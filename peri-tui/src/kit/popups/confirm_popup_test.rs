@@ -12,6 +12,7 @@ fn test_confirm_reject_a_preserves_active_b_panel() {
     let old_active = *ACTIVE_PANEL.state().read();
     let old_open = OPEN_PANELS.state().read().clone();
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
+        owner: Default::default(),
         request_id_json: "B".into(),
         payload: peri_acp_types::event_data::AskUser { questions: vec![] },
     });
@@ -20,12 +21,16 @@ fn test_confirm_reject_a_preserves_active_b_panel() {
     let mut sent = None;
     execute_confirm_action(
         &ConfirmAction::RejectAskUser {
+            owner: crate::acp_client::InteractionOwner {
+                token: 1,
+                ..Default::default()
+            },
             request_id_json: "A".into(),
         },
         |action| sent = Some(action),
     );
     assert!(
-        matches!(sent, Some(AskUserResponseAction::Reject { request_id_str }) if request_id_str == "A")
+        matches!(sent, Some(AskUserResponseAction::Reject { request_id_str, .. }) if request_id_str == "A")
     );
     assert_eq!(
         ASK_USER_PENDING

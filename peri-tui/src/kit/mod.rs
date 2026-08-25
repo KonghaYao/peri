@@ -41,6 +41,7 @@ pub mod popups;
 pub mod rewind_action;
 pub mod rewind_candidates;
 pub mod service_snapshot;
+pub mod session_boundary;
 pub mod setup_wizard;
 pub mod slash_completion;
 pub mod slash_projection;

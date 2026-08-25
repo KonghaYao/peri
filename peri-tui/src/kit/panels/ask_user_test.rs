@@ -4,6 +4,74 @@ use super::*;
 use peri_acp_types::event_data::{AskUser, Question};
 use serde_json::json;
 
+#[test]
+fn test_ask_user_same_question_ids_new_owner_resets_answers() {
+    use crate::kit::acp_types::PendingInteraction;
+
+    let questions = vec![make_question("same", false, &["A", "B"])];
+    let owner_a = crate::acp_client::InteractionOwner {
+        client_instance_id: 1,
+        token: 7,
+        session_id: "s1".into(),
+        generation: 3,
+        prompt_epoch: 5,
+        ..Default::default()
+    };
+    let owner_b = crate::acp_client::InteractionOwner {
+        token: 8,
+        ..owner_a.clone()
+    };
+    let a = PendingInteraction {
+        owner: owner_a,
+        request_id_json: "\"same-wire-id\"".into(),
+        payload: AskUser {
+            questions: questions.clone(),
+        },
+    };
+    let b = PendingInteraction {
+        owner: owner_b,
+        request_id_json: "\"same-wire-id\"".into(),
+        payload: AskUser { questions },
+    };
+
+    let mut fingerprint = interaction_fingerprint(Some(&a));
+    let mut focused = 2;
+    let mut answers = vec![vec![1]];
+    let mut focused_option = 1;
+    let mut is_typing = true;
+    let mut typing_state = TextAreaState::default();
+    typing_state.insert_str("answer owned by A");
+    let mut custom_answers = vec![Some("A custom".into())];
+    let mut scroll =
+        ScrollViewState::with_offset(ratatui_kit::ratatui::layout::Position::new(0, 9));
+
+    assert!(reset_for_owner_change(
+        &mut fingerprint,
+        Some(&b),
+        1,
+        &mut focused,
+        &mut answers,
+        &mut focused_option,
+        &mut is_typing,
+        &mut typing_state,
+        &mut custom_answers,
+        &mut scroll,
+    ));
+    assert_eq!(focused, 0);
+    assert_eq!(answers, vec![Vec::<usize>::new()]);
+    assert_eq!(focused_option, 0);
+    assert!(!is_typing);
+    assert_eq!(typing_state.all_text(), "");
+    assert_eq!(typing_state.cursor_byte(), 0);
+    assert_eq!(custom_answers, vec![None]);
+    assert_eq!(scroll.offset().y, 0);
+    assert_eq!(fingerprint, interaction_fingerprint(Some(&b)));
+    assert_eq!(
+        build_answers_map(Some(&b.payload), &answers, &custom_answers),
+        json!({"same": ""})
+    );
+}
+
 fn make_question(id: &str, multi_select: bool, labels: &[&str]) -> Question {
     use peri_acp_types::event_data::QuestionOption;
     Question {

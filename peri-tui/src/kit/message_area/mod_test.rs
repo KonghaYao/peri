@@ -514,6 +514,10 @@ fn ask_user_block(pending: bool, rid: Option<&str>) -> TuiRenderUnit {
             Some("Allowed once".into())
         },
         request_id: rid.map(|s| s.to_string()),
+        owner: rid.map(|_| crate::acp_client::InteractionOwner {
+            token: 1,
+            ..Default::default()
+        }),
         question_ids: vec![],
         fold: FoldState::Expanded,
         user_modified: false,
@@ -619,6 +623,7 @@ fn test_permission_inline_a_response_preserves_active_b_popup() {
     let old_pending = HITL_PENDING.state().read().clone();
     let old_popup = *POPUP_KIND.state().read();
     *HITL_PENDING.state().write() = Some(PendingInteraction {
+        owner: Default::default(),
         request_id_json: "B".into(),
         payload: peri_acp_types::event_data::HitlPending {
             tool_name: "Bash".into(),
@@ -638,7 +643,7 @@ fn test_permission_inline_a_response_preserves_active_b_popup() {
         |_| {},
     );
     assert!(
-        matches!(sent, Some(crate::kit::hitl_response::HitlResponseAction::Approve { request_id_str }) if request_id_str == "A")
+        matches!(sent, Some(crate::kit::hitl_response::HitlResponseAction::Approve { request_id_str, .. }) if request_id_str == "A")
     );
     assert_eq!(
         HITL_PENDING
@@ -665,6 +670,7 @@ fn test_ask_user_inline_a_response_preserves_active_b_panel() {
     let old_active = *ACTIVE_PANEL.state().read();
     let old_open = OPEN_PANELS.state().read().clone();
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
+        owner: Default::default(),
         request_id_json: "B".into(),
         payload: peri_acp_types::event_data::AskUser { questions: vec![] },
     });
@@ -684,7 +690,7 @@ fn test_ask_user_inline_a_response_preserves_active_b_panel() {
         |action| sent = Some(action),
     );
     assert!(
-        matches!(sent, Some(crate::kit::ask_user_action::AskUserResponseAction::Submit { request_id_str, answers }) if request_id_str == "A" && answers == serde_json::json!({"a1":"Fast","a2":""}))
+        matches!(sent, Some(crate::kit::ask_user_action::AskUserResponseAction::Submit { request_id_str, answers, .. }) if request_id_str == "A" && answers == serde_json::json!({"a1":"Fast","a2":""}))
     );
     assert_eq!(
         ASK_USER_PENDING

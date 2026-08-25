@@ -151,11 +151,15 @@ pub(crate) fn execute_confirm_action(
                 let _ = tx.send(target_id.clone());
             }
         }
-        ConfirmAction::RejectAskUser { request_id_json } => {
+        ConfirmAction::RejectAskUser {
+            owner,
+            request_id_json,
+        } => {
             send_ask_user(AskUserResponseAction::Reject {
+                owner: owner.clone(),
                 request_id_str: request_id_json.clone(),
             });
-            crate::kit::panel_registry::close_ask_user_panel_for_request(request_id_json);
+            crate::kit::panel_registry::close_ask_user_panel_for_owner(owner);
         }
     }
 }

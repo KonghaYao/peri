@@ -151,7 +151,7 @@ pub(super) fn handle_hitl_pending(
     // [§6.8 模态互斥] 同 request_id 的 pending block 已存在（事件重放/重连/
     // 重试重复到达）→ 跳过注入——重复 pending 块永远不会被 resolve（单响应
     // 事件只匹配首个），会以「可聚焦假象」永久滞留 transcript。
-    if !committed_has_pending(state, block.request_id.as_deref()) {
+    if !committed_has_pending(state, &pending.owner) {
         state
             .committed
             .push_back(TuiRenderUnit::TuiAskUserBlock(block));
@@ -172,7 +172,7 @@ pub(super) fn handle_ask_user(state: &mut BridgeState, pending: &PendingInteract
     let block = build_ask_user_block(pending);
     // [§6.8 模态互斥] 同 request_id 的 pending block 已存在 → 跳过注入
     // （重复 pending 块不会被 resolve，永久滞留）。
-    if !committed_has_pending(state, block.request_id.as_deref()) {
+    if !committed_has_pending(state, &pending.owner) {
         state
             .committed
             .push_back(TuiRenderUnit::TuiAskUserBlock(block));
@@ -183,12 +183,9 @@ pub(super) fn handle_ask_user(state: &mut BridgeState, pending: &PendingInteract
 
 /// [§6.8] committed 中是否已存在同 request_id 的 pending interaction block。
 /// request_id 缺失（测试构造/协议异常）时按「无 pending 同源块」处理（不拦截）。
-fn committed_has_pending(state: &BridgeState, request_id: Option<&str>) -> bool {
-    let Some(id) = request_id else {
-        return false;
-    };
+fn committed_has_pending(state: &BridgeState, owner: &crate::acp_client::InteractionOwner) -> bool {
     state.committed.iter().any(|vm| {
-        matches!(vm, TuiRenderUnit::TuiAskUserBlock(a) if a.pending && a.request_id.as_deref() == Some(id))
+        matches!(vm, TuiRenderUnit::TuiAskUserBlock(a) if a.pending && a.owner.as_ref() == Some(owner))
     })
 }
 
@@ -196,16 +193,75 @@ fn committed_has_pending(state: &BridgeState, request_id: Option<&str>) -> bool 
 /// 按 `request_id` 匹配 → clone + `pending=false` + `result` + `recompute_hash`，
 /// 再原位 `set`（im::Vector COW）。匹配不到时 no-op（防御：本地事件迟到 /
 /// 重复到达幂等）。
-pub(super) fn handle_interaction_resolved(state: &mut BridgeState, request_id: &str, result: &str) {
+pub(super) fn handle_interaction_terminal(
+    state: &mut BridgeState,
+    owner: &crate::acp_client::InteractionOwner,
+    outcome: &crate::acp_client::InteractionUiOutcome,
+) {
+    let result = match outcome {
+        crate::acp_client::InteractionUiOutcome::Resolved { result } => result.clone(),
+        crate::acp_client::InteractionUiOutcome::Expired { .. } => {
+            i18n::tr("render-interaction-result-rejected")
+        }
+    };
+    {
+        let atom = crate::kit::atoms::HITL_PENDING.state();
+        let mut pending = atom.write();
+        if pending
+            .as_ref()
+            .is_some_and(|pending| pending.owner == *owner)
+        {
+            *pending = None;
+            if *crate::kit::atoms::POPUP_KIND.state().read()
+                == Some(crate::kit::atoms::PopupKind::Hitl)
+            {
+                *crate::kit::atoms::POPUP_KIND.state().write() = None;
+            }
+        }
+    }
+    {
+        let atom = ASK_USER_PENDING.state();
+        let mut pending = atom.write();
+        if pending
+            .as_ref()
+            .is_some_and(|pending| pending.owner == *owner)
+        {
+            *pending = None;
+            crate::kit::panel_registry::close_panel(crate::app::panel_types::PanelKind::AskUser);
+            if *crate::kit::atoms::POPUP_KIND.state().read()
+                == Some(crate::kit::atoms::PopupKind::AskUser)
+            {
+                *crate::kit::atoms::POPUP_KIND.state().write() = None;
+            }
+        }
+    }
+    {
+        let atom = crate::kit::atoms::CONFIRM_PAYLOAD.state();
+        let mut confirm = atom.write();
+        if confirm.as_ref().is_some_and(|payload| {
+            matches!(
+                &payload.pending_action,
+                crate::kit::atoms::ConfirmAction::RejectAskUser { owner: pending_owner, .. }
+                    if pending_owner == owner
+            )
+        }) {
+            *confirm = None;
+            if *crate::kit::atoms::POPUP_KIND.state().read()
+                == Some(crate::kit::atoms::PopupKind::Confirm)
+            {
+                *crate::kit::atoms::POPUP_KIND.state().write() = None;
+            }
+        }
+    }
     let mut updated: Option<(usize, TuiRenderUnit)> = None;
     for (i, vm) in state.committed.iter().enumerate() {
         if let TuiRenderUnit::TuiAskUserBlock(a) = vm
             && a.pending
-            && a.request_id.as_deref() == Some(request_id)
+            && a.owner.as_ref() == Some(owner)
         {
             let mut b = a.clone();
             b.pending = false;
-            b.result = Some(result.to_string());
+            b.result = Some(result.clone());
             // 结果回写后收束为结果行（§7 completed → Collapsed）——
             // 手动展开的覆盖由折叠 pass 依据 FOLD_OVERRIDES 恢复。
             if !b.user_modified {
@@ -259,6 +315,7 @@ fn build_permission_block(pending: &PendingInteraction<HitlPending>) -> TuiAskUs
         ],
         result: None,
         request_id: Some(pending.request_id_json.clone()),
+        owner: Some(pending.owner.clone()),
         question_ids: Vec::new(),
         fold: crate::kit::tui_render_unit::FoldState::Expanded,
         user_modified: false,
@@ -292,6 +349,7 @@ fn build_ask_user_block(pending: &PendingInteraction<AskUser>) -> TuiAskUserBloc
         options,
         result: None,
         request_id: Some(pending.request_id_json.clone()),
+        owner: Some(pending.owner.clone()),
         question_ids: au.questions.iter().map(|q| q.id.clone()).collect(),
         fold: crate::kit::tui_render_unit::FoldState::Expanded,
         user_modified: false,

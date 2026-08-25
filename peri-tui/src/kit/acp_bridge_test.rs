@@ -5,6 +5,7 @@ use serial_test::serial;
 
 fn hitl() -> AcpEventData {
     AcpEventData::HitlPending(PendingInteraction {
+        owner: Default::default(),
         request_id_json: "\"h\"".into(),
         payload: HitlPending {
             tool_name: "Bash".into(),
@@ -16,6 +17,7 @@ fn hitl() -> AcpEventData {
 
 fn ask_user() -> AcpEventData {
     AcpEventData::AskUser(PendingInteraction {
+        owner: Default::default(),
         request_id_json: "\"a\"".into(),
         payload: AskUser { questions: vec![] },
     })
@@ -35,9 +37,11 @@ fn test_interaction_gate_requires_nonempty_exact_active_session() {
 
 #[test]
 fn test_ordinary_gate_preserves_nonreset_wildcards() {
-    let event = AcpEventData::InteractionResolved {
-        request_id: "r".into(),
-        result: "done".into(),
+    let event = AcpEventData::InteractionTerminal {
+        owner: Default::default(),
+        outcome: crate::acp_client::InteractionUiOutcome::Resolved {
+            result: "done".into(),
+        },
     };
     assert!(accepts_event_session(&event, "", "s1", false));
     assert!(accepts_event_session(&event, "s1", "", false));
@@ -85,6 +89,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     *HITL_PENDING.state().write() = Some(PendingInteraction {
+        owner: Default::default(),
         request_id_json: "\"sentinel\"".into(),
         payload: HitlPending {
             tool_name: "sentinel".into(),
@@ -123,6 +128,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     *HITL_PENDING.state().write() = Some(PendingInteraction {
+        owner: Default::default(),
         request_id_json: "\"sentinel\"".into(),
         payload: HitlPending {
             tool_name: "sentinel".into(),
@@ -213,6 +219,7 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
+        owner: Default::default(),
         request_id_json: "\"sentinel\"".into(),
         payload: AskUser { questions: vec![] },
     });
@@ -248,6 +255,7 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
+        owner: Default::default(),
         request_id_json: "\"sentinel\"".into(),
         payload: AskUser { questions: vec![] },
     });

@@ -206,10 +206,11 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                                 && let Some(tx) = ASK_USER_RESPONSE_TX.get()
                             {
                                 let _ = tx.send(AskUserResponseAction::Cancel {
+                                    owner: snapshot.owner.clone(),
                                     request_id_str: snapshot.request_id_json.clone(),
                                 });
-                                crate::kit::panel_registry::close_ask_user_panel_for_request(
-                                    &snapshot.request_id_json,
+                                crate::kit::panel_registry::close_ask_user_panel_for_owner(
+                                    &snapshot.owner,
                                 );
                             } else {
                                 close_active_panel();

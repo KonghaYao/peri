@@ -9,7 +9,8 @@
 //! ## 用户路径
 //!
 //! - **Enter**：approve——从 composite 快照取 ID，经 `HITL_RESPONSE_TX` 发 `Approve`
-//!   到 hitl_response_consumer，由其调用 `client.send_response(id, selected/allow_once)`。
+//!   到 hitl_response_consumer，由其按 semantic owner 调用
+//!   `client.respond_interaction(owner, selected/allow_once)`。
 //! - **Esc**：reject——同样读 id 发 `Reject`（outcome=cancelled）。
 //!
 //! ## 事件优先级（H2 修复）
@@ -30,7 +31,7 @@ use crate::i18n;
 use crate::kit::atoms::{HITL_PENDING, HITL_RESPONSE_TX, LANG_VERSION};
 use crate::kit::hitl_response::HitlResponseAction;
 use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::popup_overlay::close_hitl_popup_for_request;
+use crate::kit::popup_overlay::close_hitl_popup_for_owner;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -56,9 +57,10 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             && let Some(tx) = HITL_RESPONSE_TX.get()
         {
             let _ = tx.send(HitlResponseAction::Approve {
+                owner: snapshot.owner.clone(),
                 request_id_str: snapshot.request_id_json.clone(),
             });
-            close_hitl_popup_for_request(&snapshot.request_id_json);
+            close_hitl_popup_for_owner(&snapshot.owner);
         }
     };
     let reject = move || {
@@ -66,9 +68,10 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             && let Some(tx) = HITL_RESPONSE_TX.get()
         {
             let _ = tx.send(HitlResponseAction::Reject {
+                owner: snapshot.owner.clone(),
                 request_id_str: snapshot.request_id_json.clone(),
             });
-            close_hitl_popup_for_request(&snapshot.request_id_json);
+            close_hitl_popup_for_owner(&snapshot.owner);
         }
     };
 

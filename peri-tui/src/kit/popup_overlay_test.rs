@@ -69,6 +69,7 @@ fn test_close_popup_clears_payload_atoms() {
 
     // 构造 4 种 popup 的 payload 写入对应 atom
     *atoms::HITL_PENDING.state().write() = Some(crate::kit::acp_types::PendingInteraction {
+        owner: Default::default(),
         request_id_json: "\"hitl\"".into(),
         payload: HitlPending {
             tool_name: "rm".to_string(),
@@ -77,6 +78,7 @@ fn test_close_popup_clears_payload_atoms() {
         },
     });
     *atoms::ASK_USER_PENDING.state().write() = Some(crate::kit::acp_types::PendingInteraction {
+        owner: Default::default(),
         request_id_json: "\"ask\"".into(),
         payload: AskUser {
             questions: vec![Question {

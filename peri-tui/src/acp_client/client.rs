@@ -3,7 +3,6 @@
 //! Translates raw [`IncomingMessage`]s into [`AcpNotification`]s for the TUI event
 //! loop to consume. The notification pump runs as a background tokio task.
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use peri_acp::event::AcpEvent;
@@ -16,10 +15,15 @@ use peri_acp_types::PeriCaps;
 use peri_acp_types::command::command_route::UiCommandSpec;
 use peri_acp_types::event_data::PredictionAction;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, warn};
 
+use super::interaction_lifecycle::{
+    ClaimCause, ClaimedInteraction, InteractionLifecycle, InteractionOwner, InteractionUiOutcome,
+    OrdinaryDecision, RegisterDecision, ReverseInteractionKind, TransitionKind,
+};
 use super::interaction_response::{elicitation_cancel_response, permission_cancelled_response};
+use super::interaction_settlement::{expiry_for_cause, spawn_settlement_worker};
 
 /// Notification events dispatched from the background pump to the TUI event loop.
 #[derive(Debug)]
@@ -30,9 +34,22 @@ pub enum AcpNotification {
     /// A `notifications/session_update` notification from the ACP server.
     SessionUpdate { session_id: String, params: Value },
     /// A `RequestPermission` request requiring HITL interaction.
-    RequestPermission { id: RequestId, params: Value },
+    RequestPermission {
+        owner: InteractionOwner,
+        request_id_json: String,
+        params: Value,
+    },
     /// An `elicitation/create` request requiring AskUser interaction.
-    Elicitation { id: RequestId, params: Value },
+    Elicitation {
+        owner: InteractionOwner,
+        request_id_json: String,
+        params: Value,
+    },
+    /// Local, owner-qualified terminalization of a previously published interaction.
+    InteractionTerminal {
+        owner: InteractionOwner,
+        outcome: InteractionUiOutcome,
+    },
     /// An unrecognized notification or request.
     Other { msg: String },
     /// Agent execution completed (synthetic notification from ACP server).
@@ -64,18 +81,6 @@ pub enum AcpNotification {
     },
 }
 
-#[derive(Debug, Default)]
-struct SessionRoutingState {
-    current_session_id: Option<String>,
-    deleted_session_ids: HashSet<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReverseInteractionKind {
-    Permission,
-    Elicitation,
-}
-
 impl ReverseInteractionKind {
     fn from_method(method: &str) -> Option<Self> {
         match method {
@@ -85,10 +90,23 @@ impl ReverseInteractionKind {
         }
     }
 
-    fn notification(self, id: RequestId, params: Value) -> AcpNotification {
+    fn notification(
+        self,
+        owner: InteractionOwner,
+        request_id_json: String,
+        params: Value,
+    ) -> AcpNotification {
         match self {
-            Self::Permission => AcpNotification::RequestPermission { id, params },
-            Self::Elicitation => AcpNotification::Elicitation { id, params },
+            Self::Permission => AcpNotification::RequestPermission {
+                owner,
+                request_id_json,
+                params,
+            },
+            Self::Elicitation => AcpNotification::Elicitation {
+                owner,
+                request_id_json,
+                params,
+            },
         }
     }
 
@@ -105,19 +123,6 @@ impl ReverseInteractionKind {
             Self::Elicitation => "elicitation/create",
         }
     }
-}
-
-#[derive(Debug)]
-enum ReverseRequestPlan {
-    Forward {
-        kind: ReverseInteractionKind,
-        id: RequestId,
-        params: Value,
-    },
-    Settle {
-        kind: ReverseInteractionKind,
-        id: RequestId,
-    },
 }
 
 fn nonempty_string(value: Option<&Value>) -> Option<&str> {
@@ -147,23 +152,29 @@ fn plan_reverse_request(
     method: &str,
     id: RequestId,
     params: Value,
-    session_routing: &Arc<Mutex<SessionRoutingState>>,
-) -> Option<ReverseRequestPlan> {
+    lifecycle: &InteractionLifecycle,
+) -> Option<RegisterDecision> {
     let kind = ReverseInteractionKind::from_method(method)?;
     let session_id = match kind {
         ReverseInteractionKind::Permission => permission_session_id(&params),
         ReverseInteractionKind::Elicitation => elicitation_session_id(&params),
-    };
-    let should_forward = session_id.is_some_and(|session_id| {
-        let routing = session_routing.lock().unwrap();
-        !routing.deleted_session_ids.contains(session_id)
-            && routing.current_session_id.as_deref() == Some(session_id)
-    });
-    Some(if should_forward {
-        ReverseRequestPlan::Forward { kind, id, params }
-    } else {
-        ReverseRequestPlan::Settle { kind, id }
-    })
+    }
+    .map(str::to_string);
+    Some(lifecycle.register_reverse(kind, id, session_id.as_deref(), params))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientProjectionMode {
+    Interactive,
+    Headless,
+}
+
+struct StartupRestoreGuard<'a>(&'a watch::Sender<bool>);
+
+impl Drop for StartupRestoreGuard<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
+    }
 }
 
 /// TUI-side client that owns the ACP transport and routes notifications.
@@ -177,28 +188,28 @@ fn plan_reverse_request(
 #[derive(Clone)]
 pub struct AcpTuiClient {
     transport: Arc<MpscClientTransport>,
-    /// 当前会话与已删除会话黑名单共享同一个原子快照。`delete_session` 后的
-    /// in-flight 残流不能因 current=None 的初始化 wildcard 再次进入 UI。
-    session_routing: Arc<Mutex<SessionRoutingState>>,
+    lifecycle: InteractionLifecycle,
+    projection_mode: ClientProjectionMode,
+    notification_weak: Arc<Mutex<Option<mpsc::WeakUnboundedSender<AcpNotification>>>>,
+    /// Startup restore is reserved before submit consumers become reachable.
+    /// `ensure_session` observes this flag under the same operation gate used by
+    /// new/load and waits for the reserved load to settle instead of competing
+    /// with it.
+    startup_restore_tx: watch::Sender<bool>,
+    #[cfg(test)]
+    transition_commit_hook:
+        Arc<Mutex<Option<mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>>>,
 }
 
 impl AcpTuiClient {
     /// Check whether a session has been created.
     pub fn has_session(&self) -> bool {
-        self.session_routing
-            .lock()
-            .unwrap()
-            .current_session_id
-            .is_some()
+        self.lifecycle.has_session()
     }
 
     /// Get the current session ID, if any.
     pub fn current_session_id(&self) -> Option<String> {
-        self.session_routing
-            .lock()
-            .unwrap()
-            .current_session_id
-            .clone()
+        self.lifecycle.current_session_id()
     }
 
     /// Send a raw ACP request and return the response.
@@ -222,10 +233,47 @@ impl AcpTuiClient {
         mpsc::UnboundedSender<AcpNotification>,
         mpsc::UnboundedReceiver<AcpNotification>,
     ) {
+        Self::new_with_mode(transport, ClientProjectionMode::Headless)
+    }
+
+    pub fn new_interactive(
+        transport: MpscClientTransport,
+    ) -> (
+        Self,
+        mpsc::UnboundedSender<AcpNotification>,
+        mpsc::UnboundedReceiver<AcpNotification>,
+    ) {
+        Self::new_with_mode(transport, ClientProjectionMode::Interactive)
+    }
+
+    fn new_with_mode(
+        transport: MpscClientTransport,
+        projection_mode: ClientProjectionMode,
+    ) -> (
+        Self,
+        mpsc::UnboundedSender<AcpNotification>,
+        mpsc::UnboundedReceiver<AcpNotification>,
+    ) {
         let (notification_tx, notification_rx) = mpsc::unbounded_channel();
+        let transport = Arc::new(transport);
+        let lifecycle = InteractionLifecycle::new();
+        let notification_weak = Arc::new(Mutex::new(None));
+        let (startup_restore_tx, _startup_restore_rx) = watch::channel(false);
+        let (settlement_tx, settlement_rx) = mpsc::unbounded_channel();
+        lifecycle.install_drop_settlement_sender(settlement_tx);
+        spawn_settlement_worker(
+            Arc::downgrade(&transport),
+            settlement_rx,
+            notification_weak.clone(),
+        );
         let client = Self {
-            transport: Arc::new(transport),
-            session_routing: Arc::new(Mutex::new(SessionRoutingState::default())),
+            transport,
+            lifecycle,
+            projection_mode,
+            notification_weak,
+            startup_restore_tx,
+            #[cfg(test)]
+            transition_commit_hook: Arc::new(Mutex::new(None)),
         };
         (client, notification_tx, notification_rx)
     }
@@ -238,9 +286,10 @@ impl AcpTuiClient {
     /// recv-None 兜底失效（Issue 2）。从 client 主动发通知走显式参数传递。
     pub fn spawn_pump(&self, notification_tx: mpsc::UnboundedSender<AcpNotification>) {
         let transport = self.transport.clone();
-        let session_routing = self.session_routing.clone();
+        let lifecycle = self.lifecycle.clone();
+        *self.notification_weak.lock().unwrap() = Some(notification_tx.downgrade());
         tokio::spawn(async move {
-            Self::run_pump(transport, notification_tx, session_routing).await;
+            Self::run_pump(transport, notification_tx, lifecycle).await;
         });
     }
 
@@ -250,23 +299,18 @@ impl AcpTuiClient {
     /// 确保 `AvailableCommandsUpdate` 等初始化通知不被丢弃。
     /// 当已设置会话后，严格按 session_id 过滤。
     /// 已删除会话（黑名单）一律返回 `false`——优先级高于 None 放行语义（M3）。
-    fn is_current_session(
-        session_routing: &Arc<Mutex<SessionRoutingState>>,
-        session_id: &str,
-    ) -> bool {
-        // host 级事件（MCP OAuth 授权等）以空 sessionId 送达，不参与
-        // session 过滤——否则已建会话时 OAuth popup 事件被静默丢弃。
-        if session_id.is_empty() {
-            return true;
+    fn deliver_ordinary(
+        lifecycle: &InteractionLifecycle,
+        notification_tx: &mpsc::UnboundedSender<AcpNotification>,
+        session_id: String,
+        notification: AcpNotification,
+    ) {
+        match lifecycle.route_ordinary(session_id, notification) {
+            OrdinaryDecision::Forward(notification) => {
+                let _ = notification_tx.send(*notification);
+            }
+            OrdinaryDecision::Buffered | OrdinaryDecision::Drop => {}
         }
-        let routing = session_routing.lock().unwrap();
-        if routing.deleted_session_ids.contains(session_id) {
-            return false;
-        }
-        routing
-            .current_session_id
-            .as_deref()
-            .is_none_or(|current| current == session_id)
     }
 
     // ── Pump ──
@@ -275,7 +319,7 @@ impl AcpTuiClient {
     async fn run_pump(
         transport: Arc<MpscClientTransport>,
         notification_tx: mpsc::UnboundedSender<AcpNotification>,
-        session_routing: Arc<Mutex<SessionRoutingState>>,
+        lifecycle: InteractionLifecycle,
     ) {
         let mut event_count: u64 = 0;
         loop {
@@ -310,12 +354,12 @@ impl AcpTuiClient {
                                     session_id = %session_id,
                                     "ACP client pump: received agent_event"
                                 );
-                                if !Self::is_current_session(&session_routing, &session_id) {
-                                    debug!(session_id = %session_id, "ACP client pump: dropping stale agent_event");
-                                    continue;
-                                }
-                                let _ = notification_tx
-                                    .send(AcpNotification::AgentEvent { session_id, event });
+                                Self::deliver_ordinary(
+                                    &lifecycle,
+                                    &notification_tx,
+                                    session_id.clone(),
+                                    AcpNotification::AgentEvent { session_id, event },
+                                );
                             }
                             Err(e) => {
                                 error!(
@@ -339,12 +383,12 @@ impl AcpTuiClient {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        if !Self::is_current_session(&session_routing, &session_id) {
-                            debug!(session_id = %session_id, "ACP client pump: dropping stale session/update");
-                            continue;
-                        }
-                        let _ = notification_tx
-                            .send(AcpNotification::SessionUpdate { session_id, params });
+                        Self::deliver_ordinary(
+                            &lifecycle,
+                            &notification_tx,
+                            session_id.clone(),
+                            AcpNotification::SessionUpdate { session_id, params },
+                        );
                     } else if method == "peri/unstable_event" {
                         let session_id = params
                             .get("sessionId")
@@ -362,15 +406,16 @@ impl AcpTuiClient {
                             event = %event,
                             "ACP client pump: received unstable_event"
                         );
-                        if !Self::is_current_session(&session_routing, &session_id) {
-                            debug!(session_id = %session_id, event = %event, "ACP client pump: dropping stale unstable_event");
-                            continue;
-                        }
-                        let _ = notification_tx.send(AcpNotification::UnstableEvent {
-                            session_id,
-                            event,
-                            data,
-                        });
+                        Self::deliver_ordinary(
+                            &lifecycle,
+                            &notification_tx,
+                            session_id.clone(),
+                            AcpNotification::UnstableEvent {
+                                session_id,
+                                event,
+                                data,
+                            },
+                        );
                     } else if method == "peri/agent_event_done" {
                         let session_id = params
                             .get("sessionId")
@@ -392,15 +437,22 @@ impl AcpTuiClient {
                             .get("requestId")
                             .and_then(|v| v.as_str())
                             .map(String::from);
-                        if !Self::is_current_session(&session_routing, &session_id) {
-                            debug!(session_id = %session_id, "ACP client pump: dropping stale agent_done");
-                            continue;
+                        if lifecycle.is_current_session(&session_id) {
+                            let _gate = lifecycle.operation_gate().lock().await;
+                            let claims = lifecycle
+                                .close_prompt_by_wire_identity(&session_id, request_id.as_deref());
+                            Self::settle_claims(&transport, &notification_tx, claims).await;
                         }
-                        let _ = notification_tx.send(AcpNotification::AgentDone {
-                            session_id,
-                            stop_reason,
-                            request_id,
-                        });
+                        Self::deliver_ordinary(
+                            &lifecycle,
+                            &notification_tx,
+                            session_id.clone(),
+                            AcpNotification::AgentDone {
+                                session_id,
+                                stop_reason,
+                                request_id,
+                            },
+                        );
                     } else if method == "peri/prediction_ready" {
                         let session_id = params
                             .get("sessionId")
@@ -418,16 +470,17 @@ impl AcpTuiClient {
                                 serde_json::from_value::<Vec<PredictionAction>>(v.clone()).ok()
                             })
                             .unwrap_or_default();
-                        if !Self::is_current_session(&session_routing, &session_id) {
-                            debug!(session_id = %session_id, "ACP client pump: dropping stale prediction_ready");
-                            continue;
-                        }
                         if !actions.is_empty() || !text.is_empty() {
-                            let _ = notification_tx.send(AcpNotification::PredictionReady {
-                                session_id,
-                                text,
-                                actions,
-                            });
+                            Self::deliver_ordinary(
+                                &lifecycle,
+                                &notification_tx,
+                                session_id.clone(),
+                                AcpNotification::PredictionReady {
+                                    session_id,
+                                    text,
+                                    actions,
+                                },
+                            );
                         }
                     } else if method.starts_with("notifications/peri/") {
                         let session_id = params
@@ -435,15 +488,16 @@ impl AcpTuiClient {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        if !Self::is_current_session(&session_routing, &session_id) {
-                            debug!(session_id = %session_id, method = %method, "ACP client pump: dropping stale peri notification");
-                            continue;
-                        }
-                        let _ = notification_tx.send(AcpNotification::Peri {
-                            session_id,
-                            method,
-                            params,
-                        });
+                        Self::deliver_ordinary(
+                            &lifecycle,
+                            &notification_tx,
+                            session_id.clone(),
+                            AcpNotification::Peri {
+                                session_id,
+                                method,
+                                params,
+                            },
+                        );
                     } else {
                         let _ = notification_tx.send(AcpNotification::Other {
                             msg: format!("notification: {method}"),
@@ -451,26 +505,25 @@ impl AcpTuiClient {
                     }
                 }
                 Some(IncomingMessage::Request { id, method, params }) => {
-                    match plan_reverse_request(&method, id, params, &session_routing) {
-                        Some(ReverseRequestPlan::Settle { kind, id }) => {
+                    match plan_reverse_request(&method, id, params, &lifecycle) {
+                        Some(RegisterDecision::Settle { kind, id }) => {
                             Self::settle_reverse_request(&transport, kind, id).await;
                         }
-                        Some(ReverseRequestPlan::Forward { kind, id, params }) => {
-                            if let Err(send_error) =
-                                notification_tx.send(kind.notification(id, params))
+                        Some(RegisterDecision::Forward(registered)) => {
+                            let owner = registered.owner.clone();
+                            let kind = owner.kind;
+                            if notification_tx
+                                .send(kind.notification(
+                                    registered.owner,
+                                    registered.request_id_json,
+                                    registered.params,
+                                ))
+                                .is_err()
+                                && let Some(claimed) =
+                                    lifecycle.claim(&owner, ClaimCause::BridgeReject)
                             {
-                                let (kind, id) = match send_error.0 {
-                                    AcpNotification::RequestPermission { id, .. } => {
-                                        (ReverseInteractionKind::Permission, id)
-                                    }
-                                    AcpNotification::Elicitation { id, .. } => {
-                                        (ReverseInteractionKind::Elicitation, id)
-                                    }
-                                    _ => unreachable!(
-                                        "reverse plan creates only reverse notifications"
-                                    ),
-                                };
-                                Self::settle_reverse_request(&transport, kind, id).await;
+                                Self::settle_claims(&transport, &notification_tx, vec![claimed])
+                                    .await;
                             }
                         }
                         None => {
@@ -483,6 +536,16 @@ impl AcpTuiClient {
                 Some(IncomingMessage::Response { .. }) => {}
                 None => {
                     debug!("ACP client pump: transport closed, exiting");
+                    let _operation = lifecycle.operation_gate().lock().await;
+                    let claims = lifecycle.transport_terminal();
+                    for claim in claims {
+                        let _ = notification_tx.send(AcpNotification::InteractionTerminal {
+                            owner: claim.owner,
+                            outcome: InteractionUiOutcome::Expired {
+                                reason: super::interaction_lifecycle::InteractionExpiryReason::TransportTerminal,
+                            },
+                        });
+                    }
                     break;
                 }
             }
@@ -503,6 +566,37 @@ impl AcpTuiClient {
                 error = %error,
                 "ACP client pump: failed to settle reverse request"
             );
+        }
+    }
+
+    async fn settle_claims(
+        transport: &MpscClientTransport,
+        notification_tx: &mpsc::UnboundedSender<AcpNotification>,
+        claims: Vec<ClaimedInteraction>,
+    ) {
+        for claim in claims {
+            let response = match claim.owner.kind {
+                ReverseInteractionKind::Permission => permission_cancelled_response(),
+                ReverseInteractionKind::Elicitation => elicitation_cancel_response(),
+            };
+            let outcome = match transport
+                .send_response(claim.request_id, Ok(response))
+                .await
+            {
+                Ok(()) => InteractionUiOutcome::Expired {
+                    reason: expiry_for_cause(claim.cause),
+                },
+                Err(error) => {
+                    warn!(error = %error, "failed to settle claimed reverse interaction");
+                    InteractionUiOutcome::Expired {
+                        reason: super::interaction_lifecycle::InteractionExpiryReason::ResponseTransportFailed,
+                    }
+                }
+            };
+            let _ = notification_tx.send(AcpNotification::InteractionTerminal {
+                owner: claim.owner,
+                outcome,
+            });
         }
     }
 
@@ -537,13 +631,25 @@ impl AcpTuiClient {
     /// Closes the previous session (if any) to release its history, AgentPool,
     /// and FrozenSessionData from the server-side sessions HashMap.
     pub async fn new_session(&self, cwd: &str, model: Option<&str>) -> Result<String, AcpError> {
-        // 先清空本地事实源，避免旧 session 的延迟 notification 在 /clear 创建新会话前回写 UI。
-        let old_id = self
-            .session_routing
-            .lock()
-            .unwrap()
-            .current_session_id
-            .take();
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        self.new_session_under_gate(cwd, model).await
+    }
+
+    async fn new_session_under_gate(
+        &self,
+        cwd: &str,
+        model: Option<&str>,
+    ) -> Result<String, AcpError> {
+        let start = self
+            .lifecycle
+            .begin_transition(TransitionKind::New, None)
+            .map_err(|message| AcpError::new(-32603, message))?;
+        let transition = self.lifecycle.arm_transition(start.generation);
+        if self.projection_mode == ClientProjectionMode::Interactive {
+            crate::kit::session_boundary::project_session_boundary(None);
+        }
+        self.settle_claims_owned(start.claims).await;
+        let old_id = start.from;
         if let Some(ref old_sid) = old_id {
             let params = json!({ "sessionId": old_sid });
             if let Err(e) = self.transport.send_request("session/close", params).await {
@@ -552,7 +658,17 @@ impl AcpTuiClient {
         }
 
         let params = json!({ "cwd": cwd, "model": model });
-        let result = self.transport.send_request("session/new", params).await?;
+        let result = match self.transport.send_request("session/new", params).await {
+            Ok(result) => result,
+            Err(error) => {
+                self.lifecycle.fail_transition(start.generation);
+                transition.disarm();
+                if self.projection_mode == ClientProjectionMode::Interactive {
+                    crate::kit::session_boundary::project_session_boundary(None);
+                }
+                return Err(error);
+            }
+        };
         // ACP protocol uses camelCase: {"sessionId": "..."}
         let session_id = result
             .get("sessionId")
@@ -560,8 +676,86 @@ impl AcpTuiClient {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AcpError::new(-32603, "no session_id in response"))?
             .to_string();
-        self.session_routing.lock().unwrap().current_session_id = Some(session_id.clone());
+        #[cfg(test)]
+        self.pause_before_transition_commit().await;
+        if self.projection_mode == ClientProjectionMode::Interactive {
+            crate::kit::session_boundary::project_session_boundary(Some(&session_id));
+        }
+        let buffered = self
+            .lifecycle
+            .commit_stable(start.generation, session_id.clone());
+        transition.disarm();
+        self.flush_buffered(buffered);
         Ok(session_id)
+    }
+
+    #[cfg(test)]
+    fn install_transition_commit_hook(
+        &self,
+        tx: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
+    ) {
+        *self.transition_commit_hook.lock().unwrap() = Some(tx);
+    }
+
+    #[cfg(test)]
+    async fn pause_before_transition_commit(&self) {
+        let tx = self.transition_commit_hook.lock().unwrap().clone();
+        if let Some(tx) = tx {
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            if tx.send(release_tx).is_ok() {
+                let _ = release_rx.await;
+            }
+        }
+    }
+
+    /// Return the current stable session, creating it only if no startup restore
+    /// owns the lifecycle decision.  Both the stable re-check and a possible
+    /// `session/new` execute under the client operation gate.
+    pub async fn ensure_session(&self, cwd: &str, model: Option<&str>) -> Result<String, AcpError> {
+        let mut startup_restore_rx = self.startup_restore_tx.subscribe();
+        loop {
+            let operation = self.lifecycle.operation_gate().lock().await;
+            if let Some((session_id, _)) = self.lifecycle.stable_identity() {
+                return Ok(session_id);
+            }
+            if *startup_restore_rx.borrow_and_update() {
+                drop(operation);
+                startup_restore_rx.changed().await.map_err(|_| {
+                    AcpError::new(-32603, "startup restore reservation closed unexpectedly")
+                })?;
+                continue;
+            }
+            return self.new_session_under_gate(cwd, model).await;
+        }
+    }
+
+    /// Establish resume/continue ownership before submit consumers can choose a
+    /// fresh session. The reservation mutation shares the lifecycle operation
+    /// gate with `ensure_session`, `new_session`, and `load_session`.
+    pub async fn reserve_startup_restore(&self) {
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        self.startup_restore_tx.send_replace(true);
+    }
+
+    /// Resolve a startup restore reservation by loading its selected target.
+    /// Waiters are released only after load commits Stable (or fails closed).
+    pub async fn load_startup_session(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        model: Option<&str>,
+    ) -> Result<String, AcpError> {
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        let reservation = StartupRestoreGuard(&self.startup_restore_tx);
+        let result = self.load_session_under_gate(session_id, cwd, model).await;
+        drop(reservation);
+        result
+    }
+
+    /// Release a startup reservation when resume lookup cannot select a target.
+    pub async fn release_startup_restore(&self) {
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        self.startup_restore_tx.send_replace(false);
     }
 
     /// Load an existing session from ThreadStore history.
@@ -574,13 +768,26 @@ impl AcpTuiClient {
         cwd: &str,
         model: Option<&str>,
     ) -> Result<String, AcpError> {
-        // 先切换本地事实源，再发 close/load，避免旧 session 的延迟 notification 回写 UI。
-        let old_id = self
-            .session_routing
-            .lock()
-            .unwrap()
-            .current_session_id
-            .replace(session_id.to_string());
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        self.load_session_under_gate(session_id, cwd, model).await
+    }
+
+    async fn load_session_under_gate(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        model: Option<&str>,
+    ) -> Result<String, AcpError> {
+        let start = self
+            .lifecycle
+            .begin_transition(TransitionKind::Load, Some(session_id.to_string()))
+            .map_err(|message| AcpError::new(-32603, message))?;
+        let transition = self.lifecycle.arm_transition(start.generation);
+        if self.projection_mode == ClientProjectionMode::Interactive {
+            crate::kit::session_boundary::project_session_boundary(Some(session_id));
+        }
+        self.settle_claims_owned(start.claims).await;
+        let old_id = start.from;
         if let Some(ref old_sid) = old_id
             && old_sid != session_id
         {
@@ -591,7 +798,17 @@ impl AcpTuiClient {
         }
 
         let params = json!({ "sessionId": session_id, "cwd": cwd, "model": model });
-        self.transport.send_request("session/load", params).await?;
+        if let Err(error) = self.transport.send_request("session/load", params).await {
+            self.lifecycle.fail_transition(start.generation);
+            transition.disarm();
+            if self.projection_mode == ClientProjectionMode::Interactive {
+                crate::kit::session_boundary::project_session_boundary(None);
+            }
+            return Err(error);
+        }
+        self.lifecycle
+            .commit_stable(start.generation, session_id.to_string());
+        transition.disarm();
         Ok(session_id.to_string())
     }
 
@@ -605,25 +822,40 @@ impl AcpTuiClient {
     /// M3：删除的会话 id 记入黑名单，pump 过滤其延迟通知（`current_session_id`
     /// 置 None 后"首次连接放行"语义会让已删除会话的事件回写 UI）。
     pub async fn delete_session(&self, session_id: &str) -> Result<(), AcpError> {
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        let is_current = self
+            .lifecycle
+            .stable_identity()
+            .as_ref()
+            .is_some_and(|(id, _)| id == session_id);
+        let transition = if is_current {
+            let start = self
+                .lifecycle
+                .begin_transition(TransitionKind::DeleteCurrent, None)
+                .map_err(|message| AcpError::new(-32603, message))?;
+            let lease = self.lifecycle.arm_transition(start.generation);
+            if self.projection_mode == ClientProjectionMode::Interactive {
+                crate::kit::session_boundary::project_session_boundary(None);
+            }
+            self.settle_claims_owned(start.claims).await;
+            Some((start.generation, lease))
+        } else {
+            None
+        };
         let params = json!({ "sessionId": session_id });
-        self.transport
-            .send_request("session/delete", params)
-            .await?;
-        let mut routing = self.session_routing.lock().unwrap();
-        if routing.current_session_id.as_deref() == Some(session_id) {
-            routing.current_session_id = None;
+        let result = self.transport.send_request("session/delete", params).await;
+        match transition {
+            Some((generation, lease)) => {
+                self.lifecycle.fail_transition(generation);
+                lease.disarm();
+                if result.is_ok() {
+                    self.lifecycle.mark_deleted(session_id);
+                }
+            }
+            None if result.is_ok() => self.lifecycle.mark_deleted(session_id),
+            None => {}
         }
-        // 黑名单有界：极端删除场景下清空重来（此时 current 已复位，仅可能
-        // 放行极旧的残流，可接受；warn 记录以便排查）
-        if routing.deleted_session_ids.len() >= 128 {
-            routing.deleted_session_ids.clear();
-            warn!(
-                session_id = %session_id,
-                "deleted_session_ids 黑名单超限已清空"
-            );
-        }
-        routing.deleted_session_ids.insert(session_id.to_string());
-        Ok(())
+        result.map(|_| ())
     }
 
     /// Submit a user message to the current session.
@@ -638,13 +870,19 @@ impl AcpTuiClient {
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
     ) -> Result<(), AcpError> {
-        let session_id = self
-            .session_routing
-            .lock()
-            .unwrap()
-            .current_session_id
-            .clone()
-            .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
+        let (session_id, lease) = {
+            let _operation = self.lifecycle.operation_gate().lock().await;
+            let session_id = self
+                .lifecycle
+                .stable_identity()
+                .map(|(session_id, _)| session_id)
+                .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
+            let lease = self
+                .lifecycle
+                .open_prompt(request_id.clone())
+                .map_err(|message| AcpError::new(-32603, message))?;
+            (session_id, lease)
+        };
         let mut params = json!({
             "sessionId": session_id,
             "message": { "role": "user", "content": content },
@@ -652,10 +890,11 @@ impl AcpTuiClient {
         if let Some(rid) = request_id {
             params["requestId"] = json!(rid);
         }
-        self.transport
-            .send_request("session/prompt", params)
-            .await
-            .map(|_| ())
+        let result = self.transport.send_request("session/prompt", params).await;
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        let claims = lease.finish();
+        self.settle_claims_owned(claims).await;
+        result.map(|_| ())
     }
 
     /// Submit a user message with background task results attached.
@@ -671,13 +910,19 @@ impl AcpTuiClient {
         bg_results: Vec<peri_acp_types::event::BackgroundTaskResult>,
         request_id: Option<String>,
     ) -> Result<(), AcpError> {
-        let session_id = self
-            .session_routing
-            .lock()
-            .unwrap()
-            .current_session_id
-            .clone()
-            .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
+        let (session_id, lease) = {
+            let _operation = self.lifecycle.operation_gate().lock().await;
+            let session_id = self
+                .lifecycle
+                .stable_identity()
+                .map(|(session_id, _)| session_id)
+                .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
+            let lease = self
+                .lifecycle
+                .open_prompt(request_id.clone())
+                .map_err(|message| AcpError::new(-32603, message))?;
+            (session_id, lease)
+        };
         let mut params = json!({
             "sessionId": session_id,
             "message": { "role": "user", "content": content },
@@ -686,20 +931,18 @@ impl AcpTuiClient {
         if let Some(rid) = request_id {
             params["requestId"] = json!(rid);
         }
-        self.transport
-            .send_request("session/prompt", params)
-            .await
-            .map(|_| ())
+        let result = self.transport.send_request("session/prompt", params).await;
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        let claims = lease.finish();
+        self.settle_claims_owned(claims).await;
+        result.map(|_| ())
     }
 
     /// Change the model for the current session.
     pub async fn set_model(&self, alias: &str) -> Result<(), AcpError> {
         let session_id = self
-            .session_routing
-            .lock()
-            .unwrap()
-            .current_session_id
-            .clone()
+            .lifecycle
+            .current_session_id()
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let params = json!({ "sessionId": session_id, "modelId": alias });
         let _ = self
@@ -712,11 +955,8 @@ impl AcpTuiClient {
     /// Change the permission mode for the current session.
     pub async fn set_mode(&self, mode: &str) -> Result<(), AcpError> {
         let session_id = self
-            .session_routing
-            .lock()
-            .unwrap()
-            .current_session_id
-            .clone()
+            .lifecycle
+            .current_session_id()
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let params = json!({ "sessionId": session_id, "modeId": mode });
         let _ = self
@@ -730,10 +970,7 @@ impl AcpTuiClient {
     /// Silently returns Ok if no session exists yet — uses notification to
     /// update ACP server state directly without requiring a session.
     pub async fn set_config_option(&self, config_id: &str, value: &str) -> Result<(), AcpError> {
-        let session_id = {
-            let guard = self.session_routing.lock().unwrap();
-            guard.current_session_id.clone()
-        };
+        let session_id = self.lifecycle.current_session_id();
         match session_id {
             Some(session_id) => {
                 let params =
@@ -758,10 +995,7 @@ impl AcpTuiClient {
     /// Update the full PeriConfig on the ACP server (for Login panel CRUD).
     /// When no session exists, uses notification to update server state directly.
     pub async fn update_config(&self, config: &crate::config::PeriConfig) -> Result<(), AcpError> {
-        let session_id = {
-            let guard = self.session_routing.lock().unwrap();
-            guard.current_session_id.clone()
-        };
+        let session_id = self.lifecycle.current_session_id();
         match session_id {
             Some(session_id) => {
                 let params = json!({
@@ -790,13 +1024,13 @@ impl AcpTuiClient {
 
     /// Cancel the currently running prompt.
     pub async fn cancel(&self) -> Result<(), AcpError> {
+        let _operation = self.lifecycle.operation_gate().lock().await;
         let session_id = self
-            .session_routing
-            .lock()
-            .unwrap()
-            .current_session_id
-            .clone()
+            .lifecycle
+            .current_session_id()
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
+        let claims = self.lifecycle.cancel_active_prompt();
+        self.settle_claims_owned(claims).await;
         let params = json!({ "sessionId": session_id });
         self.transport
             .send_notification("session/cancel", params)
@@ -826,13 +1060,106 @@ impl AcpTuiClient {
         .await
     }
 
-    /// Send a response to a server-initiated request (e.g. HITL approval).
-    pub async fn send_response(
+    /// Claim and settle an interaction. A stale owner is a successful no-op.
+    pub async fn respond_interaction(
         &self,
-        id: RequestId,
-        result: Result<Value, AcpError>,
-    ) -> Result<(), AcpError> {
-        self.transport.send_response(id, result).await
+        owner: &InteractionOwner,
+        response: Value,
+        result: String,
+    ) -> Result<bool, AcpError> {
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        let Some(claimed) = self.lifecycle.claim(owner, ClaimCause::UserResponse) else {
+            return Ok(false);
+        };
+        let wire_result = self
+            .transport
+            .send_response(claimed.request_id, Ok(response))
+            .await;
+        let outcome = match &wire_result {
+            Ok(()) => InteractionUiOutcome::Resolved { result },
+            Err(_) => InteractionUiOutcome::Expired {
+                reason:
+                    super::interaction_lifecycle::InteractionExpiryReason::ResponseTransportFailed,
+            },
+        };
+        self.emit_terminal(claimed.owner, outcome);
+        wire_result.map(|_| true)
+    }
+
+    /// Ordered bridge publication seam. The gate remains held until all atom /
+    /// popup / panel / durable-block publication in `publish` has completed.
+    pub async fn publish_if_owned(&self, owner: &InteractionOwner, publish: impl FnOnce()) -> bool {
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        let projection_matches = self.projection_mode == ClientProjectionMode::Interactive
+            && crate::kit::atoms::ACTIVE_SESSION_ID.state().read().as_str() == owner.session_id;
+        if self.lifecycle.is_pending_owner(owner) && projection_matches {
+            publish();
+            return true;
+        }
+        if let Some(claimed) = self.lifecycle.claim(owner, ClaimCause::BridgeReject) {
+            self.settle_claims_owned(vec![claimed]).await;
+        }
+        false
+    }
+
+    pub async fn reject_interaction(&self, owner: &InteractionOwner) {
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        if let Some(claimed) = self.lifecycle.claim(owner, ClaimCause::BridgeReject) {
+            self.settle_claims_owned(vec![claimed]).await;
+        }
+    }
+
+    fn flush_buffered(&self, notifications: Vec<AcpNotification>) {
+        let weak = self.notification_weak.lock().unwrap().clone();
+        if let Some(weak) = weak
+            && let Some(tx) = weak.upgrade()
+        {
+            for notification in notifications {
+                let _ = tx.send(notification);
+            }
+        }
+    }
+
+    fn emit_terminal(&self, owner: InteractionOwner, outcome: InteractionUiOutcome) {
+        let weak = self.notification_weak.lock().unwrap().clone();
+        if let Some(weak) = weak
+            && let Some(tx) = weak.upgrade()
+        {
+            let _ = tx.send(AcpNotification::InteractionTerminal { owner, outcome });
+        }
+    }
+
+    async fn settle_claims_owned(&self, claims: Vec<ClaimedInteraction>) {
+        let mut batch = self.lifecycle.arm_claimed_batch(claims);
+        while let Some(lease) = batch.next_claim() {
+            let claim = lease.claim();
+            let response = match claim.owner.kind {
+                ReverseInteractionKind::Permission => permission_cancelled_response(),
+                ReverseInteractionKind::Elicitation => elicitation_cancel_response(),
+            };
+            let outcome = match self
+                .transport
+                .send_response(claim.request_id.clone(), Ok(response))
+                .await
+            {
+                Ok(()) => InteractionUiOutcome::Expired {
+                    reason: expiry_for_cause(claim.cause),
+                },
+                Err(error) => {
+                    warn!(error = %error, "failed to settle owned interaction");
+                    InteractionUiOutcome::Expired {
+                        reason: super::interaction_lifecycle::InteractionExpiryReason::ResponseTransportFailed,
+                    }
+                }
+            };
+            let claim = lease.complete();
+            self.emit_terminal(claim.owner, outcome);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_stable_for_test(&self, session_id: &str, accepting_reverse: bool) {
+        self.lifecycle.force_stable(session_id, accepting_reverse);
     }
 }
 
@@ -847,6 +1174,7 @@ mod tests {
     async fn test_pump_parses_agent_event_done_request_id() {
         let (client_transport, server_transport) = mpsc_transport_pair();
         let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+        client.lifecycle.force_stable("s1", false);
         client.spawn_pump(notification_tx);
 
         server_transport
@@ -881,6 +1209,7 @@ mod tests {
     async fn test_pump_agent_event_done_without_request_id() {
         let (client_transport, server_transport) = mpsc_transport_pair();
         let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+        client.lifecycle.force_stable("s1", false);
         client.spawn_pump(notification_tx);
 
         server_transport
@@ -916,12 +1245,7 @@ mod tests {
         client.spawn_pump(notification_tx);
 
         // 删除会话（模拟：current 置 None + 黑名单插入）
-        client
-            .session_routing
-            .lock()
-            .unwrap()
-            .deleted_session_ids
-            .insert("deleted-sess".to_string());
+        client.lifecycle.mark_deleted("deleted-sess");
 
         // 已删除会话的残流通知（agent_event / unstable_event / agent_done）
         server_transport
@@ -957,6 +1281,7 @@ mod tests {
     async fn test_pump_still_forwards_init_notifications_when_current_none() {
         let (client_transport, server_transport) = mpsc_transport_pair();
         let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+        client.lifecycle.force_stable("s-init", false);
         client.spawn_pump(notification_tx);
 
         server_transport
@@ -984,7 +1309,7 @@ mod tests {
         client.spawn_pump(notification_tx);
 
         // 先构造"当前会话"状态（等价于 new_session 成功后）
-        client.session_routing.lock().unwrap().current_session_id = Some("sess-1".to_string());
+        client.lifecycle.force_stable("sess-1", false);
 
         // server 端响应 session/delete（标准空对象）
         let server_transport = std::sync::Arc::new(server_transport);
@@ -1012,21 +1337,11 @@ mod tests {
         server.await.unwrap();
 
         assert!(
-            client
-                .session_routing
-                .lock()
-                .unwrap()
-                .current_session_id
-                .is_none(),
+            client.current_session_id().is_none(),
             "删除当前会话后 current_session_id 应清空"
         );
         assert!(
-            client
-                .session_routing
-                .lock()
-                .unwrap()
-                .deleted_session_ids
-                .contains("sess-1"),
+            !client.lifecycle.is_current_session("sess-1"),
             "删除的会话应记入黑名单"
         );
 

@@ -246,12 +246,16 @@ async fn consume_print_notification(
                 let _ = std::io::stdout().flush();
             }
         }
-        AcpNotification::RequestPermission { id, params } => {
-            auto_approve(acp_client, id, &params).await;
+        AcpNotification::RequestPermission { owner, params, .. } => {
+            auto_approve(acp_client, owner, &params).await;
         }
-        AcpNotification::Elicitation { id, .. } => {
+        AcpNotification::Elicitation { owner, .. } => {
             let _ = acp_client
-                .send_response(id, Ok(print_elicitation_response()))
+                .respond_interaction(
+                    &owner,
+                    print_elicitation_response(),
+                    "Cancelled".to_string(),
+                )
                 .await;
         }
         _ => {}
@@ -262,7 +266,7 @@ async fn consume_print_notification(
 /// 自动批准所有权限请求（等价迁移前 `PrintBroker` 语义：-p 模式无交互）。
 async fn auto_approve(
     client: &AcpTuiClient,
-    id: peri_acp::transport::types::RequestId,
+    owner: peri_tui::acp_client::InteractionOwner,
     params: &Value,
 ) {
     let tool_call = params.get("toolCall").unwrap_or(&Value::Null);
@@ -273,7 +277,10 @@ async fn auto_approve(
         .to_string();
     tracing::info!(tool = %tool_name, "print mode: auto-approving permission request");
     let response = print_permission_response();
-    if let Err(e) = client.send_response(id, Ok(response)).await {
+    if let Err(e) = client
+        .respond_interaction(&owner, response, "Allowed once".to_string())
+        .await
+    {
         tracing::warn!(error = %e, "print mode: auto-approve send_response failed");
     }
 }

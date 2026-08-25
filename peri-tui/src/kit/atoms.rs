@@ -602,7 +602,10 @@ pub enum ConfirmAction {
     /// 切换到指定 thread_id
     ThreadSwitch(String),
     /// 用户确认拒绝回答 AskUser 提问
-    RejectAskUser { request_id_json: String },
+    RejectAskUser {
+        owner: crate::acp_client::InteractionOwner,
+        request_id_json: String,
+    },
 }
 
 /// 确认弹窗的 payload

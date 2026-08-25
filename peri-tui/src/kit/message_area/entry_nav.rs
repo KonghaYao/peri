@@ -150,7 +150,7 @@ pub(super) fn cycle_interaction_option(current: usize, count: usize, back: bool)
 }
 
 /// [Slice 4 §6.8] 提交 interaction block 的指定选项（双轨 D5：与弹窗/面板
-/// 同一响应通道——HITL_RESPONSE_TX / ASK_USER_RESPONSE_TX；InteractionResolved
+/// 同一响应通道——HITL_RESPONSE_TX / ASK_USER_RESPONSE_TX；InteractionTerminal
 /// 结果回写由 ask_user_action / hitl_response 消费者发出）。同时关闭模态层
 /// （HITL 弹窗 / AskUser 面板），保持双轨一致。request_id 缺失时 no-op。
 pub(super) fn submit_interaction_option(block: &TuiAskUserBlock, option_index: usize) {
@@ -179,30 +179,36 @@ pub(crate) fn submit_interaction_option_with(
     let Some(id_str) = block.request_id.clone() else {
         return;
     };
+    let Some(owner) = block.owner.clone() else {
+        return;
+    };
     match block.kind {
         InteractionKind::Permission => {
             // D6：HITL 只渲染 [Allow once] [Deny] 两选项（[Always allow] 为
             // 协议依赖项，记入 active spec）。
             let action = if option_index == 0 {
                 crate::kit::hitl_response::HitlResponseAction::Approve {
+                    owner: owner.clone(),
                     request_id_str: id_str.clone(),
                 }
             } else {
                 crate::kit::hitl_response::HitlResponseAction::Reject {
+                    owner: owner.clone(),
                     request_id_str: id_str.clone(),
                 }
             };
             send_hitl(action);
-            crate::kit::popup_overlay::close_hitl_popup_for_request(&id_str);
+            crate::kit::popup_overlay::close_hitl_popup_for_owner(&owner);
         }
         InteractionKind::AskUser => {
             let label = block.options.get(option_index).cloned().unwrap_or_default();
             let answers = build_inline_answers(&block.question_ids, &label);
             send_ask_user(crate::kit::ask_user_action::AskUserResponseAction::Submit {
+                owner: owner.clone(),
                 request_id_str: id_str.clone(),
                 answers,
             });
-            crate::kit::panel_registry::close_ask_user_panel_for_request(&id_str);
+            crate::kit::panel_registry::close_ask_user_panel_for_owner(&owner);
         }
     }
 }

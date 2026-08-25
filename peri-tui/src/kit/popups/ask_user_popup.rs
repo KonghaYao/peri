@@ -27,7 +27,6 @@ use crate::kit::list_nav::{
     ListNavAction, classify_list_nav, cycle_next, cycle_previous, next_selection,
     previous_selection,
 };
-use crate::kit::popup_overlay::close_ask_user_popup_for_request;
 use peri_theme::atoms::THEME_ATOM;
 use serde_json::json;
 
@@ -177,10 +176,11 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         && let Some(tx) = ASK_USER_RESPONSE_TX.get()
                     {
                         let _ = tx.send(AskUserResponseAction::Submit {
+                            owner: snapshot.owner.clone(),
                             request_id_str: snapshot.request_id_json.clone(),
                             answers: answers_map,
                         });
-                        close_ask_user_popup_for_request(&snapshot.request_id_json);
+                        crate::kit::popup_overlay::close_ask_user_popup_for_owner(&snapshot.owner);
                     }
                     EventResult::Consumed
                 }
@@ -191,9 +191,10 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     && let Some(tx) = ASK_USER_RESPONSE_TX.get()
                 {
                     let _ = tx.send(AskUserResponseAction::Cancel {
+                        owner: snapshot.owner.clone(),
                         request_id_str: snapshot.request_id_json.clone(),
                     });
-                    close_ask_user_popup_for_request(&snapshot.request_id_json);
+                    crate::kit::popup_overlay::close_ask_user_popup_for_owner(&snapshot.owner);
                 }
                 EventResult::Consumed
             }

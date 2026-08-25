@@ -19,6 +19,7 @@ use ratatui_kit::{
     },
 };
 
+use crate::kit::acp_types::PendingInteraction;
 use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::atoms::{ASK_USER_PENDING, ASK_USER_RESPONSE_TX, LANG_VERSION};
 use crate::kit::list_nav::{
@@ -34,6 +35,34 @@ use unicode_width::UnicodeWidthStr;
 
 /// 自定义文本输入的视口行数上限
 const TYPING_VIEWPORT_ROWS: usize = 3;
+
+#[allow(clippy::too_many_arguments)]
+fn reset_for_owner_change(
+    session_fingerprint: &mut Vec<String>,
+    interaction: Option<&PendingInteraction<AskUser>>,
+    question_count: usize,
+    focused: &mut usize,
+    answers: &mut Vec<Vec<usize>>,
+    focused_option: &mut usize,
+    is_typing: &mut bool,
+    typing_state: &mut TextAreaState,
+    custom_answers: &mut Vec<Option<String>>,
+    scroll: &mut ScrollViewState,
+) -> bool {
+    let current_fingerprint = interaction_fingerprint(interaction);
+    if *session_fingerprint == current_fingerprint {
+        return false;
+    }
+    *focused = 0;
+    *answers = vec![vec![]; question_count];
+    *focused_option = 0;
+    *is_typing = false;
+    *typing_state = TextAreaState::default();
+    *custom_answers = vec![None; question_count];
+    *scroll = ScrollViewState::default();
+    *session_fingerprint = current_fingerprint;
+    true
+}
 
 #[component]
 pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -66,19 +95,18 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let question_count = pending.as_ref().map(|q| q.questions.len()).unwrap_or(0);
 
-    let current_fingerprint: Vec<String> = pending
-        .as_ref()
-        .map(|p| p.questions.iter().map(|q| q.id.clone()).collect())
-        .unwrap_or_default();
-    if *session_fingerprint.read() != current_fingerprint {
-        *focused.write() = 0;
-        *answers.write() = vec![vec![]; question_count];
-        *focused_option.write() = 0;
-        *is_typing.write() = false;
-        *typing_state.write() = TextAreaState::default();
-        *custom_answers.write() = vec![None; question_count];
-        *session_fingerprint.write() = current_fingerprint;
-    }
+    reset_for_owner_change(
+        &mut session_fingerprint.write(),
+        interaction.as_ref(),
+        question_count,
+        &mut focused.write(),
+        &mut answers.write(),
+        &mut focused_option.write(),
+        &mut is_typing.write(),
+        &mut typing_state.write(),
+        &mut custom_answers.write(),
+        &mut sv.write(),
+    );
 
     let pending_for_closure = pending.clone();
     let interaction_for_closure = interaction.clone();
@@ -517,12 +545,11 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             && let Some(tx) = ASK_USER_RESPONSE_TX.get()
                         {
                             let _ = tx.send(AskUserResponseAction::Submit {
+                                owner: snapshot.owner.clone(),
                                 request_id_str: snapshot.request_id_json.clone(),
                                 answers: answers_map,
                             });
-                            panel_registry::close_ask_user_panel_for_request(
-                                &snapshot.request_id_json,
-                            );
+                            panel_registry::close_ask_user_panel_for_owner(&snapshot.owner);
                         }
                         EventResult::Consumed
                     }
@@ -537,6 +564,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         message: i18n::tr("popup-confirm-reject-message"),
                         details: vec![],
                         pending_action: crate::kit::atoms::ConfirmAction::RejectAskUser {
+                            owner: snapshot.owner.clone(),
                             request_id_json: snapshot.request_id_json.clone(),
                         },
                     };
@@ -839,6 +867,22 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         )
     })
+}
+
+fn interaction_fingerprint(interaction: Option<&PendingInteraction<AskUser>>) -> Vec<String> {
+    interaction
+        .map(|interaction| {
+            let owner = &interaction.owner;
+            let mut fingerprint = vec![
+                owner.client_instance_id.to_string(),
+                owner.generation.to_string(),
+                owner.prompt_epoch.to_string(),
+                owner.token.to_string(),
+            ];
+            fingerprint.extend(interaction.payload.questions.iter().map(|q| q.id.clone()));
+            fingerprint
+        })
+        .unwrap_or_default()
 }
 
 /// CJK 安全的文本折行：按 max_width 列宽拆分文本为多行。

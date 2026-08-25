@@ -154,11 +154,43 @@ pub fn close_hitl_popup_for_request(request_id_json: &str) -> bool {
     true
 }
 
+pub fn close_hitl_popup_for_owner(owner: &crate::acp_client::InteractionOwner) -> bool {
+    let pending_atom = atoms::HITL_PENDING.state();
+    let mut pending = pending_atom.write();
+    if !pending
+        .as_ref()
+        .is_some_and(|pending| pending.owner == *owner)
+    {
+        return false;
+    }
+    *pending = None;
+    if *atoms::POPUP_KIND.state().read() == Some(PopupKind::Hitl) {
+        *atoms::POPUP_KIND.state().write() = None;
+    }
+    true
+}
+
 /// Legacy AskUser popup 的 request-aware cleanup；panel 路径见 panel_registry。
 pub fn close_ask_user_popup_for_request(request_id_json: &str) -> bool {
     let pending_atom = atoms::ASK_USER_PENDING.state();
     let mut pending = pending_atom.write();
     if pending.as_ref().map(|p| p.request_id_json.as_str()) != Some(request_id_json) {
+        return false;
+    }
+    *pending = None;
+    if *atoms::POPUP_KIND.state().read() == Some(PopupKind::AskUser) {
+        *atoms::POPUP_KIND.state().write() = None;
+    }
+    true
+}
+
+pub fn close_ask_user_popup_for_owner(owner: &crate::acp_client::InteractionOwner) -> bool {
+    let pending_atom = atoms::ASK_USER_PENDING.state();
+    let mut pending = pending_atom.write();
+    if !pending
+        .as_ref()
+        .is_some_and(|pending| pending.owner == *owner)
+    {
         return false;
     }
     *pending = None;

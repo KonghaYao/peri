@@ -174,7 +174,7 @@ pub async fn build_app_and_acp(
             });
 
             let (acp_client, notification_tx, notification_rx) =
-                AcpTuiClient::new(client_transport);
+                AcpTuiClient::new_interactive(client_transport);
             acp_client.spawn_pump(notification_tx);
 
             app.acp_client = Some(acp_client.clone());

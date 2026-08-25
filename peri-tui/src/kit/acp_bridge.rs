@@ -4,6 +4,7 @@
 //! 经 acp_events::dispatch_and_notify 处理后写入全局 Atom。
 //! Phase 2 完整实现——main_loop fan-out 后独立消费。
 
+use crate::acp_client::AcpTuiClient;
 use crate::kit::acp_events::{self, BridgeState, SessionPhase};
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, CurrentTurn};
 use crate::kit::atoms;
@@ -76,13 +77,15 @@ fn accepts_event_session(
 pub fn spawn_acp_bridge(
     rx: mpsc::UnboundedReceiver<AcpEventWithEpoch>,
     shutdown: CancellationToken,
+    client: AcpTuiClient,
 ) -> tokio::task::JoinHandle<()> {
-    spawn_acp_bridge_inner(rx, shutdown, None)
+    spawn_acp_bridge_inner(rx, shutdown, Some(client), None)
 }
 
 fn spawn_acp_bridge_inner(
     mut rx: mpsc::UnboundedReceiver<AcpEventWithEpoch>,
     shutdown: CancellationToken,
+    client: Option<AcpTuiClient>,
     observed: Option<mpsc::UnboundedSender<bool>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -203,6 +206,27 @@ fn spawn_acp_bridge_inner(
                                 }
                             }
 
+                            let interaction_owner = match &epoch_event.event {
+                                AcpEventData::HitlPending(pending) => Some(pending.owner.clone()),
+                                AcpEventData::AskUser(pending) => Some(pending.owner.clone()),
+                                _ => None,
+                            };
+
+                            if let (Some(owner), Some(client)) =
+                                (interaction_owner, client.as_ref())
+                            {
+                                let event = epoch_event.event;
+                                let published = client
+                                    .publish_if_owned(&owner, || {
+                                        acp_events::dispatch_and_notify(&mut state, &event)
+                                    })
+                                    .await;
+                                if let Some(tx) = &observed {
+                                    let _ = tx.send(published);
+                                }
+                                continue;
+                            }
+
                             if !accepts_event_session(
                                 &epoch_event.event,
                                 &state.active_session_id,
@@ -266,7 +290,17 @@ fn spawn_acp_bridge_observed(
     shutdown: CancellationToken,
     observed: mpsc::UnboundedSender<bool>,
 ) -> tokio::task::JoinHandle<()> {
-    spawn_acp_bridge_inner(rx, shutdown, Some(observed))
+    spawn_acp_bridge_inner(rx, shutdown, None, Some(observed))
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_acp_bridge_observed_with_client(
+    rx: mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    shutdown: CancellationToken,
+    client: AcpTuiClient,
+    observed: mpsc::UnboundedSender<bool>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_acp_bridge_inner(rx, shutdown, Some(client), Some(observed))
 }
 
 #[cfg(test)]
@@ -306,7 +340,7 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         FileSuggestions(_) => "FileSuggestions",
         HitlPending(_) => "HitlPending",
         AskUser(_) => "AskUser",
-        InteractionResolved { .. } => "InteractionResolved",
+        InteractionTerminal { .. } => "InteractionTerminal",
         RewindPreview(_) => "RewindPreview",
         OauthNeeded(_) => "OauthNeeded",
         OauthCompleted { .. } => "OauthCompleted",

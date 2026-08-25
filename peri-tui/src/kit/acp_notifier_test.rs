@@ -5,7 +5,7 @@ use crate::acp_client::AcpTuiClient;
 use crate::kit::slash_completion::SlashActionKind;
 use crate::kit::slash_projection::ArgKind;
 use peri_acp::event::AcpEvent;
-use peri_acp::transport::mpsc::mpsc_transport_pair;
+use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair};
 use peri_acp_types::event_data::PredictionAction;
 use serde_json::json;
 use serial_test::serial;
@@ -48,6 +48,38 @@ fn spawn_test_notifier() -> (
     let shutdown = CancellationToken::new();
     let _handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
     (notif_tx, bridge_rx, shutdown)
+}
+
+#[tokio::test]
+async fn bridge_delivery_failure_claims_and_settles_registered_interaction() {
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, notification_tx, notification_rx) = AcpTuiClient::new(client_transport);
+    client.force_stable_for_test("s1", true);
+    client.spawn_pump(notification_tx);
+
+    let (bridge_tx, bridge_rx) = mpsc::unbounded_channel();
+    drop(bridge_rx);
+    let shutdown = CancellationToken::new();
+    let _notifier =
+        spawn_kit_notifier_with_client(notification_rx, bridge_tx, shutdown.clone(), client);
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        server_transport.send_request(
+            "session/request_permission",
+            json!({"sessionId":"s1","toolCall":{"title":"Bash","rawInput":{}}}),
+        ),
+    )
+    .await
+    .expect("bridge rejection must not leave reverse request hanging")
+    .expect("bridge rejection must settle the reverse request");
+    let response: agent_client_protocol::schema::v1::RequestPermissionResponse =
+        serde_json::from_value(response).unwrap();
+    assert!(matches!(
+        response.outcome,
+        agent_client_protocol::schema::v1::RequestPermissionOutcome::Cancelled
+    ));
+    shutdown.cancel();
 }
 
 #[tokio::test]
@@ -980,10 +1012,10 @@ async fn test_request_permission_forwards_hitl_pending_event() {
     crate::kit::atoms::init_atoms();
     let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
 
-    let request_id = peri_acp::transport::types::RequestId::String("req-123".to_string());
     notif_tx
         .send(AcpNotification::RequestPermission {
-            id: request_id,
+            owner: Default::default(),
+            request_id_json: "\"req-123\"".into(),
             params: json!({
                 "sessionId": "s1",
                 "toolCall": {
@@ -1021,7 +1053,8 @@ async fn test_request_permission_queued_events_keep_number_and_string_ids_atomic
     ] {
         notif_tx
             .send(AcpNotification::RequestPermission {
-                id,
+                owner: Default::default(),
+                request_id_json: serde_json::to_string(&id).unwrap(),
                 params: json!({
                     "sessionId": "s1",
                     "toolCall": {"title": title, "rawInput": {"marker": title}},
@@ -1062,7 +1095,11 @@ async fn test_elicitation_queued_events_keep_number_and_string_ids_atomic() {
     ] {
         notif_tx
             .send(AcpNotification::Elicitation {
-                id,
+                owner: crate::acp_client::InteractionOwner {
+                    kind: crate::acp_client::ReverseInteractionKind::Elicitation,
+                    ..Default::default()
+                },
+                request_id_json: serde_json::to_string(&id).unwrap(),
                 params: json!({
                     "sessionId": "s1",
                     "requestedSchema": {"type": "object", "properties": {
@@ -1106,6 +1143,7 @@ async fn test_interaction_notifier_has_no_pending_atom_side_effect() {
     let old_hitl = crate::kit::atoms::HITL_PENDING.state().read().clone();
     let old_ask = crate::kit::atoms::ASK_USER_PENDING.state().read().clone();
     *crate::kit::atoms::HITL_PENDING.state().write() = Some(PendingInteraction {
+        owner: Default::default(),
         request_id_json: "\"sentinel-hitl\"".into(),
         payload: HitlPending {
             tool_name: "sentinel".into(),
@@ -1114,20 +1152,26 @@ async fn test_interaction_notifier_has_no_pending_atom_side_effect() {
         },
     });
     *crate::kit::atoms::ASK_USER_PENDING.state().write() = Some(PendingInteraction {
+        owner: Default::default(),
         request_id_json: "\"sentinel-ask\"".into(),
         payload: AskUser { questions: vec![] },
     });
     let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
     notif_tx
         .send(AcpNotification::RequestPermission {
-            id: peri_acp::transport::types::RequestId::Number(1),
+            owner: Default::default(),
+            request_id_json: "1".into(),
             params: json!({"sessionId":"s1","toolCall":{"title":"new","rawInput":null}}),
         })
         .unwrap();
     bridge_rx.recv().await.expect("应完成 notifier conversion");
     notif_tx
         .send(AcpNotification::Elicitation {
-            id: peri_acp::transport::types::RequestId::Number(2),
+            owner: crate::acp_client::InteractionOwner {
+                kind: crate::acp_client::ReverseInteractionKind::Elicitation,
+                ..Default::default()
+            },
+            request_id_json: "2".into(),
             params: json!({"sessionId":"s1","requestedSchema":{"type":"object","properties":{}}}),
         })
         .unwrap();

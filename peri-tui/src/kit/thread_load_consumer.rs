@@ -118,57 +118,14 @@ async fn handle_load(
     }
     info!(thread_id = %thread_id, cwd = %cwd, "kit thread_load_consumer: calling session/load");
 
-    // 1. 先设置目标 session_id，bridge reset 后会立刻进入 session_id 过滤模式。
-    atoms::ACTIVE_SESSION_ID.set(thread_id.to_string());
-    // 2. 先触发 bridge 重置，避免旧 session 的 committed/current_turn 污染新 thread。
-    crate::kit::atoms::BRIDGE_RESET_COUNTER.set(
-        crate::kit::atoms::BRIDGE_RESET_COUNTER
-            .get()
-            .wrapping_add(1),
-    );
-    // 3. BRIDGE_RESET_COUNTER 递增后 bridge 会在下一个事件到达时自动清空
-    //    committed。session/load replay 事件即为下一个事件——旧内容在 replay
-    //    到达前保持可见，replay 到达后 bridge 清空并重建，实现平滑过渡，
-    //    避免 push_view_models_for_reset 造成的空白闪烁。
-    {
-        let ref_guard = atoms::ACP_STATE.state();
-        let mut acp = ref_guard.write();
-        acp.is_loading = false;
-    }
-    // H1/M3/L5/L10：同步清空弹窗 payload、Todo 列表、输入历史指针，
-    // 与 submit_consumer::handle_clear_submit 对称。load_session 的 replay
-    // 事件会通过 ViewCommit 重写 VIEW_MODELS、通过 SessionUpdate::Plan 重写
-    // TODO_ITEMS，无数据丢失。本 handle_load 仅在 bg-task 拦截分支（弹 Confirm
-    // 后 continue）之后才执行，不会误关用户刚看到的 Confirm 弹窗。
-    crate::kit::popup_overlay::close_popup();
-    // REWIND_PREVIEW 跟随会话生命周期：切换 thread 后旧 thread 的消息 id 已
-    // 失效，必须清空，否则双击 Esc 会看到旧 thread 的候选（服务端 rewind 报
-    // not found）。新 thread 的首个 turn 完成后服务端会推送新的 preview。
-    *crate::kit::atoms::REWIND_PREVIEW.state().write() = None;
-    *crate::kit::atoms::REWIND_TARGET_TEXT.state().write() = None;
-    *crate::kit::atoms::REWIND_PREVIEW_FINGERPRINT
-        .state()
-        .write() = None;
-    *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
-        crate::kit::atoms::RewindBudgetState::Idle;
-    *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;
-    *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
-    crate::kit::input_history::reset_history_cursor();
-    // 4. 最后加载 session。replay notification 到达时 active session 已就绪，不会被误丢。
+    // Client-owned session boundary projects the target before the load RPC so
+    // pre-response replay is accepted without a split atom/client fact source.
     tracing::info!(
         target: "msg_scroll_diag",
         thread_id = %thread_id,
         "thread_load_consumer: about to call load_session() for history replay",
     );
     acp_client.load_session(&thread_id, cwd, None).await?;
-    // 5. session/load 已完成，显式回到 idle，避免 replay 或历史 usage 留下 loading 态。
-    {
-        let ref_guard = atoms::ACP_STATE.state();
-        let mut acp = ref_guard.write();
-        acp.variant = 0;
-        acp.is_loading = false;
-    }
-
     Ok(())
 }
 

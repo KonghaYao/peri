@@ -935,6 +935,7 @@ fn ask_user_block_base() -> TuiAskUserBlock {
         options: vec!["Allow once".into(), "Deny".into()],
         result: None,
         request_id: Some("rid-1".into()),
+        owner: None,
         question_ids: vec![],
         fold: FoldState::Expanded,
         user_modified: false,

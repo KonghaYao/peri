@@ -8,6 +8,7 @@ fn make_interaction_state() -> BridgeState {
 
 fn hitl_event(payload: HitlPending) -> AcpEventData {
     AcpEventData::HitlPending(crate::kit::acp_types::PendingInteraction {
+        owner: Default::default(),
         request_id_json: serde_json::to_string(&"hitl-1").unwrap(),
         payload,
     })
@@ -15,6 +16,7 @@ fn hitl_event(payload: HitlPending) -> AcpEventData {
 
 fn ask_user_event(payload: AskUser) -> AcpEventData {
     AcpEventData::AskUser(crate::kit::acp_types::PendingInteraction {
+        owner: Default::default(),
         request_id_json: serde_json::to_string(&"ask-1").unwrap(),
         payload,
     })
@@ -192,10 +194,14 @@ fn test_ask_user_handler_publishes_same_composite_and_question_ids() {
 #[serial]
 fn test_queued_interaction_blocks_keep_origin_request_ids() {
     let mut state = make_interaction_state();
-    for id in ["A", "B"] {
+    for (token, id) in [(1, "A"), (2, "B")] {
         dispatch_and_notify(
             &mut state,
             &AcpEventData::HitlPending(crate::kit::acp_types::PendingInteraction {
+                owner: crate::acp_client::InteractionOwner {
+                    token,
+                    ..Default::default()
+                },
                 request_id_json: id.into(),
                 payload: HitlPending {
                     tool_name: id.into(),
@@ -225,7 +231,7 @@ fn test_queued_interaction_blocks_keep_origin_request_ids() {
     );
 }
 
-/// 结果回写：InteractionResolved 按 request_id 匹配 pending block → clone +
+/// 结果回写：InteractionTerminal 按 semantic owner 匹配 pending block → clone +
 /// pending=false + result + 重算 hash + 原位 set（COW）；completed → Collapsed。
 #[test]
 #[serial]
@@ -244,12 +250,13 @@ fn test_interaction_resolved_writes_back_pending_block() {
     let before = ask_user_block_of(&snap, idx).clone();
     let hash_before = before.content_hash;
 
-    let rid = serde_json::to_string(&"hitl-1").unwrap();
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::InteractionResolved {
-            request_id: rid.clone(),
-            result: "Allowed once".into(),
+        &AcpEventData::InteractionTerminal {
+            owner: Default::default(),
+            outcome: crate::acp_client::InteractionUiOutcome::Resolved {
+                result: "Allowed once".into(),
+            },
         },
     );
 
@@ -270,9 +277,11 @@ fn test_interaction_resolved_writes_back_pending_block() {
     // 幂等：重复到达（迟到/重复事件）不改变结果（matched 条件 pending=false 不再命中）
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::InteractionResolved {
-            request_id: rid,
-            result: "Allowed once".into(),
+        &AcpEventData::InteractionTerminal {
+            owner: Default::default(),
+            outcome: crate::acp_client::InteractionUiOutcome::Resolved {
+                result: "Allowed once".into(),
+            },
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
@@ -281,7 +290,7 @@ fn test_interaction_resolved_writes_back_pending_block() {
     assert_eq!(block.result.as_deref(), Some("Allowed once"));
 }
 
-/// request_id 不匹配的 InteractionResolved → no-op（防御）。
+/// semantic owner 不匹配的 InteractionTerminal → no-op（防御）。
 #[test]
 #[serial]
 fn test_interaction_resolved_mismatched_request_id_noop() {
@@ -296,9 +305,14 @@ fn test_interaction_resolved_mismatched_request_id_noop() {
     );
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::InteractionResolved {
-            request_id: serde_json::to_string(&"other-rid").unwrap(),
-            result: "Denied".into(),
+        &AcpEventData::InteractionTerminal {
+            owner: crate::acp_client::InteractionOwner {
+                token: 999,
+                ..Default::default()
+            },
+            outcome: crate::acp_client::InteractionUiOutcome::Resolved {
+                result: "Denied".into(),
+            },
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
@@ -328,9 +342,11 @@ fn test_fold_pass_interaction_pending_expanded_override_priority() {
     // 结果回写 → Completed → Expanded（不自动收束）
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::InteractionResolved {
-            request_id: serde_json::to_string(&"hitl-1").unwrap(),
-            result: "Denied".into(),
+        &AcpEventData::InteractionTerminal {
+            owner: Default::default(),
+            outcome: crate::acp_client::InteractionUiOutcome::Resolved {
+                result: "Denied".into(),
+            },
         },
     );
     let snap = VIEW_MODELS.state().read().clone();

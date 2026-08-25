@@ -1,3 +1,4 @@
+use crate::acp_client::{InteractionOwner, InteractionUiOutcome};
 use crate::kit::stream_data::*;
 use peri_acp_types::event_data::*;
 use serde_json::Value;
@@ -18,6 +19,7 @@ pub struct AcpEventWithEpoch {
 /// TUI 内部 interaction 快照：RequestId 与 payload 从 notifier 起原子同行。
 #[derive(Debug, Clone)]
 pub struct PendingInteraction<T> {
+    pub owner: InteractionOwner,
     pub request_id_json: String,
     pub payload: T,
 }
@@ -157,7 +159,10 @@ pub enum AcpEventData {
     /// 按 `request_id` 匹配，clone + `pending=false` + `result` + 重算 hash +
     /// 原位 set（COW）。`result` 为渲染文案（纯文本，无符号——渲染层负责
     /// 加状态符号与颜色）。
-    InteractionResolved { request_id: String, result: String },
+    InteractionTerminal {
+        owner: InteractionOwner,
+        outcome: InteractionUiOutcome,
+    },
 
     /// `"rewind-preview"` -- preview of changes that will be undone.
     RewindPreview(RewindPreview),

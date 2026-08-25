@@ -1,6 +1,6 @@
 # TUI 与 ACP 数据流
 
-> 最后核对：2026-08-07
+> 最后核对：2026-08-25
 
 ## 概述
 
@@ -294,7 +294,9 @@ event_v2         →  `session/update`                    →  AcpNotification �
 
 ### 4.3 交互请求事件 — 标准 ACP 通道（TUI 消费）
 
-> 注：交互类事件走标准 ACP 通道。AskUser 走 `Elicitation`，HITL 走 `AcpNotification::RequestPermission`。client pump 与普通 notification 分流：普通 notification 保留 current=None 与空 host session wildcard；两种已知 reverse request 按各自 schema 提取 non-empty session identity，并在单个 current/deleted snapshot 上要求 exact active。invalid、no-active、stale、deleted 或 notifier send failure 直接用共享 typed builder 返回标准 cancel，不进入 UI。exact-current 请求才由 notifier 将原始 RequestId 与 payload 封装为 composite event（不写 UI atom），bridge 再通过 non-empty exact active-session gate 后由 handler 发布 composite pending state与 durable block。pump early gate 不拥有已 forward 请求，跨 session transition 的 pending settlement 仍需独立 lifecycle ownership。rewind 使用 `peri/agent_event` 加 `session/rewind*` RPC。`ContextWarning` 当前没有用户可见的 `budget-warning` 生产路径。
+> 注：交互类事件走标准 ACP 通道。AskUser 走 `Elicitation`，HITL 走 `AcpNotification::RequestPermission`。client pump 先按 method schema 提取 non-empty session identity，再由 `interaction_lifecycle` 的 Stable route 接受并在 forward 前注册 semantic owner；invalid/no-active/stale/deleted 请求直接返回 typed cancel。notifier 只携带 owner、debug 用 RequestId JSON 与 payload，bridge 的 `publish_if_owned` 持有同一 operation gate 完成 final owner/projection check 和所有同步 UI 写入，投递失败则 first-claim BridgeReject。用户 action、prompt/AgentDone、cancel、session transition 与 transport terminal 都竞争同一 owner，因此每个请求最多一个 typed response attempt 和一个 owner-aware local terminal。`new` response→commit 窗口的 ordinary notification 进入容量 64 的 FIFO，commit 后只刷新 exact-target；`PromptLease`/transition/claimed batch Drop 把已拥有的 settlement 交给不保活 transport/notifier 的 worker。headless print 参与 token claim，但不触碰 kit atoms。rewind 使用 `peri/agent_event` 加 `session/rewind*` RPC。`ContextWarning` 当前没有用户可见的 `budget-warning` 生产路径。
+>
+> 启动时 initial 与 first-submit 共用 client gate 内 Stable 重检的 `ensure_session`。resume/continue 在 submit consumer 可达前预留 restore，异步查到目标后在同一 gate load（无目标则释放），所以延迟 startup producer 不能替换首 prompt 的 session；显式 `/clear` 仍无条件 new。
 
 | 事件名 | 方向 | 通道 | TUI Atom / 弹窗 |
 |--------|------|------|----------|
