@@ -31,15 +31,23 @@ describe("tool-card: bash running duration", () => {
 
       await sendPrompt(
         tester,
-        "请用 Bash 执行 sleep 6",
+        "请严格使用 Bash 工具执行 sleep 10，不要只解释命令。",
       );
 
-      // 等待 Bash 工具被调用（agent 思考 + 派发约 5-15s）
-      await tester.waitForText("Bash", {
-        timeout: 60_000,
-        interval: 1000,
-      });
-      // 等 Bash 开始运行（sleep 期间，约 3s 时抓拍）
+      // 等待真实的运行中工具行。不能匹配裸 "Bash"：用户 prompt 本身含该词，
+      // 会在工具尚未派发时假绿并过早抓屏。
+      await tester.waitFor(
+        (screen) =>
+          /(?:^|\n)\s*[\u2800-\u28ff]\s+(?:Bash|Shell)\b[^\n]*sleep 10/m.test(
+            screen,
+          ),
+        {
+          timeout: 90_000,
+          interval: 500,
+          message: "等待 Bash sleep 10 进入运行态",
+        },
+      );
+      // sleep 10 留出确定的运行窗口，约 3s 时抓拍时长。
       await tester.sleep(3000);
 
       const runningCapture = await takePeriSnapshot(
@@ -47,8 +55,17 @@ describe("tool-card: bash running duration", () => {
         "bash-running-duration",
       );
 
-      // 固定等待 sleep 6 完成（已过 3s，再等 10s 确保完成 + agent 响应）
-      await tester.sleep(12000);
+      // 等待同一工具完成以及主 turn footer 出现，再抓完成态。
+      await tester.waitFor(
+        (screen) =>
+          /✓\s+(?:Bash|Shell)\b[^\n]*sleep 10/.test(screen) &&
+          /(?:Brewed for|处理耗时)/.test(screen),
+        {
+          timeout: 120_000,
+          interval: 500,
+          message: "等待 Bash sleep 10 与主 turn 完成",
+        },
+      );
 
       const doneCapture = await takePeriSnapshot(tester, "bash-done");
 

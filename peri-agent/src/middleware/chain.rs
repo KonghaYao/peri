@@ -53,7 +53,7 @@ impl MiddlewareChain {
     /// 语义边界（设计 §3.5）：middleware 仅作内容载体——收集结果由渲染面
     /// （`PromptTemplate`）按"位置属性 + 段内序号"排序装配，**不依赖
     /// middleware 链序**（blueprint 会变，链序不可作顺序契约）；本方法不是
-    /// `prompt_contribution`（首轮一次性通知）的收集通道。
+    /// `prompt_contribution`（`before_agent` 后按模型请求读取）的收集通道。
     ///
     /// 契约 3（gate 原子迁移）：收集到的段落即持有者已装配（gate 开启）；
     /// 契约 4（运行时缺失防御）：middleware 未提供段落（默认空）不 fail。
@@ -342,8 +342,9 @@ impl MiddlewareChain {
 
     // ── 声明式 Prompt 贡献 ──
 
-    /// 收集所有中间件的 prompt_contribution，顺序拼接为单个 String。
+    /// 收集所有中间件当前的 prompt_contribution，顺序拼接为单个 String。
     ///
+    /// 主 Agent bridge 在 `before_agent` 后构造每个 `ModelRequest` 时调用一次；
     /// 只有返回 `Some` 的中间件会被包含，各段之间直接拼接（调用方负责分隔符）。
     pub fn collect_prompt_contributions(&self) -> String {
         self.middlewares

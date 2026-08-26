@@ -20,7 +20,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
-import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
 /** 每次运行独立目标文件（避免并行/重跑冲突）。 */
@@ -55,53 +54,43 @@ describe("tool-card: edit/write diff summary rendering (G-Diff)", () => {
 
       await sendPrompt(
         tester,
-        `请用 Write 工具创建文件 ${TARGET}，内容为两行：hello 和 world`,
+        `这是 E2E 测试。请立即且只调用一次 Write 工具，file_path 必须是 ${TARGET}，content 必须严格为两行 hello 和 world；成功后只回复“完成”，不得再次调用 Write。`,
       );
 
-      // 等待 turn 完成（footer 处理耗时出现；中英文环境各兜底）
-      try {
-        await tester.waitForText("处理耗时", {
-          timeout: 180_000,
-          interval: 1000,
-        });
-      } catch {
-        await tester.waitForText("Brewed for", {
-          timeout: 60_000,
-          interval: 1000,
-        });
-      }
-      await tester.sleep(1500);
+      await tester.waitForPattern(/✓\s+Write .*e2e-edit-diff.*· \+2/, {
+        timeout: 120_000,
+        interval: 500,
+        message: "等待单次 Write +2 完成态",
+      });
+      await tester.waitFor(
+        (screen) => /(?:Brewed for|处理耗时)/.test(screen),
+        { timeout: 120_000, interval: 500, message: "等待 Write 主 turn 完成" },
+      );
 
       // ── 折叠态：Write 卡片 header 含路径 + 变更计数（§6.4 `+N −M`）──
       const collapsed = await takePeriSnapshot(tester, "edit-diff-collapsed");
       expect(collapsed.text.length).toBeGreaterThan(50);
-      const r = await judge({
-        ansiRaw: collapsed.raw,
-        criteria: [
-          "工具卡区域应显示 Write 头行：包含目标文件路径（e2e-edit-diff）",
-          "变更摘要可见：'Wrote 2 lines' 或 '+2' 形式的行数计数",
-        ],
-      });
-      expect(r.pass, `折叠态 diff 摘要可见`).toBe(true);
+      expect(collapsed.text).toMatch(/✓\s+Write .*e2e-edit-diff.*· \+2/);
 
-      // ── 展开 diff header：焦点移到 Write 卡（user → Write，2 次 Alt+Down）+ Enter ──
-      for (let i = 0; i < 2; i++) {
-        await tester.sendKey("Down", { alt: true });
-        await tester.sleep(150);
+      // ── 展开 diff header：从末尾 entry 向上遍历，直到目标 Write 卡首行
+      // 变为展开符号 ▾。固定次数导航会因 reasoning/tool 交错数量变化而命中
+      // 错误 entry；公开符号是更可靠的因果确认。
+      let expandedWrite = false;
+      for (let i = 0; i < 12; i++) {
+        await tester.sendKey("Up", { alt: true });
+        await tester.sleep(100);
+        await tester.sendKey("Enter");
+        await tester.sleep(250);
+        if (/▾\s+Write .*e2e-edit-diff.*· \+2/.test(await tester.getScreenText())) {
+          expandedWrite = true;
+          break;
+        }
       }
-      await tester.sendKey("Enter");
-      await tester.sleep(1000);
+      expect(expandedWrite, "应能聚焦并展开目标 Write 卡").toBe(true);
 
       const expanded = await takePeriSnapshot(tester, "edit-diff-expanded");
       expect(expanded.text.length).toBeGreaterThan(50);
-      const r2 = await judge({
-        ansiRaw: expanded.raw,
-        criteria: [
-          "展开后的 Write 工具卡显示 diff 摘要 header 行（文件路径 + '+2' 计数）",
-          "文件路径（e2e-edit-diff）与 '+2' 计数可见",
-        ],
-      });
-      expect(r2.pass, `展开态 diff header`).toBe(true);
+      expect(expanded.text).toMatch(/▾\s+Write .*e2e-edit-diff.*· \+2/);
     },
   );
 });

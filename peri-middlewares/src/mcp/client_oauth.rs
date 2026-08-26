@@ -38,10 +38,20 @@ impl McpClientPool {
         if disposition != OAuthStartDisposition::Started {
             return disposition;
         }
+        let _admission = self.lifecycle_registration.lock();
+        if !self.is_open() {
+            self.release_oauth_flow(server_name, flow_id);
+            return OAuthStartDisposition::Conflict {
+                active_flow_id: "pool-closing".to_string(),
+            };
+        }
         let pool = self.clone();
         let server_name = server_name.to_string();
         let flow_id = flow_id.to_string();
-        tokio::spawn(async move {
+        let rollback_server = server_name.clone();
+        let rollback_flow = flow_id.clone();
+        let key = super::task_scope::McpTaskKey::OAuth(flow_id.clone());
+        let spawn = self.task_spawner.spawn(key, async move {
             if pool.oauth_event_callback().is_none() {
                 let _ = pool.start_oauth_flow(&flow_id, &server_name, true).await;
                 pool.release_oauth_flow(&server_name, &flow_id);
@@ -51,6 +61,12 @@ impl McpClientPool {
             let _ = pool.start_oauth_flow(&flow_id, &server_name, false).await;
             pool.release_oauth_flow(&server_name, &flow_id);
         });
+        if spawn.is_err() {
+            self.release_oauth_flow(&rollback_server, &rollback_flow);
+            return OAuthStartDisposition::Conflict {
+                active_flow_id: "task-owner-closing".to_string(),
+            };
+        }
         disposition
     }
 
@@ -136,7 +152,8 @@ impl McpClientPool {
             };
 
             // 关闭旧连接
-            if let Some(mut svc) = self.services.lock().await.remove(server_name) {
+            let previous_service = { self.services.lock().remove(server_name) };
+            if let Some(mut svc) = previous_service {
                 let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
             }
             let old_status = self
@@ -198,11 +215,16 @@ impl McpClientPool {
                         channel_capable: false,
                         skills_capable,
                     });
-                    self.clients.write().insert(server_name.to_string(), handle);
-                    self.services
-                        .lock()
-                        .await
-                        .insert(server_name.to_string(), McpServiceWrapper::Default(rs));
+                    let service = McpServiceWrapper::Default(rs);
+                    if let Err(mut service) =
+                        self.try_commit_connection(server_name.to_string(), handle, service)
+                    {
+                        let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                        return Err(McpPoolError::ConnectionFailed {
+                            server: server_name.to_string(),
+                            reason: "MCP pool is closing".to_string(),
+                        });
+                    }
                     self.record_status_change(server_name, old_status.as_ref());
                     return Ok(());
                 }
@@ -276,7 +298,8 @@ impl McpClientPool {
         let _ = store.clear_server(server_name).await;
 
         // 2. 关闭连接
-        if let Some(mut svc) = self.services.lock().await.remove(server_name) {
+        let service = { self.services.lock().remove(server_name) };
+        if let Some(mut svc) = service {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
 

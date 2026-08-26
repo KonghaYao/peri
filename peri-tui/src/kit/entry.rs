@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::service_registry::ProcessResourceMonitor;
 use crate::kit::acp_bridge::spawn_acp_bridge;
-use crate::kit::acp_notifier::spawn_kit_notifier;
+use crate::kit::acp_notifier::spawn_kit_notifier_with_client;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::app_shell::AppShell;
 use crate::kit::ask_user_action::{AskUserResponseAction, spawn_ask_user_consumer};
@@ -320,10 +320,21 @@ pub async fn run_kit_fullscreen(
         });
 
         // 4d. 启动三链路（render_bridge 已删除）
-        let _notifier_handle = spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
-        let _bridge_handle = spawn_acp_bridge(bridge_rx, shutdown.clone());
+        let _notifier_handle = spawn_kit_notifier_with_client(
+            notification_rx,
+            bridge_tx,
+            shutdown.clone(),
+            client.clone(),
+        );
+        let _bridge_handle = spawn_acp_bridge(bridge_rx, shutdown.clone(), client.clone());
         let cwd = app.services.cwd.clone();
         let cwd_for_init = cwd.clone();
+        // Establish resume/continue ownership before any spawned submit task can
+        // choose session/new. The reservation and later ensure/load decision are
+        // serialized by the client's lifecycle operation gate.
+        if opts.resume_session.is_some() || opts.continue_session {
+            client.reserve_startup_restore().await;
+        }
         // 4dz. ACP client handle — for panels to send raw requests
         let _ = atoms::ACP_CLIENT_HANDLE.set(std::sync::Arc::new(client.clone()));
         let _submit_handle =
@@ -350,7 +361,7 @@ pub async fn run_kit_fullscreen(
         //     acp_bridge 的 state.active_session_id 保持空值，后续全部
         //     携带真实 session_id 的 ACP 事件均被 session filter 丢弃
         //     → 渲染管线断流，消息区显示为空。
-        {
+        if opts.resume_session.is_none() && !opts.continue_session {
             let client = client.clone();
             tokio::spawn(async move {
                 // 5a. 上送 ui 域命令明细（设计 §88，Phase 3 caps 通道）：必须在
@@ -371,12 +382,13 @@ pub async fn run_kit_fullscreen(
                 if let Err(e) = client.register_ui_commands(&specs).await {
                     tracing::warn!(error = %e, "kit: ui 命令上送注册失败（host 回退兜底明细）");
                 }
-                match client.new_session(&cwd_for_init, None).await {
+                match client.ensure_session(&cwd_for_init, None).await {
                     Ok(session_id) => {
                         tracing::info!(%session_id, "kit: initial session created");
-                        atoms::ACTIVE_SESSION_ID.set(session_id);
-                        atoms::BRIDGE_RESET_COUNTER
-                            .set(atoms::BRIDGE_RESET_COUNTER.get().wrapping_add(1));
+                        debug_assert_eq!(
+                            atoms::ACTIVE_SESSION_ID.state().read().as_str(),
+                            session_id
+                        );
                     }
                     Err(e) => tracing::warn!(error = %e, "kit: initial session creation failed"),
                 }
@@ -384,18 +396,15 @@ pub async fn run_kit_fullscreen(
         }
 
         // 4f. I17-A：CLI -c/-r 会话恢复——在 acp_client + THREAD_LOAD_TX 就绪后
-        //     通过 channel 触发 load_session。spawn 一次性的延迟任务，让
-        //     notifier/bridge 先初始化，再 send（避免 race）。
+        //     启动前已在 client operation gate 建立 restore reservation；异步
+        //     查找目标期间首次 submit 的 ensure 会等待，选定目标后直接走同一
+        //     client gate 的 startup load，不与普通 `/thread` channel 竞争。
         if opts.resume_session.is_some() || opts.continue_session {
-            let thread_load_tx_clone = atoms::THREAD_LOAD_TX.get().cloned();
+            let restore_client = client.clone();
             let thread_store = app.services.thread_store.clone();
             let cwd_for_restore = app.services.cwd.clone();
             let resume_id = opts.resume_session.clone();
             tokio::spawn(async move {
-                let Some(tx) = thread_load_tx_clone else {
-                    tracing::warn!("kit 恢复：THREAD_LOAD_TX 未就绪，跳过");
-                    return;
-                };
                 let thread_id = match resume_id.as_deref() {
                     Some(id) => {
                         tracing::info!(session_id = %id, "-r: 触发 load_session");
@@ -418,10 +427,19 @@ pub async fn run_kit_fullscreen(
                         }
                     }
                 };
-                if let Some(id) = thread_id
-                    && let Err(e) = tx.send(id)
-                {
-                    tracing::warn!(error = %e, "kit 恢复：THREAD_LOAD_TX.send 失败");
+                match thread_id {
+                    Some(id) => {
+                        if let Err(e) = restore_client
+                            .load_startup_session(&id, &cwd_for_restore, None)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "kit 恢复：startup load_session 失败");
+                        }
+                    }
+                    None => {
+                        restore_client.release_startup_restore().await;
+                        tracing::warn!("kit 恢复：没有可恢复 thread，允许首次提交创建会话");
+                    }
                 }
             });
         }

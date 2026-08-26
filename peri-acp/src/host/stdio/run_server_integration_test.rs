@@ -60,7 +60,7 @@ fn make_server_config(
     provider: LlmProvider,
     tmp: &tempfile::TempDir,
 ) -> AcpServerConfig {
-    make_server_config_with(peri_config, provider, tmp, Vec::new(), None)
+    make_server_config_with(peri_config, provider, tmp, Vec::new(), None, None)
 }
 
 /// 同 [`make_server_config`]，另注入 `plugin_lsp_servers`（H1 会话级 LSP 池
@@ -72,6 +72,7 @@ fn make_server_config_with(
     tmp: &tempfile::TempDir,
     lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
     mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
+    task_manager_factory: Option<crate::session::TaskManagerFactory>,
 ) -> AcpServerConfig {
     use std::collections::BTreeMap;
 
@@ -87,15 +88,22 @@ fn make_server_config_with(
         None,
         None,
         None,
-        Some(Arc::new(|| {
-            Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
-                as Arc<dyn peri_acp_types::tasks::TaskManager>
-        })),
+        task_manager_factory.or_else(|| {
+            Some(Arc::new(|| {
+                Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
+                    as Arc<dyn peri_acp_types::tasks::TaskManager>
+            }))
+        }),
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
         Vec::new(),
         Vec::new(),
     );
+    let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
+    let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
+        host_task_owner: Some(host_task_owner),
+        host_task_spawner,
+        mcp_task_owner: Some(Box::new(mcp_task_owner)),
         provider: Arc::new(parking_lot::RwLock::new(provider)),
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
@@ -216,7 +224,7 @@ fn test_config_with_lsp(
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    make_server_config_with(peri_config, provider, tmp, lsp_servers, None)
+    make_server_config_with(peri_config, provider, tmp, lsp_servers, None, None)
 }
 
 /// 带 pending `mcp_pool` 注入的测试配置（MCP 发现预热 smoke：pool 存在但
@@ -231,7 +239,105 @@ fn test_config_with_pending_mcp_pool(tmp: &tempfile::TempDir) -> AcpServerConfig
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let pool: Arc<dyn peri_acp_types::ports::McpPoolPort> =
         Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
-    make_server_config_with(peri_config, provider, tmp, Vec::new(), Some(pool))
+    make_server_config_with(peri_config, provider, tmp, Vec::new(), Some(pool), None)
+}
+
+#[derive(Default)]
+struct RecordingTaskManager {
+    cancel_all_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl peri_acp_types::tasks::TaskManager for RecordingTaskManager {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn set_event_sender(
+        &self,
+        _sender: tokio::sync::mpsc::UnboundedSender<peri_acp_types::tasks::BgRegistryEvent>,
+        _session_id: String,
+    ) {
+    }
+
+    fn active_count(&self) -> usize {
+        0
+    }
+
+    fn register(&self, _request: peri_acp_types::tasks::BgTaskRegistration) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn complete(
+        &self,
+        _task_id: &str,
+        _result: peri_acp_types::event::BackgroundTaskResult,
+    ) -> bool {
+        true
+    }
+
+    fn cancel(&self, _task_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn cancel_all(&self) {
+        self.cancel_all_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn spawn_shell(
+        &self,
+        _command: String,
+        _cwd: String,
+        _timeout_ms: Option<u64>,
+        _on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
+    ) -> Result<peri_acp_types::tasks::BgShellHandle, Box<dyn std::error::Error + Send + Sync>>
+    {
+        Err("recording task manager does not spawn".into())
+    }
+
+    fn finalize_bg_shell(
+        &self,
+        _on_bg_complete: &Option<peri_acp_types::tasks::OnBgCompleteFn>,
+        _task_id: String,
+        _prompt_summary: String,
+        _success: bool,
+        _output: String,
+        _duration_ms: u64,
+        _timed_out: bool,
+    ) {
+    }
+}
+
+struct RecordingLspPool {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Arc<tokio::sync::Notify>,
+    shutdown_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl peri_acp_types::ports::LspPoolPort for RecordingLspPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn shutdown(&self) {
+        self.shutdown_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        self.release.notified().await;
+    }
+}
+
+struct EofTaskDropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for EofTaskDropSignal {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
 }
 
 /// 发送 initialize（id=1）并读取响应，断言 protocolVersion/agentCapabilities。
@@ -395,6 +501,134 @@ async fn test_initialize_and_session_new_over_stdio_transport() {
         .await
         .expect("run_acp_server 应在 stdin EOF 后退出")
         .expect("server task 不应 panic");
+}
+
+#[tokio::test]
+async fn test_transport_eof_closes_sessions_and_drains_host_tasks() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let task_manager = Arc::new(RecordingTaskManager::default());
+    let task_manager_factory: crate::session::TaskManagerFactory = {
+        let task_manager = Arc::clone(&task_manager);
+        Arc::new(move || Arc::clone(&task_manager) as Arc<dyn peri_acp_types::tasks::TaskManager>)
+    };
+    let cfg = make_server_config_with(
+        peri_config,
+        provider,
+        &tmp,
+        Vec::new(),
+        None,
+        Some(task_manager_factory),
+    );
+    let manager = cfg.session_manager.clone();
+    manager
+        .new_session_with_id("manager-only", tmp.path().to_str().unwrap())
+        .await
+        .unwrap();
+
+    let host_shutdown = cfg.host_task_spawner.shutdown_token();
+    let (host_started_tx, host_started_rx) = tokio::sync::oneshot::channel();
+    let (host_dropped_tx, host_dropped_rx) = tokio::sync::oneshot::channel();
+    cfg.host_task_spawner
+        .spawn(
+            crate::host::task_scope::HostTaskOwnerKind::Host,
+            crate::host::task_scope::HostTaskKind::LegacyCancelHook,
+            async move {
+                let _drop_signal = EofTaskDropSignal(Some(host_dropped_tx));
+                let _ = host_started_tx.send(());
+                host_shutdown.cancelled().await;
+            },
+        )
+        .unwrap();
+
+    let local_cancel = tokio_util::sync::CancellationToken::new();
+    let local_cancel_observer = local_cancel.clone();
+    let lsp_release = Arc::new(tokio::sync::Notify::new());
+    let (lsp_entered_tx, lsp_entered_rx) = tokio::sync::oneshot::channel();
+    let lsp = Arc::new(RecordingLspPool {
+        entered: std::sync::Mutex::new(Some(lsp_entered_tx)),
+        release: Arc::clone(&lsp_release),
+        shutdown_calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (transport, mut input, mut output) = duplex_transport();
+    let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::from([
+        (
+            "local-only".to_string(),
+            crate::host::SessionState {
+                session_id: "local-only".to_string(),
+                thread_id: "local-only".to_string(),
+                cwd: tmp.path().to_string_lossy().into_owned(),
+                history: Vec::new(),
+                cancel_token: Some(local_cancel),
+                frozen: None,
+                recall_items: Vec::new(),
+                agent_pool: crate::session::agent_pool::AgentPool::new(),
+                workflow_middleware: None,
+                lsp_pool: Some(Arc::clone(&lsp) as Arc<dyn peri_acp_types::ports::LspPoolPort>),
+                title: None,
+                tags: Vec::new(),
+                continuation_armed: false,
+                continuation_epoch: 0,
+                continuation_in_flight: false,
+                lease: crate::host::lease::WriterLease::acquired("default"),
+            },
+        ),
+    ])));
+    let server_task = tokio::spawn(host::run_acp_server_with_sessions(
+        Arc::new(transport),
+        cfg,
+        sessions.clone(),
+    ));
+
+    host_started_rx.await.unwrap();
+    send_initialize(&mut input, &mut output).await;
+    drop(input);
+    lsp_entered_rx
+        .await
+        .expect("EOF must reach the local-only LSP shutdown");
+
+    host_dropped_rx
+        .await
+        .expect("accepted host task must settle before LSP shutdown");
+    assert!(local_cancel_observer.is_cancelled());
+    assert!(
+        task_manager
+            .cancel_all_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 1,
+        "manager-only TaskManager must receive pre-close cancellation"
+    );
+    assert!(manager.get_session("manager-only").is_none());
+
+    let lock_sessions = Arc::clone(&sessions);
+    let (lock_acquired_tx, lock_acquired_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _guard = lock_sessions.lock().await;
+        let _ = lock_acquired_tx.send(());
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), lock_acquired_rx)
+        .await
+        .expect("SharedSessions must be acquirable while LSP shutdown is awaiting")
+        .unwrap();
+    lsp_release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
+        .await
+        .expect("run_acp_server must finish after controlled LSP release")
+        .expect("server task must not panic");
+
+    assert!(sessions.lock().await.is_empty());
+    assert!(manager.session_ids().is_empty());
+    assert_eq!(
+        lsp.shutdown_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "local-only LSP must be shut down exactly once"
+    );
 }
 
 /// `session/prompt` wire 形态（stdio `PromptRequest`：`prompt` 块数组）在统一

@@ -14,7 +14,7 @@
 //! （可提交输入/取消），观察者只读。策略先行，协议级扩展另立 issue。
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -32,7 +32,7 @@ use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::PluginManagerPort;
 use peri_acp_types::ports::{
-    LspPoolPort, McpPoolPort, SkillsPort, ToolSearchPort, WorkflowMiddlewarePort,
+    LspPoolPort, McpPoolPort, McpTaskOwnerPort, SkillsPort, ToolSearchPort, WorkflowMiddlewarePort,
 };
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -54,6 +54,7 @@ pub mod prompt_handle;
 mod requests;
 pub mod stage_builder;
 pub mod stdio;
+mod task_scope;
 #[cfg(test)]
 #[path = "unify_wire_baseline_test.rs"]
 mod unify_wire_baseline_tests;
@@ -114,6 +115,9 @@ pub(crate) struct SessionState {
 
 /// All cross-session configuration needed by the ACP server.
 pub struct AcpServerConfig {
+    pub(crate) host_task_owner: Option<task_scope::HostTaskOwner>,
+    pub(crate) host_task_spawner: task_scope::HostTaskSpawner,
+    pub(crate) mcp_task_owner: Option<Box<dyn McpTaskOwnerPort>>,
     pub provider: Arc<parking_lot::RwLock<LlmProvider>>,
     pub peri_config: Arc<parking_lot::RwLock<PeriConfig>>,
     pub permission_mode: Arc<SharedPermissionMode>,
@@ -283,6 +287,16 @@ async fn run_acp_server_inner(
     mut cfg: AcpServerConfig,
     sessions: SharedSessions,
 ) {
+    // Keep the sole strong task owner on this stack. The config captured by
+    // tasks contains only its weak spawner.
+    let mut task_owner = cfg
+        .host_task_owner
+        .take()
+        .expect("AcpServerConfig missing HostTaskOwner");
+    let mut mcp_task_owner = cfg
+        .mcp_task_owner
+        .take()
+        .expect("AcpServerConfig missing McpTaskOwner");
     // OAuth 授权事件消费者：host 级事件（无 session 归属）。专用安全通道与
     // legacy TUI 通道分别按 initialize 协商值门控，互不隐式开启。
     let oauth_event_rx = cfg.oauth_event_rx.take();
@@ -290,8 +304,16 @@ async fn run_acp_server_inner(
     if let Some(mut rx) = oauth_event_rx {
         let oauth_transport = Arc::clone(&transport);
         let oauth_sessions = cfg.session_manager.clone();
-        tokio::spawn(async move {
-            while let Some(event) = rx.recv().await {
+        let shutdown = cfg.host_task_spawner.shutdown_token();
+        let _ = cfg.host_task_spawner.spawn(
+            task_scope::HostTaskOwnerKind::Host,
+            task_scope::HostTaskKind::OAuthConsumer,
+            async move {
+            loop {
+                let event = tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    event = rx.recv() => match event { Some(event) => event, None => break },
+                };
                 let caps = oauth_sessions.effective_host_caps();
                 let policy = oauth_delivery_policy(&caps);
                 match event {
@@ -440,14 +462,23 @@ async fn run_acp_server_inner(
     // 内部 continuation 通知通道：executor on_bg_complete 闭包 → scheduler。
     let (cont_tx, cont_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::session::executor::ContinuationRequest>();
-    tokio::spawn(run_continuation_scheduler(
-        cont_rx,
-        sessions.clone(),
-        prompt_locks.clone(),
-        Arc::clone(&cfg),
-        Arc::clone(&transport),
-        cont_tx.clone(),
-    ));
+    let cont_tx = Arc::new(cont_tx);
+    let continuation_spawner = cfg.host_task_spawner.clone();
+    let continuation_shutdown = cfg.host_task_spawner.shutdown_token();
+    let _ = cfg.host_task_spawner.spawn(
+        task_scope::HostTaskOwnerKind::Host,
+        task_scope::HostTaskKind::ContinuationScheduler,
+        run_continuation_scheduler(
+            cont_rx,
+            sessions.clone(),
+            prompt_locks.clone(),
+            Arc::clone(&cfg),
+            Arc::clone(&transport),
+            Arc::downgrade(&cont_tx),
+            continuation_spawner,
+            continuation_shutdown,
+        ),
+    );
 
     while let Some(msg) = transport.recv().await {
         match msg {
@@ -461,23 +492,29 @@ async fn run_acp_server_inner(
                     let prompt_locks = prompt_locks.clone();
                     let cfg = Arc::clone(&cfg);
                     let cont_tx = cont_tx.clone();
-                    tokio::spawn(async move {
-                        let result = dispatch_prompt_turn(
-                            params,
-                            false,
-                            None,
-                            &sessions,
-                            &prompt_locks,
-                            &transport,
-                            &cfg,
-                            &cont_tx,
-                        )
-                        .await;
-                        let _ = transport.send_response(id, result).await;
-                        if !prompt_session_id.is_empty() {
-                            send_session_info_update(transport.as_ref(), &prompt_session_id).await;
-                        }
-                    });
+                    let prompt_spawner = cfg.host_task_spawner.clone();
+                    let _ = prompt_spawner.spawn(
+                        task_scope::HostTaskOwnerKind::Session,
+                        task_scope::HostTaskKind::Prompt,
+                        async move {
+                            let result = dispatch_prompt_turn(
+                                params,
+                                false,
+                                None,
+                                &sessions,
+                                &prompt_locks,
+                                &transport,
+                                &cfg,
+                                &cont_tx,
+                            )
+                            .await;
+                            let _ = transport.send_response(id, result).await;
+                            if !prompt_session_id.is_empty() {
+                                send_session_info_update(transport.as_ref(), &prompt_session_id)
+                                    .await;
+                            }
+                        },
+                    );
                 } else {
                     let mut sessions = sessions.lock().await;
                     let result =
@@ -524,15 +561,73 @@ async fn run_acp_server_inner(
         }
     }
 
-    // ── 宿主退出：优雅关闭所有会话的 LSP 服务器池（H1 shutdown 钩子）──
-    // transport 关闭 = 宿主退出。sessions 即将 drop；每 turn 装配复用的是
-    // 会话级 pool，此处显式 shutdown，避免 LSP 服务器子进程随进程残留。
-    {
+    // Transport EOF is the host's single ownership transaction.
+    task_owner.begin_shutdown();
+    if let Some(pool) = cfg.mcp_pool.as_ref() {
+        pool.begin_shutdown();
+    }
+    mcp_task_owner.begin_shutdown();
+    drop(cont_tx);
+    let (local_ids, mut lsp_pools) = {
         let sessions = sessions.lock().await;
-        for state in sessions.values() {
-            if let Some(pool) = state.lsp_pool.as_ref() {
-                pool.shutdown().await;
+        let mut ids = Vec::with_capacity(sessions.len());
+        let mut pools = Vec::new();
+        for (session_id, state) in sessions.iter() {
+            ids.push(session_id.clone());
+            if let Some(token) = state.cancel_token.as_ref() {
+                token.cancel();
             }
+            if let Some(pool) = state.lsp_pool.as_ref() {
+                pools.push(Arc::clone(pool));
+            }
+        }
+        (ids, pools)
+    };
+    let mut all_ids: BTreeSet<String> = local_ids.into_iter().collect();
+    all_ids.extend(cfg.session_manager.session_ids());
+    for session_id in &all_ids {
+        cfg.session_manager.pre_close_session(session_id);
+    }
+    if let task_scope::HostShutdownReport::Incomplete { unfinished } = task_owner.shutdown().await {
+        tracing::warn!(unfinished, "ACP host task drain incomplete");
+    }
+    let _ = mcp_task_owner.shutdown().await;
+    for session_id in &all_ids {
+        if let Err(error) = cfg.session_manager.close_session(session_id).await {
+            tracing::warn!(session_id = %session_id, error = %error, "session close during host shutdown failed");
+        }
+    }
+    {
+        let mut sessions = sessions.lock().await;
+        for (_, state) in sessions.drain() {
+            if let Some(pool) = state.lsp_pool {
+                lsp_pools.push(pool);
+            }
+        }
+    }
+    prompt_locks.lock().await.clear();
+    let mut unique_lsp = Vec::<Arc<dyn LspPoolPort>>::new();
+    for pool in lsp_pools {
+        if !unique_lsp.iter().any(|known| Arc::ptr_eq(known, &pool)) {
+            unique_lsp.push(pool);
+        }
+    }
+    for pool in unique_lsp {
+        pool.shutdown().await;
+    }
+    if let Some(pool) = cfg.mcp_pool.as_ref() {
+        if let peri_acp_types::ports::McpPoolShutdownReport::Incomplete {
+            settled_services,
+            unfinished_services,
+            failed_services,
+        } = pool.shutdown().await
+        {
+            tracing::warn!(
+                settled_services,
+                unfinished_services,
+                failed_services,
+                "MCP pool service drain incomplete"
+            );
         }
     }
 }
@@ -714,150 +809,154 @@ pub(crate) async fn dispatch_prompt_turn(
         let pred_thread_store = cfg.thread_store.clone();
         let pred_caps_registry = cfg.session_manager.caps_registry();
 
-        tokio::spawn(async move {
-            tracing::debug!("Prediction task started");
-            // 从 session 获取最新历史与当前标题
-            let (history, cwd, current_title) = {
-                let sessions = pred_sessions.lock().await;
-                match sessions.get(&pred_session_id) {
-                    Some(s) => (s.history.clone(), s.cwd.clone(), s.title.clone()),
-                    None => {
-                        tracing::debug!("Prediction: session not found");
-                        return;
+        let _ = cfg.host_task_spawner.spawn(
+            task_scope::HostTaskOwnerKind::Session,
+            task_scope::HostTaskKind::Prediction,
+            async move {
+                tracing::debug!("Prediction task started");
+                // 从 session 获取最新历史与当前标题
+                let (history, cwd, current_title) = {
+                    let sessions = pred_sessions.lock().await;
+                    match sessions.get(&pred_session_id) {
+                        Some(s) => (s.history.clone(), s.cwd.clone(), s.title.clone()),
+                        None => {
+                            tracing::debug!("Prediction: session not found");
+                            return;
+                        }
                     }
+                };
+
+                // 取最近 10 条消息作为上下文（排除 System 消息）
+                let recent: Vec<_> = history
+                    .iter()
+                    .rev()
+                    .filter(|m| !m.is_system())
+                    .take(10)
+                    .cloned()
+                    .collect();
+                let recent: Vec<_> = recent.into_iter().rev().collect();
+
+                if recent.is_empty() {
+                    tracing::debug!("Prediction: no recent messages");
+                    return;
                 }
-            };
+                tracing::debug!(count = recent.len(), "Prediction: got messages");
 
-            // 取最近 10 条消息作为上下文（排除 System 消息）
-            let recent: Vec<_> = history
-                .iter()
-                .rev()
-                .filter(|m| !m.is_system())
-                .take(10)
-                .cloned()
-                .collect();
-            let recent: Vec<_> = recent.into_iter().rev().collect();
+                // 直接复用已构建的 LlmProvider（绕过 from_config）
+                let llm_provider = pred_provider.read().clone();
+                tracing::debug!("Prediction: LLM provider ready");
 
-            if recent.is_empty() {
-                tracing::debug!("Prediction: no recent messages");
-                return;
-            }
-            tracing::debug!(count = recent.len(), "Prediction: got messages");
+                // Facade：agent 构建与执行统一由 peri-acp executor 承担，
+                // TUI 层不再直接构建 Agent（遵守 CLAUDE.md [TRAP]）。
+                // L5：LLM 构造（AgentModelBridge）在协议面完成，执行体只收 ReactLLM。
+                let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> =
+                    Box::new(peri_agent::agent::model_bridge::AgentModelBridge::new(
+                        Arc::from(llm_provider.into_model()),
+                    ));
+                let result = crate::session::executor::execute_prediction(
+                    llm,
+                    recent,
+                    &cwd,
+                    current_title.as_deref(),
+                )
+                .await;
 
-            // 直接复用已构建的 LlmProvider（绕过 from_config）
-            let llm_provider = pred_provider.read().clone();
-            tracing::debug!("Prediction: LLM provider ready");
-
-            // Facade：agent 构建与执行统一由 peri-acp executor 承担，
-            // TUI 层不再直接构建 Agent（遵守 CLAUDE.md [TRAP]）。
-            // L5：LLM 构造（AgentModelBridge）在协议面完成，执行体只收 ReactLLM。
-            let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> =
-                Box::new(peri_agent::agent::model_bridge::AgentModelBridge::new(
-                    Arc::from(llm_provider.into_model()),
-                ));
-            let result = crate::session::executor::execute_prediction(
-                llm,
-                recent,
-                &cwd,
-                current_title.as_deref(),
-            )
-            .await;
-
-            match result {
-                Ok(actions) => {
-                    if actions.is_empty() {
-                        tracing::debug!("Prediction: empty actions");
-                        return;
-                    }
-                    // 元数据动作写入 session 状态；标题变更待持久化并推送
-                    let mut applied_title: Option<String> = None;
-                    {
-                        let mut sessions = pred_sessions.lock().await;
-                        if let Some(state) = sessions.get_mut(&pred_session_id) {
-                            for action in &actions {
-                                match action {
-                                    PredictionAction::SetTitle { title } => {
-                                        let title = title.trim();
-                                        if !title.is_empty() {
-                                            state.title = Some(title.to_string());
-                                            applied_title = Some(title.to_string());
+                match result {
+                    Ok(actions) => {
+                        if actions.is_empty() {
+                            tracing::debug!("Prediction: empty actions");
+                            return;
+                        }
+                        // 元数据动作写入 session 状态；标题变更待持久化并推送
+                        let mut applied_title: Option<String> = None;
+                        {
+                            let mut sessions = pred_sessions.lock().await;
+                            if let Some(state) = sessions.get_mut(&pred_session_id) {
+                                for action in &actions {
+                                    match action {
+                                        PredictionAction::SetTitle { title } => {
+                                            let title = title.trim();
+                                            if !title.is_empty() {
+                                                state.title = Some(title.to_string());
+                                                applied_title = Some(title.to_string());
+                                            }
                                         }
+                                        PredictionAction::AddTag { tag }
+                                            if !state.tags.contains(tag) =>
+                                        {
+                                            state.tags.push(tag.clone());
+                                        }
+                                        _ => {}
                                     }
-                                    PredictionAction::AddTag { tag }
-                                        if !state.tags.contains(tag) =>
-                                    {
-                                        state.tags.push(tag.clone());
-                                    }
-                                    _ => {}
                                 }
                             }
                         }
-                    }
-                    // 标题变更：持久化到 thread store，并推送 session/update
-                    // 供标题栏与外部客户端刷新（与 session/rename 行为一致）
-                    if let Some(title) = applied_title {
-                        if let Err(e) = pred_thread_store
-                            .update_title(&pred_session_id, &title)
-                            .await
-                        {
-                            tracing::warn!(
-                                session_id = %pred_session_id,
-                                error = %e,
-                                "Prediction: failed to persist title"
-                            );
-                        }
-                        notify::send_session_info_update_with_title(
-                            pred_transport.as_ref(),
-                            &pred_session_id,
-                            Some(&title),
-                        )
-                        .await;
-                    }
-                    let caps = pred_caps_registry
-                        .get(&pred_session_id)
-                        .map(|r| r.clone())
-                        .unwrap_or_default();
-                    if caps.prediction {
-                        // text 字段取首个 Placeholder（兼容旧消费方）
-                        let text = actions
-                            .iter()
-                            .find_map(|a| match a {
-                                PredictionAction::Placeholder { text } => Some(text.clone()),
-                                _ => None,
-                            })
-                            .unwrap_or_default();
-                        let actions_json: Vec<serde_json::Value> = actions
-                            .iter()
-                            .filter_map(|a| serde_json::to_value(a).ok())
-                            .collect();
-                        tracing::debug!(
-                            count = actions.len(),
-                            "Prediction ready, sending notification"
-                        );
-                        let _ = pred_transport
-                            .send_notification(
-                                "peri/prediction_ready",
-                                serde_json::json!({
-                                    "sessionId": pred_session_id,
-                                    "text": text,
-                                    "actions": actions_json,
-                                }),
+                        // 标题变更：持久化到 thread store，并推送 session/update
+                        // 供标题栏与外部客户端刷新（与 session/rename 行为一致）
+                        if let Some(title) = applied_title {
+                            if let Err(e) = pred_thread_store
+                                .update_title(&pred_session_id, &title)
+                                .await
+                            {
+                                tracing::warn!(
+                                    session_id = %pred_session_id,
+                                    error = %e,
+                                    "Prediction: failed to persist title"
+                                );
+                            }
+                            notify::send_session_info_update_with_title(
+                                pred_transport.as_ref(),
+                                &pred_session_id,
+                                Some(&title),
                             )
                             .await;
-                    } else {
-                        tracing::debug!(
-                            "Prediction ready but cap not declared, suppressing notification"
-                        );
+                        }
+                        let caps = pred_caps_registry
+                            .get(&pred_session_id)
+                            .map(|r| r.clone())
+                            .unwrap_or_default();
+                        if caps.prediction {
+                            // text 字段取首个 Placeholder（兼容旧消费方）
+                            let text = actions
+                                .iter()
+                                .find_map(|a| match a {
+                                    PredictionAction::Placeholder { text } => Some(text.clone()),
+                                    _ => None,
+                                })
+                                .unwrap_or_default();
+                            let actions_json: Vec<serde_json::Value> = actions
+                                .iter()
+                                .filter_map(|a| serde_json::to_value(a).ok())
+                                .collect();
+                            tracing::debug!(
+                                count = actions.len(),
+                                "Prediction ready, sending notification"
+                            );
+                            let _ = pred_transport
+                                .send_notification(
+                                    "peri/prediction_ready",
+                                    serde_json::json!({
+                                        "sessionId": pred_session_id,
+                                        "text": text,
+                                        "actions": actions_json,
+                                    }),
+                                )
+                                .await;
+                        } else {
+                            tracing::debug!(
+                                "Prediction ready but cap not declared, suppressing notification"
+                            );
+                        }
+                    }
+                    Err(crate::session::executor::PredictionError::Failed(e)) => {
+                        tracing::debug!(error = %e, "Prediction fork failed");
+                    }
+                    Err(crate::session::executor::PredictionError::Timeout) => {
+                        tracing::debug!("Prediction fork timed out (30s)");
                     }
                 }
-                Err(crate::session::executor::PredictionError::Failed(e)) => {
-                    tracing::debug!(error = %e, "Prediction fork failed");
-                }
-                Err(crate::session::executor::PredictionError::Timeout) => {
-                    tracing::debug!("Prediction fork timed out (30s)");
-                }
-            }
-        });
+            },
+        );
     }
 
     // Restore AgentPool back into session (still inside the per-session prompt

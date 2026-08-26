@@ -1,6 +1,6 @@
 # TUI 与 ACP 数据流
 
-> 最后核对：2026-08-07
+> 最后核对：2026-08-25
 
 ## 概述
 
@@ -294,15 +294,17 @@ event_v2         →  `session/update`                    →  AcpNotification �
 
 ### 4.3 交互请求事件 — 标准 ACP 通道（TUI 消费）
 
-> 注：交互类事件走标准 ACP 通道。AskUser 走 `Elicitation`，HITL 走 `AcpNotification::RequestPermission`；rewind 使用 `peri/agent_event` 加 `session/rewind*` RPC。`ContextWarning` 当前没有用户可见的 `budget-warning` 生产路径。
+> 注：交互类事件走标准 ACP 通道。AskUser 走 `Elicitation`，HITL 走 `AcpNotification::RequestPermission`。client pump 先按 method schema 提取 non-empty session identity，再由 `interaction_lifecycle` 的 Stable route 接受并在 forward 前注册 semantic owner；invalid/no-active/stale/deleted 请求直接返回 typed cancel。notifier 只携带 owner、debug 用 RequestId JSON 与 payload，bridge 的 `publish_if_owned` 持有同一 operation gate 完成 final owner/projection check 和所有同步 UI 写入，投递失败则 first-claim BridgeReject。用户 action、prompt/AgentDone、cancel、session transition 与 transport terminal 都竞争同一 owner，因此每个请求最多一个 typed response attempt 和一个 owner-aware local terminal。`new` response→commit 窗口的 ordinary notification 进入容量 64 的 FIFO，commit 后只刷新 exact-target；`PromptLease`/transition/claimed batch Drop 把已拥有的 settlement 交给不保活 transport/notifier 的 worker。headless print 参与 token claim，但不触碰 kit atoms。rewind 使用 `peri/agent_event` 加 `session/rewind*` RPC。`ContextWarning` 当前没有用户可见的 `budget-warning` 生产路径。
+>
+> 启动时 initial 与 first-submit 共用 client gate 内 Stable 重检的 `ensure_session`。resume/continue 在 submit consumer 可达前预留 restore，异步查到目标后在同一 gate load（无目标则释放），所以延迟 startup producer 不能替换首 prompt 的 session；显式 `/clear` 仍无条件 new。
 
 | 事件名 | 方向 | 通道 | TUI Atom / 弹窗 |
 |--------|------|------|----------|
-| `ask-user` | ACP → TUI | ACP `Elicitation` | `ASK_USER_PENDING` + `PanelKind::AskUser` 面板（非弹窗） |
+| `ask-user` | ACP → TUI | ACP `Elicitation` | `ASK_USER_PENDING: Option<PendingInteraction<AskUser>>` + `PanelKind::AskUser` 面板（非弹窗） |
 | `rewind-preview` | ACP → TUI | `peri/agent_event` + `session/rewind*` RPC | `REWIND_PREVIEW` |
 | `oauth-needed` | ACP → TUI | ACP 通知 | `OAUTH_INFO` |
 | `budget-warning` | — | 当前无用户可见生产路径 | — |
-| `hitl-pending` | ACP → TUI | `AcpNotification::RequestPermission` → `HitlPending` | `HITL_PENDING` + `HITL_REQUEST_ID` |
+| `hitl-pending` | ACP → TUI | `AcpNotification::RequestPermission` → composite event | `HITL_PENDING: Option<PendingInteraction<HitlPending>>` + HITL popup |
 | `confirm` | TUI 内部 | AskUser Panel 二次确认 / ThreadBrowser 切线程 | `CONFIRM_PAYLOAD`（第 7 个 popup，PopupKind 共 7 种：Hitl/AskUser/Rewind/OAuth/Confirm/Download/ModelQuickSwitch） |
 
 ### 4.4 Background Tasks 事件

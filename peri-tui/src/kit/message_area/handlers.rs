@@ -579,7 +579,7 @@ pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State
                 }
                 // [Slice 4 §6.8] 焦点在 pending interaction block 上：
                 // Enter 提交当前 option（双轨：响应 channel + 关闭模态层；
-                // InteractionResolved 由消费者发出）；Space 消费但不动作
+                // owner-aware InteractionTerminal 由 client 发出）；Space 消费但不动作
                 // （防止泄漏给输入区插入空格）。提交后退出 entry 焦点。
                 if let Some(block) = pending_interaction_of(&snapshot.items[idx]) {
                     if !next_is_preview {

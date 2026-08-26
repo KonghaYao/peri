@@ -562,7 +562,11 @@ where
                     status: StageStatus::Error,
                     duration_ms: start.elapsed().as_millis() as u64,
                 });
-            return Err(LoopResult::Error(e));
+            return Err(if matches!(&e, crate::error::AgentError::Interrupted) {
+                LoopResult::Interrupted
+            } else {
+                LoopResult::Error(e)
+            });
         }
     };
     Ok(out)
@@ -575,17 +579,15 @@ where
 /// 返回循环最终结果（Completed / Interrupted / Error）。
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut loop_state = LoopState::default();
+    let mut semantic_iterations = 0usize;
     // await_wake 在主 agent idle 时启用，反复等待异步事件续跑（cron/bg/workflow）。
     // idle_should_wait probe 检 active_count>0，保证无挂起任务时不会永久阻塞。
 
-    for _ in 0..max_iterations {
+    loop {
         // 检查 cancel
         if context.session.turn.is_cancelled() {
             return LoopResult::Interrupted;
         }
-
-        // 推进 step
-        context.session.turn.advance_step();
 
         // ── Receive（循环入口，也是退出判断点）──
         let receive_out = match run_stage(&context, Stage::Receive, || async {
@@ -670,6 +672,22 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             return LoopResult::Completed;
         }
 
+        // Receive、队列竞态重试与 idle wake 都不消耗语义迭代预算。只有确实需要
+        // 进入 Compact → Reason → Act 时才检查并推进预算；因此最后一轮 Act 提交
+        // final answer 后，下一次 Receive 仍可作为唯一正常退出入口。
+        if semantic_iterations >= max_iterations {
+            tracing::warn!(
+                max_iterations,
+                semantic_iterations,
+                "ReAct v2 循环达到最大语义迭代次数"
+            );
+            return LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(
+                max_iterations,
+            ));
+        }
+        semantic_iterations += 1;
+        context.session.turn.advance_step();
+
         // ── before_agent hooks（首次 Receive 后执行一次）──
         // RCRA 下 Receive 是唯一队列消费点，消息已通过 drain_all() 写入 transcript，
         // 此时 before_agent 钩子（SkillPreloadMiddleware / AtMentionMiddleware 等）
@@ -729,12 +747,6 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         // RCRA：无论 has_tool_calls 是 true 或 false，统一回 Receive 开始新一轮迭代
         continue;
     }
-
-    // 达到最大迭代次数
-    tracing::warn!(max_iterations, "ReAct v2 循环达到最大迭代次数");
-    LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(
-        max_iterations,
-    ))
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

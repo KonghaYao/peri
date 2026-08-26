@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::acp_client::AcpTuiClient;
+use crate::acp_client::InteractionOwner;
 use crate::i18n;
 
 /// AskUser 用户操作——由 AskUserPopup 在 Enter/Esc 时通过 ASK_USER_RESPONSE_TX 发送。
@@ -29,13 +30,20 @@ pub enum AskUserResponseAction {
     Submit {
         /// `serde_json::to_string(&RequestId)` 序列化结果
         request_id_str: String,
+        owner: InteractionOwner,
         /// 答案 map，key = question_id，value = ElicitationContentValue 的 JSON
         answers: Value,
     },
     /// 用户取消（Esc）
-    Cancel { request_id_str: String },
+    Cancel {
+        owner: InteractionOwner,
+        request_id_str: String,
+    },
     /// 用户拒绝回答（ESC → 确认弹窗 → 确认拒绝）
-    Reject { request_id_str: String },
+    Reject {
+        owner: InteractionOwner,
+        request_id_str: String,
+    },
 }
 
 /// 启动 ask_user 响应消费者后台任务。
@@ -63,14 +71,14 @@ pub fn spawn_ask_user_consumer(
                             info!("kit ask_user_consumer: ASK_USER_RESPONSE_TX dropped, exiting");
                             break;
                         }
-                        Some(AskUserResponseAction::Cancel { request_id_str }) => {
-                            handle_cancel(&acp_client, &request_id_str).await;
+                        Some(AskUserResponseAction::Cancel { owner, request_id_str }) => {
+                            handle_cancel(&acp_client, &owner, &request_id_str).await;
                         }
-                        Some(AskUserResponseAction::Submit { request_id_str, answers }) => {
-                            handle_submit(&acp_client, &request_id_str, &answers).await;
+                        Some(AskUserResponseAction::Submit { owner, request_id_str, answers }) => {
+                            handle_submit(&acp_client, &owner, &request_id_str, &answers).await;
                         }
-                        Some(AskUserResponseAction::Reject { request_id_str }) => {
-                            handle_reject(&acp_client, &request_id_str).await;
+                        Some(AskUserResponseAction::Reject { owner, request_id_str }) => {
+                            handle_reject(&acp_client, &owner, &request_id_str).await;
                         }
                     }
                 }
@@ -80,18 +88,15 @@ pub fn spawn_ask_user_consumer(
 }
 
 /// 处理提交：构造 Accept response JSON，调用 send_response。
-/// RPC 成功后发送 `InteractionResolved` 本地事件回写 inline interaction block
-/// （§6.8；失败保持 pending）。result = 首个非空答案（inline 快速回答的
-/// 选中 label），无答案时回退 `Answered`。
-async fn handle_submit(acp_client: &AcpTuiClient, request_id_str: &str, answers: &Value) {
-    let id = match serde_json::from_str::<peri_acp::transport::types::RequestId>(request_id_str) {
-        Ok(id) => id,
-        Err(e) => {
-            error!(error = %e, request_id_str, "kit ask_user_consumer: failed to deserialize RequestId");
-            return;
-        }
-    };
-
+/// Client 先 claim owner；成功或传输失败都会 owner-aware terminalize。
+/// 失败是 `ResponseTransportFailed` 终态，不恢复 pending、不重试。result =
+/// 首个非空答案（inline 快速回答的选中 label），无答案时回退 `Answered`。
+async fn handle_submit(
+    acp_client: &AcpTuiClient,
+    owner: &InteractionOwner,
+    request_id_str: &str,
+    answers: &Value,
+) {
     let response = json!({
         "action": "accept",
         "content": answers
@@ -99,10 +104,6 @@ async fn handle_submit(acp_client: &AcpTuiClient, request_id_str: &str, answers:
 
     info!(request_id = %request_id_str, "kit ask_user_consumer: sending Accept response");
 
-    if let Err(e) = acp_client.send_response(id, Ok(response)).await {
-        error!(error = %e, "kit ask_user_consumer: send_response failed");
-        return;
-    }
     let result = answers
         .as_object()
         .and_then(|m| {
@@ -112,59 +113,50 @@ async fn handle_submit(acp_client: &AcpTuiClient, request_id_str: &str, answers:
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| i18n::tr("render-interaction-result-answered"));
-    crate::kit::acp_events::emit_interaction_resolved(request_id_str, &result);
+    if let Err(e) = acp_client
+        .respond_interaction(owner, response, result)
+        .await
+    {
+        error!(error = %e, "kit ask_user_consumer: send_response failed");
+    }
 }
 
 /// 处理取消：构造 Cancel response JSON，调用 send_response。
-/// RPC 成功后发送 `InteractionResolved` 本地事件回写 inline interaction block
-/// （§6.8；失败保持 pending）。
-async fn handle_cancel(acp_client: &AcpTuiClient, request_id_str: &str) {
-    let id = match serde_json::from_str::<peri_acp::transport::types::RequestId>(request_id_str) {
-        Ok(id) => id,
-        Err(e) => {
-            error!(error = %e, request_id_str, "kit ask_user_consumer: failed to deserialize RequestId (cancel)");
-            return;
-        }
-    };
-
+/// 成功或传输失败都 owner-aware terminalize；失败不恢复 pending、不重试。
+async fn handle_cancel(acp_client: &AcpTuiClient, owner: &InteractionOwner, request_id_str: &str) {
     let response = json!({"action": "cancel"});
 
     info!(request_id = %request_id_str, "kit ask_user_consumer: sending Cancel response");
 
-    if let Err(e) = acp_client.send_response(id, Ok(response)).await {
+    if let Err(e) = acp_client
+        .respond_interaction(
+            owner,
+            response,
+            i18n::tr("render-interaction-result-rejected"),
+        )
+        .await
+    {
         error!(error = %e, "kit ask_user_consumer: send_response (cancel) failed");
-        return;
     }
-    crate::kit::acp_events::emit_interaction_resolved(
-        request_id_str,
-        &i18n::tr("render-interaction-result-rejected"),
-    );
 }
 
 /// 处理拒绝：发送 decline response，告诉 Agent 用户明确拒绝了回答。
-/// RPC 成功后发送 `InteractionResolved` 本地事件回写 inline interaction block
-/// （§6.8；失败保持 pending）。
-async fn handle_reject(acp_client: &AcpTuiClient, request_id_str: &str) {
-    let id = match serde_json::from_str::<peri_acp::transport::types::RequestId>(request_id_str) {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!(error = %e, request_id_str, "kit ask_user_consumer: failed to deserialize RequestId (reject)");
-            return;
-        }
-    };
-
+/// 成功或传输失败都 owner-aware terminalize；失败不恢复 pending、不重试。
+async fn handle_reject(acp_client: &AcpTuiClient, owner: &InteractionOwner, request_id_str: &str) {
     let response = serde_json::json!({"action": "decline"});
 
     tracing::info!(request_id = %request_id_str, "kit ask_user_consumer: sending Reject/Decline response");
 
-    if let Err(e) = acp_client.send_response(id, Ok(response)).await {
+    if let Err(e) = acp_client
+        .respond_interaction(
+            owner,
+            response,
+            i18n::tr("render-interaction-result-rejected"),
+        )
+        .await
+    {
         tracing::error!(error = %e, "kit ask_user_consumer: send_response (reject) failed");
-        return;
     }
-    crate::kit::acp_events::emit_interaction_resolved(
-        request_id_str,
-        &i18n::tr("render-interaction-result-rejected"),
-    );
 }
 
 #[cfg(test)]

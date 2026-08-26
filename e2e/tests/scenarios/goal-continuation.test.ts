@@ -7,8 +7,7 @@
  * prompt 来源: prompts/ai-text-in-streaming.md
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { launchPeri, sendPrompt, takePeriSnapshot, waitForStableScreen } from "../../helpers/peri.js";
-import { judge } from "../../helpers/judge.js";
+import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
 import type { TmuxTester } from "tui-tester";
 
 describe("scenarios: goal continuation", () => {
@@ -26,31 +25,36 @@ describe("scenarios: goal continuation", () => {
     async () => {
       tester = await launchPeri();
 
-      // 发送 goal 指令：agent 需要数到 10
-      // goal 机制会在每个 turn 末尾注入续跑信号，直到 goal 完成
-      const baseScreen = await tester.getScreenText();
+      // 使用短且可观测的两阶段协议：第一阶段保持 goal active，让 middleware
+      // 自动注入续跑；第二阶段用 block 终止 fixture，避免把本用例耦合到独立的
+      // auxiliary verifier JSON 兼容性。这里验证的是 continuation，不是 verifier。
       await sendPrompt(
         tester,
-        "我们来测试 goal 工具， 你要数到 10 ，但是中间中断， 让 goal 唤醒你",
+        "这是 Goal continuation E2E。必须先调用 goal(create)，objective 为分两阶段完成计数。" +
+        "当前第一阶段只输出 GOAL_STAGE_1= 后接一至五的阿拉伯数字（逗号分隔），然后结束当前回复，保持 goal active，绝对不要继续第二阶段。" +
+        "被 goal system reminder 自动唤醒后，第二阶段只输出 GOAL_STAGE_2= 后接六至十的阿拉伯数字（逗号分隔），" +
+        "再调用 goal(block)，reason=e2e continuation verified。最后把 GOAL_CONTINUATION、_E2E_、DONE 三段连起来单独输出。",
       );
 
-      // Goal 可能跨多个 turn 自动续跑；以提交前屏幕为基线，等待最终完整屏幕稳定。
-      await waitForStableScreen(tester, 180_000, baseScreen);
+      // 最终 marker 未以完整字符串出现在 prompt 中，因此不会被输入回显提前命中。
+      await tester.waitFor(
+        (screen) =>
+          screen.includes("GOAL_CONTINUATION_E2E_DONE") &&
+          /(?:Brewed for|处理耗时)/.test(screen),
+        {
+          timeout: 300_000,
+          interval: 1000,
+          message: "等待 Goal 自动续跑后的终态 marker 超时",
+        },
+      );
 
       const capture = await takePeriSnapshot(tester, "goal-continuation-complete");
 
       expect(capture.text.length).toBeGreaterThan(100);
-
-      // LLM judge
-      const result = await judge({
-        ansiRaw: capture.raw,
-        criteria: [
-          "消息区应最终包含数字 10（或表明计数到达了 10）",
-          "agent 应完成了 counting 任务，而非中途放弃",
-        ],
-      });
-      console.log("Judge:", JSON.stringify(result, null, 2));
-      expect(result.pass).toBe(true);
+      expect(capture.text).toMatch(/GOAL_STAGE_2=\s*6,7,8,9,10/);
+      expect(capture.text).toContain("GOAL_CONTINUATION_E2E_DONE");
+      expect(capture.text).toMatch(/System Reminder|system-reminder/);
+      expect(capture.text).toMatch(/ExecuteExtraTool action: block|Goal marked as blocked/);
     },
   );
 });

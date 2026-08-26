@@ -1,6 +1,6 @@
 # peri-acp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-22（stdio 命令边界 / 事件投影 / fatal prompt 边界）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-25（frozen snapshot stage bridge）
 > 依据：peri-acp/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/peri-acp-protocol.md、源码
 
 ## 架构速览
@@ -19,13 +19,14 @@
 | 改事件发射/forwarder | `src/event/forwarder.rs` | `spawn_eventbus_forwarder(handles, on_event, bridge)`（:78） | 消费 v2 EventBus 三通道（render/state/observe），**biased select：render 先于 state**（防 partial 污染）；Langfuse `LangfuseBridge` 在协议化前分支消费（:101）；observe Lagged 容错；映射后经 `on_event(UnstampedEvent, ExecutorEvent)` 送 event_sink |
 | 改 Hub/Web 事件投影 | `src/event/activity.rs` | `map_agent_activity(&ExecutorEvent) -> Option<AgentActivityWire>`（:93）；`AgentActivityKind`（:19）/`AgentActivityStatus`（:36） | `peri.agentActivity` 安全摘要面：allowlist 字段 + `safe_label`/`truncate_utf8`/`hash_correlation` 清洗；禁止携带消息/路径/输出/错误正文；cap 未双向协商不投影 |
 | 改 provider/模型/配置 | `src/provider/mod.rs` + `config.rs` + `store.rs` | `LlmProvider` enum（mod.rs:23，OpenAi/Anthropic）；`from_config`（:118）/`from_config_for_alias`（:125）/`into_model`（:246）；`PeriConfig`（config.rs:13）；`ConfigSource`（store.rs:78，读写路径唯一事实源，`load_at` :92 / `save` :199） | 模型切换走 `session/set_config_option` 的 `configId="model"` 分支（requests/config_options.rs:62，`handle_set_config_option` :44）；`session/update_config` 校验 providers 非空 + profile→provider 引用；`AgentPool::has_valid_cache`（session/agent_pool.rs:64）按 provider 指纹复用 LLM 实例 |
-| 改 transport（新增传输） | `src/transport/mod.rs` + `mpsc.rs` + `stdio.rs` + `router.rs` | `AcpTransport` trait（mod.rs:24，send_request/send_notification/recv/send_response）；`mpsc_transport_pair()`（mpsc.rs:237）；`RequestRouter`（router.rs:25，`dispatch` :64）；`StdioTransport::from_reader_writer`（stdio.rs:90，可注入 reader/writer 供测试） | router 只匹配 `RequestId::Number` 的 pending 请求，String id 走 unmatched 转发路径；transport 只做帧编解码，不分发普通业务语义；唯一 legacy 例外是 stdio pump 精确拦截非 JSON-RPC `{"type":"cancel"}` 行，调用无 sessionId 的全 session cancel hook，且不产生 `IncomingMessage`，标准 `session/cancel` 仍走统一 host。TUI 走 mpsc、IDE 走 `transport/stdio.rs`（`StdioTransport`，JSON-RPC 2.0 newline-delimited）。**想改 stdio 帧行为/pump 语义** → `transport/stdio_test.rs`（集成测试：解析三态/id 配对/并发乱序/EOF/失败语义/域外 id 拒绝/legacy cancel 基线）；**想对照 wire 基线** → `host/unify_wire_baseline_test.rs`（批 0 建立、统一后作回归基线，见 docs/design/acp-host-unify.md） |
+| 改 transport（新增传输） | `src/transport/mod.rs` + `mpsc.rs` + `stdio.rs` + `router.rs` | `AcpTransport` trait；`mpsc_transport_pair()`；`RequestRouter::{register,dispatch,close,wait_closed}`；`PendingRequest`；`StdioTransport::from_reader_writer` | router 以 owned pending handle 统一线性化 response、caller cancellation 与 terminal close，数字 ID 在正数域回绕并以 owner identity 防 stale handle 误删；终止以稳定 `Transport closed` 结算当前/后续请求，连接静默仍无隐式 timeout。MPSC 任一 pump/channel 关闭终止逻辑 pair，并保留已转发 incoming queue；stdio reader EOF/error 与所有 writer 路径汇入同一 terminal 状态。String response id 仍走 unmatched 转发；legacy `{"type":"cancel"}` 仍只在 stdio pump 精确拦截。契约：ARC-TRANSPORT-001；测试：`router_test.rs`、`mpsc_test.rs`、`stdio_test.rs`。 |
+| 改 host 后台任务 / EOF 收口 | `src/host/task_scope.rs` + `src/host/mod.rs` + `src/host/stdio/mod.rs` + `src/session/mod.rs`；跨层 owner 契约 `peri-acp-types/src/ports.rs` | `HostTaskOwner::{begin_shutdown,shutdown}`；`HostTaskSpawner::spawn`；`McpTaskOwnerPort`；`SessionManager::{pre_close_session,session_ids}` | non-Clone owner 与 weak spawner 分离；ACP config 只持 boxed `McpTaskOwnerPort`，不得直接 import middlewares concrete owner。EOF 以 local + manager session ID 并集执行 pre-close/close，cooperative grace 后 abort/drain，LSP/MCP 全在 session 锁外关闭；host 或 MCP service report 超时均返回 `Incomplete` 并保持 Closing。契约 ARC-HOST-SHUTDOWN-001 |
 | 改 prompt 组装（system prompt） | `src/prompt/mod.rs` + `prompts/sections/*.md` | `PromptTemplate::render`（:342）；`PromptFeatures::detect`（:42）；`PromptEnv::with_frozen_date`（:104） | render 按 `PromptFeatures` 门控 section（git repo 检测等）；frozen date 在会话创建时注入，禁止中途重读（ARC-FROZEN-001）；`format_available_agents`（:409） |
-| 改 HITL/AskUser 交互 | `src/broker/transport_broker.rs`（TUI/stdio 统一 broker，批 3 后无第二实现） | `AcpTransportBroker`（:37）`impl UserInteractionBroker`（:69，`request` :93）；`with_auto_approve`（:56）/`with_timeout`（:62）；`parse_ask_user_timeout`（:74）/`ask_user_timeout`（:87，批 4 恢复提问超时兜底） | 审批逐 item 发 `session/request_permission` RPC（仅 allow_once/reject_once 两选项）；问题聚合为单个 `elicitation/create` form；传输失败默认 Reject（防误放行）；提问超时兜底：统一构造点读 env `PERI_ASK_USER_TIMEOUT_SECS`（缺失/非法 → 默认 300s，`0` → 不超时） |
+| 改 HITL/AskUser 交互 | `src/broker/transport_broker.rs`（TUI/stdio 统一 broker，批 3 后无第二实现） | `AcpTransportBroker`、`impl UserInteractionBroker`（`request` 是完整转发 context 的串行化点）；`with_auto_approve` / `with_timeout`；`parse_ask_user_timeout` / `ask_user_timeout` | 同一 broker 实例的转发 Approval/Questions 共享 capacity=1 异步门，多 item Approval 不可被 Questions 插入；AutoApprove 锁前本地返回。审批逐 item 发 `session/request_permission` RPC（仅 allow_once/reject_once 两选项），问题聚合为单个 `elicitation/create` form；传输失败默认 Reject（防误放行）；提问超时兜底：统一构造点读 env `PERI_ASK_USER_TIMEOUT_SECS`（缺失/非法 → 默认 300s，`0` → 不超时） |
 | 改命令路由/内置命令 | `src/session/command/mod.rs` + `src/dispatch/commands.rs` + `src/host/prompt.rs` + `src/host/notify.rs` | `register_builtins`（command/mod.rs:124，compact/clear/rewind/LoopPlaceholder）；`register_ui_entries`（commands.rs:73）/`ui_route_entries`（:38）；`stdio_filters_command`；`send_available_commands_update` | 注册顺序 = 内置 → 本地 skills → 插件（`AcpServerConfig::plugin_command_entries`）→ 动态注入；stdio 部署设置 `stdio_command_filter=true`：`clear`/`rewind`（含 alias）既不出现在 available commands，也不被 slash command 拦截，而是 fall-through 作为普通 prompt 进入 agent；TUI/print 保持命令行为，`session/rewind*` RPC 不受影响；`session/command/compact/pipeline.rs` **仅 re-export** `peri_agent::session::exec::compact_pipeline::execute_compact` |
 | 改 cancel / continuation 链路 | `src/session/mod.rs` + `src/host/continuation.rs` | `SessionManager::cancel_session`（:400，过渡路径）/`cancel_all_agents`（:771）/`cancel_cascade_children_for`（:753）；`cancel_arms_continuation`（continuation.rs:66）；`run_continuation_scheduler`（:111） | 按 (session_id, turn_id, attempt_id) 三元组定位，clear_queue 默认 false；cancel 置位 `continuation_armed`（epoch 代际校验防过期执行，`continuation_still_valid` :89）；cancel > 续跑 > promote > retry 优先级由 Agent 判定；契约 ARC-CANCEL-001 |
 | 改 caps 门控 | `src/session/mod.rs` | `set_pending_caps`（:436，initialize 暂存）/`consume_pending_caps`（:469，session/new 消费）/`ensure_session_caps`（:506）/`effective_host_caps`（:455） | 发送扩展事件前按该 session 的 caps 门控；cap 未双向协商不得投影；事件改动必须覆盖 caps 门控层 |
-| 改装配/中间件链/部署 | `src/host/assemble.rs` + `src/host/stage_builder.rs` | `assemble_server_config(HostAssemblyInput)`（:136）；`assemble_hook_groups`（:60）；`build_stage_context`（stage_builder.rs:75）；`build_session_manager`（:93） | 链序事实源在 `peri-agent/src/session/factory.rs` 的 `production_blueprint`（ARC-MIDDLEWARE-001），ACP 只构造装配上下文；`AcpServerConfig`（host/mod.rs:111）是跨 session 配置聚合面 |
+| 改装配/中间件链/部署 | `src/host/assemble.rs` + `src/host/stage_builder.rs` | `assemble_server_config(HostAssemblyInput)`；`assemble_hook_groups`；`build_stage_context`；`build_session_manager` | ACP stage bridge 只转发 `FrozenSessionData`，language/MetaHarness/date/prompt projection 均从该 snapshot 派生；链序事实源仍是 Agent 层 `production_blueprint`（ARC-MIDDLEWARE-001） |
 | 改 rewind | `src/dispatch/rewind.rs` + `src/session/command/rewind.rs` + `src/host/prompt.rs` | `rewind_preview`（:52）；`rewind_execute`（:215）；`rewind_candidates`（rewind_candidates.rs）；`stdio_filters_command` | `session/rewind*` RPC 仅在双向协商 `peri.rewind` 后可用：preview 返回有界 project-relative 文件影响 + 一次性指纹，execute 前重算历史，指纹缺失/过期拒绝；统一宿主注册使 stdio/TUI 都可调用 RPC（cap 未协商时 -32601）。另有部署差异：stdio 的 slash `/rewind`（及 alias）从命令投影隐藏并 fall-through 进 agent，TUI/print 仍执行内置命令 |
 
 ## 子系统
@@ -74,9 +75,9 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 传输 trait | transport/mod.rs | `AcpTransport`（:24） |
-| mpsc 实现 | transport/mpsc.rs | `MpscClientTransport`（:63）/`MpscServerTransport`（:147）/`mpsc_transport_pair`（:237） |
-| stdio 实现 | transport/stdio.rs | 帧编解码 + pump（含 legacy `type:cancel` 精确行拦截钩子：无 sessionId、全 session cancel、消费后不入统一 host；与标准 `session/cancel` 并存）及入站 id 域校验；`StdioTransport::from_reader_writer`（:90，可注入 reader/writer）；集成测试 `transport/stdio_test.rs`（批 0：解析三态/id 配对/并发乱序/EOF/失败语义；批 4：域外 id 拒绝；legacy cancel：hook/无 hook 均不中断 pump） |
-| 请求-响应匹配 | transport/router.rs | `RequestRouter`（:25，仅匹配 Number 型 RequestId） |
+| mpsc 实现 | transport/mpsc.rs | `spawn_pump` 对任一方向关闭执行 pair 级 terminal；`send_or_close` 统一 outbound failure；`mpsc_transport_pair` 共享 router/ID 空间 |
+| stdio 实现 | transport/stdio.rs | pump 显式处理 EOF/read error 并观察 router close；`write_envelope` 让 writer mutex/write/flush 全程竞速 terminal；legacy cancel 与入站 id 域校验保持不变 |
+| 请求-响应匹配 | transport/router.rs | `RequestRouter` 原子持有 pending/terminal 状态；`PendingRequest` Drop 同步按 owner identity 注销；`CancellationToken` 提供 lost-wake-safe close 观察 |
 
 ### src/dispatch/（共享业务纯函数）
 
@@ -91,7 +92,7 @@
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 交互 broker | broker/transport_broker.rs | `AcpTransportBroker`（:26，`request` :42，Approval→RequestPermission、Questions→elicitation/create） |
+| 交互 broker | broker/transport_broker.rs | `AcpTransportBroker::request`：同实例内完整 transport-forwarded Approval/Questions 共用异步 gate；AutoApprove 绕过；Approval→RequestPermission、Questions→elicitation/create |
 
 ### src/host/（部署单元 = 装配面）
 
@@ -102,9 +103,10 @@
 | notification 处理 | host/notify.rs | `handle_notification`（:28）/`extract_session_id`（:153）；通知 wire 基线 `host/unify_wire_baseline_test.rs`（批 0 建立、统一后回归基线：发射面 payload 与 schema typed `SessionNotification` 序列化逐字段一致，见 docs/design/acp-host-unify.md） |
 | prompt 执行体 | host/prompt.rs | `run_prompt`（:35）；`take_recall_for_turn`（:763）；`build_compact_hooks`（:776） |
 | 续跑调度 | host/continuation.rs | `run_continuation_scheduler`（:111） |
+| Host 任务所有权 | host/task_scope.rs | `HostTaskOwner` / `HostTaskSpawner`；生产 timeout driver + 测试 controlled phase driver |
 | writer lease | host/lease.rs | `WriterLease`（:20，多读者单 writer） |
 | 装配 | host/assemble.rs | `assemble_server_config`（:136） |
-| stage 构建 | host/stage_builder.rs | `build_stage_context`（:75） |
+| stage 构建 | host/stage_builder.rs | `build_stage_context`：消费单一 `FrozenSessionData`，派生 frozen language/MetaHarness/date 与 Agent 装配输入，禁止从当轮 config 建第二事实源 |
 | workflow 薄壳 | host/workflow_agent.rs | `create_session_workflow_middleware`（:192，装配经 `WorkflowMiddlewareFactory` 端口） |
 | stdio 部署 | host/stdio/ | `run_acp_stdio`（mod.rs:39，`StdioInput` → `assemble_stdio_config` → `run_acp_server_with_sessions`，业务处理走统一宿主）；集成测试 `run_server_integration_test.rs`（initialize → session/new → 通知 wire 链路） |
 
@@ -117,6 +119,8 @@
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）
 
 - ARC-BOUNDARY-001：TUI 交互主路径经 ACP transport，不得直驱 Agent 运行时；ACP 仅协议化薄壳 + 装配面宿主
+- ARC-TRANSPORT-001：stdio/MPSC terminal 结算当前与后续请求；response、caller cancellation、close 对 pending 至多生效一次；连接静默无隐式 timeout
+- ARC-HOST-SHUTDOWN-001：host/MCP 任务的 non-Clone deployment owner、weak spawner、EOF 会话并集收口与锁外 pool close 契约
 - ARC-CANCEL-001：cancel 三元组定位（`CancelRequest` 事实源 `peri-acp-types::identity`），幂等与终态归 Agent 层；`SessionManager::cancel_session` 为过渡路径
 - ARC-EVENT-001：事件链路单事实源 Agent 发射（v2 EventBus）→ ACP 映射/转发（`peri-acp/src/event/`）→ 客户端；禁止 v1 中间态与第二套投递
 - ARC-FROZEN-001：frozen 数据会话内不可漂移（`build_frozen_data` 会话创建时构建）

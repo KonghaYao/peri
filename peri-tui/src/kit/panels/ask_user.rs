@@ -19,10 +19,9 @@ use ratatui_kit::{
     },
 };
 
+use crate::kit::acp_types::PendingInteraction;
 use crate::kit::ask_user_action::AskUserResponseAction;
-use crate::kit::atoms::{
-    ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, LANG_VERSION,
-};
+use crate::kit::atoms::{ASK_USER_PENDING, ASK_USER_RESPONSE_TX, LANG_VERSION};
 use crate::kit::list_nav::{
     ListNavAction, classify_list_nav, cycle_next, cycle_previous, next_selection,
     previous_selection,
@@ -37,13 +36,42 @@ use unicode_width::UnicodeWidthStr;
 /// 自定义文本输入的视口行数上限
 const TYPING_VIEWPORT_ROWS: usize = 3;
 
+#[allow(clippy::too_many_arguments)]
+fn reset_for_owner_change(
+    session_fingerprint: &mut Vec<String>,
+    interaction: Option<&PendingInteraction<AskUser>>,
+    question_count: usize,
+    focused: &mut usize,
+    answers: &mut Vec<Vec<usize>>,
+    focused_option: &mut usize,
+    is_typing: &mut bool,
+    typing_state: &mut TextAreaState,
+    custom_answers: &mut Vec<Option<String>>,
+    scroll: &mut ScrollViewState,
+) -> bool {
+    let current_fingerprint = interaction_fingerprint(interaction);
+    if *session_fingerprint == current_fingerprint {
+        return false;
+    }
+    *focused = 0;
+    *answers = vec![vec![]; question_count];
+    *focused_option = 0;
+    *is_typing = false;
+    *typing_state = TextAreaState::default();
+    *custom_answers = vec![None; question_count];
+    *scroll = ScrollViewState::default();
+    *session_fingerprint = current_fingerprint;
+    true
+}
+
 #[component]
 pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let pending_store = hooks.use_atom(&ASK_USER_PENDING);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
     let sv = hooks.use_state(ScrollViewState::default);
-    let pending: Option<AskUser> = pending_store.read().clone();
+    let interaction = pending_store.read().clone();
+    let pending: Option<AskUser> = interaction.as_ref().map(|p| p.payload.clone());
     let _ = pending_store;
     let _ = hooks.use_atom(&LANG_VERSION);
     // 动态换行宽度：跟随终端实际宽度，避免宽终端下内容被压缩在 80 列内
@@ -67,21 +95,26 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let question_count = pending.as_ref().map(|q| q.questions.len()).unwrap_or(0);
 
-    let current_fingerprint: Vec<String> = pending
-        .as_ref()
-        .map(|p| p.questions.iter().map(|q| q.id.clone()).collect())
-        .unwrap_or_default();
-    if *session_fingerprint.read() != current_fingerprint {
-        *focused.write() = 0;
-        *answers.write() = vec![vec![]; question_count];
-        *focused_option.write() = 0;
-        *is_typing.write() = false;
-        *typing_state.write() = TextAreaState::default();
-        *custom_answers.write() = vec![None; question_count];
-        *session_fingerprint.write() = current_fingerprint;
+    // State::write 会发布变更通知。只有 owner 真正变化时才取得写 guard；否则
+    // 每次 render 都会再次唤醒组件树，形成热重绘并饿死终端 EventStream。
+    let next_fingerprint = interaction_fingerprint(interaction.as_ref());
+    if *session_fingerprint.read() != next_fingerprint {
+        reset_for_owner_change(
+            &mut session_fingerprint.write(),
+            interaction.as_ref(),
+            question_count,
+            &mut focused.write(),
+            &mut answers.write(),
+            &mut focused_option.write(),
+            &mut is_typing.write(),
+            &mut typing_state.write(),
+            &mut custom_answers.write(),
+            &mut sv.write(),
+        );
     }
 
     let pending_for_closure = pending.clone();
+    let interaction_for_closure = interaction.clone();
 
     // 面板绘制区域（上一帧）——鼠标点击行号反推
     let area;
@@ -513,27 +546,32 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             &answers_snapshot,
                             &custom_snapshot,
                         );
-                        if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                        if let Some(snapshot) = interaction_for_closure.as_ref()
                             && let Some(tx) = ASK_USER_RESPONSE_TX.get()
                         {
                             let _ = tx.send(AskUserResponseAction::Submit {
-                                request_id_str: id_str,
+                                owner: snapshot.owner.clone(),
+                                request_id_str: snapshot.request_id_json.clone(),
                                 answers: answers_map,
                             });
+                            panel_registry::close_ask_user_panel_for_owner(&snapshot.owner);
                         }
-                        panel_registry::close_panel(PanelKind::AskUser);
-                        *ASK_USER_PENDING.state().write() = None;
-                        *ASK_USER_REQUEST_ID.state().write() = None;
                         EventResult::Consumed
                     }
                 }
                 Some(ListNavAction::Cancel) => {
                     // ESC → 打开确认弹窗而非直接取消
+                    let Some(snapshot) = interaction_for_closure.as_ref() else {
+                        return EventResult::Consumed;
+                    };
                     let payload = crate::kit::atoms::ConfirmPayload {
                         title: i18n::tr("popup-confirm-reject-title"),
                         message: i18n::tr("popup-confirm-reject-message"),
                         details: vec![],
-                        pending_action: crate::kit::atoms::ConfirmAction::RejectAskUser,
+                        pending_action: crate::kit::atoms::ConfirmAction::RejectAskUser {
+                            owner: snapshot.owner.clone(),
+                            request_id_json: snapshot.request_id_json.clone(),
+                        },
                     };
                     *crate::kit::atoms::CONFIRM_PAYLOAD.state().write() = Some(payload);
                     crate::kit::popup_overlay::open_popup(crate::kit::atoms::PopupKind::Confirm);
@@ -834,6 +872,22 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         )
     })
+}
+
+fn interaction_fingerprint(interaction: Option<&PendingInteraction<AskUser>>) -> Vec<String> {
+    interaction
+        .map(|interaction| {
+            let owner = &interaction.owner;
+            let mut fingerprint = vec![
+                owner.client_instance_id.to_string(),
+                owner.generation.to_string(),
+                owner.prompt_epoch.to_string(),
+                owner.token.to_string(),
+            ];
+            fingerprint.extend(interaction.payload.questions.iter().map(|q| q.id.clone()));
+            fingerprint
+        })
+        .unwrap_or_default()
 }
 
 /// CJK 安全的文本折行：按 max_width 列宽拆分文本为多行。

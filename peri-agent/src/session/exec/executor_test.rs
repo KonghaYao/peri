@@ -8,7 +8,10 @@
 //!
 //! Mock 命名遵循 CLAUDE.md：`make_` 前缀（函数），`Mock` 前缀（结构体）。
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 use async_trait::async_trait;
 use peri_acp_types::{
@@ -26,7 +29,9 @@ use peri_acp_types::{
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::{is_keepgoing, run_session_loop, PromptStopReason, SessionContext, TurnInput};
+use super::{
+    is_keepgoing, run_session_loop, FrozenSessionData, PromptStopReason, SessionContext, TurnInput,
+};
 use crate::{
     session::exec::executor_helpers::{ForwarderLauncherFn, StageBuildFn},
     tools::DirectToolInvocationResolver,
@@ -160,6 +165,46 @@ fn noop_forwarder() -> ForwarderLauncherFn {
     Arc::new(|_handles, _agent_id, _on_event| {})
 }
 
+/// 构造预取消 stage，并记录 executor 传入的完整 frozen snapshot。
+fn make_recording_cancelled_stage(
+    calls: Arc<AtomicUsize>,
+    recorded: Arc<Mutex<Option<FrozenSessionData>>>,
+) -> StageBuildFn {
+    use peri_acp_types::event_v2::EventBus;
+
+    use crate::agent::stages::StageContext;
+    use crate::session::exec::stage_builder::V2AgentOutput;
+    use crate::session::Session;
+
+    Arc::new(move |sbr| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        *recorded.lock().unwrap() = Some(sbr.frozen_session.clone());
+        let session = Session::new(
+            Arc::from("/tmp"),
+            sbr.frozen_session.v2_frozen().clone(),
+            None,
+        );
+        let turn = session.start_turn();
+        turn.cancel_token.cancel();
+        let (bus, handles) = EventBus::new(Default::default());
+        let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+            .with_event_bus(Arc::new(bus))
+            .build();
+        let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
+        let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            V2AgentOutput {
+                context,
+                session,
+                event_handles: handles,
+                todo_rx,
+                bg_event_rx,
+            },
+            None,
+        )
+    })
+}
+
 // ── Helper 工厂函数 ─────────────────────────────────────────────────────────
 
 /// 构造最小 SessionContext（keepgoing 短路路径只用到 session_id，其余字段给默认值）。
@@ -211,7 +256,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         allow_await_wake: false,
         continuation_notify: None,
         frozen_fallback_builder: None,
-        meta_harness: Default::default(),
     }
 }
 
@@ -234,6 +278,106 @@ fn make_turn_input(
         stage_build: noop_stage_build(),
         forwarder_launcher: noop_forwarder(),
     }
+}
+
+/// [回归测试] turn 缺少 frozen 时，fallback builder 产出的完整 snapshot
+/// 必须原样进入唯一 stage request，不能再拆成会丢失 language/meta 的 legacy 字段。
+#[tokio::test]
+async fn test_missing_frozen_builder_snapshot_reaches_cancelled_stage_once() {
+    use crate::session::FrozenContext;
+    use peri_acp_types::meta_harness::MetaHarnessState;
+
+    let builder_calls = Arc::new(AtomicUsize::new(0));
+    let stage_calls = Arc::new(AtomicUsize::new(0));
+    let recorded = Arc::new(Mutex::new(None));
+    let mut ctx = make_session_context("fallback-builder");
+    let builder_counter = Arc::clone(&builder_calls);
+    ctx.frozen_fallback_builder = Some(Arc::new(move |_cwd, _language| {
+        builder_counter.fetch_add(1, Ordering::SeqCst);
+        let mut meta = MetaHarnessState::default();
+        meta.disabled_middlewares.insert("SkillsMiddleware".into());
+        meta.built_in_subagents_enabled = false;
+        FrozenSessionData::from_frozen_parts(
+            FrozenContext::builder()
+                .system_prompt("fallback-system")
+                .claude_md("fallback-claude")
+                .skill_summary("fallback-skills")
+                .date("2026-08-25")
+                .language(Some("zh-CN"))
+                .meta_harness(meta)
+                .build(),
+            Some(Arc::from("fallback-local")),
+        )
+    }));
+    let sink = Arc::new(MockEventSink::new());
+    let mut turn = make_turn_input(
+        sink as Arc<dyn EventSink>,
+        MessageContent::text("run"),
+        false,
+        vec![],
+    );
+    turn.stage_build =
+        make_recording_cancelled_stage(Arc::clone(&stage_calls), Arc::clone(&recorded));
+
+    let result = run_session_loop(ctx, turn).await;
+
+    assert_eq!(result.stop_reason, PromptStopReason::Cancelled);
+    assert_eq!(builder_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(stage_calls.load(Ordering::SeqCst), 1);
+    let snapshot = recorded
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("stage 收到 snapshot");
+    assert_eq!(snapshot.system_prompt(), "fallback-system");
+    assert_eq!(snapshot.claude_md(), Some("fallback-claude"));
+    assert_eq!(snapshot.claude_local_md(), Some("fallback-local"));
+    assert_eq!(snapshot.skill_summary(), Some("fallback-skills"));
+    assert_eq!(snapshot.date(), "2026-08-25");
+    assert_eq!(snapshot.language(), Some("zh-CN"));
+    assert!(snapshot
+        .meta_harness()
+        .disabled_middlewares
+        .contains("SkillsMiddleware"));
+    assert!(!snapshot.meta_harness().built_in_subagents_enabled);
+}
+
+/// [回归测试] builder 也缺失时仍先形成完整 FrozenSessionData，再走同一 stage
+/// interface；语言只在这个防御性分支从 SessionContext 回退。
+#[tokio::test]
+async fn test_missing_frozen_without_builder_builds_complete_snapshot_for_cancelled_stage_once() {
+    let stage_calls = Arc::new(AtomicUsize::new(0));
+    let recorded = Arc::new(Mutex::new(None));
+    let mut ctx = make_session_context("fallback-minimal");
+    ctx.language = Some("fr-FR".into());
+    let sink = Arc::new(MockEventSink::new());
+    let mut turn = make_turn_input(
+        sink as Arc<dyn EventSink>,
+        MessageContent::text("run"),
+        false,
+        vec![],
+    );
+    turn.stage_build =
+        make_recording_cancelled_stage(Arc::clone(&stage_calls), Arc::clone(&recorded));
+
+    let result = run_session_loop(ctx, turn).await;
+
+    assert_eq!(result.stop_reason, PromptStopReason::Cancelled);
+    assert_eq!(stage_calls.load(Ordering::SeqCst), 1);
+    let snapshot = recorded
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("stage 收到 snapshot");
+    assert_eq!(snapshot.system_prompt(), "");
+    assert_eq!(snapshot.claude_md(), None);
+    assert_eq!(snapshot.claude_local_md(), None);
+    assert_eq!(snapshot.skill_summary(), None);
+    assert_eq!(snapshot.language(), Some("fr-FR"));
+    assert_eq!(snapshot.date().len(), 10, "日期必须保持 YYYY-MM-DD 结构");
+    assert_eq!(snapshot.date().as_bytes()[4], b'-');
+    assert_eq!(snapshot.date().as_bytes()[7], b'-');
+    assert_eq!(snapshot.meta_harness(), &Default::default());
 }
 
 // ── is_keepgoing: 跨层判空契约测试 ───────────────────────────────────────

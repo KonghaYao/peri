@@ -14,7 +14,7 @@ use tokio::{
 };
 
 use super::{
-    router::RequestRouter,
+    router::{transport_closed_error, RequestRouter},
     types::{AcpError, IncomingMessage, RequestId},
     AcpTransport,
 };
@@ -116,7 +116,22 @@ impl StdioTransport {
         tokio::spawn(async move {
             let mut lines = BufReader::new(reader).lines();
 
-            while let Ok(Some(line)) = lines.next_line().await {
+            loop {
+                let next_line = tokio::select! {
+                    result = lines.next_line() => Some(result),
+                    () = pump_router.wait_closed() => None,
+                };
+                let Some(next_line) = next_line else {
+                    break;
+                };
+                let line = match next_line {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, "Stdio transport: stdin read failed");
+                        break;
+                    }
+                };
                 if line.is_empty() {
                     continue;
                 }
@@ -179,8 +194,8 @@ impl StdioTransport {
                             Ok(result_val.unwrap_or(Value::Null))
                         };
                         let msg = IncomingMessage::Response { id: req_id, result };
-                        if !pump_router.dispatch(&msg).await {
-                            let _ = incoming_tx.send(msg);
+                        if !pump_router.dispatch(&msg) && incoming_tx.send(msg).is_err() {
+                            break;
                         }
                     }
                     // Request (has id + method)
@@ -194,19 +209,29 @@ impl StdioTransport {
                         }
                         let method = envelope.method.unwrap();
                         let req_id = value_to_request_id(&id);
-                        let _ = incoming_tx.send(IncomingMessage::Request {
-                            id: req_id,
-                            method,
-                            params: envelope.params.unwrap_or(Value::Null),
-                        });
+                        if incoming_tx
+                            .send(IncomingMessage::Request {
+                                id: req_id,
+                                method,
+                                params: envelope.params.unwrap_or(Value::Null),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                     // Notification (no id, has method)
                     (None, true) => {
                         let method = envelope.method.unwrap();
-                        let _ = incoming_tx.send(IncomingMessage::Notification {
-                            method,
-                            params: envelope.params.unwrap_or(Value::Null),
-                        });
+                        if incoming_tx
+                            .send(IncomingMessage::Notification {
+                                method,
+                                params: envelope.params.unwrap_or(Value::Null),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                     _ => {
                         tracing::warn!("Unhandled JSON-RPC message structure, ignoring");
@@ -214,7 +239,8 @@ impl StdioTransport {
                 }
             }
 
-            tracing::info!("Stdio transport: stdin closed");
+            pump_router.close();
+            tracing::info!("Stdio transport closed");
         });
 
         Self {
@@ -231,21 +257,19 @@ impl StdioTransport {
 #[async_trait]
 impl AcpTransport for StdioTransport {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        let (id_num, response_rx) = self.router.register().await;
+        let pending = self.router.register()?;
 
         let envelope = JsonRpcEnvelope {
             jsonrpc: "2.0".to_string(),
-            id: Some(Value::Number(id_num.into())),
+            id: Some(Value::Number(pending.id().into())),
             method: Some(method.to_string()),
             params: Some(params),
             result: None,
             error: None,
         };
-        write_envelope(&self.writer, &envelope).await?;
+        write_envelope(&self.writer, &self.router, &envelope).await?;
 
-        response_rx
-            .await
-            .map_err(|_| AcpError::new(-32603, "Request cancelled (client disconnected)"))?
+        pending.wait().await
     }
 
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {
@@ -257,7 +281,7 @@ impl AcpTransport for StdioTransport {
             result: None,
             error: None,
         };
-        write_envelope(&self.writer, &envelope).await
+        write_envelope(&self.writer, &self.router, &envelope).await
     }
 
     async fn recv(&self) -> Option<IncomingMessage> {
@@ -280,7 +304,7 @@ impl AcpTransport for StdioTransport {
                     result: Some(value),
                     error: None,
                 };
-                write_envelope(&self.writer, &envelope).await
+                write_envelope(&self.writer, &self.router, &envelope).await
             }
             Err(error) => {
                 let envelope = JsonRpcEnvelope {
@@ -291,7 +315,7 @@ impl AcpTransport for StdioTransport {
                     result: None,
                     error: Some(error),
                 };
-                write_envelope(&self.writer, &envelope).await
+                write_envelope(&self.writer, &self.router, &envelope).await
             }
         }
     }
@@ -301,21 +325,37 @@ impl AcpTransport for StdioTransport {
 
 async fn write_envelope(
     writer: &Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
+    router: &RequestRouter,
     envelope: &JsonRpcEnvelope,
 ) -> Result<(), AcpError> {
+    router.ensure_open()?;
     let mut line = serde_json::to_string(envelope)
         .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))?;
     line.push('\n');
-    let mut guard = writer.lock().await;
-    guard
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|e| AcpError::new(-32603, format!("Write failed: {e}")))?;
-    guard
-        .flush()
-        .await
-        .map_err(|e| AcpError::new(-32603, format!("Flush failed: {e}")))?;
-    Ok(())
+    let writer_operation = async {
+        let mut guard = writer.lock().await;
+        guard
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| AcpError::new(-32603, format!("Write failed: {e}")))?;
+        guard
+            .flush()
+            .await
+            .map_err(|e| AcpError::new(-32603, format!("Flush failed: {e}")))?;
+        Ok(())
+    };
+
+    tokio::select! {
+        biased;
+        result = writer_operation => match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                router.close();
+                Err(error)
+            }
+        },
+        () = router.wait_closed() => Err(transport_closed_error()),
+    }
 }
 
 /// JSON-RPC 2.0 id 域校验（决策点 7 收口）：合法 id 仅 String 或整数

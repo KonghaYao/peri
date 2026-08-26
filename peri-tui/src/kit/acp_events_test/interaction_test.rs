@@ -3,13 +3,23 @@ use super::*;
 // ── [Slice 4 §6.8] Interaction block：生产创建点 + 结果回写 + 折叠表 ──
 
 fn make_interaction_state() -> BridgeState {
-    let st = make_fold_test_state();
-    // 模拟 acp_notifier 写入的 request_id atom（handle_* 创建 block 时克隆）
-    *crate::kit::atoms::HITL_REQUEST_ID.state().write() =
-        Some(serde_json::to_string(&"hitl-1").unwrap());
-    *crate::kit::atoms::ASK_USER_REQUEST_ID.state().write() =
-        Some(serde_json::to_string(&"ask-1").unwrap());
-    st
+    make_fold_test_state()
+}
+
+fn hitl_event(payload: HitlPending) -> AcpEventData {
+    AcpEventData::HitlPending(crate::kit::acp_types::PendingInteraction {
+        owner: Default::default(),
+        request_id_json: serde_json::to_string(&"hitl-1").unwrap(),
+        payload,
+    })
+}
+
+fn ask_user_event(payload: AskUser) -> AcpEventData {
+    AcpEventData::AskUser(crate::kit::acp_types::PendingInteraction {
+        owner: Default::default(),
+        request_id_json: serde_json::to_string(&"ask-1").unwrap(),
+        payload,
+    })
 }
 
 fn ask_user_block_of(snapshot: &ViewModelsSnapshot, idx: usize) -> &TuiAskUserBlock {
@@ -30,7 +40,7 @@ fn test_hitl_pending_injects_pending_permission_block() {
         tool_input: serde_json::json!({"command": "cargo test"}),
         batch: None,
     };
-    dispatch_and_notify(&mut state, &AcpEventData::HitlPending(hp));
+    dispatch_and_notify(&mut state, &hitl_event(hp));
 
     let snap = VIEW_MODELS.state().read().clone();
     // committed 末尾是 interaction block（无 current_turn 内容 → 快照即 committed）
@@ -47,13 +57,41 @@ fn test_hitl_pending_injects_pending_permission_block() {
     );
     assert!(
         block.request_id.as_deref() == Some(&serde_json::to_string(&"hitl-1").unwrap()),
-        "request_id 从 HITL_REQUEST_ID atom 克隆"
+        "request_id 与 payload 由同一 composite 事件提供"
     );
-    // 断言 request_id 与 atom 同源
     assert_eq!(
         block.request_id.as_deref(),
-        crate::kit::atoms::HITL_REQUEST_ID.state().read().as_deref()
+        crate::kit::atoms::HITL_PENDING
+            .state()
+            .read()
+            .as_ref()
+            .map(|p| p.request_id_json.as_str())
     );
+}
+
+#[test]
+#[serial]
+fn test_hitl_handler_publishes_same_composite_to_atom_and_block() {
+    let mut state = make_interaction_state();
+    dispatch_and_notify(
+        &mut state,
+        &hitl_event(HitlPending {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command":"cargo test"}),
+            batch: None,
+        }),
+    );
+    let atom_id = crate::kit::atoms::HITL_PENDING
+        .state()
+        .read()
+        .as_ref()
+        .unwrap()
+        .request_id_json
+        .clone();
+    let snap = VIEW_MODELS.state().read().clone();
+    let block = ask_user_block_of(&snap, snap.items.len() - 1);
+    assert_eq!(block.request_id.as_deref(), Some(atom_id.as_str()));
+    assert!(block.question_ids.is_empty());
 }
 
 /// [§6.8 模态互斥] 同 request_id 的 pending block 重复注入（事件重放/重连/重试
@@ -68,8 +106,8 @@ fn test_hitl_pending_duplicate_request_id_not_reinjected() {
         tool_input: serde_json::json!({"command": "cargo test"}),
         batch: None,
     };
-    dispatch_and_notify(&mut state, &AcpEventData::HitlPending(hp()));
-    dispatch_and_notify(&mut state, &AcpEventData::HitlPending(hp()));
+    dispatch_and_notify(&mut state, &hitl_event(hp()));
+    dispatch_and_notify(&mut state, &hitl_event(hp()));
 
     let snap = VIEW_MODELS.state().read().clone();
     let pending = snap
@@ -113,7 +151,7 @@ fn test_ask_user_injects_pending_ask_user_block() {
             },
         ],
     };
-    dispatch_and_notify(&mut state, &AcpEventData::AskUser(au));
+    dispatch_and_notify(&mut state, &ask_user_event(au));
 
     let snap = VIEW_MODELS.state().read().clone();
     let block = ask_user_block_of(&snap, snap.items.len() - 1);
@@ -121,10 +159,79 @@ fn test_ask_user_injects_pending_ask_user_block() {
     assert_eq!(block.kind, InteractionKind::AskUser);
     assert_eq!(block.question, "Pick a strategy", "首问 header 摘要");
     assert_eq!(block.options, vec!["Fast", "Careful"]);
+    assert_eq!(block.question_ids, vec!["q1", "q2"]);
     assert_eq!(block.fold, FoldState::Expanded);
 }
 
-/// 结果回写：InteractionResolved 按 request_id 匹配 pending block → clone +
+#[test]
+#[serial]
+fn test_ask_user_handler_publishes_same_composite_and_question_ids() {
+    let mut state = make_interaction_state();
+    let payload = AskUser {
+        questions: vec![Question {
+            id: "q1".into(),
+            header: "H".into(),
+            question: "Q".into(),
+            options: vec![],
+            multi_select: false,
+        }],
+    };
+    dispatch_and_notify(&mut state, &ask_user_event(payload));
+    let atom_id = crate::kit::atoms::ASK_USER_PENDING
+        .state()
+        .read()
+        .as_ref()
+        .unwrap()
+        .request_id_json
+        .clone();
+    let snap = VIEW_MODELS.state().read().clone();
+    let block = ask_user_block_of(&snap, snap.items.len() - 1);
+    assert_eq!(block.request_id.as_deref(), Some(atom_id.as_str()));
+    assert_eq!(block.question_ids, vec!["q1"]);
+}
+
+#[test]
+#[serial]
+fn test_queued_interaction_blocks_keep_origin_request_ids() {
+    let mut state = make_interaction_state();
+    for (token, id) in [(1, "A"), (2, "B")] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::HitlPending(crate::kit::acp_types::PendingInteraction {
+                owner: crate::acp_client::InteractionOwner {
+                    token,
+                    ..Default::default()
+                },
+                request_id_json: id.into(),
+                payload: HitlPending {
+                    tool_name: id.into(),
+                    tool_input: serde_json::Value::Null,
+                    batch: None,
+                },
+            }),
+        );
+    }
+    let ids: Vec<_> = state
+        .committed
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiAskUserBlock(block) => block.request_id.clone(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, vec!["A", "B"]);
+    assert_eq!(
+        crate::kit::atoms::HITL_PENDING
+            .state()
+            .read()
+            .as_ref()
+            .unwrap()
+            .request_id_json,
+        "B"
+    );
+}
+
+/// 结果回写：InteractionTerminal 按 semantic owner 匹配 pending block → clone +
 /// pending=false + result + 重算 hash + 原位 set（COW）；completed → Collapsed。
 #[test]
 #[serial]
@@ -132,7 +239,7 @@ fn test_interaction_resolved_writes_back_pending_block() {
     let mut state = make_interaction_state();
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::HitlPending(HitlPending {
+        &hitl_event(HitlPending {
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": "cargo test"}),
             batch: None,
@@ -143,12 +250,13 @@ fn test_interaction_resolved_writes_back_pending_block() {
     let before = ask_user_block_of(&snap, idx).clone();
     let hash_before = before.content_hash;
 
-    let rid = serde_json::to_string(&"hitl-1").unwrap();
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::InteractionResolved {
-            request_id: rid.clone(),
-            result: "Allowed once".into(),
+        &AcpEventData::InteractionTerminal {
+            owner: Default::default(),
+            outcome: crate::acp_client::InteractionUiOutcome::Resolved {
+                result: "Allowed once".into(),
+            },
         },
     );
 
@@ -169,9 +277,11 @@ fn test_interaction_resolved_writes_back_pending_block() {
     // 幂等：重复到达（迟到/重复事件）不改变结果（matched 条件 pending=false 不再命中）
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::InteractionResolved {
-            request_id: rid,
-            result: "Allowed once".into(),
+        &AcpEventData::InteractionTerminal {
+            owner: Default::default(),
+            outcome: crate::acp_client::InteractionUiOutcome::Resolved {
+                result: "Allowed once".into(),
+            },
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
@@ -180,14 +290,14 @@ fn test_interaction_resolved_writes_back_pending_block() {
     assert_eq!(block.result.as_deref(), Some("Allowed once"));
 }
 
-/// request_id 不匹配的 InteractionResolved → no-op（防御）。
+/// semantic owner 不匹配的 InteractionTerminal → no-op（防御）。
 #[test]
 #[serial]
 fn test_interaction_resolved_mismatched_request_id_noop() {
     let mut state = make_interaction_state();
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::HitlPending(HitlPending {
+        &hitl_event(HitlPending {
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": "ls"}),
             batch: None,
@@ -195,9 +305,14 @@ fn test_interaction_resolved_mismatched_request_id_noop() {
     );
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::InteractionResolved {
-            request_id: serde_json::to_string(&"other-rid").unwrap(),
-            result: "Denied".into(),
+        &AcpEventData::InteractionTerminal {
+            owner: crate::acp_client::InteractionOwner {
+                token: 999,
+                ..Default::default()
+            },
+            outcome: crate::acp_client::InteractionUiOutcome::Resolved {
+                result: "Denied".into(),
+            },
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
@@ -214,7 +329,7 @@ fn test_fold_pass_interaction_pending_expanded_override_priority() {
     let mut state = make_interaction_state();
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::HitlPending(HitlPending {
+        &hitl_event(HitlPending {
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": "cargo test"}),
             batch: None,
@@ -227,9 +342,11 @@ fn test_fold_pass_interaction_pending_expanded_override_priority() {
     // 结果回写 → Completed → Expanded（不自动收束）
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::InteractionResolved {
-            request_id: serde_json::to_string(&"hitl-1").unwrap(),
-            result: "Denied".into(),
+        &AcpEventData::InteractionTerminal {
+            owner: Default::default(),
+            outcome: crate::acp_client::InteractionUiOutcome::Resolved {
+                result: "Denied".into(),
+            },
         },
     );
     let snap = VIEW_MODELS.state().read().clone();

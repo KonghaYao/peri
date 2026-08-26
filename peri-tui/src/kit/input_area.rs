@@ -17,6 +17,7 @@ mod popup;
 mod render;
 mod submit;
 
+use image::insert_image_reference;
 pub(crate) use image::png_encode;
 pub(crate) use popup::{get_cached_slash_items, refresh_slash_items};
 pub(crate) use submit::send_local_user_bubble;
@@ -453,8 +454,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
                                     match png_encode(&img_bytes, width, height, &file_path) {
                                         Ok(()) => {
-                                            let at_text = format!("@image {}", file_path.display());
-                                            state_clone.write().insert_str(&at_text);
+                                            insert_image_reference(
+                                                &mut state_clone.write(),
+                                                &file_path,
+                                            );
                                             return;
                                         }
                                         Err(_) => {

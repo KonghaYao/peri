@@ -542,7 +542,6 @@ pub(crate) async fn run_prompt(
         allow_await_wake: true,
         continuation_notify: cont_tx,
         frozen_fallback_builder,
-        meta_harness,
     };
 
     // ── L5：TurnInput 注入面（Langfuse hooks / stage 装配桥 / forwarder）──
@@ -623,8 +622,7 @@ pub(crate) async fn run_prompt(
             compact_pre_hook,
             compact_post_hook,
             sbr.cached_llm.as_ref(),
-            sbr.system_prompt,
-            sbr.frozen,
+            sbr.frozen_session,
             sbr.event_handler,
             sbr.agent_overrides,
             sbr.preload_skills,

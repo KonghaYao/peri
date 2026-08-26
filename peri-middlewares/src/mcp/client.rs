@@ -4,6 +4,7 @@ mod transport;
 use std::{any::Any, collections::HashMap, sync::Arc};
 
 use peri_acp_types::mcp::McpSubscriptionPort;
+use peri_acp_types::ports::McpPoolShutdownReport;
 use peri_acp_types::session::InboxHandle;
 use rmcp::{
     model::{
@@ -31,6 +32,61 @@ pub(crate) use transport::{
 pub(crate) enum McpServiceWrapper {
     Default(RunningService<RoleClient, InitializeRequestParams>),
     Channel(RunningService<RoleClient, Arc<ChannelHandler>>),
+    #[cfg(test)]
+    Controlled(ControlledMcpService),
+}
+
+#[cfg(test)]
+pub(crate) struct ControlledMcpService {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Arc<tokio::sync::Notify>,
+    close_count: Arc<std::sync::atomic::AtomicUsize>,
+    completes: bool,
+}
+
+#[cfg(test)]
+impl ControlledMcpService {
+    pub(crate) fn new(
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: Arc<tokio::sync::Notify>,
+        close_count: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        Self {
+            entered: std::sync::Mutex::new(Some(entered)),
+            release,
+            close_count,
+            completes: true,
+        }
+    }
+
+    pub(crate) fn timing_out(close_count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        let (entered, _entered_rx) = tokio::sync::oneshot::channel();
+        Self {
+            entered: std::sync::Mutex::new(Some(entered)),
+            release: Arc::new(tokio::sync::Notify::new()),
+            close_count,
+            completes: false,
+        }
+    }
+
+    async fn close(&mut self) -> Result<Option<QuitReason>, tokio::task::JoinError> {
+        self.close_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(entered) = self
+            .entered
+            .lock()
+            .expect("controlled service poisoned")
+            .take()
+        {
+            let _ = entered.send(());
+        }
+        if self.completes {
+            self.release.notified().await;
+            Ok(Some(QuitReason::Closed))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 impl McpServiceWrapper {
@@ -41,6 +97,8 @@ impl McpServiceWrapper {
         match self {
             McpServiceWrapper::Default(svc) => svc.close_with_timeout(timeout).await,
             McpServiceWrapper::Channel(svc) => svc.close_with_timeout(timeout).await,
+            #[cfg(test)]
+            McpServiceWrapper::Controlled(svc) => svc.close().await,
         }
     }
 
@@ -48,6 +106,10 @@ impl McpServiceWrapper {
         match self {
             McpServiceWrapper::Default(svc) => svc.peer(),
             McpServiceWrapper::Channel(svc) => svc.peer(),
+            #[cfg(test)]
+            McpServiceWrapper::Controlled(_) => {
+                panic!("controlled test service has no protocol peer")
+            }
         }
     }
 }
@@ -245,8 +307,16 @@ pub(crate) fn cache_scope_allows_persistence(scope: Option<CacheScope>) -> bool 
 
 /// MCP 客户端连接池
 pub struct McpClientPool {
+    /// Pool-wide admission gate. 0=open, 1=closing, 2=closed.
+    lifecycle: std::sync::atomic::AtomicU8,
+    pub(crate) lifecycle_registration: parking_lot::Mutex<()>,
+    /// Pool-owned terminal service-close transaction. Awaiting a borrowed
+    /// handle is cancellation-safe: a dropped waiter cannot detach the worker
+    /// or the drained services it owns.
+    service_shutdown: tokio::sync::Mutex<ServiceShutdownState>,
+    pub(crate) task_spawner: super::task_scope::McpTaskSpawner,
     pub(crate) clients: parking_lot::RwLock<HashMap<String, Arc<McpClientHandle>>>,
-    pub(crate) services: tokio::sync::Mutex<HashMap<String, McpServiceWrapper>>,
+    pub(crate) services: parking_lot::Mutex<HashMap<String, McpServiceWrapper>>,
     pub(crate) configs: parking_lot::RwLock<HashMap<String, McpServerConfig>>,
     pub(crate) cache_versions: parking_lot::RwLock<HashMap<String, String>>,
     /// 插件来源旁路表：key 为 server name（如 `"plugin:p1:srv1"`），value 为 `"name@marketplace"`
@@ -263,7 +333,7 @@ pub struct McpClientPool {
     /// 以 Info 消息推送进模型上下文；全局缓冲，任一会话消费一次即清空）。
     pub(crate) pending_changes: parking_lot::Mutex<Vec<String>>,
     /// 状态变化通知回调（装配时注入；发布 system-notification 给 TUI 通知面）。
-    notifier: parking_lot::RwLock<Option<Box<dyn Fn(&str) + Send + Sync>>>,
+    notifier: parking_lot::RwLock<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
     /// OAuth 流程事件回调（装配时注入；`AuthorizationNeeded` 需把
     /// `callback_tx` 注册进 `pending_oauth_callbacks` 供授权码回传 RPC 投递，
     /// 其余事件转发为 ACP `oauth-needed` / `oauth-completed` / `oauth-failed`）。
@@ -277,11 +347,17 @@ pub struct McpClientPool {
     /// SessionManager（peri-acp）经 `McpSubscriptionPort` 注册；订阅通知到达
     /// 时向全部注册 inbox 推送 Defer 消息并唤醒 idle agent。
     pub(crate) session_inboxes: parking_lot::RwLock<HashMap<String, InboxHandle>>,
-    /// 活跃订阅循环任务（server_name → JoinHandle；随 transport 关闭自然结束）。
-    pub(crate) subscription_tasks:
-        tokio::sync::Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
     /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
     pub(crate) resource_cache: super::resource_cache::McpResourceCache,
+}
+
+enum ServiceShutdownState {
+    Idle,
+    Running {
+        handle: tokio::task::JoinHandle<McpPoolShutdownReport>,
+        total_services: usize,
+    },
+    Terminal(McpPoolShutdownReport),
 }
 
 /// MCP 状态变化 → 通知文本（每台一行：上线带工具数，失败报名字 + 错误）。
@@ -308,6 +384,38 @@ pub(crate) fn status_change_text(name: &str, status: &ClientStatus, tool_count: 
 pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub(crate) const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn close_services(services: Vec<(String, McpServiceWrapper)>) -> McpPoolShutdownReport {
+    let mut settled_services = 0;
+    let mut unfinished_services = 0;
+    let mut failed_services = 0;
+    for (server_name, mut service) in services {
+        match service.close_with_timeout(SHUTDOWN_TIMEOUT).await {
+            Ok(Some(_reason)) => settled_services += 1,
+            Ok(None) => {
+                unfinished_services += 1;
+                tracing::warn!(server = %server_name, "MCP service cleanup remained unfinished");
+            }
+            Err(error) => {
+                settled_services += 1;
+                failed_services += 1;
+                tracing::warn!(server = %server_name, %error, "MCP service cleanup task failed");
+            }
+        }
+    }
+    if unfinished_services == 0 {
+        McpPoolShutdownReport::Complete {
+            settled_services,
+            failed_services,
+        }
+    } else {
+        McpPoolShutdownReport::Incomplete {
+            settled_services,
+            unfinished_services,
+            failed_services,
+        }
+    }
+}
 
 impl McpClientPool {
     fn config_allows_persistent_cache(config: &McpServerConfig) -> bool {
@@ -663,9 +771,17 @@ impl McpClientPool {
     }
 
     pub fn new_pending() -> Self {
+        Self::new_pending_with_spawner(super::task_scope::McpTaskSpawner::closed())
+    }
+
+    pub fn new_pending_with_spawner(spawner: super::task_scope::McpTaskSpawner) -> Self {
         Self {
+            lifecycle: std::sync::atomic::AtomicU8::new(0),
+            lifecycle_registration: parking_lot::Mutex::new(()),
+            service_shutdown: tokio::sync::Mutex::new(ServiceShutdownState::Idle),
+            task_spawner: spawner,
             clients: parking_lot::RwLock::new(HashMap::new()),
-            services: tokio::sync::Mutex::new(HashMap::new()),
+            services: parking_lot::Mutex::new(HashMap::new()),
             configs: parking_lot::RwLock::new(HashMap::new()),
             cache_versions: parking_lot::RwLock::new(HashMap::new()),
             plugin_sources: parking_lot::RwLock::new(HashMap::new()),
@@ -677,7 +793,6 @@ impl McpClientPool {
             pending_oauth_callbacks: parking_lot::Mutex::new(HashMap::new()),
             active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
             session_inboxes: parking_lot::RwLock::new(HashMap::new()),
-            subscription_tasks: tokio::sync::Mutex::new(HashMap::new()),
             resource_cache: super::resource_cache::McpResourceCache::new(),
         }
     }
@@ -696,7 +811,10 @@ impl McpClientPool {
     where
         F: Fn(OAuthFlowEvent) + Send + Sync + 'static,
     {
-        *self.oauth_event_callback.write() = Some(Arc::new(callback));
+        let _admission = self.lifecycle_registration.lock();
+        if self.is_open() {
+            *self.oauth_event_callback.write() = Some(Arc::new(callback));
+        }
     }
 
     /// 读取 OAuth 流程事件回调（spawn 授权任务时克隆给 `OAuthFlowManager`）。
@@ -711,6 +829,10 @@ impl McpClientPool {
         flow_id: &str,
         callback_tx: tokio::sync::oneshot::Sender<OAuthCallbackResult>,
     ) -> bool {
+        let _admission = self.lifecycle_registration.lock();
+        if !self.is_open() {
+            return false;
+        }
         let mut active = self.active_oauth_flows.lock();
         match active.get(server_name) {
             Some(current) if current != flow_id => return false,
@@ -804,6 +926,12 @@ impl McpClientPool {
         server_name: &str,
         flow_id: &str,
     ) -> OAuthStartDisposition {
+        let _admission = self.lifecycle_registration.lock();
+        if !self.is_open() {
+            return OAuthStartDisposition::Conflict {
+                active_flow_id: "pool-closing".to_string(),
+            };
+        }
         let mut active = self.active_oauth_flows.lock();
         match active.get(server_name) {
             Some(current) if current == flow_id => OAuthStartDisposition::AlreadyActive,
@@ -849,30 +977,37 @@ impl McpClientPool {
     }
 
     pub(crate) fn insert_failed(pool: &Arc<Self>, name: &str, reason: String) {
-        let (source, url) = pool
-            .configs
-            .read()
-            .get(name)
-            .map(|c| (c.source.clone(), c.url.clone()))
-            .unwrap_or((None, None));
-        let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
-        pool.clients.write().insert(
-            name.to_string(),
-            Arc::new(McpClientHandle {
-                name: name.to_string(),
-                version: None,
-                cache_version: None,
-                peer: None,
-                tools: vec![],
-                resources: vec![],
-                status: ClientStatus::Failed(reason.clone()),
-                oauth_status: OAuthStatus::default(),
-                source,
-                url,
-                skills_capable: false,
-                channel_capable: false,
-            }),
-        );
+        let old_status = {
+            let _admission = pool.lifecycle_registration.lock();
+            if !pool.is_open() {
+                return;
+            }
+            let (source, url) = pool
+                .configs
+                .read()
+                .get(name)
+                .map(|c| (c.source.clone(), c.url.clone()))
+                .unwrap_or((None, None));
+            let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
+            pool.clients.write().insert(
+                name.to_string(),
+                Arc::new(McpClientHandle {
+                    name: name.to_string(),
+                    version: None,
+                    cache_version: None,
+                    peer: None,
+                    tools: vec![],
+                    resources: vec![],
+                    status: ClientStatus::Failed(reason.clone()),
+                    oauth_status: OAuthStatus::default(),
+                    source,
+                    url,
+                    skills_capable: false,
+                    channel_capable: false,
+                }),
+            );
+            old_status
+        };
         pool.record_status_change(name, old_status.as_ref());
         peri_agent::metrics::emit(
             "mcp.error",
@@ -889,30 +1024,37 @@ impl McpClientPool {
     /// 插入需要 OAuth 授权的服务器（HTTP 传输收到 401/AuthRequired 时使用）
     pub(crate) fn insert_needs_auth(pool: &Arc<Self>, name: &str, reason: String) {
         tracing::info!(server = %name, "HTTP 服务器需要 OAuth 授权，可在 MCP 面板按 r 键触发");
-        let (source, url) = pool
-            .configs
-            .read()
-            .get(name)
-            .map(|c| (c.source.clone(), c.url.clone()))
-            .unwrap_or((None, None));
-        let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
-        pool.clients.write().insert(
-            name.to_string(),
-            Arc::new(McpClientHandle {
-                name: name.to_string(),
-                version: None,
-                cache_version: None,
-                peer: None,
-                tools: vec![],
-                resources: vec![],
-                status: ClientStatus::Failed(reason),
-                oauth_status: OAuthStatus::NeedsAuthorization,
-                source,
-                url,
-                skills_capable: false,
-                channel_capable: false,
-            }),
-        );
+        let old_status = {
+            let _admission = pool.lifecycle_registration.lock();
+            if !pool.is_open() {
+                return;
+            }
+            let (source, url) = pool
+                .configs
+                .read()
+                .get(name)
+                .map(|c| (c.source.clone(), c.url.clone()))
+                .unwrap_or((None, None));
+            let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
+            pool.clients.write().insert(
+                name.to_string(),
+                Arc::new(McpClientHandle {
+                    name: name.to_string(),
+                    version: None,
+                    cache_version: None,
+                    peer: None,
+                    tools: vec![],
+                    resources: vec![],
+                    status: ClientStatus::Failed(reason),
+                    oauth_status: OAuthStatus::NeedsAuthorization,
+                    source,
+                    url,
+                    skills_capable: false,
+                    channel_capable: false,
+                }),
+            );
+            old_status
+        };
         pool.record_status_change(name, old_status.as_ref());
     }
 
@@ -922,22 +1064,29 @@ impl McpClientPool {
     }
 
     pub async fn remove_server(self: &Arc<Self>, server_name: &str) {
+        self.stop_background(&super::task_scope::McpTaskKey::Subscription(
+            server_name.to_string(),
+        ))
+        .await;
         self.clients.write().remove(server_name);
-        if let Some(mut svc) = self.services.lock().await.remove(server_name) {
+        let service = { self.services.lock().remove(server_name) };
+        if let Some(mut svc) = service {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
-        // 关闭连接会终止订阅循环（transport 关闭 → 流结束）；清掉句柄引用即可。
-        self.subscription_tasks.lock().await.remove(server_name);
         self.configs.write().remove(server_name);
     }
 
     /// 将服务器标记为 Disabled：关闭连接但保留 config 和 handle（用于面板展示）
     pub async fn set_disabled(self: &Arc<Self>, server_name: &str) {
+        self.stop_background(&super::task_scope::McpTaskKey::Subscription(
+            server_name.to_string(),
+        ))
+        .await;
         // 关闭实际连接
-        if let Some(mut svc) = self.services.lock().await.remove(server_name) {
+        let service = { self.services.lock().remove(server_name) };
+        if let Some(mut svc) = service {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
-        self.subscription_tasks.lock().await.remove(server_name);
         // 更新 handle 为 Disabled 状态（保留 config 引用）
         let (source, url) = self
             .configs
@@ -1094,21 +1243,106 @@ impl McpClientPool {
             .join("\n")
     }
 
-    pub async fn shutdown(&self) {
-        let names: Vec<String> = self.clients.read().keys().cloned().collect();
-        for name in &names {
-            if let Some(c) = self.clients.write().get_mut(name) {
-                if matches!(c.status, ClientStatus::Connected) {
-                    tracing::info!(server = %name, "关闭连接");
+    pub(crate) fn is_open(&self) -> bool {
+        self.lifecycle.load(std::sync::atomic::Ordering::Acquire) == 0
+    }
+
+    pub fn begin_shutdown(&self) {
+        let _admission = self.lifecycle_registration.lock();
+        if !self.is_open() {
+            return;
+        }
+        self.lifecycle
+            .store(1, std::sync::atomic::Ordering::Release);
+        self.notifier.write().take();
+        self.oauth_event_callback.write().take();
+        self.pending_oauth_callbacks.lock().clear();
+        self.active_oauth_flows.lock().clear();
+    }
+
+    pub fn spawn_background<F>(
+        &self,
+        key: super::task_scope::McpTaskKey,
+        future: F,
+    ) -> Result<(), super::task_scope::McpTaskScopeClosed>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let _admission = self.lifecycle_registration.lock();
+        if !self.is_open() {
+            return Err(super::task_scope::McpTaskScopeClosed);
+        }
+        self.task_spawner.spawn(key, future)
+    }
+
+    pub async fn stop_background(&self, key: &super::task_scope::McpTaskKey) {
+        self.task_spawner.stop_key(key).await;
+    }
+
+    pub(crate) fn try_commit_connection(
+        &self,
+        name: String,
+        handle: Arc<McpClientHandle>,
+        service: McpServiceWrapper,
+    ) -> Result<(), McpServiceWrapper> {
+        let _admission = self.lifecycle_registration.lock();
+        if !self.is_open() {
+            return Err(service);
+        }
+        self.services.lock().insert(name.clone(), service);
+        self.clients.write().insert(name, handle);
+        Ok(())
+    }
+
+    pub async fn shutdown(&self) -> McpPoolShutdownReport {
+        let mut transaction = self.service_shutdown.lock().await;
+        if matches!(*transaction, ServiceShutdownState::Idle) {
+            self.begin_shutdown();
+            let names: Vec<String> = self.clients.read().keys().cloned().collect();
+            for name in &names {
+                if let Some(c) = self.clients.write().get_mut(name) {
+                    if matches!(c.status, ClientStatus::Connected) {
+                        tracing::info!(server = %name, "关闭连接");
+                    }
+                    let h = Arc::make_mut(c);
+                    h.status = ClientStatus::Disconnected;
+                    h.peer = None;
                 }
-                let h = Arc::make_mut(c);
-                h.status = ClientStatus::Disconnected;
-                h.peer = None;
             }
+            let mut services: Vec<_> = self.services.lock().drain().collect();
+            services.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            let total_services = services.len();
+            let handle = tokio::spawn(close_services(services));
+            *transaction = ServiceShutdownState::Running {
+                handle,
+                total_services,
+            };
         }
-        for (_name, mut svc) in self.services.lock().await.drain() {
-            let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+
+        let report = match &mut *transaction {
+            ServiceShutdownState::Idle => unreachable!("shutdown transaction must be installed"),
+            ServiceShutdownState::Terminal(report) => return *report,
+            ServiceShutdownState::Running {
+                handle,
+                total_services,
+            } => match handle.await {
+                Ok(report) => report,
+                Err(error) => {
+                    tracing::error!(%error, "MCP service shutdown transaction failed");
+                    McpPoolShutdownReport::Incomplete {
+                        settled_services: 0,
+                        unfinished_services: *total_services,
+                        failed_services: *total_services,
+                    }
+                }
+            },
+        };
+        *transaction = ServiceShutdownState::Terminal(report);
+        if report.is_complete() {
+            self.lifecycle
+                .store(2, std::sync::atomic::Ordering::Release);
         }
+        report
     }
 
     // ── 状态变化统一出口（上下线通知） ──────────────────────────────────────
@@ -1144,14 +1378,18 @@ impl McpClientPool {
         }
         let text = status_change_text(name, &handle.status, handle.tools.len());
         self.pending_changes.lock().push(text.clone());
-        if let Some(notifier) = self.notifier.read().as_ref() {
+        let notifier = self.notifier.read().clone();
+        if let Some(notifier) = notifier {
             notifier(&text);
         }
     }
 
     /// 注入状态变化通知回调（发布 system-notification 事件；装配时调用）。
     pub fn set_notifier(&self, notifier: Box<dyn Fn(&str) + Send + Sync>) {
-        *self.notifier.write() = Some(notifier);
+        let _admission = self.lifecycle_registration.lock();
+        if self.is_open() {
+            *self.notifier.write() = Some(Arc::from(notifier));
+        }
     }
 
     /// 初始化收口后补发初始连接通知（仅 notifier 回调，不进
@@ -1179,8 +1417,8 @@ impl McpClientPool {
                 .map(|h| status_change_text(&h.name, &h.status, h.tools.len()))
                 .collect()
         };
-        let notifier_guard = self.notifier.read();
-        if let Some(notifier) = notifier_guard.as_ref() {
+        let notifier = self.notifier.read().clone();
+        if let Some(notifier) = notifier {
             for text in texts {
                 notifier(&text);
             }
@@ -1214,8 +1452,12 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         self
     }
 
-    async fn shutdown(&self) {
-        McpClientPool::shutdown(self).await;
+    fn begin_shutdown(&self) {
+        McpClientPool::begin_shutdown(self);
+    }
+
+    async fn shutdown(&self) -> McpPoolShutdownReport {
+        McpClientPool::shutdown(self).await
     }
 
     fn snapshot(&self) -> serde_json::Value {

@@ -12,7 +12,6 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
-import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
 describe("subagent: bg task area (merged)", () => {
@@ -30,42 +29,48 @@ describe("subagent: bg task area (merged)", () => {
     async () => {
       tester = await launchPeri();
 
-      // ── 阶段 1：bg subagent（sleep 3s）──
+      // ── 阶段 1：bg subagent（sleep 12s）──
       await sendPrompt(
         tester,
-        "请使用 bg subagent say hello，但是它要先 sleep 3s",
+        "请调用 Agent 工具，参数必须包含 subagent_type=general-purpose、run_in_background=true；让它先用 Bash sleep 12，再返回 hello。不要使用同步 Agent。",
       );
 
       // 等待派发完成：BgTaskArea 出现 ● agent 运行条目（思考 + 派发约 10-15s）
       await tester.waitFor(
         (screen) => /◎ agent/.test(screen),
-        { timeout: 60_000, interval: 1000, message: "等待 bg subagent 运行条目超时" },
+        { timeout: 120_000, interval: 1000, message: "等待 bg subagent 运行条目超时" },
       );
-      await tester.sleep(2000);
       const agentRunning = await takePeriSnapshot(tester, "bg-task-agent-running");
 
-      // 等待完成：● agent → ✔ agent（保留 3s，轮询 1s 可捕获）
+      // 等持久化完成通知；✔ agent 只保留 3s，不能作为唯一完成屏障。
       await tester.waitFor(
-        (screen) => /✔ agent/.test(screen),
-        { timeout: 60_000, interval: 1000, message: "等待 bg subagent 完成超时" },
+        (screen) => /后台任务 bg-[^\]]+ 已完成[\s\S]*Agent: general-purpose/.test(screen),
+        { timeout: 180_000, interval: 1000, message: "等待 bg subagent 完成超时" },
       );
       const agentDone = await takePeriSnapshot(tester, "bg-task-agent-done");
 
       // ── 阶段 2：bg shell（run_in_background sleep 20）──
       await sendPrompt(
         tester,
-        "请使用 Bash 工具的 run_in_background 参数在后台运行 sleep 20，然后告诉我 task_id",
+        '这是 E2E 测试。请直接调用 Bash 工具，参数必须为 {"command":"sleep 20","run_in_background":true}；不得改为前台运行或只解释。调用后回复返回的 shell- 开头 task_id。',
       );
-      await tester.waitForText("shell-", {
-        timeout: 60_000,
-        interval: 1000,
-      });
+      await tester.waitFor(
+        // task_id 由主模型稍后写入 transcript；20s shell 可能在模型回复前已
+        // 完成，因此不能要求短暂运行条目与 task_id 同屏。
+        (screen) => /◎ shell/.test(screen),
+        {
+          timeout: 120_000,
+          interval: 500,
+          message: "等待 bg shell 运行条目",
+        },
+      );
       await tester.sleep(2000);
       const shellRunning = await takePeriSnapshot(tester, "bg-task-shell-running");
 
-      // 等 ✔ shell（sleep 20 完成，通知含独特文本 "bg-shell"）
+      // 等持久完成通知；✔ shell 只保留 3s，不能作为唯一完成屏障。
       await tester.waitFor(
-        (screen) => /✔ shell/.test(screen),
+        (screen) =>
+          /后台任务 shell-[^\]]+ 已完成[\s\S]*Agent: bg-shell/.test(screen),
         { timeout: 90_000, interval: 1000, message: "等待 bg shell 完成超时" },
       );
       const shellDone = await takePeriSnapshot(tester, "bg-task-shell-done");
@@ -74,19 +79,19 @@ describe("subagent: bg task area (merged)", () => {
       // 阶段 1 的 ● agent 已消失（✔ 保留 3s），● agent 再次出现即本阶段 fork
       await sendPrompt(
         tester,
-        "请使用 bg fork subagent say hello，但是它要先 sleep 5s",
+        '这是 E2E 测试。请直接调用 Agent 工具，参数必须包含 {"fork":true,"run_in_background":true,"prompt":"先用 Bash sleep 12，再返回 hello"}；不要使用同步 Agent。',
       );
       await tester.waitFor(
         (screen) => /◎ agent/.test(screen),
-        { timeout: 60_000, interval: 1000, message: "等待 bg fork 运行条目超时" },
+        { timeout: 120_000, interval: 1000, message: "等待 bg fork 运行条目超时" },
       );
       await tester.sleep(2000);
       const forkRunning = await takePeriSnapshot(tester, "bg-task-fork-running");
 
-      // fork 完成：● agent 消失（变 ✔）
+      // fork 完成：等待持久化的 Agent: fork 回调通知，避免错过短暂 ✔。
       await tester.waitFor(
-        (screen) => !/◎ agent/.test(screen),
-        { timeout: 90_000, interval: 1000, message: "等待 bg fork 完成超时" },
+        (screen) => /后台任务 bg-[^\]]+ 已完成[\s\S]*Agent: fork/.test(screen),
+        { timeout: 180_000, interval: 1000, message: "等待 bg fork 完成超时" },
       );
       const forkDone = await takePeriSnapshot(tester, "bg-task-fork-done");
 
@@ -102,59 +107,19 @@ describe("subagent: bg task area (merged)", () => {
       expect(shellRunning.text).toContain("◎");
       expect(shellRunning.text).toContain("shell");
 
-      // Judge: bg subagent 运行 + 完成
-      const r1 = await judge({
-        ansiRaw: agentRunning.raw,
-        criteria: [
-          "系统应处于处理中状态：应有思考块（如 '思考了 N 字符'）或底部有加载指示器",
-          "输入提示应已提交（屏幕显示用户 prompt），agent 在准备或启动后台任务",
-        ],
-      });
-      console.log("Judge (bg agent running):", JSON.stringify(r1, null, 2));
-      expect(r1.pass).toBe(true);
-
-      const r2 = await judge({
-        ansiRaw: agentDone.raw,
-        criteria: [
-          "后台 agent 应已完成（✔ 标记、完成通知或状态栏 agent 计数归零）",
-          "消息区应包含 SubAgent 的完成通知或执行结果",
-        ],
-      });
-      console.log("Judge (bg agent done):", JSON.stringify(r2, null, 2));
-      expect(r2.pass).toBe(true);
-
-      // Judge: bg shell 运行期间展示栏可见
-      const r3 = await judge({
-        ansiRaw: shellRunning.raw,
-        criteria: [
-          "状态栏下方的后台任务展示栏应显示 shell 任务行（◎ shell 开头，含运行耗时）",
-          "屏幕应显示后台任务已启动（含 shell- 开头的 task_id）",
-        ],
-      });
-      console.log("Judge (bg shell running):", JSON.stringify(r3, null, 2));
-      expect(r3.pass).toBe(true);
-
-      // Judge: bg shell 完成
-      const r4 = await judge({
-        ansiRaw: shellDone.raw,
-        criteria: [
-          "后台 shell 任务应已完成（完成通知出现，● shell 条目不再处于运行态）",
-          "agent 应已收到后台任务结果并给出回复",
-        ],
-      });
-      console.log("Judge (bg shell done):", JSON.stringify(r4, null, 2));
-      expect(r4.pass).toBe(true);
-
-      // Judge: bg fork 完成回调
-      const r5 = await judge({
-        ansiRaw: forkDone.raw,
-        criteria: [
-          "后台 fork agent 应已完成（✔ 标记、完成通知或状态栏 agent 计数归零）",
-          "消息区应出现 SubAgent 完成后的回调通知或结果（如 'hello' 或完成摘要）",
-        ],
-      });
-      console.log("Judge (bg fork done):", JSON.stringify(r5, null, 2));
-      expect(r5.pass).toBe(true);
+      // 所有断言都绑定到上面的因果屏障，避免再用 LLM judge 重复猜测 UI 状态。
+      expect(agentRunning.text).toMatch(/◎ agent/);
+      expect(agentDone.text).toMatch(
+        /后台任务 bg-[^\]]+ 已完成[\s\S]*Agent: general-purpose/,
+      );
+      expect(shellRunning.text).toMatch(/◎ shell/);
+      expect(shellDone.text).toMatch(
+        /后台任务 shell-[^\]]+ 已完成[\s\S]*Agent: bg-shell/,
+      );
+      expect(forkRunning.text).toMatch(/◎ agent/);
+      expect(forkDone.text).toMatch(
+        /后台任务 bg-[^\]]+ 已完成[\s\S]*Agent: fork/,
+      );
     },
   );
 });

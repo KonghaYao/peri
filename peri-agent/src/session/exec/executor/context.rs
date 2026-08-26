@@ -163,7 +163,8 @@ pub struct SessionContext {
     pub effective_context_window: u32,
     /// CLAUDE.md excludes（原 `peri_config.config.claude_md_excludes`）。
     pub claude_md_excludes: Option<Vec<String>>,
-    /// 会话语言偏好（原 `peri_config.config.language`）。
+    /// `turn.frozen=None` 时构造最小 snapshot 的语言回退。
+    /// production stage/render/subagent 必须从 `FrozenSessionData` 派生语言。
     pub language: Option<String>,
     /// Compact 配置（`load_compact_config` 语义：unwrap_or_default + env
     /// overrides 每轮在宿主构造点应用——[TRAP] env 每轮重读，非 frozen）。
@@ -258,12 +259,6 @@ pub struct SessionContext {
     /// 构造——生产不可达，print mode 已走 session/new 构建，None 时回落
     /// 最小 FrozenSessionData）。
     pub frozen_fallback_builder: Option<FrozenFallbackBuilder>,
-
-    /// 会话级 MetaHarness 状态投影（段落覆盖 + middleware 关闭集合）。
-    ///
-    /// 由 ACP 宿主从当前 session 的冻结数据投影（`FrozenSessionData::meta_harness()`），
-    /// 禁止从每 turn 的当前配置重建（ARC-FROZEN-001 / 设计 §2.5-2.6）。
-    pub meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
 }
 
 /// Per-turn computed configuration derived from [`SessionContext`].

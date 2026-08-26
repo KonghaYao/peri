@@ -1,3 +1,4 @@
+use crate::acp_client::{InteractionOwner, InteractionUiOutcome};
 use crate::kit::stream_data::*;
 use peri_acp_types::event_data::*;
 use serde_json::Value;
@@ -13,6 +14,14 @@ use serde_json::Value;
 pub struct AcpEventWithEpoch {
     pub event: AcpEventData,
     pub active_session_id: String,
+}
+
+/// TUI 内部 interaction 快照：RequestId 与 payload 从 notifier 起原子同行。
+#[derive(Debug, Clone)]
+pub struct PendingInteraction<T> {
+    pub owner: InteractionOwner,
+    pub request_id_json: String,
+    pub payload: T,
 }
 
 /// Decoded ACP custom event.
@@ -139,10 +148,10 @@ pub enum AcpEventData {
 
     // -- §4.5 Interaction requests (require user decision) ------------------
     /// `"hitl-pending"` -- HITL tool approval request.
-    HitlPending(HitlPending),
+    HitlPending(PendingInteraction<HitlPending>),
 
     /// `"ask-user"` -- multi-question form initiated by the agent.
-    AskUser(AskUser),
+    AskUser(PendingInteraction<AskUser>),
 
     /// TUI 内部事件（Slice 4 §6.8）：interaction block 结果回写。仅 TUI 内部
     /// 使用，不走 ACP 协议——`ask_user_action` / `hitl_response` 消费者在
@@ -150,7 +159,10 @@ pub enum AcpEventData {
     /// 按 `request_id` 匹配，clone + `pending=false` + `result` + 重算 hash +
     /// 原位 set（COW）。`result` 为渲染文案（纯文本，无符号——渲染层负责
     /// 加状态符号与颜色）。
-    InteractionResolved { request_id: String, result: String },
+    InteractionTerminal {
+        owner: InteractionOwner,
+        outcome: InteractionUiOutcome,
+    },
 
     /// `"rewind-preview"` -- preview of changes that will be undone.
     RewindPreview(RewindPreview),

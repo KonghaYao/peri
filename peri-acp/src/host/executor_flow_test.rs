@@ -27,14 +27,16 @@ use peri_acp_types::{
     permission::{PermissionMode, SharedPermissionMode},
     store::ThreadStore,
 };
-use peri_agent::session::exec::executor_helpers::{ForwarderLauncherFn, StageBuildFn};
+use peri_agent::session::exec::executor_helpers::{
+    ForwarderLauncherFn, StageBuildFn, StageBuildRequest,
+};
 use peri_agent::thread::FilesystemThreadStore;
 use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use crate::session::executor::{
-    run_session_loop, AutoClassifierFactory, PromptStopReason, SessionContext, SubagentLlmFactory,
-    TurnInput,
+    run_session_loop, AutoClassifierFactory, FrozenSessionData, PromptStopReason, SessionContext,
+    SubagentLlmFactory, TurnInput,
 };
 use crate::{
     provider::{LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels},
@@ -85,6 +87,7 @@ struct MockEventSink {
     push_done_count: Mutex<usize>,
     push_done_stop_reasons: Mutex<Vec<String>>,
     pushed_events: Mutex<Vec<String>>,
+    operations: Mutex<Vec<String>>,
 }
 
 impl MockEventSink {
@@ -93,6 +96,7 @@ impl MockEventSink {
             push_done_count: Mutex::new(0),
             push_done_stop_reasons: Mutex::new(Vec::new()),
             pushed_events: Mutex::new(Vec::new()),
+            operations: Mutex::new(Vec::new()),
         }
     }
 
@@ -105,7 +109,8 @@ impl MockEventSink {
 impl EventSink for MockEventSink {
     async fn push_event(&self, _session_id: &str, event: &ExecutorEvent, _context_window: u32) {
         let json = serde_json::to_string(event).unwrap_or_default();
-        self.pushed_events.lock().unwrap().push(json);
+        self.pushed_events.lock().unwrap().push(json.clone());
+        self.operations.lock().unwrap().push(json);
     }
 
     async fn push_done(&self, _session_id: &str, stop_reason: &str, _request_id: Option<&str>) {
@@ -114,6 +119,100 @@ impl EventSink for MockEventSink {
             .lock()
             .unwrap()
             .push(stop_reason.to_string());
+        self.operations
+            .lock()
+            .unwrap()
+            .push(format!("done:{stop_reason}"));
+    }
+}
+
+#[cfg(not(windows))]
+struct CancelGateModel {
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[cfg(not(windows))]
+#[async_trait]
+impl Model for CancelGateModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_streaming: true,
+            ..ModelCapabilities::default()
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: AgentCancellationToken,
+    ) -> ModelResult<ModelStream> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        Ok(ModelStream::with_parent_cancellation(
+            stream::pending::<ModelResult<ModelStreamEvent>>(),
+            cancellation,
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+struct FatalModel;
+
+#[cfg(not(windows))]
+#[async_trait]
+impl Model for FatalModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_streaming: true,
+            ..ModelCapabilities::default()
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancellation: AgentCancellationToken,
+    ) -> ModelResult<ModelStream> {
+        Err(peri_model::ModelError::http_status(
+            500,
+            "test-provider",
+            Some("safe-request-id"),
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+struct CapturePromptModel {
+    requests: Arc<Mutex<Vec<ModelRequest>>>,
+}
+
+#[cfg(not(windows))]
+#[async_trait]
+impl Model for CapturePromptModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_streaming: true,
+            ..ModelCapabilities::default()
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        cancellation: AgentCancellationToken,
+    ) -> ModelResult<ModelStream> {
+        self.requests.lock().unwrap().push(request);
+        let response = ModelResponse::new(
+            ModelMessage::assistant_text("done"),
+            StopReason::EndTurn,
+            None,
+            None,
+        )?;
+        Ok(ModelStream::with_parent_cancellation(
+            stream::iter(vec![Ok(ModelStreamEvent::Completed(response))]),
+            cancellation,
+        ))
     }
 }
 
@@ -307,7 +406,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         allow_await_wake: false,
         continuation_notify: None,
         frozen_fallback_builder: None,
-        meta_harness: Default::default(),
     }
 }
 
@@ -378,8 +476,7 @@ fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
             compact_pre_hook,
             compact_post_hook,
             sbr.cached_llm.as_ref(),
-            sbr.system_prompt,
-            sbr.frozen,
+            sbr.frozen_session,
             sbr.event_handler,
             sbr.agent_overrides,
             sbr.preload_skills,
@@ -420,6 +517,593 @@ fn make_turn_input(
         stage_build,
         forwarder_launcher: make_forwarder_launcher(),
     }
+}
+
+fn make_sentinel_frozen() -> FrozenSessionData {
+    use peri_acp_types::meta_harness::MetaHarnessState;
+    use peri_agent::session::FrozenContext;
+
+    let mut meta = MetaHarnessState::default();
+    meta.section_overrides.insert(
+        "01_intro".into(),
+        Arc::from("FROZEN_SECTION_OVERRIDE_MARKER"),
+    );
+    meta.disabled_middlewares.insert("SkillsMiddleware".into());
+    meta.built_in_subagents_enabled = false;
+    FrozenSessionData::from_frozen_parts(
+        FrozenContext::builder()
+            .system_prompt("BASE_FROZEN_SYSTEM_SENTINEL")
+            .claude_md("FROZEN_CLAUDE_SENTINEL")
+            .skill_summary("FROZEN_SKILLS_SENTINEL")
+            .date("1999-12-31")
+            .language(Some("zh-CN"))
+            .meta_harness(meta)
+            .build(),
+        Some(Arc::from("FROZEN_LOCAL_SENTINEL")),
+    )
+}
+
+fn make_stage_request(
+    frozen_session: FrozenSessionData,
+    agent_overrides: Option<peri_acp_types::agents::AgentOverrides>,
+) -> StageBuildRequest {
+    StageBuildRequest {
+        cached_llm: None,
+        frozen_session,
+        event_handler: Arc::new(ParityFakeEventHandler),
+        agent_overrides,
+        preload_skills: vec![],
+        child_handler_factory: None,
+        auxiliary_model: None,
+        thread_persistence: Default::default(),
+        goal_controller: None,
+        task_manager: None,
+        on_bg_complete: None,
+    }
+}
+
+#[cfg(not(windows))]
+fn system_text(request: &ModelRequest) -> String {
+    request.messages[0]
+        .text_content()
+        .expect("首条必须是 system message")
+}
+
+#[cfg(not(windows))]
+fn frozen_with_dynamic_prompt_policy(
+    base: &'static str,
+    disabled_middlewares: &[&str],
+) -> FrozenSessionData {
+    use peri_acp_types::meta_harness::MetaHarnessState;
+    use peri_agent::session::FrozenContext;
+
+    FrozenSessionData::from_frozen_parts(
+        FrozenContext::builder()
+            .system_prompt(base)
+            .claude_md("")
+            .skill_summary("")
+            .date("2026-08-25")
+            .meta_harness(MetaHarnessState {
+                disabled_middlewares: disabled_middlewares
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect(),
+                ..Default::default()
+            })
+            .build(),
+        None,
+    )
+}
+
+/// [回归测试] production 首个 Reason 必须看到同一 middleware chain 在
+/// before_agent 后生成的 PTC 与 ToolSearch dynamic prompt contribution。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_production_first_reason_sees_after_before_agent_dynamic_contributions() {
+    use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
+    use peri_agent::agent::stages::{run_react_loop, LoopResult};
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let model = Arc::new(CapturePromptModel {
+        requests: Arc::clone(&requests),
+    }) as Arc<dyn Model>;
+    let mut ctx = make_session_context("dynamic-first-reason");
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let frozen = frozen_with_dynamic_prompt_policy("DYNAMIC_BASE_SENTINEL", &[]);
+    let (out, _) = make_stage_build(&ctx)(make_stage_request(frozen, None));
+    let parent = Arc::clone(&out.session);
+    out.context.session.queue.push(QueuedMessage::new(
+        MessageKind::Prompt,
+        MessageSource::UserInput,
+        BaseMessage::human("finish"),
+    ));
+
+    let loop_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_react_loop(out.context, 1),
+    )
+    .await
+    .expect("真实 loop 不得挂起");
+
+    assert!(matches!(loop_result, LoopResult::Completed));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let system = system_text(&requests[0]);
+    let ptc_offset = system
+        .find("RunPtcCode programmatically executes")
+        .expect("首个 Reason 缺少 PTC contribution");
+    let tool_search_offset = system
+        .find("## Deferred Tools")
+        .expect("首个 Reason 缺少 ToolSearch contribution");
+    assert!(ptc_offset < tool_search_offset, "{system}");
+    assert_eq!(system.matches("DYNAMIC_BASE_SENTINEL").count(), 1);
+    assert_eq!(system.matches("## Deferred Tools").count(), 1);
+    let tool_search = &system[tool_search_offset..];
+    assert_eq!(tool_search.matches("- RunPtcCode:").count(), 1);
+    assert_eq!(
+        tool_search
+            .matches("Discover deferred tools by name or keyword")
+            .count(),
+        1
+    );
+    assert_eq!(
+        tool_search
+            .matches("Invoke a registered deferred tool by name")
+            .count(),
+        1
+    );
+    let ptc = &system[ptc_offset..tool_search_offset];
+    assert_eq!(
+        ptc.matches("RunPtcCode programmatically executes").count(),
+        1
+    );
+    assert_eq!(ptc.matches("RPC-callable tool catalog").count(), 1);
+    assert_eq!(
+        &*parent.store().frozen.system_prompt,
+        "DYNAMIC_BASE_SENTINEL"
+    );
+    assert!(!parent
+        .store()
+        .frozen
+        .system_prompt
+        .contains("## Deferred Tools"));
+    assert!(!parent
+        .store()
+        .frozen
+        .system_prompt
+        .contains("RPC-callable tool catalog"));
+}
+
+/// [回归测试] fresh stage 必须从当前 filtered session-local 工具视图重算动态段，
+/// 共享 ToolSearchIndex 不能泄漏上一 stage 的 PTC inventory/cache。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_production_fresh_stage_rebuild_recomputes_dynamic_contributions_from_disabled_view() {
+    use peri_acp_types::ports::ToolSearchPort;
+    use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
+    use peri_agent::agent::stages::{run_react_loop, LoopResult};
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let model = Arc::new(CapturePromptModel {
+        requests: Arc::clone(&requests),
+    }) as Arc<dyn Model>;
+    let shared_index = Arc::new(ToolSearchIndex::default());
+    let mut first_ctx = make_session_context("dynamic-fresh-enabled");
+    first_ctx.primary_llm_factory = {
+        let model = Arc::clone(&model);
+        Some(Arc::new(move || Arc::clone(&model)))
+    };
+    first_ctx.tool_search_index = Arc::clone(&shared_index) as Arc<dyn ToolSearchPort>;
+    let first_frozen = frozen_with_dynamic_prompt_policy("DYNAMIC_FRESH_BASE_ONE", &[]);
+    let (first, _) = make_stage_build(&first_ctx)(make_stage_request(first_frozen, None));
+    let first_parent = Arc::clone(&first.session);
+    first.context.session.queue.push(QueuedMessage::new(
+        MessageKind::Prompt,
+        MessageSource::UserInput,
+        BaseMessage::human("first"),
+    ));
+
+    let first_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_react_loop(first.context, 1),
+    )
+    .await
+    .expect("第一 stage 不得挂起");
+
+    assert!(matches!(first_result, LoopResult::Completed));
+    {
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let first_system = system_text(&captured[0]);
+        assert!(first_system.contains("RunPtcCode programmatically executes"));
+        let first_tool_search = first_system
+            .find("## Deferred Tools")
+            .map(|offset| &first_system[offset..])
+            .expect("第一 stage 缺少 ToolSearch contribution");
+        assert_eq!(first_tool_search.matches("- RunPtcCode:").count(), 1);
+    }
+    assert_eq!(
+        &*first_parent.store().frozen.system_prompt,
+        "DYNAMIC_FRESH_BASE_ONE"
+    );
+    drop(first_parent);
+    drop(first.session);
+    drop(first.event_handles);
+    drop(first.todo_rx);
+    drop(first.bg_event_rx);
+    drop(first_ctx);
+
+    let mut second_ctx = make_session_context("dynamic-fresh-disabled");
+    second_ctx.primary_llm_factory = {
+        let model = Arc::clone(&model);
+        Some(Arc::new(move || Arc::clone(&model)))
+    };
+    second_ctx.tool_search_index = shared_index as Arc<dyn ToolSearchPort>;
+    let second_frozen =
+        frozen_with_dynamic_prompt_policy("DYNAMIC_FRESH_BASE_TWO", &["PtcMiddleware"]);
+    let (second, _) = make_stage_build(&second_ctx)(make_stage_request(second_frozen, None));
+    let second_parent = Arc::clone(&second.session);
+    second.context.session.queue.push(QueuedMessage::new(
+        MessageKind::Prompt,
+        MessageSource::UserInput,
+        BaseMessage::human("second"),
+    ));
+
+    let second_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_react_loop(second.context, 1),
+    )
+    .await
+    .expect("第二 stage 不得挂起");
+
+    assert!(matches!(second_result, LoopResult::Completed));
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    let second_system = system_text(&captured[1]);
+    assert_eq!(second_system.matches("DYNAMIC_FRESH_BASE_TWO").count(), 1);
+    assert_eq!(second_system.matches("## Deferred Tools").count(), 1);
+    assert!(second_system.contains("Discover deferred tools by name or keyword"));
+    assert!(second_system.contains("Invoke a registered deferred tool by name"));
+    assert!(!second_system.contains("RunPtcCode programmatically executes"));
+    let second_tool_search = second_system
+        .find("## Deferred Tools")
+        .map(|offset| &second_system[offset..])
+        .expect("第二 stage 缺少 ToolSearch contribution");
+    assert!(!second_tool_search.contains("- RunPtcCode:"));
+    assert!(!second_system.contains("RunPtcCode"));
+    assert_eq!(
+        &*second_parent.store().frozen.system_prompt,
+        "DYNAMIC_FRESH_BASE_TWO"
+    );
+    assert!(!second_parent
+        .store()
+        .frozen
+        .system_prompt
+        .contains("## Deferred Tools"));
+}
+
+#[derive(Clone)]
+struct RecordingSubagentAssembler {
+    context: Arc<Mutex<Option<peri_agent::session::subagent::SubagentChainContext>>>,
+}
+
+impl peri_agent::session::subagent::SubagentChainAssembler for RecordingSubagentAssembler {
+    fn assemble(
+        &self,
+        ctx: &peri_agent::session::subagent::SubagentChainContext,
+    ) -> peri_agent::middleware::MiddlewareChain {
+        *self.context.lock().unwrap() = Some(ctx.clone());
+        peri_agent::middleware::MiddlewareChain::new()
+    }
+}
+
+struct FixedAnswerReactLlm;
+
+#[async_trait]
+impl peri_agent::agent::react::ReactLLM for FixedAnswerReactLlm {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[peri_agent::messages::BaseMessage],
+        _tools: &[&dyn peri_agent::tools::BaseTool],
+        _streaming: Option<peri_agent::agent::react::StreamingContext>,
+    ) -> peri_agent::error::AgentResult<peri_agent::agent::react::Reasoning> {
+        Ok(peri_agent::agent::react::Reasoning::with_answer(
+            "done", "done",
+        ))
+    }
+}
+
+/// [回归测试] production stage 创建的主 Session 必须保存 session/new 的完整
+/// snapshot；一级 child 与其链装配 context 继续复用同一冻结事实和 disabled set。
+#[tokio::test]
+async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
+    use peri_agent::session::subagent::{
+        SessionFactory, SubagentCancelPolicy, SubagentRunMode, SubagentSpawnConfig,
+    };
+
+    let mut ctx = make_session_context("frozen-production-parent");
+    ctx.language = Some("en-US".into());
+    let stage_build = make_stage_build(&ctx);
+    let sentinel = make_sentinel_frozen();
+    let (out, _) = stage_build(make_stage_request(sentinel.clone(), None));
+    let parent_frozen = &out.session.store().frozen;
+    assert_eq!(&*parent_frozen.system_prompt, sentinel.system_prompt());
+    assert_eq!(&*parent_frozen.claude_md, "FROZEN_CLAUDE_SENTINEL");
+    assert_eq!(&*parent_frozen.skill_summary, "FROZEN_SKILLS_SENTINEL");
+    assert_eq!(&*parent_frozen.date, "1999-12-31");
+    assert_eq!(parent_frozen.language.as_deref(), Some("zh-CN"));
+    assert_eq!(parent_frozen.meta_harness, *sentinel.meta_harness());
+    let local = out
+        .session
+        .subagent_host()
+        .and_then(|host| host.frozen_claude_local_md.as_ref().map(|v| (**v).clone()));
+    assert_eq!(local.as_deref(), Some("FROZEN_LOCAL_SENTINEL"));
+
+    let recorded = Arc::new(Mutex::new(None));
+    let child = SessionFactory::spawn_subagent(
+        Some(&out.session),
+        SubagentSpawnConfig {
+            agent_name: "frozen-child".into(),
+            prompt: "finish".into(),
+            parent_messages: vec![],
+            cancel_policy: SubagentCancelPolicy::Cascade,
+            max_iterations: 1,
+            fork_directive_kind: None,
+            run_mode: SubagentRunMode::Sync,
+            skill_names: vec![],
+            llm: Box::new(FixedAnswerReactLlm),
+            chain_assembler: Arc::new(RecordingSubagentAssembler {
+                context: Arc::clone(&recorded),
+            }),
+            tools: vec![],
+            system_prompt: None,
+            error_suggest_registry: None,
+            tool_registry_snapshot: None,
+            tool_invocation_resolver: None,
+            compact_config: None,
+            context_budget: None,
+            compact_llm: None,
+            thread_store: None,
+            event_handler: None,
+            bg_event_sender: None,
+            task_manager: None,
+            on_bg_complete: None,
+            langfuse_bridge: None,
+            on_subagent_start: None,
+            on_subagent_stop: None,
+            register_runtime: None,
+            deregister_runtime: None,
+            parent_agent_id: None,
+            cancel_token: None,
+            cwd: None,
+            parent_thread_id: None,
+            frozen_claude_md: None,
+            frozen_claude_local_md: local,
+            frozen_skill_summary: None,
+            frozen_date: None,
+        },
+    )
+    .await
+    .expect("child spawn 必须成功");
+    let child_frozen = &child.session.store().frozen;
+    assert_eq!(&*child_frozen.system_prompt, "BASE_FROZEN_SYSTEM_SENTINEL");
+    assert_eq!(&*child_frozen.claude_md, "FROZEN_CLAUDE_SENTINEL");
+    assert_eq!(&*child_frozen.skill_summary, "FROZEN_SKILLS_SENTINEL");
+    assert_eq!(&*child_frozen.date, "1999-12-31");
+    assert_eq!(child_frozen.language.as_deref(), Some("zh-CN"));
+    assert_eq!(child_frozen.meta_harness, *sentinel.meta_harness());
+    let child_ctx = recorded
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("child chain context");
+    assert_eq!(
+        child_ctx.frozen_claude_md.as_deref(),
+        Some("FROZEN_CLAUDE_SENTINEL")
+    );
+    assert_eq!(
+        child_ctx.frozen_claude_local_md.as_deref(),
+        Some("FROZEN_LOCAL_SENTINEL")
+    );
+    assert_eq!(
+        child_ctx.frozen_skill_summary.as_deref(),
+        Some("FROZEN_SKILLS_SENTINEL")
+    );
+    assert_eq!(
+        child_ctx.meta_harness_disabled,
+        sentinel.meta_harness().disabled_middlewares
+    );
+}
+
+/// [回归测试] override 只生成 model-facing effective prompt；其语言、段落覆盖
+/// 与 disabled policy 必须来自 frozen snapshot，不能被当轮 SessionContext 覆盖。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_production_stage_uses_frozen_language_and_keeps_override_out_of_base_prompt() {
+    use peri_acp_types::agents::AgentOverrides;
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let model = Arc::new(CapturePromptModel {
+        requests: Arc::clone(&requests),
+    }) as Arc<dyn Model>;
+    let mut ctx = make_session_context("frozen-language-override");
+    ctx.language = Some("en-US".into());
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let sentinel = make_sentinel_frozen();
+    let stage_build = make_stage_build(&ctx);
+    let (out, _) = stage_build(make_stage_request(
+        sentinel.clone(),
+        Some(AgentOverrides {
+            persona: Some("OVERRIDE_PERSONA_MARKER".into()),
+            ..Default::default()
+        }),
+    ));
+
+    out.context
+        .runtime
+        .llm
+        .generate_reasoning(&[], &[], None)
+        .await
+        .expect("capturing model 必须返回固定完成响应");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let effective = requests[0].messages[0]
+        .text_content()
+        .expect("首条必须是 system message");
+    assert!(effective.contains("OVERRIDE_PERSONA_MARKER"), "{effective}");
+    assert!(
+        effective.contains("FROZEN_SECTION_OVERRIDE_MARKER"),
+        "{effective}"
+    );
+    assert!(
+        effective.contains("Always respond in Simplified Chinese"),
+        "{effective}"
+    );
+    assert!(
+        !effective.contains("Always respond in en-US"),
+        "{effective}"
+    );
+    assert!(
+        effective.contains("Today's date: 1999-12-31"),
+        "{effective}"
+    );
+    assert_eq!(effective.matches("Today's date:").count(), 1, "{effective}");
+    assert_eq!(
+        &*out.session.store().frozen.system_prompt,
+        "BASE_FROZEN_SYSTEM_SENTINEL"
+    );
+    assert!(!out
+        .session
+        .store()
+        .frozen
+        .system_prompt
+        .contains("OVERRIDE_PERSONA_MARKER"));
+    assert_eq!(
+        out.session.store().frozen.meta_harness.disabled_middlewares,
+        sentinel.meta_harness().disabled_middlewares
+    );
+}
+
+/// [回归测试] 空 CLAUDE/skills 是冻结的“缺席”而非 legacy None。即使文件在
+/// snapshot 后出现，真实 before_agent lifecycle 也不得把 marker 注入贡献。
+#[cfg(not(windows))]
+#[tokio::test]
+#[serial]
+async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files_appear() {
+    use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
+    use peri_agent::agent::stages::{run_react_loop, LoopResult};
+    use peri_agent::session::FrozenContext;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(tmp.path());
+    let cwd = tmp.path().join("project");
+    std::fs::create_dir_all(cwd.join(".claude/skills/late-skill")).unwrap();
+    let frozen = FrozenSessionData::from_frozen_parts(
+        FrozenContext::builder()
+            .system_prompt("EMPTY_FROZEN_BASE")
+            .claude_md("")
+            .skill_summary("")
+            .date("2026-08-25")
+            .build(),
+        None,
+    );
+    std::fs::write(cwd.join("CLAUDE.md"), "LATE_CLAUDE_MARKER").unwrap();
+    std::fs::write(
+        cwd.join(".claude/skills/late-skill/SKILL.md"),
+        "---\nname: late-skill\ndescription: LATE_SKILL_MARKER\n---\nlate\n",
+    )
+    .unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let model = Arc::new(CapturePromptModel {
+        requests: Arc::clone(&requests),
+    }) as Arc<dyn Model>;
+    let mut ctx = make_session_context("late-frozen-files");
+    ctx.cwd = cwd.to_string_lossy().into_owned();
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let stage_build = make_stage_build(&ctx);
+    let (out, _) = stage_build(make_stage_request(frozen, None));
+    let parent = Arc::clone(&out.session);
+    let chain = Arc::clone(&out.context.runtime.middleware_chain);
+    out.context.session.queue.push(QueuedMessage::new(
+        MessageKind::Prompt,
+        MessageSource::UserInput,
+        BaseMessage::human("finish"),
+    ));
+
+    let loop_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_react_loop(out.context, 1),
+    )
+    .await
+    .expect("真实 loop 不得挂起");
+
+    assert!(matches!(loop_result, LoopResult::Completed));
+    let contributions = chain.collect_prompt_contributions();
+    assert!(
+        !contributions.contains("LATE_CLAUDE_MARKER"),
+        "{contributions}"
+    );
+    assert!(
+        !contributions.contains("LATE_SKILL_MARKER"),
+        "{contributions}"
+    );
+    assert_eq!(&*parent.store().frozen.claude_md, "");
+    assert_eq!(&*parent.store().frozen.skill_summary, "");
+
+    let recorded = Arc::new(Mutex::new(None));
+    let child = peri_agent::session::subagent::SessionFactory::spawn_subagent(
+        Some(&parent),
+        peri_agent::session::subagent::SubagentSpawnConfig {
+            agent_name: "empty-frozen-child".into(),
+            prompt: "finish".into(),
+            parent_messages: vec![],
+            cancel_policy: peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
+            max_iterations: 1,
+            fork_directive_kind: None,
+            run_mode: peri_agent::session::subagent::SubagentRunMode::Sync,
+            skill_names: vec![],
+            llm: Box::new(FixedAnswerReactLlm),
+            chain_assembler: Arc::new(RecordingSubagentAssembler {
+                context: Arc::clone(&recorded),
+            }),
+            tools: vec![],
+            system_prompt: None,
+            error_suggest_registry: None,
+            tool_registry_snapshot: None,
+            tool_invocation_resolver: None,
+            compact_config: None,
+            context_budget: None,
+            compact_llm: None,
+            thread_store: None,
+            event_handler: None,
+            bg_event_sender: None,
+            task_manager: None,
+            on_bg_complete: None,
+            langfuse_bridge: None,
+            on_subagent_start: None,
+            on_subagent_stop: None,
+            register_runtime: None,
+            deregister_runtime: None,
+            parent_agent_id: None,
+            cancel_token: None,
+            cwd: None,
+            parent_thread_id: None,
+            frozen_claude_md: None,
+            frozen_claude_local_md: parent
+                .subagent_host()
+                .and_then(|host| host.frozen_claude_local_md.as_ref().map(|v| (**v).clone())),
+            frozen_skill_summary: None,
+            frozen_date: None,
+        },
+    )
+    .await
+    .expect("child spawn 必须成功");
+    assert_eq!(&*child.session.store().frozen.claude_md, "");
+    assert_eq!(&*child.session.store().frozen.skill_summary, "");
+    let child_ctx = recorded.lock().unwrap().clone().expect("child context");
+    assert_eq!(child_ctx.frozen_claude_md.as_deref(), Some(""));
+    assert_eq!(child_ctx.frozen_skill_summary.as_deref(), Some(""));
 }
 
 // ── run_session_loop: AsyncContinuation 内部续跑（非 keepgoing）─────────────
@@ -523,6 +1207,137 @@ async fn test_turn_terminal_state_unique_and_last() {
         Some("cancelled".to_string()),
         "push_done 终态与 TurnEnded(Interrupted) 语义一致"
     );
+}
+
+/// [回归测试] 取消发生在真实 ModelStream 已返回之后，ACP 仍必须
+/// 对 PromptResult、TurnEnded 和 push_done 给出唯一且一致的 cancelled 终态。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_cancel_during_reason_has_one_interrupted_terminal() {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let model: Arc<dyn Model> = Arc::new(CancelGateModel {
+        entered: Mutex::new(Some(entered_tx)),
+    });
+    let mut ctx = make_session_context("test-cancel-during-reason");
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let cancel = ctx.cancel.clone();
+    let stage_build = make_stage_build(&ctx);
+    let sink = Arc::new(MockEventSink::new());
+    let turn = make_turn_input(
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+        MessageContent::text("cancel while reasoning"),
+        false,
+        vec![],
+        stage_build,
+    );
+    let task = tokio::spawn(async move { run_session_loop(ctx, turn).await });
+    entered_rx.await.expect("primary model stream 必须已返回");
+
+    cancel.cancel();
+    let result = task.await.expect("session loop task 不得 panic");
+
+    assert!(!result.ok);
+    assert_eq!(result.stop_reason, PromptStopReason::Cancelled);
+    assert!(result.failure.is_none(), "用户取消不得产生 fatal failure");
+    let events: Vec<ExecutorEvent> = sink
+        .pushed_events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|json| serde_json::from_str(json).unwrap())
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ExecutorEvent::TurnStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ExecutorEvent::TurnEnded { .. }))
+            .count(),
+        1
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ExecutorEvent::TurnEnded {
+            status: peri_acp_types::event::TurnStatus::Interrupted,
+            error_kind: Some(peri_acp_types::event::TurnErrorKind::Interrupted),
+            ..
+        }
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ExecutorEvent::AgentExecutionFailed { .. })));
+    assert_eq!(sink.push_done_count(), 1);
+    assert_eq!(
+        sink.push_done_stop_reasons.lock().unwrap().as_slice(),
+        ["cancelled"]
+    );
+}
+
+/// fatal 终态的兼容 failure 事件必须在唯一 TurnEnded 之前，
+/// 且与 PromptResult 共用同一份脱敏文案；done 仅在事件泵排空后发送。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_fatal_failure_precedes_turn_end_and_done() {
+    let model: Arc<dyn Model> = Arc::new(FatalModel);
+    let mut ctx = make_session_context("test-fatal-terminal-order");
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let stage_build = make_stage_build(&ctx);
+    let sink = Arc::new(MockEventSink::new());
+    let turn = make_turn_input(
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+        MessageContent::text("trigger fatal model error"),
+        false,
+        vec![],
+        stage_build,
+    );
+
+    let result = run_session_loop(ctx, turn).await;
+
+    let failure = result.failure.expect("fatal model error 必须产生 failure");
+    assert!(!failure.public_message.is_empty());
+    assert!(!failure.public_message.contains("safe-request-id"));
+    let operations = sink.operations.lock().unwrap();
+    let failure_index = operations
+        .iter()
+        .position(|operation| operation.contains("agent_execution_failed"))
+        .expect("必须发射 AgentExecutionFailed");
+    let turn_end_index = operations
+        .iter()
+        .position(|operation| operation.contains("turn_ended"))
+        .expect("必须发射 TurnEnded");
+    let done_index = operations
+        .iter()
+        .position(|operation| operation == "done:end_turn")
+        .expect("必须在 pump drain 后 push_done");
+    assert!(failure_index < turn_end_index && turn_end_index < done_index);
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| operation.contains("turn_ended"))
+            .count(),
+        1
+    );
+    let failure_event: ExecutorEvent = serde_json::from_str(&operations[failure_index]).unwrap();
+    match failure_event {
+        ExecutorEvent::AgentExecutionFailed { message } => {
+            assert_eq!(message, failure.public_message)
+        }
+        other => panic!("预期 AgentExecutionFailed，got: {other:?}"),
+    }
+    let turn_end: ExecutorEvent = serde_json::from_str(&operations[turn_end_index]).unwrap();
+    assert!(matches!(
+        turn_end,
+        ExecutorEvent::TurnEnded {
+            status: peri_acp_types::event::TurnStatus::Error,
+            error_kind: Some(peri_acp_types::event::TurnErrorKind::LlmFailure),
+            ..
+        }
+    ));
 }
 
 /// [AsyncContinuation] 内部续跑不写入空 human prompt：Phase 6 跳过 Prompt push，

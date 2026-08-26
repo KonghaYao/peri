@@ -25,22 +25,25 @@ function existingRunIds(): Set<string> {
     .map((d) => d.name));
 }
 
-/** 在已有 runs 之外查找新出现的 run ID（等 state.json 就绪） */
-function findNewRun(excludeIds: Set<string>, timeoutMs: number): string | null {
+/** 在已有 runs 之外等待一个成功完成且 journal 已落盘的 run。 */
+async function findNewCompletedRun(excludeIds: Set<string>, timeoutMs: number): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!existsSync(WORKFLOW_RUNS_DIR)) {
-      // busy wait
-      continue;
+    if (existsSync(WORKFLOW_RUNS_DIR)) {
+      for (const dirent of readdirSync(WORKFLOW_RUNS_DIR, { withFileTypes: true })) {
+        if (!dirent.isDirectory() || excludeIds.has(dirent.name)) continue;
+        const statePath = join(WORKFLOW_RUNS_DIR, dirent.name, "state.json");
+        if (!existsSync(statePath)) continue;
+        const state = JSON.parse(readFileSync(statePath, "utf-8"));
+        if (state.status === "failed") {
+          throw new Error(`workflow ${dirent.name} failed: ${state.error ?? "unknown error"}`);
+        }
+        if (state.status === "completed" && readJournal(dirent.name).length > 0) {
+          return dirent.name;
+        }
+      }
     }
-    for (const dirent of readdirSync(WORKFLOW_RUNS_DIR, { withFileTypes: true })) {
-      if (!dirent.isDirectory() || excludeIds.has(dirent.name)) continue;
-      const statePath = join(WORKFLOW_RUNS_DIR, dirent.name, "state.json");
-      if (existsSync(statePath)) return dirent.name;
-    }
-    // 短轮询
-    const start = Date.now();
-    while (Date.now() - start < 1000) { /* busy wait 1s */ }
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
   return null;
 }
@@ -81,12 +84,13 @@ describe("workflow: reporting (P2/P0/P3)", () => {
       // workflow-run.test.ts / workflow-panel-columns.test.ts 的用法）
       await sendPrompt(
         tester,
-        "/ultracode 请用 Workflow 工具派发一个 workflow，包含 2 个并行 agent：Agent 1（label: greeter）说 hello world，并用 3 句话描述你看到的内容；Agent 2（label: counter）从 1 数到 10。并行调用前先使用 phase('Test')。",
+        "/ultracode 这是 E2E 测试，请立即且只调用一次 Workflow 工具，不得只解释。script 参数必须等价于以下顶层脚本：export const meta = { name: 'e2e-reporting', description: 'E2E reporting verification' }; phase('Test'); const [greeter, counter] = await parallel([() => agent('用三句话描述 hello world', { label: 'greeter' }), () => agent('从 1 数到 10', { label: 'counter' })]); return { greeter, counter }; 严禁 export default 或任何第二个 export；phase 只传字符串，不得传 callback；parallel 元素必须是零参工厂函数。",
       );
 
-      // 等待新 run 出现（state.json 就绪）
-      const runId = findNewRun(beforeIds, 180_000);
-      expect(runId, "应在 180s 内出现新的 workflow state.json").toBeTruthy();
+      // 等 workflow 成功完成且 journal 落盘；仅看到初始 state.json 不能证明
+      // agent RPC 已执行，失败脚本也会先创建 state.json。
+      const runId = await findNewCompletedRun(beforeIds, 240_000);
+      expect(runId, "应在 240s 内出现成功完成且 journal 非空的新 workflow").toBeTruthy();
       if (!runId) return;
 
       console.log(`runId: ${runId}`);

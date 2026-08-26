@@ -8,7 +8,7 @@ use peri_acp_types::{
         TurnStatus,
     },
     event_v2::EventHandles,
-    frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
+    frozen::{ChildHandlerFactory, ThreadPersistence},
     goal::GoalController,
     identity::EventDeliveryClass,
     messages::BaseMessage,
@@ -27,6 +27,7 @@ use crate::agent::{
     stages::{run_react_loop, LoopResult},
     state::AgentState,
 };
+use crate::session::exec::executor::FrozenSessionData;
 use crate::session::exec::stage_builder::{CachedLlmInstances, V2AgentOutput};
 use crate::session::MessageTranscript;
 
@@ -50,8 +51,7 @@ pub type ForwarderLauncherFn = Arc<
 #[allow(clippy::type_complexity)]
 pub struct StageBuildRequest {
     pub cached_llm: Option<CachedLlmInstances>,
-    pub system_prompt: String,
-    pub frozen: FrozenData,
+    pub frozen_session: FrozenSessionData,
     pub event_handler: Arc<dyn AgentEventHandler>,
     pub agent_overrides: Option<peri_acp_types::agents::AgentOverrides>,
     pub preload_skills: Vec<String>,
@@ -84,8 +84,7 @@ pub struct V2ExecuteRequest {
     pub task_manager: Option<Arc<dyn TaskManager>>,
     pub continuation: bool,
     // ── stage 装配输入（透传 StageBuildRequest）──
-    pub system_prompt: String,
-    pub frozen: FrozenData,
+    pub frozen_session: FrozenSessionData,
     pub event_handler: Arc<dyn AgentEventHandler>,
     pub agent_overrides: Option<peri_acp_types::agents::AgentOverrides>,
     pub preload_skills: Vec<String>,
@@ -131,8 +130,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     });
     let (v2_out, new_cache) = (req.stage_build)(StageBuildRequest {
         cached_llm: req.cached_llm,
-        system_prompt: req.system_prompt,
-        frozen: req.frozen,
+        frozen_session: req.frozen_session,
         event_handler: req.event_handler,
         agent_overrides: req.agent_overrides,
         preload_skills: req.preload_skills,
@@ -383,17 +381,18 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         }
     }
 
-    // Phase 9: 映射 LoopResult → ExecOutcome
+    // Phase 9: 映射 LoopResult → ExecOutcome。cancel 在 transcript flush 之后
+    // 只采样一次，后续 failure / TurnEnded / cascade / outcome 共用同一分类。
+    let sampled_cancel = req.cancel.is_cancelled();
+    let terminal = classify_loop_terminal(&loop_result, sampled_cancel);
     // 内部诊断日志对所有 Error 保持（含 Interrupted/MaxIterations）。
     if let LoopResult::Error(ref e) = loop_result {
         error!(session_id = %req.session_id, error = %e, "[v2] loop failed");
     }
-    let (ok, stop_reason, failure) =
-        map_loop_result_to_outcome(&loop_result, req.cancel.is_cancelled());
     // 对非 Interrupted/MaxIterations/cancel 的致命错误，通知 TUI 显示红色错误提示
     // issue: spec/issues/2026-07-22-llm-api-error-silently-swallowed-in-tui.md
     // （与 failure 共享同一 fatal 判定：fatal ↔ 发射；message 同一来源）
-    if let Some(f) = &failure {
+    if let Some(f) = &terminal.failure {
         // 发射点统一经 EventPublisher
         let source = UnstampedEvent::new(
             String::new(),
@@ -412,20 +411,6 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
 
     // langfuse v2: emit TurnEnded
     {
-        let (status, error_kind) = match loop_result {
-            LoopResult::Completed => (TurnStatus::Done, None),
-            LoopResult::Interrupted => (TurnStatus::Interrupted, Some(TurnErrorKind::Interrupted)),
-            LoopResult::Error(ref e) => {
-                let kind = if matches!(e, AgentError::Interrupted) {
-                    TurnErrorKind::Interrupted
-                } else if matches!(e, AgentError::MaxIterationsExceeded(_)) {
-                    TurnErrorKind::MaxIterations
-                } else {
-                    TurnErrorKind::LlmFailure
-                };
-                (TurnStatus::Error, Some(kind))
-            }
-        };
         // 发射点统一经 EventPublisher（TurnEnded 是事件流终末事件）
         let source = UnstampedEvent::new(
             loop_turn_id.clone(),
@@ -439,27 +424,36 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             ExecutorEvent::TurnEnded {
                 turn_id: loop_turn_id,
                 session_id: req.session_id.clone(),
-                status,
-                error_kind,
+                status: terminal.turn_status,
+                error_kind: terminal.turn_error_kind,
             },
         );
     }
 
     // Cancel cascade children when this agent is cancelled
-    if stop_reason == PromptStopReason::Cancelled {
+    if terminal.stop_reason == PromptStopReason::Cancelled {
         (req.cancel_cascade)(&req.session_id);
     }
 
     ExecOutcome {
-        ok,
-        stop_reason,
-        failure,
+        ok: terminal.ok,
+        stop_reason: terminal.stop_reason,
+        failure: terminal.failure,
         history_replaced_by_compaction,
         agent_state,
     }
 }
 
-/// Phase 9 分类映射：`LoopResult` → `(ok, stop_reason, fatal failure)`。
+/// Phase 9 的单一终态分类结果。
+pub(crate) struct LoopTerminal {
+    pub(crate) ok: bool,
+    pub(crate) stop_reason: PromptStopReason,
+    pub(crate) failure: Option<ExecutionFailure>,
+    pub(crate) turn_status: TurnStatus,
+    pub(crate) turn_error_kind: Option<TurnErrorKind>,
+}
+
+/// Phase 9 纯分类器：一次同时决定 Prompt、Turn 和 fatal failure。
 ///
 /// 分类契约（spec/issues/2026-08-18-acp-error-handler.md Commit 1）：
 /// - `Completed` / 用户 cancel / `Interrupted` / `MaxIterationsExceeded` →
@@ -469,26 +463,53 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
 ///
 /// fatal 判定与 `AgentExecutionFailed` 发射条件共享（fatal ↔ 发射私有事件），
 /// public message 来自 [`AgentError::user_facing_message()`]（脱敏基线）。
-pub(crate) fn map_loop_result_to_outcome(
+pub(crate) fn classify_loop_terminal(
     loop_result: &LoopResult,
-    cancelled: bool,
-) -> (bool, PromptStopReason, Option<ExecutionFailure>) {
-    match loop_result {
-        LoopResult::Completed => (true, PromptStopReason::EndTurn, None),
-        LoopResult::Interrupted => (false, PromptStopReason::Cancelled, None),
-        LoopResult::Error(e) => {
-            let is_interrupted = matches!(e, AgentError::Interrupted);
-            let is_max_iterations = matches!(e, AgentError::MaxIterationsExceeded(_));
-            let fatal = !is_interrupted && !is_max_iterations && !cancelled;
-            let reason = if cancelled || is_interrupted {
-                PromptStopReason::Cancelled
-            } else if is_max_iterations {
-                PromptStopReason::MaxTurnRequests
-            } else {
-                PromptStopReason::EndTurn
-            };
-            let failure = fatal.then(|| ExecutionFailure::internal(e.user_facing_message()));
-            (false, reason, failure)
-        }
+    sampled_cancel: bool,
+) -> LoopTerminal {
+    if matches!(loop_result, LoopResult::Completed) {
+        return LoopTerminal {
+            ok: true,
+            stop_reason: PromptStopReason::EndTurn,
+            failure: None,
+            turn_status: TurnStatus::Done,
+            turn_error_kind: None,
+        };
+    }
+    if sampled_cancel
+        || matches!(
+            loop_result,
+            LoopResult::Interrupted | LoopResult::Error(AgentError::Interrupted)
+        )
+    {
+        return LoopTerminal {
+            ok: false,
+            stop_reason: PromptStopReason::Cancelled,
+            failure: None,
+            turn_status: TurnStatus::Interrupted,
+            turn_error_kind: Some(TurnErrorKind::Interrupted),
+        };
+    }
+    if matches!(
+        loop_result,
+        LoopResult::Error(AgentError::MaxIterationsExceeded(_))
+    ) {
+        return LoopTerminal {
+            ok: false,
+            stop_reason: PromptStopReason::MaxTurnRequests,
+            failure: None,
+            turn_status: TurnStatus::Error,
+            turn_error_kind: Some(TurnErrorKind::MaxIterations),
+        };
+    }
+    let LoopResult::Error(error) = loop_result else {
+        unreachable!("Completed and Interrupted were classified above")
+    };
+    LoopTerminal {
+        ok: false,
+        stop_reason: PromptStopReason::EndTurn,
+        failure: Some(ExecutionFailure::internal(error.user_facing_message())),
+        turn_status: TurnStatus::Error,
+        turn_error_kind: Some(TurnErrorKind::LlmFailure),
     }
 }

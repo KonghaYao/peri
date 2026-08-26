@@ -23,12 +23,10 @@ use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
 use crate::i18n;
-use crate::kit::acp_events;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{
-    ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, EXIT_REQUESTED, LOADING_EPOCH,
-    LOCAL_EVENT_TX, NOTIFICATION, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, RENDER_HEARTBEAT,
-    REWIND_ACTION_TX,
+    ACP_STATE, EXIT_REQUESTED, LOADING_EPOCH, LOCAL_EVENT_TX, NOTIFICATION, PERI_CONFIG_HANDLE,
+    PERMISSION_MODE_HANDLE, RENDER_HEARTBEAT, REWIND_ACTION_TX,
 };
 use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
@@ -37,13 +35,6 @@ use crate::kit::submit_request::{
 /// cancel_consumer 中 cancel RPC 的超时上限。transport 死亡时 cancel 可能
 /// 挂起——超时后仍执行本地复位（兜底路径，Issue 2026-08-05 S4.2）。
 const CANCEL_RPC_TIMEOUT_SECS: u64 = 2;
-
-/// 首次会话懒初始化互斥锁（spawn 化后并发防护）。
-///
-/// submit_consumer 从"串行 await prompt RPC"改为"每请求 spawn"后，两个
-/// 并发 AgentText 提交可能同时命中 `!has_session()` 分支（双 Enter / 排队
-/// 输入），加锁 + 双重检查保证只创建一个 session。
-static SESSION_INIT_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
 /// 启动提交消费者后台任务。
 ///
@@ -143,44 +134,9 @@ async fn handle_clear_submit(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("kit submit_consumer: /clear intercepted, creating new session");
 
-    ACTIVE_SESSION_ID.set(String::new());
-    BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
-    acp_events::push_view_models_for_reset();
-    // S4.2: 与 cancel 路径同构的复位（直接写 + LocalLoadingReset 注入）——
-    // bridge 检测到 BRIDGE_RESET_COUNTER 前，直接写保证 UI 立即响应；注入
-    // 事件保证 bridge phase 同步复位（幂等，Issue 2026-08-05）。
-    clear_loading_state();
-    // H1/M3/L5/L10：同步清空弹窗 payload、Todo 列表、输入历史指针，
-    // 防止旧 session 残留阻塞新会话。close_popup 在无弹窗时是 no-op，安全；
-    // TODO_ITEMS 会在新 session 的 SessionUpdate::Plan 事件到来时重新填充；
-    // reset_history_cursor 仅清浏览指针与草稿，INPUT_HISTORY 栈保留。
-    // REWIND_PREVIEW 跟随会话生命周期：clear 后旧消息 id 已失效，必须清空，
-    // 否则双击 Esc 会看到已删除的候选（服务端 rewind 报 not found）。
-    crate::kit::popup_overlay::close_popup();
-    *crate::kit::atoms::REWIND_PREVIEW.state().write() = None;
-    *crate::kit::atoms::REWIND_TARGET_TEXT.state().write() = None;
-    *crate::kit::atoms::REWIND_PREVIEW_FINGERPRINT
-        .state()
-        .write() = None;
-    *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
-        crate::kit::atoms::RewindBudgetState::Idle;
-    *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;
-    *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
-    crate::kit::input_history::reset_history_cursor();
-
-    // Issue 2026-08-06：与 handle_agent_text_submit 同源并发保护——spawn 化后
-    // /clear 的 new_session 可能与其他提交（首次 AgentText / 另一 /clear）并发，
-    // 锁内创建保证同一时刻只有一条 session 创建路径在途（clear 无条件创建，
-    // 无需 double-check；AgentText 侧在锁内 double-check 会复用本 session）。
-    let lock = SESSION_INIT_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
-    let _guard = lock.lock().await;
-    let new_sid = acp_client.new_session(cwd, None).await?;
-    ACTIVE_SESSION_ID.set(new_sid);
-    BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
-
-    acp_events::push_view_models_for_reset();
-    // S4.2: 同第一处——/clear 后 bridge 侧 phase 复位（幂等）。
-    clear_loading_state();
+    // `/clear` intentionally remains unconditional. The client-owned operation
+    // gate serializes it with startup/load/prompt lifecycle decisions.
+    acp_client.new_session(cwd, None).await?;
     Ok(())
 }
 
@@ -194,20 +150,11 @@ async fn handle_agent_text_submit(
         return Ok(());
     }
 
-    if !acp_client.has_session() {
-        // 并发保护（Issue 2026-08-06）：spawn 化后首个提交的 new_session 可能被
-        // 第二个并发提交触发（双 Enter / 排队输入），加锁 + 双重检查保证只创建
-        // 一个 session——否则两个 session 并存，第二个 prompt 会被路由到新 session
-        // 而 TUI 只记录一个 ACTIVE_SESSION_ID，历史错乱。
-        let lock = SESSION_INIT_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
-        let _guard = lock.lock().await;
-        if !acp_client.has_session() {
-            info!(cwd = %cwd, "kit submit_consumer: creating initial session");
-            let session_id = acp_client.new_session(cwd, None).await?;
-            ACTIVE_SESSION_ID.set(session_id);
-            BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
-        }
-    }
+    // The client re-checks Stable under its lifecycle operation gate. This is
+    // shared with startup ensure and waits behind a reserved resume/continue
+    // load, so a delayed producer cannot replace this first prompt's session.
+    info!(cwd = %cwd, "kit submit_consumer: ensuring session");
+    acp_client.ensure_session(cwd, None).await?;
 
     // Issue 2026-08-05 返工：在发送 PromptSubmitted 之前生成本轮 prompt 的
     // request_id（uuid v7）——PromptSubmitted 事件与 prompt RPC 必须携带同一

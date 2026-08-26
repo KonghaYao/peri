@@ -38,6 +38,7 @@ pub struct StdioInput {
 /// ACP 层只持端口接口（3.0 批 2 波 2，§0 依赖方向）。
 pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
     let cfg = assemble_stdio_config(input).await?;
+    let cancel_task_spawner = cfg.host_task_spawner.clone();
 
     // 共享 session 集合：legacy `type:cancel` 全 session 兜底中断回调与宿主
     // `run_acp_server` 遍历**同一 map**（回调在构造 transport 时注入，因此
@@ -50,15 +51,19 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
         // writer lease + continuation 武装，`host/notify.rs`）并存——type:cancel
         // 无客户端身份、无续跑语义，仅作 IDE 强停兜底（批 3 §7 #10）。
         let sessions = cancel_sessions.clone();
-        tokio::spawn(async move {
-            let sessions = sessions.lock().await;
-            for (sid, state) in sessions.iter() {
-                if let Some(ref token) = state.cancel_token {
-                    token.cancel();
-                    tracing::info!(session_id = %sid, "Cancelled via type:cancel");
+        let _ = cancel_task_spawner.spawn(
+            super::task_scope::HostTaskOwnerKind::Host,
+            super::task_scope::HostTaskKind::LegacyCancelHook,
+            async move {
+                let sessions = sessions.lock().await;
+                for (sid, state) in sessions.iter() {
+                    if let Some(ref token) = state.cancel_token {
+                        token.cancel();
+                        tracing::info!(session_id = %sid, "Cancelled via type:cancel");
+                    }
                 }
-            }
-        });
+            },
+        );
     })));
     super::run_acp_server_with_sessions(
         Arc::new(transport) as Arc<dyn AcpTransport>,

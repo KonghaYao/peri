@@ -30,6 +30,8 @@
 
 `transport/stdio.rs` 现状：`send_request/send_notification/recv/send_response` 齐全（`transport/stdio.rs:134-201`）；id 转换非保真（`Value::Number(n) → i64`，`224-229` 越界压 0）；pump 退出依赖 channel 关闭的间接语义（`121-124`）；**零集成测试**（有 envelope 单测，无 stdin pump/stdout/并发/EOF/initialize 集成测试）。
 
+> **后续闭环（2026-08-24）**：上段保留统一工程启动时的历史基线；当前 `transport/stdio.rs` 已完成 id 域收口与生命周期闭环。reader EOF/error、outbound write/flush failure 会终止 router 并以稳定 `Transport closed` 结算当前/后续 request；caller cancellation 同步注销 pending；连接静默仍无隐式 timeout。MPSC pair 复用同一 terminal 生命周期，任一方向关闭会对称终止，并保留已经转发到 incoming queue 的消息。事实源为 ARC-TRANSPORT-001 与 transport 相邻测试。
+
 ## 3. 目标架构
 
 ```
@@ -117,7 +119,7 @@ stdio│ StdioTransport  ──┘        ├─ requests/（控制面 RPC）
 
 ## 8. 线协议验证计划（v2 修正）
 
-> **批 0 已落实（2026-08-17）**：下方 1-3 全部完成——§8.1/8.2 → `transport/stdio_test.rs`（14 条，含 id 保真/越界压 0 标注、EOF 后 pending 请求不倒挂语义记录）；§8.3 wire capture → `host/unify_wire_baseline_test.rs`（AvailableCommandsUpdate / SessionInfoUpdate 双路径逐字段一致 + initialize 基线）。结果见 §9「批 0 完成清单」。
+> **批 0 已落实（2026-08-17）**：下方 1-3 全部完成——§8.1/8.2 → `transport/stdio_test.rs`（当时记录 id 与 EOF 后 pending 挂起的历史基线，后续分别完成 id 域收口与 ARC-TRANSPORT-001 生命周期闭环）；§8.3 wire capture → `host/unify_wire_baseline_test.rs`（AvailableCommandsUpdate / SessionInfoUpdate 双路径逐字段一致 + initialize 基线）。结果见 §9「批 0 完成清单」。
 
 - **现状校正**：`transport/stdio.rs` 已有基础信封测试（`transport/stdio_test.rs:1-39`：response/request/notification envelope + id conversion），但**缺集成测试**（pump/stdout/并发/EOF/非法 JSON/initialize 顺序）。
 - 批 1 前必须补齐：
@@ -167,4 +169,4 @@ stdio│ StdioTransport  ──┘        ├─ requests/（控制面 RPC）
 4. **prompt 引擎合并回归面**：最大风险点；批 3 前完成 §7 全部差异对齐，合并后先手动验证。
 5. **`session_start_source`**：批 2 前核实 `host/prompt.rs` 是否消费；未消费则按 stdio 语义补入。
 6. **新增能力是行为扩展**（D 标准）：IDE 客户端可能面临意外新通知/新 RPC，需在发布说明标注。
-7. **id 保真结论（批 4 已落地收口）**：agent-client-protocol-schema 的 `RequestId` = `Null | Number(i64) | Str(String)`（`rpc.rs:42`，JSON-RPC 2.0 §5）；`transport::types::RequestId` = `String | Number(i64)`（无 Null）——内部域已覆盖可表示子集。批 0-3 对域外值（小数、u64 溢出 i64、null、bool 等）**静默压 0**（`as_i64().unwrap_or(0)`），非保真且与合法 id 0 存在碰撞风险（router 配对/宿主 `send_response(0, ...)` 将响错对象）。**最终落地（批 4）**：`transport/stdio.rs` pump 对入站 Request/Response 的域外 id **拒绝该消息**（`tracing::warn` + 丢弃该行，不中断 pump，与非法 JSON 行处理语义一致），不再压 0 转发；id 为 null 的 Request 按 JSON-RPC 2.0 §2.2 视为通知（`IncomingMessage::Notification`——客户端无兴趣于对应响应）。`send_request` 侧（id 由内部 `RequestId` 生成恒合法）不改。风险面评估：仅影响协议违规输入（合法 IDE 客户端 id 恒为整数/字符串），不触及合法报文；`StdioTransport` 出站 id 恒为域内 Number。测试锁定：`stdio_test.rs` 的 `test_request_id_domain_validation` / `test_pump_rejects_out_of_domain_ids_and_null_id_becomes_notification`（原压 0 测试改写）。另记录：EOF 后 pump 退出仅是 `recv()` 侧感知关闭，已发出的 pending `send_request` 不会被自动失败/取消（无内置超时）——闭环时需要显式处理（§8.1，`stdio_test.rs: test_pending_request_waits_after_eof`）。
+7. **id 保真结论（批 4 已落地收口）**：agent-client-protocol-schema 的 `RequestId` = `Null | Number(i64) | Str(String)`（`rpc.rs:42`，JSON-RPC 2.0 §5）；`transport::types::RequestId` = `String | Number(i64)`（无 Null）——内部域已覆盖可表示子集。批 0-3 对域外值（小数、u64 溢出 i64、null、bool 等）**静默压 0**（`as_i64().unwrap_or(0)`），非保真且与合法 id 0 存在碰撞风险（router 配对/宿主 `send_response(0, ...)` 将响错对象）。**最终落地（批 4）**：`transport/stdio.rs` pump 对入站 Request/Response 的域外 id **拒绝该消息**（`tracing::warn` + 丢弃该行，不中断 pump，与非法 JSON 行处理语义一致），不再压 0 转发；id 为 null 的 Request 按 JSON-RPC 2.0 §2.2 视为通知（`IncomingMessage::Notification`——客户端无兴趣于对应响应）。`send_request` 侧（id 由内部 `RequestId` 生成恒合法）不改。风险面评估：仅影响协议违规输入（合法 IDE 客户端 id 恒为整数/字符串），不触及合法报文；`StdioTransport` 出站 id 恒为域内 Number。测试锁定：`stdio_test.rs` 的 `test_request_id_domain_validation` / `test_pump_rejects_out_of_domain_ids_and_null_id_becomes_notification`（原压 0 测试改写）。EOF 后 pending 挂起是当时保留的历史基线；2026-08-24 已由 ARC-TRANSPORT-001 闭环，测试改为 `test_pending_request_fails_after_eof`，并覆盖 read error、writer failure、caller abort 与 blocked writer/mutex waiter。

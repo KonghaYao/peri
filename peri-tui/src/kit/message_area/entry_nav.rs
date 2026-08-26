@@ -150,11 +150,36 @@ pub(super) fn cycle_interaction_option(current: usize, count: usize, back: bool)
 }
 
 /// [Slice 4 §6.8] 提交 interaction block 的指定选项（双轨 D5：与弹窗/面板
-/// 同一响应通道——HITL_RESPONSE_TX / ASK_USER_RESPONSE_TX；InteractionResolved
+/// 同一响应通道——HITL_RESPONSE_TX / ASK_USER_RESPONSE_TX；InteractionTerminal
 /// 结果回写由 ask_user_action / hitl_response 消费者发出）。同时关闭模态层
 /// （HITL 弹窗 / AskUser 面板），保持双轨一致。request_id 缺失时 no-op。
 pub(super) fn submit_interaction_option(block: &TuiAskUserBlock, option_index: usize) {
+    submit_interaction_option_with(
+        block,
+        option_index,
+        |action| {
+            if let Some(tx) = crate::kit::atoms::HITL_RESPONSE_TX.get() {
+                let _ = tx.send(action);
+            }
+        },
+        |action| {
+            if let Some(tx) = crate::kit::atoms::ASK_USER_RESPONSE_TX.get() {
+                let _ = tx.send(action);
+            }
+        },
+    );
+}
+
+pub(crate) fn submit_interaction_option_with(
+    block: &TuiAskUserBlock,
+    option_index: usize,
+    mut send_hitl: impl FnMut(crate::kit::hitl_response::HitlResponseAction),
+    mut send_ask_user: impl FnMut(crate::kit::ask_user_action::AskUserResponseAction),
+) {
     let Some(id_str) = block.request_id.clone() else {
+        return;
+    };
+    let Some(owner) = block.owner.clone() else {
         return;
     };
     match block.kind {
@@ -163,50 +188,43 @@ pub(super) fn submit_interaction_option(block: &TuiAskUserBlock, option_index: u
             // 协议依赖项，记入 active spec）。
             let action = if option_index == 0 {
                 crate::kit::hitl_response::HitlResponseAction::Approve {
-                    request_id_str: id_str,
+                    owner: owner.clone(),
+                    request_id_str: id_str.clone(),
                 }
             } else {
                 crate::kit::hitl_response::HitlResponseAction::Reject {
-                    request_id_str: id_str,
+                    owner: owner.clone(),
+                    request_id_str: id_str.clone(),
                 }
             };
-            if let Some(tx) = crate::kit::atoms::HITL_RESPONSE_TX.get() {
-                let _ = tx.send(action);
-            }
-            crate::kit::popup_overlay::close_popup();
+            send_hitl(action);
+            crate::kit::popup_overlay::close_hitl_popup_for_owner(&owner);
         }
         InteractionKind::AskUser => {
             let label = block.options.get(option_index).cloned().unwrap_or_default();
-            let answers = build_inline_answers(&label);
-            if let Some(tx) = crate::kit::atoms::ASK_USER_RESPONSE_TX.get() {
-                let _ = tx.send(crate::kit::ask_user_action::AskUserResponseAction::Submit {
-                    request_id_str: id_str,
-                    answers,
-                });
-            }
-            // 关闭面板 + 清 payload（与面板提交路径一致）
-            crate::kit::panel_registry::close_panel(crate::app::panel_types::PanelKind::AskUser);
-            *crate::kit::atoms::ASK_USER_PENDING.state().write() = None;
-            *crate::kit::atoms::ASK_USER_REQUEST_ID.state().write() = None;
+            let answers = build_inline_answers(&block.question_ids, &label);
+            send_ask_user(crate::kit::ask_user_action::AskUserResponseAction::Submit {
+                owner: owner.clone(),
+                request_id_str: id_str.clone(),
+                answers,
+            });
+            crate::kit::panel_registry::close_ask_user_panel_for_owner(&owner);
         }
     }
 }
 
 /// [Slice 4 §6.8] AskUser inline 快速回答的 answers map：首问 = 选中 label，
 /// 其余问题空字符串（协议结构完整——单选 string 类型，面板的空答案先例
-/// `json!("")`）。从 ASK_USER_PENDING 读首问 id（面板仍打开；防御分支返回
-/// 空 map，提交失败不 panic）。
-fn build_inline_answers(label: &str) -> serde_json::Value {
+/// `json!("")`）。question IDs 来自 durable block，不读取 active interaction。
+pub(crate) fn build_inline_answers(question_ids: &[String], label: &str) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    if let Some(au) = crate::kit::atoms::ASK_USER_PENDING.state().read().as_ref() {
-        for (i, q) in au.questions.iter().enumerate() {
-            let val = if i == 0 && !label.is_empty() {
-                serde_json::json!(label)
-            } else {
-                serde_json::json!("")
-            };
-            map.insert(q.id.clone(), val);
-        }
+    for (i, id) in question_ids.iter().enumerate() {
+        let val = if i == 0 && !label.is_empty() {
+            serde_json::json!(label)
+        } else {
+            serde_json::json!("")
+        };
+        map.insert(id.clone(), val);
     }
     serde_json::Value::Object(map)
 }

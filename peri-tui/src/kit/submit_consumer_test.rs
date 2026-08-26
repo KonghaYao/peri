@@ -15,6 +15,14 @@ fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
     (client, server_transport)
 }
 
+fn make_interactive_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
+    let (client_transport, server_transport): (MpscClientTransport, MpscServerTransport) =
+        mpsc_transport_pair();
+    let (client, _notification_tx, _notification_rx) =
+        AcpTuiClient::new_interactive(client_transport);
+    (client, server_transport)
+}
+
 #[tokio::test]
 async fn test_empty_agent_text_skipped() {
     let (client, _server_transport) = make_client_without_pump();
@@ -229,15 +237,20 @@ async fn test_clear_request_bypasses_prompt() {
 /// 断言此时 4 类 atom 已被清空。这些写入发生在 new_session await 之前，
 /// 因此即使 RPC 失败也已完成。
 #[tokio::test]
+#[serial]
 async fn test_handle_clear_submit_resets_popup_todo_history_atoms() {
     crate::kit::atoms::init_atoms();
     // Arrange：把 4 类 atom 填充为"旧 session 残留"。
     *crate::kit::atoms::POPUP_KIND.state().write() = Some(crate::kit::atoms::PopupKind::Hitl);
     *crate::kit::atoms::HITL_PENDING.state().write() =
-        Some(peri_acp_types::event_data::HitlPending {
-            tool_name: "old".into(),
-            tool_input: serde_json::Value::Null,
-            batch: None,
+        Some(crate::kit::acp_types::PendingInteraction {
+            owner: Default::default(),
+            request_id_json: "\"old\"".into(),
+            payload: peri_acp_types::event_data::HitlPending {
+                tool_name: "old".into(),
+                tool_input: serde_json::Value::Null,
+                batch: None,
+            },
         });
     *crate::kit::atoms::TODO_ITEMS.state().write() = vec![crate::kit::message_area::TodoItem {
         content: "stale".into(),
@@ -246,7 +259,7 @@ async fn test_handle_clear_submit_resets_popup_todo_history_atoms() {
     *crate::kit::atoms::INPUT_HISTORY_INDEX.state().write() = Some(3);
     *crate::kit::atoms::DRAFT.state().write() = Some("stale draft".to_string());
 
-    let (client, _server) = make_client_without_pump();
+    let (client, _server) = make_interactive_client_without_pump();
     let cwd = ".".to_string();
 
     // Act：handle_clear_submit 在 new_session 处会 hang（无 server），

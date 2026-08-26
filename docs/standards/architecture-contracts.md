@@ -41,14 +41,28 @@
 ### ARC-HITL-001
 
 - **Scope**：工具审批、用户提问、MetaHarness 关闭面与提示词段落。
-- **Rule**：`PermissionMiddleware` 独占工具审批、`PermissionMode` 与 `10_hitl`；`HumanInTheLoopMiddleware` 独占 `AskUserQuestion` 与 `12_ask_user`。两项能力必须独立装配和关闭：middleware 缺席时，其工具、钩子和提示词贡献必须同时从当前 session-local 视图消失。`HumanInTheLoopMiddleware=false` 的现行语义是关闭提问，不再表示关闭审批；旧配置迁移不得静默按旧语义解释。
-- **Verify**：`cargo test -p peri-middlewares --lib permission`；`cargo test -p peri-middlewares --lib hitl`；`cargo test -p peri-middlewares --lib assembly_test`；检查 `peri-acp-types/src/meta_harness.rs` 的 section holder 与 middleware/tool 清单、`peri-agent/src/session/factory.rs` 的 `[Permission, AskUser, SubAgent]` 蓝本。
+- **Rule**：`PermissionMiddleware` 独占工具审批、`PermissionMode` 与 `10_hitl`；`HumanInTheLoopMiddleware` 独占 `AskUserQuestion` 与 `12_ask_user`。两项能力必须独立装配和关闭：middleware 缺席时，其工具、钩子和提示词贡献必须同时从当前 session-local 视图消失。`HumanInTheLoopMiddleware=false` 的现行语义是关闭提问，不再表示关闭审批；旧配置迁移不得静默按旧语义解释。经同一 `AcpTransportBroker` 实例转发的 Approval 与 Questions 必须共享 capacity=1 的异步交互门，门覆盖完整 context（含多 item Approval），不得在 item 间交错；`ApprovalMode::AutoApprove` 是本地决策，必须绕过该门。同步单位是 broker 实例而非全局 transport 或 session identity；pending/terminal 结算仍只归 ARC-TRANSPORT-001。TUI 对 `session/request_permission` 与 `elicitation/create` 先按各自 schema 提取 non-empty session identity；invalid、no-active、stale、deleted 或 notification/bridge 投递失败必须用对应标准 cancel response 结算，且不得发布 pending UI state。exact-current 请求在 forward 前注册由进程内唯一 client instance、session generation、prompt epoch 与 checked token 组成的 semantic owner；typed RequestId 只作 wire identity。用户响应、bridge reject、session/prompt/cancel/transport terminal 通过同一 owner registry first-claim，session operation gate 同时序列化 claim、transition 与完整同步 UI publication。`new` 的未知目标 ordinary notification 仅进入容量 64 的 FIFO，目标 commit 后只刷新 exact-target；load replay 使用已知 target。`PromptLease`、transition 与已 claim settlement batch 的 Drop 必须同步撤销并把 owned plan 交给 weak-endpoint worker，不能恢复 owner 或保活 notifier/transport。冻结请求 A 的 owner-aware terminal cleanup 不得关闭后来活跃的 B surface；AskUser 本地表单 fingerprint 必须包含 owner identity。
+  Startup session lifecycle 同属该 operation gate：initial 与 first-submit 必须共用 gate 内 Stable 重检的 `ensure_session`；resume/continue 必须在 submit consumer 可达前建立 client-owned restore reservation，异步 lookup 后在同一 gate 内 load 或释放 reservation，禁止延迟 startup producer 替换首个 prompt 的 session。显式 `/clear` 保持 unconditional new。
+- **Verify**：`cargo test -p peri-middlewares --lib permission`；`cargo test -p peri-middlewares --lib hitl`；`cargo test -p peri-middlewares --lib assembly_test`；`cargo test -p peri-acp --lib -- broker::transport_broker`；`cargo test -p peri-tui --lib -- acp_client::client::reverse_tests`；`cargo test -p peri-tui --bin peri -- cli_print`；`cargo test -p peri-tui --lib acp_notifier`；`cargo test -p peri-tui --lib acp_bridge`；`cargo test -p peri-tui --lib acp_events`；检查 `peri-acp-types/src/meta_harness.rs` 的 section holder 与 middleware/tool 清单、`peri-agent/src/session/factory.rs` 的 `[Permission, AskUser, SubAgent]` 蓝本，并检查 `AcpTransportBroker::request` 的 AutoApprove 锁前返回与完整转发 context guard。
 
 ### ARC-STDIO-001
 
 - **Scope**：ACP stdio/IDE transport 与统一 host。
 - **Rule**：stdio 请求必须经 `run_acp_stdio → run_acp_server_with_sessions → handle_request` 进入统一 ACP host，禁止恢复独立 typed-handler 业务路径。`session/new` response 必须先于首次 commands notification；stdio 的 rewind/clear 类输入不由命令层拦截，而是落入模型 prompt。legacy `type:cancel` 仅是全 session 强停兜底，不得被解释为标准 `session/cancel` 的身份、continuation 或队列语义。
 - **Verify**：`cargo test -p peri-acp --lib host::stdio`；人工检查 `peri-acp/src/host/stdio/mod.rs` 与 `run_server_integration_test.rs` 的 initialize/new、response ordering、rename、prompt error、command filter 和 cancel 用例。
+
+### ARC-TRANSPORT-001
+
+- **Scope**：ACP stdio 与 MPSC transport 的 request 生命周期。
+- **Rule**：transport 终止必须以稳定的 `AcpError(-32603, "Transport closed")` 结算当前及后续 request；匹配 response、caller cancellation 与 terminal close 对同一 pending request 至多生效一次。连接仍存活但对端静默不等于终止，不得为 `send_request` 隐式增加通用 timeout；发起 I/O 失败的调用保留其具体 write/flush 错误，同时使同一逻辑连接进入 terminal 状态。
+- **Verify**：`cargo test -p peri-acp --lib -- transport::router`、`cargo test -p peri-acp --lib -- transport::mpsc`、`cargo test -p peri-acp --lib -- transport::stdio`；人工检查 stdio EOF/read/write/flush 与任一 MPSC pump/channel 关闭均汇入同一 terminal 生命周期。
+
+### ARC-HOST-SHUTDOWN-001
+
+- **Scope**：`peri-acp` host/stdio，`peri-middlewares` MCP pool，`peri-tui` MCP panel deployment。
+- **Rule**：ACP transport 终止是一个显式所有权事务：先关闭 host 任务准入并取消会话，再在可控 cooperative grace 后 abort/drain host-owned 任务；对 MCP 必须按 `pool.begin_shutdown → McpTaskOwner.begin/shutdown → pool.shutdown` 顺序执行。`HostTaskOwner` 与 `McpTaskOwner` 均是 deployment-held、non-Clone 强 owner；ACP 仅经 `peri-acp-types::ports::McpTaskOwnerPort` 持有 boxed owner capability，具体 `McpTaskOwner` 与 keyed registry 仍归 `peri-middlewares`。配置/task/pool 只保留 weak spawner，callback/notifier 只弱引用 pool；pool 不得反向持有会捕获 `Arc<McpClientPool>` 的 task handle。MCP 的 init/OAuth/reconnect/subscription 准入与 owner 注册在 pool lifecycle gate 下线性化，`Open → Closing` 后 callback 注册、新连接/service 发布与新任务均拒绝。Pool service-close 必须由 pool state 持有单一、不捕获 pool 的 shutdown worker；调用者取消、并发或重试只能继续观察同一事务，不能取得 drained service 的唯一所有权。只有每个 service 的 close/join 终态均已记录才可发布 `Closed`；`close_with_timeout == Ok(None)` 必须显式报告 `Incomplete` 并保持 `Closing`。EOF 对 local 与 `SessionManager` ID 并集执行 pre-close/close，任何 task join、LSP/MCP close 或外部 callback 都不得持有 session/lifecycle/registry/services 锁。超过 abort-drain guard 只能报告 `Incomplete` 并保持 `Closing`，不得宣称已释放图。
+- **Boundary**：本契约只 join 本轮显式迁移的 host/MCP 任务；Agent `TaskManager`、Permission 等待、prewarm discovery、compact hooks、command notifications、event forwarders 与 request-level session close/delete LSP parity 仍是独立边界。
+- **Verify**：`cargo test -p peri-acp --lib -- host::task_scope`、`cargo test -p peri-acp --lib -- host::stdio::run_server_integration_tests`、`cargo test -p peri-middlewares --lib -- mcp::task_scope`、`cargo test -p peri-middlewares --lib -- mcp::client`、`cargo test -p peri-tui --lib -- app::mcp_lifecycle_tests`。
 
 ### ARC-WORKFLOW-RPC-001
 

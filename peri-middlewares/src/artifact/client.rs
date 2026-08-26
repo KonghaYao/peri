@@ -51,6 +51,9 @@ impl ArtifactClient {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "text/html")
+            // Deno Deploy 可能返回无法被 reqwest 正确解码的 Brotli body；
+            // 响应 JSON 很小，禁用压缩可避免读取响应失败。
+            .header("Accept-Encoding", "identity")
             .header("X-TTL", ttl)
             .body(content.to_string())
             .send()

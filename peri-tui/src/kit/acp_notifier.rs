@@ -19,14 +19,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::acp_client::AcpNotification;
+use crate::acp_client::{AcpNotification, AcpTuiClient, InteractionOwner};
 use crate::i18n;
 use crate::kit::acp_types::{
-    AcpEventData, AcpEventWithEpoch, FeedbackChannel, FeedbackLevel, TuiCommandFeedback,
+    AcpEventData, AcpEventWithEpoch, FeedbackChannel, FeedbackLevel, PendingInteraction,
+    TuiCommandFeedback,
 };
 use crate::kit::atoms::{
-    ACP_STATE, ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, INPUT_BUFFER,
-    NOTIFICATION, PERI_CONFIG_HANDLE, RENDER_HEARTBEAT, SPINNER_TOKEN_COUNT,
+    ACP_STATE, AVAILABLE_SLASH_COMMANDS, INPUT_BUFFER, NOTIFICATION, PERI_CONFIG_HANDLE,
+    RENDER_HEARTBEAT, SPINNER_TOKEN_COUNT,
 };
 use crate::kit::input_area::refresh_slash_items;
 use crate::kit::slash_completion::SlashActionKind;
@@ -46,9 +47,29 @@ use serde_json::Value;
 ///
 /// 通道关闭（transport 断开）或 shutdown 触发时干净退出。
 pub fn spawn_kit_notifier(
+    notification_rx: mpsc::UnboundedReceiver<AcpNotification>,
+    bridge_tx: mpsc::UnboundedSender<AcpEventWithEpoch>,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    spawn_kit_notifier_inner(notification_rx, bridge_tx, shutdown, None)
+}
+
+/// Interactive notifier variant. A registered reverse interaction that cannot
+/// enter the bridge is claimed and cancelled instead of remaining orphaned.
+pub fn spawn_kit_notifier_with_client(
+    notification_rx: mpsc::UnboundedReceiver<AcpNotification>,
+    bridge_tx: mpsc::UnboundedSender<AcpEventWithEpoch>,
+    shutdown: CancellationToken,
+    client: AcpTuiClient,
+) -> tokio::task::JoinHandle<()> {
+    spawn_kit_notifier_inner(notification_rx, bridge_tx, shutdown, Some(client))
+}
+
+fn spawn_kit_notifier_inner(
     mut notification_rx: mpsc::UnboundedReceiver<AcpNotification>,
     bridge_tx: mpsc::UnboundedSender<AcpEventWithEpoch>,
     shutdown: CancellationToken,
+    client: Option<AcpTuiClient>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -59,7 +80,13 @@ pub fn spawn_kit_notifier(
                 }
                 n = notification_rx.recv() => {
                     match n {
-                        Some(notif) => forward_notification(&bridge_tx, notif),
+                        Some(notif) => {
+                            if let Some(owner) = forward_notification(&bridge_tx, notif)
+                                && let Some(client) = &client
+                            {
+                                client.reject_interaction(&owner).await;
+                            }
+                        }
                         None => {
                             debug!("kit ACP notifier: notification channel closed (transport disconnected)");
                             // Issue 2026-08-05: 事件流中断兜底复位。
@@ -264,7 +291,10 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
 ///
 /// 设计决策：session/update 是流式主通道（agent_message_chunk / tool_call 等），
 /// AgentDone 通过 TurnDone 转换，AgentEvent 通过 `convert_agent_event` 转换。
-fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n: AcpNotification) {
+fn forward_notification(
+    bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    n: AcpNotification,
+) -> Option<InteractionOwner> {
     /// 将 AcpEventData 包装为 AcpEventWithEpoch（注入 session_id）。
     fn wrap_with_session(event: AcpEventData, session_id: String) -> AcpEventWithEpoch {
         AcpEventWithEpoch {
@@ -282,7 +312,7 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
             let decoded = AcpEventData::decode(&event, data);
             if matches!(decoded, AcpEventData::Unknown { .. }) {
                 debug!(event = %event, "kit ACP notifier: unknown unstable_event, dropping");
-                return;
+                return None;
             }
             let wrapped = wrap_with_session(decoded, session_id);
             if let Err(e) = bridge_tx.send(wrapped) {
@@ -319,8 +349,15 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
                 warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping agent done");
             }
         }
-        AcpNotification::Elicitation { id, params } => {
-            handle_elicitation(&id, &params, bridge_tx);
+        AcpNotification::Elicitation {
+            owner,
+            request_id_json,
+            params,
+        } => {
+            let rejected_owner = owner.clone();
+            if !handle_elicitation(owner, request_id_json, &params, bridge_tx) {
+                return Some(rejected_owner);
+            }
         }
         // peri/agent_event → AcpEvent → AcpEventData 转换
         // SubagentStarted/SubagentStopped 首先映射至此通道；通过 convert_agent_event
@@ -348,13 +385,30 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
                 warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping prediction");
             }
         }
-        AcpNotification::RequestPermission { id, params } => {
-            handle_request_permission(&id, &params, bridge_tx);
+        AcpNotification::RequestPermission {
+            owner,
+            request_id_json,
+            params,
+        } => {
+            let rejected_owner = owner.clone();
+            if !handle_request_permission(owner, request_id_json, &params, bridge_tx) {
+                return Some(rejected_owner);
+            }
+        }
+        AcpNotification::InteractionTerminal { owner, outcome } => {
+            let wrapped = wrap_with_session(
+                AcpEventData::InteractionTerminal { owner, outcome },
+                String::new(),
+            );
+            if let Err(error) = bridge_tx.send(wrapped) {
+                warn!(error = %error, "kit ACP notifier: bridge closed, dropping interaction terminal");
+            }
         }
         AcpNotification::Peri { .. } | AcpNotification::Other { .. } => {
             debug!("kit ACP notifier: notification variant not yet handled, dropping");
         }
     }
+    None
 }
 
 /// Extract commands / plan / streaming events from a SessionUpdate notification.
@@ -691,13 +745,13 @@ fn handle_session_update(
     }
 }
 
-/// 处理 Elicitation 通知：解析 params 为 AskUser → 写入 ASK_USER_REQUEST_ID atom →
-/// 构造 AcpEventData::AskUser 推入双 bridge。
+/// 处理 Elicitation 通知：原子封装 RequestId + AskUser 后推入 bridge。
 fn handle_elicitation(
-    id: &peri_acp::transport::types::RequestId,
+    owner: crate::acp_client::InteractionOwner,
+    request_id_json: String,
     params: &Value,
     bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
-) {
+) -> bool {
     // 从 params 中提取 session_id
     let session_id = params
         .get("sessionId")
@@ -705,17 +759,13 @@ fn handle_elicitation(
         .unwrap_or("")
         .to_string();
 
-    // 序列化 RequestId 存入 atom（供 popup 提交时回传）
-    if let Ok(id_str) = serde_json::to_string(id) {
-        *ASK_USER_REQUEST_ID.state().write() = Some(id_str);
-    } else {
-        warn!("kit ACP notifier: failed to serialize elicitation RequestId");
-        return;
-    }
-
     let questions = parse_elicitation_questions(params);
     let ask_user = AskUser { questions };
-    let event = AcpEventData::AskUser(ask_user);
+    let event = AcpEventData::AskUser(PendingInteraction {
+        owner,
+        request_id_json,
+        payload: ask_user,
+    });
     let wrapped = AcpEventWithEpoch {
         event,
         active_session_id: session_id,
@@ -723,14 +773,16 @@ fn handle_elicitation(
 
     info!("kit ACP notifier: forwarding Elicitation as AskUser event");
 
-    if let Err(e) = bridge_tx.send(wrapped) {
-        warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping AskUser");
-    }
+    bridge_tx.send(wrapped).map_or_else(
+        |e| {
+            warn!(error = %e, "kit ACP notifier: bridge_tx closed, rejecting AskUser");
+            false
+        },
+        |_| true,
+    )
 }
 
-/// 处理 RequestPermission 通知（HITL）：解析 params 为 HitlPending →
-/// 写入 HITL_REQUEST_ID atom（供 HitlPopup 回传）→ 构造 AcpEventData::HitlPending
-/// 推入双 bridge channel，由 dispatch_and_notify 写入 HITL_PENDING atom + 设 POPUP_KIND。
+/// 处理 RequestPermission：原子封装 RequestId + HITL payload 后推入 bridge。
 ///
 /// JSON 结构（CreatePermissionRequest ACP schema）:
 /// ```json
@@ -738,23 +790,17 @@ fn handle_elicitation(
 ///  "options": [{"id": "allow_once", ...}, ...]}
 /// ```
 fn handle_request_permission(
-    id: &peri_acp::transport::types::RequestId,
+    owner: crate::acp_client::InteractionOwner,
+    request_id_json: String,
     params: &Value,
     bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
-) {
+) -> bool {
     let session_id = params
         .get("sessionId")
         .or_else(|| params.get("session_id"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-
-    if let Ok(id_str) = serde_json::to_string(id) {
-        *HITL_REQUEST_ID.state().write() = Some(id_str);
-    } else {
-        warn!("kit ACP notifier: failed to serialize RequestPermission RequestId");
-        return;
-    }
 
     // 从 params.toolCall 提取 tool_name + tool_input
     let tool_call = params.get("toolCall").unwrap_or(&Value::Null);
@@ -770,7 +816,11 @@ fn handle_request_permission(
         batch: None,
     };
 
-    let event = AcpEventData::HitlPending(hp);
+    let event = AcpEventData::HitlPending(PendingInteraction {
+        owner,
+        request_id_json,
+        payload: hp,
+    });
     let wrapped = AcpEventWithEpoch {
         event,
         active_session_id: session_id,
@@ -778,9 +828,13 @@ fn handle_request_permission(
 
     info!("kit ACP notifier: forwarding RequestPermission as HitlPending event");
 
-    if let Err(e) = bridge_tx.send(wrapped) {
-        warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping HitlPending");
-    }
+    bridge_tx.send(wrapped).map_or_else(
+        |e| {
+            warn!(error = %e, "kit ACP notifier: bridge_tx closed, rejecting HitlPending");
+            false
+        },
+        |_| true,
+    )
 }
 
 /// 从 CreateElicitationRequest JSON 中解析问题列表。

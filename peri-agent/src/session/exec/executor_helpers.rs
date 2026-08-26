@@ -27,8 +27,8 @@
 //! - `intercept_immediate_command` 内的 `tokio::select!` 分支顺序原样保留
 //!   （`handler.execute` 优先于 `cancel.cancelled()`；二者均会触发 `push_done`）
 //! - `build_and_execute_agent_v2` 末尾的 cancel cascade 仍在循环失败后触发，
-//!   `LoopResult::Error` 分支先发 `AgentExecutionFailed` 事件再判断 stop_reason，
-//!   顺序与原实现一致
+//!   且与 failure / `TurnEnded` 共用一次 post-flush cancel 采样的
+//!   单一终态分类；顺序保持 failure 事件 → `TurnEnded` → cascade
 //! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"，
 //!   顺序不变（pump 必须先 close sender 才能退出 recv 循环）
 

@@ -231,11 +231,14 @@ impl SkillsMiddleware {
         self
     }
 
-    /// 注入冻结的 skills 摘要。设置后 `before_agent` 跳过目录扫描，
-    /// 直接使用冻结内容。
+    /// 注入 session/new 时冻结的 skills 摘要。设置后 summary contribution
+    /// 在会话内保持稳定；`before_agent` 仍扫描目录以刷新工具使用的 structured
+    /// metadata，但不会用扫描结果重写该摘要。
     ///
-    /// v2：构造时即填充 cached_contribution，使 prompt_contribution 立即可用，
-    /// 无需 before_agent 触发（builder 在 before_agent 前收集 prompt_contribution）。
+    /// v2：构造时即以 session/new 的冻结摘要填充 cached_contribution；
+    /// `before_agent` 在刷新 structured tool metadata 后仍恢复同一冻结文本，随后
+    /// 主 Agent bridge 构造每个 ModelRequest 时把该 contribution 作为 request-local
+    /// suffix 读取。它不进入也不修改 `SessionStore` 的 frozen base/prefix。
     ///
     /// 注意：仅填充 cached_contribution，不填充 cached_skills。
     /// cached_skills 由 before_agent 在 frozen/non-frozen 两条路径中统一填充，

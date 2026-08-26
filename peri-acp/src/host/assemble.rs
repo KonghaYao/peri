@@ -23,6 +23,7 @@ use peri_acp_types::store::ThreadStore;
 use crate::provider::{LlmProvider, PeriConfig};
 use crate::session::SessionManager;
 
+use super::task_scope::{HostTaskKind, HostTaskOwner, HostTaskOwnerKind};
 use super::AcpServerConfig;
 
 /// host 装配输入：调用方（cli/TUI/print/stdio）持有的轻量输入。
@@ -134,6 +135,8 @@ pub fn build_session_manager(
 /// 边 2 assemble 路径）；行为与迁移前三路径（launch / cli_print / stdio）
 /// 各自装配一致（cron tick 驱动、MCP 初始化、孤儿插件清理时机均复刻）。
 pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig {
+    let (host_task_owner, host_task_spawner) = HostTaskOwner::new();
+    let (mcp_task_owner, mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     let HostAssemblyInput {
         provider,
         peri_config,
@@ -167,13 +170,20 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         ));
         if drive_cron_tick {
             let tick_scheduler = scheduler.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-                loop {
-                    interval.tick().await;
-                    tick_scheduler.lock().tick();
-                }
-            });
+            let shutdown = host_task_spawner.shutdown_token();
+            let _ = host_task_spawner.spawn(
+                HostTaskOwnerKind::Startup,
+                HostTaskKind::CronTick,
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                    loop {
+                        tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            _ = interval.tick() => tick_scheduler.lock().tick(),
+                        }
+                    }
+                },
+            );
         }
         Some(Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(
             scheduler,
@@ -188,7 +198,11 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
     let mcp_pool_concrete: Option<Arc<peri_middlewares::mcp::McpClientPool>> = if bare {
         None
     } else {
-        let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
+        let pool = Arc::new(
+            peri_middlewares::mcp::McpClientPool::new_pending_with_spawner(
+                mcp_task_spawner.clone(),
+            ),
+        );
         let pool_clone = pool.clone();
         let cwd_clone = cwd.clone();
         let claude_home_clone = claude_dir.clone();
@@ -203,7 +217,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
             Box<dyn Fn(peri_middlewares::mcp::oauth_flow::OAuthFlowEvent) + Send + Sync>,
         > = {
             let cb_tx = oauth_event_tx.clone();
-            let cb_pool = pool.clone();
+            let cb_pool = Arc::downgrade(&pool);
             Some(Box::new(move |event: OAuthFlowEvent| match event {
                 OAuthFlowEvent::AuthorizationNeeded {
                     flow_id,
@@ -211,6 +225,9 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
                     authorization_url,
                     callback_tx,
                 } => {
+                    let Some(cb_pool) = cb_pool.upgrade() else {
+                        return;
+                    };
                     if !cb_pool.register_oauth_callback(&server_name, &flow_id, callback_tx) {
                         return;
                     }
@@ -269,7 +286,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
                 }
             }))
         };
-        tokio::spawn(async move {
+        let _ = pool.spawn_background(peri_middlewares::mcp::McpTaskKey::Initialize, async move {
             peri_middlewares::mcp::McpClientPool::run_initialize(
                 pool_clone,
                 std::path::Path::new(&cwd_clone),
@@ -303,15 +320,19 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
     // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
     if !bare {
         let claude_dir_clone = claude_dir.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                peri_middlewares::plugin::cleanup_orphaned_plugins(&claude_dir_clone).await
-            {
-                tracing::warn!(target: "peri", error = %e, "启动时清理孤儿插件文件失败");
-            } else {
-                tracing::info!(target: "peri", "启动时清理孤儿插件文件完成");
-            }
-        });
+        let _ = host_task_spawner.spawn(
+            HostTaskOwnerKind::Startup,
+            HostTaskKind::PluginCleanup,
+            async move {
+                if let Err(e) =
+                    peri_middlewares::plugin::cleanup_orphaned_plugins(&claude_dir_clone).await
+                {
+                    tracing::warn!(target: "peri", error = %e, "启动时清理孤儿插件文件失败");
+                } else {
+                    tracing::info!(target: "peri", "启动时清理孤儿插件文件完成");
+                }
+            },
+        );
     }
 
     let plugin_skill_roots = plugin_data
@@ -383,6 +404,9 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         };
 
     AcpServerConfig {
+        host_task_owner: Some(host_task_owner),
+        host_task_spawner,
+        mcp_task_owner: Some(Box::new(mcp_task_owner)),
         provider: Arc::new(RwLock::new(provider)),
         peri_config,
         permission_mode,

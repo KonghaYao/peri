@@ -1,7 +1,9 @@
 //! Tests
 
 use super::*;
-use crate::kit::tui_render_unit::{TuiToolCard, TuiToolPresentation, TuiUserBubble};
+use crate::kit::tui_render_unit::{
+    InteractionKind, TuiToolCard, TuiToolPresentation, TuiUserBubble,
+};
 use ratatui_kit::ratatui::layout::Rect;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
@@ -512,6 +514,11 @@ fn ask_user_block(pending: bool, rid: Option<&str>) -> TuiRenderUnit {
             Some("Allowed once".into())
         },
         request_id: rid.map(|s| s.to_string()),
+        owner: rid.map(|_| crate::acp_client::InteractionOwner {
+            token: 1,
+            ..Default::default()
+        }),
+        question_ids: vec![],
         fold: FoldState::Expanded,
         user_modified: false,
         content_hash: 0,
@@ -598,6 +605,106 @@ fn test_cycle_interaction_option_wraps_around() {
     // 单选项恒 0（count 归一化 ≥1 后）
     assert_eq!(cycle_interaction_option(0, 1, true), 0);
     assert_eq!(cycle_interaction_option(0, 1, false), 0);
+}
+
+#[test]
+fn test_inline_ask_user_answers_use_block_question_ids_not_active_pending() {
+    let ids = vec!["a1".to_string(), "a2".to_string()];
+    let answers = super::entry_nav::build_inline_answers(&ids, "Fast");
+    assert_eq!(answers, serde_json::json!({"a1": "Fast", "a2": ""}));
+}
+
+/// [回归测试] durable permission A 响应不能清掉后来 active 的 B popup。
+#[test]
+#[serial]
+fn test_permission_inline_a_response_preserves_active_b_popup() {
+    use crate::kit::acp_types::PendingInteraction;
+    use crate::kit::atoms::{HITL_PENDING, POPUP_KIND, PopupKind};
+    let old_pending = HITL_PENDING.state().read().clone();
+    let old_popup = *POPUP_KIND.state().read();
+    *HITL_PENDING.state().write() = Some(PendingInteraction {
+        owner: Default::default(),
+        request_id_json: "B".into(),
+        payload: peri_acp_types::event_data::HitlPending {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::Value::Null,
+            batch: None,
+        },
+    });
+    *POPUP_KIND.state().write() = Some(PopupKind::Hitl);
+    let TuiRenderUnit::TuiAskUserBlock(block) = ask_user_block(true, Some("A")) else {
+        unreachable!()
+    };
+    let mut sent = None;
+    super::entry_nav::submit_interaction_option_with(
+        &block,
+        0,
+        |action| sent = Some(action),
+        |_| {},
+    );
+    assert!(
+        matches!(sent, Some(crate::kit::hitl_response::HitlResponseAction::Approve { request_id_str, .. }) if request_id_str == "A")
+    );
+    assert_eq!(
+        HITL_PENDING
+            .state()
+            .read()
+            .as_ref()
+            .unwrap()
+            .request_id_json,
+        "B"
+    );
+    assert_eq!(*POPUP_KIND.state().read(), Some(PopupKind::Hitl));
+    *HITL_PENDING.state().write() = old_pending;
+    *POPUP_KIND.state().write() = old_popup;
+}
+
+/// [回归测试] durable AskUser A 响应只用 A 的 question IDs，且保留 active B panel。
+#[test]
+#[serial]
+fn test_ask_user_inline_a_response_preserves_active_b_panel() {
+    use crate::app::panel_types::PanelKind;
+    use crate::kit::acp_types::PendingInteraction;
+    use crate::kit::atoms::{ACTIVE_PANEL, ASK_USER_PENDING, OPEN_PANELS};
+    let old_pending = ASK_USER_PENDING.state().read().clone();
+    let old_active = *ACTIVE_PANEL.state().read();
+    let old_open = OPEN_PANELS.state().read().clone();
+    *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
+        owner: Default::default(),
+        request_id_json: "B".into(),
+        payload: peri_acp_types::event_data::AskUser { questions: vec![] },
+    });
+    *OPEN_PANELS.state().write() = vec![PanelKind::AskUser];
+    *ACTIVE_PANEL.state().write() = Some(PanelKind::AskUser);
+    let TuiRenderUnit::TuiAskUserBlock(mut block) = ask_user_block(true, Some("A")) else {
+        unreachable!()
+    };
+    block.kind = InteractionKind::AskUser;
+    block.options = vec!["Fast".into()];
+    block.question_ids = vec!["a1".into(), "a2".into()];
+    let mut sent = None;
+    super::entry_nav::submit_interaction_option_with(
+        &block,
+        0,
+        |_| {},
+        |action| sent = Some(action),
+    );
+    assert!(
+        matches!(sent, Some(crate::kit::ask_user_action::AskUserResponseAction::Submit { request_id_str, answers, .. }) if request_id_str == "A" && answers == serde_json::json!({"a1":"Fast","a2":""}))
+    );
+    assert_eq!(
+        ASK_USER_PENDING
+            .state()
+            .read()
+            .as_ref()
+            .unwrap()
+            .request_id_json,
+        "B"
+    );
+    assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::AskUser));
+    *ASK_USER_PENDING.state().write() = old_pending;
+    *ACTIVE_PANEL.state().write() = old_active;
+    *OPEN_PANELS.state().write() = old_open;
 }
 
 // ── 点击/Enter 共用折叠分派（apply_fold_toggle 动作层）────────────────────

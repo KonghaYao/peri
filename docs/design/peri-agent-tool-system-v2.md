@@ -1,6 +1,6 @@
 # peri-agent v2 工具系统架构设计
 
-> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v1.5（2026-08-22：工具可见性改以 session-local 工具视图与 `BaseTool::is_direct()` 为事实源）
+> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v1.6（2026-08-25：动态提示贡献改为 `before_agent` 后按模型请求读取）
 
 ## 1. 设计原则
 
@@ -176,8 +176,8 @@ score = keyword_score × 0.4 + tfidf_score × 0.6
 
 > 参照 grok-build 的 `ToolDescription`（name/description/title/namespace 结构）与
 > `description_template` 模板渲染模式设计；提示词合并复用现有 middleware
-> `prompt_contribution` 机制（`peri-agent/src/middleware/chain.rs:312`、
-> `stage_builder.rs:410` 步骤 8）。
+> `prompt_contribution` 机制（`peri-agent/src/middleware/chain.rs`、
+> `peri-agent/src/agent/model_bridge.rs`）。
 
 ### 2.5.1 ToolDescription 契约
 
@@ -224,7 +224,7 @@ function calling 无对应字段（对齐 grok-build `ToolDefinition` → `Funct
 
 ### 2.5.2 提示词层声明机制
 
-工具显式声明 + 构建期合并，复用现有 `prompt_contribution` 链路：
+工具显式声明 + request-time 合并，复用现有 `prompt_contribution` 链路：
 
 ```
 before_agent（ToolSearchMiddleware）
@@ -240,7 +240,8 @@ before_agent（ToolSearchMiddleware）
 │
 └─ prompt_contribution() 返回缓存文本
         ↓
-stage 装配步骤 8：format!("{system_prompt}\n\n{contributions}") 追加到 system prompt 尾部
+AgentModelBridge 构造每个 ModelRequest 时，从与 StageContext 共享的
+Arc<MiddlewareChain> 同步收集一次，并追加到不变的 frozen base prompt 尾部
 ```
 
 要点：
@@ -257,14 +258,18 @@ stage 装配步骤 8：format!("{system_prompt}\n\n{contributions}") 追加到 s
   （LLM 丢失"当前可用 deferred 工具"提示即功能回归）。
 - **失效路径**：声明段不走索引 `content_version` 失效路径——每轮
   `before_agent` 独立重渲染，输出仅依赖工具静态字段。
-- **时序（已知限制）**：`build_stage_context` 的步骤 8（stage_builder.rs:410）
-  先于 `before_agent`（首次 Receive 后执行，stages/mod.rs:719-724）——因此
-  每个 agent **首个 turn 的 system prompt 不含声明段**（与 deferred 列表
-  同病，现状延续），turn 2 起出现。单轮会话（多数交互）声明段缺失为已知
-  行为；演进方向为合并进静态段落（见下文缓存位置），记为未来项。
+- **时序**：`run_react_loop` 在首个 Reason 前完成 `before_agent`；主 Agent 的
+  bridge 在每个 `ModelRequest` 构造时，从与 `StageContext` 共享的同一条
+  `Arc<MiddlewareChain>` 读取当前 contribution。因此首个 Reason 即包含
+  deferred 列表与 direct 声明；fresh stage 会从该 turn 的 disabled/filter 后
+  session-local 工具视图重算，不依赖上一 stage 的 middleware cache。
+- **组合纪律**：frozen base prompt 本身不被修改，动态段只存在于当次模型请求；
+  空 contribution 不追加分隔符，非空时精确组合为
+  `base + "\n\n" + contribution`，不会在历史字符串上累加。
 - **缓存位置**：声明段位于 prompt contribution（frozen 之后），不参与 Anthropic
   前缀缓存。量小（17 工具 × 1-2 行）可控；若需缓存收益，演进方向为合并进静态
-  段落（build_system_prompt 感知工具集），记为未来项，不在 v1.4 实现。
+  段落（build_system_prompt 感知工具集），记为未来项；当前保持 request-time
+  dynamic contribution，以保证 session-local 能力视图准确。
 
 ### 2.5.3 模板语法与渲染
 
@@ -305,8 +310,9 @@ Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `ca
 
 05 段落保留**通用纪律**（文件头部的 batch/incremental 规则与 Bash discipline
 节，05_using_tools.md:3-4、6-13）与**通用工具选择原则骨架**（"Tool selection
-principles" 小节，2 行、不含工具名与逐工具细节）——骨架是 turn-1 与 SubAgent
-冻结 prompt 路径的兜底指引（声明段 turn-2+ 才可见，见 2.5.2 时序限制）。
+principles" 小节，2 行、不含工具名与逐工具细节）。骨架负责通用选择纪律；
+主 Agent 的当前工具声明从首个 Reason 起即通过 request-time contribution 可见，
+不再承担 turn-1 声明缺口的 fallback 职责。
 当前 direct 工具的 `prompt_declaration()` 按 session-local 工具视图动态参与渲染；常见分组包括
 `filesystem`、`execution`、`web`、`interaction`、`skills` 与 `meta`。
 声明段是工具选择指引的**单一事实源**（工具代码），05 不再维护

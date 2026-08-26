@@ -6,7 +6,7 @@ use super::{
     client::{
         build_http_transport, serve_client_auto, setup_subscription, spawn_stdio_transport,
         ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, OAuthStatus,
-        HTTP_CONNECT_TIMEOUT, STDIO_CONNECT_TIMEOUT,
+        HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT, STDIO_CONNECT_TIMEOUT,
     },
     config::OAuthConfig,
     oauth_flow::OAuthFlowEvent,
@@ -214,8 +214,10 @@ impl McpClientPool {
                         channel_capable,
                         skills_capable,
                     });
-                    pool.clients.write().insert(name.clone(), handle);
-                    pool.services.lock().await.insert(name.clone(), rs);
+                    if let Err(mut service) = pool.try_commit_connection(name.clone(), handle, rs) {
+                        let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                        break;
+                    }
                     connected += 1;
                     let _ = status_tx.send(McpInitStatus::Initializing {
                         connected,
@@ -294,6 +296,7 @@ impl McpClientPool {
         pool.notify_initial_connections();
     }
 
+    #[cfg(test)]
     pub async fn initialize(
         cwd: &Path,
         claude_home: &Path,
@@ -444,26 +447,26 @@ impl McpClientPool {
                         .is_some();
                     let oauth_status = OAuthStatus::default();
                     let skills_capable = super::client::peer_declares_skills(&peer);
-                    pool.clients.write().insert(
-                        name.clone(),
-                        Arc::new(McpClientHandle {
-                            name: name.clone(),
-                            version: peer.peer_info().and_then(|info| {
-                                info.server_info.as_ref().map(|si| si.version.clone())
-                            }),
-                            cache_version: cache_version.clone(),
-                            peer: Some(peer),
-                            tools,
-                            resources,
-                            status: ClientStatus::Connected,
-                            oauth_status,
-                            source: server_config.source.clone(),
-                            url: server_config.url.clone(),
-                            channel_capable,
-                            skills_capable,
+                    let handle = Arc::new(McpClientHandle {
+                        name: name.clone(),
+                        version: peer.peer_info().and_then(|info| {
+                            info.server_info.as_ref().map(|si| si.version.clone())
                         }),
-                    );
-                    pool.services.lock().await.insert(name.clone(), rs);
+                        cache_version: cache_version.clone(),
+                        peer: Some(peer),
+                        tools,
+                        resources,
+                        status: ClientStatus::Connected,
+                        oauth_status,
+                        source: server_config.source.clone(),
+                        url: server_config.url.clone(),
+                        channel_capable,
+                        skills_capable,
+                    });
+                    if let Err(mut service) = pool.try_commit_connection(name.clone(), handle, rs) {
+                        let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                        break;
+                    }
                 }
                 Ok(Err(e)) => {
                     let err_str = e.to_string();

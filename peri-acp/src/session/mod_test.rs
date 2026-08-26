@@ -312,6 +312,27 @@ async fn test_close_session_移除记录后goal_state返回none() {
     );
 }
 
+#[tokio::test]
+async fn test_pre_close_cancels_but_preserves_record_until_terminal_close() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp);
+    let session_id = "pre-close-session";
+    mgr.ensure_session(session_id, tmp.path().to_str().unwrap());
+    let cancel = mgr
+        .get_session(session_id)
+        .expect("session exists")
+        .cancel_token
+        .clone();
+
+    mgr.pre_close_session(session_id);
+
+    assert!(cancel.is_cancelled());
+    assert!(mgr.get_session(session_id).is_some());
+    assert_eq!(mgr.session_ids(), vec![session_id.to_string()]);
+    mgr.close_session(session_id).await.unwrap();
+    assert!(mgr.session_ids().is_empty());
+}
+
 /// [回归] turn 以 Error 结束后 cron 触发仍能注入 session（不丢失）。
 #[tokio::test]
 async fn test_cron_bridge_survives_turn_error() {

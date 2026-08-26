@@ -118,7 +118,12 @@ fn make_server_config(
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
         Vec::new(), // plugin skill roots（C1；测试无）
     );
+    let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
+    let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
+        host_task_owner: Some(host_task_owner),
+        host_task_spawner,
+        mcp_task_owner: Some(Box::new(mcp_task_owner)),
         provider: Arc::new(parking_lot::RwLock::new(provider)),
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),

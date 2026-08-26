@@ -30,6 +30,10 @@ use types::{AcpError, IncomingMessage, RequestId};
 #[async_trait]
 pub trait AcpTransport: Send + Sync {
     /// Send a request and wait for a response.
+    ///
+    /// Connected silence has no built-in timeout. Cancelling the caller releases
+    /// its pending registration; terminal stdio/MPSC closure settles current and
+    /// future requests with `AcpError(-32603, "Transport closed")`.
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError>;
 
     /// Send a notification (fire-and-forget, no response expected).

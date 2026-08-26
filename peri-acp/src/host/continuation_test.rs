@@ -2,11 +2,17 @@
 //! 原子 take、epoch 代际失效（用户新 prompt 清除未运行的续跑）、
 //! cancel race 兜底 eligibility、取消续跑不 arm、dispatch 前 Defer 确认。
 
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use peri_acp_types::tasks::BgTaskKind;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     cancel_arms_continuation, cancel_should_schedule_continuation, continuation_dispatchable,
-    continuation_still_valid, take_continuation_if_armed, SessionState,
+    continuation_still_valid, recv_until_shutdown, take_continuation_if_armed, SessionState,
 };
 
 /// 构造最小 SessionState（仅续跑相关字段有值）。
@@ -164,4 +170,51 @@ fn test_continuation_dispatchable_requires_pending_defer() {
     // 代际失效（用户新 prompt）→ 跳过
     assert!(!continuation_dispatchable(&state, 3 + 1, true));
     assert!(!continuation_dispatchable(&state, 3 + 1, false));
+}
+
+#[tokio::test]
+async fn test_scheduler_exits_on_host_shutdown_even_if_continuation_ingress_still_exists() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let root = Arc::new(tx);
+    let _bounded_callback_clone = root.clone();
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+
+    assert!(recv_until_shutdown(&mut rx, &shutdown).await.is_none());
+    assert!(
+        !root.is_closed(),
+        "kept-alive ingress must not be the exit signal"
+    );
+}
+
+#[tokio::test]
+async fn test_scheduler_does_not_own_its_ingress_sender() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let root = Arc::new(tx);
+    let scheduler_ingress = Arc::downgrade(&root);
+    drop(root);
+
+    assert!(scheduler_ingress.upgrade().is_none());
+    assert!(recv_until_shutdown(&mut rx, &CancellationToken::new())
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_continuation_child_is_rejected_after_admission_closes() {
+    let (owner, spawner) = crate::host::task_scope::HostTaskOwner::new();
+    owner.begin_shutdown();
+    let started = Arc::new(AtomicBool::new(false));
+    let started_task = started.clone();
+    assert!(spawner
+        .spawn(
+            crate::host::task_scope::HostTaskOwnerKind::Session,
+            crate::host::task_scope::HostTaskKind::ContinuationTurn,
+            async move {
+                started_task.store(true, Ordering::SeqCst);
+            },
+        )
+        .is_err());
+    tokio::task::yield_now().await;
+    assert!(!started.load(Ordering::SeqCst));
 }

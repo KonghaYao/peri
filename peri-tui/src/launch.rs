@@ -174,7 +174,7 @@ pub async fn build_app_and_acp(
             });
 
             let (acp_client, notification_tx, notification_rx) =
-                AcpTuiClient::new(client_transport);
+                AcpTuiClient::new_interactive(client_transport);
             acp_client.spawn_pump(notification_tx);
 
             app.acp_client = Some(acp_client.clone());
@@ -235,7 +235,23 @@ pub async fn teardown_app(app: &mut App) {
     // 关闭 MCP 连接池
     if let Some(pool) = app.services.mcp_pool.take() {
         tracing::info!("正在关闭 MCP 连接池...");
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(pool.shutdown()));
-        tracing::info!("MCP 连接池已关闭");
+        let report = shutdown_mcp_pool(pool, app.services.mcp_task_owner.take()).await;
+        if report.is_complete() {
+            tracing::info!("MCP 连接池已关闭");
+        } else {
+            tracing::warn!(?report, "MCP 连接池关闭未完全收敛");
+        }
     }
+}
+
+pub(crate) async fn shutdown_mcp_pool(
+    pool: Arc<peri_middlewares::mcp::McpClientPool>,
+    mut owner: Option<peri_middlewares::mcp::McpTaskOwner>,
+) -> peri_acp_types::ports::McpPoolShutdownReport {
+    pool.begin_shutdown();
+    if let Some(owner) = owner.as_mut() {
+        owner.begin_shutdown();
+        let _ = owner.shutdown().await;
+    }
+    pool.shutdown().await
 }

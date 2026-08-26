@@ -81,6 +81,7 @@ pub struct ServiceRegistry {
     pub permission_mode: Arc<SharedPermissionMode>,
     pub thread_store: Arc<dyn ThreadStore>,
     pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
+    pub mcp_task_owner: Option<peri_middlewares::mcp::McpTaskOwner>,
     pub mcp_init_rx: Option<tokio::sync::watch::Receiver<peri_middlewares::mcp::McpInitStatus>>,
     pub cron: CronState,
     pub plugin_data: Option<PluginLoadResult>,

@@ -68,19 +68,27 @@ fn test_close_popup_clears_payload_atoms() {
     setup_atoms();
 
     // 构造 4 种 popup 的 payload 写入对应 atom
-    *atoms::HITL_PENDING.state().write() = Some(HitlPending {
-        tool_name: "rm".to_string(),
-        tool_input: serde_json::Value::Null,
-        batch: None,
+    *atoms::HITL_PENDING.state().write() = Some(crate::kit::acp_types::PendingInteraction {
+        owner: Default::default(),
+        request_id_json: "\"hitl\"".into(),
+        payload: HitlPending {
+            tool_name: "rm".to_string(),
+            tool_input: serde_json::Value::Null,
+            batch: None,
+        },
     });
-    *atoms::ASK_USER_PENDING.state().write() = Some(AskUser {
-        questions: vec![Question {
-            id: "q1".to_string(),
-            header: "h".to_string(),
-            question: "q".to_string(),
-            options: vec![],
-            multi_select: false,
-        }],
+    *atoms::ASK_USER_PENDING.state().write() = Some(crate::kit::acp_types::PendingInteraction {
+        owner: Default::default(),
+        request_id_json: "\"ask\"".into(),
+        payload: AskUser {
+            questions: vec![Question {
+                id: "q1".to_string(),
+                header: "h".to_string(),
+                question: "q".to_string(),
+                options: vec![],
+                multi_select: false,
+            }],
+        },
     });
     *atoms::REWIND_PREVIEW.state().write() = Some(RewindPreview {
         files: vec![],

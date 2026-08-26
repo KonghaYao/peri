@@ -25,7 +25,7 @@ use peri_acp_types::{
     cron::CronSchedulerPort,
     event::{AgentEventHandler, ExecutorEvent},
     event_v2::{EventBus, EventBusConfig, EventHandles},
-    frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
+    frozen::{ChildHandlerFactory, ThreadPersistence},
     goal::GoalController,
     hooks::RegisteredHook,
     identity::AgentId,
@@ -51,13 +51,14 @@ use crate::agent::{
 };
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::middleware::chain::MiddlewareChain;
+use crate::session::exec::executor::FrozenSessionData;
 use crate::session::factory::{
     AssemblyContext, ChainAssembly, MiddlewareChainAssembler, OnBgCompleteFn,
     SubAgentMiddlewarePort, SystemPromptBuilder,
 };
 use crate::session::retry_events::RetryEventForwarder;
 use crate::session::subagent::SubagentHost;
-use crate::session::{FrozenContext, Session};
+use crate::session::Session;
 use crate::tools::{BaseTool, ToolInvocationResolver};
 
 // ── 装配/构建输入（原 SessionContext 投影 + 注入面）──────────────────────────
@@ -167,8 +168,8 @@ pub struct StageBuildInput {
     pub compact_pre_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     /// compact 后置 hook（hook_groups 非空时 ACP 装配点构造）
     pub compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
-    /// 装配期关闭的 middleware 名集合（源自会话冻结状态
-    /// `SessionContext::meta_harness.disabled_middlewares` 投影；
+    /// 装配期关闭的 middleware 名集合（源自当前 `FrozenSessionData` 的
+    /// `v2_frozen.meta_harness.disabled_middlewares` 投影；
     /// 顶层链过滤——设计 §2.5）。
     pub meta_harness_disabled: HashSet<String>,
 }
@@ -255,7 +256,7 @@ pub struct AgentComponents {
     /// 主 LLM（已通过 `AgentModelBridge` 适配为标准 ReAct 抽象）
     pub llm: Arc<dyn ReactLLM + Send + Sync>,
     /// 中间件链（v2 StageContext 直接复用）
-    pub chain: MiddlewareChain,
+    pub chain: Arc<MiddlewareChain>,
     /// 共享工具注册表（deferred tools，供 ExecuteExtraTool 代理）
     #[allow(clippy::type_complexity)]
     pub shared_tools: Option<Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>>,
@@ -285,8 +286,7 @@ pub struct AgentComponents {
 pub(crate) fn build_agent(
     input: &StageBuildInput,
     assembler: &dyn MiddlewareChainAssembler<Context = AssemblyContext, Output = ChainAssembly>,
-    system_prompt: String,
-    frozen: FrozenData,
+    frozen_session: &FrozenSessionData,
     event_handler: Arc<dyn AgentEventHandler>,
     agent_overrides: Option<AgentOverrides>,
     preload_skills: Vec<String>,
@@ -298,12 +298,13 @@ pub(crate) fn build_agent(
     on_bg_complete: Option<OnBgCompleteFn>,
     cached_llm: Option<&CachedLlmInstances>,
 ) -> (AcpAgentOutput, Option<CachedLlmInstances>) {
-    let FrozenData {
-        claude_md: frozen_claude_md,
-        claude_local_md: frozen_claude_local_md,
-        skill_summary: frozen_skill_summary,
-        date: _frozen_date,
-    } = frozen;
+    // FrozenContext 中的空字符串是“冻结缺席”，仍须投影为 Some("")，
+    // 防止 AgentsMd/Skills middleware 在 before_agent 阶段重读晚到文件。
+    let frozen = frozen_session.v2_frozen();
+    let frozen_claude_md = Some(frozen.claude_md.to_string());
+    let frozen_claude_local_md = frozen_session.claude_local_md().map(ToString::to_string);
+    let frozen_skill_summary = Some(frozen.skill_summary.to_string());
+    let system_prompt = frozen.system_prompt.to_string();
 
     let ThreadPersistence {
         store: thread_store,
@@ -350,7 +351,8 @@ pub(crate) fn build_agent(
     );
 
     // 提前提取模型实例（chain 构建完成后才组装 AgentModelBridge，
-    // 以便收集中间件 prompt_contribution 合并到 system prompt）。
+    // 以便 bridge provider 与 StageContext 共享同一 Arc<MiddlewareChain>；
+    // contribution 在 before_agent 后按 ModelRequest 同步收集）。
     // 与 SubAgent 模型共享 session 级 LLM 缓存（同一 fingerprint）：
     // 跨 turn / 跨 agent 实例复用 reqwest::Client（连接池 + TLS session cache），
     // 避免每轮重建 ~1-2 MB HTTP client。烘焙的 observer 是 session 级转发器
@@ -469,17 +471,17 @@ pub(crate) fn build_agent(
         },
     );
 
-    // 收集中间件的 prompt_contribution（AgentsMd / Skills / GitAttribution /
-    // ToolSearch 等声明式贡献），合并到 system_prompt 后传入 LLM。
-    let contributions = chain.collect_prompt_contributions();
-    let merged_system_prompt = if contributions.is_empty() {
-        system_prompt.clone()
-    } else {
-        format!("{system_prompt}\n\n{contributions}")
-    };
+    // bridge 与 StageContext 必须共享同一条 middleware chain：before_agent
+    // 填充的 session-local cache 由下一个 ModelRequest 在同步构造阶段读取。
+    let chain = Arc::new(chain);
+    let contribution_chain = Arc::clone(&chain);
 
-    // 构造 AgentModelBridge（带系统提示词）
-    let mut base_llm = AgentModelBridge::new(base_model).with_system(merged_system_prompt);
+    // 构造 AgentModelBridge（冻结 base 不变；动态 contribution request-time 组合）
+    let mut base_llm = AgentModelBridge::new(base_model)
+        .with_system(system_prompt)
+        .with_system_contribution_provider(Arc::new(move || {
+            contribution_chain.collect_prompt_contributions()
+        }));
     if let Some(ref sid) = session_id {
         base_llm = base_llm.with_session_id(sid);
     }
@@ -577,8 +579,7 @@ pub fn build_stage_context(
     input: &StageBuildInput,
     assembler: &dyn MiddlewareChainAssembler<Context = AssemblyContext, Output = ChainAssembly>,
     cached_llm: Option<&CachedLlmInstances>,
-    system_prompt: String,
-    frozen: FrozenData,
+    frozen_session: FrozenSessionData,
     event_handler: Arc<dyn AgentEventHandler>,
     agent_overrides: Option<AgentOverrides>,
     preload_skills: Vec<String>,
@@ -618,8 +619,7 @@ pub fn build_stage_context(
     let (agent_output, new_cached) = build_agent(
         input,
         assembler,
-        system_prompt,
-        frozen.clone(),
+        &frozen_session,
         event_handler,
         agent_overrides,
         preload_skills,
@@ -650,7 +650,7 @@ pub fn build_stage_context(
 
     // 构造 v2 Session（复用外部 cancel token + 会话级共享 MessageQueue）
     let cwd_arc: Arc<str> = Arc::from(cwd.as_str());
-    let frozen_ctx = FrozenContext::builder().build();
+    let frozen_ctx = frozen_session.v2_frozen().clone();
     let cancel_arc = Arc::new(cancel_token);
     let session = Session::new_with_cancel_and_queue(
         cwd_arc,
@@ -779,17 +779,18 @@ pub fn build_stage_context(
             langfuse_bridge: input.langfuse_bridge_factory.as_ref().map(|f| f()),
             // Frozen CLAUDE.local.md 不在 FrozenContext（父 session 无此字段），
             // 由 session/new 冻结数据注入（不重读磁盘）。
-            frozen_claude_local_md: frozen
-                .claude_local_md
-                .as_ref()
+            frozen_claude_local_md: frozen_session
+                .claude_local_md()
                 .map(|s| Arc::new(s.to_string())),
             // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同；
             // 主 session 挂载 host 时恒 None（spawn 主路径从 parent session
             // 直接读取 frozen system_prompt，不经本字段）。
             frozen_system_prompt: None,
             parent_thread_id: thread_persistence.parent_thread_id.clone(),
-            frozen_claude_md: frozen.claude_md.as_ref().map(|s| Arc::new(s.clone())),
-            frozen_skill_summary: frozen.skill_summary.as_ref().map(|s| Arc::new(s.clone())),
+            frozen_claude_md: Some(Arc::new(frozen_session.v2_frozen().claude_md.to_string())),
+            frozen_skill_summary: Some(Arc::new(
+                frozen_session.v2_frozen().skill_summary.to_string(),
+            )),
         };
         session.set_subagent_host(host);
         // 父 v2 session 注入 SubAgentMiddleware（与 set_parent_agent_id 同点；
@@ -824,7 +825,7 @@ pub fn build_stage_context(
         .with_llm(react_llm)
         .with_tools(session_tools)
         .with_tool_invocation_resolver(Arc::clone(&input.tool_invocation_resolver))
-        .with_middleware_chain(Arc::new(chain))
+        .with_middleware_chain(Arc::clone(&chain))
         .with_event_bus(Arc::new(event_bus))
         .with_session_context(session_context)
         .with_tool_registry_snapshot((*tool_registry_snapshot).clone());
@@ -876,6 +877,7 @@ pub fn build_stage_context(
 #[cfg(test)]
 mod builder_v2_tests {
     use super::*;
+    use crate::session::FrozenContext;
 
     #[test]
     fn test_v2_context_has_null_llm_by_default() {

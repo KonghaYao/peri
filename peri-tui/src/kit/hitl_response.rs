@@ -20,15 +20,22 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::acp_client::AcpTuiClient;
+use crate::acp_client::InteractionOwner;
 use crate::i18n;
 
 /// HITL 用户操作——由 HitlPopup 在 Enter/Esc 时通过 HITL_RESPONSE_TX 发送。
 #[derive(Debug, Clone)]
 pub enum HitlResponseAction {
     /// 用户批准（Enter）。`request_id_str` 为 `serde_json::to_string(&RequestId)` 序列化结果。
-    Approve { request_id_str: String },
+    Approve {
+        owner: InteractionOwner,
+        request_id_str: String,
+    },
     /// 用户拒绝（Esc）。
-    Reject { request_id_str: String },
+    Reject {
+        owner: InteractionOwner,
+        request_id_str: String,
+    },
 }
 
 /// 启动 hitl 响应消费者后台任务。
@@ -56,11 +63,11 @@ pub fn spawn_hitl_response_consumer(
                             info!("kit hitl_response_consumer: HITL_RESPONSE_TX dropped, exiting");
                             break;
                         }
-                        Some(HitlResponseAction::Approve { request_id_str }) => {
-                            handle_approve(&acp_client, &request_id_str).await;
+                        Some(HitlResponseAction::Approve { owner, request_id_str }) => {
+                            handle_approve(&acp_client, &owner, &request_id_str).await;
                         }
-                        Some(HitlResponseAction::Reject { request_id_str }) => {
-                            handle_reject(&acp_client, &request_id_str).await;
+                        Some(HitlResponseAction::Reject { owner, request_id_str }) => {
+                            handle_reject(&acp_client, &owner, &request_id_str).await;
                         }
                     }
                 }
@@ -70,55 +77,43 @@ pub fn spawn_hitl_response_consumer(
 }
 
 /// 处理批准：构造 selected/allow_once response JSON，调用 send_response。
-/// RPC 成功后发送 `InteractionResolved` 本地事件回写 inline interaction block
-/// （§6.8；失败保持 pending，用户可在 block 上重试——双轨 D5）。
-async fn handle_approve(acp_client: &AcpTuiClient, request_id_str: &str) {
-    let id = match serde_json::from_str::<peri_acp::transport::types::RequestId>(request_id_str) {
-        Ok(id) => id,
-        Err(e) => {
-            error!(error = %e, request_id_str, "kit hitl_consumer: failed to deserialize RequestId");
-            return;
-        }
-    };
-
+/// Client 先 claim owner 再发送 wire response；成功或传输失败都会发送
+/// owner-aware `InteractionTerminal`。失败是终态 `ResponseTransportFailed`，
+/// 不恢复 pending，也不允许以同一 owner 重试。
+async fn handle_approve(acp_client: &AcpTuiClient, owner: &InteractionOwner, request_id_str: &str) {
     let response = json!({"outcome": {"outcome": "selected", "optionId": "allow_once"}});
 
     info!(request_id = %request_id_str, "kit hitl_consumer: sending Approve (allow_once) response");
 
-    if let Err(e) = acp_client.send_response(id, Ok(response)).await {
+    if let Err(e) = acp_client
+        .respond_interaction(
+            owner,
+            response,
+            i18n::tr("render-interaction-result-allowed-once"),
+        )
+        .await
+    {
         error!(error = %e, "kit hitl_consumer: send_response (approve) failed");
-        return;
     }
-    crate::kit::acp_events::emit_interaction_resolved(
-        request_id_str,
-        &i18n::tr("render-interaction-result-allowed-once"),
-    );
 }
 
 /// 处理拒绝：构造 cancelled response JSON，调用 send_response。
-/// RPC 成功后发送 `InteractionResolved` 本地事件回写 inline interaction block
-/// （§6.8；失败保持 pending）。
-async fn handle_reject(acp_client: &AcpTuiClient, request_id_str: &str) {
-    let id = match serde_json::from_str::<peri_acp::transport::types::RequestId>(request_id_str) {
-        Ok(id) => id,
-        Err(e) => {
-            error!(error = %e, request_id_str, "kit hitl_consumer: failed to deserialize RequestId (reject)");
-            return;
-        }
-    };
-
+/// Client 先 claim owner；成功或传输失败都 owner-aware terminalize，且失败不重试。
+async fn handle_reject(acp_client: &AcpTuiClient, owner: &InteractionOwner, request_id_str: &str) {
     let response = json!({"outcome": {"outcome": "cancelled"}});
 
     info!(request_id = %request_id_str, "kit hitl_consumer: sending Reject (cancelled) response");
 
-    if let Err(e) = acp_client.send_response(id, Ok(response)).await {
+    if let Err(e) = acp_client
+        .respond_interaction(
+            owner,
+            response,
+            i18n::tr("render-interaction-result-denied"),
+        )
+        .await
+    {
         error!(error = %e, "kit hitl_consumer: send_response (reject) failed");
-        return;
     }
-    crate::kit::acp_events::emit_interaction_resolved(
-        request_id_str,
-        &i18n::tr("render-interaction-result-denied"),
-    );
 }
 
 #[cfg(test)]

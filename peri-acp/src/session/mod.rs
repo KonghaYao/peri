@@ -389,6 +389,25 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Begin terminal shutdown without removing the record needed by a
+    /// cooperatively unwinding prompt.
+    pub(crate) fn pre_close_session(&self, session_id: &str) {
+        if let Some(session) = self.inner.sessions.get(session_id) {
+            peri_acp_types::session::cancel_all_agents(session.active_agents.values());
+            session.cancel_token.cancel();
+            session.task_manager.cancel_all();
+        }
+    }
+
+    /// Stable session identity snapshot for the host EOF transaction.
+    pub(crate) fn session_ids(&self) -> Vec<String> {
+        self.inner
+            .sessions
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub async fn list_sessions(&self) -> anyhow::Result<Vec<ThreadMeta>> {
         self.inner.thread_store.list_threads().await
     }

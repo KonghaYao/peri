@@ -531,6 +531,32 @@ pub fn close_panel(kind: PanelKind) -> bool {
     removed
 }
 
+/// 仅当 AskUser active request 仍等于响应快照时，原子清理并关闭面板。
+pub fn close_ask_user_panel_for_request(request_id_json: &str) -> bool {
+    let pending_atom = crate::kit::atoms::ASK_USER_PENDING.state();
+    let mut pending = pending_atom.write();
+    if pending.as_ref().map(|p| p.request_id_json.as_str()) != Some(request_id_json) {
+        return false;
+    }
+    *pending = None;
+    close_panel(PanelKind::AskUser);
+    true
+}
+
+pub fn close_ask_user_panel_for_owner(owner: &crate::acp_client::InteractionOwner) -> bool {
+    let pending_atom = crate::kit::atoms::ASK_USER_PENDING.state();
+    let mut pending = pending_atom.write();
+    if !pending
+        .as_ref()
+        .is_some_and(|pending| pending.owner == *owner)
+    {
+        return false;
+    }
+    *pending = None;
+    drop(pending);
+    close_panel(PanelKind::AskUser)
+}
+
 /// Toggle：若已打开则关闭，否则打开。返回操作后的最终状态（true=已打开）。
 pub fn toggle_panel(kind: PanelKind) -> bool {
     let is_open = OPEN_PANELS.state().read().contains(&kind);

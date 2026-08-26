@@ -38,9 +38,14 @@ use crate::session::executor::ContinuationRequest;
 use peri_acp_types::tasks::BgTaskKind;
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use super::{dispatch_prompt_turn, AcpServerConfig, PromptLocks, SessionState, SharedSessions};
+use super::{
+    dispatch_prompt_turn,
+    task_scope::{HostTaskKind, HostTaskOwnerKind, HostTaskSpawner},
+    AcpServerConfig, PromptLocks, SessionState, SharedSessions,
+};
 
 /// 判定并**原子 take** session 的 continuation 标记（每 session coalesce）。
 ///
@@ -114,9 +119,14 @@ pub(crate) async fn run_continuation_scheduler(
     prompt_locks: PromptLocks,
     cfg: Arc<AcpServerConfig>,
     transport: Arc<dyn crate::transport::AcpTransport>,
-    cont_tx: mpsc::UnboundedSender<ContinuationRequest>,
+    cont_tx: std::sync::Weak<mpsc::UnboundedSender<ContinuationRequest>>,
+    task_spawner: HostTaskSpawner,
+    shutdown: CancellationToken,
 ) {
-    while let Some(req) = rx.recv().await {
+    loop {
+        let Some(req) = recv_until_shutdown(&mut rx, &shutdown).await else {
+            break;
+        };
         // eligibility + 原子 take（每 session 只运行一次）
         let epoch = {
             let mut sessions = sessions.lock().await;
@@ -139,22 +149,39 @@ pub(crate) async fn run_continuation_scheduler(
         let cfg2 = Arc::clone(&cfg);
         let transport2 = Arc::clone(&transport);
         let cont_tx2 = cont_tx.clone();
-        tokio::spawn(async move {
-            // dispatch_prompt_turn 在获取同一把 prompt lock 后校验 epoch 和
-            // SubAgentComplete Defer，避免本处预先持锁后再次获取导致死锁。
-            let params = continuation_params(&session_id);
-            let _ = dispatch_prompt_turn(
-                params,
-                true,
-                Some(epoch),
-                &sessions2,
-                &locks2,
-                &transport2,
-                &cfg2,
-                &cont_tx2,
-            )
-            .await;
-        });
+        let _ = task_spawner.spawn(
+            HostTaskOwnerKind::Session,
+            HostTaskKind::ContinuationTurn,
+            async move {
+                let Some(cont_tx2) = cont_tx2.upgrade() else {
+                    return;
+                };
+                // dispatch_prompt_turn 在获取同一把 prompt lock 后校验 epoch 和
+                // SubAgentComplete Defer，避免本处预先持锁后再次获取导致死锁。
+                let params = continuation_params(&session_id);
+                let _ = dispatch_prompt_turn(
+                    params,
+                    true,
+                    Some(epoch),
+                    &sessions2,
+                    &locks2,
+                    &transport2,
+                    &cfg2,
+                    cont_tx2.as_ref(),
+                )
+                .await;
+            },
+        );
+    }
+}
+
+async fn recv_until_shutdown(
+    rx: &mut mpsc::UnboundedReceiver<ContinuationRequest>,
+    shutdown: &CancellationToken,
+) -> Option<ContinuationRequest> {
+    tokio::select! {
+        _ = shutdown.cancelled() => None,
+        req = rx.recv() => req,
     }
 }
 
