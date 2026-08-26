@@ -7,12 +7,68 @@ use std::{
     time::Duration,
 };
 
+use peri_acp_types::{dynamic_mcp::DynamicMcpShutdownReport, ports::McpPoolShutdownReport};
 use tokio::sync::{oneshot, Barrier};
 
 use super::{
     Admission, DrainFuture, HostShutdownReport, HostTaskKind, HostTaskOwner, HostTaskOwnerKind,
-    HostWaitDriver, WaitFuture, WaitOutcome, WaitPhase,
+    HostTerminalShutdownReport, HostWaitDriver, WaitFuture, WaitOutcome, WaitPhase,
 };
+
+#[test]
+fn test_terminal_shutdown_evidence_requires_all_subsystems_and_sessions_complete() {
+    let complete_pool = McpPoolShutdownReport::Complete {
+        settled_services: 2,
+        failed_services: 0,
+    };
+    assert!(matches!(
+        HostTerminalShutdownReport::aggregate(
+            HostShutdownReport::Complete,
+            DynamicMcpShutdownReport::Complete,
+            complete_pool,
+            0,
+        ),
+        HostTerminalShutdownReport::Complete { .. }
+    ));
+
+    for report in [
+        HostTerminalShutdownReport::aggregate(
+            HostShutdownReport::Incomplete { unfinished: 1 },
+            DynamicMcpShutdownReport::Complete,
+            complete_pool,
+            0,
+        ),
+        HostTerminalShutdownReport::aggregate(
+            HostShutdownReport::Complete,
+            DynamicMcpShutdownReport::Incomplete {
+                unfinished_instances: 1,
+            },
+            complete_pool,
+            0,
+        ),
+        HostTerminalShutdownReport::aggregate(
+            HostShutdownReport::Complete,
+            DynamicMcpShutdownReport::Complete,
+            McpPoolShutdownReport::Incomplete {
+                settled_services: 1,
+                unfinished_services: 1,
+                failed_services: 0,
+            },
+            0,
+        ),
+        HostTerminalShutdownReport::aggregate(
+            HostShutdownReport::Complete,
+            DynamicMcpShutdownReport::Complete,
+            complete_pool,
+            1,
+        ),
+    ] {
+        assert!(matches!(
+            report,
+            HostTerminalShutdownReport::Incomplete { .. }
+        ));
+    }
+}
 
 struct ControlledWaitDriver {
     expiries: Mutex<VecDeque<(WaitPhase, oneshot::Receiver<()>)>>,

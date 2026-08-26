@@ -98,6 +98,7 @@ pub fn build_session_manager(
     permission_mode: Arc<SharedPermissionMode>,
     cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     mcp_subscription: Option<Arc<dyn McpSubscriptionPort>>,
+    dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     skills: Arc<dyn SkillsPort>,
     plugin_command_entries: Vec<RouteEntry>,
     plugin_skill_roots: Vec<SkillRoot>,
@@ -111,6 +112,7 @@ pub fn build_session_manager(
         None,
         cron_scheduler,
         mcp_subscription,
+        dynamic_mcp,
         // 装配注入面：per-session 后台任务管理器（Agent 层实现，per-session
         // 聚合：registry + bg shell 执行），由本装配点构造后注入（全路径引用）；
         // ACP 协议面只持有契约 `peri_acp_types::tasks::TaskManager`。
@@ -219,6 +221,32 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
             let cb_tx = oauth_event_tx.clone();
             let cb_pool = Arc::downgrade(&pool);
             Some(Box::new(move |event: OAuthFlowEvent| match event {
+                OAuthFlowEvent::DynamicAuthorizationNeeded {
+                    instance,
+                    flow_id,
+                    server_name,
+                    authorization_url,
+                    callback_tx,
+                } => {
+                    let Some(cb_pool) = cb_pool.upgrade() else {
+                        return;
+                    };
+                    if !cb_pool.register_dynamic_oauth_callback(
+                        instance.clone(),
+                        &flow_id,
+                        callback_tx,
+                    ) {
+                        return;
+                    }
+                    let _ = cb_tx.send(
+                        crate::event::oauth::HostOAuthEvent::DynamicAuthorizationNeeded {
+                            instance,
+                            flow_id,
+                            server_name,
+                            authorization_url,
+                        },
+                    );
+                }
                 OAuthFlowEvent::AuthorizationNeeded {
                     flow_id,
                     server_name,
@@ -299,6 +327,23 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         });
         Some(pool)
     };
+    let dynamic_mcp_concrete = peri_middlewares::mcp::dynamic::DynamicMcpRegistry::new(
+        mcp_task_spawner.clone(),
+        Arc::new(
+            peri_middlewares::mcp::dynamic::ProductionDynamicMcpConnector::from_environment(
+                mcp_task_spawner.clone(),
+                mcp_pool_concrete.clone().unwrap_or_else(|| {
+                    Arc::new(
+                        peri_middlewares::mcp::McpClientPool::new_pending_with_spawner(
+                            mcp_task_spawner.clone(),
+                        ),
+                    )
+                }),
+            ),
+        ),
+    );
+    let dynamic_mcp: Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort> =
+        dynamic_mcp_concrete;
     // 订阅端口同源复用：同一 McpClientPool 同时承担 McpPoolPort（命令面）与
     // McpSubscriptionPort（订阅通知 → 会话 inbox 唤醒）两个角色。
     let mcp_pool: Option<Arc<dyn McpPoolPort>> =
@@ -385,6 +430,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         permission_mode.clone(),
         cron_scheduler.clone(),
         mcp_subscription,
+        Some(Arc::clone(&dynamic_mcp)),
         skills.clone(),
         // Phase 6 B2/C1：插件静态条目 + 插件 skill roots 注入 session
         // 管理器（会话创建时按 内置 → skills → 插件 顺序注册）。
@@ -412,6 +458,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         permission_mode,
         cron_scheduler,
         mcp_pool,
+        dynamic_mcp: Some(dynamic_mcp),
         oauth_event_tx: Some(oauth_event_tx),
         oauth_event_rx: Some(oauth_event_rx),
         channel_state: None, // ServiceRegistry.channel_state 已删除

@@ -124,6 +124,9 @@ pub(crate) fn build_stage_context(
             Arc::new(move |sid: &str| sa.cron_bridge_for(sid))
                 as Arc<dyn Fn(&str) -> bool + Send + Sync>
         });
+    if let Some(session_access) = session_access.as_ref() {
+        let _ = session_access.dynamic_mcp_notifications_for(&ctx.session_id);
+    }
     // session 级 MCP 订阅 inbox 惰性注册器（SessionManager 路径；无
     // SessionManager 时安全 no-op——print 模式无会话 inbox 可注册）
     let launch_mcp_subscription: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>> =
@@ -210,6 +213,8 @@ pub(crate) fn build_stage_context(
         session_start_source: ctx.session_start_source.clone(),
         cron_scheduler: ctx.cron_scheduler.clone(),
         mcp_pool: ctx.mcp_pool.clone(),
+        dynamic_mcp: ctx.dynamic_mcp.clone(),
+        session_mcp_capability: ctx.session_mcp_capability.clone(),
         channel_state: ctx.channel_state.clone(),
         tool_search_index: Arc::clone(&ctx.tool_search_index),
         shared_tools: Arc::clone(&ctx.shared_tools),

@@ -114,6 +114,7 @@ pub(crate) async fn run_prompt(
     plugin_loaded: &[peri_acp_types::plugin::LoadedPlugin],
     hook_groups: &[Vec<peri_acp_types::hooks::RegisteredHook>],
     mcp_pool: Option<Arc<dyn McpPoolPort>>,
+    dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     channel_state: Option<Arc<ChannelState>>,
     tool_search_index: Arc<dyn ToolSearchPort>,
     skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
@@ -489,6 +490,10 @@ pub(crate) async fn run_prompt(
         }))
     };
 
+    let session_mcp_capability = dynamic_mcp
+        .as_ref()
+        .map(|deployment| deployment.capability(&session_id));
+
     let ctx = executor::SessionContext {
         cwd,
         provider_name,
@@ -520,6 +525,8 @@ pub(crate) async fn run_prompt(
         hook_groups: hook_groups.to_vec(),
         cron_scheduler,
         mcp_pool,
+        dynamic_mcp,
+        session_mcp_capability,
         channel_state,
         tool_search_index,
         skills,

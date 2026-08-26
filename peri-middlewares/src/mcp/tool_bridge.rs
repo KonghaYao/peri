@@ -13,6 +13,8 @@ use crate::tools::output_persist::persist_truncated_output;
 pub enum ToolCallError {
     #[error("MCP 服务器 \"{server}\" 未连接 (状态: {status:?})")]
     NotConnected { server: String, status: String },
+    #[error("MCP server \"{server}\" is draining or closed")]
+    Unavailable { server: String },
     #[error("MCP 服务器 \"{server}\" 工具 \"{tool}\" 调用失败: {reason}")]
     CallFailed {
         server: String,
@@ -35,6 +37,7 @@ pub struct McpToolBridge {
     description: String,
     input_schema: serde_json::Value,
     client: Arc<McpClientHandle>,
+    admission: Option<super::dynamic::admission::DynamicMcpAdmissionGate>,
 }
 
 const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -75,8 +78,48 @@ impl McpToolBridge {
             description,
             input_schema,
             client,
+            admission: None,
         }
     }
+
+    pub fn new_dynamic(
+        server_name: &str,
+        tool: &Tool,
+        client: Arc<McpClientHandle>,
+        admission: super::dynamic::admission::DynamicMcpAdmissionGate,
+    ) -> Result<Self, ToolCallError> {
+        let tool_name = tool.name.to_string();
+        if !valid_name_component(server_name) || !valid_name_component(&tool_name) {
+            return Err(ToolCallError::Unavailable {
+                server: server_name.to_string(),
+            });
+        }
+        let description = format!(
+            "[MCP:{}] {}",
+            server_name,
+            tool.description
+                .as_ref()
+                .map(|value| value.as_ref())
+                .unwrap_or("")
+        );
+        Ok(Self {
+            server_name: server_name.to_string(),
+            full_name: format!("mcp__{server_name}__{tool_name}"),
+            tool_name,
+            description,
+            input_schema: serde_json::to_value(&*tool.input_schema)
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+            client,
+            admission: Some(admission),
+        })
+    }
+}
+
+fn valid_name_component(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[async_trait]
@@ -93,6 +136,10 @@ impl BaseTool for McpToolBridge {
         self.input_schema.clone()
     }
 
+    fn mcp_server_name(&self) -> Option<&str> {
+        Some(&self.server_name)
+    }
+
     fn timeout(&self) -> Option<std::time::Duration> {
         None
     }
@@ -102,6 +149,14 @@ impl BaseTool for McpToolBridge {
         input: serde_json::Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let _permit = match &self.admission {
+            Some(gate) => Some(gate.try_acquire().map_err(|_| {
+                Box::new(ToolCallError::Unavailable {
+                    server: self.server_name.clone(),
+                }) as Box<dyn std::error::Error + Send + Sync>
+            })?),
+            None => None,
+        };
         // 1. 检查连接状态
         match &self.client.peer {
             Some(_) => {}

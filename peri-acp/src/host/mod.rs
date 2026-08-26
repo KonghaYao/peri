@@ -123,6 +123,7 @@ pub struct AcpServerConfig {
     pub permission_mode: Arc<SharedPermissionMode>,
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
+    pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     /// OAuth 授权事件通道（host 级，跨 session）：装配点创建 (tx, rx) 并注入
     /// tx（MCP 授权回调经此转发 AcpEvent），run_acp_server take rx 后 spawn
     /// 消费者 task，以 `peri/agent_event` notification（sessionId 为空串，
@@ -317,6 +318,26 @@ async fn run_acp_server_inner(
                 let caps = oauth_sessions.effective_host_caps();
                 let policy = oauth_delivery_policy(&caps);
                 match event {
+                    crate::event::oauth::HostOAuthEvent::DynamicAuthorizationNeeded {
+                        instance,
+                        flow_id,
+                        server_name,
+                        authorization_url,
+                    } => {
+                        if !oauth_sessions.dynamic_mcp_instance_is_current(&instance) {
+                            continue;
+                        }
+                        if policy.safe {
+                            if let Ok(notification) = crate::event::oauth::OAuthWireNotification::dynamic_authorization_needed(
+                                instance,
+                                flow_id,
+                                server_name,
+                                authorization_url,
+                            ) {
+                                let _ = oauth_transport.send_notification("peri/oauth", notification.into_params()).await;
+                            }
+                        }
+                    }
                     crate::event::oauth::HostOAuthEvent::AuthorizationNeeded {
                         flow_id,
                         server_name,
@@ -563,6 +584,9 @@ async fn run_acp_server_inner(
 
     // Transport EOF is the host's single ownership transaction.
     task_owner.begin_shutdown();
+    if let Some(dynamic_mcp) = cfg.dynamic_mcp.as_ref() {
+        dynamic_mcp.begin_shutdown();
+    }
     if let Some(pool) = cfg.mcp_pool.as_ref() {
         pool.begin_shutdown();
     }
@@ -588,12 +612,27 @@ async fn run_acp_server_inner(
     for session_id in &all_ids {
         cfg.session_manager.pre_close_session(session_id);
     }
-    if let task_scope::HostShutdownReport::Incomplete { unfinished } = task_owner.shutdown().await {
+    let host_report = task_owner.shutdown().await;
+    if let task_scope::HostShutdownReport::Incomplete { unfinished } = host_report {
         tracing::warn!(unfinished, "ACP host task drain incomplete");
     }
+    let dynamic_report = if let Some(dynamic_mcp) = cfg.dynamic_mcp.as_ref() {
+        let report = dynamic_mcp.shutdown().await;
+        if let peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Incomplete {
+            unfinished_instances,
+        } = report
+        {
+            tracing::warn!(unfinished_instances, "Dynamic MCP service drain incomplete");
+        }
+        report
+    } else {
+        peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
+    };
     let _ = mcp_task_owner.shutdown().await;
+    let mut session_close_failures = 0usize;
     for session_id in &all_ids {
         if let Err(error) = cfg.session_manager.close_session(session_id).await {
+            session_close_failures += 1;
             tracing::warn!(session_id = %session_id, error = %error, "session close during host shutdown failed");
         }
     }
@@ -615,12 +654,13 @@ async fn run_acp_server_inner(
     for pool in unique_lsp {
         pool.shutdown().await;
     }
-    if let Some(pool) = cfg.mcp_pool.as_ref() {
+    let pool_report = if let Some(pool) = cfg.mcp_pool.as_ref() {
+        let report = pool.shutdown().await;
         if let peri_acp_types::ports::McpPoolShutdownReport::Incomplete {
             settled_services,
             unfinished_services,
             failed_services,
-        } = pool.shutdown().await
+        } = report
         {
             tracing::warn!(
                 settled_services,
@@ -628,6 +668,26 @@ async fn run_acp_server_inner(
                 failed_services,
                 "MCP pool service drain incomplete"
             );
+        }
+        report
+    } else {
+        peri_acp_types::ports::McpPoolShutdownReport::Complete {
+            settled_services: 0,
+            failed_services: 0,
+        }
+    };
+    let terminal_report = task_scope::HostTerminalShutdownReport::aggregate(
+        host_report,
+        dynamic_report,
+        pool_report,
+        session_close_failures,
+    );
+    match terminal_report {
+        task_scope::HostTerminalShutdownReport::Complete { .. } => {
+            tracing::info!(?terminal_report, "ACP host terminal shutdown complete");
+        }
+        task_scope::HostTerminalShutdownReport::Incomplete { .. } => {
+            tracing::warn!(?terminal_report, "ACP host terminal shutdown incomplete");
         }
     }
 }
@@ -781,6 +841,7 @@ pub(crate) async fn dispatch_prompt_turn(
         &cfg.plugin_loaded,
         &cfg.hook_groups,
         cfg.mcp_pool.clone(),
+        cfg.dynamic_mcp.clone(),
         cfg.channel_state.clone(),
         cfg.tool_search_index.clone(),
         cfg.skills.clone(),

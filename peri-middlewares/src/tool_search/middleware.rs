@@ -83,6 +83,7 @@ impl Middleware for ToolSearchMiddleware {
         // 声明段数据源，design v2 §2.5.2）两个集合。
         let deferred_arcs: Vec<Arc<dyn BaseTool>>;
         let direct_arcs: Vec<Arc<dyn BaseTool>>;
+        let request_index = Arc::new(ToolSearchIndex::new());
         {
             let local = state.local_tools();
             let mut guard = match local {
@@ -94,29 +95,31 @@ impl Middleware for ToolSearchMiddleware {
                 .filter(|(_, tool)| tool.is_direct())
                 .map(|(name, _)| name.clone())
                 .collect();
-            if guard.contains_key(super::core_tools::SEARCH_EXTRA_TOOLS_NAME) {
-                guard.insert(
-                    super::core_tools::SEARCH_EXTRA_TOOLS_NAME.to_string(),
-                    Arc::new(SearchExtraTools::with_direct_tools(
-                        Arc::clone(&self.tool_search_index),
-                        direct_names.iter().map(String::as_str),
-                    )),
-                );
-            }
-            if guard.contains_key(super::core_tools::EXECUTE_EXTRA_TOOL_NAME) {
-                guard.insert(
-                    super::core_tools::EXECUTE_EXTRA_TOOL_NAME.to_string(),
-                    Arc::new(ExecuteExtraTool::with_direct_tools(
-                        Arc::clone(&self.shared_tools),
-                        direct_names.iter().map(String::as_str),
-                    )),
-                );
-            }
             deferred_arcs = guard
                 .iter()
                 .filter(|(_, tool)| !tool.is_direct())
                 .map(|(_, tool)| Arc::clone(tool))
                 .collect();
+            request_index.build(deferred_arcs.clone());
+            if guard.contains_key(super::core_tools::SEARCH_EXTRA_TOOLS_NAME) {
+                guard.insert(
+                    super::core_tools::SEARCH_EXTRA_TOOLS_NAME.to_string(),
+                    Arc::new(SearchExtraTools::with_direct_tools(
+                        Arc::clone(&request_index),
+                        direct_names.iter().map(String::as_str),
+                    )),
+                );
+            }
+            let request_resolver = Arc::new(RwLock::new(guard.clone()));
+            if guard.contains_key(super::core_tools::EXECUTE_EXTRA_TOOL_NAME) {
+                guard.insert(
+                    super::core_tools::EXECUTE_EXTRA_TOOL_NAME.to_string(),
+                    Arc::new(ExecuteExtraTool::with_direct_tools(
+                        request_resolver,
+                        direct_names.iter().map(String::as_str),
+                    )),
+                );
+            }
             direct_arcs = guard
                 .iter()
                 .filter(|(_, tool)| tool.is_direct())
@@ -140,19 +143,10 @@ impl Middleware for ToolSearchMiddleware {
                     new_count, old_count
                 ));
             }
-            let list = self.tool_search_index.format_deferred_list();
-            if list.is_empty() {
-                self.tool_search_index.clear_cached_prompt();
-            } else {
-                self.tool_search_index.set_cached_prompt(list);
-            }
         }
 
-        // 缓存 prompt 贡献（由 prompt_contribution 同步返回）。
-        // 合并策略（design v2 §2.5.2）：deferred 列表在前、声明段在后，`\n\n` 分隔；
-        // 任一段为空时只保留另一段。声明段不走索引 content_version 失效路径——
-        // 每轮 before_agent 独立重渲染，输出仅依赖工具静态字段。
-        let list = self.tool_search_index.cached_prompt();
+        let list = request_index.format_deferred_list();
+        let list = (!list.is_empty()).then_some(list);
         let declarations = collect_declarations(&direct_arcs);
         *self.cached_contribution.write().unwrap() = match (list, declarations) {
             (Some(l), Some(d)) => Some(format!("{l}\n\n{d}")),

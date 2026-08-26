@@ -12,7 +12,7 @@
 //! - **error_suggest 注入**：在 run_after_tool 之后、写 transcript 之前；只修改 output 文本
 //! - **ToolEnd emit 时机**：在 error_suggest 注入之前 emit
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -26,6 +26,7 @@ use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{Reasoning, ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, MessageId, ToolCallRequest};
+use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{
     BaseTool, CanonicalToolInvocation, EffectiveToolCall, EffectiveToolDefinition,
     EffectiveToolDispatcher, EffectiveToolError, EffectiveToolErrorCode, RUN_PTC_CODE_TOOL_NAME,
@@ -108,11 +109,12 @@ pub struct DispatchOutcome {
 #[derive(Clone)]
 struct StageEffectiveToolDispatcher {
     context: StageContext,
+    catalog: Arc<SessionToolCatalogSnapshot>,
 }
 
 impl StageEffectiveToolDispatcher {
-    fn new(context: StageContext) -> Self {
-        Self { context }
+    fn new(context: StageContext, catalog: Arc<SessionToolCatalogSnapshot>) -> Self {
+        Self { context, catalog }
     }
 }
 
@@ -146,14 +148,7 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
             .map(|parent| format!("{parent}/{}", call.invocation_id))
             .unwrap_or_else(|| call.invocation_id.clone());
         let raw_call = ToolCall::new(event_invocation_id, call.tool_name.clone(), call.input);
-        let all_tools: BTreeMap<String, Arc<dyn BaseTool>> = self
-            .context
-            .runtime
-            .tools
-            .read()
-            .iter()
-            .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
-            .collect();
+        let all_tools = self.catalog.tool_map();
         let invocation = self
             .context
             .runtime
@@ -176,6 +171,7 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
             vec![invocation.policy_call],
             &event_calls,
             &target_tools,
+            &self.catalog,
             &cancel,
             ai_message.id(),
             &ai_message,
@@ -207,11 +203,10 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
     }
 
     fn tools(&self) -> Vec<EffectiveToolDefinition> {
-        self.context
-            .runtime
+        self.catalog
             .tools
-            .read()
             .values()
+            .map(|entry| &entry.tool)
             .filter(|tool| tool.name() != RUN_PTC_CODE_TOOL_NAME)
             .map(|tool| EffectiveToolDefinition {
                 name: tool.name().to_string(),
@@ -226,6 +221,7 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
 pub async fn dispatch_tools(
     ctx: &StageContext,
     reasoning: &Reasoning,
+    catalog: &Arc<SessionToolCatalogSnapshot>,
     cancel: &CancellationToken,
 ) -> AgentResult<DispatchOutcome> {
     let turn_id = ctx.turn_id();
@@ -253,13 +249,7 @@ pub async fn dispatch_tools(
         });
     }
 
-    let all_tools: BTreeMap<String, Arc<dyn BaseTool>> = {
-        let tools_guard = ctx.runtime.tools.read();
-        tools_guard
-            .iter()
-            .map(|(k, v)| (k.clone(), Arc::clone(v)))
-            .collect()
-    };
+    let all_tools = catalog.tool_map();
     let invalid_ids: std::collections::HashSet<&str> = reasoning
         .tool_calls
         .iter()
@@ -338,6 +328,7 @@ pub async fn dispatch_tools(
         policy_calls,
         &event_calls,
         &target_tools,
+        catalog,
         cancel,
         ai_msg_id,
         &ai_msg,
@@ -408,11 +399,13 @@ struct ApprovalOutcome {
 /// 执行 before_tool 审批 + 并发工具调用，收集所有结果（不写 transcript）
 ///
 /// Orchestrator：按顺序调用三个子阶段函数。
+#[allow(clippy::too_many_arguments)] // 阶段边界显式传递同一 Reason 固定的 catalog 与调用上下文
 async fn collect_tool_results(
     ctx: &StageContext,
     original_calls: Vec<ToolCall>,
     event_calls: &HashMap<String, ToolCall>,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
+    catalog: &Arc<SessionToolCatalogSnapshot>,
     cancel: &CancellationToken,
     // ai_msg_id 保留为 API 契约（未来 ToolEnd 事件可携带 message_id）
     ai_msg_id: MessageId,
@@ -437,6 +430,7 @@ async fn collect_tool_results(
         &approval.ready_calls,
         event_calls,
         all_tools,
+        catalog,
         cancel,
         ai_msg,
     )
@@ -564,6 +558,7 @@ async fn dispatch_concurrent(
     ready_calls: &[ToolCall],
     event_calls: &HashMap<String, ToolCall>,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
+    catalog: &Arc<SessionToolCatalogSnapshot>,
     cancel: &CancellationToken,
     ai_msg: &BaseMessage,
 ) -> Vec<Result<String, EffectiveToolError>> {
@@ -581,6 +576,7 @@ async fn dispatch_concurrent(
     let agent_id = ctx.session.agent_id;
     let event_bus = Arc::clone(&ctx.runtime.event_bus);
     let dispatch_context = ctx.clone();
+    let dispatch_catalog = Arc::clone(catalog);
 
     let futures: Vec<_> = ready_calls
         .iter()
@@ -601,6 +597,7 @@ async fn dispatch_concurrent(
             let cwd = cwd_snapshot.clone();
             let event_bus = Arc::clone(&event_bus);
             let dispatch_context = dispatch_context.clone();
+            let dispatch_catalog = Arc::clone(&dispatch_catalog);
             // [Fix] span 在 async 块外创建、用 .instrument() 包裹整个 future：
             // span.enter() 的 guard 跨 await 持有在 tokio multi-thread 下会随 task
             // 线程迁移错误重置 thread-local current span，导致 tracing-subscriber
@@ -616,7 +613,10 @@ async fn dispatch_concurrent(
                 let invoke_fut = async {
                     let ctx_param = crate::tools::ToolContext::new(&messages, &cwd)
                         .with_effective_tool_dispatcher(
-                            Arc::new(StageEffectiveToolDispatcher::new(dispatch_context)),
+                            Arc::new(StageEffectiveToolDispatcher::new(
+                                dispatch_context,
+                                dispatch_catalog,
+                            )),
                             raw_call.id.clone(),
                             cancel.clone(),
                         );

@@ -242,6 +242,17 @@ impl<'a> ToolContext<'a> {
     }
 }
 
+/// A target-specific canonical action bound before middleware/HITL.
+///
+/// `policy_name` and `policy_input` are the approval-safe projection. `target`
+/// owns the immutable execution action and must not reinterpret the raw call.
+#[derive(Clone)]
+pub struct BoundToolInvocation {
+    pub policy_name: String,
+    pub policy_input: serde_json::Value,
+    pub target: std::sync::Arc<dyn BaseTool>,
+}
+
 /// BaseTool trait - 对齐 LangChain Python BaseTool
 ///
 /// 所有工具必须实现此 trait，不再依赖 langchain-rust::tools::Tool。
@@ -266,6 +277,24 @@ pub trait BaseTool: Send + Sync {
         input: serde_json::Value,
         ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Canonicalize one target invocation before middleware/HITL.
+    ///
+    /// Most tools return `None` and use the direct call. Method-based tools may
+    /// return a bound execution target so approval never depends on a mutable
+    /// raw input or on post-approval reparsing.
+    fn bind_invocation(
+        &self,
+        _input: serde_json::Value,
+    ) -> Result<Option<BoundToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(None)
+    }
+
+    /// Static MCP source identity used by session catalog shadowing and collision
+    /// checks. Non-MCP tools return `None`; wrappers must forward this value.
+    fn mcp_server_name(&self) -> Option<&str> {
+        None
+    }
 
     /// 工具调用的外层超时时间。None 表示不设外层超时（工具自行管理超时）。
     /// 默认 120s，适用于 Read/Edit/Glob 等快速操作。Agent/Bash 等工具应返回

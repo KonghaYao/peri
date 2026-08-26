@@ -42,6 +42,14 @@ pub enum OAuthFlowEvent {
         /// 回调通道：TUI 收集用户输入后通过此通道传回授权码
         callback_tx: oneshot::Sender<OAuthCallbackResult>,
     },
+    /// Dynamic MCP authorization, preserving the non-reducible instance identity.
+    DynamicAuthorizationNeeded {
+        instance: peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey,
+        flow_id: String,
+        server_name: String,
+        authorization_url: String,
+        callback_tx: oneshot::Sender<OAuthCallbackResult>,
+    },
     /// OAuth 授权完成
     AuthorizationCompleted {
         flow_id: String,

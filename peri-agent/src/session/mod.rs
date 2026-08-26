@@ -32,6 +32,7 @@ pub mod retry_events;
 pub mod runtime;
 pub mod store;
 pub mod subagent;
+pub mod tool_catalog;
 pub mod transcript;
 pub mod turn;
 

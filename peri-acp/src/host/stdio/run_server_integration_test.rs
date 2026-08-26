@@ -88,6 +88,7 @@ fn make_server_config_with(
         None,
         None,
         None,
+        None,
         task_manager_factory.or_else(|| {
             Some(Arc::new(|| {
                 Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
@@ -111,6 +112,7 @@ fn make_server_config_with(
         ),
         cron_scheduler: None,
         mcp_pool,
+        dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,
         channel_state: None,

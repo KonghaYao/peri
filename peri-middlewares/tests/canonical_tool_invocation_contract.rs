@@ -11,7 +11,7 @@ use peri_agent::{
         stages::{tool_dispatch::dispatch_tools, SharedToolMap, StageContext},
     },
     middleware::{r#trait::Middleware, state::MiddlewareState, MiddlewareChain},
-    session::{FrozenContext, Session},
+    session::{tool_catalog::SessionToolCatalog, FrozenContext, Session},
     tools::{BaseTool, ToolContext},
 };
 #[cfg(unix)]
@@ -86,8 +86,10 @@ fn make_context(
     let turn = session.start_turn();
     let (event_bus, handles) = peri_agent::agent::events_v2::EventBus::new(Default::default());
     let shared: SharedToolMap = Arc::new(RwLock::new(tools));
+    let catalog = Arc::new(SessionToolCatalog::new(shared.read().clone(), None));
     let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
         .with_tools(shared)
+        .with_tool_catalog(catalog)
         .with_tool_invocation_resolver(Arc::new(ExecuteExtraToolResolver::default()))
         .with_middleware_chain(Arc::new(chain))
         .with_event_bus(Arc::new(event_bus))
@@ -129,9 +131,14 @@ async fn wrapper_policy_event_and_result_project_canonical_target() {
         )],
     );
 
-    let outcome = dispatch_tools(&context, &reasoning, &CancellationToken::new())
-        .await
-        .unwrap();
+    let outcome = dispatch_tools(
+        &context,
+        &reasoning,
+        &context.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     {
         let policy_calls = policy.lock();
@@ -193,9 +200,14 @@ async fn grep_path_parameter_is_preserved_not_renamed_to_file_path() {
             json!({"tool_name": "Grep", "params": {"pattern": "tokio|serde", "path": "/tmp/a"}}),
         )],
     );
-    let outcome = dispatch_tools(&context, &reasoning, &CancellationToken::new())
-        .await
-        .unwrap();
+    let outcome = dispatch_tools(
+        &context,
+        &reasoning,
+        &context.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     assert!(!outcome.results[0].1.is_error);
 
     // 2) 直接调用路径（tool_dispatch 本地归一化）
@@ -207,9 +219,14 @@ async fn grep_path_parameter_is_preserved_not_renamed_to_file_path() {
             json!({"pattern": "tokio", "path": "/tmp/a"}),
         )],
     );
-    let outcome = dispatch_tools(&context, &reasoning, &CancellationToken::new())
-        .await
-        .unwrap();
+    let outcome = dispatch_tools(
+        &context,
+        &reasoning,
+        &context.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     assert!(!outcome.results[0].1.is_error);
 
     // policy 与执行 input 都保留 path，不重命名为 file_path
@@ -273,9 +290,14 @@ async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invok
         ],
     );
 
-    let outcome = dispatch_tools(&context, &reasoning, &CancellationToken::new())
-        .await
-        .unwrap();
+    let outcome = dispatch_tools(
+        &context,
+        &reasoning,
+        &context.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     assert!(policy.lock().is_empty());
     assert!(invoked.lock().is_empty());
@@ -327,9 +349,14 @@ async fn hook_receives_canonical_alias_identity() {
         vec![ToolCall::new("shell", "SHELL", json!({"command": "true"}))],
     );
 
-    let outcome = dispatch_tools(&context, &reasoning, &CancellationToken::new())
-        .await
-        .unwrap();
+    let outcome = dispatch_tools(
+        &context,
+        &reasoning,
+        &context.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     assert!(outcome.results[0].1.is_error);
     assert!(invoked.lock().is_empty());
@@ -396,9 +423,14 @@ async fn accept_edit_applies_to_wrapper_write_and_edit_but_not_bash_or_mcp() {
         ],
     );
 
-    let outcome = dispatch_tools(&context, &reasoning, &CancellationToken::new())
-        .await
-        .unwrap();
+    let outcome = dispatch_tools(
+        &context,
+        &reasoning,
+        &context.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         policy

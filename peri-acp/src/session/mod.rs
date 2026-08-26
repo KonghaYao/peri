@@ -30,6 +30,35 @@ pub use peri_agent::session::async_router::AsyncRouter;
 
 pub use retry_events::RetryEventForwarder;
 
+pub struct SessionDynamicMcpNotificationSink {
+    session_id: String,
+    inbox: std::sync::Weak<peri_acp_types::session::SessionInbox>,
+}
+
+impl DynamicMcpNotificationSinkPort for SessionDynamicMcpNotificationSink {
+    fn notify(&self, notification: DynamicMcpNotification) -> bool {
+        if !self.accepts(&notification.instance_key) {
+            return false;
+        }
+        let Some(inbox) = self.inbox.upgrade() else {
+            return false;
+        };
+        let reminder = format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            notification.safe_summary
+        );
+        inbox.handle().push_info(
+            MessageSource::DynamicMcpNotification,
+            BaseMessage::human(MessageContent::text(reminder)),
+        );
+        true
+    }
+
+    fn accepts(&self, instance: &DynamicMcpInstanceKey) -> bool {
+        instance.logical.session_id == self.session_id && self.inbox.upgrade().is_some()
+    }
+}
+
 use std::{
     collections::HashMap,
     sync::{atomic::AtomicBool, Arc},
@@ -42,9 +71,12 @@ use peri_acp_types::command::command_route::{
     CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource, RouteEntry,
 };
 use peri_acp_types::command_registry::CommandRegistry;
+use peri_acp_types::dynamic_mcp::{DynamicMcpInstanceKey, DynamicMcpNotification};
 use peri_acp_types::mcp_skills::McpSkillRegistry;
-use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::{BaseMessage, MessageContent};
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
+use peri_acp_types::ports::DynamicMcpNotificationSinkPort;
+use peri_acp_types::session::MessageSource;
 use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::{
     store::ThreadStore,
@@ -118,6 +150,10 @@ pub struct AcpSession {
     /// Session 级命令注册表（随 session 创建初始化并注册内置命令；跨轮常驻，
     /// 动态注入条目不因轮次丢失；随本结构 drop 释放，杜绝全局挂点）。
     pub command_registry: Arc<CommandRegistry>,
+    /// Idempotent Dynamic MCP cleanup lease.
+    pub dynamic_mcp_close: Option<Arc<dyn peri_acp_types::ports::SessionCloseRegistration>>,
+    /// Strong owner for the checked weak Dynamic MCP notification sink.
+    pub dynamic_mcp_notifications: Option<Arc<SessionDynamicMcpNotificationSink>>,
 }
 
 struct SessionManagerInner {
@@ -140,6 +176,8 @@ struct SessionManagerInner {
     /// MCP subscriptions 桥接端口（装配注入；session 创建时注册 inbox，
     /// close_session 时注销——订阅通知唤醒 agent 的通道，同 cron 模式）。
     pub mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
+    /// Deployment-level Dynamic MCP state machine port.
+    pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     /// Skills 扫描端口（装配注入；frozen 数据构建的 agents/skills 扫描经此访问）。
     pub skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
     /// 插件命令静态条目（Phase 6 B2 预转；会话创建时按
@@ -168,6 +206,7 @@ impl SessionManager {
         agent_overrides: Option<AgentOverrides>,
         cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
         mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
+        dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
         task_manager_factory: Option<TaskManagerFactory>,
         skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
         plugin_command_entries: Vec<RouteEntry>,
@@ -185,6 +224,7 @@ impl SessionManager {
                 caps_registry: Arc::new(DashMap::new()),
                 cron_scheduler,
                 mcp_subscription,
+                dynamic_mcp,
                 skills,
                 plugin_command_entries,
                 plugin_skill_roots,
@@ -332,6 +372,12 @@ impl SessionManager {
             idle_suspended: Arc::new(AtomicBool::new(false)),
             mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
             command_registry: self.build_command_registry(cwd),
+            dynamic_mcp_close: self
+                .inner
+                .dynamic_mcp
+                .as_ref()
+                .map(|deployment| deployment.close_registration(&session_id)),
+            dynamic_mcp_notifications: None,
         };
 
         self.inner.sessions.insert(session_id.clone(), session);
@@ -370,6 +416,12 @@ impl SessionManager {
             idle_suspended: Arc::new(AtomicBool::new(false)),
             mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
             command_registry: self.build_command_registry(cwd),
+            dynamic_mcp_close: self
+                .inner
+                .dynamic_mcp
+                .as_ref()
+                .map(|deployment| deployment.close_registration(session_id)),
+            dynamic_mcp_notifications: None,
         }
     }
 
@@ -379,6 +431,9 @@ impl SessionManager {
             port.unregister_inbox(session_id);
         }
         if let Some((_, session)) = self.inner.sessions.remove(session_id) {
+            if let Some(close) = &session.dynamic_mcp_close {
+                let _ = close.revoke_and_cleanup().await;
+            }
             // 取消所有运行时 agent 实例（终止执行归 Agent 层，L5）
             peri_acp_types::session::cancel_all_agents(session.active_agents.values());
             session.cancel_token.cancel();
@@ -761,6 +816,35 @@ impl SessionManager {
         true
     }
 
+    pub fn dynamic_mcp_instance_is_current(&self, instance: &DynamicMcpInstanceKey) -> bool {
+        self.inner
+            .dynamic_mcp
+            .as_ref()
+            .is_some_and(|deployment| deployment.accepts_instance(instance))
+    }
+
+    pub fn dynamic_mcp_notifications_for(&self, session_id: &str) -> bool {
+        let Some(deployment) = self.inner.dynamic_mcp.as_ref() else {
+            return false;
+        };
+        let Some(inbox) = self.session_inbox_for(session_id) else {
+            return false;
+        };
+        let sink = Arc::new(SessionDynamicMcpNotificationSink {
+            session_id: session_id.to_string(),
+            inbox: Arc::downgrade(&inbox),
+        });
+        let erased: Arc<dyn DynamicMcpNotificationSinkPort> = sink.clone();
+        if !deployment.bind_notification_sink(session_id, Arc::downgrade(&erased)) {
+            return false;
+        }
+        let Some(mut session) = self.inner.sessions.get_mut(session_id) else {
+            return false;
+        };
+        session.dynamic_mcp_notifications = Some(sink);
+        true
+    }
+
     /// 确保指定 session 的 MCP 订阅 inbox 已注册（lazy-init，幂等）。
     ///
     /// 首次调用：把 session 级 inbox handle 注册到 `McpSubscriptionPort`
@@ -1013,6 +1097,10 @@ impl SessionAccessPort for SessionManager {
 
     fn mcp_subscription_for(&self, session_id: &str) -> bool {
         SessionManager::mcp_subscription_for(self, session_id)
+    }
+
+    fn dynamic_mcp_notifications_for(&self, session_id: &str) -> bool {
+        SessionManager::dynamic_mcp_notifications_for(self, session_id)
     }
 
     fn mcp_skill_registry(&self, session_id: &str) -> Option<Arc<McpSkillRegistry>> {

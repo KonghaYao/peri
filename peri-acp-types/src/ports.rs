@@ -15,6 +15,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agents::AgentCapability;
+use crate::dynamic_mcp::{
+    CanonicalDynamicMcpAction, DynamicMcpCatalogTool, DynamicMcpFailure, DynamicMcpInstanceKey,
+    DynamicMcpNotification, DynamicMcpResponse, DynamicMcpShutdownReport, ResolvedSecret,
+    SecretRef, SessionMcpCapabilitySnapshot,
+};
+use crate::mcp_skills::HandleToken;
 use crate::skills::{SkillMetadata, SkillRoot};
 
 /// Terminal evidence for one MCP pool service-close transaction.
@@ -132,6 +138,112 @@ impl dyn ToolSearchPort {
             }
         }
     }
+}
+
+/// Deployment-scoped Dynamic MCP operation and shutdown port.
+#[async_trait::async_trait]
+pub trait DynamicMcpDeploymentPort: Send + Sync {
+    async fn execute(
+        &self,
+        session_id: &str,
+        action: CanonicalDynamicMcpAction,
+    ) -> Result<DynamicMcpResponse, DynamicMcpFailure>;
+
+    /// Register the canonical session catalog used for pre-commit name collision
+    /// rejection. Registration must happen before any load can be admitted.
+    fn register_catalog(
+        &self,
+        session_id: &str,
+        tools: Vec<DynamicMcpCatalogTool>,
+    ) -> Result<(), DynamicMcpFailure>;
+
+    fn capability(&self, session_id: &str) -> Arc<dyn SessionMcpCapabilityPort>;
+
+    fn close_registration(&self, session_id: &str) -> Arc<dyn SessionCloseRegistration>;
+
+    /// Validate that an opaque Dynamic MCP identity still names the current live
+    /// incarnation. OAuth RPCs must call this before touching scoped flow APIs.
+    fn accepts_instance(&self, _instance: &DynamicMcpInstanceKey) -> bool {
+        false
+    }
+
+    /// Bind a weak, checked notification target for one live session. Rebinding
+    /// replaces the previous lease; dropping the returned sink disables delivery.
+    fn bind_notification_sink(
+        &self,
+        _session_id: &str,
+        _sink: std::sync::Weak<dyn DynamicMcpNotificationSinkPort>,
+    ) -> bool {
+        false
+    }
+
+    fn begin_shutdown(&self);
+
+    async fn close_session(&self, session_id: &str) -> DynamicMcpShutdownReport;
+
+    async fn shutdown(&self) -> DynamicMcpShutdownReport;
+}
+
+/// Session-local immutable capability source shared by the main agent and all
+/// of its subagents.
+pub trait SessionMcpCapabilityPort: Send + Sync {
+    fn snapshot(&self) -> Arc<SessionMcpCapabilitySnapshot>;
+
+    /// Bind the existing session MCP read/discovery registries to this checked
+    /// capability source. The returned lease owns no parallel capability
+    /// registry: it only projects the effective handles into the existing MCP
+    /// pool, skill registry and command registry.
+    fn bind_projection(
+        &self,
+        _static_handles: Vec<(String, HandleToken)>,
+        _skill_registry: Arc<crate::mcp_skills::McpSkillRegistry>,
+        _command_registry: Arc<crate::command_registry::CommandRegistry>,
+    ) -> Arc<dyn SessionMcpProjectionLease> {
+        panic!("session MCP capability does not support checked projection")
+    }
+}
+
+/// Incarnation-checked adapter from a session capability view to the existing
+/// MCP tools/resources/skills/commands production registries.
+pub trait SessionMcpProjectionLease: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+
+    /// Refresh the effective server view. Returns false after session close.
+    fn refresh(&self) -> bool;
+
+    /// Close projection admission and remove every dynamic projection. Idempotent.
+    fn close(&self);
+}
+
+/// Idempotent session-close lease. ACP may call this without understanding the
+/// Dynamic MCP state machine.
+#[async_trait::async_trait]
+pub trait SessionCloseRegistration: Send + Sync {
+    async fn revoke_and_cleanup(&self) -> DynamicMcpShutdownReport;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SecretResolveError {
+    #[error("secret reference was not found")]
+    NotFound,
+    #[error("secret reference access was denied")]
+    Denied,
+    #[error("secret resolver is unavailable")]
+    Unavailable,
+}
+
+/// Production implementations must resolve opaque references only after HITL.
+#[async_trait::async_trait]
+pub trait SecretResolverPort: Send + Sync {
+    async fn resolve(&self, reference: &SecretRef) -> Result<ResolvedSecret, SecretResolveError>;
+}
+
+/// Checked session-specific Dynamic MCP notification sink. Implementations must
+/// reject stale incarnation writes and must never broadcast as a fallback.
+pub trait DynamicMcpNotificationSinkPort: Send + Sync {
+    fn notify(&self, notification: DynamicMcpNotification) -> bool;
+
+    fn accepts(&self, instance: &DynamicMcpInstanceKey) -> bool;
 }
 
 /// Workflow 中间件端口（`peri-middlewares::workflow::WorkflowMiddleware` 实现）。

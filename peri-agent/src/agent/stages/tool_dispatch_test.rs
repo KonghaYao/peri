@@ -1,4 +1,6 @@
 //! 从 tool_dispatch.rs 分离的测试模块
+use std::collections::BTreeMap;
+
 use super::*;
 use serde_json::json;
 
@@ -405,7 +407,12 @@ async fn test_dispatch_rejects_duplicate_and_empty_ids_before_policy_or_invoke()
         ],
     );
 
-    let outcome = dispatch_tools(&ctx, &reasoning, &CancellationToken::new())
+    let catalog = ctx
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&ctx.runtime.tools.read())
+        .unwrap();
+    let outcome = dispatch_tools(&ctx, &reasoning, &catalog, &CancellationToken::new())
         .await
         .expect("malformed calls should settle as tool errors");
 
@@ -480,11 +487,13 @@ async fn test_dispatch_concurrent_single_tool_succeeds() {
         Arc::clone(all_tools.get("Read").unwrap()),
     );
     let raw_calls = HashMap::new();
+    let catalog = ctx.runtime.tool_catalog.snapshot();
     let results = dispatch_concurrent(
         &ctx,
         &ready_calls,
         &raw_calls,
         &target_tools,
+        &catalog,
         &cancel,
         &ai_msg,
     )
@@ -517,11 +526,13 @@ async fn test_dispatch_concurrent_cancelled() {
         Arc::clone(all_tools.get("Read").unwrap()),
     );
     let raw_calls = HashMap::new();
+    let catalog = ctx.runtime.tool_catalog.snapshot();
     let results = dispatch_concurrent(
         &ctx,
         &ready_calls,
         &raw_calls,
         &target_tools,
+        &catalog,
         &cancel,
         &ai_msg,
     )

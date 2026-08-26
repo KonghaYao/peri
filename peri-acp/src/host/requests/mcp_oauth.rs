@@ -146,7 +146,37 @@ pub(super) fn handle_oauth_callback(
     let pool = pool
         .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
         .map_err(|_| AcpError::new(-32603, "mcp pool type mismatch"))?;
-    let result = pool.deliver_oauth_callback(&server_name, code, state);
+    let result = match (
+        params.get("session_id").and_then(Value::as_str),
+        params.get("incarnation_id").and_then(Value::as_str),
+        params.get("flow_id").and_then(Value::as_str),
+    ) {
+        (Some(session_id), Some(incarnation_id), Some(flow_id)) => {
+            crate::event::oauth::validate_identifier(session_id)
+                .and_then(|_| crate::event::oauth::validate_identifier(incarnation_id))
+                .and_then(|_| crate::event::oauth::validate_identifier(flow_id))
+                .map_err(|error| AcpError::new(-32602, error.to_string()))?;
+            let instance = peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey {
+                logical: peri_acp_types::dynamic_mcp::DynamicMcpLogicalKey {
+                    session_id: session_id.to_string(),
+                    server_name,
+                },
+                incarnation_id: peri_acp_types::dynamic_mcp::DynamicMcpIncarnationId::from_string(
+                    incarnation_id,
+                ),
+            };
+            let deployment = cfg
+                .dynamic_mcp
+                .as_ref()
+                .ok_or_else(|| AcpError::new(-32603, "dynamic mcp not available"))?;
+            if !deployment.accepts_instance(&instance) {
+                return Err(AcpError::new(-32602, "stale Dynamic MCP identity"));
+            }
+            pool.deliver_dynamic_oauth_callback(instance, flow_id, code, state)
+        }
+        (None, None, None) => pool.deliver_oauth_callback(&server_name, code, state),
+        _ => return Err(AcpError::new(-32602, "incomplete Dynamic MCP identity")),
+    };
     result
         .map(|_| serde_json::json!({ "success": true }))
         .map_err(|e| AcpError::new(-32603, e))

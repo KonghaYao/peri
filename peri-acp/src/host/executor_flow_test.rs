@@ -372,6 +372,8 @@ fn make_session_context(session_id: &str) -> SessionContext {
         hook_groups: vec![],
         cron_scheduler: None,
         mcp_pool: None,
+        dynamic_mcp: None,
+        session_mcp_capability: None,
         channel_state: None,
         tool_search_index: Arc::new(ToolSearchIndex::default()),
         shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
@@ -445,6 +447,7 @@ async fn make_session_context_with_manager(
         None,
         None,
         None, // MCP 订阅端口（测试无）
+        None, // Dynamic MCP（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(SkillsProvider),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
@@ -856,6 +859,10 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
                 context: Arc::clone(&recorded),
             }),
             tools: vec![],
+            tool_filter: peri_agent::session::tool_catalog::ToolFilterPolicy::canonical(
+                Some(vec![]),
+                vec![],
+            ),
             system_prompt: None,
             error_suggest_registry: None,
             tool_registry_snapshot: None,
@@ -1068,6 +1075,10 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
                 context: Arc::clone(&recorded),
             }),
             tools: vec![],
+            tool_filter: peri_agent::session::tool_catalog::ToolFilterPolicy::canonical(
+                Some(vec![]),
+                vec![],
+            ),
             system_prompt: None,
             error_suggest_registry: None,
             tool_registry_snapshot: None,
@@ -1435,6 +1446,7 @@ fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
         None,
         None,
         None,
+        None,
         Arc::new(SkillsProvider),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
         Vec::new(), // plugin skill roots（C1；测试无）
@@ -1704,6 +1716,9 @@ fn make_parity_context(
         command_registry: None,
         cron_scheduler: None,
         mcp_pool: None,
+        dynamic_mcp: None,
+        dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
+        session_id: "session-parity-test".to_string(),
         channel_state: None,
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,

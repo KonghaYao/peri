@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use peri_acp_types::{dynamic_mcp::DynamicMcpShutdownReport, ports::McpPoolShutdownReport};
 use tokio::task::AbortHandle;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -113,6 +114,51 @@ pub(crate) struct HostTaskSpawner {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HostScopeClosed;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostTerminalShutdownReport {
+    Complete {
+        host: HostShutdownReport,
+        dynamic_mcp: DynamicMcpShutdownReport,
+        mcp_pool: McpPoolShutdownReport,
+        session_close_failures: usize,
+    },
+    Incomplete {
+        host: HostShutdownReport,
+        dynamic_mcp: DynamicMcpShutdownReport,
+        mcp_pool: McpPoolShutdownReport,
+        session_close_failures: usize,
+    },
+}
+
+impl HostTerminalShutdownReport {
+    pub(crate) fn aggregate(
+        host: HostShutdownReport,
+        dynamic_mcp: DynamicMcpShutdownReport,
+        mcp_pool: McpPoolShutdownReport,
+        session_close_failures: usize,
+    ) -> Self {
+        let complete = matches!(host, HostShutdownReport::Complete)
+            && matches!(dynamic_mcp, DynamicMcpShutdownReport::Complete)
+            && mcp_pool.is_complete()
+            && session_close_failures == 0;
+        if complete {
+            Self::Complete {
+                host,
+                dynamic_mcp,
+                mcp_pool,
+                session_close_failures,
+            }
+        } else {
+            Self::Incomplete {
+                host,
+                dynamic_mcp,
+                mcp_pool,
+                session_close_failures,
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostShutdownReport {

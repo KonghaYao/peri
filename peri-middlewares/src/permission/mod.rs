@@ -53,6 +53,8 @@ pub fn default_requires_approval(tool_name: &str) -> bool {
         || tool_name == TOOL_WEBFETCH
         || tool_name == TOOL_WEBSEARCH
         || tool_name.starts_with("mcp__")
+        || tool_name == "DynamicMCP.load"
+        || tool_name == "DynamicMCP.unload"
         || tool_name == "cron_register"
 }
 
@@ -86,7 +88,7 @@ pub struct SensitiveToolEntry {
 ///
 /// 与 [`default_requires_approval`] 的判定分支一一对应——段落不再硬编码
 /// 列表（设计 §3.1.2 重复段处理：修改代码无需同步段落，防失同步）。
-pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 12] {
+pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 14] {
     [
         SensitiveToolEntry {
             name: TOOL_BASH,
@@ -142,6 +144,16 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 12] {
             name: "mcp__",
             description: "any MCP server tool (prefix match)",
             prefix_match: true,
+        },
+        SensitiveToolEntry {
+            name: "DynamicMCP.load",
+            description: "load a session-scoped MCP server",
+            prefix_match: false,
+        },
+        SensitiveToolEntry {
+            name: "DynamicMCP.unload",
+            description: "unload a session-scoped MCP server",
+            prefix_match: false,
         },
         SensitiveToolEntry {
             name: "cron_register",
@@ -302,7 +314,9 @@ impl PermissionMiddleware {
         let mode_snapshot = self.mode.clone();
 
         for (i, call) in calls.iter().enumerate() {
-            // 非敏感工具 → 直接放行（ExecuteExtraTool 透传目标工具名）
+            // Canonical dispatch has already projected method-based tools. Keep
+            // the wrapper fallback for legacy/static call paths that still pass
+            // ExecuteExtraTool directly.
             let effective_name = effective_tool_name(&call.name, &call.input);
             if !(self.requires_approval)(&effective_name) {
                 results.push(Ok(call.clone()));
@@ -524,7 +538,8 @@ impl Middleware for PermissionMiddleware {
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         // 1. 非敏感工具 → 所有模式都放行
-        if !(self.requires_approval)(&effective_tool_name(&tool_call.name, &tool_call.input)) {
+        let effective_name = effective_tool_name(&tool_call.name, &tool_call.input);
+        if !(self.requires_approval)(&effective_name) {
             return Ok(tool_call.clone());
         }
 

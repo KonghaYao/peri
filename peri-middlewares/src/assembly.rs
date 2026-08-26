@@ -96,6 +96,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             command_registry,
             cron_scheduler,
             mcp_pool,
+            dynamic_mcp,
+            dynamic_mcp_projection,
+            session_id,
             channel_state,
             tool_search_index,
             shared_tools,
@@ -490,8 +493,47 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // 不设置 notifier（构造副作用消失）。
                 ChainSlot::Mcp if disabled.contains("McpMiddleware") => {}
                 ChainSlot::Mcp => {
+                    if let Some(deployment) = dynamic_mcp.as_ref() {
+                        chain.add(Box::new(crate::mcp::dynamic::DynamicMcpMiddleware::new(
+                            session_id.clone(),
+                            Arc::clone(deployment),
+                        )));
+                    }
                     if let Some(pool) = mcp_pool_concrete.as_ref() {
-                        let mw = McpMiddleware::new(Arc::clone(pool))
+                        let effective_pool = if let (
+                            Some(deployment),
+                            Some(skill_registry),
+                            Some(command_registry),
+                        ) = (
+                            dynamic_mcp.as_ref(),
+                            ctx.mcp_skill_registry.as_ref(),
+                            command_registry.as_ref(),
+                        ) {
+                            let static_handles = pool
+                                .get_all_clients()
+                                .into_iter()
+                                .map(|handle| {
+                                    let token: peri_acp_types::mcp_skills::HandleToken =
+                                        handle.clone();
+                                    (handle.name.clone(), token)
+                                })
+                                .collect();
+                            let lease = deployment.capability(session_id).bind_projection(
+                                static_handles,
+                                Arc::clone(skill_registry),
+                                Arc::clone(command_registry),
+                            );
+                            let projected = lease
+                                .as_any()
+                                .downcast_ref::<crate::mcp::dynamic::registry::CheckedSessionMcpProjection>()
+                                .map(|projection| projection.pool())
+                                .unwrap_or_else(|| Arc::clone(pool));
+                            *dynamic_mcp_projection.lock() = Some(lease);
+                            projected
+                        } else {
+                            Arc::clone(pool)
+                        };
+                        let mw = McpMiddleware::new(Arc::clone(&effective_pool))
                             .with_skill_discovery(
                                 ctx.mcp_skill_registry.clone(),
                                 ctx.cancel.clone(),
@@ -519,7 +561,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                         // before_agent）+ 初始化收口补发覆盖全时序。
                         let tx = ctx.bg_event_tx.clone();
                         crate::mcp::middleware::attach_connection_notifier(
-                            pool,
+                            &effective_pool,
                             ctx.mcp_skill_registry.as_ref(),
                             command_registry.as_ref(),
                             &ctx.cancel,

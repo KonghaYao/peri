@@ -203,6 +203,8 @@ pub struct SessionContext {
     pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
     pub cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
     pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
+    pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
+    pub session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
     pub channel_state: Option<Arc<ChannelState>>,
     pub tool_search_index: Arc<dyn peri_acp_types::ports::ToolSearchPort>,
     /// Skills 扫描端口（prompt 渲染 available_agents / frozen 构造经此访问）。

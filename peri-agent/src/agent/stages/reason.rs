@@ -17,8 +17,25 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
 
     tracing::trace!(step, has_tool_calls = input.has_tool_calls, "Reason 阶段");
 
+    // Apply a new session capability generation only at the Reason boundary.
+    let refreshed = match ctx.runtime.tool_catalog.refresh() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(error = %error, "tool catalog refresh failed; retaining previous snapshot");
+            ctx.runtime.tool_catalog.snapshot()
+        }
+    };
+    *ctx.runtime.tools.write() = refreshed.tool_map();
+
     // before_model middleware（goal_middleware / compact_middleware 等在此注入）
     run_before_model(ctx).await?;
+    let catalog = {
+        let working = ctx.runtime.tools.read();
+        ctx.runtime
+            .tool_catalog
+            .pin_working_tools(&working)
+            .map_err(|error| AgentError::Other(anyhow::Error::new(error)))?
+    };
 
     // 取出 messages 快照（避免跨 await 持有 RwLockReadGuard）。
     // 直接构建为 Arc<Vec>：LlmCallStart 与 LLM 调用共享同一份，避免二次深拷贝。
@@ -128,11 +145,11 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         },
     );
 
-    // 取出 tools 的 Arc clone（避免跨 await 持有 RwLockReadGuard）
-    let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = {
-        let guard = ctx.runtime.tools.read();
-        guard.values().cloned().collect()
-    };
+    let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = catalog
+        .tools
+        .values()
+        .map(|entry| std::sync::Arc::clone(&entry.tool))
+        .collect();
     let tool_refs: Vec<&dyn crate::tools::BaseTool> = tools_owned
         .iter()
         .filter(|t| t.is_direct())
@@ -324,6 +341,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
 
     Ok(ReasonOutput {
         reasoning,
+        catalog,
         messages_snapshot,
     })
 }

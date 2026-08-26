@@ -3919,11 +3919,13 @@ dependencies = [
  "peri-model",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 

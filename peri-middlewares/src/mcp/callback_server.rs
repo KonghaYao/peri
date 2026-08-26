@@ -83,8 +83,8 @@ impl OAuthCallbackServer {
         let callback_result = parse_callback_url(url_path);
 
         let response = match &callback_result {
-            Ok((code, _)) => {
-                info!(code = %code, "OAuth 回调成功");
+            Ok((_code, _)) => {
+                info!("OAuth 回调成功");
                 &format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
                     OAUTH_SUCCESS_BODY

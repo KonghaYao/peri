@@ -285,6 +285,13 @@ pub struct AssemblyContext {
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     /// MCP 连接池端口（None = 不注册 MCP 中间件/工具）
     pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
+    /// Deployment-scoped Dynamic MCP operation port.
+    pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
+    /// Keeps the checked effective MCP projection alive for this session.
+    pub dynamic_mcp_projection:
+        Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
+    /// Session ID bound into DynamicMCP operations.
+    pub session_id: String,
     /// Channel 状态（MultiplexBroker 包装用）
     pub channel_state: Option<Arc<ChannelState>>,
     /// 工具搜索索引端口
