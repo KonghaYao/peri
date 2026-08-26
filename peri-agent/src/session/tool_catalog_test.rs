@@ -16,6 +16,7 @@ use crate::tools::ToolContext;
 struct NamedTool {
     name: String,
     description: String,
+    aliases: &'static [&'static str],
 }
 
 impl NamedTool {
@@ -23,6 +24,15 @@ impl NamedTool {
         Self {
             name: name.to_string(),
             description: description.to_string(),
+            aliases: &[],
+        }
+    }
+
+    fn with_alias(name: &str, alias: &'static str) -> Self {
+        Self {
+            name: name.to_string(),
+            description: name.to_string(),
+            aliases: Box::leak(vec![alias].into_boxed_slice()),
         }
     }
 }
@@ -39,6 +49,10 @@ impl BaseTool for NamedTool {
 
     fn parameters(&self) -> serde_json::Value {
         json!({"type": "object"})
+    }
+
+    fn aliases(&self) -> &[&str] {
+        self.aliases
     }
 
     async fn invoke(
@@ -70,6 +84,22 @@ impl SessionMcpCapabilityPort for MutableCapability {
     fn snapshot(&self) -> Arc<SessionMcpCapabilitySnapshot> {
         Arc::clone(&self.0.read())
     }
+}
+
+#[test]
+fn conflicting_base_aliases_are_reported_without_weakening_production_constructor() {
+    let first: Arc<dyn BaseTool> = Arc::new(NamedTool::with_alias("first", "shared"));
+    let second: Arc<dyn BaseTool> = Arc::new(NamedTool::with_alias("second", "shared"));
+    let tools = BTreeMap::from([("first".to_string(), first), ("second".to_string(), second)]);
+
+    assert!(matches!(
+        SessionToolCatalog::try_new(tools.clone(), None),
+        Err(CatalogRefreshError::AliasConflict)
+    ));
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        SessionToolCatalog::new(tools, None)
+    }))
+    .is_err());
 }
 
 #[test]

@@ -177,6 +177,18 @@ pub trait DynamicMcpDeploymentPort: Send + Sync {
         false
     }
 
+    /// Deliver an OAuth authorization URL only through the checked sink bound to
+    /// the originating session. Implementations must reject stale instances and
+    /// must never fall back to a deployment-global transport.
+    fn notify_authorization_needed(
+        &self,
+        _instance: &DynamicMcpInstanceKey,
+        _flow_id: &str,
+        _authorization_url: &str,
+    ) -> bool {
+        false
+    }
+
     fn begin_shutdown(&self);
 
     async fn close_session(&self, session_id: &str) -> DynamicMcpShutdownReport;
@@ -242,6 +254,15 @@ pub trait SecretResolverPort: Send + Sync {
 /// reject stale incarnation writes and must never broadcast as a fallback.
 pub trait DynamicMcpNotificationSinkPort: Send + Sync {
     fn notify(&self, notification: DynamicMcpNotification) -> bool;
+
+    fn notify_authorization_needed(
+        &self,
+        _instance: &DynamicMcpInstanceKey,
+        _flow_id: &str,
+        _authorization_url: &str,
+    ) -> bool {
+        false
+    }
 
     fn accepts(&self, instance: &DynamicMcpInstanceKey) -> bool;
 }

@@ -23,6 +23,7 @@ use crate::mcp::{client::McpClientHandle, McpTaskOwner};
 struct RecordingSink {
     session_id: String,
     notifications: Mutex<Vec<DynamicMcpNotification>>,
+    authorization_urls: Mutex<Vec<(DynamicMcpInstanceKey, String, String)>>,
     accept: AtomicBool,
 }
 
@@ -31,6 +32,7 @@ impl RecordingSink {
         Arc::new(Self {
             session_id: session_id.to_string(),
             notifications: Mutex::new(Vec::new()),
+            authorization_urls: Mutex::new(Vec::new()),
             accept: AtomicBool::new(true),
         })
     }
@@ -42,6 +44,23 @@ impl DynamicMcpNotificationSinkPort for RecordingSink {
             return false;
         }
         self.notifications.lock().push(notification);
+        true
+    }
+
+    fn notify_authorization_needed(
+        &self,
+        instance: &DynamicMcpInstanceKey,
+        flow_id: &str,
+        authorization_url: &str,
+    ) -> bool {
+        if !self.accepts(instance) {
+            return false;
+        }
+        self.authorization_urls.lock().push((
+            instance.clone(),
+            flow_id.to_string(),
+            authorization_url.to_string(),
+        ));
         true
     }
 
@@ -293,6 +312,16 @@ async fn checked_notification_sinks_isolate_sessions_and_status_survives_loss() 
         .unwrap();
     wait_ready(&registry, "session-a", "example").await;
     wait_ready(&registry, "session-b", "example").await;
+    let instance_a = registry.capability("session-a").snapshot().servers["example"]
+        .instance_key
+        .clone();
+    assert!(registry.notify_authorization_needed(
+        &instance_a,
+        "flow-a",
+        "https://auth.example.test/authorize"
+    ));
+    assert_eq!(sink_a.authorization_urls.lock().len(), 1);
+    assert!(sink_b.authorization_urls.lock().is_empty());
     assert!(sink_a
         .notifications
         .lock()
@@ -381,11 +410,26 @@ async fn checked_notification_rejects_stale_incarnation_close_and_secret_canary(
         .operation_id
         .clone();
     assert!(!registry.notify_operation(&stale_operation));
+    assert!(!registry.notify_authorization_needed(
+        &first,
+        "stale-flow",
+        "https://auth.example.test/stale"
+    ));
     assert_eq!(sink.notifications.lock().len(), before);
     assert!(!serde_json::to_string(&*sink.notifications.lock())
         .unwrap()
         .contains("CANARY_SECRET_VALUE"));
     registry.close_session("session-a").await;
+    assert!(!registry.notify_authorization_needed(
+        &registry
+            .capability("session-a")
+            .snapshot()
+            .servers
+            .get("example")
+            .map_or_else(|| first.clone(), |server| server.instance_key.clone(),),
+        "late-flow",
+        "https://auth.example.test/late"
+    ));
     assert!(!registry.bind_notification_sink("session-a", Arc::downgrade(&erased)));
     owner.shutdown().await;
 }

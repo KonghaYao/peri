@@ -304,7 +304,12 @@ impl StageContextBuilder {
     }
 
     pub fn with_tools(mut self, tools: SharedToolMap) -> Self {
-        self.runtime.tool_catalog = Arc::new(SessionToolCatalog::new(tools.read().clone(), None));
+        // `with_tools` is a builder convenience seam; production installs its
+        // validated session catalog explicitly with `with_tool_catalog`.
+        self.runtime.tool_catalog = Arc::new(
+            SessionToolCatalog::try_new(tools.read().clone(), None)
+                .unwrap_or_else(|_| SessionToolCatalog::new(BTreeMap::new(), None)),
+        );
         self.runtime.tools = tools;
         self
     }

@@ -107,7 +107,15 @@ impl SessionToolCatalog {
         base_tools: BTreeMap<String, Arc<dyn BaseTool>>,
         capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
     ) -> Self {
-        Self::with_filter(base_tools, capability, Arc::new(|_| true))
+        Self::try_new(base_tools, capability)
+            .expect("base tool catalog must not contain conflicting aliases")
+    }
+
+    pub fn try_new(
+        base_tools: BTreeMap<String, Arc<dyn BaseTool>>,
+        capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
+    ) -> Result<Self, CatalogRefreshError> {
+        Self::try_with_filter(base_tools, capability, Arc::new(|_| true))
     }
 
     pub fn with_filter(
@@ -115,6 +123,15 @@ impl SessionToolCatalog {
         capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
         tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     ) -> Self {
+        Self::try_with_filter(base_tools, capability, tool_filter)
+            .expect("base tool catalog must not contain conflicting aliases")
+    }
+
+    pub fn try_with_filter(
+        base_tools: BTreeMap<String, Arc<dyn BaseTool>>,
+        capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
+        tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    ) -> Result<Self, CatalogRefreshError> {
         let base_tools = base_tools
             .into_iter()
             .map(|(name, tool)| {
@@ -127,16 +144,13 @@ impl SessionToolCatalog {
                 (name, CatalogToolEntry { tool, source })
             })
             .collect::<BTreeMap<_, _>>();
-        let initial = Arc::new(
-            build_snapshot(0, &base_tools, None)
-                .expect("base tool catalog must not contain conflicting aliases"),
-        );
-        Self {
+        let initial = Arc::new(build_snapshot(0, &base_tools, None)?);
+        Ok(Self {
             base_tools,
             published: RwLock::new(initial),
             capability,
             tool_filter,
-        }
+        })
     }
 
     pub fn dynamic_catalog_tools(&self) -> Vec<peri_acp_types::dynamic_mcp::DynamicMcpCatalogTool> {

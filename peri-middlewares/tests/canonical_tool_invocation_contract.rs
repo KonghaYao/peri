@@ -86,7 +86,10 @@ fn make_context(
     let turn = session.start_turn();
     let (event_bus, handles) = peri_agent::agent::events_v2::EventBus::new(Default::default());
     let shared: SharedToolMap = Arc::new(RwLock::new(tools));
-    let catalog = Arc::new(SessionToolCatalog::new(shared.read().clone(), None));
+    let catalog = Arc::new(
+        SessionToolCatalog::try_new(shared.read().clone(), None)
+            .unwrap_or_else(|_| SessionToolCatalog::new(BTreeMap::new(), None)),
+    );
     let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
         .with_tools(shared)
         .with_tool_catalog(catalog)

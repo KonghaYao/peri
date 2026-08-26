@@ -47,18 +47,62 @@ impl SecretResolverPort for RejectingSecretResolver {
     }
 }
 
+pub struct DynamicOAuthCredentialGuard {
+    pool: Arc<McpClientPool>,
+    connection: crate::mcp::client::McpConnectionKey,
+    store: Arc<FileCredentialStore>,
+    credential_key: String,
+}
+
+impl DynamicOAuthCredentialGuard {
+    fn new(
+        pool: Arc<McpClientPool>,
+        connection: crate::mcp::client::McpConnectionKey,
+        store: Arc<FileCredentialStore>,
+        credential_key: String,
+    ) -> Self {
+        Self {
+            pool,
+            connection,
+            store,
+            credential_key,
+        }
+    }
+
+    fn cleanup(&self) -> Result<(), DynamicMcpFailure> {
+        self.pool.revoke_oauth_connection(&self.connection);
+        self.store
+            .clear_server_blocking(&self.credential_key)
+            .map_err(|_| {
+                DynamicMcpFailure::new(
+                    DynamicMcpErrorCode::ShutdownIncomplete,
+                    DynamicMcpOperationState::Draining,
+                    "Dynamic MCP OAuth credential cleanup did not complete",
+                )
+            })
+    }
+}
+
+impl Drop for DynamicOAuthCredentialGuard {
+    fn drop(&mut self) {
+        self.pool.revoke_oauth_connection(&self.connection);
+        if self
+            .store
+            .clear_server_blocking(&self.credential_key)
+            .is_err()
+        {
+            tracing::error!("dynamic MCP OAuth credential rollback failed during drop");
+        }
+    }
+}
+
 pub struct StagedMcpConnection {
     pub instance_key: DynamicMcpInstanceKey,
     pub handle: Arc<McpClientHandle>,
     pub gate: DynamicMcpAdmissionGate,
     service: Option<McpServiceWrapper>,
     cleanup_spawner: McpTaskSpawner,
-    oauth: Option<(
-        Arc<McpClientPool>,
-        crate::mcp::client::McpConnectionKey,
-        Arc<FileCredentialStore>,
-        String,
-    )>,
+    oauth: Option<DynamicOAuthCredentialGuard>,
 }
 
 impl StagedMcpConnection {
@@ -121,11 +165,9 @@ impl StagedMcpConnection {
     }
 
     pub async fn cleanup(mut self) -> Result<(), DynamicMcpFailure> {
-        if let Some((pool, connection, store, credential_key)) = &self.oauth {
-            pool.revoke_oauth_connection(connection);
-            let _ = store.clear_server(credential_key).await;
-        }
-        close_service(self.service.take()).await
+        let oauth_failure = self.oauth.take().and_then(|oauth| oauth.cleanup().err());
+        let service_failure = close_service(self.service.take()).await.err();
+        shutdown_result(oauth_failure, service_failure)
     }
 }
 
@@ -136,15 +178,12 @@ impl Drop for StagedMcpConnection {
         if service.is_none() && oauth.is_none() {
             return;
         }
-        if let Some((pool, connection, _, _)) = &oauth {
-            pool.revoke_oauth_connection(connection);
-        }
+        drop(oauth);
         let key = McpTaskKey::dynamic(DynamicMcpTaskKind::StagedCleanup, &self.instance_key);
         let _ = self.cleanup_spawner.spawn(key, async move {
-            if let Some((_, _, store, credential_key)) = oauth {
-                let _ = store.clear_server(&credential_key).await;
+            if close_service(service).await.is_err() {
+                tracing::error!("dynamic MCP staged service cleanup did not complete");
             }
-            let _ = close_service(service).await;
         });
     }
 }
@@ -154,21 +193,29 @@ pub struct ActiveMcpConnection {
     pub handle: Arc<McpClientHandle>,
     pub gate: DynamicMcpAdmissionGate,
     service: tokio::sync::Mutex<Option<McpServiceWrapper>>,
-    oauth: Option<(
-        Arc<McpClientPool>,
-        crate::mcp::client::McpConnectionKey,
-        Arc<FileCredentialStore>,
-        String,
-    )>,
+    oauth: Option<DynamicOAuthCredentialGuard>,
 }
 
 impl ActiveMcpConnection {
     pub async fn close(&self) -> Result<(), DynamicMcpFailure> {
-        if let Some((pool, connection, store, credential_key)) = &self.oauth {
-            pool.revoke_oauth_connection(connection);
-            let _ = store.clear_server(credential_key).await;
-        }
-        close_service(self.service.lock().await.take()).await
+        let oauth_failure = self.oauth.as_ref().and_then(|oauth| oauth.cleanup().err());
+        let service_failure = close_service(self.service.lock().await.take()).await.err();
+        shutdown_result(oauth_failure, service_failure)
+    }
+}
+
+fn shutdown_result(
+    oauth_failure: Option<DynamicMcpFailure>,
+    service_failure: Option<DynamicMcpFailure>,
+) -> Result<(), DynamicMcpFailure> {
+    match (oauth_failure, service_failure) {
+        (None, None) => Ok(()),
+        (Some(failure), None) | (None, Some(failure)) => Err(failure),
+        (Some(_), Some(_)) => Err(DynamicMcpFailure::new(
+            DynamicMcpErrorCode::ShutdownIncomplete,
+            DynamicMcpOperationState::Draining,
+            "Dynamic MCP OAuth credential and service cleanup did not complete",
+        )),
     }
 }
 
@@ -309,6 +356,13 @@ pub async fn prepare_single_server(
                     ));
                 }
             }
+            let store = Arc::new(FileCredentialStore::new());
+            let guard = DynamicOAuthCredentialGuard::new(
+                Arc::clone(&oauth_pool),
+                connection.clone(),
+                Arc::clone(&store),
+                credential_key.clone(),
+            );
             progress(DynamicMcpOperationState::Authorizing);
             let callback_pool = Arc::clone(&oauth_pool);
             let callback_instance = instance_key.clone();
@@ -335,7 +389,6 @@ pub async fn prepare_single_server(
                     OAuthFlowEvent::AuthorizationFailed { .. } => {}
                     _ => {}
                 });
-            let store = Arc::new(FileCredentialStore::new());
             let mut manager = OAuthFlowManager::new_with_arc(Arc::clone(&store), callback);
             let auth_result = manager
                 .run_oauth_flow_with_id(&flow_id, &credential_key, url, &OAuthConfig::default())
@@ -358,7 +411,7 @@ pub async fn prepare_single_server(
                     )
                 })?;
             progress(DynamicMcpOperationState::Connecting);
-            oauth_lease = Some((Arc::clone(&oauth_pool), connection, store, credential_key));
+            oauth_lease = Some(guard);
             serve_client_auto(
                 build_authed_transport(url, &headers, auth_manager),
                 None,
@@ -492,7 +545,81 @@ mod tests {
     }
 
     use super::*;
-    use crate::mcp::client::ControlledMcpService;
+    use crate::mcp::client::{ControlledMcpService, McpConnectionKey, OAuthStartDisposition};
+
+    fn credential() -> rmcp::transport::auth::StoredCredentials {
+        rmcp::transport::auth::StoredCredentials::new("client".into(), None, vec![], None)
+    }
+
+    fn credential_guard(
+        instance: DynamicMcpInstanceKey,
+    ) -> (
+        DynamicOAuthCredentialGuard,
+        Arc<FileCredentialStore>,
+        tempfile::TempDir,
+        Arc<McpClientPool>,
+        McpConnectionKey,
+        String,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FileCredentialStore::with_path(
+            dir.path().join("oauth_tokens.json"),
+        ));
+        let pool = Arc::new(McpClientPool::new_pending());
+        let connection = McpConnectionKey::dynamic(instance.clone());
+        let key = format!(
+            "dynamic:{}:{}:{}",
+            instance.logical.session_id,
+            instance.incarnation_id.as_str(),
+            instance.logical.server_name
+        );
+        assert_eq!(
+            pool.reserve_oauth_flow_scoped(connection.clone(), "flow"),
+            OAuthStartDisposition::Started
+        );
+        (
+            DynamicOAuthCredentialGuard::new(
+                Arc::clone(&pool),
+                connection.clone(),
+                Arc::clone(&store),
+                key.clone(),
+            ),
+            store,
+            dir,
+            pool,
+            connection,
+            key,
+        )
+    }
+
+    fn failing_credential_guard(
+        instance: DynamicMcpInstanceKey,
+    ) -> (
+        DynamicOAuthCredentialGuard,
+        Arc<McpClientPool>,
+        McpConnectionKey,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FileCredentialStore::with_path(dir.path().to_path_buf()));
+        let pool = Arc::new(McpClientPool::new_pending());
+        let connection = McpConnectionKey::dynamic(instance);
+        assert_eq!(
+            pool.reserve_oauth_flow_scoped(connection.clone(), "flow"),
+            OAuthStartDisposition::Started
+        );
+        (
+            DynamicOAuthCredentialGuard::new(
+                Arc::clone(&pool),
+                connection.clone(),
+                store,
+                "credential".to_string(),
+            ),
+            pool,
+            connection,
+            dir,
+        )
+    }
 
     fn instance() -> DynamicMcpInstanceKey {
         DynamicMcpInstanceKey {
@@ -521,6 +648,111 @@ mod tests {
             assert!(!serialized.contains("super-secret-reference"));
             assert!(!serialized.contains("secret value"));
         }
+    }
+
+    #[tokio::test]
+    async fn credential_guard_drop_clears_exact_instance_without_deleting_l2() {
+        let l1 = instance();
+        let mut l2 = l1.clone();
+        l2.incarnation_id = DynamicMcpIncarnationId::from_string("mcpinc_l2");
+        let (guard, store, _dir, pool, connection, l1_key) = credential_guard(l1);
+        let l2_key = format!(
+            "dynamic:{}:{}:{}",
+            l2.logical.session_id,
+            l2.incarnation_id.as_str(),
+            l2.logical.server_name
+        );
+        store.save_server(&l1_key, credential()).await.unwrap();
+        store.save_server(&l2_key, credential()).await.unwrap();
+
+        drop(guard);
+
+        assert!(store.load_server(&l1_key).await.unwrap().is_none());
+        assert!(store.load_server(&l2_key).await.unwrap().is_some());
+        assert!(pool.active_oauth_flow_scoped(&connection).is_none());
+    }
+
+    #[tokio::test]
+    async fn committed_credential_guard_is_owned_until_active_close() {
+        let key = instance();
+        let (guard, store, _dir, _pool, _connection, credential_key) =
+            credential_guard(key.clone());
+        store
+            .save_server(&credential_key, credential())
+            .await
+            .unwrap();
+        let mut staged = StagedMcpConnection::without_service(key, Arc::new(empty_handle()));
+        staged.oauth = Some(guard);
+        let active = staged.commit();
+        assert!(store.load_server(&credential_key).await.unwrap().is_some());
+
+        active.close().await.unwrap();
+
+        assert!(store.load_server(&credential_key).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn staged_drop_clears_real_file_credential() {
+        let key = instance();
+        let (guard, store, _dir, _pool, _connection, credential_key) =
+            credential_guard(key.clone());
+        store
+            .save_server(&credential_key, credential())
+            .await
+            .unwrap();
+        let mut staged = StagedMcpConnection::without_service(key, Arc::new(empty_handle()));
+        staged.oauth = Some(guard);
+
+        drop(staged);
+
+        assert!(store.load_server(&credential_key).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_credential_cleanup_still_revokes_flow_and_closes_service() {
+        let key = instance();
+        let (guard, pool, connection, _dir) = failing_credential_guard(key.clone());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let service = McpServiceWrapper::Controlled(ControlledMcpService::new(
+            entered_tx,
+            Arc::clone(&release),
+            Arc::clone(&close_count),
+        ));
+        let mut staged = StagedMcpConnection::with_service(key, Arc::new(empty_handle()), service);
+        staged.oauth = Some(guard);
+        let cleanup = tokio::spawn(async move { staged.cleanup().await });
+
+        entered_rx.await.unwrap();
+        assert!(pool.active_oauth_flow_scoped(&connection).is_none());
+        assert_eq!(close_count.load(Ordering::SeqCst), 1);
+        release.notify_waiters();
+        let failure = cleanup.await.unwrap().unwrap_err();
+        assert_eq!(failure.code, DynamicMcpErrorCode::ShutdownIncomplete);
+    }
+
+    #[tokio::test]
+    async fn active_close_aggregates_credential_and_service_failures_and_is_idempotent() {
+        let key = instance();
+        let (guard, pool, connection, _dir) = failing_credential_guard(key.clone());
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let service = McpServiceWrapper::Controlled(ControlledMcpService::timing_out(Arc::clone(
+            &close_count,
+        )));
+        let mut staged = StagedMcpConnection::with_service(key, Arc::new(empty_handle()), service);
+        staged.oauth = Some(guard);
+        let active = staged.commit();
+
+        let failure = active.close().await.unwrap_err();
+        assert_eq!(failure.code, DynamicMcpErrorCode::ShutdownIncomplete);
+        assert!(failure.safe_summary.contains("credential and service"));
+        assert!(pool.active_oauth_flow_scoped(&connection).is_none());
+        assert_eq!(close_count.load(Ordering::SeqCst), 1);
+
+        let repeated = active.close().await.unwrap_err();
+        assert_eq!(repeated.code, DynamicMcpErrorCode::ShutdownIncomplete);
+        assert_eq!(close_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

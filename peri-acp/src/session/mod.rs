@@ -54,6 +54,29 @@ impl DynamicMcpNotificationSinkPort for SessionDynamicMcpNotificationSink {
         true
     }
 
+    fn notify_authorization_needed(
+        &self,
+        instance: &DynamicMcpInstanceKey,
+        flow_id: &str,
+        authorization_url: &str,
+    ) -> bool {
+        if !self.accepts(instance) {
+            return false;
+        }
+        let Some(inbox) = self.inbox.upgrade() else {
+            return false;
+        };
+        let reminder = format!(
+            "<system-reminder>\nDynamic MCP {} requires OAuth authorization for flow {}: {}\n</system-reminder>",
+            instance.logical.server_name, flow_id, authorization_url
+        );
+        inbox.handle().push_info(
+            MessageSource::DynamicMcpNotification,
+            BaseMessage::human(MessageContent::text(reminder)),
+        );
+        true
+    }
+
     fn accepts(&self, instance: &DynamicMcpInstanceKey) -> bool {
         instance.logical.session_id == self.session_id && self.inbox.upgrade().is_some()
     }

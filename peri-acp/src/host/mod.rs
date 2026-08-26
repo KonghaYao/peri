@@ -305,6 +305,7 @@ async fn run_acp_server_inner(
     if let Some(mut rx) = oauth_event_rx {
         let oauth_transport = Arc::clone(&transport);
         let oauth_sessions = cfg.session_manager.clone();
+        let dynamic_mcp = cfg.dynamic_mcp.clone();
         let shutdown = cfg.host_task_spawner.shutdown_token();
         let _ = cfg.host_task_spawner.spawn(
             task_scope::HostTaskOwnerKind::Host,
@@ -321,21 +322,18 @@ async fn run_acp_server_inner(
                     crate::event::oauth::HostOAuthEvent::DynamicAuthorizationNeeded {
                         instance,
                         flow_id,
-                        server_name,
+                        server_name: _,
                         authorization_url,
                     } => {
-                        if !oauth_sessions.dynamic_mcp_instance_is_current(&instance) {
+                        let Some(deployment) = dynamic_mcp.as_ref() else {
                             continue;
-                        }
+                        };
                         if policy.safe {
-                            if let Ok(notification) = crate::event::oauth::OAuthWireNotification::dynamic_authorization_needed(
-                                instance,
-                                flow_id,
-                                server_name,
-                                authorization_url,
-                            ) {
-                                let _ = oauth_transport.send_notification("peri/oauth", notification.into_params()).await;
-                            }
+                            let _ = deployment.notify_authorization_needed(
+                                &instance,
+                                &flow_id,
+                                &authorization_url,
+                            );
                         }
                     }
                     crate::event::oauth::HostOAuthEvent::AuthorizationNeeded {

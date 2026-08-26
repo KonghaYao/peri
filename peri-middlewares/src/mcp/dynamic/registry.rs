@@ -1171,6 +1171,36 @@ impl DynamicMcpDeploymentPort for DynamicMcpRegistry {
         true
     }
 
+    fn notify_authorization_needed(
+        &self,
+        instance: &DynamicMcpInstanceKey,
+        flow_id: &str,
+        authorization_url: &str,
+    ) -> bool {
+        let sink = {
+            let state = self.state.lock();
+            if state.closing
+                || state.closed_sessions.contains(&instance.logical.session_id)
+                || state
+                    .entries
+                    .get(&instance.logical)
+                    .is_none_or(|entry| entry.instance != *instance)
+            {
+                return false;
+            }
+            let Some(sink) = state
+                .notification_sinks
+                .get(&instance.logical.session_id)
+                .and_then(Weak::upgrade)
+            else {
+                return false;
+            };
+            sink
+        };
+        sink.accepts(instance)
+            && sink.notify_authorization_needed(instance, flow_id, authorization_url)
+    }
+
     fn begin_shutdown(&self) {
         self.state.lock().closing = true;
     }
