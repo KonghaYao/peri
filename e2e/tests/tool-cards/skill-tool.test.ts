@@ -34,13 +34,24 @@ describe("Skill 工具", () => {
         '请用 Skill 工具加载 "use-artifacts" skill，然后根据 SKILL.md 中的描述，用中文告诉我这个 skill 的功能。只加载这一个 skill。'
       );
 
-      // 等待 Skill 工具被调用
-      await tester.waitForText("Skill", {
-        timeout: 60_000,
-        interval: 1000,
-      });
-      // 等待工具执行完成 + agent 回复
-      await tester.sleep(8000);
+      // 分两阶段等待。最终回复较长时工具行可能滚出视口，因此不能要求工具行
+      // 与 footer 同时可见；但必须先因果观察到真实工具完成，再观察 turn 完成。
+      await tester.waitFor(
+        (screen) => /✓\s+Skill \(use-artifacts\)/.test(screen),
+        {
+          timeout: 120_000,
+          interval: 500,
+          message: "等待 use-artifacts Skill 完成",
+        },
+      );
+      await tester.waitFor(
+        (screen) => /(?:Brewed for|处理耗时)/.test(screen),
+        {
+          timeout: 120_000,
+          interval: 500,
+          message: "等待 Skill 主 turn 完成",
+        },
+      );
 
       const capture = await takePeriSnapshot(tester, "skill-tool-use-artifacts");
 

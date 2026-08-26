@@ -26,11 +26,13 @@ import type { TmuxTester } from "tui-tester";
 function hasExpandedReasoning(text: string): boolean {
   const lines = text.split("\n");
   return lines.some(
-    (l, i) =>
-      (l.includes("思考了") || l.includes("Thought")) &&
-      i + 1 < lines.length &&
-      lines[i + 1].trimStart().startsWith("│") &&
-      lines[i + 1].trimStart().length > 1,
+    (l, i) => {
+      if (!(l.includes("思考了") || l.includes("Thought")) || i + 1 >= lines.length) {
+        return false;
+      }
+      const next = lines[i + 1].trim();
+      return next.startsWith("│") && next.slice(1).trim().length > 0;
+    },
   );
 }
 
@@ -64,15 +66,18 @@ describe("scenarios: streaming + tool interleave", () => {
 
       // 基本断言
       expect(capture.text.length).toBeGreaterThan(200);
+      const completedReadCards = capture.text.match(/✓\s+Read\b/g) ?? [];
+      expect(completedReadCards.length).toBeGreaterThanOrEqual(2);
+      expect(capture.text).toMatch(/\b(?:[1-9]\d?|100)% ctx\b/);
 
-      // LLM judge 检查渲染质量（不测试 agent 行为）
+      // 数量和状态栏格式由上面的确定性文本断言负责；Judge 只检查无法用
+      // 字符串可靠表达的布局质量，避免把多个 Read 卡片或新版 `NN% ctx`
+      // 状态栏误读成失败。
       const result = await judge({
         ansiRaw: capture.raw,
         criteria: [
-          "屏幕中应至少有 2 个 Read 工具调用卡片（绿色圆点标记）",
           "思考文本块（如'思考了 N 字符'）和工具调用卡片应可见且排列有序，无文本重叠",
           "不应出现严重的渲染错位（如文字覆盖、行重叠、截断）",
-          "状态栏应显示上下文消耗（如格式 'NN% NNNk'），且百分比数值合理（>0% 且 <=100%）",
         ],
       });
       console.log("Judge:", JSON.stringify(result, null, 2));
@@ -92,11 +97,21 @@ describe("scenarios: streaming + tool interleave", () => {
         tester,
         "请先思考（reasoning）再回答：读取 README.md 的第一行，然后用一句话回答你读到了什么。",
       );
+      // stable screen 可能命中工具等待窗口；先等主 turn footer，确保 completed
+      // folding pass 已发生，再判断 reasoning 的默认折叠态。
+      await tester.waitFor(
+        (screen) => /(?:Brewed for|处理耗时)/.test(screen),
+        {
+          timeout: 180_000,
+          interval: 500,
+          message: "等待第一轮主 turn 完成",
+        },
+      );
       await waitForStableScreen(tester, 180_000, base);
 
       // Turn 完成后 reasoning 应按 §7 自动折叠为单行（摘要行后无正文行）
-      const afterTurn = await tester.getScreenText();
-      expect(hasExpandedReasoning(afterTurn)).toBe(false);
+      const afterTurn = await takePeriSnapshot(tester, "reasoning-completed-collapsed");
+      expect(hasExpandedReasoning(afterTurn.text)).toBe(false);
 
       // 手动展开：Alt+Up 逐条上移 entry 焦点（显式 CSI 序列 \e[1;3A，裁决 C3），
       // Enter 切换 Collapsed/Expanded。reasoning 可能不在末位 entry

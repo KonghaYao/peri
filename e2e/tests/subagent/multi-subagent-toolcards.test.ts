@@ -23,7 +23,6 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { launchPeri, sendPrompt, takePeriSnapshot, waitForStableScreen } from "../../helpers/peri.js";
-import { judge } from "../../helpers/judge.js";
 import { readFileSync } from "node:fs";
 import type { TmuxTester } from "tui-tester";
 
@@ -49,7 +48,7 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
 
   it(
     "同一 turn 内主 agent 两次调用 Agent 工具，两个 SubAgent 的摘要行都应可见",
-    { timeout: 240_000 },
+    { timeout: 600_000 },
     async () => {
       // ── Prepare: 记录测试前 NOT ROUTED 计数 ──
       const notRoutedBefore = countNotRoutedInLog();
@@ -64,8 +63,9 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       await sendPrompt(
         tester,
         "请分两步完成以下任务，每一步都必须使用 Agent 工具（不可直接执行 shell）：" +
-        "第一步：使用同步 subagent 执行 shell 命令 echo hello-agent-1。" +
-        "第二步：完成第一步并发回结果后，再使用同步 subagent 执行 shell 命令 echo hello-agent-2。" +
+        "第一步：使用同步 general-purpose subagent，并要求它只用一次 Bash 执行 echo hello-agent-1 后立即返回。" +
+        "等待第一步 Agent 工具完全返回后，第二步再使用新的同步 general-purpose subagent，" +
+        "要求它只用一次 Bash 执行 echo hello-agent-2 后立即返回。" +
         "\n\n关键：每一步都必须调用 Agent 工具，不能合并。",
       );
 
@@ -79,7 +79,7 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       await tester.waitFor(
         (screen) => /Shell\s{2}echo hello-agent-1/.test(screen),
         {
-          timeout: 60_000,
+          timeout: 180_000,
           interval: 1000,
           message: "等待第一个 SubAgent 摘要行出现超时",
         },
@@ -91,37 +91,16 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       );
       expect(capture1.text.length).toBeGreaterThan(50);
 
-      // 断言 A1: 第一个 SubAgent 摘要行非空壳
-      const r = await judge({
-        ansiRaw: capture1.raw,
-        criteria: [
-          "消息区应出现第一个 SubAgent 的 Agent 工具行，其下嵌套子工具行（如 'Shell echo hello-agent-1'），不是空白",
-          "嵌套子工具行应包含具体活动/结果文本（如 echo 命令 hello-agent-1 或 Shell 相关字样）",
-        ],
-      });
-      console.log("Judge (phase1):", JSON.stringify(r, null, 2));
-      expect(r.pass).toBe(true);
+      // 断言 A1: 第一个 SubAgent 摘要行非空壳。
+      expect(capture1.text).toMatch(/Shell\s{2}echo hello-agent-1/);
 
-      // ── Phase 2: 等第二个 SubAgent 开始运行 ──
-      // 注意：不能用 waitForText("Agent")——第一个 Agent 卡片仍在屏幕上会立即匹配。
-      // 轮询屏幕直到 "Agent" 出现 ≥2 次（第二个 Agent 卡片已出现）。
-      let secondAgentSeen = false;
-      for (let i = 0; i < 60; i++) {
-        const screen = await tester.getScreenText();
-        const agentCount = (screen.match(/Agent/g) || []).length;
-        if (agentCount >= 2) {
-          secondAgentSeen = true;
-          break;
-        }
-        await tester.sleep(2000);
-      }
-      expect(secondAgentSeen).toBe(true);
-      // 等第二个 SubAgent 的嵌套工具行也出现（hello-agent-2）
+      // ── Phase 2: 等第二个 SubAgent 的真实嵌套工具行 ──
+      // 不能统计裸 "Agent"：用户 prompt 自身多次包含该词，会造成立即假绿。
       try {
         await tester.waitFor(
           (screen) => /Shell\s{2}echo hello-agent-2/.test(screen),
           {
-            timeout: 60_000,
+            timeout: 180_000,
             interval: 1000,
             message: "等待第二个 SubAgent 摘要行出现超时",
           },
@@ -137,20 +116,9 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       );
       expect(capture2.text.length).toBeGreaterThan(50);
 
-      // 断言 A2: 第二个 SubAgent 也有工具计数 —— 核心断言
-      const r2 = await judge({
-        ansiRaw: capture2.raw,
-        criteria: [
-          // 核心: 第二个 SubAgent 也要有可见的嵌套工具行（非空壳）
-          "消息区中应出现第二个 SubAgent 的 Agent 工具行，其下嵌套子工具行（如 'Shell echo hello-agent-2'），不是空的外壳",
-          // 防御: 不应出现空的外壳——每个 SubAgent 应有 Agent 头行 + 嵌套工具行
-          "每个 SubAgent 都应展示 Agent 工具行与嵌套子工具行（含工具名与活动文本）",
-          // 防混淆
-          "第二个 SubAgent 不应与第一个混为一行——两个 SubAgent 各占一行",
-        ],
-      });
-      console.log("Judge (phase2):", JSON.stringify(r2, null, 2));
-      expect(r2.pass).toBe(true);
+      // 断言 A2: 两个独立嵌套工具行同时可见。
+      expect(capture2.text).toMatch(/Shell\s{2}echo hello-agent-1/);
+      expect(capture2.text).toMatch(/Shell\s{2}echo hello-agent-2/);
 
       // ── Phase 3: 等全部完成（屏幕稳定）──
       await waitForStableScreen(tester, 120_000, base);
@@ -160,16 +128,10 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       );
       expect(capture3.text.length).toBeGreaterThan(50);
 
-      // 断言 A3: 完成后两个 SubAgent 的痕迹都保留
-      const r3 = await judge({
-        ansiRaw: capture3.raw,
-        criteria: [
-          "完成后消息区应保留两个 SubAgent 的完成痕迹（成功符号 ✓ 的 Agent 工具行与嵌套子工具行），各自显示完成状态",
-          "两个 SubAgent 应包含工具调用结果摘要（如 echo 输出 hello-agent-1 / hello-agent-2 或文本总结）",
-        ],
-      });
-      console.log("Judge (phase3):", JSON.stringify(r3, null, 2));
-      expect(r3.pass).toBe(true);
+      // 断言 A3: 完成后两个 SubAgent 的痕迹都保留。
+      expect((capture3.text.match(/✓\s+Agent/g) || []).length).toBeGreaterThanOrEqual(2);
+      expect(capture3.text).toContain("hello-agent-1");
+      expect(capture3.text).toContain("hello-agent-2");
 
       // ── 断言 B: 日志诊断 ──
       const notRoutedAfter = countNotRoutedInLog();

@@ -95,18 +95,23 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let question_count = pending.as_ref().map(|q| q.questions.len()).unwrap_or(0);
 
-    reset_for_owner_change(
-        &mut session_fingerprint.write(),
-        interaction.as_ref(),
-        question_count,
-        &mut focused.write(),
-        &mut answers.write(),
-        &mut focused_option.write(),
-        &mut is_typing.write(),
-        &mut typing_state.write(),
-        &mut custom_answers.write(),
-        &mut sv.write(),
-    );
+    // State::write 会发布变更通知。只有 owner 真正变化时才取得写 guard；否则
+    // 每次 render 都会再次唤醒组件树，形成热重绘并饿死终端 EventStream。
+    let next_fingerprint = interaction_fingerprint(interaction.as_ref());
+    if *session_fingerprint.read() != next_fingerprint {
+        reset_for_owner_change(
+            &mut session_fingerprint.write(),
+            interaction.as_ref(),
+            question_count,
+            &mut focused.write(),
+            &mut answers.write(),
+            &mut focused_option.write(),
+            &mut is_typing.write(),
+            &mut typing_state.write(),
+            &mut custom_answers.write(),
+            &mut sv.write(),
+        );
+    }
 
     let pending_for_closure = pending.clone();
     let interaction_for_closure = interaction.clone();

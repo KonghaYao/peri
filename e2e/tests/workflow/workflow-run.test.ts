@@ -6,7 +6,6 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
-import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
 describe("workflow: run and observe", () => {
@@ -27,7 +26,15 @@ describe("workflow: run and observe", () => {
       // 阶段 1：触发 workflow（使用 /ultracode skill）
       await sendPrompt(
         tester,
-        "/ultracode 请派发一个简单的 workflow，用并行 agent 分别执行 echo hello workflow test",
+        "/ultracode 这是 E2E 测试。请立即且只调用一次 Workflow 工具，不得先试错或只解释。" +
+        "script 参数必须等价于以下顶层脚本：" +
+        "export const meta = { name: 'e2e-run-observe', description: 'E2E workflow panel observation' } " +
+        "phase('Run') " +
+        "const results = await parallel([" +
+        "() => agent('只用 Bash 执行 echo hello-workflow-a', { label: 'agent-a' })," +
+        "() => agent('只用 Bash 执行 echo hello-workflow-b', { label: 'agent-b' })" +
+        "]) " +
+        "log(JSON.stringify(results))",
       );
 
       // 等 workflow 真正完成：消息区出现完成通知
@@ -55,15 +62,8 @@ describe("workflow: run and observe", () => {
       await tester.sendKey("Escape");
       await tester.sleep(500);
 
-      // 阶段 3：等待 workflow 完成通知
-      // "Workflow '<name>' completed. (<duration>ms, ...)"（async_router.rs 生成，不会被翻译）
-      await tester.waitForText("completed. (", {
-        timeout: 120_000,
-        interval: 3000,
-      });
-      await tester.sleep(2000);
-
-      // 再次打开 /workflows 面板查看完成结果（同上：固定等待面板渲染）
+      // 阶段 3：workflow 在阶段 1 已由持久完成通知因果确认；关闭面板后不再
+      // 重等可能已滚出视口的同一条通知，直接重新打开面板检查终态。
       await tester.sendText("/workflows");
       await tester.sleep(500);
       await tester.sendKey("Enter");
@@ -75,38 +75,18 @@ describe("workflow: run and observe", () => {
       expect(runningCapture.text.length).toBeGreaterThan(100);
       expect(doneCapture.text.length).toBeGreaterThan(100);
 
-      // Judge: 启动阶段
-      const r = await judge({
-        ansiRaw: launchCapture.raw,
-        criteria: [
-          "消息区中应有 workflow 相关输出（如 'Workflow ... completed' 完成通知或 workflow 摘要）",
-        ],
-      });
-      console.log("Judge (launch):", JSON.stringify(r, null, 2));
-      expect(r.pass).toBe(true);
-
-      // Judge: 面板 running 阶段——workflow 已启动，面板中应有任务条目
-      // （workflow 是 fire-and-forget，echo 任务几秒内完成，运行中或已完成均可）
-      const r2 = await judge({
-        ansiRaw: runningCapture.raw,
-        criteria: [
-          "Workflow 面板已打开，标题栏显示 'Workflow'",
-          "面板中应显示 workflow 任务条目：run tab 显示 workflow 名称（可带运行中/✓ 完成标记），或 agent 行列表；不应显示 '当前会话无工作流运行'",
-        ],
-      });
-      console.log("Judge (running):", JSON.stringify(r2, null, 2));
-      expect(r2.pass).toBe(true);
-
-      // Judge: 面板完成态
-      const r3 = await judge({
-        ansiRaw: doneCapture.raw,
-        criteria: [
-          "Workflow 面板应显示已完成的任务（可能显示 ✓ 或 completed 标记）",
-          "面板中应有任务的执行结果或统计信息（如 agent 数量、耗时、输出摘要）",
-        ],
-      });
-      console.log("Judge (done):", JSON.stringify(r3, null, 2));
-      expect(r3.pass).toBe(true);
+      // 上面的 waitForText 与面板快照已提供因果证据，直接断言结构，避免
+      // 让 LLM judge 把合法的已完成面板误判成“没有运行中任务”。
+      expect(launchCapture.text).toMatch(
+        /Workflow 'e2e-run-observe' completed\. \(/,
+      );
+      expect(runningCapture.text).toContain("Workflow");
+      expect(runningCapture.text).toContain("e2e-run-observe");
+      expect(runningCapture.text).not.toContain("当前会话无工作流运行");
+      expect(doneCapture.text).toContain("Workflow");
+      expect(doneCapture.text).toContain("e2e-run-observe");
+      expect(doneCapture.text).toMatch(/✓\s+e2e-run-observe/);
+      expect(doneCapture.text).toContain("Agents");
     },
   );
 });
