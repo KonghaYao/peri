@@ -133,6 +133,14 @@ pub trait Middleware: Send + Sync {
         Ok(())
     }
 
+    /// Reason 边界工具目录刷新后调用。
+    ///
+    /// 仅用于把依赖工具目录的 request-local middleware 视图重绑到当前
+    /// working map；默认无副作用。不得在此执行一般性的 `before_agent` 初始化。
+    async fn before_reason_catalog(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        Ok(())
+    }
+
     /// LLM 调用前调用（在每轮 ReAct 循环的 call_llm 之前）
     ///
     /// 可用于上下文压缩、token 预算检查等预处理操作。

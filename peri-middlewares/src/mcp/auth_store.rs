@@ -5,9 +5,9 @@ use std::{
 };
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use tracing::debug;
 
 const TOKEN_FILE_VERSION: u32 = 1;
@@ -139,7 +139,7 @@ impl FileCredentialStore {
         &self,
         server_name: &str,
     ) -> Result<Option<StoredCredentials>, AuthStoreError> {
-        let _lock = self.mutex.lock().await;
+        let _lock = self.mutex.lock();
         let file = self.read_file()?;
         Ok(file.tokens.get(server_name).cloned())
     }
@@ -149,21 +149,25 @@ impl FileCredentialStore {
         server_name: &str,
         credentials: StoredCredentials,
     ) -> Result<(), AuthStoreError> {
-        let _lock = self.mutex.lock().await;
+        let _lock = self.mutex.lock();
         let mut file = self.read_file()?;
         file.tokens.insert(server_name.to_string(), credentials);
         self.write_file(&file)
     }
 
     pub async fn clear_server(&self, server_name: &str) -> Result<(), AuthStoreError> {
-        let _lock = self.mutex.lock().await;
+        self.clear_server_blocking(server_name)
+    }
+
+    pub(crate) fn clear_server_blocking(&self, server_name: &str) -> Result<(), AuthStoreError> {
+        let _lock = self.mutex.lock();
         let mut file = self.read_file()?;
         file.tokens.remove(server_name);
         self.write_file(&file)
     }
 
     pub async fn clear_all(&self) -> Result<(), AuthStoreError> {
-        let _lock = self.mutex.lock().await;
+        let _lock = self.mutex.lock();
         self.write_file(&OAuthTokenFile {
             version: TOKEN_FILE_VERSION,
             tokens: HashMap::new(),
@@ -171,7 +175,7 @@ impl FileCredentialStore {
     }
 
     pub async fn list_servers(&self) -> Result<Vec<String>, AuthStoreError> {
-        let _lock = self.mutex.lock().await;
+        let _lock = self.mutex.lock();
         Ok(self.read_file()?.tokens.keys().cloned().collect())
     }
 }

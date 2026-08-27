@@ -314,6 +314,162 @@ async fn test_before_agent_builds_index_from_local_tools_when_shared_empty() {
 }
 
 #[tokio::test]
+async fn reason_refresh_rebinds_search_and_execute_to_same_dynamic_catalog() {
+    use peri_acp_types::{
+        dynamic_mcp::{
+            DynamicMcpConfig, DynamicMcpInstanceKey, DynamicMcpLogicalKey,
+            DynamicMcpServerProjection, DynamicMcpToolCapability, SessionMcpCapabilitySnapshot,
+        },
+        ports::SessionMcpCapabilityPort,
+    };
+    use peri_agent::{
+        agent::{
+            react::{ReactLLM, Reasoning, StreamingContext},
+            stages::{reason::run_reason, ReasonInput, StageContext},
+        },
+        messages::BaseMessage,
+        middleware::chain::MiddlewareChain,
+        session::{store::FrozenContext, tool_catalog::SessionToolCatalog, Session},
+        tools::ToolContext,
+    };
+
+    struct MutableCapability(RwLock<Arc<SessionMcpCapabilitySnapshot>>);
+    impl SessionMcpCapabilityPort for MutableCapability {
+        fn snapshot(&self) -> Arc<SessionMcpCapabilitySnapshot> {
+            Arc::clone(&self.0.read())
+        }
+    }
+
+    struct CatalogObservingLlm {
+        search_result: Arc<StdRwLock<Option<String>>>,
+        execute_result: Arc<StdRwLock<Option<String>>>,
+    }
+    #[async_trait]
+    impl ReactLLM for CatalogObservingLlm {
+        async fn generate_reasoning(
+            &self,
+            _messages: &[BaseMessage],
+            tools: &[&dyn BaseTool],
+            _streaming: Option<StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            let search = tools
+                .iter()
+                .find(|tool| tool.name() == "SearchExtraTools")
+                .expect("Reason model request must contain SearchExtraTools");
+            let execute = tools
+                .iter()
+                .find(|tool| tool.name() == "ExecuteExtraTool")
+                .expect("Reason model request must contain ExecuteExtraTool");
+            let ctx = ToolContext::new(&[], "/tmp");
+            *self.search_result.write().unwrap() = Some(
+                search
+                    .invoke(serde_json::json!({"query": "select:mcp__echo__echo"}), ctx)
+                    .await
+                    .unwrap(),
+            );
+            *self.execute_result.write().unwrap() = Some(
+                execute
+                    .invoke(
+                        serde_json::json!({
+                            "tool_name": "mcp__echo__echo",
+                            "params": {}
+                        }),
+                        ToolContext::new(&[], "/tmp"),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            Ok(Reasoning::with_answer("", "done"))
+        }
+    }
+
+    let index = Arc::new(ToolSearchIndex::new());
+    let shared = Arc::new(RwLock::new(BTreeMap::new()));
+    let middleware = ToolSearchMiddleware::new(Arc::clone(&index), Arc::clone(&shared));
+    let meta = <ToolSearchMiddleware as Middleware>::collect_tools(&middleware, "/tmp")
+        .into_iter()
+        .map(|tool| (tool.name().to_string(), Arc::from(tool)))
+        .collect::<BTreeMap<String, Arc<dyn BaseTool>>>();
+    let working = Arc::new(RwLock::new(meta.clone()));
+    middleware
+        .before_agent(&mut LocalToolsState::new(Arc::clone(&working)))
+        .await
+        .unwrap();
+    assert!(index.search("select:mcp__echo__echo", 5).is_empty());
+
+    let capability = Arc::new(MutableCapability(RwLock::new(Arc::new(
+        SessionMcpCapabilitySnapshot::default(),
+    ))));
+    let catalog = Arc::new(SessionToolCatalog::new(meta, Some(capability.clone())));
+    let instance = DynamicMcpInstanceKey {
+        logical: DynamicMcpLogicalKey {
+            session_id: "session-a".to_string(),
+            server_name: "echo".to_string(),
+        },
+        incarnation_id: Default::default(),
+    };
+    *capability.0.write() = Arc::new(SessionMcpCapabilitySnapshot {
+        generation: 1,
+        servers: BTreeMap::from([(
+            "echo".to_string(),
+            DynamicMcpServerProjection {
+                instance_key: instance.clone(),
+                name: "echo".to_string(),
+                config: DynamicMcpConfig {
+                    command: Some("fixture".to_string()),
+                    ..Default::default()
+                }
+                .canonicalize()
+                .unwrap(),
+                tool_count: 1,
+                resource_count: 0,
+            },
+        )]),
+        tools: BTreeMap::from([(
+            "mcp__echo__echo".to_string(),
+            DynamicMcpToolCapability {
+                instance,
+                tool: Arc::new(MockTool::new("mcp__echo__echo", "canonical echo")),
+            },
+        )]),
+    });
+
+    let search_result = Arc::new(StdRwLock::new(None));
+    let execute_result = Arc::new(StdRwLock::new(None));
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(middleware));
+    let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_tools(working)
+    .with_tool_catalog(catalog)
+    .with_middleware_chain(Arc::new(chain))
+    .with_llm(Arc::new(CatalogObservingLlm {
+        search_result: Arc::clone(&search_result),
+        execute_result: Arc::clone(&execute_result),
+    }))
+    .build();
+
+    run_reason(ReasonInput {
+        context,
+        has_tool_calls: false,
+    })
+    .await
+    .unwrap();
+
+    let search_result = search_result.read().unwrap().clone().unwrap();
+    assert!(search_result.contains("mcp__echo__echo"), "{search_result}");
+    assert_eq!(
+        execute_result.read().unwrap().as_deref(),
+        Some("mock"),
+        "ExecuteExtraTool must resolve the canonical dynamic target from this Reason snapshot"
+    );
+}
+
+#[tokio::test]
 async fn test_before_agent_binds_index_and_prompt_to_each_turn_snapshot() {
     let index = Arc::new(ToolSearchIndex::new());
     let shared = Arc::new(RwLock::new(BTreeMap::new()));

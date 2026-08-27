@@ -10,6 +10,18 @@ use peri_agent::tools::BaseTool;
 use crate::tool_search::core_tools::TOOL_AGENT;
 use crate::{agent_define::AgentOverrides, claude_agent_parser::ToolsValue, tools::ArcToolWrapper};
 
+pub fn canonical_tool_filter(
+    allowed: &ToolsValue,
+    disallowed: &ToolsValue,
+) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
+    let allowed = match allowed {
+        ToolsValue::Empty => None,
+        ToolsValue::NoTools => Some(Vec::new()),
+        ToolsValue::List(names) => Some(names.clone()),
+    };
+    peri_agent::session::tool_catalog::ToolFilterPolicy::canonical(allowed, disallowed.to_vec())
+}
+
 /// Filter tools from parent set based on agent definition's tools/disallowedTools fields.
 ///
 /// Rules:

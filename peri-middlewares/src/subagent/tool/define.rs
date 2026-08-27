@@ -513,6 +513,7 @@ impl SubAgentTool {
         run_mode: peri_agent::session::subagent::SubagentRunMode,
         llm: Box<dyn ReactLLM + Send + Sync>,
         tools: Vec<Arc<dyn BaseTool>>,
+        tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
         system_prompt: Option<String>,
         skill_names: Vec<String>,
         cwd: String,
@@ -531,6 +532,7 @@ impl SubAgentTool {
             llm,
             chain_assembler: Arc::clone(&self.chain_assembler),
             tools,
+            tool_filter,
             system_prompt,
             error_suggest_registry: None,
             tool_registry_snapshot: None,
@@ -841,6 +843,7 @@ impl BaseTool for SubAgentTool {
                 .into_iter()
                 .map(|t| Arc::from(t) as Arc<dyn BaseTool>)
                 .collect(),
+            build_result.tool_filter,
             build_result.system_prompt,
             build_result.skill_names,
             cwd,

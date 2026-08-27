@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use peri_agent::tools::{BaseTool, DirectToolInvocationResolver};
+use peri_agent::tools::{bind_target_invocation, BaseTool, DirectToolInvocationResolver};
 use peri_agent::{
     agent::react::ToolCall,
     error::{AgentError, AgentResult},
@@ -52,16 +52,13 @@ impl ToolInvocationResolver for ExecuteExtraToolResolver {
         }
 
         let (target, params) = resolve_extra_tool_target(&raw_call.input, tools)?;
-        Ok(CanonicalToolInvocation {
-            raw_call: raw_call.clone(),
-            policy_call: ToolCall::new(
-                raw_call.id.clone(),
-                target.name().to_string(),
-                peri_agent::tools::normalize_params(params, Some(target.as_ref())),
-            ),
+        let normalized = peri_agent::tools::normalize_params(params, Some(target.as_ref()));
+        bind_target_invocation(
+            raw_call,
             target,
-            wrapper_name: Some(outer.target.name().to_string()),
-        })
+            normalized,
+            Some(outer.target.name().to_string()),
+        )
     }
 }
 

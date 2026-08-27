@@ -32,7 +32,7 @@ croner = "3"
 tracing.workspace = true
 parking_lot.workspace = true
 grep = "0.4"
-rmcp = { version = "3.1.2", features = [
+rmcp = { version = "3.1.4", features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",

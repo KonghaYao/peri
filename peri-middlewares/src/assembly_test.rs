@@ -56,6 +56,93 @@ impl UserInteractionBroker for FakeBroker {
     }
 }
 
+struct FakeDynamicDeployment;
+
+#[async_trait]
+impl peri_acp_types::ports::DynamicMcpDeploymentPort for FakeDynamicDeployment {
+    async fn execute(
+        &self,
+        _session_id: &str,
+        _action: peri_acp_types::dynamic_mcp::CanonicalDynamicMcpAction,
+    ) -> Result<
+        peri_acp_types::dynamic_mcp::DynamicMcpResponse,
+        peri_acp_types::dynamic_mcp::DynamicMcpFailure,
+    > {
+        unimplemented!("assembly contract does not execute DynamicMCP")
+    }
+
+    fn register_catalog(
+        &self,
+        _session_id: &str,
+        _tools: Vec<peri_acp_types::dynamic_mcp::DynamicMcpCatalogTool>,
+    ) -> Result<(), peri_acp_types::dynamic_mcp::DynamicMcpFailure> {
+        Ok(())
+    }
+
+    fn capability(
+        &self,
+        _session_id: &str,
+    ) -> Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort> {
+        struct Empty;
+        impl peri_acp_types::ports::SessionMcpCapabilityPort for Empty {
+            fn snapshot(&self) -> Arc<peri_acp_types::dynamic_mcp::SessionMcpCapabilitySnapshot> {
+                Arc::new(Default::default())
+            }
+
+            fn bind_projection(
+                &self,
+                _static_handles: Vec<(String, peri_acp_types::mcp_skills::HandleToken)>,
+                _skill_registry: Arc<peri_acp_types::mcp_skills::McpSkillRegistry>,
+                _command_registry: Arc<peri_acp_types::command_registry::CommandRegistry>,
+            ) -> Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease> {
+                struct Lease;
+                impl peri_acp_types::ports::SessionMcpProjectionLease for Lease {
+                    fn as_any(&self) -> &dyn std::any::Any {
+                        self
+                    }
+
+                    fn refresh(&self) -> bool {
+                        true
+                    }
+
+                    fn close(&self) {}
+                }
+                Arc::new(Lease)
+            }
+        }
+        Arc::new(Empty)
+    }
+
+    fn close_registration(
+        &self,
+        _session_id: &str,
+    ) -> Arc<dyn peri_acp_types::ports::SessionCloseRegistration> {
+        struct Noop;
+        #[async_trait]
+        impl peri_acp_types::ports::SessionCloseRegistration for Noop {
+            async fn revoke_and_cleanup(
+                &self,
+            ) -> peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport {
+                peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
+            }
+        }
+        Arc::new(Noop)
+    }
+
+    fn begin_shutdown(&self) {}
+
+    async fn close_session(
+        &self,
+        _session_id: &str,
+    ) -> peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport {
+        peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
+    }
+
+    async fn shutdown(&self) -> peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport {
+        peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
+    }
+}
+
 struct FakeEventHandler;
 
 impl AgentEventHandler for FakeEventHandler {
@@ -191,6 +278,9 @@ fn base_context() -> AssemblyContext {
         command_registry: None,
         cron_scheduler: None,
         mcp_pool: None,
+        dynamic_mcp: None,
+        dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
+        session_id: "session-contract-test".to_string(),
         channel_state: None,
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,
@@ -462,6 +552,38 @@ fn hook_groups_expand_hook_middleware() {
         pos_cron < pos_hook1 && pos_hook1 < pos_hitl,
         "Hook 组位置错误: {names:?}"
     );
+}
+
+#[test]
+fn dynamic_mcp_registers_deferred_control_tool_at_mcp_slot() {
+    let mut ctx = base_context();
+    ctx.dynamic_mcp = Some(Arc::new(FakeDynamicDeployment));
+
+    let names = assemble_names(&ctx);
+    let tools = assemble_tool_names(&ctx);
+
+    assert!(names.contains(&"DynamicMcpMiddleware".to_string()));
+    assert!(tools.contains(&"DynamicMCP".to_string()));
+    assert!(!tools
+        .iter()
+        .any(|tool| matches!(tool.as_str(), "DynamicMCP.load" | "DynamicMCP.unload")));
+}
+
+#[test]
+fn dynamic_mcp_projection_is_bound_without_optional_registries() {
+    let mut ctx = base_context();
+    ctx.mcp_pool = Some(Arc::new(McpClientPool::new_empty()));
+    ctx.dynamic_mcp = Some(Arc::new(FakeDynamicDeployment));
+    assert!(ctx.mcp_skill_registry.is_none());
+    assert!(ctx.command_registry.is_none());
+    let projection = Arc::clone(&ctx.dynamic_mcp_projection);
+
+    let names = assemble_names(&ctx);
+    let names_again = assemble_names(&ctx);
+
+    assert!(names.contains(&"McpMiddleware".to_string()));
+    assert!(names_again.contains(&"McpMiddleware".to_string()));
+    assert!(projection.lock().is_some());
 }
 
 /// 条件注册矩阵：MCP / Workflow / LSP / Goal 开关组合。

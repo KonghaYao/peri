@@ -26,6 +26,37 @@ impl CanonicalToolInvocation {
     }
 }
 
+pub fn bind_target_invocation(
+    raw_call: &ToolCall,
+    target: Arc<dyn BaseTool>,
+    normalized_input: serde_json::Value,
+    wrapper_name: Option<String>,
+) -> AgentResult<CanonicalToolInvocation> {
+    match target
+        .bind_invocation(normalized_input.clone())
+        .map_err(|error| AgentError::ToolExecutionFailed {
+            tool: target.name().to_string(),
+            reason: error.to_string(),
+        })? {
+        Some(bound) => Ok(CanonicalToolInvocation {
+            raw_call: raw_call.clone(),
+            policy_call: ToolCall::new(raw_call.id.clone(), bound.policy_name, bound.policy_input),
+            target: bound.target,
+            wrapper_name,
+        }),
+        None => Ok(CanonicalToolInvocation {
+            raw_call: raw_call.clone(),
+            policy_call: ToolCall::new(
+                raw_call.id.clone(),
+                target.name().to_string(),
+                normalized_input,
+            ),
+            target,
+            wrapper_name,
+        }),
+    }
+}
+
 /// P0-1 的调用解析边界。每个 dispatch 只从其工具表 snapshot 解析一次。
 pub trait ToolInvocationResolver: Send + Sync {
     fn resolve(
@@ -81,16 +112,8 @@ impl ToolInvocationResolver for DirectToolInvocationResolver {
         tools: &BTreeMap<String, Arc<dyn BaseTool>>,
     ) -> AgentResult<CanonicalToolInvocation> {
         let target = self.resolve_target(&raw_call.name, tools)?;
-        Ok(CanonicalToolInvocation {
-            raw_call: raw_call.clone(),
-            policy_call: ToolCall::new(
-                raw_call.id.clone(),
-                target.name().to_string(),
-                normalize_params(raw_call.input.clone(), Some(target.as_ref())),
-            ),
-            target,
-            wrapper_name: None,
-        })
+        let normalized = normalize_params(raw_call.input.clone(), Some(target.as_ref()));
+        bind_target_invocation(raw_call, target, normalized, None)
     }
 }
 

@@ -38,6 +38,7 @@ pub mod command;
 pub use command::command_registry;
 pub mod compact;
 pub mod cron;
+pub mod dynamic_mcp;
 pub mod error;
 pub mod event;
 pub mod event_data;

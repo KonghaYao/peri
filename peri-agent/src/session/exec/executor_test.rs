@@ -192,7 +192,7 @@ fn make_recording_cancelled_stage(
             .build();
         let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
         let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        (
+        Ok((
             V2AgentOutput {
                 context,
                 session,
@@ -201,7 +201,7 @@ fn make_recording_cancelled_stage(
                 bg_event_rx,
             },
             None,
-        )
+        ))
     })
 }
 
@@ -238,6 +238,9 @@ fn make_session_context(session_id: &str) -> SessionContext {
         hook_groups: vec![],
         cron_scheduler: None,
         mcp_pool: None,
+        dynamic_mcp: None,
+        session_mcp_capability: None,
+        dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
         channel_state: None,
         tool_search_index: Arc::new(NoopToolSearch),
         shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
@@ -703,7 +706,7 @@ async fn test_run_session_loop_intercept_inject_enters_agent_pipeline() {
         .build();
         let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
         let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        (
+        Ok((
             V2AgentOutput {
                 context: ctx,
                 session: Arc::clone(&session_for_build),
@@ -712,7 +715,7 @@ async fn test_run_session_loop_intercept_inject_enters_agent_pipeline() {
                 bg_event_rx,
             },
             None,
-        )
+        ))
     });
 
     let mock_sink = Arc::new(MockEventSink::new());

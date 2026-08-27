@@ -77,10 +77,15 @@ impl super::SubAgentTool {
         //    - 其他 → load_agent_def(title) 重新应用过滤（tools/disallowed，
         //      权限漂移防护）+ agent_def 声明的 max_turns
         //    二者均不注入 skill_names / system_prompt（R-H1 / F4）
-        let (llm, tools, max_iterations) = if title == "fork" {
+        let (llm, tools, tool_filter, max_iterations) = if title == "fork" {
             let llm = (self.llm_factory)(None);
             let tools: Vec<Arc<dyn BaseTool>> = self.parent_tools.iter().cloned().collect();
-            (llm, tools, 200)
+            (
+                llm,
+                tools,
+                Arc::new(|name: &str| name != "Agent") as Arc<dyn Fn(&str) -> bool + Send + Sync>,
+                200,
+            )
         } else {
             let agent_def = if title.starts_with("mcp__") {
                 self.load_and_approve_mcp_agent(&title)
@@ -111,7 +116,8 @@ impl super::SubAgentTool {
                 .into_iter()
                 .map(|t| Arc::from(t) as Arc<dyn BaseTool>)
                 .collect();
-            (llm, tools, build_result.max_iterations)
+            let tool_filter = build_result.tool_filter;
+            (llm, tools, tool_filter, build_result.max_iterations)
         };
 
         // 3. 组装 resume config（通道段与 spawn_config_base 同源；五字段 None 与
@@ -127,6 +133,7 @@ impl super::SubAgentTool {
             max_iterations,
             llm,
             tools,
+            tool_filter,
             thread_store,
             cwd,
         );
@@ -180,6 +187,7 @@ impl super::SubAgentTool {
         max_iterations: usize,
         llm: Box<dyn ReactLLM + Send + Sync>,
         tools: Vec<Arc<dyn BaseTool>>,
+        tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
         thread_store: Arc<dyn ThreadStore>,
         cwd: String,
     ) -> SubagentResumeConfig {
@@ -194,6 +202,7 @@ impl super::SubAgentTool {
             llm,
             chain_assembler: Arc::clone(&self.chain_assembler),
             tools,
+            tool_filter,
             tool_invocation_resolver: Some(Arc::new(ExecuteExtraToolResolver::default())),
             error_suggest_registry: None,
             tool_registry_snapshot: None,

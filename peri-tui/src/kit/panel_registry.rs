@@ -270,7 +270,7 @@ pub const PANELS: &[PanelMeta] = &[
         kind: PanelKind::Cron,
         title: "Cron",
         shortcut_letter: 'r',
-        slash_command: "cron",
+        slash_command: "cron-list",
         description: "Scheduled tasks",
         priority: 8,
         mutex_group: MutexGroup::Tools,

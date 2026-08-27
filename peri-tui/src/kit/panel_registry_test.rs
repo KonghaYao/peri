@@ -250,6 +250,15 @@ fn test_panels_slash_command_table_pure() {
             .all(|m| m.slash_command != "history" && m.slash_command != "his"),
         "别名不得以 slash_command 形式存在于 PANELS"
     );
+    let cron = PANELS
+        .iter()
+        .find(|m| m.kind == PanelKind::Cron)
+        .expect("PANELS 必须含 Cron 面板条目");
+    assert_eq!(cron.slash_command, "cron-list");
+    assert!(
+        PANELS.iter().all(|m| m.slash_command != "cron"),
+        "/cron 保留给 builtin skill，不得注册为面板命令"
+    );
     assert!(PANELS.iter().all(|m| m.slash_command != "unknown"));
 }
 

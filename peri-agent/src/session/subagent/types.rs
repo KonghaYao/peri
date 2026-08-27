@@ -124,6 +124,8 @@ pub struct SubagentHost {
     pub frozen_claude_md: Option<Arc<String>>,
     /// Frozen skills summary 回退值（生产路径由 spawn_subagent 从 parent session copy）
     pub frozen_skill_summary: Option<Arc<String>>,
+    /// Session-local Dynamic MCP capability publisher shared by the whole agent tree.
+    pub session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
 }
 
 // ─── spawn 配置与产物 ────────────────────────────────────────────────────────
@@ -159,6 +161,8 @@ pub struct SubagentSpawnConfig {
     pub chain_assembler: Arc<dyn SubagentChainAssembler>,
     /// 过滤后的工具集（agent 定义路径按 tools/disallowed_tools 过滤）
     pub tools: Vec<Arc<dyn BaseTool>>,
+    /// Canonical child policy, reapplied after every capability generation refresh.
+    pub tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     /// SubAgent system prompt（注入 transcript 起始处）
     pub system_prompt: Option<String>,
     /// 错误感知建议注册表（可选）
@@ -263,6 +267,8 @@ pub struct SubagentResumeConfig {
     pub chain_assembler: Arc<dyn SubagentChainAssembler>,
     /// 过滤后的工具集（恢复路径由 tool 层按 title 重新应用过滤）
     pub tools: Vec<Arc<dyn BaseTool>>,
+    /// Canonical child policy, reapplied after every capability generation refresh.
+    pub tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     /// deferred 工具解析器（None = DirectToolInvocationResolver；middlewares 传
     /// ExecuteExtraToolResolver 保持包装层语义）
     pub tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,

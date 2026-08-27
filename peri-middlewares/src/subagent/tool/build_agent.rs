@@ -24,6 +24,8 @@ pub(crate) struct AgentBuildResult {
     pub llm: Box<dyn ReactLLM + Send + Sync>,
     /// 过滤后的工具集（按 agent_def.tools/disallowed_tools）
     pub tools: Vec<Box<dyn BaseTool>>,
+    /// Canonical allow/disallow policy retained for every generation refresh.
+    pub tool_filter: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>,
     /// SubAgent system prompt
     pub system_prompt: Option<String>,
     /// agent 定义声明的 skills（SkillPreload 装配输入）
@@ -159,6 +161,10 @@ impl super::SubAgentTool {
         Ok(AgentBuildResult {
             llm,
             tools: filtered_tools,
+            tool_filter: crate::subagent::fork::canonical_tool_filter(
+                &agent_def.frontmatter.tools,
+                &agent_def.frontmatter.disallowed_tools,
+            ),
             system_prompt,
             skill_names,
             max_iterations,
