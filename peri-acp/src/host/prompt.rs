@@ -493,6 +493,10 @@ pub(crate) async fn run_prompt(
     let session_mcp_capability = dynamic_mcp
         .as_ref()
         .map(|deployment| deployment.capability(&session_id));
+    let dynamic_mcp_projection = session_manager
+        .get_session(&session_id)
+        .map(|session| Arc::clone(&session.dynamic_mcp_projection))
+        .unwrap_or_else(|| Arc::new(parking_lot::Mutex::new(None)));
 
     let ctx = executor::SessionContext {
         cwd,
@@ -527,6 +531,7 @@ pub(crate) async fn run_prompt(
         mcp_pool,
         dynamic_mcp,
         session_mcp_capability,
+        dynamic_mcp_projection,
         channel_state,
         tool_search_index,
         skills,

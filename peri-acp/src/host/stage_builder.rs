@@ -215,6 +215,7 @@ pub(crate) fn build_stage_context(
         mcp_pool: ctx.mcp_pool.clone(),
         dynamic_mcp: ctx.dynamic_mcp.clone(),
         session_mcp_capability: ctx.session_mcp_capability.clone(),
+        dynamic_mcp_projection: Arc::clone(&ctx.dynamic_mcp_projection),
         channel_state: ctx.channel_state.clone(),
         tool_search_index: Arc::clone(&ctx.tool_search_index),
         shared_tools: Arc::clone(&ctx.shared_tools),

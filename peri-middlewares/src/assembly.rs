@@ -14,7 +14,7 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use parking_lot::RwLock;
-use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_acp_types::{command_registry::CommandRegistry, mcp_skills::McpSkillRegistry};
 use peri_agent::{
     agent::{events::AgentEventHandler, react::ReactLLM},
     interaction::{ChannelBroker, MultiplexBroker, UserInteractionBroker},
@@ -500,36 +500,44 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                         )));
                     }
                     if let Some(pool) = mcp_pool_concrete.as_ref() {
-                        let effective_pool = if let (
-                            Some(deployment),
-                            Some(skill_registry),
-                            Some(command_registry),
-                        ) = (
-                            dynamic_mcp.as_ref(),
-                            ctx.mcp_skill_registry.as_ref(),
-                            command_registry.as_ref(),
-                        ) {
-                            let static_handles = pool
-                                .get_all_clients()
-                                .into_iter()
-                                .map(|handle| {
-                                    let token: peri_acp_types::mcp_skills::HandleToken =
-                                        handle.clone();
-                                    (handle.name.clone(), token)
-                                })
-                                .collect();
-                            let lease = deployment.capability(session_id).bind_projection(
-                                static_handles,
-                                Arc::clone(skill_registry),
-                                Arc::clone(command_registry),
-                            );
-                            let projected = lease
-                                .as_any()
-                                .downcast_ref::<crate::mcp::dynamic::registry::CheckedSessionMcpProjection>()
-                                .map(|projection| projection.pool())
-                                .unwrap_or_else(|| Arc::clone(pool));
-                            *dynamic_mcp_projection.lock() = Some(lease);
-                            projected
+                        let effective_pool = if let Some(deployment) = dynamic_mcp.as_ref() {
+                            let mut projection_holder = dynamic_mcp_projection.lock();
+                            if let Some(existing) = projection_holder.as_ref() {
+                                existing
+                                    .as_any()
+                                    .downcast_ref::<crate::mcp::dynamic::registry::CheckedSessionMcpProjection>()
+                                    .map(|projection| projection.pool())
+                                    .unwrap_or_else(|| Arc::clone(pool))
+                            } else {
+                                let static_handles = pool
+                                    .get_all_clients()
+                                    .into_iter()
+                                    .map(|handle| {
+                                        let token: peri_acp_types::mcp_skills::HandleToken =
+                                            handle.clone();
+                                        (handle.name.clone(), token)
+                                    })
+                                    .collect();
+                                let skill_registry = ctx
+                                    .mcp_skill_registry
+                                    .clone()
+                                    .unwrap_or_else(|| Arc::new(McpSkillRegistry::new()));
+                                let command_registry = command_registry
+                                    .clone()
+                                    .unwrap_or_else(|| Arc::new(CommandRegistry::new()));
+                                let lease = deployment.capability(session_id).bind_projection(
+                                    static_handles,
+                                    skill_registry,
+                                    command_registry,
+                                );
+                                let projected = lease
+                                    .as_any()
+                                    .downcast_ref::<crate::mcp::dynamic::registry::CheckedSessionMcpProjection>()
+                                    .map(|projection| projection.pool())
+                                    .unwrap_or_else(|| Arc::clone(pool));
+                                *projection_holder = Some(lease);
+                                projected
+                            }
                         } else {
                             Arc::clone(pool)
                         };

@@ -78,6 +78,21 @@ pub async fn run_before_agent(ctx: &StageContext) -> crate::error::AgentResult<(
     result
 }
 
+/// 调用 middleware chain 的 Reason 工具目录刷新钩子。
+pub async fn run_before_reason_catalog(ctx: &StageContext) -> crate::error::AgentResult<()> {
+    let mut cx = make_context_from_stage(ctx);
+    let result = ctx
+        .runtime
+        .middleware_chain
+        .run_before_reason_catalog(&mut cx)
+        .await;
+    let rec = cx.drain_recall();
+    if !rec.is_empty() {
+        ctx.recall_buffer.write().extend(rec);
+    }
+    result
+}
+
 /// 调用 middleware chain 的 `before_model` 钩子
 pub async fn run_before_model(ctx: &StageContext) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);

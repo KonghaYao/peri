@@ -324,16 +324,14 @@ impl Middleware for McpMiddleware {
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
         let mut tools = build_tool_bridges(&self.pool);
 
-        if self.pool.has_resources() {
-            tools.push(Box::new(McpResourceTool::new(
-                Arc::clone(&self.pool),
-                // 未装配 session 注册表（print 模式/既有测试）→ 空注册表：
-                // 无条目 = 无内容绑定校验（与现状一致）。
-                self.registry
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(McpSkillRegistry::new())),
-            )));
-        }
+        tools.push(Box::new(McpResourceTool::new(
+            Arc::clone(&self.pool),
+            // 未装配 session 注册表（print 模式/既有测试）→ 空注册表：
+            // 无条目 = 无内容绑定校验（与现状一致）。
+            self.registry
+                .clone()
+                .unwrap_or_else(|| Arc::new(McpSkillRegistry::new())),
+        )));
 
         tools.push(Box::new(
             DiscoverMCPTool::new(Arc::clone(&self.pool), self.registry.clone())

@@ -175,6 +175,9 @@ pub struct AcpSession {
     pub command_registry: Arc<CommandRegistry>,
     /// Idempotent Dynamic MCP cleanup lease.
     pub dynamic_mcp_close: Option<Arc<dyn peri_acp_types::ports::SessionCloseRegistration>>,
+    /// Strong owner for the checked session-local MCP projection across stage builds.
+    pub dynamic_mcp_projection:
+        Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
     /// Strong owner for the checked weak Dynamic MCP notification sink.
     pub dynamic_mcp_notifications: Option<Arc<SessionDynamicMcpNotificationSink>>,
 }
@@ -400,6 +403,7 @@ impl SessionManager {
                 .dynamic_mcp
                 .as_ref()
                 .map(|deployment| deployment.close_registration(&session_id)),
+            dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
             dynamic_mcp_notifications: None,
         };
 
@@ -444,6 +448,7 @@ impl SessionManager {
                 .dynamic_mcp
                 .as_ref()
                 .map(|deployment| deployment.close_registration(session_id)),
+            dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
             dynamic_mcp_notifications: None,
         }
     }
@@ -454,6 +459,9 @@ impl SessionManager {
             port.unregister_inbox(session_id);
         }
         if let Some((_, session)) = self.inner.sessions.remove(session_id) {
+            if let Some(projection) = session.dynamic_mcp_projection.lock().take() {
+                projection.close();
+            }
             if let Some(close) = &session.dynamic_mcp_close {
                 let _ = close.revoke_and_cleanup().await;
             }

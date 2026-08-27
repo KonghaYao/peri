@@ -628,7 +628,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 4. 实现 `DynamicMCP` 的 method 级 canonical invocation resolver 与 HITL 审批投影。
 5. 实现 secret resolver 接缝与脱敏配置投影。
 6. 实现 capability overlay、shadow resolution 和 generation。
-7. 在 Reason 边界离线构建 immutable catalog snapshot，并以单次 swap 原子发布 MCP tools、pinned dispatch target 与 ToolSearch index。
+7. 在 Reason 边界按 `catalog refresh → working map swap → before_reason_catalog → before_model → pin` 离线构建 immutable catalog snapshot；专用 hook 仅让 ToolSearch 将 request-local Search index 与 Execute resolver 重绑到同一 working map，再以单次 swap 原子发布 MCP tools、pinned dispatch target 与 ToolSearch index。Discover/resource 使用的 checked projection lease 由 session runtime 跨 stage build 强持有；重复装配复用既有 lease，session close 先关闭并释放 projection，再执行动态实例异步清理。
 8. 为 bridge 增加 admission/in-flight drain，并实现 unload。
 9. 接入 session skill/command registry，增加 handle token/generation 防迟到提交。
 10. 接入 session close、host shutdown 与统一 `McpTaskOwner`。

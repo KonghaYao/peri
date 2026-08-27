@@ -154,7 +154,10 @@ impl DynamicMcpConnector for FakeConnector {
             cache_version: None,
             peer: None,
             tools: vec![tool],
-            resources: vec![],
+            resources: vec![rmcp::model::Resource::new(
+                "test://example/resource",
+                "example resource",
+            )],
             status: crate::mcp::ClientStatus::Connected,
             oauth_status: Default::default(),
             source: None,
@@ -601,6 +604,61 @@ async fn checked_projection_ready_shadow_unload_aba_and_close() {
         projection.pool().get_client("example").unwrap().tools[0].name,
         "static_lookup"
     );
+    owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn session_owned_projection_keeps_existing_discover_instance_live_until_close() {
+    use peri_agent::tools::{BaseTool, ToolContext};
+
+    let (mut owner, spawner) = McpTaskOwner::new();
+    let registry = DynamicMcpRegistry::new(spawner, FakeConnector::new());
+    let skills = Arc::new(McpSkillRegistry::new());
+    let commands = Arc::new(CommandRegistry::new());
+    let holder = Arc::new(parking_lot::Mutex::new(Some(
+        registry.capability("session-a").bind_projection(
+            Vec::new(),
+            Arc::clone(&skills),
+            Arc::clone(&commands),
+        ),
+    )));
+    let pool = holder
+        .lock()
+        .as_ref()
+        .unwrap()
+        .as_any()
+        .downcast_ref::<CheckedSessionMcpProjection>()
+        .unwrap()
+        .pool();
+    let discover = crate::mcp::discover_tool::DiscoverMCPTool::new(Arc::clone(&pool), Some(skills));
+
+    registry
+        .execute("session-a", load("example", "one"))
+        .await
+        .unwrap();
+    wait_ready(&registry, "session-a", "example").await;
+
+    let listed = discover
+        .invoke(
+            serde_json::json!({"method": "list", "params": {"server": "example"}}),
+            ToolContext::new(&[], "/tmp"),
+        )
+        .await
+        .unwrap();
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["server"], "example");
+    assert_eq!(listed["tools"], serde_json::json!(["lookup"]));
+    assert_eq!(
+        listed["resources"],
+        serde_json::json!(["test://example/resource"])
+    );
+
+    let lease = holder.lock().take().unwrap();
+    lease.close();
+    assert!(!lease.refresh());
+    assert!(pool.get_client("example").is_none());
+    drop(lease);
+    registry.close_session("session-a").await;
     owner.shutdown().await;
 }
 

@@ -88,6 +88,27 @@ impl peri_acp_types::ports::DynamicMcpDeploymentPort for FakeDynamicDeployment {
             fn snapshot(&self) -> Arc<peri_acp_types::dynamic_mcp::SessionMcpCapabilitySnapshot> {
                 Arc::new(Default::default())
             }
+
+            fn bind_projection(
+                &self,
+                _static_handles: Vec<(String, peri_acp_types::mcp_skills::HandleToken)>,
+                _skill_registry: Arc<peri_acp_types::mcp_skills::McpSkillRegistry>,
+                _command_registry: Arc<peri_acp_types::command_registry::CommandRegistry>,
+            ) -> Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease> {
+                struct Lease;
+                impl peri_acp_types::ports::SessionMcpProjectionLease for Lease {
+                    fn as_any(&self) -> &dyn std::any::Any {
+                        self
+                    }
+
+                    fn refresh(&self) -> bool {
+                        true
+                    }
+
+                    fn close(&self) {}
+                }
+                Arc::new(Lease)
+            }
         }
         Arc::new(Empty)
     }
@@ -546,6 +567,23 @@ fn dynamic_mcp_registers_deferred_control_tool_at_mcp_slot() {
     assert!(!tools
         .iter()
         .any(|tool| matches!(tool.as_str(), "DynamicMCP.load" | "DynamicMCP.unload")));
+}
+
+#[test]
+fn dynamic_mcp_projection_is_bound_without_optional_registries() {
+    let mut ctx = base_context();
+    ctx.mcp_pool = Some(Arc::new(McpClientPool::new_empty()));
+    ctx.dynamic_mcp = Some(Arc::new(FakeDynamicDeployment));
+    assert!(ctx.mcp_skill_registry.is_none());
+    assert!(ctx.command_registry.is_none());
+    let projection = Arc::clone(&ctx.dynamic_mcp_projection);
+
+    let names = assemble_names(&ctx);
+    let names_again = assemble_names(&ctx);
+
+    assert!(names.contains(&"McpMiddleware".to_string()));
+    assert!(names_again.contains(&"McpMiddleware".to_string()));
+    assert!(projection.lock().is_some());
 }
 
 /// 条件注册矩阵：MCP / Workflow / LSP / Goal 开关组合。

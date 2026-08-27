@@ -20,9 +20,11 @@ fn test_collect_tools_empty_pool() {
     let pool = Arc::new(McpClientPool::new_empty());
     let mw = McpMiddleware::new(pool);
     let tools = <McpMiddleware as Middleware>::collect_tools(&mw, "/tmp");
-    // 空池无桥接工具/资源工具，仅 DiscoverMCP（只读查询，无条件注册）
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name(), "DiscoverMCP");
+    // Resource reader 与 DiscoverMCP 都是 deferred capability；即使初始为空也注册，
+    // 使 session-local projected pool 后续 ready 的 resources 可在同一会话使用。
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0].name(), "mcp_read_resource");
+    assert_eq!(tools[1].name(), "DiscoverMCP");
 }
 
 // ─── first_turn_reminder：首 turn 概览 ───────────────────────────────────────

@@ -3,7 +3,9 @@
 //! 流程：snapshot visible_messages → emit LlmCallStart → before_model →
 //!       LLM.generate_reasoning（与 cancel 竞争）→ after_model → emit LlmCallEnd
 
-use super::middleware_runner::{run_after_model, run_before_model, run_on_error};
+use super::middleware_runner::{
+    run_after_model, run_before_model, run_before_reason_catalog, run_on_error,
+};
 use super::{ReasonInput, ReasonOutput};
 use crate::agent::events_v2::{ObserveEvent, TurnErrorReason};
 use crate::agent::react::{Reasoning, StreamingContext};
@@ -26,6 +28,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         }
     };
     *ctx.runtime.tools.write() = refreshed.tool_map();
+    run_before_reason_catalog(ctx).await?;
 
     // before_model middleware（goal_middleware / compact_middleware 等在此注入）
     run_before_model(ctx).await?;

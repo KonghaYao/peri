@@ -54,33 +54,10 @@ impl ToolSearchMiddleware {
         )
         .expect("tool snapshot fingerprint must serialize")
     }
-}
 
-#[async_trait]
-impl Middleware for ToolSearchMiddleware {
-    fn name(&self) -> &str {
-        "ToolSearch"
-    }
-
-    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        vec![
-            Box::new(SearchExtraTools::new(Arc::clone(&self.tool_search_index))),
-            Box::new(ExecuteExtraTool::new(Arc::clone(&self.shared_tools))),
-        ]
-    }
-
-    fn prompt_contribution(&self) -> Option<String> {
-        self.cached_contribution.read().unwrap().clone()
-    }
-
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn rebind_catalog(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // 优先读取 v2 每 turn 本地工具视图（stage_builder 构建，含当前链全部
         // 工具）；无本地视图时回退宿主级 shared_tools（v1 / 测试路径）。
-        // 背景：宿主级 shared_tools 生产路径写入点归零后恒为空表，仅读它会
-        // 导致 deferred 索引永不构建（issue 2026-08-15-workflow-deferred-
-        // tool-missing）。
-        // 一次加锁同时收集 deferred（搜索索引面）与 direct（LLM 可见面，
-        // 声明段数据源，design v2 §2.5.2）两个集合。
         let deferred_arcs: Vec<Arc<dyn BaseTool>>;
         let direct_arcs: Vec<Arc<dyn BaseTool>>;
         let request_index = Arc::new(ToolSearchIndex::new());
@@ -130,12 +107,10 @@ impl Middleware for ToolSearchMiddleware {
         let fingerprint = Self::deferred_fingerprint(&deferred_arcs);
         let should_rebuild =
             self.deferred_fingerprint.read().unwrap().as_ref() != Some(&fingerprint);
-
         if should_rebuild {
             let old_count = self.tool_search_index.total_count();
             self.tool_search_index.build(deferred_arcs);
             *self.deferred_fingerprint.write().unwrap() = Some(fingerprint);
-
             let new_count = self.tool_search_index.total_count();
             if old_count > 0 && new_count != old_count {
                 state.push_recall(format!(
@@ -155,6 +130,32 @@ impl Middleware for ToolSearchMiddleware {
             (None, None) => None,
         };
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Middleware for ToolSearchMiddleware {
+    fn name(&self) -> &str {
+        "ToolSearch"
+    }
+
+    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
+        vec![
+            Box::new(SearchExtraTools::new(Arc::clone(&self.tool_search_index))),
+            Box::new(ExecuteExtraTool::new(Arc::clone(&self.shared_tools))),
+        ]
+    }
+
+    fn prompt_contribution(&self) -> Option<String> {
+        self.cached_contribution.read().unwrap().clone()
+    }
+
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        self.rebind_catalog(state).await
+    }
+
+    async fn before_reason_catalog(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        self.rebind_catalog(state).await
     }
 }
 

@@ -100,6 +100,9 @@ pub struct StageBuildInput {
     pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     /// Session-scoped Dynamic MCP capability source.
     pub session_mcp_capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
+    /// Session-owned checked projection lease holder, shared across stage builds.
+    pub dynamic_mcp_projection:
+        Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
     /// Channel 状态
     pub channel_state: Option<Arc<ChannelState>>,
     /// 工具搜索索引端口
@@ -441,7 +444,7 @@ pub(crate) fn build_agent(
             cron_scheduler,
             mcp_pool,
             dynamic_mcp: input.dynamic_mcp.clone(),
-            dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
+            dynamic_mcp_projection: Arc::clone(&input.dynamic_mcp_projection),
             session_id: input.session_id.clone(),
             channel_state,
             tool_search_index,

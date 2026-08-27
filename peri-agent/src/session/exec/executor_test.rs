@@ -240,6 +240,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         mcp_pool: None,
         dynamic_mcp: None,
         session_mcp_capability: None,
+        dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
         channel_state: None,
         tool_search_index: Arc::new(NoopToolSearch),
         shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),

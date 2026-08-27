@@ -205,6 +205,8 @@ pub struct SessionContext {
     pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     pub session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
+    pub dynamic_mcp_projection:
+        Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
     pub channel_state: Option<Arc<ChannelState>>,
     pub tool_search_index: Arc<dyn peri_acp_types::ports::ToolSearchPort>,
     /// Skills 扫描端口（prompt 渲染 available_agents / frozen 构造经此访问）。
