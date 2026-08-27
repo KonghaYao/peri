@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_transport_starts_with_initialize() {
+    async fn none_starts_with_initialize_and_accepts_2025_11_25_response() {
         assert_eq!(observe_first_request(None).await, "initialize");
     }
 

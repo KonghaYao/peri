@@ -283,6 +283,59 @@ async fn resolve_headers(
     Ok(resolved)
 }
 
+fn dynamic_stdio_command(
+    program: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+    cwd: Option<&str>,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(args)
+        .env_clear()
+        .envs(dynamic_stdio_runtime_environment())
+        .envs(env)
+        .kill_on_drop(true);
+    if let Some(cwd) = cwd {
+        command.current_dir(Path::new(cwd));
+    }
+    command
+}
+
+#[cfg(windows)]
+fn dynamic_stdio_runtime_environment() -> Vec<(String, String)> {
+    let mut environment = dynamic_stdio_path_environment();
+    for name in ["SystemRoot", "WINDIR", "TEMP", "TMP"] {
+        if let Ok(value) = std::env::var(name) {
+            environment.push((name.into(), value));
+        }
+    }
+    environment
+}
+
+#[cfg(not(windows))]
+fn dynamic_stdio_runtime_environment() -> Vec<(String, String)> {
+    dynamic_stdio_path_environment()
+}
+
+fn dynamic_stdio_path_environment() -> Vec<(String, String)> {
+    let path = std::env::var("PATH")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| dynamic_stdio_default_path().into());
+    vec![("PATH".into(), path)]
+}
+
+#[cfg(windows)]
+fn dynamic_stdio_default_path() -> &'static str {
+    r"C:\Windows\System32;C:\Windows"
+}
+
+#[cfg(not(windows))]
+fn dynamic_stdio_default_path() -> &'static str {
+    "/usr/local/bin:/usr/bin:/bin"
+}
+
 fn spawn_dynamic_stdio_transport(
     command: &str,
     args: &[String],
@@ -291,18 +344,11 @@ fn spawn_dynamic_stdio_transport(
 ) -> std::io::Result<rmcp::transport::child_process::TokioChildProcess> {
     use std::process::Stdio;
 
-    let mut command = tokio::process::Command::new(command);
+    let mut command = dynamic_stdio_command(command, args, env, cwd);
     command
-        .args(args)
-        .env_clear()
-        .envs(env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    if let Some(cwd) = cwd {
-        command.current_dir(Path::new(cwd));
-    }
+        .stderr(Stdio::null());
     rmcp::transport::child_process::TokioChildProcess::new(command)
 }
 
@@ -527,6 +573,11 @@ async fn list_all_resources(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(unix)]
+    use serial_test::serial;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use peri_acp_types::{
         dynamic_mcp::{DynamicMcpIncarnationId, DynamicMcpLogicalKey},
         ports::SecretResolveError,
@@ -546,6 +597,105 @@ mod tests {
 
     use super::*;
     use crate::mcp::client::{ControlledMcpService, McpConnectionKey, OAuthStartDisposition};
+
+    #[cfg(unix)]
+    fn write_fixture(dir: &Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s' \"${PERI_DYNAMIC_SENTINEL-unset}\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    async fn fixture_output(
+        program: &str,
+        env: &HashMap<String, String>,
+        cwd: Option<&str>,
+    ) -> String {
+        let output = dynamic_stdio_command(program, &[], env, cwd)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn relative_fixture_starts_via_parent_path_after_environment_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        write_fixture(dir.path(), "dynamic-fixture");
+        let original = std::env::var_os("PATH");
+        std::env::set_var("PATH", dir.path());
+        let output = fixture_output("dynamic-fixture", &HashMap::new(), None).await;
+        match original {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(output, "unset");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn missing_or_empty_parent_path_uses_fixed_fallback() {
+        let original = std::env::var_os("PATH");
+        std::env::set_var("PATH", "");
+        assert_eq!(
+            dynamic_stdio_path_environment(),
+            vec![("PATH".into(), dynamic_stdio_default_path().into())]
+        );
+        match original {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn unapproved_parent_sentinel_is_not_inherited() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = write_fixture(dir.path(), "dynamic-fixture");
+        let original = std::env::var_os("PERI_DYNAMIC_SENTINEL");
+        std::env::set_var("PERI_DYNAMIC_SENTINEL", "parent");
+        let output = fixture_output(fixture.to_str().unwrap(), &HashMap::new(), None).await;
+        match original {
+            Some(value) => std::env::set_var("PERI_DYNAMIC_SENTINEL", value),
+            None => std::env::remove_var("PERI_DYNAMIC_SENTINEL"),
+        }
+        assert_eq!(output, "unset");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approved_path_overrides_runtime_path() {
+        let dir = tempfile::tempdir().unwrap();
+        write_fixture(dir.path(), "dynamic-fixture");
+        let env = HashMap::from([(
+            "PATH".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        )]);
+        assert_eq!(fixture_output("dynamic-fixture", &env, None).await, "unset");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn absolute_fixture_still_starts_with_cleared_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = write_fixture(dir.path(), "dynamic-fixture");
+        assert_eq!(
+            fixture_output(fixture.to_str().unwrap(), &HashMap::new(), None).await,
+            "unset"
+        );
+    }
 
     fn credential() -> rmcp::transport::auth::StoredCredentials {
         rmcp::transport::auth::StoredCredentials::new("client".into(), None, vec![], None)

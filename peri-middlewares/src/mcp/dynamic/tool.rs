@@ -121,17 +121,138 @@ impl BaseTool for DynamicMcpTool {
     }
 
     fn parameters(&self) -> Value {
-        json!({
+        let secret_ref = json!({
+            "type": "object",
+            "properties": {"secretRef": {"type": "string"}},
+            "required": ["secretRef"],
+            "additionalProperties": false
+        });
+        let subscriptions = json!({
             "type": "object",
             "properties": {
-                "method": {
-                    "type": "string",
-                    "enum": ["load", "status", "unload"]
+                "resources": {"type": "array", "items": {"type": "string"}},
+                "toolsListChanged": {"type": "boolean"},
+                "promptsListChanged": {"type": "boolean"},
+                "resourcesListChanged": {"type": "boolean"}
+            }
+        });
+        let common_config = json!({
+            "timeoutMs": {"type": "integer", "minimum": 1},
+            "protocolVersion": {"type": "string", "enum": ["2026-07-28"]},
+            "subscriptions": subscriptions
+        });
+        let mut stdio_properties = common_config.as_object().unwrap().clone();
+        stdio_properties.insert("command".to_string(), json!({"type": "string"}));
+        stdio_properties.insert(
+            "args".to_string(),
+            json!({"type": "array", "items": {"type": "string"}}),
+        );
+        stdio_properties.insert(
+            "env".to_string(),
+            json!({"type": "object", "additionalProperties": secret_ref}),
+        );
+        stdio_properties.insert("cwd".to_string(), json!({"type": "string"}));
+
+        let mut http_properties = common_config.as_object().unwrap().clone();
+        http_properties.insert("url".to_string(), json!({"type": "string"}));
+        http_properties.insert(
+            "headers".to_string(),
+            json!({
+                "type": "object",
+                "additionalProperties": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "properties": {"secretRef": {"type": "string"}},
+                            "required": ["secretRef"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
+            }),
+        );
+
+        let config = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": stdio_properties,
+                    "required": ["command"],
+                    "additionalProperties": false
                 },
-                "params": {"type": "object"}
-            },
-            "required": ["method"],
-            "additionalProperties": false
+                {
+                    "type": "object",
+                    "properties": http_properties,
+                    "required": ["url"],
+                    "additionalProperties": false
+                }
+            ]
+        });
+
+        json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": {"type": "string", "enum": ["load"]},
+                        "params": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "config": config
+                            },
+                            "required": ["name", "config"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": {"type": "string", "enum": ["status"]},
+                        "params": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {},
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {"operationId": {"type": "string"}},
+                                    "required": ["operationId"],
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {"name": {"type": "string"}},
+                                    "required": ["name"],
+                                    "additionalProperties": false
+                                }
+                            ]
+                        }
+                    },
+                    "required": ["method"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": {"type": "string", "enum": ["unload"]},
+                        "params": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                            "required": ["name"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": false
+                }
+            ]
         })
     }
 

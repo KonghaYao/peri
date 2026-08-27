@@ -139,6 +139,68 @@ fn safe_summary_removes_url_query_and_preserves_only_secret_reference_identity()
 }
 
 #[test]
+fn dynamic_action_parser_accepts_load_transports_and_status_forms() {
+    for input in [
+        json!({"method": "load", "params": {"name": "stdio", "config": {"command": "mcp"}}}),
+        json!({"method": "load", "params": {"name": "http", "config": {"url": "https://example.invalid/mcp", "timeoutMs": 1000}}}),
+        json!({"method": "status"}),
+        json!({"method": "status", "params": {}}),
+    ] {
+        assert!(DynamicMcpAction::from_tool_input(input).is_ok());
+    }
+}
+
+#[test]
+fn dynamic_action_parser_rejects_incomplete_loads_and_invalid_transports() {
+    for input in [
+        json!({"method": "load"}),
+        json!({"method": "load", "params": {"name": "missing-config"}}),
+    ] {
+        assert!(DynamicMcpAction::from_tool_input(input).is_err());
+    }
+
+    for config in [
+        json!({"command": "mcp", "url": "https://example.invalid/mcp"}),
+        json!({}),
+    ] {
+        let action = DynamicMcpAction::from_tool_input(
+            json!({"method": "load", "params": {"name": "example", "config": config}}),
+        )
+        .unwrap();
+        assert!(action.canonicalize().is_err());
+    }
+}
+
+#[test]
+fn dynamic_action_parser_rejects_zero_timeout() {
+    let action = DynamicMcpAction::from_tool_input(json!({
+        "method": "load",
+        "params": {
+            "name": "example",
+            "config": {"command": "mcp", "timeoutMs": 0}
+        }
+    }))
+    .unwrap();
+
+    assert!(action.canonicalize().is_err());
+}
+
+#[test]
+fn dynamic_action_parser_rejects_ambiguous_status_and_nameless_unload() {
+    let status = DynamicMcpAction::from_tool_input(json!({
+        "method": "status",
+        "params": {"operationId": "mcpop_test", "name": "example"}
+    }))
+    .unwrap();
+    assert!(status.canonicalize().is_err());
+    assert!(DynamicMcpAction::from_tool_input(json!({
+        "method": "unload",
+        "params": {}
+    }))
+    .is_err());
+}
+
+#[test]
 fn identity_types_roundtrip_without_being_interchangeable() {
     let operation = DynamicMcpOperationId::from_string("mcpop_test");
     let incarnation = DynamicMcpIncarnationId::from_string("mcpinc_test");

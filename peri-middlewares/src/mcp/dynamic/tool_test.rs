@@ -107,6 +107,34 @@ fn load_input() -> serde_json::Value {
     })
 }
 
+#[test]
+fn parameters_describe_method_specific_contracts() {
+    let tool = DynamicMcpTool::new("session-a", Arc::new(FakeDeployment::default()));
+    let schema = tool.parameters();
+    let branches = schema["oneOf"].as_array().unwrap();
+
+    assert_eq!(branches[0]["properties"]["method"]["enum"][0], "load");
+    assert_eq!(branches[0]["required"], json!(["method", "params"]));
+    assert_eq!(branches[1]["properties"]["method"]["enum"][0], "status");
+    assert_eq!(branches[1]["required"], json!(["method"]));
+    assert_eq!(branches[2]["properties"]["method"]["enum"][0], "unload");
+    assert_eq!(branches[2]["required"], json!(["method", "params"]));
+}
+
+#[test]
+fn load_schema_selects_stdio_or_http_and_exposes_timeout_ms() {
+    let tool = DynamicMcpTool::new("session-a", Arc::new(FakeDeployment::default()));
+    let schema = tool.parameters();
+    let configs = &schema["oneOf"][0]["properties"]["params"]["properties"]["config"]["oneOf"];
+
+    assert_eq!(configs[0]["required"], json!(["command"]));
+    assert_eq!(configs[1]["required"], json!(["url"]));
+    assert_eq!(configs[0]["properties"]["timeoutMs"]["type"], "integer");
+    assert_eq!(configs[0]["properties"]["timeoutMs"]["minimum"], 1);
+    assert_eq!(configs[1]["properties"]["timeoutMs"]["type"], "integer");
+    assert_eq!(configs[1]["properties"]["timeoutMs"]["minimum"], 1);
+}
+
 #[tokio::test]
 async fn execute_extra_tool_projects_method_level_policy_and_binds_action() {
     let deployment = Arc::new(FakeDeployment::default());
