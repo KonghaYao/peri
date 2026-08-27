@@ -372,6 +372,9 @@ fn make_session_context(session_id: &str) -> SessionContext {
         hook_groups: vec![],
         cron_scheduler: None,
         mcp_pool: None,
+        dynamic_mcp: None,
+        session_mcp_capability: None,
+        dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
         channel_state: None,
         tool_search_index: Arc::new(ToolSearchIndex::default()),
         shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
@@ -445,6 +448,7 @@ async fn make_session_context_with_manager(
         None,
         None,
         None, // MCP 订阅端口（测试无）
+        None, // Dynamic MCP（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(SkillsProvider),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
@@ -610,7 +614,7 @@ async fn test_production_first_reason_sees_after_before_agent_dynamic_contributi
     let mut ctx = make_session_context("dynamic-first-reason");
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let frozen = frozen_with_dynamic_prompt_policy("DYNAMIC_BASE_SENTINEL", &[]);
-    let (out, _) = make_stage_build(&ctx)(make_stage_request(frozen, None));
+    let (out, _) = make_stage_build(&ctx)(make_stage_request(frozen, None)).unwrap();
     let parent = Arc::clone(&out.session);
     out.context.session.queue.push(QueuedMessage::new(
         MessageKind::Prompt,
@@ -695,7 +699,7 @@ async fn test_production_fresh_stage_rebuild_recomputes_dynamic_contributions_fr
     };
     first_ctx.tool_search_index = Arc::clone(&shared_index) as Arc<dyn ToolSearchPort>;
     let first_frozen = frozen_with_dynamic_prompt_policy("DYNAMIC_FRESH_BASE_ONE", &[]);
-    let (first, _) = make_stage_build(&first_ctx)(make_stage_request(first_frozen, None));
+    let (first, _) = make_stage_build(&first_ctx)(make_stage_request(first_frozen, None)).unwrap();
     let first_parent = Arc::clone(&first.session);
     first.context.session.queue.push(QueuedMessage::new(
         MessageKind::Prompt,
@@ -741,7 +745,8 @@ async fn test_production_fresh_stage_rebuild_recomputes_dynamic_contributions_fr
     second_ctx.tool_search_index = shared_index as Arc<dyn ToolSearchPort>;
     let second_frozen =
         frozen_with_dynamic_prompt_policy("DYNAMIC_FRESH_BASE_TWO", &["PtcMiddleware"]);
-    let (second, _) = make_stage_build(&second_ctx)(make_stage_request(second_frozen, None));
+    let (second, _) =
+        make_stage_build(&second_ctx)(make_stage_request(second_frozen, None)).unwrap();
     let second_parent = Arc::clone(&second.session);
     second.context.session.queue.push(QueuedMessage::new(
         MessageKind::Prompt,
@@ -825,7 +830,7 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
     ctx.language = Some("en-US".into());
     let stage_build = make_stage_build(&ctx);
     let sentinel = make_sentinel_frozen();
-    let (out, _) = stage_build(make_stage_request(sentinel.clone(), None));
+    let (out, _) = stage_build(make_stage_request(sentinel.clone(), None)).unwrap();
     let parent_frozen = &out.session.store().frozen;
     assert_eq!(&*parent_frozen.system_prompt, sentinel.system_prompt());
     assert_eq!(&*parent_frozen.claude_md, "FROZEN_CLAUDE_SENTINEL");
@@ -856,6 +861,10 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
                 context: Arc::clone(&recorded),
             }),
             tools: vec![],
+            tool_filter: peri_agent::session::tool_catalog::ToolFilterPolicy::canonical(
+                Some(vec![]),
+                vec![],
+            ),
             system_prompt: None,
             error_suggest_registry: None,
             tool_registry_snapshot: None,
@@ -937,7 +946,8 @@ async fn test_production_stage_uses_frozen_language_and_keeps_override_out_of_ba
             persona: Some("OVERRIDE_PERSONA_MARKER".into()),
             ..Default::default()
         }),
-    ));
+    ))
+    .unwrap();
 
     out.context
         .runtime
@@ -1022,7 +1032,7 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
     ctx.cwd = cwd.to_string_lossy().into_owned();
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let stage_build = make_stage_build(&ctx);
-    let (out, _) = stage_build(make_stage_request(frozen, None));
+    let (out, _) = stage_build(make_stage_request(frozen, None)).unwrap();
     let parent = Arc::clone(&out.session);
     let chain = Arc::clone(&out.context.runtime.middleware_chain);
     out.context.session.queue.push(QueuedMessage::new(
@@ -1068,6 +1078,10 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
                 context: Arc::clone(&recorded),
             }),
             tools: vec![],
+            tool_filter: peri_agent::session::tool_catalog::ToolFilterPolicy::canonical(
+                Some(vec![]),
+                vec![],
+            ),
             system_prompt: None,
             error_suggest_registry: None,
             tool_registry_snapshot: None,
@@ -1435,6 +1449,7 @@ fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
         None,
         None,
         None,
+        None,
         Arc::new(SkillsProvider),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
         Vec::new(), // plugin skill roots（C1；测试无）
@@ -1704,6 +1719,9 @@ fn make_parity_context(
         command_registry: None,
         cron_scheduler: None,
         mcp_pool: None,
+        dynamic_mcp: None,
+        dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
+        session_id: "session-parity-test".to_string(),
         channel_state: None,
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,

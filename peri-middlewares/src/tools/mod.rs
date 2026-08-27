@@ -75,6 +75,20 @@ impl BaseTool for BoxToolWrapper {
         self.0.invoke(input, ctx).await
     }
 
+    fn bind_invocation(
+        &self,
+        input: serde_json::Value,
+    ) -> Result<
+        Option<peri_agent::tools::BoundToolInvocation>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        self.0.bind_invocation(input)
+    }
+
+    fn mcp_server_name(&self) -> Option<&str> {
+        self.0.mcp_server_name()
+    }
+
     fn timeout(&self) -> Option<std::time::Duration> {
         self.0.timeout()
     }
@@ -108,6 +122,20 @@ impl BaseTool for ArcToolWrapper {
         ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.0.invoke(input, ctx).await
+    }
+
+    fn bind_invocation(
+        &self,
+        input: serde_json::Value,
+    ) -> Result<
+        Option<peri_agent::tools::BoundToolInvocation>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        self.0.bind_invocation(input)
+    }
+
+    fn mcp_server_name(&self) -> Option<&str> {
+        self.0.mcp_server_name()
     }
 
     fn timeout(&self) -> Option<std::time::Duration> {

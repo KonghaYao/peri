@@ -72,6 +72,17 @@ impl MiddlewareChain {
         Ok(())
     }
 
+    /// 顺序执行 Reason 工具目录刷新钩子。
+    pub async fn run_before_reason_catalog(
+        &self,
+        state: &mut dyn MiddlewareState,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.before_reason_catalog(state).await?;
+        }
+        Ok(())
+    }
+
     /// 顺序执行 before_tool 钩子（每个中间件可修改 tool_call）
     pub async fn run_before_tool(
         &self,

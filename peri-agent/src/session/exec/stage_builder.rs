@@ -33,7 +33,9 @@ use peri_acp_types::{
     lsp::LspServerConfig,
     mcp_skills::McpSkillRegistry,
     plugin::LoadedPlugin,
-    ports::{LspPoolPort, McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort},
+    ports::{
+        LspPoolPort, McpPoolPort, SessionMcpCapabilityPort, ToolSearchPort, WorkflowMiddlewarePort,
+    },
     session::{CronOwner, MessageQueue, SessionInbox},
     skills::SkillRoot,
     store::ThreadStore,
@@ -94,6 +96,13 @@ pub struct StageBuildInput {
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     /// MCP 连接池端口
     pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
+    /// Deployment-scoped Dynamic MCP operation port.
+    pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
+    /// Session-scoped Dynamic MCP capability source.
+    pub session_mcp_capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
+    /// Session-owned checked projection lease holder, shared across stage builds.
+    pub dynamic_mcp_projection:
+        Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
     /// Channel 状态
     pub channel_state: Option<Arc<ChannelState>>,
     /// 工具搜索索引端口
@@ -434,6 +443,9 @@ pub(crate) fn build_agent(
             command_registry: input.command_registry.clone(),
             cron_scheduler,
             mcp_pool,
+            dynamic_mcp: input.dynamic_mcp.clone(),
+            dynamic_mcp_projection: Arc::clone(&input.dynamic_mcp_projection),
+            session_id: input.session_id.clone(),
             channel_state,
             tool_search_index,
             shared_tools: shared_tools.clone(),
@@ -573,6 +585,14 @@ pub struct V2AgentOutput {
 ///
 /// MessageQueue 内部 Arc<Mutex<VecDeque>> + Arc<Notify>，clone 共享底层；
 /// 传入引用只是为了避免在签名里 move。
+#[derive(Debug, thiserror::Error)]
+pub enum StageBuildError {
+    #[error("session tool catalog is invalid: {0}")]
+    ToolCatalog(#[from] crate::session::tool_catalog::CatalogRefreshError),
+    #[error("dynamic MCP catalog registration failed: {0:?}")]
+    DynamicMcp(peri_acp_types::dynamic_mcp::DynamicMcpFailure),
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn build_stage_context(
@@ -589,7 +609,7 @@ pub fn build_stage_context(
     goal_controller: Option<Arc<dyn GoalController>>,
     task_manager: Option<Arc<TaskManager>>,
     on_bg_complete: Option<OnBgCompleteFn>,
-) -> (V2AgentOutput, Option<CachedLlmInstances>) {
+) -> Result<(V2AgentOutput, Option<CachedLlmInstances>), StageBuildError> {
     // 提取 LLM 用字段（在 cfg 被 build_agent 消费前）
     let cwd = input.cwd.clone();
     let session_id = input.session_id.clone();
@@ -791,6 +811,7 @@ pub fn build_stage_context(
             frozen_skill_summary: Some(Arc::new(
                 frozen_session.v2_frozen().skill_summary.to_string(),
             )),
+            session_mcp_capability: input.session_mcp_capability.clone(),
         };
         session.set_subagent_host(host);
         // 父 v2 session 注入 SubAgentMiddleware（与 set_parent_agent_id 同点；
@@ -817,6 +838,15 @@ pub fn build_stage_context(
     // 工具（`mcp__{server}__{tool}`）不进入共享 registry，无需剔除。
     let session_tools: SharedToolMap =
         build_session_tool_view(&shared_tools, chain.collect_tools(&cwd));
+    let tool_catalog = Arc::new(crate::session::tool_catalog::SessionToolCatalog::try_new(
+        session_tools.read().clone(),
+        input.session_mcp_capability.clone(),
+    )?);
+    if let Some(deployment) = input.dynamic_mcp.as_ref() {
+        deployment
+            .register_catalog(&input.session_id, tool_catalog.dynamic_catalog_tools())
+            .map_err(StageBuildError::DynamicMcp)?;
+    }
 
     // 构造 StageContext（builder 构造晚于工具注入：chain 在
     // collect_tools 借用后被 move 进 builder，顺序不可调换）
@@ -824,6 +854,7 @@ pub fn build_stage_context(
         .with_agent_id(main_agent_id)
         .with_llm(react_llm)
         .with_tools(session_tools)
+        .with_tool_catalog(tool_catalog)
         .with_tool_invocation_resolver(Arc::clone(&input.tool_invocation_resolver))
         .with_middleware_chain(Arc::clone(&chain))
         .with_event_bus(Arc::new(event_bus))
@@ -862,7 +893,7 @@ pub fn build_stage_context(
 
     let context = builder.build();
 
-    (
+    Ok((
         V2AgentOutput {
             context,
             session,
@@ -871,7 +902,7 @@ pub fn build_stage_context(
             bg_event_rx: agent_output.bg_event_rx,
         },
         new_cached,
-    )
+    ))
 }
 
 #[cfg(test)]

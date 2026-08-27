@@ -67,6 +67,7 @@ fn make_session_manager_skills_disabled(tmp: &tempfile::TempDir) -> SessionManag
         None,
         None,
         None,
+        None,
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
         Vec::new(),
         Vec::new(),
@@ -137,6 +138,7 @@ fn make_manager_inner(
                 as Arc<dyn peri_acp_types::cron::CronSchedulerPort>
         }),
         None, // MCP 订阅端口（测试无）
+        None, // Dynamic MCP（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
         plugin_entries,
@@ -213,6 +215,7 @@ fn make_manager_with_mcp_subscription(
         None,
         None, // cron 调度器（测试无）
         mcp_subscription,
+        None, // Dynamic MCP（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
@@ -779,6 +782,7 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
         None,
         None,
         None,
+        None,
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
         Vec::new(), // plugin skill roots（C1；测试无）
@@ -844,6 +848,7 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
         provider,
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
+        None,
         None,
         None,
         None,

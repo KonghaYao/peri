@@ -3,6 +3,7 @@ mod transport;
 
 use std::{any::Any, collections::HashMap, sync::Arc};
 
+use peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey;
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::ports::McpPoolShutdownReport;
 use peri_acp_types::session::InboxHandle;
@@ -305,6 +306,41 @@ pub(crate) fn cache_scope_allows_persistence(scope: Option<CacheScope>) -> bool 
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum McpConnectionKey {
+    Static { server_name: String },
+    Dynamic { instance: DynamicMcpInstanceKey },
+}
+
+impl McpConnectionKey {
+    pub(crate) fn static_server(server_name: impl Into<String>) -> Self {
+        Self::Static {
+            server_name: server_name.into(),
+        }
+    }
+
+    pub(crate) fn dynamic(instance: DynamicMcpInstanceKey) -> Self {
+        Self::Dynamic { instance }
+    }
+
+    pub(crate) fn server_name(&self) -> &str {
+        match self {
+            Self::Static { server_name } => server_name,
+            Self::Dynamic { instance } => &instance.logical.server_name,
+        }
+    }
+
+    pub(crate) fn is_dynamic(&self) -> bool {
+        matches!(self, Self::Dynamic { .. })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct OAuthFlowKey {
+    connection: McpConnectionKey,
+    flow_id: String,
+}
+
 /// MCP 客户端连接池
 pub struct McpClientPool {
     /// Pool-wide admission gate. 0=open, 1=closing, 2=closed.
@@ -338,11 +374,11 @@ pub struct McpClientPool {
     /// `callback_tx` 注册进 `pending_oauth_callbacks` 供授权码回传 RPC 投递，
     /// 其余事件转发为 ACP `oauth-needed` / `oauth-completed` / `oauth-failed`）。
     oauth_event_callback: parking_lot::RwLock<Option<Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>>>,
-    /// 待完成 OAuth 授权的回调通道（key: server_name）。TUI 经
-    /// `mcp/oauth_callback` RPC 回传授权码时由 host 装配面查表投递。
-    pending_oauth_callbacks: parking_lot::Mutex<HashMap<String, PendingOAuthCallback>>,
-    /// 每台 server 最多一个活跃 OAuth flow；值是稳定 flow identity。
-    active_oauth_flows: parking_lot::Mutex<HashMap<String, String>>,
+    /// 待完成 OAuth 授权的回调通道。物理连接与 flow identity 共同定位，
+    /// dynamic 路径不得降维为裸 server name。
+    pending_oauth_callbacks: parking_lot::Mutex<HashMap<OAuthFlowKey, PendingOAuthCallback>>,
+    /// 每个 scoped connection 最多一个活跃 OAuth flow。
+    active_oauth_flows: parking_lot::Mutex<HashMap<McpConnectionKey, String>>,
     /// subscriptions/listen 会话 inbox 注册表（session_id → InboxHandle）。
     /// SessionManager（peri-acp）经 `McpSubscriptionPort` 注册；订阅通知到达
     /// 时向全部注册 inbox 推送 Defer 消息并唤醒 idle agent。
@@ -434,9 +470,18 @@ impl McpClientPool {
     }
 
     pub(crate) fn persistent_cache_allowed(&self, server_name: &str) -> bool {
+        self.persistent_cache_allowed_for(&McpConnectionKey::static_server(server_name))
+    }
+
+    pub(crate) fn persistent_cache_allowed_for(&self, connection: &McpConnectionKey) -> bool {
+        if connection.is_dynamic() {
+            // Dynamic MCP 首版 fail-closed：在 scoped cache ticket/current-instance
+            // fencing 完成前，不读取或写入持久化 resource cache。
+            return false;
+        }
         self.configs
             .read()
-            .get(server_name)
+            .get(connection.server_name())
             .is_none_or(Self::config_allows_persistent_cache)
     }
 
@@ -829,21 +874,50 @@ impl McpClientPool {
         flow_id: &str,
         callback_tx: tokio::sync::oneshot::Sender<OAuthCallbackResult>,
     ) -> bool {
+        self.register_oauth_callback_scoped(
+            McpConnectionKey::static_server(server_name),
+            flow_id,
+            callback_tx,
+        )
+    }
+
+    pub fn register_dynamic_oauth_callback(
+        &self,
+        instance: DynamicMcpInstanceKey,
+        flow_id: &str,
+        callback_tx: tokio::sync::oneshot::Sender<OAuthCallbackResult>,
+    ) -> bool {
+        self.register_oauth_callback_scoped(
+            McpConnectionKey::dynamic(instance),
+            flow_id,
+            callback_tx,
+        )
+    }
+
+    pub(crate) fn register_oauth_callback_scoped(
+        &self,
+        connection: McpConnectionKey,
+        flow_id: &str,
+        callback_tx: tokio::sync::oneshot::Sender<OAuthCallbackResult>,
+    ) -> bool {
         let _admission = self.lifecycle_registration.lock();
         if !self.is_open() {
             return false;
         }
         let mut active = self.active_oauth_flows.lock();
-        match active.get(server_name) {
+        match active.get(&connection) {
             Some(current) if current != flow_id => return false,
             Some(_) => {}
             None => {
-                active.insert(server_name.to_string(), flow_id.to_string());
+                active.insert(connection.clone(), flow_id.to_string());
             }
         }
         drop(active);
         self.pending_oauth_callbacks.lock().insert(
-            server_name.to_string(),
+            OAuthFlowKey {
+                connection,
+                flow_id: flow_id.to_string(),
+            },
             PendingOAuthCallback {
                 flow_id: flow_id.to_string(),
                 tx: callback_tx,
@@ -860,15 +934,65 @@ impl McpClientPool {
         code: String,
         state: String,
     ) -> Result<(), String> {
+        let connection = McpConnectionKey::static_server(server_name);
+        let flow_id = self
+            .active_oauth_flow_scoped(&connection)
+            .ok_or_else(|| format!("{server_name} 无进行中的 OAuth 授权"))?;
         let pending = self
             .pending_oauth_callbacks
             .lock()
-            .remove(server_name)
+            .remove(&OAuthFlowKey {
+                connection,
+                flow_id,
+            })
             .ok_or_else(|| format!("{server_name} 无进行中的 OAuth 授权"))?;
         pending
             .tx
             .send(OAuthCallbackResult { code, state })
             .map_err(|_| format!("{server_name} OAuth 授权流程已结束"))
+    }
+
+    pub fn deliver_dynamic_oauth_callback(
+        &self,
+        instance: DynamicMcpInstanceKey,
+        flow_id: &str,
+        code: String,
+        state: String,
+    ) -> Result<(), String> {
+        self.deliver_oauth_callback_scoped(
+            &McpConnectionKey::dynamic(instance),
+            flow_id,
+            code,
+            state,
+        )
+    }
+
+    /// 以完整 dynamic identity 精确投递授权码。调用方必须持有当前
+    /// `(session_id, incarnation_id, flow_id)`，禁止退化为裸 server name。
+    fn deliver_oauth_callback_scoped(
+        &self,
+        connection: &McpConnectionKey,
+        flow_id: &str,
+        code: String,
+        state: String,
+    ) -> Result<(), String> {
+        if !connection.is_dynamic() {
+            return Err("scoped OAuth callback requires dynamic identity".to_string());
+        }
+        let key = OAuthFlowKey {
+            connection: connection.clone(),
+            flow_id: flow_id.to_string(),
+        };
+        let pending = self
+            .pending_oauth_callbacks
+            .lock()
+            .remove(&key)
+            .filter(|pending| pending.flow_id == flow_id)
+            .ok_or_else(|| "OAuth flow 不再等待 callback".to_string())?;
+        pending
+            .tx
+            .send(OAuthCallbackResult { code, state })
+            .map_err(|_| "OAuth flow 已结束".to_string())
     }
 
     /// 以 flow identity 精确投递授权码。Hub 不使用该接口；保留给未来安全
@@ -879,13 +1003,17 @@ impl McpClientPool {
         code: String,
         state: String,
     ) -> Result<(), String> {
-        let server_name = self
-            .server_for_oauth_flow(flow_id)
+        let connection = self
+            .connection_for_oauth_flow(flow_id)
             .ok_or_else(|| "OAuth flow 不存在".to_string())?;
+        let key = OAuthFlowKey {
+            connection,
+            flow_id: flow_id.to_string(),
+        };
         let pending = self
             .pending_oauth_callbacks
             .lock()
-            .remove(&server_name)
+            .remove(&key)
             .filter(|pending| pending.flow_id == flow_id)
             .ok_or_else(|| "OAuth flow 不再等待 callback".to_string())?;
         pending
@@ -897,33 +1025,68 @@ impl McpClientPool {
     /// 取消进行中的 OAuth 授权（`mcp/oauth_cancel` RPC 调用）：移除 pending
     /// 通道并 drop sender，后台 `run_oauth_flow` 收到 Cancelled 终止。
     pub fn cancel_oauth_callback(&self, server_name: &str) -> bool {
-        let flow_id = self.active_oauth_flows.lock().get(server_name).cloned();
+        let connection = McpConnectionKey::static_server(server_name);
+        let flow_id = self.active_oauth_flows.lock().get(&connection).cloned();
         flow_id
             .as_deref()
             .map(|flow_id| self.cancel_oauth_flow(flow_id))
             .unwrap_or(false)
     }
 
+    pub fn cancel_dynamic_oauth_flow(
+        &self,
+        instance: DynamicMcpInstanceKey,
+        flow_id: &str,
+    ) -> bool {
+        self.cancel_oauth_flow_scoped(&McpConnectionKey::dynamic(instance), flow_id)
+    }
+
+    fn cancel_oauth_flow_scoped(&self, connection: &McpConnectionKey, flow_id: &str) -> bool {
+        if !connection.is_dynamic() {
+            return false;
+        }
+        self.pending_oauth_callbacks
+            .lock()
+            .remove(&OAuthFlowKey {
+                connection: connection.clone(),
+                flow_id: flow_id.to_string(),
+            })
+            .is_some_and(|pending| pending.flow_id == flow_id)
+    }
+
     /// 精确取消一个活跃 flow；不接受由客户端指定的 server 名称。
     pub fn cancel_oauth_flow(&self, flow_id: &str) -> bool {
-        let Some(server_name) = self.server_for_oauth_flow(flow_id) else {
+        let Some(connection) = self.connection_for_oauth_flow(flow_id) else {
             return false;
         };
-        let removed = self
-            .pending_oauth_callbacks
+        self.pending_oauth_callbacks
             .lock()
-            .remove(&server_name)
-            .is_some_and(|pending| pending.flow_id == flow_id);
-        removed
+            .remove(&OAuthFlowKey {
+                connection,
+                flow_id: flow_id.to_string(),
+            })
+            .is_some_and(|pending| pending.flow_id == flow_id)
     }
 
     pub fn active_oauth_flow(&self, server_name: &str) -> Option<String> {
-        self.active_oauth_flows.lock().get(server_name).cloned()
+        self.active_oauth_flow_scoped(&McpConnectionKey::static_server(server_name))
+    }
+
+    pub(crate) fn active_oauth_flow_scoped(&self, connection: &McpConnectionKey) -> Option<String> {
+        self.active_oauth_flows.lock().get(connection).cloned()
     }
 
     pub(crate) fn reserve_oauth_flow(
         &self,
         server_name: &str,
+        flow_id: &str,
+    ) -> OAuthStartDisposition {
+        self.reserve_oauth_flow_scoped(McpConnectionKey::static_server(server_name), flow_id)
+    }
+
+    pub(crate) fn reserve_oauth_flow_scoped(
+        &self,
+        connection: McpConnectionKey,
         flow_id: &str,
     ) -> OAuthStartDisposition {
         let _admission = self.lifecycle_registration.lock();
@@ -933,41 +1096,52 @@ impl McpClientPool {
             };
         }
         let mut active = self.active_oauth_flows.lock();
-        match active.get(server_name) {
+        match active.get(&connection) {
             Some(current) if current == flow_id => OAuthStartDisposition::AlreadyActive,
             Some(current) => OAuthStartDisposition::Conflict {
                 active_flow_id: current.clone(),
             },
             None => {
-                active.insert(server_name.to_string(), flow_id.to_string());
+                active.insert(connection, flow_id.to_string());
                 OAuthStartDisposition::Started
             }
         }
     }
 
     pub fn release_oauth_flow(&self, server_name: &str, flow_id: &str) {
+        self.release_oauth_flow_scoped(&McpConnectionKey::static_server(server_name), flow_id);
+    }
+
+    pub(crate) fn release_oauth_flow_scoped(&self, connection: &McpConnectionKey, flow_id: &str) {
         let mut active = self.active_oauth_flows.lock();
         if active
-            .get(server_name)
+            .get(connection)
             .is_some_and(|current| current == flow_id)
         {
-            active.remove(server_name);
+            active.remove(connection);
         }
         drop(active);
-        let mut callbacks = self.pending_oauth_callbacks.lock();
-        if callbacks
-            .get(server_name)
-            .is_some_and(|pending| pending.flow_id == flow_id)
-        {
-            callbacks.remove(server_name);
+        self.pending_oauth_callbacks.lock().remove(&OAuthFlowKey {
+            connection: connection.clone(),
+            flow_id: flow_id.to_string(),
+        });
+    }
+
+    pub(crate) fn revoke_oauth_connection(&self, connection: &McpConnectionKey) {
+        let flow_id = self.active_oauth_flows.lock().remove(connection);
+        if let Some(flow_id) = flow_id {
+            self.pending_oauth_callbacks.lock().remove(&OAuthFlowKey {
+                connection: connection.clone(),
+                flow_id,
+            });
         }
     }
 
-    fn server_for_oauth_flow(&self, flow_id: &str) -> Option<String> {
+    fn connection_for_oauth_flow(&self, flow_id: &str) -> Option<McpConnectionKey> {
         self.active_oauth_flows
             .lock()
             .iter()
-            .find_map(|(server, active)| (active == flow_id).then(|| server.clone()))
+            .find_map(|(connection, active)| (active == flow_id).then(|| connection.clone()))
     }
 
     /// 查询指定 server 的插件来源标识，非插件 server 返回 None
@@ -1270,7 +1444,7 @@ impl McpClientPool {
     {
         let _admission = self.lifecycle_registration.lock();
         if !self.is_open() {
-            return Err(super::task_scope::McpTaskScopeClosed);
+            return Err(super::task_scope::TaskAdmissionError::OwnerClosed);
         }
         self.task_spawner.spawn(key, future)
     }

@@ -7,6 +7,54 @@ use serde_json::Value;
 use super::super::AcpServerConfig;
 use crate::transport::types::AcpError;
 
+fn dynamic_oauth_identity(
+    params: &Value,
+) -> Result<Option<(peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey, String)>, AcpError> {
+    let fields = [
+        params.get("session_id").and_then(Value::as_str),
+        params.get("server_name").and_then(Value::as_str),
+        params.get("incarnation_id").and_then(Value::as_str),
+        params.get("flow_id").and_then(Value::as_str),
+    ];
+    if fields[0].is_none() && fields[2].is_none() && fields[3].is_none() {
+        return Ok(None);
+    }
+    let [Some(session_id), Some(server_name), Some(incarnation_id), Some(flow_id)] = fields else {
+        return Err(AcpError::new(-32602, "incomplete Dynamic MCP identity"));
+    };
+    crate::event::oauth::validate_identifier(session_id)
+        .and_then(|_| crate::event::oauth::validate_server_name(server_name))
+        .and_then(|_| crate::event::oauth::validate_identifier(incarnation_id))
+        .and_then(|_| crate::event::oauth::validate_identifier(flow_id))
+        .map_err(|error| AcpError::new(-32602, error.to_string()))?;
+    Ok(Some((
+        peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey {
+            logical: peri_acp_types::dynamic_mcp::DynamicMcpLogicalKey {
+                session_id: session_id.to_string(),
+                server_name: server_name.to_string(),
+            },
+            incarnation_id: peri_acp_types::dynamic_mcp::DynamicMcpIncarnationId::from_string(
+                incarnation_id,
+            ),
+        },
+        flow_id.to_string(),
+    )))
+}
+
+fn validate_dynamic_instance(
+    cfg: &AcpServerConfig,
+    instance: &peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey,
+) -> Result<(), AcpError> {
+    let deployment = cfg
+        .dynamic_mcp
+        .as_ref()
+        .ok_or_else(|| AcpError::new(-32603, "dynamic mcp not available"))?;
+    if !deployment.accepts_instance(instance) {
+        return Err(AcpError::new(-32602, "stale Dynamic MCP identity"));
+    }
+    Ok(())
+}
+
 pub(super) fn handle_list(_params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
     let caps = cfg.session_manager.effective_host_caps();
     if !caps.oauth {
@@ -121,6 +169,7 @@ pub(super) fn handle_oauth_callback(
     if !caps.agent_event {
         return Err(AcpError::new(-32601, "OAuth capability not negotiated"));
     }
+    let dynamic_identity = dynamic_oauth_identity(params)?;
     let server_name = params
         .get("server_name")
         .and_then(|v| v.as_str())
@@ -146,7 +195,13 @@ pub(super) fn handle_oauth_callback(
     let pool = pool
         .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
         .map_err(|_| AcpError::new(-32603, "mcp pool type mismatch"))?;
-    let result = pool.deliver_oauth_callback(&server_name, code, state);
+    let result = match dynamic_identity {
+        Some((instance, flow_id)) => {
+            validate_dynamic_instance(cfg, &instance)?;
+            pool.deliver_dynamic_oauth_callback(instance, &flow_id, code, state)
+        }
+        None => pool.deliver_oauth_callback(&server_name, code, state),
+    };
     result
         .map(|_| serde_json::json!({ "success": true }))
         .map_err(|e| AcpError::new(-32603, e))
@@ -164,23 +219,71 @@ pub(super) fn handle_oauth_cancel(
         .mcp_pool
         .clone()
         .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?;
-    match pool.downcast_arc::<peri_middlewares::mcp::McpClientPool>() {
-        Ok(p) => {
-            let cancelled = if let Some(flow_id) = params.get("flow_id").and_then(Value::as_str) {
-                crate::event::oauth::validate_identifier(flow_id)
-                    .map_err(|error| AcpError::new(-32602, error.to_string()))?;
-                p.cancel_oauth_flow(flow_id)
-            } else if caps.agent_event && !caps.oauth {
-                let server_name = params
-                    .get("server_name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| AcpError::new(-32602, "missing 'flow_id'"))?;
-                p.cancel_oauth_callback(server_name)
-            } else {
-                return Err(AcpError::new(-32602, "missing 'flow_id'"));
-            };
-            Ok(serde_json::json!({ "success": true, "cancelled": cancelled }))
+    let pool = pool
+        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+        .map_err(|_| AcpError::new(-32603, "mcp pool type mismatch"))?;
+    let cancelled = match dynamic_oauth_identity(params)? {
+        Some((instance, flow_id)) => {
+            validate_dynamic_instance(cfg, &instance)?;
+            pool.cancel_dynamic_oauth_flow(instance, &flow_id)
         }
-        Err(_) => Err(AcpError::new(-32603, "mcp pool type mismatch")),
+        None if caps.agent_event && !caps.oauth => {
+            let server_name = params
+                .get("server_name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AcpError::new(-32602, "missing 'server_name'"))?;
+            crate::event::oauth::validate_server_name(server_name)
+                .map_err(|error| AcpError::new(-32602, error.to_string()))?;
+            pool.cancel_oauth_callback(server_name)
+        }
+        None => return Err(AcpError::new(-32602, "missing Dynamic MCP identity")),
+    };
+    Ok(serde_json::json!({ "success": true, "cancelled": cancelled }))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::dynamic_oauth_identity;
+
+    #[test]
+    fn dynamic_oauth_wire_identity_requires_all_four_fields() {
+        for partial in [
+            json!({ "session_id": "session-a" }),
+            json!({ "server_name": "docs", "flow_id": "flow-1" }),
+            json!({
+                "session_id": "session-a",
+                "server_name": "docs",
+                "incarnation_id": "inc-1"
+            }),
+        ] {
+            let error = dynamic_oauth_identity(&partial).unwrap_err();
+            assert_eq!(error.code, -32602);
+            assert_eq!(error.message, "incomplete Dynamic MCP identity");
+        }
+    }
+
+    #[test]
+    fn callback_and_cancel_share_canonical_dynamic_oauth_wire_identity() {
+        let params = json!({
+            "session_id": "session-a",
+            "server_name": "docs",
+            "incarnation_id": "inc-1",
+            "flow_id": "flow-1"
+        });
+        let (instance, flow_id) = dynamic_oauth_identity(&params).unwrap().unwrap();
+        assert_eq!(instance.logical.session_id, "session-a");
+        assert_eq!(instance.logical.server_name, "docs");
+        assert_eq!(instance.incarnation_id.as_str(), "inc-1");
+        assert_eq!(flow_id, "flow-1");
+    }
+
+    #[test]
+    fn static_legacy_wire_has_no_dynamic_identity() {
+        assert!(dynamic_oauth_identity(&json!({ "server_name": "docs" }))
+            .unwrap()
+            .is_none());
+        assert!(dynamic_oauth_identity(&json!({})).unwrap().is_none());
     }
 }

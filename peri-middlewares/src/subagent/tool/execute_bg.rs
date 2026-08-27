@@ -59,6 +59,7 @@ impl super::SubAgentTool {
                 SubagentRunMode::Background,
                 llm,
                 tools,
+                Arc::new(|name| name != "Agent"),
                 system_prompt,
                 Vec::new(),
                 cwd.clone(),
@@ -107,6 +108,7 @@ impl super::SubAgentTool {
                     .into_iter()
                     .map(|t| Arc::from(t) as Arc<dyn BaseTool>)
                     .collect(),
+                build_result.tool_filter,
                 build_result.system_prompt,
                 build_result.skill_names,
                 cwd.clone(),

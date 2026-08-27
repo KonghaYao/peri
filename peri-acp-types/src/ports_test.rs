@@ -27,6 +27,33 @@ async fn test_mcp_task_owner_port_preserves_unique_mutable_shutdown_owner() {
     assert_eq!(owner.shutdown().await, McpTaskShutdownReport::Complete);
 }
 
+#[derive(Default)]
+struct MockSessionClose {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl SessionCloseRegistration for MockSessionClose {
+    async fn revoke_and_cleanup(&self) -> DynamicMcpShutdownReport {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        DynamicMcpShutdownReport::Complete
+    }
+}
+
+#[tokio::test]
+async fn test_session_close_registration_is_safe_to_call_idempotently() {
+    let lease = Arc::new(MockSessionClose::default());
+    assert_eq!(
+        lease.revoke_and_cleanup().await,
+        DynamicMcpShutdownReport::Complete
+    );
+    assert_eq!(
+        lease.revoke_and_cleanup().await,
+        DynamicMcpShutdownReport::Complete
+    );
+    assert_eq!(lease.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
 // -- McpPoolPort -----------------------------------------------------------
 
 /// 测试用 mock：记录 shutdown 调用次数。

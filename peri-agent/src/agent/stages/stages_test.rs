@@ -43,12 +43,13 @@ fn test_receive_input_output_contract() {
 fn test_reason_input_output_contract() {
     let ctx = make_stage_context();
     let _input = ReasonInput {
-        context: ctx,
+        context: ctx.clone(),
         has_tool_calls: false,
     };
     let reasoning = crate::agent::react::Reasoning::with_answer("thinking", "answer");
     let output = ReasonOutput {
         reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
         messages_snapshot: std::sync::Arc::new(vec![]),
     };
     assert!(!output.reasoning.needs_tool_call());
@@ -60,8 +61,9 @@ fn test_act_input_output_contract() {
     let ctx = make_stage_context();
     let reasoning = crate::agent::react::Reasoning::with_answer("thinking", "done");
     let _input = ActInput {
-        context: ctx,
+        context: ctx.clone(),
         reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
     };
 
     let output_with_tools = ActOutput {

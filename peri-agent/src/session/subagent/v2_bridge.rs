@@ -13,6 +13,7 @@ use crate::agent::stages::{SharedToolMap, StageContext};
 use crate::agent::{CompactConfig, ContextBudget};
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::middleware::chain::MiddlewareChain;
+use crate::session::tool_catalog::SessionToolCatalog;
 use crate::session::turn::TurnId;
 use crate::session::{FrozenContext, MessageQueue, Session};
 use crate::tools::{BaseTool, DirectToolInvocationResolver, ToolInvocationResolver};
@@ -195,6 +196,8 @@ pub fn build_v2_subagent_context(
     llm: Box<dyn ReactLLM + Send + Sync>,
     chain: MiddlewareChain,
     tools: Vec<Arc<dyn BaseTool>>,
+    tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
     cwd: &str,
     cancel_token: CancellationToken,
     tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
@@ -227,7 +230,12 @@ pub fn build_v2_subagent_context(
     for tool in tools {
         tools_map.insert(tool.name().to_string(), tool);
     }
-    let combined_shared_tools: SharedToolMap = Arc::new(RwLock::new(tools_map));
+    let combined_shared_tools: SharedToolMap = Arc::new(RwLock::new(tools_map.clone()));
+    let tool_catalog = Arc::new(SessionToolCatalog::with_filter(
+        tools_map,
+        session_mcp_capability,
+        tool_filter,
+    ));
 
     let (event_bus, event_handles) = EventBus::new(EventBusConfig::default());
     let event_bus_arc: Arc<EventBus> = Arc::new(event_bus);
@@ -244,6 +252,7 @@ pub fn build_v2_subagent_context(
         .with_agent_id(resolved_agent_id)
         .with_llm(v2_llm)
         .with_tools(combined_shared_tools)
+        .with_tool_catalog(tool_catalog)
         .with_tool_invocation_resolver(tool_invocation_resolver.unwrap_or_else(|| {
             Arc::new(DirectToolInvocationResolver) as Arc<dyn ToolInvocationResolver>
         }))
@@ -330,6 +339,8 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
             llm,
             chain,
             tools,
+            Arc::new(|_| true),
+            None,
             cwd,
             cancel_token,
             tool_invocation_resolver,

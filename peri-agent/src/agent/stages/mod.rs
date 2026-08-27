@@ -28,6 +28,7 @@ use crate::agent::token::ContextBudget;
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
+use crate::session::tool_catalog::{SessionToolCatalog, SessionToolCatalogSnapshot};
 use crate::session::turn::TurnContext;
 use crate::session::{MessageQueue, MessageTranscript, QueuedMessage};
 use crate::tools::{BaseTool, DirectToolInvocationResolver, ToolInvocationResolver};
@@ -65,8 +66,10 @@ pub struct SessionHandle {
 #[derive(Clone)]
 pub struct RuntimeServices {
     pub llm: Arc<dyn ReactLLM + Send + Sync>,
-    /// LLM 可见 + 可执行的工具（Reason 读列表传 LLM，tool_dispatch 按名执行）
+    /// Mutable middleware working view. Dispatch never resolves from this map.
     pub tools: SharedToolMap,
+    /// Session-local immutable catalog publisher.
+    pub tool_catalog: Arc<SessionToolCatalog>,
     /// 每个 dispatch 使用其工具表 snapshot 的 canonical invocation resolver。
     pub tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
     pub middleware_chain: Arc<MiddlewareChain>,
@@ -160,7 +163,8 @@ impl StageContext {
             },
             runtime: RuntimeServices {
                 llm: Arc::new(NullReactLLM),
-                tools: tools_map,
+                tools: Arc::clone(&tools_map),
+                tool_catalog: Arc::new(SessionToolCatalog::new(BTreeMap::new(), None)),
                 tool_invocation_resolver: Arc::new(DirectToolInvocationResolver),
                 middleware_chain: mw_chain,
                 event_bus: ebus,
@@ -204,6 +208,7 @@ impl StageContext {
             runtime: RuntimeServices {
                 llm: Arc::new(NullReactLLM),
                 tools: Arc::new(RwLock::new(BTreeMap::new())),
+                tool_catalog: Arc::new(SessionToolCatalog::new(BTreeMap::new(), None)),
                 tool_invocation_resolver: Arc::new(DirectToolInvocationResolver),
                 middleware_chain: Arc::new(MiddlewareChain::new()),
                 event_bus: Arc::new(EventBus::new(Default::default()).0),
@@ -299,7 +304,18 @@ impl StageContextBuilder {
     }
 
     pub fn with_tools(mut self, tools: SharedToolMap) -> Self {
+        // `with_tools` is a builder convenience seam; production installs its
+        // validated session catalog explicitly with `with_tool_catalog`.
+        self.runtime.tool_catalog = Arc::new(
+            SessionToolCatalog::try_new(tools.read().clone(), None)
+                .unwrap_or_else(|_| SessionToolCatalog::new(BTreeMap::new(), None)),
+        );
         self.runtime.tools = tools;
+        self
+    }
+
+    pub fn with_tool_catalog(mut self, catalog: Arc<SessionToolCatalog>) -> Self {
+        self.runtime.tool_catalog = catalog;
         self
     }
 
@@ -444,6 +460,8 @@ pub struct ReasonInput {
 pub struct ReasonOutput {
     /// LLM 推理结果（含 tool_calls 或 final_answer）
     pub reasoning: crate::agent::react::Reasoning,
+    /// Immutable tool catalog used by this model request and its following Act.
+    pub catalog: Arc<SessionToolCatalogSnapshot>,
     /// LLM 请求使用的消息快照（用于调试/追踪；Arc 共享，避免传递时再拷贝）
     pub messages_snapshot: std::sync::Arc<Vec<BaseMessage>>,
 }
@@ -455,6 +473,8 @@ pub struct ActInput {
     pub context: StageContext,
     /// Reason 阶段的推理结果
     pub reasoning: crate::agent::react::Reasoning,
+    /// Exact catalog pinned by Reason.
+    pub catalog: Arc<SessionToolCatalogSnapshot>,
 }
 
 /// Act 阶段输出
@@ -734,6 +754,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             act::run_act(ActInput {
                 context: context.clone(),
                 reasoning: reason_out.reasoning,
+                catalog: reason_out.catalog,
             })
             .await
         })

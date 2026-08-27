@@ -104,6 +104,7 @@ async fn spawn_subagent_impl(
         llm,
         chain_assembler,
         tools,
+        tool_filter,
         system_prompt,
         error_suggest_registry,
         tool_registry_snapshot,
@@ -219,6 +220,10 @@ async fn spawn_subagent_impl(
         llm,
         chain_assembler,
         tools,
+        tool_filter,
+        parent
+            .and_then(|session| session.subagent_host())
+            .and_then(|host| host.session_mcp_capability.clone()),
         skill_names,
         frozen_claude_md,
         frozen_claude_local_md,
@@ -354,6 +359,8 @@ fn build_subagent_session_v2(
     llm: Box<dyn ReactLLM + Send + Sync>,
     chain_assembler: Arc<dyn SubagentChainAssembler>,
     tools: Vec<Arc<dyn BaseTool>>,
+    tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
     skill_names: Vec<String>,
     frozen_claude_md: Option<String>,
     frozen_claude_local_md: Option<String>,
@@ -415,6 +422,8 @@ fn build_subagent_session_v2(
         llm,
         chain,
         tools,
+        tool_filter,
+        session_mcp_capability,
         &cwd,
         cancel_token,
         tool_invocation_resolver,
@@ -482,6 +491,7 @@ async fn resume_subagent_impl(
         llm,
         chain_assembler,
         tools,
+        tool_filter,
         tool_invocation_resolver,
         error_suggest_registry,
         tool_registry_snapshot,
@@ -640,6 +650,10 @@ async fn resume_subagent_impl(
         llm,
         chain_assembler,
         tools,
+        tool_filter,
+        parent
+            .and_then(|session| session.subagent_host())
+            .and_then(|host| host.session_mcp_capability.clone()),
         Vec::new(), // skill_names 恒空（R-H1：恢复不重复注入 SkillPreload）
         frozen_claude_md,
         frozen_claude_local_md_cfg,

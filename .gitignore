@@ -208,6 +208,8 @@ settings.json
 !.claude/skills/project-maturity/
 !.claude/skills/advisor-consultation/**
 !.claude/skills/advisor-consultation/
+!.claude/skills/heavy-verify-loop/**
+!.claude/skills/heavy-verify-loop/
 !.claude/skills/codebase-index/**
 !.claude/skills/codebase-index/
 !.claude/skills/langfuse/

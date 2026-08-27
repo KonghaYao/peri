@@ -185,6 +185,8 @@ pub enum MessageSource {
     StopHookFeedback,
     /// Channel 消息（微信/Slack 等）
     ChannelMessage,
+    /// Dynamic MCP lifecycle notification.
+    DynamicMcpNotification,
     /// Hook 系统注入
     SystemInjected,
     /// 工具失败警告
@@ -704,6 +706,11 @@ pub trait SessionAccessPort: Send + Sync {
     ///
     /// 默认实现返回 false（print mode / 未装配端口时安全 no-op）。
     fn mcp_subscription_for(&self, _session_id: &str) -> bool {
+        false
+    }
+
+    /// Bind the existing session inbox as the checked Dynamic MCP notification target.
+    fn dynamic_mcp_notifications_for(&self, _session_id: &str) -> bool {
         false
     }
 

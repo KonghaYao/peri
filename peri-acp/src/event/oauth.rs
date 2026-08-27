@@ -92,6 +92,8 @@ pub struct OAuthWireNotification {
     flow_id: String,
     server_name: String,
     status: OAuthWireStatus,
+    incarnation_id: Option<String>,
+    session_id: Option<String>,
     authorization_url: Option<ValidatedAuthorizationUrl>,
     failure_class: Option<OAuthFailureClass>,
 }
@@ -100,6 +102,12 @@ pub struct OAuthWireNotification {
 /// a URL or raw local error, so it intentionally implements neither `Debug` nor
 /// serde traits.
 pub enum HostOAuthEvent {
+    DynamicAuthorizationNeeded {
+        instance: peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey,
+        flow_id: String,
+        server_name: String,
+        authorization_url: String,
+    },
     AuthorizationNeeded {
         flow_id: String,
         server_name: String,
@@ -137,6 +145,8 @@ impl OAuthWireNotification {
             flow_id,
             server_name,
             status,
+            incarnation_id: None,
+            session_id: None,
             authorization_url: None,
             failure_class: None,
         })
@@ -167,6 +177,20 @@ impl OAuthWireNotification {
         Ok(notification)
     }
 
+    pub fn dynamic_authorization_needed(
+        instance: peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey,
+        flow_id: String,
+        server_name: String,
+        authorization_url: String,
+    ) -> Result<Self, OAuthWireError> {
+        let mut notification = Self::authorization_needed(flow_id, server_name, authorization_url)?;
+        validate_identifier(instance.incarnation_id.as_str())?;
+        validate_identifier(&instance.logical.session_id)?;
+        notification.incarnation_id = Some(instance.incarnation_id.to_string());
+        notification.session_id = Some(instance.logical.session_id);
+        Ok(notification)
+    }
+
     pub fn failed(
         flow_id: String,
         server_name: String,
@@ -184,6 +208,12 @@ impl OAuthWireNotification {
             "serverName": self.server_name,
             "status": self.status.as_str(),
         });
+        if let Some(session_id) = self.session_id {
+            params["sessionId"] = Value::String(session_id);
+        }
+        if let Some(incarnation_id) = self.incarnation_id {
+            params["incarnationId"] = Value::String(incarnation_id);
+        }
         if let Some(url) = self.authorization_url {
             params["authorizationUrl"] = Value::String(url.into_inner());
         }

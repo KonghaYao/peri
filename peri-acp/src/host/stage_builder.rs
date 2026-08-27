@@ -90,7 +90,10 @@ pub(crate) fn build_stage_context(
     task_manager: Option<Arc<TaskManager>>,
     on_bg_complete: Option<OnBgCompleteFn>,
     langfuse_bridge_factory: Option<Arc<dyn Fn() -> Arc<dyn LangfuseBridgeLike> + Send + Sync>>,
-) -> (V2AgentOutput, Option<CachedLlmInstances>) {
+) -> Result<
+    (V2AgentOutput, Option<CachedLlmInstances>),
+    peri_agent::session::exec::stage_builder::StageBuildError,
+> {
     let frozen = frozen_session.v2_frozen();
     // ── 会话级共享变量（原 session_manager 端口化；None = print mode）──
     let session_access = ctx.session_access.clone();
@@ -124,6 +127,9 @@ pub(crate) fn build_stage_context(
             Arc::new(move |sid: &str| sa.cron_bridge_for(sid))
                 as Arc<dyn Fn(&str) -> bool + Send + Sync>
         });
+    if let Some(session_access) = session_access.as_ref() {
+        let _ = session_access.dynamic_mcp_notifications_for(&ctx.session_id);
+    }
     // session 级 MCP 订阅 inbox 惰性注册器（SessionManager 路径；无
     // SessionManager 时安全 no-op——print 模式无会话 inbox 可注册）
     let launch_mcp_subscription: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>> =
@@ -210,6 +216,9 @@ pub(crate) fn build_stage_context(
         session_start_source: ctx.session_start_source.clone(),
         cron_scheduler: ctx.cron_scheduler.clone(),
         mcp_pool: ctx.mcp_pool.clone(),
+        dynamic_mcp: ctx.dynamic_mcp.clone(),
+        session_mcp_capability: ctx.session_mcp_capability.clone(),
+        dynamic_mcp_projection: Arc::clone(&ctx.dynamic_mcp_projection),
         channel_state: ctx.channel_state.clone(),
         tool_search_index: Arc::clone(&ctx.tool_search_index),
         shared_tools: Arc::clone(&ctx.shared_tools),

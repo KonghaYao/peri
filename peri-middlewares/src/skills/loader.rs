@@ -120,7 +120,9 @@ fn scan_skill_roots_impl(
     max_dirs: usize,
 ) -> Vec<SkillMetadata> {
     let mut seen: HashMap<String, SkillMetadata> = HashMap::new();
+    let mut owner_roots: HashMap<String, PathBuf> = HashMap::new();
     let mut ordered: Vec<String> = Vec::new();
+    let mut scanned_roots: HashSet<PathBuf> = HashSet::new();
     let reserved_builtin_names: HashSet<String> = if roots
         .iter()
         .any(|root| matches!(root.source, SkillSource::Builtin))
@@ -168,12 +170,33 @@ fn scan_skill_roots_impl(
                         continue;
                     }
                 }
-                insert_skill(meta, root, &reserved_builtin_names, &mut seen, &mut ordered);
+                insert_skill(
+                    meta,
+                    root,
+                    None,
+                    &reserved_builtin_names,
+                    &mut seen,
+                    &mut owner_roots,
+                    &mut ordered,
+                );
             }
             continue;
         }
 
         if !root.path.is_dir() {
+            continue;
+        }
+        let canonical_root = root
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| root.path.clone());
+        if !scanned_roots.insert(canonical_root.clone()) {
+            tracing::debug!(
+                path = %root.path.display(),
+                canonical_path = %canonical_root.display(),
+                source = ?root.source,
+                "等价 skill root 已由更高优先级来源扫描，跳过"
+            );
             continue;
         }
         // 每 root 独立 visited/dir_count，避免跨 root 配额污染与误判环
@@ -185,10 +208,12 @@ fn scan_skill_roots_impl(
             max_depth,
             max_dirs,
             root,
+            &canonical_root,
             &reserved_builtin_names,
             &mut visited,
             &mut dir_count,
             &mut seen,
+            &mut owner_roots,
             &mut ordered,
         );
     }
@@ -206,10 +231,12 @@ fn scan_dir_recursive(
     max_depth: usize,
     max_dirs: usize,
     root: &SkillRoot,
+    canonical_root: &Path,
     reserved_builtin_names: &HashSet<String>,
     visited: &mut HashSet<PathBuf>,
     dir_count: &mut usize,
     seen: &mut HashMap<String, SkillMetadata>,
+    owner_roots: &mut HashMap<String, PathBuf>,
     ordered: &mut Vec<String>,
 ) {
     if depth > max_depth {
@@ -240,7 +267,15 @@ fn scan_dir_recursive(
     let skill_file = dir.join("SKILL.md");
     if skill_file.is_file() {
         if let Some(meta) = load_skill_metadata(&skill_file) {
-            insert_skill(meta, root, reserved_builtin_names, seen, ordered);
+            insert_skill(
+                meta,
+                root,
+                Some(canonical_root),
+                reserved_builtin_names,
+                seen,
+                owner_roots,
+                ordered,
+            );
         }
         return;
     }
@@ -263,10 +298,12 @@ fn scan_dir_recursive(
             max_depth,
             max_dirs,
             root,
+            canonical_root,
             reserved_builtin_names,
             visited,
             dir_count,
             seen,
+            owner_roots,
             ordered,
         );
     }
@@ -275,8 +312,10 @@ fn scan_dir_recursive(
 fn insert_skill(
     mut meta: SkillMetadata,
     root: &SkillRoot,
+    canonical_root: Option<&Path>,
     reserved_builtin_names: &HashSet<String>,
     seen: &mut HashMap<String, SkillMetadata>,
+    owner_roots: &mut HashMap<String, PathBuf>,
     ordered: &mut Vec<String>,
 ) {
     meta.source = root.source;
@@ -294,8 +333,8 @@ fn insert_skill(
         );
         return;
     }
-    if claimed_names.clone().any(|name| {
-        seen.values().any(|existing| {
+    if let Some(existing) = claimed_names.clone().find_map(|name| {
+        seen.values().find(|existing| {
             existing.name.eq_ignore_ascii_case(name)
                 || existing
                     .aliases
@@ -303,14 +342,38 @@ fn insert_skill(
                     .any(|alias| alias.eq_ignore_ascii_case(name))
         })
     }) {
-        tracing::warn!(
-            skill = %meta.name,
-            aliases = ?meta.aliases,
-            "skill canonical/alias 冲突，已跳过"
-        );
+        let same_root = match canonical_root {
+            Some(candidate) => owner_roots
+                .get(&existing.name)
+                .is_some_and(|owner| owner == candidate),
+            None => {
+                matches!(root.source, SkillSource::Builtin)
+                    && matches!(existing.source, SkillSource::Builtin)
+            }
+        };
+        if same_root {
+            tracing::warn!(
+                skill = %meta.name,
+                aliases = ?meta.aliases,
+                existing_skill = %existing.name,
+                root = %root.path.display(),
+                "同一 skill root 内 canonical/alias 冲突，已跳过"
+            );
+        } else {
+            tracing::debug!(
+                skill = %meta.name,
+                aliases = ?meta.aliases,
+                existing_skill = %existing.name,
+                source = ?root.source,
+                "低优先级 skill canonical/alias 被已有来源 shadow，已跳过"
+            );
+        }
         return;
     }
     ordered.push(meta.name.clone());
+    if let Some(canonical_root) = canonical_root {
+        owner_roots.insert(meta.name.clone(), canonical_root.to_path_buf());
+    }
     seen.insert(meta.name.clone(), meta);
 }
 

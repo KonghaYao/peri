@@ -53,6 +53,15 @@ fn test_resolve_ui_command_bare_name_hit() {
         resolve_ui_command("workflows"),
         Some(UiCommandAction::OpenPanel(PanelKind::Workflow))
     );
+    assert_eq!(
+        resolve_ui_command("cron-list"),
+        Some(UiCommandAction::OpenPanel(PanelKind::Cron))
+    );
+    assert_eq!(
+        resolve_ui_command("cron"),
+        None,
+        "/cron 保留给 builtin skill，不得命中 TUI Cron 面板"
+    );
 }
 
 #[test]

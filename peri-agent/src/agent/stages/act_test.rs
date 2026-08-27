@@ -59,6 +59,7 @@ async fn test_act_no_tool_calls_writes_answer() {
     let input = ActInput {
         context: ctx.clone(),
         reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
     };
     let output = run_act(input).await.unwrap();
     assert!(!output.has_tool_calls);
@@ -84,6 +85,7 @@ async fn test_act_with_tool_calls_dispatches() {
     let input = ActInput {
         context: ctx.clone(),
         reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
     };
     let output = run_act(input).await.unwrap();
     assert!(output.has_tool_calls, "有 tool_calls 时应标记");
@@ -121,6 +123,7 @@ async fn test_act_after_agent_failure_emits_turn_completed() {
     let result = run_act(ActInput {
         context: ctx.clone(),
         reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
     })
     .await;
     assert!(result.is_err(), "run_after_agent 失败应传播错误");
@@ -153,6 +156,7 @@ async fn test_act_tool_path_cancel_emits_turn_completed() {
     let result = run_act(ActInput {
         context: ctx.clone(),
         reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
     })
     .await;
     assert!(

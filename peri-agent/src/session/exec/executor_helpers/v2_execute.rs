@@ -65,8 +65,15 @@ pub struct StageBuildRequest {
 
 /// stage 装配注入面（ACP 侧从 `SessionContext` 投影 `StageBuildInput` 并补齐
 /// LLM 构造 / 渲染 / 观测注入后调用 stage 装配本体）。
-pub type StageBuildFn =
-    Arc<dyn Fn(StageBuildRequest) -> (V2AgentOutput, Option<CachedLlmInstances>) + Send + Sync>;
+pub type StageBuildFn = Arc<
+    dyn Fn(
+            StageBuildRequest,
+        ) -> Result<
+            (V2AgentOutput, Option<CachedLlmInstances>),
+            crate::session::exec::stage_builder::StageBuildError,
+        > + Send
+        + Sync,
+>;
 
 /// v2 执行请求（L5：原 `build_and_execute_agent_v2` 22 参数对象化；
 /// ACP 特有构造全部经注入面接入，本模块只消费契约化输入）。
@@ -128,7 +135,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             tm as Arc<dyn std::any::Any + Send + Sync>;
         tm_any.downcast::<AgentTaskManager>().ok()
     });
-    let (v2_out, new_cache) = (req.stage_build)(StageBuildRequest {
+    let (v2_out, new_cache) = match (req.stage_build)(StageBuildRequest {
         cached_llm: req.cached_llm,
         frozen_session: req.frozen_session,
         event_handler: req.event_handler,
@@ -140,7 +147,33 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         goal_controller: req.goal_controller,
         task_manager: concrete_tm,
         on_bg_complete: req.on_bg_complete,
-    });
+    }) {
+        Ok(output) => output,
+        Err(error) => {
+            error!(session_id = %req.session_id, error = %error, "[v2] stage build failed");
+            let failure = ExecutionFailure::internal("Agent stage initialization failed");
+            let source = UnstampedEvent::new(
+                String::new(),
+                String::new(),
+                None,
+                EventDeliveryClass::Critical,
+            );
+            req.publisher.publish_event(
+                &req.session_id,
+                &source,
+                ExecutorEvent::AgentExecutionFailed {
+                    message: failure.public_message.clone(),
+                },
+            );
+            return ExecOutcome {
+                ok: false,
+                stop_reason: PromptStopReason::EndTurn,
+                failure: Some(failure),
+                history_replaced_by_compaction: false,
+                agent_state: AgentState::new(&req.cwd),
+            };
+        }
+    };
     if let Some(cache) = new_cache {
         (req.store_llm)(cache);
     }

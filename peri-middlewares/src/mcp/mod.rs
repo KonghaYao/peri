@@ -6,6 +6,7 @@ pub mod client;
 pub mod client_oauth;
 pub mod config;
 pub mod discover_tool;
+pub mod dynamic;
 // ClientInitializeError 来自 rmcp crate（504 bytes），无法修改其定义
 #[allow(clippy::result_large_err)]
 pub mod initialize;
@@ -39,5 +40,8 @@ pub use oauth_flow::{
 };
 pub use resource_tool::McpResourceTool;
 pub use rmcp::model::{Resource, Tool};
-pub use task_scope::{McpTaskKey, McpTaskOwner, McpTaskShutdownReport, McpTaskSpawner};
+pub use task_scope::{
+    DynamicMcpTaskKind, McpTaskKey, McpTaskOwner, McpTaskShutdownReport, McpTaskSpawner,
+    TaskAdmissionError,
+};
 pub use tool_bridge::{build_tool_bridges, McpToolBridge, ToolCallError};
