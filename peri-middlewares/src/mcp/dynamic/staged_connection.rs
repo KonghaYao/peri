@@ -379,7 +379,14 @@ pub async fn prepare_single_server(
                         "Dynamic MCP stdio process could not be started",
                     )
                 })?;
-            serve_client_auto(transport, None, config.protocol_version.as_ref(), timeout).await
+            serve_client_auto(
+                transport,
+                None,
+                config.protocol_version.as_ref(),
+                &oauth_pool.capability_profile,
+                timeout,
+            )
+            .await
         }
         CanonicalDynamicMcpTransport::StreamableHttp { url, headers } => {
             let headers = resolve_headers(headers, resolver).await?;
@@ -462,6 +469,7 @@ pub async fn prepare_single_server(
                 build_authed_transport(url, &headers, auth_manager),
                 None,
                 config.protocol_version.as_ref(),
+                &oauth_pool.capability_profile,
                 timeout,
             )
             .await

@@ -130,6 +130,7 @@ fn make_server_config(
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         cron_scheduler: None,
         mcp_pool: None,
+        mcp_apps_relay: None,
         dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,

@@ -112,6 +112,7 @@ fn make_server_config_with(
         ),
         cron_scheduler: None,
         mcp_pool,
+        mcp_apps_relay: None,
         dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,

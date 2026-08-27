@@ -141,8 +141,9 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
     //    （与 TUI/print 的 `assemble_server_config` 同源）；stdio 无 bare
     //    语义、无 cron tick。MCP 初始化（run_initialize）、孤儿插件清理即
     //    在 assemble 内部完成，此处不再重复 spawn。──
-    let mut cfg =
-        crate::host::assemble::assemble_server_config(crate::host::assemble::HostAssemblyInput {
+    let apps_enabled = std::env::var_os(peri_acp_types::mcp_apps::MCP_APPS_ENV).is_some();
+    let mut cfg = crate::host::assemble::assemble_server_config_with_mcp_apps(
+        crate::host::assemble::HostAssemblyInput {
             provider,
             peri_config: Arc::new(RwLock::new(peri_config)),
             config_source,
@@ -151,8 +152,10 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
             cwd: cwd.clone(),
             bare: false,
             drive_cron_tick: false,
-        })
-        .await;
+        },
+        apps_enabled,
+    )
+    .await;
 
     // stdio 部署过滤 rewind/clear（IDE 客户端自管理；不拦截，fall-through 进模型）。
     cfg.stdio_command_filter = true;

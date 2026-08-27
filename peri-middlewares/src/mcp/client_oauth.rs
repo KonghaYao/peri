@@ -168,7 +168,7 @@ impl McpClientPool {
             let result = tokio::time::timeout(
                 HTTP_CONNECT_TIMEOUT,
                 rmcp::service::serve_client(
-                    super::client::mcpp_client_info(),
+                    super::client::mcpp_client_info_for_profile(&self.capability_profile),
                     build_authed_transport(&url, &headers, auth_manager),
                 ),
             )

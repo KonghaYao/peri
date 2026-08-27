@@ -36,7 +36,10 @@ pub struct McpToolBridge {
     full_name: String,
     description: String,
     input_schema: serde_json::Value,
+    model_visible: bool,
+    server_generation: u64,
     client: Arc<McpClientHandle>,
+    binding_leases: Option<Arc<super::apps::McpAppBindingLeaseRegistry>>,
     admission: Option<super::dynamic::admission::DynamicMcpAdmissionGate>,
 }
 
@@ -52,6 +55,37 @@ fn sanitize_name_component(name: &str) -> String {
             } else {
                 '_'
             }
+        })
+        .collect()
+}
+
+fn app_allowed_tools(
+    server_name: &str,
+    resource_uri: &str,
+    tools: &[Tool],
+    dispatcher: &dyn peri_acp_types::tools::EffectiveToolDispatcher,
+) -> std::collections::HashMap<String, String> {
+    let dispatcher_tools = dispatcher
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<std::collections::HashSet<_>>();
+    tools
+        .iter()
+        .filter(|tool| {
+            super::apps::tool_visibility(tool).app
+                && super::apps::tool_resource_uri(tool).as_deref() == Some(resource_uri)
+        })
+        .filter_map(|tool| {
+            let name = tool.name.to_string();
+            let effective = format!(
+                "mcp__{}__{}",
+                sanitize_name_component(server_name),
+                sanitize_name_component(&name)
+            );
+            dispatcher_tools
+                .contains(&effective)
+                .then_some((name, effective))
         })
         .collect()
 }
@@ -77,7 +111,10 @@ impl McpToolBridge {
             full_name,
             description,
             input_schema,
+            model_visible: super::apps::tool_visibility(tool).model,
+            server_generation: 0,
             client,
+            binding_leases: None,
             admission: None,
         }
     }
@@ -109,9 +146,25 @@ impl McpToolBridge {
             description,
             input_schema: serde_json::to_value(&*tool.input_schema)
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+            model_visible: super::apps::tool_visibility(tool).model,
+            server_generation: 0,
             client,
+            binding_leases: None,
             admission: Some(admission),
         })
+    }
+
+    pub fn with_server_generation(mut self, generation: u64) -> Self {
+        self.server_generation = generation;
+        self
+    }
+
+    pub fn with_binding_leases(
+        mut self,
+        registry: Arc<super::apps::McpAppBindingLeaseRegistry>,
+    ) -> Self {
+        self.binding_leases = Some(registry);
+        self
     }
 }
 
@@ -144,10 +197,14 @@ impl BaseTool for McpToolBridge {
         None
     }
 
+    fn visible_to_model(&self) -> bool {
+        self.model_visible
+    }
+
     async fn invoke(
         &self,
         input: serde_json::Value,
-        _ctx: peri_agent::tools::ToolContext<'_>,
+        ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let _permit = match &self.admission {
             Some(gate) => Some(gate.try_acquire().map_err(|_| {
@@ -188,6 +245,57 @@ impl BaseTool for McpToolBridge {
                 tool: self.tool_name.clone(),
                 reason: e.to_string(),
             })?;
+
+        if let (
+            Some(registry),
+            Some(dispatcher),
+            Some(session_id),
+            Some(turn_generation),
+            Some(invocation_id),
+        ) = (
+            self.binding_leases.as_ref(),
+            ctx.effective_tool_dispatcher.clone(),
+            ctx.session_id.clone(),
+            ctx.turn_generation.clone(),
+            ctx.invocation_id.clone(),
+        ) {
+            if invocation_id.starts_with("mcp-app:") {
+                if let Ok(raw_result) = serde_json::to_value(&result)
+                    .and_then(serde_json::from_value::<peri_acp_types::mcp_apps::RawCallToolResult>)
+                {
+                    registry.record_raw_result(
+                        &invocation_id,
+                        serde_json::to_value(raw_result).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            } else if let Some(resource_uri) = self
+                .client
+                .tools
+                .iter()
+                .find(|tool| tool.name.as_ref() == self.tool_name)
+                .filter(|tool| super::apps::tool_visibility(tool).app)
+                .and_then(super::apps::tool_resource_uri)
+            {
+                let allowed_tools = app_allowed_tools(
+                    &self.server_name,
+                    &resource_uri,
+                    &self.client.tools,
+                    dispatcher.as_ref(),
+                );
+                registry.issue(super::apps::McpAppBindingLease::new(
+                    session_id,
+                    turn_generation,
+                    self.server_name.clone(),
+                    self.server_generation,
+                    resource_uri,
+                    self.tool_name.clone(),
+                    invocation_id,
+                    allowed_tools,
+                    dispatcher,
+                    ctx.cancellation.clone(),
+                ));
+            }
+        }
 
         // 4. 处理 is_error 标志
         if result.is_error.unwrap_or(false) {
@@ -262,12 +370,13 @@ fn format_contents(contents: &[ContentBlock]) -> String {
 pub fn build_tool_bridges(pool: &McpClientPool) -> Vec<Box<dyn BaseTool>> {
     let mut bridges: Vec<Box<dyn BaseTool>> = Vec::new();
     for client in pool.get_all_clients() {
+        let generation = pool.handle_generation(&client);
         for tool in &client.tools {
-            bridges.push(Box::new(McpToolBridge::new(
-                &client.name,
-                tool,
-                Arc::clone(&client),
-            )));
+            bridges.push(Box::new(
+                McpToolBridge::new(&client.name, tool, Arc::clone(&client))
+                    .with_server_generation(generation)
+                    .with_binding_leases(Arc::clone(&pool.app_binding_leases)),
+            ));
         }
     }
     bridges

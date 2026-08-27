@@ -155,7 +155,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         .collect();
     let tool_refs: Vec<&dyn crate::tools::BaseTool> = tools_owned
         .iter()
-        .filter(|t| t.is_direct())
+        .filter(|t| t.is_direct() && t.visible_to_model())
         .map(|t| t.as_ref())
         .collect();
     // 工具数量与名称追踪（调试用；默认 filter 下不写盘）

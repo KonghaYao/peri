@@ -49,6 +49,34 @@ impl Drop for TestDropSignal {
 }
 
 #[test]
+fn server_generation_advances_explicitly_on_each_committed_connection() {
+    let pool = McpClientPool::new_pending();
+    let first = connected_test_handle("server");
+    let second = connected_test_handle("server");
+    let service = || {
+        let (entered, _entered_rx) = tokio::sync::oneshot::channel();
+        controlled_service(
+            entered,
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )
+    };
+
+    assert!(pool
+        .try_commit_connection("server".into(), Arc::clone(&first), service())
+        .is_ok());
+    let first_generation = pool.handle_generation(&first);
+    assert!(pool
+        .try_commit_connection("server".into(), Arc::clone(&second), service())
+        .is_ok());
+    let second_generation = pool.handle_generation(&second);
+
+    assert!(first_generation > 0);
+    assert!(second_generation > first_generation);
+    assert_eq!(pool.handle_generation(&first), second_generation);
+}
+
+#[test]
 fn test_pool_get_all_clients_filters_disconnected() {
     let pool = McpClientPool::new_empty();
     assert!(pool.get_all_clients().is_empty());

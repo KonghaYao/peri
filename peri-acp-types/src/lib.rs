@@ -50,6 +50,7 @@ pub mod identity;
 pub mod interaction;
 pub mod lsp;
 pub mod mcp;
+pub mod mcp_apps;
 pub mod mcp_skills;
 pub mod messages;
 pub mod meta_harness;

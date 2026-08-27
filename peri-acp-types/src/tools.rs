@@ -216,6 +216,10 @@ pub struct ToolContext<'a> {
     pub invocation_id: Option<String>,
     /// 当前外层调用的取消令牌。
     pub cancellation: tokio_util::sync::CancellationToken,
+    /// 当前 Agent session identity；仅 canonical dispatch 中存在。
+    pub session_id: Option<String>,
+    /// 当前 turn generation；用于撤销跨 turn 的宿主调用租约。
+    pub turn_generation: Option<String>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -226,6 +230,8 @@ impl<'a> ToolContext<'a> {
             effective_tool_dispatcher: None,
             invocation_id: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
+            session_id: None,
+            turn_generation: None,
         }
     }
 
@@ -238,6 +244,16 @@ impl<'a> ToolContext<'a> {
         self.effective_tool_dispatcher = Some(dispatcher);
         self.invocation_id = Some(invocation_id.into());
         self.cancellation = cancellation;
+        self
+    }
+
+    pub fn with_session_identity(
+        mut self,
+        session_id: impl Into<String>,
+        turn_generation: impl Into<String>,
+    ) -> Self {
+        self.session_id = Some(session_id.into());
+        self.turn_generation = Some(turn_generation.into());
         self
     }
 }
@@ -330,6 +346,12 @@ pub trait BaseTool: Send + Sync {
     /// 默认 `false`（安全默认值：新工具默认为 deferred）。
     fn is_direct(&self) -> bool {
         false
+    }
+
+    /// Whether this tool may be projected into the model-facing tool catalog.
+    /// Host-only tools remain dispatchable through the canonical catalog/HITL.
+    fn visible_to_model(&self) -> bool {
+        true
     }
 
     /// 短显示名（≤ 6 词，名词短语）。缺省时由 [`derive_title_from_name`] 推导。

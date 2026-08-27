@@ -53,6 +53,7 @@ pub(crate) async fn serve_client_auto<T, E, A>(
     transport: T,
     channel_handler: Option<&Arc<ChannelHandler>>,
     protocol_version: Option<&McpProtocolVersion>,
+    capability_profile: &crate::mcp::apps::McpCapabilityProfile,
     timeout: std::time::Duration,
 ) -> Result<Result<McpServiceWrapper, ClientInitializeError>, tokio::time::error::Elapsed>
 where
@@ -78,7 +79,7 @@ where
         ConnectionMode::DiscoverDefault => tokio::time::timeout(
             timeout,
             rmcp::service::serve_client_with_lifecycle(
-                super::mcpp_client_info(),
+                super::mcpp_client_info_for_profile(capability_profile),
                 transport,
                 ClientLifecycleMode::Discover {
                     preferred_versions: vec![ProtocolVersion::V_2026_07_28],
@@ -98,7 +99,10 @@ where
         }
         ConnectionMode::LegacyDefault => tokio::time::timeout(
             timeout,
-            rmcp::service::serve_client(super::mcpp_client_info(), transport),
+            rmcp::service::serve_client(
+                super::mcpp_client_info_for_profile(capability_profile),
+                transport,
+            ),
         )
         .await
         .map(|inner| inner.map(McpServiceWrapper::Default)),
@@ -251,6 +255,7 @@ mod tests {
             client_io,
             None,
             protocol_version,
+            &crate::mcp::apps::McpCapabilityProfile::disabled(),
             std::time::Duration::from_secs(2),
         )
         .await
