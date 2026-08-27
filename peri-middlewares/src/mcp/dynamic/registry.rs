@@ -1124,15 +1124,10 @@ impl DynamicMcpDeploymentPort for DynamicMcpRegistry {
                 "Dynamic MCP task admission is closed",
             ));
         }
-        match state.catalogs.get(session_id) {
-            Some(existing) if existing == &tools => Ok(()),
-            Some(_) => Err(Self::failure(
-                DynamicMcpErrorCode::ToolNameConflict,
-                DynamicMcpOperationState::Failed,
-                "Dynamic MCP session catalog changed after initialization",
-            )),
-            None => {
-                state.catalogs.insert(session_id.to_string(), tools);
+        match state.catalogs.entry(session_id.to_string()) {
+            std::collections::btree_map::Entry::Occupied(_) => Ok(()),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(tools);
                 Ok(())
             }
         }

@@ -90,7 +90,10 @@ pub(crate) fn build_stage_context(
     task_manager: Option<Arc<TaskManager>>,
     on_bg_complete: Option<OnBgCompleteFn>,
     langfuse_bridge_factory: Option<Arc<dyn Fn() -> Arc<dyn LangfuseBridgeLike> + Send + Sync>>,
-) -> (V2AgentOutput, Option<CachedLlmInstances>) {
+) -> Result<
+    (V2AgentOutput, Option<CachedLlmInstances>),
+    peri_agent::session::exec::stage_builder::StageBuildError,
+> {
     let frozen = frozen_session.v2_frozen();
     // ── 会话级共享变量（原 session_manager 端口化；None = print mode）──
     let session_access = ctx.session_access.clone();

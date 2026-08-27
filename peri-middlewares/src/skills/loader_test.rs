@@ -317,6 +317,74 @@ fn test_scan_skill_roots_dedup_across_roots() {
 }
 
 #[test]
+fn test_scan_skill_roots_dedup_equivalent_roots_keeps_first_source() {
+    let root = tempdir().unwrap();
+    write_skill(root.path(), "shared", "same physical root");
+    let equivalent = root.path().join("nested").join("..");
+    std::fs::create_dir_all(root.path().join("nested")).unwrap();
+
+    let skills = scan_skill_roots(&[
+        SkillRoot {
+            path: root.path().to_path_buf(),
+            source: SkillSource::User,
+            plugin_name: None,
+        },
+        SkillRoot {
+            path: equivalent,
+            source: SkillSource::Plugin,
+            plugin_name: Some("alias-plugin".to_string()),
+        },
+    ]);
+
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].source, SkillSource::User);
+    assert_eq!(skills[0].plugin_name, None);
+}
+
+#[test]
+fn test_scan_skill_roots_duplicate_builtin_roots_keep_first_wins() {
+    let builtin = SkillRoot {
+        path: PathBuf::new(),
+        source: SkillSource::Builtin,
+        plugin_name: None,
+    };
+
+    let once = scan_skill_roots(std::slice::from_ref(&builtin));
+    let twice = scan_skill_roots(&[builtin.clone(), builtin]);
+
+    assert_eq!(twice.len(), once.len());
+    assert_eq!(
+        twice.iter().map(|skill| &skill.name).collect::<Vec<_>>(),
+        once.iter().map(|skill| &skill.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_scan_skill_roots_distinct_source_alias_canonical_conflict_keeps_priority() {
+    let user_dir = tempdir().unwrap();
+    let plugin_dir = tempdir().unwrap();
+    write_skill_with_aliases(user_dir.path(), "preferred", &["shared"], "from user");
+    write_skill(plugin_dir.path(), "shared", "from plugin");
+
+    let skills = scan_skill_roots(&[
+        SkillRoot {
+            path: user_dir.path().to_path_buf(),
+            source: SkillSource::User,
+            plugin_name: None,
+        },
+        SkillRoot {
+            path: plugin_dir.path().to_path_buf(),
+            source: SkillSource::Plugin,
+            plugin_name: Some("lower".to_string()),
+        },
+    ]);
+
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].name, "preferred");
+    assert_eq!(skills[0].source, SkillSource::User);
+}
+
+#[test]
 fn test_scan_skill_roots_dedup_within_root() {
     let root = tempdir().unwrap();
     // 同一 root 下两个不同子目录都有 "dup" skill

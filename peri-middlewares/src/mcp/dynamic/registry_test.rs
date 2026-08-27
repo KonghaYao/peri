@@ -663,7 +663,7 @@ async fn session_owned_projection_keeps_existing_discover_instance_live_until_cl
 }
 
 #[test]
-fn repeated_catalog_registration_requires_identical_canonical_view() {
+fn repeated_catalog_registration_keeps_first_session_baseline() {
     let (_owner, spawner) = McpTaskOwner::new();
     let registry = DynamicMcpRegistry::new(spawner, FakeConnector::new());
     let initial = vec![DynamicMcpCatalogTool {
@@ -676,7 +676,7 @@ fn repeated_catalog_registration_requires_identical_canonical_view() {
         .register_catalog("session-a", initial.clone())
         .unwrap();
     registry.register_catalog("session-a", initial).unwrap();
-    let error = registry
+    registry
         .register_catalog(
             "session-a",
             vec![DynamicMcpCatalogTool {
@@ -685,9 +685,50 @@ fn repeated_catalog_registration_requires_identical_canonical_view() {
                 static_mcp_server: None,
             }],
         )
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error.code, DynamicMcpErrorCode::ToolNameConflict);
+    let state = registry.state.lock();
+    assert_eq!(state.catalogs["session-a"][0].name, "Builtin");
+}
+
+#[tokio::test]
+async fn load_and_unload_do_not_change_session_collision_baseline() {
+    let (mut owner, spawner) = McpTaskOwner::new();
+    let registry = DynamicMcpRegistry::new(spawner, FakeConnector::new());
+    let baseline = vec![DynamicMcpCatalogTool {
+        name: "Builtin".to_string(),
+        aliases: vec!["builtin_alias".to_string()],
+        static_mcp_server: None,
+    }];
+    registry
+        .register_catalog("session-a", baseline.clone())
+        .unwrap();
+
+    registry
+        .execute("session-a", load("example", "one"))
+        .await
+        .unwrap();
+    wait_ready(&registry, "session-a", "example").await;
+    registry
+        .register_catalog(
+            "session-a",
+            registry.capability("session-a").snapshot().dynamic_tools(),
+        )
+        .unwrap();
+    registry
+        .execute(
+            "session-a",
+            CanonicalDynamicMcpAction::Unload(CanonicalDynamicMcpUnloadRequest {
+                name: "example".to_string(),
+                expected_instance: None,
+            }),
+        )
+        .await
+        .unwrap();
+    registry.register_catalog("session-a", Vec::new()).unwrap();
+
+    assert_eq!(registry.state.lock().catalogs["session-a"], baseline);
+    owner.shutdown().await;
 }
 
 #[tokio::test]

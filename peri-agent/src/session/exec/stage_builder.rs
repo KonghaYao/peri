@@ -585,6 +585,14 @@ pub struct V2AgentOutput {
 ///
 /// MessageQueue 内部 Arc<Mutex<VecDeque>> + Arc<Notify>，clone 共享底层；
 /// 传入引用只是为了避免在签名里 move。
+#[derive(Debug, thiserror::Error)]
+pub enum StageBuildError {
+    #[error("session tool catalog is invalid: {0}")]
+    ToolCatalog(#[from] crate::session::tool_catalog::CatalogRefreshError),
+    #[error("dynamic MCP catalog registration failed: {0:?}")]
+    DynamicMcp(peri_acp_types::dynamic_mcp::DynamicMcpFailure),
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn build_stage_context(
@@ -601,7 +609,7 @@ pub fn build_stage_context(
     goal_controller: Option<Arc<dyn GoalController>>,
     task_manager: Option<Arc<TaskManager>>,
     on_bg_complete: Option<OnBgCompleteFn>,
-) -> (V2AgentOutput, Option<CachedLlmInstances>) {
+) -> Result<(V2AgentOutput, Option<CachedLlmInstances>), StageBuildError> {
     // 提取 LLM 用字段（在 cfg 被 build_agent 消费前）
     let cwd = input.cwd.clone();
     let session_id = input.session_id.clone();
@@ -830,14 +838,14 @@ pub fn build_stage_context(
     // 工具（`mcp__{server}__{tool}`）不进入共享 registry，无需剔除。
     let session_tools: SharedToolMap =
         build_session_tool_view(&shared_tools, chain.collect_tools(&cwd));
-    let tool_catalog = Arc::new(crate::session::tool_catalog::SessionToolCatalog::new(
+    let tool_catalog = Arc::new(crate::session::tool_catalog::SessionToolCatalog::try_new(
         session_tools.read().clone(),
         input.session_mcp_capability.clone(),
-    ));
+    )?);
     if let Some(deployment) = input.dynamic_mcp.as_ref() {
         deployment
             .register_catalog(&input.session_id, tool_catalog.dynamic_catalog_tools())
-            .expect("dynamic MCP catalog registration must succeed before session startup");
+            .map_err(StageBuildError::DynamicMcp)?;
     }
 
     // 构造 StageContext（builder 构造晚于工具注入：chain 在
@@ -885,7 +893,7 @@ pub fn build_stage_context(
 
     let context = builder.build();
 
-    (
+    Ok((
         V2AgentOutput {
             context,
             session,
@@ -894,7 +902,7 @@ pub fn build_stage_context(
             bg_event_rx: agent_output.bg_event_rx,
         },
         new_cached,
-    )
+    ))
 }
 
 #[cfg(test)]

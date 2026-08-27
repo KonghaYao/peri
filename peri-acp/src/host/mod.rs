@@ -49,6 +49,7 @@ pub mod controller_ports;
 mod executor_flow_tests;
 pub mod lease;
 mod notify;
+mod prediction_projection;
 mod prompt;
 pub mod prompt_handle;
 mod requests;
@@ -885,15 +886,9 @@ pub(crate) async fn dispatch_prompt_turn(
                     }
                 };
 
-                // 取最近 10 条消息作为上下文（排除 System 消息）
-                let recent: Vec<_> = history
-                    .iter()
-                    .rev()
-                    .filter(|m| !m.is_system())
-                    .take(10)
-                    .cloned()
-                    .collect();
-                let recent: Vec<_> = recent.into_iter().rev().collect();
+                // 最近 10 条非 System 消息是软窗口；工具调用 batch 会完整扩展，
+                // 历史中本就不完整的 batch 则整组丢弃。
+                let recent = prediction_projection::project_prediction_history(&history);
 
                 if recent.is_empty() {
                     tracing::debug!("Prediction: no recent messages");
@@ -1008,10 +1003,10 @@ pub(crate) async fn dispatch_prompt_turn(
                         }
                     }
                     Err(crate::session::executor::PredictionError::Failed(e)) => {
-                        tracing::debug!(error = %e, "Prediction fork failed");
+                        tracing::debug!(error = %e, "Prediction task failed");
                     }
                     Err(crate::session::executor::PredictionError::Timeout) => {
-                        tracing::debug!("Prediction fork timed out (30s)");
+                        tracing::debug!("Prediction task timed out (30s)");
                     }
                 }
             },
