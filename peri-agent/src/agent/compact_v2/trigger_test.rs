@@ -106,6 +106,16 @@ fn test_determine_compact_action_above_threshold() {
 }
 
 #[test]
+fn test_determine_compact_action_at_threshold() {
+    let config = CompactConfig::default();
+    assert_eq!(
+        determine_compact_action(config.micro_compact_threshold, &config),
+        CompactAction::Micro,
+        "等于阈值时必须执行 Micro Compact"
+    );
+}
+
+#[test]
 fn test_determine_compact_action_smart_enabled() {
     let config = CompactConfig {
         smart_compact_enabled: true,
@@ -114,6 +124,79 @@ fn test_determine_compact_action_smart_enabled() {
     assert_eq!(
         determine_compact_action(0.80, &config),
         CompactAction::Smart
+    );
+}
+
+#[test]
+fn test_determine_compact_action_preserves_non_finite_comparisons() {
+    let config = CompactConfig::default();
+    assert_eq!(
+        determine_compact_action(f64::NAN, &config),
+        CompactAction::Skip,
+        "NaN 与阈值比较为 false，应保持 Skip"
+    );
+    assert_eq!(
+        determine_compact_action(f64::INFINITY, &config),
+        CompactAction::Micro,
+        "正无穷大应保持 Micro"
+    );
+    assert_eq!(
+        determine_compact_action(f64::NEG_INFINITY, &config),
+        CompactAction::Skip,
+        "负无穷大应保持 Skip"
+    );
+
+    let nan_threshold = CompactConfig {
+        micro_compact_threshold: f64::NAN,
+        ..Default::default()
+    };
+    assert_eq!(
+        determine_compact_action(0.75, &nan_threshold),
+        CompactAction::Skip,
+        "NaN 阈值使大于等于比较为 false，应保持 Skip"
+    );
+    assert_eq!(
+        determine_compact_action(
+            0.75,
+            &CompactConfig {
+                smart_compact_enabled: true,
+                ..nan_threshold.clone()
+            }
+        ),
+        CompactAction::Skip,
+        "NaN 阈值使大于等于比较为 false，开启 Smart 也应保持 Skip"
+    );
+
+    let positive_infinity_threshold = CompactConfig {
+        micro_compact_threshold: f64::INFINITY,
+        smart_compact_enabled: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        determine_compact_action(0.75, &positive_infinity_threshold),
+        CompactAction::Skip,
+        "有限 budget 小于正无穷阈值，应保持 Skip"
+    );
+
+    let negative_infinity_threshold = CompactConfig {
+        micro_compact_threshold: f64::NEG_INFINITY,
+        ..Default::default()
+    };
+    assert_eq!(
+        determine_compact_action(0.75, &negative_infinity_threshold),
+        CompactAction::Micro,
+        "有限 budget 不小于负无穷阈值，应保持 Micro"
+    );
+    assert_eq!(
+        determine_compact_action(
+            0.75,
+            &CompactConfig {
+                smart_compact_enabled: true,
+                ..negative_infinity_threshold
+            }
+        ),
+        CompactAction::Smart,
+        "负无穷阈值且开启 Smart 时应保持 Smart"
     );
 }
 

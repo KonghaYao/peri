@@ -3,7 +3,5 @@ linker = "arm-linux-gnueabihf-gcc"
 ar = "arm-linux-gnueabihf-ar"
 # Point to the Linaro toolchain sysroot
 # CARGO_CFG_* are set via environment variables
-
-[build]
 # Disable cross-compile warnings as errors
 rustflags = ["-C", "target-feature=-crt-static"]

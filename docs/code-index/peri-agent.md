@@ -1,20 +1,20 @@
 # peri-agent 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-25（完整 frozen snapshot 贯穿 production stage）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-29（compact selector 共享 policy）
 > 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
 
 ## 架构速览
 
 - 数据流：`MessageQueue → Receive → Compact → Reason → Act → MessageQueue`
 - 循环入口：`src/agent/stages/mod.rs:612` 的 `run_react_loop(StageContext, max_iterations) -> LoopResult`；Receive 是唯一退出口 + keepgoing 判定点
-- 稳定不变量：`FrozenContext` 会话内不可漂移（ARC-FROZEN-001）；`BaseTool::is_direct()` 是工具可见性事实源（ARC-TOOLS-001）；`CompactConfig` 是 compact 阈值唯一事实源；中间件链序蓝本 `production_blueprint`（ARC-MIDDLEWARE-001）
+- 稳定不变量：`FrozenContext` 会话内不可漂移（ARC-FROZEN-001）；`BaseTool::is_direct()` 是工具可见性事实源（ARC-TOOLS-001）；`CompactConfig` 是 compact 阈值唯一事实源，纯 Skip/Micro/Smart selector 委托 `peri-turn-policy`；中间件链序蓝本 `production_blueprint`（ARC-MIDDLEWARE-001）
 
 ## 速查表
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
 | 改 compact 触发阈值 | `peri-acp-types/src/compact.rs`（`CompactConfig` 事实源，`apply_env_overrides` 实现在 :325；`peri-agent/src/agent/compact_v2/config.rs` 仅 re-export；`peri-acp/src/host/compact_config.rs` 是配置加载调用方） | `CompactConfig` 字段：`auto_compact_threshold`（默认 0.95）、`micro_compact_threshold`（默认 0.75）、`smart_compact_enabled`（废弃恒 false） | budget < 0.75 跳过；≥ 0.75 走 Micro；Micro 收益不足且 budget ≥ auto_compact_threshold 时升级 Full；force=true 直接 Full。注意：调低 Full 阈值时 micro_compact_threshold 必须更低，否则先走 Skip |
-| 改 compact 策略选择 | `src/agent/compact_v2/mod.rs` + `src/agent/stages/compact.rs` | `determine_compact_action(budget, config)`（mod.rs:102，Skip/Micro/Smart 选择）；`run_compact`（mod.rs:125 编排，Full 升级判定在 :233）；阶段入口 `stages/compact.rs::run_compact` | Full 升级判定以代码为准：`budget >= config.auto_compact_threshold` + `llm.is_none()` 守卫 + cache-aware 跳过；`planner.rs::CompactPolicy::force_full_threshold` 无消费点（遗留） |
+| 改 compact 策略选择 | `src/agent/compact_v2/mod.rs` + `peri-turn-policy/src/compact.rs` + `src/agent/stages/compact.rs` | native 入口 `determine_compact_action(budget, config)` 委托 `select_compact_action`；`CompactAction` 从 shared crate re-export；`run_compact` 负责编排和 Full 升级；阶段入口 `stages/compact.rs::run_compact` | shared selector 保留原生未校验的浮点比较与 Smart 开关语义；`CompactConfig` 仍是阈值事实源。Full 升级判定仍在 Agent：`budget >= config.auto_compact_threshold` + `llm.is_none()` 守卫 + cache-aware 跳过；WASI 的 `[0,1]` 校验和 Smart 禁用不属于 native 路径 |
 | 改 Micro/Full 执行细节 | `src/agent/compact_v2/micro.rs` / `full.rs` | `micro_compact`；`re_inject_v2`、`extract_file_info`、`extract_skill_names` | Micro 按 round 截断（`micro_excluded_tools` 黑名单）；Full 走 `peri_model::Model` 摘要 + re-inject |
 | 改循环退出 / keepgoing 判定 | `src/session/exec/executor.rs` + `src/agent/stages/mod.rs`（Receive 分支） | `executor.rs:130 is_keepgoing(&MessageContent)`；`run_session_loop`（executor.rs:221）；`run_react_loop` 退出判断（stages/mod.rs:647 `consumed_count == 0 && !has_tool_calls`）；判空底层 `peri-acp-types/src/messages/content.rs::is_empty`（:399） | 空白 prompt 须用 `MessageContent::is_empty()` 判空（禁止 trim 替代）；空历史 + 空白 prompt 时短路 `push_done`；keepgoing 不注入 recall；契约 ARC-KEEPGOING-001 |
 | 改 turn fatal failure 分类/传递 | `src/session/exec/executor_helpers/v2_execute.rs` + `executor_helpers.rs` + `executor_helpers/collect.rs`；契约 DTO 在 `peri-acp-types/src/session.rs` | `classify_loop_terminal`；`ExecOutcome.failure` → `PromptResult.failure` | transcript flush 后只采样一次 cancel；单一纯分类器同时决定 Prompt stop reason、`TurnEnded`、fatal failure 与 cascade。Completed 为已提交成功；其他非成功结果中 cancel 优先；契约 ARC-EVENT-001 / ARC-CANCEL-001 |
@@ -43,7 +43,7 @@
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 策略选择 + 触发编排 | compact_v2/mod.rs | `determine_compact_action`（:102）；`run_compact`（:125）；`CompactResult` |
+| 策略选择 + 触发编排 | compact_v2/mod.rs + `peri-turn-policy/src/compact.rs` | `determine_compact_action`（保留 native 入口并委托 shared selector）；`CompactAction` re-export；`run_compact`；`CompactResult` |
 | 压力计算与计划 | compact_v2/planner.rs | `plan_micro`、`ContextPressure`、`CompactPolicy`（force_full_threshold 无消费点） |
 | Micro 执行（按 round 截断） | compact_v2/micro.rs | `micro_compact` |
 | Smart 执行（废弃中，恒 false） | compact_v2/smart.rs | `smart_compact` |
@@ -84,3 +84,4 @@
 - ARC-TOOLS-001：`is_direct()` 自声明可见性
 - ARC-KEEPGOING-001：空白 prompt = 继续跑 loop
 - ARC-MIDDLEWARE-001：中间件链序是行为契约，链序蓝本 `production_blueprint`
+- WASI policy seam：native compact 的函数路径、Smart 与未校验浮点比较语义保持不变；`peri-wasi` 只消费 shared selector 的受约束 Skip/Micro 子集，不能反向定义 Agent 行为

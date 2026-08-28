@@ -1,3 +1,4 @@
+use peri_turn_policy::{is_message_content_empty, MessageContentShape};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 // ─── ImageSource ──────────────────────────────────────────────────────────────
@@ -397,11 +398,12 @@ impl MessageContent {
 
     /// 是否为空内容
     pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Text(s) => s.is_empty(),
-            Self::Blocks(b) => b.is_empty(),
-            Self::Raw(v) => v.is_empty(),
-        }
+        let shape = match self {
+            Self::Text(text) => MessageContentShape::Text(text),
+            Self::Blocks(blocks) => MessageContentShape::Blocks(blocks.len()),
+            Self::Raw(values) => MessageContentShape::Raw(values.len()),
+        };
+        is_message_content_empty(shape)
     }
 
     /// 是否包含工具调用 block
