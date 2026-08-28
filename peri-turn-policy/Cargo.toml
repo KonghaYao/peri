@@ -1,0 +1,8 @@
+[package]
+name = "peri-turn-policy"
+version.workspace = true
+edition.workspace = true
+description = "Portable deterministic turn policy shared by native Peri and WASI components"
+publish = false
+
+[dependencies]

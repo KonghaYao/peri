@@ -9,11 +9,13 @@ members = [
     "peri-resources",
     "peri-runtime",
     "peri-tui",
+    "peri-turn-policy",
     "langfuse-client",
     "peri-lsp",
     "peri-js-runtime",
     "peri-web-pty",
     "peri-workflow",
+    "peri-wasi",
 ]
 resolver = "2"
 
@@ -84,6 +86,7 @@ lru = "0.18"
 
 # --- Build ---
 tempfile = "3"
+wit-bindgen = { version = "=0.57.1", default-features = false, features = ["macros"] }
 
 # --- Allocator ---
 tikv-jemallocator = "0.6"

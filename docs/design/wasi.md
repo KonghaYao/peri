@@ -1,18 +1,20 @@
-# WASI Preview 2 静态可行性探查
+# WASI Preview 2 能力边界与 policy Component 探针
 
-> 状态：Exploratory / No implementation planned
+> 状态：窄切片已验证；完整 Headless ACP Host 仍为 Exploratory
 >
-> 探查日期：2026-08-27
+> 静态探查日期：2026-08-27；探针验证日期：2026-08-29
 >
-> 目标基线：`wasm32-wasip2`、Headless ACP 服务
+> 目标基线：Rust 1.96.1 `wasm32-wasip2`、Node.js 22.20.0、Headless ACP 服务
 >
-> 证据范围：仓库源码、Cargo manifests 与 lockfile 的静态核查；本次未安装 target、未运行 `cargo check --target wasm32-wasip2`，因此本文不声称记录真实 compiler 首错。
+> 证据范围：完整 Host 结论来自仓库源码、Cargo manifests 与 lockfile 的静态核查；实际构建和 Node 运行证据仅覆盖内部 deterministic turn-policy Component probe。
 
 ## 1. 目的与边界
 
-本文记录 Perihelion 面向 WASI Preview 2 的初步可行性，供未来讨论部署形态或依赖边界时参考。当前没有 WASI 开发计划，本文不是 active implementation spec、迁移承诺或架构决策记录。
+本文记录 Perihelion 面向 WASI Preview 2 的能力边界，并补充一个已实际构建和跨运行时执行的窄探针。完整 ACP Host 的分析仍用于未来讨论部署形态或依赖边界；探针的 active implementation 事实与验收进度见 `spec/issues/2026-08-28-wasi-p2-node-validation.md`。
 
 探查目标是：在不包含 TUI 的前提下，评估 ACP session/event、Agent loop 与相关运行能力构建为 `wasm32-wasip2` Component 时可能遇到的问题。
+
+本次实际实现仅把 native 已使用的两项确定性策略抽到 dependency-free `peri-turn-policy`：`MessageContent` 判空和 compact action 选择；`peri-wasi` 再通过 WIT 暴露其受约束子集。它是内部、`publish = false` 的 Component probe，不是 Agent loop、ACP protocol 或 Headless ACP Host 的 WASI port，也不改变下文对完整 native 闭包的判断。
 
 本次不评估：
 
@@ -20,12 +22,14 @@
 - `wasm32-wasip1` 的兼容性；
 - 浏览器 target；
 - 通过特定 WASI runtime 私有扩展复刻完整 Unix 环境；
-- 实际性能、产物体积或 runtime 兼容性；
-- 具体 WIT schema、版本计划或任务拆分。
+- 完整 Agent/ACP 的实际性能、产物体积或 runtime 兼容性；
+- 完整 Agent/ACP 的 WIT schema、版本计划或任务拆分。
 
 ## 2. 摘要结论
 
-当前 Headless ACP 服务不能被视为可直接、完整地构建为标准 `wasm32-wasip2` 产物。主要原因不是单个 Rust API，而是 ACP Host 当前同时装配了 HTTP、SQLite、文件系统、子进程、插件、MCP、LSP、PTC、OAuth callback、系统指标和文件日志等 native host 能力。
+当前 Headless ACP 服务仍不能被视为可直接、完整地构建为标准 `wasm32-wasip2` 产物。主要原因不是单个 Rust API，而是 ACP Host 当前同时装配了 HTTP、SQLite、文件系统、子进程、插件、MCP、LSP、PTC、OAuth callback、系统指标和文件日志等 native host 能力。
+
+已验证的结论更窄：Rust 1.96.1 能把不依赖这些 native capability 的 `peri-wasi` 直接链接为 WASI Preview 2 Component；Node.js 22.20.0 可经固定版本 Jco 和 Preview 2 shim 调用它的唯一业务 export。这个结果验证了工具链和纯策略 seam，不证明完整 Agent/ACP 构建闭包已经可移植。
 
 较可行的远期形态是：
 
@@ -39,7 +43,7 @@ WASI Agent/ACP Core Component
 
 其中 ACP 数据模型、session/router、RCRA Agent loop、prompt/message projection、tool schema/dispatch、cancel/event mapping 大体属于可保留的逻辑核心；网络、持久化和进程型工具更适合作为 Component imports 或宿主服务，而不是继续由 Component 直接调用 native API。
 
-这不意味着现在应拆分或修改代码。当前结论仅表明：若未来立项，第一步应定义 WASI capability boundary，而不是先逐个替换 native 依赖并尝试原样编译完整 Host。
+这不意味着现在应继续拆分或修改完整 Host。当前结论仅表明：若未来立项，第一步应定义 WASI capability boundary，而不是先逐个替换 native 依赖并尝试原样编译完整 Host。
 
 ## 3. 当前 Headless ACP 构建闭包
 
@@ -218,9 +222,62 @@ Component Model 更自然的形态是导出 session、prompt、event stream 和 
 
 不建议优先尝试把 SQLite、reqwest/TLS、MCP child process、LSP、Node/npm、plugin installer 和 OAuth callback 全部搬入 Component。这样容易依赖特定 runtime 的私有扩展，且削弱采用 Preview 2 capability model 的价值。
 
-## 8. 若未来重新开启探查
+## 8. 已验证的 deterministic policy Component probe
 
-建议按以下验证顺序推进，但当前不执行：
+### 8.1 共享策略与 WIT 边界
+
+`peri-turn-policy` 是 `#![no_std]`、无第三方依赖、`publish = false` 的共享 kernel。native 调用路径仍保持原入口，但把两项纯决策委托给该 crate：
+
+- `peri-acp-types::MessageContent::is_empty` 将 `Text`、`Blocks`、`Raw` 投影为 `MessageContentShape`；纯空白 text 仍为非空。
+- `peri-agent::agent::compact_v2::determine_compact_action` 把 budget、micro threshold 与 native Smart 开关交给 `select_compact_action`；原有 `CompactAction` 路径通过 re-export 保持不变。
+
+`peri-wasi` 是 `cdylib`、`publish = false` 的边界 adapter。WIT package 为 `peri:turn-policy@0.1.0`，world 为 `turn-policy`，唯一业务 export 是命名 interface `policy`：
+
+```wit
+classify-content: func(content: content-shape) -> content-classification;
+select-compact: func(
+    budget: f64,
+    micro-threshold: f64,
+) -> result<compact-action, policy-error>;
+```
+
+Component 没有 imports。`classify-content` 只表达 content 判空，不包含 continuation-aware keepgoing；`select-compact` 只导出 `skip`/`micro`，不把 native legacy Smart 固化为跨运行时契约。边界在调用共享 selector 前拒绝非有限值和 `[0,1]` 外输入，错误优先级依次为 budget 非有限、budget 越界、threshold 非有限、threshold 越界。
+
+### 8.2 构建与产物
+
+Rust 1.96.1 的 `wasm32-wasip2` target 通过 `wasm-component-ld` 直接生成 Component，不需要 `cargo-component`。固定依赖与实际 lockfile 解析结果为：
+
+| 项目 | 固定/解析版本 |
+| --- | --- |
+| Rust toolchain | 1.96.1 |
+| target | `wasm32-wasip2` |
+| `wit-bindgen` | 0.57.1 |
+| `wit-parser`（`Cargo.lock`） | 0.247.0 |
+| Node.js | 22.20.0 |
+| npm | 10.9.3 |
+| `@bytecodealliance/jco` | 1.32.1 |
+| `@bytecodealliance/preview2-shim` | 0.22.0 |
+
+release artifact 为 `target/wasm32-wasip2/release/peri_wasi.wasm`。验证过的文件头为 `00 61 73 6d 0d 00 01 00`：Wasm magic 后是 Component encoding/version，而不是 core Wasm 的 `01 00 00 00`。产物 WIT 检查确认 sole business export 为 `peri:turn-policy/policy@0.1.0`，imports 为空；Cargo target closure 的本地路径只有 `peri-wasi → peri-turn-policy`，没有 Agent/ACP、Tokio、reqwest、SQLx 或 process 能力闭包。
+
+### 8.3 可复现 Node gate 与隔离
+
+Node gate 把 dependency acquisition 与执行分开：
+
+```bash
+npm --prefix wasi-e2e run acquire:cargo
+npm --prefix wasi-e2e test
+```
+
+`acquire:cargo` 只从已有 parent Cargo cache 获取源代码，在 `wasi-e2e/target` 下生成独立 acquisition workspace、versioned vendor tree 和 credential-free Cargo home；它先比较 standalone manifest 与根 `peri-wasi` 的 registry closure，再固定供应该闭包。当前验证输出为 `CARGO_VENDOR_REGISTRY_PACKAGES=34`。执行 gate 只使用这个隔离 Cargo home，启用 offline/frozen 构建，并校验 acquisition fingerprint、路径 containment、symlink、环境变量 allowlist、toolchain、Cargo tree、Component header、WIT/import 与 Jco 产物。
+
+`npm --prefix wasi-e2e test` 当前包含 8 项 TAP 测试：缺失、空、core Wasm、损坏 Component、Jco 非零退出、acquisition fingerprint 篡改、vendor symlink，以及完整 build/inspect/transpile/execute 链路。隔离 Node child 对真实 WIT export 执行 28 个确定性断言，覆盖 content empty/non-empty、0/1/equality、NaN/±Infinity、两侧越界和多错误 precedence。已验证结果为 `tests 8 / pass 8 / fail 0 / skipped 0`。
+
+`wasi-e2e/target`、Cargo `target`、`node_modules`、最终 wasm 和 Jco 转译文件都是 ignored 生成物，不进入版本控制。Node 自带的 `node:wasi` 是 Preview 1 路径；本探针使用 pinned Jco + Preview 2 shim，不把二者混同。
+
+## 9. 若未来继续完整 Host 探查
+
+窄探针已经完成工具链与纯策略 seam 的第一步。若未来继续完整 Agent/ACP 探查，建议按以下顺序推进：
 
 1. 用最小 feature 对 `peri-acp-types`、`peri-model` 纯类型层和 `peri-agent` core 执行 `cargo check --target wasm32-wasip2`，记录真实首错。
 2. 构造无外部工具、mock model、in-memory ThreadStore 的最小 Agent session，验证 loop、event 和 cancel。
@@ -231,9 +288,10 @@ Component Model 更自然的形态是导出 session、prompt、event stream 和 
 
 高概率首先暴露问题的依赖类别包括 Tokio native backend、`mio`/`socket2`、`sysinfo`、`sqlx`/SQLite binding、reqwest/TLS、`peri-js-runtime`、RMCP child-process transport 和 file appender。该顺序只是静态推断，必须由真实 target build 修正。
 
-## 9. 当前决定
+## 10. 当前决定
 
-- 当前不开发 WASI 版本。
-- 当前不添加 target、CI job、feature flag、WIT 文件或 runtime 依赖。
+- 保留内部 deterministic turn-policy Component probe 与 Node 验证门禁；不把它发布为稳定产品接口。
+- 不宣称完整 Headless ACP Host、Agent loop 或 ACP protocol 已完成 WASI port。
+- 当前不为完整 Host 添加 CI job、feature flag 或 runtime 私有扩展。
 - 当前不为了推测性兼容而修改 production middleware 顺序或工具行为。
-- 本文只保留静态探查结论；未来若立项，应新建 active spec/issue，并以实际构建日志和选定 runtime 的契约替代本文中的推断。
+- 完整 Host 未来若立项，应新建独立 active spec/issue，并以该闭包的实际构建日志和选定 runtime 契约替代本文中的静态推断；本次 probe 的通过不能作为该结论的替代证据。

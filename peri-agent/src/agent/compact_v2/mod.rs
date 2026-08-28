@@ -31,6 +31,7 @@ pub mod smart;
 pub use config::{CompactConfig, CONTINUATION_HINT};
 pub use full::{extract_file_info, extract_skill_names, re_inject_v2, ReInjectResult};
 pub use micro::micro_compact;
+pub use peri_turn_policy::CompactAction;
 pub use planner::{plan_micro, ApplyReport, CompactPolicy, ContextPressure, FullEscalationReason};
 pub use projection::{
     plan_from_persisted_directives, render_llm_view, MessageProjectionDirective, MicroCompactPlan,
@@ -80,17 +81,6 @@ impl CompactResult {
 
 // ─── 顶层入口 ───────────────────────────────────────────────────────────────────
 
-/// Compact 阶段动作
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompactAction {
-    /// 跳过 compact（预算充足）
-    Skip,
-    /// 执行 Micro Compact
-    Micro,
-    /// 执行 Smart Compact（规则驱动，保留关键消息）
-    Smart,
-}
-
 /// 根据 budget 和配置决定 Compact 动作。
 ///
 /// 返回 `Skip` 表示预算未到 75%，跳过 compact。
@@ -100,15 +90,11 @@ pub enum CompactAction {
 /// Full Compact 的触发不在本函数内判定——由 run_compact 在执行后
 /// 根据 affected_count 和 budget 动态决策。
 pub fn determine_compact_action(budget: f64, config: &CompactConfig) -> CompactAction {
-    if budget >= config.micro_compact_threshold {
-        if config.smart_compact_enabled {
-            CompactAction::Smart
-        } else {
-            CompactAction::Micro
-        }
-    } else {
-        CompactAction::Skip
-    }
+    peri_turn_policy::select_compact_action(
+        budget,
+        config.micro_compact_threshold,
+        config.smart_compact_enabled,
+    )
 }
 
 /// 根据 ContextPressure 选择策略并执行 Compact

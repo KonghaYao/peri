@@ -1,0 +1,13 @@
+[package]
+name = "peri-wasi"
+version.workspace = true
+edition.workspace = true
+description = "WASI Preview 2 component for portable Peri turn policy"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+peri-turn-policy = { path = "../peri-turn-policy" }
+wit-bindgen.workspace = true

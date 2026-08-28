@@ -10,6 +10,7 @@ async-trait.workspace = true
 chrono.workspace = true
 parking_lot.workspace = true
 peri-model = { path = "../peri-model" }
+peri-turn-policy = { path = "../peri-turn-policy" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

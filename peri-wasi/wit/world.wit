@@ -1,0 +1,36 @@
+package peri:turn-policy@0.1.0;
+
+interface policy {
+    variant content-shape {
+        text(string),
+        blocks(u32),
+        raw(u32),
+    }
+
+    enum content-classification {
+        empty,
+        non-empty,
+    }
+
+    enum compact-action {
+        skip,
+        micro,
+    }
+
+    enum policy-error {
+        budget-not-finite,
+        budget-out-of-range,
+        micro-threshold-not-finite,
+        micro-threshold-out-of-range,
+    }
+
+    classify-content: func(content: content-shape) -> content-classification;
+    select-compact: func(
+        budget: f64,
+        micro-threshold: f64,
+    ) -> result<compact-action, policy-error>;
+}
+
+world turn-policy {
+    export policy;
+}

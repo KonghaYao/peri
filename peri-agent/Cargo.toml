@@ -25,6 +25,7 @@ parking_lot.workspace = true
 peri-model = { path = "../peri-model" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-resources = { path = "../peri-resources" }
+peri-turn-policy = { path = "../peri-turn-policy" }
 sysinfo.workspace = true
 fuzzy-matcher = "0.3"
 

@@ -70,6 +70,7 @@ fn test_tool_use_blocks_consistency_with_has_tool_use() {
 fn test_is_empty_variants() {
     assert!(MessageContent::text("").is_empty());
     assert!(!MessageContent::text("x").is_empty());
+    assert!(!MessageContent::text(" \n").is_empty());
     assert!(MessageContent::Blocks(vec![]).is_empty());
     assert!(!MessageContent::Blocks(vec![ContentBlock::text("x")]).is_empty());
     assert!(MessageContent::Raw(vec![]).is_empty());
