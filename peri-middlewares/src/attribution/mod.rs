@@ -16,7 +16,9 @@ mod state;
 
 use std::{
     collections::HashMap,
+    process::Stdio,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -29,6 +31,8 @@ use peri_agent::{
 pub use state::AttributionState;
 
 use crate::tool_search::core_tools::{TOOL_EDIT, TOOL_WRITE};
+
+const GIT_BRANCH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Git 留名中间件
 ///
@@ -77,12 +81,23 @@ impl GitAttributionMiddleware {
         }
     }
 
-    async fn current_branch(cwd: &str) -> Option<String> {
-        let output = tokio::process::Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .current_dir(cwd)
-            .output()
+    fn spawn_branch_command(mut command: tokio::process::Command) -> Option<tokio::process::Child> {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .ok()
+    }
+
+    async fn current_branch_from_child(
+        child: tokio::process::Child,
+        timeout: Duration,
+    ) -> Option<String> {
+        let output = tokio::time::timeout(timeout, child.wait_with_output())
             .await
+            .ok()?
             .ok()?;
         if !output.status.success() {
             return None;
@@ -90,6 +105,22 @@ impl GitAttributionMiddleware {
         let branch = String::from_utf8(output.stdout).ok()?;
         let branch = branch.trim();
         (!branch.is_empty()).then(|| branch.to_string())
+    }
+
+    async fn current_branch_with_command(
+        command: tokio::process::Command,
+        timeout: Duration,
+    ) -> Option<String> {
+        let child = Self::spawn_branch_command(command)?;
+        Self::current_branch_from_child(child, timeout).await
+    }
+
+    async fn current_branch(cwd: &str) -> Option<String> {
+        let mut command = tokio::process::Command::new("git");
+        command
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(cwd);
+        Self::current_branch_with_command(command, GIT_BRANCH_TIMEOUT).await
     }
 }
 
