@@ -38,7 +38,7 @@ impl ConnectionContext {
     }
 
     pub(crate) fn apps_enabled(&self) -> bool {
-        self.lifecycle == ConnectionLifecycle::Open && self.apps_enabled
+        self.initialized && self.lifecycle == ConnectionLifecycle::Open && self.apps_enabled
     }
 
     #[allow(dead_code)]

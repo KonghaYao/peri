@@ -16,11 +16,25 @@ use rmcp::{
 /// 根据 `method` 字段路由到 channel 消息推送或权限响应处理。
 pub struct ChannelHandler {
     pub state: Arc<ChannelState>,
+    capability_profile: super::apps::McpCapabilityProfile,
 }
 
 impl ChannelHandler {
     pub fn new(state: Arc<ChannelState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            capability_profile: super::apps::McpCapabilityProfile::disabled(),
+        }
+    }
+
+    pub(crate) fn with_capability_profile(
+        &self,
+        capability_profile: super::apps::McpCapabilityProfile,
+    ) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            capability_profile,
+        }
     }
 }
 
@@ -94,7 +108,7 @@ impl ChannelHandler {
 
 impl ClientHandler for ChannelHandler {
     fn get_info(&self) -> InitializeRequestParams {
-        super::client::mcpp_client_info()
+        super::client::mcpp_client_info_for_profile(&self.capability_profile)
     }
 
     // rmcp trait 要求返回 impl Future，无法改为 async fn

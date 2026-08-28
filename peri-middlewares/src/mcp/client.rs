@@ -145,10 +145,6 @@ pub fn redact_mcp_error(input: &str) -> String {
 
 pub(crate) const SERVER_CACHE_VERSION_EXTENSION: &str = "io.mcpp/server-cache-version";
 
-pub(crate) fn mcpp_client_info() -> InitializeRequestParams {
-    mcpp_client_info_for_profile(&super::apps::McpCapabilityProfile::disabled())
-}
-
 pub(crate) fn mcpp_client_info_for_profile(
     profile: &super::apps::McpCapabilityProfile,
 ) -> InitializeRequestParams {
@@ -362,7 +358,8 @@ pub struct McpClientPool {
     service_shutdown: tokio::sync::Mutex<ServiceShutdownState>,
     pub(crate) task_spawner: super::task_scope::McpTaskSpawner,
     pub(crate) clients: parking_lot::RwLock<HashMap<String, Arc<McpClientHandle>>>,
-    handle_generations: parking_lot::Mutex<HashMap<String, u64>>,
+    handle_generations:
+        parking_lot::Mutex<HashMap<String, Vec<(std::sync::Weak<McpClientHandle>, u64)>>>,
     next_handle_generation: std::sync::atomic::AtomicU64,
     pub(crate) services: parking_lot::Mutex<HashMap<String, McpServiceWrapper>>,
     pub(crate) configs: parking_lot::RwLock<HashMap<String, McpServerConfig>>,
@@ -474,17 +471,25 @@ impl McpClientPool {
         self.handle_generations
             .lock()
             .get(&handle.name)
-            .copied()
+            .and_then(|entries| {
+                entries.iter().find_map(|(candidate, generation)| {
+                    candidate
+                        .upgrade()
+                        .filter(|candidate| Arc::ptr_eq(candidate, handle))
+                        .map(|_| *generation)
+                })
+            })
             .unwrap_or(0)
     }
 
-    fn advance_handle_generation(&self, name: &str) -> u64 {
+    fn advance_handle_generation(&self, handle: &Arc<McpClientHandle>) -> u64 {
         let generation = self
             .next_handle_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.handle_generations
-            .lock()
-            .insert(name.to_string(), generation);
+        let mut generations = self.handle_generations.lock();
+        let entries = generations.entry(handle.name.clone()).or_default();
+        entries.retain(|(candidate, _)| candidate.strong_count() > 0);
+        entries.push((Arc::downgrade(handle), generation));
         generation
     }
 
@@ -1211,24 +1216,22 @@ impl McpClientPool {
                 .map(|c| (c.source.clone(), c.url.clone()))
                 .unwrap_or((None, None));
             let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
-            pool.advance_handle_generation(name);
-            pool.clients.write().insert(
-                name.to_string(),
-                Arc::new(McpClientHandle {
-                    name: name.to_string(),
-                    version: None,
-                    cache_version: None,
-                    peer: None,
-                    tools: vec![],
-                    resources: vec![],
-                    status: ClientStatus::Failed(reason.clone()),
-                    oauth_status: OAuthStatus::default(),
-                    source,
-                    url,
-                    skills_capable: false,
-                    channel_capable: false,
-                }),
-            );
+            let handle = Arc::new(McpClientHandle {
+                name: name.to_string(),
+                version: None,
+                cache_version: None,
+                peer: None,
+                tools: vec![],
+                resources: vec![],
+                status: ClientStatus::Failed(reason.clone()),
+                oauth_status: OAuthStatus::default(),
+                source,
+                url,
+                skills_capable: false,
+                channel_capable: false,
+            });
+            pool.advance_handle_generation(&handle);
+            pool.clients.write().insert(name.to_string(), handle);
             old_status
         };
         pool.record_status_change(name, old_status.as_ref());
@@ -1259,24 +1262,22 @@ impl McpClientPool {
                 .map(|c| (c.source.clone(), c.url.clone()))
                 .unwrap_or((None, None));
             let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
-            pool.advance_handle_generation(name);
-            pool.clients.write().insert(
-                name.to_string(),
-                Arc::new(McpClientHandle {
-                    name: name.to_string(),
-                    version: None,
-                    cache_version: None,
-                    peer: None,
-                    tools: vec![],
-                    resources: vec![],
-                    status: ClientStatus::Failed(reason),
-                    oauth_status: OAuthStatus::NeedsAuthorization,
-                    source,
-                    url,
-                    skills_capable: false,
-                    channel_capable: false,
-                }),
-            );
+            let handle = Arc::new(McpClientHandle {
+                name: name.to_string(),
+                version: None,
+                cache_version: None,
+                peer: None,
+                tools: vec![],
+                resources: vec![],
+                status: ClientStatus::Failed(reason),
+                oauth_status: OAuthStatus::NeedsAuthorization,
+                source,
+                url,
+                skills_capable: false,
+                channel_capable: false,
+            });
+            pool.advance_handle_generation(&handle);
+            pool.clients.write().insert(name.to_string(), handle);
             old_status
         };
         pool.record_status_change(name, old_status.as_ref());
@@ -1513,7 +1514,7 @@ impl McpClientPool {
         if !self.is_open() {
             return Err(service);
         }
-        self.advance_handle_generation(&name);
+        self.advance_handle_generation(&handle);
         self.services.lock().insert(name.clone(), service);
         self.clients.write().insert(name, handle);
         Ok(())

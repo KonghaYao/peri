@@ -73,7 +73,7 @@ fn server_generation_advances_explicitly_on_each_committed_connection() {
 
     assert!(first_generation > 0);
     assert!(second_generation > first_generation);
-    assert_eq!(pool.handle_generation(&first), second_generation);
+    assert_eq!(pool.handle_generation(&first), first_generation);
 }
 
 #[test]

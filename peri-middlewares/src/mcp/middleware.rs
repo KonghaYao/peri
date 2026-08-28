@@ -22,7 +22,12 @@ use super::{
 /// MCP 中间件 —— 将所有已连接 MCP 服务器的工具和资源注入 ReAct 循环，
 /// 并向模型通报 MCP 连接状态（首 turn 概览 + 运行中上下线变化）。
 pub struct McpMiddleware {
+    /// Session-projected MCP view used by resources, discovery, and status reporting.
     pool: Arc<McpClientPool>,
+    /// Deployment-owned pool used to build static MCP tool bridges. Static bridges must retain
+    /// deployment identity such as handle generations and MCP Apps binding leases; dynamic
+    /// tools are overlaid separately by `SessionToolCatalog`.
+    tool_pool: Arc<McpClientPool>,
     /// 会话级 MCP skill 远端注册表（None = 未装配 session 透传；DiscoverMCP
     /// 的 skill 域查询读它）。
     registry: Option<Arc<McpSkillRegistry>>,
@@ -40,12 +45,20 @@ pub struct McpMiddleware {
 impl McpMiddleware {
     pub fn new(pool: Arc<McpClientPool>) -> Self {
         Self {
+            tool_pool: Arc::clone(&pool),
             pool,
             registry: None,
             command_registry: None,
             cancel: AgentCancellationToken::new(),
             hint_sent: AtomicBool::new(false),
         }
+    }
+
+    /// Use a deployment-owned pool for static tool bridges while retaining the session-projected
+    /// pool for resources and discovery.
+    pub fn with_tool_pool(mut self, tool_pool: Arc<McpClientPool>) -> Self {
+        self.tool_pool = tool_pool;
+        self
     }
 
     /// 注入 skill 发现装配（session 级 registry + cancel token；assembly 槽位
@@ -322,7 +335,7 @@ impl Middleware for McpMiddleware {
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        let mut tools = build_tool_bridges(&self.pool);
+        let mut tools = build_tool_bridges(&self.tool_pool);
 
         tools.push(Box::new(McpResourceTool::new(
             Arc::clone(&self.pool),

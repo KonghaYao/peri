@@ -54,12 +54,14 @@ PERI_MCP_APPS 环境变量存在
     "envelopeVersion": "1",
     "appsProtocolVersion": "2026-01-26",
     "serverId": "server",
-    "toolName": "open_dashboard"
+    "toolName": "open_dashboard",
+    "ownerSessionId": "agent-session",
+    "invocationToken": "opaque-invocation-token"
   }
 }
 ```
 
-Peri 校验：server 已连接、tool 存在、visibility 包含 `app`、tool metadata 含合法且无冲突的 `ui://` resource URI。成功返回 opaque `appSessionId`、resource URI 和 MCP core version。
+Peri 校验：`ownerSessionId` 与 `invocationToken` 两个 lease 字段均为必填，并与待消费 lease 精确匹配；同时校验 server 已连接、tool 存在、visibility 包含 `app`、tool metadata 含合法且无冲突的 `ui://` resource URI。成功返回 opaque `appSessionId`、resource URI 和 MCP core version。
 
 ### Resource
 
@@ -100,6 +102,28 @@ InitialMcpAppBindingLease {
 
 server generation 在每次 pool connection commit/失败替换时显式递增；验证只查 server name 对应的 generation，不使用 `Arc` 地址或指针相等推断。stdio 装配点读取一次环境并构造 immutable profile；pool、initial/reconnect 和 Dynamic MCP connector 复用同一 profile，TUI/MPSC 入口固定 disabled 且不读取/传播环境。Apps requests 由 connection-owned task 异步执行；除 `open` 的短临界提交外不跨网络 await 持 connection 锁，EOF cancellation 与 response 发送竞争后每个已接收 request 至多产生一个 terminal response。
 
+## 成功路径故障记录
+
+### 现象
+
+官方风格 fixture 已能驱动模型调用 App 实例化工具并收到 completed tool update，但随后 `peri/mcp/open` 无法消费对应 Binding lease。逐项排除 prompt 完成时序、invocation token、普通 cleanup 与 session-turn revoke 后，registry identity 诊断确认：tool bridge 在 registry A 签发，relay 在 registry B 消费。
+
+### 根因
+
+启用 Dynamic MCP 时，`McpMiddleware` 使用 `CheckedSessionMcpProjection` 持有的 session projection pool。该 pool 是独立 `McpClientPool`，仅复制 effective handles，不共享 deployment pool 的 `app_binding_leases` 与 handle generation identity。因此 static MCP tool bridge 从 projection pool 构建后，签发的 lease 无法被绑定 deployment pool 的 `PoolMcpAppsRelay` 消费。
+
+这不是 stale catalog：dynamic tools 本来就由 `SessionToolCatalog` capability overlay 注入；问题是 static bridge 错用了 projection pool。
+
+### 修复
+
+`McpMiddleware` 明确区分两个视图：
+
+- session projection pool 继续负责 resources、discovery 与 status；
+- deployment-owned pool 专门构建 static MCP tool bridges，保留真实 server generation 与 Apps lease registry；
+- dynamic tools 仍由 `SessionToolCatalog` overlay 注入，保持 session 隔离和 shadow 语义。
+
+同时保留 initial invocation cancellation 对 lease 的约束；未采用“lease 自持独立 cancellation token”的临时实验。失败的 MCP `CallToolResult` 仍先按 `isError` 结算，不得签发 App lease。
+
 ## 安全不变量
 
 1. 环境变量不存在时，extension 与 relay 都不存在。
@@ -115,20 +139,38 @@ server generation 在每次 pool connection commit/失败替换时显式递增�
 
 已覆盖：
 
-- env profile presence/absence helper；
-- MCP UI extension 构造；
+- env profile presence/absence；环境变量存在且值为空时启用，不存在时 fail closed；
+- initial/reconnect/channel MCP initialize 的 UI extension 构造；
 - visibility 与 resource URI canonicalization；
 - raw resource/result roundtrip；
-- connection-owned binding 与 EOF 清理；
+- connection-owned binding、session close 与 EOF 清理；
 - Apps envelope/version/JSON-RPC result/error 校验；
-- `peri-acp` 全量 lib 测试。
+- static MCP bridge 使用 deployment pool，而 resources/discovery 保持 session projection；
+- 官方风格 stdio fixture 的 `tools/list → resources/read → tools/call`；
+- 真实 Peri successful path：模型实例化工具 → completed update → `peri/mcp/open` → resource → App `tools/call`；
+- disabled deployment probe 返回 `capability_disabled`。
 
-最终验收还需：
+本次验收证据：
 
-- fake MCP server 断言环境变量存在时 initial/reconnect initialize extension；
-- stdio wire `open → resource` E2E；
-- Binding lease 的 HITL approve/deny、cancel、expiry、server generation E2E；
-- App 主动调用不重复进入模型事件投影。
+```text
+cargo test -p peri-middlewares --lib
+  1587 passed
+cargo test -p peri-acp --lib mcp_apps
+  2 passed
+cargo clippy -p peri-middlewares -p peri-acp --all-targets -- -D warnings
+  passed
+cd side-projects/mcp-apps && npm run check:peri
+  ok=true, resourceCount=1, modelCalls=3, disabledProbe=capability_disabled
+cargo fmt --all -- --check
+  passed
+git diff --check
+  passed
+```
+
+后续增强项不阻塞 stdio successful path：
+
+- Binding lease 的 HITL deny、expiry 与 server reconnect wire-level fixture；
+- 更高并发下多个 App session 的隔离压力测试。
 
 ## 目标命令
 

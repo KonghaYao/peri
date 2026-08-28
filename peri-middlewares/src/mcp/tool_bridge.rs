@@ -246,6 +246,27 @@ impl BaseTool for McpToolBridge {
                 reason: e.to_string(),
             })?;
 
+        // 4. 处理 is_error 标志。失败的实例化调用不得签发 App lease。
+        if result.is_error.unwrap_or(false) {
+            let error_text = format_contents(&result.content);
+            let lines: Vec<&str> = error_text.lines().collect();
+            let reason = if lines.len() > MAX_MCP_LINES {
+                let persist_hint = persist_truncated_output(&error_text);
+                let truncated: String = lines[..MAX_MCP_LINES].join("\n");
+                format!(
+                    "{truncated}\n\n[MCP error output truncated: {} total lines]{persist_hint}",
+                    lines.len()
+                )
+            } else {
+                error_text
+            };
+            return Err(Box::new(ToolCallError::CallFailed {
+                server: self.server_name.clone(),
+                tool: self.tool_name.clone(),
+                reason,
+            }));
+        }
+
         if let (
             Some(registry),
             Some(dispatcher),
@@ -295,27 +316,6 @@ impl BaseTool for McpToolBridge {
                     ctx.cancellation.clone(),
                 ));
             }
-        }
-
-        // 4. 处理 is_error 标志
-        if result.is_error.unwrap_or(false) {
-            let error_text = format_contents(&result.content);
-            let lines: Vec<&str> = error_text.lines().collect();
-            let reason = if lines.len() > MAX_MCP_LINES {
-                let persist_hint = persist_truncated_output(&error_text);
-                let truncated: String = lines[..MAX_MCP_LINES].join("\n");
-                format!(
-                    "{truncated}\n\n[MCP error output truncated: {} total lines]{persist_hint}",
-                    lines.len()
-                )
-            } else {
-                error_text
-            };
-            return Err(Box::new(ToolCallError::CallFailed {
-                server: self.server_name.clone(),
-                tool: self.tool_name.clone(),
-                reason,
-            }));
         }
 
         // 5. 格式化返回（截断超大输出）

@@ -392,7 +392,7 @@ sequenceDiagram
 | 两个 App 同时使用相同 L1 id | 由 connection owner + appSessionId + ACP L2 隔离 |
 | App 指定另一个 `serverId` / `resourceUri` / 旧 generation | 被拒绝，server 不收到 `tools/call` |
 | visibility 为 `model` 或 `app` | model/app tool surface 按 visibility 分流，默认值符合规范 |
-| resource 为多 contents、`text` 或 `blob` | `uri`、`mimeType`、`text|blob`、content `_meta.ui` 完整往返 |
+| resource 为多 contents、`text` 或 `blob` | `uri`、`mimeType`、`text/blob`、content `_meta.ui` 完整往返 |
 | `structuredContent` + `content` + `_meta` + `isError` | 字段逐项保留；`isError` 是正常 result，不变成 transport error |
 | App 主动调用与模型调用 | 前者只返回标准 JSON-RPC response；后者只产生一次下游 input/result/cancelled 投影 |
 | session teardown、stdio EOF、server generation 变化、timeout/cancel | 只清理对应 owner/generation；pending request 至多结算一次 |
@@ -402,8 +402,8 @@ sequenceDiagram
 
 | # | 改动 | 位置 | 依赖 |
 | --- | --- | --- | --- |
-| 0 | **读取 ACP client 的 MCP Apps capability**：从 UI 侧 `initialize` 保存 connection-scoped capability；不能由 Peri stdio 自行声明 | `peri-acp` ACP initialize contract / connection state | 无——所有 App 生态的前提 |
-| 1 | **条件传播 MCP server capability**：仅当 ACP client 声明 UI capability 时，Peri 才在 MCP client initialize 中发送对应 UI extension；否则保持普通 MCP capabilities | `peri-middlewares/src/mcp/channel_handler.rs` 与 MCP 初始化装配 | 0 |
+| 0 | **读取冻结的 MCP Apps deployment profile**：stdio 启动时只读取一次 `PERI_MCP_APPS`，作为 Apps relay 与 MCP UI extension 的唯一启用来源 | stdio host 装配 / immutable capability profile | 无——所有 App 生态的前提 |
+| 1 | **按 deployment profile 构造 MCP server capability**：profile enabled 时在 MCP client initialize 中发送 UI extension；disabled 时保持普通 MCP capabilities | `peri-middlewares` MCP 初始化与重连装配 | 0 |
 | 2 | `peri/mcp/app`、`peri/mcp/resource` 方法分发（下游 UI → Peri 方向） | ACP 命令分发处（与 `session/*` 同入口） | 0、1 |
 | 3 | App session：会话注册表、server/resource 绑定、握手校验与 teardown | `peri-acp`/`peri-middlewares` 的协议实现层 | 2 |
 | 4 | id 映射与 `tools/call` 路由（复用 `McpClientPool` + 既有权限/HITL） | 同上 | 2、3 |

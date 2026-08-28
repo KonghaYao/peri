@@ -610,12 +610,23 @@ async fn run_acp_server_inner(
                             .await;
                     }
                 } else {
+                    let closed_session_id =
+                        matches!(method.as_str(), "session/close" | "session/delete")
+                            .then(|| extract_session_id(&params, "").to_string())
+                            .filter(|session_id| !session_id.is_empty());
                     let result = {
                         let mut sessions = sessions.lock().await;
                         handle_request(&method, &params, &cfg, &mut sessions, &transport).await
                     };
                     if method == "initialize" && result.is_ok() {
                         connection.lock().await.commit_initialize();
+                    }
+                    if result.is_ok() {
+                        if let (Some(session_id), Some(relay)) =
+                            (closed_session_id.as_deref(), cfg.mcp_apps_relay.as_ref())
+                        {
+                            relay.close_session(session_id);
+                        }
                     }
                     let new_session_id = (method == "session/new")
                         .then(|| {

@@ -4,6 +4,7 @@ use peri_acp_types::mcp_apps::{AppSessionBinding, MCP_APPS_PROTOCOL_VERSION};
 #[test]
 fn deployment_capability_is_immutable_and_close_invalidates_sessions() {
     let mut connection = ConnectionContext::new(true);
+    assert!(!connection.apps_enabled());
     connection.commit_initialize();
     connection.commit_initialize();
     assert!(connection.apps_enabled());
