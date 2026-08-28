@@ -194,8 +194,8 @@ fn group_input_fingerprint(segment: &im::Vector<TuiRenderUnit>) -> (u64, bool) {
     let last = segment.len().saturating_sub(1);
     for (i, vm) in segment.iter().enumerate() {
         let is_trailing_bubble = i == last && matches!(vm, TuiRenderUnit::TuiAssistantBubble(_));
-        h = if is_trailing_bubble {
-            tui_hash_combine(h, TRAILING_BUBBLE_MARKER)
+        let entry_hash = if is_trailing_bubble {
+            TRAILING_BUBBLE_MARKER
         } else {
             match vm {
                 TuiRenderUnit::TuiToolCard(t) => {
@@ -227,6 +227,7 @@ fn group_input_fingerprint(segment: &im::Vector<TuiRenderUnit>) -> (u64, bool) {
                 }
             }
         };
+        h = tui_hash_combine(h, entry_hash);
     }
     h = tui_hash_combine(h, segment.len() as u64);
     // [S2 单一事实源] 焦点键——焦点工具免疫随焦点变化切换（命中/未命中必须

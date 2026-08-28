@@ -43,9 +43,9 @@ fn test_dispatch_subagent_streaming_updates_current_turn_group() {
         }),
     );
 
-    let snapshot = VIEW_MODELS.state().read().clone();
-    assert_eq!(snapshot.items.len(), 1);
-    match &snapshot.items[0] {
+    let current_turn = state.current_turn.view_models().clone();
+    assert_eq!(current_turn.len(), 1);
+    match &current_turn[0] {
         TuiRenderUnit::TuiSubAgentGroup(group) => {
             assert_eq!(group.agent_id, "agent-1");
             assert_eq!(group.view_models.len(), 1);
@@ -102,8 +102,8 @@ fn test_subagent_stopped_freezes_child_trailing_bubble() {
     );
 
     // 流式期间：子 turn trailing bubble 持有 started_at（Running 形态）。
-    let running_snap = VIEW_MODELS.state().read().clone();
-    let b = match &running_snap.items[0] {
+    let running_vms = state.current_turn.view_models().clone();
+    let b = match &running_vms[0] {
         TuiRenderUnit::TuiSubAgentGroup(g) => match &g.view_models[0] {
             TuiRenderUnit::TuiAssistantBubble(b) => b,
             other => panic!("expected child TuiAssistantBubble, got {other:?}"),
@@ -127,8 +127,8 @@ fn test_subagent_stopped_freezes_child_trailing_bubble() {
 
     // stop 后：started_at 清除 + duration_ms 冻结（详情面板不再显示增长中的
     // `◐ Thinking… Ns`）。
-    let snap = VIEW_MODELS.state().read().clone();
-    let b = match &snap.items[0] {
+    let stopped_vms = state.current_turn.view_models().clone();
+    let b = match &stopped_vms[0] {
         TuiRenderUnit::TuiSubAgentGroup(g) => match &g.view_models[0] {
             TuiRenderUnit::TuiAssistantBubble(b) => b,
             other => panic!("expected child TuiAssistantBubble, got {other:?}"),
@@ -618,7 +618,7 @@ fn test_prompt_submitted_sets_loading() {
 }
 
 /// 同步 sub-agent 的 ToolStarted/ToolEnded 事件应路由到 SubAgentAccumulator，
-/// 并反映在 VIEW_MODELS 的 TuiSubAgentGroup 中。
+/// 并反映在当前 turn 的 TuiSubAgentGroup 中。
 #[test]
 #[serial]
 fn test_dispatch_sync_subagent_tool_routed_to_group() {
@@ -676,10 +676,10 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
         }),
     );
 
-    let snapshot = VIEW_MODELS.state().read().clone();
-    // items 中应有 1 个 TuiSubAgentGroup
-    assert_eq!(snapshot.items.len(), 1, "items 应包含 1 个元素");
-    match &snapshot.items[0] {
+    let current_turn = state.current_turn.view_models().clone();
+    // current_turn 中应有 1 个 TuiSubAgentGroup
+    assert_eq!(current_turn.len(), 1, "current_turn 应包含 1 个元素");
+    match &current_turn[0] {
         TuiRenderUnit::TuiSubAgentGroup(group) => {
             assert_eq!(group.agent_id, "sync-1");
             assert!(
