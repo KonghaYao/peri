@@ -84,7 +84,16 @@ impl McpClientPool {
         let result = match &tc {
             TransportConfig::Stdio { command, args, env } => {
                 match spawn_stdio_transport(command, args, env) {
-                    Ok(t) => serve_client_auto(t, None, protocol_version, timeout).await,
+                    Ok(t) => {
+                        serve_client_auto(
+                            t,
+                            None,
+                            protocol_version,
+                            &self.capability_profile,
+                            timeout,
+                        )
+                        .await
+                    }
                     Err(e) => {
                         McpClientPool::insert_failed(self, server_name, format!("stdio 失败: {e}"));
                         return Err(McpPoolError::ConnectionFailed {
@@ -145,6 +154,7 @@ impl McpClientPool {
                                     build_authed_transport(url, headers, am),
                                     None,
                                     protocol_version,
+                                    &self.capability_profile,
                                     timeout,
                                 )
                                 .await
@@ -153,6 +163,7 @@ impl McpClientPool {
                                     build_http_transport(url, headers),
                                     None,
                                     protocol_version,
+                                    &self.capability_profile,
                                     timeout,
                                 )
                                 .await
@@ -164,6 +175,7 @@ impl McpClientPool {
                                 build_http_transport(url, headers),
                                 None,
                                 protocol_version,
+                                &self.capability_profile,
                                 timeout,
                             )
                             .await
@@ -174,6 +186,7 @@ impl McpClientPool {
                         build_http_transport(url, headers),
                         None,
                         protocol_version,
+                        &self.capability_profile,
                         timeout,
                     )
                     .await

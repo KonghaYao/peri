@@ -139,6 +139,52 @@ fn test_snapshot_todo_summary_before_final_answer() {
             .all(|vm| !matches!(vm, TuiRenderUnit::TuiTodoSummary(_))),
         "回答后无 todo 摘要"
     );
+    crate::kit::atoms::TODO_ITEMS.state().write().clear();
+}
+
+/// [回归] todo 摘要位于 subagent group 之后时，快照分组缓存的指纹必须包含
+/// group 本身；否则 child 内容变化但末尾摘要不变会误命中旧缓存。
+#[test]
+#[serial]
+fn test_snapshot_cache_tracks_subagent_before_todo_summary() {
+    let mut state = make_fold_test_state();
+    *crate::kit::atoms::TODO_ITEMS.state().write() = vec![crate::kit::message_area::TodoItem {
+        status: crate::kit::message_area::TodoStatus::InProgress,
+        content: "subagent fingerprint regression sentinel".into(),
+    }];
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "cache-agent".into(),
+            agent_name: "researcher".into(),
+            is_background: false,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "child text".into(),
+            message_id: Some("cache-child".into()),
+            agent_id: Some("cache-agent".into()),
+        }),
+    );
+
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(snap.items.len(), 2, "group 后应保留 todo 摘要");
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(group) => {
+            assert_eq!(group.agent_id, "cache-agent");
+            assert_eq!(
+                group.view_models.len(),
+                1,
+                "child 更新后不得复用启动时的空 group 缓存"
+            );
+        }
+        other => panic!("expected TuiSubAgentGroup at [0], got {other:?}"),
+    }
+
+    crate::kit::atoms::TODO_ITEMS.state().write().clear();
 }
 
 /// §7 工具分组：相邻成功 Generic 工具压成 TuiCollapsedGroup（标题含隐藏数）；

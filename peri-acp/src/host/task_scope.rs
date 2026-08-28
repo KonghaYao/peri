@@ -16,6 +16,7 @@ pub(crate) enum HostTaskOwnerKind {
     Startup,
     Host,
     Session,
+    Connection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,7 @@ pub(crate) enum HostTaskKind {
     Prompt,
     Prediction,
     LegacyCancelHook,
+    McpAppsRelay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

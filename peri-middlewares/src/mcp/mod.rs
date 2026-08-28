@@ -1,4 +1,6 @@
 pub mod agent_registry;
+pub mod apps;
+pub mod apps_relay;
 pub mod auth_store;
 pub mod callback_server;
 pub mod channel_handler;
@@ -22,6 +24,12 @@ pub mod tool_bridge;
 pub mod transport;
 
 pub use agent_registry::{ActivatedMcpAgent, McpAgentMetadata, McpAgentRegistry};
+pub use apps::{
+    canonical_resource_uri, raw_resource, raw_tool, tool_resource_uri, tool_visibility,
+    McpAppsInvocationError, McpAppsInvocationSeam, McpAppsInvoker, McpCapabilityProfile,
+    RawCallToolResult, RawMcpResource, RawMcpTool, ToolVisibility, MCP_APPS_VERSION,
+    MCP_APP_MIME_TYPE, MCP_UI_EXTENSION,
+};
 pub use auth_store::{AuthStoreError, FileCredentialStore, PerServerCredentialStore};
 pub use callback_server::{parse_code_from_url, CallbackError, OAuthCallbackServer};
 pub use channel_handler::ChannelHandler;

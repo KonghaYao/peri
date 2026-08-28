@@ -16,6 +16,10 @@ use peri_acp_types::{
 /// 进程内计数器：保证并发写同一目标时临时文件名唯一。
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// 序列化 meta.json 的 read-modify-write，避免 transcript writer 与生命周期
+/// 状态更新互相覆盖。FilesystemThreadStore 仅用于测试，进程级锁足够。
+static META_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 原子写入 JSON 文件：先写同目录唯一临时文件再 rename。
 ///
 /// tokio `fs::write` 是「截断 + 写数据」两步（经 spawn_blocking 独立线程），
@@ -130,6 +134,7 @@ impl ThreadStore for FilesystemThreadStore {
         if msgs.is_empty() {
             return Ok(());
         }
+        let _guard = META_UPDATE_LOCK.lock().await;
         let path = self.messages_path(id);
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
@@ -145,7 +150,8 @@ impl ThreadStore for FilesystemThreadStore {
         }
         file.flush().await?;
 
-        // 更新 meta 的 message_count 和 updated_at
+        // 更新 meta 的 message_count 和 updated_at。与状态更新共用锁，避免基于
+        // 旧快照写回时把 done/error/cancelled 覆盖成 active。
         let mut meta = self.load_meta(id).await?;
         meta.message_count += msgs.len();
         meta.updated_at = Utc::now();
@@ -281,6 +287,7 @@ impl ThreadStore for FilesystemThreadStore {
         // 关键约束：参数字符串必须经 FromStr 解析，非法值直接返回错误，不静默 fallback
         let status = AgentStatus::from_str(status)
             .with_context(|| format!("非法 agent_status 值: {status:?}"))?;
+        let _guard = META_UPDATE_LOCK.lock().await;
         let mut meta = self.load_meta(id).await?;
         meta.agent_status = status;
         meta.updated_at = Utc::now();
@@ -288,6 +295,7 @@ impl ThreadStore for FilesystemThreadStore {
     }
 
     async fn invalidate_context_cache(&self, thread_id: &ThreadId) -> Result<()> {
+        let _guard = META_UPDATE_LOCK.lock().await;
         let mut meta = self.load_meta(thread_id).await?;
         meta.cached_context = None;
         self.update_meta(thread_id, meta).await
@@ -330,6 +338,7 @@ impl ThreadStore for FilesystemThreadStore {
         thread_id: &ThreadId,
         message_id: &peri_acp_types::messages::MessageId,
     ) -> Result<()> {
+        let _guard = META_UPDATE_LOCK.lock().await;
         // 重写 messages.jsonl：保留 message_id 所在位置（含）之前所有行。
         let path = self.messages_path(thread_id);
         if !path.exists() {

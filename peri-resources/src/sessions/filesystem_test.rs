@@ -83,6 +83,32 @@ async fn test_message_count_updates() {
 }
 
 #[tokio::test]
+async fn test_concurrent_append_preserves_terminal_status() {
+    let dir = tempdir().unwrap();
+    let store: Arc<dyn ThreadStore> = Arc::new(FilesystemThreadStore::new(dir.path()));
+    let id = store.create_thread(make_meta("/test")).await.unwrap();
+    let append_store = Arc::clone(&store);
+    let append_id = id.clone();
+    let status_store = Arc::clone(&store);
+    let status_id = id.clone();
+
+    let (append_result, status_result) = tokio::join!(
+        async move {
+            append_store
+                .append_messages(&append_id, &[BaseMessage::human("msg")])
+                .await
+        },
+        async move { status_store.update_thread_status(&status_id, "error").await }
+    );
+    append_result.unwrap();
+    status_result.unwrap();
+
+    let loaded = store.load_meta(&id).await.unwrap();
+    assert_eq!(loaded.message_count, 1);
+    assert_eq!(loaded.agent_status, AgentStatus::Error);
+}
+
+#[tokio::test]
 async fn test_title_extracted_from_first_human() {
     let dir = tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());

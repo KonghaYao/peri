@@ -27,6 +27,30 @@ fn test_collect_tools_empty_pool() {
     assert_eq!(tools[1].name(), "DiscoverMCP");
 }
 
+#[test]
+fn static_tool_bridges_use_deployment_pool_not_session_projection() {
+    let deployment_pool = Arc::new(McpClientPool::new_empty());
+    deployment_pool.clients.write().insert(
+        "static".to_string(),
+        make_connected_handle_with_tool("static", "instantiate_app"),
+    );
+    let projected_pool = Arc::new(McpClientPool::new_empty());
+    projected_pool.clients.write().insert(
+        "dynamic".to_string(),
+        make_connected_handle_with_tool("dynamic", "shadow_tool"),
+    );
+
+    let mw = McpMiddleware::new(Arc::clone(&projected_pool))
+        .with_tool_pool(Arc::clone(&deployment_pool));
+    let names = <McpMiddleware as Middleware>::collect_tools(&mw, "/tmp")
+        .into_iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"mcp__static__instantiate_app".to_string()));
+    assert!(!names.contains(&"mcp__dynamic__shadow_tool".to_string()));
+}
+
 // ─── first_turn_reminder：首 turn 概览 ───────────────────────────────────────
 
 /// 空池（无任何服务器配置）→ None（零噪音）
@@ -44,6 +68,28 @@ fn make_connected_handle(name: &str, tools: usize) -> Arc<McpClientHandle> {
         cache_version: None,
         peer: None,
         tools: (0..tools).map(|_| rmcp::model::Tool::default()).collect(),
+        resources: vec![],
+        status: ClientStatus::Connected,
+        oauth_status: OAuthStatus::default(),
+        source: None,
+        url: None,
+        skills_capable: false,
+        channel_capable: false,
+    })
+}
+
+fn make_connected_handle_with_tool(name: &str, tool_name: &str) -> Arc<McpClientHandle> {
+    let tool = rmcp::model::Tool::new(
+        tool_name.to_string(),
+        "fixture".to_string(),
+        serde_json::Map::new(),
+    );
+    Arc::new(McpClientHandle {
+        name: name.to_string(),
+        version: None,
+        cache_version: None,
+        peer: None,
+        tools: vec![tool],
         resources: vec![],
         status: ClientStatus::Connected,
         oauth_status: OAuthStatus::default(),

@@ -53,6 +53,7 @@ pub(crate) async fn serve_client_auto<T, E, A>(
     transport: T,
     channel_handler: Option<&Arc<ChannelHandler>>,
     protocol_version: Option<&McpProtocolVersion>,
+    capability_profile: &crate::mcp::apps::McpCapabilityProfile,
     timeout: std::time::Duration,
 ) -> Result<Result<McpServiceWrapper, ClientInitializeError>, tokio::time::error::Elapsed>
 where
@@ -61,7 +62,10 @@ where
 {
     match connection_mode(protocol_version, channel_handler.is_some()) {
         ConnectionMode::DiscoverChannel => {
-            let handler = channel_handler.expect("channel mode requires handler");
+            let handler = channel_handler
+                .expect("channel mode requires handler")
+                .with_capability_profile(capability_profile.clone());
+            let handler = Arc::new(handler);
             tokio::time::timeout(
                 timeout,
                 rmcp::service::serve_client_with_lifecycle(
@@ -78,7 +82,7 @@ where
         ConnectionMode::DiscoverDefault => tokio::time::timeout(
             timeout,
             rmcp::service::serve_client_with_lifecycle(
-                super::mcpp_client_info(),
+                super::mcpp_client_info_for_profile(capability_profile),
                 transport,
                 ClientLifecycleMode::Discover {
                     preferred_versions: vec![ProtocolVersion::V_2026_07_28],
@@ -88,7 +92,10 @@ where
         .await
         .map(|inner| inner.map(McpServiceWrapper::Default)),
         ConnectionMode::LegacyChannel => {
-            let handler = channel_handler.expect("channel mode requires handler");
+            let handler = channel_handler
+                .expect("channel mode requires handler")
+                .with_capability_profile(capability_profile.clone());
+            let handler = Arc::new(handler);
             tokio::time::timeout(
                 timeout,
                 rmcp::service::serve_client(handler.clone(), transport),
@@ -98,7 +105,10 @@ where
         }
         ConnectionMode::LegacyDefault => tokio::time::timeout(
             timeout,
-            rmcp::service::serve_client(super::mcpp_client_info(), transport),
+            rmcp::service::serve_client(
+                super::mcpp_client_info_for_profile(capability_profile),
+                transport,
+            ),
         )
         .await
         .map(|inner| inner.map(McpServiceWrapper::Default)),
@@ -209,7 +219,11 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    async fn observe_first_request(protocol_version: Option<&McpProtocolVersion>) -> String {
+    async fn observe_first_request(
+        protocol_version: Option<&McpProtocolVersion>,
+        channel: bool,
+        capability_profile: &crate::mcp::apps::McpCapabilityProfile,
+    ) -> serde_json::Value {
         let (client_io, server_io) = tokio::io::duplex(8192);
         let server = tokio::spawn(async move {
             let (read, mut write) = tokio::io::split(server_io);
@@ -244,33 +258,66 @@ mod tests {
                 let notification: serde_json::Value = serde_json::from_str(&initialized).unwrap();
                 assert_eq!(notification["method"], "notifications/initialized");
             }
-            method
+            request
         });
 
+        let channel_handler = channel.then(|| {
+            Arc::new(ChannelHandler::new(
+                peri_agent::interaction::ChannelState::new(),
+            ))
+        });
         let _service = serve_client_auto(
             client_io,
-            None,
+            channel_handler.as_ref(),
             protocol_version,
+            capability_profile,
             std::time::Duration::from_secs(2),
         )
         .await
         .expect("握手不应超时")
         .expect("握手应成功");
-        let method = server.await.unwrap();
-        method
+        server.await.unwrap()
     }
 
     #[tokio::test]
     async fn none_starts_with_initialize_and_accepts_2025_11_25_response() {
-        assert_eq!(observe_first_request(None).await, "initialize");
+        let request = observe_first_request(
+            None,
+            false,
+            &crate::mcp::apps::McpCapabilityProfile::disabled(),
+        )
+        .await;
+        assert_eq!(request["method"], "initialize");
     }
 
     #[tokio::test]
     async fn explicit_2026_07_28_transport_starts_with_discover() {
-        assert_eq!(
-            observe_first_request(Some(&McpProtocolVersion::V2026_07_28)).await,
-            "server/discover"
-        );
+        let request = observe_first_request(
+            Some(&McpProtocolVersion::V2026_07_28),
+            false,
+            &crate::mcp::apps::McpCapabilityProfile::disabled(),
+        )
+        .await;
+        assert_eq!(request["method"], "server/discover");
+    }
+
+    #[tokio::test]
+    async fn enabled_profile_is_advertised_in_both_channel_modes() {
+        let profile =
+            crate::mcp::apps::McpCapabilityProfile::negotiated([crate::mcp::MCP_APP_MIME_TYPE]);
+        for protocol_version in [None, Some(&McpProtocolVersion::V2026_07_28)] {
+            let request = observe_first_request(protocol_version, true, &profile).await;
+            let extensions = if request["method"] == "server/discover" {
+                &request["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]
+                    ["extensions"]
+            } else {
+                &request["params"]["capabilities"]["extensions"]
+            };
+            assert!(
+                extensions[crate::mcp::MCP_UI_EXTENSION].is_object(),
+                "request: {request}"
+            );
+        }
     }
 
     #[test]

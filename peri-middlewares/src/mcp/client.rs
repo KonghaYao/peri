@@ -145,12 +145,18 @@ pub fn redact_mcp_error(input: &str) -> String {
 
 pub(crate) const SERVER_CACHE_VERSION_EXTENSION: &str = "io.mcpp/server-cache-version";
 
-pub(crate) fn mcpp_client_info() -> InitializeRequestParams {
-    let mut capabilities = ClientCapabilities::default();
-    capabilities.extensions = Some(std::collections::BTreeMap::from([(
+pub(crate) fn mcpp_client_info_for_profile(
+    profile: &super::apps::McpCapabilityProfile,
+) -> InitializeRequestParams {
+    let mut extensions = std::collections::BTreeMap::from([(
         SERVER_CACHE_VERSION_EXTENSION.to_string(),
         serde_json::Map::new(),
-    )]));
+    )]);
+    if let Some(extension) = profile.ui_extension() {
+        extensions.insert(super::apps::MCP_UI_EXTENSION.to_string(), extension);
+    }
+    let mut capabilities = ClientCapabilities::default();
+    capabilities.extensions = Some(extensions);
     InitializeRequestParams::new(capabilities, Implementation::from_build_env())
 }
 
@@ -352,6 +358,9 @@ pub struct McpClientPool {
     service_shutdown: tokio::sync::Mutex<ServiceShutdownState>,
     pub(crate) task_spawner: super::task_scope::McpTaskSpawner,
     pub(crate) clients: parking_lot::RwLock<HashMap<String, Arc<McpClientHandle>>>,
+    handle_generations:
+        parking_lot::Mutex<HashMap<String, Vec<(std::sync::Weak<McpClientHandle>, u64)>>>,
+    next_handle_generation: std::sync::atomic::AtomicU64,
     pub(crate) services: parking_lot::Mutex<HashMap<String, McpServiceWrapper>>,
     pub(crate) configs: parking_lot::RwLock<HashMap<String, McpServerConfig>>,
     pub(crate) cache_versions: parking_lot::RwLock<HashMap<String, String>>,
@@ -385,6 +394,10 @@ pub struct McpClientPool {
     pub(crate) session_inboxes: parking_lot::RwLock<HashMap<String, InboxHandle>>,
     /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
     pub(crate) resource_cache: super::resource_cache::McpResourceCache,
+    /// 进程启动时冻结的 deployment capability profile；初始连接和重连复用。
+    pub(crate) capability_profile: super::apps::McpCapabilityProfile,
+    /// 初始模型 MCP tool invocation 签发、`peri/mcp/open` 单次消费的租约。
+    pub(crate) app_binding_leases: Arc<super::apps::McpAppBindingLeaseRegistry>,
 }
 
 enum ServiceShutdownState {
@@ -454,6 +467,32 @@ async fn close_services(services: Vec<(String, McpServiceWrapper)>) -> McpPoolSh
 }
 
 impl McpClientPool {
+    pub(crate) fn handle_generation(&self, handle: &Arc<McpClientHandle>) -> u64 {
+        self.handle_generations
+            .lock()
+            .get(&handle.name)
+            .and_then(|entries| {
+                entries.iter().find_map(|(candidate, generation)| {
+                    candidate
+                        .upgrade()
+                        .filter(|candidate| Arc::ptr_eq(candidate, handle))
+                        .map(|_| *generation)
+                })
+            })
+            .unwrap_or(0)
+    }
+
+    fn advance_handle_generation(&self, handle: &Arc<McpClientHandle>) -> u64 {
+        let generation = self
+            .next_handle_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut generations = self.handle_generations.lock();
+        let entries = generations.entry(handle.name.clone()).or_default();
+        entries.retain(|(candidate, _)| candidate.strong_count() > 0);
+        entries.push((Arc::downgrade(handle), generation));
+        generation
+    }
+
     fn config_allows_persistent_cache(config: &McpServerConfig) -> bool {
         // `private` 只可在匿名上下文复用。任意静态 header、HTTP query 与
         // stdio env 都可能携带 Cookie、API key 或服务自定义凭据，保守禁用。
@@ -820,12 +859,24 @@ impl McpClientPool {
     }
 
     pub fn new_pending_with_spawner(spawner: super::task_scope::McpTaskSpawner) -> Self {
+        Self::new_pending_with_spawner_and_profile(
+            spawner,
+            super::apps::McpCapabilityProfile::disabled(),
+        )
+    }
+
+    pub fn new_pending_with_spawner_and_profile(
+        spawner: super::task_scope::McpTaskSpawner,
+        capability_profile: super::apps::McpCapabilityProfile,
+    ) -> Self {
         Self {
             lifecycle: std::sync::atomic::AtomicU8::new(0),
             lifecycle_registration: parking_lot::Mutex::new(()),
             service_shutdown: tokio::sync::Mutex::new(ServiceShutdownState::Idle),
             task_spawner: spawner,
             clients: parking_lot::RwLock::new(HashMap::new()),
+            handle_generations: parking_lot::Mutex::new(HashMap::new()),
+            next_handle_generation: std::sync::atomic::AtomicU64::new(1),
             services: parking_lot::Mutex::new(HashMap::new()),
             configs: parking_lot::RwLock::new(HashMap::new()),
             cache_versions: parking_lot::RwLock::new(HashMap::new()),
@@ -839,6 +890,8 @@ impl McpClientPool {
             active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
             session_inboxes: parking_lot::RwLock::new(HashMap::new()),
             resource_cache: super::resource_cache::McpResourceCache::new(),
+            capability_profile,
+            app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
         }
     }
 
@@ -1163,23 +1216,22 @@ impl McpClientPool {
                 .map(|c| (c.source.clone(), c.url.clone()))
                 .unwrap_or((None, None));
             let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
-            pool.clients.write().insert(
-                name.to_string(),
-                Arc::new(McpClientHandle {
-                    name: name.to_string(),
-                    version: None,
-                    cache_version: None,
-                    peer: None,
-                    tools: vec![],
-                    resources: vec![],
-                    status: ClientStatus::Failed(reason.clone()),
-                    oauth_status: OAuthStatus::default(),
-                    source,
-                    url,
-                    skills_capable: false,
-                    channel_capable: false,
-                }),
-            );
+            let handle = Arc::new(McpClientHandle {
+                name: name.to_string(),
+                version: None,
+                cache_version: None,
+                peer: None,
+                tools: vec![],
+                resources: vec![],
+                status: ClientStatus::Failed(reason.clone()),
+                oauth_status: OAuthStatus::default(),
+                source,
+                url,
+                skills_capable: false,
+                channel_capable: false,
+            });
+            pool.advance_handle_generation(&handle);
+            pool.clients.write().insert(name.to_string(), handle);
             old_status
         };
         pool.record_status_change(name, old_status.as_ref());
@@ -1210,23 +1262,22 @@ impl McpClientPool {
                 .map(|c| (c.source.clone(), c.url.clone()))
                 .unwrap_or((None, None));
             let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
-            pool.clients.write().insert(
-                name.to_string(),
-                Arc::new(McpClientHandle {
-                    name: name.to_string(),
-                    version: None,
-                    cache_version: None,
-                    peer: None,
-                    tools: vec![],
-                    resources: vec![],
-                    status: ClientStatus::Failed(reason),
-                    oauth_status: OAuthStatus::NeedsAuthorization,
-                    source,
-                    url,
-                    skills_capable: false,
-                    channel_capable: false,
-                }),
-            );
+            let handle = Arc::new(McpClientHandle {
+                name: name.to_string(),
+                version: None,
+                cache_version: None,
+                peer: None,
+                tools: vec![],
+                resources: vec![],
+                status: ClientStatus::Failed(reason),
+                oauth_status: OAuthStatus::NeedsAuthorization,
+                source,
+                url,
+                skills_capable: false,
+                channel_capable: false,
+            });
+            pool.advance_handle_generation(&handle);
+            pool.clients.write().insert(name.to_string(), handle);
             old_status
         };
         pool.record_status_change(name, old_status.as_ref());
@@ -1463,6 +1514,7 @@ impl McpClientPool {
         if !self.is_open() {
             return Err(service);
         }
+        self.advance_handle_generation(&handle);
         self.services.lock().insert(name.clone(), service);
         self.clients.write().insert(name, handle);
         Ok(())

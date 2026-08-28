@@ -42,12 +42,14 @@ use peri_acp_types::event_data::PredictionAction;
 
 pub mod assemble;
 pub(crate) mod compact_config;
+mod connection;
 mod continuation;
 pub mod controller_ports;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
 pub mod lease;
+mod mcp_apps;
 mod notify;
 mod prediction_projection;
 mod prompt;
@@ -124,6 +126,8 @@ pub struct AcpServerConfig {
     pub permission_mode: Arc<SharedPermissionMode>,
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
+    /// Optional stdio-only MCP Apps backend. Absence keeps the capability fail closed.
+    pub mcp_apps_relay: Option<Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>>,
     pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     /// OAuth 授权事件通道（host 级，跨 session）：装配点创建 (tx, rx) 并注入
     /// tx（MCP 授权回调经此转发 AcpEvent），run_acp_server take rx 后 spawn
@@ -500,6 +504,10 @@ async fn run_acp_server_inner(
         ),
     );
 
+    let connection = Arc::new(tokio::sync::Mutex::new(connection::ConnectionContext::new(
+        cfg.stdio_command_filter && cfg.mcp_apps_relay.is_some(),
+    )));
+    let connection_cancellation = connection.lock().await.cancellation();
     while let Some(msg) = transport.recv().await {
         match msg {
             IncomingMessage::Request { id, method, params } => {
@@ -507,13 +515,20 @@ async fn run_acp_server_inner(
                     // Spawn long-running prompt execution so the server loop
                     // continues processing session/cancel notifications.
                     let prompt_session_id = extract_session_id(&params, "").to_string();
+                    if !prompt_session_id.is_empty() {
+                        if let Some(relay) = cfg.mcp_apps_relay.as_ref() {
+                            relay.begin_session_turn(&prompt_session_id);
+                        }
+                    }
                     let sessions = sessions.clone();
                     let transport = Arc::clone(&transport);
                     let prompt_locks = prompt_locks.clone();
                     let cfg = Arc::clone(&cfg);
                     let cont_tx = cont_tx.clone();
                     let prompt_spawner = cfg.host_task_spawner.clone();
-                    let _ = prompt_spawner.spawn(
+                    let rejected_transport = Arc::clone(&transport);
+                    let rejected_id = id.clone();
+                    let spawn_result = prompt_spawner.spawn(
                         task_scope::HostTaskOwnerKind::Session,
                         task_scope::HostTaskKind::Prompt,
                         async move {
@@ -528,17 +543,112 @@ async fn run_acp_server_inner(
                                 &cont_tx,
                             )
                             .await;
-                            let _ = transport.send_response(id, result).await;
+                            if let Err(error) = transport.send_response(id, result).await {
+                                tracing::warn!(%error, "prompt terminal response send failed");
+                                return;
+                            }
                             if !prompt_session_id.is_empty() {
                                 send_session_info_update(transport.as_ref(), &prompt_session_id)
                                     .await;
                             }
                         },
                     );
+                    if spawn_result.is_err() {
+                        if let Err(error) = rejected_transport
+                            .send_response(
+                                rejected_id,
+                                Err(crate::transport::types::AcpError::new(
+                                    -32800,
+                                    "request cancelled",
+                                )),
+                            )
+                            .await
+                        {
+                            tracing::warn!(%error, "rejected prompt response send failed");
+                        }
+                    }
+                } else if matches!(
+                    method.as_str(),
+                    "peri/mcp/open" | "peri/mcp/app" | "peri/mcp/resource"
+                ) {
+                    let transport = Arc::clone(&transport);
+                    let relay = cfg.mcp_apps_relay.clone();
+                    let connection = Arc::clone(&connection);
+                    let app_spawner = cfg.host_task_spawner.clone();
+                    let connection_cancellation = connection_cancellation.clone();
+                    let rejected_transport = Arc::clone(&transport);
+                    let rejected_id = id.clone();
+                    let spawn_result = app_spawner.spawn(
+                        task_scope::HostTaskOwnerKind::Connection,
+                        task_scope::HostTaskKind::McpAppsRelay,
+                        async move {
+                            let result = tokio::select! {
+                                _ = connection_cancellation.cancelled() => {
+                                    Err(crate::transport::types::AcpError::new(-32800, "request cancelled"))
+                                }
+                                result = async {
+                                    match method.as_str() {
+                                        "peri/mcp/open" => {
+                                            let mut connection = connection.lock().await;
+                                            mcp_apps::handle_request(
+                                                &method,
+                                                &params,
+                                                &mut connection,
+                                                relay.as_ref(),
+                                            )
+                                            .await
+                                        }
+                                        _ => {
+                                            let mut request_connection = {
+                                                let connection = connection.lock().await;
+                                                connection.snapshot_for_request()
+                                            };
+                                            mcp_apps::handle_request(
+                                                &method,
+                                                &params,
+                                                &mut request_connection,
+                                                relay.as_ref(),
+                                            )
+                                            .await
+                                        }
+                                    }
+                                } => result,
+                            };
+                            if let Err(error) = transport.send_response(id, result).await {
+                                tracing::warn!(%error, "MCP Apps terminal response send failed");
+                            }
+                        },
+                    );
+                    if spawn_result.is_err() {
+                        let _ = rejected_transport
+                            .send_response(
+                                rejected_id,
+                                Err(crate::transport::types::AcpError::new(
+                                    -32800,
+                                    "request cancelled",
+                                )),
+                            )
+                            .await;
+                    }
                 } else {
-                    let mut sessions = sessions.lock().await;
-                    let result =
-                        handle_request(&method, &params, &cfg, &mut sessions, &transport).await;
+                    let closed_session_id =
+                        matches!(method.as_str(), "session/close" | "session/delete")
+                            .then(|| extract_session_id(&params, "").to_string())
+                            .filter(|session_id| !session_id.is_empty());
+                    let result = {
+                        let mut sessions = sessions.lock().await;
+                        handle_request(&method, &params, &cfg, &mut sessions, &transport).await
+                    };
+                    if method == "initialize" && result.is_ok() {
+                        connection.lock().await.commit_initialize();
+                    }
+                    if result.is_ok() {
+                        if let (Some(session_id), Some(relay)) =
+                            (closed_session_id.as_deref(), cfg.mcp_apps_relay.as_ref())
+                        {
+                            relay.close_session(session_id);
+                        }
+                    }
                     let new_session_id = (method == "session/new")
                         .then(|| {
                             result
@@ -563,6 +673,14 @@ async fn run_acp_server_inner(
                 }
             }
             IncomingMessage::Notification { method, params } => {
+                if method == "session/cancel" {
+                    let session_id = extract_session_id(&params, "");
+                    if !session_id.is_empty() {
+                        if let Some(relay) = cfg.mcp_apps_relay.as_ref() {
+                            relay.close_session(session_id);
+                        }
+                    }
+                }
                 // session/cancel 可能需要在锁外补发 continuation 请求
                 // （race 兜底：bg 结果已 route 为 Defer，但通知可能在 cancel
                 // 置位前被 scheduler 跳过）。unbounded send 虽不阻塞，仍统一
@@ -582,6 +700,12 @@ async fn run_acp_server_inner(
     }
 
     // Transport EOF is the host's single ownership transaction.
+    connection_cancellation.cancel();
+    let connection_id = connection.lock().await.id().to_string();
+    if let Some(relay) = cfg.mcp_apps_relay.as_ref() {
+        relay.close_connection(&connection_id);
+    }
+    connection.lock().await.begin_close();
     task_owner.begin_shutdown();
     if let Some(dynamic_mcp) = cfg.dynamic_mcp.as_ref() {
         dynamic_mcp.begin_shutdown();

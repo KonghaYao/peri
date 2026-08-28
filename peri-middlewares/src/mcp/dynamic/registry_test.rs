@@ -890,17 +890,28 @@ async fn drain_timeout_never_reports_unloaded_and_can_be_retried() {
         DynamicMcpResponse::Accepted(accepted) => accepted.operation_id,
         response => panic!("unexpected response: {response:?}"),
     };
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    let status = registry
-        .execute(
-            "session-a",
-            CanonicalDynamicMcpAction::Status(DynamicMcpStatusRequest {
-                operation_id: Some(operation_id),
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap();
+    let status = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let status = registry
+                .execute(
+                    "session-a",
+                    CanonicalDynamicMcpAction::Status(DynamicMcpStatusRequest {
+                        operation_id: Some(operation_id.clone()),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .unwrap();
+            if matches!(status, DynamicMcpResponse::Status(ref value)
+                if value.operations[0].state == DynamicMcpOperationState::Failed)
+            {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drain timeout operation did not settle");
     assert!(matches!(status, DynamicMcpResponse::Status(ref value)
         if value.operations[0].state == DynamicMcpOperationState::Failed
             && value.operations[0].error.as_ref().is_some_and(|failure| failure.code == DynamicMcpErrorCode::ShutdownIncomplete)));

@@ -542,6 +542,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                             Arc::clone(pool)
                         };
                         let mw = McpMiddleware::new(Arc::clone(&effective_pool))
+                            .with_tool_pool(Arc::clone(pool))
                             .with_skill_discovery(
                                 ctx.mcp_skill_registry.clone(),
                                 ctx.cancel.clone(),

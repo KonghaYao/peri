@@ -158,10 +158,10 @@ async fn test_pump_parses_three_message_kinds_and_eof_closes() {
     );
 }
 
-/// 空行被跳过、非法 JSON 行仅 error 日志后继续——不中断后续报文解析。
+/// 空行被跳过；非法 JSON 返回 parse error 后继续解析后续报文。
 #[tokio::test]
-async fn test_invalid_json_line_skipped_keeps_parsing() {
-    let (transport, mut input, _output) = duplex_transport();
+async fn test_invalid_json_returns_error_and_keeps_parsing() {
+    let (transport, mut input, mut output) = duplex_transport();
     write_line(&mut input, "").await;
     write_line(&mut input, "this is not json {").await;
     write_line(
@@ -170,6 +170,10 @@ async fn test_invalid_json_line_skipped_keeps_parsing() {
     )
     .await;
     drop(input);
+
+    let error: Value = serde_json::from_str(&read_line(&mut output).await).unwrap();
+    assert_eq!(error["id"], Value::Null);
+    assert_eq!(error["error"]["code"], -32700);
 
     match recv(&transport).await {
         Some(IncomingMessage::Request { id, method, .. }) => {
@@ -641,6 +645,98 @@ async fn test_pump_rejects_out_of_domain_ids_and_null_id_becomes_notification() 
         other => panic!("域外 id 行应被拒绝、pump 不中断，实际 {other:?}"),
     }
     assert!(recv(&transport).await.is_none(), "EOF 后 pump 退出");
+}
+
+/// 非法 JSON 必须产生标准 JSON-RPC parse error，且不能阻断后续合法请求。
+#[tokio::test]
+async fn test_malformed_json_returns_parse_error_and_pump_continues() {
+    let (transport, mut input, mut output) = duplex_transport();
+    write_line(&mut input, r#"{"jsonrpc":"2.0","id":1,"#).await;
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","id":2,"method":"m/req","params":{}}"#,
+    )
+    .await;
+
+    let error: Value = serde_json::from_str(&read_line(&mut output).await).unwrap();
+    assert_eq!(error["jsonrpc"], "2.0");
+    assert!(error["id"].is_null());
+    assert_eq!(error["error"]["code"], -32700);
+    assert_eq!(error["error"]["message"], "Parse error");
+    assert!(error.get("result").is_none());
+
+    match recv(&transport).await {
+        Some(IncomingMessage::Request { id, method, .. }) => {
+            assert_eq!(id, RequestId::Number(2));
+            assert_eq!(method, "m/req");
+        }
+        other => panic!("parse error 后合法请求应继续进入 host，实际 {other:?}"),
+    }
+}
+
+/// 可解析但不符合 JSON-RPC request envelope 的输入必须返回 Invalid Request。
+#[tokio::test]
+async fn test_invalid_request_envelope_returns_invalid_request_error() {
+    let (_transport, mut input, mut output) = duplex_transport();
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"1.0","id":"bad-1","method":"m/req","params":{}}"#,
+    )
+    .await;
+
+    let error: Value = serde_json::from_str(&read_line(&mut output).await).unwrap();
+    assert_eq!(error["jsonrpc"], "2.0");
+    assert_eq!(error["id"], "bad-1");
+    assert_eq!(error["error"]["code"], -32600);
+    assert_eq!(error["error"]["message"], "Invalid Request");
+    assert!(error.get("result").is_none());
+}
+
+/// 域外 request id 无法安全关联，必须以 id=null 返回 Invalid Request。
+#[tokio::test]
+async fn test_out_of_domain_request_id_returns_invalid_request_error() {
+    let (_transport, mut input, mut output) = duplex_transport();
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","id":true,"method":"m/req","params":{}}"#,
+    )
+    .await;
+
+    let error: Value = serde_json::from_str(&read_line(&mut output).await).unwrap();
+    assert!(error["id"].is_null());
+    assert_eq!(error["error"]["code"], -32600);
+    assert_eq!(error["error"]["message"], "Invalid Request");
+}
+
+/// Response 必须恰好包含 result/error 之一；两者并存不得结算 pending request。
+#[tokio::test]
+async fn test_response_with_result_and_error_is_rejected() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let transport = Arc::new(transport);
+    let request = {
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move { transport.send_request("m/echo", json!({})).await })
+    };
+    let sent: Value = serde_json::from_str(&read_line(&mut output).await).unwrap();
+
+    write_line(
+        &mut input,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": sent["id"],
+            "result": "ignored",
+            "error": { "code": -32000, "message": "boom" }
+        })
+        .to_string(),
+    )
+    .await;
+    drop(input);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), request)
+        .await
+        .expect("EOF 后 pending request 应及时结束")
+        .expect("request task 不应 panic");
+    assert!(result.is_err(), "非法 response 不得结算为业务响应");
 }
 
 // ── legacy type:cancel（批 3 §7 #10 移植）──────────────────────────────────

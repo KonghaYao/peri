@@ -112,6 +112,7 @@ fn make_server_config_with(
         ),
         cron_scheduler: None,
         mcp_pool,
+        mcp_apps_relay: None,
         dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,
@@ -410,6 +411,40 @@ async fn await_server_exit(server_task: tokio::task::JoinHandle<()>, input: Dupl
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
+
+/// host task scope 已关闭时，prompt request 仍必须收到一次 terminal error response。
+#[tokio::test]
+async fn test_rejected_prompt_task_returns_terminal_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = test_config(&tmp);
+    cfg.host_task_owner
+        .as_ref()
+        .expect("test config should own host task scope")
+        .begin_shutdown();
+    let (transport, mut input_write, mut output_read) = duplex_transport();
+    let server_task = tokio::spawn(host::run_acp_server(Arc::new(transport), cfg));
+
+    write_line(
+        &mut input_write,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "prompt-rejected",
+            "method": "session/prompt",
+            "params": { "sessionId": "missing", "prompt": [] }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let response: Value = serde_json::from_str(&read_line(&mut output_read).await).unwrap();
+    assert_eq!(response["id"], "prompt-rejected");
+    assert_eq!(response["error"]["code"], -32800);
+    assert_eq!(response["error"]["message"], "request cancelled");
+    assert!(response.get("result").is_none());
+
+    drop(input_write);
+    server_task.await.expect("server task 不应 panic");
+}
 
 /// initialize → session/new → AvailableCommandsUpdate 通知：stdout 侧完整断言。
 /// 证明 StdioTransport 可承载 run_acp_server 的生命周期链路（wire 兼容 live 证明）。

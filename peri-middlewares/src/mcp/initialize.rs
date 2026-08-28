@@ -115,6 +115,7 @@ impl McpClientPool {
                             transport,
                             channel_handler.as_ref(),
                             protocol_version,
+                            &pool.capability_profile,
                             timeout,
                         )
                         .await
@@ -160,6 +161,7 @@ impl McpClientPool {
                             build_http_transport(url, headers),
                             channel_handler.as_ref(),
                             protocol_version,
+                            &pool.capability_profile,
                             timeout,
                         )
                         .await
@@ -367,8 +369,14 @@ impl McpClientPool {
                     ref env,
                 } => match spawn_stdio_transport(command, args, env) {
                     Ok(t) => {
-                        serve_client_auto(t, channel_handler.as_ref(), protocol_version, timeout)
-                            .await
+                        serve_client_auto(
+                            t,
+                            channel_handler.as_ref(),
+                            protocol_version,
+                            &pool.capability_profile,
+                            timeout,
+                        )
+                        .await
                     }
                     Err(e) => {
                         Self::insert_failed(&pool, name, format!("stdio 失败: {e}"));
@@ -411,6 +419,7 @@ impl McpClientPool {
                             build_http_transport(url, headers),
                             channel_handler.as_ref(),
                             protocol_version,
+                            &pool.capability_profile,
                             timeout,
                         )
                         .await

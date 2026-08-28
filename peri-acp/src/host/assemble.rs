@@ -137,6 +137,30 @@ pub fn build_session_manager(
 /// 边 2 assemble 路径）；行为与迁移前三路径（launch / cli_print / stdio）
 /// 各自装配一致（cron tick 驱动、MCP 初始化、孤儿插件清理时机均复刻）。
 pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig {
+    assemble_server_config_with_mcp_profile(
+        input,
+        peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+    )
+    .await
+}
+
+/// stdio deployment variant. The assembly boundary derives the concrete MCP profile;
+/// TUI/MPSC always use [`assemble_server_config`].
+pub async fn assemble_server_config_with_mcp_apps(
+    input: HostAssemblyInput,
+    apps_enabled: bool,
+) -> AcpServerConfig {
+    assemble_server_config_with_mcp_profile(
+        input,
+        peri_middlewares::mcp::apps::deployment_profile(apps_enabled),
+    )
+    .await
+}
+
+async fn assemble_server_config_with_mcp_profile(
+    input: HostAssemblyInput,
+    mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
+) -> AcpServerConfig {
     let (host_task_owner, host_task_spawner) = HostTaskOwner::new();
     let (mcp_task_owner, mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     let HostAssemblyInput {
@@ -201,8 +225,9 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         None
     } else {
         let pool = Arc::new(
-            peri_middlewares::mcp::McpClientPool::new_pending_with_spawner(
+            peri_middlewares::mcp::McpClientPool::new_pending_with_spawner_and_profile(
                 mcp_task_spawner.clone(),
+                mcp_profile.clone(),
             ),
         );
         let pool_clone = pool.clone();
@@ -334,8 +359,9 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
                 mcp_task_spawner.clone(),
                 mcp_pool_concrete.clone().unwrap_or_else(|| {
                     Arc::new(
-                        peri_middlewares::mcp::McpClientPool::new_pending_with_spawner(
+                        peri_middlewares::mcp::McpClientPool::new_pending_with_spawner_and_profile(
                             mcp_task_spawner.clone(),
+                            mcp_profile.clone(),
                         ),
                     )
                 }),
@@ -348,8 +374,19 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
     // McpSubscriptionPort（订阅通知 → 会话 inbox 唤醒）两个角色。
     let mcp_pool: Option<Arc<dyn McpPoolPort>> =
         mcp_pool_concrete.clone().map(|p| p as Arc<dyn McpPoolPort>);
-    let mcp_subscription: Option<Arc<dyn McpSubscriptionPort>> =
-        mcp_pool_concrete.map(|p| p as Arc<dyn McpSubscriptionPort>);
+    let mcp_subscription: Option<Arc<dyn McpSubscriptionPort>> = mcp_pool_concrete
+        .clone()
+        .map(|p| p as Arc<dyn McpSubscriptionPort>);
+    let mcp_apps_relay: Option<Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>> =
+        if mcp_profile.apps_enabled() {
+            mcp_pool_concrete.clone().map(|pool| {
+                Arc::new(peri_middlewares::mcp::apps_relay::PoolMcpAppsRelay::new(
+                    pool,
+                )) as Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>
+            })
+        } else {
+            None
+        };
 
     // ── 资源类/业务面端口默认实现（构造下沉：ACP Host = 部署单元）──
     let tool_search_index: Arc<dyn ToolSearchPort> =
@@ -458,6 +495,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         permission_mode,
         cron_scheduler,
         mcp_pool,
+        mcp_apps_relay,
         dynamic_mcp: Some(dynamic_mcp),
         oauth_event_tx: Some(oauth_event_tx),
         oauth_event_rx: Some(oauth_event_rx),

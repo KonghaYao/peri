@@ -614,11 +614,21 @@ async fn dispatch_concurrent(
                     let ctx_param = crate::tools::ToolContext::new(&messages, &cwd)
                         .with_effective_tool_dispatcher(
                             Arc::new(StageEffectiveToolDispatcher::new(
-                                dispatch_context,
+                                dispatch_context.clone(),
                                 dispatch_catalog,
                             )),
                             raw_call.id.clone(),
                             cancel.clone(),
+                        )
+                        .with_session_identity(
+                            dispatch_context
+                                .session
+                                .session_context
+                                .read()
+                                .get("session_id")
+                                .cloned()
+                                .unwrap_or_else(|| dispatch_context.session.agent_id.to_string()),
+                            dispatch_context.session.turn.turn_id.to_string(),
                         );
                     match tool {
                         Some(t) => t.invoke(input, ctx_param).await.map_err(|e| {

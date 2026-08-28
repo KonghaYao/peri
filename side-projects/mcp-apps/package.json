@@ -7,11 +7,16 @@
   "scripts": {
     "chat": "bun run chat/server.ts",
     "get-time": "bunx tsx server.ts",
+    "get-time:stdio": "bunx tsx stdio-server.ts",
+    "check": "npm run build && bunx tsx check.ts",
+    "check:peri": "npm run build && bunx tsx check-peri.ts",
+    "typecheck": "bunx tsc --noEmit",
     "build": "INPUT=mcp-app.html bunx vite build"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^1.7.5",
-    "@modelcontextprotocol/sdk": "^1.30.0"
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",

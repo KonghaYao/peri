@@ -271,7 +271,7 @@ fn finalize(
 ) -> Result<SessionToolCatalogSnapshot, CatalogRefreshError> {
     let direct_definitions = tools
         .values()
-        .filter(|entry| entry.tool.is_direct())
+        .filter(|entry| entry.tool.is_direct() && entry.tool.visible_to_model())
         .map(|entry| entry.tool.definition())
         .collect();
     let mut aliases = BTreeMap::new();
