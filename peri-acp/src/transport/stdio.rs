@@ -109,6 +109,9 @@ impl StdioTransport {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let router = RequestRouter::new();
         let pump_router = router.clone();
+        let writer: Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>> =
+            Arc::new(Mutex::new(BufWriter::new(Box::new(writer))));
+        let pump_writer = Arc::clone(&writer);
         let cancel_hook = Arc::new(std::sync::Mutex::new(cancel_hook));
         let pump_cancel_hook = Arc::clone(&cancel_hook);
 
@@ -152,10 +155,46 @@ impl StdioTransport {
                     continue;
                 }
 
-                let mut envelope: JsonRpcEnvelope = match serde_json::from_str(&line) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to parse JSON-RPC from stdin");
+                let raw: Value = match serde_json::from_str(&line) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error, "Stdio transport: malformed JSON-RPC input");
+                        if send_protocol_error(
+                            &pump_writer,
+                            &pump_router,
+                            Value::Null,
+                            -32700,
+                            "Parse error",
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let invalid_id = raw
+                    .get("id")
+                    .filter(|id| is_domain_id(id))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let mut envelope: JsonRpcEnvelope = match serde_json::from_value(raw) {
+                    Ok(envelope) => envelope,
+                    Err(error) => {
+                        tracing::warn!(%error, "Stdio transport: invalid JSON-RPC envelope");
+                        if send_protocol_error(
+                            &pump_writer,
+                            &pump_router,
+                            invalid_id,
+                            -32600,
+                            "Invalid Request",
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -163,6 +202,31 @@ impl StdioTransport {
                 let has_method = envelope.method.is_some();
                 let result_val = envelope.result.take();
                 let error_val = envelope.error.take();
+
+                if envelope.jsonrpc != "2.0"
+                    || (has_method && (result_val.is_some() || error_val.is_some()))
+                    || (!has_method && result_val.is_some() == error_val.is_some())
+                {
+                    let id = envelope
+                        .id
+                        .as_ref()
+                        .filter(|id| is_domain_id(id))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    if send_protocol_error(
+                        &pump_writer,
+                        &pump_router,
+                        id,
+                        -32600,
+                        "Invalid Request",
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
 
                 // JSON-RPC 2.0 §2.2：Request 的 id 成员存在但为 null 时视为
                 // 通知（客户端无兴趣于对应响应，等同「无 id」）——进入
@@ -203,8 +267,20 @@ impl StdioTransport {
                         if !is_domain_id(&id) {
                             tracing::warn!(
                                 id = %id,
-                                "Ignoring JSON-RPC request with out-of-domain id"
+                                "Rejecting JSON-RPC request with out-of-domain id"
                             );
+                            if send_protocol_error(
+                                &pump_writer,
+                                &pump_router,
+                                Value::Null,
+                                -32600,
+                                "Invalid Request",
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
                             continue;
                         }
                         let method = envelope.method.unwrap();
@@ -246,9 +322,7 @@ impl StdioTransport {
         Self {
             incoming_rx: tokio::sync::Mutex::new(incoming_rx),
             router,
-            writer: Arc::new(Mutex::new(BufWriter::new(
-                Box::new(writer) as Box<dyn AsyncWrite + Send + Unpin>
-            ))),
+            writer,
             cancel_hook,
         }
     }
@@ -322,6 +396,24 @@ impl AcpTransport for StdioTransport {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+async fn send_protocol_error(
+    writer: &Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
+    router: &RequestRouter,
+    id: Value,
+    code: i64,
+    message: &'static str,
+) -> Result<(), AcpError> {
+    let envelope = JsonRpcEnvelope {
+        jsonrpc: "2.0".to_string(),
+        id: Some(id),
+        method: None,
+        params: None,
+        result: None,
+        error: Some(AcpError::new(code, message)),
+    };
+    write_envelope(writer, router, &envelope).await
+}
 
 async fn write_envelope(
     writer: &Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,

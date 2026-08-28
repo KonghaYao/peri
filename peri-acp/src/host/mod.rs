@@ -526,7 +526,9 @@ async fn run_acp_server_inner(
                     let cfg = Arc::clone(&cfg);
                     let cont_tx = cont_tx.clone();
                     let prompt_spawner = cfg.host_task_spawner.clone();
-                    let _ = prompt_spawner.spawn(
+                    let rejected_transport = Arc::clone(&transport);
+                    let rejected_id = id.clone();
+                    let spawn_result = prompt_spawner.spawn(
                         task_scope::HostTaskOwnerKind::Session,
                         task_scope::HostTaskKind::Prompt,
                         async move {
@@ -541,13 +543,30 @@ async fn run_acp_server_inner(
                                 &cont_tx,
                             )
                             .await;
-                            let _ = transport.send_response(id, result).await;
+                            if let Err(error) = transport.send_response(id, result).await {
+                                tracing::warn!(%error, "prompt terminal response send failed");
+                                return;
+                            }
                             if !prompt_session_id.is_empty() {
                                 send_session_info_update(transport.as_ref(), &prompt_session_id)
                                     .await;
                             }
                         },
                     );
+                    if spawn_result.is_err() {
+                        if let Err(error) = rejected_transport
+                            .send_response(
+                                rejected_id,
+                                Err(crate::transport::types::AcpError::new(
+                                    -32800,
+                                    "request cancelled",
+                                )),
+                            )
+                            .await
+                        {
+                            tracing::warn!(%error, "rejected prompt response send failed");
+                        }
+                    }
                 } else if matches!(
                     method.as_str(),
                     "peri/mcp/open" | "peri/mcp/app" | "peri/mcp/resource"
@@ -595,7 +614,9 @@ async fn run_acp_server_inner(
                                     }
                                 } => result,
                             };
-                            let _ = transport.send_response(id, result).await;
+                            if let Err(error) = transport.send_response(id, result).await {
+                                tracing::warn!(%error, "MCP Apps terminal response send failed");
+                            }
                         },
                     );
                     if spawn_result.is_err() {
