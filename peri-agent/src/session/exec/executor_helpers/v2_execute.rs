@@ -418,9 +418,16 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // 只采样一次，后续 failure / TurnEnded / cascade / outcome 共用同一分类。
     let sampled_cancel = req.cancel.is_cancelled();
     let terminal = classify_loop_terminal(&loop_result, sampled_cancel);
-    // 内部诊断日志对所有 Error 保持（含 Interrupted/MaxIterations）。
-    if let LoopResult::Error(ref e) = loop_result {
-        error!(session_id = %req.session_id, error = %e, "[v2] loop failed");
+    // 诊断日志与 wire 使用同一安全投影：保留错误原意和 HTTP status，但不得把
+    // provider body 中的凭据或完整 cause chain 写入日志。
+    if let Some(failure) = &terminal.failure {
+        error!(
+            session_id = %req.session_id,
+            kind = failure.kind.wire_name(),
+            http_status = failure.http_status,
+            message = %failure.public_message,
+            "[v2] loop failed"
+        );
     }
     // 对非 Interrupted/MaxIterations/cancel 的致命错误，通知 TUI 显示红色错误提示
     // issue: spec/issues/2026-07-22-llm-api-error-silently-swallowed-in-tui.md
@@ -491,11 +498,11 @@ pub(crate) struct LoopTerminal {
 /// 分类契约（spec/issues/2026-08-18-acp-error-handler.md Commit 1）：
 /// - `Completed` / 用户 cancel / `Interrupted` / `MaxIterationsExceeded` →
 ///   failure 为 `None`（它们已有标准 `StopReason` 表达，不应升级为请求失败）；
-/// - 其他 `LoopResult::Error` → failure 为
-///   `Some(ExecutionFailureKind::Internal + user_facing_message())`。
+/// - 其他 `LoopResult::Error` → failure 为安全的窄投影：LLM 错误保留脱敏、
+///   限长后的原始含义和可选 HTTP status，其他错误使用安全用户文案。
 ///
 /// fatal 判定与 `AgentExecutionFailed` 发射条件共享（fatal ↔ 发射私有事件），
-/// public message 来自 [`AgentError::user_facing_message()`]（脱敏基线）。
+/// public message 由 [`ExecutionFailure::from_agent_error`] 统一生成。
 pub(crate) fn classify_loop_terminal(
     loop_result: &LoopResult,
     sampled_cancel: bool,
@@ -541,7 +548,7 @@ pub(crate) fn classify_loop_terminal(
     LoopTerminal {
         ok: false,
         stop_reason: PromptStopReason::EndTurn,
-        failure: Some(ExecutionFailure::internal(error.user_facing_message())),
+        failure: Some(ExecutionFailure::from_agent_error(error)),
         turn_status: TurnStatus::Error,
         turn_error_kind: Some(TurnErrorKind::LlmFailure),
     }

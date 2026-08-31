@@ -47,15 +47,19 @@ Peri 当前对执行失败使用了两套不完整的表达：
 
 为 `ExecOutcome` 及其下游 `PromptResult` 增加显式的可选 fatal failure，而不是复用 `ok` 或从 `stop_reason` 反推。该 failure 至少包含：
 
-- 稳定的内部类别，用于 ACP 边界选择协议错误码；
-- 由 `AgentError::user_facing_message()` 生成的非空、已脱敏 public message。
+- 稳定的内部类别，用于 ACP 边界选择协议错误码和 allowlist `data.kind`；
+- 非空、已脱敏且限长的 public message；LLM/provider 错误保留原始诊断含义，不再压成固定语义文案；
+- LLM HTTP 错误额外保留 `status`，但不携带完整 provider payload 或 cause chain。
 
 推荐使用窄 DTO（例如 `PromptFailure` / `ExecutionFailure`），不要把完整 `AgentError`、`anyhow::Error` 或 provider response 直接跨层传递。这样既保留结构化分类，也能阻止内部 cause chain 意外序列化到 wire。
 
-分类只需满足本次协议决策，不为未来错误建立过度复杂的 taxonomy。首批建议区分：
+分类只覆盖当前客户端诊断需要的稳定 taxonomy：
 
-- `Internal`：真正的执行/LLM/middleware/serialization fatal failure；
-- 如代码路径需要，可保留更窄的安全类别，但所有类别都必须显式映射并有默认安全文案。
+- `Internal`：非 LLM 的内部执行失败；
+- `Llm`：无 HTTP status 的 LLM/provider 失败；
+- `LlmHttp`：带 HTTP status 的 LLM/provider 失败。
+
+完整原始 error 只进入受控 `tracing`；wire message 对 provider 原文执行凭据遮蔽、URL query 清洗和 Unicode 安全限长。
 
 `Interrupted` 与 `MaxIterationsExceeded` 不写入 fatal failure：前者继续返回成功 `PromptResponse(Cancelled)`，后者继续返回成功 `PromptResponse(MaxTurnRequests)`。
 
@@ -68,7 +72,7 @@ Peri 当前对执行失败使用了两套不完整的表达：
 
 不要在 `run_acp_server`、`MpscTransport` 或 `StdioTransport` 中识别业务错误；这些层只发送 `Result`。
 
-首版使用 JSON-RPC server error 保留段中的一个稳定代码。推荐定义具名常量（建议 `-32000`，语义为 agent turn execution failed），而不是在调用点散落 magic number。`message` 使用 failure 的 public message；`data` 首版默认省略，避免把内部类型、provider payload 或未来不稳定字段固化为公开协议。若 RCS 明确需要机器可读分类，再单独评审 allowlist data schema。
+使用稳定 JSON-RPC server error code `-32000`（agent turn execution failed）。`message` 使用 failure 的非空、脱敏限长原文；`data` 是版本受控的 allowlist：始终包含 `kind`，`LlmHttp` 额外包含数值 `status`。不得将 provider payload、header、请求内容或 cause chain 放入 `data`。
 
 ### D3. 私有失败事件暂时双发，但不再是事实源
 
@@ -95,7 +99,7 @@ live mapper 与 session replay 对 tool result 使用同一投影规则：
 
 ### D5. 安全边界
 
-- 对外 turn message 只使用 `user_facing_message()` 或同等级 allowlist formatter。
+- 对外 turn message 使用窄 allowlist formatter：LLM/provider 原文只在凭据遮蔽、URL query 清洗和 Unicode 安全限长后进入 wire；其他内部错误继续使用 `user_facing_message()`。
 - 内部完整错误只进入 `tracing`，且字段仍须遵守 secret 规则；不得把完整 provider response body、认证 header、请求 payload、stack/backtrace 放入 `AcpError.message/data`。
 - 工具 output 本身可能包含用户文件内容或命令输出，这是现有 tool result 语义；本改造只把已经允许传给客户端的 tool result 投影到标准字段，不额外拼接 debug error chain。
 - 所有 fallback public message 必须非空，并在测试中断言不包含代表性 secret/cause 文本。

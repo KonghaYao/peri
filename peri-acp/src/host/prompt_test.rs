@@ -180,8 +180,9 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
 // end-turn → 成功 `PromptResponse`。`ExecutionFailureKind` 穷尽映射 + 脱敏
 // 消息基线一并固定。
 mod wire_projection {
-    use peri_acp_types::session::{
-        ExecutionFailure, ExecutionFailureKind, EXECUTION_FAILURE_FALLBACK_MESSAGE,
+    use peri_acp_types::{
+        error::AgentError,
+        session::{ExecutionFailure, ExecutionFailureKind, EXECUTION_FAILURE_FALLBACK_MESSAGE},
     };
 
     use super::{
@@ -201,17 +202,43 @@ mod wire_projection {
             ACP_TURN_EXECUTION_FAILED_CODE,
             "Internal 必须使用具名常量（替代调用点 magic number）"
         );
+        assert_eq!(
+            execution_failure_kind_code(ExecutionFailureKind::Llm),
+            ACP_TURN_EXECUTION_FAILED_CODE
+        );
+        assert_eq!(
+            execution_failure_kind_code(ExecutionFailureKind::LlmHttp),
+            ACP_TURN_EXECUTION_FAILED_CODE
+        );
     }
 
     /// fatal → Err：code = -32000（具名常量）、message = failure 的脱敏
-    /// public message、data = None。
+    /// public message、data = 稳定 allowlist 分类。
     #[test]
-    fn fatal_failure_maps_to_server_error_with_code_message_data_none() {
+    fn fatal_failure_maps_to_server_error_with_code_message_data() {
         let failure = ExecutionFailure::internal("LLM API error");
         let err = execution_failure_to_acp_error(&failure);
         assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
         assert_eq!(err.message, "LLM API error");
-        assert!(err.data.is_none(), "首版 data 必须为 None");
+        assert_eq!(err.data, Some(serde_json::json!({"kind": "internal"})));
+    }
+
+    #[test]
+    fn llm_http_failure_maps_status_and_redacted_original_to_wire() {
+        let failure = ExecutionFailure::from_agent_error(&AgentError::LlmHttpError {
+            status: 421,
+            message: "Misdirected Request token=top-secret".to_string(),
+        });
+        let err = execution_failure_to_acp_error(&failure);
+
+        assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
+        assert!(err.message.contains("LLM HTTP 421"));
+        assert!(err.message.contains("Misdirected Request"));
+        assert!(!err.message.contains("top-secret"));
+        assert_eq!(
+            err.data,
+            Some(serde_json::json!({"kind": "llm_http", "status": 421}))
+        );
     }
 
     /// fatal 空 message → 非空稳定 fallback（脱敏、无内部细节）。
@@ -227,7 +254,7 @@ mod wire_projection {
     /// `prompt_wire_response`：fatal（即便 stop_reason=EndTurn）→ Err，且
     /// serialized 形态无 `data` 字段（`AcpError.data` 为 None 时跳过序列化）。
     #[test]
-    fn prompt_wire_response_fatal_returns_error_no_data_on_wire() {
+    fn prompt_wire_response_fatal_returns_error_with_allowlist_data() {
         let failure = ExecutionFailure::internal("middleware fatal");
         let err = prompt_wire_response(
             Some(&failure),
@@ -236,15 +263,12 @@ mod wire_projection {
         .expect_err("fatal failure 必须映射为 Err，不得返回成功 PromptResponse");
         assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
         assert_eq!(err.message, "middleware fatal");
-        assert!(err.data.is_none());
+        assert_eq!(err.data, Some(serde_json::json!({"kind": "internal"})));
 
         let wire = serde_json::to_value(&err).expect("AcpError 序列化不应失败");
         assert_eq!(wire["code"], ACP_TURN_EXECUTION_FAILED_CODE);
         assert_eq!(wire["message"], "middleware fatal");
-        assert!(
-            wire.get("data").is_none(),
-            "data=None 时 wire 不得出现 data 字段: {wire}"
-        );
+        assert_eq!(wire["data"], serde_json::json!({"kind": "internal"}));
     }
 
     /// 用户 cancel → 成功 `PromptResponse(Cancelled)`，不升级为请求错误。
