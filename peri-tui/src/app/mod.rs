@@ -45,8 +45,8 @@ pub struct App {
 }
 
 impl App {
-    /// `db_path`：显式指定 SQLite 会话数据库路径；`None` 保持默认路径
-    /// + fallback 临时目录行为（`Resources::open_with`）。
+    /// `db_path`：显式指定 SQLite 会话数据库路径；`None` 使用默认路径。
+    /// 任一路径打开失败都会直接返回错误。
     pub async fn new(db_path: Option<PathBuf>) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir()
             .unwrap_or_default()
@@ -86,8 +86,8 @@ impl App {
             None => lc.tr("app-not-configured"),
         };
 
-        // 初始化 thread 存储（经 Resources 门面；失败时 fallback 到临时目录的逻辑在门面内。
-        // db_path 显式指定时打开失败直接上抛——TUI 路径由 run_tui 决定 exit 码）
+        // 初始化 thread 存储（经 Resources 门面）；打开失败直接上抛，
+        // TUI 路径由 run_tui 决定 exit 码。
         let resources = peri_resources::Resources::open_with(db_path)
             .await
             .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;

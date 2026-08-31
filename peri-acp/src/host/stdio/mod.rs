@@ -26,8 +26,7 @@ use crate::transport::AcpTransport;
 pub struct StdioInput {
     pub cwd: String,
     pub permission_mode: Arc<SharedPermissionMode>,
-    /// 显式指定 SQLite 会话数据库路径；`None` 保持默认路径 + fallback
-    /// 临时目录行为（`open_thread_store_with`）。
+    /// 显式指定 SQLite 会话数据库路径；`None` 使用默认路径，打开失败直接返回错误。
     pub db_path: Option<PathBuf>,
 }
 
@@ -81,6 +80,14 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
 /// **统一装配**，middlewares/插件/Langfuse/session_manager 全数由
 /// [`crate::host::assemble::assemble_server_config`] 构造；stdio 无 bare 语义、
 /// 无 cron tick）。
+fn load_stdio_config_source(
+    cwd: &std::path::Path,
+    global_path: PathBuf,
+) -> crate::provider::ConfigSource {
+    crate::provider::ConfigSource::load_at(cwd, global_path.clone())
+        .unwrap_or_else(|_| crate::provider::ConfigSource::load_at_lenient(cwd, global_path))
+}
+
 async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpServerConfig> {
     let _telemetry = peri_agent::telemetry::init_tracing("peri-acp");
 
@@ -91,8 +98,13 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
         .to_string_lossy()
         .to_string();
 
-    // 加载配置
-    let peri_config = crate::provider::load().unwrap_or_default();
+    // 加载配置。Provider 与后续 ConfigSource 必须共享同一个 canonical cwd，
+    // 避免从进程 cwd 启动 `peri acp --cwd <other-workspace>` 时配置来源错位。
+    let config_source = Arc::new(load_stdio_config_source(
+        std::path::Path::new(&cwd),
+        crate::provider::config_path(),
+    ));
+    let peri_config = config_source.loaded_merged();
     let provider = LlmProvider::from_config(&peri_config)
         .or_else(LlmProvider::from_env)
         .ok_or_else(|| anyhow::anyhow!("No LLM provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or configure ~/.peri/settings.json"))?;
@@ -117,23 +129,8 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
         .await
         .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
 
-    // 配置源（读写路径决策的唯一事实源）：stdio 的 cwd 语义由 cli 传入，
-    // 必须按 canonicalize 后的 input.cwd 探测工作区布局——不能用
-    // `ConfigSource::load()` 的进程 cwd。失败时回落 lenient（与上方
-    // `provider::load().unwrap_or_default()` 的宽松语义一致，文件损坏
-    // 按空配置继续并保留路径决策）。
-    let config_source = Arc::new(
-        crate::provider::ConfigSource::load_at(
-            std::path::Path::new(&cwd),
-            crate::provider::config_path(),
-        )
-        .unwrap_or_else(|_| {
-            crate::provider::ConfigSource::load_at_lenient(
-                std::path::Path::new(&cwd),
-                crate::provider::config_path(),
-            )
-        }),
-    );
+    // 配置源已在 Provider 选择前按 canonical cwd 冻结，后续读写与装配复用
+    // 同一实例，保证配置 provenance 一致。
 
     // ── M-TUI 收口：middlewares 具体实现（CronScheduler / McpClientPool /
     //    ToolSearchIndex / SkillsProvider / PluginManager / SettingsHooksLoader /

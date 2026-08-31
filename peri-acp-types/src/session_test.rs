@@ -7,6 +7,7 @@
 //! - `ExecutionFailure` 的 public message 非空并脱敏（D5 fallback 契约）。
 
 use crate::command::PromptStopReason;
+use crate::error::AgentError;
 use crate::session::{ExecutionFailure, ExecutionFailureKind, PromptResult};
 
 /// 默认结果缺失语义：必须带 fatal failure，而不是成功 EndTurn。
@@ -61,5 +62,33 @@ fn internal_failure_keeps_non_empty_message() {
 fn missing_result_is_internal_non_empty() {
     let failure = ExecutionFailure::missing_result();
     assert_eq!(failure.kind, ExecutionFailureKind::Internal);
+    assert!(failure.http_status.is_none());
     assert!(!failure.public_message.is_empty());
+}
+
+#[test]
+fn llm_http_failure_preserves_status_and_redacted_original_meaning() {
+    let failure = ExecutionFailure::from_agent_error(&AgentError::LlmHttpError {
+        status: 421,
+        message: "Misdirected Request Authorization: Bearer top-secret token=hidden endpoint=https://api.example.test/v1?api_key=hidden".to_string(),
+    });
+
+    assert_eq!(failure.kind, ExecutionFailureKind::LlmHttp);
+    assert_eq!(failure.http_status, Some(421));
+    assert!(failure.public_message.contains("LLM HTTP 421"));
+    assert!(failure.public_message.contains("Misdirected Request"));
+    assert!(!failure.public_message.contains("top-secret"));
+    assert!(!failure.public_message.contains("token=hidden"));
+    assert!(!failure.public_message.contains("api_key=hidden"));
+    assert!(failure.public_message.contains("[redacted]"));
+}
+
+#[test]
+fn llm_failure_message_is_limited_without_splitting_unicode() {
+    let failure = ExecutionFailure::from_agent_error(&AgentError::LlmError("错".repeat(2_100)));
+
+    assert_eq!(failure.kind, ExecutionFailureKind::Llm);
+    assert!(failure.http_status.is_none());
+    assert!(failure.public_message.ends_with('…'));
+    assert_eq!(failure.public_message.chars().count(), 2_001);
 }

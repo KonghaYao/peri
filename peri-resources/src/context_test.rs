@@ -57,9 +57,9 @@ async fn test_open_with_explicit_path_is_directory_errs() {
     );
 }
 
-/// [P1] `open_with(None)` 与既有 `open()` 行为一致：默认路径或临时 fallback 均成功。
+/// [P1] `open_with(None)` 使用默认数据库且可正常查询。
 #[tokio::test]
-async fn test_open_with_none_default_ok() {
+async fn test_open_with_none_uses_default_store() {
     let resources = Resources::open_with(None).await.unwrap();
     let threads = resources.thread_store().list_threads().await;
     assert!(threads.is_ok(), "默认存储应可查询: {:?}", threads.err());

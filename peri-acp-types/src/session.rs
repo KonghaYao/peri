@@ -21,15 +21,29 @@ use crate::thread::{CancelPolicy, ThreadId};
 
 // ─── ExecutionFailure（Agent→ACP 结果契约的 fatal failure DTO）────────────
 
-/// 执行终止的稳定内部类别（ACP 边界据此选择协议错误码）。
+/// 执行终止的稳定内部类别（ACP 边界据此选择协议错误码和 allowlist data）。
 ///
-/// 仅为本次协议决策区分（spec/issues/2026-08-18-acp-error-handler.md D1），
-/// 不建立过度复杂的 taxonomy；所有类别都必须显式映射并保证非空、脱敏的
-/// public message。
+/// 仅区分客户端诊断需要的稳定类别；完整 `AgentError` 和 provider payload
+/// 不得跨越本边界。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionFailureKind {
-    /// 真正的执行/LLM/middleware/serialization fatal failure。
+    /// 非 LLM 的内部执行失败。
     Internal,
+    /// 无 HTTP status 的 LLM/provider 失败。
+    Llm,
+    /// 带 HTTP status 的 LLM/provider 失败。
+    LlmHttp,
+}
+
+impl ExecutionFailureKind {
+    /// JSON-RPC error `data.kind` 的稳定 wire 名称。
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Internal => "internal",
+            Self::Llm => "llm",
+            Self::LlmHttp => "llm_http",
+        }
+    }
 }
 
 /// 结果缺失 / 空 message 时的稳定非空 fallback 文案（脱敏、无内部细节）。
@@ -47,31 +61,114 @@ pub const EXECUTION_FAILURE_FALLBACK_MESSAGE: &str =
 pub struct ExecutionFailure {
     /// 稳定内部类别。
     pub kind: ExecutionFailureKind,
-    /// 非空、已脱敏的用户可见消息。
+    /// 非空、已脱敏且限长的用户可见消息。
     pub public_message: String,
+    /// LLM HTTP 失败的状态码；其他类别为 `None`。
+    pub http_status: Option<u16>,
 }
 
 impl ExecutionFailure {
     /// 构造 [`ExecutionFailureKind::Internal`] 类别，并保证 `public_message`
     /// 非空（空输入 → [`EXECUTION_FAILURE_FALLBACK_MESSAGE`]）。
     pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(ExecutionFailureKind::Internal, message, None)
+    }
+
+    /// 从 [`crate::error::AgentError`] 构造安全的失败投影。
+    ///
+    /// LLM 错误保留经过清洗和限长的原始含义；完整原文仍只存在于调用方的
+    /// 受控诊断日志。HTTP status 作为独立 allowlist 字段保留。
+    pub fn from_agent_error(error: &crate::error::AgentError) -> Self {
+        match error {
+            crate::error::AgentError::LlmHttpError { status, message } => Self::new(
+                ExecutionFailureKind::LlmHttp,
+                format!("LLM HTTP {status}: {}", redact_public_error(message)),
+                Some(*status),
+            ),
+            crate::error::AgentError::LlmError(message) => Self::new(
+                ExecutionFailureKind::Llm,
+                format!("LLM error: {}", redact_public_error(message)),
+                None,
+            ),
+            other => Self::internal(other.user_facing_message()),
+        }
+    }
+
+    fn new(
+        kind: ExecutionFailureKind,
+        message: impl Into<String>,
+        http_status: Option<u16>,
+    ) -> Self {
         let message = message.into();
         let public_message = if message.trim().is_empty() {
             EXECUTION_FAILURE_FALLBACK_MESSAGE.to_string()
         } else {
-            message
+            truncate_chars(message.trim(), 2_000)
         };
         Self {
-            kind: ExecutionFailureKind::Internal,
+            kind,
             public_message,
+            http_status,
         }
     }
 
     /// 结果缺失时的防御性 failure（`PromptResult::default()` 等场景）：
-    /// 缺失结果不能作为成功 `EndTurn` 继续交给 ACP（Commit 2 将据此映射
-    /// 为 JSON-RPC error）。
+    /// 缺失结果不能作为成功 `EndTurn` 继续交给 ACP。
     pub fn missing_result() -> Self {
         Self::internal(EXECUTION_FAILURE_FALLBACK_MESSAGE)
+    }
+}
+
+/// 清洗可能进入客户端 wire 的 provider 错误文本。
+///
+/// 仅保留诊断原意，遮蔽 bearer token、常见凭据赋值和 URL query；最终输出由
+/// [`ExecutionFailure::new`] 统一限制长度。该函数不是通用 secret scanner，
+/// 原始 provider body 仍不得直接序列化。
+fn redact_public_error(input: &str) -> String {
+    input
+        .split_whitespace()
+        .scan(false, |redact_next, token| {
+            if *redact_next {
+                *redact_next = false;
+                return Some("[redacted]".to_string());
+            }
+
+            let lower = token.to_ascii_lowercase();
+            if lower == "bearer" {
+                *redact_next = true;
+                return Some(token.to_string());
+            }
+            if [
+                "token=",
+                "password=",
+                "secret=",
+                "api_key=",
+                "apikey=",
+                "key=",
+            ]
+            .iter()
+            .any(|key| lower.contains(key))
+            {
+                return Some("[redacted]".to_string());
+            }
+            if let Some((prefix, _)) = token.split_once('?') {
+                if prefix.starts_with("http://") || prefix.starts_with("https://") {
+                    return Some(format!("{prefix}?[redacted]"));
+                }
+            }
+            Some(token.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
     }
 }
 

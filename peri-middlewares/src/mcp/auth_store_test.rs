@@ -115,6 +115,31 @@ async fn test_list_servers() {
     assert_eq!(servers.len(), 2);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_save_across_store_instances_preserves_all_servers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("oauth_tokens.json");
+    let mut handles = vec![];
+    for i in 0..10 {
+        let store = FileCredentialStore::with_path(path.clone());
+        handles.push(tokio::spawn(async move {
+            store
+                .save_server(
+                    &format!("srv{i}"),
+                    StoredCredentials::new(format!("c{i}"), None, vec![], None),
+                )
+                .await
+                .unwrap();
+        }));
+    }
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    let store = FileCredentialStore::with_path(path);
+    assert_eq!(store.list_servers().await.unwrap().len(), 10);
+}
+
 #[tokio::test]
 async fn test_concurrent_save_does_not_corrupt() {
     let (store, _tmp) = temp_store();

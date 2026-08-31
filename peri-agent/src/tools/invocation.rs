@@ -117,11 +117,33 @@ impl ToolInvocationResolver for DirectToolInvocationResolver {
     }
 }
 
+const TOOL_PARAM_ALIASES: &[(&str, &str, &str)] = &[
+    ("Write", "contents", "content"),
+    ("Glob", "glob_pattern", "pattern"),
+    ("Glob", "target_directory", "path"),
+    ("WebSearch", "search_term", "query"),
+];
+
+fn apply_param_alias(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    declared_params: &serde_json::Map<String, serde_json::Value>,
+    alias: &str,
+    canonical: &str,
+) {
+    if declared_params.contains_key(canonical)
+        && !declared_params.contains_key(alias)
+        && obj.contains_key(alias)
+        && !obj.contains_key(canonical)
+    {
+        let value = obj.remove(alias).expect("alias existence checked above");
+        obj.insert(canonical.to_string(), value);
+    }
+}
+
 /// 将 LLM 常见的参数别名归一化为工具 schema 使用的名称。
 ///
-/// 仅当目标工具 schema 声明了 `file_path` 参数时才将 `path` 重命名为
-/// `file_path`（Read/Write/Edit 等）。Grep/Glob 的 schema 参数名就是 `path`，
-/// 无条件重命名会使其 `path` 参数丢失、静默回退全仓库搜索。
+/// `path → file_path` 是文件工具的通用兼容；其余 alias 同时受目标工具名和
+/// schema 约束，避免把字段名相似但语义不同的 API 强行兼容。
 pub fn normalize_params(
     input: serde_json::Value,
     target: Option<&dyn BaseTool>,
@@ -130,19 +152,26 @@ pub fn normalize_params(
         serde_json::Value::Object(map) => map,
         _ => return input,
     };
-    let accepts_file_path = target
-        .map(|t| {
-            t.parameters()
-                .get("properties")
-                .and_then(|p| p.as_object())
-                .map(|props| props.contains_key("file_path"))
-                .unwrap_or(false)
-        })
-        .unwrap_or(false);
-    if accepts_file_path && obj.contains_key("path") && !obj.contains_key("file_path") {
-        if let Some(value) = obj.remove("path") {
-            obj.insert("file_path".to_string(), value);
+    let Some(target) = target else {
+        return serde_json::Value::Object(obj);
+    };
+    let parameters = target.parameters();
+    let Some(declared_params) = parameters
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return serde_json::Value::Object(obj);
+    };
+
+    apply_param_alias(&mut obj, declared_params, "path", "file_path");
+    for (tool_name, alias, canonical) in TOOL_PARAM_ALIASES {
+        if target.name().eq_ignore_ascii_case(tool_name) {
+            apply_param_alias(&mut obj, declared_params, alias, canonical);
         }
     }
     serde_json::Value::Object(obj)
 }
+
+#[cfg(test)]
+#[path = "invocation_test.rs"]
+mod tests;

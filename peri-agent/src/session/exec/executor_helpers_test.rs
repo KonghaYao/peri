@@ -1191,10 +1191,10 @@ mod loop_result_mapping {
 
     use super::super::v2_execute::classify_loop_terminal;
 
-    /// 真正 fatal（LLM 错误）：ok=false + failure=Some(Internal, 非空脱敏)。
-    /// 消息来自 `user_facing_message()`，不得泄露 provider body / secret。
+    /// 真正 fatal（LLM 错误）：ok=false + failure=Some(Llm, 非空脱敏原文)。
+    /// 消息保留原始诊断含义，但不得泄露凭据。
     #[test]
-    fn fatal_llm_error_maps_to_internal_failure() {
+    fn fatal_llm_error_maps_to_safe_llm_failure() {
         let terminal = classify_loop_terminal(
             &LoopResult::Error(AgentError::LlmError(
                 "provider 500: Authorization: Bearer top-secret-key".to_string(),
@@ -1206,15 +1206,15 @@ mod loop_result_mapping {
         assert_eq!(terminal.turn_status, TurnStatus::Error);
         assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::LlmFailure));
         let failure = terminal.failure.expect("fatal error 必须携带 failure");
-        assert_eq!(failure.kind, ExecutionFailureKind::Internal);
+        assert_eq!(failure.kind, ExecutionFailureKind::Llm);
+        assert!(failure.http_status.is_none());
         assert!(
             !failure.public_message.is_empty(),
             "public message 必须非空"
         );
-        // 脱敏：内部错误/LLM 错误只暴露通用文案
         assert!(!failure.public_message.contains("top-secret-key"));
-        assert!(!failure.public_message.contains("Bearer"));
-        assert!(failure.public_message.contains("LLM API error"));
+        assert!(failure.public_message.contains("provider 500"));
+        assert!(failure.public_message.contains("Bearer [redacted]"));
     }
 
     /// 用户主动中断：failure=None，stop_reason=Cancelled。
@@ -1310,14 +1310,13 @@ mod loop_result_mapping {
         assert!(terminal.failure.is_none());
     }
 
-    /// 其它 fatal（如 LLM HTTP 错误）：failure=Some，public message 为
-    /// `user_facing_message()` 的脱敏通用文案（不泄露 provider body）。
+    /// LLM HTTP fatal 保留 status 与经过脱敏的 provider 原文。
     #[test]
     fn llm_http_error_maps_to_sanitized_message() {
         let terminal = classify_loop_terminal(
             &LoopResult::Error(AgentError::LlmHttpError {
-                status: 500,
-                message: "secret-provider-body".to_string(),
+                status: 421,
+                message: "Misdirected Request token=secret-provider-body".to_string(),
             }),
             false,
         );
@@ -1325,13 +1324,12 @@ mod loop_result_mapping {
         assert_eq!(terminal.turn_status, TurnStatus::Error);
         assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::LlmFailure));
         let failure = terminal.failure.expect("fatal error 必须携带 failure");
-        assert_eq!(failure.kind, ExecutionFailureKind::Internal);
-        assert!(!failure.public_message.is_empty());
-        assert!(
-            !failure.public_message.contains("secret-provider-body"),
-            "不得泄露 provider body"
-        );
-        assert!(failure.public_message.contains("LLM API error"));
+        assert_eq!(failure.kind, ExecutionFailureKind::LlmHttp);
+        assert_eq!(failure.http_status, Some(421));
+        assert!(failure.public_message.contains("LLM HTTP 421"));
+        assert!(failure.public_message.contains("Misdirected Request"));
+        assert!(!failure.public_message.contains("secret-provider-body"));
+        assert!(failure.public_message.contains("[redacted]"));
     }
 
     /// 脱敏契约：任何 fatal failure 的 public message 都不得为空，

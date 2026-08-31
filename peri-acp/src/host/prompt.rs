@@ -37,9 +37,9 @@ use crate::provider::{LlmProvider, PeriConfig};
 /// fatal turn failure 的稳定 JSON-RPC server error code。
 ///
 /// 取自 JSON-RPC 2.0 保留段 server error（`-32000..=-32099`）的首值，语义为
-/// "agent turn execution failed"。具名常量替代调用点 magic number；首版
-/// `data` 恒为 `None`，不把内部类型 / provider payload / 不稳定字段固化为
-/// 公开协议（D2/D5）。
+/// "agent turn execution failed"。具名常量替代调用点 magic number；`data`
+/// 只携带稳定 allowlist 分类和可选 HTTP status，不包含 provider payload 或
+/// 内部错误链（D2/D5）。
 pub const ACP_TURN_EXECUTION_FAILED_CODE: i64 = -32000;
 
 /// [`ExecutionFailureKind`] → JSON-RPC server error code 的穷尽映射。
@@ -48,7 +48,9 @@ pub const ACP_TURN_EXECUTION_FAILED_CODE: i64 = -32000;
 /// fallthrough 默认码。
 const fn execution_failure_kind_code(kind: ExecutionFailureKind) -> i64 {
     match kind {
-        ExecutionFailureKind::Internal => ACP_TURN_EXECUTION_FAILED_CODE,
+        ExecutionFailureKind::Internal
+        | ExecutionFailureKind::Llm
+        | ExecutionFailureKind::LlmHttp => ACP_TURN_EXECUTION_FAILED_CODE,
     }
 }
 
@@ -57,12 +59,20 @@ const fn execution_failure_kind_code(kind: ExecutionFailureKind) -> i64 {
 /// - `code`：按 [`execution_failure_kind_code`] 穷尽映射；
 /// - `message`：直接使用 failure 的脱敏 public message（非空由
 ///   [`ExecutionFailure::internal`] 保证，空输入回落稳定 fallback）；
-/// - `data`：首版恒 `None`。
+/// - `data`：稳定 allowlist `kind`，LLM HTTP 错误额外携带 `status`。
 pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpError {
+    let mut data = serde_json::Map::new();
+    data.insert(
+        "kind".to_string(),
+        Value::String(failure.kind.wire_name().to_string()),
+    );
+    if let Some(status) = failure.http_status {
+        data.insert("status".to_string(), Value::from(status));
+    }
     AcpError {
         code: execution_failure_kind_code(failure.kind),
         message: failure.public_message.clone(),
-        data: None,
+        data: Some(Value::Object(data)),
     }
 }
 
