@@ -1313,8 +1313,12 @@ async fn test_fatal_failure_precedes_turn_end_and_done() {
     let result = run_session_loop(ctx, turn).await;
 
     let failure = result.failure.expect("fatal model error 必须产生 failure");
-    assert!(!failure.public_message.is_empty());
-    assert!(!failure.public_message.contains("safe-request-id"));
+    assert_eq!(
+        failure.kind,
+        peri_acp_types::session::ExecutionFailureKind::LlmHttp
+    );
+    assert_eq!(failure.http_status, Some(500));
+    assert!(failure.public_message.contains("safe-request-id"));
     let operations = sink.operations.lock().unwrap();
     let failure_index = operations
         .iter()
