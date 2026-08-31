@@ -125,41 +125,140 @@ impl ExecutionFailure {
 /// [`ExecutionFailure::new`] 统一限制长度。该函数不是通用 secret scanner，
 /// 原始 provider body 仍不得直接序列化。
 fn redact_public_error(input: &str) -> String {
-    input
-        .split_whitespace()
-        .scan(false, |redact_next, token| {
-            if *redact_next {
-                *redact_next = false;
-                return Some("[redacted]".to_string());
-            }
+    redact_secret_fields(&redact_url_queries(input))
+}
 
-            let lower = token.to_ascii_lowercase();
-            if lower == "bearer" {
-                *redact_next = true;
-                return Some(token.to_string());
-            }
-            if [
-                "token=",
-                "password=",
-                "secret=",
-                "api_key=",
-                "apikey=",
-                "key=",
-            ]
+fn redact_url_queries(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut copied = 0;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let is_url = starts_with_ascii_case_insensitive(bytes, index, b"http://")
+            || starts_with_ascii_case_insensitive(bytes, index, b"https://");
+        if !is_url {
+            index += input[index..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+
+        let end = bytes[index..]
             .iter()
-            .any(|key| lower.contains(key))
-            {
-                return Some("[redacted]".to_string());
+            .position(|byte| byte.is_ascii_whitespace() || b"\"'<>)]}".contains(byte))
+            .map_or(bytes.len(), |offset| index + offset);
+        let Some(query_offset) = bytes[index..end].iter().position(|byte| *byte == b'?') else {
+            index = end;
+            continue;
+        };
+        let query = index + query_offset;
+        output.push_str(&input[copied..=query]);
+        output.push_str("[redacted]");
+        copied = end;
+        index = end;
+    }
+
+    output.push_str(&input[copied..]);
+    output
+}
+
+fn redact_secret_fields(input: &str) -> String {
+    const KEYS: &[&[u8]] = &[
+        b"authorization",
+        b"api_key",
+        b"apikey",
+        b"password",
+        b"secret",
+        b"token",
+        b"key",
+    ];
+
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut copied = 0;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let boundary_before =
+            index == 0 || (!bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_');
+        let key = boundary_before
+            .then(|| {
+                KEYS.iter().find(|key| {
+                    starts_with_ascii_case_insensitive(bytes, index, key)
+                        && bytes
+                            .get(index + key.len())
+                            .is_none_or(|next| !next.is_ascii_alphanumeric() && *next != b'_')
+                })
+            })
+            .flatten();
+        let Some(key) = key else {
+            index += input[index..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        };
+
+        let mut delimiter = index + key.len();
+        if matches!(bytes.get(delimiter), Some(b'\'' | b'"'))
+            && index > 0
+            && bytes[index - 1] == bytes[delimiter]
+        {
+            delimiter += 1;
+        }
+        while bytes.get(delimiter).is_some_and(u8::is_ascii_whitespace) {
+            delimiter += 1;
+        }
+        if !matches!(bytes.get(delimiter), Some(b':' | b'=')) {
+            index += key.len();
+            continue;
+        }
+
+        let mut value_start = delimiter + 1;
+        while bytes.get(value_start).is_some_and(u8::is_ascii_whitespace) {
+            value_start += 1;
+        }
+        if key.eq_ignore_ascii_case(b"authorization")
+            && starts_with_ascii_case_insensitive(bytes, value_start, b"bearer")
+        {
+            value_start += b"bearer".len();
+            while bytes.get(value_start).is_some_and(u8::is_ascii_whitespace) {
+                value_start += 1;
             }
-            if let Some((prefix, _)) = token.split_once('?') {
-                if prefix.starts_with("http://") || prefix.starts_with("https://") {
-                    return Some(format!("{prefix}?[redacted]"));
-                }
-            }
-            Some(token.to_string())
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+        }
+        let quote = bytes
+            .get(value_start)
+            .copied()
+            .filter(|byte| matches!(byte, b'\'' | b'"'));
+        if quote.is_some() {
+            value_start += 1;
+        }
+        if value_start >= bytes.len() {
+            break;
+        }
+
+        let value_end = if let Some(quote) = quote {
+            bytes[value_start..]
+                .iter()
+                .position(|byte| *byte == quote)
+                .map_or(bytes.len(), |offset| value_start + offset)
+        } else {
+            bytes[value_start..]
+                .iter()
+                .position(|byte| byte.is_ascii_whitespace() || b",;)}]".contains(byte))
+                .map_or(bytes.len(), |offset| value_start + offset)
+        };
+
+        output.push_str(&input[copied..value_start]);
+        output.push_str("[redacted]");
+        copied = value_end;
+        index = value_end;
+    }
+
+    output.push_str(&input[copied..]);
+    output
+}
+
+fn starts_with_ascii_case_insensitive(input: &[u8], index: usize, needle: &[u8]) -> bool {
+    input
+        .get(index..index + needle.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(needle))
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {

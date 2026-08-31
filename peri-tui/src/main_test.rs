@@ -3,6 +3,14 @@
 #[cfg(test)]
 use super::*;
 
+#[test]
+fn test_propagate_tui_result_preserves_startup_failure() {
+    let error = propagate_tui_result(Err(anyhow::anyhow!("database open failed")))
+        .expect_err("TUI startup failure must produce a non-zero process status");
+
+    assert_eq!(error.to_string(), "database open failed");
+}
+
 fn make_temp_file(content: &str) -> tempfile::TempPath {
     use std::io::Write;
     let mut file = tempfile::NamedTempFile::new().unwrap();

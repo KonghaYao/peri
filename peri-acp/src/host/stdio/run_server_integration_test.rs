@@ -28,10 +28,19 @@ use crate::host::{self, AcpServerConfig};
 use crate::provider::{LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
 use crate::transport::{stdio::StdioTransport, AcpTransport};
 
-use super::load_stdio_config_source;
+use super::assemble_stdio_config;
 
-#[test]
-fn test_stdio_config_source_uses_input_cwd_workspace() {
+struct StdioStartupGuard;
+
+impl Drop for StdioStartupGuard {
+    fn drop(&mut self) {
+        crate::provider::set_global_config_path(None);
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_stdio_assembly_uses_input_cwd_workspace() {
     let tmp = tempfile::tempdir().unwrap();
     let process_workspace = tmp.path().join("process-workspace");
     let input_workspace = tmp.path().join("input-workspace");
@@ -40,18 +49,32 @@ fn test_stdio_config_source_uses_input_cwd_workspace() {
     std::fs::create_dir_all(input_workspace.join(".peri")).unwrap();
     std::fs::write(
         process_workspace.join(".peri/settings.json"),
-        r#"{"config":{"providers":[{"id":"process","type":"openai"}]}}"#,
+        r#"{"config":{"active_alias":"sonnet","providers":[{"id":"process","type":"openai","apiKey":"not-a-credential"}],"profiles":{"sonnet":{"provider":"process","model":"test-model"}}}}"#,
     )
     .unwrap();
     std::fs::write(
         input_workspace.join(".peri/settings.json"),
-        r#"{"config":{"providers":[{"id":"input","type":"openai"}]}}"#,
+        r#"{"config":{"active_alias":"sonnet","providers":[{"id":"input","type":"openai","apiKey":"not-a-credential"}],"profiles":{"sonnet":{"provider":"input","model":"test-model"}}}}"#,
     )
     .unwrap();
 
-    let source = load_stdio_config_source(&input_workspace, global_path);
+    let _guard = StdioStartupGuard;
+    crate::provider::set_global_config_path(Some(global_path));
 
-    assert_eq!(source.loaded_merged().config.providers[0].id, "input");
+    let assembled = assemble_stdio_config(crate::host::stdio::StdioInput {
+        cwd: input_workspace.to_string_lossy().into_owned(),
+        permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
+            peri_acp_types::permission::PermissionMode::Bypass,
+        ),
+        db_path: Some(tmp.path().join("threads.db")),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        assembled.config_source.loaded_merged().config.providers[0].id,
+        "input"
+    );
 }
 
 // ── 测试装配（与 requests_test.rs 的 make_server_config 同构）──────────────

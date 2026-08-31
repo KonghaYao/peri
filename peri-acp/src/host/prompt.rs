@@ -66,8 +66,10 @@ pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpE
         "kind".to_string(),
         Value::String(failure.kind.wire_name().to_string()),
     );
-    if let Some(status) = failure.http_status {
-        data.insert("status".to_string(), Value::from(status));
+    if failure.kind == ExecutionFailureKind::LlmHttp {
+        if let Some(status) = failure.http_status {
+            data.insert("status".to_string(), Value::from(status));
+        }
     }
     AcpError {
         code: execution_failure_kind_code(failure.kind),

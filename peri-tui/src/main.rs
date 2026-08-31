@@ -621,6 +621,14 @@ struct TuiOptions {
     db_path: Option<PathBuf>,
 }
 
+fn propagate_tui_result(result: Result<()>) -> Result<()> {
+    if let Err(e) = result {
+        eprintln!("Error: {e}");
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn run_tui(opts: TuiOptions) -> Result<()> {
     // --settings 覆盖
     if let Some(ref settings_path) = opts.settings {
@@ -663,15 +671,7 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
     drop(rt);
     drop(_telemetry);
 
-    if let Err(e) = result {
-        eprintln!("Error: {e}");
-        // 显式指定 --db-path 时数据库打开失败为致命错误：三路径一致的 exit 1（gate 决策）
-        if opts.db_path.is_some() {
-            return Err(e);
-        }
-    }
-
-    Ok(())
+    propagate_tui_result(result)
 }
 
 #[cfg(test)]
