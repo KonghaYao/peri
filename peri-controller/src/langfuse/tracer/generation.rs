@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use peri_agent::messages::BaseMessage;
 use peri_agent::tools::ToolDefinition;
+use peri_model::TokenUsage;
 
 #[derive(Debug, Clone)]
 pub(crate) struct GenerationCached {
@@ -40,6 +41,14 @@ pub(crate) struct GenerationEnd {
     pub retry_metadata: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PendingTerminalState {
+    pub model: String,
+    pub output: String,
+    pub usage: Option<TokenUsage>,
+    pub request_id: Option<String>,
+}
+
 pub(crate) struct AbandonedGeneration {
     pub agent_id: String,
     pub step: usize,
@@ -47,6 +56,7 @@ pub(crate) struct AbandonedGeneration {
     pub start_time: String,
     pub input_json: serde_json::Value,
     pub retry_metadata: Option<serde_json::Value>,
+    pub terminal: Option<PendingTerminalState>,
 }
 
 pub(crate) struct GenerationTracker {
@@ -58,6 +68,8 @@ pub(crate) struct GenerationTracker {
     /// 并行 agent 交错时，on_llm_end 只消费自己 generation 的重试历史，
     /// 不再出现"后 start 清掉先 start 的 retry / end 挂错 retry"。
     retry_attempts: HashMap<(String, usize), Vec<RetryAttempt>>,
+    /// 已收到 LlmCallEnd、但归属尚不可解析的完整终态。
+    pending_terminal: HashMap<(String, usize), PendingTerminalState>,
 }
 
 impl GenerationTracker {
@@ -66,6 +78,7 @@ impl GenerationTracker {
             generation_data: HashMap::new(),
             active_step: None,
             retry_attempts: HashMap::new(),
+            pending_terminal: HashMap::new(),
         }
     }
 
@@ -128,6 +141,16 @@ impl GenerationTracker {
             .contains_key(&(agent_id.to_string(), step))
     }
 
+    pub(crate) fn preserve_terminal(
+        &mut self,
+        agent_id: &str,
+        step: usize,
+        terminal: PendingTerminalState,
+    ) {
+        self.pending_terminal
+            .insert((agent_id.to_string(), step), terminal);
+    }
+
     pub(crate) fn on_llm_end(&mut self, agent_id: &str, step: usize) -> Option<GenerationEnd> {
         let cached = self.generation_data.remove(&(agent_id.to_string(), step))?;
         self.active_step = None;
@@ -164,6 +187,7 @@ impl GenerationTracker {
                     .raw_body
                     .map(|body| (*body).clone())
                     .unwrap_or(cached.messages_json);
+                let terminal = self.pending_terminal.remove(&(agent_id.clone(), step));
                 AbandonedGeneration {
                     agent_id,
                     step,
@@ -171,6 +195,7 @@ impl GenerationTracker {
                     start_time: cached.start_time,
                     input_json,
                     retry_metadata,
+                    terminal,
                 }
             })
             .collect()

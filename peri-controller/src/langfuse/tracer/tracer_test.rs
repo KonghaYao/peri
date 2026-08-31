@@ -279,6 +279,116 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
             .and_then(|metadata| metadata.get("ownership_unresolved")),
         Some(&serde_json::json!(true))
     );
+    assert_eq!(
+        generation.output,
+        Some(serde_json::json!({"text": "completed"}))
+    );
+    assert_eq!(generation.model.as_deref(), Some("test-model"));
+    assert_eq!(
+        generation.status_message.as_deref(),
+        Some("ownership_unresolved")
+    );
+    assert_eq!(
+        generation
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("incomplete")),
+        Some(&serde_json::json!(false))
+    );
+}
+
+#[tokio::test]
+async fn test_llm_end_without_start_emits_synthetic_generation() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+
+    t.on_llm_end(
+        "main",
+        7,
+        "test-model",
+        "test-provider",
+        "completed",
+        None,
+        Some("req-7"),
+    );
+
+    let generation = session.events_snapshot().into_iter().find_map(|event| {
+        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = event {
+            Some(body)
+        } else {
+            None
+        }
+    });
+    let generation = generation.expect("missing start must produce synthetic generation");
+    assert_eq!(
+        generation.output,
+        Some(serde_json::json!({"text": "completed"}))
+    );
+    assert_eq!(generation.model.as_deref(), Some("test-model"));
+    assert_eq!(
+        generation
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("request_id")),
+        Some(&serde_json::json!("req-7"))
+    );
+    assert_eq!(
+        generation
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("start_missing")),
+        Some(&serde_json::json!(true))
+    );
+}
+
+#[tokio::test]
+async fn test_unsampled_failure_emits_parent_before_error_and_redacts_message() {
+    let (mut t, session) = make_tracer(0.0);
+    let parent_id = t.agent_observation_id.clone();
+    let secrets = "sk-live-raw eyJhbGciOiJIUzI1NiJ9.payload.signature -----BEGIN PRIVATE KEY----- postgres://user:password@host/db";
+
+    t.on_turn_end(TurnTelemetryOutcome::Failed {
+        failure: ExecutionFailure::internal(secrets),
+    })
+    .await
+    .expect("flush task should finish");
+
+    let events = session.events_snapshot();
+    let parent_index = events.iter().position(|event| {
+        matches!(
+            event,
+            langfuse_client::IngestionEvent::ObservationCreate { body, .. }
+                if body.id.as_deref() == Some(parent_id.as_str())
+        )
+    });
+    let error_index = events.iter().position(|event| {
+        matches!(
+            event,
+            langfuse_client::IngestionEvent::EventCreate { body, .. }
+                if body.name.as_deref() == Some("ErrorTurn")
+                    && body.parent_observation_id.as_deref() == Some(parent_id.as_str())
+        )
+    });
+    assert!(
+        parent_index.is_some(),
+        "synthetic ErrorTurn parent must exist"
+    );
+    assert!(
+        parent_index < error_index,
+        "synthetic parent must be queued before ErrorTurn"
+    );
+    let serialized = serde_json::to_string(&events).expect("events should serialize");
+    for secret in [
+        "sk-live-raw",
+        "eyJhbGci",
+        "BEGIN PRIVATE KEY",
+        "postgres://",
+    ] {
+        assert!(
+            !serialized.contains(secret),
+            "Langfuse payload leaked secret marker: {secret}"
+        );
+    }
 }
 
 // ── TextChunk 累积测试 ─────────────────────────────────────────────────────

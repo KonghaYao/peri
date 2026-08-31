@@ -1,4 +1,5 @@
 use super::event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
+use super::generation::PendingTerminalState;
 use super::registry::{GateEvent, Ownership};
 use super::usage;
 use super::LangfuseTracer;
@@ -96,26 +97,38 @@ impl LangfuseTracer {
             return;
         }
 
-        if !self.generation.contains(agent_id, step) {
+        let start_missing = !self.generation.contains(agent_id, step);
+        if start_missing {
             tracing::warn!(
                 target: "langfuse::generation",
                 %agent_id,
                 step,
-                "on_llm_end: 缺少 LlmCallStart，无法构造完整 generation"
+                "on_llm_end: 缺少 LlmCallStart，创建 synthetic generation"
             );
-            return;
+            self.generation
+                .on_llm_start(agent_id, step, Vec::new(), Vec::new());
         }
 
         // 必须先解析 parent 再消费 tracker state。未知 ownership 可能由可丢的
-        // SubagentStart 导致；保留 state 让 turn-end fallback 降级挂到主 agent-run。
+        // SubagentStart 导致；完整终态保留到 turn-end fallback。
         let parent_id = match self.llm_parent(agent_id) {
             Some(parent_id) => parent_id,
             None => {
+                self.generation.preserve_terminal(
+                    agent_id,
+                    step,
+                    PendingTerminalState {
+                        model: model.to_string(),
+                        output: output.to_string(),
+                        usage: usage.cloned(),
+                        request_id: request_id.map(str::to_string),
+                    },
+                );
                 tracing::warn!(
                     target: "langfuse::subagent",
                     %agent_id,
                     step,
-                    "on_llm_end: agent ownership 暂不可解析，保留 generation 等待 turn-end 兜底"
+                    "on_llm_end: agent ownership 暂不可解析，保留完整终态等待 turn-end 兜底"
                 );
                 return;
             }
@@ -159,6 +172,12 @@ impl LangfuseTracer {
 
         // 合并 retry metadata + token 用量到 metadata 字段（Langfuse UI 可见）
         let mut meta = gen_end.retry_metadata.unwrap_or(serde_json::json!({}));
+        if start_missing {
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert("start_missing".to_string(), serde_json::json!(true));
+                obj.insert("lifecycle_incomplete".to_string(), serde_json::json!(true));
+            }
+        }
         let meta_obj = meta.as_object_mut();
         if let Some(u) = usage {
             if let Some(obj) = meta_obj {

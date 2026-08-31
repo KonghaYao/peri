@@ -275,16 +275,32 @@ impl LangfuseTracer {
                 Some(parent_id) => (parent_id, false),
                 None => (self.agent_observation_id.clone(), true),
             };
+            let terminal = abandoned.terminal.as_ref();
+            let lifecycle_incomplete = terminal.is_none();
             let mut metadata = abandoned
                 .retry_metadata
                 .unwrap_or_else(|| serde_json::json!({}));
             if let Some(object) = metadata.as_object_mut() {
-                object.insert("incomplete".to_string(), serde_json::json!(true));
+                object.insert(
+                    "incomplete".to_string(),
+                    serde_json::json!(lifecycle_incomplete),
+                );
                 object.insert(
                     "terminal_source".to_string(),
-                    serde_json::json!("turn_end_fallback"),
+                    serde_json::json!(if lifecycle_incomplete {
+                        "turn_end_fallback"
+                    } else {
+                        "llm_end_pending_ownership"
+                    }),
                 );
-                object.insert("error_class".to_string(), serde_json::json!(&error_class));
+                object.insert(
+                    "error_class".to_string(),
+                    serde_json::json!(if lifecycle_incomplete {
+                        &error_class
+                    } else {
+                        "ownership_unresolved"
+                    }),
+                );
                 object.insert(
                     "ownership_unresolved".to_string(),
                     serde_json::json!(ownership_unresolved),
@@ -295,10 +311,34 @@ impl LangfuseTracer {
                         serde_json::json!(&abandoned.agent_id),
                     );
                 }
+                if let Some(terminal) = terminal {
+                    object.insert("model".to_string(), serde_json::json!(&terminal.model));
+                    if let Some(request_id) = &terminal.request_id {
+                        object.insert("request_id".to_string(), serde_json::json!(request_id));
+                    }
+                }
                 if let Some(status) = failure.and_then(|failure| failure.http_status) {
                     object.insert("http_status".to_string(), serde_json::json!(status));
                 }
             }
+            let (output, level, status_message, model, usage_details) =
+                if let Some(terminal) = terminal {
+                    (
+                        Some(safe_generation_output(&terminal.output)),
+                        None,
+                        Some("ownership_unresolved".to_string()),
+                        Some(terminal.model.clone()),
+                        terminal.usage.as_ref().map(usage::build_usage_details),
+                    )
+                } else {
+                    (
+                        Some(serde_json::json!({"error_class": &error_class})),
+                        Some(fallback_status.level.clone()),
+                        Some(error_class.clone()),
+                        None,
+                        None,
+                    )
+                };
             let end_time = now_rfc3339();
             let body = GenerationBody {
                 id: Some(abandoned.gen_id),
@@ -307,10 +347,12 @@ impl LangfuseTracer {
                 start_time: Some(abandoned.start_time),
                 end_time: Some(end_time.clone()),
                 input: Some(abandoned.input_json),
-                output: Some(serde_json::json!({"error_class": &error_class})),
+                output,
                 metadata: Some(metadata),
-                level: Some(fallback_status.level.clone()),
-                status_message: Some(error_class.clone()),
+                level,
+                status_message,
+                model,
+                usage_details,
                 parent_observation_id: Some(parent_id),
                 version: Some(VERSION.to_string()),
                 session_id: Some(self.session_id.clone()),
@@ -352,7 +394,8 @@ impl LangfuseTracer {
                 );
 
             if !sampled {
-                // 未采样时创建合成 Trace（复用 trace_id），让 error span 有父 trace
+                // 未采样时创建合成 Trace 和最小 agent-run parent，保证 ErrorTurn
+                // 不引用不存在的 observation，且 parent 先于 child 入队。
                 let trace_body = TraceBody {
                     id: Some(turn_id.clone()),
                     name: Some(format!("turn {}", turn_id)),
@@ -383,6 +426,30 @@ impl LangfuseTracer {
                     trace_event,
                     &turn_id,
                     "ErrorTurn synthetic TraceCreate",
+                );
+                let parent_time = now_rfc3339();
+                let parent_body = ObservationBody {
+                    id: Some(self.agent_observation_id.clone()),
+                    trace_id: Some(turn_id.clone()),
+                    r#type: ObservationType::Agent,
+                    name: Some("agent-run-synthetic-error".to_string()),
+                    start_time: Some(parent_time.clone()),
+                    end_time: Some(parent_time.clone()),
+                    output: Some(error_out.clone()),
+                    parent_observation_id: Some(turn_id.clone()),
+                    version: Some(VERSION.to_string()),
+                    ..Default::default()
+                };
+                try_add_or_warn_via_session(
+                    &*self.session,
+                    IngestionEvent::ObservationCreate {
+                        id: new_uuid(),
+                        timestamp: parent_time,
+                        body: parent_body,
+                        metadata: None,
+                    },
+                    &turn_id,
+                    "ErrorTurn synthetic agent-run ObservationCreate",
                 );
             }
 
@@ -590,9 +657,23 @@ fn failure_output(failure: &ExecutionFailure, error_class: &str) -> serde_json::
         "error_class": error_class,
         "error_kind": failure.kind.wire_name(),
         "http_status": failure.http_status,
-        "message": failure.public_message,
+        "message": "The operation failed. Check protected logs for details.",
         "error_schema_version": 3,
     })
+}
+
+fn safe_generation_output(output: &str) -> serde_json::Value {
+    if output.starts_with("ERROR: ") {
+        serde_json::json!({"error_class": "provider_or_stream_failure"})
+    } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
+        if value.is_object() {
+            value
+        } else {
+            serde_json::json!({"text": output})
+        }
+    } else {
+        serde_json::json!({"text": output})
+    }
 }
 
 #[cfg(test)]
