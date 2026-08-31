@@ -243,7 +243,11 @@ impl Harness {
 
     /// on_turn_end（主 turn 结束；内部 spawn，调用方需在 tokio runtime 内）
     fn turn_end(&self) {
-        drop(self.tracer.lock().on_turn_end(None));
+        drop(
+            self.tracer
+                .lock()
+                .on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed),
+        );
     }
 }
 

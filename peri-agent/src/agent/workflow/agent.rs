@@ -579,6 +579,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
         // 7. 运行 v2 ReAct 循环
         let loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
 
+        let mut telemetry_failure = None;
         let agent_result = match loop_result {
             LoopResult::Completed => {
                 let output_text = crate::session::subagent::extract_last_ai_text(&v2_ctx.session);
@@ -648,6 +649,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
             }
             LoopResult::Error(e) => {
                 debug!(error = %e, "Workflow agent: execution failed");
+                telemetry_failure = Some(
+                    peri_acp_types::session::ExecutionFailure::from_agent_error(&e),
+                );
                 AgentRunResult::Dead {
                     reason: Some("runagent-threw".into()),
                     detail: Some(e.to_string()),
@@ -657,11 +661,24 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // GAP-08: 结束 Langfuse trace（fire-and-forget flush；注入钩子）
         if let Some(ref hooks) = self.ctx.langfuse_hooks {
-            let error_output = match &agent_result {
-                AgentRunResult::Dead { detail, .. } => detail.clone(),
-                _ => None,
+            let outcome = match &agent_result {
+                AgentRunResult::Dead { reason, .. } if reason.as_deref() == Some("interrupted") => {
+                    peri_acp_types::session::TurnTelemetryOutcome::Stopped {
+                        reason: peri_acp_types::command::PromptStopReason::Cancelled,
+                    }
+                }
+                AgentRunResult::Dead { .. } => {
+                    peri_acp_types::session::TurnTelemetryOutcome::Failed {
+                        failure: telemetry_failure.clone().unwrap_or_else(|| {
+                            peri_acp_types::session::ExecutionFailure::internal(
+                                "Workflow agent execution failed",
+                            )
+                        }),
+                    }
+                }
+                _ => peri_acp_types::session::TurnTelemetryOutcome::Completed,
             };
-            let handle = (hooks.on_turn_end)(error_output);
+            let handle = (hooks.on_turn_end)(outcome);
             drop(handle); // fire-and-forget flush
         }
 

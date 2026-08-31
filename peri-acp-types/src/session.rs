@@ -35,6 +35,31 @@ pub enum ExecutionFailureKind {
     LlmHttp,
 }
 
+/// Langfuse 等进程内观测消费者使用的 canonical turn 终态。
+///
+/// 该 DTO 不参与 wire 序列化；fatal 分支只携带 [`ExecutionFailure`] 的安全窄投影，
+/// 避免观测侧从可丢弃事件或错误字符串重新推断终态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnTelemetryOutcome {
+    Completed,
+    Stopped { reason: PromptStopReason },
+    Failed { failure: ExecutionFailure },
+}
+
+impl TurnTelemetryOutcome {
+    pub fn from_result(stop_reason: PromptStopReason, failure: Option<ExecutionFailure>) -> Self {
+        if let Some(failure) = failure {
+            Self::Failed { failure }
+        } else if stop_reason == PromptStopReason::EndTurn {
+            Self::Completed
+        } else {
+            Self::Stopped {
+                reason: stop_reason,
+            }
+        }
+    }
+}
+
 impl ExecutionFailureKind {
     /// JSON-RPC error `data.kind` 的稳定 wire 名称。
     pub const fn wire_name(self) -> &'static str {

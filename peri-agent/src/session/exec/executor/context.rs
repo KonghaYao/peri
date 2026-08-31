@@ -123,8 +123,11 @@ pub type SubagentLlmFactory =
 /// 防御性 frozen 构建器（ACP 宿主渲染面构造；turn.frozen=None 时回落）。
 pub type FrozenFallbackBuilder = Arc<dyn Fn(&str, Option<&str>) -> FrozenSessionData + Send + Sync>;
 /// turn 结束 Langfuse 钩子（返回 flush JoinHandle，drop = fire-and-forget）。
-pub type LangfuseTurnEndHook =
-    Arc<dyn Fn(Option<String>) -> Option<tokio::task::JoinHandle<()>> + Send + Sync>;
+pub type LangfuseTurnEndHook = Arc<
+    dyn Fn(peri_acp_types::session::TurnTelemetryOutcome) -> Option<tokio::task::JoinHandle<()>>
+        + Send
+        + Sync,
+>;
 
 pub struct LangfuseHooks {
     /// turn 开始钩子（参数 = 本轮输入文本；泵任务开头调用，语义同

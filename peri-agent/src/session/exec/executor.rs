@@ -539,7 +539,10 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
 
     // Main event pump（事件三层化：发射点 → EventPublisher →
     // 本泵订阅消费；event_rx 仅作发射点集合的关闭信号）
-    let (stop_reason_tx, stop_reason_rx) = exec_oneshot::channel::<PromptStopReason>();
+    let (stop_reason_tx, stop_reason_rx) = exec_oneshot::channel::<(
+        PromptStopReason,
+        peri_acp_types::session::TurnTelemetryOutcome,
+    )>();
     let pump_handle = spawn_event_pump(SpawnPumpRequest {
         // L5：订阅经端口适配（契约层 SubscriptionError 镜像，Controller 零改动）
         subscription: (ctx.subscribe)(),
@@ -575,8 +578,12 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     )
     .await;
 
-    // Send stop_reason to the event pump before it pushes done
-    let _ = stop_reason_tx.send(exec_outcome.stop_reason);
+    // Send canonical terminal outcome to the event pump before it pushes done.
+    let telemetry_outcome = peri_acp_types::session::TurnTelemetryOutcome::from_result(
+        exec_outcome.stop_reason,
+        exec_outcome.failure.clone(),
+    );
+    let _ = stop_reason_tx.send((exec_outcome.stop_reason, telemetry_outcome));
 
     let result = collect_result(CollectRequest {
         event_tx: &event_tx,

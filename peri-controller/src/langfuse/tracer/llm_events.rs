@@ -96,10 +96,35 @@ impl LangfuseTracer {
             return;
         }
 
-        let gen_end = match self.generation.on_llm_end(agent_id, step) {
-            Some(g) => g,
-            None => return,
+        if !self.generation.contains(agent_id, step) {
+            tracing::warn!(
+                target: "langfuse::generation",
+                %agent_id,
+                step,
+                "on_llm_end: 缺少 LlmCallStart，无法构造完整 generation"
+            );
+            return;
+        }
+
+        // 必须先解析 parent 再消费 tracker state。未知 ownership 可能由可丢的
+        // SubagentStart 导致；保留 state 让 turn-end fallback 降级挂到主 agent-run。
+        let parent_id = match self.llm_parent(agent_id) {
+            Some(parent_id) => parent_id,
+            None => {
+                tracing::warn!(
+                    target: "langfuse::subagent",
+                    %agent_id,
+                    step,
+                    "on_llm_end: agent ownership 暂不可解析，保留 generation 等待 turn-end 兜底"
+                );
+                return;
+            }
         };
+
+        let gen_end = self
+            .generation
+            .on_llm_end(agent_id, step)
+            .expect("generation existence checked before removal");
 
         let end_time = now_rfc3339();
         let usage_details: Option<std::collections::HashMap<String, i32>> =
@@ -130,21 +155,7 @@ impl LangfuseTracer {
                 map
             });
 
-        // 优先使用当前活跃 stage span 作为父 observation（按 agent 隔离：
-        // 并行 subagent 各自持有自己的 stage slot，不会取到其他 agent 的 span）。
-        // 归属链:该 agent 的活跃 stage → 该 agent 的 AGENT obs → 主 agent obs。
-        // 禁止降级挂主 agent:未知 agent(未注册且非 main)直接跳过。
-        let parent_id = match self.llm_parent(agent_id) {
-            Some(p) => p,
-            None => {
-                tracing::warn!(
-                    target: "langfuse::subagent",
-                    %agent_id,
-                    "on_llm_end: agent 未注册且非主 agent,跳过 generation 上报"
-                );
-                return;
-            }
-        };
+        // parent 已在消费 tracker state 前解析，避免 ownership 暂不可用时永久丢失。
 
         // 合并 retry metadata + token 用量到 metadata 字段（Langfuse UI 可见）
         let mut meta = gen_end.retry_metadata.unwrap_or(serde_json::json!({}));

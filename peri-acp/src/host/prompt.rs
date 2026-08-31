@@ -590,11 +590,17 @@ pub(crate) async fn run_prompt(
             },
             on_turn_end: {
                 let tracer = Arc::clone(&tracer);
-                Arc::new(move |err: Option<String>| {
-                    tracer.lock().on_turn_end(err.as_deref()).into()
-                })
+                Arc::new(
+                    move |outcome: peri_acp_types::session::TurnTelemetryOutcome| {
+                        tracer.lock().on_turn_end(outcome).into()
+                    },
+                )
                     as Arc<
-                        dyn Fn(Option<String>) -> Option<tokio::task::JoinHandle<()>> + Send + Sync,
+                        dyn Fn(
+                                peri_acp_types::session::TurnTelemetryOutcome,
+                            ) -> Option<tokio::task::JoinHandle<()>>
+                            + Send
+                            + Sync,
                     >
             },
             bridge_factory: {
