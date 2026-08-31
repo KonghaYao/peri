@@ -4030,6 +4030,7 @@ dependencies = [
  "dirs-next",
  "filetime",
  "flate2",
+ "fs2",
  "futures",
  "glob",
  "gray_matter",

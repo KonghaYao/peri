@@ -135,7 +135,7 @@ pub async fn run_print(
     // thread 存储（经 Resources 门面）——协议面输入，ACP host 的 ephemeral
     // session 需要；middlewares 具体实现（CronScheduler / McpClientPool / 插件
     // 数据等）由 ACP Host 装配面内部构造（§0 依赖方向）。
-    // db_path 显式指定时打开失败直接上抛（不 fallback），经 `?` 传播 exit 1。
+    // 默认或显式 db_path 打开失败都经 `?` 传播 exit 1。
     let thread_store = peri_resources::Resources::open_with(db_path)
         .await
         .map(|resources| resources.thread_store())

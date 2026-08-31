@@ -21,29 +21,24 @@ pub struct Resources {
 impl Resources {
     /// 打开全部资源（当前为会话存储）。
     ///
-    /// 保持既有行为：默认路径 `~/.peri/threads/threads.db` 打开失败时
-    /// fallback 到临时目录。
+    /// 默认路径 `~/.peri/threads/threads.db` 打开失败时直接返回错误。
     pub async fn open() -> Result<Self> {
         Self::open_with(None).await
     }
 
     /// 按显式路径打开全部资源（当前为会话存储）。
     ///
-    /// `Some(path)`：直接使用指定路径打开 SQLite 数据库；打开失败时
-    /// 直接报错（不 fallback 临时目录），错误信息携带路径。
-    /// `None`：与 [`open`] 相同——默认路径 `~/.peri/threads/threads.db`
-    /// 打开失败时 fallback 到临时目录。
+    /// `Some(path)` 使用指定路径；`None` 使用默认路径
+    /// `~/.peri/threads/threads.db`。任一路径打开失败都直接返回包含路径的错误，
+    /// 不再静默 fallback 到共享临时数据库。
     pub async fn open_with(db_path: Option<PathBuf>) -> Result<Self> {
         let store = match db_path {
             Some(path) => SqliteThreadStore::new(path.clone()).await.map_err(|e| {
                 anyhow::anyhow!("无法打开指定 SQLite 数据库 {}: {e}", path.display())
             })?,
-            None => match SqliteThreadStore::default_path().await {
-                Ok(store) => store,
-                Err(_) => SqliteThreadStore::new(std::env::temp_dir().join("zen-threads.db"))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("无法创建临时 SQLite 数据库: {e}"))?,
-            },
+            None => SqliteThreadStore::default_path().await.map_err(|e| {
+                anyhow::anyhow!("无法打开默认 SQLite 数据库 ~/.peri/threads/threads.db: {e}")
+            })?,
         };
         Ok(Self {
             thread_store: Arc::new(store),

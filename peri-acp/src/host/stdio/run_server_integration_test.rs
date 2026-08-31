@@ -28,6 +28,32 @@ use crate::host::{self, AcpServerConfig};
 use crate::provider::{LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
 use crate::transport::{stdio::StdioTransport, AcpTransport};
 
+use super::load_stdio_config_source;
+
+#[test]
+fn test_stdio_config_source_uses_input_cwd_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let process_workspace = tmp.path().join("process-workspace");
+    let input_workspace = tmp.path().join("input-workspace");
+    let global_path = tmp.path().join("missing-global.json");
+    std::fs::create_dir_all(process_workspace.join(".peri")).unwrap();
+    std::fs::create_dir_all(input_workspace.join(".peri")).unwrap();
+    std::fs::write(
+        process_workspace.join(".peri/settings.json"),
+        r#"{"config":{"providers":[{"id":"process","type":"openai"}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        input_workspace.join(".peri/settings.json"),
+        r#"{"config":{"providers":[{"id":"input","type":"openai"}]}}"#,
+    )
+    .unwrap();
+
+    let source = load_stdio_config_source(&input_workspace, global_path);
+
+    assert_eq!(source.loaded_merged().config.providers[0].id, "input");
+}
+
 // ── 测试装配（与 requests_test.rs 的 make_server_config 同构）──────────────
 
 fn make_provider_config(

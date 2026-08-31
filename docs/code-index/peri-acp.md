@@ -6,7 +6,7 @@
 ## 架构速览
 
 - 数据流：`ACP request → transport(mpsc/stdio) → host 部署单元 → dispatch 纯函数 → SessionManager(frozen/caps) → run_prompt → peri-agent run_session_loop → ExecutorEvent → event/forwarder+mapper → SessionUpdate / AcpEvent → client`
-- 服务入口：`src/host/mod.rs:248` 的 `run_acp_server(AcpTransport, AcpServerConfig)`（mpsc/TUI 部署单元，`session/prompt` spawn 后台 task 保证 cancel 可响应）；stdio 部署单元 `src/host/stdio/mod.rs:39` 的 `run_acp_stdio(StdioInput)`（批 3 后整体接入统一 `run_acp_server`）。方法分发：`src/host/requests.rs:22` 的 `handle_request` match（按方法分派到 `host/requests/` 子模块：session_lifecycle / plugin / config_options / mcp_oauth / workflow / rewind）——**stdio 与 TUI 共用 `run_acp_server` + `handle_request`（单一路径，transport 多态）**
+- 服务入口：`src/host/mod.rs:248` 的 `run_acp_server(AcpTransport, AcpServerConfig)`（mpsc/TUI 部署单元，`session/prompt` spawn 后台 task 保证 cancel 可响应）；stdio 部署单元 `src/host/stdio/mod.rs:39` 的 `run_acp_stdio(StdioInput)`（Provider、合并配置与 `ConfigSource` 统一按 canonicalized `input.cwd` 冻结，随后整体接入统一 `run_acp_server`）。方法分发：`src/host/requests.rs:22` 的 `handle_request` match（按方法分派到 `host/requests/` 子模块：session_lifecycle / plugin / config_options / mcp_oauth / workflow / rewind）——**stdio 与 TUI 共用 `run_acp_server` + `handle_request`（单一路径，transport 多态）**
 - 稳定不变量：`SessionManager` 在每条 session/new、load、resume、fork 路径注册 caps，发送扩展事件前按 session caps 门控；frozen 数据会话内不可漂移（ARC-FROZEN-001）；事件改动须覆盖发射/mapper/forwarder/caps 门控/客户端五层（ARC-EVENT-001）；Hub/Web 投影必须从 canonical event 映射为版本化 allowlist DTO（`event/activity.rs`），禁止复用 TUI 私有 `event_json`；中间件链序事实源在 Agent 层 `production_blueprint`（ARC-MIDDLEWARE-001），ACP 仅构造装配上下文；Langfuse bridge/tracer 实现在 `peri-controller/src/langfuse/`，ACP `event/forwarder.rs` 只保留协议化前分支的接线点（None=禁用），不参与业务链路
 
 ## 速查表
