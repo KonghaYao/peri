@@ -5,7 +5,8 @@
 //!
 //! ## 设计
 //!
-//! - 单消费者，从 `mpsc::UnboundedReceiver<String>` 顺序读取
+//! - dispatcher 在同步 `send` 边界先取得 reservation，再入队
+//! - 单消费者，从 `mpsc::UnboundedReceiver<ThreadLoadRequest>` 顺序读取
 //! - 与 submit_consumer / rewind_consumer 同模式，独立 channel 解耦
 //! - shutdown 信号触发时干净退出
 //!
@@ -22,14 +23,53 @@ use tracing::{error, info};
 
 use fluent_bundle::FluentValue;
 
-use crate::acp_client::AcpTuiClient;
+use crate::acp_client::{AcpTuiClient, client::SessionLoadReservation};
 use crate::i18n;
 use crate::kit::atoms;
+
+/// Queued load plus the reservation that blocks new prompts until consumption
+/// finishes (or the request is dropped/cancelled).
+pub struct ThreadLoadRequest {
+    thread_id: String,
+    _reservation: SessionLoadReservation,
+}
+
+impl ThreadLoadRequest {
+    #[cfg(test)]
+    pub(crate) fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+}
+
+/// Synchronous producer boundary shared by browser, confirm popup, and compact
+/// replay. Reserving here avoids relying on async consumer scheduling order.
+#[derive(Clone)]
+pub struct ThreadLoadDispatcher {
+    tx: mpsc::UnboundedSender<ThreadLoadRequest>,
+    client: AcpTuiClient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadLoadDispatchError;
+
+impl ThreadLoadDispatcher {
+    pub fn new(tx: mpsc::UnboundedSender<ThreadLoadRequest>, client: AcpTuiClient) -> Self {
+        Self { tx, client }
+    }
+
+    pub fn send(&self, thread_id: String) -> Result<(), ThreadLoadDispatchError> {
+        let request = ThreadLoadRequest {
+            thread_id,
+            _reservation: self.client.reserve_session_load(),
+        };
+        self.tx.send(request).map_err(|_| ThreadLoadDispatchError)
+    }
+}
 
 /// 启动 thread 切换消费者后台任务。
 pub fn spawn_thread_load_consumer(
     acp_client: AcpTuiClient,
-    mut rx: mpsc::UnboundedReceiver<String>,
+    mut rx: mpsc::UnboundedReceiver<ThreadLoadRequest>,
     cwd: String,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
@@ -47,7 +87,8 @@ pub fn spawn_thread_load_consumer(
                             info!("kit thread_load_consumer: THREAD_LOAD_TX dropped, exiting");
                             break;
                         }
-                        Some(thread_id) => {
+                        Some(request) => {
+                            let thread_id = request.thread_id.clone();
                             // 检查是否有运行中的后台任务（scoped 以避免 Non-Send guard 跨 await 点）
                             let has_bg_tasks = {
                                 let state = atoms::BG_TASKS.state();
@@ -93,7 +134,17 @@ pub fn spawn_thread_load_consumer(
                                 continue;
                             }
 
-                            if let Err(e) = handle_load(&acp_client, &cwd, thread_id).await {
+                            let result = tokio::select! {
+                                _ = shutdown.cancelled() => {
+                                    info!("kit thread_load_consumer: shutdown cancelled in-flight session/load");
+                                    drop(request);
+                                    break;
+                                }
+                                result = handle_load(&acp_client, &cwd, thread_id) => result,
+                            };
+                            // Explicitly keep the reservation alive across the load RPC.
+                            drop(request);
+                            if let Err(e) = result {
                                 error!(error = %e, "kit thread_load_consumer: load_session failed");
                             }
                         }

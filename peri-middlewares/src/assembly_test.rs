@@ -26,7 +26,8 @@ use peri_agent::{
     tools::BaseTool,
 };
 use peri_model::{
-    Model, ModelCapabilities, ModelRequest, ModelResult, ModelStream, ModelStreamEvent,
+    Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
+    ModelStreamEvent, StopReason,
 };
 use peri_resources::lsp::config::{LspConfigSource, LspServerConfig};
 use peri_resources::workflow::protocol::{AgentRunParams, AgentRunResult};
@@ -187,6 +188,35 @@ impl Model for FakeModel {
 
 struct CancelGateModel {
     entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+struct CompletedWorkflowModel;
+
+#[async_trait]
+impl Model for CompletedWorkflowModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_streaming: true,
+            ..ModelCapabilities::default()
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        let response = ModelResponse::new(
+            ModelMessage::assistant_text("workflow done"),
+            StopReason::EndTurn,
+            None,
+            Some("workflow-forwarder-failure".into()),
+        )?;
+        Ok(ModelStream::with_parent_cancellation(
+            stream::iter(vec![Ok(ModelStreamEvent::Completed(response))]),
+            cancellation,
+        ))
+    }
 }
 
 #[async_trait]
@@ -885,6 +915,63 @@ async fn test_workflow_executor_cancel_during_model_stream_is_interrupted() {
     }
 }
 
+#[tokio::test]
+async fn test_workflow_executor_forwarder_join_error_is_dead_and_failed_telemetry() {
+    let model: Arc<dyn Model> = Arc::new(CompletedWorkflowModel);
+    let telemetry = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let telemetry_for_hook = Arc::clone(&telemetry);
+    let mut ctx = workflow_context_with_disabled(&[]);
+    ctx.model_factory = Arc::new(move |_model, _max_tokens, _observer| {
+        peri_agent::agent::workflow::WorkflowModel {
+            model: Arc::clone(&model),
+            model_name: "workflow-complete".to_string(),
+            tier: None,
+        }
+    });
+    ctx.forwarder_launcher = Arc::new(|_, _, _| {
+        let handle = tokio::spawn(std::future::pending());
+        handle.abort();
+        handle
+    });
+    ctx.langfuse_hooks = Some(peri_agent::session::exec::executor::LangfuseHooks {
+        on_turn_start: Arc::new(|_| {}),
+        on_turn_end: Arc::new(move |outcome| {
+            telemetry_for_hook.lock().unwrap().push(outcome);
+            None
+        }),
+        bridge_factory: Arc::new(|_, _| None),
+    });
+
+    let result = peri_agent::agent::workflow::WorkflowAgentExecutor::new(ctx)
+        .execute(AgentRunParams {
+            run_id: "forwarder-failure-workflow-run".to_string(),
+            agent_id: 1,
+            prompt: "complete before forwarder failure".to_string(),
+            schema: None,
+            model: None,
+            max_tokens: None,
+            agent_type: None,
+            isolation: None,
+            allowed_tools: None,
+            label: None,
+            phase: None,
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        AgentRunResult::Dead { reason: Some(reason), .. }
+            if reason == "event-forwarder-failed"
+    ));
+    let outcomes = telemetry.lock().unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert!(matches!(
+        &outcomes[0],
+        peri_acp_types::session::TurnTelemetryOutcome::Failed { failure }
+            if failure.kind == peri_acp_types::session::ExecutionFailureKind::Internal
+    ));
+}
+
 // ─── MetaHarness（设计 §2.5）：middleware 关闭契约测试 ────────────────────────
 
 use peri_acp_types::meta_harness::{MIDDLEWARE_NAMES, MIDDLEWARE_TOOL_NAMES};
@@ -1214,7 +1301,7 @@ fn workflow_context_with_disabled(disabled: &[&str]) -> WorkflowAgentContext {
     let fallback: peri_agent::agent::workflow::factory::WorkflowSystemPromptFallback =
         Arc::new(|_, _, _| String::new());
     let forwarder: peri_agent::session::exec::executor_helpers::ForwarderLauncherFn =
-        Arc::new(|_, _, _| {});
+        Arc::new(|_, _, _| tokio::spawn(async {}));
     WorkflowAgentContext {
         cwd: "/tmp/contract-test".to_string(),
         frozen_claude_md: None,

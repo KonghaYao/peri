@@ -1,17 +1,29 @@
 use serde_json::{json, Value};
 
-pub(super) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
+use crate::prompt_cache::{strip_system_prompt_dynamic_boundaries, SYSTEM_PROMPT_DYNAMIC_BOUNDARY};
 
 pub(super) struct SystemPromptBlock {
     pub(super) text: String,
     pub(super) cache_control: bool,
 }
 
-pub(super) fn split_system_blocks(text: &str) -> Vec<SystemPromptBlock> {
+pub(super) struct SplitSystemPrompt {
+    pub(super) blocks: Vec<SystemPromptBlock>,
+    pub(super) allow_fallback_cache: bool,
+}
+
+pub(super) fn split_system_blocks(text: &str) -> SplitSystemPrompt {
     if text.is_empty() {
-        return Vec::new();
+        return SplitSystemPrompt {
+            blocks: Vec::new(),
+            allow_fallback_cache: false,
+        };
     }
-    if let Some(index) = text.find(SYSTEM_PROMPT_DYNAMIC_BOUNDARY) {
+    let boundary_count = text.matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).count();
+    if boundary_count == 1 {
+        let index = text
+            .find(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+            .expect("count established one boundary");
         let static_text = text[..index].trim();
         let dynamic_text = text[index + SYSTEM_PROMPT_DYNAMIC_BOUNDARY.len()..].trim();
         let mut blocks = Vec::new();
@@ -27,16 +39,38 @@ pub(super) fn split_system_blocks(text: &str) -> Vec<SystemPromptBlock> {
                 cache_control: false,
             });
         }
-        blocks
+        SplitSystemPrompt {
+            blocks,
+            allow_fallback_cache: false,
+        }
+    } else if boundary_count > 1 {
+        let text = strip_system_prompt_dynamic_boundaries(text);
+        let text = text.trim();
+        SplitSystemPrompt {
+            blocks: (!text.is_empty())
+                .then(|| SystemPromptBlock {
+                    text: text.into(),
+                    cache_control: false,
+                })
+                .into_iter()
+                .collect(),
+            allow_fallback_cache: false,
+        }
     } else {
-        vec![SystemPromptBlock {
-            text: text.into(),
-            cache_control: false,
-        }]
+        SplitSystemPrompt {
+            blocks: vec![SystemPromptBlock {
+                text: text.into(),
+                cache_control: false,
+            }],
+            allow_fallback_cache: true,
+        }
     }
 }
 
-pub(super) fn system_blocks_to_json(blocks: &[SystemPromptBlock]) -> Vec<Value> {
+pub(super) fn system_blocks_to_json(
+    blocks: &[SystemPromptBlock],
+    allow_fallback_cache: bool,
+) -> Vec<Value> {
     let has_cached = blocks.iter().any(|block| block.cache_control);
     let last_index = blocks.len().saturating_sub(1);
     blocks
@@ -44,7 +78,7 @@ pub(super) fn system_blocks_to_json(blocks: &[SystemPromptBlock]) -> Vec<Value> 
         .enumerate()
         .map(|(index, block)| {
             let mut value = json!({ "type": "text", "text": block.text });
-            if block.cache_control || (index == last_index && !has_cached) {
+            if block.cache_control || (allow_fallback_cache && index == last_index && !has_cached) {
                 value["cache_control"] = json!({ "type": "ephemeral" });
             }
             value
@@ -75,12 +109,12 @@ pub(super) fn apply_cache_to_messages(messages: &mut [Value]) {
     target_indices.sort_unstable();
 
     for target_index in target_indices.iter().copied() {
-        let effective_index = if has_text_block(&messages[target_index]) {
+        let effective_index = if has_cacheable_block(&messages[target_index]) {
             Some(target_index)
         } else {
             user_indices.iter().rev().find_map(|&index| {
                 (index < target_index
-                    && has_text_block(&messages[index])
+                    && has_cacheable_block(&messages[index])
                     && !target_indices.contains(&index))
                 .then_some(index)
             })
@@ -91,19 +125,22 @@ pub(super) fn apply_cache_to_messages(messages: &mut [Value]) {
     }
 }
 
-fn has_text_block(message: &Value) -> bool {
+fn has_cacheable_block(message: &Value) -> bool {
     match message.get("content") {
-        Some(Value::Array(blocks)) => blocks.iter().any(is_non_empty_text_block),
+        Some(Value::Array(blocks)) => blocks.iter().any(is_cacheable_block),
         Some(Value::String(text)) => !text.trim().is_empty(),
         _ => false,
     }
 }
 
-fn is_non_empty_text_block(block: &Value) -> bool {
-    block["type"] == "text"
-        && block["text"]
+fn is_cacheable_block(block: &Value) -> bool {
+    match block["type"].as_str() {
+        Some("text") => block["text"]
             .as_str()
-            .is_some_and(|text| !text.trim().is_empty())
+            .is_some_and(|text| !text.trim().is_empty()),
+        Some("tool_result") => true,
+        _ => false,
+    }
 }
 
 fn apply_cache_to_message(message: &mut Value) {
@@ -112,10 +149,7 @@ fn apply_cache_to_message(message: &mut Value) {
     };
     match content {
         Value::Array(blocks) => {
-            if let Some(block) = blocks
-                .iter_mut()
-                .rfind(|block| is_non_empty_text_block(block))
-            {
+            if let Some(block) = blocks.iter_mut().rfind(|block| is_cacheable_block(block)) {
                 block["cache_control"] = json!({ "type": "ephemeral" });
             }
         }

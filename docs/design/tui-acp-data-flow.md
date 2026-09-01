@@ -1,6 +1,6 @@
 # TUI 与 ACP 数据流
 
-> 最后核对：2026-08-25
+> 最后核对：2026-09-01
 
 ## 概述
 
@@ -242,6 +242,9 @@ pub struct BridgeState {
     /// 服务器经 turn 结束事件回带）。TurnInterrupted 携带 request_id 且与
     /// 当前值不匹配 → stale（request_id 配对判定，与代际判定 OR 组合）。
     pub current_request_id: Option<String>,
+    /// 当前 prompt 最近一次 root usage observation。valid sample 为 Some；
+    /// missing/zero/inconsistent root observation 显式清为 None。
+    pub pending_cache_usage: Option<CacheUsageSample>,
     // TodoWrite 变更集字段（last_successful_todos / next_todo_sequence /
     // todo_call_inputs）用于工具卡片增量，细节见代码。
 }
@@ -274,11 +277,27 @@ event_v2         →  `session/update`                    →  AcpNotification �
 | `tool_call` | ACP → TUI | `ToolStarted` | `tool_id`, `title`(tool_name), `rawInput` |
 | `tool_call_update` | ACP → TUI | `ToolEnded` | `tool_id`, `rawOutput`, `status` |
 | `plan` | ACP → TUI | `handle_plan_update` | `entries[{content, status}]` |
-| `usage_update` | ACP → TUI | 写入 `SPINNER_TOKEN_COUNT`；cache hit rate < 80% 时推送 `SystemNotification` 到消息流 | `inputTokens`, `outputTokens`, `cacheReadTokens` |
+| `usage_update` | ACP → TUI | root 更新 spinner 与 `pending_cache_usage`；auxiliary 不覆盖；低 coverage 仅在 `TurnDone` 前至多提示一次 | `inputTokens`, `outputTokens`, `cacheReadTokens`, `requestId`, `_meta.peri.sourceAgentId?` |
 | `user_message_chunk` | ACP → TUI | `ReplayUserBubble` | `text` (session replay) |
 | `session/input` | TUI → ACP | `acp_client.prompt()` | `MessageContent` |
 
 **StateSnapshotMeta**（`peri/agent_event` → `AcpNotification::AgentEvent`）：写入 `CONTEXT_USAGE` atom（`budget_pct` + `total_tokens`），供 StatusBarRow1 显示上下文使用率。不产生 AcpEventData。
+
+#### Root cache coverage 的最终观察语义
+
+`usage_update` 的 cache 字段不是逐步告警信号。notifier 先读取顶层
+`_meta.peri.sourceAgentId`：带身份的 auxiliary agent usage 完全不参与父 turn
+coverage；未带身份的 root observation 每次都替换 `BridgeState.pending_cache_usage`。
+当 `inputTokens > 0` 且 `0 < cacheReadTokens <= inputTokens` 时写入
+`Some(CacheUsageSample)`；missing、zero 或内部不一致的 root observation 发送
+`CacheUsageUpdated(None)`，显式清掉更早的低覆盖样本，不能把旧值误当作最终值。
+
+每个 model step 都不产生 cache warning。`TurnDone` 在归档 `current_turn` 前消费
+最近一次 root sample；仅当配置允许且 `cached / input < 80%` 时注入一条 coverage
+note，并在同一次 TurnDone flush 中随 assistant 内容进入 `committed`。note 包含
+cached/input/uncached 绝对 token 与 request id。`TurnSuspended` 保留观察值；新
+prompt、session reset、非 stale interrupt 与 `AgentExecutionFailed` 清除；stale
+旧 interrupt 不得清掉新 turn 的观察值。
 
 **Agent Event Extensions**（`peri/agent_event` → `convert_agent_event`）：以下 7 个 AcpEvent 变体通过 `AcpNotification::AgentEvent` 路由，由 `convert_agent_event` 转换为 AcpEventData：
 

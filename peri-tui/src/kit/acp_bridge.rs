@@ -26,6 +26,7 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     state.turn_generation = 0;
     state.last_prompt_generation = 0;
     state.current_request_id = None;
+    state.pending_cache_usage = None;
     state.phase = SessionPhase::Idle;
     state.popup_kind = None;
     state.last_submitted_text = None;
@@ -108,6 +109,7 @@ fn spawn_acp_bridge_inner(
             turn_generation: 0,
             last_prompt_generation: 0,
             current_request_id: None,
+            pending_cache_usage: None,
         };
 
         // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load
@@ -161,6 +163,7 @@ fn spawn_acp_bridge_inner(
                                 state.turn_generation = 0;
                                 state.last_prompt_generation = 0;
                                 state.current_request_id = None;
+                                state.pending_cache_usage = None;
                                 state.phase = SessionPhase::Idle;
                                 state.popup_kind = None;
                                 state.last_submitted_text = None;
@@ -320,6 +323,7 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         ToolEnded(_) => "ToolEnded",
         PromptStarted => "PromptStarted",
         PromptSubmitted { .. } => "PromptSubmitted",
+        CacheUsageUpdated(_) => "CacheUsageUpdated",
         SessionReplayStarted => "SessionReplayStarted",
         SessionReplayDone => "SessionReplayDone",
         TurnDone => "TurnDone",

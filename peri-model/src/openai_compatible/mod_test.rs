@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::{
+    prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
     transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
     ContentBlock, JsonObject, Model, ModelMessage, ModelRequest, ModelResult, ModelRuntimeConfig,
     ModelStreamEvent, RetryConfig, RetryableErrorClasses, StopReason, ToolCall, ToolDefinition,
@@ -116,7 +117,7 @@ fn request() -> ModelRequest {
     .expect("object");
     ModelRequest::new(vec![
         ModelMessage::system_text("base system"),
-        ModelMessage::system_text("second system __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"),
+        ModelMessage::system_text(format!("second system {SYSTEM_PROMPT_DYNAMIC_BOUNDARY}")),
         ModelMessage::user_text("read file"),
         ModelMessage::assistant(
             vec![
@@ -168,6 +169,62 @@ fn request_contract_preserves_system_tools_tool_results_and_reasoning() {
     assert_eq!(body["tool_choice"], "auto");
     assert_eq!(body["max_tokens"], 123);
     assert_eq!(body["stream"], true);
+}
+
+#[test]
+fn system_cache_transport_tokens_are_stripped_without_changing_other_bytes() {
+    let first = format!(
+        "BASE-STATIC{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\nBASE-DYNAMIC{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+    );
+    let request = ModelRequest::new(vec![
+        ModelMessage::system_text(first),
+        ModelMessage::system_text("REQUEST-MIDDLEWARE"),
+        ModelMessage::user_text("go"),
+    ]);
+    let body = body_for_test(&config("gpt-4o"), &request);
+    let expected = "BASE-STATIC\n\nBASE-DYNAMIC\n\nREQUEST-MIDDLEWARE";
+
+    assert_eq!(body["messages"][0]["content"], expected);
+    let serialized = serde_json::to_string(&body).expect("body serializes");
+    assert!(!serialized.contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY));
+    assert!(!serialized.contains("cache_control"));
+}
+
+#[test]
+fn prepared_body_keeps_existing_prefix_stable_when_tool_round_is_appended() {
+    let before_request = request();
+    let mut after_request = before_request.clone();
+    after_request.messages.push(ModelMessage::assistant(
+        vec![ContentBlock::text("next step")],
+        vec![ToolCall::new(
+            "call_2",
+            "Read",
+            JsonObject::from_value(json!({ "path": "b.rs" })).expect("object"),
+        )],
+    ));
+    after_request
+        .messages
+        .push(ModelMessage::tool_result(ToolResult::success(
+            "call_2",
+            "Read",
+            "next file contents",
+        )));
+
+    let before = body_for_test(&config("gpt-5.6-sol"), &before_request);
+    let after = body_for_test(&config("gpt-5.6-sol"), &after_request);
+
+    assert_eq!(before["messages"][0], after["messages"][0]);
+    assert_eq!(before.get("tools"), after.get("tools"));
+    let before_messages = before["messages"].as_array().expect("messages array");
+    let after_messages = after["messages"].as_array().expect("messages array");
+    assert_eq!(after_messages.len(), before_messages.len() + 2);
+    for (index, message) in before_messages.iter().enumerate() {
+        assert_eq!(
+            serde_json::to_vec(message).expect("message serializes"),
+            serde_json::to_vec(&after_messages[index]).expect("message serializes"),
+            "existing prepared message element {index} must stay byte-identical"
+        );
+    }
 }
 
 #[test]

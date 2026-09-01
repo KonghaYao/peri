@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::kit::acp_types::CurrentTurn;
-use crate::kit::atoms::{RENDER_HEARTBEAT, THREAD_LOAD_TX};
+use crate::kit::atoms::{PERI_CONFIG_HANDLE, RENDER_HEARTBEAT, THREAD_LOAD_TX};
 use crate::kit::tui_render_unit::{
     TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, TuiUserBubble,
 };
@@ -15,6 +15,11 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     // (b) current_turn.reset() + push_view_models
     // buffered_text 已由 LocalUserBubble 事件提前入队 committed，
     // TurnDone 不再代为搬运。
+    let show_warning = PERI_CONFIG_HANDLE
+        .get()
+        .map(|handle| handle.read().config.show_cache_warning.unwrap_or(false))
+        .unwrap_or(false);
+    finalize_cache_coverage(state, show_warning);
     state.flush_current_turn();
     state.last_pushed_text_len = 0;
     state.last_pushed_reasoning_len = 0;
@@ -36,9 +41,6 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     super::render::push_view_models(state);
     super::render::push_acp_state(state);
 
-    // (g) C1: agent 完成本轮——drain INPUT_BUFFER，按顺序重新提交。
-    super::render::drain_input_buffer();
-
     // C2: compact 命令完成后触发 session/load 重放。
     // S4.1 方案 B：命令 compact（Immediate）后无流事件，标志保持到 TurnDone；
     // agent 内部 auto-compact 后标志已被后续流事件清除（见 dispatch_and_notify
@@ -53,6 +55,40 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
                 "TurnDone: compact completed, triggering session/load replay"
             );
             let _ = tx.send(session_id);
+        }
+    }
+
+    // (g) C1: agent 完成本轮——drain INPUT_BUFFER，按顺序重新提交。
+    // compact replay 必须先同步取得 load reservation，否则 drain 出来的首条
+    // prompt 仍可能抢在异步 session/load consumer 前绑定旧 Stable session。
+    super::render::drain_input_buffer();
+}
+
+pub(super) fn finalize_cache_coverage(state: &mut BridgeState, show_warning: bool) {
+    if let Some(sample) = state.pending_cache_usage.take() {
+        if sample.input_tokens == 0
+            || sample.cached_tokens == 0
+            || sample.cached_tokens > sample.input_tokens
+        {
+            return;
+        }
+        let coverage = sample.cached_tokens as f64 / sample.input_tokens as f64;
+        if show_warning && coverage < 0.8 {
+            use fluent_bundle::FluentValue;
+            let pct = (coverage * 100.0) as u64;
+            let uncached = sample.input_tokens.saturating_sub(sample.cached_tokens);
+            let request_id = sample.request_id.as_deref().unwrap_or("-");
+            let text = crate::i18n::tr_args(
+                "app-note-cache-coverage-low",
+                &[
+                    ("pct".into(), FluentValue::from(pct)),
+                    ("cached".into(), FluentValue::from(sample.cached_tokens)),
+                    ("input".into(), FluentValue::from(sample.input_tokens)),
+                    ("uncached".into(), FluentValue::from(uncached)),
+                    ("req_id".into(), FluentValue::from(request_id)),
+                ],
+            );
+            state.inject_system_note(text, crate::kit::tui_render_unit::TuiNoteLevel::Warning);
         }
     }
 }
@@ -122,6 +158,8 @@ pub(super) fn handle_turn_interrupted(
         super::render::drain_input_buffer();
         return;
     }
+
+    state.pending_cache_usage = None;
 
     // 零产出回滚：Agent 尚未产出任何 AI 内容时（current_turn 为空），
     // 撤销本次用户气泡 + 恢复文本到输入框。
@@ -222,6 +260,7 @@ pub(super) fn handle_prompt_submitted(state: &mut BridgeState, request_id: &Opti
     // Issue 2026-08-05 返工：记录当前 turn 的 request_id——stale TurnInterrupted
     // 的 request_id 配对判定基准（主导排序场景，见 handle_turn_interrupted 注释）。
     state.current_request_id = request_id.clone();
+    state.pending_cache_usage = None;
     super::render::push_acp_state(state);
 }
 

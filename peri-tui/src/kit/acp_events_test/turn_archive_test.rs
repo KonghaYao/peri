@@ -24,6 +24,7 @@ fn test_two_turn_done_accumulates_committed() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // 第一轮：stream one text → TurnDone
@@ -87,6 +88,7 @@ fn test_turndone_archives_assistant_to_committed() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // 往 current_turn 写入一条 assistant 文本
@@ -145,6 +147,7 @@ fn test_turn_interrupted_empty_skips_archive() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     dispatch_and_notify(
@@ -194,6 +197,7 @@ fn test_turn_done_clears_last_submitted_text() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     dispatch_and_notify(
@@ -214,4 +218,158 @@ fn test_turn_done_clears_last_submitted_text() {
         state.last_submitted_text.is_none(),
         "TurnDone 后 last_submitted_text 应清空（防跨 turn 残留）"
     );
+}
+
+#[test]
+#[serial]
+fn test_cache_coverage_uses_latest_sample_once_and_commits_with_turn() {
+    let mut state = super::make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "assistant reply".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    for (input, cached) in [
+        (100_000, 70_000),
+        (101_449, 70_000),
+        (102_941, 70_000),
+        (104_478, 70_000),
+    ] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::CacheUsageUpdated(Some(CacheUsageSample {
+                input_tokens: input,
+                cached_tokens: cached,
+                request_id: Some("chatcmpl-cache".into()),
+            })),
+        );
+        assert!(
+            state
+                .current_turn
+                .view_models()
+                .iter()
+                .all(|vm| !matches!(vm, TuiRenderUnit::TuiSystemNote(_))),
+            "intermediate usage must not emit per-step notes"
+        );
+    }
+
+    turn::finalize_cache_coverage(&mut state, true);
+    turn::handle_turn_done(&mut state);
+    let notes: Vec<_> = state
+        .committed
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiSystemNote(note) => Some(note.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].contains("70000"));
+    assert!(notes[0].contains("104478"));
+    assert!(notes[0].contains("34478"));
+    assert!(notes[0].contains("chatcmpl-cache"));
+    assert!(state.current_turn.is_empty());
+    assert!(state.pending_cache_usage.is_none());
+}
+
+#[test]
+#[serial]
+fn test_cache_coverage_final_healthy_sample_suppresses_earlier_low_sample() {
+    let mut state = super::make_fold_test_state();
+    for (input, cached) in [(100, 50), (100, 90)] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::CacheUsageUpdated(Some(CacheUsageSample {
+                input_tokens: input,
+                cached_tokens: cached,
+                request_id: None,
+            })),
+        );
+    }
+    turn::finalize_cache_coverage(&mut state, true);
+    assert!(state.current_turn.is_empty());
+    assert!(state.pending_cache_usage.is_none());
+}
+
+fn assert_root_cache_clear_suppresses_earlier_low_sample(observation: &str) {
+    let mut state = super::make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CacheUsageUpdated(Some(CacheUsageSample {
+            input_tokens: 100,
+            cached_tokens: 50,
+            request_id: Some("earlier-low".into()),
+        })),
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::CacheUsageUpdated(None));
+    assert!(
+        state.pending_cache_usage.is_none(),
+        "{observation} root observation must clear the earlier low sample"
+    );
+
+    turn::finalize_cache_coverage(&mut state, true);
+    turn::handle_turn_done(&mut state);
+    assert!(
+        state
+            .committed
+            .iter()
+            .all(|unit| !matches!(unit, TuiRenderUnit::TuiSystemNote(_))),
+        "{observation} final root observation must suppress a stale warning"
+    );
+}
+
+#[test]
+#[serial]
+fn test_cache_coverage_final_missing_observation_clears_earlier_low_sample() {
+    assert_root_cache_clear_suppresses_earlier_low_sample("missing cache usage");
+}
+
+#[test]
+#[serial]
+fn test_cache_coverage_final_zero_observation_clears_earlier_low_sample() {
+    assert_root_cache_clear_suppresses_earlier_low_sample("zero cache usage");
+}
+
+#[test]
+#[serial]
+fn test_cache_coverage_final_invalid_observation_clears_earlier_low_sample() {
+    assert_root_cache_clear_suppresses_earlier_low_sample("invalid cache usage");
+}
+
+#[test]
+#[serial]
+fn test_cache_coverage_survives_suspend_and_is_overwritten_before_done() {
+    let mut state = super::make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CacheUsageUpdated(Some(CacheUsageSample {
+            input_tokens: 100,
+            cached_tokens: 40,
+            request_id: Some("before-suspend".into()),
+        })),
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    assert_eq!(
+        state
+            .pending_cache_usage
+            .as_ref()
+            .unwrap()
+            .request_id
+            .as_deref(),
+        Some("before-suspend")
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CacheUsageUpdated(Some(CacheUsageSample {
+            input_tokens: 100,
+            cached_tokens: 90,
+            request_id: Some("after-wake".into()),
+        })),
+    );
+    turn::finalize_cache_coverage(&mut state, true);
+    assert!(state.current_turn.is_empty());
+    assert!(state.pending_cache_usage.is_none());
 }

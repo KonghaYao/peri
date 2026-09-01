@@ -20,7 +20,7 @@ use tracing::{debug, error, warn};
 
 use super::interaction_lifecycle::{
     ClaimCause, ClaimedInteraction, InteractionLifecycle, InteractionOwner, InteractionUiOutcome,
-    OrdinaryDecision, RegisterDecision, ReverseInteractionKind, TransitionKind,
+    OrdinaryDecision, PromptLease, RegisterDecision, ReverseInteractionKind, TransitionKind,
 };
 use super::interaction_response::{elicitation_cancel_response, permission_cancelled_response};
 use super::interaction_settlement::{expiry_for_cause, spawn_settlement_worker};
@@ -177,6 +177,33 @@ impl Drop for StartupRestoreGuard<'_> {
     }
 }
 
+struct SessionLoadReservationState {
+    pending: Mutex<usize>,
+    epoch_tx: watch::Sender<u64>,
+}
+
+/// Synchronous queue-side ownership for an ordinary session load.
+///
+/// The reservation is acquired before a load request enters its async consumer.
+/// Dropping the guard releases exactly one queued/in-flight load and wakes prompt
+/// waiters. It is deliberately not Clone: the pending count represents queue
+/// ownership, not arbitrary client clones.
+pub(crate) struct SessionLoadReservation {
+    state: Arc<SessionLoadReservationState>,
+}
+
+impl Drop for SessionLoadReservation {
+    fn drop(&mut self) {
+        let mut pending = self.state.pending.lock().unwrap();
+        debug_assert!(*pending > 0, "session load reservation underflow");
+        *pending = pending.saturating_sub(1);
+        drop(pending);
+        self.state
+            .epoch_tx
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
+}
+
 /// TUI-side client that owns the ACP transport and routes notifications.
 ///
 /// Uses one mutex-protected routing state so current/deleted decisions are
@@ -196,6 +223,7 @@ pub struct AcpTuiClient {
     /// new/load and waits for the reserved load to settle instead of competing
     /// with it.
     startup_restore_tx: watch::Sender<bool>,
+    session_load_reservations: Arc<SessionLoadReservationState>,
     #[cfg(test)]
     transition_commit_hook:
         Arc<Mutex<Option<mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>>>,
@@ -259,6 +287,7 @@ impl AcpTuiClient {
         let lifecycle = InteractionLifecycle::new();
         let notification_weak = Arc::new(Mutex::new(None));
         let (startup_restore_tx, _startup_restore_rx) = watch::channel(false);
+        let (load_epoch_tx, _load_epoch_rx) = watch::channel(0_u64);
         let (settlement_tx, settlement_rx) = mpsc::unbounded_channel();
         lifecycle.install_drop_settlement_sender(settlement_tx);
         spawn_settlement_worker(
@@ -272,6 +301,10 @@ impl AcpTuiClient {
             projection_mode,
             notification_weak,
             startup_restore_tx,
+            session_load_reservations: Arc::new(SessionLoadReservationState {
+                pending: Mutex::new(0),
+                epoch_tx: load_epoch_tx,
+            }),
             #[cfg(test)]
             transition_commit_hook: Arc::new(Mutex::new(None)),
         };
@@ -713,9 +746,31 @@ impl AcpTuiClient {
     /// `session/new` execute under the client operation gate.
     pub async fn ensure_session(&self, cwd: &str, model: Option<&str>) -> Result<String, AcpError> {
         let mut startup_restore_rx = self.startup_restore_tx.subscribe();
+        let mut load_epoch_rx = self.session_load_reservations.epoch_tx.subscribe();
         loop {
             let operation = self.lifecycle.operation_gate().lock().await;
-            if let Some((session_id, _)) = self.lifecycle.stable_identity() {
+            let (pending_load, stable_session) = {
+                let _ = *load_epoch_rx.borrow_and_update();
+                let pending = self.session_load_reservations.pending.lock().unwrap();
+                if *pending > 0 {
+                    (true, None)
+                } else {
+                    // Hold the reservation mutex through Stable selection so a
+                    // dispatcher linearizes strictly before or after this result.
+                    (
+                        false,
+                        self.lifecycle
+                            .stable_identity()
+                            .map(|(session_id, _)| session_id),
+                    )
+                }
+            };
+            if pending_load {
+                drop(operation);
+                self.wait_for_session_load(&mut load_epoch_rx).await?;
+                continue;
+            }
+            if let Some(session_id) = stable_session {
                 return Ok(session_id);
             }
             if *startup_restore_rx.borrow_and_update() {
@@ -726,6 +781,77 @@ impl AcpTuiClient {
                 continue;
             }
             return self.new_session_under_gate(cwd, model).await;
+        }
+    }
+
+    /// Reserve an ordinary session load before handing it to an async consumer.
+    /// This synchronous boundary closes the browser-select → consumer scheduling
+    /// window where a fast submit could otherwise bind to the old Stable session.
+    pub(crate) fn reserve_session_load(&self) -> SessionLoadReservation {
+        let mut pending = self.session_load_reservations.pending.lock().unwrap();
+        *pending = pending
+            .checked_add(1)
+            .expect("session load reservation count overflow");
+        drop(pending);
+        self.session_load_reservations
+            .epoch_tx
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        SessionLoadReservation {
+            state: Arc::clone(&self.session_load_reservations),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_session_load_count(&self) -> usize {
+        *self.session_load_reservations.pending.lock().unwrap()
+    }
+
+    async fn wait_for_session_load(
+        &self,
+        epoch_rx: &mut watch::Receiver<u64>,
+    ) -> Result<(), AcpError> {
+        loop {
+            let _ = *epoch_rx.borrow_and_update();
+            if *self.session_load_reservations.pending.lock().unwrap() == 0 {
+                return Ok(());
+            }
+            epoch_rx.changed().await.map_err(|_| {
+                AcpError::new(-32603, "session load reservation closed unexpectedly")
+            })?;
+        }
+    }
+
+    async fn open_prompt_after_session_loads(
+        &self,
+        request_id: Option<String>,
+    ) -> Result<(String, PromptLease), AcpError> {
+        let mut epoch_rx = self.session_load_reservations.epoch_tx.subscribe();
+        loop {
+            let opened = {
+                let _operation = self.lifecycle.operation_gate().lock().await;
+                let pending = self.session_load_reservations.pending.lock().unwrap();
+                let _ = *epoch_rx.borrow_and_update();
+                if *pending > 0 {
+                    None
+                } else {
+                    let session_id = self
+                        .lifecycle
+                        .stable_identity()
+                        .map(|(session_id, _)| session_id)
+                        .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
+                    let lease = self
+                        .lifecycle
+                        .open_prompt(request_id.clone())
+                        .map_err(|message| AcpError::new(-32603, message))?;
+                    // Keep the reservation mutex through open_prompt: a dispatcher
+                    // linearizes strictly before this prompt or after it.
+                    Some((session_id, lease))
+                }
+            };
+            if let Some(opened) = opened {
+                return Ok(opened);
+            }
+            self.wait_for_session_load(&mut epoch_rx).await?;
         }
     }
 
@@ -870,19 +996,9 @@ impl AcpTuiClient {
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
     ) -> Result<(), AcpError> {
-        let (session_id, lease) = {
-            let _operation = self.lifecycle.operation_gate().lock().await;
-            let session_id = self
-                .lifecycle
-                .stable_identity()
-                .map(|(session_id, _)| session_id)
-                .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
-            let lease = self
-                .lifecycle
-                .open_prompt(request_id.clone())
-                .map_err(|message| AcpError::new(-32603, message))?;
-            (session_id, lease)
-        };
+        let (session_id, lease) = self
+            .open_prompt_after_session_loads(request_id.clone())
+            .await?;
         let mut params = json!({
             "sessionId": session_id,
             "message": { "role": "user", "content": content },
@@ -910,19 +1026,9 @@ impl AcpTuiClient {
         bg_results: Vec<peri_acp_types::event::BackgroundTaskResult>,
         request_id: Option<String>,
     ) -> Result<(), AcpError> {
-        let (session_id, lease) = {
-            let _operation = self.lifecycle.operation_gate().lock().await;
-            let session_id = self
-                .lifecycle
-                .stable_identity()
-                .map(|(session_id, _)| session_id)
-                .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
-            let lease = self
-                .lifecycle
-                .open_prompt(request_id.clone())
-                .map_err(|message| AcpError::new(-32603, message))?;
-            (session_id, lease)
-        };
+        let (session_id, lease) = self
+            .open_prompt_after_session_loads(request_id.clone())
+            .await?;
         let mut params = json!({
             "sessionId": session_id,
             "message": { "role": "user", "content": content },

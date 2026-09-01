@@ -214,7 +214,7 @@ pub struct AppConfig {
     /// 主动性级别
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proactiveness: Option<String>,
-    /// 是否在消息流中显示缓存命中率过低警告。
+    /// 是否在消息流中显示最终 prompt cache coverage 过低警告。
     /// Option<bool>：None=未设置（merge 时保留全局值），Some=显式开/关。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_cache_warning: Option<bool>,

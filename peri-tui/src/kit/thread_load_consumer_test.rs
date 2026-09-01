@@ -2,7 +2,11 @@
 
 #[cfg(test)]
 use super::*;
-use peri_acp::transport::mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair};
+use peri_acp::transport::{
+    AcpTransport,
+    mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair},
+    types::IncomingMessage,
+};
 use serial_test::serial;
 
 fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
@@ -30,7 +34,7 @@ async fn test_empty_thread_id_skipped() {
 #[tokio::test]
 async fn test_shutdown_exits_loop() {
     let (client, _server) = make_client_without_pump();
-    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    let (tx, rx) = mpsc::unbounded_channel::<ThreadLoadRequest>();
     let shutdown = CancellationToken::new();
     let handle = spawn_thread_load_consumer(client, rx, ".".into(), shutdown.clone());
     shutdown.cancel();
@@ -41,11 +45,42 @@ async fn test_shutdown_exits_loop() {
 #[tokio::test]
 async fn test_dropped_tx_exits_loop() {
     let (client, _server) = make_client_without_pump();
-    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    let (tx, rx) = mpsc::unbounded_channel::<ThreadLoadRequest>();
     let shutdown = CancellationToken::new();
     let handle = spawn_thread_load_consumer(client, rx, ".".into(), shutdown);
     drop(tx);
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
+}
+
+#[tokio::test]
+async fn test_shutdown_cancels_inflight_load_and_releases_reservation() {
+    let (client, server) = make_client_without_pump();
+    let (tx, rx) = mpsc::unbounded_channel::<ThreadLoadRequest>();
+    let dispatcher = ThreadLoadDispatcher::new(tx, client.clone());
+    let shutdown = CancellationToken::new();
+    let handle = spawn_thread_load_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+    dispatcher.send("target".into()).unwrap();
+
+    let request = tokio::time::timeout(std::time::Duration::from_millis(500), server.recv())
+        .await
+        .expect("session/load should become in-flight")
+        .expect("server transport should stay open");
+    assert!(matches!(
+        request,
+        IncomingMessage::Request { ref method, .. } if method == "session/load"
+    ));
+    assert_eq!(client.pending_session_load_count(), 1);
+
+    shutdown.cancel();
+    tokio::time::timeout(std::time::Duration::from_millis(500), handle)
+        .await
+        .expect("consumer must stop while session/load is in-flight")
+        .unwrap();
+    assert_eq!(
+        client.pending_session_load_count(),
+        0,
+        "shutdown must drop the in-flight reservation"
+    );
 }
 
 /// 验证 handle_load 在调用 load_session 前已同步重置弹窗 / Todo / 历史指针。

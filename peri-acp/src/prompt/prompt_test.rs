@@ -4,6 +4,9 @@ use peri_acp_types::meta_harness::MetaHarnessState;
 use peri_middlewares::default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
 use peri_middlewares::host_ports::SkillsProvider;
 use peri_middlewares::subagent::SubAgentMiddleware;
+use peri_model::prompt_cache::{
+    strip_system_prompt_dynamic_boundaries, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+};
 
 /// 构建系统提示词（测试 helper；原 prompt/mod.rs 的同名函数随 §0 边 2
 /// 依赖门收口迁出——收集函数移至宿主装配面 `crate::session::crate::session::build_collected_sections`，
@@ -140,8 +143,7 @@ fn test_with_overrides_uses_override_block() {
         None,
         None,
     );
-    // persona 段在缓存区段（01-06）之后（C2：boundary 文本标记已删除，
-    // 位置属性承担划分）
+    // persona 段在缓存区段（01-06）和 cache boundary transport token 之后。
     let pos_tone_style = result.find("# Tone and style").unwrap();
     assert!(
         result[pos_tone_style..].contains("test persona"),
@@ -484,24 +486,43 @@ fn test_detect_channel_gate_never_enabled() {
     );
 }
 
-// ─── boundary marker tests ──────────────────────────────────────────────
+// ─── system prompt cache boundary tests ────────────────────────────────
 
 #[test]
-fn test_boundary_marker_removed() {
-    let result = build_system_prompt(
-        &MetaHarnessState::default(),
-        None,
-        "/tmp",
-        PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
-        None,
-        None,
-    );
-    assert!(
-        !result.contains("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"),
-        "波 4 演进（C2）：boundary 文本标记已删除（缓存区划分由段落位置属性承担）"
-    );
+fn test_prompt_cache_boundary_four_state_matrix_preserves_old_wire_bytes() {
+    for (cached, uncached, expected_rendered, expected_wire) in [
+        (
+            Some("CACHED"),
+            Some("UNCACHED"),
+            format!("CACHED{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\nUNCACHED"),
+            "CACHED\n\nUNCACHED",
+        ),
+        (
+            Some("CACHED"),
+            None,
+            format!("CACHED{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"),
+            "CACHED",
+        ),
+        (
+            None,
+            Some("UNCACHED"),
+            format!("{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\nUNCACHED"),
+            "\n\nUNCACHED",
+        ),
+        (None, None, String::new(), ""),
+    ] {
+        let rendered = render_cache_zones(cached, uncached);
+        assert_eq!(rendered, expected_rendered);
+        assert_eq!(
+            strip_system_prompt_dynamic_boundaries(&rendered),
+            expected_wire,
+            "剥离 transport token 后必须逐字节等于旧拼接算法"
+        );
+        assert_eq!(
+            rendered.matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).count(),
+            usize::from(cached.is_some() || uncached.is_some())
+        );
+    }
 }
 
 #[test]
@@ -516,16 +537,17 @@ fn test_boundary_marker_before_dynamic_content() {
         None,
         None,
     );
-    // 缓存区段落（01-06）在动态内容段（07_runtime）之前——位置属性
-    // （zone + 段内序号）承担缓存区划分（C2：boundary 文本标记已删除）
+    // 缓存区段落（01-06）在 transport boundary 和动态内容段（07_runtime）之前。
     let pos_tone = result.find("# Tone and style").unwrap();
+    let pos_boundary = result.find(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).unwrap();
+    let pos_runtime = result.find("Working directory").unwrap();
     assert!(
         result[..pos_tone].contains("# Following conventions"),
         "02_system 应在 06_tone_style 之前"
     );
     assert!(
-        result[pos_tone..].contains("Working directory"),
-        "07_runtime 应在 06_tone_style 之后（缓存区后段）"
+        pos_tone < pos_boundary && pos_boundary < pos_runtime,
+        "transport boundary 必须分隔缓存区和运行时动态区"
     );
 }
 
@@ -557,6 +579,60 @@ fn test_boundary_marker_with_all_features() {
 }
 
 #[test]
+fn test_default_production_template_emits_one_cache_boundary() {
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
+    assert_eq!(result.matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).count(), 1);
+    assert_eq!(
+        PromptTemplate::default()
+            .render(
+                &PromptEnv::with_frozen_date("/tmp", "2026-01-01"),
+                &PromptFeatures::none(),
+                &SkillsProvider,
+                &[],
+            )
+            .matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+            .count(),
+        0,
+        "裸 default 无 enabled section，必须遵守 empty matrix"
+    );
+}
+
+fn render_cache_zones(cached: Option<&'static str>, uncached: Option<&'static str>) -> String {
+    let mut collected = Vec::new();
+    if let Some(content) = cached {
+        collected.push(collected_section(
+            "test_cached",
+            PromptSectionZone::Cached,
+            1,
+            content,
+        ));
+    }
+    if let Some(content) = uncached {
+        collected.push(collected_section(
+            "test_uncached",
+            PromptSectionZone::Uncached,
+            1,
+            content,
+        ));
+    }
+    PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
+        &PromptEnv::with_frozen_date("/tmp", "2026-01-01"),
+        &PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+    )
+}
+
+#[test]
 fn test_overrides_after_boundary_marker() {
     let overrides = AgentOverrides {
         persona: Some("test persona".into()),
@@ -575,7 +651,7 @@ fn test_overrides_after_boundary_marker() {
         None,
     );
     // Persona 段（persona/tone/proactiveness）在缓存区段之后、07_runtime
-    // 之前（现状顺序保持；C2：boundary 文本标记删除，位置属性承担划分）
+    // 之前（位置属性负责装配，transport token 把 cache seam 交给 provider）
     let pos_tone_style = result.find("# Tone and style").unwrap();
     assert!(
         result[pos_tone_style..].contains("test persona"),
@@ -843,8 +919,8 @@ fn test_language_section_after_dynamic_content() {
         None,
         Some("zh-CN"),
     );
-    // Language 段在非缓存区最后（07_runtime 之后；C2：boundary 文本标记
-    // 已删除，位置属性承担划分——language 由 LangMiddleware 持有）
+    // Language 段在非缓存区最后（07_runtime 之后；language 由
+    // LangMiddleware 持有，整体位于 cache boundary transport token 后）
     let pos_runtime = result.find("## System Reminders").unwrap();
     assert!(
         result[pos_runtime..].contains("# Language"),
@@ -1025,9 +1101,9 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
 
 /// 验证渲染路径字节一致（C2）：build_system_prompt（经
 /// `crate::session::build_collected_sections` 收集）与直接 PromptTemplate + 同一收集结果
-/// 输出逐字节一致；boundary 文本标记已删除（C2 断言）。
+/// 输出逐字节一致，并只生成一个 provider 必须消费的 cache boundary token。
 #[test]
-fn test_template_byte_identical_and_no_boundary_marker() {
+fn test_template_byte_identical_and_one_boundary_marker() {
     let old = build_system_prompt(
         &MetaHarnessState::default(),
         None,
@@ -1048,9 +1124,10 @@ fn test_template_byte_identical_and_no_boundary_marker() {
         &[],
     );
     assert_eq!(old, new, "两条渲染路径字节一致");
-    assert!(
-        !new.contains("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"),
-        "boundary 文本标记已删除（位置属性承担缓存区划分）"
+    assert_eq!(
+        new.matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).count(),
+        1,
+        "生产模板必须携带唯一 cache boundary transport token"
     );
 }
 

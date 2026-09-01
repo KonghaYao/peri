@@ -810,6 +810,7 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             }),
             stop_reason: None,
             request_id,
+            source_agent_id: None,
         }),
         ObserveEvent::CompactStarted {
             turn_id,

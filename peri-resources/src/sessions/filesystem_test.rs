@@ -43,6 +43,58 @@ async fn test_create_and_load_thread() {
 }
 
 #[tokio::test]
+async fn test_frozen_snapshot_roundtrip_stays_out_of_thread_index() {
+    let dir = tempdir().unwrap();
+    let store = FilesystemThreadStore::new(dir.path());
+    let id = store.create_thread(make_meta("/test")).await.unwrap();
+    let snapshot = r#"{"version":1,"marker":"frozen-prefix-only"}"#;
+
+    assert!(store.load_frozen_snapshot(&id).await.unwrap().is_none());
+    assert!(store
+        .store_frozen_snapshot_if_absent(&id, snapshot)
+        .await
+        .unwrap());
+    assert!(
+        !store
+            .store_frozen_snapshot_if_absent(&id, r#"{"version":2}"#)
+            .await
+            .unwrap(),
+        "frozen snapshot is write-once"
+    );
+
+    assert_eq!(
+        store.load_frozen_snapshot(&id).await.unwrap().as_deref(),
+        Some(snapshot)
+    );
+    let index = tokio::fs::read_to_string(dir.path().join("index.json"))
+        .await
+        .unwrap();
+    assert!(
+        !index.contains("frozen-prefix-only"),
+        "large frozen payload must not pollute the list index"
+    );
+}
+
+#[tokio::test]
+async fn test_frozen_snapshot_concurrent_backfill_has_one_winner() {
+    let dir = tempdir().unwrap();
+    let store = FilesystemThreadStore::new(dir.path());
+    let id = store.create_thread(make_meta("/test")).await.unwrap();
+    let first = r#"{"version":1,"candidate":"first"}"#;
+    let second = r#"{"version":1,"candidate":"second"}"#;
+
+    let (first_won, second_won) = tokio::join!(
+        store.store_frozen_snapshot_if_absent(&id, first),
+        store.store_frozen_snapshot_if_absent(&id, second),
+    );
+    let first_won = first_won.unwrap();
+    let second_won = second_won.unwrap();
+    assert_ne!(first_won, second_won, "exactly one backfill must win");
+    let stored = store.load_frozen_snapshot(&id).await.unwrap().unwrap();
+    assert_eq!(stored, if first_won { first } else { second });
+}
+
+#[tokio::test]
 async fn test_append_and_load_messages() {
     let dir = tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());

@@ -2,6 +2,7 @@
 
 pub mod anthropic;
 pub mod openai_compatible;
+pub mod prompt_cache;
 pub mod protocol;
 pub mod runtime;
 mod transport;

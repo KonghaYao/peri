@@ -380,7 +380,7 @@ impl CurrentTurn {
         self.sync_cache();
     }
 
-    /// 在 current_turn 内部时序位置注入一条 SystemNote（如 cache 命中率警告）。
+    /// 在 current_turn 内部时序位置注入一条 SystemNote（如 final cache coverage 警告）。
     ///
     /// 先 flush 挂起的 text segment，再将 SystemNote 作为独立 segment 追加。
     /// 这样 SystemNote 天然位于已产出 AI 内容之后、后续内容之前，

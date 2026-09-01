@@ -126,14 +126,14 @@ Provider 的统一抽象。ReAct 循环不直接调用 Provider API——它通�
 
 **System hoist**：system 角色消息不进入 messages 数组，独立传递。Anthropic 协议走顶层 `system` 字段；OpenAI 协议走 messages 首位 System 消息。这保证 frozen system prompt 独立于对话消息，且为 Anthropic 的 cache_control 提供确定的注入位置。
 
-Anthropic 适配器在 `messages_to_anthropic` 中处理 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 标记：含边界标记的 system prompt（来自 `build_system_prompt`）排在最前面（可缓存前缀），不含边界标记的 middleware 注入内容排在边界之后（动态段，不影响缓存）。边界标记处通过 `split_system_blocks` 拆分为静态块（`cache_control=true`）和动态块（`cache_control=false`），确保 middleware 内容变化不会破坏 Anthropic prompt cache 前缀。
+`PromptTemplate::render` 用 `peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 把 cached/uncached zone seam 跨 `String` handoff 传给 provider。Anthropic 的 `messages_to_anthropic` 按原 `ModelMessage::System` 顺序拼接后再由 `split_system_blocks` 拆分静态块（`cache_control=true`）与动态块（`cache_control=false`），因此 template dynamic suffix 和后续 request-time middleware contribution 保持原顺序且不污染缓存前缀。OpenAI-compatible 仅剥离控制字，不改变其他 system bytes；任一 provider wire 都不得泄漏控制字。重复控制字视为不可信输入：全部剥离且整个 system 不缓存；无控制字 legacy 输入保留最后 block fallback。
 
 **Prompt Cache 标记**（Anthropic）：`apply_cache_to_messages` 在 messages 数组的指定位置注入 `cache_control: { type: "ephemeral" }` 标记。缓存断点策略（最多 3 个断点）：
 1. **第一条 user 消息**：system + 首条 user 构成稳定缓存段
 2. **倒数第二条 user 消息**：上一轮的 user+assistant+tool 整段可被缓存
 3. **最后一条 user 消息**：当前轮次的完整前缀可被缓存
 
-当目标消息无 text block 时，沿 user 索引向前回退搜索。user 消息不足 3 条时按实际数量设置断点（不重复）。system 数组中由 `build_system_blocks_json` 处理：静态块已有 `cache_control` 则保留，最后一块在无任何缓存标记时 fallback 添加。
+目标 user message 的可缓存 block 为非空 text 或 `tool_result`；array 从后向前标记最后一个 eligible block。目标没有 eligible block 时沿 user 索引向前回退。这样 append-only 工具循环能把断点推进到最新 result，同时在新 Human prompt 到来时保留上一 result 为倒数第二断点。user 消息不足 3 条时按实际数量设置断点（不重复）。system 数组中由 `system_blocks_to_json` 处理：显式静态块保留 `cache_control`；仅无 boundary 的 legacy 输入允许最后 block fallback，显式 uncached-only 或重复 boundary 均禁止 fallback。
 
 ### 2.4 重试与容错
 

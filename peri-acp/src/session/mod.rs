@@ -21,6 +21,7 @@ pub mod command;
 pub mod cron_bridge;
 pub mod event_sink;
 pub mod executor;
+pub(crate) mod frozen_snapshot;
 pub mod goal_state;
 pub mod retry_events;
 pub mod state_builders;
@@ -348,67 +349,6 @@ impl SessionManager {
 
         self.inner.sessions.insert(session_id.to_string(), session);
         Ok(())
-    }
-
-    pub async fn new_session(&self, cwd: &str) -> anyhow::Result<(String, ThreadId)> {
-        let meta = ThreadMeta::new(cwd);
-        let thread_id = self.inner.thread_store.create_thread(meta).await?;
-
-        let session_id = thread_id.clone();
-
-        let session = self.build_session(&session_id, thread_id.clone(), cwd);
-
-        self.inner.sessions.insert(session_id.clone(), session);
-        Ok((session_id, thread_id))
-    }
-
-    /// 创建新会话并继承指定的 provider_id、model_alias
-    pub async fn new_session_with_settings(
-        &self,
-        cwd: &str,
-        provider_id: String,
-        model_alias: String,
-    ) -> anyhow::Result<(String, ThreadId)> {
-        let meta = ThreadMeta::new(cwd);
-        let thread_id = self.inner.thread_store.create_thread(meta).await?;
-
-        let session_id = thread_id.clone();
-
-        let task_manager = self.make_task_manager();
-
-        let session = AcpSession {
-            session_id: session_id.clone(),
-            thread_id: thread_id.clone(),
-            cwd: cwd.to_string(),
-            cancel_token: CancellationToken::new(),
-            state_messages: Vec::new(),
-            created_at: Utc::now(),
-            provider_id,
-            model_alias,
-            permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
-            active_agents: HashMap::new(),
-            goal_state: crate::session::goal_state::GoalState::new(
-                Arc::new(peri_acp_types::goal::InMemoryGoalStore::new()),
-                session_id.clone(),
-            ),
-            v2_message_queue: peri_acp_types::session::MessageQueue::new(),
-            session_inbox: None,
-            cron_bridge: None,
-            task_manager,
-            idle_suspended: Arc::new(AtomicBool::new(false)),
-            mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
-            command_registry: self.build_command_registry(cwd),
-            dynamic_mcp_close: self
-                .inner
-                .dynamic_mcp
-                .as_ref()
-                .map(|deployment| deployment.close_registration(&session_id)),
-            dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
-            dynamic_mcp_notifications: None,
-        };
-
-        self.inner.sessions.insert(session_id.clone(), session);
-        Ok((session_id, thread_id))
     }
 
     fn build_session(&self, session_id: &str, thread_id: ThreadId, cwd: &str) -> AcpSession {

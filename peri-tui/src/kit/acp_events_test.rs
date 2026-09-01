@@ -79,6 +79,7 @@ fn make_fold_test_state() -> BridgeState {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     }
 }
 
@@ -118,4 +119,35 @@ fn test_llm_retrying_injects_warning_system_note() {
     assert!(notes[0].0.contains("1/6"));
     assert!(notes[0].0.contains("0.5"));
     assert!(notes[0].0.contains("transport"));
+}
+
+#[test]
+#[serial]
+fn test_prompt_and_agent_failure_clear_pending_cache_usage() {
+    let mut state = make_fold_test_state();
+    state.pending_cache_usage = Some(CacheUsageSample {
+        input_tokens: 100,
+        cached_tokens: 50,
+        request_id: None,
+    });
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("new-prompt".into()),
+        },
+    );
+    assert!(state.pending_cache_usage.is_none());
+
+    state.pending_cache_usage = Some(CacheUsageSample {
+        input_tokens: 100,
+        cached_tokens: 50,
+        request_id: None,
+    });
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::AgentExecutionFailed {
+            message: "forwarder failed".into(),
+        },
+    );
+    assert!(state.pending_cache_usage.is_none());
 }

@@ -39,6 +39,7 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     dispatch_and_notify(
         &mut state,
@@ -56,6 +57,11 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
         &AcpEventData::LocalUserBubble { text: "B".into() },
     );
     INPUT_BUFFER.state().write().push_back("queued".into());
+    state.pending_cache_usage = Some(CacheUsageSample {
+        input_tokens: 100,
+        cached_tokens: 90,
+        request_id: Some("new-turn".into()),
+    });
     assert_eq!(state.turn_generation, 2);
     assert_eq!(state.last_prompt_generation, 1, "B 的 prompt RPC 尚未发出");
     let committed_before = state.committed.len(); // A + B 两个气泡
@@ -111,6 +117,16 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
         Some("B"),
         "stale TurnInterrupted 应保留最近一次提交的文本锚点"
     );
+    assert_eq!(
+        state
+            .pending_cache_usage
+            .as_ref()
+            .unwrap()
+            .request_id
+            .as_deref(),
+        Some("new-turn"),
+        "stale old interruption must preserve the new prompt's cache sample"
+    );
 }
 
 /// 非 stale 的零产出回滚：删气泡 + 恢复文本；排队项（Slice 3 D4）不吞——
@@ -147,6 +163,7 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     dispatch_and_notify(
         &mut state,
@@ -156,6 +173,11 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
         &mut state,
         &AcpEventData::PromptSubmitted { request_id: None },
     );
+    state.pending_cache_usage = Some(CacheUsageSample {
+        input_tokens: 100,
+        cached_tokens: 50,
+        request_id: None,
+    });
     INPUT_BUFFER.state().write().push_back("queued".into());
     assert_eq!(state.committed.len(), 1);
 
@@ -192,6 +214,10 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
         }
     }
     assert_eq!(state.phase, SessionPhase::Idle);
+    assert!(
+        state.pending_cache_usage.is_none(),
+        "non-stale interruption must clear pending cache coverage"
+    );
 }
 
 /// 次要项 (a)：TurnInterrupted 归档分支（current_turn 非空）drain 排队项——
@@ -224,6 +250,7 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     dispatch_and_notify(
         &mut state,
@@ -308,6 +335,7 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     // turn A：LocalUserBubble + PromptSubmitted(A1)
     dispatch_and_notify(
@@ -428,6 +456,7 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     dispatch_and_notify(
         &mut state,
@@ -512,6 +541,7 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     // turn A 运行中
     dispatch_and_notify(
@@ -610,6 +640,7 @@ fn test_turn_interrupted_current_request_id_rollback() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     dispatch_and_notify(
         &mut state,
@@ -690,6 +721,7 @@ fn test_turn_interrupted_none_request_id_falls_back() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     dispatch_and_notify(
         &mut state,
@@ -758,6 +790,7 @@ fn test_double_cancel_request_id_pairs() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     // A 提交并运行
     dispatch_and_notify(

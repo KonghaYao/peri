@@ -6,6 +6,7 @@ use std::sync::{
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use peri_model::{
+    prompt_cache::{strip_system_prompt_dynamic_boundaries, SYSTEM_PROMPT_DYNAMIC_BOUNDARY},
     JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
     ModelStream, ModelStreamEvent, PreparedModelRequest, StopReason, TokenUsage, ToolCall,
 };
@@ -112,7 +113,13 @@ async fn test_bridge_dynamic_system_contribution_reads_current_value_once_per_re
                 .expect("首条必须是 system message")
         })
         .collect();
-    assert_eq!(systems, ["BASE\n\nDYNAMIC_ONE", "BASE\n\nDYNAMIC_TWO"]);
+    assert_eq!(
+        systems,
+        [
+            format!("BASE{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\nDYNAMIC_ONE"),
+            format!("BASE{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\nDYNAMIC_TWO"),
+        ]
+    );
     assert_eq!(systems[0].matches("BASE").count(), 1);
     assert_eq!(systems[0].matches("DYNAMIC_ONE").count(), 1);
     assert!(!systems[0].contains("DYNAMIC_TWO"));
@@ -120,6 +127,53 @@ async fn test_bridge_dynamic_system_contribution_reads_current_value_once_per_re
     assert_eq!(systems[1].matches("DYNAMIC_TWO").count(), 1);
     assert!(!systems[1].contains("DYNAMIC_ONE"));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        systems
+            .iter()
+            .map(|system| strip_system_prompt_dynamic_boundaries(system))
+            .collect::<Vec<_>>(),
+        ["BASE\n\nDYNAMIC_ONE", "BASE\n\nDYNAMIC_TWO"]
+    );
+}
+
+#[tokio::test]
+async fn test_bridge_dynamic_contribution_preserves_explicit_seam_for_empty_and_absent_base() {
+    for (base, expected, expected_wire) in [
+        (
+            Some(""),
+            format!("{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\nDYNAMIC"),
+            "\n\nDYNAMIC",
+        ),
+        (
+            None,
+            format!("{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}DYNAMIC"),
+            "DYNAMIC",
+        ),
+    ] {
+        let streamed_requests = Arc::new(Mutex::new(Vec::new()));
+        let mut bridge = AgentModelBridge::from_arc(Arc::new(CaptureSystemModel {
+            streamed_requests: Arc::clone(&streamed_requests),
+        }));
+        if let Some(base) = base {
+            bridge = bridge.with_system(base);
+        }
+        bridge = bridge.with_system_contribution_provider(Arc::new(|| "DYNAMIC".into()));
+
+        bridge
+            .generate_reasoning(&[BaseMessage::human("hello")], &[], None)
+            .await
+            .unwrap();
+
+        let requests = streamed_requests.lock().unwrap();
+        let system = requests[0].messages[0]
+            .text_content()
+            .expect("dynamic contribution must produce a system message");
+        assert_eq!(system, expected);
+        assert_eq!(
+            strip_system_prompt_dynamic_boundaries(&system),
+            expected_wire
+        );
+    }
 }
 
 #[tokio::test]

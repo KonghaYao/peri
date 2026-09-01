@@ -177,6 +177,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             model,
             stop_reason,
             request_id,
+            source_agent_id,
             ..
         } => {
             let update = UsageUpdate::new(
@@ -206,9 +207,10 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                 update
             };
 
-            vec![MappedEvent::standard(vec![SessionUpdate::UsageUpdate(
-                update,
-            )])]
+            vec![MappedEvent::standard_with_src(
+                vec![SessionUpdate::UsageUpdate(update)],
+                source_agent_id.clone(),
+            )]
         }
 
         // ── Synthetic user message (Category ①) ─────────────────────────────────

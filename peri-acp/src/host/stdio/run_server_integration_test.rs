@@ -459,6 +459,12 @@ async fn await_server_exit(server_task: tokio::task::JoinHandle<()>, input: Dupl
         .expect("server task 不应 panic");
 }
 
+async fn create_legacy_thread(cfg: &AcpServerConfig, session_id: &str, cwd: &str) {
+    let mut meta = peri_acp_types::thread::ThreadMeta::new(cwd);
+    meta.id = session_id.to_string();
+    cfg.thread_store.create_thread(meta).await.unwrap();
+}
+
 // ── 测试 ──────────────────────────────────────────────────────────────────
 
 /// host task scope 已关闭时，prompt request 仍必须收到一次 terminal error response。
@@ -783,6 +789,7 @@ async fn test_prompt_wire_shape_unknown_session_returns_error() {
 async fn test_load_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]);
+    create_legacy_thread(&cfg, "load-test-session", tmp.path().to_str().unwrap()).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -823,6 +830,7 @@ async fn test_load_creates_session_scoped_lsp_pool() {
 async fn test_resume_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]);
+    create_legacy_thread(&cfg, "resume-test-session", tmp.path().to_str().unwrap()).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -863,6 +871,11 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     // 前置：注册带非空历史的 source session（fork 要求 source history 非空）
+    let source_frozen = cfg.session_manager.build_frozen_data(
+        tmp.path().to_str().unwrap(),
+        &cfg.plugin_skill_roots,
+        &cfg.plugin_agent_dirs,
+    );
     sessions.lock().await.insert(
         "fork-source-session".to_string(),
         crate::host::SessionState {
@@ -871,7 +884,7 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
             cwd: tmp.path().to_string_lossy().into_owned(),
             history: vec![peri_acp_types::messages::BaseMessage::human("hello")],
             cancel_token: None,
-            frozen: None,
+            frozen: Some(source_frozen),
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             workflow_middleware: None,
@@ -922,6 +935,7 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
 async fn test_load_without_lsp_config_has_no_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg = test_config(&tmp); // plugin_lsp_servers = []
+    create_legacy_thread(&cfg, "no-lsp-session", tmp.path().to_str().unwrap()).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));

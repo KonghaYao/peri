@@ -33,6 +33,7 @@ fn test_push_view_models_uses_bridge_state() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // push_view_models: 用 BridgeState 数据（空 committed + 空 current_turn）→ 空 items
@@ -130,6 +131,7 @@ fn test_prediction_writes_prediction_atom() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     use peri_acp_types::event_data::{Prediction, PredictionAction};
@@ -184,6 +186,7 @@ fn test_rewind_completed_replaces_committed() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     let messages_json = serde_json::json!([
@@ -247,6 +250,7 @@ fn test_rewind_completed_rebuild_preview_strips_reminder() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     let messages_json = serde_json::json!([
         {
@@ -310,6 +314,7 @@ fn test_rewind_completed_restores_target_text_to_input() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     let messages_json = serde_json::json!([
         {"role": "user", "id": "msg-1", "content": "历史用户消息"},
@@ -368,6 +373,7 @@ fn test_rewind_completed_without_target_text_no_restore() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     let messages_json = serde_json::json!([]).to_string();
     dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
@@ -403,6 +409,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // === Turn 1: user bubble, reasoning + text → TurnDone ===
@@ -528,17 +535,23 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
 /// 场景 B：agent 内部 auto-compact 后有后续流事件 → 标志被清除，不触发。
 ///
 /// 注：THREAD_LOAD_TX 是 OnceLock，两场景合并为单测试以避免 set 冲突。
-#[test]
+#[tokio::test]
 #[serial]
-fn test_compact_turndone_reload() {
+async fn test_compact_turndone_reload() {
     use tokio::sync::mpsc;
 
     // ── 场景 A：命令 compact → 触发 reload ──────────────────────────
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
 
-    let (tx_a, mut rx_a) = mpsc::unbounded_channel::<String>();
-    let _ = THREAD_LOAD_TX.set(tx_a);
+    let (client_transport, _server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
+    let (client, _notification_tx, _notification_rx) =
+        crate::acp_client::AcpTuiClient::new(client_transport);
+    let (tx_a, mut rx_a) =
+        mpsc::unbounded_channel::<crate::kit::thread_load_consumer::ThreadLoadRequest>();
+    let _ = THREAD_LOAD_TX.set(crate::kit::thread_load_consumer::ThreadLoadDispatcher::new(
+        tx_a, client,
+    ));
 
     let mut state = BridgeState {
         variant: 0,
@@ -559,6 +572,7 @@ fn test_compact_turndone_reload() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // Phase 5 Step 7 补遗（Step 8 回归修复）：manual compact 场景的 UiOnly
@@ -584,7 +598,10 @@ fn test_compact_turndone_reload() {
 
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
-    let received = rx_a.try_recv().ok();
+    let received = rx_a
+        .try_recv()
+        .ok()
+        .map(|request| request.thread_id().to_string());
     assert_eq!(
         received.as_deref(),
         Some("test-session"),
@@ -615,6 +632,7 @@ fn test_compact_turndone_reload() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // ① CompactCompleted（auto）：不置标志（S4.1 方案 A——服务端透传 trigger，

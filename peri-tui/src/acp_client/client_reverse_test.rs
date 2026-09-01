@@ -503,6 +503,152 @@ async fn test_startup_restore_reservation_wins_submit_ensure_both_orders() {
     *crate::kit::atoms::FOLD_OVERRIDES.state().write() = old_fold_overrides;
 }
 
+/// [回归测试] ThreadBrowser 入队的普通 load 必须在异步 consumer 运行前封住 prompt。
+///
+/// 历史问题：面板只发送 channel 后立即关闭；快速输入可先读取旧 Stable session，
+/// 使首个 OpenAI/Cursor 请求携带错误 history prefix。
+#[tokio::test]
+async fn test_ordinary_load_reservation_blocks_prompt_until_target_commits() {
+    // Arrange
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
+    let create_client = client.clone();
+    let create = tokio::spawn(async move { create_client.ensure_session("/tmp", None).await });
+    let (new_id, _) = receive_lifecycle_request(&server_transport, "session/new").await;
+    server_transport
+        .send_response(new_id, Ok(json!({"sessionId": "old"})))
+        .await
+        .unwrap();
+    assert_eq!(create.await.unwrap().unwrap(), "old");
+    let reservation = client.reserve_session_load();
+    let submit_client = client.clone();
+    let submit = tokio::spawn(async move {
+        submit_client.ensure_session("/tmp", None).await?;
+        submit_client
+            .prompt(
+                &peri_acp_types::messages::MessageContent::text("fast"),
+                Some("p-fast".into()),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !submit.is_finished(),
+        "reservation 存在时 prompt 不得落到 old"
+    );
+    let load_client = client.clone();
+    let load = tokio::spawn(async move {
+        let _reservation = reservation;
+        load_client.load_session("target", "/tmp", None).await
+    });
+    let (close_id, close_params) =
+        receive_lifecycle_request(&server_transport, "session/close").await;
+    assert_eq!(close_params["sessionId"], "old");
+    server_transport
+        .send_response(close_id, Ok(json!({})))
+        .await
+        .unwrap();
+    let (load_id, load_params) = receive_lifecycle_request(&server_transport, "session/load").await;
+    assert_eq!(load_params["sessionId"], "target");
+    server_transport
+        .send_response(load_id, Ok(json!({})))
+        .await
+        .unwrap();
+    assert_eq!(load.await.unwrap().unwrap(), "target");
+    // Act
+    let (prompt_id, prompt_params) =
+        receive_lifecycle_request(&server_transport, "session/prompt").await;
+    // Assert
+    assert_eq!(prompt_params["sessionId"], "target");
+    server_transport
+        .send_response(prompt_id, Ok(json!({})))
+        .await
+        .unwrap();
+    submit.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_multiple_load_reservations_release_only_after_last_guard() {
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
+    let create_client = client.clone();
+    let create = tokio::spawn(async move { create_client.ensure_session("/tmp", None).await });
+    let (new_id, _) = receive_lifecycle_request(&server_transport, "session/new").await;
+    server_transport
+        .send_response(new_id, Ok(json!({"sessionId": "old"})))
+        .await
+        .unwrap();
+    create.await.unwrap().unwrap();
+
+    let first = client.reserve_session_load();
+    let second = client.reserve_session_load();
+    let prompt_client = client.clone();
+    let prompt = tokio::spawn(async move {
+        prompt_client
+            .prompt(
+                &peri_acp_types::messages::MessageContent::text("queued"),
+                Some("p-queued".into()),
+            )
+            .await
+    });
+    drop(first);
+    tokio::task::yield_now().await;
+    assert!(
+        !prompt.is_finished(),
+        "one remaining reservation must keep prompt blocked"
+    );
+    drop(second);
+
+    let (prompt_id, prompt_params) =
+        receive_lifecycle_request(&server_transport, "session/prompt").await;
+    assert_eq!(prompt_params["sessionId"], "old");
+    server_transport
+        .send_response(prompt_id, Ok(json!({})))
+        .await
+        .unwrap();
+    prompt.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_failed_load_dispatch_releases_reservation() {
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
+    let create_client = client.clone();
+    let create = tokio::spawn(async move { create_client.ensure_session("/tmp", None).await });
+    let (new_id, _) = receive_lifecycle_request(&server_transport, "session/new").await;
+    server_transport
+        .send_response(new_id, Ok(json!({"sessionId": "old"})))
+        .await
+        .unwrap();
+    create.await.unwrap().unwrap();
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+        crate::kit::thread_load_consumer::ThreadLoadRequest,
+    >();
+    drop(rx);
+    let dispatcher =
+        crate::kit::thread_load_consumer::ThreadLoadDispatcher::new(tx, client.clone());
+    assert!(dispatcher.send("target".into()).is_err());
+
+    let prompt_client = client.clone();
+    let prompt = tokio::spawn(async move {
+        prompt_client
+            .prompt(
+                &peri_acp_types::messages::MessageContent::text("after-send-failure"),
+                Some("p-after-failure".into()),
+            )
+            .await
+    });
+    let (prompt_id, prompt_params) =
+        receive_lifecycle_request(&server_transport, "session/prompt").await;
+    assert_eq!(prompt_params["sessionId"], "old");
+    server_transport
+        .send_response(prompt_id, Ok(json!({})))
+        .await
+        .unwrap();
+    prompt.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn test_pump_cancels_no_active_reverse_requests() {
     let (client_transport, server_transport) = mpsc_transport_pair();

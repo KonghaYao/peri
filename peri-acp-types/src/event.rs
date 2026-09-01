@@ -232,6 +232,7 @@ pub enum TurnStatus {
 pub enum TurnErrorKind {
     Interrupted,
     Timeout,
+    Internal,
     LlmFailure,
     ToolFailure,
     RateLimit,
@@ -440,6 +441,8 @@ pub enum ExecutorEvent {
         stop_reason: Option<peri_model::StopReason>,
         /// Provider 请求 ID（迁移后从 TokenUsage 提升为事件字段，避免随 usage 丢失）
         request_id: Option<String>,
+        /// 辅助 agent 身份。主 agent 为 None；子 agent/workflow 在转发边界注入。
+        source_agent_id: Option<String>,
     },
     /// 上下文窗口使用警告（阈值触发时发出）
     ContextWarning {

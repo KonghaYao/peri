@@ -23,7 +23,7 @@ pub(crate) use self::render::drain_input_buffer;
 pub use crate::kit::submit_request::SubmitRequest;
 pub use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, TuiUserBubble};
 
-use crate::kit::acp_types::{AcpEventData, CurrentTurn};
+use crate::kit::acp_types::{AcpEventData, CacheUsageSample, CurrentTurn};
 use crate::kit::atoms::*;
 use crate::kit::tui_render_unit::{TuiNoteLevel, tui_hash_str};
 use std::collections::HashMap;
@@ -210,6 +210,10 @@ pub struct BridgeState {
     /// 主导排序场景；排队分支无 RPC → current_request_id 停留在旧 turn，由
     /// 代际判定兜底）。
     pub current_request_id: Option<String>,
+    /// Latest root-agent cache usage observation for this prompt. A root clear
+    /// observation assigns `None`, preventing a stale earlier sample from
+    /// surviving to `TurnDone`.
+    pub pending_cache_usage: Option<CacheUsageSample>,
 }
 
 impl BridgeState {
@@ -330,6 +334,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // ── §4.2 Boundary events ──
         PromptStarted => turn::handle_prompt_started(state),
         PromptSubmitted { request_id } => turn::handle_prompt_submitted(state, request_id),
+        CacheUsageUpdated(sample) => state.pending_cache_usage = sample.clone(),
         SessionReplayStarted => turn::handle_session_replay_started(state),
         SessionReplayDone => turn::handle_session_replay_done(state),
         TurnDone => turn::handle_turn_done(state),

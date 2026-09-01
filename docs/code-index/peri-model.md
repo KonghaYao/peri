@@ -1,6 +1,6 @@
 # peri-model 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-16
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-01
 > 依据：docs/standards/architecture-contracts.md、源码（无 crate 级 CLAUDE.md）
 
 ## 架构速览
@@ -39,7 +39,7 @@
 | --- | --- | --- |
 | 配置/模型/流入口 | anthropic/mod.rs | `AnthropicConfig` :31（Debug 脱敏 :82）；`AnthropicModel` :107；`impl Model` :166（stream → runtime_http_sse_stream） |
 | 请求构建 | anthropic/request.rs | `build_request` :37；`messages_endpoint` :88（拒绝 userinfo/非 http(s)，保留 base path）；`messages_to_anthropic` :111 |
-| prompt cache | anthropic/cache.rs | `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` :3；`split_system_blocks` :10；`apply_cache_to_messages` :55（首/末/倒数第二 user 消息） |
+| prompt cache | `prompt_cache.rs` + `anthropic/cache.rs`；consumer `anthropic/request.rs` / `openai_compatible/request.rs` | `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` / `combine_system_prompt_with_dynamic` / `strip_system_prompt_dynamic_boundaries` 是共享 transport contract；combine 对空/None frozen base 也保留 request-time dynamic seam；`split_system_blocks` 对单 token 分区、重复 token fail-closed、无 token legacy fallback；`apply_cache_to_messages` 标记首/末/倒数第二 user 的最后一个非空 text 或 tool_result |
 | 流解码 | anthropic/stream.rs | `decoders` :52；`decode_event` :66（生命周期状态机：ensure_streaming :155/start_block :163/apply_delta :226/finish_block :285）；`completed_response` :378 |
 | 非流式响应 | anthropic/response.rs | `token_count` :110（溢出检查） |
 

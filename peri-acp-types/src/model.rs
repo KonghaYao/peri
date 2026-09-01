@@ -8,4 +8,4 @@
 //!
 //! 随 StageBuildFn 签名改造 / v1 退役时可收敛。
 
-pub use peri_model::Model;
+pub use peri_model::{prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY, Model, TokenUsage};

@@ -3,10 +3,10 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use futures::StreamExt;
 use peri_model::{
-    ContentBlock as ModelContentBlock, DocumentSource as ModelDocumentSource,
-    ImageSource as ModelImageSource, JsonObject, Model, ModelMessage, ModelRequest, ModelResponse,
-    ModelStreamEvent, ToolCall as ModelToolCall, ToolDefinition as ModelToolDefinition,
-    ToolResult as ModelToolResult,
+    prompt_cache::combine_system_prompt_with_dynamic, ContentBlock as ModelContentBlock,
+    DocumentSource as ModelDocumentSource, ImageSource as ModelImageSource, JsonObject, Model,
+    ModelMessage, ModelRequest, ModelResponse, ModelStreamEvent, ToolCall as ModelToolCall,
+    ToolDefinition as ModelToolDefinition, ToolResult as ModelToolResult,
 };
 
 use crate::{
@@ -139,13 +139,9 @@ impl AgentModelBridge {
             .system_contribution_provider
             .as_ref()
             .map(|provider| provider());
-        let system = match (&self.system, dynamic.as_deref()) {
-            (Some(base), Some(dynamic)) if !dynamic.is_empty() => {
-                Some(format!("{base}\n\n{dynamic}"))
-            }
-            (Some(base), _) => Some(base.clone()),
-            (None, Some(dynamic)) if !dynamic.is_empty() => Some(dynamic.to_string()),
-            (None, _) => None,
+        let system = match dynamic.as_deref() {
+            Some(dynamic) => combine_system_prompt_with_dynamic(self.system.as_deref(), dynamic),
+            None => self.system.clone(),
         };
         if let Some(system) = system {
             messages.insert(0, ModelMessage::system_text(system));

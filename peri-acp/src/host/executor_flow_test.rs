@@ -46,7 +46,7 @@ use peri_middlewares::{host_ports::SkillsProvider, tool_search::ToolSearchIndex}
 #[cfg(not(windows))]
 use peri_model::{
     JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
-    ModelStream, ModelStreamEvent, StopReason, ToolCall,
+    ModelStream, ModelStreamEvent, StopReason, TokenUsage, ToolCall,
 };
 
 #[cfg_attr(windows, allow(dead_code))]
@@ -185,6 +185,42 @@ impl Model for FatalModel {
 #[cfg(not(windows))]
 struct CapturePromptModel {
     requests: Arc<Mutex<Vec<ModelRequest>>>,
+}
+
+#[cfg(not(windows))]
+struct UsageModel;
+
+#[cfg(not(windows))]
+#[async_trait]
+impl Model for UsageModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_streaming: true,
+            ..ModelCapabilities::default()
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: AgentCancellationToken,
+    ) -> ModelResult<ModelStream> {
+        let response = ModelResponse::new(
+            ModelMessage::assistant_text("done"),
+            StopReason::EndTurn,
+            Some(TokenUsage {
+                input_tokens: 104_478,
+                output_tokens: 1,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(70_000),
+            }),
+            Some("chatcmpl-barrier".into()),
+        )?;
+        Ok(ModelStream::with_parent_cancellation(
+            stream::iter(vec![Ok(ModelStreamEvent::Completed(response))]),
+            cancellation,
+        ))
+    }
 }
 
 #[cfg(not(windows))]
@@ -498,7 +534,90 @@ fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
 /// 构造 forwarder 启动器（真实 spawn_eventbus_forwarder，无 Langfuse bridge）。
 fn make_forwarder_launcher() -> ForwarderLauncherFn {
     Arc::new(|handles, _agent_id, on_event| {
-        crate::event::spawn_eventbus_forwarder(handles, on_event, None);
+        crate::event::spawn_eventbus_forwarder(handles, on_event, None)
+    })
+}
+
+#[cfg(not(windows))]
+fn make_gated_forwarder_launcher(
+    reached: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+) -> ForwarderLauncherFn {
+    let reached = Arc::new(Mutex::new(Some(reached)));
+    let release = Arc::new(Mutex::new(Some(release)));
+    Arc::new(move |mut handles, _agent_id, on_event| {
+        let reached = reached.lock().unwrap().take();
+        let release = release.lock().unwrap().take();
+        tokio::spawn(async move {
+            let mut reached = reached;
+            let mut release = release;
+            loop {
+                tokio::select! {
+                    biased;
+                    Some(event) = handles.render_rx.recv() => {
+                        if let Some(exec) = peri_acp_types::event_v2::render_event_to_executor(event.clone()) {
+                            on_event(
+                                peri_acp_types::runtime::UnstampedEvent::new(
+                                    event.turn_id().to_string(),
+                                    event.agent_id().to_string(),
+                                    None,
+                                    peri_acp_types::identity::EventDeliveryClass::Critical,
+                                ),
+                                exec,
+                            );
+                        }
+                    }
+                    Some(event) = handles.state_rx.recv() => {
+                        if let Some(exec) = peri_acp_types::event_v2::state_event_to_executor(event.clone()) {
+                            on_event(
+                                peri_acp_types::runtime::UnstampedEvent::new(
+                                    event.turn_id().to_string(),
+                                    event.agent_id().to_string(),
+                                    None,
+                                    peri_acp_types::identity::EventDeliveryClass::Critical,
+                                ),
+                                exec,
+                            );
+                        }
+                    }
+                    result = handles.observe_rx.recv() => match result {
+                        Ok(event) => {
+                            if matches!(event, peri_acp_types::event_v2::ObserveEvent::LlmCallEnd { .. }) {
+                                if let Some(reached) = reached.take() {
+                                    let _ = reached.send(());
+                                }
+                                if let Some(gate) = release.take() {
+                                    let _ = gate.await;
+                                }
+                            }
+                            if let Some(exec) = peri_acp_types::event_v2::observe_event_to_executor(event.clone()) {
+                                on_event(
+                                    peri_acp_types::runtime::UnstampedEvent::new(
+                                        event.turn_id().to_string(),
+                                        event.agent_id().to_string(),
+                                        None,
+                                        peri_acp_types::identity::EventDeliveryClass::Broadcast,
+                                    ),
+                                    exec,
+                                );
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    },
+                    else => break,
+                }
+            }
+        })
+    })
+}
+
+#[cfg(not(windows))]
+fn make_aborting_forwarder_launcher() -> ForwarderLauncherFn {
+    Arc::new(|_handles, _agent_id, _on_event| {
+        let handle = tokio::spawn(std::future::pending());
+        handle.abort();
+        handle
     })
 }
 
@@ -1220,6 +1339,147 @@ async fn test_turn_terminal_state_unique_and_last() {
             .cloned(),
         Some("cancelled".to_string()),
         "push_done 终态与 TurnEnded(Interrupted) 语义一致"
+    );
+}
+
+/// Root LlmCallEnd must cross the real forwarder before the session exposes
+/// AgentDone/push_done. The gate holds the final usage event inside the
+/// forwarder and proves the session cannot complete early.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_forwarder_barrier_orders_final_usage_before_done() {
+    let model: Arc<dyn Model> = Arc::new(UsageModel);
+    let mut ctx = make_session_context("test-forwarder-usage-barrier");
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let stage_build = make_stage_build(&ctx);
+    let sink = Arc::new(MockEventSink::new());
+    let mut turn = make_turn_input(
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+        MessageContent::text("finish with usage"),
+        false,
+        vec![],
+        stage_build,
+    );
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    turn.forwarder_launcher = make_gated_forwarder_launcher(reached_tx, release_rx);
+
+    let task = tokio::spawn(async move { run_session_loop(ctx, turn).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), reached_rx)
+        .await
+        .expect("forwarder must observe final LlmCallEnd")
+        .expect("barrier signal must remain connected");
+    assert!(
+        !task.is_finished(),
+        "session must not publish terminal completion while final usage is gated"
+    );
+    release_tx.send(()).expect("release barrier");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("session completes after usage release")
+        .expect("session task must not panic");
+    assert!(result.ok);
+
+    let operations = sink.operations.lock().unwrap();
+    let usage_index = operations
+        .iter()
+        .position(|operation| operation.contains("llm_call_end"))
+        .expect("final LlmCallEnd must reach the event sink");
+    let done_index = operations
+        .iter()
+        .position(|operation| operation == "done:end_turn")
+        .expect("session must publish done");
+    assert!(
+        usage_index < done_index,
+        "UsageUpdate source must precede done"
+    );
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_forwarder_join_error_fails_turn_before_done_without_late_usage() {
+    let model: Arc<dyn Model> = Arc::new(UsageModel);
+    let mut ctx = make_session_context("test-forwarder-join-error");
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let stage_build = make_stage_build(&ctx);
+    let sink = Arc::new(MockEventSink::new());
+    let mut turn = make_turn_input(
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+        MessageContent::text("finish with failed forwarder"),
+        false,
+        vec![],
+        stage_build,
+    );
+    turn.forwarder_launcher = make_aborting_forwarder_launcher();
+
+    let result = run_session_loop(ctx, turn).await;
+    assert!(!result.ok);
+    assert!(result.failure.is_some());
+    assert!(
+        result.messages.iter().any(|message| {
+            matches!(message, BaseMessage::Human { .. })
+                && message.content().contains("finish with failed forwarder")
+        }),
+        "forwarder failure must preserve the current user message in PromptResult history"
+    );
+    assert!(
+        result.messages.iter().any(|message| {
+            matches!(message, BaseMessage::Ai { .. }) && message.content().contains("done")
+        }),
+        "forwarder failure must preserve the completed assistant message in PromptResult history"
+    );
+
+    let events: Vec<ExecutorEvent> = sink
+        .pushed_events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|json| serde_json::from_str(json).unwrap())
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ExecutorEvent::TurnStarted { .. }))
+            .count(),
+        1,
+        "forwarder failure must retain the unique TurnStarted"
+    );
+    let ended: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event, ExecutorEvent::TurnEnded { .. }))
+        .collect();
+    assert_eq!(ended.len(), 1, "forwarder failure needs one TurnEnded");
+    let ExecutorEvent::TurnEnded {
+        status, error_kind, ..
+    } = ended[0]
+    else {
+        unreachable!("filtered to TurnEnded")
+    };
+    assert_eq!(*status, peri_acp_types::event::TurnStatus::Error);
+    assert_eq!(
+        *error_kind,
+        Some(peri_acp_types::event::TurnErrorKind::Internal)
+    );
+
+    let operations = sink.operations.lock().unwrap();
+    let failure_index = operations
+        .iter()
+        .position(|operation| operation.contains("agent_execution_failed"))
+        .expect("join error must publish AgentExecutionFailed");
+    let terminal_index = operations
+        .iter()
+        .position(|operation| operation.contains("turn_ended"))
+        .expect("join error must publish TurnEnded(Error/Internal)");
+    let done_index = operations
+        .iter()
+        .position(|operation| operation == "done:end_turn")
+        .expect("failed session must still terminate");
+    assert!(failure_index < terminal_index && terminal_index < done_index);
+    assert!(
+        operations[done_index + 1..]
+            .iter()
+            .all(|operation| !operation.contains("llm_call_end")),
+        "no UsageUpdate source may arrive after AgentDone"
     );
 }
 

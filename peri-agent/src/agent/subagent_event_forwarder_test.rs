@@ -163,6 +163,36 @@ async fn test_forwarder_injects_source_agent_id_for_reasoning_chunk() {
 }
 
 #[tokio::test]
+async fn test_forwarder_injects_source_agent_id_for_llm_usage() {
+    let (bus, handles) = EventBus::new(EventBusConfig::default());
+    let captured: Arc<Mutex<Vec<ExecutorEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let handler = Arc::new(CapturingHandler {
+        events: Arc::clone(&captured),
+    });
+    let _forwarder =
+        spawn_subagent_event_forwarder(handles, Some(handler), None, "child-usage".into());
+    let (turn_id, agent_id) = ids();
+    bus.emit_observe(ObserveEvent::LlmCallEnd {
+        turn_id,
+        agent_id,
+        step: 0,
+        model: "test".into(),
+        output: String::new(),
+        input_tokens: 100,
+        output_tokens: 1,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 70,
+        request_id: Some("aux-request".into()),
+    });
+    wait_for_event_count(&captured, 1).await;
+    assert!(matches!(
+        &captured.lock()[0],
+        ExecutorEvent::LlmCallEnd { source_agent_id: Some(source), .. }
+            if source == "child-usage"
+    ));
+}
+
+#[tokio::test]
 async fn test_forwarder_propagates_all_event_layers() {
     // 3 层 v2 事件中，State 层 TurnCompleted/StateSnapshot 应被过滤
     // 仅 Render + Observe 层事件转发到父 agent（与 v1 subagent_stack 对齐）

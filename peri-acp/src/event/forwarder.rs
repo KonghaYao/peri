@@ -69,8 +69,9 @@ fn extract_message_id(event: &ExecutorEvent) -> Option<String> {
 ///
 /// # 返回
 ///
-/// forwarder task 的 [`tokio::task::JoinHandle`]。调用方可持有以控制生命周期，也可
-/// fire-and-forget（task 在三通道全部关闭时自动退出）。
+/// forwarder task 的 [`tokio::task::JoinHandle`]。turn-producing 调用方必须在
+/// producer drop 后 await 它，才能让 final observe usage 先于 terminal；仅纯测试/
+/// 非终态旁路可选择不等待。
 ///
 /// # 不变量
 ///
@@ -79,7 +80,8 @@ pub fn spawn_eventbus_forwarder<F>(
     mut handles: EventHandles,
     on_event: F,
     bridge: Option<LangfuseBridge>,
-) where
+) -> tokio::task::JoinHandle<()>
+where
     F: Fn(UnstampedEvent, ExecutorEvent) + Send + Sync + 'static,
 {
     tokio::spawn(async move {
@@ -161,5 +163,5 @@ pub fn spawn_eventbus_forwarder<F>(
                 else => break,
             }
         }
-    });
+    })
 }

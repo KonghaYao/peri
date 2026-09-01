@@ -59,6 +59,26 @@ pub trait ThreadStore: Send + Sync {
     /// 更新指定 thread 的元数据
     async fn update_meta(&self, id: &ThreadId, meta: ThreadMeta) -> Result<()>;
 
+    /// 加载会话创建时冻结的版本化上下文快照。
+    ///
+    /// `None` 表示 legacy thread 尚未持久化快照；实现不得从 thread 列表投影
+    /// 返回该大字段。默认用于旧测试替身，按 legacy 语义返回缺失。
+    async fn load_frozen_snapshot(&self, _id: &ThreadId) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// 仅当 thread 尚无快照时持久化会话创建时冻结的版本化上下文快照。
+    ///
+    /// 返回 true 表示本调用赢得 write-once；false 表示已有 winner，调用方
+    /// 必须重读 canonical snapshot，不得覆盖。默认必须显式失败，禁止假成功。
+    async fn store_frozen_snapshot_if_absent(
+        &self,
+        _id: &ThreadId,
+        _snapshot: &str,
+    ) -> Result<bool> {
+        anyhow::bail!("unsupported frozen snapshot persistence")
+    }
+
     /// 列举所有 thread 元数据，按 updated_at 降序（不含 hidden 的子 agent）
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>>;
 

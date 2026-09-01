@@ -7,6 +7,7 @@ use fluent_bundle::FluentValue;
 
 pub(super) fn handle_agent_execution_failed(state: &mut BridgeState, message: &str) {
     tracing::error!("bridge: AgentExecutionFailed");
+    state.pending_cache_usage = None;
     let text = i18n::tr_args(
         "app-note-agent-failed",
         &[("message".into(), FluentValue::from(message))],
