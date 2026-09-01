@@ -8,7 +8,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_DIR / "scripts"
@@ -25,7 +25,7 @@ from extract_daily import (
     redact_sensitive,
     thread_file_stem,
 )
-from run_history import build_manifest, parse_args, plan_units, sha256_file, write_private_json, write_private_text
+from run_history import build_manifest, parse_args, plan_units, sha256_file, snapshot_database, write_private_json, write_private_text
 from validate_run import cleanup_inputs, validate_run
 
 
@@ -102,6 +102,62 @@ class ThreadDatabaseTestCase(unittest.TestCase):
                 ],
             }
             write_private_json(run_dir / unit["sidecar_path"], sidecar)
+
+
+class SnapshotDatabaseTest(unittest.TestCase):
+    def test_wal_source_backup_supports_readonly_query_without_mutating_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "source.db"
+            snapshot_dir = root / "snapshot"
+            snapshot_dir.mkdir(mode=0o700)
+            snapshot_path = snapshot_dir / "threads.db"
+
+            source = sqlite3.connect(source_path)
+            try:
+                self.assertEqual(source.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+                source.execute("PRAGMA wal_autocheckpoint=0")
+                source.execute("CREATE TABLE records (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+                source.execute("INSERT INTO records (value) VALUES ('before-backup')")
+                source.commit()
+                wal_path = Path(f"{source_path}-wal")
+                shm_path = Path(f"{source_path}-shm")
+                self.assertTrue(wal_path.is_file())
+                wal_before = (wal_path.read_bytes(), wal_path.stat().st_mtime_ns, wal_path.stat().st_ino)
+                self.assertTrue(shm_path.is_file())
+                source_bytes = source_path.read_bytes()
+
+                snapshot_database(source_path, snapshot_path)
+
+                with sqlite3.connect(f"file:{snapshot_path}?mode=ro", uri=True) as snapshot:
+                    self.assertEqual(snapshot.execute("SELECT value FROM records").fetchall(), [("before-backup",)])
+                    self.assertEqual(snapshot.execute("PRAGMA journal_mode").fetchone()[0], "delete")
+
+                self.assertEqual(source_path.read_bytes(), source_bytes)
+                self.assertEqual(
+                    (wal_path.read_bytes(), wal_path.stat().st_mtime_ns, wal_path.stat().st_ino),
+                    wal_before,
+                )
+                self.assertTrue(shm_path.is_file())
+            finally:
+                source.close()
+
+            self.assertEqual(os.stat(snapshot_dir).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(snapshot_path).st_mode & 0o777, 0o600)
+            with sqlite3.connect(f"file:{source_path}?mode=ro", uri=True) as source:
+                self.assertEqual(source.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+                self.assertEqual(source.execute("SELECT value FROM records").fetchall(), [("before-backup",)])
+
+    def test_target_connect_failure_closes_readonly_source(self):
+        source = MagicMock()
+        with patch(
+            "run_history.sqlite3.connect",
+            side_effect=[source, sqlite3.OperationalError("target unavailable")],
+        ):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "target unavailable"):
+                snapshot_database("source.db", "snapshot.db")
+
+        source.close.assert_called_once_with()
 
 
 class QueryActiveDaysTest(ThreadDatabaseTestCase):

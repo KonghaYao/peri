@@ -17,7 +17,7 @@
 import {
   api, clampTraceLimit, fetchObservations, fetchTracesFiltered,
   parseFilterArgs, summarizeLatency, summarizeObservationLatency, fmtLatency,
-  fmt, pct, bar, LatencySummary,
+  fmt, pct, bar, genTokens, totalInputTraffic, LatencySummary,
 } from "./lib.ts";
 
 // Backward-compat aliases for existing section code
@@ -69,6 +69,7 @@ interface TraceAnalysis {
   totalInput: number;
   totalOutput: number;
   totalCache: number;
+  totalCacheCreation: number;
   cachePct: number;
   effective: number;
   genDetails: GenDetail[];
@@ -86,25 +87,22 @@ function analyzeTrace(trace: any, observations: any[]): TraceAnalysis {
   const gens = observations.filter((o) => o.type === "GENERATION");
   const tools = observations.filter((o) => o.type === "TOOL");
 
-  let totalInput = 0, totalOutput = 0, totalCache = 0;
+  let totalInput = 0, totalOutput = 0, totalCache = 0, totalCacheCreation = 0;
 
   const genDetails: GenDetail[] = gens.map((g) => {
-    const u = g.usageDetails || g.usage || {};
-    const inputTokens: number = u.input || u.prompt_tokens || 0;
-    const outputTokens: number = u.output || u.completion_tokens || 0;
-    const cacheRead: number = u.cache_read_input_tokens || u.cache_read || 0;
-    const cacheCreation: number = u.cache_creation_input_tokens || 0;
-    totalInput += inputTokens;
-    totalOutput += outputTokens;
-    totalCache += cacheRead;
+    const tokens = genTokens(g);
+    totalInput += tokens.input;
+    totalOutput += tokens.output;
+    totalCache += tokens.cacheRead;
+    totalCacheCreation += tokens.cacheCreate;
     return {
       model: g.providedModelName || g.internalModelId || g.model
         || (g.metadata?.attributes?.["langfuse.observation.model.name"])
         || "?",
-      input: inputTokens,
-      output: outputTokens,
-      cacheRead,
-      cacheCreation,
+      input: tokens.input,
+      output: tokens.output,
+      cacheRead: tokens.cacheRead,
+      cacheCreation: tokens.cacheCreate,
       latency: summarizeObservationLatency(g),
     };
   });
@@ -133,8 +131,11 @@ function analyzeTrace(trace: any, observations: any[]): TraceAnalysis {
     totalInput,
     totalOutput,
     totalCache,
-    cachePct: totalInput > 0 ? (totalCache / totalInput) * 100 : 0,
-    effective: totalInput - totalCache,
+    totalCacheCreation,
+    cachePct: totalInputTraffic({ input: totalInput, cacheRead: totalCache, cacheCreate: totalCacheCreation }) > 0
+      ? (totalCache / totalInputTraffic({ input: totalInput, cacheRead: totalCache, cacheCreate: totalCacheCreation })) * 100
+      : 0,
+    effective: totalInput,
     genDetails,
     toolDetails,
     observations,
@@ -147,9 +148,9 @@ function analyzeTrace(trace: any, observations: any[]): TraceAnalysis {
 
 function sectionOverview(traces: TraceAnalysis[]) {
   console.log("## 1. Overview\n");
-  let aggIn = 0, aggOut = 0, aggCache = 0, aggLLM = 0, aggTool = 0;
+  let aggIn = 0, aggOut = 0, aggCache = 0, aggCacheCreation = 0, aggLLM = 0, aggTool = 0;
   for (const t of traces) {
-    aggIn += t.totalInput; aggOut += t.totalOutput; aggCache += t.totalCache;
+    aggIn += t.totalInput; aggOut += t.totalOutput; aggCache += t.totalCache; aggCacheCreation += t.totalCacheCreation;
     aggLLM += t.llmCalls; aggTool += t.toolCalls;
   }
   console.log(`  Traces:         ${traces.length}`);
@@ -157,9 +158,10 @@ function sectionOverview(traces: TraceAnalysis[]) {
   console.log(`  Tool calls:     ${aggTool}`);
   console.log(`  Total input:    ${FMT(aggIn)} tokens`);
   console.log(`  Total output:   ${FMT(aggOut)} tokens`);
-  console.log(`  Cache read:     ${FMT(aggCache)} tokens (${PCT(aggCache, aggIn)}%)`);
-  console.log(`  Effective new:  ${FMT(aggIn - aggCache)} tokens`);
-  console.log(`  Output/Input:   ${PCT(aggOut, aggIn)}%`);
+  console.log(`  Cache read:     ${FMT(aggCache)} tokens (${PCT(aggCache, totalInputTraffic({ input: aggIn, cacheRead: aggCache, cacheCreate: aggCacheCreation }))} of input traffic)`);
+  console.log(`  Cache creation: ${FMT(aggCacheCreation)} tokens`);
+  console.log(`  Effective new:  ${FMT(aggIn)} tokens`);
+  console.log(`  Output/Input:   ${PCT(aggOut, aggIn)}`);
   console.log(`  Avg LLM/trace:  ${(aggLLM / traces.length).toFixed(1)}`);
   console.log(`  Avg Tool/trace: ${(aggTool / traces.length).toFixed(1)}`);
 }
@@ -204,7 +206,7 @@ function sectionToolAnalysis(traces: TraceAnalysis[]) {
   console.log("|------|------:|-----------:|------------:|-------:|");
   for (const t of tools) {
     console.log(
-      `| ${t.name} | ${t.count} | ${PCT(t.count, totalCalls)}% | ${t.avgLatency === null ? "N/A" : `${t.avgLatency.toFixed(2)}s`} | ${t.errors} |`
+      `| ${t.name} | ${t.count} | ${PCT(t.count, totalCalls)} | ${t.avgLatency === null ? "N/A" : `${t.avgLatency.toFixed(2)}s`} | ${t.errors} |`
     );
   }
 
@@ -216,7 +218,7 @@ function sectionToolAnalysis(traces: TraceAnalysis[]) {
     console.log("|-----:|----------:|----------------:|--------------:|------------|");
     for (let i = 0; i < t.genDetails.length; i++) {
       const gen = t.genDetails[i];
-      const delta = i > 0 ? gen.input - t.genDetails[i - 1].input : gen.input - gen.cacheRead;
+      const delta = i > 0 ? gen.input - t.genDetails[i - 1].input : gen.input;
       const betweenTools = t.toolDetails.filter((td) => td.parentGenIdx === i - 1);
       const toolNames = betweenTools.map((td) => td.name).join(", ") || "-";
       const deltaStr = delta >= 0 ? `+${FMT(delta)}` : FMT(delta);
@@ -247,7 +249,7 @@ function sectionContextGrowth(traces: TraceAnalysis[]) {
   for (const t of traces) {
     if (t.genDetails.length < 2) continue;
     const g = t.genDetails;
-    const maxInput = Math.max(...g.map((x) => x.input));
+    const maxTraffic = Math.max(...g.map((tokens) => totalInputTraffic({ input: tokens.input, cacheRead: tokens.cacheRead, cacheCreate: tokens.cacheCreation })));
     const firstInput = g[0].input;
     const lastInput = g[g.length - 1].input;
     const growth = lastInput - firstInput;
@@ -258,13 +260,18 @@ function sectionContextGrowth(traces: TraceAnalysis[]) {
 
     for (let i = 0; i < g.length; i++) {
       const barWidth = 30;
-      const pct = maxInput > 0 ? (g[i].input / maxInput) * barWidth : 0;
-      const cacheWidth = maxInput > 0 ? (g[i].cacheRead / maxInput) * barWidth : 0;
-      const newWidth = pct - cacheWidth;
-      const bar = "\u2591".repeat(Math.round(cacheWidth)) + "\u2588".repeat(Math.round(newWidth)) + "\u2591".repeat(Math.max(0, barWidth - Math.round(pct)));
-      console.log(`  ${String(i + 1).padStart(2)} |${bar}| ${FMT(g[i].input)} (new: ${FMT(g[i].input - g[i].cacheRead)})`);
+      const tokens = g[i];
+      const rawWidth = maxTraffic > 0 ? (tokens.input / maxTraffic) * barWidth : 0;
+      const cacheReadWidth = maxTraffic > 0 ? (tokens.cacheRead / maxTraffic) * barWidth : 0;
+      const cacheCreateWidth = maxTraffic > 0 ? (tokens.cacheCreation / maxTraffic) * barWidth : 0;
+      const rawCells = Math.round(rawWidth);
+      const cacheReadCells = Math.min(Math.round(cacheReadWidth), barWidth - rawCells);
+      const cacheCreateCells = Math.min(Math.round(cacheCreateWidth), barWidth - rawCells - cacheReadCells);
+      const usedWidth = rawCells + cacheReadCells + cacheCreateCells;
+      const bar = "█".repeat(rawCells) + "░".repeat(cacheReadCells) + "▒".repeat(cacheCreateCells) + " ".repeat(barWidth - usedWidth);
+      console.log(`  ${String(i + 1).padStart(2)} |${bar}| raw=${FMT(tokens.input)} cache-read=${FMT(tokens.cacheRead)} cache-create=${FMT(tokens.cacheCreation)}`);
     }
-    console.log(`  Legend: \u2591=cached \u2588=new tokens\n`);
+    console.log(`  Legend: █=raw input ░=cache read ▒=cache creation\n`);
   }
 
   console.log("### 4.2 Session Accumulation\n");
@@ -327,11 +334,11 @@ function sectionExpensiveTrace(traces: TraceAnalysis[]) {
 
 function sectionSummary(traces: TraceAnalysis[]) {
   console.log("\n## 7. Summary & Flags\n");
-  let aggIn = 0, aggOut = 0, aggCache = 0;
+  let aggIn = 0, aggOut = 0, aggCache = 0, aggCacheCreation = 0;
   const flags: string[] = [];
 
   for (const t of traces) {
-    aggIn += t.totalInput; aggOut += t.totalOutput; aggCache += t.totalCache;
+    aggIn += t.totalInput; aggOut += t.totalOutput; aggCache += t.totalCache; aggCacheCreation += t.totalCacheCreation;
 
     if (t.cachePct < 90 && t.llmCalls > 1)
       flags.push(`低缓存（${t.cachePct.toFixed(0)}%）：${traceLabel(t)}`);
@@ -356,9 +363,10 @@ function sectionSummary(traces: TraceAnalysis[]) {
     for (const f of flags) console.log(`  ${f}`);
   }
 
-  console.log(`\n  Cache hit rate: ${PCT(aggCache, aggIn)}%`);
-  console.log(`  Output/Input:   ${PCT(aggOut, aggIn)}%`);
-  console.log(`  Avg eff./trace: ${FMT(Math.round((aggIn - aggCache) / traces.length))} tokens`);
+  const inputTraffic = totalInputTraffic({ input: aggIn, cacheRead: aggCache, cacheCreate: aggCacheCreation });
+  console.log(`\n  Cache read share: ${PCT(aggCache, inputTraffic)} of input traffic`);
+  console.log(`  Output/Input:     ${PCT(aggOut, aggIn)}`);
+  console.log(`  Avg eff./trace:   ${FMT(Math.round(aggIn / traces.length))} tokens`);
 }
 
 // ═══════════════════════════════════════════════════════════════

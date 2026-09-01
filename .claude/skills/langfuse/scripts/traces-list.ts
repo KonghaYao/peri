@@ -14,7 +14,7 @@
  *   --name <str>   按 name 过滤
  *   --limit <N>    条数限制
  */
-import { fetchTracesFiltered, fetchObservations, parseFilterArgs, genTokens, fmt, pct, fmtLatency, summarizeLatency } from "./lib.ts";
+import { fetchTracesFiltered, fetchObservations, parseFilterArgs, genTokens, fmt, pct, fmtLatency, summarizeLatency, totalInputTraffic } from "./lib.ts";
 
 const args = process.argv.slice(2);
 if (args.includes("--help") || args.includes("-h")) {
@@ -51,6 +51,7 @@ interface TraceSummary {
   totalInput: number;
   totalOutput: number;
   totalCache: number;
+  totalCacheCreate: number;
   effective: number;
   cachePct: number;
   latency: ReturnType<typeof summarizeLatency>;
@@ -68,12 +69,13 @@ for (let i = 0; i < traces.length; i += 5) {
     const gens = obs.filter((o: any) => o.type === "GENERATION");
     const tools = obs.filter((o: any) => o.type === "TOOL");
 
-    let totalInput = 0, totalOutput = 0, totalCache = 0;
+    let totalInput = 0, totalOutput = 0, totalCache = 0, totalCacheCreate = 0;
     for (const g of gens) {
       const tk = genTokens(g);
       totalInput += tk.input;
       totalOutput += tk.output;
       totalCache += tk.cacheRead;
+      totalCacheCreate += tk.cacheCreate;
     }
 
     summaries.push({
@@ -83,8 +85,11 @@ for (let i = 0; i < traces.length; i += 5) {
       totalInput,
       totalOutput,
       totalCache,
-      effective: totalInput - totalCache,
-      cachePct: totalInput > 0 ? (totalCache / totalInput) * 100 : 0,
+      totalCacheCreate,
+      effective: totalInput,
+      cachePct: totalInputTraffic({ input: totalInput, cacheRead: totalCache, cacheCreate: totalCacheCreate }) > 0
+        ? (totalCache / totalInputTraffic({ input: totalInput, cacheRead: totalCache, cacheCreate: totalCacheCreate })) * 100
+        : 0,
       latency: summarizeLatency(obs),
       timestamp: t.timestamp || "",
     });
@@ -106,14 +111,15 @@ const agg = summaries.reduce(
     input: a.input + s.totalInput,
     output: a.output + s.totalOutput,
     cache: a.cache + s.totalCache,
+    cacheCreate: a.cacheCreate + s.totalCacheCreate,
     calls: a.calls + s.llmCalls,
     tools: a.tools + s.toolCalls,
   }),
-  { input: 0, output: 0, cache: 0, calls: 0, tools: 0 }
+  { input: 0, output: 0, cache: 0, cacheCreate: 0, calls: 0, tools: 0 }
 );
 
 console.log("\n## Aggregate");
 console.log(`  Traces: ${summaries.length}  LLM calls: ${agg.calls}  Tool calls: ${agg.tools}`);
-console.log(`  Input: ${fmt(agg.input)}  Output: ${fmt(agg.output)}  Cache: ${fmt(agg.cache)} (${pct(agg.cache, agg.input)})`);
-console.log(`  Effective new: ${fmt(agg.input - agg.cache)}`);
+console.log(`  Raw input: ${fmt(agg.input)}  Output: ${fmt(agg.output)}  Cache read: ${fmt(agg.cache)} (${pct(agg.cache, totalInputTraffic({ input: agg.input, cacheRead: agg.cache, cacheCreate: agg.cacheCreate }))} of input traffic)  Cache create: ${fmt(agg.cacheCreate)}`);
+console.log(`  Effective new: ${fmt(agg.input)}`);
 console.log(`  Output/Input: ${agg.input > 0 ? ((agg.output / agg.input) * 100).toFixed(2) + "%" : "-"}`);

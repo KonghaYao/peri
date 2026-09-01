@@ -6,7 +6,7 @@
  *   bun .claude/skills/langfuse/scripts/trace-tokens.ts <traceId>
  *   bun .claude/skills/langfuse/scripts/trace-tokens.ts --index <N> [--from/--to/--days/--tag/--user/--session/--name/--limit]
  */
-import { fetchObservations, fetchTracesFiltered, parseFilterArgs, parseTraceArg, genTokens, fmt, pct, fmtLatency, summarizeLatency, summarizeObservationLatency } from "./lib.ts";
+import { fetchObservations, fetchTracesFiltered, parseFilterArgs, parseTraceArg, genTokens, fmt, pct, fmtLatency, summarizeLatency, summarizeObservationLatency, totalInputTraffic } from "./lib.ts";
 
 const args = process.argv.slice(2);
 
@@ -67,22 +67,22 @@ const roundTokens: { idx: number; input: number; cacheRead: number; cacheCreate:
 
 for (let i = 0; i < generations.length; i++) {
   const tk = genTokens(generations[i]);
-  const effective = tk.input - tk.cacheRead;
+  const effective = tk.input;
   cumulativeNew += effective;
   totalInput += tk.input;
   totalCacheRead += tk.cacheRead;
   totalCacheCreate += tk.cacheCreate;
   totalOutput += tk.output;
 
-  const cachePct = tk.input > 0 ? ((tk.cacheRead / tk.input) * 100).toFixed(1) : "0";
+  const cachePct = pct(tk.cacheRead, totalInputTraffic(tk));
   console.log(
-    `| ${i + 1} | ${fmt(tk.input)} | ${fmt(tk.cacheRead)} | ${fmt(tk.cacheCreate)} | ${fmt(effective)} | ${fmt(tk.output)} | ${cachePct}% | ${fmt(cumulativeNew)} |`
+    `| ${i + 1} | ${fmt(tk.input)} | ${fmt(tk.cacheRead)} | ${fmt(tk.cacheCreate)} | ${fmt(effective)} | ${fmt(tk.output)} | ${cachePct} | ${fmt(cumulativeNew)} |`
   );
   roundTokens.push({ idx: i, ...tk, effective });
 }
 
 console.log(
-  `\n**Totals**: Input=${fmt(totalInput)} CacheRead=${fmt(totalCacheRead)} (${pct(totalCacheRead, totalInput)}) CacheCreate=${fmt(totalCacheCreate)} Output=${fmt(totalOutput)}`
+  `\n**Totals**: RawInput=${fmt(totalInput)} CacheRead=${fmt(totalCacheRead)} (${pct(totalCacheRead, totalInputTraffic({ input: totalInput, cacheRead: totalCacheRead, cacheCreate: totalCacheCreate }))} of input traffic) CacheCreate=${fmt(totalCacheCreate)} Output=${fmt(totalOutput)}`
 );
 
 // --- Cache anomalies ---
@@ -95,8 +95,10 @@ for (let i = 0; i < roundTokens.length; i++) {
   // cache hit drop
   if (i > 0) {
     const prev = roundTokens[i - 1];
-    const prevPct = prev.input > 0 ? (prev.cacheRead / prev.input) * 100 : 100;
-    const curPct = r.input > 0 ? (r.cacheRead / r.input) * 100 : 100;
+    const prevTraffic = totalInputTraffic(prev);
+    const curTraffic = totalInputTraffic(r);
+    const prevPct = prevTraffic > 0 ? (prev.cacheRead / prevTraffic) * 100 : 100;
+    const curPct = curTraffic > 0 ? (r.cacheRead / curTraffic) * 100 : 100;
     if (curPct < prevPct - 10) {
       console.log(`  ⚠️ Round ${i + 1}: Cache hit dropped ${prevPct.toFixed(1)}% → ${curPct.toFixed(1)}% (${(prevPct - curPct).toFixed(0)}pp)`);
       anomalies++;
@@ -127,8 +129,10 @@ for (let i = 0; i < roundTokens.length; i++) {
 for (let i = 1; i < roundTokens.length; i++) {
   const prev = roundTokens[i - 1];
   const curr = roundTokens[i];
-  if (curr.input < prev.input * 0.85) {
-    console.log(`  ✂️ Round ${i + 1}: Input dropped ${fmt(prev.input)} → ${fmt(curr.input)} (possible compact/truncation)`);
+  const prevTraffic = totalInputTraffic(prev);
+  const currTraffic = totalInputTraffic(curr);
+  if (currTraffic < prevTraffic * 0.85) {
+    console.log(`  ✂️ Round ${i + 1}: Input traffic dropped ${fmt(prevTraffic)} → ${fmt(currTraffic)} (possible compact/truncation)`);
     anomalies++;
   }
 }

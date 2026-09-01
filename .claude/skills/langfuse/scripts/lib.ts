@@ -211,23 +211,58 @@ export function isoToLocal(iso: string) {
 }
 
 export function genTokens(generation: any) {
-  const usage = generation.usageDetails || generation.usage || {};
+  const usageDetails = generation?.usageDetails && typeof generation.usageDetails === "object" ? generation.usageDetails : {};
+  const legacyUsage = generation?.usage && typeof generation.usage === "object" ? generation.usage : {};
+  const nonNegative = (...values: unknown[]) => {
+    for (const value of values) {
+      if ((typeof value !== "number" && typeof value !== "string") || value === "") continue;
+      const number = Number(value);
+      if (Number.isFinite(number) && number >= 0) return number;
+    }
+    return 0;
+  };
   return {
-    input: Number(usage.input || usage.prompt_tokens || 0),
-    output: Number(usage.output || usage.completion_tokens || 0),
-    cacheRead: Number(usage.cache_read_input_tokens || 0),
-    cacheCreate: Number(usage.cache_creation_input_tokens || 0),
+    // build_usage_details() writes raw input, already excluding cache read/create.
+    input: nonNegative(
+      usageDetails.input, usageDetails.input_tokens, usageDetails.inputTokens,
+      usageDetails.prompt_tokens, usageDetails.promptTokens,
+      legacyUsage.input, legacyUsage.input_tokens, legacyUsage.inputTokens,
+      legacyUsage.prompt_tokens, legacyUsage.promptTokens,
+    ),
+    output: nonNegative(
+      usageDetails.output, usageDetails.output_tokens, usageDetails.outputTokens,
+      usageDetails.completion_tokens, usageDetails.completionTokens,
+      legacyUsage.output, legacyUsage.output_tokens, legacyUsage.outputTokens,
+      legacyUsage.completion_tokens, legacyUsage.completionTokens,
+    ),
+    cacheRead: nonNegative(
+      usageDetails.cache_read_input_tokens, usageDetails.cacheReadInputTokens,
+      usageDetails.cache_read, usageDetails.cacheRead,
+      legacyUsage.cache_read_input_tokens, legacyUsage.cacheReadInputTokens,
+      legacyUsage.cache_read, legacyUsage.cacheRead,
+    ),
+    cacheCreate: nonNegative(
+      usageDetails.cache_creation_input_tokens, usageDetails.cacheCreationInputTokens,
+      usageDetails.cache_creation, usageDetails.cacheCreation,
+      legacyUsage.cache_creation_input_tokens, legacyUsage.cacheCreationInputTokens,
+      legacyUsage.cache_creation, legacyUsage.cacheCreation,
+    ),
   };
 }
 
 export interface TokenSummary { input: number; output: number; cacheRead: number; cacheCreate: number; effective: number; calls: number; }
+export type InputTokenBuckets = Pick<TokenSummary, "input" | "cacheRead" | "cacheCreate">;
+export function totalInputTraffic(tokens: InputTokenBuckets) {
+  return tokens.input + tokens.cacheRead + tokens.cacheCreate;
+}
 export function summarizeTokens(generations: any[]): TokenSummary {
   const total = generations.reduce((sum, generation) => {
     const tokens = genTokens(generation);
     sum.input += tokens.input; sum.output += tokens.output; sum.cacheRead += tokens.cacheRead; sum.cacheCreate += tokens.cacheCreate;
     return sum;
   }, { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 });
-  return { ...total, effective: total.input - total.cacheRead, calls: generations.length };
+  // input is raw input; cache buckets are additional, independently reported usage.
+  return { ...total, effective: total.input, calls: generations.length };
 }
 
 export type LatencySource = "agent-run" | "observations" | "unavailable";
@@ -260,8 +295,8 @@ export function summarizeTraceMetrics(observations: any[]): TraceMetrics {
   return { llmCalls: tokens.calls, toolCalls: observations.filter((observation) => observation?.type === "TOOL").length, inputTokens: tokens.input, outputTokens: tokens.output, cacheReadTokens: tokens.cacheRead, cacheCreateTokens: tokens.cacheCreate, effectiveNewTokens: tokens.effective, latency: summarizeLatency(observations) };
 }
 
-/** 每百万 token 美元定价。键顺序即匹配优先级：estimateCost 用 includes 子串匹配，更具体的版本号键必须排在通用键之前（如 claude-sonnet-4-5 先于 claude-sonnet-4，gpt-5-mini 先于 gpt-5）。 */
-const MODEL_PRICES: Record<string, { input: number; output: number; cacheRead: number }> = {
+/** 每百万 token 美元定价；cacheCreate 缺省时显式按 input 价计费，不混入 raw input。 */
+const MODEL_PRICES: Record<string, { input: number; output: number; cacheRead: number; cacheCreate?: number }> = {
   // Anthropic
   "claude-3-7-sonnet": { input: 3, output: 15, cacheRead: 0.30 },
   "claude-sonnet-4-20250514": { input: 3, output: 15, cacheRead: 0.30 },
@@ -291,10 +326,31 @@ const MODEL_PRICES: Record<string, { input: number; output: number; cacheRead: n
   "gemini-2.5-pro": { input: 1.25, output: 10, cacheRead: 0.125 },
   "gemini-2.5-flash": { input: 0.30, output: 2.50, cacheRead: 0.03 },
 };
-export function estimateCost(model: string, tokens: Pick<TokenSummary, "input" | "output" | "cacheRead">): number {
+export function estimateCost(model: string, tokens: Pick<TokenSummary, "input" | "output" | "cacheRead" | "cacheCreate">): number {
   const key = Object.keys(MODEL_PRICES).find((candidate) => model.toLowerCase().includes(candidate));
-  const price = key ? MODEL_PRICES[key] : { input: 2, output: 10, cacheRead: 0.5 };
-  return (Math.max(0, tokens.input - tokens.cacheRead) * price.input + tokens.cacheRead * price.cacheRead + tokens.output * price.output) / 1_000_000;
+  const price = key ? MODEL_PRICES[key] : { input: 2, output: 10, cacheRead: 0.5, cacheCreate: 2 };
+  const billable = (value: number) => Number.isFinite(value) ? Math.max(0, value) : 0;
+  return (billable(tokens.input) * price.input
+    + billable(tokens.cacheRead) * price.cacheRead
+    + billable(tokens.cacheCreate) * (price.cacheCreate ?? price.input)
+    + billable(tokens.output) * price.output) / 1_000_000;
+}
+
+export function generationModel(generation: any): string {
+  return generation?.model
+    || generation?.modelName
+    || generation?.providedModelName
+    || generation?.internalModelId
+    || generation?.metadata?.attributes?.["langfuse.observation.model.name"]
+    || "unknown";
+}
+
+/** 按 generation 自身模型分别计价，避免 mixed-model trace/session 被单一模型误计。 */
+export function estimateGenerationsCost(generations: any[]): number {
+  return generations.reduce(
+    (total, generation) => total + estimateCost(generationModel(generation), genTokens(generation)),
+    0,
+  );
 }
 export function fmtCost(usd: number) { return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`; }
 
@@ -337,8 +393,9 @@ export function summarizeErrors(observations: any[]): ErrorSummary {
 export interface Anomaly { type: "cache_drop" | "high_effective" | "high_latency" | "loop" | "empty_output" | "tiny_output"; severity: "low" | "medium" | "high"; description: string; traceId?: string; details?: string; }
 export function detectAnomalies(metrics: TraceMetrics, _model?: string): Anomaly[] {
   const anomalies: Anomaly[] = [];
+  const inputTraffic = totalInputTraffic({ input: metrics.inputTokens, cacheRead: metrics.cacheReadTokens, cacheCreate: metrics.cacheCreateTokens });
   if (metrics.effectiveNewTokens > 20_000) anomalies.push({ type: "high_effective", severity: "high", description: `有效新 token = ${fmt(metrics.effectiveNewTokens)} (>20K)，上下文可能持续膨胀` });
-  if (metrics.inputTokens > 5000 && metrics.cacheReadTokens / metrics.inputTokens < 0.1) anomalies.push({ type: "cache_drop", severity: "medium", description: `缓存命中率仅 ${pct(metrics.cacheReadTokens, metrics.inputTokens)}，可能是新 session 或 prompt 变更` });
+  if (inputTraffic > 5000 && metrics.cacheReadTokens / inputTraffic < 0.1) anomalies.push({ type: "cache_drop", severity: "medium", description: `缓存读取占输入流量仅 ${pct(metrics.cacheReadTokens, inputTraffic)}，可能是新 session 或 prompt 变更` });
   if (metrics.inputTokens > 100_000 && metrics.outputTokens / metrics.inputTokens < 0.001) anomalies.push({ type: "tiny_output", severity: "medium", description: `输出/输入比极低 ${pct(metrics.outputTokens, metrics.inputTokens)}，大量上下文可能无用` });
   if (metrics.latency.seconds !== null && metrics.latency.seconds > 120) anomalies.push({ type: "high_latency", severity: "low", description: `真实耗时 ${fmtLatency(metrics.latency)} (>2min)，单个 trace 耗时较长` });
   if (metrics.llmCalls > 10 || metrics.toolCalls > 10) {

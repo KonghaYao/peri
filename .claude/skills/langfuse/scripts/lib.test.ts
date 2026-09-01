@@ -1,7 +1,44 @@
 import { describe, expect, test } from "bun:test";
-import { auditObservationTree, clampTraceLimit, detectAnomalies, fmtLatency, parseFilterArgs, splitGenerationAgentSegments, summarizeErrors, summarizeLatency, summarizeTraceMetrics } from "./lib.ts";
+import { auditObservationTree, clampTraceLimit, detectAnomalies, estimateCost, estimateGenerationsCost, fmtLatency, genTokens, parseFilterArgs, splitGenerationAgentSegments, summarizeErrors, summarizeLatency, summarizeTokens, summarizeTraceMetrics, totalInputTraffic } from "./lib.ts";
 
 describe("Langfuse report pure logic", () => {
+  test("usageDetails 将 raw input、cache read、cache creation、output 各计一次且不为负", () => {
+    const generation = { usageDetails: { input: 100, cache_read_input_tokens: 20, cache_creation_input_tokens: 30, output: 40 } };
+    expect(genTokens(generation)).toEqual({ input: 100, cacheRead: 20, cacheCreate: 30, output: 40 });
+    expect(summarizeTokens([generation, { usageDetails: { input: -5, cache_read_input_tokens: -2, cache_creation_input_tokens: "bad", output: -1 } }])).toEqual({ input: 100, cacheRead: 20, cacheCreate: 30, output: 40, effective: 100, calls: 2 });
+    expect(estimateCost("unknown-model", { input: 100, cacheRead: 20, cacheCreate: 30, output: 40 })).toBeCloseTo((100 * 2 + 20 * 0.5 + 30 * 2 + 40 * 10) / 1_000_000);
+  });
+
+  test("usageDetails 按字段回退 legacy usage 与常见别名", () => {
+    expect(genTokens({ usageDetails: {}, usage: { prompt_tokens: 11, completion_tokens: 12, cache_read: 13, cache_creation: 14 } })).toEqual({
+      input: 11, output: 12, cacheRead: 13, cacheCreate: 14,
+    });
+    expect(genTokens({
+      usageDetails: { input: 10, output: "bad", cache_read_input_tokens: -1 },
+      usage: { outputTokens: 20, cacheReadInputTokens: 50, cacheCreationInputTokens: 7 },
+    })).toEqual({ input: 10, output: 20, cacheRead: 50, cacheCreate: 7 });
+  });
+
+  test("raw input 小于 cache read 时 effective 不为负且比例分母包含全部输入桶", () => {
+    const summary = summarizeTokens([{ usageDetails: { input: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 10 } }]);
+    expect(summary.effective).toBe(5);
+    expect(totalInputTraffic(summary)).toBe(115);
+  });
+
+  test("成本估算将非有限或负值归零，不产生 NaN", () => {
+    expect(estimateCost("unknown-model", { input: Number.NaN, cacheRead: -1, cacheCreate: Number.POSITIVE_INFINITY, output: 1 })).toBe(10 / 1_000_000);
+  });
+  test("cache creation 使用模型专用价格，缺省时回退 input 价格", () => {
+    expect(estimateCost("claude-sonnet-4", { input: 0, cacheRead: 0, cacheCreate: 1_000_000, output: 0 })).toBe(3);
+  });
+
+  test("mixed-model 成本按每个 generation 自身模型累加", () => {
+    expect(estimateGenerationsCost([
+      { model: "claude-sonnet-4", usageDetails: { input: 1_000_000 } },
+      { modelName: "gpt-5", usageDetails: { input: 1_000_000 } },
+    ])).toBeCloseTo(4.25);
+  });
+
   test("trace 查询 limit 被限制在 API 上限 100", () => {
     expect(clampTraceLimit(500)).toBe(100);
     expect(parseFilterArgs(["--limit", "500"]).limit).toBe(100);

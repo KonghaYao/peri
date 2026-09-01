@@ -1,7 +1,7 @@
 import {
-  clampTraceLimit, detectAnomalies, estimateCost, fetchAllTracesFiltered, fetchObservations, fmt, fmtCost,
-  fmtLatency, genTokens, isoToLocal, summarizeErrors, summarizeObservationLatency,
-  summarizeTraceMetrics,
+  clampTraceLimit, detectAnomalies, estimateGenerationsCost, fetchAllTracesFiltered, fetchObservations, fmt, fmtCost,
+  fmtLatency, genTokens, isoToLocal, pct, summarizeErrors, summarizeObservationLatency,
+  summarizeTraceMetrics, totalInputTraffic,
 } from "./lib.ts";
 
 const args = process.argv.slice(2);
@@ -35,21 +35,21 @@ if (csvMode) {
   for (const analysis of analyses) for (const [index, generation] of analysis.generations.entries()) {
     const tokens = genTokens(generation);
     const latency = summarizeObservationLatency(generation);
-    console.log([analysis.idx, analysis.id, analysis.timestamp, index + 1, generation.model || generation.modelName || "?", tokens.input, tokens.cacheRead, tokens.cacheCreate, tokens.input - tokens.cacheRead, tokens.output, latency ?? "", analysis.metrics.latency.source, analysis.flags.map((flag) => flag.type).join(";"), analysis.errors.categories.join(";")].join(","));
+    console.log([analysis.idx, analysis.id, analysis.timestamp, index + 1, generation.model || generation.modelName || "?", tokens.input, tokens.cacheRead, tokens.cacheCreate, tokens.input, tokens.output, latency ?? "", analysis.metrics.latency.source, analysis.flags.map((flag) => flag.type).join(";"), analysis.errors.categories.join(";")].join(","));
   }
   process.exit(0);
 }
 
 const aggregate = analyses.reduce((sum, analysis) => {
   const metrics = analysis.metrics;
-  sum.input += metrics.inputTokens; sum.output += metrics.outputTokens; sum.cacheRead += metrics.cacheReadTokens; sum.effective += metrics.effectiveNewTokens; sum.llm += metrics.llmCalls; sum.tools += metrics.toolCalls;
+  sum.input += metrics.inputTokens; sum.output += metrics.outputTokens; sum.cacheRead += metrics.cacheReadTokens; sum.cacheCreate += metrics.cacheCreateTokens; sum.effective += metrics.effectiveNewTokens; sum.llm += metrics.llmCalls; sum.tools += metrics.toolCalls;
   if (metrics.latency.seconds !== null) { sum.latency += metrics.latency.seconds; sum.observed += 1; }
   for (const category of analysis.errors.categories) sum.errors[category] = (sum.errors[category] || 0) + 1;
   return sum;
-}, { input: 0, output: 0, cacheRead: 0, effective: 0, llm: 0, tools: 0, latency: 0, observed: 0, errors: {} as Record<string, number> });
-const model = analyses.flatMap((analysis) => analysis.generations).at(0)?.model || "?";
+}, { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, effective: 0, llm: 0, tools: 0, latency: 0, observed: 0, errors: {} as Record<string, number> });
+const sessionCost = estimateGenerationsCost(analyses.flatMap((analysis) => analysis.generations));
 console.log(`\n## Session: ${sessionId}\n\n| Metric | Value |\n|--------|-------|`);
-console.log(`| Traces | ${analyses.length} |\n| LLM calls | ${aggregate.llm} |\n| Tool calls | ${aggregate.tools} |\n| Effective new | ${fmt(aggregate.effective)} tokens |\n| Avg observed latency | ${aggregate.observed ? fmtLatency({ seconds: aggregate.latency / aggregate.observed, source: "observations" }) : "N/A"} (${aggregate.observed}/${analyses.length} traces) |\n| Errors by category | ${Object.entries(aggregate.errors).map(([kind, count]) => `${kind}=${count}`).join(", ") || "none"} |\n| Est. cost | ${fmtCost(estimateCost(model, { input: aggregate.input, output: aggregate.output, cacheRead: aggregate.cacheRead }))} |`);
+console.log(`| Traces | ${analyses.length} |\n| LLM calls | ${aggregate.llm} |\n| Tool calls | ${aggregate.tools} |\n| Effective new | ${fmt(aggregate.effective)} tokens |\n| Cache read | ${fmt(aggregate.cacheRead)} (${pct(aggregate.cacheRead, totalInputTraffic(aggregate))} of input traffic) |\n| Avg observed latency | ${aggregate.observed ? fmtLatency({ seconds: aggregate.latency / aggregate.observed, source: "observations" }) : "N/A"} (${aggregate.observed}/${analyses.length} traces) |\n| Errors by category | ${Object.entries(aggregate.errors).map(([kind, count]) => `${kind}=${count}`).join(", ") || "none"} |\n| Est. cost | ${fmtCost(sessionCost)} |`);
 console.log("\n### Trace Timeline\n\n| # | Time | Name | Eff.New | LLM | Tools | Lat | Errors | Flags |\n|---|------|------|---------|-----|-------|-----|--------|-------|");
 for (const analysis of analyses) console.log(`| ${analysis.idx} | ${isoToLocal(analysis.timestamp)} | ${analysis.name.replace(/\|/g, "\\|").slice(0, 50)} | ${fmt(analysis.metrics.effectiveNewTokens)} | ${analysis.metrics.llmCalls} | ${analysis.metrics.toolCalls} | ${fmtLatency(analysis.metrics.latency)} | ${analysis.errors.categories.join(",") || "-"} | ${analysis.flags.map((flag) => flag.type).join(",") || "-"} |`);
 
@@ -59,7 +59,7 @@ if (detailMode) for (const analysis of analyses) {
   for (const [index, generation] of analysis.generations.entries()) {
     const tokens = genTokens(generation);
     const latency = summarizeObservationLatency(generation);
-    console.log(`| ${index + 1} | ${fmt(tokens.input)} | ${fmt(tokens.cacheRead)} | ${fmt(tokens.input - tokens.cacheRead)} | ${fmt(tokens.output)} | ${latency === null ? "N/A" : fmtLatency({ seconds: latency, source: "observations" })} |`);
+    console.log(`| ${index + 1} | ${fmt(tokens.input)} | ${fmt(tokens.cacheRead)} | ${fmt(tokens.input)} | ${fmt(tokens.output)} | ${latency === null ? "N/A" : fmtLatency({ seconds: latency, source: "observations" })} |`);
   }
 }
 

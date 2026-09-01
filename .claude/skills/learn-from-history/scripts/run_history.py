@@ -9,6 +9,7 @@ import secrets
 import shutil
 import sqlite3
 import sys
+from contextlib import closing
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -49,13 +50,17 @@ def write_private_text(path, content):
 
 
 def snapshot_database(source_path, snapshot_path):
-    source = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)
-    target = sqlite3.connect(snapshot_path)
-    try:
-        source.backup(target)
-    finally:
-        target.close()
-        source.close()
+    with closing(sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)) as source:
+        with closing(sqlite3.connect(snapshot_path)) as target:
+            source.backup(target)
+            # backup() 会复制源库的 WAL journal mode。隔离快照没有对应的
+            # -wal/-shm 文件，mode=ro 随后可能尝试创建它们并打开失败。
+            # 只在独立快照上转换为单文件 DELETE mode，源库始终保持只读。
+            journal_mode = target.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+            if journal_mode.lower() != "delete":
+                raise sqlite3.OperationalError(
+                    f"无法将隔离快照转换为 DELETE journal mode: {journal_mode}"
+                )
     os.chmod(snapshot_path, 0o600)
 
 
