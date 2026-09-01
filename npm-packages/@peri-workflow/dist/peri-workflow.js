@@ -1119,7 +1119,18 @@ var currentRunId;
 var currentAbortController;
 var currentCwd;
 var currentBudget;
+var currentResumeRunId;
 var currentResumeJournal;
+function parseBudgetTotal(params) {
+  if (!params || typeof params !== "object" || !Object.hasOwn(params, "budgetTotal")) {
+    return;
+  }
+  const value = params.budgetTotal;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`budgetTotal must be an integer between 1 and ${Number.MAX_SAFE_INTEGER}`);
+  }
+  return value;
+}
 function createPorts() {
   return {
     agentAdapterRegistry: new AgentAdapterRegistry().register(rpcAdapter).default("perihelion-rpc"),
@@ -1148,10 +1159,36 @@ function createPorts() {
     },
     journalStore: {
       async read() {
-        return currentResumeJournal ?? [];
+        return (currentResumeJournal ?? []).map((entry) => {
+          const recovered = {
+            ...entry,
+            attempt: {
+              runId: currentRunId,
+              journalSeq: entry.seq,
+              recoveredFrom: {
+                runId: currentResumeRunId ?? currentRunId,
+                agentId: entry.attempt?.agentId,
+                journalSeq: entry.attempt?.journalSeq ?? entry.seq
+              },
+              consumed: true,
+              disposition: "recovered"
+            }
+          };
+          rpcNotify("journal/append", { runId: currentRunId, entry: recovered });
+          return recovered;
+        });
       },
       async append(runId, entry) {
-        rpcNotify("journal/append", { runId, entry });
+        const structured = {
+          ...entry,
+          attempt: {
+            runId,
+            journalSeq: entry.seq,
+            consumed: true,
+            disposition: "produced"
+          }
+        };
+        rpcNotify("journal/append", { runId, entry: structured });
       },
       async truncate(runId) {
         rpcNotify("journal/truncate", { runId });
@@ -1186,9 +1223,24 @@ async function handleRequest(msg) {
   switch (method) {
     case "workflow/start": {
       const p = params;
+      let budgetTotal;
+      try {
+        budgetTotal = parseBudgetTotal(params);
+      } catch (error) {
+        send({
+          jsonrpc: "2.0",
+          id,
+          error: {
+            code: -32602,
+            message: error instanceof Error ? error.message : "invalid budgetTotal"
+          }
+        });
+        return;
+      }
       currentRunId = p.runId;
       currentCwd = p.cwd;
-      currentBudget = p.budgetTotal;
+      currentBudget = budgetTotal ?? null;
+      currentResumeRunId = p.resumeFromRunId;
       currentResumeJournal = p.resume;
       currentAbortController = new AbortController;
       send({

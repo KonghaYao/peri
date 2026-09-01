@@ -45,11 +45,19 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse | JsonRpcNotificat
 export const WORKFLOW_PROTOCOL_VERSION = 1
 export const WORKFLOW_BUILD_ID = '@peri-code/workflow@0.2.0'
 
+export type WorkflowLimits = {
+  maxAgents?: number
+  maxToolCalls?: number
+  maxElapsedMs?: number
+}
+
 /** host → runner: start a workflow */
 export type WorkflowStartParams = {
   runId: string
   cwd: string
-  budgetTotal: number | null
+  budgetTotal?: number
+  limits?: WorkflowLimits
+  resumeFromRunId?: string
   resume?: JournalEntry[]
   script: string
   args?: unknown
@@ -79,11 +87,49 @@ export type AgentRunRequestParams = {
 
 // ─── CLI 读取器类型 ────────────────────────────────────────
 
+export type WorkflowWriteIntent =
+  | { kind: 'read_only' }
+  | {
+      kind: 'write'
+      repo_root: string
+      cwd: string
+      path_allowlist: string[]
+      head_may_change?: boolean
+      commit_required?: boolean
+    }
+
+export type WorkflowExecutionStatus = 'running' | 'completed' | 'failed' | 'killed' | 'unknown'
+export type WorkflowAcceptanceStatus = 'passed' | 'failed' | 'unknown'
+export type WorkflowPostProcessingStatus = 'not_required' | 'passed' | 'failed' | 'blocked' | 'unknown'
+export type WorkflowDeliveryStatus = 'deliverable' | 'blocked' | 'unknown'
+
+export type AttemptDisposition = 'produced' | 'recovered' | 'rejected'
+
+export type WorkflowAttempt = {
+  runId: string
+  /** Absent when the engine journal callback cannot prove the originating agent identity. */
+  agentId?: number
+  journalSeq: number
+  recoveredFrom?: { runId: string; agentId?: number; journalSeq: number }
+  consumed: boolean
+  disposition: AttemptDisposition
+}
+
+export type WorkflowJournalEntry = JournalEntry & { attempt?: WorkflowAttempt }
+
 /** `.claude/workflow-runs/<runId>/state.json` 的结构 */
 export interface RunState {
   run_id: string
   workflow_name: string
   status: string
+  /** Legacy completed only proves execution completion, never deliverability. */
+  execution_status?: WorkflowExecutionStatus
+  acceptance_status?: WorkflowAcceptanceStatus
+  post_processing_status?: WorkflowPostProcessingStatus
+  delivery_status?: WorkflowDeliveryStatus
+  limits?: WorkflowLimits
+  budget_total?: number
+  attempts?: WorkflowAttempt[]
   return_value?: unknown
   script?: string
   started_at?: string

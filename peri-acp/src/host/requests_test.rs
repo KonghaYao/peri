@@ -889,7 +889,7 @@ fn register_run(mw: &Arc<WorkflowMiddleware>, run_id: &str) {
             script_preview: "test".to_string(),
             status: WorkflowRunStatus::Running,
             started_at: std::time::Instant::now(),
-            child_handle: child,
+            child_handle: Some(child),
             kill_tx: Some(kill_tx),
         })
         .unwrap();

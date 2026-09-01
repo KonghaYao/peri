@@ -8,13 +8,15 @@ fn test_workflow_start_params_serializes_camel_case() {
         args: None,
         budget_total: None,
         max_concurrency: 3,
+        limits: None,
+        resume_from_run_id: None,
         resume: None,
         cwd: "/tmp".into(),
     };
     let json = serde_json::to_value(&params).unwrap();
     assert!(json.get("runId").is_some(), "runId 应存在，实际: {json}");
     assert!(json.get("maxConcurrency").is_some());
-    assert_eq!(json.get("budgetTotal"), Some(&serde_json::Value::Null));
+    assert!(json.get("budgetTotal").is_none());
     assert!(json.get("run_id").is_none());
     assert!(json.get("max_concurrency").is_none());
 }
@@ -27,6 +29,8 @@ fn test_workflow_start_params_preserves_budget_total() {
         args: None,
         budget_total: Some(9_007_199_254_740_991),
         max_concurrency: 3,
+        limits: None,
+        resume_from_run_id: None,
         resume: None,
         cwd: "/tmp".into(),
     };
@@ -111,6 +115,40 @@ fn test_workflow_done_params_camel_case() {
     assert_eq!(done.run_id, "r1");
     assert_eq!(done.status, "completed");
     assert!(done.return_value.is_some());
+}
+
+#[test]
+fn test_journal_attempt_round_trip_and_legacy_default() {
+    let legacy: JournalEntry = serde_json::from_value(serde_json::json!({
+        "key": "stable-key",
+        "seq": 7,
+        "result": {"kind": "skipped"}
+    }))
+    .unwrap();
+    assert!(legacy.attempt.is_none());
+
+    let entry = JournalEntry {
+        key: "stable-key".into(),
+        seq: 7,
+        result: AgentRunResult::Skipped,
+        attempt: Some(WorkflowAttempt {
+            run_id: "019-run".into(),
+            agent_id: Some(42),
+            journal_seq: 7,
+            recovered_from: Some(RecoveredAttempt {
+                run_id: "018-source".into(),
+                agent_id: Some(9),
+                journal_seq: 7,
+            }),
+            consumed: true,
+            disposition: AttemptDisposition::Recovered,
+        }),
+    };
+    let json = serde_json::to_value(&entry).unwrap();
+    assert_eq!(json["attempt"]["runId"], "019-run");
+    assert_eq!(json["attempt"]["agentId"], 42);
+    assert_eq!(json["attempt"]["journalSeq"], 7);
+    assert_eq!(json["attempt"]["recoveredFrom"]["runId"], "018-source");
 }
 
 #[test]

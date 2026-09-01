@@ -24,7 +24,9 @@ use peri_resources::workflow::{
     journal::WorkflowJournalStore,
     progress::WorkflowProgressStore,
     registry::{WorkflowRun, WorkflowRunStatus, WorkflowTaskRegistry, WorkflowTaskResult},
-    runner::{AgentExecutor, WorkflowInput, WorkflowResult, WorkflowRunner},
+    runner::{
+        receive_workflow_result, AgentExecutor, WorkflowInput, WorkflowResult, WorkflowRunner,
+    },
     tool::WorkflowTool,
 };
 
@@ -142,14 +144,23 @@ impl WorkflowMiddleware {
             return Err("Workflow is still running, cannot resume".into());
         }
 
+        let write_intent = state.write_intent.clone();
+        let git_baseline = peri_resources::workflow::journal::GitBaseline::capture_for_intent(
+            std::path::Path::new(self.runner.cwd()),
+            write_intent.as_ref(),
+        )
+        .map_err(|error| format!("Workflow resume preflight failed: {error}"))?;
         let new_run_id = uuid::Uuid::now_v7().to_string();
         let wf_input = WorkflowInput {
             script: state.script.clone(),
             args: None,
             max_concurrency: 3,
-            budget_total: None,
+            budget_total: state.budget_total,
+            limits: state.limits.clone(),
             workflow_name: state.workflow_name.clone(),
             resume_from: Some(run_id.to_string()),
+            write_intent,
+            git_baseline,
         };
         let wf_name = wf_input.workflow_name.clone();
 
@@ -162,6 +173,19 @@ impl WorkflowMiddleware {
         let new_run_id_clone = new_run_id.clone();
 
         let started_at = std::time::Instant::now();
+        let script_preview: String = state.script.chars().take(100).collect();
+        self.registry
+            .reserve(WorkflowRun {
+                run_id: new_run_id.clone(),
+                workflow_name: wf_name.clone(),
+                script_preview,
+                status: WorkflowRunStatus::Running,
+                started_at,
+                child_handle: None,
+                kill_tx: Some(kill_tx),
+            })
+            .map_err(|e| format!("Failed to reserve resumed workflow: {e}"))?;
+
         let child_handle = tokio::spawn(async move {
             let _ = runner
                 .run(
@@ -175,35 +199,22 @@ impl WorkflowMiddleware {
                 .await;
         });
 
-        let script_preview: String = state.script.chars().take(100).collect();
-        self.registry
-            .register(WorkflowRun {
-                run_id: new_run_id.clone(),
-                workflow_name: wf_name.clone(),
-                script_preview,
-                status: WorkflowRunStatus::Running,
-                started_at,
-                child_handle,
-                kill_tx: Some(kill_tx),
-            })
-            .map_err(|e| format!("Failed to register resumed workflow: {e}"))?;
+        self.registry.attach_child(&new_run_id, child_handle);
 
         // ─── 快速失败检测（1s 内 done 到来即同步报错）───
         let mut fast_rx = done_rx.clone();
         let fast_result = tokio::select! {
-            _ = fast_rx.changed() => {
-                let val = fast_rx.borrow().clone();
-                if val.is_none() {
-                    Some(WorkflowResult {
-                        run_id: new_run_id.clone(),
-                        status: "failed".to_string(),
-                        return_value: None,
-                        error: Some("workflow process exited before reporting result".to_string()),
-                        stderr_tail: None,
-                    })
-                } else {
-                    val
-                }
+            result = receive_workflow_result(&mut fast_rx) => {
+                Some(result.unwrap_or_else(|| WorkflowResult {
+                    run_id: new_run_id.clone(),
+                    status: "failed".to_string(),
+                    return_value: None,
+                    error: Some("workflow process exited before reporting result".to_string()),
+                    post_processing_status:
+                        peri_acp_types::workflow::PostProcessingStatus::Failed,
+                    delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+                    stderr_tail: None,
+                }))
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => None,
         };
@@ -227,11 +238,24 @@ impl WorkflowMiddleware {
                         workflow_name: wf_name.clone(),
                         success: false,
                         status: WorkflowRunStatus::Failed,
+                        execution_status: peri_acp_types::workflow::ExecutionStatus::Failed,
+                        acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
+                        post_processing_status: result.post_processing_status,
+                        delivery_status: result.delivery_status,
+                        state_artifact_exists: self
+                            .journal_store
+                            .run_dir(&new_run_id)
+                            .join("state.json")
+                            .is_file(),
                         duration_ms: started_at.elapsed().as_millis() as u64,
                         agent_count: 0,
                         tool_calls_count: 0,
                         error: Some(error_msg.clone()),
                         phase_summaries: Vec::new(),
+                        attempts: self
+                            .journal_store
+                            .read_attempts(&new_run_id)
+                            .unwrap_or_default(),
                     },
                 );
 
@@ -246,15 +270,23 @@ impl WorkflowMiddleware {
         // 完成后通知任务
         let registry_for_complete = Arc::clone(&self.registry);
         let notify_progress_store = Arc::clone(&self.progress_store);
+        let notify_journal_store = Arc::clone(&self.journal_store);
         let notify_name = wf_name;
         let notify_run_id = new_run_id.clone();
         tokio::spawn(async move {
             let mut done_rx = done_rx;
-            if done_rx.changed().await.is_err() {
+            let Some(result) = receive_workflow_result(&mut done_rx).await else {
                 let (agent_count, tool_calls_count) = notify_progress_store
                     .get_run_stats(&notify_run_id)
                     .unwrap_or((0, 0));
                 let phase_summaries = notify_progress_store.get_phase_summaries(&notify_run_id);
+                let state_artifact_exists = notify_journal_store
+                    .run_dir(&notify_run_id)
+                    .join("state.json")
+                    .is_file();
+                let attempts = notify_journal_store
+                    .read_attempts(&notify_run_id)
+                    .unwrap_or_default();
                 registry_for_complete.complete(
                     &notify_run_id,
                     WorkflowTaskResult {
@@ -262,23 +294,37 @@ impl WorkflowMiddleware {
                         workflow_name: notify_name,
                         success: false,
                         status: WorkflowRunStatus::Failed,
+                        execution_status: peri_acp_types::workflow::ExecutionStatus::Failed,
+                        acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
+                        post_processing_status:
+                            peri_acp_types::workflow::PostProcessingStatus::Blocked,
+                        delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+                        state_artifact_exists,
                         duration_ms: started_at.elapsed().as_millis() as u64,
                         agent_count,
                         tool_calls_count,
                         error: Some("workflow process exited unexpectedly".to_string()),
                         phase_summaries,
+                        attempts,
                     },
                 );
                 return;
-            }
-            let result = done_rx
-                .borrow()
-                .clone()
-                .expect("watch value should be Some after changed() resolves");
+            };
             let (agent_count, tool_calls_count) = notify_progress_store
                 .get_run_stats(&notify_run_id)
                 .unwrap_or((0, 0));
             let phase_summaries = notify_progress_store.get_phase_summaries(&notify_run_id);
+            let state_artifact_exists = notify_journal_store
+                .run_dir(&notify_run_id)
+                .join("state.json")
+                .is_file();
+            let attempts = notify_journal_store
+                .read_attempts(&notify_run_id)
+                .unwrap_or_default();
+            let acceptance_status = notify_journal_store
+                .read_state(&notify_run_id)
+                .map(|state| state.acceptance_status)
+                .unwrap_or_default();
             let success = result.status == "completed";
             let status = match result.status.as_str() {
                 "completed" => WorkflowRunStatus::Completed,
@@ -292,11 +338,21 @@ impl WorkflowMiddleware {
                     workflow_name: notify_name,
                     success,
                     status,
+                    execution_status: match result.status.as_str() {
+                        "completed" => peri_acp_types::workflow::ExecutionStatus::Completed,
+                        "killed" => peri_acp_types::workflow::ExecutionStatus::Killed,
+                        _ => peri_acp_types::workflow::ExecutionStatus::Failed,
+                    },
+                    acceptance_status,
+                    post_processing_status: result.post_processing_status,
+                    delivery_status: result.delivery_status,
+                    state_artifact_exists,
                     duration_ms: started_at.elapsed().as_millis() as u64,
                     agent_count,
                     tool_calls_count,
                     error: result.error,
                     phase_summaries,
+                    attempts,
                 },
             );
         });

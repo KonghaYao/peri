@@ -96,6 +96,93 @@ fn parse_budget_total_rejects_invalid_values_with_stable_range_error() {
     }
 }
 
+#[test]
+fn parse_host_limits_rejects_invalid_values() {
+    for field in ["maxAgents", "maxToolCalls", "maxElapsedMs"] {
+        let input = serde_json::json!({(field): 0});
+        let error = parse_bounded_integer(&input, field, None, MAX_SAFE_INTEGER).unwrap_err();
+        assert!(error.contains(field));
+    }
+    assert!(parse_bounded_integer(
+        &serde_json::json!({"maxConcurrency": 17}),
+        "maxConcurrency",
+        Some(3),
+        MAX_CONCURRENCY_CAP,
+    )
+    .is_err());
+}
+
+#[tokio::test]
+async fn invalid_script_fails_before_workflow_side_effects() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (tool, registry) = make_tool(cwd, Arc::clone(&calls));
+
+    let error = tool
+        .invoke(
+            serde_json::json!({
+                "script": "export const meta = { name: 'broken', description: 'test' }; const = nope"
+            }),
+            ToolContext::new(&[], cwd),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("Workflow preflight failed"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(registry.active_count(), 0);
+    assert!(!tmp.path().join(".claude/workflow-runs").exists());
+}
+
+#[tokio::test]
+async fn strict_preflight_fails_before_workflow_side_effects() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (tool, registry) = make_tool(cwd, Arc::clone(&calls));
+
+    let error = tool
+        .invoke(
+            serde_json::json!({
+                "script": "export const meta = { name: 'strict' }",
+                "strictPreflight": true
+            }),
+            ToolContext::new(&[], cwd),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("cannot be statically validated"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(registry.active_count(), 0);
+    assert!(!tmp.path().join(".claude/workflow-runs").exists());
+}
+
+#[tokio::test]
+async fn invalid_write_intent_fails_before_workflow_side_effects() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (tool, registry) = make_tool(cwd, Arc::clone(&calls));
+
+    let error = tool
+        .invoke(
+            serde_json::json!({
+                "script": "export const meta = { name: 'invalid-intent' }",
+                "writeIntent": {"kind": "write", "cwd": cwd}
+            }),
+            ToolContext::new(&[], cwd),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("Invalid writeIntent"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(registry.active_count(), 0);
+    assert!(!tmp.path().join(".claude/workflow-runs").exists());
+}
+
 #[tokio::test]
 async fn invalid_budget_fails_before_workflow_side_effects() {
     let tmp = tempfile::TempDir::new().unwrap();

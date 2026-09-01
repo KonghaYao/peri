@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,8 +32,18 @@ const START_TIMEOUT: Duration = Duration::from_secs(15);
 const WORKFLOW_PROTOCOL_VERSION: u32 = 1;
 const WORKFLOW_BUILD_ID: &str = "@peri-code/workflow@0.2.0";
 const NPX_FALLBACK_ENV: &str = "PERI_WORKFLOW_ALLOW_NPX_FALLBACK";
-const EMBEDDED_WORKFLOW_ARTIFACT: &[u8] =
+pub(crate) const WORKFLOW_ARTIFACT_BYTES: &[u8] =
     include_bytes!("../../npm-packages/@peri-workflow/dist/peri-workflow.js");
+
+fn public_workflow_error(error: &str) -> String {
+    peri_acp_types::session::sanitize_public_error(error, 2_000)
+}
+
+fn public_stderr_summary(stderr_tail: Option<String>) -> Option<String> {
+    stderr_tail.filter(|tail| !tail.trim().is_empty()).map(|_| {
+        "workflow process emitted diagnostic stderr; check protected logs for details".into()
+    })
+}
 
 /// 串行化本地安装（避免并发 workflow 同时触发安装）。
 static INSTALL_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
@@ -109,8 +120,11 @@ fn validate_workflow_artifact(base: &Path) -> Option<PathBuf> {
     let canonical_entry = entry.canonicalize().ok()?;
     if !canonical_entry.starts_with(&canonical_package)
         || !canonical_entry.metadata().ok()?.is_file()
-        || canonical_entry.metadata().ok()?.len() == 0
     {
+        return None;
+    }
+    let entry_bytes = std::fs::read(&canonical_entry).ok()?;
+    if entry_bytes.as_slice() != WORKFLOW_ARTIFACT_BYTES {
         return None;
     }
     Some(entry)
@@ -204,7 +218,7 @@ async fn publish_embedded_workflow_artifact() -> Result<(), WorkflowError> {
         }))?,
     )
     .await?;
-    tokio::fs::write(package.join(WORKFLOW_ENTRY), EMBEDDED_WORKFLOW_ARTIFACT).await?;
+    tokio::fs::write(package.join(WORKFLOW_ENTRY), WORKFLOW_ARTIFACT_BYTES).await?;
 
     if validate_workflow_artifact(&staging).is_none() {
         let _ = tokio::fs::remove_dir_all(&staging).await;
@@ -307,11 +321,19 @@ fn persist_failed_state(
         run_id: run_id.to_string(),
         workflow_name: input.workflow_name.clone(),
         status: "failed".to_string(),
+        execution_status: peri_acp_types::workflow::ExecutionStatus::Failed,
+        acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
+        post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
+        delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+        write_intent: input.write_intent.clone(),
+        limits: input.limits.clone(),
+        budget_total: input.budget_total,
+        attempts: journal_store.read_attempts(run_id).unwrap_or_default(),
         return_value: None,
         script: input.script.clone(),
         started_at: started_at.to_string(),
         finished_at: Some(chrono::Utc::now().to_rfc3339()),
-        error: Some(format!("{error:#}")),
+        error: Some(public_workflow_error(&format!("{error:#}"))),
     };
     if let Err(write_error) = journal_store.write_state(run_id, &state) {
         warn!(target: "workflow", run_id, error = %write_error, "failed to persist workflow startup failure");
@@ -369,9 +391,69 @@ fn workflow_start_params(
         args: input.args.clone(),
         budget_total: input.budget_total,
         max_concurrency: input.max_concurrency,
+        limits: Some(input.limits.clone()),
+        resume_from_run_id: input.resume_from.clone(),
         resume,
         cwd: cwd.to_string(),
     }
+}
+
+struct LiveAttemptPermit {
+    counter: Arc<AtomicU64>,
+}
+
+impl Drop for LiveAttemptPermit {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn try_reserve_live_attempt(
+    counter: &Arc<AtomicU64>,
+    maximum: Option<u64>,
+) -> Option<LiveAttemptPermit> {
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            let next = current.checked_add(1)?;
+            (!maximum.is_some_and(|maximum| next > maximum)).then_some(next)
+        })
+        .ok()
+        .map(|_| LiveAttemptPermit {
+            counter: Arc::clone(counter),
+        })
+}
+
+fn project_postcondition(
+    execution_status: &str,
+    acceptance_status: peri_acp_types::workflow::AcceptanceStatus,
+    write_intent: Option<&peri_acp_types::workflow::WorkflowWriteIntent>,
+    verification: Option<&Result<(), String>>,
+) -> (
+    peri_acp_types::workflow::PostProcessingStatus,
+    peri_acp_types::workflow::DeliveryStatus,
+) {
+    use peri_acp_types::workflow::{
+        AcceptanceStatus, DeliveryStatus, PostProcessingStatus, WorkflowWriteIntent,
+    };
+
+    let post_processing = match (write_intent, verification) {
+        (_, Some(Err(_))) => PostProcessingStatus::Failed,
+        (Some(WorkflowWriteIntent::ReadOnly), Some(Ok(()))) => PostProcessingStatus::NotRequired,
+        (Some(WorkflowWriteIntent::Write { .. }), Some(Ok(()))) => PostProcessingStatus::Passed,
+        _ => PostProcessingStatus::Blocked,
+    };
+    let delivery = if execution_status == "completed"
+        && acceptance_status == AcceptanceStatus::Passed
+        && write_intent.is_some()
+        && matches!(
+            post_processing,
+            PostProcessingStatus::Passed | PostProcessingStatus::NotRequired
+        ) {
+        DeliveryStatus::Deliverable
+    } else {
+        DeliveryStatus::Blocked
+    };
+    (post_processing, delivery)
 }
 
 // ─── 公开类型 ──────────────────────────────────────────────────
@@ -383,8 +465,11 @@ pub struct WorkflowInput {
     pub args: Option<Value>,
     pub max_concurrency: u32,
     pub budget_total: Option<u64>,
+    pub limits: WorkflowLimits,
     pub workflow_name: String,
     pub resume_from: Option<String>,
+    pub write_intent: Option<peri_acp_types::workflow::WorkflowWriteIntent>,
+    pub git_baseline: Option<crate::journal::GitBaseline>,
 }
 
 /// Workflow 执行结果
@@ -394,9 +479,25 @@ pub struct WorkflowResult {
     pub status: String,
     pub return_value: Option<Value>,
     pub error: Option<String>,
-    /// Node 进程 stderr 的最后 20 行（仅 status 为 "failed"/"killed" 时可能有值）。
-    /// 用于诊断脚本加载/沙箱导致的快速失败。
+    pub post_processing_status: peri_acp_types::workflow::PostProcessingStatus,
+    pub delivery_status: peri_acp_types::workflow::DeliveryStatus,
+    /// 子进程是否产生过 stderr 的稳定诊断摘要；不承载原始 stderr 内容。
     pub stderr_tail: Option<String>,
+}
+
+/// 读取 workflow 终态：若 fast-path 已经写入当前 watch 值则立即返回，
+/// 否则等待首次变化。sender 未发布终态即关闭时返回 `None`。
+pub async fn receive_workflow_result(
+    rx: &mut watch::Receiver<Option<WorkflowResult>>,
+) -> Option<WorkflowResult> {
+    loop {
+        if let Some(result) = rx.borrow().clone() {
+            return Some(result);
+        }
+        if rx.changed().await.is_err() {
+            return rx.borrow().clone();
+        }
+    }
 }
 
 // ─── Journal RPC 参数反序列化 ───────────────────────────────────
@@ -482,9 +583,6 @@ impl WorkflowRunner {
         done_tx: watch::Sender<Option<WorkflowResult>>,
         kill_rx: oneshot::Receiver<()>,
     ) -> Result<(), WorkflowError> {
-        // Helper: send failure result on done_tx before returning Err.
-        // Ensures tool.rs's fast-failure detection always receives a result,
-        // even when runner exits before spawning the msg_loop (e.g. binary not found).
         fn send_failure(
             tx: &watch::Sender<Option<WorkflowResult>>,
             journal_store: Option<&WorkflowJournalStore>,
@@ -492,6 +590,7 @@ impl WorkflowRunner {
             input: &WorkflowInput,
             started_at: &str,
             error: &WorkflowError,
+            stderr_tail: Option<String>,
         ) {
             if let Some(journal_store) = journal_store {
                 persist_failed_state(journal_store, rid, input, started_at, error);
@@ -500,8 +599,10 @@ impl WorkflowRunner {
                 run_id: rid.to_string(),
                 status: "failed".to_string(),
                 return_value: None,
-                error: Some(format!("{error:#}")),
-                stderr_tail: None,
+                error: Some(public_workflow_error(&format!("{error:#}"))),
+                post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
+                delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+                stderr_tail: public_stderr_summary(stderr_tail),
             }));
         }
 
@@ -519,6 +620,7 @@ impl WorkflowRunner {
                     &input,
                     &started_at_iso,
                     &err,
+                    None,
                 );
                 return Err(err);
             }
@@ -548,6 +650,7 @@ impl WorkflowRunner {
                         &input,
                         &started_at_iso,
                         &error,
+                        None,
                     );
                     return Err(error);
                 }
@@ -563,6 +666,7 @@ impl WorkflowRunner {
                     &input,
                     &started_at_iso,
                     &e,
+                    None,
                 );
                 return Err(e);
             }
@@ -578,6 +682,7 @@ impl WorkflowRunner {
                     &input,
                     &started_at_iso,
                     &err,
+                    None,
                 );
                 return Err(err);
             }
@@ -613,6 +718,7 @@ impl WorkflowRunner {
                     &input,
                     &started_at_iso,
                     &err,
+                    None,
                 );
                 return Err(err);
             }
@@ -627,6 +733,7 @@ impl WorkflowRunner {
             Ok(Err(_rpc_error)) => {
                 self.active_channels.remove(&run_id);
                 let _ = host.kill().await;
+                let stderr_tail = host.stderr_tail();
                 let err = WorkflowError::SpawnFailed("workflow/start RPC failed".into());
                 send_failure(
                     &done_tx,
@@ -635,12 +742,14 @@ impl WorkflowRunner {
                     &input,
                     &started_at_iso,
                     &err,
+                    stderr_tail,
                 );
                 return Err(err);
             }
             Err(_timeout) => {
                 self.active_channels.remove(&run_id);
                 let _ = host.kill().await;
+                let stderr_tail = host.stderr_tail();
                 let err = WorkflowError::SpawnFailed(
                     "workflow/start timed out (15s) — node process may have crashed".into(),
                 );
@@ -651,6 +760,7 @@ impl WorkflowRunner {
                     &input,
                     &started_at_iso,
                     &err,
+                    stderr_tail,
                 );
                 return Err(err);
             }
@@ -658,6 +768,7 @@ impl WorkflowRunner {
         if let Err(err) = validate_start_ack(start_resp) {
             self.active_channels.remove(&run_id);
             let _ = host.kill().await;
+            let stderr_tail = host.stderr_tail();
             send_failure(
                 &done_tx,
                 Some(&journal_store),
@@ -665,6 +776,7 @@ impl WorkflowRunner {
                 &input,
                 &started_at_iso,
                 &err,
+                stderr_tail,
             );
             return Err(err);
         }
@@ -676,10 +788,18 @@ impl WorkflowRunner {
         let progress_store_clone = Arc::clone(&progress_store);
         let run_id_clone = run_id.clone();
         let stderr_host = Arc::clone(&host);
+        let live_agent_attempts = Arc::new(AtomicU64::new(0));
+        let observed_tool_calls = Arc::new(AtomicU64::new(0));
+        let limit_breach = Arc::new(parking_lot::Mutex::new(None::<String>));
+        let run_limits = input.limits.clone();
+        let run_started = std::time::Instant::now();
 
         // Clone values needed by the kill branch before they're moved into msg_loop
         let kill_wf_name = input.workflow_name.clone();
         let kill_script = input.script.clone();
+        let kill_limits = input.limits.clone();
+        let kill_budget_total = input.budget_total;
+        let kill_write_intent = input.write_intent.clone();
         let kill_started_at = started_at_iso.clone();
 
         // Clone done_tx for kill branch — must happen before async move consumes it
@@ -704,6 +824,8 @@ impl WorkflowRunner {
                 status: "failed".into(),
                 return_value: None,
                 error: None,
+                post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
+                delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
                 stderr_tail: None,
             };
 
@@ -712,7 +834,31 @@ impl WorkflowRunner {
             let mut response_count: usize = 0;
             let mut method_counts: HashMap<String, usize> = HashMap::new();
 
-            while let Some(msg) = msg_rx.recv().await {
+            loop {
+                let next = if let Some(maximum) = run_limits.max_elapsed_ms {
+                    let elapsed = run_started.elapsed().as_millis() as u64;
+                    let remaining = maximum.saturating_sub(elapsed);
+                    if remaining == 0 {
+                        let error = format!("workflow exceeded maxElapsedMs ({maximum})");
+                        *limit_breach.lock() = Some(error.clone());
+                        final_result.error = Some(error);
+                        break;
+                    }
+                    match tokio::time::timeout(Duration::from_millis(remaining), msg_rx.recv())
+                        .await
+                    {
+                        Ok(message) => message,
+                        Err(_) => {
+                            let error = format!("workflow exceeded maxElapsedMs ({maximum})");
+                            *limit_breach.lock() = Some(error.clone());
+                            final_result.error = Some(error);
+                            break;
+                        }
+                    }
+                } else {
+                    msg_rx.recv().await
+                };
+                let Some(msg) = next else { break };
                 msg_count += 1;
                 match &msg {
                     IncomingMessage::Request { method, .. } => {
@@ -751,6 +897,25 @@ impl WorkflowRunner {
                             // Extract run_id + agent_id for kill tracking before moving params
                             let agent_run_id = params.run_id.clone();
                             let agent_id_num = params.agent_id;
+                            if run_limits.max_elapsed_ms.is_some_and(|maximum| {
+                                run_started.elapsed().as_millis() as u64 >= maximum
+                            }) {
+                                final_result.error = Some(format!(
+                                    "workflow exceeded maxElapsedMs ({})",
+                                    run_limits.max_elapsed_ms.unwrap_or_default()
+                                ));
+                                *limit_breach.lock() = final_result.error.clone();
+                                if let Some(id) = id {
+                                    let _ = channel_clone
+                                        .send_error(
+                                            id,
+                                            ERR_ABORTED,
+                                            "workflow maxElapsedMs limit exceeded",
+                                        )
+                                        .await;
+                                }
+                                break;
+                            }
                             // 注册提前到 spawn 之前（GAP-07 原子化）：kill_agent 与
                             // 注册之间不再有空窗（此前注册在 spawn 内，kill 先到会
                             // 漏杀且返回 false）；duplicate 拒绝在 spawn 前完成，
@@ -775,10 +940,41 @@ impl WorkflowRunner {
                                 }
                                 continue;
                             };
+                            let Some(live_attempt_permit) = try_reserve_live_attempt(
+                                &live_agent_attempts,
+                                run_limits.max_agents,
+                            ) else {
+                                let _ = channel_clone.deregister_agent(
+                                    &agent_run_id,
+                                    agent_id_num,
+                                    reg_token,
+                                );
+                                final_result.error = Some(format!(
+                                    "workflow exceeded maxAgents ({})",
+                                    run_limits.max_agents.unwrap_or_default()
+                                ));
+                                *limit_breach.lock() = final_result.error.clone();
+                                if let Some(id) = id {
+                                    let _ = channel_clone
+                                        .send_error(
+                                            id,
+                                            ERR_ABORTED,
+                                            "workflow maxAgents limit exceeded",
+                                        )
+                                        .await;
+                                }
+                                break;
+                            };
                             let exec = Arc::clone(&agent_executor);
                             let ch = Arc::clone(&channel_clone);
                             let progress_for_agent = Arc::clone(&progress_store_clone);
+                            let tool_calls_for_agent = Arc::clone(&observed_tool_calls);
+                            let breach_for_agent = Arc::clone(&limit_breach);
+                            let max_tool_calls = run_limits.max_tool_calls;
                             tokio::spawn(async move {
+                                // permit 随 task 生命周期持有；成功、失败、取消或 panic unwind
+                                // 都由 Drop 释放 live maxAgents 配额。
+                                let _live_attempt_permit = live_attempt_permit;
                                 // Execute with cancel support
                                 let result = tokio::select! {
                                     r = exec.execute(params) => r,
@@ -800,7 +996,24 @@ impl WorkflowRunner {
                                 // progress 事件传递，不进入 AgentRunParams.phase（hooks.js:21 漏了）
                                 // → agent_started 事件包含 phase，进度 store 先收到，此处补入结果。
                                 let mut result = result;
-                                if let AgentRunResult::Ok { ref mut phase, .. } = &mut result {
+                                let reported_tool_count = result.tool_count();
+                                if let Some(tool_count) = reported_tool_count {
+                                    let total = tool_calls_for_agent
+                                        .fetch_add(tool_count, Ordering::SeqCst)
+                                        .saturating_add(tool_count);
+                                    if max_tool_calls.is_some_and(|maximum| total > maximum) {
+                                        let detail = format!(
+                                            "workflow exceeded maxToolCalls ({})",
+                                            max_tool_calls.unwrap_or_default()
+                                        );
+                                        *breach_for_agent.lock() = Some(detail.clone());
+                                        result = AgentRunResult::Dead {
+                                            reason: Some("resource-limit".into()),
+                                            detail: Some(detail),
+                                        };
+                                    }
+                                }
+                                if let AgentRunResult::Ok { phase, .. } = &mut result {
                                     if phase.is_none() {
                                         *phase = progress_for_agent
                                             .get_agent_phase(&agent_run_id, agent_id_num);
@@ -818,7 +1031,19 @@ impl WorkflowRunner {
                                         result,
                                         AgentRunResult::Dead { reason: Some(ref r), .. } if r == "killed"
                                     );
-                                    if owned && !was_killed {
+                                    let resource_limited = matches!(
+                                        result,
+                                        AgentRunResult::Dead { reason: Some(ref r), .. } if r == "resource-limit"
+                                    );
+                                    if owned && resource_limited {
+                                        let _ = ch
+                                            .send_error(
+                                                id,
+                                                ERR_ABORTED,
+                                                "workflow resource limit exceeded",
+                                            )
+                                            .await;
+                                    } else if owned && !was_killed {
                                         let result_val = serde_json::to_value(&result)
                                             .unwrap_or_else(|_| {
                                                 serde_json::json!({
@@ -907,9 +1132,17 @@ impl WorkflowRunner {
                                 });
                                 final_result = WorkflowResult {
                                     run_id: done.run_id.clone(),
-                                    status: done.status.clone(),
+                                    status: if limit_breach.lock().is_some() {
+                                        "failed".to_string()
+                                    } else {
+                                        done.status.clone()
+                                    },
                                     return_value: processed_return_value,
-                                    error: done.error.clone(),
+                                    error: limit_breach.lock().clone().or(done.error.clone()),
+                                    post_processing_status:
+                                        peri_acp_types::workflow::PostProcessingStatus::Blocked,
+                                    delivery_status:
+                                        peri_acp_types::workflow::DeliveryStatus::Blocked,
                                     stderr_tail: None,
                                 };
                                 break;
@@ -949,12 +1182,49 @@ impl WorkflowRunner {
                 "msg_loop exiting — summary"
             );
 
+            let postcondition = input
+                .git_baseline
+                .as_ref()
+                .map(|baseline| baseline.verify_postcondition(input.write_intent.as_ref()));
+            let acceptance_status = peri_acp_types::workflow::AcceptanceStatus::Unknown;
+            (
+                final_result.post_processing_status,
+                final_result.delivery_status,
+            ) = project_postcondition(
+                &final_result.status,
+                acceptance_status,
+                input.write_intent.as_ref(),
+                postcondition.as_ref(),
+            );
+            if let Some(Err(error)) = postcondition {
+                let error = format!("Git postcondition failed: {error}");
+                final_result.error = Some(match final_result.error.take() {
+                    Some(existing) => format!("{existing}; {error}"),
+                    None => error,
+                });
+            }
+            final_result.error = final_result.error.as_deref().map(public_workflow_error);
+
             // Write state.json
-            let stderr_tail = stderr_host.stderr_tail();
+            let stderr_tail = public_stderr_summary(stderr_host.stderr_tail());
             let state = crate::journal::RunState {
                 run_id: final_result.run_id.clone(),
                 workflow_name: input.workflow_name.clone(),
                 status: final_result.status.clone(),
+                execution_status: match final_result.status.as_str() {
+                    "completed" => peri_acp_types::workflow::ExecutionStatus::Completed,
+                    "killed" => peri_acp_types::workflow::ExecutionStatus::Killed,
+                    _ => peri_acp_types::workflow::ExecutionStatus::Failed,
+                },
+                acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
+                post_processing_status: final_result.post_processing_status,
+                delivery_status: final_result.delivery_status,
+                write_intent: input.write_intent.clone(),
+                limits: input.limits.clone(),
+                budget_total: input.budget_total,
+                attempts: journal_clone
+                    .read_attempts(&final_result.run_id)
+                    .unwrap_or_default(),
                 return_value: final_result.return_value.clone(),
                 script: input.script.clone(),
                 started_at: started_at_iso,
@@ -968,6 +1238,11 @@ impl WorkflowRunner {
             );
             if let Err(e) = journal_clone.write_state(&final_result.run_id, &state) {
                 warn!(target: "workflow", run_id = %final_result.run_id, error = %e, "write_state failed");
+                final_result.status = "failed".to_string();
+                final_result.post_processing_status =
+                    peri_acp_types::workflow::PostProcessingStatus::Failed;
+                final_result.delivery_status = peri_acp_types::workflow::DeliveryStatus::Blocked;
+                final_result.error = Some("workflow state persistence failed".to_string());
             } else {
                 tracing::info!(
                     target: "workflow",
@@ -987,6 +1262,17 @@ impl WorkflowRunner {
                 return_value: None,
                 error: final_result.error.clone(),
             });
+            progress_store_clone.set_terminal_projection(
+                &final_result.run_id,
+                match final_result.status.as_str() {
+                    "completed" => peri_acp_types::workflow::ExecutionStatus::Completed,
+                    "killed" => peri_acp_types::workflow::ExecutionStatus::Killed,
+                    _ => peri_acp_types::workflow::ExecutionStatus::Failed,
+                },
+                peri_acp_types::workflow::AcceptanceStatus::Unknown,
+                final_result.post_processing_status,
+                final_result.delivery_status,
+            );
 
             final_result.stderr_tail = stderr_tail;
             let _ = done_tx.send(Some(final_result));
@@ -1017,6 +1303,14 @@ impl WorkflowRunner {
                     run_id: run_id.clone(),
                     workflow_name: kill_wf_name,
                     status: "killed".to_string(),
+                    execution_status: peri_acp_types::workflow::ExecutionStatus::Killed,
+                    acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
+                    post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
+                    delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+                    write_intent: kill_write_intent,
+                    limits: kill_limits,
+                    budget_total: kill_budget_total,
+                    attempts: journal_clone2.read_attempts(&run_id).unwrap_or_default(),
                     return_value: None,
                     script: kill_script,
                     started_at: kill_started_at,
@@ -1041,6 +1335,8 @@ impl WorkflowRunner {
                     status: "killed".to_string(),
                     return_value: None,
                     error: Some("workflow killed by user".to_string()),
+                    post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
+                    delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
                     stderr_tail,
                 };
                 let _ = done_tx_for_kill.send(Some(killed_result));

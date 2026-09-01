@@ -140,7 +140,7 @@ return { answer: r }`
       jsonrpc: '2.0',
       id: 1,
       method: 'workflow/start',
-      params: { runId: 'e2e-run-1', cwd: '/tmp', script, budgetTotal: null },
+      params: { runId: 'e2e-run-1', cwd: '/tmp', script },
     })
 
     // start 同步响应
@@ -183,6 +183,33 @@ return { answer: r }`
     expect(progressTypes).toEqual(
       expect.arrayContaining(['run_started', 'phase_started', 'agent_started', 'agent_done', 'phase_done', 'run_done'])
     )
+  })
+
+  test('invalid-present budgetTotal 同步拒绝且不启动 workflow', async () => {
+    const s = startRpc()
+    sessions.push(s)
+
+    s.send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'workflow/start',
+      params: {
+        runId: 'e2e-invalid-budget',
+        cwd: '/tmp',
+        script: "return 'must-not-run'",
+        budgetTotal: null,
+      },
+    })
+
+    const response = await s.waitFor((m) => m.id === 2 && 'error' in m)
+    expect(response.error).toEqual({
+      code: -32602,
+      message: `budgetTotal must be an integer between 1 and ${Number.MAX_SAFE_INTEGER}`,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(s.all().some((m) => m.method === 'progress/event')).toBe(false)
+    expect(s.all().some((m) => m.method === 'agent/run')).toBe(false)
+    expect(s.all().some((m) => m.method === 'workflow/done')).toBe(false)
   })
 
   test('budgetTotal 在首个 agent 消耗额度后阻止后续 agent', async () => {
@@ -258,7 +285,9 @@ return { result }`
     expect(params.status).toBe('completed')
     expect(params.returnValue).toEqual({ result: 'cached-result' })
     expect(s.all().filter((m) => m.method === 'agent/run')).toHaveLength(0)
-    expect(s.all().filter((m) => m.method === 'journal/append')).toHaveLength(0)
+    const recovered = s.all().filter((m) => m.method === 'journal/append')
+    expect(recovered).toHaveLength(1)
+    expect((recovered[0].params as { entry: { attempt: { disposition: string } } }).entry.attempt.disposition).toBe('recovered')
   })
 
   test('未知方法返回 -32601', async () => {
@@ -285,7 +314,7 @@ return { r1, r2 }`
         jsonrpc: '2.0',
         id: 1,
         method: 'workflow/start',
-        params: { runId: 'e2e-kill-1', cwd: '/tmp', script, budgetTotal: null },
+        params: { runId: 'e2e-kill-1', cwd: '/tmp', script },
       })
       await s.waitFor((m) => m.id === 1 && 'result' in m)
 

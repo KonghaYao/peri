@@ -8,7 +8,7 @@
 
 use crate::command::PromptStopReason;
 use crate::error::AgentError;
-use crate::session::{ExecutionFailure, ExecutionFailureKind, PromptResult};
+use crate::session::{sanitize_public_error, ExecutionFailure, ExecutionFailureKind, PromptResult};
 
 /// 默认结果缺失语义：必须带 fatal failure，而不是成功 EndTurn。
 #[test]
@@ -110,4 +110,33 @@ fn llm_failure_message_is_limited_without_splitting_unicode() {
     assert!(failure.http_status.is_none());
     assert!(failure.public_message.ends_with('…'));
     assert_eq!(failure.public_message.chars().count(), 2_001);
+}
+
+#[test]
+fn public_error_sanitizer_redacts_bearer_credentials_and_url_components() {
+    let secret = "sentinel-secret";
+    let sanitized = sanitize_public_error(
+        &format!(
+            "Bearer {secret}; client_secret={secret} private_key='{secret}' endpoint=https://user:{secret}@api.example.test/v1?token={secret}&mode=debug"
+        ),
+        2_000,
+    );
+
+    assert!(!sanitized.contains(secret));
+    assert!(sanitized.contains("Bearer [redacted]"));
+    assert!(sanitized.contains("client_secret=[redacted]"));
+    assert!(sanitized.contains("private_key='[redacted]'"));
+    assert!(sanitized.contains("https://[redacted]@api.example.test/v1?[redacted]"));
+}
+
+#[test]
+fn public_error_sanitizer_truncates_unicode_and_falls_back_for_empty_input() {
+    let sanitized = sanitize_public_error(&"错".repeat(20), 8);
+    assert_eq!(sanitized.chars().count(), 9);
+    assert!(sanitized.ends_with('…'));
+
+    assert_eq!(
+        sanitize_public_error("   ", 2_000),
+        crate::session::EXECUTION_FAILURE_FALLBACK_MESSAGE
+    );
 }

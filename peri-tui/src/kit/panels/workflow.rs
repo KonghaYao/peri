@@ -416,8 +416,19 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     );
 
     // ── Footer ───────────────────────────────────────────────────────────
-    let footer =
-        Line::from(i18n::tr("workflow-footer-shortcuts")).fg(theme_def.read().semantic.text.dim);
+    let status_line = format!(
+        "execution={}  acceptance={}  post-processing={}  delivery={}",
+        current_run.execution_status,
+        current_run.acceptance_status,
+        current_run.post_processing_status,
+        current_run.delivery_status,
+    );
+    let footer = Line::from(format!(
+        "{}  {}",
+        status_line,
+        i18n::tr("workflow-footer-shortcuts")
+    ))
+    .fg(theme_def.read().semantic.text.dim);
 
     panel_shell!(PanelKind::Workflow, {
         View(height: Constraint::Length(1)) {

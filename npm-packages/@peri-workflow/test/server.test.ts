@@ -86,6 +86,65 @@ return { answer: r }`
     expect(written.some((m) => m.method === 'journal/append')).toBe(true)
   })
 
+  test('resume cache-hit 写入结构化 recovered attempt identity', async () => {
+    written = []
+    const script = `export const meta = { name: 'resume-demo', description: 'resume test' }
+return await agent('hello')`
+
+    await handleRequest({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'workflow/start',
+      params: {
+        runId: '019-current-run',
+        cwd: '/tmp',
+        script,
+        resumeFromRunId: '018-source-run',
+        resume: [{ key: 'unused-in-unit-fixture', seq: 7, result: { kind: 'skipped' } }],
+      },
+    })
+
+    const append = await waitFor((m) => m.method === 'journal/append')
+    const entry = (append.params as { entry: { attempt: Record<string, unknown> } }).entry
+    expect(entry.attempt).toEqual({
+      runId: '019-current-run',
+      journalSeq: 7,
+      recoveredFrom: { runId: '018-source-run', journalSeq: 7 },
+      consumed: true,
+      disposition: 'recovered',
+    })
+  })
+
+  test('workflow/start：invalid-present budgetTotal 在启动前同步拒绝', async () => {
+    const invalid = [null, 0, -1, 1.5, '1', Number.MAX_SAFE_INTEGER + 1]
+
+    for (const [index, budgetTotal] of invalid.entries()) {
+      written = []
+      await handleRequest({
+        jsonrpc: '2.0',
+        id: 100 + index,
+        method: 'workflow/start',
+        params: {
+          runId: `invalid-budget-${index}`,
+          cwd: '/tmp',
+          script: "return 'must-not-run'",
+          budgetTotal,
+        },
+      })
+
+      expect(written).toEqual([
+        {
+          jsonrpc: '2.0',
+          id: 100 + index,
+          error: {
+            code: -32602,
+            message: `budgetTotal must be an integer between 1 and ${Number.MAX_SAFE_INTEGER}`,
+          },
+        },
+      ])
+    }
+  })
+
   test('workflow/kill：响应 ok', async () => {
     written = []
     await handleRequest({ jsonrpc: '2.0', id: 2, method: 'workflow/kill' })

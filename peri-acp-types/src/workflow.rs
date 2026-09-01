@@ -263,6 +263,93 @@ pub enum AgentStatus {
 
 // ─── registry 契约（自 peri-workflow/src/registry.rs 迁入）────────────────
 
+// ─── workflow 结果投影契约 ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStatus {
+    Running,
+    Completed,
+    Failed,
+    Killed,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptanceStatus {
+    Passed,
+    Failed,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PostProcessingStatus {
+    NotRequired,
+    Passed,
+    Failed,
+    Blocked,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStatus {
+    Deliverable,
+    Blocked,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowWriteIntent {
+    ReadOnly,
+    Write {
+        repo_root: String,
+        cwd: String,
+        path_allowlist: Vec<String>,
+        #[serde(default)]
+        head_may_change: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit_required: Option<bool>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAttempt {
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<u64>,
+    pub journal_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovered_from: Option<RecoveredAttempt>,
+    pub consumed: bool,
+    pub disposition: AttemptDisposition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveredAttempt {
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<u64>,
+    pub journal_seq: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptDisposition {
+    Produced,
+    Recovered,
+    Rejected,
+}
+
 /// Workflow run 状态（registry 与 task result 共用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -292,6 +379,16 @@ pub struct WorkflowTaskResult {
     pub workflow_name: String,
     pub success: bool,
     pub status: WorkflowRunStatus,
+    #[serde(default)]
+    pub execution_status: ExecutionStatus,
+    #[serde(default)]
+    pub acceptance_status: AcceptanceStatus,
+    #[serde(default)]
+    pub post_processing_status: PostProcessingStatus,
+    #[serde(default)]
+    pub delivery_status: DeliveryStatus,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub state_artifact_exists: bool,
     pub duration_ms: u64,
     pub agent_count: usize,
     pub tool_calls_count: usize,
@@ -299,6 +396,15 @@ pub struct WorkflowTaskResult {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phase_summaries: Vec<PhaseSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<WorkflowAttempt>,
+}
+
+fn escape_reminder_text(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 impl WorkflowTaskResult {
@@ -321,24 +427,84 @@ impl WorkflowTaskResult {
                 };
                 phase_lines.push_str(&format!(
                     "- {}: {} agents{}{}\n",
-                    s.name, s.agent_count, token_info, dur_info
+                    escape_reminder_text(&s.name),
+                    s.agent_count,
+                    token_info,
+                    dur_info
                 ));
             }
         }
 
+        let error_line = if self.success {
+            String::new()
+        } else {
+            let error = self
+                .error
+                .as_deref()
+                .filter(|error| !error.trim().is_empty())
+                .unwrap_or("no error details available");
+            let error = escape_reminder_text(&crate::session::sanitize_public_error(error, 2_000));
+            format!("Error: {error}\n")
+        };
+        let state_path = format!(
+            ".claude/workflow-runs/{}/state.json",
+            escape_reminder_text(&self.run_id)
+        );
+        let artifact_lines = if self.state_artifact_exists {
+            format!("Results saved to {state_path}\nUse Read tool to view full results.\n")
+        } else {
+            "Result state file was not generated.\n".to_string()
+        };
+        let projection_line = format!(
+            "Execution: {:?}; acceptance: {:?}; post-processing: {:?}; delivery: {:?}.\n",
+            self.execution_status,
+            self.acceptance_status,
+            self.post_processing_status,
+            self.delivery_status,
+        )
+        .to_ascii_lowercase();
+
+        let attempt_lines = self
+            .attempts
+            .iter()
+            .map(|attempt| {
+                format!(
+                    "- attempt run_id={} agent_id={} journal_seq={} disposition={:?} consumed={}{}\n",
+                    escape_reminder_text(&attempt.run_id),
+                    attempt.agent_id.map_or("unknown".to_string(), |id| id.to_string()),
+                    attempt.journal_seq,
+                    attempt.disposition,
+                    attempt.consumed,
+                    attempt.recovered_from.as_ref().map_or_else(String::new, |source| {
+                        format!(
+                            " recovered_from={}/{}/{}",
+                            escape_reminder_text(&source.run_id),
+                            source
+                                .agent_id
+                                .map_or("unknown".to_string(), |id| id.to_string()),
+                            source.journal_seq
+                        )
+                    })
+                )
+                .to_ascii_lowercase()
+            })
+            .collect::<String>();
+
         format!(
             "<system-reminder>\n\
             Workflow '{}' {}. ({}ms, {} agents, {} tool calls)\n\
-            {}Results saved to .claude/workflow-runs/{}/state.json\n\
-            Use Read tool to view full results.\n\
+            {}{}{}{}{}\
             </system-reminder>",
-            self.workflow_name,
+            escape_reminder_text(&self.workflow_name),
             success_msg,
             self.duration_ms,
             self.agent_count,
             self.tool_calls_count,
             phase_lines,
-            self.run_id,
+            error_line,
+            projection_line,
+            attempt_lines,
+            artifact_lines,
         )
     }
 }

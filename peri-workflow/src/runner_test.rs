@@ -1,13 +1,15 @@
 // ─── E2E 集成测试（需要 @peri-code/workflow 已安装）──────────────
 
 use super::{
-    parse_agent_run_params, parse_run_scoped, validate_start_ack, workflow_local_dist_in,
-    workflow_start_params, AgentExecutor, JournalTruncateParams, WorkflowDoneParams, WorkflowInput,
-    WorkflowRunner,
+    parse_agent_run_params, parse_run_scoped, project_postcondition, receive_workflow_result,
+    try_reserve_live_attempt, validate_start_ack, workflow_local_dist_in, workflow_start_params,
+    AgentExecutor, JournalTruncateParams, WorkflowDoneParams, WorkflowInput, WorkflowResult,
+    WorkflowRunner, WORKFLOW_ARTIFACT_BYTES,
 };
 use crate::journal::WorkflowJournalStore;
 use crate::progress::{RunStatus, WorkflowProgressStore};
-use crate::protocol::{AgentRunParams, AgentRunResult, Usage};
+use crate::protocol::{AgentRunParams, AgentRunResult, Usage, WorkflowLimits};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Mock executor: 返回固定结果（delay 用于模拟慢 agent，保证 kill 测试的窗口）
@@ -33,14 +35,146 @@ impl AgentExecutor for MockAgentExecutor {
 }
 
 #[test]
+fn live_attempt_permit_releases_capacity_on_drop() {
+    let counter = Arc::new(AtomicU64::new(0));
+    let first = try_reserve_live_attempt(&counter, Some(1)).expect("首个 live attempt 应获准");
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    assert!(try_reserve_live_attempt(&counter, Some(1)).is_none());
+    assert_eq!(counter.load(Ordering::SeqCst), 1, "拒绝不得消耗配额");
+
+    drop(first);
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
+    assert!(try_reserve_live_attempt(&counter, Some(1)).is_some());
+}
+
+fn completed_workflow_result() -> WorkflowResult {
+    WorkflowResult {
+        run_id: "run-fast".into(),
+        status: "completed".into(),
+        return_value: None,
+        error: None,
+        post_processing_status: peri_acp_types::workflow::PostProcessingStatus::NotRequired,
+        delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+        stderr_tail: None,
+    }
+}
+
+#[tokio::test]
+async fn workflow_result_receiver_reads_already_published_value() {
+    let (done_tx, done_rx) = tokio::sync::watch::channel(None);
+    done_tx.send(Some(completed_workflow_result())).unwrap();
+    let mut late_rx = done_rx.clone();
+    drop(done_tx);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        receive_workflow_result(&mut late_rx),
+    )
+    .await
+    .expect("已发布的 watch 终态必须立即可读")
+    .expect("已发布的终态不得丢失");
+
+    assert_eq!(result.status, "completed");
+}
+
+#[tokio::test]
+async fn workflow_result_receiver_returns_none_when_closed_without_result() {
+    let (done_tx, mut done_rx) = tokio::sync::watch::channel::<Option<WorkflowResult>>(None);
+    drop(done_tx);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        receive_workflow_result(&mut done_rx),
+    )
+    .await
+    .expect("关闭且无终态的 watch 不得挂起");
+
+    assert!(result.is_none());
+}
+
+#[test]
+fn postcondition_projection_requires_acceptance_evidence_for_delivery() {
+    use peri_acp_types::workflow::{
+        AcceptanceStatus, DeliveryStatus, PostProcessingStatus, WorkflowWriteIntent,
+    };
+
+    let read_only = WorkflowWriteIntent::ReadOnly;
+    assert_eq!(
+        project_postcondition(
+            "completed",
+            AcceptanceStatus::Unknown,
+            Some(&read_only),
+            Some(&Ok(())),
+        ),
+        (PostProcessingStatus::NotRequired, DeliveryStatus::Blocked,)
+    );
+    assert_eq!(
+        project_postcondition(
+            "completed",
+            AcceptanceStatus::Passed,
+            Some(&read_only),
+            Some(&Ok(())),
+        ),
+        (
+            PostProcessingStatus::NotRequired,
+            DeliveryStatus::Deliverable,
+        )
+    );
+    assert_eq!(
+        project_postcondition(
+            "completed",
+            AcceptanceStatus::Failed,
+            Some(&read_only),
+            Some(&Ok(())),
+        ),
+        (PostProcessingStatus::NotRequired, DeliveryStatus::Blocked)
+    );
+}
+
+#[test]
+fn postcondition_projection_fails_safe_without_evidence() {
+    use peri_acp_types::workflow::{
+        AcceptanceStatus, DeliveryStatus, PostProcessingStatus, WorkflowWriteIntent,
+    };
+
+    let write = WorkflowWriteIntent::Write {
+        repo_root: "/repo".into(),
+        cwd: "/repo".into(),
+        path_allowlist: vec!["src".into()],
+        head_may_change: false,
+        commit_required: None,
+    };
+    assert_eq!(
+        project_postcondition("completed", AcceptanceStatus::Unknown, Some(&write), None),
+        (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
+    );
+    assert_eq!(
+        project_postcondition(
+            "completed",
+            AcceptanceStatus::Unknown,
+            Some(&write),
+            Some(&Err("credential token=secret".into())),
+        ),
+        (PostProcessingStatus::Failed, DeliveryStatus::Blocked)
+    );
+    assert_eq!(
+        project_postcondition("completed", AcceptanceStatus::Unknown, None, Some(&Ok(())),),
+        (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
+    );
+}
+
+#[test]
 fn test_workflow_start_params_preserve_budget_total() {
     let input = WorkflowInput {
         script: "export const meta = { name: 'budget', description: 'test' }".to_string(),
         args: Some(serde_json::json!({"key": "value"})),
         max_concurrency: 2,
         budget_total: Some(9_007_199_254_740_991),
+        limits: WorkflowLimits::default(),
         workflow_name: "budget".to_string(),
         resume_from: None,
+        write_intent: None,
+        git_baseline: None,
     };
 
     let params = workflow_start_params("run-1", &input, None, "/tmp");
@@ -165,7 +299,7 @@ fn test_workflow_local_dist_found() {
         .join("dist")
         .join("peri-workflow.js");
     std::fs::create_dir_all(dist.parent().unwrap()).unwrap();
-    std::fs::write(&dist, "#!/usr/bin/env node\n").unwrap();
+    std::fs::write(&dist, WORKFLOW_ARTIFACT_BYTES).unwrap();
     std::fs::write(
         dist.parent()
             .unwrap()
@@ -250,8 +384,11 @@ return { output: result }
         args: None,
         max_concurrency: 3,
         budget_total: None,
+        limits: WorkflowLimits::default(),
         workflow_name: "test-workflow".to_string(),
         resume_from: None,
+        write_intent: None,
+        git_baseline: None,
     };
 
     let run_id = uuid::Uuid::now_v7().to_string();
@@ -310,8 +447,11 @@ return { output: result }
         args: None,
         max_concurrency: 3,
         budget_total: None,
+        limits: WorkflowLimits::default(),
         workflow_name: "kill-test".to_string(),
         resume_from: None,
+        write_intent: None,
+        git_baseline: None,
     };
 
     let run_id = uuid::Uuid::now_v7().to_string();
@@ -410,8 +550,11 @@ throw new Error('intentional crash after agent')
         args: None,
         max_concurrency: 3,
         budget_total: None,
+        limits: WorkflowLimits::default(),
         workflow_name: "crash-test".to_string(),
         resume_from: None,
+        write_intent: None,
+        git_baseline: None,
     };
 
     let run_id = uuid::Uuid::now_v7().to_string();

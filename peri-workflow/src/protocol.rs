@@ -19,10 +19,26 @@ pub struct WorkflowStartParams {
     pub script: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<Value>,
-    pub budget_total: Option<u64>, // null = 无限
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_total: Option<u64>, // 省略 = 无限
     pub max_concurrency: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<WorkflowLimits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_from_run_id: Option<String>,
     pub resume: Option<Vec<JournalEntry>>, // 非-null 时携带 journal entries
     pub cwd: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_agents: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_calls: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_elapsed_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +53,10 @@ pub struct WorkflowKillParams {
 // 已迁入契约层 `peri_acp_types::workflow`；本模块保留 re-export 保兼容
 // （npm 侧 wire 字段契约不变，见文件头注释）。
 
-pub use peri_acp_types::workflow::{AgentRunParams, AgentRunResult, ProgressEvent, Usage};
+pub use peri_acp_types::workflow::{
+    AgentRunParams, AgentRunResult, AttemptDisposition, ProgressEvent, RecoveredAttempt, Usage,
+    WorkflowAttempt,
+};
 
 // ─── Journal ───────────────────────────────────────────────
 
@@ -46,6 +65,8 @@ pub struct JournalEntry {
     pub key: String,
     pub seq: u64,
     pub result: AgentRunResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<WorkflowAttempt>,
 }
 
 // ─── WorkflowDone ──────────────────────────────────────────

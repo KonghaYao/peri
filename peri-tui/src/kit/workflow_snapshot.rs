@@ -20,6 +20,10 @@ use crate::kit::atoms::WORKFLOW_SNAPSHOT;
 
 // ── DTO types ──────────────────────────────────────────────────────────────
 
+fn unknown_status() -> String {
+    "unknown".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct WorkflowSnapshot {
     #[serde(default)]
@@ -32,6 +36,14 @@ pub struct TuiRunProgress {
     pub run_id: String,
     pub workflow_name: String,
     pub status: String, // "running" | "completed" | "failed" | "killed"
+    #[serde(default = "unknown_status")]
+    pub execution_status: String,
+    #[serde(default = "unknown_status")]
+    pub acceptance_status: String,
+    #[serde(default = "unknown_status")]
+    pub post_processing_status: String,
+    #[serde(default = "unknown_status")]
+    pub delivery_status: String,
     #[serde(default)]
     pub phases: Vec<TuiPhaseProgress>,
     /// Server serializes IndexMap<u64, AgentProgress> as JSON array.
@@ -118,4 +130,38 @@ pub fn spawn_workflow_poll(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_projection_preserves_four_statuses() {
+        let snapshot: WorkflowSnapshot = serde_json::from_value(serde_json::json!({"runs": [{
+            "run_id": "run-1", "workflow_name": "test", "status": "completed",
+            "execution_status": "completed", "acceptance_status": "passed",
+            "post_processing_status": "failed", "delivery_status": "blocked",
+            "phases": [], "agents": []
+        }]}))
+        .unwrap();
+        let run = &snapshot.runs[0];
+        assert_eq!(run.execution_status, "completed");
+        assert_eq!(run.acceptance_status, "passed");
+        assert_eq!(run.post_processing_status, "failed");
+        assert_eq!(run.delivery_status, "blocked");
+    }
+
+    #[test]
+    fn legacy_snapshot_defaults_delivery_dimensions_to_unknown() {
+        let run: TuiRunProgress = serde_json::from_value(serde_json::json!({
+            "run_id": "legacy", "workflow_name": "legacy", "status": "completed",
+            "phases": [], "agents": []
+        }))
+        .unwrap();
+        assert_eq!(run.execution_status, "unknown");
+        assert_eq!(run.acceptance_status, "unknown");
+        assert_eq!(run.post_processing_status, "unknown");
+        assert_eq!(run.delivery_status, "unknown");
+    }
 }
