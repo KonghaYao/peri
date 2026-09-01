@@ -29,3 +29,21 @@
 - **Scope**：改动架构、规则、模块入口或文档 loader。
 - **Rule**：实现变更同时检查是否影响对应 standards、模块 CLAUDE、测试 canonical 路由和命令；只更新受影响的单一事实源，避免平行副本。
 - **Verify**：`git diff --check`；人工按本文件和 `docs/standards/index.md` 检查受影响路由与事实源。
+
+### DOC-DESIGN-001
+
+- **Scope**：`docs/design/`。
+- **Rule**：只保存已批准的现行设计或目标设计，并在文首标明状态。调查报告、迁移批次、实施计划、完成清单、复盘、draft/proposal 与未采纳方案不得留在该目录；进度写 `spec/issues/`，历史由 archive issue 与 Git 保留。设计不得复制动态 inventory 或固定源码行号。
+- **Verify**：检查 `docs/design/README.md` 索引与每份设计状态；`rg -n '状态：.*(draft|proposal)|分批执行计划|完成清单|本轮仅分析|未采纳' docs/design` 后人工确认无过程文档。
+
+### DOC-REFERENCE-001
+
+- **Scope**：`docs/reference/` 与面向使用者的 `docs/*.md`。
+- **Rule**：生态背景、操作手册和可重复 checklist 可以保留，但必须声明不具权威性并链接对应 design/standard；不得保存某次执行的勾选状态或临时结果。
+- **Verify**：检查 `docs/reference/README.md` 路由；checklist 不含已完成勾选，引用的权威文档存在。
+
+### DOC-LINK-001
+
+- **Scope**：文档移动、合并与删除。
+- **Rule**：同一变更同步根/模块 `CLAUDE.md`、standards、code-index、active spec 和其他重要引用。已归档 issue 可保留历史语境，但不得留下指向已删除文件的当前导航。
+- **Verify**：运行仓库 Markdown 本地链接检查与 `git diff --check`；用 `rg` 检查旧文件名无残留。

@@ -14,7 +14,7 @@
 | --- | --- |
 | session、事件、Prompt、工具、中间件、secret | `../docs/standards/architecture-contracts.md` |
 | Rust、async 与 doc tests | `../docs/standards/rust.md` |
-| 测试位置与覆盖要求 | `../docs/design/testing-standards.md` |
+| 测试位置与覆盖要求 | `../docs/standards/testing.md` |
 | middleware 具体链顺序 | `../peri-middlewares/CLAUDE.md` 与 `../peri-agent/src/session/factory.rs` |
 | TUI 通知消费 | `../peri-tui/CLAUDE.md` 与 `../docs/standards/tui.md` |
 

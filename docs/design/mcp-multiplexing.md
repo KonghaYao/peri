@@ -2,10 +2,9 @@
 
 > 本文件是「外部 MCP server ↔ view 层」透传信道的设计定稿，回答一个问题：**ACP 只有一条连接，多个 MCP server 的数据（App 交互、工具结果、通知）如何在这条信道上分离路由，保证数据正确送达正确的接收方。**
 >
-> 最后核对：2026-08-27
-> 状态：**目标设计，实施中但尚未成为代码事实**——最小 ACP stdio relay 的 active spec 为 `spec/issues/2026-08-27-mcp-apps-stdio-relay.md`；在对应契约测试通过前，本文描述的 Apps capability、envelope、session 与 relay 均不得视为已实现
-> 关联文档：`docs/design/mcp-connector-guide-v2.md`（MCP 生态定位，§6 MCP Apps、§9 内部落地）；`docs/design/peri-acp-protocol.md`（ACP 协议）
-> 本文是设计说明，不是规范；不搬运规范原文。
+> 状态：**已批准目标设计，尚未成为完整代码事实**——最小 ACP stdio relay 的进度由 `spec/issues/2026-08-27-mcp-apps-stdio-relay.md` 维护；在对应契约测试通过前，本文描述的 Apps capability、envelope、session 与 relay 均不得视为已实现
+> 关联文档：`docs/reference/mcp-ecosystem.md`（MCP 生态定位，§6 MCP Apps、§9 内部落地）；`docs/design/peri-acp-protocol.md`（ACP 协议）
+> 本文是 Perihelion 内部 relay 的目标设计，不复制或替代外部 MCP/MCP Apps 规范。
 
 ## 目录
 
@@ -18,8 +17,6 @@
 - [7. 分流规则（防双写）](#7-分流规则防双写)
 - [8. 错误语义](#8-错误语义)
 - [9. 可靠性：超时 / 背压 / 协议版本](#9-可靠性超时--背压--协议版本)
-- [10. 落地清单与前置依赖](#10-落地清单与前置依赖)
-- [11. 未决问题](#11-未决问题)
 
 ## 1. 目标与范围
 
@@ -280,7 +277,7 @@ agent 侧收到 `peri/mcp/app` 时按序校验，任一失败按 §8 返回：
 
 - **现状**：透传 response/notification 与事件链共用 transport（同一条 mpsc/stdio）。App 事件由用户交互驱动（低频），host-context-changed 等推送量小，共用通道不会挤占事件链。
 - **缓解**：同类推送 coalesce——同一 `appSessionId` 的连续同类型 notification（如 size-changed）合并最近一条。
-- **未决**：若未来出现高频 App 事件（流式图表等），需要硬隔离（App 事件改走独立 notification 方法 + view 侧独立队列），见 §11。
+- 若未来出现高频 App 事件（流式图表等），必须先量化共享通道容量，再通过新的权威设计决定是否改为独立 notification 与独立队列。
 
 ### 9.3 协议版本
 
@@ -397,26 +394,3 @@ sequenceDiagram
 | App 主动调用与模型调用 | 前者只返回标准 JSON-RPC response；后者只产生一次下游 input/result/cancelled 投影 |
 | session teardown、stdio EOF、server generation 变化、timeout/cancel | 只清理对应 owner/generation；pending request 至多结算一次 |
 | 不支持 Apps 的 server/client | 普通 MCP tool/resource/skills/subscription 行为保持不变 |
-
-
-
-| # | 改动 | 位置 | 依赖 |
-| --- | --- | --- | --- |
-| 0 | **读取冻结的 MCP Apps deployment profile**：stdio 启动时只读取一次 `PERI_MCP_APPS`，作为 Apps relay 与 MCP UI extension 的唯一启用来源 | stdio host 装配 / immutable capability profile | 无——所有 App 生态的前提 |
-| 1 | **按 deployment profile 构造 MCP server capability**：profile enabled 时在 MCP client initialize 中发送 UI extension；disabled 时保持普通 MCP capabilities | `peri-middlewares` MCP 初始化与重连装配 | 0 |
-| 2 | `peri/mcp/app`、`peri/mcp/resource` 方法分发（下游 UI → Peri 方向） | ACP 命令分发处（与 `session/*` 同入口） | 0、1 |
-| 3 | App session：会话注册表、server/resource 绑定、握手校验与 teardown | `peri-acp`/`peri-middlewares` 的协议实现层 | 2 |
-| 4 | id 映射与 `tools/call` 路由（复用 `McpClientPool` + 既有权限/HITL） | 同上 | 2、3 |
-| 5 | `peri/mcp/resource`：`resources/read` 透传，保留 HTML/MIME/`_meta.ui` | 同上（复用现有 MCP resource 能力） | 1、2 |
-| 6 | agent/model 侧工具结果关联 UI resource，并通过 ACP 定向通知下游 | 事件/结果投影层；不改变 TUI 路径 | 3、4 |
-| 7 | **下游实现项（不属于 Peri）**：Web Host 的 iframe、sandbox、CSP、Permissions Policy、`postMessage` bridge、MCP Apps FE | 下游项目 | Peri ACP contract 稳定后 |
-
-**rmcp 侧支持情况（已调查，rmcp 3.1.2）**：无 MCP Apps 专用 handler（`ui/*` 消息在规范上不走 MCP 连接，由宿主侧 App Host 逻辑处理，见 §6）；但全部透传基础已在——第 0 项能力声明（`ExtensionCapabilities`）、`on_custom_request` / `on_custom_notification` 扩展点（默认 `-32601` 拒绝，安全）、`send_custom_notification`（`mcp_notify.rs` 已用）、`Tool._meta`（`_meta.ui.resourceUri` 可透传）、`resources/read`（`resource_tool.rs` 已用）。
-
-**前置依赖确认**：guide §9.4 的「工具执行结果携带 `ui.resourceUri`」若尚未落地，需先行（本次设计不改变事件链结构——server 关联靠工具名解析，无需新增事件字段）。
-
-## 11. 未决问题
-
-1. **高频 App 事件的硬隔离**：透传与事件链共用通道的容量上限未量化；流式 App 出现时需评估独立队列方案。
-2. **Host → App 双向 request**：若下游需要通过 ACP 让 Peri 触发下游 request，需为 `ui/resource-teardown` 等定义反向 ACP request/response contract；不能退化成 notification。
-3. **Lease 长期策略**：首版 TTL 为 5 分钟且与初始 turn cancellation 绑定；未来若要求跨 turn 长驻 App，需要新的 session-owned dispatcher lease，而不是延长 turn-local lease。

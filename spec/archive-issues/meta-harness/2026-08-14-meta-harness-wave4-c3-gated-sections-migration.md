@@ -4,7 +4,7 @@
 **优先级**：高（波 4 演进批次）
 **类型**：决策记录
 **创建日期**：2026-08-14
-**来源**：`docs/design/meta-harness-design.md` §3.1.1（归属全景 / 拆分持有契约 2/3/4）
+**来源**：MetaHarness gated section 持有迁移；当前稳定设计见 `docs/design/meta-harness.md` §2.4/§2.5，过程由本归档 issue 保留
 + §3.1.2（重复段处理）+ §3.5（演进 2）+ §3.5.1（11_subagent 拆分六步）；
 批 C3 任务书；C2 决策记录遗留问题 1/2
 

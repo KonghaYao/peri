@@ -1,6 +1,9 @@
-# peri-agent v2 Middleware 中间件系统设计
+# Middleware 系统设计
 
-> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v2.1（2026-08-25：对齐生产链蓝本与 request-time prompt contribution）
+> 状态：现行设计
+>
+> 链序事实源为 `peri-agent/src/session/factory.rs::production_blueprint`，装配实现为
+> `peri-middlewares/src/assembly.rs`；强制顺序契约见 ARC-MIDDLEWARE-001。
 
 ## 1. 设计原则
 
@@ -59,7 +62,7 @@ graph TB
 
 | 声明项 | 说明 |
 |--------|------|
-| **Hook 挂载** | 声明在哪些生命周期点上执行什么逻辑。完整 hook 清单见 [Hook 注册表面板](peri-agent-hook-registry-v2.md)——`Middleware` trait 定义了 19 个生命周期 hook，按功能分为四层：**Session 级**（on_session_start、on_session_end、on_user_prompt）、**Agent/ReAct 级**（before_agent、before_model、after_model、before_tools_batch、before_tool、after_tool、after_tools_batch、after_agent、on_turn_end）、**Compact 观测层**（before_compact、after_compact）、**事件/子对象观测层**（on_permission_request、on_subagent_start、on_subagent_stop、on_notification、on_error） |
+| **Hook 挂载** | 声明在哪些生命周期点执行逻辑。hook 事实源为 `peri-agent/src/middleware/trait.rs`，执行顺序由 `peri-agent/src/middleware/chain.rs` 与 stages 中的 runner 锁定；设计文档不复制动态 hook inventory |
 | **工具声明** | 声明提供哪些工具，Executor 统一收集注册 |
 | **System Prompt 贡献** | 声明需要追加到 System Prompt 的文本片段 |
 | **条件守卫** | 声明注册条件（如「仅当权限模式非 Bypass 时注册」） |
@@ -186,7 +189,7 @@ MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实�
 
 ---
 
-## 6. 与 v2 其他模块的关系
+## 6. 与其他模块的关系
 
 | 模块 | 关系 |
 |------|------|
@@ -194,5 +197,5 @@ MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实�
 | **ReAct 循环** | hook 点嵌入 ReAct 循环固定检查点 |
 | **System Prompt** | 切面通过声明贡献，不通过 prepend_message |
 | **工具系统** | 切面声明 tools，Executor 统一收集 |
-| **Compact** | 已从中间件链移除（`CompactMiddleware` 已删除）。自动 compact 由 `peri-agent::agent::stages::compact` 在 RCRA 循环中处理；旧版固定阈值仅是历史实现参数，不作为当前约束。当前策略与回收目标以 `docs/design/micro-compact-improvement-proposals.md` 和 `ContextPressure::target_reclaim_tokens()` 为事实源。Compact 不再作为切面参与链执行 |
+| **Compact** | 已从中间件链移除（`CompactMiddleware` 已删除）。自动 compact 由 `peri-agent::agent::stages::compact` 在 RCRA 循环中处理；旧版固定阈值仅是历史实现参数，不作为当前约束。当前策略与回收目标以 `docs/design/micro-compact.md` 和 `ContextPressure::target_reclaim_tokens()` 为事实源。Compact 不再作为切面参与链执行 |
 | **Plugin** | `PluginMiddleware`（#5）是基础中间件，在 `before_agent` hook 中执行插件兼容性校验。插件扩展的 Skills 通过 `SkillsMiddleware.with_plugin_roots()` 注入，Hooks 通过 `HookMiddleware`（#16，可多实例）注入 |

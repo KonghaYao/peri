@@ -88,4 +88,4 @@ test result: ok. 1 passed; 0 failed
 - **移除的旧行为**：整体替换为 `{"_compact_note":"tool input compacted"}`（`projection.rs` 的 CompactToolInput 路径）。
 - **测试**：`cargo test -p peri-agent --lib compact_v2` 172 passed。
 - **设计文档**：[Micro Compact 字段级压缩设计](./2026-07-29-micro-compact-field-level-design.md)
-- **实现计划**：`docs/superpowers/plans/2026-07-29-micro-compact-field-level-implementation.md`
+- **历史实现计划**：过程计划已删除；当前设计见 `docs/design/micro-compact.md`

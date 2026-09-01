@@ -43,7 +43,7 @@ commit `3bfb9fff` ("refactor(tui): delete render_bridge + bubbles/view_render pi
 
 > **R2. text_selection 功能丢失（接受，后续补回）**
 > 保留 `text_selection.rs` 代码但功能失效（鼠标 Drag 复制不可用）。
-> —— `docs/superpowers/specs/2026-07-09-ratatui-kit-markdown-migration-design.md:223-225`
+> —— 当时的 ratatui-kit Markdown 迁移过程设计（已删除；由本归档 issue 与 Git 历史保留）
 
 **CPU 暴涨追加根因**：`message_area.rs` 鼠标事件处理器仅过滤 `MouseEventKind::Moved`，`MouseEventKind::Drag(Left)` 穿透 `_ => {}` 后 `return EventResult::Consumed`，触发组件重渲染 → 每帧 clone 数千行 `Line<'static>`（含 syntect 高亮 Span）。
 
@@ -113,4 +113,3 @@ MouseEvent(Down/Drag/Up)
 - `peri-tui/src/kit/text_selection.rs`：0 行变更（仅使用了 `TextSelection` 结构体和 `line_to_plain_text` 函数）
 
 **验证状态**：`cargo build` ✅，`cargo test -p peri-tui --lib` 394 passed ✅，`cargo test --workspace --lib` 963 passed（2 个已存在的 peri-middlewares 失败无关联）✅，需真实终端人工验证
-

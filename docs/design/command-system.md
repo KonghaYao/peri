@@ -1,6 +1,7 @@
 # Command 系统权威架构
 
-> 最后核对：2026-08-15
+> 状态：已批准目标设计；当前代码差距与实施进度由对应 active issue 维护。
+>
 > 事实源：`peri-acp-types/src/command.rs`（契约，子模块挂载点）+ `command_name.rs`（词法契约）+ `command_registry.rs`（注册表本体）、`peri-acp/src/session/command/mod.rs`（组合根 / register_builtins）、`peri-agent/src/session/exec/executor.rs`（拦截）、`peri-tui/src/kit/input_area.rs` + `slash_completion.rs`（展示）。
 
 ## 本质定义
@@ -156,20 +157,3 @@ MCP skill 的组合即：声明来源 = 外部系统（动态），执行域 = A
 3. **解析唯一实现**：词法切分、严格精确匹配、alias 解析只在注册表一处实现（现状 `find` / `find_arc` 双份复制）。
 4. **handler 开放扩展**：执行域是元数据不是类型；`CommandHandler` trait + `Outcome{Done, Inject, Delegate}`；新增执行域 = 新增 trait 实现，路由核心零改动。
 5. **上下文按需注入**：core 字段常驻，扩展依赖经 `ctx.dep::<dyn Trait>()` 接口注册表按需获取；新增依赖不动 `CommandContext` 结构体；缺注入的命令优雅报错。
-
-## 与现状的差距（优化讨论起点）
-
-- 元数据分散：TUI 反推 kind（Skill / McpSkill / Command），与 ACP 事实漂移风险。
-- 三套命名形态混用（`plugin:x:y` 冒号 / `mcp__s__k` 双下划线 / `s:k` 别名），未统一词法。
-- 注册表静态 Vec：无运行时增删、无 provenance、无冲突裁决（`/clear` 双存在为证）。
-- 无 args schema：参数解析各命令自研，无统一补全与校验。
-- `CommandContext` 持续膨胀（frozen_* 系列为证），无扩展策略。
-- `available_commands_update` 扁平推送，不带 kind / category / args 元数据。
-- 反馈无统一通道：`CommandResult` 无 feedback 字段，命令自造事件（clear 的 `CompactCompleted`、rewind 的 `format!` 错误串），UI-only 通知通道不存在。
-
-## 待裁决
-
-- ~~输入宽松度~~ → 已裁决：输入严格（执行层仅精确匹配），模糊只发生在搜索层（UI 补全）。
-- ~~`mcp__` 兼容策略~~ → 已裁决：直接废弃，无兼容过渡。
-- ~~同域重名裁决~~ → 已裁决：内置永远优先。本地 skill 与内置命令共享 `core` 域，重名时本地 skill 拒绝注册并警告；动态注入条目同理，注册即校验优先级，不覆盖、不静默。
-- 保留域前缀硬错误（`/mcp:` / `/plugin:` / `/core:` 命中失败报错 vs fall through 进管线）——~~可选未来优化~~ → 已裁决（2026-08-15）：**全部 fall through，不区分保留域**；仅 execute-command RPC 路径显式报错。

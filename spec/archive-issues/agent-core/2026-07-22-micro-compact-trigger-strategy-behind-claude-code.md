@@ -119,7 +119,7 @@ export function estimateMaxTurnGrowth(model: string): number {
 - `peri-agent/src/agent/compact_v2/config.rs:47-73` — `CompactConfig`：缺少 time-based / cached MC / token-threshold 配置
 - `peri-agent/src/agent/compact_v2/micro.rs:25-115` — `micro_compact()`：仅 stale_steps + 白名单
 - `peri-agent/src/agent/stages/compact.rs:14-160` — `run_compact()`：单一次序的 Micro → Full 调度
-- `docs/design/peri-agent-compact-v2.md` — compact v2 架构设计文档
+- `docs/design/micro-compact.md` — 当前 Micro Compact 权威设计
 
 ### Claude Code 参照侧
 - `src/services/compact/autoCompact.ts` — 触发判定、autoCompactIfNeeded、预测性检查

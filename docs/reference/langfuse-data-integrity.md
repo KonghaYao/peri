@@ -1,8 +1,9 @@
 # Langfuse 监控数据结构检查手册
 
-> 最后核对：2026-08-15
 > 用途：排查 Perihelion → Langfuse 监控数据异常（字段缺失、归属错乱、比例异常、token/缓存异常）。
 > 本手册面向「数据长什么样、应该长什么样、怎么快速验证」，不含 UI 操作指南。
+> 架构归属与跨层约束以 `docs/design/architecture.md` 和
+> `docs/standards/architecture-contracts.md` 为准。
 
 ---
 

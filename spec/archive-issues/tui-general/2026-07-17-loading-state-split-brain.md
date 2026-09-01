@@ -2,7 +2,7 @@
 
 
 > 归档于 2026-07-20，原路径 spec/issues/2026-07-17-loading-state-split-brain.md
-> ⚠️ **未证实**：本文档基于代码静态分析（阅读 `acp_events.rs`、`submit_consumer.rs`、`atoms.rs`、`acp_bridge.rs` 等文件），关键结论待实际运行验证。详见 `docs/design/tui-loading-state-analysis.md`。
+> ⚠️ **未证实**：本文基于代码静态分析（阅读 `acp_events.rs`、`submit_consumer.rs`、`atoms.rs`、`acp_bridge.rs` 等文件），关键结论待实际运行验证。原独立分析过程文档已删除，本归档 issue 保留结论。
 
 **状态**：Fixed
 **优先级**：高
@@ -109,7 +109,7 @@ push_acp_state(state);  // 此时防御检测：acp.is_loading == false → 不�
 
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
-| 2026-07-17 | — | Open | agent | 创建（基于 docs/design/tui-loading-state-analysis.md 静态分析） |
+| 2026-07-17 | — | Open | agent | 创建（基于当时的静态分析） |
 
 ## 修复记录
 

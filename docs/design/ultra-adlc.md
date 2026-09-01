@@ -1,13 +1,11 @@
-# Ultra-ADLC 权威设计
+# Ultra-ADLC 设计
 
-**版本**：1.0
-**日期**：2026-09-01
 **状态**：已实现（builtin skill v1）
 **事实源范围**：Ultra-ADLC 的产品语义、文件协议与编排契约
 
 > 本文定义 Ultra-ADLC 的目标行为。当前 Workflow、事件、工具和模型能力仍以
 > 代码、契约测试、`docs/standards/` 与
-> [Workflow 系统设计](workflow-system.md)为事实源；本文不得覆盖更高优先级的
+> [Workflow 系统设计](workflow.md)为事实源；本文不得覆盖更高优先级的
 > 已实现契约。
 
 ---
@@ -1047,7 +1045,7 @@ Ultra-ADLC 实现中顺带扩张范围。
 - [跨模块架构契约](../standards/architecture-contracts.md)：`ARC-BOUNDARY-001`、
   `ARC-FROZEN-001`、`ARC-EVENT-001`、`ARC-TOOLS-001`、`ARC-HITL-001`、
   `ARC-WORKFLOW-RPC-001`、`ARC-MIDDLEWARE-001`。
-- [Workflow 系统设计](workflow-system.md)：现有 Workflow 原语、运行时、journal、
+- [Workflow 系统设计](workflow.md)：现有 Workflow 原语、运行时、journal、
   notification 与 TUI 面板。
 - [peri-workflow 代码索引](../code-index/peri-workflow.md)：当前代码入口与稳定不变量。
 - `peri-middlewares/src/skills/builtin/skills/ultracode/SKILL.md`：现有 Workflow Tool

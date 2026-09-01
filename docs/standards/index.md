@@ -22,15 +22,16 @@
 | `peri-tui` 界面与交互 | [tui.md](tui.md) 与 `peri-tui/CLAUDE.md` |
 | `CLAUDE.md` 维护 | [documentation.md](documentation.md) |
 | Git 分支创建、upstream、历史整理与 push 安全 | [git.md](git.md) |
-| 测试（根 workspace、submodule、独立/side project 的范围与命令） | `docs/design/testing-standards.md`（当前 canonical） |
+| 测试（根 workspace、submodule、独立/side project 的范围与命令） | [testing.md](testing.md) |
+| 权威设计与参考资料的生命周期 | [documentation.md](documentation.md) |
 
 ## 规则
 
 ### STD-INDEX-001
 
 - **Scope**：所有工程任务。
-- **Rule**：先按上表读取所需规则；测试规范只路由到 `docs/design/testing-standards.md`，不在本目录复制。
-- **Verify**：`test -f docs/design/testing-standards.md && git diff --check`
+- **Rule**：先按上表读取所需规则；测试规范只路由到 `docs/standards/testing.md`，不在本目录复制。
+- **Verify**：`test -f docs/standards/testing.md && git diff --check`
 
 ### STD-INDEX-002
 

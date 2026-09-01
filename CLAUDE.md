@@ -12,10 +12,10 @@ MUST 规则 → docs/standards/；active changes → spec/issues/；history look
 
 信息优先级：代码/契约测试 > `docs/standards/` > 模块 `CLAUDE.md` > `docs/design/` > active spec > history；冲突服从更高项。`AgentsMdMiddleware` loader 不自动继承父目录：进入模块任务前，显式 Read 对应模块 `CLAUDE.md` 和适用 standard。
 
-- 标准入口：`docs/standards/index.md`；架构契约：`docs/standards/architecture-contracts.md`。
+- 标准入口：`docs/standards/index.md`；架构契约：`docs/standards/architecture-contracts.md`；权威设计索引：`docs/design/README.md`。
 - Rust：`docs/standards/rust.md`；TUI：`docs/standards/tui.md`；文档维护：`docs/standards/documentation.md`。
 - Git 分支、upstream 与 push 安全：`docs/standards/git.md`。
-- 测试：`docs/design/testing-standards.md`；活动需求读对应 `spec/issues/`；历史仅查 `spec/global/problems.md`。
+- 测试：`docs/standards/testing.md`；活动需求读对应 `spec/issues/`；历史仅查 `spec/global/problems.md`。
 
 ## 跨仓库契约
 
@@ -33,7 +33,7 @@ MUST 规则 → docs/standards/；active changes → spec/issues/；history look
 | TUI | `peri-tui/CLAUDE.md` + tui/rust | `peri-tui/src/kit/`、`peri-tui/src/kit/acp_events/` |
 | E2E | `e2e/CLAUDE.md` + testing standards | `e2e/` |
 | 文档站 | `peri-cool/CLAUDE.md` + documentation | `peri-cool/`（submodule） |
-| Rust 通用、测试、CLAUDE 维护 | 对应 standard | `docs/standards/`、`docs/design/testing-standards.md` |
+| Rust 通用、测试、CLAUDE 维护 | 对应 standard | `docs/standards/`、`docs/standards/testing.md` |
 
 ## 代码定位
 

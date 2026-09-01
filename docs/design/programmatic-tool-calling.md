@@ -2,7 +2,9 @@
 
 ## 1. 文档地位
 
-本文定义 Perihelion 的 Programmatic Tool Calling（PTC）目标架构、通用 JavaScript 执行器 seam、Workflow 迁移方式及分阶段实施计划。实现、测试和后续设计若与本文冲突，应先更新本文并说明契约变化。
+> 状态：现行设计
+
+本文定义 Perihelion 的 Programmatic Tool Calling（PTC）现行架构、通用 JavaScript 执行器 seam 与 Workflow 共享边界。实现、测试和后续设计若与本文冲突，应先更新本文并说明契约变化。
 
 PTC 在本仓库中的含义是：提供 canonical deferred-only 工具 `RunPtcCode`；模型先通过 `SearchExtraTools` 发现它，再经 `ExecuteExtraTool` 执行，JavaScript 程序通过 `tools.<ToolName>(input)` 异步调用当前 session-local 工具。PTC 默认装配（`PtcMiddleware=false` 可关闭），不改变现有 direct tools 的可见性。旧名 `run_code` 不可执行、不是 alias，仅作为 ToolSearch 迁移关键词。`RunPtcCode` 外层任意代码执行入口按 Bash 同级审批；内部调用的 policy、HITL、事件与 tool card 均投影到 effective target。模型 assistant raw wrapper call 仅为协议配对而保留。
 
@@ -378,157 +380,8 @@ npm-packages/
 
 实现可以先在现有 crate 内做行为保持的提炼，再迁移到新 crate；最终依赖方向必须清晰，避免循环依赖。新增 crate 前必须以根 `Cargo.toml` 和邻近 crate manifest 为事实源。
 
-## 10. 分阶段执行计划
 
-### Step 0：基线与契约测试
-
-**目标**：先固定 Workflow transport 的现有行为。
-
-任务：
-
-- 定位 `RpcChannel`、`WorkflowRunner::run`、Node server 和 wire DTO；
-- 为换行+flush、pending drain、先注册后 spawn、kill、迟到结果、stderr 并行消费、唯一 completion 补齐缺失测试；
-- 记录当前 Workflow 目标测试与基线结果。
-
-验证：
-
-```bash
-cargo test -p peri-workflow --lib rpc
-cargo test -p peri-workflow --lib runner
-```
-
-验收：不改变生产行为；后续抽取造成的竞态回归可被测试捕获。
-
-### Step 1：提炼 JavaScript Execution Host
-
-**目标**：把 Node lifecycle 与双向 RPC 从 workflow domain 中分离。
-
-任务：
-
-- 提炼通用 process/RPC/executor/error module；
-- 定义 host request router；
-- 将 pending map、EOF/process exit drain、cancel 和 stderr 消费移入 host；
-- 保持现有 Workflow wire protocol不变；
-- 优先行为保持，不同时重写 protocol。
-
-验证：
-
-```bash
-cargo test -p peri-js-runtime --lib
-cargo test -p peri-workflow --lib rpc
-cargo test -p peri-workflow --lib runner
-```
-
-若首轮尚未独立 crate，则用实际 module 测试路径替代第一条命令。
-
-验收：Workflow 外部行为及原测试全部不变；Workflow Adapter 不再直接管理底层 NDJSON/pending/process 细节。
-
-### Step 2：提炼共享 effective-tool dispatch seam
-
-**目标**：让 `ExecuteExtraTool` 与 PTC 共用同一执行路径。
-
-任务：
-
-- 从 `peri-middlewares/src/tool_search/` 定位并提炼 resolution/dispatch；
-- 输入绑定当前 session-local tool view；
-- 保持 `ExecuteExtraTool` 的用户可见 schema、错误和行为兼容；
-- 增加 direct/deferred、disabled、allowlist/disallowlist、unknown tool 测试；
-- 不新增平行 permission/event 管线。
-
-验证：
-
-```bash
-cargo test -p peri-middlewares --lib tool_search
-cargo test -p peri-agent --lib session::exec
-```
-
-验收：`ExecuteExtraTool` 回归通过；共享 dispatcher 可由非模型 wrapper 的宿主调用方使用。
-
-### Step 3：实现 PTC Node Adapter
-
-**目标**：Node 代码可通过 `tools.<name>()` 发起异步 host request。
-
-任务：
-
-- 增加 `tool/call`/`tool/cancel` wire DTO；
-- 实现 `tools` Proxy；
-- 支持多个并发 pending Promise；
-- 实现顶层 completion、logs、return value 和结构化错误；
-- Rust/TypeScript wire 类型同步更新；
-- 增加协议 roundtrip、并发、拒绝、取消和 malformed request 测试。
-
-验收：Node runtime fake-host 测试可验证 `tools.Read()` 和 `Promise.all()`，无需启动完整 agent session。
-
-### Step 4：实现 `RunPtcCode` 与 PTC middleware
-
-**目标**：将 PTC 接入真实 session-local 工具视图。
-
-任务：
-
-- 新增 deferred-only canonical `RunPtcCode`，并以旧 `run_code` 作为搜索迁移关键词而非可执行 alias；
-- 装配 PTC middleware，不修改其他工具的 `is_direct()`；
-- PTC router 调用共享 effective-tool dispatcher；
-- 从 session-local view 生成稳定工具目录和 prompt 说明；
-- 首版使用字符串工具结果；
-- 实现外层取消向内部 invocation 与 Node execution 传播。
-
-验证：
-
-```bash
-cargo test -p peri-middlewares --lib ptc
-cargo test -p peri-middlewares --lib tool_search
-cargo test -p peri-agent --lib session::exec
-```
-
-验收：
-
-- LLM tools 保留原有 direct tools 与 ToolSearch 元工具，不直接包含 `RunPtcCode`；
-- `SearchExtraTools` 可通过 canonical 名 `RunPtcCode`、旧迁移关键词 `run_code` 发现该工具，且只有 canonical 名可执行；
-- disabled/filtered 工具不进入 PTC 工具目录且不可调用；
-- `tools.Read()` 使用真实 session-local view；
-- `Promise.all([tools.Read(...), tools.Read(...)])` 正常完成；
-- unknown、permission reject、cancel 返回稳定错误。
-
-### Step 5：Workflow 迁移收口与跨层验证
-
-**目标**：确保两个 Adapter 真正共享 host，同时不破坏现有链路。
-
-任务：
-
-- 清除 Workflow 中已被 host 接管的重复 process/RPC 逻辑；
-- 检查 crate/npm package 依赖方向；
-- 更新 `docs/code-index/`、相关模块路由和 architecture contract（若新增稳定不变量）；
-- 补真实 Node 进程集成测试；
-- 检查外层和内部工具事件经 ACP 正常投影；
-- 运行格式、clippy、目标测试和 doc tests。
-
-验证：
-
-```bash
-cargo test -p peri-js-runtime
-cargo test -p peri-workflow
-cargo test -p peri-middlewares --lib tool_search
-cargo test -p peri-middlewares --lib ptc
-cargo test -p peri-agent --lib session::exec
-cargo test -p peri-acp --lib mapper
-cargo test --workspace --doc
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-验收：Workflow 行为保持；PTC 闭环通过；工具、事件、权限、取消没有旁路；文档路由与代码索引同步。
-
-### 10.1 PTC npm 发布
-
-`@peri-code/ptc` 发布必须在 `npm-packages/@peri-ptc/` 中按顺序执行：
-
-```bash
-npm run prepublishOnly
-npm publish
-```
-
-`prepublishOnly` 成功是 `npm publish` 的前置条件；发布前必须确认 package version/build ID/protocol version、Rust 常量与生成的 npm `dist` 已同步。`dist` 由 package 构建生成，不由 Cargo 生成或作为 Rust 内嵌 artifact 跟踪。不得以 `npx` fallback 代替发布验证；fallback 仅是固定版本 npm install 失败后的显式 opt-in 路径。
-
-## 11. 首个端到端场景
+## 10. 首个端到端场景
 
 ```js
 const manifests = await tools.Glob({
@@ -555,14 +408,3 @@ return {
 5. JavaScript 从 await 点继续执行并返回最终 value；
 6. 取消时所有 pending 调用与 Node execution 一起结束；
 7. Workflow 原有测试不受影响。
-
-## 12. 实施纪律
-
-- 每一步必须先通过本阶段目标测试，再进入下一步；
-- 抽取与功能新增尽量分开，避免同一变更同时重写 Workflow 和新增 PTC；
-- 不为 PTC 复制 ToolSearch execution code；
-- 不让 `RunPtcCode` 持有静态工具清单；
-- 不让 Node Adapter 直接接触文件系统、shell 或 MCP implementation；
-- 不因首版字符串结果而顺带重构全部工具输出；
-- 不修改无关工具、事件或 TUI 表现；
-- 行为变化后按 `DOC-UPDATE-001` 更新唯一事实源。

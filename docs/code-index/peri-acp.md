@@ -100,7 +100,7 @@
 | --- | --- | --- |
 | 服务循环 | host/mod.rs | `run_acp_server`（:248）；`dispatch_prompt_turn`（:496）；`SessionState`（:66，frozen/agent_pool/workflow_middleware/continuation_armed/lease） |
 | 方法注册面（mpsc） | host/requests.rs + host/requests/*.rs | `handle_request`（requests.rs:22，30 个方法分派到子模块；各 handle_* 均为 `pub(super)` 定义在对应子文件） |
-| notification 处理 | host/notify.rs | `handle_notification`（:28）/`extract_session_id`（:153）；通知 wire 基线 `host/unify_wire_baseline_test.rs`（批 0 建立、统一后回归基线：发射面 payload 与 schema typed `SessionNotification` 序列化逐字段一致，见 docs/design/acp-host-unify.md） |
+| notification 处理 | host/notify.rs | `handle_notification`（:28）/`extract_session_id`（:153）；`host/unify_wire_baseline_test.rs` 锁定发射面 payload 与 schema typed `SessionNotification` 的逐字段一致性；统一 host 入口见 ARC-STDIO-001 与 `docs/design/architecture.md` |
 | prompt 执行体 | host/prompt.rs | `run_prompt`（:35）；`take_recall_for_turn`（:763）；`build_compact_hooks`（:776） |
 | 续跑调度 | host/continuation.rs | `run_continuation_scheduler`（:111） |
 | Host 任务所有权 | host/task_scope.rs | `HostTaskOwner` / `HostTaskSpawner`；生产 timeout driver + 测试 controlled phase driver |

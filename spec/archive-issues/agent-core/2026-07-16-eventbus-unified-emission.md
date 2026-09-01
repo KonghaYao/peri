@@ -240,7 +240,7 @@ PRD §问题 2 的 claim 基于对两条独立代码路径的混淆：
 ## Further Notes
 
 - 本次改进的前身分析见 `/tmp/architecture-review-20260716.html`（架构审查报告）。
-- 相关既有设计文档：`docs/design/peri-agent-v2.md`、`docs/design/peri-agent-acp-v2.md`。
+- 当前权威设计：`docs/design/architecture.md`、`docs/design/peri-acp-protocol.md`；历史迁移过程只保留在 Git 历史与本归档 issue 中。
 - 三个已知 issue 与本 PRD 相关：`spec/issues/2026-07-08-peri-agent-architecture-improvement.md`（AgentGroup 仍使用 v1 sender）、`spec/issues/2026-07-08-peri-agent-maintainability-improvement.md`（缺少 `#[deprecated]` 迁移路径）、`spec/issues/2026-07-09-peri-agent-comprehensive-code-quality-review.md`（v1 变体未被标记废弃）。
 
 ---

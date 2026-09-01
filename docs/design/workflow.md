@@ -1,42 +1,6 @@
-# Workflow 系统设计文档
+# Workflow 系统设计
 
-**版本**: 3.0
-**日期**: 2026-08-10
-**关联分支**: `feature/workflow-ultracode`
-**状态**: 已实现 / 已与代码同步（v3.0）
-
-> **v3.0 变更**（2026-08-10）：随 peri 3.0 架构重构（p1-wa 收口 + WorkflowMiddlewarePort 端口化）更新跨 crate 归属。主要变更：
-> §2 架构总览更新为端口化架构（session 级 WorkflowMiddleware 经 `WorkflowMiddlewarePort` 端口注入，装配面收敛至 `peri-acp/src/host/workflow_agent.rs`）、
-> §3.4 完成广播消费位置更新（broadcast receiver 唯一 consumer 在 `peri-agent/src/session/exec/executor.rs`）、
-> §3.7 WorkflowAgentExecutor 归位至 `peri-agent/src/agent/workflow/agent.rs`（ACP 仅留装配薄壳）、
-> §4 通知双路径重写（Path A 经 `BgRegistryEvent::Completed → bg-task-completed` unstable event，不再经 EventSink 直推；Path B 经 `AsyncRouter → push_defer(Defer kind)` 唤醒新 turn，替代 notification_buffer + execute_prompt drain）、
-> §8.2 `/workflows` 面板命令位置更新（`peri-tui/src/kit/panel_registry.rs`）。
->
-> **v2.1 变更**（2026-07-15）：基于代码审计修正约 10 处事实性差异。主要变更：
-> §3.1 请求参数移除 workflowName（WorkflowStartParams 中不存在该字段）、
-> §3.2 Node 进程改为 npx/bunx 自动下载（bun 环境优先 bunx）、
-> §3.2 log 级别映射修正（无独立 debug 映射）、
-> §3.2 kill 分支描述修正为 5s 超时 RPC + child.kill + msg_loop.abort + state.json、
-> §3.4 kill() 方法修正为两层清理（kill_tx + runs.remove）、
-> §3.4 移除不存在的 status() 方法、
-> §3.5 RunProgress 结构修正（meta 类型为 Option<WorkflowMeta>，agents 为 IndexMap）、
-> §3.5 新增 completed_at 字段和 cleanup_completed() 5 分钟保留策略、
-> §3.5 新增 get_run_stats() 方法、
-> §3.7 CompactMiddleware 已移除（v2 统一接管）、
-> §3.8 新增快速失败检测（1s timeout）和 bg_registry 注册步骤、
-> §3.8 新增 WorkflowResult.stderr_tail 字段说明、
-> 新增 §3.4a WorkflowMiddlewareAdaptor 适配器模式、
-> §7 新增 bg_registry 延迟注入说明、
-> §8.1/§8.3 重写为 WorkflowSnapshot + WORKFLOW_SNAPSHOT atom + 2s 轮询、
-> §8.2 标注为未实现功能。
->
-> **v2.0 变更**（2026-06-23）：基于实现代码的逐模块对比，修正 60+ 处差异。主要变更：
-> §3.1 协议字段补全、§3.2 消息循环实际模型、§3.4 Registry 职责纠错、§3.5 AgentStatus 5 变体、
-> §3.7 System prompt 非精简版、§3.8 Tool 参数补全 + deferred 层级修正、§4.4 防重复机制完全重写、
-> §8 TUI 布局/字段修正 + pull 轮询为主要更新路径 + `/workflows` 面板命令文档化、
-> §11.4 Ultracode Skill 完整文档化（LLM 操作手册）
-
----
+**状态**：现行设计
 
 ## 1. 概述
 
@@ -109,7 +73,7 @@ Workflow 系统是 Peri 的多 Agent 编排子系统，允许用户通过 JavaSc
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**端口化归属**（3.0，p1-wa 收口）：session 级 workflow 状态不再由 peri-acp `SessionState` 直接持有——具体实现 `WorkflowMiddleware`（peri-middlewares）经 `WorkflowMiddlewarePort` 契约端口（`peri-acp-types/src/ports.rs`）注入 ACP，装配面宿主为 `peri-acp/src/host/workflow_agent.rs` 的 `create_session_workflow_middleware`；执行体（WorkflowAgentExecutor、通知消费者）随 p1-wa 物理迁入 peri-agent。
+**端口归属**：session 级 workflow 状态由 `WorkflowMiddleware`（peri-middlewares）持有，经 `WorkflowMiddlewarePort`（`peri-acp-types/src/ports.rs`）注入 ACP；`peri-acp/src/host/workflow_agent.rs` 是装配宿主，`WorkflowAgentExecutor` 与通知消费者归 Agent 执行层。
 
 **通信协议**：Rust ←→ Node 通过 stdin/stdout 双向 JSON-RPC 2.0（NDJSON 格式）。Node 侧 RPC server，Rust 侧 RPC client。
 
@@ -266,7 +230,7 @@ pub enum RegistryError { ConcurrentLimit, NotFound }
 
 **完成通知**：`tool.rs` 的 notification_task 在 done_rx 收到后，从 `ProgressStore::get_run_stats()` 读取 `agent_count` 和 `tool_calls_count`，连同 `status`/`duration_ms`/`error` 构造 `WorkflowTaskResult`，调用 `registry.complete()` **仅做广播**（不读 ProgressStore，不移除 run——history 保留供调试）。`WorkflowTaskResult::to_notification()` 方法（`peri-acp-types/src/workflow.rs`，契约层）格式化 `<system-reminder>` 文本块。
 
-**广播消费**：broadcast receiver 在 `peri-agent/src/session/exec/executor.rs`（session 级 consumer，p1-wa 归位后随执行体迁入 Agent 层）被唯一消费——单一消费者确保无重复通知。
+**广播消费**：broadcast receiver 在 Agent session 执行层由单一 session 级 consumer 消费，避免重复通知；具体入口以 `docs/code-index/peri-agent.md` 为准。
 
 ### 3.4a WorkflowMiddlewareAdaptor — 中间件链适配器
 
@@ -371,7 +335,7 @@ pub struct AgentProgress {
 
 ### 3.7 WorkflowAgentExecutor — SubAgent 复用
 
-`peri-agent/src/agent/workflow/agent.rs` — workflow 内部 agent 的构建器（p1-wa 归位：执行体物理迁入 Agent 层；`peri-acp/src/host/workflow_agent.rs` 仅保留装配面薄壳——`create_session_workflow_middleware` 装配编排与注入面构造 helpers，经 `WorkflowMiddlewareFactory` 端口注入中间件链/工具/error_suggest/tool resolver）。
+`peri-agent/src/agent/workflow/agent.rs` — workflow 内部 agent 的构建器；`peri-acp/src/host/workflow_agent.rs` 只保留装配薄壳，经 `WorkflowMiddlewareFactory` 端口注入中间件链、工具与 resolver。
 
 **核心职责**：将 `AgentRunParams`（来自 Node 的 `agent/run` RPC）转换为完整的 ReActAgent 执行。
 
@@ -379,15 +343,15 @@ pub struct AgentProgress {
 
 | 方面 | Main Agent | Workflow Agent |
 |------|-----------|----------------|
-| 中间件数量 | 20 个（15 基础 + 5 条件） | ~10 个（CompactMiddleware 已在 v2 中移除，由 `stages/compact.rs` 统一接管） |
+| 中间件链 | 主 session production chain | 专用 Workflow Agent chain；不按主链数量推断能力 |
 | Frozen data | 完整 | **透传**（从 session frozen） |
-| System prompt | 完整（14 段） | **完整 frozen system prompt**（`ctx.system_prompt.clone()`，非精简版） |
+| System prompt | 冻结 base + request-time contribution | 继承父 session frozen base，并按 Workflow Agent chain 应用能力闭包 |
 | LLM Model | 用户选择 | 跟随 session provider（`ctx.provider.clone().into_model()`，无 Anthropic 回退） |
 | max_iterations | 500 | 200 |
 | HITL | 完整 | 共享 session 权限模式 |
 | Langfuse | 完整 | 启用 |
 
-**透传的 WAI 上下文**（`WorkflowAgentContext` 含 15 个字段，远超最初设计的 5 个）：
+**透传的 Workflow Agent 上下文**：
 - CLAUDE.md 内容 / Skills 摘要 / System prompt（完整 frozen）
 - session_id / compact_config / cancel token
 - broker / permission_mode（HITL 共享）
@@ -471,7 +435,7 @@ workflow 完成
 
 ### 4.2 Session 级 Consumer
 
-`peri-agent/src/session/exec/executor.rs:1225+`（p1-wa 归位前位于 `peri-acp/src/session/executor.rs:957-1023`）— 在首次 turn 构建（`build_and_execute_agent`）时 spawn，永久运行直到 session 结束。spawn 去重由 `init_notification_buffer()` set-once gate（AtomicBool `compare_exchange`）保证。
+consumer 在首次 turn 构建时 spawn，并持续到 session 结束。spawn 去重由 `init_notification_buffer()` 的 set-once gate 保证；具体入口以 `docs/code-index/peri-agent.md` 和源码为准。
 
 **Path A 输出格式**（`BackgroundTaskResult`，写入 registry 触发 `BgRegistryEvent::Completed`）：
 ```json
@@ -496,7 +460,7 @@ status 文本区分 `completed` / `killed` / `failed`（幽灵完成事件防护
 
 ### 4.3 唤醒模型
 
-Path B 通知经 `AsyncRouter → InboxHandle → push_defer(Defer kind)` 注入消息流并触发 wake Notify，在 End 阶段被消费（`append_messages_to_transcript` 统一包裹后注入），唤醒新 turn 处理 workflow 结果——无需用户输入。原 `WorkflowMiddleware.notification_buffer_rx`（mpsc unbounded channel）+ `execute_prompt()` 开头 drain 机制已迁移到 MessageQueue + broadcast 模式（`peri-middlewares/src/workflow/mod.rs`），`init_notification_buffer()` 仅保留 set-once gate 语义。通知仍作为消息流注入而非中断正在执行的 agent（Defer 在 End 阶段统一消费）。
+Path B 通知经 `AsyncRouter → InboxHandle → push_defer(Defer kind)` 注入消息流并触发 wake Notify，由下一轮 Receive 统一排空并写入 Transcript，因此无需用户输入，也不会中断正在执行的模型或工具调用。`init_notification_buffer()` 只承担 consumer 的 set-once gate。
 
 **无 inbox 回退**：AsyncRouter 不可用（无 inbox 场景）时，consumer 回退为直接 push 到 v2 message queue（`QueuedMessage::new(Defer, WorkflowComplete, human(...))`，无 wake），并关闭 `notify_bg` 任务计数以消除 Defer 堆积竞态窗口（issue 2026-08-05）。
 
@@ -508,8 +472,6 @@ Path B 通知经 `AsyncRouter → InboxHandle → push_defer(Defer kind)` 注入
 2. 首次 turn 构建（`build_and_execute_agent`）时 `init_notification_buffer()` 返回 true → spawn session 级 consumer
 3. 后续 turn 构建调用返回 false → 跳过 spawn
 4. WorkflowMiddleware 不再持有 per-turn forwarder；通知消费统一由 executor 的 session 级 consumer 处理（见 §4.2）
-
-**关键演變**：早期设计曾尝试 per-turn forwarder + `swap_forwarder_abort()` 方案，但在 `b0d91529`（PULL 模型简化）中被 session 级 AtomicBool 方案替代——因为单一 session 级 consumer 语义更清晰，且 broadcast channel 天然保证单消费者无重复。
 
 ---
 
@@ -631,89 +593,36 @@ DTO 类型镜像 `peri_workflow::progress::RunProgress`（避免直接 crate 依
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| 脚本执行环境 | 独立 Node.js 进程 | 沙箱隔离，不污染 Rust 运行时；复用现有 workflow-engine |
+| 脚本执行环境 | 独立 Node.js 进程 | 独立管理进程生命周期并复用 workflow-engine；这不是 OS 级安全 sandbox |
 | run_id 生成 | tool.invoke() 中（not runner） | 立即返回 LLM，不等待子进程启动 |
-| 通知模型 | Defer 消息流注入（End 阶段消费，AsyncRouter → push_defer）| 避免 push 通知打断正在执行的 agent；通知作为消息流注入，GPT cache 友好 |
+| 通知模型 | Defer 消息流注入（Receive 阶段消费，AsyncRouter → push_defer）| 避免 push 通知打断正在执行的 agent；通知作为消息流进入下轮 Receive |
 | 完成通知 | 双路径（TUI + Agent） | TUI 需要实时反馈（bg-task-completed unstable event）；Agent 需要文本感知才能行动（Defer 注入） |
 | Consumer 模型 | session 级一次 spawn + AtomicBool guard（`peri-agent/src/session/exec/executor.rs`）| 替代 per-turn forwarder 方案：语义更清晰，broadcast channel 天然单消费者 |
 | progress 消费 | TUI 轮询（event payload） | 删除 8 跳 push 管线（~190 行），降为 ~100 行轮询 |
-| agent 执行 | 完整 SubAgent 中间件链 | 复用 frozen data、HITL、tool 系统、LLM 管理 |
+| agent 执行 | 专用 Workflow Agent 链 | 复用 frozen data、tool 与 LLM 基础设施，同时显式限制递归 SubAgent 等能力 |
 | 并发限制 | Registry 上限 3 | 防止 LLM 无限 spawn workflow |
 | journal 保留 | 最多 50 个 run 目录 | 避免磁盘膨胀，同时保留足够历史供 resume 和调试 |
-| system prompt | 全程 unchanged | 遵循 Prompt Cache 规则——中途变更导致 cache 失效 + 行为漂移 |
-| 纠正消息 | `BaseMessage::human()` + `<system-reminder>` | 遵循 [TRAP]——禁止用 `system` 消息注入纠正（会被 hoist 到 top 导致 frozen prompt 污染） |
+| system prompt | 冻结 base + request-time contribution seam | 遵循 ARC-FROZEN-001 与 ARC-SERIAL-001，不把 workflow 状态写入缓存前缀 |
+| 纠正消息 | Defer 进入 MessageQueue | 禁止用 `system` 消息注入运行时状态；Receive 统一写入 Transcript |
+
+## 11. 能力暴露与使用入口
+
+Workflow 是 deferred capability：只有 workflow executor 可用且
+`WorkflowMiddleware` 在当前 session 生产链中时，`Workflow` 才进入 session-local
+tool view，并经 `SearchExtraTools → ExecuteExtraTool` 发现和调用。关闭 middleware 或
+缺少 executor 时，tool、目录、提示贡献、SubAgent/Workflow 继承与客户端投影必须一起
+消失。
+
+面向模型的操作手册是 builtin skill
+`peri-middlewares/src/skills/builtin/skills/ultracode/SKILL.md`，按需加载；系统提示词不
+常驻复制完整 workflow 教程。复杂、全生命周期交付另由 `ultra-adlc` skill 与
+[Ultra-ADLC 设计](ultra-adlc.md)约束。
+
+Workflow host 优先使用本地固定版本 bundle；不可用时按实现契约使用精确版本的
+`npx` fallback。运行需要 Node.js，但不要求用户全局安装 `@peri-code/workflow`。
+artifact identity、handshake、环境清理与失败语义以代码和相邻测试为准。
+
+用户可通过 `/workflows` 查看运行快照。面板是运行状态投影，不拥有 workflow
+lifecycle；kill、resume、journal 与 terminal state 仍由 runner/registry 事实源决定。
 
 ---
-
-## 11. 配置与约束
-
-### 11.1 系统提示词
-
-`peri-acp/prompts/sections/16_workflow.md` — LLM 可见的 workflow 简介（~10 行），内容简练：
-- Workflow 是 deferred tool，需通过 `SearchExtraTools` 发现
-- 主要用途说明（编排多 agent 并行/流水线）
-- **重定向到 ultracode skill**（"For detailed guidance on writing workflow scripts, invoke the `ultracode` skill."）
-- 原语（parallel/pipeline/phase/log）、配额说明、注意事项等已委托给 ultracode skill，不在 prompt section 中重复
-
-### 11.2 推荐用法
-
-- **单脚本**：WorkflowTool { script: "<inline>" } — 简单测试场景
-- **脚本路径**：WorkflowTool { scriptPath: ".claude/workflows/audit.js" } — 生产场景
-- **Resume**：WorkflowTool { scriptPath: "...", resumeFromRunId: "prev-id" } — 中断恢复
-- **命名命令**：`/{name}` — 用户直接触发（通过 slash command）
-
-### 11.3 限制
-
-- 单 session 最多 50 个历史 run 目录
-- 并发最多 3 个 workflow
-- agent 最多 200 轮迭代（vs Main Agent 500 轮）
-- workflow agent 无 SubAgent 能力（避免递归嵌套）
-- 用户需要预装 `@peri-code/workflow` npm 包（含 workflow-engine 依赖）
-
-### 11.4 Ultracode Skill — LLM 可见的 Workflow 操作手册
-
-`peri-middlewares/src/skills/builtin/skills/ultracode/SKILL.md` — 这是 LLM 使用 Workflow 系统的**完整操作手册**。当 LLM 需要编排多 Agent 时，它加载此 skill 获得全部所需知识。
-
-**在系统中的角色**：
-
-```
-用户说 "/ultracode" 或 "workflow" 或 "parallel"
-        │
-        ▼
-Skill 系统匹配 ultracode skill → 注入 LLM 上下文
-        │
-        ▼
-LLM 阅读 SKILL.md → 学会如何用 Workflow 工具
-        │
-        ├─ SearchExtraTools("workflow") → 发现 deferred tool
-        ├─ ExecuteExtraTool("Workflow", { script: "..." }) → 启动 workflow
-        └─ /workflows → 打开面板监控进度
-```
-
-**为什么用 Skill 而非 System Prompt**：
-
-| 方案 | System Prompt 全量注入 | Skill 按需加载 |
-|------|------------------------|----------------|
-| Prompt 体积 | 每次对话都携带（~145 行） | 仅在触发时注入 |
-| Cache 友好性 | 占用 prompt cache，降低有效上下文 | 不影响日常对话 |
-| 更新灵活性 | 修改 system prompt 需重启 session | 修改 SKILL.md 即时生效 |
-| 职责分离 | system prompt 混杂操作细节 | system prompt 只做简介（~10 行），skill 提供完整指南 |
-
-**Skill 内容结构**：
-
-| 段落 | 内容 | 目的 |
-|------|------|------|
-| **When to Use** | 适用/不适用场景清单 | 防止 LLM 滥用 workflow（简单任务直接做，不要编脚本） |
-| **How to Use** | 发现 deferred tool 的两步流程 + 六种原语定义 | 教 LLM 正确的工具调用序列和脚本语法 |
-| **Examples** | Parallel / Pipeline / Phase / Sub-workflow 完整示例 | 可复制的模板，降低 LLM 写出错误脚本的概率 |
-| **Best Practices** | label、allowedTools、phase、maxConcurrency 的使用建议 | 确保 LLM 产出的 workflow 具备可观察性和安全性 |
-| **Script Constraints** | 沙箱限制（禁止 Date、meta 必须含 name+description）| 防止 LLM 写出因沙箱限制而失败的脚本 |
-
-**关键细节**：
-
-- **`parallel` 陷阱警告**：Skill 明确标注 `parallel` 入参必须是工厂函数 `() => agent(...)` 而非直接 `agent(...)`。直接传 Promise 会被 runtime 静默吞掉，workflow 以「假成功 + 全 null」结束。这是一条从真实 bug 中提炼的防御性文档。
-- **Deferred tool 发现流程**：Workflow 不是 core tool——LLM 必须先调 `SearchExtraTools("workflow")` 再用 `ExecuteExtraTool` 调用。Skill 将此两步流程作为第一项操作说明，防止 LLM 尝试直接调用。
-- **`userInvocable: true`**：用户可通过 `/ultracode [task]` 直接触发，`argumentHint` 提供参数提示。
-- **触发词匹配**：`description` 字段包含 "ultracode"、"workflow"、"parallel agents"、"pipeline" 等关键词，skill 系统据此自动激活。
-
-**与 §11.1 系统提示词的关系**：System prompt section `16_workflow.md`（~10 行）仅做简介 + 显式重定向：*"For detailed guidance on writing workflow scripts, invoke the `ultracode` skill."* 实际的操作细节、示例、约束全部在 SKILL.md 中。这是一个两层架构：system prompt 告诉 LLM "有这个能力"，skill 告诉 LLM "怎么用它"。

@@ -1,7 +1,7 @@
 # peri-workflow 代码索引
 
 > 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-09-01
-> 依据：`docs/design/workflow-system.md`、`docs/standards/architecture-contracts.md`、源码（无 crate 级 CLAUDE.md）
+> 依据：`docs/design/workflow.md`、`docs/standards/architecture-contracts.md`、源码（无 crate 级 CLAUDE.md）
 
 ## 架构速览
 

@@ -1,6 +1,6 @@
-# Perihelion TUI Chat & Tool Activity Workbench — UI/UX 目标规范
+# TUI Chat 与 Tool Activity Workbench 目标设计
 
-> 状态：目标规范（包含当前实现基线与分阶段迁移要求）
+> 状态：已批准目标设计（当前实现基线只用于解释兼容边界；进度见对应 active issue）
 > 范围：`peri-tui` 的 chat transcript、全部 Agent tool call、Tool Inspector、交互弹窗、滚动、focus、selection 与鼠标事件
 > 上游边界：`Agent → ACP → TUI`；涉及新增事件或详情请求时遵守 `ARC-EVENT-001` 与 `ARC-BOUNDARY-001`
 > 视觉基础：延续现有连续 transcript、统一水平网格、语义 token 与响应式断点
@@ -16,7 +16,7 @@
 4. 统一的 semantic hit region、hover、press、drag 与 focus 模型；
 5. transcript、Inspector、Panel、Modal 的区域化滚动所有权；
 6. 大输出、流式日志、敏感内容和动态 MCP/plugin 工具的安全 fallback；
-7. 可按阶段验证的实现路线。
+7. 可重复验证的验收契约。
 
 本文使用以下标签区分事实与目标：
 
@@ -1698,123 +1698,8 @@ Full | Reduced | KeyboardOnly
 - replay 与 live path 对同一工具产生等价 ToolEntryVm；
 - 不因新 Inspector 将敏感 raw payload 无条件广播给所有客户端。
 
-## 20. 分阶段实施路线
 
-**目标规范**：实施路线按 §19.2 协议扩展与 §21 验收标准推进；Phase 0 可在不扩展协议的前提下完成。
-
-### Phase 0：文档与安全基线
-
-目标：先消除规范冲突和危险鼠标路径。
-
-- 修订 `TUI-EVENT-001` 与 `peri-tui/CLAUDE.md`；
-- 移除 HITL 整窗 `MouseDown` 批准，改为显式 action 的 Down+Up；
-- 记录 approval `Submitting/stale` 状态；
-- 修复 JSON object/array `rawOutput` 变空的 TUI 解码；
-- 明确 artifact direct/deferred 注释事实；
-- 为 unknown summary 移除任意首字段 fallback，先落安全 allowlist。
-
-验证：
-
-- body/border/空白/drag/release outside 永不批准；
-- unknown `{"token":"secret-marker"}` 不在 Inline 出现 marker；
-- object/array output 不再静默空白；
-- 文档不再同时声明“只消费滚轮”和“消息区可点击”。
-
-### Phase 1：Tool identity、family presenter 与安全 ViewModel
-
-目标：所有现有工具先拥有友好的 Inline/Expanded 表示。
-
-- 增加 `ToolIdentity`、`ToolFamily`、完整 lifecycle 与 `DetailRef`；
-- 先对 raw alias/name 做兼容 presenter：`reading`/`Shell`/`task`/`WriteSandbox`/legacy `Skill`；
-- 对 legacy `ExecuteExtraTool` 只解析并标记 delegated requested target，不冒充 effective target；
-- 把 Skill/Todo 特例升级为 family presenter registry；
-- 覆盖 §12 的所有工具和动态 fallback；
-- focus/fold identity 迁移到稳定 `EntryKey/ToolKey`；
-- 增加 redaction、control-sequence sanitization 与 i18n keys。
-
-验证：
-
-- 静态工具逐项 golden scene；
-- dynamic MCP、malformed wrapper、unknown plugin、legacy replay 均不空白、不 panic；
-- synthetic secret marker 不进入 VM/render/copy；
-- 同一 `tool_id` 更新同一 entry，不重复。
-
-### Phase 2：统一 InteractionFrame 与 Command Router
-
-目标：把鼠标从分散 rect/handler 升级为统一 semantic routing。
-
-- 建立 frame generation、z-order、hit regions 与 pointer capture；
-- 迁移 entry、disclosure、Details、copy、interaction、scrollbar；
-- 实现 hover target-change 更新与 focus/pressed 样式；
-- keyboard/mouse 生成统一 `UiCommand`；
-- 把全局 blanket consume 改为 region-owned consume。
-
-验证：
-
-- Down+Up、阈值、缺失 Drag、resize/session reset stale frame；
-- body drag 只选择文本；
-- scrollbar 优先于 selection；
-- hover 不改变 focus/fold、不触发详情请求；
-- 每条鼠标语义命令存在 keyboard parity test。
-
-### Phase 3：Tool Inspector workspace
-
-目标：引入非模态、响应式详情面。
-
-- 在 AppShell/Session workspace 增加 dock/drawer/full-page placement；
-- 抽取现有 panel primitives，不复用静态 Panel state machine；
-- 实现 Overview/Input/Output/Metadata，再实现 Diff/Log/Subagent/Workflow/Resources；
-- 保留 composer；实现 focus restoration、独立 scroll/follow/selection；
-- mouse router 演进为 region-aware。
-
-验证：
-
-- Wide 下 transcript/Inspector wheel 按坐标独立滚；
-- Standard drawer 不隐藏 composer；
-- Narrow 全屏 Esc 后恢复原 entry 与 anchor；
-- Panel/Modal 打开关闭时 focus 和事件不穿透；
-- resize 保留 selected tool/facet/scroll。
-
-### Phase 4：混合 detail store 与协议扩展
-
-目标：支持大输出、历史详情与真实流式数据。
-
-- 增加 source-side redaction、resolver identity snapshot（含 normalized/approval-final input）、detail revision、opaque ref 与分页 ACP 请求；
-- summary/detail store 分离；
-- 增加 structured diff/log/resource facets；
-- 如需要 running tail，增加 sequenced `ToolOutputChunk`；
-- replay 持久化 detail ref/completeness，并提供 legacy fallback；
-- 为 detail cache 设置 session-scoped bounded LRU。
-
-验证：
-
-- 小型 inline 与 RPC detail 语义一致；
-- 跨 session opaque ref 查询失败；
-- streaming sequence 去重，迟到 chunk 不复活终态；
-- 100k 行只渲染 viewport；
-- clear/rewind/switch/close 清理 cache/pending；
-- output unavailable 时明确说明，不伪造。
-
-### Phase 5：Activity strip、性能与 accessibility 收口
-
-目标：让后台活动、鼠标与低性能终端形成完整产品体验。
-
-- 增量 Activity strip；
-- Full/Reduced/KeyboardOnly profile；
-- wheel coalescing、hover redraw 与 animation budget；
-- NO_COLOR/ASCII/reduced-motion；
-- CJK/emoji/combining mark 与 clipboard fallback；
-- PTY/E2E 覆盖鼠标、滚动、Modal、Inspector 与 resize。
-
-验证：
-
-- 120×30、100×24、80×24、48×16、40×8、30×8；
-- ghostty 高频 wheel 与 SSH burst 不丢尾、不回弹、不跨区域；
-- KeyboardOnly 可完成所有语义动作；
-- idle 无高频 redraw；
-- Activity strip 不造成 transcript/composer 大跳。
-
-## 21. 验收标准
+## 20. 验收标准
 
 **目标规范**：以下验收条件是 redesign 完成后必须满足的可验证标准。
 
@@ -1921,7 +1806,7 @@ Full | Reduced | KeyboardOnly
 - **PERF-003**：Inspector 关闭时不解析完整大 output/diff。
 - **PERF-004**：idle 时无 hover/spinner/detail 导致的高频 redraw。
 
-## 22. 验证场景与命令
+## 21. 验证场景与命令
 
 **目标规范**：以下验证场景用于验收；当前已具备的能力以 §3.2 为准，未实现的场景是目标路径。
 
@@ -1974,7 +1859,7 @@ cargo clippy -p peri-tui --all-targets -- -D warnings
 
 涉及事件/ACP 扩展时，额外运行相关 mapper、event-chain 与 replay tests；跨 workspace 收口时按仓库标准运行 workspace clippy/test。涉及鼠标、PTY、resize、面板和弹窗时，补充 E2E 场景，命令以 `e2e/CLAUDE.md`/测试规范为事实源。
 
-## 23. 设计完成定义
+## 22. 设计完成定义
 
 **目标规范**：
 
@@ -1991,7 +1876,7 @@ cargo clippy -p peri-tui --all-targets -- -D warnings
 9. Narrow、低高度、NO_COLOR、ASCII、Reduced、KeyboardOnly 可用；
 10. 标准、模块指引、事件契约、测试与实现同步，无平行事实源。
 
-## 24. 事实源索引
+## 23. 事实源索引
 
 | 主题 | 稳定事实源 |
 | --- | --- |

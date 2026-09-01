@@ -15,7 +15,7 @@
 
 原则：**标准有的走标准，真没有的才自定义。**
 
-详见 `docs/design/decisions/2026-07-07-acp-reuse-first.md`。
+当前协议裁决见 `docs/design/peri-acp-protocol.md` 与 ARC-EVENT-001；当时的独立决策记录已收敛并由本归档 issue 与 Git 历史保留。
 
 ---
 

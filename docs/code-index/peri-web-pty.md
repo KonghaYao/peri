@@ -43,4 +43,4 @@
 
 - 消费方：`peri-tui/src/main.rs:587-595` — `peri web` 命令：`peri_web_pty::config::Config::from_env()` + `peri_web_pty::start_server(config)`（block_on 运行）
 - 独立可执行：`src/main.rs` 为独立 bin 入口；`start_server` 以库形式供嵌入
-- Windows ConPTY 行为说明见 docs/review/2026-06-16-peri-web-pty-windows-conpty-bug.md（Cargo.toml:100 注释引用）
+- Windows ConPTY 行为以 `src/pty_session.rs`、`src/ws_handler.rs` 的平台分支及 `src/pty_session_test.rs` / `tests/ws_e2e_test.rs` 为事实源；历史事故过程不在 `docs/` 保留

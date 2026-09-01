@@ -5,7 +5,7 @@
 
 ## 架构速览
 
-- 职责：控制面宿主（docs/top-level.md §6）——控制面五步 lite params → pick Resources → pick Runtime → run Session → pop events；无业务执行权，只定位与转发（cancel 语义、终态判定均归 Agent 层）
+- 职责：控制面宿主（docs/design/architecture.md §6）——控制面五步 lite params → pick Resources → pick Runtime → run Session → pop events；无业务执行权，只定位与转发（cancel 语义、终态判定均归 Agent 层）
 - 数据流：ACP → `Controller`（协议化前分支）→ Runtime 查映射 → `SessionHandle`；事件经 `publish_event`/`publish` 双投递（弹出队列 `pop_events` + 订阅广播 `subscribe`，Langfuse bridge 旁路消费同一分支，不参与业务链路）
 - 稳定不变量：cancel 按 (session_id, turn_id, attempt_id) 三元组定位并转发，不解释取消语义（ARC-CANCEL-001）；事件统一出口为 `publish_event`（stamp 补打 + 双投递，ARC-EVENT-001）；缺省 Runtime 空实例、Resources 未注入，由部署装配点经 `with_*` 注入
 - 依赖方向（§0）：Controller → Runtime / Controller → Resources / 契约层 peri-acp-types；不依赖 peri-acp；peri-agent / peri-model / langfuse-client 为 langfuse 过渡依赖（L4 移除）

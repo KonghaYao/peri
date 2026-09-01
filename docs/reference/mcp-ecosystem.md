@@ -1,10 +1,11 @@
-# MCP 生态定位与互通指南（Connector 视角）· 整理版
+# MCP 生态定位与互通指南（Connector 视角）
 
-> 本文件是 MCP 生态定位与互通指南的唯一权威版本（原 `mcp-connector-guide.md` 已并入本文，不再并行保留）。
+> 本文件是生态背景与外部互通参考，不是仓库架构或协议的事实源。Perihelion
+> 的 MCP 设计以 `docs/design/dynamic-mcp.md`、
+> `docs/design/mcp-multiplexing.md` 和代码契约测试为准。
 >
-> 最后核对：2026-08-14
 > 实验位置：`side-projects/mcp-apps/`（Node.js + `@modelcontextprotocol/ext-apps` + `@modelcontextprotocol/sdk`）
-> 文档定位：说明 MCP 在 perihelion 中的生态角色——**标准的 connector / 通用外部能力对接器**——以及外部开发者如何实现「外部 MCP server ↔ peri 内部」的互通。本文是设计说明，不是规范；不搬运规范原文，官方出处见各章末尾链接。
+> 文档定位：说明 MCP 在 perihelion 中的生态角色——**标准的 connector / 通用外部能力对接器**——以及外部开发者如何实现「外部 MCP server ↔ peri 内部」的互通。不搬运规范原文，官方出处见各章末尾链接。
 
 ## 目录
 
@@ -568,7 +569,7 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 
 - MCP client 已进入 peri 主代码（`peri-middlewares/src/mcp/`，基于 rmcp）：tools 桥接、资源读取（`mcp_read_resource`）、OAuth 授权、断线重连均已落地；MCP Apps（`ui://` 渲染）仍在 `side-projects/mcp-apps/` 实验。
 - **MCP 域查询与技能分发已落地（2026-08-13）**：DiscoverMCP 只读工具（deferred / `meta`，search / list / detail）+ MCP `skill://` 异步发现与命令注入（McpSkillRegistry，session 级，分源合并），形态见 §7.4。
-- **注意**：MCP Apps 能力声明（`enable_extensions_with` 声明 `io.modelcontextprotocol/ui`）**尚未实现**——client 初始化目前用 `ClientCapabilities::default()`（`peri-middlewares/src/mcp/channel_handler.rs`）。server 因此不会下发 `ui://` 资源；落地 App 生态前需补齐（见 `docs/design/mcp-multiplexing.md` §10）。
+- **注意**：MCP Apps capability 与 relay 的实际状态以 `spec/issues/2026-08-27-mcp-apps-stdio-relay.md` 和契约测试为准；目标边界见 `docs/design/mcp-multiplexing.md`。
 - **MCP 通知（server → client）已实现**：2026-07-28 `subscriptions/listen` 全链路在 peri 主代码落地——`McpClientPool` 按 `McpSubscriptionsConfig`（`resources` URI 列表 + tools / prompts / resources 三个 list_changed 开关）协商协议并建立长流（`setup_subscription`），消费循环（`spawn_subscription_loop`）把 `notifications/resources/updated` 以 `<system-reminder><mcp-subscription …/>` Defer 消息注入会话 inbox 并唤醒 agent（字段经 XML 转义防注入）；list_changed 系列由 rmcp peer 内部失效缓存，不进 agent。订阅通知默认进 agent，不进 view。
 - **订阅可靠性**：长流异常中断按 1s/2s/4s 指数退避重新 `listen`（最多 3 次，收到通知即重置计数）；连接重连后按当前配置重建长流。2025-11-25 旧路径（`resources/subscribe` + 直推 list_changed）未实现；无订阅配置时维持 legacy 握手。
 - **装配**：`McpSubscriptionPort`（`peri-acp-types/src/mcp.rs`）由 `McpClientPool` 实现——session 创建时注册 inbox、`close_session` 时注销。反向（client → server）支持经 `ChannelNotificationSender` 发送自定义 JSON-RPC 通知（`peri-middlewares/src/mcp/mcp_notify.rs`）。

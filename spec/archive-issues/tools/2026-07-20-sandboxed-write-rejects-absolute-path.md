@@ -52,7 +52,7 @@ SandboxedWriteTool.invoke()
 
 ## 关联历史
 
-- `2026-07-20-sandboxed-write-design.md` 设计方案中未考虑此矛盾——`parameters()` 委托行为在设计中未被提及
+- 当时未采纳的 Sandboxed Write 方案未考虑此矛盾——`parameters()` 委托行为在方案中未被提及；过程方案已从 `docs/` 删除，可由 Git 历史追溯
 - `36b0aef3`（feat: replace WriteSandbox with SandboxedWriteTool）引入问题
 - `580ceef3`（test: add 27 adversarial path validation tests）中的 `test_sandboxed_write_invoke_absolute_rejected` **断言了绝对路径应被拒绝**，与 `parameters()` 描述的 "must be absolute" 直接冲突
 - `spec/issues/2026-07-20-plan-agent-writesandbox-not-found.md` 是前一个问题（沙箱目录不存在导致工具构造失败），已通过 `ab8786e8` 修复，但被 `36b0aef3` 重构取代后引入了新的矛盾

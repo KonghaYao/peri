@@ -269,7 +269,7 @@ Full Compact、Smart Compact 兼容字段和触发阈值不在本次修改范围
 
 ## 10. 测试设计
 
-测试遵循 `docs/design/testing-standards.md`，纯逻辑覆盖放在 compact_v2 邻近的 `*_test.rs`。
+测试遵循 `docs/standards/testing.md`，纯逻辑覆盖放在 compact_v2 邻近的 `*_test.rs`。
 
 ### 10.1 Planner 测试
 

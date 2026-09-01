@@ -1,6 +1,9 @@
-# peri-agent Interaction Multiplex 设计
+# 交互 Broker 与多路审批设计
 
-> 简要说明 | 日期：2026-07-15 | v2
+> 状态：现行设计
+>
+> 跨 transport 的结算、串行化与关闭语义以 ARC-HITL-001 和
+> ARC-TRANSPORT-001 为准。
 
 ## 1. 用途
 

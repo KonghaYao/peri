@@ -1,6 +1,8 @@
-# peri-agent v2 Micro Compact 投影引擎设计
+# Micro Compact 投影引擎设计
 
-> v2 重写，替代旧版 Micro Compact | 日期：2026-07-25 | 修订：v1.0
+> 状态：现行设计
+>
+> 运行时事实源为 `peri-agent/src/agent/compact_v2/` 与相邻测试。
 
 ## 1. 背景
 

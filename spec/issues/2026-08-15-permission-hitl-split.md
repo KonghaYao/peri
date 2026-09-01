@@ -10,7 +10,7 @@
 
 现状 `HumanInTheLoopMiddleware` 名不副实：其实际职责是**工具审批**（`before_tool` / `before_tools_batch` 钩子 + `default_requires_approval` + `PermissionMode` 决策 + `AutoClassifier`），名为"HITL"但 Bypass 模式 / disabled 时并无人在环。真正的"人在环"交互工具 `AskUserQuestion` 反而游离在 middleware 体系之外：作为宿主级 `shared_tools` 唯一条目（`assembly.rs:537-543` 无条件 insert）、不在 `MIDDLEWARE_TOOL_NAMES` 剔除面，导致 meta harness 关闭 `HumanInTheLoopMiddleware` 后该工具仍出现在 LLM 视图——"关闭不掉"。
 
-设计文档 `docs/design/meta-harness-design.md` §2.5 / §3.4 将"AskUserQuestion 不在关闭面"记为**有意设计 + 未来项**（"若要纳入关闭面，需将其移入某个 middleware 的 collect_tools 或显式建模为可关闭能力"）。本 issue 落地该未来项。
+设计文档 `docs/design/meta-harness.md` §2.5 当前将审批与提问建模为两个独立关闭面；本 issue 记录该契约的落地过程。
 
 ## 决策内容（用户拍板 2026-08-15）
 
