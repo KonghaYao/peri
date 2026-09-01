@@ -19,6 +19,8 @@ use crate::progress::WorkflowProgressStore;
 use crate::registry::{WorkflowRunStatus, WorkflowTaskRegistry, WorkflowTaskResult};
 use crate::runner::{WorkflowInput, WorkflowResult, WorkflowRunner};
 
+const MAX_SAFE_BUDGET_TOTAL: u64 = 9_007_199_254_740_991;
+
 /// Workflow 工具 — 启动 workflow（fire-and-forget）
 pub struct WorkflowTool {
     runner: Arc<WorkflowRunner>,
@@ -84,6 +86,12 @@ impl BaseTool for WorkflowTool {
                     "description": "Maximum concurrent agents (default 3).",
                     "default": 3
                 },
+                "budgetTotal": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_SAFE_BUDGET_TOTAL,
+                    "description": "Maximum total token budget for this workflow. Omit for no explicit budget."
+                },
                 "resumeFromRunId": {
                     "type": "string",
                     "description": "If provided, resume the workflow from the given run ID. \
@@ -133,6 +141,7 @@ impl BaseTool for WorkflowTool {
         let script = script_owned.as_str();
 
         let max_concurrency = input["maxConcurrency"].as_u64().unwrap_or(3) as u32;
+        let budget_total = parse_budget_total(&input)?;
 
         let args = input.get("args").cloned();
 
@@ -163,7 +172,7 @@ impl BaseTool for WorkflowTool {
             script: script.to_string(),
             args,
             max_concurrency,
-            budget_total: None,
+            budget_total,
             workflow_name: workflow_name.clone(),
             resume_from,
         };
@@ -394,6 +403,23 @@ impl BaseTool for WorkflowTool {
     }
 }
 
+fn parse_budget_total(input: &Value) -> Result<Option<u64>, String> {
+    let Some(value) = input.get("budgetTotal") else {
+        return Ok(None);
+    };
+    let Some(budget_total) = value.as_u64() else {
+        return Err(format!(
+            "'budgetTotal' must be an integer between 1 and {MAX_SAFE_BUDGET_TOTAL}"
+        ));
+    };
+    if !(1..=MAX_SAFE_BUDGET_TOTAL).contains(&budget_total) {
+        return Err(format!(
+            "'budgetTotal' must be an integer between 1 and {MAX_SAFE_BUDGET_TOTAL}"
+        ));
+    }
+    Ok(Some(budget_total))
+}
+
 /// 从脚本中提取 workflow 名称（简单 heuristic：查找 `name:` 后的第一个引号字符串）
 fn extract_workflow_name(script: &str) -> String {
     // 尝试匹配 name: '...' 或 name: "..."
@@ -444,3 +470,7 @@ fn is_safe_run_id(s: &str) -> bool {
     // 必须为合法 UUID
     uuid::Uuid::parse_str(s).is_ok()
 }
+
+#[cfg(test)]
+#[path = "tool_test.rs"]
+mod tests;

@@ -14,9 +14,26 @@ fn test_workflow_start_params_serializes_camel_case() {
     let json = serde_json::to_value(&params).unwrap();
     assert!(json.get("runId").is_some(), "runId 应存在，实际: {json}");
     assert!(json.get("maxConcurrency").is_some());
-    assert!(json.get("budgetTotal").is_some());
+    assert_eq!(json.get("budgetTotal"), Some(&serde_json::Value::Null));
     assert!(json.get("run_id").is_none());
     assert!(json.get("max_concurrency").is_none());
+}
+
+#[test]
+fn test_workflow_start_params_preserves_budget_total() {
+    let params = WorkflowStartParams {
+        run_id: "r1".into(),
+        script: "code".into(),
+        args: None,
+        budget_total: Some(9_007_199_254_740_991),
+        max_concurrency: 3,
+        resume: None,
+        cwd: "/tmp".into(),
+    };
+
+    let json = serde_json::to_value(&params).unwrap();
+
+    assert_eq!(json["budgetTotal"], 9_007_199_254_740_991_u64);
 }
 
 #[test]

@@ -2,7 +2,8 @@
 
 use super::{
     parse_agent_run_params, parse_run_scoped, validate_start_ack, workflow_local_dist_in,
-    AgentExecutor, JournalTruncateParams, WorkflowDoneParams, WorkflowInput, WorkflowRunner,
+    workflow_start_params, AgentExecutor, JournalTruncateParams, WorkflowDoneParams, WorkflowInput,
+    WorkflowRunner,
 };
 use crate::journal::WorkflowJournalStore;
 use crate::progress::{RunStatus, WorkflowProgressStore};
@@ -29,6 +30,24 @@ impl AgentExecutor for MockAgentExecutor {
             duration_ms: None,
         }
     }
+}
+
+#[test]
+fn test_workflow_start_params_preserve_budget_total() {
+    let input = WorkflowInput {
+        script: "export const meta = { name: 'budget', description: 'test' }".to_string(),
+        args: Some(serde_json::json!({"key": "value"})),
+        max_concurrency: 2,
+        budget_total: Some(9_007_199_254_740_991),
+        workflow_name: "budget".to_string(),
+        resume_from: None,
+    };
+
+    let params = workflow_start_params("run-1", &input, None, "/tmp");
+
+    assert_eq!(params.budget_total, Some(9_007_199_254_740_991));
+    assert_eq!(params.max_concurrency, 2);
+    assert_eq!(params.args, input.args);
 }
 
 #[test]

@@ -51,7 +51,7 @@ return { answer: r }`
       jsonrpc: '2.0',
       id: 1,
       method: 'workflow/start',
-      params: { runId: 'srv-1', cwd: '/tmp', script, budgetTotal: null },
+      params: { runId: 'srv-1', cwd: '/tmp', script, budgetTotal: Number.MAX_SAFE_INTEGER },
     })
 
     // start 同步响应

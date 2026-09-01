@@ -8,6 +8,7 @@
  * 前置：测试会自动执行 `bun run build`（保证 dist 为最新源码产物）。
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -182,6 +183,82 @@ return { answer: r }`
     expect(progressTypes).toEqual(
       expect.arrayContaining(['run_started', 'phase_started', 'agent_started', 'agent_done', 'phase_done', 'run_done'])
     )
+  })
+
+  test('budgetTotal 在首个 agent 消耗额度后阻止后续 agent', async () => {
+    const s = startRpc()
+    sessions.push(s)
+
+    const script = `export const meta = { name: 'e2e-budget', description: 'budget e2e test' }
+const first = await agent('first')
+const second = await agent('second')
+return { first, second }`
+
+    s.send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'workflow/start',
+      params: { runId: 'e2e-budget-1', cwd: '/tmp', script, budgetTotal: 1 },
+    })
+    await s.waitFor((m) => m.id === 1 && 'result' in m)
+
+    const first = await s.waitFor((m) => m.method === 'agent/run')
+    s.send({
+      jsonrpc: '2.0',
+      id: first.id,
+      result: { kind: 'ok', output: 'first-result', usage: { outputTokens: 1 } },
+    })
+
+    const done = await s.waitFor((m) => m.method === 'workflow/done', 10000)
+    const params = done.params as { status: string; error?: string }
+    expect(params.status).toBe('failed')
+    expect(
+      s.all().filter((m) => m.method === 'agent/run')
+    ).toHaveLength(1)
+
+    const runDone = s
+      .all()
+      .filter((m) => m.method === 'progress/event')
+      .map((m) => m.params as { type: string; status?: string })
+      .find((event) => event.type === 'run_done')
+    expect(runDone?.status).toBe('failed')
+  })
+
+  test('budgeted resume 命中 journal 时不重复 agent 调用', async () => {
+    const s = startRpc()
+    sessions.push(s)
+
+    const script = `export const meta = { name: 'e2e-budget-resume', description: 'budget resume e2e test' }
+const result = await agent('cached')
+return { result }`
+    const key = createHash('sha256')
+      .update('cached\n' + JSON.stringify({ prompt: 'cached' }))
+      .digest('hex')
+
+    s.send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'workflow/start',
+      params: {
+        runId: 'e2e-budget-resume-1',
+        cwd: '/tmp',
+        script,
+        budgetTotal: 1,
+        resume: [{
+          key,
+          seq: 0,
+          result: { kind: 'ok', output: 'cached-result', usage: { outputTokens: 99 } },
+        }],
+      },
+    })
+    await s.waitFor((m) => m.id === 1 && 'result' in m)
+
+    const done = await s.waitFor((m) => m.method === 'workflow/done', 10000)
+    const params = done.params as { status: string; returnValue: { result: string } }
+    expect(params.status).toBe('completed')
+    expect(params.returnValue).toEqual({ result: 'cached-result' })
+    expect(s.all().filter((m) => m.method === 'agent/run')).toHaveLength(0)
+    expect(s.all().filter((m) => m.method === 'journal/append')).toHaveLength(0)
   })
 
   test('未知方法返回 -32601', async () => {

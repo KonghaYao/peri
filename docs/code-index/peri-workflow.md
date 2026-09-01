@@ -1,6 +1,6 @@
 # peri-workflow 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-16
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-01
 > 依据：docs/design/workflow-system.md（v3.0，已与代码同步）、docs/standards/architecture-contracts.md、源码（无 crate 级 CLAUDE.md）
 
 ## 架构速览
@@ -20,7 +20,7 @@
 | 改 Workflow agent 挂起/kill | `src/rpc.rs` | `register_agent`、`deregister_agent`、`kill_agent` | Workflow Adapter 只保留 agent ownership token 与业务错误响应；通用 transport 委托 `peri-js-runtime`，契约 ARC-WORKFLOW-RPC-001 |
 | 改工作流定义/脚本执行 | `src/protocol.rs`（`WorkflowStartParams`、`WorkflowDoneParams`、`JournalEntry`）+ `src/runner.rs` | `WorkflowRunner::run`；消息循环与外层 kill 竞速 | 所有 Node→host run-scoped RPC 先匹配 active `run_id`；生产只接受已校验固定 artifact，显式 opt-in 才允许 npx；start/error/EOF/kill 均经 host kill/wait 收敛 |
 | 改 agent 装配/执行回调 | 契约 trait `peri-acp-types/src/workflow.rs:348` `AgentExecutor`；执行体 `peri-agent/src/agent/workflow/agent.rs:141`（WorkflowAgentExecutor，透传 frozen data）；本 crate 侧 re-export（runner.rs:122） | 消息循环 `agent/run` 分支（runner.rs:426）；`parse_agent_run_params`（:124，runId 必须匹配 :130） | 注册在 spawn 前（GAP-07 原子化，runner.rs:456）；kill 后不得发成功响应（owned token 校验 + was_killed 门控，runner.rs:494-528）；phase 从 progress store 补注（runner.rs:498-505）；其他 Dead 变体仍须正常响应，防 Node Promise 永远 hang（runner.rs:512-519） |
-| 改工具调用（WorkflowTool） | `src/tool.rs` | `BaseTool` impl（tool.rs:56）；`invoke`（:111）；`with_bg_registry`（:49） | deferred tool（未覆写 `is_direct`，默认 false，ARC-TOOLS-001）；scriptPath 限定 cwd 内（`resolve_script_path` :419）；resumeFromRunId 必须合法 UUID（`is_safe_run_id` :439）；1s 快速失败检测同步报错并清理 registry/bg_registry（tool.rs:280-330）；正常路径立即返回多行 run_id 文本（tool.rs:418-427） |
+| 改工具调用（WorkflowTool） | `src/tool.rs` | `BaseTool` impl（tool.rs:56）；`invoke`（:118）；`with_bg_registry`（:49） | deferred tool（未覆写 `is_direct`，默认 false，ARC-TOOLS-001）；`budgetTotal` schema 与 JS safe integer 严格校验由 `parse_budget_total` 负责并透传 `WorkflowInput`；scriptPath 限定 cwd 内（`resolve_script_path`）；resumeFromRunId 必须合法 UUID（`is_safe_run_id`）；1s 快速失败检测同步报错并清理 registry/bg_registry；正常路径立即返回多行 run_id 文本 |
 | 改并发限制/完成通知 | `src/registry.rs` | `WorkflowTaskRegistry::register`（:69 限流）、`complete`（:84 仅广播）、`kill`（:95）、`active_count`（:61） | 并发按 Running 状态计数；complete 不移除 run（history 保留供面板/调试）；kill 只发 kill_tx、不 abort child_handle（清理归 runner kill 分支，registry.rs:104-107）；广播唯一消费在 peri-agent executor 的 session 级 consumer（防重复通知） |
 | 改进度状态（TUI 面板数据源） | `src/progress.rs` | `apply_event`（:57 reducer）；`get_run_stats`（:314）；`get_phase_summaries`（:330）；`get_all_runs_snapshot`（:206） | agent 按 agent_id 精确匹配、非 LIFO（progress.rs:3-4）；`AgentDone` 仅当 started_agents 含该 agent 才计 token/duration（resume cache-hit 只有 AgentDone，progress.rs:151-170）；RunDone 归一 Completed/Killed/Failed（:184-192）；完成态保留 5 分钟（`COMPLETED_RETENTION` :219）；`agents_as_map` serde（:290）使 IndexMap 序列化为 JSON 数组 |
 | 改持久化/resume | `src/journal.rs` | `init_run`（:64）、`append`（:71）、`read_all`（:86）、`write_state`（:105 原子写）、`cleanup_old_runs`（:115）、`extract_long_texts`（:185） | `run_dir` 防路径遍历（:50-61）；state.json 先写 .tmp 再 rename（:105-111）；resume 按 `JournalEntry.key`（SHA256）cache-hit（read_all → WorkflowStartParams.resume）；`KEEP_MAX_RUNS=50` 按 mtime 清理最旧目录（:115-140）；超长文本（>200 字符）落盘 outputs/{label}.txt 并以 `${label}` 占位（:185） |

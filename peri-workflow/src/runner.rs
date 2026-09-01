@@ -357,6 +357,23 @@ fn parse_agent_run_params(
     parse_run_scoped(params, expected_run_id).map_err(str::to_string)
 }
 
+fn workflow_start_params(
+    run_id: &str,
+    input: &WorkflowInput,
+    resume: Option<Vec<JournalEntry>>,
+    cwd: &str,
+) -> WorkflowStartParams {
+    WorkflowStartParams {
+        run_id: run_id.to_string(),
+        script: input.script.clone(),
+        args: input.args.clone(),
+        budget_total: input.budget_total,
+        max_concurrency: input.max_concurrency,
+        resume,
+        cwd: cwd.to_string(),
+    }
+}
+
 // ─── 公开类型 ──────────────────────────────────────────────────
 
 /// Workflow 输入参数
@@ -578,15 +595,12 @@ impl WorkflowRunner {
             .expect("new JavaScript host must expose its incoming receiver");
 
         // 7. Send workflow/start request
-        let start_params = match serde_json::to_value(&WorkflowStartParams {
-            run_id: run_id.clone(),
-            script: input.script.clone(),
-            args: input.args.clone(),
-            budget_total: input.budget_total,
-            max_concurrency: input.max_concurrency,
-            resume: resume_entries,
-            cwd: self.cwd.clone(),
-        }) {
+        let start_params = match serde_json::to_value(workflow_start_params(
+            &run_id,
+            &input,
+            resume_entries,
+            &self.cwd,
+        )) {
             Ok(v) => v,
             Err(e) => {
                 self.active_channels.remove(&run_id);
