@@ -24,6 +24,7 @@ fn test_dispatch_subagent_streaming_updates_current_turn_group() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     dispatch_and_notify(
@@ -82,6 +83,7 @@ fn test_subagent_stopped_freezes_child_trailing_bubble() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     dispatch_and_notify(
@@ -172,6 +174,7 @@ fn test_subagent_stopped_after_turn_done_does_not_set_loading() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // 模拟 TurnDone：归档 + 重置 phase/loading
@@ -227,6 +230,7 @@ fn test_subagent_stopped_after_turn_suspended_does_not_set_loading() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // 模拟 TurnSuspended：归档 + 重置 phase/loading
@@ -285,6 +289,7 @@ fn test_bg_subagent_chunk_after_turn_suspended_does_not_leak_to_main() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // bg subagent 启动（注册 BG_AGENT_IDS + current_turn 组）
@@ -383,6 +388,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // 前置：bg 启动（注册 BG_AGENT_IDS + SubAgentGroup）→ 主 turn 挂起
@@ -537,6 +543,7 @@ fn test_subagent_stopped_after_subagent_started_keeps_loading() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // SubagentStarted 设置 phase=PromptRunning
@@ -600,6 +607,7 @@ fn test_prompt_submitted_sets_loading() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     dispatch_and_notify(
@@ -643,6 +651,7 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // 启动同步 sub-agent
@@ -730,6 +739,7 @@ fn test_loading_reset_event_resets_phase() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     // 前置：PromptSubmitted 使 bridge 进入 PromptRunning，ACP_STATE 派生 loading
     dispatch_and_notify(
@@ -794,6 +804,7 @@ fn test_loading_reset_then_turn_interrupted_keeps_idle() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
     dispatch_and_notify(
         &mut state,

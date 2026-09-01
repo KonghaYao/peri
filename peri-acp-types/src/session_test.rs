@@ -84,6 +84,25 @@ fn llm_http_failure_preserves_status_and_redacted_original_meaning() {
 }
 
 #[test]
+fn llm_error_redacts_structured_prefixed_and_labeled_url_secrets() {
+    let failure = ExecutionFailure::from_agent_error(&AgentError::LlmError(
+        r#"provider rejected Authorization:"Bearer auth-secret" "api_key": "key-secret" endpoint_url="https://api.example.test/v1?token=query-secret&mode=debug""#.to_string(),
+    ));
+
+    assert_eq!(failure.kind, ExecutionFailureKind::Llm);
+    assert!(failure.public_message.contains("provider rejected"));
+    assert!(failure.public_message.contains("Authorization:"));
+    assert!(failure.public_message.contains("[redacted]"));
+    assert!(failure.public_message.contains("\"api_key\": \"[redacted]"));
+    assert!(failure
+        .public_message
+        .contains("endpoint_url=\"https://api.example.test/v1?[redacted]"));
+    for secret in ["auth-secret", "key-secret", "query-secret"] {
+        assert!(!failure.public_message.contains(secret));
+    }
+}
+
+#[test]
 fn llm_failure_message_is_limited_without_splitting_unicode() {
     let failure = ExecutionFailure::from_agent_error(&AgentError::LlmError("错".repeat(2_100)));
 

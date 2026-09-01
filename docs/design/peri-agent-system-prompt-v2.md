@@ -137,7 +137,7 @@ pub struct PromptFeatures {
 ## 3. 与 v2 其他模块的关系
 
 - **Session / FrozenContext**：`session/new` 调用 `build_system_prompt()` 产出 `frozen_system_prompt`，封装进 `FrozenContext`（`peri-agent/src/session/store.rs`）。FrozenContext 由 `FrozenContextBuilder` 构建，包含 5 个字段：`system_prompt`（完整提示词）、`claude_md`（项目级+用户级 CLAUDE.md 合并）、`skill_summary`（Skills 摘要）、`date`（会话日期）、`language`（语言偏好）。所有字段均为 `Arc<str>` 以避免跨 Agent/Turn 复制大字符串。后续轮次直接复用，禁止重新构建
-- **LLM 适配器**：`split_system_blocks()` 按 boundary 拆分为静态/动态块，Provider 各自处理。Anthropic 适配器（`invoke.rs`）中 `messages_to_anthropic()` 还会执行 System 消息分离——将含边界标记的 System 消息（来自 `build_system_prompt()`）排在最前面作为可缓存前缀，不含边界标记的 middleware 注入内容排在边界之后。这确保 middleware contributions 变化不会破坏 Anthropic prompt cache 前缀。详见 LLM 适配器文档
+- **LLM 适配器**：`split_system_blocks()` 按 boundary 拆分静态/动态块，Provider 各自处理。Anthropic 的 `messages_to_anthropic()` 保持所有 System 消息原顺序拼接：模板内 dynamic suffix 与后续 request-time middleware contribution 均落在显式 boundary 后；不再通过重排 System 消息伪造前缀。OpenAI-compatible 仅剥离 transport token 并保持其他 wire bytes。详见 LLM 适配器文档
 - **中间件系统**：切面通过 `prompt_contribution` 声明贡献 System Prompt 片段。Executor 在 Agent 构建时收集并追加到 `frozen_system_prompt` 尾部。详见中间件设计文档
 - **SubAgent**：复用 main agent 的 frozen 数据，仅 AgentOverrides 不同，禁止重新读盘
 - **Compact**：不触碰 System Prompt。摘要以 Human 消息注入，不被 hoist

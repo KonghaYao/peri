@@ -28,7 +28,7 @@ use crate::kit::rewind_action::spawn_rewind_consumer;
 use crate::kit::service_snapshot::{SnapshotSource, spawn_service_snapshot};
 use crate::kit::submit_consumer::{spawn_cancel_consumer, spawn_submit_consumer};
 use crate::kit::submit_request::SubmitRequest;
-use crate::kit::thread_load_consumer::spawn_thread_load_consumer;
+use crate::kit::thread_load_consumer::{ThreadLoadDispatcher, spawn_thread_load_consumer};
 use crate::kit::ui_command::ui_command_specs;
 use crate::launch::{TuiLaunchOptions, build_app_and_acp, teardown_app};
 use ratatui_kit::{
@@ -299,8 +299,9 @@ pub async fn run_kit_fullscreen(
         let _ = atoms::HITL_RESPONSE_TX.set(hitl_tx);
 
         // 4b2. THREAD_LOAD channel：ThreadBrowser → thread_load_consumer（H3）
-        let (thread_load_tx, thread_load_rx) = mpsc::unbounded_channel::<String>();
-        let _ = atoms::THREAD_LOAD_TX.set(thread_load_tx);
+        let (thread_load_tx, thread_load_rx) = mpsc::unbounded_channel();
+        let _ =
+            atoms::THREAD_LOAD_TX.set(ThreadLoadDispatcher::new(thread_load_tx, client.clone()));
 
         // 4a2. CANCEL channel：event_handlers Ctrl+C → cancel_consumer
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<()>();

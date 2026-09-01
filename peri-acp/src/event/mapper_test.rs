@@ -23,6 +23,7 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
         }),
         stop_reason: Some(StopReason::EndTurn),
         request_id: Some("req-123".to_string()),
+        source_agent_id: None,
     };
     let caps = PeriCaps {
         token_stats: true,
@@ -73,6 +74,7 @@ fn test_llm_call_end_no_optional_fields() {
         }),
         stop_reason: None,
         request_id: None,
+        source_agent_id: None,
     };
     let caps = PeriCaps {
         token_stats: true,
@@ -94,6 +96,32 @@ fn test_llm_call_end_no_optional_fields() {
 }
 
 #[test]
+fn test_auxiliary_llm_usage_preserves_source_agent_id() {
+    let event = ExecutorEvent::LlmCallEnd {
+        step: 1,
+        model: "aux-model".into(),
+        output: String::new(),
+        usage: Some(TokenUsage::new(100, 1)),
+        stop_reason: Some(StopReason::EndTurn),
+        request_id: Some("aux-request".into()),
+        source_agent_id: Some("child-agent".into()),
+    };
+    let mapped = map_event(
+        &event,
+        200_000,
+        &PeriCaps {
+            token_stats: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(mapped[0].source_agent_id.as_deref(), Some("child-agent"));
+    assert!(matches!(
+        mapped[0].updates[0],
+        SessionUpdate::UsageUpdate(_)
+    ));
+}
+
+#[test]
 fn test_llm_call_end_no_usage_filtered() {
     let event = ExecutorEvent::LlmCallEnd {
         step: 1,
@@ -102,6 +130,7 @@ fn test_llm_call_end_no_usage_filtered() {
         usage: None,
         stop_reason: None,
         request_id: None,
+        source_agent_id: None,
     };
     let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert!(

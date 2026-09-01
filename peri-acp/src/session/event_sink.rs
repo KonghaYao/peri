@@ -836,6 +836,45 @@ mod tests {
         assert!(notifications[0].1.get("_peri").is_none());
     }
 
+    #[tokio::test]
+    async fn auxiliary_usage_places_source_identity_in_top_level_acp_meta() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                token_stats: true,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::LlmCallEnd {
+                step: 0,
+                model: "aux-model".into(),
+                output: String::new(),
+                usage: Some(peri_acp_types::model::TokenUsage::new(100, 1)),
+                stop_reason: None,
+                request_id: Some("aux-request".into()),
+                source_agent_id: Some("workflow-agent".into()),
+            },
+            200_000,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications[0].0, "session/update");
+        assert_eq!(
+            notifications[0].1["_meta"]["peri"]["sourceAgentId"],
+            "workflow-agent"
+        );
+        assert_eq!(
+            notifications[0].1["update"]["sessionUpdate"],
+            "usage_update"
+        );
+    }
+
     /// push_unstable_event 通道 method 命名统一为 snake_case（2026-08-14 整顿）。
     #[tokio::test]
     async fn push_unstable_event_uses_snake_case_method() {

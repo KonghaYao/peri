@@ -83,7 +83,7 @@ mod tests {
             None,
             None,
         );
-        let _handle = tracer.on_turn_end(None);
+        let _handle = tracer.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
 
         tokio::task::yield_now().await;
         let events = session.events_snapshot();
@@ -108,7 +108,9 @@ mod tests {
         let mut tracer = LangfuseTracer::new(session.clone(), "sess_e2e_error".to_string(), config);
 
         tracer.on_turn_start("turn_err");
-        let _handle = tracer.on_turn_end(Some("SomeError"));
+        let _handle = tracer.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Failed {
+            failure: peri_acp_types::session::ExecutionFailure::internal("SomeError"),
+        });
 
         tokio::task::yield_now().await;
         let events = session.events_snapshot();
@@ -231,7 +233,9 @@ mod tests {
             is_error: false,
         });
 
-        let _h = tracer.lock().on_turn_end(None);
+        let _h = tracer
+            .lock()
+            .on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
         tokio::task::yield_now().await;
         let events = session.events_snapshot();
 
@@ -380,7 +384,9 @@ mod tests {
         }
 
         // Turn 结束——兜底关闭 bg 子 agent
-        let _h = tracer.lock().on_turn_end(None);
+        let _h = tracer
+            .lock()
+            .on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
         tokio::task::yield_now().await;
         let events = session.events_snapshot();
 
@@ -522,7 +528,9 @@ mod tests {
             duration_ms: 5,
         });
 
-        let _h = tracer.lock().on_turn_end(None);
+        let _h = tracer
+            .lock()
+            .on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
         tokio::task::yield_now().await;
         let events = session.events_snapshot();
 

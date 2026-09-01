@@ -242,7 +242,7 @@ async fn test_full_lifecycle_eight_steps() {
     );
 
     // ⑧ on_turn_end:无残留
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let final_events = session.events_snapshot();
 
@@ -372,7 +372,7 @@ async fn test_start_after_tool_ended() {
     );
 
     // on_turn_end 无残留、无 incomplete
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     assert_eq!(t.subagent.incomplete_count(), 0);
 }
@@ -445,7 +445,7 @@ async fn test_stop_before_tool_ended() {
     // AGENT obs end ≥ child 事件 end
     let agent_end = parse_time(updates[0].1.as_ref().unwrap());
     let _ = main_act;
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     assert!(
         agent_end >= parse_time(&child_reason.start_time),
@@ -498,7 +498,7 @@ async fn test_stop_before_content_end_time_takes_max() {
         child_reason.start_time
     );
     let _ = main_act;
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
 }
 
@@ -1000,7 +1000,7 @@ async fn test_start_before_tool_start_interleaved() {
     assert_eq!(t.subagent.incomplete_count(), 0);
 
     // on_turn_end 无残留
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     assert_eq!(t.subagent.incomplete_count(), 0);
     let _ = main_act;
@@ -1105,7 +1105,7 @@ async fn test_nested_parent_no_cross_binding() {
     );
 
     // ⑤ 收尾:未绑定的 (child_b_owner, call_b) 由 turn_end 兜底清除
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     assert_eq!(t.subagent.incomplete_count(), 0);
     let _ = main_act;
@@ -1133,7 +1133,7 @@ async fn test_unknown_agent_id_incomplete() {
     );
 
     // on_turn_end:残留缓存 → UnknownAgent incomplete
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     assert_eq!(
         t.subagent.status_of("ghost"),
@@ -1172,7 +1172,7 @@ async fn test_missing_start_incomplete() {
     t.on_llm_start("child_1", 0, &[], &[]);
     assert_eq!(t.subagent.gated_len(), 2);
 
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     assert_eq!(t.subagent.gated_len(), 0, "on_turn_end 应清空闸门缓存");
     assert_eq!(
@@ -1221,7 +1221,7 @@ async fn test_duplicate_start() {
     );
     assert_eq!(t.subagent.incomplete_count(), 1);
 
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let _ = main_act;
 }
@@ -1257,7 +1257,7 @@ async fn test_duplicate_stop() {
     );
     assert_eq!(t.subagent.incomplete_count(), 1);
 
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let _ = main_act;
 }
@@ -1301,7 +1301,7 @@ async fn test_gate_cache_overflow() {
         "CacheOverflow 的 child 不应创建 AGENT obs"
     );
 
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     assert!(t.subagent.incomplete_count() >= 1);
     let _ = main_act;
@@ -1477,7 +1477,7 @@ async fn test_bg_subagent_turn_end_cleanup() {
     t.on_tool_end("main", "call_agent", "spawned", false);
     // Stop 永不到达
 
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
 
     let events = session.events_snapshot();
@@ -1600,7 +1600,7 @@ async fn test_tool_batch_reparents_to_stage_act() {
         "所有 batch span 应只挂 stage-act"
     );
 
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
 }
 
@@ -1666,7 +1666,7 @@ async fn test_replaced_stage_emits_span_no_orphan_batch() {
     // 主 agent Act stage 正常结束(否则其 span 未发送,主 batch 的 parent 悬空)
     std::thread::sleep(std::time::Duration::from_millis(2));
     t.on_stage_end("main", &main_act, StageStatus::Done);
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
 
     let events = session.events_snapshot();
@@ -1801,7 +1801,7 @@ async fn test_subagent_flushes_tool_batch_per_act_stage() {
     t.on_subagent_stop("main", "child_1", "done", false);
     std::thread::sleep(std::time::Duration::from_millis(2));
     t.on_stage_end("main", &main_act, StageStatus::Done);
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
 
     let events = session.events_snapshot();
@@ -1873,7 +1873,7 @@ async fn test_turn_end_closes_stale_stage_no_orphan_batch() {
     t.on_tool_end("main", "call_agent", "done", false);
     std::thread::sleep(std::time::Duration::from_millis(2));
     t.on_stage_end("main", &main_act, StageStatus::Done);
-    let _h = t.on_turn_end(None);
+    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
 
     let events = session.events_snapshot();

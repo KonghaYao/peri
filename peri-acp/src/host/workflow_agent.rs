@@ -97,7 +97,7 @@ pub(crate) fn build_publish_hook(
 /// 调用点一致；biased select 顺序不变量单点保持在 `crate::event`）。
 pub(crate) fn build_workflow_forwarder_launcher() -> ForwarderLauncherFn {
     Arc::new(|handles, _agent_id, on_event| {
-        crate::event::spawn_eventbus_forwarder(handles, on_event, None);
+        crate::event::spawn_eventbus_forwarder(handles, on_event, None)
     })
 }
 

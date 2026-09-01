@@ -38,6 +38,24 @@ async fn atomic_write_json(path: &std::path::Path, content: &str) -> Result<()> 
     Ok(())
 }
 
+/// Atomically publish a complete sidecar only when no winner exists.
+///
+/// The fully-written unique temp file is linked into the canonical path with
+/// no-clobber semantics. A concurrent reader therefore sees either no file or
+/// one complete snapshot, never a partially written create_new target.
+async fn atomic_write_json_if_absent(path: &std::path::Path, content: &str) -> Result<bool> {
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), n));
+    fs::write(&tmp, content).await?;
+    let result = match fs::hard_link(&tmp, path).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error.into()),
+    };
+    let _ = fs::remove_file(&tmp).await;
+    result
+}
+
 /// 基于文件系统的 ThreadStore 实现
 ///
 /// 目录结构：
@@ -46,6 +64,7 @@ async fn atomic_write_json(path: &std::path::Path, content: &str) -> Result<()> 
 ///   index.json                 # 所有 thread 的摘要索引
 ///   <thread_id>/
 ///     meta.json                # 单个 thread 的完整元数据
+///     frozen.json              # 版本化 frozen session snapshot（不进 index）
 ///     messages.jsonl           # 消息流，每行一条 JSON
 /// ```
 pub struct FilesystemThreadStore {
@@ -78,6 +97,10 @@ impl FilesystemThreadStore {
 
     fn messages_path(&self, id: &ThreadId) -> PathBuf {
         self.thread_dir(id).join("messages.jsonl")
+    }
+
+    fn frozen_snapshot_path(&self, id: &ThreadId) -> PathBuf {
+        self.thread_dir(id).join("frozen.json")
     }
 
     fn index_path(&self) -> PathBuf {
@@ -196,6 +219,24 @@ impl ThreadStore for FilesystemThreadStore {
         let json = serde_json::to_string_pretty(&meta)?;
         atomic_write_json(&self.meta_path(id), &json).await?;
         self.upsert_index(&meta).await
+    }
+
+    async fn load_frozen_snapshot(&self, id: &ThreadId) -> Result<Option<String>> {
+        let path = self.frozen_snapshot_path(id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(fs::read_to_string(&path).await.with_context(
+            || format!("读取 frozen snapshot 失败: {}", path.display()),
+        )?))
+    }
+
+    async fn store_frozen_snapshot_if_absent(&self, id: &ThreadId, snapshot: &str) -> Result<bool> {
+        let dir = self.thread_dir(id);
+        if !dir.exists() {
+            anyhow::bail!("thread 不存在，无法写入 frozen snapshot: {id}");
+        }
+        atomic_write_json_if_absent(&self.frozen_snapshot_path(id), snapshot).await
     }
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>> {

@@ -6,7 +6,9 @@
 //!   通过标准 `session/update` 携带，在 `handle_session_update` 中转换为
 //!   `AcpEventData` 变体推入双 bridge channel。
 //! - **usage_update**：token 消耗通过标准 session/update 的 `usage_update` tag
-//!   携带，直接写入 `SPINNER_TOKEN_COUNT` atom，不产生 AcpEventData。
+//!   携带；root usage 更新 spinner，并把本次 cache observation（valid sample 或
+//!   explicit clear）转为 session-enveloped `CacheUsageUpdated` 交给 BridgeState。
+//!   auxiliary usage 不覆盖父 turn sample。
 //! - **AgentEvent DTO 已接入**：`peri/agent_event` 携带的 AcpEvent 变体
 //!   （SubagentStarted/SubagentStopped/TurnSuspended/RewindCompleted/...）
 //!   通过 `convert_agent_event` 转换为 AcpEventData 推入双 bridge channel。
@@ -26,14 +28,13 @@ use crate::kit::acp_types::{
     TuiCommandFeedback,
 };
 use crate::kit::atoms::{
-    ACP_STATE, AVAILABLE_SLASH_COMMANDS, INPUT_BUFFER, NOTIFICATION, PERI_CONFIG_HANDLE,
-    RENDER_HEARTBEAT, SPINNER_TOKEN_COUNT,
+    ACP_STATE, AVAILABLE_SLASH_COMMANDS, INPUT_BUFFER, NOTIFICATION, RENDER_HEARTBEAT,
+    SPINNER_TOKEN_COUNT,
 };
 use crate::kit::input_area::refresh_slash_items;
 use crate::kit::slash_completion::SlashActionKind;
 use crate::kit::slash_projection::{ArgsSchema, SlashCommandEntry, parse_projection_kind};
 use crate::truncate::summarize_input;
-use fluent_bundle::FluentValue;
 use peri_acp::event::AcpEvent;
 use peri_acp_types::event_data::{
     AskUser, HitlPending, OauthNeeded, Question, QuestionOption, SystemNotification,
@@ -419,7 +420,7 @@ fn forward_notification(
 /// (available_commands_update, plan, usage_update).
 fn handle_session_update(
     params: serde_json::Value,
-    bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    _bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
     session_id: &str,
 ) -> Option<AcpEventData> {
     // params: {"session_id": "...", "update": <SessionUpdate>}
@@ -676,6 +677,11 @@ fn handle_session_update(
             // UsageUpdate.meta 序列化 key 是 "_meta"（ACP SDK #[serde(rename = "_meta")]），
             // 带 fallback 兼容旧格式。
             let meta_obj = update.get("_meta").or_else(|| update.get("meta"));
+            // Auxiliary usage is protocol-visible for progress/telemetry, but it
+            // must never replace the parent turn's root cache sample.
+            if agent_id.is_some() {
+                return None;
+            }
             let input = meta_obj
                 .and_then(|m| m.get("inputTokens"))
                 .and_then(|v| v.as_u64())
@@ -685,49 +691,21 @@ fn handle_session_update(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             *SPINNER_TOKEN_COUNT.state().write() = (input + output) as usize;
-            // 缓存命中率：低于 80% 时直接 push SystemNotification 到消息流。
-            // 受 AppConfig.show_cache_warning 控制（config 面板开关，默认关闭）。
             let cache_read = meta_obj
                 .and_then(|m| m.get("cacheReadTokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            if cache_read > 0 && input > 0 {
-                let show_warning = PERI_CONFIG_HANDLE
-                    .get()
-                    .map(|h| h.read().config.show_cache_warning.unwrap_or(false))
-                    .unwrap_or(false);
-                if !show_warning {
-                    return None;
-                }
-                let hit_rate = cache_read as f64 / input as f64;
-                if hit_rate < 0.8 {
-                    let req_id = meta_obj
-                        .and_then(|m| m.get("requestId"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("-");
-                    let pct = (hit_rate * 100.0) as u32;
-                    let text = i18n::tr_args(
-                        "app-note-cache-hit-low",
-                        &[
-                            ("pct".into(), FluentValue::from(pct as u64)),
-                            ("req_id".into(), FluentValue::from(req_id)),
-                        ],
-                    );
-                    let data = SystemNotification {
-                        text,
-                        level: "warning".into(),
-                    };
-                    let event = AcpEventData::SystemNotification(data);
-                    let wrapped = AcpEventWithEpoch {
-                        event,
-                        active_session_id: session_id.to_string(),
-                    };
-                    if let Err(e) = bridge_tx.send(wrapped) {
-                        warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping cache warning");
-                    }
-                }
-            }
-            None
+                .and_then(|v| v.as_u64());
+            let request_id = meta_obj
+                .and_then(|m| m.get("requestId"))
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned);
+            let sample = cache_read
+                .filter(|cached| input > 0 && *cached > 0 && *cached <= input)
+                .map(|cached_tokens| crate::kit::acp_types::CacheUsageSample {
+                    input_tokens: input,
+                    cached_tokens,
+                    request_id,
+                });
+            Some(AcpEventData::CacheUsageUpdated(sample))
         }
         // ── session/replay: user_message_chunk ──
         // Session replay 通过 session/update 推送 user_message_chunk + agent_message_chunk，

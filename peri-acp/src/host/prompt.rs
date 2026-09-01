@@ -66,8 +66,10 @@ pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpE
         "kind".to_string(),
         Value::String(failure.kind.wire_name().to_string()),
     );
-    if let Some(status) = failure.http_status {
-        data.insert("status".to_string(), Value::from(status));
+    if failure.kind == ExecutionFailureKind::LlmHttp {
+        if let Some(status) = failure.http_status {
+            data.insert("status".to_string(), Value::from(status));
+        }
     }
     AcpError {
         code: execution_failure_kind_code(failure.kind),
@@ -588,11 +590,17 @@ pub(crate) async fn run_prompt(
             },
             on_turn_end: {
                 let tracer = Arc::clone(&tracer);
-                Arc::new(move |err: Option<String>| {
-                    tracer.lock().on_turn_end(err.as_deref()).into()
-                })
+                Arc::new(
+                    move |outcome: peri_acp_types::session::TurnTelemetryOutcome| {
+                        tracer.lock().on_turn_end(outcome).into()
+                    },
+                )
                     as Arc<
-                        dyn Fn(Option<String>) -> Option<tokio::task::JoinHandle<()>> + Send + Sync,
+                        dyn Fn(
+                                peri_acp_types::session::TurnTelemetryOutcome,
+                            ) -> Option<tokio::task::JoinHandle<()>>
+                            + Send
+                            + Sync,
                     >
             },
             bridge_factory: {
@@ -674,7 +682,7 @@ pub(crate) async fn run_prompt(
                     let any: Arc<dyn std::any::Any + Send + Sync> = b;
                     any.downcast::<LangfuseBridge>().ok().map(|b| (*b).clone())
                 });
-            crate::event::spawn_eventbus_forwarder(handles, on_event, bridge);
+            crate::event::spawn_eventbus_forwarder(handles, on_event, bridge)
         })
     };
 

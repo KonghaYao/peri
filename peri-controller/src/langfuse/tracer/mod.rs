@@ -43,7 +43,9 @@ use crate::langfuse::tracer::stages::StageHandle;
 use event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
 use langfuse_client::types::session::SessionBody;
 use langfuse_client::types::{EventBody, ObservationLevel, TraceBody};
-use langfuse_client::{IngestionEvent, ObservationBody, ObservationType};
+use langfuse_client::{GenerationBody, IngestionEvent, ObservationBody, ObservationType};
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::session::{ExecutionFailure, ExecutionFailureKind, TurnTelemetryOutcome};
 use peri_agent::agent::events::StageStatus;
 use peri_agent::agent::events_v2::TurnErrorReason;
 
@@ -209,23 +211,51 @@ impl LangfuseTracer {
     /// ErrorEvent 机制：当轮次以 error 结束时，始终发送 ErrorTurn event
     /// （即使该轮次未被采样），确保错误可观测。错误是"时点标记"而非一段
     /// 工作区间，故用 Event 类型（无 end_time 语义），不产生误导性的 0ms span。
-    pub fn on_turn_end(&mut self, error_output: Option<&str>) -> tokio::task::JoinHandle<()> {
+    pub fn on_turn_end(&mut self, outcome: TurnTelemetryOutcome) -> tokio::task::JoinHandle<()> {
         use std::sync::Arc;
 
-        // 先 flush tools batch，发出 batch span + 所有工具 span
-        let flush = self.tool_batch.flush();
-        self.emit_tools_flush(flush);
+        let fallback_status = match &outcome {
+            TurnTelemetryOutcome::Failed { failure } => GenerationFallbackStatus {
+                error_class: failure_error_class(failure),
+                level: ObservationLevel::Error,
+                failure: Some(failure),
+            },
+            TurnTelemetryOutcome::Stopped {
+                reason: PromptStopReason::Cancelled,
+            } => GenerationFallbackStatus {
+                error_class: "cancelled".to_string(),
+                level: ObservationLevel::Warning,
+                failure: None,
+            },
+            TurnTelemetryOutcome::Stopped {
+                reason: PromptStopReason::MaxTurnRequests,
+            } => GenerationFallbackStatus {
+                error_class: "max_iterations".to_string(),
+                level: ObservationLevel::Warning,
+                failure: None,
+            },
+            TurnTelemetryOutcome::Stopped {
+                reason: PromptStopReason::EndTurn,
+            }
+            | TurnTelemetryOutcome::Completed => GenerationFallbackStatus {
+                error_class: "lifecycle_incomplete".to_string(),
+                level: ObservationLevel::Error,
+                failure: None,
+            },
+        };
+        let failure = fallback_status.failure;
+        let error_class = failure
+            .map(failure_error_class)
+            .or_else(|| {
+                self.last_error_class
+                    .take()
+                    .map(|reason| reason.to_string())
+            })
+            .unwrap_or_else(|| fallback_status.error_class.clone());
+        let is_error = failure.is_some();
 
-        // 兜底:清理未收 Stop 的活跃 subagent(pending/gate/残留 invocation),
-        // 关闭其 AGENT obs(metadata 携带 incomplete_reason)。
-        let closed_list = self.subagent.cleanup_turn_end();
-        for closed in closed_list {
-            self.emit_subagent_close(closed);
-        }
-        // 兜底:关闭所有仍活跃/未领取的 stage span(StageEnded 因事件流截断/
-        // 乱序丢失时,不发送则其下工具 batch 的 parent 悬空成孤儿)。
-        // turn 结束是终态,此后不可能再有 stage 事件,立即补发是安全的;
-        // 乱序 StageEnded 若随后到达,Langfuse 按同 id upsert 无害。
+        // 兜底闭合仍活跃/未领取的 stage parent，必须先于 generation/tool child
+        // 入队，保证 FIFO ingest 在部分投递时不会留下可避免的孤儿 observation。
         for handle in self.stages.take_all_active() {
             self.emit_stage_span_close(&handle, StageStatus::Done, None);
         }
@@ -238,22 +268,134 @@ impl LangfuseTracer {
             self.emit_stage_span_close(&handle, StageStatus::Done, None);
         }
 
-        let is_error = error_output.is_some();
+        // 兜底闭合缺少 LlmCallEnd 的 Generation。仅写稳定分类和 allowlist status，
+        // 不写 provider/body 错误正文。
+        for abandoned in self.generation.take_all_active() {
+            let (parent_id, ownership_unresolved) = match self.llm_parent(&abandoned.agent_id) {
+                Some(parent_id) => (parent_id, false),
+                None => (self.agent_observation_id.clone(), true),
+            };
+            let terminal = abandoned.terminal.as_ref();
+            let lifecycle_incomplete = terminal.is_none();
+            let mut metadata = abandoned
+                .retry_metadata
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(object) = metadata.as_object_mut() {
+                object.insert(
+                    "incomplete".to_string(),
+                    serde_json::json!(lifecycle_incomplete),
+                );
+                object.insert(
+                    "terminal_source".to_string(),
+                    serde_json::json!(if lifecycle_incomplete {
+                        "turn_end_fallback"
+                    } else {
+                        "llm_end_pending_ownership"
+                    }),
+                );
+                object.insert(
+                    "error_class".to_string(),
+                    serde_json::json!(if lifecycle_incomplete {
+                        &error_class
+                    } else {
+                        "ownership_unresolved"
+                    }),
+                );
+                object.insert(
+                    "ownership_unresolved".to_string(),
+                    serde_json::json!(ownership_unresolved),
+                );
+                if ownership_unresolved {
+                    object.insert(
+                        "original_agent_id".to_string(),
+                        serde_json::json!(&abandoned.agent_id),
+                    );
+                }
+                if let Some(terminal) = terminal {
+                    object.insert("model".to_string(), serde_json::json!(&terminal.model));
+                    if let Some(request_id) = &terminal.request_id {
+                        object.insert("request_id".to_string(), serde_json::json!(request_id));
+                    }
+                }
+                if let Some(status) = failure.and_then(|failure| failure.http_status) {
+                    object.insert("http_status".to_string(), serde_json::json!(status));
+                }
+            }
+            let (output, level, status_message, model, usage_details) =
+                if let Some(terminal) = terminal {
+                    (
+                        Some(safe_generation_output(&terminal.output)),
+                        None,
+                        Some("ownership_unresolved".to_string()),
+                        Some(terminal.model.clone()),
+                        terminal.usage.as_ref().map(usage::build_usage_details),
+                    )
+                } else {
+                    (
+                        Some(serde_json::json!({"error_class": &error_class})),
+                        Some(fallback_status.level.clone()),
+                        Some(error_class.clone()),
+                        None,
+                        None,
+                    )
+                };
+            let end_time = now_rfc3339();
+            let body = GenerationBody {
+                id: Some(abandoned.gen_id),
+                trace_id: Some(self.trace_id.clone()),
+                name: Some(format!("step-{}", abandoned.step)),
+                start_time: Some(abandoned.start_time),
+                end_time: Some(end_time.clone()),
+                input: Some(abandoned.input_json),
+                output,
+                metadata: Some(metadata),
+                level,
+                status_message,
+                model,
+                usage_details,
+                parent_observation_id: Some(parent_id),
+                version: Some(VERSION.to_string()),
+                session_id: Some(self.session_id.clone()),
+                ..Default::default()
+            };
+            try_add_or_warn_via_session(
+                &*self.session,
+                IngestionEvent::GenerationCreate {
+                    id: new_uuid(),
+                    timestamp: end_time,
+                    body,
+                    metadata: None,
+                },
+                &self.trace_id,
+                "incomplete LLM GenerationCreate",
+            );
+        }
+
+        // 先 flush tools batch，发出 batch span + 所有工具 span
+        let flush = self.tool_batch.flush();
+        self.emit_tools_flush(flush);
+
+        // 兜底:清理未收 Stop 的活跃 subagent(pending/gate/残留 invocation),
+        // 关闭其 AGENT obs(metadata 携带 incomplete_reason)。
+        let closed_list = self.subagent.cleanup_turn_end();
+        for closed in closed_list {
+            self.emit_subagent_close(closed);
+        }
+
         let sampled = self.sampling.should_emit(&self.trace_id, &self.session_id);
-        let error_class = self
-            .last_error_class
-            .take()
-            .map(|reason| reason.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
 
         // ErrorSpan：错误时始终发送（即使未采样），确保错误可观测
         if is_error && self.config.error_span_always {
             let turn_id = self.trace_id.clone();
-            let error_out =
-                serde_json::json!({"error_class": &error_class, "error_schema_version": 2});
+            let error_out = failure
+                .map(|failure| failure_output(failure, &error_class))
+                .unwrap_or_else(
+                    || serde_json::json!({"error_class": &error_class, "error_schema_version": 3}),
+                );
 
             if !sampled {
-                // 未采样时创建合成 Trace（复用 trace_id），让 error span 有父 trace
+                // 未采样时创建合成 Trace 和最小 agent-run parent，保证 ErrorTurn
+                // 不引用不存在的 observation，且 parent 先于 child 入队。
                 let trace_body = TraceBody {
                     id: Some(turn_id.clone()),
                     name: Some(format!("turn {}", turn_id)),
@@ -284,6 +426,30 @@ impl LangfuseTracer {
                     trace_event,
                     &turn_id,
                     "ErrorTurn synthetic TraceCreate",
+                );
+                let parent_time = now_rfc3339();
+                let parent_body = ObservationBody {
+                    id: Some(self.agent_observation_id.clone()),
+                    trace_id: Some(turn_id.clone()),
+                    r#type: ObservationType::Agent,
+                    name: Some("agent-run-synthetic-error".to_string()),
+                    start_time: Some(parent_time.clone()),
+                    end_time: Some(parent_time.clone()),
+                    output: Some(error_out.clone()),
+                    parent_observation_id: Some(turn_id.clone()),
+                    version: Some(VERSION.to_string()),
+                    ..Default::default()
+                };
+                try_add_or_warn_via_session(
+                    &*self.session,
+                    IngestionEvent::ObservationCreate {
+                        id: new_uuid(),
+                        timestamp: parent_time,
+                        body: parent_body,
+                        metadata: None,
+                    },
+                    &turn_id,
+                    "ErrorTurn synthetic agent-run ObservationCreate",
                 );
             }
 
@@ -323,17 +489,30 @@ impl LangfuseTracer {
             );
         }
 
-        // 未采样且非 error span 已处理：提前退出
+        // 未采样的非错误 turn 无事件可发送；未采样 fatal 已补发 synthetic
+        // trace/error event，仍须立即 flush，不能依赖定时批处理或进程寿命。
         if !sampled {
             self.sampling.cleanup_turn(&self.trace_id);
+            if is_error && self.config.error_span_always {
+                let session = Arc::clone(&self.session);
+                let trace_id = self.trace_id.clone();
+                return tokio::spawn(async move {
+                    if session.flush().await.is_err() {
+                        tracing::warn!(trace_id = %trace_id, "langfuse: session flush failed");
+                    }
+                });
+            }
             return tokio::spawn(async {});
         }
 
         let session = Arc::clone(&self.session);
         let trace_id = self.trace_id.clone();
         let agent_observation_id = self.agent_observation_id.clone();
-        let output = if error_output.is_some() {
-            Some(serde_json::json!({"error_class": &error_class}))
+        let output = if is_error {
+            Some(failure_output(
+                failure.expect("is_error requires failure"),
+                &error_class,
+            ))
         } else {
             None
         };
@@ -455,6 +634,45 @@ impl LangfuseTracer {
             session_id = %self.session_id,
             "on_session_start（stub）"
         );
+    }
+}
+
+struct GenerationFallbackStatus<'a> {
+    error_class: String,
+    level: ObservationLevel,
+    failure: Option<&'a ExecutionFailure>,
+}
+
+fn failure_error_class(failure: &ExecutionFailure) -> String {
+    match (failure.kind, failure.http_status) {
+        (ExecutionFailureKind::LlmHttp, Some(429)) => "rate_limit".to_string(),
+        (ExecutionFailureKind::Internal, _) => "internal".to_string(),
+        (ExecutionFailureKind::Llm, _) => "llm_failure".to_string(),
+        (ExecutionFailureKind::LlmHttp, _) => "llm_http".to_string(),
+    }
+}
+
+fn failure_output(failure: &ExecutionFailure, error_class: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error_class": error_class,
+        "error_kind": failure.kind.wire_name(),
+        "http_status": failure.http_status,
+        "message": "The operation failed. Check protected logs for details.",
+        "error_schema_version": 3,
+    })
+}
+
+fn safe_generation_output(output: &str) -> serde_json::Value {
+    if output.starts_with("ERROR: ") {
+        serde_json::json!({"error_class": "provider_or_stream_failure"})
+    } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
+        if value.is_object() {
+            value
+        } else {
+            serde_json::json!({"text": output})
+        }
+    } else {
+        serde_json::json!({"text": output})
     }
 }
 

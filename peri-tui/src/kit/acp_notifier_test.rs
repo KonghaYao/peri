@@ -908,16 +908,11 @@ fn test_handle_session_update_skips_non_command_update() {
     assert_eq!(entries.len(), 0, "非 commands update 不应写入 atom");
 }
 
-/// 缓存命中率警告受 show_cache_warning 控制：handle 未初始化（默认关闭）时
-/// 即使命中率低于 80% 也不推送 SystemNotification。
+/// usage_update 只解码为 bridge-owned sample；notifier 不再逐步推送 warning。
 #[test]
 #[serial]
-fn test_usage_update_cache_warning_suppressed_when_disabled() {
+fn test_usage_update_decodes_root_cache_sample_without_per_step_notification() {
     crate::kit::atoms::init_atoms();
-    assert!(
-        PERI_CONFIG_HANDLE.get().is_none(),
-        "测试环境 handle 未初始化，应走默认关闭路径"
-    );
     let payload = json!({
         "sessionId": "s1",
         "update": {
@@ -932,11 +927,56 @@ fn test_usage_update_cache_warning_suppressed_when_disabled() {
     });
     let (dummy_tx, mut dummy_rx) = tokio::sync::mpsc::unbounded_channel();
     let result = handle_session_update(payload, &dummy_tx, "test");
-    assert!(result.is_none(), "开关关闭时 usage_update 不应产出事件");
+    match result {
+        Some(AcpEventData::CacheUsageUpdated(Some(sample))) => {
+            assert_eq!(sample.input_tokens, 20_000);
+            assert_eq!(sample.cached_tokens, 2_000);
+            assert_eq!(sample.request_id.as_deref(), Some("req-1"));
+        }
+        other => panic!("expected cache usage sample, got {other:?}"),
+    }
     assert!(
         dummy_rx.try_recv().is_err(),
-        "开关关闭时不应推送缓存命中率警告"
+        "notifier must not push a per-step cache warning"
     );
+}
+
+#[test]
+fn test_usage_update_ignores_auxiliary_but_invalid_root_observations_clear_sample() {
+    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
+    let payload = |usage_meta: serde_json::Value, params_meta: serde_json::Value| {
+        json!({
+            "_meta": params_meta,
+            "update": {
+                "sessionUpdate": "usage_update",
+                "_meta": usage_meta
+            }
+        })
+    };
+    assert!(
+        handle_session_update(
+            payload(
+                json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 70}),
+                json!({"peri": {"sourceAgentId": "child"}})
+            ),
+            &dummy_tx,
+            "test"
+        )
+        .is_none()
+    );
+    for invalid_meta in [
+        json!({"inputTokens": 100, "outputTokens": 1}),
+        json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 0}),
+        json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 101}),
+    ] {
+        assert!(
+            matches!(
+                handle_session_update(payload(invalid_meta, json!({})), &dummy_tx, "test"),
+                Some(AcpEventData::CacheUsageUpdated(None))
+            ),
+            "missing, zero, or inconsistent root usage must emit an explicit clear"
+        );
+    }
 }
 
 /// 验证 handle_session_update 能正确解析 plan update 并写入 TODO_ITEMS atom。

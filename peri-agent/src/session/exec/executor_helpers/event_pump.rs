@@ -3,13 +3,14 @@ use std::sync::Arc;
 use peri_acp_types::{
     command::PromptStopReason,
     event::{EventSink, EventSubscriber, ExecutorEvent, SubscriptionError},
+    session::TurnTelemetryOutcome,
 };
 use tokio::sync::oneshot;
 use tracing::debug;
 
 /// Langfuse trace 收尾闭包（构造 JoinHandle 后由 pump 在 pump_done 之后 drop）。
 pub type LangfuseEndFn =
-    Arc<dyn Fn(Option<String>) -> Option<tokio::task::JoinHandle<()>> + Send + Sync>;
+    Arc<dyn Fn(TurnTelemetryOutcome) -> Option<tokio::task::JoinHandle<()>> + Send + Sync>;
 
 // ── Spawn Pump Request parameter object ─────────────────────────────────────
 
@@ -22,7 +23,7 @@ pub struct SpawnPumpRequest {
     /// 事件发射点集合的关闭信号：所有发射点（forwarder / v1 直发）结束、
     /// `event_tx` 全部 drop 时触发（`closed()`），泵随后 drain 广播在途事件。
     pub event_rx: tokio::sync::mpsc::UnboundedReceiver<ExecutorEvent>,
-    pub stop_reason_rx: oneshot::Receiver<PromptStopReason>,
+    pub stop_reason_rx: oneshot::Receiver<(PromptStopReason, TurnTelemetryOutcome)>,
     pub sink: Arc<dyn EventSink>,
     pub session_id: String,
     pub effective_context_window: u32,
@@ -173,11 +174,21 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
             }
         }
 
-        // End Langfuse trace and flush（构造 JoinHandle；drop = detach，不阻塞管线）
-        let langfuse_flush = langfuse_on_turn_end.as_ref().and_then(|f| f(last_error));
+        // Executor result is the canonical terminal source; broadcast events remain observational.
+        let (stop_reason, telemetry_outcome) = stop_reason_rx.await.unwrap_or((
+            PromptStopReason::EndTurn,
+            TurnTelemetryOutcome::Failed {
+                failure: peri_acp_types::session::ExecutionFailure::internal(
+                    "Agent execution result was unavailable",
+                ),
+            },
+        ));
 
-        // Resolve stop_reason from the oneshot channel set by executor
-        let stop_reason = stop_reason_rx.await.unwrap_or(PromptStopReason::EndTurn);
+        // End Langfuse trace and flush（构造 JoinHandle；drop = detach，不阻塞管线）
+        let langfuse_flush = langfuse_on_turn_end
+            .as_ref()
+            .and_then(|f| f(telemetry_outcome));
+
         let stop_reason_str = match stop_reason {
             PromptStopReason::EndTurn => "end_turn",
             PromptStopReason::Cancelled => "cancelled",

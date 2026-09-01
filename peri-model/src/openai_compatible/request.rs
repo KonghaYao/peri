@@ -4,8 +4,9 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::{
-    ContentBlock, DocumentSource, ImageSource, ModelError, ModelMessage, ModelRequest, ModelResult,
-    PreparedModelRequest, ProviderProtocol, ToolDefinition,
+    prompt_cache::strip_system_prompt_dynamic_boundaries, ContentBlock, DocumentSource,
+    ImageSource, ModelError, ModelMessage, ModelRequest, ModelResult, PreparedModelRequest,
+    ProviderProtocol, ToolDefinition,
 };
 
 use super::OpenAiConfig;
@@ -115,11 +116,7 @@ fn extract_system_message(messages: &[ModelMessage]) -> Option<String> {
         })
         .filter(|content| !content.trim().is_empty())
         .collect::<Vec<_>>();
-    (!parts.is_empty()).then(|| {
-        parts
-            .join("\n\n")
-            .replace("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__", "")
-    })
+    (!parts.is_empty()).then(|| strip_system_prompt_dynamic_boundaries(&parts.join("\n\n")))
 }
 
 fn messages_to_json(config: &OpenAiConfig, messages: &[ModelMessage]) -> Vec<Value> {

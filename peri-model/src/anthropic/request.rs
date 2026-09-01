@@ -38,7 +38,7 @@ pub(super) fn build_request(
     config: &AnthropicConfig,
     request: &ModelRequest,
 ) -> ModelResult<BuiltAnthropicRequest> {
-    let (mut messages, mut system_blocks) = messages_to_anthropic(&request.messages);
+    let (mut messages, mut system_prompt) = messages_to_anthropic(&request.messages);
     cache::ensure_thinking_blocks(&mut messages);
     if config.enable_cache {
         cache::apply_cache_to_messages(&mut messages);
@@ -50,15 +50,18 @@ pub(super) fn build_request(
         "messages": messages,
         "stream": true,
     });
-    if config.enable_cache && !system_blocks.is_empty() {
-        body["system"] = Value::Array(cache::system_blocks_to_json(&system_blocks));
-    } else if !config.enable_cache && !system_blocks.is_empty() {
-        let system = system_blocks
+    if config.enable_cache && !system_prompt.blocks.is_empty() {
+        body["system"] = Value::Array(cache::system_blocks_to_json(
+            &system_prompt.blocks,
+            system_prompt.allow_fallback_cache,
+        ));
+    } else if !config.enable_cache && !system_prompt.blocks.is_empty() {
+        let system = system_prompt
+            .blocks
             .drain(..)
             .map(|block| block.text)
             .collect::<Vec<_>>()
-            .join("\n\n")
-            .replace(cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "");
+            .join("\n\n");
         if !system.trim().is_empty() {
             body["system"] = json!(system.trim());
         }
@@ -108,9 +111,8 @@ pub(super) fn messages_endpoint(endpoint: &Url) -> ModelResult<Url> {
     Ok(endpoint)
 }
 
-fn messages_to_anthropic(messages: &[ModelMessage]) -> (Vec<Value>, Vec<cache::SystemPromptBlock>) {
-    let mut system_with_boundary = Vec::new();
-    let mut system_without_boundary = Vec::new();
+fn messages_to_anthropic(messages: &[ModelMessage]) -> (Vec<Value>, cache::SplitSystemPrompt) {
+    let mut system = Vec::new();
     let mut result = Vec::new();
 
     for message in messages {
@@ -118,11 +120,7 @@ fn messages_to_anthropic(messages: &[ModelMessage]) -> (Vec<Value>, Vec<cache::S
             ModelMessage::System { content } => {
                 let text = content_text(content);
                 if !text.trim().is_empty() {
-                    if text.contains(cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY) {
-                        system_with_boundary.push(text);
-                    } else {
-                        system_without_boundary.push(text);
-                    }
+                    system.push(text);
                 }
             }
             ModelMessage::User { content } => result.push(json!({
@@ -169,20 +167,7 @@ fn messages_to_anthropic(messages: &[ModelMessage]) -> (Vec<Value>, Vec<cache::S
         }
     }
 
-    let mut system = system_with_boundary.join("\n\n");
-    if !system_without_boundary.is_empty() {
-        let middleware = system_without_boundary.join("\n\n");
-        if system.contains(cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY) {
-            system = system.replacen(
-                cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-                &format!("{}\n\n{middleware}", cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY),
-                1,
-            );
-        } else {
-            system = format!("{system}\n\n{middleware}");
-        }
-    }
-    (result, cache::split_system_blocks(&system))
+    (result, cache::split_system_blocks(&system.join("\n\n")))
 }
 
 fn tool_to_anthropic(tool: &ToolDefinition) -> Value {

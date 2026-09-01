@@ -1,6 +1,6 @@
 # MetaHarness 设计 — 提示词完全替换与 middleware 卸载
 
-> 日期：2026-08-14 | 修订：2026-08-14（结构重写：理想架构 → 现状）
+> 日期：2026-08-14 | 修订：2026-09-01（恢复跨 provider 的缓存区 transport seam）
 > 状态：设计定案；波 1（段落覆盖）+ 波 2（middleware 关闭）已实现落地
 > （2026-08-14，实现偏差裁定 Q1-Q10 已同步至 2.1/2.3/2.4/2.5/3.3/3.4；
 > 2026-08-14 advisor 红队复审：Q1 推翻（PromptLayer 去除，兑现"层概念全部
@@ -8,7 +8,8 @@
 > + 契约测试锁定、Q10 冻结时序证据成立——均已同步 2.4/3.1/3.3/2.7/2.8；
 > 2026-08-14 波 3+波 4（wave3-4 workflow，C1-C5）已实现落地：段落持有者
 > 基础设施 + 基础段/gated 段全部迁移至功能 middleware（gate = 持有者是否
-> 在链上，契约 3）+ boundary 删除 + permission_mode_notice 删除 +
+> 在链上，契约 3）+ boundary 删除（后于 2026-09-01 修正为私有 transport
+> seam）+ permission_mode_notice 删除 +
 > 02/07/14/16 段落重组——3.1/3.4/3.5 已同步为现状，对账裁决见 3.5）
 
 本文是 MetaHarness 机制的**单一事实源**。结构：第 2 节为**理想架构**（目标态
@@ -204,9 +205,10 @@ MetaHarnessState 传入——冻结渲染与后续重渲染必须同一覆盖源
 
 - **gated 段落**：覆盖只改内容来源，`FeatureGate` 判定不变——未启用功能的
   段落即使被覆盖也不渲染（现状 gate 判定事实见 3.4）。
-- **边界标记（演进后删除）**：现状 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`
-  由渲染逻辑生成，不在段落文件内；演进（3.5.2）后标记删除，缓存区划分由
-  段落位置属性（契约 2）显式承担。
+- **缓存区 transport seam**：现状 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 由
+  `PromptTemplate::render` 生成，不在段落文件内；段落位置属性（契约 2）负责
+  装配，保留控制字负责把 seam 跨越 `String` handoff 传给 provider。provider
+  必须消费该控制字，wire prompt 不得包含它（ARC-SERIAL-001）。
 - **冻结语义**：覆盖在冻结期构造时一次应用，产出后即 frozen，无运行时
   开销、无中途重读（ARC-FROZEN-001）。
 
@@ -405,7 +407,7 @@ gate = 持有者是否在链上，middleware 关闭自动移除其段落。以�
 
 | 段 | 驱动 | 动作 | 归属（目标态） |
 | --- | --- | --- | --- |
-| `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` | 渲染逻辑生成 | **删除** | 缓存区划分由段落位置属性（契约 2）显式承担，不再生成文本标记 |
+| `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` | 渲染逻辑生成 | **C2 曾删除；2026-09-01 恢复为私有 transport seam** | 段落位置属性负责装配；控制字仅跨 String handoff，provider wire 必须剥离 |
 | Persona 段（full/extend） | AgentOverrides（用户配置） | **并入** | DefaultSystemPromptMiddleware（角色/身份持有者）——关闭它 Persona 一并消失（纯净模式清空 persona 覆盖） |
 | Language 段 | `settings.language`（用户配置） | **新开 middleware** | 新 `LangMiddleware` 持有（段落 ID `language`）——可关闭、可覆盖 |
 
@@ -613,7 +615,8 @@ permission_mode_notice / ModeNoticeBooking / mark_permission_mode_notified
   06 语气、07_runtime = 07_env + 14_system_reminder 合并的环境快照与事件
   语义、Persona = overrides 动态段）：关闭它即清除全部内置段落内容与
   persona 覆盖；✅ **Language 归新开 LangMiddleware**（可关闭、可覆盖，见
-  3.5.2）；✅ **boundary 标记删除**（缓存区划分由位置属性承担，见 3.5.2）；
+  3.5.2）；✅ **cache boundary transport seam**（C2 曾删除，2026-09-01
+  因 provider handoff 丢失 zone 语义而恢复，见 3.5.2 修正）；
 - ✅ 段落覆盖（2.4）语义保留：覆盖 = 替换持有 middleware 的对应段落贡献；
 - ✅ 重复段收敛（3.1.2）同步进行：16_workflow 整段删除（ultracode 完整覆盖）；
   13_skills 协议、11_subagent 的 Agent Selection Guide 随对应功能
@@ -693,11 +696,19 @@ permission_mode_notice / ModeNoticeBooking / mark_permission_mode_notified
    （关闭 SubAgentMiddleware → 段落与工具同时消失）；覆盖测试
    （`11_subagent` 覆盖输出 = md 全文，段落顺序不变）。
 
-### 3.5.2 落地样例：渲染生成段重构（boundary 删除 / Persona 并入 / LangMiddleware，已全部落地）
+### 3.5.2 落地样例：渲染生成段重构（C2 历史 + 2026-09-01 boundary 修正）
 
 三个渲染生成段（非段落文件）的演进去向与落地步骤（**已全部执行**）：
 
-**步骤 1：boundary 删除（`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`，✅ 已落地）**
+**步骤 1（C2 历史裁决）：boundary 删除（`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`，后被修正）**
+
+> **2026-09-01 修正**：C2 只验证了 `PromptSectionZone` 在 ACP 装配面的顺序，
+> 漏掉 `PromptTemplate::render -> String -> ModelMessage::System` 后 zone 元数据
+> 已不存在，以及 request-time middleware system contribution 仍会追加。无 seam
+> 时 Anthropic fallback 会把动态区一并缓存。现恢复 provider-neutral 保留控制字：
+> cached/uncached 四态在剥离控制字后与 C2 wire bytes 完全一致；Anthropic 以它
+> 拆分 cache block，OpenAI-compatible 只做零宽剥离；重复控制字 fail-closed。
+> 下列三点保留为当时决策记录，不再描述当前行为。
 
 - render 删除标记拼接（prompt/mod.rs:397 附近）；影响：缓存前缀范围变化——
   现状 boundary 前 = 01-06（缓存命中区）、boundary 后 = 07/14/gated/Language

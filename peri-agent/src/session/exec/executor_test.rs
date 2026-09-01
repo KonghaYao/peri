@@ -162,7 +162,7 @@ fn noop_stage_build() -> StageBuildFn {
 
 /// 占位 forwarder 启动器（短路路径不调用；满足 TurnInput 类型）。
 fn noop_forwarder() -> ForwarderLauncherFn {
-    Arc::new(|_handles, _agent_id, _on_event| {})
+    Arc::new(|_handles, _agent_id, _on_event| tokio::spawn(async {}))
 }
 
 /// 构造预取消 stage，并记录 executor 传入的完整 frozen snapshot。

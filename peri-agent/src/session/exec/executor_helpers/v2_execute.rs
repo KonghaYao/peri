@@ -36,7 +36,11 @@ use super::ExecOutcome;
 /// EventBus forwarder 启动器闭包（ACP 侧持有 Langfuse bridge 构造；
 /// 参数 = event_handles / 主 agent_id / 事件消费闭包）。
 pub type ForwarderLauncherFn = Arc<
-    dyn Fn(EventHandles, String, Box<dyn Fn(UnstampedEvent, ExecutorEvent) + Send + Sync>)
+    dyn Fn(
+            EventHandles,
+            String,
+            Box<dyn Fn(UnstampedEvent, ExecutorEvent) + Send + Sync>,
+        ) -> tokio::task::JoinHandle<()>
         + Send
         + Sync,
 >;
@@ -255,7 +259,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // ToolEnded 共享 FIFO），不能放回 state_tx：跨通道 biased select! 只保证
     // 单次迭代内的优先级，不保证跨迭代——iter2 的 TextChunk 会先于 iter1 的
     // TurnCompleted 被消费，污染 partial，渲染出"新文本在旧工具之前"的错乱。
-    {
+    let forwarder_handle = {
         let publisher = Arc::clone(&req.publisher);
         let sid = req.session_id.clone();
         let agent_id = v2_out.context.session.agent_id.to_string();
@@ -265,8 +269,8 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             Box::new(move |source, exec_ev| {
                 publisher.publish_event(&sid, &source, exec_ev);
             }),
-        );
-    }
+        )
+    };
 
     // Phase 5: seed transcript（history 作为 ancestor 之外的自有消息）
     // 首轮用户 turn 判定需在 history move 前捕获（Phase 5.9 使用）。
@@ -374,6 +378,17 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     }
     let loop_result = run_react_loop(v2_out.context, 500).await;
 
+    // `run_react_loop` consumed StageContext, so all root EventBus senders have
+    // been dropped. Wait for the forwarder to drain Observe/Render/State before
+    // terminal classification can make AgentDone/TurnDone visible downstream.
+    let forwarder_failure = match forwarder_handle.await {
+        Ok(()) => None,
+        Err(join_error) => {
+            error!(session_id = %req.session_id, error = %join_error, "[v2] event forwarder failed");
+            Some(ExecutionFailure::internal("Agent event forwarding failed"))
+        }
+    };
+
     // Phase 8: 从 transcript 提取最终消息列表，构造 AgentState（兼容下游 PromptResult）
     // 前置：显式 flush 剩余积压，确保最终回答已落库。Drop 层 Shutdown 优雅关闭是
     // 根因兜底（覆盖全部 6 个 run_react_loop 调用方），此处是主路径双保险——
@@ -417,7 +432,10 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // Phase 9: 映射 LoopResult → ExecOutcome。cancel 在 transcript flush 之后
     // 只采样一次，后续 failure / TurnEnded / cascade / outcome 共用同一分类。
     let sampled_cancel = req.cancel.is_cancelled();
-    let terminal = classify_loop_terminal(&loop_result, sampled_cancel);
+    let terminal = match forwarder_failure {
+        Some(failure) => internal_failure_terminal(failure),
+        None => classify_loop_terminal(&loop_result, sampled_cancel),
+    };
     // 诊断日志与 wire 使用同一安全投影：保留错误原意和 HTTP status，但不得把
     // provider body 中的凭据或完整 cause chain 写入日志。
     if let Some(failure) = &terminal.failure {
@@ -426,7 +444,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             kind = failure.kind.wire_name(),
             http_status = failure.http_status,
             message = %failure.public_message,
-            "[v2] loop failed"
+            "[v2] execution failed"
         );
     }
     // 对非 Interrupted/MaxIterations/cancel 的致命错误，通知 TUI 显示红色错误提示
@@ -491,6 +509,16 @@ pub(crate) struct LoopTerminal {
     pub(crate) failure: Option<ExecutionFailure>,
     pub(crate) turn_status: TurnStatus,
     pub(crate) turn_error_kind: Option<TurnErrorKind>,
+}
+
+fn internal_failure_terminal(failure: ExecutionFailure) -> LoopTerminal {
+    LoopTerminal {
+        ok: false,
+        stop_reason: PromptStopReason::EndTurn,
+        failure: Some(failure),
+        turn_status: TurnStatus::Error,
+        turn_error_kind: Some(TurnErrorKind::Internal),
+    }
 }
 
 /// Phase 9 纯分类器：一次同时决定 Prompt、Turn 和 fatal failure。

@@ -216,7 +216,7 @@ config-desc-language = en, zh-CN, or leave empty for auto
 config-desc-persona = Override system prompt persona (empty = default)
 config-desc-tone = Override system prompt tone (empty = default)
 config-desc-proactiveness = low / medium / high — agent initiative level
-config-desc-cache-warning = (ON/OFF — show low cache hit rate warning in chat)
+config-desc-cache-warning = (ON/OFF — show low final cache coverage warning in chat)
 config-desc-diff = (ON/OFF — show inline diff for Write/Edit tools)
 config-field-streaming = Streaming Mode
 config-desc-streaming = streaming / block / none — render granularity for LLM output
@@ -285,7 +285,7 @@ app-compact-auto-cleared = Auto cleanup: freed { $count } tool call results
 app-compact-limit-reached = Context still exceeds limit after compression. Use /compact to manually compress or /clear to clear history.
 app-model-switched = Model switched to: { $alias } ({ $effort } effort)
 app-1m-context-enabled = 1M context mode enabled (context window: 1,000,000 tokens)
-app-prompt-cache-low = Prompt cache hit rate { $rate }% < 80% (req: { $req })
+app-prompt-cache-low = Prompt cache coverage { $rate }% < 80% (req: { $req })
 app-no-mcp-configured = No MCP servers configured (add in .mcp.json or settings.json)
 app-no-cron-tasks = No cron tasks
 app-cron-deleted = Cron task deleted: { $preview }
@@ -1125,7 +1125,8 @@ app-note-compact-type-full = Full compaction
 app-note-compact-type-micro = Micro compaction
 app-note-compact-type-smart = Smart compaction
 app-note-agent-failed = Agent execution failed: { $message }
-app-note-cache-hit-low = Prompt cache hit rate {$pct}% < 80% (req: { $req_id })
+app-note-cache-hit-low = Prompt cache coverage {$pct}% < 80% (req: { $req_id })
+app-note-cache-coverage-low = Prompt cache coverage {$pct}% < 80% — cached {$cached} / input {$input}, uncached {$uncached} (req: {$req_id})
 
 # ---- Semantic tool cards ----
 tool-todo-failed = Update failed

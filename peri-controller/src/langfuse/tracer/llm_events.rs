@@ -1,4 +1,5 @@
 use super::event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
+use super::generation::PendingTerminalState;
 use super::registry::{GateEvent, Ownership};
 use super::usage;
 use super::LangfuseTracer;
@@ -96,10 +97,47 @@ impl LangfuseTracer {
             return;
         }
 
-        let gen_end = match self.generation.on_llm_end(agent_id, step) {
-            Some(g) => g,
-            None => return,
+        let start_missing = !self.generation.contains(agent_id, step);
+        if start_missing {
+            tracing::warn!(
+                target: "langfuse::generation",
+                %agent_id,
+                step,
+                "on_llm_end: 缺少 LlmCallStart，创建 synthetic generation"
+            );
+            self.generation
+                .on_llm_start(agent_id, step, Vec::new(), Vec::new());
+        }
+
+        // 必须先解析 parent 再消费 tracker state。未知 ownership 可能由可丢的
+        // SubagentStart 导致；完整终态保留到 turn-end fallback。
+        let parent_id = match self.llm_parent(agent_id) {
+            Some(parent_id) => parent_id,
+            None => {
+                self.generation.preserve_terminal(
+                    agent_id,
+                    step,
+                    PendingTerminalState {
+                        model: model.to_string(),
+                        output: output.to_string(),
+                        usage: usage.cloned(),
+                        request_id: request_id.map(str::to_string),
+                    },
+                );
+                tracing::warn!(
+                    target: "langfuse::subagent",
+                    %agent_id,
+                    step,
+                    "on_llm_end: agent ownership 暂不可解析，保留完整终态等待 turn-end 兜底"
+                );
+                return;
+            }
         };
+
+        let gen_end = self
+            .generation
+            .on_llm_end(agent_id, step)
+            .expect("generation existence checked before removal");
 
         let end_time = now_rfc3339();
         let usage_details: Option<std::collections::HashMap<String, i32>> =
@@ -130,24 +168,16 @@ impl LangfuseTracer {
                 map
             });
 
-        // 优先使用当前活跃 stage span 作为父 observation（按 agent 隔离：
-        // 并行 subagent 各自持有自己的 stage slot，不会取到其他 agent 的 span）。
-        // 归属链:该 agent 的活跃 stage → 该 agent 的 AGENT obs → 主 agent obs。
-        // 禁止降级挂主 agent:未知 agent(未注册且非 main)直接跳过。
-        let parent_id = match self.llm_parent(agent_id) {
-            Some(p) => p,
-            None => {
-                tracing::warn!(
-                    target: "langfuse::subagent",
-                    %agent_id,
-                    "on_llm_end: agent 未注册且非主 agent,跳过 generation 上报"
-                );
-                return;
-            }
-        };
+        // parent 已在消费 tracker state 前解析，避免 ownership 暂不可用时永久丢失。
 
         // 合并 retry metadata + token 用量到 metadata 字段（Langfuse UI 可见）
         let mut meta = gen_end.retry_metadata.unwrap_or(serde_json::json!({}));
+        if start_missing {
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert("start_missing".to_string(), serde_json::json!(true));
+                obj.insert("lifecycle_incomplete".to_string(), serde_json::json!(true));
+            }
+        }
         let meta_obj = meta.as_object_mut();
         if let Some(u) = usage {
             if let Some(obj) = meta_obj {

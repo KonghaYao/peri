@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use peri_acp_types::ports::SkillsPort;
+use peri_acp_types::{model::SYSTEM_PROMPT_DYNAMIC_BOUNDARY, ports::SkillsPort};
 use peri_agent::middleware::{PromptSection, PromptSectionContent, PromptSectionZone};
 
 /// 控制 Feature-gated 提示词段落的注入。
@@ -338,10 +338,10 @@ impl PromptTemplate {
     ///
     /// 之后应用占位符替换（cwd, is_git_repo, platform, os_version, date, available_agents）。
     ///
-    /// 波 4 演进（C2）：boundary 文本标记删除（设计 §3.5.2 步骤 1）——缓存
-    /// 区划分由段落位置属性（zone）承担装配机制，不再生成提示词文本标记；
-    /// Language 段由 LangMiddleware 持有（经 collected 注入），不再有
-    /// language 参数。
+    /// `PromptSectionZone` 在装配面完成排序；渲染时以 provider-neutral 保留
+    /// token 将 zone seam 跨越 String handoff 传给 provider。provider 必须在
+    /// wire request 中消费该 token。Language 段由 LangMiddleware 持有（经
+    /// collected 注入），不再有 language 参数。
     pub fn render(
         &self,
         env: &PromptEnv,
@@ -349,25 +349,39 @@ impl PromptTemplate {
         skills: &dyn SkillsPort,
         extra_agent_dirs: &[std::path::PathBuf],
     ) -> String {
-        let mut result = String::new();
+        let mut cached = String::new();
 
         // 1. 缓存区段落（01-06，段内序号升序）
         //    无条件渲染：`prompt_mode: full` / persona override 不得移除。
         for (i, section) in self.cached_sections.iter().enumerate() {
             if i > 0 {
-                result.push_str("\n\n");
+                cached.push_str("\n\n");
             }
-            result.push_str(section.content.as_str());
+            cached.push_str(section.content.as_str());
         }
 
         // 2. 非缓存区段落（persona → 07_runtime → gated → language，按段内
         //    序号升序；gate 判定：内置 gated 段按 PromptFeatures，收集段恒渲染）
+        let mut uncached = String::new();
         for section in &self.uncached_sections {
             if section.gate.is_enabled(features) {
-                result.push_str("\n\n");
-                result.push_str(section.content.as_str());
+                if !uncached.is_empty() {
+                    uncached.push_str("\n\n");
+                }
+                uncached.push_str(section.content.as_str());
             }
         }
+
+        // Token 本身不携带分隔符。四态组合刻意保留旧渲染算法的其他字节：
+        // uncached-only 仍带两个前导换行；empty 不生成 marker-only prompt。
+        let result = match (cached.is_empty(), uncached.is_empty()) {
+            (false, false) => {
+                format!("{cached}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\n{uncached}")
+            }
+            (false, true) => format!("{cached}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"),
+            (true, false) => format!("{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\n{uncached}"),
+            (true, true) => String::new(),
+        };
 
         // 占位符替换（顺序与全部构造点一致）
         result

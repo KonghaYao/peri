@@ -62,7 +62,7 @@ async fn test_smoke_complete_turn_sequence() {
     );
     t.on_stage_end("main", &reason_handle, StageStatus::Done);
 
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     // 等待 flush async 任务完成（FakeLangfuseSession 的 flush 是同步的，但 spawn 需要运行）
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
@@ -93,7 +93,7 @@ async fn test_sampling_rate_0_emits_nothing() {
     t.on_stage_start(Stage::Reason, "turn_1");
     t.on_llm_start("main", 0, &[], &[]);
     t.on_llm_end("main", 0, "m", "p", "o", None, None);
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
     assert!(
@@ -108,7 +108,7 @@ async fn test_sampling_rate_1_emits_events() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
     t.on_stage_start(Stage::Reason, "turn_1");
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
     assert!(!events.is_empty(), "采样率 1.0 应有事件");
@@ -120,8 +120,11 @@ async fn test_sampling_rate_1_emits_events() {
 async fn test_error_span_emitted_for_error_turn() {
     let (mut t, session) = make_tracer(0.0);
     t.on_turn_start("turn_1");
-    let _handle = t.on_turn_end(Some("TurnError"));
-    tokio::task::yield_now().await;
+    t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Failed {
+        failure: peri_acp_types::session::ExecutionFailure::internal("Turn failed"),
+    })
+    .await
+    .expect("flush task should finish");
     let events = session.events_snapshot();
 
     let has_trace = events
@@ -136,6 +139,256 @@ async fn test_error_span_emitted_for_error_turn() {
     });
     assert!(has_trace, "错误 turn 应补发 TraceCreate");
     assert!(has_error_span, "错误 turn 应发 ErrorTurn event");
+    assert_eq!(session.flush_count(), 1, "未采样 fatal turn 必须立即 flush");
+}
+
+#[tokio::test]
+async fn test_turn_end_failed_closes_active_generation_with_canonical_failure() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    let stage = t
+        .on_stage_start_gated("main", Stage::Reason, "turn_1")
+        .expect("sampled stage");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    t.on_llm_start("main", 0, &[], &[]);
+    let failure =
+        ExecutionFailure::from_agent_error(&peri_acp_types::error::AgentError::LlmHttpError {
+            status: 429,
+            message: "retry exhausted token=secret".to_string(),
+        });
+
+    t.on_turn_end(TurnTelemetryOutcome::Failed { failure })
+        .await
+        .expect("flush task should finish");
+
+    let events = session.events_snapshot();
+    let stage_index = events
+        .iter()
+        .position(|event| matches!(event, langfuse_client::IngestionEvent::SpanCreate { body, .. } if body.id.as_deref() == Some(stage.span_id.as_str())))
+        .expect("active stage parent must be closed");
+    let generation_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                langfuse_client::IngestionEvent::GenerationCreate { .. }
+            )
+        })
+        .expect("active generation must be closed");
+    assert!(
+        stage_index < generation_index,
+        "stage parent 必须先于 generation child 入队"
+    );
+
+    let generation = events.into_iter().find_map(|event| {
+        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = event {
+            Some(body)
+        } else {
+            None
+        }
+    });
+    let generation = generation.expect("active generation must be closed at turn end");
+    assert_eq!(generation.level, Some(ObservationLevel::Error));
+    assert_eq!(generation.status_message.as_deref(), Some("rate_limit"));
+    assert_eq!(
+        generation
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("http_status")),
+        Some(&serde_json::json!(429))
+    );
+    assert!(
+        !generation
+            .output
+            .as_ref()
+            .expect("safe failure output")
+            .to_string()
+            .contains("secret"),
+        "generation must not contain provider error text"
+    );
+}
+
+#[tokio::test]
+async fn test_cancelled_turn_closes_active_generation_as_warning() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_llm_start("main", 0, &[], &[]);
+
+    t.on_turn_end(TurnTelemetryOutcome::Stopped {
+        reason: PromptStopReason::Cancelled,
+    })
+    .await
+    .expect("flush task should finish");
+
+    let generation = session.events_snapshot().into_iter().find_map(|event| {
+        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = event {
+            Some(body)
+        } else {
+            None
+        }
+    });
+    let generation = generation.expect("cancelled active generation must be closed");
+    assert_eq!(generation.level, Some(ObservationLevel::Warning));
+    assert_eq!(generation.status_message.as_deref(), Some("cancelled"));
+}
+
+#[tokio::test]
+async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
+    let (mut t, session) = make_tracer(1.0);
+    t.set_main_agent_id("main".to_string());
+    t.on_turn_start("turn_1");
+    t.generation
+        .on_llm_start("unregistered-child", 0, vec![], vec![]);
+
+    t.on_llm_end(
+        "unregistered-child",
+        0,
+        "test-model",
+        "test-provider",
+        "completed",
+        None,
+        None,
+    );
+    assert!(
+        t.generation.contains("unregistered-child", 0),
+        "unresolved parent must not consume generation state"
+    );
+
+    t.on_turn_end(TurnTelemetryOutcome::Failed {
+        failure: ExecutionFailure::internal("safe internal failure"),
+    })
+    .await
+    .expect("flush task should finish");
+
+    let generation = session.events_snapshot().into_iter().find_map(|event| {
+        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = event {
+            Some(body)
+        } else {
+            None
+        }
+    });
+    let generation = generation.expect("unresolved generation must use turn-end fallback");
+    assert_eq!(
+        generation.parent_observation_id.as_deref(),
+        Some(t.agent_observation_id.as_str())
+    );
+    assert_eq!(
+        generation
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("ownership_unresolved")),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(
+        generation.output,
+        Some(serde_json::json!({"text": "completed"}))
+    );
+    assert_eq!(generation.model.as_deref(), Some("test-model"));
+    assert_eq!(
+        generation.status_message.as_deref(),
+        Some("ownership_unresolved")
+    );
+    assert_eq!(
+        generation
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("incomplete")),
+        Some(&serde_json::json!(false))
+    );
+}
+
+#[tokio::test]
+async fn test_llm_end_without_start_emits_synthetic_generation() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+
+    t.on_llm_end(
+        "main",
+        7,
+        "test-model",
+        "test-provider",
+        "completed",
+        None,
+        Some("req-7"),
+    );
+
+    let generation = session.events_snapshot().into_iter().find_map(|event| {
+        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = event {
+            Some(body)
+        } else {
+            None
+        }
+    });
+    let generation = generation.expect("missing start must produce synthetic generation");
+    assert_eq!(
+        generation.output,
+        Some(serde_json::json!({"text": "completed"}))
+    );
+    assert_eq!(generation.model.as_deref(), Some("test-model"));
+    assert_eq!(
+        generation
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("request_id")),
+        Some(&serde_json::json!("req-7"))
+    );
+    assert_eq!(
+        generation
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("start_missing")),
+        Some(&serde_json::json!(true))
+    );
+}
+
+#[tokio::test]
+async fn test_unsampled_failure_emits_parent_before_error_and_redacts_message() {
+    let (mut t, session) = make_tracer(0.0);
+    let parent_id = t.agent_observation_id.clone();
+    let secrets = "sk-live-raw eyJhbGciOiJIUzI1NiJ9.payload.signature -----BEGIN PRIVATE KEY----- postgres://user:password@host/db";
+
+    t.on_turn_end(TurnTelemetryOutcome::Failed {
+        failure: ExecutionFailure::internal(secrets),
+    })
+    .await
+    .expect("flush task should finish");
+
+    let events = session.events_snapshot();
+    let parent_index = events.iter().position(|event| {
+        matches!(
+            event,
+            langfuse_client::IngestionEvent::ObservationCreate { body, .. }
+                if body.id.as_deref() == Some(parent_id.as_str())
+        )
+    });
+    let error_index = events.iter().position(|event| {
+        matches!(
+            event,
+            langfuse_client::IngestionEvent::EventCreate { body, .. }
+                if body.name.as_deref() == Some("ErrorTurn")
+                    && body.parent_observation_id.as_deref() == Some(parent_id.as_str())
+        )
+    });
+    assert!(
+        parent_index.is_some(),
+        "synthetic ErrorTurn parent must exist"
+    );
+    assert!(
+        parent_index < error_index,
+        "synthetic parent must be queued before ErrorTurn"
+    );
+    let serialized = serde_json::to_string(&events).expect("events should serialize");
+    for secret in [
+        "sk-live-raw",
+        "eyJhbGci",
+        "BEGIN PRIVATE KEY",
+        "postgres://",
+    ] {
+        assert!(
+            !serialized.contains(secret),
+            "Langfuse payload leaked secret marker: {secret}"
+        );
+    }
 }
 
 // ── TextChunk 累积测试 ─────────────────────────────────────────────────────
@@ -156,7 +409,7 @@ async fn test_llm_generation_emits_events() {
     t.on_turn_start("turn_1");
     t.on_llm_start("main", 0, &[], &[]);
     t.on_llm_end("main", 0, "gpt-4", "openai", "response", None, None);
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 
@@ -192,7 +445,7 @@ async fn test_llm_error_uses_safe_status_message() {
         None,
         None,
     );
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 
@@ -222,7 +475,13 @@ async fn test_turn_error_reason_is_safe_in_error_span() {
     let (mut t, session) = make_tracer(0.0);
     t.on_turn_start("turn_1");
     t.on_turn_error(peri_agent::agent::events_v2::TurnErrorReason::LlmFailure);
-    let _handle = t.on_turn_end(Some("sentinel-secret"));
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Failed {
+        failure: peri_acp_types::session::ExecutionFailure {
+            kind: peri_acp_types::session::ExecutionFailureKind::Llm,
+            public_message: "LLM failure".to_string(),
+            http_status: None,
+        },
+    });
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 
@@ -261,7 +520,7 @@ async fn test_llm_retry_accumulates_metadata() {
     t.on_llm_retrying("main", 0, 1, 3, 500, "timeout");
     t.on_llm_retrying("main", 0, 2, 3, 1000, "timeout");
     t.on_llm_end("main", 0, "gpt-4", "openai", "response", None, None);
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 
@@ -299,7 +558,7 @@ async fn test_middleware_start_and_end() {
     // 微小延迟确保 duration > 0（MiddlewareSpan 条件上报）
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     t.on_middleware_end(&mw_handle, StageStatus::Done, None);
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 
@@ -341,7 +600,7 @@ async fn test_compact_lifecycle() {
         full_escalation_reason: None,
         outcome: Some("done".to_string()),
     });
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 
@@ -410,7 +669,7 @@ async fn test_full_compact_span_name() {
         full_escalation_reason: None,
         outcome: None,
     });
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 
@@ -441,7 +700,7 @@ async fn test_workflow_span_carries_plan_input() {
     t.on_turn_start("turn_1");
     t.on_stage_start(Stage::Act, "turn_1");
     t.on_workflow_start("wf-1", "my test plan");
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 
@@ -622,7 +881,7 @@ async fn test_tool_observation_carries_input_and_output() {
     );
     t.on_tool_end("main", "tc_read", "file content: hello", false);
 
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 
@@ -666,7 +925,7 @@ async fn test_tool_observation_error_marks_error_class() {
     );
     t.on_tool_end("main", "tc_fail", "command failed", true);
 
-    let _handle = t.on_turn_end(None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 

@@ -241,6 +241,37 @@ mod wire_projection {
         );
     }
 
+    #[test]
+    fn llm_http_serialized_error_redacts_structured_secrets() {
+        let failure = ExecutionFailure::from_agent_error(&AgentError::LlmHttpError {
+            status: 401,
+            message: r#"Unauthorized Authorization:'Bearer auth-secret' api_key="key-secret" endpoint="https://api.example.test/v1?token=query-secret""#.to_string(),
+        });
+        let err = execution_failure_to_acp_error(&failure);
+        let wire = serde_json::to_value(&err).expect("AcpError 序列化不应失败");
+
+        assert_eq!(
+            wire["data"],
+            serde_json::json!({"kind": "llm_http", "status": 401})
+        );
+        assert!(wire["message"].as_str().unwrap().contains("Unauthorized"));
+        for secret in ["auth-secret", "key-secret", "query-secret"] {
+            assert!(!wire["message"].as_str().unwrap().contains(secret));
+        }
+    }
+
+    #[test]
+    fn non_http_failure_omits_status_even_for_inconsistent_input() {
+        let failure = ExecutionFailure {
+            kind: ExecutionFailureKind::Llm,
+            public_message: "LLM failure".to_string(),
+            http_status: Some(500),
+        };
+
+        let err = execution_failure_to_acp_error(&failure);
+        assert_eq!(err.data, Some(serde_json::json!({"kind": "llm"})));
+    }
+
     /// fatal 空 message → 非空稳定 fallback（脱敏、无内部细节）。
     #[test]
     fn fatal_failure_empty_message_falls_back_to_nonempty_safe_text() {
@@ -252,7 +283,7 @@ mod wire_projection {
     }
 
     /// `prompt_wire_response`：fatal（即便 stop_reason=EndTurn）→ Err，且
-    /// serialized 形态无 `data` 字段（`AcpError.data` 为 None 时跳过序列化）。
+    /// serialized 形态包含当前 allowlist `data` payload。
     #[test]
     fn prompt_wire_response_fatal_returns_error_with_allowlist_data() {
         let failure = ExecutionFailure::internal("middleware fatal");

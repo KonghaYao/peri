@@ -7,7 +7,7 @@ Peri ACP 服务层：session 生命周期（`SessionManager`/`AcpSession`）、p
 ## 核心流程
 
 - **请求入口**：`peri-tui/src/acp_server/mod.rs::run_acp_server` 接收 JSON-RPC 请求；`session/prompt` spawn 后台任务执行，保持 loop 响应 `session/cancel`
-- **session 创建**：`SessionManager::new_session` / `new_session_with_settings` 建 `AcpSession`（句柄，核心状态委托 `peri_agent::session::Session`），同时 `FrozenSessionData::build` 冻结 CLAUDE.md/skills/system prompt/date；`new_session_with_id` 服务 `session/load` 与 `session/resume`
+- **session 创建**：统一由 `host/requests/session_lifecycle.rs` 的 `session/new` 建 thread、冻结并持久化版本化 frozen snapshot，再向 `SessionManager` 注册 `AcpSession`；`new_session_with_id` 仅服务已有 thread 的测试/恢复注册，不拥有 durable thread 创建权
 - **prompt 构建**：`PromptTemplate::render(&env, &features, …)` 从 `prompts/sections/`（01_intro…16_workflow）按 `FeatureGate`/`PromptFeatures` 条件注入；frozen 数据 session 中途不重读（ARC-FROZEN-001）
 - **agent 执行**：`run_session_loop(SessionContext, TurnInput) -> PromptResult` 装配 v2 `StageContext` 并调用 `peri-agent` 的 ReAct 循环；slash 命令经 `session::command::CommandRegistry`（Immediate 命令也可由 `execute_command` 直接执行）
 - **事件流**：v2 EventBus 三通道（render/state/observe）→ `spawn_eventbus_forwarder`（biased select，render 先于 state）→ `ExecutorEvent` → `map_event` → `AcpEvent` DTO（按 session caps 门控）→ `EventSink` → `session/update`（标准 ACP，带 `_peri` metadata）、`peri/agent_event`、`peri/unstable-event`

@@ -387,7 +387,8 @@ pub static LAST_CTRL_C_PROCESSED: AtomStatic<Option<Instant>> = AtomStatic::new(
 pub static REWIND_ACTION_TX: OnceLock<UnboundedSender<RewindAction>> = OnceLock::new();
 pub static ASK_USER_RESPONSE_TX: OnceLock<UnboundedSender<AskUserResponseAction>> = OnceLock::new();
 pub static HITL_RESPONSE_TX: OnceLock<UnboundedSender<HitlResponseAction>> = OnceLock::new();
-pub static THREAD_LOAD_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
+pub static THREAD_LOAD_TX: OnceLock<crate::kit::thread_load_consumer::ThreadLoadDispatcher> =
+    OnceLock::new();
 
 pub static PERI_CONFIG_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::RwLock<crate::config::PeriConfig>>,

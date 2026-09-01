@@ -110,6 +110,7 @@ impl SqliteThreadStore {
             "ALTER TABLE threads ADD COLUMN cancel_policy TEXT NOT NULL DEFAULT 'cascade'",
             "ALTER TABLE threads ADD COLUMN config TEXT",
             "ALTER TABLE threads ADD COLUMN cached_context TEXT",
+            "ALTER TABLE threads ADD COLUMN frozen_context TEXT",
             "ALTER TABLE threads ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0",
@@ -420,6 +421,40 @@ impl ThreadStore for SqliteThreadStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn load_frozen_snapshot(&self, id: &ThreadId) -> Result<Option<String>> {
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
+                .bind(id.as_str())
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(row.0)
+    }
+
+    async fn store_frozen_snapshot_if_absent(&self, id: &ThreadId, snapshot: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL",
+        )
+        .bind(snapshot)
+        .bind(id.as_str())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            return Ok(true);
+        }
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
+                .bind(id.as_str())
+                .fetch_optional(&self.pool)
+                .await?;
+        match row {
+            Some((Some(_),)) => Ok(false),
+            Some((None,)) => anyhow::bail!(
+                "frozen snapshot write lost without a persisted winner for thread: {id}"
+            ),
+            None => anyhow::bail!("thread 不存在，无法写入 frozen snapshot: {id}"),
+        }
     }
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>> {

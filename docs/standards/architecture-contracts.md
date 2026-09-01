@@ -17,13 +17,19 @@
 ### ARC-FROZEN-001
 
 - **Scope**：会话、Prompt、SubAgent。
-- **Rule**：会话创建时冻结日期、项目指引、skills 摘要和 system prompt；同一会话及其 SubAgent 复用冻结数据，禁止中途重新读取而改变 prompt 前缀。
-- **Verify**：`cargo test -p peri-middlewares --lib frozen_claude_md`；人工检查 `build_frozen_data`、`from_frozen_parts` 与 SubAgent `with_frozen_data` 调用。
+- **Rule**：会话创建时冻结日期、项目指引、skills 摘要、MetaHarness 和 system prompt；同一会话及其 SubAgent 复用冻结数据，禁止中途重新读取而改变 prompt 前缀。冻结数据必须作为版本化 owner state 经 `ThreadStore` 专用接口持久化（不进入 `ThreadMeta` / list projection）：冷 `session/load` / `resume` 恢复原快照；legacy 缺失时只能用 `ThreadMeta.cwd` 构建，并以原子 write-once/CAS 回填，竞争失败方必须重读 winner。未知未来版本、损坏快照、metadata/store 错误均 fail closed 且不得覆盖原 blob。`fork` 继承 source 的精确快照；new/fork 写快照失败须补偿删除新 thread，禁止留下无 frozen owner state 的可用会话。
+- **Verify**：`cargo test -p peri-acp --lib frozen_snapshot`、`cargo test -p peri-acp --lib test_session_load_cold_host_restores_original_frozen_prompt`、`cargo test -p peri-resources --lib frozen_snapshot`、`cargo test -p peri-middlewares --lib frozen_claude_md`；人工检查 `build_frozen_data`、`session/frozen_snapshot.rs`、session lifecycle 与 SubAgent `with_frozen_data` 调用。
+
+### ARC-SESSION-LOAD-001
+
+- **Scope**：`peri-tui` 普通 thread 切换、ACP session lifecycle。
+- **Rule**：普通 thread load 必须在 producer 的同步入队边界取得引用计数 reservation，并持有到 `session/load` 提交或请求被丢弃；`ensure_session` 与所有 prompt 入口在选择 Stable session / 打开 prompt lease 前等待 reservation 清零。等待不得持有 lifecycle operation gate；Stable 决策或 `open_prompt` 必须在 reservation mutex 下线性化。send failure 不得把 guard 暴露给调用方，shutdown 必须能取消 in-flight load 并释放 reservation。compact replay 必须先 reserve load，再 drain buffered input，禁止依赖异步 consumer 调度顺序。
+- **Verify**：`cargo test -p peri-tui --lib load_reservation`、`cargo test -p peri-tui --lib test_failed_load_dispatch_releases_reservation`、`cargo test -p peri-tui --lib test_shutdown_cancels_inflight_load_and_releases_reservation`、`cargo test -p peri-tui --lib test_compact_turndone_reload`；人工检查 `ThreadLoadDispatcher::send`、`AcpTuiClient::open_prompt_after_session_loads` 与 consumer drop/cancel 分支。
 
 ### ARC-EVENT-001
 
 - **Scope**：v2 事件（`peri-acp-types/src/event_v2.rs`）、v1 `ExecutorEvent` 协议化载体、ACP 映射、TUI 通知。
-- **Rule**：事件链路为单事实源 `Agent →(emit v2 事件，ObserveEvent 身份透传) →(协议序列化面映射) ACP →(协议化) TUI`：新增或变更事件必须覆盖完整链路——发射（v2 EventBus，唯一发射点，禁止 Agent 层构造 v1 `ExecutorEvent`；v1 中间态已退役，历史迁移记录已归档）、协议序列化面映射（`event_v2::*_event_to_executor`，穷尽匹配，禁止 wildcard 兜底，仅 ACP 协议化/发射侧同步映射使用）、ACP 映射/转发（`peri-acp/src/event/`）、能力门控（如适用）和客户端消费；终止事件必须使客户端离开 loading 状态。标准 ACP 没有 turn-error `SessionUpdate`：fatal turn failure 的 canonical wire 结果是 `session/prompt` JSON-RPC error response；`AgentExecutionFailed` 仅作 capability-gated 客户端兼容投影，不能替代标准响应。工具结果的 live/replay 投影必须同时保留标准 `ToolCallUpdate.content` 与兼容 `rawOutput`，失败状态使用标准 `failed`，失败展示文本不得为空。面向不同客户端的降维投影必须在 ACP 边界从 canonical event 构造独立、版本化、allowlist DTO，不能把 TUI 私有 `event_json` 原样转给 Hub/Web；cap 未双向协商时不得投影。v2_tx 双轨直连已下线（`2026-08-05-3.0-m-event-chain-canonical.md`），TUI 事件仅经 ACP 协议化路径，禁止恢复第二套事件投递。v1 兼容层仅保留协议序列化面需要的最小映射（在 `peri-acp-types`），wire format 不变。
+- **Rule**：事件链路为单事实源 `Agent →(emit v2 事件，ObserveEvent 身份透传) →(协议序列化面映射) ACP →(协议化) TUI`：新增或变更事件必须覆盖完整链路——发射（v2 EventBus，唯一发射点，禁止 Agent 层构造 v1 `ExecutorEvent`；v1 中间态已退役，历史迁移记录已归档）、协议序列化面映射（`event_v2::*_event_to_executor`，穷尽匹配，禁止 wildcard 兜底，仅 ACP 协议化/发射侧同步映射使用）、ACP 映射/转发（`peri-acp/src/event/`）、能力门控（如适用）和客户端消费；终止事件必须使客户端离开 loading 状态。主 turn 返回终态前必须 await 本轮 root EventBus forwarder 完成，保证 final `LlmCallEnd/UsageUpdate` 先于 `AgentDone/TurnDone`；forwarder JoinError 是内部执行失败，不得超时后 fail-open，也不得提前返回空历史：仍须完成 transcript/recall/compaction 提取，并按 `AgentExecutionFailed → TurnEnded(Error/Internal) → done` 唯一收尾。辅助 agent 的 `LlmCallEnd` 必须以 `_meta.peri.sourceAgentId` 保留来源身份，不能覆盖父 turn 的 root usage；TUI 对每次 root usage observation 都必须替换最终样本，missing/zero/inconsistent observation 显式 clear，禁止保留更早的低 coverage 样本。标准 ACP 没有 turn-error `SessionUpdate`：fatal turn failure 的 canonical wire 结果是 `session/prompt` JSON-RPC error response；`AgentExecutionFailed` 仅作 capability-gated 客户端兼容投影，不能替代标准响应。工具结果的 live/replay 投影必须同时保留标准 `ToolCallUpdate.content` 与兼容 `rawOutput`，失败状态使用标准 `failed`，失败展示文本不得为空。面向不同客户端的降维投影必须在 ACP 边界从 canonical event 构造独立、版本化、allowlist DTO，不能把 TUI 私有 `event_json` 原样转给 Hub/Web；cap 未双向协商时不得投影。v2_tx 双轨直连已下线（`2026-08-05-3.0-m-event-chain-canonical.md`），TUI 事件仅经 ACP 协议化路径，禁止恢复第二套事件投递。v1 兼容层仅保留协议序列化面需要的最小映射（在 `peri-acp-types`），wire format 不变。
 - **Verify**：`cargo test -p peri-acp --lib mapper`（含 `variant_coverage_test` 的 map_event 穷尽断言）；`cargo test -p peri-agent --lib events_v2`（协议序列化面映射穷尽 + 身份透传）；`cargo test -p peri-agent --lib model_bridge`（流式事件 v2 直发，无 v1 中间态）；`cargo test -p peri-acp-types --lib identity`（canonical envelope / session_seq 单调契约）；人工检查 `peri-acp/src/event/`、事件 sink 和 `peri-tui/src/kit/acp_notifier.rs` 的对应分支。
 
 ### ARC-TOOLS-001
@@ -79,8 +85,8 @@
 ### ARC-SERIAL-001
 
 - **Scope**：跨请求复用的 Prompt、工具注册与 provider payload。
-- **Rule**：影响 prompt cache 的序列化顺序必须确定；不得直接依赖 `HashMap` 迭代顺序生成 tools 或其他缓存前缀。使用 `BTreeMap`、稳定排序或固定注册顺序，并保持包装层顺序不变。
-- **Verify**：检查工具注册表及 provider payload 的收集路径；修改后运行相关工具注册测试，并比较相同输入的连续序列化结果。
+- **Rule**：影响 prompt cache 的序列化顺序必须确定；不得直接依赖 `HashMap` 迭代顺序生成 tools 或其他缓存前缀。使用 `BTreeMap`、稳定排序或固定注册顺序，并保持包装层顺序不变。`PromptSectionZone` 的 cached/uncached seam 必须跨 `String` handoff 保留：唯一保留控制字由 `peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 定义，所有 provider 构造 wire request 前必须消费且不得泄漏。支持显式 cache breakpoint 的 adapter 以单一控制字区分静态/动态 system block；重复控制字须剥离全部并对显式 breakpoint fail-closed（整个 system 不显式缓存）。不支持显式 breakpoint 的 adapter 只做字节守恒剥离，不宣称控制 provider 的隐式缓存。无控制字输入是否采用 legacy fallback 由具体 adapter 契约决定。
+- **Verify**：检查工具注册表及 provider payload 的收集路径；修改后运行相关工具注册测试，并比较相同输入的连续序列化结果。运行 `cargo test -p peri-acp --test prompt_cache_boundary`、`cargo test -p peri-model --lib -- system_cache`，覆盖四态字节守恒、显式 breakpoint adapter 的重复控制字 fail-closed、provider wire 无控制字及动态 suffix 顺序。
 
 ### ARC-MIDDLEWARE-001
 

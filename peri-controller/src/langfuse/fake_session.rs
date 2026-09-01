@@ -2,6 +2,7 @@ use langfuse_client::{IngestionEvent, LangfuseError};
 use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::drop_telemetry::LangfuseDropRegistry;
@@ -11,6 +12,7 @@ pub struct FakeLangfuseSession {
     events: Mutex<Vec<IngestionEvent>>,
     drop_registry: LangfuseDropRegistry,
     session_id: String,
+    flush_count: AtomicUsize,
 }
 
 impl FakeLangfuseSession {
@@ -19,6 +21,7 @@ impl FakeLangfuseSession {
             events: Mutex::new(Vec::new()),
             drop_registry: LangfuseDropRegistry::default(),
             session_id: session_id.into(),
+            flush_count: AtomicUsize::new(0),
         })
     }
 
@@ -29,6 +32,10 @@ impl FakeLangfuseSession {
     pub fn event_count(&self) -> usize {
         self.events.lock().len()
     }
+
+    pub fn flush_count(&self) -> usize {
+        self.flush_count.load(Ordering::SeqCst)
+    }
 }
 
 impl LangfuseSessionLike for FakeLangfuseSession {
@@ -38,6 +45,7 @@ impl LangfuseSessionLike for FakeLangfuseSession {
     }
 
     fn flush(&self) -> Pin<Box<dyn Future<Output = Result<(), LangfuseError>> + Send + '_>> {
+        self.flush_count.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(()) })
     }
 

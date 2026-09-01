@@ -183,6 +183,13 @@ impl FileCredentialStore {
                 path: self.path.clone(),
                 detail: e.error.to_string(),
             })?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|e| AuthStoreError::WriteFailed {
+                path: self.path.clone(),
+                detail: e.to_string(),
+            })?;
         debug!(path = %self.path.display(), "Token 文件已原子写入");
         Ok(())
     }

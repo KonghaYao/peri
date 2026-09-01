@@ -16,6 +16,14 @@ pub struct AcpEventWithEpoch {
     pub active_session_id: String,
 }
 
+/// Latest valid root-agent prompt-cache telemetry for the active turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheUsageSample {
+    pub input_tokens: u64,
+    pub cached_tokens: u64,
+    pub request_id: Option<String>,
+}
+
 /// TUI 内部 interaction 快照：RequestId 与 payload 从 notifier 起原子同行。
 #[derive(Debug, Clone)]
 pub struct PendingInteraction<T> {
@@ -56,6 +64,12 @@ pub enum AcpEventData {
     /// `request_id` 为本轮 prompt RPC 的 id（submit_consumer 生成）——bridge
     /// 记录为"当前 turn 的 id"，供 stale TurnInterrupted 配对判定。
     PromptSubmitted { request_id: Option<String> },
+
+    /// Root-agent usage sample. Auxiliary agent updates are filtered by the notifier.
+    /// Final root usage observation for the current model step. `None` is an
+    /// explicit clear: the root observation arrived but did not contain a
+    /// valid positive cache sample, so an older sample must not survive.
+    CacheUsageUpdated(Option<CacheUsageSample>),
 
     /// session/load 历史恢复开始。Replay 不是 agent turn，不能触发 loading。
     SessionReplayStarted,

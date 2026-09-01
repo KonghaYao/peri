@@ -215,7 +215,7 @@ config-desc-language = en, zh-CN，或留空为自动
 config-desc-persona = 覆盖系统提示词 persona（留空=默认）
 config-desc-tone = 覆盖系统提示词 tone（留空=默认）
 config-desc-proactiveness = low / medium / high — agent 主动性级别
-config-desc-cache-warning = （开/关 — 在对话中显示缓存命中率过低警告）
+config-desc-cache-warning = （开/关 — 在对话中显示最终缓存覆盖率过低警告）
 config-desc-diff = （开/关 — 显示 Write/Edit 工具的内联 diff）
 config-field-streaming = 渲染模式
 config-desc-streaming = streaming / block / none — LLM 输出渲染粒度
@@ -284,7 +284,7 @@ app-compact-auto-cleared = 自动清理：释放了 { $count } 个工具调用�
 app-compact-limit-reached = 上下文压缩后仍超出限制，已停止自动继续。请使用 /compact 手动压缩或 /clear 清空历史。
 app-model-switched = 模型已切换为: { $alias } ({ $effort } effort)
 app-1m-context-enabled = 已启用 1M 上下文模式（context window: 1,000,000 tokens）
-app-prompt-cache-low = Prompt cache 命中率 { $rate }% < 80% (req: { $req })
+app-prompt-cache-low = Prompt cache 覆盖率 { $rate }% < 80% (req: { $req })
 app-no-mcp-configured = 无 MCP 服务器配置（请在 .mcp.json 或 settings.json 中添加）
 app-no-cron-tasks = 无定时任务
 app-cron-deleted = 已删除定时任务: { $preview }
@@ -1123,7 +1123,8 @@ app-note-compact-type-full = 完整压缩
 app-note-compact-type-micro = 微压缩
 app-note-compact-type-smart = 智能压缩
 app-note-agent-failed = Agent 执行失败: { $message }
-app-note-cache-hit-low = Prompt cache 命中率 {$pct}% < 80%（req: { $req_id }）
+app-note-cache-hit-low = Prompt cache 覆盖率 {$pct}% < 80%（req: { $req_id }）
+app-note-cache-coverage-low = Prompt cache 覆盖率 {$pct}% < 80% — 已缓存 {$cached} / 输入 {$input}，未缓存 {$uncached}（req: {$req_id}）
 
 # ---- 语义工具卡片 ----
 tool-todo-failed = 更新失败

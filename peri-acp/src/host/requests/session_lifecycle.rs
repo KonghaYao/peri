@@ -19,7 +19,120 @@ use super::super::notify::{send_available_commands_update, send_config_option_up
 use super::super::{build_mode_state, AcpServerConfig, SessionState};
 use crate::dispatch::config_update::make_config_options;
 use crate::dispatch::ReplaySender;
+use crate::session::frozen_snapshot::{decode_frozen_snapshot, encode_frozen_snapshot};
 use crate::{dispatch, transport::types::AcpError};
+
+async fn store_frozen_snapshot(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    frozen_data: &crate::session::executor::FrozenSessionData,
+) -> Result<bool, AcpError> {
+    let snapshot = encode_frozen_snapshot(frozen_data).map_err(|error| {
+        AcpError::new(-32603, format!("Frozen snapshot encode failed: {error}"))
+    })?;
+    cfg.thread_store
+        .store_frozen_snapshot_if_absent(&session_id.to_string(), &snapshot)
+        .await
+        .map_err(|error| AcpError::new(-32603, format!("Frozen snapshot store failed: {error}")))
+}
+
+async fn store_new_frozen_snapshot_or_compensate(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    frozen_data: &crate::session::executor::FrozenSessionData,
+) -> Result<(), AcpError> {
+    let stored = store_frozen_snapshot(cfg, session_id, frozen_data).await;
+    if !matches!(stored, Ok(true)) {
+        let error = match stored {
+            Ok(false) => AcpError::new(
+                -32603,
+                format!("Frozen snapshot already exists for new session: {session_id}"),
+            ),
+            Err(error) => error,
+            Ok(true) => unreachable!(),
+        };
+        if let Err(cleanup_error) = cfg
+            .thread_store
+            .delete_thread(&session_id.to_string())
+            .await
+        {
+            warn!(
+                session_id,
+                error = %cleanup_error,
+                "failed to compensate thread after frozen snapshot store failure"
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn load_or_backfill_frozen_data(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+) -> Result<crate::session::executor::FrozenSessionData, AcpError> {
+    match cfg
+        .thread_store
+        .load_frozen_snapshot(&session_id.to_string())
+        .await
+    {
+        Ok(Some(snapshot)) => decode_frozen_snapshot(&snapshot).map_err(|error| {
+            AcpError::new(
+                -32603,
+                format!("Frozen snapshot restore failed for {session_id}: {error}"),
+            )
+        }),
+        Ok(None) => {
+            let meta = cfg
+                .thread_store
+                .load_meta(&session_id.to_string())
+                .await
+                .map_err(|error| {
+                    AcpError::new(
+                        -32603,
+                        format!("Legacy frozen snapshot metadata load failed: {error}"),
+                    )
+                })?;
+            let frozen_data = cfg.session_manager.build_frozen_data(
+                &meta.cwd,
+                &cfg.plugin_skill_roots,
+                &cfg.plugin_agent_dirs,
+            );
+            if store_frozen_snapshot(cfg, session_id, &frozen_data).await? {
+                return Ok(frozen_data);
+            }
+            // Another process won the write-once backfill. Its complete snapshot
+            // is canonical; use it instead of this process's potentially different
+            // environment rendering.
+            let winner = cfg
+                .thread_store
+                .load_frozen_snapshot(&session_id.to_string())
+                .await
+                .map_err(|error| {
+                    AcpError::new(
+                        -32603,
+                        format!("Frozen snapshot winner reload failed: {error}"),
+                    )
+                })?
+                .ok_or_else(|| {
+                    AcpError::new(
+                        -32603,
+                        format!("Frozen snapshot backfill lost without winner: {session_id}"),
+                    )
+                })?;
+            decode_frozen_snapshot(&winner).map_err(|error| {
+                AcpError::new(
+                    -32603,
+                    format!("Frozen snapshot winner restore failed for {session_id}: {error}"),
+                )
+            })
+        }
+        Err(error) => Err(AcpError::new(
+            -32603,
+            format!("Frozen snapshot load failed for {session_id}: {error}"),
+        )),
+    }
+}
 
 /// 创建 session 级 WorkflowMiddleware（session/new / load / resume 共用，GAP-05）。
 ///
@@ -103,12 +216,13 @@ pub(crate) async fn handle_new(
     // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
     // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
     // GAP-05: frozen data 在 WorkflowMiddleware 创建前构建，注入到 executor。
-    cfg.session_manager.ensure_session(&session_id, &cwd);
     let frozen_data = cfg.session_manager.build_frozen_data(
         &cwd,
         &cfg.plugin_skill_roots,
         &cfg.plugin_agent_dirs,
     );
+    store_new_frozen_snapshot_or_compensate(cfg, &session_id, &frozen_data).await?;
+    cfg.session_manager.ensure_session(&session_id, &cwd);
 
     // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
     let workflow_middleware =
@@ -194,12 +308,17 @@ pub(crate) async fn handle_load(
     // Load history from ThreadStore via Controller
     let history = dispatch::load_session_messages(cfg.controller.as_ref(), req_session_id).await;
 
-    // ── 先构建 frozen + workflow_middleware，再插入 session ──
+    // ── 先恢复 frozen，再产生任何 SessionManager side effect ──
+    let frozen_data = if let Some(frozen) = sessions
+        .get(req_session_id)
+        .and_then(|state| state.frozen.clone())
+    {
+        frozen
+    } else {
+        load_or_backfill_frozen_data(cfg, req_session_id).await?
+    };
     cfg.session_manager.ensure_session(req_session_id, cwd);
     let caps = cfg.session_manager.ensure_session_caps(req_session_id);
-    let frozen_data =
-        cfg.session_manager
-            .build_frozen_data(cwd, &cfg.plugin_skill_roots, &cfg.plugin_agent_dirs);
     let workflow_middleware =
         create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
     let lsp_pool = create_session_lsp_pool(cfg, cwd);
@@ -210,7 +329,7 @@ pub(crate) async fn handle_load(
             state.history = history;
         }
         if state.frozen.is_none() {
-            state.frozen = Some(frozen_data);
+            state.frozen = Some(frozen_data.clone());
         }
         if state.workflow_middleware.is_none() {
             state.workflow_middleware = workflow_middleware;
@@ -406,12 +525,17 @@ pub(crate) async fn handle_resume(
     // Load history from ThreadStore via Controller (deferred load)
     let history = dispatch::load_session_messages(cfg.controller.as_ref(), req_session_id).await;
 
-    // ── 先构建 frozen + workflow_middleware ──
+    // ── 先恢复 frozen，再产生任何 SessionManager side effect ──
+    let frozen_data = if let Some(frozen) = sessions
+        .get(req_session_id)
+        .and_then(|state| state.frozen.clone())
+    {
+        frozen
+    } else {
+        load_or_backfill_frozen_data(cfg, req_session_id).await?
+    };
     cfg.session_manager.ensure_session(req_session_id, cwd);
     let caps = cfg.session_manager.ensure_session_caps(req_session_id);
-    let frozen_data =
-        cfg.session_manager
-            .build_frozen_data(cwd, &cfg.plugin_skill_roots, &cfg.plugin_agent_dirs);
     let workflow_middleware =
         create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
     let lsp_pool = create_session_lsp_pool(cfg, cwd);
@@ -446,7 +570,7 @@ pub(crate) async fn handle_resume(
                 s.history = history;
             }
             if s.frozen.is_none() {
-                s.frozen = Some(frozen_data);
+                s.frozen = Some(frozen_data.clone());
             }
             if s.workflow_middleware.is_none() {
                 s.workflow_middleware = workflow_middleware;
@@ -488,10 +612,16 @@ pub(crate) async fn handle_fork(
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
     let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
-    let source_history = sessions
+    let (source_history, source_frozen) = sessions
         .get(source_id)
-        .map(|s| s.history.clone())
+        .map(|state| (state.history.clone(), state.frozen.clone()))
         .ok_or_else(|| AcpError::new(-32602, format!("source session not found: {source_id}")))?;
+    let source_frozen = source_frozen.ok_or_else(|| {
+        AcpError::new(
+            -32603,
+            format!("source session has no frozen snapshot: {source_id}"),
+        )
+    })?;
 
     let (new_thread_id, copied_history) =
         dispatch::fork_session(cfg.controller.as_ref(), source_id, &source_history, cwd)
@@ -500,12 +630,12 @@ pub(crate) async fn handle_fork(
 
     let new_session_id = new_thread_id.clone();
 
-    // ── 先构建 frozen + workflow_middleware ──
+    // Fork inherits the source session's exact frozen prefix. Rebuilding from the
+    // current environment would invalidate the provider cache on its first turn.
+    let frozen_data = source_frozen;
+    store_new_frozen_snapshot_or_compensate(cfg, &new_session_id, &frozen_data).await?;
     cfg.session_manager.ensure_session(&new_session_id, cwd);
     let caps = cfg.session_manager.ensure_session_caps(&new_session_id);
-    let frozen_data =
-        cfg.session_manager
-            .build_frozen_data(cwd, &cfg.plugin_skill_roots, &cfg.plugin_agent_dirs);
     let workflow_middleware =
         create_session_workflow_middleware(cfg, cwd, &new_session_id, &frozen_data);
     let lsp_pool = create_session_lsp_pool(cfg, cwd);

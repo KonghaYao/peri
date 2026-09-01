@@ -1648,6 +1648,9 @@ async fn test_session_load_prewarms_mcp_discovery_smoke() {
     let mut cfg = make_server_config(peri_config, provider, &tmp);
     cfg.session_manager.set_pending_caps(PeriCaps::default());
     cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let mut legacy_meta = ThreadMeta::new(tmp.path().to_str().unwrap());
+    legacy_meta.id = "s1".to_string();
+    cfg.thread_store.create_thread(legacy_meta).await.unwrap();
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
@@ -1671,6 +1674,157 @@ async fn test_session_load_prewarms_mcp_discovery_smoke() {
             m == "session/update" && p["update"]["sessionUpdate"] == "available_commands_update"
         }),
         "session/load 应广播 available_commands_update"
+    );
+}
+
+/// [回归测试] 冷启动加载同一 session 必须恢复创建时的 frozen prompt。
+///
+/// 历史问题：`session/load` 只恢复消息，却重新扫描当前 CLAUDE.md/skills/date；
+/// OpenAI/Cursor 因而在恢复后的首请求看到“新 system + 旧 history”，首轮重建
+/// cache prefix、后续轮才恢复命中。
+#[tokio::test]
+async fn test_session_load_cold_host_restores_original_frozen_prompt() {
+    // Arrange
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("CLAUDE.md"), "FROZEN_PROMPT_V1").unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config.clone(), provider.clone(), &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let created = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let session_id = created["sessionId"].as_str().unwrap().to_string();
+    let original_prompt = sessions[&session_id]
+        .frozen
+        .as_ref()
+        .unwrap()
+        .system_prompt()
+        .to_string();
+    let original_claude_md = sessions[&session_id]
+        .frozen
+        .as_ref()
+        .unwrap()
+        .claude_md()
+        .unwrap()
+        .to_string();
+    assert!(original_claude_md.contains("FROZEN_PROMPT_V1"));
+    cfg.thread_store
+        .append_messages(
+            &session_id,
+            &[peri_acp_types::messages::BaseMessage::human(
+                "existing history",
+            )],
+        )
+        .await
+        .unwrap();
+    drop(cfg);
+    drop(sessions);
+    std::fs::write(tmp.path().join("CLAUDE.md"), "FROZEN_PROMPT_V2").unwrap();
+    let restarted = make_server_config(peri_config, provider, &tmp);
+    let mut restored_sessions = HashMap::new();
+    // Act
+    handle_request(
+        "session/load",
+        &json!({
+            "sessionId": session_id,
+            "cwd": tmp.path().to_str().unwrap(),
+        }),
+        &restarted,
+        &mut restored_sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    // Assert
+    let restored_prompt = restored_sessions[&session_id]
+        .frozen
+        .as_ref()
+        .unwrap()
+        .system_prompt();
+    let restored_claude_md = restored_sessions[&session_id]
+        .frozen
+        .as_ref()
+        .unwrap()
+        .claude_md()
+        .unwrap();
+    assert_eq!(restored_prompt, original_prompt);
+    assert_eq!(restored_claude_md, original_claude_md);
+    assert!(restored_claude_md.contains("FROZEN_PROMPT_V1"));
+    assert!(!restored_claude_md.contains("FROZEN_PROMPT_V2"));
+}
+
+#[tokio::test]
+async fn test_session_load_future_frozen_snapshot_fails_without_overwrite() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config.clone(), provider.clone(), &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let created = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let session_id = created["sessionId"].as_str().unwrap().to_string();
+    let future_snapshot = r#"{"version":999,"data":{"must":"remain"}}"#;
+    let snapshot_path = tmp
+        .path()
+        .join("threads")
+        .join(&session_id)
+        .join("frozen.json");
+    tokio::fs::write(&snapshot_path, future_snapshot)
+        .await
+        .unwrap();
+    drop(cfg);
+    drop(sessions);
+
+    let restarted = make_server_config(peri_config, provider, &tmp);
+    let mut restored_sessions = HashMap::new();
+    let error = handle_request(
+        "session/load",
+        &json!({
+            "sessionId": session_id,
+            "cwd": tmp.path().to_str().unwrap(),
+        }),
+        &restarted,
+        &mut restored_sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error
+        .message
+        .contains("unsupported frozen snapshot version"));
+    assert!(restored_sessions.is_empty());
+    assert!(restarted.session_manager.get_session(&session_id).is_none());
+    assert_eq!(
+        tokio::fs::read_to_string(snapshot_path).await.unwrap(),
+        future_snapshot,
+        "future snapshot must be preserved for a newer binary"
     );
 }
 

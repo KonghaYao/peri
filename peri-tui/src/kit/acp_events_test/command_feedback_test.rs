@@ -27,6 +27,7 @@ fn test_command_feedback_injects_system_note() {
         turn_generation: 0,
         last_prompt_generation: 0,
         current_request_id: None,
+        pending_cache_usage: None,
     };
 
     // Info（UiOnly 通道）
