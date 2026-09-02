@@ -107,6 +107,8 @@ pub(crate) struct SessionState {
     /// 与 pool 取出/归还同一临界区）。`session/cancel` 取消的是续跑本身时
     /// 排除置位 armed——否则会形成"取消续跑 → 再续跑"的自动链式续跑。
     continuation_in_flight: bool,
+    /// 下一次 continuation dispatch 按 MQ steering 校验（非 SubAgentComplete）。
+    continuation_mq_steering_pending: bool,
     /// 多读者 + 单 writer lease：session 创建方（writer）唯一可提交输入/取消。
     ///
     /// 协议无客户端身份字段（`clientId` 属协议级扩展，另立 issue），writer 恒为
@@ -911,16 +913,19 @@ pub(crate) async fn dispatch_prompt_turn(
         let dispatchable = {
             let sessions = sessions.lock().await;
             sessions.get(&prompt_session_id).is_some_and(|state| {
-                let has_pending = cfg
+                let (has_subagent, has_mq) = cfg
                     .session_manager
                     .get_session(&prompt_session_id)
                     .map(|session| {
-                        session.v2_message_queue.has_pending_defer(
-                            &peri_acp_types::session::MessageSource::SubAgentComplete,
+                        (
+                            session.v2_message_queue.has_pending_defer(
+                                &peri_acp_types::session::MessageSource::SubAgentComplete,
+                            ),
+                            session.v2_message_queue.needs_mq_continuation(),
                         )
                     })
-                    .unwrap_or(false);
-                continuation::continuation_dispatchable(state, epoch, has_pending)
+                    .unwrap_or((false, false));
+                continuation::continuation_dispatchable(state, epoch, has_subagent, has_mq)
             })
         };
         if !dispatchable {
@@ -933,6 +938,7 @@ pub(crate) async fn dispatch_prompt_turn(
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
             state.continuation_in_flight = true;
+            state.continuation_mq_steering_pending = false;
         }
     }
 

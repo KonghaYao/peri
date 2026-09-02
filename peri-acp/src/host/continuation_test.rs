@@ -33,6 +33,7 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         continuation_armed: armed,
         continuation_epoch: epoch,
         continuation_in_flight: false,
+        continuation_mq_steering_pending: false,
         lease: crate::host::lease::WriterLease::acquired("default"),
     }
 }
@@ -164,12 +165,12 @@ fn test_cancel_schedule_race_eligibility() {
 fn test_continuation_dispatchable_requires_pending_defer() {
     let state = make_session_state(false, 3);
     // 代际有效 + Defer 在队 → 可 dispatch
-    assert!(continuation_dispatchable(&state, 3, true));
+    assert!(continuation_dispatchable(&state, 3, true, false));
     // 代际有效但 Defer 已被消费 → 跳过（空跑无意义）
-    assert!(!continuation_dispatchable(&state, 3, false));
+    assert!(!continuation_dispatchable(&state, 3, false, false));
     // 代际失效（用户新 prompt）→ 跳过
-    assert!(!continuation_dispatchable(&state, 3 + 1, true));
-    assert!(!continuation_dispatchable(&state, 3 + 1, false));
+    assert!(!continuation_dispatchable(&state, 3 + 1, true, false));
+    assert!(!continuation_dispatchable(&state, 3 + 1, false, false));
 }
 
 #[tokio::test]

@@ -284,8 +284,8 @@ fn test_observe_llm_call_end_maps_with_usage() {
         output: "test output".to_string(),
         input_tokens: 500,
         output_tokens: 200,
-        cache_creation_input_tokens: 30,
-        cache_read_input_tokens: 400,
+        cache_creation_input_tokens: Some(30),
+        cache_read_input_tokens: Some(400),
         request_id: Some("req-abc".to_string()),
     };
     match observe_event_to_executor(o).unwrap() {
@@ -333,14 +333,24 @@ fn test_observe_llm_call_end_maps_with_output() {
         output: "final answer text".to_string(),
         input_tokens: 100,
         output_tokens: 50,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: Some(0),
         request_id: None,
     };
     match observe_event_to_executor(o).expect("LlmCallEnd 应映射") {
-        ExecutorEvent::LlmCallEnd { output, step, .. } => {
+        ExecutorEvent::LlmCallEnd {
+            output,
+            step,
+            usage,
+            ..
+        } => {
             assert_eq!(output, "final answer text");
             assert_eq!(step, 3);
+            assert_eq!(
+                usage.and_then(|value| value.cache_read_input_tokens),
+                Some(0),
+                "显式零命中必须与 provider 未提供统计区分"
+            );
         }
         _ => panic!("应为 LlmCallEnd"),
     }

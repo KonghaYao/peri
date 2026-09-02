@@ -16,7 +16,7 @@ pub struct AcpEventWithEpoch {
     pub active_session_id: String,
 }
 
-/// Latest valid root-agent prompt-cache telemetry for the active turn.
+/// One root-agent request's prompt-cache telemetry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheUsageSample {
     pub input_tokens: u64,
@@ -65,10 +65,9 @@ pub enum AcpEventData {
     /// 记录为"当前 turn 的 id"，供 stale TurnInterrupted 配对判定。
     PromptSubmitted { request_id: Option<String> },
 
-    /// Root-agent usage sample. Auxiliary agent updates are filtered by the notifier.
-    /// Final root usage observation for the current model step. `None` is an
-    /// explicit clear: the root observation arrived but did not contain a
-    /// valid positive cache sample, so an older sample must not survive.
+    /// Root-agent usage observation for one model request. Auxiliary agent updates
+    /// are filtered by the notifier. `Some` includes an explicit zero cache read;
+    /// `None` means this provider observation did not expose usable cache detail.
     CacheUsageUpdated(Option<CacheUsageSample>),
 
     /// session/load 历史恢复开始。Replay 不是 agent turn，不能触发 loading。

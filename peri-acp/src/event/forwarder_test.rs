@@ -116,8 +116,8 @@ async fn test_forwarder_branches_to_bridge_before_mapper() {
         output: "out".to_string(),
         input_tokens: 10,
         output_tokens: 5,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
         request_id: None,
     });
 

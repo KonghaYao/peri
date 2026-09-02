@@ -668,6 +668,7 @@ async fn test_transport_eof_closes_sessions_and_drains_host_tasks() {
                 continuation_armed: false,
                 continuation_epoch: 0,
                 continuation_in_flight: false,
+                continuation_mq_steering_pending: false,
                 lease: crate::host::lease::WriterLease::acquired("default"),
             },
         ),
@@ -894,6 +895,7 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
             // 会话创建方即 writer（§6；测试源 session 同样建立 lease）
             lease: crate::host::lease::WriterLease::acquired("default"),
         },

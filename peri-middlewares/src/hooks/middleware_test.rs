@@ -824,13 +824,14 @@ async fn test_stop_block_continue_sets_block_continue_field() {
             // If command exits 0 (Allow), block_continue should be None
             // Either outcome is valid depending on the hook executor behavior
             if o.block_continue.is_some() {
-                // Stop hook block → 应通过 v2 queue push 1 条 Info（StopHookFeedback）
+                // Stop hook block → 应通过 v2 queue push 1 条 Defer（StopHookFeedback）
                 let drained = state.v2_queue().drain_all();
                 assert_eq!(
                     drained.len(),
                     1,
-                    "stop block 应 push 1 条 StopHookFeedback Info 消息"
+                    "stop block 应 push 1 条 StopHookFeedback Defer 消息"
                 );
+                assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Defer);
             }
         }
         Err(_) => {

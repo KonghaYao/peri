@@ -186,6 +186,7 @@ pub(super) async fn build_and_execute_agent(
                 let _ = tx.send(ContinuationRequest {
                     session_id: sid.clone(),
                     kind,
+                    mq_steering: false,
                 });
             }
         }) as Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>
@@ -240,6 +241,7 @@ pub(super) async fn build_and_execute_agent(
         store_llm,
         cancel_cascade,
         forwarder_launcher,
+        continuation_notify: ctx.continuation_notify.clone(),
     })
     .await
 }

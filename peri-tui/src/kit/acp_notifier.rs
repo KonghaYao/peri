@@ -6,9 +6,9 @@
 //!   通过标准 `session/update` 携带，在 `handle_session_update` 中转换为
 //!   `AcpEventData` 变体推入双 bridge channel。
 //! - **usage_update**：token 消耗通过标准 session/update 的 `usage_update` tag
-//!   携带；root usage 更新 spinner，并把本次 cache observation（valid sample 或
-//!   explicit clear）转为 session-enveloped `CacheUsageUpdated` 交给 BridgeState。
-//!   auxiliary usage 不覆盖父 turn sample。
+//!   携带；root usage 更新 spinner，并把本次请求的 cache observation（包括显式
+//!   零命中）转为 session-enveloped `CacheUsageUpdated` 交给 BridgeState 立即计算。
+//!   auxiliary usage 不产生父 turn 的 cache 提示。
 //! - **AgentEvent DTO 已接入**：`peri/agent_event` 携带的 AcpEvent 变体
 //!   （SubagentStarted/SubagentStopped/TurnSuspended/RewindCompleted/...）
 //!   通过 `convert_agent_event` 转换为 AcpEventData 推入双 bridge channel。
@@ -699,7 +699,7 @@ fn handle_session_update(
                 .and_then(|v| v.as_str())
                 .map(ToOwned::to_owned);
             let sample = cache_read
-                .filter(|cached| input > 0 && *cached > 0 && *cached <= input)
+                .filter(|cached| input > 0 && *cached <= input)
                 .map(|cached_tokens| crate::kit::acp_types::CacheUsageSample {
                     input_tokens: input,
                     cached_tokens,

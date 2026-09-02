@@ -560,4 +560,47 @@ mod tests {
         );
         assert_eq!(bg_registry.active_count(), 0);
     }
+
+    /// Throwaway diagnosis harness for GitHub #117: a fast workflow failure must
+    /// leave the background task active until the session notification consumer
+    /// has routed the failure as a Defer. Completing it inside WorkflowTool opens
+    /// a window where idle_should_wait becomes false before that Defer is queued.
+    #[tokio::test]
+    async fn diagnosis_fast_failure_does_not_complete_bg_before_defer_consumer() {
+        use peri_acp_types::tools::ToolContext;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (notification_tx, _) = tokio::sync::broadcast::channel(32);
+        let executor: Arc<dyn AgentExecutor> = Arc::new(MockAgentExecutor);
+        let mw = WorkflowMiddleware::new(
+            executor,
+            tmp.path().to_str().unwrap(),
+            notification_tx,
+            None,
+        );
+        let bg_registry: Arc<dyn TaskManager> =
+            Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+        mw.set_bg_registry(Arc::clone(&bg_registry));
+        let tool = mw.create_tool();
+        let cwd = tmp.path().to_str().unwrap();
+
+        let result = tool
+            .invoke(
+                serde_json::json!({
+                    "script": "export const meta = { name: 'fast-fail', description: 'diagnosis' }; throw new Error('boom')"
+                }),
+                ToolContext::new(&[], cwd),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "fixture must exercise the fast-failure branch"
+        );
+        assert_eq!(
+            bg_registry.active_count(),
+            1,
+            "fast failure must not clear active_count before the Defer consumer runs"
+        );
+    }
 }

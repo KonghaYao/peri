@@ -609,6 +609,11 @@ impl MessageQueue {
             .any(|m| m.kind == MessageKind::Defer && &m.source == source)
     }
 
+    /// 是否仍需在本 session 内消费 MQ（含 Info / Defer / Prompt）。
+    pub fn needs_mq_continuation(&self) -> bool {
+        !self.is_empty()
+    }
+
     /// 队列是否为空
     pub fn is_empty(&self) -> bool {
         self.inner.lock().is_empty()

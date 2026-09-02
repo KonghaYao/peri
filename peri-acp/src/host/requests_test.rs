@@ -381,6 +381,7 @@ fn register_session_with_history(
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
             lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );
@@ -872,6 +873,7 @@ fn register_session_with_workflow(
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
             lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );
@@ -1457,6 +1459,7 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
             lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );

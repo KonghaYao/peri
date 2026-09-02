@@ -248,6 +248,7 @@ pub(crate) async fn handle_new(
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
             lease: super::super::lease::WriterLease::acquired("default"),
         },
     );
@@ -356,6 +357,7 @@ pub(crate) async fn handle_load(
                 continuation_armed: false,
                 continuation_epoch: 0,
                 continuation_in_flight: false,
+                continuation_mq_steering_pending: false,
                 lease: super::super::lease::WriterLease::acquired("default"),
             },
         );
@@ -559,6 +561,7 @@ pub(crate) async fn handle_resume(
                 continuation_armed: false,
                 continuation_epoch: 0,
                 continuation_in_flight: false,
+                continuation_mq_steering_pending: false,
                 lease: super::super::lease::WriterLease::acquired("default"),
             },
         );
@@ -658,6 +661,7 @@ pub(crate) async fn handle_fork(
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
             lease: super::super::lease::WriterLease::acquired("default"),
         },
     );

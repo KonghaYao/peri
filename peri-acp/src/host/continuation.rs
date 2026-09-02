@@ -63,6 +63,21 @@ pub(crate) fn take_continuation_if_armed(
     Some(state.continuation_epoch)
 }
 
+/// 消费 [`ContinuationRequest`]：bg cancel 续跑或 loop 后 MQ steering 续跑。
+pub(crate) fn take_continuation_for_request(
+    state: &mut SessionState,
+    req: &ContinuationRequest,
+) -> Option<u64> {
+    if req.mq_steering {
+        if state.continuation_in_flight {
+            return None;
+        }
+        state.continuation_mq_steering_pending = true;
+        return Some(state.continuation_epoch);
+    }
+    take_continuation_if_armed(state, req.kind)
+}
+
 /// `session/cancel` 是否应置位 continuation 标记。
 ///
 /// 取消**正在执行的 continuation**（`continuation_in_flight`）时不置位：
@@ -103,8 +118,15 @@ pub(crate) fn continuation_dispatchable(
     state: &SessionState,
     epoch: u64,
     has_pending_subagent_defer: bool,
+    has_pending_mq: bool,
 ) -> bool {
-    continuation_still_valid(state, epoch) && has_pending_subagent_defer
+    if !continuation_still_valid(state, epoch) {
+        return false;
+    }
+    if state.continuation_mq_steering_pending {
+        return has_pending_mq;
+    }
+    has_pending_subagent_defer
 }
 
 /// 运行 per-session continuation scheduler（由 `run_acp_server` spawn）。
@@ -131,7 +153,7 @@ pub(crate) async fn run_continuation_scheduler(
         let epoch = {
             let mut sessions = sessions.lock().await;
             match sessions.get_mut(&req.session_id) {
-                Some(state) => take_continuation_if_armed(state, req.kind),
+                Some(state) => take_continuation_for_request(state, &req),
                 None => None,
             }
         };
@@ -140,7 +162,8 @@ pub(crate) async fn run_continuation_scheduler(
         };
         info!(
             session_id = %req.session_id,
-            "continuation: cancelled prompt bg agent completed, scheduling AsyncContinuation"
+            mq_steering = req.mq_steering,
+            "continuation: scheduling AsyncContinuation"
         );
 
         let session_id = req.session_id.clone();
