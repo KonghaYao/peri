@@ -15,11 +15,7 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     // (b) current_turn.reset() + push_view_models
     // buffered_text 已由 LocalUserBubble 事件提前入队 committed，
     // TurnDone 不再代为搬运。
-    let show_warning = PERI_CONFIG_HANDLE
-        .get()
-        .map(|handle| handle.read().config.show_cache_warning.unwrap_or(false))
-        .unwrap_or(false);
-    finalize_cache_coverage(state, show_warning);
+    let _ = state.pending_cache_usage.take();
     state.flush_current_turn();
     state.last_pushed_text_len = 0;
     state.last_pushed_reasoning_len = 0;
@@ -64,32 +60,56 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     super::render::drain_input_buffer();
 }
 
+pub(super) fn handle_cache_usage_updated(
+    state: &mut BridgeState,
+    sample: &Option<crate::kit::acp_types::CacheUsageSample>,
+) {
+    state.pending_cache_usage = sample.clone();
+    if let Some(sample) = sample {
+        let show_warning = PERI_CONFIG_HANDLE
+            .get()
+            .map(|handle| handle.read().config.show_cache_warning.unwrap_or(false))
+            .unwrap_or(false);
+        inject_cache_coverage_warning_if_needed(state, sample, show_warning);
+    }
+}
+
+/// Turn-end helper for tests; production warnings emit on each root `usage_update`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn finalize_cache_coverage(state: &mut BridgeState, show_warning: bool) {
     if let Some(sample) = state.pending_cache_usage.take() {
-        if sample.input_tokens == 0
-            || sample.cached_tokens == 0
-            || sample.cached_tokens > sample.input_tokens
-        {
-            return;
-        }
-        let coverage = sample.cached_tokens as f64 / sample.input_tokens as f64;
-        if show_warning && coverage < 0.8 {
-            use fluent_bundle::FluentValue;
-            let pct = (coverage * 100.0) as u64;
-            let uncached = sample.input_tokens.saturating_sub(sample.cached_tokens);
-            let request_id = sample.request_id.as_deref().unwrap_or("-");
-            let text = crate::i18n::tr_args(
-                "app-note-cache-coverage-low",
-                &[
-                    ("pct".into(), FluentValue::from(pct)),
-                    ("cached".into(), FluentValue::from(sample.cached_tokens)),
-                    ("input".into(), FluentValue::from(sample.input_tokens)),
-                    ("uncached".into(), FluentValue::from(uncached)),
-                    ("req_id".into(), FluentValue::from(request_id)),
-                ],
-            );
-            state.inject_system_note(text, crate::kit::tui_render_unit::TuiNoteLevel::Warning);
-        }
+        inject_cache_coverage_warning_if_needed(state, &sample, show_warning);
+    }
+}
+
+fn inject_cache_coverage_warning_if_needed(
+    state: &mut BridgeState,
+    sample: &crate::kit::acp_types::CacheUsageSample,
+    show_warning: bool,
+) {
+    if sample.input_tokens == 0
+        || sample.cached_tokens == 0
+        || sample.cached_tokens > sample.input_tokens
+    {
+        return;
+    }
+    let coverage = sample.cached_tokens as f64 / sample.input_tokens as f64;
+    if show_warning && coverage < 0.8 {
+        use fluent_bundle::FluentValue;
+        let pct = (coverage * 100.0) as u64;
+        let uncached = sample.input_tokens.saturating_sub(sample.cached_tokens);
+        let request_id = sample.request_id.as_deref().unwrap_or("-");
+        let text = crate::i18n::tr_args(
+            "app-note-cache-coverage-low",
+            &[
+                ("pct".into(), FluentValue::from(pct)),
+                ("cached".into(), FluentValue::from(sample.cached_tokens)),
+                ("input".into(), FluentValue::from(sample.input_tokens)),
+                ("uncached".into(), FluentValue::from(uncached)),
+                ("req_id".into(), FluentValue::from(request_id)),
+            ],
+        );
+        state.inject_system_note(text, crate::kit::tui_render_unit::TuiNoteLevel::Warning);
     }
 }
 
