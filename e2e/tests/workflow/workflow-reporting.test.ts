@@ -38,8 +38,18 @@ async function findNewCompletedRun(excludeIds: Set<string>, timeoutMs: number): 
         if (state.status === "failed") {
           throw new Error(`workflow ${dirent.name} failed: ${state.error ?? "unknown error"}`);
         }
-        if (state.status === "completed" && readJournal(dirent.name).length > 0) {
-          return dirent.name;
+        if (state.status === "completed") {
+          const journal = readJournal(dirent.name);
+          const hasReportingFields = journal.some(
+            (e) =>
+              e.result?.kind === "ok" &&
+              e.result.phase &&
+              e.result.durationMs > 0 &&
+              e.result.tokenCount > 0,
+          );
+          if (hasReportingFields) {
+            return dirent.name;
+          }
         }
       }
     }

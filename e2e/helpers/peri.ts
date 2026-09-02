@@ -91,6 +91,76 @@ export interface PeriLaunchOptions {
   env?: Record<string, string>;
   /** 调试模式 */
   debug?: boolean;
+  /**
+   * Peri 进程工作目录（经 dev.sh `--cwd` 传入）。默认仓库根。
+   * 显式 `env.HOME` 时自动使用空临时目录，避免仓库 `./.peri/settings.json` 覆盖隔离配置。
+   */
+  cwd?: string;
+}
+
+const transientLaunchDirs: string[] = [];
+
+function registerTempDirForCleanup(dir: string): void {
+  transientLaunchDirs.push(dir);
+  if (transientLaunchDirs.length === 1) {
+    process.on("exit", () => {
+      for (const d of transientLaunchDirs) {
+        try {
+          fs.rmSync(d, { recursive: true, force: true });
+        } catch {
+          // ignore
+        }
+      }
+    });
+  }
+}
+
+function resolvePeriWorkdir(options: PeriLaunchOptions): string {
+  if (options.cwd) {
+    return options.cwd;
+  }
+  if (options.env?.HOME) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "peri-e2e-cwd-"));
+    registerTempDirForCleanup(dir);
+    return dir;
+  }
+  return PROJECT_ROOT;
+}
+
+function devShCommand(
+  periWorkdir: string,
+  env: Record<string, string>,
+  extraArgs: string[] = [],
+): string[] {
+  const base =
+    path.resolve(periWorkdir) === path.resolve(PROJECT_ROOT)
+      ? [DEV_SH]
+      : [DEV_SH, `--cwd=${periWorkdir}`];
+  const args = [...base, ...extraArgs];
+  if (env.HOME) {
+    const settings = path.join(env.HOME, ".peri", "settings.json");
+    if (fs.existsSync(settings)) {
+      args.push(`--config-file=${settings}`);
+    }
+  }
+  return args;
+}
+
+function createPeriTester(
+  options: PeriLaunchOptions,
+  env: Record<string, string>,
+  extraArgs: string[] = [],
+): TmuxTester {
+  const size = options.size ?? DEFAULT_SIZE;
+  const periWorkdir = resolvePeriWorkdir(options);
+  return new TmuxTester({
+    command: devShCommand(periWorkdir, env, extraArgs),
+    size,
+    cwd: PROJECT_ROOT,
+    env,
+    debug: options.debug ?? false,
+    snapshotDir: path.join(PROJECT_ROOT, "e2e", "recordings"),
+  });
 }
 
 /**
@@ -135,6 +205,10 @@ function looksLikeLaunchFailure(screen: string): boolean {
   );
 }
 
+function looksLikeCargoBuild(screen: string): boolean {
+  return /\b(?:Compiling|Finished)\b/.test(screen);
+}
+
 /** 检查 tmux session 是否还存活（直接调 tmux，绕开 tester 内部状态） */
 async function isSessionAlive(sessionName: string): Promise<boolean> {
   try {
@@ -164,7 +238,7 @@ async function isSessionAlive(sessionName: string): Promise<boolean> {
  * 本函数轮询屏幕并检测三类失败：
  * 1. session 消失（dev.sh 启动失败导致 server 退出）→ 抛"启动失败"
  * 2. 屏幕出现 shell 提示符 / cargo error（dev.sh 已退出）→ 抛"启动失败"
- * 3. 90s 后仍无欢迎文本（慢编译/卡初始化）→ 抛"启动超时"
+ * 3. 启动超时（冷编译时最长约 5 分钟）→ 抛"启动超时"
  */
 async function waitForPeriReady(
   tester: TmuxTester,
@@ -174,14 +248,15 @@ async function waitForPeriReady(
 
   await tester.sleep(5000);
   const start = Date.now();
+  const maxWaitMs = 300_000;
+  const compileGraceMs = 180_000;
+  let deadline = start + maxWaitMs;
 
-  // 阶段 1：欢迎文本 / 快速失败检测（30s）
-  while (Date.now() - start < 30_000) {
+  while (Date.now() < deadline) {
     let screen: string;
     try {
       screen = await tester.getScreenText();
     } catch {
-      // capture 失败：session 可能已销毁
       if (!(await isSessionAlive(sessionName))) {
         throw new Error(
           `[${label}] peri 启动失败：tmux session "${sessionName}" 已退出。` +
@@ -190,12 +265,16 @@ async function waitForPeriReady(
             `后续操作报 "can't find pane"/"no server running" 均属同一根因。`,
         );
       }
+      await tester.sleep(1000);
       continue;
     }
     if (screen.includes("AI operating system")) {
       return;
     }
-    if (looksLikeLaunchFailure(screen)) {
+    if (looksLikeCargoBuild(screen)) {
+      deadline = Math.max(deadline, Date.now() + compileGraceMs);
+    }
+    if (looksLikeLaunchFailure(screen) && !looksLikeCargoBuild(screen)) {
       throw new Error(
         `[${label}] peri 启动失败：dev.sh 已退出（屏幕出现 shell 提示符或编译错误）。` +
           `屏幕片段: ${screen.slice(0, 300).replace(/\n/g, "⏎")}`,
@@ -204,38 +283,9 @@ async function waitForPeriReady(
     await tester.sleep(1000);
   }
 
-  // 阶段 2：session 存活但无欢迎文本——慢启动（cargo 编译）再等 60s
-  console.warn(
-    `[${label}] 30s 内未出现欢迎文本（session 存活），继续等待慢启动…`,
-  );
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    let screen: string;
-    try {
-      screen = await tester.getScreenText();
-    } catch {
-      if (!(await isSessionAlive(sessionName))) {
-        throw new Error(
-          `[${label}] peri 启动失败：tmux session "${sessionName}" 已退出（等待期间）。`,
-        );
-      }
-      continue;
-    }
-    if (screen.includes("AI operating system")) {
-      return;
-    }
-    if (looksLikeLaunchFailure(screen)) {
-      throw new Error(
-        `[${label}] peri 启动失败：dev.sh 已退出（屏幕出现 shell 提示符或编译错误）。` +
-          `屏幕片段: ${screen.slice(0, 300).replace(/\n/g, "⏎")}`,
-      );
-    }
-    await tester.sleep(2000);
-  }
-
   const screen = await tester.getScreenText().catch(() => "");
   throw new Error(
-    `[${label}] peri 启动超时（约 95s）：session 存活但欢迎文本未出现，` +
+    `[${label}] peri 启动超时：session 存活但欢迎文本未出现，` +
       `可能卡在 cargo 编译或 TUI 初始化。当前屏幕片段: ${screen
         .slice(0, 300)
         .replace(/\n/g, "⏎")}`,
@@ -257,17 +307,8 @@ async function waitForPeriReady(
 export async function launchPeri(
   options: PeriLaunchOptions = {},
 ): Promise<TmuxTester> {
-  const size = options.size ?? DEFAULT_SIZE;
   const env = buildPeriLaunchEnv(options, { isolateHome: true });
-
-  const tester = new TmuxTester({
-    command: [DEV_SH],
-    size,
-    cwd: PROJECT_ROOT,
-    env,
-    debug: options.debug ?? false,
-    snapshotDir: path.join(PROJECT_ROOT, "e2e", "recordings"),
-  });
+  const tester = createPeriTester(options, env);
 
   await startTester(tester, "launchPeri");
   await waitForPeriReady(tester, "launchPeri");
@@ -341,17 +382,8 @@ export async function takePeriSnapshot(
 export async function launchPeriHITL(
   options: PeriLaunchOptions = {},
 ): Promise<TmuxTester> {
-  const size = options.size ?? DEFAULT_SIZE;
   const env = buildPeriLaunchEnv(options, { isolateHome: false });
-
-  const tester = new TmuxTester({
-    command: [DEV_SH, "-a"],
-    size,
-    cwd: PROJECT_ROOT,
-    env,
-    debug: options.debug ?? false,
-    snapshotDir: path.join(PROJECT_ROOT, "e2e", "recordings"),
-  });
+  const tester = createPeriTester(options, env, ["-a"]);
 
   await startTester(tester, "launchPeriHITL");
   await waitForPeriReady(tester, "launchPeriHITL");

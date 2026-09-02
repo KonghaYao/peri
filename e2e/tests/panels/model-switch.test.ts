@@ -183,14 +183,16 @@ describe("panels: model switch", () => {
       expect(extractRightValue(panelCapture.text, "Max tokens")).toBe("32000");
       expect(extractRightValue(panelCapture.text, "1m enable")).toBe("off");
       // 状态栏三段式（<mode> · <cwd> · alias model effort）：初始 active=fable
-      expect(panelCapture.text).toContain("Bypass · perihelion · fable test-model-fable max");
+      expect(panelCapture.text).toMatch(
+        /Bypass · .+ · fable test-model-fable max/,
+      );
 
       // 阶段 2 确定性断言：激活标记（●）应移动到 sonnet 档位（选择即激活，替代原 judge 调用）
       expect(profileCapture.text).toContain("● sonnet");
       expect(profileCapture.text).not.toContain("● fable");
       // 状态栏随 active profile 更新（alias/effort 均切到 sonnet 档位）
-      expect(profileCapture.text).toContain(
-        "Bypass · perihelion · sonnet test-model-sonnet medium",
+      expect(profileCapture.text).toMatch(
+        /Bypass · .+ · sonnet test-model-sonnet medium/,
       );
 
       // 阶段 3a 回归断言：Model 行值必须真的变化（此前 ←/→ 触发写入但值不变）
@@ -201,8 +203,8 @@ describe("panels: model switch", () => {
       expect(modelAfter).not.toBeNull();
       expect(modelAfter).not.toBe(modelBefore);
       // 状态栏 Model 段同步更新（候选序 opus→sonnet→haiku→fable，→ 一次：sonnet→haiku）
-      expect(modelCapture.text).toContain(
-        "Bypass · perihelion · sonnet test-model-haiku medium",
+      expect(modelCapture.text).toMatch(
+        /Bypass · .+ · sonnet test-model-haiku medium/,
       );
 
       // 阶段 3b 回归断言：Effort 行值必须真的变化（与 Model 同理，确定性断言不依赖 LLM judge）
@@ -213,12 +215,16 @@ describe("panels: model switch", () => {
       expect(effortAfter).not.toBeNull();
       expect(effortAfter).not.toBe(effortBefore);
       // 状态栏 Effort 段同步更新（EFFORT_LEVELS low→medium→high→xhigh→max，→ 一次：medium→high）
-      expect(editCapture.text).toContain("Bypass · perihelion · sonnet test-model-haiku high");
+      expect(editCapture.text).toMatch(
+        /Bypass · .+ · sonnet test-model-haiku high/,
+      );
 
       // 确定性断言（替代原 LLM judge）：面板已关闭（回到主界面）+ 状态栏三段式
       // 与最终配置一致（alias=sonnet ≠ 初始 fable，model/effort 为循环后终值）
       expect(capture.text).not.toContain("Select model");
-      expect(capture.text).toContain("Bypass · perihelion · sonnet test-model-haiku high");
+      expect(capture.text).toMatch(
+        /Bypass · .+ · sonnet test-model-haiku high/,
+      );
     },
   );
 });
