@@ -123,6 +123,7 @@ MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实�
 | 9 | image | before_agent | — | — | — |
 | 10 | filesystem | — | Read/Write/Edit/Glob/Grep/folder | — | — |
 | 11 | git_attribution | before_agent, before_tool, after_tool | — | Git Attribution contribution | — |
+| — | git_watch | before_agent, after_tool | — | — | 链上位于 #11 与 #12 之间；[git-watch-middleware.md](git-watch-middleware.md) |
 | 12 | terminal | — | Bash | — | — |
 | 13 | web | — | WebFetch/WebSearch | — | — |
 | 14 | todo | — | TodoWrite | — | — |

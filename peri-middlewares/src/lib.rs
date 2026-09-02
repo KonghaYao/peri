@@ -23,6 +23,7 @@ pub mod agents_md;
 pub mod artifact;
 pub mod assembly;
 pub mod claude_agent_parser;
+pub mod git_watch;
 pub mod goal;
 pub mod goal_middleware;
 /// 装配注入端口实现（3.0 批 2 波 2：`PluginManager` / `SkillsProvider`）。
@@ -68,6 +69,7 @@ pub use at_mention::AtMentionMiddleware;
 pub use attribution::GitAttributionMiddleware;
 pub use cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger};
 pub use default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
+pub use git_watch::GitWatchMiddleware;
 pub use goal_middleware::GoalMiddleware;
 pub use hitl::HumanInTheLoopMiddleware;
 pub use lsp::{LspMiddleware, LspTool};

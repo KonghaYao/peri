@@ -36,6 +36,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Workflow | [workflow.md](workflow.md) | Node RPC、runner、通知、kill 与 resume |
 | Ultra-ADLC | [ultra-adlc.md](ultra-adlc.md) | 超大交付模式的文件协议与编排契约 |
 | TUI 数据流 | [tui-acp-data-flow.md](tui-acp-data-flow.md) | ACP event → Atom → render 链路 |
+| Git Watch 中间件 | [git-watch-middleware.md](git-watch-middleware.md) | 分支/HEAD 变化 Info 注入（异步采样 + 60s 节流） |
 
 ## 已批准目标设计
 

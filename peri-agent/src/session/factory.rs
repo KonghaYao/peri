@@ -49,6 +49,8 @@ pub enum ChainSlot {
     Filesystem,
     /// GitAttribution（git 归属注入）
     GitAttribution,
+    /// GitWatch（分支 / HEAD 变化 Info 注入）
+    GitWatch,
     /// Terminal（终端命令工具）
     Terminal,
     /// Web（Web 工具）
@@ -105,6 +107,7 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         // 第二组：文件/终端/Web 工具提供器
         ChainSlot::Filesystem,
         ChainSlot::GitAttribution,
+        ChainSlot::GitWatch,
         ChainSlot::Terminal,
         ChainSlot::Web,
         // 第三组：Todo / Cron
