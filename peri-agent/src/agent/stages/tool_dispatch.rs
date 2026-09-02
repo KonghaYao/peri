@@ -217,6 +217,30 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
     }
 }
 
+/// 为 middleware 前已结算的工具调用（解析失败、畸形 id 等）补全 render 事件。
+///
+/// 流式 Reason 可能已提前 emit `ToolStarted`；此处仍成对发送 Started/Ended，
+/// TUI 侧对同 id 的 Started 做 upsert，Ended 负责结束 loading。
+fn emit_settled_tool_render(ctx: &StageContext, call: &ToolCall, result: &ToolResult) {
+    let turn_id = ctx.turn_id();
+    let agent_id = ctx.session.agent_id;
+    ctx.runtime.event_bus.emit_render(RenderEvent::ToolStarted {
+        turn_id,
+        agent_id,
+        tool_call_id: call.id.clone(),
+        name: call.name.clone(),
+        input: call.input.clone(),
+    });
+    ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
+        turn_id,
+        agent_id,
+        tool_call_id: call.id.clone(),
+        name: call.name.clone(),
+        output: result.output.clone(),
+        is_error: result.is_error,
+    });
+}
+
 /// 分发工具调用：审批 → 并发执行 → 收集结果 → 统一写入 transcript
 pub async fn dispatch_tools(
     ctx: &StageContext,
@@ -296,6 +320,9 @@ pub async fn dispatch_tools(
                 ToolResult::error(&call.id, &call.name, error.to_string()),
             )),
         }
+    }
+    for (call, result) in &resolution_errors {
+        emit_settled_tool_render(ctx, call, result);
     }
     // Invocation events/tool cards project the effective canonical target. The LLM's
     // wrapper call remains only in the source assistant message for protocol pairing.

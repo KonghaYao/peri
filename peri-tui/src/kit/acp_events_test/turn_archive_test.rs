@@ -220,6 +220,36 @@ fn test_turn_done_clears_last_submitted_text() {
     );
 }
 
+/// TurnDone 归档时，未收到 ToolEnded 的在途工具卡不得永久 loading（如工具不存在）。
+#[test]
+#[serial]
+fn test_turn_done_archives_orphan_tool_not_running() {
+    let mut state = super::make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "ghost".into(),
+            tool_name: "NotRegistered".into(),
+            input_summary: String::new(),
+            raw_input: serde_json::Value::Null,
+            agent_id: None,
+        }),
+    );
+    let running = VIEW_MODELS.state().read().clone();
+    assert!(
+        matches!(&running.items[0], TuiRenderUnit::TuiToolCard(t) if t.is_running),
+        "precondition: tool card running before TurnDone"
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let done = VIEW_MODELS.state().read().clone();
+    match &done.items[0] {
+        TuiRenderUnit::TuiToolCard(t) => {
+            assert!(!t.is_running, "TurnDone 归档后工具卡不得继续 loading");
+        }
+        other => panic!("expected TuiToolCard, got {other:?}"),
+    }
+}
+
 #[test]
 #[serial]
 fn test_cache_coverage_uses_latest_sample_once_and_commits_with_turn() {

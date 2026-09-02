@@ -245,6 +245,9 @@ impl BridgeState {
                 );
                 return;
             }
+            // 与 TurnInterrupted/TurnSuspended 一致：归档前 deactivate，避免
+            // ToolStarted 无 ToolEnded（如工具不存在）时 running 态被写入 committed。
+            self.current_turn.deactivate();
             for vm in self.current_turn.view_models() {
                 self.committed.push_back(vm.clone());
             }
