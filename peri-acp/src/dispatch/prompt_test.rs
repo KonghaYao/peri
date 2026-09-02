@@ -19,12 +19,22 @@ fn test_extract_prompt_params_with_attachments() {
     let params = serde_json::json!({
         "session_id": "s2",
         "message": { "content": "look at this" },
-        "attachments": [{"type": "image", "data": "abc"}]
+        "attachments": [{"type": "image", "mimeType": "image/png", "data": "abc"}]
     });
     let (sid, content, attachments) = extract_prompt_params(&params).unwrap();
     assert_eq!(sid, "s2");
     assert_eq!(content.text_content(), "look at this");
     assert!(attachments.is_some());
+    let blocks = content.content_blocks();
+    assert_eq!(blocks.len(), 2);
+    assert!(matches!(
+        blocks[0],
+        peri_acp_types::messages::ContentBlock::Text { .. }
+    ));
+    assert!(matches!(
+        blocks[1],
+        peri_acp_types::messages::ContentBlock::Image { .. }
+    ));
 }
 
 #[test]
@@ -37,13 +47,13 @@ fn test_extract_prompt_params_missing_session_id() {
 }
 
 #[test]
-fn test_extract_prompt_params_missing_message() {
+fn test_extract_prompt_params_defaults_empty_content_without_body_keys() {
     let params = serde_json::json!({
         "sessionId": "s1"
     });
     let (sid, content, attachments) = extract_prompt_params(&params).unwrap();
     assert_eq!(sid, "s1");
-    // 缺少 message 时 content 默认为空文本
+    // extract 不报错；`missing message` 由 validate_run_prompt_body / run_prompt 管道负责
     assert_eq!(content.text_content(), "");
     assert!(attachments.is_none());
 }
@@ -164,4 +174,102 @@ fn test_extract_prompt_params_message_takes_priority_over_prompt() {
     });
     let (_, content, _) = extract_prompt_params(&params).unwrap();
     assert_eq!(content.text_content(), "from message");
+}
+
+/// stdio：`prompt` 文本块 + 顶层 `attachments` image → merge 后含 image block。
+#[test]
+fn test_extract_prompt_params_stdio_prompt_with_attachments_image() {
+    let params = serde_json::json!({
+        "sessionId": "s-att",
+        "prompt": [{ "type": "text", "text": "describe" }],
+        "attachments": [{ "type": "image", "mimeType": "image/png", "data": "aGk=" }]
+    });
+    let (_, content, attachments) = extract_prompt_params(&params).unwrap();
+    assert!(attachments.is_some());
+    let blocks = content.content_blocks();
+    assert_eq!(blocks.len(), 2);
+    assert!(matches!(
+        blocks[0],
+        peri_acp_types::messages::ContentBlock::Text { .. }
+    ));
+    assert!(matches!(
+        blocks[1],
+        peri_acp_types::messages::ContentBlock::Image { .. }
+    ));
+}
+
+/// 仅顶层 `attachments`（无 message/prompt 键）→ extract merge 后有 block。
+#[test]
+fn test_extract_prompt_params_attachments_only() {
+    let params = serde_json::json!({
+        "sessionId": "s-only-att",
+        "attachments": [{ "type": "image", "mimeType": "image/png", "data": "abc" }]
+    });
+    let (_, content, _) = extract_prompt_params(&params).unwrap();
+    let blocks = content.content_blocks();
+    assert_eq!(blocks.len(), 1);
+    assert!(matches!(
+        blocks[0],
+        peri_acp_types::messages::ContentBlock::Image { .. }
+    ));
+}
+
+#[test]
+fn test_validate_run_prompt_body_missing_message_when_no_keys_and_empty() {
+    let params = serde_json::json!({ "sessionId": "s1" });
+    let content = peri_acp_types::messages::MessageContent::text("");
+    let err = validate_run_prompt_body(&params, &content).unwrap_err();
+    assert_eq!(err.code, -32602);
+    assert_eq!(err.message, "missing message");
+}
+
+#[test]
+fn test_validate_run_prompt_body_allows_empty_prompt_array() {
+    let params = serde_json::json!({
+        "sessionId": "s1",
+        "prompt": []
+    });
+    let content = peri_acp_types::messages::MessageContent::text("");
+    validate_run_prompt_body(&params, &content).unwrap();
+}
+
+#[test]
+fn test_validate_run_prompt_body_allows_attachments_only() {
+    let params = serde_json::json!({
+        "sessionId": "s1",
+        "attachments": [{ "type": "image", "mimeType": "image/png", "data": "x" }]
+    });
+    let content = extract_prompt_params(&params).unwrap().1;
+    validate_run_prompt_body(&params, &content).unwrap();
+}
+
+#[test]
+fn test_validate_run_prompt_body_rejects_non_array_prompt() {
+    let params = serde_json::json!({
+        "sessionId": "s1",
+        "prompt": "not-an-array"
+    });
+    let content = peri_acp_types::messages::MessageContent::text("");
+    let err = validate_run_prompt_body(&params, &content).unwrap_err();
+    assert_eq!(err.message, "missing message");
+}
+
+/// `run_prompt` 边界：extract + validate 管道（与 host 主路径 / idle 注入一致）。
+#[test]
+fn test_extract_and_validate_run_prompt_params_missing_message() {
+    let params = serde_json::json!({ "sessionId": "s1" });
+    let err = extract_and_validate_run_prompt_params(&params).unwrap_err();
+    assert_eq!(err.code, -32602);
+    assert_eq!(err.message, "missing message");
+}
+
+#[test]
+fn test_extract_and_validate_run_prompt_params_attachments_only() {
+    let params = serde_json::json!({
+        "sessionId": "s1",
+        "attachments": [{ "type": "image", "mimeType": "image/png", "data": "abc" }]
+    });
+    let (sid, content, _) = extract_and_validate_run_prompt_params(&params).unwrap();
+    assert_eq!(sid, "s1");
+    assert_eq!(content.content_blocks().len(), 1);
 }

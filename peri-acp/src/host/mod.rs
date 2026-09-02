@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::dispatch::prompt::extract_prompt_params;
+use crate::dispatch::prompt::extract_and_validate_run_prompt_params;
 pub use crate::session::state_builders::{
     apply_profile_effort, apply_thinking_effort, build_config_options, build_mode_state,
     parse_permission_mode,
@@ -880,7 +880,7 @@ pub(crate) async fn dispatch_prompt_turn(
     // 的 bgResults 在 run_session_loop 内 push Defer——挂起注入路径不携带
     // bgResults（该 RPC 仅 stdio 会话使用，allow_await_wake=false 永不挂起）。
     if !is_continuation && cfg.session_manager.is_idle_suspended(&prompt_session_id) {
-        let (_, content, _attachments) = extract_prompt_params(&params)?;
+        let (_, content, _attachments) = extract_and_validate_run_prompt_params(&params)?;
         if let Some(inbox) = cfg.session_manager.session_inbox_for(&prompt_session_id) {
             inbox.handle().push_prompt(
                 peri_acp_types::session::MessageSource::UserInput,

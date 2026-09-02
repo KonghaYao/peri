@@ -21,7 +21,7 @@ use peri_acp_types::PeriCaps;
 pub fn build_initialize_response(peri_caps: &PeriCaps) -> InitializeResponse {
     let caps = AgentCapabilities::new()
         .load_session(true)
-        .prompt_capabilities(PromptCapabilities::new())
+        .prompt_capabilities(PromptCapabilities::new().image(true))
         .session_capabilities(
             SessionCapabilities::new()
                 .list(SessionListCapabilities::new())
