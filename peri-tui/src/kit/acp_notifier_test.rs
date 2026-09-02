@@ -981,15 +981,14 @@ fn test_usage_update_ignores_auxiliary_and_preserves_explicit_zero_cache_read() 
             ..
         })))
     ));
-    for invalid_meta in [json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 101})] {
-        assert!(
-            matches!(
-                handle_session_update(payload(invalid_meta, json!({})), &dummy_tx, "test"),
-                Some(AcpEventData::CacheUsageUpdated(None))
-            ),
-            "inconsistent root usage must remain unavailable"
-        );
-    }
+    let invalid_meta = json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 101});
+    assert!(
+        matches!(
+            handle_session_update(payload(invalid_meta, json!({})), &dummy_tx, "test"),
+            Some(AcpEventData::CacheUsageUpdated(None))
+        ),
+        "inconsistent root usage must remain unavailable"
+    );
     assert!(
         handle_session_update(
             payload(json!({"inputTokens": 100, "outputTokens": 1}), json!({})),

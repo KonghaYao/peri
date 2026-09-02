@@ -115,6 +115,7 @@ fn init_git_repo(path: &std::path::Path) {
 
 #[tokio::test]
 async fn git_watch_notifies_on_new_commit() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let dir = tempdir().unwrap();
     init_git_repo(dir.path());
 
@@ -158,6 +159,7 @@ async fn git_watch_notifies_on_new_commit() {
 
 #[tokio::test]
 async fn non_git_repo_stays_quiet() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let dir = tempdir().unwrap();
     let mw = GitWatchMiddleware::with_throttle_for_test(Duration::ZERO);
     let queue = MessageQueue::new();

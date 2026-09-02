@@ -571,6 +571,7 @@ mod tests {
     async fn diagnosis_fast_failure_does_not_complete_bg_before_defer_consumer() {
         use peri_acp_types::tools::ToolContext;
 
+        let _process_env = crate::process_env::lock().expect("process env lock");
         let tmp = tempfile::TempDir::new().unwrap();
         let (notification_tx, _) = tokio::sync::broadcast::channel(32);
         let executor: Arc<dyn AgentExecutor> = Arc::new(MockAgentExecutor);

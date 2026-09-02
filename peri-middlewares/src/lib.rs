@@ -45,6 +45,8 @@ pub mod meta_harness;
 pub mod middleware;
 pub mod permission;
 pub mod plugin;
+#[doc(hidden)]
+pub mod process_env;
 pub mod ptc;
 pub use plugin::{
     AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource, InstallScope,

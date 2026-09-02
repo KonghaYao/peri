@@ -1,8 +1,4 @@
-use std::{
-    ffi::OsString,
-    path::Path,
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
-};
+use std::{ffi::OsString, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use peri_agent::{
@@ -15,7 +11,6 @@ use peri_agent::{
 };
 use peri_js_runtime::{JsExecutionFailure, JsRuntimeError};
 use serde_json::{json, Value};
-use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -23,17 +18,15 @@ use super::{
     MAX_PRE_CANCELLED_INVOCATIONS, RUN_PTC_CODE_TOOL_NAME,
 };
 
-static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
 struct HomeGuard {
-    _lock: MutexGuard<'static, ()>,
+    _lock: crate::process_env::EnvLockFile,
     previous: Option<OsString>,
     _home: tempfile::TempDir,
 }
 
 impl HomeGuard {
     fn with_ptc_fixture() -> Self {
-        let lock = HOME_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let lock = crate::process_env::lock().expect("process env lock");
         let home = tempfile::tempdir().unwrap();
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../npm-packages/@peri-ptc");
         let package = home
@@ -161,7 +154,6 @@ fn test_catalog_is_stably_sorted_from_dispatcher_view() {
 }
 
 #[tokio::test]
-#[serial(ptc_home)]
 async fn test_run_code_routes_concurrent_calls_through_effective_dispatcher() {
     let _home = HomeGuard::with_ptc_fixture();
     let tool = RunPtcCodeTool::default();
@@ -186,7 +178,6 @@ async fn test_run_code_routes_concurrent_calls_through_effective_dispatcher() {
 }
 
 #[tokio::test]
-#[serial(ptc_home)]
 async fn test_run_code_preserves_effective_tool_error_code() {
     let _home = HomeGuard::with_ptc_fixture();
     let result = RunPtcCodeTool::default()
@@ -210,7 +201,6 @@ async fn test_run_code_preserves_effective_tool_error_code() {
 }
 
 #[tokio::test]
-#[serial(ptc_home)]
 async fn test_run_code_preserves_all_canonical_error_codes() {
     let _home = HomeGuard::with_ptc_fixture();
     let result = RunPtcCodeTool::default()
@@ -316,7 +306,6 @@ fn test_run_code_error_formatter_uses_only_stable_projection() {
 }
 
 #[tokio::test]
-#[serial(ptc_home)]
 async fn test_run_code_exception_returns_safe_fixed_error() {
     let _home = HomeGuard::with_ptc_fixture();
     let source = "throw new Error('ptc-tool-canary');";
@@ -339,7 +328,6 @@ async fn test_run_code_exception_returns_safe_fixed_error() {
 }
 
 #[tokio::test]
-#[serial(ptc_home)]
 async fn test_run_code_resource_limit_returns_safe_fixed_error() {
     let _home = HomeGuard::with_ptc_fixture();
     let source = "return 'result-canary'.repeat(1024 * 1024);";

@@ -64,7 +64,9 @@ jobs:
               run: bun run build
 
             - name: Run tests
-              run: cargo test --workspace
+              run: |
+                  cargo test --workspace --exclude peri-middlewares
+                  cargo test -p peri-middlewares -- --test-threads=1
 
             - name: Clippy
               run: cargo clippy --workspace --all-targets -- -D warnings

@@ -8,6 +8,7 @@ use super::*;
 
 #[tokio::test]
 async fn test_bash_normal_command() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
         .invoke(
@@ -21,6 +22,7 @@ async fn test_bash_normal_command() {
 
 #[tokio::test]
 async fn test_bash_nonzero_exit_code() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
         .invoke(
@@ -35,6 +37,7 @@ async fn test_bash_nonzero_exit_code() {
 /// 验证超时后在合理时间内返回，且进程组（bash + 全部子进程）被清理
 #[tokio::test]
 async fn test_bash_timeout_returns_quickly() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let start = Instant::now();
 
@@ -71,6 +74,7 @@ async fn test_bash_timeout_returns_quickly() {
 
 #[tokio::test]
 async fn test_bash_stderr_captured() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
         .invoke(
@@ -146,6 +150,7 @@ fn test_bash_description_extended() {
 /// timeout=0 表示不超时（前台/后台通用）；这里验证显式正超时下 echo 正常完成。
 #[tokio::test]
 async fn test_bash_timeout_clamped_to_minimum() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let start = Instant::now();
     // timeout = 2000 → clamp 不生效，echo quick 应正常完成（PowerShell 冷启动较慢）
@@ -171,6 +176,7 @@ async fn test_bash_timeout_clamped_to_minimum() {
 /// 显式超时 600000 毫秒应被允许（上限）
 #[tokio::test]
 async fn test_bash_timeout_maximum_accepted() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
         .invoke(
@@ -194,6 +200,7 @@ fn test_tool_name_is_Bash() {
 
 #[tokio::test]
 async fn test_bash_default_timeout_is_15_seconds() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     // 不传 timeout → 默认 15000ms = 15s
     let result = tool
@@ -210,6 +217,7 @@ async fn test_bash_default_timeout_is_15_seconds() {
 async fn test_bash_legacy_params_ignored() {
     // description 是 schema 未声明的字段，残留应被静默忽略（不影响执行）
     // 注：run_in_background 现已支持（见 issue bg-tasks-unified-management），不再是 legacy
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
         .invoke(
@@ -285,6 +293,7 @@ async fn test_bg_explicit_timeout_kills_process_group() {
     ));
     let marker_path = marker.to_string_lossy().to_string();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_task_manager(registry)
         .with_on_bg_complete(Arc::new(move |r, _kind| {
@@ -334,6 +343,7 @@ async fn test_bg_explicit_timeout_kills_process_group() {
 async fn test_bg_shell_registered_while_running() {
     let registry = Arc::new(TaskManager::new());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_task_manager(registry.clone())
         .with_on_bg_complete(Arc::new(move |r, _kind| {
@@ -386,6 +396,7 @@ async fn test_bg_shell_registered_while_running() {
 async fn test_bg_shell_log_file_tee() {
     let registry = Arc::new(TaskManager::new());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_task_manager(registry.clone())
         .with_on_bg_complete(Arc::new(move |r, _kind| {
@@ -454,6 +465,7 @@ async fn test_bg_shell_log_file_tee() {
 async fn test_sync_timeout_promotes_to_background() {
     let registry = Arc::new(TaskManager::new());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_task_manager(registry.clone())
         .with_on_bg_complete(Arc::new(move |r, _kind| {
@@ -515,6 +527,7 @@ async fn test_sync_timeout_promotes_to_background() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_sync_timeout_without_registry_kills_and_persists_partial() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap()); // 无 registry
     let err = tool
         .invoke(
@@ -561,6 +574,7 @@ async fn test_sync_timeout_without_registry_kills_and_persists_partial() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_bash_stdin_null_read_fails_fast() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let start = Instant::now();
     let result = tool
@@ -586,6 +600,7 @@ async fn test_bash_stdin_null_read_fails_fast() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_sync_timeout_promote_no_output_diagnoses_stall() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let registry = Arc::new(TaskManager::new());
     let tool =
         BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
@@ -633,6 +648,7 @@ async fn test_sync_timeout_promote_no_output_diagnoses_stall() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_sync_timeout_promote_with_output_notes_progress() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let registry = Arc::new(TaskManager::new());
     let tool =
         BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
