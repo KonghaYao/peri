@@ -5,9 +5,20 @@
 **类型**：Bug — Workflow 系统
 **创建日期**：2026-07-22
 **来源**：`issue-resolution-devflow` workflow 执行复盘
-**最后核查**：2026-08-11
+**最后核查**：2026-09-01
 
-## 最新情况（2026-08-11）
+## 最新情况（2026-09-01）
+
+已建立 WF-01/WF-02 的 fail-safe 基础，但尚未满足关闭条件：
+
+- canonical result/state 新增独立的 `execution_status`、`acceptance_status`、`post_processing_status`、`delivery_status`；保留 legacy `status/success`，旧 `completed` 缺少新字段时默认 `unknown`，绝不推出 deliverable。
+- Workflow tool 接受声明式 `writeIntent`；缺失 intent 的现有写入型运行固定投影为 `post_processing=blocked`、`delivery=blocked`，不从 agent 输出猜测 changed-files 归属。
+- `GitBaseline` 使用只读 Git 命令捕获 canonical repo、cwd、HEAD 和 porcelain v2 index/worktree/untracked facts；postcondition 异常只失败报告，不执行 add/commit/stash/reset/restore/clean，也不覆盖既有 dirty/staged/untracked 内容。
+- executable fixtures 已覆盖 dirty + staged + binary untracked 原样保留，以及无归属变化被检测且不恢复。
+
+**仍阻塞**：当前 agent wire 没有 typed changed-files/acceptance finding，无法安全完成路径 allowlist、commit file list、自报 changed-files 对账；因此 write intent 即使存在也不会被判为 deliverable。需先扩充 typed result/journal 证据，再接入 runner 结束边界并补齐错误 cwd、多 repo、越界路径、意外 HEAD、commit 夹带矩阵。issue 保持 Open，只有 WF-02 全部 fixture 通过后才能关闭。
+
+## 历史情况（2026-08-11）
 
 workflow 链路已随 3.0 重构（SessionFactory/exec 拆分）重构；但没有任何可静态证明「报告写盘一致性」的契约断言（journal 声称 vs git diff 校验），幻觉误报风险无法静态排除——**待运行时复测**。
 

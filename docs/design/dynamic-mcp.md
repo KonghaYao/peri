@@ -2,11 +2,9 @@
 
 > 本文件是 Perihelion Dynamic MCP 的权威设计，回答一个问题：**Agent 如何在运行中的 session 内，经 HITL 动态创建、观察和卸载 MCP server，并在不破坏工具可见性、任务所有权和关闭契约的前提下使用其能力。**
 >
-> 状态：**设计定稿，待实施**
+> 状态：**现行设计**；具体缺陷与修复进度由 `spec/issues/` 中对应 active issue 维护
 >
-> 最后核对：2026-08-26
->
-> 关联事实源：`docs/standards/architecture-contracts.md`、`docs/design/mcp-connector-guide-v2.md`、`docs/design/testing-standards.md`、`peri-middlewares/CLAUDE.md`。若本文与代码或跨模块架构契约冲突，以代码、契约测试和 standards 为准。
+> 关联事实源：`docs/standards/architecture-contracts.md`、`docs/reference/mcp-ecosystem.md`、`docs/standards/testing.md`、`peri-middlewares/CLAUDE.md`。若本文与代码或跨模块架构契约冲突，以代码、契约测试和 standards 为准。
 
 ## 1. 目标与范围
 
@@ -619,17 +617,3 @@ cargo clippy --workspace --all-targets -- -D warnings
 | unload 直接取消所有在途工具 | 外部副作用可能已发生，取消会制造未知结果 |
 | 每个 session 建立完整静态 MCP pool | 重复静态连接，破坏现有 host 级复用与关闭模型 |
 | 将动态配置自动写入 settings 或 session store | 违反本设计的进程内临时能力语义 |
-
-## 14. 实施分解
-
-1. 在契约层定义动态 operation、错误码、secretRef 与 session capability port。
-2. 从 `run_initialize` 提取可复用、无提前发布的单 server connect/discover 流程。
-3. 建立以 logical key `(session_id, server_name)` 定位、以不可复用 `incarnation_id` 约束物理实例的 dynamic registry 和线性化 reservation。
-4. 实现 `DynamicMCP` 的 method 级 canonical invocation resolver 与 HITL 审批投影。
-5. 实现 secret resolver 接缝与脱敏配置投影。
-6. 实现 capability overlay、shadow resolution 和 generation。
-7. 在 Reason 边界按 `catalog refresh → working map swap → before_reason_catalog → before_model → pin` 离线构建 immutable catalog snapshot；专用 hook 仅让 ToolSearch 将 request-local Search index 与 Execute resolver 重绑到同一 working map，再以单次 swap 原子发布 MCP tools、pinned dispatch target 与 ToolSearch index。Discover/resource 使用的 checked projection lease 由 session runtime 跨 stage build 强持有；重复装配复用既有 lease，session close 先关闭并释放 projection，再执行动态实例异步清理。
-8. 为 bridge 增加 admission/in-flight drain，并实现 unload。
-9. 接入 session skill/command registry，增加 handle token/generation 防迟到提交。
-10. 接入 session close、host shutdown 与统一 `McpTaskOwner`。
-11. 增加 P0/P1 契约测试，再更新相关 code index 和稳定架构契约。

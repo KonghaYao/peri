@@ -55,8 +55,20 @@ fn ensure_submit_tx_observable() -> Option<mpsc::UnboundedReceiver<SubmitRequest
     Some(rx)
 }
 
+fn ensure_cache_warning_enabled_for_tests() {
+    use std::sync::Arc;
+    if let Some(handle) = PERI_CONFIG_HANDLE.get() {
+        handle.write().config.show_cache_warning = Some(true);
+        return;
+    }
+    let mut cfg = crate::config::PeriConfig::default();
+    cfg.config.show_cache_warning = Some(true);
+    let _ = PERI_CONFIG_HANDLE.set(Arc::new(parking_lot::RwLock::new(cfg)));
+}
+
 fn make_fold_test_state() -> BridgeState {
     crate::kit::atoms::init_atoms();
+    ensure_cache_warning_enabled_for_tests();
     *FOLD_OVERRIDES.state().write() = std::collections::HashMap::new();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();

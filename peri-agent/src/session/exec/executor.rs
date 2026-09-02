@@ -107,6 +107,8 @@ pub use peri_acp_types::command::PromptStopReason;
 pub struct ContinuationRequest {
     pub session_id: String,
     pub kind: BgTaskKind,
+    /// loop 自然结束后队列仍有 steering/bg Defer 待消费（不依赖 cancel armed）。
+    pub mq_steering: bool,
 }
 
 /// Result of prompt execution.

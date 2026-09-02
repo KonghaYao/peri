@@ -36,7 +36,7 @@
 
 ### P0 — TEST-EVIDENCE-001：验证命令必须证明自己执行了目标检查
 
-**状态**：新增候选，建议写入 `docs/design/testing-standards.md`，不写根 `CLAUDE.md`。
+**状态**：新增候选，建议写入 `docs/standards/testing.md`，不写根 `CLAUDE.md`。
 
 **跨日证据**：
 
@@ -235,7 +235,7 @@
 
 用户选择“应用全部现有项”后，已完成：
 
-- `docs/design/testing-standards.md`：新增 `TEST-EVIDENCE-001`、`TEST-HERMETIC-001`、`TEST-LIFECYCLE-001`。
+- `docs/standards/testing.md`：新增 `TEST-EVIDENCE-001`、`TEST-HERMETIC-001`、`TEST-LIFECYCLE-001`。
 - `docs/standards/architecture-contracts.md`：新增 `ARC-CAPABILITY-CLOSURE-001`，与 `ARC-TOOLS-001` 的 session-local view 契约保持分工。
 - `.claude/skills/learn-from-history/`：修正含今天在内的自然日期边界、非递归子 agent prompt、规则事实源路由、多日期分组和完成对账；新增隔离 SQLite 的 Python 测试。
 - `.claude/skills/langfuse/`：增加 host/auth/schema/分页/字段投影 preflight、真实 trace 验收门和 metadata-only observation tree/orphan audit。

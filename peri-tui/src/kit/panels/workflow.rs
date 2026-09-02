@@ -369,14 +369,11 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             .take(VISIBLE_ITEMS),
     );
 
-    // Build agents Paragraph: header（新增 Model 列）+ visible slice
+    // Build agents Paragraph: header（Model 列与数据行共用列宽常量）+ visible slice
     let mut agent_text: Vec<Line<'_>> = Vec::new();
-    // Model header 按列宽补齐（zh "模型" 显示宽度 2，补齐后与 en 对齐）
     let model_header = i18n::tr("workflow-model-header");
-    let model_header_pad =
-        " ".repeat(MODEL_COL_WIDTH.saturating_sub(UnicodeWidthStr::width(model_header.as_str())));
     agent_text.push(Line::from(Span::styled(
-        format!(" Agents                 {model_header}{model_header_pad} Tokens    Tools"),
+        agent_table_header(&model_header),
         Style::new().fg(theme.semantic.text.muted).bold(),
     )));
     agent_text.extend(
@@ -386,9 +383,10 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             .take(VISIBLE_ITEMS),
     );
 
-    // Divider —— 渲染垂直 │ 线；高度固定为 body viewport
+    // Divider —— 高度随面板 body 伸缩（固定 30 行会在高面板下断线）
     let divider_style = Style::new().fg(theme.semantic.border.default);
-    let divider_lines: Vec<Line<'_>> = (0..30_usize)
+    let body_rows = hooks.use_previous_size().height.saturating_sub(4).max(1) as usize;
+    let divider_lines: Vec<Line<'_>> = (0..body_rows)
         .map(|_| Line::from(Span::styled("│", divider_style)))
         .collect();
 
@@ -415,9 +413,34 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ],
     );
 
-    // ── Footer ───────────────────────────────────────────────────────────
-    let footer =
-        Line::from(i18n::tr("workflow-footer-shortcuts")).fg(theme_def.read().semantic.text.dim);
+    // ── Footer（状态与快捷键分两行，避免窄终端截断）────────────────────
+    let status_line = i18n::tr_args(
+        "workflow-footer-status",
+        &[
+            (
+                "execution".into(),
+                FluentValue::from(current_run.execution_status.clone()),
+            ),
+            (
+                "acceptance".into(),
+                FluentValue::from(current_run.acceptance_status.clone()),
+            ),
+            (
+                "post".into(),
+                FluentValue::from(current_run.post_processing_status.clone()),
+            ),
+            (
+                "delivery".into(),
+                FluentValue::from(current_run.delivery_status.clone()),
+            ),
+        ],
+    );
+    let shortcuts_line = i18n::tr("workflow-footer-shortcuts");
+    let dim = theme_def.read().semantic.text.dim;
+    let footer = ratatui::text::Text::from(vec![
+        Line::from(status_line).style(Style::new().fg(dim)),
+        Line::from(shortcuts_line).style(Style::new().fg(dim)),
+    ]);
 
     panel_shell!(PanelKind::Workflow, {
         View(height: Constraint::Length(1)) {
@@ -453,8 +476,8 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             }
         }
-        View(height: Constraint::Length(1)) {
-            Text(text: Paragraph::new(ratatui::text::Text::from(footer)))
+        View(height: Constraint::Length(2)) {
+            Text(text: Paragraph::new(footer))
         }
     })
 }
@@ -550,6 +573,26 @@ fn abbreviate_count(n: u64) -> String {
 /// Model 列显示宽度（终端列）。
 const MODEL_COL_WIDTH: usize = 12;
 
+/// Agent 名列显示宽度（与行内 `take(18)` / padding 一致）。
+const AGENT_NAME_COL_WIDTH: usize = 18;
+
+/// 数据行在 name 列之前的终端列数（`>` + ` {emoji} `）。
+const AGENT_ROW_LEADING_COLS: usize = 4;
+
+/// Agents 表头：列位置与数据行 `arrow + emoji + name` 对齐。
+fn agent_table_header(model_header: &str) -> String {
+    let mut out = String::from(' ');
+    out.push_str("Agents");
+    let used = 1 + UnicodeWidthStr::width("Agents");
+    let pad_to_model = AGENT_ROW_LEADING_COLS + AGENT_NAME_COL_WIDTH;
+    if pad_to_model > used {
+        out.push_str(&" ".repeat(pad_to_model - used));
+    }
+    out.push_str(&model_cell(Some(model_header), MODEL_COL_WIDTH));
+    out.push_str("  Tokens    Tools");
+    out
+}
+
 /// Model 列单元格：缺失显示 '-'；超过列宽按显示宽度截断（Unicode 安全），
 /// 未超过则补齐到列宽。
 fn model_cell(model: Option<&str>, width: usize) -> String {
@@ -585,7 +628,7 @@ fn truncate_to_width(s: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_run_selection, model_cell, truncate_to_width};
+    use super::{agent_table_header, clamp_run_selection, model_cell, truncate_to_width};
 
     /// [回归测试] workflow 轮询快照收缩时，旧的选中 tab 不能越界。
     ///
@@ -596,6 +639,16 @@ mod tests {
         assert_eq!(clamp_run_selection(1, 1), 0);
         assert_eq!(clamp_run_selection(2, 3), 2);
         assert_eq!(clamp_run_selection(0, 0), 0);
+    }
+
+    #[test]
+    fn test_agent_table_header_model_column_aligns_with_row_prefix() {
+        let header = agent_table_header("Model");
+        let model_start = header.find("Model").expect("model header");
+        assert_eq!(
+            model_start,
+            super::AGENT_ROW_LEADING_COLS + super::AGENT_NAME_COL_WIDTH
+        );
     }
 
     /// [单测] Model 列 Unicode 宽度截断 helper：ASCII/CJK 均按终端显示宽度

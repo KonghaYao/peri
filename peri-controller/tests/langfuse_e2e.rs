@@ -187,8 +187,8 @@ mod tests {
             output: "我来读取文件".to_string(),
             input_tokens: 10,
             output_tokens: 5,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
             request_id: None,
         });
         bridge.process_render_event(&RenderEvent::ToolStarted {
@@ -350,8 +350,8 @@ mod tests {
             output: "搜索完成，发现 3 个结果".to_string(),
             input_tokens: 10,
             output_tokens: 5,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
             request_id: None,
         });
         bridge.process_observe_event(&ObserveEvent::StageEnded {
@@ -477,8 +477,8 @@ mod tests {
             output: "完成".to_string(),
             input_tokens: 10,
             output_tokens: 5,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
             request_id: None,
         });
         bridge.process_render_event(&RenderEvent::ToolStarted {

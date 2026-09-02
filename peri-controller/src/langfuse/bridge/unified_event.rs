@@ -424,16 +424,10 @@ impl UnifiedLangfuseEvent {
                 let usage = TokenUsage {
                     input_tokens: input_tokens as u32,
                     output_tokens: output_tokens as u32,
-                    cache_creation_input_tokens: if cache_creation_input_tokens > 0 {
-                        Some(cache_creation_input_tokens as u32)
-                    } else {
-                        None
-                    },
-                    cache_read_input_tokens: if cache_read_input_tokens > 0 {
-                        Some(cache_read_input_tokens as u32)
-                    } else {
-                        None
-                    },
+                    cache_creation_input_tokens: cache_creation_input_tokens
+                        .and_then(|tokens| tokens.try_into().ok()),
+                    cache_read_input_tokens: cache_read_input_tokens
+                        .and_then(|tokens| tokens.try_into().ok()),
                 };
                 Some(UnifiedLangfuseEvent::LlmCallEnd {
                     agent_id: agent_id.to_string(),

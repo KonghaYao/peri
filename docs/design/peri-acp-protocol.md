@@ -1,6 +1,6 @@
 # peri-acp 协议设计
 
-> 设计起点：2026-07-15（v2.1 修订） | 最后核对：2026-08-22
+> 状态：现行设计
 >
 > 本文是 wire 语义说明；当前实现入口以 `docs/code-index/peri-acp.md` 为准，跨层不变量以 `docs/standards/architecture-contracts.md` 为准。
 
@@ -64,7 +64,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 
 ### 2.5 后台任务、工作流与 rewind
 
-> 本表方法与 `session/rename`、`plugin/*`、`session/cancel-bg-task`、`workflow/*`、`marketplace/*`、`mcp/*` 均在统一宿主（`host/requests.rs`）注册；批 3 unify 后 stdio 与 TUI 共用同一 `run_acp_server` + `handle_request`（`host/stdio/mod.rs`），stdio 通道同样可用这些方法（wire 验证见 `host/stdio/run_server_integration_test.rs`）。stdio 特有差异仅剩命令面过滤：`stdio_command_filter=true` 时 `core:rewind` / `core:clear` 从命令列表/补全隐藏。
+> 本表方法与 `session/rename`、`plugin/*`、`session/cancel-bg-task`、`workflow/*`、`marketplace/*`、`mcp/*` 均在统一宿主（`host/requests.rs`）注册；stdio 与 TUI 共用同一 `run_acp_server` + `handle_request`（`host/stdio/mod.rs`），stdio 通道同样可用这些方法（wire 验证见 `host/stdio/run_server_integration_test.rs`）。stdio 特有差异仅剩命令面过滤：`stdio_command_filter=true` 时 `core:rewind` / `core:clear` 从命令列表/补全隐藏。
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|

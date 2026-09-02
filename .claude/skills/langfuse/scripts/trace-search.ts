@@ -1,6 +1,6 @@
 import {
   detectAnomalies, fetchObservations, fetchTracesFiltered, fmt, fmtLatency, isoToLocal,
-  parseFilterArgs, summarizeErrors, summarizeTraceMetrics,
+  parseFilterArgs, summarizeErrors, summarizeTraceMetrics, totalInputTraffic,
 } from "./lib.ts";
 
 const args = process.argv.slice(2);
@@ -44,8 +44,8 @@ if (outputJson) { console.log(JSON.stringify({ traces: rows, meta }, null, 2)); 
 if (outputCsv) {
   console.log("id,timestamp,name,userId,sessionId,tags,inputTokens,effectiveNew,outputTokens,cachePct,latency,latencySource,llmCalls,toolCalls,errorCategories,failedLlmCalls,failedToolCalls,flags");
   for (const row of rows) {
-    const cachePct = row.metrics.inputTokens ? row.metrics.cacheReadTokens / row.metrics.inputTokens * 100 : 0;
-    console.log([row.id, row.timestamp, `"${row.name.replace(/"/g, '""')}"`, row.userId, row.sessionId, `"${row.tags.join(";")}"`, row.metrics.inputTokens, row.metrics.effectiveNewTokens, row.metrics.outputTokens, cachePct.toFixed(1), row.metrics.latency.seconds ?? "", row.metrics.latency.source, row.metrics.llmCalls, row.metrics.toolCalls, row.errors.categories.join(";"), row.errors.failedLlmCalls, row.errors.failedToolCalls, row.anomalies.map((item) => item.type).join(";")].join(","));
+    const inputTraffic = totalInputTraffic({ input: row.metrics.inputTokens, cacheRead: row.metrics.cacheReadTokens, cacheCreate: row.metrics.cacheCreateTokens });
+    console.log([row.id, row.timestamp, `"${row.name.replace(/"/g, '""')}"`, row.userId, row.sessionId, `"${row.tags.join(";")}"`, row.metrics.inputTokens, row.metrics.effectiveNewTokens, row.metrics.outputTokens, (inputTraffic > 0 ? row.metrics.cacheReadTokens / inputTraffic * 100 : 0).toFixed(1), row.metrics.latency.seconds ?? "", row.metrics.latency.source, row.metrics.llmCalls, row.metrics.toolCalls, row.errors.categories.join(";"), row.errors.failedLlmCalls, row.errors.failedToolCalls, row.anomalies.map((item) => item.type).join(";")].join(","));
   }
   process.exit(0);
 }

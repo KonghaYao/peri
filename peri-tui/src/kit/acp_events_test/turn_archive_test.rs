@@ -220,6 +220,36 @@ fn test_turn_done_clears_last_submitted_text() {
     );
 }
 
+/// TurnDone 归档时，未收到 ToolEnded 的在途工具卡不得永久 loading（如工具不存在）。
+#[test]
+#[serial]
+fn test_turn_done_archives_orphan_tool_not_running() {
+    let mut state = super::make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "ghost".into(),
+            tool_name: "NotRegistered".into(),
+            input_summary: String::new(),
+            raw_input: serde_json::Value::Null,
+            agent_id: None,
+        }),
+    );
+    let running = VIEW_MODELS.state().read().clone();
+    assert!(
+        matches!(&running.items[0], TuiRenderUnit::TuiToolCard(t) if t.is_running),
+        "precondition: tool card running before TurnDone"
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let done = VIEW_MODELS.state().read().clone();
+    match &done.items[0] {
+        TuiRenderUnit::TuiToolCard(t) => {
+            assert!(!t.is_running, "TurnDone 归档后工具卡不得继续 loading");
+        }
+        other => panic!("expected TuiToolCard, got {other:?}"),
+    }
+}
+
 #[test]
 #[serial]
 fn test_cache_coverage_uses_latest_sample_once_and_commits_with_turn() {
@@ -246,17 +276,8 @@ fn test_cache_coverage_uses_latest_sample_once_and_commits_with_turn() {
                 request_id: Some("chatcmpl-cache".into()),
             })),
         );
-        assert!(
-            state
-                .current_turn
-                .view_models()
-                .iter()
-                .all(|vm| !matches!(vm, TuiRenderUnit::TuiSystemNote(_))),
-            "intermediate usage must not emit per-step notes"
-        );
     }
 
-    turn::finalize_cache_coverage(&mut state, true);
     turn::handle_turn_done(&mut state);
     let notes: Vec<_> = state
         .committed
@@ -266,11 +287,15 @@ fn test_cache_coverage_uses_latest_sample_once_and_commits_with_turn() {
             _ => None,
         })
         .collect();
-    assert_eq!(notes.len(), 1);
-    assert!(notes[0].contains("70000"));
-    assert!(notes[0].contains("104478"));
-    assert!(notes[0].contains("34478"));
-    assert!(notes[0].contains("chatcmpl-cache"));
+    assert_eq!(
+        notes.len(),
+        4,
+        "each root usage_update should warn when coverage < 80%"
+    );
+    assert!(notes[3].contains("70000"));
+    assert!(notes[3].contains("104478"));
+    assert!(notes[3].contains("34478"));
+    assert!(notes[3].contains("chatcmpl-cache"));
     assert!(state.current_turn.is_empty());
     assert!(state.pending_cache_usage.is_none());
 }
@@ -289,8 +314,17 @@ fn test_cache_coverage_final_healthy_sample_suppresses_earlier_low_sample() {
             })),
         );
     }
-    turn::finalize_cache_coverage(&mut state, true);
-    assert!(state.current_turn.is_empty());
+    assert_eq!(
+        state
+            .current_turn
+            .view_models()
+            .iter()
+            .filter(|vm| matches!(vm, TuiRenderUnit::TuiSystemNote(_)))
+            .count(),
+        1,
+        "only the low-coverage step should warn"
+    );
+    turn::handle_turn_done(&mut state);
     assert!(state.pending_cache_usage.is_none());
 }
 
@@ -312,12 +346,14 @@ fn assert_root_cache_clear_suppresses_earlier_low_sample(observation: &str) {
 
     turn::finalize_cache_coverage(&mut state, true);
     turn::handle_turn_done(&mut state);
-    assert!(
-        state
-            .committed
-            .iter()
-            .all(|unit| !matches!(unit, TuiRenderUnit::TuiSystemNote(_))),
-        "{observation} final root observation must suppress a stale warning"
+    let note_count = state
+        .committed
+        .iter()
+        .filter(|unit| matches!(unit, TuiRenderUnit::TuiSystemNote(_)))
+        .count();
+    assert_eq!(
+        note_count, 1,
+        "{observation}: low sample warns immediately; explicit clear only drops pending"
     );
 }
 
@@ -369,7 +405,22 @@ fn test_cache_coverage_survives_suspend_and_is_overwritten_before_done() {
             request_id: Some("after-wake".into()),
         })),
     );
-    turn::finalize_cache_coverage(&mut state, true);
-    assert!(state.current_turn.is_empty());
-    assert!(state.pending_cache_usage.is_none());
+    assert_eq!(
+        state
+            .pending_cache_usage
+            .as_ref()
+            .unwrap()
+            .request_id
+            .as_deref(),
+        Some("after-wake")
+    );
+    let _ = state.pending_cache_usage.take();
+    assert!(
+        state
+            .committed
+            .iter()
+            .chain(state.current_turn.view_models().iter())
+            .any(|vm| matches!(vm, TuiRenderUnit::TuiSystemNote(_))),
+        "suspend must not remove an already emitted low-coverage warning"
+    );
 }

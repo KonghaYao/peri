@@ -1,6 +1,6 @@
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, BufReader};
@@ -15,6 +15,7 @@ use crate::{IncomingMessage, JsRuntimeError, Result, RpcChannel};
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const STDERR_CHUNK_BYTES: usize = 8 * 1024;
+const STDERR_TAIL_BYTES: usize = 32 * 1024;
 
 #[derive(Clone)]
 pub struct JsProcessSpec {
@@ -75,6 +76,7 @@ pub struct JsExecutionHost {
     stdout_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     stderr_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     stderr_bytes: Arc<AtomicUsize>,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
 }
 
 impl JsExecutionHost {
@@ -138,8 +140,10 @@ impl JsExecutionHost {
         let (sender, incoming) = mpsc::channel(256);
         let stdout_task = spawn_stdout_reader(stdout, Arc::clone(&channel), sender);
         let stderr_bytes = Arc::new(AtomicUsize::new(0));
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = tokio::spawn({
             let stderr_bytes = Arc::clone(&stderr_bytes);
+            let stderr_tail = Arc::clone(&stderr_tail);
             async move {
                 let mut stderr = BufReader::new(stderr);
                 let mut buffer = vec![0; STDERR_CHUNK_BYTES];
@@ -148,6 +152,13 @@ impl JsExecutionHost {
                         break;
                     }
                     stderr_bytes.fetch_add(bytes, Ordering::Relaxed);
+                    if let Ok(mut tail) = stderr_tail.lock() {
+                        tail.extend_from_slice(&buffer[..bytes]);
+                        if tail.len() > STDERR_TAIL_BYTES {
+                            let excess = tail.len() - STDERR_TAIL_BYTES;
+                            tail.drain(..excess);
+                        }
+                    }
                     debug!(target: "js_runtime:stderr", bytes, "JavaScript stderr received");
                 }
             }
@@ -161,6 +172,7 @@ impl JsExecutionHost {
             stdout_task: tokio::sync::Mutex::new(Some(stdout_task)),
             stderr_task: tokio::sync::Mutex::new(Some(stderr_task)),
             stderr_bytes,
+            stderr_tail,
         })
     }
 
@@ -194,7 +206,12 @@ impl JsExecutionHost {
     }
 
     pub fn stderr_tail(&self) -> Option<String> {
-        None
+        let tail = self.stderr_tail.lock().ok()?;
+        if tail.is_empty() {
+            None
+        } else {
+            Some(String::from_utf8_lossy(&tail).into_owned())
+        }
     }
 
     pub(crate) async fn terminate_and_wait(
@@ -220,5 +237,24 @@ impl JsExecutionHost {
         if let Some(task) = self.stderr_task.lock().await.take() {
             let _ = task.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn captures_bounded_stderr_tail() {
+        let payload = "x".repeat(STDERR_TAIL_BYTES + 1024);
+        let script = format!("process.stderr.write('prefix-' + '{}');", payload);
+        let host =
+            JsExecutionHost::spawn(JsProcessSpec::new("node", vec!["-e".into(), script])).unwrap();
+
+        host.wait().await.unwrap();
+        let tail = host.stderr_tail().unwrap();
+        assert!(tail.len() <= STDERR_TAIL_BYTES);
+        assert!(!tail.contains("prefix-"));
+        assert!(tail.ends_with('x'));
     }
 }

@@ -86,7 +86,7 @@ SECTION_IDS / 持有者声明一致性测试联动。
 ## 涉及文件
 
 - `spec/issues/2026-08-14-meta-harness-wave4-c4-evolution1-and-wave3-docs.md` — 遗留项 1/2/3 源记录
-- `docs/design/meta-harness-design.md` — 3.5 演进 1 语义代价 / 3.5.2 步骤 2 偏差记录
+- `docs/design/meta-harness.md` — 当前稳定机制见 §2.4/§2.5/§2.7；原演进与偏差记录由本 issue、关联 archive issue 和 Git 历史保留
 - `.claude/workflows/meta-harness-wave3-4.mjs` — Plan 死亡现场（F 项证据）
 - `peri-acp/src/provider/store_test.rs` — CwdGuard（G 项嫌疑点）
 

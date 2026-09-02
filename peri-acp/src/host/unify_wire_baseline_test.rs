@@ -383,6 +383,7 @@ fn test_initialize_response_wire_baseline() {
 
     let caps_v = &v["agentCapabilities"];
     assert_eq!(caps_v["loadSession"], true);
+    assert_eq!(caps_v["promptCapabilities"]["image"], true);
     for k in [
         "promptCapabilities",
         "mcpCapabilities",

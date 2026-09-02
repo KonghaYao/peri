@@ -410,6 +410,7 @@ fn blueprint_sequence_is_canonical() {
             // 第二组：文件/终端/Web 工具提供器
             "Filesystem",
             "GitAttribution",
+            "GitWatch",
             "Terminal",
             "Web",
             // 第三组：Todo / Cron
@@ -447,6 +448,7 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Image => "Image",
         ChainSlot::Filesystem => "Filesystem",
         ChainSlot::GitAttribution => "GitAttribution",
+        ChainSlot::GitWatch => "GitWatch",
         ChainSlot::Terminal => "Terminal",
         ChainSlot::Web => "Web",
         ChainSlot::Todo => "Todo",
@@ -483,6 +485,7 @@ fn default_config_produces_canonical_chain() {
             "ImageMiddleware",
             "FilesystemMiddleware",
             "GitAttributionMiddleware",
+            "GitWatchMiddleware",
             "TerminalMiddleware",
             "WebMiddleware",
             "TodoMiddleware",
@@ -534,12 +537,12 @@ fn permission_mode_keeps_chain_shape() {
         let names = assemble_names(&ctx);
         assert_eq!(
             names.iter().position(|n| n == "HumanInTheLoopMiddleware"),
-            Some(16),
+            Some(17),
             "mode {mode:?}: AskUser 位置漂移"
         );
         assert_eq!(
             names.iter().position(|n| n == "PermissionMiddleware"),
-            Some(15),
+            Some(16),
             "mode {mode:?}: Permission 位置漂移"
         );
         // 条件中间件（Hook/MCP/Workflow/LSP/Goal）不应出现
@@ -782,6 +785,7 @@ fn full_config_chain_order() {
             "ImageMiddleware",
             "FilesystemMiddleware",
             "GitAttributionMiddleware",
+            "GitWatchMiddleware",
             "TerminalMiddleware",
             "WebMiddleware",
             "TodoMiddleware",
@@ -1226,6 +1230,7 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Image => "ImageMiddleware",
         ChainSlot::Filesystem => "FilesystemMiddleware",
         ChainSlot::GitAttribution => "GitAttributionMiddleware",
+        ChainSlot::GitWatch => "GitWatchMiddleware",
         ChainSlot::Terminal => "TerminalMiddleware",
         ChainSlot::Web => "WebMiddleware",
         ChainSlot::Todo => "TodoMiddleware",

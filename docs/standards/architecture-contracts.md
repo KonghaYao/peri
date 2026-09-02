@@ -1,6 +1,6 @@
 # 跨模块架构契约
 
-只记录跨模块稳定不变量。具体测试规范见 `docs/design/testing-standards.md`。
+只记录跨模块稳定不变量。具体测试规范见 `docs/standards/testing.md`。
 
 ### ARC-BOUNDARY-001
 
@@ -92,7 +92,7 @@
 
 - **Scope**：生产中间件链。
 - **Rule**：中间件顺序是行为契约，不得按名称、便利性或局部需求重排；链的唯一事实源是 Agent 层 session 工厂（链序蓝本 `production_blueprint`），装配实现位于 `peri-middlewares/src/assembly.rs`（依赖反转完成后物理迁入 Agent 层），详细任务入口为 `peri-middlewares/CLAUDE.md`。
-- **Verify**：人工检查 `peri-agent/src/session/factory.rs` 的 `production_blueprint` 槽位顺序与 `peri-middlewares/src/assembly.rs` 的槽位构造（蓝本与构造一一对应，条件注册/Hook 组展开按装配实现判断）；修改该顺序时按 `docs/design/testing-standards.md` 增加或更新验证。
+- **Verify**：人工检查 `peri-agent/src/session/factory.rs` 的 `production_blueprint` 槽位顺序与 `peri-middlewares/src/assembly.rs` 的槽位构造（蓝本与构造一一对应，条件注册/Hook 组展开按装配实现判断）；修改该顺序时按 `docs/standards/testing.md` 增加或更新验证。
 
 ### ARC-SECRET-001
 

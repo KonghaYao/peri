@@ -4,7 +4,7 @@
 
 **状态**：Closed（Slice 1 定案，供 Slice 2-5 引用）
 **创建日期**：2026-08-10
-**规格**：`docs/design/tui-chat-message-flow-style.md`（§4/§4.1/§12）
+**规格**：`docs/design/tui-chat-workbench.md`（§4/§4.1/§12）
 **切片**：权威执行计划 Slice 1（地基：主题 token、终端能力、符号层、截断、数据门）
 
 ## 背景

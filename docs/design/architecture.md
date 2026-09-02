@@ -1,8 +1,12 @@
-Peri 3.0 架构
+# Perihelion 总体架构
 
-> 3.0 全新分层 | 日期：2026-08-05 | 修订：v3.9（时序契约 + cancel 与 MQ 语义）
+> 状态：现行设计
+>
+> 本文说明各层职责、允许的依赖方向与跨层数据流。跨模块强制不变量以
+> `docs/standards/architecture-contracts.md` 为准；代码入口以
+> `docs/code-index/` 为准。
 
-0. 依赖规则
+## 0. 依赖规则
 
 禁止跨层调用，依赖只能沿声明边单向。箭头 = 提供方向：
 
@@ -33,14 +37,14 @@ flowchart BT
 - 兜底：协议适配归 Model；业务切面归 Middleware；界面归 TUI；接口契约归 peri-acp-types
 - 争议按上述顺序裁定，不另行讨论
 
-1. Peri Model 层
+## 1. Peri Model 层
 
 - 协议适配：openai + anthropic 双协议 adapter
 - 协议消息统一抽象：ModelMessage/ModelStream（仅协议形态，不含业务语义）
 - 流式抽象：统一流式输出接口（ModelStreamEvent）
 - 最底层，无依赖
 
-2. Peri Agent 层
+## 2. Peri Agent 层
 
 - session 生命周期容器：Session 创建/运行/销毁全生命周期归此层
   - 聚合根原则：归此层的职责以 session 生命周期为界；session 是聚合根，本节职责范围由此自洽
@@ -62,14 +66,14 @@ flowchart BT
 - Middleware 链装配：session 初始化时构建（数据自 Resources；事实源自 peri-acp builder 迁入，ARC-MIDDLEWARE-001 同步迁）
 - cancel 最终执行权：Cascade/Independent 判定与终止执行归此层，上层仅传递，Model 执行中止
 
-3. Peri Runtime 层
+## 3. Peri Runtime 层
 
 - 多 session 编排器：创建/销毁 session（经 Agent 层工厂）、事件聚合路由、调度
 - 无状态：唯一持有 `session_id -> SessionHandle` 映射
   - 不持有 session 状态、无持久态、无业务配置
   - 其余全部注入，状态在 Agent 层各 session 内
 
-4. Peri Middleware 分片
+## 4. Peri Middleware 分片
 
 - 实现 MiddlewareHook，聚合业务模块：FS/Goal/SubAgent/HITL/...
 - MCP：薄封装 Resources 层 MCP 管理为 middleware（工具注册/执行桥接），连接状态从 Resources context 获取
@@ -77,7 +81,7 @@ flowchart BT
 - 外部依赖一律经 Resources context，不直接触碰外部系统
 - 切面 = hook 挂载 + 工具声明 + prompt 贡献 + 条件守卫
 
-5. Peri Resources 层
+## 5. Peri Resources 层
 
 - 外部系统门面：抽象外部数据，对上提供抓手
   - peri-config：直操配置文件（settings.json 等）
@@ -86,7 +90,7 @@ flowchart BT
 - 不解释业务语义：只保存与适配状态（存储/配置/连接）；重实现仅限协议适配且显式声明
 - 以 context 形式提供给 Agent / Middleware / Controller
 
-6. Peri Controller 层
+## 6. Peri Controller 层
 
 - 控制面：lite params -> pick Resources -> pick Runtime -> run Session -> pop events
   - lite params 定义：session 标识、agent 定义引用、cwd、初始输入
@@ -100,14 +104,14 @@ flowchart BT
   - bridge 是事件流旁路消费者（装配在 Controller 侧宿主），不承担 Controller 职责
   - 关联靠身份牌（session_id + turn_id + agent_id），不改变业务链路
 
-7. Peri ACP 层
+## 7. Peri ACP 层
 
 - 纯协议实现：ACP 协议适配，不承载业务
 - 事件协议化映射、caps 门控
 - 全部客户端（TUI/CLI/stdio/IDE/print）一律经 ACP
-- 部署单元（统一宿主，批 3 acp-host-unify 后单一路径）：TUI/print = `peri-tui` 客户端装配；stdio/IDE = `run_acp_stdio(StdioInput)`（`peri-acp/src/host/stdio/mod.rs`）→ `assemble_stdio_config` → `run_acp_server`——与 TUI 共用同一 `run_acp_server`（`handle_request` + `dispatch_prompt_turn`），仅 transport 多态（mpsc vs `transport/stdio.rs` `StdioTransport`，JSON-RPC 2.0 newline-delimited）
+- 部署单元：TUI/print = `peri-tui` 客户端装配；stdio/IDE = `run_acp_stdio(StdioInput)`（`peri-acp/src/host/stdio/mod.rs`）→ `assemble_stdio_config` → `run_acp_server`——与 TUI 共用同一 `run_acp_server`（`handle_request` + `dispatch_prompt_turn`），仅 transport 多态（mpsc vs `transport/stdio.rs` `StdioTransport`，JSON-RPC 2.0 newline-delimited）
 
-8. Peri TUI 层（View 层）
+## 8. Peri TUI 层（View 层）
 
 - 职责：把 ACP 传来的数据映射成界面呈现（渲染）
 - cli = 启动接口：装配 View 与 ACP 客户端，不承载业务
@@ -115,7 +119,7 @@ flowchart BT
 - 只经 ACP 拿数据，不触碰业务层
 - 部署装配输入：cli 全局参数 `--config-file` / `--db-path`（别名 camelCase）进程级重定向全局配置文件与 SQLite 会话数据库路径，TUI / print / `peri acp` 三路径生效；thread store 实例化在装配面（`Resources::open_with` / agent 侧 `open_thread_store_with`），ACP 协议面不感知。已知边界：`peri sync` 与 middlewares 侧 skillsDir/MCP 全局配置仍读写默认 `~/.peri/settings.json`（不跟随重定向）
 
-9. 横切面
+## 9. 横切面
 
 事件链路：
 
@@ -191,22 +195,3 @@ Task vs Thread：
 - Task：内存运行态（registry），bg shell/后台 SubAgent，不持久化，生命周期跟随 session
 - Thread：持久化实体（sqlite），ThreadMeta + 消息，subagent 必有
 - 父子链 parent_thread_id = 父子标记的持久化载体（thread_id = agent_id）
-
-附录：crate 归位
-
-| 层 | crate | 动作 |
-|---|---|---|
-| Model | peri-model | 不变 |
-| Agent | peri-agent | 扩展：Session/AgentGroup/async tasks/frozen/装配迁入；BackgroundTaskRegistry 迁入（per-session 实例化） |
-| Runtime | peri-runtime（新） | 薄编排器 |
-| Middleware | peri-middlewares | 不变（BackgroundTaskRegistry 定义与实现迁入 peri-agent，Middleware 仅经 TaskManager 接口发起） |
-| Resources | peri-resources（新） | 内含 peri-config/peri-sessions 子模块 |
-| Controller | peri-controller（新） | Langfuse bridge 自 peri-acp 迁入 |
-| ACP | peri-acp | 瘦身：协议/映射/caps |
-| TUI | peri-tui | 不变 |
-| 契约 | peri-acp-types | 保留 |
-| Resources | peri-lsp | resource，被 middleware 使用 |
-| Resources | peri-workflow | resource，被 middleware 使用 |
-| TUI | peri-web-pty | TUI 层 CLI 命令 |
-
-注：peri-lsp / peri-workflow 为既有 crate，作为 resource 实现接入 peri-resources（包装为 context），不参与分层主链；Middleware 经 context 使用，不直接依赖。

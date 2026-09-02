@@ -5,9 +5,15 @@
 **状态**：Partial
 **优先级**：高
 **创建日期**：2026-08-01
-**最后核查**：2026-08-11
+**最后核查**：2026-09-01
 
-## 最新情况（2026-08-11）
+## 最新情况（2026-09-01）
+
+仓库内残余通知真实性已修复：`JsExecutionHost` 保留 32 KiB 有界 stderr tail；`workflow/start` RPC 失败、握手超时和 ack 校验失败在进程收敛后将脱敏 tail 写入 `WorkflowResult`，既有快速失败窗口与异步通知双路径不变。`WorkflowTaskResult::to_notification()` 失败时展示真实 `error`，并按通知时 `state.json` 是否实际存在决定显示保存路径或明确“未生成”；成功/失败使用同一 artifact 判定。
+
+契约测试已覆盖 stderr tail 上界、失败 error 文本、无 artifact 不出现虚假 `state.json`、存在 artifact 才显示真实路径；`cargo test -p peri-js-runtime --lib host::tests::captures_bounded_stderr_tail` 与 `cargo test -p peri-workflow --lib` 通过。fake Node 写 stderr 后静默触发完整 15 秒 timeout 的专项全链路 fixture 尚未落地，因此 issue 保持 Partial，不以现有分层测试替代该验收。
+
+## 历史情况（2026-08-11）
 
 修复 #1（2026-08-02）已落地：`workflow_cmd()` 优先本地固定安装（`~/.peri/workflow/0.1.1`，完全离线秒启），registry 不可达时 e2e 0.03s 完成（对比 npx 挂起 70-120s）。残余问题：修复范围 1-7（握手失败时 stderr 传播、通知真实 error、成功路径文案）未完整落地——workflow error/stderr 未完整传播到通知，成功路径文案仍可能误报。状态记录（2026-08-11）：Open → Partial。
 

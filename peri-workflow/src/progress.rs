@@ -18,6 +18,14 @@ pub struct RunProgress {
     pub run_id: String,
     pub workflow_name: String,
     pub status: RunStatus,
+    #[serde(default)]
+    pub execution_status: peri_acp_types::workflow::ExecutionStatus,
+    #[serde(default)]
+    pub acceptance_status: peri_acp_types::workflow::AcceptanceStatus,
+    #[serde(default)]
+    pub post_processing_status: peri_acp_types::workflow::PostProcessingStatus,
+    #[serde(default)]
+    pub delivery_status: peri_acp_types::workflow::DeliveryStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<WorkflowMeta>,
     pub phases: Vec<PhaseProgress>,
@@ -72,6 +80,10 @@ impl WorkflowProgressStore {
                     run_id: run_id.clone(),
                     workflow_name: workflow_name.clone(),
                     status: RunStatus::Running,
+                    execution_status: peri_acp_types::workflow::ExecutionStatus::Running,
+                    acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
+                    post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Unknown,
+                    delivery_status: peri_acp_types::workflow::DeliveryStatus::Unknown,
                     meta: None, // meta is raw Value; conversion not required by spec
                     phases: Vec::new(),
                     agents: IndexMap::new(),
@@ -186,6 +198,15 @@ impl WorkflowProgressStore {
                         "killed" => RunStatus::Killed,
                         _ => RunStatus::Failed,
                     };
+                    run.execution_status = match status.as_str() {
+                        "completed" => peri_acp_types::workflow::ExecutionStatus::Completed,
+                        "killed" => peri_acp_types::workflow::ExecutionStatus::Killed,
+                        _ => peri_acp_types::workflow::ExecutionStatus::Failed,
+                    };
+                    run.acceptance_status = peri_acp_types::workflow::AcceptanceStatus::Unknown;
+                    run.post_processing_status =
+                        peri_acp_types::workflow::PostProcessingStatus::Blocked;
+                    run.delivery_status = peri_acp_types::workflow::DeliveryStatus::Blocked;
                     run.completed_at = Some(std::time::Instant::now());
                 }
             }
@@ -200,6 +221,22 @@ impl WorkflowProgressStore {
 
     pub fn list_runs(&self) -> Vec<RunProgress> {
         self.runs.read().values().cloned().collect()
+    }
+
+    pub fn set_terminal_projection(
+        &self,
+        run_id: &str,
+        execution_status: peri_acp_types::workflow::ExecutionStatus,
+        acceptance_status: peri_acp_types::workflow::AcceptanceStatus,
+        post_processing_status: peri_acp_types::workflow::PostProcessingStatus,
+        delivery_status: peri_acp_types::workflow::DeliveryStatus,
+    ) {
+        if let Some(run) = self.runs.write().get_mut(run_id) {
+            run.execution_status = execution_status;
+            run.acceptance_status = acceptance_status;
+            run.post_processing_status = post_processing_status;
+            run.delivery_status = delivery_status;
+        }
     }
 
     /// 获取所有 runs 的快照（供 ACP handler 序列化用）。

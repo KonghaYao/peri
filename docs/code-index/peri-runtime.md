@@ -5,7 +5,7 @@
 
 ## 架构速览
 
-- 职责：多 session 编排器（docs/top-level.md §3）——薄编排：唯一持有 `session_id -> SessionHandle` 映射；无状态、无持久态、无业务配置（session 状态在 Agent 层各 session 内，其余全部注入）
+- 职责：多 session 编排器（docs/design/architecture.md §3）——薄编排：唯一持有 `session_id -> SessionHandle` 映射；无状态、无持久态、无业务配置（session 状态在 Agent 层各 session 内，其余全部注入）
 - 数据流：Controller（定位转发入口）→ Runtime 查映射 → `SessionHandle` 方法转发（run/cancel/join/submit_input/destroy）；Agent 层未补打事件 → `Runtime::stamp` 补打（session_id 按 session 维度 + session_seq 单调递增）→ canonical envelope
 - 稳定不变量：cancel 只定位与转发、不解释取消语义，幂等判定归 Agent（ARC-CANCEL-001）；`SessionHandle`/`UnstampedEvent` 接口契约事实源为 `peri-acp-types::runtime`，本层仅 re-export（改签名须改事实源）；销毁七步顺序固定（§9 契约，持久化失败映射保留）
 - 错误模型：边界类型化 `RuntimeError`（5 个变体），Agent 侧细节错误 anyhow 穿透后逐层包 context（§9 错误模型：边界类型化，层内 anyhow）

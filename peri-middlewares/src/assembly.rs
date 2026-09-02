@@ -45,7 +45,7 @@ use crate::{
     tool_search::{ToolSearchIndex, ToolSearchMiddleware},
     workflow::{WorkflowMiddleware, WorkflowMiddlewareAdaptor},
     AgentDefineMiddleware, AgentsMdMiddleware, AtMentionMiddleware, GitAttributionMiddleware,
-    GoalMiddleware, ImageMiddleware, LspMiddleware,
+    GitWatchMiddleware, GoalMiddleware, ImageMiddleware, LspMiddleware,
 };
 
 /// 后台任务完成回调类型（事实源 peri-agent::session::factory，L5 迁入）
@@ -380,6 +380,10 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 ChainSlot::GitAttribution if disabled.contains("GitAttributionMiddleware") => {}
                 ChainSlot::GitAttribution => {
                     chain.add(Box::new(GitAttributionMiddleware::new(model_name)));
+                }
+                ChainSlot::GitWatch if disabled.contains("GitWatchMiddleware") => {}
+                ChainSlot::GitWatch => {
+                    chain.add(Box::new(GitWatchMiddleware::new()));
                 }
                 ChainSlot::Terminal if disabled.contains("TerminalMiddleware") => {}
                 ChainSlot::Terminal => {

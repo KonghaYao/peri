@@ -79,6 +79,7 @@ pub(crate) fn handle_notification(
                     return Some(ContinuationRequest {
                         session_id: session_id.to_string(),
                         kind: BgTaskKind::Agent,
+                        mq_steering: false,
                     });
                 }
             }

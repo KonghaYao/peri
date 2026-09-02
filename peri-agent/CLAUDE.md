@@ -15,7 +15,7 @@
 | RCRA、Prompt frozen、工具 direct/deferred | `../docs/standards/architecture-contracts.md` |
 | 中间件链装配入口与链序蓝本（ARC-MIDDLEWARE-001） | `src/session/factory.rs`；装配实现在 `../peri-middlewares/src/assembly.rs` |
 | Rust、async、文本宽度、doc tests | `../docs/standards/rust.md` |
-| 测试位置与覆盖要求 | `../docs/design/testing-standards.md` |
+| 测试位置与覆盖要求 | `../docs/standards/testing.md` |
 | compact 阈值与环境覆盖 | `src/agent/compact_v2/config.rs` 的 `CompactConfig` |
 
 不通过导入扩展默认上下文；需规则时按表显式读取。

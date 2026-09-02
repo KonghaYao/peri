@@ -195,6 +195,10 @@ impl MiddlewareState for AgentContext<'_> {
         &self.ctx.session.queue
     }
 
+    fn inbox_handle(&self) -> Option<&peri_acp_types::session::InboxHandle> {
+        self.ctx.async_ctx.inbox_handle.as_ref()
+    }
+
     fn local_tools(&self) -> Option<&crate::agent::stages::SharedToolMap> {
         Some(&self.ctx.runtime.tools)
     }

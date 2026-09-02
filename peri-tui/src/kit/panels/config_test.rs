@@ -20,13 +20,10 @@ fn test_apply_toggle_row_show_diff_flips() {
 #[test]
 fn test_apply_toggle_row_cache_warn_flips() {
     let mut cfg = PeriConfig::default();
-    let initial = cfg.config.show_cache_warning;
+    assert_eq!(cfg.config.show_cache_warning, None);
     let new = apply_toggle_row(&mut cfg, ROW_CACHE_WARN);
-    assert_eq!(new, Some(!initial.unwrap_or(false)));
-    assert_eq!(
-        cfg.config.show_cache_warning,
-        Some(!initial.unwrap_or(false))
-    );
+    assert_eq!(new, Some(true));
+    assert_eq!(cfg.config.show_cache_warning, Some(true));
 }
 
 #[test]

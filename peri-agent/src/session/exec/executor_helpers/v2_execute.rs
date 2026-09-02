@@ -115,6 +115,10 @@ pub struct V2ExecuteRequest {
     pub cancel_cascade: Arc<dyn Fn(&str) + Send + Sync>,
     /// EventBus forwarder 启动器（ACP 侧持有 Langfuse bridge 构造）。
     pub forwarder_launcher: ForwarderLauncherFn,
+    /// loop 结束后 MQ 仍有待消费消息时通知宿主 continuation scheduler。
+    pub continuation_notify: Option<
+        tokio::sync::mpsc::UnboundedSender<crate::session::exec::executor::ContinuationRequest>,
+    >,
 }
 
 /// 通过注入的 stage 装配面构造 StageContext，再由 [`run_react_loop`] 驱动循环
@@ -377,6 +381,24 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         );
     }
     let loop_result = run_react_loop(v2_out.context, 500).await;
+
+    if matches!(&loop_result, LoopResult::Completed) {
+        let queue = v2_out.session.queue();
+        if queue.needs_mq_continuation() {
+            if let Some(ref tx) = req.continuation_notify {
+                let _ = tx.send(crate::session::exec::executor::ContinuationRequest {
+                    session_id: req.session_id.clone(),
+                    kind: BgTaskKind::Agent,
+                    mq_steering: true,
+                });
+                tracing::debug!(
+                    session_id = %req.session_id,
+                    queue_len = queue.len(),
+                    "[v2] MQ steering continuation notified after run_react_loop"
+                );
+            }
+        }
+    }
 
     // `run_react_loop` consumed StageContext, so all root EventBus senders have
     // been dropped. Wait for the forwarder to drain Observe/Render/State before

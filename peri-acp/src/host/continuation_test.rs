@@ -12,8 +12,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     cancel_arms_continuation, cancel_should_schedule_continuation, continuation_dispatchable,
-    continuation_still_valid, recv_until_shutdown, take_continuation_if_armed, SessionState,
+    continuation_still_valid, recv_until_shutdown, take_continuation_for_request,
+    take_continuation_if_armed, SessionState,
 };
+use crate::session::executor::ContinuationRequest;
 
 /// 构造最小 SessionState（仅续跑相关字段有值）。
 fn make_session_state(armed: bool, epoch: u64) -> SessionState {
@@ -33,8 +35,29 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         continuation_armed: armed,
         continuation_epoch: epoch,
         continuation_in_flight: false,
+        continuation_mq_steering_pending: false,
         lease: crate::host::lease::WriterLease::acquired("default"),
     }
+}
+
+/// MQ steering 在 continuation 执行中到达：须置 pending，不得静默丢弃。
+#[test]
+fn test_mq_steering_during_in_flight_sets_pending() {
+    let mut state = make_session_state(false, 2);
+    state.continuation_in_flight = true;
+    let req = ContinuationRequest {
+        session_id: "session-1".to_string(),
+        kind: BgTaskKind::Agent,
+        mq_steering: true,
+    };
+    assert!(
+        take_continuation_for_request(&mut state, &req).is_none(),
+        "in_flight 时不应立即调度"
+    );
+    assert!(
+        state.continuation_mq_steering_pending,
+        "须保留 pending 供 in_flight 结束后补发"
+    );
 }
 
 /// 只有 bg agent（kind=Agent）完成才触发：Shell 完成不得消费标记。
@@ -164,12 +187,12 @@ fn test_cancel_schedule_race_eligibility() {
 fn test_continuation_dispatchable_requires_pending_defer() {
     let state = make_session_state(false, 3);
     // 代际有效 + Defer 在队 → 可 dispatch
-    assert!(continuation_dispatchable(&state, 3, true));
+    assert!(continuation_dispatchable(&state, 3, true, false));
     // 代际有效但 Defer 已被消费 → 跳过（空跑无意义）
-    assert!(!continuation_dispatchable(&state, 3, false));
+    assert!(!continuation_dispatchable(&state, 3, false, false));
     // 代际失效（用户新 prompt）→ 跳过
-    assert!(!continuation_dispatchable(&state, 3 + 1, true));
-    assert!(!continuation_dispatchable(&state, 3 + 1, false));
+    assert!(!continuation_dispatchable(&state, 3 + 1, true, false));
+    assert!(!continuation_dispatchable(&state, 3 + 1, false, false));
 }
 
 #[tokio::test]

@@ -32,6 +32,7 @@ fn test_append_and_read_all_journal() {
             phase: None,
             duration_ms: None,
         },
+        attempt: None,
     };
     store.append("run-1", &entry).unwrap();
     let entries = store.read_all("run-1").unwrap();
@@ -48,6 +49,7 @@ fn test_truncate_clears_journal() {
         key: "k".into(),
         seq: 0,
         result: AgentRunResult::Skipped,
+        attempt: None,
     };
     store.append("run-1", &entry).unwrap();
     store.truncate("run-1").unwrap();
@@ -63,6 +65,14 @@ fn test_write_and_read_state() {
         run_id: "run-1".into(),
         workflow_name: "test".into(),
         status: "completed".into(),
+        execution_status: ExecutionStatus::Completed,
+        acceptance_status: AcceptanceStatus::Unknown,
+        post_processing_status: PostProcessingStatus::Blocked,
+        delivery_status: DeliveryStatus::Blocked,
+        write_intent: None,
+        limits: crate::protocol::WorkflowLimits::default(),
+        budget_total: Some(9_007_199_254_740_991),
+        attempts: Vec::new(),
         return_value: Some(serde_json::json!({"ok": true})),
         script: "script".into(),
         started_at: "2026-06-22T00:00:00Z".into(),
@@ -73,6 +83,21 @@ fn test_write_and_read_state() {
     let read = store.read_state("run-1").unwrap();
     assert_eq!(read.run_id, "run-1");
     assert_eq!(read.status, "completed");
+    assert_eq!(read.budget_total, Some(9_007_199_254_740_991));
+}
+
+#[test]
+fn test_legacy_state_defaults_budget_total_to_none() {
+    let state: RunState = serde_json::from_value(serde_json::json!({
+        "run_id": "legacy-budget",
+        "workflow_name": "legacy",
+        "status": "completed",
+        "script": "script",
+        "started_at": "2026-06-22T00:00:00Z"
+    }))
+    .unwrap();
+
+    assert_eq!(state.budget_total, None);
 }
 
 #[test]
@@ -84,6 +109,14 @@ fn test_state_error_field_round_trip() {
         run_id: "run-err".into(),
         workflow_name: "test".into(),
         status: "failed".into(),
+        execution_status: ExecutionStatus::Failed,
+        acceptance_status: AcceptanceStatus::Unknown,
+        post_processing_status: PostProcessingStatus::Failed,
+        delivery_status: DeliveryStatus::Blocked,
+        write_intent: None,
+        limits: crate::protocol::WorkflowLimits::default(),
+        budget_total: None,
+        attempts: Vec::new(),
         return_value: None,
         script: "script".into(),
         started_at: "2026-06-22T00:00:00Z".into(),
@@ -108,6 +141,14 @@ fn test_state_error_skipped_when_none() {
         run_id: "run-ok".into(),
         workflow_name: "test".into(),
         status: "completed".into(),
+        execution_status: ExecutionStatus::Completed,
+        acceptance_status: AcceptanceStatus::Passed,
+        post_processing_status: PostProcessingStatus::NotRequired,
+        delivery_status: DeliveryStatus::Deliverable,
+        write_intent: None,
+        limits: crate::protocol::WorkflowLimits::default(),
+        budget_total: None,
+        attempts: Vec::new(),
         return_value: None,
         script: "script".into(),
         started_at: "2026-06-22T00:00:00Z".into(),
@@ -117,6 +158,222 @@ fn test_state_error_skipped_when_none() {
     store.write_state("run-ok", &state).unwrap();
     let raw = std::fs::read_to_string(store.run_dir("run-ok").join("state.json")).unwrap();
     assert!(!raw.contains("error"), "None 时不应序列化 error 字段");
+}
+
+#[test]
+fn test_legacy_completed_defaults_do_not_claim_delivery() {
+    let state: RunState = serde_json::from_value(serde_json::json!({
+        "run_id": "legacy-run",
+        "workflow_name": "legacy",
+        "status": "completed",
+        "script": "script",
+        "started_at": "2026-06-22T00:00:00Z",
+        "future_field": {"ignored": true}
+    }))
+    .unwrap();
+
+    assert_eq!(state.status, "completed");
+    assert_eq!(state.execution_status, ExecutionStatus::Unknown);
+    assert_eq!(state.acceptance_status, AcceptanceStatus::Unknown);
+    assert_eq!(state.post_processing_status, PostProcessingStatus::Unknown);
+    assert_eq!(state.delivery_status, DeliveryStatus::Unknown);
+}
+
+#[test]
+fn test_non_git_baseline_is_optional_for_legacy_and_read_only() {
+    let tmp = TempDir::new().unwrap();
+
+    assert!(GitBaseline::capture_for_intent(tmp.path(), None)
+        .unwrap()
+        .is_none());
+    assert!(GitBaseline::capture_for_intent(
+        tmp.path(),
+        Some(&peri_acp_types::workflow::WorkflowWriteIntent::ReadOnly),
+    )
+    .unwrap()
+    .is_none());
+}
+
+#[test]
+fn test_non_git_baseline_is_required_for_write_intent() {
+    let tmp = TempDir::new().unwrap();
+    let intent = peri_acp_types::workflow::WorkflowWriteIntent::Write {
+        repo_root: tmp.path().to_string_lossy().into_owned(),
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        path_allowlist: vec!["allowed.txt".into()],
+        head_may_change: false,
+        commit_required: None,
+    };
+
+    let error = GitBaseline::capture_for_intent(tmp.path(), Some(&intent)).unwrap_err();
+    assert!(error.contains("git pre/postcondition command failed"));
+}
+
+#[test]
+fn test_git_baseline_preserves_dirty_staged_and_untracked_bytes() {
+    let tmp = TempDir::new().unwrap();
+    let run_git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), b"base\n").unwrap();
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+
+    std::fs::write(tmp.path().join("tracked.txt"), b"staged\n").unwrap();
+    run_git(&["add", "tracked.txt"]);
+    std::fs::write(tmp.path().join("tracked.txt"), b"dirty\n").unwrap();
+    std::fs::write(tmp.path().join("untracked.bin"), [0_u8, 1, 2, 255]).unwrap();
+    let tracked_before = std::fs::read(tmp.path().join("tracked.txt")).unwrap();
+    let untracked_before = std::fs::read(tmp.path().join("untracked.bin")).unwrap();
+
+    let baseline = GitBaseline::capture(tmp.path()).unwrap();
+    baseline.verify_unchanged().unwrap();
+
+    assert_eq!(
+        std::fs::read(tmp.path().join("tracked.txt")).unwrap(),
+        tracked_before
+    );
+    assert_eq!(
+        std::fs::read(tmp.path().join("untracked.bin")).unwrap(),
+        untracked_before
+    );
+}
+
+#[test]
+fn test_git_baseline_detects_unattributed_change_without_restoring_it() {
+    let tmp = TempDir::new().unwrap();
+    let run_git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n").unwrap();
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+
+    let baseline = GitBaseline::capture(tmp.path()).unwrap();
+    std::fs::write(
+        tmp.path().join("tracked.txt"),
+        "agent claim without ownership\n",
+    )
+    .unwrap();
+
+    let error = baseline.verify_unchanged().unwrap_err();
+    assert!(error.contains("changed without an attributable"));
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("tracked.txt")).unwrap(),
+        "agent claim without ownership\n"
+    );
+}
+
+#[test]
+fn test_write_postcondition_allows_only_allowlisted_change() {
+    let tmp = TempDir::new().unwrap();
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .unwrap()
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("allowed.txt"), "base\n").unwrap();
+    std::fs::write(tmp.path().join("outside.txt"), "base\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+
+    let baseline = GitBaseline::capture(tmp.path()).unwrap();
+    let intent = peri_acp_types::workflow::WorkflowWriteIntent::Write {
+        repo_root: tmp.path().to_string_lossy().into_owned(),
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        path_allowlist: vec!["allowed.txt".into()],
+        head_may_change: false,
+        commit_required: None,
+    };
+    baseline.validate_write_intent(&intent).unwrap();
+    std::fs::write(tmp.path().join("allowed.txt"), "changed\n").unwrap();
+    baseline.verify_postcondition(Some(&intent)).unwrap();
+    std::fs::write(tmp.path().join("outside.txt"), "escaped\n").unwrap();
+    assert!(baseline
+        .verify_postcondition(Some(&intent))
+        .unwrap_err()
+        .contains("escaped"));
+}
+
+#[test]
+fn test_write_intent_rejects_parent_traversal() {
+    let tmp = TempDir::new().unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(tmp.path())
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["add", "tracked.txt"])
+        .current_dir(tmp.path())
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Peri Test",
+            "-c",
+            "user.email=peri-test@example.invalid",
+            "commit",
+            "-qm",
+            "baseline"
+        ])
+        .current_dir(tmp.path())
+        .status()
+        .unwrap()
+        .success());
+    let baseline = GitBaseline::capture(tmp.path()).unwrap();
+    let intent = peri_acp_types::workflow::WorkflowWriteIntent::Write {
+        repo_root: tmp.path().to_string_lossy().into_owned(),
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        path_allowlist: vec!["../outside".into()],
+        head_may_change: false,
+        commit_required: None,
+    };
+    assert!(baseline.validate_write_intent(&intent).is_err());
 }
 
 // ─── extract_long_texts / write_output 测试 ────────────────────

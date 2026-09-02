@@ -10,7 +10,7 @@
 
 Cron 任务在 agent 运行中、大模型 retry 失败后完全无法注入：turn 异常结束后，cron 触发没有任何接收方，任务静默丢失（`tick` 只打 warn 日志）。根因是 cron 注入管道（`CronOwner` + bridge task + `scheduler.subscribe()`）的生命周期绑定在**每次 turn 新建的 V2Session** 上，turn 一结束（无论正常 Completed 还是 retry 失败 Error）管道即死；而 idle 期没有替代消费方，导致后续所有 cron 触发被 `retain` 清理掉。
 
-设计文档（`docs/design/peri-agent-message-store-v2.md`）写明 AsyncOwners（SessionInbox + CronOwner）应为 **session 级、跨 turn 存活**，实现与设计存在偏差。
+设计文档（`docs/design/message-transcript.md`）写明 AsyncOwners（SessionInbox + CronOwner）应为 **session 级、跨 turn 存活**，实现与设计存在偏差。
 
 ## 症状详情
 

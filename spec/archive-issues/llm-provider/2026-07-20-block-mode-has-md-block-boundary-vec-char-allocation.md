@@ -23,7 +23,7 @@
 ## 涉及文件
 
 - `peri-tui/src/kit/acp_events.rs:59-121` —— `has_md_block_boundary_since` 函数，第 65 行为 `Vec<char>` 分配点
-- `docs/superpowers/specs/2026-07-19-streaming-mode-config-design.md:86-105` —— 原始 spec 中的零分配版本
+- 当时的 streaming mode 过程 spec 曾给出零分配版本；spec 已删除，本归档 issue 与 Git 历史保留证据
 
 ## 技术背景
 

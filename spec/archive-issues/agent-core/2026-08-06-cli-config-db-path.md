@@ -98,7 +98,7 @@ db_path: Option<PathBuf>,
 - `peri-agent/src/resources.rs`（`open_thread_store_with` + M-res 注释修正）
 - `peri-resources/src/context.rs`（`open_with`）、`context_test.rs`（新）
 - 测试：store_test.rs（RAII guard + 6 条 #[serial]）、cli_integration_test.rs（TestCli 镜像 + 10 条）、main_test.rs（prescan 10 条）、context_test.rs（4 条）、resources.rs 内嵌（2 条）
-- 文档：README.md（CLI 全局参数段）、docs/top-level.md §8
+- 文档：README.md（CLI 全局参数段）、docs/design/architecture.md §8
 
 ### 验证
 

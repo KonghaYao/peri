@@ -4,7 +4,7 @@
 **优先级**：低（文档与决策记录，无行为变更）
 **类型**：决策记录
 **创建日期**：2026-08-14
-**来源**：MetaHarness 实施质量审查（P1-2）+ 设计文档 `docs/design/meta-harness-design.md` §2.5
+**来源**：MetaHarness 实施质量审查（P1-2）+ 设计文档 `docs/design/meta-harness.md` §2.5
 
 ## 背景
 

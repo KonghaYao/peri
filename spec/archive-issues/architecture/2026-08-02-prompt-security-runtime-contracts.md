@@ -7,7 +7,7 @@
 **优先级**：高（P0 安全边界优先，P1/P2 随同收敛）
 **类型**：架构改进 / 安全修复
 **创建日期**：2026-08-02
-**来源**：Prompt 逻辑审计及四组对抗验证（结论已写入 `prompt-sections-audit.md`）
+**来源**：Prompt 逻辑审计及四组对抗验证；稳定结论已收敛到 `docs/design/system-prompt.md`、`docs/design/meta-harness.md` 与对应 ARC 契约，审计过程由本归档 issue 和 Git 历史保留
 
 ## 最新情况（2026-08-11）
 

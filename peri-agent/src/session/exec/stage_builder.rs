@@ -876,6 +876,18 @@ pub fn build_stage_context(
     if let Some(inbox) = idle_inbox {
         builder = builder.with_idle_inbox(inbox);
     }
+    if let Some(handle) = input
+        .idle_inbox
+        .as_ref()
+        .map(|inbox| inbox.handle())
+        .or_else(|| {
+            session
+                .async_owners_guard()
+                .and_then(|guard| guard.as_ref().map(|owners| owners.inbox.handle()))
+        })
+    {
+        builder = builder.with_inbox_handle(handle);
+    }
     if let Some(probe) = idle_should_wait {
         builder = builder.with_idle_should_wait(probe);
     }

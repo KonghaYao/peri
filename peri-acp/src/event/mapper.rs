@@ -180,10 +180,10 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             source_agent_id,
             ..
         } => {
-            let update = UsageUpdate::new(
-                u64::from(u.input_tokens) + u64::from(u.output_tokens),
-                u64::from(context_window),
-            );
+            // UsageUpdate.used 与 size 配对表示当前上下文占用。input_tokens 是本次
+            // 请求时 provider 看到的完整 prompt；output 会在下一次请求中进入 input，
+            // 此处立即相加会双计。Anthropic input_tokens 已包含 cache breakdown。
+            let update = UsageUpdate::new(u64::from(u.input_tokens), u64::from(context_window));
             // 只有当 tokenStats cap 为 true 时才附加 _meta
             let update = if caps.token_stats {
                 let mut meta = serde_json::Map::new();

@@ -1,3 +1,7 @@
+use std::path::PathBuf;
+
+use crate::skills::{scan_skill_roots, SkillRoot, SkillSource, SkillsMiddleware};
+
 use super::{parse_builtin_frontmatter, BUILTIN_SKILLS};
 
 #[test]
@@ -51,6 +55,102 @@ fn test_self_build_skill_registered_and_scoped() {
         !skill.content.to_ascii_lowercase().contains("hooks"),
         "self-build 不应教授或推荐 hooks"
     );
+}
+
+#[test]
+fn test_ultra_adlc_skill_registered_and_discriminating() {
+    let skill = BUILTIN_SKILLS
+        .iter()
+        .find(|skill| skill.name == "ultra-adlc")
+        .expect("BUILTIN_SKILLS 应含 ultra-adlc");
+    let (name, aliases, description) =
+        parse_builtin_frontmatter(skill.content).expect("ultra-adlc frontmatter 应有效");
+
+    assert_eq!(name, "ultra-adlc");
+    assert!(aliases.is_empty());
+    let description = description.to_ascii_lowercase();
+    assert!(description.contains("very large"));
+    assert!(description.contains("end-to-end"));
+    assert!(description.contains("do not use for ordinary"));
+    assert!(skill.content.contains("userInvocable: true"));
+    assert!(skill.content.contains("argumentHint:"));
+}
+
+#[test]
+fn test_ultra_adlc_skill_is_discoverable_in_builtin_summary() {
+    let skills = scan_skill_roots(&[SkillRoot {
+        path: PathBuf::new(),
+        source: SkillSource::Builtin,
+        plugin_name: None,
+    }]);
+    let summary = SkillsMiddleware::build_summary(&skills);
+
+    assert!(
+        summary.contains("**ultra-adlc** [builtin]"),
+        "builtin 摘要应暴露 ultra-adlc，实际: {summary}"
+    );
+}
+
+#[test]
+fn test_ultra_adlc_skill_encodes_peri_workflow_contract() {
+    let content = BUILTIN_SKILLS
+        .iter()
+        .find(|skill| skill.name == "ultra-adlc")
+        .expect("BUILTIN_SKILLS 应含 ultra-adlc")
+        .content;
+
+    for marker in [
+        "./peri/adlc/",
+        "intent.md",
+        "execution.md",
+        "evidence.md",
+        "exactly two **logical** workflows",
+        "discovery-design",
+        "delivery-convergence",
+        "AskUserQuestion",
+        "SearchExtraTools(\"workflow\")",
+        "ExecuteExtraTool(\"Workflow\"",
+        ".claude/workflow-runs/<run-id>/state.json",
+        "maxConcurrency: 12",
+        "() => agent(",
+        "Date.now()",
+        "new Date()",
+        "Math.random()",
+    ] {
+        assert!(content.contains(marker), "ultra-adlc 应锁定 {marker}");
+    }
+
+    for profile in ["`fable`", "`opus`", "`sonnet`", "`haiku`"] {
+        assert!(
+            content.contains(profile),
+            "ultra-adlc 应覆盖 profile {profile}"
+        );
+    }
+}
+
+#[test]
+fn test_ultra_adlc_skill_guards_complete_delivery_and_audit() {
+    let content = BUILTIN_SKILLS
+        .iter()
+        .find(|skill| skill.name == "ultra-adlc")
+        .expect("BUILTIN_SKILLS 应含 ultra-adlc")
+        .content;
+
+    for marker in [
+        "There is no",
+        "`partially_complete`",
+        "Completion Assessor",
+        "exactly one new",
+        "100% coverage",
+        "gap-round-N.md",
+        "learning/agent-performance.md",
+        "Only when the assessor verdict is `complete`",
+        "must not receive a success performance record",
+        "Never commit, push, publish, deploy",
+        "Never put a secret, token, password",
+    ] {
+        assert!(content.contains(marker), "ultra-adlc 应锁定 {marker}");
+    }
 }
 
 #[test]

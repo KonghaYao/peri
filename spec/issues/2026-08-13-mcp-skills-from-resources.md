@@ -4,7 +4,7 @@
 **优先级**：中
 **类型**：功能
 **创建日期**：2026-08-13
-**来源**：`docs/design/mcp-connector-guide-v2.md` §7（skills 发现与加载）+ MCP SEP-2640 Skills Extension 草案研究
+**来源**：`docs/reference/mcp-ecosystem.md` §7（skills 发现与加载）+ MCP SEP-2640 Skills Extension 草案研究
 **最后核查**：2026-08-13
 
 ## 取代说明（2026-08-13）
@@ -65,7 +65,7 @@ initialize 成功 → list_all_resources()
 
 ### 3. 统一发现（DiscoverSkillsTool 扩展，零新工具）
 
-- `cached_skills` 已是本地 + 远端的聚合缓存，`DiscoverSkillsTool` 搜索范围自然覆盖两者——**不新增任何搜索工具**，避免 N 个 server 产生 N 个碎片搜索入口（`mcp-connector-guide-v2.md` §7.4 已定）。
+- `cached_skills` 已是本地 + 远端的聚合缓存，`DiscoverSkillsTool` 搜索范围自然覆盖两者——**不新增任何搜索工具**，避免 N 个 server 产生 N 个碎片搜索入口（`docs/reference/mcp-ecosystem.md` §7.4）。
 - **分源合并**：McpMiddleware 维护独立的远端注册表（`Arc<RwLock<Vec<SkillMetadata>>>`，连接/断开/重连时增删）；`SkillsMiddleware::before_agent` 在本地扫描结果之上合并该注册表再写缓存——本地扫描不再无条件覆盖远端。
 - **与 ToolSearch 的关系（重叠审查结论）**：skill 不是工具，**不进 ToolSearch 面**（`SearchExtraTools` 只搜 deferred 工具，MCP 桥接工具仍按现状经 tool search 发现，两者语义不冲突）。发现/加载完全复用 `DiscoverSkillsTool` + `SkillTool` + `mcp_read_resource` 三个既有工具，本方案**新增工具数为零**。
 - server 自带的 skill 搜索类工具**保持既有桥接行为，不搞排除特例**——它作为普通 `mcp__` 工具经 tool search 可见是工具桥接的统一契约，与 skills 系统无关。

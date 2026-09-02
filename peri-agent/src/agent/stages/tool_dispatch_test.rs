@@ -618,3 +618,56 @@ async fn test_handle_consecutive_failures_success_resets() {
         "成功执行后失败计数器应重置为 0"
     );
 }
+
+#[tokio::test]
+async fn test_resolution_error_emits_tool_started_and_ended() {
+    use crate::agent::events_v2::{EventBus, RenderEvent};
+    use std::sync::Arc;
+
+    let (bus, mut handles) = EventBus::new(Default::default());
+    let turn = TurnContext::new(Arc::from("/tmp"), Arc::new(CancellationToken::new()));
+    let transcript = Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
+    let queue = MessageQueue::new();
+    let ctx = StageContext::builder(turn, transcript, queue)
+        .with_event_bus(Arc::new(bus))
+        .build();
+
+    let reasoning = Reasoning::with_tools(
+        "",
+        vec![ToolCall::new("missing-1", "NotARealTool", json!({}))],
+    );
+    let catalog = ctx
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&ctx.runtime.tools.read())
+        .unwrap();
+    dispatch_tools(&ctx, &reasoning, &catalog, &CancellationToken::new())
+        .await
+        .expect("unknown tool should settle as error");
+
+    let mut started = false;
+    let mut ended = false;
+    while let Some(event) = handles.try_render() {
+        match event {
+            RenderEvent::ToolStarted {
+                tool_call_id, name, ..
+            } => {
+                assert_eq!(tool_call_id, "missing-1");
+                assert_eq!(name, "NotARealTool");
+                started = true;
+            }
+            RenderEvent::ToolEnded {
+                tool_call_id,
+                is_error,
+                ..
+            } => {
+                assert_eq!(tool_call_id, "missing-1");
+                assert!(is_error);
+                ended = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(started, "resolution error must emit ToolStarted");
+    assert!(ended, "resolution error must emit ToolEnded");
+}

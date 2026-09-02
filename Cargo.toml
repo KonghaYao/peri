@@ -104,4 +104,4 @@ axum = { version = "0.8.9", features = ["ws"] }
 # 详见 docs/review/2026-06-16-peri-web-pty-windows-conpty-bug.md
 portable-pty = "0.9"
 tokio-tungstenite = "0.30"
-serial_test = "4.0.1"
+serial_test = { version = "4.0.1", features = ["async"] }

@@ -25,7 +25,7 @@ pub struct WorkflowRun {
     pub script_preview: String,
     pub status: WorkflowRunStatus,
     pub started_at: std::time::Instant,
-    pub child_handle: tokio::task::JoinHandle<()>,
+    pub child_handle: Option<tokio::task::JoinHandle<()>>,
     pub kill_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -65,6 +65,10 @@ impl WorkflowTaskRegistry {
             .count()
     }
 
+    pub fn reserve(&self, run: WorkflowRun) -> Result<(), RegistryError> {
+        self.register(run)
+    }
+
     /// 注册一个新的 workflow run，超出并发限制返回错误。
     pub fn register(&self, run: WorkflowRun) -> Result<(), RegistryError> {
         let mut runs = self.runs.lock();
@@ -77,6 +81,14 @@ impl WorkflowTaskRegistry {
         }
         runs.insert(run.run_id.clone(), run);
         Ok(())
+    }
+
+    pub fn attach_child(&self, run_id: &str, child_handle: tokio::task::JoinHandle<()>) {
+        if let Some(run) = self.runs.lock().get_mut(run_id) {
+            run.child_handle = Some(child_handle);
+        } else {
+            child_handle.abort();
+        }
     }
 
     /// 标记 workflow 完成，更新状态（保留历史记录），并发送通知。

@@ -443,11 +443,11 @@ impl Middleware for HookMiddleware {
                     // System 消息会被 anthropic/openai invoke hoist 到 system prompt 顶部,
                     // 违反 frozen_system_prompt 稳定性（第一优先级）。
                     // （与 goal_middleware.rs / compact_v2.rs::re_inject_v2 注入路径一致）
-                    // 走 v2 MessageQueue Info kind → Receive 阶段统一消费。
+                    // 走 v2 MessageQueue Defer kind → Receive 阶段统一消费并唤醒续跑。
                     let feedback = format_stop_block_feedback_no_wrapper(&reason, count);
                     let reminder = format!("<system-reminder>\n{}\n</system-reminder>", feedback);
-                    state.v2_queue().push(QueuedMessage::new(
-                        MessageKind::Info,
+                    state.enqueue_v2_message(QueuedMessage::new(
+                        MessageKind::Defer,
                         MessageSource::StopHookFeedback,
                         BaseMessage::human(MessageContent::text(reminder)),
                     ));

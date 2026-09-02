@@ -1,6 +1,10 @@
 # Perihelion 测试规范
 
-> 最后核对：2026-08-22
+> 状态：现行标准
+>
+> 本文是测试范围、证据与命令的单一事实源；具体架构测试入口仍以相邻代码和
+> `docs/standards/architecture-contracts.md` 的 Verify 项为准。
+
 > 根 workspace 范围以根 `Cargo.toml` 与 `cargo metadata --no-deps` 为准；submodule 与独立项目必须进入各自目录执行其本地命令。
 
 ---

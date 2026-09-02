@@ -102,6 +102,7 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "ImageMiddleware",
     "FilesystemMiddleware",
     "GitAttributionMiddleware",
+    "GitWatchMiddleware",
     "TerminalMiddleware",
     "WebMiddleware",
     "TodoMiddleware",

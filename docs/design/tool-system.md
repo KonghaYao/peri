@@ -1,6 +1,9 @@
-# peri-agent v2 工具系统架构设计
+# 工具系统架构设计
 
-> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v1.6（2026-08-25：动态提示贡献改为 `before_agent` 后按模型请求读取）
+> 状态：现行设计
+>
+> 工具可见性与执行边界的强制不变量见 ARC-TOOLS-001；运行时事实源为
+> session-local tool view、`peri-agent` dispatch 与 `peri-middlewares` ToolSearch。
 
 ## 1. 设计原则
 

@@ -10,7 +10,7 @@
 ## 背景
 
 Q1-Q10 实现偏差裁定评审后，advisor-consultation 对其中四项提出反对/质疑。
-本记录归档复审结论与执行结果；设计文档 `docs/design/meta-harness-design.md`
+本记录归档复审结论与执行结果；设计文档 `docs/design/meta-harness.md`
 已同步（状态行 + 2.4/3.1/3.3/2.7/2.8）。
 
 ## 复审结论
@@ -72,7 +72,7 @@ Q1-Q10 实现偏差裁定评审后，advisor-consultation 对其中四项提出�
 - `peri-acp/src/prompt/mod.rs` — Layer 去除 + SectionContent 枚举
 - `peri-acp/src/prompt/prompt_test.rs` — 测试同步
 - `peri-acp/src/provider/store_test.rs` — Q5 契约测试 + CwdGuard
-- `docs/design/meta-harness-design.md` — 2.4/3.1/3.3/2.7/2.8/状态行同步
+- `docs/design/meta-harness.md` — 2.4/3.1/3.3/2.7/2.8/状态行同步
 
 ## 状态变更记录
 

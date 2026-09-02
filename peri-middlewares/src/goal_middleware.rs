@@ -109,7 +109,7 @@ impl Middleware for GoalMiddleware {
         // （与 hooks/middleware.rs stop_hook_feedback、compact_v2.rs::re_inject_v2 注入路径一致）
         // 走 v2 MessageQueue Defer kind → Receive 阶段 drain_all 消费。
         let reminder = format!("<system-reminder>\n{}\n</system-reminder>", template);
-        state.v2_queue().push(QueuedMessage::new(
+        state.enqueue_v2_message(QueuedMessage::new(
             MessageKind::Defer,
             MessageSource::GoalSteering,
             BaseMessage::human(MessageContent::text(reminder)),

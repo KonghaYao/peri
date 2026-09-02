@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::dispatch::prompt::extract_prompt_params;
+use crate::dispatch::prompt::extract_and_validate_run_prompt_params;
 pub use crate::session::state_builders::{
     apply_profile_effort, apply_thinking_effort, build_config_options, build_mode_state,
     parse_permission_mode,
@@ -107,6 +107,8 @@ pub(crate) struct SessionState {
     /// 与 pool 取出/归还同一临界区）。`session/cancel` 取消的是续跑本身时
     /// 排除置位 armed——否则会形成"取消续跑 → 再续跑"的自动链式续跑。
     continuation_in_flight: bool,
+    /// 下一次 continuation dispatch 按 MQ steering 校验（非 SubAgentComplete）。
+    continuation_mq_steering_pending: bool,
     /// 多读者 + 单 writer lease：session 创建方（writer）唯一可提交输入/取消。
     ///
     /// 协议无客户端身份字段（`clientId` 属协议级扩展，另立 issue），writer 恒为
@@ -878,7 +880,7 @@ pub(crate) async fn dispatch_prompt_turn(
     // 的 bgResults 在 run_session_loop 内 push Defer——挂起注入路径不携带
     // bgResults（该 RPC 仅 stdio 会话使用，allow_await_wake=false 永不挂起）。
     if !is_continuation && cfg.session_manager.is_idle_suspended(&prompt_session_id) {
-        let (_, content, _attachments) = extract_prompt_params(&params)?;
+        let (_, content, _attachments) = extract_and_validate_run_prompt_params(&params)?;
         if let Some(inbox) = cfg.session_manager.session_inbox_for(&prompt_session_id) {
             inbox.handle().push_prompt(
                 peri_acp_types::session::MessageSource::UserInput,
@@ -911,16 +913,19 @@ pub(crate) async fn dispatch_prompt_turn(
         let dispatchable = {
             let sessions = sessions.lock().await;
             sessions.get(&prompt_session_id).is_some_and(|state| {
-                let has_pending = cfg
+                let (has_subagent, has_mq) = cfg
                     .session_manager
                     .get_session(&prompt_session_id)
                     .map(|session| {
-                        session.v2_message_queue.has_pending_defer(
-                            &peri_acp_types::session::MessageSource::SubAgentComplete,
+                        (
+                            session.v2_message_queue.has_pending_defer(
+                                &peri_acp_types::session::MessageSource::SubAgentComplete,
+                            ),
+                            session.v2_message_queue.needs_mq_continuation(),
                         )
                     })
-                    .unwrap_or(false);
-                continuation::continuation_dispatchable(state, epoch, has_pending)
+                    .unwrap_or((false, false));
+                continuation::continuation_dispatchable(state, epoch, has_subagent, has_mq)
             })
         };
         if !dispatchable {
@@ -933,6 +938,7 @@ pub(crate) async fn dispatch_prompt_turn(
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
             state.continuation_in_flight = true;
+            state.continuation_mq_steering_pending = false;
         }
     }
 
@@ -1141,14 +1147,37 @@ pub(crate) async fn dispatch_prompt_turn(
     // lock — see the take-out comment above) and clear the continuation in-flight
     // marker. Both writes are unconditional after run_prompt returns, so every
     // non-panic path restores the pool and clears the marker.
-    {
+    let mq_steering_reschedule = {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
             if let Ok(mutex) = Arc::try_unwrap(pool_arc) {
                 state.agent_pool = mutex.into_inner();
             }
             state.continuation_in_flight = false;
+            let pending = state.continuation_mq_steering_pending;
+            let needs_mq = cfg
+                .session_manager
+                .get_session(&prompt_session_id)
+                .map(|session| session.v2_message_queue.needs_mq_continuation())
+                .unwrap_or(false);
+            if pending && !needs_mq {
+                state.continuation_mq_steering_pending = false;
+            }
+            pending && needs_mq
+        } else {
+            false
         }
+    };
+    if mq_steering_reschedule {
+        let _ = cont_tx.send(crate::session::executor::ContinuationRequest {
+            session_id: prompt_session_id.clone(),
+            kind: peri_acp_types::tasks::BgTaskKind::Agent,
+            mq_steering: true,
+        });
+        tracing::debug!(
+            session_id = %prompt_session_id,
+            "continuation: rescheduled MQ steering after in-flight turn ended"
+        );
     }
 
     result

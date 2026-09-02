@@ -297,12 +297,14 @@ pub enum ObserveEvent {
         output: String,
         input_tokens: u64,
         output_tokens: u64,
-        /// Prompt cache 创建/读取的 token 数（v2 之前丢失，导致 TUI cache 命中率始终 0%）
+        /// Prompt cache 创建/读取的 token 数。
         ///
-        /// 0 表示 Provider 不支持 caching 或未命中；与 `TokenUsage::cache_creation_input_tokens`
-        /// 对齐（None 用 0 占位，因为 Provider 不支持时本就是 0）。
-        cache_creation_input_tokens: u64,
-        cache_read_input_tokens: u64,
+        /// `Some(0)` 表示 provider 明确报告本次未命中；`None` 表示 provider
+        /// 未提供该统计。二者不得折叠，否则 turn 级 coverage 会漏掉零命中请求。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input_tokens: Option<u64>,
         /// Provider 返回的请求 ID（用于关联日志/遥测；None 表示 Provider 未返回）
         request_id: Option<String>,
     },
@@ -796,17 +798,10 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             usage: Some(peri_model::TokenUsage {
                 input_tokens: input_tokens as u32,
                 output_tokens: output_tokens as u32,
-                // 0 表示 Provider 不支持 caching；保留 Option 让下游区分"不支持" vs "未命中"
-                cache_creation_input_tokens: if cache_creation_input_tokens > 0 {
-                    Some(cache_creation_input_tokens as u32)
-                } else {
-                    None
-                },
-                cache_read_input_tokens: if cache_read_input_tokens > 0 {
-                    Some(cache_read_input_tokens as u32)
-                } else {
-                    None
-                },
+                cache_creation_input_tokens: cache_creation_input_tokens
+                    .and_then(|tokens| tokens.try_into().ok()),
+                cache_read_input_tokens: cache_read_input_tokens
+                    .and_then(|tokens| tokens.try_into().ok()),
             }),
             stop_reason: None,
             request_id,

@@ -35,6 +35,7 @@ pub mod subagent;
 pub mod tool_catalog;
 pub mod transcript;
 pub mod turn;
+pub mod workflow_completion;
 
 pub use config::{PermissionMode, SessionConfig, ThinkingConfig};
 /// MessageFlags 已下沉 peri-acp-types（store 契约），此处 re-export 保持兼容。

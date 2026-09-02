@@ -1,7 +1,7 @@
 # MetaHarness — 系统提示词自定义与 middleware 卸载
 
 > 面向使用者的特性说明。内部机制与设计决策见
-> `docs/design/meta-harness-design.md`（单一事实源）；文档站版本见
+> `docs/design/meta-harness.md`（单一事实源）；文档站版本见
 > `peri-cool/src/content/docs/docs/features/meta-harness.mdx`。
 
 MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
@@ -63,7 +63,7 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 `McpMiddleware`、`WorkflowMiddleware`、`ToolSearch`、`ArtifactMiddleware`、
 `LspMiddleware`、`GoalMiddleware`
 
-关闭语义（波 4 落地后）：
+关闭语义：
 
 - 关闭 = middleware 实例不进链：工具、钩子、提示词贡献一并消失；
 - **审批与提问独立**：关闭 `PermissionMiddleware` 会移除审批钩子与
@@ -107,10 +107,10 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 
 关闭 `DefaultSystemPromptMiddleware` + `LangMiddleware` + 其余全部
 middleware（AskUserQuestion 除外）= 系统提示词只剩无持有者的
-15_channel（gate 恒关闭）——"完全纯净"路径（波 4 演进闭环）。
+15_channel（gate 恒关闭）——"完全纯净"路径。
 
 ## 相关文档
 
-- 设计文档（机制与决策单一事实源）：`docs/design/meta-harness-design.md`
+- 设计文档（机制与决策单一事实源）：`docs/design/meta-harness.md`
 - 文档站特性页：`peri-cool/src/content/docs/docs/features/meta-harness.mdx`
-- 示例与安全段落覆盖风险：`spec/issues/2026-08-14-meta-harness-wave3-examples-and-safety.md`
+- System Prompt 冻结、缓存与安全边界：`docs/design/system-prompt.md`

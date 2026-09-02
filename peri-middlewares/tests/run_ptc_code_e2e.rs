@@ -1,28 +1,23 @@
-use std::{
-    ffi::OsString,
-    path::Path,
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
-};
+use std::{ffi::OsString, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use peri_agent::tools::{
     BaseTool, EffectiveToolCall, EffectiveToolDefinition, EffectiveToolDispatcher,
     EffectiveToolError, ToolContext,
 };
+use peri_middlewares::process_env::{self, EnvLockFile};
 use peri_middlewares::ptc::RunPtcCodeTool;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
 struct HomeGuard {
-    _lock: MutexGuard<'static, ()>,
+    _lock: EnvLockFile,
     previous: Option<OsString>,
 }
 
 impl HomeGuard {
     fn set(home: &Path) -> Self {
-        let lock = HOME_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let lock = process_env::lock().expect("process env lock");
         let previous = std::env::var_os("HOME");
         std::env::set_var("HOME", home);
         Self {

@@ -207,8 +207,8 @@ fn test_observe_event_llm_call_end_id_extraction() {
         output: "test output".to_string(),
         input_tokens: 500,
         output_tokens: 200,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
         request_id: None,
     };
     assert_eq!(event.turn_id(), turn_id);
@@ -459,8 +459,8 @@ async fn test_event_bus_observe_no_subscriber_returns_zero() {
         output: "test output".to_string(),
         input_tokens: 0,
         output_tokens: 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
         request_id: None,
     });
     // handles 仍持有 receiver，所以至少 1 个订阅者

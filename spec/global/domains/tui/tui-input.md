@@ -74,7 +74,7 @@ FocusLayer 优先级（focus_router.rs，active_layer() 判定）：
 │   > peri-tui/src/kit/...                                                     │
 │     peri-agent/src/...                                                       │
 │     peri-acp/src/...                                                         │
-│     docs/architecture.md                                                     │
+│     docs/design/architecture.md                                              │
 │   ────────────────────────────────────────────────────────────────────────   │
 │   > 请阅读 @src/                                                             │
 │   ────────────────────────────────────────────────────────────────────────   │

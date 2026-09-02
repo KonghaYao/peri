@@ -2,7 +2,7 @@
 
 **状态**：Active（Slice 2-5 持续追加；各决策以代码事实为准）
 **创建日期**：2026-08-10
-**规格**：`docs/design/tui-chat-message-flow-style.md`（§6/§7/§8/§10/§11/§15）
+**规格**：`docs/design/tui-chat-workbench.md`（§6/§7/§8/§10/§11/§15）
 **前置**：`spec/archive-issues/tui-general/2026-08-10-chat-redesign-slice1-data-gates.md`（Closed，5 项数据门）
 **最后核查**：2026-08-11
 

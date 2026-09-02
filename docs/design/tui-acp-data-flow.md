@@ -1,6 +1,6 @@
 # TUI 与 ACP 数据流
 
-> 最后核对：2026-09-01
+> 状态：现行设计
 
 ## 概述
 
@@ -105,10 +105,10 @@ graph TB
 
 自上而下，不反向：
 
-- **peri-tui** — Atom 响应式组件 + async consumer 任务 + ratatui-kit 渲染。类型依赖包括 `peri-acp` / `peri-acp-types`（DTO）、`ratatui-kit`（组件库）+ `peri-theme`（主题）；`peri-middlewares` / `peri-resources` 为 3.0 批 3 豁免清单中的宿主装配点（launch.rs / main.rs / cli_print.rs 构造用），属直接依赖。运行时通过 MpscTransport（进程内内存通道）与 peri-acp 通信。代码禁止 `use peri_agent::`（引用数为 0）——pre-commit 钩子阻断。TuiRenderUnit 定义在 `peri-tui/src/kit/tui_render_unit.rs`，是 TUI 内部类型。
-- **peri-acp** — 会话管理 + 事件路由器 + 配置快照。依赖 `peri-acp-types`、`peri-agent`、`peri-middlewares`。系统唯一的"全知"层。事件路由器将 ExecutorEvent 转换为 AcpNotification，TUI 侧 kit notifier 解码并写入 Atom。
-- **peri-agent** — Session → ReAct 循环 → 事件产出。不依赖 `peri-acp-types`。Agent 运行时完全不知道 ViewModel 等前端概念的存在。
-- **peri-acp-types** — DTO 定义层（实际依赖不止 serde，含 peri-model、tokio、chrono 等）。包含各事件对应的 data 结构体定义、各类摘要结构。不包含 ViewModel/TuiRenderUnit 类型（该类型定义在 peri-tui 内部）。不包含命令枚举——事件名是字符串，不需要类型化。TUI 和 ACP 的共同数据结构基础。
+- **peri-tui** — Atom 响应式组件 + async consumer 任务 + ratatui-kit 渲染。类型依赖包括 `peri-acp` / `peri-acp-types`（DTO）、`ratatui-kit` 与 `peri-theme`；`launch.rs` / `main.rs` / `cli_print.rs` 作为部署组合根可装配 middleware/resources，但用户交互执行仍只经 ACP transport。代码禁止 `use peri_agent::`；`TuiRenderUnit` 只定义在 TUI 内部。
+- **peri-acp** — ACP host、transport、session 定位与协议映射层。它把客户端请求交给 Agent 执行入口，并把 canonical Agent 事件协议化；不拥有 ReAct、工具策略或 TUI ViewModel。
+- **peri-agent** — Session → RCRA 循环 → canonical 事件产出。可依赖 `peri-acp-types` 中与协议实现解耦的契约类型，但完全不知道 ViewModel、Atom 与渲染队列。
+- **peri-acp-types** — 跨 crate 契约类型层，承载 identity、事件、命令、交互与端口 DTO；不包含 `TuiRenderUnit` 或 TUI 状态。
 
 ---
 
@@ -416,11 +416,6 @@ append_text("2", message_id="msg_B")  → text="12", last_id 不变 → 不 flus
 start_tool(Bash)                      → flush: AssistantText{text_end:2, reason_end:X} → Tool{1}
 ```
 
-> **2026-07-08 重构（三阶段）**：
-> (1) 旧版 `text: String` + `tool_cards: Vec<ToolCardAccumulator>` → 单一气泡 + 全部工具 → 交错丢失
-> (2) `TurnSegment` 枚举 + `flush_text_segment()` → text 按边界分离，但 reasoning 仍全量塞入首段
-> (3) `AssistantText` 段增加 `reasoning_end_byte` → 每段气泡取自身推理切片，工具/消息边界后的 reasoning 归入对应气泡
-> **动机**：ACP 协议自带消息标识，变体推断是冗余的启发式。
 
 ### 5.2.1 视图派生与增量 VM 缓存（sync_cache）
 
@@ -926,7 +921,7 @@ INPUT_BUFFER 清空
 ## 13. 关键设计原则
 
 1. **Agent 不感知 UI**：Agent 运行时仅产出 `ExecutorEvent`，完全不知道 ViewModel、Atom、渲染队列的存在
-2. **TUI 不引入 Agent 类型**：TUI 只消费 `TuiRenderUnit`，代码禁止 `use peri_agent::`（引用数为 0）—— pre-commit hook 阻断。注意 `peri-middlewares` / `peri-resources` 属 3.0 批 3 豁免清单的宿主装配点，不在此列
+2. **TUI 不引入 Agent 类型**：TUI 只消费 ACP DTO 并派生 `TuiRenderUnit`，代码禁止 `use peri_agent::`；部署组合根可装配 `peri-middlewares` / `peri-resources`，但交互请求不得绕过 ACP
 3. **ACP 层是唯一全知层**：唯一同时依赖 `peri-agent` + `peri-middlewares` + `peri-tui` 的层，负责协议适配
 4. **All events → Atom → Render**：所有数据变更走统一事件渠道 → atom 写入 → 渲染消费者读取，禁止旁路
 5. **BridgeState 单一事实源**：`VIEW_MODELS` atom 仅通过 `push_view_models` 写入，所有状态变更必须经过 BridgeState

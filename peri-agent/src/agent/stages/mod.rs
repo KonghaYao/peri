@@ -108,6 +108,8 @@ pub struct AsyncContext {
     /// 注入 inbox（Prompt + wake），让挂起的 loop 立即醒来消费，而不是在
     /// per-session prompt lock 上阻塞至当前 turn 完成。
     pub idle_suspended_flag: Option<Arc<AtomicBool>>,
+    /// 与 session inbox 同源的 push 句柄；middleware 经此入队以唤醒 `await_wake`。
+    pub inbox_handle: Option<crate::agent::session::InboxHandle>,
 }
 
 // ─── 阶段间共享上下文 ───────────────────────────────────────────────────────
@@ -186,6 +188,7 @@ impl StageContext {
                 idle_inbox: None,
                 idle_should_wait: None,
                 idle_suspended_flag: None,
+                inbox_handle: None,
             },
             recall_buffer: rbuf,
         }
@@ -232,6 +235,7 @@ impl StageContext {
                 idle_inbox: None,
                 idle_should_wait: None,
                 idle_suspended_flag: None,
+                inbox_handle: None,
             },
         }
     }
@@ -389,6 +393,11 @@ impl StageContextBuilder {
 
     pub fn with_idle_inbox(mut self, inbox: Arc<crate::agent::session::SessionInbox>) -> Self {
         self.async_ctx.idle_inbox = Some(inbox);
+        self
+    }
+
+    pub fn with_inbox_handle(mut self, handle: crate::agent::session::InboxHandle) -> Self {
+        self.async_ctx.inbox_handle = Some(handle);
         self
     }
 
@@ -600,173 +609,198 @@ where
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut loop_state = LoopState::default();
     let mut semantic_iterations = 0usize;
-    // await_wake 在主 agent idle 时启用，反复等待异步事件续跑（cron/bg/workflow）。
-    // idle_should_wait probe 检 active_count>0，保证无挂起任务时不会永久阻塞。
+    let mut mq_steering_tail_passes = 0usize;
+    const MAX_MQ_STEERING_TAIL_PASSES: usize = 8;
 
-    loop {
-        // 检查 cancel
-        if context.session.turn.is_cancelled() {
-            return LoopResult::Interrupted;
-        }
-
-        // ── Receive（循环入口，也是退出判断点）──
-        let receive_out = match run_stage(&context, Stage::Receive, || async {
-            receive::run_receive(ReceiveInput {
-                context: context.clone(),
-            })
-            .await
-        })
-        .await
-        {
-            Ok(out) => out,
-            Err(e) => return e,
-        };
-
-        // 退出判断：队列为空且上一轮无工具调用 → 检查是否该退出。
-        // 工具调用结果写入 transcript 而非队列：has_tool_calls=true 时
-        // consumed_count=0 是正常状态——继续循环让 LLM 处理工具结果。
-        if receive_out.consumed_count == 0 && !loop_state.has_tool_calls {
-            // 竞态保护：退出前再检查一次队列是否有新消息到达
-            if context.session.queue.has_wake_up() {
-                tracing::debug!("Receive: consumed=0 but queue has wake-up, continue");
-                continue;
+    'steering_tail: loop {
+        'rcra: loop {
+            // 检查 cancel
+            if context.session.turn.is_cancelled() {
+                return LoopResult::Interrupted;
             }
 
-            // idle_should_wait 逻辑：队列空 → 如有 idle_inbox 且有未完成异步任务，等异步事件续跑。
-            let should_wait = context
-                .async_ctx
-                .idle_should_wait
-                .as_ref()
-                .map(|probe| probe())
-                .unwrap_or(false);
-            if should_wait {
-                if let Some(inbox) = &context.async_ctx.idle_inbox {
-                    tracing::debug!("Receive: queue empty, awaiting wake (idle_should_wait=true)");
-                    // 置 idle-suspended 标志：宿主 dispatch_prompt_turn 据此把
-                    // 挂起期间到达的用户 prompt 注入 inbox（而非在 prompt lock
-                    // 上阻塞至当前 turn 完成——bg 任务活跃时可能长达数分钟）。
-                    if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                        flag.store(true, Ordering::Release);
-                    }
-                    context.runtime.event_bus.emit_state(
-                        crate::agent::events_v2::StateEvent::TurnSuspended {
-                            turn_id: context.turn_id(),
-                            agent_id: context.session.agent_id,
-                        },
-                    );
-                    let cancel_fut = context.session.turn.cancel_token.cancelled();
-                    tokio::pin!(cancel_fut);
-                    tokio::select! {
-                        _ = inbox.await_wake() => {
-                            // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
-                            // 标志——后续 Receive 会 drain 队列并继续本 turn。
-                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                                flag.store(false, Ordering::Release);
+            // ── Receive（循环入口，也是退出判断点）──
+            let receive_out = match run_stage(&context, Stage::Receive, || async {
+                receive::run_receive(ReceiveInput {
+                    context: context.clone(),
+                })
+                .await
+            })
+            .await
+            {
+                Ok(out) => out,
+                Err(e) => return e,
+            };
+
+            // 退出判断：队列为空且上一轮无工具调用 → 检查是否该退出。
+            // 工具调用结果写入 transcript 而非队列：has_tool_calls=true 时
+            // consumed_count=0 是正常状态——继续循环让 LLM 处理工具结果。
+            if receive_out.consumed_count == 0 && !loop_state.has_tool_calls {
+                // 竞态保护：退出前再检查一次队列是否有新消息到达
+                if context.session.queue.has_wake_up() {
+                    tracing::debug!("Receive: consumed=0 but queue has wake-up, continue");
+                    continue;
+                }
+
+                // idle_should_wait 逻辑：队列空 → 如有 idle_inbox 且有未完成异步任务，等异步事件续跑。
+                let should_wait = context
+                    .async_ctx
+                    .idle_should_wait
+                    .as_ref()
+                    .map(|probe| probe())
+                    .unwrap_or(false);
+                if should_wait {
+                    if let Some(inbox) = &context.async_ctx.idle_inbox {
+                        tracing::debug!(
+                            "Receive: queue empty, awaiting wake (idle_should_wait=true)"
+                        );
+                        // 置 idle-suspended 标志：宿主 dispatch_prompt_turn 据此把
+                        // 挂起期间到达的用户 prompt 注入 inbox（而非在 prompt lock
+                        // 上阻塞至当前 turn 完成——bg 任务活跃时可能长达数分钟）。
+                        if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                            flag.store(true, Ordering::Release);
+                        }
+                        context.runtime.event_bus.emit_state(
+                            crate::agent::events_v2::StateEvent::TurnSuspended {
+                                turn_id: context.turn_id(),
+                                agent_id: context.session.agent_id,
+                            },
+                        );
+                        let cancel_fut = context.session.turn.cancel_token.cancelled();
+                        tokio::pin!(cancel_fut);
+                        tokio::select! {
+                            _ = inbox.await_wake() => {
+                                // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
+                                // 标志——后续 Receive 会 drain 队列并继续本 turn。
+                                if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                    flag.store(false, Ordering::Release);
+                                }
+                                if context.session.turn.is_cancelled() {
+                                    return LoopResult::Interrupted;
+                                }
+                                tracing::debug!(
+                                    turn_id = %context.session.turn.turn_id,
+                                    queue_len_after_wake = context.session.queue.len(),
+                                    "run_react_loop: idle inbox woken, continue to Receive"
+                                );
+                                // 醒来直接 continue 回 Receive——下一轮 Receive 用 drain_all()
+                                // 统一处理所有消息（Prompt + Info + Defer），不再需要 post-wake drain_for_end
+                                continue;
                             }
-                            if context.session.turn.is_cancelled() {
+                            _ = &mut cancel_fut => {
+                                if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                    flag.store(false, Ordering::Release);
+                                }
                                 return LoopResult::Interrupted;
                             }
-                            tracing::debug!(
-                                turn_id = %context.session.turn.turn_id,
-                                queue_len_after_wake = context.session.queue.len(),
-                                "run_react_loop: idle inbox woken, continue to Receive"
-                            );
-                            // 醒来直接 continue 回 Receive——下一轮 Receive 用 drain_all()
-                            // 统一处理所有消息（Prompt + Info + Defer），不再需要 post-wake drain_for_end
-                            continue;
-                        }
-                        _ = &mut cancel_fut => {
-                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                                flag.store(false, Ordering::Release);
-                            }
-                            return LoopResult::Interrupted;
                         }
                     }
                 }
+                if !context.session.queue.is_empty() {
+                    tracing::debug!(
+                        queue_len = context.session.queue.len(),
+                        "run_react_loop: queue has pending messages, continue Receive"
+                    );
+                    continue;
+                }
+                tracing::debug!(
+                    idle_should_wait = should_wait,
+                    queue_len = context.session.queue.len(),
+                    "run_react_loop: exit (queue empty, no idle wait)"
+                );
+                break 'rcra;
             }
+
+            // Receive、队列竞态重试与 idle wake 都不消耗语义迭代预算。只有确实需要
+            // 进入 Compact → Reason → Act 时才检查并推进预算；因此最后一轮 Act 提交
+            // final answer 后，下一次 Receive 仍可作为唯一正常退出入口。
+            if semantic_iterations >= max_iterations {
+                tracing::warn!(
+                    max_iterations,
+                    semantic_iterations,
+                    "ReAct v2 循环达到最大语义迭代次数"
+                );
+                return LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(
+                    max_iterations,
+                ));
+            }
+            semantic_iterations += 1;
+            context.session.turn.advance_step();
+
+            // ── before_agent hooks（首次 Receive 后执行一次）──
+            // RCRA 下 Receive 是唯一队列消费点，消息已通过 drain_all() 写入 transcript，
+            // 此时 before_agent 钩子（SkillPreloadMiddleware / AtMentionMiddleware 等）
+            // 可通过 state.messages() 读取用户输入。
+            // 替代原来在 run_react_loop 外部的 Phase 6.7 调用。
+            if !loop_state.before_agent_has_run {
+                loop_state.before_agent_has_run = true;
+                if let Err(e) = middleware_runner::run_before_agent(&context).await {
+                    tracing::warn!(error = %e, "[v2] before_agent hook failed");
+                }
+            }
+
+            // ── Compact ──
+            // Compact 输出（compacted 标志）当前无调用方：compact 的副作用已直接
+            // 写入 transcript/flags 与事件流，此处仅保留阶段观测与错误传播。
+            if let Err(e) = run_stage(&context, Stage::Compact, || async {
+                compact::run_compact(CompactInput {
+                    context: context.clone(),
+                    has_tool_calls: loop_state.has_tool_calls,
+                })
+                .await
+            })
+            .await
+            {
+                return e;
+            }
+
+            // ── Reason ──
+            let reason_out = match run_stage(&context, Stage::Reason, || async {
+                reason::run_reason(ReasonInput {
+                    context: context.clone(),
+                    has_tool_calls: loop_state.has_tool_calls,
+                })
+                .await
+            })
+            .await
+            {
+                Ok(out) => out,
+                Err(e) => return e,
+            };
+
+            // ── Act ──
+            let act_out = match run_stage(&context, Stage::Act, || async {
+                act::run_act(ActInput {
+                    context: context.clone(),
+                    reasoning: reason_out.reasoning,
+                    catalog: reason_out.catalog,
+                })
+                .await
+            })
+            .await
+            {
+                Ok(out) => out,
+                Err(e) => return e,
+            };
+
+            loop_state.has_tool_calls = act_out.has_tool_calls;
+            // RCRA：无论 has_tool_calls 是 true 或 false，统一回 Receive 开始新一轮迭代
+            continue;
+        }
+
+        if mq_steering_tail_passes < MAX_MQ_STEERING_TAIL_PASSES
+            && context.session.queue.needs_mq_continuation()
+        {
+            mq_steering_tail_passes += 1;
+            loop_state.has_tool_calls = false;
             tracing::debug!(
-                idle_should_wait = should_wait,
+                pass = mq_steering_tail_passes,
                 queue_len = context.session.queue.len(),
-                "run_react_loop: exit (queue empty, no idle wait)"
+                "run_react_loop: MQ steering tail re-entry"
             );
-            return LoopResult::Completed;
+            continue 'steering_tail;
         }
-
-        // Receive、队列竞态重试与 idle wake 都不消耗语义迭代预算。只有确实需要
-        // 进入 Compact → Reason → Act 时才检查并推进预算；因此最后一轮 Act 提交
-        // final answer 后，下一次 Receive 仍可作为唯一正常退出入口。
-        if semantic_iterations >= max_iterations {
-            tracing::warn!(
-                max_iterations,
-                semantic_iterations,
-                "ReAct v2 循环达到最大语义迭代次数"
-            );
-            return LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(
-                max_iterations,
-            ));
-        }
-        semantic_iterations += 1;
-        context.session.turn.advance_step();
-
-        // ── before_agent hooks（首次 Receive 后执行一次）──
-        // RCRA 下 Receive 是唯一队列消费点，消息已通过 drain_all() 写入 transcript，
-        // 此时 before_agent 钩子（SkillPreloadMiddleware / AtMentionMiddleware 等）
-        // 可通过 state.messages() 读取用户输入。
-        // 替代原来在 run_react_loop 外部的 Phase 6.7 调用。
-        if !loop_state.before_agent_has_run {
-            loop_state.before_agent_has_run = true;
-            if let Err(e) = middleware_runner::run_before_agent(&context).await {
-                tracing::warn!(error = %e, "[v2] before_agent hook failed");
-            }
-        }
-
-        // ── Compact ──
-        // Compact 输出（compacted 标志）当前无调用方：compact 的副作用已直接
-        // 写入 transcript/flags 与事件流，此处仅保留阶段观测与错误传播。
-        if let Err(e) = run_stage(&context, Stage::Compact, || async {
-            compact::run_compact(CompactInput {
-                context: context.clone(),
-                has_tool_calls: loop_state.has_tool_calls,
-            })
-            .await
-        })
-        .await
-        {
-            return e;
-        }
-
-        // ── Reason ──
-        let reason_out = match run_stage(&context, Stage::Reason, || async {
-            reason::run_reason(ReasonInput {
-                context: context.clone(),
-                has_tool_calls: loop_state.has_tool_calls,
-            })
-            .await
-        })
-        .await
-        {
-            Ok(out) => out,
-            Err(e) => return e,
-        };
-
-        // ── Act ──
-        let act_out = match run_stage(&context, Stage::Act, || async {
-            act::run_act(ActInput {
-                context: context.clone(),
-                reasoning: reason_out.reasoning,
-                catalog: reason_out.catalog,
-            })
-            .await
-        })
-        .await
-        {
-            Ok(out) => out,
-            Err(e) => return e,
-        };
-
-        loop_state.has_tool_calls = act_out.has_tool_calls;
-        // RCRA：无论 has_tool_calls 是 true 或 false，统一回 Receive 开始新一轮迭代
-        continue;
+        return LoopResult::Completed;
     }
 }
 

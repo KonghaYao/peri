@@ -100,5 +100,5 @@ TurnDone / SessionReplay / TurnInterrupted 等多处 handler 重置 `last_pushed
 - `peri-tui/src/kit/acp_events.rs`（核心实现 + 单元测试）
 - `peri-tui/src/kit/acp_bridge.rs`（Bash tick 门控 + BridgeState 重置）
 
-**设计文档**：`docs/superpowers/specs/2026-07-19-streaming-mode-config-design.md`
-**实现计划**：`docs/superpowers/plans/2026-07-19-streaming-mode-config.md`
+**历史设计**：原过程 spec 已删除；本归档 issue 与 Git 历史保留执行语境
+**历史实现计划**：过程计划已删除；本归档 issue 与 Git 历史保留执行语境

@@ -91,7 +91,7 @@ impl Middleware for TodoMiddleware {
                     // System 消息会被 invoke hoist 到 system prompt 顶部，污染 frozen_system_prompt。
                     // （与 goal_middleware.rs / hooks/middleware.rs 注入路径一致）
         let reminder = format!("<system-reminder>\n{}\n</system-reminder>", template);
-        state.v2_queue().push(QueuedMessage::new(
+        state.enqueue_v2_message(QueuedMessage::new(
             MessageKind::Defer,
             MessageSource::TodoSteering,
             BaseMessage::human(MessageContent::text(reminder)),

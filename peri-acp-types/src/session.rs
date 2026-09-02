@@ -144,13 +144,75 @@ impl ExecutionFailure {
     }
 }
 
+/// 清洗可能进入用户可见边界的错误文本。
+///
+/// 遮蔽 bearer token、常见凭据赋值、URL userinfo/query，并按 Unicode 字符边界限长。
+/// 该函数不是通用 secret scanner，原始 provider/script body 仍不得直接序列化。
+pub fn sanitize_public_error(input: &str, max_chars: usize) -> String {
+    let sanitized = truncate_chars(redact_public_error(input).trim(), max_chars);
+    if sanitized.is_empty() && max_chars > 0 {
+        truncate_chars(EXECUTION_FAILURE_FALLBACK_MESSAGE, max_chars)
+    } else {
+        sanitized
+    }
+}
+
 /// 清洗可能进入客户端 wire 的 provider 错误文本。
 ///
 /// 仅保留诊断原意，遮蔽 bearer token、常见凭据赋值和 URL query；最终输出由
 /// [`ExecutionFailure::new`] 统一限制长度。该函数不是通用 secret scanner，
 /// 原始 provider body 仍不得直接序列化。
 fn redact_public_error(input: &str) -> String {
-    redact_secret_fields(&redact_url_queries(input))
+    redact_bearer_tokens(&redact_secret_fields(&redact_url_queries(input)))
+}
+
+fn redact_bearer_tokens(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut copied = 0;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if !starts_with_ascii_case_insensitive(bytes, index, b"bearer")
+            || (index > 0 && bytes[index - 1].is_ascii_alphanumeric())
+        {
+            index += input[index..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+        let mut value_start = index + b"bearer".len();
+        if !bytes.get(value_start).is_some_and(u8::is_ascii_whitespace) {
+            index = value_start;
+            continue;
+        }
+        while bytes.get(value_start).is_some_and(u8::is_ascii_whitespace) {
+            value_start += 1;
+        }
+        let value_end = bytes[value_start..]
+            .iter()
+            .position(|byte| byte.is_ascii_whitespace() || b",;)}]\"'<>".contains(byte))
+            .map_or(bytes.len(), |offset| value_start + offset);
+        output.push_str(&input[copied..value_start]);
+        output.push_str("[redacted]");
+        copied = value_end;
+        index = value_end;
+    }
+
+    output.push_str(&input[copied..]);
+    output
+}
+
+fn url_scheme_end(bytes: &[u8], index: usize) -> Option<usize> {
+    if !bytes.get(index)?.is_ascii_alphabetic() {
+        return None;
+    }
+    let mut cursor = index + 1;
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    {
+        cursor += 1;
+    }
+    (bytes.get(cursor..cursor + 3) == Some(b"://")).then_some(cursor)
 }
 
 fn redact_url_queries(input: &str) -> String {
@@ -160,25 +222,34 @@ fn redact_url_queries(input: &str) -> String {
     let mut index = 0;
 
     while index < bytes.len() {
-        let is_url = starts_with_ascii_case_insensitive(bytes, index, b"http://")
-            || starts_with_ascii_case_insensitive(bytes, index, b"https://");
-        if !is_url {
+        let Some(scheme_end) = url_scheme_end(bytes, index) else {
             index += input[index..].chars().next().map_or(1, char::len_utf8);
             continue;
-        }
-
+        };
         let end = bytes[index..]
             .iter()
             .position(|byte| byte.is_ascii_whitespace() || b"\"'<>)]}".contains(byte))
             .map_or(bytes.len(), |offset| index + offset);
-        let Some(query_offset) = bytes[index..end].iter().position(|byte| *byte == b'?') else {
-            index = end;
-            continue;
-        };
-        let query = index + query_offset;
-        output.push_str(&input[copied..=query]);
-        output.push_str("[redacted]");
-        copied = end;
+        let authority_start = scheme_end + 3;
+        let authority_end = bytes[authority_start..end]
+            .iter()
+            .position(|byte| matches!(byte, b'/' | b'?' | b'#'))
+            .map_or(end, |offset| authority_start + offset);
+        if let Some(userinfo_offset) = bytes[authority_start..authority_end]
+            .iter()
+            .rposition(|byte| *byte == b'@')
+        {
+            let userinfo_end = authority_start + userinfo_offset;
+            output.push_str(&input[copied..authority_start]);
+            output.push_str("[redacted]@");
+            copied = userinfo_end + 1;
+        }
+        if let Some(query_offset) = bytes[index..end].iter().position(|byte| *byte == b'?') {
+            let query = index + query_offset;
+            output.push_str(&input[copied..=query]);
+            output.push_str("[redacted]");
+            copied = end;
+        }
         index = end;
     }
 
@@ -189,9 +260,14 @@ fn redact_url_queries(input: &str) -> String {
 fn redact_secret_fields(input: &str) -> String {
     const KEYS: &[&[u8]] = &[
         b"authorization",
+        b"aws_access_key_id",
         b"api_key",
         b"apikey",
+        b"client_secret",
+        b"connection_string",
+        b"credential",
         b"password",
+        b"private_key",
         b"secret",
         b"token",
         b"key",
@@ -531,6 +607,11 @@ impl MessageQueue {
             .lock()
             .iter()
             .any(|m| m.kind == MessageKind::Defer && &m.source == source)
+    }
+
+    /// 是否仍需在本 session 内消费 MQ（含 Info / Defer / Prompt）。
+    pub fn needs_mq_continuation(&self) -> bool {
+        !self.is_empty()
     }
 
     /// 队列是否为空

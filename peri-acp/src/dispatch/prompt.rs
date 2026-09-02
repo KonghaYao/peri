@@ -12,8 +12,8 @@ use crate::transport::types::AcpError;
 /// 解析 stdio/ACP 客户端 `session/prompt` 的 `prompt` 字段（agent-client-protocol-
 /// schema `PromptRequest` 的 wire 形态：`prompt: Vec<ContentBlock>`，外部封装
 /// camelCase，block 内 `type` 判别）为 peri 的 [`MessageContent`]——与 TUI/notify
-/// 路径 `message.content` 形态对齐（批 3 §7 #1/#2 合并方向：以 run_prompt 为
-/// 基座、兼容 stdio 输入）。
+/// 路径 `message.content` 形态对齐。`extract_prompt_params` 为单一事实源；
+/// `run_prompt` / idle 挂起注入经 [`extract_and_validate_run_prompt_params`] 复用。
 ///
 /// 转换规则与迁移前 `host/stdio/session/prompt.rs` 一致：
 /// - `{"type":"text","text":...}` → Text block；
@@ -50,11 +50,32 @@ pub(crate) fn prompt_blocks_to_content(blocks: &[Value]) -> MessageContent {
     }
 }
 
+/// Merge top-level `attachments` (wire image blocks) into [`MessageContent`].
+/// Clients may send images only in `attachments` instead of `message.content` blocks.
+fn merge_attachments_into_content(
+    content: MessageContent,
+    attachments: Option<&Value>,
+) -> MessageContent {
+    let attachment_blocks = attachments
+        .and_then(|v| v.as_array())
+        .map(|arr| prompt_blocks_to_content(arr).content_blocks())
+        .unwrap_or_default();
+    if attachment_blocks.is_empty() {
+        return content;
+    }
+    let mut blocks = content.content_blocks();
+    blocks.extend(attachment_blocks);
+    if blocks.is_empty() {
+        MessageContent::text("")
+    } else {
+        MessageContent::Blocks(blocks)
+    }
+}
+
 /// Extract prompt parameters from a JSON-RPC `session/prompt` request.
 ///
 /// Returns `(session_id, content, attachments)` on success.
-/// The `attachments` field is accepted but currently ignored (reserved for
-/// future image/file attachment support).
+/// Top-level `attachments` image blocks are merged into `content` for agent execution.
 pub fn extract_prompt_params(
     params: &Value,
 ) -> Result<(String, MessageContent, Option<Value>), AcpError> {
@@ -81,23 +102,56 @@ pub fn extract_prompt_params(
     };
 
     let attachments = params.get("attachments").cloned();
+    let content = merge_attachments_into_content(content, attachments.as_ref());
 
+    Ok((session_id, content, attachments))
+}
+
+/// `run_prompt` 专用：在 [`extract_prompt_params`] 之后校验 body 键语义（与迁移前
+/// `host/prompt.rs` 一致，并允许仅顶层 `attachments` 无 `message`/`prompt` 键）。
+pub(crate) fn validate_run_prompt_body(
+    params: &Value,
+    content: &MessageContent,
+) -> Result<(), AcpError> {
+    if params.get("message").is_some() {
+        return Ok(());
+    }
+    if let Some(prompt) = params.get("prompt") {
+        if prompt.is_array() {
+            return Ok(());
+        }
+        return Err(AcpError::new(-32602, "missing message"));
+    }
+    // 与 executor `is_keepgoing` 一致使用 `MessageContent::is_empty()`（ARC keepgoing）；
+    // extract 产出形态下与迁移前 `content_blocks().is_empty()` 判定等价。
+    if content.is_empty() {
+        Err(AcpError::new(-32602, "missing message"))
+    } else {
+        Ok(())
+    }
+}
+
+/// `run_prompt` 与 idle 挂起注入共用的参数管道：extract + body 守卫。
+pub(crate) fn extract_and_validate_run_prompt_params(
+    params: &Value,
+) -> Result<(String, MessageContent, Option<Value>), AcpError> {
+    let (session_id, content, attachments) = extract_prompt_params(params)?;
+    validate_run_prompt_body(params, &content)?;
     Ok((session_id, content, attachments))
 }
 
 /// Handle a `session/prompt` request.
 ///
-/// Extracts parameters, validates the session exists, and returns `{}` on success.
-/// The caller is responsible for spawning the actual execution via
-/// [`crate::session::executor::run_session_loop`] (which requires a full
-/// [`crate::session::executor::PromptExecutionContext`]).
+/// 校验 session 存在性与 **完整 prompt body 语义**（与 `run_prompt` 相同守卫）。
+/// 生产 turn 执行走 `dispatch_prompt_turn` → `run_prompt`；本函数供 dispatch 层
+/// 复用参数校验，不启动 executor。
 ///
 /// Returns `Ok(serde_json::json!({}))` when the session exists and params are valid.
 pub fn handle_prompt(
     params: &Value,
     session_exists: impl Fn(&str) -> bool,
 ) -> Result<Value, AcpError> {
-    let (session_id, _content, _attachments) = extract_prompt_params(params)?;
+    let (session_id, _content, _attachments) = extract_and_validate_run_prompt_params(params)?;
 
     if !session_exists(&session_id) {
         return Err(AcpError::new(-32602, "session not found"));

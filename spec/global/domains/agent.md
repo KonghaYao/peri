@@ -819,7 +819,7 @@ Peri Agent 的 ReAct 循环、工具系统、Context 管理、SubAgent 构建。
 **关键词:** prompt 分层, 单一事实源, prompt_mode full, 能力声明漂移
 **问题本质:** system prompt 将安全/工程/能力/状态/persona 拼成可整体替换文本，绝对性断言与运行时机制漂移；方案 = 五层模型（安全层不可移除）+ 能力声明与注册同一事实源 + tag 可信度边界。
 **通用模式:** prompt 是运行时机制的平行副本必然漂移；关键断言（审批/工具可见性/模式）由同一运行时数据或 feature gate 生成。
-**涉及文件:** peri-acp/prompts/sections/, prompt_test.rs, docs/design/prompt-sections-audit.md
+**涉及文件:** peri-acp/prompts/sections/, prompt_test.rs, docs/design/system-prompt.md, docs/design/meta-harness.md
 **CLAUDE.md 链接:** false
 
 ### issue_2026-08-05-langfuse-subagent-attribution-stack-lifetime

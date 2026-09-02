@@ -4,7 +4,7 @@
 **优先级**：高（波 4 演进批次）
 **类型**：决策记录
 **创建日期**：2026-08-14
-**来源**：`docs/design/meta-harness-design.md` §3.5（演进 2）/ §3.5.2（渲染生成段重构）/
+**来源**：MetaHarness base section 与渲染生成段迁移；当前稳定设计见 `docs/design/meta-harness.md` §2.4/§2.7，过程由本归档 issue 保留
 §3.1.1（拆分持有契约 + 归属全景）；批 C2 任务书；C1 决策记录 D7 遗留问题
 
 ## 背景

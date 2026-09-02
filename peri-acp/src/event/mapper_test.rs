@@ -37,7 +37,7 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
 
     match &m.updates[0] {
         SessionUpdate::UsageUpdate(usage) => {
-            assert_eq!(usage.used, 150);
+            assert_eq!(usage.used, 100);
             assert_eq!(usage.size, 200_000);
             let meta = usage.meta.as_ref().expect("_meta 应包含详细 usage");
             assert_eq!(meta.get("inputTokens").unwrap().as_u64(), Some(100));
@@ -85,7 +85,7 @@ fn test_llm_call_end_no_optional_fields() {
 
     match &mapped[0].updates[0] {
         SessionUpdate::UsageUpdate(usage) => {
-            assert_eq!(usage.used, 230);
+            assert_eq!(usage.used, 200);
             let meta = usage.meta.as_ref().unwrap();
             assert!(meta.get("cacheCreationTokens").is_none());
             assert!(meta.get("cacheReadTokens").is_none());

@@ -1,8 +1,10 @@
-# peri-agent v2 会话消息存储架构设计
+# 会话消息与 Transcript 架构设计
 
 > BaseMessage、ContentBlock 枚举、MessageTranscript 与 staging 事务写
 >
-> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v1.3
+> 状态：现行设计
+>
+> 运行时事实源为 `peri-agent/src/session/transcript.rs`、消息契约类型与相邻测试。
 
 ## 1. 设计原则
 

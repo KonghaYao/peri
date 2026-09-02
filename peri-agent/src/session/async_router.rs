@@ -22,7 +22,7 @@ use peri_acp_types::messages::{BaseMessage, MessageContent};
 use peri_acp_types::session::InboxHandle;
 use peri_acp_types::session::MessageSource;
 use peri_acp_types::tasks::BgTaskKind;
-use peri_acp_types::workflow::PhaseSummary;
+use peri_acp_types::workflow::{PhaseSummary, WorkflowTaskResult};
 use tracing::debug;
 
 /// Routes async results (bg SubAgent completion, workflow events) into the Session inbox.
@@ -75,6 +75,17 @@ impl AsyncRouter {
             agent_name = %result.agent_name,
             success = result.success,
             "AsyncRouter: routed bg SubAgent result to inbox"
+        );
+    }
+
+    /// Route a workflow completion using the canonical [`WorkflowTaskResult::to_notification`].
+    pub fn route_workflow_task_result(&self, result: &WorkflowTaskResult) {
+        let msg = BaseMessage::human(MessageContent::text(result.to_notification()));
+        self.inbox.push_defer(MessageSource::WorkflowComplete, msg);
+        debug!(
+            run_id = %result.run_id,
+            workflow_name = %result.workflow_name,
+            "AsyncRouter: routed workflow task result to inbox"
         );
     }
 

@@ -8,6 +8,7 @@
  * 前置：测试会自动执行 `bun run build`（保证 dist 为最新源码产物）。
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -139,7 +140,7 @@ return { answer: r }`
       jsonrpc: '2.0',
       id: 1,
       method: 'workflow/start',
-      params: { runId: 'e2e-run-1', cwd: '/tmp', script, budgetTotal: null },
+      params: { runId: 'e2e-run-1', cwd: '/tmp', script },
     })
 
     // start 同步响应
@@ -184,6 +185,111 @@ return { answer: r }`
     )
   })
 
+  test('invalid-present budgetTotal 同步拒绝且不启动 workflow', async () => {
+    const s = startRpc()
+    sessions.push(s)
+
+    s.send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'workflow/start',
+      params: {
+        runId: 'e2e-invalid-budget',
+        cwd: '/tmp',
+        script: "return 'must-not-run'",
+        budgetTotal: null,
+      },
+    })
+
+    const response = await s.waitFor((m) => m.id === 2 && 'error' in m)
+    expect(response.error).toEqual({
+      code: -32602,
+      message: `budgetTotal must be an integer between 1 and ${Number.MAX_SAFE_INTEGER}`,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(s.all().some((m) => m.method === 'progress/event')).toBe(false)
+    expect(s.all().some((m) => m.method === 'agent/run')).toBe(false)
+    expect(s.all().some((m) => m.method === 'workflow/done')).toBe(false)
+  })
+
+  test('budgetTotal 在首个 agent 消耗额度后阻止后续 agent', async () => {
+    const s = startRpc()
+    sessions.push(s)
+
+    const script = `export const meta = { name: 'e2e-budget', description: 'budget e2e test' }
+const first = await agent('first')
+const second = await agent('second')
+return { first, second }`
+
+    s.send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'workflow/start',
+      params: { runId: 'e2e-budget-1', cwd: '/tmp', script, budgetTotal: 1 },
+    })
+    await s.waitFor((m) => m.id === 1 && 'result' in m)
+
+    const first = await s.waitFor((m) => m.method === 'agent/run')
+    s.send({
+      jsonrpc: '2.0',
+      id: first.id,
+      result: { kind: 'ok', output: 'first-result', usage: { outputTokens: 1 } },
+    })
+
+    const done = await s.waitFor((m) => m.method === 'workflow/done', 10000)
+    const params = done.params as { status: string; error?: string }
+    expect(params.status).toBe('failed')
+    expect(
+      s.all().filter((m) => m.method === 'agent/run')
+    ).toHaveLength(1)
+
+    const runDone = s
+      .all()
+      .filter((m) => m.method === 'progress/event')
+      .map((m) => m.params as { type: string; status?: string })
+      .find((event) => event.type === 'run_done')
+    expect(runDone?.status).toBe('failed')
+  })
+
+  test('budgeted resume 命中 journal 时不重复 agent 调用', async () => {
+    const s = startRpc()
+    sessions.push(s)
+
+    const script = `export const meta = { name: 'e2e-budget-resume', description: 'budget resume e2e test' }
+const result = await agent('cached')
+return { result }`
+    const key = createHash('sha256')
+      .update('cached\n' + JSON.stringify({ prompt: 'cached' }))
+      .digest('hex')
+
+    s.send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'workflow/start',
+      params: {
+        runId: 'e2e-budget-resume-1',
+        cwd: '/tmp',
+        script,
+        budgetTotal: 1,
+        resume: [{
+          key,
+          seq: 0,
+          result: { kind: 'ok', output: 'cached-result', usage: { outputTokens: 99 } },
+        }],
+      },
+    })
+    await s.waitFor((m) => m.id === 1 && 'result' in m)
+
+    const done = await s.waitFor((m) => m.method === 'workflow/done', 10000)
+    const params = done.params as { status: string; returnValue: { result: string } }
+    expect(params.status).toBe('completed')
+    expect(params.returnValue).toEqual({ result: 'cached-result' })
+    expect(s.all().filter((m) => m.method === 'agent/run')).toHaveLength(0)
+    const recovered = s.all().filter((m) => m.method === 'journal/append')
+    expect(recovered).toHaveLength(1)
+    expect((recovered[0].params as { entry: { attempt: { disposition: string } } }).entry.attempt.disposition).toBe('recovered')
+  })
+
   test('未知方法返回 -32601', async () => {
     const s = startRpc()
     sessions.push(s)
@@ -208,7 +314,7 @@ return { r1, r2 }`
         jsonrpc: '2.0',
         id: 1,
         method: 'workflow/start',
-        params: { runId: 'e2e-kill-1', cwd: '/tmp', script, budgetTotal: null },
+        params: { runId: 'e2e-kill-1', cwd: '/tmp', script },
       })
       await s.waitFor((m) => m.id === 1 && 'result' in m)
 

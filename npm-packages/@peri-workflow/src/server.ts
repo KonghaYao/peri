@@ -15,14 +15,26 @@ import type {
 } from '@claude-code-best/workflow-engine'
 import { rpcAdapter } from './adapter'
 import { rpcNotify, send, waitDrain } from './rpc'
-import type { JsonRpcRequest, WorkflowStartParams } from './types'
+import type { JsonRpcRequest, WorkflowJournalEntry, WorkflowStartParams } from './types'
 import { WORKFLOW_BUILD_ID, WORKFLOW_PROTOCOL_VERSION } from './types'
 
 let currentRunId: string
 let currentAbortController: AbortController
 let currentCwd: string
 let currentBudget: number | null
-let currentResumeJournal: JournalEntry[] | undefined
+let currentResumeRunId: string | undefined
+let currentResumeJournal: WorkflowJournalEntry[] | undefined
+
+function parseBudgetTotal(params: unknown): number | undefined {
+  if (!params || typeof params !== 'object' || !Object.hasOwn(params, 'budgetTotal')) {
+    return undefined
+  }
+  const value = (params as { budgetTotal?: unknown }).budgetTotal
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`budgetTotal must be an integer between 1 and ${Number.MAX_SAFE_INTEGER}`)
+  }
+  return value
+}
 
 function createPorts(): WorkflowPorts {
   return {
@@ -62,10 +74,36 @@ function createPorts(): WorkflowPorts {
 
     journalStore: {
       async read(): Promise<JournalEntry[]> {
-        return currentResumeJournal ?? []
+        return (currentResumeJournal ?? []).map((entry) => {
+          const recovered: WorkflowJournalEntry = {
+            ...entry,
+            attempt: {
+              runId: currentRunId,
+              journalSeq: entry.seq,
+              recoveredFrom: {
+                runId: currentResumeRunId ?? currentRunId,
+                agentId: entry.attempt?.agentId,
+                journalSeq: entry.attempt?.journalSeq ?? entry.seq,
+              },
+              consumed: true,
+              disposition: 'recovered' as const,
+            },
+          }
+          rpcNotify('journal/append', { runId: currentRunId, entry: recovered })
+          return recovered
+        })
       },
       async append(runId: string, entry: JournalEntry): Promise<void> {
-        rpcNotify('journal/append', { runId, entry })
+        const structured: WorkflowJournalEntry = {
+          ...entry,
+          attempt: {
+            runId,
+            journalSeq: entry.seq,
+            consumed: true,
+            disposition: 'produced',
+          },
+        }
+        rpcNotify('journal/append', { runId, entry: structured })
       },
       async truncate(runId: string): Promise<void> {
         rpcNotify('journal/truncate', { runId })
@@ -105,10 +143,25 @@ export async function handleRequest(msg: JsonRpcRequest): Promise<void> {
   switch (method) {
     case 'workflow/start': {
       const p = params as WorkflowStartParams
+      let budgetTotal: number | undefined
+      try {
+        budgetTotal = parseBudgetTotal(params)
+      } catch (error) {
+        send({
+          jsonrpc: '2.0',
+          id: id!,
+          error: {
+            code: -32602,
+            message: error instanceof Error ? error.message : 'invalid budgetTotal',
+          },
+        })
+        return
+      }
       currentRunId = p.runId
       currentCwd = p.cwd
-      currentBudget = p.budgetTotal
-      currentResumeJournal = p.resume
+      currentBudget = budgetTotal ?? null
+      currentResumeRunId = p.resumeFromRunId
+      currentResumeJournal = p.resume as WorkflowJournalEntry[] | undefined
       currentAbortController = new AbortController()
       send({
         jsonrpc: '2.0',

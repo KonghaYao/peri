@@ -122,14 +122,14 @@ Perihelion's code is primarily AI-assisted, with human responsibility for produc
 | Knowledge | Canonical location |
 |---|---|
 | Stable engineering rules and cross-crate contracts | `docs/standards/` |
+| Approved current and target designs | `docs/design/` |
+| Non-authoritative guides and operational references | `docs/reference/` |
 | Current implementation navigation | `docs/code-index/` |
 | Active changes, defects, and acceptance status | `spec/issues/` |
 | Historical problem records | `spec/global/problems.md` |
 | Repository and module routing | root/module `CLAUDE.md` and `AGENTS.md` |
 
 A non-obvious constraint discovered during a fix is promoted only when it is stable: rules go to standards, behavior navigation goes to code-index, and temporary investigation stays in the active spec. Root guidance files remain small routers so every agent reaches the same canonical source instead of inheriting duplicated “TRAP” narratives.
-
-→ Read the full story: [Nobody Coding](docs/blogs/ai-coding-paradigm/nobody-coding.md)
 
 ---
 

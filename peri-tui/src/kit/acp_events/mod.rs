@@ -245,6 +245,9 @@ impl BridgeState {
                 );
                 return;
             }
+            // 与 TurnInterrupted/TurnSuspended 一致：归档前 deactivate，避免
+            // ToolStarted 无 ToolEnded（如工具不存在）时 running 态被写入 committed。
+            self.current_turn.deactivate();
             for vm in self.current_turn.view_models() {
                 self.committed.push_back(vm.clone());
             }
@@ -334,7 +337,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // ── §4.2 Boundary events ──
         PromptStarted => turn::handle_prompt_started(state),
         PromptSubmitted { request_id } => turn::handle_prompt_submitted(state, request_id),
-        CacheUsageUpdated(sample) => state.pending_cache_usage = sample.clone(),
+        CacheUsageUpdated(sample) => turn::handle_cache_usage_updated(state, sample),
         SessionReplayStarted => turn::handle_session_replay_started(state),
         SessionReplayDone => turn::handle_session_replay_done(state),
         TurnDone => turn::handle_turn_done(state),

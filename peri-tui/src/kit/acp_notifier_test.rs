@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::acp_client::AcpTuiClient;
+use crate::kit::acp_types::CacheUsageSample;
 use crate::kit::slash_completion::SlashActionKind;
 use crate::kit::slash_projection::ArgKind;
 use peri_acp::event::AcpEvent;
@@ -942,7 +943,7 @@ fn test_usage_update_decodes_root_cache_sample_without_per_step_notification() {
 }
 
 #[test]
-fn test_usage_update_ignores_auxiliary_but_invalid_root_observations_clear_sample() {
+fn test_usage_update_ignores_auxiliary_and_preserves_explicit_zero_cache_read() {
     let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
     let payload = |usage_meta: serde_json::Value, params_meta: serde_json::Value| {
         json!({
@@ -964,19 +965,39 @@ fn test_usage_update_ignores_auxiliary_but_invalid_root_observations_clear_sampl
         )
         .is_none()
     );
-    for invalid_meta in [
-        json!({"inputTokens": 100, "outputTokens": 1}),
-        json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 0}),
-        json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 101}),
-    ] {
-        assert!(
-            matches!(
-                handle_session_update(payload(invalid_meta, json!({})), &dummy_tx, "test"),
-                Some(AcpEventData::CacheUsageUpdated(None))
-            ),
-            "missing, zero, or inconsistent root usage must emit an explicit clear"
-        );
-    }
+    let zero = handle_session_update(
+        payload(
+            json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 0}),
+            json!({}),
+        ),
+        &dummy_tx,
+        "test",
+    );
+    assert!(matches!(
+        zero,
+        Some(AcpEventData::CacheUsageUpdated(Some(CacheUsageSample {
+            input_tokens: 100,
+            cached_tokens: 0,
+            ..
+        })))
+    ));
+    let invalid_meta = json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 101});
+    assert!(
+        matches!(
+            handle_session_update(payload(invalid_meta, json!({})), &dummy_tx, "test"),
+            Some(AcpEventData::CacheUsageUpdated(None))
+        ),
+        "inconsistent root usage must remain unavailable"
+    );
+    assert!(
+        handle_session_update(
+            payload(json!({"inputTokens": 100, "outputTokens": 1}), json!({})),
+            &dummy_tx,
+            "test"
+        )
+        .is_none(),
+        "missing cacheReadTokens must not clear a prior root sample"
+    );
 }
 
 /// 验证 handle_session_update 能正确解析 plan update 并写入 TODO_ITEMS atom。

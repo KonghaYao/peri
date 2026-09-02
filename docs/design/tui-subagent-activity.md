@@ -1,7 +1,10 @@
-# TUI Subagent 工具行展示设计 —— 与主时间线工具的差异化
+# TUI SubAgent 活动行目标设计
 
-状态：proposal（待评审）
-关联规范：`tui-chat-message-flow-style.md`（§3.1 网格 / §4.1 符号层级 / §6.4 主时间线工具 / §6.7 Subagent / §8.2 动画 / §9 复制 / §11 断点 / §12 无障碍）
+> 状态：已批准目标设计；实现进度不在本文记录。
+>
+> 上位设计：[TUI Chat 与 Tool Activity Workbench](tui-chat-workbench.md)。如有冲突，
+> 以上位设计为准。
+
 实现现状：`peri-tui/src/kit/message_area/render.rs`（`subagent_tool_line`、`render_subagent_group_lines`、`subagent_error_reason_line`）
 
 ## 1. 背景与目标

@@ -4,7 +4,7 @@
 **优先级**：高（波 4 演进批次收尾）
 **类型**：决策记录
 **创建日期**：2026-08-14
-**来源**：`docs/design/meta-harness-design.md` §3.5 演进 1（含影响面与语义代价注释）；
+**来源**：MetaHarness 能力闭包与用户文档迁移；当前稳定设计见 `docs/design/meta-harness.md` §2.5，过程由本归档 issue 保留；
 批 C4 任务书；C3 决策记录遗留问题 2（10_hitl "controlled runtime notification" 句联动）；
 wave3 交付物 `spec/issues/2026-08-14-meta-harness-wave3-examples-and-safety.md`
 
