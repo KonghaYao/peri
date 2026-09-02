@@ -408,9 +408,31 @@ fn escape_reminder_text(input: &str) -> String {
 }
 
 impl WorkflowTaskResult {
+    /// 主 Agent 是否应把 workflow 视为「成功交付」（非仅 engine 跑完）。
+    pub fn agent_facing_success(&self) -> bool {
+        self.status == WorkflowRunStatus::Completed
+            && self.delivery_status != DeliveryStatus::Blocked
+    }
+
+    /// Defer / 通知用状态短语：`delivery_status=blocked` 时不得写 "completed"。
+    pub fn notification_status_phrase(&self) -> &'static str {
+        match self.status {
+            WorkflowRunStatus::Running => "running",
+            WorkflowRunStatus::Completed => {
+                if self.delivery_status == DeliveryStatus::Blocked {
+                    "finished (engine completed; delivery blocked)"
+                } else {
+                    "completed"
+                }
+            }
+            WorkflowRunStatus::Killed => "killed",
+            WorkflowRunStatus::Failed => "failed",
+        }
+    }
+
     /// 格式化为 `<system-reminder>` 块，含 phase breakdown。
     pub fn to_notification(&self) -> String {
-        let success_msg = if self.success { "completed" } else { "failed" };
+        let success_msg = self.notification_status_phrase();
 
         let mut phase_lines = String::new();
         if !self.phase_summaries.is_empty() {
@@ -435,9 +457,7 @@ impl WorkflowTaskResult {
             }
         }
 
-        let error_line = if self.success {
-            String::new()
-        } else {
+        let error_line = if self.status == WorkflowRunStatus::Failed {
             let error = self
                 .error
                 .as_deref()
@@ -445,6 +465,8 @@ impl WorkflowTaskResult {
                 .unwrap_or("no error details available");
             let error = escape_reminder_text(&crate::session::sanitize_public_error(error, 2_000));
             format!("Error: {error}\n")
+        } else {
+            String::new()
         };
         let state_path = format!(
             ".claude/workflow-runs/{}/state.json",

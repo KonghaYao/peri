@@ -22,15 +22,7 @@ pub fn apply_workflow_task_result(
     notify_bg: &dyn TaskManager,
 ) {
     if let Some(router) = router {
-        router.route_workflow_event(
-            &task_result.run_id,
-            &task_result.workflow_name,
-            task_result.status.as_str(),
-            task_result.duration_ms,
-            task_result.agent_count,
-            task_result.tool_calls_count,
-            &task_result.phase_summaries,
-        );
+        router.route_workflow_task_result(task_result);
     } else if let Some(fallback_queue) = fallback_queue {
         push_workflow_defer_fallback(fallback_queue, task_result);
     }
@@ -39,7 +31,7 @@ pub fn apply_workflow_task_result(
         task_id: task_result.run_id.clone(),
         agent_name: format!("workflow:{}", task_result.workflow_name),
         prompt_summary: task_result.workflow_name.clone(),
-        success: task_result.success,
+        success: task_result.agent_facing_success(),
         output: format!(
             "Workflow '{}' finished with status {:?} ({}ms, {} agents, {} tool calls). \
              Results in .claude/workflow-runs/{}/state.json",
@@ -76,11 +68,7 @@ fn push_workflow_defer_fallback(queue: &MessageQueue, task_result: &WorkflowTask
             s.name, s.agent_count, token_info, dur_info
         ));
     }
-    let status_word = match task_result.status.as_str() {
-        "completed" => "completed",
-        "killed" => "killed",
-        _ => "failed",
-    };
+    let status_word = task_result.notification_status_phrase();
     let notif_text = format!(
         "Workflow '{}' {status_word}. ({}ms, {} agents, {} tool calls)\n\
         {}Results saved to .claude/workflow-runs/{}/state.json",

@@ -537,12 +537,12 @@ fn permission_mode_keeps_chain_shape() {
         let names = assemble_names(&ctx);
         assert_eq!(
             names.iter().position(|n| n == "HumanInTheLoopMiddleware"),
-            Some(16),
+            Some(17),
             "mode {mode:?}: AskUser 位置漂移"
         );
         assert_eq!(
             names.iter().position(|n| n == "PermissionMiddleware"),
-            Some(15),
+            Some(16),
             "mode {mode:?}: Permission 位置漂移"
         );
         // 条件中间件（Hook/MCP/Workflow/LSP/Goal）不应出现
@@ -1397,7 +1397,6 @@ fn workflow_build_middlewares_filters_disabled() {
             "SkillPreloadMiddleware",
             "FilesystemMiddleware",
             "GitAttributionMiddleware",
-            "GitWatchMiddleware",
             "TerminalMiddleware",
             "WebMiddleware",
             "TodoMiddleware",
@@ -1412,7 +1411,6 @@ fn workflow_build_middlewares_filters_disabled() {
         "SkillPreloadMiddleware",
         "FilesystemMiddleware",
         "GitAttributionMiddleware",
-        "GitWatchMiddleware",
         "TerminalMiddleware",
         "WebMiddleware",
         "TodoMiddleware",

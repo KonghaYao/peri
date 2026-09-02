@@ -70,6 +70,9 @@ pub(crate) fn take_continuation_for_request(
 ) -> Option<u64> {
     if req.mq_steering {
         if state.continuation_in_flight {
+            // 续跑执行中：不立即调度，但保留 pending，待 in_flight 清除后由
+            // dispatch_prompt_turn 尾端补发 ContinuationRequest。
+            state.continuation_mq_steering_pending = true;
             return None;
         }
         state.continuation_mq_steering_pending = true;

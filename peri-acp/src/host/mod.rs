@@ -1147,14 +1147,37 @@ pub(crate) async fn dispatch_prompt_turn(
     // lock — see the take-out comment above) and clear the continuation in-flight
     // marker. Both writes are unconditional after run_prompt returns, so every
     // non-panic path restores the pool and clears the marker.
-    {
+    let mq_steering_reschedule = {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
             if let Ok(mutex) = Arc::try_unwrap(pool_arc) {
                 state.agent_pool = mutex.into_inner();
             }
             state.continuation_in_flight = false;
+            let pending = state.continuation_mq_steering_pending;
+            let needs_mq = cfg
+                .session_manager
+                .get_session(&prompt_session_id)
+                .map(|session| session.v2_message_queue.needs_mq_continuation())
+                .unwrap_or(false);
+            if pending && !needs_mq {
+                state.continuation_mq_steering_pending = false;
+            }
+            pending && needs_mq
+        } else {
+            false
         }
+    };
+    if mq_steering_reschedule {
+        let _ = cont_tx.send(crate::session::executor::ContinuationRequest {
+            session_id: prompt_session_id.clone(),
+            kind: peri_acp_types::tasks::BgTaskKind::Agent,
+            mq_steering: true,
+        });
+        tracing::debug!(
+            session_id = %prompt_session_id,
+            "continuation: rescheduled MQ steering after in-flight turn ended"
+        );
     }
 
     result

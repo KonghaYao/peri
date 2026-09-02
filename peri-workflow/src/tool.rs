@@ -449,7 +449,9 @@ impl BaseTool for WorkflowTool {
                 .read_state(&notify_run_id)
                 .map(|state| state.acceptance_status)
                 .unwrap_or_default();
-            let success = result.status == "completed";
+            let delivery_status = result.delivery_status;
+            let success = result.status == "completed"
+                && delivery_status != peri_acp_types::workflow::DeliveryStatus::Blocked;
             let status = match result.status.as_str() {
                 "completed" => WorkflowRunStatus::Completed,
                 "killed" => WorkflowRunStatus::Killed,

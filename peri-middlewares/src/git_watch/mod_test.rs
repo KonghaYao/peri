@@ -125,7 +125,12 @@ async fn git_watch_notifies_on_new_commit() {
         queue: queue.clone(),
     };
 
-    mw.before_agent(&mut state).await.unwrap();
+    let dummy_call = ToolCall::new("0", "Read", serde_json::json!({}));
+    let dummy_ok = ToolResult::success("0", "Read", "ok");
+
+    mw.after_tool(&mut state, &dummy_call, &dummy_ok)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(queue.drain_all().is_empty(), "baseline should not notify");
 
@@ -161,8 +166,6 @@ async fn non_git_repo_stays_quiet() {
         queue: queue.clone(),
     };
 
-    mw.before_agent(&mut state).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
     mw.after_tool(
         &mut state,
         &ToolCall::new("1", "Read", serde_json::json!({})),

@@ -43,7 +43,7 @@ struct GitWatchInner {
     sample_timeout: Duration,
 }
 
-/// 监视 git 分支与 HEAD；`before_agent` / `after_tool` 触发，节流 + 后台采样。
+/// 监视 git 分支与 HEAD；**成功**工具返回后触发采样（节流 + 后台），不监视 working tree。
 pub struct GitWatchMiddleware {
     inner: Arc<GitWatchInner>,
 }
@@ -183,38 +183,37 @@ impl GitWatchMiddleware {
 }
 
 async fn run_git_sample(cwd: &str) -> SampleOutcome {
-    let mut command = Command::new("git");
-    command
+    let output = match Command::new("git")
         .current_dir(cwd)
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(["rev-parse", "--is-inside-work-tree"]);
-    let work_tree = match command.output().await {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        .args([
+            "rev-parse",
+            "--is-inside-work-tree",
+            "HEAD",
+            "--abbrev-ref",
+            "HEAD",
+        ])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
         _ => return SampleOutcome::Failed,
     };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let work_tree = lines.next().unwrap_or("").trim();
     if work_tree != "true" {
-        return SampleOutcome::NotRepository;
+        if work_tree == "false" {
+            return SampleOutcome::NotRepository;
+        }
+        return SampleOutcome::Failed;
     }
-
-    let mut head_cmd = Command::new("git");
-    head_cmd
-        .current_dir(cwd)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(["rev-parse", "HEAD"]);
-    let head = match head_cmd.output().await {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => return SampleOutcome::Failed,
-    };
-
-    let mut branch_cmd = Command::new("git");
-    branch_cmd
-        .current_dir(cwd)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"]);
-    let branch = match branch_cmd.output().await {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => return SampleOutcome::Failed,
-    };
+    let head = lines.next().unwrap_or("").trim();
+    let branch = lines.next().unwrap_or("").trim();
+    if head.is_empty() || branch.is_empty() {
+        return SampleOutcome::Failed;
+    }
 
     parse_sample_stdout(&format!("true\n{head}\n{branch}\n"))
 }
@@ -225,18 +224,15 @@ impl Middleware for GitWatchMiddleware {
         "GitWatchMiddleware"
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
-        self.schedule_sample(state);
-        Ok(())
-    }
-
     async fn after_tool(
         &self,
         state: &mut dyn MiddlewareState,
         _tool_call: &ToolCall,
-        _result: &ToolResult,
+        result: &ToolResult,
     ) -> AgentResult<()> {
-        self.schedule_sample(state);
+        if !result.is_error {
+            self.schedule_sample(state);
+        }
         Ok(())
     }
 }

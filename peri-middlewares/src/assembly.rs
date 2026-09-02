@@ -916,9 +916,6 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         if !disabled.contains("GitAttributionMiddleware") {
             middlewares.push(Box::new(GitAttributionMiddleware::new(model_name)));
         }
-        if !disabled.contains("GitWatchMiddleware") {
-            middlewares.push(Box::new(GitWatchMiddleware::new()));
-        }
 
         if !disabled.contains("TerminalMiddleware") {
             middlewares.push(Box::new(TerminalMiddleware::new()));
