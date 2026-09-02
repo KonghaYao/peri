@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager};
 use peri_acp_types::tools::BaseTool;
 use serde_json::Value;
@@ -349,22 +348,10 @@ impl BaseTool for WorkflowTool {
                     .map(|s| format!("\n\nstderr (last 20 lines):\n{}", s))
                     .unwrap_or_default();
 
-                // 快速失败清理：complete 使 BgTaskArea 从 ◎ 过渡到 ✗
                 let fast_duration = started_at.elapsed().as_millis() as u64;
-                if let Some(ref bg) = self.bg_registry {
-                    let result = BackgroundTaskResult {
-                        task_id: run_id.clone(),
-                        agent_name: "workflow".to_string(),
-                        prompt_summary: String::new(),
-                        success: false,
-                        output: String::new(),
-                        tool_calls_count: 0,
-                        duration_ms: fast_duration,
-                        child_thread_id: None,
-                        timed_out: false,
-                    };
-                    bg.complete(&run_id, result);
-                }
+                // 不在此处 bg.complete()：须在 session consumer push_defer 之后再递减
+                // active_count，否则 idle_should_wait 提前为 false，Defer 无法唤起 loop（#117）。
+                // BgTaskArea / registry 终态由 agent_build 通知 consumer 在 Defer 入队后处理。
                 // 同步标记 registry 为失败，发送通知给 agent
                 self.registry.complete(
                     &run_id,
