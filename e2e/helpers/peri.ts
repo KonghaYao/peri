@@ -22,6 +22,68 @@ export const DEV_SH = path.join(PROJECT_ROOT, "dev.sh");
 
 const DEFAULT_SIZE: TerminalSize = { cols: 120, rows: 40 };
 
+const PATH_PREFIX = "/opt/homebrew/bin:/usr/local/bin:/usr/bin";
+
+/** 隔离 HOME 仅用于 Peri 配置；rustup/cargo 仍使用开发者本机 toolchain。 */
+function ensureDeveloperToolchainEnv(env: Record<string, string>): void {
+  const devHome = os.homedir();
+  if (!env.RUSTUP_HOME) {
+    env.RUSTUP_HOME = process.env.RUSTUP_HOME || path.join(devHome, ".rustup");
+  }
+  if (!env.CARGO_HOME) {
+    env.CARGO_HOME = process.env.CARGO_HOME || path.join(devHome, ".cargo");
+  }
+  const basePath = env.PATH ?? process.env.PATH ?? "";
+  env.PATH = basePath.includes(PATH_PREFIX)
+    ? basePath
+    : `${PATH_PREFIX}:${basePath}`;
+}
+
+/** 用户 shell rc 可能 source "$HOME/.cargo/env"；隔离 HOME 时提供空文件避免启动即退出。 */
+function ensureHomeShellCompat(home: string): void {
+  const cargoDir = path.join(home, ".cargo");
+  fs.mkdirSync(cargoDir, { recursive: true });
+  const cargoEnv = path.join(cargoDir, "env");
+  if (!fs.existsSync(cargoEnv)) {
+    fs.writeFileSync(cargoEnv, "");
+  }
+}
+
+function allocateIsoHome(): string {
+  const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), "peri-e2e-home-"));
+  const periDir = path.join(isoHome, ".peri");
+  fs.mkdirSync(periDir, { recursive: true });
+  fs.writeFileSync(path.join(periDir, "settings.json"), "{}");
+  ensureHomeShellCompat(isoHome);
+  process.on("exit", () => {
+    try {
+      fs.rmSync(isoHome, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+  return isoHome;
+}
+
+function buildPeriLaunchEnv(
+  options: PeriLaunchOptions,
+  defaults: { isolateHome: boolean },
+): Record<string, string> {
+  const env: Record<string, string> = { ...(options.env ?? {}) };
+  if (!env.HOME && defaults.isolateHome) {
+    env.HOME = allocateIsoHome();
+  } else if (env.HOME) {
+    ensureHomeShellCompat(env.HOME);
+    const periSettings = path.join(env.HOME, ".peri", "settings.json");
+    if (!fs.existsSync(periSettings)) {
+      fs.mkdirSync(path.dirname(periSettings), { recursive: true });
+      fs.writeFileSync(periSettings, "{}");
+    }
+  }
+  ensureDeveloperToolchainEnv(env);
+  return env;
+}
+
 export interface PeriLaunchOptions {
   /** 终端尺寸 */
   size?: TerminalSize;
@@ -196,29 +258,7 @@ export async function launchPeri(
   options: PeriLaunchOptions = {},
 ): Promise<TmuxTester> {
   const size = options.size ?? DEFAULT_SIZE;
-
-  const env: Record<string, string> = { ...(options.env ?? {}) };
-  let isoHome: string | undefined;
-  if (!env.HOME) {
-    isoHome = fs.mkdtempSync(path.join(os.tmpdir(), "peri-e2e-home-"));
-    const periDir = path.join(isoHome, ".peri");
-    fs.mkdirSync(periDir, { recursive: true });
-    fs.writeFileSync(path.join(periDir, "settings.json"), "{}");
-    // 用户 shell rc 可能无条件 source "$HOME/.cargo/env"。隔离 HOME 中提供空的
-    // 兼容文件，避免交互 shell 在 dev.sh 启动前退出；不复制用户环境或凭据。
-    const cargoDir = path.join(isoHome, ".cargo");
-    fs.mkdirSync(cargoDir, { recursive: true });
-    fs.writeFileSync(path.join(cargoDir, "env"), "");
-    env.HOME = isoHome;
-    // 测试进程退出时清理临时 HOME（best-effort，不阻塞退出）
-    process.on("exit", () => {
-      try {
-        fs.rmSync(isoHome!, { recursive: true, force: true });
-      } catch {
-        // ignore cleanup errors
-      }
-    });
-  }
+  const env = buildPeriLaunchEnv(options, { isolateHome: true });
 
   const tester = new TmuxTester({
     command: [DEV_SH],
@@ -302,12 +342,13 @@ export async function launchPeriHITL(
   options: PeriLaunchOptions = {},
 ): Promise<TmuxTester> {
   const size = options.size ?? DEFAULT_SIZE;
+  const env = buildPeriLaunchEnv(options, { isolateHome: false });
 
   const tester = new TmuxTester({
     command: [DEV_SH, "-a"],
     size,
     cwd: PROJECT_ROOT,
-    env: options.env ?? {},
+    env,
     debug: options.debug ?? false,
     snapshotDir: path.join(PROJECT_ROOT, "e2e", "recordings"),
   });
