@@ -5,8 +5,8 @@ use chrono::Local;
 use peri_acp_types::{
     event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
     frozen::ThreadPersistence,
-    messages::{BaseMessage, MessageContent},
-    session::{MessageQueue, QueuedMessage},
+    messages::BaseMessage,
+    session::MessageQueue,
     tasks::{BgTaskKind, TaskManager},
 };
 
@@ -129,91 +129,16 @@ pub(super) async fn build_and_execute_agent(
                 loop {
                     match rx.recv().await {
                         Ok(task_result) => {
-                            // Path B: 通过 AsyncRouter（或回退 v2 queue）push Defer。
-                            // AsyncRouter → InboxHandle → push_defer 触发 wake Notify，
-                            // 替代直接 notify_queue.push（raw，无 wake）。
-                            if let Some(ref router) = wf_router {
-                                router.route_workflow_event(
-                                    &task_result.run_id,
-                                    &task_result.workflow_name,
-                                    task_result.status.as_str(),
-                                    task_result.duration_ms,
-                                    task_result.agent_count,
-                                    task_result.tool_calls_count,
-                                    &task_result.phase_summaries,
-                                );
-                            } else {
-                                // 回退：直接 push（无 wake，兼容无 inbox 场景）
-                                let mut phase_lines = String::new();
-                                for s in &task_result.phase_summaries {
-                                    let token_info = if s.token_count > 0 {
-                                        format!(", {} tokens", s.token_count)
-                                    } else {
-                                        String::new()
-                                    };
-                                    let dur_info = if let Some(d) = s.duration_ms {
-                                        format!(", {}ms", d)
-                                    } else {
-                                        String::new()
-                                    };
-                                    phase_lines.push_str(&format!(
-                                        "- {}: {} agents{}{}\n",
-                                        s.name, s.agent_count, token_info, dur_info
-                                    ));
-                                }
-                                // 幽灵完成事件防护（issue 2026-08-05）：killed/failed 不得显示为 "completed"
-                                let status_word = match task_result.status.as_str() {
-                                    "completed" => "completed",
-                                    "killed" => "killed",
-                                    _ => "failed",
-                                };
-                                // 不包裹 <system-reminder>：append_messages_to_transcript 统一包裹所有 Defer/Info
-                                let notif_text = format!(
-                                    "Workflow '{}' {status_word}. ({}ms, {} agents, {} tool calls)\n\
-                                    {}Results saved to .claude/workflow-runs/{}/state.json",
-                                    task_result.workflow_name,
-                                    task_result.duration_ms,
-                                    task_result.agent_count,
-                                    task_result.tool_calls_count,
-                                    phase_lines,
-                                    task_result.run_id,
-                                );
-                                fallback_queue.push(QueuedMessage::new(
-                                    peri_acp_types::session::MessageKind::Defer,
-                                    peri_acp_types::session::MessageSource::WorkflowComplete,
-                                    BaseMessage::human(MessageContent::text(notif_text)),
-                                ));
-                            }
-
-                            // 构造 BackgroundTaskResult 并写入 registry：触发 BgRegistryEvent::Completed
-                            // （→ bg-task-completed unstable event → TUI 通知条），这是通知的真实路径。
-                            // 不再经 EventSink 直推 BackgroundTaskCompleted（S5.1：event_sink 无映射，死路径）。
-                            let bg = BackgroundTaskResult {
-                                task_id: task_result.run_id.clone(),
-                                agent_name: format!("workflow:{}", task_result.workflow_name),
-                                prompt_summary: task_result.workflow_name.clone(),
-                                success: task_result.success,
-                                output: format!(
-                                    "Workflow '{}' finished with status {:?} ({}ms, {} agents, {} tool calls). \
-                                     Results in .claude/workflow-runs/{}/state.json",
-                                    task_result.workflow_name,
-                                    task_result.status,
-                                    task_result.duration_ms,
-                                    task_result.agent_count,
-                                    task_result.tool_calls_count,
-                                    task_result.run_id
-                                ),
-                                tool_calls_count: task_result.tool_calls_count,
-                                duration_ms: task_result.duration_ms,
-                                child_thread_id: None,
-                                timed_out: false,
-                            };
-                            // 在 Defer 入队后递减 active_count，消除 tool.rs 通知 task 中的竞态窗口：
-                            // 原实现在 registry.complete() broadcast 后立即调用 bg.complete_workflow()，
-                            // 若 broadcast consumer 尚未被调度，agent 的 idle_should_wait probe
-                            // (active_count > 0) 提前归零 → agent 退出 ReAct loop → Defer 堆积在队列中。
-                            // [修复] 将 complete_workflow 移至 consumer 内 Defer push 之后执行。
-                            notify_bg.complete(&task_result.run_id, bg);
+                            crate::session::workflow_completion::apply_workflow_task_result(
+                                &task_result,
+                                wf_router.as_ref(),
+                                if wf_router.is_none() {
+                                    Some(&fallback_queue)
+                                } else {
+                                    None
+                                },
+                                notify_bg.as_ref(),
+                            );
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("WF notification consumer lagged by {} messages", n);

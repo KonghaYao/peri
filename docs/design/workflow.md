@@ -385,8 +385,11 @@ fn parameters() -> JSON Schema { script, scriptPath, name, args, maxConcurrency,
 4. `registry.register(run, ...)` — 并发限流检查
 5. `tokio::spawn(runner.run())` — 后台启动执行（watch channel: done_tx/done_rx + kill_tx/kill_rx）
 6. `bg_registry.register_workflow()` — 注册到统一后台任务系统（BackgroundTaskRegistry），可选步骤
-7. **快速失败检测**（1s timeout）：clone watch channel `fast_rx` + `tokio::select!` + `sleep(1s)`，在 spawn 后 1 秒内检测 workflow 是否快速失败（如 Node 二进制不存在、脚本语法错误）。快速失败时同步报错给 LLM（返回 `Err` 含 `stderr_tail`），并清理 `bg_registry`（`complete_workflow` 标记失败）和 `registry`（`complete()` 发送失败通知）
-8. `tokio::spawn(notification_task(receiver))` — 等待 done_rx，完成后调用 `registry.complete()` + `bg_registry.complete_workflow()`
+7. **快速失败检测**（1s timeout）：clone watch channel `fast_rx` + `tokio::select!` + `sleep(1s)`，在 spawn 后 1 秒内检测 workflow 是否快速失败（如 Node 二进制不存在、脚本语法错误）。快速失败时：
+   - **同步**向 LLM 返回 `Err`（含 `stderr_tail` 等诊断信息）；
+   - **仅**调用 `registry.complete()` 广播失败态 `WorkflowTaskResult`，**不在** `WorkflowTool` 内调用 `TaskManager::complete()`（#117：须在 consumer `push_defer` 之后再递减 `active_count`）；
+   - BgTaskArea（Path A）与 Defer（Path B）由 session consumer 在 Defer 入队**之后**写入 `BackgroundTaskResult`（§4.2）。
+8. `tokio::spawn(notification_task(receiver))` — 等待 done_rx；完成后**只**调用 `registry.complete()`（**不**在 notification task 内 `TaskManager::complete()`；bg 终态由 consumer 在 Defer 之后处理，与慢路径一致）
 9. **立即返回**（多行格式）：
    ```
    Workflow 'xxx' started.
@@ -436,6 +439,10 @@ workflow 完成
 ### 4.2 Session 级 Consumer
 
 consumer 在首次 turn 构建时 spawn，并持续到 session 结束。spawn 去重由 `init_notification_buffer()` 的 set-once gate 保证；具体入口以 `docs/code-index/peri-agent.md` 和源码为准。
+
+**处理顺序（#117）**：对每个 `WorkflowTaskResult`，consumer **先** Path B（`AsyncRouter::route_workflow_event` → `push_defer` + wake），**再** Path A（`TaskManager::complete` → `BgRegistryEvent::Completed`）。`WorkflowTool` 与 notification task **不得**在 broadcast 之前或与之并发地调用 `TaskManager::complete()`。
+
+实现：`peri-agent/src/session/workflow_completion.rs` 的 `apply_workflow_task_result`（由 `exec/executor/agent_build.rs` 的 broadcast 循环调用）。
 
 **Path A 输出格式**（`BackgroundTaskResult`，写入 registry 触发 `BgRegistryEvent::Completed`）：
 ```json
