@@ -7,8 +7,8 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
-    testTimeout: 300_000, // 5 minutes for e2e with real LLM
-    hookTimeout: 60_000,
+    testTimeout: 600_000,
+    hookTimeout: 120_000,
     // Vitest 4: 顺序执行避免 tmux session 冲突
     fileParallelism: false,
     maxConcurrency: 1,

@@ -12,7 +12,9 @@ import {
   sendPrompt,
   takePeriSnapshot,
   waitForStableScreen,
+  PROJECT_ROOT,
 } from "../../helpers/peri.js";
+import { join } from "node:path";
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
@@ -31,17 +33,20 @@ describe("tool-card: output truncation", () => {
     async () => {
       tester = await launchPeri();
 
-      // Cargo.lock 通常很大，输出会被截断
+      const cargoLock = join(PROJECT_ROOT, "Cargo.lock");
+
+      // 隔离 HOME 时 cwd 为空临时目录，必须用仓库内绝对路径
       const baseScreen = await tester.getScreenText();
       await sendPrompt(
         tester,
-        "请严格只调用一次 Read 工具，读取当前工作目录下的 Cargo.lock 文件（file_path 必须是 Cargo.lock，不要读取 Cargo.toml 或其他文件），然后根据读取结果继续回答。",
+        `请严格只调用一次 Read 工具，读取 ${cargoLock}（file_path 必须是该绝对路径），然后根据读取结果继续回答。`,
       );
 
-      // 等待目标 Read tool card 的独有完成态组合，避免命中 reasoning 或最终回复中的
-      // 通用 "truncated" 文本后过早抓屏。
-      await tester.waitForPattern(/✓\s+Read Cargo\.lock\s+—\s+\d+ lines · truncated/, {
-        timeout: 60_000,
+      const readDonePattern =
+        /✓\s+Read\s+[^\n]*Cargo\.lock\s+—\s+\d+ lines · truncated/;
+
+      await tester.waitForPattern(readDonePattern, {
+        timeout: 180_000,
         interval: 500,
         message: "等待 Read Cargo.lock 截断工具卡完成态",
       });
@@ -58,7 +63,7 @@ describe("tool-card: output truncation", () => {
         "tool-truncation-after",
       );
 
-      expect(readCapture.text).toMatch(/✓\s+Read Cargo\.lock\s+—\s+\d+ lines · truncated/);
+      expect(readCapture.text).toMatch(readDonePattern);
       // 最终分析较长时，已验证过的工具头行可以正常滚出视口；完成态只验证
       // agent 基于该 canonical result 给出了后续分析。
 

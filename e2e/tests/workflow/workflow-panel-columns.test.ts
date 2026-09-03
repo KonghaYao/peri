@@ -11,6 +11,10 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import {
+  E2E_WORKFLOW_PANEL_COLUMNS_SCRIPT,
+  triggerWorkflowAndWait,
+} from "../../helpers/workflow.js";
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
@@ -29,19 +33,12 @@ describe("workflow: panel columns", () => {
     async () => {
       tester = await launchPeri();
 
-      // 触发一个简单的 workflow
-      await sendPrompt(
+      await triggerWorkflowAndWait(
         tester,
-        "/ultracode 请派发一个简单的 workflow，用两个并行 agent 分别执行 echo hello workflow columns test",
+        "e2e-panel-columns",
+        E2E_WORKFLOW_PANEL_COLUMNS_SCRIPT,
+        { timeoutMs: 480_000 },
       );
-
-      // 等待 workflow 真正完成：消息区出现完成通知
-      // "Workflow '<name>' completed. (<duration>ms, ...)"（async_router.rs 生成，不会被翻译）
-      // 注意：不能等 "workflow" 字样——prompt 回显里就有，会立即匹配（e2e/CLAUDE.md 稳定不变量）
-      await tester.waitForText("completed. (", {
-        timeout: 300_000,
-        interval: 3000,
-      });
       await tester.sleep(3000);
 
       // 打开 workflow 面板

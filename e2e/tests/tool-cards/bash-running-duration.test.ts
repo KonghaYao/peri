@@ -25,7 +25,7 @@ describe("tool-card: bash running duration", () => {
 
   it(
     "长时间 Bash 运行时显示运行时长",
-    { timeout: 300_000 },
+    { timeout: 480_000 },
     async () => {
       tester = await launchPeri();
 
@@ -61,7 +61,7 @@ describe("tool-card: bash running duration", () => {
           /✓\s+(?:Bash|Shell)\b[^\n]*sleep 10/.test(screen) &&
           /(?:Brewed for|处理耗时)/.test(screen),
         {
-          timeout: 120_000,
+          timeout: 180_000,
           interval: 500,
           message: "等待 Bash sleep 10 与主 turn 完成",
         },

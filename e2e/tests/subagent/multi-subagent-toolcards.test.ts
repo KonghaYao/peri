@@ -22,14 +22,15 @@
  */
 
 import { describe, it, expect, afterEach } from "vitest";
-import { launchPeri, sendPrompt, takePeriSnapshot, waitForStableScreen } from "../../helpers/peri.js";
+import { launchPeri, sendPrompt, takePeriSnapshot, waitForStableScreen, PROJECT_ROOT } from "../../helpers/peri.js";
+import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import type { TmuxTester } from "tui-tester";
 
 /** 在 agent-tui.log 中搜索 NOT ROUTED 事件 */
 function countNotRoutedInLog(): number {
   try {
-    const log = readFileSync("../../.tmp/agent-tui.log", "utf-8");
+    const log = readFileSync(join(PROJECT_ROOT, ".tmp", "agent-tui.log"), "utf-8");
     const matches = log.match(/NOT ROUTED/g);
     return matches ? matches.length : 0;
   } catch {

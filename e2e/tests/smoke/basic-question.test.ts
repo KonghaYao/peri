@@ -22,7 +22,7 @@ describe("peri e2e smoke", () => {
     "启动后提问并验证回答",
     { timeout: 300_000 },
     async () => {
-      tester = await launchPeri({ debug: true });
+      tester = await launchPeri();
 
       // 记录提交前的屏幕作为基准（用于 waitForStableScreen 先等变化）
       const initial = await tester.getScreenText();

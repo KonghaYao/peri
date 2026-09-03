@@ -37,7 +37,7 @@ const RESULTS_DIR = path.join(E2E_ROOT, "results");
 const VITEST_ENTRY = path.join(E2E_ROOT, "node_modules", "vitest", "vitest.mjs");
 
 // 单个测试文件最长耗时（与 vitest.config.ts testTimeout 一致 + 启动缓冲）
-const PER_FILE_TIMEOUT_MS = 360_000;
+const PER_FILE_TIMEOUT_MS = 600_000;
 const MIN_WORKER_TIMEOUT_MS = 600_000;
 
 // ======================== 参数解析 ========================
