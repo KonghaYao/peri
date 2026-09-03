@@ -68,6 +68,29 @@ tmux 默认行为决定了两条关键链路：
 - 测试进程被 SIGKILL（控制面 worker 超时）会残留挂起的 dev.sh session；控制面优先 SIGTERM 优雅终止，启动前统一清理残留。
 - tmux 命令（exec）一律带超时，异常挂起不能卡住测试进程。
 
+## 分层门禁（L0 / L1 / Release）
+
+发版不稳定的主因是 **真 LLM + 并行争抢 + retry 掩盖 flake**。分层门禁把「日常快反馈」和「发版全量」拆开，并在 `summary.json` 记录 **首轮失败列表**（不看 retry 后的绿）。
+
+定义见 `config/tiers.mjs`：
+
+| Tier | 命令 | 用例范围 | 并发 | retry | 首轮 flake 预算 |
+| --- | --- | --- | --- | --- | --- |
+| **L0** | `npm run e2e:l0` | 5 个确定性冒烟 | 1 | 0 | 0（必须首轮全绿） |
+| **L1** | `npm run e2e:l1` | smoke + panels + tool-cards | 2 | 1 | ≤1 |
+| **Release** | `npm run e2e:release` | 全部 28 | 3 | 1 | ≤2（retry 后仍须 28/28） |
+| **Release 严格** | `npm run e2e:release:strict` | 同 Release | 3 | 1 | 0 |
+
+控制面等价命令：
+
+```bash
+node scripts/run-e2e.mjs --tier l0
+node scripts/run-e2e.mjs --tier release --require-clean-first-pass
+node scripts/e2e-gate.mjs release
+```
+
+**发版建议**：先 `npm run e2e:l0`（约 5～10 分钟），再 `npm run e2e:release`；查看 `results/run-*/summary.json` 的 `flake.firstAttemptFailed`。若频繁触顶 flake 预算，应修 harness/用例而非只加 retry。
+
 ## 目标命令
 
 以下命令均从 `e2e/` 目录执行：
@@ -79,7 +102,7 @@ npm run test:watch -- tests/<目录>/<文件>.test.ts
 npm run report
 ```
 
-发布前如需全量验证，执行 `npm run e2e -- --all`（并行）或 `npm test`（串行）。
+发布前全量：`npm run e2e:release`（推荐）或 `npm run e2e -- --all`（无 flake 预算统计）。
 
 运行前置：`tests/setup.ts` 会在测试启动前自动清理残留 `tui-test-*` tmux session（防止上次运行残留干扰 tmux server）；tmux 未安装或 server 不存在时静默跳过。并行模式下清理由控制面统一执行，worker 间互不干扰。
 

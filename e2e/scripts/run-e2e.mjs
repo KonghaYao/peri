@@ -19,9 +19,12 @@
  *   node scripts/run-e2e.mjs --dir tool-cards         # 目录过滤
  *   node scripts/run-e2e.mjs --file tests/smoke/basic-question.test.ts
  *   node scripts/run-e2e.mjs --parallel 3 --retry 1   # 并发 3，失败重试 1 次
+ *   node scripts/run-e2e.mjs --tier l0               # 分层门禁（见 config/tiers.mjs）
+ *   node scripts/run-e2e.mjs --tier release            # 发版全量 + flake 预算
  *   node scripts/run-e2e.mjs --all --no-interactive --verbose
  */
 import { spawn } from "node:child_process";
+import { getTier, resolveTierFiles } from "../config/tiers.mjs";
 import { existsSync, readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -52,6 +55,10 @@ const USAGE = `用法:
   --file <路径>          精确指定测试文件（可多次）
   --parallel <N>         并发 worker 数（默认 3；0 = CPU 核数）
   --retry <N>            失败文件重试次数（默认 1；0 = 不重试）
+  --tier <l0|l1|l2|release>  分层门禁（覆盖 parallel/retry/flake 预算）
+  --serial               等价 --parallel 1
+  --require-clean-first-pass  首轮任一失败即门禁不通过（即使 retry 后全绿）
+  --max-first-failures <N>    首轮允许失败文件数（默认随 tier）
   --no-interactive       无过滤参数时不进入交互选择，直接跑全部
   --verbose              流式打印各 worker 的 vitest 输出
   --output <路径>        Markdown 报告输出路径（默认 results/run-<ts>/report.md）
@@ -64,6 +71,10 @@ function parseArgs(argv) {
     files: [], // --file
     parallel: 3,
     retry: 1,
+    tier: null,
+    serial: false,
+    requireCleanFirstPass: false,
+    maxFirstAttemptFailures: null,
     interactive: true,
     verbose: false,
     output: null,
@@ -95,6 +106,22 @@ function parseArgs(argv) {
         opts.retry = Number.isFinite(n) && n >= 0 ? n : 1;
         break;
       }
+      case "--tier":
+        opts.tier = next();
+        opts.interactive = false;
+        break;
+      case "--serial":
+        opts.serial = true;
+        break;
+      case "--require-clean-first-pass":
+        opts.requireCleanFirstPass = true;
+        break;
+      case "--max-first-failures": {
+        const n = Number(next());
+        opts.maxFirstAttemptFailures =
+          Number.isFinite(n) && n >= 0 ? n : 0;
+        break;
+      }
       case "--no-interactive":
         opts.interactive = false;
         break;
@@ -115,10 +142,35 @@ function parseArgs(argv) {
     }
   }
 
+  if (opts.serial) {
+    opts.parallel = 1;
+  }
   if (opts.parallel === 0) {
     opts.parallel = Math.max(1, os.cpus().length);
   }
   return opts;
+}
+
+/** @returns {{ tierMeta: object | null, files: string[] | null }} */
+function applyTierDefaults(opts, allFiles) {
+  if (!opts.tier) {
+    return { tierMeta: null, files: null };
+  }
+  const tier = getTier(opts.tier);
+  const files = resolveTierFiles(opts.tier, allFiles);
+  if (files.length === 0) {
+    console.error(`tier ${opts.tier} 未匹配到任何用例`);
+    process.exit(1);
+  }
+  opts.parallel = tier.parallel ?? opts.parallel;
+  opts.retry = tier.retry ?? opts.retry;
+  if (opts.requireCleanFirstPass) {
+    opts.maxFirstAttemptFailures = 0;
+  } else if (opts.maxFirstAttemptFailures === null) {
+    opts.maxFirstAttemptFailures = tier.maxFirstAttemptFailures ?? null;
+  }
+  opts.interactive = false;
+  return { tierMeta: tier, files };
 }
 
 // ======================== 用例扫描与过滤 ========================
@@ -508,14 +560,33 @@ function summarize(allSuites, runDir, attempts) {
 }
 
 function printSummary(summary, opts) {
-  const { total, passed, failed, totalMs } = summary;
+  const { total, passed, failed, totalMs, flake } = summary;
   console.log("\n" + "=".repeat(64));
   console.log("Peri E2E 结果汇总");
   console.log("=".repeat(64));
-  console.log(`用例: ${total} 个文件 | ✅ ${passed} 通过 | ❌ ${failed} 失败 | 总耗时 ${formatDuration(totalMs)}（并发 ${opts.parallel}，重试 ${opts.retry}）`);
+  const tierLabel = opts.tier ? ` tier=${opts.tier}` : "";
+  console.log(
+    `用例: ${total} 个文件 | ✅ ${passed} 通过 | ❌ ${failed} 失败 | 总耗时 ${formatDuration(totalMs)}（并发 ${opts.parallel}，重试 ${opts.retry}${tierLabel}）`,
+  );
 
-  if (failed === 0) {
+  if (flake) {
+    console.log(
+      `首轮: ${flake.firstAttemptPassed}/${total} 通过，${flake.firstAttemptFailed.length} 个失败` +
+        (flake.budget != null ? `（flake 预算 ≤${flake.budget}）` : ""),
+    );
+    if (flake.firstAttemptFailed.length > 0) {
+      console.log(`首轮失败文件: ${flake.firstAttemptFailed.join(", ")}`);
+    }
+    if (flake.gateFailed) {
+      console.log("\n⚠️  Flake 门禁未通过（retry 后虽全绿，首轮失败超出预算）");
+    }
+  }
+
+  if (failed === 0 && !(flake?.gateFailed)) {
     console.log("\n全部通过 🎉");
+    return;
+  }
+  if (failed === 0 && flake?.gateFailed) {
     return;
   }
 
@@ -551,9 +622,27 @@ function buildMarkdown(summary, attempts, opts, startedAt) {
   const lines = [];
   lines.push(`# Peri E2E 测试结果（${startedAt}）`);
   lines.push("");
-  lines.push(`- 运行方式：并行执行（${opts.parallel} worker），失败重试 ${opts.retry} 次`);
-  lines.push(`- 用例数：${summary.total} 个文件（${summary.passed} 通过 / ${summary.failed} 失败）`);
+  const tierNote = opts.tier ? `，tier \`${opts.tier}\`` : "";
+  lines.push(
+    `- 运行方式：并行执行（${opts.parallel} worker），失败重试 ${opts.retry} 次${tierNote}`,
+  );
+  lines.push(
+    `- 用例数：${summary.total} 个文件（${summary.passed} 通过 / ${summary.failed} 失败）`,
+  );
   lines.push(`- 总耗时：${formatDuration(summary.totalMs)}`);
+  if (summary.flake) {
+    lines.push(
+      `- 首轮：${summary.flake.firstAttemptPassed}/${summary.total} 通过；首轮失败 ${summary.flake.firstAttemptFailed.length} 个` +
+        (summary.flake.budget != null
+          ? `（预算 ≤${summary.flake.budget}，门禁 ${summary.flake.gateFailed ? "❌" : "✅"}）`
+          : ""),
+    );
+    if (summary.flake.firstAttemptFailed.length > 0) {
+      lines.push(
+        `- 首轮失败列表：\`${summary.flake.firstAttemptFailed.join("`, `")}\``,
+      );
+    }
+  }
   lines.push("");
   lines.push("## 结果汇总");
   lines.push("");
@@ -606,12 +695,22 @@ async function main() {
     process.exit(1);
   }
 
+  const { tierMeta, files: tierFiles } = applyTierDefaults(opts, allFiles);
+  if (opts.requireCleanFirstPass && opts.maxFirstAttemptFailures === null) {
+    opts.maxFirstAttemptFailures = 0;
+  }
+
   // ---- 用例选择 ----
   let files;
   const hasSelectionArgs =
-    opts.files.length > 0 || opts.filters.length > 0 || opts.dirs.length > 0;
+    tierFiles != null ||
+    opts.files.length > 0 ||
+    opts.filters.length > 0 ||
+    opts.dirs.length > 0;
 
-  if (hasSelectionArgs) {
+  if (tierFiles != null) {
+    files = tierFiles;
+  } else if (hasSelectionArgs) {
     files = selectFiles(allFiles, opts);
   } else if (opts.interactive && process.stdin.isTTY) {
     const result = await interactiveSelect(allFiles);
@@ -636,6 +735,9 @@ async function main() {
 
   console.log(`\nPeri E2E 控制面`);
   console.log(`运行目录: ${runDir}`);
+  if (tierMeta) {
+    console.log(`门禁: ${tierMeta.label} — ${tierMeta.description}`);
+  }
   console.log(`选中 ${files.length} 个文件, 并发 ${opts.parallel}, 重试 ${opts.retry}\n`);
 
   await cleanupStaleSessions();
@@ -644,6 +746,8 @@ async function main() {
   const allSuites = new Map();
   let attempts = 0;
   let pending = files;
+  /** @type {string[]} */
+  let firstAttemptFailed = [];
 
   while (pending.length > 0) {
     attempts++;
@@ -692,6 +796,12 @@ async function main() {
       }
     }
 
+    if (attempts === 1) {
+      firstAttemptFailed = [...allSuites.entries()]
+        .filter(([, s]) => s.status === "failed" || s.failedTests?.length > 0)
+        .map(([file]) => file);
+    }
+
     // 找出需要重试的失败文件
     const failedFiles = [...allSuites.entries()]
       .filter(([file]) => allSuites.get(file).status === "failed")
@@ -706,6 +816,25 @@ async function main() {
 
   // ---- 汇总与报告 ----
   const summary = summarize(allSuites, runDir, attempts);
+
+  const flakeBudget = opts.maxFirstAttemptFailures;
+  const flakeGateActive = flakeBudget != null;
+  const flakeGateFailed =
+    flakeGateActive && firstAttemptFailed.length > flakeBudget;
+  summary.flake = flakeGateActive
+    ? {
+        budget: flakeBudget,
+        firstAttemptFailed,
+        firstAttemptPassed: summary.total - firstAttemptFailed.length,
+        gateFailed: flakeGateFailed,
+      }
+    : {
+        budget: null,
+        firstAttemptFailed,
+        firstAttemptPassed: summary.total - firstAttemptFailed.length,
+        gateFailed: false,
+      };
+
   printSummary(summary, opts);
 
   const reportPath =
@@ -723,7 +852,14 @@ async function main() {
         runId,
         startedAt,
         attempts,
-        opts: { parallel: opts.parallel, retry: opts.retry },
+        tier: opts.tier ?? null,
+        tierLabel: tierMeta?.label ?? null,
+        opts: {
+          parallel: opts.parallel,
+          retry: opts.retry,
+          maxFirstAttemptFailures: opts.maxFirstAttemptFailures,
+        },
+        flake: summary.flake,
         ...summary,
         failures: summary.failures.map((s) => ({
           file: s.file,
@@ -750,7 +886,8 @@ async function main() {
   console.log(`\n📄 Markdown 报告: ${reportPath}`);
   console.log(`📄 数据摘要: ${path.join(runDir, "summary.json")}`);
 
-  process.exit(summary.failed > 0 ? 1 : 0);
+  const exitFailed = summary.failed > 0 || flakeGateFailed;
+  process.exit(exitFailed ? 1 : 0);
 }
 
 main().catch((err) => {
