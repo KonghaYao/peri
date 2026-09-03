@@ -40,7 +40,7 @@
 ## 复现步骤
 
 ```bash
-cd e2e && npm run e2e -- --only workflow --parallel 3
+cd e2e && npm run e2e -- --only workflow --serial --retry 0
 # 手动：tmux 起 TUI（./dev.sh），发
 #   /ultracode 请派发一个简单的 workflow，用并行 agent 分别执行 echo hello workflow test
 # 观察模型工具调用：应出现 WorkflowTool 调用，实际退化为 Agent 并行

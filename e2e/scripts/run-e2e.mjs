@@ -13,15 +13,9 @@
  *
  * 用法（在 e2e/ 目录下）：
  *   node scripts/run-e2e.mjs                          # 交互式选择
- *   node scripts/run-e2e.mjs --all                    # 全部用例
- *   node scripts/run-e2e.mjs --only rewind            # 文件名子串过滤
- *   node scripts/run-e2e.mjs --only 'scenarios/*.test.ts'
- *   node scripts/run-e2e.mjs --dir tool-cards         # 目录过滤
- *   node scripts/run-e2e.mjs --file tests/smoke/basic-question.test.ts
- *   node scripts/run-e2e.mjs --parallel 3 --retry 1   # 并发 3，失败重试 1 次
- *   node scripts/run-e2e.mjs --tier l0               # 分层门禁（见 config/tiers.mjs）
- *   node scripts/run-e2e.mjs --tier release            # 发版全量 + flake 预算
- *   node scripts/run-e2e.mjs --all --no-interactive --verbose
+ *   node scripts/run-e2e.mjs --tier release          # 发版全量（推荐，含 flake 门禁）
+ *   node scripts/run-e2e.mjs --file tests/smoke/basic-question.test.ts --serial --retry 0
+ *   node scripts/run-e2e.mjs --only rewind --serial   # 过滤 + 调试参数
  */
 import { spawn } from "node:child_process";
 import { getTier, resolveTierFiles } from "../config/tiers.mjs";
@@ -49,19 +43,19 @@ const USAGE = `用法:
   node scripts/run-e2e.mjs [选项]
 
 选项:
-  --all                  运行全部用例
+  --tier <l0|l1|l2|release>  分层门禁（发版用 release；见 config/tiers.mjs）
   --only <glob|子串>     按文件路径过滤（glob 或子串，可多次）
   --dir <目录>           按 tests/ 下目录过滤（如 tool-cards，可多次）
   --file <路径>          精确指定测试文件（可多次）
-  --parallel <N>         并发 worker 数（默认 3；0 = CPU 核数）
-  --retry <N>            失败文件重试次数（默认 1；0 = 不重试）
-  --tier <l0|l1|l2|release>  分层门禁（覆盖 parallel/retry/flake 预算）
+  --parallel <N>         并发 worker 数（tier 会覆盖默认值）
+  --retry <N>            失败重试次数（tier 会覆盖默认值）
   --serial               等价 --parallel 1
-  --require-clean-first-pass  首轮任一失败即门禁不通过（即使 retry 后全绿）
-  --max-first-failures <N>    首轮允许失败文件数（默认随 tier）
-  --no-interactive       无过滤参数时不进入交互选择，直接跑全部
-  --verbose              流式打印各 worker 的 vitest 输出
-  --output <路径>        Markdown 报告输出路径（默认 results/run-<ts>/report.md）
+  --require-clean-first-pass  首轮必须全绿
+  --max-first-failures <N>    首轮允许失败数（默认随 tier）
+  --all                  [已废弃] 等价 --tier release
+  --no-interactive       非 TTY 或 tier 时跳过交互选择
+  --verbose              流式打印 worker 输出
+  --output <路径>        Markdown 报告路径
   -h, --help             显示帮助`;
 
 function parseArgs(argv) {
@@ -72,6 +66,7 @@ function parseArgs(argv) {
     parallel: 3,
     retry: 1,
     tier: null,
+    allLegacy: false,
     serial: false,
     requireCleanFirstPass: false,
     maxFirstAttemptFailures: null,
@@ -85,6 +80,7 @@ function parseArgs(argv) {
     const next = () => argv[++i];
     switch (arg) {
       case "--all":
+        opts.allLegacy = true;
         opts.interactive = false;
         break;
       case "--only":
@@ -695,7 +691,15 @@ async function main() {
     process.exit(1);
   }
 
+  if (opts.allLegacy && !opts.tier) {
+    console.warn(
+      "⚠️  --all 已废弃，请改用: npm run e2e:release（含 flake 门禁）",
+    );
+    opts.tier = "release";
+  }
+
   const { tierMeta, files: tierFiles } = applyTierDefaults(opts, allFiles);
+
   if (opts.requireCleanFirstPass && opts.maxFirstAttemptFailures === null) {
     opts.maxFirstAttemptFailures = 0;
   }

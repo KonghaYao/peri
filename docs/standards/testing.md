@@ -299,7 +299,22 @@ cargo test -p <crate> --lib -- <test_name>
 lefthook run pre-commit    # fmt + check + clippy + typos
 ```
 
-### 8.2 Submodule 与独立项目
+### 8.2 Peri TUI E2E（分层门禁）
+
+Rust 单测与 E2E 分离：**E2E 命令只在 `e2e/CLAUDE.md` 维护**，不要写「28 个文件逐个手跑」或 `npm run e2e -- --all`。
+
+在 `e2e/` 目录：
+
+```bash
+npm run e2e:l0              # PR 冒烟
+npm run e2e:l1              # 合并前（panels + tool-cards + smoke）
+npm run e2e:release         # 发版全量（含首轮 flake 预算）
+npm run e2e:release:strict  # 发版且不容忍首轮 flake
+```
+
+单文件调试：`npm run e2e -- --file tests/<path>.test.ts --serial --retry 0`
+
+### 8.3 Submodule 与独立项目
 
 - `.gitmodules` 当前声明 `peri-cool/` 与 `e2e/tui-tester/`；它们不是根 Cargo workspace crate。先初始化 submodule，再进入其目录读取 manifest/README 并运行本地命令。
 - `side-projects/` 下项目有各自的 `Cargo.toml` 或 `package.json`，不由 `cargo test --workspace` 覆盖。只在任务涉及对应项目时进入目录，按其 manifest scripts 或 README 执行。

@@ -47,7 +47,7 @@ export const TIERS = {
   release: {
     id: "release",
     label: "Release 门禁",
-    description: "同 L2；用于 release-prep / CI 发版脚本别名。",
+    description: "同 L2；release-prep / npm run e2e:release 别名。",
     all: true,
     parallel: 3,
     retry: 1,
