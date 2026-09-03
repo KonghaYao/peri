@@ -1049,7 +1049,6 @@ panel-theme-footer-hint =   Ctrl+T::daily({ $status })  Ctrl+D::{ $download }
 # ---- Workflow Panel kanban ----
 workflow-loading-runs = Loading workflow runs
 workflow-no-runs = No workflow runs in current session
-workflow-footer-status = exec={ $execution } · accept={ $acceptance } · post={ $post } · deliver={ $delivery }
 workflow-footer-shortcuts = Tab::next-run · Shift+Tab::prev-run · ←/→::pane · ↑/↓::navigate · Enter::kill-run · Esc::close
 workflow-phases-header = Phases ({ $count } agents)
 workflow-model-header = Model

@@ -413,34 +413,11 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ],
     );
 
-    // ── Footer（状态与快捷键分两行，避免窄终端截断）────────────────────
-    let status_line = i18n::tr_args(
-        "workflow-footer-status",
-        &[
-            (
-                "execution".into(),
-                FluentValue::from(current_run.execution_status.clone()),
-            ),
-            (
-                "acceptance".into(),
-                FluentValue::from(current_run.acceptance_status.clone()),
-            ),
-            (
-                "post".into(),
-                FluentValue::from(current_run.post_processing_status.clone()),
-            ),
-            (
-                "delivery".into(),
-                FluentValue::from(current_run.delivery_status.clone()),
-            ),
-        ],
-    );
+    // ── Footer（仅快捷键；四维终态不在面板展示）────────────────────
     let shortcuts_line = i18n::tr("workflow-footer-shortcuts");
     let dim = theme_def.read().semantic.text.dim;
-    let footer = ratatui::text::Text::from(vec![
-        Line::from(status_line).style(Style::new().fg(dim)),
-        Line::from(shortcuts_line).style(Style::new().fg(dim)),
-    ]);
+    let footer =
+        ratatui::text::Text::from(vec![Line::from(shortcuts_line).style(Style::new().fg(dim))]);
 
     panel_shell!(PanelKind::Workflow, {
         View(height: Constraint::Length(1)) {
@@ -476,7 +453,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             }
         }
-        View(height: Constraint::Length(2)) {
+        View(height: Constraint::Length(1)) {
             Text(text: Paragraph::new(footer))
         }
     })

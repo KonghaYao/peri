@@ -1,6 +1,6 @@
 # peri-workflow 代码索引
 
-> 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-09-01
+> 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-09-03
 > 依据：`docs/design/workflow.md`、`docs/standards/architecture-contracts.md`、源码（无 crate 级 CLAUDE.md）
 
 ## 架构速览
@@ -25,7 +25,7 @@
 | 改 runtime limits | `peri-workflow/src/runner.rs` | `WorkflowLimits`、agent/run 分支、elapsed/tool count 门限；live agent 才计 attempt，cache-hit 不重复计数 |
 | 改并发限制/完成通知 | `peri-workflow/src/registry.rs`、`peri-middlewares/src/workflow/mod.rs` | `reserve`、`attach_child`、`complete`、`kill`、`resume_workflow`；complete 保留历史并广播，kill 清理由 runner 收敛 |
 | 改进度/ACP snapshot | `peri-workflow/src/progress.rs`、`peri-middlewares/src/workflow/mod.rs` | `WorkflowProgressStore::apply_event/set_terminal_projection/get_all_runs_snapshot`、`WorkflowMiddlewarePort::runs_snapshot`；四维状态随 snapshot 序列化 |
-| 改 TUI Workflow 面板 | `peri-tui/src/kit/{workflow_snapshot.rs,panels/workflow.rs}` | `TuiRunProgress` legacy 四维默认 unknown；panel footer 分别展示 execution/acceptance/post-processing/delivery |
+| 改 TUI Workflow 面板 | `peri-tui/src/kit/{workflow_snapshot.rs,panels/workflow.rs}` | `TuiRunProgress` legacy 四维默认 unknown；panel footer 只展示快捷键，不渲染 execution/acceptance/post-processing/delivery |
 | 改 Node adapter/attempt bridge | `npm-packages/@peri-workflow/src/{adapter,server,types}.ts` | `rpcAdapter.run` 透传真实 `ctx.agentId` 到 agent/run；journal callback 无 identity 时省略 optional agentId，不合成确定值 |
 
 ## 状态与持久化
