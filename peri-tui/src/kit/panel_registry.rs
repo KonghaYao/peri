@@ -27,7 +27,7 @@ use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
 use crate::kit::panels::{
     agent::AgentPanel, ask_user::AskUserPanel, betas::BetasPanel, config::ConfigPanel,
     cron::CronPanel, hooks::HooksPanel, login::LoginPanel, mcp::McpPanel, memory::MemoryPanel,
-    model::ModelPanel, plugin::PluginPanel, status::StatusPanel,
+    model::ModelPanel, plugin::PluginPanel, shell_detail::ShellDetailPanel, status::StatusPanel,
     subagent_detail::SubAgentDetailPanel, tasks::TasksPanel, theme::ThemePanel,
     thread_browser::ThreadBrowserPanel, workflow::WorkflowPanel,
 };
@@ -150,6 +150,10 @@ fn render_theme_panel() -> AnyElement<'static> {
 
 fn render_subagent_detail_panel() -> AnyElement<'static> {
     element!(SubAgentDetailPanel()).into()
+}
+
+fn render_shell_detail_panel() -> AnyElement<'static> {
+    element!(ShellDetailPanel()).into()
 }
 
 /// 所有 14 面板的元数据。
@@ -374,6 +378,18 @@ pub const PANELS: &[PanelMeta] = &[
         layout: PanelLayout::fixed(90, 20),
         render: render_subagent_detail_panel,
     },
+    PanelMeta {
+        kind: PanelKind::ShellDetail,
+        title: "Shell Detail",
+        shortcut_letter: '\0',
+        slash_command: "",
+        description: "Background shell task detail",
+        priority: 17,
+        mutex_group: MutexGroup::Tools,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(90, 20),
+        render: render_shell_detail_panel,
+    },
 ];
 
 pub fn panel_title(kind: PanelKind) -> String {
@@ -395,6 +411,7 @@ pub fn panel_title(kind: PanelKind) -> String {
         PanelKind::AskUser => "panel-title-ask-user",
         PanelKind::Theme => "panel-title-theme",
         PanelKind::SubAgentDetail => "panel-title-subagent-detail",
+        PanelKind::ShellDetail => "panel-title-shell-detail",
     };
     format!(" {} ", i18n::tr(key))
 }
@@ -418,6 +435,7 @@ pub fn panel_description(kind: PanelKind) -> String {
         PanelKind::AskUser => "panel-desc-ask-user",
         PanelKind::Theme => "panel-desc-theme",
         PanelKind::SubAgentDetail => "panel-desc-subagent-detail",
+        PanelKind::ShellDetail => "panel-desc-shell-detail",
     };
     i18n::tr(key)
 }

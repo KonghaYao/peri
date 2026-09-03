@@ -13,7 +13,7 @@ use std::time::Instant;
 /// 避免 turn 取消后缺失 `ToolEnded` 导致卡片永久显示 spinner。hash 由
 /// [`TuiToolCard::recompute_hash`] 单点计算（含 fold + user_modified，duration
 /// 按秒取整避免每毫秒 hash 抖动）。
-pub(super) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> TuiToolCard {
+pub(crate) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> TuiToolCard {
     let is_running = turn_active && t.output_summary.is_none();
     let running_duration_ms = is_running.then(|| t.started_at.elapsed().as_millis() as u64);
     let status = if is_running {

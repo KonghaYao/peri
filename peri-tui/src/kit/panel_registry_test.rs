@@ -194,6 +194,73 @@ fn test_subagent_detail_opens_and_replaces_agent_group() {
 }
 
 #[test]
+#[serial]
+fn test_shell_detail_registered_tools_mutex() {
+    let m = meta(PanelKind::ShellDetail).expect("ShellDetail 必须注册");
+    assert_eq!(m.shortcut_letter, '\0', "Shell 详情无快捷键");
+    assert_eq!(m.slash_command, "", "Shell 详情无 slash");
+    assert_eq!(m.mutex_group, MutexGroup::Tools);
+    assert!(!panel_title(PanelKind::ShellDetail).trim().is_empty());
+    assert!(!panel_description(PanelKind::ShellDetail).is_empty());
+}
+
+#[test]
+#[serial]
+fn test_open_shell_detail_closes_tasks() {
+    setup_atoms();
+    open_panel(PanelKind::Tasks);
+    open_panel(PanelKind::ShellDetail);
+    let stack = OPEN_PANELS.state().read().clone();
+    assert_eq!(stack, vec![PanelKind::ShellDetail]);
+    assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::ShellDetail));
+}
+
+#[test]
+#[serial]
+fn test_bg_task_click_route_tools_mutex_shell_then_workflow() {
+    setup_atoms();
+    use crate::kit::bg_task_click::{BgTaskClickRoute, apply_bg_task_click_route};
+
+    apply_bg_task_click_route(BgTaskClickRoute::Shell {
+        task_id: "shell-1".into(),
+    });
+    assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::ShellDetail));
+    apply_bg_task_click_route(BgTaskClickRoute::Workflow {
+        run_id: "run-a".into(),
+    });
+    let stack = OPEN_PANELS.state().read().clone();
+    assert_eq!(stack, vec![PanelKind::Workflow]);
+    assert_eq!(
+        *crate::kit::atoms::SELECTED_WORKFLOW_RUN_ID.state().read(),
+        Some("run-a".into())
+    );
+}
+
+#[test]
+#[serial]
+fn test_bg_task_click_route_subagent_agent_mutex() {
+    setup_atoms();
+    use crate::kit::bg_task_click::{BgTaskClickRoute, apply_bg_task_click_route};
+
+    open_panel(PanelKind::Agent);
+    apply_bg_task_click_route(BgTaskClickRoute::SubAgent {
+        subagent_id: "sub-1".into(),
+    });
+    let stack = OPEN_PANELS.state().read().clone();
+    assert_eq!(stack, vec![PanelKind::SubAgentDetail]);
+}
+
+#[test]
+#[serial]
+fn test_shell_detail_esc_closes() {
+    setup_atoms();
+    open_panel(PanelKind::ShellDetail);
+    let closed = close_active_panel();
+    assert_eq!(closed, Some(PanelKind::ShellDetail));
+    assert!(OPEN_PANELS.state().read().is_empty());
+}
+
+#[test]
 fn test_from_key_code_ctrl_m_maps_to_model() {
     assert_eq!(from_key_code(KeyCode::Char('m')), Some(PanelKind::Model));
     assert_eq!(from_key_code(KeyCode::Char('M')), Some(PanelKind::Model));
@@ -327,6 +394,7 @@ const ALL_PANEL_KINDS: &[PanelKind] = &[
     PanelKind::AskUser,
     PanelKind::Theme,
     PanelKind::SubAgentDetail,
+    PanelKind::ShellDetail,
 ];
 
 /// 编译期断言：MutexGroup 实现了 PartialEq（测试需要）。

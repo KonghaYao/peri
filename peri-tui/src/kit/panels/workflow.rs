@@ -5,7 +5,9 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{ACP_CLIENT_HANDLE, LANG_VERSION, WORKFLOW_SNAPSHOT};
+use crate::kit::atoms::{
+    ACP_CLIENT_HANDLE, LANG_VERSION, SELECTED_WORKFLOW_RUN_ID, WORKFLOW_SNAPSHOT,
+};
 use crate::kit::list_nav::{
     cycle_next, cycle_previous, previous_selection, scroll_start_for_selected,
 };
@@ -33,6 +35,8 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = snapshot_store;
 
     let active_run = hooks.use_state(|| 0usize);
+    let preselect_key = hooks.use_state(|| None::<(String, Vec<String>)>);
+    let run_sync_missing = hooks.use_state(|| false);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
     let sv_phase = hooks.use_state(ScrollViewState::default);
     let sv_agent = hooks.use_state(ScrollViewState::default);
@@ -69,6 +73,32 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let run_count = runs.len();
     // Enter（kill_run）按当前选中 tab 取 run_id；闭包按值捕获，随每次渲染刷新
     let run_ids: Vec<String> = runs.iter().map(|r| r.run_id.clone()).collect();
+
+    let selected_run = SELECTED_WORKFLOW_RUN_ID.state().read().clone();
+    if let Some(ref run_id) = selected_run {
+        let key = (run_id.clone(), run_ids.clone());
+        if preselect_key.read().as_ref() != Some(&key) {
+            if let Some(idx) = index_for_run_id(runs, run_id) {
+                *active_run.write() = idx;
+                *run_sync_missing.write() = false;
+            } else {
+                *active_run.write() = clamp_run_selection(0, run_count);
+                *run_sync_missing.write() = true;
+            }
+            *preselect_key.write() = Some(key);
+        }
+    } else {
+        if preselect_key.read().is_some() {
+            *preselect_key.write() = None;
+            *run_sync_missing.write() = false;
+        }
+        let clamped = clamp_run_selection(*active_run.read(), run_count);
+        if *active_run.read() != clamped {
+            *active_run.write() = clamped;
+        }
+    }
+
+    let show_run_sync_hint = *run_sync_missing.read();
 
     // ── Keyboard event handling ──────────────────────────────────────────
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
@@ -416,8 +446,15 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // ── Footer（仅快捷键；四维终态不在面板展示）────────────────────
     let shortcuts_line = i18n::tr("workflow-footer-shortcuts");
     let dim = theme_def.read().semantic.text.dim;
-    let footer =
-        ratatui::text::Text::from(vec![Line::from(shortcuts_line).style(Style::new().fg(dim))]);
+    let mut footer_lines = vec![Line::from(shortcuts_line).style(Style::new().fg(dim))];
+    if show_run_sync_hint {
+        footer_lines.insert(
+            0,
+            Line::from(i18n::tr("workflow-run-not-synced")).style(Style::new().fg(dim)),
+        );
+    }
+    let footer = ratatui::text::Text::from(footer_lines);
+    let footer_height = if show_run_sync_hint { 2 } else { 1 };
 
     panel_shell!(PanelKind::Workflow, {
         View(height: Constraint::Length(1)) {
@@ -453,7 +490,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             }
         }
-        View(height: Constraint::Length(1)) {
+        View(height: Constraint::Length(footer_height)) {
             Text(text: Paragraph::new(footer))
         }
     })
@@ -520,6 +557,14 @@ fn agent_status_color(
 
 fn clamp_run_selection(selected: usize, run_count: usize) -> usize {
     selected.min(run_count.saturating_sub(1))
+}
+
+/// 在 snapshot runs 中定位 `run_id` 对应的 tab 索引。
+pub(crate) fn index_for_run_id(
+    runs: &[crate::kit::workflow_snapshot::TuiRunProgress],
+    run_id: &str,
+) -> Option<usize> {
+    runs.iter().position(|r| r.run_id == run_id)
 }
 
 /// 壁钟驱动的运行中动画帧指示器。每 100ms 推进一帧。
@@ -605,7 +650,37 @@ fn truncate_to_width(s: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_table_header, clamp_run_selection, model_cell, truncate_to_width};
+    use super::{
+        agent_table_header, clamp_run_selection, index_for_run_id, model_cell, truncate_to_width,
+    };
+
+    #[test]
+    fn test_index_for_run_id_selects_matching_run() {
+        use crate::kit::workflow_snapshot::TuiRunProgress;
+        let runs = vec![
+            TuiRunProgress {
+                run_id: "a".into(),
+                ..Default::default()
+            },
+            TuiRunProgress {
+                run_id: "b".into(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(index_for_run_id(&runs, "b"), Some(1));
+        assert_eq!(index_for_run_id(&runs, "missing"), None);
+    }
+
+    #[test]
+    fn test_index_for_run_id_missing_clamps_zero() {
+        use crate::kit::workflow_snapshot::TuiRunProgress;
+        let runs = vec![TuiRunProgress {
+            run_id: "only".into(),
+            ..Default::default()
+        }];
+        assert!(index_for_run_id(&runs, "gone").is_none());
+        assert_eq!(clamp_run_selection(0, runs.len()), 0);
+    }
 
     /// [回归测试] workflow 轮询快照收缩时，旧的选中 tab 不能越界。
     ///

@@ -4,7 +4,8 @@
 use super::*;
 use crate::kit::acp_types::ToolCardAccumulator;
 use crate::kit::atoms::BG_AGENT_IDS;
-use crate::kit::atoms::BG_DISPLAY;
+use crate::kit::bg_task_identity::with_bg_display_for_agent;
+use crate::kit::bg_task_live::{handle_bg_tool_ended, handle_bg_tool_started};
 use crate::kit::stream_data::{TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, fold_for_status,
@@ -18,14 +19,10 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
         // bg sub-agent: TurnSuspended 后 SubAgentAccumulator 已被清除，
         // 后续 bg 工具事件仅更新 BG_DISPLAY，不走 start_subagent_tool
         if BG_AGENT_IDS.state().read().contains(agent_id) {
-            if let Some(entry) = BG_DISPLAY
-                .state()
-                .write()
-                .iter_mut()
-                .find(|e| e.id == agent_id)
-            {
+            with_bg_display_for_agent(agent_id, |entry| {
                 entry.current_tool = Some(ts.tool_name.clone());
-            }
+            });
+            handle_bg_tool_started(agent_id, ts, state.last_successful_todos.as_ref());
             state.variant = 1;
             // bg 工具事件不触碰 phase（Issue 2026-08-12）：仅更新 BG_DISPLAY，
             // 主 agent 已空闲（TurnSuspended → Idle）时不得拉回 loading。
@@ -100,15 +97,11 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
     let _todo_advanced = if let Some(agent_id) = te.agent_id.as_deref() {
         // bg sub-agent 不生成消息卡片，但仍需在成功结束时推进 Todo 基线。
         if BG_AGENT_IDS.state().read().contains(agent_id) {
-            if let Some(entry) = BG_DISPLAY
-                .state()
-                .write()
-                .iter_mut()
-                .find(|entry| entry.id == agent_id)
-            {
+            with_bg_display_for_agent(agent_id, |entry| {
                 entry.current_tool = None;
                 entry.tool_count += 1;
-            }
+            });
+            handle_bg_tool_ended(agent_id, te);
             state.variant = 1;
             // bg 工具事件不触碰 phase（Issue 2026-08-12，同 ToolStarted）。
             super::render::push_view_models(state);

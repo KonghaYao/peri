@@ -236,6 +236,7 @@ pub enum AcpEventData {
         kind: Option<String>,
         success: bool,
         duration_ms: u64,
+        output_preview: Option<String>,
     },
 
     /// `"bg-task-cancelled"` -- a background task was cancelled.
@@ -394,6 +395,7 @@ impl AcpEventData {
                     kind: d.kind,
                     success: d.success,
                     duration_ms: d.duration_ms,
+                    output_preview: d.output_preview.filter(|s| !s.is_empty()),
                 }
             }),
             "bg-task-cancelled" => decode_or_unknown(event, data, |d: BgTaskCancelledData| {
@@ -482,6 +484,8 @@ struct BgTaskCompletedData {
     kind: Option<String>,
     success: bool,
     duration_ms: u64,
+    #[serde(default)]
+    output_preview: Option<String>,
 }
 
 /// Deserialization helper for `bg-task-cancelled` payload.

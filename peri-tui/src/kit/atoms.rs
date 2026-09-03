@@ -557,12 +557,64 @@ pub static BG_TASKS: AtomStatic<Vec<BgTaskEntry>> = AtomStatic::new(Vec::new);
 
 // ── Background Display Area (后台显示区域) ────────────────────────────────────
 
+#[derive(Debug, Clone, Default)]
+pub struct BgTaskIdentity {
+    pub kind: String,
+    pub summary: String,
+    pub agent_id: Option<String>,
+    pub agent_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgLiveStatus {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+pub struct BgLiveDetail {
+    pub status: BgLiveStatus,
+    pub kind: String,
+    pub summary: String,
+    pub agent_id: Option<String>,
+    pub agent_name: Option<String>,
+    pub pid: Option<u32>,
+    pub duration_ms: Option<u64>,
+    pub output_preview: Option<String>,
+    pub cancel_reason: Option<String>,
+    pub nested_units: im::Vector<crate::kit::tui_render_unit::TuiRenderUnit>,
+    pub(crate) tool_cards: Vec<crate::kit::acp_types::ToolCardAccumulator>,
+    pub(crate) subagent_result: Option<String>,
+    pub(crate) subagent_is_error: bool,
+}
+
+impl Default for BgLiveDetail {
+    fn default() -> Self {
+        Self {
+            status: BgLiveStatus::Running,
+            kind: String::new(),
+            summary: String::new(),
+            agent_id: None,
+            agent_name: None,
+            pid: None,
+            duration_ms: None,
+            output_preview: None,
+            cancel_reason: None,
+            nested_units: im::Vector::new(),
+            tool_cards: Vec::new(),
+            subagent_result: None,
+            subagent_is_error: false,
+        }
+    }
+}
+
 /// 后台显示区域条目（由 bg-task-* + subagent tool 事件维护）
 #[derive(Debug, Clone)]
 pub struct BgDisplayEntry {
-    /// 唯一标识：task_id 或 agent_id
     pub id: String,
-    /// 任务类型标签："coder" / "explorer" / "bg-shell" / "workflow"
+    pub linked_agent_id: Option<String>,
     pub agent_type: String,
     /// 任务描述（来自 BgTaskEntry.summary）
     pub desc: String,
@@ -587,6 +639,16 @@ pub static BG_DISPLAY: AtomStatic<Vec<BgDisplayEntry>> = AtomStatic::new(Vec::ne
 /// key = SubagentStarted.instance_id (is_background=true)
 pub static BG_AGENT_IDS: AtomStatic<std::collections::HashSet<String>> =
     AtomStatic::new(std::collections::HashSet::new);
+
+pub static BG_TASK_IDENTITY: AtomStatic<std::collections::HashMap<String, BgTaskIdentity>> =
+    AtomStatic::new(std::collections::HashMap::new);
+
+pub static BG_LIVE_DETAIL: AtomStatic<std::collections::HashMap<String, BgLiveDetail>> =
+    AtomStatic::new(std::collections::HashMap::new);
+
+pub static SELECTED_BG_TASK_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
+pub static SELECTED_WORKFLOW_RUN_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 
 /// 通知消息（状态栏短暂显示，过期后自动忽略）
 pub struct Notification {

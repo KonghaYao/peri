@@ -825,6 +825,7 @@ panel-title-workflow = Workflow
 panel-title-ask-user = Ask User
 panel-title-theme = Theme
 panel-title-subagent-detail = SubAgent 详情
+panel-title-shell-detail = Shell 详情
 
 # ---- Panel Descriptions ----
 panel-desc-model = Model 别名选择
@@ -844,7 +845,18 @@ panel-desc-workflow = Workflow 运行
 panel-desc-ask-user = Agent 用户提问（自动打开）
 panel-desc-theme = 配色方案选择
 panel-desc-subagent-detail = SubAgent 嵌套消息详情
+panel-desc-shell-detail = 后台 Shell 任务详情
 subagent-detail-not-found = 未找到该 SubAgent — 会话可能已重置。
+shell-detail-not-found = 未找到该 Shell 任务 — 可能已结束或会话已重置。
+shell-detail-no-output = 运行中的 Shell 任务不会向 TUI 推送输出流。
+shell-detail-running = 运行中…
+shell-detail-output-preview = 输出预览
+shell-detail-status-running = 状态：运行中
+shell-detail-status-succeeded = 状态：成功
+shell-detail-status-failed = 状态：失败
+shell-detail-status-cancelled = 状态：已取消
+bg-task-unknown-kind = 未知的后台任务类型 — 未打开抽屉。
+workflow-run-not-synced = 所选 Workflow 运行不在当前快照中（可能已结束或尚未同步）。
 
 # ---- Betas Panel ----
 panel-betas-readonly-hint =   (只读 — 功能开关在构建时配置)

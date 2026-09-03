@@ -827,6 +827,7 @@ panel-title-workflow = Workflow
 panel-title-ask-user = Ask User
 panel-title-theme = Theme
 panel-title-subagent-detail = SubAgent Detail
+panel-title-shell-detail = Shell Detail
 
 # ---- Panel Descriptions ----
 panel-desc-model = Model alias selection
@@ -846,7 +847,18 @@ panel-desc-workflow = Workflow runs
 panel-desc-ask-user = Agent user questions (auto-open)
 panel-desc-theme = Color theme selection
 panel-desc-subagent-detail = Subagent nested transcript detail
+panel-desc-shell-detail = Background shell task detail
 subagent-detail-not-found = Subagent not found — the session may have been reset.
+shell-detail-not-found = Shell task not found — it may have finished or the session was reset.
+shell-detail-no-output = Output is not streamed to the TUI for running shell tasks.
+shell-detail-running = Running…
+shell-detail-output-preview = Output preview
+shell-detail-status-running = Status: running
+shell-detail-status-succeeded = Status: succeeded
+shell-detail-status-failed = Status: failed
+shell-detail-status-cancelled = Status: cancelled
+bg-task-unknown-kind = Unknown background task type — drawer not opened.
+workflow-run-not-synced = Selected workflow run is not in the current snapshot (finished or not synced yet).
 
 # ---- Betas Panel ----
 panel-betas-readonly-hint =   (read-only — feature flags are configured at build time)

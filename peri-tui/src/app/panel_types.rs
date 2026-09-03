@@ -24,6 +24,8 @@ pub enum PanelKind {
     /// §6.7 subagent 详情 pane——焦点在 subagent 行按 Enter 打开（嵌套消息
     /// 不铺入主时间轴）。
     SubAgentDetail,
+    /// 后台 shell 任务详情（由底栏 bg 行点击打开）。
+    ShellDetail,
 }
 
 // ─── EventResult ────────────────────────────────────────────────────────────

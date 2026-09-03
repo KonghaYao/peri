@@ -4,7 +4,14 @@
 //! 格式：`● coder  修改文档  2m15s`，空态高度 0。
 
 use crate::kit::atoms::{self, BgDisplayEntry};
+use crate::kit::bg_task_click::{
+    BgTaskLineHit, apply_bg_task_click_route, build_bg_task_line_hits,
+    route_bg_task_click_at_index, sort_bg_display_rows, visible_bg_display_entries,
+};
+use crate::kit::mouse_router;
+use crate::kit::panel_mouse::AreaTracker;
 use ratatui_kit::{
+    crossterm::event::{Event, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
@@ -13,11 +20,9 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
-
-/// 完成后保留时长（秒）
-const DONE_KEEP_SECS: u64 = 3;
 
 /// 状态符号
 mod status_symbol {
@@ -41,34 +46,63 @@ fn safe_elapsed(later: Instant, earlier: Instant) -> Duration {
 pub fn BgTaskArea(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let display = hooks.use_atom(&atoms::BG_DISPLAY);
     let _heartbeat = hooks.use_atom(&atoms::RENDER_HEARTBEAT);
-    // 所有 hook 必须在条件分支之前调用
     let (term_w, _) = hooks.use_terminal_size();
+
+    let area_tracker = hooks.use_hook(AreaTracker::new);
+    let area_rect = area_tracker.rect;
+    let line_hits = hooks.use_state(Arc::<Vec<BgTaskLineHit>>::default);
+
+    hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
+        let Event::Mouse(mouse) = event else {
+            return EventResult::Ignored;
+        };
+        if mouse.kind != MouseEventKind::Up(MouseButton::Left) {
+            return EventResult::Ignored;
+        }
+        let Some(area) = area_rect else {
+            return EventResult::Ignored;
+        };
+        let hits = line_hits.read().clone();
+        let Some(hit) =
+            crate::kit::bg_task_click::hit_test_bg_task_line(&hits, area, mouse.column, mouse.row)
+        else {
+            return EventResult::Ignored;
+        };
+        if !mouse_router::bg_bar_click_allowed(true) {
+            return EventResult::Ignored;
+        }
+        let entries = atoms::BG_DISPLAY.state().read().clone();
+        let now = Instant::now();
+        let active = visible_bg_display_entries(&entries, now);
+        let sorted = sort_bg_display_rows(active);
+        let Some(route) = route_bg_task_click_at_index(&sorted, hit.sorted_index) else {
+            return EventResult::Ignored;
+        };
+        apply_bg_task_click_route(route);
+        EventResult::Consumed
+    });
 
     let entries = display.read();
     let now = Instant::now();
 
-    let active: Vec<&BgDisplayEntry> = entries
-        .iter()
-        .filter(|e| {
-            e.is_active
-                || e.completed_at
-                    .is_none_or(|t| safe_elapsed(now, t).as_secs() < DONE_KEEP_SECS)
-        })
-        .collect();
-
-    // 排序：活跃在前
-    let mut sorted: Vec<&&BgDisplayEntry> = active.iter().collect();
-    sorted.sort_by_key(|e| (!e.is_active, e.completed_at));
+    let active = visible_bg_display_entries(&entries, now);
+    let sorted = sort_bg_display_rows(active);
 
     let max_width = (term_w as usize).saturating_sub(2);
 
-    // 逐行渲染：每个 agent 一行
     let lines: Vec<Line<'static>> = sorted
         .iter()
         .map(|entry| render_entry_line(entry, now, max_width))
         .collect();
 
     let height = lines.len() as u16;
+
+    if let Some(area) = area_rect {
+        let hits = build_bg_task_line_hits(area, &sorted);
+        *line_hits.write_no_update() = Arc::new(hits);
+    } else {
+        *line_hits.write_no_update() = Arc::new(Vec::new());
+    }
 
     element! {
         View(

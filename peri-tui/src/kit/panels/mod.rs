@@ -33,6 +33,7 @@ pub mod mcp;
 pub mod memory;
 pub mod model;
 pub mod plugin;
+pub mod shell_detail;
 pub mod status;
 pub mod subagent_detail;
 pub mod tasks;

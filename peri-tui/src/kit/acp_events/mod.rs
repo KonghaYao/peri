@@ -452,8 +452,14 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             kind: _,
             success,
             duration_ms,
-        } => system::handle_bg_task_completed(task_id, *success, *duration_ms),
-        BgTaskCancelled { task_id, .. } => system::handle_bg_task_cancelled(task_id),
+            output_preview,
+        } => system::handle_bg_task_completed(
+            task_id,
+            *success,
+            *duration_ms,
+            output_preview.clone(),
+        ),
+        BgTaskCancelled { task_id, reason } => system::handle_bg_task_cancelled(task_id, reason),
     }
 }
 

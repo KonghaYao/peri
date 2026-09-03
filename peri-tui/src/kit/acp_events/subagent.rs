@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::kit::atoms::BG_AGENT_IDS;
+use crate::kit::bg_task_identity::bind_linked_agent_on_subagent_started;
+use crate::kit::bg_task_live::{handle_bg_subagent_stopped, init_agent_live_detail};
 
 pub(super) fn handle_subagent_started(
     state: &mut BridgeState,
@@ -23,6 +25,9 @@ pub(super) fn handle_subagent_started(
     // 仅后台 subagent 注册到 BG_AGENT_IDS——同步 subagent 不进入后台显示区域
     if is_background {
         BG_AGENT_IDS.state().write().insert(agent_id.to_string());
+        if let Some(task_id) = bind_linked_agent_on_subagent_started(agent_id, agent_name) {
+            init_agent_live_detail(&task_id, agent_id, agent_name);
+        }
     }
     state.variant = 1;
     state.phase = SessionPhase::PromptRunning;
@@ -43,6 +48,9 @@ pub(super) fn handle_subagent_stopped(
         "SubagentStopped: marking SubAgentGroup as done"
     );
     state.current_turn.stop_subagent(agent_id, is_error, result);
+    if BG_AGENT_IDS.state().read().contains(agent_id) {
+        handle_bg_subagent_stopped(agent_id, result, is_error);
+    }
     // 清理后台 agent_id 注册
     BG_AGENT_IDS.state().write().remove(agent_id);
     state.variant = 1;
