@@ -39,7 +39,10 @@ pub struct CurrentTurn {
     /// Whether the turn is actively streaming (any text / tool event arrived).
     pub active: bool,
 
-    /// Streaming sub-agent cards keyed by agent_id / instance_id.
+    /// Streaming sub-agent occurrences routed by agent_id / instance_id.
+    ///
+    /// A resumed child reuses its agent_id, so multiple stopped/running
+    /// occurrences with the same ID may coexist in one parent turn.
     pub subagents: Vec<SubAgentAccumulator>,
 
     /// Chronological order of text flushes, tool starts, and sub-agent starts
@@ -341,7 +344,14 @@ impl CurrentTurn {
     ///
     /// Flushes any pending text before the sub-agent boundary.
     pub fn start_subagent(&mut self, agent_id: String, agent_name: String) {
-        if self.subagents.iter().any(|s| s.agent_id == agent_id) {
+        // Duplicate Start for the same live occurrence is idempotent. A resume,
+        // however, reuses child_thread_id after the previous occurrence stopped;
+        // it must create a fresh group and claim the new Agent ToolCard.
+        if self
+            .subagents
+            .iter()
+            .any(|s| s.agent_id == agent_id && s.is_running)
+        {
             return;
         }
         self.flush_text_segment();
@@ -409,7 +419,12 @@ impl CurrentTurn {
     /// 失败 child tool 也不携带 parent error。保存的是原始未 trim 的 result
     /// （空白仅用于判缺，不修改展示文本）。
     pub fn stop_subagent(&mut self, agent_id: &str, is_error: bool, result: &str) {
-        if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
+        if let Some(s) = self
+            .subagents
+            .iter_mut()
+            .rev()
+            .find(|s| s.agent_id == agent_id)
+        {
             s.is_running = false;
             s.is_error = is_error;
             s.error_reason = (is_error && !result.trim().is_empty()).then(|| result.to_string());
@@ -429,7 +444,12 @@ impl CurrentTurn {
 
     /// Route text chunks into a sub-agent child message.
     pub fn append_subagent_text(&mut self, agent_id: &str, text: &str) -> bool {
-        if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
+        if let Some(s) = self
+            .subagents
+            .iter_mut()
+            .rev()
+            .find(|s| s.agent_id == agent_id)
+        {
             s.append_text(text);
             self.active = true;
             self.sync_cache();
@@ -441,7 +461,12 @@ impl CurrentTurn {
 
     /// Route reasoning chunks into a sub-agent child message.
     pub fn append_subagent_reasoning(&mut self, agent_id: &str, text: &str) -> bool {
-        if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
+        if let Some(s) = self
+            .subagents
+            .iter_mut()
+            .rev()
+            .find(|s| s.agent_id == agent_id)
+        {
             s.append_reasoning(text);
             self.active = true;
             self.sync_cache();
@@ -453,7 +478,12 @@ impl CurrentTurn {
 
     /// Route tool start into a sub-agent child message.
     pub fn start_subagent_tool(&mut self, agent_id: &str, tool: ToolCardAccumulator) -> bool {
-        if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
+        if let Some(s) = self
+            .subagents
+            .iter_mut()
+            .rev()
+            .find(|s| s.agent_id == agent_id)
+        {
             s.start_tool(tool);
             self.active = true;
             self.sync_cache();
@@ -479,7 +509,12 @@ impl CurrentTurn {
         output: String,
         is_error: bool,
     ) -> bool {
-        if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
+        if let Some(s) = self
+            .subagents
+            .iter_mut()
+            .rev()
+            .find(|s| s.agent_id == agent_id)
+        {
             let ended = s.end_tool(tool_id, output, is_error);
             if ended {
                 self.active = true;
