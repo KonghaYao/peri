@@ -88,7 +88,7 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
             super::StreamingMode::None => false,
         };
         if should_push {
-            super::render::push_view_models(state);
+            // bridge-local scheduler consumes the publication intent after canonical ingest.
         }
     }
     super::render::push_acp_state(state);
@@ -158,7 +158,7 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
             super::StreamingMode::None => false,
         };
         if should_push {
-            super::render::push_view_models(state);
+            // bridge-local scheduler consumes the publication intent after canonical ingest.
         }
     }
     super::render::push_acp_state(state);

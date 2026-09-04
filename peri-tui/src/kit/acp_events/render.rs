@@ -73,6 +73,20 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     group_successful_tools(&mut items, current_turn_start);
 
     state.generation = state.generation.wrapping_add(1);
+    #[cfg(test)]
+    crate::kit::acp_bridge::observe_publication(crate::kit::acp_bridge::PublicationObservation {
+        generation: state.generation,
+        source_version: state
+            .current_turn
+            .text
+            .len()
+            .saturating_add(state.current_turn.reasoning.len()) as u64,
+        reason: if state.phase == SessionPhase::PromptRunning {
+            crate::kit::acp_bridge::PublicationReason::Intermediate
+        } else {
+            crate::kit::acp_bridge::PublicationReason::Terminal
+        },
+    });
     let snapshot = ViewModelsSnapshot {
         items,
         generation: state.generation,
@@ -594,6 +608,12 @@ fn apply_fold_pass(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
 /// 由 acp_bridge 在 BRIDGE_RESET_COUNTER 复位时调用——
 /// 立即将空快照写入 VIEW_MODELS atom，防止其他 reader 读到旧 session 数据。
 pub fn push_view_models_for_reset() {
+    #[cfg(test)]
+    crate::kit::acp_bridge::observe_publication(crate::kit::acp_bridge::PublicationObservation {
+        generation: 0,
+        source_version: 0,
+        reason: crate::kit::acp_bridge::PublicationReason::Reset,
+    });
     // [Slice 2] session 复位时清空折叠覆盖表——tool_id/message_id/agent_id
     // 跨 session 不保证唯一，残留覆盖会错误作用于新会话的同名 entry。
     FOLD_OVERRIDES.state().write().clear();

@@ -41,6 +41,26 @@ fn test_append_reasoning_sets_active() {
 }
 
 #[test]
+#[serial_test::serial]
+fn test_projection_counter_is_deterministic() {
+    crate::kit::acp_bridge::reset_perf_counters();
+    let mut ct = CurrentTurn::new();
+    ct.append_text("xxxx", None);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().projections, 0);
+    let _ = ct.view_models();
+    let first = crate::kit::acp_bridge::perf_counters();
+
+    crate::kit::acp_bridge::reset_perf_counters();
+    let mut repeated = CurrentTurn::new();
+    repeated.append_text("xxxx", None);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().projections, 0);
+    let _ = repeated.view_models();
+    let second = crate::kit::acp_bridge::perf_counters();
+
+    assert_eq!(first, second);
+}
+
+#[test]
 fn test_start_then_end_tool() {
     let mut ct = CurrentTurn::new();
     ct.start_tool(ToolCardAccumulator::new(

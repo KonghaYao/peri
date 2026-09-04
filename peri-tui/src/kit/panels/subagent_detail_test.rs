@@ -112,12 +112,16 @@ fn test_find_selected_subagent_recurses_into_nested_subagent() {
 
 #[test]
 fn test_find_live_detail_subagent_prefers_latest_resumed_task() {
-    let mut older = crate::kit::atoms::BgLiveDetail::default();
-    older.agent_id = Some("shared-agent".into());
-    older.agent_name = Some("Older".into());
-    let mut latest = crate::kit::atoms::BgLiveDetail::default();
-    latest.agent_id = Some("shared-agent".into());
-    latest.agent_name = Some("Latest".into());
+    let older = crate::kit::atoms::BgLiveDetail {
+        agent_id: Some("shared-agent".into()),
+        agent_name: Some("Older".into()),
+        ..Default::default()
+    };
+    let latest = crate::kit::atoms::BgLiveDetail {
+        agent_id: Some("shared-agent".into()),
+        agent_name: Some("Latest".into()),
+        ..Default::default()
+    };
     let live = std::collections::HashMap::from([
         ("task-z-old".to_string(), older),
         ("task-a-latest".to_string(), latest),

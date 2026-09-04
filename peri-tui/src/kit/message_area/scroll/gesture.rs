@@ -1,4 +1,4 @@
-use crate::kit::message_area::selection::{WrappedLineInfo, visual_to_logical};
+use crate::kit::message_area::selection::SlotIndex;
 
 use super::GesturePending;
 
@@ -22,14 +22,23 @@ pub(in crate::kit::message_area) fn is_click(down: (u16, u16), cur: (u16, u16)) 
 /// 与键盘 Enter（焦点在 entry 时切换）语义一致。wrap_map 越界
 /// （footer 区域无映射）→ `None`。header 换行成多视觉行时，所属视觉行
 /// 均反查到同一逻辑行，全部命中。
+pub(in crate::kit::message_area) fn entry_click_target_index(
+    index: &SlotIndex,
+    visual_row: usize,
+) -> Option<(usize, usize)> {
+    let lookup = index.visual_lookup(visual_row)?;
+    (lookup.local_logical == 0).then_some((lookup.slot_index, 0))
+}
+
+#[cfg(test)]
 pub(in crate::kit::message_area) fn entry_click_target(
-    wrap_map: &[WrappedLineInfo],
+    wrap_map: &[crate::kit::message_area::selection::WrappedLineInfo],
     slot_offsets: &[usize],
     visual_row: usize,
 ) -> Option<(usize, usize)> {
-    let li = visual_to_logical(visual_row, wrap_map)?;
-    let slot = wrap_map.get(li)?.slot_index;
-    let local = li.saturating_sub(*slot_offsets.get(slot)?);
+    let logical = crate::kit::message_area::selection::visual_to_logical(visual_row, wrap_map)?;
+    let slot = wrap_map.get(logical)?.slot_index;
+    let local = logical.saturating_sub(*slot_offsets.get(slot)?);
     (local == 0).then_some((slot, 0))
 }
 
@@ -41,14 +50,27 @@ pub(in crate::kit::message_area) fn entry_click_target(
 /// Down 冻结：记录 Pending 手势（屏幕坐标 + 一次性换算的内容坐标 +
 /// entry header 命中反查）。不改任何可视状态——真实拖动（Drag 超容差）
 /// 才升级为拖拽。
-pub(in crate::kit::message_area) fn freeze_down(
+pub(in crate::kit::message_area) fn freeze_down_index(
     screen: (u16, u16),
     visual: (usize, u16),
-    wrap_map: &[WrappedLineInfo],
-    slot_offsets: &[usize],
+    index: &SlotIndex,
 ) -> GesturePending {
     // [冻结命中] entry 命中在 Down 时反查冻结——Up 结算直接消费，不再二次
     // 换算（滚动/网格前缀的坐标正确性由此时保证）。
+    GesturePending {
+        screen,
+        visual,
+        entry_hit: entry_click_target_index(index, visual.0),
+    }
+}
+
+#[cfg(test)]
+pub(in crate::kit::message_area) fn freeze_down(
+    screen: (u16, u16),
+    visual: (usize, u16),
+    wrap_map: &[crate::kit::message_area::selection::WrappedLineInfo],
+    slot_offsets: &[usize],
+) -> GesturePending {
     GesturePending {
         screen,
         visual,

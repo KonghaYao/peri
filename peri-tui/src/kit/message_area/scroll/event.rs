@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::kit::focus_router;
 use crate::kit::message_area::props::{ScrollbarFields, mouse_in_area};
 use crate::kit::message_area::selection::{
-    WrappedLineInfo, copy_to_clipboard, extract_visual_range, mark_copy_message,
+    SlotIndex, copy_to_clipboard, extract_visual_range_index, mark_copy_message,
 };
 use crate::kit::mouse_router;
 use crate::kit::text_selection::TextSelection;
@@ -14,7 +14,7 @@ use ratatui_kit::ratatui::layout::Rect;
 
 use super::{
     DragAction, DragThrottle, GesturePending, SCROLL_LINES, ScrollPos, ScrollThrottle,
-    ScrollbarDragState, apply_scroll, compute_thumb_geometry, drag_step, freeze_down,
+    ScrollbarDragState, apply_scroll, compute_thumb_geometry, drag_step, freeze_down_index,
     is_scrollbar_column, position_to_scroll_y, scroll_frame_ms, settle_up, thumb_start_to_position,
     update_follow_on_scroll,
 };
@@ -34,11 +34,7 @@ pub(in crate::kit::message_area) fn handle_event(
     text_sel: &State<TextSelection>,
     gesture: &State<Option<GesturePending>>,
     drag_throttle: &State<DragThrottle>,
-    // 拼接后的全量 wrap_map（按 visual_start 升序）。mod.rs 渲染前已拼接好。
-    wrap_map: &Arc<Vec<WrappedLineInfo>>,
-    // [Scheme D] slot 行数据 + 累积偏移，按需解析视口行，不再传全量 clone。
-    slot_arcs: &Arc<Vec<Arc<Vec<ratatui_kit::ratatui::text::Line<'static>>>>>,
-    slot_offsets: &Arc<Vec<usize>>,
+    slot_index: &Arc<SlotIndex>,
     scrollbar_fields: &State<ScrollbarFields>,
     scrollbar_drag: &State<ScrollbarDragState>,
     follow_bottom: &State<bool>,
@@ -234,11 +230,10 @@ pub(in crate::kit::message_area) fn handle_event(
                         let visual_row = mouse.row.saturating_sub(area.y) as usize + scroll_y;
                         // 视口裁剪后无边框，visual_col 直接 = mouse.column - area.x
                         let visual_col = mouse.column.saturating_sub(area.x);
-                        let pending = freeze_down(
+                        let pending = freeze_down_index(
                             (mouse.column, mouse.row),
                             (visual_row, visual_col),
-                            wrap_map,
-                            slot_offsets,
+                            slot_index,
                         );
                         *gesture.write_no_update() = Some(pending);
                         return EventResult::Consumed;
@@ -324,10 +319,8 @@ pub(in crate::kit::message_area) fn handle_event(
                         // 先 copy 出 normalized_bounds（owned Option），drop read guard
                         let bounds = text_sel.read().normalized_bounds();
                         let extracted: Option<String> = if let Some(((sr, sc), (er, ec))) = bounds {
-                            extract_visual_range(
-                                slot_arcs.as_ref(),
-                                slot_offsets.as_ref(),
-                                wrap_map,
+                            extract_visual_range_index(
+                                slot_index,
                                 (sr, sc),
                                 (er, ec),
                                 vis_width,

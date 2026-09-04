@@ -106,7 +106,8 @@ pub struct CurrentTurn {
     cached_view_models: im::Vector<TuiRenderUnit>,
 
     /// 缓存与 segments/内容失同步标记：`invalidate_cache` 置位，`view_models()`
-    /// 时调用 `sync_cache` 重同步。流式变更走 eager sync（不置位）。
+    /// 时调用 `sync_cache` 重同步。流式变更只置位，由 publication、freeze、
+    /// terminal 或明确读取形成 projection barrier。
     cache_dirty: bool,
 }
 
@@ -227,6 +228,10 @@ impl CurrentTurn {
         self.cache_dirty = true;
     }
 
+    pub(crate) fn has_unprojected_changes(&self) -> bool {
+        self.cache_dirty
+    }
+
     /// Append a text chunk from `"text-chunk"`.
     ///
     /// If `message_id` differs from the previous chunk, a new assistant message
@@ -259,7 +264,7 @@ impl CurrentTurn {
         self.open_text_hash = tui_hash_roll_update(self.open_text_hash, t);
         self.text_started_at.get_or_insert_with(Instant::now);
         self.active = true;
-        self.sync_cache();
+        self.invalidate_cache();
     }
 
     /// Append a reasoning chunk from `"reasoning-chunk"`.
@@ -279,7 +284,7 @@ impl CurrentTurn {
         self.open_reasoning_hash = tui_hash_roll_update(self.open_reasoning_hash, t);
         self.reasoning_started_at.get_or_insert_with(Instant::now);
         self.active = true;
-        self.sync_cache();
+        self.invalidate_cache();
     }
 
     /// Begin a new tool card from `"tool-started"`.
@@ -307,7 +312,7 @@ impl CurrentTurn {
                 existing.raw_input = tool.raw_input;
                 existing.input_summary = tool.input_summary;
                 existing.presentation = tool.presentation;
-                self.sync_cache();
+                self.invalidate_cache();
             }
             return;
         }
@@ -316,7 +321,7 @@ impl CurrentTurn {
         self.segments.push(TurnSegment::Tool { tool_idx: idx });
         self.tool_cards.push(tool);
         self.active = true;
-        self.sync_cache();
+        self.invalidate_cache();
     }
 
     /// Finalise an existing running tool card from `"tool-ended"`.
@@ -336,7 +341,7 @@ impl CurrentTurn {
         // [G-started_at] 完成时刻冻结时长——running→completed 不重建 accumulator，
         // completed 显示用同源 started_at 的冻结差值（不再增长）。
         t.completed_duration_ms = Some(t.started_at.elapsed().as_millis() as u64);
-        self.sync_cache();
+        self.invalidate_cache();
         true
     }
 
@@ -387,7 +392,7 @@ impl CurrentTurn {
         self.subagents
             .push(SubAgentAccumulator::new(agent_id, agent_name));
         self.active = true;
-        self.sync_cache();
+        self.invalidate_cache();
     }
 
     /// 在 current_turn 内部时序位置注入一条 SystemNote（如 final cache coverage 警告）。
@@ -403,7 +408,7 @@ impl CurrentTurn {
             content_hash,
         });
         self.active = true;
-        self.sync_cache();
+        self.invalidate_cache();
     }
 
     /// [诊断] 返回当前所有 SubAgentAccumulator 的 agent_id 列表。
@@ -438,7 +443,7 @@ impl CurrentTurn {
             // output_summary 的工具卡保持 Running（is_running = active && 无输出）。
             s.child_turn.deactivate();
             s.cached_view_model.replace(None);
-            self.sync_cache();
+            self.invalidate_cache();
         }
     }
 
@@ -452,7 +457,7 @@ impl CurrentTurn {
         {
             s.append_text(text);
             self.active = true;
-            self.sync_cache();
+            self.invalidate_cache();
             true
         } else {
             false
@@ -469,7 +474,7 @@ impl CurrentTurn {
         {
             s.append_reasoning(text);
             self.active = true;
-            self.sync_cache();
+            self.invalidate_cache();
             true
         } else {
             false
@@ -486,7 +491,7 @@ impl CurrentTurn {
         {
             s.start_tool(tool);
             self.active = true;
-            self.sync_cache();
+            self.invalidate_cache();
             true
         } else {
             // [诊断] 路由失败时记录所有已注册的 agent_id
@@ -518,7 +523,7 @@ impl CurrentTurn {
             let ended = s.end_tool(tool_id, output, is_error);
             if ended {
                 self.active = true;
-                self.sync_cache();
+                self.invalidate_cache();
             }
             ended
         } else {
@@ -529,7 +534,7 @@ impl CurrentTurn {
     /// Mark the turn as no longer active (e.g. on `"turn-interrupted"`).
     pub fn deactivate(&mut self) {
         self.active = false;
-        self.sync_cache();
+        self.invalidate_cache();
     }
 
     /// Mark current turn as committed by a canonical ViewCommit snapshot.
@@ -693,6 +698,17 @@ impl CurrentTurn {
     /// 每 token 成本 O(变化量 + 段数扫描)，取代旧版每 token 全量重建（O(总内容)
     /// 文本拷贝 + 全量 format!/hash 的 O(N²) 累积）。
     fn sync_cache(&mut self) {
+        #[cfg(test)]
+        {
+            crate::kit::acp_bridge::observe_perf(
+                crate::kit::acp_bridge::PerfCounter::Projection,
+                1,
+            );
+            crate::kit::acp_bridge::observe_perf(
+                crate::kit::acp_bridge::PerfCounter::ProjectionCopiedBytes,
+                (self.text.len() + self.reasoning.len()) as u64,
+            );
+        }
         use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiSystemNote};
 
         let mut prev_text_end: usize = 0;

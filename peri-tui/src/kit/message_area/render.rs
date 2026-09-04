@@ -4,6 +4,8 @@
 //! 前缀结构——块首行 `[outer 空][accent 符号][gap]`，续行 `[outer 空][dim 竖线][gap]`；
 //! Narrow 断点 accent 符号退化为 bullet（§11）。正文全部从 content 列起点对齐。
 
+use std::sync::Arc;
+
 use crate::i18n;
 #[cfg(test)]
 use crate::kit::message_area::grid::Breakpoint;
@@ -148,6 +150,21 @@ pub(crate) fn vm_to_lines_cached(
     Option<InteractionLayout>,
     Vec<ImageLineInfo>,
 ) {
+    vm_to_lines_cached_with_layout(vm, grid, md_cache, None, render_copy_button)
+}
+
+pub(super) fn vm_to_lines_cached_with_layout(
+    vm: &TuiRenderUnit,
+    grid: &GridSpec,
+    md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
+    md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
+    render_copy_button: bool,
+) -> (
+    Vec<Line<'static>>,
+    Option<CopyButtonInfo>,
+    Option<InteractionLayout>,
+    Vec<ImageLineInfo>,
+) {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
@@ -181,15 +198,89 @@ pub(crate) fn vm_to_lines_cached(
                 lines.push(prefixed_cont_line(grid, line_color, Line::default()));
                 let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
                 let palette_guard = palette_state.read();
-                let segments = crate::kit::markdown::parse_markdown_cached(
-                    &data.text,
-                    grid.content_width(),
-                    *palette_guard,
-                    md_text_fg,
-                    md_cache,
-                );
+                let rendered = if data.started_at.is_none() {
+                    crate::kit::markdown::parse_markdown_terminal(
+                        &data.text,
+                        grid.content_width(),
+                        *palette_guard,
+                        md_text_fg,
+                        md_cache,
+                    )
+                } else {
+                    crate::kit::markdown::parse_markdown_chunks_cached(
+                        &data.text,
+                        grid.content_width(),
+                        *palette_guard,
+                        md_text_fg,
+                        md_cache,
+                    )
+                };
+                if let Some(layout) = md_lines {
+                    layout.stable_start = Some(lines.len());
+                    let stable_lines: Vec<_> =
+                        rendered
+                            .stable
+                            .iter()
+                            .enumerate()
+                            .map(|(chunk_index, chunk)| {
+                                let identity = Arc::as_ptr(chunk) as usize;
+                                if layout
+                                    .stable
+                                    .get(chunk_index)
+                                    .is_some_and(|cached| cached.identity == identity)
+                                {
+                                    return (identity, Vec::new());
+                                }
+                                let mut chunk_lines = Vec::new();
+                                if chunk_index > 0 {
+                                    chunk_lines.push(prefixed_cont_line(
+                                        grid,
+                                        line_color,
+                                        Line::default(),
+                                    ));
+                                }
+                                for segment in chunk.iter() {
+                                    if let crate::kit::markdown::MarkdownSegment::Text(seg_lines) =
+                                        segment
+                                    {
+                                        chunk_lines.extend(seg_lines.iter().cloned().map(|line| {
+                                            prefixed_cont_line(grid, line_color, line)
+                                        }));
+                                    }
+                                }
+                                (Arc::as_ptr(chunk) as usize, chunk_lines)
+                            })
+                            .collect();
+                    layout.retain_and_wrap(grid.total_width() as u16, &stable_lines);
+                    for chunk in &layout.stable {
+                        lines.resize(
+                            lines.len().saturating_add(chunk.lines.len()),
+                            Line::default(),
+                        );
+                    }
+                } else {
+                    for (chunk_index, chunk) in rendered.stable.iter().enumerate() {
+                        if chunk_index > 0 {
+                            lines.push(prefixed_cont_line(grid, line_color, Line::default()));
+                        }
+                        for segment in chunk.iter() {
+                            if let crate::kit::markdown::MarkdownSegment::Text(seg_lines) = segment
+                            {
+                                lines.extend(
+                                    seg_lines
+                                        .iter()
+                                        .cloned()
+                                        .map(|line| prefixed_cont_line(grid, line_color, line)),
+                                );
+                            }
+                        }
+                    }
+                }
+                let stable_segment_count: usize =
+                    rendered.stable.iter().map(|chunk| chunk.len()).sum();
                 let mut prev_seg: Option<&crate::kit::markdown::MarkdownSegment> = None;
-                for (seg_idx, seg) in segments.iter().enumerate() {
+                for (tail_index, seg) in rendered.tail.iter().enumerate() {
+                    let seg_idx = stable_segment_count + tail_index;
                     // segment 之间加空行（表格 ↔ 文本边界；T3 §3.5 图片间隙规则）：
                     // - 行内图片前后无间隙（拆段后前后片段仍属同一视觉段落）
                     // - 独占图片段连续（同段多图已在 convert 层合并为单段，

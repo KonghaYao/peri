@@ -157,6 +157,10 @@ fn test_prompt_and_agent_failure_clear_pending_cache_usage() {
         cached_tokens: 50,
         request_id: None,
     });
+    state.phase = SessionPhase::PromptRunning;
+    state.current_turn.append_reasoning("analysis", Some("r1"));
+    state.current_turn.append_text("final text", Some("m1"));
+    let generation_before = state.generation;
     dispatch_and_notify(
         &mut state,
         &AcpEventData::AgentExecutionFailed {
@@ -164,4 +168,15 @@ fn test_prompt_and_agent_failure_clear_pending_cache_usage() {
         },
     );
     assert!(state.pending_cache_usage.is_none());
+    assert_eq!(state.phase, SessionPhase::Idle);
+    assert_eq!(state.generation, generation_before.wrapping_add(1));
+    let snapshot = VIEW_MODELS.state().read().clone();
+    let assistant = snapshot.items.iter().find_map(|unit| match unit {
+        TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble),
+        _ => None,
+    });
+    assert!(
+        assistant.is_none_or(|bubble| bubble.started_at.is_none()),
+        "failure snapshot must be frozen"
+    );
 }

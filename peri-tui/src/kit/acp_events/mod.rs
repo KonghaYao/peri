@@ -297,6 +297,13 @@ impl BridgeState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationIntent {
+    None,
+    Immediate,
+    Deferred,
+}
+
 // ---------------------------------------------------------------------------
 // 核心分发函数
 // ---------------------------------------------------------------------------
@@ -305,7 +312,13 @@ impl BridgeState {
 ///
 /// 这是 acp_bridge 消费事件时调用的核心函数。
 /// 每次调用按事件类型更新内部状态，然后 push 到 VIEW_MODELS 和 ACP_STATE Atoms。
-pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
+pub(crate) fn dispatch_for_bridge(
+    state: &mut BridgeState,
+    event: &AcpEventData,
+) -> PublicationIntent {
+    let generation_before = state.generation;
+    let text_was_empty = state.current_turn.text.is_empty();
+    let reasoning_was_empty = state.current_turn.reasoning.is_empty();
     use AcpEventData::*;
     // S4.1 方案 B：CompactCompleted 置 compact_just_completed 后，任何流事件
     // 到达即清除标志——agent 内部 auto-compact 后 ReAct 循环继续产出，流事件
@@ -460,6 +473,48 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             output_preview.clone(),
         ),
         BgTaskCancelled { task_id, reason } => system::handle_bg_task_cancelled(task_id, reason),
+    }
+
+    if state.generation != generation_before {
+        PublicationIntent::Immediate
+    } else if state.current_turn.has_unprojected_changes() {
+        match event {
+            TextChunk(_) => match current_streaming_mode() {
+                StreamingMode::Streaming if text_was_empty => PublicationIntent::Immediate,
+                StreamingMode::Streaming => PublicationIntent::Deferred,
+                StreamingMode::Block
+                    if state.last_pushed_text_len == state.current_turn.text.chars().count() =>
+                {
+                    PublicationIntent::Immediate
+                }
+                StreamingMode::Block | StreamingMode::None => PublicationIntent::None,
+            },
+            ReasoningChunk(_) => match current_streaming_mode() {
+                StreamingMode::Streaming if reasoning_was_empty => PublicationIntent::Immediate,
+                StreamingMode::Streaming => PublicationIntent::Deferred,
+                StreamingMode::Block
+                    if state.last_pushed_reasoning_len
+                        == state.current_turn.reasoning.chars().count() =>
+                {
+                    PublicationIntent::Immediate
+                }
+                StreamingMode::Block | StreamingMode::None => PublicationIntent::None,
+            },
+            _ => PublicationIntent::Deferred,
+        }
+    } else {
+        PublicationIntent::None
+    }
+}
+
+/// 同步测试/非 bridge 调用的兼容入口；生产 bridge 使用 `dispatch_for_bridge`
+/// 消费 publication intent 并执行合帧。
+#[cfg(test)]
+pub(crate) fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
+    let generation_before = state.generation;
+    let _ = dispatch_for_bridge(state, event);
+    if state.generation == generation_before {
+        render::push_view_models(state);
     }
 }
 

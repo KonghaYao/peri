@@ -5,7 +5,7 @@ use std::time::Instant;
 use super::render;
 use super::render::ImageLineInfo;
 use super::scroll;
-use super::selection::WrappedLineInfo;
+use super::selection::{WrappedLineInfo, build_wrap_map};
 use ratatui_kit::ratatui::text::Line;
 
 /// 计算 palette 中影响 markdown 渲染的关键字段哈希。
@@ -75,6 +75,103 @@ pub(super) fn trace_phase(phase: &str, start: Instant, detail: Option<&str>) {
 //
 // content_hash 由 build_view_models / TuiAssistantBubble::recompute_hash 维护，
 // 已覆盖 text / reasoning.text / reasoning.collapsed / tool duration(secs) 等可变字段。
+#[derive(Clone)]
+pub(super) struct MarkdownLineChunk {
+    pub(super) identity: usize,
+    pub(super) lines: Arc<Vec<Line<'static>>>,
+    pub(super) wrap_map: Arc<Vec<WrappedLineInfo>>,
+    pub(super) visual_rows: usize,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct MarkdownLineCache {
+    pub(super) width: u16,
+    pub(super) stable_start: Option<usize>,
+    pub(super) stable: Vec<MarkdownLineChunk>,
+}
+
+impl MarkdownLineCache {
+    pub(super) fn retain_and_wrap(&mut self, width: u16, chunks: &[(usize, Vec<Line<'static>>)]) {
+        if self.width != width {
+            self.stable.clear();
+            self.width = width;
+        }
+        for (index, (identity, lines)) in chunks.iter().enumerate() {
+            if self
+                .stable
+                .get(index)
+                .is_some_and(|cached| cached.identity == *identity)
+            {
+                continue;
+            }
+            self.stable.truncate(index);
+            let lines = if lines.is_empty() {
+                Arc::clone(&self.stable[index].lines)
+            } else {
+                Arc::new(lines.clone())
+            };
+            let (_, wrap_map) = build_wrap_map(&lines, width);
+            let visual_rows = wrap_map.last().map(|entry| entry.visual_end).unwrap_or(0);
+            self.stable.push(MarkdownLineChunk {
+                identity: *identity,
+                lines,
+                wrap_map: Arc::new(wrap_map),
+                visual_rows,
+            });
+        }
+        self.stable.truncate(chunks.len());
+    }
+
+    pub(super) fn stable_overlay(&self) -> Option<(usize, Vec<Arc<Vec<Line<'static>>>>)> {
+        Some((
+            self.stable_start?,
+            self.stable
+                .iter()
+                .map(|chunk| Arc::clone(&chunk.lines))
+                .collect(),
+        ))
+    }
+
+    pub(super) fn build_slot_wrap_map(
+        &self,
+        lines: &[Line<'static>],
+        width: u16,
+    ) -> (usize, Vec<WrappedLineInfo>) {
+        let Some(stable_start) = self.stable_start.filter(|_| !self.stable.is_empty()) else {
+            return build_wrap_map(lines, width);
+        };
+        let stable_len = self
+            .stable
+            .iter()
+            .map(|chunk| chunk.lines.len())
+            .sum::<usize>();
+        if stable_start.saturating_add(stable_len) > lines.len() {
+            return build_wrap_map(lines, width);
+        }
+
+        let (mut visual_rows, mut result) = build_wrap_map(&lines[..stable_start], width);
+        let mut logical_offset = stable_start;
+        for chunk in &self.stable {
+            result.extend(chunk.wrap_map.iter().cloned().map(|mut entry| {
+                entry.logical_idx += logical_offset;
+                entry.visual_start += visual_rows;
+                entry.visual_end += visual_rows;
+                entry
+            }));
+            logical_offset += chunk.lines.len();
+            visual_rows += chunk.visual_rows;
+        }
+        let (tail_rows, tail_map) = build_wrap_map(&lines[logical_offset..], width);
+        result.extend(tail_map.into_iter().map(|mut entry| {
+            entry.logical_idx += logical_offset;
+            entry.visual_start += visual_rows;
+            entry.visual_end += visual_rows;
+            entry
+        }));
+        (visual_rows + tail_rows, result)
+    }
+}
+
 #[derive(Clone, Default)]
 pub(super) struct VmCacheSlot {
     /// 上次渲染时 VM 的 content_hash。变化时（流式追加 text、折叠/展开 reasoning、
@@ -95,6 +192,8 @@ pub(super) struct VmCacheSlot {
     /// [Phase 2] markdown 增量渲染缓存——按文本前缀复用 stable_state，仅处理新增 block。
     /// 仅 AssistantBubble / UserBubble 实际使用；其他 VM 类型保留默认值不消耗资源。
     pub(super) markdown_cache: crate::kit::markdown::MarkdownRenderCache,
+    /// Phase D：stable rendered chunk 对应的 Line/wrap identity cache。
+    pub(super) markdown_lines: MarkdownLineCache,
     /// md 复制按钮布局（slot 内逻辑索引 + 列范围）。None = 该 VM 无按钮
     /// （非 AssistantBubble / 空文本 / 宽度不足）。rebuild 时随 lines 重建。
     pub(super) copy_button: Option<render::CopyButtonInfo>,
@@ -108,4 +207,40 @@ pub(super) struct VmCacheSlot {
     /// 上次渲染时的动画帧（§8.2 壁钟 tick，100ms 粒度）。running 类 VM
     /// （tool/subagent/reasoning）帧变化时强制重建——braille 动画随帧推进。
     pub(super) anim_frame: u64,
+}
+
+#[test]
+#[serial_test::serial]
+fn test_markdown_line_cache_reuses_stable_wrap_and_rebuilds_tail_only() {
+    use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
+    use ratatui_kit::ratatui::text::Line;
+
+    let stable = vec![Line::from("stable 中文 line")];
+    let identity = 7usize;
+    let mut cache = MarkdownLineCache::default();
+    cache.retain_and_wrap(20, &[(identity, stable.clone())]);
+    let stable_lines = Arc::clone(&cache.stable[0].lines);
+    cache.stable_start = Some(1);
+
+    let mut slot_lines = vec![Line::from("chrome")];
+    slot_lines.extend(stable);
+    slot_lines.push(Line::from("mutable tail"));
+    reset_perf_counters();
+    let (_, map) = cache.build_slot_wrap_map(&slot_lines, 20);
+    let counters = perf_counters();
+
+    assert!(Arc::ptr_eq(&stable_lines, &cache.stable[0].lines));
+    assert_eq!(map.len(), slot_lines.len());
+    assert_eq!(counters.wrap_recalculated_lines, 2);
+}
+
+#[test]
+fn test_markdown_line_cache_width_invalidates_stable_wrap() {
+    use ratatui_kit::ratatui::text::Line;
+
+    let mut cache = MarkdownLineCache::default();
+    cache.retain_and_wrap(20, &[(1, vec![Line::from("long stable line")])]);
+    let first = Arc::clone(&cache.stable[0].wrap_map);
+    cache.retain_and_wrap(8, &[(1, vec![Line::from("long stable line")])]);
+    assert!(!Arc::ptr_eq(&first, &cache.stable[0].wrap_map));
 }

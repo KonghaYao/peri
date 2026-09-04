@@ -8,12 +8,17 @@ use fluent_bundle::FluentValue;
 pub(super) fn handle_agent_execution_failed(state: &mut BridgeState, message: &str) {
     tracing::error!("bridge: AgentExecutionFailed");
     state.pending_cache_usage = None;
+    state.phase = SessionPhase::Idle;
+    state.current_turn.deactivate();
     let text = i18n::tr_args(
         "app-note-agent-failed",
         &[("message".into(), FluentValue::from(message))],
     );
-    state.inject_system_note(text, TuiNoteLevel::Error);
-    state.phase = SessionPhase::Idle;
+    let content_hash = crate::kit::tui_render_unit::tui_hash_str(&text);
+    state
+        .current_turn
+        .push_system_note(text, TuiNoteLevel::Error, content_hash);
+    super::render::push_view_models(state);
     super::render::push_acp_state(state);
 }
 
