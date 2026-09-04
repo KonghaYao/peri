@@ -36,11 +36,54 @@ workflow.
 - Legal terminal states are `complete`, `blocked`, and `cancelled`. There is no
   `partially_complete`. "Core complete", "mostly complete", an exhausted context,
   or a normally exited Workflow are never completion evidence.
+- Assessor verdicts are only `complete | incomplete | blocked`. Do not invent a
+  fourth verdict such as `complete_with_known_gaps`. Unrun E2E, preexisting flake,
+  or items never listed in the accepted Verification Plan belong in
+  `Remaining Risks`; they are not coverage gaps and do not create a new verdict.
+  `incomplete` must compile every fixable gap into a Work Package and stay inside
+  the Workflow 2 loop.
 - A task is `complete` only after one independent Completion Assessor in the
   current assessment round proves 100% coverage. Fixable gaps remain inside
   logical Workflow 2 and loop until they are fixed and reassessed.
 - Never commit, push, publish, deploy, delete material data, or mutate an external
   system unless the user separately and explicitly authorizes that action.
+
+## Engine and orchestration hard rules
+
+`phase(name) only marks a stage`. The engine drops any second callback argument.
+Never write `phase(name, async () => { ... })`. Correct shape:
+
+```javascript
+phase('ADLC/W1/Discover')
+await parallel([() => agent(...)])
+```
+
+After every Workflow completion notification, read
+`.claude/workflow-runs/<run-id>/state.json` before the decision seam or any
+delivery claim. If the run has `0 agents`, or it finishes in a few seconds with
+an empty handoff directory, the script failed: fix the script and relaunch.
+Do not enter the decision seam or claim discovery finished.
+
+Engine four-layer status is not product completion. Read
+`execution_status`, `acceptance_status`, `post_processing_status`, and
+`delivery_status` separately. Do not treat engine `completed`, a worker
+`status: complete`, or a completion notification as product done. Product
+completion requires an independent Completion Assessor verdict of `complete`
+and a finalized `evidence.md`.
+
+`writeIntent.path_allowlist` inspects the whole working-tree git dirty set, not
+only files this script wrote. Before launching a write Workflow, run
+`git status --porcelain`. The allowlist lists only authorized write paths
+(product crates plus `{cwd}/.peri/adlc/tasks/<id>/**`). Do not add unrelated
+dirty paths to pass the check. If unrelated dirty files exist, record them;
+Workflow 1 (ADLC records only) can still be blocked the same way. When
+`delivery_status: blocked` and the error mentions `path_allowlist`, compare
+`git status` first: treat it as a git close-out failure, not product failure,
+and do not stash or commit. Keep `head_may_change: false` unless the user
+explicitly authorizes a commit.
+
+The Main Agent authors every Workflow script from engine primitives. `parallel`
+must receive `() => agent(` factories, never already-started promises.
 
 ## Preflight before fan-out
 
@@ -52,12 +95,14 @@ Before creating an expensive run:
 3. Discover the deferred Workflow capability with
    `SearchExtraTools("workflow")`, and execute it only through
    `ExecuteExtraTool("Workflow", ...)`. If it is unavailable, stop before fan-out.
-4. Resolve `{cwd}/peri/adlc/`, canonicalizing existing ancestors. Refuse symlink or
-   `..` traversal that escapes cwd. Verify the task directory is writable.
+4. Resolve `{cwd}/.peri/adlc/`, canonicalizing existing ancestors. Refuse symlink
+   or `..` traversal that escapes cwd. Never resolve to `~/.peri/` or outside
+   cwd. Verify the task directory is writable.
 5. Confirm the required Peri profile aliases are usable: `haiku`, `sonnet`,
    `opus`, and, when escalation requires it, `fable`.
-6. Inspect the working tree and preserve unrelated user changes. Load the
-   repository and relevant module instructions before assigning work.
+6. Inspect the working tree with `git status --porcelain` and preserve unrelated
+   user changes. Load the repository and relevant module instructions before
+   assigning work.
 
 Workflow startup may still fail quickly when Node/the runner is unavailable.
 Record that failure and stop; do not substitute an untracked inline process.
@@ -67,8 +112,12 @@ Record that failure and stop; do not substitute an untracked inline process.
 The project-level root is always:
 
 ```text
-./peri/adlc/
+./.peri/adlc/
 ```
+
+ADLC records are a local audit under `{cwd}/.peri/adlc/`. They are ignored by
+`.peri/*` and are not committed unless the user separately authorizes it. Never
+write `{cwd}/peri/adlc/`.
 
 Create a safe task id outside Workflow scripts and inject it, the cwd, and all
 timestamps through Workflow `args`. A task id may be
@@ -77,7 +126,7 @@ suffix. Never use `Date.now()`, `new Date()`, `Math.random()`, random APIs, or
 ambient time inside a Workflow script.
 
 ```text
-peri/adlc/
+.peri/adlc/
 ├── tasks/<adlc-id>/
 │   ├── manifest.json
 │   ├── contracts/
@@ -99,7 +148,7 @@ peri/adlc/
 ```
 
 Raw Workflow state remains in `.claude/workflow-runs/<run-id>/`. Do not move or
-copy its full journal into `peri/adlc/`; record the run ids in `manifest.json`
+copy its full journal into `.peri/adlc/`; record the run ids in `manifest.json`
 and, at the end, retain only a compact provenance summary.
 
 The Main Agent is the single writer for `manifest.json`, user decisions, and
@@ -311,14 +360,15 @@ run with null results.
 Workflow 1 may read the repository and write only its unique ADLC handoffs and
 artifacts. It must not begin product implementation.
 
-1. `phase('ADLC/W1/Discover')`: fan out `haiku` Agents for architecture and entry
-   points, current behavior, tests/acceptance seams, applicable repository rules,
-   relevant history, compatibility, security, and existing reusable mechanisms.
-2. `phase('ADLC/W1/Design')`: use parallel `sonnet` Agents for genuinely distinct
-   candidate designs and risk/migration analysis. They consume discovery
-   handoffs, not raw global output.
-3. `phase('ADLC/W1/Synthesize')`: one `opus` owner reconciles facts and writes:
-   `design-options.md`, `decision-brief.md`, an `intent.md` draft, and an
+1. `phase('ADLC/W1/Discover')` then `await parallel` `haiku` factories for
+   architecture and entry points, current behavior, tests/acceptance seams,
+   applicable repository rules, relevant history, compatibility, security, and
+   existing reusable mechanisms.
+2. `phase('ADLC/W1/Design')` then `await parallel` `sonnet` factories for
+   genuinely distinct candidate designs and risk/migration analysis. They consume
+   discovery handoffs, not raw global output.
+3. `phase('ADLC/W1/Synthesize')` then one `opus` owner reconciles facts and
+   writes: `design-options.md`, `decision-brief.md`, an `intent.md` draft, and an
    `execution.md` draft.
 
 `decision-brief.md` must separate confirmed facts from questions and contain:
@@ -336,7 +386,7 @@ artifacts. It must not begin product implementation.
 Do not ask the user for crate names, file paths, test commands, Agent count,
 Workflow structure, or facts discoverable from the repository.
 
-Launch with an externally injected argument object:
+Launch with an externally injected argument object. Canonical W1 script shape:
 
 ```javascript
 export const meta = {
@@ -344,15 +394,41 @@ export const meta = {
   description: 'Discover the repository and prepare an Ultra-ADLC decision brief',
 }
 
-// args supplies adlcId, adlcTaskRoot, createdAt, goal, and revision values.
-// Use only agent(), parallel(), pipeline(), phase(), log(), and normal JS.
+export default async function run({ agent, parallel, phase }, args) {
+  // args supplies adlcId, adlcTaskRoot, createdAt, goal, and revision values.
+  // Never use Date.now(), new Date(), or Math.random() in this script.
+
+  phase('ADLC/W1/Discover')
+  await parallel([
+    () => agent(discoverPromptA, { label: 'A · discovery · haiku', model: 'haiku' }),
+    () => agent(discoverPromptB, { label: 'B · discovery · haiku', model: 'haiku' }),
+  ])
+
+  phase('ADLC/W1/Design')
+  await parallel([
+    () => agent(designPrompt, { label: 'C · design · sonnet', model: 'sonnet' }),
+  ])
+
+  phase('ADLC/W1/Synthesize')
+  await agent(synthesizePrompt, { label: 'D · synthesize · opus', model: 'opus' })
+
+  return {
+    status: 'complete',
+    workPackage: 'W1-SYNTH',
+    adlcId: args.adlcId,
+  }
+}
 ```
+
+Handoff paths stay under `args.adlcTaskRoot` (`{cwd}/.peri/adlc/tasks/<id>/`).
+Use only `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, and normal JS.
 
 After `ExecuteExtraTool` returns the run id, append it to the Workflow 1 manifest
 slot and **do not continue to the decision seam yet**. Workflow is asynchronous.
 End the current work segment and wait for the Workflow completion notification.
 When notified, read `.claude/workflow-runs/<run-id>/state.json` and the referenced
-handoffs. A start response or completion notification alone is not the result.
+handoffs. Apply the empty-run failure rule above. A start response or completion
+notification alone is not the result.
 
 ## Main Agent decision seam
 
@@ -360,10 +436,13 @@ Only after Workflow 1 has completed successfully:
 
 1. Read and validate `decision-brief.md`; reject missing evidence or unresolved
    technical facts back into Workflow 1 rather than asking the user.
-2. Call `AskUserQuestion` with at most three questions. Ask only user-visible
-   behavior, intended scope, material risk, or irreversible commitments. Give
-   concise background, mutually exclusive choices, consequences, and a recommended
-   option. If the user delegates the choice, use the recommended option.
+2. Call `AskUserQuestion` with at most 4 questions per round. Ask only
+   user-visible behavior, intended scope, material risk, or irreversible
+   commitments. Discoverable technical facts must not be asked. Related decisions
+   may merge, but do not put two different user-visible outcomes into one option.
+   Give concise background, mutually exclusive choices, consequences, and a
+   recommended option. If the user delegates the choice, use the recommended
+   option.
 3. Persist `decisions/decision-001.md`, revise and accept `intent.md`, then produce
    the accepted `execution.md` with a complete ledger, ownership, profile, and
    verification plan.
@@ -375,21 +454,38 @@ Workflow 2 consumes accepted contract revision numbers through `args` and owns a
 implementation and convergence. It is one logical workflow even when resumed after
 an external blocker.
 
-1. `ADLC/W2/Decompose`: one `opus` planning owner validates the full Work Package
-   inventory and Completion Ledger. It may report contract gaps but may not narrow
-   intent or move work to Non-goals.
-2. `ADLC/W2/Implement/Round-N`: run ready `sonnet` implementation packages in
-   parallel, with `haiku` for independent fixtures/checks. Every writer has an
-   exclusive write scope and leaves a Handoff with self-test evidence.
-3. `ADLC/W2/Integrate/Round-N`: one `sonnet` integration owner resolves shared
-   changes, runs target integration checks, and accounts for every package.
-4. `ADLC/W2/Verify/Round-N`: fan out independent `sonnet` correctness reviews,
-   `opus` architecture/security reviews when warranted, and `haiku` deterministic
-   checks/evidence reconciliation.
-5. `ADLC/W2/Assess/Round-N`: after all verification joins, invoke exactly one new
-   Completion Assessor for that round. Never run assessors in parallel or use a
-   vote. Use `opus`, replacing it with one `fable` assessor only after documented
-   repeated Opus convergence failure.
+W2 `writeIntent` example:
+
+```javascript
+writeIntent: {
+  head_may_change: false,
+  path_allowlist: [
+    '.peri/adlc/tasks/<id>/**',
+    'the/authorized/product/crate/**',
+  ],
+}
+```
+
+Replace the product-crate glob with the actual authorized crates. Do not list
+unrelated dirty paths.
+
+1. `phase('ADLC/W2/Decompose')` then one `opus` planning owner validates the full
+   Work Package inventory and Completion Ledger. It may report contract gaps but
+   may not narrow intent or move work to Non-goals.
+2. `phase('ADLC/W2/Implement/Round-N')` then run ready `sonnet` implementation
+   packages in `await parallel` factories, with `haiku` for independent
+   fixtures/checks. Every writer has an exclusive write scope and leaves a
+   Handoff with self-test evidence.
+3. `phase('ADLC/W2/Integrate/Round-N')` then one `sonnet` integration owner
+   resolves shared changes, runs target integration checks, and accounts for
+   every package.
+4. `phase('ADLC/W2/Verify/Round-N')` then fan out independent `sonnet`
+   correctness reviews, `opus` architecture/security reviews when warranted, and
+   `haiku` deterministic checks/evidence reconciliation.
+5. `phase('ADLC/W2/Assess/Round-N')` then invoke exactly one new Completion
+   Assessor for that round. Never run assessors in parallel or use a vote. Use
+   `opus`, replacing it with one `fable` assessor only after documented repeated
+   Opus convergence failure.
 
 The assessor starts from a fresh context, did not design/code/fix/review the task,
 and treats all completion claims as untrusted. Its product-code and test access is
@@ -427,8 +523,8 @@ physical run id; do not create Workflow 3. Cancellation likewise remains
 `cancelled` and retains the audit files.
 
 After launching Workflow 2, again wait for its completion notification and read
-the saved state and Handoffs before acting. Never infer delivery from the immediate
-run-id response.
+the four engine statuses, saved state, and Handoffs before acting. Never infer
+delivery from the immediate run-id response.
 
 ## Performance and evolution record
 
@@ -446,9 +542,9 @@ must not receive a success performance record.
 
 ## Final handoff to the user
 
-Before reporting success, the Main Agent independently checks that the final
-Workflow state is completed, the assessor verdict is `complete`, `evidence.md`
-is finalized, the Completion Ledger is 100%, and the performance record exists.
+Before reporting success, the Main Agent independently checks that the assessor
+verdict is `complete`, `evidence.md` is finalized, the Completion Ledger is 100%,
+and the performance record exists. Engine `execution_status` alone is not enough.
 Only then append compact Workflow provenance without modifying the verdict, and
 update the manifest.
 

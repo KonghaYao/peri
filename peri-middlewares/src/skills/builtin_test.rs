@@ -81,7 +81,7 @@ fn test_ultra_adlc_skill_encodes_peri_workflow_contract() {
         .content;
 
     for marker in [
-        "./peri/adlc/",
+        "./.peri/adlc/",
         "intent.md",
         "execution.md",
         "evidence.md",
@@ -97,9 +97,23 @@ fn test_ultra_adlc_skill_encodes_peri_workflow_contract() {
         "Date.now()",
         "new Date()",
         "Math.random()",
+        "phase(name) only marks a stage",
+        "delivery_status",
+        "path_allowlist",
+        "git status --porcelain",
+        "at most 4",
     ] {
         assert!(content.contains(marker), "ultra-adlc 应锁定 {marker}");
     }
+
+    assert!(
+        !content.contains("./peri/adlc/"),
+        "ultra-adlc 不得再锁定已删除路径 ./peri/adlc/"
+    );
+    assert!(
+        !content.contains("at most three"),
+        "ultra-adlc 提问上限应与 AskUserQuestion 对齐为 at most 4"
+    );
 
     for profile in ["`fable`", "`opus`", "`sonnet`", "`haiku`"] {
         assert!(
