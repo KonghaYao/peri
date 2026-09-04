@@ -81,8 +81,8 @@ orchestrator must also capture a filesystem write-boundary snapshot at preflight
 must report both created files and files whose content or type changed, including under
 ignored paths such as `.peri/adlc/`; merge those paths with Git `changed_paths` and
 validate every repo-relative path against the same allowlist. The Git postcondition
-compares before/after porcelain records and checks only paths whose status changed
-during the run. A pre-existing unrelated dirty or ignored path is therefore allowed
+checks only paths whose status changed during the run by comparing before/after
+porcelain records. A pre-existing unrelated dirty or ignored path is therefore allowed
 when its status and filesystem snapshot remain unchanged; record it once as an
 out-of-scope baseline, preserve it, and do not treat it as a blocker or ask the user to
 clean it. Before launching a write Workflow, run `git status --porcelain` and capture
