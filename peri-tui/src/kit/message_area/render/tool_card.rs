@@ -132,10 +132,12 @@ fn render_todo_tool_card_lines(
                 .fg(sem.text.primary)
                 .add_modifier(Modifier::BOLD),
         )]));
-        lines.push(Line::from(vec![Span::styled(
-            truncate_by_width(&data.output_summary, content_width),
-            Style::default().fg(sem.text.muted),
-        )]));
+        if data.fold == FoldState::Expanded {
+            lines.push(Line::from(vec![Span::styled(
+                truncate_by_width(&data.output_summary, content_width),
+                Style::default().fg(sem.text.muted),
+            )]));
+        }
     } else {
         let title = format!("TodoUpdate ({}/{})", todo.completed_count, todo.total_count);
         lines.push(Line::from(vec![Span::styled(
@@ -144,6 +146,10 @@ fn render_todo_tool_card_lines(
                 .fg(sem.text.primary)
                 .add_modifier(Modifier::BOLD),
         )]));
+
+        if !data.is_running && data.fold == FoldState::Collapsed {
+            return with_prefix_lines(grid, &symbol, Style::default().fg(indicator_color), lines);
+        }
 
         for change in &todo.changes {
             // [F3] 图标走符号降级表（§12）：✓→success；▶/↻/✎ 无 §4.1 语义
@@ -174,7 +180,7 @@ fn render_generic_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Li
     let content = grid.content_width();
     let display_name = crate::kit::tool_display::format_tool_name(&data.tool_name);
     let (symbol, symbol_color) = status_symbol_and_color(data.is_running, data.is_error, &sem);
-    // 展开态（completed+Expanded / error=Expanded）首行符号换 ▾（§6.4 示例）。
+    // 显式展开的成功终态首行符号换 ▾；失败终态始终保留 × 状态符号。
     let symbol = if !data.is_running && !data.is_error && data.fold == FoldState::Expanded {
         sym().expanded.to_string()
     } else {
@@ -260,14 +266,11 @@ fn render_generic_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Li
         lines.push(divider_fill_line(grid));
     }
 
-    // 输出摘要（§6.4）：error 摘要拆行 + error 色（§9.2）；展开态 ≤4 行。
+    // 输出摘要（§6.4）：仅显式展开时显示；error 摘要拆行 + error 色（§9.2）。
+    // 完成态默认折叠，避免 tool result 到达时自动增加正文行导致消息区高度突变。
     // [G-Diff] 含 diff 的 Edit/Write 展开体由 render_diff_lines 展示（§6.5）——
     // diff 文本就是 output_summary 本体，原始行直接显示会与 hunk 渲染重复。
-    let show_output = if data.is_error {
-        true
-    } else {
-        data.fold == FoldState::Expanded
-    };
+    let show_output = data.fold == FoldState::Expanded;
     let has_diff = data.diff.is_some();
     if show_output && !has_diff && !data.output_summary.is_empty() {
         // [Fix F6 §11] Compact/Narrow 断点：tool 展开体最多 2 行（§11

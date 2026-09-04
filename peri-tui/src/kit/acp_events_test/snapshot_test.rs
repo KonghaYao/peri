@@ -257,7 +257,7 @@ fn test_snapshot_group_successful_tools() {
         TuiRenderUnit::TuiCollapsedGroup(g) => {
             assert_eq!(
                 g.failed_count, 1,
-                "紧邻 error 工具计入失败数（error 仍独立展开，不入组）"
+                "紧邻 error 工具计入失败数（error 仍保持独立状态行，不入组）"
             );
             // [G1] failed_count 纳入 hash——变化必须触发分片缓存重建
             assert_ne!(

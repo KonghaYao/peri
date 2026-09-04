@@ -98,7 +98,7 @@ RenderEvent::ToolStarted / ToolEnded
 | 主题 | 当前基线 |
 | --- | --- |
 | Transcript | 连续左对齐时间轴、统一 `GridSpec`、视口裁剪、分片渲染缓存、响应式断点已实现 |
-| Tool card | 统一 `TuiToolCard`；Running→Preview、Completed→Collapsed、Error→Expanded summary |
+| Tool card | 统一 `TuiToolCard`；Running→Preview、Completed/Error→Collapsed（失败状态行保持可见，详情由用户显式展开） |
 | 专属展示 | `SkillTool`/旧名 `Skill` 与 `TodoWrite` 有专属 presentation；`Bash`、`Edit`、`Write` 在通用 renderer 内有局部特判 |
 | Diff | Edit/Write 尝试解析 unified diff，失败时回退为变更摘要；完整 diff 是否可达取决于上游 output |
 | SubAgent | 主时间轴有 `TuiSubAgentGroup`，并已有 SubAgent 详情 Panel |

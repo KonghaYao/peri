@@ -131,10 +131,10 @@ fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
     assert!(r.collapsed());
 }
 
-/// §7 tool 行：running → Preview；success → Collapsed；error → Expanded summary。
+/// §7 tool 行：running → Preview；success/error 终态均 → Collapsed。
 #[test]
 #[serial]
-fn test_fold_pass_tool_preview_collapsed_error_expanded() {
+fn test_fold_pass_tool_preview_then_terminal_collapsed() {
     let mut state = make_fold_test_state();
 
     // running：ToolStarted
@@ -195,8 +195,8 @@ fn test_fold_pass_tool_preview_collapsed_error_expanded() {
     let t = tool_card_of(&snap, 1);
     assert_eq!(
         t.fold,
-        FoldState::Expanded,
-        "§7 tool error → Expanded summary（永不自动隐藏）"
+        FoldState::Collapsed,
+        "§7 tool error → Collapsed，完成时不得自动展开导致高度突变"
     );
 }
 

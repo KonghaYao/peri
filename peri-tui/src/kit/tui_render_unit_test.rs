@@ -229,10 +229,10 @@ fn test_fold_for_status_matches_spec_table() {
     assert_eq!(fold_for_status(Reasoning, Running), Preview);
     assert_eq!(fold_for_status(Reasoning, Completed), Collapsed);
     assert_eq!(fold_for_status(Reasoning, Error), Preview);
-    // tool：Preview → Collapsed → Expanded summary
+    // tool：流式 Preview，成功或失败完成后均收束为 Collapsed
     assert_eq!(fold_for_status(Tool, Running), Preview);
     assert_eq!(fold_for_status(Tool, Completed), Collapsed);
-    assert_eq!(fold_for_status(Tool, Error), Expanded);
+    assert_eq!(fold_for_status(Tool, Error), Collapsed);
     // subagent：Collapsed + live summary → Collapsed → Expanded summary
     assert_eq!(fold_for_status(SubAgent, Running), Collapsed);
     assert_eq!(fold_for_status(SubAgent, Completed), Collapsed);

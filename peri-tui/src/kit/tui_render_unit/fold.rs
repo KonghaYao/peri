@@ -59,10 +59,11 @@ pub fn fold_for_status(target: FoldTarget, status: EntryStatus) -> FoldState {
         // reasoning：running = tail preview，completed 自动收束为单行
         (Reasoning, Running) | (Reasoning, Error) => FoldState::Preview,
         (Reasoning, Completed) => FoldState::Collapsed,
-        // tool：running = tail preview，success 默认折叠，error 展开错误摘要
+        // tool：running = tail preview；完成后（成功或失败）默认收束为单行，
+        // 避免终态到达时展开正文导致消息区高度突变。失败仍由状态符号与 Failed
+        // 文案保持可见，详情可由用户显式展开。
         (Tool, Running) => FoldState::Preview,
-        (Tool, Completed) => FoldState::Collapsed,
-        (Tool, Error) => FoldState::Expanded,
+        (Tool, Completed) | (Tool, Error) => FoldState::Collapsed,
         // subagent：running = Collapsed + live summary（裁决 C4：按 spec §7 表）
         (SubAgent, Running) | (SubAgent, Completed) => FoldState::Collapsed,
         (SubAgent, Error) => FoldState::Expanded,

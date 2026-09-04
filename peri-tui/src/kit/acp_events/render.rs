@@ -343,9 +343,9 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
             continue;
         }
         // [D2] 失败数 = 从 run 结束位置向后扫描**连续相邻** error 工具计数。
-        // error 工具不入组、不删除、保持展开（§7 表 error→Expanded + §15
-        // 「error 永不隐藏」优先）；扫描在删除 run 元素之前进行（segment 索引
-        // 仍指向原位置）。
+        // error 工具不入组、不删除，保持独立的失败状态行（§7 表 error→Collapsed；
+        // §15「error 永不隐藏」指状态行始终可见）；扫描在删除 run 元素之前进行
+        //（segment 索引仍指向原位置）。
         let mut failed_count: u32 = 0;
         for i in run_end..segment.len() {
             let is_error = matches!(

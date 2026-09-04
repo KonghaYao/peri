@@ -8,8 +8,8 @@ use std::time::Instant;
 
 /// 从 `ToolCardAccumulator` 派生 `TuiToolCard`。
 ///
-/// fold 按 spec §7 表取当前状态的目标值（running=Preview / error=Expanded /
-/// completed=Collapsed）；工具只有在所属 turn 仍 active 且尚无输出时才是 running，
+/// fold 按 spec §7 表取当前状态的目标值（running=Preview / completed/error=
+/// Collapsed）；工具只有在所属 turn 仍 active 且尚无输出时才是 running，
 /// 避免 turn 取消后缺失 `ToolEnded` 导致卡片永久显示 spinner。hash 由
 /// [`TuiToolCard::recompute_hash`] 单点计算（含 fold + user_modified，duration
 /// 按秒取整避免每毫秒 hash 抖动）。

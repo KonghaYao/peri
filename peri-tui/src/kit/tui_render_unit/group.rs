@@ -83,8 +83,8 @@ pub struct TuiCollapsedGroup {
     pub title: String,
     /// Number of items hidden when collapsed.
     pub count: u32,
-    /// 组后**连续相邻**的 error 工具数（D2：error 不入组、不删除、保持展开，
-    /// 标题追加 `· N failed`）。由 `group_successful_tools` 从 run 结束位置
+    /// 组后**连续相邻**的 error 工具数（D2：error 不入组、不删除，独立失败
+    /// 状态行保持可见，标题追加 `· N failed`）。由 `group_successful_tools` 从 run 结束位置
     /// 向后扫描连续相邻 error `TuiToolCard` 计入。
     pub failed_count: u32,
     /// The view models inside the group (visible when expanded).

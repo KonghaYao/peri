@@ -239,9 +239,10 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   （`combine(h, failed_count)`）、`tui_impl_partial_eq` 同步
   （`tui_render_unit.rs::TuiCollapsedGroup`）。
 - `group_successful_tools`（acp_events/render.rs）：run 结束位置起向后扫描
-  **连续相邻** error `TuiToolCard` 计入 `failed_count`；error 不入组、不删除、
-  保持展开（§7 表 error→Expanded + §15「error 永不隐藏」）。扫描在删除 run
-  元素之前进行（items 索引仍指向原位置）。
+  **连续相邻** error `TuiToolCard` 计入 `failed_count`；error 不入组、不删除，
+  独立失败状态行保持可见。2026-09-04 起 §7 表改为 error→Collapsed，避免
+  ToolEnded 到达时自动展开正文造成 transcript 高度突变；错误详情仍可手动展开。
+  扫描在删除 run 元素之前进行（items 索引仍指向原位置）。
 - 渲染 `render_collapsed_group_lines`（message_area/render.rs）：标题追加
   `· N failed`（仅 >0，`sem.status.error` 色 span）；title 截断优先于失败后缀
   （失败数不可被截断吞掉），窄屏失败数仍可见。
