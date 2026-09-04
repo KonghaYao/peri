@@ -10,7 +10,7 @@
 - 入口：`peri-workflow/src/tool.rs::WorkflowTool::invoke`；执行与终态：`peri-workflow/src/runner.rs::WorkflowRunner::run`；通用进程/RPC host：`peri-js-runtime/src/{host,rpc}.rs`。
 - 契约事实源：`peri-acp-types/src/workflow.rs` 的 `AgentExecutor`、`AgentRunParams`、`AgentRunResult`、`ProgressEvent`、四维状态、`WorkflowAttempt`、`WorkflowTaskResult`。wire 变更须同步 `npm-packages/@peri-workflow/src/types.ts`。
 - 并发不变量：start/resume 都先 `WorkflowTaskRegistry::reserve`，成功后才 spawn，并用 `attach_child` 绑定 task，拒绝路径不得产生 detached runner。
-- 交付不变量：engine `completed` 只表示 execution completed；acceptance、post-processing、delivery 独立投影。Git postcondition 异常只报告并 blocked，不执行 add/commit/stash/reset/restore/clean。
+- 交付不变量：engine `completed` 只表示 execution completed；acceptance、post-processing、delivery 独立投影。`acceptance_status: unknown` 且 execution/post-processing 成功时，delivery 保持 `unknown`；明确执行/验收/Git postcondition 失败才为 `blocked`。Git postcondition 只比较 Workflow 前后状态发生变化的路径，已有且未变化的无关 dirty path 不阻塞；异常只报告并 blocked，不执行 add/commit/stash/reset/restore/clean。
 
 ## 速查表
 

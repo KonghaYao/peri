@@ -106,7 +106,7 @@ fn postcondition_projection_requires_acceptance_evidence_for_delivery() {
             Some(&read_only),
             Some(&Ok(())),
         ),
-        (PostProcessingStatus::NotRequired, DeliveryStatus::Blocked,)
+        (PostProcessingStatus::NotRequired, DeliveryStatus::Unknown)
     );
     assert_eq!(
         project_postcondition(

@@ -144,6 +144,26 @@ Ultra-ADLC 是一个深模块。它对用户暴露的接口只有自然语言目
   owner 收敛。
 - **Verify**：执行记录能够区分可并发工作包、写冲突串行化与关键路径等待。
 
+### ADLC-GIT-BASELINE-001
+
+- **Scope**：Workflow 写入归属与任务外工作区改动。
+- **Rule**：`writeIntent.path_allowlist` 以 Workflow 启动时捕获的 Git baseline 为基准，
+  只约束运行期间状态发生变化的路径。启动前已存在且运行期间未变化的任务外 dirty path
+  只记录一次并保留，不构成阻塞，也不得要求用户清理。`delivery_status: blocked` 不能单独
+  证明 Git 越界；只有 `post_processing_status: failed` 与明确 Git postcondition error
+  才能建立该结论。错误未列出具体路径时，不得从结束时的 dirty set 推断责任路径。
+- **Verify**：Workflow journal 测试覆盖 unchanged pre-existing dirty path 通过、allowlisted
+  path 变化通过、out-of-allowlist path 在 baseline 后变化失败；builtin skill 锁定相同解释。
+
+### ADLC-DELIVERY-STATUS-001
+
+- **Scope**：Workflow 四维终态解释。
+- **Rule**：execution、acceptance、post-processing 与 delivery 独立表达。execution 与
+  post-processing 成功但 acceptance 尚为 `unknown` 时，delivery 必须保持 `unknown`；
+  只有明确执行失败、acceptance failed、缺少可验证 write intent 或 post-processing
+  failed/blocked 时才是 `blocked`；全部必要维度通过时才是 `deliverable`。
+- **Verify**：`project_postcondition` 单元测试分别覆盖 unknown、failed 与 passed acceptance。
+
 ### ADLC-COMPLETE-001
 
 - **Scope**：任务终态。

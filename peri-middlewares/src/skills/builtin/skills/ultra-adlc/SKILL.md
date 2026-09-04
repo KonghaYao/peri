@@ -71,16 +71,28 @@ Engine four-layer status is not product completion. Read
 completion requires an independent Completion Assessor verdict of `complete`
 and a finalized `evidence.md`.
 
-`writeIntent.path_allowlist` inspects the whole working-tree git dirty set, not
-only files this script wrote. Before launching a write Workflow, run
-`git status --porcelain`. The allowlist lists only authorized write paths
-(product crates plus `{cwd}/.peri/adlc/tasks/<id>/**`). Do not add unrelated
-dirty paths to pass the check. If unrelated dirty files exist, record them;
-Workflow 1 (ADLC records only) can still be blocked the same way. When
-`delivery_status: blocked` and the error mentions `path_allowlist`, compare
-`git status` first: treat it as a git close-out failure, not product failure,
-and do not stash or commit. Keep `head_may_change: false` unless the user
-explicitly authorizes a commit.
+`writeIntent.path_allowlist` is enforced against the Git baseline captured when the
+Workflow starts. The postcondition compares before/after porcelain records and
+checks only paths whose status changed during the run. A pre-existing unrelated
+dirty path is therefore allowed when its status remains unchanged; record it once
+as an out-of-scope baseline, preserve it, and do not treat it as a blocker or ask
+the user to clean it. Before launching a write Workflow, run
+`git status --porcelain` to establish that context. The allowlist lists only
+authorized write paths (product crates plus
+`{cwd}/.peri/adlc/tasks/<id>/**`); never add unrelated dirty paths merely to widen
+write authority.
+
+Interpret the four engine statuses independently. `delivery_status: blocked`
+alone does not prove a Git failure: an explicit Git postcondition error requires
+`post_processing_status: failed` and an error mentioning `path_allowlist` (or
+another Git invariant). `acceptance_status: unknown` with successful execution
+and post-processing means delivery is `unknown`, not blocked. If a path-allowlist
+error occurs, it proves that some out-of-allowlist path changed after baseline;
+unless the engine names that path or a before/after comparison proves it, do not
+infer the culprit from the final dirty set. Treat the event as a Git close-out
+failure rather than a product failure, and do not stash, commit, reset, clean, or
+ask the user to alter unrelated changes. Keep `head_may_change: false` unless the
+user explicitly authorizes a commit.
 
 The Main Agent authors every Workflow script from engine primitives. `parallel`
 must receive `() => agent(` factories, never already-started promises.

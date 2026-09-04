@@ -205,8 +205,12 @@ impl WorkflowProgressStore {
                     };
                     run.acceptance_status = peri_acp_types::workflow::AcceptanceStatus::Unknown;
                     run.post_processing_status =
-                        peri_acp_types::workflow::PostProcessingStatus::Blocked;
-                    run.delivery_status = peri_acp_types::workflow::DeliveryStatus::Blocked;
+                        peri_acp_types::workflow::PostProcessingStatus::Unknown;
+                    run.delivery_status = if status == "completed" {
+                        peri_acp_types::workflow::DeliveryStatus::Unknown
+                    } else {
+                        peri_acp_types::workflow::DeliveryStatus::Blocked
+                    };
                     run.completed_at = Some(std::time::Instant::now());
                 }
             }

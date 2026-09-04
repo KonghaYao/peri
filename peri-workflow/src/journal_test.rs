@@ -293,6 +293,45 @@ fn test_git_baseline_detects_unattributed_change_without_restoring_it() {
 }
 
 #[test]
+fn test_write_postcondition_ignores_unchanged_preexisting_dirty_path() {
+    let tmp = TempDir::new().unwrap();
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .unwrap()
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("allowed.txt"), "base\n").unwrap();
+    std::fs::write(tmp.path().join("outside.txt"), "base\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    std::fs::write(tmp.path().join("outside.txt"), "pre-existing dirty\n").unwrap();
+
+    let baseline = GitBaseline::capture(tmp.path()).unwrap();
+    let intent = peri_acp_types::workflow::WorkflowWriteIntent::Write {
+        repo_root: tmp.path().to_string_lossy().into_owned(),
+        cwd: tmp.path().to_string_lossy().into_owned(),
+        path_allowlist: vec!["allowed.txt".into()],
+        head_may_change: false,
+        commit_required: None,
+    };
+    std::fs::write(tmp.path().join("allowed.txt"), "changed\n").unwrap();
+
+    baseline.verify_postcondition(Some(&intent)).unwrap();
+}
+
+#[test]
 fn test_write_postcondition_allows_only_allowlisted_change() {
     let tmp = TempDir::new().unwrap();
     let run_git = |args: &[&str]| {
