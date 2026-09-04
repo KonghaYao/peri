@@ -1,7 +1,6 @@
 # Peri Meta 数据访问
 
-> 状态：已批准目标设计；实现进度由
-> `spec/issues/2026-09-04-peri-meta-control.md` 维护。
+> 状态：现行设计
 >
 > 事实源：持久化契约为 `peri-acp-types::store::ThreadStore`，生产数据源为
 > `peri-resources::sessions::SqliteThreadStore`，CLI 启动接口位于 `peri-tui`。
@@ -145,9 +144,9 @@ CLI 不直接执行 SQL，不依赖 SQLite 表名，也不实例化 session owne
 - 不存在默认数据库时返回 `database_not_found`，不得用新空库伪装成 session 不存在。
 
 现有 `SqliteThreadStore::new` 会创建文件并初始化 schema，因此不能直接作为该只读命令
-的打开路径。目标实现应在 Resources 层提供 read-only open adapter，并复用
-`ThreadStore::load_meta` 的读取语义。read-only adapter 必须验证数据库存在且 schema
-可识别；未来 schema 版本不兼容时 fail closed。
+的打开路径。现行实现通过 Resources 层的 read-only open adapter 复用
+`ThreadStore::load_meta` 的读取语义。该 adapter 验证数据库是已存在的普通文件，并按查询
+所需 schema shape fail closed；未来 schema 不兼容时返回类型化错误。
 
 SQLite 为并发读取提供的必要内部机制不算业务写入，但 read-only 连接不得依赖创建
 WAL、migration 或其他持久副作用才能成功。
@@ -294,9 +293,9 @@ v1 不提前增加 `list`、`messages`、`tree`、`snapshot`、`compaction`、`e
 SQL/query command。Workflow 已有独立二进制，不进入 `peri meta`。其他能力在真实需求
 出现后分别设计，避免形成与数据库 schema 等宽的浅 interface。
 
-## 11. 验证要求
+## 11. 验证覆盖
 
-实现必须证明：
+现行实现的 contract tests 与完整验证矩阵覆盖：
 
 - 同一数据库和 session ID 在 Agent 运行与不运行时返回相同持久化投影；
 - 命令调用链不依赖 `peri-acp` host、`SessionManager`、IPC 或环境中的 session context；

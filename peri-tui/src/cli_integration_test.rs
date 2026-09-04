@@ -106,6 +106,215 @@ fn test_resume_without_value() {
 }
 
 #[test]
+fn test_meta_session_nested_grammar() {
+    let cli = Cli::try_parse_from([
+        "peri",
+        "--db-path",
+        "/tmp/threads.db",
+        "meta",
+        "session",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "--json",
+    ])
+    .unwrap();
+    assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
+    let Some(Commands::Meta {
+        action: MetaAction::Session { session_id, json },
+    }) = cli.command
+    else {
+        panic!("expected meta session command");
+    };
+    assert_eq!(session_id, "550e8400-e29b-41d4-a716-446655440000");
+    assert!(json);
+}
+
+#[test]
+fn test_meta_session_requires_explicit_id() {
+    assert!(Cli::try_parse_from(["peri", "meta", "session"]).is_err());
+}
+
+#[test]
+fn test_meta_rejects_unknown_expansions() {
+    assert!(
+        Cli::try_parse_from([
+            "peri",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--include",
+            "messages",
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["peri", "meta", "list"]).is_err());
+}
+
+#[test]
+fn test_print_conflicts_with_meta() {
+    let cli = Cli::try_parse_from([
+        "peri",
+        "--print=prompt",
+        "meta",
+        "session",
+        "550e8400-e29b-41d4-a716-446655440000",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_err());
+}
+
+#[test]
+fn test_meta_rejects_every_unrelated_top_level_option() {
+    let cases: &[&[&str]] = &[
+        &["--approve"],
+        &["--print=prompt"],
+        &["--output-format", "json"],
+        &["--max-turns", "1"],
+        &["--bare"],
+        &["--permission-mode", "default"],
+        &["--dangerously-skip-permissions"],
+        &["--model", "sonnet"],
+        &["--effort", "high"],
+        &["--continue"],
+        &["--resume=session"],
+        &["--session-id", "550e8400-e29b-41d4-a716-446655440000"],
+        &["--name", "name"],
+        &["--no-session-persistence"],
+        &["--allowedTools", "Bash"],
+        &["--disallowedTools", "Edit"],
+        &["--settings", "{}"],
+        &["--config-file", "/tmp/settings.json"],
+    ];
+
+    for unrelated in cases {
+        let mut args = vec!["peri"];
+        args.extend_from_slice(unrelated);
+        args.extend_from_slice(&["meta", "session", "550e8400-e29b-41d4-a716-446655440000"]);
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(
+            validate_cli(&cli).is_err(),
+            "Meta accepted unrelated option: {unrelated:?}"
+        );
+    }
+}
+
+#[test]
+fn test_argv_meta_detection_respects_top_level_subcommand_position() {
+    let ordinary_cases: &[&[&str]] = &[
+        &["-p", "meta", "--help"],
+        &["--print", "meta", "--help"],
+        &["-r", "meta", "--help"],
+        &["--resume", "meta", "--help"],
+        &["--model", "meta"],
+        &["--model", "meta", "--definitely-invalid"],
+        &["--model", "meta", "--settings"],
+        &["--model", "meta", "--effort"],
+        &[
+            "--db-path",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ],
+        &[
+            "--definitely-invalid",
+            "value",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ],
+        &[
+            "--help",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ],
+        &["-p", "meta", "value"],
+        &["--resume", "meta", "value"],
+    ];
+    for ordinary in ordinary_cases {
+        let mut args = vec![OsString::from("peri")];
+        args.extend(ordinary.iter().map(OsString::from));
+        assert!(
+            !argv_requests_meta(&args),
+            "ordinary argv was classified as Meta: {ordinary:?}"
+        );
+    }
+
+    let meta_cases: &[&[&str]] = &[
+        &[
+            "--db-path",
+            "threads.db",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ],
+        &["meta", "session"],
+        &["meta", "list"],
+        &[
+            "-p",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ],
+        &[
+            "--print",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ],
+        &[
+            "-r",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ],
+        &[
+            "--resume",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ],
+        &[
+            "--definitely-invalid",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--json",
+        ],
+        &[
+            "--db-path",
+            "--definitely-invalid",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--json",
+        ],
+        &[
+            "--approve",
+            "--unknown",
+            "meta",
+            "session",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ],
+    ];
+    for meta in meta_cases {
+        let mut args = vec![OsString::from("peri")];
+        args.extend(meta.iter().map(OsString::from));
+        assert!(
+            argv_requests_meta(&args),
+            "Meta argv was not classified as Meta: {meta:?}"
+        );
+    }
+
+    let other_command = [
+        OsString::from("peri"),
+        OsString::from("acp"),
+        OsString::from("--model"),
+        OsString::from("meta"),
+    ];
+    assert!(!argv_requests_meta(&other_command));
+}
+
+#[test]
 fn test_combined_model_effort() {
     let cli = TestCli::try_parse_from(["peri", "--model", "sonnet", "--effort", "high"]);
     assert!(cli.is_ok());

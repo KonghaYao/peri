@@ -1,10 +1,18 @@
 # Peri Meta 数据访问实施
 
-**状态**：Ready for agent
+**状态**：已完成（归档）
 **优先级**：中
 **类型**：功能 / CLI / 持久化数据访问
 **创建日期**：2026-09-04
 **权威设计**：`docs/design/meta-control.md`
+
+## 完成摘要
+
+实现已按权威设计交付：`peri-tui` 提供 `peri meta session <SESSION_ID> [--json]`，在配置初始化前完成受限 Meta 路由、参数校验、稳定输出与退出码映射；`peri-resources` 提供 existing-file-only SQLite read-only seam，并经 `ThreadStore::load_meta` 返回持久化 metadata。CLI 使用九字段 DTO allowlist，不进入 ACP、Agent、Runtime、Workflow、IPC 或运行中 session 状态。
+
+WP-007 的授权单次有界重试已通过完整验证矩阵，包括格式、`peri-resources` 与 `peri-tui` 测试、真实 binary contract tests、doc tests、layer-import gate、workspace clippy 和 diff check。此前观察到的无关 `peri-tui` library test timing/order-sensitive flaky 风险继续保留；本次通过不证明该风险不会复现。
+
+本 issue 作为已完成实施记录归档保留；现行行为以 `docs/design/meta-control.md`、对应 code-index 与代码/契约测试为准。
 
 ## Problem Statement
 
@@ -79,16 +87,16 @@ peri --db-path /path/to/threads.db meta session <SESSION_ID> --json
 
 ## 验收标准
 
-- [ ] `peri meta session <ID>` 能在没有其他 Peri 进程时读取已持久化 metadata。
-- [ ] 相同数据库与 ID 在 Agent 运行和不运行时使用相同查询路径。
-- [ ] 缺少 ID 时 parser 拒绝；不选择 cwd 最新、全局最新或 active session。
-- [ ] `--db-path` 精确选择单个数据库，不扫描或 fallback 到其他路径。
-- [ ] 不存在的数据库不会因查询而创建。
-- [ ] 查询不会更新 metadata、运行 schema migration 或产生业务写入。
-- [ ] `SessionMetaDtoV1` 不包含 config、cached context、frozen data、messages 或 secret。
-- [ ] 非法 `agent_status` / `cancel_policy`、损坏或不兼容 schema 不静默 fallback。
-- [ ] WAL writer 并发时读取已提交数据，busy 等待有界。
-- [ ] JSON stdout、错误 stderr 和退出码通过 contract tests。
+- [x] `peri meta session <ID>` 能在没有其他 Peri 进程时读取已持久化 metadata。
+- [x] 相同数据库与 ID 在 Agent 运行和不运行时使用相同查询路径。
+- [x] 缺少 ID 时 parser 拒绝；不选择 cwd 最新、全局最新或 active session。
+- [x] `--db-path` 精确选择单个数据库，不扫描或 fallback 到其他路径。
+- [x] 不存在的数据库不会因查询而创建。
+- [x] 查询不会更新 metadata、运行 schema migration 或产生业务写入。
+- [x] `SessionMetaDtoV1` 不包含 config、cached context、frozen data、messages 或 secret。
+- [x] 非法 `agent_status` / `cancel_policy`、损坏或不兼容 schema 不静默 fallback。
+- [x] WAL writer 并发时读取已提交数据，busy 等待有界。
+- [x] JSON stdout、错误 stderr 和退出码通过 contract tests。
 
 ## 非目标
 

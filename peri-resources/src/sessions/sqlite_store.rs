@@ -1,6 +1,7 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -27,11 +28,92 @@ const THREAD_META_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated
     (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
     t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, NULL as cached_context, t.agent_status";
 
+const READ_ONLY_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+const REQUIRED_THREAD_COLUMNS: &[&str] = &[
+    "id",
+    "title",
+    "cwd",
+    "created_at",
+    "updated_at",
+    "message_count",
+    "parent_thread_id",
+    "snapshot_at_message_id",
+    "hidden",
+    "cancel_policy",
+    "config",
+    "cached_context",
+    "agent_status",
+];
+const REQUIRED_MESSAGE_COLUMNS: &[&str] = &["thread_id", "content"];
+
+/// 只读 session 数据库访问的稳定失败分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOnlyStoreErrorKind {
+    DatabaseNotFound,
+    DatabaseUnreadable,
+    SchemaIncompatible,
+    SessionNotFound,
+    CorruptSessionData,
+    Internal,
+}
+
+/// 只读 session 数据库错误；所有公开格式及 source chain 均不携带数据库行值或 SQL 文本。
+#[derive(Debug)]
+pub enum ReadOnlyThreadStoreError {
+    DatabaseNotFound,
+    DatabaseUnreadable,
+    SchemaIncompatible,
+    SessionNotFound,
+    CorruptSessionData,
+    Internal,
+}
+
+impl ReadOnlyThreadStoreError {
+    fn from_kind(kind: ReadOnlyStoreErrorKind) -> Self {
+        match kind {
+            ReadOnlyStoreErrorKind::DatabaseNotFound => Self::DatabaseNotFound,
+            ReadOnlyStoreErrorKind::DatabaseUnreadable => Self::DatabaseUnreadable,
+            ReadOnlyStoreErrorKind::SchemaIncompatible => Self::SchemaIncompatible,
+            ReadOnlyStoreErrorKind::SessionNotFound => Self::SessionNotFound,
+            ReadOnlyStoreErrorKind::CorruptSessionData => Self::CorruptSessionData,
+            ReadOnlyStoreErrorKind::Internal => Self::Internal,
+        }
+    }
+
+    pub fn kind(&self) -> ReadOnlyStoreErrorKind {
+        match self {
+            Self::DatabaseNotFound => ReadOnlyStoreErrorKind::DatabaseNotFound,
+            Self::DatabaseUnreadable => ReadOnlyStoreErrorKind::DatabaseUnreadable,
+            Self::SchemaIncompatible => ReadOnlyStoreErrorKind::SchemaIncompatible,
+            Self::SessionNotFound => ReadOnlyStoreErrorKind::SessionNotFound,
+            Self::CorruptSessionData => ReadOnlyStoreErrorKind::CorruptSessionData,
+            Self::Internal => ReadOnlyStoreErrorKind::Internal,
+        }
+    }
+}
+
+impl std::fmt::Display for ReadOnlyThreadStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self.kind() {
+            ReadOnlyStoreErrorKind::DatabaseNotFound => "session database not found",
+            ReadOnlyStoreErrorKind::DatabaseUnreadable => "session database is unreadable",
+            ReadOnlyStoreErrorKind::SchemaIncompatible => "session database schema is incompatible",
+            ReadOnlyStoreErrorKind::SessionNotFound => "session not found",
+            ReadOnlyStoreErrorKind::CorruptSessionData => "session data is corrupt",
+            ReadOnlyStoreErrorKind::Internal => "internal storage error",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for ReadOnlyThreadStoreError {}
+
 /// 基于 SQLite 的 ThreadStore 实现
 ///
 /// 使用 WAL 模式提升并发读性能，sqlx SqlitePool 连接池管理并发。
 pub struct SqliteThreadStore {
     pool: SqlitePool,
+    read_only: bool,
 }
 
 impl SqliteThreadStore {
@@ -54,9 +136,75 @@ impl SqliteThreadStore {
             .max_connections(5)
             .connect_with(options)
             .await?;
-        let store = Self { pool };
+        let store = Self {
+            pool,
+            read_only: false,
+        };
         store.init_schema().await?;
         Ok(store)
+    }
+
+    /// 以 SQLite read-only capability 打开已存在的数据库。
+    ///
+    /// 该路径不创建目录、数据库或 schema，也不执行 migration。
+    pub async fn open_existing_read_only(
+        db_path: impl AsRef<Path>,
+    ) -> std::result::Result<Self, ReadOnlyThreadStoreError> {
+        let db_path = db_path.as_ref();
+        let metadata = tokio::fs::metadata(db_path).await.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::DatabaseNotFound)
+            } else {
+                ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::DatabaseUnreadable)
+            }
+        })?;
+        if !metadata.is_file() {
+            return Err(ReadOnlyThreadStoreError::from_kind(
+                ReadOnlyStoreErrorKind::DatabaseUnreadable,
+            ));
+        }
+
+        let options = SqliteConnectOptions::new()
+            .filename(db_path)
+            .read_only(true)
+            .create_if_missing(false)
+            .busy_timeout(READ_ONLY_BUSY_TIMEOUT);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|_| {
+                ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::DatabaseUnreadable)
+            })?;
+        let store = Self {
+            pool,
+            read_only: true,
+        };
+        store.probe_load_meta_shape().await?;
+        Ok(store)
+    }
+
+    async fn probe_load_meta_shape(&self) -> std::result::Result<(), ReadOnlyThreadStoreError> {
+        for (table, required) in [
+            ("threads", REQUIRED_THREAD_COLUMNS),
+            ("messages", REQUIRED_MESSAGE_COLUMNS),
+        ] {
+            let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(format!(
+                "SELECT name FROM pragma_table_info('{table}')"
+            )))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|_| {
+                ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::SchemaIncompatible)
+            })?;
+            let actual: HashSet<String> = rows.into_iter().map(|(name,)| name).collect();
+            if !required.iter().all(|column| actual.contains(*column)) {
+                return Err(ReadOnlyThreadStoreError::from_kind(
+                    ReadOnlyStoreErrorKind::SchemaIncompatible,
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// 使用默认路径 `~/.peri/threads/threads.db` 创建
@@ -235,6 +383,8 @@ fn meta_from_row(
     cached_context: Option<String>,
     agent_status: String,
 ) -> Result<ThreadMeta> {
+    let message_count = usize::try_from(message_count).context("message_count is negative")?;
+    let content_size = u64::try_from(content_size).context("content_size is negative")?;
     // 关键约束：DB 字符串必须经 FromStr 解析为强类型枚举；非法值不静默 fallback
     let cancel_policy = CancelPolicy::from_str(&cancel_policy)
         .with_context(|| format!("解析 cancel_policy 失败（thread_id={}）", id))?;
@@ -246,8 +396,8 @@ fn meta_from_row(
         cwd,
         created_at: created_at.parse::<DateTime<Utc>>()?,
         updated_at: updated_at.parse::<DateTime<Utc>>()?,
-        message_count: message_count as usize,
-        content_size: content_size as u64,
+        message_count,
+        content_size,
         parent_thread_id,
         snapshot_at_message_id,
         hidden,
@@ -386,17 +536,42 @@ impl ThreadStore for SqliteThreadStore {
             Option<String>,
             Option<String>,
             String,
-        ) = sqlx::query_as(AssertSqlSafe(format!(
+        ) = match sqlx::query_as(AssertSqlSafe(format!(
             "SELECT {THREAD_COLUMNS} FROM threads t WHERE t.id = ?1"
         )))
         .bind(id.as_str())
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        {
+            Ok(row) => row,
+            Err(error) if self.read_only => {
+                let kind = if matches!(error, sqlx::Error::RowNotFound) {
+                    ReadOnlyStoreErrorKind::SessionNotFound
+                } else if matches!(
+                    error,
+                    sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)
+                ) {
+                    ReadOnlyStoreErrorKind::CorruptSessionData
+                } else {
+                    ReadOnlyStoreErrorKind::DatabaseUnreadable
+                };
+                return Err(ReadOnlyThreadStoreError::from_kind(kind).into());
+            }
+            Err(error) => return Err(error.into()),
+        };
 
-        meta_from_row(
+        let result = meta_from_row(
             row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
             row.12, row.13,
-        )
+        );
+        if self.read_only {
+            result.map_err(|_| {
+                ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::CorruptSessionData)
+                    .into()
+            })
+        } else {
+            result
+        }
     }
 
     async fn update_meta(&self, id: &ThreadId, meta: ThreadMeta) -> Result<()> {

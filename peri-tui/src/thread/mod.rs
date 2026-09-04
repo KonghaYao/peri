@@ -7,4 +7,6 @@
 
 pub use peri_acp_types::store::ThreadStore;
 pub use peri_acp_types::thread::{ThreadId, ThreadMeta};
-pub use peri_resources::sessions::SqliteThreadStore;
+pub use peri_resources::sessions::{
+    ReadOnlyThreadStoreError, SqliteThreadStore, open_thread_store_read_only,
+};
