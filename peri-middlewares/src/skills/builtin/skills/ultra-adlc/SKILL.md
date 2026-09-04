@@ -37,11 +37,15 @@ workflow.
   `partially_complete`. "Core complete", "mostly complete", an exhausted context,
   or a normally exited Workflow are never completion evidence.
 - Assessor verdicts are only `complete | incomplete | blocked`. Do not invent a
-  fourth verdict such as `complete_with_known_gaps`. Unrun E2E, preexisting flake,
-  or items never listed in the accepted Verification Plan belong in
-  `Remaining Risks`; they are not coverage gaps and do not create a new verdict.
-  `incomplete` must compile every fixable gap into a Work Package and stay inside
-  the Workflow 2 loop.
+  fourth verdict such as `complete_with_known_gaps`. Every required check in the
+  accepted Verification Plan must have current, attributable evidence. Unrun or
+  missing required tests, missing required coverage evidence, and unevidenced
+  acceptance scenarios are coverage gaps: return `incomplete` when fixable inside
+  Workflow 2, or `blocked` when an external dependency or authorization prevents
+  obtaining the evidence. Keep fixable incomplete items inside the Workflow 2 loop.
+  `Remaining Risks` may contain only non-required checks outside the accepted
+  Verification Plan (including an out-of-plan E2E or preexisting flake); it cannot
+  excuse missing required evidence or reduce any completion percentage.
 - A task is `complete` only after one independent Completion Assessor in the
   current assessment round proves 100% coverage. Fixable gaps remain inside
   logical Workflow 2 and loop until they are fixed and reassessed.
@@ -72,14 +76,19 @@ completion requires an independent Completion Assessor verdict of `complete`
 and a finalized `evidence.md`.
 
 `writeIntent.path_allowlist` is enforced against the Git baseline captured when the
-Workflow starts. The postcondition compares before/after porcelain records and
-checks only paths whose status changed during the run. A pre-existing unrelated
-dirty path is therefore allowed when its status remains unchanged; record it once
-as an out-of-scope baseline, preserve it, and do not treat it as a blocker or ask
-the user to clean it. Before launching a write Workflow, run
-`git status --porcelain` to establish that context. The allowlist lists only
-authorized write paths (product crates plus
-`{cwd}/.peri/adlc/tasks/<id>/**`); never add unrelated dirty paths merely to widen
+Workflow starts. The existing Git postcondition omits ignored paths, so the Ultra-ADLC
+orchestrator must also capture a filesystem write-boundary snapshot at preflight and compare it during post-processing. That check
+must report both created files and files whose content or type changed, including under
+ignored paths such as `.peri/adlc/`; merge those paths with Git `changed_paths` and
+validate every repo-relative path against the same allowlist. The Git postcondition
+compares before/after porcelain records and checks only paths whose status changed
+during the run. A pre-existing unrelated dirty or ignored path is therefore allowed
+when its status and filesystem snapshot remain unchanged; record it once as an
+out-of-scope baseline, preserve it, and do not treat it as a blocker or ask the user to
+clean it. Before launching a write Workflow, run `git status --porcelain` and capture
+the filesystem write-boundary snapshot to establish that context. The allowlist lists
+only authorized write paths (product crates plus `{cwd}/.peri/adlc/tasks/<id>/**` and
+the designated evolution record); never add unrelated dirty paths merely to widen
 write authority.
 
 Interpret the four engine statuses independently. `delivery_status: blocked`
@@ -410,6 +419,13 @@ export default async function run({ agent, parallel, phase }, args) {
   // args supplies adlcId, adlcTaskRoot, createdAt, goal, and revision values.
   // Never use Date.now(), new Date(), or Math.random() in this script.
 
+  const {
+    discoverPromptA,
+    discoverPromptB,
+    designPrompt,
+    synthesizePrompt,
+  } = args
+
   phase('ADLC/W1/Discover')
   await parallel([
     () => agent(discoverPromptA, { label: 'A · discovery · haiku', model: 'haiku' }),
@@ -473,6 +489,7 @@ writeIntent: {
   head_may_change: false,
   path_allowlist: [
     '.peri/adlc/tasks/<id>/**',
+    '.peri/adlc/evolution/records/<adlc-id>.json',
     'the/authorized/product/crate/**',
   ],
 }
@@ -521,8 +538,13 @@ gap_handoff_path
 assessment_handoff_path
 ```
 
-`complete` requires all four percentages to equal 100 and all three counts to
-equal zero. Do not average them. For `incomplete`, write
+`complete` requires all four percentages to equal 100, including
+`required_tests_pass_percent`, and all three counts to equal zero. Each percentage
+must be backed by the required evidence named in the accepted Verification Plan;
+a reported percentage without that evidence is missing evidence, not 100%. Do not
+average them or move a required check to `Remaining Risks`. For missing evidence,
+return `incomplete` when Workflow 2 can obtain it or `blocked` when an external
+constraint prevents it. For `incomplete`, write
 `handoffs/workflow-2/gap-round-N.md`, compile every fixable gap into a Work
 Package, then loop through parallel repair, integration, verification, and one new
 assessment. Do not return from Workflow 2 while a gap is internally fixable.

@@ -248,6 +248,11 @@ fn test_current_turn_resumed_subagent_routes_to_new_agent_group() {
     assert!(ct.end_subagent_tool("child-1", "child-tool-2", "passed".into(), false));
     ct.stop_subagent("child-1", false, "completed");
 
+    assert_ne!(
+        ct.subagents[0].instance_id, ct.subagents[1].instance_id,
+        "恢复 occurrence 必须获得新的 TUI instance_id"
+    );
+    assert_eq!(ct.subagents[0].agent_id, ct.subagents[1].agent_id);
     assert_eq!(ct.subagents.len(), 2, "恢复应创建第二个可见分组");
     assert_eq!(
         ct.subagents[0].child_turn.text, "before interruption",

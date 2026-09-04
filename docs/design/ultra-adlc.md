@@ -148,12 +148,18 @@ Ultra-ADLC 是一个深模块。它对用户暴露的接口只有自然语言目
 
 - **Scope**：Workflow 写入归属与任务外工作区改动。
 - **Rule**：`writeIntent.path_allowlist` 以 Workflow 启动时捕获的 Git baseline 为基准，
-  只约束运行期间状态发生变化的路径。启动前已存在且运行期间未变化的任务外 dirty path
-  只记录一次并保留，不构成阻塞，也不得要求用户清理。`delivery_status: blocked` 不能单独
-  证明 Git 越界；只有 `post_processing_status: failed` 与明确 Git postcondition error
-  才能建立该结论。错误未列出具体路径时，不得从结束时的 dirty set 推断责任路径。
-- **Verify**：Workflow journal 测试覆盖 unchanged pre-existing dirty path 通过、allowlisted
-  path 变化通过、out-of-allowlist path 在 baseline 后变化失败；builtin skill 锁定相同解释。
+  只约束运行期间状态发生变化的路径。由于现有 Git postcondition 不报告 ignored path，
+  Ultra-ADLC orchestrator 还必须在 preflight 对 cwd 建立文件系统 write-boundary snapshot，
+  并在 post-processing 比较 snapshot，按 repo-relative path 报出所有新建或内容/类型发生
+  变化的文件；该 orchestrator 检查结果与 Git `changed_paths` 合并后再逐项匹配 allowlist。启动前已存在且运行期间未变化的任务外
+  dirty 或 ignored path 只记录一次并保留，不构成阻塞，也不得要求用户清理。
+  `delivery_status: blocked` 不能单独证明 Git 越界；只有 `post_processing_status: failed`
+  与明确 Git postcondition error 才能建立该结论。错误未列出具体路径时，不得从结束时的
+  dirty set 推断责任路径。
+- **Verify**：Ultra-ADLC orchestrator 的 boundary-check 测试覆盖 allowlisted ignored path 的新建/
+  修改通过、out-of-allowlist ignored path 的新建/修改失败；Workflow journal 测试继续覆盖
+  unchanged pre-existing dirty path 通过、allowlisted tracked path 变化通过和
+  out-of-allowlist tracked path 在 baseline 后变化失败；builtin skill 锁定相同解释。
 
 ### ADLC-DELIVERY-STATUS-001
 

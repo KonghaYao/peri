@@ -32,17 +32,56 @@ where
 }
 
 fn sync_tool_units(detail: &mut BgLiveDetail) {
-    let mut units: im::Vector<TuiRenderUnit> = detail
-        .nested_units
-        .iter()
-        .filter(|u| !matches!(u, TuiRenderUnit::TuiToolCard(_)))
-        .cloned()
-        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut units = detail.nested_units.clone();
+    for unit in units.iter_mut() {
+        let TuiRenderUnit::TuiToolCard(existing) = unit else {
+            continue;
+        };
+        let Some(acc) = detail
+            .tool_cards
+            .iter()
+            .find(|acc| acc.tool_id == existing.tool_id)
+        else {
+            continue;
+        };
+        seen.insert(acc.tool_id.clone());
+        *unit = TuiRenderUnit::TuiToolCard(build_tool_card(
+            acc,
+            detail.status == BgLiveStatus::Running,
+        ));
+    }
     for acc in &detail.tool_cards {
-        let card = build_tool_card(acc, detail.status == BgLiveStatus::Running);
-        units.push_back(TuiRenderUnit::TuiToolCard(card));
+        if seen.insert(acc.tool_id.clone()) {
+            units.push_back(TuiRenderUnit::TuiToolCard(build_tool_card(
+                acc,
+                detail.status == BgLiveStatus::Running,
+            )));
+        }
     }
     detail.nested_units = units;
+}
+
+fn finalize_nested_reasoning(detail: &mut BgLiveDetail) {
+    for unit in detail.nested_units.iter_mut() {
+        let TuiRenderUnit::TuiAssistantBubble(bubble) = unit else {
+            continue;
+        };
+        let mut bubble = bubble.clone();
+        if let Some(reasoning) = bubble.reasoning.as_mut() {
+            reasoning.duration_ms = reasoning.duration_ms.or_else(|| {
+                reasoning
+                    .started_at
+                    .map(|started| started.elapsed().as_millis() as u64)
+            });
+            reasoning.started_at = None;
+            reasoning.is_running = false;
+            reasoning.status = EntryStatus::Completed;
+            reasoning.fold = FoldState::Collapsed;
+        }
+        bubble.recompute_hash();
+        *unit = TuiRenderUnit::TuiAssistantBubble(bubble);
+    }
 }
 
 pub fn init_agent_live_detail(task_id: &str, agent_id: &str, agent_name: &str) {
@@ -186,6 +225,7 @@ pub fn handle_bg_subagent_stopped(agent_id: &str, result: &str, is_error: bool) 
         } else {
             BgLiveStatus::Succeeded
         };
+        finalize_nested_reasoning(detail);
         sync_tool_units(detail);
     });
 }
@@ -204,6 +244,7 @@ pub fn mark_task_completed(
         } else {
             BgLiveStatus::Failed
         };
+        finalize_nested_reasoning(d);
         sync_tool_units(d);
     });
 }
@@ -212,6 +253,7 @@ pub fn mark_task_cancelled(task_id: &str, reason: &str) {
     with_live_detail(task_id, |d| {
         d.cancel_reason = Some(reason.to_string());
         d.status = BgLiveStatus::Cancelled;
+        finalize_nested_reasoning(d);
         sync_tool_units(d);
     });
 }

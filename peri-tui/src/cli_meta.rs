@@ -211,7 +211,7 @@ fn render_nullable(value: Option<&str>) -> String {
 }
 
 fn escape_human(value: &str) -> String {
-    value.chars().flat_map(char::escape_default).collect()
+    value.chars().flat_map(char::escape_debug).collect()
 }
 
 #[cfg(test)]

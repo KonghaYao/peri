@@ -251,6 +251,7 @@ async function waitForPeriReady(
   const maxWaitMs = 300_000;
   const compileGraceMs = 180_000;
   let deadline = start + maxWaitMs;
+  let compileGraceApplied = false;
 
   while (Date.now() < deadline) {
     let screen: string;
@@ -271,8 +272,9 @@ async function waitForPeriReady(
     if (screen.includes("AI operating system")) {
       return;
     }
-    if (looksLikeCargoBuild(screen)) {
+    if (!compileGraceApplied && looksLikeCargoBuild(screen)) {
       deadline = Math.max(deadline, Date.now() + compileGraceMs);
+      compileGraceApplied = true;
     }
     if (looksLikeLaunchFailure(screen) && !looksLikeCargoBuild(screen)) {
       throw new Error(
@@ -410,10 +412,11 @@ export async function waitForStableScreen(
 ): Promise<void> {
   // 阶段 1：等待屏幕变化（如果有基准）
   if (baseScreen !== undefined) {
-    await tester.waitFor(
-      (screen) => screen !== baseScreen,
-      { timeout: 30_000, interval: 500, message: "屏幕未发生变化，输入可能未被处理" },
-    );
+    await tester.waitFor((screen) => screen !== baseScreen, {
+      timeout: 30_000,
+      interval: 500,
+      message: "屏幕未发生变化，输入可能未被处理",
+    });
   }
 
   // 阶段 2：等待屏幕内容连续 3 次完全相同（interval 1.5s → 约 3s 稳定）

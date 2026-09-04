@@ -55,8 +55,8 @@ human 输出与 JSON 输出表达同一组字段。JSON v1 示例：
   "id": "01...",
   "title": "Example session",
   "cwd": "/workspace/project",
-  "createdAt": "2026-09-04T00:00:00Z",
-  "updatedAt": "2026-09-04T00:10:00Z",
+  "createdAt": "2026-09-04T00:00:00+00:00",
+  "updatedAt": "2026-09-04T00:10:00+00:00",
   "messageCount": 12,
   "parentThreadId": null,
   "persistedAgentStatus": "done"
@@ -85,7 +85,7 @@ schema/数据损坏和内部失败。
 因此：
 
 - 输出反映最后一次成功持久化的值；
-- `agentStatus=active` 只表示数据库记录值，不证明进程仍在运行；
+- `persistedAgentStatus=active` 只表示数据库记录值，不证明进程仍在运行；
 - 尚未落库的消息、状态或标题不可见；
 - 数据库与运行中对象短暂不一致是该命令的预期语义，不做隐式协调。
 
@@ -183,8 +183,8 @@ peri --db-path /path/to/threads.db meta session <SESSION_ID> --json
   "id": "01...",
   "title": "Example session",
   "cwd": "/workspace/project",
-  "createdAt": "2026-09-04T00:00:00Z",
-  "updatedAt": "2026-09-04T00:10:00Z",
+  "createdAt": "2026-09-04T00:00:00+00:00",
+  "updatedAt": "2026-09-04T00:10:00+00:00",
   "messageCount": 12,
   "parentThreadId": null,
   "persistedAgentStatus": "done"

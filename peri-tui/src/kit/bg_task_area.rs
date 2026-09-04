@@ -5,8 +5,8 @@
 
 use crate::kit::atoms::{self, BgDisplayEntry};
 use crate::kit::bg_task_click::{
-    BgTaskLineHit, apply_bg_task_click_route, build_bg_task_line_hits,
-    route_bg_task_click_at_index, sort_bg_display_rows, visible_bg_display_entries,
+    BgTaskLineHit, apply_bg_task_click_route, build_bg_task_line_hits, route_bg_task_click,
+    sort_bg_display_rows, visible_bg_display_entries,
 };
 use crate::kit::mouse_router;
 use crate::kit::panel_mouse::AreaTracker;
@@ -75,9 +75,10 @@ pub fn BgTaskArea(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let now = Instant::now();
         let active = visible_bg_display_entries(&entries, now);
         let sorted = sort_bg_display_rows(active);
-        let Some(route) = route_bg_task_click_at_index(&sorted, hit.sorted_index) else {
+        let Some(entry) = sorted.iter().find(|entry| entry.id == hit.task_id) else {
             return EventResult::Ignored;
         };
+        let route = route_bg_task_click(entry);
         apply_bg_task_click_route(route);
         EventResult::Consumed
     });

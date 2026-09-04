@@ -5,6 +5,7 @@ use crate::kit::tui_render_unit::{TuiCollapsedGroup, TuiSubAgentGroup, TuiUserBu
 
 fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
     TuiSubAgentGroup {
+        instance_id: format!("instance-{id}"),
         agent_id: id.to_string(),
         agent_name: name.to_string(),
         view_models: im::Vector::new(),
@@ -41,6 +42,24 @@ fn test_find_selected_subagent_matches_by_id() {
     let g = find_selected_subagent(&snap, Some("beta")).expect("应匹配 beta");
     assert_eq!(g.agent_id, "beta");
     assert_eq!(g.agent_name, "Beta");
+}
+
+#[test]
+fn test_find_selected_subagent_uses_instance_id_for_resumed_occurrence() {
+    let mut first = make_subagent("shared", "First");
+    first.instance_id = "occurrence-1".into();
+    let mut resumed = make_subagent("shared", "Resumed");
+    resumed.instance_id = "occurrence-2".into();
+    let snap = ViewModelsSnapshot {
+        items: im::Vector::from(vec![
+            TuiRenderUnit::TuiSubAgentGroup(first),
+            TuiRenderUnit::TuiSubAgentGroup(resumed),
+        ]),
+        generation: 0,
+    };
+
+    let found = find_selected_subagent(&snap, Some("occurrence-2")).expect("resumed occurrence");
+    assert_eq!(found.agent_name, "Resumed");
 }
 
 #[test]
@@ -89,6 +108,52 @@ fn test_find_selected_subagent_recurses_into_nested_subagent() {
     assert_eq!(g.agent_id, "inner");
     let outer_match = find_selected_subagent(&snap, Some("outer")).expect("外层也可匹配");
     assert_eq!(outer_match.agent_id, "outer");
+}
+
+#[test]
+fn test_find_live_detail_subagent_prefers_latest_resumed_task() {
+    let mut older = crate::kit::atoms::BgLiveDetail::default();
+    older.agent_id = Some("shared-agent".into());
+    older.agent_name = Some("Older".into());
+    let mut latest = crate::kit::atoms::BgLiveDetail::default();
+    latest.agent_id = Some("shared-agent".into());
+    latest.agent_name = Some("Latest".into());
+    let live = std::collections::HashMap::from([
+        ("task-z-old".to_string(), older),
+        ("task-a-latest".to_string(), latest),
+    ]);
+    let now = std::time::Instant::now();
+    let display = vec![
+        crate::kit::atoms::BgDisplayEntry {
+            id: "task-z-old".into(),
+            linked_agent_id: Some("shared-agent".into()),
+            agent_type: "agent".into(),
+            desc: "Older".into(),
+            current_tool: None,
+            tool_count: 0,
+            is_active: false,
+            is_error: false,
+            created_at: now,
+            completed_at: Some(now),
+        },
+        crate::kit::atoms::BgDisplayEntry {
+            id: "task-a-latest".into(),
+            linked_agent_id: Some("shared-agent".into()),
+            agent_type: "agent".into(),
+            desc: "Latest".into(),
+            current_tool: None,
+            tool_count: 0,
+            is_active: true,
+            is_error: false,
+            created_at: now,
+            completed_at: None,
+        },
+    ];
+
+    let found =
+        find_live_detail_subagent(&live, &display, Some("shared-agent")).expect("latest task");
+    assert_eq!(found.instance_id, "task-a-latest");
+    assert_eq!(found.agent_name, "Latest");
 }
 
 #[test]

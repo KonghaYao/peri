@@ -5,6 +5,7 @@ use crate::kit::tui_render_unit::{TuiCollapsedGroup, TuiSubAgentGroup, TuiUserBu
 
 fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
     TuiSubAgentGroup {
+        instance_id: format!("instance-{id}"),
         agent_id: id.to_string(),
         agent_name: name.to_string(),
         view_models: im::Vector::new(),

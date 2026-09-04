@@ -55,15 +55,15 @@ fn json_success_has_exact_nine_field_projection() {
 }
 
 #[test]
-fn human_success_escapes_stored_control_characters() {
-    let outcome = success_outcome(
-        SessionMetaDtoV1::from(meta_with_control_characters()),
-        false,
-    );
+fn human_success_preserves_unicode_and_escapes_stored_control_characters() {
+    let mut meta = meta_with_control_characters();
+    meta.title = Some("标题\n\t\u{1b}[31m".to_owned());
+    meta.cwd = "/tmp/项目\rnext".to_owned();
+    let outcome = success_outcome(SessionMetaDtoV1::from(meta), false);
     let output = outcome.stdout.unwrap();
 
-    assert!(output.contains("Title: title\\n\\t\\u{1b}[31m"));
-    assert!(output.contains("CWD: /tmp/project\\rnext"));
+    assert!(output.contains("Title: 标题\\n\\t\\u{1b}[31m"));
+    assert!(output.contains("CWD: /tmp/项目\\rnext"));
     assert!(!output.contains("forbidden-config-secret"));
     assert!(!output.contains("forbidden-cached-context"));
     assert!(!output.contains("forbidden-snapshot"));

@@ -12,7 +12,9 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{BG_LIVE_DETAIL, LANG_VERSION, SELECTED_SUBAGENT_ID, VIEW_MODELS};
+use crate::kit::atoms::{
+    BG_DISPLAY, BG_LIVE_DETAIL, BgDisplayEntry, LANG_VERSION, SELECTED_SUBAGENT_ID, VIEW_MODELS,
+};
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::message_area::render::vm_to_lines_cached;
 use crate::kit::panel_registry::clean_scrollbars;
@@ -41,10 +43,17 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 选中 subagent：SELECTED_SUBAGENT_ID（消息区焦点分派写入）→ VIEW_MODELS 扫描
     let selected_id = SELECTED_SUBAGENT_ID.state().read().clone();
     let vm_store = hooks.use_atom(&VIEW_MODELS);
+    let display_store = hooks.use_atom(&BG_DISPLAY);
     let live_store = hooks.use_atom(&BG_LIVE_DETAIL);
-    let group = find_selected_subagent(&vm_store.read(), selected_id.as_deref())
-        .or_else(|| find_live_detail_subagent(&live_store.read(), selected_id.as_deref()));
+    let group = find_selected_subagent(&vm_store.read(), selected_id.as_deref()).or_else(|| {
+        find_live_detail_subagent(
+            &live_store.read(),
+            &display_store.read(),
+            selected_id.as_deref(),
+        )
+    });
     let _ = vm_store;
+    let _ = display_store;
     let _ = live_store;
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
@@ -131,7 +140,7 @@ fn find_selected_subagent(
 fn scan_vm_for_subagent(vm: &TuiRenderUnit, selected_id: &str) -> Option<TuiSubAgentGroup> {
     match vm {
         TuiRenderUnit::TuiSubAgentGroup(g) => {
-            if g.agent_id == selected_id {
+            if g.instance_id == selected_id || g.agent_id == selected_id {
                 Some(g.clone())
             } else {
                 // 嵌套 SubAgent 内层也扫描（agent.rs 同口径）
@@ -150,15 +159,21 @@ fn scan_vm_for_subagent(vm: &TuiRenderUnit, selected_id: &str) -> Option<TuiSubA
 
 fn find_live_detail_subagent(
     live: &std::collections::HashMap<String, crate::kit::atoms::BgLiveDetail>,
+    display: &[BgDisplayEntry],
     selected_id: Option<&str>,
 ) -> Option<TuiSubAgentGroup> {
     let selected_id = selected_id?;
-    let detail = live
-        .iter()
-        .find(|(task_id, d)| {
-            d.agent_id.as_deref() == Some(selected_id) || task_id.as_str() == selected_id
-        })
-        .map(|(_, d)| d)?;
+    let task_id = if live.contains_key(selected_id) {
+        selected_id
+    } else {
+        display
+            .iter()
+            .rev()
+            .find(|entry| entry.linked_agent_id.as_deref() == Some(selected_id))?
+            .id
+            .as_str()
+    };
+    let detail = live.get(task_id)?;
     let status = if detail.subagent_is_error {
         EntryStatus::Error
     } else if detail.status == crate::kit::atoms::BgLiveStatus::Running {
@@ -167,6 +182,7 @@ fn find_live_detail_subagent(
         EntryStatus::Completed
     };
     let mut group = TuiSubAgentGroup {
+        instance_id: task_id.to_string(),
         agent_id: detail
             .agent_id
             .clone()

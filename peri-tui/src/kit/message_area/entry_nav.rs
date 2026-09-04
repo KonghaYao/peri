@@ -39,7 +39,9 @@ pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
             Some((FoldKey::Reasoning(b.message_id.clone()?), r.fold))
         }
         TuiRenderUnit::TuiToolCard(t) => Some((FoldKey::Tool(t.tool_id.clone()), t.fold)),
-        TuiRenderUnit::TuiSubAgentGroup(g) => Some((FoldKey::SubAgent(g.agent_id.clone()), g.fold)),
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            Some((FoldKey::SubAgent(g.instance_id.clone()), g.fold))
+        }
         TuiRenderUnit::TuiAskUserBlock(a) => {
             Some((FoldKey::Interaction(a.request_id.clone()?), a.fold))
         }

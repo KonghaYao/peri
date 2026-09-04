@@ -203,6 +203,7 @@ fn test_vm_to_lines_all_variants_width_1() {
     let todo = TuiRenderUnit::TuiTodoSummary(TuiTodoSummary::new("3/7 tasks".into()));
 
     let subagent = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
+        instance_id: "instance-test-agent".to_string(),
         agent_id: "test-agent".to_string(),
         agent_name: "Test Agent".to_string(),
         view_models: im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
@@ -1412,6 +1413,7 @@ fn subagent_group(
     error_reason: Option<&str>,
 ) -> TuiRenderUnit {
     TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
+        instance_id: "instance-agent-1".into(),
         agent_id: "agent-1".into(),
         agent_name: "Agent explorer".into(),
         view_models: children,
@@ -2272,6 +2274,7 @@ fn test_glob_grep_header_match_suffix() {
 fn test_subagent_completed_shows_tool_lines_only() {
     // subagent：completed + 1 个 Bash 工具 → 只渲染工具行
     let group = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
+        instance_id: "instance-a1".into(),
         agent_id: "a1".into(),
         agent_name: "general-purpose".into(),
         view_models: im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(

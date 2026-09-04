@@ -4,7 +4,10 @@ use crate::kit::tui_render_unit::{
     EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, TuiToolPresentation, fold_for_status,
 };
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+static NEXT_SUBAGENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// 从 `ToolCardAccumulator` 派生 `TuiToolCard`。
 ///
@@ -148,6 +151,8 @@ impl ToolCardAccumulator {
 /// In-progress sub-agent accumulator.
 #[derive(Debug, Clone)]
 pub struct SubAgentAccumulator {
+    /// TUI-local identity for this occurrence; resumes retain agent_id but get a new instance.
+    pub instance_id: String,
     pub agent_id: String,
     pub agent_name: String,
     pub is_running: bool,
@@ -166,6 +171,10 @@ impl SubAgentAccumulator {
     pub fn new(agent_id: String, agent_name: String) -> Self {
         let child_turn = CurrentTurn::new();
         Self {
+            instance_id: format!(
+                "subagent-{}",
+                NEXT_SUBAGENT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
+            ),
             agent_id,
             agent_name,
             is_running: true,
@@ -223,6 +232,7 @@ impl SubAgentAccumulator {
         // [G1] hash 由 TuiSubAgentGroup::recompute_hash 单点计算（含 fold +
         // user_modified + child hash 组合）——构造与折叠 pass 共用同一公式。
         let mut group = crate::kit::tui_render_unit::TuiSubAgentGroup {
+            instance_id: self.instance_id.clone(),
             agent_id: self.agent_id.clone(),
             agent_name: self.agent_name.clone(),
             view_models: child_vms.clone(),

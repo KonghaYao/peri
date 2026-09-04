@@ -460,85 +460,49 @@ enum TopLevelOptionShape {
 }
 
 fn top_level_option_shape(arg: &OsStr) -> Option<TopLevelOptionShape> {
-    let arg = arg.to_str()?;
-    if [
-        "-a",
-        "--approve",
-        "--bare",
-        "--dangerously-skip-permissions",
-        "-c",
-        "--continue",
-        "--no-session-persistence",
-    ]
-    .contains(&arg)
-    {
-        return Some(TopLevelOptionShape::Flag);
-    }
-    if ["-p", "--print", "-r", "--resume"].contains(&arg) {
-        return Some(TopLevelOptionShape::OptionalValue);
-    }
-    if [
-        "--output-format",
-        "--outputFormat",
-        "--max-turns",
-        "--maxTurns",
-        "--permission-mode",
-        "--permissionMode",
-        "--model",
-        "--effort",
-        "--session-id",
-        "--sessionId",
-        "-n",
-        "--name",
-        "--allowedTools",
-        "--allowed-tools",
-        "--disallowedTools",
-        "--disallowed-tools",
-        "--settings",
-        "--config-file",
-        "--configFile",
-        "--db-path",
-        "--dbPath",
-    ]
-    .contains(&arg)
-    {
-        return Some(TopLevelOptionShape::RequiredValue);
-    }
+    use clap::ArgAction;
 
-    let (name, _) = arg.split_once('=')?;
-    if [
-        "-p",
-        "--print",
-        "-r",
-        "--resume",
-        "--output-format",
-        "--outputFormat",
-        "--max-turns",
-        "--maxTurns",
-        "--permission-mode",
-        "--permissionMode",
-        "--model",
-        "--effort",
-        "--session-id",
-        "--sessionId",
-        "-n",
-        "--name",
-        "--allowedTools",
-        "--allowed-tools",
-        "--disallowedTools",
-        "--disallowed-tools",
-        "--settings",
-        "--config-file",
-        "--configFile",
-        "--db-path",
-        "--dbPath",
-    ]
-    .contains(&name)
-    {
-        Some(TopLevelOptionShape::Flag)
-    } else {
-        None
-    }
+    let raw = arg.to_str()?;
+    let name = raw.split_once('=').map_or(raw, |(name, _)| name);
+    let command = Cli::command();
+    command.get_arguments().find_map(|declared| {
+        let long_match = declared
+            .get_long()
+            .is_some_and(|long| name == format!("--{long}"))
+            || declared.get_all_aliases().is_some_and(|aliases| {
+                aliases
+                    .into_iter()
+                    .any(|alias| name == format!("--{alias}"))
+            });
+        let short_match = declared
+            .get_short()
+            .is_some_and(|short| name == format!("-{short}"))
+            || declared.get_all_short_aliases().is_some_and(|aliases| {
+                aliases.into_iter().any(|alias| name == format!("-{alias}"))
+            });
+        if !long_match && !short_match {
+            return None;
+        }
+        if raw.contains('=') {
+            return Some(TopLevelOptionShape::Flag);
+        }
+        if matches!(
+            declared.get_action(),
+            ArgAction::SetTrue
+                | ArgAction::SetFalse
+                | ArgAction::Count
+                | ArgAction::Help
+                | ArgAction::HelpShort
+                | ArgAction::HelpLong
+                | ArgAction::Version
+        ) {
+            return Some(TopLevelOptionShape::Flag);
+        }
+        match declared.get_num_args() {
+            Some(range) if range.min_values() == 0 => Some(TopLevelOptionShape::OptionalValue),
+            _ => Some(TopLevelOptionShape::RequiredValue),
+        }
+    })
 }
 
 /// 按已接受的顶层 grammar走到 subcommand槽位。已知 option严格消费 `Cli` 声明的值；

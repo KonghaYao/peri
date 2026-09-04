@@ -766,6 +766,11 @@ fn human_argument_and_storage_failures_are_stderr_only() {
 fn unreadable_regular_file_has_real_binary_stream_and_exit_contract() {
     use std::os::unix::fs::PermissionsExt;
 
+    let effective_uid = Command::new("id").arg("-u").output().unwrap();
+    if text(&effective_uid.stdout).trim() == "0" {
+        return;
+    }
+
     let sandbox = TempDir::new().unwrap();
     let db = sandbox.path().join("unreadable.db");
     create_database(
@@ -834,9 +839,12 @@ fn meta_path_does_not_read_settings_or_mutate_environment() {
     let sandbox = TempDir::new().unwrap();
     let home = sandbox.path().join("home");
     let cwd = sandbox.path().join("cwd");
-    std::fs::create_dir_all(home.join(".peri/settings.json")).unwrap();
-    std::fs::create_dir_all(cwd.join(".peri/settings.json")).unwrap();
-    std::fs::create_dir_all(home.join(".claude/settings.json")).unwrap();
+    std::fs::create_dir_all(home.join(".peri")).unwrap();
+    std::fs::create_dir_all(cwd.join(".peri")).unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(home.join(".peri/settings.json"), "leaked").unwrap();
+    std::fs::write(cwd.join(".peri/settings.json"), "leaked").unwrap();
+    std::fs::write(home.join(".claude/settings.json"), "leaked").unwrap();
     let db = sandbox.path().join("threads.db");
     create_database(
         &db,
@@ -856,6 +864,8 @@ fn meta_path_does_not_read_settings_or_mutate_environment() {
         ],
     );
     assert_success(&output);
+    assert!(!text(&output.stdout).contains("leaked"));
+    assert!(!text(&output.stderr).contains("leaked"));
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["title"], "settings-proof");
 }

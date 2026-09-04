@@ -31,11 +31,20 @@ const E2E_ROOT = path.resolve(__dirname, "..");
 const TESTS_DIR = path.join(E2E_ROOT, "tests");
 const RESULTS_DIR = path.join(E2E_ROOT, "results");
 // vitest 的 ESM CLI 入口（package.json bin 指向 ./vitest.mjs），用 node 直接加载
-const VITEST_ENTRY = path.join(E2E_ROOT, "node_modules", "vitest", "vitest.mjs");
+const VITEST_ENTRY = path.join(
+  E2E_ROOT,
+  "node_modules",
+  "vitest",
+  "vitest.mjs",
+);
 
-// 单个测试文件最长耗时（与 vitest.config.ts testTimeout 一致 + 启动缓冲）
-const PER_FILE_TIMEOUT_MS = 600_000;
-const MIN_WORKER_TIMEOUT_MS = 600_000;
+// Worker 预算：suite 级单测上限 + 单次 hook 上限 + teardown/SIGTERM 余量。
+const SUITE_TEST_TIMEOUT_MS = 600_000;
+const PERMITTED_HOOK_TIMEOUT_MS = 120_000;
+const SHUTDOWN_MARGIN_MS = 15_000;
+const PER_FILE_TIMEOUT_MS =
+  SUITE_TEST_TIMEOUT_MS + PERMITTED_HOOK_TIMEOUT_MS + SHUTDOWN_MARGIN_MS;
+const MIN_WORKER_TIMEOUT_MS = PER_FILE_TIMEOUT_MS;
 
 // ======================== 参数解析 ========================
 
@@ -102,10 +111,16 @@ function parseArgs(argv) {
         opts.retry = Number.isFinite(n) && n >= 0 ? n : 1;
         break;
       }
-      case "--tier":
-        opts.tier = next();
+      case "--tier": {
+        const tier = next();
+        if (!tier) {
+          console.error(`--tier 缺少值\n\n${USAGE}`);
+          process.exit(2);
+        }
+        opts.tier = tier;
         opts.interactive = false;
         break;
+      }
       case "--serial":
         opts.serial = true;
         break;
@@ -114,8 +129,7 @@ function parseArgs(argv) {
         break;
       case "--max-first-failures": {
         const n = Number(next());
-        opts.maxFirstAttemptFailures =
-          Number.isFinite(n) && n >= 0 ? n : 0;
+        opts.maxFirstAttemptFailures = Number.isFinite(n) && n >= 0 ? n : 0;
         break;
       }
       case "--no-interactive":
@@ -158,7 +172,7 @@ function applyTierDefaults(opts, allFiles) {
     console.error(`tier ${opts.tier} 未匹配到任何用例`);
     process.exit(1);
   }
-  opts.parallel = tier.parallel ?? opts.parallel;
+  opts.parallel = opts.serial ? 1 : (tier.parallel ?? opts.parallel);
   opts.retry = tier.retry ?? opts.retry;
   if (opts.requireCleanFirstPass) {
     opts.maxFirstAttemptFailures = 0;
@@ -224,7 +238,9 @@ function selectFiles(allFiles, opts) {
   }
   if (opts.dirs.length > 0) {
     selected = selected.filter((f) =>
-      opts.dirs.some((d) => f.startsWith(`tests/${d.replace(/^\/+|\/+$/g, "")}/`)),
+      opts.dirs.some((d) =>
+        f.startsWith(`tests/${d.replace(/^\/+|\/+$/g, "")}/`),
+      ),
     );
   }
   return selected;
@@ -258,16 +274,21 @@ async function interactiveSelect(allFiles) {
       "Peri E2E 用例选择（输入过滤子串回车过滤；'1,3-5' 切换选中；a=全选；n=清空；q=退出；空=执行）\n",
     );
     if (filter) {
-      console.log(`过滤: "${filter}"  匹配 ${visible.length}/${allFiles.length}\n`);
+      console.log(
+        `过滤: "${filter}"  匹配 ${visible.length}/${allFiles.length}\n`,
+      );
     }
     visible.slice(0, 40).forEach((f, i) => {
       const mark = selected.has(f) ? "●" : "○";
       console.log(`  ${String(i + 1).padStart(2)} ${mark} ${f}`);
     });
-    if (visible.length > 40) console.log(`  … 其余 ${visible.length - 40} 项未显示`);
+    if (visible.length > 40)
+      console.log(`  … 其余 ${visible.length - 40} 项未显示`);
     console.log(`\n当前选中: ${checked}/${visible.length} 项`);
 
-    const input = (await new Promise((resolve) => rl.question("> ", resolve))).trim();
+    const input = (
+      await new Promise((resolve) => rl.question("> ", resolve))
+    ).trim();
 
     if (input === "") {
       rl.close();
@@ -367,7 +388,9 @@ function runWorker({ files, workerId, runDir, verbose }) {
         E2E_RECORDINGS_DIR: recordingsDir,
         E2E_PARALLEL: "1",
       },
-      stdio: verbose ? ["ignore", "inherit", "inherit"] : ["ignore", "ignore", "inherit"],
+      stdio: verbose
+        ? ["ignore", "inherit", "inherit"]
+        : ["ignore", "ignore", "inherit"],
     });
 
     const timer = setTimeout(() => {
@@ -578,7 +601,7 @@ function printSummary(summary, opts) {
     }
   }
 
-  if (failed === 0 && !(flake?.gateFailed)) {
+  if (failed === 0 && !flake?.gateFailed) {
     console.log("\n全部通过 🎉");
     return;
   }
@@ -742,7 +765,9 @@ async function main() {
   if (tierMeta) {
     console.log(`门禁: ${tierMeta.label} — ${tierMeta.description}`);
   }
-  console.log(`选中 ${files.length} 个文件, 并发 ${opts.parallel}, 重试 ${opts.retry}\n`);
+  console.log(
+    `选中 ${files.length} 个文件, 并发 ${opts.parallel}, 重试 ${opts.retry}\n`,
+  );
 
   await cleanupStaleSessions();
 
@@ -756,7 +781,9 @@ async function main() {
   while (pending.length > 0) {
     attempts++;
     const shards = shardFiles(pending, Math.min(opts.parallel, pending.length));
-    console.log(`\n── 第 ${attempts} 轮执行 (${pending.length} 个文件, ${shards.length} 个 worker) ──\n`);
+    console.log(
+      `\n── 第 ${attempts} 轮执行 (${pending.length} 个文件, ${shards.length} 个 worker) ──\n`,
+    );
 
     const workerResults = await Promise.all(
       shards.map((shard, i) =>
@@ -841,8 +868,7 @@ async function main() {
 
   printSummary(summary, opts);
 
-  const reportPath =
-    opts.output ?? path.join(runDir, "report.md");
+  const reportPath = opts.output ?? path.join(runDir, "report.md");
   await fs.mkdir(path.dirname(reportPath), { recursive: true });
   await fs.writeFile(
     reportPath,

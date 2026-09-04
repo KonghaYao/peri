@@ -1462,17 +1462,20 @@ ToolOutputChunk {
 
 ### 15.1 默认 fold
 
-**目标规范**：下表是 redesign 完成后的默认折叠目标。当前实际 `fold_for_status` 中除 interaction 行（见 §3.3 gap #13，当前仍为 Expanded）外，其余各行的 Running/Succeeded/Error 折叠与下表一致。
+**目标规范**：下表是 redesign 完成后的默认折叠目标。当前实际
+`fold_for_status` 中，completed Error tool cards 与 succeeded tool cards 一样为
+Collapsed；interaction 行见 §3.3 gap #13（当前仍为 Expanded）。Denied、Cancelled 与
+TimedOut 保持各自的目标行为，不因 Error 的基线而隐式归组。
 
-| Entry | Running | Succeeded | Error/Denied/Cancelled/TimedOut |
-| --- | --- | --- | --- |
-| user | Expanded | Expanded/长文折叠 | — |
-| assistant | Expanded | Expanded | Expanded |
-| reasoning | Preview | Collapsed | Preview |
-| tool | Preview | Collapsed | Expanded summary |
-| subagent/workflow | Collapsed + live summary | Collapsed | Expanded summary |
-| system | Collapsed | Collapsed | Expanded summary |
-| interaction | Expanded | Collapsed result | Expanded |
+| Entry | Running | Succeeded | Error | Denied/Cancelled/TimedOut |
+| --- | --- | --- | --- | --- |
+| user | Expanded | Expanded/长文折叠 | — | — |
+| assistant | Expanded | Expanded | Expanded | Expanded |
+| reasoning | Preview | Collapsed | Preview | Preview |
+| tool | Preview | Collapsed | Collapsed | Expanded summary |
+| subagent/workflow | Collapsed + live summary | Collapsed | Expanded summary | Expanded summary |
+| system | Collapsed | Collapsed | Expanded summary | Expanded summary |
+| interaction | Expanded | Collapsed result | Expanded | Expanded |
 
 - 用户手动 fold 后，本 turn 内自动策略不得覆盖；
 - Inspector 打开与否不影响 fold；

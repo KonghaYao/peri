@@ -67,6 +67,10 @@ pub(super) fn projected_tool_header_text(data: &TuiToolCard, grid: &GridSpec) ->
         text.push_str(&plan.summary);
     }
     text.push_str(&plan.suffix);
+    if data.is_error {
+        text.push_str(" \u{2014} ");
+        text.push_str(&i18n::tr("msg-status-failed"));
+    }
     text
 }
 
@@ -135,7 +139,7 @@ fn render_tool_plan(
         String::new()
     };
     let fixed_width = error_word.width() + plan.suffix.width() + 2;
-    let used_width: usize = spans.iter().map(|span| span.content.width()).sum();
+    let used_width = label_width;
     let budget = grid
         .content_width()
         .saturating_sub(used_width + fixed_width)
@@ -206,7 +210,8 @@ fn project_todo_tool(
     grid: &GridSpec,
 ) -> ToolRenderPlan {
     let sem = THEME_ATOM.state().read().semantic;
-    let content_width = grid.content_width().saturating_sub(1).max(1);
+    const TODO_DETAIL_PREFIX_WIDTH: usize = 2;
+    let detail_width = grid.content_width().max(1);
     let label = format!("TodoUpdate ({}/{})", todo.completed_count, todo.total_count);
     let completed_details: Vec<Line<'static>> = todo
         .changes
@@ -221,6 +226,13 @@ fn project_todo_tool(
                 TuiTodoChangeKind::Reopened => (symbols.todo_reopened, sem.status.success),
                 TuiTodoChangeKind::ActiveFormUpdated => (symbols.todo_edited, sem.status.success),
             };
+            if detail_width <= TODO_DETAIL_PREFIX_WIDTH {
+                return Line::from(Span::styled(
+                    truncate_by_width(icon, detail_width),
+                    Style::default().fg(color),
+                ));
+            }
+            let content_width = detail_width - TODO_DETAIL_PREFIX_WIDTH;
             Line::from(vec![
                 Span::styled(format!("{icon} "), Style::default().fg(color)),
                 Span::styled(
@@ -231,7 +243,7 @@ fn project_todo_tool(
         })
         .collect();
     let error_details = vec![Line::from(Span::styled(
-        truncate_by_width(&data.output_summary, content_width),
+        truncate_by_width(&data.output_summary, detail_width),
         Style::default().fg(sem.text.muted),
     ))];
     ToolRenderPlan {
@@ -278,12 +290,23 @@ fn project_generic_tool(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
         completed_details.extend(output_details(&data.output_summary, sem.text.muted));
     }
 
-    let error_details = if let Some(diff) = &data.diff {
-        render_diff_lines(diff, grid)
+    let mut error_details = Vec::new();
+    if bash {
+        error_details.push(Line::from(Span::styled(
+            format!(
+                "$ {}",
+                truncate_by_width(&data.input_summary, content.saturating_sub(2))
+            ),
+            Style::default().fg(sem.syntax.command),
+        )));
+        error_details.push(divider_fill_line(grid));
+    }
+    if let Some(diff) = &data.diff {
+        error_details.extend(render_diff_lines(diff, grid));
     } else {
         let output = data.output_summary.replacen(" - Error: ", "\n- Error: ", 1);
-        output_details(&output, sem.status.error)
-    };
+        error_details.extend(output_details(&output, sem.status.error));
+    }
 
     ToolRenderPlan {
         label: crate::kit::tool_display::format_tool_name(&data.tool_name),
@@ -459,4 +482,43 @@ fn divider_fill_line(grid: &GridSpec) -> Line<'static> {
         "\u{2500}".repeat(grid.content_width()),
         Style::default().fg(THEME_ATOM.state().read().semantic.text.dim),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn todo_detail_respects_extremely_narrow_content_width() {
+        let todo = TuiTodoPresentation {
+            current_items: Vec::new(),
+            changes: vec![crate::kit::tui_render_unit::TuiTodoChange {
+                kind: TuiTodoChangeKind::Added,
+                content: "task".into(),
+            }],
+            is_initial: true,
+            completed_count: 0,
+            total_count: 1,
+        };
+        let card = TuiToolCard {
+            tool_id: "todo".into(),
+            tool_name: "TodoWrite".into(),
+            input_summary: String::new(),
+            output_summary: String::new(),
+            is_error: false,
+            is_running: false,
+            running_duration_ms: None,
+            completed_duration_ms: None,
+            diff: None,
+            presentation: TuiToolPresentation::Todo(todo.clone()),
+            fold: FoldState::Expanded,
+            user_modified: false,
+            content_hash: 0,
+            tool_calls_count: 0,
+        };
+        for width in [1, 2] {
+            let plan = project_todo_tool(&card, &todo, &GridSpec::with_content(width));
+            assert!(plan.completed_details[0].width() <= usize::from(width));
+        }
+    }
 }

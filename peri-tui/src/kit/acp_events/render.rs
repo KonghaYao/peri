@@ -535,7 +535,7 @@ fn apply_fold_pass(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
                 };
                 let override_fold = if has_overrides {
                     overrides
-                        .get(&FoldKey::SubAgent(g.agent_id.clone()))
+                        .get(&FoldKey::SubAgent(g.instance_id.clone()))
                         .copied()
                 } else {
                     None
