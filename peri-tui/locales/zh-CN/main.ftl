@@ -1139,4 +1139,3 @@ app-note-cache-hit-low = Prompt cache 覆盖率 {$pct}% < 80%（req: { $req_id }
 app-note-cache-coverage-low = Prompt cache 覆盖率 {$pct}% < 80% — 已缓存 {$cached} / 输入 {$input}，未缓存 {$uncached}（req: {$req_id}）
 
 # ---- 语义工具卡片 ----
-tool-todo-failed = 更新失败

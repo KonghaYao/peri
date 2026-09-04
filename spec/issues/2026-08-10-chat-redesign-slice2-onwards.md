@@ -242,6 +242,9 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   **连续相邻** error `TuiToolCard` 计入 `failed_count`；error 不入组、不删除，
   独立失败状态行保持可见。2026-09-04 起 §7 表改为 error→Collapsed，避免
   ToolEnded 到达时自动展开正文造成 transcript 高度突变；错误详情仍可手动展开。
+  2026-09-04 进一步将 Generic/Skill/Todo 收敛到 `ToolRenderPlan`：presentation
+  只投影 label/summary/detail 候选，统一 resolve/render 路径消费 status/fold/prefix/duration 与
+  detail visibility，语义复制也复用同一 plan；旧的三套 renderer 已删除。
   扫描在删除 run 元素之前进行（items 索引仍指向原位置）。
 - 渲染 `render_collapsed_group_lines`（message_area/render.rs）：标题追加
   `· N failed`（仅 >0，`sem.status.error` 色 span）；title 截断优先于失败后缀

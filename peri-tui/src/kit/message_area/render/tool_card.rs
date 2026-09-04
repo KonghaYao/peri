@@ -26,214 +26,130 @@ const TOOL_OUTPUT_MAX_LINES: usize = 4;
 /// - running（Preview）：仅活动行（运行中无 output）；completed：折叠单行 /
 ///   展开输出（≤4 行）；Bash 展开显示 `$ command` + 分隔线 + 输出。
 pub(super) fn render_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Line<'static>> {
+    let plan = project_tool_render_plan(data, grid);
+    let resolved = resolve_tool_render_plan(data, plan);
+    render_tool_plan(data, resolved, grid)
+}
+
+/// Presentation 只投影 header/detail 候选内容；状态、fold、prefix 与时长由
+/// `resolve_tool_render_plan` / `render_tool_plan` 的统一路径消费。
+struct ToolRenderPlan {
+    label: String,
+    summary: String,
+    completed_suffix: String,
+    hide_completed_summary_when_expanded: bool,
+    running_details: Vec<Line<'static>>,
+    completed_details: Vec<Line<'static>>,
+    error_details: Vec<Line<'static>>,
+}
+
+struct ResolvedToolRenderPlan {
+    label: String,
+    summary: String,
+    suffix: String,
+    details: Vec<Line<'static>>,
+}
+
+fn project_tool_render_plan(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
     match &data.presentation {
-        TuiToolPresentation::Skill(skill) => {
-            return render_skill_tool_card_lines(data, &skill.name, grid);
-        }
-        TuiToolPresentation::Todo(todo) => {
-            return render_todo_tool_card_lines(data, todo, grid);
-        }
-        TuiToolPresentation::Generic => {}
+        TuiToolPresentation::Generic => project_generic_tool(data, grid),
+        TuiToolPresentation::Skill(skill) => project_skill_tool(&skill.name),
+        TuiToolPresentation::Todo(todo) => project_todo_tool(data, todo, grid),
     }
-
-    render_generic_tool_card_lines(data, grid)
 }
 
-/// 语义卡（Skill/Todo）保持专属展示，套用统一网格前缀。
-fn with_prefix_lines(
-    grid: &GridSpec,
-    symbol: &str,
-    symbol_style: Style,
-    content: Vec<Line<'static>>,
-) -> Vec<Line<'static>> {
-    let sem = THEME_ATOM.state().read().semantic;
-    let mut lines = Vec::with_capacity(content.len());
-    for (i, line) in content.into_iter().enumerate() {
-        let spans = if i == 0 {
-            let mut spans = first_prefix(grid, symbol, symbol_style);
-            spans.extend(line.spans);
-            spans
-        } else {
-            let mut spans = cont_prefix(grid, sem.accents.tool);
-            spans.extend(line.spans);
-            spans
-        };
-        lines.push(Line::from(spans));
+/// 语义复制与视觉 header 共用同一投影，避免 presentation 文案双重实现。
+pub(super) fn projected_tool_header_text(data: &TuiToolCard, grid: &GridSpec) -> String {
+    let plan = resolve_tool_render_plan(data, project_tool_render_plan(data, grid));
+    let mut text = plan.label;
+    if !plan.summary.is_empty() {
+        text.push(' ');
+        text.push_str(&plan.summary);
     }
-    lines
+    text.push_str(&plan.suffix);
+    text
 }
 
-fn render_skill_tool_card_lines(
-    data: &TuiToolCard,
-    name: &str,
-    grid: &GridSpec,
-) -> Vec<Line<'static>> {
-    let sem = THEME_ATOM.state().read().semantic;
-    let content_width = grid.content_width().saturating_sub(1).max(1);
-    let (symbol, indicator_color) = status_symbol_and_color(data.is_running, data.is_error, &sem);
-
-    if data.is_running {
-        let title = format!("Skill ({})", name);
-        return with_prefix_lines(
-            grid,
-            &symbol,
-            Style::default().fg(indicator_color),
-            vec![
-                Line::from(vec![Span::styled(
-                    truncate_by_width(&title, content_width),
-                    Style::default()
-                        .fg(sem.text.primary)
-                        .add_modifier(Modifier::BOLD),
-                )]),
-                Line::from(vec![Span::styled(
-                    i18n::tr("msg-status-loading"),
-                    Style::default().fg(sem.text.muted),
-                )]),
-            ],
-        );
+/// 生命周期只在此处解析一次：presentation 提供候选内容，统一路径选择当前状态
+/// 对应的 suffix/detail，并处理展开态 header 摘要。
+fn resolve_tool_render_plan(data: &TuiToolCard, plan: ToolRenderPlan) -> ResolvedToolRenderPlan {
+    let ToolRenderPlan {
+        label,
+        mut summary,
+        completed_suffix,
+        hide_completed_summary_when_expanded,
+        running_details,
+        completed_details,
+        error_details,
+    } = plan;
+    if hide_completed_summary_when_expanded
+        && !data.is_running
+        && !data.is_error
+        && data.fold == FoldState::Expanded
+    {
+        summary.clear();
     }
-
-    // [F3] 状态符号走降级表（§12：Unicode 能力不足时 × → x / ✓ → +），
-    // 不硬编码原始 UTF-8。
-    let status = if data.is_error {
-        sym().error
+    let (suffix, details) = if data.is_running {
+        (String::new(), running_details)
+    } else if data.is_error {
+        (String::new(), error_details)
     } else {
-        sym().success
+        (completed_suffix, completed_details)
     };
-    let title = format!("Skill ({}) - {}", name, status);
-    with_prefix_lines(
-        grid,
-        &symbol,
-        Style::default().fg(indicator_color),
-        vec![Line::from(vec![Span::styled(
-            truncate_by_width(&title, content_width),
-            Style::default()
-                .fg(sem.text.primary)
-                .add_modifier(Modifier::BOLD),
-        )])],
-    )
+    ResolvedToolRenderPlan {
+        label,
+        summary,
+        suffix,
+        details,
+    }
 }
 
-fn render_todo_tool_card_lines(
+/// 工具卡片的唯一结构 renderer。所有 presentation 共用同一条状态与折叠路径：
+/// header 恒可见；Collapsed 不消费 detail；Preview/Expanded 消费解析后的 detail。
+fn render_tool_plan(
     data: &TuiToolCard,
-    todo: &TuiTodoPresentation,
+    plan: ResolvedToolRenderPlan,
     grid: &GridSpec,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
-    let content_width = grid.content_width().saturating_sub(1).max(1);
-    let (symbol, indicator_color) = status_symbol_and_color(data.is_running, data.is_error, &sem);
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    if data.is_error {
-        let title = i18n::tr("tool-todo-failed");
-        lines.push(Line::from(vec![Span::styled(
-            truncate_by_width(&title, content_width),
-            Style::default()
-                .fg(sem.text.primary)
-                .add_modifier(Modifier::BOLD),
-        )]));
-        if data.fold == FoldState::Expanded {
-            lines.push(Line::from(vec![Span::styled(
-                truncate_by_width(&data.output_summary, content_width),
-                Style::default().fg(sem.text.muted),
-            )]));
-        }
-    } else {
-        let title = format!("TodoUpdate ({}/{})", todo.completed_count, todo.total_count);
-        lines.push(Line::from(vec![Span::styled(
-            truncate_by_width(&title, content_width),
-            Style::default()
-                .fg(sem.text.primary)
-                .add_modifier(Modifier::BOLD),
-        )]));
-
-        if !data.is_running && data.fold == FoldState::Collapsed {
-            return with_prefix_lines(grid, &symbol, Style::default().fg(indicator_color), lines);
-        }
-
-        for change in &todo.changes {
-            // [F3] 图标走符号降级表（§12）：✓→success；▶/↻/✎ 无 §4.1 语义
-            // 条目，按辅助字形降级（ASCII：> / ~ / *）。
-            let s = sym();
-            let (icon, color) = match change.kind {
-                TuiTodoChangeKind::Completed => (s.success, sem.status.success),
-                TuiTodoChangeKind::Added => ("+", sem.status.success),
-                TuiTodoChangeKind::Removed => ("-", sem.text.muted),
-                TuiTodoChangeKind::Started => (s.todo_started, sem.status.success),
-                TuiTodoChangeKind::Reopened => (s.todo_reopened, sem.status.success),
-                TuiTodoChangeKind::ActiveFormUpdated => (s.todo_edited, sem.status.success),
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{icon} "), Style::default().fg(color)),
-                Span::styled(
-                    truncate_by_width(&change.content, content_width),
-                    Style::default().fg(sem.text.muted),
-                ),
-            ]));
-        }
-    }
-    with_prefix_lines(grid, &symbol, Style::default().fg(indicator_color), lines)
-}
-
-fn render_generic_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Line<'static>> {
-    let sem = THEME_ATOM.state().read().semantic;
-    let content = grid.content_width();
-    let display_name = crate::kit::tool_display::format_tool_name(&data.tool_name);
-    let (symbol, symbol_color) = status_symbol_and_color(data.is_running, data.is_error, &sem);
-    // 显式展开的成功终态首行符号换 ▾；失败终态始终保留 × 状态符号。
+    let (status_symbol, symbol_color) =
+        status_symbol_and_color(data.is_running, data.is_error, &sem);
     let symbol = if !data.is_running && !data.is_error && data.fold == FoldState::Expanded {
         sym().expanded.to_string()
     } else {
-        symbol
+        status_symbol
     };
-
     let mut spans = first_prefix(grid, &symbol, Style::default().fg(symbol_color));
-    // label：每行最多一个 bold 主锚点
+    let label = truncate_by_width(&plan.label, grid.content_width().max(1));
+    let label_width = label.width();
     spans.push(Span::styled(
-        display_name.clone(),
+        label,
         Style::default()
             .fg(sem.text.primary)
             .add_modifier(Modifier::BOLD),
     ));
 
-    // summary 统一 muted 暗色——路径/命令不再用高饱和 syntax 色
-    // （label 是每行唯一的亮色主锚点，summary 不与其抢视觉，§6.4）。
-    let summary_color = sem.text.muted;
-    // Bash 展开时 command 移到 `$ ` 行——首行只留 label + duration。
-    let bash_expanded = data.tool_name == "Bash"
-        && !data.is_running
-        && !data.is_error
-        && data.fold == FoldState::Expanded;
-    let show_summary = !bash_expanded;
-
-    // 固定部件宽度（label + 错误词后缀）预算 summary 宽度
-    let error_word = if data.is_error {
+    let error_word = if data.is_error && grid.content_width() > label_width.saturating_add(2) {
         format!(" \u{2014} {}", i18n::tr("msg-status-failed"))
     } else {
         String::new()
     };
-    let label_width = display_name.width() + error_word.width() + 2;
-    if show_summary {
-        let suffix = completed_header_suffix(data);
-        let budget = content.saturating_sub(label_width + suffix.width() + 2);
-        let summary = truncate_by_width(&data.input_summary, budget.max(1));
-        if !summary.is_empty() {
-            spans.push(Span::styled(
-                format!(" {summary}"),
-                Style::default().fg(summary_color),
-            ));
-        }
-        if !suffix.is_empty() {
-            spans.push(Span::styled(suffix, Style::default().fg(sem.text.dim)));
-        }
+    let fixed_width = error_word.width() + plan.suffix.width() + 2;
+    let used_width: usize = spans.iter().map(|span| span.content.width()).sum();
+    let budget = grid
+        .content_width()
+        .saturating_sub(used_width + fixed_width)
+        .max(1);
+    let summary = truncate_by_width(&plan.summary, budget);
+    if !summary.is_empty() {
+        spans.push(Span::styled(
+            format!(" {summary}"),
+            Style::default().fg(sem.text.muted),
+        ));
     }
-
-    // duration 三档（§6.4）：running 秒 / completed ms·s 冻结值
-    let duration_text = if data.is_running {
-        data.running_duration_ms.map(format_running_duration)
-    } else {
-        data.completed_duration_ms.map(format_completed_duration)
-    };
+    if !plan.suffix.is_empty() {
+        spans.push(Span::styled(plan.suffix, Style::default().fg(sem.text.dim)));
+    }
     if !error_word.is_empty() {
         spans.push(Span::styled(
             error_word,
@@ -242,70 +158,142 @@ fn render_generic_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Li
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+
+    let duration_text = if data.is_running {
+        data.running_duration_ms.map(format_running_duration)
+    } else {
+        data.completed_duration_ms.map(format_completed_duration)
+    };
+    let used: usize = spans.iter().map(|span| span.content.width()).sum();
     if let Some(meta) = duration_text
         .as_deref()
-        .and_then(|d| place_meta(grid, used, d, Style::default().fg(sem.text.dim)))
+        .and_then(|duration| place_meta(grid, used, duration, Style::default().fg(sem.text.dim)))
     {
         spans.extend(meta);
     }
     fit_summary_to_content(&mut spans, grid);
-    let mut lines = vec![Line::from(spans)];
 
-    // Bash 展开：`$ command`（syntax.command）+ 分隔线 + 输出
-    if bash_expanded {
-        let mut cmd_spans = cont_prefix(grid, sem.accents.tool);
-        cmd_spans.push(Span::styled(
+    let mut lines = vec![Line::from(spans)];
+    if data.fold != FoldState::Collapsed {
+        for detail in plan.details {
+            let mut spans = cont_prefix(grid, sem.accents.tool);
+            spans.extend(detail.spans);
+            lines.push(Line::from(spans));
+        }
+    }
+    lines
+}
+
+fn project_skill_tool(name: &str) -> ToolRenderPlan {
+    let running_details = vec![Line::from(Span::styled(
+        i18n::tr("msg-status-loading"),
+        Style::default().fg(THEME_ATOM.state().read().semantic.text.muted),
+    ))];
+    ToolRenderPlan {
+        label: format!("Skill ({name})"),
+        summary: String::new(),
+        completed_suffix: String::new(),
+        hide_completed_summary_when_expanded: false,
+        running_details,
+        completed_details: Vec::new(),
+        error_details: Vec::new(),
+    }
+}
+
+fn project_todo_tool(
+    data: &TuiToolCard,
+    todo: &TuiTodoPresentation,
+    grid: &GridSpec,
+) -> ToolRenderPlan {
+    let sem = THEME_ATOM.state().read().semantic;
+    let content_width = grid.content_width().saturating_sub(1).max(1);
+    let label = format!("TodoUpdate ({}/{})", todo.completed_count, todo.total_count);
+    let completed_details: Vec<Line<'static>> = todo
+        .changes
+        .iter()
+        .map(|change| {
+            let symbols = sym();
+            let (icon, color) = match change.kind {
+                TuiTodoChangeKind::Completed => (symbols.success, sem.status.success),
+                TuiTodoChangeKind::Added => ("+", sem.status.success),
+                TuiTodoChangeKind::Removed => ("-", sem.text.muted),
+                TuiTodoChangeKind::Started => (symbols.todo_started, sem.status.success),
+                TuiTodoChangeKind::Reopened => (symbols.todo_reopened, sem.status.success),
+                TuiTodoChangeKind::ActiveFormUpdated => (symbols.todo_edited, sem.status.success),
+            };
+            Line::from(vec![
+                Span::styled(format!("{icon} "), Style::default().fg(color)),
+                Span::styled(
+                    truncate_by_width(&change.content, content_width),
+                    Style::default().fg(sem.text.muted),
+                ),
+            ])
+        })
+        .collect();
+    let error_details = vec![Line::from(Span::styled(
+        truncate_by_width(&data.output_summary, content_width),
+        Style::default().fg(sem.text.muted),
+    ))];
+    ToolRenderPlan {
+        label,
+        summary: String::new(),
+        completed_suffix: String::new(),
+        hide_completed_summary_when_expanded: false,
+        running_details: completed_details.clone(),
+        completed_details,
+        error_details,
+    }
+}
+
+fn project_generic_tool(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
+    let sem = THEME_ATOM.state().read().semantic;
+    let content = grid.content_width();
+    let bash = data.tool_name == "Bash";
+    let mut completed_details = Vec::new();
+    if bash {
+        completed_details.push(Line::from(Span::styled(
             format!(
                 "$ {}",
                 truncate_by_width(&data.input_summary, content.saturating_sub(2))
             ),
             Style::default().fg(sem.syntax.command),
-        ));
-        lines.push(Line::from(cmd_spans));
-        lines.push(divider_fill_line(grid));
+        )));
+        completed_details.push(divider_fill_line(grid));
     }
 
-    // 输出摘要（§6.4）：仅显式展开时显示；error 摘要拆行 + error 色（§9.2）。
-    // 完成态默认折叠，避免 tool result 到达时自动增加正文行导致消息区高度突变。
-    // [G-Diff] 含 diff 的 Edit/Write 展开体由 render_diff_lines 展示（§6.5）——
-    // diff 文本就是 output_summary 本体，原始行直接显示会与 hunk 渲染重复。
-    let show_output = data.fold == FoldState::Expanded;
-    let has_diff = data.diff.is_some();
-    if show_output && !has_diff && !data.output_summary.is_empty() {
-        // [Fix F6 §11] Compact/Narrow 断点：tool 展开体最多 2 行（§11
-        // 「tool summary 最多 2 行」）——标准断点保持 4 行上限。
-        let max_lines = if matches!(grid.bp, Breakpoint::Compact | Breakpoint::Narrow) {
-            2
-        } else {
-            TOOL_OUTPUT_MAX_LINES
-        };
-        // [§9.2 错误输出] `Tool execution failed: X - Error: …` 按 ` - Error: `
-        // 分隔符拆成两行（首行工具名、次行错误详情），整块 error 色——
-        // 错误详情不再与工具名挤在同一行。
-        let output = if data.is_error {
-            data.output_summary.replacen(" - Error: ", "\n- Error: ", 1)
-        } else {
-            data.output_summary.clone()
-        };
-        let output_color = if data.is_error {
-            sem.status.error
-        } else {
-            sem.text.muted
-        };
-        for out_line in compact_output_lines(&output, max_lines, content) {
-            let mut spans = cont_prefix(grid, sem.accents.tool);
-            spans.push(Span::styled(out_line, Style::default().fg(output_color)));
-            lines.push(Line::from(spans));
-        }
+    let max_lines = if matches!(grid.bp, Breakpoint::Compact | Breakpoint::Narrow) {
+        2
+    } else {
+        TOOL_OUTPUT_MAX_LINES
+    };
+    let output_details = |output: &str, color| {
+        compact_output_lines(output, max_lines, content)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(color))))
+            .collect::<Vec<_>>()
+    };
+    if let Some(diff) = &data.diff {
+        completed_details.extend(render_diff_lines(diff, grid));
+    } else if !data.output_summary.is_empty() {
+        completed_details.extend(output_details(&data.output_summary, sem.text.muted));
     }
 
-    // [G-Diff] §6.5 diff 展开体（展开态；header `path +N −M` + hunk 行渲染）。
-    if show_output && let Some(ref diff) = data.diff {
-        lines.extend(render_diff_lines(diff, grid));
-    }
+    let error_details = if let Some(diff) = &data.diff {
+        render_diff_lines(diff, grid)
+    } else {
+        let output = data.output_summary.replacen(" - Error: ", "\n- Error: ", 1);
+        output_details(&output, sem.status.error)
+    };
 
-    lines
+    ToolRenderPlan {
+        label: crate::kit::tool_display::format_tool_name(&data.tool_name),
+        summary: data.input_summary.clone(),
+        completed_suffix: completed_header_suffix(data),
+        hide_completed_summary_when_expanded: bash,
+        running_details: Vec::new(),
+        completed_details,
+        error_details,
+    }
 }
 
 /// §6.5 Diff 展开体（G-Diff）：
@@ -342,7 +330,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
         count_parts.push(format!("\u{2212}{dels}"));
     }
     let count_text = count_parts.join(" ");
-    let mut spans = cont_prefix(grid, sem.accents.tool);
+    let mut spans = Vec::new();
     if !diff.path.is_empty() {
         spans.push(Span::styled(
             truncate_by_width(
@@ -368,7 +356,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
         return lines;
     };
     // hunk 头（dim）。
-    let mut hunk_header = cont_prefix(grid, sem.accents.tool);
+    let mut hunk_header = Vec::new();
     hunk_header.push(Span::styled(
         truncate_by_width(
             &format!("@@ {} {} @@", hunk.old_range, hunk.new_range),
@@ -387,7 +375,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
             TuiHunkLineKind::Del => (l.old_no, "-", sem.status.error),
             TuiHunkLineKind::Context => (l.old_no, " ", sem.text.muted),
         };
-        let mut spans = cont_prefix(grid, sem.accents.tool);
+        let mut spans = Vec::new();
         if show_gutter {
             let no = gutter
                 .map(|n| format!("{n:>gutter_width$}"))
@@ -415,7 +403,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
     // 截断指示：本 hunk 截断 + 后续 hunk 的剩余 change 行（§6.5 `… +N more lines`）。
     let remaining = hunk.truncated_lines + diff.more_change_lines;
     if remaining > 0 {
-        let mut more = cont_prefix(grid, sem.accents.tool);
+        let mut more = Vec::new();
         more.push(Span::styled(
             format!("\u{2026} +{remaining} more lines"),
             Style::default().fg(sem.text.dim),
@@ -430,7 +418,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
 /// Edit/Write `· +N −M`（只保留 diff 计数——摘要文本含路径，与 header 的
 /// `input_summary` 重复，不再拼接）。错误态不加后缀（§6.4）。
 pub(super) fn completed_header_suffix(data: &TuiToolCard) -> String {
-    if data.is_running || data.is_error || data.output_summary.is_empty() {
+    if data.output_summary.is_empty() {
         return String::new();
     }
     match data.tool_name.as_str() {
@@ -465,14 +453,10 @@ pub(super) fn completed_header_suffix(data: &TuiToolCard) -> String {
     }
 }
 
-/// 内容列铺满的 dim 分隔线（`[outer ][│][gap][───…]`）——Bash 展开体分隔用
-/// （竖线随工具卡片取 tool 角色色）。
+/// 内容列铺满的 dim 分隔线；统一 renderer 负责添加续行前缀。
 fn divider_fill_line(grid: &GridSpec) -> Line<'static> {
-    let sem = THEME_ATOM.state().read().semantic;
-    let mut spans = cont_prefix(grid, sem.accents.tool);
-    spans.push(Span::styled(
+    Line::from(Span::styled(
         "\u{2500}".repeat(grid.content_width()),
-        Style::default().fg(sem.text.dim),
-    ));
-    Line::from(spans)
+        Style::default().fg(THEME_ATOM.state().read().semantic.text.dim),
+    ))
 }

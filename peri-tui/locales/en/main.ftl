@@ -1141,4 +1141,3 @@ app-note-cache-hit-low = Prompt cache coverage {$pct}% < 80% (req: { $req_id })
 app-note-cache-coverage-low = Prompt cache coverage {$pct}% < 80% — cached {$cached} / input {$input}, uncached {$uncached} (req: {$req_id})
 
 # ---- Semantic tool cards ----
-tool-todo-failed = Update failed

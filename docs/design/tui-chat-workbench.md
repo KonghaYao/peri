@@ -98,7 +98,7 @@ RenderEvent::ToolStarted / ToolEnded
 | 主题 | 当前基线 |
 | --- | --- |
 | Transcript | 连续左对齐时间轴、统一 `GridSpec`、视口裁剪、分片渲染缓存、响应式断点已实现 |
-| Tool card | 统一 `TuiToolCard`；Running→Preview、Completed/Error→Collapsed（失败状态行保持可见，详情由用户显式展开） |
+| Tool card | `TuiToolPresentation` 仅投影 `ToolRenderPlan` 的 label/summary/detail 候选；统一 `resolve_tool_render_plan` / `render_tool_plan` 路径消费 status、fold、prefix、duration 与详情可见性。Running→Preview、Completed/Error→Collapsed（失败状态行保持可见，详情由用户显式展开） |
 | 专属展示 | `SkillTool`/旧名 `Skill` 与 `TodoWrite` 有专属 presentation；`Bash`、`Edit`、`Write` 在通用 renderer 内有局部特判 |
 | Diff | Edit/Write 尝试解析 unified diff，失败时回退为变更摘要；完整 diff 是否可达取决于上游 output |
 | SubAgent | 主时间轴有 `TuiSubAgentGroup`，并已有 SubAgent 详情 Panel |
@@ -478,7 +478,7 @@ outer accent  verb      primary object                  result · duration  acti
 - Expanded 与 transcript 共用父滚动，不得创建内部 scrollbar；
 - Wide/Standard 默认最多约 8 个视觉行，Compact 最多 4 行，Narrow 最多 3 行；具体预算由 viewport 与 theme density 决定；
 - 超出时显示 `… N more lines · Open details`；上游未知省略量时显示 `More content available`；
-- success 可自动折叠；running 默认 Preview；error 默认 Expanded summary；
+- success/error 完成态默认折叠；running 默认 Preview；
 - 用户手动改变 fold 后，lifecycle 更新不得覆盖 `user_modified`。
 
 ### 7.3 Tool Inspector：完整非模态详情

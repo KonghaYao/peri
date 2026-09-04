@@ -1943,7 +1943,7 @@ fn test_todo_summary_line() {
     assert!(text.contains("3/7 tasks · Running tests"));
 }
 
-// ── Skill / Todo 语义卡（保持专属展示）──────────────────────────────────
+// ── 统一 ToolRenderPlan：presentation 只投影专属内容 ────────────────────
 
 #[test]
 fn skill_card_hides_raw_skill_output() {
