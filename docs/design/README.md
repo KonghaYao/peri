@@ -43,6 +43,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
+| Meta 数据访问 | [meta-control.md](meta-control.md) | `spec/issues/2026-09-04-peri-meta-control.md` |
 | MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | `spec/issues/2026-08-27-mcp-apps-stdio-relay.md` |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/issues/2026-08-10-chat-redesign-slice2-onwards.md` |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |
