@@ -1,6 +1,6 @@
 # peri-agent 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-05（Goal 自动接续状态投影）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-05（Goal 自动接续状态投影；compact 展示事件恢复）
 > 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
 
 ## 架构速览
@@ -15,6 +15,7 @@
 | --- | --- | --- | --- |
 | 改 compact 触发阈值 | `peri-acp-types/src/compact.rs`（`CompactConfig` 事实源，`apply_env_overrides` 实现在 :325；`peri-agent/src/agent/compact_v2/config.rs` 仅 re-export；`peri-acp/src/host/compact_config.rs` 是配置加载调用方） | `CompactConfig` 字段：`auto_compact_threshold`（默认 0.95）、`micro_compact_threshold`（默认 0.75）、`smart_compact_enabled`（废弃恒 false） | budget < 0.75 跳过；≥ 0.75 走 Micro；Micro 收益不足且 budget ≥ auto_compact_threshold 时升级 Full；force=true 直接 Full。注意：调低 Full 阈值时 micro_compact_threshold 必须更低，否则先走 Skip |
 | 改 compact 策略选择 | `src/agent/compact_v2/mod.rs` + `src/agent/stages/compact.rs` | `determine_compact_action(budget, config)`（mod.rs:102，Skip/Micro/Smart 选择）；`run_compact`（mod.rs:125 编排，Full 升级判定在 :233）；阶段入口 `stages/compact.rs::run_compact` | Full 升级判定以代码为准：`budget >= config.auto_compact_threshold` + `llm.is_none()` 守卫 + cache-aware 跳过；`planner.rs::CompactPolicy::force_full_threshold` 无消费点（遗留） |
+| 改 compact 展示事件 | `src/agent/stages/compact.rs` + `peri-acp-types/src/event_v2.rs` + `src/session/exec/{compact_pipeline,events}.rs` | `ObserveEvent::CompactStarted` / `MessagesCompacted`；`observe_event_to_executor`；`emit_compact_started` / `emit_compact_completed` | 自动 compact 将 strategy、受影响消息数、估算节省 token、files/skills 映射到 `ExecutorEvent::CompactCompleted`；手动 `/compact` 从 pipeline 发送同一展示载荷；下游经 ACP 单路径投递，契约 ARC-EVENT-001 |
 | 改 Micro/Full 执行细节 | `src/agent/compact_v2/micro.rs` / `full.rs` | `micro_compact`；`re_inject_v2`、`extract_file_info`、`extract_skill_names` | Micro 按 round 截断（`micro_excluded_tools` 黑名单）；Full 走 `peri_model::Model` 摘要 + re-inject |
 | 改 Goal 自动接续与状态事件 | `peri-middlewares/src/goal_middleware.rs` + `src/agent/stages/act.rs` + `src/session/exec/stage_builder.rs` + `peri-acp-types/src/{goal,event_v2}.rs` | `GoalMiddleware::after_agent`；`GoalController::increment_continuation`；`emit_goal_snapshot`；`StateEvent::GoalSnapshot` | 仅 active Goal 且无既有 `block_continue` 时记录一次主动接续并设置 `goal_active`；Act 每轮结束（含错误返回）发 session Goal 快照，下游经 ACP 单路径投影；契约 ARC-EVENT-001 / ARC-MIDDLEWARE-001 |
 | 改循环退出 / keepgoing 判定 | `src/session/exec/executor.rs` + `src/agent/stages/mod.rs`（Receive 分支） | `executor.rs:130 is_keepgoing(&MessageContent)`；`run_session_loop`（executor.rs:221）；`run_react_loop` 退出判断（stages/mod.rs:647 `consumed_count == 0 && !has_tool_calls`）；判空底层 `peri-acp-types/src/messages/content.rs::is_empty`（:399） | 空白 prompt 须用 `MessageContent::is_empty()` 判空（禁止 trim 替代）；空历史 + 空白 prompt 时短路 `push_done`；keepgoing 不注入 recall；契约 ARC-KEEPGOING-001 |

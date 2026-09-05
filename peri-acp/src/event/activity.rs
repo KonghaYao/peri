@@ -437,12 +437,16 @@ mod tests {
 
     #[test]
     fn compact_projection_contains_counts_not_sensitive_bodies() {
-        // Phase 5 Step 4：CompactCompleted 收敛为三字段重建信号——activity
-        // 投影仅含 trigger 与消息数，敏感摘要/路径均不泄漏。
+        // activity 投影仅暴露 allowlist 计数，不泄漏摘要/路径。
         let event = ExecutorEvent::CompactCompleted {
             summary: "SECRET_SUMMARY".into(),
             messages: vec![],
             trigger: CompactTrigger::Auto,
+            strategy: CompactStrategy::Smart,
+            affected_count: 3,
+            estimated_tokens_saved: 100,
+            files: vec![],
+            skills: vec![],
         };
         let completed = map_agent_activity(&event).unwrap();
         let started = map_agent_activity(&ExecutorEvent::CompactStarted {

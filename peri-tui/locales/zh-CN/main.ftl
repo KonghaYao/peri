@@ -1136,8 +1136,9 @@ popup-download-finished-notify = 主题下载完成: { $success }/{ $total } 成
 
 # ---- System Notes (app message stream) ----
 app-note-budget-warning = 上下文窗口使用率 { NUMBER($pct, maximumFractionDigits: 0) }%（{ $used }/{ $limit }）
-app-note-compact-completed = { $type }完成{ $detail }
-app-note-compact-completed-summary = { $type }完成{ $detail } —— { $summary }
+app-note-compact-completed = { $type }完成 { $detail }
+app-note-compact-completed-summary = { $type }完成 { $detail } —— { $summary }
+app-note-compact-detail = （压缩 { $messages } 条消息，估算节省 { $tokens } tokens，重新注入 { $files } 个文件、{ $skills } 个 Skills）
 app-note-compact-error = 上下文压缩失败: { $message }
 app-note-rewind-error = 回退失败: { $message }
 app-note-compact-type-full = 完整压缩

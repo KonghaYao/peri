@@ -263,6 +263,10 @@ impl Default for CompactTrigger {
     }
 }
 
+fn default_compact_strategy() -> CompactStrategy {
+    CompactStrategy::Full
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactThreshold {
@@ -498,21 +502,30 @@ pub enum ExecutorEvent {
         /// 压缩触发方式
         trigger: CompactTrigger,
     },
-    /// 上下文压缩完成（Phase 5 Step 4 收敛：状态重建信号，非纯反馈——通知
-    /// 文案职责已移交 `CommandFeedback`；R1/R3 桥接核心，字段不得再删）
+    /// 上下文压缩完成（状态重建信号 + TUI 展示信息）
     CompactCompleted {
         /// 摘要文本（full compact 时非空，micro compact 时为空）。
-        /// 文案职责移交 feedback 后仅为兼容保留（TUI 事件日志展示）。
         summary: String,
-        /// 压缩后的新消息列表（full compact 时非空）——TUI 重建数据源
-        /// （重放兜底 + 事件日志）
+        /// 压缩后的新消息列表（full compact 时非空）——TUI 重建数据源。
         messages: Vec<crate::messages::BaseMessage>,
         /// 压缩触发方式（Manual=用户 /compact 命令；Auto=agent 内部自动压缩）。
-        /// R3 标志链依赖（TUI compact_just_completed 置位条件
-        /// `trigger=="manual"`），不得删。
-        /// 旧事件（无此字段）按 Auto 处理（serde(default)）。
         #[serde(default)]
         trigger: CompactTrigger,
+        /// 实际采用的压缩策略。
+        #[serde(default = "default_compact_strategy")]
+        strategy: CompactStrategy,
+        /// 被压缩或投影的消息数量。
+        #[serde(default)]
+        affected_count: usize,
+        /// 估算节省的 token 数量。
+        #[serde(default)]
+        estimated_tokens_saved: u64,
+        /// Full compact 后重新注入的文件信息。
+        #[serde(default)]
+        files: Vec<CompactFileInfo>,
+        /// Full compact 后重新注入的 Skill 名称。
+        #[serde(default)]
+        skills: Vec<String>,
     },
     /// 对话回退完成（rewind 命令，移除目标用户消息及其之后的所有消息）
     RewindCompleted {

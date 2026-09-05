@@ -107,6 +107,17 @@ pub(super) fn handle_system_notification(state: &mut BridgeState, sn: &SystemNot
 }
 
 pub(super) fn handle_command_feedback(state: &mut BridgeState, fb: &TuiCommandFeedback) {
+    // CompactCompleted 已注入更完整的展示信息；手动 compact 紧随其后的通用
+    // CommandFeedback 仅是兼容反馈，跳过以避免消息流短暂出现两条完成通知。
+    if fb.channel == FeedbackChannel::UiOnly
+        && state.compact_just_completed
+        && crate::kit::atoms::PENDING_COMPACT_NOTE
+            .state()
+            .read()
+            .is_some()
+    {
+        return;
+    }
     // 命令执行反馈（Phase 3 CommandFeedback 事件）。v1 不建独立通知条组件，
     // UiOnly/Session 两通道均先走 inject_system_note——SystemNote 是 TUI 渲染
     // 层概念，不进 ACP 消息，agent 永不见（设计 §79）；通知条/状态区的视觉
@@ -131,7 +142,13 @@ pub(super) fn handle_command_feedback(state: &mut BridgeState, fb: &TuiCommandFe
     // waitFor 完成提示 120s 超时）。仅 UiOnly 且 compact 完成场景写入：auto
     // compact 无 replay 触发不写、非 compact 命令无 replay 不写，防残留串到
     // 后续 thread 切换的 reset。
-    if fb.channel == FeedbackChannel::UiOnly && state.compact_just_completed {
+    if fb.channel == FeedbackChannel::UiOnly
+        && state.compact_just_completed
+        && crate::kit::atoms::PENDING_COMPACT_NOTE
+            .state()
+            .read()
+            .is_none()
+    {
         crate::kit::atoms::PENDING_COMPACT_NOTE.set(Some(fb.message.clone()));
     }
 }

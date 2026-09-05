@@ -336,6 +336,9 @@ pub(crate) fn dispatch_for_bridge(
             | ToolCount(_)
             | Progress(_)
     ) {
+        if state.compact_just_completed {
+            crate::kit::atoms::PENDING_COMPACT_NOTE.set(None);
+        }
         state.compact_just_completed = false;
     }
     match event {
@@ -424,7 +427,25 @@ pub(crate) fn dispatch_for_bridge(
             steps,
         } => turn::handle_turn_committed(state, *steps),
         CompactStarted => compact::handle_compact_started(state),
-        CompactCompleted { trigger, .. } => compact::handle_compact_completed(state, trigger),
+        CompactCompleted {
+            summary,
+            trigger,
+            strategy,
+            affected_count,
+            estimated_tokens_saved,
+            files,
+            skills,
+            ..
+        } => compact::handle_compact_completed(
+            state,
+            summary,
+            trigger,
+            strategy,
+            *affected_count,
+            *estimated_tokens_saved,
+            files.len(),
+            skills.len(),
+        ),
         BackgroundTaskCompleted {
             task_id,
             agent_name,

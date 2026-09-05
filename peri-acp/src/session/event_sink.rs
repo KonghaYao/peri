@@ -226,10 +226,16 @@ impl EventSink for TransportEventSink {
                     is_error: *is_error,
                     instance_id: instance_id.clone(),
                 }),
+                ExecutorEvent::CompactStarted { .. } => Some(AcpEvent::CompactStarted),
                 ExecutorEvent::CompactCompleted {
                     summary,
                     messages,
                     trigger,
+                    strategy,
+                    affected_count,
+                    estimated_tokens_saved,
+                    files,
+                    skills,
                 } => {
                     let messages_json = match serde_json::to_string(messages) {
                         Ok(json) => json,
@@ -238,11 +244,21 @@ impl EventSink for TransportEventSink {
                             return;
                         }
                     };
-                    let trigger_str = to_serde_str(trigger);
                     Some(AcpEvent::CompactCompleted {
                         summary: summary.clone(),
                         messages_json,
-                        trigger: trigger_str,
+                        trigger: to_serde_str(trigger),
+                        strategy: to_serde_str(strategy),
+                        affected_count: *affected_count,
+                        estimated_tokens_saved: *estimated_tokens_saved,
+                        files: files
+                            .iter()
+                            .map(|file| crate::event::CompactFileInfoDto {
+                                path: file.path.clone(),
+                                lines: file.lines,
+                            })
+                            .collect(),
+                        skills: skills.clone(),
                     })
                 }
                 ExecutorEvent::AgentExecutionFailed { message } => {
@@ -566,6 +582,76 @@ mod tests {
             id: MessageId::new(),
             content: MessageContent::Text("hi".to_string()),
         }
+    }
+
+    fn compact_test_sink() -> (Arc<MockTransport>, TransportEventSink) {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                agent_event: true,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+        (transport, sink)
+    }
+
+    #[tokio::test]
+    async fn push_event_forwards_compact_started() {
+        let (transport, sink) = compact_test_sink();
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::CompactStarted {
+                turn_id: "turn-1".into(),
+                agent_id: "agent-1".into(),
+                step: 3,
+                strategy: peri_acp_types::event::CompactStrategy::Micro,
+                trigger: peri_acp_types::event::CompactTrigger::Auto,
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        let event_json = notifications[0].1["event_json"].as_str().unwrap();
+        let event: AcpEvent = serde_json::from_str(event_json).unwrap();
+        assert!(matches!(event, AcpEvent::CompactStarted));
+    }
+
+    #[tokio::test]
+    async fn push_event_forwards_compact_completed_details() {
+        let (transport, sink) = compact_test_sink();
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::CompactCompleted {
+                summary: String::new(),
+                messages: vec![],
+                trigger: peri_acp_types::event::CompactTrigger::Auto,
+                strategy: peri_acp_types::event::CompactStrategy::Micro,
+                affected_count: 7,
+                estimated_tokens_saved: 2048,
+                files: vec![],
+                skills: vec!["tdd".into()],
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        let event_json = notifications[0].1["event_json"].as_str().unwrap();
+        let event: AcpEvent = serde_json::from_str(event_json).unwrap();
+        assert!(matches!(
+            event,
+            AcpEvent::CompactCompleted {
+                strategy,
+                affected_count: 7,
+                estimated_tokens_saved: 2048,
+                skills,
+                ..
+            } if strategy == "micro" && skills == ["tdd"]
+        ));
     }
 
     #[tokio::test]

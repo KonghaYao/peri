@@ -245,30 +245,27 @@ impl UnifiedLangfuseEvent {
             ExecutorEvent::CompactStarted {
                 strategy, trigger, ..
             } => Some(UnifiedLangfuseEvent::CompactStarted { strategy, trigger }),
-            // Phase 5 Step 4：CompactCompleted 收敛为重建信号三字段
-            // （summary/messages/trigger），观测映射改读 summary/messages，
-            // 被删字段（files/skills/micro_cleared/strategy/outcome 等）不再
-            // 参与映射；错误反馈已移交 CommandFeedback（CompactError 变体删除）。
-            // [P2-4] CompactEnded span 模型要求数字字段，收敛后已无观测来源：
-            // 下方 files_count/skills_count/estimated_tokens_* 等硬编码 0/0.0
-            // 仅表示「未知/不可用」，勿在 Langfuse 面板读作真实观测
-            // （「0 文件、0 token 节省」）；完整观测见 ObserveEvent::MessagesCompacted。
-            ExecutorEvent::CompactCompleted { summary, .. } => {
-                Some(UnifiedLangfuseEvent::CompactEnded {
-                    summary,
-                    files_count: 0,
-                    skills_count: 0,
-                    micro_cleared: 0,
-                    is_error: false,
-                    error_message: String::new(),
-                    estimated_tokens_saved: 0,
-                    estimated_tokens_before: 0,
-                    estimated_tokens_after: 0,
-                    cache_hit_rate_before: 0.0,
-                    full_escalation_reason: None,
-                    outcome: None,
-                })
-            }
+            ExecutorEvent::CompactCompleted {
+                summary,
+                files,
+                skills,
+                affected_count,
+                estimated_tokens_saved,
+                ..
+            } => Some(UnifiedLangfuseEvent::CompactEnded {
+                summary,
+                files_count: files.len(),
+                skills_count: skills.len(),
+                micro_cleared: affected_count,
+                is_error: false,
+                error_message: String::new(),
+                estimated_tokens_saved,
+                estimated_tokens_before: 0,
+                estimated_tokens_after: 0,
+                cache_hit_rate_before: 0.0,
+                full_escalation_reason: None,
+                outcome: None,
+            }),
             ExecutorEvent::SessionStarted { frozen_summary, .. } => {
                 Some(UnifiedLangfuseEvent::SessionStarted { frozen_summary })
             }

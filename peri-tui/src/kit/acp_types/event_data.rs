@@ -263,14 +263,22 @@ pub enum AcpEventData {
     /// `"compact-started"` — 上下文压缩开始。
     CompactStarted,
 
-    /// `"compact-completed"` — 上下文压缩完成（Phase 5 Step 4 收敛：
-    /// 状态重建信号三字段；通知文案由 CommandFeedback 渲染）。
+    /// `"compact-completed"` — 上下文压缩完成（状态重建信号 + 展示信息）。
     CompactCompleted {
         summary: String,
         messages_json: String,
-        /// 压缩触发方式: "auto" | "manual"（旧事件缺省视为 "auto"，由
-        /// acp_notifier 透传时补默认值）
+        /// 压缩触发方式: "auto" | "manual"。
         trigger: String,
+        /// 实际采用的压缩策略。
+        strategy: String,
+        /// 被压缩或投影的消息数量。
+        affected_count: usize,
+        /// 估算节省的 token 数量。
+        estimated_tokens_saved: u64,
+        /// Full compact 后重新注入的文件信息。
+        files: Vec<peri_acp_types::summary::CompactFileInfoDto>,
+        /// Full compact 后重新注入的 Skill 名称。
+        skills: Vec<String>,
     },
 
     /// `"background-task-completed"` — 后台 agent 任务完成。

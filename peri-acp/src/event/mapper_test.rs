@@ -682,12 +682,17 @@ fn test_compact_started_no_session_update() {
 
 #[test]
 fn test_compact_completed_no_session_update() {
-    // Phase 5 Step 4 收敛：CompactCompleted 为重建信号三字段。
+    // CompactCompleted 是私有事件，不产生标准 SessionUpdate。
     assert_no_session_update(
         &ExecutorEvent::CompactCompleted {
             summary: "compressed".to_string(),
             messages: vec![],
             trigger: CompactTrigger::Auto,
+            strategy: CompactStrategy::Micro,
+            affected_count: 2,
+            estimated_tokens_saved: 128,
+            files: vec![],
+            skills: vec![],
         },
         "CompactCompleted",
     );

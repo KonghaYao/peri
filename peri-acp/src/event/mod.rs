@@ -110,8 +110,7 @@ pub enum AcpEvent {
     },
     /// Context compaction started
     CompactStarted,
-    /// Context compaction completed（Phase 5 Step 4 收敛：状态重建信号三字段；
-    /// 通知文案职责已移交 CommandFeedback）
+    /// Context compaction completed（状态重建信号 + TUI 展示信息）
     CompactCompleted {
         summary: String,
         /// JSON-serialized `Vec<BaseMessage>` (the new message list after compact)
@@ -119,6 +118,16 @@ pub enum AcpEvent {
         /// 压缩触发方式: "auto" | "manual"（旧事件缺省视为 "auto"）
         #[serde(default = "default_compact_trigger")]
         trigger: String,
+        /// 实际采用的压缩策略。
+        strategy: String,
+        /// 被压缩或投影的消息数量。
+        affected_count: usize,
+        /// 估算节省的 token 数量。
+        estimated_tokens_saved: u64,
+        /// Full compact 后重新注入的文件信息。
+        files: Vec<CompactFileInfoDto>,
+        /// Full compact 后重新注入的 Skill 名称。
+        skills: Vec<String>,
     },
     /// Rewind completed
     RewindCompleted {
