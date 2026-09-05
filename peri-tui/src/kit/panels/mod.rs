@@ -27,6 +27,7 @@ pub mod ask_user;
 pub mod betas;
 pub mod config;
 pub mod cron;
+pub mod goal;
 pub mod hooks;
 pub mod login;
 pub mod mcp;

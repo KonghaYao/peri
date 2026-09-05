@@ -6,9 +6,11 @@
 //!   CPU%/MEM/ctx 已迁移 composer footer 资源线（input_area.rs）。
 //! - **Row 2**：状态相关的快捷键 hints（popup/mention/slash/默认 4 态切换）。
 
+use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms;
 use crate::kit::mouse_router;
+use crate::kit::panel_registry::open_panel;
 use crate::kit::popup_overlay::open_popup;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -34,8 +36,10 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let provider_hl = hooks.use_atom(&atoms::PROVIDER_HIGHLIGHT_UNTIL);
     let mode_hl = hooks.use_atom(&atoms::MODE_HIGHLIGHT_UNTIL);
     let bg_tasks = hooks.use_atom(&atoms::BG_TASKS);
+    let goal_store = hooks.use_atom(&atoms::GOAL_SNAPSHOT);
 
     let snap = snap.read().clone();
+    let goal = goal_store.read().clone();
     let now = Instant::now();
     // provider 不单独显示；provider 或 model 任一变化都让模型段闪烁提醒
     let model_highlighted = model_hl.read().as_ref().is_some_and(|t| *t > now)
@@ -93,7 +97,26 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         model_end = spans.len();
     }
 
-    // 4. 后台任务计数
+    // 4. 当前 goal（简洁状态，点击打开详情）
+    let mut goal_start = None;
+    let mut goal_end = 0usize;
+    if let Some(goal) = &goal {
+        goal_start = Some(spans.len());
+        spans.push(separator());
+        let status = match goal.status {
+            Some(peri_acp_types::goal::GoalStatus::Active) => i18n::tr("goal-status-active"),
+            Some(peri_acp_types::goal::GoalStatus::Complete) => i18n::tr("goal-status-complete"),
+            Some(peri_acp_types::goal::GoalStatus::Blocked) => i18n::tr("goal-status-blocked"),
+            None => i18n::tr("ui-empty"),
+        };
+        spans.push(Span::styled(
+            format!("Goal: {status} · ↻{}", goal.continuation_count),
+            Style::default().fg(THEME_ATOM.state().read().semantic.accent),
+        ));
+        goal_end = spans.len();
+    }
+
+    // 5. 后台任务计数
     let bg = bg_tasks.read();
     let shell_c = bg.iter().filter(|t| t.kind == "shell").count();
     let agent_c = bg.iter().filter(|t| t.kind == "agent").count();
@@ -146,6 +169,12 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         } else {
             Vec::new()
         };
+    let goal_click: Vec<(u16, u16, u16)> =
+        if let (Some(start), Some(area)) = (goal_start, row1_area) {
+            model_click_areas(&spans, area.width as usize, row_height, start, goal_end)
+        } else {
+            Vec::new()
+        };
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
         if let Event::Mouse(mouse) = event {
             if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
@@ -166,6 +195,16 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 *atoms::MODEL_SWITCH_ANCHOR.state().write() =
                     Some((area.x.saturating_add(x_start), mouse.row));
                 open_popup(atoms::PopupKind::ModelQuickSwitch);
+                return EventResult::Consumed;
+            }
+            if let Some(area) = row1_area
+                && goal_click.iter().copied().any(|(li, xs, xe)| {
+                    mouse.row == area.y.saturating_add(li)
+                        && mouse.column >= area.x.saturating_add(xs)
+                        && mouse.column < area.x.saturating_add(xe)
+                })
+            {
+                open_panel(PanelKind::Goal);
                 return EventResult::Consumed;
             }
         }

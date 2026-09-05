@@ -599,6 +599,7 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         Progress(_) => "Progress",
         BudgetWarning(_) => "BudgetWarning",
         SystemNotification(_) => "SystemNotification",
+        GoalSnapshot { .. } => "GoalSnapshot",
         CommandFeedback(_) => "CommandFeedback",
         Prediction(_) => "Prediction",
         FileSuggestions(_) => "FileSuggestions",

@@ -26,6 +26,8 @@ pub enum PanelKind {
     SubAgentDetail,
     /// 后台 shell 任务详情（由底栏 bg 行点击打开）。
     ShellDetail,
+    /// 当前 session 的 Goal 只读详情（由状态栏 goal 段点击打开）。
+    Goal,
 }
 
 // ─── EventResult ────────────────────────────────────────────────────────────

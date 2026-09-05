@@ -367,6 +367,23 @@ pub(crate) fn dispatch_for_bridge(
         CommandFeedback(fb) => system::handle_command_feedback(state, fb),
 
         // ── §4.4 Input assist ──
+        GoalSnapshot {
+            objective,
+            status,
+            token_budget,
+            tokens_used,
+            time_used_seconds,
+            continuation_count,
+            blocked_reason,
+        } => system::handle_goal_snapshot(
+            objective,
+            *status,
+            *token_budget,
+            *tokens_used,
+            *time_used_seconds,
+            *continuation_count,
+            blocked_reason,
+        ),
         Prediction(p) => system::handle_prediction(p),
         FileSuggestions(_) => system::handle_file_suggestions(),
 

@@ -217,6 +217,69 @@ fn test_ordinary_gate_preserves_just_reset_rules() {
     assert!(!accepts_event_session(&event, "s1", "s2", true));
 }
 
+fn goal_snapshot(objective: &str, continuation_count: u64) -> AcpEventData {
+    AcpEventData::GoalSnapshot {
+        objective: Some(objective.into()),
+        status: Some(peri_acp_types::goal::GoalStatus::Active),
+        token_budget: None,
+        tokens_used: 0,
+        time_used_seconds: 0,
+        continuation_count,
+        blocked_reason: None,
+    }
+}
+
+/// Goal 投影必须服从普通事件的 session ownership gate。
+#[tokio::test]
+#[serial]
+async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_session() {
+    use crate::kit::atoms::{ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, GOAL_SNAPSHOT};
+
+    let old_active = ACTIVE_SESSION_ID.state().read().clone();
+    let old_reset = BRIDGE_RESET_COUNTER.get();
+    let old_goal = GOAL_SNAPSHOT.state().read().clone();
+    *ACTIVE_SESSION_ID.state().write() = "s1".into();
+    *GOAL_SNAPSHOT.state().write() = None;
+    BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(1));
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+
+    tx.send(AcpEventWithEpoch {
+        event: goal_snapshot("current", 2),
+        active_session_id: "s1".into(),
+    })
+    .unwrap();
+    assert_eq!(observed_rx.recv().await, Some(true));
+    assert_eq!(
+        GOAL_SNAPSHOT
+            .state()
+            .read()
+            .as_ref()
+            .and_then(|goal| goal.objective.as_deref()),
+        Some("current")
+    );
+
+    tx.send(AcpEventWithEpoch {
+        event: goal_snapshot("stale", 99),
+        active_session_id: "s0".into(),
+    })
+    .unwrap();
+    assert_eq!(observed_rx.recv().await, Some(false));
+    let projected = GOAL_SNAPSHOT.state().read().clone().unwrap();
+    assert_eq!(projected.objective.as_deref(), Some("current"));
+    assert_eq!(projected.continuation_count, 2);
+
+    shutdown.cancel();
+    drop(tx);
+    handle.await.unwrap();
+    *ACTIVE_SESSION_ID.state().write() = old_active;
+    BRIDGE_RESET_COUNTER.set(old_reset);
+    *GOAL_SNAPSHOT.state().write() = old_goal;
+}
+
 /// [回归测试] production bridge 在 session gate 前不发布 HITL UI state。
 #[tokio::test]
 #[serial]

@@ -532,6 +532,20 @@ pub static SPINNER_TOKEN_COUNT: AtomStatic<usize> = AtomStatic::new(|| 0);
 /// StatusBarRow1 订阅此 atom 显示。
 pub static CONTEXT_USAGE: AtomStatic<Option<(f64, u64)>> = AtomStatic::new(|| None);
 
+/// 当前 session 的 Goal 只读投影，由 ACP GoalSnapshot 状态事件更新。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GoalSnapshot {
+    pub objective: Option<String>,
+    pub status: Option<peri_acp_types::goal::GoalStatus>,
+    pub token_budget: Option<u64>,
+    pub tokens_used: u64,
+    pub time_used_seconds: u64,
+    pub continuation_count: u64,
+    pub blocked_reason: Option<String>,
+}
+
+pub static GOAL_SNAPSHOT: AtomStatic<Option<GoalSnapshot>> = AtomStatic::new(|| None);
+
 /// 最近一次消息区视口快照。由 MessageArea 在 render 阶段计算后写入，
 /// 仅供调试导出命令读取；screen 模式按此范围导出当前可见文本。
 #[derive(Debug, Clone, Default)]

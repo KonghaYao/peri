@@ -50,6 +50,8 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
     *atoms::REWIND_BUDGET_STATE.state().write() = atoms::RewindBudgetState::Idle;
     *atoms::REWIND_QUERY_ERROR.state().write() = None;
     *atoms::TODO_ITEMS.state().write() = Vec::new();
+    *atoms::GOAL_SNAPSHOT.state().write() = None;
+    panel_registry::close_panel(PanelKind::Goal);
     input_history::reset_history_cursor();
 }
 

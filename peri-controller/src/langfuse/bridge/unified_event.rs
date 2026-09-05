@@ -319,6 +319,7 @@ impl UnifiedLangfuseEvent {
             }),
             // 无 Langfuse 映射的事件
             ExecutorEvent::TurnStarted { .. }
+            | ExecutorEvent::GoalSnapshot { .. }
             | ExecutorEvent::TurnEnded { .. }
             | ExecutorEvent::StateSnapshotMeta { .. }
             | ExecutorEvent::SubagentStarted { .. }

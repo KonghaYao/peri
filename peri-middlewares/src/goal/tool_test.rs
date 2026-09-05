@@ -53,7 +53,7 @@ impl GoalController for MockController {
                 status: Some(GoalStatus::Active),
                 token_budget: None,
                 tokens_used: 0,
-                objective_just_updated: false,
+                ..Default::default()
             }
         } else {
             GoalViewSnapshot::default()

@@ -468,6 +468,47 @@ async fn test_agent_event_unknown_variant_dropped() {
     shutdown.cancel();
 }
 
+#[tokio::test]
+async fn test_goal_snapshot_forwards_to_session_owned_bridge() {
+    crate::kit::atoms::init_atoms();
+    *crate::kit::atoms::GOAL_SNAPSHOT.state().write() = None;
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+
+    notif_tx
+        .send(AcpNotification::AgentEvent {
+            session_id: "s1".into(),
+            event: AcpEvent::GoalSnapshot {
+                objective: Some("ship status bar".into()),
+                status: Some(peri_acp_types::goal::GoalStatus::Active),
+                token_budget: Some(10_000),
+                tokens_used: 2_000,
+                time_used_seconds: 30,
+                continuation_count: 3,
+                blocked_reason: None,
+            },
+        })
+        .unwrap();
+
+    let bridge_event = bridge_rx.recv().await.expect("bridge should receive goal");
+    assert_eq!(bridge_event.active_session_id, "s1");
+    match bridge_event.event {
+        AcpEventData::GoalSnapshot {
+            objective,
+            status,
+            continuation_count,
+            ..
+        } => {
+            assert_eq!(objective.as_deref(), Some("ship status bar"));
+            assert_eq!(status, Some(peri_acp_types::goal::GoalStatus::Active));
+            assert_eq!(continuation_count, 3);
+        }
+        other => panic!("expected GoalSnapshot, got {other:?}"),
+    }
+    assert!(crate::kit::atoms::GOAL_SNAPSHOT.state().read().is_none());
+
+    shutdown.cancel();
+}
+
 /// SystemNotification（MCP 上下线等）必须透传 text/level 到系统通知面。
 #[tokio::test]
 async fn test_agent_event_forwards_system_notification() {

@@ -310,6 +310,7 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
         | ExecutorEvent::StateSnapshot(_)
         | ExecutorEvent::TurnCommitted { .. }
         | ExecutorEvent::StateSnapshotMeta { .. }
+        | ExecutorEvent::GoalSnapshot { .. }
         | ExecutorEvent::MessageAdded(_)
         | ExecutorEvent::LlmCallStart { .. }
         | ExecutorEvent::LlmRequestPayload { .. }

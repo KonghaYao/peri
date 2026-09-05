@@ -401,6 +401,16 @@ pub enum ExecutorEvent {
         /// 上下文窗口总量（ContextBudget.context_window），None 表示无配置
         context_total_tokens: Option<u64>,
     },
+    /// 当前 session 的 Goal 详情投影。
+    GoalSnapshot {
+        objective: Option<String>,
+        status: Option<crate::goal::GoalStatus>,
+        token_budget: Option<u64>,
+        tokens_used: u64,
+        time_used_seconds: u64,
+        continuation_count: u64,
+        blocked_reason: Option<String>,
+    },
     /// 增量消息（BaseMessage），持久化和遥测的最小数据单元
     MessageAdded(crate::messages::BaseMessage),
     /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。

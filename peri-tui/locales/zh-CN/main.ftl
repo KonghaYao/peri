@@ -826,6 +826,7 @@ panel-title-ask-user = Ask User
 panel-title-theme = Theme
 panel-title-subagent-detail = SubAgent 详情
 panel-title-shell-detail = Shell 详情
+panel-title-goal = Goal
 
 # ---- Panel Descriptions ----
 panel-desc-model = Model 别名选择
@@ -846,6 +847,14 @@ panel-desc-ask-user = Agent 用户提问（自动打开）
 panel-desc-theme = 配色方案选择
 panel-desc-subagent-detail = SubAgent 嵌套消息详情
 panel-desc-shell-detail = 后台 Shell 任务详情
+panel-desc-goal = 当前 Goal 详情
+goal-status-active = 进行中
+goal-status-complete = 已完成
+goal-status-blocked = 已阻塞
+goal-detail-status = 状态
+goal-detail-continuations = 主动接续次数
+goal-detail-blocked-reason = 阻塞原因
+goal-detail-empty = 当前会话没有可用的 Goal。
 subagent-detail-not-found = 未找到该 SubAgent — 会话可能已重置。
 shell-detail-not-found = 未找到该 Shell 任务 — 可能已结束或会话已重置。
 shell-detail-no-output = 运行中的 Shell 任务不会向 TUI 推送输出流。

@@ -126,6 +126,8 @@ pub struct StageContext {
     pub runtime: RuntimeServices,
     pub compact: CompactContext,
     pub async_ctx: AsyncContext,
+    /// 当前 session 的 Goal 只读/控制投影源。
+    pub goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
     /// Recall 累加器（跨 middleware hook 共享）。
     ///
     /// 每次 middleware hook 都会构造临时 [`AgentContext`]，
@@ -190,6 +192,7 @@ impl StageContext {
                 idle_suspended_flag: None,
                 inbox_handle: None,
             },
+            goal_controller: None,
             recall_buffer: rbuf,
         }
     }
@@ -237,6 +240,7 @@ impl StageContext {
                 idle_suspended_flag: None,
                 inbox_handle: None,
             },
+            goal_controller: None,
         }
     }
 
@@ -299,6 +303,7 @@ pub struct StageContextBuilder {
     runtime: RuntimeServices,
     compact: CompactContext,
     async_ctx: AsyncContext,
+    goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
 }
 
 impl StageContextBuilder {
@@ -416,12 +421,21 @@ impl StageContextBuilder {
         self
     }
 
+    pub fn with_goal_controller(
+        mut self,
+        controller: Arc<dyn peri_acp_types::goal::GoalController>,
+    ) -> Self {
+        self.goal_controller = Some(controller);
+        self
+    }
+
     pub fn build(self) -> StageContext {
         StageContext {
             session: self.session,
             runtime: self.runtime,
             compact: self.compact,
             async_ctx: self.async_ctx,
+            goal_controller: self.goal_controller,
             recall_buffer: Arc::new(RwLock::new(Vec::new())),
         }
     }

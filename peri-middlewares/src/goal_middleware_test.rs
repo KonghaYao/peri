@@ -6,6 +6,7 @@ use peri_agent::middleware::r#trait::Middleware;
 
 struct MockController {
     snapshot: parking_lot::Mutex<GoalViewSnapshot>,
+    continuation_count: std::sync::atomic::AtomicU64,
 }
 
 #[async_trait]
@@ -22,6 +23,11 @@ impl GoalController for MockController {
     async fn clear_goal(&self) -> Result<(), String> {
         Ok(())
     }
+    async fn increment_continuation(&self) -> Result<(), String> {
+        self.continuation_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
     fn snapshot(&self) -> GoalViewSnapshot {
         self.snapshot.lock().clone()
     }
@@ -33,7 +39,7 @@ fn make_active_snapshot() -> GoalViewSnapshot {
         status: Some(GoalStatus::Active),
         token_budget: None,
         tokens_used: 0,
-        objective_just_updated: false,
+        ..Default::default()
     }
 }
 
@@ -66,6 +72,7 @@ fn test_render_steering_contains_objective() {
 fn test_collect_tools_returns_goal_tool() {
     let controller = Arc::new(MockController {
         snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
     }) as Arc<dyn GoalController>;
     let mw = GoalMiddleware::new(controller, None);
 
@@ -78,8 +85,9 @@ fn test_collect_tools_returns_goal_tool() {
 async fn test_after_agent_goal_active_注入_steering_并设_block_continue() {
     let controller = Arc::new(MockController {
         snapshot: parking_lot::Mutex::new(make_active_snapshot()),
-    }) as Arc<dyn GoalController>;
-    let mw = GoalMiddleware::new(controller, None);
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+    });
+    let mw = GoalMiddleware::new(controller.clone(), None);
     let mut state = AgentState::new("/tmp");
     let output = AgentOutput::new("我完成了", 1);
 
@@ -89,6 +97,12 @@ async fn test_after_agent_goal_active_注入_steering_并设_block_continue() {
 
     // 设 block_continue 触发 executor 续跑
     assert_eq!(result.block_continue.as_deref(), Some("goal_active"));
+    assert_eq!(
+        controller
+            .continuation_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 
     // 注入路径：v2 MessageQueue 应收到 1 条 Defer（GoalSteering）
     let drained = state.v2_queue().drain_all();
@@ -99,6 +113,7 @@ async fn test_after_agent_goal_active_注入_steering_并设_block_continue() {
 async fn test_after_agent_no_goal_放行_不注入() {
     let controller = Arc::new(MockController {
         snapshot: parking_lot::Mutex::new(GoalViewSnapshot::default()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
     }) as Arc<dyn GoalController>;
     let mw = GoalMiddleware::new(controller, None);
     let mut state = AgentState::new("/tmp");
@@ -123,6 +138,7 @@ async fn test_after_agent_existing_block_continue_不干预() {
     // GoalMiddleware 必须尊重优先级，不覆盖也不重复注入 steering
     let controller = Arc::new(MockController {
         snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
     }) as Arc<dyn GoalController>;
     let mw = GoalMiddleware::new(controller, None);
     let mut state = AgentState::new("/tmp");
@@ -150,6 +166,7 @@ async fn test_after_agent_existing_block_continue_不干预() {
 async fn test_after_agent_terminal_重置_pending_rounds() {
     let mock = Arc::new(MockController {
         snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
     });
     let controller: Arc<dyn GoalController> = mock.clone();
     let mw = GoalMiddleware::new(controller, None);

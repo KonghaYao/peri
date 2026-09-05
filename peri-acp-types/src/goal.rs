@@ -65,6 +65,9 @@ pub struct GoalAccounting {
     pub tokens_used: u64,
     /// 已用时间（秒）
     pub time_used_seconds: u64,
+    /// GoalMiddleware 主动触发的续跑次数
+    #[serde(default)]
+    pub continuation_count: u64,
 }
 
 /// Thread-level goal 事实数据（持久化）
@@ -188,6 +191,13 @@ pub trait GoalController: Send + Sync {
     /// 清除当前 goal（释放 singleton 槽位，终态也可清除）。
     async fn clear_goal(&self) -> Result<(), String>;
 
+    /// 记录一次 GoalMiddleware 主动接续。
+    ///
+    /// 默认 no-op 保持第三方/测试控制器兼容；持久化实现应原子更新计数。
+    async fn increment_continuation(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// 只读快照（get action + after_agent 判断用）
     fn snapshot(&self) -> GoalViewSnapshot;
 }
@@ -206,6 +216,9 @@ pub struct GoalViewSnapshot {
     pub status: Option<GoalStatus>,
     pub token_budget: Option<u64>,
     pub tokens_used: u64,
+    pub time_used_seconds: u64,
+    pub continuation_count: u64,
+    pub blocked_reason: Option<String>,
     pub objective_just_updated: bool,
 }
 

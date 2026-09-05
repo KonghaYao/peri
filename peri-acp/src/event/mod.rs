@@ -78,6 +78,16 @@ pub enum AcpEvent {
         /// 上下文窗口总量
         context_total_tokens: Option<u64>,
     },
+    /// 当前 session 的 Goal 详情投影。
+    GoalSnapshot {
+        objective: Option<String>,
+        status: Option<peri_acp_types::goal::GoalStatus>,
+        token_budget: Option<u64>,
+        tokens_used: u64,
+        time_used_seconds: u64,
+        continuation_count: u64,
+        blocked_reason: Option<String>,
+    },
     /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
     ///
     /// v2 `StateEvent::TurnSuspended` → ExecutorEvent::TurnSuspended → 本 DTO。

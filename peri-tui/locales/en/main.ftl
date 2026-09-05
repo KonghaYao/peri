@@ -828,6 +828,7 @@ panel-title-ask-user = Ask User
 panel-title-theme = Theme
 panel-title-subagent-detail = SubAgent Detail
 panel-title-shell-detail = Shell Detail
+panel-title-goal = Goal
 
 # ---- Panel Descriptions ----
 panel-desc-model = Model alias selection
@@ -848,6 +849,14 @@ panel-desc-ask-user = Agent user questions (auto-open)
 panel-desc-theme = Color theme selection
 panel-desc-subagent-detail = Subagent nested transcript detail
 panel-desc-shell-detail = Background shell task detail
+panel-desc-goal = Current goal detail
+goal-status-active = Active
+goal-status-complete = Complete
+goal-status-blocked = Blocked
+goal-detail-status = Status
+goal-detail-continuations = Proactive continuations
+goal-detail-blocked-reason = Blocked reason
+goal-detail-empty = No goal is available for this session.
 subagent-detail-not-found = Subagent not found — the session may have been reset.
 shell-detail-not-found = Shell task not found — it may have finished or the session was reset.
 shell-detail-no-output = Output is not streamed to the TUI for running shell tasks.

@@ -147,6 +147,17 @@ pub enum AcpEventData {
     /// `"system-notification"` -- system-level notification text with severity.
     SystemNotification(SystemNotification),
 
+    /// 当前 session 的 Goal 只读投影。由 bridge 在 session ownership 校验后写入 atom。
+    GoalSnapshot {
+        objective: Option<String>,
+        status: Option<peri_acp_types::goal::GoalStatus>,
+        token_budget: Option<u64>,
+        tokens_used: u64,
+        time_used_seconds: u64,
+        continuation_count: u64,
+        blocked_reason: Option<String>,
+    },
+
     /// `"command-feedback"` — 命令执行反馈（Phase 1 `CommandFeedback` 载荷，
     /// 经 peri/agent_event 通道送达，无标准 SessionUpdate；level/channel 为
     /// wire string 化 camelCase：`"info"|"warning"|"error"`、`"uiOnly"|"session"`）。

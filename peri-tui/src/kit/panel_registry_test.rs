@@ -395,6 +395,7 @@ const ALL_PANEL_KINDS: &[PanelKind] = &[
     PanelKind::Theme,
     PanelKind::SubAgentDetail,
     PanelKind::ShellDetail,
+    PanelKind::Goal,
 ];
 
 /// 编译期断言：MutexGroup 实现了 PartialEq（测试需要）。

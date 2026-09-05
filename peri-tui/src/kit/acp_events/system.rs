@@ -74,6 +74,27 @@ pub(super) fn handle_llm_retrying(
     state.inject_system_note(text, TuiNoteLevel::Warning);
 }
 
+pub(super) fn handle_goal_snapshot(
+    objective: &Option<String>,
+    status: Option<peri_acp_types::goal::GoalStatus>,
+    token_budget: Option<u64>,
+    tokens_used: u64,
+    time_used_seconds: u64,
+    continuation_count: u64,
+    blocked_reason: &Option<String>,
+) {
+    *crate::kit::atoms::GOAL_SNAPSHOT.state().write() =
+        status.map(|status| crate::kit::atoms::GoalSnapshot {
+            objective: objective.clone(),
+            status: Some(status),
+            token_budget,
+            tokens_used,
+            time_used_seconds,
+            continuation_count,
+            blocked_reason: blocked_reason.clone(),
+        });
+}
+
 pub(super) fn handle_system_notification(state: &mut BridgeState, sn: &SystemNotification) {
     // 系统通知（如 cache 命中率警告）——通过 inject_system_note 注入
     // current_turn 内部，天然位于其时序位置（已产出内容之后、后续内容之前）。
