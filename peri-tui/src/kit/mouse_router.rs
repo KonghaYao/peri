@@ -19,6 +19,23 @@ pub fn is_occluded() -> bool {
     POPUP_KIND.state().read().is_some() || ACTIVE_PANEL.state().read().is_some()
 }
 
+/// 仅弹窗层（不含面板）——底栏 D4：面板打开时仍可点 BgTask 行，弹窗仍挡。
+pub fn is_popup_active() -> bool {
+    POPUP_KIND.state().read().is_some()
+}
+
+/// 底栏 BgTask 行是否允许进入路由（D4）。
+///
+/// - 弹窗打开 → 一律不允许。
+/// - 无弹窗且命中底栏行 → 允许（即使 `ACTIVE_PANEL` 已开）。
+/// - 未命中底栏行 → 不允许（handler 应 `Ignored`，不吞消息区/输入）。
+pub fn bg_bar_click_allowed(hit_on_bg_row: bool) -> bool {
+    if is_popup_active() {
+        return false;
+    }
+    hit_on_bg_row
+}
+
 /// 弹窗或面板打开时，滚轮事件在该屏幕坐标是否仍应被遮挡。
 ///
 /// 与 `is_occluded` 的关系：调用方在 `is_occluded()` 为 true 时用它进一步
@@ -86,6 +103,48 @@ mod tests {
         reset();
         *ACTIVE_PANEL.state().write() = Some(PanelKind::Config);
         assert!(super::is_occluded());
+    }
+
+    #[test]
+    #[serial]
+    fn test_is_occluded_unchanged_popup_and_panel() {
+        reset();
+        assert!(!super::is_occluded());
+        *POPUP_KIND.state().write() = Some(PopupKind::Confirm);
+        assert!(super::is_occluded());
+        reset();
+        *ACTIVE_PANEL.state().write() = Some(PanelKind::Config);
+        assert!(super::is_occluded());
+        assert!(!super::is_popup_active());
+        assert!(super::bg_bar_click_allowed(true));
+    }
+
+    #[test]
+    #[serial]
+    fn test_bg_bar_click_blocked_when_popup() {
+        reset();
+        *POPUP_KIND.state().write() = Some(PopupKind::Confirm);
+        assert!(!super::bg_bar_click_allowed(true));
+        assert!(!super::bg_bar_click_allowed(false));
+    }
+
+    #[test]
+    #[serial]
+    fn test_bg_bar_click_allowed_panel_open_hit_row() {
+        reset();
+        *ACTIVE_PANEL.state().write() = Some(PanelKind::SubAgentDetail);
+        assert!(super::is_occluded());
+        assert!(super::bg_bar_click_allowed(true));
+    }
+
+    #[test]
+    #[serial]
+    fn test_bg_bar_click_miss_outside_row_ignored() {
+        reset();
+        assert!(super::bg_bar_click_allowed(true));
+        assert!(!super::bg_bar_click_allowed(false));
+        *ACTIVE_PANEL.state().write() = Some(PanelKind::Workflow);
+        assert!(!super::bg_bar_click_allowed(false));
     }
 
     // ── occludes_scroll：弹窗外滚轮放行 ─────────────────────────────────

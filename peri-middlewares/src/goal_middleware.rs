@@ -102,6 +102,9 @@ impl Middleware for GoalMiddleware {
 
         // 3. goal active → 注入递增紧迫感 steering
         let round = self.pending_rounds.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Err(error) = self.controller.increment_continuation().await {
+            tracing::warn!(%error, "GoalMiddleware: 主动接续计数更新失败");
+        }
         let objective = snap.objective.as_deref().unwrap_or("(unknown)");
         let template = Self::render_steering(objective, round);
         // [TRAP] 必须用 Human + <system-reminder> 注入，禁止 BaseMessage::system。

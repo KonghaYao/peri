@@ -19,6 +19,8 @@ use crate::kit::tui_render_unit::{EntryStatus, FoldKey, FoldState, TuiReasoningB
 // 本文件经 acp_events/mod.rs 的 `#[path = "../acp_events_test.rs"]` 挂载；此路径
 // 加载方式下，rustc 不会为聚合根派生 `acp_events_test/` 子目录，子模块需显式
 // `#[path]` 指向。
+#[path = "acp_events_test/bg_task_live_test.rs"]
+mod bg_task_live_test;
 #[path = "acp_events_test/command_feedback_test.rs"]
 mod command_feedback_test;
 #[path = "acp_events_test/diff_grouping_test.rs"]
@@ -155,6 +157,10 @@ fn test_prompt_and_agent_failure_clear_pending_cache_usage() {
         cached_tokens: 50,
         request_id: None,
     });
+    state.phase = SessionPhase::PromptRunning;
+    state.current_turn.append_reasoning("analysis", Some("r1"));
+    state.current_turn.append_text("final text", Some("m1"));
+    let generation_before = state.generation;
     dispatch_and_notify(
         &mut state,
         &AcpEventData::AgentExecutionFailed {
@@ -162,4 +168,15 @@ fn test_prompt_and_agent_failure_clear_pending_cache_usage() {
         },
     );
     assert!(state.pending_cache_usage.is_none());
+    assert_eq!(state.phase, SessionPhase::Idle);
+    assert_eq!(state.generation, generation_before.wrapping_add(1));
+    let snapshot = VIEW_MODELS.state().read().clone();
+    let assistant = snapshot.items.iter().find_map(|unit| match unit {
+        TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble),
+        _ => None,
+    });
+    assert!(
+        assistant.is_none_or(|bubble| bubble.started_at.is_none()),
+        "failure snapshot must be frozen"
+    );
 }

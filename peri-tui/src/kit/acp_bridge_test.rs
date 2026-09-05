@@ -3,6 +3,165 @@ use crate::kit::acp_types::PendingInteraction;
 use peri_acp_types::event_data::{AskUser, HitlPending};
 use serial_test::serial;
 
+fn scheduler_state() -> BridgeState {
+    crate::kit::atoms::init_atoms();
+    BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::PromptRunning,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: "s1".into(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: Default::default(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+        pending_cache_usage: None,
+    }
+}
+
+#[test]
+#[serial]
+fn test_production_scheduler_uses_fixed_deadline_and_terminal_invalidates_it() {
+    use crate::kit::atoms::VIEW_MODELS;
+
+    *VIEW_MODELS.state().write() = Default::default();
+    let mut state = scheduler_state();
+    let mut scheduler = PublicationScheduler::default();
+
+    state.current_turn.append_text("first", Some("m1"));
+    scheduler.accept(PublicationIntent::Immediate, &mut state);
+    assert_eq!(state.generation, 1);
+
+    let now = tokio::time::Instant::now();
+    state.current_turn.append_text(" second", Some("m1"));
+    scheduler.accept_at(PublicationIntent::Deferred, &mut state, now);
+    let fixed_deadline = scheduler.pending_deadline.expect("deadline scheduled");
+    state.current_turn.append_text(" third", Some("m1"));
+    scheduler.accept_at(
+        PublicationIntent::Deferred,
+        &mut state,
+        now + std::time::Duration::from_millis(25),
+    );
+    assert_eq!(scheduler.pending_deadline, Some(fixed_deadline));
+
+    assert!(!scheduler.fire_at(&mut state, now + std::time::Duration::from_millis(49)));
+    assert_eq!(state.generation, 1);
+    assert!(scheduler.fire_at(&mut state, fixed_deadline));
+    assert_eq!(state.generation, 2);
+    assert_eq!(state.current_turn.text, "first second third");
+
+    state.current_turn.append_text(" final", Some("m1"));
+    scheduler.accept(PublicationIntent::Deferred, &mut state);
+    scheduler.accept(PublicationIntent::Immediate, &mut state);
+    assert!(scheduler.pending_deadline.is_none());
+    let terminal_generation = state.generation;
+    assert_eq!(state.generation, terminal_generation);
+}
+
+#[test]
+#[serial]
+fn test_production_scheduler_lifecycle_invalidation_matrix_is_stale_noop() {
+    use crate::kit::atoms::VIEW_MODELS;
+
+    for lifecycle in ["terminal", "reset", "session", "shutdown"] {
+        *VIEW_MODELS.state().write() = Default::default();
+        let mut state = scheduler_state();
+        state.current_turn.append_text("pending", Some("m1"));
+        let mut scheduler = PublicationScheduler::default();
+        let now = tokio::time::Instant::now();
+        scheduler.accept_at(PublicationIntent::Deferred, &mut state, now);
+        let stale_deadline = scheduler.pending_deadline.unwrap();
+
+        match lifecycle {
+            "terminal" => scheduler.accept_at(PublicationIntent::Immediate, &mut state, now),
+            "reset" | "session" | "shutdown" => scheduler.invalidate(),
+            _ => unreachable!(),
+        }
+        let generation = state.generation;
+        assert!(!scheduler.fire_at(&mut state, stale_deadline));
+        assert_eq!(state.generation, generation, "lifecycle={lifecycle}");
+    }
+}
+
+#[test]
+#[serial]
+fn test_receiver_close_reset_wins_over_dirty_final_publication() {
+    use crate::kit::atoms::{ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, VIEW_MODELS};
+
+    let old_reset = BRIDGE_RESET_COUNTER.get();
+    *ACTIVE_SESSION_ID.state().write() = "s2".into();
+    *VIEW_MODELS.state().write() = Default::default();
+    let mut state = scheduler_state();
+    state.current_turn.append_text("stale", Some("m1"));
+    let mut last_reset = old_reset;
+    let new_reset = old_reset.wrapping_add(1);
+    BRIDGE_RESET_COUNTER.set(new_reset);
+
+    let mut scheduler = PublicationScheduler::default();
+    scheduler.accept_at(
+        PublicationIntent::Deferred,
+        &mut state,
+        tokio::time::Instant::now(),
+    );
+    flush_on_receiver_close(&mut state, &mut scheduler, &mut last_reset);
+
+    assert!(scheduler.pending_deadline.is_none());
+    assert_eq!(state.active_session_id, "s2");
+    assert!(VIEW_MODELS.state().read().items.is_empty());
+    BRIDGE_RESET_COUNTER.set(old_reset);
+}
+
+#[test]
+fn test_deterministic_clock_advances_without_sleep() {
+    let mut clock = DeterministicClock::default();
+    clock.advance_ms(50);
+    assert_eq!(clock.now_ms(), 50);
+}
+
+#[test]
+fn test_publication_observer_records_metadata_without_content() {
+    reset_perf_counters();
+    let observations = [
+        PublicationObservation {
+            generation: 7,
+            source_version: 11,
+            reason: PublicationReason::Intermediate,
+        },
+        PublicationObservation {
+            generation: 8,
+            source_version: 12,
+            reason: PublicationReason::Terminal,
+        },
+        PublicationObservation {
+            generation: 0,
+            source_version: 13,
+            reason: PublicationReason::Reset,
+        },
+    ];
+    for observation in observations {
+        observe_publication(observation);
+    }
+    let counters = perf_counters();
+    assert_eq!(
+        (
+            observations,
+            counters.intermediate_publications,
+            counters.terminal_publications,
+            counters.reset_publications,
+        ),
+        (observations, 1, 1, 1)
+    );
+}
+
 fn hitl() -> AcpEventData {
     AcpEventData::HitlPending(PendingInteraction {
         owner: Default::default(),
@@ -56,6 +215,69 @@ fn test_ordinary_gate_preserves_just_reset_rules() {
     assert!(accepts_event_session(&event, "s1", "s1", true));
     assert!(!accepts_event_session(&event, "", "s1", true));
     assert!(!accepts_event_session(&event, "s1", "s2", true));
+}
+
+fn goal_snapshot(objective: &str, continuation_count: u64) -> AcpEventData {
+    AcpEventData::GoalSnapshot {
+        objective: Some(objective.into()),
+        status: Some(peri_acp_types::goal::GoalStatus::Active),
+        token_budget: None,
+        tokens_used: 0,
+        time_used_seconds: 0,
+        continuation_count,
+        blocked_reason: None,
+    }
+}
+
+/// Goal 投影必须服从普通事件的 session ownership gate。
+#[tokio::test]
+#[serial]
+async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_session() {
+    use crate::kit::atoms::{ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, GOAL_SNAPSHOT};
+
+    let old_active = ACTIVE_SESSION_ID.state().read().clone();
+    let old_reset = BRIDGE_RESET_COUNTER.get();
+    let old_goal = GOAL_SNAPSHOT.state().read().clone();
+    *ACTIVE_SESSION_ID.state().write() = "s1".into();
+    *GOAL_SNAPSHOT.state().write() = None;
+    BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(1));
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+
+    tx.send(AcpEventWithEpoch {
+        event: goal_snapshot("current", 2),
+        active_session_id: "s1".into(),
+    })
+    .unwrap();
+    assert_eq!(observed_rx.recv().await, Some(true));
+    assert_eq!(
+        GOAL_SNAPSHOT
+            .state()
+            .read()
+            .as_ref()
+            .and_then(|goal| goal.objective.as_deref()),
+        Some("current")
+    );
+
+    tx.send(AcpEventWithEpoch {
+        event: goal_snapshot("stale", 99),
+        active_session_id: "s0".into(),
+    })
+    .unwrap();
+    assert_eq!(observed_rx.recv().await, Some(false));
+    let projected = GOAL_SNAPSHOT.state().read().clone().unwrap();
+    assert_eq!(projected.objective.as_deref(), Some("current"));
+    assert_eq!(projected.continuation_count, 2);
+
+    shutdown.cancel();
+    drop(tx);
+    handle.await.unwrap();
+    *ACTIVE_SESSION_ID.state().write() = old_active;
+    BRIDGE_RESET_COUNTER.set(old_reset);
+    *GOAL_SNAPSHOT.state().write() = old_goal;
 }
 
 /// [回归测试] production bridge 在 session gate 前不发布 HITL UI state。

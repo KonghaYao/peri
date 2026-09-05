@@ -646,7 +646,7 @@ pub fn build_stage_context(
         child_handler_factory,
         auxiliary_model,
         thread_persistence.clone(),
-        goal_controller,
+        goal_controller.clone(),
         task_manager.clone(),
         on_bg_complete.clone(),
         cached_llm,
@@ -861,6 +861,9 @@ pub fn build_stage_context(
         .with_session_context(session_context)
         .with_tool_registry_snapshot((*tool_registry_snapshot).clone());
 
+    if let Some(controller) = goal_controller {
+        builder = builder.with_goal_controller(controller);
+    }
     if let Some(reg) = error_suggest_registry {
         builder = builder.with_error_suggest_registry(reg);
     }

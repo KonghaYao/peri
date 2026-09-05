@@ -203,6 +203,7 @@ fn test_vm_to_lines_all_variants_width_1() {
     let todo = TuiRenderUnit::TuiTodoSummary(TuiTodoSummary::new("3/7 tasks".into()));
 
     let subagent = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
+        instance_id: "instance-test-agent".to_string(),
         agent_id: "test-agent".to_string(),
         agent_name: "Test Agent".to_string(),
         view_models: im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
@@ -1246,6 +1247,23 @@ fn test_tool_error_splits_and_uses_error_color() {
     }
 }
 
+/// 折叠的错误工具只保留失败状态行，错误正文等待用户显式展开。
+#[test]
+fn test_tool_error_collapsed_hides_output() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(80);
+    let mut card = tool_card("Edit", "render.rs", true, false);
+    card.fold = FoldState::Collapsed;
+    card.output_summary = "Tool execution failed: Edit - Error: File not found at /x.rs".into();
+    card.recompute_hash();
+
+    let lines = vm_to_lines(&TuiRenderUnit::TuiToolCard(card), &grid);
+    assert_eq!(lines.len(), 1, "折叠错误工具不得自动展开正文");
+    let header = header_of(&lines);
+    assert!(header.contains("Failed"), "失败状态仍须在首行可见");
+    assert!(!header.contains("File not found"));
+}
+
 /// duration 三档：Wide/Standard 右对齐到屏幕右缘 / Compact+Narrow 隐藏。
 #[test]
 fn test_tool_duration_three_tiers() {
@@ -1395,6 +1413,7 @@ fn subagent_group(
     error_reason: Option<&str>,
 ) -> TuiRenderUnit {
     TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
+        instance_id: "instance-agent-1".into(),
         agent_id: "agent-1".into(),
         agent_name: "Agent explorer".into(),
         view_models: children,
@@ -1926,7 +1945,7 @@ fn test_todo_summary_line() {
     assert!(text.contains("3/7 tasks · Running tests"));
 }
 
-// ── Skill / Todo 语义卡（保持专属展示）──────────────────────────────────
+// ── 统一 ToolRenderPlan：presentation 只投影专属内容 ────────────────────
 
 #[test]
 fn skill_card_hides_raw_skill_output() {
@@ -1974,7 +1993,7 @@ fn todo_card_renders_progress_and_changes_without_raw_output() {
         running_duration_ms: None,
         completed_duration_ms: Some(37),
         diff: None,
-        fold: FoldState::Collapsed,
+        fold: FoldState::Expanded,
         user_modified: false,
         presentation: TuiToolPresentation::Todo(TuiTodoPresentation {
             current_items: vec![TuiTodoItem {
@@ -2003,6 +2022,40 @@ fn todo_card_renders_progress_and_changes_without_raw_output() {
     assert!(text.contains("✓"));
     assert!(text.contains("实现语义卡片"));
     assert!(!text.contains("+[0],[1]"));
+}
+
+#[test]
+fn todo_card_collapsed_hides_change_details() {
+    crate::i18n::init(Some("en"));
+    let card = TuiToolCard {
+        tool_id: "todo-collapsed".into(),
+        tool_name: "TodoWrite".into(),
+        input_summary: "todos: 1".into(),
+        output_summary: "+[0]".into(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        completed_duration_ms: Some(37),
+        diff: None,
+        fold: FoldState::Collapsed,
+        user_modified: false,
+        presentation: TuiToolPresentation::Todo(TuiTodoPresentation {
+            current_items: vec![],
+            changes: vec![TuiTodoChange {
+                kind: TuiTodoChangeKind::Added,
+                content: "完成后不自动展开".into(),
+            }],
+            is_initial: false,
+            completed_count: 0,
+            total_count: 1,
+        }),
+        content_hash: 3,
+        tool_calls_count: 0,
+    };
+
+    let lines = vm_to_lines(&TuiRenderUnit::TuiToolCard(card), &GridSpec::grid_for(80));
+    assert_eq!(lines.len(), 1, "折叠 TodoWrite 只保留状态行");
+    assert!(!all_text(&lines).contains("完成后不自动展开"));
 }
 
 /// 语义卡在极端窄宽度（Narrow）下不 panic 且不超宽。
@@ -2221,6 +2274,7 @@ fn test_glob_grep_header_match_suffix() {
 fn test_subagent_completed_shows_tool_lines_only() {
     // subagent：completed + 1 个 Bash 工具 → 只渲染工具行
     let group = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
+        instance_id: "instance-a1".into(),
         agent_id: "a1".into(),
         agent_name: "general-purpose".into(),
         view_models: im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(

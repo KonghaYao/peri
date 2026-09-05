@@ -439,6 +439,7 @@ fn test_fold_key_of_maps_vm_identities() {
     // §6.7 subagent：fold_key_of 返回 SubAgent key——Enter 分派据此刻断打开
     // 详情 pane（折叠切换仍走同一 key 的覆盖表；分派改判在 mod.rs Enter 分支）。
     let sub = TuiRenderUnit::TuiSubAgentGroup(crate::kit::tui_render_unit::TuiSubAgentGroup {
+        instance_id: "instance-agent-7".into(),
         agent_id: "agent-7".into(),
         agent_name: "explorer".into(),
         view_models: im::Vector::new(),
@@ -452,7 +453,10 @@ fn test_fold_key_of_maps_vm_identities() {
     });
     assert_eq!(
         fold_key_of(&sub),
-        Some((FoldKey::SubAgent("agent-7".into()), FoldState::Collapsed)),
+        Some((
+            FoldKey::SubAgent("instance-agent-7".into()),
+            FoldState::Collapsed
+        )),
         "subagent 折叠恒 Collapsed（§7 表），Enter 分派以此为锚"
     );
 }
@@ -720,6 +724,7 @@ fn test_apply_fold_toggle_subagent_opens_detail_panel() {
     *crate::kit::atoms::SELECTED_SUBAGENT_ID.state().write() = None;
     *crate::kit::atoms::ACTIVE_PANEL.state().write() = None;
     let sub = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
+        instance_id: "instance-agent-9".into(),
         agent_id: "agent-9".into(),
         agent_name: "explorer".into(),
         view_models: im::Vector::new(),
@@ -739,7 +744,7 @@ fn test_apply_fold_toggle_subagent_opens_detail_panel() {
     assert_eq!(r, EventResult::Consumed);
     assert_eq!(
         *crate::kit::atoms::SELECTED_SUBAGENT_ID.state().read(),
-        Some("agent-9".to_string())
+        Some("instance-agent-9".to_string())
     );
     assert_eq!(
         *crate::kit::atoms::ACTIVE_PANEL.state().read(),

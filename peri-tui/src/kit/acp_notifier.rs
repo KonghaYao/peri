@@ -152,10 +152,20 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             summary,
             messages_json,
             trigger,
+            strategy,
+            affected_count,
+            estimated_tokens_saved,
+            files,
+            skills,
         } => Some(AcpEventData::CompactCompleted {
             summary,
             messages_json,
             trigger,
+            strategy,
+            affected_count,
+            estimated_tokens_saved,
+            files,
+            skills,
         }),
         AcpEvent::BackgroundTaskCompleted {
             task_id,
@@ -282,6 +292,23 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             }
             None
         }
+        AcpEvent::GoalSnapshot {
+            objective,
+            status,
+            token_budget,
+            tokens_used,
+            time_used_seconds,
+            continuation_count,
+            blocked_reason,
+        } => Some(AcpEventData::GoalSnapshot {
+            objective,
+            status,
+            token_budget,
+            tokens_used,
+            time_used_seconds,
+            continuation_count,
+            blocked_reason,
+        }),
         _ => {
             debug!("kit ACP notifier: AcpEvent variant not yet mapped to AcpEventData, dropping");
             None

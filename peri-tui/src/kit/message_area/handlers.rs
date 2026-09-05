@@ -10,7 +10,7 @@ use super::hits::{CopyButtonHit, ImageLineHit, InteractionOptionHit};
 use super::image_action::{hover_target_for, try_open_image};
 use super::props::ScrollbarFields;
 use super::scroll::{self, DragThrottle, ScrollThrottle, ScrollbarDragState};
-use super::selection::{WrappedLineInfo, copy_to_clipboard, mark_copy_message};
+use super::selection::{self, copy_to_clipboard, mark_copy_message};
 use crate::kit::atoms::{
     FOCUSED_ENTRY, IMAGE_HOVER, KEEPGOING_BLOCKED_UNTIL, RENDER_HEARTBEAT, SUBMIT_TX, VIEW_MODELS,
     ViewModelsSnapshot,
@@ -25,7 +25,6 @@ use ratatui_kit::crossterm::event::{
 };
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Rect;
-use ratatui_kit::ratatui::text::Line;
 
 /// keepgoing 按钮点击防抖时长（连续点击冷却）。
 const KEEPGOING_DEBOUNCE: Duration = Duration::from_millis(1500);
@@ -426,13 +425,9 @@ pub(super) fn register_scroll_events(
     follow_bottom: State<bool>,
     view_models: AtomState<ViewModelsSnapshot>,
     grid: GridSpec,
-    concat_wrap_map_arc: Arc<Vec<WrappedLineInfo>>,
-    slot_arcs_arc: Arc<Vec<Arc<Vec<Line<'static>>>>>,
-    slot_offsets_arc: Arc<Vec<usize>>,
+    slot_index: Arc<selection::SlotIndex>,
 ) {
-    let wrap_map_for_closure = Arc::clone(&concat_wrap_map_arc);
-    let slot_arcs_for_closure = Arc::clone(&slot_arcs_arc);
-    let slot_offsets_for_closure = Arc::clone(&slot_offsets_arc);
+    let index_for_closure = Arc::clone(&slot_index);
     let view_models_for_closure = view_models;
     let grid_for_closure = grid;
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
@@ -449,9 +444,7 @@ pub(super) fn register_scroll_events(
             &text_sel,
             &gesture,
             &drag_throttle,
-            &wrap_map_for_closure,
-            &slot_arcs_for_closure,
-            &slot_offsets_for_closure,
+            &index_for_closure,
             &scrollbar_fields,
             &scrollbar_drag,
             &follow_bottom,

@@ -236,14 +236,18 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     // 阶段 6: 组装最终消息（从 transcript visible_messages 取）
     let assembled = assemble_compact_messages(&transcript, &compact_result.summary.clone());
 
-    // 阶段 7: 发出 CompactCompleted 事件（重建信号，Phase 5 Step 4 收敛为
-    // summary/messages/trigger 三字段；通知文案移交编排层 CommandFeedback）
+    // 阶段 7: 发出 CompactCompleted 事件（重建信号 + 展示/观测计数）。
     emit_compact_completed(
         &event_sink,
         &session_id,
         compact_result.summary.clone().unwrap_or_default(),
         assembled.messages.clone(),
         CompactTrigger::Manual,
+        compact_result.strategy,
+        compact_result.affected_count,
+        compact_result.estimated_tokens_saved,
+        assembled.files.clone(),
+        assembled.skills.clone(),
     )
     .await;
 

@@ -701,3 +701,193 @@ fn test_extract_without_view_models_keeps_plain() {
         "无 VM 时保留 chrome，实际: {text:?}"
     );
 }
+
+// ── SlotIndex production lookup 与旧 flatten reference 等价 ──
+
+fn slot_index_fixture(slot_count: usize, lines_per_slot: usize) -> SlotIndex {
+    let mut slots = Vec::with_capacity(slot_count);
+    let mut maps = Vec::with_capacity(slot_count);
+    for slot in 0..slot_count {
+        let lines: Vec<_> = (0..lines_per_slot)
+            .map(|line| make_line(&format!("slot-{slot}-line-{line}-你好-🙂")))
+            .collect();
+        let (_, map) = build_wrap_map(&lines, 8);
+        slots.push(Arc::new(lines));
+        maps.push(Arc::new(map));
+    }
+    SlotIndex::new(slots, maps)
+}
+
+#[test]
+fn test_slot_index_visual_and_logical_lookup_match_flatten_reference() {
+    let index = slot_index_fixture(10, 7);
+    let flattened = concat_wrap_maps(
+        &(0..10)
+            .map(|slot| {
+                let map = index.wrap_maps[slot].as_slice();
+                (map, slot * 7, slot)
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    assert_eq!(index.total_logical(), flattened.len());
+    assert_eq!(index.total_visual(), flattened.last().unwrap().visual_end);
+    for entry in &flattened {
+        let by_logical = index.logical_lookup(entry.logical_idx).unwrap();
+        assert_eq!(by_logical.slot_index, entry.slot_index);
+        assert_eq!(by_logical.global_visual_start, entry.visual_start);
+        assert_eq!(by_logical.global_visual_end, entry.visual_end);
+        for visual in entry.visual_start..entry.visual_end {
+            let by_visual = index.visual_lookup(visual).unwrap();
+            assert_eq!(by_visual.global_logical, entry.logical_idx);
+            assert_eq!(by_visual.slot_index, entry.slot_index);
+        }
+    }
+}
+
+#[test]
+fn test_wrap_byte_starts_large_line_does_not_truncate_u16_height() {
+    let text = "x".repeat(u16::MAX as usize + 2);
+    let line = make_line(&text);
+    let starts = wrap_byte_starts(&line, &text, 1);
+
+    assert_eq!(starts.len(), text.len() + 1);
+    assert_eq!(starts[u16::MAX as usize + 1], u16::MAX as usize + 1);
+    assert_eq!(starts.last().copied(), Some(text.len()));
+}
+
+#[test]
+fn test_slot_index_handles_empty_slots_and_large_visual_coordinates() {
+    let lines = Arc::new(vec![make_line("x")]);
+    let maps = vec![
+        Arc::new(Vec::new()),
+        Arc::new(vec![make_wrap_entry(0, 0, u16::MAX as usize + 100, 0)]),
+        Arc::new(Vec::new()),
+    ];
+    let index = SlotIndex::new(
+        vec![Arc::new(Vec::new()), lines, Arc::new(Vec::new())],
+        maps,
+    );
+
+    assert_eq!(index.total_visual(), u16::MAX as usize + 100);
+    assert_eq!(
+        index
+            .visual_lookup(u16::MAX as usize + 50)
+            .unwrap()
+            .slot_index,
+        1
+    );
+    assert_eq!(index.slot_visual_range(0), None);
+    assert_eq!(
+        index.slot_visual_range(1),
+        Some((0, u16::MAX as usize + 100))
+    );
+}
+
+#[test]
+fn test_slot_index_equivalence_matrix_covers_empty_and_varied_wraps() {
+    for (slot_count, lines_per_slot, width) in [
+        (0usize, 0usize, 8u16),
+        (1, 1, 80),
+        (3, 0, 8),
+        (3, 5, 4),
+        (17, 9, 12),
+    ] {
+        let mut slots = Vec::with_capacity(slot_count);
+        let mut maps = Vec::with_capacity(slot_count);
+        for slot in 0..slot_count {
+            let lines: Vec<_> = (0..lines_per_slot)
+                .map(|line| make_line(&format!("s{slot}-l{line}-中文🙂-longword")))
+                .collect();
+            let (_, map) = build_wrap_map(&lines, width);
+            slots.push(Arc::new(lines));
+            maps.push(Arc::new(map));
+        }
+        let index = SlotIndex::new(slots, maps);
+        let flattened = concat_wrap_maps(
+            &(0..slot_count)
+                .map(|slot| {
+                    let map = index.wrap_maps[slot].as_slice();
+                    (map, slot * lines_per_slot, slot)
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(index.total_logical(), flattened.len());
+        for entry in flattened {
+            let lookup = index.logical_lookup(entry.logical_idx).unwrap();
+            assert_eq!(lookup.slot_index, entry.slot_index);
+            assert_eq!(lookup.global_visual_start, entry.visual_start);
+            assert_eq!(lookup.global_visual_end, entry.visual_end);
+        }
+    }
+}
+
+#[test]
+fn test_viewport_offset_preserves_values_above_u16() {
+    let lines = Arc::new(vec![make_line("x")]);
+    let index = SlotIndex::new(
+        vec![lines],
+        vec![Arc::new(vec![make_wrap_entry(
+            0,
+            0,
+            u16::MAX as usize + 200,
+            0,
+        )])],
+    );
+    let (_, _, offset) = index
+        .viewport_logical_range(u16::MAX as usize + 100, 20)
+        .unwrap();
+    assert_eq!(offset, u16::MAX as usize + 100);
+}
+
+#[test]
+fn test_slot_index_stable_overlay_returns_shared_lines_not_placeholders() {
+    let placeholders = Arc::new(vec![
+        make_line("chrome"),
+        Line::default(),
+        make_line("tail"),
+    ]);
+    let stable = Arc::new(vec![make_line("stable 中文")]);
+    let (_, map) = build_wrap_map(&placeholders, 20);
+    let index = SlotIndex::new_with_overlays(
+        vec![SlotLines::composite(placeholders, 1, vec![stable])],
+        vec![Arc::new(map)],
+    );
+    assert_eq!(index.line(0, 1).unwrap().to_string(), "stable 中文");
+    assert_eq!(index.line(0, 2).unwrap().to_string(), "tail");
+}
+
+#[test]
+fn test_slot_lines_composite_shares_large_stable_part_without_flattening() {
+    let mutable = Arc::new(
+        std::iter::once(make_line("chrome"))
+            .chain(std::iter::repeat_n(Line::default(), 10_000))
+            .chain(std::iter::once(make_line("tail")))
+            .collect::<Vec<_>>(),
+    );
+    let stable = Arc::new(
+        (0..10_000)
+            .map(|line| make_line(&format!("stable-{line}")))
+            .collect::<Vec<_>>(),
+    );
+    let stable_ptr = Arc::as_ptr(&stable);
+
+    let lines = SlotLines::composite(Arc::clone(&mutable), 1, vec![stable]);
+
+    assert_eq!(lines.parts.len(), 3, "构造成本按 parts 而非稳定行数增长");
+    assert_eq!(Arc::as_ptr(&lines.parts[1].lines), stable_ptr);
+    assert_eq!(lines.len(), 10_002);
+    assert_eq!(lines.get(0).unwrap().to_string(), "chrome");
+    assert_eq!(lines.get(10_000).unwrap().to_string(), "stable-9999");
+    assert_eq!(lines.get(10_001).unwrap().to_string(), "tail");
+}
+
+#[test]
+fn test_slot_index_scales_by_slots_not_logical_lines() {
+    for slots in [10usize, 100, 1000] {
+        let index = slot_index_fixture(slots, 20);
+        assert_eq!(index.logical_prefix.len(), slots + 1);
+        assert_eq!(index.visual_prefix.len(), slots + 1);
+        assert_eq!(index.total_logical(), slots * 20);
+    }
+}

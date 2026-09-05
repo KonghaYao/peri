@@ -1,6 +1,6 @@
 # peri-workflow 代码索引
 
-> 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-09-01
+> 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-09-03
 > 依据：`docs/design/workflow.md`、`docs/standards/architecture-contracts.md`、源码（无 crate 级 CLAUDE.md）
 
 ## 架构速览
@@ -10,7 +10,7 @@
 - 入口：`peri-workflow/src/tool.rs::WorkflowTool::invoke`；执行与终态：`peri-workflow/src/runner.rs::WorkflowRunner::run`；通用进程/RPC host：`peri-js-runtime/src/{host,rpc}.rs`。
 - 契约事实源：`peri-acp-types/src/workflow.rs` 的 `AgentExecutor`、`AgentRunParams`、`AgentRunResult`、`ProgressEvent`、四维状态、`WorkflowAttempt`、`WorkflowTaskResult`。wire 变更须同步 `npm-packages/@peri-workflow/src/types.ts`。
 - 并发不变量：start/resume 都先 `WorkflowTaskRegistry::reserve`，成功后才 spawn，并用 `attach_child` 绑定 task，拒绝路径不得产生 detached runner。
-- 交付不变量：engine `completed` 只表示 execution completed；acceptance、post-processing、delivery 独立投影。Git postcondition 异常只报告并 blocked，不执行 add/commit/stash/reset/restore/clean。
+- 交付不变量：engine `completed` 只表示 execution completed；acceptance、post-processing、delivery 独立投影。`acceptance_status: unknown` 且 execution/post-processing 成功时，delivery 保持 `unknown`；明确执行/验收/Git postcondition 失败才为 `blocked`。Git postcondition 只比较 Workflow 前后状态发生变化的路径，已有且未变化的无关 dirty path 不阻塞；异常只报告并 blocked，不执行 add/commit/stash/reset/restore/clean。
 
 ## 速查表
 
@@ -25,7 +25,7 @@
 | 改 runtime limits | `peri-workflow/src/runner.rs` | `WorkflowLimits`、agent/run 分支、elapsed/tool count 门限；live agent 才计 attempt，cache-hit 不重复计数 |
 | 改并发限制/完成通知 | `peri-workflow/src/registry.rs`、`peri-middlewares/src/workflow/mod.rs` | `reserve`、`attach_child`、`complete`、`kill`、`resume_workflow`；complete 保留历史并广播，kill 清理由 runner 收敛 |
 | 改进度/ACP snapshot | `peri-workflow/src/progress.rs`、`peri-middlewares/src/workflow/mod.rs` | `WorkflowProgressStore::apply_event/set_terminal_projection/get_all_runs_snapshot`、`WorkflowMiddlewarePort::runs_snapshot`；四维状态随 snapshot 序列化 |
-| 改 TUI Workflow 面板 | `peri-tui/src/kit/{workflow_snapshot.rs,panels/workflow.rs}` | `TuiRunProgress` legacy 四维默认 unknown；panel footer 分别展示 execution/acceptance/post-processing/delivery |
+| 改 TUI Workflow 面板 | `peri-tui/src/kit/{workflow_snapshot.rs,panels/workflow.rs}` | `TuiRunProgress` legacy 四维默认 unknown；panel footer 只展示快捷键，不渲染 execution/acceptance/post-processing/delivery |
 | 改 Node adapter/attempt bridge | `npm-packages/@peri-workflow/src/{adapter,server,types}.ts` | `rpcAdapter.run` 透传真实 `ctx.agentId` 到 agent/run；journal callback 无 identity 时省略 optional agentId，不合成确定值 |
 
 ## 状态与持久化

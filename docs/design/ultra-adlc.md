@@ -100,8 +100,8 @@ Ultra-ADLC 是一个深模块。它对用户暴露的接口只有自然语言目
 ### ADLC-STORAGE-001
 
 - **Scope**：项目级持久化。
-- **Rule**：ADLC 根目录固定解析为 `{cwd}/peri/adlc/`。它不得解析到
-  `~/.peri/`、`{cwd}/.peri/` 或 cwd 之外。
+- **Rule**：ADLC 根目录固定解析为 `{cwd}/.peri/adlc/`。它不得解析到
+  `~/.peri/`、`{cwd}/peri/adlc/` 或 cwd 之外。不再使用 `peri/adlc/`。
 - **Verify**：路径测试覆盖相对路径、符号链接和 `..` 穿越拒绝。
 
 ### ADLC-WORKFLOW-001
@@ -143,6 +143,32 @@ Ultra-ADLC 是一个深模块。它对用户暴露的接口只有自然语言目
   实现最大有效并发。只读任务高并发；写任务按 write scope 隔离；共享写入由唯一
   owner 收敛。
 - **Verify**：执行记录能够区分可并发工作包、写冲突串行化与关键路径等待。
+
+### ADLC-GIT-BASELINE-001
+
+- **Scope**：Workflow 写入归属与任务外工作区改动。
+- **Rule**：`writeIntent.path_allowlist` 以 Workflow 启动时捕获的 Git baseline 为基准，
+  只约束运行期间状态发生变化的路径。由于现有 Git postcondition 不报告 ignored path，
+  Ultra-ADLC orchestrator 还必须在 preflight 对 cwd 建立文件系统 write-boundary snapshot，
+  并在 post-processing 比较 snapshot，按 repo-relative path 报出所有新建或内容/类型发生
+  变化的文件；该 orchestrator 检查结果与 Git `changed_paths` 合并后再逐项匹配 allowlist。启动前已存在且运行期间未变化的任务外
+  dirty 或 ignored path 只记录一次并保留，不构成阻塞，也不得要求用户清理。
+  `delivery_status: blocked` 不能单独证明 Git 越界；只有 `post_processing_status: failed`
+  与明确 Git postcondition error 才能建立该结论。错误未列出具体路径时，不得从结束时的
+  dirty set 推断责任路径。
+- **Verify**：Ultra-ADLC orchestrator 的 boundary-check 测试覆盖 allowlisted ignored path 的新建/
+  修改通过、out-of-allowlist ignored path 的新建/修改失败；Workflow journal 测试继续覆盖
+  unchanged pre-existing dirty path 通过、allowlisted tracked path 变化通过和
+  out-of-allowlist tracked path 在 baseline 后变化失败；builtin skill 锁定相同解释。
+
+### ADLC-DELIVERY-STATUS-001
+
+- **Scope**：Workflow 四维终态解释。
+- **Rule**：execution、acceptance、post-processing 与 delivery 独立表达。execution 与
+  post-processing 成功但 acceptance 尚为 `unknown` 时，delivery 必须保持 `unknown`；
+  只有明确执行失败、acceptance failed、缺少可验证 write intent 或 post-processing
+  failed/blocked 时才是 `blocked`；全部必要维度通过时才是 `deliverable`。
+- **Verify**：`project_postcondition` 单元测试分别覆盖 unknown、failed 与 passed acceptance。
 
 ### ADLC-COMPLETE-001
 
@@ -194,7 +220,7 @@ Main Agent 必须在启动 Workflow 1 前执行 capability preflight：
 2. 当前 session-local 工具视图包含 `AskUserQuestion`；
 3. deferred 目录可以发现并执行 `Workflow`；
 4. Node runner 可用，或 Workflow 快速失败能被同步报告；
-5. `{cwd}/peri/adlc/` 可安全创建和写入；
+5. `{cwd}/.peri/adlc/` 可安全创建和写入；
 6. 所需 Peri Profile 能解析到可用 provider/model。
 
 任何一项失败都应在昂贵的 Workflow fan-out 前停止。
@@ -218,7 +244,7 @@ Handoff 只记录本任务新增事实和适用规则的引用，不复制完整
 ### 6.1 根路径
 
 ```text
-adlc_root = canonicalize_or_create(cwd / "peri" / "adlc")
+adlc_root = canonicalize_or_create(cwd / ".peri" / "adlc")
 ```
 
 解析后的路径必须仍位于 cwd。任务目录名使用安全 slug：
@@ -233,7 +259,7 @@ slug 只允许小写 ASCII 字母、数字和连字符；冲突时递增 `NN`。
 ### 6.2 目录结构
 
 ```text
-peri/adlc/
+.peri/adlc/
 ├── tasks/
 │   └── <adlc-id>/
 │       ├── manifest.json
@@ -279,8 +305,9 @@ ADLC 不迁移或复制它。`manifest.json` 记录逻辑 Workflow 与物理 run
 
 ### 6.4 Git 与保留策略
 
-`peri/adlc/` 是可见的项目目录，默认不被 `.peri/*` 规则忽略。Ultra-ADLC 不自动
-commit，除非用户明确授权。推荐进入版本控制的内容：
+`.peri/adlc/` 是本地审计目录，被根 `.gitignore` 的 `.peri/*` 规则忽略，与
+`.peri/plans` 和本地 settings 同类。Ultra-ADLC 不自动 commit，未经用户单独授权
+不得把 ADLC 记录加入版本控制。目录内存放：
 
 - 三份契约；
 - 用户决策；
@@ -289,7 +316,7 @@ commit，除非用户明确授权。推荐进入版本控制的内容：
 - Workflow provenance；
 - Agent performance 与 evolution record。
 
-临时文件、完整模型输出、重复日志和大型构建产物不得进入项目级审计目录。
+临时文件、完整模型输出、重复日志和大型构建产物不得进入该审计目录。
 
 ---
 
@@ -865,7 +892,7 @@ sequenceDiagram
     participant T as Peri TUI / ACP
     participant M as Main Agent
     participant S as ultra-adlc skill
-    participant D as ./peri/adlc/
+    participant D as ./.peri/adlc/
     participant W as Workflow Tool
     participant R as .claude/workflow-runs/
     participant P as /workflows 与 /tasks
@@ -969,13 +996,14 @@ Main Agent 可以通过 AskUserQuestion 解除阻塞，再 resume 同一逻辑 W
 ### 17.4 取消
 
 用户取消时，Main Agent 通过现有 Workflow/Agent cancel 路径终止活跃运行，并把任务
-标记为 `cancelled`。取消不自动删除 `peri/adlc/` 留痕。
+标记为 `cancelled`。取消不自动删除 `.peri/adlc/` 留痕。
 
 ---
 
 ## 18. 安全与权限
 
-1. `peri/adlc/` 的所有路径必须限制在 cwd 内；
+1. `.peri/adlc/` 的所有路径必须限制在 cwd 内；不得解析到 `~/.peri/` 或
+   `{cwd}/peri/adlc/`；
 2. Handoff 和 provenance 不保存 secret、token、密码或完整连接串；
 3. read-only 探索 Agent 使用最小 `allowedTools`；
 4. 写 Agent 只获得完成其 write scope 所需的工具；
@@ -998,7 +1026,7 @@ v1 已在现有能力上增加上层 skill、注册和契约测试：
 | builtin 注册 | `peri-middlewares/src/skills/builtin/mod.rs` |
 | skill frontmatter/发现/契约测试 | `peri-middlewares/src/skills/builtin_test.rs` |
 | 两个 Workflow 脚本生成规则 | `ultra-adlc/SKILL.md`，不新增 engine 原语 |
-| 文件协议模板 | `ultra-adlc/SKILL.md` 内嵌模板；默认根 `peri/adlc/` |
+| 文件协议模板 | `ultra-adlc/SKILL.md` 内嵌模板；默认根 `.peri/adlc/` |
 | 用户文档 | `peri-cool/src/content/docs/docs/features/ultra-adlc.mdx` |
 
 当前 v1 不包含依赖真实模型和外部 provider 的 E2E；这类验证可在协议通过真实任务运行后

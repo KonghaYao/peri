@@ -41,6 +41,12 @@ mod props;
 pub(crate) mod render;
 pub(crate) mod scroll;
 mod selection;
+#[cfg(test)]
+pub(crate) use selection::run_synthetic_slot_index;
+#[cfg(test)]
+pub(crate) fn measure_synthetic_wrap(lines: &[Line<'static>], width: u16) {
+    let _ = selection::build_wrap_map(lines, width);
+}
 mod vm_cache;
 
 #[cfg(test)]
@@ -69,13 +75,12 @@ pub(crate) use footer::hash_todo_items;
 pub use footer::{TodoItem, TodoStatus};
 pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
-use render::vm_to_lines_cached;
+use render::vm_to_lines_cached_with_layout;
 #[cfg(test)]
 use scroll::GesturePending;
 use scroll::{DragThrottle, ScrollThrottle, ScrollbarDragState};
 use selection::{
-    WrappedLineInfo, build_wrap_map, concat_wrap_maps, highlight_line_in_selection,
-    viewport_logical_range, visual_to_logical,
+    SlotIndex, SlotLines, WrappedLineInfo, build_wrap_map, highlight_line_in_selection,
 };
 
 // ── 组件 ──────────────────────────────────────────────────────────────────
@@ -308,10 +313,15 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             let vm = &snapshot2.items[*i];
             let vm_hash = vm.content_hash();
             let slot = &mut caches[*i];
-            let (lines, copy_button, interaction, image_lines) =
-                vm_to_lines_cached(vm, &grid, &mut slot.markdown_cache, true);
+            let (lines, copy_button, interaction, image_lines) = vm_to_lines_cached_with_layout(
+                vm,
+                &grid,
+                &mut slot.markdown_cache,
+                Some(&mut slot.markdown_lines),
+                true,
+            );
             let lines = Arc::new(lines);
-            let (_, wm) = build_wrap_map(&lines, vis_width);
+            let (_, wm) = slot.markdown_lines.build_slot_wrap_map(&lines, vis_width);
             let visual_rows = wm.last().map(|e| e.visual_end).unwrap_or(0);
             slot.content_hash = vm_hash;
             slot.width = vis_width;
@@ -336,44 +346,32 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         );
     }
 
-    // 第三阶段：拼接 concat_wrap_map（累加 visual_offset 和 logical_idx）。
-    // [Scheme D] 不再构建全量 core_lines——仅收集每个 slot 的 Arc<Vec<Line>> 引用
-    // 和 slot_offsets（累积偏移）。视口循环按需从 slot 中提取行。
-    // [Why] per-frame clone 全量 core_lines 是 Phase 1 之后的首要瓶颈。
-    let mut core_total_visual_rows: usize = 0;
-    let mut total_logical_lines: usize = 0;
-    let mut slot_arcs: Vec<Arc<Vec<Line<'static>>>> = Vec::new();
-    let mut slot_offsets: Vec<usize> = Vec::new();
-    // 每个 slot 在拼接后的全量视觉行中的起始偏移（供 md 复制按钮换算屏幕坐标）。
-    let mut slot_visual_starts: Vec<usize> = Vec::new();
-    // 每个 slot 的视觉行数（与 slot_visual_starts 同长度）——anchor 视觉范围
-    // 用 `start + rows` 直接算出，避免每帧对 concat_wrap_map 做第二次全量扫描。
-    let mut slot_visual_rows: Vec<usize> = Vec::new();
-    let concat_wrap_map: Vec<WrappedLineInfo> = {
+    // 第三阶段：构建 O(slot count) prefix index；slot-local lines/wrap map 保持 Arc 共享。
+    let mut slot_arcs = Vec::new();
+    let mut slot_wrap_maps = Vec::new();
+    let slot_index = {
         let caches_read = vm_caches.read();
         slot_arcs.reserve(caches_read.len());
-        slot_offsets.reserve(caches_read.len());
-        slot_visual_starts.reserve(caches_read.len());
-        slot_visual_rows.reserve(caches_read.len());
-        let mut slots: Vec<(&[WrappedLineInfo], usize, usize)> =
-            Vec::with_capacity(caches_read.len());
-        for (slot_index, slot) in caches_read.iter().enumerate() {
-            let lines_start = total_logical_lines;
-            slot_offsets.push(lines_start);
-            total_logical_lines += slot.lines.len();
-            slot_arcs.push(Arc::clone(&slot.lines));
-            slots.push((&slot.wrap_map, lines_start, slot_index));
-            slot_visual_starts.push(core_total_visual_rows);
-            slot_visual_rows.push(slot.visual_rows);
-            core_total_visual_rows += slot.visual_rows;
+        slot_wrap_maps.reserve(caches_read.len());
+        for slot in caches_read.iter() {
+            let slot_lines = match slot.markdown_lines.stable_overlay() {
+                Some((stable_start, stable)) => {
+                    SlotLines::composite(Arc::clone(&slot.lines), stable_start, stable)
+                }
+                None => SlotLines::single(Arc::clone(&slot.lines)),
+            };
+            slot_arcs.push(slot_lines);
+            slot_wrap_maps.push(Arc::clone(&slot.wrap_map));
         }
-        concat_wrap_maps(&slots)
+        Arc::new(SlotIndex::new_with_overlays(slot_arcs, slot_wrap_maps))
     };
-    let slot_arcs_arc: Arc<Vec<Arc<Vec<Line<'static>>>>> = Arc::new(slot_arcs);
-    let slot_offsets_arc: Arc<Vec<usize>> = Arc::new(slot_offsets);
-    let concat_wrap_map_arc: Arc<Vec<WrappedLineInfo>> = Arc::new(concat_wrap_map);
-    // [PERI_RENDER_TIMING] concat 阶段耗时
-    let num_slots = slot_arcs_arc.len();
+    let total_logical_lines = slot_index.total_logical();
+    let core_total_visual_rows = slot_index.total_visual();
+    let num_slots = slot_index.slot_count();
+
+    let slot_visual_starts: Vec<usize> = (0..num_slots)
+        .filter_map(|slot| slot_index.slot_visual_start(slot))
+        .collect();
 
     // [Slice 4 §6.8] anchor 的视觉行范围（core 行）：slot 起始偏移 + slot 内
     // 视觉行数。供 auto_follow 的 anchor 分支对齐视口到 block 底部。
@@ -381,14 +379,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [Fix §15] O(1) 查表：旧实现每帧对 concat_wrap_map 全量 filter 求最大
     // visual_end（O(total wrapped lines) 第二次全量遍历）——slot.visual_rows
     // 即 wrap_map 末项 visual_end（rebuild 时同源写入），与旧语义完全一致。
-    let anchor_visual_range: Option<(usize, usize)> = anchor_slot_state.read().and_then(|slot| {
-        let start = *slot_visual_starts.get(slot)?;
-        let rows = *slot_visual_rows.get(slot)?;
-        if rows == 0 {
-            return None; // 空 slot（无 wrap 条目）→ 无锚定（与旧 max() 语义一致）
-        }
-        Some((start, start + rows))
-    });
+    let anchor_visual_range: Option<(usize, usize)> = anchor_slot_state
+        .read()
+        .and_then(|slot| slot_index.slot_visual_range(slot));
     let t_concat = Instant::now();
     trace_phase(
         "concat",
@@ -459,9 +452,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         follow_bottom,
         view_models,
         grid,
-        Arc::clone(&concat_wrap_map_arc),
-        Arc::clone(&slot_arcs_arc),
-        Arc::clone(&slot_offsets_arc),
+        Arc::clone(&slot_index),
     );
 
     handlers::register_keyboard_nav(&mut hooks, interaction_option);
@@ -665,17 +656,21 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         let sel = text_sel.read();
         if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
             // Clamp sr/er 到 wrap_map 视觉范围内（footer 区域无 wrap_map）
-            let max_visual = concat_wrap_map_arc
-                .last()
-                .map(|e| e.visual_end.saturating_sub(1))
-                .unwrap_or(0);
+            let max_visual = slot_index.total_visual().saturating_sub(1);
             let sr_c = sr.min(max_visual);
             let er_c = er.min(max_visual);
             match (
-                visual_to_logical(sr_c, &concat_wrap_map_arc),
-                visual_to_logical(er_c, &concat_wrap_map_arc),
+                slot_index.visual_lookup(sr_c),
+                slot_index.visual_lookup(er_c),
             ) {
-                (Some(f), Some(l)) => Some((f.min(l), f.max(l), sr_c, sc, er_c, ec)),
+                (Some(f), Some(l)) => Some((
+                    f.global_logical.min(l.global_logical),
+                    f.global_logical.max(l.global_logical),
+                    sr_c,
+                    sc,
+                    er_c,
+                    ec,
+                )),
                 _ => None,
             }
         } else {
@@ -686,9 +681,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     };
 
     // 视口对应的 core 逻辑行范围 + 首行视觉偏移
-    let (vp_core_start, vp_core_end, vp_first_offset): (usize, usize, u16) =
+    let (vp_core_start, vp_core_end, vp_first_offset): (usize, usize, usize) =
         if scroll_y < core_total_visual_rows && total_logical_lines > 0 {
-            viewport_logical_range(&concat_wrap_map_arc, scroll_y, vp_height).unwrap_or((0, 0, 0))
+            slot_index
+                .viewport_logical_range(scroll_y, vp_height)
+                .unwrap_or((0, 0, 0))
         } else {
             // 视口完全在 footer 内（footer 占据末尾几行）
             (0, 0, 0)
@@ -731,19 +728,20 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     if scroll_y < core_total_visual_rows && vp_core_start <= vp_core_end && core_len > 0 {
         let end = vp_core_end.min(core_len - 1);
-        // concat_wrap_map_arc 已是 Arc，clone 引用计数 O(1)
-        let wrap_map_arc = Arc::clone(&concat_wrap_map_arc);
-        // [Scheme D] 通过 slot_index + slot_offsets 按需从 slot 中提取行
-        let slots_arc = Arc::clone(&slot_arcs_arc);
-        let offsets_arc = Arc::clone(&slot_offsets_arc);
         for i in vp_core_start..=end {
             let in_sel = sel_bounds.is_some_and(|(f, l, _, _, _, _)| i >= f && i <= l);
-            if let Some(entry) = wrap_map_arc.get(i) {
-                let local_idx = i - offsets_arc[entry.slot_index];
-                let line = &slots_arc[entry.slot_index][local_idx];
+            if let Some(lookup) = slot_index.logical_lookup(i) {
+                let entry = WrappedLineInfo {
+                    logical_idx: i,
+                    visual_start: lookup.global_visual_start,
+                    visual_end: lookup.global_visual_end,
+                    slot_index: lookup.slot_index,
+                };
+                let local_idx = lookup.local_logical;
+                let line = slot_index.line(lookup.slot_index, local_idx).unwrap();
                 let mut out = if in_sel {
                     let (_, _, sr, sc, er, ec) = sel_bounds.unwrap();
-                    highlight_line_in_selection(line, entry, sr, er, sc, ec, vis_width, sel_bg)
+                    highlight_line_in_selection(line, &entry, sr, er, sc, ec, vis_width, sel_bg)
                 } else {
                     line.clone()
                 };
@@ -848,7 +846,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let scroll_offset_y: u16 = if scroll_y >= core_total_visual_rows && core_total_visual_rows > 0 {
         (scroll_y - core_total_visual_rows) as u16
     } else {
-        vp_first_offset
+        vp_first_offset.min(u16::MAX as usize) as u16
     };
 
     // [Why] View 必须保持 `Fill(1)`——ScrollbarHook 在 MessageArea 的 drawer.area

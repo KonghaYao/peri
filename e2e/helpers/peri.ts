@@ -22,6 +22,68 @@ export const DEV_SH = path.join(PROJECT_ROOT, "dev.sh");
 
 const DEFAULT_SIZE: TerminalSize = { cols: 120, rows: 40 };
 
+const PATH_PREFIX = "/opt/homebrew/bin:/usr/local/bin:/usr/bin";
+
+/** 隔离 HOME 仅用于 Peri 配置；rustup/cargo 仍使用开发者本机 toolchain。 */
+function ensureDeveloperToolchainEnv(env: Record<string, string>): void {
+  const devHome = os.homedir();
+  if (!env.RUSTUP_HOME) {
+    env.RUSTUP_HOME = process.env.RUSTUP_HOME || path.join(devHome, ".rustup");
+  }
+  if (!env.CARGO_HOME) {
+    env.CARGO_HOME = process.env.CARGO_HOME || path.join(devHome, ".cargo");
+  }
+  const basePath = env.PATH ?? process.env.PATH ?? "";
+  env.PATH = basePath.includes(PATH_PREFIX)
+    ? basePath
+    : `${PATH_PREFIX}:${basePath}`;
+}
+
+/** 用户 shell rc 可能 source "$HOME/.cargo/env"；隔离 HOME 时提供空文件避免启动即退出。 */
+function ensureHomeShellCompat(home: string): void {
+  const cargoDir = path.join(home, ".cargo");
+  fs.mkdirSync(cargoDir, { recursive: true });
+  const cargoEnv = path.join(cargoDir, "env");
+  if (!fs.existsSync(cargoEnv)) {
+    fs.writeFileSync(cargoEnv, "");
+  }
+}
+
+function allocateIsoHome(): string {
+  const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), "peri-e2e-home-"));
+  const periDir = path.join(isoHome, ".peri");
+  fs.mkdirSync(periDir, { recursive: true });
+  fs.writeFileSync(path.join(periDir, "settings.json"), "{}");
+  ensureHomeShellCompat(isoHome);
+  process.on("exit", () => {
+    try {
+      fs.rmSync(isoHome, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+  return isoHome;
+}
+
+function buildPeriLaunchEnv(
+  options: PeriLaunchOptions,
+  defaults: { isolateHome: boolean },
+): Record<string, string> {
+  const env: Record<string, string> = { ...(options.env ?? {}) };
+  if (!env.HOME && defaults.isolateHome) {
+    env.HOME = allocateIsoHome();
+  } else if (env.HOME) {
+    ensureHomeShellCompat(env.HOME);
+    const periSettings = path.join(env.HOME, ".peri", "settings.json");
+    if (!fs.existsSync(periSettings)) {
+      fs.mkdirSync(path.dirname(periSettings), { recursive: true });
+      fs.writeFileSync(periSettings, "{}");
+    }
+  }
+  ensureDeveloperToolchainEnv(env);
+  return env;
+}
+
 export interface PeriLaunchOptions {
   /** 终端尺寸 */
   size?: TerminalSize;
@@ -29,6 +91,76 @@ export interface PeriLaunchOptions {
   env?: Record<string, string>;
   /** 调试模式 */
   debug?: boolean;
+  /**
+   * Peri 进程工作目录（经 dev.sh `--cwd` 传入）。默认仓库根。
+   * 显式 `env.HOME` 时自动使用空临时目录，避免仓库 `./.peri/settings.json` 覆盖隔离配置。
+   */
+  cwd?: string;
+}
+
+const transientLaunchDirs: string[] = [];
+
+function registerTempDirForCleanup(dir: string): void {
+  transientLaunchDirs.push(dir);
+  if (transientLaunchDirs.length === 1) {
+    process.on("exit", () => {
+      for (const d of transientLaunchDirs) {
+        try {
+          fs.rmSync(d, { recursive: true, force: true });
+        } catch {
+          // ignore
+        }
+      }
+    });
+  }
+}
+
+function resolvePeriWorkdir(options: PeriLaunchOptions): string {
+  if (options.cwd) {
+    return options.cwd;
+  }
+  if (options.env?.HOME) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "peri-e2e-cwd-"));
+    registerTempDirForCleanup(dir);
+    return dir;
+  }
+  return PROJECT_ROOT;
+}
+
+function devShCommand(
+  periWorkdir: string,
+  env: Record<string, string>,
+  extraArgs: string[] = [],
+): string[] {
+  const base =
+    path.resolve(periWorkdir) === path.resolve(PROJECT_ROOT)
+      ? [DEV_SH]
+      : [DEV_SH, `--cwd=${periWorkdir}`];
+  const args = [...base, ...extraArgs];
+  if (env.HOME) {
+    const settings = path.join(env.HOME, ".peri", "settings.json");
+    if (fs.existsSync(settings)) {
+      args.push(`--config-file=${settings}`);
+    }
+  }
+  return args;
+}
+
+function createPeriTester(
+  options: PeriLaunchOptions,
+  env: Record<string, string>,
+  extraArgs: string[] = [],
+): TmuxTester {
+  const size = options.size ?? DEFAULT_SIZE;
+  const periWorkdir = resolvePeriWorkdir(options);
+  return new TmuxTester({
+    command: devShCommand(periWorkdir, env, extraArgs),
+    size,
+    cwd: PROJECT_ROOT,
+    env,
+    debug: options.debug ?? false,
+    snapshotDir: path.join(PROJECT_ROOT, "e2e", "recordings"),
+  });
 }
 
 /**
@@ -73,6 +205,10 @@ function looksLikeLaunchFailure(screen: string): boolean {
   );
 }
 
+function looksLikeCargoBuild(screen: string): boolean {
+  return /\b(?:Compiling|Finished)\b/.test(screen);
+}
+
 /** 检查 tmux session 是否还存活（直接调 tmux，绕开 tester 内部状态） */
 async function isSessionAlive(sessionName: string): Promise<boolean> {
   try {
@@ -102,7 +238,7 @@ async function isSessionAlive(sessionName: string): Promise<boolean> {
  * 本函数轮询屏幕并检测三类失败：
  * 1. session 消失（dev.sh 启动失败导致 server 退出）→ 抛"启动失败"
  * 2. 屏幕出现 shell 提示符 / cargo error（dev.sh 已退出）→ 抛"启动失败"
- * 3. 90s 后仍无欢迎文本（慢编译/卡初始化）→ 抛"启动超时"
+ * 3. 启动超时（冷编译时最长约 5 分钟）→ 抛"启动超时"
  */
 async function waitForPeriReady(
   tester: TmuxTester,
@@ -112,14 +248,16 @@ async function waitForPeriReady(
 
   await tester.sleep(5000);
   const start = Date.now();
+  const maxWaitMs = 300_000;
+  const compileGraceMs = 180_000;
+  let deadline = start + maxWaitMs;
+  let compileGraceApplied = false;
 
-  // 阶段 1：欢迎文本 / 快速失败检测（30s）
-  while (Date.now() - start < 30_000) {
+  while (Date.now() < deadline) {
     let screen: string;
     try {
       screen = await tester.getScreenText();
     } catch {
-      // capture 失败：session 可能已销毁
       if (!(await isSessionAlive(sessionName))) {
         throw new Error(
           `[${label}] peri 启动失败：tmux session "${sessionName}" 已退出。` +
@@ -128,12 +266,17 @@ async function waitForPeriReady(
             `后续操作报 "can't find pane"/"no server running" 均属同一根因。`,
         );
       }
+      await tester.sleep(1000);
       continue;
     }
     if (screen.includes("AI operating system")) {
       return;
     }
-    if (looksLikeLaunchFailure(screen)) {
+    if (!compileGraceApplied && looksLikeCargoBuild(screen)) {
+      deadline = Math.max(deadline, Date.now() + compileGraceMs);
+      compileGraceApplied = true;
+    }
+    if (looksLikeLaunchFailure(screen) && !looksLikeCargoBuild(screen)) {
       throw new Error(
         `[${label}] peri 启动失败：dev.sh 已退出（屏幕出现 shell 提示符或编译错误）。` +
           `屏幕片段: ${screen.slice(0, 300).replace(/\n/g, "⏎")}`,
@@ -142,38 +285,9 @@ async function waitForPeriReady(
     await tester.sleep(1000);
   }
 
-  // 阶段 2：session 存活但无欢迎文本——慢启动（cargo 编译）再等 60s
-  console.warn(
-    `[${label}] 30s 内未出现欢迎文本（session 存活），继续等待慢启动…`,
-  );
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    let screen: string;
-    try {
-      screen = await tester.getScreenText();
-    } catch {
-      if (!(await isSessionAlive(sessionName))) {
-        throw new Error(
-          `[${label}] peri 启动失败：tmux session "${sessionName}" 已退出（等待期间）。`,
-        );
-      }
-      continue;
-    }
-    if (screen.includes("AI operating system")) {
-      return;
-    }
-    if (looksLikeLaunchFailure(screen)) {
-      throw new Error(
-        `[${label}] peri 启动失败：dev.sh 已退出（屏幕出现 shell 提示符或编译错误）。` +
-          `屏幕片段: ${screen.slice(0, 300).replace(/\n/g, "⏎")}`,
-      );
-    }
-    await tester.sleep(2000);
-  }
-
   const screen = await tester.getScreenText().catch(() => "");
   throw new Error(
-    `[${label}] peri 启动超时（约 95s）：session 存活但欢迎文本未出现，` +
+    `[${label}] peri 启动超时：session 存活但欢迎文本未出现，` +
       `可能卡在 cargo 编译或 TUI 初始化。当前屏幕片段: ${screen
         .slice(0, 300)
         .replace(/\n/g, "⏎")}`,
@@ -195,39 +309,8 @@ async function waitForPeriReady(
 export async function launchPeri(
   options: PeriLaunchOptions = {},
 ): Promise<TmuxTester> {
-  const size = options.size ?? DEFAULT_SIZE;
-
-  const env: Record<string, string> = { ...(options.env ?? {}) };
-  let isoHome: string | undefined;
-  if (!env.HOME) {
-    isoHome = fs.mkdtempSync(path.join(os.tmpdir(), "peri-e2e-home-"));
-    const periDir = path.join(isoHome, ".peri");
-    fs.mkdirSync(periDir, { recursive: true });
-    fs.writeFileSync(path.join(periDir, "settings.json"), "{}");
-    // 用户 shell rc 可能无条件 source "$HOME/.cargo/env"。隔离 HOME 中提供空的
-    // 兼容文件，避免交互 shell 在 dev.sh 启动前退出；不复制用户环境或凭据。
-    const cargoDir = path.join(isoHome, ".cargo");
-    fs.mkdirSync(cargoDir, { recursive: true });
-    fs.writeFileSync(path.join(cargoDir, "env"), "");
-    env.HOME = isoHome;
-    // 测试进程退出时清理临时 HOME（best-effort，不阻塞退出）
-    process.on("exit", () => {
-      try {
-        fs.rmSync(isoHome!, { recursive: true, force: true });
-      } catch {
-        // ignore cleanup errors
-      }
-    });
-  }
-
-  const tester = new TmuxTester({
-    command: [DEV_SH],
-    size,
-    cwd: PROJECT_ROOT,
-    env,
-    debug: options.debug ?? false,
-    snapshotDir: path.join(PROJECT_ROOT, "e2e", "recordings"),
-  });
+  const env = buildPeriLaunchEnv(options, { isolateHome: true });
+  const tester = createPeriTester(options, env);
 
   await startTester(tester, "launchPeri");
   await waitForPeriReady(tester, "launchPeri");
@@ -301,16 +384,8 @@ export async function takePeriSnapshot(
 export async function launchPeriHITL(
   options: PeriLaunchOptions = {},
 ): Promise<TmuxTester> {
-  const size = options.size ?? DEFAULT_SIZE;
-
-  const tester = new TmuxTester({
-    command: [DEV_SH, "-a"],
-    size,
-    cwd: PROJECT_ROOT,
-    env: options.env ?? {},
-    debug: options.debug ?? false,
-    snapshotDir: path.join(PROJECT_ROOT, "e2e", "recordings"),
-  });
+  const env = buildPeriLaunchEnv(options, { isolateHome: false });
+  const tester = createPeriTester(options, env, ["-a"]);
 
   await startTester(tester, "launchPeriHITL");
   await waitForPeriReady(tester, "launchPeriHITL");
@@ -337,10 +412,11 @@ export async function waitForStableScreen(
 ): Promise<void> {
   // 阶段 1：等待屏幕变化（如果有基准）
   if (baseScreen !== undefined) {
-    await tester.waitFor(
-      (screen) => screen !== baseScreen,
-      { timeout: 30_000, interval: 500, message: "屏幕未发生变化，输入可能未被处理" },
-    );
+    await tester.waitFor((screen) => screen !== baseScreen, {
+      timeout: 30_000,
+      interval: 500,
+      message: "屏幕未发生变化，输入可能未被处理",
+    });
   }
 
   // 阶段 2：等待屏幕内容连续 3 次完全相同（interval 1.5s → 约 3s 稳定）

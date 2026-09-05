@@ -86,6 +86,37 @@ return { answer: r }`
     expect(written.some((m) => m.method === 'journal/append')).toBe(true)
   })
 
+  test('phase callback is not executed but phase events are emitted', async () => {
+    written = []
+    const script = `export const meta = { name: 'phase-contract', description: 'phase callback contract' }
+phase('marker', async () => {
+  await agent('must-not-run')
+})
+return { phaseUpdated: true }`
+
+    await handleRequest({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'workflow/start',
+      params: { runId: 'srv-phase', cwd: '/tmp', script },
+    })
+
+    const done = await waitFor((m) => m.method === 'workflow/done')
+    const params = done.params as { status: string; returnValue: { phaseUpdated: boolean } }
+    expect(params.status).toBe('completed')
+    expect(params.returnValue).toEqual({ phaseUpdated: true })
+    expect(written.some((m) => m.method === 'agent/run')).toBe(false)
+
+    const phaseTypes = written
+      .filter((m) => m.method === 'progress/event')
+      .map((m) => m.params as { type: string; phase?: string })
+      .filter((event) => event.type === 'phase_started' || event.type === 'phase_done')
+    expect(phaseTypes).toEqual([
+      expect.objectContaining({ type: 'phase_started', phase: 'marker' }),
+      expect.objectContaining({ type: 'phase_done', phase: 'marker' }),
+    ])
+  })
+
   test('resume cache-hit 写入结构化 recovered attempt identity', async () => {
     written = []
     const script = `export const meta = { name: 'resume-demo', description: 'resume test' }

@@ -25,6 +25,11 @@ pub(super) struct WrappedLineInfo {
 /// 为 all_lines 构建视觉行→逻辑行映射。
 /// 返回 (total_visual_rows, wrap_map)。wrap_map 按 visual_start 升序排列，可二分查找。
 pub(super) fn build_wrap_map(lines: &[Line<'static>], width: u16) -> (usize, Vec<WrappedLineInfo>) {
+    #[cfg(test)]
+    crate::kit::acp_bridge::observe_perf(
+        crate::kit::acp_bridge::PerfCounter::WrapRecalculatedLines,
+        lines.len() as u64,
+    );
     let mut wrap_map = Vec::with_capacity(lines.len());
     let mut visual_row = 0usize;
     for (idx, line) in lines.iter().enumerate() {
@@ -43,17 +48,298 @@ pub(super) fn build_wrap_map(lines: &[Line<'static>], width: u16) -> (usize, Vec
     (visual_row, wrap_map)
 }
 
-/// 拼接多个 VM 的 wrap_map：每个分片内部 visual_row 从 0 起、logical_idx 从 0 起，
-/// 拼接时累加 visual_offset 和 lines_start（合并后 lines 中该分片的起始 logical_idx）。
-///
-/// 输入：每个分片的 (wrap_map, lines_start_offset, slot_index)。
-/// 输出：扁平化 wrap_map，所有 entry 的 visual_start/end 是全量坐标，
-/// logical_idx 是合并 lines 中的索引，slot_index 标记所属 VmCacheSlot。
-/// 可直接传给 visual_to_logical / viewport_logical_range。
+#[derive(Debug, Clone)]
+struct SlotLinePart {
+    lines: Arc<Vec<Line<'static>>>,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct SlotLines {
+    parts: Vec<SlotLinePart>,
+    prefix: Vec<usize>,
+}
+
+impl SlotLines {
+    pub(super) fn single(lines: Arc<Vec<Line<'static>>>) -> Self {
+        let end = lines.len();
+        Self::from_parts(vec![SlotLinePart {
+            lines,
+            start: 0,
+            end,
+        }])
+    }
+
+    pub(super) fn composite(
+        mutable: Arc<Vec<Line<'static>>>,
+        stable_start: usize,
+        stable: Vec<Arc<Vec<Line<'static>>>>,
+    ) -> Self {
+        let mut parts = Vec::with_capacity(stable.len().saturating_add(2));
+        let split = stable_start.min(mutable.len());
+        parts.push(SlotLinePart {
+            lines: Arc::clone(&mutable),
+            start: 0,
+            end: split,
+        });
+        let stable_len = stable.iter().map(|lines| lines.len()).sum::<usize>();
+        let suffix_start = split.saturating_add(stable_len).min(mutable.len());
+        parts.extend(stable.into_iter().map(|lines| {
+            let end = lines.len();
+            SlotLinePart {
+                lines,
+                start: 0,
+                end,
+            }
+        }));
+        parts.push(SlotLinePart {
+            end: mutable.len(),
+            lines: mutable,
+            start: suffix_start,
+        });
+        Self::from_parts(parts)
+    }
+
+    fn from_parts(parts: Vec<SlotLinePart>) -> Self {
+        let mut prefix = Vec::with_capacity(parts.len().saturating_add(1));
+        prefix.push(0usize);
+        for part in &parts {
+            prefix.push(
+                prefix
+                    .last()
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(part.end.saturating_sub(part.start)),
+            );
+        }
+        Self { parts, prefix }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.prefix.last().copied().unwrap_or(0)
+    }
+
+    pub(super) fn get(&self, logical: usize) -> Option<&Line<'static>> {
+        if logical >= self.len() {
+            return None;
+        }
+        let part_index = self
+            .prefix
+            .partition_point(|&start| start <= logical)
+            .saturating_sub(1);
+        let part = self.parts.get(part_index)?;
+        part.lines
+            .get(part.start + logical.saturating_sub(self.prefix[part_index]))
+    }
+
+    pub(super) fn line(&self, logical: usize) -> Option<&Line<'static>> {
+        self.get(logical)
+    }
+}
+
+impl From<Arc<Vec<Line<'static>>>> for SlotLines {
+    fn from(lines: Arc<Vec<Line<'static>>>) -> Self {
+        Self::single(lines)
+    }
+}
+
+/// 每帧按 VM slot 构建的两级索引。prefix 的最后一个元素是总量；空 slot 也保留，
+/// 因而全局坐标查找只需先二分 slot，再二分该 slot 的 local wrap map。
+#[derive(Debug, Clone, Default)]
+pub(super) struct SlotIndex {
+    slots: Vec<SlotLines>,
+    wrap_maps: Vec<Arc<Vec<WrappedLineInfo>>>,
+    logical_prefix: Vec<usize>,
+    visual_prefix: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SlotLookup {
+    pub(super) slot_index: usize,
+    pub(super) local_logical: usize,
+    pub(super) global_logical: usize,
+    pub(super) global_visual_start: usize,
+    pub(super) global_visual_end: usize,
+}
+
+impl SlotIndex {
+    #[cfg(test)]
+    pub(super) fn new<T>(slots: Vec<T>, wrap_maps: Vec<Arc<Vec<WrappedLineInfo>>>) -> Self
+    where
+        T: Into<SlotLines>,
+    {
+        Self::new_with_overlays(slots.into_iter().map(Into::into).collect(), wrap_maps)
+    }
+
+    pub(super) fn new_with_overlays(
+        slots: Vec<SlotLines>,
+        wrap_maps: Vec<Arc<Vec<WrappedLineInfo>>>,
+    ) -> Self {
+        debug_assert_eq!(slots.len(), wrap_maps.len());
+        let mut logical_prefix = Vec::with_capacity(slots.len().saturating_add(1));
+        let mut visual_prefix = Vec::with_capacity(slots.len().saturating_add(1));
+        logical_prefix.push(0);
+        visual_prefix.push(0);
+        for (lines, wrap_map) in slots.iter().zip(&wrap_maps) {
+            logical_prefix.push(
+                logical_prefix
+                    .last()
+                    .copied()
+                    .unwrap_or(0usize)
+                    .saturating_add(lines.len()),
+            );
+            visual_prefix.push(
+                visual_prefix
+                    .last()
+                    .copied()
+                    .unwrap_or(0usize)
+                    .saturating_add(wrap_map.last().map_or(0, |entry| entry.visual_end)),
+            );
+        }
+        Self {
+            slots,
+            wrap_maps,
+            logical_prefix,
+            visual_prefix,
+        }
+    }
+
+    pub(super) fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub(super) fn total_logical(&self) -> usize {
+        self.logical_prefix.last().copied().unwrap_or(0)
+    }
+
+    pub(super) fn total_visual(&self) -> usize {
+        self.visual_prefix.last().copied().unwrap_or(0)
+    }
+
+    pub(super) fn slot_visual_start(&self, slot: usize) -> Option<usize> {
+        self.visual_prefix.get(slot).copied()
+    }
+
+    pub(super) fn slot_visual_range(&self, slot: usize) -> Option<(usize, usize)> {
+        let start = *self.visual_prefix.get(slot)?;
+        let end = *self.visual_prefix.get(slot.checked_add(1)?)?;
+        (start < end).then_some((start, end))
+    }
+
+    fn prefix_slot(prefix: &[usize], value: usize) -> Option<usize> {
+        let total = *prefix.last()?;
+        if value >= total {
+            return None;
+        }
+        Some(
+            prefix
+                .partition_point(|&start| start <= value)
+                .saturating_sub(1),
+        )
+    }
+
+    pub(super) fn visual_lookup(&self, visual: usize) -> Option<SlotLookup> {
+        let slot_index = Self::prefix_slot(&self.visual_prefix, visual)?;
+        let local_visual = visual.saturating_sub(self.visual_prefix[slot_index]);
+        let wrap_map = self.wrap_maps.get(slot_index)?;
+        let entry_index = wrap_map
+            .binary_search_by(|entry| {
+                if local_visual < entry.visual_start {
+                    Ordering::Greater
+                } else if local_visual >= entry.visual_end {
+                    Ordering::Less
+                } else {
+                    Ordering::Equal
+                }
+            })
+            .ok()?;
+        let entry = &wrap_map[entry_index];
+        let global_logical = self.logical_prefix[slot_index].saturating_add(entry.logical_idx);
+        Some(SlotLookup {
+            slot_index,
+            local_logical: entry.logical_idx,
+            global_logical,
+            global_visual_start: self.visual_prefix[slot_index].saturating_add(entry.visual_start),
+            global_visual_end: self.visual_prefix[slot_index].saturating_add(entry.visual_end),
+        })
+    }
+
+    pub(super) fn logical_lookup(&self, logical: usize) -> Option<SlotLookup> {
+        let slot_index = Self::prefix_slot(&self.logical_prefix, logical)?;
+        let local_logical = logical.saturating_sub(self.logical_prefix[slot_index]);
+        let entry = self.wrap_maps.get(slot_index)?.get(local_logical)?;
+        Some(SlotLookup {
+            slot_index,
+            local_logical,
+            global_logical: logical,
+            global_visual_start: self.visual_prefix[slot_index].saturating_add(entry.visual_start),
+            global_visual_end: self.visual_prefix[slot_index].saturating_add(entry.visual_end),
+        })
+    }
+
+    pub(super) fn line(&self, slot: usize, local: usize) -> Option<&Line<'static>> {
+        self.slots.get(slot)?.line(local)
+    }
+
+    pub(super) fn viewport_logical_range(
+        &self,
+        scroll_y: usize,
+        vp_height: usize,
+    ) -> Option<(usize, usize, usize)> {
+        if vp_height == 0 {
+            return None;
+        }
+        let start = self.visual_lookup(scroll_y)?;
+        let end_visual = scroll_y
+            .saturating_add(vp_height)
+            .saturating_sub(1)
+            .min(self.total_visual().saturating_sub(1));
+        let end = self.visual_lookup(end_visual)?;
+        Some((
+            start.global_logical,
+            end.global_logical,
+            scroll_y.saturating_sub(start.global_visual_start),
+        ))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn run_synthetic_slot_index(slots: usize) -> (usize, usize) {
+    let lines = (0..slots)
+        .map(|slot| Arc::new(vec![Line::from(format!("slot-{slot}"))]))
+        .collect::<Vec<_>>();
+    let maps = (0..slots)
+        .map(|_| {
+            Arc::new(vec![WrappedLineInfo {
+                logical_idx: 0,
+                visual_start: 0,
+                visual_end: 1,
+                slot_index: 0,
+            }])
+        })
+        .collect();
+    let index = SlotIndex::new(lines, maps);
+    (index.logical_prefix.len(), index.visual_prefix.len())
+}
+
+/// 拼接多个 VM 的 wrap_map：仅保留为新索引的测试 reference。
+#[cfg(test)]
 pub(super) fn concat_wrap_maps(
     slots: &[(&[WrappedLineInfo], usize, usize)],
 ) -> Vec<WrappedLineInfo> {
     let total: usize = slots.iter().map(|(wm, _, _)| wm.len()).sum();
+    #[cfg(test)]
+    {
+        crate::kit::acp_bridge::observe_perf(
+            crate::kit::acp_bridge::PerfCounter::AggregateAllocation,
+            1,
+        );
+        crate::kit::acp_bridge::observe_perf(
+            crate::kit::acp_bridge::PerfCounter::AggregateCopiedItems,
+            total as u64,
+        );
+    }
     let mut result = Vec::with_capacity(total);
     let mut visual_offset = 0usize;
     for (wm, lines_start, slot_index) in slots {
@@ -71,6 +357,7 @@ pub(super) fn concat_wrap_maps(
 }
 
 /// 二分查找：视觉行 → 逻辑行索引。
+#[cfg(test)]
 pub(super) fn visual_to_logical(visual_row: usize, wrap_map: &[WrappedLineInfo]) -> Option<usize> {
     let vr = visual_row;
     match wrap_map.binary_search_by(|entry| {
@@ -85,34 +372,6 @@ pub(super) fn visual_to_logical(visual_row: usize, wrap_map: &[WrappedLineInfo])
         Ok(idx) => Some(wrap_map[idx].logical_idx),
         Err(_) => None,
     }
-}
-
-/// 计算视口 [scroll_y, scroll_y + vp_height) 对应的逻辑行范围 + 首行视觉偏移。
-///
-/// 返回 (start_logical, end_logical, first_line_visual_offset)。
-/// first_line_visual_offset 是首行在视口内向下推的视觉行数（Paragraph::scroll 第一参数）。
-/// 当 wrap_map 为空或视口在范围外时返回 None。
-pub(super) fn viewport_logical_range(
-    wrap_map: &[WrappedLineInfo],
-    scroll_y: usize,
-    vp_height: usize,
-) -> Option<(usize, usize, u16)> {
-    if wrap_map.is_empty() || vp_height == 0 {
-        return None;
-    }
-    // 视口起始：第一个 visual_end > scroll_y 的 entry
-    let start_idx = wrap_map.iter().position(|e| e.visual_end > scroll_y)?;
-    let start_logical = wrap_map[start_idx].logical_idx;
-    let first_line_offset = scroll_y.saturating_sub(wrap_map[start_idx].visual_start);
-    // 视口结束：第一个 visual_start >= scroll_y + vp_height 的 entry 之前
-    let vp_visual_end = scroll_y.checked_add(vp_height)?;
-    let end_logical = wrap_map
-        .iter()
-        .take_while(|e| e.visual_start < vp_visual_end)
-        .last()
-        .map(|e| e.logical_idx)
-        .unwrap_or(start_logical);
-    Some((start_logical, end_logical, first_line_offset as u16))
 }
 
 // ── 折行宽度模拟 ──────────────────────────────────────────────────────────
@@ -147,7 +406,12 @@ fn wrap_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usize> {
         return vec![0, plain.len()];
     }
 
-    let area = Rect::new(0, 0, width, line_count as u16);
+    if line_count > u16::MAX as usize {
+        return wrap_byte_starts_large_line(plain, usize::from(width));
+    }
+
+    let height = u16::try_from(line_count).expect("line count checked against u16::MAX");
+    let area = Rect::new(0, 0, width, height);
     let mut buf = Buffer::empty(area);
     Paragraph::new(ratatui_kit::ratatui::text::Text::from(line.clone()))
         .wrap(Wrap { trim: false })
@@ -168,7 +432,7 @@ fn wrap_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usize> {
     let total_chars = plain.chars().count();
     let mut chars = plain.chars();
 
-    for row in 0..(line_count as u16 - 1) {
+    for row in 0..height.saturating_sub(1) {
         for col in 0..width {
             if chars_consumed >= total_chars {
                 break;
@@ -193,6 +457,23 @@ fn wrap_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usize> {
             // 否则是 trailing padding 空格，跳过
         }
         starts.push(*char_byte.get(chars_consumed).unwrap_or(&plain.len()));
+    }
+    starts.push(plain.len());
+    starts
+}
+
+fn wrap_byte_starts_large_line(plain: &str, width: usize) -> Vec<usize> {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut starts = vec![0];
+    let mut row_width = 0usize;
+    for (byte, ch) in plain.char_indices() {
+        let char_width = ch.width().unwrap_or(0);
+        if row_width > 0 && row_width.saturating_add(char_width) > width {
+            starts.push(byte);
+            row_width = 0;
+        }
+        row_width = row_width.saturating_add(char_width);
     }
     starts.push(plain.len());
     starts
@@ -373,10 +654,8 @@ pub(super) fn mark_copy_message(char_count: usize) {
 /// 提取）。`view_models` 为 None 时保持既有行为（列模拟不侵入，剥离只发生
 /// 在提取层——wrap_byte_starts / 高亮列模型零改动）。
 #[allow(clippy::too_many_arguments)] // 选区提取参数组（与既有调用链签名一致）
-pub(super) fn extract_visual_range(
-    slots: &[Arc<Vec<Line<'static>>>],
-    slot_offsets: &[usize],
-    wrap_map: &[WrappedLineInfo],
+pub(super) fn extract_visual_range_index(
+    index: &SlotIndex,
     vis_start: (usize, u16),
     vis_end: (usize, u16),
     width: u16,
@@ -388,23 +667,26 @@ pub(super) fn extract_visual_range(
     } else {
         (vis_end, vis_start)
     };
-    // Clamp sr/er 到 wrap_map 视觉范围内（footer 区域无 wrap_map，避免 None）
-    let max_visual = wrap_map
-        .last()
-        .map(|e| e.visual_end.saturating_sub(1))
-        .unwrap_or(0);
+    // Clamp sr/er 到 core 视觉范围内（footer 区域无映射，避免 None）
+    let max_visual = index.total_visual().saturating_sub(1);
     let sr = sr.min(max_visual);
     let er = er.min(max_visual);
-    let first_logical = visual_to_logical(sr, wrap_map)?;
-    let last_logical = visual_to_logical(er, wrap_map)?;
+    let first_logical = index.visual_lookup(sr)?.global_logical;
+    let last_logical = index.visual_lookup(er)?.global_logical;
     let first = first_logical.min(last_logical);
     let last = first_logical.max(last_logical);
 
     let mut parts: Vec<String> = Vec::new();
     for li in first..=last {
-        let entry = wrap_map.get(li)?;
-        let local_idx = li.saturating_sub(slot_offsets.get(entry.slot_index).copied().unwrap_or(0));
-        let line = slots.get(entry.slot_index)?.get(local_idx)?;
+        let lookup = index.logical_lookup(li)?;
+        let entry = WrappedLineInfo {
+            logical_idx: li,
+            visual_start: lookup.global_visual_start,
+            visual_end: lookup.global_visual_end,
+            slot_index: lookup.slot_index,
+        };
+        let local_idx = lookup.local_logical;
+        let line = index.line(lookup.slot_index, local_idx)?;
         let plain = text_selection::line_to_plain_text(line);
         // [D3 §9] 语义文本（无 UI chrome）——仅提取层替换，列模拟仍基于 plain。
         // [Fix §15] 传入已渲染行而非重渲染 VM：slot 行与渲染缓存同源，
@@ -460,6 +742,45 @@ pub(super) fn extract_visual_range(
     } else {
         Some(parts.join("\n"))
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn extract_visual_range(
+    slots: &[Arc<Vec<Line<'static>>>],
+    slot_offsets: &[usize],
+    wrap_map: &[WrappedLineInfo],
+    vis_start: (usize, u16),
+    vis_end: (usize, u16),
+    width: u16,
+    view_models: Option<&im::Vector<crate::kit::tui_render_unit::TuiRenderUnit>>,
+    grid: Option<GridSpec>,
+) -> Option<String> {
+    let mut visual_start = 0usize;
+    let local_maps = slots
+        .iter()
+        .enumerate()
+        .map(|(slot, _)| {
+            let logical_start = slot_offsets.get(slot).copied().unwrap_or(0);
+            let first_visual = visual_start;
+            let entries: Vec<_> = wrap_map
+                .iter()
+                .filter(|entry| entry.slot_index == slot)
+                .map(|entry| WrappedLineInfo {
+                    logical_idx: entry.logical_idx.saturating_sub(logical_start),
+                    visual_start: entry.visual_start.saturating_sub(first_visual),
+                    visual_end: entry.visual_end.saturating_sub(first_visual),
+                    slot_index: 0,
+                })
+                .collect();
+            visual_start = entries.last().map_or(first_visual, |entry| {
+                first_visual.saturating_add(entry.visual_end)
+            });
+            Arc::new(entries)
+        })
+        .collect();
+    let index = SlotIndex::new(slots.to_vec(), local_maps);
+    extract_visual_range_index(&index, vis_start, vis_end, width, view_models, grid)
 }
 
 /// [D3 §9] 把 plain 的 byte 片段 [b0..b1) 映射到语义文本上。

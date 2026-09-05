@@ -73,6 +73,20 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     group_successful_tools(&mut items, current_turn_start);
 
     state.generation = state.generation.wrapping_add(1);
+    #[cfg(test)]
+    crate::kit::acp_bridge::observe_publication(crate::kit::acp_bridge::PublicationObservation {
+        generation: state.generation,
+        source_version: state
+            .current_turn
+            .text
+            .len()
+            .saturating_add(state.current_turn.reasoning.len()) as u64,
+        reason: if state.phase == SessionPhase::PromptRunning {
+            crate::kit::acp_bridge::PublicationReason::Intermediate
+        } else {
+            crate::kit::acp_bridge::PublicationReason::Terminal
+        },
+    });
     let snapshot = ViewModelsSnapshot {
         items,
         generation: state.generation,
@@ -343,9 +357,9 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
             continue;
         }
         // [D2] 失败数 = 从 run 结束位置向后扫描**连续相邻** error 工具计数。
-        // error 工具不入组、不删除、保持展开（§7 表 error→Expanded + §15
-        // 「error 永不隐藏」优先）；扫描在删除 run 元素之前进行（segment 索引
-        // 仍指向原位置）。
+        // error 工具不入组、不删除，保持独立的失败状态行（§7 表 error→Collapsed；
+        // §15「error 永不隐藏」指状态行始终可见）；扫描在删除 run 元素之前进行
+        //（segment 索引仍指向原位置）。
         let mut failed_count: u32 = 0;
         for i in run_end..segment.len() {
             let is_error = matches!(
@@ -535,7 +549,7 @@ fn apply_fold_pass(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
                 };
                 let override_fold = if has_overrides {
                     overrides
-                        .get(&FoldKey::SubAgent(g.agent_id.clone()))
+                        .get(&FoldKey::SubAgent(g.instance_id.clone()))
                         .copied()
                 } else {
                     None
@@ -594,6 +608,12 @@ fn apply_fold_pass(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
 /// 由 acp_bridge 在 BRIDGE_RESET_COUNTER 复位时调用——
 /// 立即将空快照写入 VIEW_MODELS atom，防止其他 reader 读到旧 session 数据。
 pub fn push_view_models_for_reset() {
+    #[cfg(test)]
+    crate::kit::acp_bridge::observe_publication(crate::kit::acp_bridge::PublicationObservation {
+        generation: 0,
+        source_version: 0,
+        reason: crate::kit::acp_bridge::PublicationReason::Reset,
+    });
     // [Slice 2] session 复位时清空折叠覆盖表——tool_id/message_id/agent_id
     // 跨 session 不保证唯一，残留覆盖会错误作用于新会话的同名 entry。
     FOLD_OVERRIDES.state().write().clear();

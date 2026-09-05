@@ -19,6 +19,7 @@ pub use event_data::{
     AcpEventData, AcpEventWithEpoch, BgTaskEntry, CacheUsageSample, FeedbackChannel, FeedbackLevel,
     PendingInteraction, TuiCommandFeedback,
 };
+pub(crate) use tool_card::build_tool_card;
 pub(crate) use tool_card::parse_tool_diff;
 pub use tool_card::{SubAgentAccumulator, ToolCardAccumulator};
 
@@ -32,3 +33,7 @@ use crate::kit::tui_render_unit::{EntryStatus, TuiRenderUnit};
 #[cfg(test)]
 #[path = "acp_types_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "acp_types/event_data_bg_test.rs"]
+mod event_data_bg_test;

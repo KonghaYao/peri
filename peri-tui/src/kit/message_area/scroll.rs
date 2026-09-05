@@ -17,9 +17,9 @@ pub(super) use self::event::handle_event;
 use self::geometry::round_divide;
 pub(super) use self::geometry::{ScrollbarDragState, is_scrollbar_column};
 use self::geometry::{compute_thumb_geometry, position_to_scroll_y, thumb_start_to_position};
-pub(super) use self::gesture::{DragAction, drag_step, freeze_down, settle_up};
+pub(super) use self::gesture::{DragAction, drag_step, freeze_down_index, settle_up};
 #[cfg(test)]
-use self::gesture::{entry_click_target, is_click};
+use self::gesture::{entry_click_target, freeze_down, is_click};
 use self::throttle::apply_scroll;
 pub(super) use self::throttle::{DragThrottle, SCROLL_PADDING, flush_scroll_if_due};
 pub(crate) use self::throttle::{SCROLL_LINES, ScrollThrottle, scroll_frame_ms};

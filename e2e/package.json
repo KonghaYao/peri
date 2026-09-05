@@ -7,7 +7,11 @@
     "test:watch": "vitest",
     "report": "tsx scripts/generate-report.ts",
     "e2e": "node scripts/run-e2e.mjs",
-    "e2e:all": "node scripts/run-e2e.mjs --all"
+    "e2e:l0": "node scripts/run-e2e.mjs --tier l0 --no-interactive",
+    "e2e:l1": "node scripts/run-e2e.mjs --tier l1 --no-interactive",
+    "e2e:l2": "node scripts/run-e2e.mjs --tier l2 --no-interactive",
+    "e2e:release": "node scripts/run-e2e.mjs --tier release --no-interactive",
+    "e2e:release:strict": "node scripts/run-e2e.mjs --tier release --no-interactive --require-clean-first-pass"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

@@ -8,6 +8,59 @@ use peri_acp::transport::{
     types::IncomingMessage,
 };
 use serial_test::serial;
+use std::time::Duration;
+
+/// Global atoms can leak across parallel lib tests; thread switch must not see
+/// stale background tasks (consumer would open confirm and skip session/load).
+fn clear_thread_load_isolation_atoms() {
+    crate::kit::atoms::init_atoms();
+    crate::kit::atoms::BG_TASKS.state().write().clear();
+    *crate::kit::atoms::CONFIRM_PAYLOAD.state().write() = None;
+}
+
+fn session_boundary_reset_observed() -> bool {
+    crate::kit::atoms::POPUP_KIND.state().read().is_none()
+        && crate::kit::atoms::HITL_PENDING.state().read().is_none()
+        && crate::kit::atoms::TODO_ITEMS.state().read().is_empty()
+        && crate::kit::atoms::INPUT_HISTORY_INDEX
+            .state()
+            .read()
+            .is_none()
+        && crate::kit::atoms::DRAFT.state().read().is_none()
+}
+
+async fn wait_for_session_boundary_reset(timeout: Duration) {
+    tokio::time::timeout(timeout, async {
+        while !session_boundary_reset_observed() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("session boundary projection should clear popup/todo/history atoms");
+}
+
+async fn recv_session_load(server: &MpscServerTransport, timeout: Duration) -> IncomingMessage {
+    tokio::time::timeout(timeout, async {
+        loop {
+            let Some(message) = server.recv().await else {
+                panic!("server transport closed before session/load");
+            };
+            match &message {
+                IncomingMessage::Request { method, .. } if method == "session/load" => {
+                    return message;
+                }
+                IncomingMessage::Request { id, method, .. } if method == "session/close" => {
+                    let _ = server
+                        .send_response(id.clone(), Ok(serde_json::json!({})))
+                        .await;
+                }
+                _ => return message,
+            }
+        }
+    })
+    .await
+    .expect("session/load should become in-flight")
+}
 
 fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
     let (client_transport, server_transport): (MpscClientTransport, MpscServerTransport) =
@@ -53,18 +106,18 @@ async fn test_dropped_tx_exits_loop() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_shutdown_cancels_inflight_load_and_releases_reservation() {
+    clear_thread_load_isolation_atoms();
     let (client, server) = make_client_without_pump();
     let (tx, rx) = mpsc::unbounded_channel::<ThreadLoadRequest>();
     let dispatcher = ThreadLoadDispatcher::new(tx, client.clone());
     let shutdown = CancellationToken::new();
     let handle = spawn_thread_load_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+    tokio::task::yield_now().await;
     dispatcher.send("target".into()).unwrap();
 
-    let request = tokio::time::timeout(std::time::Duration::from_millis(500), server.recv())
-        .await
-        .expect("session/load should become in-flight")
-        .expect("server transport should stay open");
+    let request = recv_session_load(&server, Duration::from_secs(5)).await;
     assert!(matches!(
         request,
         IncomingMessage::Request { ref method, .. } if method == "session/load"
@@ -72,7 +125,7 @@ async fn test_shutdown_cancels_inflight_load_and_releases_reservation() {
     assert_eq!(client.pending_session_load_count(), 1);
 
     shutdown.cancel();
-    tokio::time::timeout(std::time::Duration::from_millis(500), handle)
+    tokio::time::timeout(Duration::from_secs(5), handle)
         .await
         .expect("consumer must stop while session/load is in-flight")
         .unwrap();
@@ -86,13 +139,13 @@ async fn test_shutdown_cancels_inflight_load_and_releases_reservation() {
 /// 验证 handle_load 在调用 load_session 前已同步重置弹窗 / Todo / 历史指针。
 ///
 /// 覆盖 H1/M3/L5/L10，与 submit_consumer::test_handle_clear_submit_*
-/// 对称。load_session 无 server 会 hang，我们用 100ms 超时让控制流走到
-/// 重置后即返回，断言此时 4 类 atom 已被清空。重置写入发生在
-/// load_session await 之前，因此即使 RPC 失败也已完成。
+/// 对称。load_session 无 server 会 hang；在后台 spawn handle_load 并轮询 atom，
+/// 直到 client 在 load_session 内完成 project_session_boundary（发生在首个
+/// 阻塞 RPC 之前），避免 CI 上 100ms 固定超时在 gate 排队时过早断言。
 #[tokio::test]
 #[serial]
 async fn test_handle_load_resets_popup_todo_history_atoms() {
-    crate::kit::atoms::init_atoms();
+    clear_thread_load_isolation_atoms();
     // Arrange：把 4 类 atom 填充为"旧 session 残留"。
     *crate::kit::atoms::POPUP_KIND.state().write() = Some(crate::kit::atoms::PopupKind::Hitl);
     *crate::kit::atoms::HITL_PENDING.state().write() =
@@ -115,13 +168,15 @@ async fn test_handle_load_resets_popup_todo_history_atoms() {
     let (client, _server) = make_interactive_client_without_pump();
     let cwd = ".".to_string();
 
-    // Act：handle_load 在 load_session 处会 hang（无 server），
-    // 我们只关心它 await 之前的同步重置块，所以 100ms 超时即返回。
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        handle_load(&client, &cwd, "thread-xyz".to_string()),
-    )
-    .await;
+    // Act：load_session 会在 session/load 上挂起；轮询直到 boundary 投影完成。
+    let load_task = {
+        let client = client.clone();
+        let cwd = cwd.clone();
+        tokio::spawn(async move { handle_load(&client, &cwd, "thread-xyz".to_string()).await })
+    };
+    wait_for_session_boundary_reset(Duration::from_secs(5)).await;
+    load_task.abort();
+    let _ = load_task.await;
 
     // Assert：4 类残留已清空。
     assert!(

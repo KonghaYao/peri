@@ -147,6 +147,17 @@ pub enum AcpEventData {
     /// `"system-notification"` -- system-level notification text with severity.
     SystemNotification(SystemNotification),
 
+    /// 当前 session 的 Goal 只读投影。由 bridge 在 session ownership 校验后写入 atom。
+    GoalSnapshot {
+        objective: Option<String>,
+        status: Option<peri_acp_types::goal::GoalStatus>,
+        token_budget: Option<u64>,
+        tokens_used: u64,
+        time_used_seconds: u64,
+        continuation_count: u64,
+        blocked_reason: Option<String>,
+    },
+
     /// `"command-feedback"` — 命令执行反馈（Phase 1 `CommandFeedback` 载荷，
     /// 经 peri/agent_event 通道送达，无标准 SessionUpdate；level/channel 为
     /// wire string 化 camelCase：`"info"|"warning"|"error"`、`"uiOnly"|"session"`）。
@@ -236,6 +247,7 @@ pub enum AcpEventData {
         kind: Option<String>,
         success: bool,
         duration_ms: u64,
+        output_preview: Option<String>,
     },
 
     /// `"bg-task-cancelled"` -- a background task was cancelled.
@@ -251,14 +263,22 @@ pub enum AcpEventData {
     /// `"compact-started"` — 上下文压缩开始。
     CompactStarted,
 
-    /// `"compact-completed"` — 上下文压缩完成（Phase 5 Step 4 收敛：
-    /// 状态重建信号三字段；通知文案由 CommandFeedback 渲染）。
+    /// `"compact-completed"` — 上下文压缩完成（状态重建信号 + 展示信息）。
     CompactCompleted {
         summary: String,
         messages_json: String,
-        /// 压缩触发方式: "auto" | "manual"（旧事件缺省视为 "auto"，由
-        /// acp_notifier 透传时补默认值）
+        /// 压缩触发方式: "auto" | "manual"。
         trigger: String,
+        /// 实际采用的压缩策略。
+        strategy: String,
+        /// 被压缩或投影的消息数量。
+        affected_count: usize,
+        /// 估算节省的 token 数量。
+        estimated_tokens_saved: u64,
+        /// Full compact 后重新注入的文件信息。
+        files: Vec<peri_acp_types::summary::CompactFileInfoDto>,
+        /// Full compact 后重新注入的 Skill 名称。
+        skills: Vec<String>,
     },
 
     /// `"background-task-completed"` — 后台 agent 任务完成。
@@ -394,6 +414,7 @@ impl AcpEventData {
                     kind: d.kind,
                     success: d.success,
                     duration_ms: d.duration_ms,
+                    output_preview: d.output_preview.filter(|s| !s.is_empty()),
                 }
             }),
             "bg-task-cancelled" => decode_or_unknown(event, data, |d: BgTaskCancelledData| {
@@ -482,6 +503,8 @@ struct BgTaskCompletedData {
     kind: Option<String>,
     success: bool,
     duration_ms: u64,
+    #[serde(default)]
+    output_preview: Option<String>,
 }
 
 /// Deserialization helper for `bg-task-cancelled` payload.

@@ -13,6 +13,10 @@ use crate::kit::atoms::{
     ASK_USER_PENDING, BG_DISPLAY, BG_TASKS, NOTIFICATION, PLUGIN_LIST, PLUGIN_SEARCH_RESULTS,
     PREDICTION, RENDER_HEARTBEAT,
 };
+use crate::kit::bg_task_identity::upsert_identity_from_started;
+use crate::kit::bg_task_live::{
+    mark_task_cancelled, mark_task_completed, reconcile_live_snapshot, seed_live_from_started,
+};
 use crate::kit::tui_render_unit::{InteractionKind, TuiAskUserBlock, TuiNoteLevel, TuiRenderUnit};
 use fluent_bundle::FluentValue;
 use peri_acp_types::event_data::{
@@ -70,6 +74,27 @@ pub(super) fn handle_llm_retrying(
     state.inject_system_note(text, TuiNoteLevel::Warning);
 }
 
+pub(super) fn handle_goal_snapshot(
+    objective: &Option<String>,
+    status: Option<peri_acp_types::goal::GoalStatus>,
+    token_budget: Option<u64>,
+    tokens_used: u64,
+    time_used_seconds: u64,
+    continuation_count: u64,
+    blocked_reason: &Option<String>,
+) {
+    *crate::kit::atoms::GOAL_SNAPSHOT.state().write() =
+        status.map(|status| crate::kit::atoms::GoalSnapshot {
+            objective: objective.clone(),
+            status: Some(status),
+            token_budget,
+            tokens_used,
+            time_used_seconds,
+            continuation_count,
+            blocked_reason: blocked_reason.clone(),
+        });
+}
+
 pub(super) fn handle_system_notification(state: &mut BridgeState, sn: &SystemNotification) {
     // 系统通知（如 cache 命中率警告）——通过 inject_system_note 注入
     // current_turn 内部，天然位于其时序位置（已产出内容之后、后续内容之前）。
@@ -82,6 +107,17 @@ pub(super) fn handle_system_notification(state: &mut BridgeState, sn: &SystemNot
 }
 
 pub(super) fn handle_command_feedback(state: &mut BridgeState, fb: &TuiCommandFeedback) {
+    // CompactCompleted 已注入更完整的展示信息；手动 compact 紧随其后的通用
+    // CommandFeedback 仅是兼容反馈，跳过以避免消息流短暂出现两条完成通知。
+    if fb.channel == FeedbackChannel::UiOnly
+        && state.compact_just_completed
+        && crate::kit::atoms::PENDING_COMPACT_NOTE
+            .state()
+            .read()
+            .is_some()
+    {
+        return;
+    }
     // 命令执行反馈（Phase 3 CommandFeedback 事件）。v1 不建独立通知条组件，
     // UiOnly/Session 两通道均先走 inject_system_note——SystemNote 是 TUI 渲染
     // 层概念，不进 ACP 消息，agent 永不见（设计 §79）；通知条/状态区的视觉
@@ -106,7 +142,13 @@ pub(super) fn handle_command_feedback(state: &mut BridgeState, fb: &TuiCommandFe
     // waitFor 完成提示 120s 超时）。仅 UiOnly 且 compact 完成场景写入：auto
     // compact 无 replay 触发不写、非 compact 命令无 replay 不写，防残留串到
     // 后续 thread 切换的 reset。
-    if fb.channel == FeedbackChannel::UiOnly && state.compact_just_completed {
+    if fb.channel == FeedbackChannel::UiOnly
+        && state.compact_just_completed
+        && crate::kit::atoms::PENDING_COMPACT_NOTE
+            .state()
+            .read()
+            .is_none()
+    {
         crate::kit::atoms::PENDING_COMPACT_NOTE.set(Some(fb.message.clone()));
     }
 }
@@ -575,6 +617,12 @@ pub(super) fn handle_bg_task_snapshot(state: &mut BridgeState, tasks: &[BgTaskEn
         .iter()
         .map(|t| crate::kit::atoms::BgDisplayEntry {
             id: t.task_id.clone(),
+            linked_agent_id: BG_DISPLAY
+                .state()
+                .read()
+                .iter()
+                .find(|e| e.id == t.task_id)
+                .and_then(|e| e.linked_agent_id.clone()),
             agent_type: t.kind.clone(),
             desc: t.summary.clone(),
             is_active: true,
@@ -586,13 +634,21 @@ pub(super) fn handle_bg_task_snapshot(state: &mut BridgeState, tasks: &[BgTaskEn
         })
         .collect();
     BG_DISPLAY.state().write().clone_from(&entries);
+    for t in tasks {
+        upsert_identity_from_started(&t.task_id, &t.kind, &t.summary, t.pid);
+        seed_live_from_started(&t.task_id, &t.kind, &t.summary, t.pid);
+    }
+    reconcile_live_snapshot(&tasks.iter().map(|t| t.task_id.clone()).collect::<Vec<_>>());
     super::render::push_acp_state(state);
 }
 
 pub(super) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEntry) {
     BG_TASKS.state().write().push(entry.clone());
+    upsert_identity_from_started(&entry.task_id, &entry.kind, &entry.summary, entry.pid);
+    seed_live_from_started(&entry.task_id, &entry.kind, &entry.summary, entry.pid);
     let display_entry = crate::kit::atoms::BgDisplayEntry {
         id: entry.task_id.clone(),
+        linked_agent_id: None,
         agent_type: entry.kind.clone(),
         desc: entry.summary.clone(),
         is_active: true,
@@ -605,8 +661,14 @@ pub(super) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
     BG_DISPLAY.state().write().push(display_entry);
 }
 
-pub(super) fn handle_bg_task_completed(task_id: &str, success: bool, duration_ms: u64) {
+pub(super) fn handle_bg_task_completed(
+    task_id: &str,
+    success: bool,
+    duration_ms: u64,
+    output_preview: Option<String>,
+) {
     BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
+    mark_task_completed(task_id, success, duration_ms, output_preview);
     // 标记后台显示条目为完成（保留 3s 后自动清除）
     let now = Instant::now();
     if let Some(entry) = BG_DISPLAY
@@ -645,8 +707,9 @@ pub(super) fn handle_bg_task_completed(task_id: &str, success: bool, duration_ms
         });
 }
 
-pub(super) fn handle_bg_task_cancelled(task_id: &str) {
+pub(super) fn handle_bg_task_cancelled(task_id: &str, reason: &str) {
     BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
+    mark_task_cancelled(task_id, reason);
     // 标记后台显示条目为失败（3s 倒计时）
     let now = Instant::now();
     if let Some(entry) = BG_DISPLAY

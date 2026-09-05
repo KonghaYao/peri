@@ -529,6 +529,52 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
     }
 }
 
+#[test]
+fn test_auto_compact_completed_injects_detailed_system_note() {
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::PromptRunning,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: "test-session".to_string(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+        pending_cache_usage: None,
+    };
+
+    super::super::compact::handle_compact_completed(&mut state, "", "auto", "micro", 7, 2048, 2, 1);
+
+    let notes: Vec<_> = state
+        .current_turn
+        .view_models()
+        .iter()
+        .filter_map(|unit| match unit {
+            crate::kit::tui_render_unit::TuiRenderUnit::TuiSystemNote(note) => Some(&note.text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notes.len(), 1);
+    for expected in ["7", "2048", "2", "1"] {
+        assert!(
+            notes[0].contains(expected),
+            "compact note 缺少 {expected}: {}",
+            notes[0]
+        );
+    }
+    assert!(!state.compact_just_completed);
+}
+
 /// C2: compact 完成后 TurnDone 触发 session/load 重放。
 ///
 /// 场景 A：命令 compact（Immediate）后无流事件 → 触发 THREAD_LOAD_TX。
@@ -644,6 +690,11 @@ async fn test_compact_turndone_reload() {
             summary: "compact summary".into(),
             messages_json: String::new(),
             trigger: "auto".into(),
+            strategy: "micro".into(),
+            affected_count: 2,
+            estimated_tokens_saved: 512,
+            files: vec![],
+            skills: vec![],
         },
     );
     assert!(
@@ -704,6 +755,11 @@ async fn test_compact_turndone_reload() {
             summary: "manual compact summary".into(),
             messages_json: String::new(),
             trigger: "manual".into(),
+            strategy: "full".into(),
+            affected_count: 4,
+            estimated_tokens_saved: 1024,
+            files: vec![],
+            skills: vec![],
         },
     );
     assert!(

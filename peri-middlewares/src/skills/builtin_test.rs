@@ -39,25 +39,6 @@ fn test_builtin_skills_frontmatter_valid() {
 }
 
 #[test]
-fn test_self_build_skill_registered_and_scoped() {
-    let skill = BUILTIN_SKILLS
-        .iter()
-        .find(|skill| skill.name == "self-build")
-        .expect("BUILTIN_SKILLS 应含 self-build");
-
-    for marker in ["MCP", "MCPP", "Bun", "Node.js", "MetaHarness", ".mcp.json"] {
-        assert!(
-            skill.content.contains(marker),
-            "self-build 应覆盖 {marker}"
-        );
-    }
-    assert!(
-        !skill.content.to_ascii_lowercase().contains("hooks"),
-        "self-build 不应教授或推荐 hooks"
-    );
-}
-
-#[test]
 fn test_ultra_adlc_skill_registered_and_discriminating() {
     let skill = BUILTIN_SKILLS
         .iter()
@@ -100,7 +81,7 @@ fn test_ultra_adlc_skill_encodes_peri_workflow_contract() {
         .content;
 
     for marker in [
-        "./peri/adlc/",
+        "./.peri/adlc/",
         "intent.md",
         "execution.md",
         "evidence.md",
@@ -116,9 +97,28 @@ fn test_ultra_adlc_skill_encodes_peri_workflow_contract() {
         "Date.now()",
         "new Date()",
         "Math.random()",
+        "phase(name) only marks a stage",
+        "delivery_status",
+        "acceptance_status: unknown",
+        "delivery is `unknown`, not blocked",
+        "pre-existing unrelated",
+        "checks only paths whose status changed during the run",
+        "infer the culprit from the final dirty set",
+        "path_allowlist",
+        "git status --porcelain",
+        "at most 4",
     ] {
         assert!(content.contains(marker), "ultra-adlc 应锁定 {marker}");
     }
+
+    assert!(
+        !content.contains("./peri/adlc/"),
+        "ultra-adlc 不得再锁定已删除路径 ./peri/adlc/"
+    );
+    assert!(
+        !content.contains("at most three"),
+        "ultra-adlc 提问上限应与 AskUserQuestion 对齐为 at most 4"
+    );
 
     for profile in ["`fable`", "`opus`", "`sonnet`", "`haiku`"] {
         assert!(
@@ -151,6 +151,34 @@ fn test_ultra_adlc_skill_guards_complete_delivery_and_audit() {
     ] {
         assert!(content.contains(marker), "ultra-adlc 应锁定 {marker}");
     }
+}
+
+#[test]
+fn test_ultra_task_skill_registered_and_discoverable() {
+    let skill = BUILTIN_SKILLS
+        .iter()
+        .find(|skill| skill.name == "ultra-task")
+        .expect("BUILTIN_SKILLS 应含 ultra-task");
+    let (name, aliases, description) =
+        parse_builtin_frontmatter(skill.content).expect("ultra-task frontmatter 应有效");
+
+    assert_eq!(name, "ultra-task");
+    assert!(aliases.is_empty());
+    assert!(description.contains("task supervision"));
+    assert!(description.contains("subagents"));
+    assert!(skill.content.contains("userInvocable: true"));
+    assert!(skill.content.contains("argumentHint:"));
+
+    let skills = scan_skill_roots(&[SkillRoot {
+        path: PathBuf::new(),
+        source: SkillSource::Builtin,
+        plugin_name: None,
+    }]);
+    let summary = SkillsMiddleware::build_summary(&skills);
+    assert!(
+        summary.contains("**ultra-task** [builtin]"),
+        "builtin 摘要应暴露 ultra-task，实际: {summary}"
+    );
 }
 
 #[test]

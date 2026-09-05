@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::kit::atoms::BG_AGENT_IDS;
+use crate::kit::bg_task_live::{append_bg_reasoning_chunk, append_bg_text_chunk};
 use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk};
 
 /// 路由失败的 chunk 是否属于仍在运行的 bg subagent（BG_AGENT_IDS 已注册）。
@@ -43,6 +44,9 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
             .agent_id
             .as_deref()
             .is_some_and(|id| BG_AGENT_IDS.state().read().contains(id));
+        if is_bg && let Some(agent_id) = tc.agent_id.as_deref() {
+            append_bg_text_chunk(agent_id, tc);
+        }
         if !is_bg {
             state.phase = SessionPhase::PromptRunning;
         }
@@ -56,11 +60,12 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
         .as_deref()
         .is_some_and(is_bg_agent_without_group)
     {
-        // bg sub-agent：组已被 turn 边界清除（TurnSuspended/TurnInterrupted），
-        // 与 tool.rs 同口径——bg 文本不进主消息区，跳过。phase 不得被拉回
-        // PromptRunning（Issue 2026-08-12：主 agent 已空闲时 bg 流式事件
-        // 不得重新点亮 loading）；push_acp_state 由调用方统一完成。
+        if let Some(agent_id) = tc.agent_id.as_deref() {
+            append_bg_text_chunk(agent_id, tc);
+        }
         state.variant = 1;
+        super::render::push_acp_state(state);
+        return;
     } else {
         state
             .current_turn
@@ -83,7 +88,7 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
             super::StreamingMode::None => false,
         };
         if should_push {
-            super::render::push_view_models(state);
+            // bridge-local scheduler consumes the publication intent after canonical ingest.
         }
     }
     super::render::push_acp_state(state);
@@ -104,6 +109,9 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
             .agent_id
             .as_deref()
             .is_some_and(|id| BG_AGENT_IDS.state().read().contains(id));
+        if is_bg && let Some(agent_id) = rc.agent_id.as_deref() {
+            append_bg_reasoning_chunk(agent_id, rc);
+        }
         if !is_bg {
             state.phase = SessionPhase::PromptRunning;
         }
@@ -116,10 +124,12 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
         .as_deref()
         .is_some_and(is_bg_agent_without_group)
     {
-        // bg sub-agent：组已被 turn 边界清除——推理不进主消息区，跳过（同
-        // handle_text_chunk 口径，防外溢到主 agent 推理块）。phase 不得被
-        // 拉回 PromptRunning（Issue 2026-08-12）。
+        if let Some(agent_id) = rc.agent_id.as_deref() {
+            append_bg_reasoning_chunk(agent_id, rc);
+        }
         state.variant = 1;
+        super::render::push_acp_state(state);
+        return;
     } else {
         state
             .current_turn
@@ -148,7 +158,7 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
             super::StreamingMode::None => false,
         };
         if should_push {
-            super::render::push_view_models(state);
+            // bridge-local scheduler consumes the publication intent after canonical ingest.
         }
     }
     super::render::push_acp_state(state);

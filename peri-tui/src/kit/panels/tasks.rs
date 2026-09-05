@@ -413,3 +413,20 @@ fn close_panel() {
     // I19-A: 弹栈而非清空整个栈，避免同时打开多个不同组面板时关闭一个会全部关闭
     crate::kit::panel_registry::close_active_panel();
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_tasks_enter_still_cancels_not_open_detail() {
+        let src = include_str!("tasks.rs");
+        let main_src = src.split("#[cfg(test)]").next().expect("tasks module body");
+        assert!(
+            main_src.contains("cancel_bg_task") || main_src.contains("kill_workflow_run"),
+            "Tasks Enter 应取消 bg 任务"
+        );
+        assert!(
+            !main_src.contains("open_panel"),
+            "Tasks 面板 Enter 不得打开 SubAgent/Shell 详情抽屉"
+        );
+    }
+}

@@ -8,4 +8,23 @@ mod filesystem;
 mod sqlite_store;
 
 pub use filesystem::FilesystemThreadStore;
-pub use sqlite_store::SqliteThreadStore;
+pub use sqlite_store::{ReadOnlyStoreErrorKind, ReadOnlyThreadStoreError, SqliteThreadStore};
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use peri_acp_types::store::ThreadStore;
+
+/// 只读打开显式路径或默认路径下已存在的 thread database。
+pub async fn open_thread_store_read_only(
+    db_path: Option<PathBuf>,
+) -> Result<Arc<dyn ThreadStore>, ReadOnlyThreadStoreError> {
+    let path = match db_path {
+        Some(path) => path,
+        None => dirs_next::home_dir()
+            .map(|home| home.join(".peri").join("threads").join("threads.db"))
+            .ok_or(ReadOnlyThreadStoreError::Internal)?,
+    };
+    let store = SqliteThreadStore::open_existing_read_only(path).await?;
+    Ok(Arc::new(store))
+}

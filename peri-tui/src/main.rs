@@ -1,13 +1,15 @@
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod cli_args;
+mod cli_meta;
 mod cli_plugin;
 mod cli_print;
 
@@ -110,6 +112,11 @@ enum Commands {
         #[arg(short = 'g', long)]
         agent: Option<String>,
     },
+    /// 查询 Peri 持久化 metadata
+    Meta {
+        #[command(subcommand)]
+        action: MetaAction,
+    },
     /// 更新：从 GitHub 下载并安装最新版本
     Update,
     /// 配置同步：在设备间同步 settings/skills/mcp/plugins
@@ -140,6 +147,18 @@ enum Commands {
         /// 监听端口（默认 0 = 随机分配）
         #[arg(long, default_value_t = 0, env = "PORT")]
         port: u16,
+    },
+}
+
+#[derive(Subcommand)]
+enum MetaAction {
+    /// 查询单条持久化 session metadata
+    Session {
+        /// Session ID（任意合法 UUID）
+        session_id: String,
+        /// JSON 输出
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -404,11 +423,201 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
         .map_err(Into::into)
 }
 
+fn validate_cli(cli: &Cli) -> std::result::Result<(), &'static str> {
+    if cli.print.is_some() && cli.command.is_some() {
+        return Err("--print cannot be used with a subcommand");
+    }
+    if matches!(cli.command, Some(Commands::Meta { .. }))
+        && (cli.approve
+            || cli.print.is_some()
+            || cli.output_format.is_some()
+            || cli.max_turns.is_some()
+            || cli.bare
+            || cli.permission_mode.is_some()
+            || cli.skip_permissions
+            || cli.model.is_some()
+            || cli.effort.is_some()
+            || cli.cont
+            || cli.resume.is_some()
+            || cli.session_id.is_some()
+            || cli.session_name.is_some()
+            || cli.no_session_persistence
+            || cli.allowed_tools.is_some()
+            || cli.disallowed_tools.is_some()
+            || cli.settings.is_some()
+            || cli.config_file.is_some())
+    {
+        return Err("meta only accepts --db-path and session --json");
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum TopLevelOptionShape {
+    Flag,
+    RequiredValue,
+    OptionalValue,
+}
+
+fn top_level_option_shape(arg: &OsStr) -> Option<TopLevelOptionShape> {
+    use clap::ArgAction;
+
+    let raw = arg.to_str()?;
+    let name = raw.split_once('=').map_or(raw, |(name, _)| name);
+    let command = Cli::command();
+    command.get_arguments().find_map(|declared| {
+        let long_match = declared
+            .get_long()
+            .is_some_and(|long| name == format!("--{long}"))
+            || declared.get_all_aliases().is_some_and(|aliases| {
+                aliases
+                    .into_iter()
+                    .any(|alias| name == format!("--{alias}"))
+            });
+        let short_match = declared
+            .get_short()
+            .is_some_and(|short| name == format!("-{short}"))
+            || declared.get_all_short_aliases().is_some_and(|aliases| {
+                aliases.into_iter().any(|alias| name == format!("-{alias}"))
+            });
+        if !long_match && !short_match {
+            return None;
+        }
+        if raw.contains('=') {
+            return Some(TopLevelOptionShape::Flag);
+        }
+        if matches!(
+            declared.get_action(),
+            ArgAction::SetTrue
+                | ArgAction::SetFalse
+                | ArgAction::Count
+                | ArgAction::Help
+                | ArgAction::HelpShort
+                | ArgAction::HelpLong
+                | ArgAction::Version
+        ) {
+            return Some(TopLevelOptionShape::Flag);
+        }
+        match declared.get_num_args() {
+            Some(range) if range.min_values() == 0 => Some(TopLevelOptionShape::OptionalValue),
+            _ => Some(TopLevelOptionShape::RequiredValue),
+        }
+    })
+}
+
+/// 按已接受的顶层 grammar走到 subcommand槽位。已知 option严格消费 `Cli` 声明的值；
+/// malformed option-like token只消费自身，使后续明确的 `meta` shape保持可见，同时
+/// 不把任意 option value或普通 positional中的 `meta`误判为 command。
+fn malformed_argv_requests_meta(args: &[OsString]) -> bool {
+    let mut index = 1;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "meta" {
+            return true;
+        }
+        if arg == "--" {
+            return args.get(index + 1).is_some_and(|next| next == "meta");
+        }
+        if ["-h", "--help", "-V", "--version"]
+            .iter()
+            .any(|terminal| arg == terminal)
+        {
+            return false;
+        }
+
+        match top_level_option_shape(arg) {
+            Some(TopLevelOptionShape::Flag) => index += 1,
+            Some(TopLevelOptionShape::RequiredValue) => {
+                index += 1;
+                if args
+                    .get(index)
+                    .is_some_and(|value| !value.to_string_lossy().starts_with('-'))
+                {
+                    index += 1;
+                }
+            }
+            Some(TopLevelOptionShape::OptionalValue) => {
+                index += 1;
+                if args
+                    .get(index)
+                    .is_some_and(|value| !value.to_string_lossy().starts_with('-'))
+                {
+                    if args[index] == "meta"
+                        && args.get(index + 1).is_some_and(|next| next == "session")
+                    {
+                        return true;
+                    }
+                    index += 1;
+                }
+            }
+            None if arg.to_string_lossy().starts_with('-') => index += 1,
+            None => return false,
+        }
+    }
+    false
+}
+
+fn argv_requests_meta(args: &[OsString]) -> bool {
+    match Cli::try_parse_from(args) {
+        Ok(cli) => matches!(cli.command, Some(Commands::Meta { .. })),
+        Err(_) => malformed_argv_requests_meta(args),
+    }
+}
+
+fn argv_requests_meta_json(args: &[OsString]) -> bool {
+    args.iter().any(|arg| arg == OsStr::new("--json"))
+}
+
+fn emit_meta_outcome(outcome: cli_meta::MetaCommandOutcome) -> Result<()> {
+    if let Some(output) = outcome.stdout {
+        print!("{output}");
+    }
+    if let Some(error) = outcome.stderr {
+        eprint!("{error}");
+    }
+    if outcome.exit_code != 0 {
+        std::process::exit(i32::from(outcome.exit_code));
+    }
+    Ok(())
+}
+
+fn try_run_meta_before_configuration(args: &[OsString]) -> Option<Result<()>> {
+    if !argv_requests_meta(args) {
+        return None;
+    }
+    let json = argv_requests_meta_json(args);
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(_) => return Some(emit_meta_outcome(cli_meta::invalid_argument_outcome(json))),
+    };
+    if validate_cli(&cli).is_err() {
+        return Some(emit_meta_outcome(cli_meta::invalid_argument_outcome(json)));
+    }
+    let Some(Commands::Meta { action }) = cli.command else {
+        return Some(emit_meta_outcome(cli_meta::invalid_argument_outcome(json)));
+    };
+    let runtime = match build_runtime() {
+        Ok(runtime) => runtime,
+        Err(_) => return Some(emit_meta_outcome(cli_meta::internal_error_outcome(json))),
+    };
+    let outcome = match action {
+        MetaAction::Session { session_id, json } => {
+            runtime.block_on(cli_meta::run_meta_session(cli.db_path, session_id, json))
+        }
+    };
+    Some(emit_meta_outcome(outcome))
+}
+
 // ─── 入口 ──────────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
-    // Set jemalloc MALLOC_CONF env vars BEFORE any allocation.
-    // Must be the very first line — jemalloc reads these during init.
+    let args: Vec<OsString> = std::env::args_os().collect();
+    if argv_requests_meta(&args) {
+        return try_run_meta_before_configuration(&args)
+            .expect("Meta argv detection and dispatch must agree");
+    }
+
+    // Set jemalloc MALLOC_CONF env vars before ordinary runtime startup.
     peri_tui::alloc_config::init_alloc_conf();
 
     // 预扫描 argv 重定向全局配置路径，必须在 env 注入之前（gate 决策 Option A）：
@@ -426,6 +635,11 @@ fn main() -> Result<()> {
     inject_env_from_claude_settings(); // ~/.claude/settings.json
 
     let cli = Cli::parse();
+    if let Err(message) = validate_cli(&cli) {
+        Cli::command()
+            .error(clap::error::ErrorKind::ArgumentConflict, message)
+            .exit();
+    }
 
     // 以 clap 解析结果为准（幂等；prescan 与 clap 同源 argv，二者一致）
     peri_tui::config::set_global_config_path(cli.config_file.clone());
@@ -492,6 +706,7 @@ fn main() -> Result<()> {
                 .await
             })
         }
+        Some(Commands::Meta { .. }) => unreachable!("Meta 在配置读取前完成 dispatch"),
         Some(Commands::Update) => {
             // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
             let rt = build_runtime()?;

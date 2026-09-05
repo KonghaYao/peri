@@ -203,9 +203,8 @@ impl LangfuseBridge {
                 full_escalation_reason,
                 outcome,
             } => {
-                // [P2-4] 本分支来自 ExecutorEvent::CompactCompleted 收敛映射时，
-                // files_count/estimated_tokens_* 等数字字段为占位 0（未知/不可用，
-                // 见上方映射注释），勿将本日志中的 0 读作真实观测。
+                // 协议化 CompactCompleted 现携带真实 files/skills/affected/token-saved
+                // 计数；estimated_tokens_before/after 等未透传字段仍以 0 表示未知。
                 tracing::info!(
                     estimated_tokens_saved,
                     estimated_tokens_before,

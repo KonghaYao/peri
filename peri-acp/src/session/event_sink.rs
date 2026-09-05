@@ -226,10 +226,16 @@ impl EventSink for TransportEventSink {
                     is_error: *is_error,
                     instance_id: instance_id.clone(),
                 }),
+                ExecutorEvent::CompactStarted { .. } => Some(AcpEvent::CompactStarted),
                 ExecutorEvent::CompactCompleted {
                     summary,
                     messages,
                     trigger,
+                    strategy,
+                    affected_count,
+                    estimated_tokens_saved,
+                    files,
+                    skills,
                 } => {
                     let messages_json = match serde_json::to_string(messages) {
                         Ok(json) => json,
@@ -238,11 +244,21 @@ impl EventSink for TransportEventSink {
                             return;
                         }
                     };
-                    let trigger_str = to_serde_str(trigger);
                     Some(AcpEvent::CompactCompleted {
                         summary: summary.clone(),
                         messages_json,
-                        trigger: trigger_str,
+                        trigger: to_serde_str(trigger),
+                        strategy: to_serde_str(strategy),
+                        affected_count: *affected_count,
+                        estimated_tokens_saved: *estimated_tokens_saved,
+                        files: files
+                            .iter()
+                            .map(|file| crate::event::CompactFileInfoDto {
+                                path: file.path.clone(),
+                                lines: file.lines,
+                            })
+                            .collect(),
+                        skills: skills.clone(),
                     })
                 }
                 ExecutorEvent::AgentExecutionFailed { message } => {
@@ -322,6 +338,23 @@ impl EventSink for TransportEventSink {
                     consecutive_failures: *consecutive_failures,
                     budget_pct: *budget_pct,
                     context_total_tokens: *context_total_tokens,
+                }),
+                ExecutorEvent::GoalSnapshot {
+                    objective,
+                    status,
+                    token_budget,
+                    tokens_used,
+                    time_used_seconds,
+                    continuation_count,
+                    blocked_reason,
+                } => Some(AcpEvent::GoalSnapshot {
+                    objective: objective.clone(),
+                    status: *status,
+                    token_budget: *token_budget,
+                    tokens_used: *tokens_used,
+                    time_used_seconds: *time_used_seconds,
+                    continuation_count: *continuation_count,
+                    blocked_reason: blocked_reason.clone(),
                 }),
                 // TurnCommitted：messages 载荷（全量消息快照）在本链路无消费者——
                 // TUI 仅用 steps 做 ReAct 迭代边界刷新检查点（acp_events/mod.rs:331
@@ -549,6 +582,117 @@ mod tests {
             id: MessageId::new(),
             content: MessageContent::Text("hi".to_string()),
         }
+    }
+
+    fn compact_test_sink() -> (Arc<MockTransport>, TransportEventSink) {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                agent_event: true,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+        (transport, sink)
+    }
+
+    #[tokio::test]
+    async fn push_event_forwards_compact_started() {
+        let (transport, sink) = compact_test_sink();
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::CompactStarted {
+                turn_id: "turn-1".into(),
+                agent_id: "agent-1".into(),
+                step: 3,
+                strategy: peri_acp_types::event::CompactStrategy::Micro,
+                trigger: peri_acp_types::event::CompactTrigger::Auto,
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        let event_json = notifications[0].1["event_json"].as_str().unwrap();
+        let event: AcpEvent = serde_json::from_str(event_json).unwrap();
+        assert!(matches!(event, AcpEvent::CompactStarted));
+    }
+
+    #[tokio::test]
+    async fn push_event_forwards_compact_completed_details() {
+        let (transport, sink) = compact_test_sink();
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::CompactCompleted {
+                summary: String::new(),
+                messages: vec![],
+                trigger: peri_acp_types::event::CompactTrigger::Auto,
+                strategy: peri_acp_types::event::CompactStrategy::Micro,
+                affected_count: 7,
+                estimated_tokens_saved: 2048,
+                files: vec![],
+                skills: vec!["tdd".into()],
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        let event_json = notifications[0].1["event_json"].as_str().unwrap();
+        let event: AcpEvent = serde_json::from_str(event_json).unwrap();
+        assert!(matches!(
+            event,
+            AcpEvent::CompactCompleted {
+                strategy,
+                affected_count: 7,
+                estimated_tokens_saved: 2048,
+                skills,
+                ..
+            } if strategy == "micro" && skills == ["tdd"]
+        ));
+    }
+
+    #[tokio::test]
+    async fn push_event_forwards_goal_snapshot_details() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                agent_event: true,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::GoalSnapshot {
+                objective: Some("ship goal panel".into()),
+                status: Some(peri_acp_types::goal::GoalStatus::Active),
+                token_budget: None,
+                tokens_used: 0,
+                time_used_seconds: 0,
+                continuation_count: 3,
+                blocked_reason: None,
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        let event_json = notifications[0].1["event_json"].as_str().unwrap();
+        let event: AcpEvent = serde_json::from_str(event_json).unwrap();
+        assert!(matches!(
+            event,
+            AcpEvent::GoalSnapshot {
+                objective,
+                status: Some(peri_acp_types::goal::GoalStatus::Active),
+                continuation_count: 3,
+                ..
+            } if objective.as_deref() == Some("ship goal panel")
+        ));
     }
 
     /// 回归测试：RewindCompleted 必须经 peri/agent_event 通道送达 TUI。

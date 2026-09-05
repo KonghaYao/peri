@@ -26,6 +26,8 @@ pub enum TuiNoteLevel {
 /// Nested `view_models` render inside a collapsible container.
 #[derive(Debug, Clone)]
 pub struct TuiSubAgentGroup {
+    /// TUI-local occurrence identity; unlike agent_id this changes on resume.
+    pub instance_id: String,
     pub agent_id: String,
     pub agent_name: String,
     /// Nested view models produced by the sub-agent.
@@ -58,7 +60,8 @@ impl TuiSubAgentGroup {
         for vm in self.view_models.iter() {
             child_hash_total = tui_hash_combine(child_hash_total, vm.content_hash());
         }
-        let mut h = tui_hash_combine(0, tui_hash_str(&self.agent_id));
+        let mut h = tui_hash_combine(0, tui_hash_str(&self.instance_id));
+        h = tui_hash_combine(h, tui_hash_str(&self.agent_id));
         h = tui_hash_combine(h, tui_hash_str(&self.agent_name));
         h = tui_hash_combine(h, self.view_models.len() as u64);
         h = tui_hash_combine(h, 0); // collapsed 恒为 false（详情面板保持展开；消息区折叠由 fold 驱动）
@@ -75,7 +78,7 @@ impl TuiSubAgentGroup {
     }
 }
 
-tui_impl_partial_eq!(TuiSubAgentGroup: agent_id, agent_name, view_models, collapsed, is_running, is_error, error_reason, fold, user_modified);
+tui_impl_partial_eq!(TuiSubAgentGroup: instance_id, agent_id, agent_name, view_models, collapsed, is_running, is_error, error_reason, fold, user_modified);
 
 /// Generic collapsible group -- e.g. batched tool calls.
 #[derive(Debug, Clone)]
@@ -83,8 +86,8 @@ pub struct TuiCollapsedGroup {
     pub title: String,
     /// Number of items hidden when collapsed.
     pub count: u32,
-    /// 组后**连续相邻**的 error 工具数（D2：error 不入组、不删除、保持展开，
-    /// 标题追加 `· N failed`）。由 `group_successful_tools` 从 run 结束位置
+    /// 组后**连续相邻**的 error 工具数（D2：error 不入组、不删除，独立失败
+    /// 状态行保持可见，标题追加 `· N failed`）。由 `group_successful_tools` 从 run 结束位置
     /// 向后扫描连续相邻 error `TuiToolCard` 计入。
     pub failed_count: u32,
     /// The view models inside the group (visible when expanded).

@@ -237,6 +237,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         ExecutorEvent::StateSnapshot(_)
         | ExecutorEvent::TurnCommitted { .. }
         | ExecutorEvent::StateSnapshotMeta { .. }
+        | ExecutorEvent::GoalSnapshot { .. }
         | ExecutorEvent::TurnSuspended { .. }
         | ExecutorEvent::LlmCallStart { .. }
         | ExecutorEvent::LlmRequestPayload { .. }

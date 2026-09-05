@@ -41,6 +41,26 @@ fn test_append_reasoning_sets_active() {
 }
 
 #[test]
+#[serial_test::serial]
+fn test_projection_counter_is_deterministic() {
+    crate::kit::acp_bridge::reset_perf_counters();
+    let mut ct = CurrentTurn::new();
+    ct.append_text("xxxx", None);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().projections, 0);
+    let _ = ct.view_models();
+    let first = crate::kit::acp_bridge::perf_counters();
+
+    crate::kit::acp_bridge::reset_perf_counters();
+    let mut repeated = CurrentTurn::new();
+    repeated.append_text("xxxx", None);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().projections, 0);
+    let _ = repeated.view_models();
+    let second = crate::kit::acp_bridge::perf_counters();
+
+    assert_eq!(first, second);
+}
+
+#[test]
 fn test_start_then_end_tool() {
     let mut ct = CurrentTurn::new();
     ct.start_tool(ToolCardAccumulator::new(
@@ -210,6 +230,80 @@ fn test_current_turn_subagent_streaming_builds_nested_group() {
         }
         other => panic!("expected TuiSubAgentGroup, got {other:?}"),
     }
+}
+
+/// [回归测试] 同一个 child thread 在当前主 turn 内恢复时会复用 agent_id。
+/// 已停止的旧分组必须保持封闭，新一轮 SubagentStarted 应创建并关联到新的
+/// Agent ToolCard；恢复后的事件只能进入新分组。
+#[test]
+fn test_current_turn_resumed_subagent_routes_to_new_agent_group() {
+    let mut ct = CurrentTurn::new();
+    ct.start_tool(ToolCardAccumulator::new(
+        "agent-call-1".into(),
+        "Agent".into(),
+        "start coder".into(),
+    ));
+    ct.start_subagent("child-1".into(), "coder".into());
+    assert!(ct.append_subagent_text("child-1", "before interruption"));
+    assert!(ct.start_subagent_tool(
+        "child-1",
+        ToolCardAccumulator::new("child-tool-1".into(), "Read".into(), "old.rs".into()),
+    ));
+    assert!(ct.end_subagent_tool("child-1", "child-tool-1", "old output".into(), false));
+    ct.stop_subagent("child-1", true, "model stream interrupted");
+    assert!(ct.end_tool("agent-call-1", "child_thread_id: child-1".into(), true));
+
+    ct.start_tool(ToolCardAccumulator::new(
+        "agent-call-2".into(),
+        "Agent".into(),
+        "continue child-1".into(),
+    ));
+    ct.start_subagent("child-1".into(), "coder".into());
+    assert!(ct.append_subagent_text("child-1", "after resume"));
+    assert!(ct.append_subagent_reasoning("child-1", "resumed reasoning"));
+    assert!(ct.start_subagent_tool(
+        "child-1",
+        ToolCardAccumulator::new("child-tool-2".into(), "Shell".into(), "cargo test".into()),
+    ));
+    assert!(ct.end_subagent_tool("child-1", "child-tool-2", "passed".into(), false));
+    ct.stop_subagent("child-1", false, "completed");
+
+    assert_ne!(
+        ct.subagents[0].instance_id, ct.subagents[1].instance_id,
+        "恢复 occurrence 必须获得新的 TUI instance_id"
+    );
+    assert_eq!(ct.subagents[0].agent_id, ct.subagents[1].agent_id);
+    assert_eq!(ct.subagents.len(), 2, "恢复应创建第二个可见分组");
+    assert_eq!(
+        ct.subagents[0].child_turn.text, "before interruption",
+        "旧失败分组不得接收恢复后的消息"
+    );
+    assert!(!ct.subagents[0].is_running);
+    assert_eq!(ct.subagents[1].child_turn.text, "after resume");
+    assert_eq!(ct.subagents[1].child_turn.reasoning, "resumed reasoning");
+    assert!(!ct.subagents[1].is_running);
+    assert!(!ct.subagents[1].is_error);
+    assert_eq!(ct.subagents[0].child_turn.tool_cards.len(), 1);
+    assert_eq!(
+        ct.subagents[0].child_turn.tool_cards[0].tool_id,
+        "child-tool-1"
+    );
+    assert_eq!(ct.subagents[1].child_turn.tool_cards.len(), 1);
+    assert_eq!(
+        ct.subagents[1].child_turn.tool_cards[0].tool_id,
+        "child-tool-2"
+    );
+    assert!(
+        ct.tool_cards.iter().all(|tool| tool.claimed_by_subagent),
+        "原始与恢复 Agent 调用都应关联各自的 Subagent 分组"
+    );
+
+    let vms = ct.view_models().clone();
+    assert_eq!(vms.len(), 4, "应按 Agent/分组/Agent/分组交错显示");
+    assert!(matches!(vms[0], TuiRenderUnit::TuiToolCard(_)));
+    assert!(matches!(vms[1], TuiRenderUnit::TuiSubAgentGroup(_)));
+    assert!(matches!(vms[2], TuiRenderUnit::TuiToolCard(_)));
+    assert!(matches!(vms[3], TuiRenderUnit::TuiSubAgentGroup(_)));
 }
 
 #[test]

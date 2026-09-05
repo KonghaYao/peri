@@ -26,10 +26,10 @@ use crate::i18n;
 use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
 use crate::kit::panels::{
     agent::AgentPanel, ask_user::AskUserPanel, betas::BetasPanel, config::ConfigPanel,
-    cron::CronPanel, hooks::HooksPanel, login::LoginPanel, mcp::McpPanel, memory::MemoryPanel,
-    model::ModelPanel, plugin::PluginPanel, status::StatusPanel,
-    subagent_detail::SubAgentDetailPanel, tasks::TasksPanel, theme::ThemePanel,
-    thread_browser::ThreadBrowserPanel, workflow::WorkflowPanel,
+    cron::CronPanel, goal::GoalPanel, hooks::HooksPanel, login::LoginPanel, mcp::McpPanel,
+    memory::MemoryPanel, model::ModelPanel, plugin::PluginPanel, shell_detail::ShellDetailPanel,
+    status::StatusPanel, subagent_detail::SubAgentDetailPanel, tasks::TasksPanel,
+    theme::ThemePanel, thread_browser::ThreadBrowserPanel, workflow::WorkflowPanel,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +152,15 @@ fn render_subagent_detail_panel() -> AnyElement<'static> {
     element!(SubAgentDetailPanel()).into()
 }
 
-/// 所有 14 面板的元数据。
+fn render_shell_detail_panel() -> AnyElement<'static> {
+    element!(ShellDetailPanel()).into()
+}
+
+fn render_goal_panel() -> AnyElement<'static> {
+    element!(GoalPanel()).into()
+}
+
+/// 所有面板的元数据。
 ///
 /// 快捷键分配（避开 Ctrl+C 全局 quit）：
 /// - Ctrl+M = Model（替代 legacy cycle model）
@@ -374,6 +382,30 @@ pub const PANELS: &[PanelMeta] = &[
         layout: PanelLayout::fixed(90, 20),
         render: render_subagent_detail_panel,
     },
+    PanelMeta {
+        kind: PanelKind::ShellDetail,
+        title: "Shell Detail",
+        shortcut_letter: '\0',
+        slash_command: "",
+        description: "Background shell task detail",
+        priority: 17,
+        mutex_group: MutexGroup::Tools,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(90, 20),
+        render: render_shell_detail_panel,
+    },
+    PanelMeta {
+        kind: PanelKind::Goal,
+        title: "Goal",
+        shortcut_letter: '\0',
+        slash_command: "",
+        description: "Current goal detail",
+        priority: 18,
+        mutex_group: MutexGroup::Info,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(70, 18),
+        render: render_goal_panel,
+    },
 ];
 
 pub fn panel_title(kind: PanelKind) -> String {
@@ -395,6 +427,8 @@ pub fn panel_title(kind: PanelKind) -> String {
         PanelKind::AskUser => "panel-title-ask-user",
         PanelKind::Theme => "panel-title-theme",
         PanelKind::SubAgentDetail => "panel-title-subagent-detail",
+        PanelKind::ShellDetail => "panel-title-shell-detail",
+        PanelKind::Goal => "panel-title-goal",
     };
     format!(" {} ", i18n::tr(key))
 }
@@ -418,6 +452,8 @@ pub fn panel_description(kind: PanelKind) -> String {
         PanelKind::AskUser => "panel-desc-ask-user",
         PanelKind::Theme => "panel-desc-theme",
         PanelKind::SubAgentDetail => "panel-desc-subagent-detail",
+        PanelKind::ShellDetail => "panel-desc-shell-detail",
+        PanelKind::Goal => "panel-desc-goal",
     };
     i18n::tr(key)
 }

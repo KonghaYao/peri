@@ -6,7 +6,7 @@
  * - glob-grep-match-count:      Glob/Grep 头行 "— N matches"
  * - edit-write-diff-summary:    Write/Edit 头行 diff 计数（· +N · -N）
  * - edit-diff-display:          同上（精确 turn 定位，保留更严格版本）
- * - tool-error-display:         Read 不存在文件 → 错误态强制展开、error 色
+ * - tool-error-display:         Read 不存在文件 → 错误态默认折叠、显式展开详情
  * - tool-error-no-suffix:       错误态头行无 "— N lines" 后缀
  *
  * 一次会话 4 个顺序阶段。跨阶段文本（Read/Write 等）会留在历史中，
@@ -151,18 +151,42 @@ describe("tool-card: header suffix + error display", () => {
       );
       const editCapture = await takePeriSnapshot(tester, "header-suffix-edit");
 
-      // ── 阶段 4：Read 不存在文件 → 错误态强制展开 + 头行无后缀 ──
+      // ── 阶段 4：Read 不存在文件 → 错误态默认折叠 + 头行无后缀 ──
       await sendPrompt(
         tester,
         "请使用 Read 工具读取文件 /nonexistent/peri_e2e_test_file_12345.txt",
       );
       await waitTurnCompleted(tester, STAGE.error, 120_000);
-      const errorCapture = await takePeriSnapshot(tester, "header-suffix-error");
+      const errorCollapsedCapture = await takePeriSnapshot(
+        tester,
+        "header-suffix-error-collapsed",
+      );
+
+      // 从末尾 entry 向上遍历并切换折叠，直到错误详情出现。错误态 header
+      // 始终保持 `×`，不能像成功工具一样用 `▾` 判断展开状态。
+      let errorExpanded = false;
+      for (let i = 0; i < 12; i++) {
+        await tester.sendKey("Up", { alt: true });
+        await tester.sleep(100);
+        await tester.sendKey("Enter");
+        await tester.sleep(250);
+        const screen = await tester.getScreenText();
+        if (screen.includes("Tool execution failed") && screen.includes("not found")) {
+          errorExpanded = true;
+          break;
+        }
+      }
+      expect(errorExpanded, "应能聚焦并展开错误工具卡").toBe(true);
+      const errorExpandedCapture = await takePeriSnapshot(
+        tester,
+        "header-suffix-error-expanded",
+      );
 
       expect(readCapture.text.length).toBeGreaterThan(50);
       expect(globGrepCapture.text.length).toBeGreaterThan(50);
       expect(editCapture.text.length).toBeGreaterThan(50);
-      expect(errorCapture.text.length).toBeGreaterThan(50);
+      expect(errorCollapsedCapture.text.length).toBeGreaterThan(50);
+      expect(errorExpandedCapture.text.length).toBeGreaterThan(50);
 
       // Judge: Read 头行行数后缀
       const r1 = await judge({
@@ -199,11 +223,11 @@ describe("tool-card: header suffix + error display", () => {
       console.log("Judge (edit):", JSON.stringify(r3, null, 2));
       expect(r3.pass).toBe(true);
 
-      // 确定性断言：错误态头行无 "— N lines" 后缀 + 明确错误词 + 错误详情独立行可见。
+      // 确定性断言：错误态终态默认折叠，头行无 "— N lines" 后缀且明确错误词。
       // 选择器必须命中**工具卡错误行**而非 prompt 回显——回显行
       // （`请使用 Read 工具读取文件 /nonexistent/...`）同样含 "Read" 与路径，
       // 用错误符号 ×（§8.2 错误态符号）限定。
-      const errLines = errorCapture.text.split("\n");
+      const errLines = errorCollapsedCapture.text.split("\n");
       const errHeader = errLines.find(
         (l) => l.includes("×") && l.includes("/nonexistent"),
       );
@@ -214,15 +238,16 @@ describe("tool-card: header suffix + error display", () => {
         errHeader!.includes("失败") || errHeader!.includes("Failed"),
         `错误态头行含错误词：${errHeader}`,
       ).toBe(true);
-      expect(errorCapture.text).toContain("Tool execution failed");
-      expect(errorCapture.text).toContain("not found");
+      expect(errorCollapsedCapture.text).not.toContain("Tool execution failed");
+      expect(errorExpandedCapture.text).toContain("Tool execution failed");
+      expect(errorExpandedCapture.text).toContain("not found");
 
-      // Judge（信息性）：错误态强制展开 + agent 感知错误
+      // Judge（信息性）：默认折叠保持错误信号，显式展开后显示详情。
       const r4 = await judge({
-        ansiRaw: errorCapture.raw,
+        ansiRaw: errorExpandedCapture.raw,
         criteria: [
           "Read 工具行应只包含文件名参数与错误词（如 'Read  /nonexistent... — Failed'），不应有 '— N lines' 等行数后缀",
-          "错误详细信息应在独立的输出行中可见（如 'Error:' 或 'not found' 或 'Tool execution failed'），错误信息不应被压缩消失",
+          "用户显式展开后，错误详细信息应在独立的输出行中可见（如 'Error:' 或 'not found' 或 'Tool execution failed'）",
           "agent 应感知到文件不存在（如 'not found'、'不存在' 等错误提示）",
         ],
       });

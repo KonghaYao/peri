@@ -253,6 +253,22 @@ async fn test_usage_pct_基于_flushed_值() {
     assert!((snap.usage_pct().unwrap() - 0.8).abs() < 0.01);
 }
 
+#[tokio::test]
+async fn test_increment_continuation_updates_snapshot() {
+    let state = make_state();
+    state.set_goal("测试".to_string(), None).await.unwrap();
+
+    GoalController::increment_continuation(&state)
+        .await
+        .unwrap();
+    GoalController::increment_continuation(&state)
+        .await
+        .unwrap();
+
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.continuation_count, 2);
+}
+
 // ---- GoalController trait 实现测试 ----
 
 use peri_acp_types::goal::{GoalController, GoalStore};

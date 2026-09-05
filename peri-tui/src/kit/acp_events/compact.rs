@@ -1,12 +1,9 @@
 //! Compact event handlers — CompactStarted, CompactCompleted.
-//!
-//! Phase 5 Step 4/7：CompactCompleted 收敛为「状态重建信号」——仅保留
-//! `trigger=="manual"` 置 `compact_just_completed`（R3 标志链：TurnDone →
-//! session/load 重放）；SystemNote 文案注入已删除（通知文案移交
-//! CommandFeedback 事件渲染，历史回看依赖 TUI 事件日志——设计文档 §81）。
-//! CompactError 变体与 handler 已删除（错误反馈收敛到 CommandFeedback）。
 
 use super::*;
+use crate::i18n;
+use crate::kit::tui_render_unit::TuiNoteLevel;
+use fluent_bundle::FluentValue;
 
 pub(super) fn handle_compact_started(state: &mut BridgeState) {
     tracing::info!("bridge: CompactStarted");
@@ -14,16 +11,69 @@ pub(super) fn handle_compact_started(state: &mut BridgeState) {
     super::render::push_acp_state(state);
 }
 
-pub(super) fn handle_compact_completed(state: &mut BridgeState, trigger: &str) {
-    tracing::info!(%trigger, "bridge: CompactCompleted");
-    // S4.1 方案 A：trigger 由服务端透传。仅手动 /compact 置
-    // compact_just_completed（TurnDone 需在完整重建后到达）；auto compact
-    // 不置位——auto 后 ReAct 循环继续运行，zero-output 后重放旧消息的
-    // 边缘洞即被根治（流事件清除逻辑保留为防御）。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn handle_compact_completed(
+    state: &mut BridgeState,
+    summary: &str,
+    trigger: &str,
+    strategy: &str,
+    affected_count: usize,
+    estimated_tokens_saved: u64,
+    file_count: usize,
+    skill_count: usize,
+) {
+    tracing::info!(
+        summary_len = summary.len(),
+        %trigger,
+        %strategy,
+        affected_count,
+        estimated_tokens_saved,
+        file_count,
+        skill_count,
+        "bridge: CompactCompleted"
+    );
     if trigger == "manual" {
         state.compact_just_completed = true;
     }
-    // 不重置 phase——auto compact 后 ReAct 循环继续运行，
-    // loading 由流式事件（TextChunk/ToolStarted）和 TurnDone 管理。
-    // 手动 /compact 路径由 push_done → TurnDone 兜底清除。
+
+    let compact_type = match strategy {
+        "micro" => i18n::tr("app-note-compact-type-micro"),
+        "smart" => i18n::tr("app-note-compact-type-smart"),
+        _ => i18n::tr("app-note-compact-type-full"),
+    };
+    let detail = i18n::tr_args(
+        "app-note-compact-detail",
+        &[
+            ("messages".into(), FluentValue::from(affected_count as u64)),
+            ("tokens".into(), FluentValue::from(estimated_tokens_saved)),
+            ("files".into(), FluentValue::from(file_count as u64)),
+            ("skills".into(), FluentValue::from(skill_count as u64)),
+        ],
+    );
+    let summary_display: String = summary.chars().take(60).collect();
+    let text = if summary_display.is_empty() {
+        i18n::tr_args(
+            "app-note-compact-completed",
+            &[
+                ("detail".into(), FluentValue::from(detail.as_str())),
+                ("type".into(), FluentValue::from(compact_type.as_str())),
+            ],
+        )
+    } else {
+        i18n::tr_args(
+            "app-note-compact-completed-summary",
+            &[
+                ("detail".into(), FluentValue::from(detail.as_str())),
+                (
+                    "summary".into(),
+                    FluentValue::from(summary_display.as_str()),
+                ),
+                ("type".into(), FluentValue::from(compact_type.as_str())),
+            ],
+        )
+    };
+    if trigger == "manual" {
+        crate::kit::atoms::PENDING_COMPACT_NOTE.set(Some(text.clone()));
+    }
+    state.inject_system_note(text, TuiNoteLevel::Info);
 }

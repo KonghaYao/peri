@@ -31,16 +31,22 @@ pub async fn emit_compact_started(sink: &Arc<dyn EventSink>, session_id: &str) {
     .await;
 }
 
-/// 发出 `CompactCompleted` 事件（Phase 5 Step 4 收敛：状态重建信号三字段）。
+/// 发出 `CompactCompleted` 事件（状态重建信号 + 展示/观测计数）。
 ///
 /// `messages` 字段与 `CommandResult.messages` 共享同一个 `new_messages.clone()`，
 /// 保持事件观测数据与最终返回值一致——TUI 下游依赖此对齐。
+#[allow(clippy::too_many_arguments)]
 pub async fn emit_compact_completed(
     sink: &Arc<dyn EventSink>,
     session_id: &str,
     summary: String,
     messages: Vec<BaseMessage>,
     trigger: CompactTrigger,
+    strategy: CompactStrategy,
+    affected_count: usize,
+    estimated_tokens_saved: u64,
+    files: Vec<peri_acp_types::event::CompactFileInfo>,
+    skills: Vec<String>,
 ) {
     sink.push_event(
         session_id,
@@ -48,6 +54,11 @@ pub async fn emit_compact_completed(
             summary,
             messages,
             trigger,
+            strategy,
+            affected_count,
+            estimated_tokens_saved,
+            files,
+            skills,
         },
         COMPACT_CONTEXT_WINDOW,
     )

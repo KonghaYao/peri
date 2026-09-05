@@ -4,16 +4,19 @@ use crate::kit::tui_render_unit::{
     EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, TuiToolPresentation, fold_for_status,
 };
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+static NEXT_SUBAGENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// 从 `ToolCardAccumulator` 派生 `TuiToolCard`。
 ///
-/// fold 按 spec §7 表取当前状态的目标值（running=Preview / error=Expanded /
-/// completed=Collapsed）；工具只有在所属 turn 仍 active 且尚无输出时才是 running，
+/// fold 按 spec §7 表取当前状态的目标值（running=Preview / completed/error=
+/// Collapsed）；工具只有在所属 turn 仍 active 且尚无输出时才是 running，
 /// 避免 turn 取消后缺失 `ToolEnded` 导致卡片永久显示 spinner。hash 由
 /// [`TuiToolCard::recompute_hash`] 单点计算（含 fold + user_modified，duration
 /// 按秒取整避免每毫秒 hash 抖动）。
-pub(super) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> TuiToolCard {
+pub(crate) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> TuiToolCard {
     let is_running = turn_active && t.output_summary.is_none();
     let running_duration_ms = is_running.then(|| t.started_at.elapsed().as_millis() as u64);
     let status = if is_running {
@@ -148,6 +151,8 @@ impl ToolCardAccumulator {
 /// In-progress sub-agent accumulator.
 #[derive(Debug, Clone)]
 pub struct SubAgentAccumulator {
+    /// TUI-local identity for this occurrence; resumes retain agent_id but get a new instance.
+    pub instance_id: String,
     pub agent_id: String,
     pub agent_name: String,
     pub is_running: bool,
@@ -166,6 +171,10 @@ impl SubAgentAccumulator {
     pub fn new(agent_id: String, agent_name: String) -> Self {
         let child_turn = CurrentTurn::new();
         Self {
+            instance_id: format!(
+                "subagent-{}",
+                NEXT_SUBAGENT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
+            ),
             agent_id,
             agent_name,
             is_running: true,
@@ -223,6 +232,7 @@ impl SubAgentAccumulator {
         // [G1] hash 由 TuiSubAgentGroup::recompute_hash 单点计算（含 fold +
         // user_modified + child hash 组合）——构造与折叠 pass 共用同一公式。
         let mut group = crate::kit::tui_render_unit::TuiSubAgentGroup {
+            instance_id: self.instance_id.clone(),
             agent_id: self.agent_id.clone(),
             agent_name: self.agent_name.clone(),
             view_models: child_vms.clone(),

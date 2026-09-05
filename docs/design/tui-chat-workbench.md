@@ -98,7 +98,7 @@ RenderEvent::ToolStarted / ToolEnded
 | 主题 | 当前基线 |
 | --- | --- |
 | Transcript | 连续左对齐时间轴、统一 `GridSpec`、视口裁剪、分片渲染缓存、响应式断点已实现 |
-| Tool card | 统一 `TuiToolCard`；Running→Preview、Completed→Collapsed、Error→Expanded summary |
+| Tool card | `TuiToolPresentation` 仅投影 `ToolRenderPlan` 的 label/summary/detail 候选；统一 `resolve_tool_render_plan` / `render_tool_plan` 路径消费 status、fold、prefix、duration 与详情可见性。Running→Preview、Completed/Error→Collapsed（失败状态行保持可见，详情由用户显式展开） |
 | 专属展示 | `SkillTool`/旧名 `Skill` 与 `TodoWrite` 有专属 presentation；`Bash`、`Edit`、`Write` 在通用 renderer 内有局部特判 |
 | Diff | Edit/Write 尝试解析 unified diff，失败时回退为变更摘要；完整 diff 是否可达取决于上游 output |
 | SubAgent | 主时间轴有 `TuiSubAgentGroup`，并已有 SubAgent 详情 Panel |
@@ -478,7 +478,7 @@ outer accent  verb      primary object                  result · duration  acti
 - Expanded 与 transcript 共用父滚动，不得创建内部 scrollbar；
 - Wide/Standard 默认最多约 8 个视觉行，Compact 最多 4 行，Narrow 最多 3 行；具体预算由 viewport 与 theme density 决定；
 - 超出时显示 `… N more lines · Open details`；上游未知省略量时显示 `More content available`；
-- success 可自动折叠；running 默认 Preview；error 默认 Expanded summary；
+- success/error 完成态默认折叠；running 默认 Preview；
 - 用户手动改变 fold 后，lifecycle 更新不得覆盖 `user_modified`。
 
 ### 7.3 Tool Inspector：完整非模态详情
@@ -1462,17 +1462,20 @@ ToolOutputChunk {
 
 ### 15.1 默认 fold
 
-**目标规范**：下表是 redesign 完成后的默认折叠目标。当前实际 `fold_for_status` 中除 interaction 行（见 §3.3 gap #13，当前仍为 Expanded）外，其余各行的 Running/Succeeded/Error 折叠与下表一致。
+**目标规范**：下表是 redesign 完成后的默认折叠目标。当前实际
+`fold_for_status` 中，completed Error tool cards 与 succeeded tool cards 一样为
+Collapsed；interaction 行见 §3.3 gap #13（当前仍为 Expanded）。Denied、Cancelled 与
+TimedOut 保持各自的目标行为，不因 Error 的基线而隐式归组。
 
-| Entry | Running | Succeeded | Error/Denied/Cancelled/TimedOut |
-| --- | --- | --- | --- |
-| user | Expanded | Expanded/长文折叠 | — |
-| assistant | Expanded | Expanded | Expanded |
-| reasoning | Preview | Collapsed | Preview |
-| tool | Preview | Collapsed | Expanded summary |
-| subagent/workflow | Collapsed + live summary | Collapsed | Expanded summary |
-| system | Collapsed | Collapsed | Expanded summary |
-| interaction | Expanded | Collapsed result | Expanded |
+| Entry | Running | Succeeded | Error | Denied/Cancelled/TimedOut |
+| --- | --- | --- | --- | --- |
+| user | Expanded | Expanded/长文折叠 | — | — |
+| assistant | Expanded | Expanded | Expanded | Expanded |
+| reasoning | Preview | Collapsed | Preview | Preview |
+| tool | Preview | Collapsed | Collapsed | Expanded summary |
+| subagent/workflow | Collapsed + live summary | Collapsed | Expanded summary | Expanded summary |
+| system | Collapsed | Collapsed | Expanded summary | Expanded summary |
+| interaction | Expanded | Collapsed result | Expanded | Expanded |
 
 - 用户手动 fold 后，本 turn 内自动策略不得覆盖；
 - Inspector 打开与否不影响 fold；

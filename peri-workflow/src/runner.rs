@@ -442,16 +442,18 @@ fn project_postcondition(
         (Some(WorkflowWriteIntent::Write { .. }), Some(Ok(()))) => PostProcessingStatus::Passed,
         _ => PostProcessingStatus::Blocked,
     };
-    let delivery = if execution_status == "completed"
-        && acceptance_status == AcceptanceStatus::Passed
-        && write_intent.is_some()
-        && matches!(
+    let delivery = if execution_status != "completed"
+        || acceptance_status == AcceptanceStatus::Failed
+        || write_intent.is_none()
+        || matches!(
             post_processing,
-            PostProcessingStatus::Passed | PostProcessingStatus::NotRequired
+            PostProcessingStatus::Failed | PostProcessingStatus::Blocked
         ) {
+        DeliveryStatus::Blocked
+    } else if acceptance_status == AcceptanceStatus::Passed {
         DeliveryStatus::Deliverable
     } else {
-        DeliveryStatus::Blocked
+        DeliveryStatus::Unknown
     };
     (post_processing, delivery)
 }

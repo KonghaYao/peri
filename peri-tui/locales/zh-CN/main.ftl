@@ -825,6 +825,8 @@ panel-title-workflow = Workflow
 panel-title-ask-user = Ask User
 panel-title-theme = Theme
 panel-title-subagent-detail = SubAgent 详情
+panel-title-shell-detail = Shell 详情
+panel-title-goal = Goal
 
 # ---- Panel Descriptions ----
 panel-desc-model = Model 别名选择
@@ -844,7 +846,26 @@ panel-desc-workflow = Workflow 运行
 panel-desc-ask-user = Agent 用户提问（自动打开）
 panel-desc-theme = 配色方案选择
 panel-desc-subagent-detail = SubAgent 嵌套消息详情
+panel-desc-shell-detail = 后台 Shell 任务详情
+panel-desc-goal = 当前 Goal 详情
+goal-status-active = 进行中
+goal-status-complete = 已完成
+goal-status-blocked = 已阻塞
+goal-detail-status = 状态
+goal-detail-continuations = 主动接续次数
+goal-detail-blocked-reason = 阻塞原因
+goal-detail-empty = 当前会话没有可用的 Goal。
 subagent-detail-not-found = 未找到该 SubAgent — 会话可能已重置。
+shell-detail-not-found = 未找到该 Shell 任务 — 可能已结束或会话已重置。
+shell-detail-no-output = 运行中的 Shell 任务不会向 TUI 推送输出流。
+shell-detail-running = 运行中…
+shell-detail-output-preview = 输出预览
+shell-detail-status-running = 状态：运行中
+shell-detail-status-succeeded = 状态：成功
+shell-detail-status-failed = 状态：失败
+shell-detail-status-cancelled = 状态：已取消
+bg-task-unknown-kind = 未知的后台任务类型 — 未打开抽屉。
+workflow-run-not-synced = 所选 Workflow 运行不在当前快照中（可能已结束或尚未同步）。
 
 # ---- Betas Panel ----
 panel-betas-readonly-hint =   (只读 — 功能开关在构建时配置)
@@ -1047,7 +1068,6 @@ panel-theme-footer-hint =   Ctrl+T::daily({ $status })  Ctrl+D::{ $download }
 # ---- Workflow Panel kanban ----
 workflow-loading-runs = 正在加载工作流运行信息
 workflow-no-runs = 当前会话无工作流运行
-workflow-footer-status = 执行={ $execution } · 验收={ $acceptance } · 后处理={ $post } · 交付={ $delivery }
 workflow-footer-shortcuts = Tab::切换运行 · Shift+Tab::上一个 · ←/→::切换面板 · ↑/↓::导航 · Enter::终止运行 · Esc::关闭
 workflow-phases-header = 阶段（共 { $count } 个 agent）
 workflow-model-header = 模型
@@ -1116,8 +1136,9 @@ popup-download-finished-notify = 主题下载完成: { $success }/{ $total } 成
 
 # ---- System Notes (app message stream) ----
 app-note-budget-warning = 上下文窗口使用率 { NUMBER($pct, maximumFractionDigits: 0) }%（{ $used }/{ $limit }）
-app-note-compact-completed = { $type }完成{ $detail }
-app-note-compact-completed-summary = { $type }完成{ $detail } —— { $summary }
+app-note-compact-completed = { $type }完成 { $detail }
+app-note-compact-completed-summary = { $type }完成 { $detail } —— { $summary }
+app-note-compact-detail = （压缩 { $messages } 条消息，估算节省 { $tokens } tokens，重新注入 { $files } 个文件、{ $skills } 个 Skills）
 app-note-compact-error = 上下文压缩失败: { $message }
 app-note-rewind-error = 回退失败: { $message }
 app-note-compact-type-full = 完整压缩
@@ -1128,4 +1149,3 @@ app-note-cache-hit-low = Prompt cache 覆盖率 {$pct}% < 80%（req: { $req_id }
 app-note-cache-coverage-low = Prompt cache 覆盖率 {$pct}% < 80% — 已缓存 {$cached} / 输入 {$input}，未缓存 {$uncached}（req: {$req_id}）
 
 # ---- 语义工具卡片 ----
-tool-todo-failed = 更新失败

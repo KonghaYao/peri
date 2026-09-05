@@ -226,6 +226,18 @@ pub enum StateEvent {
         /// 上下文窗口总量（ContextBudget.context_window），None 表示无配置
         context_total_tokens: Option<u64>,
     },
+    /// 当前 session 的 Goal 详情投影。
+    GoalSnapshot {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        objective: Option<String>,
+        status: Option<crate::goal::GoalStatus>,
+        token_budget: Option<u64>,
+        tokens_used: u64,
+        time_used_seconds: u64,
+        continuation_count: u64,
+        blocked_reason: Option<String>,
+    },
     /// 合成用户消息——由 agent 内部注入的 human message（如 bg agent 完成回调）。
     /// 通过 EventBus → mapper_v2 → ExecutorEvent::MessageAdded → ACP 映射到
     /// session/update(user_message_chunk) → TUI 用户气泡。
@@ -253,6 +265,7 @@ impl StateEvent {
     pub fn turn_id(&self) -> TurnId {
         match self {
             Self::StateSnapshot { turn_id, .. }
+            | Self::GoalSnapshot { turn_id, .. }
             | Self::SyntheticUserMessage { turn_id, .. }
             | Self::TurnSuspended { turn_id, .. } => *turn_id,
         }
@@ -262,6 +275,7 @@ impl StateEvent {
     pub fn agent_id(&self) -> AgentId {
         match self {
             Self::StateSnapshot { agent_id, .. }
+            | Self::GoalSnapshot { agent_id, .. }
             | Self::SyntheticUserMessage { agent_id, .. }
             | Self::TurnSuspended { agent_id, .. } => *agent_id,
         }
@@ -756,6 +770,24 @@ pub fn state_event_to_executor(event: StateEvent) -> Option<ExecutorEvent> {
             budget_pct,
             context_total_tokens,
         }),
+        StateEvent::GoalSnapshot {
+            objective,
+            status,
+            token_budget,
+            tokens_used,
+            time_used_seconds,
+            continuation_count,
+            blocked_reason,
+            ..
+        } => Some(ExecutorEvent::GoalSnapshot {
+            objective,
+            status,
+            token_budget,
+            tokens_used,
+            time_used_seconds,
+            continuation_count,
+            blocked_reason,
+        }),
         StateEvent::SyntheticUserMessage { text, .. } => Some(ExecutorEvent::MessageAdded(
             crate::messages::BaseMessage::human(crate::messages::MessageContent::text(text)),
         )),
@@ -824,13 +856,23 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
         // 事件变体；仅 Langfuse bridge 直消费 v2 闭合 span。
         ObserveEvent::CompactEnded { .. } => None,
         ObserveEvent::MessagesCompacted {
-            summary, messages, ..
+            summary,
+            messages,
+            files,
+            skills,
+            strategy,
+            affected_count,
+            estimated_tokens_saved,
+            ..
         } => Some(ExecutorEvent::CompactCompleted {
-            // Phase 5 Step 4：CompactCompleted 收敛为重建信号三字段——
-            // v2 观测字段（files/skills/strategy/outcome/计数）不再透传。
             summary,
             messages,
             trigger: CompactTrigger::Auto,
+            strategy,
+            affected_count,
+            estimated_tokens_saved,
+            files,
+            skills,
         }),
         // TurnError：TUI 错误展示经 executor_helpers 的 AgentExecutionFailed
         // （LoopResult::Error 分支）；Langfuse 经 bridge 直消费 v2。v1 无对应变体。

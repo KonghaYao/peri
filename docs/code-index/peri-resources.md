@@ -1,6 +1,6 @@
 # peri-resources 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-16
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-04
 > 依据：peri-resources/src 源码、lib.rs 模块注释（伞形 PRD 决策 20）
 
 ## 架构速览
@@ -13,7 +13,8 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 打开全部资源（会话存储） | `src/context.rs` | `Resources::open`（:25）；`open_with`（:35）；`thread_store`（:49，返回 `Arc<dyn ThreadStore>`） | 默认路径 `~/.peri/threads/threads.db`（`SqliteThreadStore::default_path`）或显式路径打开失败时直接返回包含路径的错误；不使用共享临时数据库 fallback |
+| 打开全部资源（会话存储） | `src/context.rs` | `Resources::open`；`Resources::open_with`；`Resources::thread_store` | 默认路径 `~/.peri/threads/threads.db`（`SqliteThreadStore::default_path`）或显式路径打开失败时直接返回包含路径的错误；不使用共享临时数据库 fallback |
+| 只读打开已有 session 数据库 | `src/sessions/mod.rs` + `src/sessions/sqlite_store.rs` | `open_thread_store_read_only`；`SqliteThreadStore::open_existing_read_only`；`probe_load_meta_shape`；`ReadOnlyThreadStoreError` | 显式路径或默认路径只选择一个已存在普通文件；SQLite 使用 read-only、`create_if_missing(false)`、单连接和有界 busy timeout；按 `load_meta` 所需 schema shape fail closed，不创建目录/数据库、不初始化或迁移 schema |
 | 改会话存储 SQL 实现 | `src/sessions/sqlite_store.rs` | `SqliteThreadStore::new`；`default_path`；`init_schema`；`ThreadStore` impl；轻量列表 `list_thread_entries`；`load_frozen_snapshot` / `store_frozen_snapshot_if_absent` | trait 方法须与 `peri-acp-types/src/store.rs::ThreadStore` 签名一致；frozen owner state 存在独立 nullable `frozen_context` 列且不进入 list projection，写入使用 `IS NULL` CAS（ARC-FROZEN-001）；TUI 列表查询只投影 thread 摘要并在 SQL 层按 cwd/hidden/message_count 过滤；另含 compaction 生命周期与 context cache |
 | 改消息读写/祖先链 | `src/sessions/sqlite_store.rs` | `create_thread`（:293）；`append_messages`（:318）；`load_messages`（:360）；`load_context`（:494）；`resolve_ancestor_chain`（:135） | load_context 按祖先链拼装 + context cache（`save_context_cache` :191）；`delete_messages_since`（:818）供回滚类操作 |
 | 改测试用文件存储 | `src/sessions/filesystem.rs` | `FilesystemThreadStore`；`new`；`default_path`；`frozen_snapshot_path`；`atomic_write_json_if_absent` | 纯测试用途（sessions/mod.rs:3），生产实现是 sqlite；frozen snapshot 使用每 thread 的 `frozen.json` sidecar，不写入 `index.json`，完整 temp + hard-link 提供 no-clobber write-once |

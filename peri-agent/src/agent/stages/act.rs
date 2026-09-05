@@ -26,6 +26,24 @@ fn emit_turn_completed(ctx: &StageContext) {
         });
 }
 
+fn emit_goal_snapshot(ctx: &StageContext) {
+    let Some(controller) = &ctx.goal_controller else {
+        return;
+    };
+    let goal = controller.snapshot();
+    ctx.runtime.event_bus.emit_state(StateEvent::GoalSnapshot {
+        turn_id: ctx.turn_id(),
+        agent_id: ctx.session.agent_id,
+        objective: goal.objective,
+        status: goal.status,
+        token_budget: goal.token_budget,
+        tokens_used: goal.tokens_used,
+        time_used_seconds: goal.time_used_seconds,
+        continuation_count: goal.continuation_count,
+        blocked_reason: goal.blocked_reason,
+    });
+}
+
 /// 运行 Act 阶段
 pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
     let ctx = &input.context;
@@ -76,6 +94,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
                 // transcript 可能已含本轮消息（阶段 B 提交后），先 emit TurnCompleted
                 // 再传播错误，保持 TUI committed 视图与 transcript 一致。
                 emit_turn_completed(ctx);
+                emit_goal_snapshot(ctx);
                 return Err(e);
             }
         };
@@ -91,6 +110,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // 下一迭代的 TextChunk，把本轮 TurnCompleted 拖到后面，导致 partial 混合
         // 两轮内容，渲染出"新文本在旧工具之前"的顺序错乱（详见 RenderEvent::TurnCompleted）。
         emit_turn_completed(ctx);
+        emit_goal_snapshot(ctx);
 
         Ok(ActOutput {
             has_tool_calls: true,
@@ -148,6 +168,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
                 // （从 transcript 读快照，RwLock 无死锁风险——append 已释放锁），
                 // 再传播错误，避免 TUI committed 视图与 transcript/持久化不一致。
                 emit_turn_completed(ctx);
+                emit_goal_snapshot(ctx);
                 return Err(e);
             }
         };
@@ -156,6 +177,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         //
         // 必须用 emit_render（详见上方工具路径 同款注释）——保证与同迭代 Render 事件 FIFO。
         emit_turn_completed(ctx);
+        emit_goal_snapshot(ctx);
 
         Ok(ActOutput {
             has_tool_calls: false,

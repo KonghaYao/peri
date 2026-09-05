@@ -827,6 +827,8 @@ panel-title-workflow = Workflow
 panel-title-ask-user = Ask User
 panel-title-theme = Theme
 panel-title-subagent-detail = SubAgent Detail
+panel-title-shell-detail = Shell Detail
+panel-title-goal = Goal
 
 # ---- Panel Descriptions ----
 panel-desc-model = Model alias selection
@@ -846,7 +848,26 @@ panel-desc-workflow = Workflow runs
 panel-desc-ask-user = Agent user questions (auto-open)
 panel-desc-theme = Color theme selection
 panel-desc-subagent-detail = Subagent nested transcript detail
+panel-desc-shell-detail = Background shell task detail
+panel-desc-goal = Current goal detail
+goal-status-active = Active
+goal-status-complete = Complete
+goal-status-blocked = Blocked
+goal-detail-status = Status
+goal-detail-continuations = Proactive continuations
+goal-detail-blocked-reason = Blocked reason
+goal-detail-empty = No goal is available for this session.
 subagent-detail-not-found = Subagent not found — the session may have been reset.
+shell-detail-not-found = Shell task not found — it may have finished or the session was reset.
+shell-detail-no-output = Output is not streamed to the TUI for running shell tasks.
+shell-detail-running = Running…
+shell-detail-output-preview = Output preview
+shell-detail-status-running = Status: running
+shell-detail-status-succeeded = Status: succeeded
+shell-detail-status-failed = Status: failed
+shell-detail-status-cancelled = Status: cancelled
+bg-task-unknown-kind = Unknown background task type — drawer not opened.
+workflow-run-not-synced = Selected workflow run is not in the current snapshot (finished or not synced yet).
 
 # ---- Betas Panel ----
 panel-betas-readonly-hint =   (read-only — feature flags are configured at build time)
@@ -1049,7 +1070,6 @@ panel-theme-footer-hint =   Ctrl+T::daily({ $status })  Ctrl+D::{ $download }
 # ---- Workflow Panel kanban ----
 workflow-loading-runs = Loading workflow runs
 workflow-no-runs = No workflow runs in current session
-workflow-footer-status = exec={ $execution } · accept={ $acceptance } · post={ $post } · deliver={ $delivery }
 workflow-footer-shortcuts = Tab::next-run · Shift+Tab::prev-run · ←/→::pane · ↑/↓::navigate · Enter::kill-run · Esc::close
 workflow-phases-header = Phases ({ $count } agents)
 workflow-model-header = Model
@@ -1118,8 +1138,9 @@ popup-download-finished-notify = Theme download complete: { $success }/{ $total 
 
 # ---- System Notes (app message stream) ----
 app-note-budget-warning = Context usage { NUMBER($pct, maximumFractionDigits: 0) }% ({ $used }/{ $limit })
-app-note-compact-completed = { $type } completed{ $detail }
-app-note-compact-completed-summary = { $type } completed{ $detail } — { $summary }
+app-note-compact-completed = { $type } completed { $detail }
+app-note-compact-completed-summary = { $type } completed { $detail } — { $summary }
+app-note-compact-detail = ({ $messages } messages, ~{ $tokens } tokens saved, { $files } files, { $skills } skills)
 app-note-compact-error = Context compaction failed: { $message }
 app-note-rewind-error = Rewind failed: { $message }
 app-note-compact-type-full = Full compaction
@@ -1130,4 +1151,3 @@ app-note-cache-hit-low = Prompt cache coverage {$pct}% < 80% (req: { $req_id })
 app-note-cache-coverage-low = Prompt cache coverage {$pct}% < 80% — cached {$cached} / input {$input}, uncached {$uncached} (req: {$req_id})
 
 # ---- Semantic tool cards ----
-tool-todo-failed = Update failed

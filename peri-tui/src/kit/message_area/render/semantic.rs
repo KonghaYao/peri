@@ -1,9 +1,9 @@
 use crate::kit::message_area::grid::GridSpec;
-use crate::kit::tui_render_unit::{FoldState, TuiRenderUnit, TuiToolCard};
+use crate::kit::tui_render_unit::{TuiRenderUnit, TuiToolCard};
 use unicode_width::UnicodeWidthStr;
 
 use super::group::{SUBAGENT_TOOL_INDENT, SUBAGENT_TOOL_LINES};
-use super::tool_card::completed_header_suffix;
+use super::tool_card::projected_tool_header_text;
 
 /// §9 语义复制（D3）：按 VM 变体从渲染行提取「语义文本」——复制内容而非
 /// 屏幕像素。供 `extract_visual_range`（selection.rs）在复制时调用（事件时点，
@@ -36,7 +36,7 @@ pub(crate) fn semantic_line_text(
         TuiRenderUnit::TuiToolCard(card) => {
             if local_idx == 0 {
                 // header 行：label + summary + suffix（§9）。
-                return Some(tool_header_semantic(card));
+                return Some(tool_header_semantic(card, grid));
             }
             // Bash 展开 `$ cmd` 行（§9 保留 command）。
             if let Some(rest) = stripped.strip_prefix("$ ") {
@@ -125,26 +125,10 @@ fn strip_code_block_visual_padding(
     text
 }
 
-/// §9 tool header 行语义：`{Verb} {summary}{suffix}`——无符号、无 duration。
-/// Bash 展开态 summary 移到 `$ ` 行（render_generic_tool_card_lines 口径），
-/// header 语义只留 label；suffix 复用 `completed_header_suffix`（Read `— N
-/// lines` / Glob/Grep `— N matches` / Edit/Write `· +N −M`——§6.4 口径，
-/// Edit/Write 不重复输出含路径的摘要文本）。
-fn tool_header_semantic(data: &TuiToolCard) -> String {
-    let mut text = crate::kit::tool_display::format_tool_name(&data.tool_name);
-    let bash_expanded = data.tool_name == "Bash"
-        && !data.is_running
-        && !data.is_error
-        && data.fold == FoldState::Expanded;
-    if !bash_expanded && !data.input_summary.is_empty() {
-        text.push(' ');
-        text.push_str(&data.input_summary);
-    }
-    let suffix = completed_header_suffix(data);
-    if !suffix.is_empty() {
-        text.push_str(&suffix);
-    }
-    text
+/// §9 tool header 行语义与视觉 header 共用 `ToolRenderPlan` 投影；仅去除状态符号、
+/// duration 和视觉截断。
+fn tool_header_semantic(data: &TuiToolCard, grid: &GridSpec) -> String {
+    projected_tool_header_text(data, grid)
 }
 
 /// 从渲染行剥离网格前缀列（§3.1：`outer + accent + gap`），返回内容列文本。

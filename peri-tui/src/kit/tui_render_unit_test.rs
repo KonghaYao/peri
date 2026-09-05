@@ -229,10 +229,10 @@ fn test_fold_for_status_matches_spec_table() {
     assert_eq!(fold_for_status(Reasoning, Running), Preview);
     assert_eq!(fold_for_status(Reasoning, Completed), Collapsed);
     assert_eq!(fold_for_status(Reasoning, Error), Preview);
-    // tool：Preview → Collapsed → Expanded summary
+    // tool：流式 Preview，成功或失败完成后均收束为 Collapsed
     assert_eq!(fold_for_status(Tool, Running), Preview);
     assert_eq!(fold_for_status(Tool, Completed), Collapsed);
-    assert_eq!(fold_for_status(Tool, Error), Expanded);
+    assert_eq!(fold_for_status(Tool, Error), Collapsed);
     // subagent：Collapsed + live summary → Collapsed → Expanded summary
     assert_eq!(fold_for_status(SubAgent, Running), Collapsed);
     assert_eq!(fold_for_status(SubAgent, Completed), Collapsed);
@@ -486,6 +486,7 @@ fn test_tui_render_unit_subagent_group_construction() {
         content_hash: tui_hash_str("inner"),
     });
     let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
+        instance_id: "instance-sa-1".into(),
         agent_id: "sa-1".into(),
         agent_name: "explorer".into(),
         view_models: im::Vector::from(vec![inner]),
@@ -513,6 +514,7 @@ fn test_tui_render_unit_subagent_group_construction() {
 fn test_subagent_group_hash_and_eq_include_is_error_and_error_reason() {
     fn mk(is_error: bool, error_reason: Option<&str>) -> TuiSubAgentGroup {
         let mut g = TuiSubAgentGroup {
+            instance_id: "instance-sa-1".into(),
             agent_id: "sa-1".into(),
             agent_name: "explorer".into(),
             view_models: im::Vector::new(),

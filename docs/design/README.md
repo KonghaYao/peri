@@ -36,6 +36,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Workflow | [workflow.md](workflow.md) | Node RPC、runner、通知、kill 与 resume |
 | Ultra-ADLC | [ultra-adlc.md](ultra-adlc.md) | 超大交付模式的文件协议与编排契约 |
 | TUI 数据流 | [tui-acp-data-flow.md](tui-acp-data-flow.md) | ACP event → Atom → render 链路 |
+| TUI 流式 Markdown 性能 | [tui-streaming-markdown-performance.md](tui-streaming-markdown-performance.md) | publication scheduler、lazy projection、增量 Markdown 与 slot index |
 | Git Watch 中间件 | [git-watch-middleware.md](git-watch-middleware.md) | 分支/HEAD 变化 Info 注入（异步采样 + 60s 节流） |
 
 ## 已批准目标设计
@@ -43,6 +44,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
+| Meta 数据访问 | [meta-control.md](meta-control.md) | `spec/issues/2026-09-04-peri-meta-control.md` |
 | MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | `spec/issues/2026-08-27-mcp-apps-stdio-relay.md` |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/issues/2026-08-10-chat-redesign-slice2-onwards.md` |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |

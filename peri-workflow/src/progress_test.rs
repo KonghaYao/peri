@@ -191,10 +191,16 @@ fn test_run_done_updates_status() {
         return_value: None,
         error: None,
     });
-    assert!(matches!(
-        store.get_run("r1").unwrap().status,
-        RunStatus::Completed
-    ));
+    let run = store.get_run("r1").unwrap();
+    assert!(matches!(run.status, RunStatus::Completed));
+    assert_eq!(
+        run.post_processing_status,
+        peri_acp_types::workflow::PostProcessingStatus::Unknown
+    );
+    assert_eq!(
+        run.delivery_status,
+        peri_acp_types::workflow::DeliveryStatus::Unknown
+    );
 }
 
 #[test]
@@ -273,6 +279,10 @@ fn test_run_done_failed_sets_failed_status() {
     });
     let run = store.get_run("r1").expect("run 应存在");
     assert!(matches!(run.status, RunStatus::Failed));
+    assert_eq!(
+        run.delivery_status,
+        peri_acp_types::workflow::DeliveryStatus::Blocked
+    );
     // Failed 是终态：completed_at 必须设置（否则 cleanup_completed 永不清理）
     assert!(run.completed_at.is_some());
 }

@@ -119,12 +119,16 @@ fn test_compact_started_serde() {
 
 #[test]
 fn test_compact_completed_serde_roundtrip() {
-    // Phase 5 Step 4 收敛：CompactCompleted 为重建信号三字段
-    // （summary/messages/trigger）。
+    // CompactCompleted 同时承载重建数据与展示/观测计数。
     let ev = ExecutorEvent::CompactCompleted {
         summary: "对话摘要内容".to_string(),
         messages: vec![],
         trigger: CompactTrigger::Auto,
+        strategy: CompactStrategy::Full,
+        affected_count: 4,
+        estimated_tokens_saved: 1024,
+        files: vec![],
+        skills: vec![],
     };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(json.contains(r#""type":"compact_completed""#));
@@ -134,6 +138,7 @@ fn test_compact_completed_serde_roundtrip() {
         summary,
         messages,
         trigger,
+        ..
     } = deserialized
     {
         assert_eq!(summary, "对话摘要内容");
