@@ -94,7 +94,7 @@ pub fn query_stats() -> Option<AllocStats> {
     let pid = sysinfo::get_current_pid().ok()?;
     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     let proc = sys.process(pid)?;
-    let current_rss = (proc.memory() * 1024) as usize; // sysinfo returns KB
+    let current_rss = proc.memory() as usize; // sysinfo returns bytes
     let current_allocated = tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(current_rss);
     Some(AllocStats {
         current_rss,
@@ -128,6 +128,74 @@ pub fn dump_stats() {
     }
 }
 
+/// macOS task ledger physical footprint in bytes.
+#[cfg(target_os = "macos")]
+pub fn physical_footprint_bytes() -> Option<u64> {
+    const TASK_VM_INFO: libc::task_flavor_t = 22;
+
+    // TASK_VM_INFO rev1 prefix from the installed macOS SDK. Asking only for this
+    // prefix is ABI-stable and includes phys_footprint without guessing later fields.
+    #[repr(C)]
+    #[derive(Default)]
+    struct TaskVmInfoRev1 {
+        virtual_size: u64,
+        region_count: i32,
+        page_size: i32,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device: u64,
+        device_peak: u64,
+        internal: u64,
+        internal_peak: u64,
+        external: u64,
+        external_peak: u64,
+        reusable: u64,
+        reusable_peak: u64,
+        purgeable_volatile_pmap: u64,
+        purgeable_volatile_resident: u64,
+        purgeable_volatile_virtual: u64,
+        compressed: u64,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        phys_footprint: u64,
+    }
+
+    let mut info = TaskVmInfoRev1::default();
+    let mut count = (std::mem::size_of::<TaskVmInfoRev1>() / std::mem::size_of::<libc::natural_t>())
+        as libc::mach_msg_type_number_t;
+    // SAFETY: `info` is a writable C-layout TASK_VM_INFO rev1 prefix, `count`
+    // exactly describes its natural_t capacity, and mach_task_self_ is the current task.
+    let result = unsafe {
+        #[allow(deprecated)]
+        libc::task_info(
+            libc::mach_task_self_,
+            TASK_VM_INFO,
+            (&mut info as *mut TaskVmInfoRev1).cast::<libc::integer_t>(),
+            &mut count,
+        )
+    };
+    let required_count = (std::mem::offset_of!(TaskVmInfoRev1, phys_footprint)
+        + std::mem::size_of::<u64>())
+    .div_ceil(std::mem::size_of::<libc::natural_t>())
+        as libc::mach_msg_type_number_t;
+    physical_footprint_from_task_info(result, count, required_count, info.phys_footprint)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn physical_footprint_from_task_info(
+    result: libc::kern_return_t,
+    returned_count: libc::mach_msg_type_number_t,
+    required_count: libc::mach_msg_type_number_t,
+    physical_footprint: u64,
+) -> Option<u64> {
+    (result == 0 && returned_count >= required_count).then_some(physical_footprint)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn physical_footprint_bytes() -> Option<u64> {
+    None
+}
+
 /// 通过 sysinfo 获取 OS 级 RSS（MB）。
 /// 公共函数，供 gc.rs 和 thread_ops.rs 复用。
 #[cfg(not(target_os = "windows"))]
@@ -136,7 +204,7 @@ pub fn os_rss_mb() -> Option<u64> {
     let mut sys = System::new();
     let pid = sysinfo::get_current_pid().ok()?;
     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    sys.process(pid).map(|p| p.memory() / 1024) // KB → MB
+    sys.process(pid).map(|p| p.memory() / 1024 / 1024) // bytes → MB
 }
 
 // ── Windows stubs ──────────────────────────────────────────────────────────

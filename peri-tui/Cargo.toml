@@ -16,6 +16,9 @@ path = "src/main.rs"
 tempfile.workspace = true
 serial_test.workspace = true
 tracing-subscriber.workspace = true
+
+[features]
+default = []
 [dependencies]
 serde.workspace = true
 # 3.0 批 3（tui-deps）依赖收紧豁免清单（见 scripts/import-exemptions.conf）：
@@ -102,3 +105,6 @@ rpassword = "7"
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl.workspace = true
 tikv-jemalloc-sys.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

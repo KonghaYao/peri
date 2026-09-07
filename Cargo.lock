@@ -4147,6 +4147,7 @@ dependencies = [
  "im",
  "image",
  "keyring",
+ "libc",
  "parking_lot",
  "peri-acp",
  "peri-acp-types",

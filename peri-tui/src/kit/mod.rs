@@ -30,6 +30,7 @@ pub mod input_history;
 pub mod layout;
 pub mod list_nav;
 pub mod markdown;
+pub mod memory_diagnostics;
 pub mod mention_popup;
 pub mod message_area;
 pub mod mouse_router;

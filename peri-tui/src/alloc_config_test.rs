@@ -31,6 +31,25 @@ fn test_alloc_collect_does_not_panic() {
     alloc_collect();
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn test_physical_footprint_has_process_scale() {
+    let footprint =
+        physical_footprint_bytes().expect("macOS physical footprint should be available");
+    assert!(
+        footprint >= 1024 * 1024,
+        "unexpected footprint: {footprint}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_physical_footprint_requires_complete_returned_count() {
+    assert_eq!(physical_footprint_from_task_info(0, 19, 20, 42), None);
+    assert_eq!(physical_footprint_from_task_info(1, 20, 20, 42), None);
+    assert_eq!(physical_footprint_from_task_info(0, 20, 20, 42), Some(42));
+}
+
 /// jemalloc stats 查询仅在非 Windows 平台有效（Windows stub 返回 None）
 #[cfg(not(target_os = "windows"))]
 #[test]

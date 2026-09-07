@@ -24,6 +24,9 @@ use crate::kit::ask_user_action::{AskUserResponseAction, spawn_ask_user_consumer
 use crate::kit::atoms;
 use crate::kit::hitl_response::{HitlResponseAction, spawn_hitl_response_consumer};
 use crate::kit::input_history;
+use crate::kit::memory_diagnostics::{
+    MemoryDiagnosticsConfig, spawn_memory_diagnostics, stop_memory_diagnostics,
+};
 use crate::kit::rewind_action::spawn_rewind_consumer;
 use crate::kit::service_snapshot::{SnapshotSource, spawn_service_snapshot};
 use crate::kit::submit_consumer::{spawn_cancel_consumer, spawn_submit_consumer};
@@ -185,6 +188,10 @@ pub async fn run_kit_fullscreen(
     }
 
     let shutdown = CancellationToken::new();
+
+    // Issue #127：仅在显式 opt-in 且提供输出路径时启动，与 kit shutdown 共生命周期。
+    let memory_diagnostics_handle = MemoryDiagnosticsConfig::from_env()
+        .map(|config| spawn_memory_diagnostics(config, shutdown.clone()));
 
     // 3. service_snapshot 任务——无论是否配 ACP provider 都要启动：
     //    用户即使离线，也需要看到 CPU/MEM/Cron/Thread 列表。
@@ -485,6 +492,9 @@ pub async fn run_kit_fullscreen(
 
     // 6. 退出前触发 shutdown，让后台任务干净退出
     shutdown.cancel();
+    if let Some(handle) = memory_diagnostics_handle {
+        stop_memory_diagnostics(handle, std::time::Duration::from_secs(2)).await;
+    }
 
     // 7. teardown：hooks / MCP / Langfuse
     teardown_app(&mut app).await;
