@@ -1,8 +1,8 @@
 //! Sub-agent event handlers — SubagentStarted, SubagentStopped.
 
 use super::*;
-use crate::kit::atoms::BG_AGENT_IDS;
-use crate::kit::bg_task_identity::bind_linked_agent_on_subagent_started;
+use crate::kit::atoms::{BG_AGENT_IDS, BG_TASKS};
+use crate::kit::bg_task_identity::{bind_linked_agent_on_subagent_started, task_id_for_agent_id};
 use crate::kit::bg_task_live::{handle_bg_subagent_stopped, init_agent_live_detail};
 
 pub(super) fn handle_subagent_started(
@@ -48,8 +48,15 @@ pub(super) fn handle_subagent_stopped(
         "SubagentStopped: marking SubAgentGroup as done"
     );
     state.current_turn.stop_subagent(agent_id, is_error, result);
+    let task_id = task_id_for_agent_id(agent_id);
     if BG_AGENT_IDS.state().read().contains(agent_id) {
         handle_bg_subagent_stopped(agent_id, result, is_error);
+        if let Some(task_id) = task_id.as_deref() {
+            BG_TASKS
+                .state()
+                .write()
+                .retain(|task| task.task_id != task_id);
+        }
     }
     // 清理后台 agent_id 注册
     BG_AGENT_IDS.state().write().remove(agent_id);

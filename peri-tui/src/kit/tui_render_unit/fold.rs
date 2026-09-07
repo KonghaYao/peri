@@ -41,6 +41,8 @@ pub enum FoldKey {
     Reasoning(String),
     Tool(String),
     SubAgent(String),
+    /// Batched tool group keyed by the ordered member tool ids.
+    Group(Vec<String>),
     /// Interaction block 按事件携带的本地 request_id 键控；测试构造为 None 时
     /// `fold_key_of` 返回 None——与 reasoning 的 message_id 先例一致）。
     Interaction(String),

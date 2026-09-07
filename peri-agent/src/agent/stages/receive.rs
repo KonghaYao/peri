@@ -15,6 +15,10 @@ use crate::session::MessageKind;
 pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<ReceiveOutput> {
     let consumed = input.context.session.queue.drain_all();
     let count = consumed.len();
+    let wake_up_count = consumed
+        .iter()
+        .filter(|message| message.kind.wakes_up())
+        .count();
 
     // emit MessageQueueDrained（langfuse v2 遥测）
     {
@@ -71,6 +75,7 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
 
     Ok(ReceiveOutput {
         consumed_count: count,
+        wake_up_count,
     })
 }
 

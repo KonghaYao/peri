@@ -902,6 +902,7 @@ fn test_collapsed_group_hash_includes_failed_count() {
         count: 2,
         failed_count: 0,
         view_models: vec![],
+        fold: FoldState::Collapsed,
         content_hash: 0,
     };
     let mut a = base();
@@ -922,6 +923,10 @@ fn test_collapsed_group_hash_includes_failed_count() {
     d.count = 3;
     d.recompute_hash();
     assert_ne!(a.content_hash, d.content_hash);
+
+    let mut expanded = base();
+    expanded.fold = FoldState::Expanded;
+    assert_ne!(a, expanded, "仅 fold 不同时组也必须不相等");
 }
 
 // ── [Slice 4] TuiAskUserBlock：InteractionKind + pending/options/result hash ──

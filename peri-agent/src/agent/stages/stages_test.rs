@@ -35,8 +35,12 @@ fn test_compact_input_output_contract() {
 fn test_receive_input_output_contract() {
     let ctx = make_stage_context();
     let _input = ReceiveInput { context: ctx };
-    let output = ReceiveOutput { consumed_count: 0 };
+    let output = ReceiveOutput {
+        consumed_count: 0,
+        wake_up_count: 0,
+    };
     assert_eq!(output.consumed_count, 0);
+    assert_eq!(output.wake_up_count, 0);
 }
 
 #[test]
@@ -336,6 +340,64 @@ async fn test_run_react_loop_final_answer_at_iteration_limit_completes() {
     assert_eq!(events.llm_start_steps, vec![1]);
     assert_eq!(events.llm_end_steps, vec![1]);
     assert_single_turn_completed(&mut handles, 1);
+}
+
+#[tokio::test]
+async fn test_run_react_loop_info_only_does_not_wake_model() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let session = Session::new(
+        Arc::from("/tmp/micro-compact-info-only"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let turn = session.start_turn();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(CountingFinalAnswerLLM {
+            calls: Arc::clone(&calls),
+            answer: "must not run",
+        }))
+        .build();
+    context.session.queue.push(QueuedMessage::info(
+        MessageSource::SystemInjected,
+        BaseMessage::human("micro compact state update"),
+    ));
+
+    let result = run_react_loop(context.clone(), 1).await;
+
+    assert!(matches!(result, LoopResult::Completed));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(context.session.turn.current_step(), 0);
+    assert!(context.session.transcript.read().entries()[0]
+        .message
+        .content()
+        .contains("micro compact state update"));
+}
+
+#[tokio::test]
+async fn test_run_react_loop_defer_still_continues_to_model() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let session = Session::new(
+        Arc::from("/tmp/defer-continuation"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let turn = session.start_turn();
+    let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_llm(Arc::new(CountingFinalAnswerLLM {
+            calls: Arc::clone(&calls),
+            answer: "continued",
+        }))
+        .build();
+    context.session.queue.push(QueuedMessage::defer(
+        MessageSource::SubAgentComplete,
+        BaseMessage::human("real deferred result"),
+    ));
+
+    let result = run_react_loop(context.clone(), 1).await;
+
+    assert!(matches!(result, LoopResult::Completed));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(context.session.turn.current_step(), 1);
 }
 
 /// [回归测试] 零预算仍必须先进入 Receive，空队列由 Receive 唯一判定正常完成。

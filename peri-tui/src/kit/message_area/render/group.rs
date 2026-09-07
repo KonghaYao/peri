@@ -1,7 +1,7 @@
 use crate::i18n;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{
-    EntryStatus, TuiCollapsedGroup, TuiRenderUnit, TuiSubAgentGroup, TuiToolCard,
+    EntryStatus, FoldState, TuiCollapsedGroup, TuiRenderUnit, TuiSubAgentGroup, TuiToolCard,
 };
 use crate::truncate::truncate_by_width;
 use fluent_bundle::FluentValue;
@@ -252,7 +252,13 @@ pub(super) fn render_collapsed_group_lines(
     grid: &GridSpec,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
-    let mut spans = first_prefix(grid, sym().collapsed, Style::default().fg(sem.text.dim));
+    let expanded = data.fold == FoldState::Expanded;
+    let symbol = if expanded {
+        sym().expanded
+    } else {
+        sym().collapsed
+    };
+    let mut spans = first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
     // 先截 title 使 (title + failed 后缀) 总宽 ≤ content——失败数不可被截断吞掉
     // （§15「error 永不隐藏」），title 截断在前。
     let suffix = if data.failed_count > 0 {
@@ -266,8 +272,12 @@ pub(super) fn render_collapsed_group_lines(
     } else {
         String::new()
     };
-    let keep = grid.content_width().saturating_sub(suffix.width()).max(1);
+    let hint = format!(" · {}", i18n::tr("render-group-toggle-hint"));
+    // symbol/title/failed suffix 是主信息；hint 仅在完整容纳时追加，绝不截成残片。
+    let content_width = grid.content_width();
+    let keep = content_width.saturating_sub(suffix.width()).max(1);
     let title_trunc = truncate_by_width(&data.title, keep);
+    let show_hint = title_trunc.width() + suffix.width() + hint.width() <= content_width;
     spans.push(Span::styled(
         title_trunc,
         Style::default().fg(sem.text.muted),
@@ -275,5 +285,15 @@ pub(super) fn render_collapsed_group_lines(
     if !suffix.is_empty() {
         spans.push(Span::styled(suffix, Style::default().fg(sem.status.error)));
     }
-    vec![Line::from(spans)]
+    if show_hint {
+        spans.push(Span::styled(hint, Style::default().fg(sem.text.dim)));
+    }
+    let mut lines = vec![Line::from(spans)];
+    if expanded {
+        let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+        for vm in &data.view_models {
+            lines.extend(super::vm_to_lines_cached(vm, grid, &mut md_cache, false).0);
+        }
+    }
+    lines
 }

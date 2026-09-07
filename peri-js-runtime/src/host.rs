@@ -220,7 +220,10 @@ impl JsExecutionHost {
         grace: Duration,
     ) -> Result<std::process::ExitStatus> {
         self.channel.drain_pending(reason);
-        let _ = self.child.lock().await.try_wait()?;
+        if let Some(status) = self.child.lock().await.try_wait()? {
+            self.join_readers().await;
+            return Ok(status);
+        }
         self.process_tree
             .terminate(grace)
             .await

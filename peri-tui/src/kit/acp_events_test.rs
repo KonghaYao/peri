@@ -106,6 +106,97 @@ fn reasoning_of(snapshot: &ViewModelsSnapshot, idx: usize) -> &TuiReasoningBlock
 
 #[test]
 #[serial]
+fn test_subagent_stopped_removes_only_matching_active_agent() {
+    let mut state = make_fold_test_state();
+    BG_TASKS.state().write().clear();
+    BG_AGENT_IDS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+
+    for (task_id, agent_id) in [
+        ("task-done", "agent-done"),
+        ("task-running", "agent-running"),
+    ] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::BgTaskStarted(BgTaskEntry {
+                task_id: task_id.into(),
+                kind: "agent".into(),
+                summary: task_id.into(),
+                started_at: String::new(),
+                pid: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStarted {
+                agent_id: agent_id.into(),
+                agent_name: "coder".into(),
+                is_background: true,
+            },
+        );
+    }
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "agent-done".into(),
+            result: "done".into(),
+            is_error: false,
+        },
+    );
+
+    let tasks_store = BG_TASKS.state();
+    let tasks = tasks_store.read();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].task_id, "task-running");
+}
+
+#[test]
+#[serial]
+fn test_unknown_subagent_stopped_keeps_running_agents() {
+    let mut state = make_fold_test_state();
+    BG_TASKS.state().write().clear();
+    BG_AGENT_IDS.state().write().clear();
+    BG_DISPLAY.state().write().clear();
+    BG_TASK_IDENTITY.state().write().clear();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(BgTaskEntry {
+            task_id: "task-running".into(),
+            kind: "agent".into(),
+            summary: "running".into(),
+            started_at: String::new(),
+            pid: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "agent-running".into(),
+            agent_name: "coder".into(),
+            is_background: true,
+        },
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "stale-agent".into(),
+            result: "cancelled".into(),
+            is_error: true,
+        },
+    );
+
+    let tasks_store = BG_TASKS.state();
+    let tasks = tasks_store.read();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].task_id, "task-running");
+}
+
+#[test]
+#[serial]
 fn test_llm_retrying_injects_warning_system_note() {
     let mut state = make_fold_test_state();
 

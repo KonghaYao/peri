@@ -20,6 +20,18 @@ fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
 }
 
 #[test]
+fn test_agent_wrapped_content_fills_scroll_buffer_to_last_row() {
+    let lines = vec![ratatui_kit::ratatui::text::Line::from("你好世界abcd")];
+    let content_height = wrapped_content_height(&lines, 5);
+    let viewport_height = 2u16;
+    let bottom_offset = content_height.saturating_sub(viewport_height);
+
+    assert_eq!(content_height, 3);
+    assert!(content_height > viewport_height);
+    assert_eq!(bottom_offset + viewport_height, content_height);
+}
+
+#[test]
 fn test_collect_subagents_empty_snapshot() {
     let snap = ViewModelsSnapshot::default();
     assert!(collect_subagents(&snap).is_empty());
@@ -79,6 +91,7 @@ fn test_collect_subagents_recurses_into_collapsed_group() {
         view_models: vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
             "hidden", "Hidden",
         ))],
+        fold: crate::kit::tui_render_unit::FoldState::Collapsed,
         content_hash: 0,
     };
     let snap = ViewModelsSnapshot {

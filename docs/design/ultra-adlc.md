@@ -13,7 +13,7 @@
 ## 1. 摘要
 
 Ultra-ADLC 是构建在 Peri Main Agent、builtin skill、`Workflow` deferred tool、
-`AskUserQuestion` 和文件系统之上的超大规模交付模式。用户只需要用自然语言表达
+受限场景下的 `AskUserQuestion` 和文件系统之上的超大规模交付模式。用户只需要用自然语言表达
 目标：
 
 ```text
@@ -33,9 +33,9 @@ Workflow resume 能力表达。
 
 ```text
 自然语言目标
-  → Workflow 1：环境发现与设计
-  → Main Agent：AskUserQuestion
-  → Workflow 2：完整实现与收敛
+  → Workflow 1：环境发现、设计与独立裁决
+  → 默认直接进入 Workflow 2：完整实现与收敛
+  → 缺失用户意图或授权时：Main Agent AskUserQuestion
   → 单一 Completion Assessor
   → 证据与 Agent 表现记录
 ```
@@ -47,7 +47,8 @@ Workflow resume 能力表达。
 ### 2.1 目标
 
 1. 为超大规模任务提供只有一行自然语言的用户接口。
-2. 让 Agent 先调查环境，再向用户询问只有用户能够决定的问题。
+2. 让 Agent 先调查环境，再由独立高阶模型裁决当前意图和授权范围内的可逆选择；
+   只把缺失的用户意图或权限问题交回用户。
 3. 用两个逻辑 Workflow 隔离“发现与设计”和“实现与收敛”。
 4. 使用 Peri `fable`、`opus`、`sonnet`、`haiku` Profile 按节点分配认知成本。
 5. 最大化有效并发，缩短关键路径，而不是最大化 Agent 数量。
@@ -74,7 +75,8 @@ Workflow resume 能力表达。
 | 术语 | 定义 |
 | --- | --- |
 | ADLC Task | 从自然语言目标开始，到完整证据交付结束的一次超大规模任务 |
-| Main Agent | 用户接口和总协调者；唯一可以调用中间决策 `AskUserQuestion` 的执行主体 |
+| Main Agent | 用户接口和总协调者；验证独立裁决的 revision、证据和权限边界，必要时调用 `AskUserQuestion` |
+| Decision Arbiter | Workflow 1 中未参与发现、设计或综合的 fresh `opus`/`fable` Agent；在现有意图与授权内作有约束力的可逆选择 |
 | Workflow 1 | `discovery-design`，负责发现、候选设计、风险分析和决策材料 |
 | Workflow 2 | `delivery-convergence`，负责全量实现、集成、验证和完成度收敛 |
 | Work Package | `execution.md` 中可独立分派和验收的最小工作包 |
@@ -83,8 +85,9 @@ Workflow resume 能力表达。
 | Completion Assessor | 每轮仅一个、使用全新上下文、只读评估任务完成度的 Agent |
 | Evolution Record | 任务完成后保存的 Agent 表现与路由改进信号 |
 
-Ultra-ADLC 是一个深模块。它对用户暴露的接口只有自然语言目标和必要的用户决策，
-环境发现、模型路由、并发、文件交接、恢复、验证和收敛都属于其内部实现。
+Ultra-ADLC 是一个深模块。它对用户暴露的接口只有自然语言目标，以及无法由当前目标、
+证据和授权边界裁决的必要问题；环境发现、模型路由、并发、文件交接、恢复、验证和收敛
+都属于其内部实现。
 
 ---
 
@@ -107,19 +110,51 @@ Ultra-ADLC 是一个深模块。它对用户暴露的接口只有自然语言目
 ### ADLC-WORKFLOW-001
 
 - **Scope**：逻辑编排。
-- **Rule**：正常路径只有两个逻辑 Workflow；Workflow 1 与 Workflow 2 之间由
-  Main Agent 执行用户决策。修复循环属于 Workflow 2，resume 产生的新 run_id
-  仍归同一个逻辑 Workflow 2。
+- **Rule**：正常路径只有两个逻辑 Workflow；Workflow 1 在内部完成独立裁决后，
+  Main Agent 校验并接受裁决，再启动 Workflow 2。只有裁决合法返回 `needs_user` 时才
+  进入用户决策。修复循环属于 Workflow 2，resume 产生的新 run_id 仍归同一个逻辑
+  Workflow 2。
 - **Verify**：manifest 始终只含 `discoveryDesign` 与 `deliveryConvergence` 两个
   逻辑槽位，每个槽位允许记录多个物理 run_id。
+
+### ADLC-ARBITRATION-001
+
+- **Scope**：Workflow 1 裁决与用户升级。
+- **Rule**：Workflow 1 的 synthesizer 只生成 revisioned Decision Packet 和推荐，不得
+  自我批准；packet revision 使用唯一、不可覆盖的文件。Main Agent 对安全 canonicalize 后的
+  精确文件 bytes 计算并在每次裁决前后复核可信 SHA-256。随后由未参与发现、设计或综合的
+  fresh independent `opus` Decision Arbiter 默认裁决。合法 `decided` 在现有 intent/authority
+  内对 Main Agent 有约束力；缺少可发现的技术证据返回 `needs_evidence`；只有缺失产品意图、
+  新授权、secret/外部状态、法律或财务接受、不可逆动作、无法从目标推导的重大用户结果差异
+  可返回 `needs_user`。完整 packet 经两次 fresh Opus 仍无法形成合法裁决时才升级 fresh
+  `fable`；三个 attempt 必须绑定相同 packet ID、revision、path 和 fingerprint，纠错 attempt
+  只重跑裁决，不得重新 discovery/design/synthesis；`fable` 不得创造意图或授权。
+- **Verify**：契约测试锁定 `ADLC/W1/Arbitrate`、Decision Packet/Record schema、默认 Opus、
+  不可变 packet SHA-256、裁决专用重试、条件 Fable 升级和 `needs_user` 枚举；受控 provider
+  eval 证明普通可逆技术选择不提问，新授权与缺失产品意图必然提问。
 
 ### ADLC-HITL-001
 
 - **Scope**：用户决策。
-- **Rule**：Workflow Agent 不得承担中间用户提问。Workflow 1 完成后，Main Agent
-  读取 `decision-brief.md`，通过现有 `AskUserQuestion` 工具提问，再启动 Workflow 2。
-- **Verify**：关闭 `HumanInTheLoopMiddleware` 时，Ultra-ADLC preflight 安全失败；
-  Workflow Agent 工具视图不需要新增 `AskUserQuestion`。
+- **Rule**：Workflow Agent 不得直接向用户提问。只有合法 Decision Arbiter 结果为
+  `needs_user` 时，Main Agent 才通过现有 `AskUserQuestion` 提问；工具不可用仅在该分支
+  形成真实 `blocked`，不能阻塞默认自动裁决路径。产品裁决不替代 PermissionMiddleware
+  的敏感工具审批。
+- **Verify**：关闭 `HumanInTheLoopMiddleware` 时，普通 `decided` 路径仍能进入 Workflow 2；
+  `needs_user` 路径明确 `blocked`；Workflow Agent 工具视图不新增 `AskUserQuestion`。
+
+### ADLC-PROGRESS-001
+
+- **Scope**：主管可见的中间、阻塞、恢复、评估与最终汇报。
+- **Rule**：Requirement、Work Package、Decision、Gap 的 ID 必须同时展示语义内容，禁止
+  只列编号。每次汇报包含整体百分比、四维分项、公式、denominator revision、当前阶段及
+  完成/进行中/剩余/阻塞。四维分别是当前 revision 的需求覆盖率、工作包完成率、验收证据
+  通过率（包含已接受 Verification Plan 的必需检查）和缺口关闭率；进行中不计部分分。
+  `overall_progress_percent` 取四者最小值，不得取平均。已发现 Gap 必须保留在分母直至有
+  当前证据证明关闭；尚无 Gap 时缺口关闭率定义为 100%。范围或完成条件变化递增 denominator
+  revision；百分比 100% 不替代 Completion Assessor verdict。
+- **Verify**：契约测试锁定 semantic content 与 conservative-min 公式；示例输入
+  75%/80%/60%/90% 的整体进度必须为 60%，scope revision 可解释百分比下降。
 
 ### ADLC-HANDOFF-001
 
@@ -206,7 +241,7 @@ Ultra-ADLC 是一个深模块。它对用户暴露的接口只有自然语言目
 | SkillsMiddleware / SkillPreload | 载入 `/ultra-adlc` 完整操作协议 |
 | ToolSearch | 发现 deferred `Workflow` 工具 |
 | Workflow Tool | 启动两个异步 Workflow |
-| HumanInTheLoopMiddleware | Main Agent 的中间决策问题 |
+| HumanInTheLoopMiddleware | 仅承载无法由当前意图与授权裁决的用户问题 |
 | PermissionMiddleware | 风险操作审批；不得与提问通道混为一体 |
 | Workflow completion notification | Workflow 完成后唤醒 Main Agent 继续流程 |
 | `/workflows` | 展示 run、phase、Agent、token 与工具统计 |
@@ -217,13 +252,16 @@ Ultra-ADLC 是一个深模块。它对用户暴露的接口只有自然语言目
 Main Agent 必须在启动 Workflow 1 前执行 capability preflight：
 
 1. `ultra-adlc` skill 已成功加载；
-2. 当前 session-local 工具视图包含 `AskUserQuestion`；
+2. 检测当前 session-local 工具视图是否包含 `AskUserQuestion`，但仅在后续合法
+   `needs_user` 分支缺失该工具时阻塞；
 3. deferred 目录可以发现并执行 `Workflow`；
 4. Node runner 可用，或 Workflow 快速失败能被同步报告；
 5. `{cwd}/.peri/adlc/` 可安全创建和写入；
-6. 所需 Peri Profile 能解析到可用 provider/model。
+6. `haiku`、`sonnet` 与默认裁决所需 `opus` 可解析到可用 provider/model；条件升级触发
+   时再确认 `fable`。
 
-任何一项失败都应在昂贵的 Workflow fan-out 前停止。
+任何普通执行所需能力失败都应在昂贵的 Workflow fan-out 前停止；可选用户交互能力和
+条件升级能力只在实际进入对应分支时形成阻塞。
 
 ### 5.2 不新增事件链
 
@@ -276,6 +314,7 @@ slug 只允许小写 ASCII 字母、数字和连字符；冲突时递增 `NN`。
 │       │   ├── designs/
 │       │   ├── reviews/
 │       │   ├── test-results/
+│       │   ├── progress/
 │       │   └── workflow-provenance/
 │       └── learning/
 │           └── agent-performance.md
@@ -329,7 +368,7 @@ ADLC 不迁移或复制它。`manifest.json` 记录逻辑 Workflow 与物理 run
   "schema": "peri.adlc/task-v1",
   "adlcId": "2026-09-01-workflow-resume",
   "title": "实现工作流断点恢复",
-  "status": "awaiting_user_decision",
+  "status": "discovering",
   "contracts": {
     "intent": { "path": "contracts/intent.md", "revision": 1 },
     "execution": { "path": "contracts/execution.md", "revision": 0 },
@@ -343,7 +382,16 @@ ADLC 不迁移或复制它。`manifest.json` 记录逻辑 Workflow 与物理 run
   },
   "decision": {
     "status": "pending",
-    "brief": "handoffs/workflow-1/decision-brief.md"
+    "packet": null,
+    "record": null,
+    "source": null,
+    "attempts": [],
+    "arbiterAgentId": null,
+    "arbiterProfile": null
+  },
+  "progress": {
+    "snapshotRevision": 0,
+    "denominatorRevision": "bootstrap-0"
   },
   "completion": { "round": 0, "verdict": null }
 }
@@ -368,7 +416,8 @@ cancelled
 ```mermaid
 stateDiagram-v2
     [*] --> discovering
-    discovering --> awaiting_user_decision: Workflow 1 完成
+    discovering --> planning_delivery: 独立裁决有效
+    discovering --> awaiting_user_decision: 裁决返回 needs_user
     awaiting_user_decision --> planning_delivery: 用户回答
     planning_delivery --> delivering: execution.md 接受
     delivering --> verifying: 工作包汇合
@@ -394,8 +443,8 @@ stateDiagram-v2
 
 ### 8.1 `intent.md`：用户与 Main Agent 的接口
 
-回答“为什么做、用户最终得到什么”。由 Main Agent 根据原始目标、Workflow 1 结果和
-用户回答维护。
+回答“为什么做、用户最终得到什么”。由 Main Agent 根据原始目标、Workflow 1 结果、
+有效 Decision Record 和必要时的用户回答维护。
 
 必需字段：
 
@@ -413,8 +462,9 @@ stateDiagram-v2
 ## Stop and Escalation Conditions
 ```
 
-用户可见行为、明确非目标和用户决策只能在此处成为任务事实。用户改变目标时递增
-`intent_revision`，并使受影响的下游工作包失效。
+用户选择可以修改用户可见行为、明确非目标或授权。有效 arbiter Decision Record 只能
+在原始目标和当前授权已允许的结果中选择，不得扩张意图或权限。被接受的 intent 语义
+变化时递增 `intent_revision`，并使受影响的下游工作包失效。
 
 ### 8.2 `execution.md`：Main Agent 与 Workflow Agent 的接口
 
@@ -433,6 +483,8 @@ Workflow 脚本只把这里的工作包编译为现有原语。
 ## Impacted Areas
 ## Work Packages
 ## Completion Ledger
+## Decision Arbitration
+## Progress Reporting
 ## Model Routing
 ## Concurrency and Write Ownership
 ## Verification Plan
@@ -444,6 +496,7 @@ Workflow 脚本只把这里的工作包编译为现有原语。
 
 ```text
 id
+semantic title
 goal
 dependencies
 profile
@@ -509,6 +562,7 @@ logical_workflow: delivery-convergence
 phase: implementation
 round: 1
 work_package: WP-017
+work_package_title: 实现升级失败事务回滚
 agent_id: impl-runtime-02
 role: implementation
 profile: sonnet
@@ -570,8 +624,25 @@ execution_revision: 1
 1. 调查仓库事实、现有行为、测试 seam、架构契约和历史问题；
 2. 找出可以由环境回答的事实，避免向用户提技术问题；
 3. 形成多个可比较的候选方案；
-4. 分析用户可见差异、风险、成本和兼容性；
-5. 生成 `decision-brief.md`、`intent.md` 草案和 `execution.md` 草案。
+4. 分析用户可见差异、风险、成本、兼容性、可逆性和权限需求；
+5. 由 Opus synthesizer 生成 revisioned `decision-packet.md`、`intent.md` 草案和
+   `execution.md` 草案，但不作最终裁决；
+6. 由未参与前序工作的 fresh independent Opus Decision Arbiter 输出
+   `decided | needs_evidence | needs_user | invalid`。
+
+Workflow 1 可以有多个物理 run，但都追加在 `discoveryDesign` 这一逻辑槽位。首次或
+`needs_evidence` 后的 `prepare_packet` run 执行发现、设计和综合，只写入带 prepare run id 的
+唯一 candidate artifact，然后以 `packet_ready` 返回。Main Agent 校验 canonical task root 内的
+regular、non-symlink candidate，读取精确 bytes，再以 exclusive-create/no-overwrite 原语发布到
+缺失的 revision final path；final path 已存在或平台无法保证不覆盖时 fail closed。Main Agent
+重新打开 final file，对精确 bytes 计算 `sha256:<lowercase-hex>`，并将 ID、revision、path、
+fingerprint 写入 `manifest.decision.packet`。
+
+之后每个 `arbitrate` run 只执行裁决。Main Agent 在启动前一次读取并验证 final packet，把该次
+读取的 exact bytes 与 matching fingerprint 直接注入 arbiter prompt，因此 arbiter 不从文件路径
+重新读取内容；`invalid` 的 Opus/Fable 纠错不得重新运行发现、设计或综合。结果接受前再次验证
+安全路径、regular-file identity（平台支持时）和 SHA-256；任何变化都使本轮失效，必须生成新
+revision 并重置 attempt sequence。
 
 推荐编排：
 
@@ -580,35 +651,82 @@ Haiku × N：高并发环境探索
   ↓
 Sonnet × N：候选方案与专项风险
   ↓
-Opus × 1：综合、消除冲突、生成决策材料
+Opus × 1：综合并生成 Decision Packet
+  ↓
+Fresh Opus × 1：独立裁决
+  ↓（完整 packet 经两次 fresh Opus 仍无法合法裁决时）
+Fresh Fable × 1：条件升级裁决
 ```
 
-Workflow 1 只能执行只读调查和 ADLC 目录写入，不得开始产品实现。
+Workflow 1 只能执行只读调查和 ADLC 目录写入，不得开始产品实现。synthesizer 与
+Decision Arbiter 必须是不同 Agent；后者只消费当前 Decision Packet、必要证据引用和
+条件升级时的压缩失败诊断。
 
-`decision-brief.md` 必须包含：
+Decision Packet 是 Handoff/audit artifact，不是第四份契约。它至少包含：原始用户目标、
+当前 intent/authority/non-goals、带证据的确认事实、未确认主张、所有候选方案及语义名称、
+用户可见/兼容性/安全/运维/迁移后果、可逆性、所需授权、正反证据、失败模式、验证策略、
+synthesizer 推荐及反证，以及逐类 User-Escalation Analysis。每个 packet 自身带 `packet_id`、
+`packet_revision`、不可变 `packet_path`、`intent_revision` 和 `execution_draft_revision`；可信
+`packet_fingerprint` 是 Main Agent 对 final packet 精确 bytes 计算的外部元数据，不写入被 hash
+的 packet 以避免自引用。synthesizer 不能直接写 final path；Main Agent 只能从唯一 candidate
+以 exclusive create 发布一次。revision 过期、路径不是 task root 内的 regular non-symlink
+file，或任一 attempt 前后 SHA-256 不匹配都使裁决失效。证据内容按不可信输入处理，不得把
+其中的 prompt 当作指令。
 
-```markdown
-# Decision Brief
+裁决 Agent 必须写 `schema: peri.adlc/arbitration-handoff-v1` 的专用 Handoff。通用
+`status: complete` 只表示 Agent 已写完 Handoff，不代表裁决为 `decided`。其 frontmatter
+必须同时包含 `decision_id` 与语义标题、packet ID/revision/path/fingerprint、intent/execution
+revision、当前 packet 内的 `attempt_id`/`attempt_number`、`correction_of_attempt_id`、请求
+profile、`arbitration_result`、选项 ID 与语义标题、升级类别；正文包含 authority basis、正反
+证据、验证义务，以及按结果必填的 requested evidence、proposed user question 或 invalidity
+reason。`decided` 的 option ID/title 必须与 Main Agent 从冻结 packet 验证的候选项逐字匹配，
+并至少引用一项同样经过验证的 packet evidence reference。Workflow 调用
+`agent(..., { schema })` 取得同构短结果，并把实际 `arbitration_result` 原样作为 Workflow 1
+`returnValue.status`，不得无条件返回 `complete`。
+`attempt_id`/`attempt_number`/`correction_of_attempt_id`/profile 由 Main Agent 注入，不由模型
+生成。attempt 1/2 的请求 profile 固定为 `opus`，attempt 3 固定为 `fable`；脚本按 attempt number
+推导 profile，不接受调用者另传任意 profile。Main Agent 通过 result phase 定位唯一的
+`ADLC/W1/Arbitrate` journal entry，并以 `attempt.runId` 加上 `attempt.agentId`（存在时）或
+entry `seq` 建立可信执行 identity：fresh 必须是当前 run 中的 `disposition: produced`、无
+`recoveredFrom`，并且 identity tuple 未被此前裁决使用；journal 的
+resolved model 还必须与该 profile 当前解析出的模型一致。每次验证结果及 provenance 追加到
+`manifest.decision.attempts`，后续物理 run 只接受这些记录作为 prior attempts。attempt 2 必须引用
+同 packet ID、revision、path 和 fingerprint 的 fresh failed Opus attempt 1；attempt 3 必须引用
+同一完整 packet 内容上两个 identity 不同的 fresh failed Opus attempt，且为首次 Fable 请求。
+模型自报 identity 或 fingerprint 不构成证据。
 
-## Confirmed Environment Facts
-## Recommended Outcome
-## Decisions Only the User Can Make
-## Options and User-visible Consequences
-## Recommended Defaults
-## Risks That Need Explicit Acceptance
-```
+裁决 Handoff path 由 Main Agent 预先计算，必须包含唯一 `attempt_id`，例如
+`handoffs/workflow-1/arbitration-D-001-r1-ARB-002.md`；启动前必须不存在，且不得与 prior
+attempt 共用。路径不得为绝对路径或含 `..`；run 后 canonicalize 新建的 regular non-symlink
+file，确认仍位于 canonical task root，并把可信 Handoff SHA-256 写入 attempt record。
+`decision_id`、语义标题、全部 revision、attempt chain、profile、identity、packet/handoff
+fingerprint 和 path 任一不匹配都按 `invalid` 处理。
 
-### 10.2 中间用户决策
+Decision Record 使用 `schema: peri.adlc/decision-record-v1`，记录 `decision_id` 及其完整
+语义、packet/contract revision、`decision_source: arbiter | user`、arbiter id/profile、
+选中方案及语义、binding scope、权限依据、正反证据、用户可见后果、可逆性、升级类别、
+对 Requirement/Work Package 的语义影响和验证义务。Main Agent 只校验 schema、revision、
+证据存在性、独立性与权限边界；有效 arbiter 裁决不得因偏好被重新询问用户或覆盖。
+裁决本身不授予 commit、deploy、删除数据或外部写入权限。
 
-Workflow 1 异步完成后，经现有 Workflow completion notification 唤醒 Main Agent。
-Main Agent 读取 `decision-brief.md`，调用 `AskUserQuestion`：
+### 10.2 裁决接受与例外用户决策
 
-- 每轮只问影响用户结果、范围、风险或不可逆行为的问题；
-- 不问文件、crate、测试命令或普通实现细节；
-- 每个问题给出背景、互斥选项、推荐项和后果；
-- 用户回答写入 `decisions/decision-001.md` 和 `intent.md`；
-- 用户选择“由你决定”时采用推荐默认项；
-- 决策完成后生成被接受的 `intent.md` 与 `execution.md`，再启动 Workflow 2。
+Workflow 1 的 `prepare_packet` 或 `arbitrate` 物理 run 异步完成后，经现有 Workflow
+completion notification 唤醒 Main Agent。`packet_ready` 只进入 Main Agent 的安全路径和 hash
+验证，不是裁决结果。裁决 run 的处理规则是：
+
+- `decided`：Main Agent 校验后持久化 `decisions/decision-001.md`，接受 intent/execution，
+  不调用 `AskUserQuestion`，直接启动 Workflow 2；
+- `needs_evidence`：回到 Workflow 1 补充可发现事实并递增 packet revision，不向用户提问；
+- `invalid`：以新的 fresh Opus 修复重试；完整 packet 经两次 fresh Opus 仍失败时才升级
+  fresh Fable，Fable 仍失败或不可用则 `blocked`；
+- `needs_user`：仅当缺失产品意图、新授权、secret/外部状态、法律或财务接受、不可逆动作、
+  或无法从目标推导的重大用户结果差异时成立。Main Agent 此时才调用 `AskUserQuestion`，
+  每轮至多四问，给出背景、互斥选项、推荐项和后果；用户回答生成新的
+  `decision_source: user` Decision Record，再启动 Workflow 2。
+
+Workflow Agent 始终不直接向用户提问。模型能力更强不能替代真实用户意图或授权；
+PermissionMiddleware 的敏感工具审批也不能被 Decision Record 取代。
 
 ### 10.3 Workflow 2：`delivery-convergence`
 
@@ -653,7 +771,7 @@ Ultra-ADLC 使用 Peri 已有 Profile，而不是写死具体供应商模型：
 | --- | --- | --- |
 | `haiku` | 搜索、批量提取、确定性检查、证据整理、低风险专项 review | 跨模块架构裁决 |
 | `sonnet` | 主体实现、局部设计、集成、复杂修复、常规正确性 review | 极高杠杆且不可快速验证的决策 |
-| `opus` | 需求综合、全局分解、架构冲突、高风险 review、Completion Assessor | 大规模机械搜索 |
+| `opus` | 需求综合、全局分解、默认独立 Decision Arbiter、架构冲突、高风险 review、Completion Assessor | 大规模机械搜索 |
 | `fable` | Opus 连续收敛失败后的根因裁决、最高风险重规划 | 常规默认路径 |
 
 效率以预期总成本衡量：
@@ -674,9 +792,11 @@ expected_total_cost =
 3. 主体编码和大多数修复使用 `sonnet`；
 4. `haiku` 输出冲突、证据不足或连续失败时升级 `sonnet`；
 5. `sonnet` 遇到跨模块契约或高风险冲突时升级 `opus`；
-6. Opus 在多轮收敛中仍无法形成完整方案时才升级 `fable`；
-7. 升级后的 Agent 消费压缩 Handoff，不重新扫描全部仓库；
-8. Profile 错配是协调/路由缺陷，不应转嫁为 Worker 表现扣分。
+6. Decision Arbiter 首次及一次 correction retry 均使用互相独立的 fresh `opus`；
+   只有完整 packet 经两次 Opus 仍不能形成合法裁决时才升级 fresh `fable`；
+7. Opus Completion Assessor 在多轮收敛中仍无法形成完整判定时才升级 `fable`；
+8. 升级后的 Agent 消费压缩 Handoff，不重新扫描全部仓库；
+9. Profile 错配是协调/路由缺陷，不应转嫁为 Worker 表现扣分。
 
 ---
 
@@ -741,14 +861,16 @@ WP-C：plan → implement → self-test → handoff
 `execution.md` 必须维护全量映射：
 
 ```markdown
-| Requirement | Work Packages | Implementation | Verification | Status |
-| --- | --- | --- | --- | --- |
-| R-001 | WP-001, WP-002 | pending | pending | pending |
-| R-002 | WP-003 | pending | pending | pending |
+| Requirement | Requirement summary | Work Packages | Work-package summaries | Implementation | Verification | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| R-001 | 升级失败时保留原插件 | WP-001, WP-002 | 事务安装；失败回滚 | pending | pending | pending |
+| R-002 | 用户可恢复上一版本 | WP-003 | 实现版本恢复命令 | pending | pending | pending |
 ```
 
 每条 intent requirement 必须映射到至少一个 Work Package；每个 Work Package 必须映射
-到实现产物和独立证据。未映射项自动视为未完成。
+到实现产物和独立证据。未映射项自动视为未完成。所有主管可见的 Requirement、Work
+Package、Decision 和 Gap 必须使用 `ID — semantic content` 或独立 semantic summary 列；
+只列 `R-001`、`WP-003`、`D-002`、`G-01` 等编号属于无效汇报。
 
 ### 13.2 Completion Assessor
 
@@ -856,6 +978,7 @@ Phase：
 ADLC/W1/Discover
 ADLC/W1/Design
 ADLC/W1/Synthesize
+ADLC/W1/Arbitrate
 ADLC/W2/Decompose
 ADLC/W2/Implement/Round-N
 ADLC/W2/Integrate/Round-N
@@ -864,22 +987,52 @@ ADLC/W2/Assess/Round-N
 ADLC/W2/Converge/Round-N
 ```
 
-Agent label：
+Agent label 必须带语义内容，不能让主管只看到编号：
 
 ```text
-WP-017 · implementation · sonnet
-R-004 · verification · haiku
+WP-017 · 实现升级失败事务回滚 · implementation · sonnet
+R-004 · 旧版配置保持可读 · verification · haiku
 completion-assessor · opus
 ```
 
+Main Agent 在 preflight、Workflow 完成、裁决、round 切换、assessment、blocked、cancelled
+和最终交付时写一份不可变 `schema: peri.adlc/progress-snapshot-v1` 快照到
+`artifacts/progress/`，并用同一内容向主管汇报。每份快照包含当前 phase、intent/execution/
+verification revision、`denominator_revision`、四维完成/进行中/剩余/阻塞计数、每个 ID 的
+semantic content、决策、缺口和风险。正式分母尚未接受时报告 `bootstrap-0` 与 `0.00%`。
+
+对当前 denominator revision `d`，Requirements、Work Packages、required acceptance-evidence
+items（包含已接受 Verification Plan 的必需检查）和 tracked Gaps 分别按“有当前、可归属、
+可复查证据的完成项 / 总项”计算；进行中、剩余和阻塞均计 0，不给部分分。已发现 Gap 保留
+在分母直至有当前证据证明关闭；尚无 Gap 时该维定义为 100%。整体进度为：
+
+```text
+overall_progress_percent = min(
+  requirements_percent,
+  work_packages_percent,
+  acceptance_evidence_percent,
+  gap_closure_percent
+)
+```
+
+显示四舍五入到两位，比较使用未舍入比值。不得取平均。项目增删、拆分/合并或完成条件
+发生语义变化时递增 `denominator_revision`。`denominator_fingerprint` 必须来自所有分母
+entry 的确定性 canonical serialization，绑定 dimension、ID、完整 semantic content、completion
+condition、required/optional 标记及关联 contract/plan revision；只更新证据状态时仅递增
+snapshot revision。范围扩大导致百分比下降应报告为分母修订，不是执行回归；缩小范围只允许
+显式用户 intent revision 或有 Decision Record 的重复/错误条目修正。100% 进度仍不替代
+Completion Assessor verdict。
+
 Main Agent 的最终消息必须给出：
 
-1. 用户结果；
-2. `contracts/evidence.md` 路径；
-3. Completion Assessor verdict；
-4. 两个逻辑 Workflow 的 run_id；
-5. 剩余风险；
-6. `learning/agent-performance.md` 路径。
+1. 用户结果与 `overall_progress_percent`；
+2. denominator revision、四维分项和计算口径；
+3. `contracts/evidence.md` 路径；
+4. Completion Assessor verdict；
+5. 两个逻辑 Workflow 的 run_id；
+6. 带语义内容的完成项、剩余项、缺口与阻塞；
+7. 剩余风险；
+8. `learning/agent-performance.md` 路径。
 
 ---
 
@@ -919,19 +1072,31 @@ sequenceDiagram
 
     A->>D: 写 Workflow 1 Handoff
     W->>A: Sonnet · 候选方案
-    W->>A: Opus · 综合与 decision brief
-    A->>D: 写 decision-brief.md
-    W->>R: Workflow 1 完成
+    W->>A: Opus synthesizer · Decision Packet candidate
+    A->>D: 写唯一 candidate artifact
+    W->>R: prepare_packet run 完成
+    W-->>M: 完成通知 + defer 唤醒
+    M->>D: 校验 candidate，以 exclusive create 发布 final packet 并计算 SHA-256
+    M->>W: 启动 arbitrate run，注入 exact packet bytes
+    W->>A: Fresh Opus · independent Decision Arbiter
+    A->>D: 写 attempt-unique arbitration Handoff
+    W->>R: arbitrate run 完成
     W-->>M: 完成通知 + defer 唤醒
 
-    M->>D: 读取 decision brief
-    M->>Q: 提出用户决策
-    Q->>T: 展示结构化问题
-    T->>U: 选项、推荐与影响
-    U-->>T: 用户选择
-    T-->>Q: 返回答案
-    Q-->>M: 返回结构化决策
-    M->>D: 写 decision、接受 intent 与 execution
+    M->>D: 复核 packet/Handoff、revision、SHA-256、证据与权限
+    alt decided（默认路径）
+        M->>D: 写 arbiter Decision Record、接受 intent 与 execution
+    else needs_evidence
+        M->>W: Workflow 1 补证并递增 packet revision
+    else needs_user（枚举例外）
+        M->>Q: 提出必要用户决策
+        Q->>T: 展示结构化问题
+        T->>U: 选项、推荐与影响
+        U-->>T: 用户选择
+        T-->>Q: 返回答案
+        Q-->>M: 返回结构化决策
+        M->>D: 写 user Decision Record、接受 intent 与 execution
+    end
 
     M->>W: 启动 Workflow 2：delivery-convergence
     W-->>M: 返回 run_id
@@ -1051,13 +1216,18 @@ Ultra-ADLC 实现中顺带扩张范围。
 
 | 场景 | 预期结果 |
 | --- | --- |
-| 用户只输入一句自然语言目标 | Workflow 1 能调查环境并形成 decision brief |
-| 用户不了解代码库 | 问题只涉及用户结果、范围和风险，不要求技术知识 |
-| HumanInTheLoopMiddleware 关闭 | preflight 失败，不启动 Workflow 1 |
+| 用户只输入一句自然语言目标 | Workflow 1 能调查环境、生成 Decision Packet 并完成独立裁决 |
+| 普通可逆技术选择 | fresh Opus Decision Arbiter 返回 `decided`，Main Agent 不提问并启动 Workflow 2 |
+| 可发现技术证据不足 | 返回 `needs_evidence` 并在 Workflow 1 补证，不向用户提问 |
+| 缺失产品意图或新授权 | 返回 `needs_user`，只有 Main Agent 调用 AskUserQuestion |
+| HumanInTheLoopMiddleware 关闭且裁决为 `decided` | 不阻塞 Workflow 1 或 Workflow 2 |
+| HumanInTheLoopMiddleware 关闭且裁决为 `needs_user` | 状态明确为 `blocked` |
 | Workflow tool 不可用 | preflight 或快速失败明确报告，不伪造执行 |
-| Workflow 1 完成 | Main Agent 收到通知并调用 AskUserQuestion |
-| 用户回答 | 决策写入 `decisions/` 与 `intent.md`，随后启动 Workflow 2 |
+| Workflow 1 完成且裁决为 `decided` | Main Agent 校验并持久化 arbiter Decision Record，直接启动 Workflow 2 |
+| 用户回答例外问题 | user Decision Record 写入 `decisions/` 与 `intent.md`，随后启动 Workflow 2 |
 | 多个独立工作包 | 使用显式高并发和不重叠 write scope |
+| 主管查看中间进度 | 显示整体 conservative-min 百分比、分母 revision、阶段和所有 ID 的语义内容 |
+| 四维进度为 75%/80%/60%/90% | `overall_progress_percent` 为 60%，不取平均 |
 | Agent 输出较长 | 内容落盘，Workflow 只传路径和短状态 |
 | Completion Assessor 发现缺口 | 生成 gap work packages，Workflow 2 继续收敛 |
 | 任务只完成大部分 | 不允许进入 `complete` |

@@ -55,6 +55,7 @@ async fn test_receive_consumes_info_wrapped_in_reminder() {
     };
     let output = run_receive(input).await.unwrap();
     assert_eq!(output.consumed_count, 1);
+    assert_eq!(output.wake_up_count, 0);
 
     let transcript = ctx.session.transcript.read();
     assert_eq!(transcript.len(), 1);
@@ -85,6 +86,7 @@ async fn test_receive_consumes_defer() {
     let output = run_receive(input).await.unwrap();
     // 消费全部（Prompt + Defer）
     assert_eq!(output.consumed_count, 2);
+    assert_eq!(output.wake_up_count, 2);
     assert!(ctx.session.queue.is_empty(), "队列应完全排空");
     assert_eq!(ctx.session.transcript.read().len(), 2);
 }

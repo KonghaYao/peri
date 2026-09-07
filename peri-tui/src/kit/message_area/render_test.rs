@@ -179,6 +179,7 @@ fn test_vm_to_lines_all_variants_width_1() {
         count: 3,
         failed_count: 0,
         view_models: vec![],
+        fold: FoldState::Collapsed,
         content_hash: 47,
     });
 
@@ -1851,6 +1852,7 @@ fn test_collapsed_group_line() {
         count: 5,
         failed_count: 0,
         view_models: vec![],
+        fold: FoldState::Collapsed,
         content_hash: 0,
     };
     group.recompute_hash();
@@ -1866,6 +1868,61 @@ fn test_collapsed_group_line() {
 }
 
 /// [D2] 组后相邻 error 数 >0 → 标题追加 `· N failed`（error 色 span），
+#[test]
+fn test_expanded_group_renders_member_tools_and_hint() {
+    let grid = GridSpec::grid_for(80);
+    let mut group = TuiCollapsedGroup {
+        title: "Read 1".into(),
+        count: 1,
+        failed_count: 0,
+        view_models: vec![TuiRenderUnit::TuiToolCard(tool_card(
+            "Read", "a.rs", false, false,
+        ))],
+        fold: FoldState::Expanded,
+        content_hash: 0,
+    };
+    group.recompute_hash();
+
+    let text = vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group), &grid)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("click or Enter"));
+    assert!(text.contains("a.rs"), "展开后应渲染组内工具，实际 {text:?}");
+}
+
+#[test]
+fn test_collapsed_group_narrow_hides_whole_hint_within_grid_width() {
+    let grid = GridSpec::grid_for(24);
+    let mut group = TuiCollapsedGroup {
+        title: "读取工具 100 · Glob 100".into(),
+        count: 200,
+        failed_count: 3,
+        view_models: vec![],
+        fold: FoldState::Collapsed,
+        content_hash: 0,
+    };
+    group.recompute_hash();
+
+    let lines = vm_to_lines(&TuiRenderUnit::TuiCollapsedGroup(group), &grid);
+    let text = line_text(&lines[0]);
+    assert!(
+        text.contains("· 3 failed"),
+        "失败后缀必须保留，实际 {text:?}"
+    );
+    assert!(
+        !text.contains("click") && !text.contains("Enter"),
+        "hint 放不下时必须整体隐藏，实际 {text:?}"
+    );
+    assert!(
+        text.width() <= grid.total_width(),
+        "display width 不得超过 grid：{} > {}，实际 {text:?}",
+        text.width(),
+        grid.total_width()
+    );
+}
+
 /// 与 `+N −M` 计数（diff_change_summary）不混淆。
 #[test]
 fn test_collapsed_group_line_with_failed_count() {
@@ -1875,6 +1932,7 @@ fn test_collapsed_group_line_with_failed_count() {
         count: 2,
         failed_count: 1,
         view_models: vec![],
+        fold: FoldState::Collapsed,
         content_hash: 0,
     };
     group.recompute_hash();
@@ -1885,9 +1943,12 @@ fn test_collapsed_group_line_with_failed_count() {
     assert!(text.contains("· 1 failed"), "失败后缀，实际 {text:?}");
     // 失败后缀使用 status.error 色（只染后缀，不染整行）
     let line = &lines[0];
-    let last = line.spans.last().expect("末 span 为失败后缀");
-    assert!(last.content.contains("failed"), "后缀是独立 span");
-    assert_ne!(last.style.fg, None, "失败后缀必须有 error 前景色");
+    let failed = line
+        .spans
+        .iter()
+        .find(|span| span.content.contains("failed"))
+        .expect("失败后缀是独立 span");
+    assert_ne!(failed.style.fg, None, "失败后缀必须有 error 前景色");
 
     // 窄屏：title 截断优先于失败后缀（失败数不可被截断吞掉）
     let narrow = GridSpec::grid_for(40);
@@ -1896,6 +1957,7 @@ fn test_collapsed_group_line_with_failed_count() {
         count: 300,
         failed_count: 3,
         view_models: vec![],
+        fold: FoldState::Collapsed,
         content_hash: 0,
     };
     group2.recompute_hash();

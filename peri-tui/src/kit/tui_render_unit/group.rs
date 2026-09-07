@@ -92,6 +92,8 @@ pub struct TuiCollapsedGroup {
     pub failed_count: u32,
     /// The view models inside the group (visible when expanded).
     pub view_models: Vec<TuiRenderUnit>,
+    /// Current user-controlled fold state.
+    pub fold: FoldState,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
 }
@@ -109,11 +111,12 @@ impl TuiCollapsedGroup {
         h = tui_hash_combine(h, u64::from(self.failed_count));
         h = tui_hash_combine(h, self.view_models.len() as u64);
         h = tui_hash_combine(h, child_hash_total);
+        h = tui_hash_combine(h, fold_state_code(self.fold));
         self.content_hash = h;
     }
 }
 
-tui_impl_partial_eq!(TuiCollapsedGroup: title, count, failed_count, view_models);
+tui_impl_partial_eq!(TuiCollapsedGroup: title, count, failed_count, view_models, fold);
 
 /// Visual separator between iteration rounds.
 #[derive(Debug, Clone)]
