@@ -129,6 +129,145 @@ fn test_ultra_adlc_skill_encodes_peri_workflow_contract() {
 }
 
 #[test]
+fn test_ultra_adlc_skill_defaults_to_independent_arbitration_and_semantic_progress() {
+    let content = BUILTIN_SKILLS
+        .iter()
+        .find(|skill| skill.name == "ultra-adlc")
+        .expect("BUILTIN_SKILLS 应含 ultra-adlc")
+        .content;
+
+    for marker in [
+        "Decision Arbiter",
+        "fresh, independent `opus`",
+        "ADLC/W1/Arbitrate",
+        "peri.adlc/decision-packet-v1",
+        "peri.adlc/arbitration-handoff-v1",
+        "peri.adlc/decision-record-v1",
+        "decision_source: arbiter | user",
+        "`arbitration_result` is exactly one of `decided |",
+        "enum: ['decided', 'needs_evidence', 'needs_user', 'invalid']",
+        "attempt_number: <1-or-2-for-opus-or-3-for-fable>",
+        "correction_of_attempt_id: <prior-attempt-id-or-none>",
+        "expectedArbiterProfile = args.arbitrationAttemptNumber <= 2 ? 'opus' : 'fable'",
+        "priorAttemptsAreFreshFailedOpus",
+        "attempt.packet_fingerprint === args.packetFingerprint",
+        "attempt.recoveredFrom: null",
+        "manifest.decision.attempts",
+        "existing regular, non-symlinked candidate",
+        "workflowMode === 'prepare_packet'",
+        "status: 'packet_ready'",
+        "workflowMode !== 'arbitrate'",
+        "packetCandidatePathAlreadyExists === true",
+        "expectedCandidatePath =",
+        "candidate-${args.prepareAttemptId}.md",
+        "exclusive-create/no-overwrite",
+        "O_CREAT | O_EXCL",
+        "decisionPacketContent",
+        "const packetEnvelope = JSON.stringify({",
+        "const boundArbitratePrompt =",
+        "do not reopen packet_path",
+        "packetVerifiedByMainAgent === true",
+        "handoffPathAlreadyExists === false",
+        "optionMatchesPacket(",
+        "allowedEvidenceReferences.has(reference)",
+        "args.expectedArbitrationHandoffPath === expectedHandoffPath",
+        "args.packetPath === expectedPacketPath",
+        "^sha256:[0-9a-f]{64}$",
+        "packet_path: arbitration.packet_path",
+        "packet_fingerprint: arbitration.packet_fingerprint",
+        "Arbitration retries intentionally skip ADLC/W1/Discover, Design, and Synthesize.",
+        "schema: arbitrationResultSchema",
+        "if (!metadataMatches || !resultFieldsAreLegal)",
+        "status: arbitration.arbitration_result",
+        "two fresh `opus` attempts fail",
+        "`fable` is escalation, never the default",
+        "Do not turn model uncertainty into a user preference question",
+        "peri.adlc/progress-snapshot-v1",
+        "denominator_revision",
+        "denominator_fingerprint: <sha256-of-canonical-dimension-id-semantic-content-completion-condition-required-flag-and-linked-revisions>",
+        "deterministic canonical",
+        "overall_progress_percent = min(",
+        "gap_closure_percent",
+        "accepted Verification Plan checks",
+        "empty set is defined as 100%",
+        "For example, 75% requirements, 80% Work Packages, 60% acceptance",
+        "90% gap closure produces `overall_progress_percent: 60%`",
+        "Do not average dimensions",
+        "ID | Semantic content",
+        "bare ids such as",
+    ] {
+        assert!(content.contains(marker), "ultra-adlc 应锁定 {marker}");
+    }
+
+    assert!(
+        !content.contains("status: 'complete',\n    workPackage: 'W1-SYNTH'"),
+        "Workflow 1 不得把任意裁决结果无条件压成 complete"
+    );
+    assert_eq!(
+        content
+            .matches("\n    phase('ADLC/W1/Discover')")
+            .count(),
+        1,
+        "canonical prepare_packet 分支应恰好执行一次 Discover，arbitrate 分支不得重跑"
+    );
+    assert_eq!(
+        content
+            .matches("\n    phase('ADLC/W1/Synthesize')")
+            .count(),
+        1,
+        "canonical prepare_packet 分支应恰好执行一次 Synthesize，arbitrate 分支不得重跑"
+    );
+    assert!(
+        !content.contains("packet_fingerprint: sha256:<lowercase-hex>\nintent_revision:"),
+        "packet fingerprint 是 Main Agent 计算的外部元数据，不得写入被 hash 的 packet"
+    );
+    assert!(
+        !content.contains("await agent(arbitratePrompt, {"),
+        "arbiter 必须消费 Main Agent 绑定的 packet bytes，不得只消费可变路径或未绑定 prompt"
+    );
+    assert!(
+        !content.contains("handoffs/workflow-1/arbitration-D-001-r1.md"),
+        "裁决 Handoff 路径必须按 attempt 唯一，不能让重试覆盖前序审计记录"
+    );
+    assert!(
+        !content.contains("If it is absent, stop as `blocked`; Workflow Agents cannot replace it."),
+        "AskUserQuestion 缺失不得阻塞默认自动裁决路径"
+    );
+    assert!(
+        !content.contains("Call `AskUserQuestion` with at most 4 questions per round."),
+        "Ultra-ADLC 不得恢复默认用户裁决"
+    );
+}
+
+#[test]
+fn test_ultra_adlc_canonical_w1_separates_packet_preparation_from_arbitration() {
+    let content = BUILTIN_SKILLS
+        .iter()
+        .find(|skill| skill.name == "ultra-adlc")
+        .expect("BUILTIN_SKILLS 应含 ultra-adlc")
+        .content;
+    let script = content
+        .split_once("Canonical W1 script shape:\n\n```javascript\n")
+        .and_then(|(_, rest)| rest.split_once("\n```"))
+        .map(|(script, _)| script)
+        .expect("Ultra-ADLC 应包含 canonical W1 JavaScript");
+    let (_, arbitrate_branch) = script
+        .split_once("if (args.workflowMode !== 'arbitrate')")
+        .expect("canonical W1 应显式拒绝未知 mode");
+
+    assert!(script.contains("if (args.workflowMode === 'prepare_packet')"));
+    assert!(script.contains("status: 'packet_ready'"));
+    assert!(!arbitrate_branch.contains("phase('ADLC/W1/Discover')"));
+    assert!(!arbitrate_branch.contains("phase('ADLC/W1/Design')"));
+    assert!(!arbitrate_branch.contains("phase('ADLC/W1/Synthesize')"));
+    assert!(arbitrate_branch.contains("phase('ADLC/W1/Arbitrate')"));
+    assert!(arbitrate_branch.contains("agent(boundArbitratePrompt"));
+    assert!(arbitrate_branch.contains("optionMatchesPacket("));
+    assert!(arbitrate_branch.contains("allowedEvidenceReferences.has(reference)"));
+    assert!(arbitrate_branch.contains("status: arbitration.arbitration_result"));
+}
+
+#[test]
 fn test_ultra_adlc_skill_guards_complete_delivery_and_audit() {
     let content = BUILTIN_SKILLS
         .iter()
