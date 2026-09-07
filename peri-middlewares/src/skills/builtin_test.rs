@@ -245,7 +245,8 @@ fn test_ultra_adlc_canonical_w1_separates_packet_preparation_from_arbitration() 
         .iter()
         .find(|skill| skill.name == "ultra-adlc")
         .expect("BUILTIN_SKILLS 应含 ultra-adlc")
-        .content;
+        .content
+        .replace("\r\n", "\n");
     let script = content
         .split_once("Canonical W1 script shape:\n\n```javascript\n")
         .and_then(|(_, rest)| rest.split_once("\n```"))
