@@ -6,7 +6,7 @@ use crate::kit::atoms::FOLD_OVERRIDES;
 use crate::kit::submit_request::SubmitRequest;
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldKey, FoldState, FoldTarget, TuiDivider, TuiRenderUnit, TuiTodoSummary,
-    TuiToolPresentation, fold_for_status, tui_hash_combine, tui_hash_str,
+    TuiToolPresentation, fold_for_status, fold_state_code, tui_hash_combine, tui_hash_str,
 };
 use fluent_bundle::FluentValue;
 use std::sync::Mutex;
@@ -57,7 +57,6 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
             }),
         );
     }
-    let current_turn_start = items.len();
     items.append(state.current_turn.view_models().clone());
 
     // [G2] 折叠状态机单点 pass（spec §7 表 + FOLD_OVERRIDES 用户覆盖）。
@@ -69,8 +68,11 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     // 插在 trailing 最终回答之前（回答后无 todo）；无 trailing 回答时位于 turn 底部。
     insert_todo_summary(&mut items, state.phase);
 
-    // [§7] 相邻成功工具分组——只作用于 current_turn 段（不跨 turn 边界）。
-    group_successful_tools(&mut items, current_turn_start);
+    // [§7] 相邻成功工具分组——作用于完整 snapshot。TurnDone 会先把 current_turn
+    // 搬入 committed 再发布终态快照；若只扫描 current_turn 段，归档边界会让同一批
+    // 工具从 TuiCollapsedGroup 退回独立卡片。用户气泡、divider、文本及不可分组工具
+    // 仍作为天然边界，因此完整扫描不会跨 turn 合并。
+    group_successful_tools(&mut items, 0);
 
     state.generation = state.generation.wrapping_add(1);
     #[cfg(test)]
@@ -257,6 +259,21 @@ fn group_input_fingerprint(segment: &im::Vector<TuiRenderUnit>) -> (u64, bool) {
         .and_then(|f| f.key.as_ref())
         .hash(&mut fh);
     h = tui_hash_combine(h, fh.finish());
+    // 分组自身的展开覆盖不会写回源 tool card，因此必须直接参与缓存指纹；
+    // 否则下一帧会复用旧的 collapsed group，表现为点击/Enter 后不展开。
+    let mut oh = std::collections::hash_map::DefaultHasher::new();
+    let overrides_state = FOLD_OVERRIDES.state();
+    let overrides_guard = overrides_state.read();
+    let mut group_overrides: Vec<_> = overrides_guard
+        .iter()
+        .filter_map(|(key, fold)| match key {
+            FoldKey::Group(ids) => Some((ids, fold_state_code(*fold))),
+            _ => None,
+        })
+        .collect();
+    group_overrides.sort_by_key(|(ids, _)| *ids);
+    group_overrides.hash(&mut oh);
+    h = tui_hash_combine(h, oh.finish());
     let has_trailing_bubble = matches!(segment.back(), Some(TuiRenderUnit::TuiAssistantBubble(_)));
     (h, has_trailing_bubble)
 }
@@ -390,11 +407,27 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
             .map(|(name, count)| format!("{name} {count}"))
             .collect::<Vec<_>>()
             .join(" \u{b7} ");
+        let group_key = FoldKey::Group(
+            hidden_vms
+                .iter()
+                .filter_map(|vm| match vm {
+                    TuiRenderUnit::TuiToolCard(t) => Some(t.tool_id.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
+        let fold = FOLD_OVERRIDES
+            .state()
+            .read()
+            .get(&group_key)
+            .copied()
+            .unwrap_or(FoldState::Collapsed);
         let mut group = TuiCollapsedGroup {
             title,
             count: run_len as u32,
             failed_count,
             view_models: hidden_vms,
+            fold,
             content_hash: 0,
         };
         group.recompute_hash();

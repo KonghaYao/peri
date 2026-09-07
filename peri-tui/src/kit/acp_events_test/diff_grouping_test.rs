@@ -163,6 +163,34 @@ fn test_edit_plain_output_grouped_normally() {
         }
         other => panic!("expected TuiCollapsedGroup, got {other:?}"),
     }
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnCommitted {
+            messages_json: "[]".into(),
+            steps: 2,
+        },
+    );
+    let committed_checkpoint = VIEW_MODELS.state().read().clone();
+    assert_eq!(committed_checkpoint.items.len(), 1);
+    assert!(
+        matches!(
+            committed_checkpoint.items.front(),
+            Some(TuiRenderUnit::TuiCollapsedGroup(group)) if group.count == 2
+        ),
+        "TurnCommitted 检查点应保持流式期间的工具分组"
+    );
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let final_snapshot = VIEW_MODELS.state().read().clone();
+    assert_eq!(final_snapshot.items.len(), 1);
+    assert!(
+        matches!(
+            final_snapshot.items.front(),
+            Some(TuiRenderUnit::TuiCollapsedGroup(group)) if group.count == 2
+        ),
+        "TurnDone 将 current_turn 归档到 committed 后仍应保持工具分组"
+    );
 }
 
 /// [Slice 5] 真实摘要路径：Edit 输出 `Added 2 lines to P`（真实工具形态，

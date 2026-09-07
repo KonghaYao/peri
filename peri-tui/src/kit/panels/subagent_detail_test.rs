@@ -83,6 +83,7 @@ fn test_find_selected_subagent_recurses_into_collapsed_group() {
         view_models: vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
             "hidden", "Hidden",
         ))],
+        fold: crate::kit::tui_render_unit::FoldState::Collapsed,
         content_hash: 0,
     };
     let snap = ViewModelsSnapshot {

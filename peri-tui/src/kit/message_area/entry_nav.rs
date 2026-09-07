@@ -42,6 +42,18 @@ pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
         TuiRenderUnit::TuiSubAgentGroup(g) => {
             Some((FoldKey::SubAgent(g.instance_id.clone()), g.fold))
         }
+        TuiRenderUnit::TuiCollapsedGroup(g) => Some((
+            FoldKey::Group(
+                g.view_models
+                    .iter()
+                    .filter_map(|vm| match vm {
+                        TuiRenderUnit::TuiToolCard(t) => Some(t.tool_id.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            g.fold,
+        )),
         TuiRenderUnit::TuiAskUserBlock(a) => {
             Some((FoldKey::Interaction(a.request_id.clone()?), a.fold))
         }
@@ -119,6 +131,10 @@ pub(super) fn apply_fold_override(vm: &mut TuiRenderUnit, fold: FoldState) {
         TuiRenderUnit::TuiSubAgentGroup(g) => {
             g.fold = fold;
             g.user_modified = true;
+            g.recompute_hash();
+        }
+        TuiRenderUnit::TuiCollapsedGroup(g) => {
+            g.fold = fold;
             g.recompute_hash();
         }
         TuiRenderUnit::TuiAskUserBlock(a) => {

@@ -715,6 +715,7 @@ msg-assistant-prompt = Perihelion
 msg-status-loading = Loading
 msg-new-output = New output
 render-group-failed-count = { $count } failed
+render-group-toggle-hint = click or Enter
 
 # ---- Interaction block (spec §6.8, Slice 4) ----
 # inline transcript block 与 AskUser 面板 / HITL 弹窗双轨（D5）——

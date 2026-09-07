@@ -465,8 +465,10 @@ pub struct ReceiveInput {
 
 /// Receive 阶段输出
 pub struct ReceiveOutput {
-    /// 本轮消费的消息数量
+    /// 本轮消费的消息数量（含不唤醒循环的 Info）
     pub consumed_count: usize,
+    /// 本轮消费的可驱动语义续跑消息数量（Prompt / Defer）
+    pub wake_up_count: usize,
 }
 
 // ─── Reason 阶段类型 ─────────────────────────────────────────────────────────
@@ -646,10 +648,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 Err(e) => return e,
             };
 
-            // 退出判断：队列为空且上一轮无工具调用 → 检查是否该退出。
+            // 退出判断：本轮没有可唤醒消息且上一轮无工具调用 → 检查是否该退出。
+            // Info 只做状态维护，虽被 Receive 消费，但不能单独驱动 Compact → Reason → Act。
             // 工具调用结果写入 transcript 而非队列：has_tool_calls=true 时
-            // consumed_count=0 是正常状态——继续循环让 LLM 处理工具结果。
-            if receive_out.consumed_count == 0 && !loop_state.has_tool_calls {
+            // wake_up_count=0 是正常状态——继续循环让 LLM 处理工具结果。
+            if receive_out.wake_up_count == 0 && !loop_state.has_tool_calls {
                 // 竞态保护：退出前再检查一次队列是否有新消息到达
                 if context.session.queue.has_wake_up() {
                     tracing::debug!("Receive: consumed=0 but queue has wake-up, continue");

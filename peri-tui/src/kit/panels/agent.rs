@@ -23,7 +23,7 @@ use ratatui_kit::{
         layout::Constraint,
         style::{Style, Stylize},
         text::{Line, Span},
-        widgets::Paragraph,
+        widgets::{Paragraph, Wrap},
     },
 };
 
@@ -235,7 +235,10 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     lines.push(Line::from(""));
     lines.push(Line::from(i18n::tr("panel-agent-nav-hint")).fg(theme_def.read().semantic.text.dim));
 
-    let content = Paragraph::new(ratatui::text::Text::from(lines));
+    let area = hooks.use_previous_size();
+    let content_width = area.width.saturating_sub(PANEL_CONTENT_INSET).max(1);
+    let content_height = wrapped_content_height(&lines, content_width);
+    let content = Paragraph::new(ratatui::text::Text::from(lines)).wrap(Wrap { trim: false });
 
     // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
     crate::kit::panel_scroll::register_panel_scroll(
@@ -251,12 +254,26 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {
-            Text(text: content)
+            View(
+                width: Constraint::Fill(1),
+                height: Constraint::Length(content_height),
+            ) {
+                Text(text: content)
+            }
         }
     })
 }
 
-/// 从 ViewModelsSnapshot 派生 SubAgent 列表（按出现顺序，去重）。
+const PANEL_CONTENT_INSET: u16 = 2;
+
+/// Agent 面板内容区扣除左右边框/滚动条后的显示宽度。
+fn wrapped_content_height(lines: &[Line<'_>], width: u16) -> u16 {
+    Paragraph::new(ratatui::text::Text::from(lines.to_vec()))
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1))
+        .clamp(1, u16::MAX as usize) as u16
+}
+
 fn collect_subagents(snap: &crate::kit::atoms::ViewModelsSnapshot) -> Vec<TuiSubAgentGroup> {
     let mut out: Vec<TuiSubAgentGroup> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
