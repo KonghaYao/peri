@@ -17,8 +17,8 @@
 ### <thread id> — <用户意图>
 
 - **结果**：成功 / 部分完成 / 失败 / 取消 / blocked
-- **关键证据**：可核对的事件、命令结果或用户纠正
-- **反证**：相反案例或使结论降级的事实；没有则写“未发现”
+- **关键证据**：`extracted/<day>/<thread>.txt :: <可定位摘录或事件>`
+- **反证**：`extracted/<day>/<thread>.txt :: <成功对照或不支持结论的事件>`；没有则写“未发现”
 - **成功模式**：真正促成收敛的策略
 - **改进分类**：rule gap / active issue covered / skill gap / execution deviation / external blocker
 
@@ -26,13 +26,19 @@
 
 ### F-001 — <简短结论>
 
-- **证据**：thread + 事件
-- **反证**：成功案例或不支持该结论的证据
+- **失败模式**：跨场景重复出现的可观察模式
+- **根因**：为什么失败，而不只是发生了什么
+- **证据**：`extracted/<day>/<thread>.txt :: <可定位摘录或事件>`
+- **反证**：`extracted/<day>/<thread>.txt :: <成功对照或不支持结论的事件>`
 - **频次**：N/M，必须带分母
 - **影响**：high / medium / low
 - **置信度**：high / medium / low
 - **事实源**：建议修改或已覆盖的路径
-- **验收**：可执行、可证伪的验证条件
+- **目标面**：standard / module_guidance / active_issue / skill / tool_description / tool_implementation / middleware / subagent / memory / configuration / implementation / test / external / none
+- **归属理由**：为何由这个最窄层负责，而不是把建议都塞进 prompt 或规则
+- **预测修复**：下一轮应出现的可观察改善，至少一项
+- **回归风险**：可能受损的既有成功模式；若未发现，写明搜索范围和理由
+- **验收**：分别列出 `target` 检查与 `preserved_success` 检查，各至少一项且原文不重复
 
 ## Blocked
 

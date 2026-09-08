@@ -114,9 +114,11 @@ def unit_prompt(run_dir, unit):
 
 任务：
 1. 分析每个 thread 的用户意图、结果、真实异常、用户纠正和成功模式。
-2. 只把可证伪的改进写为 finding；区分规则缺口、active issue 已覆盖、skill 缺陷、仅执行偏差和外部阻塞。
-3. 写人类报告到 `{run_dir / unit['summary_path']}`。
-4. 写机器 sidecar 到 `{run_dir / unit['sidecar_path']}`，格式严格为：
+2. 先做 thread 级分析，再聚合跨 thread 模式；只把可证伪的改进写为 finding。
+3. 对每个 finding 区分规则缺口、active issue 已覆盖、skill 缺陷、仅执行偏差和外部阻塞；定位最窄的 owner component，并同时预测收益与回归面。
+4. 证据按“概览 → finding → 原始 thread”分层；sidecar 中的 evidence/counterevidence 必须使用 `extracted/...txt` 相对路径加可定位摘录或事件，不能只写裸 thread id。
+5. 写人类报告到 `{run_dir / unit['summary_path']}`。
+6. 写机器 sidecar 到 `{run_dir / unit['sidecar_path']}`，格式严格为：
 
 ```json
 {{
@@ -131,13 +133,22 @@ def unit_prompt(run_dir, unit):
     {{
       "id": "F-001",
       "classification": "rule_gap|active_issue_covered|skill_gap|execution_deviation|external_blocker",
-      "evidence": ["thread id + 可核对事件"],
+      "failure_pattern": "跨场景重复的可观察失败模式",
+      "root_cause": "为什么失败，而不只是发生了什么",
+      "evidence": ["extracted/<day>/<thread>.txt :: 可定位摘录或事件"],
       "counterevidence": [],
       "frequency": "带分母的频次",
       "impact": "high|medium|low",
       "confidence": "high|medium|low",
       "fact_source": "建议事实源或 existing path",
-      "acceptance": "如何证明改进有效"
+      "target_surface": "standard|module_guidance|active_issue|skill|tool_description|tool_implementation|middleware|subagent|memory|configuration|implementation|test|external|none",
+      "why_this_surface": "为何由这个最窄层负责，而不是把建议都塞进 prompt/规则",
+      "predicted_fixes": ["下轮可观察到的改善"],
+      "risk_regressions": ["可能受损的既有成功模式，或 none identified + 理由"],
+      "acceptance": {{
+        "target": ["预测修复检查"],
+        "preserved_success": ["既有成功模式检查"]
+      }}
     }}
   ],
   "blocked": [],
@@ -165,7 +176,8 @@ def build_manifest(args):
         snapshot_path = snapshot_dir / "threads.db"
         snapshot_database(source_db, snapshot_path)
 
-        cwd = None if args.all else normalize_cwd(args.cwd or os.getcwd())
+        repository_root = str(Path(args.cwd or os.getcwd()).expanduser().resolve())
+        cwd = None if args.all else normalize_cwd(repository_root)
         today = date.fromisoformat(args.today) if args.today else date.today()
         rows = query_active_days(str(snapshot_path), days=args.days, cwd=cwd, today=today)
         active_days = sorted(row["day"] for row in rows)
@@ -179,6 +191,7 @@ def build_manifest(args):
         "status": "extracting",
         "created_at": created_at.isoformat(),
         "run_dir": str(run_dir),
+        "repository_root": repository_root,
         "project_filter": cwd,
         "all_projects": args.all,
         "window": {"days": args.days, "today": today.isoformat(), "active_days": active_days},
