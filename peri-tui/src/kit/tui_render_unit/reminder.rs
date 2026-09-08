@@ -1,4 +1,106 @@
 use crate::i18n;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderCategory, ReminderDelivery, ReminderFilter, ReminderSeverity,
+    SystemReminder,
+};
+
+/// 独立的 canonical/legacy reminder 展示模型，不附着用户气泡。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TuiSystemReminder {
+    pub wire: Option<SystemReminder>,
+    pub summary: String,
+    pub body: String,
+    pub category: String,
+    pub source: String,
+    pub severity: ReminderSeverity,
+    pub required: bool,
+    pub legacy: bool,
+    pub expanded: bool,
+    pub content_hash: u64,
+}
+
+/// Local, non-serializable proof that a structured reminder passed the live ACP
+/// session ownership gate. Wire decoding can never construct this wrapper.
+#[derive(Debug)]
+pub(crate) struct DisplayTrusted(SystemReminder);
+
+impl DisplayTrusted {
+    pub(crate) fn after_current_session_gate(reminder: SystemReminder) -> Self {
+        Self(reminder)
+    }
+}
+
+impl TuiSystemReminder {
+    /// Untrusted wire/DTO ingress. Required is always downgraded before display policy.
+    pub fn from_wire(mut reminder: SystemReminder) -> Option<Self> {
+        if reminder.delivery == ReminderDelivery::Required {
+            reminder.delivery = ReminderDelivery::Configurable;
+        }
+        Self::from_display_ingress(reminder, false)
+    }
+
+    /// Structured ingress carrying local proof from the current-session ownership gate.
+    pub(crate) fn from_trusted_structured(trusted: DisplayTrusted) -> Option<Self> {
+        Self::from_display_ingress(trusted.0, true)
+    }
+
+    fn from_display_ingress(reminder: SystemReminder, trusted: bool) -> Option<Self> {
+        reminder.validate().ok()?;
+        let filter = ReminderFilter {
+            minimum_severity: if reminder.category == ReminderCategory::Security {
+                Some(ReminderSeverity::Warning)
+            } else {
+                None
+            },
+            ..Default::default()
+        };
+        if !reminder.audiences.contains(ReminderAudience::Tui)
+            || reminder.delivery == ReminderDelivery::DiagnosticOnly
+            || filter
+                .minimum_severity
+                .is_some_and(|minimum| reminder.severity < minimum)
+        {
+            return None;
+        }
+        let summary = reminder.summary.clone().unwrap_or_else(|| {
+            reminder
+                .body
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or_default()
+                .to_string()
+        });
+        Some(Self {
+            category: format!("{:?}", reminder.category),
+            source: reminder.source.0.clone(),
+            severity: reminder.severity,
+            required: trusted && reminder.delivery == ReminderDelivery::Required,
+            body: reminder.body.clone(),
+            summary,
+            legacy: false,
+            expanded: false,
+            content_hash: crate::kit::tui_render_unit::tui_hash_str(
+                &serde_json::to_string(&reminder).unwrap_or_default(),
+            ),
+            wire: Some(reminder),
+        })
+    }
+
+    pub fn legacy(text: String) -> Self {
+        Self {
+            content_hash: crate::kit::tui_render_unit::tui_hash_str(&text),
+            summary: text.clone(),
+            body: text,
+            category: i18n::tr("reminder-system-reminder"),
+            source: i18n::tr("reminder-legacy-source"),
+            severity: ReminderSeverity::Info,
+            required: false,
+            legacy: true,
+            expanded: false,
+            wire: None,
+        }
+    }
+}
 
 /// System-reminder 分类——10 种从 `<system-reminder>` 标签检测到的类型。
 #[derive(Debug, Clone, PartialEq)]

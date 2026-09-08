@@ -318,6 +318,15 @@ pub enum AcpEventData {
         message: Option<String>,
     },
 
+    /// Versioned canonical reminder wire DTO. Receiving it grants display trust only.
+    SystemReminder {
+        reminder: peri_acp_types::system_reminder::SystemReminder,
+        replay: bool,
+    },
+
+    /// Explicit text-only compatibility display; never promoted to canonical trust.
+    SystemReminderFallback { text: String, replay: bool },
+
     // -- §4.9 Plugin events ------------------------------------------------
     /// `"plugin-snapshot"` — 插件列表全量快照。
     PluginSnapshot(PluginSnapshot),
@@ -355,6 +364,23 @@ impl AcpEventData {
             "budget-warning" => decode_or_unknown(event, data, AcpEventData::BudgetWarning),
             "system-notification" => {
                 decode_or_unknown(event, data, AcpEventData::SystemNotification)
+            }
+            "system-reminder" => {
+                #[derive(serde::Deserialize)]
+                struct Wire {
+                    reminder: peri_acp_types::system_reminder::SystemReminder,
+                    #[serde(default)]
+                    replay: bool,
+                }
+                decode_or_unknown(event, data, |wire: Wire| AcpEventData::SystemReminder {
+                    reminder: wire.reminder,
+                    replay: wire.replay,
+                })
+            }
+            "system-reminder-fallback" => {
+                let text = data["text"].as_str().unwrap_or_default().to_string();
+                let replay = data["replay"].as_bool().unwrap_or(false);
+                AcpEventData::SystemReminderFallback { text, replay }
             }
 
             // §4.4 Input assist

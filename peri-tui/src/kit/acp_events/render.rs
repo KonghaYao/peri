@@ -232,6 +232,7 @@ fn group_input_fingerprint(segment: &im::Vector<TuiRenderUnit>) -> (u64, bool) {
                         TuiRenderUnit::TuiUserBubble(_) => 1,
                         TuiRenderUnit::TuiAssistantBubble(_) => 2,
                         TuiRenderUnit::TuiSystemNote(_) => 4,
+                        TuiRenderUnit::TuiSystemReminder(_) => 10,
                         TuiRenderUnit::TuiSubAgentGroup(_) => 5,
                         TuiRenderUnit::TuiCollapsedGroup(_) => 6,
                         TuiRenderUnit::TuiDivider(_) => 7,

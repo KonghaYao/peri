@@ -515,7 +515,10 @@ fn spawn_acp_bridge_inner(
                             let committed_before = state.committed.len();
                             let was_dirty = state.current_turn.has_unprojected_changes();
 
-                            let intent = acp_events::dispatch_for_bridge(&mut state, &event);
+                            let intent = acp_events::dispatch_trusted_structured_for_bridge(
+                                &mut state,
+                                event,
+                            );
                             scheduler.accept(intent, &mut state);
 
                             let committed_after = state.committed.len();
@@ -599,6 +602,8 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         Progress(_) => "Progress",
         BudgetWarning(_) => "BudgetWarning",
         SystemNotification(_) => "SystemNotification",
+        SystemReminder { .. } => "SystemReminder",
+        SystemReminderFallback { .. } => "SystemReminderFallback",
         GoalSnapshot { .. } => "GoalSnapshot",
         CommandFeedback(_) => "CommandFeedback",
         Prediction(_) => "Prediction",

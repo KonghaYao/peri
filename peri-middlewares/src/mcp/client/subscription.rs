@@ -1,11 +1,17 @@
 use std::sync::Arc;
 
 use peri_acp_types::plugin::McpSubscriptionsConfig;
-use peri_acp_types::session::InboxHandle;
+use peri_acp_types::session::{InboxHandle, MessageKind, MessageSource};
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource as CanonicalReminderSource, SystemReminder, TrustedSystemReminderFactory,
+    SYSTEM_REMINDER_VERSION,
+};
 use rmcp::{
     model::{ServerNotification, SubscriptionFilter},
     service::{Subscription, SubscriptionEnd},
 };
+use serde_json::json;
 
 use super::{McpClientPool, McpServiceWrapper};
 
@@ -14,24 +20,44 @@ impl McpClientPool {
 
     /// 广播一条订阅通知到所有已注册的会话 inbox。
     ///
-    /// 通知以 `<system-reminder><mcp-subscription …/>` Defer 消息注入，
-    /// 唤醒 idle executor（agent 随即读资源 / 调工具回复外部消息）。
+    /// 通知以 canonical `Defer + ExternalEvent` reminder 注入，唤醒 idle executor
+    ///（agent 随即读资源 / 调工具回复外部消息）。
     fn broadcast_subscription_notification(&self, server: &str, uri: &str, subscription_id: &str) {
         let handles: Vec<InboxHandle> = self.session_inboxes.read().values().cloned().collect();
         if handles.is_empty() {
             tracing::debug!(server = %server, uri = %uri, "订阅通知到达但无注册会话 inbox");
             return;
         }
-        let text = format!(
-            "<system-reminder><mcp-subscription server=\"{}\" uri=\"{}\" subscription-id=\"{}\">资源已更新，请查看并处理。</mcp-subscription></system-reminder>",
-            xml_escape(server),
-            xml_escape(uri),
-            xml_escape(subscription_id)
+        let body = format!(
+            "MCP 资源已更新：server={server}, uri={uri}, subscription_id={subscription_id}。请查看并处理。"
         );
+        let reminder = TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::ExternalEvent,
+                source: CanonicalReminderSource("mcp".into()),
+                kind: "subscription_resource_updated".into(),
+                severity: ReminderSeverity::Info,
+                delivery: ReminderDelivery::Required,
+                audiences: ReminderAudiences(vec![
+                    ReminderAudience::Model,
+                    ReminderAudience::Tui,
+                    ReminderAudience::Automation,
+                ]),
+                body,
+                summary: Some("MCP 订阅资源已更新".into()),
+                metadata: json!({
+                    "server": server,
+                    "uri": uri,
+                    "subscription_id": subscription_id,
+                }),
+            })
+            .expect("MCP subscription reminder mapping must be valid");
         for handle in handles {
-            handle.push_defer(
-                peri_acp_types::session::MessageSource::ChannelMessage,
-                peri_acp_types::messages::BaseMessage::human(text.clone()),
+            handle.push_system_reminder(
+                MessageKind::Defer,
+                MessageSource::DynamicMcpNotification,
+                reminder.clone(),
             );
         }
         tracing::info!(server = %server, uri = %uri, sessions = %self.session_inboxes.read().len(), "订阅通知已广播到会话 inbox");
@@ -255,21 +281,4 @@ pub(crate) async fn setup_subscription(
             );
         }
     }
-}
-
-/// XML 转义五个特殊字符（`&` `<` `>` `"` `'`），防止第三方 MCP server
-/// 推送的字段值（如资源 URI）注入 `<system-reminder>` 结构。
-pub(crate) fn xml_escape(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for c in input.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            _ => out.push(c),
-        }
-    }
-    out
 }

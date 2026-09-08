@@ -367,6 +367,8 @@ pub(crate) fn dispatch_for_bridge(
         Progress(_) => tool::handle_progress(state),
         BudgetWarning(bw) => system::handle_budget_warning(state, bw),
         SystemNotification(sn) => system::handle_system_notification(state, sn),
+        SystemReminder { reminder, .. } => system::handle_system_reminder(state, reminder),
+        SystemReminderFallback { text, .. } => system::handle_system_reminder_fallback(state, text),
         CommandFeedback(fb) => system::handle_command_feedback(state, fb),
 
         // ── §4.4 Input assist ──
@@ -549,6 +551,19 @@ pub(crate) fn dispatch_for_bridge(
         }
     } else {
         PublicationIntent::None
+    }
+}
+
+pub(crate) fn dispatch_trusted_structured_for_bridge(
+    state: &mut BridgeState,
+    event: AcpEventData,
+) -> PublicationIntent {
+    match event {
+        AcpEventData::SystemReminder { reminder, .. } => {
+            system::handle_trusted_system_reminder(state, reminder);
+            PublicationIntent::None
+        }
+        other => dispatch_for_bridge(state, &other),
     }
 }
 

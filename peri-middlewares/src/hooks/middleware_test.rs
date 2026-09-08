@@ -832,6 +832,22 @@ async fn test_stop_block_continue_sets_block_continue_field() {
                     "stop block 应 push 1 条 StopHookFeedback Defer 消息"
                 );
                 assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Defer);
+                let reminder = match &drained[0].payload {
+                    peri_agent::session::QueuedPayload::SystemReminder(reminder) => {
+                        reminder.as_reminder()
+                    }
+                    other => panic!("expected canonical reminder, got {other:?}"),
+                };
+                assert_eq!(
+                    reminder.category,
+                    peri_acp_types::system_reminder::ReminderCategory::Guidance
+                );
+                assert_eq!(reminder.source.0, "hook");
+                assert_eq!(reminder.kind, "stop_blocked");
+                assert_eq!(
+                    reminder.delivery,
+                    peri_acp_types::system_reminder::ReminderDelivery::Required
+                );
             }
         }
         Err(_) => {

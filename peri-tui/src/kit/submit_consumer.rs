@@ -333,6 +333,7 @@ fn extract_vm_text(vm: &crate::kit::tui_render_unit::TuiRenderUnit) -> String {
             data.tool_name, data.input_summary, data.output_summary
         ),
         TuiRenderUnit::TuiSystemNote(data) => data.text.clone(),
+        TuiRenderUnit::TuiSystemReminder(data) => data.body.clone(),
         TuiRenderUnit::TuiSubAgentGroup(data) => {
             let mut text = format!("[SubAgent: {}]", data.agent_name);
             for child in data.view_models.iter() {

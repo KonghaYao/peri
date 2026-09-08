@@ -1,3 +1,6 @@
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity,
+};
 use peri_agent::agent::react::AgentOutput;
 use peri_agent::agent::state::AgentState;
 use peri_agent::middleware::r#trait::Middleware;
@@ -78,14 +81,21 @@ async fn test_after_agent_未完成_注入_steering_并设_block_continue() {
         MessageSource::TodoSteering,
         "来源应为 TodoSteering"
     );
-    let text = drained[0].message.content().to_string();
+    let reminder = match &drained[0].payload {
+        peri_agent::session::QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+        other => panic!("expected canonical reminder, got {other:?}"),
+    };
+    assert_eq!(reminder.category, ReminderCategory::Guidance);
+    assert_eq!(reminder.source.0, "todo");
+    assert_eq!(reminder.kind, "require_completion");
+    assert_eq!(reminder.severity, ReminderSeverity::Warning);
+    assert_eq!(reminder.delivery, ReminderDelivery::Required);
+    assert!(reminder.audiences.contains(ReminderAudience::Model));
+    assert!(reminder.audiences.contains(ReminderAudience::Automation));
     assert!(
-        text.contains("[0] [pending] A"),
-        "注入内容应含当前 todo 状态: {text}"
-    );
-    assert!(
-        text.contains("<system-reminder>"),
-        "注入必须使用 system-reminder 包裹"
+        reminder.body.contains("[0] [pending] A"),
+        "注入内容应含当前 todo 状态: {}",
+        reminder.body
     );
 }
 

@@ -41,7 +41,9 @@ use self::tool_card::render_tool_card_lines;
 #[cfg(test)]
 use self::user::build_image_meta_info;
 pub(crate) use self::user::{parse_image_line, render_image_hover_line};
-use self::user::{render_reminder_condensed, render_user_bubble_lines};
+use self::user::{
+    render_reminder_condensed, render_system_reminder_lines, render_user_bubble_lines,
+};
 
 // ── vm_to_lines：TuiRenderUnit → Vec<Line<'static>> ───────────────────────
 
@@ -116,7 +118,7 @@ fn copy_button_line(grid: &GridSpec) -> Option<(Line<'static>, u16, u16)> {
 ///
 /// 仅测试断言使用（[`render_test`]）——生产路径统一走 [`vm_to_lines_cached`]。
 #[cfg(test)]
-pub(super) fn vm_to_lines(vm: &TuiRenderUnit, grid: &GridSpec) -> Vec<Line<'static>> {
+pub(crate) fn vm_to_lines(vm: &TuiRenderUnit, grid: &GridSpec) -> Vec<Line<'static>> {
     vm_to_lines_cached(
         vm,
         grid,
@@ -394,6 +396,12 @@ pub(super) fn vm_to_lines_cached_with_layout(
         TuiRenderUnit::TuiSystemNote(data) => {
             (render_system_note_lines(data, grid), None, None, Vec::new())
         }
+        TuiRenderUnit::TuiSystemReminder(data) => (
+            render_system_reminder_lines(data, grid),
+            None,
+            None,
+            Vec::new(),
+        ),
         TuiRenderUnit::TuiSubAgentGroup(data) => (
             render_subagent_group_lines(data, grid),
             None,

@@ -319,7 +319,12 @@ fn test_before_model_pushes_info_messages() {
     let drained = state.queue.drain_all();
     let texts: Vec<String> = drained
         .iter()
-        .map(|m| m.message.content().to_string())
+        .map(|m| match &m.payload {
+            peri_agent::session::QueuedPayload::SystemReminder(reminder) => {
+                reminder.as_reminder().body.clone()
+            }
+            other => panic!("expected canonical reminder, got {other:?}"),
+        })
         .collect();
     assert_eq!(texts.len(), 3, "提示 + 2 条变化: {texts:?}");
     assert!(
@@ -342,7 +347,7 @@ fn test_before_model_pushes_info_messages() {
     mw.push_status_changes(&mut state);
     assert!(state.queue.drain_all().is_empty(), "缓冲恰好一次");
 
-    // 队列内消息均为 Info + SystemInjected
+    // 队列内消息均为 canonical Info + Lifecycle/MCP mapping
     for msg in &drained {
         assert_eq!(msg.kind, MessageKind::Info, "必须为 Info（不唤醒循环）");
         assert!(
@@ -352,6 +357,15 @@ fn test_before_model_pushes_info_messages() {
             ),
             "source 应为 SystemInjected"
         );
+        let reminder = match &msg.payload {
+            peri_agent::session::QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+            other => panic!("expected canonical reminder, got {other:?}"),
+        };
+        assert_eq!(reminder.category, ReminderCategory::Lifecycle);
+        assert_eq!(reminder.source.0, "mcp");
+        assert_eq!(reminder.kind, "connection_status_changed");
+        assert_eq!(reminder.delivery, ReminderDelivery::Configurable);
+        assert!(reminder.audiences.contains(ReminderAudience::Model));
     }
 }
 
@@ -373,7 +387,12 @@ fn test_tool_search_hint_once_per_instance() {
             .queue
             .drain_all()
             .iter()
-            .map(|m| m.message.content().to_string())
+            .map(|m| match &m.payload {
+                peri_agent::session::QueuedPayload::SystemReminder(reminder) => {
+                    reminder.as_reminder().body.clone()
+                }
+                other => panic!("expected canonical reminder, got {other:?}"),
+            })
             .collect();
         let hint_count = texts.iter().filter(|t| t.contains("tool search")).count();
         assert_eq!(

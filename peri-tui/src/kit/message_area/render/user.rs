@@ -15,6 +15,54 @@ const USER_BODY_MAX_LINES: usize = 6;
 
 // ── 各变体渲染函数（Slice 3：统一网格 + 无气泡 + 垂直节奏）──────────────
 
+pub(super) fn render_system_reminder_lines(
+    data: &crate::kit::tui_render_unit::TuiSystemReminder,
+    grid: &GridSpec,
+) -> Vec<Line<'static>> {
+    let sem = THEME_ATOM.state().read().semantic;
+    let marker = if data.legacy {
+        i18n::tr("reminder-legacy-marker")
+    } else if data.required {
+        i18n::tr("reminder-required-marker")
+    } else {
+        i18n::tr("reminder-structured-marker")
+    };
+    let heading = format!(
+        "{} · {} · {} · {:?}",
+        marker, data.category, data.source, data.severity
+    );
+    let mut lines = Vec::new();
+    for text in wrap_by_width(&heading, grid.content_width()) {
+        lines.push(prefixed_cont_line(
+            grid,
+            sem.text.secondary,
+            Line::from(Span::styled(
+                text,
+                Style::default()
+                    .fg(sem.text.secondary)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ));
+    }
+    for text in wrap_by_width(&data.summary, grid.content_width()) {
+        lines.push(prefixed_cont_line(
+            grid,
+            sem.text.secondary,
+            Line::from(Span::styled(text, Style::default().fg(sem.text.primary))),
+        ));
+    }
+    if data.expanded && data.body != data.summary {
+        for text in wrap_by_width(&data.body, grid.content_width()) {
+            lines.push(prefixed_cont_line(
+                grid,
+                sem.text.secondary,
+                Line::from(Span::styled(text, Style::default().fg(sem.text.primary))),
+            ));
+        }
+    }
+    lines
+}
+
 /// §6.1 User prompt：去全宽 bg 与 `❯`；无 role label（`You`），正文直接开始。
 ///
 /// - 首尾各 1 个空行（§3.2 turn 节拍）——空行带竖线前缀，左缘时间线不断链；

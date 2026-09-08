@@ -1,13 +1,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
 use peri_agent::{
-    error::AgentResult,
-    messages::{BaseMessage, MessageContent},
+    error::{AgentError, AgentResult},
     middleware::r#trait::Middleware,
     session::{MessageKind, MessageSource, QueuedMessage},
     tools::BaseTool,
 };
+use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::tools::todo::{render_todo_status, TodoItem, TodoState, TodoStatus, TodoWriteTool};
@@ -87,14 +91,30 @@ impl Middleware for TodoMiddleware {
             .count();
         let template = Self::render_steering(&snap.items);
         drop(snap); // 模板渲染完成，释放状态锁（注入路径不依赖 todo 状态）
-                    // [TRAP] 必须用 Human + <system-reminder> 注入，禁止 BaseMessage::system。
-                    // System 消息会被 invoke hoist 到 system prompt 顶部，污染 frozen_system_prompt。
-                    // （与 goal_middleware.rs / hooks/middleware.rs 注入路径一致）
-        let reminder = format!("<system-reminder>\n{}\n</system-reminder>", template);
-        state.enqueue_v2_message(QueuedMessage::new(
+        let reminder = TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Guidance,
+                source: ReminderSource("todo".into()),
+                kind: "require_completion".into(),
+                severity: ReminderSeverity::Warning,
+                delivery: ReminderDelivery::Required,
+                audiences: ReminderAudiences(vec![
+                    ReminderAudience::Model,
+                    ReminderAudience::Automation,
+                ]),
+                body: template,
+                summary: Some(format!("{pending_count} 个 Todo 尚未完成")),
+                metadata: json!({ "pending_count": pending_count }),
+            })
+            .map_err(|error| AgentError::MiddlewareError {
+                middleware: self.name().to_string(),
+                reason: error.to_string(),
+            })?;
+        state.enqueue_v2_message(QueuedMessage::system_reminder(
             MessageKind::Defer,
             MessageSource::TodoSteering,
-            BaseMessage::human(MessageContent::text(reminder)),
+            reminder,
         ));
 
         tracing::debug!(
