@@ -139,7 +139,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             .entries()
             .iter()
             .filter(|e| {
-                let f = transcript_owned.flags(e.message.id());
+                let f = transcript_owned.flags(e.id());
                 f.truncated || f.excluded || f.projection.is_some()
             })
             .count();
@@ -158,7 +158,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                     .entries()
                     .iter()
                     .filter(|e| {
-                        let f = transcript_owned.flags(e.message.id());
+                        let f = transcript_owned.flags(e.id());
                         f.truncated || f.excluded || f.projection.is_some()
                     })
                     .count();

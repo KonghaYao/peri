@@ -33,10 +33,12 @@ pub async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
 
     let recall_items = exec_outcome.agent_state.drain_recall();
     PromptResult {
+        persisted_payloads: exec_outcome.persisted_payloads,
         messages: exec_outcome.agent_state.into_messages(),
         ok: exec_outcome.ok,
         stop_reason: exec_outcome.stop_reason,
         failure: exec_outcome.failure,
+        persistence_inconsistent: exec_outcome.persistence_inconsistent,
         history_replaced_by_compaction: exec_outcome.history_replaced_by_compaction,
         recall_items,
     }

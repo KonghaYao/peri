@@ -512,40 +512,27 @@ pub struct ActOutput {
 
 // ─── 工具函数 ────────────────────────────────────────────────────────────────
 
-/// 把 drained 队列消息写入 transcript。
-///
-/// - `Prompt`：message 原样 append（用户输入）
-/// - `Defer` / `Info`：content 用 `<system-reminder>` 包裹后 append（系统注入）
-///
-/// Defer 与 Info 在 transcript 中的渲染一致（都是 system-injected 数据），
-/// 差异仅在队列行为（drain 时机）——见 `MessageQueue::drain_all`。
+/// Writes drained queue payloads into the transcript without inferring semantics from scheduling.
 pub fn append_messages_to_transcript(
     transcript: &mut MessageTranscript,
     messages: Vec<QueuedMessage>,
 ) {
-    use crate::messages::{BaseMessage, MessageContent};
-    use crate::session::MessageKind;
+    use crate::session::QueuedPayload;
+
     for msg in messages {
-        let content = match msg.kind {
-            MessageKind::Prompt => {
-                // keepgoing：空 Prompt 仅驱动 ReAct loop 继续（Receive consumed_count>0），
-                // 不写入 transcript——用户没有输入新内容，历史中不应出现空 user 消息。
-                // [判空] 必须与 peri-acp `is_keepgoing` 同一语义（按 content block 判空）：
-                // `Blocks([Image])` 等纯附件消息不应被误判为空。
-                if msg.message.message_content().is_empty() {
+        match msg.payload {
+            QueuedPayload::Message(message) => {
+                if msg.kind == crate::session::MessageKind::Prompt
+                    && message.message_content().is_empty()
+                {
                     continue;
                 }
-                msg.message
+                transcript.append(message);
             }
-            MessageKind::Info | MessageKind::Defer => {
-                let text = msg.message.content().to_string();
-                BaseMessage::human(MessageContent::text(format!(
-                    "<system-reminder>\n{}\n</system-reminder>",
-                    text
-                )))
+            QueuedPayload::SystemReminder(reminder) => {
+                transcript.append_system_reminder(reminder);
             }
-        };
-        transcript.append(content);
+        }
     }
 }
 

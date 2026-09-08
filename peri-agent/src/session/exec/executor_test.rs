@@ -274,6 +274,11 @@ fn make_turn_input(
         content,
         continuation,
         frozen: None,
+        history_payloads: history
+            .iter()
+            .cloned()
+            .map(peri_acp_types::store::PersistedPayload::Message)
+            .collect(),
         history,
         incoming_recalls: vec![],
         bg_results: vec![],
@@ -741,9 +746,9 @@ async fn test_run_session_loop_intercept_inject_enters_agent_pipeline() {
     let queued = session_arc.queue().drain_all();
     let injected = queued.iter().find(|q| q.kind == MessageKind::Prompt);
     assert!(
-        matches!(injected, Some(q) if q.message.content().contains("/skill tdd")),
+        matches!(injected, Some(q) if q.message().unwrap().content().contains("/skill tdd")),
         "注入文本必须经 AgentInput::blocks 进入 agent 管线，实际: {:?}",
-        injected.map(|q| q.message.content())
+        injected.map(|q| q.message().unwrap().content())
     );
     assert!(
         matches!(injected, Some(q) if q.source == V2MessageSource::UserInput),

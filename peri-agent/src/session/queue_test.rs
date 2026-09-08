@@ -1,5 +1,29 @@
 use super::*;
 use crate::messages::MessageContent;
+use peri_acp_types::system_reminder::{
+    ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity, ReminderSource as CanonicalSource,
+    SystemReminder, TrustedSystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
+use serde_json::json;
+
+fn make_reminder() -> TrustedSystemReminder {
+    TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: CanonicalSource("test".into()),
+            kind: "completed".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![
+                peri_acp_types::system_reminder::ReminderAudience::Model,
+            ]),
+            body: "done".into(),
+            summary: None,
+            metadata: json!({"id": 1}),
+        })
+        .unwrap()
+}
 
 fn make_msg(text: &str) -> BaseMessage {
     BaseMessage::human(MessageContent::text(text.to_string()))
@@ -31,9 +55,18 @@ fn test_drain_all_consumes_all_message_types() {
 
     let consumed = q.drain_all();
     assert_eq!(consumed.len(), 3, "drain_all 应消费全部三种类型");
-    assert_eq!(consumed[0].message.content(), "p1");
-    assert_eq!(consumed[1].message.content(), "d1");
-    assert_eq!(consumed[2].message.content(), "i1");
+    assert!(matches!(
+        &consumed[0].payload,
+        QueuedPayload::Message(message) if message.content() == "p1"
+    ));
+    assert!(matches!(
+        &consumed[1].payload,
+        QueuedPayload::Message(message) if message.content() == "d1"
+    ));
+    assert!(matches!(
+        &consumed[2].payload,
+        QueuedPayload::Message(message) if message.content() == "i1"
+    ));
     assert!(q.is_empty(), "队列应完全排空");
 }
 
@@ -66,6 +99,33 @@ fn test_has_wake_up_only_prompt_and_defer() {
         make_msg("p1"),
     ));
     assert!(q.has_wake_up(), "Prompt 应唤醒");
+}
+
+#[test]
+fn test_reminder_payload_roundtrip_is_independent_of_wake_kind() {
+    let q = MessageQueue::new();
+    let reminder = make_reminder();
+    q.push(QueuedMessage::system_reminder(
+        MessageKind::Info,
+        MessageSource::SystemInjected,
+        reminder.clone(),
+    ));
+    assert!(!q.has_wake_up());
+
+    q.push(QueuedMessage::system_reminder(
+        MessageKind::Defer,
+        MessageSource::SystemInjected,
+        reminder.clone(),
+    ));
+    assert!(q.has_wake_up());
+
+    let drained = q.drain_all();
+    for queued in drained {
+        let QueuedPayload::SystemReminder(actual) = queued.payload else {
+            panic!("expected reminder payload");
+        };
+        assert_eq!(actual, reminder);
+    }
 }
 
 #[test]

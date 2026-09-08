@@ -131,7 +131,7 @@ mod tests {
         let marked_messages = t
             .entries()
             .iter()
-            .filter(|entry| t.flags(entry.message.id()).truncated)
+            .filter(|entry| t.flags(entry.id()).truncated)
             .count();
         assert_eq!(
             affected, marked_messages,
@@ -169,10 +169,10 @@ mod tests {
 
         // 验证所有错误 tool_result 未被 truncated
         for entry in t.entries() {
-            if let BaseMessage::Tool { is_error, .. } = &entry.message {
+            if let BaseMessage::Tool { is_error, .. } = entry.message() {
                 if *is_error {
                     assert!(
-                        !t.flags(entry.message.id()).truncated,
+                        !t.flags(entry.id()).truncated,
                         "错误 ToolResult 不应被 truncated"
                     );
                 }
@@ -197,7 +197,7 @@ mod tests {
         // ancestor 消息不应被标记
         let entries = t.entries();
         assert!(entries.len() > 1);
-        let ancestor_flags = t.flags(entries[0].message.id());
+        let ancestor_flags = t.flags(entries[0].message().id());
         assert!(!ancestor_flags.truncated, "ancestor 消息不应被 truncated");
 
         // 自有消息有被标记的
@@ -251,9 +251,9 @@ mod tests {
         let (affected, _saved) = smart_compact(&mut t, &config);
 
         let entries = t.entries();
-        let recent_human_id = entries[entries.len() - 3].message.id();
-        let recent_tool_id = entries[entries.len() - 1].message.id();
-        let error_tool_id = entries[entries.len() - 5].message.id();
+        let recent_human_id = entries[entries.len() - 3].message().id();
+        let recent_tool_id = entries[entries.len() - 1].message().id();
+        let error_tool_id = entries[entries.len() - 5].message().id();
 
         // 最近消息（在 stale 窗口内）应保留
         assert!(
@@ -283,7 +283,7 @@ mod tests {
         let (affected, _saved) = smart_compact(&mut t, &config);
 
         let entries = t.entries();
-        let system_flags = t.flags(entries[0].message.id());
+        let system_flags = t.flags(entries[0].message().id());
         assert!(
             !system_flags.truncated,
             "System 消息应保留（非工具，不被选中）"

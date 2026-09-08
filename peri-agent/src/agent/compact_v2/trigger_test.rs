@@ -384,7 +384,7 @@ async fn test_micro_applied_then_full_failure_is_not_reported_as_full_completion
     assert!(
         t.entries()
             .iter()
-            .any(|entry| t.flags(entry.message.id()).truncated),
+            .any(|entry| t.flags(entry.id()).truncated),
         "Full 失败后仍应保留已应用的 Micro 截断"
     );
     assert_eq!(failures, 1, "Full 失败应计入连续失败次数");
@@ -542,7 +542,7 @@ async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
     assert!(
         t.entries()
             .iter()
-            .any(|entry| t.flags(entry.message.id()).truncated),
+            .any(|entry| t.flags(entry.id()).truncated),
         "Full 失败后必须保留 Smart 已应用的 truncated 标记"
     );
     assert_eq!(
@@ -686,7 +686,7 @@ async fn test_run_compact_micro_shadow_mode_returns_shadowed_without_changes() {
     assert!(
         t.entries()
             .iter()
-            .all(|entry| !t.flags(entry.message.id()).truncated),
+            .all(|entry| !t.flags(entry.id()).truncated),
         "shadow mode 绝不应改写 transcript"
     );
 }
@@ -727,7 +727,7 @@ async fn test_run_compact_smart_shadow_mode_returns_shadowed_without_changes() {
     assert!(
         t.entries()
             .iter()
-            .all(|entry| !t.flags(entry.message.id()).truncated),
+            .all(|entry| !t.flags(entry.id()).truncated),
         "shadow mode 绝不应改写 transcript"
     );
 }

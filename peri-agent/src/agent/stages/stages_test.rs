@@ -368,7 +368,7 @@ async fn test_run_react_loop_info_only_does_not_wake_model() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(context.session.turn.current_step(), 0);
     assert!(context.session.transcript.read().entries()[0]
-        .message
+        .message()
         .content()
         .contains("micro compact state update"));
 }
@@ -1069,7 +1069,7 @@ fn test_append_messages_prompt_kept_as_is() {
     }
     let transcript = ctx.session.transcript.read();
     assert_eq!(transcript.len(), 1);
-    let content = transcript.entries()[0].message.content();
+    let content = transcript.entries()[0].message().content();
     assert_eq!(content, "hello user");
 }
 
@@ -1110,8 +1110,7 @@ fn test_append_messages_whitespace_prompt_kept() {
 }
 
 #[test]
-fn test_append_messages_info_wrapped_in_reminder() {
-    // Info 消息应用 <system-reminder> 包裹
+fn test_append_messages_info_kept_as_plain_message() {
     let ctx = make_stage_context();
     let msgs = vec![QueuedMessage::info(
         MessageSource::SystemInjected,
@@ -1122,17 +1121,11 @@ fn test_append_messages_info_wrapped_in_reminder() {
         append_messages_to_transcript(&mut transcript, msgs);
     }
     let transcript = ctx.session.transcript.read();
-    assert_eq!(transcript.len(), 1);
-    let content = transcript.entries()[0].message.content();
-    assert!(content.contains("<system-reminder>"));
-    assert!(content.contains("system info"));
+    assert_eq!(transcript.entries()[0].message().content(), "system info");
 }
 
 #[test]
-fn test_append_messages_defer_wrapped_in_reminder() {
-    // Defer 消息（bg_results / WorkflowComplete）应用 <system-reminder> 包裹
-    // —— 这是本次修复的关键断言：mod.rs:520-528 把 awakened_messages 写入
-    // transcript 时，Defer 走 reminder 包裹路径（与 Info 一致）。
+fn test_append_messages_defer_kept_as_plain_message() {
     let ctx = make_stage_context();
     let msgs = vec![QueuedMessage::defer(
         MessageSource::SubAgentComplete,
@@ -1143,17 +1136,9 @@ fn test_append_messages_defer_wrapped_in_reminder() {
         append_messages_to_transcript(&mut transcript, msgs);
     }
     let transcript = ctx.session.transcript.read();
-    assert_eq!(transcript.len(), 1);
-    let content = transcript.entries()[0].message.content();
-    assert!(
-        content.contains("<system-reminder>"),
-        "Defer 应被 reminder 包裹, got: {}",
-        content
-    );
-    assert!(
-        content.contains("bg-result-payload"),
-        "Defer 内容应在 transcript 中, got: {}",
-        content
+    assert_eq!(
+        transcript.entries()[0].message().content(),
+        "bg-result-payload"
     );
 }
 
@@ -1184,7 +1169,7 @@ async fn test_e2e_defer_consumed_in_receive() {
         result
     );
 
-    // transcript 应包含 Defer 内容（reminder 包裹，由 Receive 阶段写入）
+    // transcript 应包含普通 Defer 内容，保持 legacy event/message 语义。
     let transcript = ctx.session.transcript.read();
     let combined: String = transcript
         .visible_messages()
@@ -1192,11 +1177,6 @@ async fn test_e2e_defer_consumed_in_receive() {
         .map(|m| m.content().to_string())
         .collect::<Vec<_>>()
         .join("\n---\n");
-    assert!(
-        combined.contains("<system-reminder>"),
-        "Defer 应被 reminder 包裹写入 transcript, got: {}",
-        combined
-    );
     assert!(
         combined.contains("bg-result-payload"),
         "Defer 内容应在 transcript 中, got: {}",

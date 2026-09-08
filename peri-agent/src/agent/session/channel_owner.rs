@@ -33,12 +33,16 @@
 //! channel_owner.start(channel_rx, inbox_handle, cancel_token);
 //! ```
 
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
+use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::agent::session::inbox::InboxHandle;
 use crate::interaction::channel_types::ChannelNotification;
-use crate::messages::{BaseMessage, MessageContent};
-use crate::session::{MessageSource, QueuedMessage};
+use crate::session::{MessageKind, MessageSource, QueuedMessage};
 
 /// Agent-owned channel notification bridge.
 ///
@@ -98,16 +102,36 @@ impl ChannelOwner {
                     notif = channel_rx.recv() => {
                         match notif {
                             Some(notif) => {
-                                let payload = format!(
-                                    "<system-reminder><channel source=\"{}\" chat_id=\"{}\">{}</channel></system-reminder>",
+                                let body = format!(
+                                    "Channel message from {} (chat {}): {}",
                                     notif.source, notif.chat_id, notif.text
                                 );
-                                let message = BaseMessage::human(
-                                    MessageContent::text(payload),
-                                );
-                                inbox.push(QueuedMessage::defer(
+                                let reminder = TrustedSystemReminderFactory::for_producer()
+                                    .construct(SystemReminder {
+                                        version: SYSTEM_REMINDER_VERSION,
+                                        category: ReminderCategory::ExternalEvent,
+                                        source: ReminderSource("channel".into()),
+                                        kind: "message_received".into(),
+                                        severity: ReminderSeverity::Info,
+                                        delivery: ReminderDelivery::Configurable,
+                                        audiences: ReminderAudiences(vec![
+                                            ReminderAudience::Model,
+                                            ReminderAudience::Tui,
+                                            ReminderAudience::Diagnostics,
+                                            ReminderAudience::Automation,
+                                        ]),
+                                        summary: Some(format!("Channel message from {}", notif.source)),
+                                        body,
+                                        metadata: json!({
+                                            "channel_source": notif.source,
+                                            "chat_id": notif.chat_id,
+                                        }),
+                                    })
+                                    .expect("channel reminder contract must be valid");
+                                inbox.push(QueuedMessage::system_reminder(
+                                    MessageKind::Defer,
                                     MessageSource::ChannelMessage,
-                                    message,
+                                    reminder,
                                 ));
                                 tracing::info!(
                                     source = %notif.source,

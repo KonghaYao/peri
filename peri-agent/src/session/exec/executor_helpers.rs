@@ -65,6 +65,10 @@ pub struct ExecOutcome {
     pub failure: Option<ExecutionFailure>,
     /// A Full Compact committed during this turn and replaced prior visible history.
     pub history_replaced_by_compaction: bool,
+    /// Canonical transcript snapshot captured after the persistence barrier.
+    pub persisted_payloads: Vec<peri_acp_types::store::PersistedPayload>,
+    /// Durable state could not be rolled back or verified; host must invalidate the session.
+    pub persistence_inconsistent: bool,
     pub agent_state: AgentState,
 }
 

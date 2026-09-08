@@ -129,10 +129,12 @@ pub(super) async fn full_compact_inner(
         .entries()
         .iter()
         .skip(transcript.ancestor_len())
-        .filter(|entry| !matches!(entry.message, BaseMessage::System { .. }))
+        .filter(|entry| {
+            matches!(entry.as_message(), Some(message) if !matches!(message, BaseMessage::System { .. }))
+        })
         .map(|entry| {
             (
-                entry.message.id(),
+                entry.id(),
                 MessageFlags {
                     excluded: true,
                     ..Default::default()
@@ -183,12 +185,11 @@ pub(super) async fn full_compact_inner(
 
 /// 构造 Full Compact 的 Human 摘要消息。
 fn build_summary_message(summary: &str) -> BaseMessage {
-    let hint_text = format!(
-        "<system-reminder>\n{}\n\n{}\n</system-reminder>",
+    BaseMessage::human(format!(
+        "{}\n\n{}",
         crate::agent::compact_v2::CONTINUATION_HINT,
         summary
-    );
-    BaseMessage::human(hint_text)
+    ))
 }
 
 /// 预处理消息为文本行（供 LLM 摘要使用）
@@ -552,7 +553,7 @@ async fn collect_reinject_v2(
     let all_messages: Vec<BaseMessage> = transcript
         .entries()
         .iter()
-        .map(|e| e.message.clone())
+        .filter_map(|entry| entry.as_message().cloned())
         .collect();
 
     let mut result_messages: Vec<BaseMessage> = Vec::new();
@@ -586,10 +587,7 @@ async fn collect_reinject_v2(
 
         for (path, content) in &valid_files {
             // 用 Human 消息（而非 System）避免 LLM invoke hoist 污染 frozen prompt
-            let human_content = format!(
-                "[最近读取的文件: {}]\n<system-reminder>\n{}\n</system-reminder>",
-                path, content
-            );
+            let human_content = format!("[最近读取的文件: {}]\n{}", path, content);
             result_messages.push(BaseMessage::human(human_content));
         }
         files_injected = valid_files.len();
@@ -624,10 +622,7 @@ async fn collect_reinject_v2(
         truncate_to_budget(&mut valid_skills, config.re_inject_skills_budget);
 
         for (path, content) in &valid_skills {
-            let human_content = format!(
-                "[激活的 Skill 指令: {}]\n<system-reminder>\n{}\n</system-reminder>",
-                path, content
-            );
+            let human_content = format!("[激活的 Skill 指令: {}]\n{}", path, content);
             result_messages.push(BaseMessage::human(human_content));
         }
         skills_injected = valid_skills.len();

@@ -120,7 +120,11 @@ impl TurnGroup {
             if i < ancestor_len {
                 continue;
             }
-            match &entry.message {
+            let Some(message) = entry.as_message() else {
+                // Canonical reminders are control entries, not Human turn boundaries.
+                continue;
+            };
+            match message {
                 BaseMessage::Human { .. } => {
                     if let Some(g) = current.take() {
                         groups.push(g);
@@ -155,7 +159,7 @@ impl TurnGroup {
     pub fn tool_exchanges(&self) -> Vec<ToolExchange> {
         let mut exchanges = Vec::new();
         for (_, ai_entry) in &self.ai_entries {
-            if let BaseMessage::Ai { tool_calls, .. } = &ai_entry.message {
+            if let BaseMessage::Ai { tool_calls, .. } = ai_entry.message() {
                 for tc in tool_calls {
                     let result_entries: Vec<_> = self
                         .tool_results
@@ -166,7 +170,7 @@ impl TurnGroup {
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
                         tool_input: tc.arguments.clone(),
-                        ai_message_id: ai_entry.message.id(),
+                        ai_message_id: ai_entry.id(),
                         tool_result_entries: result_entries,
                     });
                 }
@@ -320,9 +324,9 @@ pub fn plan_micro(
             if config.has_valid_micro_field_limits() {
                 for (_, result_entry) in &exchange.tool_result_entries {
                     if skip_existing_truncated
-                        && transcript.flags(result_entry.message.id()).truncated
+                        && transcript.flags(result_entry.id()).truncated
                         && transcript
-                            .get_flags(result_entry.message.id())
+                            .get_flags(result_entry.id())
                             .and_then(|f| f.projection)
                             .is_some_and(|d| {
                                 d.policy_version == super::projection::PROJECTION_POLICY_VERSION
@@ -332,7 +336,7 @@ pub fn plan_micro(
                     }
                     let BaseMessage::Tool {
                         content, is_error, ..
-                    } = &result_entry.message
+                    } = result_entry.message()
                     else {
                         continue;
                     };
@@ -344,7 +348,7 @@ pub fn plan_micro(
                     }
                     has_any_action = true;
                     actions.push(ProjectionActionEntry {
-                        message_id: result_entry.message.id(),
+                        message_id: result_entry.id(),
                         target: ProjectionTarget::Message,
                         action: ProjectionAction::CompactToolResult {
                             keep_head: config.micro_field_keep_head_chars,

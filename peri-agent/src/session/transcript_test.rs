@@ -1,4 +1,70 @@
 use super::*;
+
+#[test]
+fn reminder_entry_preserves_stable_identity_without_placeholder_state() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("identity_test".into()),
+            kind: "done".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "non-empty".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let mut transcript = MessageTranscript::new();
+    let id = transcript.append_system_reminder(reminder);
+    let entry = transcript.get(id).unwrap();
+
+    assert_eq!(entry.id(), id);
+    assert!(entry.as_message().is_none());
+    assert_eq!(entry.project_message().unwrap().id(), id);
+    assert!(!entry.project_message().unwrap().content().is_empty());
+}
+
+#[test]
+fn test_system_reminder_projects_once_as_human() {
+    use peri_acp_types::system_reminder::{
+        encode_system_reminder, ReminderAudience, ReminderAudiences, ReminderCategory,
+        ReminderDelivery, ReminderSeverity, ReminderSource, SystemReminder,
+        TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("test".into()),
+            kind: "completed".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "already <system-reminder> text".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let expected = encode_system_reminder(&reminder).unwrap();
+    let mut transcript = MessageTranscript::new();
+    transcript.append_system_reminder(reminder);
+
+    let projected = transcript.visible_model_messages().unwrap();
+    assert!(matches!(&projected[0], BaseMessage::Human { .. }));
+    assert_eq!(projected[0].content(), expected);
+    assert_eq!(
+        projected[0].content().matches("</system-reminder>").count(),
+        1
+    );
+}
+
 use std::sync::{Arc, Mutex};
 
 use crate::messages::MessageContent;
@@ -345,7 +411,7 @@ async fn test_message_transcript_flush_persistence_makes_appends_visible() {
 }
 
 #[tokio::test]
-async fn test_message_transcript_flush_persistence_returns_error_once_and_recovers() {
+async fn test_message_transcript_flush_persistence_failure_is_sticky() {
     let store = Arc::new(FaultInjectingStore::new([2]));
     let mut transcript =
         MessageTranscript::new().with_persistence(store.clone(), "flush-error".to_string());
@@ -362,7 +428,8 @@ async fn test_message_transcript_flush_persistence_returns_error_once_and_recove
     );
     assert_eq!(store.messages().len(), 1, "失败写入不应伪装为成功");
 
-    transcript.flush_persistence().await.unwrap();
+    let repeated = transcript.flush_persistence().await.unwrap_err();
+    assert_eq!(repeated.to_string(), error.to_string());
 }
 
 #[tokio::test]
@@ -377,7 +444,7 @@ async fn test_message_transcript_rebuild_keeps_persistence_writer_alive() {
     let entries: Vec<(BaseMessage, MessageFlags)> = transcript
         .entries()
         .iter()
-        .map(|entry| (entry.message.clone(), transcript.flags(entry.message.id())))
+        .map(|entry| (entry.message().clone(), transcript.flags(entry.id())))
         .collect();
     let mut rebuilt = transcript.rebuild(entries);
 
@@ -406,9 +473,10 @@ async fn test_message_transcript_flush_persistence_returns_first_of_multiple_err
             .contains("deterministic injected error on append 2"),
         "同一 barrier 前的多个写入失败必须返回第一个错误: {error}"
     );
-    assert_eq!(store.messages().len(), 1, "两个失败写入都不应伪装为成功");
+    assert_eq!(store.messages().len(), 1, "后续操作不得越过首次失败");
 
-    transcript.flush_persistence().await.unwrap();
+    let repeated = transcript.flush_persistence().await.unwrap_err();
+    assert_eq!(repeated.to_string(), error.to_string());
 }
 
 #[tokio::test]
@@ -588,7 +656,7 @@ fn test_append_returns_correct_id() {
     let msg = make_human("hello");
     let id = t.append(msg);
     // 返回的 id 应与消息内部 id 一致
-    assert_eq!(t.get(id).unwrap().message.id(), id);
+    assert_eq!(t.get(id).unwrap().message().id(), id);
 }
 
 #[test]
@@ -600,9 +668,9 @@ fn test_append_batch() {
     assert_eq!(ids.len(), 3);
     assert_eq!(t.len(), 3);
     // 按 append 顺序存储
-    assert_eq!(t.entries()[0].message.content(), "a");
-    assert_eq!(t.entries()[1].message.content(), "b");
-    assert_eq!(t.entries()[2].message.content(), "c");
+    assert_eq!(t.entries()[0].message().content(), "a");
+    assert_eq!(t.entries()[1].message().content(), "b");
+    assert_eq!(t.entries()[2].message().content(), "c");
 }
 
 // ── Staging 两阶段写入 ────────────────────────────────────────────────────
@@ -630,9 +698,9 @@ fn test_staging_commit_atomic() {
     // AI + 2 个 ToolResult = 3 条新消息
     assert_eq!(t.len(), 4);
     // 顺序：user → ai → tool1 → tool2
-    assert_eq!(t.entries()[1].message.content(), "thinking...");
-    assert_eq!(t.entries()[2].message.content(), "result-1");
-    assert_eq!(t.entries()[3].message.content(), "result-2");
+    assert_eq!(t.entries()[1].message().content(), "thinking...");
+    assert_eq!(t.entries()[2].message().content(), "result-1");
+    assert_eq!(t.entries()[3].message().content(), "result-2");
 }
 
 #[test]
@@ -674,8 +742,8 @@ fn test_stage_ai_message_overwrites_previous_staging() {
 
     t.commit_staged();
     assert_eq!(t.len(), 2, "只有 ai2 + tool2，ai1 和 tool1 被丢弃");
-    assert_eq!(t.entries()[0].message.content(), "second ai");
-    assert_eq!(t.entries()[1].message.content(), "result for second");
+    assert_eq!(t.entries()[0].message().content(), "second ai");
+    assert_eq!(t.entries()[1].message().content(), "result for second");
 }
 
 #[test]
@@ -853,13 +921,13 @@ fn test_rebuild_preserves_flags() {
     // 重建：保留 id1 的 excluded 标记
     let entries = vec![
         (
-            t.entries()[0].message.clone(),
+            t.entries()[0].message().clone(),
             MessageFlags {
                 excluded: true,
                 ..Default::default()
             },
         ),
-        (t.entries()[1].message.clone(), MessageFlags::default()),
+        (t.entries()[1].message().clone(), MessageFlags::default()),
     ];
 
     let t2 = t.rebuild(entries);
@@ -877,7 +945,7 @@ fn test_rebuild_preserves_ancestor_and_persistence() {
     let entries: Vec<(BaseMessage, MessageFlags)> = t
         .entries()
         .iter()
-        .map(|e| (e.message.clone(), MessageFlags::default()))
+        .map(|e| (e.message().clone(), MessageFlags::default()))
         .collect();
 
     let t2 = t.rebuild(entries);
@@ -891,7 +959,7 @@ fn test_rebuild_clears_staging() {
     t.append(make_human("msg"));
     t.stage_ai_message(make_ai("staged"));
 
-    let entries = vec![(t.entries()[0].message.clone(), MessageFlags::default())];
+    let entries = vec![(t.entries()[0].message().clone(), MessageFlags::default())];
     let t2 = t.rebuild(entries);
     assert!(!t2.has_staged(), "rebuild 应清空 staging");
 }
@@ -1005,12 +1073,12 @@ fn test_projection_directive_persists_roundtrip() {
         .entries()
         .iter()
         .map(|e| {
-            let fid = e.message.id();
+            let fid = e.id();
             let mut flags = t.flags(fid);
             if fid == id {
                 flags.projection = Some(directive.clone());
             }
-            (e.message.clone(), flags)
+            (e.message().clone(), flags)
         })
         .collect();
 

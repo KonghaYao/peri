@@ -68,8 +68,8 @@ fn test_add_message_dual_writes_transcript_and_cache() {
     // transcript 也应包含 new（双写同步）
     let transcript = ctx.session.transcript.read();
     assert_eq!(transcript.len(), 2, "transcript 应同时包含 old + new");
-    assert_eq!(transcript.entries()[0].message.content(), "old");
-    assert_eq!(transcript.entries()[1].message.content(), "new");
+    assert_eq!(transcript.entries()[0].message().content(), "old");
+    assert_eq!(transcript.entries()[1].message().content(), "new");
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn test_messages_mut_emits_warning() {
     assert!(!transcript
         .entries()
         .iter()
-        .any(|e| e.message.content() == "cache-only"));
+        .any(|e| e.message().content() == "cache-only"));
 }
 
 #[test]

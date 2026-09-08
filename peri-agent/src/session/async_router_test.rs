@@ -1,7 +1,7 @@
 //! Tests for async_router
 
 use super::*;
-use peri_acp_types::session::SessionInbox;
+use peri_acp_types::session::{QueuedPayload, SessionInbox};
 use peri_acp_types::tasks::BgTaskKind;
 use std::sync::Arc;
 
@@ -92,7 +92,10 @@ fn test_route_bg_result_notification_text_contains_task_info() {
     router.route_bg_result(&result, BgTaskKind::Agent);
 
     let msgs = inbox.queue().drain_all();
-    let text = msgs[0].message.content();
+    let text = match &msgs[0].payload {
+        QueuedPayload::SystemReminder(r) => r.as_reminder().body.as_str(),
+        _ => panic!("expected reminder"),
+    };
     assert!(text.contains("task-12"), "should contain short task_id");
     assert!(text.contains("my-agent"), "should contain agent_name");
     assert!(text.contains("output text"), "should contain output");
@@ -153,7 +156,10 @@ fn test_route_workflow_event_notification_format() {
     );
 
     let msgs = inbox.queue().drain_all();
-    let text = msgs[0].message.content();
+    let text = match &msgs[0].payload {
+        QueuedPayload::SystemReminder(r) => r.as_reminder().body.as_str(),
+        _ => panic!("expected reminder"),
+    };
     assert!(text.contains("wf-run-"), "should contain short run_id");
     assert!(
         text.contains("deploy-pipeline"),
@@ -182,7 +188,10 @@ fn test_route_workflow_event_status_text_distinguishes_killed_failed() {
     assert_eq!(msgs.len(), 3);
     let texts: Vec<String> = msgs
         .iter()
-        .map(|m| m.message.content().to_string())
+        .map(|m| match &m.payload {
+            QueuedPayload::SystemReminder(r) => r.as_reminder().body.clone(),
+            _ => panic!("expected reminder"),
+        })
         .collect();
     assert!(
         texts[0].contains("'deploy' killed."),

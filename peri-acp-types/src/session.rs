@@ -17,6 +17,7 @@ use crate::command::PromptStopReason;
 use crate::command_registry::CommandRegistry;
 use crate::mcp_skills::McpSkillRegistry;
 use crate::messages::BaseMessage;
+use crate::system_reminder::TrustedSystemReminder;
 use crate::thread::{CancelPolicy, ThreadId};
 
 // ─── ExecutionFailure（Agent→ACP 结果契约的 fatal failure DTO）────────────
@@ -377,6 +378,8 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 /// 单轮 prompt 执行结果（ACP 协议面 / 执行薄壳消费；Agent 层命令执行体与
 /// 执行句柄经本类型回传）。
 pub struct PromptResult {
+    /// Canonical transcript snapshot captured after Agent persistence barrier.
+    pub persisted_payloads: Vec<crate::store::PersistedPayload>,
     /// 执行后的消息历史。
     pub messages: Vec<BaseMessage>,
     /// 是否执行成功。
@@ -386,6 +389,8 @@ pub struct PromptResult {
     /// 致命执行失败（None = 正常终止 / 用户取消 / 最大轮数；Some = turn 应
     /// 以协议 error 结束，见 spec/issues/2026-08-18-acp-error-handler.md）。
     pub failure: Option<ExecutionFailure>,
+    /// 持久化状态无法回滚或验证，宿主必须使 session 不可继续。
+    pub persistence_inconsistent: bool,
     /// 本轮是否发生 Full Compact 提交并替换了先前的可见历史。
     pub history_replaced_by_compaction: bool,
     /// 执行期间收集的 recall 项（供下一轮注入）。
@@ -399,10 +404,12 @@ impl Default for PromptResult {
     /// 继续交给 ACP。
     fn default() -> Self {
         Self {
+            persisted_payloads: Vec::new(),
             messages: Vec::new(),
             ok: false,
             stop_reason: PromptStopReason::EndTurn,
             history_replaced_by_compaction: false,
+            persistence_inconsistent: false,
             recall_items: Vec::new(),
             failure: Some(ExecutionFailure::missing_result()),
         }
@@ -494,6 +501,13 @@ pub enum MessageSource {
 
 // ─── QueuedMessage ───────────────────────────────────────────────────────────
 
+/// Queue payload. Scheduling (`MessageKind`) is deliberately orthogonal to content semantics.
+#[derive(Debug, Clone)]
+pub enum QueuedPayload {
+    Message(BaseMessage),
+    SystemReminder(TrustedSystemReminder),
+}
+
 /// 一条待投递的消息（v2 富类型）
 #[derive(Debug, Clone)]
 pub struct QueuedMessage {
@@ -502,15 +516,34 @@ pub struct QueuedMessage {
     /// 消息来源
     pub source: MessageSource,
     /// 实际消息内容
-    pub message: BaseMessage,
+    pub payload: QueuedPayload,
 }
 
 impl QueuedMessage {
     pub fn new(kind: MessageKind, source: MessageSource, message: BaseMessage) -> Self {
+        Self::with_payload(kind, source, QueuedPayload::Message(message))
+    }
+
+    pub fn with_payload(kind: MessageKind, source: MessageSource, payload: QueuedPayload) -> Self {
         Self {
             kind,
             source,
-            message,
+            payload,
+        }
+    }
+
+    pub fn system_reminder(
+        kind: MessageKind,
+        source: MessageSource,
+        reminder: TrustedSystemReminder,
+    ) -> Self {
+        Self::with_payload(kind, source, QueuedPayload::SystemReminder(reminder))
+    }
+
+    pub fn message(&self) -> Option<&BaseMessage> {
+        match &self.payload {
+            QueuedPayload::Message(message) => Some(message),
+            QueuedPayload::SystemReminder(_) => None,
         }
     }
 
@@ -755,6 +788,16 @@ impl InboxHandle {
     pub fn push_info(&self, source: MessageSource, message: BaseMessage) {
         // Intentionally no wake.notify_one() — Info does not wake the loop
         self.queue.push(QueuedMessage::info(source, message));
+    }
+
+    /// Push a trusted reminder and preserve its scheduling semantics.
+    pub fn push_system_reminder(
+        &self,
+        kind: MessageKind,
+        source: MessageSource,
+        reminder: TrustedSystemReminder,
+    ) {
+        self.push(QueuedMessage::system_reminder(kind, source, reminder));
     }
 
     /// Push an arbitrary QueuedMessage and conditionally wake.

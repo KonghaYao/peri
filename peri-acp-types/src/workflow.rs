@@ -430,7 +430,10 @@ impl WorkflowTaskResult {
         }
     }
 
-    /// 格式化为 `<system-reminder>` 块，含 phase breakdown。
+    /// 格式化 workflow 完成通知正文，含 phase breakdown。
+    ///
+    /// 本函数不编码 `<system-reminder>` envelope；canonical producer 在队列/投影边界
+    /// 统一编码，避免 producer 直接拼接 wire format。
     pub fn to_notification(&self) -> String {
         let success_msg = self.notification_status_phrase();
 
@@ -513,10 +516,8 @@ impl WorkflowTaskResult {
             .collect::<String>();
 
         format!(
-            "<system-reminder>\n\
-            Workflow '{}' {}. ({}ms, {} agents, {} tool calls)\n\
-            {}{}{}{}{}\
-            </system-reminder>",
+            "Workflow '{}' {}. ({}ms, {} agents, {} tool calls)\n\
+            {}{}{}{}{}",
             escape_reminder_text(&self.workflow_name),
             success_msg,
             self.duration_ms,

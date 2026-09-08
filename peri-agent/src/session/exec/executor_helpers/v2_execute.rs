@@ -90,6 +90,7 @@ pub struct V2ExecuteRequest {
     pub thread_store: Option<Arc<dyn ThreadStore>>,
     pub thread_id: Option<String>,
     pub agent_input: AgentInput,
+    pub history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     pub history: Vec<BaseMessage>,
     pub cached_llm: Option<CachedLlmInstances>,
     pub task_manager: Option<Arc<dyn TaskManager>>,
@@ -178,6 +179,8 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 stop_reason: PromptStopReason::EndTurn,
                 failure: Some(failure),
                 history_replaced_by_compaction: false,
+                persisted_payloads: req.history_payloads,
+                persistence_inconsistent: false,
                 agent_state: AgentState::new(&req.cwd),
             };
         }
@@ -278,11 +281,13 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
 
     // Phase 5: seed transcript（history 作为 ancestor 之外的自有消息）
     // 首轮用户 turn 判定需在 history move 前捕获（Phase 5.9 使用）。
-    let is_first_user_turn = !req.continuation && req.history.is_empty();
+    let is_first_user_turn = !req.continuation && req.history_payloads.is_empty();
+    let ancestor_payloads = req.history_payloads.clone();
     {
         let transcript_arc = v2_out.session.transcript();
         let mut transcript = transcript_arc.write();
-        transcript.append_batch(req.history);
+        let old = std::mem::take(&mut *transcript);
+        *transcript = old.with_ancestor_payloads(req.history_payloads);
     }
 
     // Phase 5.5: restore compact flags from persistence (if available)
@@ -412,26 +417,75 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     };
 
     // Phase 8: 从 transcript 提取最终消息列表，构造 AgentState（兼容下游 PromptResult）
-    // 前置：显式 flush 剩余积压，确保最终回答已落库。Drop 层 Shutdown 优雅关闭是
-    // 根因兜底（覆盖全部 6 个 run_react_loop 调用方），此处是主路径双保险——
-    // 让会话恢复方在 turn 结束即可读到完整历史，不依赖 drop 时序。失败不阻断
-    // 内存路径（后续 Drop 仍会尝试 flush）。
+    // 前置：显式 flush 剩余积压，确保最终回答已落库。Barrier 失败是执行失败；
+    // 此时不得把包含未持久化内容的 transcript snapshot 暴露给 host。
     // [SAFE] 先在 guard 作用域内同步提取 Send 的 writer 通道句柄（guard 语句结束即
     // drop，不跨 await），再经关联函数 `flush_via_tx` 异步等待 barrier——调用链
     // future 不持有 parking_lot guard，保持 Send（peri-tui 在 tokio::spawn 中调用本链）。
     let flush_tx = v2_out.session.transcript().read().persist_tx_handle();
-    if let Some(tx) = flush_tx {
-        if let Err(e) = MessageTranscript::flush_via_tx(&tx).await {
-            tracing::warn!(session_id = %req.session_id, error = %e, "[v2] phase 8 transcript flush failed");
-        }
-    }
-    let (messages, history_replaced_by_compaction) = {
-        let transcript = v2_out.session.transcript();
-        let transcript = transcript.read();
-        let messages: Vec<BaseMessage> =
-            transcript.visible_messages().into_iter().cloned().collect();
-        (messages, transcript.full_compaction_committed())
+    let flush_error = if let Some(tx) = flush_tx {
+        MessageTranscript::flush_via_tx(&tx).await.err()
+    } else {
+        None
     };
+    let mut persistence_inconsistent = false;
+    let persistence_failure = if let Some(e) = flush_error {
+        error!(session_id = %req.session_id, error = %e, "[v2] phase 8 transcript flush failed");
+        let ancestor_ids = ancestor_payloads
+            .iter()
+            .map(|payload| payload.id())
+            .collect::<std::collections::HashSet<_>>();
+        let turn_ids = {
+            let transcript = v2_out.session.transcript();
+            let transcript = transcript.read();
+            transcript
+                .persisted_payloads()
+                .into_iter()
+                .map(|payload| payload.id())
+                .filter(|id| !ancestor_ids.contains(id))
+                .collect::<Vec<_>>()
+        };
+        let rollback_ok = match (req.thread_store.as_ref(), req.thread_id.as_ref()) {
+            (Some(store), Some(thread_id)) => {
+                store.delete_messages(thread_id, &turn_ids).await.is_ok()
+                    && store.load_payloads(thread_id).await.is_ok_and(|payloads| {
+                        payloads
+                            .iter()
+                            .map(|payload| payload.id())
+                            .eq(ancestor_payloads.iter().map(|payload| payload.id()))
+                    })
+            }
+            _ => false,
+        };
+        if !rollback_ok {
+            persistence_inconsistent = true;
+        }
+        Some(if rollback_ok {
+            ExecutionFailure::internal("Conversation persistence failed")
+        } else {
+            ExecutionFailure::internal("Conversation persistence is inconsistent")
+        })
+    } else {
+        None
+    };
+    let (messages, persisted_payloads, history_replaced_by_compaction) =
+        if persistence_failure.is_some() {
+            let messages = ancestor_payloads
+                .iter()
+                .filter_map(|payload| payload.as_message().cloned())
+                .collect();
+            (messages, ancestor_payloads, false)
+        } else {
+            let transcript = v2_out.session.transcript();
+            let transcript = transcript.read();
+            let messages: Vec<BaseMessage> =
+                transcript.visible_messages().into_iter().cloned().collect();
+            (
+                messages,
+                transcript.persisted_payloads(),
+                transcript.full_compaction_committed(),
+            )
+        };
     let mut agent_state = AgentState::with_messages(req.cwd.clone(), messages);
     agent_state.set_context("session_id", &req.session_id);
     agent_state.set_context("run_id", uuid::Uuid::now_v7().to_string());
@@ -454,7 +508,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // Phase 9: 映射 LoopResult → ExecOutcome。cancel 在 transcript flush 之后
     // 只采样一次，后续 failure / TurnEnded / cascade / outcome 共用同一分类。
     let sampled_cancel = req.cancel.is_cancelled();
-    let terminal = match forwarder_failure {
+    let terminal = match persistence_failure.or(forwarder_failure) {
         Some(failure) => internal_failure_terminal(failure),
         None => classify_loop_terminal(&loop_result, sampled_cancel),
     };
@@ -520,6 +574,8 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         stop_reason: terminal.stop_reason,
         failure: terminal.failure,
         history_replaced_by_compaction,
+        persisted_payloads,
+        persistence_inconsistent,
         agent_state,
     }
 }

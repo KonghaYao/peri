@@ -9,6 +9,51 @@ use crate::agent::compact_v2::projection::{
 use crate::messages::BaseMessage;
 use crate::session::transcript::MessageTranscript;
 
+fn append_reminder(transcript: &mut MessageTranscript) -> crate::messages::MessageId {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    transcript.append_system_reminder(
+        TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Task,
+                source: ReminderSource("planner_test".into()),
+                kind: "status".into(),
+                severity: ReminderSeverity::Info,
+                delivery: ReminderDelivery::Configurable,
+                audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+                body: "control".into(),
+                summary: None,
+                metadata: serde_json::json!({}),
+            })
+            .unwrap(),
+    )
+}
+
+#[test]
+fn plan_micro_ignores_reminder_as_turn_and_compaction_target() {
+    let mut transcript = MessageTranscript::new();
+    transcript.append(BaseMessage::human("first"));
+    let reminder_id = append_reminder(&mut transcript);
+    transcript.append(BaseMessage::human("second"));
+    let plan = plan_micro(
+        &transcript,
+        &CompactConfig {
+            micro_compact_stale_steps: 0,
+            ..Default::default()
+        },
+        false,
+    );
+
+    assert!(plan
+        .actions
+        .iter()
+        .all(|action| action.message_id != reminder_id));
+    assert_eq!(transcript.flags(reminder_id), Default::default());
+}
+
 #[test]
 fn test_context_pressure_target_tokens() {
     let p = ContextPressure {
@@ -373,7 +418,7 @@ fn test_plan_micro_skip_true_excludes_already_truncated() {
     };
 
     // 预标记所有消息为 truncated（使用 v2 projection directive 模拟 compact 后状态）
-    let ids: Vec<_> = t.entries().iter().map(|e| e.message.id()).collect();
+    let ids: Vec<_> = t.entries().iter().map(|e| e.id()).collect();
     use crate::agent::compact_v2::projection::{
         MessageProjectionDirective, PROJECTION_POLICY_VERSION,
     };

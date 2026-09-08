@@ -121,14 +121,16 @@ async fn test_channel_owner_notification_format() {
 
     let msgs = inbox.queue().drain_all();
     assert_eq!(msgs.len(), 1);
-    let content = msgs[0].message.content();
+    let reminder = match &msgs[0].payload {
+        peri_acp_types::session::QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+        _ => panic!("expected reminder"),
+    };
+    let content = &reminder.body;
+    assert_eq!(reminder.source.0, "channel");
+    assert_eq!(reminder.kind, "message_received");
     assert!(content.contains("plugin:weixin:weixin"));
     assert!(content.contains("chat42"));
     assert!(content.contains("test msg"));
-    assert!(content.contains("<system-reminder>"));
-    assert!(content.contains("<channel"));
-    assert!(content.contains("</channel>"));
-    assert!(content.contains("</system-reminder>"));
 
     shutdown.cancel();
     owner.shutdown();

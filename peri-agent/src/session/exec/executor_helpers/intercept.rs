@@ -34,6 +34,8 @@ pub struct InterceptRequest<'a> {
     // ── 消息上下文 ──
     pub content: &'a MessageContent,
     pub history: &'a [BaseMessage],
+    /// Canonical history owner; includes reminders that are absent from `history` projection.
+    pub history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     // ── 会话上下文 ──
     pub cwd: &'a str,
     pub session_id: &'a str,
@@ -171,10 +173,12 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     .push_done(req.session_id, "end_turn", None)
                     .await;
                 return InterceptOutcome::Handled(PromptResult {
+                    persisted_payloads: req.history_payloads.clone(),
                     messages: result.messages,
                     ok: true,
                     stop_reason: result.stop_reason,
                     history_replaced_by_compaction: false,
+                    persistence_inconsistent: false,
                     recall_items: Vec::new(),
                     failure: None,
                 });
@@ -243,11 +247,26 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
             req.event_sink
                 .push_done(req.session_id, "end_turn", None)
                 .await;
+            let mut persisted_payloads = req.history_payloads.clone();
+            let existing_ids = persisted_payloads
+                .iter()
+                .map(peri_acp_types::store::PersistedPayload::id)
+                .collect::<std::collections::HashSet<_>>();
+            persisted_payloads.extend(
+                result
+                    .messages
+                    .iter()
+                    .filter(|message| !existing_ids.contains(&message.id()))
+                    .cloned()
+                    .map(peri_acp_types::store::PersistedPayload::Message),
+            );
             InterceptOutcome::Handled(PromptResult {
+                persisted_payloads,
                 messages: result.messages,
                 ok: true,
                 stop_reason: result.stop_reason,
                 history_replaced_by_compaction: false,
+                persistence_inconsistent: false,
                 recall_items: Vec::new(),
                 failure: None,
             })

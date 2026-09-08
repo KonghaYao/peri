@@ -177,7 +177,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         let expected_history = if transcript
             .entries()
             .iter()
-            .any(|entry| transcript.flags(entry.message.id()).excluded)
+            .any(|entry| transcript.flags(entry.id()).excluded)
         {
             assemble_compact_messages(&transcript, &None).messages
         } else {
