@@ -121,25 +121,64 @@ fn test_summarize_input_read_fallback_path() {
 }
 
 #[test]
-fn test_summarize_input_agent_prompt_preview() {
-    // Agent/Task（别名 task）摘要 = prompt 任务预览（不再落入 `_` 兜底取
-    // 第一个 KV——cwd 字典序最小会先被选中，导致头行显示绝对路径）
+fn test_summarize_input_agent_shows_type_and_task() {
     let input = serde_json::json!({
         "cwd": "/Users/konghayao/code/ai/perihelion",
         "prompt": "追踪 Agent 调用显示链路",
         "subagent_type": "explorer",
     });
-    assert_eq!(summarize_input("Agent", &input), "追踪 Agent 调用显示链路");
-    assert_eq!(summarize_input("Task", &input), "追踪 Agent 调用显示链路");
-    // prompt 为空 → description 兜底
+    assert_eq!(
+        summarize_input("Agent", &input),
+        "explorer 追踪 Agent 调用显示链路"
+    );
+    assert_eq!(
+        summarize_input("Task", &input),
+        "explorer 追踪 Agent 调用显示链路"
+    );
+
     let no_prompt = serde_json::json!({
         "cwd": "/tmp",
         "description": "只读调查",
         "subagent_type": "plan",
     });
-    assert_eq!(summarize_input("Agent", &no_prompt), "只读调查");
-    // 两者皆空 → 显式占位（不再兜底到 cwd）
-    let empty = serde_json::json!({ "cwd": "/tmp", "subagent_type": "plan" });
+    assert_eq!(summarize_input("Agent", &no_prompt), "plan 只读调查");
+
+    let type_only = serde_json::json!({ "cwd": "/tmp", "subagent_type": "plan" });
+    assert_eq!(summarize_input("Agent", &type_only), "plan");
+}
+
+#[test]
+fn test_summarize_input_agent_shows_fork_and_resume_modes() {
+    let fork = serde_json::json!({
+        "fork": true,
+        "prompt": "审查当前实现",
+        "subagent_type": "explorer",
+    });
+    assert_eq!(summarize_input("Agent", &fork), "fork 审查当前实现");
+
+    let resume = serde_json::json!({
+        "resume_thread_id": "thread-1",
+        "fork": true,
+        "prompt": "继续验证",
+        "subagent_type": "explorer",
+    });
+    assert_eq!(summarize_input("Agent", &resume), "resume 继续验证");
+}
+
+#[test]
+fn test_summarize_input_agent_compatibility_fallbacks() {
+    let prompt_only = serde_json::json!({ "prompt": "普通任务" });
+    assert_eq!(summarize_input("Agent", &prompt_only), "普通任务");
+
+    let invalid_selectors = serde_json::json!({
+        "fork": "true",
+        "prompt": "普通任务",
+        "resume_thread_id": 42,
+        "subagent_type": false,
+    });
+    assert_eq!(summarize_input("Agent", &invalid_selectors), "普通任务");
+
+    let empty = serde_json::json!({ "cwd": "/tmp" });
     assert_eq!(summarize_input("Agent", &empty), "(empty input)");
 }
 
