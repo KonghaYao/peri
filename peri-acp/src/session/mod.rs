@@ -666,12 +666,14 @@ impl SessionManager {
     /// TUI/stdio 调用方仍自行维护 history/frozen/agent_pool 等字段，
     /// SessionManager 只负责 active_agents / goal_state 维度。
     pub fn ensure_session(&self, session_id: &str, cwd: &str) {
-        if self.inner.sessions.contains_key(session_id) {
-            return;
+        if !self.inner.sessions.contains_key(session_id) {
+            let thread_id = ThreadId::from(session_id.to_string());
+            let session = self.build_session(session_id, thread_id, cwd);
+            self.inner.sessions.insert(session_id.to_string(), session);
         }
-        let thread_id = ThreadId::from(session_id.to_string());
-        let session = self.build_session(session_id, thread_id, cwd);
-        self.inner.sessions.insert(session_id.to_string(), session);
+        // 在 session 发布边界立即订阅，避免首个 turn 前到点的 trigger 丢失。
+        // cron_bridge_for 本身幂等，既有 session 与 first-turn 调用均不会重复订阅。
+        self.cron_bridge_for(session_id);
     }
 
     /// 取指定 session 的 goal_state 句柄（用于 TUI/stdio 注入到 middleware 链）。

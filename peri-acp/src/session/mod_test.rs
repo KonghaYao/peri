@@ -337,6 +337,36 @@ async fn test_pre_close_cancels_but_preserves_record_until_terminal_close() {
     assert!(mgr.session_ids().is_empty());
 }
 
+/// [回归] session 注册完成后、首个 turn 前到达的 cron trigger 不会丢失。
+#[tokio::test]
+async fn test_ensure_session_subscribes_cron_before_first_turn() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp);
+    let session_id = "test-cron-before-first-turn";
+
+    mgr.ensure_session(session_id, "/tmp");
+
+    let task_id = scheduler
+        .lock()
+        .register("* * * * *", "before-first-turn")
+        .unwrap();
+    {
+        let mut sched = scheduler.lock();
+        assert!(sched.force_next_fire_to_past(&task_id));
+        sched.tick();
+    }
+
+    let request = tokio::time::timeout(Duration::from_secs(1), continuation_rx.recv())
+        .await
+        .expect("session 发布时应已订阅，首个 turn 前的 trigger 应及时转发")
+        .expect("Host continuation receiver 应存活");
+    assert_eq!(request.session_id, session_id);
+    assert_eq!(request.trigger.task_id, task_id);
+    assert_eq!(request.trigger.prompt, "before-first-turn");
+
+    mgr.close_session(session_id).await.unwrap();
+}
+
 /// [回归] turn 以 Error 结束后 cron bridge 仍转发完整 continuation 请求。
 #[tokio::test]
 async fn test_cron_bridge_survives_turn_error() {

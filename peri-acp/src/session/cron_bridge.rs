@@ -1,7 +1,7 @@
 //! Session-scoped cron bridge: CronSchedulerPort → Host continuation scheduler.
 //!
 //! Lives exactly as long as its owning [`crate::session::AcpSession`]: created
-//! lazily on the first turn of a session, dropped (task aborted) when the
+//! at the session publication boundary, dropped (task aborted) when the
 //! session closes. Survives turn end and session/cancel.
 
 use std::sync::Arc;
