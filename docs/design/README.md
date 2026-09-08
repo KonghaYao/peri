@@ -38,12 +38,12 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | TUI 数据流 | [tui-acp-data-flow.md](tui-acp-data-flow.md) | ACP event → Atom → render 链路 |
 | TUI 流式 Markdown 性能 | [tui-streaming-markdown-performance.md](tui-streaming-markdown-performance.md) | publication scheduler、lazy projection、增量 Markdown 与 slot index |
 | Git Watch 中间件 | [git-watch-middleware.md](git-watch-middleware.md) | 分支/HEAD 变化 Info 注入（异步采样 + 60s 节流） |
+| System Reminder | [system-reminder.md](system-reminder.md) | canonical DTO、可信生产、队列/持久化、ACP/TUI 投影与 legacy fallback |
 
 ## 已批准目标设计
 
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
-| System Reminder | [system-reminder.md](system-reminder.md) | 对应 System Reminder active issue 与代码 |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
 | Meta 数据访问 | [meta-control.md](meta-control.md) | `spec/issues/2026-09-04-peri-meta-control.md` |
 | MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | `spec/issues/2026-08-27-mcp-apps-stdio-relay.md` |

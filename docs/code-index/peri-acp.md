@@ -1,6 +1,6 @@
 # peri-acp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-05（Goal 状态投影；compact 事件投影恢复）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-08（System Reminder producer/ACP replay）
 > 依据：peri-acp/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/peri-acp-protocol.md、源码
 
 ## 架构速览
@@ -13,6 +13,7 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 改 System Reminder producer/ACP 投影 | `src/session/mod.rs` + `src/host/continuation.rs` + `src/session/event_sink.rs` + `src/dispatch/session_replay.rs` | `SessionDynamicMcpNotificationSink`；`enqueue_cron_trigger`；`push_system_reminder`；`send_system_reminder` | Dynamic MCP lifecycle/OAuth 与 Cron trigger 直接入 canonical queue；不改变 OAuth/cron 控制；ACP client 声明 `peri.systemReminder` 时收结构化 event，否则只收展示 fallback；load/replay 不伪装 user message |
 | 新增/改会话协议方法 | `src/host/requests.rs`（注册面，`handle_request` :22，按方法分派到 `host/requests/{session_lifecycle,plugin,config_options,mcp_oauth,workflow,rewind}.rs`）；`src/host/mod.rs`（`session/prompt` 单独处理，spawn 后台 task）；`src/session/frozen_snapshot.rs`（版本化 frozen owner state）；stdio 侧部署装配点 `src/host/stdio/mod.rs`（`run_acp_stdio` + `assemble_stdio_config`，业务处理走统一 `run_acp_server`） | `handle_new/load/resume/fork`（requests/session_lifecycle.rs）；`encode_frozen_snapshot` / `decode_frozen_snapshot`；`after_new_response`；其余 plugin/config/workflow/rewind handler | new 持久化 frozen 后才发布 session；load/resume 冷恢复原快照，legacy 缺失按 ThreadMeta.cwd 原子 write-once 回填、loser 重读 winner，未知/损坏版本及存储错误 fail closed；fork 继承 source 快照；new/fork 写失败补偿删除。`session/load` 保持 response 前 replay/通知；`session/prompt` 是唯一 spawn 后台执行的方法；stdio 与 TUI 共用统一 host |
 | 改 prompt 执行流程（keepgoing/挂起注入/错误响应） | `src/host/prompt.rs` + `src/host/mod.rs` + `src/session/executor.rs` | `run_prompt`；`prompt_wire_response` / `execution_failure_to_acp_error`；`dispatch_prompt_turn`；`session/executor.rs` **仅 re-export** `peri_agent::session::exec::executor` 的执行入口（ARC-BOUNDARY-001） | 挂起时 prompt 注入 inbox；keepgoing 短路在 Agent 层；重试中的 `LlmRetrying` 是进度事件，不结束 prompt；仅 fatal `PromptResult.failure` 在历史/state/cancel-token 后处理完成后映射为 `session/prompt` JSON-RPC server error（`-32000`）：message 保留脱敏限长后的 LLM/provider 原意，allowlist data 携带 `kind` 与可选 HTTP `status`；cancel/interrupted/max iterations 仍返回成功 `PromptResponse`；mpsc/stdio 共用统一 host |
 | 改事件映射（ExecutorEvent → 协议） | `src/event/mapper.rs` + `src/event/mod.rs` + `src/event/activity.rs` + `src/session/event_sink.rs` + `src/dispatch/session_replay.rs` | `map_event`；`map_agent_activity`；`tool_result_content`；`TransportEventSink::push_event`；`AcpEvent` DTO | ToolEnd live/replay 使用标准 `failed`/`completed`，同时写标准 `ToolCallUpdate.content` 与兼容 `rawOutput`，失败空文本有安全 fallback；SubAgent 来源写入 ACP 标准 `SessionNotification._meta.peri.sourceAgentId`（mpsc/stdio 同构，typed SDK 往返保留）；`CompactStarted/CompactCompleted` 经 `peri/agent_event` 透传 strategy、trigger 与安全计数供 TUI 展示；`BgRegistryEvent` 是私有功能载体：无标准 `SessionUpdate`，TUI 私有事件仍按 `agent_event` cap 门控，Hub/Web 仅经 `map_agent_activity` 输出去正文、哈希 correlation 的 capability-gated allowlist 摘要；契约 ARC-EVENT-001 |

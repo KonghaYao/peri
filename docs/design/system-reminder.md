@@ -1,6 +1,6 @@
 # System Reminder 协议设计
 
-> 状态：已批准目标设计
+> 状态：现行设计
 >
 > 本文定义 System Reminder 的分类、承载、投递、筛选与兼容语义。具体实现入口以
 > `docs/code-index/` 与源码为准；跨层事件、Frozen Prompt、序列化和安全边界以
@@ -244,7 +244,12 @@ token、认证 header、连接串和敏感 URL 参数的脱敏。错误消息不
 ### 7.3 Producer 约束
 
 新 producer 只构造 canonical DTO，不直接拼接 `<system-reminder>`。文本编码集中在统一
-codec。旧 producer 可以在迁移期继续工作，但所有消费端必须优先使用结构化信息。
+codec。仓库内 production producer 已迁移；legacy parser 仅用于历史记录、旧客户端和外部
+harness 输入的兼容降级。
+
+Git/MCP session-start 等由进程外 harness 生成并作为输入进入的 reminder 不属于本仓库的
+producer 边界，本仓库不能替换其生产 API；接收端必须把它们保持为 external/legacy
+provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等控制状态。
 
 当所有受支持历史和外部协议都具备结构化承载后，可以缩小 legacy parser 的使用范围；
 删除兼容路径属于单独的协议版本决策。
