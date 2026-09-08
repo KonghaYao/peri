@@ -117,7 +117,42 @@ impl TransportEventSink {
 
 #[async_trait]
 impl EventSink for TransportEventSink {
+    async fn push_system_reminder(
+        &self,
+        session_id: &str,
+        reminder: &peri_acp_types::system_reminder::SystemReminder,
+        replay: bool,
+    ) {
+        let caps = self
+            .caps_registry
+            .get(session_id)
+            .map(|caps| caps.clone())
+            .unwrap_or_default();
+        let (event, data) = if caps.system_reminder {
+            (
+                "system-reminder",
+                json!({ "reminder": reminder, "replay": replay }),
+            )
+        } else {
+            (
+                "system-reminder-fallback",
+                json!({ "text": reminder.summary.as_deref().unwrap_or(&reminder.body), "replay": replay, "legacy": true }),
+            )
+        };
+        let _ = self
+            .transport
+            .send_notification(
+                "peri/unstable_event",
+                json!({ "sessionId": session_id, "event": event, "data": data }),
+            )
+            .await;
+    }
+
     async fn push_event(&self, session_id: &str, event: &ExecutorEvent, context_window: u32) {
+        if let ExecutorEvent::SystemReminder(reminder) = event {
+            self.push_system_reminder(session_id, reminder, false).await;
+            return;
+        }
         let caps = self
             .caps_registry
             .get(session_id)

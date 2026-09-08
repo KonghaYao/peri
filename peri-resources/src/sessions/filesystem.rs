@@ -9,7 +9,10 @@ use tokio::{fs, io::AsyncWriteExt};
 
 use peri_acp_types::{
     messages::BaseMessage,
-    store::{CompactionLifecycle, ThreadStore},
+    store::{
+        deserialize_persisted_payload, serialize_persisted_payload, CompactionLifecycle,
+        PersistedPayload, ThreadStore,
+    },
     thread::{AgentStatus, ThreadId, ThreadListEntry, ThreadMeta},
 };
 
@@ -154,37 +157,12 @@ impl ThreadStore for FilesystemThreadStore {
     }
 
     async fn append_messages(&self, id: &ThreadId, msgs: &[BaseMessage]) -> Result<()> {
-        if msgs.is_empty() {
-            return Ok(());
-        }
-        let _guard = META_UPDATE_LOCK.lock().await;
-        let path = self.messages_path(id);
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-            .with_context(|| format!("打开 messages.jsonl 失败: {}", path.display()))?;
-
-        for msg in msgs {
-            let mut line = serde_json::to_string(msg)?;
-            line.push('\n');
-            file.write_all(line.as_bytes()).await?;
-        }
-        file.flush().await?;
-
-        // 更新 meta 的 message_count 和 updated_at。与状态更新共用锁，避免基于
-        // 旧快照写回时把 done/error/cancelled 覆盖成 active。
-        let mut meta = self.load_meta(id).await?;
-        meta.message_count += msgs.len();
-        meta.updated_at = Utc::now();
-        // 如果还没有标题，用第一条 Human 消息的前 50 字符作为标题
-        if meta.title.is_none() {
-            if let Some(title) = extract_title(msgs) {
-                meta.title = Some(title);
-            }
-        }
-        self.update_meta(id, meta).await
+        let payloads = msgs
+            .iter()
+            .cloned()
+            .map(PersistedPayload::Message)
+            .collect::<Vec<_>>();
+        self.append_payloads(id, &payloads).await
     }
 
     async fn load_messages(&self, id: &ThreadId) -> Result<Vec<BaseMessage>> {
@@ -199,11 +177,71 @@ impl ThreadStore for FilesystemThreadStore {
             if line.is_empty() {
                 continue;
             }
-            let msg: BaseMessage =
-                serde_json::from_str(line).with_context(|| format!("反序列化消息失败: {line}"))?;
-            msgs.push(msg);
+            let payload =
+                deserialize_persisted_payload(line).with_context(|| "反序列化持久化消息失败")?;
+            if let PersistedPayload::Message(message) = payload {
+                msgs.push(message);
+            }
         }
         Ok(msgs)
+    }
+
+    async fn append_payloads(&self, id: &ThreadId, payloads: &[PersistedPayload]) -> Result<()> {
+        if payloads.is_empty() {
+            return Ok(());
+        }
+        let _guard = META_UPDATE_LOCK.lock().await;
+        let existing = self.load_payloads(id).await?;
+        let existing_ids = existing
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<std::collections::HashSet<_>>();
+        let payloads = payloads
+            .iter()
+            .filter(|payload| !existing_ids.contains(&payload.id()))
+            .collect::<Vec<_>>();
+        if payloads.is_empty() {
+            return Ok(());
+        }
+        let path = self.messages_path(id);
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await
+            .with_context(|| format!("打开 messages.jsonl 失败: {}", path.display()))?;
+        for payload in &payloads {
+            let mut line = serialize_persisted_payload(payload)?;
+            line.push('\n');
+            file.write_all(line.as_bytes()).await?;
+        }
+        file.flush().await?;
+        let mut meta = self.load_meta(id).await?;
+        meta.message_count = existing.len() + payloads.len();
+        meta.updated_at = Utc::now();
+        if meta.title.is_none() {
+            let messages = payloads
+                .iter()
+                .filter_map(|payload| payload.as_message())
+                .cloned()
+                .collect::<Vec<_>>();
+            meta.title = extract_title(&messages);
+        }
+        self.update_meta(id, meta).await
+    }
+
+    async fn load_payloads(&self, id: &ThreadId) -> Result<Vec<PersistedPayload>> {
+        let path = self.messages_path(id);
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+        let raw = fs::read_to_string(&path).await?;
+        raw.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                deserialize_persisted_payload(line.trim()).with_context(|| "反序列化持久化消息失败")
+            })
+            .collect()
     }
 
     async fn load_meta(&self, id: &ThreadId) -> Result<ThreadMeta> {
@@ -289,6 +327,10 @@ impl ThreadStore for FilesystemThreadStore {
         self.write_index(&metas).await
     }
 
+    async fn load_context_payloads(&self, thread_id: &ThreadId) -> Result<Vec<PersistedPayload>> {
+        self.load_payloads(thread_id).await
+    }
+
     async fn load_context(&self, thread_id: &ThreadId) -> Result<Vec<BaseMessage>> {
         // 文件系统实现暂不支持祖先链，直接加载自身消息
         self.load_messages(thread_id).await
@@ -344,10 +386,35 @@ impl ThreadStore for FilesystemThreadStore {
 
     async fn delete_messages(
         &self,
-        _thread_id: &ThreadId,
-        _message_ids: &[peri_acp_types::messages::MessageId],
+        thread_id: &ThreadId,
+        message_ids: &[peri_acp_types::messages::MessageId],
     ) -> Result<()> {
-        Ok(())
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+        let _guard = META_UPDATE_LOCK.lock().await;
+        let ids = message_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let payloads = self.load_payloads(thread_id).await?;
+        let kept = payloads
+            .into_iter()
+            .filter(|payload| !ids.contains(&payload.id()))
+            .collect::<Vec<_>>();
+        let path = self.messages_path(thread_id);
+        let mut file = tokio::fs::File::create(&path).await?;
+        for payload in &kept {
+            let mut line = serialize_persisted_payload(payload)?;
+            line.push('\n');
+            file.write_all(line.as_bytes()).await?;
+        }
+        file.flush().await?;
+        let mut meta = self.load_meta(thread_id).await?;
+        meta.message_count = kept.len();
+        meta.cached_context = None;
+        meta.updated_at = Utc::now();
+        self.update_meta(thread_id, meta).await
     }
 
     async fn update_message_flags(
@@ -394,11 +461,11 @@ impl ThreadStore for FilesystemThreadStore {
                 continue;
             }
             kept.push(line.to_string());
-            if let Ok(msg) = serde_json::from_str::<BaseMessage>(trimmed) {
-                if msg.id() == *message_id {
-                    found = true;
-                    break;
-                }
+            if deserialize_persisted_payload(trimmed)
+                .is_ok_and(|payload| payload.id() == *message_id)
+            {
+                found = true;
+                break;
             }
         }
         if !found {

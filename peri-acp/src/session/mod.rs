@@ -36,6 +36,35 @@ pub struct SessionDynamicMcpNotificationSink {
     inbox: std::sync::Weak<peri_acp_types::session::SessionInbox>,
 }
 
+impl SessionDynamicMcpNotificationSink {
+    fn reminder(
+        kind: &str,
+        severity: ReminderSeverity,
+        body: String,
+        summary: String,
+        metadata: serde_json::Value,
+    ) -> TrustedSystemReminder {
+        TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Lifecycle,
+                source: ReminderSource("dynamic_mcp".into()),
+                kind: kind.into(),
+                severity,
+                delivery: ReminderDelivery::Configurable,
+                audiences: ReminderAudiences(vec![
+                    ReminderAudience::Model,
+                    ReminderAudience::Tui,
+                    ReminderAudience::Diagnostics,
+                ]),
+                body,
+                summary: Some(summary),
+                metadata,
+            })
+            .expect("dynamic MCP reminder mapping must be valid")
+    }
+}
+
 impl DynamicMcpNotificationSinkPort for SessionDynamicMcpNotificationSink {
     fn notify(&self, notification: DynamicMcpNotification) -> bool {
         if !self.accepts(&notification.instance_key) {
@@ -44,13 +73,17 @@ impl DynamicMcpNotificationSinkPort for SessionDynamicMcpNotificationSink {
         let Some(inbox) = self.inbox.upgrade() else {
             return false;
         };
-        let reminder = format!(
-            "<system-reminder>\n{}\n</system-reminder>",
-            notification.safe_summary
+        let reminder = Self::reminder(
+            "lifecycle_changed",
+            ReminderSeverity::Info,
+            notification.safe_summary.clone(),
+            notification.safe_summary,
+            serde_json::json!({ "instance_key": notification.instance_key }),
         );
-        inbox.handle().push_info(
+        inbox.handle().push_system_reminder(
+            MessageKind::Info,
             MessageSource::DynamicMcpNotification,
-            BaseMessage::human(MessageContent::text(reminder)),
+            reminder,
         );
         true
     }
@@ -67,13 +100,27 @@ impl DynamicMcpNotificationSinkPort for SessionDynamicMcpNotificationSink {
         let Some(inbox) = self.inbox.upgrade() else {
             return false;
         };
-        let reminder = format!(
-            "<system-reminder>\nDynamic MCP {} requires OAuth authorization for flow {}: {}\n</system-reminder>",
+        let body = format!(
+            "Dynamic MCP {} requires OAuth authorization for flow {}: {}",
             instance.logical.server_name, flow_id, authorization_url
         );
-        inbox.handle().push_info(
+        let reminder = Self::reminder(
+            "oauth_authorization_required",
+            ReminderSeverity::Warning,
+            body,
+            format!(
+                "Dynamic MCP {} requires OAuth authorization",
+                instance.logical.server_name
+            ),
+            serde_json::json!({
+                "server_name": instance.logical.server_name,
+                "flow_id": flow_id,
+            }),
+        );
+        inbox.handle().push_system_reminder(
+            MessageKind::Info,
             MessageSource::DynamicMcpNotification,
-            BaseMessage::human(MessageContent::text(reminder)),
+            reminder,
         );
         true
     }
@@ -97,11 +144,16 @@ use peri_acp_types::command::command_route::{
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::dynamic_mcp::{DynamicMcpInstanceKey, DynamicMcpNotification};
 use peri_acp_types::mcp_skills::McpSkillRegistry;
-use peri_acp_types::messages::{BaseMessage, MessageContent};
+use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::ports::DynamicMcpNotificationSinkPort;
-use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::{MessageKind, MessageSource};
 use peri_acp_types::skills::SkillRoot;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminder, TrustedSystemReminderFactory,
+    SYSTEM_REMINDER_VERSION,
+};
 use peri_acp_types::{
     store::ThreadStore,
     thread::{ThreadId, ThreadMeta},

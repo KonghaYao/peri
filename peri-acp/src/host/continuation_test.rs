@@ -71,6 +71,7 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         thread_id: "thread-1".to_string(),
         cwd: "/tmp".to_string(),
         history: vec![],
+        history_payloads: vec![],
         cancel_token: None,
         frozen: None,
         recall_items: vec![],

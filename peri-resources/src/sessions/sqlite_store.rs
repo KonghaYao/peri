@@ -13,7 +13,10 @@ use sqlx::{
 
 use peri_acp_types::{
     messages::BaseMessage,
-    store::{CompactionLifecycle, MessageFlags, ThreadStore},
+    store::{
+        deserialize_persisted_payload, serialize_persisted_payload, CompactionLifecycle,
+        MessageFlags, PersistedPayload, ThreadStore,
+    },
     thread::{AgentStatus, CancelPolicy, ThreadId, ThreadListEntry, ThreadMeta},
 };
 
@@ -302,7 +305,40 @@ impl SqliteThreadStore {
         Ok(chain)
     }
 
+    async fn load_payloads_up_to(
+        &self,
+        thread_id: &ThreadId,
+        message_id: &str,
+    ) -> Result<Vec<PersistedPayload>> {
+        let target_row: Option<(i64,)> =
+            sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
+                .bind(thread_id.as_str())
+                .bind(message_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some((target_rowid,)) = target_row else {
+            return Ok(vec![]);
+        };
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT message_id, content FROM messages WHERE thread_id = ?1 AND rowid <= ?2 ORDER BY rowid",
+        )
+        .bind(thread_id.as_str())
+        .bind(target_rowid)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(row_id, content)| {
+                let payload = deserialize_persisted_payload(&content)?;
+                if payload.id().as_uuid().to_string() != row_id {
+                    anyhow::bail!("persisted payload message id mismatch");
+                }
+                Ok(payload)
+            })
+            .collect()
+    }
+
     /// 加载指定 thread 中 rowid <= 目标消息 rowid 的所有消息
+    #[allow(dead_code)]
     async fn load_messages_up_to(
         &self,
         thread_id: &ThreadId,
@@ -467,14 +503,42 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn append_messages(&self, id: &ThreadId, msgs: &[BaseMessage]) -> Result<()> {
-        if msgs.is_empty() {
+        let payloads = msgs
+            .iter()
+            .cloned()
+            .map(PersistedPayload::Message)
+            .collect::<Vec<_>>();
+        self.append_payloads(id, &payloads).await
+    }
+
+    async fn load_messages(&self, id: &ThreadId) -> Result<Vec<BaseMessage>> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT content FROM messages WHERE thread_id = ?1 ORDER BY rowid")
+                .bind(id.as_str())
+                .fetch_all(&self.pool)
+                .await?;
+
+        rows.into_iter()
+            .filter_map(|(content,)| match deserialize_persisted_payload(&content) {
+                Ok(PersistedPayload::Message(message)) => Some(Ok(message)),
+                Ok(PersistedPayload::SystemReminder { .. }) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
+    async fn append_payloads(&self, id: &ThreadId, payloads: &[PersistedPayload]) -> Result<()> {
+        if payloads.is_empty() {
             return Ok(());
         }
         let mut tx = self.pool.begin().await?;
-        for msg in msgs {
-            let message_id = msg.id().as_uuid().to_string();
-            let role = role_of(msg);
-            let content = serde_json::to_string(msg)?;
+        for payload in payloads {
+            let message_id = payload.id().as_uuid().to_string();
+            let role = payload
+                .as_message()
+                .map(role_of)
+                .unwrap_or("system_reminder");
+            let content = serialize_persisted_payload(payload)?;
             sqlx::query(
                 "INSERT OR IGNORE INTO messages (message_id, thread_id, role, content)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -486,18 +550,21 @@ impl ThreadStore for SqliteThreadStore {
             .execute(&mut *tx)
             .await?;
         }
-        let now = Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE threads SET updated_at = ?1,
                 message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
              WHERE id = ?2",
         )
-        .bind(&now)
+        .bind(Utc::now().to_rfc3339())
         .bind(id.as_str())
         .execute(&mut *tx)
         .await?;
-
-        if let Some(title) = extract_title(msgs) {
+        let messages = payloads
+            .iter()
+            .filter_map(PersistedPayload::as_message)
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(title) = extract_title(&messages) {
             sqlx::query("UPDATE threads SET title = ?1 WHERE id = ?2 AND title IS NULL")
                 .bind(&title)
                 .bind(id.as_str())
@@ -508,15 +575,21 @@ impl ThreadStore for SqliteThreadStore {
         Ok(())
     }
 
-    async fn load_messages(&self, id: &ThreadId) -> Result<Vec<BaseMessage>> {
-        let rows: Vec<(String,)> =
-            sqlx::query_as("SELECT content FROM messages WHERE thread_id = ?1 ORDER BY rowid")
-                .bind(id.as_str())
-                .fetch_all(&self.pool)
-                .await?;
-
+    async fn load_payloads(&self, id: &ThreadId) -> Result<Vec<PersistedPayload>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT message_id, content FROM messages WHERE thread_id = ?1 ORDER BY rowid",
+        )
+        .bind(id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
-            .map(|(content,)| serde_json::from_str(&content).map_err(Into::into))
+            .map(|(row_id, content)| {
+                let payload = deserialize_persisted_payload(&content)?;
+                if payload.id().as_uuid().to_string() != row_id {
+                    anyhow::bail!("persisted payload message id mismatch");
+                }
+                Ok(payload)
+            })
             .collect()
     }
 
@@ -725,73 +798,30 @@ impl ThreadStore for SqliteThreadStore {
         Ok(())
     }
 
-    async fn load_context(&self, thread_id: &ThreadId) -> Result<Vec<BaseMessage>> {
-        // 先尝试从 cached_context 读取。
-        // context_cache_epoch 在此处仅做双重保障读取：
-        // commit_compaction_lifecycle 已将 cached_context 设为 NULL 并递增 epoch，
-        // 因此若 cached_context 非空即代表 epoch 未被后续 commit 更改——缓存有效。
-        let cache_row: Option<(Option<String>, i64)> =
-            sqlx::query_as("SELECT cached_context, context_cache_epoch FROM threads WHERE id = ?1")
-                .bind(thread_id.as_str())
-                .fetch_optional(&self.pool)
-                .await?;
-
-        let cached = cache_row.and_then(|(c, _epoch)| c);
-
-        if let Some(json) = cached {
-            let mut cached_msgs: Vec<BaseMessage> = serde_json::from_str(&json)?;
-            // 检查是否有新消息追加到缓存之后
-            let cached_count = cached_msgs.len();
-            let rows: Vec<(String,)> = sqlx::query_as(
-                "SELECT content FROM messages WHERE thread_id = ?1 ORDER BY rowid LIMIT -1 OFFSET ?2"
-            )
-            .bind(thread_id.as_str())
-            .bind(cached_count as i64)
-            .fetch_all(&self.pool)
-            .await?;
-
-            if rows.is_empty() {
-                return Ok(cached_msgs);
-            }
-
-            let new_msgs: Vec<BaseMessage> = rows
-                .into_iter()
-                .map(|(content,)| serde_json::from_str(&content).map_err(Into::into))
-                .collect::<Result<Vec<_>>>()?;
-            cached_msgs.extend(new_msgs);
-
-            // 更新缓存
-            self.save_context_cache(thread_id, &cached_msgs).await?;
-            return Ok(cached_msgs);
-        }
-
-        // 缓存未命中：解析祖先链 + 各级消息
+    async fn load_context_payloads(&self, thread_id: &ThreadId) -> Result<Vec<PersistedPayload>> {
         let chain = self.resolve_ancestor_chain(thread_id).await?;
-        let mut all_msgs = Vec::new();
-
-        for (i, tid) in chain.iter().enumerate() {
-            let is_last = i == chain.len() - 1;
-
-            if is_last {
-                // 自身线程：加载全部消息
-                let msgs = self.load_messages(tid).await?;
-                all_msgs.extend(msgs);
-            } else {
-                // 祖先线程：只加载到 snapshot_at_message_id
-                let meta = self.load_meta(tid).await?;
-                if let Some(ref snap_id) = meta.snapshot_at_message_id {
-                    let msgs = self.load_messages_up_to(tid, snap_id).await?;
-                    all_msgs.extend(msgs);
-                }
+        let mut payloads = Vec::new();
+        for (index, tid) in chain.iter().enumerate() {
+            if index == chain.len() - 1 {
+                payloads.extend(self.load_payloads(tid).await?);
+            } else if let Some(snapshot_id) = self.load_meta(tid).await?.snapshot_at_message_id {
+                payloads.extend(self.load_payloads_up_to(tid, &snapshot_id).await?);
             }
         }
+        Ok(payloads)
+    }
 
-        // 保存缓存
-        if !all_msgs.is_empty() {
-            self.save_context_cache(thread_id, &all_msgs).await?;
+    async fn load_context(&self, thread_id: &ThreadId) -> Result<Vec<BaseMessage>> {
+        let messages = self
+            .load_context_payloads(thread_id)
+            .await?
+            .into_iter()
+            .filter_map(|payload| payload.as_message().cloned())
+            .collect::<Vec<_>>();
+        if !messages.is_empty() {
+            self.save_context_cache(thread_id, &messages).await?;
         }
-
-        Ok(all_msgs)
+        Ok(messages)
     }
 
     async fn list_child_threads(&self, parent_id: &ThreadId) -> Result<Vec<ThreadMeta>> {

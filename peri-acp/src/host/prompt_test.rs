@@ -1,6 +1,114 @@
 use super::*;
 
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
+
+#[tokio::test]
+async fn compact_replacement_store_reload_is_summary_then_same_reminder_once() {
+    use peri_acp_types::store::ThreadStore;
+    use peri_acp_types::thread::ThreadMeta;
+    use peri_agent::thread::SqliteThreadStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteThreadStore::new(dir.path().join("history.db"))
+        .await
+        .unwrap();
+    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let first = BaseMessage::human("A");
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("compact_reload_test".into()),
+            kind: "notice".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "R".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let reminder_id = peri_acp_types::messages::MessageId::new();
+    let previous = vec![
+        PersistedPayload::Message(first),
+        PersistedPayload::SystemReminder {
+            id: reminder_id,
+            reminder,
+        },
+        PersistedPayload::Message(BaseMessage::ai("B")),
+    ];
+    store.append_payloads(&thread_id, &previous).await.unwrap();
+    let projected = vec![
+        BaseMessage::ai("S"),
+        BaseMessage::Human {
+            id: reminder_id,
+            content: peri_acp_types::messages::MessageContent::text("projected R"),
+        },
+    ];
+    let compacted = rebuild_compacted_payloads(&previous, &projected);
+    let ids = previous
+        .iter()
+        .map(PersistedPayload::id)
+        .collect::<Vec<_>>();
+    store.delete_messages(&thread_id, &ids).await.unwrap();
+    store.append_payloads(&thread_id, &compacted).await.unwrap();
+
+    let loaded = store.load_payloads(&thread_id).await.unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0].as_message().unwrap().content(), "S");
+    assert_eq!(loaded[1].id(), reminder_id);
+    assert!(matches!(loaded[1], PersistedPayload::SystemReminder { .. }));
+}
+
+#[test]
+fn compact_replacement_preserves_canonical_reminder_without_duplication() {
+    let first = BaseMessage::human("old user");
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("compact_test".into()),
+            kind: "notice".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "remember".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let reminder_id = peri_acp_types::messages::MessageId::new();
+    let last = BaseMessage::ai("old answer");
+    let previous = vec![
+        PersistedPayload::Message(first),
+        PersistedPayload::SystemReminder {
+            id: reminder_id,
+            reminder,
+        },
+        PersistedPayload::Message(last),
+    ];
+    let projected = vec![
+        BaseMessage::Human {
+            id: reminder_id,
+            content: peri_acp_types::messages::MessageContent::text("projected reminder"),
+        },
+        BaseMessage::ai("compact summary"),
+    ];
+
+    let rebuilt = rebuild_compacted_payloads(&previous, &projected);
+    assert_eq!(rebuilt.len(), 2);
+    assert_eq!(rebuilt[0].id(), reminder_id);
+    assert!(matches!(
+        rebuilt[0],
+        PersistedPayload::SystemReminder { .. }
+    ));
+    assert!(matches!(rebuilt[1], PersistedPayload::Message(_)));
+}
 
 /// stdio 部署过滤 rewind/clear：stdio（true）命中 rewind/clear 返回 true。
 #[test]

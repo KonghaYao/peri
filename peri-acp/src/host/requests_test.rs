@@ -362,6 +362,11 @@ fn register_session_with_history(
         peri_acp_types::messages::BaseMessage::ai("第一轮回答"),
         peri_acp_types::messages::BaseMessage::human("第二轮用户问题"),
     ];
+    let history_payloads = history
+        .iter()
+        .cloned()
+        .map(peri_acp_types::store::PersistedPayload::Message)
+        .collect();
     let sid = "rewind-test-session".to_string();
     sessions.insert(
         sid.clone(),
@@ -370,6 +375,7 @@ fn register_session_with_history(
             thread_id: "thread-1".to_string(),
             cwd: cwd.to_string(),
             history,
+            history_payloads,
             cancel_token: None,
             frozen: None,
             recall_items: Vec::new(),
@@ -623,6 +629,11 @@ async fn test_rewind_routes_to_dispatch() {
     // 数据源，不写回会导致第二次回退 not found。
     let s = sessions.get(&sid).unwrap();
     assert_eq!(s.history.len(), 0, "回退到第一条后 history 应为空");
+    assert_eq!(
+        s.history_payloads.len(),
+        0,
+        "rewind 必须同步裁剪 canonical history_payloads"
+    );
 }
 
 #[tokio::test]
@@ -862,6 +873,7 @@ fn register_session_with_workflow(
             thread_id: format!("thread-{sid}"),
             cwd: cwd.to_string(),
             history: Vec::new(),
+            history_payloads: Vec::new(),
             cancel_token: None,
             frozen: None,
             recall_items: Vec::new(),
@@ -1448,6 +1460,7 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
             thread_id: sid.clone(),
             cwd: cwd.to_string(),
             history: Vec::new(),
+            history_payloads: Vec::new(),
             cancel_token: None,
             frozen: None,
             recall_items: Vec::new(),

@@ -80,6 +80,8 @@ pub(crate) struct SessionState {
     pub(crate) thread_id: String,
     pub(crate) cwd: String,
     pub(crate) history: Vec<BaseMessage>,
+    /// Canonical persisted history; `history` is a compatibility projection for legacy commands.
+    pub(crate) history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     pub(crate) cancel_token: Option<CancellationToken>,
     // ── Frozen session data (populated at creation, immutable thereafter) ──
     pub(crate) frozen: Option<crate::session::executor::FrozenSessionData>,

@@ -11,6 +11,7 @@
 //! （TUI 回填/弹窗展示的都是干净的用户输入）。
 
 use peri_acp_types::messages::{strip_system_reminders, BaseMessage};
+use peri_acp_types::store::PersistedPayload;
 use serde_json::{json, Value};
 
 use crate::transport::types::AcpError;
@@ -20,6 +21,17 @@ use crate::transport::types::AcpError;
 fn looks_like_pure_system_reminder(content: &str) -> bool {
     let trimmed = content.trim();
     trimmed.starts_with("<system-reminder>") && trimmed.ends_with("</system-reminder>")
+}
+
+pub fn rewind_persisted_candidates(
+    session_history: &[PersistedPayload],
+) -> Result<Value, AcpError> {
+    let messages = session_history
+        .iter()
+        .filter_map(PersistedPayload::as_message)
+        .cloned()
+        .collect::<Vec<_>>();
+    rewind_candidates(&messages)
 }
 
 /// 提取回退候选（纯计算，无副作用）。

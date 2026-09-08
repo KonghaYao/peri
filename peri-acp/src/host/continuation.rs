@@ -36,8 +36,11 @@ use std::sync::Arc;
 
 use crate::session::executor::ContinuationRequest;
 use peri_acp_types::cron::{CronContinuationRequest, CronTrigger};
-use peri_acp_types::messages::{BaseMessage, MessageContent};
-use peri_acp_types::session::{MessageSource, QueuedMessage};
+use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
 use peri_acp_types::tasks::BgTaskKind;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -209,12 +212,32 @@ fn enqueue_cron_trigger(cfg: &AcpServerConfig, session_id: &str, trigger: &CronT
     let Some(queue) = cfg.session_manager.v2_queue_for(session_id) else {
         return false;
     };
-    queue.push(QueuedMessage::defer(
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("cron".into()),
+            kind: "triggered".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Required,
+            audiences: ReminderAudiences(vec![
+                ReminderAudience::Model,
+                ReminderAudience::Tui,
+                ReminderAudience::Automation,
+                ReminderAudience::Diagnostics,
+            ]),
+            body: format!(
+                "<goal-message>Cron task {} triggered: {}</goal-message>",
+                trigger.task_id, trigger.prompt
+            ),
+            summary: Some(format!("Cron task {} triggered", trigger.task_id)),
+            metadata: serde_json::json!({ "task_id": trigger.task_id }),
+        })
+        .expect("cron reminder mapping must be valid");
+    queue.push(QueuedMessage::system_reminder(
+        MessageKind::Defer,
         MessageSource::CronTrigger,
-        BaseMessage::human(MessageContent::text(format!(
-            "<goal-message>Cron task {} triggered: {}</goal-message>",
-            trigger.task_id, trigger.prompt
-        ))),
+        reminder,
     ));
     true
 }

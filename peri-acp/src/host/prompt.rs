@@ -33,6 +33,33 @@ use peri_agent::session::exec::stage_builder::CachedLlmInstances;
 use super::SharedSessions;
 use crate::provider::{LlmProvider, PeriConfig};
 
+#[cfg(test)]
+fn rebuild_compacted_payloads(
+    previous: &[peri_acp_types::store::PersistedPayload],
+    projected: &[peri_acp_types::messages::BaseMessage],
+) -> Vec<peri_acp_types::store::PersistedPayload> {
+    use peri_acp_types::store::PersistedPayload;
+
+    let reminders = previous
+        .iter()
+        .filter_map(|payload| match payload {
+            PersistedPayload::SystemReminder { id, reminder } => Some((*id, reminder.clone())),
+            PersistedPayload::Message(_) => None,
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    projected
+        .iter()
+        .cloned()
+        .map(|message| match reminders.get(&message.id()) {
+            Some(reminder) => PersistedPayload::SystemReminder {
+                id: message.id(),
+                reminder: reminder.clone(),
+            },
+            None => PersistedPayload::Message(message),
+        })
+        .collect()
+}
+
 // ── Prompt execution (spawned into background task) ──────────────────────────
 
 // ── ACP 结果投影（spec/issues/2026-08-18-acp-error-handler.md D2）─────────────
@@ -232,6 +259,7 @@ pub(crate) async fn run_prompt(
     let (
         cwd,
         history,
+        history_payloads,
         is_empty,
         thread_id,
         frozen,
@@ -245,8 +273,13 @@ pub(crate) async fn run_prompt(
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
         (
             state.cwd.clone(),
-            state.history.clone(),
-            state.history.is_empty(),
+            state
+                .history_payloads
+                .iter()
+                .filter_map(|payload| payload.as_message().cloned())
+                .collect::<Vec<_>>(),
+            state.history_payloads.clone(),
+            state.history_payloads.is_empty(),
             state.thread_id.clone(),
             state.frozen.clone(),
             // [AsyncContinuation] 续跑不 take recall：上一轮留给用户 prompt 的
@@ -258,9 +291,14 @@ pub(crate) async fn run_prompt(
         )
     };
     let history_len = history.len();
-    // Save message IDs for compact persistence path (history is moved into run_session_loop below).
-    let history_ids: Vec<peri_acp_types::messages::MessageId> =
-        history.iter().map(|m| m.id()).collect();
+    // Every canonical payload projects to exactly one model message. This is the only
+    // safe prefix boundary when reminders are interleaved with ordinary messages.
+    let _projected_history_len = history_payloads.len();
+    // Compact replacement must delete every canonical row, including reminder rows.
+    let _history_ids: Vec<peri_acp_types::messages::MessageId> = history_payloads
+        .iter()
+        .map(|payload| payload.id())
+        .collect();
 
     let broker = build_transport_broker(transport, &session_id);
     let event_sink = Arc::new(TransportEventSink::new(
@@ -343,7 +381,7 @@ pub(crate) async fn run_prompt(
 
     // Track first history message ID for cancel-with-progress path (history is moved below)
     // Uses Option<MessageId> (16 bytes) instead of cloning the entire history.
-    let first_history_id = history.first().map(|m| m.id());
+    let _first_history_id = history.first().map(|m| m.id());
 
     // ── L5：SessionContext 投影（provider / peri_config / pool / SessionManager /
     //    Controller 端口化——执行体迁入 peri-agent 后由本宿主构造注入面）──
@@ -708,6 +746,7 @@ pub(crate) async fn run_prompt(
         continuation,
         frozen,
         history,
+        history_payloads: history_payloads.clone(),
         incoming_recalls,
         bg_results,
         langfuse: langfuse_hooks,
@@ -728,96 +767,35 @@ pub(crate) async fn run_prompt(
         .map_err(|e| AcpError::new(-32603, format!("run_session failed: {e}")))?;
     let result = handle.take_result();
 
+    // Persistence rollback/verification failure invalidates the in-memory session. Keeping the
+    // old snapshot would allow a subsequent turn to fork from unknown durable state.
+    let persistence_inconsistent = result.persistence_inconsistent;
+
     // Persist new messages to ThreadStore and update in-memory state.
     {
         let mut sessions = sessions.lock().await;
-        if let Some(state) = sessions.get_mut(&session_id) {
+        if persistence_inconsistent {
+            sessions.remove(&session_id);
+        } else if let Some(state) = sessions.get_mut(&session_id) {
             if result.ok {
-                info!(session_id = %session_id, messages = result.messages.len(), "Agent execution completed");
-                // Persist only the newly added messages.
-                if history_len < result.messages.len() {
-                    let new_msgs = &result.messages[history_len..];
-                    if let Err(e) = thread_store.append_messages(&thread_id, new_msgs).await {
-                        tracing::warn!(error = %e, "Failed to persist messages to ThreadStore");
-                    }
-                } else if result.messages.len() < history_len {
-                    // Compact replaced own messages with a condensed summary.
-                    // Delete old messages from ThreadStore and persist compacted state,
-                    // otherwise session restore loads old + new messages causing duplication.
-                    info!(
-                        session_id = %session_id,
-                        old_count = history_len,
-                        new_count = result.messages.len(),
-                        "Compact detected: updating ThreadStore"
-                    );
-                    if let Err(e) = thread_store.delete_messages(&thread_id, &history_ids).await {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to delete pre-compact messages from ThreadStore"
-                        );
-                    }
-                    if let Err(e) = thread_store
-                        .append_messages(&thread_id, &result.messages)
-                        .await
-                    {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to persist compacted messages to ThreadStore"
-                        );
-                    }
-                }
-                state.history = result.messages;
-            } else if result.history_replaced_by_compaction
-                || result.messages.len() > history_len + 1
-            {
-                // Error/cancel but agent made progress (user msg + AI/tool messages beyond
-                // just the user message). Preserve history so the agent remembers the
-                // interrupted round's context on the next prompt. Covers all error paths:
-                // LLM stream errors, HTTP errors, tool failures, middleware errors,
-                // MaxIterationsExceeded, and Ctrl+C cancel.
-                //
-                // NOTE: execute() skips cleanup_prepended on error paths (? propagation),
-                // so result.messages may contain leaked system prepends at the beginning.
-                // A committed Full Compact intentionally removes prior visible IDs and appends
-                // its summary to ThreadStore. Only that explicit executor signal may replace
-                // history without its original first message; other partial results are rejected.
-                if let Some(cleaned) = strip_leaked_prepends(
-                    &result.messages,
-                    first_history_id,
-                    result.history_replaced_by_compaction,
-                ) {
-                    let new_count = cleaned.len().saturating_sub(history_len);
-                    // Persist newly added messages to ThreadStore
-                    if new_count > 0 && history_len < cleaned.len() {
-                        let new_msgs = &cleaned[history_len..];
-                        if let Err(e) = thread_store.append_messages(&thread_id, new_msgs).await {
-                            tracing::warn!(error = %e, "Failed to persist cancelled-round messages");
-                        }
-                    }
-                    state.history = cleaned;
-                    info!(
-                        session_id = %session_id,
-                        history_len,
-                        new_count,
-                        "Agent cancelled with progress, preserving history"
-                    );
-                } else {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        history_len,
-                        result_messages = result.messages.len(),
-                        "Cancelled result omitted existing history; preserving prior in-memory history"
-                    );
-                }
+                info!(
+                    session_id = %session_id,
+                    payloads = result.persisted_payloads.len(),
+                    compact = result.history_replaced_by_compaction,
+                    "Agent execution completed with canonical transcript snapshot"
+                );
+                // The transcript writer is the sole execution-time store writer. Its barrier
+                // completes before PromptResult is built; host only adopts that canonical
+                // discriminated snapshot and never reconstructs persistence from model projection.
+                state.history_payloads = result.persisted_payloads;
+                state.history = state
+                    .history_payloads
+                    .iter()
+                    .filter_map(|payload| payload.as_message().cloned())
+                    .collect();
             } else {
-                // Execution failed, cancelled early (no AI output), or MaxIterationsExceeded.
-                // Roll back LLM-side history to pre-submit state.
-                // The TUI's TurnInterrupted handler detects zero AI output (current_turn empty)
-                // and performs the corresponding UI rollback: removes the user bubble from
-                // committed + restores text to the input area via INPUT_RESTORE_TEXT storage
-                // + RENDER_HEARTBEAT trigger.
                 state.history.truncate(history_len);
-                info!(session_id = %session_id, history_len, "Agent execution failed/cancelled, rolled back history");
+                info!(session_id = %session_id, history_len, "Agent execution failed/cancelled without canonical progress");
             }
             // [AsyncContinuation] 续跑结束不回写 recall：保留续跑开始前
             // SessionState 中的 recall（上一轮留给用户 prompt 的），续跑自身
@@ -928,6 +906,7 @@ fn recall_overwrite_allowed(continuation: bool) -> bool {
 
 /// Returns `None` when a partial result omits existing history. A committed Full Compact
 /// explicitly replaces prior visible messages with its persisted summary, so it is accepted.
+#[cfg(test)]
 fn strip_leaked_prepends(
     result_messages: &[peri_acp_types::messages::BaseMessage],
     first_history_id: Option<peri_acp_types::messages::MessageId>,

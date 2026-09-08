@@ -54,6 +54,28 @@ async fn test_sqlite_store_flush_persistence_makes_messages_and_flags_readable()
 }
 
 #[tokio::test]
+async fn test_delete_messages_removes_exact_turn_ids_and_preserves_ancestor() {
+    let (store, _dir) = make_store().await;
+    let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let messages = vec![
+        BaseMessage::human("ancestor"),
+        BaseMessage::ai("first durable batch"),
+        BaseMessage::human("later batch"),
+    ];
+    store.append_messages(&id, &messages).await.unwrap();
+
+    store
+        .delete_messages(&id, &[messages[1].id(), messages[2].id()])
+        .await
+        .unwrap();
+
+    let loaded = store.load_messages(&id).await.unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].id(), messages[0].id());
+    assert_eq!(store.load_meta(&id).await.unwrap().message_count, 1);
+}
+
+#[tokio::test]
 async fn test_create_append_load() {
     let (store, _dir) = make_store().await;
     let meta = ThreadMeta::new("/tmp");

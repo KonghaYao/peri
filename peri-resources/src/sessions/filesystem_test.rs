@@ -307,6 +307,29 @@ fn test_extract_title_empty_messages() {
 }
 
 #[tokio::test]
+async fn test_delete_messages_removes_exact_ids_and_preserves_ancestor() {
+    let dir = tempdir().unwrap();
+    let store = FilesystemThreadStore::new(dir.path());
+    let id = store.create_thread(make_meta("/test")).await.unwrap();
+    let messages = vec![
+        BaseMessage::human("ancestor"),
+        BaseMessage::ai("turn-first-batch"),
+        BaseMessage::human("turn-second-batch"),
+    ];
+    store.append_messages(&id, &messages).await.unwrap();
+
+    store
+        .delete_messages(&id, &[messages[1].id(), messages[2].id()])
+        .await
+        .unwrap();
+
+    let loaded = store.load_messages(&id).await.unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].id(), messages[0].id());
+    assert_eq!(store.load_meta(&id).await.unwrap().message_count, 1);
+}
+
+#[tokio::test]
 async fn test_delete_messages_since_truncates_jsonl() {
     let dir = tempdir().unwrap();
     let store = FilesystemThreadStore::new(dir.path());
