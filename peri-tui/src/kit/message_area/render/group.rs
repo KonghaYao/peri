@@ -272,21 +272,15 @@ pub(super) fn render_collapsed_group_lines(
     } else {
         String::new()
     };
-    let hint = format!(" · {}", i18n::tr("render-group-toggle-hint"));
-    // symbol/title/failed suffix 是主信息；hint 仅在完整容纳时追加，绝不截成残片。
     let content_width = grid.content_width();
     let keep = content_width.saturating_sub(suffix.width()).max(1);
     let title_trunc = truncate_by_width(&data.title, keep);
-    let show_hint = title_trunc.width() + suffix.width() + hint.width() <= content_width;
     spans.push(Span::styled(
         title_trunc,
         Style::default().fg(sem.text.muted),
     ));
     if !suffix.is_empty() {
         spans.push(Span::styled(suffix, Style::default().fg(sem.status.error)));
-    }
-    if show_hint {
-        spans.push(Span::styled(hint, Style::default().fg(sem.text.dim)));
     }
     let mut lines = vec![Line::from(spans)];
     if expanded {
