@@ -200,6 +200,10 @@ struct SessionManagerInner {
     pub caps_registry: Arc<DashMap<String, PeriCaps>>,
     /// 全局 CronScheduler（TUI/stdio 进程共享）。None = 不启用 cron 注入。
     pub cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
+    /// Host 统一 continuation scheduler 的 cron 入口；server 启动后绑定。
+    pub cron_continuation_tx: parking_lot::Mutex<
+        Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::cron::CronContinuationRequest>>,
+    >,
     /// MCP subscriptions 桥接端口（装配注入；session 创建时注册 inbox，
     /// close_session 时注销——订阅通知唤醒 agent 的通道，同 cron 模式）。
     pub mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
@@ -250,6 +254,7 @@ impl SessionManager {
                 pending_caps: parking_lot::Mutex::new(None),
                 caps_registry: Arc::new(DashMap::new()),
                 cron_scheduler,
+                cron_continuation_tx: parking_lot::Mutex::new(None),
                 mcp_subscription,
                 dynamic_mcp,
                 skills,
@@ -753,6 +758,18 @@ impl SessionManager {
             .unwrap_or(false)
     }
 
+    /// Host 启动时绑定 cron continuation 入口。既有 bridge 会在下一次 lazy 检查前
+    /// 尚未创建，因此只允许首次写入。
+    pub fn bind_cron_continuation(
+        &self,
+        tx: tokio::sync::mpsc::UnboundedSender<peri_acp_types::cron::CronContinuationRequest>,
+    ) {
+        let mut slot = self.inner.cron_continuation_tx.lock();
+        if slot.is_none() {
+            *slot = Some(tx);
+        }
+    }
+
     /// 确保指定 session 的 session 级 cron bridge 已启动（lazy-init，幂等）。
     ///
     /// 首次调用：`scheduler.subscribe()` 一次 + 用 session 级 inbox handle 启动
@@ -766,19 +783,27 @@ impl SessionManager {
             Some(s) => s.clone(),
             None => return false,
         };
+        let continuation_tx = match self.inner.cron_continuation_tx.lock().clone() {
+            Some(tx) => tx,
+            None => return false,
+        };
         // Fast path
         if let Some(session) = self.inner.sessions.get(session_id) {
             if session.cron_bridge.is_some() {
                 return true;
             }
         }
-        // Slow path: session-level inbox first (shared wake Notify), then bridge
-        let Some(inbox) = self.session_inbox_for(session_id) else {
+        // Slow path: bind a session-scoped scheduler subscription to Host continuation.
+        if self.session_inbox_for(session_id).is_none() {
             return false;
-        };
+        }
         if let Some(mut session) = self.inner.sessions.get_mut(session_id) {
             if session.cron_bridge.is_none() {
-                session.cron_bridge = Some(SessionCronBridge::start(&scheduler, inbox.handle()));
+                session.cron_bridge = Some(SessionCronBridge::start(
+                    session_id.to_string(),
+                    &scheduler,
+                    continuation_tx,
+                ));
                 tracing::info!(session_id = %session_id, "session cron bridge started");
             }
         }

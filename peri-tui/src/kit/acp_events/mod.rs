@@ -515,6 +515,13 @@ pub(crate) fn dispatch_for_bridge(
 
     if state.generation != generation_before {
         PublicationIntent::Immediate
+    } else if matches!(
+        event,
+        CommittedAssistantText { .. } | ReplayToolStarted { .. } | ReplayToolEnded { .. }
+    ) {
+        // session/load 历史逐条只更新 canonical state，由 bridge 固定 deadline 合帧；
+        // SessionReplayDone 等边界 handler 仍会立即发布最终完整快照。
+        PublicationIntent::Deferred
     } else if state.current_turn.has_unprojected_changes() {
         match event {
             TextChunk(_) => match current_streaming_mode() {

@@ -7,6 +7,10 @@ use std::sync::{
     Arc,
 };
 
+use peri_acp_types::interaction::{
+    ApprovalDecision, InteractionContext, InteractionResponse, UserInteractionBroker,
+};
+use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::tasks::BgTaskKind;
 use tokio_util::sync::CancellationToken;
 
@@ -16,6 +20,49 @@ use super::{
     take_continuation_if_armed, SessionState,
 };
 use crate::session::executor::ContinuationRequest;
+
+struct FixedBroker(InteractionResponse);
+
+#[async_trait::async_trait]
+impl UserInteractionBroker for FixedBroker {
+    async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+        self.0.clone()
+    }
+}
+
+#[tokio::test]
+async fn test_scheduled_trigger_permission_contract() {
+    let bypass = SharedPermissionMode::new(PermissionMode::Bypass);
+    assert!(
+        super::super::prompt::approve_scheduled_trigger(bypass.as_ref(), None, "task-1", "status")
+            .await
+    );
+
+    let default = SharedPermissionMode::new(PermissionMode::Default);
+    assert!(
+        !super::super::prompt::approve_scheduled_trigger(
+            default.as_ref(),
+            None,
+            "task-1",
+            "status"
+        )
+        .await
+    );
+
+    let broker: Arc<dyn UserInteractionBroker> =
+        Arc::new(FixedBroker(InteractionResponse::Decisions(vec![
+            ApprovalDecision::Approve { source: None },
+        ])));
+    assert!(
+        super::super::prompt::approve_scheduled_trigger(
+            default.as_ref(),
+            Some(&broker),
+            "task-1",
+            "status"
+        )
+        .await
+    );
+}
 
 /// 构造最小 SessionState（仅续跑相关字段有值）。
 fn make_session_state(armed: bool, epoch: u64) -> SessionState {
@@ -197,7 +244,7 @@ fn test_continuation_dispatchable_requires_pending_defer() {
 
 #[tokio::test]
 async fn test_scheduler_exits_on_host_shutdown_even_if_continuation_ingress_still_exists() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ContinuationRequest>();
     let root = Arc::new(tx);
     let _bounded_callback_clone = root.clone();
     let shutdown = CancellationToken::new();
@@ -212,7 +259,7 @@ async fn test_scheduler_exits_on_host_shutdown_even_if_continuation_ingress_stil
 
 #[tokio::test]
 async fn test_scheduler_does_not_own_its_ingress_sender() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ContinuationRequest>();
     let root = Arc::new(tx);
     let scheduler_ingress = Arc::downgrade(&root);
     drop(root);

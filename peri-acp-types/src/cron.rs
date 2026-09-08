@@ -31,6 +31,16 @@ pub struct CronTaskInfo {
     pub enabled: bool,
 }
 
+/// Host 统一 continuation 入口接收的 cron/loop 触发。
+///
+/// `task_id` 必须原样保留到审批边界；`session_id` 在 session bridge 绑定，
+/// 防止部署级 scheduler 的广播订阅丢失目标会话。
+#[derive(Debug, Clone)]
+pub struct CronContinuationRequest {
+    pub session_id: String,
+    pub trigger: CronTrigger,
+}
+
 /// Cron 调度器端口（装配注入面，`peri-middlewares::cron::CronScheduler` 实现）。
 ///
 /// ACP 侧只持 `Arc<dyn CronSchedulerPort>`；具体调度器（含注册/移除/时钟）

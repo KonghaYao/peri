@@ -10,7 +10,9 @@ mod throttle;
 
 use self::auto_follow::update_follow_on_scroll;
 #[cfg(test)]
-use self::auto_follow::{anchor_scroll_target, should_follow_after_user_scroll};
+use self::auto_follow::{
+    anchor_scroll_target, consume_reset_force_bottom, should_follow_after_user_scroll,
+};
 pub(super) use self::auto_follow::{new_output_indicator_active, run_auto_follow};
 pub(super) use self::event::handle_event;
 #[cfg(test)]

@@ -383,6 +383,6 @@ pub(super) fn handle_committed_assistant_text(
     bubble.recompute_hash();
     let vm = TuiRenderUnit::TuiAssistantBubble(bubble);
     state.committed.push_back(vm);
-    super::render::push_view_models(state);
+    // Replay publication 由 bridge scheduler 合帧；避免每条历史消息完整扫描 committed。
     super::render::push_acp_state(state);
 }

@@ -63,7 +63,9 @@ mod task_scope;
 mod unify_wire_baseline_tests;
 pub mod workflow_agent;
 
-pub(crate) use continuation::run_continuation_scheduler;
+pub(crate) use continuation::{
+    run_continuation_scheduler, run_cron_continuation_scheduler, CronContinuationContext,
+};
 pub(crate) use notify::{extract_session_id, handle_notification, send_session_info_update};
 pub(crate) use prompt::run_prompt;
 pub(crate) use requests::handle_request;
@@ -489,6 +491,8 @@ async fn run_acp_server_inner(
     let (cont_tx, cont_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::session::executor::ContinuationRequest>();
     let cont_tx = Arc::new(cont_tx);
+    let (cron_cont_tx, cron_cont_rx) = tokio::sync::mpsc::unbounded_channel();
+    cfg.session_manager.bind_cron_continuation(cron_cont_tx);
     let continuation_spawner = cfg.host_task_spawner.clone();
     let continuation_shutdown = cfg.host_task_spawner.shutdown_token();
     let _ = cfg.host_task_spawner.spawn(
@@ -501,8 +505,24 @@ async fn run_acp_server_inner(
             Arc::clone(&cfg),
             Arc::clone(&transport),
             Arc::downgrade(&cont_tx),
-            continuation_spawner,
-            continuation_shutdown,
+            continuation_spawner.clone(),
+            continuation_shutdown.clone(),
+        ),
+    );
+    let _ = cfg.host_task_spawner.spawn(
+        task_scope::HostTaskOwnerKind::Host,
+        task_scope::HostTaskKind::ContinuationScheduler,
+        run_cron_continuation_scheduler(
+            cron_cont_rx,
+            CronContinuationContext {
+                sessions: sessions.clone(),
+                prompt_locks: prompt_locks.clone(),
+                cfg: Arc::clone(&cfg),
+                transport: Arc::clone(&transport),
+                cont_tx: Arc::clone(&cont_tx),
+                task_spawner: continuation_spawner,
+                shutdown: continuation_shutdown,
+            },
         ),
     );
 

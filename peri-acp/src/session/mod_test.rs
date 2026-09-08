@@ -83,14 +83,15 @@ fn make_session_manager_with_cron(
 ) -> (
     SessionManager,
     Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,
+    tokio::sync::mpsc::UnboundedReceiver<peri_acp_types::cron::CronContinuationRequest>,
 ) {
     let scheduler = Arc::new(parking_lot::Mutex::new(
         peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
     ));
-    (
-        make_manager_with_cron_option(tmp, Some(scheduler.clone())),
-        scheduler,
-    )
+    let manager = make_manager_with_cron_option(tmp, Some(scheduler.clone()));
+    let (continuation_tx, continuation_rx) = tokio::sync::mpsc::unbounded_channel();
+    manager.bind_cron_continuation(continuation_tx);
+    (manager, scheduler, continuation_rx)
 }
 
 /// 同 make_session_manager，仅 SessionManager::new 末参按需传入 cron scheduler。
@@ -336,18 +337,16 @@ async fn test_pre_close_cancels_but_preserves_record_until_terminal_close() {
     assert!(mgr.session_ids().is_empty());
 }
 
-/// [回归] turn 以 Error 结束后 cron 触发仍能注入 session（不丢失）。
+/// [回归] turn 以 Error 结束后 cron bridge 仍转发完整 continuation 请求。
 #[tokio::test]
 async fn test_cron_bridge_survives_turn_error() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (mgr, scheduler) = make_session_manager_with_cron(&tmp);
+    let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp);
     let session_id = "test-cron-turn-error";
     mgr.ensure_session(session_id, "/tmp");
-
-    // 第一 turn：build_stage_context 挂载 session 级 bridge（幂等）
     assert!(mgr.cron_bridge_for(session_id));
 
-    // 模拟 turn：构造 per-turn V2Session（共享 session queue）后以 Error drop
+    // 模拟 turn：构造 per-turn V2Session（共享 session queue）后以 Error drop。
     let queue = mgr.v2_queue_for(session_id).unwrap();
     {
         let cancel = Arc::new(tokio_util::sync::CancellationToken::new());
@@ -356,69 +355,60 @@ async fn test_cron_bridge_survives_turn_error() {
             peri_agent::session::FrozenContext::builder().build(),
             None,
             cancel,
-            queue.clone(),
+            queue,
         );
-        drop(v2); // turn 结束（LoopResult::Error 路径）→ 旧实现此处杀死 bridge
+        drop(v2);
     }
 
-    // cron 到点触发（TUI tick 循环等价物）
-    let id = scheduler
+    let task_id = scheduler
         .lock()
         .register("* * * * *", "turn-error-survival")
         .unwrap();
     {
         let mut sched = scheduler.lock();
-        assert!(sched.force_next_fire_to_past(&id));
+        assert!(sched.force_next_fire_to_past(&task_id));
         sched.tick();
     }
-    tokio::time::sleep(Duration::from_millis(50)).await; // 等 bridge 异步转发（cron_owner_test 同款 50ms 模式）
 
-    // 触发必须已入队（queued，下一 turn 消费），而非被 retain 丢弃
-    let inbox = mgr.session_inbox_for(session_id).unwrap();
-    let drained = inbox.queue().drain_all();
-    assert_eq!(drained.len(), 1, "turn Error 后 cron 触发不得丢失");
-    assert_eq!(
-        drained[0].source,
-        peri_acp_types::session::MessageSource::CronTrigger
-    );
+    let request = tokio::time::timeout(Duration::from_secs(1), continuation_rx.recv())
+        .await
+        .expect("cron bridge 应及时转发")
+        .expect("Host continuation receiver 应存活");
+    assert_eq!(request.session_id, session_id);
+    assert_eq!(request.trigger.task_id, task_id);
+    assert_eq!(request.trigger.prompt, "turn-error-survival");
+    assert!(mgr.v2_queue_for(session_id).unwrap().is_empty());
 
-    // 清理：close_session → bridge drop → abort（幂等，无 panic）
     mgr.close_session(session_id).await.unwrap();
 }
 
-/// [回归] idle 期（无 turn 运行）cron 触发入队不丢弃；"queued, not dropped"
-/// （立即开新 turn 属后续增强，不在本期范围）。
+/// [回归] idle 期 cron bridge 转发完整 continuation 请求，不提前写入 inbox。
 #[tokio::test]
-async fn test_cron_bridge_idle_trigger_queued_not_dropped() {
+async fn test_cron_bridge_idle_trigger_forwards_continuation_without_early_enqueue() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (mgr, scheduler) = make_session_manager_with_cron(&tmp);
+    let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp);
     let session_id = "test-cron-idle";
     mgr.ensure_session(session_id, "/tmp");
     assert!(mgr.cron_bridge_for(session_id));
 
-    // idle：无 executor 运行，仅 TUI tick 循环存活
-    let id = scheduler
+    let task_id = scheduler
         .lock()
         .register("* * * * *", "idle-survival")
         .unwrap();
     {
         let mut sched = scheduler.lock();
-        assert!(sched.force_next_fire_to_past(&id));
+        assert!(sched.force_next_fire_to_past(&task_id));
         sched.tick();
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let inbox = mgr.session_inbox_for(session_id).unwrap();
-    assert_eq!(
-        inbox.queue().len(),
-        1,
-        "idle 期触发必须留在 queue（不丢弃）"
-    );
-    let drained = inbox.queue().drain_all();
-    assert_eq!(
-        drained[0].source,
-        peri_acp_types::session::MessageSource::CronTrigger
-    );
+    let request = tokio::time::timeout(Duration::from_secs(1), continuation_rx.recv())
+        .await
+        .expect("idle cron bridge 应及时转发")
+        .expect("Host continuation receiver 应存活");
+    assert_eq!(request.session_id, session_id);
+    assert_eq!(request.trigger.task_id, task_id);
+    assert_eq!(request.trigger.prompt, "idle-survival");
+    assert!(mgr.v2_queue_for(session_id).unwrap().is_empty());
 
     mgr.close_session(session_id).await.unwrap();
 }

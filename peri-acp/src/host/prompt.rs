@@ -12,8 +12,11 @@ use agent_client_protocol::schema::v1::{PromptResponse, StopReason};
 use parking_lot::RwLock;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::RegisteredHook;
-use peri_acp_types::interaction::ChannelState;
-use peri_acp_types::permission::SharedPermissionMode;
+use peri_acp_types::interaction::{
+    ApprovalDecision, ApprovalItem, ChannelState, InteractionContext, InteractionResponse,
+    UserInteractionBroker,
+};
+use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::ports::{McpPoolPort, ToolSearchPort};
 use peri_acp_types::session::{ExecutionFailure, ExecutionFailureKind};
 use peri_controller::langfuse::bridge::LangfuseBridge;
@@ -111,6 +114,49 @@ fn prompt_wire_response(
 /// 自管理这两个命令）。TUI / print（`false`）恒不过滤。
 fn stdio_filters_command(fullname: &str, stdio_command_filter: bool) -> bool {
     stdio_command_filter && matches!(fullname, "core:rewind" | "core:clear")
+}
+
+pub(crate) fn build_transport_broker(
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    session_id: &str,
+) -> Arc<dyn UserInteractionBroker> {
+    Arc::new(
+        AcpTransportBroker::new(
+            Arc::new(crate::transport::AcpRequestBridge(Arc::clone(transport))),
+            session_id.to_string().into(),
+        )
+        .with_timeout(crate::broker::ask_user_timeout()),
+    )
+}
+
+/// Cron/loop 是被持久注册的代理执行权：每次触发在进入模型前重新审批。
+/// Bypass 按既有模式契约直接允许；其他模式必须有 broker 并明确 Approve。
+pub(crate) async fn approve_scheduled_trigger(
+    permission_mode: &SharedPermissionMode,
+    broker: Option<&Arc<dyn UserInteractionBroker>>,
+    task_id: &str,
+    prompt: &str,
+) -> bool {
+    if permission_mode.load() == PermissionMode::Bypass {
+        return true;
+    }
+    let Some(broker) = broker else {
+        return false;
+    };
+    let response = broker
+        .request(InteractionContext::Approval {
+            items: vec![ApprovalItem {
+                tool_call_id: task_id.to_string(),
+                tool_name: "cron_trigger".to_string(),
+                tool_input: serde_json::json!({ "taskId": task_id, "prompt": prompt }),
+            }],
+        })
+        .await;
+    matches!(
+        response,
+        InteractionResponse::Decisions(decisions)
+            if matches!(decisions.as_slice(), [ApprovalDecision::Approve { .. }])
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -216,18 +262,7 @@ pub(crate) async fn run_prompt(
     let history_ids: Vec<peri_acp_types::messages::MessageId> =
         history.iter().map(|m| m.id()).collect();
 
-    let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> = Arc::new(
-        AcpTransportBroker::new(
-            Arc::new(crate::transport::AcpRequestBridge(Arc::clone(transport))),
-            session_id.clone().into(),
-        )
-        // 提问超时兜底（批 4 恢复旧 stdio 语义，见 broker::parse_ask_user_timeout）：
-        // 统一构造点读 env `PERI_ASK_USER_TIMEOUT_SECS`（缺失/非法 → 默认 300s；
-        // `0` → 不超时）。本构造点是 TUI/stdio 唯一统一点——TUI 不设 env 时也
-        // 获得 300s 默认兜底（TUI 本地客户端恒响应，实际交互无感知）；TUI 用户
-        // 显式设 env 会获得对应超时——显式配置的合理语义。
-        .with_timeout(crate::broker::ask_user_timeout()),
-    );
+    let broker = build_transport_broker(transport, &session_id);
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),
         session_manager.caps_registry(),

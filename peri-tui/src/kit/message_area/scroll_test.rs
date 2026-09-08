@@ -143,6 +143,24 @@ fn test_follow_when_content_fits_viewport() {
     assert!(should_follow_after_user_scroll(1, 0));
 }
 
+#[test]
+fn test_reset_force_bottom_sentinel_is_consumed_once() {
+    let mut prev_items_len = 0;
+    assert!(consume_reset_force_bottom(&mut prev_items_len, 100));
+    assert_eq!(prev_items_len, 100);
+
+    assert!(!consume_reset_force_bottom(&mut prev_items_len, 200));
+    assert_eq!(prev_items_len, 200);
+}
+
+#[test]
+fn test_empty_replay_snapshot_keeps_sentinel_armed() {
+    let mut prev_items_len = 0;
+    assert!(!consume_reset_force_bottom(&mut prev_items_len, 0));
+    assert_eq!(prev_items_len, 0);
+    assert!(consume_reset_force_bottom(&mut prev_items_len, 25));
+}
+
 // ── 滚动节流：反向落地与位置转换（纯函数） ─────────────────────────────
 
 #[test]

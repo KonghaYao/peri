@@ -65,6 +65,18 @@ pub(in crate::kit::message_area) fn anchor_scroll_target(
 
 // ── 吸底自动跟随 ─────────────────────────────────────────────────────────
 
+/// reset 后首次非空快照消费一次强制滚底哨兵，并立即记录当前长度。
+/// 返回 true 表示本次应强制滚底；后续 replay 批次走粘性 follow guard。
+pub(super) fn consume_reset_force_bottom(prev_items_len: &mut usize, items_len: usize) -> bool {
+    if *prev_items_len == 0 && items_len > 0 {
+        *prev_items_len = items_len;
+        true
+    } else {
+        *prev_items_len = items_len;
+        false
+    }
+}
+
 /// 从 `use_effect` 闭包提取的吸底逻辑。
 /// 注意：use_effect body 不是 render body，所以 `write()` 是正确的（需要 wake 触发后续渲染）。
 pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
@@ -170,26 +182,26 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
         return;
     }
 
-    // ── [Fix #3] History replay 批量强制滚底（哨兵 prev==0）──
-    // 仅在 non-loading 且 「BRIDGE_RESET_COUNTER 递增触发了 prev_items_len 归零」时进入。
-    // 每批次都 force scroll + 再次将 prev_items_len 归零——直到 replay 结束，
-    // generation 不再增长、effect 停发，prev==0 自然消弭。
-    if prev == 0 && !ctx.is_loading && ctx.items_len > 0 {
+    // ── History replay 首批强制滚底（一次性消费 prev==0 哨兵）──
+    // reset 后首个非空快照滚到底；立即记录 items_len，后续 replay 批次遵守
+    // follow_bottom。用户若在 replay 中上滚，后续增长不再抢回 viewport。
+    let force_bottom = {
+        let mut prev_items_len = ctx.prev_items_len.write();
+        consume_reset_force_bottom(&mut prev_items_len, ctx.items_len)
+    };
+    if force_bottom && !ctx.is_loading {
         tracing::trace!(
             target: "msg_scroll_diag",
             items_len = ctx.items_len,
-            "auto_follow: prev==0 force-scroll (history replay batch) → scroll_to_bottom",
+            "auto_follow: consuming reset force-scroll sentinel → scroll_to_bottom",
         );
         ctx.scroll_state.write().scroll_to_bottom();
         *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
         *ctx.follow_bottom.write() = true;
-        // 不消费 prev==0——维持为 0 让后续 batch 也走此路径
-        *ctx.prev_items_len.write() = 0;
         return;
     }
 
-    // ── 正常路径：更新 prev_items_len ──
-    *ctx.prev_items_len.write() = ctx.items_len;
+    // loading 首批仍由正常 streaming follow 路径处理；哨兵已消费。
 
     // ── [Slice 4 §6.8] Interaction block 锚定 ──
     // pending interaction block 存在时，block 末行超出视口 → 视口对齐到 block
