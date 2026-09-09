@@ -125,37 +125,37 @@ fn test_micro_compact_truncated_still_visible() {
 }
 
 #[test]
-fn test_micro_compact_truncates_tool_use_arguments() {
+fn test_micro_compact_preserves_tool_use_arguments() {
     let mut t = MessageTranscript::new();
     // 构造足够多轮次，使第 0 轮的 Ai 消息被截断
     for i in 0..7 {
         t.append(make_human(&format!("q {}", i)));
-        // Write 工具的 tool_use 有大量 arguments（如 file content）
         t.append(BaseMessage::ai_with_tool_calls(
-            MessageContent::text("I'll write the file"),
+            MessageContent::text("I'll read the file"),
             vec![crate::messages::ToolCallRequest::new(
                 format!("call_{}", i),
-                "Write",
-                serde_json::json!({"file_path": "/tmp/test.txt", "content": "x".repeat(501)}),
+                "Read",
+                serde_json::json!({"file_path": "/tmp/test.txt", "prompt": "x".repeat(501)}),
             )],
         ));
-        t.append(make_tool_result(&format!("call_{}", i), "Wrote file"));
+        t.append(make_tool_result(&format!("call_{}", i), &"R".repeat(600)));
     }
 
     let config = CompactConfig::default();
     let affected = micro_compact(&mut t, &config);
-    // 第 0-1 轮的 Ai (tool_use) + Tool (tool_result) 都应被截断
-    assert!(
-        affected >= 2,
-        "tool_use + tool_result 应被截断，实际: {}",
-        affected
-    );
+    assert!(affected >= 2, "stale ToolResult 应被截断，实际: {affected}");
 
-    // 确认第 0 条 Ai 消息被标 truncated（tool_use input）
     let ai_id = t.entries()[1].message().id();
     assert!(
-        t.flags(ai_id).truncated,
-        "Ai 消息（含 Write tool_use arguments）应被 truncated"
+        !t.flags(ai_id).truncated,
+        "Ai ToolCall/ToolUse input 永远不得被标记为投影目标"
+    );
+    let BaseMessage::Ai { tool_calls, .. } = t.entries()[1].message() else {
+        panic!("第二条消息应为 Ai");
+    };
+    assert_eq!(
+        tool_calls[0].arguments,
+        serde_json::json!({"file_path": "/tmp/test.txt", "prompt": "x".repeat(501)})
     );
 }
 
@@ -339,7 +339,7 @@ fn test_error_tool_result_not_selected() {
             }
         }
     }
-    assert!(affected > 0, "至少 Ai 消息应被截断");
+    assert_eq!(affected, 0, "仅含错误结果时不得因 ToolUse input 标记消息");
 }
 
 #[test]

@@ -6,6 +6,7 @@ pub mod grep;
 pub(crate) mod grep_args;
 pub(crate) mod grep_format;
 pub mod read;
+pub(crate) mod transaction;
 pub mod write;
 pub mod write_sandbox;
 

@@ -18,6 +18,13 @@ pub(crate) struct DraftEntry {
     pub(crate) append: bool,
 }
 
+/// 读取 exact id entry 的结果。
+pub(crate) enum DraftAccessError<E> {
+    Unknown,
+    WrongTarget,
+    Operation(E),
+}
+
 /// 进程级草稿存储:target → 最新草稿(同 target 覆盖,旧 draft_id 立即失效)。不设上限。
 #[derive(Default)]
 pub(crate) struct DraftStore {
@@ -42,6 +49,30 @@ impl DraftStore {
             },
         );
         id
+    }
+
+    /// 在锁内读取 exact id，并仅在操作成功后删除该 exact id。
+    pub(crate) fn with_exact_entry<T, E>(
+        &mut self,
+        draft_id: &str,
+        target: &str,
+        operation: impl FnOnce(&str, bool) -> Result<T, E>,
+    ) -> Result<T, DraftAccessError<E>> {
+        let Some((key, entry)) = self
+            .by_target
+            .iter()
+            .find(|(_, entry)| entry.id == draft_id)
+        else {
+            return Err(DraftAccessError::Unknown);
+        };
+        if entry.target != target {
+            return Err(DraftAccessError::WrongTarget);
+        }
+        let key = key.clone();
+        let result =
+            operation(&entry.content, entry.append).map_err(DraftAccessError::Operation)?;
+        self.by_target.remove(&key);
+        Ok(result)
     }
 
     /// 只读查看草稿(不消费)。用于恢复前先校验 target 一致性,避免误消费导致无法用原路径重试。

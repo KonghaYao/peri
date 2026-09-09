@@ -353,7 +353,7 @@ fn test_plan_micro_skip_false_includes_truncated_messages() {
             MessageContent::text(format!(
                 "file {} contains a lot of content: {}",
                 i,
-                "x".repeat(200)
+                "x".repeat(600)
             )),
         ));
     }
@@ -407,7 +407,7 @@ fn test_plan_micro_skip_true_excludes_already_truncated() {
             MessageContent::text(format!(
                 "file {} contains a lot of content: {}",
                 i,
-                "x".repeat(200)
+                "x".repeat(600)
             )),
         ));
     }
@@ -569,7 +569,7 @@ fn plan_for_tool_call(
 }
 
 #[test]
-fn test_plan_micro_input_savings_uses_character_difference() {
+fn test_plan_micro_tool_input_has_zero_savings() {
     use crate::messages::{BaseMessage, MessageContent};
 
     let config = CompactConfig {
@@ -583,16 +583,10 @@ fn test_plan_micro_input_savings_uses_character_difference() {
         &config,
     );
 
-    assert!(matches!(
-        &plan.actions[..],
-        [ProjectionActionEntry {
-            action: ProjectionAction::CompactToolInput { fields, .. },
-            ..
-        }] if fields == &["prompt"]
-    ));
-    assert_eq!(plan.estimated_before_tokens, 125);
-    assert_eq!(plan.estimated_after_tokens, 117);
-    assert_eq!(plan.estimated_tokens_saved, 7);
+    assert!(plan.actions.is_empty());
+    assert_eq!(plan.estimated_before_tokens, 0);
+    assert_eq!(plan.estimated_after_tokens, 0);
+    assert_eq!(plan.estimated_tokens_saved, 0);
 }
 
 #[test]
@@ -643,13 +637,10 @@ fn test_plan_micro_enforces_input_threshold_boundary() {
         exact_limit.actions.is_empty(),
         "恰好阈值的字段不触发字段级压缩，也不再生成整条兜底压缩 action"
     );
-    assert!(matches!(
-        &over_limit.actions[..],
-        [ProjectionActionEntry {
-            action: ProjectionAction::CompactToolInput { fields, .. },
-            ..
-        }] if fields == &["prompt"]
-    ));
+    assert!(
+        over_limit.actions.is_empty(),
+        "超过旧 input 阈值也不得生成 CompactToolInput"
+    );
 }
 
 #[test]
@@ -754,13 +745,10 @@ fn test_plan_micro_sorts_compactable_input_fields() {
         &config,
     );
 
-    assert!(matches!(
-        &plan.actions[..],
-        [ProjectionActionEntry {
-            action: ProjectionAction::CompactToolInput { fields, .. },
-            ..
-        }] if fields == &["alpha", "zeta"]
-    ));
+    assert!(plan
+        .actions
+        .iter()
+        .all(|entry| !matches!(entry.action, ProjectionAction::CompactToolInput { .. })));
 }
 
 #[test]

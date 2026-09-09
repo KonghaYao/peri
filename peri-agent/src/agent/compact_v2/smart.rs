@@ -160,12 +160,8 @@ mod tests {
 
         let config = CompactConfig::default();
         let (affected, _saved) = smart_compact(&mut t, &config);
-        // 4 stale rounds: tool_use 被压缩（CompactToolInput），error tool_result 不被压缩
-        assert_eq!(
-            affected, 4,
-            "只有 tool_use 被标记，错误 tool_result 保留，实际: {}",
-            affected
-        );
+        // Tool input 永不投影，错误 ToolResult 也必须保留。
+        assert_eq!(affected, 0, "错误 exchange 不应产生任何安全 action");
 
         // 验证所有错误 tool_result 未被 truncated
         for entry in t.entries() {

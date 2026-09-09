@@ -212,38 +212,6 @@ fn should_preserve_tool(tool_name: &str, config: &CompactConfig) -> bool {
     false
 }
 
-/// 返回需要压缩的顶层字符串字段名。
-fn compactable_top_level_string_fields(
-    input: &serde_json::Value,
-    config: &CompactConfig,
-) -> Vec<String> {
-    if !config.has_valid_micro_field_limits() {
-        tracing::warn!(
-            threshold = config.micro_field_threshold_chars,
-            keep_head = config.micro_field_keep_head_chars,
-            keep_tail = config.micro_field_keep_tail_chars,
-            "invalid micro compact field limits"
-        );
-        return vec![];
-    }
-
-    let Some(object) = input.as_object() else {
-        return vec![];
-    };
-
-    let mut fields: Vec<_> = object
-        .iter()
-        .filter_map(|(key, value)| {
-            value
-                .as_str()
-                .filter(|text| text.chars().count() > config.micro_field_threshold_chars)
-                .map(|_| key.clone())
-        })
-        .collect();
-    fields.sort();
-    fields
-}
-
 /// 生成 Micro Compact 计划（纯数据，零副作用）
 ///
 /// 遍历 TurnGroup，跳过最近 `micro_compact_stale_steps` 轮，对每个 tool exchange
@@ -253,8 +221,8 @@ fn compactable_top_level_string_fields(
 /// - 跳过最近 N 轮（`stale_steps`）
 /// - 已 truncated 的消息 → 当 `skip_existing_truncated` 时跳过
 /// - 受保护工具（`micro_excluded_tools`）→ 跳过
-/// - 错误 ToolResult → 跳过 ToolResult 的 compact，但 tool_use 仍可压缩
-/// - 安全可压缩的工具 → CompactToolInput（per tool_call_id）+ CompactToolResult
+/// - 错误 ToolResult → 跳过 ToolResult 的 compact
+/// - 安全可压缩的工具 → 仅生成 CompactToolResult；ToolCall/ToolUse input 永远保留
 pub fn plan_micro(
     transcript: &MessageTranscript,
     config: &CompactConfig,
@@ -301,24 +269,7 @@ pub fn plan_micro(
 
             let mut has_any_action = false;
 
-            let fields = compactable_top_level_string_fields(&exchange.tool_input, config);
-            if !fields.is_empty() {
-                has_any_action = true;
-                actions.push(ProjectionActionEntry {
-                    message_id: exchange.ai_message_id,
-                    target: ProjectionTarget::ToolCall {
-                        tool_call_id: exchange.tool_call_id.clone(),
-                    },
-                    action: ProjectionAction::CompactToolInput {
-                        fields,
-                        keep_head: config.micro_field_keep_head_chars,
-                        keep_tail: config.micro_field_keep_tail_chars,
-                    },
-                });
-            }
-            // 无超长字段的短参数调用不产生 action（不生成 fields 空占位 action）。
-            // 历史上该兜底会把短参数整条替换为 `{"_compact_note": ...}` 占位，
-            // LLM 看到投影视图后模仿输出占位参数导致真实工具执行失败，已移除。
+            // ToolCall/ToolUse input 是 canonical execution data，Micro planner 永不投影。
 
             // 仅压缩超过阈值的成功 ToolResult；错误结果保留诊断信息。
             if config.has_valid_micro_field_limits() {

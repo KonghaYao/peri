@@ -100,6 +100,12 @@
 - **Rule**：真实密钥、token、密码、私钥和连接串不得写入源码、fixture、日志、错误响应、遥测 payload 或版本库。运行时可通过环境变量、密钥管理或项目已支持且受本机权限保护的本地配置加载；输出和诊断只保留安全上下文。
 - **Verify**：`git diff --check`；人工审阅变更中本地配置与环境注入、`tracing` 调用、错误格式化和测试 fixture，确认没有真实 secret 或完整认证信息。
 
+### ARC-MICRO-TOOL-INPUT-001
+
+- **Scope**：`peri-agent` Micro Compact、provider-facing message view、`peri-middlewares` 内建 `Write` / `Edit`。
+- **Rule**：Micro Compact 不得修改任何历史 tool input；`ToolCallRequest.arguments` 与 `ContentBlock::ToolUse.input` 在 provider-facing view 中保持 canonical transcript 原值。Peri V1 projection sentinel（`... [` + 非空 ASCII digits + ` 字符已省略] ...` 完整逻辑行）不得相对目标文件 pre-image 作为新文件内容经内建 `Write` / `Edit` 引入；既有 sentinel 不扫描、不修复，未新增时不阻断无关修改。该 sink 保证不扩展到 Bash、外部进程、任意 MCP 或 PTC direct OS API。
+- **Verify**：`cargo test -p peri-agent --lib compact_v2`（legacy directive restore、renderer/provider-facing input 保真、Full canonical transcript 输入）；`cargo test -p peri-middlewares --lib -- tools::filesystem`（Write/Edit full-post-image sentinel delta 与无副作用拒绝）；`cargo test -p peri-acp-types --lib sentinel`（共享 V1 grammar）。
+
 ### ARC-PTC-ARTIFACT-001
 
 - **Scope**：`@peri-code/ptc` npm package、Rust 固定版本安装/启动路径与 PTC wire handshake。

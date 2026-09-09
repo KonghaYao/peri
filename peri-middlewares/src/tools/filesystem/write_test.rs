@@ -325,8 +325,8 @@ async fn test_write_create_dir_failure_saves_draft() {
         .await;
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("Error creating parent directory"),
-        "应含目录创建错误: {err}"
+        err.contains("Write failed while committing the file"),
+        "应使用固定提交错误: {err}"
     );
     assert!(err.contains("A draft was saved"), "应含草稿提示: {err}");
     assert!(err.contains("draft_"), "应含 draft_id: {err}");
@@ -383,47 +383,6 @@ async fn test_write_rename_failure_saves_draft_and_cleans_tmp() {
     assert!(result.is_ok(), "恢复应成功: {:?}", result.err());
     let content = std::fs::read_to_string(dir.path().join("d")).unwrap();
     assert_eq!(content, "x\ny", "草稿内容应为 tmp 实际文本");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_write_append_open_failure_saves_draft() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("log.txt"), "keep\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-        dir.path().join("log.txt"),
-        std::fs::Permissions::from_mode(0o444),
-    )
-    .unwrap();
-    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-    let result = tool
-        .invoke(
-            serde_json::json!({"file_path": "log.txt", "content": "appended\n", "append": true}),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await;
-    let err = result.unwrap_err().to_string();
-    let draft_id = extract_draft_id(&err);
-    assert!(
-        err.contains("Error opening file for append"),
-        "错误前缀: {err}"
-    );
-    // 还原权限后 from_draft 恢复,append 语义保留(非覆盖)
-    std::fs::set_permissions(
-        dir.path().join("log.txt"),
-        std::fs::Permissions::from_mode(0o644),
-    )
-    .unwrap();
-    let result = tool
-        .invoke(
-            serde_json::json!({"file_path": "log.txt", "from_draft": draft_id}),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await;
-    assert!(result.is_ok(), "恢复应成功: {:?}", result.err());
-    let content = std::fs::read_to_string(dir.path().join("log.txt")).unwrap();
-    assert_eq!(content, "keep\nappended\n", "append 语义应保留,非覆盖");
 }
 
 #[cfg(unix)]
@@ -634,10 +593,16 @@ async fn test_write_success_clears_draft() {
         .unwrap_err()
         .to_string();
     let draft_id = extract_draft_id(&err);
-    // 成功写入同 target 后草稿被清除
+    // 普通成功不得按 target 清除草稿；只有 exact id 恢复成功才消费。
     make_writable(&readonly);
     tool.invoke(
         serde_json::json!({"file_path": "readonly/a.txt", "content": "success"}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+    tool.invoke(
+        serde_json::json!({"file_path": "readonly/a.txt", "from_draft": draft_id.clone()}),
         peri_agent::tools::ToolContext::new(&[], "."),
     )
     .await
@@ -652,7 +617,7 @@ async fn test_write_success_clears_draft() {
         .to_string();
     assert!(
         err.contains("unknown or no longer available"),
-        "成功写入后旧草稿应失效: {err}"
+        "exact draft 成功后应失效: {err}"
     );
 }
 
@@ -757,4 +722,208 @@ async fn test_write_validation_failure_saves_no_draft() {
         .unwrap_err()
         .to_string();
     assert!(!err.contains("draft_"), "参数错误不应存草稿: {err}");
+}
+
+#[tokio::test]
+async fn test_write_rejects_sentinel_before_creating_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "missing/parent/f.txt", "content": "... [12 字符已省略] ..."}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(err, super::SENTINEL_REJECTION);
+    assert!(!dir.path().join("missing").exists());
+}
+
+#[tokio::test]
+async fn test_write_overwrite_rejects_new_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.txt");
+    std::fs::write(&path, "original").unwrap();
+    WriteFileTool::new(dir.path().to_str().unwrap())
+        .invoke(
+            serde_json::json!({"file_path": "f.txt", "content": "... [987654321 字符已省略] ..."}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "original");
+}
+
+#[tokio::test]
+async fn test_write_append_rejects_cross_boundary_sentinel_without_side_effects() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.txt");
+    std::fs::write(&path, "... [").unwrap();
+    let old_time = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    filetime::set_file_mtime(&path, old_time).unwrap();
+    WriteFileTool::new(dir.path().to_str().unwrap())
+        .invoke(
+            serde_json::json!({"file_path": "f.txt", "content": "12 字符已省略] ...", "append": true}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "... [");
+    assert_eq!(
+        filetime::FileTime::from_last_modification_time(&std::fs::metadata(&path).unwrap()),
+        old_time
+    );
+    assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".tmp.")
+    }));
+}
+
+#[tokio::test]
+async fn test_write_overwrites_non_utf8_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.bin");
+    std::fs::write(&path, [0xff, 0xfe]).unwrap();
+    WriteFileTool::new(dir.path().to_str().unwrap())
+        .invoke(
+            serde_json::json!({"file_path": "f.bin", "content": "new"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"new");
+}
+
+#[tokio::test]
+async fn test_write_appends_utf8_to_non_utf8_file_preserving_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.bin");
+    std::fs::write(&path, [0xff, b'a']).unwrap();
+    WriteFileTool::new(dir.path().to_str().unwrap())
+        .invoke(
+            serde_json::json!({"file_path": "f.bin", "content": "中文", "append": true}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let mut expected = vec![0xff, b'a'];
+    expected.extend_from_slice("中文".as_bytes());
+    assert_eq!(std::fs::read(path).unwrap(), expected);
+}
+
+#[tokio::test]
+async fn test_write_non_utf8_append_rejects_cross_boundary_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.bin");
+    std::fs::write(&path, [0xff, b'\n', b'.', b'.', b'.', b' ', b'[']).unwrap();
+    WriteFileTool::new(dir.path().to_str().unwrap())
+        .invoke(
+            serde_json::json!({"file_path": "f.bin", "content": "12 字符已省略] ...", "append": true}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        [0xff, b'\n', b'.', b'.', b'.', b' ', b'[']
+    );
+}
+
+#[tokio::test]
+async fn test_write_allows_existing_sentinel_without_increase() {
+    let dir = tempfile::tempdir().unwrap();
+    let sentinel = "... [12 字符已省略] ...";
+    std::fs::write(dir.path().join("f.txt"), format!("{sentinel}\nold")).unwrap();
+    WriteFileTool::new(dir.path().to_str().unwrap())
+        .invoke(
+            serde_json::json!({"file_path": "f.txt", "content": format!("{sentinel}\nnew")}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+        format!("{sentinel}\nnew")
+    );
+}
+
+#[tokio::test]
+async fn test_write_draft_rejection_preserves_exact_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = WriteFileTool::with_draft(dir.path().to_str().unwrap(), true);
+    let target = super::target_key(dir.path().to_str().unwrap(), "f.txt");
+    let target_id = target.to_string_lossy().to_string();
+    let draft_id = tool.drafts.as_ref().unwrap().lock().unwrap().save(
+        &target_id,
+        "... [12 字符已省略] ...".to_string(),
+        false,
+    );
+    for _ in 0..2 {
+        let err = tool
+            .invoke(
+                serde_json::json!({"file_path": "f.txt", "from_draft": draft_id}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, super::SENTINEL_REJECTION);
+    }
+    assert!(!target.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_write_same_target_concurrent_appends_are_serialized() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "start\n").unwrap();
+    let cwd = dir.path().to_string_lossy().to_string();
+    let first = tokio::spawn({
+        let cwd = cwd.clone();
+        async move {
+            WriteFileTool::with_draft(cwd, false)
+                .invoke(
+                    serde_json::json!({"file_path": "f.txt", "content": "a\n", "append": true}),
+                    peri_agent::tools::ToolContext::new(&[], "."),
+                )
+                .await
+        }
+    });
+    let second = tokio::spawn(async move {
+        WriteFileTool::with_draft(cwd, false)
+            .invoke(
+                serde_json::json!({"file_path": "f.txt", "content": "b\n", "append": true}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+    });
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+    assert!(content == "start\na\nb\n" || content == "start\nb\na\n");
+}
+
+#[tokio::test]
+async fn test_write_append_32_mib_smoke_records_wall_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large.txt");
+    std::fs::write(&path, vec![b'a'; 32 * 1024 * 1024]).unwrap();
+    let chunk = "b".repeat(64 * 1024);
+    let started = std::time::Instant::now();
+    WriteFileTool::with_draft(dir.path().to_str().unwrap(), false)
+        .invoke(
+            serde_json::json!({"file_path": "large.txt", "content": chunk, "append": true}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let wall_time = started.elapsed();
+    assert_eq!(
+        std::fs::metadata(path).unwrap().len(),
+        32 * 1024 * 1024 + 64 * 1024
+    );
+    std::hint::black_box(wall_time);
 }
