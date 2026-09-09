@@ -247,6 +247,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         | ExecutorEvent::SubagentStarted { .. }
         | ExecutorEvent::SubagentStopped { .. }
         | ExecutorEvent::CompactStarted { .. }
+        | ExecutorEvent::SystemReminder(_)
         | ExecutorEvent::CompactCompleted { .. }
         | ExecutorEvent::RewindCompleted { .. }
         | ExecutorEvent::AgentExecutionFailed { .. }

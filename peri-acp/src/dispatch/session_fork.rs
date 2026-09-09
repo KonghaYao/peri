@@ -3,7 +3,7 @@
 //! 存储访问经 [`Controller::sessions`]（ARC-BOUNDARY-001 方向）。
 
 use anyhow::{Context, Result};
-use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_controller::Controller;
 
@@ -14,9 +14,9 @@ use peri_controller::Controller;
 pub async fn fork_session(
     controller: &Controller,
     source_thread_id: &str,
-    source_messages: &[BaseMessage],
+    source_payloads: &[PersistedPayload],
     cwd: &str,
-) -> Result<(String, Vec<BaseMessage>)> {
+) -> Result<(String, Vec<PersistedPayload>)> {
     let meta = ThreadMeta::new(cwd);
     let store = controller.sessions();
     let new_thread_id = store
@@ -24,21 +24,36 @@ pub async fn fork_session(
         .await
         .context("Thread creation failed")?;
 
-    if !source_messages.is_empty() {
-        if let Err(e) = store
-            .append_messages(&ThreadId::from(new_thread_id.clone()), source_messages)
+    if !source_payloads.is_empty() {
+        if let Err(copy_error) = store
+            .append_payloads(&ThreadId::from(new_thread_id.clone()), source_payloads)
             .await
         {
-            tracing::warn!(error = %e, "session/fork: failed to copy messages to new thread");
+            if store.delete_thread(&new_thread_id).await.is_err() {
+                tracing::error!(
+                    event = "session_fork_persistence_inconsistency",
+                    source_thread_id,
+                    new_thread_id = %new_thread_id,
+                    copy_failed = true,
+                    compensation_failed = true,
+                    classification = "persistence_inconsistency",
+                    "session fork persistence inconsistency"
+                );
+                anyhow::bail!(
+                    "Session fork failed due to a persistence inconsistency; manual recovery may be required"
+                );
+            }
+
+            return Err(copy_error).context("Failed to copy session payloads");
         }
     }
 
     tracing::info!(
         source = %source_thread_id,
         new = %new_thread_id,
-        msg_count = source_messages.len(),
+        msg_count = source_payloads.len(),
         "Session forked"
     );
 
-    Ok((new_thread_id, source_messages.to_vec()))
+    Ok((new_thread_id, source_payloads.to_vec()))
 }

@@ -2,6 +2,7 @@
 
 use std::{process::Command as StdCommand, time::Duration};
 
+use peri_acp_types::system_reminder::{ReminderAudience, ReminderCategory, ReminderDelivery};
 use peri_agent::{
     agent::react::{ToolCall, ToolResult},
     middleware::r#trait::Middleware,
@@ -152,9 +153,17 @@ async fn git_watch_notifies_on_new_commit() {
 
     let msgs = queue.drain_all();
     assert_eq!(msgs.len(), 1, "expected one Info on HEAD change");
-    let debug = format!("{:?}", msgs[0].message);
-    assert!(debug.contains("[Git watch]"));
-    assert!(debug.contains("HEAD"));
+    let reminder = match &msgs[0].payload {
+        peri_agent::session::QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+        other => panic!("expected canonical reminder, got {other:?}"),
+    };
+    assert_eq!(reminder.category, ReminderCategory::Diagnostic);
+    assert_eq!(reminder.source.0, "git_watch");
+    assert_eq!(reminder.kind, "repository_ref_changed");
+    assert_eq!(reminder.delivery, ReminderDelivery::Configurable);
+    assert!(reminder.audiences.contains(ReminderAudience::Diagnostics));
+    assert!(reminder.body.contains("[Git watch]"));
+    assert!(reminder.body.contains("HEAD"));
 }
 
 #[tokio::test]

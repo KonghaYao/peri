@@ -1,4 +1,7 @@
 use super::*;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity,
+};
 use peri_agent::agent::react::AgentOutput;
 use peri_agent::agent::state::AgentState;
 use peri_agent::goal::{GoalController, GoalStatus, GoalViewSnapshot};
@@ -107,6 +110,22 @@ async fn test_after_agent_goal_active_注入_steering_并设_block_continue() {
     // 注入路径：v2 MessageQueue 应收到 1 条 Defer（GoalSteering）
     let drained = state.v2_queue().drain_all();
     assert_eq!(drained.len(), 1, "应 push 1 条 goal steering Defer 消息");
+    assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Defer);
+    assert_eq!(
+        drained[0].source,
+        peri_agent::session::MessageSource::GoalSteering
+    );
+    let reminder = match &drained[0].payload {
+        peri_agent::session::QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+        other => panic!("expected canonical reminder, got {other:?}"),
+    };
+    assert_eq!(reminder.category, ReminderCategory::Guidance);
+    assert_eq!(reminder.source.0, "goal");
+    assert_eq!(reminder.kind, "steering");
+    assert_eq!(reminder.severity, ReminderSeverity::Warning);
+    assert_eq!(reminder.delivery, ReminderDelivery::Required);
+    assert!(reminder.audiences.contains(ReminderAudience::Model));
+    assert!(reminder.audiences.contains(ReminderAudience::Automation));
 }
 
 #[tokio::test]

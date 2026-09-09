@@ -232,6 +232,7 @@ fn group_input_fingerprint(segment: &im::Vector<TuiRenderUnit>) -> (u64, bool) {
                         TuiRenderUnit::TuiUserBubble(_) => 1,
                         TuiRenderUnit::TuiAssistantBubble(_) => 2,
                         TuiRenderUnit::TuiSystemNote(_) => 4,
+                        TuiRenderUnit::TuiSystemReminder(_) => 10,
                         TuiRenderUnit::TuiSubAgentGroup(_) => 5,
                         TuiRenderUnit::TuiCollapsedGroup(_) => 6,
                         TuiRenderUnit::TuiDivider(_) => 7,
@@ -598,6 +599,24 @@ fn apply_fold_pass(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
                     updates.push((i, TuiSubAgentGroup(updated)));
                 }
             }
+            TuiSystemReminder(r) => {
+                let target_fold = if has_overrides {
+                    overrides
+                        .get(&FoldKey::SystemReminder(r.reminder_id))
+                        .copied()
+                        .unwrap_or_else(|| {
+                            fold_for_status(FoldTarget::System, EntryStatus::Completed)
+                        })
+                } else {
+                    fold_for_status(FoldTarget::System, EntryStatus::Completed)
+                };
+                if r.fold != target_fold {
+                    let mut updated = r.clone();
+                    updated.fold = target_fold;
+                    updated.recompute_hash();
+                    updates.push((i, TuiSystemReminder(updated)));
+                }
+            }
             TuiAskUserBlock(a) => {
                 // [Slice 4 §6.8] 状态推导：pending → Running（Expanded 可聚焦，
                 // 等待期间锚定）；结果回写（pending=false）→ Completed；error
@@ -647,8 +666,8 @@ pub fn push_view_models_for_reset() {
         source_version: 0,
         reason: crate::kit::acp_bridge::PublicationReason::Reset,
     });
-    // [Slice 2] session 复位时清空折叠覆盖表——tool_id/message_id/agent_id
-    // 跨 session 不保证唯一，残留覆盖会错误作用于新会话的同名 entry。
+    // [Slice 2] session 复位时清空折叠覆盖表——tool_id/message_id/agent_id/
+    // reminder_id 跨 session 不保证唯一，残留覆盖会错误作用于新会话的同名 entry。
     FOLD_OVERRIDES.state().write().clear();
     // [S2 §3.4] 焦点单一事实源同源清空（跨 session 身份不唯一——slot 与 key
     // 都依赖旧会话索引/身份，残留会让新会话焦点/免疫错误指向）。

@@ -5,7 +5,17 @@
 
 use crate::agent::events_v2::{ObserveEvent, StateEvent};
 use crate::agent::stages::{append_messages_to_transcript, ReceiveInput, ReceiveOutput};
-use crate::session::MessageKind;
+use crate::session::{MessageKind, QueuedMessage, QueuedPayload};
+use peri_acp_types::event::ExecutorEvent;
+
+fn synthetic_defer_text(message: &QueuedMessage) -> Option<String> {
+    match (&message.kind, &message.payload) {
+        (MessageKind::Defer, QueuedPayload::Message(message)) => {
+            Some(message.content().to_string())
+        }
+        _ => None,
+    }
+}
 
 /// 运行 Receive 阶段
 ///
@@ -49,9 +59,17 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
         // 在写入 transcript 前，对 Defer 消息 emit SyntheticUserMessage
         // （复制原 End 阶段 post-wake drain 的同模式 emit，让 TUI bridge 刷新 committed 视图）
         for msg in &consumed {
-            if msg.kind == MessageKind::Defer {
-                let raw_text = msg.message.content().to_string();
-                let text = format!("<system-reminder>\n{}\n</system-reminder>", raw_text);
+            if let QueuedPayload::SystemReminder(reminder) = &msg.payload {
+                input
+                    .context
+                    .runtime
+                    .event_bus
+                    .emit_state(StateEvent::ProtocolEvent {
+                        turn_id: input.context.turn_id(),
+                        agent_id: input.context.session.agent_id,
+                        event: ExecutorEvent::SystemReminder(reminder.as_reminder().clone()),
+                    });
+            } else if let Some(text) = synthetic_defer_text(msg) {
                 input
                     .context
                     .runtime

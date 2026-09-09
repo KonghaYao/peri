@@ -66,6 +66,7 @@ pub mod session;
 pub mod skills;
 pub mod store;
 pub mod summary;
+pub mod system_reminder;
 pub mod tasks;
 pub mod thread;
 pub mod tools;

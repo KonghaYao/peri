@@ -633,6 +633,11 @@ fn make_turn_input(
         content,
         continuation,
         frozen: None,
+        history_payloads: history
+            .iter()
+            .cloned()
+            .map(peri_acp_types::store::PersistedPayload::Message)
+            .collect(),
         history,
         incoming_recalls: vec![],
         bg_results: vec![],

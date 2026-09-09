@@ -13,16 +13,53 @@ use std::sync::Arc;
 use anyhow::anyhow;
 
 use crate::agent::compact_v2::projection::MessageProjectionDirective;
-use crate::messages::{BaseMessage, MessageId};
+use crate::messages::{BaseMessage, MessageContent, MessageId};
 use crate::thread::{ThreadId, ThreadStore};
-use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::{MessageFlags, PersistedPayload};
+use peri_acp_types::system_reminder::{encode_system_reminder, TrustedSystemReminder};
 
 // ─── TranscriptEntry ──────────────────────────────────────────────────────────
 
-/// Transcript 中的单条消息条目
+/// Transcript 中的单条逻辑条目。Reminder 不是伪造的空 Human message。
 #[derive(Debug, Clone)]
-pub struct TranscriptEntry {
-    pub message: BaseMessage,
+pub enum TranscriptEntry {
+    Message(BaseMessage),
+    Reminder {
+        id: MessageId,
+        reminder: TrustedSystemReminder,
+    },
+}
+
+impl TranscriptEntry {
+    pub fn id(&self) -> MessageId {
+        match self {
+            Self::Message(message) => message.id(),
+            Self::Reminder { id, .. } => *id,
+        }
+    }
+
+    pub fn as_message(&self) -> Option<&BaseMessage> {
+        match self {
+            Self::Message(message) => Some(message),
+            Self::Reminder { .. } => None,
+        }
+    }
+
+    pub fn message(&self) -> &BaseMessage {
+        self.as_message()
+            .expect("canonical reminder has no stored BaseMessage")
+    }
+
+    /// Canonical model projection shared by normal Reason and compact rendering.
+    pub fn project_message(&self) -> anyhow::Result<BaseMessage> {
+        match self {
+            Self::Message(message) => Ok(message.clone()),
+            Self::Reminder { id, reminder } => Ok(BaseMessage::Human {
+                id: *id,
+                content: MessageContent::text(encode_system_reminder(reminder)?),
+            }),
+        }
+    }
 }
 
 // ─── StagedData ───────────────────────────────────────────────────────────────
@@ -43,7 +80,7 @@ pub struct StagedData {
 #[derive(Debug)]
 pub enum PersistOp {
     /// 追加新消息
-    Append(BaseMessage),
+    Append(TranscriptEntry),
     /// Rewind 至指定 id（删除该 id 之后的所有记录）
     RewindTo(MessageId),
     /// 更新消息标记
@@ -66,18 +103,23 @@ pub enum PersistOp {
 async fn flush_appends(
     store: &dyn ThreadStore,
     tid: &ThreadId,
-    pending: &mut Vec<BaseMessage>,
-    barrier_error: &mut Option<anyhow::Error>,
+    pending: &mut Vec<PersistedPayload>,
+    barrier_error: &mut Option<String>,
     processed: &mut u64,
 ) {
     if pending.is_empty() {
         return;
     }
-    if let Err(e) = store.append_messages(tid, pending).await {
-        tracing::warn!("transcript persist failed (append batch): {e}");
-        if barrier_error.is_none() {
-            *barrier_error = Some(e);
-        }
+    if barrier_error.is_some() {
+        return;
+    }
+    if let Err(e) = store.append_payloads(tid, pending).await {
+        tracing::warn!(
+            pending = pending.len(),
+            "transcript persist entered terminal failure: {e}"
+        );
+        *barrier_error = Some(e.to_string());
+        return;
     }
     *processed = processed.saturating_add(pending.len() as u64);
     pending.clear();
@@ -152,6 +194,21 @@ impl MessageTranscript {
         }
     }
 
+    pub fn with_ancestor_payloads(mut self, payloads: Vec<PersistedPayload>) -> Self {
+        for payload in payloads {
+            let entry = match payload {
+                PersistedPayload::Message(message) => TranscriptEntry::Message(message),
+                PersistedPayload::SystemReminder { id, reminder } => {
+                    TranscriptEntry::Reminder { id, reminder }
+                }
+            };
+            self.id_index.insert(entry.id(), self.entries.len());
+            self.entries.push(entry);
+        }
+        self.ancestor_len = self.entries.len();
+        self
+    }
+
     /// 设置祖先消息（Fork/Background Agent 从父 Agent 继承）
     ///
     /// 祖先消息只读——Compact 仅操作边界之后的自有消息。
@@ -160,9 +217,7 @@ impl MessageTranscript {
         for msg in &messages {
             let id = msg.id();
             self.id_index.insert(id, self.entries.len());
-            self.entries.push(TranscriptEntry {
-                message: msg.clone(),
-            });
+            self.entries.push(TranscriptEntry::Message(msg.clone()));
         }
         self.ancestor_len = len;
         self
@@ -191,7 +246,9 @@ impl MessageTranscript {
             // - Barrier 到达时先 flush 积压再 ack（flush_persistence 确认 = 已落库）
             // - 其他 op 到达时先 flush 积压，保持 FIFO 顺序
             // - 通道关闭时 flush 剩余
-            let mut pending_appends: Vec<crate::messages::BaseMessage> = Vec::new();
+            const FAILED_PENDING_MAX: usize = 256;
+            let mut dropped_after_failure = 0usize;
+            let mut pending_appends: Vec<PersistedPayload> = Vec::new();
             let mut window_start: std::time::Instant = std::time::Instant::now();
             const APPEND_BATCH_MAX: usize = 64;
             const APPEND_BATCH_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
@@ -220,11 +277,25 @@ impl MessageTranscript {
                 };
 
                 match op {
-                    Some(PersistOp::Append(msg)) => {
+                    Some(PersistOp::Append(entry)) => {
                         if pending_appends.is_empty() {
                             window_start = std::time::Instant::now();
                         }
-                        pending_appends.push(msg);
+                        let payload = match entry {
+                            TranscriptEntry::Message(message) => PersistedPayload::Message(message),
+                            TranscriptEntry::Reminder { id, reminder } => {
+                                PersistedPayload::SystemReminder { id, reminder }
+                            }
+                        };
+                        if barrier_error.is_some() && pending_appends.len() >= FAILED_PENDING_MAX {
+                            dropped_after_failure = dropped_after_failure.saturating_add(1);
+                            tracing::warn!(
+                                dropped_after_failure,
+                                "terminal transcript persistence failure dropped payload"
+                            );
+                        } else {
+                            pending_appends.push(payload);
+                        }
                         if pending_appends.len() >= APPEND_BATCH_MAX {
                             flush_appends(
                                 store.as_ref(),
@@ -246,7 +317,14 @@ impl MessageTranscript {
                             &mut processed,
                         )
                         .await;
-                        let _ = ack.send(barrier_error.take().map_or(Ok(()), Err));
+                        let result = barrier_error.as_ref().map_or(Ok(()), |error| {
+                            Err(anyhow!(
+                                "{error}; {} payload(s) remain unpersisted, {} dropped after terminal failure",
+                                pending_appends.len(),
+                                dropped_after_failure
+                            ))
+                        });
+                        let _ = ack.send(result);
                     }
                     Some(PersistOp::Shutdown) | None => {
                         // 优雅关闭：flush 剩余积压后退出。
@@ -277,36 +355,46 @@ impl MessageTranscript {
                             &mut processed,
                         )
                         .await;
-                        let result = match other {
-                            PersistOp::RewindTo(id) => store.delete_messages_since(&tid, &id).await,
-                            PersistOp::UpdateFlags(id, flags) => {
-                                store.update_message_flags(&id, &flags).await
-                            }
-                            PersistOp::ApplyCompactionBatch { updates } => {
-                                let mut first_err = None;
-                                for (id, flags) in &updates {
-                                    if let Err(err) = store.update_message_flags(id, flags).await {
+                        let result = if let Some(error) = barrier_error.as_ref() {
+                            Err(anyhow!(error.clone()))
+                        } else {
+                            match other {
+                                PersistOp::RewindTo(id) => {
+                                    store.delete_messages_since(&tid, &id).await
+                                }
+                                PersistOp::UpdateFlags(id, flags) => {
+                                    store.update_message_flags(&id, &flags).await
+                                }
+                                PersistOp::ApplyCompactionBatch { updates } => {
+                                    let mut first_err = None;
+                                    for (id, flags) in &updates {
+                                        if let Err(err) =
+                                            store.update_message_flags(id, flags).await
+                                        {
+                                            if first_err.is_none() {
+                                                first_err = Some(err);
+                                            }
+                                        }
+                                    }
+                                    // 无论标记更新是否部分失败，均需使缓存失效。
+                                    if let Err(err) = store.invalidate_context_cache(&tid).await {
                                         if first_err.is_none() {
                                             first_err = Some(err);
                                         }
                                     }
+                                    first_err.map_or(Ok(()), Err)
                                 }
-                                // 无论标记更新是否部分失败，均需使缓存失效。
-                                if let Err(err) = store.invalidate_context_cache(&tid).await {
-                                    if first_err.is_none() {
-                                        first_err = Some(err);
-                                    }
+                                PersistOp::Append(_)
+                                | PersistOp::Barrier(_)
+                                | PersistOp::Shutdown => {
+                                    unreachable!("handled in dedicated branches above")
                                 }
-                                first_err.map_or(Ok(()), Err)
-                            }
-                            PersistOp::Append(_) | PersistOp::Barrier(_) | PersistOp::Shutdown => {
-                                unreachable!("handled in dedicated branches above")
                             }
                         };
                         if let Err(e) = result {
                             tracing::warn!("transcript persist failed: {e}");
                             if barrier_error.is_none() {
-                                barrier_error = Some(e);
+                                barrier_error = Some(e.to_string());
                             }
                         }
                         processed = processed.saturating_add(1);
@@ -336,21 +424,46 @@ impl MessageTranscript {
         &self.entries
     }
 
-    /// 获取所有**可见**消息（跳过 excluded 标记的消息）
-    ///
-    /// LLM 请求构造时使用此方法获取有效消息列表。
+    /// Canonical persistence snapshot preserving message/reminder discriminants and stable IDs.
+    pub fn persisted_payloads(&self) -> Vec<PersistedPayload> {
+        self.entries
+            .iter()
+            .cloned()
+            .map(|entry| match entry {
+                TranscriptEntry::Message(message) => PersistedPayload::Message(message),
+                TranscriptEntry::Reminder { id, reminder } => {
+                    PersistedPayload::SystemReminder { id, reminder }
+                }
+            })
+            .collect()
+    }
+
+    /// 获取所有**可见**普通消息（跳过 excluded 与 canonical reminder）
     pub fn visible_messages(&self) -> Vec<&BaseMessage> {
         self.entries
             .iter()
-            .filter(|entry| {
-                let f = self.flags.get(&entry.message.id());
-                match f {
-                    None => true,
-                    Some(flags) => !flags.excluded,
-                }
-            })
-            .map(|entry| &entry.message)
+            .filter(|entry| !self.flags(entry.id()).excluded)
+            .filter_map(TranscriptEntry::as_message)
             .collect()
+    }
+
+    /// Projects visible transcript entries for the model. Canonical reminders are encoded only here.
+    pub fn visible_model_messages(&self) -> anyhow::Result<Vec<BaseMessage>> {
+        self.entries
+            .iter()
+            .filter(|entry| !self.flags(entry.id()).excluded)
+            .map(TranscriptEntry::project_message)
+            .collect()
+    }
+
+    pub fn append_system_reminder(&mut self, reminder: TrustedSystemReminder) -> MessageId {
+        let id = MessageId::new();
+        let idx = self.entries.len();
+        self.id_index.insert(id, idx);
+        self.entries
+            .push(TranscriptEntry::Reminder { id, reminder });
+        self.send_persist(PersistOp::Append(self.entries[idx].clone()));
+        id
     }
 
     /// 获取所有**可见**消息的 owned Arc 快照（跳过 excluded 标记的消息）
@@ -366,13 +479,13 @@ impl MessageTranscript {
             .entries
             .iter()
             .filter(|entry| {
-                let f = self.flags.get(&entry.message.id());
+                let f = self.flags.get(&entry.id());
                 match f {
                     None => true,
                     Some(flags) => !flags.excluded,
                 }
             })
-            .map(|entry| entry.message.clone())
+            .map(|entry| entry.project_message().expect("validated transcript entry"))
             .collect();
         Arc::new(filtered)
     }
@@ -431,9 +544,9 @@ impl MessageTranscript {
         let id = message.id();
         let idx = self.entries.len();
         self.id_index.insert(id, idx);
-        self.entries.push(TranscriptEntry { message });
+        self.entries.push(TranscriptEntry::Message(message));
         // 异步持久化
-        self.send_persist(PersistOp::Append(self.entries[idx].message.clone()));
+        self.send_persist(PersistOp::Append(self.entries[idx].clone()));
         id
     }
 
@@ -444,9 +557,9 @@ impl MessageTranscript {
             let id = msg.id();
             let idx = self.entries.len();
             self.id_index.insert(id, idx);
-            self.entries.push(TranscriptEntry { message: msg });
+            self.entries.push(TranscriptEntry::Message(msg));
             ids.push(id);
-            self.send_persist(PersistOp::Append(self.entries[idx].message.clone()));
+            self.send_persist(PersistOp::Append(self.entries[idx].clone()));
         }
         ids
     }
@@ -457,7 +570,7 @@ impl MessageTranscript {
     /// 不触发异步持久化（假设调用方会在后续正常写入路径中持久化）。
     pub fn replace_by_id(&mut self, message: BaseMessage) {
         if let Some(&idx) = self.id_index.get(&message.id()) {
-            self.entries[idx] = TranscriptEntry { message };
+            self.entries[idx] = TranscriptEntry::Message(message);
         }
     }
 
@@ -496,20 +609,17 @@ impl MessageTranscript {
         let ai_id = staged.ai_message.id();
         let ai_idx = self.entries.len();
         self.id_index.insert(ai_id, ai_idx);
-        self.entries.push(TranscriptEntry {
-            message: staged.ai_message,
-        });
-        self.send_persist(PersistOp::Append(self.entries[ai_idx].message.clone()));
+        self.entries
+            .push(TranscriptEntry::Message(staged.ai_message));
+        self.send_persist(PersistOp::Append(self.entries[ai_idx].clone()));
 
         // 写入 ToolResult 列表
         for tool_result in staged.tool_results {
             let id = tool_result.id();
             let idx = self.entries.len();
             self.id_index.insert(id, idx);
-            self.entries.push(TranscriptEntry {
-                message: tool_result,
-            });
-            self.send_persist(PersistOp::Append(self.entries[idx].message.clone()));
+            self.entries.push(TranscriptEntry::Message(tool_result));
+            self.send_persist(PersistOp::Append(self.entries[idx].clone()));
         }
     }
 
@@ -626,9 +736,7 @@ impl MessageTranscript {
             let id = message.id();
             let idx = self.entries.len();
             self.id_index.insert(id, idx);
-            self.entries.push(TranscriptEntry {
-                message: message.clone(),
-            });
+            self.entries.push(TranscriptEntry::Message(message.clone()));
         }
     }
 
@@ -646,7 +754,7 @@ impl MessageTranscript {
         for (idx, (msg, flags)) in entries.into_iter().enumerate() {
             let id = msg.id();
             new_index.insert(id, idx);
-            new_entries.push(TranscriptEntry { message: msg });
+            new_entries.push(TranscriptEntry::Message(msg));
             // 仅存非默认标记
             if flags != MessageFlags::default() {
                 new_flags.insert(id, flags);
@@ -695,7 +803,7 @@ impl MessageTranscript {
         // 收集要移除的 id（用于清理索引和标记）
         let remove_ids: Vec<MessageId> = self.entries[target_idx + 1..]
             .iter()
-            .map(|e| e.message.id())
+            .map(|e| e.id())
             .collect();
 
         // 截断 entries

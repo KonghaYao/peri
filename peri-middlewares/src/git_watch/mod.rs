@@ -11,13 +11,17 @@ use std::{
 };
 
 use async_trait::async_trait;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
 use peri_agent::{
     agent::react::{ToolCall, ToolResult},
     error::AgentResult,
-    messages::BaseMessage,
     middleware::{r#trait::Middleware, state::MiddlewareState},
     session::{MessageKind, MessageSource, QueuedMessage},
 };
+use serde_json::json;
 use snapshot::{
     info_message_if_changed, parse_sample_stdout, GitSnapshot, SampleOutcome,
     GIT_WATCH_SAMPLE_TIMEOUT, GIT_WATCH_THROTTLE,
@@ -164,10 +168,28 @@ impl GitWatchMiddleware {
                     };
 
                     if let Some(text) = notify {
-                        queue.push(QueuedMessage::new(
+                        let reminder = TrustedSystemReminderFactory::for_producer()
+                            .construct(SystemReminder {
+                                version: SYSTEM_REMINDER_VERSION,
+                                category: ReminderCategory::Diagnostic,
+                                source: ReminderSource("git_watch".into()),
+                                kind: "repository_ref_changed".into(),
+                                severity: ReminderSeverity::Info,
+                                delivery: ReminderDelivery::Configurable,
+                                audiences: ReminderAudiences(vec![
+                                    ReminderAudience::Model,
+                                    ReminderAudience::Tui,
+                                    ReminderAudience::Diagnostics,
+                                ]),
+                                body: text,
+                                summary: Some("Git branch 或 HEAD 已变化".into()),
+                                metadata: json!({}),
+                            })
+                            .expect("git watch reminder mapping must be valid");
+                        queue.push(QueuedMessage::system_reminder(
                             MessageKind::Info,
                             MessageSource::SystemInjected,
-                            BaseMessage::human(text),
+                            reminder,
                         ));
                     }
 

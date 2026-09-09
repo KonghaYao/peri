@@ -6,11 +6,17 @@ use std::sync::{
 use async_trait::async_trait;
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::mcp_skills::{HandleToken, McpSkillRegistry};
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
 use peri_agent::{
     agent::AgentCancellationToken,
     middleware::{r#trait::Middleware, state::MiddlewareState},
+    session::{MessageKind, MessageSource as QueueMessageSource, QueuedMessage},
     tools::BaseTool,
 };
+use serde_json::json;
 
 use super::{
     client::{ClientStatus, McpClientPool},
@@ -301,7 +307,7 @@ impl McpMiddleware {
         ))
     }
 
-    /// 状态变化文本注入模型上下文（Info 消息，`<system-reminder>` 包裹）。
+    /// 状态变化以 canonical Info reminder 注入模型上下文。
     ///
     /// 首条推送附 tool search 提示（每个会话恰好一次），后续只推送变化行。
     fn push_status_changes(&self, state: &mut dyn MiddlewareState) {
@@ -319,10 +325,32 @@ impl McpMiddleware {
         }
         texts.extend(changes);
         for text in texts {
-            queue.push(peri_agent::session::QueuedMessage::new(
-                peri_agent::session::MessageKind::Info,
-                peri_agent::session::MessageSource::SystemInjected,
-                peri_agent::messages::BaseMessage::human(text),
+            let reminder = TrustedSystemReminderFactory::for_producer()
+                .construct(SystemReminder {
+                    version: SYSTEM_REMINDER_VERSION,
+                    category: ReminderCategory::Lifecycle,
+                    source: ReminderSource("mcp".into()),
+                    kind: "connection_status_changed".into(),
+                    severity: if text.contains("failed") {
+                        ReminderSeverity::Warning
+                    } else {
+                        ReminderSeverity::Info
+                    },
+                    delivery: ReminderDelivery::Configurable,
+                    audiences: ReminderAudiences(vec![
+                        ReminderAudience::Model,
+                        ReminderAudience::Tui,
+                        ReminderAudience::Diagnostics,
+                    ]),
+                    summary: Some(text.clone()),
+                    body: text,
+                    metadata: json!({}),
+                })
+                .expect("MCP status reminder mapping must be valid");
+            queue.push(QueuedMessage::system_reminder(
+                MessageKind::Info,
+                QueueMessageSource::SystemInjected,
+                reminder,
             ));
         }
     }
@@ -360,9 +388,39 @@ impl Middleware for McpMiddleware {
     /// 事件"的场景）。由 executor 在首 turn 组装前调用。
     async fn first_turn_reminder(
         &self,
-        _state: &mut dyn MiddlewareState,
+        state: &mut dyn MiddlewareState,
     ) -> peri_agent::error::AgentResult<Option<String>> {
-        Ok(self.overview_text())
+        let Some(body) = self.overview_text() else {
+            return Ok(None);
+        };
+        let summary = body.lines().next().map(str::to_string);
+        let reminder = TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Capability,
+                source: ReminderSource("mcp".into()),
+                kind: "connection_summary".into(),
+                severity: ReminderSeverity::Info,
+                delivery: ReminderDelivery::Configurable,
+                audiences: ReminderAudiences(vec![
+                    ReminderAudience::Model,
+                    ReminderAudience::Tui,
+                    ReminderAudience::Diagnostics,
+                ]),
+                body,
+                summary,
+                metadata: json!({}),
+            })
+            .map_err(|error| peri_agent::error::AgentError::MiddlewareError {
+                middleware: self.name().to_string(),
+                reason: error.to_string(),
+            })?;
+        state.enqueue_v2_message(QueuedMessage::system_reminder(
+            MessageKind::Info,
+            QueueMessageSource::SystemInjected,
+            reminder,
+        ));
+        Ok(None)
     }
 
     /// 每轮投映 pool 已连接 server → 触发 MCP skill 发现（决策 B：before_agent

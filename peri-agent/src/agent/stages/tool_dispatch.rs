@@ -875,12 +875,25 @@ fn handle_consecutive_failures(ctx: &StageContext, results: &[(ToolCall, ToolRes
                     "Warning: Tool '{}' has failed {} consecutive times. Consider a different approach.",
                     result.tool_name, current
                 );
-                let content = format!("<system-reminder>\n{}\n</system-reminder>", warning);
+                let reminder = crate::session::producer_reminders::trusted_reminder(
+                    peri_acp_types::system_reminder::ReminderCategory::Guidance,
+                    "tool_runtime",
+                    "consecutive_failures",
+                    peri_acp_types::system_reminder::ReminderSeverity::Warning,
+                    peri_acp_types::system_reminder::ReminderDelivery::Required,
+                    warning,
+                    Some(format!("Tool '{}' repeatedly failed", result.tool_name)),
+                    serde_json::json!({
+                        "tool_name": result.tool_name,
+                        "failure_count": current,
+                    }),
+                );
                 ctx.session
                     .queue
-                    .push(crate::session::queue::QueuedMessage::info(
+                    .push(crate::session::queue::QueuedMessage::system_reminder(
+                        crate::session::queue::MessageKind::Info,
                         crate::session::queue::MessageSource::ToolFailureWarning,
-                        BaseMessage::human(crate::messages::MessageContent::text(content)),
+                        reminder,
                     ));
             }
         } else {

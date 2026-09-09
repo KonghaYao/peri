@@ -307,7 +307,9 @@ pub struct TurnInput {
     pub continuation: bool,
     /// 会话级 frozen 数据（system prompt 稳定性锚点）。
     pub frozen: Option<FrozenSessionData>,
-    /// 现有历史消息（执行前）。
+    /// Canonical persisted history for transcript restoration.
+    pub history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
+    /// Legacy message projection for compatibility-only consumers.
     pub history: Vec<BaseMessage>,
     /// 上一轮 recall 注入项。
     pub incoming_recalls: Vec<String>,

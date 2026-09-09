@@ -3894,6 +3894,7 @@ dependencies = [
  "peri-controller",
  "peri-middlewares",
  "peri-model",
+ "peri-resources",
  "peri-workflow",
  "serde",
  "serde_json",
@@ -3904,6 +3905,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]

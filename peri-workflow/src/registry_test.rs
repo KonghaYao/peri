@@ -148,12 +148,8 @@ fn test_notification_includes_error_when_failed() {
         "无 artifact 时不得声称 state.json 已保存，实际：{notification}"
     );
     assert!(
-        notification.starts_with("<system-reminder>"),
-        "通知应以 <system-reminder> 开头，实际：{notification}"
-    );
-    assert!(
-        notification.ends_with("</system-reminder>"),
-        "通知应以 </system-reminder> 结尾"
+        !notification.contains("<system-reminder") && !notification.contains("</system-reminder>"),
+        "通知正文不应自行编码 system-reminder envelope，实际：{notification}"
     );
 }
 
@@ -184,10 +180,8 @@ fn test_notification_redacts_and_limits_untrusted_error() {
     let notification = result.to_notification();
     assert!(!notification.contains(secret));
     assert!(!notification.contains("https://example.invalid/run?api_key="));
-    assert!(
-        !notification[..notification.len() - "</system-reminder>".len()]
-            .contains("</system-reminder>")
-    );
+    assert!(!notification.contains("</system-reminder>"));
+    assert!(!notification.contains("<system-reminder"));
     assert!(notification.contains("[redacted]"));
     assert!(notification.contains("&lt;/system-reminder&gt;"));
     assert!(notification.contains('…'));

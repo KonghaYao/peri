@@ -54,6 +54,9 @@ pub struct PeriCaps {
     /// 客户端未声明时三个非标准 RPC 都必须 fail closed。
     #[serde(default)]
     pub rewind: bool,
+    /// 控制版本化 `system-reminder` structured event；默认 false 以兼容旧客户端。
+    #[serde(default)]
+    pub system_reminder: bool,
     /// `peri.uiCommands`：TUI 上送的 ui 域命令明细（空 = 不广播 ui 条目）。
     /// 门控语义反转：TUI 声明明细 → ACP 注册为 `ui:*` 条目，而非 ACP 附加
     /// 硬编码列表；旧客户端 bool `true` 由 [`PeriCaps::from_client_meta`]
@@ -81,6 +84,7 @@ impl PeriCaps {
             prediction: meta_bool(meta, "peri.prediction"),
             plan_entry_active_form: meta_bool(meta, "peri.planEntryActiveForm"),
             rewind: meta_bool(meta, "peri.rewind"),
+            system_reminder: meta_bool(meta, "peri.systemReminder"),
             ui_commands: Self::meta_ui_commands(meta),
         }
     }
@@ -136,6 +140,10 @@ impl PeriCaps {
         );
         m.insert("peri.rewind".into(), Value::Bool(self.rewind));
         m.insert(
+            "peri.systemReminder".into(),
+            Value::Bool(self.system_reminder),
+        );
+        m.insert(
             "peri.uiCommands".into(),
             serde_json::to_value(&self.ui_commands).expect("Vec<UiCommandSpec> 序列化不应失败"),
         );
@@ -157,6 +165,7 @@ impl PeriCaps {
             prediction: true,
             plan_entry_active_form: true,
             rewind: true,
+            system_reminder: true,
             ui_commands: default_ui_commands(),
         }
     }

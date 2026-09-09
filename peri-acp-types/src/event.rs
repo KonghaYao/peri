@@ -18,6 +18,16 @@ pub trait EventSink: Send + Sync {
     /// Push a single executor event. Called from the background pump task.
     async fn push_event(&self, session_id: &str, event: &ExecutorEvent, context_window: u32);
 
+    /// Push a canonical System Reminder. Implementations capability-gate the rich DTO and
+    /// must never serialize trusted provenance.
+    async fn push_system_reminder(
+        &self,
+        _session_id: &str,
+        _reminder: &crate::system_reminder::SystemReminder,
+        _replay: bool,
+    ) {
+    }
+
     /// Signal that the agent execution stream has ended (no more events).
     ///
     /// `request_id` 为可选的本轮 prompt requestId（TUI 提交时生成、经
@@ -310,6 +320,8 @@ pub enum MiddlewareHook {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExecutorEvent {
+    /// Canonical System Reminder display payload; trusted provenance is never serialized.
+    SystemReminder(crate::system_reminder::SystemReminder),
     /// 系统级通知文本（MCP 上下线、连接状态变化等），经 peri/agent_event
     /// 通道送达 TUI 显示为 system-notification 通知。
     ///

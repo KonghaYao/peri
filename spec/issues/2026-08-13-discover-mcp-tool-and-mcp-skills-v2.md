@@ -4,7 +4,7 @@
 **优先级**：中
 **类型**：功能
 **创建日期**：2026-08-13
-**来源**：2026-08-13 需求访谈（/interview 定案）+ `spec/issues/2026-08-13-mcp-skills-from-resources.md`（superseded）
+**来源**：2026-08-13 需求访谈（/interview 定案）
 **最后核查**：2026-08-13
 
 ## 任务定义
@@ -172,7 +172,7 @@ initialize 成功（列表已缓存）→ 异步任务：
 - **search 结果体积**：工具类带完整 schema 可能让返回很大。缓解：`max_results` 上限（默认 5、上限 20）+ 结果截断策略复用既有输出截断。
 - **commands 列表膨胀**：每个 MCP skill 一条，恶意/低质 server 可注入大量条目。缓解：命名带 server 前缀可识别；后续可按 server 折叠。
 - **内容新鲜度**：注册时读入缓存的 SKILL.md 不随 server 侧变化**主动**刷新；热更新闭环**已落地**（2026-08-15 第二轮 review）——读取面 digest 校验失败/未列出时经 `skills/get` 刷新单条目并回写注册表（digest 失败触发，frontmatter 比对失败不触发；handle 一致性检查防重连竞态）；重连重扫仍为兜底。
-- **旧 issue 演进**：本 issue 取代 `2026-08-13-mcp-skills-from-resources.md`（superseded），保留其 SEP-2640 阶段二路线与 resource 前缀方案事实基础。
+- **方案演进**：保留 SEP-2640 阶段二路线与 resource 前缀方案事实基础；被取代的过程记录由 Git 保留。
 
 ## 非目标
 
@@ -195,7 +195,6 @@ initialize 成功（列表已缓存）→ 异步任务：
 - `peri-middlewares/src/skills/tools.rs` — `SkillTool` Mcp 来源加载分支、`DiscoverSkillsTool` source 输出。
 - `peri-acp/src/host/stdio/commands.rs` — `availableCommands` 追加 mcp 条目 + `meta.mcpSkillNames`。
 - `peri-tui/src/kit/slash_completion.rs`、`input_area.rs`、`acp_notifier.rs`、`atoms.rs` — `SlashActionKind::McpSkill`、颜色映射、atom 与归类逻辑。
-- `spec/issues/2026-08-13-mcp-skills-from-resources.md` — superseded。
 
 ## 状态变更记录
 

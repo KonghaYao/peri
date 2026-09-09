@@ -1,5 +1,31 @@
 use super::*;
 
+#[test]
+#[serial]
+fn test_replay_events_defer_publication_until_scheduler_boundary() {
+    let mut state = make_fold_test_state();
+    state.phase = SessionPhase::ReplayingHistory;
+
+    for text in ["history one", "history two"] {
+        let intent = dispatch_for_bridge(
+            &mut state,
+            &AcpEventData::CommittedAssistantText {
+                text: text.into(),
+                reasoning: None,
+            },
+        );
+        assert_eq!(intent, PublicationIntent::Deferred);
+    }
+
+    assert_eq!(state.committed.len(), 2);
+    assert_eq!(state.generation, 0, "逐条 replay 不应完整发布 VIEW_MODELS");
+
+    let intent = dispatch_for_bridge(&mut state, &AcpEventData::SessionReplayDone);
+    assert_eq!(intent, PublicationIntent::Immediate);
+    assert_eq!(state.generation, 1, "completion 边界必须发布完整历史");
+    assert_eq!(VIEW_MODELS.state().read().items.len(), 2);
+}
+
 /// push_view_models 以 BridgeState 为准，不再 fallback 到 atom 旧值。
 #[test]
 #[serial]

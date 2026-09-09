@@ -227,8 +227,8 @@ pub(crate) fn estimate_projection_chars(
         let Some(message) = transcript
             .entries()
             .iter()
-            .find(|entry| entry.message.id() == action.message_id)
-            .map(|entry| &entry.message)
+            .find(|entry| entry.id() == action.message_id)
+            .and_then(|entry| entry.as_message())
         else {
             continue;
         };
@@ -299,8 +299,8 @@ pub fn render_llm_view(
     plan: &MicroCompactPlan,
     caps: &ProviderCapabilities,
 ) -> AgentResult<Vec<BaseMessage>> {
-    // 1. 收集可见消息（从 transcript 取原始消息）
-    let visible = transcript.visible_messages();
+    // 1. 使用与 normal Reason 相同的 canonical projection，确保 reminder 恰好一次且非空。
+    let visible = transcript.visible_model_messages()?;
 
     // 2. 按 message_id 索引 plan.actions
     let mut actions_by_id: HashMap<MessageId, Vec<&ProjectionActionEntry>> = HashMap::new();

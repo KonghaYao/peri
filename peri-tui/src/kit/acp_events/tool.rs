@@ -188,7 +188,7 @@ pub(super) fn handle_replay_tool_started(
     let mut card = card;
     card.recompute_hash();
     state.committed.push_back(TuiRenderUnit::TuiToolCard(card));
-    super::render::push_view_models(state);
+    // Replay publication 由 bridge scheduler 合帧；避免每条历史工具事件完整发布。
     super::render::push_acp_state(state);
 }
 
@@ -201,7 +201,7 @@ pub(super) fn handle_replay_tool_ended(
     if update_committed_tool_card(state, tool_id, output_summary, is_error) {
         state.complete_todo_if_current(tool_id, is_error);
     }
-    super::render::push_view_models(state);
+    // Replay publication 由 bridge scheduler 合帧；completion 更新仍在固定 deadline 内可见。
     super::render::push_acp_state(state);
 }
 

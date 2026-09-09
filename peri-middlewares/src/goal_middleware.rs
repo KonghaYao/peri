@@ -3,20 +3,23 @@
 //! goal active 时每轮注入提示 + 设 block_continue，executor 自动续跑。
 //! agent 必须调 goal(complete) 或 goal(block) 才能终止循环。
 //!
-//! 注入路径：通过 v2 MessageQueue push Defer kind（Receive 保留 → End 消费唤醒续跑）。
-//! 绝不破坏 frozen_system_prompt。使用 <system-reminder> 标签包裹，
-//! 与 compact 摘要检测、14_system_reminder prompt 协同。
+//! 注入路径：通过 v2 MessageQueue push canonical Defer reminder（Receive 保留 → End 消费唤醒续跑）。
+//! 结构化 reminder 在模型投影边界编码为 Human role，不破坏 frozen_system_prompt。
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
 use peri_agent::{
-    error::AgentResult,
-    messages::{BaseMessage, MessageContent},
+    error::{AgentError, AgentResult},
     middleware::{r#trait::Middleware, state::MiddlewareState},
     session::{MessageKind, MessageSource, QueuedMessage},
 };
+use serde_json::json;
 
 use crate::goal::GoalTool;
 
@@ -107,15 +110,30 @@ impl Middleware for GoalMiddleware {
         }
         let objective = snap.objective.as_deref().unwrap_or("(unknown)");
         let template = Self::render_steering(objective, round);
-        // [TRAP] 必须用 Human + <system-reminder> 注入，禁止 BaseMessage::system。
-        // System 消息会被 invoke hoist 到 system prompt 顶部，污染 frozen_system_prompt。
-        // （与 hooks/middleware.rs stop_hook_feedback、compact_v2.rs::re_inject_v2 注入路径一致）
-        // 走 v2 MessageQueue Defer kind → Receive 阶段 drain_all 消费。
-        let reminder = format!("<system-reminder>\n{}\n</system-reminder>", template);
-        state.enqueue_v2_message(QueuedMessage::new(
+        let reminder = TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Guidance,
+                source: ReminderSource("goal".into()),
+                kind: "steering".into(),
+                severity: ReminderSeverity::Warning,
+                delivery: ReminderDelivery::Required,
+                audiences: ReminderAudiences(vec![
+                    ReminderAudience::Model,
+                    ReminderAudience::Automation,
+                ]),
+                body: template,
+                summary: Some(format!("Goal 仍未完成（第 {round} 轮提醒）")),
+                metadata: json!({ "round": round }),
+            })
+            .map_err(|error| AgentError::MiddlewareError {
+                middleware: self.name().to_string(),
+                reason: error.to_string(),
+            })?;
+        state.enqueue_v2_message(QueuedMessage::system_reminder(
             MessageKind::Defer,
             MessageSource::GoalSteering,
-            BaseMessage::human(MessageContent::text(reminder)),
+            reminder,
         ));
 
         tracing::debug!(

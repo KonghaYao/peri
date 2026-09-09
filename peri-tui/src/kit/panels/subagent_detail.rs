@@ -105,6 +105,7 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     }
 
+    let content_height = scroll_content_height(lines.len());
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
     crate::kit::panel_scroll::register_panel_scroll(PanelKind::SubAgentDetail, area, sv);
@@ -116,9 +117,19 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {
-            Text(text: content)
+            View(
+                width: Constraint::Fill(1),
+                height: Constraint::Length(content_height),
+            ) {
+                Text(text: content)
+            }
         }
     })
+}
+
+/// ScrollView 需要子节点声明完整内容高度，才能计算 overflow 与滚动条。
+fn scroll_content_height(line_count: usize) -> u16 {
+    line_count.clamp(1, u16::MAX as usize) as u16
 }
 
 /// 从 VIEW_MODELS 快照扫描 `TuiSubAgentGroup`，按 agent_id 匹配选中项。

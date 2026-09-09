@@ -132,6 +132,11 @@ fn make_intercept_request<'a>(
     InterceptRequest {
         content,
         history,
+        history_payloads: history
+            .iter()
+            .cloned()
+            .map(peri_acp_types::store::PersistedPayload::Message)
+            .collect(),
         cwd: "/tmp",
         session_id,
         cancel,

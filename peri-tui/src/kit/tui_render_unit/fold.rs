@@ -35,7 +35,7 @@ pub enum FoldTarget {
 /// 折叠覆盖键——用户手动操作过的 entry 身份（spec §7「用户手动改变 fold state
 /// 后，本 turn 内不再被自动策略覆盖」）。按 ACP 身份字段键控：
 /// `Reasoning(message_id)` / `Tool(tool_id)` / `SubAgent(agent_id)` /
-/// `Interaction(request_id)`。
+/// `Interaction(request_id)` / `SystemReminder(reminder_id)`。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FoldKey {
     Reasoning(String),
@@ -46,6 +46,8 @@ pub enum FoldKey {
     /// Interaction block 按事件携带的本地 request_id 键控；测试构造为 None 时
     /// `fold_key_of` 返回 None——与 reasoning 的 message_id 先例一致）。
     Interaction(String),
+    /// System reminder 使用 TUI session 内分配的稳定身份键控。
+    SystemReminder(u64),
 }
 
 /// [G2] spec §7 折叠表——每个 entry 类型 × 状态的默认折叠目标。

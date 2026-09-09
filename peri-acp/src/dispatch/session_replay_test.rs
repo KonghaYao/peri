@@ -7,6 +7,11 @@ use agent_client_protocol_schema::v1::{
     ToolCallUpdateFields,
 };
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
 use peri_acp_types::PeriCaps;
 
 use super::*;
@@ -36,6 +41,42 @@ async fn collect_replay(history: Vec<BaseMessage>) -> Vec<SessionUpdate> {
         .await
         .expect("replay 发送失败");
     sender.updates.into_inner().unwrap()
+}
+
+#[tokio::test]
+async fn persisted_reminder_is_not_replayed_as_user_content() {
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Lifecycle,
+            source: ReminderSource("replay_test".into()),
+            kind: "complete".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Tui]),
+            body: "system only".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let history = vec![
+        PersistedPayload::Message(BaseMessage::human("user")),
+        PersistedPayload::SystemReminder {
+            id: peri_acp_types::messages::MessageId::new(),
+            reminder,
+        },
+        PersistedPayload::Message(BaseMessage::ai("answer")),
+    ];
+    let sender = CollectSender {
+        updates: std::sync::Mutex::new(Vec::new()),
+    };
+    replay_persisted_session_history("s1", &history, &sender, &PeriCaps::default())
+        .await
+        .unwrap();
+    let updates = sender.updates.into_inner().unwrap();
+    assert_eq!(updates.len(), 2);
+    assert!(matches!(updates[0], SessionUpdate::UserMessageChunk(_)));
+    assert!(matches!(updates[1], SessionUpdate::AgentMessageChunk(_)));
 }
 
 /// 提取 `ToolCallUpdateFields.content` 中唯一 Text block 的文本。

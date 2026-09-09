@@ -194,19 +194,33 @@ pub fn summarize_input(name: &str, input: &serde_json::Value) -> String {
         "TodoWrite" => String::new(),
         // ── task_id 截断 12 ──
         "AgentResult" => truncate_text(&str_val("task_id"), 12),
-        // ── Agent/Task（别名 task）：prompt 任务预览（截断 400，spec §6.4
-        //    任务预览摘要），description 兜底；空则回退通用兜底 ──
+        // ── Agent/Task（别名 task）：显示调用模式或 subagent type，再以空格连接
+        //    prompt 任务预览（截断 400）；prompt 为空时回退 description ──
         "Agent" | "Task" => {
+            let resume_thread_id = str_val("resume_thread_id");
+            let subagent_type = str_val("subagent_type");
+            let label = if !resume_thread_id.is_empty() {
+                "resume".to_string()
+            } else if obj.get("fork").and_then(|v| v.as_bool()) == Some(true) {
+                "fork".to_string()
+            } else if !subagent_type.is_empty() {
+                truncate_text(&subagent_type, 64)
+            } else {
+                String::new()
+            };
+
             let prompt = str_val("prompt");
-            if !prompt.is_empty() {
+            let task = if !prompt.is_empty() {
                 truncate_text(&prompt, 400)
             } else {
-                let desc = str_val("description");
-                if desc.is_empty() {
-                    "(empty input)".to_string()
-                } else {
-                    truncate_text(&desc, 400)
-                }
+                truncate_text(&str_val("description"), 400)
+            };
+
+            match (label.is_empty(), task.is_empty()) {
+                (false, false) => format!("{} {}", label, task),
+                (false, true) => label,
+                (true, false) => task,
+                (true, true) => "(empty input)".to_string(),
             }
         }
         // ── file_path 不截断但精简 cwd 前缀 ──

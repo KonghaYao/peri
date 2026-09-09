@@ -23,8 +23,12 @@ pub use prompt::{extract_prompt_params, handle_prompt};
 pub use rewind::{rewind_execute, rewind_preview};
 pub use rewind_candidates::rewind_candidates;
 pub use session_fork::fork_session;
-pub use session_load::load_session_messages;
-pub use session_replay::{replay_session_history, ReplayError, ReplaySender};
+pub use session_load::load_session_payloads;
+pub use session_replay::{
+    replay_persisted_session_history, replay_session_history, ReplayError, ReplaySender,
+};
 
 #[cfg(test)]
 mod commands_test;
+#[cfg(test)]
+mod session_fork_test;

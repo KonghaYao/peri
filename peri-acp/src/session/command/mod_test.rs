@@ -298,12 +298,7 @@ async fn test_clear_command_does_not_call_push_done_itself() {
     );
 }
 
-// ── LoopPlaceholder 占位测试 ──────────────────────────────────────────────
-// Phase 5 Step 5.5：产品未裁决执行语义，按 plan 二选一默认保留占位语义——
-// 确定性执行（resolve 命中 → Done，杜绝静默 fall through）+ UI-only 反馈
-// 「loop 命令尚未实现」；不退役（与 Phase 3 预注册要求一致，投影条目不缺失）。
-
-/// /loop resolve 命中注册表条目（不再是投影幽灵条目，注册表含 handler）。
+/// /loop resolve 命中注册表条目。
 #[test]
 fn test_loop_resolve_hits_registry_entry() {
     let reg = CommandRegistry::new();
@@ -320,41 +315,33 @@ fn test_loop_resolve_hits_registry_entry() {
     // test_register_builtins_resolves_builtin_commands 中保持。
 }
 
-/// loop 占位执行返回 Done（确定性执行，杜绝 fall through）+ UI-only 反馈。
+/// loop 有参数时注入统一 agent turn；缺参数时返回用法错误。
 #[tokio::test]
-async fn test_loop_placeholder_executes_done_with_ui_only_feedback() {
-    // Arrange: 带历史消息，断言 history 原样返回（占位不改变会话）
+async fn test_loop_injects_prompt_and_rejects_empty_args() {
     let sink = Arc::new(MockEventSink::new());
-    let history = vec![BaseMessage::human("你好"), BaseMessage::ai("世界")];
-    let ctx = CommandContext::new(
-        "test-session".to_string(),
-        history.clone(),
-        "/tmp".to_string(),
-        sink.clone(),
-        tokio_util::sync::CancellationToken::new(),
-        peri_acp_types::command::DependencyBag::new(),
-    );
-
     let reg = CommandRegistry::new();
     register_builtins(&reg);
-    let resolved = reg.resolve("/loop").expect("/loop 应命中 core:loop");
 
-    // Act: 经注册表条目 handler 直接执行（与拦截层同源）
+    let mut ctx = make_command_context(sink.clone());
+    ctx.args = "检查状态".to_string();
+    let resolved = reg
+        .resolve("/loop 检查状态")
+        .expect("/loop 应命中 core:loop");
     let outcome = CommandHandler::execute(resolved.entry.handler.as_ref(), ctx).await;
+    assert!(matches!(outcome, CommandOutcome::Inject(text) if text.contains("检查状态")));
 
-    // Assert: 恒 Done + EndTurn + history 原样 + feedback(Info, UiOnly)
+    let resolved = reg.resolve("/loop").expect("/loop 应命中 core:loop");
+    let outcome = CommandHandler::execute(
+        resolved.entry.handler.as_ref(),
+        make_command_context(sink.clone()),
+    )
+    .await;
     let CommandOutcome::Done(result) = outcome else {
-        panic!("loop 占位恒 Done");
+        panic!("空 /loop 应返回用法错误");
     };
-    assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
-    // BaseMessage 无 PartialEq，按条数 + 文本断言 history 原样返回
-    assert_eq!(result.messages.len(), history.len(), "占位不改变会话");
-    assert_eq!(result.messages[0].content(), "你好");
-    assert_eq!(result.messages[1].content(), "世界");
-    let feedback = result.feedback.expect("loop 占位应携带反馈");
-    assert_eq!(feedback.level, FeedbackLevel::Info);
-    assert_eq!(feedback.message, "loop 命令尚未实现");
-    assert_eq!(feedback.channel, FeedbackChannel::UiOnly, "UiOnly 不进会话");
-    // 命令自身不发射事件（编排层 emit_command_feedback 统一发射）
+    let feedback = result.feedback.expect("空 /loop 应携带反馈");
+    assert_eq!(feedback.level, FeedbackLevel::Error);
+    assert!(feedback.message.contains("/loop <prompt>"));
+    assert_eq!(feedback.channel, FeedbackChannel::UiOnly);
     assert!(sink.events().is_empty());
 }

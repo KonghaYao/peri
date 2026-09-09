@@ -35,7 +35,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 - `BridgeState` 是 ACP 事件到 `VIEW_MODELS` 与 atoms 的状态边界。切换会话或重置时，必须过滤陈旧 session 事件并清理旧会话状态。
 - render body 不写 atom；render 内派生缓存使用既有无通知写入模式，副作用放在事件或 effect 边界。
 - `#[component]` 的 hooks 必须在所有条件分支、`match` 与提前返回前按稳定顺序调用。
-- 交互事件按焦点和优先级分发：消息区只处理滚轮，编辑区处理键盘，面板/弹窗的局部取消不得被全局 handler 截断。
+- 交互事件按 focus owner、语义命中区域、z-order 与 pointer capture 分发；弹窗/面板前景事件和遮罩必须先于背景处理，避免 click-through。
 - 用户可见文本使用 i18n；新增 key 同步更新 `locales/en/main.ftl` 和 `locales/zh-CN/main.ftl`。主题从 `peri-theme` atoms 获取，不硬编码颜色。
 - 文本编辑、截断与坐标按 Unicode 字符边界和终端显示宽度处理；不得用字节长度替代显示宽度。
 - TUI MCP panel 的 `ServiceRegistry` 持有唯一 non-Clone `McpTaskOwner`；初始化与 OAuth completed/restored 触发的 reconnect 必须经 pool 的 weak spawner 准入。teardown 顺序为 pool begin-close → owner abort/join → pool close，并检查 `McpPoolShutdownReport`；Incomplete 不得记录为已关闭（ARC-HOST-SHUTDOWN-001）。

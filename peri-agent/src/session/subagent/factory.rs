@@ -355,7 +355,7 @@ fn build_subagent_session_v2(
     cancel_token: CancellationToken,
     child_thread_id: String,
     thread_store: Option<Arc<dyn ThreadStore>>,
-    ancestor: Vec<BaseMessage>,
+    ancestor: Vec<peri_acp_types::store::PersistedPayload>,
     llm: Box<dyn ReactLLM + Send + Sync>,
     chain_assembler: Arc<dyn SubagentChainAssembler>,
     tools: Vec<Arc<dyn BaseTool>>,
@@ -389,7 +389,7 @@ fn build_subagent_session_v2(
         let transcript_arc = session.transcript();
         let mut transcript = transcript_arc.write();
         let old = std::mem::take(&mut *transcript);
-        let with_ancestor = old.with_ancestor(ancestor);
+        let with_ancestor = old.with_ancestor_payloads(ancestor);
         *transcript = match thread_store {
             Some(ref store) => {
                 with_ancestor.with_persistence(Arc::clone(store), child_thread_id.clone())
@@ -564,7 +564,7 @@ async fn resume_subagent_impl(
 
     // 1. 加载 transcript；末条含未配对 tool_calls 的 AI 则 pop（R2-MID-1：
     //    仅末条规则，幂等——磁盘旧消息不删除，每次 resume 重截）
-    let mut loaded = match thread_store.load_messages(&thread_id).await {
+    let mut loaded = match thread_store.load_payloads(&thread_id).await {
         Ok(msgs) => msgs,
         Err(e) => {
             // R-M1 回滚：重建失败 → status 回滚至原值（不置 active 卡死）
@@ -578,7 +578,11 @@ async fn resume_subagent_impl(
             .into());
         }
     };
-    if loaded.last().is_some_and(|m| m.has_tool_calls()) {
+    if loaded.last().is_some_and(|payload| {
+        payload
+            .as_message()
+            .is_some_and(BaseMessage::has_tool_calls)
+    }) {
         loaded.pop();
     }
 

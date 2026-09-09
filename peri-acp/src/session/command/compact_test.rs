@@ -941,8 +941,8 @@ async fn test_contract_compact_output_starts_with_human_summary() {
         "首条 Human 必须包含摘要 LLM 输出"
     );
     assert!(
-        first_text.contains("<system-reminder>"),
-        "首条 Human 必须包裹 <system-reminder> 标签以触发 TUI 折叠"
+        !first_text.contains("<system-reminder>"),
+        "compact summary 是 canonical context，不是运行期通知，不应伪装 reminder"
     );
 }
 

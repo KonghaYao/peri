@@ -2,8 +2,8 @@
 
 **状态**：Active（Slice 2-5 持续追加；各决策以代码事实为准）
 **创建日期**：2026-08-10
-**规格**：`docs/design/tui-chat-workbench.md`（§6/§7/§8/§10/§11/§15）
-**前置**：`spec/archive-issues/tui-general/2026-08-10-chat-redesign-slice1-data-gates.md`（Closed，5 项数据门）
+**规格**：`docs/design/tui-chat-workbench.md` 的“信息披露与布局”“工具身份与生命周期”“Inspector 与详情安全”“交互路由与审批安全”“焦点、滚动与连续性”“响应式与性能”
+**前置**：Slice 1 的 5 项数据门已关闭（历史实施记录由 Git 保留）
 **最后核查**：2026-08-11
 
 ## 最新情况（2026-08-11）
@@ -13,16 +13,16 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
 本文件累计记录跨切片定案（D 系列冲突消解 + 落地引用），供后续编码切片引用；
 已落地项标注代码位置，代码与文档冲突时以代码为准并回写本文件。
 
-## D1：§6.2「同一 streaming response 只能有一个 entry」= 按 message_id 段拆分（定案，零代码改动）
+## D1：Workbench“连续 transcript”要求 = 按 message_id 段拆分（定案，零代码改动）
 
-- **冲突**：§6.2 单 entry 表述 vs 现状按 message_id 拆多段（interleaving 刻意设计）。
+- **冲突**：Workbench 的单 entry 表述 vs 现状按 message_id 拆多段（interleaving 刻意设计）。
 - **定案**：保留按 message_id 段拆分；「entry」解释为「不按 chunk 新增 block」
   （现状已满足——`append_text`/`append_reasoning` 仅在 message_id 变化或
   tool/subagent 边界时 `flush_text_segment`，chunk 不产生新 block）。
 - **依据**：interleaving 是刻意设计；合并需重写 `sync_cache`（高险低值）。
 - **代码**：`acp_types.rs::flush_text_segment`（message_id 变化/边界 flush）。
 
-## 冻结机制定案：assistant 正文时长（§6.2 `12.4s`）镜像 reasoning 冻结
+## 冻结机制定案：assistant 正文时长镜像 reasoning 冻结
 
 - **模型**：`TuiAssistantBubble` 新增 `started_at: Option<Instant>`（仅 trailing
   流式段有值）与 `duration_ms: Option<u64>`（冻结值）；`CurrentTurn` 新增
@@ -40,7 +40,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
 - **代码**：`tui_render_unit.rs::TuiAssistantBubble`、`acp_types.rs::build_bubble_parts`、
   `acp_events/render.rs::apply_fold_pass`。
 
-## 空 reasoning 占位（§6.3）hash 契约
+## 空 reasoning 占位的 hash 契约
 
 - `build_bubble_parts`：`running == true && reasoning.is_empty()` → 产出空文本
   `TuiReasoningBlock`（fold=Preview、status=Running、started_at=推理起点）；
@@ -51,7 +51,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   由既有空行跳过逻辑处理；`is_trailing_answer`/todo 插位无需改
   （`reasoning.is_some()` 成立）。
 
-## 高度断点（§11）定案：Row1Only 高度 2
+## 高度断点定案：Row1Only 高度 2
 
 - `layout_plan(h)` 纯函数（`layout.rs`）：`h≥12` Full（状态栏 4 行）/ `8≤h<12`
   Row1Only（Row1 + NotifRow，2 行；隐藏 Row2 key hints 与缓冲行）+ 隐藏 session
@@ -70,8 +70,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
 
 ## D5：interaction 双轨（定案，已落地 Slice 4）
 
-- **冲突**：inline transcript block（§6.8 要求 permission/AskUserQuestion 入
-  transcript）vs 全量迁移（击穿 focus 仲裁与既有测试）。
+- **冲突**：Workbench 要求 permission/AskUserQuestion 进入 inline transcript block vs 全量迁移（击穿 focus 仲裁与既有测试）。
 - **定案**：**双轨**——inline transcript block（AskUser + HITL 都建）承担
   「可见 + 可聚焦 + 结果回写」；AskUser 面板 / HITL 弹窗保留为模态操作层。
   两条响应通道统一走 `HITL_RESPONSE_TX` / `ASK_USER_RESPONSE_TX`（消费者
@@ -83,7 +82,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
 
 ## D6：`[Always allow]` 为协议依赖项（定案，已落地 Slice 4）
 
-- **冲突**：§6.8 选项渲染 vs `HitlPending` 无 optionId 列表
+- **冲突**：Workbench 的审批选项语义 vs `HitlPending` 无 optionId 列表
   （event_data.rs:90-95，不得发明协议字段）。
 - **定案**：HITL 只渲染 `[Allow once] [Deny]` 两选项；`[Always allow]` 记入
   active spec 为协议依赖项——`HitlPending` 协议扩展后再议。
@@ -92,7 +91,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
 
 ## Slice 4 落地记录
 
-### 4a：模型 + 生产创建点 + 结果回写（§6.8，已落地）
+### 4a：模型 + 生产创建点 + 结果回写（已落地）
 
 - `TuiAskUserBlock` 扩展：`kind: InteractionKind`（AskUser/Permission）、
   `pending`、`verb`、`question`（人类摘要）、`options`、`result`、
@@ -120,7 +119,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   (request_id)` 同步进 `fold_key_of` / `apply_fold_override` / 折叠 pass
   （render.rs:349-376，覆盖表优先——用户 Space 手动折叠仍生效）。
 
-### 4b：选项焦点与提交（§6.8/§9/§11，已落地）
+### 4b：选项焦点与提交（已落地）
 
 - 键盘：entry 焦点落在 pending interaction block 时 Tab/←/→ 循环切换
   option（纯函数 `cycle_interaction_option`，首末回绕——saturating_sub
@@ -131,7 +130,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   （Tab/←/→ 仅 entry 焦点激活时归属消息区，非 interaction 焦点 Ignored
   放行输入区）。
 - 渲染 `render_ask_user_block_lines`（render.rs:1310）：pending 态
-  标题 + 问题摘要 + 选项行；Narrow（§11）垂直排列每行一个 `[label]`，
+  标题 + 问题摘要 + 选项行；Narrow 垂直排列每行一个 `[label]`，
   否则横向拼接（`[Allow once]  [Deny]`，列区间供点击热区）；
   `InteractionLayout`（option_rows/cols）随 slot 缓存重建；视口 post-pass
   对焦点 slot 的当前 option 行应用 selection bg + BOLD（mod.rs:1284-1337，
@@ -140,7 +139,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   scroll handler（:929）之前（同 keepgoing/md 复制/new output 模式）；
   键盘 handler 无冲突面（scroll 只消费 Ctrl+方向键）。
 
-### 4c：Follow 锚定（§8.1/§6.8，已落地）
+### 4c：Follow 锚定（已落地）
 
 - 新独立状态 `anchor_slot: Option<usize>`（mod.rs:533，不碰 `follow_bottom`
   二值）；render body 每帧从快照扫描 pending `TuiAskUserBlock` 的 slot
@@ -153,7 +152,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   anchor 分支（scroll.rs:896）：`anchor_scroll_target` 纯函数判定 block
   末行超出视口 → 视口对齐到 block 底部（浏览态与跟随态均生效——bg
   subagent 并发流式不把 interaction block 推出视口）；block 完成 →
-  anchor=None → 恢复原语义，不强制 follow（§15「不抢回 viewport」）。
+  anchor=None → 恢复原语义，不强制 follow（符合“不抢回 viewport”原则）。
 - 回归：anchor=None 时既有四路径（submit/reset/replay/增长）全绿；
   `SCROLL_PADDING`/`should_follow_after_user_scroll` 未改。
 
@@ -179,7 +178,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
 
 - **反转**：`dispatch_submit_request`（input_area.rs）AgentText 分支 `is_loading`
   时**只入队** `INPUT_BUFFER`（保留 32 条上限），不再 `send_local_user_bubble`
-  ——排队项不提前进 transcript，显示在 composer 上方队列（§10）。
+  ——排队项不提前进 transcript，显示在 composer 上方队列。
 - **drain（D4）**：`drain_input_buffer`（acp_events/render.rs）对每条排队文本
   先 `send_local_user_bubble(text)`（从 input_area.rs 提出为 pub(crate)）再
   `tx.send(AgentText)`——镜像非 loading 路径，气泡恰出现一次，不依赖服务端回显。
@@ -210,7 +209,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   gap=2 → 6）。鼠标点击定位 `text_x` 与光标上下视觉移动宽度同步该公式。
   40/60/120 对齐矩阵测试锁定（`test_prompt_prefix_aligns_with_grid_content_start`）。
 
-### Slice 3a：composer 标题/footer（§10，已落地）
+### Slice 3a：composer 标题/footer（已落地）
 
 - `build_composer_block` 的 title_top 仅保留右侧 session title；mode/model 已由状态栏
   持续显示，不在 composer 左上角重复。title_bottom 左侧 `@ N files`
@@ -240,7 +239,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   （`tui_render_unit.rs::TuiCollapsedGroup`）。
 - `group_successful_tools`（acp_events/render.rs）：run 结束位置起向后扫描
   **连续相邻** error `TuiToolCard` 计入 `failed_count`；error 不入组、不删除，
-  独立失败状态行保持可见。2026-09-04 起 §7 表改为 error→Collapsed，避免
+  独立失败状态行保持可见。2026-09-04 起默认折叠改为 error→Collapsed，避免
   ToolEnded 到达时自动展开正文造成 transcript 高度突变；错误详情仍可手动展开。
   2026-09-04 进一步将 Generic/Skill/Todo 收敛到 `ToolRenderPlan`：presentation
   只投影 label/summary/detail 候选，统一 resolve/render 路径消费 status/fold/prefix/duration 与
@@ -253,7 +252,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   `test_collapsed_group_line_with_failed_count` + `tui_render_unit_test`
   `test_collapsed_group_hash_includes_failed_count`。
 
-### 2a：`↓ New output` 指示器（§8.1，已落地）
+### 2a：`↓ New output` 指示器（已落地）
 
 - 判定纯函数 `scroll::new_output_indicator_active(follow, scroll_y, vis_height,
   content_bottom)`：浏览态（!follow_bottom）且视口未到**真实内容底**（core +
@@ -268,7 +267,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   （与 End 键同路径）。键盘 End 已有，不改。
 - 测试：`scroll_test.rs` 指示器矩阵（浏览/跟随/到底/边界/缓冲口径）。
 
-### 2c：subagent Enter 详情 pane（§6.7，已落地）
+### 2c：subagent Enter 详情 pane（已落地）
 
 - 新 atom `SELECTED_SUBAGENT_ID: AtomStatic<Option<String>>`（atoms.rs）。
 - `PanelKind::SubAgentDetail` 注册入 panel_registry（PANELS 表 +
@@ -281,7 +280,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   `vm_to_lines_cached(..., render_copy_button=false)`（可见性提升为 pub(crate)）；
   `register_panel_scroll` 可滚动；Esc 单层关闭（`close_active_panel` 弹栈）。
 - 焦点分派（mod.rs Enter 分支）：焦点在 `TuiSubAgentGroup` 上时 Enter **不切
-  折叠**（subagent 折叠恒 Collapsed 是 §7 表裁决，`fold_key_of`/
+  折叠**（subagent 默认折叠为设计裁决，`fold_key_of`/
   `apply_fold_override` 不动），改 `open_panel(SubAgentDetail)` + 写
   `SELECTED_SUBAGENT_ID`；Tool/Reasoning 的 Enter 语义不变。Space 仍切折叠。
 - 新 FTL 键：`panel-title-subagent-detail` / `panel-desc-subagent-detail` /
@@ -290,7 +289,7 @@ Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约
   `panel_registry_test.rs`（注册/互斥/弹栈）、`mod_test.rs`（subagent fold_key
   锚定）。
 
-### 2d：鼠标单击展开（§9.1，已落地）
+### 2d：鼠标单击展开（已落地）
 
 - **缺口**：消息区内 `Down(Left)` 被 scroll handler 记为选区锚点、无拖拽 `Up`
   什么都不做——单击无任何展开/详情入口。

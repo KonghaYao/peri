@@ -7,6 +7,37 @@ use crate::session::store::FrozenContext;
 use crate::session::{QueuedMessage, Session};
 use std::sync::Arc;
 
+#[test]
+fn canonical_reminder_has_no_synthetic_event_but_plain_defer_keeps_legacy_event() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("receive_test".into()),
+            kind: "done".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "canonical".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let canonical =
+        QueuedMessage::system_reminder(MessageKind::Defer, MessageSource::SystemInjected, reminder);
+    let plain = QueuedMessage::defer(
+        MessageSource::SubAgentComplete,
+        BaseMessage::human("legacy"),
+    );
+
+    assert_eq!(synthetic_defer_text(&canonical), None);
+    assert_eq!(synthetic_defer_text(&plain).as_deref(), Some("legacy"));
+}
+
 fn make_context() -> StageContext {
     let cwd: Arc<str> = Arc::from("/tmp/test");
     let frozen = FrozenContext::builder().build();
@@ -59,12 +90,8 @@ async fn test_receive_consumes_info_wrapped_in_reminder() {
 
     let transcript = ctx.session.transcript.read();
     assert_eq!(transcript.len(), 1);
-    let content = transcript.entries()[0].message.content();
-    assert!(
-        content.contains("<system-reminder>"),
-        "Info 应被 reminder 包裹"
-    );
-    assert!(content.contains("system info"));
+    let content = transcript.entries()[0].message().content();
+    assert_eq!(content, "system info");
 }
 
 #[tokio::test]

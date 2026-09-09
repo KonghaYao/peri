@@ -403,8 +403,8 @@ async fn test_run_compact_preserves_ancestor_flags_after_micro() {
     }
 
     let entries = t.entries();
-    let ancestor_id_0 = entries[0].message.id();
-    let ancestor_id_1 = entries[1].message.id();
+    let ancestor_id_0 = entries[0].message().id();
+    let ancestor_id_1 = entries[1].message().id();
     // 确认 compact 前 ancestor 无任何标记
     assert!(!t.flags(ancestor_id_0).truncated);
     assert!(!t.flags(ancestor_id_0).excluded);
@@ -463,7 +463,7 @@ async fn test_run_compact_preserves_ancestor_flags_after_micro() {
     let any_own_truncated = entries_after
         .iter()
         .skip(2) // 跳过 2 条 ancestor
-        .any(|e| t.flags(e.message.id()).truncated);
+        .any(|e| t.flags(e.id()).truncated);
     assert!(
         any_own_truncated,
         "compact 后至少一条自有消息应有 truncated 标记"

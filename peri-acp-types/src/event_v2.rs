@@ -202,6 +202,12 @@ impl RenderEvent {
 /// biased select! 无法保证跨通道顺序。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StateEvent {
+    /// Low-frequency protocol display event emitted at the queue→transcript boundary.
+    ProtocolEvent {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        event: ExecutorEvent,
+    },
     /// 状态快照（轻量级元数据，用于状态同步与 UI 刷新）
     ///
     /// 与 v1 `ExecutorEvent::StateSnapshot(Vec<BaseMessage>)` 不同，v2 快照**不携带**
@@ -264,7 +270,8 @@ impl StateEvent {
     /// 提取 turn_id
     pub fn turn_id(&self) -> TurnId {
         match self {
-            Self::StateSnapshot { turn_id, .. }
+            Self::ProtocolEvent { turn_id, .. }
+            | Self::StateSnapshot { turn_id, .. }
             | Self::GoalSnapshot { turn_id, .. }
             | Self::SyntheticUserMessage { turn_id, .. }
             | Self::TurnSuspended { turn_id, .. } => *turn_id,
@@ -274,7 +281,8 @@ impl StateEvent {
     /// 提取 agent_id
     pub fn agent_id(&self) -> AgentId {
         match self {
-            Self::StateSnapshot { agent_id, .. }
+            Self::ProtocolEvent { agent_id, .. }
+            | Self::StateSnapshot { agent_id, .. }
             | Self::GoalSnapshot { agent_id, .. }
             | Self::SyntheticUserMessage { agent_id, .. }
             | Self::TurnSuspended { agent_id, .. } => *agent_id,
@@ -754,6 +762,7 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
 /// 将 v2 `StateEvent` 转换为 `ExecutorEvent`（穷尽匹配）。
 pub fn state_event_to_executor(event: StateEvent) -> Option<ExecutorEvent> {
     match event {
+        StateEvent::ProtocolEvent { event, .. } => Some(event),
         StateEvent::StateSnapshot {
             message_count,
             total_tokens,

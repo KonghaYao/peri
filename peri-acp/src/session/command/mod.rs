@@ -67,28 +67,31 @@ pub fn handler_entry<C: CommandHandler + Default + 'static>(
     }
 }
 
-/// `core:loop` 占位 handler（Phase 5「loop 命令迁移」替换为正式实现）：
-/// Done + UI-only 反馈，保证投影条目不缺失、路由确定性执行。
+/// `core:loop` 将参数注入当前 agent 管线，由统一 turn/continuation 执行机制处理，
+/// 不再以 `Done` 吞掉命令。
 #[derive(Default)]
-struct LoopPlaceholder;
+struct LoopCommand;
 
-impl LoopPlaceholder {
-    /// 描述（注册条目挂载；与现状投影硬编码一致，dispatch/commands.rs）。
+impl LoopCommand {
     const DESCRIPTION: &'static str = "Control agent iteration loop";
 }
 
 #[async_trait]
-impl CommandHandler for LoopPlaceholder {
+impl CommandHandler for LoopCommand {
     async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
-        CommandOutcome::Done(CommandResult {
-            messages: ctx.history,
-            stop_reason: PromptStopReason::EndTurn,
-            feedback: Some(CommandFeedback {
-                level: FeedbackLevel::Info,
-                message: "loop 命令尚未实现".to_string(),
-                channel: FeedbackChannel::UiOnly,
-            }),
-        })
+        let prompt = ctx.args.trim();
+        if prompt.is_empty() {
+            return CommandOutcome::Done(CommandResult {
+                messages: ctx.history,
+                stop_reason: PromptStopReason::EndTurn,
+                feedback: Some(CommandFeedback {
+                    level: FeedbackLevel::Error,
+                    message: "用法: /loop <prompt>".to_string(),
+                    channel: FeedbackChannel::UiOnly,
+                }),
+            });
+        }
+        CommandOutcome::Inject(format!("<goal-message>Loop: {prompt}</goal-message>"))
     }
 }
 
@@ -147,15 +150,11 @@ pub fn register_builtins(reg: &CommandRegistry) {
         Some(rewind::RewindCommand::args_schema()),
     ))
     .expect("core:rewind 注册失败：词法合法且无冲突，失败即编程错误");
-    // loop：无现执行体（现状仅投影幽灵条目，dispatch/commands.rs 硬编码），
-    // 预注册占位 handler（LoopPlaceholder：Done + UI-only 反馈「loop 命令
-    // 尚未实现」），保证 Phase 3 投影条目不缺失；Phase 5「loop 命令迁移」
-    // 小节替换为正式实现（P1-7）。
-    reg.register(handler_entry::<LoopPlaceholder>(
+    reg.register(handler_entry::<LoopCommand>(
         "core:loop",
         &[],
-        LoopPlaceholder::DESCRIPTION,
-        None,
+        LoopCommand::DESCRIPTION,
+        Some(ArgsSchema::default()),
     ))
     .expect("core:loop 注册失败：词法合法且无冲突，失败即编程错误");
 }

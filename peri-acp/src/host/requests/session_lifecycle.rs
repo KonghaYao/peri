@@ -237,6 +237,7 @@ pub(crate) async fn handle_new(
             thread_id: thread_id.clone(),
             cwd: cwd.clone(),
             history: Vec::new(),
+            history_payloads: Vec::new(),
             cancel_token: None,
             frozen: Some(frozen_data),
             recall_items: Vec::new(),
@@ -307,7 +308,13 @@ pub(crate) async fn handle_load(
     let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
     // Load history from ThreadStore via Controller
-    let history = dispatch::load_session_messages(cfg.controller.as_ref(), req_session_id).await;
+    let history_payloads =
+        dispatch::load_session_payloads(cfg.controller.as_ref(), req_session_id).await?;
+    let history = history_payloads
+        .iter()
+        .filter_map(peri_acp_types::store::PersistedPayload::as_message)
+        .cloned()
+        .collect::<Vec<_>>();
 
     // ── 先恢复 frozen，再产生任何 SessionManager side effect ──
     let frozen_data = if let Some(frozen) = sessions
@@ -328,6 +335,7 @@ pub(crate) async fn handle_load(
     if let Some(state) = sessions.get_mut(req_session_id) {
         if state.history.is_empty() {
             state.history = history;
+            state.history_payloads = history_payloads.clone();
         }
         if state.frozen.is_none() {
             state.frozen = Some(frozen_data.clone());
@@ -346,6 +354,7 @@ pub(crate) async fn handle_load(
                 thread_id: req_session_id.to_string(),
                 cwd: cwd.to_string(),
                 history,
+                history_payloads: history_payloads.clone(),
                 cancel_token: None,
                 frozen: Some(frozen_data),
                 recall_items: Vec::new(),
@@ -364,16 +373,16 @@ pub(crate) async fn handle_load(
     }
 
     // ── ACP v1 spec: replay history via session/update BEFORE responding ──
-    let history_for_replay: Vec<_> = sessions
-        .get(req_session_id)
-        .map(|s| s.history.clone())
-        .unwrap_or_default();
     let replay_sender = TuiReplaySender {
         transport: transport.as_ref(),
     };
-    if let Err(e) =
-        dispatch::replay_session_history(req_session_id, &history_for_replay, &replay_sender, &caps)
-            .await
+    if let Err(e) = dispatch::replay_persisted_session_history(
+        req_session_id,
+        &history_payloads,
+        &replay_sender,
+        &caps,
+    )
+    .await
     {
         tracing::warn!(session_id = %req_session_id, error = %e, "session/load: history replay failed, continuing");
     }
@@ -525,7 +534,12 @@ pub(crate) async fn handle_resume(
     let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
     // Load history from ThreadStore via Controller (deferred load)
-    let history = dispatch::load_session_messages(cfg.controller.as_ref(), req_session_id).await;
+    let history_payloads =
+        dispatch::load_session_payloads(cfg.controller.as_ref(), req_session_id).await?;
+    let history = history_payloads
+        .iter()
+        .filter_map(|payload| payload.as_message().cloned())
+        .collect();
 
     // ── 先恢复 frozen，再产生任何 SessionManager side effect ──
     let frozen_data = if let Some(frozen) = sessions
@@ -550,6 +564,7 @@ pub(crate) async fn handle_resume(
                 thread_id: req_session_id.to_string(),
                 cwd: cwd.to_string(),
                 history,
+                history_payloads: history_payloads.clone(),
                 cancel_token: None,
                 frozen: Some(frozen_data),
                 recall_items: Vec::new(),
@@ -615,9 +630,9 @@ pub(crate) async fn handle_fork(
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
     let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
-    let (source_history, source_frozen) = sessions
+    let (source_payloads, source_frozen) = sessions
         .get(source_id)
-        .map(|state| (state.history.clone(), state.frozen.clone()))
+        .map(|state| (state.history_payloads.clone(), state.frozen.clone()))
         .ok_or_else(|| AcpError::new(-32602, format!("source session not found: {source_id}")))?;
     let source_frozen = source_frozen.ok_or_else(|| {
         AcpError::new(
@@ -626,8 +641,8 @@ pub(crate) async fn handle_fork(
         )
     })?;
 
-    let (new_thread_id, copied_history) =
-        dispatch::fork_session(cfg.controller.as_ref(), source_id, &source_history, cwd)
+    let (new_thread_id, _copied_history) =
+        dispatch::fork_session(cfg.controller.as_ref(), source_id, &source_payloads, cwd)
             .await
             .map_err(|e| AcpError::new(-32603, format!("{e}")))?;
 
@@ -649,7 +664,11 @@ pub(crate) async fn handle_fork(
             session_id: new_session_id.clone(),
             thread_id: new_thread_id.clone(),
             cwd: cwd.to_string(),
-            history: copied_history,
+            history: source_payloads
+                .iter()
+                .filter_map(|payload| payload.as_message().cloned())
+                .collect(),
+            history_payloads: source_payloads,
             cancel_token: None,
             frozen: Some(frozen_data),
             recall_items: Vec::new(),
@@ -771,6 +790,36 @@ impl ReplaySender for TuiReplaySender<'_> {
             .map_err(|e| crate::dispatch::ReplayError::SendFailed(e.to_string()))?;
         self.transport
             .send_notification("session/update", payload)
+            .await
+            .map_err(|e| crate::dispatch::ReplayError::SendFailed(e.to_string()))
+    }
+
+    async fn send_system_reminder(
+        &self,
+        session_id: &str,
+        reminder: &peri_acp_types::system_reminder::SystemReminder,
+        caps: &peri_acp_types::PeriCaps,
+    ) -> Result<(), crate::dispatch::ReplayError> {
+        let (event, data) = if caps.system_reminder {
+            (
+                "system-reminder",
+                serde_json::json!({ "reminder": reminder, "replay": true }),
+            )
+        } else {
+            (
+                "system-reminder-fallback",
+                serde_json::json!({
+                    "text": reminder.summary.as_deref().unwrap_or(&reminder.body),
+                    "replay": true,
+                    "legacy": true
+                }),
+            )
+        };
+        self.transport
+            .send_notification(
+                "peri/unstable_event",
+                serde_json::json!({ "sessionId": session_id, "event": event, "data": data }),
+            )
             .await
             .map_err(|e| crate::dispatch::ReplayError::SendFailed(e.to_string()))
     }

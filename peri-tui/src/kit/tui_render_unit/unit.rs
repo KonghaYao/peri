@@ -1,6 +1,6 @@
 use super::{
     TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider, TuiSubAgentGroup,
-    TuiSystemNote, TuiTodoSummary, TuiToolCard, TuiUserBubble,
+    TuiSystemNote, TuiSystemReminder, TuiTodoSummary, TuiToolCard, TuiUserBubble,
 };
 
 // ---------------------------------------------------------------------------
@@ -14,6 +14,7 @@ pub enum TuiRenderUnit {
     TuiAssistantBubble(TuiAssistantBubble),
     TuiToolCard(TuiToolCard),
     TuiSystemNote(TuiSystemNote),
+    TuiSystemReminder(TuiSystemReminder),
     TuiSubAgentGroup(TuiSubAgentGroup),
     TuiCollapsedGroup(TuiCollapsedGroup),
     TuiDivider(TuiDivider),
@@ -32,6 +33,7 @@ impl TuiRenderUnit {
             Self::TuiAssistantBubble(d) => d.content_hash,
             Self::TuiToolCard(d) => d.content_hash,
             Self::TuiSystemNote(d) => d.content_hash,
+            Self::TuiSystemReminder(d) => d.content_hash,
             Self::TuiSubAgentGroup(d) => d.content_hash,
             Self::TuiCollapsedGroup(d) => d.content_hash,
             Self::TuiDivider(d) => d.content_hash,

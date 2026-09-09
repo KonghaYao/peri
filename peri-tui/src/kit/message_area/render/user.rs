@@ -1,5 +1,6 @@
 use crate::i18n;
 use crate::kit::message_area::grid::GridSpec;
+use crate::kit::tui_render_unit::FoldState;
 use crate::truncate::{truncate_by_width, wrap_by_width};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -14,6 +15,49 @@ use super::helpers::{cont_prefix, first_prefix, prefixed_cont_line, sym};
 const USER_BODY_MAX_LINES: usize = 6;
 
 // ── 各变体渲染函数（Slice 3：统一网格 + 无气泡 + 垂直节奏）──────────────
+
+pub(super) fn render_system_reminder_lines(
+    data: &crate::kit::tui_render_unit::TuiSystemReminder,
+    grid: &GridSpec,
+) -> Vec<Line<'static>> {
+    let sem = THEME_ATOM.state().read().semantic;
+    let marker = if data.legacy {
+        i18n::tr("reminder-legacy-marker")
+    } else if data.required {
+        i18n::tr("reminder-required-marker")
+    } else {
+        i18n::tr("reminder-structured-marker")
+    };
+    let heading = format!(
+        "{} · {} · {} · {:?}",
+        marker, data.category, data.source, data.severity
+    );
+    let symbol = if data.fold == FoldState::Expanded {
+        sym().expanded
+    } else {
+        sym().collapsed
+    };
+    let mut spans = first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
+    spans.push(Span::styled(
+        truncate_by_width(&heading, grid.content_width()),
+        Style::default().fg(sem.text.dim),
+    ));
+    let mut lines = vec![Line::from(spans)];
+    if data.fold == FoldState::Expanded {
+        for text in data
+            .body
+            .lines()
+            .flat_map(|line| wrap_by_width(line, grid.content_width()))
+        {
+            lines.push(prefixed_cont_line(
+                grid,
+                sem.accents.reasoning,
+                Line::from(Span::styled(text, Style::default().fg(sem.text.muted))),
+            ));
+        }
+    }
+    lines
+}
 
 /// §6.1 User prompt：去全宽 bg 与 `❯`；无 role label（`You`），正文直接开始。
 ///

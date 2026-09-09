@@ -36,6 +36,35 @@ pub struct SessionDynamicMcpNotificationSink {
     inbox: std::sync::Weak<peri_acp_types::session::SessionInbox>,
 }
 
+impl SessionDynamicMcpNotificationSink {
+    fn reminder(
+        kind: &str,
+        severity: ReminderSeverity,
+        body: String,
+        summary: String,
+        metadata: serde_json::Value,
+    ) -> TrustedSystemReminder {
+        TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Lifecycle,
+                source: ReminderSource("dynamic_mcp".into()),
+                kind: kind.into(),
+                severity,
+                delivery: ReminderDelivery::Configurable,
+                audiences: ReminderAudiences(vec![
+                    ReminderAudience::Model,
+                    ReminderAudience::Tui,
+                    ReminderAudience::Diagnostics,
+                ]),
+                body,
+                summary: Some(summary),
+                metadata,
+            })
+            .expect("dynamic MCP reminder mapping must be valid")
+    }
+}
+
 impl DynamicMcpNotificationSinkPort for SessionDynamicMcpNotificationSink {
     fn notify(&self, notification: DynamicMcpNotification) -> bool {
         if !self.accepts(&notification.instance_key) {
@@ -44,13 +73,17 @@ impl DynamicMcpNotificationSinkPort for SessionDynamicMcpNotificationSink {
         let Some(inbox) = self.inbox.upgrade() else {
             return false;
         };
-        let reminder = format!(
-            "<system-reminder>\n{}\n</system-reminder>",
-            notification.safe_summary
+        let reminder = Self::reminder(
+            "lifecycle_changed",
+            ReminderSeverity::Info,
+            notification.safe_summary.clone(),
+            notification.safe_summary,
+            serde_json::json!({ "instance_key": notification.instance_key }),
         );
-        inbox.handle().push_info(
+        inbox.handle().push_system_reminder(
+            MessageKind::Info,
             MessageSource::DynamicMcpNotification,
-            BaseMessage::human(MessageContent::text(reminder)),
+            reminder,
         );
         true
     }
@@ -67,13 +100,27 @@ impl DynamicMcpNotificationSinkPort for SessionDynamicMcpNotificationSink {
         let Some(inbox) = self.inbox.upgrade() else {
             return false;
         };
-        let reminder = format!(
-            "<system-reminder>\nDynamic MCP {} requires OAuth authorization for flow {}: {}\n</system-reminder>",
+        let body = format!(
+            "Dynamic MCP {} requires OAuth authorization for flow {}: {}",
             instance.logical.server_name, flow_id, authorization_url
         );
-        inbox.handle().push_info(
+        let reminder = Self::reminder(
+            "oauth_authorization_required",
+            ReminderSeverity::Warning,
+            body,
+            format!(
+                "Dynamic MCP {} requires OAuth authorization",
+                instance.logical.server_name
+            ),
+            serde_json::json!({
+                "server_name": instance.logical.server_name,
+                "flow_id": flow_id,
+            }),
+        );
+        inbox.handle().push_system_reminder(
+            MessageKind::Info,
             MessageSource::DynamicMcpNotification,
-            BaseMessage::human(MessageContent::text(reminder)),
+            reminder,
         );
         true
     }
@@ -97,11 +144,16 @@ use peri_acp_types::command::command_route::{
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::dynamic_mcp::{DynamicMcpInstanceKey, DynamicMcpNotification};
 use peri_acp_types::mcp_skills::McpSkillRegistry;
-use peri_acp_types::messages::{BaseMessage, MessageContent};
+use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::ports::DynamicMcpNotificationSinkPort;
-use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::{MessageKind, MessageSource};
 use peri_acp_types::skills::SkillRoot;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminder, TrustedSystemReminderFactory,
+    SYSTEM_REMINDER_VERSION,
+};
 use peri_acp_types::{
     store::ThreadStore,
     thread::{ThreadId, ThreadMeta},
@@ -200,6 +252,10 @@ struct SessionManagerInner {
     pub caps_registry: Arc<DashMap<String, PeriCaps>>,
     /// 全局 CronScheduler（TUI/stdio 进程共享）。None = 不启用 cron 注入。
     pub cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
+    /// Host 统一 continuation scheduler 的 cron 入口；server 启动后绑定。
+    pub cron_continuation_tx: parking_lot::Mutex<
+        Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::cron::CronContinuationRequest>>,
+    >,
     /// MCP subscriptions 桥接端口（装配注入；session 创建时注册 inbox，
     /// close_session 时注销——订阅通知唤醒 agent 的通道，同 cron 模式）。
     pub mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
@@ -250,6 +306,7 @@ impl SessionManager {
                 pending_caps: parking_lot::Mutex::new(None),
                 caps_registry: Arc::new(DashMap::new()),
                 cron_scheduler,
+                cron_continuation_tx: parking_lot::Mutex::new(None),
                 mcp_subscription,
                 dynamic_mcp,
                 skills,
@@ -661,12 +718,14 @@ impl SessionManager {
     /// TUI/stdio 调用方仍自行维护 history/frozen/agent_pool 等字段，
     /// SessionManager 只负责 active_agents / goal_state 维度。
     pub fn ensure_session(&self, session_id: &str, cwd: &str) {
-        if self.inner.sessions.contains_key(session_id) {
-            return;
+        if !self.inner.sessions.contains_key(session_id) {
+            let thread_id = ThreadId::from(session_id.to_string());
+            let session = self.build_session(session_id, thread_id, cwd);
+            self.inner.sessions.insert(session_id.to_string(), session);
         }
-        let thread_id = ThreadId::from(session_id.to_string());
-        let session = self.build_session(session_id, thread_id, cwd);
-        self.inner.sessions.insert(session_id.to_string(), session);
+        // 在 session 发布边界立即订阅，避免首个 turn 前到点的 trigger 丢失。
+        // cron_bridge_for 本身幂等，既有 session 与 first-turn 调用均不会重复订阅。
+        self.cron_bridge_for(session_id);
     }
 
     /// 取指定 session 的 goal_state 句柄（用于 TUI/stdio 注入到 middleware 链）。
@@ -753,6 +812,18 @@ impl SessionManager {
             .unwrap_or(false)
     }
 
+    /// Host 启动时绑定 cron continuation 入口。既有 bridge 会在下一次 lazy 检查前
+    /// 尚未创建，因此只允许首次写入。
+    pub fn bind_cron_continuation(
+        &self,
+        tx: tokio::sync::mpsc::UnboundedSender<peri_acp_types::cron::CronContinuationRequest>,
+    ) {
+        let mut slot = self.inner.cron_continuation_tx.lock();
+        if slot.is_none() {
+            *slot = Some(tx);
+        }
+    }
+
     /// 确保指定 session 的 session 级 cron bridge 已启动（lazy-init，幂等）。
     ///
     /// 首次调用：`scheduler.subscribe()` 一次 + 用 session 级 inbox handle 启动
@@ -766,19 +837,27 @@ impl SessionManager {
             Some(s) => s.clone(),
             None => return false,
         };
+        let continuation_tx = match self.inner.cron_continuation_tx.lock().clone() {
+            Some(tx) => tx,
+            None => return false,
+        };
         // Fast path
         if let Some(session) = self.inner.sessions.get(session_id) {
             if session.cron_bridge.is_some() {
                 return true;
             }
         }
-        // Slow path: session-level inbox first (shared wake Notify), then bridge
-        let Some(inbox) = self.session_inbox_for(session_id) else {
+        // Slow path: bind a session-scoped scheduler subscription to Host continuation.
+        if self.session_inbox_for(session_id).is_none() {
             return false;
-        };
+        }
         if let Some(mut session) = self.inner.sessions.get_mut(session_id) {
             if session.cron_bridge.is_none() {
-                session.cron_bridge = Some(SessionCronBridge::start(&scheduler, inbox.handle()));
+                session.cron_bridge = Some(SessionCronBridge::start(
+                    session_id.to_string(),
+                    &scheduler,
+                    continuation_tx,
+                ));
                 tracing::info!(session_id = %session_id, "session cron bridge started");
             }
         }

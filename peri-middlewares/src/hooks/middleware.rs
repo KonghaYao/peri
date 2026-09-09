@@ -21,13 +21,18 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
 use peri_agent::{
     agent::react::{AgentOutput, ReactLLM, ToolCall, ToolResult},
     error::{AgentError, AgentResult},
-    messages::{BaseMessage, MessageContent},
+    messages::BaseMessage,
     middleware::{r#trait::Middleware, state::MiddlewareState},
     session::{MessageKind, MessageSource, QueuedMessage},
 };
+use serde_json::json;
 
 use crate::permission::SharedPermissionMode;
 // HookType 仅 `middleware_test.rs` 通过 `use super::*` 使用。保留以维持测试不变。
@@ -439,17 +444,31 @@ impl Middleware for HookMiddleware {
                     return Ok(output.clone());
                 }
                 GuardDecision::Block { count, reason } => {
-                    // [TRAP] 必须用 Human + <system-reminder> 注入，禁止 BaseMessage::system。
-                    // System 消息会被 anthropic/openai invoke hoist 到 system prompt 顶部,
-                    // 违反 frozen_system_prompt 稳定性（第一优先级）。
-                    // （与 goal_middleware.rs / compact_v2.rs::re_inject_v2 注入路径一致）
-                    // 走 v2 MessageQueue Defer kind → Receive 阶段统一消费并唤醒续跑。
                     let feedback = format_stop_block_feedback_no_wrapper(&reason, count);
-                    let reminder = format!("<system-reminder>\n{}\n</system-reminder>", feedback);
-                    state.enqueue_v2_message(QueuedMessage::new(
+                    let reminder = TrustedSystemReminderFactory::for_producer()
+                        .construct(SystemReminder {
+                            version: SYSTEM_REMINDER_VERSION,
+                            category: ReminderCategory::Guidance,
+                            source: ReminderSource("hook".into()),
+                            kind: "stop_blocked".into(),
+                            severity: ReminderSeverity::Warning,
+                            delivery: ReminderDelivery::Required,
+                            audiences: ReminderAudiences(vec![
+                                ReminderAudience::Model,
+                                ReminderAudience::Automation,
+                            ]),
+                            body: feedback,
+                            summary: Some(format!("Stop hook 阻止结束（{count}/8）")),
+                            metadata: json!({ "block_count": count }),
+                        })
+                        .map_err(|error| AgentError::MiddlewareError {
+                            middleware: self.name().to_string(),
+                            reason: error.to_string(),
+                        })?;
+                    state.enqueue_v2_message(QueuedMessage::system_reminder(
                         MessageKind::Defer,
                         MessageSource::StopHookFeedback,
-                        BaseMessage::human(MessageContent::text(reminder)),
+                        reminder,
                     ));
                     let mut output = output.clone();
                     output.block_continue = Some(reason);

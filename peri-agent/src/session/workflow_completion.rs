@@ -3,12 +3,14 @@
 //! Extracted from `exec/executor/agent_build.rs` so ordering invariants (#117) are unit-testable.
 
 use peri_acp_types::event::BackgroundTaskResult;
-use peri_acp_types::messages::{BaseMessage, MessageContent};
 use peri_acp_types::session::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
+use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
 use peri_acp_types::tasks::TaskManager;
 use peri_acp_types::workflow::WorkflowTaskResult;
+use serde_json::json;
 
 use crate::session::async_router::AsyncRouter;
+use crate::session::producer_reminders::trusted_reminder;
 
 /// Apply a broadcast [`WorkflowTaskResult`]: push Defer (and wake when `router` is set), then
 /// complete the background workflow task in [`TaskManager`].
@@ -79,10 +81,35 @@ fn push_workflow_defer_fallback(queue: &MessageQueue, task_result: &WorkflowTask
         phase_lines,
         task_result.run_id,
     );
-    queue.push(QueuedMessage::new(
+    let success = task_result.agent_facing_success();
+    let reminder = trusted_reminder(
+        ReminderCategory::Task,
+        "workflow",
+        if success { "completed" } else { "failed" },
+        if success {
+            ReminderSeverity::Info
+        } else {
+            ReminderSeverity::Error
+        },
+        ReminderDelivery::Configurable,
+        notif_text,
+        Some(format!(
+            "Workflow '{}' {status_word}",
+            task_result.workflow_name
+        )),
+        json!({
+            "run_id": task_result.run_id,
+            "workflow_name": task_result.workflow_name,
+            "status": status_word,
+            "duration_ms": task_result.duration_ms,
+            "agent_count": task_result.agent_count,
+            "tool_calls_count": task_result.tool_calls_count,
+        }),
+    );
+    queue.push(QueuedMessage::system_reminder(
         MessageKind::Defer,
         MessageSource::WorkflowComplete,
-        BaseMessage::human(MessageContent::text(notif_text)),
+        reminder,
     ));
 }
 

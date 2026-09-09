@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use peri_acp_types::session::{MessageKind, MessageSource, SessionInbox};
+use peri_acp_types::session::{MessageKind, MessageSource, QueuedPayload, SessionInbox};
 use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager};
 use peri_acp_types::workflow::{WorkflowRunStatus, WorkflowTaskResult};
 
@@ -65,7 +65,13 @@ fn consumer_applies_defer_before_clearing_active_count() {
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].kind, MessageKind::Defer);
     assert_eq!(msgs[0].source, MessageSource::WorkflowComplete);
-    let text = msgs[0].message.content();
+    let reminder = match &msgs[0].payload {
+        QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+        _ => panic!("expected reminder"),
+    };
+    let text = &reminder.body;
+    assert_eq!(reminder.source.0, "workflow");
+    assert_eq!(reminder.kind, "failed");
     assert!(
         text.contains("failed"),
         "notification text should use failed status word: {text}"

@@ -204,7 +204,92 @@ fn test_projection_action_exclude_and_keep() {
     assert_eq!(restored, entry);
 }
 
-// ─── render_llm_view 协议测试 ─────────────────────────────────────────────────
+#[test]
+fn estimate_projection_chars_ignores_directive_targeting_reminder() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let mut transcript = MessageTranscript::new();
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("estimate_test".into()),
+            kind: "status".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "control".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let id = transcript.append_system_reminder(reminder);
+    let action = ProjectionActionEntry {
+        message_id: id,
+        target: ProjectionTarget::Message,
+        action: ProjectionAction::CompactToolResult {
+            keep_head: 1,
+            keep_tail: 1,
+            preserve_recovery_handle: true,
+        },
+    };
+
+    assert_eq!(estimate_projection_chars(&transcript, &[action]), (0, 0));
+    assert_eq!(transcript.flags(id), Default::default());
+}
+
+#[test]
+fn canonical_reminder_renders_once_with_and_without_directives() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("compact_test".into()),
+            kind: "done".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "compact reminder".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let mut transcript = MessageTranscript::new();
+    let reminder_id = transcript.append_system_reminder(reminder);
+    let normal_id = transcript.append(BaseMessage::human("normal"));
+
+    for plan in [
+        MicroCompactPlan::default(),
+        MicroCompactPlan {
+            actions: vec![ProjectionActionEntry {
+                message_id: normal_id,
+                target: ProjectionTarget::Message,
+                action: ProjectionAction::Keep,
+            }],
+            ..Default::default()
+        },
+    ] {
+        let projected =
+            render_llm_view(&transcript, &plan, &ProviderCapabilities::default()).unwrap();
+        let reminders: Vec<_> = projected
+            .iter()
+            .filter(|message| message.id() == reminder_id)
+            .collect();
+        assert_eq!(reminders.len(), 1);
+        assert!(matches!(reminders[0], BaseMessage::Human { .. }));
+        assert!(!reminders[0].content().is_empty());
+        assert_eq!(
+            reminders[0].content().matches("</system-reminder>").count(),
+            1
+        );
+    }
+}
 
 #[test]
 fn test_blocks_image_projection_removes_base64() {

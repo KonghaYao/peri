@@ -17,7 +17,10 @@ use crate::kit::bg_task_identity::upsert_identity_from_started;
 use crate::kit::bg_task_live::{
     mark_task_cancelled, mark_task_completed, reconcile_live_snapshot, seed_live_from_started,
 };
-use crate::kit::tui_render_unit::{InteractionKind, TuiAskUserBlock, TuiNoteLevel, TuiRenderUnit};
+use crate::kit::tui_render_unit::{
+    DisplayTrusted, InteractionKind, TuiAskUserBlock, TuiNoteLevel, TuiRenderUnit,
+    TuiSystemReminder,
+};
 use fluent_bundle::FluentValue;
 use peri_acp_types::event_data::{
     AskUser, BudgetWarning, HitlPending, OauthNeeded, PluginActionResult, PluginSearchResult,
@@ -93,6 +96,41 @@ pub(super) fn handle_goal_snapshot(
             continuation_count,
             blocked_reason: blocked_reason.clone(),
         });
+}
+
+pub(super) fn handle_trusted_system_reminder(
+    state: &mut BridgeState,
+    reminder: peri_acp_types::system_reminder::SystemReminder,
+) {
+    if let Some(vm) = TuiSystemReminder::from_trusted_structured(
+        DisplayTrusted::after_current_session_gate(reminder),
+    ) {
+        state.flush_current_turn();
+        state
+            .committed
+            .push_back(TuiRenderUnit::TuiSystemReminder(vm));
+    }
+}
+
+pub(super) fn handle_system_reminder(
+    state: &mut BridgeState,
+    reminder: &peri_acp_types::system_reminder::SystemReminder,
+) {
+    if let Some(vm) = TuiSystemReminder::from_wire(reminder.clone()) {
+        state.flush_current_turn();
+        state
+            .committed
+            .push_back(TuiRenderUnit::TuiSystemReminder(vm));
+    }
+}
+
+pub(super) fn handle_system_reminder_fallback(state: &mut BridgeState, text: &str) {
+    state.flush_current_turn();
+    state
+        .committed
+        .push_back(TuiRenderUnit::TuiSystemReminder(TuiSystemReminder::legacy(
+            text.to_string(),
+        )));
 }
 
 pub(super) fn handle_system_notification(state: &mut BridgeState, sn: &SystemNotification) {

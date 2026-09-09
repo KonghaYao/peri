@@ -3,7 +3,8 @@
 use super::*;
 use crate::kit::atoms::FOLD_OVERRIDES;
 use crate::kit::tui_render_unit::{
-    InteractionKind, TuiCollapsedGroup, TuiToolCard, TuiToolPresentation, TuiUserBubble,
+    InteractionKind, TuiCollapsedGroup, TuiSystemReminder, TuiToolCard, TuiToolPresentation,
+    TuiUserBubble,
 };
 use ratatui_kit::ratatui::layout::Rect;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
@@ -433,6 +434,13 @@ fn test_fold_key_of_maps_vm_identities() {
         Some((FoldKey::Tool("tool-1".into()), FoldState::Collapsed))
     );
 
+    let reminder = TuiSystemReminder::legacy("maintenance notice".into());
+    let reminder_id = reminder.reminder_id;
+    assert_eq!(
+        fold_key_of(&TuiRenderUnit::TuiSystemReminder(reminder)),
+        Some((FoldKey::SystemReminder(reminder_id), FoldState::Collapsed))
+    );
+
     // user bubble 无折叠能力
     let user = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("hi".into()));
     assert!(fold_key_of(&user).is_none());
@@ -847,6 +855,39 @@ fn test_apply_fold_toggle_tool_writes_override() {
             .state()
             .read()
             .get(&FoldKey::Tool("tool-2".into())),
+        Some(&FoldState::Expanded)
+    );
+}
+
+#[test]
+#[serial]
+fn test_apply_fold_toggle_system_reminder_writes_override() {
+    crate::kit::atoms::init_atoms();
+    *crate::kit::atoms::FOLD_OVERRIDES.state().write() = std::collections::HashMap::new();
+    let reminder = TuiSystemReminder::legacy("maintenance notice".into());
+    let reminder_id = reminder.reminder_id;
+    let hash_before = reminder.content_hash;
+    let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
+        items: im::Vector::from(vec![TuiRenderUnit::TuiSystemReminder(reminder)]),
+        generation: 0,
+    };
+
+    assert_eq!(
+        apply_fold_toggle(&mut snapshot, 0, false),
+        EventResult::Consumed
+    );
+    match &snapshot.items[0] {
+        TuiRenderUnit::TuiSystemReminder(reminder) => {
+            assert_eq!(reminder.fold, FoldState::Expanded);
+            assert_ne!(reminder.content_hash, hash_before);
+        }
+        other => panic!("expected system reminder, got {other:?}"),
+    }
+    assert_eq!(
+        crate::kit::atoms::FOLD_OVERRIDES
+            .state()
+            .read()
+            .get(&FoldKey::SystemReminder(reminder_id)),
         Some(&FoldState::Expanded)
     );
 }

@@ -321,6 +321,7 @@ pub struct AgentProgress {
 └── {run_id}/
     ├── script.js          — 用户脚本副本
     ├── journal.jsonl      — append-only agent 日志
+    ├── outputs/           — 从 `return_value` 外置的长文本
     ├── state.json         — 终态快照（原子写入）
     └── state.json.tmp     — 原子写入临时文件
 ```
@@ -328,6 +329,7 @@ pub struct AgentProgress {
 **写入策略**：
 - `journal.jsonl`：**append-only**，每行一条 `JournalEntry { key, seq, result }`。`key` 是 agent 参数的 SHA256 哈希（用于 resume cache-hit），`seq` 是顺序号
 - `state.json`：**原子写入**——先写 `.tmp`，再 `rename`，确保崩溃不产生损坏文件
+- `return_value`：只用于摘要或短结构化数据；object 中超过 200 bytes 的字符串写入 `outputs/<label>.txt`，原值替换为 `${label}`。调用方读取长结果时必须跟随该占位符，不应把 Agent 全文直接作为顶层返回值
 
 **保留策略**：`cleanup_old_runs()` 按 mtime 保留最新 `KEEP_MAX_RUNS=50` 个目录，定期在 `runner.run()` 结束时执行。
 

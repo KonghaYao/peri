@@ -16,7 +16,30 @@ use agent_client_protocol_schema::v1::{
 use peri_acp_types::messages::{
     BaseMessage, ContentBlock as PeriContentBlock, MessageContent as PeriMessageContent,
 };
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::PeriCaps;
+
+pub async fn replay_persisted_session_history(
+    session_id: &str,
+    history: &[PersistedPayload],
+    sender: &dyn ReplaySender,
+    caps: &PeriCaps,
+) -> Result<(), ReplayError> {
+    for payload in history {
+        match payload {
+            PersistedPayload::Message(message) => {
+                replay_session_history(session_id, std::slice::from_ref(message), sender, caps)
+                    .await?;
+            }
+            PersistedPayload::SystemReminder { reminder, .. } => {
+                sender
+                    .send_system_reminder(session_id, reminder.as_reminder(), caps)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Replay session history via `session/update` notifications.
 ///
@@ -241,6 +264,15 @@ fn extract_text(content: &PeriMessageContent) -> String {
 #[async_trait::async_trait]
 pub trait ReplaySender: Send + Sync {
     async fn send(&self, notif: SessionNotification) -> Result<(), ReplayError>;
+
+    async fn send_system_reminder(
+        &self,
+        _session_id: &str,
+        _reminder: &peri_acp_types::system_reminder::SystemReminder,
+        _caps: &PeriCaps,
+    ) -> Result<(), ReplayError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

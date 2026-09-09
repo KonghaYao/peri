@@ -39,6 +39,8 @@ mod snapshot_test;
 mod streaming_test;
 #[path = "acp_events_test/subagent_loading_test.rs"]
 mod subagent_loading_test;
+#[path = "acp_events_test/system_reminder_test.rs"]
+mod system_reminder_test;
 #[path = "acp_events_test/todo_skill_test.rs"]
 mod todo_skill_test;
 #[path = "acp_events_test/turn_archive_test.rs"]

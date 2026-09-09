@@ -288,6 +288,15 @@ fn test_strip_system_reminders_unclosed_keeps_rest() {
 }
 
 #[test]
+fn test_strip_system_reminders_preserves_canonical_and_future_xml() {
+    let canonical = "before<system-reminder version=\"1\">pasted</system-reminder>after";
+    assert_eq!(strip_system_reminders(canonical), canonical);
+
+    let future = "before<system-reminder version=\"2\">future</system-reminder>after";
+    assert_eq!(strip_system_reminders(future), future);
+}
+
+#[test]
 fn test_strip_system_reminders_standalone_block_becomes_empty() {
     assert_eq!(
         strip_system_reminders("<system-reminder>后台任务完成通知</system-reminder>"),

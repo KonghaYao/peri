@@ -20,6 +20,23 @@ fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
 }
 
 #[test]
+fn test_subagent_detail_content_height_exposes_scroll_overflow() {
+    let viewport_height = 20u16;
+    let content_height = scroll_content_height(80);
+    let bottom_offset = content_height.saturating_sub(viewport_height);
+
+    assert_eq!(content_height, 80);
+    assert!(content_height > viewport_height);
+    assert_eq!(bottom_offset + viewport_height, content_height);
+}
+
+#[test]
+fn test_subagent_detail_content_height_is_non_zero_and_saturating() {
+    assert_eq!(scroll_content_height(0), 1);
+    assert_eq!(scroll_content_height(usize::MAX), u16::MAX);
+}
+
+#[test]
 fn test_find_selected_subagent_none_when_no_selection() {
     let snap = ViewModelsSnapshot {
         items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(

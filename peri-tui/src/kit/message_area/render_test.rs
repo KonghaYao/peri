@@ -6,13 +6,15 @@
 //!   不折行」（metadata 右对齐到消息区右缘，§6.4）。
 //! - 前缀结构（§3.1）：首行 `[outer 空][accent 符号][gap]`，续行 `[outer 空][│][gap]`。
 
+use super::helpers::sym;
 use super::*;
 use crate::kit::message_area::selection::build_wrap_map;
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldState, TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider,
     TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiSkillPresentation, TuiSubAgentGroup,
-    TuiSystemNote, TuiTodoChange, TuiTodoChangeKind, TuiTodoItem, TuiTodoPresentation,
-    TuiTodoStatus, TuiTodoSummary, TuiToolCard, TuiToolPresentation, TuiUserBubble,
+    TuiSystemNote, TuiSystemReminder, TuiTodoChange, TuiTodoChangeKind, TuiTodoItem,
+    TuiTodoPresentation, TuiTodoStatus, TuiTodoSummary, TuiToolCard, TuiToolPresentation,
+    TuiUserBubble,
 };
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
@@ -580,6 +582,54 @@ fn test_user_slash_at_emphasis() {
         emphasized.contains("/build") && emphasized.contains("@matt"),
         "slash/@ token 应局部强调，实际强调内容: {emphasized:?}"
     );
+}
+
+// ── System Reminder 折叠展示 ───────────────────────────────────────────────
+
+#[test]
+fn test_system_reminder_collapsed_shows_only_muted_header() {
+    let reminder = TuiSystemReminder::legacy("sensitive reminder body".into());
+    let unit = TuiRenderUnit::TuiSystemReminder(reminder);
+    let grid = GridSpec::with_content(80);
+    let lines = vm_to_lines(&unit, &grid);
+
+    assert_eq!(lines.len(), 1, "默认折叠时只显示 header");
+    assert_eq!(
+        lines[0].spans[1].content.as_ref(),
+        sym().collapsed,
+        "折叠 header 左侧应显示展开按钮"
+    );
+    assert!(!all_text(&lines).contains("sensitive reminder body"));
+    let sem = THEME_ATOM.state().read().semantic;
+    for span in &lines[0].spans {
+        if !span.content.trim().is_empty() && span.content.as_ref() != "\u{2502}" {
+            assert_eq!(span.style.fg, Some(sem.text.dim));
+            assert!(
+                !span.style.add_modifier.contains(Modifier::BOLD),
+                "header 不应使用 bold"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_system_reminder_expanded_shows_body() {
+    let mut reminder = TuiSystemReminder::legacy("first line\nsecond line".into());
+    reminder.fold = FoldState::Expanded;
+    reminder.recompute_hash();
+    let unit = TuiRenderUnit::TuiSystemReminder(reminder);
+    let grid = GridSpec::with_content(80);
+    let lines = vm_to_lines(&unit, &grid);
+
+    assert_eq!(lines.len(), 3, "展开后显示 header 与完整正文");
+    assert_eq!(
+        lines[0].spans[1].content.as_ref(),
+        sym().expanded,
+        "展开 header 左侧应显示收起按钮"
+    );
+    let text = all_text(&lines);
+    assert!(text.contains("first line"));
+    assert!(text.contains("second line"));
 }
 
 // ── Reasoning 三态（§6.3）──────────────────────────────────────────────
@@ -1869,7 +1919,7 @@ fn test_collapsed_group_line() {
 
 /// [D2] 组后相邻 error 数 >0 → 标题追加 `· N failed`（error 色 span），
 #[test]
-fn test_expanded_group_renders_member_tools_and_hint() {
+fn test_expanded_group_renders_member_tools() {
     let grid = GridSpec::grid_for(80);
     let mut group = TuiCollapsedGroup {
         title: "Read 1".into(),
@@ -1888,7 +1938,6 @@ fn test_expanded_group_renders_member_tools_and_hint() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("click or Enter"));
     assert!(text.contains("a.rs"), "展开后应渲染组内工具，实际 {text:?}");
 }
 

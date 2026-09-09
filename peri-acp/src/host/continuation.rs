@@ -35,6 +35,12 @@
 use std::sync::Arc;
 
 use crate::session::executor::ContinuationRequest;
+use peri_acp_types::cron::{CronContinuationRequest, CronTrigger};
+use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
 use peri_acp_types::tasks::BgTaskKind;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -132,6 +138,110 @@ pub(crate) fn continuation_dispatchable(
     has_pending_subagent_defer
 }
 
+pub(crate) struct CronContinuationContext {
+    pub(crate) sessions: SharedSessions,
+    pub(crate) prompt_locks: PromptLocks,
+    pub(crate) cfg: Arc<AcpServerConfig>,
+    pub(crate) transport: Arc<dyn crate::transport::AcpTransport>,
+    pub(crate) cont_tx: Arc<mpsc::UnboundedSender<ContinuationRequest>>,
+    pub(crate) task_spawner: HostTaskSpawner,
+    pub(crate) shutdown: CancellationToken,
+}
+
+pub(crate) async fn run_cron_continuation_scheduler(
+    mut rx: mpsc::UnboundedReceiver<CronContinuationRequest>,
+    context: CronContinuationContext,
+) {
+    let CronContinuationContext {
+        sessions,
+        prompt_locks,
+        cfg,
+        transport,
+        cont_tx,
+        task_spawner,
+        shutdown,
+    } = context;
+    while let Some(req) = recv_until_shutdown(&mut rx, &shutdown).await {
+        let sessions = sessions.clone();
+        let locks = prompt_locks.clone();
+        let cfg = Arc::clone(&cfg);
+        let transport = Arc::clone(&transport);
+        let cont_tx = Arc::clone(&cont_tx);
+        let _ = task_spawner.spawn(
+            HostTaskOwnerKind::Session,
+            HostTaskKind::ContinuationTurn,
+            async move {
+                let broker = super::prompt::build_transport_broker(&transport, &req.session_id);
+                if !super::prompt::approve_scheduled_trigger(
+                    cfg.permission_mode.as_ref(),
+                    Some(&broker),
+                    &req.trigger.task_id,
+                    &req.trigger.prompt,
+                )
+                .await
+                {
+                    info!(session_id = %req.session_id, task_id = %req.trigger.task_id, "cron trigger rejected");
+                    return;
+                }
+                if !enqueue_cron_trigger(&cfg, &req.session_id, &req.trigger) {
+                    return;
+                }
+                let epoch = {
+                    let mut sessions = sessions.lock().await;
+                    let Some(state) = sessions.get_mut(&req.session_id) else { return };
+                    state.continuation_mq_steering_pending = true;
+                    state.continuation_epoch
+                };
+                let _ = dispatch_prompt_turn(
+                    continuation_params(&req.session_id),
+                    true,
+                    Some(epoch),
+                    &sessions,
+                    &locks,
+                    &transport,
+                    &cfg,
+                    cont_tx.as_ref(),
+                )
+                .await;
+            },
+        );
+    }
+}
+
+fn enqueue_cron_trigger(cfg: &AcpServerConfig, session_id: &str, trigger: &CronTrigger) -> bool {
+    let Some(queue) = cfg.session_manager.v2_queue_for(session_id) else {
+        return false;
+    };
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("cron".into()),
+            kind: "triggered".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Required,
+            audiences: ReminderAudiences(vec![
+                ReminderAudience::Model,
+                ReminderAudience::Tui,
+                ReminderAudience::Automation,
+                ReminderAudience::Diagnostics,
+            ]),
+            body: format!(
+                "<goal-message>Cron task {} triggered: {}</goal-message>",
+                trigger.task_id, trigger.prompt
+            ),
+            summary: Some(format!("Cron task {} triggered", trigger.task_id)),
+            metadata: serde_json::json!({ "task_id": trigger.task_id }),
+        })
+        .expect("cron reminder mapping must be valid");
+    queue.push(QueuedMessage::system_reminder(
+        MessageKind::Defer,
+        MessageSource::CronTrigger,
+        reminder,
+    ));
+    true
+}
+
 /// 运行 per-session continuation scheduler（由 `run_acp_server` spawn）。
 ///
 /// 循环消费 executor `on_bg_complete` 闭包的通知；每次合格请求 spawn 一个
@@ -201,10 +311,10 @@ pub(crate) async fn run_continuation_scheduler(
     }
 }
 
-async fn recv_until_shutdown(
-    rx: &mut mpsc::UnboundedReceiver<ContinuationRequest>,
+async fn recv_until_shutdown<T>(
+    rx: &mut mpsc::UnboundedReceiver<T>,
     shutdown: &CancellationToken,
-) -> Option<ContinuationRequest> {
+) -> Option<T> {
     tokio::select! {
         _ = shutdown.cancelled() => None,
         req = rx.recv() => req,

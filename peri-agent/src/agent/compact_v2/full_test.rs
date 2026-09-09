@@ -73,6 +73,57 @@ impl Model for FullLifecycleModel {
 // ── Full Compact 测试 ──────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn full_compact_preserves_canonical_reminder_without_flags() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ThreadStore> = Arc::new(
+        SqliteThreadStore::new(dir.path().join("reminder-full.db"))
+            .await
+            .unwrap(),
+    );
+    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
+    transcript.append(make_human("question"));
+    let reminder_id = transcript.append_system_reminder(
+        TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Task,
+                source: ReminderSource("full_test".into()),
+                kind: "status".into(),
+                severity: ReminderSeverity::Info,
+                delivery: ReminderDelivery::Configurable,
+                audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+                body: "preserve me".into(),
+                summary: None,
+                metadata: serde_json::json!({}),
+            })
+            .unwrap(),
+    );
+    transcript.append(make_ai("answer"));
+
+    full_compact_inner(
+        &mut transcript,
+        Some(&FullLifecycleModel),
+        &CompactConfig::default(),
+        "/tmp",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(transcript.flags(reminder_id), MessageFlags::default());
+    assert!(transcript.get(reminder_id).is_some());
+    assert!(transcript
+        .visible_model_messages()
+        .unwrap()
+        .iter()
+        .any(|message| message.id() == reminder_id));
+}
+
+#[tokio::test]
 async fn test_full_compact_no_llm_returns_error() {
     let mut t = MessageTranscript::new();
     t.append(make_human("user question"));
@@ -146,16 +197,16 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
     let summary = transcript
         .entries()
         .iter()
-        .find(|entry| entry.message.content().contains("FULL_SUMMARY_MARKER"))
+        .find(|entry| entry.message().content().contains("FULL_SUMMARY_MARKER"))
         .expect("应追加 summary")
-        .message
+        .message()
         .clone();
     let reinject = transcript
         .entries()
         .iter()
-        .find(|entry| entry.message.content().contains("[最近读取的文件:"))
+        .find(|entry| entry.message().content().contains("[最近读取的文件:"))
         .expect("应追加重新注入的文件")
-        .message
+        .message()
         .clone();
 
     let stored_messages = store
@@ -170,7 +221,7 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
         transcript
             .entries()
             .iter()
-            .map(|entry| entry.message.id())
+            .map(|entry| entry.id())
             .collect::<Vec<_>>(),
         "内存与 SQLite history 必须一致"
     );
@@ -224,7 +275,7 @@ async fn test_full_compact_filesystem_unsupported_lifecycle_leaves_memory_and_st
     let before_entries = transcript
         .entries()
         .iter()
-        .map(|entry| entry.message.id())
+        .map(|entry| entry.id())
         .collect::<Vec<_>>();
     let before_store = store
         .load_messages(&thread_id)
@@ -250,7 +301,7 @@ async fn test_full_compact_filesystem_unsupported_lifecycle_leaves_memory_and_st
         transcript
             .entries()
             .iter()
-            .map(|entry| entry.message.id())
+            .map(|entry| entry.id())
             .collect::<Vec<_>>(),
         before_entries,
         "失败后内存 entries 必须原样"

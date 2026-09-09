@@ -55,7 +55,7 @@ use tokio::sync::oneshot as exec_oneshot;
 use peri_acp_types::{
     event::ExecutorEvent,
     interaction::UserInteractionBroker,
-    messages::{BaseMessage, ContentBlock, MessageContent},
+    messages::{ContentBlock, MessageContent},
     session::QueuedMessage,
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
@@ -219,6 +219,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         continuation,
         frozen,
         history,
+        history_payloads,
         incoming_recalls,
         bg_results,
         langfuse,
@@ -265,10 +266,12 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             .push_done(&ctx.session_id, "end_turn", ctx.request_id.as_deref())
             .await;
         return PromptResult {
+            persisted_payloads: history_payloads,
             messages: history,
             ok: true,
             stop_reason: PromptStopReason::EndTurn,
             history_replaced_by_compaction: false,
+            persistence_inconsistent: false,
             recall_items: Vec::new(),
             failure: None,
         };
@@ -327,11 +330,46 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         } else {
             // 回退路径：直接 push（无 wake，兼容 print mode / 无 SessionAccess）
             use peri_acp_types::session::{MessageKind as V2Kind, MessageSource as V2Src};
+            use peri_acp_types::system_reminder::{
+                ReminderCategory, ReminderDelivery, ReminderSeverity,
+            };
             for result in &bg_results {
-                v2_message_queue.push(QueuedMessage::new(
+                let reminder = crate::session::producer_reminders::trusted_reminder(
+                    ReminderCategory::Task,
+                    "subagent",
+                    if result.success {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
+                    if result.success {
+                        ReminderSeverity::Info
+                    } else {
+                        ReminderSeverity::Error
+                    },
+                    ReminderDelivery::Configurable,
+                    result.to_notification(),
+                    Some(format!(
+                        "{} {}",
+                        result.agent_name,
+                        if result.success {
+                            "completed"
+                        } else {
+                            "failed"
+                        }
+                    )),
+                    serde_json::json!({
+                        "task_id": result.task_id,
+                        "agent_name": result.agent_name,
+                        "success": result.success,
+                        "timed_out": result.timed_out,
+                        "child_thread_id": result.child_thread_id,
+                    }),
+                );
+                v2_message_queue.push(QueuedMessage::system_reminder(
                     V2Kind::Defer,
                     V2Src::SubAgentComplete,
-                    BaseMessage::human(MessageContent::text(result.to_notification())),
+                    reminder,
                 ));
             }
         }
@@ -457,6 +495,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let injected_content = match intercept_immediate_command(InterceptRequest {
         content: &content,
         history: &history,
+        history_payloads: history_payloads.clone(),
         cwd: &ctx.cwd,
         session_id: &ctx.session_id,
         cancel: &ctx.cancel,
@@ -496,12 +535,8 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let agent_input = if incoming_recalls.is_empty() {
         AgentInput::blocks(injected_content)
     } else {
-        let reminder_text = format!(
-            "<system-reminder>\n{}\n</system-reminder>",
-            incoming_recalls.join("\n")
-        );
         let mut blocks = injected_content.content_blocks();
-        blocks.push(ContentBlock::text(reminder_text));
+        blocks.push(ContentBlock::text(incoming_recalls.join("\n")));
         AgentInput::blocks(MessageContent::blocks(blocks))
     };
 
@@ -569,6 +604,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         &turn,
         agent_input,
         history,
+        history_payloads,
         &ctx.session_id,
         cached_llm.as_ref(),
         &v2_message_queue,

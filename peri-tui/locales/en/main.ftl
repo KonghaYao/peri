@@ -715,7 +715,6 @@ msg-assistant-prompt = Perihelion
 msg-status-loading = Loading
 msg-new-output = New output
 render-group-failed-count = { $count } failed
-render-group-toggle-hint = click or Enter
 
 # ---- Interaction block (spec §6.8, Slice 4) ----
 # inline transcript block 与 AskUser 面板 / HITL 弹窗双轨（D5）——
@@ -800,6 +799,10 @@ reminder-trust-boundary = Trust Boundary
 reminder-tool-reminder = Tool Reminder
 reminder-subagent-result = SubAgent Result
 reminder-system-reminder = System Reminder
+reminder-legacy-marker = Legacy reminder
+reminder-required-marker = Required reminder
+reminder-structured-marker = System reminder
+reminder-legacy-source = legacy history
 channel-wechat = WeChat
 channel-feishu = Feishu
 channel-dingtalk = DingTalk

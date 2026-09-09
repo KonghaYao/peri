@@ -324,8 +324,8 @@ pub(super) fn register_image_hover(hooks: &mut Hooks, image_rects: State<Arc<Vec
 // interaction option（Down）之后即可——两者事件类型不重叠。
 // [语义] 单击 = Down 冻结 + 手势从未升级（gesture 保持 Pending 到 Up）：
 // Up 只消费 Down 时冻结的结果（entry_hit），不再做坐标换算与反查。命中
-// entry 首行 → 设置 entry 焦点 + 折叠切换：tool/reasoning/subagent/completed
-// interaction toggle（写 FOLD_OVERRIDES，与键盘 Enter 一致）；subagent
+// entry 首行 → 设置 entry 焦点 + 折叠切换：tool/reasoning/system reminder/
+// subagent/completed interaction toggle（写 FOLD_OVERRIDES，与键盘 Enter 一致）；subagent
 // 打开详情面板；pending interaction 首行仅聚焦不提交（键盘 Enter 的提交
 // 是明确按键语义）。未命中（手势已升级/滚动条列/非首行/坐标外）→
 // Ignored，选区逻辑照常。

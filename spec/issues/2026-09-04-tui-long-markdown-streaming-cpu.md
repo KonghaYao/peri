@@ -178,7 +178,7 @@ PERI_RENDER_TIMING=1 cargo run -p peri-tui
 
 ## 建议修复方向
 
-详细建议见 [TUI 超长 Markdown 流式渲染优化建议](2026-09-04-tui-long-markdown-streaming-cpu-recommendations.md)。
+详细方案与稳定契约见 `docs/design/tui-streaming-markdown-performance.md`。
 
 推荐顺序：
 
@@ -225,7 +225,7 @@ cargo test -p peri-tui --lib boundary_
 ## 相关记录
 
 - `spec/issues/2026-07-17-message-area-render-stutter-long-conversation.md`：长对话消息区渲染卡顿。
-- `spec/archive-issues/subagent/2026-08-02-multi-agent-concurrent-cpu-high.md`：多 agent 场景中的历史渲染风暴问题。
+- 多 Agent 场景中的历史渲染风暴记录由 Git 保留。
 - `spec/issues/2026-07-05-ratatui-kit-markdown-migration.md`：Markdown 渲染管线迁移背景。
 
 ## 状态变更记录

@@ -123,10 +123,9 @@ fn test_update_no_caps_projects_registry_entries_only() {
             c["_meta"].get("periCategory").is_none(),
             "基座条目不得附加 periCategory（全 None）"
         );
-        assert_eq!(
+        assert!(
             c["_meta"].get("periArgs").is_some(),
-            name == "clear" || name == "compact" || name == "rewind",
-            "clear/compact/rewind 已声明 args schema，实际: {name}"
+            "所有内置命令均已声明 args schema，实际: {name}"
         );
     }
     let by_name = |n: &str| {

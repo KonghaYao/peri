@@ -18,12 +18,14 @@
 //! (RCRA), or detectable by `drain_for_end` for external callers.
 
 use peri_acp_types::event::BackgroundTaskResult;
-use peri_acp_types::messages::{BaseMessage, MessageContent};
-use peri_acp_types::session::InboxHandle;
-use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::{InboxHandle, MessageKind, MessageSource};
+use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::workflow::{PhaseSummary, WorkflowTaskResult};
+use serde_json::json;
 use tracing::debug;
+
+use crate::session::producer_reminders::trusted_reminder;
 
 /// Routes async results (bg SubAgent completion, workflow events) into the Session inbox.
 ///
@@ -63,13 +65,50 @@ impl AsyncRouter {
             output_len = result.output.len(),
             "[bg-diag] route_bg_result: calling push_defer"
         );
-        let msg = BaseMessage::human(MessageContent::text(result.to_notification()));
         let source = match kind {
             BgTaskKind::Agent => MessageSource::SubAgentComplete,
             BgTaskKind::Shell => MessageSource::ShellComplete,
             BgTaskKind::Workflow => MessageSource::WorkflowComplete,
         };
-        self.inbox.push_defer(source, msg);
+        let reminder_source = match kind {
+            BgTaskKind::Agent => "subagent",
+            BgTaskKind::Shell => "shell",
+            BgTaskKind::Workflow => "workflow",
+        };
+        let reminder = trusted_reminder(
+            ReminderCategory::Task,
+            reminder_source,
+            if result.success {
+                "completed"
+            } else {
+                "failed"
+            },
+            if result.success {
+                ReminderSeverity::Info
+            } else {
+                ReminderSeverity::Error
+            },
+            ReminderDelivery::Configurable,
+            result.to_notification(),
+            Some(format!(
+                "{} {}",
+                result.agent_name,
+                if result.success {
+                    "completed"
+                } else {
+                    "failed"
+                }
+            )),
+            json!({
+                "task_id": result.task_id,
+                "agent_name": result.agent_name,
+                "success": result.success,
+                "timed_out": result.timed_out,
+                "child_thread_id": result.child_thread_id,
+            }),
+        );
+        self.inbox
+            .push_system_reminder(MessageKind::Defer, source, reminder);
         debug!(
             task_id = %result.task_id,
             agent_name = %result.agent_name,
@@ -80,8 +119,16 @@ impl AsyncRouter {
 
     /// Route a workflow completion using the canonical [`WorkflowTaskResult::to_notification`].
     pub fn route_workflow_task_result(&self, result: &WorkflowTaskResult) {
-        let msg = BaseMessage::human(MessageContent::text(result.to_notification()));
-        self.inbox.push_defer(MessageSource::WorkflowComplete, msg);
+        self.push_workflow_reminder(
+            &result.run_id,
+            &result.workflow_name,
+            result.notification_status_phrase(),
+            result.agent_facing_success(),
+            result.to_notification(),
+            result.duration_ms,
+            result.agent_count,
+            result.tool_calls_count,
+        );
         debug!(
             run_id = %result.run_id,
             workflow_name = %result.workflow_name,
@@ -140,12 +187,65 @@ impl AsyncRouter {
             {}Results saved to .claude/workflow-runs/{}/state.json",
             workflow_name, duration_ms, agent_count, tool_calls_count, phase_lines, run_id,
         );
-        let msg = BaseMessage::human(MessageContent::text(notif_text));
-        self.inbox.push_defer(MessageSource::WorkflowComplete, msg);
+        self.push_workflow_reminder(
+            run_id,
+            workflow_name,
+            status_word,
+            status == "completed",
+            notif_text,
+            duration_ms,
+            agent_count,
+            tool_calls_count,
+        );
         debug!(
             run_id = %run_id,
             workflow_name = %workflow_name,
             "AsyncRouter: routed workflow event to inbox"
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_workflow_reminder(
+        &self,
+        run_id: &str,
+        workflow_name: &str,
+        status: &str,
+        success: bool,
+        body: String,
+        duration_ms: u64,
+        agent_count: usize,
+        tool_calls_count: usize,
+    ) {
+        let kind = match status {
+            "completed" => "completed",
+            "killed" => "cancelled",
+            _ => "failed",
+        };
+        let reminder = trusted_reminder(
+            ReminderCategory::Task,
+            "workflow",
+            kind,
+            if success {
+                ReminderSeverity::Info
+            } else {
+                ReminderSeverity::Error
+            },
+            ReminderDelivery::Configurable,
+            body,
+            Some(format!("Workflow '{workflow_name}' {status}")),
+            json!({
+                "run_id": run_id,
+                "workflow_name": workflow_name,
+                "status": status,
+                "duration_ms": duration_ms,
+                "agent_count": agent_count,
+                "tool_calls_count": tool_calls_count,
+            }),
+        );
+        self.inbox.push_system_reminder(
+            MessageKind::Defer,
+            MessageSource::WorkflowComplete,
+            reminder,
         );
     }
 }

@@ -93,7 +93,7 @@ fn test_micro_compact_respects_ancestor_boundary() {
     let affected = micro_compact(&mut t, &config);
     assert_eq!(affected, 0, "ancestor 消息不应被截断");
     // ancestor 消息不应被标 truncated
-    let ancestor_id = t.entries()[0].message.id();
+    let ancestor_id = t.entries()[0].message().id();
     assert!(!t.flags(ancestor_id).truncated);
 }
 
@@ -152,7 +152,7 @@ fn test_micro_compact_truncates_tool_use_arguments() {
     );
 
     // 确认第 0 条 Ai 消息被标 truncated（tool_use input）
-    let ai_id = t.entries()[1].message.id();
+    let ai_id = t.entries()[1].message().id();
     assert!(
         t.flags(ai_id).truncated,
         "Ai 消息（含 Write tool_use arguments）应被 truncated"
@@ -298,10 +298,10 @@ fn test_protected_tools_not_selected() {
 
     // 验证 goal 的 tool_result 未被截断
     for entry in t.entries() {
-        if let BaseMessage::Tool { tool_call_id, .. } = &entry.message {
+        if let BaseMessage::Tool { tool_call_id, .. } = entry.message() {
             if tool_call_id.starts_with("call_") && !tool_call_id.contains("bash") {
                 assert!(
-                    !t.flags(entry.message.id()).truncated,
+                    !t.flags(entry.id()).truncated,
                     "受保护工具 goal 的 tool_result 不应被截断"
                 );
             }
@@ -333,12 +333,9 @@ fn test_error_tool_result_not_selected() {
     // 但 Ai 消息（含 Bash tool_use）仍可能被截断
     // 验证所有错误 tool_result 未被截断
     for entry in t.entries() {
-        if let BaseMessage::Tool { is_error, .. } = &entry.message {
+        if let BaseMessage::Tool { is_error, .. } = entry.message() {
             if *is_error {
-                assert!(
-                    !t.flags(entry.message.id()).truncated,
-                    "错误 ToolResult 不应被截断"
-                );
+                assert!(!t.flags(entry.id()).truncated, "错误 ToolResult 不应被截断");
             }
         }
     }
@@ -368,7 +365,7 @@ fn test_ancestor_never_selected() {
 
     // 祖先区域消息不应有任何标记
     for entry in t.entries().iter().take(3) {
-        assert!(!t.flags(entry.message.id()).truncated, "祖先消息不应被截断");
+        assert!(!t.flags(entry.id()).truncated, "祖先消息不应被截断");
     }
 }
 
@@ -456,8 +453,8 @@ fn test_micro_compact_short_param_tool_call_not_compacted() {
     let flagged_ai = t
         .entries()
         .iter()
-        .filter(|e| matches!(&e.message, BaseMessage::Ai { .. }))
-        .filter(|e| t.flags(e.message.id()).truncated)
+        .filter(|e| matches!(e.message(), BaseMessage::Ai { .. }))
+        .filter(|e| t.flags(e.id()).truncated)
         .count();
     assert_eq!(flagged_ai, 0, "短参数 tool_use 消息不应被标记 truncated");
 }
@@ -528,12 +525,12 @@ fn test_micro_compact_writes_projection_directives() {
     // 检查受影响消息的 flags.projection 非空
     let mut found_directive = false;
     for entry in t.entries() {
-        let flags = t.flags(entry.message.id());
+        let flags = t.flags(entry.id());
         if flags.truncated {
             assert!(
                 flags.projection.is_some(),
                 "truncated 消息应含 projection directive，msg_id={:?}",
-                entry.message.id()
+                entry.id()
             );
             let directive = flags.projection.as_ref().unwrap();
             assert_eq!(
@@ -567,7 +564,7 @@ fn test_micro_compact_projection_entries_match_plan_actions() {
     let mut directive_entries: Vec<crate::agent::compact_v2::projection::ProjectionActionEntry> =
         Vec::new();
     for entry in t.entries() {
-        let flags = t.flags(entry.message.id());
+        let flags = t.flags(entry.id());
         if let Some(ref directive) = flags.projection {
             directive_entries.extend(directive.entries.iter().cloned());
         }

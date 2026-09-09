@@ -45,8 +45,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     let messages_snapshot: std::sync::Arc<Vec<crate::messages::BaseMessage>> = std::sync::Arc::new(
         {
             let guard = ctx.session.transcript.read();
-            let visible: Vec<crate::messages::BaseMessage> =
-                guard.visible_messages().into_iter().cloned().collect();
+            let visible = guard.visible_model_messages()?;
 
             // 如果有 compact config，生成 plan 并渲染投影视图
             if let Some(ref config) = ctx.compact.compact_config {

@@ -32,7 +32,10 @@ use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Rect;
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{ACTIVE_PANEL, PANEL_SCROLL_OWNER, PANEL_SCROLL_THROTTLE, POPUP_KIND};
+use crate::kit::atoms::{
+    ACTIVE_PANEL, PANEL_SCROLL_OWNER, PANEL_SCROLL_PENDING_TARGET, PANEL_SCROLL_THROTTLE,
+    POPUP_KIND,
+};
 use crate::kit::message_area::scroll::{SCROLL_LINES, scroll_frame_ms};
 
 // ── 注册表 ──────────────────────────────────────────────────────────────
@@ -49,6 +52,13 @@ pub struct PanelScrollSlot {
 pub struct PanelScrollOwner {
     pub kind: PanelKind,
     pub slots: Vec<PanelScrollSlot>,
+}
+
+/// 节流 pending 的精确归属，避免双栏串滚或面板切换后误投递。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelScrollTarget {
+    pub kind: PanelKind,
+    pub slot_index: usize,
 }
 
 /// 面板渲染体调用：覆盖式注册本帧滚动槽位。
@@ -82,6 +92,20 @@ fn mouse_in_area(mouse_row: u16, mouse_col: u16, area: Rect) -> bool {
     mouse_row >= area.y && mouse_row < area_bottom && mouse_col >= area.x && mouse_col < area_right
 }
 
+fn hovered_area(
+    areas: impl IntoIterator<Item = Rect>,
+    mouse_row: u16,
+    mouse_col: u16,
+) -> Option<usize> {
+    areas
+        .into_iter()
+        .position(|area| mouse_in_area(mouse_row, mouse_col, area))
+}
+
+fn hovered_slot(slots: &[PanelScrollSlot], mouse_row: u16, mouse_col: u16) -> Option<usize> {
+    hovered_area(slots.iter().map(|slot| slot.area), mouse_row, mouse_col)
+}
+
 // ── 仲裁 handler ────────────────────────────────────────────────────────
 
 /// 面板滚轮仲裁（`Global+High`，由 PanelOverlay 挂载）。
@@ -107,26 +131,24 @@ pub fn handle_panel_scroll(event: &Event) -> EventResult {
     if *ACTIVE_PANEL.state().read() != Some(owner.kind) {
         return EventResult::Ignored;
     }
-    // 鼠标在面板内容区之外 → 放行（消息区或无人消费）
-    let in_panel = owner
-        .slots
-        .iter()
-        .any(|s| mouse_in_area(mouse.row, mouse.column, s.area));
-    if !in_panel {
+    let Some(slot_index) = hovered_slot(&owner.slots, mouse.row, mouse.column) else {
         return EventResult::Ignored;
-    }
+    };
     let delta = match mouse.kind {
         MouseEventKind::ScrollDown => SCROLL_LINES as i32,
         MouseEventKind::ScrollUp => -(SCROLL_LINES as i32),
         _ => unreachable!(),
     };
-    // 命中槽位驱动；未命中具体槽位（border/divider 列）仍 Consumed 防双滚
-    if let Some(slot) = owner
-        .slots
-        .iter()
-        .find(|s| mouse_in_area(mouse.row, mouse.column, s.area))
-    {
-        accumulate_and_flush(&slot.state, delta);
+    // 只驱动鼠标所在槽位；面板整体区域内的 border/divider 由消息区遮挡判定吞掉。
+    if let Some(slot) = owner.slots.get(slot_index) {
+        accumulate_and_flush(
+            &slot.state,
+            delta,
+            PanelScrollTarget {
+                kind: owner.kind,
+                slot_index,
+            },
+        );
     }
     EventResult::Consumed
 }
@@ -139,13 +161,19 @@ pub fn flush_panel_scroll_due() {
     if Instant::now().duration_since(st.last_flush) < Duration::from_millis(scroll_frame_ms()) {
         return;
     }
+    let target = PANEL_SCROLL_PENDING_TARGET.state().read().as_ref().copied();
+    let Some(target) = target else {
+        st.pending_delta = 0;
+        return;
+    };
     let pending = st.pending_delta;
     st.pending_delta = 0;
     st.last_flush = Instant::now();
     drop(st);
     if let Some(owner) = PANEL_SCROLL_OWNER.state().read().clone()
         && *ACTIVE_PANEL.state().read() == Some(owner.kind)
-        && let Some(slot) = owner.slots.first()
+        && owner.kind == target.kind
+        && let Some(slot) = owner.slots.get(target.slot_index)
     {
         // [Fix 竞态崩溃] 本函数在 PanelOverlay::update（组件 update 遍历）内执行，
         // 而 slot.state 是面板 ScrollView 组件的 State——同一遍历中 ScrollView 正在
@@ -163,9 +191,14 @@ pub fn flush_panel_scroll_due() {
 }
 
 /// 节流累积 + 窗口到点即 flush（事件驱动路径）。
-fn accumulate_and_flush(state: &State<ScrollViewState>, delta: i32) {
+fn accumulate_and_flush(state: &State<ScrollViewState>, delta: i32, target: PanelScrollTarget) {
     let throttle = PANEL_SCROLL_THROTTLE.state();
     let mut st = throttle.write_no_update();
+    let previous_target = PANEL_SCROLL_PENDING_TARGET.state().read().as_ref().copied();
+    if previous_target != Some(target) {
+        st.pending_delta = 0;
+        *PANEL_SCROLL_PENDING_TARGET.state().write_no_update() = Some(target);
+    }
     st.pending_delta += delta;
     let now = Instant::now();
     if now.duration_since(st.last_flush) < Duration::from_millis(scroll_frame_ms()) {
@@ -272,5 +305,34 @@ mod tests {
         assert!(!mouse_in_area(19, 10, area)); // 上边界外
         assert!(!mouse_in_area(20, 9, area)); // 左边界外
         assert!(!mouse_in_area(34, 70, area)); // 右下外
+    }
+
+    #[test]
+    fn test_hovered_slot_follows_mouse_position() {
+        let areas = [rect(0, 10, 40, 20), rect(40, 10, 60, 20)];
+
+        assert_eq!(hovered_area(areas, 15, 20), Some(0));
+        assert_eq!(hovered_area(areas, 15, 70), Some(1));
+        assert_eq!(hovered_area(areas, 9, 20), None);
+        assert_eq!(hovered_area(areas, 30, 70), None);
+    }
+
+    #[test]
+    fn test_scroll_target_distinguishes_hovered_slot_and_panel() {
+        let left = PanelScrollTarget {
+            kind: PanelKind::Model,
+            slot_index: 0,
+        };
+        let right = PanelScrollTarget {
+            kind: PanelKind::Model,
+            slot_index: 1,
+        };
+        let subagent = PanelScrollTarget {
+            kind: PanelKind::SubAgentDetail,
+            slot_index: 0,
+        };
+
+        assert_ne!(left, right, "左右栏必须有独立滚动归属");
+        assert_ne!(left, subagent, "切换面板后不得复用旧 pending 归属");
     }
 }

@@ -62,3 +62,5 @@ langfuse-client = { path = "../langfuse-client" }
 # 测试面（requests_test.rs 构造真实 WorkflowMiddleware：WorkflowRun /
 # AgentExecutor 等 registry/runner 类型仅测试构造使用，不构成协议/业务面依赖）
 peri-workflow = { path = "../peri-workflow" }
+peri-resources = { path = "../peri-resources" }
+tracing-subscriber.workspace = true
