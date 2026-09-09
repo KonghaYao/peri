@@ -1,14 +1,14 @@
 # peri-model 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-01
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-09（ModelStream 终态语义校准）
 > 依据：docs/standards/architecture-contracts.md、源码（无 crate 级 CLAUDE.md）
 
 ## 架构速览
 
 - 定位：与 provider 无关的协议 DTO + 流式优先模型接口（lib.rs:1）；只产消标准 `peri-model` 协议，不引用 Agent 事件/类型（anthropic/mod.rs:3）
 - 数据流：`ModelRequest → build_request（provider 适配）→ HttpTransport/SSE → provider decoder（ModelStreamEvent 流）→ ModelStream → 上层消费（peri-agent/src/agent/model_bridge.rs:246）`
-- 模型接口：`protocol/model.rs:150` 的 `Model` trait——`stream()`（:157）是唯一调用路径；`complete()`（:171）仅聚合 stream 事件，无独立非流式路径
-- 稳定不变量：`ModelStream` 持有 parent 的 child token，`abort()` 只取消本流、不反向取消父 token（model.rs:81-85）；流必须以 `Completed(ModelResponse)` 收尾，Completed 只发一次（model.rs:134-137, :222）；`ModelResponse::new` 强制 assistant message（types.rs:366/:374）；事实源关系：协议类型在 `protocol/`，adapter 配置在各自目录，`lib.rs:9-20` 统一 re-export；装配面（provider 工厂）在 `peri-acp/src/provider/mod.rs`（`LlmProvider::into_model`，OpenAi :271 / Anthropic :305 构造）
+- 模型接口：`protocol/model.rs:153` 的 `Model` trait——`stream()`（:163）是唯一调用路径；`complete()`（:170）仅聚合 stream 事件，无独立非流式路径
+- 稳定不变量：`ModelStream` 持有 parent 的 child token，`abort()` 只取消本流、不反向取消父 token（model.rs:81-85）；正常 provider decoder 应以单个 `Completed(ModelResponse)` 收尾，`complete()` 在首个 `Completed` 返回，EOF 未见 Completed 则报错（model.rs:212-222）；`ModelResponse::new` 强制 assistant message（types.rs:366/:374）；事实源关系：协议类型在 `protocol/`，adapter 配置在各自目录，`lib.rs:9-20` 统一 re-export；装配面（provider 工厂）在 `peri-acp/src/provider/mod.rs`（`LlmProvider::into_model`，OpenAi :271 / Anthropic :305 构造）
 
 ## 速查表
 

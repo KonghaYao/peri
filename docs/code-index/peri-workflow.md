@@ -1,13 +1,13 @@
 # peri-workflow 代码索引
 
-> 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-09-03
+> 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-09-09（Workflow RPC 所有权校准）
 > 依据：`docs/design/workflow.md`、`docs/standards/architecture-contracts.md`、源码（无 crate 级 CLAUDE.md）
 
 ## 架构速览
 
 - 定位：多 Agent 编排子系统。用户 JS ESM 脚本在独立 Node.js 进程运行，经 stdio NDJSON 与 Rust host 双向 JSON-RPC；agent 回调复用 v2 `run_react_loop`。
 - 主链：`WorkflowTool::invoke → preflight/GitBaseline → registry.reserve → WorkflowRunner::run → peri-js-runtime → Node engine → agent/run → AgentExecutor → Git postcondition/state.json → done_tx → registry.complete → session consumer → TUI/Defer`。
-- 入口：`peri-workflow/src/tool.rs::WorkflowTool::invoke`；执行与终态：`peri-workflow/src/runner.rs::WorkflowRunner::run`；通用进程/RPC host：`peri-js-runtime/src/{host,rpc}.rs`。
+- 入口：`peri-workflow/src/tool.rs::WorkflowTool::invoke`；执行与终态：`peri-workflow/src/runner.rs::WorkflowRunner::run`；通用进程 host 与 NDJSON framing/pending：`peri-js-runtime/src/{host,rpc}.rs`；Workflow agent ownership/kill：`peri-workflow/src/rpc.rs`。
 - 契约事实源：`peri-acp-types/src/workflow.rs` 的 `AgentExecutor`、`AgentRunParams`、`AgentRunResult`、`ProgressEvent`、四维状态、`WorkflowAttempt`、`WorkflowTaskResult`。wire 变更须同步 `npm-packages/@peri-workflow/src/types.ts`。
 - 并发不变量：start/resume 都先 `WorkflowTaskRegistry::reserve`，成功后才 spawn，并用 `attach_child` 绑定 task，拒绝路径不得产生 detached runner。
 - 交付不变量：engine `completed` 只表示 execution completed；acceptance、post-processing、delivery 独立投影。`acceptance_status: unknown` 且 execution/post-processing 成功时，delivery 保持 `unknown`；明确执行/验收/Git postcondition 失败才为 `blocked`。Git postcondition 只比较 Workflow 前后状态发生变化的路径，已有且未变化的无关 dirty path 不阻塞；异常只报告并 blocked，不执行 add/commit/stash/reset/restore/clean。
@@ -16,7 +16,7 @@
 
 | 我想做什么 | 主文件 | 稳定入口/关键逻辑 |
 | --- | --- | --- |
-| 改通用 JS RPC 传输/进程生命周期 | `peri-js-runtime/src/{rpc,host}.rs` | `RpcChannel::send_request`、`JsExecutionHost::spawn/kill/wait`；pending 先登记后写，stdout/exit/cancel drain pending，stderr 并行消费 |
+| 改通用 JS RPC 传输/进程生命周期 | `peri-js-runtime/src/{rpc,host}.rs` | `peri_js_runtime::RpcChannel::send_request`、`JsExecutionHost::spawn/kill/wait`；pending 先登记后写，stdout/exit/cancel drain pending，stderr 并行消费 |
 | 改 Workflow agent 挂起/kill | `peri-workflow/src/rpc.rs` | `register_agent`、`deregister_agent`、`kill_agent`；ownership token 防 stale deregister，kill 同时响应 RPC error 与 cancel |
 | 改脚本执行/Node 消息循环 | `peri-workflow/src/{runner,protocol}.rs` | `WorkflowRunner::run`、`workflow_start_params`、`parse_agent_run_params`；所有 run-scoped RPC 必须匹配 active run_id |
 | 改 Workflow 工具/preflight | `peri-workflow/src/tool.rs` | `WorkflowTool::invoke`、`preflight_validate_script`、`resolve_script_path`；run_id 前校验脚本、cwd/repo、writeIntent、JS-safe limits，并捕获 GitBaseline |
