@@ -224,10 +224,16 @@ impl JsExecutionHost {
             self.join_readers().await;
             return Ok(status);
         }
-        self.process_tree
-            .terminate(grace)
-            .await
-            .map_err(|error| JsRuntimeError::CleanupFailed(error.to_string()))?;
+        if let Err(error) = self.process_tree.terminate(grace).await {
+            // The child may exit after the first try_wait but before its process group is
+            // signalled. Some Unix platforms report that race as EPERM rather than ESRCH.
+            // Only suppress the signal error once the child confirms cleanup converged.
+            if let Some(status) = self.child.lock().await.try_wait()? {
+                self.join_readers().await;
+                return Ok(status);
+            }
+            return Err(JsRuntimeError::CleanupFailed(error.to_string()));
+        }
         let status = self.child.lock().await.wait().await?;
         self.join_readers().await;
         Ok(status)
