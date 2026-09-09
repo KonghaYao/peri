@@ -225,16 +225,35 @@ impl JsExecutionHost {
             return Ok(status);
         }
         if let Err(error) = self.process_tree.terminate(grace).await {
-            // The child may exit after the first try_wait but before its process group is
-            // signalled. Some Unix platforms report that race as EPERM rather than ESRCH.
-            // Only suppress the signal error once the child confirms cleanup converged.
-            if let Some(status) = self.child.lock().await.try_wait()? {
-                self.join_readers().await;
-                return Ok(status);
-            }
-            return Err(JsRuntimeError::CleanupFailed(error.to_string()));
+            return self.recover_termination_race(error, grace).await;
         }
         let status = self.child.lock().await.wait().await?;
+        self.join_readers().await;
+        Ok(status)
+    }
+
+    async fn recover_termination_race(
+        &self,
+        signal_error: std::io::Error,
+        grace: Duration,
+    ) -> Result<std::process::ExitStatus> {
+        // A successful SIGTERM can make the group leader a zombie before the immediate
+        // SIGKILL. macOS may report that window as EPERM while Tokio has not reaped the child
+        // yet, so one immediate try_wait is insufficient. Bound the reap wait, then retry the
+        // process group to kill any descendants that outlived the leader. Real signal failures
+        // remain fatal if the child does not exit or the retry cannot converge.
+        let status = {
+            let mut child = self.child.lock().await;
+            match tokio::time::timeout(grace, child.wait()).await {
+                Ok(Ok(status)) => status,
+                Ok(Err(error)) => return Err(error.into()),
+                Err(_) => return Err(JsRuntimeError::CleanupFailed(signal_error.to_string())),
+            }
+        };
+        self.process_tree
+            .terminate(grace)
+            .await
+            .map_err(|error| JsRuntimeError::CleanupFailed(error.to_string()))?;
         self.join_readers().await;
         Ok(status)
     }
