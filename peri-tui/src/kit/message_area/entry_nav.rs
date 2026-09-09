@@ -31,7 +31,7 @@ pub(super) fn move_entry_focus(
 /// entry 的折叠键 + 当前 fold（无折叠能力的 entry → `None`）。
 /// 与折叠 pass（`acp_events/render.rs::apply_fold_pass`）的键控口径一致：
 /// Reasoning(message_id) / Tool(tool_id) / SubAgent(agent_id) /
-/// Interaction(request_id)。
+/// Interaction(request_id) / SystemReminder(reminder_id)。
 pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(b) => {
@@ -56,6 +56,9 @@ pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
         )),
         TuiRenderUnit::TuiAskUserBlock(a) => {
             Some((FoldKey::Interaction(a.request_id.clone()?), a.fold))
+        }
+        TuiRenderUnit::TuiSystemReminder(r) => {
+            Some((FoldKey::SystemReminder(r.reminder_id), r.fold))
         }
         _ => None,
     }
@@ -141,6 +144,10 @@ pub(super) fn apply_fold_override(vm: &mut TuiRenderUnit, fold: FoldState) {
             a.fold = fold;
             a.user_modified = true;
             a.recompute_hash();
+        }
+        TuiRenderUnit::TuiSystemReminder(r) => {
+            r.fold = fold;
+            r.recompute_hash();
         }
         _ => {}
     }
@@ -262,7 +269,7 @@ pub(super) fn apply_fold_toggle(
         return EventResult::Consumed;
     };
     // [Slice 2] §6.7：subagent Enter → 打开详情 pane（不切折叠——subagent
-    // 折叠恒 Collapsed 是 §7 表裁决，fold_key_of 不动）；Tool/Reasoning 的
+    // 折叠恒 Collapsed 是 §7 表裁决，fold_key_of 不动）；Tool/Reasoning/SystemReminder 的
     // Enter 语义不变。写 SELECTED_SUBAGENT_ID 供详情面板按 id 从 VIEW_MODELS
     // 扫描嵌套消息。
     if !next_is_preview && let FoldKey::SubAgent(agent_id) = &fold_key {

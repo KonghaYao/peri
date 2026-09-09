@@ -11,8 +11,9 @@ use crate::kit::message_area::selection::build_wrap_map;
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldState, TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider,
     TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiSkillPresentation, TuiSubAgentGroup,
-    TuiSystemNote, TuiTodoChange, TuiTodoChangeKind, TuiTodoItem, TuiTodoPresentation,
-    TuiTodoStatus, TuiTodoSummary, TuiToolCard, TuiToolPresentation, TuiUserBubble,
+    TuiSystemNote, TuiSystemReminder, TuiTodoChange, TuiTodoChangeKind, TuiTodoItem,
+    TuiTodoPresentation, TuiTodoStatus, TuiTodoSummary, TuiToolCard, TuiToolPresentation,
+    TuiUserBubble,
 };
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
@@ -580,6 +581,44 @@ fn test_user_slash_at_emphasis() {
         emphasized.contains("/build") && emphasized.contains("@matt"),
         "slash/@ token 应局部强调，实际强调内容: {emphasized:?}"
     );
+}
+
+// ── System Reminder 折叠展示 ───────────────────────────────────────────────
+
+#[test]
+fn test_system_reminder_collapsed_shows_only_muted_header() {
+    let reminder = TuiSystemReminder::legacy("sensitive reminder body".into());
+    let unit = TuiRenderUnit::TuiSystemReminder(reminder);
+    let grid = GridSpec::with_content(80);
+    let lines = vm_to_lines(&unit, &grid);
+
+    assert_eq!(lines.len(), 1, "默认折叠时只显示 header");
+    assert!(!all_text(&lines).contains("sensitive reminder body"));
+    let sem = THEME_ATOM.state().read().semantic;
+    for span in &lines[0].spans {
+        if !span.content.trim().is_empty() && span.content.as_ref() != "\u{2502}" {
+            assert_eq!(span.style.fg, Some(sem.text.dim));
+            assert!(
+                !span.style.add_modifier.contains(Modifier::BOLD),
+                "header 不应使用 bold"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_system_reminder_expanded_shows_body() {
+    let mut reminder = TuiSystemReminder::legacy("first line\nsecond line".into());
+    reminder.fold = FoldState::Expanded;
+    reminder.recompute_hash();
+    let unit = TuiRenderUnit::TuiSystemReminder(reminder);
+    let grid = GridSpec::with_content(80);
+    let lines = vm_to_lines(&unit, &grid);
+
+    assert_eq!(lines.len(), 3, "展开后显示 header 与完整正文");
+    let text = all_text(&lines);
+    assert!(text.contains("first line"));
+    assert!(text.contains("second line"));
 }
 
 // ── Reasoning 三态（§6.3）──────────────────────────────────────────────

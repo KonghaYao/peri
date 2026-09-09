@@ -119,6 +119,33 @@ fn system_reminder_fallback_is_legacy_only_and_each_path_renders_once() {
 }
 
 #[test]
+#[serial]
+fn system_reminder_fold_override_survives_snapshot_rebuild() {
+    let mut state = make_fold_test_state();
+    dispatch_for_bridge(
+        &mut state,
+        &AcpEventData::SystemReminder {
+            reminder: reminder(),
+            replay: false,
+        },
+    );
+    let TuiRenderUnit::TuiSystemReminder(vm) = &state.committed[0] else {
+        panic!("structured reminder should render")
+    };
+    FOLD_OVERRIDES
+        .state()
+        .write()
+        .insert(FoldKey::SystemReminder(vm.reminder_id), FoldState::Expanded);
+
+    push_view_models(&mut state);
+
+    assert!(matches!(
+        &VIEW_MODELS.state().read().items[0],
+        TuiRenderUnit::TuiSystemReminder(vm) if vm.fold == FoldState::Expanded
+    ));
+}
+
+#[test]
 fn trusted_structured_dispatch_preserves_required_and_renders_marker() {
     let mut state = make_fold_test_state();
     let _ = dispatch_trusted_structured_for_bridge(

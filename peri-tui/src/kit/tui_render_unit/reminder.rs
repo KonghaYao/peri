@@ -3,9 +3,19 @@ use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderCategory, ReminderDelivery, ReminderFilter, ReminderSeverity,
     SystemReminder,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use super::fold::{FoldState, fold_state_code};
+use super::hash::{tui_hash_combine, tui_hash_str};
+
+static NEXT_REMINDER_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_reminder_id() -> u64 {
+    NEXT_REMINDER_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// 独立的 canonical/legacy reminder 展示模型，不附着用户气泡。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct TuiSystemReminder {
     pub wire: Option<SystemReminder>,
     pub summary: String,
@@ -15,7 +25,9 @@ pub struct TuiSystemReminder {
     pub severity: ReminderSeverity,
     pub required: bool,
     pub legacy: bool,
-    pub expanded: bool,
+    /// 仅用于当前 TUI session 的折叠身份，不进入 wire 或内容哈希。
+    pub reminder_id: u64,
+    pub fold: FoldState,
     pub content_hash: u64,
 }
 
@@ -70,7 +82,7 @@ impl TuiSystemReminder {
                 .unwrap_or_default()
                 .to_string()
         });
-        Some(Self {
+        let mut vm = Self {
             category: format!("{:?}", reminder.category),
             source: reminder.source.0.clone(),
             severity: reminder.severity,
@@ -78,17 +90,17 @@ impl TuiSystemReminder {
             body: reminder.body.clone(),
             summary,
             legacy: false,
-            expanded: false,
-            content_hash: crate::kit::tui_render_unit::tui_hash_str(
-                &serde_json::to_string(&reminder).unwrap_or_default(),
-            ),
+            reminder_id: next_reminder_id(),
+            fold: FoldState::Collapsed,
+            content_hash: 0,
             wire: Some(reminder),
-        })
+        };
+        vm.recompute_hash();
+        Some(vm)
     }
 
     pub fn legacy(text: String) -> Self {
-        Self {
-            content_hash: crate::kit::tui_render_unit::tui_hash_str(&text),
+        let mut vm = Self {
             summary: text.clone(),
             body: text,
             category: i18n::tr("reminder-system-reminder"),
@@ -96,11 +108,29 @@ impl TuiSystemReminder {
             severity: ReminderSeverity::Info,
             required: false,
             legacy: true,
-            expanded: false,
+            reminder_id: next_reminder_id(),
+            fold: FoldState::Collapsed,
+            content_hash: 0,
             wire: None,
-        }
+        };
+        vm.recompute_hash();
+        vm
+    }
+
+    pub fn recompute_hash(&mut self) {
+        let mut h = tui_hash_str(&self.summary);
+        h = tui_hash_combine(h, tui_hash_str(&self.body));
+        h = tui_hash_combine(h, tui_hash_str(&self.category));
+        h = tui_hash_combine(h, tui_hash_str(&self.source));
+        h = tui_hash_combine(h, self.severity as u64);
+        h = tui_hash_combine(h, u64::from(self.required));
+        h = tui_hash_combine(h, u64::from(self.legacy));
+        h = tui_hash_combine(h, fold_state_code(self.fold));
+        self.content_hash = h;
     }
 }
+
+tui_impl_partial_eq!(TuiSystemReminder: wire, summary, body, category, source, severity, required, legacy, reminder_id, fold);
 
 /// System-reminder 分类——10 种从 `<system-reminder>` 标签检测到的类型。
 #[derive(Debug, Clone, PartialEq)]

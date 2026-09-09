@@ -1,5 +1,6 @@
 use crate::i18n;
 use crate::kit::message_area::grid::GridSpec;
+use crate::kit::tui_render_unit::FoldState;
 use crate::truncate::{truncate_by_width, wrap_by_width};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -31,32 +32,22 @@ pub(super) fn render_system_reminder_lines(
         "{} · {} · {} · {:?}",
         marker, data.category, data.source, data.severity
     );
-    let mut lines = Vec::new();
-    for text in wrap_by_width(&heading, grid.content_width()) {
-        lines.push(prefixed_cont_line(
-            grid,
-            sem.text.secondary,
-            Line::from(Span::styled(
-                text,
-                Style::default()
-                    .fg(sem.text.secondary)
-                    .add_modifier(Modifier::BOLD),
-            )),
-        ));
-    }
-    for text in wrap_by_width(&data.summary, grid.content_width()) {
-        lines.push(prefixed_cont_line(
-            grid,
-            sem.text.secondary,
-            Line::from(Span::styled(text, Style::default().fg(sem.text.primary))),
-        ));
-    }
-    if data.expanded && data.body != data.summary {
-        for text in wrap_by_width(&data.body, grid.content_width()) {
+    let mut spans = first_prefix(grid, "\u{2502}", Style::default().fg(sem.text.dim));
+    spans.push(Span::styled(
+        truncate_by_width(&heading, grid.content_width()),
+        Style::default().fg(sem.text.dim),
+    ));
+    let mut lines = vec![Line::from(spans)];
+    if data.fold == FoldState::Expanded {
+        for text in data
+            .body
+            .lines()
+            .flat_map(|line| wrap_by_width(line, grid.content_width()))
+        {
             lines.push(prefixed_cont_line(
                 grid,
-                sem.text.secondary,
-                Line::from(Span::styled(text, Style::default().fg(sem.text.primary))),
+                sem.accents.reasoning,
+                Line::from(Span::styled(text, Style::default().fg(sem.text.muted))),
             ));
         }
     }
