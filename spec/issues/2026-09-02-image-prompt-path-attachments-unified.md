@@ -123,7 +123,7 @@ cargo test -p peri-middlewares --lib middleware::image
 | TUI `PENDING_ATTACHMENTS` 写入与 wire 同步 | UI 占位，与 P0 attachments 丢失无关 |
 | `cli_print` 图片 / 多模态 | 见 `2026-07-25-stdio-missing-features.md` |
 | ImageMiddleware 行为变更 | 已满足 TUI `@image`；P0 只修 ACP 提取 |
-| TUI 改为发 `attachments` 而非 `@image` | 违背既有「transport 轻量、路径在 middleware」设计（`spec/archive-issues/agent-core/2026-07-29-image-input-support.md`） |
+| TUI 改为发 `attachments` 而非 `@image` | 违背既有「transport 轻量、路径在 middleware」设计（历史设计记录由 Git 保留） |
 
 ## 涉及文件
 

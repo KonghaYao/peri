@@ -2,7 +2,7 @@
 
 > 本文件是「外部 MCP server ↔ view 层」透传信道的设计定稿，回答一个问题：**ACP 只有一条连接，多个 MCP server 的数据（App 交互、工具结果、通知）如何在这条信道上分离路由，保证数据正确送达正确的接收方。**
 >
-> 状态：**已批准目标设计，尚未成为完整代码事实**——最小 ACP stdio relay 的进度由 `spec/issues/2026-08-27-mcp-apps-stdio-relay.md` 维护；在对应契约测试通过前，本文描述的 Apps capability、envelope、session 与 relay 均不得视为已实现
+> 状态：**现行设计**——stdio relay 由 `PERI_MCP_APPS` deployment profile 启用；Apps envelope、binding lease、resource relay 与 canonical Permission/HITL 工具调用已落地。下游 Web Host、iframe 与 TUI Apps 渲染不在 Peri relay 范围内。
 > 关联文档：`docs/reference/mcp-ecosystem.md`（MCP 生态定位，§6 MCP Apps、§9 内部落地）；`docs/design/peri-acp-protocol.md`（ACP 协议）
 > 本文是 Perihelion 内部 relay 的目标设计，不复制或替代外部 MCP/MCP Apps 规范。
 

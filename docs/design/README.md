@@ -14,8 +14,8 @@
   验收勾选只写对应 `spec/issues/`。
 
 draft、proposal、可行性探查、审计报告和未采纳方案不进入本目录。需要长期保留的
-外部生态或操作资料放 `docs/reference/`；过程与历史由 active/archive issue 和 Git
-历史承载。
+外部生态或操作资料放 `docs/reference/`；过程由 active issue 承载，完整历史由 Git
+保留。
 
 ## 现行设计
 
@@ -33,6 +33,8 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 消息存储 | [message-transcript.md](message-transcript.md) | Transcript、MessageQueue、staging 与持久化 |
 | Compact | [micro-compact.md](micro-compact.md) | 压缩计划与 LLM projection |
 | Dynamic MCP | [dynamic-mcp.md](dynamic-mcp.md) | session 动态加载、目录发布与关闭 |
+| MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | stdio Apps profile、binding lease 与多路数据隔离 |
+| Meta 数据访问 | [meta-control.md](meta-control.md) | 只读 session metadata CLI 与持久化边界 |
 | Workflow | [workflow.md](workflow.md) | Node RPC、runner、通知、kill 与 resume |
 | Ultra-ADLC | [ultra-adlc.md](ultra-adlc.md) | 超大交付模式的文件协议与编排契约 |
 | TUI 数据流 | [tui-acp-data-flow.md](tui-acp-data-flow.md) | ACP event → Atom → render 链路 |
@@ -45,8 +47,6 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
-| Meta 数据访问 | [meta-control.md](meta-control.md) | `spec/issues/2026-09-04-peri-meta-control.md` |
-| MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | `spec/issues/2026-08-27-mcp-apps-stdio-relay.md` |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/issues/2026-08-10-chat-redesign-slice2-onwards.md` |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |
 

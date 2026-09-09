@@ -36,7 +36,7 @@ peri-fuse（本地服务 localhost:23332）   ③ 接收端：Langfuse OTel attr
 | 服务端 attribute 映射 | peri-fuse `dist/server.cjs` 内 `LangfuseOtelSpanAttributes`（与官方 Langfuse 一致） |
 | 配置 | 项目根 `.env`：`LANGFUSE_BASE_URL`（**注意不是** `LANGFUSE_HOST`，两者同名键易混淆） |
 | 查询工具 | `.claude/skills/langfuse/`（trace-search / daily-report / analyze / session-analyze 等脚本 + `bunx langfuse-cli`） |
-| 历史问题 | `spec/archive-issues/langfuse/` |
+| 历史问题 | `spec/global/problems.md`（完整记录通过 Git 检索） |
 
 ---
 
@@ -143,7 +143,7 @@ bunx langfuse-cli api traces list --limit 10 --json                        # CLI
 | 1 | **GENERATION 全部/部分无 input** | §3.1 按天趋势 | 某天起 input 完整率骤降为 0 | 曾因 tracer 事件构造 `input` 硬编码 `None` 引入（2026-08-08 重构，2026-08-15 修复）；**修复需重启 peri 进程生效** |
 | 2 | **AGENT 无 input**（agent-run/subagent） | §3.1 类型统计 | AGENT 完整率低 | 同上重构删除 `agent_input` 存储逻辑；2026-08-15 已恢复（`on_turn_start` 暂存 → agent-run input） |
 | 3 | **TOOL 无 input** | §3.1 类型统计 | TOOL 完整率低 | 已修复（2026-08-10）；若出现新缺口按天断点定位 |
-| 4 | SPAN 数量爆炸（>> turn × 5） | `SELECT COUNT(*) FROM observations WHERE type='SPAN'` | 单 turn 理论 stage 数 5 + batch | stage span 未成对关闭会堆积；查 `spec/archive-issues/langfuse/2026-08-03-*.md`（顺序错乱） |
+| 4 | SPAN 数量爆炸（>> turn × 5） | `SELECT COUNT(*) FROM observations WHERE type='SPAN'` | 单 turn 理论 stage 数 5 + batch | stage span 未成对关闭会堆积；按 `spec/global/problems.md` 的 Langfuse 路由查 Git 历史 |
 | 5 | 缓存命中率异常（0% 或缺失 cache_read） | `trace-tokens.ts` / usage 直查 | 同模型同 prompt 应命中缓存 | `2026-07-22-langfuse-cache-tokens-not-recorded.md` |
 | 6 | 父链断裂（parent 不存在） | §3.1 父链 SQL | 带 `obs_`/`span_`/`gen_`/`batch_` 前缀的 parent 查无此 id 即断裂 | 2026-08-15 实测存在 5151 条：stage span 挂在缺失的 TOOL obs 下（TOOL 未落库但子 span 已上传，疑似采样/丢弃不一致，待查） |
 | 7 | 并行 subagent 下 step 顺序乱/span 挂错 | `analyze.ts --tools` + trace 详情 | 并行 agent 的 generation 应各归其 AGENT obs | `2026-08-03-langfuse-trace-step-order-shuffled-with-parallel-subagents.md`（已按 agent 隔离修复） |

@@ -23,8 +23,8 @@
 ### TUI-EVENT-001
 
 - **Scope**：事件 handler 与交互区域。
-- **Rule**：消息区只消费鼠标滚轮，编辑区处理键盘；弹窗和面板等局部取消事件使用高于全局 handler 的优先级，避免被全局事件截断。
-- **Verify**：`cargo test -p peri-tui --lib`；人工检查 `use_event_handler` 的 scope、`EventPriority` 和 `EventResult`。
+- **Rule**：键盘按当前 focus owner 路由；鼠标按最近完成帧的语义命中区域、z-order 与 pointer capture 路由。弹窗和面板等前景区域必须先于背景处理并消费遮罩/关闭事件，避免背景 click-through；消息区的滚动、点击、拖拽与选择必须复用既有语义 handler，不得以注册偶然顺序形成冲突。
+- **Verify**：`cargo test -p peri-tui --lib`；人工检查 `use_event_handler` 的 scope、`EventPriority`、`EventResult`、命中区域与 pointer capture 生命周期。
 
 ### TUI-I18N-001
 
