@@ -32,7 +32,12 @@ pub(super) fn render_system_reminder_lines(
         "{} · {} · {} · {:?}",
         marker, data.category, data.source, data.severity
     );
-    let mut spans = first_prefix(grid, "\u{2502}", Style::default().fg(sem.text.dim));
+    let symbol = if data.fold == FoldState::Expanded {
+        sym().expanded
+    } else {
+        sym().collapsed
+    };
+    let mut spans = first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
     spans.push(Span::styled(
         truncate_by_width(&heading, grid.content_width()),
         Style::default().fg(sem.text.dim),

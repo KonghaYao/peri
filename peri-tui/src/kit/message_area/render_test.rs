@@ -6,6 +6,7 @@
 //!   不折行」（metadata 右对齐到消息区右缘，§6.4）。
 //! - 前缀结构（§3.1）：首行 `[outer 空][accent 符号][gap]`，续行 `[outer 空][│][gap]`。
 
+use super::helpers::sym;
 use super::*;
 use crate::kit::message_area::selection::build_wrap_map;
 use crate::kit::tui_render_unit::{
@@ -593,6 +594,11 @@ fn test_system_reminder_collapsed_shows_only_muted_header() {
     let lines = vm_to_lines(&unit, &grid);
 
     assert_eq!(lines.len(), 1, "默认折叠时只显示 header");
+    assert_eq!(
+        lines[0].spans[1].content.as_ref(),
+        sym().collapsed,
+        "折叠 header 左侧应显示展开按钮"
+    );
     assert!(!all_text(&lines).contains("sensitive reminder body"));
     let sem = THEME_ATOM.state().read().semantic;
     for span in &lines[0].spans {
@@ -616,6 +622,11 @@ fn test_system_reminder_expanded_shows_body() {
     let lines = vm_to_lines(&unit, &grid);
 
     assert_eq!(lines.len(), 3, "展开后显示 header 与完整正文");
+    assert_eq!(
+        lines[0].spans[1].content.as_ref(),
+        sym().expanded,
+        "展开 header 左侧应显示收起按钮"
+    );
     let text = all_text(&lines);
     assert!(text.contains("first line"));
     assert!(text.contains("second line"));
