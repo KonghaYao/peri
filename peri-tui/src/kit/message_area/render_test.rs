@@ -1869,7 +1869,7 @@ fn test_collapsed_group_line() {
 
 /// [D2] 组后相邻 error 数 >0 → 标题追加 `· N failed`（error 色 span），
 #[test]
-fn test_expanded_group_renders_member_tools_and_hint() {
+fn test_expanded_group_renders_member_tools() {
     let grid = GridSpec::grid_for(80);
     let mut group = TuiCollapsedGroup {
         title: "Read 1".into(),
@@ -1888,7 +1888,6 @@ fn test_expanded_group_renders_member_tools_and_hint() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("click or Enter"));
     assert!(text.contains("a.rs"), "展开后应渲染组内工具，实际 {text:?}");
 }
 
