@@ -6,7 +6,7 @@
 ## 架构速览
 
 - 数据流：`ACP transport → acp_client pump（interaction_lifecycle 在 forward 前分配 semantic owner；ordinary notification 按 Stable/Transitioning/NoSession 路由）→ acp_notifier（owner + RequestId debug JSON + payload，不写 UI）→ acp_bridge（publish_if_owned 持 operation gate 完成 final owner/projection check；bridge-local 50 ms single-pending scheduler 合并主 Agent Streaming publication，reset/terminal/receiver-close/shutdown 失效 pending）→ dispatch_for_bridge（canonical ingest + PublicationIntent）→ VIEW_MODELS/ACP_STATE → components；CurrentTurn mutation lazy projection，response action 只能按 owner first-claim，terminal cleanup compare-and-clear 同 owner surface`
-- 提交链路：`InputArea（input_area.rs:148）→ SubmitRequest（submit_request.rs:5）→ SUBMIT_TX（atoms.rs:256）→ submit_consumer（submit_consumer.rs:46）→ AcpTuiClient::ensure_session / prompt（client.rs:719/:879）→ ACP transport`；取消经 CANCEL_TX（atoms.rs:257）→ `spawn_cancel_consumer`（submit_consumer.rs:412）
+- 提交链路：`InputArea（input_area.rs:117）→ SubmitRequest（submit_request.rs:5）→ SUBMIT_TX（atoms.rs:256）→ submit_consumer（submit_consumer.rs:46）→ AcpTuiClient::ensure_session / prompt（client.rs:719/:879）→ ACP transport`；取消经 CANCEL_TX（atoms.rs:257）→ `spawn_cancel_consumer`（submit_consumer.rs:412）
 - 入口：`main.rs:409 main` → `run_tui`（:624）→ `kit/entry.rs:52 run_kit_fullscreen`（spawn kit 各链路）→ `launch.rs:41 build_app_and_acp`（App + AcpTuiClient + consumer 装配）
 - 稳定不变量：ACP 是交互与 Agent 执行边界（ARC-BOUNDARY-001）；`BridgeState` 是事件 → 状态边界（切换会话/重置须过滤陈旧事件，BRIDGE_RESET_COUNTER 清理）；render body 不写 atom；hooks 稳定顺序；交互事件按焦点/优先级分发；用户可见文本走 i18n 双 FTL（i18n/mod.rs:35 `tr`）；文本按 Unicode 字符边界/显示宽度处理
 
@@ -16,7 +16,7 @@
 | --- | --- | --- | --- |
 | 改 System Reminder 展示 | `src/kit/acp_types/event_data.rs` + `src/kit/acp_events/system.rs` + `src/kit/tui_render_unit/{reminder,fold}.rs` + `src/kit/message_area/{entry_nav.rs,render/user.rs}` | `AcpEventData::SystemReminder`；canonical event handler；`TuiSystemReminder::from_wire` / `legacy`；`FoldKey::SystemReminder`；reminder render | canonical 路径只按 DTO 字段建模；reminder 默认只显示 dim 非 bold header，左侧以 `▸/▾` 表达折叠态，点击/Enter 经通用 fold override 展开正文；`detect_reminder` 仅处理无结构化事件的 legacy 文本 fallback；reminder 独立于用户气泡 |
 | 改消息流渲染 | `src/kit/message_area/mod.rs` + `message_area/render.rs` + `message_area/vm_cache.rs` + `message_area/selection.rs` + `grid.rs` | `MessageArea`；`vm_to_lines_cached`；`MarkdownLineCache`；`SlotLines::{single,composite}`；`SlotIndex::{new,visual_lookup,logical_lookup}` | 变化 Markdown 复用 stable rendered chunks 与 local wrap map；slot 用 chrome/tail slice + stable chunk `Arc` composite access，避免把稳定 `Line` clone 回 contiguous Vec；全局坐标通过 O(VM) prefix + slot-local lookup，production 不 flatten transcript wrap map；Unicode 按显示宽度映射 |
-| 改 keepgoing 按钮行为 | `src/kit/message_area/mod.rs` + `footer.rs` + `src/kit/submit_consumer.rs` | 点击 handler（mod.rs:956，Global+High，须在 scroll handler 前注册）；防抖常量 `KEEPGOING_DEBOUNCE`（mod.rs:58）+ `KEEPGOING_BLOCKED_UNTIL`；按钮布局 `build_footer_lines`/`KeepGoingLayout`（footer.rs:100/:85）、rect 每帧更新（`compute_keepgoing_rect` mod.rs:2040）；提交 `handle_keepgoing_submit`（submit_consumer.rs:255） | 命中检测用最近一帧按钮 rect；防抖期内点击 Consumed 不提交；提交 = 空白 user prompt（服务端不插消息仅继续 loop）；契约 ARC-KEEPGOING-001（唯一生产者） |
+| 改 keepgoing 按钮行为 | `src/kit/message_area/mod.rs` + `footer.rs` + `src/kit/submit_consumer.rs` | 点击 handler（mod.rs:956，Global+High，须在 scroll handler 前注册）；防抖常量 `KEEPGOING_DEBOUNCE`（mod.rs:58）+ `KEEPGOING_BLOCKED_UNTIL`；按钮布局 `build_footer_lines`/`KeepGoingLayout`（footer.rs:100/:85）、rect 每帧更新（`compute_keepgoing_rect` mod.rs:2040）；提交 `handle_keepgoing_submit`（submit_consumer.rs:202） | 命中检测用最近一帧按钮 rect；防抖期内点击 Consumed 不提交；提交 = 空内容 user prompt（服务端不插消息仅继续 loop；纯空白文本不等价）；契约 ARC-KEEPGOING-001（唯一生产者） |
 | 改事件消费（新增/变更事件） | `src/kit/acp_bridge.rs` + `src/kit/acp_events/` + `acp_notifier.rs` | `spawn_acp_bridge_inner` / `PublicationScheduler`；`dispatch_for_bridge` → `PublicationIntent`；`push_view_models` | 事件先 canonical ingest，再由 bridge 合帧主 Agent Streaming publication；首 text/reasoning、block boundary 与 terminal 可立即，50 ms fixed deadline 不 debounce；reset/session/receiver-close/shutdown 失效 pending；终止事件必须离开 loading；root usage_update 仍按 session envelope 处理 |
 | 改 Goal 状态栏与详情面板 | `src/kit/status_bar.rs` + `src/kit/panels/goal.rs` + `src/kit/acp_{notifier,bridge}.rs` + `src/kit/acp_events/system.rs` + `src/kit/session_boundary.rs` | `AcpEventData::GoalSnapshot`；`handle_goal_snapshot`；`GOAL_SNAPSHOT`；`PanelKind::Goal` | notifier 只解码并转发；bridge 完成 session ownership 校验后写 Goal atom；状态栏显示状态和主动接续次数，点击打开只读详情；session transition 清快照并关闭面板 |
 | 改 compact 信息展示 | `src/kit/acp_notifier.rs` + `src/kit/acp_types/event_data.rs` + `src/kit/acp_events/compact.rs` + 双语 `locales/*/main.ftl` | `convert_agent_event`；`handle_compact_started` / `handle_compact_completed` | 单一 ACP `peri/agent_event` 路径消费 started/completed；完成时按 strategy 显示压缩类型，并展示受影响消息数、估算节省 token、files/skills，manual 仍保留跨 replay note，auto 不触发 session/load |
@@ -34,17 +34,17 @@
 
 | 组件 | 文件 | 职责 |
 | --- | --- | --- |
-| MessageArea（消息流 + footer + keepgoing 按钮） | `message_area/mod.rs`（MessageArea :627） | 消息流渲染主组件；滚动/点击/选区事件注册；footer 行与 keepgoing 按钮命中 |
+| MessageArea（消息流 + footer + keepgoing 按钮） | `message_area/mod.rs`（MessageArea :89） | 消息流渲染主组件；滚动/点击/选区事件注册；footer 行与 keepgoing 按钮命中 |
 | footer/spinner 行 | `message_area/footer.rs` | `build_footer_lines`（:100）：loading spinner / summary / todo 行 + `KeepGoingLayout`（:85）；防抖期按钮禁用样式 |
 | GridSpec 网格 | `message_area/grid.rs` | 断点（`Breakpoint` :17）与行首/续行前缀宽度；全部行渲染的对齐基准 |
 | scroll 滚动引擎 | `message_area/scroll.rs` | `handle_event`（:516）；滚轮节流、拖拽选中、键盘滚动、吸底跟随（`should_follow_after_user_scroll` :378） |
 | 语义选区 | `message_area/selection.rs` | 拖拽选区与语义复制（`map_slice_to_semantic` :469，复制时剥视觉前缀） |
 | markdown 渲染 | `markdown/`（convert.rs / code_block.rs / table.rs / scan.rs） | 文本 → 带样式的行渲染；代码块、表格、扫描 |
-| subagent 工具行 | `message_area/render.rs` | `render_subagent_group_lines`（:1664）、`subagent_tool_line`（:1724，固定 2 格缩进 `SUBAGENT_TOOL_INDENT` :34、label 无 bold）、`subagent_error_reason_line`（:1800，错误不弱化） |
+| subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`（:29）、`subagent_tool_line`（:92，固定 2 格缩进 `SUBAGENT_TOOL_INDENT` :22、label 无 bold）、`subagent_error_reason_line`（:168，错误不弱化） |
 | InputArea（输入区） | `input_area.rs` | 编辑、@mention、slash 补全、提交分发（`dispatch_submit_request` :1165）；多行渲染按显示宽度 |
 | input_history（输入历史） | `input_history.rs` | `push_history`（:23）/`history_up`（:54）；持久化 `~/.peri/input-history.json`（唯一存储，`load_history` :119） |
-| StatusBar（状态栏） | `status_bar.rs` | `StatusBar`（:322）：Row1/Row2/NotifRow、模型点击区（:400）、权限模式显示 |
-| BgTaskArea（后台任务栏） | `bg_task_area.rs` | `BgTaskArea`（:41）：bg agent 运行中条目 + 动画 |
+| StatusBar（状态栏） | `status_bar.rs` | `StatusBarProps`（:353）/`StatusBar`（:361）：Row1/Row2/NotifRow、模型点击区、权限模式显示 |
+| BgTaskArea（后台任务栏） | `bg_task_area.rs` | `BgTaskArea`（:46）：bg agent 运行中条目 + 动画 |
 | Welcome（空态欢迎屏） | `welcome.rs` | `Welcome`（:94）：logo + 会话空态引导 |
 | AppShell / SessionColumn | `app_shell.rs` + `layout.rs` | `AppShell`（app_shell.rs:23）顶层外壳；`SessionColumn`（layout.rs:100）+ `layout_plan`（:75）垂直布局 |
 | SlashCompletion / MentionPopup | `slash_completion.rs` + `mention_popup.rs` | slash 命令补全弹窗（fuzzy 过滤，仅搜索层）；文件 @mention 弹窗 |

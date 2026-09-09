@@ -36,6 +36,39 @@ fn make_ai_with_read_tool(file_path: &str) -> BaseMessage {
 
 struct FullLifecycleModel;
 
+struct CapturingFullModel {
+    requests: std::sync::Mutex<Vec<ModelRequest>>,
+}
+
+#[async_trait]
+impl Model for CapturingFullModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        FullLifecycleModel.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        Err(ModelError::cancelled())
+    }
+
+    async fn complete(
+        &self,
+        request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelResponse> {
+        self.requests.lock().unwrap().push(request);
+        Ok(ModelResponse::new(
+            ModelMessage::assistant_text("<summary>captured</summary>"),
+            StopReason::EndTurn,
+            None,
+            None,
+        )?)
+    }
+}
+
 #[async_trait]
 impl Model for FullLifecycleModel {
     fn capabilities(&self) -> ModelCapabilities {
@@ -71,6 +104,53 @@ impl Model for FullLifecycleModel {
 }
 
 // ── Full Compact 测试 ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn full_compact_model_input_comes_from_canonical_transcript() {
+    let original = "ORIGINAL_HISTORY_CANONICAL";
+    let projected = "... [999 字符已省略] ...";
+    let mut transcript = MessageTranscript::new();
+    transcript.append(make_human("summarize the history"));
+    transcript.append(BaseMessage::ai_with_tool_calls(
+        MessageContent::text("historical tool call"),
+        vec![crate::messages::ToolCallRequest::new(
+            "canonical-write",
+            "Write",
+            serde_json::json!({"file_path": original, "content": "unchanged"}),
+        )],
+    ));
+    transcript.append(BaseMessage::tool_result(
+        "canonical-write",
+        MessageContent::text(projected),
+    ));
+
+    let model = CapturingFullModel {
+        requests: std::sync::Mutex::new(Vec::new()),
+    };
+    let result = full_compact_inner(
+        &mut transcript,
+        Some(&model),
+        &CompactConfig::default(),
+        "/tmp",
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "无 persistence 的测试 transcript 应在 model capture 后拒绝 lifecycle commit"
+    );
+
+    let requests = model.requests.lock().unwrap();
+    let request = requests.first().expect("Full model 应收到一次请求");
+    let body = serde_json::to_string(request).unwrap();
+    assert!(
+        body.contains(original),
+        "Full 输入必须读取 canonical transcript"
+    );
+    assert!(
+        body.contains(projected),
+        "Full 不得改写 canonical transcript 内容"
+    );
+}
 
 #[tokio::test]
 async fn full_compact_preserves_canonical_reminder_without_flags() {

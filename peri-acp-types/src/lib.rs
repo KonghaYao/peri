@@ -62,6 +62,7 @@ pub mod plugin;
 pub mod ports;
 pub mod projection;
 pub mod runtime;
+pub mod sentinel;
 pub mod session;
 pub mod skills;
 pub mod store;

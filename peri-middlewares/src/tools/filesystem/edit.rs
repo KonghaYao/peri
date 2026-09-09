@@ -1,7 +1,7 @@
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
 
-use super::resolve_path;
+use super::transaction::{target_key, with_target_lock, CommitError, SENTINEL_REJECTION};
 
 const EDIT_FILE_DESCRIPTION: &str = include_str!("descriptions/edit.md");
 
@@ -155,118 +155,106 @@ impl BaseTool for EditFileTool {
             return Err("Error: old_string cannot be empty".into());
         }
 
-        let resolved = resolve_path(&self.cwd, file_path);
+        let resolved = target_key(&self.cwd, file_path);
 
-        let content = match std::fs::read_to_string(&resolved) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(format!("Error: File not found at {file_path}").into());
-            }
-            Err(e) => return Err(e.into()),
-        };
+        with_target_lock(&resolved, |locked| {
+            let pre = match locked.read_pre() {
+                Ok(Some(content)) => content,
+                Ok(None) => return Err("Error: File not found".into()),
+                Err(_) => return Err("Edit failed while reading the file.".into()),
+            };
+            let content = match String::from_utf8(pre.clone()) {
+                Ok(content) => content,
+                Err(_) => return Err("Edit failed while reading the file.".into()),
+            };
 
-        let old_lines = old_string.lines().count();
-        let new_lines = new_string.lines().count();
-        let line_diff = new_lines as i64 - old_lines as i64;
-        let rel = resolved
-            .strip_prefix(&self.cwd)
-            .unwrap_or(&resolved)
-            .display()
-            .to_string();
+            let old_lines = old_string.lines().count();
+            let new_lines = new_string.lines().count();
+            let line_diff = new_lines as i64 - old_lines as i64;
+            let rel = resolved
+                .strip_prefix(&self.cwd)
+                .unwrap_or(&resolved)
+                .display()
+                .to_string();
 
-        // 构建行数变化描述。行数不变（Equal）时仍报告被替换的行数
-        // （= old_string 行数，±0 也有变更量）——TUI 依赖摘要中的计数
-        // 展示 `· +N · -N` 后缀；旧文本 "Replaced text (same line count)"
-        // 无计数信息，TUI 无法展示变更摘要。
-        let diff_desc = match line_diff.cmp(&0) {
-            std::cmp::Ordering::Greater => format!(
-                "Added {} line{}",
-                line_diff,
-                if line_diff == 1 { "" } else { "s" }
-            ),
-            std::cmp::Ordering::Less => format!(
-                "Removed {} line{}",
-                -line_diff,
-                if -line_diff == 1 { "" } else { "s" }
-            ),
-            std::cmp::Ordering::Equal => format!(
-                "Replaced {} line{}",
-                old_lines,
-                if old_lines == 1 { "" } else { "s" }
-            ),
-        };
+            // 构建行数变化描述。行数不变（Equal）时仍报告被替换的行数
+            // （= old_string 行数，±0 也有变更量）——TUI 依赖摘要中的计数
+            // 展示 `· +N · -N` 后缀；旧文本 "Replaced text (same line count)"
+            // 无计数信息，TUI 无法展示变更摘要。
+            let diff_desc = match line_diff.cmp(&0) {
+                std::cmp::Ordering::Greater => format!(
+                    "Added {} line{}",
+                    line_diff,
+                    if line_diff == 1 { "" } else { "s" }
+                ),
+                std::cmp::Ordering::Less => format!(
+                    "Removed {} line{}",
+                    -line_diff,
+                    if -line_diff == 1 { "" } else { "s" }
+                ),
+                std::cmp::Ordering::Equal => format!(
+                    "Replaced {} line{}",
+                    old_lines,
+                    if old_lines == 1 { "" } else { "s" }
+                ),
+            };
 
-        if replace_all {
-            if !content.contains(old_string) {
-                let hint = build_not_found_hint(&content, old_string);
-                return Err(format!(
-                    "Error: old_string not found in {}\n{hint}",
-                    resolved.display()
-                )
-                .into());
-            }
-            let new_content = content.replace(old_string, new_string);
-            let occurrences = content.matches(old_string).count();
-            // 原子写入：先写临时文件再 rename
-            let tmp_ext = format!("tmp.{}", uuid::Uuid::now_v7());
-            let tmp_path = resolved.with_extension(tmp_ext);
-            std::fs::write(&tmp_path, &new_content)?;
-            // 恢复原文件的 Unix 权限位（含可执行位），防止原子写入后 +x 丢失
-            if let Ok(metadata) = std::fs::metadata(&resolved) {
-                #[cfg(unix)]
-                {
-                    let _ = std::fs::set_permissions(&tmp_path, metadata.permissions());
-                }
-                #[cfg(not(unix))]
-                let _ = &metadata; // Windows 上 #[cfg(unix)] 排除后 metadata 未使用
-            }
-            match std::fs::rename(&tmp_path, &resolved) {
-                Ok(_) => Ok(format!(
-                    "{} to {} (replaced {} occurrence{})",
-                    diff_desc,
-                    rel,
-                    occurrences,
-                    if occurrences == 1 { "" } else { "s" }
-                )),
-                Err(e) => {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    Err(format!("Error renaming temp file: {e}").into())
-                }
-            }
-        } else {
-            let occurrences = content.matches(old_string).count();
-            if occurrences == 0 {
-                let hint = build_not_found_hint(&content, old_string);
-                return Err(format!(
-                    "Error: old_string not found in {}\n{hint}",
-                    resolved.display()
-                )
-                .into());
-            }
-            if occurrences > 1 {
-                let locations: Vec<String> = content
-                    .match_indices(old_string)
-                    .take(10)
-                    .map(|(offset, _)| {
-                        let line = content[..offset].lines().count() + 1;
-                        let end_line = line + old_string.lines().count().saturating_sub(1);
-                        if end_line > line {
-                            format!("lines {}-{}", line, end_line)
-                        } else {
-                            format!("line {}", line)
-                        }
-                    })
-                    .collect();
-                let location_text = if occurrences > 10 {
-                    format!(
-                        "{} ({} total, showing first 10)",
-                        locations.join(", "),
-                        occurrences
+            if replace_all {
+                if !content.contains(old_string) {
+                    let hint = build_not_found_hint(&content, old_string);
+                    return Err(format!(
+                        "Error: old_string not found in {}\n{hint}",
+                        resolved.display()
                     )
-                } else {
-                    locations.join(", ")
-                };
-                return Err(format!(
+                    .into());
+                }
+                let new_content = content.replace(old_string, new_string);
+                let occurrences = content.matches(old_string).count();
+                match locked.guard_and_commit(&pre, new_content.as_bytes()) {
+                    Ok(()) => Ok(format!(
+                        "{} to {} (replaced {} occurrence{})",
+                        diff_desc,
+                        rel,
+                        occurrences,
+                        if occurrences == 1 { "" } else { "s" }
+                    )),
+                    Err(CommitError::Sentinel) => Err(SENTINEL_REJECTION.into()),
+                    Err(CommitError::Io) => Err("Edit failed while committing the file.".into()),
+                }
+            } else {
+                let occurrences = content.matches(old_string).count();
+                if occurrences == 0 {
+                    let hint = build_not_found_hint(&content, old_string);
+                    return Err(format!(
+                        "Error: old_string not found in {}\n{hint}",
+                        resolved.display()
+                    )
+                    .into());
+                }
+                if occurrences > 1 {
+                    let locations: Vec<String> = content
+                        .match_indices(old_string)
+                        .take(10)
+                        .map(|(offset, _)| {
+                            let line = content[..offset].lines().count() + 1;
+                            let end_line = line + old_string.lines().count().saturating_sub(1);
+                            if end_line > line {
+                                format!("lines {}-{}", line, end_line)
+                            } else {
+                                format!("line {}", line)
+                            }
+                        })
+                        .collect();
+                    let location_text = if occurrences > 10 {
+                        format!(
+                            "{} ({} total, showing first 10)",
+                            locations.join(", "),
+                            occurrences
+                        )
+                    } else {
+                        locations.join(", ")
+                    };
+                    return Err(format!(
                     "Error: old_string is not unique in {} (found {} occurrences).\n\
                      Match locations: {location_text}.\n\
                      Please provide more context to make old_string unique, or set replace_all=true.",
@@ -274,29 +262,15 @@ impl BaseTool for EditFileTool {
                     occurrences
                 )
                 .into());
-            }
-            let new_content = content.replacen(old_string, new_string, 1);
-            // 原子写入：先写临时文件再 rename
-            let tmp_ext = format!("tmp.{}", uuid::Uuid::now_v7());
-            let tmp_path = resolved.with_extension(tmp_ext);
-            std::fs::write(&tmp_path, &new_content)?;
-            // 恢复原文件的 Unix 权限位（含可执行位），防止原子写入后 +x 丢失
-            if let Ok(metadata) = std::fs::metadata(&resolved) {
-                #[cfg(unix)]
-                {
-                    let _ = std::fs::set_permissions(&tmp_path, metadata.permissions());
                 }
-                #[cfg(not(unix))]
-                let _ = &metadata; // Windows 上 #[cfg(unix)] 排除后 metadata 未使用
-            }
-            match std::fs::rename(&tmp_path, &resolved) {
-                Ok(_) => Ok(format!("{} to {}", diff_desc, rel)),
-                Err(e) => {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    Err(format!("Error renaming temp file: {e}").into())
+                let new_content = content.replacen(old_string, new_string, 1);
+                match locked.guard_and_commit(&pre, new_content.as_bytes()) {
+                    Ok(()) => Ok(format!("{} to {}", diff_desc, rel)),
+                    Err(CommitError::Sentinel) => Err(SENTINEL_REJECTION.into()),
+                    Err(CommitError::Io) => Err("Edit failed while committing the file.".into()),
                 }
             }
-        }
+        })
     }
 }
 

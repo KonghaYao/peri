@@ -269,3 +269,78 @@ async fn test_edit_not_unique_many_occurrences_truncated() {
         "超过 10 个匹配时应截断位置列表，实际 {location_count} 个: {msg}"
     );
 }
+
+#[tokio::test]
+async fn test_edit_keeps_non_utf8_read_failure_semantics() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.bin");
+    let original = [0xff, b'a'];
+    std::fs::write(&path, original).unwrap();
+    EditFileTool::new(dir.path().to_str().unwrap())
+        .invoke(
+            serde_json::json!({"file_path": "f.bin", "old_string": "a", "new_string": "b"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(std::fs::read(path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn test_edit_rejects_sentinel_joined_by_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.txt");
+    std::fs::write(&path, "... [TOKEN 字符已省略] ...").unwrap();
+    let old_time = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    filetime::set_file_mtime(&path, old_time).unwrap();
+    let err = EditFileTool::new(dir.path().to_str().unwrap())
+        .invoke(
+            serde_json::json!({"file_path": "f.txt", "old_string": "TOKEN", "new_string": "12"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(err, super::SENTINEL_REJECTION);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "... [TOKEN 字符已省略] ..."
+    );
+    assert_eq!(
+        filetime::FileTime::from_last_modification_time(&std::fs::metadata(path).unwrap()),
+        old_time
+    );
+}
+
+#[tokio::test]
+async fn test_edit_replace_all_rejects_new_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.txt");
+    std::fs::write(&path, "TOKEN\nTOKEN").unwrap();
+    EditFileTool::new(dir.path().to_str().unwrap())
+        .invoke(
+            serde_json::json!({"file_path": "f.txt", "old_string": "TOKEN", "new_string": "... [12 字符已省略] ...", "replace_all": true}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "TOKEN\nTOKEN");
+}
+
+#[tokio::test]
+async fn test_edit_allows_existing_sentinel_without_increase() {
+    let dir = tempfile::tempdir().unwrap();
+    let sentinel = "... [12 字符已省略] ...";
+    std::fs::write(dir.path().join("f.txt"), format!("{sentinel}\nold")).unwrap();
+    EditFileTool::new(dir.path().to_str().unwrap())
+        .invoke(
+            serde_json::json!({"file_path": "f.txt", "old_string": "old", "new_string": "new"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+        format!("{sentinel}\nnew")
+    );
+}

@@ -42,8 +42,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
 
     // 取出 messages 快照（避免跨 await 持有 RwLockReadGuard）。
     // 直接构建为 Arc<Vec>：LlmCallStart 与 LLM 调用共享同一份，避免二次深拷贝。
-    let messages_snapshot: std::sync::Arc<Vec<crate::messages::BaseMessage>> = std::sync::Arc::new(
-        {
+    let messages_snapshot: std::sync::Arc<Vec<crate::messages::BaseMessage>> =
+        std::sync::Arc::new({
             let guard = ctx.session.transcript.read();
             let visible = guard.visible_model_messages()?;
 
@@ -55,7 +55,9 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                     &guard,
                     crate::agent::compact_v2::PROJECTION_POLICY_VERSION,
                 ) {
-                    Ok(plan) => {
+                    crate::agent::compact_v2::projection::PersistedDirectiveRestore::Valid(
+                        plan,
+                    ) => {
                         // 持久化 directive 有效 → 直接渲染
                         match crate::agent::compact_v2::projection::render_llm_view(
                             &guard, &plan, &caps,
@@ -78,74 +80,30 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                             }
                         }
                     }
-                    Err(e) => {
-                        let err_msg = e.to_string();
-                        if err_msg.contains(
-                            crate::agent::compact_v2::projection::DIRECTIVE_VERSION_MISMATCH,
-                        ) {
-                            // 版本不匹配 → 重新规划为 v2 directive（skip=false 纳入旧 truncated 消息）
-                            // 新 plan 在下次 Compact 阶段持久化后覆盖旧 directive
-                            tracing::info!(
-                                error = %e,
-                                "持久化 directive 版本不匹配，重新规划为 v2"
-                            );
-                            let plan = crate::agent::compact_v2::planner::plan_micro(
-                                &guard, config, false,
-                            );
-                            if plan.has_changes() {
-                                match crate::agent::compact_v2::projection::render_llm_view(
-                                    &guard, &plan, &caps,
-                                ) {
-                                    Ok(view) => view,
-                                    Err(render_err) => {
-                                        tracing::warn!(
-                                            error = %render_err,
-                                            "render_llm_view (v2 re-plan) 失败，fallback 原始消息"
-                                        );
-                                        visible
-                                    }
-                                }
-                            } else {
-                                visible
-                            }
+                    crate::agent::compact_v2::projection::PersistedDirectiveRestore::Absent => {
+                        tracing::debug!("无持久化 directive，fallback 到 plan_micro");
+                        let plan =
+                            crate::agent::compact_v2::planner::plan_micro(&guard, config, false);
+                        if plan.has_changes() {
+                            crate::agent::compact_v2::projection::render_llm_view(
+                                &guard, &plan, &caps,
+                            )
+                            .unwrap_or(visible)
                         } else {
-                            // 无持久化 directive → fallback 到 planner
-                            tracing::debug!("无持久化 directive，fallback 到 plan_micro");
-                            let plan = crate::agent::compact_v2::planner::plan_micro(
-                                &guard, config, false,
-                            );
-                            if plan.has_changes() {
-                                match crate::agent::compact_v2::projection::render_llm_view(
-                                    &guard, &plan, &caps,
-                                ) {
-                                    Ok(view) => {
-                                        tracing::debug!(
-                                            action_count = plan.actions.len(),
-                                            messages_before = visible.len(),
-                                            messages_after = view.len(),
-                                            "render_llm_view (planner): 投影后消息数"
-                                        );
-                                        view
-                                    }
-                                    Err(render_err) => {
-                                        tracing::warn!(
-                                            error = %render_err,
-                                            "render_llm_view (planner) 失败，fallback 到原始可见消息"
-                                        );
-                                        visible
-                                    }
-                                }
-                            } else {
-                                visible
-                            }
+                            visible
                         }
+                    }
+                    crate::agent::compact_v2::projection::PersistedDirectiveRestore::Invalid => {
+                        tracing::warn!(
+                            "持久化 directive 无效；本轮使用 canonical messages，不重新规划"
+                        );
+                        visible
                     }
                 }
             } else {
                 visible
             }
-        },
-    );
+        });
 
     let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = catalog
         .tools

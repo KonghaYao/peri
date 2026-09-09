@@ -6,7 +6,7 @@
 ## 架构速览
 
 - 定位：Workflow 与 PTC 共用的 Node lifecycle、NDJSON JSON-RPC 和 execution host；不解释 `workflow/*`、`agent/run` 或 `tool/call` 业务语义。
-- 稳定不变量：pending request 在写帧前登记；每帧有字节上限、换行并 flush；execution 有 wall timeout、资源/并发预算与稳定错误分类；所有终态统一取消 router、回收进程树并 wait；stderr 正文不保留、不写 tracing。
+- 稳定不变量：pending request 在写帧前登记；每帧有字节上限、换行并 flush；execution 有 wall timeout、资源/并发预算与稳定错误分类；所有终态统一取消 router、回收进程树并 wait；stderr 正文不写 tracing，仅在内存保留有界 tail 供上层安全摘要。
 
 ## 速查表
 

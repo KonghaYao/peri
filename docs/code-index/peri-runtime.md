@@ -1,6 +1,6 @@
 # peri-runtime 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-16
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-09（epoch 所有权校准）
 > 依据：docs/standards/architecture-contracts.md（ARC-CANCEL-001 / ARC-EVENT-001）、源码（无 crate 级 CLAUDE.md，架构速览取自 lib.rs / runtime.rs 模块注释）
 
 ## 架构速览
@@ -18,7 +18,7 @@
 | 句柄注册 / 替换 | `src/runtime.rs` | `register`（:61）、`register_or_replace`（:93） | register 防双注册（同 session 已存在报 `SessionAlreadyRegistered`，重建须先 destroy）；register_or_replace 已注册则替换句柄且**不递增 epoch / 不重置 seq**（同一 session 新一轮执行事件序号继续单调），未注册等价首次注册 |
 | 查映射（handle 定位） | `src/runtime.rs` | `handle`（:125）、`contains`（:120）、`session_ids`（:115） | HashMap 簿记；session_ids 返回 key 列表，无顺序保证 |
 | cancel 转发 | `src/runtime.rs` | `cancel(&CancelRequest)`（:169） | 查映射拿句柄（未注册 → `UnknownSession`）→ 原样透传 `CancelRequest`（三元组 identity + clear_queue + policy）给 `SessionHandle::cancel`；重复转发同一请求幂等（句柄侧判定），本层不解释取消语义（契约 ARC-CANCEL-001） |
-| 事件聚合补打 | `src/runtime.rs` | `stamp(session_id, &UnstampedEvent)`（:141） | 未注册 session 报 `UnknownSession`（销毁后迟到事件无法补打，与 epoch 不可复用契约共同防迟到消息命中新 session）；已注册则补 session_id、seq 单调递增（`SessionSeq::next`，绝不回退）、epoch 透传当前实例纪元 |
+| 事件聚合补打 | `src/runtime.rs` | `stamp(session_id, &UnstampedEvent)`（:141） | 未注册 session 报 `UnknownSession`；已注册则补 session_id、seq 单调递增（`SessionSeq::next`，绝不回退）、epoch 透传当前登记值；当前 `register`/未注册 `register_or_replace` 均写 `SessionEpoch::initial()`，本映射不保留跨销毁 epoch 历史，跨销毁不可复用仍依赖外部 owner state/恢复装配（本索引未定位到该实现） |
 | run / join / submit_input 转发 | `src/runtime.rs` | `run`（:178）、`join`（:195）、`submit_input`（:206） | 查映射 → 转发句柄对应方法；未注册均报 `UnknownSession`；run 错误包 `RunFailed`、submit_input 错误包 `SubmitFailed`（Agent 侧细节 anyhow 穿透）；join 返回 deadline 内是否结束（true/false） |
 | destroy 七步编排 | `src/runtime.rs` | `destroy(session_id, join_deadline)`（:226） | 顺序固定：停收新输入 → 取消 owned tasks → join（带 deadline）→ 超时 abort → 持久化事务收束 → drain 事件（逐条 `stamp` 补打）→ 移除映射；持久化失败上抛 `PersistFailed` 且**不移除映射**（已执行阶段幂等，重试安全）；drain 出的补打事件作为返回值交调用方（Controller）投递 |
 | 改句柄接口（SessionHandle） | `peri-acp-types/src/runtime.rs`（事实源）；本层 re-export（runtime.rs:21） | trait `SessionHandle`（runtime.rs:77：run/cancel/submit_input/stop_accepting/cancel_owned/join/abort/persist/drain）；`UnstampedEvent`（runtime.rs:29） | 各层接口引用同一签名，本层 `pub use peri_acp_types::runtime::{SessionHandle, UnstampedEvent}` 透传；改接口只改事实源，勿在本层定义 |

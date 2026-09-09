@@ -2,8 +2,8 @@
 
 use super::projection::{
     estimate_projection_chars, render_llm_view, MessageProjectionDirective, MicroCompactPlan,
-    ProjectionAction, ProjectionActionEntry, ProjectionTarget, ProviderCapabilities,
-    ProviderProtocol, PROJECTION_POLICY_VERSION,
+    PersistedDirectiveRestore, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
+    ProviderCapabilities, ProviderProtocol, PROJECTION_POLICY_VERSION,
 };
 use crate::messages::{BaseMessage, ContentBlock, MessageContent, MessageId};
 use crate::session::transcript::MessageTranscript;
@@ -138,15 +138,10 @@ fn test_legacy_v1_compact_tool_input_deserializes_but_is_rejected_by_policy_vers
     assert_eq!(*keep_tail, 100);
 
     transcript.set_flags_projection(message_id, directive);
-    let error =
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION)
-            .expect_err("旧 v1 directive 绝不能按当前整体替换语义应用");
-    assert!(
-        error
-            .to_string()
-            .contains(super::projection::DIRECTIVE_VERSION_MISMATCH),
-        "旧 v1 directive 应因版本不匹配被拒绝"
-    );
+    assert!(matches!(
+        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION,),
+        PersistedDirectiveRestore::Invalid
+    ));
 }
 
 #[test]
@@ -422,18 +417,10 @@ fn test_tool_input_projection_compacts_only_selected_long_field_and_syncs_tool_u
         panic!("第一条消息应为 Ai 消息");
     };
     let arguments = &tool_calls[0].arguments;
-    let object = arguments
-        .as_object()
-        .expect("Tool input 应保持 JSON object 根类型");
-    let prompt = object["prompt"].as_str().expect("prompt 应为 string");
-    assert!(prompt.starts_with("头部头部头部头部头部"));
-    assert!(prompt.ends_with("部尾部"));
-    assert!(prompt.contains("字符已省略"));
-    assert_eq!(object["required"], "short");
-    assert_eq!(object["unselected"], tool_input["unselected"]);
-    assert_eq!(object["nested"], tool_input["nested"]);
-    assert_eq!(object["items"], tool_input["items"]);
-    assert!(!arguments.to_string().contains("_compact_note"));
+    assert_eq!(
+        arguments, &tool_input,
+        "ToolCall arguments 必须保持 canonical 原值"
+    );
 
     let tool_use = content
         .content_blocks()
@@ -1003,245 +990,190 @@ fn test_human_and_system_are_unchanged() {
 // ─── plan_from_persisted_directives 测试 ────────────────────────────────────
 
 #[test]
-fn test_plan_from_persisted_directives_empty_transcript() {
-    // transcript 中无任何 directive → 返回错误
+fn test_plan_from_persisted_directives_empty_transcript_is_absent() {
     let transcript = MessageTranscript::new();
-    let result =
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION);
-    assert!(result.is_err(), "无 directive 的 transcript 应返回错误");
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains(super::projection::NO_PERSISTED_DIRECTIVES),
-        "错误消息应包含 NO_PERSISTED_DIRECTIVES"
-    );
+    assert!(matches!(
+        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION,),
+        PersistedDirectiveRestore::Absent
+    ));
 }
 
 #[test]
-fn test_plan_from_persisted_directives_version_mismatch_errors() {
-    // policy_version 不匹配 → 错误
-    let mut t = MessageTranscript::new();
-    let msg = BaseMessage::human(MessageContent::text("hello"));
-    let msg_id = msg.id();
-    t.append(msg);
-    t.set_flags_projection(
-        msg_id,
+fn test_plan_from_persisted_directives_version_mismatch_is_invalid() {
+    let mut transcript = MessageTranscript::new();
+    let message = BaseMessage::human("hello");
+    let message_id = message.id();
+    transcript.append(message);
+    transcript.set_flags_projection(
+        message_id,
         MessageProjectionDirective {
-            policy_version: PROJECTION_POLICY_VERSION + 1, // 不匹配的版本
-            entries: vec![ProjectionActionEntry {
-                message_id: msg_id,
-                target: ProjectionTarget::Message,
-                action: ProjectionAction::Keep,
-            }],
+            policy_version: PROJECTION_POLICY_VERSION + 1,
+            entries: vec![],
         },
     );
 
-    let result = super::projection::plan_from_persisted_directives(&t, PROJECTION_POLICY_VERSION);
-    assert!(result.is_err(), "policy_version 不匹配应返回错误");
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains(super::projection::DIRECTIVE_VERSION_MISMATCH),
-        "错误消息应包含 DIRECTIVE_VERSION_MISMATCH"
-    );
+    assert!(matches!(
+        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION,),
+        PersistedDirectiveRestore::Invalid
+    ));
 }
 
 #[test]
-fn test_plan_from_persisted_directives_legacy_truncated_passthrough() {
-    // G1 fail-closed: truncated=true + projection=None → 返回 CORRUPTED_PROJECTION 错误
-    let mut t = MessageTranscript::new();
-    let msg = BaseMessage::human(MessageContent::text("legacy content"));
-    let msg_id = msg.id();
-    t.append(msg);
-    t.set_truncated(msg_id, true);
-    // projection 保持 None（旧行为）
+fn test_plan_from_persisted_directives_truncated_without_directive_is_invalid() {
+    let mut transcript = MessageTranscript::new();
+    let message = BaseMessage::human("legacy content");
+    let message_id = message.id();
+    transcript.append(message);
+    transcript.set_truncated(message_id, true);
 
-    let result = super::projection::plan_from_persisted_directives(&t, PROJECTION_POLICY_VERSION);
-    assert!(
-        result.is_err(),
-        "旧 truncated 标记（无 directive）应返回 CORRUPTED_PROJECTION 错误"
-    );
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains(super::projection::CORRUPTED_PROJECTION),
-        "应报告 CORRUPTED_PROJECTION"
-    );
+    assert!(matches!(
+        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION,),
+        PersistedDirectiveRestore::Invalid
+    ));
 }
 
 #[test]
-fn test_plan_from_persisted_directives_stale_config_still_renders() {
-    // 即使 planner 用新 config 生成空 plan，持久化 directive 仍有效
-    let tool_call_id = "tc_stale";
-    let mut t = MessageTranscript::new();
-    let blocks = vec![
-        ContentBlock::text("I'll use a tool"),
-        ContentBlock::tool_use(tool_call_id, "Bash", serde_json::json!({"cmd": "ls"})),
-    ];
-    let ai_msg = BaseMessage::ai_from_blocks(blocks);
-    let ai_msg_id = ai_msg.id();
-    t.append(ai_msg);
-    let tr_msg = BaseMessage::tool_result(tool_call_id, "long output here");
-    let tr_msg_id = tr_msg.id();
-    t.append(tr_msg);
-
-    // 设置 projection directive（使用 set_flags_projection）
-    t.set_flags_projection(
-        ai_msg_id,
-        MessageProjectionDirective {
-            policy_version: PROJECTION_POLICY_VERSION,
-            entries: vec![ProjectionActionEntry {
-                message_id: ai_msg_id,
-                target: ProjectionTarget::ToolCall {
-                    tool_call_id: tool_call_id.to_string(),
-                },
-                action: ProjectionAction::CompactToolInput {
-                    // 真实 directive 不再使用空 fields（短参数不再被占位压缩）
-                    fields: vec!["cmd".into()],
-                    keep_head: 350,
-                    keep_tail: 100,
-                },
-            }],
-        },
-    );
-    t.set_flags_projection(
-        tr_msg_id,
-        MessageProjectionDirective {
-            policy_version: PROJECTION_POLICY_VERSION,
-            entries: vec![ProjectionActionEntry {
-                message_id: tr_msg_id,
-                target: ProjectionTarget::Message,
-                action: ProjectionAction::CompactToolResult {
-                    keep_head: 500,
-                    keep_tail: 200,
-                    preserve_recovery_handle: true,
-                },
-            }],
-        },
-    );
-
-    let result = super::projection::plan_from_persisted_directives(&t, PROJECTION_POLICY_VERSION);
-    assert!(
-        result.is_ok(),
-        "持久化 directive 应在 stale config 下仍有效"
-    );
-    let plan = result.unwrap();
-    assert_eq!(plan.actions.len(), 2, "应有 2 条 action entries");
-}
-
-#[test]
-fn test_plan_from_persisted_directives_saves_by_character_difference() {
-    let mut transcript = transcript_with_tool_exchange(
-        "tc_persisted",
-        serde_json::json!({"prompt": "x".repeat(501)}),
-        "ok",
-        false,
-    );
-    let message_id = transcript.visible_messages()[0].id();
+fn test_plan_from_persisted_directives_wrong_message_id_is_invalid() {
+    let mut transcript = MessageTranscript::new();
+    let message = BaseMessage::tool_result("tc", "x".repeat(600));
+    let message_id = message.id();
+    transcript.append(message);
     transcript.set_flags_projection(
         message_id,
         MessageProjectionDirective {
             policy_version: PROJECTION_POLICY_VERSION,
             entries: vec![ProjectionActionEntry {
-                message_id,
-                target: ProjectionTarget::ToolCall {
-                    tool_call_id: "tc_persisted".into(),
-                },
-                action: ProjectionAction::CompactToolInput {
-                    fields: vec!["prompt".into()],
-                    keep_head: 350,
-                    keep_tail: 100,
+                message_id: MessageId::new(),
+                target: ProjectionTarget::Message,
+                action: ProjectionAction::CompactToolResult {
+                    keep_head: 10,
+                    keep_tail: 10,
+                    preserve_recovery_handle: false,
                 },
             }],
         },
     );
 
-    let plan =
-        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION)
-            .expect("应从持久化 directive 重建 plan");
-    assert_eq!(plan.estimated_before_tokens, 125);
-    assert_eq!(plan.estimated_after_tokens, 117);
-    assert_eq!(plan.estimated_tokens_saved, 7);
+    assert!(matches!(
+        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION,),
+        PersistedDirectiveRestore::Invalid
+    ));
 }
 
 #[test]
-fn test_plan_from_persisted_directives_collects_all_directives() {
-    // 多条消息各有 directive → 全部收集到一个 plan 中
-    let mut t = MessageTranscript::new();
-    let mut expected_count = 0u32;
-
-    for i in 0..3 {
-        let msg = BaseMessage::human(MessageContent::text(format!("msg {}", i)));
-        let msg_id = msg.id();
-        t.append(msg);
-
-        t.set_flags_projection(
-            msg_id,
-            MessageProjectionDirective {
-                policy_version: PROJECTION_POLICY_VERSION,
-                entries: vec![ProjectionActionEntry {
-                    message_id: msg_id,
+fn test_persisted_restore_keeps_only_independent_tool_result_action() {
+    let mut transcript = transcript_with_tool_exchange(
+        "tc_legacy",
+        serde_json::json!({"prompt": "x".repeat(600)}),
+        &"R".repeat(600),
+        false,
+    );
+    let (ai_id, result_id, canonical_content, canonical_tool_calls) = {
+        let visible = transcript.visible_messages();
+        let (canonical_content, canonical_tool_calls) = match &visible[0] {
+            BaseMessage::Ai {
+                content,
+                tool_calls,
+                ..
+            } => (content.clone(), tool_calls.clone()),
+            _ => unreachable!(),
+        };
+        (
+            visible[0].id(),
+            visible[1].id(),
+            canonical_content,
+            canonical_tool_calls,
+        )
+    };
+    transcript.set_flags_projection(
+        ai_id,
+        MessageProjectionDirective {
+            policy_version: PROJECTION_POLICY_VERSION,
+            entries: vec![
+                ProjectionActionEntry {
+                    message_id: ai_id,
+                    target: ProjectionTarget::ToolCall {
+                        tool_call_id: "tc_legacy".into(),
+                    },
+                    action: ProjectionAction::CompactToolInput {
+                        fields: vec!["prompt".into()],
+                        keep_head: 10,
+                        keep_tail: 10,
+                    },
+                },
+                ProjectionActionEntry {
+                    message_id: ai_id,
                     target: ProjectionTarget::Message,
-                    action: ProjectionAction::CompactText { max_chars: 10 },
-                }],
-            },
-        );
-        expected_count += 1;
-    }
-
-    let result = super::projection::plan_from_persisted_directives(&t, PROJECTION_POLICY_VERSION);
-    assert!(result.is_ok(), "应收集所有 directive 消息");
-    let plan = result.unwrap();
-    assert_eq!(
-        plan.actions.len(),
-        expected_count as usize,
-        "应收集所有 {} 条 directive",
-        expected_count
+                    action: ProjectionAction::Exclude,
+                },
+                ProjectionActionEntry {
+                    message_id: ai_id,
+                    target: ProjectionTarget::ContentBlock { index: 1 },
+                    action: ProjectionAction::CompactText { max_chars: 1 },
+                },
+            ],
+        },
     );
-}
-
-#[test]
-fn test_render_llm_view_from_persisted_directives() {
-    // 端到端：transcript + persisted directive → plan_from_persisted_directives → render_llm_view
-    let tool_call_id = "tc_e2e";
-    let mut t = MessageTranscript::new();
-    let blocks = vec![
-        ContentBlock::text("I'll use bash"),
-        ContentBlock::tool_use(tool_call_id, "Bash", serde_json::json!({"cmd": "ls -la"})),
-    ];
-    let ai_msg = BaseMessage::ai_from_blocks(blocks);
-    let ai_msg_id = ai_msg.id();
-    t.append(ai_msg);
-    let tr_msg = BaseMessage::tool_result(tool_call_id, "AAAAAAAA".repeat(100));
-    let tr_msg_id = tr_msg.id();
-    t.append(tr_msg);
-
-    t.set_flags_projection(
-        ai_msg_id,
+    transcript.set_flags_projection(
+        result_id,
         MessageProjectionDirective {
             policy_version: PROJECTION_POLICY_VERSION,
             entries: vec![ProjectionActionEntry {
-                message_id: ai_msg_id,
-                target: ProjectionTarget::ToolCall {
-                    tool_call_id: tool_call_id.to_string(),
-                },
-                action: ProjectionAction::CompactToolInput {
-                    fields: vec![],
-                    keep_head: 350,
-                    keep_tail: 100,
+                message_id: result_id,
+                target: ProjectionTarget::Message,
+                action: ProjectionAction::CompactToolResult {
+                    keep_head: 20,
+                    keep_tail: 20,
+                    preserve_recovery_handle: false,
                 },
             }],
         },
     );
-    t.set_flags_projection(
-        tr_msg_id,
+
+    let PersistedDirectiveRestore::Valid(plan) =
+        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION)
+    else {
+        panic!("当前可解码 legacy directive 应恢复为安全子集");
+    };
+    assert!(matches!(
+        &plan.actions[..],
+        [ProjectionActionEntry {
+            message_id,
+            target: ProjectionTarget::Message,
+            action: ProjectionAction::CompactToolResult { .. },
+        }] if *message_id == result_id
+    ));
+
+    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+        .expect("安全子集应可渲染");
+    let BaseMessage::Ai {
+        content,
+        tool_calls,
+        ..
+    } = &projected[0]
+    else {
+        panic!("第一条消息应为 Ai");
+    };
+    assert_eq!(tool_calls, &canonical_tool_calls);
+    assert_eq!(content, &canonical_content);
+    assert!(projected[1].content().contains("字符已省略"));
+}
+
+#[test]
+fn test_render_llm_view_from_persisted_tool_result_directive() {
+    let mut transcript = transcript_with_tool_exchange(
+        "tc_e2e",
+        serde_json::json!({"cmd": "ls -la"}),
+        &"A".repeat(800),
+        false,
+    );
+    let result_id = transcript.visible_messages()[1].id();
+    transcript.set_flags_projection(
+        result_id,
         MessageProjectionDirective {
             policy_version: PROJECTION_POLICY_VERSION,
             entries: vec![ProjectionActionEntry {
-                message_id: tr_msg_id,
+                message_id: result_id,
                 target: ProjectionTarget::Message,
                 action: ProjectionAction::CompactToolResult {
                     keep_head: 50,
@@ -1252,35 +1184,14 @@ fn test_render_llm_view_from_persisted_directives() {
         },
     );
 
-    let plan_result =
-        super::projection::plan_from_persisted_directives(&t, PROJECTION_POLICY_VERSION);
-    assert!(plan_result.is_ok(), "应从持久化 directive 重建 plan");
-    let caps = ProviderCapabilities::default();
-    let projected =
-        render_llm_view(&t, &plan_result.unwrap(), &caps).expect("render_llm_view 应成功");
-
-    // 验证 ToolUse arguments 保持原样（fields 空 = no-op，不再替换为 _compact_note 占位）
-    let BaseMessage::Ai { tool_calls, .. } = &projected[0] else {
-        panic!("第一条消息应为 Ai 消息");
+    let PersistedDirectiveRestore::Valid(plan) =
+        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION)
+    else {
+        panic!("应恢复 ToolResult action");
     };
-    assert_eq!(
-        tool_calls[0].arguments,
-        serde_json::json!({"cmd": "ls -la"}),
-        "fields 空 action 应为 no-op，arguments 保持原样"
-    );
-    assert!(
-        !tool_calls[0]
-            .arguments
-            .to_string()
-            .contains("_compact_note"),
-        "投影视图不应出现 _compact_note 占位"
-    );
-
-    // 验证 ToolResult 被截断
-    let tr_projected = &projected[1];
-    let text = tr_projected.content();
-    assert!(text.len() < 800, "投影后 ToolResult 应被截断");
-    assert!(text.contains("AAAA"), "投影后应保留头部内容");
+    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+        .expect("render_llm_view 应成功");
+    assert!(projected[1].content().contains("字符已省略"));
 }
 
 #[test]
@@ -1321,14 +1232,11 @@ fn test_estimate_projection_chars_counts_only_actually_truncated_values() {
         },
     ];
 
-    let (before, after) = estimate_projection_chars(&transcript, &actions);
-    let expected_after = format!(
-        "{}\n... [585 字符已省略] ...\n{}",
-        "x".repeat(10),
-        "x".repeat(5)
+    assert_eq!(
+        estimate_projection_chars(&transcript, &actions),
+        (0, 0),
+        "ToolUse 输入受硬保护，不应计入可回收字符"
     );
-    assert_eq!(before, 600, "未选择字段和短 ToolResult 不应计入估算");
-    assert_eq!(after, expected_after.chars().count() as u64);
 }
 
 #[test]
@@ -1369,8 +1277,146 @@ fn test_estimate_projection_chars_deduplicates_repeated_tool_input_fields() {
 
     assert_eq!(repeated_estimate.0, single_estimate.0);
     assert_eq!(repeated_estimate.1, single_estimate.1);
-    assert!(
-        single_estimate.0 > single_estimate.1,
-        "501+ 字符顶层 prompt 应产生真实节省"
+    assert_eq!(single_estimate, (0, 0));
+}
+
+#[test]
+fn duplicate_or_conflicting_tool_result_actions_fail_closed_for_render_and_estimate() {
+    let transcript = transcript_with_tool_exchange(
+        "tc_conflict",
+        serde_json::json!({"path": "f"}),
+        &"x".repeat(600),
+        false,
+    );
+    let message_id = transcript.visible_messages()[1].id();
+    let compact = ProjectionAction::CompactToolResult {
+        keep_head: 10,
+        keep_tail: 10,
+        preserve_recovery_handle: false,
+    };
+
+    for actions in [
+        vec![
+            ProjectionActionEntry {
+                message_id,
+                target: ProjectionTarget::Message,
+                action: compact.clone(),
+            },
+            ProjectionActionEntry {
+                message_id,
+                target: ProjectionTarget::Message,
+                action: compact.clone(),
+            },
+        ],
+        vec![
+            ProjectionActionEntry {
+                message_id,
+                target: ProjectionTarget::ContentBlock { index: 0 },
+                action: compact.clone(),
+            },
+            ProjectionActionEntry {
+                message_id,
+                target: ProjectionTarget::Message,
+                action: ProjectionAction::CompactToolResult {
+                    keep_head: 1_000,
+                    keep_tail: 1_000,
+                    preserve_recovery_handle: false,
+                },
+            },
+        ],
+    ] {
+        let plan = MicroCompactPlan {
+            actions: actions.clone(),
+            ..Default::default()
+        };
+        let rendered =
+            render_llm_view(&transcript, &plan, &ProviderCapabilities::default()).unwrap();
+        assert_eq!(rendered[1].content(), "x".repeat(600));
+        assert_eq!(estimate_projection_chars(&transcript, &actions), (0, 0));
+    }
+}
+
+#[test]
+fn test_renderer_preserves_tool_use_for_illegal_block_actions() {
+    let first_input = serde_json::json!({"content": "A".repeat(600)});
+    let second_input = serde_json::json!({"command": "printf safe"});
+    let blocks = vec![
+        ContentBlock::text("before"),
+        ContentBlock::tool_use("tc_1", "Write", first_input.clone()),
+        ContentBlock::text("between"),
+        ContentBlock::tool_use("tc_2", "Bash", second_input.clone()),
+        ContentBlock::text("after"),
+    ];
+    let mut transcript = MessageTranscript::new();
+    let message = BaseMessage::ai_from_blocks(blocks.clone());
+    let message_id = message.id();
+    transcript.append(message);
+    let plan = MicroCompactPlan {
+        policy_version: PROJECTION_POLICY_VERSION,
+        actions: vec![
+            ProjectionActionEntry {
+                message_id,
+                target: ProjectionTarget::ContentBlock { index: 1 },
+                action: ProjectionAction::Exclude,
+            },
+            ProjectionActionEntry {
+                message_id,
+                target: ProjectionTarget::ContentBlock { index: 3 },
+                action: ProjectionAction::CompactText { max_chars: 1 },
+            },
+            ProjectionActionEntry {
+                message_id,
+                target: ProjectionTarget::ToolCall {
+                    tool_call_id: "tc_1".into(),
+                },
+                action: ProjectionAction::CompactToolInput {
+                    fields: vec!["content".into()],
+                    keep_head: 1,
+                    keep_tail: 1,
+                },
+            },
+        ],
+        ..Default::default()
+    };
+
+    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+        .expect("非法组合应防御性 no-op");
+    let BaseMessage::Ai {
+        content,
+        tool_calls,
+        ..
+    } = &projected[0]
+    else {
+        panic!("应为 Ai 消息");
+    };
+    assert_eq!(content, &MessageContent::Blocks(blocks));
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(tool_calls[0].id, "tc_1");
+    assert_eq!(tool_calls[0].name, "Write");
+    assert_eq!(tool_calls[0].arguments, first_input);
+    assert_eq!(tool_calls[1].id, "tc_2");
+    assert_eq!(tool_calls[1].name, "Bash");
+    assert_eq!(tool_calls[1].arguments, second_input);
+}
+
+#[test]
+fn test_estimator_fails_closed_for_duplicate_tool_result_actions() {
+    let mut transcript = MessageTranscript::new();
+    let result = BaseMessage::tool_result("tc", "x".repeat(600));
+    let result_id = result.id();
+    transcript.append(result);
+    let action = ProjectionActionEntry {
+        message_id: result_id,
+        target: ProjectionTarget::Message,
+        action: ProjectionAction::CompactToolResult {
+            keep_head: 10,
+            keep_tail: 10,
+            preserve_recovery_handle: false,
+        },
+    };
+
+    assert_eq!(
+        estimate_projection_chars(&transcript, &[action.clone(), action]),
+        (0, 0)
     );
 }

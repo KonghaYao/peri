@@ -1,6 +1,6 @@
 # peri-acp-types 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-08（System Reminder canonical contract）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-09（CompactConfig 边界校准）
 > 依据：peri-acp-types/src/lib.rs、docs/standards/architecture-contracts.md、源码（本 crate 无 CLAUDE.md）
 
 ## 架构速览
@@ -14,7 +14,7 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 改 CompactConfig 阈值 | `src/compact.rs`（`CompactConfig` 事实源，struct :210；`peri-agent/src/agent/compact_v2/config.rs:8` 仅 re-export；加载方 `peri-acp/src/host/compact_config.rs:14`；`peri-acp/src/provider/config.rs:194` 可挂配置） | 字段：`auto_compact_threshold`（默认 0.95）、`micro_compact_threshold`（默认 0.75）、`micro_compact_stale_steps`（默认 3）、`smart_compact_enabled`（废弃恒 false，:246）；`apply_env_overrides`（:325）；`has_valid_micro_field_limits`（:316） | serde 反序列化经 `deserialize_threshold_range`（:185）把阈值 clamp 到 [0.0,1.0] 并 warn，防 Full 升级路径被静默绕过；`DISABLE_COMPACT` → 禁用 + micro 阈值=1.0，`DISABLE_AUTO_COMPACT` → 仅禁 auto，`COMPACT_THRESHOLD` 校验后仅覆盖 auto 阈值（:326-339） |
+| 改 CompactConfig 阈值 | `src/compact.rs`（`CompactConfig` 事实源，struct :210；`peri-agent/src/agent/compact_v2/config.rs:8` 仅 re-export；加载方 `peri-acp/src/host/compact_config.rs:14`；`peri-acp/src/provider/config.rs:194` 可挂配置） | 字段：`auto_compact_threshold`（默认 0.95）、`micro_compact_threshold`（默认 0.75）、`micro_compact_stale_steps`（默认 3）、`smart_compact_enabled`（deprecated、默认 false，但运行时仍尊重 true，:246）；`apply_env_overrides`（:325）；`has_valid_micro_field_limits`（:316） | serde 反序列化仅对 `auto_compact_threshold` 经 `deserialize_threshold_range`（:185）clamp 到 [0.0,1.0] 并 warn；`micro_compact_threshold` 当前不走该 helper；`DISABLE_COMPACT` → 禁用 + micro 阈值=1.0，`DISABLE_AUTO_COMPACT` → 仅禁 auto，`COMPACT_THRESHOLD` 校验后仅覆盖 auto 阈值（:326-339） |
 | 改 System Reminder 契约/codec/筛选 | `src/system_reminder.rs` + `src/session.rs` + `src/store.rs` + `src/event.rs` | `SystemReminder` / `TrustedSystemReminderFactory`；`encode_system_reminder` / legacy parser；`QueuedPayload::SystemReminder`、`InboxHandle::push_system_reminder`；`PersistedPayload::SystemReminder`；`ExecutorEvent::SystemReminder` | producer 只构造 trusted canonical DTO；`MessageKind` 继续独立决定 wake；模型 wire 编码仅在 transcript 投影边界；持久化与 ACP event 保留结构化字段，未知/损坏版本 fail closed |
 | 改 BaseTool trait / is_direct 默认值 | `src/tools.rs`（trait 事实源；`peri-agent/src/tools/mod.rs:8` re-export；实现方在 peri-middlewares 各工具） | `BaseTool`（:146）；`is_direct`（:199，默认 **false** = deferred）；`context_retention`（:193，默认 `Preserve`）；`timeout`（:170，默认 120s）；`definition`（:152 组合 name/desc/params）；`derive_title_from_name`（:70） | 默认值即行为契约：新工具不覆写 `is_direct` 即为 deferred（经 SearchExtraTools 发现）；`context_retention` 默认 Preserve = 不被压缩；`ToolContext`（:129）只读借用 state，工具不可绕过 dispatch 统一写入 |
 | 改 CancelRequest 三元组 | `src/identity.rs`（`CancelRequest` 事实源 :262；`CancelPolicy` 事实源 `src/thread/types.rs:17`） | `CancelRequest::new(identity, policy)`（:273，clear_queue 默认 **false**）；`with_clear_queue`（:282）；`AttemptIdentity`（:140，四元组） | 定位四元组 (session_id, session_epoch, turn_id, attempt_id)，**幂等判定取三元组** (session_id, turn_id, attempt_id)；epoch 不可复用（`SessionEpoch::next` :70 只增）；cancel ≠ 清除待办；消费方仅传递不解释语义：controller `cancel`（controller.rs:336）、runtime `cancel`（runtime.rs:169）、`RuntimePort::cancel`（`src/runtime.rs:85`）、prompt_handle（peri-acp:20 / peri-agent:23） |

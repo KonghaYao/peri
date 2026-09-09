@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::error::AgentResult;
-use crate::messages::{BaseMessage, ContentBlock, MessageContent, MessageId, ToolCallRequest};
+use crate::messages::{BaseMessage, ContentBlock, MessageContent, MessageId};
 use crate::session::transcript::MessageTranscript;
 pub use peri_acp_types::projection::{
     MessageProjectionDirective, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
@@ -107,20 +107,34 @@ pub const DIRECTIVE_VERSION_MISMATCH: &str = "persisted directive version mismat
 /// 错误信息常量：消息被标记 truncated 但缺少 projection directive（G1 fail-closed）。
 pub const CORRUPTED_PROJECTION: &str = "message truncated without projection directive";
 
-/// 从 transcript 中已持久化的 projection directive 重建 MicroCompactPlan。
-///
-/// 遍历全部可见消息，检查 `MessageFlags.projection`：
-/// - `projection = Some(d)` 且 `d.policy_version == expected_version` → 收集 entries
-/// - `projection = Some(d)` 但版本不匹配 → 立即返回错误
-/// - `projection = None`（含旧 truncated 标记）→ 跳过（不生产伪 action）
-///
-/// # Returns
-/// - `Ok(plan)`：至少一条消息有有效 directive
-/// - `Err(msg)`：无有效 directive（caller 应 fallback 到 `plan_micro`）或版本不匹配
+/// 当前可解码 persisted directive 的恢复结果。
+#[derive(Debug)]
+pub enum PersistedDirectiveRestore {
+    Absent,
+    Valid(MicroCompactPlan),
+    Invalid,
+}
+
+/// 当前 renderer 可安全执行、且不会直接或间接影响 ToolCall/ToolUse 的 action。
+fn is_safe_projection_action(message: &BaseMessage, entry: &ProjectionActionEntry) -> bool {
+    matches!(
+        (&entry.target, &entry.action, message),
+        (
+            ProjectionTarget::Message | ProjectionTarget::ContentBlock { index: 0 },
+            ProjectionAction::CompactToolResult { .. },
+            BaseMessage::Tool {
+                is_error: false,
+                ..
+            },
+        )
+    )
+}
+
+/// 从 transcript 中恢复当前可解码的 projection directive。
 pub fn plan_from_persisted_directives(
     transcript: &MessageTranscript,
     expected_version: u32,
-) -> AgentResult<MicroCompactPlan> {
+) -> PersistedDirectiveRestore {
     let visible = transcript.visible_messages();
     let mut actions = Vec::new();
     let mut has_any_directive = false;
@@ -133,36 +147,25 @@ pub fn plan_from_persisted_directives(
             Some(ref directive) => {
                 has_any_directive = true;
                 if directive.policy_version != expected_version {
-                    return Err(crate::error::AgentError::Other(anyhow::anyhow!(
-                        "{}: expected {}, got {} (msg {:?})",
-                        DIRECTIVE_VERSION_MISMATCH,
-                        expected_version,
-                        directive.policy_version,
-                        id
-                    )));
+                    return PersistedDirectiveRestore::Invalid;
                 }
-                // 验证 directive entries 的 message_id 与当前消息一致
+                // 当前可解码 legacy entry 只有可证明与 ToolCall/ToolUse 独立的
+                // ToolResult message-level action 才能恢复；其余一律 Preserve（丢弃）。
                 for entry in &directive.entries {
                     if entry.message_id != id {
-                        return Err(crate::error::AgentError::Other(anyhow::anyhow!(
-                            "directive entry references wrong message: entry.msg_id={:?} != msg.id={:?}",
-                            entry.message_id,
-                            id
-                        )));
+                        return PersistedDirectiveRestore::Invalid;
+                    }
+                    if is_safe_projection_action(msg, entry) {
+                        actions.push(entry.clone());
                     }
                 }
-                actions.extend(directive.entries.clone());
             }
             None => {
                 // G1: fail-closed on unknown directives
                 // truncated=true + projection=None + not excluded = corrupted state
                 // （visible_messages() 已过滤 excluded，此处消息必然非 excluded）
                 if flags.truncated {
-                    return Err(crate::error::AgentError::Other(anyhow::anyhow!(
-                        "{}: msg {:?} is truncated but lacks projection directive",
-                        CORRUPTED_PROJECTION,
-                        id
-                    )));
+                    return PersistedDirectiveRestore::Invalid;
                 }
                 // 无 truncated 标记 → 正常跳过，不生成投影 action
             }
@@ -170,10 +173,7 @@ pub fn plan_from_persisted_directives(
     }
 
     if !has_any_directive {
-        return Err(crate::error::AgentError::Other(anyhow::anyhow!(
-            "{}",
-            NO_PERSISTED_DIRECTIVES
-        )));
+        return PersistedDirectiveRestore::Absent;
     }
 
     // 统计：去重 message_id 数量
@@ -199,7 +199,7 @@ pub fn plan_from_persisted_directives(
     let after = after_chars / 4;
     let estimated_tokens_saved = before_chars.saturating_sub(after_chars) / 4;
 
-    Ok(MicroCompactPlan {
+    PersistedDirectiveRestore::Valid(MicroCompactPlan {
         policy_version: expected_version,
         target_reclaim_tokens: 0, // 持久化 directive 不依赖 dynamic config target
         actions,
@@ -223,70 +223,63 @@ pub(crate) fn estimate_projection_chars(
     let mut before = 0u64;
     let mut after = 0u64;
 
-    for action in actions {
-        let Some(message) = transcript
-            .entries()
-            .iter()
-            .find(|entry| entry.id() == action.message_id)
-            .and_then(|entry| entry.as_message())
+    for entry in transcript.entries() {
+        let Some(message) = entry.as_message() else {
+            continue;
+        };
+        let BaseMessage::Tool {
+            content,
+            is_error: false,
+            ..
+        } = message
         else {
             continue;
         };
-
-        match (&action.target, &action.action, message) {
-            (
-                ProjectionTarget::ToolCall { tool_call_id },
-                ProjectionAction::CompactToolInput {
-                    fields,
-                    keep_head,
-                    keep_tail,
-                },
-                BaseMessage::Ai { tool_calls, .. },
-            ) => {
-                let Some(tool_call) = tool_calls.iter().find(|tc| tc.id == *tool_call_id) else {
-                    continue;
-                };
-                let Some(arguments) = tool_call.arguments.as_object() else {
-                    continue;
-                };
-
-                let mut seen_fields = HashSet::new();
-                for field in fields {
-                    if !seen_fields.insert(field) {
-                        continue;
-                    }
-                    let Some(text) = arguments.get(field).and_then(serde_json::Value::as_str)
-                    else {
-                        continue;
-                    };
-                    if let Some(projected) = apply_head_tail(text, *keep_head, *keep_tail) {
-                        before += text.chars().count() as u64;
-                        after += projected.chars().count() as u64;
-                    }
-                }
-            }
-            (
-                ProjectionTarget::Message | ProjectionTarget::ContentBlock { index: 0 },
-                ProjectionAction::CompactToolResult {
-                    keep_head,
-                    keep_tail,
-                    ..
-                },
-                BaseMessage::Tool {
-                    content, is_error, ..
-                },
-            ) if !is_error => {
-                let text = content.text_content();
-                if let Some(projected) = apply_head_tail(&text, *keep_head, *keep_tail) {
-                    before += text.chars().count() as u64;
-                    after += projected.chars().count() as u64;
-                }
-            }
-            _ => {}
+        let candidates: Vec<_> = actions
+            .iter()
+            .filter(|action| action.message_id == message.id())
+            .collect();
+        let Some(action) = effective_tool_result_action(&candidates) else {
+            continue;
+        };
+        let ProjectionAction::CompactToolResult {
+            keep_head,
+            keep_tail,
+            ..
+        } = action
+        else {
+            continue;
+        };
+        let text = content.text_content();
+        if let Some(projected) = apply_head_tail(&text, *keep_head, *keep_tail) {
+            before += text.chars().count() as u64;
+            after += projected.chars().count() as u64;
         }
     }
 
     (before, after)
+}
+
+/// ToolResult 的 Message 与 ContentBlock(0) 指向同一逻辑文本。只有恰好一条
+/// CompactToolResult action 时才执行；重复或冲突均 fail-closed 为 Preserve。
+fn effective_tool_result_action<'a>(
+    entries: &[&'a ProjectionActionEntry],
+) -> Option<&'a ProjectionAction> {
+    let mut effective = None;
+    for entry in entries {
+        if !matches!(
+            entry.target,
+            ProjectionTarget::Message | ProjectionTarget::ContentBlock { index: 0 }
+        ) || !matches!(entry.action, ProjectionAction::CompactToolResult { .. })
+        {
+            continue;
+        }
+        if effective.is_some() {
+            return None;
+        }
+        effective = Some(&entry.action);
+    }
+    effective
 }
 
 // ─── render_llm_view ──────────────────────────────────────────────────────────
@@ -341,19 +334,15 @@ fn project_message(
     caps: &ProviderCapabilities,
 ) -> BaseMessage {
     // 按 target 分类 actions
-    let mut msg_entry: Option<&ProjectionActionEntry> = None;
     let mut block_actions: HashMap<usize, &ProjectionActionEntry> = HashMap::new();
-    let mut tool_actions: HashMap<&str, &ProjectionActionEntry> = HashMap::new();
 
     for e in entries {
         match &e.target {
-            ProjectionTarget::Message => msg_entry = Some(e),
+            ProjectionTarget::Message => {}
             ProjectionTarget::ContentBlock { index } => {
                 block_actions.insert(*index, e);
             }
-            ProjectionTarget::ToolCall { tool_call_id } => {
-                tool_actions.insert(tool_call_id.as_str(), e);
-            }
+            ProjectionTarget::ToolCall { .. } => {}
         }
     }
 
@@ -386,32 +375,14 @@ fn project_message(
             content,
             tool_calls,
         } => {
-            // 投影 tool_calls（先投影以便同步到 ContentBlock::ToolUse）
-            let projected_tool_calls: Vec<ToolCallRequest> = tool_calls
-                .iter()
-                .map(|tc| {
-                    if let Some(action) = tool_actions.get(tc.id.as_str()) {
-                        project_tool_input(tc, action)
-                    } else {
-                        tc.clone()
-                    }
-                })
-                .collect();
-
-            // 构造 tool_call_id → projected ToolCallRequest 快速查找
-            let tool_call_lookup: HashMap<&str, &ToolCallRequest> = projected_tool_calls
-                .iter()
-                .map(|tc| (tc.id.as_str(), tc))
-                .collect();
-
-            // 投影 content blocks，同时将 ToolUse blocks 与 projected tool_calls 同步
-            let projected_content =
-                project_ai_content(content, &block_actions, &tool_call_lookup, caps);
+            // ToolCall 与 ToolUse 是 canonical execution data。无论 plan 中包含何种
+            // legacy/非法组合，renderer 都只允许投影独立的非 ToolUse content block。
+            let projected_content = project_content(content, &block_actions, caps);
 
             BaseMessage::Ai {
                 id: *id,
                 content: projected_content,
-                tool_calls: projected_tool_calls,
+                tool_calls: tool_calls.clone(),
             }
         }
 
@@ -425,18 +396,11 @@ fn project_message(
                 return msg.clone(); // 错误结果不变
             }
 
-            // 检查消息级 action（CompactToolResult）
-            let content_action = if let Some(entry) = msg_entry {
-                &entry.action
-            } else {
-                // fallback：检查 block_actions 中 index=0 的 action
-                match block_actions.get(&0) {
-                    Some(entry) => &entry.action,
-                    None => &ProjectionAction::Keep,
-                }
-            };
+            // Message 与 block 0 是同一逻辑 ToolResult 文本；重复或冲突时
+            // fail-closed，不执行任何投影。estimator 复用同一选择函数。
+            let content_action =
+                effective_tool_result_action(entries).unwrap_or(&ProjectionAction::Keep);
 
-            // 投影 tool result content
             let projected_content = project_tool_result_content(content, content_action);
 
             BaseMessage::Tool {
@@ -490,64 +454,6 @@ fn project_content(
     }
 }
 
-/// AI 消息专用投影：在 project_content 基础上，将 ToolUse blocks 与 projected tool_calls 同步。
-///
-/// 保证 Anthropic adapter 看到的 ContentBlock::ToolUse 与 tool_calls 向量一致，
-/// 避免投影后的 tool input 在不同 provider 路径中产生数据不一致（P0-4 修复）。
-fn project_ai_content(
-    content: &MessageContent,
-    block_actions: &HashMap<usize, &ProjectionActionEntry>,
-    tool_call_lookup: &HashMap<&str, &ToolCallRequest>,
-    caps: &ProviderCapabilities,
-) -> MessageContent {
-    let blocks = content.content_blocks();
-    if blocks.is_empty() {
-        return content.clone();
-    }
-
-    let mut projected_blocks = Vec::with_capacity(blocks.len());
-
-    for (i, block) in blocks.iter().enumerate() {
-        // 先按 block_actions 获取投影 action
-        let action_opt = block_actions.get(&i).map(|a| &a.action);
-
-        match block {
-            ContentBlock::ToolUse { id, .. } => {
-                // 从 projected tool_calls 查找对应的投影版本
-                if let Some(projected_tc) = tool_call_lookup.get(id.as_str()) {
-                    projected_blocks.push(ContentBlock::ToolUse {
-                        id: projected_tc.id.clone(),
-                        name: projected_tc.name.clone(),
-                        input: projected_tc.arguments.clone(),
-                    });
-                } else if action_opt.is_some() {
-                    // 有 block_actions 但没有 tool_call_lookup 条目 → 使用 action 投影
-                    projected_blocks.push(project_block(block, action_opt, caps));
-                } else {
-                    projected_blocks.push(block.clone());
-                }
-            }
-            _ => {
-                // 非 ToolUse block 使用标准投影逻辑
-                projected_blocks.push(project_block(block, action_opt, caps));
-            }
-        }
-    }
-
-    match content {
-        MessageContent::Text(_) => {
-            if projected_blocks.len() == 1 {
-                if let ContentBlock::Text { ref text } = projected_blocks[0] {
-                    return MessageContent::text(text.clone());
-                }
-            }
-            MessageContent::Blocks(projected_blocks)
-        }
-        MessageContent::Blocks(_) => MessageContent::Blocks(projected_blocks),
-        MessageContent::Raw(_) => content.clone(),
-    }
-}
-
 /// 对 tool result 的完整文本流应用 CompactToolResult action。
 fn project_tool_result_content(
     content: &MessageContent,
@@ -576,6 +482,10 @@ fn project_block(
     action: Option<&ProjectionAction>,
     _caps: &ProviderCapabilities,
 ) -> ContentBlock {
+    if matches!(block, ContentBlock::ToolUse { .. }) {
+        return block.clone();
+    }
+
     match action {
         None | Some(ProjectionAction::Keep) => block.clone(),
 
@@ -645,67 +555,6 @@ fn project_block(
     }
 }
 
-// ─── project_tool_input ───────────────────────────────────────────────────────
-
-/// 投影 tool input
-fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> ToolCallRequest {
-    match &action.action {
-        ProjectionAction::CompactToolInput {
-            fields,
-            keep_head,
-            keep_tail,
-        } => {
-            let Some(arguments) = tc.arguments.as_object() else {
-                return tc.clone();
-            };
-            // fields 空 = 无字段可截断（no-op），保持原样。
-            // 历史上该分支会把整条参数替换为 `{"_compact_note": ...}` 占位，
-            // LLM 模仿输出占位导致真实工具执行失败，已移除。
-            if fields.is_empty() {
-                return tc.clone();
-            }
-            let mut projected_arguments = arguments.clone();
-            let mut changed = false;
-
-            for field in fields {
-                let Some(text) = arguments.get(field).and_then(serde_json::Value::as_str) else {
-                    continue;
-                };
-                let Some(truncated) = apply_head_tail(text, *keep_head, *keep_tail) else {
-                    continue;
-                };
-                projected_arguments.insert(field.clone(), serde_json::Value::String(truncated));
-                changed = true;
-            }
-
-            if changed {
-                ToolCallRequest {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    arguments: serde_json::Value::Object(projected_arguments),
-                }
-            } else {
-                tc.clone()
-            }
-        }
-        ProjectionAction::CompactText { max_chars } => {
-            let args_str = serde_json::to_string(&tc.arguments).unwrap_or_default();
-            let chars: Vec<char> = args_str.chars().collect();
-            if chars.len() > *max_chars && tc.arguments.is_string() {
-                let truncated: String = chars[..*max_chars].iter().collect();
-                ToolCallRequest {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    arguments: serde_json::Value::String(format!("{}\n[内容已压缩]", truncated)),
-                }
-            } else {
-                tc.clone()
-            }
-        }
-        _ => tc.clone(),
-    }
-}
-
 // ─── apply_head_tail ──────────────────────────────────────────────────────────
 
 /// 安全的 head/tail 截断（CJK 安全）。
@@ -727,7 +576,8 @@ fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> Option<S
         .rev()
         .collect();
     let skipped = total.saturating_sub(head_chars + tail_chars);
-    let projected = format!("{}\n... [{} 字符已省略] ...\n{}", head, skipped, tail);
+    let sentinel = peri_acp_types::sentinel::format_projection_sentinel_v1(skipped);
+    let projected = format!("{head}\n{sentinel}\n{tail}");
 
     (projected.chars().count() < total).then_some(projected)
 }
