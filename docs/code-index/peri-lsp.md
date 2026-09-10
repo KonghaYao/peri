@@ -1,52 +1,43 @@
 # peri-lsp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11（分发与后台任务 owner）
-> 依据：peri-lsp/src 源码、peri-resources/src/lsp.rs（门面）、源码注释
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11
+> 依据：peri-lsp/src、peri-resources/src/lsp.rs、docs/standards/architecture-contracts.md
 
 ## 架构速览
 
-- 数据流：`LspServerPool（按扩展名路由）→ LspClient（进程管理 + 协议）→ MessageDispatcher（后台分发）→ DiagnosticsRegistry（诊断聚合）`
-- 入口：`src/pool.rs::LspServerPool::new`（:44，惰性初始化，`disabled=true` 跳过）；单服务器启动走 `src/client.rs::LspClient::start`（:107，并发安全：start_lock 互斥 + 二次检查）
-- 稳定不变量：协议类型 `LspServerConfig/LspConfigSource` 事实源在 `peri_acp_types::lsp`（`src/config.rs:8` 仅 re-export）；`LspServerPool` 实现 `peri_acp_types::ports::LspPoolPort`（pool.rs:327，跨层 downcast 用）；池初始化检查-插入由 `start_lock`（tokio::sync::Mutex）保证原子
+- 数据流：`LspServerPool（扩展名路由）→ LspClient（连接与握手）→ MessageDispatcher（请求登记/分发/任务 owner）→ DiagnosticsRegistry`。
+- `client::Connection` 在同一锁内保存当前 dispatcher 与 ServerState，完成 initialize/initialized 后才发布 Running；start、restart、shutdown 共用 lifecycle mutex。
+- pool 的 active 仅表示动态添加时是否自动启动，不保存第二份服务器就绪集合；实际就绪以 client 为准。
 
 ## 速查表
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 加/改 LSP 服务器配置 | `src/config.rs`（`LspServerConfig` 定义在 `peri-acp-types/src/lsp.rs`，本文件 re-export 于 :8） | `load_global_lsp_config`（:71，settings.json 的 `config.lspServers`）；`lsp_config_from_plugin`（:111，插件场景） | name 以 settings.json 的 key 为准；`expand_env_vars`（:17）只查进程环境；插件配置额外按注入 env 展开 `${CLAUDE_PLUGIN_ROOT}`（:139-148） |
-| 改服务器启动/握手 | `src/client.rs` | `start`（:107）；`do_start`（:134）；`shutdown`（:442） | spawn 子进程 → 注册 publishDiagnostics 通知处理器 → initialize 请求（startup_timeout_ms，缺省 30s，:33）→ initialized 通知；启动失败须 close 子进程防孤儿 |
-| 改重启/冷却语义 | `src/client.rs` | `try_restart`（:485）；`check_and_increment_restart`（:459） | 60s 窗口内计数不重置，超出 `max_restarts` 返回 ServerCrashed 进入冷却（RESTART_WINDOW :30）；重启清空 open_files 与 diagnostics（:498-500） |
-| 发请求/通知或文件同步 | `src/client.rs` | `request`（:241，带超时）；`notify`（:315）；`did_open`（:327）/`did_change`（:349）/`did_save`（:395） | request 失败/超时须 `cancel_request` 移除 pending 注册防 oneshot 残留；did_open 幂等（open_files 已含 uri 直接返回）；did_change 版本号自增 |
-| 改消息分帧/分发 | `src/jsonrpc/` | codec：`encode_message`/`decode_message`（codec.rs:8/:28）；transport：`LspTransport::spawn`（:28）、`transport/dispatcher.rs::MessageDispatcher::new`、`run_dispatch_loop` | Content-Length 分帧，body 上限 64MB（codec.rs:20）；spawn 后立即 try_wait 捕获参数错误即退；请求先按 method 分类，双向 ID 不相互消费；只有 result/error 响应可移除 pending；支持服务器字符串 ID；EOF/失败自动 kill 子进程；close 自行拒绝 pending 并 kill/abort/join 自有 stdout、stderr、dispatch tasks |
-| 改诊断聚合/限流 | `src/diagnostics.rs` | `handle_publish_diagnostics`（:82）；`get_for_file`（:119）/`get_all`（:124）/`summary`（:133）/`clear_all`（:156） | 单文件上限 10、总量上限 30（:55-56）；按 uri 索引；clear_all 后服务器再推会重新入库 |
-| 新增 LSP 请求/通知方法 | `src/protocol/requests.rs` / `notifications.rs` | 例 `goto_definition_request`（requests.rs:7）、`initialize_params`（:94）；`did_open_notification`（notifications.rs:7）、`parse_publish_diagnostics`（:61） | 请求须携带自增 id；通知不期望响应；lsp_types 类型经 protocol/mod.rs re-export |
-| 改 URI 转换 | `src/uri.rs` | `path_to_uri`（:21）；`uri_to_path`（:56） | 幂等（已有 file:// 原样返回）；相对路径绝对化；RFC 3986 percent-encode 保留 `/` 与 `:`；Windows 盘符输出 `file:///C:/a/b` 空 authority 形式 |
-| 改扩展名路由/按需启动 | `src/pool.rs` | `ensure_server_for_file`（:139）；`ensure_initialized`（:92）；`add_server`（:260）；`server_for_file`（:207） | 扩展名小写化映射；start_lock 保证并发 ensure 只 spawn 一次；`shutdown`（:244）逐个关停并清 initialized |
-
-## 子系统
-
-| 功能 | 文件 | 入口/关键点 |
-| --- | --- | --- |
-| 客户端（进程 + 协议状态机） | src/client.rs | `LspClient::new`（:73）；`infer_language_id`（:418）；`ServerState`（:21）；`open_files` 版本簿 |
-| 服务器池（路由 + 生命周期） | src/pool.rs | `LspServerPool`（:20）；`LspServerInfo`（:36）；`root_uri`（:312）；`any_server`（:306） |
-| 诊断注册表 | src/diagnostics.rs | `DiagnosticsRegistry`（:63）；`DiagnosticEntry`（:11）；`DiagnosticSeverity`（:21）；`DiagnosticSummary`（:41） |
-| JSON-RPC 分帧 | src/jsonrpc/codec.rs | Content-Length 编解码；大小写不敏感头部 |
-| JSON-RPC 消息类型 | src/jsonrpc/message.rs | `JsonRpcRequest`（:14）/`JsonRpcNotification`（:56）/`JsonRpcResponse`（:35）/`RequestId`（:7） |
-| 传输管道 | src/jsonrpc/transport.rs | `LspTransport`；spawn 设置 kill_on_drop，处理独立 stdin/stdout 管道 |
-| 分发与任务 owner | src/jsonrpc/transport/dispatcher.rs | `MessageDispatcher` / `DispatchState` / `run_dispatch_loop`；父模块 re-export 保留路径；close 串行化并等待自有任务释放 |
-| 协议请求构造 | src/protocol/requests.rs | hover/definition/references/symbol/callHierarchy 构造器 |
-| 协议通知构造 | src/protocol/notifications.rs | didOpen/didChange/didSave/initialized/publishDiagnostics 解析 |
-| 错误类型 | src/error.rs | `LspError`（ContentModified 判定 `is_content_modified`） |
+| 加/改服务器配置 | `src/config.rs` | `load_global_lsp_config` / `lsp_config_from_plugin` / `expand_env_vars` | 配置类型由 peri-acp-types 定义，此处 re-export；全局配置取 settings.json，插件支持注入的 CLAUDE_PLUGIN_ROOT |
+| 改启动/握手/取消 | `src/client/lifecycle.rs` | `start` / `do_start` / `Startup` | 旧连接先关闭；私有 request_on 执行初始化，正常请求仅使用 Running 连接；失败回收，启动 future 被取消时撤回其注册 |
+| 改关闭/重启 | `src/client/lifecycle.rs` | `shutdown` / `Shutdown` / `try_restart` / `check_and_increment_restart` | 关闭先撤回就绪但保留注册供重试 join；取消关闭等待时 begin_close 同步拒绝请求并终止任务；重启计数在固定窗口累计 |
+| 发请求/通知 | `src/client/requests.rs` | `ready_dispatcher` / `request_on` / `request` / `notify` | 一次捕获同一 dispatcher 完成登记、发送和等待；超时覆盖排队/写入/响应，PendingRequest guard 在取消时清理原登记 |
+| 改文件同步 | `src/client.rs` | `did_open` / `did_change` / `did_save` / `infer_language_id` | client 维护 open_files 版本缓存；didOpen 幂等，首次 didChange 转 didOpen；启动/重启清缓存 |
+| 改路由与动态服务器 | `src/pool.rs` | `ensure_initialized` / `ensure_server_for_file` / `add_server` / `shutdown` | 池操作锁串行化路由选择、添加与关闭；同名替换先关闭旧 client，清除其旧扩展名；ensure 查询当前 client 就绪 |
+| 改进程管道 | `src/jsonrpc/transport.rs` | `LspTransport::spawn` / `read_message` / `kill` | 启动设置 kill_on_drop，独立 stdin/stdout 管道，立即 try_wait 检查早退 |
+| 改请求登记/分发 | `src/jsonrpc/transport/dispatcher.rs` | `register_owned_request` / `DispatchState::dispatch` / `run_dispatch_loop` | admission 同锁管理 closed/pending/writer；guard 用原 state 弱引用和独立 token 防止删除复用 ID；双向请求先按 method 分类，result/error 响应才消费 pending |
+| 改写入背压与取消 | `src/jsonrpc/transport/dispatcher/writer.rs` | `run` / `Frame` | 唯一 writer 持 stdin，16帧有界队列；已入队帧不被调用者取消截断，ack 表示实际写入与 flush；错误关闭准入并通知上层 |
+| 改任务回收 | `src/jsonrpc/transport/dispatcher.rs` | `begin_close` / `close` / `abort_and_join` | 同步拒绝 pending、请求杀进程并 abort；异步 close 回收 child、join writer/stdout/stderr/dispatch；join 句柄跨关闭取消留在 owner 槽位 |
+| 改分帧和消息类型 | `src/jsonrpc/{codec,message}.rs` | `encode_message` / `decode_message` / `JsonRpcRequest` / `JsonRpcResponse` | Content-Length 分帧，body 上限64MB，头部大小写不敏感；服务器字符串 ID 原样响应 |
+| 改诊断聚合 | `src/diagnostics.rs` | `handle_publish_diagnostics` / `get_for_file` / `summary` / `clear_all` | 按 URI 聚合与限流；client 的通知回调用当前 dispatcher 身份门控，旧连接关闭后再清重启诊断 |
+| 新增协议方法 | `src/protocol/{requests,notifications}.rs` | `initialize_params` / `goto_definition_request` / `did_open_notification` | 请求构造携带递增 ID，通知不等待响应；lsp_types 经 protocol re-export |
+| 改 URI 转换 | `src/uri.rs` | `path_to_uri` / `uri_to_path` | file:// 幂等、相对路径绝对化、RFC3986 percent encoding、Windows 盘符空 authority |
 
 ## 跨模块契约
 
-- 事实源：`LspServerConfig`/`LspConfigSource` 定义于 `peri-acp-types/src/lsp.rs`，`peri-lsp/src/config.rs:8` 仅 re-export（3.0 批 2 波 1 迁出）；`LspPoolPort` 定义于 `peri-acp-types/src/ports.rs:158`，`LspServerPool` 实现于 pool.rs:327（跨层 downcast 经 `downcast_arc`）
-- 消费方：本 crate 不直接被业务代码依赖，统一经 `peri-resources/src/lsp.rs` 门面出口（`pub use peri_lsp::*`）；实际调用方为 `peri-middlewares/src/lsp/`（middleware.rs:11-12、tool.rs:6-7）、`peri-middlewares/src/plugin/loader.rs:14`（`lsp_config_from_plugin`）
+- `LspServerConfig` / `LspConfigSource` 事实源在 `peri-acp-types/src/lsp.rs`；`LspPoolPort` 在 `peri-acp-types/src/ports.rs`，pool 实现该端口，装配通过 downcast 复用同一池。
+- 业务消费者经 `peri-resources/src/lsp.rs` 门面访问；middleware 工具、middleware hook 与 plugin loader 不引入另一份连接池。
+- 根 `client` 保留 LspClient / ServerState / DEFAULT_STARTUP_TIMEOUT_MS 公开路径；transport re-export MessageDispatcher / DispatchState / run_dispatch_loop。
+- 公开 run_dispatch_loop 的外部调用方负责自己的任务；client 内部分发由 dispatcher 持有。Drop 仅作终止保底，不能替代显式 close 的异步 join。
 
+## 验证入口
 
-## 分发与关闭验证
-
-- `jsonrpc/transport_test.rs` 经 `transport::dispatcher::tests` 挂载，覆盖同 ID 双向请求、缺少响应载荷与没有外部分发消费者的 close。
-- `LspClient::do_start` 将分发任务交给 `MessageDispatcher::start_dispatch_loop` 持有；调用公开 `run_dispatch_loop` 的外部使用者仍负责自己的任务。
-- 正常 close 明确等待自有任务；Drop 仅做 abort/kill 保底，不宣称完成异步 join。
-- 当前就绪状态由 client 的 `ServerState` 与 pool 的 `initialized` 集合共同维护；client 在 initialize 前发布 Running。
+- `client_test.rs` / `client_lifecycle_test.rs`：真实 Perl wire 的并发握手、请求取消、启动/关闭取消、冷却窗口与进程清理。
+- `pool_test.rs`：实际服务器复用、关闭后重新 ensure、同名替换及扩展名更新。
+- `jsonrpc/transport_test.rs` 经 `transport::dispatcher::tests` 挂载：双向同 ID、畸形响应、完整帧写入、队列背压、关闭与 pending guard。
+- 目标命令：`cargo test -p peri-lsp --lib`；文档与平台证明范围遵循 `docs/standards/testing.md`。

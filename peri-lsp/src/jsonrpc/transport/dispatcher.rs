@@ -1,5 +1,7 @@
 //! 消息分发与 pending/后台任务的生命周期；进程管道由父模块构造。
 
+mod writer;
+
 use super::LspTransport;
 use crate::{
     error::LspError,
@@ -7,30 +9,67 @@ use crate::{
 };
 use parking_lot::Mutex;
 use serde_json::Value;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
+};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    process::{Child, ChildStdin},
+    process::Child,
     sync::{mpsc, oneshot},
 };
 
 type NotificationHandler = Box<dyn Fn(Value) + Send + Sync>;
 type ErrorHandler = Box<dyn Fn(LspError) + Send + Sync>;
 
-/// 分发所需共享状态（从 MessageDispatcher 中提取，供后台 task 使用）
+pub(crate) type PendingResponse = oneshot::Receiver<Result<Value, LspError>>;
+
+struct PendingEntry {
+    token: Arc<()>,
+    sender: oneshot::Sender<Result<Value, LspError>>,
+}
+
+/// Owns only one registration in its original dispatcher, never the process owner.
+#[must_use]
+pub(crate) struct PendingRequest {
+    state: Weak<DispatchState>,
+    id: i64,
+    token: Arc<()>,
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.upgrade() {
+            let mut admission = state.admission.lock();
+            if admission
+                .pending
+                .get(&self.id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.token, &self.token))
+            {
+                admission.pending.remove(&self.id);
+            }
+        }
+    }
+}
+
+struct Admission {
+    closed: bool,
+    pending: HashMap<i64, PendingEntry>,
+    writer: Option<mpsc::Sender<writer::Frame>>,
+}
+
+/// Shared protocol state; no child or task join ownership.
 pub struct DispatchState {
-    pending: Mutex<HashMap<i64, oneshot::Sender<Result<Value, LspError>>>>,
+    admission: Mutex<Admission>,
     notification_handlers: Mutex<HashMap<String, NotificationHandler>>,
     on_error: Mutex<Option<ErrorHandler>>,
-    /// stdin 写入端 — dispatch 需向服务器回写响应（如未知请求的 -32601）时使用；
-    /// 用 tokio::sync::Mutex 以支持跨 await 持有
-    stdin: tokio::sync::Mutex<Option<ChildStdin>>,
 }
 
 /// 消息分发器：后台读取 stdout，分发到 pending_requests 或 notification_handlers
 pub struct MessageDispatcher {
     /// 共享分发状态，供后台 dispatch loop 使用
     dispatch_state: Arc<DispatchState>,
+    writer_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// read loop 任务句柄
     read_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stderr_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -46,6 +85,22 @@ impl MessageDispatcher {
         let mut stdout_reader = transport.stdout_reader;
         let mut child = transport.child;
         let stderr = child.stderr.take();
+
+        let (writer_tx, writer_rx) = mpsc::channel(writer::FRAME_QUEUE_CAPACITY);
+        let dispatch_state = Arc::new(DispatchState {
+            admission: Mutex::new(Admission {
+                closed: false,
+                pending: HashMap::new(),
+                writer: Some(writer_tx),
+            }),
+            notification_handlers: Mutex::new(HashMap::new()),
+            on_error: Mutex::new(None),
+        });
+        let writer_handle = tokio::spawn(writer::run(
+            stdin,
+            writer_rx,
+            Arc::downgrade(&dispatch_state),
+        ));
 
         // 启动 stderr drain 任务
         let stderr_task = stderr.map(|stderr| {
@@ -98,12 +153,8 @@ impl MessageDispatcher {
         });
 
         let dispatcher = Self {
-            dispatch_state: Arc::new(DispatchState {
-                pending: Mutex::new(HashMap::new()),
-                notification_handlers: Mutex::new(HashMap::new()),
-                on_error: Mutex::new(None),
-                stdin: tokio::sync::Mutex::new(Some(stdin)),
-            }),
+            dispatch_state,
+            writer_task: Mutex::new(Some(writer_handle)),
             read_task: Mutex::new(Some(read_handle)),
             stderr_task: Mutex::new(stderr_task),
             dispatch_task: Mutex::new(None),
@@ -127,43 +178,45 @@ impl MessageDispatcher {
         *self.dispatch_state.on_error.lock() = Some(handler);
     }
 
-    /// 注册 pending request（返回 oneshot receiver）
+    /// Register a request whose entry is removed when its caller future is dropped.
+    pub(crate) fn register_owned_request(&self, id: i64) -> (PendingRequest, PendingResponse) {
+        let token = Arc::new(());
+        let receiver = self.dispatch_state.register_request(id, Arc::clone(&token));
+        (
+            PendingRequest {
+                state: Arc::downgrade(&self.dispatch_state),
+                id,
+                token,
+            },
+            receiver,
+        )
+    }
+
+    /// 注册 pending request（返回 oneshot receiver；调用方负责 cancel_request）。
     pub fn register_request(&self, id: i64) -> oneshot::Receiver<Result<Value, LspError>> {
-        let (tx, rx) = oneshot::channel();
-        self.dispatch_state.pending.lock().insert(id, tx);
-        rx
+        self.dispatch_state.register_request(id, Arc::new(()))
     }
 
-    /// 取消 pending request（请求超时或发送失败时移除注册，避免 oneshot sender 残留）
-    ///
-    /// 若响应恰好已在途中、条目已被 dispatch 移除，此处为无副作用 no-op。
+    /// 显式取消当前 ID；owned 请求通过其 registration token 自动取消。
     pub fn cancel_request(&self, id: i64) {
-        self.dispatch_state.pending.lock().remove(&id);
+        self.dispatch_state.admission.lock().pending.remove(&id);
     }
 
-    /// 发送消息到 transport
+    /// Enqueue a complete frame and wait for its actual write/flush result.
     pub async fn send_request(&self, request: &JsonRpcRequest) -> Result<(), LspError> {
-        let mut guard = self.dispatch_state.stdin.lock().await;
-        let stdin = guard.as_mut().ok_or_else(|| LspError::JsonRpcError {
-            code: -32002,
-            message: "transport 已关闭".to_string(),
-        })?;
-        let body = serde_json::to_string(request)?;
-        codec::encode_message(body.as_bytes(), stdin).await
+        self.dispatch_state
+            .send_body(serde_json::to_string(request)?)
+            .await
     }
 
-    /// 发送通知到 transport
+    /// 调用者取消不会中断已经入队的帧；成功仍表示实际写入并 flush 完成。
     pub async fn send_notification(
         &self,
         notification: &JsonRpcNotification,
     ) -> Result<(), LspError> {
-        let mut guard = self.dispatch_state.stdin.lock().await;
-        let stdin = guard.as_mut().ok_or_else(|| LspError::JsonRpcError {
-            code: -32002,
-            message: "transport 已关闭".to_string(),
-        })?;
-        let body = serde_json::to_string(notification)?;
-        codec::encode_message(body.as_bytes(), stdin).await
+        self.dispatch_state
+            .send_body(serde_json::to_string(notification)?)
+            .await
     }
 
     /// 获取共享分发状态的 Arc（供后台 dispatch loop 使用，不持有 tokio::sync::Mutex）
@@ -177,12 +230,32 @@ impl MessageDispatcher {
         *self.dispatch_task.lock() = Some(tokio::spawn(run_dispatch_loop(state, rx)));
     }
 
+    /// 同步撤销准入并请求终止；保留 join 槽位供 close 或后续重试回收。
+    pub(crate) fn begin_close(&self) {
+        self.dispatch_state
+            .reject_all_pending("LSP transport 已关闭");
+        for slot in [
+            &self.writer_task,
+            &self.read_task,
+            &self.stderr_task,
+            &self.dispatch_task,
+        ] {
+            if let Some(handle) = slot.lock().as_ref() {
+                handle.abort();
+            }
+        }
+        if let Ok(mut child) = self.child.try_lock() {
+            if let Some(child) = child.as_mut() {
+                let _ = child.start_kill();
+            }
+        }
+    }
+
     /// 拒绝 pending、关闭管道并回收进程，随后 abort/join 所有自有后台任务。
     pub async fn close(&self) {
         let _closing = self.close_lock.lock().await;
-        self.dispatch_state
-            .reject_all_pending("LSP transport 已关闭");
-        *self.dispatch_state.stdin.lock().await = None;
+        self.begin_close();
+        abort_and_join(&self.writer_task).await;
         if let Some(child) = self.child.lock().await.as_mut() {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), child.kill()).await;
         }
@@ -193,18 +266,36 @@ impl MessageDispatcher {
 }
 
 async fn abort_and_join(slot: &Mutex<Option<tokio::task::JoinHandle<()>>>) {
-    let handle = slot.lock().take();
-    if let Some(handle) = handle {
+    if let Some(handle) = slot.lock().as_ref() {
         handle.abort();
-        let _ = handle.await;
     }
+    // Keep the handle in its owner slot across await: cancelling close must not
+    // detach the task and make a later close skip its join.
+    std::future::poll_fn(|cx| {
+        let mut slot = slot.lock();
+        let Some(handle) = slot.as_mut() else {
+            return std::task::Poll::Ready(());
+        };
+        if std::future::Future::poll(std::pin::Pin::new(handle), cx).is_ready() {
+            slot.take();
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
 }
 
 impl Drop for MessageDispatcher {
     fn drop(&mut self) {
         self.dispatch_state
             .reject_all_pending("LSP dispatcher 已释放");
-        for slot in [&self.read_task, &self.stderr_task, &self.dispatch_task] {
+        for slot in [
+            &self.writer_task,
+            &self.read_task,
+            &self.stderr_task,
+            &self.dispatch_task,
+        ] {
             if let Some(handle) = slot.lock().take() {
                 handle.abort();
             }
@@ -218,6 +309,37 @@ impl Drop for MessageDispatcher {
 }
 
 impl DispatchState {
+    fn register_request(&self, id: i64, token: Arc<()>) -> PendingResponse {
+        let (sender, receiver) = oneshot::channel();
+        let mut admission = self.admission.lock();
+        if admission.closed {
+            let _ = sender.send(Err(LspError::TransportClosed));
+        } else {
+            admission.pending.insert(id, PendingEntry { token, sender });
+        }
+        receiver
+    }
+
+    async fn send_body(&self, body: String) -> Result<(), LspError> {
+        let sender = self
+            .admission
+            .lock()
+            .writer
+            .clone()
+            .ok_or(LspError::TransportClosed)?;
+        let (ack, receiver) = oneshot::channel();
+        sender
+            .send(writer::Frame { body, ack })
+            .await
+            .map_err(|_| LspError::TransportClosed)?;
+        receiver.await.map_err(|_| LspError::TransportClosed)?
+    }
+
+    fn writer_failed(&self) {
+        self.reject_all_pending("LSP transport 写入失败");
+        self.invoke_on_error(LspError::TransportClosed);
+    }
+
     async fn dispatch(&self, msg: String) {
         let value: Value = match serde_json::from_str(&msg) {
             Ok(v) => v,
@@ -246,8 +368,8 @@ impl DispatchState {
             return;
         }
         if let Some(id) = value.get("id").and_then(Value::as_i64) {
-            let sender = self.pending.lock().remove(&id);
-            if let Some(tx) = sender {
+            let entry = self.admission.lock().pending.remove(&id);
+            if let Some(entry) = entry {
                 let result = if let Some(error) = value.get("error") {
                     let code = error.get("code").and_then(Value::as_i64).unwrap_or(-32000);
                     let message = error
@@ -259,7 +381,7 @@ impl DispatchState {
                 } else {
                     Ok(value["result"].clone())
                 };
-                let _ = tx.send(result);
+                let _ = entry.sender.send(result);
             }
         }
     }
@@ -275,22 +397,26 @@ impl DispatchState {
             Ok(body) => body,
             Err(_) => return,
         };
-        if let Some(stdin) = self.stdin.lock().await.as_mut() {
-            let _ = codec::encode_message(body.as_bytes(), stdin).await;
-        }
+        // Writer failure terminates the protocol and reports on_error centrally.
+        let _ = self.send_body(body).await;
     }
 
     /// 当前 pending 请求数（仅测试断言超时/发送失败后无残留）
     #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
-        self.pending.lock().len()
+        self.admission.lock().pending.len()
     }
 
     /// 拒绝所有待处理请求（transport EOF 或错误时调用）
     fn reject_all_pending(&self, reason: &str) {
-        let mut pending = self.pending.lock();
-        for (_, tx) in pending.drain() {
-            let _ = tx.send(Err(LspError::RequestFailed {
+        let pending = {
+            let mut admission = self.admission.lock();
+            admission.closed = true;
+            admission.writer.take();
+            std::mem::take(&mut admission.pending)
+        };
+        for (_, entry) in pending {
+            let _ = entry.sender.send(Err(LspError::RequestFailed {
                 method: "transport".to_string(),
                 reason: reason.to_string(),
             }));
@@ -299,7 +425,8 @@ impl DispatchState {
 
     /// 调用 on_error 回调通知上层服务器断开
     fn invoke_on_error(&self, error: LspError) {
-        if let Some(handler) = self.on_error.lock().take() {
+        let handler = self.on_error.lock().take();
+        if let Some(handler) = handler {
             handler(error);
         }
     }

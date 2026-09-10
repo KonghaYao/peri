@@ -289,7 +289,7 @@ async fn test_request_timeout_cleans_pending() {
     // 启动失败路径整体清理 dispatcher（kill 子进程 + abort read task），
     // pending map 中的超时条目随之释放，不残留 oneshot sender
     assert!(
-        client.dispatcher.lock().await.is_none(),
+        client.connection.read().dispatcher.is_none(),
         "start 失败后 dispatcher 应被整体清理（含 pending 条目）"
     );
 
@@ -579,7 +579,7 @@ async fn test_start_failure_initialize_kills_child() {
         "短超时 + 慢服务器应触发 initialize 超时: {err:?}"
     );
     assert!(
-        client.dispatcher.lock().await.is_none(),
+        client.connection.read().dispatcher.is_none(),
         "启动失败后 dispatcher 应被清理（子进程/read task 不残留）"
     );
     wait_for_child_exit(&pid_file).await;
@@ -600,7 +600,7 @@ async fn test_start_failure_notify_kills_child() {
         "stdin 关闭后 initialized 通知应 IO 失败: {err:?}"
     );
     assert!(
-        client.dispatcher.lock().await.is_none(),
+        client.connection.read().dispatcher.is_none(),
         "启动失败后 dispatcher 应被清理（子进程/read task 不残留）"
     );
     wait_for_child_exit(&pid_file).await;

@@ -63,19 +63,7 @@ async fn test_server_request_unknown_id_receives_method_not_found() {
 async fn test_cancel_request_removes_pending_entry() {
     // 超时/发送失败路径调用 cancel_request 后，pending 不得残留 oneshot sender
     // （此前仅在 transport EOF 时由 reject_all_pending 整体清理）
-    let dispatcher = MessageDispatcher {
-        dispatch_state: Arc::new(DispatchState {
-            pending: Mutex::new(HashMap::new()),
-            notification_handlers: Mutex::new(HashMap::new()),
-            on_error: Mutex::new(None),
-            stdin: tokio::sync::Mutex::new(None),
-        }),
-        read_task: Mutex::new(None),
-        stderr_task: Mutex::new(None),
-        dispatch_task: Mutex::new(None),
-        close_lock: tokio::sync::Mutex::new(()),
-        child: Arc::new(tokio::sync::Mutex::new(None)),
-    };
+    let dispatcher = empty_dispatcher();
 
     // receiver 保持存活，模拟"请求方仍持有 receiver 但已超时放弃"
     let _receiver = dispatcher.register_request(7);
@@ -130,18 +118,20 @@ async fn test_close_kills_child_process() {
 
 fn disconnected_state() -> DispatchState {
     DispatchState {
-        pending: Mutex::new(HashMap::new()),
+        admission: Mutex::new(Admission {
+            closed: false,
+            pending: HashMap::new(),
+            writer: None,
+        }),
         notification_handlers: Mutex::new(HashMap::new()),
         on_error: Mutex::new(None),
-        stdin: tokio::sync::Mutex::new(None),
     }
 }
 
 #[tokio::test]
 async fn server_request_id_collision_keeps_client_response_pending() {
     let state = disconnected_state();
-    let (tx, mut rx) = oneshot::channel();
-    state.pending.lock().insert(7, tx);
+    let mut rx = state.register_request(7, Arc::new(()));
     state.dispatch(serde_json::json!({"jsonrpc":"2.0","id":7,"method":"workspace/configuration","params":[]}).to_string()).await;
     assert_eq!(
         state.pending_len(),
@@ -164,8 +154,7 @@ async fn server_request_id_collision_keeps_client_response_pending() {
 #[tokio::test]
 async fn id_without_response_payload_keeps_request_pending() {
     let state = disconnected_state();
-    let (tx, rx) = oneshot::channel();
-    state.pending.lock().insert(9, tx);
+    let rx = state.register_request(9, Arc::new(()));
     state
         .dispatch(serde_json::json!({"jsonrpc":"2.0","id":9}).to_string())
         .await;
@@ -178,14 +167,7 @@ async fn id_without_response_payload_keeps_request_pending() {
 
 #[tokio::test]
 async fn close_rejects_pending_without_an_external_dispatch_loop() {
-    let dispatcher = MessageDispatcher {
-        dispatch_state: Arc::new(disconnected_state()),
-        read_task: Mutex::new(None),
-        stderr_task: Mutex::new(None),
-        dispatch_task: Mutex::new(None),
-        close_lock: tokio::sync::Mutex::new(()),
-        child: Arc::new(tokio::sync::Mutex::new(None)),
-    };
+    let dispatcher = empty_dispatcher();
     let rx = dispatcher.register_request(11);
     dispatcher.close().await;
     let error = tokio::time::timeout(Duration::from_millis(100), rx)
@@ -195,4 +177,334 @@ async fn close_rejects_pending_without_an_external_dispatch_loop() {
         .unwrap_err();
     assert!(matches!(error, LspError::RequestFailed { .. }));
     assert_eq!(dispatcher.dispatch_state().pending_len(), 0);
+}
+
+fn empty_dispatcher() -> MessageDispatcher {
+    MessageDispatcher {
+        dispatch_state: Arc::new(disconnected_state()),
+        writer_task: Mutex::new(None),
+        read_task: Mutex::new(None),
+        stderr_task: Mutex::new(None),
+        dispatch_task: Mutex::new(None),
+        close_lock: tokio::sync::Mutex::new(()),
+        child: Arc::new(tokio::sync::Mutex::new(None)),
+    }
+}
+
+fn dispatcher_with_writer(
+    stdin: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+) -> MessageDispatcher {
+    let dispatcher = empty_dispatcher();
+    let (sender, receiver) = mpsc::channel(writer::FRAME_QUEUE_CAPACITY);
+    dispatcher.dispatch_state.admission.lock().writer = Some(sender);
+    *dispatcher.writer_task.lock() = Some(tokio::spawn(writer::run(
+        stdin,
+        receiver,
+        Arc::downgrade(&dispatcher.dispatch_state),
+    )));
+    dispatcher
+}
+
+#[tokio::test]
+async fn owned_request_drop_cancels_only_its_original_registration() {
+    let old = empty_dispatcher();
+    let new = empty_dispatcher();
+    let (old_guard, old_receiver) = old.register_owned_request(1);
+    let (_new_guard, mut new_receiver) = new.register_owned_request(1);
+    drop(old_guard);
+    assert!(old_receiver.await.is_err());
+    assert_eq!(old.dispatch_state.pending_len(), 0);
+    assert_eq!(new.dispatch_state.pending_len(), 1);
+    assert!(matches!(
+        new_receiver.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn old_guard_cannot_remove_a_reused_id_or_keep_dispatcher_state_alive() {
+    let dispatcher = empty_dispatcher();
+    let (old_guard, _old_receiver) = dispatcher.register_owned_request(1);
+    let (new_guard, _new_receiver) = dispatcher.register_owned_request(1);
+    drop(old_guard);
+    assert_eq!(dispatcher.dispatch_state.pending_len(), 1);
+    let weak = Arc::downgrade(&dispatcher.dispatch_state);
+    drop(dispatcher);
+    assert!(
+        weak.upgrade().is_none(),
+        "request guard must not own dispatcher state or child"
+    );
+    drop(new_guard);
+}
+
+#[tokio::test]
+async fn close_rejects_new_owned_and_legacy_registrations() {
+    let dispatcher = empty_dispatcher();
+    dispatcher.close().await;
+    let (_guard, receiver) = dispatcher.register_owned_request(1);
+    assert!(matches!(
+        receiver.await.unwrap(),
+        Err(LspError::TransportClosed)
+    ));
+    assert!(matches!(
+        dispatcher.register_request(2).await.unwrap(),
+        Err(LspError::TransportClosed)
+    ));
+    assert_eq!(dispatcher.dispatch_state.pending_len(), 0);
+}
+
+#[tokio::test]
+async fn cancelled_sender_finishes_its_frame_before_the_next_frame() {
+    use tokio::io::AsyncReadExt;
+    let (stdin, mut server) = tokio::io::duplex(8);
+    let dispatcher = Arc::new(dispatcher_with_writer(stdin));
+    let request = JsonRpcRequest::new(
+        1,
+        "first",
+        Some(serde_json::json!({"text": "x".repeat(4096)})),
+    );
+    let expected = serde_json::to_value(&request).unwrap();
+    let sender = {
+        let dispatcher = Arc::clone(&dispatcher);
+        tokio::spawn(async move { dispatcher.send_request(&request).await })
+    };
+    // Receiving the first header byte proves the writer has started a frame;
+    // the tiny pipe makes actual write completion impossible without more reads.
+    let mut prefix = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(2), server.read_exact(&mut prefix))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !sender.is_finished(),
+        "send success must wait for actual write completion"
+    );
+    sender.abort();
+    let _ = sender.await;
+    let next = {
+        let dispatcher = Arc::clone(&dispatcher);
+        tokio::spawn(async move {
+            dispatcher
+                .send_notification(&JsonRpcNotification::new("second", None))
+                .await
+        })
+    };
+    let mut reader = BufReader::new(prefix.as_slice().chain(server));
+    let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
+        let first = codec::decode_message(&mut reader).await.unwrap().unwrap();
+        let second = codec::decode_message(&mut reader).await.unwrap().unwrap();
+        (first, second)
+    })
+    .await
+    .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&first).unwrap(), expected);
+    assert_eq!(
+        serde_json::from_str::<Value>(&second).unwrap()["method"],
+        "second"
+    );
+    next.await.unwrap().unwrap();
+    dispatcher.close().await;
+    assert!(dispatcher.writer_task.lock().is_none());
+}
+
+#[tokio::test]
+async fn close_joins_a_blocked_writer_and_settles_its_sender() {
+    use tokio::io::AsyncReadExt;
+    let (stdin, mut server) = tokio::io::duplex(8);
+    let dispatcher = Arc::new(dispatcher_with_writer(stdin));
+    let pending = dispatcher.register_request(1);
+    let sender = {
+        let dispatcher = Arc::clone(&dispatcher);
+        tokio::spawn(async move {
+            dispatcher
+                .send_notification(&JsonRpcNotification::new(
+                    "blocked",
+                    Some(serde_json::json!({"text": "x".repeat(4096)})),
+                ))
+                .await
+        })
+    };
+    let mut byte = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(2), server.read_exact(&mut byte))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), dispatcher.close())
+        .await
+        .expect("close must not await a blocked stdin write lock");
+    assert!(matches!(
+        sender.await.unwrap(),
+        Err(LspError::TransportClosed)
+    ));
+    assert!(pending.await.unwrap().is_err());
+    assert!(dispatcher.writer_task.lock().is_none());
+    assert_eq!(dispatcher.dispatch_state.pending_len(), 0);
+    dispatcher.close().await;
+}
+
+#[tokio::test]
+async fn writer_failure_rejects_pending_and_reports_terminal_error_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (stdin, server) = tokio::io::duplex(8);
+    drop(server);
+    let dispatcher = dispatcher_with_writer(stdin);
+    let pending = dispatcher.register_request(1);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let on_error_calls = Arc::clone(&calls);
+    dispatcher.set_on_error(Box::new(move |_| {
+        on_error_calls.fetch_add(1, Ordering::SeqCst);
+    }));
+    let error = dispatcher
+        .send_notification(&JsonRpcNotification::new("broken", None))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, LspError::Io(_)),
+        "the initiating send retains its IO error"
+    );
+    assert!(pending.await.unwrap().is_err());
+    assert_eq!(dispatcher.dispatch_state.pending_len(), 0);
+    assert!(matches!(
+        dispatcher
+            .send_notification(&JsonRpcNotification::new("later", None))
+            .await,
+        Err(LspError::TransportClosed)
+    ));
+    let (tx, rx) = mpsc::unbounded_channel();
+    drop(tx);
+    run_dispatch_loop(dispatcher.dispatch_state(), rx).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "later EOF must not duplicate the writer error callback"
+    );
+    dispatcher.close().await;
+}
+
+#[tokio::test]
+async fn close_reclaims_child_while_its_stdin_body_write_is_blocked() {
+    // Read only the header, announce that barrier on stdout, then stop reading.
+    // A body much larger than the OS pipe proves close cannot depend on stdin's
+    // write lock becoming available. This uses the same perl dependency as the
+    // existing bidirectional JSON-RPC test.
+    let script = r#"binmode STDIN; binmode STDOUT; $| = 1;
+while (defined(my $line = <STDIN>)) { last if $line =~ /^\r?\n$/; }
+my $body = '{"jsonrpc":"2.0","method":"header-read"}';
+print "Content-Length: " . length($body) . "\r\n\r\n" . $body;
+sleep 60;
+"#;
+    let transport =
+        LspTransport::spawn("perl", &["-e".into(), script.into()], &HashMap::new()).unwrap();
+    let (dispatcher, mut incoming) = MessageDispatcher::new(transport);
+    let dispatcher = Arc::new(dispatcher);
+    let send = {
+        let dispatcher = Arc::clone(&dispatcher);
+        tokio::spawn(async move {
+            dispatcher
+                .send_notification(&JsonRpcNotification::new(
+                    "large",
+                    Some(serde_json::json!({"body": "x".repeat(4 * 1024 * 1024)})),
+                ))
+                .await
+        })
+    };
+    let observed = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("server must observe the frame header")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&observed).unwrap()["method"],
+        "header-read"
+    );
+    assert!(!send.is_finished());
+    tokio::time::timeout(Duration::from_secs(5), dispatcher.close())
+        .await
+        .expect("blocked body write must not hold close hostage");
+    assert!(matches!(
+        send.await.unwrap(),
+        Err(LspError::TransportClosed)
+    ));
+    assert!(dispatcher.writer_task.lock().is_none());
+    assert!(dispatcher.read_task.lock().is_none());
+    assert!(dispatcher.stderr_task.lock().is_none());
+    assert!(dispatcher
+        .child
+        .lock()
+        .await
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn close_settles_every_admitted_frame_in_a_full_writer_queue() {
+    use tokio::io::AsyncReadExt;
+    let (stdin, mut server) = tokio::io::duplex(1);
+    let dispatcher = dispatcher_with_writer(stdin);
+    let sender = dispatcher
+        .dispatch_state
+        .admission
+        .lock()
+        .writer
+        .clone()
+        .unwrap();
+    let mut acks = Vec::new();
+    let (ack, receiver) = oneshot::channel();
+    sender
+        .send(writer::Frame {
+            body: "first".into(),
+            ack,
+        })
+        .await
+        .unwrap();
+    acks.push(receiver);
+    let mut byte = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(2), server.read_exact(&mut byte))
+        .await
+        .unwrap()
+        .unwrap();
+    for _ in 0..writer::FRAME_QUEUE_CAPACITY {
+        let (ack, receiver) = oneshot::channel();
+        assert!(sender
+            .try_send(writer::Frame {
+                body: "queued".into(),
+                ack
+            })
+            .is_ok());
+        acks.push(receiver);
+    }
+    assert_eq!(sender.capacity(), 0);
+    tokio::time::timeout(Duration::from_secs(2), dispatcher.close())
+        .await
+        .unwrap();
+    for receiver in acks {
+        assert!(
+            receiver.await.is_err(),
+            "each abandoned frame must settle its send waiter"
+        );
+    }
+    assert!(sender.is_closed());
+}
+
+#[tokio::test]
+async fn begin_close_retains_join_ownership_for_later_close() {
+    let (stdin, _server) = tokio::io::duplex(8);
+    let dispatcher = Arc::new(dispatcher_with_writer(stdin));
+    let another_owner = Arc::clone(&dispatcher);
+    let pending = dispatcher.register_request(1);
+    dispatcher.begin_close();
+    assert!(
+        dispatcher.writer_task.lock().is_some(),
+        "begin_close must retain the join handle"
+    );
+    assert!(pending.await.unwrap().is_err());
+    assert!(matches!(
+        dispatcher.register_request(2).await.unwrap(),
+        Err(LspError::TransportClosed)
+    ));
+    drop(dispatcher);
+    another_owner.close().await;
+    assert!(another_owner.writer_task.lock().is_none());
 }
