@@ -1,6 +1,16 @@
 //! Tests for loader_theme
 
-use super::*;
+use std::collections::HashMap;
+
+use ratatui::style::Color;
+
+use super::ThemeLoadError;
+use super::resolve::{parse_hex_color, resolve_refs};
+use super::source::ThemeSources;
+
+fn parse_theme_json(json: &str) -> Result<crate::theme::ThemeDefinition, ThemeLoadError> {
+    ThemeSources::new(None).parse_document(json)
+}
 use crate::bridge::ThemeDefinitionExt;
 
 #[test]
@@ -23,6 +33,92 @@ fn test_parse_hex() {
 fn test_parse_hex_invalid() {
     assert!(parse_hex_color("").is_err());
     assert!(parse_hex_color("not-a-color").is_err());
+}
+
+#[test]
+fn test_unicode_hex_returns_error_without_panicking() {
+    for invalid in ["#0é000", "#é0000", "#é0", "#中", "#12345é", "#GGG"] {
+        assert!(matches!(
+            parse_hex_color(invalid),
+            Err(ThemeLoadError::InvalidColor(_))
+        ));
+    }
+    assert_eq!(
+        parse_hex_color("  #aBc  ").unwrap(),
+        Color::Rgb(170, 187, 204)
+    );
+}
+
+#[test]
+fn test_shared_reference_chain_is_not_a_cycle_in_any_iteration_order() {
+    let mut flat: HashMap<String, String> = ["a", "b", "c", "d"]
+        .into_iter()
+        .map(|key| (key.to_string(), "#123456".to_string()))
+        .collect();
+    // 不改变键集合，按实际遍历顺序构造链，避免回归测试依赖 HashMap 随机种子。
+    // 第一次解析 roots[0] 后，第二次链 roots[1] → roots[2] → roots[0]
+    // 必须能再次访问 roots[0]；全局 visited 会误报循环。
+    let roots: Vec<_> = flat.keys().cloned().collect();
+    flat.insert(roots[0].clone(), format!("${}", roots[3]));
+    flat.insert(roots[1].clone(), format!("${}", roots[2]));
+    flat.insert(roots[2].clone(), format!("${}", roots[0]));
+    let resolved = resolve_refs(&flat, 0).unwrap();
+    assert_eq!(resolved.len(), 4);
+    assert!(resolved.values().all(|value| value == "#123456"));
+}
+
+#[test]
+fn test_case_insensitive_references_track_actual_keys() {
+    let flat = HashMap::from([
+        ("First".to_string(), "$SECOND".to_string()),
+        ("Second".to_string(), "#abc".to_string()),
+    ]);
+    assert_eq!(resolve_refs(&flat, 0).unwrap()["First"], "#abc");
+    let cycle = HashMap::from([
+        ("First".to_string(), "$SECOND".to_string()),
+        ("Second".to_string(), "$FIRST".to_string()),
+    ]);
+    assert!(matches!(
+        resolve_refs(&cycle, 0),
+        Err(ThemeLoadError::CircularRef(_))
+    ));
+    assert!(matches!(
+        resolve_refs(
+            &HashMap::from([("a".to_string(), "$missing".to_string())]),
+            0
+        ),
+        Err(ThemeLoadError::UnresolvedRef(_))
+    ));
+}
+
+#[test]
+fn test_ten_reference_edges_are_allowed_but_eleven_are_not() {
+    let mut flat: HashMap<_, _> = (0..10)
+        .map(|index| (format!("k{index}"), format!("$k{}", index + 1)))
+        .collect();
+    flat.insert("k10".to_string(), "#abc".to_string());
+    assert_eq!(resolve_refs(&flat, 0).unwrap()["k0"], "#abc");
+    flat.insert("extra".to_string(), "$k0".to_string());
+    assert!(matches!(
+        resolve_refs(&flat, 0),
+        Err(ThemeLoadError::CircularRef(_))
+    ));
+}
+
+#[test]
+fn test_builtin_json_and_rust_definitions_match_every_token() {
+    for (json, builtin) in [
+        (
+            include_str!("../themes/dark.json"),
+            crate::builtin::dark_theme(),
+        ),
+        (
+            include_str!("../themes/light.json"),
+            crate::builtin::light_theme(),
+        ),
+    ] {
+        assert_eq!(parse_theme_json(json).unwrap(), builtin);
+    }
 }
 
 #[test]
