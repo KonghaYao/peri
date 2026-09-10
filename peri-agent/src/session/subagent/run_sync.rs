@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use peri_acp_types::identity::AgentId;
 
+use super::factory::ResumeClaim;
 use super::types::{SubagentLifecycleStart, SubagentLifecycleStop};
 use super::util::extract_last_ai_text;
 use super::v2_bridge::{forward_subagent_start_v1, forward_subagent_stop_v1, V2SubagentContext};
@@ -36,6 +37,7 @@ pub(super) async fn run_sync_subagent(
     parent_agent_id: Option<AgentId>,
     v2_ctx: V2SubagentContext,
     session: Arc<Session>,
+    mut resume_claim: Option<ResumeClaim>,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let agent_name = agent_name.to_string();
     let cwd = cwd.to_string();
@@ -51,6 +53,17 @@ pub(super) async fn run_sync_subagent(
     let _deregister_guard = DeregisterGuard {
         thread_id: child_thread_id.to_string(),
         deregister: deregister_runtime,
+    };
+
+    // The resumed claim crosses the first execution await with us. Its Drop
+    // records cancellation without duplicating lifecycle Stop/hook delivery.
+    if let Some(claim) = &mut resume_claim {
+        claim.mark_running();
+    }
+    let stop_store = if resume_claim.is_some() {
+        None // The claim worker serializes resumed terminal status writes.
+    } else {
+        thread_store
     };
 
     // lifecycle hook（SubagentStart）
@@ -159,7 +172,7 @@ pub(super) async fn run_sync_subagent(
             // 之后经 forward_subagent_stop_v1 发出）
             on_subagent_stop_handler(
                 &on_subagent_stop,
-                &thread_store,
+                &stop_store,
                 &agent_name,
                 child_thread_id,
                 &error_result,
@@ -167,6 +180,9 @@ pub(super) async fn run_sync_subagent(
                 &cwd,
             )
             .await;
+            if let Some(claim) = resume_claim.take() {
+                claim.finish("error").await;
+            }
             return Err(error_summary.into());
         }
     };
@@ -178,7 +194,7 @@ pub(super) async fn run_sync_subagent(
     };
     on_subagent_stop_handler(
         &on_subagent_stop,
-        &thread_store,
+        &stop_store,
         &agent_name,
         child_thread_id,
         &output_summary,
@@ -186,6 +202,11 @@ pub(super) async fn run_sync_subagent(
         &cwd,
     )
     .await;
+    if let Some(claim) = resume_claim.take() {
+        claim
+            .finish(if interrupted { "error" } else { "done" })
+            .await;
+    }
 
     Ok(interrupted)
 }
