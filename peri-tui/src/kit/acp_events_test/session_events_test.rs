@@ -601,6 +601,97 @@ fn test_auto_compact_completed_injects_detailed_system_note() {
     assert!(!state.compact_just_completed);
 }
 
+#[test]
+fn test_full_compact_completed_shows_unmeasured_token_saving() {
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::PromptRunning,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: "test-session".to_string(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+        pending_cache_usage: None,
+    };
+
+    super::super::compact::handle_compact_completed(&mut state, "", "auto", "full", 7, 0, 2, 1);
+
+    let note = state
+        .current_turn
+        .view_models()
+        .iter()
+        .find_map(|unit| match unit {
+            crate::kit::tui_render_unit::TuiRenderUnit::TuiSystemNote(note) => Some(&note.text),
+            _ => None,
+        })
+        .expect("Full compact 应注入 system note");
+    assert!(note.contains("unmeasured"), "Full 应显示未测量: {note}");
+    assert!(
+        !note.contains("0 tokens saved"),
+        "legacy 0 不得显示为真实节省: {note}"
+    );
+}
+
+#[test]
+fn test_unknown_and_empty_compact_strategy_use_full_unmeasured_detail() {
+    for strategy in ["unknown", ""] {
+        let mut state = BridgeState {
+            variant: 0,
+            committed: im::Vector::new(),
+            current_turn: CurrentTurn::new(),
+            phase: SessionPhase::PromptRunning,
+            popup_kind: None,
+            generation: 0,
+            active_session_id: "test-session".to_string(),
+            compact_just_completed: false,
+            last_submitted_text: None,
+            last_pushed_text_len: 0,
+            last_pushed_reasoning_len: 0,
+            last_successful_todos: None,
+            last_successful_todo_sequence: None,
+            next_todo_sequence: 0,
+            todo_call_inputs: std::collections::HashMap::new(),
+            turn_generation: 0,
+            last_prompt_generation: 0,
+            current_request_id: None,
+            pending_cache_usage: None,
+        };
+
+        super::super::compact::handle_compact_completed(
+            &mut state, "", "auto", strategy, 7, 0, 2, 1,
+        );
+
+        let note = state
+            .current_turn
+            .view_models()
+            .iter()
+            .find_map(|unit| match unit {
+                crate::kit::tui_render_unit::TuiRenderUnit::TuiSystemNote(note) => Some(&note.text),
+                _ => None,
+            })
+            .expect("legacy Full compact 应注入 system note");
+        assert!(
+            note.contains("unmeasured"),
+            "strategy={strategy:?} 应使用 Full 未测量模板: {note}"
+        );
+        assert!(
+            !note.contains("0 tokens saved"),
+            "strategy={strategy:?} 不得显示 legacy numeric 0: {note}"
+        );
+    }
+}
+
 /// C2: compact 完成后 TurnDone 触发 session/load 重放。
 ///
 /// 场景 A：命令 compact（Immediate）后无流事件 → 触发 THREAD_LOAD_TX。

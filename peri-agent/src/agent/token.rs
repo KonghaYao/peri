@@ -1,5 +1,12 @@
 use peri_model::TokenUsage;
 
+/// 标识一次可供自动 Compact 评估的上下文压力样本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PressureSampleKey {
+    usage_generation: u64,
+    tool_growth_generation: u64,
+}
+
 /// 会话级 token 用量追踪器
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TokenTracker {
@@ -25,6 +32,15 @@ pub struct TokenTracker {
     /// **不可污染 `last_usage`**（那是 LLM API 的精确值，混入估算会破坏显示精度）。
     /// 每次 LLM `accumulate` 时清零（工具结果已被下一轮 input_tokens 包含）。
     pub estimated_tool_tokens_since_last_llm: u64,
+    /// 最近一次有效 provider usage 的单调 generation。
+    #[serde(default)]
+    usage_generation: u64,
+    /// 实际新增工具输出的单调 generation。
+    #[serde(default)]
+    tool_growth_generation: u64,
+    /// 最近一次已消费的自动 Compact 压力样本。
+    #[serde(skip)]
+    consumed_pressure_sample: Option<PressureSampleKey>,
 }
 
 impl TokenTracker {
@@ -47,6 +63,7 @@ impl TokenTracker {
         // 防止异常 API 响应（input_tokens=0）覆盖正常的上下文估算
         if usage.input_tokens > 0 {
             self.last_usage = Some(usage.clone());
+            self.usage_generation = self.usage_generation.saturating_add(1);
         }
         self.llm_call_count += 1;
         // 工具结果 token 已被本轮 input_tokens 包含（作为 tool_result 消息），清零避免双计
@@ -60,6 +77,10 @@ impl TokenTracker {
     pub fn add_estimated_tool_tokens(&mut self, tool_output: &str) {
         // 经验估算：英文 ~4 字符/token，CJK 略多但保守取 4
         let estimated = (tool_output.chars().count() / 4) as u64;
+        if tool_output.is_empty() {
+            return;
+        }
+        self.tool_growth_generation = self.tool_growth_generation.saturating_add(1);
         self.estimated_tool_tokens_since_last_llm = self
             .estimated_tool_tokens_since_last_llm
             .saturating_add(estimated);
@@ -97,9 +118,33 @@ impl TokenTracker {
             .unwrap_or(0.0)
     }
 
-    /// 重置追踪器（compact 后调用）
+    pub(crate) fn pressure_sample_key(&self) -> Option<PressureSampleKey> {
+        self.last_usage.as_ref()?;
+        Some(PressureSampleKey {
+            usage_generation: self.usage_generation,
+            tool_growth_generation: self.tool_growth_generation,
+        })
+    }
+
+    pub(crate) fn consume_pressure_sample(&mut self, key: PressureSampleKey) {
+        self.consumed_pressure_sample = Some(key);
+    }
+
+    pub(crate) fn is_pressure_sample_consumed(&self, key: PressureSampleKey) -> bool {
+        self.consumed_pressure_sample == Some(key)
+    }
+
+    /// 重置 usage 计数，但保留单调 generation 与已消费样本身份。
     pub fn reset(&mut self) {
-        *self = Self::default();
+        let usage_generation = self.usage_generation;
+        let tool_growth_generation = self.tool_growth_generation;
+        let consumed_pressure_sample = self.consumed_pressure_sample;
+        *self = Self {
+            usage_generation,
+            tool_growth_generation,
+            consumed_pressure_sample,
+            ..Self::default()
+        };
     }
 }
 

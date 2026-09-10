@@ -1,19 +1,21 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use super::entry_nav::{
     apply_fold_toggle, cycle_interaction_option, entry_click_decision, move_entry_focus,
     pending_interaction_of, set_entry_focus, submit_interaction_option,
 };
 use super::grid::GridSpec;
-use super::hits::{CopyButtonHit, ImageLineHit, InteractionOptionHit};
+use super::hits::{CopyButtonHit, ImageHoverState, ImageLineHit, InteractionOptionHit};
 use super::image_action::{hover_target_for, try_open_image};
 use super::props::ScrollbarFields;
 use super::scroll::{self, DragThrottle, ScrollThrottle, ScrollbarDragState};
 use super::selection::{self, copy_to_clipboard, mark_copy_message};
 use crate::kit::atoms::{
-    FOCUSED_ENTRY, IMAGE_HOVER, KEEPGOING_BLOCKED_UNTIL, RENDER_HEARTBEAT, SUBMIT_TX, VIEW_MODELS,
-    ViewModelsSnapshot,
+    FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_HOVER, KEEPGOING_BLOCKED_UNTIL, RENDER_HEARTBEAT,
+    SUBMIT_TX, VIEW_MODELS, ViewModelsSnapshot,
 };
 use crate::kit::focus_router;
 use crate::kit::mouse_router;
@@ -28,6 +30,32 @@ use ratatui_kit::ratatui::layout::Rect;
 
 /// keepgoing 按钮点击防抖时长（连续点击冷却）。
 const KEEPGOING_DEBOUNCE: Duration = Duration::from_millis(1500);
+/// 鼠标在同一图片链接上稳定停留后才触发预览，避免快速划过误触。
+pub(super) const IMAGE_PREVIEW_HOVER_DELAY: Duration = Duration::from_millis(300);
+
+/// 组件本地的延迟预览状态。闭包每帧重建，但该值由 `use_state` 跨帧保留；
+/// `generation` 使已启动的旧计时任务在目标变化后失效。
+#[derive(Default)]
+pub(super) struct ImagePreviewHoverGate {
+    generation: u64,
+    pending: Option<ImageHoverState>,
+}
+
+impl ImagePreviewHoverGate {
+    fn transition(&mut self, target: Option<ImageHoverState>) -> Option<(u64, ImageHoverState)> {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = target.clone();
+        target.map(|target| (self.generation, target))
+    }
+
+    fn confirm(&mut self, generation: u64, target: &ImageHoverState) -> bool {
+        if self.generation != generation || self.pending.as_ref() != Some(target) {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+}
 
 // ── keepgoing 按钮点击（footer summary 行右侧）──
 // [Why] 必须注册在 scroll handler 之前：两者同 Global+High，同优先级按注册序分发，
@@ -288,13 +316,18 @@ pub(super) fn register_image_click(
     });
 }
 
-// ── [T4 §4] @image 行 hover（绝对路径 + accent 高亮）──
+// ── [T4 §4] @image 行 hover（即时高亮 + 稳定悬停后预览）──
 // [Why 注册顺序] 注册在 scroll handler 之前（scroll.rs 对 Moved 直接
 // Ignored，顺序在其前即可收到）；Moved 恒 Ignored，不消费事件。
 // [防风暴 §4.6] 仅当「命中集合变化」时 write（触发重渲染）；命中不变
-// 的移动 no-op——防高频 Moved 每帧全量重渲染消息区。
-pub(super) fn register_image_hover(hooks: &mut Hooks, image_rects: State<Arc<Vec<ImageLineHit>>>) {
+// 的移动 no-op——既防高频 Moved 每帧全量重渲染，也不会反复重置悬停计时。
+pub(super) fn register_image_hover(
+    hooks: &mut Hooks,
+    image_rects: State<Arc<Vec<ImageLineHit>>>,
+    preview_gate: State<Arc<Mutex<ImagePreviewHoverGate>>>,
+) {
     let image_rects_for_hover = image_rects;
+    let preview_gate_for_hover = preview_gate;
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
         let Event::Mouse(mouse) = event else {
             return EventResult::Ignored;
@@ -312,9 +345,47 @@ pub(super) fn register_image_hover(hooks: &mut Hooks, image_rects: State<Arc<Vec
         // read+write 冲突会 panic。
         let current = IMAGE_HOVER.state().read().clone();
         if current != new_state {
-            *IMAGE_HOVER.state().write() = new_state;
+            // 行高亮即时反馈；真正的预览使用独立 atom 延迟触发。移出或换到
+            // 另一链接会立即清除已确认目标，并使旧计时任务失效。
+            *IMAGE_HOVER.state().write() = new_state.clone();
+            schedule_image_preview_hover(
+                Arc::clone(&preview_gate_for_hover.read()),
+                new_state,
+                IMAGE_PREVIEW_HOVER_DELAY,
+            );
         }
         EventResult::Ignored
+    });
+}
+
+/// 更新延迟预览目标。每次目标变化都推进 generation，使旧计时任务在写回前
+/// 自行失效；`None` 立即清空，不留下鼠标快速划过时的预览。
+pub(super) fn schedule_image_preview_hover(
+    gate: Arc<Mutex<ImagePreviewHoverGate>>,
+    target: Option<ImageHoverState>,
+    delay: Duration,
+) {
+    let armed = gate.lock().transition(target);
+    let current = IMAGE_PREVIEW_HOVER.state().read().clone();
+    if current.is_some() {
+        *IMAGE_PREVIEW_HOVER.state().write() = None;
+    }
+    let Some((generation, target)) = armed else {
+        return;
+    };
+    let gate = Arc::downgrade(&gate);
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let Some(gate) = Weak::upgrade(&gate) else {
+            return;
+        };
+        let mut gate = gate.lock();
+        if !gate.confirm(generation, &target) {
+            return;
+        }
+        // 与 confirm 持同一把锁写回；若此刻发生移出/切换，新 transition
+        // 会在本次写回后立即清空，避免旧任务反向覆盖新状态。
+        *IMAGE_PREVIEW_HOVER.state().write() = Some(target);
     });
 }
 

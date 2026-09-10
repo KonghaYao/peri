@@ -869,10 +869,22 @@ async fn test_resume_creates_session_scoped_lsp_pool() {
 async fn test_fork_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]);
+    let thread_store = Arc::clone(&cfg.thread_store);
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-    // 前置：注册带非空历史的 source session（fork 要求 source history 非空）
+    // 前置：注册带非空 canonical history 的 source session。
+    let source_message = peri_acp_types::messages::BaseMessage::human("hello");
+    let source_message_id = source_message.id();
+    let source_payload = peri_acp_types::store::PersistedPayload::Message(source_message.clone());
+    let source_thread_id = "fork-source-thread".to_string();
+    let mut source_meta = peri_acp_types::thread::ThreadMeta::new(tmp.path().to_string_lossy());
+    source_meta.id = source_thread_id.clone();
+    thread_store.create_thread(source_meta).await.unwrap();
+    thread_store
+        .append_payloads(&source_thread_id, std::slice::from_ref(&source_payload))
+        .await
+        .unwrap();
     let source_frozen = cfg.session_manager.build_frozen_data(
         tmp.path().to_str().unwrap(),
         &cfg.plugin_skill_roots,
@@ -882,10 +894,10 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
         "fork-source-session".to_string(),
         crate::host::SessionState {
             session_id: "fork-source-session".to_string(),
-            thread_id: "fork-source-session".to_string(),
+            thread_id: source_thread_id,
             cwd: tmp.path().to_string_lossy().into_owned(),
-            history: vec![peri_acp_types::messages::BaseMessage::human("hello")],
-            history_payloads: vec![],
+            history: vec![source_message],
+            history_payloads: vec![source_payload],
             cancel_token: None,
             frozen: Some(source_frozen),
             recall_items: Vec::new(),
@@ -929,6 +941,21 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
         forked.lsp_pool.is_some(),
         "fork 分支应创建会话级 LSP 池（H1 跨 turn 复用）"
     );
+    assert_eq!(forked.history_payloads.len(), 1);
+    let forked_message_id = forked.history_payloads[0].id();
+    assert_ne!(forked_message_id, source_message_id);
+    assert_eq!(
+        forked
+            .history
+            .first()
+            .expect("fork history projection")
+            .id(),
+        forked_message_id,
+        "fork SessionState 必须采用持久化复制后的新消息 ID"
+    );
+    let stored_fork = thread_store.load_payloads(&forked_id).await.unwrap();
+    assert_eq!(stored_fork.len(), 1);
+    assert_eq!(stored_fork[0].id(), forked_message_id);
     drop(sessions);
     await_server_exit(server_task, input_write).await;
 }

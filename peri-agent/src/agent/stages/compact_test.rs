@@ -398,6 +398,91 @@ async fn test_compact_stage_applied_mixed_emits_one_messages_compacted_with_snap
     );
 }
 
+#[tokio::test]
+async fn test_auto_compact_consumes_each_pressure_sample_once() {
+    let (mut ctx, mut handles) = make_context_with_observe();
+    append_compactable_history(&ctx);
+    ctx.compact.context_budget = Some(ContextBudget::new(200_000));
+    ctx.compact.compact_config = Some(CompactConfig {
+        micro_compact_stale_steps: 1,
+        ..Default::default()
+    });
+    ctx.compact.token_tracker.write().accumulate(&TokenUsage {
+        input_tokens: 160_000,
+        output_tokens: 0,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    });
+
+    let first = run_compact(CompactInput {
+        context: ctx.clone(),
+        has_tool_calls: true,
+    })
+    .await
+    .unwrap();
+    assert!(first.compacted);
+    let first_started = observe_events(&mut handles)
+        .into_iter()
+        .filter(|event| matches!(event, ObserveEvent::CompactStarted { .. }))
+        .count();
+    assert_eq!(first_started, 1);
+
+    ctx.compact.token_tracker.write().accumulate(&TokenUsage {
+        input_tokens: 0,
+        output_tokens: 100,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    });
+    let repeated = run_compact(CompactInput {
+        context: ctx.clone(),
+        has_tool_calls: true,
+    })
+    .await
+    .unwrap();
+    assert!(!repeated.compacted);
+    assert!(observe_events(&mut handles).is_empty());
+
+    ctx.compact.token_tracker.write().accumulate(&TokenUsage {
+        input_tokens: 160_000,
+        output_tokens: 100,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    });
+    run_compact(CompactInput {
+        context: ctx.clone(),
+        has_tool_calls: true,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        observe_events(&mut handles)
+            .into_iter()
+            .filter(|event| matches!(event, ObserveEvent::CompactStarted { .. }))
+            .count(),
+        1,
+        "新有效 provider usage generation 必须重新评估"
+    );
+
+    ctx.compact
+        .token_tracker
+        .write()
+        .add_estimated_tool_tokens("new tool output");
+    run_compact(CompactInput {
+        context: ctx,
+        has_tool_calls: true,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        observe_events(&mut handles)
+            .into_iter()
+            .filter(|event| matches!(event, ObserveEvent::CompactStarted { .. }))
+            .count(),
+        1,
+        "同 provider generation 下新增工具输出必须重新评估"
+    );
+}
+
 /// [S1.4] cancel 且未提交变更时 CompactStarted 必须有配对结束事件：
 /// emit `CompactEnded { outcome: Interrupted }`，且**不得** emit
 /// `MessagesCompacted`（那会误导遥测以为压缩发生了）。

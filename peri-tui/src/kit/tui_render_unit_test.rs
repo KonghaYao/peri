@@ -597,6 +597,21 @@ mod reminder_tests {
     }
 
     #[test]
+    fn test_detect_compact_continuation_hint_without_reminder_tags() {
+        let text = format!(
+            "{}\n\ncompact summary body",
+            peri_acp_types::compact::CONTINUATION_HINT
+        );
+        let info = detect_reminder(&text).expect("compact continuation hint should be detected");
+
+        assert!(matches!(info.reminder_type, ReminderType::ContinuationHint));
+        assert!(
+            info.summary.is_empty(),
+            "内部 compact 控制文本不应作为用户可见摘要"
+        );
+    }
+
+    #[test]
     fn test_detect_channel_message() {
         i18n::init(None);
         let info = detect_reminder(

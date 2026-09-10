@@ -5,15 +5,15 @@
 //! → Error）、陈旧解码结果丢弃、隐藏清理（Idle）、渲染（TestBackend：Ready
 //! 含 `\x1b_G` transmit；Degraded/Idle 无 escape）。
 //!
-//! 全局 atom（IMAGE_PREVIEW_STATE / IMAGE_HOVER / INPUT_SNAPSHOT /
-//! FOCUSED_ENTRY / VIEW_MODELS / POPUP_KIND / ACTIVE_PANEL）在测试间污染，
+//! 全局 atom（IMAGE_PREVIEW_STATE / IMAGE_HOVER / IMAGE_PREVIEW_HOVER /
+//! INPUT_SNAPSHOT / FOCUSED_ENTRY / VIEW_MODELS / POPUP_KIND / ACTIVE_PANEL）在测试间污染，
 //! 统一 `reset_atoms()` + `serial_test::serial`（仿 mouse_router_test 模式）。
 
 #[cfg(test)]
 use super::*;
 use crate::kit::atoms::{
-    ACTIVE_PANEL, FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_STATE, INPUT_SNAPSHOT, POPUP_KIND,
-    PopupKind, ViewModelsSnapshot,
+    ACTIVE_PANEL, FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_HOVER, IMAGE_PREVIEW_STATE,
+    INPUT_SNAPSHOT, POPUP_KIND, PopupKind, ViewModelsSnapshot,
 };
 use crate::kit::message_area::ImageHoverState;
 use crate::kit::terminal_caps::GraphicsProtocol;
@@ -45,6 +45,7 @@ fn managed_fixture(dir: &Path, name: &str) -> PathBuf {
 fn reset_atoms() {
     *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Idle;
     *IMAGE_HOVER.state().write() = None;
+    *IMAGE_PREVIEW_HOVER.state().write() = None;
     *INPUT_SNAPSHOT.state().write() = InputSnapshot::default();
     *FOCUSED_ENTRY.state().write() = None;
     *POPUP_KIND.state().write() = None;
@@ -209,7 +210,7 @@ fn resolve_preview_target_priority_hover_cursor_focus() {
     assert_eq!(resolve_preview_target(), Some("/cur.png".to_string()));
 
     // hover 与 cursor 同时命中 → hover 优先。
-    *IMAGE_HOVER.state().write() = Some(ImageHoverState {
+    *IMAGE_PREVIEW_HOVER.state().write() = Some(ImageHoverState {
         row: 5,
         slot_index: 0,
         logical_idx: 1,
@@ -220,7 +221,7 @@ fn resolve_preview_target_priority_hover_cursor_focus() {
     assert_eq!(resolve_preview_target(), Some("/hov.png".to_string()));
 
     // hover 清空、cursor 命中、focus 命中 → cursor 优先于 focus。
-    *IMAGE_HOVER.state().write() = None;
+    *IMAGE_PREVIEW_HOVER.state().write() = None;
     view_models_with("@image /focus.png");
     *FOCUSED_ENTRY.state().write() = Some(FocusedEntry { slot: 0, key: None });
     assert_eq!(resolve_preview_target(), Some("/cur.png".to_string()));
@@ -232,6 +233,26 @@ fn resolve_preview_target_priority_hover_cursor_focus() {
     // 全部清空 → None（Idle）。
     *FOCUSED_ENTRY.state().write() = None;
     assert_eq!(resolve_preview_target(), None);
+}
+
+#[test]
+#[serial]
+fn resolve_preview_target_ignores_unconfirmed_hover() {
+    reset_atoms();
+    *IMAGE_HOVER.state().write() = Some(ImageHoverState {
+        row: 5,
+        slot_index: 0,
+        logical_idx: 1,
+        vm_hash: 7,
+        path: "/hover-too-soon.png".to_string(),
+        size_text: "45 B".to_string(),
+    });
+
+    assert_eq!(
+        resolve_preview_target(),
+        None,
+        "即时行高亮不应在稳定悬停确认前触发 overlay"
+    );
 }
 
 #[test]

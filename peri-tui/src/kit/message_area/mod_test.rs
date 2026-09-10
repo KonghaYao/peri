@@ -1,7 +1,7 @@
 //! Tests
 
 use super::*;
-use crate::kit::atoms::FOLD_OVERRIDES;
+use crate::kit::atoms::{FOLD_OVERRIDES, IMAGE_HOVER, IMAGE_PREVIEW_HOVER};
 use crate::kit::tui_render_unit::{
     InteractionKind, TuiCollapsedGroup, TuiSystemReminder, TuiToolCard, TuiToolPresentation,
     TuiUserBubble,
@@ -10,6 +10,8 @@ use ratatui_kit::ratatui::layout::Rect;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use serial_test::serial;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[test]
 fn test_empty_with_todo_items_shows_footer_not_welcome() {
@@ -283,6 +285,61 @@ fn test_hover_target_for() {
         hover_target_for(&hits, 5, 10, true).is_none(),
         "遮挡时不响应"
     );
+}
+
+fn hover_state(path: &str, row: u16) -> ImageHoverState {
+    ImageHoverState {
+        row,
+        slot_index: 0,
+        logical_idx: 1,
+        vm_hash: 7,
+        path: path.to_string(),
+        size_text: "45 B".to_string(),
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn image_preview_hover_requires_stable_dwell_and_cancels_on_exit() {
+    *IMAGE_HOVER.state().write() = None;
+    *IMAGE_PREVIEW_HOVER.state().write() = None;
+    let gate = Arc::new(parking_lot::Mutex::new(ImagePreviewHoverGate::default()));
+    let target = hover_state("/tmp/a.png", 10);
+
+    *IMAGE_HOVER.state().write() = Some(target.clone());
+    schedule_image_preview_hover(
+        Arc::clone(&gate),
+        Some(target.clone()),
+        Duration::from_millis(20),
+    );
+    assert!(
+        IMAGE_PREVIEW_HOVER.state().read().is_none(),
+        "悬停等待期内不应触发预览"
+    );
+
+    *IMAGE_HOVER.state().write() = None;
+    schedule_image_preview_hover(Arc::clone(&gate), None, Duration::from_millis(20));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(
+        IMAGE_PREVIEW_HOVER.state().read().is_none(),
+        "移出链接必须取消尚未触发的预览"
+    );
+
+    *IMAGE_HOVER.state().write() = Some(target.clone());
+    schedule_image_preview_hover(
+        Arc::clone(&gate),
+        Some(target.clone()),
+        Duration::from_millis(20),
+    );
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(
+        IMAGE_PREVIEW_HOVER.state().read().as_ref(),
+        Some(&target),
+        "稳定悬停超过等待时间后才确认预览目标"
+    );
+
+    *IMAGE_HOVER.state().write() = None;
+    schedule_image_preview_hover(gate, None, Duration::from_millis(20));
 }
 
 /// try_open_image 校验失败分支：NOTIFICATION 提示（paste-truncated 通知模式），

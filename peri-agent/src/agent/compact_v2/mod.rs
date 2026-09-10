@@ -357,8 +357,11 @@ pub async fn run_compact(
                     FullEscalationReason::InsufficientReclaim,
                 )
                 .await;
-                // 合并 Micro 的 affected_count（即使 Full 失败，Micro 的截断已持久化）
-                full_result.affected_count += micro_affected;
+                // Full 成功时，其 excluded transition 已覆盖 Micro affected messages；
+                // 只有 Full 失败时才保留已生效的 Micro affected_count。
+                if !full_result.outcome().is_full_applied() {
+                    full_result.affected_count += micro_affected;
+                }
                 // estimated_tokens_saved 也需要累加 Micro 的贡献
                 full_result.estimated_tokens_saved += plan.estimated_tokens_saved;
                 // 从 Micro plan 填充统计字段
@@ -500,9 +503,11 @@ pub async fn run_compact(
                         FullEscalationReason::ForceThresholdExceeded,
                     )
                     .await;
-                    // Smart 已在 Full 前实际应用；无论 Full 成功与否，指标都必须
-                    // 表示本轮 Smart + Full 的总变更（与 Micro 路径保持一致）。
-                    full_result.affected_count += affected;
+                    // Full 成功时，其 excluded transition 已覆盖 Smart affected messages；
+                    // 只有 Full 失败时才保留已生效的 Smart affected_count。
+                    if !full_result.outcome().is_full_applied() {
+                        full_result.affected_count += affected;
+                    }
                     full_result.estimated_tokens_saved += estimated_tokens_saved;
                     full_result.changed_messages = plan.changed_messages;
                     full_result.changed_fields = plan.changed_fields;

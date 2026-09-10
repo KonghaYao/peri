@@ -5,8 +5,9 @@
 //! 像素区经 T6 窄接口（[`crate::kit::image_preview`]）渲染（Kitty 协议，占位符
 //! 从 buffer 消失即自动清理，S2 §7）。
 //!
-//! 三态触发仲裁（§7.3）：优先级 **hover > cursor > focus**；任一来源清空 →
-//! `Idle`（隐藏清理）。遮挡（`mouse_router::is_occluded`）→ `Idle`（§7.5）。
+//! 三态触发仲裁（§7.3）：优先级 **稳定 hover > cursor > focus**；任一来源清空 →
+//! `Idle`（隐藏清理）。消息区链接先即时高亮，只有鼠标稳定停留 300ms 后才进入
+//! hover 预览源；遮挡（`mouse_router::is_occluded`）→ `Idle`（§7.5）。
 //!
 //! 安全（§6.1 Q6 / §5.7）：仅受管理目录（`~/.peri/images`，T5 分级）自动
 //! 像素预览；手工路径 `Degraded` 文本降级（提示文案）；T5 全链校验失败 →
@@ -26,7 +27,7 @@ use std::task::Poll;
 
 use crate::i18n;
 use crate::kit::atoms::{
-    FOCUSED_ENTRY, FocusedEntry, IMAGE_HOVER, IMAGE_PREVIEW_STATE, INPUT_SNAPSHOT,
+    FOCUSED_ENTRY, FocusedEntry, IMAGE_PREVIEW_HOVER, IMAGE_PREVIEW_STATE, INPUT_SNAPSHOT,
     ImagePreviewState, InputSnapshot, RENDER_HEARTBEAT,
 };
 use crate::kit::image_preview::{AsyncImage, picker_for, supported as preview_supported};
@@ -107,14 +108,14 @@ pub(crate) fn focus_image_path(focused: &FocusedEntry) -> Option<String> {
     data.text.lines().find_map(parse_image_line)
 }
 
-/// 三态触发仲裁（§7.3）：优先级 **hover > cursor > focus**；遮挡
+/// 三态触发仲裁（§7.3）：优先级 **稳定 hover > cursor > focus**；遮挡
 /// （`mouse_router::is_occluded`）或全部来源清空 → None（→ Idle，隐藏清理）。
 /// 组件渲染 body 每帧调用；结果经 `use_effect` 驱动请求（事件边界）。
 pub(crate) fn resolve_preview_target() -> Option<String> {
     if mouse_router::is_occluded() {
         return None;
     }
-    if let Some(hover) = IMAGE_HOVER.state().read().as_ref() {
+    if let Some(hover) = IMAGE_PREVIEW_HOVER.state().read().as_ref() {
         return Some(hover.path.clone());
     }
     let snapshot = INPUT_SNAPSHOT.state().read().clone();
@@ -537,7 +538,7 @@ fn overlay_clear_rect(rect: Option<Rect>, state: &ImagePreviewState) -> Option<R
 pub fn ImageOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 订阅（稳定顺序，TUI-HOOK-001）：触发源 + 能力位 + 心跳 + 遮挡。
     let _hb = hooks.use_atom(&RENDER_HEARTBEAT);
-    let _hover = hooks.use_atom(&IMAGE_HOVER);
+    let _hover = hooks.use_atom(&IMAGE_PREVIEW_HOVER);
     let _focus = hooks.use_atom(&FOCUSED_ENTRY);
     let _snapshot = hooks.use_atom(&INPUT_SNAPSHOT);
     let _vms = hooks.use_atom(&crate::kit::atoms::VIEW_MODELS);
@@ -547,7 +548,7 @@ pub fn ImageOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _panel = hooks.use_atom(&crate::kit::atoms::ACTIVE_PANEL);
     let (term_w, term_h) = hooks.use_terminal_size();
 
-    // 三态触发仲裁（§7.3；优先级 hover > cursor > focus；遮挡 → None）。
+    // 三态触发仲裁（§7.3；优先级稳定 hover > cursor > focus；遮挡 → None）。
     let target = resolve_preview_target();
     // 请求流程（use_effect = effect 边界，非 render body——TUI-RENDER-001）。
     // 闭包捕获 target 副本；deps 用原值做变化比较（use_effect 只比较不消费）。

@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use peri_acp_types::messages::{BaseMessage, MessageId};
-use peri_acp_types::store::{MessageFlags, PersistedPayload, ThreadStore};
+use peri_acp_types::store::{CompactionLifecycle, MessageFlags, PersistedPayload, ThreadStore};
 use peri_acp_types::thread::{ThreadId, ThreadListEntry, ThreadMeta};
 use peri_controller::Controller;
-use peri_resources::sessions::FilesystemThreadStore;
+use peri_resources::sessions::{FilesystemThreadStore, SqliteThreadStore};
 use tracing_subscriber::fmt::MakeWriter;
 
 use super::fork_session;
@@ -120,6 +120,125 @@ impl ThreadStore for FailingForkStore {
     async fn update_message_flags(&self, id: &MessageId, flags: &MessageFlags) -> Result<()> {
         self.inner.update_message_flags(id, flags).await
     }
+}
+
+#[tokio::test]
+async fn forked_payloads_have_independent_ids_flags_and_compaction_lifecycle() {
+    use peri_acp_types::projection::{
+        MessageProjectionDirective, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        SqliteThreadStore::new(temp.path().join("fork-ownership.db"))
+            .await
+            .unwrap(),
+    );
+    let source_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let source_messages = [
+        BaseMessage::human("source question"),
+        BaseMessage::tool_result("read-1", "source tool output"),
+    ];
+    let source_payloads = source_messages
+        .iter()
+        .cloned()
+        .map(PersistedPayload::Message)
+        .collect::<Vec<_>>();
+    store
+        .append_payloads(&source_id, &source_payloads)
+        .await
+        .unwrap();
+    let source_tool_id = source_messages[1].id();
+    store
+        .update_message_flags(
+            &source_tool_id,
+            &MessageFlags {
+                truncated: true,
+                excluded: false,
+                projection: Some(MessageProjectionDirective {
+                    policy_version: peri_agent::agent::compact_v2::PROJECTION_POLICY_VERSION,
+                    entries: vec![ProjectionActionEntry {
+                        message_id: source_tool_id,
+                        target: ProjectionTarget::Message,
+                        action: ProjectionAction::CompactToolResult {
+                            keep_head: 8,
+                            keep_tail: 8,
+                            preserve_recovery_handle: true,
+                        },
+                    }],
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let controller = Controller::new(store.clone());
+
+    let (fork_id, copied_payloads) =
+        fork_session(&controller, &source_id, &source_payloads, "/tmp")
+            .await
+            .unwrap();
+
+    assert_eq!(copied_payloads.len(), source_payloads.len());
+    assert!(source_payloads
+        .iter()
+        .zip(&copied_payloads)
+        .all(|(source, copied)| source.id() != copied.id()));
+    assert_eq!(
+        copied_payloads
+            .iter()
+            .filter_map(PersistedPayload::as_message)
+            .map(BaseMessage::content)
+            .collect::<Vec<_>>(),
+        source_messages
+            .iter()
+            .map(BaseMessage::content)
+            .collect::<Vec<_>>()
+    );
+    let stored_fork = store.load_payloads(&fork_id).await.unwrap();
+    assert_eq!(
+        stored_fork
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>(),
+        copied_payloads
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>()
+    );
+    let copied_tool_id = copied_payloads[1].id();
+    let copied_flags = store.load_message_flags(&fork_id).await.unwrap();
+    let copied_tool_flags = &copied_flags[&copied_tool_id];
+    assert!(copied_tool_flags.truncated);
+    assert_eq!(
+        copied_tool_flags.projection.as_ref().unwrap().entries[0].message_id,
+        copied_tool_id,
+        "fork 后 projection directive 必须引用新的消息 ID"
+    );
+
+    store
+        .commit_compaction_lifecycle(
+            &fork_id,
+            &CompactionLifecycle {
+                flag_updates: copied_payloads
+                    .iter()
+                    .map(|payload| {
+                        (
+                            payload.id(),
+                            MessageFlags {
+                                excluded: true,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+                appended_messages: vec![BaseMessage::human("fork summary")],
+            },
+        )
+        .await
+        .expect("fork history 必须由新 thread 独立拥有并可提交 Full lifecycle");
+    let source_flags = store.load_message_flags(&source_id).await.unwrap();
+    assert!(source_flags[&source_tool_id].truncated);
+    assert!(!source_flags[&source_tool_id].excluded);
 }
 
 #[tokio::test]

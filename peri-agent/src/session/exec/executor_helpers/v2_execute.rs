@@ -282,12 +282,12 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // Phase 5: seed transcript（history 作为 ancestor 之外的自有消息）
     // 首轮用户 turn 判定需在 history move 前捕获（Phase 5.9 使用）。
     let is_first_user_turn = !req.continuation && req.history_payloads.is_empty();
-    let ancestor_payloads = req.history_payloads.clone();
+    let history_payloads_snapshot = req.history_payloads.clone();
     {
         let transcript_arc = v2_out.session.transcript();
         let mut transcript = transcript_arc.write();
         let old = std::mem::take(&mut *transcript);
-        *transcript = old.with_ancestor_payloads(req.history_payloads);
+        *transcript = old.with_own_payloads(req.history_payloads);
     }
 
     // Phase 5.5: restore compact flags from persistence (if available)
@@ -431,7 +431,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     let mut persistence_inconsistent = false;
     let persistence_failure = if let Some(e) = flush_error {
         error!(session_id = %req.session_id, error = %e, "[v2] phase 8 transcript flush failed");
-        let ancestor_ids = ancestor_payloads
+        let previous_history_ids = history_payloads_snapshot
             .iter()
             .map(|payload| payload.id())
             .collect::<std::collections::HashSet<_>>();
@@ -442,7 +442,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 .persisted_payloads()
                 .into_iter()
                 .map(|payload| payload.id())
-                .filter(|id| !ancestor_ids.contains(id))
+                .filter(|id| !previous_history_ids.contains(id))
                 .collect::<Vec<_>>()
         };
         let rollback_ok = match (req.thread_store.as_ref(), req.thread_id.as_ref()) {
@@ -452,7 +452,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                         payloads
                             .iter()
                             .map(|payload| payload.id())
-                            .eq(ancestor_payloads.iter().map(|payload| payload.id()))
+                            .eq(history_payloads_snapshot.iter().map(|payload| payload.id()))
                     })
             }
             _ => false,
@@ -470,11 +470,11 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     };
     let (messages, persisted_payloads, history_replaced_by_compaction) =
         if persistence_failure.is_some() {
-            let messages = ancestor_payloads
+            let messages = history_payloads_snapshot
                 .iter()
                 .filter_map(|payload| payload.as_message().cloned())
                 .collect();
-            (messages, ancestor_payloads, false)
+            (messages, history_payloads_snapshot, false)
         } else {
             let transcript = v2_out.session.transcript();
             let transcript = transcript.read();

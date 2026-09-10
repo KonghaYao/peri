@@ -194,16 +194,35 @@ impl MessageTranscript {
         }
     }
 
+    fn push_loaded_payload(&mut self, payload: PersistedPayload) {
+        let entry = match payload {
+            PersistedPayload::Message(message) => TranscriptEntry::Message(message),
+            PersistedPayload::SystemReminder { id, reminder } => {
+                TranscriptEntry::Reminder { id, reminder }
+            }
+        };
+        self.id_index.insert(entry.id(), self.entries.len());
+        self.entries.push(entry);
+    }
+
+    /// 装载主 Agent 已持久化的历史，保持为可压缩的自有消息。
+    ///
+    /// 与 [`Self::with_ancestor_payloads`] 不同，此路径不移动 `ancestor_len`；普通
+    /// session 的跨 turn 历史仍属于当前 Agent，Full Compact 必须能够排除它。
+    pub fn with_own_payloads(mut self, payloads: Vec<PersistedPayload>) -> Self {
+        for payload in payloads {
+            self.push_loaded_payload(payload);
+        }
+        self
+    }
+
+    /// 装载来源明确的继承 payload，并将其划入只读 ancestor region。
+    ///
+    /// 调用方若拿到“父快照 + 当前 thread 历史”的平铺列表，必须先恢复来源边界；
+    /// 不得把混合 ownership 的列表整体传入本方法。
     pub fn with_ancestor_payloads(mut self, payloads: Vec<PersistedPayload>) -> Self {
         for payload in payloads {
-            let entry = match payload {
-                PersistedPayload::Message(message) => TranscriptEntry::Message(message),
-                PersistedPayload::SystemReminder { id, reminder } => {
-                    TranscriptEntry::Reminder { id, reminder }
-                }
-            };
-            self.id_index.insert(entry.id(), self.entries.len());
-            self.entries.push(entry);
+            self.push_loaded_payload(payload);
         }
         self.ancestor_len = self.entries.len();
         self

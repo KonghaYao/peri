@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use crate::event::CompactFileInfo;
 use crate::messages::BaseMessage;
 
+/// Full Compact 摘要消息的内部续接标记。
+pub const CONTINUATION_HINT: &str =
+    "[Context has been compacted. Continue working based on the summary above.]";
+
 /// 升级到 Full Compact 的原因（事件契约字段）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

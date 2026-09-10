@@ -222,6 +222,45 @@ async fn test_micro_effective_full_overlay() {
 }
 
 #[tokio::test]
+async fn test_micro_then_full_success_does_not_double_count_affected_messages() {
+    let store_dir = tempfile::tempdir().expect("创建临时目录失败");
+    let store = Arc::new(
+        crate::thread::SqliteThreadStore::new(store_dir.path().join("micro-full.db"))
+            .await
+            .expect("创建 SQLite store 失败"),
+    );
+    let thread_id = store
+        .create_thread(crate::thread::ThreadMeta::new("/tmp"))
+        .await
+        .expect("创建 thread 失败");
+    let mut t = MessageTranscript::new().with_persistence(store, thread_id);
+    for i in 0..8 {
+        t.append(make_human(&format!("q {}", i)));
+        t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
+        t.append(make_tool_result(&format!("c_{}", i), &format!("out {}", i)));
+    }
+    let expected_full_transitions = t.visible_messages().len();
+    let mut failures = 0u32;
+
+    let result = run_compact(
+        &mut t,
+        Some(&MockSummaryModel),
+        &CompactConfig::default(),
+        &pressure_from_budget(0.98),
+        false,
+        &mut failures,
+        "/tmp",
+    )
+    .await;
+
+    assert_eq!(result.outcome(), CompactOutcome::FullApplied);
+    assert_eq!(
+        result.affected_count, expected_full_transitions,
+        "Full 成功时不得再次累加已由 excluded transition 覆盖的 Micro affected"
+    );
+}
+
+#[tokio::test]
 async fn test_force_full_failure_preserves_persistent_excluded_flags_after_prior_failure() {
     let dir = tempfile::tempdir().expect("创建临时目录失败");
     let store: std::sync::Arc<dyn ThreadStore> =

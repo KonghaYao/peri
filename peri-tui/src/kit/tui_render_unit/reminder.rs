@@ -280,6 +280,16 @@ fn extract_summary(inner: &str) -> String {
 /// 公开入口：从用户消息文本中检测 `<system-reminder>` 标签。
 /// 返回 `Some(ReminderInfo)` 若存在合法标签，否则 `None`。
 pub fn detect_reminder(text: &str) -> Option<ReminderInfo> {
+    if text
+        .trim_start()
+        .starts_with(peri_acp_types::compact::CONTINUATION_HINT)
+    {
+        return Some(ReminderInfo {
+            reminder_type: ReminderType::ContinuationHint,
+            summary: String::new(),
+        });
+    }
+
     let inner = extract_reminder_inner(text)?;
     let reminder_type = classify_reminder_type(&inner, text);
     let summary = extract_summary(&inner);

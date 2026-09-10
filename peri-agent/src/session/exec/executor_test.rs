@@ -764,3 +764,59 @@ async fn test_run_session_loop_intercept_inject_enters_agent_pipeline() {
         "Inject 分发不 push_done 于拦截层，pump 收尾恰好一次（TRAP 守护）"
     );
 }
+
+#[tokio::test]
+async fn test_main_agent_history_is_seeded_as_compactable_own_region() {
+    use peri_acp_types::event_v2::EventBus;
+
+    use crate::agent::stages::StageContext;
+    use crate::session::exec::stage_builder::V2AgentOutput;
+    use crate::session::{FrozenContext, Session};
+
+    let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
+    let inspected_session = Arc::clone(&session);
+    let stage_build: StageBuildFn = Arc::new(move |_sbr| {
+        let turn = session.start_turn();
+        turn.cancel_token.cancel();
+        let (bus, handles) = EventBus::new(Default::default());
+        let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+            .with_event_bus(Arc::new(bus))
+            .build();
+        let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
+        let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Ok((
+            V2AgentOutput {
+                context,
+                session: Arc::clone(&session),
+                event_handles: handles,
+                todo_rx,
+                bg_event_rx,
+            },
+            None,
+        ))
+    });
+    let history = vec![
+        BaseMessage::human("previous turn question"),
+        BaseMessage::ai("previous turn answer"),
+    ];
+    let sink = Arc::new(MockEventSink::new());
+    let mut turn = make_turn_input(
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+        MessageContent::text("continue"),
+        false,
+        history,
+    );
+    turn.stage_build = stage_build;
+
+    let result = run_session_loop(make_session_context("root-history-own-region"), turn).await;
+
+    assert!(!result.ok, "预取消 stage 应以 Interrupted 结束");
+    let transcript = inspected_session.transcript();
+    let transcript = transcript.read();
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(
+        transcript.ancestor_len(),
+        0,
+        "main-agent Phase 5 不得把已加载历史误标为 SubAgent ancestor"
+    );
+}
