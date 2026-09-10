@@ -111,6 +111,24 @@ impl std::fmt::Display for ReadOnlyThreadStoreError {
 
 impl std::error::Error for ReadOnlyThreadStoreError {}
 
+/// 只读 shape probe 查询失败的分类。
+///
+/// 只有确定性的「不是 SQLite 数据库 / 镜像损坏」才能判定 schema 不兼容；锁竞争、
+/// IO 故障、`-wal`/`-shm` 不可用等瞬时或环境故障必须保持可诊断，否则一次并发
+/// checkpoint 会被误报成 schema 问题。SQLite primary result code：
+/// `SQLITE_CORRUPT` = 11，`SQLITE_NOTADB` = 26。
+fn classify_shape_probe_failure(error: &sqlx::Error) -> ReadOnlyThreadStoreError {
+    let damaged_image = match error {
+        sqlx::Error::Database(db) => matches!(db.code().as_deref(), Some("11") | Some("26")),
+        _ => false,
+    };
+    if damaged_image {
+        ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::SchemaIncompatible)
+    } else {
+        ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::DatabaseUnreadable)
+    }
+}
+
 /// 基于 SQLite 的 ThreadStore 实现
 ///
 /// 使用 WAL 模式提升并发读性能，sqlx SqlitePool 连接池管理并发。
@@ -145,6 +163,15 @@ impl SqliteThreadStore {
         };
         store.init_schema().await?;
         Ok(store)
+    }
+
+    /// 关闭连接池并等待全部连接释放。
+    ///
+    /// `Drop` 只异步调度连接关闭，因此最后一次关闭触发的 WAL checkpoint、`-wal`/`-shm`
+    /// 清理可能晚于 `Drop` 返回，并与并发只读打开重叠。需要确定性收尾（测试夹具、
+    /// 优雅退出）时调用本方法，保证返回后本进程不再持有任何连接。
+    pub async fn close(&self) {
+        self.pool.close().await;
     }
 
     /// 以 SQLite read-only capability 打开已存在的数据库。
@@ -197,9 +224,7 @@ impl SqliteThreadStore {
             )))
             .fetch_all(&self.pool)
             .await
-            .map_err(|_| {
-                ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::SchemaIncompatible)
-            })?;
+            .map_err(|error| classify_shape_probe_failure(&error))?;
             let actual: HashSet<String> = rows.into_iter().map(|(name,)| name).collect();
             if !required.iter().all(|column| actual.contains(*column)) {
                 return Err(ReadOnlyThreadStoreError::from_kind(

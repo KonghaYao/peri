@@ -1,6 +1,6 @@
 # peri-resources 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-09（SQLite 入口行号刷新）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-10（只读打开错误分类与 `close` 收尾）
 > 依据：peri-resources/src 源码、lib.rs 模块注释（伞形 PRD 决策 20）
 
 ## 架构速览
@@ -14,8 +14,8 @@
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
 | 打开全部资源（会话存储） | `src/context.rs` | `Resources::open`；`Resources::open_with`；`Resources::thread_store` | 默认路径 `~/.peri/threads/threads.db`（`SqliteThreadStore::default_path`）或显式路径打开失败时直接返回包含路径的错误；不使用共享临时数据库 fallback |
-| 只读打开已有 session 数据库 | `src/sessions/mod.rs` + `src/sessions/sqlite_store.rs` | `open_thread_store_read_only`；`SqliteThreadStore::open_existing_read_only`；`probe_load_meta_shape`；`ReadOnlyThreadStoreError` | 显式路径或默认路径只选择一个已存在普通文件；SQLite 使用 read-only、`create_if_missing(false)`、单连接和有界 busy timeout；按 `load_meta` 所需 schema shape fail closed，不创建目录/数据库、不初始化或迁移 schema |
-| 改会话存储 SQL 实现 | `src/sessions/sqlite_store.rs` | `SqliteThreadStore::new`；`default_path`；`init_schema`；`ThreadStore` impl；轻量列表 `list_thread_entries`；`load_frozen_snapshot` / `store_frozen_snapshot_if_absent` | trait 方法须与 `peri-acp-types/src/store.rs::ThreadStore` 签名一致；frozen owner state 存在独立 nullable `frozen_context` 列且不进入 list projection，写入使用 `IS NULL` CAS（ARC-FROZEN-001）；TUI 列表查询只投影 thread 摘要并在 SQL 层按 cwd/hidden/message_count 过滤；另含 compaction 生命周期与 context cache |
+| 只读打开已有 session 数据库 | `src/sessions/mod.rs` + `src/sessions/sqlite_store.rs` | `open_thread_store_read_only`；`SqliteThreadStore::open_existing_read_only`；`probe_load_meta_shape`；`classify_shape_probe_failure`；`ReadOnlyThreadStoreError` | 显式路径或默认路径只选择一个已存在普通文件；SQLite 使用 read-only、`create_if_missing(false)`、单连接和有界 busy timeout；按 `load_meta` 所需 schema shape fail closed，不创建目录/数据库、不初始化或迁移 schema；只有表/列缺失或 `SQLITE_CORRUPT`/`SQLITE_NOTADB` 才判定 schema 不兼容，锁竞争与 IO 等瞬时失败归 `database_unreadable` |
+| 改会话存储 SQL 实现 | `src/sessions/sqlite_store.rs` | `SqliteThreadStore::new`；`close`；`default_path`；`init_schema`；`ThreadStore` impl；轻量列表 `list_thread_entries`；`load_frozen_snapshot` / `store_frozen_snapshot_if_absent` | trait 方法须与 `peri-acp-types/src/store.rs::ThreadStore` 签名一致；`close` 等待连接释放以确定性完成 WAL checkpoint（`Drop` 只异步调度）；frozen owner state 存在独立 nullable `frozen_context` 列且不进入 list projection，写入使用 `IS NULL` CAS（ARC-FROZEN-001）；TUI 列表查询只投影 thread 摘要并在 SQL 层按 cwd/hidden/message_count 过滤；另含 compaction 生命周期与 context cache |
 | 改消息读写/祖先链 | `src/sessions/sqlite_store.rs` | `create_thread`（:480）；`append_messages`（:505）；`load_messages`（:514）；`load_context`（:814）；`resolve_ancestor_chain`（:287） | load_context 按祖先链拼装 + context cache；`delete_messages_since` 供回滚类操作 |
 | 改测试用文件存储 | `src/sessions/filesystem.rs` | `FilesystemThreadStore`；`new`；`default_path`；`frozen_snapshot_path`；`atomic_write_json_if_absent` | 纯测试用途（sessions/mod.rs:3），生产实现是 sqlite；frozen snapshot 使用每 thread 的 `frozen.json` sidecar，不写入 `index.json`，完整 temp + hard-link 提供 no-clobber write-once |
 | 改全局配置路径 | `src/config/mod.rs` | `peri_dir`（:9，`~/.peri`）；`settings_path`（:14，`~/.peri/settings.json`） | 仅路径入口，配置读取语义之外的逻辑不迁入本 crate |

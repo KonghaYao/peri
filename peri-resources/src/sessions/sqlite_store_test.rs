@@ -1380,6 +1380,90 @@ async fn test_readonly_store_observes_wal_commit_but_not_uncommitted_update() {
     );
 }
 
+/// 确定性 test double：只用于覆盖 probe 失败的分类分支，不经过真实 SQLite。
+#[derive(Debug)]
+struct ShapeProbeError {
+    code: Option<&'static str>,
+    message: &'static str,
+}
+
+impl std::fmt::Display for ShapeProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+
+impl std::error::Error for ShapeProbeError {}
+
+impl sqlx::error::DatabaseError for ShapeProbeError {
+    fn message(&self) -> &str {
+        self.message
+    }
+
+    fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+        self.code.map(std::borrow::Cow::Borrowed)
+    }
+
+    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+        self
+    }
+
+    fn kind(&self) -> sqlx::error::ErrorKind {
+        sqlx::error::ErrorKind::Other
+    }
+}
+
+#[test]
+fn test_shape_probe_failure_classification_never_fakes_schema_verdict() {
+    // 只有确定性损坏/非数据库镜像才可判定 schema 不兼容。
+    for code in ["11", "26"] {
+        let error = sqlx::Error::Database(Box::new(ShapeProbeError {
+            code: Some(code),
+            message: "shape probe failed",
+        }));
+        assert_eq!(
+            classify_shape_probe_failure(&error).kind(),
+            ReadOnlyStoreErrorKind::SchemaIncompatible,
+            "SQLite primary result code {code} 是确定性 schema/镜像判定"
+        );
+    }
+
+    // 瞬时或环境故障（锁竞争、IO、连接池超时等）必须保持可诊断。
+    let transient_codes = [
+        Some("5"),   // SQLITE_BUSY：并发 checkpoint / lock 未释放
+        Some("6"),   // SQLITE_LOCKED：共享缓存表锁
+        Some("10"),  // SQLITE_IOERR
+        Some("14"),  // SQLITE_CANTOPEN：-wal/-shm 不可用
+        Some("266"), // SQLITE_IOERR_READ 扩展码
+        None,
+    ];
+    for code in transient_codes {
+        let error = sqlx::Error::Database(Box::new(ShapeProbeError {
+            code,
+            message: "shape probe failed",
+        }));
+        assert_eq!(
+            classify_shape_probe_failure(&error).kind(),
+            ReadOnlyStoreErrorKind::DatabaseUnreadable,
+            "code {code:?} 不得伪装成 schema 判定"
+        );
+    }
+    for error in [sqlx::Error::PoolTimedOut, sqlx::Error::RowNotFound] {
+        assert_eq!(
+            classify_shape_probe_failure(&error).kind(),
+            ReadOnlyStoreErrorKind::DatabaseUnreadable
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_readonly_open_lock_contention_is_bounded() {
     let dir = tempdir().unwrap();
@@ -1401,12 +1485,10 @@ async fn test_readonly_open_lock_contention_is_bounded() {
     let started = Instant::now();
     let kind = readonly_error_kind(&db_path).await;
     let elapsed = started.elapsed();
-    assert!(
-        matches!(
-            kind,
-            ReadOnlyStoreErrorKind::DatabaseUnreadable | ReadOnlyStoreErrorKind::SchemaIncompatible
-        ),
-        "锁竞争应类型化失败: {kind:?}"
+    assert_eq!(
+        kind,
+        ReadOnlyStoreErrorKind::DatabaseUnreadable,
+        "锁竞争必须报成不可读，不得伪装成 schema 判定: {kind:?}"
     );
     assert!(
         elapsed < Duration::from_secs(2),
