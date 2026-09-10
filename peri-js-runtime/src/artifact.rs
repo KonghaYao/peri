@@ -1,16 +1,18 @@
 use std::ffi::OsStr;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use fs2::FileExt;
 use serde::Deserialize;
 use tempfile::TempDir;
 use tokio::process::Command;
-use tracing::debug;
+use tokio_util::sync::CancellationToken;
 
 use crate::{JsProcessSpec, JsRuntimeError, Result};
+
+mod install;
+use install::NpmInstaller;
 
 pub(crate) const PACKAGE_NAME: &str = "@peri-code/ptc";
 pub(crate) const PACKAGE_VERSION: &str = "0.2.3";
@@ -48,67 +50,15 @@ pub(crate) struct PtcLaunch {
 
 #[async_trait::async_trait]
 pub(crate) trait PtcArtifactProvider: Send + Sync {
-    async fn launch(&self, node: &str) -> Result<PtcLaunch>;
+    /// Cancellation must finish preparation cleanup before returning.
+    async fn launch(&self, node: &str, cancel: &CancellationToken) -> Result<PtcLaunch>;
     async fn invalidate(&self) -> Result<()>;
 }
 
 #[async_trait::async_trait]
 pub(crate) trait Installer: Send + Sync {
-    async fn install(&self, staging: &Path) -> std::io::Result<bool>;
-}
-
-struct NpmInstaller;
-
-#[async_trait::async_trait]
-impl Installer for NpmInstaller {
-    async fn install(&self, staging: &Path) -> std::io::Result<bool> {
-        let home = staging.join(".npm-home");
-        let cache = staging.join(".npm-cache");
-        tokio::fs::create_dir(&home).await?;
-        tokio::fs::create_dir(&cache).await?;
-        let child = match npm_command(staging, &home, &cache)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(error) => {
-                debug!(error_kind = ?error.kind(), "PTC npm install failed to spawn");
-                return Err(error);
-            }
-        };
-        match tokio::time::timeout(INSTALL_TIMEOUT, child.wait_with_output()).await {
-            Ok(Ok(output)) => {
-                if !output.status.success() {
-                    let stderr = bounded_stderr_tail(&output.stderr);
-                    debug!(
-                        status = ?output.status.code(),
-                        stderr = %stderr,
-                        "PTC npm install exited unsuccessfully"
-                    );
-                }
-                Ok(output.status.success())
-            }
-            Ok(Err(error)) => {
-                debug!(error_kind = ?error.kind(), "PTC npm install wait failed");
-                Err(error)
-            }
-            Err(_) => {
-                debug!(
-                    timeout_seconds = INSTALL_TIMEOUT.as_secs(),
-                    "PTC npm install timed out"
-                );
-                Ok(false)
-            }
-        }
-    }
-}
-
-fn bounded_stderr_tail(stderr: &[u8]) -> String {
-    let start = stderr.len().saturating_sub(MAX_INSTALL_STDERR_BYTES);
-    String::from_utf8_lossy(&stderr[start..]).into_owned()
+    /// Own and reap any installer processes before returning, including on cancellation.
+    async fn install(&self, staging: &Path, cancel: &CancellationToken) -> std::io::Result<bool>;
 }
 
 pub(crate) struct NpmArtifactProvider;
@@ -127,8 +77,15 @@ impl NpmArtifactProvider {
 
 #[async_trait::async_trait]
 impl PtcArtifactProvider for NpmArtifactProvider {
-    async fn launch(&self, node: &str) -> Result<PtcLaunch> {
-        launch_in(node, &self.home()?, &NpmInstaller, fallback_enabled()).await
+    async fn launch(&self, node: &str, cancel: &CancellationToken) -> Result<PtcLaunch> {
+        launch_in(
+            node,
+            &self.home()?,
+            &NpmInstaller,
+            fallback_enabled(),
+            cancel,
+        )
+        .await
     }
 
     async fn invalidate(&self) -> Result<()> {
@@ -141,8 +98,9 @@ pub(crate) async fn launch_in(
     home: &Path,
     installer: &dyn Installer,
     allow_fallback: bool,
+    cancel: &CancellationToken,
 ) -> Result<PtcLaunch> {
-    match ensure_install(home, installer).await {
+    match ensure_install(home, installer, cancel).await {
         Ok(entry) => Ok(PtcLaunch {
             spec: JsProcessSpec::new(node, vec![entry.to_string_lossy().into_owned()])
                 .without_inherited_environment()
@@ -150,7 +108,8 @@ pub(crate) async fn launch_in(
             _guard: None,
             local_cache: true,
         }),
-        Err(_) if allow_fallback => npx_launch(node),
+        Err(JsRuntimeError::Cancelled) => Err(JsRuntimeError::Cancelled),
+        Err(_) if allow_fallback && !cancel.is_cancelled() => npx_launch(node),
         Err(_) => Err(JsRuntimeError::ArtifactUnavailable),
     }
 }
@@ -190,48 +149,68 @@ impl Drop for InstallLock {
     }
 }
 
-async fn acquire_lock(parent: &Path) -> Result<InstallLock> {
+async fn acquire_lock(parent: &Path, cancel: &CancellationToken) -> Result<InstallLock> {
     tokio::fs::create_dir_all(parent).await?;
     let path = parent.join(format!(".{PACKAGE_VERSION}.lock"));
-    tokio::task::spawn_blocking(move || {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)?;
-        file.lock_exclusive()?;
-        Ok::<_, std::io::Error>(InstallLock(file))
-    })
-    .await
-    .map_err(|_| JsRuntimeError::ArtifactUnavailable)?
-    .map_err(Into::into)
+    let file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .await?
+        .into_std()
+        .await;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(JsRuntimeError::Cancelled);
+        }
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(InstallLock(file)),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(JsRuntimeError::Cancelled),
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+    }
 }
 
-pub(crate) async fn ensure_install(home: &Path, installer: &dyn Installer) -> Result<PathBuf> {
+pub(crate) async fn ensure_install(
+    home: &Path,
+    installer: &dyn Installer,
+    cancel: &CancellationToken,
+) -> Result<PathBuf> {
+    if cancel.is_cancelled() {
+        return Err(JsRuntimeError::Cancelled);
+    }
     let target = prefix(home);
     if let Some(entry) = validate_install(&target) {
         return Ok(entry);
     }
     let parent = target.parent().ok_or(JsRuntimeError::ArtifactUnavailable)?;
-    let _lock = acquire_lock(parent).await?;
+    let _lock = acquire_lock(parent, cancel).await?;
     if let Some(entry) = validate_install(&target) {
         return Ok(entry);
     }
     if target.exists() {
         quarantine_locked(&target).await?;
     }
-    let staging = parent.join(format!(
-        ".{PACKAGE_VERSION}.staging-{}-{}",
-        std::process::id(),
-        unique_id()
-    ));
-    tokio::fs::create_dir(&staging).await?;
+    let staging_owner = tempfile::Builder::new()
+        .prefix(&format!(".{PACKAGE_VERSION}.staging-"))
+        .tempdir_in(parent)?;
+    let staging = staging_owner.path();
     let result = async {
-        if !installer.install(&staging).await? || validate_install(&staging).is_none() {
+        let installed = installer.install(staging, cancel).await;
+        if cancel.is_cancelled() {
+            return Err(JsRuntimeError::Cancelled);
+        }
+        if !installed? || validate_install(staging).is_none() {
             return Err(JsRuntimeError::ArtifactUnavailable);
         }
-        match tokio::fs::rename(&staging, &target).await {
+        match tokio::fs::rename(staging, &target).await {
             Ok(()) => {}
             Err(_) if validate_install(&target).is_some() => {}
             Err(error) => return Err(error.into()),
@@ -240,7 +219,7 @@ pub(crate) async fn ensure_install(home: &Path, installer: &dyn Installer) -> Re
     }
     .await;
     if staging.exists() {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
+        let _ = tokio::fs::remove_dir_all(staging).await;
     }
     result
 }
@@ -248,7 +227,7 @@ pub(crate) async fn ensure_install(home: &Path, installer: &dyn Installer) -> Re
 pub(crate) async fn quarantine(home: &Path) -> Result<()> {
     let target = prefix(home);
     let parent = target.parent().ok_or(JsRuntimeError::ArtifactUnavailable)?;
-    let _lock = acquire_lock(parent).await?;
+    let _lock = acquire_lock(parent, &CancellationToken::new()).await?;
     if target.exists() {
         quarantine_locked(&target).await?;
     }
@@ -407,7 +386,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Installer for FixtureInstaller {
-        async fn install(&self, staging: &Path) -> std::io::Result<bool> {
+        async fn install(
+            &self,
+            staging: &Path,
+            _cancel: &CancellationToken,
+        ) -> std::io::Result<bool> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let package = staging.join("node_modules/@peri-code/ptc");
             tokio::fs::create_dir_all(package.join("dist")).await?;
@@ -441,9 +424,11 @@ mod tests {
     async fn concurrent_install_has_one_winner_and_reuses_target() {
         let home = tempfile::tempdir().unwrap();
         let installer = Arc::new(fixture());
+        let left_cancel = CancellationToken::new();
+        let right_cancel = CancellationToken::new();
         let (left, right) = tokio::join!(
-            ensure_install(home.path(), installer.as_ref()),
-            ensure_install(home.path(), installer.as_ref())
+            ensure_install(home.path(), installer.as_ref(), &left_cancel),
+            ensure_install(home.path(), installer.as_ref(), &right_cancel)
         );
         assert_eq!(left.as_ref().unwrap(), right.as_ref().unwrap());
         assert_eq!(
@@ -465,7 +450,9 @@ mod tests {
         tokio::fs::write(target.join("in-use-marker"), b"keep")
             .await
             .unwrap();
-        ensure_install(home.path(), &fixture()).await.unwrap();
+        ensure_install(home.path(), &fixture(), &CancellationToken::new())
+            .await
+            .unwrap();
         let entries = std::fs::read_dir(target.parent().unwrap()).unwrap();
         assert!(entries
             .filter_map(|entry| entry.ok())
@@ -581,7 +568,15 @@ mod tests {
                 metadata: package,
                 entry: b"x",
             };
-            assert!(ensure_install(home.path(), &installer).await.is_err());
+            assert!(
+                ensure_install(home.path(), &installer, &CancellationToken::new())
+                    .await
+                    .is_err()
+            );
         }
     }
 }
+
+#[cfg(test)]
+#[path = "artifact_lifecycle_test.rs"]
+mod lifecycle_tests;

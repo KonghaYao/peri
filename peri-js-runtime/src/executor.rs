@@ -13,6 +13,9 @@ use crate::{
     IncomingMessage, JsExecutionFailure, JsExecutionHost, JsRuntimeError, ResourceKind, Result,
 };
 
+mod invocation;
+use invocation::Invocation;
+
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
@@ -97,14 +100,25 @@ pub trait JsRpcRouter: Send + Sync {
     ) -> Result<Value>;
 }
 
-enum ExecutionPhase {
-    Handshake,
-    Execute,
+struct ExecutionFailure {
+    error: JsRuntimeError,
+    invalidates_cache: bool,
 }
 
-struct PhasedError {
-    phase: ExecutionPhase,
-    error: JsRuntimeError,
+impl ExecutionFailure {
+    fn handshake(error: JsRuntimeError) -> Self {
+        Self {
+            error,
+            invalidates_cache: true,
+        }
+    }
+
+    fn interrupted(error: JsRuntimeError) -> Self {
+        Self {
+            error,
+            invalidates_cache: false,
+        }
+    }
 }
 
 pub struct JsExecutor {
@@ -165,7 +179,26 @@ impl JsExecutor {
             permit = self.execution_slots.clone().acquire_owned() => permit.map_err(|_| JsRuntimeError::Rpc("execution semaphore closed".into()))?,
         };
 
-        let launch = self.artifact_provider.launch(&self.program).await?;
+        let prepare_cancel = cancel.child_token();
+        let _prepare_guard = prepare_cancel.clone().drop_guard();
+        let launch = self
+            .artifact_provider
+            .launch(&self.program, &prepare_cancel);
+        tokio::pin!(launch);
+        let launch = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                prepare_cancel.cancel();
+                let _ = launch.await;
+                return Err(JsRuntimeError::Cancelled);
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                prepare_cancel.cancel();
+                let _ = launch.await;
+                return Err(JsRuntimeError::Timeout { limit: self.limits.wall_timeout });
+            }
+            launch = &mut launch => launch?,
+        };
         let local_cache = launch.local_cache;
         let host = match JsExecutionHost::spawn_with_frame_limit(
             launch.spec.clone(),
@@ -191,8 +224,8 @@ impl JsExecutor {
         if local_cache
             && matches!(
                 outcome,
-                Err(PhasedError {
-                    phase: ExecutionPhase::Handshake,
+                Err(ExecutionFailure {
+                    invalidates_cache: true,
                     ..
                 })
             )
@@ -230,44 +263,39 @@ impl JsExecutor {
         router: Arc<dyn JsRpcRouter>,
         cancel: CancellationToken,
         deadline: tokio::time::Instant,
-    ) -> std::result::Result<JsExecutionResult, PhasedError> {
-        self.handshake(&host, deadline)
-            .await
-            .map_err(|error| PhasedError {
-                phase: ExecutionPhase::Handshake,
-                error,
-            })?;
+    ) -> std::result::Result<JsExecutionResult, ExecutionFailure> {
+        self.handshake(&host, &cancel, deadline).await?;
         self.run_execute(host, request, router, cancel, deadline)
             .await
-            .map_err(|error| PhasedError {
-                phase: ExecutionPhase::Execute,
+            .map_err(|error| ExecutionFailure {
                 error,
+                invalidates_cache: false,
             })
     }
 
     async fn handshake(
         &self,
         host: &Arc<JsExecutionHost>,
+        cancel: &CancellationToken,
         deadline: tokio::time::Instant,
-    ) -> Result<()> {
-        let handshake_deadline = deadline.min(tokio::time::Instant::now() + HANDSHAKE_TIMEOUT);
-        let handshake = tokio::time::timeout_at(
-            handshake_deadline,
-            host.channel()
-                .send_request("ptc/start", json!({ "protocolVersion": PROTOCOL_VERSION })),
-        )
-        .await
-        .map_err(|_| JsRuntimeError::Timeout {
-            limit: self.limits.wall_timeout,
-        })?;
+    ) -> std::result::Result<(), ExecutionFailure> {
+        let handshake_deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+        let channel = host.channel();
+        let handshake = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ExecutionFailure::interrupted(JsRuntimeError::Cancelled)),
+            _ = tokio::time::sleep_until(deadline) => return Err(ExecutionFailure::interrupted(JsRuntimeError::Timeout { limit: self.limits.wall_timeout })),
+            _ = tokio::time::sleep_until(handshake_deadline) => return Err(ExecutionFailure::handshake(JsRuntimeError::Timeout { limit: self.limits.wall_timeout })),
+            result = channel.send_request("ptc/start", json!({ "protocolVersion": PROTOCOL_VERSION })) => result,
+        };
         let handshake = match handshake {
             Ok(value) => value,
             Err(JsRuntimeError::RpcResponse(remote)) if remote.code == -32000 => {
-                return Err(runtime_exit_error(host).await);
+                return Err(ExecutionFailure::handshake(runtime_exit_error(host).await));
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(ExecutionFailure::handshake(error)),
         };
-        validate_handshake(&handshake)
+        validate_handshake(&handshake).map_err(ExecutionFailure::handshake)
     }
 
     async fn run_execute(
@@ -292,24 +320,24 @@ impl JsExecutor {
                 "maxResultBytes": self.limits.max_result_bytes,
             }
         });
-        let mut request_task = tokio::spawn({
+        let request_task = tokio::spawn({
             let channel = channel.clone();
             async move { channel.send_request("execute", wire).await }
         });
-        let invocation_cancel = cancel.child_token();
+        let mut invocation = Invocation::new(request_task, cancel.child_token());
         let internal_slots = Arc::new(Semaphore::new(self.limits.max_internal_calls));
-        let mut router_tasks = tokio::task::JoinSet::new();
-        let mut request_finished = false;
 
         let outcome = loop {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break Err(JsRuntimeError::Cancelled),
                 _ = tokio::time::sleep_until(deadline) => break Err(JsRuntimeError::Timeout { limit: self.limits.wall_timeout }),
-                result = &mut request_task, if !request_finished => {
-                    request_finished = true;
-                    let response = result
-                        .map_err(|_| JsRuntimeError::Rpc("execution request task failed".into()))?;
+                result = &mut invocation.request, if !invocation.request_finished => {
+                    invocation.request_finished = true;
+                    let response = match result {
+                        Ok(response) => response,
+                        Err(_) => break Err(JsRuntimeError::Rpc("execution request task failed".into())),
+                    };
                     let value = match response {
                         Ok(value) => value,
                         Err(JsRuntimeError::RpcResponse(remote)) if remote.code == -32000 => {
@@ -317,9 +345,12 @@ impl JsExecutor {
                         }
                         Err(error) => break Err(normalize_execute_response_error(error)),
                     };
-                    let parsed: JsExecutionResult = serde_json::from_value(value)?;
-                    check_result(&parsed, &self.limits)?;
-                    break Ok(parsed);
+                    break serde_json::from_value(value)
+                        .map_err(JsRuntimeError::from)
+                        .and_then(|parsed| {
+                            check_result(&parsed, &self.limits)?;
+                            Ok(parsed)
+                        });
                 }
                 message = incoming.recv() => match message {
                     Some(IncomingMessage::Request { id, method, params }) => {
@@ -328,7 +359,12 @@ impl JsExecutor {
                                 Ok(permit) => Some(permit),
                                 Err(_) => {
                                     if let Some(id) = id {
-                                        let _ = channel.send_error(id, -32003, "JavaScript resource limit exceeded", Some(json!({"code": "RESOURCE_LIMIT"}))).await;
+                                        tokio::select! {
+                                            biased;
+                                            _ = cancel.cancelled() => break Err(JsRuntimeError::Cancelled),
+                                            _ = tokio::time::sleep_until(deadline) => break Err(JsRuntimeError::Timeout { limit: self.limits.wall_timeout }),
+                                            _ = channel.send_error(id, -32003, "JavaScript resource limit exceeded", Some(json!({"code": "RESOURCE_LIMIT"}))) => {}
+                                        }
                                     }
                                     continue;
                                 }
@@ -336,8 +372,8 @@ impl JsExecutor {
                         } else { None };
                         let channel = channel.clone();
                         let router = router.clone();
-                        let child_cancel = invocation_cancel.child_token();
-                        router_tasks.spawn(async move {
+                        let child_cancel = invocation.cancel.child_token();
+                        invocation.routers.spawn(async move {
                             let _permit = permit;
                             if let Some(id) = id {
                                 match router.route(&method, params, child_cancel).await {
@@ -358,14 +394,7 @@ impl JsExecutor {
                 }
             }
         };
-        invocation_cancel.cancel();
-        if !request_finished {
-            request_task.abort();
-            let _ = request_task.await;
-        }
-        tokio::task::yield_now().await;
-        router_tasks.abort_all();
-        while router_tasks.join_next().await.is_some() {}
+        invocation.shutdown().await;
         outcome
     }
 }
