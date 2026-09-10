@@ -69,22 +69,22 @@
 
 | Crate / 项目 | 重点入口与职责问题 | 当前状态 |
 | --- | --- | --- |
-| peri-middlewares | client、dynamic registry、assembly、staged_connection、subagent tool、middleware capability | client/registry/assembly 已验证；capability 调用面正在审查 |
+| peri-middlewares | client、dynamic registry、assembly、staged_connection、subagent tool、middleware capability | client/registry/assembly 已提交；capability A 已验证，阶段接口 B 待实施 |
 | peri-acp | host、session、event_sink、prompt、session lifecycle | host/session 已提交；event_sink 已拆分验证；prompt 待治理 |
 | peri-resources | SQLite 连接、行映射、祖先上下文、compaction 事务 | SQLite 拆分已提交，65 项存储测试通过 |
 | peri-agent | stage_builder、tool_dispatch、workflow agent、transcript、subagent factory、MiddlewareState | stage_builder 已拆分验证；capability 审查中；其余待治理 |
 | peri-acp-types | session 混合 runtime/错误/消息投递，event_v2 契约与映射；Agent queue_test 文件存在但未挂载 | session 拆分已验证，Agent queue 7 项测试恢复挂载；event_v2 待审 |
 | peri-tui | client、ask_user、acp_notifier、current_turn、input_area、plugin panel | client 已提交；其他待审/治理 |
-| peri-controller | Langfuse tracer registry、bridge 与控制面状态所有权 | 待审 |
+| peri-controller | Langfuse tracer registry、bridge 与控制面状态所有权 | 已拆分；漏关观测回归2红→全套130+5绿；移除6个仅装配阶段使用的锁 |
 | peri-model | protocol/runtime/transport/provider 分层清楚；测试专用 async SSE 重复路径需收敛 | 已审保留总体结构；测试专用 SSE 整链已删除，生产路径147项测试通过 |
 | peri-runtime | destroy 跨 await 后无条件 remove 可能误删替换后的 session；旧事件也可能借新 entry 补打 | 已修复并提交：4项旧实现回归失败；16项Runtime及16项Controller关联测试通过 |
 | peri-workflow | runner、tool preflight、journal、progress | runner 已提交；其余待审 |
-| peri-js-runtime | 分层可保留；artifact launch 未纳入 deadline/cancel、run_execute 错误提前返回可能跳过显式收尾 | 已审，生命周期路径待复现/修复 |
+| peri-js-runtime | 分层可保留；artifact launch 未纳入 deadline/cancel、run_execute 错误提前返回可能跳过显式收尾 | 准备取消/时限与结果失败漏取消已4项回归复现；生产修复待实施 |
 | peri-lsp | document sync/dispatcher 可分离；重复 readiness、请求 id 碰撞和进程任务 owner 需核查 | 已审，结构与生命周期待治理 |
 | peri-theme | loader 混合查找/引用/构造；visited 跨根复用、Unicode hex切片、忽略 extends、重复默认主题 | 已拆分并修复引用链/Unicode hex/extends；29项单元与集成测试通过，索引已补建 |
 | peri-web-pty | handle_socket 混合协议/阻塞I/O/child监控；reader未join、末尾输出drain需实测 | 已审，连接owner与协议边界待治理 |
 | langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 已审，转换与batcher待治理 |
-| side-projects/git-stats | 结构清楚；外层log sentinel碰撞、聚合展示名新旧次序需核查 | 已审，正确性修复/独立验证待完成 |
+| side-projects/git-stats | 结构清楚；外层log sentinel碰撞、聚合展示名新旧次序需核查 | NUL framing与最新展示名修复已验证：28项测试含真实Git fixture，独立Clippy通过 |
 | side-projects/md-scan-matrix | 结构清楚；FAIL/前缀稳定性/collision结果只打印，不能据exit0宣称验收通过 | 评估/报告已分离；6项回归、45矩阵+33补充checks及独立Clippy通过 |
 | side-projects/image-spike | 目标单一的TestBackend buffer/Kitty transmit实验，无需拆分 | 已审保留；本地2项buffer行为测试及all-targets Clippy通过；不等于真实终端验证 |
 
@@ -115,3 +115,16 @@
 - md-scan-matrix独立manifest：6项回归、45矩阵+33补充checks及all-targets Clippy通过；预期碰撞精确标记，未预期失败返回非零。
 
 上述结果不替代尚未执行的全仓完整测试，也不覆盖下一批正在修改的模块。
+
+
+## 第四批验证记录
+
+- 首次完整workspace测试（允许本机测试端口）：45个测试目标，5481通过、37失败、12 ignored。失败分布在JS fixture未构建与middleware进程环境污染；不能据此宣称全仓通过。
+- 按本地源码构建PTC的两个JS fixture后，JS原有33项通过。新加4项生命周期回归在原实现全部失败，修复仍在进行。
+- MCP staged_connection的PATH/sentinel测试迁为子进程，父进程不再临时改PATH。修复后middleware全套1612通过、4项原有ignored；原workflow快速失败诊断亦通过，无需修改其生产逻辑。
+- capability A：Agent全套736项通过，middleware上述全套覆盖真实Image回写；仅删除失真能力和收紧消息替换，hook分阶段接口B尚未落地。
+- Controller：原登记生命周期回归1通过2失败；修复后130单元+5集成通过。事件转换函数体核对相同，保持flush/relock顺序。
+- git-stats独立manifest：28项测试与all-targets Clippy通过；真实Git fixture覆盖消息/路径marker及新旧展示名。
+- Agent/Middleware/Controller doc tests与workspace all-targets Clippy（`-D warnings`）通过；分组提交均通过hooks。
+
+后续修改完成后仍需重新完成workspace总体验证、build、独立项目与平台边界复核。
