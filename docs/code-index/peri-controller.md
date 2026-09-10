@@ -1,61 +1,76 @@
 # peri-controller 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-17（langfuse tracer / bridge 拆分事件域子模块）
-> 依据：docs/standards/architecture-contracts.md（ARC-CANCEL-001 / ARC-EVENT-001）、源码（无 crate 级 CLAUDE.md，架构速览取自 lib.rs / controller.rs 模块注释）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-10。
+> 依据：`docs/standards/architecture-contracts.md`、manifest、源码与契约测试；无 crate 级 CLAUDE.md。
 
 ## 架构速览
 
-- 职责：控制面宿主（docs/design/architecture.md §6）——控制面五步 lite params → pick Resources → pick Runtime → run Session → pop events；无业务执行权，只定位与转发（cancel 语义、终态判定均归 Agent 层）
-- 数据流：ACP → `Controller`（协议化前分支）→ Runtime 查映射 → `SessionHandle`；事件经 `publish_event`/`publish` 双投递（弹出队列 `pop_events` + 订阅广播 `subscribe`，Langfuse bridge 旁路消费同一分支，不参与业务链路）
-- 稳定不变量：cancel 按 (session_id, turn_id, attempt_id) 三元组定位并转发，不解释取消语义（ARC-CANCEL-001）；事件统一出口为 `publish_event`（stamp 补打 + 双投递，ARC-EVENT-001）；缺省 Runtime 空实例、Resources 未注入，由部署装配点经 `with_*` 注入
-- 依赖方向（§0）：Controller → Runtime / Controller → Resources / 契约层 peri-acp-types；不依赖 peri-acp；peri-agent / peri-model / langfuse-client 为 langfuse 过渡依赖（L4 移除）
+Controller 是控制面宿主：定位 Runtime / Resources、转发会话操作、发布协议化前事件。
+取消策略与业务终态归 Agent，登记和销毁编排归 Runtime；Controller 不持有第二份 session 表。
+Runtime、Resources 和装配端口只在消费 `self` 的 builder 中替换，发布后按只读字段使用。
+`events_rx` 保留排空队列所需的 mutex；Runtime 自己持有其登记和事件序列的锁。
+
+Langfuse 是同一事件分支上的旁路消费者。bridge 负责 v1/v2 转换、句柄配对与诊断计数，
+`LangfuseTracer` 持有单轮观测状态，`SubagentRegistry` 是子 agent 归属与生命周期的唯一 owner。
+子模块通过同一 owner 的借用实现注册、缓存和收尾，不另建注册表。
+
+依赖方向为 Controller → Runtime / Resources / peri-acp-types；manifest 中的 peri-agent、
+peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引推断已经解耦。
 
 ## 速查表
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| cancel 转发（三元组定位） | `src/controller.rs` | `Controller::cancel(&CancelRequest)`（:336）→ `Runtime::cancel` → `SessionHandle::cancel` | 定位依据请求携带的三元组（`CancelRequest.identity`，事实源 `peri-acp-types/src/identity.rs:262`）；未注册 session 包 context 为 `ControllerError::CancelFailed`；幂等判定与终态归 Agent 层，本层只定位与转发（契约 ARC-CANCEL-001） |
-| 事件发布（业务事件出口） | `src/controller.rs` | `publish_event(session_id, &UnstampedEvent, ExecutorEvent)`（:436）；`publish(EventEnvelope)`（:424）；私有 `publish_message`（:453） | 先经 `Runtime::stamp` 补打 session_id/session_seq（未注册 session 降级为发射方身份直接投递，不 panic），再双投递：弹出队列有界满丢弃（Critical 类）+ 订阅广播慢消费者 lagging（Broadcast 类） |
-| 事件订阅（协议化前分支） | `src/controller.rs` | `subscribe()`（:463）→ `Subscription::recv`（:131）/ `try_recv`（:142）/ `unsubscribe`（:154） | 显式订阅句柄；`Lagged(skipped)` 可恢复（可继续 recv）、`Closed` 终态；退订 = drop 接收端或显式 unsubscribe，无 Controller 侧簿记 |
-| pop events（控制面第五步） | `src/controller.rs` | `pop_events()`（:470） | 按投递序 `try_recv` 排干弹出队列全部在途事件（`try_recv` 直到 Empty） |
-| session 定位/枚举 | `src/controller.rs` | `register_session`（:324）、`run_session`（:308）、`session_ids`（:348）、`contains_session`（:353） | 注册 = 注册或替换句柄（不递增 epoch/不重置 seq）；run 只发起不解释，错误包 `RunFailed`；枚举无顺序保证（Runtime 簿记为 HashMap） |
-| 会话生命周期面 | `src/controller.rs` | `join_session`（:362）、`destroy_session`（:383）、`submit_input`（:404） | join 带 deadline（true=期内结束/false=超时）；destroy 经 Runtime 七步编排，drain 出的补打事件经 `publish` 双投递并作为返回值；submit_input 透传 `SessionHandle::submit_input`，错误包 `InjectFailed` |
-| 装配注入（pick 目标源） | `src/controller.rs` | `with_runtime`（:216）/ `with_resources`（:223）/ `with_mcp_pool`（:230）/ `with_cron_scheduler`（:240）/ `with_tool_search`（:250）/ `with_lsp_servers`（:259）与对应 `pick_*`（:265-:280） | 缺省：Runtime 空实例、Resources None、端口 None、lsp 空 vec；宿主装配点构造具体实现后 upcast 注入 |
-| lite params 会话启动参数 | `src/controller.rs` | `LiteParams::new`（:87）、`with_initial_messages`（:104）、`with_tools`（:110）；`AgentRef`（:49） | 仅承载最小启动参数集（session 标识/agent 引用/cwd/初始输入/初始消息/工具集）；初始消息与工具集为透传声明，消费方在 Agent 层 session 工厂（L5） |
-| Langfuse 观测（旁路消费者） | `src/langfuse/bridge.rs` + `src/langfuse/tracer/mod.rs` | `LangfuseBridge::process_event`（bridge.rs:105）；`LangfuseTracer`（tracer/mod.rs:49，`new` :90） | 事件在协议化前分支给 bridge，不承担 Controller 职责；`UnifiedLangfuseEvent`（bridge/unified_event.rs:19，bridge.rs:21 re-export）为 v1/v2 事件并集，无映射事件返回 None |
-| 改边界错误类型 | `src/error.rs` | `ControllerError`（:9）、`SubscriptionError`（:33） | 仅对边界可判定条件类型化（RunFailed/CancelFailed/JoinFailed/DestroyFailed/InjectFailed 均包 Runtime context 为 `#[source]`）；层内细节错误归 anyhow，不逐层类型化 |
+| 转发取消三元组 | `peri-controller/src/controller.rs` | `Controller::cancel`:339 | 原样交给 Runtime；未知 session 包装为 CancelFailed，策略和幂等判定归句柄实现（ARC-CANCEL-001） |
+| 发布业务事件 | `peri-controller/src/controller.rs` | `publish_event`:438、`publish`:426、`publish_message` | Runtime 补打身份后先投弹出队列再广播；无法补打时使用发射方身份，不 panic |
+| 订阅与排空事件 | `peri-controller/src/controller.rs` | `subscribe`:465、`pop_events`:472、`Subscription::recv`:131、`try_recv`:142 | 队列有界满丢弃，广播 Lagged 可恢复；退订只 drop receiver，无额外簿记 |
+| 注册与定位会话 | `peri-controller/src/controller.rs` | `register_session`:327、`run_session`:311、`session_ids`:350、`contains_session`:355 | register_or_replace 归 Runtime；Controller 只转发，不解释执行结果 |
+| 等待、销毁或注入会话 | `peri-controller/src/controller.rs` | `join_session`:364、`destroy_session`:385、`submit_input`:406 | 捕获 Runtime Arc 后调用；销毁返回的已补打事件经 publish 按顺序双投递 |
+| 注入部署端口 | `peri-controller/src/controller.rs` | `Controller::new`:198、`with_runtime`:216、`with_resources`:223、`with_mcp_pool`、`with_cron_scheduler`、`with_tool_search`、`with_lsp_servers` | builder 消费 self 后赋值；对应 pick 方法克隆句柄/配置，不引入共享可写配置 |
+| 调整启动参数 | `peri-controller/src/controller.rs` | `AgentRef`:49、`LiteParams`:70 | 仅承载定义引用、cwd、初始消息和工具；消费与执行归 Agent |
+| 修改 Langfuse 事件入口 | `peri-controller/src/langfuse/bridge.rs` | `LangfuseBridge`:34、`process_event`:92 | 保留统一事件分发与 tracer 锁，trait 入口先持有该 bridge 的 stage 表锁 |
+| 修改 v1 事件转换 | `peri-controller/src/langfuse/bridge/v1_conversion.rs` | `UnifiedLangfuseEvent::from_executor_event` | 无映射事件返回 None；v1 LLM 使用 MAIN_AGENT_KEY，工具优先保留 source_agent_id |
+| 修改 v2 事件转换 | `peri-controller/src/langfuse/bridge/v2_conversion.rs` | `from_render_event`、`from_observe_event` | 保留 agent identity、request_id、usage 和 compact 语义数据，不修改事件来源 |
+| 维护 bridge stage/middleware 配对 | `peri-controller/src/langfuse/bridge/lifecycle.rs` | `start_stage`、`finish_stage`、`finish_middleware` | stage 按 agent 匹配，找不到时领取 tracer 重放句柄；保留 tracer 锁释放/重取边界 |
+| 查看 bridge 收到的子 agent 事件 | `peri-controller/src/langfuse/bridge/lifecycle.rs` | `SubagentTelemetry::on_start`、`on_stop` | 单锁集合与计数只描述此 bridge 收到的事件，不决定观测 parent 或关闭 |
+| 调整 turn 开始与终止 | `peri-controller/src/langfuse/tracer/turn.rs` | `on_turn_start`:15、`on_turn_end`:84 | stage → generation → 主工具批次 → 子 agent → error → agent-run 同步入队，最后返回 spawn 的 flush 句柄 |
+| 修复遗留 stage/generation | `peri-controller/src/langfuse/tracer/turn_fallback.rs` | `close_stage_parents`、`close_abandoned_generations`、`GenerationFallbackStatus::for_outcome` | 先补 parent，再按终态或稳定失败分类补 child；保留未解析 owner 的诊断元数据 |
+| 修改错误遥测 | `peri-controller/src/langfuse/tracer/turn_error.rs` | `emit_error_turn`、`failure_error_class`、`failure_output` | 未采样 fatal 先创建合成 parent，再发 ErrorTurn；只写稳定错误分类和允许的 HTTP 状态 |
+| 修改边界错误 | `peri-controller/src/error.rs` | `ControllerError`、`SubscriptionError` | Controller 错误保留 Runtime 来源；广播错误区分 Lagged 和 Closed |
 
-## 子系统
-
-### 控制面宿主（src/）
-
-| 功能 | 文件 | 入口/关键点 |
-| --- | --- | --- |
-| Controller 宿主（控制面五步） | controller.rs | `Controller::new`（:198）；`EVENT_CHANNEL_CAPACITY = 1024`（:42，弹出队列与订阅广播共用） |
-| 事件订阅句柄 | controller.rs | `Subscription`（:125，Broadcast 交付类） |
-| 边界错误 | error.rs | `ControllerError`（:9：RunFailed/CancelFailed/JoinFailed/DestroyFailed/InjectFailed，均包 Runtime context）；`SubscriptionError`（:33：Lagged/Closed） |
-| crate 出口 | lib.rs | re-export `AgentRef/Controller/LiteParams/Subscription`、`ControllerError/SubscriptionError`（:23-24） |
-| 测试入口（ARC-CANCEL-001 验证） | controller_test.rs | `cancel_forwards_triple_to_handle`（:215）、`cancel_unknown_session_typed_error`（:237）、`publish_pop_and_subscribe_events`（:258）、`bypass_consumer_subscribes_same_branch`（:298）、`destroy_session_orchestrates_phases_and_publishes_drained`（:390）；MockHandle（:27）实现 `SessionHandle` 记录调用序列，`temp_store`（:121）注入 ThreadStore |
-
-### Langfuse 观测（src/langfuse/）
+## 子 agent 注册与生命周期
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 事件路由 / 统一枚举 | bridge.rs + bridge/unified_event.rs | `UnifiedLangfuseEvent`（unified_event.rs:19）；`from_executor_event`（unified_event.rs:167）/ `from_render_event`（:350）/ `from_observe_event`（:395）；`LangfuseBridge`（bridge.rs:31）、`process_event`（bridge.rs:105） |
-| 单轮追踪器 Facade | tracer/mod.rs + tracer/{llm_events,tool_events,span_events,subagent_events}.rs | `LangfuseTracer`（mod.rs:49）；turn：`on_turn_start`（mod.rs:142）/ `on_turn_end`（mod.rs:210）；LLM：`on_llm_start`（llm_events.rs:15）/ `on_llm_retrying`（llm_events.rs:239）；工具：`on_tool_start`（tool_events.rs:17）/ `on_tool_end`（tool_events.rs:82）；Span：`on_compact_start`（span_events.rs:14）/ `on_compact_end`（span_events.rs:29）/ `on_stage_start`（span_events.rs:117）/ `on_stage_end`（span_events.rs:138）；subagent：`on_subagent_start`（subagent_events.rs:102）/ `on_subagent_stop`（subagent_events.rs:122） |
-| ReAct 阶段 Span 管理 | tracer/stages.rs | `StageHandle`（:23）、`StageSpans`（:47）、`MAIN_AGENT_KEY`（:20） |
-| 工具批次管理 | tracer/tool_batch.rs | `ToolBatch`（:52） |
-| SubAgent 归属注册表 | tracer/registry.rs | `SubagentRegistry`（:210，agent_id 查表归属，替代旧 LIFO 栈） |
-| LLM Generation 生命周期 | tracer/generation.rs | `GenerationTracker`（:43） |
-| 中间件链追踪 | tracer/middleware.rs | `MiddlewareTracer`（:33） |
-| Compact Span | tracer/compact.rs | `CompactSpan`（:38）、`CompactEndInfo`（:15） |
-| 采样决策器 | tracer/sampling.rs | `SamplingDecider`（:15） |
-| 基础设施 | tracer/event_builder.rs / tracer/usage.rs | `now_rfc3339`（event_builder.rs:19）、`new_uuid`（:24）、`try_add_or_warn_via_session`（:58）；TokenUsage 转换 |
-| 背压丢弃遥测 | drop_telemetry.rs | `LangfuseDropRegistry`（:65）、`record`（:84）、`snapshot`（:115） |
-| 会话抽象 | session.rs / session_like.rs / fake_session.rs | `LangfuseSession`（session.rs:19）；trait `LangfuseSessionLike`（session_like.rs:8）；`FakeLangfuseSession`（fake_session.rs:10，测试注入） |
-| 配置 | config.rs | `LangfuseConfig`（:3）、`from_env`（:46）、`load_with_settings`（:90） |
+| 唯一状态 owner | `peri-controller/src/langfuse/tracer/registry.rs` | `SubagentRegistry`:55、`ActiveSubagent`:29；持有 by_agent_id、invocations、pending_starts、gate_cache |
+| 内容归属 | `peri-controller/src/langfuse/tracer/registry.rs` | `ownership`:116、`observation_id_of`:130、`is_main_agent`:96；事件侧 agent_id 查表，未注入主身份才启用既有 fallback |
+| 内部数据与诊断 | `peri-controller/src/langfuse/tracer/registry/types.rs` | `SubagentStatus`、`IncompleteReason`、`GateEvent`、`SubagentStartOutcome`、`ClosedSubagent`；registry 根 re-export 内部路径 |
+| 有界乱序缓存 | `peri-controller/src/langfuse/tracer/registry/gate.rs` | `try_gate`:10、`take_gated_events`:45；容量 64，满时逐出旧事件并拒绝新事件，重放保留原次序 |
+| 父调用与子 Start 关联 | `peri-controller/src/langfuse/tracer/registry/registration.rs` | `register_invocation`:14、`on_subagent_start`:51、`try_join`；按同 parent 的未绑定 invocation FIFO join，冻结 parent 后取出重放事件 |
+| Stop/ToolEnded 回收 | `peri-controller/src/langfuse/tracer/registry/closure.rs` | `on_invocation_tool_end`:12、`on_subagent_stop`:53、`close_subagent`；双信号齐备才回收，保留各路径的 flush/remove 顺序 |
+| turn 结束兜底 | `peri-controller/src/langfuse/tracer/registry/closure.rs` | `cleanup_turn_end`:155、`finish_observation`；统一投影 close 并设置 private observation_closed，已有 Incomplete 诊断也必须收尾，已 closed 不再关闭 |
+| tracer 创建/重放/关闭 | `peri-controller/src/langfuse/tracer/subagent_events.rs` | `handle_join_outcome`、`emit_subagent_obs_start`、`emit_subagent_close`；先开 parent 再重放，关闭时先补 stage 再 flush batch |
 
-## 跨模块契约（指向 architecture-contracts.md，不复制正文）
+## 其他观测子系统
 
-- ARC-CANCEL-001：cancel 链路 Controller →(定位转发) Runtime →(查映射) Agent 句柄；`CancelRequest` 事实源 `peri-acp-types::identity`（:262，含 clear_queue/policy，clear_queue 默认 false）；幂等判定与 turn 终态归 Agent 层，上层只定位与转发
-- ARC-EVENT-001：事件链路单事实源 Agent 发射 → ACP 映射 → TUI 消费；Controller `publish_event`/`publish` 是协议化前分支（stamp 补打 + 弹出队列/订阅广播双投递），Langfuse bridge 以同一分支旁路消费，禁止恢复第二套事件投递
+| 功能 | 文件 | 入口/关键点 |
+| --- | --- | --- |
+| Tracer 状态与构造 | `peri-controller/src/langfuse/tracer/mod.rs` | `LangfuseTracer`:52、`new`:93、`new_with_turn_id`:124 |
+| LLM Generation | `peri-controller/src/langfuse/tracer/llm_events.rs`、`peri-controller/src/langfuse/tracer/generation.rs` | `on_llm_start`、`on_llm_end`、`on_llm_retrying`、`GenerationTracker` |
+| 工具事件与批次 | `peri-controller/src/langfuse/tracer/tool_events.rs`、`peri-controller/src/langfuse/tracer/tool_batch.rs` | `on_tool_start`、`on_tool_end`、`emit_tools_flush`、`ToolBatch` |
+| Stage/Workflow/Compact/Middleware | `peri-controller/src/langfuse/tracer/span_events.rs` | `on_stage_start`、`on_stage_end`、`on_compact_end`、`on_workflow_end`、`on_middleware_end` |
+| Stage 身份与父链 | `peri-controller/src/langfuse/tracer/stages.rs` | `StageHandle`、`StageSpans`、`MAIN_AGENT_KEY` |
+| 中间件 Span 与 Compact Span | `peri-controller/src/langfuse/tracer/middleware.rs`、`peri-controller/src/langfuse/tracer/compact.rs` | `MiddlewareTracer`、`CompactSpan`、`CompactEndInfo` |
+| 采样与基础设施 | `peri-controller/src/langfuse/tracer/sampling.rs`、`peri-controller/src/langfuse/tracer/event_builder.rs`、`peri-controller/src/langfuse/tracer/usage.rs` | `SamplingDecider`、`try_add_or_warn_via_session`、`build_usage_details` |
+| 背压丢弃遥测 | `peri-controller/src/langfuse/drop_telemetry.rs` | `LangfuseDropRegistry::record`、`snapshot` |
+| session 抽象和配置 | `peri-controller/src/langfuse/session.rs`、`peri-controller/src/langfuse/session_like.rs`、`peri-controller/src/langfuse/config.rs` | `LangfuseSession`、`LangfuseSessionLike`、`LangfuseConfig` |
+
+## 回归与跨模块契约
+
+- ARC-CANCEL-001：Controller → Runtime → SessionHandle 原样定位转发；见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 和 [`peri-runtime` 索引](peri-runtime.md)。
+- ARC-EVENT-001：`publish_event` / `publish` 是协议化前双投递出口；Langfuse 旁路不参与业务执行，不建立第二条事件投递链。
+- 控制面测试：`peri-controller/src/controller_test.rs` 覆盖取消、事件双投递、会话销毁与端口注入。
+- 异常关闭回归：`peri-controller/src/langfuse/tracer/registry_lifecycle_test.rs` 的重复 Start/Stop、已 Closed 后重复 Stop；`registry_test.rs` 还验证异常 turn-end 实际发送一次 observation update。
+- 观测顺序回归：`peri-controller/src/langfuse/bridge_test.rs` 的双 producer/乱序矩阵，以及 `tracer/tracer_test.rs` 的缺少 LlmCallEnd、未采样错误 parent-first 和错误脱敏。
+- bridge 原有内联测试入口迁到 `peri-controller/src/langfuse/bridge/lifecycle_test.rs`，保留 `bridge::tests` 模块路径。
+- 验证：`cargo test -p peri-controller`、`cargo test -p peri-controller --doc`、`cargo clippy -p peri-controller --all-targets -- -D warnings`；集成测试使用 `FakeLangfuseSession`，不向真实服务发请求。
