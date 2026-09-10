@@ -1,6 +1,6 @@
 # peri-acp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-10（host/session 与事件 sink 职责拆分）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11（prompt 模型工厂、观测与 stage 装配职责拆分）
 > 依据：peri-acp/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/peri-acp-protocol.md、源码
 
 ## 架构速览
@@ -113,7 +113,10 @@
 | EOF 收尾 | host/shutdown.rs | `shutdown_host` 借用唯一强 owner；先撤销准入，再取消并 drain 会话，最后关闭 LSP/MCP |
 | 方法注册面（mpsc） | host/requests.rs + host/requests/*.rs | `handle_request`（requests.rs:22，30 个方法分派到子模块；各 handle_* 均为 `pub(super)` 定义在对应子文件） |
 | notification 处理 | host/notify.rs | `handle_notification`（:28）/`extract_session_id`（:153）；`host/unify_wire_baseline_test.rs` 锁定发射面 payload 与 schema typed `SessionNotification` 的逐字段一致性；统一 host 入口见 ARC-STDIO-001 与 `docs/design/architecture.md` |
-| prompt 执行体 | host/prompt.rs | `run_prompt`（:35）；`take_recall_for_turn`（:763）；`build_compact_hooks`（:776） |
+| prompt 执行编排 | host/prompt.rs | `run_prompt` 借用既有 AcpServerConfig 与当轮参数；`take_recall_for_turn`；保留 session 快照、Controller 执行及 canonical 结果回写顺序 |
+| prompt 模型工厂 | host/prompt/models.rs | `build_model_factories`；闭包复用当轮 provider/config 快照与同一 session AgentPool，缓存按 provider fingerprint 校验 |
+| prompt 观测装配 | host/prompt/telemetry.rs | `build_langfuse_hooks` / `build_forwarder_launcher`；turn hooks 与 bridge 共享 tracer，事件消费顺序仍归 event/forwarder.rs |
+| prompt stage 装配 | host/prompt/stage.rs | `build_stage_bridge` / `build_compact_hooks`；逐次 stage 构造原 compact hooks，保留 host/prompt.rs 的 hook re-export |
 | 续跑调度 | host/continuation.rs | `run_continuation_scheduler`（:111） |
 | Host 任务所有权 | host/task_scope.rs | `HostTaskOwner` / `HostTaskSpawner`；生产 timeout driver + 测试 controlled phase driver |
 | writer lease | host/lease.rs | `WriterLease`（:20，多读者单 writer） |

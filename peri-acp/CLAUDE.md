@@ -2,7 +2,7 @@
 
 ## Scope
 
-`peri-acp` 负责 ACP 服务层：session 生命周期、prompt 构建、Agent 装配入口与事件映射/发送；不实现 TUI 组件。中间件链装配实现已随 L2 迁至 Agent 层（见 `peri-agent/CLAUDE.md`），本层仅构造装配上下文。Langfuse 观测已随 L4 迁出至 `peri-controller`（事件流旁路消费者，见 `../peri-controller/`），本层仅在事件协议化前分支调用 bridge（`src/event/forwarder.rs`）。
+`peri-acp` 负责 ACP 服务层：session 生命周期、prompt 构建、Agent 装配入口与事件映射/发送；不实现 TUI 组件。中间件链序蓝本位于 Agent 层（见 `../peri-agent/CLAUDE.md`），具体装配位于 `../peri-middlewares/src/assembly.rs`；本层构造宿主装配上下文。Langfuse 观测已随 L4 迁出至 `peri-controller`（事件流旁路消费者，见 `../peri-controller/`），本层仅在事件协议化前分支调用 bridge（`src/event/forwarder.rs`）。
 
 ## 数据流
 
