@@ -168,6 +168,25 @@ pub struct SessionManager {
     inner: Arc<SessionManagerInner>,
 }
 
+impl AcpSession {
+    /// Close the same resources again after Incomplete; no registry guard crosses await.
+    pub(crate) async fn close_resources(
+        &self,
+    ) -> peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport {
+        if let Some(projection) = self.dynamic_mcp_projection.lock().take() {
+            projection.close();
+        }
+        let report = match &self.dynamic_mcp_close {
+            Some(close) => close.revoke_and_cleanup().await,
+            None => peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete,
+        };
+        peri_acp_types::session::cancel_all_agents(self.active_agents.values());
+        self.cancel_token.cancel();
+        self.task_manager.cancel_all();
+        report
+    }
+}
+
 impl SessionManager {
     #[allow(clippy::too_many_arguments)] // 装配注入面：端口/工厂逐项注入，L5 装配迁出后可分组
     pub fn new(
@@ -220,25 +239,21 @@ impl SessionManager {
     }
 
     pub async fn close_session(&self, session_id: &str) -> anyhow::Result<()> {
-        // 注销 MCP 订阅 inbox（通知不再唤醒已关闭的会话）
+        if let Some(session) = self.take_for_close(session_id) {
+            let _ = session.close_resources().await;
+        }
+        Ok(())
+    }
+
+    /// Transfer the removed record to the host's retryable exit context.
+    pub(crate) fn take_for_close(&self, session_id: &str) -> Option<AcpSession> {
         if let Some(port) = &self.inner.mcp_subscription {
             port.unregister_inbox(session_id);
         }
-        if let Some((_, session)) = self.inner.sessions.remove(session_id) {
-            if let Some(projection) = session.dynamic_mcp_projection.lock().take() {
-                projection.close();
-            }
-            if let Some(close) = &session.dynamic_mcp_close {
-                let _ = close.revoke_and_cleanup().await;
-            }
-            // 取消所有运行时 agent 实例（终止执行归 Agent 层，L5）
-            peri_acp_types::session::cancel_all_agents(session.active_agents.values());
-            session.cancel_token.cancel();
-            // L1：取消 owned 后台任务（§9 销毁顺序「取消 owned tasks」：
-            // bg shell / bg agent / workflow 随 session 销毁，多会话互不干扰）
-            session.task_manager.cancel_all();
-        }
-        Ok(())
+        self.inner
+            .sessions
+            .remove(session_id)
+            .map(|(_, session)| session)
     }
 
     /// Begin terminal shutdown without removing the record needed by a

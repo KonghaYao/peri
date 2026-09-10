@@ -21,7 +21,7 @@ impl DynamicMcpRegistry {
         Arc::new(RegistrySessionClose {
             registry: self.self_weak.clone(),
             session_id: session_id.into(),
-            closed: std::sync::atomic::AtomicBool::new(false),
+            closed: tokio::sync::Mutex::new(false),
         })
     }
 
@@ -120,18 +120,23 @@ impl DynamicMcpRegistry {
 struct RegistrySessionClose {
     registry: Weak<DynamicMcpRegistry>,
     session_id: String,
-    closed: std::sync::atomic::AtomicBool,
+    closed: tokio::sync::Mutex<bool>,
 }
 
 #[async_trait]
 impl SessionCloseRegistration for RegistrySessionClose {
     async fn revoke_and_cleanup(&self) -> DynamicMcpShutdownReport {
-        if self.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        let mut closed = self.closed.lock().await;
+        if *closed {
             return DynamicMcpShutdownReport::Complete;
         }
-        match self.registry.upgrade() {
+        // Serialize callers, but only cache actual completion. Cancellation or
+        // Incomplete leaves the retained registry instances available to retry.
+        let report = match self.registry.upgrade() {
             Some(registry) => registry.close_session_impl(&self.session_id).await,
             None => DynamicMcpShutdownReport::Complete,
-        }
+        };
+        *closed = report == DynamicMcpShutdownReport::Complete;
+        report
     }
 }

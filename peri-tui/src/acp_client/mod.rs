@@ -1,4 +1,6 @@
 pub mod client;
+mod deployment;
+pub use deployment::AcpDeployment;
 pub mod interaction_lifecycle;
 #[doc(hidden)]
 pub mod interaction_response;

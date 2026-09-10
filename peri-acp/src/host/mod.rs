@@ -39,6 +39,8 @@ use crate::provider::{LlmProvider, PeriConfig};
 pub mod assemble;
 pub(crate) mod compact_config;
 mod connection;
+mod lifecycle;
+pub use lifecycle::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport};
 mod continuation;
 pub mod controller_ports;
 #[cfg(test)]
@@ -179,6 +181,8 @@ pub struct AcpServerConfig {
     /// 3.0 批 2：事件发射（`publish_event`）/ 执行发起（`run_session`）亦经此宿主。
     pub controller: Arc<peri_controller::Controller>,
     pub langfuse_session: Option<Arc<peri_controller::langfuse::LangfuseSession>>,
+    /// Only fresh assembly grants shutdown authority; externally injected shared sessions do not.
+    pub(crate) langfuse_shutdown_owner: Option<peri_controller::langfuse::LangfuseShutdownOwner>,
     /// 配置源（读写路径决策的唯一事实源；`persist_config` 经此写回生效层，
     /// 与加载共享同一路径决策，见 `provider::store::ConfigSource`）。
     pub config_source: Arc<crate::provider::ConfigSource>,
@@ -219,8 +223,8 @@ pub async fn run_acp_server(
     transport: Arc<dyn crate::transport::AcpTransport>,
     cfg: AcpServerConfig,
 ) {
-    let sessions: SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    run_acp_server_inner(transport, cfg, sessions).await;
+    let mut handle = spawn_acp_server(transport, cfg);
+    let _ = handle.shutdown().await;
 }
 
 /// stdio 宿主入口：注入**调用方持有的**共享 session 集合（批 3 §7 #10：
@@ -232,21 +236,22 @@ pub(crate) async fn run_acp_server_with_sessions(
     cfg: AcpServerConfig,
     sessions: SharedSessions,
 ) {
-    run_acp_server_inner(transport, cfg, sessions).await;
+    let mut handle = lifecycle::spawn_with_sessions(transport, cfg, sessions);
+    let _ = handle.shutdown().await;
 }
 
 async fn run_acp_server_inner(
     transport: Arc<dyn crate::transport::AcpTransport>,
     mut cfg: AcpServerConfig,
     sessions: SharedSessions,
-) {
+) -> lifecycle::HostExitContext {
     // Keep the sole strong task owner on this stack. The config captured by
     // tasks contains only its weak spawner.
-    let mut task_owner = cfg
+    let task_owner = cfg
         .host_task_owner
         .take()
         .expect("AcpServerConfig missing HostTaskOwner");
-    let mut mcp_task_owner = cfg
+    let mcp_task_owner = cfg
         .mcp_task_owner
         .take()
         .expect("AcpServerConfig missing McpTaskOwner");
@@ -315,17 +320,17 @@ async fn run_acp_server_inner(
     .run()
     .await;
 
-    shutdown::shutdown_host(
-        &mut task_owner,
-        mcp_task_owner.as_mut(),
-        &cfg,
-        &sessions,
-        &prompt_locks,
-        cont_tx,
-        &connection,
-        &connection_cancellation,
-    )
-    .await;
+    lifecycle::HostExitContext {
+        task_owner,
+        mcp_task_owner,
+        cfg,
+        sessions,
+        prompt_locks,
+        cont_tx: Some(cont_tx),
+        connection,
+        connection_cancellation,
+        closing_sessions: std::collections::BTreeMap::new(),
+    }
 }
 
 #[cfg(test)]

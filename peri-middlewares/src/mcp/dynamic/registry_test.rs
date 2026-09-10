@@ -980,3 +980,84 @@ async fn stale_unload_instance_cannot_target_current_incarnation() {
     );
     owner.shutdown().await;
 }
+
+#[tokio::test]
+async fn test_close_registration_incomplete_retry_finishes_retained_instance() {
+    let (mut owner, spawner) = McpTaskOwner::new();
+    let connector = Arc::new(GateConnector {
+        gate: Mutex::new(None),
+    });
+    let registry =
+        DynamicMcpRegistry::with_drain_timeout(spawner, connector.clone(), Duration::ZERO);
+    registry
+        .execute("closing-session", load("example", "one"))
+        .await
+        .unwrap();
+    wait_ready(&registry, "closing-session", "example").await;
+    let gate = connector.gate.lock().as_ref().unwrap().clone();
+    let permit = gate.try_acquire().unwrap();
+    let close = registry.close_registration("closing-session");
+    assert_eq!(
+        close.revoke_and_cleanup().await,
+        DynamicMcpShutdownReport::Incomplete {
+            unfinished_instances: 1
+        }
+    );
+    assert_eq!(registry.state.lock().entries.len(), 1);
+    drop(permit);
+    assert_eq!(
+        close.revoke_and_cleanup().await,
+        DynamicMcpShutdownReport::Complete
+    );
+    assert!(
+        registry.state.lock().entries.is_empty(),
+        "Complete 必须真的移除已 drain 的连接，不能只缓存调用开始标志"
+    );
+    assert_eq!(
+        gate.state(),
+        crate::mcp::dynamic::admission::AdmissionState::Closed
+    );
+    owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_close_registration_cancelled_waiter_retries_real_cleanup() {
+    let (mut owner, spawner) = McpTaskOwner::new();
+    let connector = Arc::new(GateConnector {
+        gate: Mutex::new(None),
+    });
+    let registry = DynamicMcpRegistry::new(spawner, connector.clone());
+    registry
+        .execute("closing-session", load("example", "one"))
+        .await
+        .unwrap();
+    wait_ready(&registry, "closing-session", "example").await;
+    let gate = connector.gate.lock().as_ref().unwrap().clone();
+    let permit = gate.try_acquire().unwrap();
+    let close = registry.close_registration("closing-session");
+    let mut cancelled = close.revoke_and_cleanup();
+    std::future::poll_fn(|cx| {
+        assert!(cancelled.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert_eq!(
+        gate.state(),
+        crate::mcp::dynamic::admission::AdmissionState::Draining
+    );
+    drop(cancelled);
+    drop(permit);
+    assert_eq!(
+        close.revoke_and_cleanup().await,
+        DynamicMcpShutdownReport::Complete
+    );
+    assert!(
+        registry.state.lock().entries.is_empty(),
+        "取消等待后重试必须实际完成原连接清理"
+    );
+    assert_eq!(
+        gate.state(),
+        crate::mcp::dynamic::admission::AdmissionState::Closed
+    );
+    owner.shutdown().await;
+}

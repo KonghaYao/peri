@@ -42,6 +42,7 @@ pub struct App {
     /// ACP client — communicates with the ACP server via in-memory transport.
     /// Initialized after App construction in run_app(); None until `set_acp_client` is called.
     pub acp_client: Option<AcpTuiClient>,
+    pub(crate) acp_deployment: Option<crate::acp_client::AcpDeployment>,
 }
 
 impl App {
@@ -124,6 +125,7 @@ impl App {
             focused: true,
             config_source,
             acp_client: None,
+            acp_deployment: None,
         })
     }
 

@@ -17,10 +17,13 @@ pub(super) async fn shutdown_host(
     cfg: &AcpServerConfig,
     sessions: &SharedSessions,
     prompt_locks: &PromptLocks,
-    cont_tx: Arc<tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>>,
+    cont_tx: &mut Option<
+        Arc<tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>>,
+    >,
     connection: &Arc<tokio::sync::Mutex<ConnectionContext>>,
     connection_cancellation: &CancellationToken,
-) {
+    closing_sessions: &mut std::collections::BTreeMap<String, crate::session::AcpSession>,
+) -> task_scope::HostTerminalShutdownReport {
     // Transport EOF is the host's single ownership transaction.
     connection_cancellation.cancel();
     let connection_id = connection.lock().await.id().to_string();
@@ -36,7 +39,7 @@ pub(super) async fn shutdown_host(
         pool.begin_shutdown();
     }
     mcp_task_owner.begin_shutdown();
-    drop(cont_tx);
+    cont_tx.take();
     let (local_ids, mut lsp_pools) = {
         let sessions = sessions.lock().await;
         let mut ids = Vec::with_capacity(sessions.len());
@@ -74,13 +77,25 @@ pub(super) async fn shutdown_host(
         peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
     };
     let _ = mcp_task_owner.shutdown().await;
-    let mut session_close_failures = 0usize;
     for session_id in &all_ids {
-        if let Err(error) = cfg.session_manager.close_session(session_id).await {
-            session_close_failures += 1;
-            tracing::warn!(session_id = %session_id, error = %error, "session close during host shutdown failed");
+        if let Some(session) = cfg.session_manager.take_for_close(session_id) {
+            closing_sessions.insert(session_id.clone(), session);
         }
     }
+    let closing_ids: Vec<_> = closing_sessions.keys().cloned().collect();
+    for session_id in closing_ids {
+        let session = closing_sessions
+            .get(&session_id)
+            .expect("closing session retained");
+        if session.close_resources().await
+            == peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
+        {
+            closing_sessions.remove(&session_id);
+        } else {
+            tracing::warn!(session_id = %session_id, "session resources retained for shutdown retry");
+        }
+    }
+    let session_close_failures = closing_sessions.len();
     {
         let mut sessions = sessions.lock().await;
         for (_, state) in sessions.drain() {
@@ -135,4 +150,5 @@ pub(super) async fn shutdown_host(
             tracing::warn!(?terminal_report, "ACP host terminal shutdown incomplete");
         }
     }
+    terminal_report
 }

@@ -110,6 +110,11 @@ pub struct AcpTuiClient {
 }
 
 impl AcpTuiClient {
+    /// 部署退出时显式关闭 transport；不依赖 UI/后台消费者释放所有 client 克隆。
+    pub fn close(&self) {
+        self.transport.close();
+    }
+
     /// Create a new client wrapping an existing `MpscClientTransport`.
     ///
     /// Returns `(Self, notification_sender, notification_receiver)`. The caller must:
