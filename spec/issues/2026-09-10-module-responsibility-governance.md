@@ -69,24 +69,24 @@
 
 | Crate / 项目 | 重点入口与职责问题 | 当前状态 |
 | --- | --- | --- |
-| peri-middlewares | client、dynamic registry、assembly、staged_connection、subagent tool、middleware capability | client/registry 已提交；其余待审/治理 |
-| peri-acp | host、session、event_sink、prompt、session lifecycle | host/session 已提交；事件与 prompt 待治理 |
+| peri-middlewares | client、dynamic registry、assembly、staged_connection、subagent tool、middleware capability | client/registry/assembly 已验证；capability 调用面正在审查 |
+| peri-acp | host、session、event_sink、prompt、session lifecycle | host/session 已提交；event_sink 已拆分验证；prompt 待治理 |
 | peri-resources | SQLite 连接、行映射、祖先上下文、compaction 事务 | SQLite 拆分已提交，65 项存储测试通过 |
-| peri-agent | stage_builder、tool_dispatch、workflow agent、transcript、subagent factory、MiddlewareState | 已定位，待治理 |
-| peri-acp-types | session 混合 runtime/错误/消息投递，event_v2 契约与映射；Agent queue_test 文件存在但未挂载 | 已定位，拆分及恢复测试挂载待完成 |
+| peri-agent | stage_builder、tool_dispatch、workflow agent、transcript、subagent factory、MiddlewareState | stage_builder 已拆分验证；capability 审查中；其余待治理 |
+| peri-acp-types | session 混合 runtime/错误/消息投递，event_v2 契约与映射；Agent queue_test 文件存在但未挂载 | session 拆分已验证，Agent queue 7 项测试恢复挂载；event_v2 待审 |
 | peri-tui | client、ask_user、acp_notifier、current_turn、input_area、plugin panel | client 已提交；其他待审/治理 |
 | peri-controller | Langfuse tracer registry、bridge 与控制面状态所有权 | 待审 |
-| peri-model | protocol/runtime/transport/provider 分层清楚；测试专用 async SSE 重复路径需收敛 | 已审，保留总体结构，重复实现待处理 |
-| peri-runtime | destroy 跨 await 后无条件 remove 可能误删替换后的 session；旧事件也可能借新 entry 补打 | 已审，登记实例所有权待复现/修复 |
+| peri-model | protocol/runtime/transport/provider 分层清楚；测试专用 async SSE 重复路径需收敛 | 已审保留总体结构；测试专用 SSE 整链已删除，生产路径147项测试通过 |
+| peri-runtime | destroy 跨 await 后无条件 remove 可能误删替换后的 session；旧事件也可能借新 entry 补打 | 已修复并提交：4项旧实现回归失败；16项Runtime及16项Controller关联测试通过 |
 | peri-workflow | runner、tool preflight、journal、progress | runner 已提交；其余待审 |
 | peri-js-runtime | 分层可保留；artifact launch 未纳入 deadline/cancel、run_execute 错误提前返回可能跳过显式收尾 | 已审，生命周期路径待复现/修复 |
 | peri-lsp | document sync/dispatcher 可分离；重复 readiness、请求 id 碰撞和进程任务 owner 需核查 | 已审，结构与生命周期待治理 |
-| peri-theme | loader 混合查找/引用/构造；visited 跨根复用、Unicode hex切片、忽略 extends、重复默认主题 | 已审，解析边界待治理；缺少索引需补建 |
+| peri-theme | loader 混合查找/引用/构造；visited 跨根复用、Unicode hex切片、忽略 extends、重复默认主题 | 已拆分并修复引用链/Unicode hex/extends；29项单元与集成测试通过，索引已补建 |
 | peri-web-pty | handle_socket 混合协议/阻塞I/O/child监控；reader未join、末尾输出drain需实测 | 已审，连接owner与协议边界待治理 |
 | langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 已审，转换与batcher待治理 |
 | side-projects/git-stats | 结构清楚；外层log sentinel碰撞、聚合展示名新旧次序需核查 | 已审，正确性修复/独立验证待完成 |
-| side-projects/md-scan-matrix | 结构清楚；FAIL/前缀稳定性/collision结果只打印，不能据exit0宣称验收通过 | 已审，实验预期与退出码待治理 |
-| side-projects/image-spike | 目标单一的TestBackend buffer/Kitty transmit实验，无需拆分 | 已审保留，独立验证待完成 |
+| side-projects/md-scan-matrix | 结构清楚；FAIL/前缀稳定性/collision结果只打印，不能据exit0宣称验收通过 | 评估/报告已分离；6项回归、45矩阵+33补充checks及独立Clippy通过 |
+| side-projects/image-spike | 目标单一的TestBackend buffer/Kitty transmit实验，无需拆分 | 已审保留；本地2项buffer行为测试及all-targets Clippy通过；不等于真实终端验证 |
 
 ## 每批验证
 
@@ -99,3 +99,19 @@
    不通过放宽阈值或修改豁免来消除提示。
 4. 按 [文档维护规范](../../docs/standards/documentation.md) 更新受影响代码索引和
    canonical 路由。后续事项完成后删除此过程文档，稳定入口保留在代码索引。
+
+
+## 第三批验证记录
+
+- Runtime：新增4个并发场景在旧实现全部失败；修复后16项通过（另含取消重试、旧persist失败），Controller关联16项通过。
+- session拆分：types 10项、Agent session 215项（含恢复挂载queue 7项）、ACP event_sink 14项通过。
+- 装配：Agent exec 59项、中间件assembly 33项、ACP executor flow 19项通过；54个ChainSlot arm及disabled guard顺序逐项核对。
+- Theme：24项单元+4项builtin集成+1项隔离HOME loader集成通过；保留root路径与dotfiles symlink兼容性。
+- Model：147项通过；测试改走生产SSE reader，删除仅供测试的async decoder分支。
+- 本批涉及的6个crate doc tests：1项通过、3项原有ignored；其余无可执行用例。Theme doc tests为0项。
+- workspace all-targets Clippy（`-D warnings`）、格式、16条依赖门与diff检查通过。
+- image-spike独立manifest：2项行为测试及all-targets Clippy通过。
+
+- md-scan-matrix独立manifest：6项回归、45矩阵+33补充checks及all-targets Clippy通过；预期碰撞精确标记，未预期失败返回非零。
+
+上述结果不替代尚未执行的全仓完整测试，也不覆盖下一批正在修改的模块。
