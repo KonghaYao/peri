@@ -1,6 +1,6 @@
 # peri-tui 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-10（ACP client、通知解码、CurrentTurn 与问答表单职责拆分）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11（Plugin Discover 查询、结果归属与输入动作治理）
 > 依据：peri-tui/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
 
 ## 架构速览
@@ -26,6 +26,7 @@
 | 改配置/启动流程 | `src/main.rs` + `src/launch.rs` + `src/config/` + `src/app/mod.rs` | `main`；`build_runtime`；`run_tui`；`build_app_and_acp`；`App::new`；`TuiConfig::from_extra`；`save_effective` | `PeriConfig` 等类型事实源在 `peri-acp/src/provider/config.rs`，`config/mod.rs` 仅 re-export；配置源句柄 `CONFIG_SOURCE_HANDLE` 启动时 set 一次，加载与保存共用同一决策；`teardown_app` 收尾 MCP 池/Langfuse |
 | 改 `peri meta session` CLI | `src/main.rs` + `src/cli_meta.rs` + `src/thread/mod.rs` | `MetaAction::Session`；`try_run_meta_before_configuration`；`run_meta_session`；`SessionMetaDtoV1`；`open_thread_store_read_only` re-export | Meta 在 settings/config/env 初始化前按受限 grammar 路由；先校验 UUID，再经 `peri-resources` 只读 seam 调用 `ThreadStore::load_meta`；human/JSON 使用九字段 allowlist，稳定错误与退出码由 adapter 映射；不进入 ACP、Agent、Runtime 或 TUI session owner |
 | 改 TUI MCP panel 生命周期 | `src/app/mod.rs` + `src/app/service_registry.rs` + `src/kit/acp_events/system.rs` + `src/launch.rs` | `spawn_mcp_init`；`ServiceRegistry::mcp_task_owner`；`handle_oauth_completed/restored`；`shutdown_mcp_pool` | panel 部署容器保留 non-Clone `McpTaskOwner`，init 和 OAuth-event reconnect 经 weak spawner 准入；teardown 按 pool begin-close → owner join → pool close，并检查 service transaction report，Incomplete 不得记为已关闭（ARC-HOST-SHUTDOWN-001） |
+| 改 Plugin Discover 搜索与远端条目操作 | `src/kit/panels/plugin.rs` + `plugin/{discover,discover_handler,search_request}.rs` | `DiscoverState::{begin_search,complete,reset_session}`；`decide` / `apply` / `handle_event`；`launch_search` | 单一 Discover owner 持输入、结果、选中条目身份与取消 token；键盘/鼠标统一动作；RPC response 按 generation 和 session/reset identity 接收，编辑、替换查询、关闭/Drop、会话重置使旧请求失效；无 request ID 的异步通知不作为面板结果源；空结果不回退本地缓存，错误保留输入以重试 |
 | 改 service snapshot / thread 列表刷新 | `src/kit/service_snapshot.rs` | `spawn_service_snapshot`；`tick_once`；`SlowSnapshotRefresh` | thread 列表经 `ThreadStore::list_thread_entries(cwd)` 获取轻量投影，存储层完成 cwd/hidden/空 thread 过滤；不得退回会计算 message content size 的完整 `list_threads` |
 | 改 ACP 请求发送 / reverse interaction 生命周期 | `src/acp_client/client/{pump,interaction,requests}.rs` + `src/acp_client/interaction_lifecycle.rs` + `interaction_settlement.rs` + `interaction_response.rs` | `AcpTuiClient::spawn_pump` / `respond_interaction` / `publish_if_owned`；`InteractionLifecycle::{register_reverse,claim,begin_transition,open_prompt}`；`PromptLease` / `TransitionLease` / claimed batch lease | 单一 owner registry 管 Permission/Elicitation 的接受、claim 与 terminal；operation gate 线性化 UI publication、response、cancel 和 session transition；Drop settlement 使用 weak transport/notifier；headless print 仍按 token claim，且不依赖 kit atoms |
 | 改 session new/load/delete 的 TUI 投影 | `src/acp_client/client/session.rs` + `src/kit/session_boundary.rs` + `src/kit/thread_load_consumer.rs` | `new_session` / `load_session` / `delete_session`；`ThreadLoadDispatcher::send`；`reserve_session_load` / `open_prompt_after_session_loads`；`project_session_boundary` | client 在 route Stable commit 前同步投影 ACTIVE_SESSION_ID，并统一清 interaction atom/popup/panel/confirm、loading/input/rewind/todo/history；普通 load 在同步入队边界取得引用计数 reservation，ensure/prompt 在选择 Stable/open lease 前等待，request drop 自动释放；compact 先 reserve replay 再 drain input（ARC-SESSION-LOAD-001）；new transition 用容量 64 的 exact-target FIFO 覆盖 response→commit 窗口 |
@@ -93,6 +94,8 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 面板目录（tasks/cron/agent/model/config/thread_browser/mcp/plugin/…） | kit/panels/ + kit/panel_registry.rs | `open_panel`（panel_registry.rs:475）；面板渲染按 PanelKind 分发（:438）；`PanelOverlay`（panel_overlay.rs:34） |
+| Plugin 面板装配与展示 | kit/panels/plugin.rs + plugin/{data,render,search_handler,panel_handler}.rs | `PluginPanel` 保持公共入口；`data` 管本地目录缓存，`render_discover_list` 保留 loading/error 下的可编辑输入；`handle_search_event` 路由 Discover 与 marketplace 输入，`handle_panel_event` 保留其他 tab 与既有安装操作生命周期 |
+| Plugin 搜索生命周期回归 | kit/panels/plugin/search_request_test.rs | `plugin_search_*`：真实 mpsc 请求/响应及 notifier → bridge → render；覆盖错误重试、同 query 乱序与无身份旧通知、session switch/reset、关闭/Drop、空/无效结果、键鼠提交可达和远端条目身份；回调暂拒收保留结果、可取消延迟重试，接收后只投影一次 |
 | 弹窗（HITL/AskUser/OAuth/Confirm/Rewind/下载进度） | kit/popups/ + kit/popup_overlay.rs + kit/event_handlers.rs | `open_popup`/`close_popup`/`is_popup_active`；Rewind Enter 由根级 Global 模态仲裁发送既有 `REWIND_ACTION_TX`，鼠标与渲染留在 popup |
 
 ### App/配置/启动（src/app/ src/config/ src/acp_client/）

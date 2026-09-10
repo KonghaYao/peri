@@ -8,8 +8,8 @@ use crate::app::panel_types::PanelKind;
 use crate::components::textarea::TextAreaState;
 use crate::i18n;
 use crate::kit::atoms::{
-    LANG_VERSION, PLUGIN_LIST, PLUGIN_SEARCH_RESULTS, PluginSummary, PluginViewTab,
-    RENDER_HEARTBEAT,
+    ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, LANG_VERSION, PLUGIN_LIST, PluginSummary,
+    PluginViewTab, RENDER_HEARTBEAT,
 };
 use crate::kit::list_nav::scroll_start_for_selected;
 use crate::kit::panel_mouse::AreaTracker;
@@ -23,9 +23,17 @@ use ratatui_kit::ratatui::{
 };
 
 mod data;
+mod discover;
+mod discover_handler;
+use discover::{DiscoverState, SearchSession};
 mod panel_handler;
 mod render;
 mod search_handler;
+mod search_request;
+
+#[cfg(test)]
+#[path = "plugin/search_request_test.rs"]
+mod search_request_tests;
 
 use self::data::{get_discover_cache, get_marketplace_cache};
 use self::render::{
@@ -67,7 +75,7 @@ impl DiscoverDetailAction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 struct PluginSearchResultItem {
     name: String,
     version: String,
@@ -135,9 +143,6 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let confirm_action = hooks.use_state(|| Option::<String>::None);
     let cursor_visible = hooks.use_state(|| true);
     let cursor_last_toggle = hooks.use_state(std::time::Instant::now);
-    let search_text = hooks.use_state(TextAreaState::default);
-    let search_focus = hooks.use_state(|| false);
-    let search_state = hooks.use_state(|| SearchState::Idle);
     let operation_loading = hooks.use_state(|| Option::<String>::None);
     let add_marketplace_input = hooks.use_state(TextAreaState::default);
     let add_marketplace_active = hooks.use_state(|| false);
@@ -145,15 +150,15 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Marketplace detail state
     let marketplace_detail = hooks.use_state(|| Option::<usize>::None);
     let marketplace_detail_action = hooks.use_state(|| 0usize);
-    // Discover list state
-    let discover_cursor = hooks.use_state(|| 0usize);
-    let discover_filtered = hooks.use_state(Vec::<usize>::new);
-    let discover_detail_idx = hooks.use_state(|| Option::<usize>::None);
-    let discover_detail_action = hooks.use_state(|| 0usize);
+    let discover = hooks.use_state(DiscoverState::default);
     let store = hooks.use_atom(&PLUGIN_LIST);
     let plugins: Vec<PluginSummary> = store.read().clone();
     hooks.use_atom(&LANG_VERSION);
-    hooks.use_atom(&PLUGIN_SEARCH_RESULTS);
+    hooks.use_atom(&ACTIVE_SESSION_ID);
+    hooks.use_atom(&BRIDGE_RESET_COUNTER);
+    discover
+        .write_no_update()
+        .reset_session(SearchSession::current());
     let count = plugins.len();
 
     // RENDER_HEARTBEAT: 驱动 cursor blink（Discover 搜索框）
@@ -178,13 +183,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 event,
                 area,
                 active_tab,
-                search_text,
-                search_focus,
-                search_state,
-                discover_cursor,
-                discover_filtered,
-                discover_detail_idx,
-                discover_detail_action,
+                discover,
                 detail_plugin_idx,
                 marketplace_detail,
                 marketplace_detail_action,
@@ -207,18 +206,14 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 area,
                 selected,
                 active_tab,
+                discover,
                 action_index,
                 confirm_action,
                 operation_loading,
                 detail_plugin_idx,
-                discover_cursor,
-                discover_detail_idx,
-                discover_detail_action,
-                discover_filtered,
                 marketplace_detail,
                 marketplace_detail_action,
                 marketplace_refreshing,
-                search_text,
                 add_marketplace_input,
                 add_marketplace_active,
             )
@@ -300,23 +295,20 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // ── Content ──
     // 检查 discover detail 模式
-    let dd_idx = *discover_detail_idx.read();
-    if let Some(disc_idx) = dd_idx {
-        let items = get_discover_cache();
-        if let Some(dp) = items.get(disc_idx) {
-            render_discover_detail(
-                &mut lines,
-                dp,
-                *discover_detail_action.read(),
-                bold_style,
-                muted_style,
-                dim_style,
-                primary_style,
-                success_color,
-                title_color,
-                title_style,
-            );
-        }
+    let discover_read = discover.read();
+    if let Some(dp) = discover_read.detail.as_ref() {
+        render_discover_detail(
+            &mut lines,
+            dp,
+            discover_read.detail_action,
+            bold_style,
+            muted_style,
+            dim_style,
+            primary_style,
+            success_color,
+            title_color,
+            title_style,
+        );
     } else if let Some(mp_sel) = *marketplace_detail.read() {
         let entries = get_marketplace_cache();
         if let Some(entry) = entries.get(mp_sel.saturating_sub(1)) {
@@ -405,71 +397,18 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 title_color,
             ),
             PluginViewTab::Discover => {
-                // Discover list: show cached marketplace plugins with real-time filtering
-                // 当有搜索文本且远程搜索结果不为空时，使用远程结果；否则使用本地 cache
-                let query = search_text.read().text.to_lowercase();
-                let search_state_guard = PLUGIN_SEARCH_RESULTS.state();
-                let search_results = search_state_guard.read();
-                let remote_items: Vec<PluginSearchResultItem> =
-                    if !query.is_empty() && !search_results.is_empty() {
-                        search_results
-                            .iter()
-                            .map(|p| PluginSearchResultItem {
-                                name: p.name.clone(),
-                                version: p.version.clone(),
-                                marketplace: p.marketplace.clone(),
-                                description: p.description.clone(),
-                                author: p.author.clone(),
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                drop(search_results);
-
-                let use_remote = !remote_items.is_empty();
-                let local_items = get_discover_cache();
-                let display_items: Vec<PluginSearchResultItem> = if use_remote {
-                    remote_items
-                } else {
-                    local_items
-                };
-
-                let filtered_items: Vec<&PluginSearchResultItem> = if use_remote || query.is_empty()
-                {
-                    display_items.iter().collect()
-                } else {
-                    let filtered_indices = discover_filtered.read().clone();
-                    if filtered_indices.is_empty() {
-                        // 刚切换过来，初始化过滤
-                        display_items
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, item)| {
-                                item.name.to_lowercase().contains(&query)
-                                    || item.description.to_lowercase().contains(&query)
-                                    || item.marketplace.to_lowercase().contains(&query)
-                            })
-                            .map(|(_, item)| item)
-                            .collect()
-                    } else {
-                        filtered_indices
-                            .iter()
-                            .filter_map(|&i| display_items.get(i))
-                            .collect()
-                    }
-                };
-                let disc_sel = *discover_cursor.read();
-                let disc_scroll =
-                    scroll_start_for_selected(disc_sel, filtered_items.len(), VISIBLE_ITEMS);
+                let local = get_discover_cache();
+                let items = discover_read.visible_items(&local);
+                let scroll =
+                    scroll_start_for_selected(discover_read.selected, items.len(), VISIBLE_ITEMS);
                 render_discover_list(
                     &mut lines,
-                    search_text.read().text.as_str(),
-                    show_cursor,
-                    &search_state.read(),
-                    &filtered_items,
-                    disc_sel,
-                    disc_scroll,
+                    &discover_read.editor.text,
+                    show_cursor && discover_read.focused,
+                    &discover_read.status,
+                    &items,
+                    discover_read.selected,
+                    scroll,
                     VISIBLE_ITEMS,
                     bold_style,
                     muted_style,
@@ -520,7 +459,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     } else if confirm_action.read().is_some() {
         i18n::tr("panel-plugin-confirm-hint")
-    } else if discover_detail_idx.read().is_some() {
+    } else if discover_read.detail.is_some() {
         i18n::tr("common-nav-enter-close")
     } else if detail_idx.is_some() {
         i18n::tr("common-nav-enter-close")
