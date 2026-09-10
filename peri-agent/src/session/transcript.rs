@@ -53,7 +53,25 @@ impl TranscriptEntry {
     /// Canonical model projection shared by normal Reason and compact rendering.
     pub fn project_message(&self) -> anyhow::Result<BaseMessage> {
         match self {
-            Self::Message(message) => Ok(message.clone()),
+            Self::Message(message) => {
+                let reminders = peri_acp_types::compact_reminder::legacy_compact_reminders(message);
+                if reminders.is_empty() {
+                    return Ok(message.clone());
+                }
+                let encoded = reminders
+                    .iter()
+                    .map(|reminder| {
+                        peri_acp_types::system_reminder::encode_legacy_system_reminder(
+                            &reminder.body,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join("\n");
+                Ok(BaseMessage::Human {
+                    id: message.id(),
+                    content: MessageContent::text(encoded),
+                })
+            }
             Self::Reminder { id, reminder } => Ok(BaseMessage::Human {
                 id: *id,
                 content: MessageContent::text(encode_system_reminder(reminder)?),

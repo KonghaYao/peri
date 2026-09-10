@@ -232,6 +232,12 @@ token、认证 header、连接串和敏感 URL 参数的脱敏。错误消息不
 无可靠元数据的旧 reminder 可以通过兼容启发式生成展示分类，但必须标记为 `Legacy` 或
 保留 legacy provenance。启发式结果不得驱动安全或执行控制逻辑。
 
+Compact 的旧 plain-text Human 回注保留存储格式，在模型投影与 ACP replay 出口统一兼容：
+只识别完整首行的文件/Skill 回注前缀及固定摘要续接标记，分类保持 `Legacy`，不建立可信
+producer provenance。模型出口使用 legacy codec 转义并分块；回放出口按 capability 发送
+reminder 或 fallback，正文不进入用户气泡。精确同形的用户粘贴无法从旧格式判别来源，
+该启发式只用于兼容投影，不能用于权限或控制决策。
+
 ### 7.2 容错
 
 - 未闭合标签不得导致标签之前的用户文本丢失；

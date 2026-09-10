@@ -1,5 +1,20 @@
 use super::*;
 
+/// [回归测试] 内部 Compact 文本仅在模型出口包装，数据库原始内容和 ID 保持不变。
+#[test]
+fn test_legacy_compact_model_projection_preserves_storage() {
+    let text = "[最近读取的文件: /a.rs]\nfn main() { /* </system-reminder> */ }";
+    let mut transcript = MessageTranscript::new();
+    let id = transcript.append(BaseMessage::human(text));
+    let view = transcript.visible_model_messages().unwrap();
+    assert_eq!(view[0].id(), id);
+    assert!(view[0].content().starts_with("<system-reminder>"));
+    assert!(view[0].content().contains("&lt;/system-reminder&gt;"));
+    assert_eq!(transcript.get(id).unwrap().message().content(), text);
+    transcript.set_excluded(id, true);
+    assert!(transcript.visible_model_messages().unwrap().is_empty());
+}
+
 #[test]
 fn reminder_entry_preserves_stable_identity_without_placeholder_state() {
     use peri_acp_types::system_reminder::{

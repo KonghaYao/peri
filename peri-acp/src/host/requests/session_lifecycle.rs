@@ -793,6 +793,10 @@ struct TuiReplaySender<'a> {
     transport: &'a dyn crate::transport::AcpTransport,
 }
 
+#[cfg(test)]
+#[path = "session_lifecycle_replay_test.rs"]
+mod replay_tests;
+
 #[async_trait::async_trait]
 impl ReplaySender for TuiReplaySender<'_> {
     async fn send(&self, notif: SessionNotification) -> Result<(), crate::dispatch::ReplayError> {

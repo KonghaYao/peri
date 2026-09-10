@@ -154,3 +154,15 @@ async fn test_replay_tool_failure_empty_text_uses_fallback() {
         other => panic!("预期 ToolCallUpdate，实际: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn test_investigation_compact_file_must_not_be_user_bubble() {
+    let updates = collect_replay(vec![BaseMessage::human(
+        "[最近读取的文件: /src/example.rs]\nfn example() {}",
+    )])
+    .await;
+    assert!(
+        updates.is_empty(),
+        "内部文件上下文被回放成用户消息: {updates:?}"
+    );
+}
