@@ -26,33 +26,6 @@ pub(crate) use stage::build_compact_hooks;
 
 use super::SharedSessions;
 
-#[cfg(test)]
-fn rebuild_compacted_payloads(
-    previous: &[peri_acp_types::store::PersistedPayload],
-    projected: &[peri_acp_types::messages::BaseMessage],
-) -> Vec<peri_acp_types::store::PersistedPayload> {
-    use peri_acp_types::store::PersistedPayload;
-
-    let reminders = previous
-        .iter()
-        .filter_map(|payload| match payload {
-            PersistedPayload::SystemReminder { id, reminder } => Some((*id, reminder.clone())),
-            PersistedPayload::Message(_) => None,
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    projected
-        .iter()
-        .cloned()
-        .map(|message| match reminders.get(&message.id()) {
-            Some(reminder) => PersistedPayload::SystemReminder {
-                id: message.id(),
-                reminder: reminder.clone(),
-            },
-            None => PersistedPayload::Message(message),
-        })
-        .collect()
-}
-
 // ── Prompt execution (spawned into background task) ──────────────────────────
 
 // ── ACP 结果投影（spec/issues/2026-08-18-acp-error-handler.md D2）─────────────
@@ -278,15 +251,6 @@ pub(crate) async fn run_prompt(
         )
     };
     let history_len = history.len();
-    // Every canonical payload projects to exactly one model message. This is the only
-    // safe prefix boundary when reminders are interleaved with ordinary messages.
-    let _projected_history_len = history_payloads.len();
-    // Compact replacement must delete every canonical row, including reminder rows.
-    let _history_ids: Vec<peri_acp_types::messages::MessageId> = history_payloads
-        .iter()
-        .map(|payload| payload.id())
-        .collect();
-
     let broker = build_transport_broker(transport, &session_id);
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),
@@ -365,10 +329,6 @@ pub(crate) async fn run_prompt(
             meta_harness_disabled: meta_harness.disabled_middlewares.clone(),
         },
     );
-
-    // Track first history message ID for cancel-with-progress path (history is moved below)
-    // Uses Option<MessageId> (16 bytes) instead of cloning the entire history.
-    let _first_history_id = history.first().map(|m| m.id());
 
     // ── L5：SessionContext 投影（provider / peri_config / pool / SessionManager /
     //    Controller 端口化——执行体迁入 peri-agent 后由本宿主构造注入面）──
@@ -631,44 +591,6 @@ fn take_recall_for_turn(recall_items: &mut Vec<String>, continuation: bool) -> V
 /// 用户 prompt）；用户 prompt 正常回写本轮产生的 recall。
 fn recall_overwrite_allowed(continuation: bool) -> bool {
     !continuation
-}
-
-/// Returns `None` when a partial result omits existing history. A committed Full Compact
-/// explicitly replaces prior visible messages with its persisted summary, so it is accepted.
-#[cfg(test)]
-fn strip_leaked_prepends(
-    result_messages: &[peri_acp_types::messages::BaseMessage],
-    first_history_id: Option<peri_acp_types::messages::MessageId>,
-    full_compaction_committed: bool,
-) -> Option<Vec<peri_acp_types::messages::BaseMessage>> {
-    match first_history_id {
-        Some(first_id) => {
-            // Find where original history starts in result (skip leaked prepends).
-            if let Some(start) = result_messages.iter().position(|m| m.id() == first_id) {
-                Some(result_messages[start..].to_vec())
-            } else if full_compaction_committed {
-                Some(
-                    result_messages
-                        .iter()
-                        .skip_while(|m| m.is_system())
-                        .cloned()
-                        .collect(),
-                )
-            } else {
-                None
-            }
-        }
-        None => {
-            // Original history was empty — strip leading system messages (all prepends).
-            Some(
-                result_messages
-                    .iter()
-                    .skip_while(|m| m.is_system())
-                    .cloned()
-                    .collect(),
-            )
-        }
-    }
 }
 
 #[cfg(test)]

@@ -394,6 +394,150 @@ async fn test_commit_compaction_lifecycle_filesystem_failure_leaves_memory_and_s
     assert!(flags.is_empty());
 }
 
+/// [回归测试] compact 历史必须从 canonical transcript 持久化，而非从模型投影重建。
+/// reminder 在摘要前保留或在摘要后追加，冷重载均保持同一 typed payload 和顺序。
+#[tokio::test]
+async fn test_compaction_reload_preserves_canonical_reminder_once() {
+    use peri_acp_types::system_reminder::{
+        encode_system_reminder, ReminderAudience, ReminderAudiences, ReminderCategory,
+        ReminderDelivery, ReminderSeverity, ReminderSource, SystemReminder,
+        TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let dir = tempdir().unwrap();
+    for reminder_after_compact in [false, true] {
+        let db_path = dir
+            .path()
+            .join(format!("reminder-{reminder_after_compact}.db"));
+        let store: Arc<dyn ThreadStore> = Arc::new(SqliteThreadStore::new(&db_path).await.unwrap());
+        let thread_id = store.create_thread(ThreadMeta::new("/test")).await.unwrap();
+        let reminder = TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Task,
+                source: ReminderSource("compact_reload_test".into()),
+                kind: "notice".into(),
+                severity: ReminderSeverity::Info,
+                delivery: ReminderDelivery::Configurable,
+                audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+                body: "canonical reminder".into(),
+                summary: None,
+                metadata: serde_json::json!({}),
+            })
+            .unwrap();
+        let encoded_reminder = encode_system_reminder(&reminder).unwrap();
+        let mut transcript =
+            MessageTranscript::new().with_persistence(store.clone(), thread_id.clone());
+        let first_id = transcript.append(make_human("旧用户消息"));
+        let existing_reminder =
+            (!reminder_after_compact).then(|| transcript.append_system_reminder(reminder.clone()));
+        let second_id = transcript.append(make_ai("旧助手回答"));
+        let summary = make_human("压缩摘要");
+        let summary_id = summary.id();
+        // 不手工删行：生产 API 先排空 writer，再原子追加摘要与 excluded flags。
+        transcript
+            .commit_compaction_lifecycle(CompactionLifecycle {
+                flag_updates: [first_id, second_id]
+                    .into_iter()
+                    .map(|id| {
+                        (
+                            id,
+                            MessageFlags {
+                                excluded: true,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+                appended_messages: vec![summary],
+            })
+            .await
+            .unwrap();
+        let reminder_id =
+            existing_reminder.unwrap_or_else(|| transcript.append_system_reminder(reminder));
+        transcript.flush_persistence().await.unwrap();
+        let canonical = transcript.persisted_payloads();
+        let visible_ids = if reminder_after_compact {
+            vec![summary_id, reminder_id]
+        } else {
+            vec![reminder_id, summary_id]
+        };
+        assert_eq!(
+            transcript
+                .visible_model_messages()
+                .unwrap()
+                .iter()
+                .map(BaseMessage::id)
+                .collect::<Vec<_>>(),
+            visible_ids
+        );
+        transcript.shutdown_persistence();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while transcript.flush_persistence().await.is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("冷重载前 writer 必须退出");
+        drop(transcript);
+        drop(store);
+        // 新建 SQLite store 和 transcript，从磁盘 payload/flags 恢复。
+        let reopened = SqliteThreadStore::new(&db_path).await.unwrap();
+        let loaded = reopened.load_payloads(&thread_id).await.unwrap();
+        let flags = reopened.load_message_flags(&thread_id).await.unwrap();
+        assert_eq!(
+            loaded.len(),
+            4,
+            "compact 保留旧 canonical 行，以 flags 控制可见性"
+        );
+        let encoded = |payloads: &[PersistedPayload]| {
+            payloads
+                .iter()
+                .map(|payload| {
+                    serde_json::from_str::<serde_json::Value>(
+                        &peri_acp_types::store::serialize_persisted_payload(payload).unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(encoded(&loaded), encoded(&canonical));
+        assert_eq!(
+            loaded
+                .iter()
+                .filter(|payload| payload.id() == reminder_id)
+                .count(),
+            1
+        );
+        assert!(matches!(
+            loaded
+                .iter()
+                .find(|payload| payload.id() == reminder_id)
+                .unwrap(),
+            PersistedPayload::SystemReminder { .. }
+        ));
+        let mut restored = MessageTranscript::new().with_own_payloads(loaded);
+        restored.set_flags_batch(flags);
+        let projected = restored.visible_model_messages().unwrap();
+        assert_eq!(
+            projected.iter().map(BaseMessage::id).collect::<Vec<_>>(),
+            visible_ids
+        );
+        assert_eq!(
+            projected
+                .iter()
+                .find(|message| message.id() == reminder_id)
+                .unwrap()
+                .content(),
+            encoded_reminder
+        );
+        assert_eq!(
+            restored.visible_messages().len(),
+            1,
+            "普通消息视图只含摘要，不将 reminder 反写为普通 human"
+        );
+    }
+}
+
 // ── 持久化 flush/barrier ───────────────────────────────────────────────────
 
 #[tokio::test]
