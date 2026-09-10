@@ -57,6 +57,7 @@
 | --- | --- | --- |
 | 事件 DTO | event/mod.rs | `AcpEvent`（:42，22 个变体，tag+content serde）；re-export `peri_acp_types::event_v2::*_event_to_executor`（:30） |
 | v1→协议映射 | event/mapper.rs | `map_event`（:51）；`MappedEvent`（:22，standard/standard_with_src） |
+| LLM usage 可选字段与来源 | event/mapper.rs + event/mapper_test.rs | `map_event` 的 `LlmCallEnd` 分支；有 usage 才产生 `UsageUpdate`，tokenStats cap 开启才附加计数 `_meta`；cacheReadTokens 缺省省略、显式零保留，sourceAgentId 与计数独立透传；TUI 消费入口见 peri-tui 索引与 ARC-EVENT-001 |
 | 事件泵 | event/forwarder.rs | `spawn_eventbus_forwarder`（:78，biased select render 优先） |
 | 安全活动投影 | event/activity.rs | `map_agent_activity`（:93，allowlist DTO） |
 | OAuth 事件 | event/oauth.rs | `HostOAuthEvent`（:102，host 级通道，不依赖 session event_sink） |

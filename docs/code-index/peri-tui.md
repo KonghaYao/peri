@@ -1,11 +1,11 @@
 # peri-tui 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-10（ACP client 职责拆分）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-10（ACP client、通知解码、CurrentTurn 与问答表单职责拆分）
 > 依据：peri-tui/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
 
 ## 架构速览
 
-- 数据流：`ACP transport → acp_client pump（interaction_lifecycle 在 forward 前分配 semantic owner；ordinary notification 按 Stable/Transitioning/NoSession 路由）→ acp_notifier（owner + RequestId debug JSON + payload，不写 UI）→ acp_bridge（publish_if_owned 持 operation gate 完成 final owner/projection check；bridge-local 50 ms single-pending scheduler 合并主 Agent Streaming publication，reset/terminal/receiver-close/shutdown 失效 pending）→ dispatch_for_bridge（canonical ingest + PublicationIntent）→ VIEW_MODELS/ACP_STATE → components；CurrentTurn mutation lazy projection，response action 只能按 owner first-claim，terminal cleanup compare-and-clear 同 owner surface`
+- 数据流：`ACP transport → acp_client pump（interaction_lifecycle 在 forward 前分配 semantic owner；ordinary notification 按 Stable/Transitioning/NoSession 路由）→ acp_notifier（owner + RequestId debug JSON + payload；同步发布 commands/plan/spinner/context 后转发）→ acp_bridge（publish_if_owned 持 operation gate 完成 final owner/projection check；bridge-local 50 ms single-pending scheduler 合并主 Agent Streaming publication，reset/terminal/receiver-close/shutdown 失效 pending）→ dispatch_for_bridge（canonical ingest + PublicationIntent）→ VIEW_MODELS/ACP_STATE → components；CurrentTurn mutation lazy projection，response action 只能按 owner first-claim，terminal cleanup compare-and-clear 同 owner surface`
 - 提交链路：`InputArea → SubmitRequest → SUBMIT_TX → submit_consumer → AcpTuiClient::ensure_session（acp_client/client/session.rs）/ prompt（acp_client/client/requests.rs）→ ACP transport`；取消经 `CANCEL_TX → spawn_cancel_consumer → AcpTuiClient::cancel`
 - 入口：`main.rs:409 main` → `run_tui`（:624）→ `kit/entry.rs:52 run_kit_fullscreen`（spawn kit 各链路）→ `launch.rs:41 build_app_and_acp`（App + AcpTuiClient + consumer 装配）
 - 稳定不变量：ACP 是交互与 Agent 执行边界（ARC-BOUNDARY-001）；`BridgeState` 是事件 → 状态边界（切换会话/重置须过滤陈旧事件，BRIDGE_RESET_COUNTER 清理）；render body 不写 atom；hooks 稳定顺序；交互事件按焦点/优先级分发；用户可见文本走 i18n 双 FTL（i18n/mod.rs:35 `tr`）；文本按 Unicode 字符边界/显示宽度处理
@@ -20,7 +20,7 @@
 | 改 keepgoing 按钮行为 | `src/kit/message_area/mod.rs` + `footer.rs` + `src/kit/submit_consumer.rs` | 点击 handler（mod.rs:956，Global+High，须在 scroll handler 前注册）；防抖常量 `KEEPGOING_DEBOUNCE`（mod.rs:58）+ `KEEPGOING_BLOCKED_UNTIL`；按钮布局 `build_footer_lines`/`KeepGoingLayout`（footer.rs:100/:85）、rect 每帧更新（`compute_keepgoing_rect` mod.rs:2040）；提交 `handle_keepgoing_submit`（submit_consumer.rs:202） | 命中检测用最近一帧按钮 rect；防抖期内点击 Consumed 不提交；提交 = 空内容 user prompt（服务端不插消息仅继续 loop；纯空白文本不等价）；契约 ARC-KEEPGOING-001（唯一生产者） |
 | 改事件消费（新增/变更事件） | `src/kit/acp_bridge.rs` + `src/kit/acp_events/` + `acp_notifier.rs` | `spawn_acp_bridge_inner` / `PublicationScheduler`；`dispatch_for_bridge` → `PublicationIntent`；`push_view_models` | 事件先 canonical ingest，再由 bridge 合帧主 Agent Streaming publication；首 text/reasoning、block boundary 与 terminal 可立即，50 ms fixed deadline 不 debounce；reset/session/receiver-close/shutdown 失效 pending；终止事件必须离开 loading；root usage_update 仍按 session envelope 处理 |
 | 改 Goal 状态栏与详情面板 | `src/kit/status_bar.rs` + `src/kit/panels/goal.rs` + `src/kit/acp_{notifier,bridge}.rs` + `src/kit/acp_events/system.rs` + `src/kit/session_boundary.rs` | `AcpEventData::GoalSnapshot`；`handle_goal_snapshot`；`GOAL_SNAPSHOT`；`PanelKind::Goal` | notifier 只解码并转发；bridge 完成 session ownership 校验后写 Goal atom；状态栏显示状态和主动接续次数，点击打开只读详情；session transition 清快照并关闭面板 |
-| 改 compact 信息展示 | `src/kit/acp_notifier.rs` + `src/kit/acp_types/event_data.rs` + `src/kit/acp_events/compact.rs` + 双语 `locales/*/main.ftl` | `convert_agent_event`；`handle_compact_started` / `handle_compact_completed` | 单一 ACP `peri/agent_event` 路径消费 started/completed；完成时按 strategy 显示压缩类型，并展示受影响消息数、估算节省 token、files/skills，manual 仍保留跨 replay note，auto 不触发 session/load |
+| 改 compact 信息展示 | `src/kit/acp_notifier/agent_event.rs` + `src/kit/acp_types/event_data.rs` + `src/kit/acp_events/compact.rs` + 双语 `locales/*/main.ftl` | `decode_agent_event`；`handle_compact_started` / `handle_compact_completed` | 单一 ACP `peri/agent_event` 路径消费 started/completed；完成时按 strategy 显示压缩类型，并展示受影响消息数、估算节省 token、files/skills，manual 仍保留跨 replay note，auto 不触发 session/load |
 | 改输入/滚动/选择 | `src/kit/input_area.rs` + `message_area/scroll.rs` + `focus_router.rs` | `InputArea`（input_area.rs:148）；`scroll::handle_event`（scroll.rs:516，滚轮节流/拖拽选中/键盘滚动）；`focus_router::active_layer`（:105）、`classify_global_shortcut`（:117）、`message_accepts_key`（:147）、`input_accepts_key`（:190） | 消息区只处理滚轮、编辑区处理键盘（按焦点层分发）；弹窗/面板遮挡时鼠标清理残留（scroll.rs:548 `is_occluded`）；同优先级按注册序分发（keepgoing 须先于 scroll） |
 | 改命令面板（slash/@mention） | `src/kit/slash_completion.rs` + `input_area.rs` + `submit_request.rs` | `SlashCompletion`、`filter_slash_items`；词法 `detect_slash_token`、`apply_slash_selection`；本地命令解析 `parse_submit_request`；UI 命令上送 `AcpTuiClient::register_ui_commands`（acp_client/client/requests.rs） | 词法在 TUI、路由裁决在服务端 CommandRegistry（command-system.md）；补全模糊仅发生在搜索层，提交须完整全名；`/rewind` 等经 ACP 协议请求，不本地执行 |
 | 改配置/启动流程 | `src/main.rs` + `src/launch.rs` + `src/config/` + `src/app/mod.rs` | `main`；`build_runtime`；`run_tui`；`build_app_and_acp`；`App::new`；`TuiConfig::from_extra`；`save_effective` | `PeriConfig` 等类型事实源在 `peri-acp/src/provider/config.rs`，`config/mod.rs` 仅 re-export；配置源句柄 `CONFIG_SOURCE_HANDLE` 启动时 set 一次，加载与保存共用同一决策；`teardown_app` 收尾 MCP 池/Langfuse |
@@ -29,7 +29,8 @@
 | 改 service snapshot / thread 列表刷新 | `src/kit/service_snapshot.rs` | `spawn_service_snapshot`；`tick_once`；`SlowSnapshotRefresh` | thread 列表经 `ThreadStore::list_thread_entries(cwd)` 获取轻量投影，存储层完成 cwd/hidden/空 thread 过滤；不得退回会计算 message content size 的完整 `list_threads` |
 | 改 ACP 请求发送 / reverse interaction 生命周期 | `src/acp_client/client/{pump,interaction,requests}.rs` + `src/acp_client/interaction_lifecycle.rs` + `interaction_settlement.rs` + `interaction_response.rs` | `AcpTuiClient::spawn_pump` / `respond_interaction` / `publish_if_owned`；`InteractionLifecycle::{register_reverse,claim,begin_transition,open_prompt}`；`PromptLease` / `TransitionLease` / claimed batch lease | 单一 owner registry 管 Permission/Elicitation 的接受、claim 与 terminal；operation gate 线性化 UI publication、response、cancel 和 session transition；Drop settlement 使用 weak transport/notifier；headless print 仍按 token claim，且不依赖 kit atoms |
 | 改 session new/load/delete 的 TUI 投影 | `src/acp_client/client/session.rs` + `src/kit/session_boundary.rs` + `src/kit/thread_load_consumer.rs` | `new_session` / `load_session` / `delete_session`；`ThreadLoadDispatcher::send`；`reserve_session_load` / `open_prompt_after_session_loads`；`project_session_boundary` | client 在 route Stable commit 前同步投影 ACTIVE_SESSION_ID，并统一清 interaction atom/popup/panel/confirm、loading/input/rewind/todo/history；普通 load 在同步入队边界取得引用计数 reservation，ensure/prompt 在选择 Stable/open lease 前等待，request drop 自动释放；compact 先 reserve replay 再 drain input（ARC-SESSION-LOAD-001）；new transition 用容量 64 的 exact-target FIFO 覆盖 response→commit 窗口 |
-| 改消息累积模型 | `src/kit/acp_types.rs` + `acp_events/streaming.rs` + `acp_events/render.rs` | `CurrentTurn`（acp_types.rs:42）：`start_tool`（:302）/`end_tool`（:339）/`start_subagent`（:359）/`stop_subagent`（:427）/`deactivate`（:511）/`mark_committed`（:517）；`handle_text_chunk`（streaming.rs:26）；提交态分组 `group_successful_tools`（render.rs:269）、折叠 `apply_fold_pass`（render.rs:414） | 流事件原地更新 current_turn、TurnDone 归档到 committed；`AcpEventData` 未知变体兜底 `Unknown` 前向兼容；replay 事件直接写 committed（turn.rs:292） |
+| 改消息累积模型 | `src/kit/acp_types/current_turn.rs` + `current_turn/{streaming,subagents,projection}.rs` + `src/kit/acp_events/{streaming,render}.rs` | `CurrentTurn`（`acp_types.rs` re-export）；`append_text` / `start_tool` / `start_subagent` / `stop_subagent`；`view_models` → `sync_cache` | 单一 canonical state 原地累积，只置 dirty；投影按 frozen segments → trailing → Agent/child 配对顺序增量更新，共享 `im::Vector`；停止后复用 child ID 创建新 occurrence，后续事件从尾部路由 |
+| 改问答选项、输入与提交决策 | `src/kit/panels/ask_user.rs` + `ask_user/{form,typing}.rs` | `AskUserPanel`；`FormState::{handle_key,toggle_option,begin_custom_input,reset_for_owner_change}`；`FormOutcome` | 单一表单 state 管 focus/选择/编辑器；owner fingerprint 变更同步清答案与滚动，无通知 render reset；提交与确认弹窗只由面板携原 owner 执行 |
 
 ## 关键控件/组件（src/kit/）
 
@@ -51,6 +52,7 @@
 | SlashCompletion / MentionPopup | `slash_completion.rs` + `mention_popup.rs` | slash 命令补全弹窗（fuzzy 过滤，仅搜索层）；文件 @mention 弹窗 |
 | PanelOverlay / PopupOverlay | `panel_overlay.rs` + `popup_overlay.rs` | 面板层（`PanelOverlay` :34）与居中弹窗层（`PopupOverlay` :38，`open_popup` :99） |
 | 面板目录 PanelRegistry | `panel_registry.rs` | 面板种类→渲染函数注册表（`render` :438、`open_panel` :475、快捷键 `from_shortcut` :448） |
+| AskUserPanel（问答面板） | panels/ask_user.rs + ask_user/{form,typing}.rs | 面板保留主题布局、命中区域与 owner 响应副作用；`FormState` 处理选择/导航/编辑/答案构造，鼠标与 Space 共用操作 |
 | tool 展示 | `tool_display.rs` + `tool_semantics.rs` | `format_tool_name`（tool_display.rs:8，本地化动词）；skill/todo 语义展示（tool_semantics.rs:65/:79）、todo diff（:115） |
 
 ## 子系统
@@ -59,7 +61,10 @@
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 通知解码任务 | kit/acp_notifier.rs | `spawn_kit_notifier_with_client`：AcpNotification → AcpEventData 推 bridge_tx；usage 仅更新 spinner 并把 valid root cache sample 交给 bridge，不逐 step 生成 warning；reverse 投递失败按 owner BridgeReject 结算；transport 死亡兜底复位 loading + 断连提示 |
+| 通知消费与状态发布 | kit/acp_notifier.rs | `spawn_kit_notifier_with_client` / `forward_notification` / `handle_session_update` / `convert_agent_event`；commands/plan/spinner/context 保持同步发布后送 bridge，reverse 投递失败按 owner 结算；transport 关闭复位 loading + 断连提示 |
+| 标准 session/update 解码 | kit/acp_notifier/session_update.rs | `decode_commands` / `decode_stream_update` / `StreamUpdate`；纯解析返回事件及可选 spinner 计数；root 缺省 cacheReadTokens 只更新进度并保留旧 sample，显式零值在 input>0 时替换为零样本，字段可用但 input=0 或 cached>input 时清空；auxiliary/replay 不更新父 sample |
+| Cache coverage 提示 | kit/acp_events/turn.rs | `handle_cache_usage_updated` / `inject_cache_coverage_warning_if_needed` / `handle_turn_done`；配置开启时每次 root sample 在 0<cached/input<0.8 时即时注入提示，TurnDone 清 pending，不补发或撤销提示；wire 契约在 acp_notifier_test.rs，逐次提示在 acp_events_test/turn_archive_test.rs |
+| Agent DTO 与 reverse wire | kit/acp_notifier/{agent_event,interaction}.rs | `decode_agent_event`；`handle_elicitation` / `handle_request_permission` / `parse_elicitation_questions`；reverse 将 owner、request ID、payload 封装为同一 envelope 后投递 |
 | 状态桥 | kit/acp_bridge.rs | `spawn_acp_bridge`：interaction 经 `AcpTuiClient::publish_if_owned` 后才同步写 UI；普通事件维护 `BridgeState` 并检测 BRIDGE_RESET_COUNTER |
 | 事件分派 | kit/acp_events/mod.rs | `dispatch_and_notify`（:301）；`SessionPhase`（:149）/`BridgeState`（:158） |
 | 流式/工具/边界/系统 handler | kit/acp_events/{streaming,tool,turn,system}.rs | `handle_text_chunk`（streaming.rs:26）、`handle_tool_started`（tool.rs:13）、`handle_turn_done`（turn.rs:12）、`handle_hitl_pending`（system.rs:117）等；subagent（subagent.rs:6/:33）、agent（agent.rs:8）、compact（compact.rs:11/:17） |
@@ -70,7 +75,9 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 全局 atoms | kit/atoms.rs | `ACP_STATE`（:220）/`VIEW_MODELS`（:249）/`SUBMIT_TX`（:256）/`CANCEL_TX`（:257）；`init_atoms`（:653） |
-| 消息累积模型 | kit/acp_types.rs | `CurrentTurn`（:42）、`ToolCardAccumulator`（:996）、`SubAgentAccumulator`（:1054）、`AcpEventData`（:1170） |
+| 消息累积模型入口 | kit/acp_types.rs + acp_types/{current_turn,tool_card,event_data}.rs | `acp_types.rs` re-export `CurrentTurn`、`ToolCardAccumulator`、`SubAgentAccumulator` 与 `AcpEventData`，canonical turn state 与生命周期在 current_turn.rs |
+| 主回合流式变更与子回合路由 | kit/acp_types/current_turn/{streaming,subagents}.rs | `append_text` / `append_reasoning` / `flush_text_segment` / `start_tool`；`start_subagent` / `stop_subagent` / `append_subagent_text`；冻结边界与 rolling hash 保持同一 state，child 路由取最后一次 occurrence |
+| 回合渲染投影 | kit/acp_types/current_turn/projection.rs | `view_models` / `sync_cache` / `sync_segments` / `sync_trailing` / `pair_agent_tool_cards`；dirty 读取才投影，冻结片段复用、trailing 一次性消费 freeze，最后配对计数 |
 
 ### 输入与提交（src/kit/）
 
@@ -114,6 +121,7 @@
 
 - ARC-BOUNDARY-001：TUI 交互主路径经 ACP transport；不得从 TUI 直驱 Agent/Middleware 运行时
 - ARC-EVENT-001：事件链路单事实源 Agent →(ACP 映射) → TUI；新增事件须覆盖发射、映射与消费；终止事件必须使客户端离开 loading
+- Cache coverage 用户现场验收仍在 [#114 active issue](../../spec/issues/2026-09-01-long-context-cache-evicted-each-round-114.md)；当前 wire 与逐样本提示契约见 ARC-EVENT-001。
 - ARC-KEEPGOING-001：空白 user prompt（`MessageContent::is_empty()` 判空）是「继续跑 loop」指令，唯一生产者是 TUI keepgoing 按钮；空历史 + 空白 prompt 时服务端短路且必须 push_done
 - ARC-CANCEL-001：cancel 按 (session_id, turn_id, attempt_id) 三元组定位；TUI 只经 ACP 发送 cancel，幂等判定与终态归 Agent 层
 - ARC-HITL-001：Permission 与 AskUser 独立能力；TUI reverse interaction 由 semantic owner registry、operation gate、prompt/transition leases 与 token-aware UI terminalization 共同 first-claim
