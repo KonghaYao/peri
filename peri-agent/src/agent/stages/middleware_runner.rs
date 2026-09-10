@@ -2,7 +2,7 @@
 //!
 //! ## 背景
 //!
-//! v1 middleware 通过 `&mut dyn MiddlewareState` 操作状态（messages/context 等）。
+//! v1 middleware 通过 `&mut dyn MiddlewareState` 操作消息与队列等状态。
 //! v2 stages 用 `MessageTranscript`（标记代替删除 + staging 两阶段写入）作为权威。
 //!
 //! ## 方案
@@ -67,7 +67,7 @@ pub async fn run_before_agent(ctx: &StageContext) -> crate::error::AgentResult<(
         ctx.recall_buffer.write().extend(rec);
     }
     // Sync messages_cache modifications back to transcript.
-    // AgentContext::messages_mut() only modifies the in-memory cache;
+    // AgentContext::replace_message() updates only existing IDs in the cache;
     // Reason stage reads from the authoritative transcript, so
     // middleware that modify existing messages (e.g. ImageMiddleware)
     // must have their changes written through.

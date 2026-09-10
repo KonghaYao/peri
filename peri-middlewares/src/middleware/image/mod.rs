@@ -146,7 +146,12 @@ impl Middleware for ImageMiddleware {
         }
 
         let new_msg = state.messages()[idx].clone_with_content(MessageContent::Blocks(new_blocks));
-        state.messages_mut()[idx] = new_msg;
+        if !state.replace_message(new_msg) {
+            return Err(peri_agent::error::AgentError::MiddlewareError {
+                middleware: self.name().to_string(),
+                reason: "image input message is no longer visible".to_string(),
+            });
+        }
 
         Ok(())
     }
@@ -207,3 +212,7 @@ fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
 }
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;

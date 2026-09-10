@@ -26,6 +26,7 @@
 | /compact 命令路径 | `src/session/exec/compact_pipeline.rs` | `run_compact(force=true)` → Full + re-inject | 编排：validate_inputs → resolve_auxiliary_model → run_v2_compact_with_cancel → assemble_compact_messages；取消返回 Cancelled |
 | 改 LLM 调用链路 | `src/agent/stages/reason.rs` + `src/agent/model_bridge.rs` | `run_reason`；`AgentModelBridge::build_request`；model_bridge 流式事件 v2 直发 | Reason：snapshot → LlmCallStart → before_model → generate（与 cancel 竞争）→ after_model → LlmCallEnd；bridge 每个 ModelRequest 同步读取一次当前 middleware prompt contribution，与 frozen base request-local 组合且不累加；事件契约 ARC-EVENT-001 |
 | 改工具执行分发 | `src/agent/stages/act.rs` + `src/agent/stages/tool_dispatch.rs` | `run_act`；`dispatch_tools`（并发执行 + 写 transcript） | 有 tool_calls → 并发执行；无 → 最终回答 emit TextChunk + StateSnapshot |
+| 改 middleware 状态能力 / 消息修改 | `src/middleware/state.rs` + `src/agent/agent_context.rs` + `src/agent/stages/middleware_runner.rs` | `MiddlewareState::replace_message`；`AgentContext::from_stage` / `reconcile_to_transcript`；`run_before_agent` | hook 不再暴露 cwd/step setter、store/thread 或无法回写的 token/context 快照；替换按稳定 MessageId 查找，不增删/重排，before_agent 成功或 Err 后均 reconcile；消息追加仍双写，hook 分阶段收窄待 active capability issue 后续组 |
 
 ## 子系统
 
@@ -39,7 +40,7 @@
 | Reason（LLM 推理） | stages/reason.rs | `run_reason`；`is_direct` 过滤（:138） |
 | Act（工具执行或回答） | stages/act.rs | `run_act`；emit TurnCompleted |
 | 工具并发分发 | stages/tool_dispatch.rs | `dispatch_tools` |
-| 阶段中间件 runner | stages/middleware_runner.rs | `run_before_compact`/`run_before_model`/`run_after_model` 等 |
+| 阶段中间件 runner | stages/middleware_runner.rs + agent_context.rs | `run_before_agent` 结束后（含 Err）drain recall 并将稳定 ID replacement reconcile；`run_before_model`/`run_after_model` 保留追加消息双写路径 |
 
 ### Compact v2（src/agent/compact_v2/）
 

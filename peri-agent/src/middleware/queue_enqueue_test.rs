@@ -1,4 +1,3 @@
-use crate::agent::token::TokenTracker;
 use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
 
 use crate::agent::session::{InboxHandle, SessionInbox};
@@ -9,7 +8,6 @@ use crate::session::MessageQueue;
 struct TestState {
     queue: MessageQueue,
     inbox: Option<InboxHandle>,
-    token_tracker: TokenTracker,
     messages: Vec<BaseMessage>,
 }
 
@@ -21,40 +19,23 @@ impl MiddlewareState for TestState {
         &self.messages
     }
     fn add_message(&mut self, _: BaseMessage) {}
-    fn prepend_message(&mut self, _: BaseMessage) {}
-    fn messages_mut(&mut self) -> &mut Vec<BaseMessage> {
-        &mut self.messages
+    fn replace_message(&mut self, message: BaseMessage) -> bool {
+        let Some(existing) = self
+            .messages
+            .iter_mut()
+            .find(|existing| existing.id() == message.id())
+        else {
+            return false;
+        };
+        *existing = message;
+        true
     }
     fn current_step(&self) -> usize {
         0
     }
-    fn get_context(&self, _: &str) -> Option<&str> {
-        None
-    }
-    fn set_context(&mut self, _: String, _: String) {}
-    fn token_tracker(&self) -> &TokenTracker {
-        &self.token_tracker
-    }
-    fn token_tracker_mut(&mut self) -> &mut TokenTracker {
-        &mut self.token_tracker
-    }
     fn push_recall(&mut self, _: String) {}
     fn drain_recall(&mut self) -> Vec<String> {
         vec![]
-    }
-    fn ancestor_len(&self) -> usize {
-        0
-    }
-    fn store(&self) -> Option<&std::sync::Arc<dyn crate::thread::ThreadStore>> {
-        None
-    }
-    #[allow(deprecated)]
-    fn set_cwd(&mut self, _: String) {}
-    #[allow(deprecated)]
-    fn set_current_step(&mut self, _: usize) {}
-    #[allow(deprecated)]
-    fn own_thread_id(&self) -> Option<&crate::thread::ThreadId> {
-        None
     }
     fn v2_queue(&self) -> &MessageQueue {
         &self.queue
@@ -72,7 +53,6 @@ fn enqueue_v2_message_uses_inbox_when_present() {
     let state = TestState {
         queue: queue.clone(),
         inbox: Some(handle.clone()),
-        token_tracker: TokenTracker::default(),
         messages: Vec::new(),
     };
     let msg = QueuedMessage::new(
@@ -91,7 +71,6 @@ fn enqueue_v2_message_falls_back_to_raw_queue() {
     let state = TestState {
         queue: queue.clone(),
         inbox: None,
-        token_tracker: TokenTracker::default(),
         messages: Vec::new(),
     };
     let msg = QueuedMessage::new(

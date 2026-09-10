@@ -58,7 +58,7 @@ pub struct SessionHandle {
     pub transcript: Arc<RwLock<MessageTranscript>>,
     pub queue: MessageQueue,
     pub agent_id: AgentId,
-    /// metrics/tracing 用键值对（AgentContext 在 from_stage 时克隆）
+    /// metrics/tracing 用键值对（不作为 middleware hook 的隐式共享协议）
     pub session_context: Arc<RwLock<HashMap<String, String>>>,
 }
 

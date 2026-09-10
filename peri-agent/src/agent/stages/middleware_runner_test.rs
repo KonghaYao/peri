@@ -77,3 +77,112 @@ fn test_no_recall_keeps_buffer_empty() {
     let drained = cx.drain_recall();
     assert!(drained.is_empty());
 }
+
+struct ReplaceAppendRecall {
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::middleware::Middleware for ReplaceAppendRecall {
+    fn name(&self) -> &str {
+        "ReplaceAppendRecall"
+    }
+
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> crate::error::AgentResult<()> {
+        let original = state
+            .messages()
+            .iter()
+            .find(|message| message.content() == "original")
+            .unwrap()
+            .clone();
+        assert!(state.replace_message(original.clone_with_content(MessageContent::text("updated"))));
+        state.add_message(BaseMessage::human(MessageContent::text("added")));
+        state.push_recall("replacement recall".to_string());
+        if self.fail {
+            return Err(crate::error::AgentError::MiddlewareError {
+                middleware: self.name().to_string(),
+                reason: "failure after replacement".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+struct ObserveReplacement(Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait::async_trait]
+impl crate::middleware::Middleware for ObserveReplacement {
+    fn name(&self) -> &str {
+        "ObserveReplacement"
+    }
+
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> crate::error::AgentResult<()> {
+        assert_eq!(
+            state
+                .messages()
+                .iter()
+                .map(BaseMessage::content)
+                .collect::<Vec<_>>(),
+            vec!["updated", "added"]
+        );
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+async fn assert_before_agent_reconciles_replacement(fail: bool) {
+    let mut ctx = make_context();
+    let (excluded_id, original_id, original_flags) = {
+        let mut transcript = ctx.session.transcript.write();
+        let excluded = transcript.append(BaseMessage::human(MessageContent::text("excluded")));
+        transcript.set_excluded(excluded, true);
+        let original = transcript.append(BaseMessage::human(MessageContent::text("original")));
+        transcript.set_truncated(original, true);
+        (excluded, original, transcript.flags(original))
+    };
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut chain = crate::middleware::MiddlewareChain::new();
+    chain.add(Box::new(ReplaceAppendRecall { fail }));
+    chain.add(Box::new(ObserveReplacement(Arc::clone(&observed))));
+    ctx.runtime.middleware_chain = Arc::new(chain);
+
+    let result = run_before_agent(&ctx).await;
+    assert_eq!(result.is_err(), fail);
+    assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst), !fail);
+    assert_eq!(*ctx.recall_buffer.read(), vec!["replacement recall"]);
+    let transcript = ctx.session.transcript.read();
+    assert_eq!(
+        transcript.len(),
+        3,
+        "replacement must not append or rebuild entries"
+    );
+    assert_eq!(transcript.entries()[0].message().id(), excluded_id);
+    assert_eq!(transcript.entries()[1].message().id(), original_id);
+    assert_eq!(
+        transcript.get(original_id).unwrap().message().content(),
+        "updated"
+    );
+    assert_eq!(transcript.flags(original_id), original_flags);
+    assert_eq!(
+        transcript
+            .visible_messages()
+            .iter()
+            .map(|message| message.content())
+            .collect::<Vec<_>>(),
+        vec!["updated", "added"]
+    );
+    assert_eq!(
+        transcript.get(excluded_id).unwrap().message().content(),
+        "excluded"
+    );
+}
+
+#[tokio::test]
+async fn before_agent_reconciles_stable_id_replacement() {
+    assert_before_agent_reconciles_replacement(false).await;
+}
+
+#[tokio::test]
+async fn before_agent_reconciles_stable_id_replacement_after_error() {
+    assert_before_agent_reconciles_replacement(true).await;
+}

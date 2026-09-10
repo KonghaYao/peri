@@ -1,25 +1,60 @@
 # Middleware 在 v2 中可调用无效写操作且无编译期反馈
 
-**状态**：Open
+**状态**：In Progress
 **优先级**：中
 **类型**：重构
 **创建日期**：2026-07-25
 **来源**：2026-07-24 架构审查 A4；过程文档已删除，本 issue 保留可执行问题与证据
-**最后核查**：2026-08-11
+**最后核查**：2026-09-10
 
-## 最新情况（2026-08-11）
+## 最新情况（2026-09-10，第一组 A）
 
-宽 middleware trait/no-op 能力仍在：`agent_context.rs:119/155` 对 `set_cwd()`/`set_current_step()` 仍为 no-op（v2 中由 TurnContext 管理），调用方可编译通过、mock 测试通过，但生产 v2 路径无效果，无编译期反馈。
+已移除 `MiddlewareState` 上 10 个没有生产 middleware 消费者的失真能力，以及
+`AgentContext` 内对应的 token/context/ancestor 快照。`AgentState` 自身真实 API
+保留，stage 的 token tracker 和 session context 所有权不变。hook 签名仍使用
+`MiddlewareState`，分阶段能力约束留待第二组 B，不能视为整个 issue 已完成。
 
-**状态**：Open（保持）
+`messages_mut()` 与初始审查记录不同：ImageMiddleware 在生产 `before_agent`
+使用它，runner 会在链结束后按 MessageId reconcile，包含 Err 路径。本组将其
+迁为 `replace_message(message) -> bool`：只能替换已有可见 ID，不支持 Vec
+增删或重排；未知 ID 返回 false。Image 保留原 ID，消息追加仍双写 transcript
+和缓存，model before→after 的消息注入路径不变。
+
+### 旧接口消费者清单
+
+以下为删除前的仓库调用核查；不计 trait/impl 定义，不混入 AgentState 自身
+API、Transcript API 或 Atomic::store。生产 middleware 之外的 AgentState
+`set_context`（executor 结果投影）等仍真实有效，不属于本组删除面。
+
+| 旧方法 | 生产 middleware 消费 | 测试消费 / 处置 |
+| --- | --- | --- |
+| `set_cwd` / `set_current_step` | 0；AgentContext 空实现 | 只有适配器/mock 定义，删除 hook 面定义 |
+| `store` / `own_thread_id` | 0；AgentContext 恒 None | 只有适配器/mock 定义，删除 hook 面定义 |
+| `prepend_message` | 0；仅改缓存，且不标记 reconcile | `agent_context_test::test_prepend_message_emits_warning`，删除 |
+| `token_tracker` / `token_tracker_mut` | 0；实际是 stage tracker 的 clone，修改不回写 | `test_token_tracker_is_default`（2 次读取）与 `test_token_tracker_mut_is_mutable`（1 次读/写），删除 |
+| `ancestor_len` | 0；AgentContext 恒 0 | 只有适配器/mock 定义，删除 |
+| `get_context` / `set_context` | 0；自有 HashMap 修改不回写 | `test_get_set_context_on_owned_hashmap`（2 次读、1 次写），删除 |
+| `messages_mut` | `middleware/image/mod.rs::before_agent` 唯一消费者 | 旧 cache-only append 测试替换为稳定 ID replacement、未知 ID 拒绝与 legacy 适配一致性测试 |
+
+六个实现同步迁移：`AgentState`、`AgentContext`、Agent queue 测试的 `TestState`，
+以及 middleware git_watch / tool_search / mcp 测试的三个状态适配器。
+
+### 第一组回归
+
+- `agent_context_test.rs`：稳定 ID 替换、未知 ID 拒绝、legacy 适配语义一致；保留双写/可见消息/cwd/step/recall/queue 测试。
+- `middleware_runner_test.rs`：真实 before_agent 成功和 Err 路径均回写替换、保留 ID/flags/excluded 消息，追加与 recall 不丢失，失败仍短路后续 middleware。
+- `middleware/image/mod_test.rs`：真实 Image→AgentContext→runner→transcript 路径保留 Human ID 并发布附件错误块。
+- 保留 `middleware/chain_test.rs::test_state_mutation_visible_across_hooks`，验证 before_model 追加对 after_model 可见。
+
+目标 Cargo 测试与 clippy 由主 agent 统一执行；本组不改变链序、hook 签名或工具目录契约。
 
 ## 问题描述
 
 `MiddlewareState` 同时向所有 middleware hook 暴露消息、cwd、step、token tracker、context map、recall、thread store 和 queue 等跨领域能力。v2 的 `AgentContext` 对部分写方法只记录 warning 并 no-op，因此调用方可以通过编译和 mock 测试，却在生产 v2 路径中不产生预期修改。期望 middleware 按 hook 获得最小、真实可用的 capability context，无效操作在编译期不可见，而不是运行时静默失效。
 
-## 现状
+## 初始审查记录（2026-07，当前事实见上节）
 
-架构审查观察到：
+当时架构审查观察到：
 
 - `MiddlewareState` 暴露约 16 个跨领域能力，部分方法已标记 deprecated；
 - `messages_mut()`、`prepend_message()`、`set_cwd()`、`set_current_step()` 在 `AgentContext` 中仅 warning 或 no-op；
@@ -81,6 +116,7 @@
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-07-25 | — | Open | agent | 根据架构审查 A4 创建，并关联 StageContext 拆分 issue |
+| 2026-09-10 | Open | In Progress | agent | 第一组移除失真 API，稳定 ID replacement 替代 Vec 修改；hook 签名收窄待后续组 |
 
 ## 修复记录
 
