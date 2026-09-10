@@ -162,20 +162,14 @@ impl LspClient {
 
         *self.dispatcher.lock().await = Some(dispatcher);
 
-        // 提取共享分发状态（Arc clone），不持有 tokio::sync::Mutex
-        let dispatch_state = {
-            let guard = self.dispatcher.lock().await;
-            guard.as_ref().unwrap().dispatch_state()
-        };
-
-        // 立即设置状态为 Running，这样 initialize 请求可以通过状态检查
+        // initialize 仍经当前 dispatcher 发送，后台分发任务由其 owner 回收。
         *self.state.write() = ServerState::Running;
-
-        // 启动消息分发循环（后台 task，消费 stdout 消息）
-        // 使用 Arc<DispatchState> 而非持有 tokio::sync::Mutex guard，避免死锁
-        tokio::spawn(async move {
-            crate::jsonrpc::transport::run_dispatch_loop(dispatch_state, rx).await;
-        });
+        self.dispatcher
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .start_dispatch_loop(rx);
 
         // root_uri 已经是 "file:///path" 格式，直接使用
         let workspace_uri: lsp_types::Uri = root_uri

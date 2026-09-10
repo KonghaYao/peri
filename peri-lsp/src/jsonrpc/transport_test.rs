@@ -71,6 +71,9 @@ async fn test_cancel_request_removes_pending_entry() {
             stdin: tokio::sync::Mutex::new(None),
         }),
         read_task: Mutex::new(None),
+        stderr_task: Mutex::new(None),
+        dispatch_task: Mutex::new(None),
+        close_lock: tokio::sync::Mutex::new(()),
         child: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
@@ -123,4 +126,73 @@ async fn test_close_kills_child_process() {
         !status.success(),
         "子进程应被 close() 的 kill 终止，而非自然退出: {status:?}"
     );
+}
+
+fn disconnected_state() -> DispatchState {
+    DispatchState {
+        pending: Mutex::new(HashMap::new()),
+        notification_handlers: Mutex::new(HashMap::new()),
+        on_error: Mutex::new(None),
+        stdin: tokio::sync::Mutex::new(None),
+    }
+}
+
+#[tokio::test]
+async fn server_request_id_collision_keeps_client_response_pending() {
+    let state = disconnected_state();
+    let (tx, mut rx) = oneshot::channel();
+    state.pending.lock().insert(7, tx);
+    state.dispatch(serde_json::json!({"jsonrpc":"2.0","id":7,"method":"workspace/configuration","params":[]}).to_string()).await;
+    assert_eq!(
+        state.pending_len(),
+        1,
+        "双向请求 ID 独立，服务器请求不得消费客户端 pending"
+    );
+    assert!(matches!(
+        rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    state
+        .dispatch(serde_json::json!({"jsonrpc":"2.0","id":7,"result":{"ready":true}}).to_string())
+        .await;
+    assert_eq!(
+        rx.await.unwrap().unwrap(),
+        serde_json::json!({"ready":true})
+    );
+}
+
+#[tokio::test]
+async fn id_without_response_payload_keeps_request_pending() {
+    let state = disconnected_state();
+    let (tx, rx) = oneshot::channel();
+    state.pending.lock().insert(9, tx);
+    state
+        .dispatch(serde_json::json!({"jsonrpc":"2.0","id":9}).to_string())
+        .await;
+    assert_eq!(state.pending_len(), 1, "畸形响应不能伪装成成功的 null 结果");
+    state
+        .dispatch(serde_json::json!({"jsonrpc":"2.0","id":9,"result":null}).to_string())
+        .await;
+    assert_eq!(rx.await.unwrap().unwrap(), Value::Null);
+}
+
+#[tokio::test]
+async fn close_rejects_pending_without_an_external_dispatch_loop() {
+    let dispatcher = MessageDispatcher {
+        dispatch_state: Arc::new(disconnected_state()),
+        read_task: Mutex::new(None),
+        stderr_task: Mutex::new(None),
+        dispatch_task: Mutex::new(None),
+        close_lock: tokio::sync::Mutex::new(()),
+        child: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+    let rx = dispatcher.register_request(11);
+    dispatcher.close().await;
+    let error = tokio::time::timeout(Duration::from_millis(100), rx)
+        .await
+        .expect("close必须自行释放pending，而非依赖外部消费者")
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, LspError::RequestFailed { .. }));
+    assert_eq!(dispatcher.dispatch_state().pending_len(), 0);
 }

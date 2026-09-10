@@ -1,6 +1,6 @@
 # peri-lsp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-16
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11（分发与后台任务 owner）
 > 依据：peri-lsp/src 源码、peri-resources/src/lsp.rs（门面）、源码注释
 
 ## 架构速览
@@ -17,7 +17,7 @@
 | 改服务器启动/握手 | `src/client.rs` | `start`（:107）；`do_start`（:134）；`shutdown`（:442） | spawn 子进程 → 注册 publishDiagnostics 通知处理器 → initialize 请求（startup_timeout_ms，缺省 30s，:33）→ initialized 通知；启动失败须 close 子进程防孤儿 |
 | 改重启/冷却语义 | `src/client.rs` | `try_restart`（:485）；`check_and_increment_restart`（:459） | 60s 窗口内计数不重置，超出 `max_restarts` 返回 ServerCrashed 进入冷却（RESTART_WINDOW :30）；重启清空 open_files 与 diagnostics（:498-500） |
 | 发请求/通知或文件同步 | `src/client.rs` | `request`（:241，带超时）；`notify`（:315）；`did_open`（:327）/`did_change`（:349）/`did_save`（:395） | request 失败/超时须 `cancel_request` 移除 pending 注册防 oneshot 残留；did_open 幂等（open_files 已含 uri 直接返回）；did_change 版本号自增 |
-| 改消息分帧/分发 | `src/jsonrpc/` | codec：`encode_message`/`decode_message`（codec.rs:8/:28）；transport：`LspTransport::spawn`（:28）、`MessageDispatcher::new`（:134）、`run_dispatch_loop`（:363） | Content-Length 分帧，body 上限 64MB（codec.rs:20）；spawn 后立即 try_wait 捕获参数错误即退；EOF/失败自动 kill 子进程（transport.rs:184-188）；close() 先 kill 再 abort read task |
+| 改消息分帧/分发 | `src/jsonrpc/` | codec：`encode_message`/`decode_message`（codec.rs:8/:28）；transport：`LspTransport::spawn`（:28）、`transport/dispatcher.rs::MessageDispatcher::new`、`run_dispatch_loop` | Content-Length 分帧，body 上限 64MB（codec.rs:20）；spawn 后立即 try_wait 捕获参数错误即退；请求先按 method 分类，双向 ID 不相互消费；只有 result/error 响应可移除 pending；支持服务器字符串 ID；EOF/失败自动 kill 子进程；close 自行拒绝 pending 并 kill/abort/join 自有 stdout、stderr、dispatch tasks |
 | 改诊断聚合/限流 | `src/diagnostics.rs` | `handle_publish_diagnostics`（:82）；`get_for_file`（:119）/`get_all`（:124）/`summary`（:133）/`clear_all`（:156） | 单文件上限 10、总量上限 30（:55-56）；按 uri 索引；clear_all 后服务器再推会重新入库 |
 | 新增 LSP 请求/通知方法 | `src/protocol/requests.rs` / `notifications.rs` | 例 `goto_definition_request`（requests.rs:7）、`initialize_params`（:94）；`did_open_notification`（notifications.rs:7）、`parse_publish_diagnostics`（:61） | 请求须携带自增 id；通知不期望响应；lsp_types 类型经 protocol/mod.rs re-export |
 | 改 URI 转换 | `src/uri.rs` | `path_to_uri`（:21）；`uri_to_path`（:56） | 幂等（已有 file:// 原样返回）；相对路径绝对化；RFC 3986 percent-encode 保留 `/` 与 `:`；Windows 盘符输出 `file:///C:/a/b` 空 authority 形式 |
@@ -32,7 +32,8 @@
 | 诊断注册表 | src/diagnostics.rs | `DiagnosticsRegistry`（:63）；`DiagnosticEntry`（:11）；`DiagnosticSeverity`（:21）；`DiagnosticSummary`（:41） |
 | JSON-RPC 分帧 | src/jsonrpc/codec.rs | Content-Length 编解码；大小写不敏感头部 |
 | JSON-RPC 消息类型 | src/jsonrpc/message.rs | `JsonRpcRequest`（:14）/`JsonRpcNotification`（:56）/`JsonRpcResponse`（:35）/`RequestId`（:7） |
-| 传输 + 分发 | src/jsonrpc/transport.rs | `LspTransport`（:20）；`DispatchState`（:114）；`cancel_request`（:227）；未知请求回 -32601（:322） |
+| 传输管道 | src/jsonrpc/transport.rs | `LspTransport`；spawn 设置 kill_on_drop，处理独立 stdin/stdout 管道 |
+| 分发与任务 owner | src/jsonrpc/transport/dispatcher.rs | `MessageDispatcher` / `DispatchState` / `run_dispatch_loop`；父模块 re-export 保留路径；close 串行化并等待自有任务释放 |
 | 协议请求构造 | src/protocol/requests.rs | hover/definition/references/symbol/callHierarchy 构造器 |
 | 协议通知构造 | src/protocol/notifications.rs | didOpen/didChange/didSave/initialized/publishDiagnostics 解析 |
 | 错误类型 | src/error.rs | `LspError`（ContentModified 判定 `is_content_modified`） |
@@ -41,3 +42,11 @@
 
 - 事实源：`LspServerConfig`/`LspConfigSource` 定义于 `peri-acp-types/src/lsp.rs`，`peri-lsp/src/config.rs:8` 仅 re-export（3.0 批 2 波 1 迁出）；`LspPoolPort` 定义于 `peri-acp-types/src/ports.rs:158`，`LspServerPool` 实现于 pool.rs:327（跨层 downcast 经 `downcast_arc`）
 - 消费方：本 crate 不直接被业务代码依赖，统一经 `peri-resources/src/lsp.rs` 门面出口（`pub use peri_lsp::*`）；实际调用方为 `peri-middlewares/src/lsp/`（middleware.rs:11-12、tool.rs:6-7）、`peri-middlewares/src/plugin/loader.rs:14`（`lsp_config_from_plugin`）
+
+
+## 分发与关闭验证
+
+- `jsonrpc/transport_test.rs` 经 `transport::dispatcher::tests` 挂载，覆盖同 ID 双向请求、缺少响应载荷与没有外部分发消费者的 close。
+- `LspClient::do_start` 将分发任务交给 `MessageDispatcher::start_dispatch_loop` 持有；调用公开 `run_dispatch_loop` 的外部使用者仍负责自己的任务。
+- 正常 close 明确等待自有任务；Drop 仅做 abort/kill 保底，不宣称完成异步 join。
+- 当前就绪状态由 client 的 `ServerState` 与 pool 的 `initialized` 集合共同维护；client 在 initialize 前发布 Running。
