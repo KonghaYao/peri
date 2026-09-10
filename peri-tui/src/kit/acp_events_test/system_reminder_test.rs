@@ -84,6 +84,7 @@ fn system_reminder_required_security_and_diagnostic_policy() {
 }
 
 #[test]
+#[serial]
 fn system_reminder_fallback_is_legacy_only_and_each_path_renders_once() {
     let mut state = make_fold_test_state();
     dispatch_for_bridge(
@@ -146,6 +147,7 @@ fn system_reminder_fold_override_survives_snapshot_rebuild() {
 }
 
 #[test]
+#[serial]
 fn trusted_structured_dispatch_preserves_required_and_renders_marker() {
     let mut state = make_fold_test_state();
     let _ = dispatch_trusted_structured_for_bridge(
