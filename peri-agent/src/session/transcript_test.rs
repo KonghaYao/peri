@@ -1127,3 +1127,80 @@ fn test_projection_directive_none_when_not_set() {
         "JSON 应不含 projection 字段（skip_serializing_if）"
     );
 }
+/// The terminal failure must disarm batching: pending payloads are retained for
+/// diagnostics, but only a new channel operation may wake the failed writer.
+#[tokio::test(start_paused = true)]
+async fn test_failed_writer_does_not_rearm_expired_batch_deadline() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct WakeCounter(AtomicUsize);
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let store = Arc::new(FaultInjectingStore::new([1]));
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut writer = Box::pin(super::persistence::run_writer(
+        store.clone(),
+        "failed-writer-idle".into(),
+        rx,
+    ));
+    let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wakes));
+    tx.send(PersistOp::Append(TranscriptEntry::Message(make_human(
+        "not persisted",
+    ))))
+    .unwrap();
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    tx.send(PersistOp::Barrier(ack_tx)).unwrap();
+    // Poll the actual production future through Append -> failed flush -> Barrier.
+    // No executor task is attached to this waker, so an expired timer cannot
+    // automatically repoll the old writer into a hot loop in the test itself.
+    assert!(matches!(
+        writer.as_mut().poll(&mut Context::from_waker(&waker)),
+        Poll::Pending
+    ));
+    let first_error = ack_rx.await.unwrap().unwrap_err().to_string();
+    assert!(first_error.contains("deterministic injected error on append 1"));
+    assert!(store.messages().is_empty());
+    let before = wakes.0.load(Ordering::SeqCst);
+
+    // The production deadline was registered during the first poll (<=100ms).
+    // Its std::Instant bookkeeping need not change: no second writer poll occurs
+    // before this assertion. A subsequent virtual timer ensures the time driver
+    // has processed the earlier deadline before we inspect the counter.
+    tokio::time::advance(std::time::Duration::from_millis(150)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    assert_eq!(
+        wakes.0.load(Ordering::SeqCst),
+        before,
+        "a terminally failed writer must wait for operations, not an expired batching timer"
+    );
+
+    // Failure remains sticky; later Barrier and Shutdown still make progress.
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    tx.send(PersistOp::Barrier(ack_tx)).unwrap();
+    assert!(matches!(
+        writer.as_mut().poll(&mut Context::from_waker(&waker)),
+        Poll::Pending
+    ));
+    assert_eq!(ack_rx.await.unwrap().unwrap_err().to_string(), first_error);
+    assert_eq!(
+        *store.append_count.lock().unwrap(),
+        1,
+        "terminal failure must not retry a possibly partial batch"
+    );
+    tx.send(PersistOp::Shutdown).unwrap();
+    assert!(matches!(
+        writer.as_mut().poll(&mut Context::from_waker(&waker)),
+        Poll::Ready(())
+    ));
+    assert!(tx.is_closed(), "Shutdown must drop the production receiver");
+}

@@ -29,6 +29,7 @@ sysinfo.workspace = true
 fuzzy-matcher = "0.3"
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 libc = "0.2"
 tempfile.workspace = true
 url.workspace = true

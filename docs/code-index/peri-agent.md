@@ -74,6 +74,7 @@
 | 中间件链装配 | session/factory.rs | `production_blueprint`（链序事实源，装配实现在 peri-middlewares/src/assembly.rs） |
 | 消息队列 | session/queue.rs | MessageQueue 入队/排空 |
 | Transcript 标记 API | session/transcript.rs | `visible_messages()`；excluded 标记过滤 |
+| Transcript 持久化任务 | session/transcript/persistence.rs + transcript.rs | `run_writer`；FIFO Append batching / barrier / sticky failure / Shutdown；失败态撤销批处理 deadline，只等待新操作且不重试失败批次；`with_persistence` 只绑定并启动唯一 writer，compaction store→memory 提交仍归 `MessageTranscript` |
 | Turn/会话状态 | session/turn.rs、session/runtime.rs | TurnId、AgentRuntime |
 
 ### 工具系统
