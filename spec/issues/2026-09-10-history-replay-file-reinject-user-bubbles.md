@@ -109,3 +109,7 @@ async fn test_investigation_compact_file_reinject_leaks_as_user() {
 - 验证：`cargo test -p peri-agent --lib -- test_estimated_context_tokens_none`，exit 0，实际 1 passed，728 filtered out。证明初始 tracker 为未知占用；首轮整体行为结论来自上述装配/Compact/Reason 静态链路，未执行超限 provider 请求。
 
 后续修复须同时覆盖 canonical 回注、历史兼容，以及首轮模型请求的有效上下文预算预检，不能只修显示。
+
+### 展示调整（2026-09-10）
+
+用户要求保持简洁折叠风格，只区分类型。兼容 DTO 的 kind 分为 compact_file、compact_skill、compact_summary；所有分块保持原类型。TUI 对应显示“系统提醒 · 文件上下文 / Skill 指令 / 压缩摘要”，保留原颜色与折叠行为，不追加文件名或分段编号。Legacy provenance 不变。

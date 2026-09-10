@@ -20,18 +20,22 @@ pub fn legacy_compact_reminders(message: &BaseMessage) -> Vec<SystemReminder> {
     let Some((header, _)) = text.split_once('\n') else {
         return Vec::new();
     };
-    let recognized = ["[最近读取的文件: ", "[激活的 Skill 指令: "]
-        .iter()
-        .any(|prefix| {
-            header
-                .strip_prefix(prefix)
-                .and_then(|value| value.strip_suffix(']'))
-                .is_some_and(|value| !value.trim().is_empty())
-        })
-        || header == CONTINUATION_HINT;
-    if !recognized {
+    let kind = [
+        ("[最近读取的文件: ", "compact_file"),
+        ("[激活的 Skill 指令: ", "compact_skill"),
+    ]
+    .into_iter()
+    .find_map(|(prefix, kind)| {
+        header
+            .strip_prefix(prefix)
+            .and_then(|value| value.strip_suffix(']'))
+            .filter(|value| !value.trim().is_empty())
+            .map(|_| kind)
+    })
+    .or_else(|| (header == CONTINUATION_HINT).then_some("compact_summary"));
+    let Some(kind) = kind else {
         return Vec::new();
-    }
+    };
     // XML escaping can expand one byte to six; bounded chunks preserve arbitrary legacy bodies.
     let mut remainder = text.as_str();
     let mut reminders = Vec::new();
@@ -45,7 +49,7 @@ pub fn legacy_compact_reminders(message: &BaseMessage) -> Vec<SystemReminder> {
             version: SYSTEM_REMINDER_VERSION,
             category: ReminderCategory::Legacy,
             source: ReminderSource("legacy".into()),
-            kind: "compact_context".into(),
+            kind: kind.into(),
             severity: ReminderSeverity::Info,
             delivery: ReminderDelivery::Configurable,
             audiences: ReminderAudiences(vec![ReminderAudience::Model, ReminderAudience::Tui]),

@@ -1154,3 +1154,7 @@ app-note-cache-hit-low = Prompt cache 覆盖率 {$pct}% < 80%（req: { $req_id }
 app-note-cache-coverage-low = Prompt cache 覆盖率 {$pct}% < 80% — 已缓存 {$cached} / 输入 {$input}，未缓存 {$uncached}（req: {$req_id}）
 
 # ---- 语义工具卡片 ----
+
+reminder-compact-file = 文件上下文
+reminder-compact-skill = Skill 指令
+reminder-compact-summary = 压缩摘要
