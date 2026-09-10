@@ -105,6 +105,99 @@ impl Model for FullLifecycleModel {
 
 // ── Full Compact 测试 ──────────────────────────────────────────────────────
 
+// 审计反例保留为 ignored regression；显式运行 --ignored 可复现当前缺陷。
+// 对应 spec/issues/2026-09-10-p0-full-micro-compact-churn.md。
+async fn make_audit_full_history() -> (tempfile::TempDir, MessageTranscript) {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ThreadStore> = Arc::new(
+        SqliteThreadStore::new(dir.path().join("compact-audit.db"))
+            .await
+            .unwrap(),
+    );
+    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
+    for turn in 0..4 {
+        let call_id = format!("audit-bash-{turn}");
+        transcript.append(make_human("inspect output"));
+        transcript.append(BaseMessage::ai_with_tool_calls(
+            "inspect",
+            vec![crate::messages::ToolCallRequest::new(
+                &call_id,
+                "Bash",
+                serde_json::json!({"command": "fixture"}),
+            )],
+        ));
+        transcript.append(BaseMessage::tool_result(&call_id, "x".repeat(40_000)));
+    }
+    let result = full_compact_inner(
+        &mut transcript,
+        Some(&FullLifecycleModel),
+        &CompactConfig::default(),
+        dir.path().to_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.outcome,
+        crate::agent::compact_v2::CompactOutcome::FullApplied
+    );
+    assert_eq!(result.affected_count, 12);
+    (dir, transcript)
+}
+
+/// [回归测试] Full 成功排除的历史不得再次成为 Micro 候选；使用默认 stale=3。
+#[tokio::test]
+#[ignore = "已确认 compact 缺陷：Micro 仍选择 excluded 历史；修复后移除此标记"]
+async fn test_audit_full_excluded_history_must_not_be_micro_candidate() {
+    use crate::agent::compact_v2::{planner::plan_micro, projection};
+    let (_dir, transcript) = make_audit_full_history().await;
+    let plan = plan_micro(&transcript, &CompactConfig::default(), true);
+    let before = transcript.visible_model_messages().unwrap();
+    let after = projection::render_llm_view(&transcript, &plan, &Default::default()).unwrap();
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(after).unwrap()
+    );
+    assert!(
+        plan.actions.is_empty(),
+        "已排除历史仍产生 {} 个候选、虚报 {} tokens 收益，但实际模型消息完全不变",
+        plan.actions.len(),
+        plan.estimated_tokens_saved,
+    );
+}
+
+/// [回归测试] 96% 的新压力样本不能用 excluded 历史的虚假收益满足回收目标。
+#[tokio::test]
+#[ignore = "已确认 compact 缺陷：虚假 Micro 收益阻止必要 Full；修复后移除此标记"]
+async fn test_audit_excluded_savings_must_not_suppress_full() {
+    use crate::agent::compact_v2::{planner::ContextPressure, CompactOutcome};
+    let (dir, mut transcript) = make_audit_full_history().await;
+    let pressure = ContextPressure {
+        estimated_tokens: 96_000,
+        context_window: 100_000,
+        output_reserve: 4_000,
+        predicted_tool_growth: 0,
+        safety_buffer: 5_000,
+        cache_hit_rate: 0.0,
+    };
+    let mut failures = 0;
+    let result = crate::agent::compact_v2::run_compact(
+        &mut transcript,
+        Some(&FullLifecycleModel),
+        &CompactConfig::default(),
+        &pressure,
+        false,
+        &mut failures,
+        dir.path().to_str().unwrap(),
+    )
+    .await;
+    assert_eq!(
+        result.outcome,
+        CompactOutcome::FullApplied,
+        "高压下只能回收已排除内容，不能报告 Micro 已满足回收目标：{result:?}"
+    );
+}
+
 #[tokio::test]
 async fn full_compact_model_input_comes_from_canonical_transcript() {
     let original = "ORIGINAL_HISTORY_CANONICAL";
