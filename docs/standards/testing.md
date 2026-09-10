@@ -341,5 +341,6 @@ npm run e2e:release:strict  # 发版且不容忍首轮 flake
 | peri-theme | 主题加载、palette 与 atoms |
 | langfuse-client | 客户端、类型、batcher |
 | peri-workflow | runner、protocol、registry |
+| peri-js-runtime | JS host、RPC、artifact 安装与 invocation 生命周期 |
 | peri-lsp | 诊断、池、编解码 |
 | peri-web-pty | PTY session、WebSocket、HTTP |

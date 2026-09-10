@@ -35,7 +35,7 @@
 | 输出协议 | `src/ws_handler/protocol_test.rs` | 多字节每个 read 边界、跨块 DSR 仅回应一次、不完整尾字节只 flush 一次 |
 | 同步会话与配置 | `src/pty_session_test.rs`、`src/config_test.rs`、`src/ws_handler_test.rs` | 既有同步 spawn/read/write/resize、Windows CRLF、配置与查询参数 |
 
-Windows 的 ConPTY 原生读取消、所有 writer/master/slave 关闭次序与 reader join 需要 Windows 真实 fixture/CI 验证；Unix fixture 不构成该平台的回收证据。
+Windows 的 ConPTY 原生读取消、所有 writer/master/slave 关闭次序与 reader join 需要 Windows 真实 fixture/CI 验证；Unix fixture 不构成该平台的回收证据。仍需实施与验收的边界见 [ConPTY 关闭 owner](../../spec/issues/2026-09-11-windows-conpty-close-owner.md)。
 
 ## 跨模块契约
 

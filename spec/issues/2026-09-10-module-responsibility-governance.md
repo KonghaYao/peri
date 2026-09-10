@@ -69,7 +69,7 @@
 
 | Crate / 项目 | 重点入口与职责问题 | 当前状态 |
 | --- | --- | --- |
-| peri-middlewares | client、dynamic registry、assembly、staged_connection、subagent tool、middleware capability | client/registry/assembly 已提交；capability A/B/C 已验证；subagent tool 待治理 |
+| peri-middlewares | client、dynamic registry、assembly、staged_connection、subagent tool、middleware capability | client/registry/assembly 已提交；capability A/B/C 已验证；SubAgent tool 的配置/定义/审批/意图已分离并验证提交 |
 | peri-acp | host、session、event_sink、prompt、session lifecycle | host/session 已提交；event_sink 已拆分验证；prompt 模型/观测/stage 装配已拆分；canonical 旧测试副本已移除，真实 transcript/SQLite 冷重载覆盖保留；部署关闭接线已实现 |
 | peri-resources | SQLite 连接、行映射、祖先上下文、compaction 事务 | SQLite 拆分已提交，65 项存储测试通过 |
 | peri-agent | stage_builder、tool_dispatch、workflow agent、transcript、subagent factory、MiddlewareState | stage_builder、capability、tool_dispatch 已拆分验证；transcript writer 已分离并修复失败态空转；workflow agent 观察/结果投影已分离，subagent factory 的 context/spawn/resume/claim 已分离，恢复状态取消owner已实现 |
@@ -83,7 +83,7 @@
 | peri-lsp | document sync/dispatcher 可分离；重复 readiness、请求 id 碰撞和进程任务 owner 需核查 | dispatcher 已拆分，双向ID/畸形响应/close pending 三回归由红到72全绿；client/pool readiness 与请求跨重启归属已修复；document sync 已归属单次连接，缓存与 writer 准入同步提交；92项通过 |
 | peri-theme | loader 混合查找/引用/构造；visited 跨根复用、Unicode hex切片、忽略 extends、重复默认主题 | 已拆分并修复引用链/Unicode hex/extends；29项单元与集成测试通过，索引已补建 |
 | peri-web-pty | handle_socket 混合协议/阻塞I/O/child监控；reader未join、末尾输出drain需实测 | Unix 连接 owner、非阻塞 I/O 与协议边界已拆分；24单元+7真实WS测试通过，Windows阻塞读取收尾仍有平台缺口 |
-| langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 事件族转换已拆分，73项测试通过；batcher flush 失败确认已修复，77项通过；shutdown owner已验证83项；宿主关闭权限/任务join/Incomplete重试已接线；backpressure与非法配置待治理 |
+| langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 事件族转换已拆分，73项测试通过；batcher flush 失败确认已修复，77项通过；shutdown owner已验证83项；宿主关闭权限/任务join/Incomplete重试已接线；DropOldest真实驱逐/flush前缀保护与非法配置校验已完成，96项通过 |
 | side-projects/git-stats | 结构清楚；外层log sentinel碰撞、聚合展示名新旧次序需核查 | NUL framing与最新展示名修复已验证：28项测试含真实Git fixture，独立Clippy通过 |
 | side-projects/md-scan-matrix | 结构清楚；FAIL/前缀稳定性/collision结果只打印，不能据exit0宣称验收通过 | 评估/报告已分离；6项回归、45矩阵+33补充checks及独立Clippy通过 |
 | side-projects/image-spike | 目标单一的TestBackend buffer/Kitty transmit实验，无需拆分 | 已审保留；本地2项buffer行为测试及all-targets Clippy通过；不等于真实终端验证 |
@@ -189,3 +189,31 @@
 - 最终完整workspace测试：46个目标共5637通过、0失败、12项原有ignored，包含8项实际doc tests；Agent704单元+4集成、Workflow94单元通过。workspace all-targets Clippy（`-D warnings`）、完整build、格式均exit0，16条依赖方向门与typos通过；六组代码提交均通过hooks。Markdown本地文件链接86项无失效，索引与架构关闭契约同步。
 
 尚余SubAgent tool的定义/审批/意图装配边界，以及Langfuse背压与非法配置；保持本治理issue为Open。现有平台与独立后台任务边界不因本批验证被扩大。
+
+
+## 第十批验证与有限终审
+
+- SubAgent tool：define 从891行降至321行；configuration、definitions、invocation、mcp_activation、spawn_context 为私有职责实现，仍只有一个工具状态 owner，创建/恢复统一交 Agent factory。4项真实invoke回归覆盖错误可选类型、resume优先级、MCP后台拒绝和父host整体覆盖。首轮两项fixture误用过滤hidden的list_threads；改按真实ID/会话树查询后93项工具测试通过，未改变生产存储契约。
+- Langfuse：真实HTTP gate的add/try_add两项回归先红；有界准入队列仅驱逐最后一个已准入Flush后的最旧Add，复用容量permit并追加队尾。独立关闭与唯一worker保留，receiver Drop释放等待者；try_new在spawn前拒绝非法容量/间隔，new保持原Self签名并同步panic，Controller沿Option降级；最大合法容量不预分配事件buffer。重试只归client，legacy字段兼容保留。全包96项通过。
+- JS host：真实Node的已退出leader/后代持管道与取消reader join两项旧实现回归均失败。修复为先终止原进程树再join，借用原reader handle等待、观察完成后才移除；44项全包通过。Unix结果不替代Windows Job Object实测。
+- ACP：真实new→store append→resume→fork先证实fork丢失全部payload；已驻留空会话恢复同步canonical payload与消息投影，原ID、新fork ID和frozen契约保持。当前611项ACP单元及8项集成通过。
+- TUI allocator：首轮并发测试实见allocated大于active；同一锁覆盖所有epoch刷新/统计采集，日志与OS读取在锁外。sysinfo 0.39.6返回bytes，修正RSS与MiB换算；保留jemalloc层级断言，移除不同源分时采样不存在的RSS/allocated大小契约，补同源单位验证。真实jemalloc四线程回归通过，MALLOC_CONF测试改独立子进程。
+- 测试归位：staged_connection、image_safety、model、workflow的较长inline测试按规范移到相邻_test.rs；生产代码段逐字核对不变，保留原私有模块路径。代码索引补齐真实入口；testing标准补上实际workspace成员peri-js-runtime。
+- 首轮完整workspace：46目标5654通过、3失败、12项原有ignored；最终完整workspace：46目标5660通过、0失败、12项原有ignored，含8项实际doc tests。独立git-stats 28项、md-scan 6项、image-spike 2项及各自严格Clippy通过；md-scan实际45矩阵+33补充checks无未预期失败。
+
+### 剩余大模块的取舍
+
+本次三个有限审查分别核对了15个workspace crate和三个独立Rust项目的实际入口、状态owner与依赖方向，不是逐行无缺陷证明。
+
+- CommandRegistry的entries/alias/source共同维护一个原子注册事务；DynamicMCP类型只管规范化与不可变载荷；SystemReminder的trust/有界wire验证无runtime owner。保持单一契约，后续codec导航拆分为可选项。
+- MCP skills/list的分页、cache与read-side恢复共用协议管线；Plugin loader无长期runtime owner，command路由可在实际变更时私有分离。没有因行数把每种资源再抽象为通用loader。
+- ACP生命周期的new/load/resume/fork保留各自response/replay、frozen与补偿差异；本批修复实有payload同步遗漏。Agent stages保留有序循环，transcript保留唯一内存owner和FIFO writer；不同可见投影服务不同消费者，不能当作重复序列化删除。
+- TUI InputArea、MessageArea、selection、render、interaction_lifecycle、workflow面板已有提交/命中/缓存/协议等边界；一个hook/registry owner仍持状态。长键盘match与完整坐标映射不按尺寸拆开。InputArea真实键盘/粘贴到提交的覆盖增强保留为后续候选，不把它当作新缺陷。
+- Workflow准入/执行/完成已有私有边界；LSP dispatcher、writer与文档归属单次连接；SQLite单pool内事务不拆成多次提交；Runtime没有第二份session登记。Controller观测与控制面已分离，其Agent/Model过渡依赖仍如实保留。
+- Model共用生产transport/retry流；Theme来源/继承/解码分工明确，默认值等价测试保留；三个独立Rust项目保留局部算法/实验owner，无需引入服务框架。
+
+剩余两个有实际职责证据的TUI事项进入下一批：主题下载在首次HTTP等待前缺同步任务准入，setup错误未发布失败终态（全局Esc仍可关闭弹窗）；模型alias切换和字段编辑存在重复的保存/ServiceSnapshot/ACP提交序列。先验证行为再收敛，不因静态审查假定RPC乱序已复现。
+
+Windows ConPTY的实际阻塞reader关闭实现与平台验收单列于[活动issue](2026-09-11-windows-conpty-close-owner.md)，原JS Windows E2E缺口保持；ARC-HOST-SHUTDOWN-001明确排除的独立后台任务不因本轮验证被宣称全部join。当前治理issue继续Open。
+
+本批最终workspace严格all-targets Clippy、build、格式、16条依赖方向门与typos均以exit0通过；Clippy要求修正的两处仅测试断言写法/冗余clone，未改变行为。Markdown本地文件链接90项无失效。六组代码提交均通过hooks。
