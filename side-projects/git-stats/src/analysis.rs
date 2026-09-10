@@ -70,6 +70,7 @@ fn is_ai_email(email: &str) -> bool {
 /// - If any co-author has an AI-pattern email (claude-code-best.win / @anthropic.com),
 ///   the commit is attributed ONLY to those AI co-authors (human author excluded).
 /// - Otherwise, author and all co-authors each get full credit as usual.
+/// - Input follows git log newest-first order; the first name seen for an email wins.
 pub fn aggregate(commits: &[ParsedCommit]) -> Vec<PersonStats> {
     let mut map: HashMap<String, PersonStats> = HashMap::new();
 
@@ -102,11 +103,6 @@ pub fn aggregate(commits: &[ParsedCommit]) -> Vec<PersonStats> {
                 .entry((*email).clone())
                 .or_insert_with(|| PersonStats::new((*name).clone(), (*email).clone()));
             entry.add_commit(commit);
-
-            // Update display name to the most recent one
-            if entry.name != **name {
-                entry.name = (*name).clone();
-            }
         }
 
         // Record co-author relationships (only when no AI attribution — human context)
@@ -149,7 +145,10 @@ mod tests {
             subject: subject.into(),
             commit_type: CommitType::from_subject(subject),
             co_authors,
-            files: vec![FileChange { added: 5, deleted: 2 }],
+            files: vec![FileChange {
+                added: 5,
+                deleted: 2,
+            }],
         }
     }
 
@@ -222,7 +221,11 @@ mod tests {
             }],
         )];
         let stats = aggregate(&commits);
-        assert_eq!(stats.len(), 1, "Same email should not create duplicate entry");
+        assert_eq!(
+            stats.len(),
+            1,
+            "Same email should not create duplicate entry"
+        );
         assert_eq!(stats[0].commits, 1, "Should only count once");
         assert_eq!(stats[0].added_lines, 5, "Lines should only count once");
     }
@@ -319,10 +322,7 @@ mod tests {
             }],
         )];
         let stats = aggregate(&commits);
-        let alice = stats
-            .iter()
-            .find(|s| s.email == "alice@x.com")
-            .unwrap();
+        let alice = stats.iter().find(|s| s.email == "alice@x.com").unwrap();
         assert!(
             alice.co_authored_with.contains(&"Bob".to_string()),
             "Alice's co_authored_with should contain Bob even on first commit"
