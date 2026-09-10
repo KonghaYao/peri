@@ -25,11 +25,11 @@ impl Drop for Shutdown<'_> {
         } else {
             let mut connection = self.client.connection.write();
             if connection
-                .dispatcher
+                .registered
                 .as_ref()
-                .is_some_and(|d| Arc::ptr_eq(d, &self.dispatcher))
+                .is_some_and(|d| Arc::ptr_eq(&d.dispatcher, &self.dispatcher))
             {
-                connection.dispatcher = None;
+                connection.registered = None;
             }
         }
     }
@@ -39,11 +39,11 @@ impl Startup<'_> {
     fn fail(&mut self, error: &LspError) {
         let mut connection = self.client.connection.write();
         if connection
-            .dispatcher
+            .registered
             .as_ref()
-            .is_some_and(|d| Arc::ptr_eq(d, &self.dispatcher))
+            .is_some_and(|d| Arc::ptr_eq(&d.dispatcher, &self.dispatcher))
         {
-            connection.dispatcher = None;
+            connection.registered = None;
             connection.state = ServerState::Error(error.to_string());
         }
         self.finished = true;
@@ -77,13 +77,12 @@ impl LspClient {
         let previous = {
             let mut connection = self.connection.write();
             connection.state = ServerState::Starting;
-            connection.dispatcher.take()
+            connection.registered.take()
         };
         if let Some(previous) = previous {
-            previous.close().await;
+            previous.dispatcher.close().await;
             self.diagnostics.clear_all();
         }
-        self.open_files.write().clear();
         let transport = match crate::jsonrpc::transport::LspTransport::spawn(
             &self.command,
             &self.args,
@@ -112,9 +111,9 @@ impl LspClient {
                         connection.state,
                         ServerState::Starting | ServerState::Running
                     ) && connection
-                        .dispatcher
+                        .registered
                         .as_ref()
-                        .is_some_and(|d| Arc::ptr_eq(d, &dispatcher))
+                        .is_some_and(|d| Arc::ptr_eq(&d.dispatcher, &dispatcher))
                     {
                         if let Some(params) = parse_publish_diagnostics(&params) {
                             diagnostics.handle_publish_diagnostics(&params);
@@ -135,16 +134,19 @@ impl LspClient {
                     connection.state,
                     ServerState::Starting | ServerState::Running
                 ) && connection
-                    .dispatcher
+                    .registered
                     .as_ref()
-                    .is_some_and(|d| Arc::ptr_eq(d, &dispatcher))
+                    .is_some_and(|d| Arc::ptr_eq(&d.dispatcher, &dispatcher))
                 {
                     tracing::warn!(target: "lsp", server = %name, error = %error, "LSP 服务器错误");
                     connection.state = ServerState::Error(error.to_string());
                 }
             }
         }));
-        self.connection.write().dispatcher = Some(dispatcher.clone());
+        self.connection.write().registered = Some(Arc::new(RegisteredConnection {
+            dispatcher: dispatcher.clone(),
+            open_files: Mutex::new(HashMap::new()),
+        }));
         let mut startup = Startup {
             client: self,
             dispatcher,
@@ -204,7 +206,10 @@ impl LspClient {
         let dispatcher = {
             let mut connection = self.connection.write();
             connection.state = ServerState::Stopped;
-            connection.dispatcher.clone()
+            connection
+                .registered
+                .as_ref()
+                .map(|registered| registered.dispatcher.clone())
         };
         if let Some(dispatcher) = dispatcher {
             let mut shutdown = Shutdown {
@@ -225,7 +230,6 @@ impl LspClient {
             shutdown.dispatcher.close().await;
             shutdown.finished = true;
         }
-        self.open_files.write().clear();
     }
 
     /// 检查重启次数限制并递增计数（同步操作，确保 parking_lot guard 不跨 await）。

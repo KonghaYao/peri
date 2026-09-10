@@ -3,16 +3,20 @@ use super::*;
 use crate::jsonrpc::{JsonRpcNotification, JsonRpcRequest};
 
 impl LspClient {
-    pub(super) fn ready_dispatcher(&self) -> Result<Arc<MessageDispatcher>, LspError> {
+    pub(super) fn ready_connection(&self) -> Result<Arc<RegisteredConnection>, LspError> {
         let connection = self.connection.read();
         if connection.state == ServerState::Running {
-            if let Some(dispatcher) = &connection.dispatcher {
-                return Ok(dispatcher.clone());
+            if let Some(registered) = &connection.registered {
+                return Ok(registered.clone());
             }
         }
         Err(LspError::NotReady {
             server: self.name.clone(),
         })
+    }
+
+    pub(super) fn ready_dispatcher(&self) -> Result<Arc<MessageDispatcher>, LspError> {
+        Ok(self.ready_connection()?.dispatcher.clone())
     }
 
     /// 发送请求并等待响应；超时覆盖排队、写入和响应等待。

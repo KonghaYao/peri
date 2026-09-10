@@ -1,23 +1,25 @@
 use std::{collections::HashMap, sync::Arc};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
 
 use crate::{
-    diagnostics::DiagnosticsRegistry,
-    error::LspError,
-    jsonrpc::transport::MessageDispatcher,
-    protocol::notifications::{
-        did_change_notification, did_open_notification, did_save_notification,
-    },
+    diagnostics::DiagnosticsRegistry, error::LspError, jsonrpc::transport::MessageDispatcher,
 };
 
+mod documents;
 mod lifecycle;
 mod requests;
 
 struct Connection {
     state: ServerState,
-    dispatcher: Option<Arc<MessageDispatcher>>,
+    registered: Option<Arc<RegisteredConnection>>,
+}
+
+/// Dispatcher 与文档版本缓存属于同一次连接，捕获后不能跨重启重新绑定。
+struct RegisteredConnection {
+    dispatcher: Arc<MessageDispatcher>,
+    open_files: Mutex<HashMap<String, OpenFileInfo>>,
 }
 
 /// LSP 服务器状态
@@ -48,7 +50,6 @@ pub struct LspClient {
     /// tokio::sync::Mutex — guard 可以跨 .await 持有
     start_lock: Arc<tokio::sync::Mutex<()>>,
     next_id: Arc<parking_lot::Mutex<i64>>,
-    open_files: Arc<RwLock<HashMap<String, OpenFileInfo>>>,
     restart_count: Arc<parking_lot::Mutex<u32>>,
     /// 当前重启窗口起点（None = 窗口外，下次重启开启新窗口）
     restart_window_start: Arc<parking_lot::Mutex<Option<std::time::Instant>>>,
@@ -63,11 +64,6 @@ pub struct LspClient {
 #[derive(Debug, Clone)]
 struct OpenFileInfo {
     version: i32,
-}
-
-enum DidChangeAction {
-    Open { language_id: String, version: i32 },
-    Change(i32),
 }
 
 impl LspClient {
@@ -90,11 +86,10 @@ impl LspClient {
             initialization_options,
             connection: Arc::new(RwLock::new(Connection {
                 state: ServerState::Stopped,
-                dispatcher: None,
+                registered: None,
             })),
             start_lock: Arc::new(tokio::sync::Mutex::new(())),
             next_id: Arc::new(parking_lot::Mutex::new(0)),
-            open_files: Arc::new(RwLock::new(HashMap::new())),
             restart_count: Arc::new(parking_lot::Mutex::new(0)),
             restart_window_start: Arc::new(parking_lot::Mutex::new(None)),
             restart_window: RESTART_WINDOW,
@@ -102,62 +97,6 @@ impl LspClient {
             startup_timeout_ms,
             diagnostics,
         }
-    }
-
-    /// 文件同步: didOpen
-    pub async fn did_open(&self, uri: &str, language_id: &str, text: &str) -> Result<(), LspError> {
-        let version = {
-            let mut open = self.open_files.write();
-            if open.contains_key(uri) {
-                return Ok(());
-            }
-            let v = open.len() as i32 + 1;
-            open.insert(uri.to_string(), OpenFileInfo { version: v });
-            v
-        };
-
-        let notif = did_open_notification(uri, language_id, version, text);
-        self.ready_dispatcher()?.send_notification(&notif).await
-    }
-
-    /// 文件同步: didChange
-    pub async fn did_change(&self, uri: &str, text: &str) -> Result<(), LspError> {
-        // 所有版本号操作同步完成（不跨 await），避免 parking_lot guard 的 Send 问题
-        let action = {
-            let mut open = self.open_files.write();
-            if let Some(info) = open.get_mut(uri) {
-                info.version += 1;
-                DidChangeAction::Change(info.version)
-            } else {
-                let v = open.len() as i32 + 1;
-                let language_id = Self::infer_language_id(uri);
-                open.insert(uri.to_string(), OpenFileInfo { version: v });
-                DidChangeAction::Open {
-                    language_id,
-                    version: v,
-                }
-            }
-        };
-
-        match action {
-            DidChangeAction::Open {
-                language_id,
-                version,
-            } => {
-                let notif = did_open_notification(uri, &language_id, version, text);
-                self.ready_dispatcher()?.send_notification(&notif).await
-            }
-            DidChangeAction::Change(version) => {
-                let notif = did_change_notification(uri, version, text);
-                self.ready_dispatcher()?.send_notification(&notif).await
-            }
-        }
-    }
-
-    /// 文件同步: didSave
-    pub async fn did_save(&self, uri: &str) -> Result<(), LspError> {
-        let notif = did_save_notification(uri, None);
-        self.ready_dispatcher()?.send_notification(&notif).await
     }
 
     pub fn is_ready(&self) -> bool {
@@ -204,3 +143,7 @@ mod tests;
 #[cfg(test)]
 #[path = "client_lifecycle_test.rs"]
 mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "client_document_test.rs"]
+mod document_tests;

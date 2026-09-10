@@ -109,9 +109,10 @@ async fn test_cancelled_request_releases_pending_registration() {
     let pending = client
         .connection
         .read()
-        .dispatcher
+        .registered
         .as_ref()
         .unwrap()
+        .dispatcher
         .dispatch_state()
         .pending_len();
     let next = client.request("next", None, 5_000).await.unwrap();
@@ -134,7 +135,7 @@ async fn test_cancelled_start_releases_connection_and_child() {
     let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
     start.abort();
     assert!(start.await.unwrap_err().is_cancelled());
-    assert!(client.connection.read().dispatcher.is_none());
+    assert!(client.connection.read().registered.is_none());
     assert!(!client.is_ready());
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         while std::process::Command::new("kill")
@@ -189,7 +190,7 @@ async fn test_cancelled_shutdown_rejects_old_requests_and_can_finish_cleanup() {
     client.shutdown().await;
     assert_eq!(client.state(), ServerState::Stopped);
     assert!(
-        client.connection.read().dispatcher.is_none(),
+        client.connection.read().registered.is_none(),
         "重试关闭完成join后释放注册"
     );
 }

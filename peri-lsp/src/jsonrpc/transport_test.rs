@@ -253,6 +253,19 @@ async fn close_rejects_new_owned_and_legacy_registrations() {
     assert_eq!(dispatcher.dispatch_state.pending_len(), 0);
 }
 
+/// [回归测试] 已取得容量不代表已获准发送，close 后旧 permit 必须拒绝入队。
+#[tokio::test]
+async fn reserved_notification_cannot_be_admitted_after_close() {
+    let (stdin, server) = tokio::io::duplex(8);
+    let dispatcher = dispatcher_with_writer(stdin);
+    let permit = dispatcher.reserve_notification().await.unwrap();
+    dispatcher.close().await;
+    let result = permit.enqueue(&JsonRpcNotification::new("after-close", None));
+    assert!(matches!(result, Err(LspError::TransportClosed)));
+    let mut reader = BufReader::new(server);
+    assert!(codec::decode_message(&mut reader).await.unwrap().is_none());
+}
+
 #[tokio::test]
 async fn cancelled_sender_finishes_its_frame_before_the_next_frame() {
     use tokio::io::AsyncReadExt;

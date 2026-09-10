@@ -65,6 +65,42 @@ pub struct DispatchState {
     on_error: Mutex<Option<ErrorHandler>>,
 }
 
+/// 队列容量已保留，尚未发送；Drop 在准入前取消且不留下任何帧。
+pub(crate) struct NotificationPermit<'a> {
+    state: &'a DispatchState,
+    permit: mpsc::OwnedPermit<writer::Frame>,
+}
+
+/// 已入队帧的写入确认；丢弃 waiter 不会取消 writer 持有的帧。
+pub(crate) struct WriteCompletion {
+    receiver: oneshot::Receiver<Result<(), LspError>>,
+}
+
+impl WriteCompletion {
+    pub(crate) async fn wait(self) -> Result<(), LspError> {
+        self.receiver.await.map_err(|_| LspError::TransportClosed)?
+    }
+}
+
+impl NotificationPermit<'_> {
+    pub(crate) fn enqueue(
+        self,
+        notification: &JsonRpcNotification,
+    ) -> Result<WriteCompletion, LspError> {
+        self.enqueue_body(serde_json::to_string(notification)?)
+    }
+
+    fn enqueue_body(self, body: String) -> Result<WriteCompletion, LspError> {
+        let admission = self.state.admission.lock();
+        if admission.closed {
+            return Err(LspError::TransportClosed);
+        }
+        let (ack, receiver) = oneshot::channel();
+        self.permit.send(writer::Frame { body, ack });
+        Ok(WriteCompletion { receiver })
+    }
+}
+
 /// 消息分发器：后台读取 stdout，分发到 pending_requests 或 notification_handlers
 pub struct MessageDispatcher {
     /// 共享分发状态，供后台 dispatch loop 使用
@@ -219,6 +255,21 @@ impl MessageDispatcher {
             .await
     }
 
+    /// 在文档状态临界区之前等待容量；实际准入必须经 permit 同步完成。
+    pub(crate) async fn reserve_notification(&self) -> Result<NotificationPermit<'_>, LspError> {
+        self.dispatch_state.reserve_frame().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn writer_capacity_for_test(&self) -> Option<usize> {
+        self.dispatch_state
+            .admission
+            .lock()
+            .writer
+            .as_ref()
+            .map(mpsc::Sender::capacity)
+    }
+
     /// 获取共享分发状态的 Arc（供后台 dispatch loop 使用，不持有 tokio::sync::Mutex）
     pub fn dispatch_state(&self) -> Arc<DispatchState> {
         Arc::clone(&self.dispatch_state)
@@ -320,19 +371,26 @@ impl DispatchState {
         receiver
     }
 
-    async fn send_body(&self, body: String) -> Result<(), LspError> {
-        let sender = self
-            .admission
-            .lock()
-            .writer
-            .clone()
-            .ok_or(LspError::TransportClosed)?;
-        let (ack, receiver) = oneshot::channel();
-        sender
-            .send(writer::Frame { body, ack })
+    async fn reserve_frame(&self) -> Result<NotificationPermit<'_>, LspError> {
+        let sender = {
+            let admission = self.admission.lock();
+            if admission.closed {
+                return Err(LspError::TransportClosed);
+            }
+            admission.writer.clone().ok_or(LspError::TransportClosed)?
+        };
+        let permit = sender
+            .reserve_owned()
             .await
             .map_err(|_| LspError::TransportClosed)?;
-        receiver.await.map_err(|_| LspError::TransportClosed)?
+        Ok(NotificationPermit {
+            state: self,
+            permit,
+        })
+    }
+
+    async fn send_body(&self, body: String) -> Result<(), LspError> {
+        self.reserve_frame().await?.enqueue_body(body)?.wait().await
     }
 
     fn writer_failed(&self) {
