@@ -1,6 +1,6 @@
 # 大文件与模块职责治理
 
-**状态**：Open（后续边界治理待实施）
+**状态**：Completed（结构治理验收完成；平台专项保持独立活动 issue）
 **类型**：重构
 **创建日期**：2026-09-10
 
@@ -51,16 +51,16 @@
 `side-projects/{git-stats,md-scan-matrix,image-spike}` 三个独立 Rust 项目。
 不能以本轮已修改文件或 1000 行阈值替代全仓审查。
 
-- [ ] 每个 crate 完成职责、状态所有权、依赖方向、宽接口与重复实现审查，记录实际修改
+- [x] 每个 crate 完成职责、状态所有权、依赖方向、宽接口与重复实现审查，记录实际修改
   或保持现状的理由；小而职责清晰的模块无需为统一文件尺寸而拆分。
-- [ ] 下表高优先级入口完成职责拆分并验证 public/wire 路径与事务语义。
+- [x] 下表高优先级入口完成职责拆分并验证 public/wire 路径与事务语义。
 - [x] Middleware 的失真/no-op 能力接口完成迁移，hook 能力与生产实现一致。
-- [ ] 复核低于阈值但职责交织的长函数，包括 TUI 大型交互组件、Agent 工具派发及
+- [x] 复核低于阈值但职责交织的长函数，包括 TUI 大型交互组件、Agent 工具派发及
   Controller 观测注册表；判断依据为行为边界，不能仅移动文件。
-- [ ] 根 workspace 完整 build/test/doc-test/clippy、依赖方向与格式检查完成；独立
+- [x] 根 workspace 完整 build/test/doc-test/clippy、依赖方向与格式检查完成；独立
   Rust 项目按各自 manifest 验证。真实平台/网络依赖及 ignored 项需单列证据，
   不能用 root workspace 的通过状态替代。
-- [ ] 每一组已验证改动形成独立本地提交；代码索引/契约导航与源码一致；工作树无
+- [x] 每一组已验证改动形成独立本地提交；代码索引/契约导航与源码一致；工作树无
   遗漏修改。目标全部验收后删除本过程文档，当前入口仍保留在代码索引。
 
 ## 审查队列
@@ -217,3 +217,14 @@
 Windows ConPTY的实际阻塞reader关闭实现与平台验收单列于[活动issue](2026-09-11-windows-conpty-close-owner.md)，原JS Windows E2E缺口保持；ARC-HOST-SHUTDOWN-001明确排除的独立后台任务不因本轮验证被宣称全部join。当前治理issue继续Open。
 
 本批最终workspace严格all-targets Clippy、build、格式、16条依赖方向门与typos均以exit0通过；Clippy要求修正的两处仅测试断言写法/冗余clone，未改变行为。Markdown本地文件链接90项无失效。六组代码提交均通过hooks。
+
+
+## 第十一批与最终验收
+
+- 主题下载：真实本机HTTP门控与setup回归先1绿4红，确认list等待及关闭展示后可重复启动、HOME/目录失败不发布终态。面板保留交互，私有download模块以spawn前同步claim的non-Clone lease持有本次完整进度；catalog/进度/通知写完才释放准入。展示关闭不取消任务；失败和Drop取消统一收尾。最终9项下载回归全部通过，覆盖原路径/User-Agent/成功写盘/真实临时目录扫描、传输失败、首次poll前abort与HTTP在途abort后再准入。全局Esc可关闭展示，未把局部Ignored错误解释为全局禁止关闭。
+- 模型提交：4项隔离子进程的真实ConfigSource磁盘/MPSC基线在原实现通过，拆分后全部继续通过。model.rs从739行降至466行；唯一commit_snapshot按ModelChange保存、通知、投影、spawn ACP更新，仍只修改原PeriConfig owner。两条修改到clone/释放guard的前缀及原RPC块逐体核对；active/inactive、provider与highlight差异保持。RPC错误fixture证明实际Err frame与transport结束，不宣称已join不公开handle的push续体；源码该续体仅记录warn。
+- 三个subagent完成有限职责审查和窄范围独立复核：没有为缩短文件新建多份状态、通用框架或重复序列化；最后两个明确面板事项已收敛。初次测试编译修正fixture对非Copy Atom的读取与Notification的take/restore，未给生产类型添加Copy/Clone；下载提取后补回面板仍使用的FluentValue导入。编译失败不计作行为红灯。
+- 面板目标105项通过。最终 `cargo test --offline --workspace --no-fail-fast`：46个目标，5673通过、0失败、12项原有ignored，含8项实际doc tests。workspace严格all-targets Clippy（`-D warnings`）、完整build、格式、16条依赖方向门、typos均exit0。两组代码提交均通过hooks。
+- 独立Rust项目在第十批完成最终本地验证：git-stats28、md-scan6、image-spike2项，以及各自严格Clippy；md-scan实际45矩阵+33补充checks通过。第十一批只改TUI，未重复无变化的独立项目测试。源码manifest复核范围仍为15个workspace crate和3个独立项目。
+
+本次模块结构与职责治理完成，稳定入口已进入对应code-index；按DOC-HISTORY-001在记录验收提交后删除本过程文档，历史留在Git。既有compact provenance、cache现场验收、事件饱和等活动事项保持原状态。Windows ConPTY完整关闭仍需专项实现/真实平台验收，JS Windows production-path覆盖亦未被本机结果替代；这些限制及ARC-HOST-SHUTDOWN-001的独立task范围仍明确保留，不能把本次收尾扩大为所有平台/后台任务都已验证。

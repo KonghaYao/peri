@@ -1,6 +1,6 @@
 # peri-tui 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11（Plugin Discover 查询、结果归属与输入动作治理）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11（面板配置提交、下载生命周期与内存统计）
 > 依据：peri-tui/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
 
 ## 架构速览
@@ -14,6 +14,7 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 改主题下载、进度终态与重复准入 | `src/kit/panels/theme.rs` + `src/kit/panels/theme/download.rs` + `src/kit/panels/theme_download_test.rs` + `src/kit/popups/download_progress.rs` | `trigger_download_themes` / `DownloadRun::try_claim` / `run_download` / `download_file` / `DownloadRun::finish` | Ctrl+D 在 open/spawn 前同步取得唯一任务 lease；完整进度由任务持有并投影到 atom，关闭弹窗不取消任务或释放准入。目录/HTTP 错误与 abort 都收敛到完成态，catalog/notification/progress 写完才释放 owner；保留原下载 URL、HOME 保存路径与串行文件处理 |
 | 改内存统计、回收与单位转换 | `src/alloc_config.rs` + `src/alloc_config_test.rs` | `query_stats` / `query_breakdown` / `alloc_collect` / `dump_stats` / `os_rss_mb` | 所有 jemalloc epoch 刷新与缓存读取共用私有快照锁；sysinfo 0.39 的 RSS 是 bytes，展示转换为 MiB；OS 采样与日志输出在锁外。回归位于 `alloc_config::tests`，覆盖真实并发采样、单位契约与子进程 MALLOC_CONF 隔离 |
 | 改 System Reminder 展示 | `src/kit/acp_types/event_data.rs` + `src/kit/acp_events/system.rs` + `src/kit/tui_render_unit/{reminder,fold}.rs` + `src/kit/message_area/{entry_nav.rs,render/user.rs}` | `AcpEventData::SystemReminder`；canonical event handler；`TuiSystemReminder::from_wire` / `legacy`；`FoldKey::SystemReminder`；reminder render | canonical 路径只按 DTO 字段建模；reminder 默认只显示 dim 非 bold header，左侧以 `▸/▾` 表达折叠态，点击/Enter 经通用 fold override 展开正文；`detect_reminder` 仅处理无结构化事件的 legacy 文本 fallback；reminder 独立于用户气泡 |
 | 改消息流渲染 | `src/kit/message_area/mod.rs` + `message_area/render.rs` + `message_area/vm_cache.rs` + `message_area/selection.rs` + `grid.rs` | `MessageArea`；`vm_to_lines_cached`；`MarkdownLineCache`；`SlotLines::{single,composite}`；`SlotIndex::{new,visual_lookup,logical_lookup}` | 变化 Markdown 复用 stable rendered chunks 与 local wrap map；slot 用 chrome/tail slice + stable chunk `Arc` composite access，避免把稳定 `Line` clone 回 contiguous Vec；全局坐标通过 O(VM) prefix + slot-local lookup，production 不 flatten transcript wrap map；Unicode 按显示宽度映射 |
@@ -58,6 +59,7 @@
 | 面板目录 PanelRegistry | `panel_registry.rs` | 面板种类→渲染函数注册表（`render` :438、`open_panel` :475、快捷键 `from_shortcut` :448） |
 | AskUserPanel（问答面板） | panels/ask_user.rs + ask_user/{form,typing}.rs | 面板保留主题布局、命中区域与 owner 响应副作用；`FormState` 处理选择/导航/编辑/答案构造，鼠标与 Space 共用操作 |
 | 模型与 Workflow 面板回归 | panels/{model,workflow}_test.rs | 私有 tests 模块挂载；覆盖窄屏列宽、run 选择与 Unicode 截断，生产渲染仍在对应面板 |
+| 模型配置编辑与提交 | panels/model.rs + model/edit.rs + model/commit_test.rs | `switch_active_alias` 保留面板/快捷弹窗共同入口；`edit_field` 修改唯一 PeriConfig，`commit_snapshot` 在释放配置锁后统一保存、通知、按 `ModelChange` 投影并推送 ACP；inactive 编辑不切换展示，alias 切换独有高亮；真实磁盘/MPSC 回归覆盖保存失败仍推送 |
 | tool 展示 | `tool_display.rs` + `tool_semantics.rs` | `format_tool_name`（tool_display.rs:8，本地化动词）；skill/todo 语义展示（tool_semantics.rs:65/:79）、todo diff（:115） |
 
 ## 子系统
