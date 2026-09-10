@@ -582,8 +582,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[cfg(unix)]
-    use serial_test::serial;
-    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use peri_acp_types::{
@@ -635,50 +633,90 @@ mod tests {
     }
 
     #[cfg(unix)]
+    const ENV_TEST_CHILD: &str = "PERI_DYNAMIC_STDIO_ENV_TEST_CHILD";
+
+    #[cfg(unix)]
+    fn is_env_test_child(name: &str) -> bool {
+        std::env::var(ENV_TEST_CHILD).as_deref() == Ok(name)
+    }
+
+    /// 环境覆盖仅传给精确筛选的测试子进程；父测试进程的 PATH/HOME 不变。
+    /// serial_test 与 process_env 文件锁不是同一把锁，不能保护其他并行 spawn。
+    #[cfg(unix)]
+    fn run_env_test(name: &str, key: &str, value: Option<&std::ffi::OsStr>) {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg(format!("mcp::dynamic::staged_connection::tests::{name}"))
+            .args(["--nocapture", "--test-threads=1"])
+            .env(ENV_TEST_CHILD, name)
+            .env_remove("PERI_DYNAMIC_SENTINEL");
+        match value {
+            Some(value) => {
+                command.env(key, value);
+            }
+            None => {
+                command.env_remove(key);
+            }
+        }
+        let output = command.output().expect("应能启动环境隔离测试子进程");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "环境测试子进程失败: {stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("1 passed;"),
+            "精确筛选必须实际执行一个测试: {stdout}"
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
-    #[serial]
     async fn relative_fixture_starts_via_parent_path_after_environment_clear() {
+        const NAME: &str = "relative_fixture_starts_via_parent_path_after_environment_clear";
+        if is_env_test_child(NAME) {
+            let output = fixture_output("dynamic-fixture", &HashMap::new(), None).await;
+            assert_eq!(output, "unset");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         write_fixture(dir.path(), "dynamic-fixture");
-        let original = std::env::var_os("PATH");
-        std::env::set_var("PATH", dir.path());
-        let output = fixture_output("dynamic-fixture", &HashMap::new(), None).await;
-        match original {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-        assert_eq!(output, "unset");
+        run_env_test(NAME, "PATH", Some(dir.path().as_os_str()));
     }
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     fn missing_or_empty_parent_path_uses_fixed_fallback() {
-        let original = std::env::var_os("PATH");
-        std::env::set_var("PATH", "");
-        assert_eq!(
-            dynamic_stdio_path_environment(),
-            vec![("PATH".into(), dynamic_stdio_default_path().into())]
-        );
-        match original {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
+        const NAME: &str = "missing_or_empty_parent_path_uses_fixed_fallback";
+        if is_env_test_child(NAME) {
+            assert_eq!(
+                dynamic_stdio_path_environment(),
+                vec![("PATH".into(), dynamic_stdio_default_path().into())]
+            );
+            return;
         }
+        run_env_test(NAME, "PATH", Some(std::ffi::OsStr::new("")));
+        run_env_test(NAME, "PATH", None);
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    #[serial]
     async fn unapproved_parent_sentinel_is_not_inherited() {
+        const NAME: &str = "unapproved_parent_sentinel_is_not_inherited";
+        if !is_env_test_child(NAME) {
+            run_env_test(
+                NAME,
+                "PERI_DYNAMIC_SENTINEL",
+                Some(std::ffi::OsStr::new("parent")),
+            );
+            return;
+        }
+        assert_eq!(std::env::var("PERI_DYNAMIC_SENTINEL").unwrap(), "parent");
         let dir = tempfile::tempdir().unwrap();
         let fixture = write_fixture(dir.path(), "dynamic-fixture");
-        let original = std::env::var_os("PERI_DYNAMIC_SENTINEL");
-        std::env::set_var("PERI_DYNAMIC_SENTINEL", "parent");
         let output = fixture_output(fixture.to_str().unwrap(), &HashMap::new(), None).await;
-        match original {
-            Some(value) => std::env::set_var("PERI_DYNAMIC_SENTINEL", value),
-            None => std::env::remove_var("PERI_DYNAMIC_SENTINEL"),
-        }
         assert_eq!(output, "unset");
     }
 
