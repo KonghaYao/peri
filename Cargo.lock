@@ -4218,6 +4218,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "futures",
  "indexmap 2.14.0",
  "parking_lot",
  "peri-acp-types",
