@@ -36,13 +36,19 @@ pub(super) fn handle_compact_completed(
         state.compact_just_completed = true;
     }
 
+    let is_full = !matches!(strategy, "micro" | "smart");
     let compact_type = match strategy {
         "micro" => i18n::tr("app-note-compact-type-micro"),
         "smart" => i18n::tr("app-note-compact-type-smart"),
         _ => i18n::tr("app-note-compact-type-full"),
     };
+    let detail_key = if is_full {
+        "app-note-compact-detail-full"
+    } else {
+        "app-note-compact-detail"
+    };
     let detail = i18n::tr_args(
-        "app-note-compact-detail",
+        detail_key,
         &[
             ("messages".into(), FluentValue::from(affected_count as u64)),
             ("tokens".into(), FluentValue::from(estimated_tokens_saved)),

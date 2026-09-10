@@ -50,7 +50,7 @@ pub(super) async fn full_compact_inner(
     config: &CompactConfig,
     cwd: &str,
 ) -> AgentResult<super::CompactResult> {
-    let before_len = transcript.len();
+    let before_visible_len = transcript.visible_messages().len();
 
     // 无 LLM 时降级为 Micro
     let llm = llm.ok_or(crate::error::AgentError::CompactNoLlm)?;
@@ -80,9 +80,9 @@ pub(super) async fn full_compact_inner(
 
         return Ok(super::CompactResult {
             strategy: CompactStrategy::Full,
-            affected_count: before_len,
+            affected_count: 0,
             estimated_tokens_saved: 0,
-            before_visible_len: before_len,
+            before_visible_len,
             after_visible_len: after_visible,
             summary: Some(fallback_summary),
             full_escalation_reason: None,
@@ -123,12 +123,12 @@ pub(super) async fn full_compact_inner(
     // 4. 后处理摘要
     let summary = postprocess_summary(&raw_summary);
 
-    // 5. 构造原子生命周期：仅排除 own region 中的非 System 原消息。
-    //    不根据 visible filter 丢失已被排除的原文。
-    let flag_updates = transcript
+    // 5. 构造原子生命周期：仅排除 own region 中当前可见的非 System 原消息。
+    let flag_updates: Vec<_> = transcript
         .entries()
         .iter()
         .skip(transcript.ancestor_len())
+        .filter(|entry| !transcript.flags(entry.id()).excluded)
         .filter(|entry| {
             matches!(entry.as_message(), Some(message) if !matches!(message, BaseMessage::System { .. }))
         })
@@ -142,6 +142,7 @@ pub(super) async fn full_compact_inner(
             )
         })
         .collect();
+    let affected_count = flag_updates.len();
 
     // 6. 先收集 re-inject 消息，随后和摘要一次性提交。
     let re_inject_result = collect_reinject_v2(transcript, config, cwd).await;
@@ -164,15 +165,15 @@ pub(super) async fn full_compact_inner(
     let after_visible = transcript.visible_messages().len();
 
     debug!(
-        before_len,
+        before_visible_len,
         after_visible, "Full Compact: excluded 旧消息 + 追加摘要 + re-inject"
     );
 
     Ok(super::CompactResult {
         strategy: CompactStrategy::Full,
-        affected_count: before_len,
+        affected_count,
         estimated_tokens_saved: 0,
-        before_visible_len: before_len,
+        before_visible_len,
         after_visible_len: after_visible,
         summary: Some(summary),
         full_escalation_reason: None,
@@ -541,15 +542,18 @@ pub async fn re_inject_v2(
 
 /// 收集 Full Compact 后需要重新注入的关键信息（文件 + Skills）。
 ///
-/// 从 transcript 全部 entries（含已标 excluded 的旧消息）中提取：
-/// 1. 最近 Read 的非 Skills 文件 → 注入为消息
-/// 2. SkillPreloadMiddleware 注入的 Skills 路径 → 注入为消息
+/// 文件候选仅来自当前可见消息；Skills 保持从全部历史 entries 收集。
 async fn collect_reinject_v2(
     transcript: &MessageTranscript,
     config: &CompactConfig,
     cwd: &str,
 ) -> ReInjectResult {
-    // 收集全部消息（含 excluded 的旧消息——它们是 compact 前的对话历史）
+    let visible_messages: Vec<BaseMessage> = transcript
+        .entries()
+        .iter()
+        .filter(|entry| !transcript.flags(entry.id()).excluded)
+        .filter_map(|entry| entry.as_message().cloned())
+        .collect();
     let all_messages: Vec<BaseMessage> = transcript
         .entries()
         .iter()
@@ -559,7 +563,7 @@ async fn collect_reinject_v2(
     let mut result_messages: Vec<BaseMessage> = Vec::new();
 
     // 1. 提取并注入最近读取的文件
-    let file_paths = extract_recent_files(&all_messages, config.re_inject_max_files);
+    let file_paths = extract_recent_files(&visible_messages, config.re_inject_max_files);
     let mut files_injected = 0;
 
     if !file_paths.is_empty() {

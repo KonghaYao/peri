@@ -472,6 +472,44 @@ fn test_reset_clears_estimated_tool_tokens() {
 }
 
 #[test]
+fn test_pressure_sample_generations_and_reset_are_monotonic() {
+    let mut tracker = TokenTracker::default();
+    tracker.accumulate(&make_usage(196_000, 100, None, None));
+    let first = tracker.pressure_sample_key().unwrap();
+    tracker.consume_pressure_sample(first);
+
+    tracker.accumulate(&make_usage(0, 100, None, None));
+    assert_eq!(tracker.pressure_sample_key(), Some(first));
+    assert!(tracker.is_pressure_sample_consumed(first));
+
+    tracker.accumulate(&make_usage(197_000, 100, None, None));
+    let next_usage = tracker.pressure_sample_key().unwrap();
+    assert_ne!(next_usage, first);
+
+    tracker.consume_pressure_sample(next_usage);
+    tracker.add_estimated_tool_tokens("x");
+    let next_growth = tracker.pressure_sample_key().unwrap();
+    assert_ne!(next_growth, next_usage);
+
+    tracker.consume_pressure_sample(next_growth);
+    tracker.reset();
+    assert!(tracker.pressure_sample_key().is_none());
+    tracker.accumulate(&make_usage(198_000, 100, None, None));
+    assert_ne!(tracker.pressure_sample_key(), Some(next_growth));
+}
+
+#[test]
+fn test_empty_tool_output_does_not_advance_pressure_sample() {
+    let mut tracker = TokenTracker::default();
+    tracker.accumulate(&make_usage(196_000, 100, None, None));
+    let sample = tracker.pressure_sample_key().unwrap();
+
+    tracker.add_estimated_tool_tokens("");
+
+    assert_eq!(tracker.pressure_sample_key(), Some(sample));
+}
+
+#[test]
 fn test_estimated_tool_tokens_enables_early_compact_warning() {
     // 场景：input=120K（60%），未达 compact 阈值（85%）。
     // 但本轮工具结果注入了 ~800K 字符（~200K token），下一轮将 overflow。

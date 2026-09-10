@@ -91,6 +91,20 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
         ) {
             break 'compact_core Ok(CompactOutput { compacted: false });
         }
+
+        let pressure_sample = {
+            let tracker = ctx.compact.token_tracker.read();
+            tracker.pressure_sample_key()
+        };
+        if pressure_sample.is_some_and(|key| {
+            ctx.compact
+                .token_tracker
+                .read()
+                .is_pressure_sample_consumed(key)
+        }) {
+            tracing::trace!(step, "Compact 压力样本已消费，等待新 usage 或工具增长");
+            break 'compact_core Ok(CompactOutput { compacted: false });
+        }
         let compact_strategy = match compact_action {
             crate::agent::compact_v2::CompactAction::Smart => {
                 crate::agent::events::CompactStrategy::Smart
@@ -146,6 +160,13 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
 
         // G6: 记录 compact 前的可见消息数，供 cancel arm 发射 MessagesCompacted 事件使用
         let before_visible_len = transcript_owned.visible_messages().len();
+
+        if let Some(key) = pressure_sample {
+            ctx.compact
+                .token_tracker
+                .write()
+                .consume_pressure_sample(key);
+        }
 
         // 包在 select! biased 中：cancel 优先，避免 Full Compact 的长 LLM 调用阻塞中断。
         // 注：run_compact 内部不感知 turn cancel_token，必须在此层显式 select。

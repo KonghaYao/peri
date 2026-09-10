@@ -204,6 +204,106 @@ async fn full_compact_preserves_canonical_reminder_without_flags() {
 }
 
 #[tokio::test]
+async fn full_affected_count_tracks_only_false_to_true_transitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ThreadStore> = Arc::new(
+        SqliteThreadStore::new(dir.path().join("affected.db"))
+            .await
+            .unwrap(),
+    );
+    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
+    transcript.append(BaseMessage::system("system"));
+    transcript.append(make_human("question"));
+    transcript.append(make_ai("answer"));
+
+    let first = full_compact_inner(
+        &mut transcript,
+        Some(&FullLifecycleModel),
+        &CompactConfig::default(),
+        "/tmp",
+    )
+    .await
+    .unwrap();
+    let second = full_compact_inner(
+        &mut transcript,
+        Some(&FullLifecycleModel),
+        &CompactConfig::default(),
+        "/tmp",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(first.affected_count, 2);
+    assert_eq!(second.affected_count, 1, "第二轮只应排除首轮 summary");
+}
+
+#[tokio::test]
+async fn consecutive_full_requires_new_visible_read_to_reinject_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("current.txt");
+    std::fs::write(&file_path, "version one").unwrap();
+    let store: Arc<dyn ThreadStore> = Arc::new(
+        SqliteThreadStore::new(dir.path().join("reinject.db"))
+            .await
+            .unwrap(),
+    );
+    let thread_id = store
+        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
+        .await
+        .unwrap();
+    let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
+    transcript.append(make_human("read it"));
+    transcript.append(make_ai_with_read_tool(&file_path.to_string_lossy()));
+
+    full_compact_inner(
+        &mut transcript,
+        Some(&FullLifecycleModel),
+        &CompactConfig::default(),
+        &dir.path().to_string_lossy(),
+    )
+    .await
+    .unwrap();
+    let first_reinject_count = transcript
+        .entries()
+        .iter()
+        .filter(|entry| entry.message().content().contains("version one"))
+        .count();
+
+    full_compact_inner(
+        &mut transcript,
+        Some(&FullLifecycleModel),
+        &CompactConfig::default(),
+        &dir.path().to_string_lossy(),
+    )
+    .await
+    .unwrap();
+    let second_reinject_count = transcript
+        .entries()
+        .iter()
+        .filter(|entry| entry.message().content().contains("version one"))
+        .count();
+
+    std::fs::write(&file_path, "version two").unwrap();
+    transcript.append(make_ai_with_read_tool(&file_path.to_string_lossy()));
+    full_compact_inner(
+        &mut transcript,
+        Some(&FullLifecycleModel),
+        &CompactConfig::default(),
+        &dir.path().to_string_lossy(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(first_reinject_count, 1);
+    assert_eq!(second_reinject_count, 1, "无新 Read 不得重复注入旧文件");
+    assert!(transcript
+        .entries()
+        .iter()
+        .any(|entry| entry.message().content().contains("version two")));
+}
+
+#[tokio::test]
 async fn test_full_compact_no_llm_returns_error() {
     let mut t = MessageTranscript::new();
     t.append(make_human("user question"));
