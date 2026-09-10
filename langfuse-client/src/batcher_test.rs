@@ -479,25 +479,28 @@ async fn test_batcher_drop_new_increments_dropped_counter_during_slow_flush() {
     drop(batcher);
 }
 
-#[test]
-fn test_try_add_drop_new_returns_queue_full_when_command_channel_is_full() {
-    let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    let batcher = Batcher {
-        tx,
-        backpressure: BackpressurePolicy::DropNew,
-        dropped: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        failures: Arc::new(FailureLedger::default()),
-    };
-
+#[tokio::test]
+async fn test_try_add_drop_new_returns_queue_full_when_command_channel_is_full() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/api/public/otel/v1/traces")
+        .with_status(200)
+        .with_body("{}")
+        .expect(1)
+        .create_async()
+        .await;
+    let batcher = failure_barrier_batcher(&server.url());
+    // 当前线程 runtime 在下面两次同步提交之间不会运行 worker。
     batcher
         .try_add(create_test_event("first"))
         .expect("first event fits");
     let error = batcher
         .try_add(create_test_event("second"))
         .expect_err("full queue drops new event");
-
     assert!(matches!(error, LangfuseError::QueueFull));
     assert_eq!(batcher.dropped_count(), 1);
+    batcher.shutdown().await.unwrap();
+    mock.assert_async().await;
 }
 
 // This control barrier waits until the worker has handled preceding commands.
@@ -505,7 +508,11 @@ fn test_try_add_drop_new_returns_queue_full_when_command_channel_is_full() {
 // Type inference keeps this helper valid before and after the ack payload change.
 async fn wait_for_unobserved_worker_barrier(batcher: &Batcher) {
     let (tx, rx) = oneshot::channel();
-    batcher.tx.send(BatcherCommand::Flush(tx)).await.unwrap();
+    batcher
+        .admission
+        .send(BatcherCommand::Flush(tx))
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(5), rx)
         .await
         .expect("worker must reach the FIFO barrier")

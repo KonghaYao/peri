@@ -16,6 +16,7 @@ pub(super) struct FailureLedger {
 }
 
 /// A FIFO barrier's immutable view; it carries no event or HTTP response content.
+#[derive(Clone, Copy)]
 pub(super) struct FlushSnapshot {
     through: u64,
     failures: u64,
