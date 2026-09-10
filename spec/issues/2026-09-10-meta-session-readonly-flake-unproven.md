@@ -32,7 +32,7 @@
 
 ### 1. 分类修正不改变失败概率
 
-`classify_shape_probe_failure` 只改变**诊断标签**。若 CI 上锁竞争仍然超出 busy 上限，`human_success_...` 依然失败，只是 stderr 从 `schema_incompatible` 变成 `database_unreadable`、exit 从 `4` 变成 `3`。误诊被改正了，测试的确定性没有因此提高。
+`classify_shape_probe_failure` 只改变**诊断标签**。若 CI 上锁竞争仍然超出 busy 上限，`human_success_...` 依然失败：期望 exit `0`，实得 exit `4`（`DatabaseUnreadable` 与 `SchemaIncompatible` 都映射到 exit 4，只有标签从 `schema_incompatible` 变成 `database_unreadable`）。误诊被改正了，测试的确定性没有因此提高。
 
 ### 2. `close()` 的确定性只有本地 macOS 证据
 
@@ -42,19 +42,42 @@
 
 `READ_ONLY_BUSY_TIMEOUT` 仍是 250ms，probe 仍无重试。夹具只是缩短了竞态窗口，没有消除"只读打开撞上写端收尾"这一类事件，也没有为它建立失败注入测试。
 
-### 4. 缺少失败注入覆盖真实打开路径
+### 4. 失败注入只覆盖分类函数，不覆盖打开路径
 
-当前对分类的覆盖是进程内 test double（直接构造 `sqlx::Error::Database` 调分类函数），不经过真实 SQLite 打开 + probe。没有测试证明"真实锁竞争只产生 `database_unreadable`、不产生 `schema_incompatible`"。
+分类单测走进程内 test double（直接构造 `sqlx::Error::Database` 调分类函数），不经过真实 SQLite。真实路径的 `SQLITE_BUSY` 有真实覆盖（`test_readonly_open_lock_contention_is_bounded` 用真实 SQLite 断言 `DatabaseUnreadable`），但 `SQLITE_IOERR`(10)、`SQLITE_CANTOPEN`(14) 等其余瞬时码在真实打开路径上没有注入覆盖。
 
 ### 5. `close()` 的 API 边界未定义
 
 新增 public 方法只承诺"返回后本进程不再持有连接"，没有阻止 close 之后继续使用该 store；后续调用会得到 `PoolClosed` 类运行时错误，而不是编译期拒绝。
 
+## 独立验证结果（2026-09-10）
+
+独立 agent 在本地 macOS 用跨进程夹具（真实 `peri` 二进制 + 真实 SQLite）复核，总裁决 **PARTIAL**：修复的机制主张成立，但"消除 CI 偶发失败"不成立。
+
+**已验证**
+
+- `close()` 后夹具返回时 `-wal`/`-shm` 100% 已清理、无连接句柄残留、`pragma integrity_check` 通过；仅靠 `Drop` 时侧车文件在 40 轮中 30 轮仍残留（300ms 后依旧）。机制主张成立。
+- 真实打开路径分类正确：`SQLITE_BUSY`(5)、`SQLITE_CANTOPEN`(14) → `database_unreadable`；`SQLITE_NOTADB`(26)、`SQLITE_CORRUPT`(11) → `schema_incompatible`。持锁期间调用真实 `peri meta session`，5/5 得到 `database_unreadable`。
+- 查询阶段（`load_meta` 只读分支）不含同类缺陷；生产代码中 `SchemaIncompatible` 只出现在确定性分支。
+
+**已证伪**
+
+- 修复**不提高测试确定性**：构造"锁竞争超过 busy 上限"后两个用例仍失败（`human_success_...` 期望 exit 0 实得 exit 4；`every_error_kind_...` 期望 `corrupt_session_data` 实得 `database_unreadable`）。
+
+**未复现**
+
+- 任何"只读打开撞锁"的实例：约 800 次跨进程读者调用（含 512MiB WAL、QoS 饥饿、3 路并发读者）零失败；正对照（持有活 writer 时外部独占锁）3/3 被正确阻塞，检测手段灵敏。**没有修复前的失败样本**。
+
+**未验证**
+
+- `close()` 在 Ubuntu/Windows CI 上的后置条件与 Windows 句柄/删除语义。
+- WAL 收尾与只读打开重叠时"短暂持有 shm 独占锁"这一机制描述未被观测证实——观测到的只是侧车文件残留。该措辞已从设计文档与代码注释移除，只保留规范性要求。
+
 ## 待办
 
 1. **为目标环境补可重复证据**：在 CI 等价负载下重复运行 `cargo test -p peri-tui --test meta_session_cli`（CI 循环或资源受限容器），或证明无法复现。
 2. **若仍可复现**：为只读打开建立确定性策略而不是继续依赖时序 —— 候选：提高/参数化 busy timeout、对瞬时失败做有界重试、或把写端收尾与只读打开之间的窗口交给显式协议。
-3. **失败注入**：让真实打开路径上的 probe 查询返回 `SQLITE_BUSY`/`SQLITE_IOERR`，断言 `database_unreadable` 且不出现 `schema_incompatible`。
+3. **失败注入**：在真实打开路径上注入尚未覆盖的瞬时码（`SQLITE_IOERR`、`SQLITE_CANTOPEN`），断言 `database_unreadable` 且不出现 `schema_incompatible`；`SQLITE_BUSY` 已由 `test_readonly_open_lock_contention_is_bounded` 覆盖。
 4. **平台验证**：确认 macOS/Windows CI 上 `close()` 的收尾语义；在补齐平台证据前，不把该结论当作已确立的跨平台事实。
 5. **`close()` 契约**：明确 close 之后的行为（文档约定或类型层面约束）。
 
