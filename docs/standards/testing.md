@@ -107,7 +107,7 @@ fn test_edit_file_single_replace() {
 
 ### 3.3 回归测试
 
-`peri-agent/src/agent/events_v2_test.rs` 中的回归测试：
+`peri-acp-types/src/event_v2/bus_test.rs` 中的回归测试：
 
 ```rust
 /// [回归测试] TurnCompleted 必须在 render_tx 通道中，与同迭代 Render 事件 FIFO。
@@ -263,7 +263,7 @@ impl ReactLLM for EchoLLM {
 
 - [ ] 新增数据结构（含 serde） → serde roundtrip + 不完全 JSON 反序列化测试
 - [ ] 新增 `ExecutorEvent`/`ObserveEvent` 变体 → `mapper_test.rs` 增加映射测试 + `variant_coverage_test.rs` 扩展覆盖
-- [ ] 新增 v2 事件变体（`RenderEvent`/`StateEvent`/`ObserveEvent`） → `events_v2_test.rs` 与 `events_v2_mapper_test.rs` 的对应覆盖同步更新（如 peri-acp/event 层有对应映射）
+- [ ] 新增 v2 事件变体（`RenderEvent`/`StateEvent`/`ObserveEvent`） → `peri-acp-types/src/event_v2/{types,bus,executor_mapping}_test.rs` 的对应覆盖同步更新（如 peri-acp/event 层有对应映射，需同时验证下游）
 - [ ] 新增 Core 工具 → `core_tools_test.rs` 同步
 - [ ] 新增中间件 → `before_agent`/`after_agent`/`before_tool`/`after_tool` 关键路径各 ≥1 条
 - [ ] 文件系统工具操作 → 各错误路径（not found / ambiguous / permission / not unique）

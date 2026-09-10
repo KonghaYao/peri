@@ -48,7 +48,7 @@ pub enum AcpEvent {
     },
     /// 单次 ReAct 迭代提交信号（v2 路径专用）
     ///
-    /// v2 `StateEvent::TurnCompleted` 携带 `finalized_messages` → mapper_v2 转为
+    /// v2 `RenderEvent::TurnCompleted` 携带 `finalized_messages` → 共享协议映射转为
     /// `ExecutorEvent::TurnCommitted` → 本 DTO。TUI 据此调用
     /// `MessagePipeline::commit_iteration(messages)` 同步规范状态。
     ///
@@ -62,7 +62,7 @@ pub enum AcpEvent {
     },
     /// 轻量级状态快照元数据（v2 路径专用，不携带消息列表）
     ///
-    /// v2 `StateEvent::StateSnapshot` 经 mapper_v2 → ExecutorEvent::StateSnapshotMeta →
+    /// v2 `StateEvent::StateSnapshot` 经共享协议映射 → ExecutorEvent::StateSnapshotMeta →
     /// 本 DTO 投递。TUI 据此刷新上下文使用率/步数，**不应**清空消息历史。
     StateSnapshotMeta {
         /// 可见消息数

@@ -56,7 +56,7 @@
 - [ ] 可合并状态在压力下至少保留当前 turn 的最新有效值。
 - [ ] Observe consumer lag 不会影响 render/state 状态机；所有 drop/lag 都有按事件类别统计的可观测信号。
 - [ ] 覆盖主 Agent 与 SubAgent 转发路径的回归测试。
-- [ ] `cargo test -p peri-agent --lib` 和相关 `peri-acp` 测试通过。
+- [ ] `cargo test -p peri-acp-types --lib event_v2`、`cargo test -p peri-agent --lib` 和相关 `peri-acp` 测试通过。
 
 ## 非目标
 
@@ -70,8 +70,8 @@
 
 ## 涉及文件
 
-- `peri-agent/src/agent/events_v2.rs` —— EventBus 通道、容量与发送语义。
-- `peri-agent/src/agent/events_v2_test.rs` —— 当前满队列行为及新增饱和回归测试。
+- `peri-acp-types/src/event_v2/bus.rs` —— EventBus 通道、容量与发送语义（Agent events_v2 保留 re-export）。
+- `peri-acp-types/src/event_v2/bus_test.rs` —— 当前满队列行为及新增饱和回归测试。
 - `peri-acp/src/event/forwarder.rs` —— EventBus 下游转发边界。
 - `peri-agent/src/agent/subagent_event_forwarder.rs` —— SubAgent 事件转发路径。
 

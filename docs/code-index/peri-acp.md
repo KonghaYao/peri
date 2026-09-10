@@ -55,7 +55,7 @@
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 事件 DTO | event/mod.rs | `AcpEvent`（:42，22 个变体，tag+content serde）；re-export `peri_acp_types::event_v2::*_event_to_executor`（:30） |
+| 事件 DTO 与共享兼容转换 | event/mod.rs + peri-acp-types/src/event_v2/executor_mapping.rs | `AcpEvent` 使用 tag+content serde；`*_event_to_executor` 经 types crate 根路径 re-export，ACP 不复制另一套转换；TurnCompleted 来自 Render 层 |
 | v1→协议映射 | event/mapper.rs | `map_event`（:51）；`MappedEvent`（:22，standard/standard_with_src） |
 | LLM usage 可选字段与来源 | event/mapper.rs + event/mapper_test.rs | `map_event` 的 `LlmCallEnd` 分支；有 usage 才产生 `UsageUpdate`，tokenStats cap 开启才附加计数 `_meta`；cacheReadTokens 缺省省略、显式零保留，sourceAgentId 与计数独立透传；TUI 消费入口见 peri-tui 索引与 ARC-EVENT-001 |
 | 事件泵 | event/forwarder.rs | `spawn_eventbus_forwarder`（:78，biased select render 优先） |
