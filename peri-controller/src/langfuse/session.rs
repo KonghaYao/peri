@@ -91,7 +91,13 @@ impl LangfuseSession {
             backpressure: BackpressurePolicy::DropNew,
             max_retries: 3,
         };
-        let batcher = Batcher::new((*client).clone(), batcher_config);
+        let batcher = match Batcher::try_new((*client).clone(), batcher_config) {
+            Ok(batcher) => batcher,
+            Err(error) => {
+                tracing::warn!(%error, "Langfuse batcher configuration rejected");
+                return None;
+            }
+        };
 
         Some(Self {
             client,
@@ -120,3 +126,7 @@ impl LangfuseSessionLike for LangfuseSession {
         &self.drop_registry
     }
 }
+
+#[cfg(test)]
+#[path = "session_test.rs"]
+mod tests;

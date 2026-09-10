@@ -1,4 +1,4 @@
-//! 关闭 owner 的真实 HTTP 排空、准入与 join 生命周期回归。
+//! 真实 HTTP 背压、flush 屏障与关闭 owner 的排空/join 生命周期回归。
 
 use std::{collections::HashMap, time::Duration};
 
@@ -41,6 +41,10 @@ struct GatedIngestion {
 /// the complete first OTLP request before announcing the barrier, then waits for
 /// release. Connection: close makes each expected request use a separate socket.
 async fn gated_ingestion(statuses: Vec<u16>) -> GatedIngestion {
+    gated_ingestion_at(statuses, 0).await
+}
+
+async fn gated_ingestion_at(statuses: Vec<u16>, gate_index: usize) -> GatedIngestion {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (started_tx, started) = oneshot::channel();
@@ -48,7 +52,7 @@ async fn gated_ingestion(statuses: Vec<u16>) -> GatedIngestion {
     let worker = tokio::spawn(async move {
         let mut first_gate = Some((started_tx, release_rx));
         let mut bodies = Vec::new();
-        for status in statuses {
+        for (index, status) in statuses.into_iter().enumerate() {
             let (stream, _) = listener.accept().await.unwrap();
             let mut reader = BufReader::new(stream);
             let mut headers = HashMap::new();
@@ -69,7 +73,8 @@ async fn gated_ingestion(statuses: Vec<u16>) -> GatedIngestion {
             let mut body = vec![0; length];
             reader.read_exact(&mut body).await.unwrap();
             bodies.push(serde_json::from_slice(&body).unwrap());
-            if let Some((started, release)) = first_gate.take() {
+            if index == gate_index {
+                let (started, release) = first_gate.take().expect("one controlled HTTP gate");
                 started.send(()).unwrap();
                 release.await.unwrap();
             }
@@ -319,4 +324,245 @@ async fn test_shutdown_owner_join_panic_keeps_safe_terminal_without_payload() {
         owner.join(&failures).await.unwrap_err().to_string(),
         error.to_string()
     );
+}
+
+/// [回归测试] HTTP 发送阻塞期间，DropOldest 必须替换命令队列中的最旧事件。
+/// 先完整收齐在途请求再填满队列，避免靠调度或 sleep 猜测背压窗口。
+async fn assert_drop_oldest_admission_keeps_newest(use_try_add: bool) {
+    let server = gated_ingestion(vec![200, 200]).await;
+    let batcher = Batcher::new(
+        LangfuseClient::new("test-public", "test-secret", &server.url, 0),
+        BatcherConfig {
+            max_events: 2,
+            flush_interval: Duration::from_secs(60),
+            backpressure: BackpressurePolicy::DropOldest,
+            max_retries: 0,
+        },
+    );
+    batcher.add(event("inflight0")).await.unwrap();
+    batcher.add(event("inflight1")).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server.started)
+        .await
+        .expect("首批 HTTP 必须到达门控")
+        .unwrap();
+    batcher.try_add(event("oldest")).unwrap();
+    batcher.try_add(event("kept")).unwrap();
+    let admission = if use_try_add {
+        batcher.try_add(event("newest"))
+    } else {
+        batcher.add(event("newest")).await
+    };
+    let dropped = batcher.dropped_count();
+    // 即使旧实现返回 QueueFull，也先收敛真实任务，再断言事件身份。
+    server.release.send(()).unwrap();
+    let bodies = tokio::time::timeout(Duration::from_secs(5), async {
+        batcher.shutdown().await.unwrap();
+        server.worker.await.unwrap()
+    })
+    .await
+    .expect("已准入事件必须排空且 HTTP task 必须退出");
+    let ids = bodies
+        .iter()
+        .flat_map(|body| {
+            body["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|span| span["spanId"].as_str().unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        ["inflight0", "inflight1", "kept", "newest"],
+        "在途批次不变，队列应丢 oldest 并保留 newest；准入结果: {admission:?}"
+    );
+    assert!(admission.is_ok(), "替换最旧事件后新事件必须准入");
+    assert_eq!(dropped, 1, "替换的旧事件必须计入丢弃统计");
+    assert!(batcher.worker_is_joined().await);
+}
+
+#[tokio::test]
+async fn test_backpressure_drop_oldest_add_preserves_newest_http_identity() {
+    assert_drop_oldest_admission_keeps_newest(false).await;
+}
+
+#[tokio::test]
+async fn test_backpressure_drop_oldest_try_add_preserves_newest_http_identity() {
+    assert_drop_oldest_admission_keeps_newest(true).await;
+}
+
+fn http_span_ids(bodies: &[serde_json::Value]) -> Vec<&str> {
+    bodies
+        .iter()
+        .flat_map(|body| {
+            body["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|span| span["spanId"].as_str().unwrap())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_backpressure_flush_prefix_is_protected_even_after_waiter_cancellation() {
+    for cancel_flush in [false, true] {
+        let server = gated_ingestion(vec![200, 200]).await;
+        let batcher = Batcher::try_new(
+            LangfuseClient::new("pk-test", "sk-test", &server.url, 0),
+            BatcherConfig {
+                max_events: 2,
+                flush_interval: Duration::from_secs(60),
+                backpressure: BackpressurePolicy::DropOldest,
+                max_retries: 0,
+            },
+        )
+        .unwrap();
+        batcher.try_add(event("inflight0")).unwrap();
+        batcher.try_add(event("inflight1")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server.started)
+            .await
+            .unwrap()
+            .unwrap();
+        batcher.try_add(event("protected")).unwrap();
+        let mut flush = Some(Box::pin(batcher.flush()));
+        park_pending_result(flush.as_mut().unwrap().as_mut()).await;
+        // flush 已入队，保护它之前的 protected；取消调用方不得撤销该屏障。
+        if cancel_flush {
+            drop(flush.take());
+        }
+        let replacement = batcher.try_add(event("rejected"));
+        server.release.send(()).unwrap();
+        let bodies = tokio::time::timeout(Duration::from_secs(5), async {
+            if let Some(flush) = flush {
+                flush.await.unwrap();
+            }
+            batcher.shutdown().await.unwrap();
+            server.worker.await.unwrap()
+        })
+        .await
+        .expect("flush 与关闭必须完成");
+        assert!(matches!(replacement, Err(LangfuseError::QueueFull)));
+        assert_eq!(
+            http_span_ids(&bodies),
+            ["inflight0", "inflight1", "protected"]
+        );
+        assert!(batcher.worker_is_joined().await);
+    }
+}
+
+#[tokio::test]
+async fn test_backpressure_replacement_stays_after_flush_barrier() {
+    let server = gated_ingestion(vec![200, 200]).await;
+    let batcher = Batcher::new(
+        LangfuseClient::new("pk-test", "sk-test", &server.url, 0),
+        BatcherConfig {
+            max_events: 3,
+            flush_interval: Duration::from_secs(60),
+            backpressure: BackpressurePolicy::DropOldest,
+            max_retries: 0,
+        },
+    );
+    for id in ["inflight0", "inflight1", "inflight2"] {
+        batcher.try_add(event(id)).unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(5), server.started)
+        .await
+        .unwrap()
+        .unwrap();
+    let (ack, response) = oneshot::channel();
+    batcher
+        .admission
+        .send(BatcherCommand::Flush(ack))
+        .await
+        .unwrap();
+    batcher.try_add(event("oldest")).unwrap();
+    batcher.try_add(event("kept")).unwrap();
+    let replacement = batcher.try_add(event("newest"));
+    server.release.send(()).unwrap();
+    let (snapshot, bodies) = tokio::time::timeout(Duration::from_secs(5), async {
+        let snapshot = response.await.expect("Flush ack 不得被驱逐");
+        batcher.shutdown().await.unwrap();
+        (snapshot, server.worker.await.unwrap())
+    })
+    .await
+    .unwrap();
+    assert!(replacement.is_ok());
+    batcher.failures.observe(snapshot).unwrap();
+    assert_eq!(
+        http_span_ids(&bodies),
+        ["inflight0", "inflight1", "inflight2", "kept", "newest"]
+    );
+}
+
+#[tokio::test]
+async fn test_flush_barrier_does_not_wait_for_later_http_batch() {
+    // 第二个 HTTP 批次暂停；第一批后的公共 flush 必须可以先返回。
+    let server = gated_ingestion_at(vec![200, 200], 1).await;
+    let batcher = Batcher::new(
+        LangfuseClient::new("pk-test", "sk-test", &server.url, 0),
+        BatcherConfig {
+            max_events: 2,
+            flush_interval: Duration::from_secs(60),
+            backpressure: BackpressurePolicy::Block,
+            max_retries: 0,
+        },
+    );
+    batcher.try_add(event("before")).unwrap();
+    let mut flush = Box::pin(batcher.flush());
+    park_pending_result(flush.as_mut()).await;
+    batcher.add(event("after0")).await.unwrap();
+    batcher.add(event("after1")).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server.started)
+        .await
+        .unwrap()
+        .unwrap();
+    let flush_result = tokio::time::timeout(Duration::from_secs(1), flush).await;
+    server.release.send(()).unwrap();
+    let bodies = tokio::time::timeout(Duration::from_secs(5), async {
+        batcher.shutdown().await.unwrap();
+        server.worker.await.unwrap()
+    })
+    .await
+    .unwrap();
+    flush_result
+        .expect("屏障不能等待它之后的 HTTP 请求")
+        .unwrap();
+    assert_eq!(http_span_ids(&bodies), ["before", "after0", "after1"]);
+}
+
+#[tokio::test]
+async fn test_batcher_legacy_retry_field_never_overrides_client_http_policy() {
+    for (client_retries, legacy_retries, statuses) in [(1, 0, vec![500, 200]), (0, 9, vec![500])] {
+        let expected_requests = statuses.len();
+        let server = gated_ingestion(statuses).await;
+        let batcher = Batcher::try_new(
+            LangfuseClient::new("pk-test", "sk-test", &server.url, client_retries),
+            BatcherConfig {
+                max_events: 1,
+                flush_interval: Duration::from_secs(60),
+                backpressure: BackpressurePolicy::DropNew,
+                max_retries: legacy_retries,
+            },
+        )
+        .unwrap();
+        batcher.try_add(event("retryevent")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server.started)
+            .await
+            .unwrap()
+            .unwrap();
+        server.release.send(()).unwrap();
+        let (result, bodies) = tokio::time::timeout(Duration::from_secs(5), async {
+            let result = batcher.shutdown().await;
+            (result, server.worker.await.unwrap())
+        })
+        .await
+        .expect("实际 retry 与 worker join 必须收敛");
+        assert_eq!(bodies.len(), expected_requests);
+        assert_eq!(result.is_ok(), client_retries == 1);
+        assert!(batcher.worker_is_joined().await);
+        if let Err(error) = result {
+            assert!(!error.to_string().contains("private-response-marker"));
+        }
+    }
 }

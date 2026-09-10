@@ -3,7 +3,7 @@ mod failure;
 mod shutdown;
 mod worker;
 
-use admission::Admission;
+use admission::{Admission, AdmissionOutcome};
 use failure::{FailureLedger, FlushSnapshot};
 use shutdown::WorkerOwner;
 use worker::BatchWorker;
@@ -12,7 +12,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
 
 use crate::{
@@ -45,23 +45,33 @@ pub struct Batcher {
 
 impl Batcher {
     /// 创建聚合器并启动唯一的后台事件处理 task。
+    ///
+    /// # Panics
+    /// 配置容量无效或间隔为零时立即 panic；可恢复配置错误请使用 [`Self::try_new`]。
+    /// 与 Tokio spawn 一样，必须在 Tokio runtime 内调用。
     pub fn new(client: LangfuseClient, config: BatcherConfig) -> Self {
-        let (tx, rx) = mpsc::channel(config.max_events);
-        let (admission, closing) = Admission::new(tx);
+        Self::try_new(client, config).expect("invalid batcher configuration")
+    }
+
+    /// 在启动 worker 前验证配置；无效容量或零间隔返回 Config 错误。
+    /// 必须在 Tokio runtime 内调用。HTTP 重试仍仅由传入的 client 决定。
+    pub fn try_new(client: LangfuseClient, config: BatcherConfig) -> Result<Self, LangfuseError> {
+        config.validate()?;
+        let (admission, rx, closing) = Admission::new(config.max_events);
         let dropped = Arc::new(AtomicUsize::new(0));
         let failures = Arc::new(FailureLedger::default());
         let worker = BatchWorker::new(client, &config, Arc::clone(&dropped), Arc::clone(&failures));
         let handle = tokio::spawn(worker.run(rx, closing, config.flush_interval));
-        Self {
+        Ok(Self {
             admission,
             worker: Mutex::new(WorkerOwner::Running(handle)),
             backpressure: config.backpressure,
             dropped,
             failures,
-        }
+        })
     }
 
-    /// 添加事件。DropNew/DropOldest 在命令队列满时拒绝新事件；Block 等待空位。
+    /// 添加事件。DropNew 拒绝满队列；DropOldest 替换未受 flush 保护的最旧事件；Block 等待空位。
     /// 关闭开始后均返回 ChannelClosed；等待空位尚未提交的事件不属于排空集合。
     pub async fn add(&self, event: IngestionEvent) -> Result<(), LangfuseError> {
         match self.backpressure {
@@ -73,9 +83,18 @@ impl Batcher {
         }
     }
 
-    /// 同步非阻塞添加事件，按成功提交的顺序入队；队列满时返回 QueueFull。
+    /// 同步非阻塞添加事件。DropOldest 可替换最后一个已准入 flush 之后的最旧 Add，
+    /// 新事件始终追加在队尾；队列已满时，其他策略或无可驱逐事件会返回 QueueFull。
     pub fn try_add(&self, event: IngestionEvent) -> Result<(), LangfuseError> {
-        self.report_rejection(self.admission.try_send(BatcherCommand::Add(event)))
+        match self.admission.try_add(event, self.backpressure) {
+            Ok(AdmissionOutcome::Accepted) => Ok(()),
+            Ok(AdmissionOutcome::ReplacedOldest) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                warn!("Batcher replaced oldest unprotected queued event");
+                Ok(())
+            }
+            Err(error) => self.report_rejection(Err(error)),
+        }
     }
 
     fn report_rejection(&self, result: Result<(), LangfuseError>) -> Result<(), LangfuseError> {
@@ -86,7 +105,9 @@ impl Batcher {
         result
     }
 
-    /// 等待此前入队事件完成发送尝试，报告该确认点尚未被调用方观察的批次失败。
+    /// 等待此前仍在队列中的事件完成发送尝试，报告该确认点尚未被调用方观察的批次失败。
+    /// 已准入的 flush 保护其前缀不再被驱逐；准入前已被 DropOldest 替换的事件不在集合内。
+    /// flush 等待容量、尚未准入时不建立保护前缀，也不恢复此前已驱逐的事件。
     ///
     /// 返回 Err 后只确认本次快照的失败水位；后续失败仍由下次 flush 报告。
     /// 取消等待或仅由后台发送 ack 不会确认错误。并发 flush 可观察到同一失败，

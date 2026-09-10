@@ -8,26 +8,22 @@ use std::{
     },
 };
 use tokio::{
-    sync::{mpsc, watch},
+    sync::watch,
     time::{interval, Duration},
 };
 use tracing::{debug, error, info, warn};
 
 use super::{
+    admission::CommandReceiver,
     failure::{FailureLedger, FlushSnapshot},
     BatcherCommand,
 };
-use crate::{
-    config::{BackpressurePolicy, BatcherConfig},
-    types::IngestionEvent,
-    LangfuseClient,
-};
+use crate::{config::BatcherConfig, types::IngestionEvent, LangfuseClient};
 
 pub(super) struct BatchWorker {
     client: Arc<LangfuseClient>,
     buffer: VecDeque<IngestionEvent>,
     max_events: usize,
-    backpressure: BackpressurePolicy,
     dropped: Arc<AtomicUsize>,
     failures: Arc<FailureLedger>,
 }
@@ -41,9 +37,10 @@ impl BatchWorker {
     ) -> Self {
         Self {
             client: Arc::new(client),
-            buffer: VecDeque::with_capacity(config.max_events),
+            // A capacity limit does not require reserving that many event-sized
+            // allocations before the first event arrives.
+            buffer: VecDeque::new(),
             max_events: config.max_events,
-            backpressure: config.backpressure,
             dropped,
             failures,
         }
@@ -51,7 +48,7 @@ impl BatchWorker {
 
     pub(super) async fn run(
         mut self,
-        mut rx: mpsc::Receiver<BatcherCommand>,
+        mut rx: CommandReceiver,
         mut closing: watch::Receiver<bool>,
         flush_interval: Duration,
     ) -> FlushSnapshot {
@@ -79,7 +76,7 @@ impl BatchWorker {
         // Admission is closed before the signal. No producer can commit after
         // this point. Drain committed commands only: recv().await could wait on
         // a reserved permit belonging to a suspended, unpolled producer.
-        while let Ok(command) = rx.try_recv() {
+        while let Some(command) = rx.try_recv() {
             self.process(command).await;
         }
         if !self.buffer.is_empty() {
@@ -95,14 +92,6 @@ impl BatchWorker {
     async fn process(&mut self, command: BatcherCommand) {
         match command {
             BatcherCommand::Add(event) => {
-                // Preserve the existing buffer policy; queue overflow policy is
-                // independently enforced at admission.
-                if self.buffer.len() >= self.max_events
-                    && self.backpressure == BackpressurePolicy::DropOldest
-                    && self.buffer.pop_front().is_some()
-                {
-                    warn!(target: "langfuse::batcher", "DropOldest: 弹出最旧事件以容纳新事件");
-                }
                 self.buffer.push_back(event);
                 if self.buffer.len() >= self.max_events {
                     self.flush_buffer().await;
