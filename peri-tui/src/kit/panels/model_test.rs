@@ -33,3 +33,6 @@ fn pad_fits_align_column() {
     assert_eq!(pad + key_len + value_len, align);
     assert!(pad < 32, "行宽应不超过右列可视宽度");
 }
+
+#[path = "model/commit_test.rs"]
+mod commit;
