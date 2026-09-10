@@ -2367,3 +2367,7 @@ async fn test_ptc_runs_through_acp_session_agent_production_path() {
         "{events}"
     );
 }
+
+#[cfg(not(windows))]
+#[path = "compact_recovery_test.rs"]
+mod compact_recovery_tests;

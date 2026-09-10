@@ -1472,19 +1472,19 @@ async fn test_run_react_loop_new_high_usage_generations_continue_full_micro_chur
         vec![
             (
                 crate::agent::events::CompactStrategy::Micro,
-                96_000,
+                96_070,
                 Some(crate::agent::compact_v2::planner::FullEscalationReason::InsufficientReclaim),
                 crate::agent::compact_v2::CompactOutcome::MicroAppliedThenFullFailed,
             ),
             (
                 crate::agent::events::CompactStrategy::Micro,
-                80_000,
+                80_070,
                 None,
                 crate::agent::compact_v2::CompactOutcome::MicroApplied,
             ),
             (
                 crate::agent::events::CompactStrategy::Micro,
-                97_000,
+                97_070,
                 Some(crate::agent::compact_v2::planner::FullEscalationReason::InsufficientReclaim),
                 crate::agent::compact_v2::CompactOutcome::MicroAppliedThenFullFailed,
             ),
@@ -1527,10 +1527,10 @@ impl crate::tools::BaseTool for AuditAlternatingOutputTool {
     }
 }
 
-/// 审计 characterization：真实 SQLite Full 成功后仍能 Full→Micro→Full→Micro。
+/// [回归测试] SQLite Full 后新高 usage 可再次 Full，但不能对 excluded 历史发 Micro。
 /// usage 数列为受控输入，只证明新高样本下的执行链，不代表现场 token 测量。
 #[tokio::test]
-async fn test_audit_run_react_loop_successful_full_micro_churn_has_zero_micro_delta() {
+async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history() {
     use crate::agent::compact_v2::{planner::plan_micro, projection, CompactOutcome};
     use crate::thread::{SqliteThreadStore, ThreadMeta, ThreadStore};
     let dir = tempfile::tempdir().unwrap();
@@ -1605,35 +1605,22 @@ async fn test_audit_run_react_loop_successful_full_micro_churn_has_zero_micro_de
         .collect();
     assert_eq!(
         compacted.iter().map(|entry| entry.0).collect::<Vec<_>>(),
-        vec![
-            CompactOutcome::FullApplied,
-            CompactOutcome::MicroApplied,
-            CompactOutcome::FullApplied,
-            CompactOutcome::MicroApplied,
-        ]
+        vec![CompactOutcome::FullApplied, CompactOutcome::FullApplied,]
     );
-    for index in [1, 3] {
-        assert!(compacted[index].1 > 0, "Micro 对外报告正收益");
-        assert_eq!(
-            compacted[index].2, 1,
-            "每次只重新标记刚被 Full 排除的长结果"
-        );
-    }
     {
         let transcript = context.session.transcript.read();
         let plan = plan_micro(&transcript, &config, false);
-        assert_eq!(plan.actions.len(), 2);
-        assert!(plan
-            .actions
-            .iter()
-            .all(|action| transcript.flags(action.message_id).excluded));
+        assert!(
+            plan.actions.is_empty(),
+            "Full 后只有短结果可见，不应再次规划旧工具输出"
+        );
         let canonical = transcript.visible_model_messages().unwrap();
         let projected =
             projection::render_llm_view(&transcript, &plan, &Default::default()).unwrap();
         assert_eq!(
             serde_json::to_value(canonical).unwrap(),
             serde_json::to_value(projected).unwrap(),
-            "两个 Micro directive 均指向不可见历史，实际模型消息收益为零"
+            "无 Micro action 时维持 canonical 模型视图"
         );
     }
     let tx = context
@@ -1651,13 +1638,12 @@ async fn test_audit_run_react_loop_successful_full_micro_churn_has_zero_micro_de
             .values()
             .filter(|flag| flag.excluded && flag.projection.is_some())
             .count(),
-        2
+        0
     );
 }
 
 /// [回归测试] 工具结果已进入 transcript 后，下一轮 Compact 必须看见其新增压力。
 #[tokio::test]
-#[ignore = "已确认 compact 缺陷：生产 tool dispatch 未接线 token growth；修复后移除此标记"]
 async fn test_audit_dispatch_must_account_for_tool_output_pressure() {
     let context = make_stage_context();
     context.runtime.tools.write().insert(
@@ -1720,7 +1706,6 @@ async fn test_audit_dispatch_must_account_for_tool_output_pressure() {
 
 /// [回归测试] Reason 已投影的内容不能在随后 Micro 中再次报告增量回收收益。
 #[tokio::test]
-#[ignore = "已确认 compact 缺陷：Reason 预投影导致 Micro 重复记收益；修复后移除此标记"]
 async fn test_audit_micro_savings_must_change_previous_reason_view() {
     let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
     {
@@ -1761,6 +1746,17 @@ async fn test_audit_micro_savings_must_change_previous_reason_view() {
     })
     .await
     .unwrap();
+    let first_tool_outputs = first
+        .messages_snapshot
+        .iter()
+        .filter(|message| matches!(message, BaseMessage::Tool { .. }))
+        .map(|message| message.content().chars().count())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_tool_outputs,
+        vec![8_000; 4],
+        "没有已提交 directive 时 Reason 必须发送 canonical 工具结果"
+    );
     super::compact::run_compact(CompactInput {
         context: context.clone(),
         has_tool_calls: false,

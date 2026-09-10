@@ -138,53 +138,73 @@ pub struct V2ExecuteRequest {
 pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     use peri_acp_types::session::{MessageKind, MessageSource as V2MessageSource, QueuedMessage};
 
+    // Restore the inherited boundary and compact state before spawning forwarders.
+    // A failed/corrupt snapshot must not enter Reason with unclassified history.
+    let restored_history = async {
+        let Some((store, tid)) = req.thread_store.as_ref().zip(req.thread_id.as_ref()) else {
+            return Ok::<_, anyhow::Error>((
+                peri_acp_types::store::InheritedContext::default(),
+                Default::default(),
+            ));
+        };
+        let inherited = store.load_inherited_context(tid).await?;
+        let flags = store.load_message_flags(tid).await?;
+        Ok((inherited, flags))
+    }
+    .await;
+
     // Phase 1: build StageContext（内部消费 AgentComponents）
     let concrete_tm: Option<Arc<AgentTaskManager>> = req.task_manager.clone().and_then(|tm| {
         let tm_any: Arc<dyn std::any::Any + Send + Sync> =
             tm as Arc<dyn std::any::Any + Send + Sync>;
         tm_any.downcast::<AgentTaskManager>().ok()
     });
-    let (v2_out, new_cache) = match (req.stage_build)(StageBuildRequest {
-        cached_llm: req.cached_llm,
-        frozen_session: req.frozen_session,
-        event_handler: req.event_handler,
-        agent_overrides: req.agent_overrides,
-        preload_skills: req.preload_skills,
-        child_handler_factory: req.child_handler_factory,
-        auxiliary_model: req.auxiliary_model,
-        thread_persistence: req.thread_persistence,
-        goal_controller: req.goal_controller,
-        task_manager: concrete_tm,
-        on_bg_complete: req.on_bg_complete,
-    }) {
-        Ok(output) => output,
-        Err(error) => {
-            error!(session_id = %req.session_id, error = %error, "[v2] stage build failed");
-            let failure = ExecutionFailure::internal("Agent stage initialization failed");
-            let source = UnstampedEvent::new(
-                String::new(),
-                String::new(),
-                None,
-                EventDeliveryClass::Critical,
-            );
-            req.publisher.publish_event(
-                &req.session_id,
-                &source,
-                ExecutorEvent::AgentExecutionFailed {
-                    message: failure.public_message.clone(),
-                },
-            );
-            return ExecOutcome {
-                ok: false,
-                stop_reason: PromptStopReason::EndTurn,
-                failure: Some(failure),
-                history_replaced_by_compaction: false,
-                persisted_payloads: req.history_payloads,
-                persistence_inconsistent: false,
-                agent_state: AgentState::new(&req.cwd),
-            };
-        }
-    };
+    let (v2_out, new_cache, inherited, own_flags) =
+        match restored_history.and_then(|(inherited, own_flags)| {
+            (req.stage_build)(StageBuildRequest {
+                cached_llm: req.cached_llm,
+                frozen_session: req.frozen_session,
+                event_handler: req.event_handler,
+                agent_overrides: req.agent_overrides,
+                preload_skills: req.preload_skills,
+                child_handler_factory: req.child_handler_factory,
+                auxiliary_model: req.auxiliary_model,
+                thread_persistence: req.thread_persistence,
+                goal_controller: req.goal_controller,
+                task_manager: concrete_tm,
+                on_bg_complete: req.on_bg_complete,
+            })
+            .map(|(output, cache)| (output, cache, inherited, own_flags))
+            .map_err(anyhow::Error::from)
+        }) {
+            Ok(output) => output,
+            Err(error) => {
+                error!(session_id = %req.session_id, error = %error, "[v2] stage build failed");
+                let failure = ExecutionFailure::internal("Agent stage initialization failed");
+                let source = UnstampedEvent::new(
+                    String::new(),
+                    String::new(),
+                    None,
+                    EventDeliveryClass::Critical,
+                );
+                req.publisher.publish_event(
+                    &req.session_id,
+                    &source,
+                    ExecutorEvent::AgentExecutionFailed {
+                        message: failure.public_message.clone(),
+                    },
+                );
+                return ExecOutcome {
+                    ok: false,
+                    stop_reason: PromptStopReason::EndTurn,
+                    failure: Some(failure),
+                    history_replaced_by_compaction: false,
+                    persisted_payloads: req.history_payloads,
+                    persistence_inconsistent: false,
+                    agent_state: AgentState::new(&req.cwd),
+                };
+            }
+        };
     if let Some(cache) = new_cache {
         (req.store_llm)(cache);
     }
@@ -279,7 +299,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         )
     };
 
-    // Phase 5: seed transcript（history 作为 ancestor 之外的自有消息）
+    // Phase 5: restore the frozen ancestor prefix, then this thread's own history.
     // 首轮用户 turn 判定需在 history move 前捕获（Phase 5.9 使用）。
     let is_first_user_turn = !req.continuation && req.history_payloads.is_empty();
     let history_payloads_snapshot = req.history_payloads.clone();
@@ -287,32 +307,30 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         let transcript_arc = v2_out.session.transcript();
         let mut transcript = transcript_arc.write();
         let old = std::mem::take(&mut *transcript);
-        *transcript = old.with_own_payloads(req.history_payloads);
-    }
-
-    // Phase 5.5: restore compact flags from persistence (if available)
-    {
-        if let (Some(store), Some(tid)) = (req.thread_store.as_ref(), req.thread_id.as_ref()) {
-            match store.load_message_flags(tid).await {
-                Ok(flags) if !flags.is_empty() => {
-                    let transcript_arc = v2_out.session.transcript();
-                    let mut transcript = transcript_arc.write();
-                    transcript.set_flags_batch(flags);
-                    tracing::debug!(
-                        thread_id = %tid,
-                        "Phase 5.5: restored compact flags from persistence"
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::debug!(
-                        thread_id = %tid,
-                        error = %e,
-                        "Phase 5.5: failed to load compact flags"
-                    );
-                }
-            }
-        }
+        let ancestor_ids = inherited
+            .payloads
+            .iter()
+            .map(|payload| payload.id())
+            .collect::<std::collections::HashSet<_>>();
+        let own: Vec<_> = req
+            .history_payloads
+            .into_iter()
+            .filter(|payload| !ancestor_ids.contains(&payload.id()))
+            .collect();
+        let own_ids = own
+            .iter()
+            .map(|payload| payload.id())
+            .collect::<std::collections::HashSet<_>>();
+        *transcript = old
+            .with_ancestor_payloads(inherited.payloads)
+            .with_own_payloads(own);
+        transcript.set_flags_batch(inherited.flags);
+        transcript.set_flags_batch(
+            own_flags
+                .into_iter()
+                .filter(|(id, _)| own_ids.contains(id))
+                .collect(),
+        );
     }
 
     // Phase 6: push 用户输入到 v2 queue（Receive 阶段消费）
@@ -428,43 +446,27 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     } else {
         None
     };
-    let mut persistence_inconsistent = false;
-    let persistence_failure = if let Some(e) = flush_error {
-        error!(session_id = %req.session_id, error = %e, "[v2] phase 8 transcript flush failed");
-        let previous_history_ids = history_payloads_snapshot
-            .iter()
-            .map(|payload| payload.id())
-            .collect::<std::collections::HashSet<_>>();
-        let turn_ids = {
-            let transcript = v2_out.session.transcript();
-            let transcript = transcript.read();
-            transcript
-                .persisted_payloads()
-                .into_iter()
-                .map(|payload| payload.id())
-                .filter(|id| !previous_history_ids.contains(id))
-                .collect::<Vec<_>>()
-        };
-        let rollback_ok = match (req.thread_store.as_ref(), req.thread_id.as_ref()) {
-            (Some(store), Some(thread_id)) => {
-                store.delete_messages(thread_id, &turn_ids).await.is_ok()
-                    && store.load_payloads(thread_id).await.is_ok_and(|payloads| {
-                        payloads
-                            .iter()
-                            .map(|payload| payload.id())
-                            .eq(history_payloads_snapshot.iter().map(|payload| payload.id()))
-                    })
-            }
-            _ => false,
-        };
-        if !rollback_ok {
-            persistence_inconsistent = true;
-        }
-        Some(if rollback_ok {
-            ExecutionFailure::internal("Conversation persistence failed")
+    let compact_uncertain = v2_out
+        .session
+        .transcript()
+        .read()
+        .compaction_commit_state()
+        .is_uncertain();
+    let persistence_inconsistent = flush_error.is_some() || compact_uncertain;
+    let persistence_failure = if persistence_inconsistent {
+        if let Some(error) = flush_error {
+            error!(session_id = %req.session_id, error = %error, "[v2] phase 8 transcript flush failed");
         } else {
-            ExecutionFailure::internal("Conversation persistence is inconsistent")
-        })
+            error!(session_id = %req.session_id, "[v2] compact persistence outcome is unconfirmed");
+        }
+        // A store call can commit before its future is cancelled or returns an error.
+        // A successful writer barrier alone cannot confirm that lifecycle's memory view.
+        // Preserve the durable prefix and require a cold reload; ID-only deletion cannot
+        // roll back old flags and can destroy the only visible summary.
+        v2_out.session.transcript().read().shutdown_persistence();
+        Some(ExecutionFailure::internal(
+            "Conversation persistence failed; reload the session to recover",
+        ))
     } else {
         None
     };

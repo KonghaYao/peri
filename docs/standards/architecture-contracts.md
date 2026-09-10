@@ -20,6 +20,12 @@
 - **Rule**：会话创建时冻结日期、项目指引、skills 摘要、MetaHarness 和 system prompt；同一会话及其 SubAgent 复用冻结数据，禁止中途重新读取而改变 prompt 前缀。冻结数据必须作为版本化 owner state 经 `ThreadStore` 专用接口持久化（不进入 `ThreadMeta` / list projection）：冷 `session/load` / `resume` 恢复原快照；legacy 缺失时只能用 `ThreadMeta.cwd` 构建，并以原子 write-once/CAS 回填，竞争失败方必须重读 winner。未知未来版本、损坏快照、metadata/store 错误均 fail closed 且不得覆盖原 blob。`fork` 继承 source 的精确快照；new/fork 写快照失败须补偿删除新 thread，禁止留下无 frozen owner state 的可用会话。
 - **Verify**：`cargo test -p peri-acp --lib frozen_snapshot`、`cargo test -p peri-acp --lib test_session_load_cold_host_restores_original_frozen_prompt`、`cargo test -p peri-resources --lib frozen_snapshot`、`cargo test -p peri-middlewares --lib frozen_claude_md`；人工检查 `build_frozen_data`、`session/frozen_snapshot.rs`、session lifecycle 与 SubAgent `with_frozen_data` 调用。
 
+### ARC-COMPACT-001
+
+- **Scope**：`peri-agent`、`peri-acp`、`peri-acp-types`、`peri-resources`。
+- **Rule**：Micro 计划与收益只计当前模型可见的 own region；Reason 只恢复已提交的 projection，关闭自动 compact 不改变已有投影。工具增长只在 canonical 工具结果提交后记账，新的有效 provider input usage 才结清估算。Full 的摘要与 excluded transitions 按持久化事务提交；随后取消或执行失败不能撤销已提交结果，host 仍须采纳可信快照；writer 失败或 compact 提交结果不确定须停止使用热状态、保留磁盘已提交内容并要求重新加载，禁止仅删除新增消息来伪造回滚。新子会话的继承上下文必须冻结 payload 与 flags，恢复时保持 ancestor/own 边界，祖先标记只可恢复、不可由子会话 compact 改写；ACP 独立 fork 的新 ID 复制仍属于 own region。无新增用户或工具工作时，连续成功 Full 后的真实请求仍未恢复预算须有界失败，不得靠删除 canonical reminder 或重复使用旧 usage 证明进展。
+- **Verify**：`cargo test -p peri-agent --lib test_audit_`、`cargo test -p peri-agent --lib budget_recovery`、`cargo test -p peri-agent --lib provenance`、`cargo test -p peri-acp --lib compact_recovery`、`cargo test -p peri-resources --lib inherited_context`；检查 `planner.rs`、`reason.rs`、`compact_progress.rs`、`subagent/factory.rs`、`v2_execute.rs` 与 `host/prompt.rs::finish_prompt_turn`。
+
 ### ARC-SESSION-LOAD-001
 
 - **Scope**：`peri-tui` 普通 thread 切换、ACP session lifecycle。

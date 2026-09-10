@@ -64,10 +64,10 @@ impl TokenTracker {
         if usage.input_tokens > 0 {
             self.last_usage = Some(usage.clone());
             self.usage_generation = self.usage_generation.saturating_add(1);
+            // 只有新权威 input usage 已包含工具结果，才能清除本地预测。
+            self.estimated_tool_tokens_since_last_llm = 0;
         }
         self.llm_call_count += 1;
-        // 工具结果 token 已被本轮 input_tokens 包含（作为 tool_result 消息），清零避免双计
-        self.estimated_tool_tokens_since_last_llm = 0;
     }
 
     /// 累积工具结果 token 估算（P0-5）。
@@ -92,9 +92,9 @@ impl TokenTracker {
         // 不加 output_tokens：output 会在下一轮 API 调用中包含进 input_tokens，
         // 相加会导致双重计算，使显示用量约为实际的 2 倍。
         // 加上 estimated_tool_tokens_since_last_llm：本轮已写入但尚未被 LLM 感知的工具结果（P0-5）
-        self.last_usage
-            .as_ref()
-            .map(|u| u.input_tokens as u64 + self.estimated_tool_tokens_since_last_llm)
+        self.last_usage.as_ref().map(|u| {
+            (u.input_tokens as u64).saturating_add(self.estimated_tool_tokens_since_last_llm)
+        })
     }
 
     pub fn context_usage_percent(&self, context_window: u32) -> Option<f64> {

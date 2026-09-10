@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use tracing::{info, warn};
 
 use crate::agent::compact_v2;
-use crate::session::transcript::MessageTranscript;
+use crate::session::transcript::{CompactionCommitState, MessageTranscript};
 
 use super::events::{emit_compact_completed, emit_compact_started};
 
@@ -50,7 +50,8 @@ pub enum PipelineOutcome {
         /// v2 compact 操作计数（feedback 文案「已压缩 N 条消息」的 N）。
         affected_count: usize,
     },
-    /// 取消（用户 Ctrl+C）：保留原 history，stop_reason = Cancelled。
+    /// 取消返回候选 history；interceptor 按共享提交状态恢复已提交结果，
+    /// 或在结果不确定时使热会话失效。未提交时 stop_reason = Cancelled。
     Cancelled { history: Vec<BaseMessage> },
     /// 边界情况（空历史 / 无模型 / compact 失败）：保留原 history，
     /// stop_reason = EndTurn，失败文案经 message 结构化返回（Phase 5 Step 4：
@@ -71,6 +72,11 @@ pub enum PipelineOutcome {
 /// [`PipelineOutcome::EarlyReturn`] 结构化返回，由 execute_compact 最外层
 /// 统一映射 feedback(Error, UiOnly)）。
 pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
+    // The interceptor owns a clone beyond both cancellation select boundaries.
+    let commit_state = ctx
+        .dep::<CompactionCommitState>()
+        .map(|state| (*state).clone())
+        .unwrap_or_default();
     let CommandContext {
         session_id,
         history,
@@ -144,7 +150,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             };
         }
     };
-    let mut transcript = MessageTranscript::new();
+    let mut transcript = MessageTranscript::new().with_compaction_commit_state(commit_state);
     if persisted_history.is_empty() {
         transcript = transcript.with_persistence(thread_store, thread_id);
         for message in &history {
@@ -280,6 +286,11 @@ async fn run_v2_compact_with_cancel(
     consecutive_failures: &mut u32,
 ) -> Result<compact_v2::CompactResult, CancelOrError> {
     let result = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            tracing::info!(session_id = %session_id, "compact cancelled by user");
+            return Err(CancelOrError::Cancelled);
+        }
         r = compact_v2::run_compact(
             transcript,
             Some(model),
@@ -296,10 +307,6 @@ async fn run_v2_compact_with_cancel(
             consecutive_failures,
             cwd,
         ) => r,
-        _ = cancel_token.cancelled() => {
-            tracing::info!(session_id = %session_id, "compact cancelled by user");
-            return Err(CancelOrError::Cancelled);
-        }
     };
 
     // 检测失败：affected_count == 0 + summary 为 None 表示 compact 未成功

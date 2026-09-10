@@ -24,8 +24,9 @@
 //!
 //! # Cancel 语义保持
 //!
-//! - `intercept_immediate_command` 内的 `tokio::select!` 分支顺序原样保留
-//!   （`handler.execute` 优先于 `cancel.cancelled()`；二者均会触发 `push_done`）
+//! - `intercept_immediate_command` 显式优先处理 cancel；compact 已确认提交时
+//!   恢复 durable history，提交结果不确定时返回 Internal 并要求冷恢复。
+//!   命令返回路径均发送 `push_done`。
 //! - `build_and_execute_agent_v2` 末尾的 cancel cascade 仍在循环失败后触发，
 //!   且与 failure / `TurnEnded` 共用一次 post-flush cancel 采样的
 //!   单一终态分类；顺序保持 failure 事件 → `TurnEnded` → cascade

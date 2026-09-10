@@ -1345,3 +1345,6 @@ mod loop_result_mapping {
         assert!(!EXECUTION_FAILURE_FALLBACK_MESSAGE.contains("secret"));
     }
 }
+
+#[path = "executor_helpers/compact_cancel_test.rs"]
+mod compact_cancel_tests;

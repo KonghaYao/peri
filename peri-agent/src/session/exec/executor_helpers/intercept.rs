@@ -8,11 +8,13 @@ use peri_acp_types::{
     compact::CompactConfig,
     event::{EventSink, ExecutorEvent},
     messages::{BaseMessage, MessageContent},
-    session::PromptResult,
-    store::ThreadStore,
+    session::{ExecutionFailure, PromptResult},
+    store::{PersistedPayload, ThreadStore},
     tasks::TaskManager,
 };
 use tokio_util::sync::CancellationToken;
+
+use crate::session::transcript::{CompactionCommitState, MessageTranscript};
 
 /// 命令注册表查找闭包（ACP 协议面注册表注入）。
 ///
@@ -187,7 +189,12 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
         None => None,
     };
 
-    let deps = peri_acp_types::command::DependencyBag::new();
+    let commit_state = CompactionCommitState::default();
+    let mut deps = peri_acp_types::command::DependencyBag::new();
+    deps.insert(
+        std::any::TypeId::of::<CompactionCommitState>(),
+        Arc::new(commit_state.clone()),
+    );
     let mut ctx = CommandContext::new(
         req.session_id.to_string(),
         req.history.to_vec(),
@@ -209,8 +216,8 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
     // 管线（McpSkillReleaser 依此放行，决策 A2；RPC 路径恒 false）。
     ctx.supports_inject = true;
     ctx.parsed_args = parsed_args;
-    ctx.thread_store = req.thread_store;
-    ctx.thread_id = req.thread_id;
+    ctx.thread_store = req.thread_store.clone();
+    ctx.thread_id = req.thread_id.clone();
     ctx.task_manager = Some(req.task_manager.clone());
     ctx.frozen_claude_md = req.frozen_claude_md.clone().map(Arc::new);
     ctx.frozen_claude_local_md = req.frozen_claude_local_md.clone().map(Arc::new);
@@ -218,10 +225,9 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
     // fork/bg-fork 复用的冻结 prompt（16_workflow 已删除（C2），与主
     // prompt 字节相同）
     ctx.frozen_system_prompt = req.frozen_system_prompt.clone().map(Arc::new);
-    // 扁平 RouteEntry：handler 为 pub 字段（对齐现状 select! 分支顺序——
-    // execute 优先于 cancel.cancelled()；二者均会触发 push_done）。
+    // Cancel wins readiness ties, but cannot erase a commit already made by the handler.
     let outcome = tokio::select! {
-        r = resolved.entry.handler.execute(ctx) => r,
+        biased;
         _ = req.cancel.cancelled() => {
             tracing::info!(session_id = %req.session_id, "command cancelled");
             CommandOutcome::Done(CommandResult {
@@ -230,6 +236,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 feedback: None,
             })
         }
+        r = resolved.entry.handler.execute(ctx) => r,
     };
     // Outcome 三态分发（Phase 5 Step 6；计划代码形态）：
     //   Done(r)   → emit_command_feedback（Step 1）→ push_done → Handled(PromptResult)
@@ -237,6 +244,38 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
     //   Delegate(_) → 本 Phase 无实现（恒 Done），unreachable!（Phase 6 使用）
     match outcome {
         CommandOutcome::Done(mut result) => {
+            // A cancelled store future can already have committed. Until confirmed,
+            // the host must evict its hot snapshot and recover from durable storage.
+            let mut persistence_inconsistent = commit_state.is_uncertain();
+            let mut history_replaced_by_compaction = false;
+            let mut committed_payloads = None;
+            if !persistence_inconsistent && commit_state.has_committed() {
+                match restore_committed_context(req.thread_store.as_ref(), req.thread_id.as_ref())
+                    .await
+                {
+                    Ok((payloads, messages)) => {
+                        committed_payloads = Some(payloads);
+                        result.messages = messages;
+                        history_replaced_by_compaction = true;
+                    }
+                    Err(error) => {
+                        tracing::warn!(session_id = %req.session_id, error = %error, "committed command history reload failed");
+                        persistence_inconsistent = true;
+                    }
+                }
+            }
+            let failure = persistence_inconsistent.then(|| {
+                result.feedback = Some(CommandFeedback {
+                    level: FeedbackLevel::Error,
+                    message: "Conversation persistence is uncertain; reload the session to recover"
+                        .into(),
+                    channel: FeedbackChannel::UiOnly,
+                });
+                result.stop_reason = PromptStopReason::EndTurn;
+                ExecutionFailure::internal(
+                    "Conversation persistence is uncertain; reload the session to recover",
+                )
+            });
             // 反馈统一出口：handler.execute 之后、push_done 之前发射
             // CommandFeedback 事件（channel=Session 额外追加系统消息）。
             // [P2-1] 占位日志退役——事件通道已接入（Phase 5 Step 1）。
@@ -247,7 +286,8 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
             req.event_sink
                 .push_done(req.session_id, "end_turn", None)
                 .await;
-            let mut persisted_payloads = req.history_payloads.clone();
+            let mut persisted_payloads =
+                committed_payloads.unwrap_or_else(|| req.history_payloads.clone());
             let existing_ids = persisted_payloads
                 .iter()
                 .map(peri_acp_types::store::PersistedPayload::id)
@@ -263,12 +303,12 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
             InterceptOutcome::Handled(PromptResult {
                 persisted_payloads,
                 messages: result.messages,
-                ok: true,
+                ok: !persistence_inconsistent,
                 stop_reason: result.stop_reason,
-                history_replaced_by_compaction: false,
-                persistence_inconsistent: false,
+                history_replaced_by_compaction,
+                persistence_inconsistent,
                 recall_items: Vec::new(),
-                failure: None,
+                failure,
             })
         }
         CommandOutcome::Inject(payload) => InterceptOutcome::Inject(payload),
@@ -276,4 +316,41 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
             unreachable!("Delegate 本 Phase 无实现（恒 Done）；Phase 6 ui 域上送注册后接入")
         }
     }
+}
+
+async fn restore_committed_context(
+    store: Option<&Arc<dyn ThreadStore>>,
+    thread_id: Option<&String>,
+) -> anyhow::Result<(Vec<PersistedPayload>, Vec<BaseMessage>)> {
+    let (store, thread_id) = store
+        .zip(thread_id)
+        .ok_or_else(|| anyhow::anyhow!("compact persistence is unavailable"))?;
+    let inherited = store.load_inherited_context(thread_id).await?;
+    let own = store.load_payloads(thread_id).await?;
+    let own_ids = own
+        .iter()
+        .map(PersistedPayload::id)
+        .collect::<std::collections::HashSet<_>>();
+    if inherited
+        .payloads
+        .iter()
+        .any(|payload| own_ids.contains(&payload.id()))
+    {
+        anyhow::bail!("inherited context overlaps command own history");
+    }
+    let own_flags = store.load_message_flags(thread_id).await?;
+    let mut transcript = MessageTranscript::new()
+        .with_ancestor_payloads(inherited.payloads)
+        .with_own_payloads(own);
+    transcript.set_flags_batch(inherited.flags);
+    transcript.set_flags_batch(
+        own_flags
+            .into_iter()
+            .filter(|(id, _)| own_ids.contains(id))
+            .collect(),
+    );
+    let messages =
+        crate::session::exec::compact_pipeline::assemble_compact_messages(&transcript, &None)
+            .messages;
+    Ok((transcript.persisted_payloads(), messages))
 }

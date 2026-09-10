@@ -8,7 +8,10 @@
 //! - **异步持久化**：append 后通过 unbounded_channel 异步触发 ThreadStore 写入
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 
 use anyhow::anyhow;
 
@@ -17,6 +20,29 @@ use crate::messages::{BaseMessage, MessageContent, MessageId};
 use crate::thread::{ThreadId, ThreadStore};
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::{encode_system_reminder, TrustedSystemReminder};
+
+// The command interceptor retains a clone while its cancellable pipeline owns the
+// transcript, so dropping that future cannot erase the persistence outcome.
+#[derive(Debug, Clone, Default)]
+pub struct CompactionCommitState(Arc<AtomicU8>);
+
+impl CompactionCommitState {
+    pub fn is_uncertain(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == 1
+    }
+
+    pub fn has_committed(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == 2
+    }
+
+    fn mark_pending(&self) {
+        self.0.store(1, Ordering::SeqCst);
+    }
+
+    fn mark_committed(&self) {
+        self.0.store(2, Ordering::SeqCst);
+    }
+}
 
 // ─── TranscriptEntry ──────────────────────────────────────────────────────────
 
@@ -171,6 +197,7 @@ pub struct MessageTranscript {
     /// 此标记不持久化；executor 用它区分 Full Compact 的合法可见快照和
     /// 取消后可能不完整的临时 transcript。
     full_compaction_committed: bool,
+    compaction_commit_state: CompactionCommitState,
     /// 持久化后端引用（保留 Arc 让 store 在 transcript 存活期间不被释放，
     /// spawned writer task 持有独立 clone）
     store: Option<Arc<dyn ThreadStore>>,
@@ -208,6 +235,7 @@ impl MessageTranscript {
             persist_handle: None,
             thread_id: None,
             full_compaction_committed: false,
+            compaction_commit_state: CompactionCommitState::default(),
             store: None,
         }
     }
@@ -527,6 +555,15 @@ impl MessageTranscript {
         Arc::new(filtered)
     }
 
+    pub fn with_compaction_commit_state(mut self, state: CompactionCommitState) -> Self {
+        self.compaction_commit_state = state;
+        self
+    }
+
+    pub fn compaction_commit_state(&self) -> CompactionCommitState {
+        self.compaction_commit_state.clone()
+    }
+
     /// 当前执行期间是否已提交 Full Compact。
     pub fn full_compaction_committed(&self) -> bool {
         self.full_compaction_committed
@@ -672,8 +709,22 @@ impl MessageTranscript {
 
     // ── 标记 ──────────────────────────────────────────────────────────────────
 
+    fn can_update_own_flags(&self, id: MessageId) -> bool {
+        let allowed = self
+            .id_index
+            .get(&id)
+            .is_some_and(|index| *index >= self.ancestor_len);
+        if !allowed {
+            tracing::warn!(?id, "ignoring flag mutation outside own transcript region");
+        }
+        allowed
+    }
+
     /// 设置 truncated 标记（Micro compact）
     pub fn set_truncated(&mut self, id: MessageId, value: bool) {
+        if !self.can_update_own_flags(id) {
+            return;
+        }
         self.flags.entry(id).or_default().truncated = value;
         let flags = self.flags[&id].clone();
         self.send_persist(PersistOp::UpdateFlags(id, flags));
@@ -681,6 +732,9 @@ impl MessageTranscript {
 
     /// 设置 excluded 标记（Full / Smart compact）
     pub fn set_excluded(&mut self, id: MessageId, value: bool) {
+        if !self.can_update_own_flags(id) {
+            return;
+        }
         self.flags.entry(id).or_default().excluded = value;
         let flags = self.flags[&id].clone();
         self.send_persist(PersistOp::UpdateFlags(id, flags));
@@ -692,6 +746,9 @@ impl MessageTranscript {
     /// per-message directive 持久化到 flags，避免后续每 turn 重新规划。
     /// 设置 projection 的同时也会设置 truncated=true。
     pub fn set_flags_projection(&mut self, id: MessageId, directive: MessageProjectionDirective) {
+        if !self.can_update_own_flags(id) {
+            return;
+        }
         let entry = self.flags.entry(id).or_default();
         entry.truncated = true;
         entry.projection = Some(directive);
@@ -701,6 +758,9 @@ impl MessageTranscript {
 
     /// 清除指定消息的所有标记
     pub fn clear_flags(&mut self, id: MessageId) {
+        if !self.can_update_own_flags(id) {
+            return;
+        }
         self.flags.remove(&id);
         self.send_persist(PersistOp::UpdateFlags(id, MessageFlags::default()));
     }
@@ -723,7 +783,11 @@ impl MessageTranscript {
         &mut self,
         lifecycle: crate::thread::CompactionLifecycle,
     ) -> anyhow::Result<()> {
-        self.flush_persistence().await?;
+        if self.compaction_commit_state.is_uncertain() {
+            return Err(anyhow!(
+                "compact persistence outcome is unknown; reload the session"
+            ));
+        }
 
         let (store, thread_id) = match (&self.store, &self.thread_id) {
             (Some(store), Some(thread_id)) => (store.clone(), thread_id.clone()),
@@ -734,6 +798,11 @@ impl MessageTranscript {
             if !self.id_index.contains_key(id) {
                 return Err(anyhow!(
                     "compact lifecycle flag target id {id:?} not found in transcript"
+                ));
+            }
+            if self.id_index[id] < self.ancestor_len {
+                return Err(anyhow!(
+                    "compact lifecycle cannot mutate ancestor message {id:?}"
                 ));
             }
         }
@@ -748,10 +817,15 @@ impl MessageTranscript {
             }
         }
 
+        // Both awaits can be cancelled, or report an error after durable effects. Only
+        // applying the acknowledged lifecycle to memory makes this snapshot safe again.
+        self.compaction_commit_state.mark_pending();
+        self.flush_persistence().await?;
         store
             .commit_compaction_lifecycle(&thread_id, &lifecycle)
             .await?;
         self.apply_compaction_lifecycle_memory(&lifecycle);
+        self.compaction_commit_state.mark_committed();
 
         Ok(())
     }
@@ -808,6 +882,7 @@ impl MessageTranscript {
             persist_handle: self.persist_handle.take(),
             thread_id: self.thread_id.take(),
             full_compaction_committed: self.full_compaction_committed,
+            compaction_commit_state: self.compaction_commit_state.clone(),
             store: self.store.take(),
         }
     }

@@ -98,7 +98,7 @@ impl MicroCompactPlan {
 
 /// 错误信息常量：transcript 中无可用持久化 directive。
 ///
-/// 调用方应识别此特定消息并回退到 `plan_micro`。
+/// Reason 保持 canonical 可见视图；新计划只由 Compact 阶段显式生成。
 pub const NO_PERSISTED_DIRECTIVES: &str = "no persisted directives in transcript";
 
 /// 错误信息常量：持久化 directive 的 policy_version 与当前不匹配。
@@ -224,6 +224,9 @@ pub(crate) fn estimate_projection_chars(
     let mut after = 0u64;
 
     for entry in transcript.entries() {
+        if transcript.flags(entry.id()).excluded {
+            continue;
+        }
         let Some(message) = entry.as_message() else {
             continue;
         };

@@ -15,7 +15,7 @@ use peri_acp_types::{
     messages::BaseMessage,
     store::{
         deserialize_persisted_payload, serialize_persisted_payload, CompactionLifecycle,
-        MessageFlags, PersistedPayload, ThreadStore,
+        InheritedContext, MessageFlags, PersistedPayload, ThreadStore,
     },
     thread::{AgentStatus, CancelPolicy, ThreadId, ThreadListEntry, ThreadMeta},
 };
@@ -287,6 +287,7 @@ impl SqliteThreadStore {
             "ALTER TABLE threads ADD COLUMN config TEXT",
             "ALTER TABLE threads ADD COLUMN cached_context TEXT",
             "ALTER TABLE threads ADD COLUMN frozen_context TEXT",
+            "ALTER TABLE threads ADD COLUMN inherited_context TEXT",
             "ALTER TABLE threads ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0",
@@ -320,6 +321,9 @@ impl SqliteThreadStore {
                     .await?;
             match row {
                 Some((Some(parent),)) => {
+                    if chain.contains(&parent) {
+                        anyhow::bail!("cyclic thread ancestry");
+                    }
                     chain.push(parent.clone());
                     current = parent;
                 }
@@ -823,16 +827,94 @@ impl ThreadStore for SqliteThreadStore {
         Ok(())
     }
 
-    async fn load_context_payloads(&self, thread_id: &ThreadId) -> Result<Vec<PersistedPayload>> {
-        let chain = self.resolve_ancestor_chain(thread_id).await?;
-        let mut payloads = Vec::new();
-        for (index, tid) in chain.iter().enumerate() {
-            if index == chain.len() - 1 {
-                payloads.extend(self.load_payloads(tid).await?);
-            } else if let Some(snapshot_id) = self.load_meta(tid).await?.snapshot_at_message_id {
-                payloads.extend(self.load_payloads_up_to(tid, &snapshot_id).await?);
-            }
+    async fn store_inherited_context(
+        &self,
+        thread_id: &ThreadId,
+        context: &InheritedContext,
+    ) -> Result<()> {
+        let snapshot = context.to_json()?;
+        // Validate before publishing, including the message/flag reference boundary.
+        InheritedContext::from_json(&snapshot)?;
+        let result = sqlx::query(
+            "UPDATE threads SET inherited_context = ?1 WHERE id = ?2 AND inherited_context IS NULL",
+        )
+        .bind(snapshot)
+        .bind(thread_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            anyhow::bail!("inherited context already exists or thread is missing");
         }
+        Ok(())
+    }
+
+    async fn load_inherited_context(&self, thread_id: &ThreadId) -> Result<InheritedContext> {
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT inherited_context FROM threads WHERE id = ?1")
+                .bind(thread_id)
+                .fetch_one(&self.pool)
+                .await?;
+        if let Some(snapshot) = row.0 {
+            return InheritedContext::from_json(&snapshot);
+        }
+        let chain = self.resolve_ancestor_chain(thread_id).await?;
+        let mut context = InheritedContext::default();
+        // Each edge's cutoff belongs to its child. A stored snapshot replaces all
+        // inherited state, so later parent compaction/rewind cannot change it.
+        for (index, tid) in chain.iter().enumerate() {
+            let row: (Option<String>,) =
+                sqlx::query_as("SELECT inherited_context FROM threads WHERE id = ?1")
+                    .bind(tid)
+                    .fetch_one(&self.pool)
+                    .await?;
+            if let Some(snapshot) = row.0 {
+                context = InheritedContext::from_json(&snapshot)?;
+                continue;
+            }
+            if index == 0 {
+                continue;
+            }
+            let meta = self.load_meta(tid).await?;
+            let Some(cutoff) = meta.snapshot_at_message_id else {
+                context = InheritedContext::default();
+                continue;
+            };
+            let parent = &chain[index - 1];
+            let own = self.load_payloads_up_to(parent, &cutoff).await?;
+            if own.is_empty() {
+                // A parent with no own entries can point into its inherited region.
+                if let Some(position) = context
+                    .payloads
+                    .iter()
+                    .position(|payload| payload.id().as_uuid().to_string() == cutoff)
+                {
+                    context.payloads.truncate(position + 1);
+                } else {
+                    anyhow::bail!("inherited context cutoff is missing");
+                }
+            } else {
+                let own_ids = own.iter().map(PersistedPayload::id).collect::<HashSet<_>>();
+                context.flags.extend(
+                    self.load_message_flags(parent)
+                        .await?
+                        .into_iter()
+                        .filter(|(id, _)| own_ids.contains(id)),
+                );
+                context.payloads.extend(own);
+            }
+            let ids = context
+                .payloads
+                .iter()
+                .map(PersistedPayload::id)
+                .collect::<HashSet<_>>();
+            context.flags.retain(|id, _| ids.contains(id));
+        }
+        Ok(context)
+    }
+
+    async fn load_context_payloads(&self, thread_id: &ThreadId) -> Result<Vec<PersistedPayload>> {
+        let mut payloads = self.load_inherited_context(thread_id).await?.payloads;
+        payloads.extend(self.load_payloads(thread_id).await?);
         Ok(payloads)
     }
 
@@ -1144,3 +1226,7 @@ impl ThreadStore for SqliteThreadStore {
 #[cfg(test)]
 #[path = "sqlite_store_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sqlite_inherited_context_test.rs"]
+mod inherited_context_tests;

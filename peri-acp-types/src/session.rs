@@ -389,7 +389,7 @@ pub struct PromptResult {
     /// 致命执行失败（None = 正常终止 / 用户取消 / 最大轮数；Some = turn 应
     /// 以协议 error 结束，见 spec/issues/2026-08-18-acp-error-handler.md）。
     pub failure: Option<ExecutionFailure>,
-    /// 持久化状态无法回滚或验证，宿主必须使 session 不可继续。
+    /// 没有可验证的 canonical snapshot，宿主必须移除热 session 并要求冷加载。
     pub persistence_inconsistent: bool,
     /// 本轮是否发生 Full Compact 提交并替换了先前的可见历史。
     pub history_replaced_by_compaction: bool,
@@ -400,8 +400,8 @@ pub struct PromptResult {
 impl Default for PromptResult {
     /// 防御性回退（结果缺失 / 未执行时使用）：空失败结果。
     ///
-    /// 结果缺失必须表达为安全的 fatal failure，不能作为成功 `EndTurn`
-    /// 继续交给 ACP。
+    /// 结果缺失必须表达为安全的 fatal failure；未知持久化状态要求冷加载，
+    /// 不能让空 payload 覆盖 host 的历史快照。
     fn default() -> Self {
         Self {
             persisted_payloads: Vec::new(),
@@ -409,7 +409,7 @@ impl Default for PromptResult {
             ok: false,
             stop_reason: PromptStopReason::EndTurn,
             history_replaced_by_compaction: false,
-            persistence_inconsistent: false,
+            persistence_inconsistent: true,
             recall_items: Vec::new(),
             failure: Some(ExecutionFailure::missing_result()),
         }

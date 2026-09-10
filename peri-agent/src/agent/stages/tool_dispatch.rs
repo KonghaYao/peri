@@ -391,6 +391,15 @@ pub async fn dispatch_tools(
         tx.commit_staged();
     }
 
+    // 只计入已提交的最外层结果，包括错误结果；PTC 内部调用没有独立 transcript
+    // 提交，不在这里重复计量。先记账再运行后置 hook，确保 hook 失败也不丢增长。
+    {
+        let mut tracker = ctx.compact.token_tracker.write();
+        for (_, result) in collect_outcome.results.iter().chain(&resolution_errors) {
+            tracker.add_estimated_tool_tokens(&result.output);
+        }
+    }
+
     // 阶段 C：仅已进入 policy 的调用触发 after_tools_batch。
     // Resolution 错误在 middleware 前结算，不能产生任何 hook 副作用。
     run_after_tools_batch(ctx, &collect_outcome.results).await?;

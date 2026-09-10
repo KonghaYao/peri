@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use peri_acp_types::identity::AgentId;
+use peri_acp_types::store::{InheritedContext, PersistedPayload};
 use peri_acp_types::thread::CancelPolicy;
 use tokio_util::sync::CancellationToken;
 
@@ -168,6 +169,69 @@ async fn spawn_subagent_impl(
     };
     let cancel_policy = cancel_policy.as_cancel_policy();
 
+    let mut inherited = InheritedContext {
+        payloads: parent_messages
+            .iter()
+            .cloned()
+            .map(PersistedPayload::Message)
+            .collect(),
+        flags: Default::default(),
+    };
+    if !inherited.payloads.is_empty() {
+        if let Some(parent) = parent {
+            let transcript = parent.transcript();
+            let transcript = transcript.read();
+            let canonical = transcript
+                .persisted_payloads()
+                .into_iter()
+                .map(|payload| (payload.id(), payload))
+                .collect::<std::collections::HashMap<_, _>>();
+            for payload in &mut inherited.payloads {
+                if let Some(original) = canonical.get(&payload.id()) {
+                    *payload = original.clone();
+                }
+            }
+            inherited.flags = inherited
+                .payloads
+                .iter()
+                .filter_map(|payload| {
+                    transcript
+                        .get_flags(payload.id())
+                        .map(|flags| (payload.id(), flags))
+                })
+                .collect();
+        } else if let (Some(store), Some(parent_id)) = (&thread_store, &parent_thread_id) {
+            let parent_context = store.load_inherited_context(parent_id).await?;
+            let mut canonical = parent_context
+                .payloads
+                .into_iter()
+                .map(|payload| (payload.id(), payload))
+                .collect::<std::collections::HashMap<_, _>>();
+            canonical.extend(
+                store
+                    .load_payloads(parent_id)
+                    .await?
+                    .into_iter()
+                    .map(|payload| (payload.id(), payload)),
+            );
+            for payload in &mut inherited.payloads {
+                if let Some(original) = canonical.get(&payload.id()) {
+                    *payload = original.clone();
+                }
+            }
+            inherited.flags = parent_context.flags;
+            inherited
+                .flags
+                .extend(store.load_message_flags(parent_id).await?);
+            let ids = inherited
+                .payloads
+                .iter()
+                .map(PersistedPayload::id)
+                .collect::<std::collections::HashSet<_>>();
+            inherited.flags.retain(|id, _| ids.contains(id));
+        }
+    }
+
     // 4. 创建子线程（thread_store Some 时；None 跳过落库——仅测试/遗留路径）
     if let Some(ref store) = thread_store {
         let snapshot_id = parent_messages.last().map(|m| m.id().as_uuid().to_string());
@@ -182,10 +246,20 @@ async fn spawn_subagent_impl(
             .create_thread(child_meta)
             .await
             .map_err(|e| format!("Failed to create child thread: {}", e))?;
+        if let Err(error) = store
+            .store_inherited_context(&child_thread_id, &inherited)
+            .await
+        {
+            let cleanup = store.delete_thread(&child_thread_id).await;
+            return Err(format!(
+                "Failed to persist child inherited context: {error}; cleanup: {cleanup:?}"
+            )
+            .into());
+        }
     }
 
     // 5. 构造子 session + 链装配 + v2_ctx（共享 helper [build_subagent_session_v2]：
-    //    frozen 从父 copy 不重读磁盘，transcript 绑定存储，ancestor 为空）
+    //    frozen 从父 copy 不重读磁盘，transcript 恢复只读 inherited snapshot 后绑定存储）
     //    注入 parent_messages / system_prompt / prompt 留在本函数——spawn 与
     //    resume 的消息注入差异大，不进 helper（D1）
     let frozen = FrozenContext {
@@ -216,7 +290,8 @@ async fn spawn_subagent_impl(
         cancel_token.clone(),
         child_thread_id.clone(),
         thread_store.clone(),
-        Vec::new(), // 无 ancestor（spawn 新建 thread，transcript 为空）
+        inherited,
+        Vec::new(), // 新 child 没有 own history
         llm,
         chain_assembler,
         tools,
@@ -239,13 +314,7 @@ async fn spawn_subagent_impl(
 
     let transcript = session.transcript();
 
-    // 6a. fork 路径：把 parent_messages 注入 transcript（让子 agent 看到父会话上下文）
-    if !parent_messages.is_empty() {
-        let mut tx = transcript.write();
-        for msg in &parent_messages {
-            tx.append(msg.clone());
-        }
-    }
+    // 父上下文已作为只读 ancestor 装载；不可用原 ID append 到 child messages。
 
     // 6b. SubAgent system_prompt（身份构建）注入到 transcript 开头位置：
     // - fork 路径：在 parent_messages 之后（让身份提示词位于对话上下文之后、
@@ -335,14 +404,12 @@ async fn spawn_subagent_impl(
 // ─── 共享 session 构造（spawn / resume 共用，D1） ───────────────────────────
 
 /// 构造子 session + 链装配 + v2_ctx（[`spawn_subagent_impl`] 与
-/// [`resume_subagent_impl`] 共用的装配块，纯 move 提取——spawn 行为不变）。
+/// [`resume_subagent_impl`] 共用的装配块）。
 ///
 /// - session 以 `child_thread_id` 为 thread_id（subagent 必有持久化 thread；
 ///   thread_id = agent_id）；
-/// - transcript 装载 `ancestor`（resume 的旧 transcript 重放；spawn 传空——
-///   `with_ancestor(vec![])` 为 no-op），再 `with_persistence` 绑定存储
-///   （**顺序不可反**：with_ancestor 只建 id_index、不触发持久化
-///   transcript.rs:158-169，append 会 send_persist 二次落库 :430-438）；
+/// - transcript 先装载只读 inherited snapshot、再装载当前 thread own history，
+///   恢复各自 flags 后绑定持久化；装载不发送 append，避免跨 thread 的原 ID 写入；
 /// - 链装配（skill_names / frozen 注入链上下文；链序由 assembler 实现方保持）；
 /// - `build_v2_subagent_context` 构造 StageContext。
 ///
@@ -355,7 +422,8 @@ fn build_subagent_session_v2(
     cancel_token: CancellationToken,
     child_thread_id: String,
     thread_store: Option<Arc<dyn ThreadStore>>,
-    ancestor: Vec<peri_acp_types::store::PersistedPayload>,
+    inherited: InheritedContext,
+    own: Vec<PersistedPayload>,
     llm: Box<dyn ReactLLM + Send + Sync>,
     chain_assembler: Arc<dyn SubagentChainAssembler>,
     tools: Vec<Arc<dyn BaseTool>>,
@@ -389,7 +457,10 @@ fn build_subagent_session_v2(
         let transcript_arc = session.transcript();
         let mut transcript = transcript_arc.write();
         let old = std::mem::take(&mut *transcript);
-        let with_ancestor = old.with_ancestor_payloads(ancestor);
+        let mut with_ancestor = old
+            .with_ancestor_payloads(inherited.payloads)
+            .with_own_payloads(own);
+        with_ancestor.set_flags_batch(inherited.flags);
         *transcript = match thread_store {
             Some(ref store) => {
                 with_ancestor.with_persistence(Arc::clone(store), child_thread_id.clone())
@@ -562,10 +633,35 @@ async fn resume_subagent_impl(
 
     // ── 重建（失败回滚 status 至原值，防 thread 永久停留 active）──
 
-    // 1. 加载 transcript；末条含未配对 tool_calls 的 AI 则 pop（R2-MID-1：
+    // 1. 加载 ancestor/own 与 flags；own 末条含未配对 tool_calls 的 AI 则 pop（R2-MID-1：
     //    仅末条规则，幂等——磁盘旧消息不删除，每次 resume 重截）
-    let mut loaded = match thread_store.load_payloads(&thread_id).await {
-        Ok(msgs) => msgs,
+    let restored = async {
+        let mut inherited = thread_store.load_inherited_context(&thread_id).await?;
+        let own = thread_store.load_payloads(&thread_id).await?;
+        let ancestor_ids = inherited
+            .payloads
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<std::collections::HashSet<_>>();
+        let own_ids = own
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<std::collections::HashSet<_>>();
+        if own_ids.iter().any(|id| ancestor_ids.contains(id)) {
+            anyhow::bail!("inherited context overlaps child own history");
+        }
+        inherited.flags.extend(
+            thread_store
+                .load_message_flags(&thread_id)
+                .await?
+                .into_iter()
+                .filter(|(id, _)| own_ids.contains(id)),
+        );
+        Ok::<_, anyhow::Error>((inherited, own))
+    }
+    .await;
+    let (inherited, mut loaded) = match restored {
+        Ok(history) => history,
         Err(e) => {
             // R-M1 回滚：重建失败 → status 回滚至原值（不置 active 卡死）
             let _ = thread_store
@@ -641,8 +737,8 @@ async fn resume_subagent_impl(
         .or_else(|| meta.title.clone())
         .unwrap_or_else(|| "subagent".to_string());
 
-    // 6. 重建 session（thread_id 固定 = config.thread_id；with_ancestor 装载
-    //    旧 transcript 重放 + with_persistence 绑定，顺序不可反——helper 内）
+    // 6. 重建 session（thread_id 固定 = config.thread_id；ancestor/own 显式分区，
+    //    两区 flags 均恢复后绑定持久化——helper 内）
     //    不注入 parent_messages / identity System / skill_names（F4 / R-H1）
     let (session, v2_ctx) = build_subagent_session_v2(
         cwd.clone(),
@@ -650,6 +746,7 @@ async fn resume_subagent_impl(
         cancel_token.clone(),
         thread_id.clone(),
         Some(Arc::clone(&thread_store)),
+        inherited,
         loaded,
         llm,
         chain_assembler,

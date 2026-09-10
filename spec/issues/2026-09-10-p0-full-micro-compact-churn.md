@@ -1,6 +1,6 @@
 # P0：长会话中 Full 与 Micro Compact 反复交错且缺少可信进展度量
 
-**状态**：Investigating
+**状态**：Fixed（代码与自动验证完成；待现场验收）
 **优先级**：P0
 **类型**：可用性 / Token 成本 / Compact 活性 / 可观测性
 **创建日期**：2026-09-10
@@ -339,3 +339,50 @@ cargo test -p peri-agent --lib -- --quiet
 - [ ] 用现场同一会话实际 provider input 与事件链补证，量化成功 Full 后基线和额外调用成本，再决定是否需要 no-progress guard。
 
 此前「仅旧压力样本去重即可、不加 no-progress guard」的结论应保留为当时证据下的决策，不能作为本次剩余问题已经解决的依据。此次尚未修改生产策略或关闭 P0。
+
+
+## 修复实现与验收（2026-09-11）
+
+用户明确要求先提交审计，再设计并修复、验证后提交。审计已独立提交为 `c415e661`；以下为该审计之后的修复，不将前文历史失败结果改写为成功。
+
+### 修复决策
+
+| 缺陷 | 实现与正确性场景 |
+| --- | --- |
+| A1 重复回收 excluded 历史 | TurnGroup、Micro planner 与 estimator 跳过 excluded，只规划 visible own history；Full 后已排除的长工具结果不能产生新 Micro saving，也不能压制必要的 Full。真实 SQLite 循环不再对这些历史交替触发 Micro。 |
+| A2 Reason 隐式预投影 | Reason 仅应用已提交 directive，Absent 使用 canonical 可见消息；渲染已有 directive 与自动 compact 开关独立。消除请求已经变短后又把同一收益记给下次 Micro 的路径。 |
+| A3 工具增长未入账 | canonical 工具批次原子提交之后、after_tools_batch 之前，统一记成功和解析失败结果的增长；内部 PTC 调用不重复结算。有效新 provider input usage 结清估算，zero/missing 保留未确认增长，预算不重复扣减。 |
+| A4 Full 后错误丢摘要 | host 不以终态 ok 决定是否采纳可信 payload 快照。Full 后 cancel、LLM error、forwarder error 均保留已提交摘要；writer 失败停止热会话、保留磁盘已提交内容，删除原有仅按新增 ID 回滚的路径。 |
+| A5 Full 成功但预算未恢复 | 采用顾问建议的一次重试窗口：无新增用户或工具工作时，两次 Full 后的对应真实请求仍高于 Full 阈值，返回 CompactBudgetUnrecovered；只认匹配请求的有效 usage，AI/摘要/Reminder 不重置计数，cancel 优先于预算错误。SQLite/RCRA 场景验证两次 Full、第三次 Reason 明确终止，canonical Reminder 完整保留。 |
+| A6 子会话来源边界丢失 | 新子会话冻结 inherited payload + flags 的版本化快照，own 消息独立持久化；spawn、resume、hidden child executor 恢复同一祖先边界；标记 setter 与 lifecycle 拒绝改写 parent IDs。覆盖 child Full/Micro、parent 后续 Full、关闭数据库重开、child resume，以及关闭自动 compact 后恢复已有投影。 |
+
+独立代码复核额外发现：Full 的数据库 COMMIT 可能已经成功，但取消先于内存 apply；store 返回错误也不能证明 COMMIT 未发生。普通 writer barrier 成功无法证明这类状态一致。自动与手动 `/compact` 都须传播共享提交状态，遇到不确定结果停止运行并要求冷恢复；已确认提交后的普通取消仍保留摘要。持久化不确定属于收尾失败，不等同于普通 cancel 或预算错误。
+
+### 验证记录
+
+审计中的四个 ignored correctness regression 已移除 ignore，并作为默认套件断言运行；旧成功 Full churn characterization 已改为正确行为回归。
+
+最终自动验证（命令退出码均为 0）：
+
+| 验证 | 结果 |
+| --- | --- |
+| `cargo test -p peri-agent -p peri-acp -p peri-acp-types -p peri-resources --lib --no-fail-fast -- --quiet` | Agent 754、ACP 619、types 334、resources 69 passed；均 0 failed / 0 ignored；ACP 日志通过 `RUST_LOG_FILE` 指向临时目录 |
+| `cargo test -p peri-middlewares --lib -- --test-threads=1` | 1611 passed、0 failed、4 既有 ignored；需允许本地回环端口与子进程状态读取 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 通过 |
+| `cargo build --workspace` | 通过 |
+| `cargo test --workspace --doc` | 1 passed、0 failed、3 既有 ignored |
+| 审计 correctness regression | 4 passed、0 ignored；首次 Reason 保留 canonical 内容、解析失败工具结果压力入账亦有断言 |
+| 手动与自动取消/恢复 | 6 个手动、10 个自动真实 SQLite 场景包含在上述完整套件中 |
+
+验证过程如实保留：Middleware 默认并发运行最初出现 26 项失败；串行后剩 4 项涉及沙箱的回环端口/进程观察限制。对应测试在允许所需系统能力后单独通过，随后完整串行套件通过。本次未改 Middleware 生产代码或削弱断言。格式检查、`git diff --check` 和变更文档本地链接检查通过；提交钩子由提交时再次执行。
+
+### 验收边界
+
+- 新 snapshot 可以准确冻结创建时 payload/flags。legacy 子会话未保存历史 snapshot，无法凭现存数据库重建创建时 flags；兼容加载修正 child cutoff 并恢复当前可获得状态，不声称回溯修复历史缺失。
+- 预算保护针对同一工作单元的重复 Full。持续新增非空 Human/Tool 会开启新窗口；本次未改变 canonical Reminder 生命周期，也未测出 frozen/system/tool schema 的不可压缩 token 下限。
+- 自动测试使用真实 SQLite、executor/host 收尾和模拟 provider usage；没有替代现场同一会话真实 token/事件链验收。P0 现场验收与成本量化继续留在本 issue，不因测试绿色归档。
+- 全局测试此前访问真实用户默认数据库，新增 schema 迁移在沙箱下暴露该问题。Resources 默认路径选择测试改为注入临时 SQLite，生产默认路径不变；ACP 验证日志通过 RUST_LOG_FILE 放入临时目录。
+
+- 独立复核确认当前自动 compact 与 `session/prompt` 的 `/compact` 主路径无剩余阻断发现。新增自动恢复 10 场景、手动取消与恢复 6 场景均通过。
+- 未注入 SQLite 内部 worker 已排队但尚未执行 COMMIT 的更窄时序；本轮稳定验证的是 COMMIT 已生效、ACK 返回前的取消与错误。若需严格验证该内部窗口，须另外建立存储层事务完成屏障实验。
+- 公开 Rust `dispatch::execute_command` 保留 API 尚未共享手动恢复保护；全仓库调用仅测试，host/router 未接线，不能归因于当前用户主路径。后续接入前须复用本轮提交状态契约。

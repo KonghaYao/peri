@@ -11,7 +11,7 @@ use peri_acp_types::{
     messages::BaseMessage,
     store::{
         deserialize_persisted_payload, serialize_persisted_payload, CompactionLifecycle,
-        PersistedPayload, ThreadStore,
+        InheritedContext, PersistedPayload, ThreadStore,
     },
     thread::{AgentStatus, ThreadId, ThreadListEntry, ThreadMeta},
 };
@@ -327,13 +327,45 @@ impl ThreadStore for FilesystemThreadStore {
         self.write_index(&metas).await
     }
 
+    async fn store_inherited_context(
+        &self,
+        id: &ThreadId,
+        context: &InheritedContext,
+    ) -> Result<()> {
+        self.load_meta(id).await?;
+        let snapshot = context.to_json()?;
+        InheritedContext::from_json(&snapshot)?;
+        if !atomic_write_json_if_absent(&self.thread_dir(id).join("inherited.json"), &snapshot)
+            .await?
+        {
+            anyhow::bail!("inherited context already exists");
+        }
+        Ok(())
+    }
+
+    async fn load_inherited_context(&self, id: &ThreadId) -> Result<InheritedContext> {
+        match fs::read_to_string(self.thread_dir(id).join("inherited.json")).await {
+            Ok(snapshot) => InheritedContext::from_json(&snapshot),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(InheritedContext::default())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn load_context_payloads(&self, thread_id: &ThreadId) -> Result<Vec<PersistedPayload>> {
-        self.load_payloads(thread_id).await
+        let mut payloads = self.load_inherited_context(thread_id).await?.payloads;
+        payloads.extend(self.load_payloads(thread_id).await?);
+        Ok(payloads)
     }
 
     async fn load_context(&self, thread_id: &ThreadId) -> Result<Vec<BaseMessage>> {
-        // 文件系统实现暂不支持祖先链，直接加载自身消息
-        self.load_messages(thread_id).await
+        Ok(self
+            .load_context_payloads(thread_id)
+            .await?
+            .into_iter()
+            .filter_map(|payload| payload.as_message().cloned())
+            .collect())
     }
 
     async fn list_child_threads(&self, parent_id: &ThreadId) -> Result<Vec<ThreadMeta>> {

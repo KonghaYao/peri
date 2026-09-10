@@ -47,8 +47,9 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             let guard = ctx.session.transcript.read();
             let visible = guard.visible_model_messages()?;
 
-            // 如果有 compact config，生成 plan 并渲染投影视图
-            if let Some(ref config) = ctx.compact.compact_config {
+            // 已提交的投影是会话状态，与是否启用自动 Compact 无关。
+            // Reason 只恢复已有投影；新计划和收益记账仅归 Compact。
+            {
                 let caps = ctx.runtime.llm.provider_capabilities();
                 // 优先使用持久化 directive，避免每 turn 重新规划
                 match crate::agent::compact_v2::projection::plan_from_persisted_directives(
@@ -81,17 +82,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                         }
                     }
                     crate::agent::compact_v2::projection::PersistedDirectiveRestore::Absent => {
-                        tracing::debug!("无持久化 directive，fallback 到 plan_micro");
-                        let plan =
-                            crate::agent::compact_v2::planner::plan_micro(&guard, config, false);
-                        if plan.has_changes() {
-                            crate::agent::compact_v2::projection::render_llm_view(
-                                &guard, &plan, &caps,
-                            )
-                            .unwrap_or(visible)
-                        } else {
-                            visible
-                        }
+                        visible
                     }
                     crate::agent::compact_v2::projection::PersistedDirectiveRestore::Invalid => {
                         tracing::warn!(
@@ -100,8 +91,6 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                         visible
                     }
                 }
-            } else {
-                visible
             }
         });
 
@@ -149,6 +138,15 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         agent_id,
         cancel: tokio_util::sync::CancellationToken::clone(&ctx.session.turn.cancel_token),
     });
+
+    // 将本次实际请求与最近成功的 Full 对齐；不得借用 tracker 的旧 usage。
+    let budget_probe = {
+        let transcript = ctx.session.transcript.read();
+        ctx.compact
+            .budget_recovery
+            .lock()
+            .begin_request(&transcript)
+    };
 
     // LLM 调用（与 cancel 竞争）。
     // 使用 generate_reasoning_with_observed_body：观测体复用本次调用已构建的
@@ -294,6 +292,19 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // 累积 token_tracker（P0 #2 修复：v2 路径下 token tracker 从未累积）
     if let Some(ref usage) = reasoning.usage {
         ctx.compact.token_tracker.write().accumulate(usage);
+    }
+
+    if ctx.session.turn.cancel_token.is_cancelled() {
+        return Err(AgentError::Interrupted);
+    }
+    if let (Some(config), Some(budget)) = (&ctx.compact.compact_config, &ctx.compact.context_budget)
+    {
+        ctx.compact.budget_recovery.lock().observe_response(
+            budget_probe,
+            reasoning.usage.as_ref(),
+            config,
+            budget,
+        )?;
     }
 
     // after_model middleware（hook_middleware / git_attribution 等在此）

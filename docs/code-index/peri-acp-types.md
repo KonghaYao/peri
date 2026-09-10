@@ -1,6 +1,6 @@
 # peri-acp-types 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-09（CompactConfig 边界校准）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11（compact 恢复与 inherited context 契约）
 > 依据：peri-acp-types/src/lib.rs、docs/standards/architecture-contracts.md、源码（本 crate 无 CLAUDE.md）
 
 ## 架构速览
@@ -14,6 +14,7 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 改 compact 继承与失败契约 | `src/store.rs` + `src/session.rs` + `src/error.rs` | `InheritedContext`；`ThreadStore::{store_inherited_context,load_inherited_context}`；`PromptResult::default`；`AgentError::CompactBudgetUnrecovered` | 版本化 payload/flags 快照校验版本与 ID 完整性；缺失 PromptResult 默认不可恢复热历史；Full 后持续高压给出安全错误文案；ARC-COMPACT-001 |
 | 改 CompactConfig 阈值 | `src/compact.rs`（`CompactConfig` 事实源，struct :210；`peri-agent/src/agent/compact_v2/config.rs:8` 仅 re-export；加载方 `peri-acp/src/host/compact_config.rs:14`；`peri-acp/src/provider/config.rs:194` 可挂配置） | 字段：`auto_compact_threshold`（默认 0.95）、`micro_compact_threshold`（默认 0.75）、`micro_compact_stale_steps`（默认 3）、`smart_compact_enabled`（deprecated、默认 false，但运行时仍尊重 true，:246）；`apply_env_overrides`（:325）；`has_valid_micro_field_limits`（:316） | serde 反序列化仅对 `auto_compact_threshold` 经 `deserialize_threshold_range`（:185）clamp 到 [0.0,1.0] 并 warn；`micro_compact_threshold` 当前不走该 helper；`DISABLE_COMPACT` → 禁用 + micro 阈值=1.0，`DISABLE_AUTO_COMPACT` → 仅禁 auto，`COMPACT_THRESHOLD` 校验后仅覆盖 auto 阈值（:326-339） |
 | 改旧 Compact 上下文的传输兼容 | `src/compact_reminder.rs` + `src/system_reminder.rs` | `legacy_compact_reminders`；`encode_legacy_system_reminder` | 精确识别 plain-text Human 的文件/Skill 回注及摘要格式，仅在模型投影和 ACP replay 出口生成 Legacy reminder；保留数据库原文，分块并转义正文，不提升可信来源；kind 区分 `compact_file` / `compact_skill` / `compact_summary`，供客户端显示简短类型标题 |
 | 改 System Reminder 契约/codec/筛选 | `src/system_reminder.rs` + `src/session.rs` + `src/store.rs` + `src/event.rs` | `SystemReminder` / `TrustedSystemReminderFactory`；`encode_system_reminder` / legacy parser；`QueuedPayload::SystemReminder`、`InboxHandle::push_system_reminder`；`PersistedPayload::SystemReminder`；`ExecutorEvent::SystemReminder` | producer 只构造 trusted canonical DTO；`MessageKind` 继续独立决定 wake；模型 wire 编码仅在 transcript 投影边界；持久化与 ACP event 保留结构化字段，未知/损坏版本 fail closed |
@@ -105,6 +106,8 @@
 | 其他 | `interaction.rs`（HITL）、`goal.rs`、`tasks.rs`、`cron.rs`、`workflow.rs`、`hooks.rs`、`plugin.rs`、`skills.rs`、`mcp.rs`/`mcp_skills.rs`、`lsp.rs`、`meta_harness.rs`、`peri_caps.rs`（`PeriCaps` re-export lib.rs:57）、`projection.rs`、`permission.rs`、`agents.rs`、`error.rs`（`AgentError`）、`summary.rs`/`event_data.rs`（TUI 消费 DTO） |
 
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）
+
+- ARC-COMPACT-001：继承快照、失败恢复与预算错误契约
 
 - ARC-TOOLS-001：`BaseTool::is_direct()` 自声明可见性；true 才直接进 LLM tools，false 仅经 SearchExtraTools 发现、ExecuteExtraTool 执行；包装层须透传
 - ARC-CANCEL-001：cancel 按 (session_id, turn_id, attempt_id) 三元组定位（`CancelRequest` 事实源 identity.rs:262）；幂等判定与终态归 Agent 层；`clear_queue` 默认 false

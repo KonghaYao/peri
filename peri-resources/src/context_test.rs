@@ -60,7 +60,13 @@ async fn test_open_with_explicit_path_is_directory_errs() {
 /// [P1] `open_with(None)` 使用默认数据库且可正常查询。
 #[tokio::test]
 async fn test_open_with_none_uses_default_store() {
-    let resources = Resources::open_with(None).await.unwrap();
+    // 复用生产路径选择逻辑，只注入默认存储位置，禁止测试迁移用户真实数据库。
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("default.db");
+    let resources = Resources::open_with_default(None, SqliteThreadStore::new(db_path.clone()))
+        .await
+        .unwrap();
+    assert!(db_path.is_file(), "None 分支必须打开注入的默认存储");
     let threads = resources.thread_store().list_threads().await;
     assert!(threads.is_ok(), "默认存储应可查询: {:?}", threads.err());
 }

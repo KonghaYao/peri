@@ -290,7 +290,6 @@ pub(crate) async fn run_prompt(
             state.lsp_pool.clone(),
         )
     };
-    let history_len = history.len();
     // Every canonical payload projects to exactly one model message. This is the only
     // safe prefix boundary when reminders are interleaved with ordinary messages.
     let _projected_history_len = history_payloads.len();
@@ -767,52 +766,47 @@ pub(crate) async fn run_prompt(
         .map_err(|e| AcpError::new(-32603, format!("run_session failed: {e}")))?;
     let result = handle.take_result();
 
-    // Persistence rollback/verification failure invalidates the in-memory session. Keeping the
-    // old snapshot would allow a subsequent turn to fork from unknown durable state.
-    let persistence_inconsistent = result.persistence_inconsistent;
+    finish_prompt_turn(sessions, &session_id, continuation, result).await
+}
 
-    // Persist new messages to ThreadStore and update in-memory state.
+// Durable progress is independent of the terminal status. This boundary also owns wire
+// projection so that cancellation/error responses can never bypass canonical state adoption.
+pub(super) async fn finish_prompt_turn(
+    sessions: &SharedSessions,
+    session_id: &str,
+    continuation: bool,
+    result: executor::PromptResult,
+) -> Result<Value, AcpError> {
     {
         let mut sessions = sessions.lock().await;
-        if persistence_inconsistent {
-            sessions.remove(&session_id);
-        } else if let Some(state) = sessions.get_mut(&session_id) {
-            if result.ok {
-                info!(
-                    session_id = %session_id,
-                    payloads = result.persisted_payloads.len(),
-                    compact = result.history_replaced_by_compaction,
-                    "Agent execution completed with canonical transcript snapshot"
-                );
-                // The transcript writer is the sole execution-time store writer. Its barrier
-                // completes before PromptResult is built; host only adopts that canonical
-                // discriminated snapshot and never reconstructs persistence from model projection.
-                state.history_payloads = result.persisted_payloads;
-                state.history = state
-                    .history_payloads
-                    .iter()
-                    .filter_map(|payload| payload.as_message().cloned())
-                    .collect();
-            } else {
-                state.history.truncate(history_len);
-                info!(session_id = %session_id, history_len, "Agent execution failed/cancelled without canonical progress");
-            }
-            // [AsyncContinuation] 续跑结束不回写 recall：保留续跑开始前
-            // SessionState 中的 recall（上一轮留给用户 prompt 的），续跑自身
-            // 产生的 recall 不覆盖它；用户 prompt 正常回写。
+        if result.persistence_inconsistent {
+            // A failed barrier leaves only the disk prefix authoritative. Do not allow
+            // another prompt to continue from an unverified in-memory snapshot.
+            sessions.remove(session_id);
+        } else if let Some(state) = sessions.get_mut(session_id) {
+            info!(
+                session_id,
+                payloads = result.persisted_payloads.len(),
+                compact = result.history_replaced_by_compaction,
+                ok = result.ok,
+                "Adopting canonical transcript snapshot"
+            );
+            // The writer barrier completes before PromptResult is built, even on cancel
+            // or model/forwarder failure. Early failures return the previous snapshot.
+            state.history_payloads = result.persisted_payloads;
+            state.history = state
+                .history_payloads
+                .iter()
+                .filter_map(|payload| payload.as_message().cloned())
+                .collect();
             if recall_overwrite_allowed(continuation) {
                 state.recall_items = result.recall_items;
             }
             state.cancel_token = None;
         }
     }
-
-    // ── ACP 结果投影（spec/issues/2026-08-18-acp-error-handler.md D2）──
-    // 所有失败路径的历史保存 / session state / cancel token 清理 / recall 回写
-    // 已在上方完成（result.messages / recall_items 已被消费）；此处只决定 wire
-    // 形态：fatal failure → Err(AcpError)（统一 host 与 mpsc/stdio transport 共用
-    // 同一标准 JSON-RPC error 路径），其余终止（cancel / max-iterations / end-turn）
-    // → 现有成功 PromptResponse。
+    // Fatal failures still use the standard JSON-RPC error; cancellation/max-iterations
+    // retain their existing PromptResponse stop reasons after state cleanup.
     prompt_wire_response(result.failure.as_ref(), result.stop_reason)
 }
 

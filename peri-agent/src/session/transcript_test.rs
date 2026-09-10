@@ -1,5 +1,35 @@
 use super::*;
 
+#[test]
+fn test_ancestor_flags_can_restore_but_cannot_mutate() {
+    let ancestor = BaseMessage::human("parent snapshot");
+    let ancestor_id = ancestor.id();
+    let mut transcript = MessageTranscript::new().with_ancestor(vec![ancestor]);
+    let restored = MessageFlags {
+        excluded: true,
+        ..Default::default()
+    };
+    transcript.set_flags_batch(HashMap::from([(ancestor_id, restored.clone())]));
+    transcript.set_excluded(ancestor_id, false);
+    transcript.set_truncated(ancestor_id, true);
+    transcript.set_flags_projection(
+        ancestor_id,
+        MessageProjectionDirective {
+            policy_version: 2,
+            entries: vec![],
+        },
+    );
+    transcript.clear_flags(ancestor_id);
+    assert_eq!(
+        transcript.flags(ancestor_id),
+        restored,
+        "所有普通flag写入口都必须保留只读祖先快照"
+    );
+    let own_id = transcript.append(BaseMessage::human("own work"));
+    transcript.set_excluded(own_id, true);
+    assert!(transcript.flags(own_id).excluded, "own区域仍允许压缩");
+}
+
 /// [回归测试] 内部 Compact 文本仅在模型出口包装，数据库原始内容和 ID 保持不变。
 #[test]
 fn test_legacy_compact_model_projection_preserves_storage() {

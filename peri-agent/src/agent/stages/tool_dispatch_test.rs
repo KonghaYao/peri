@@ -636,14 +636,28 @@ async fn test_resolution_error_emits_tool_started_and_ended() {
         "",
         vec![ToolCall::new("missing-1", "NotARealTool", json!({}))],
     );
+    ctx.compact
+        .token_tracker
+        .write()
+        .accumulate(&peri_model::TokenUsage {
+            input_tokens: 1_000,
+            ..Default::default()
+        });
     let catalog = ctx
         .runtime
         .tool_catalog
         .pin_working_tools(&ctx.runtime.tools.read())
         .unwrap();
-    dispatch_tools(&ctx, &reasoning, &catalog, &CancellationToken::new())
+    let outcome = dispatch_tools(&ctx, &reasoning, &catalog, &CancellationToken::new())
         .await
         .expect("unknown tool should settle as error");
+    let error_output = &outcome.results[0].1.output;
+    assert!(!error_output.is_empty());
+    assert_eq!(
+        ctx.compact.token_tracker.read().estimated_context_tokens(),
+        Some(1_000 + (error_output.chars().count() / 4) as u64),
+        "已经提交的解析失败结果也必须计入下一轮压力"
+    );
 
     let mut started = false;
     let mut ended = false;

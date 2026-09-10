@@ -105,7 +105,7 @@ impl Model for FullLifecycleModel {
 
 // ── Full Compact 测试 ──────────────────────────────────────────────────────
 
-// 审计反例保留为 ignored regression；显式运行 --ignored 可复现当前缺陷。
+// 审计中确认的失败反例，修复后作为默认执行的回归测试。
 // 对应 spec/issues/2026-09-10-p0-full-micro-compact-churn.md。
 async fn make_audit_full_history() -> (tempfile::TempDir, MessageTranscript) {
     let dir = tempfile::tempdir().unwrap();
@@ -147,7 +147,6 @@ async fn make_audit_full_history() -> (tempfile::TempDir, MessageTranscript) {
 
 /// [回归测试] Full 成功排除的历史不得再次成为 Micro 候选；使用默认 stale=3。
 #[tokio::test]
-#[ignore = "已确认 compact 缺陷：Micro 仍选择 excluded 历史；修复后移除此标记"]
 async fn test_audit_full_excluded_history_must_not_be_micro_candidate() {
     use crate::agent::compact_v2::{planner::plan_micro, projection};
     let (_dir, transcript) = make_audit_full_history().await;
@@ -168,7 +167,6 @@ async fn test_audit_full_excluded_history_must_not_be_micro_candidate() {
 
 /// [回归测试] 96% 的新压力样本不能用 excluded 历史的虚假收益满足回收目标。
 #[tokio::test]
-#[ignore = "已确认 compact 缺陷：虚假 Micro 收益阻止必要 Full；修复后移除此标记"]
 async fn test_audit_excluded_savings_must_not_suppress_full() {
     use crate::agent::compact_v2::{planner::ContextPressure, CompactOutcome};
     let (dir, mut transcript) = make_audit_full_history().await;

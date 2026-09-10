@@ -15,6 +15,10 @@ use crate::session::{sanitize_public_error, ExecutionFailure, ExecutionFailureKi
 fn default_prompt_result_is_safe_fatal_failure() {
     let result = PromptResult::default();
     assert!(!result.ok, "缺失结果不得记为成功");
+    assert!(
+        result.persistence_inconsistent,
+        "缺失结果没有可采纳的 canonical snapshot，必须要求冷加载"
+    );
     let failure = result
         .failure
         .expect("缺失结果必须携带 fatal failure，不能被 ACP 当成功 EndTurn");

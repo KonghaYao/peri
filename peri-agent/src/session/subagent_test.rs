@@ -193,6 +193,7 @@ struct MockThreadStore {
     threads: Arc<RwLock<Vec<ThreadMeta>>>,
     statuses: Arc<RwLock<Vec<(String, String)>>>,
     messages: Arc<RwLock<HashMap<String, Vec<BaseMessage>>>>,
+    inherited: RwLock<HashMap<String, peri_acp_types::store::InheritedContext>>,
     /// 一次性开关：置 true 后下一次 load_messages 返回 Err（重建失败回滚测试用）
     fail_load_messages: std::sync::atomic::AtomicBool,
 }
@@ -203,6 +204,7 @@ impl MockThreadStore {
             threads: Arc::new(RwLock::new(Vec::new())),
             statuses: Arc::new(RwLock::new(Vec::new())),
             messages: Arc::new(RwLock::new(HashMap::new())),
+            inherited: RwLock::new(HashMap::new()),
             fail_load_messages: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -213,6 +215,22 @@ impl crate::thread::ThreadStore for MockThreadStore {
     async fn create_thread(&self, meta: ThreadMeta) -> anyhow::Result<ThreadId> {
         self.threads.write().push(meta.clone());
         Ok(meta.id)
+    }
+
+    async fn store_inherited_context(
+        &self,
+        id: &ThreadId,
+        context: &peri_acp_types::store::InheritedContext,
+    ) -> anyhow::Result<()> {
+        self.inherited.write().insert(id.clone(), context.clone());
+        Ok(())
+    }
+
+    async fn load_inherited_context(
+        &self,
+        id: &ThreadId,
+    ) -> anyhow::Result<peri_acp_types::store::InheritedContext> {
+        Ok(self.inherited.read().get(id).cloned().unwrap_or_default())
     }
 
     async fn append_messages(&self, id: &ThreadId, msgs: &[BaseMessage]) -> anyhow::Result<()> {
@@ -691,7 +709,7 @@ fn resume_config(thread_store: Arc<MockThreadStore>, thread_id: String) -> Subag
 /// 构造带自定义装配/运行参数的 resume config
 #[allow(clippy::too_many_arguments)]
 fn resume_config_with(
-    thread_store: Arc<MockThreadStore>,
+    thread_store: Arc<dyn ThreadStore>,
     thread_id: String,
     llm: Box<dyn ReactLLM + Send + Sync>,
     run_mode: SubagentRunMode,
@@ -1740,3 +1758,6 @@ async fn test_resume_subagent_bg_register_cap_rolls_back() {
         assert_eq!(seq, vec!["done", "active", "done"], "active 后回滚原值");
     }
 }
+
+#[path = "subagent/provenance_test.rs"]
+mod provenance_tests;

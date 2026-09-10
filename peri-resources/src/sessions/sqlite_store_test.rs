@@ -510,14 +510,10 @@ async fn test_load_context_with_snapshot() {
     let parent_loaded = store.load_messages(&parent_id).await.unwrap();
     let snapshot_msg_id = parent_loaded[1].id().as_uuid().to_string();
 
-    // 更新父线程的 snapshot_at_message_id
-    let mut parent_meta = store.load_meta(&parent_id).await.unwrap();
-    parent_meta.snapshot_at_message_id = Some(snapshot_msg_id.clone());
-    store.update_meta(&parent_id, parent_meta).await.unwrap();
-
     // 创建子线程
     let mut child_meta = ThreadMeta::new("/tmp");
     child_meta.parent_thread_id = Some(parent_id.clone());
+    child_meta.snapshot_at_message_id = Some(snapshot_msg_id);
     child_meta.hidden = true;
     let child_id = store.create_thread(child_meta).await.unwrap();
 
@@ -600,26 +596,22 @@ async fn test_load_context_three_level_nesting() {
     store.append_messages(&l1_id, &l1_msgs).await.unwrap();
     let l1_loaded = store.load_messages(&l1_id).await.unwrap();
     let l1_snap = l1_loaded[1].id().as_uuid().to_string();
-    let mut l1_meta = store.load_meta(&l1_id).await.unwrap();
-    l1_meta.snapshot_at_message_id = Some(l1_snap);
-    store.update_meta(&l1_id, l1_meta).await.unwrap();
 
     // L2 子线程：2 条消息，快照到第 1 条
     let mut l2_meta = ThreadMeta::new("/project");
     l2_meta.parent_thread_id = Some(l1_id.clone());
+    l2_meta.snapshot_at_message_id = Some(l1_snap);
     l2_meta.hidden = true;
     let l2_id = store.create_thread(l2_meta).await.unwrap();
     let l2_msgs = vec![BaseMessage::human("L2-a"), BaseMessage::ai("L2-b")];
     store.append_messages(&l2_id, &l2_msgs).await.unwrap();
     let l2_loaded = store.load_messages(&l2_id).await.unwrap();
     let l2_snap = l2_loaded[0].id().as_uuid().to_string();
-    let mut l2_meta_loaded = store.load_meta(&l2_id).await.unwrap();
-    l2_meta_loaded.snapshot_at_message_id = Some(l2_snap);
-    store.update_meta(&l2_id, l2_meta_loaded).await.unwrap();
 
     // L3 孙线程：1 条消息，无快照
     let mut l3_meta = ThreadMeta::new("/project");
     l3_meta.parent_thread_id = Some(l2_id.clone());
+    l3_meta.snapshot_at_message_id = Some(l2_snap);
     l3_meta.hidden = true;
     let l3_id = store.create_thread(l3_meta).await.unwrap();
     let l3_msgs = vec![BaseMessage::human("L3-a")];
