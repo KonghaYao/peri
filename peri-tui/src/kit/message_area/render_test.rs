@@ -613,6 +613,23 @@ fn test_system_reminder_collapsed_shows_only_muted_header() {
 }
 
 #[test]
+fn test_compact_continuation_hint_renders_as_simple_system_prompt() {
+    crate::i18n::init(Some("en"));
+    let text = format!(
+        "{}\n\ncompact summary body",
+        peri_acp_types::compact::CONTINUATION_HINT
+    );
+    let unit = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text));
+    let lines = vm_to_lines(&unit, &GridSpec::with_content(80));
+    let rendered = all_text(&lines);
+
+    assert_eq!(lines.len(), 1, "compact 控制消息应简洁显示为单行");
+    assert!(rendered.contains("System Prompt"));
+    assert!(!rendered.contains("[Context has been compacted"));
+    assert!(!rendered.contains("compact summary body"));
+}
+
+#[test]
 fn test_system_reminder_expanded_shows_body() {
     let mut reminder = TuiSystemReminder::legacy("first line\nsecond line".into());
     reminder.fold = FoldState::Expanded;
