@@ -70,9 +70,9 @@
 | Crate / 项目 | 重点入口与职责问题 | 当前状态 |
 | --- | --- | --- |
 | peri-middlewares | client、dynamic registry、assembly、staged_connection、subagent tool、middleware capability | client/registry/assembly 已提交；capability A/B/C 已验证；subagent tool 待治理 |
-| peri-acp | host、session、event_sink、prompt、session lifecycle | host/session 已提交；event_sink 已拆分验证；prompt 待治理 |
+| peri-acp | host、session、event_sink、prompt、session lifecycle | host/session 已提交；event_sink 已拆分验证；prompt 模型/观测/stage 装配已拆分；canonical 旧测试副本待与 transcript 治理收敛 |
 | peri-resources | SQLite 连接、行映射、祖先上下文、compaction 事务 | SQLite 拆分已提交，65 项存储测试通过 |
-| peri-agent | stage_builder、tool_dispatch、workflow agent、transcript、subagent factory、MiddlewareState | stage_builder 与 capability 已拆分验证；其余待治理 |
+| peri-agent | stage_builder、tool_dispatch、workflow agent、transcript、subagent factory、MiddlewareState | stage_builder、capability、tool_dispatch 已拆分验证；workflow/transcript/subagent factory 待治理 |
 | peri-acp-types | session 混合 runtime/错误/消息投递，event_v2 契约与映射；Agent queue_test 文件存在但未挂载 | session 拆分已验证，Agent queue 7 项测试恢复挂载；event_v2 待审 |
 | peri-tui | client、ask_user、acp_notifier、current_turn、input_area、plugin panel | client 已提交；ask_user/notifier/current_turn 已拆分验证；input_area 主体保留清晰边界；plugin 搜索状态与请求 owner 已拆分，真实桥接回归通过 |
 | peri-controller | Langfuse tracer registry、bridge 与控制面状态所有权 | 已拆分；漏关观测回归2红→全套130+5绿；移除6个仅装配阶段使用的锁 |
@@ -80,10 +80,10 @@
 | peri-runtime | destroy 跨 await 后无条件 remove 可能误删替换后的 session；旧事件也可能借新 entry 补打 | 已修复并提交：4项旧实现回归失败；16项Runtime及16项Controller关联测试通过 |
 | peri-workflow | runner、tool preflight、journal、progress | runner 已提交；progress 锁顺序/完成摘要、tool observer 取消窗口、journal 写失败待回归治理 |
 | peri-js-runtime | 分层可保留；artifact launch 未纳入 deadline/cancel、run_execute 错误提前返回可能跳过显式收尾 | preparation/install/invocation owner 已修复；4红到42全绿，含实际Unix进程回收；Windows runtime 未验证 |
-| peri-lsp | document sync/dispatcher 可分离；重复 readiness、请求 id 碰撞和进程任务 owner 需核查 | dispatcher 已拆分，双向ID/畸形响应/close pending 三回归由红到72全绿；client/pool readiness 与请求跨重启归属已修复；document sync 缓存与入队归属待治理 |
+| peri-lsp | document sync/dispatcher 可分离；重复 readiness、请求 id 碰撞和进程任务 owner 需核查 | dispatcher 已拆分，双向ID/畸形响应/close pending 三回归由红到72全绿；client/pool readiness 与请求跨重启归属已修复；document sync 已归属单次连接，缓存与 writer 准入同步提交；92项通过 |
 | peri-theme | loader 混合查找/引用/构造；visited 跨根复用、Unicode hex切片、忽略 extends、重复默认主题 | 已拆分并修复引用链/Unicode hex/extends；29项单元与集成测试通过，索引已补建 |
 | peri-web-pty | handle_socket 混合协议/阻塞I/O/child监控；reader未join、末尾输出drain需实测 | Unix 连接 owner、非阻塞 I/O 与协议边界已拆分；24单元+7真实WS测试通过，Windows阻塞读取收尾仍有平台缺口 |
-| langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 事件族转换已拆分，73项测试通过；batcher flush/shutdown/backpressure 待治理 |
+| langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 事件族转换已拆分，73项测试通过；batcher flush 失败确认已修复，77项通过；shutdown/backpressure 待治理 |
 | side-projects/git-stats | 结构清楚；外层log sentinel碰撞、聚合展示名新旧次序需核查 | NUL framing与最新展示名修复已验证：28项测试含真实Git fixture，独立Clippy通过 |
 | side-projects/md-scan-matrix | 结构清楚；FAIL/前缀稳定性/collision结果只打印，不能据exit0宣称验收通过 | 评估/报告已分离；6项回归、45矩阵+33补充checks及独立Clippy通过 |
 | side-projects/image-spike | 目标单一的TestBackend buffer/Kitty transmit实验，无需拆分 | 已审保留；本地2项buffer行为测试及all-targets Clippy通过；不等于真实终端验证 |
@@ -152,3 +152,13 @@
 - 完整 workspace build、all-targets Clippy（`-D warnings`）、格式、typos 与16条依赖方向检查通过。各模块代码索引同步到当前职责与 owner；本批分组提交通过 hooks。
 
 此 checkpoint 不能替代后续改动的验证，也不关闭独立项目/平台或现场验收缺口。
+
+
+## 第七批验证记录
+
+- 工具派发：审批后错误把已声明 `path` 字段改为 `file_path` 的2项生产回归先红，修复统一使用 `tools::normalize_params`。删除测试专用 resolver，其消费者契约迁到真实 resolver 的6项测试。tool_dispatch 根从912行降至298行，执行管线与 PTC 适配器私有分离；13个保留函数体逐体核对相同。新增快工具即时事件先于批次原子提交、PTC pinned target 与内层不结算外层批次的回归。
+- Langfuse flush：3项旧实现回归全部失败；私有失败水位只在公开 flush 调用者实际观察结果后确认，取消等待不清错，迟到确认不能清除新失败。新增并发确认不倒退保护，旧吞错测试更新为精确错误摘要、下一空确认与实际发送恢复。77项单元通过；shutdown/backpressure 尚未修复。
+- LSP 文档同步：真实握手 gate 与16槽满队列回归先2红2绿；RegisteredConnection 同时拥有 dispatcher 和文档缓存，先等待 writer permit，再同步规划版本/准入/提交缓存，锁外等待实际写入确认。已准入后取消保留完整帧与缓存，旧连接不能触及新缓存；关闭拒绝旧 permit。92项单元通过。
+- ACP prompt：模型工厂、turn 观测与 stage/compact hook 装配拆为私有模块，公开 hook 路径保留；借用既有 AcpServerConfig 将调用参数从27项收敛为7项。配置快照时点、池 owner、原回调与 await 顺序保持。依赖门仅随已存在装配职责移动到精确新文件，不扩大目录豁免；模块指引修正链序蓝本与具体装配位置。
+- 关联完整验证：Agent742单元+4集成、ACP611单元+8集成、Langfuse77单元、Controller130单元+5集成通过；对应 doc tests 8项通过。middleware1612单元+8集成通过，单元4项与doc1项原有 ignored。
+- workspace all-targets Clippy（`-D warnings`）、格式与16条依赖方向检查通过。代码索引已同步；分组提交须通过 hooks。本批结果不替代后续修改的最终 workspace 验证。
