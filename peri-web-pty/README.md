@@ -33,7 +33,7 @@ CWD=/path/to/proj CMD="npm run dev" cargo run -p peri-web-pty
 - CLI：`clap 4` derive + env fallback
 - 前端：单 HTML 文件，CDN 加载 xterm.js + 内联 JS，`include_str!` 嵌入二进制
 
-每个 `/ws` 连接 spawn 一个 shell 子进程，PTY 输出经 `spawn_blocking` + mpsc channel 推送到 WebSocket。
+每个 `/ws` 连接 spawn 一个 shell 子进程。Unix 使用 `AsyncFd` 处理非阻塞 PTY 读写，并在连接结束时显式回收 child；Windows 保留独立的 ConPTY 阻塞读取 adapter。
 
 ## 测试
 

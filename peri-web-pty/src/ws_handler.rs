@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::time::Duration;
 
 use axum::{
@@ -9,19 +8,25 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
-use tokio::sync::mpsc;
 
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::config::default_shell;
 use crate::pty_session::PtySession;
 use crate::session_state::SessionState;
 
-/// 子进程退出轮询间隔。
-///
-/// Windows ConPTY 上 child 退出后 reader.read 永久阻塞不发 EOF（pty handle
-/// 与 IO handle 生命周期不绑定），必须主动 try_wait。100ms 足够低延迟，
-/// 同时 CPU 开销可忽略（try_wait 是 syscall 但很轻）。
+#[cfg(unix)]
+mod connection;
+#[cfg(not(unix))]
+#[path = "ws_handler/windows.rs"]
+mod connection;
+#[cfg(unix)]
+mod input;
+#[cfg(unix)]
+mod io;
+mod protocol;
+
+/// 子进程退出检查的固定节拍，不随输入/输出流量重置。
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// WebSocket 查询参数。
@@ -81,7 +86,7 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, q, state))
 }
 
-/// WebSocket 连接生命周期：spawn PTY + 双向 pump。
+/// WebSocket 连接入口：spawn 后将全部 I/O 与 child 生命周期交给平台 owner。
 async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
     let params = q.to_spawn_params();
     let shell_display = params.shell.clone();
@@ -91,7 +96,7 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
     // 需在此处做最小桥接（不修改 spec 规定的公共 API）。
     let args_ref: Vec<&str> = params.args.iter().map(String::as_str).collect();
     let cwd = state.cwd.as_deref();
-    let (mut session, reader) =
+    let (session, reader) =
         match PtySession::spawn(&params.shell, &args_ref, params.cols, params.rows, cwd) {
             Ok(v) => v,
             Err(e) => {
@@ -107,211 +112,11 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
         params.cols, params.rows
     );
 
-    // 第一个 shell 自动注入启动命令
-    if state.try_mark_done() {
-        if let Some(cmd) = state.initial_cmd.as_deref() {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            if let Err(e) = session.write(format!("{cmd}\n").as_bytes()) {
-                warn!("初始命令注入失败: {e}");
-            }
-        }
-    }
-
-    // mpsc channel: read_task → pump_task。None 哨兵表示 PTY EOF
-    let (tx, mut rx) = mpsc::channel::<Option<Vec<u8>>>(16);
-
-    // Windows ConPTY 启动时 conhost 会向宿主发送 DSR 光标位置查询
-    // ESC[6n，宿主不回复 ESC[row;colR 则 conhost 挂起，不输出任何子进程
-    // 内容（也不正常收尾）。浏览器端 xterm.js 会自动回复，但其他客户端
-    // （SDK、测试、headless 场景）不会——此处由服务端自行响应，不依赖
-    // 客户端。writer 经 clone_writer 共享给读取线程。
-    let dsr_writer = session.clone_writer();
-
-    // read_task：spawn_blocking 阻塞读 PTY。reader 直接 move 进闭包，无需 Arc<Mutex>
-    // 跨读边界 UTF-8 残字节缓冲：多字节字符（中文/CJK、emoji、box-drawing）
-    // 可能被 4096 字节缓冲区边界截断，from_utf8_lossy 会产生 �。此处将
-    // 不完整尾部字节保存到 leftover，下次 read 时前拼。
-    let read_task = tokio::task::spawn_blocking(move || {
-        let mut reader = reader;
-        let mut buf = [0u8; 4096];
-        let mut leftover: Vec<u8> = Vec::new();
-        // ESC[6n 可能跨 read 块，保留最近 3 字节用于拼接检测
-        let mut dsr_tail = [0u8; 3];
-        let mut dsr_len = 0usize;
-        let mut dsr_replied = false;
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => {
-                    // EOF：如果有残字节，最后一次发送（lossy 兜底）
-                    if !leftover.is_empty() {
-                        let text = String::from_utf8_lossy(&leftover).into_owned();
-                        let _ = tx.blocking_send(Some(text.into_bytes()));
-                    }
-                    let _ = tx.blocking_send(None);
-                    break;
-                }
-                Ok(n) => {
-                    // ConPTY DSR 查询：\x1b[6n → 回复 \x1b[1;1R（仅一次）
-                    if !dsr_replied {
-                        let mut probe = Vec::with_capacity(dsr_len + n);
-                        probe.extend_from_slice(&dsr_tail[..dsr_len]);
-                        probe.extend_from_slice(&buf[..n]);
-                        if probe.windows(4).any(|w| w == b"\x1b[6n") {
-                            if let Ok(mut w) = dsr_writer.lock() {
-                                let _ = w.write_all(b"\x1b[1;1R");
-                            }
-                            dsr_replied = true;
-                        }
-                        let keep = probe.len().min(3);
-                        dsr_tail[..keep].copy_from_slice(&probe[probe.len() - keep..]);
-                        dsr_len = keep;
-                    }
-                    let data = if leftover.is_empty() {
-                        buf[..n].to_vec()
-                    } else {
-                        let mut v = Vec::with_capacity(leftover.len() + n);
-                        v.append(&mut leftover);
-                        v.extend_from_slice(&buf[..n]);
-                        v
-                    };
-                    match std::str::from_utf8(&data) {
-                        Ok(_) => {
-                            if tx.blocking_send(Some(data)).is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            let valid_up_to = e.valid_up_to();
-                            if e.error_len().is_some() {
-                                // 中间出现非法字节序列（PTY 输出极少发生），用 lossy 兜底
-                                let text = String::from_utf8_lossy(&data).into_owned();
-                                if tx.blocking_send(Some(text.into_bytes())).is_err() {
-                                    break;
-                                }
-                            } else {
-                                // 尾部不完整 UTF-8，保存到 leftover 等下次拼
-                                if valid_up_to > 0
-                                    && tx
-                                        .blocking_send(Some(data[..valid_up_to].to_vec()))
-                                        .is_err()
-                                {
-                                    break;
-                                }
-                                leftover.extend_from_slice(&data[valid_up_to..]);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    // pump_task：select! { ws.recv() | rx.recv() | child 退出轮询 }
-    loop {
-        tokio::select! {
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        if try_handle_resize(text.as_str(), &mut session) {
-                            continue;
-                        }
-                        if let Err(e) = session.write(text.as_bytes()) {
-                            debug!("PTY write 失败（client 输入）: {e}");
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Binary(bytes))) => {
-                        // 与 Bun 原版一致：binary frame 解码为 UTF-8 后等价于 text frame
-                        // （浏览器 xterm.js 通常用 text，但 SDK 可能用 binary）
-                        let text = String::from_utf8_lossy(&bytes);
-                        if try_handle_resize(&text, &mut session) {
-                            continue;
-                        }
-                        if let Err(e) = session.write(text.as_bytes()) {
-                            debug!("PTY write 失败（client 输入 binary）: {e}");
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
-                        debug!("WebSocket 关闭");
-                        break;
-                    }
-                    Some(Ok(_)) => {
-                        // Ping/Pong 由 axum 自动处理
-                    }
-                    Some(Err(e)) => {
-                        warn!("WebSocket 接收错误: {e}");
-                        break;
-                    }
-                }
-            }
-            bytes = rx.recv() => {
-                match bytes {
-                    Some(Some(data)) => {
-                        let text = String::from_utf8_lossy(&data).into_owned();
-                        if socket.send(Message::Text(text.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(None) => {
-                        // reader EOF：Unix 上几乎等同 child 已退出。
-                        // Windows ConPTY 上 child 退出后 reader 不一定返回 EOF
-                        // （pty handle 与 IO handle 生命周期不绑定），所以这条
-                        // 路径在 Windows 上几乎不会触发，主要靠下面的 polling。
-                        session.close_slave();
-                        send_exit_message(&mut socket, &mut session).await;
-                        break;
-                    }
-                    None => break, // read_task 退出
-                }
-            }
-            _ = tokio::time::sleep(CHILD_EXIT_POLL_INTERVAL) => {
-                // Windows ConPTY 上 child 退出后 reader.read 永久阻塞不发 EOF，
-                // 必须主动轮询 try_wait。Unix 上作为兜底（reader EOF 通常先到）。
-                if session.try_wait_exit().ok().flatten().is_some() {
-                    session.close_slave();
-                    send_exit_message(&mut socket, &mut session).await;
-                    break;
-                }
-            }
-        }
-    }
-
-    read_task.abort();
-    drop(session);
-    let _ = socket.send(Message::Close(None)).await;
+    let initial_cmd = if state.try_mark_done() {
+        state.initial_cmd.clone()
+    } else {
+        None
+    };
+    connection::run(socket, session, reader, initial_cmd).await;
     info!("PTY 连接结束 shell={shell_display}");
-}
-
-/// 尝试把文本消息当作 resize 命令处理。成功处理返回 true。
-fn try_handle_resize(text: &str, session: &mut PtySession) -> bool {
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) else {
-        return false;
-    };
-    if parsed.get("type").and_then(|v| v.as_str()) != Some("resize") {
-        return false;
-    }
-    let (Some(cols), Some(rows)) = (
-        parsed.get("cols").and_then(|v| v.as_u64()),
-        parsed.get("rows").and_then(|v| v.as_u64()),
-    ) else {
-        return false;
-    };
-    match session.resize(cols as u16, rows as u16) {
-        Ok(()) => true,
-        Err(e) => {
-            warn!("PTY resize 失败: {e}");
-            true // resize 失败也消耗掉这条消息，不当作 stdin
-        }
-    }
-}
-
-/// 发送 `[process exited with code N]` 给 client。退出码未知时显示 "unknown"。
-async fn send_exit_message(socket: &mut WebSocket, session: &mut PtySession) {
-    let code = session.try_wait_exit().ok().flatten();
-    let display = code
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let msg = format!("\r\n[process exited with code {display}]\r\n");
-    let _ = socket.send(Message::Text(msg.into())).await;
 }
