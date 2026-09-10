@@ -28,14 +28,13 @@
 
 use std::sync::Arc;
 
-use parking_lot::Mutex;
 use peri_acp_types::{
     compact::CompactConfig,
-    event::{AgentEventHandler, ExecutorEvent, FnEventHandler},
+    event::ExecutorEvent,
     interaction::UserInteractionBroker,
     messages::BaseMessage,
     session::{MessageKind, MessageSource, QueuedMessage},
-    workflow::{AgentExecutor, AgentRunParams, AgentRunResult, ProgressEvent, Usage},
+    workflow::{AgentExecutor, AgentRunParams, AgentRunResult, ProgressEvent},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -44,17 +43,18 @@ use super::factory::{
     WorkflowAgentPromptBuilder, WorkflowMiddlewareFactory, WorkflowModelFactory,
     WorkflowPublishHook, WorkflowSystemPromptFallback,
 };
-use crate::agent::{
-    model_bridge::AgentModelBridge,
-    stages::{run_react_loop, LoopResult},
-    token::ContextBudget,
-};
+use crate::agent::{model_bridge::AgentModelBridge, stages::run_react_loop, token::ContextBudget};
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::{
     exec::executor::LangfuseHooks,
     exec::executor_helpers::ForwarderLauncherFn,
     subagent::{DefaultSubagentV2ContextBuilder, SubagentV2ContextBuilder},
 };
+
+mod observation;
+mod result;
+
+use observation::WorkflowObservation;
 
 /// Langfuse 事件旁路处理器（每条映射后的 v1 ExecutorEvent 调用；构造收
 /// ACP 宿主——`UnifiedLangfuseEvent` 映射在 Controller 侧，边 8 禁止
@@ -260,101 +260,12 @@ impl AgentExecutor for WorkflowAgentExecutor {
             (hooks.on_turn_start)(&params.prompt);
         }
 
-        // Agent usage 累积器：从 LlmCallEnd 事件收集实际 token 用量
-        // (output_tokens, model_name)
-        let usage_stats: Arc<Mutex<(u64, Option<String>)>> = Arc::new(Mutex::new((0, None)));
-        let usage_stats_for_handler = Arc::clone(&usage_stats);
-
-        // 工具调用次数计数器
-        let tool_call_count: std::sync::Arc<std::sync::Mutex<u64>> =
-            std::sync::Arc::new(std::sync::Mutex::new(0));
-        let tool_call_count_for_handler = Arc::clone(&tool_call_count);
-        let progress_tx_for_handler = self.ctx.progress_tx.clone();
-        let run_id_for_handler = params.run_id.clone();
-        let agent_id_for_handler = params.agent_id;
-        let langfuse_event_handler = self.ctx.langfuse_event_handler.clone();
-
-        let event_handler: Arc<dyn AgentEventHandler> = Arc::new(FnEventHandler(
-            move |event: ExecutorEvent| {
-                match &event {
-                    ExecutorEvent::ToolStart { name, .. } => {
-                        *tool_call_count_for_handler.lock().unwrap() += 1;
-                        debug!(tool = %name, "workflow agent: tool started");
-                        // 发送实时进度更新
-                        if let Some(ref tx) = progress_tx_for_handler {
-                            let s = usage_stats_for_handler.lock();
-                            let tc = tool_call_count_for_handler.lock().unwrap();
-                            if let Err(e) = tx.send(ProgressEvent::AgentProgress {
-                                run_id: run_id_for_handler.clone(),
-                                agent_id: agent_id_for_handler,
-                                label: None,
-                                phase: None,
-                                model: None,
-                                model_tier: None,
-                                token_count: Some(s.0),
-                                tool_count: Some(*tc),
-                            }) {
-                                warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (ToolStart)");
-                            }
-                        }
-                    }
-                    ExecutorEvent::ToolEnd { name, is_error, .. } => {
-                        if *is_error {
-                            warn!(tool = %name, "workflow agent: tool failed");
-                        } else {
-                            debug!(tool = %name, "workflow agent: tool completed");
-                        }
-                    }
-                    ExecutorEvent::LlmCallEnd { model, usage, .. } => {
-                        debug!(
-                            model = %model,
-                            tokens = ?usage.as_ref().map(|u| (u.input_tokens, u.output_tokens)),
-                            "workflow agent: llm call completed"
-                        );
-                        // 累积真实 token 用量，供 AgentRunResult 上报
-                        {
-                            let mut s = usage_stats_for_handler.lock();
-                            if let Some(u) = usage {
-                                s.0 += u.output_tokens as u64;
-                            }
-                            s.1 = Some(model.clone());
-                        }
-                        // 发送实时进度更新
-                        if let Some(ref tx) = progress_tx_for_handler {
-                            let s = usage_stats_for_handler.lock();
-                            let tc = tool_call_count_for_handler.lock().unwrap();
-                            if let Err(e) = tx.send(ProgressEvent::AgentProgress {
-                                run_id: run_id_for_handler.clone(),
-                                agent_id: agent_id_for_handler,
-                                label: None,
-                                phase: None,
-                                model: None,
-                                model_tier: None,
-                                token_count: Some(s.0),
-                                tool_count: Some(*tc),
-                            }) {
-                                warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (LlmCallEnd)");
-                            }
-                        }
-                    }
-                    ExecutorEvent::LlmRetrying {
-                        attempt,
-                        max_attempts,
-                        error,
-                        ..
-                    } => {
-                        warn!(attempt, max_attempts, error = %error, "workflow agent: llm retrying");
-                    }
-                    _ => {}
-                }
-
-                // Langfuse 事件转发（注入的观测旁路处理器；`UnifiedLangfuseEvent`
-                // 映射与 bridge 构造收 ACP 宿主，边 8 禁止本层直引 Controller）
-                if let Some(ref f) = langfuse_event_handler {
-                    f(&event);
-                }
-            },
-        ));
+        let observation = WorkflowObservation::new(
+            &params,
+            self.ctx.progress_tx.clone(),
+            self.ctx.langfuse_event_handler.clone(),
+        );
+        let event_handler = observation.handler();
 
         // ── compact 配置 ──
         // 与主 agent builder 模式一致。必须在 model_factory 调用前构建 context_budget。
@@ -390,25 +301,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
         // 请求的模型档位（alias 解析成功才有值）；TUI 面板显示档位而非模型名。
         let model_tier = built_model.tier;
 
-        // 模型解析完成后尽早上报有效模型名（模型信息专用更新）：TUI 在
-        // 运行中即可显示 Model 列，不必等首个 LlmCallEnd。计数保持 None，避免
-        // 引擎重试同一 agent 时以 0 覆盖前一次尝试已累计的统计。
-        // reducer 仅在 Some 时覆盖 agent.model，后续 ToolStart/LlmCallEnd
-        // 进度（model: None）不会冲掉该值。
-        if let Some(ref tx) = self.ctx.progress_tx {
-            if let Err(e) = tx.send(ProgressEvent::AgentProgress {
-                run_id: params.run_id.clone(),
-                agent_id: params.agent_id,
-                label: None,
-                phase: None,
-                model: Some(model_name.clone()),
-                model_tier: model_tier.clone(),
-                token_count: None,
-                tool_count: None,
-            }) {
-                warn!(target: "workflow", run_id = %params.run_id, agent_id = params.agent_id, error = %e, "progress_tx.send failed (model)");
-            }
-        }
+        observation.report_model(&model_name, model_tier.clone());
 
         // 2. 注册工具（端口装配：fs/terminal/web/skills tools，仅 project-level
         // skills——workflow agent 无 plugin_skill_roots）。
@@ -591,116 +484,23 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let loop_result = run_react_loop(context, max_iterations).await;
         let forwarder_result = await_workflow_forwarder(event_bus, forwarder_handle).await;
 
-        let mut telemetry_failure = None;
-        let agent_result = if let Err(failure) = forwarder_result {
-            warn!(message = %failure.public_message, "Workflow agent: event forwarder failed");
-            telemetry_failure = Some(failure);
-            workflow_forwarder_dead_result()
-        } else {
-            match loop_result {
-                LoopResult::Completed => {
-                    let output_text = crate::session::subagent::extract_last_ai_text(&session);
+        let projected = result::project_run_result(
+            loop_result,
+            forwarder_result,
+            &session,
+            &observation,
+            &params,
+            &model_name,
+            started_at,
+        );
 
-                    // 获取 agent 执行期间累积的 token 用量
-                    let (total_output_tokens, last_model) = {
-                        let s = usage_stats.lock();
-                        let mut tokens = s.0;
-                        // P0 fallback: haiku 等模型 usage=None 时 token 累积为 0，
-                        // 按 output_text 长度启发式估算（每个 token ~4 字符）
-                        if tokens == 0 && !output_text.is_empty() {
-                            tokens = (output_text.len() as u64 / 4).max(1);
-                        }
-                        // 如果事件从未 emit LlmCallEnd（如纯工具调用），仍应回传模型
-                        // 工厂解析后的有效模型名，而非 workflow 脚本中的 alias。
-                        let model = reported_model(s.1.clone(), &model_name);
-                        (tokens, model)
-                    };
-
-                    // Schema 校验
-                    if let Some(ref schema) = params.schema {
-                        if let Err(err) = validate_json_schema(&output_text, schema) {
-                            debug!(error = %err, "Workflow agent: schema validation failed");
-                            AgentRunResult::Dead {
-                                reason: Some("no-structured-output".into()),
-                                detail: Some(err),
-                            }
-                        } else {
-                            AgentRunResult::Ok {
-                                output: serde_json::Value::String(output_text),
-                                usage: Usage {
-                                    output_tokens: total_output_tokens,
-                                },
-                                model: last_model,
-                                tool_count: {
-                                    let c = tool_call_count.lock().unwrap();
-                                    Some(*c)
-                                },
-                                token_count: Some(total_output_tokens),
-                                phase: params.phase.clone(),
-                                duration_ms: Some(started_at.elapsed().as_millis() as u64),
-                            }
-                        }
-                    } else {
-                        AgentRunResult::Ok {
-                            output: serde_json::Value::String(output_text),
-                            usage: Usage {
-                                output_tokens: total_output_tokens,
-                            },
-                            model: last_model,
-                            tool_count: {
-                                let c = tool_call_count.lock().unwrap();
-                                Some(*c)
-                            },
-                            token_count: Some(total_output_tokens),
-                            phase: params.phase.clone(),
-                            duration_ms: Some(started_at.elapsed().as_millis() as u64),
-                        }
-                    }
-                }
-                LoopResult::Interrupted => {
-                    debug!("Workflow agent: execution interrupted");
-                    AgentRunResult::Dead {
-                        reason: Some("interrupted".into()),
-                        detail: Some("Workflow agent execution was interrupted".into()),
-                    }
-                }
-                LoopResult::Error(e) => {
-                    debug!(error = %e, "Workflow agent: execution failed");
-                    telemetry_failure = Some(
-                        peri_acp_types::session::ExecutionFailure::from_agent_error(&e),
-                    );
-                    AgentRunResult::Dead {
-                        reason: Some("runagent-threw".into()),
-                        detail: Some(e.to_string()),
-                    }
-                }
-            }
-        };
-
-        // GAP-08: 结束 Langfuse trace（fire-and-forget flush；注入钩子）
+        // 保持 final event 消费与统计提取之后的终态钩子；flush 仍为 fire-and-forget。
         if let Some(ref hooks) = self.ctx.langfuse_hooks {
-            let outcome = match &agent_result {
-                AgentRunResult::Dead { reason, .. } if reason.as_deref() == Some("interrupted") => {
-                    peri_acp_types::session::TurnTelemetryOutcome::Stopped {
-                        reason: peri_acp_types::command::PromptStopReason::Cancelled,
-                    }
-                }
-                AgentRunResult::Dead { .. } => {
-                    peri_acp_types::session::TurnTelemetryOutcome::Failed {
-                        failure: telemetry_failure.clone().unwrap_or_else(|| {
-                            peri_acp_types::session::ExecutionFailure::internal(
-                                "Workflow agent execution failed",
-                            )
-                        }),
-                    }
-                }
-                _ => peri_acp_types::session::TurnTelemetryOutcome::Completed,
-            };
-            let handle = (hooks.on_turn_end)(outcome);
-            drop(handle); // fire-and-forget flush
+            let handle = (hooks.on_turn_end)(projected.telemetry_outcome());
+            drop(handle);
         }
 
-        agent_result
+        projected.result
     }
 }
 
@@ -716,13 +516,6 @@ async fn await_workflow_forwarder(
     })
 }
 
-fn workflow_forwarder_dead_result() -> AgentRunResult {
-    AgentRunResult::Dead {
-        reason: Some("event-forwarder-failed".into()),
-        detail: Some("Workflow agent event forwarding failed".into()),
-    }
-}
-
 /// 工作流与 agent.md 的工具名匹配沿用 subagent 的大小写无关语义。
 /// 单独的 `*` 表示保留全部候选工具；随后仍由 disallowedTools 过滤。
 fn tool_name_in(names: &[String], tool_name: &str) -> bool {
@@ -732,187 +525,6 @@ fn tool_name_in(names: &[String], tool_name: &str) -> bool {
             .any(|name| name.eq_ignore_ascii_case(tool_name))
 }
 
-fn reported_model(last_model: Option<String>, effective_model: &str) -> Option<String> {
-    last_model.or_else(|| Some(effective_model.to_string()))
-}
-
-/// JSON Schema 校验——基础类型 + required 字段检查。
-///
-/// schema 为 None 或空 {} 时仅验证是合法 JSON（向后兼容）。
-/// 否则检查：
-/// 1. 顶层 type 匹配（object/array/string/number/boolean/null）
-/// 2. 若 type 为 object，检查 required 字段存在
-/// 3. 若 type 为 object 且有 properties，检查各属性 type 匹配
-fn validate_json_schema(text: &str, schema: &serde_json::Value) -> Result<(), String> {
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("output is not valid JSON: {e}"))?;
-
-    // 如果 schema 为空或不是 object，仅验证 JSON 格式
-    let schema_obj = match schema.as_object() {
-        Some(obj) if obj.is_empty() => return Ok(()),
-        Some(_) => schema,
-        _ => return Ok(()),
-    };
-
-    // 检查顶层 type
-    if let Some(expected_type) = schema_obj.get("type").and_then(|v| v.as_str()) {
-        let actual_type = json_type_name(&value);
-        if actual_type != expected_type {
-            return Err(format!(
-                "expected top-level type '{expected_type}', got '{actual_type}'"
-            ));
-        }
-    }
-
-    // 对 object 类型检查 required + properties
-    if let Some(obj) = value.as_object() {
-        if let Some(required) = schema_obj.get("required").and_then(|v| v.as_array()) {
-            for field in required {
-                let field_name = field
-                    .as_str()
-                    .ok_or_else(|| format!("required 数组元素不是字符串: {field}"))?;
-                if !obj.contains_key(field_name) {
-                    return Err(format!("missing required field: {field_name}"));
-                }
-            }
-        }
-
-        if let Some(properties) = schema_obj.get("properties").and_then(|v| v.as_object()) {
-            for (prop_name, prop_schema) in properties {
-                if let Some(prop_value) = obj.get(prop_name) {
-                    if let Some(expected_type) = prop_schema.get("type").and_then(|v| v.as_str()) {
-                        let actual_type = json_type_name(prop_value);
-                        if actual_type != expected_type {
-                            return Err(format!(
-                                "field '{prop_name}': expected type '{expected_type}', got '{actual_type}'"
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// 返回 JSON value 的类型名称（用于错误消息）。
-fn json_type_name(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::{
-        await_workflow_forwarder, reported_model, requested_model, tool_name_in,
-        workflow_forwarder_dead_result,
-    };
-    use crate::agent::workflow::WorkflowAgentDefinition;
-
-    #[test]
-    fn agent_type_tool_matching_is_case_insensitive() {
-        assert!(tool_name_in(&["Read".into(), "Grep".into()], "read"));
-        assert!(tool_name_in(&["*".into()], "Write"));
-        assert!(!tool_name_in(&["Read".into()], "Write"));
-    }
-
-    #[test]
-    fn requested_model_prefers_workflow_value() {
-        let definition = WorkflowAgentDefinition {
-            model: Some("haiku".into()),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            requested_model(Some("sonnet"), Some(&definition)),
-            Some("sonnet")
-        );
-    }
-
-    #[test]
-    fn requested_model_inherit_overrides_agent_definition() {
-        let definition = WorkflowAgentDefinition {
-            model: Some("haiku".into()),
-            ..Default::default()
-        };
-
-        assert_eq!(requested_model(Some("inherit"), Some(&definition)), None);
-    }
-
-    #[test]
-    fn requested_model_trims_concrete_model_name() {
-        assert_eq!(
-            requested_model(Some("  claude-sonnet-4-5  "), None),
-            Some("claude-sonnet-4-5")
-        );
-    }
-
-    #[test]
-    fn requested_model_uses_agent_definition_when_omitted() {
-        let definition = WorkflowAgentDefinition {
-            model: Some("haiku".into()),
-            ..Default::default()
-        };
-
-        assert_eq!(requested_model(None, Some(&definition)), Some("haiku"));
-    }
-
-    #[test]
-    fn result_model_falls_back_to_effective_model() {
-        assert_eq!(
-            reported_model(None, "claude-haiku-4-5"),
-            Some("claude-haiku-4-5".into())
-        );
-        assert_eq!(
-            reported_model(Some("provider-reported".into()), "claude-haiku-4-5"),
-            Some("provider-reported".into())
-        );
-    }
-
-    #[tokio::test]
-    async fn workflow_drops_last_event_bus_owner_before_awaiting_forwarder() {
-        let (bus, mut handles) = crate::agent::events_v2::EventBus::new(
-            crate::agent::events_v2::EventBusConfig::default(),
-        );
-        let handle = tokio::spawn(async move {
-            while handles.render_rx.recv().await.is_some() {}
-            while handles.state_rx.recv().await.is_some() {}
-            while handles.observe_rx.recv().await.is_ok() {}
-        });
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            await_workflow_forwarder(bus.into(), handle),
-        )
-        .await
-        .expect("dropping the separately-held EventBus must close all channels")
-        .expect("normal forwarder completion");
-    }
-
-    #[tokio::test]
-    async fn workflow_forwarder_join_error_maps_to_dead_failure() {
-        let (bus, _handles) = crate::agent::events_v2::EventBus::new(
-            crate::agent::events_v2::EventBusConfig::default(),
-        );
-        let handle = tokio::spawn(std::future::pending());
-        handle.abort();
-        let failure = await_workflow_forwarder(bus.into(), handle)
-            .await
-            .expect_err("aborted forwarder must fail the workflow run");
-        assert_eq!(
-            failure.kind,
-            peri_acp_types::session::ExecutionFailureKind::Internal
-        );
-        assert!(matches!(
-            workflow_forwarder_dead_result(),
-            peri_acp_types::workflow::AgentRunResult::Dead { reason: Some(reason), .. }
-                if reason == "event-forwarder-failed"
-        ));
-    }
-}
+#[path = "agent/agent_test.rs"]
+mod tests;

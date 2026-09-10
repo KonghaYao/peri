@@ -67,6 +67,7 @@ pub fn spawn_subagent_event_forwarder(
             has_event_handler = has_handler,
             "forwarder spawned"
         );
+        let mut observe_open = true;
         loop {
             // biased + observe 优先：确保 StageStarted 先于 ToolStarted 到达 tracer，
             // 避免 active_stage=None 时工具 parent 错误回落到主 agent。
@@ -74,7 +75,7 @@ pub fn spawn_subagent_event_forwarder(
             // 之前被消费，避免 commit_iteration 与残留 Render 事件乱序导致的 partial 污染。
             tokio::select! {
                 biased;
-                ev_res = handles.observe_rx.recv() => {
+                ev_res = handles.observe_rx.recv(), if observe_open => {
                     match ev_res {
                         Ok(ev) => {
                             // Langfuse bridge 调用必须在 ev 被 observe_event_to_executor move 之前
@@ -105,7 +106,11 @@ pub fn spawn_subagent_event_forwarder(
                                 }
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            // observe 关闭时 render/state 仍可能持有已入队事件。
+                            // 仅停用本分支，保留其他通道的排空与既有优先级。
+                            observe_open = false;
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!(
                                 n,
