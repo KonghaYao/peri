@@ -447,12 +447,18 @@ pub static COPY_MESSAGE_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| 
 /// 触发多轮空跑。超过此刻后恢复可点击。
 pub static KEEPGOING_BLOCKED_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 
-/// @image 行 hover 状态（T4 §4.4）：Moved 事件命中变化时由消息区 handler
+/// @image 行即时 hover 状态（T4 §4.4）：Moved 事件命中变化时由消息区 handler
 /// 写入（写入自动唤醒订阅者重渲染），渲染 body 读取决定 meta 行是否显示
 /// 绝对路径 + accent 高亮；移出/遮挡 → None 恢复默认渲染。仅当「命中集合
 /// 变化」时写入——防高频 Moved 风暴（§4.6）。
 pub(crate) static IMAGE_HOVER: AtomStatic<Option<crate::kit::message_area::ImageHoverState>> =
     AtomStatic::new(|| None);
+
+/// 已通过稳定悬停等待的图片预览目标。与 [`IMAGE_HOVER`] 分离，使链接行可以
+/// 即时高亮，而像素预览只在鼠标停留后触发；移出或切换目标时立即清空。
+pub(crate) static IMAGE_PREVIEW_HOVER: AtomStatic<
+    Option<crate::kit::message_area::ImageHoverState>,
+> = AtomStatic::new(|| None);
 
 /// 图片预览状态机（image-p0-p1-spec §7.3 T7）：写入边界为事件/effect 与后台
 /// 解码线程，渲染 body 只读（TUI-RENDER-001）。默认 `Idle`（无预览）。

@@ -54,6 +54,8 @@ use self::entry_nav::{
     apply_fold_override, apply_fold_toggle, cycle_interaction_option, entry_click_decision,
     fold_key_of, move_entry_focus, pending_interaction_of, set_entry_focus,
 };
+#[cfg(test)]
+use self::handlers::{ImagePreviewHoverGate, schedule_image_preview_hover};
 pub(crate) use self::hits::ImageHoverState;
 use self::hits::{CopyButtonHit, ImageLineHit, InteractionOptionHit, compute_keepgoing_rect};
 #[cfg(test)]
@@ -158,6 +160,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [T4 §4] @image 行屏幕点击/hover 热区（每帧由渲染 body 更新，点击与
     // Moved handler 实时读取——同 CopyButtonHit 模式）。
     let image_rects = hooks.use_state(Arc::<Vec<ImageLineHit>>::default);
+    // hover 高亮即时更新；预览需在同一目标稳定停留后才写入独立 atom。
+    // gate 用 Arc<Mutex<_>> 跨异步计时任务保活，组件卸载后旧任务也只会自行失效。
+    let image_preview_hover_gate = hooks.use_state(|| {
+        Arc::new(parking_lot::Mutex::new(
+            handlers::ImagePreviewHoverGate::default(),
+        ))
+    });
 
     let empty = snapshot.items.is_empty() && !is_loading && todo_items.is_empty();
     // [Why has_content 而非 !footer_lines.is_empty()] footer 常驻渲染后恒非空
@@ -428,7 +437,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     handlers::register_image_click(&mut hooks, image_rects, view_models);
 
-    handlers::register_image_hover(&mut hooks, image_rects);
+    handlers::register_image_hover(&mut hooks, image_rects, image_preview_hover_gate);
 
     // [S2 单一事实源] FOCUSED_ENTRY 订阅（hook 声明必须在 handler 之前，hook
     // 顺序每次渲染一致）：仲裁/渲染/外部清除共读同一事实源，无收敛窗口期。
