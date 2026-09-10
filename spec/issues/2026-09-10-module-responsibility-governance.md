@@ -74,16 +74,16 @@
 | peri-resources | SQLite 连接、行映射、祖先上下文、compaction 事务 | SQLite 拆分已提交，65 项存储测试通过 |
 | peri-agent | stage_builder、tool_dispatch、workflow agent、transcript、subagent factory、MiddlewareState | stage_builder 与 capability 已拆分验证；其余待治理 |
 | peri-acp-types | session 混合 runtime/错误/消息投递，event_v2 契约与映射；Agent queue_test 文件存在但未挂载 | session 拆分已验证，Agent queue 7 项测试恢复挂载；event_v2 待审 |
-| peri-tui | client、ask_user、acp_notifier、current_turn、input_area、plugin panel | client 已提交；ask_user/notifier/current_turn 已拆分验证；input_area 主体保留清晰边界，plugin 待治理 |
+| peri-tui | client、ask_user、acp_notifier、current_turn、input_area、plugin panel | client 已提交；ask_user/notifier/current_turn 已拆分验证；input_area 主体保留清晰边界；plugin 搜索状态与请求 owner 已拆分，真实桥接回归通过 |
 | peri-controller | Langfuse tracer registry、bridge 与控制面状态所有权 | 已拆分；漏关观测回归2红→全套130+5绿；移除6个仅装配阶段使用的锁 |
 | peri-model | protocol/runtime/transport/provider 分层清楚；测试专用 async SSE 重复路径需收敛 | 已审保留总体结构；测试专用 SSE 整链已删除，生产路径147项测试通过 |
 | peri-runtime | destroy 跨 await 后无条件 remove 可能误删替换后的 session；旧事件也可能借新 entry 补打 | 已修复并提交：4项旧实现回归失败；16项Runtime及16项Controller关联测试通过 |
-| peri-workflow | runner、tool preflight、journal、progress | runner 已提交；其余待审 |
+| peri-workflow | runner、tool preflight、journal、progress | runner 已提交；progress 锁顺序/完成摘要、tool observer 取消窗口、journal 写失败待回归治理 |
 | peri-js-runtime | 分层可保留；artifact launch 未纳入 deadline/cancel、run_execute 错误提前返回可能跳过显式收尾 | preparation/install/invocation owner 已修复；4红到42全绿，含实际Unix进程回收；Windows runtime 未验证 |
-| peri-lsp | document sync/dispatcher 可分离；重复 readiness、请求 id 碰撞和进程任务 owner 需核查 | dispatcher 已拆分，双向ID/畸形响应/close pending 三回归由红到72全绿；client/pool readiness 与请求跨重启归属仍待治理 |
+| peri-lsp | document sync/dispatcher 可分离；重复 readiness、请求 id 碰撞和进程任务 owner 需核查 | dispatcher 已拆分，双向ID/畸形响应/close pending 三回归由红到72全绿；client/pool readiness 与请求跨重启归属已修复；document sync 缓存与入队归属待治理 |
 | peri-theme | loader 混合查找/引用/构造；visited 跨根复用、Unicode hex切片、忽略 extends、重复默认主题 | 已拆分并修复引用链/Unicode hex/extends；29项单元与集成测试通过，索引已补建 |
-| peri-web-pty | handle_socket 混合协议/阻塞I/O/child监控；reader未join、末尾输出drain需实测 | 已审，连接owner与协议边界待治理 |
-| langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 已审，转换与batcher待治理 |
+| peri-web-pty | handle_socket 混合协议/阻塞I/O/child监控；reader未join、末尾输出drain需实测 | Unix 连接 owner、非阻塞 I/O 与协议边界已拆分；24单元+7真实WS测试通过，Windows阻塞读取收尾仍有平台缺口 |
+| langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 事件族转换已拆分，73项测试通过；batcher flush/shutdown/backpressure 待治理 |
 | side-projects/git-stats | 结构清楚；外层log sentinel碰撞、聚合展示名新旧次序需核查 | NUL framing与最新展示名修复已验证：28项测试含真实Git fixture，独立Clippy通过 |
 | side-projects/md-scan-matrix | 结构清楚；FAIL/前缀稳定性/collision结果只打印，不能据exit0宣称验收通过 | 评估/报告已分离；6项回归、45矩阵+33补充checks及独立Clippy通过 |
 | side-projects/image-spike | 目标单一的TestBackend buffer/Kitty transmit实验，无需拆分 | 已审保留；本地2项buffer行为测试及all-targets Clippy通过；不等于真实终端验证 |
@@ -140,3 +140,15 @@
 - 规范漂移：按源码/契约测试优先级同步 cache 字段缺省、显式零与逐 sample 提示语义；删除已 Fixed 的 #113，#114 保留现场验收待办。仓库 Markdown 本地文件链接扫描86项，无失效目标；分组提交均通过 hooks。
 
 上述分组验证不替代最后的 workspace 完整 build/test，也不关闭仍需现场验收的 cache 提示问题或平台测试缺口。
+
+
+## 第六批验证记录
+
+- LSP：client 的注册/握手/请求职责分离；只在完整握手后就绪，request guard 绑定原 dispatcher，pool 移除重复 readiness。单一 bounded writer 保证已接纳帧完整写入，关闭拒绝 pending 并保留可重试 join/reap 的 owner。旧实现3项 readiness/取消回归失败；当前87项单元测试通过，包含真实进程退出、满队列关闭、同名 pool 替换。document sync 的全局缓存仍需下一批收敛，未宣称整个 LSP 生命周期完成。
+- Langfuse：OTLP 转换按 trace/observation/generation/metadata 分离，原事件族字段映射与顺序保持；9项新增生产转换用例覆盖12类事件，全套73项通过。batcher 的 flush 确认、资源关闭与背压语义仍待处理。
+- WebPTY：Unix 连接统一持有 PTY、非阻塞读写与退出清理；协议与平台适配分离，输出先 drain 再发送 exit。旧实现回归使用独立线程 watchdog 复核为3通过2失败，避免阻塞 runtime 令 Tokio timeout 假通过。当前24项单元与7项真实 WebSocket 测试通过；取消显式 shutdown 后可继续等待同一 cleanup task。Windows runtime 未验证，阻塞读取线程收尾缺口保留。
+- Plugin：DiscoverState 统一查询/选择/结果，search ticket 绑定 generation、session 与桥接 reset；真实 RPC 结果驱动展示和所选详情。2项原实现回归先失败，最终10项目标回归通过，涵盖重复查询乱序、临时渲染借用、关闭取消。测试恢复全局 atoms 后，全量 TUI 1476项通过、2项原有 ignored。
+- 完整 `cargo test --offline --workspace --no-fail-fast`：46个测试目标共5596项通过、0失败、12项原有 ignored；包含8项实际执行的 doc tests。先前 fixture/PATH 环境问题不再导致失败。测试允许本机端口和子进程操作，没有外部服务调用。
+- 完整 workspace build、all-targets Clippy（`-D warnings`）、格式、typos 与16条依赖方向检查通过。各模块代码索引同步到当前职责与 owner；本批分组提交通过 hooks。
+
+此 checkpoint 不能替代后续改动的验证，也不关闭独立项目/平台或现场验收缺口。
