@@ -4111,7 +4111,6 @@ dependencies = [
  "async-trait",
  "parking_lot",
  "peri-acp-types",
- "peri-agent",
  "thiserror 2.0.20",
  "tokio",
 ]

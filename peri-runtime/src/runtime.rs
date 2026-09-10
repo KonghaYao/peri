@@ -4,15 +4,14 @@
 //! 无持久态、无业务配置（状态在 Agent 层各 session 内，其余全部注入）。
 //!
 //! 事件聚合补打（§9 事件契约）：Agent 层事件携带 turn_id + agent_id；
-//! session_id 由本层按 session 维度补打，session_seq 单调递增。生产接线
-//! （Agent EventBus → [`Runtime::stamp`]）随 executor 拆分（L5）落地，
-//! 本模块为聚合补打逻辑的落位点。
+//! session_id 由本层按 session 维度补打，session_seq 单调递增。
+//! Controller 通过 [`Runtime::stamp`] 为聚合事件补打身份。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use peri_acp_types::identity::{CancelRequest, EventEnvelope, SessionEpoch, SessionSeq};
 use peri_acp_types::messages::MessageContent;
@@ -28,8 +27,49 @@ use crate::error::RuntimeError;
 /// 仍在 Agent 层（§3 无状态原则：不持有 session 状态，其余全部注入）。
 struct SessionEntry {
     handle: Arc<dyn SessionHandle>,
+    clock: Arc<Mutex<EventClock>>,
+    destroy_completed: tokio::sync::Mutex<bool>,
+}
+
+impl SessionEntry {
+    fn new(handle: Arc<dyn SessionHandle>, clock: Arc<Mutex<EventClock>>) -> Self {
+        Self {
+            handle,
+            clock,
+            destroy_completed: tokio::sync::Mutex::new(false),
+        }
+    }
+}
+
+/// 同一 session 的句柄刷新共享事件序列，登记实例的销毁归属独立。
+struct EventClock {
     epoch: SessionEpoch,
     seq: SessionSeq,
+}
+
+impl Default for EventClock {
+    fn default() -> Self {
+        Self {
+            epoch: SessionEpoch::initial(),
+            seq: SessionSeq::initial(),
+        }
+    }
+}
+
+impl EventClock {
+    fn stamp(&mut self, session_id: &str, event: &UnstampedEvent) -> EventEnvelope {
+        let seq = self.seq;
+        self.seq = seq.next();
+        EventEnvelope {
+            session_id: session_id.to_string(),
+            session_epoch: self.epoch,
+            turn_id: event.turn_id.clone(),
+            agent_id: event.agent_id.clone(),
+            session_seq: seq,
+            message_id: event.message_id.clone(),
+            delivery_class: event.delivery_class,
+        }
+    }
 }
 
 /// Runtime — 多 session 编排器（薄）。
@@ -41,7 +81,7 @@ struct SessionEntry {
 ///   session_seq 单调递增（§9 事件契约）
 /// - cancel 定位与转发（[`Runtime::cancel`]）：只定位与转发，不解释取消语义（§6）
 pub struct Runtime {
-    sessions: RwLock<HashMap<String, SessionEntry>>,
+    sessions: RwLock<HashMap<String, Arc<SessionEntry>>>,
 }
 
 impl Runtime {
@@ -73,11 +113,7 @@ impl Runtime {
         }
         guard.insert(
             session_id,
-            SessionEntry {
-                handle,
-                epoch: SessionEpoch::initial(),
-                seq: SessionSeq::initial(),
-            },
+            Arc::new(SessionEntry::new(handle, Arc::default())),
         );
         Ok(())
     }
@@ -96,19 +132,11 @@ impl Runtime {
     {
         let session_id = session_id.into();
         let mut guard = self.sessions.write();
-        match guard.get_mut(&session_id) {
-            Some(entry) => entry.handle = handle,
-            None => {
-                guard.insert(
-                    session_id,
-                    SessionEntry {
-                        handle,
-                        epoch: SessionEpoch::initial(),
-                        seq: SessionSeq::initial(),
-                    },
-                );
-            }
-        }
+        let clock = guard
+            .get(&session_id)
+            .map(|entry| Arc::clone(&entry.clock))
+            .unwrap_or_default();
+        guard.insert(session_id, Arc::new(SessionEntry::new(handle, clock)));
     }
 
     /// 已注册 session_id 列表（无顺序保证）。
@@ -136,28 +164,19 @@ impl Runtime {
     /// - session_seq：同 session 单调递增（[`SessionSeq::initial`] 起，绝不回退）
     /// - session_epoch：透传当前实例纪元
     ///
-    /// 未注册 session 报 [`RuntimeError::UnknownSession`]——销毁后的迟到事件
-    /// 无法补打，与 epoch 不可复用契约共同防迟到消息命中新 session。
+    /// 未注册 session 报 [`RuntimeError::UnknownSession`]。本入口只定位当前
+    /// 登记；调用方仍须校验事件归属，本映射不保留跨销毁的身份历史。
     pub fn stamp(
         &self,
         session_id: &str,
         event: &UnstampedEvent,
     ) -> Result<EventEnvelope, RuntimeError> {
-        let mut guard = self.sessions.write();
+        let guard = self.sessions.read();
         let entry = guard
-            .get_mut(session_id)
+            .get(session_id)
             .ok_or_else(|| RuntimeError::UnknownSession(session_id.to_string()))?;
-        let seq = entry.seq;
-        entry.seq = seq.next();
-        Ok(EventEnvelope {
-            session_id: session_id.to_string(),
-            session_epoch: entry.epoch,
-            turn_id: event.turn_id.clone(),
-            agent_id: event.agent_id.clone(),
-            session_seq: seq,
-            message_id: event.message_id.clone(),
-            delivery_class: event.delivery_class,
-        })
+        let envelope = entry.clock.lock().stamp(session_id, event);
+        Ok(envelope)
     }
 
     /// 取消：查映射 → 转发句柄（§9 cancel 契约：Agent 持有最终执行权与幂等
@@ -223,14 +242,25 @@ impl Runtime {
     ///
     /// 返回 drain 出的补打事件（envelope），由调用方（Controller）投递。
     /// 持久化失败时返回错误且**不移除映射**（已执行阶段幂等设计，重试安全）。
+    /// 销毁只移除开始时捕获的登记；期间替换的句柄保留。并发销毁同一登记时，
+    /// 后续调用等待首次收尾完成并返回空事件，避免重复投递。
     pub async fn destroy(
         &self,
         session_id: &str,
         join_deadline: Duration,
     ) -> Result<Vec<EventEnvelope>, RuntimeError> {
-        let handle = self
-            .handle(session_id)
+        let entry = self
+            .sessions
+            .read()
+            .get(session_id)
+            .cloned()
             .ok_or_else(|| RuntimeError::UnknownSession(session_id.to_string()))?;
+        // 同一登记的并发销毁共用收尾；取消 future 或持久化失败后仍可重试。
+        let mut completed = entry.destroy_completed.lock().await;
+        if *completed {
+            return Ok(Vec::new());
+        }
+        let handle = &entry.handle;
         // 1-2：停收新输入 + 取消 owned tasks
         handle.stop_accepting();
         handle.cancel_owned();
@@ -244,12 +274,22 @@ impl Runtime {
             .await
             .map_err(|err| RuntimeError::PersistFailed(session_id.to_string(), err))?;
         // 6：drain 事件（补打）；7：移除映射
-        let drained = handle
-            .drain()
-            .into_iter()
-            .map(|event| self.stamp(session_id, &event))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.sessions.write().remove(session_id);
+        let events = handle.drain();
+        let drained = {
+            let mut clock = entry.clock.lock();
+            events
+                .iter()
+                .map(|event| clock.stamp(session_id, event))
+                .collect()
+        };
+        let mut sessions = self.sessions.write();
+        if sessions
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &entry))
+        {
+            sessions.remove(session_id);
+        }
+        *completed = true;
         Ok(drained)
     }
 }
