@@ -65,7 +65,6 @@ pub struct ModelStream {
     completed: bool,
 }
 
-#[allow(dead_code)]
 impl ModelStream {
     pub fn new<S>(events: S) -> Self
     where

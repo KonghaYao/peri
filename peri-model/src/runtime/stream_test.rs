@@ -14,8 +14,8 @@ use tokio::{sync::Notify, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    cancellable_stream, retrying_http_sse_stream, retrying_http_sse_stream_async,
-    runtime_http_sse_stream, AsyncSseDecoder, SseCompletionDecoder, SseDecoder, SseDecoderFactory,
+    retrying_http_sse_stream, runtime_http_sse_stream, SseCompletionDecoder, SseDecoder,
+    SseDecoderFactory,
 };
 use crate::{
     transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport, SseEvent},
@@ -37,7 +37,11 @@ enum Response {
         started: Option<Arc<Notify>>,
         cancelled: Option<Arc<Notify>>,
     },
-    PendingDecoder,
+    ChunksThenPending {
+        chunks: Vec<Vec<u8>>,
+        waiting: Arc<Notify>,
+        dropped: Arc<Notify>,
+    },
 }
 
 struct FakeTransport {
@@ -107,12 +111,20 @@ impl HttpTransport for FakeTransport {
                 }));
                 Ok(HttpResponse::new(200, None, body, cancellation))
             }
-            Some(Response::PendingDecoder) => Ok(HttpResponse::new(
-                200,
-                None,
-                Box::pin(stream::iter(vec![Ok(b"data: decode\n\n".to_vec())])),
-                cancellation,
-            )),
+            Some(Response::ChunksThenPending {
+                chunks,
+                waiting,
+                dropped,
+            }) => {
+                let dropped = NotifyOnDrop(Some(dropped));
+                let tail = stream::poll_fn(move |_| {
+                    let _ = &dropped;
+                    waiting.notify_one();
+                    Poll::Pending
+                });
+                let body = stream::iter(chunks.into_iter().map(Ok)).chain(tail);
+                Ok(HttpResponse::new(200, None, Box::pin(body), cancellation))
+            }
             None => Err(ModelError::transport(
                 TransportErrorKind::Other,
                 None::<&str>,
@@ -174,7 +186,7 @@ fn stream_for(
 #[tokio::test]
 async fn abort_cancels_only_model_stream_child() {
     let parent = CancellationToken::new();
-    let mut stream = Box::pin(cancellable_stream(
+    let mut stream = Box::pin(crate::ModelStream::with_parent_cancellation(
         stream::pending::<ModelResult<ModelStreamEvent>>(),
         parent.clone(),
     ));
@@ -191,7 +203,7 @@ async fn abort_cancels_only_model_stream_child() {
 #[tokio::test]
 async fn external_cancellation_wakes_pending_stream() {
     let parent = CancellationToken::new();
-    let mut stream = Box::pin(cancellable_stream(
+    let mut stream = Box::pin(crate::ModelStream::with_parent_cancellation(
         stream::pending::<ModelResult<ModelStreamEvent>>(),
         parent.clone(),
     ));
@@ -370,45 +382,37 @@ async fn external_cancellation_stops_fake_sse_body_read() {
     assert_eq!(transport.calls(), 1);
 }
 
+/// [回归测试] 首字节已到但 SSE frame 未齐时，取消必须释放在途 body。
 #[tokio::test]
-async fn external_cancellation_stops_fake_sse_decoder() {
-    let transport = Arc::new(FakeTransport::new(vec![Response::PendingDecoder]));
+async fn test_external_cancellation_stops_sse_after_first_bytes_before_delta() {
     let cancellation = CancellationToken::new();
-    let decoder_started = Arc::new(Notify::new());
-    let decoder: AsyncSseDecoder = {
-        let decoder_started = decoder_started.clone();
-        Arc::new(move |_, cancellation| {
-            let decoder_started = decoder_started.clone();
-            Box::pin(async move {
-                decoder_started.notify_one();
-                cancellation.cancelled().await;
-                Err(ModelError::cancelled())
-            })
-        })
-    };
-    let stream = retrying_http_sse_stream_async(
-        config(),
-        cancellation.clone(),
-        None,
+    let waiting = Arc::new(Notify::new());
+    let dropped = Arc::new(Notify::new());
+    let transport = Arc::new(FakeTransport::new(vec![Response::ChunksThenPending {
+        chunks: vec![b"data: incomplete".to_vec()],
+        waiting: waiting.clone(),
+        dropped: dropped.clone(),
+    }]));
+    let mut stream = Box::pin(stream_for(
         transport.clone(),
-        Arc::new(request),
-        Arc::<str>::from("fake"),
-        decoder,
-    );
-    let read = tokio::spawn(async move { stream.into_future().await.0 });
-
-    timeout(Duration::from_millis(100), decoder_started.notified())
+        cancellation.clone(),
+        config(),
+    ));
+    timeout(Duration::from_secs(1), waiting.notified())
         .await
-        .expect("decoder must begin before cancellation");
+        .expect("首段字节已读入 parser，开始等待后续 body");
     cancellation.cancel();
-    let error = timeout(Duration::from_millis(100), read)
+    let error = timeout(Duration::from_secs(1), stream.next())
         .await
-        .expect("decoder cancellation must resolve")
-        .expect("read task must not panic")
-        .expect("cancelled event")
+        .expect("取消必须唤醒消费方")
+        .expect("应返回取消错误，不能产生未完整解码的 delta")
         .unwrap_err();
-    assert!(error.is_cancelled());
-    assert_eq!(transport.calls(), 1);
+    assert!(error.is_cancelled(), "取消不得被误报为重试或中途断流");
+    assert!(stream.next().await.is_none(), "取消后流应终止");
+    timeout(Duration::from_secs(1), dropped.notified())
+        .await
+        .expect("取消必须释放仍在等待的 body");
+    assert_eq!(transport.calls(), 1, "取消后不得发起重试");
 }
 
 #[tokio::test]
@@ -493,45 +497,38 @@ async fn abort_stops_fake_sse_body_read_without_cancelling_parent() {
     assert!(!parent.is_cancelled());
 }
 
+/// [回归测试] 同步 decoder 已产出 delta 后，abort 仍须取消后续 body 读取。
 #[tokio::test]
-async fn abort_stops_fake_sse_decoder_without_cancelling_parent() {
+async fn test_abort_stops_sse_after_decoded_delta_without_cancelling_parent() {
     let parent = CancellationToken::new();
-    let decoder_started = Arc::new(Notify::new());
-    let transport = Arc::new(FakeTransport::new(vec![Response::PendingDecoder]));
-    let decoder: AsyncSseDecoder = {
-        let decoder_started = decoder_started.clone();
-        Arc::new(move |_, cancellation| {
-            let decoder_started = decoder_started.clone();
-            Box::pin(async move {
-                decoder_started.notify_one();
-                cancellation.cancelled().await;
-                Err(ModelError::cancelled())
-            })
-        })
-    };
-    let mut stream = Box::pin(retrying_http_sse_stream_async(
-        config(),
-        parent.clone(),
-        None,
-        transport.clone(),
-        Arc::new(request),
-        Arc::<str>::from("fake"),
-        decoder,
+    let waiting = Arc::new(Notify::new());
+    let dropped = Arc::new(Notify::new());
+    let transport = Arc::new(FakeTransport::new(vec![Response::ChunksThenPending {
+        chunks: vec![b"data: partial\n\n".to_vec()],
+        waiting: waiting.clone(),
+        dropped: dropped.clone(),
+    }]));
+    let mut stream = Box::pin(stream_for(transport.clone(), parent.clone(), config()));
+    assert!(matches!(
+        timeout(Duration::from_secs(1), stream.next()).await.expect("应收到首个 delta"),
+        Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "partial"
     ));
-
-    timeout(Duration::from_millis(100), decoder_started.notified())
+    timeout(Duration::from_secs(1), waiting.notified())
         .await
-        .expect("fake SSE decoder must begin before abort");
+        .expect("已解码首个 delta，开始等待后续 body");
     stream.abort();
-    let error = timeout(Duration::from_millis(100), stream.next())
+    let error = timeout(Duration::from_secs(1), stream.next())
         .await
-        .expect("abort must wake consumer")
-        .expect("cancelled event")
+        .expect("abort 必须唤醒消费方")
+        .expect("应返回取消错误")
         .unwrap_err();
-    assert!(error.is_cancelled());
-    assert!(stream.next().await.is_none());
-    assert_eq!(transport.calls(), 1);
-    assert!(!parent.is_cancelled());
+    assert!(error.is_cancelled(), "abort 不得被误报为中途断流");
+    assert!(stream.next().await.is_none(), "取消后流应终止");
+    timeout(Duration::from_secs(1), dropped.notified())
+        .await
+        .expect("abort 必须释放仍在等待的 body");
+    assert_eq!(transport.calls(), 1, "已发出 delta 后不得重试");
+    assert!(!parent.is_cancelled(), "abort 不得反向取消父 token");
 }
 
 #[tokio::test]

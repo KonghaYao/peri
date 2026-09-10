@@ -419,6 +419,46 @@ async fn stream_invalid_utf8_is_provider_protocol_error_without_completed() {
 }
 
 #[tokio::test]
+async fn test_stream_done_completes_once_and_ignores_following_frames() {
+    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+        status: 200,
+        request_id: None,
+        chunks: vec![
+            Ok(concat!(
+                "data: {\"id\":\"resp-done\",\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+                "data: invalid-json-after-done\n\n"
+            )
+            .as_bytes()
+            .to_vec()),
+            Ok(b"data: [DONE]\n\ndata: another-invalid-frame\n\n".to_vec()),
+        ],
+    }));
+    let model = OpenAiModel::with_transport(config("qwen3"), transport.clone());
+    let events = model
+        .stream(
+            ModelRequest::new(vec![ModelMessage::user_text("go")]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("应建立生产同步 decoder 流")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<ModelResult<Vec<_>>>()
+        .expect("DONE 后的无效帧不应再进入 decoder");
+    assert!(
+        matches!(
+            events.as_slice(),
+            [ModelStreamEvent::TextDelta { text }, ModelStreamEvent::Completed(response)]
+                if text == "answer" && response.assistant_text().as_deref() == Some("answer")
+        ),
+        "DONE 应将已解码内容结算为唯一 Completed 并终止流"
+    );
+    assert_eq!(transport.bodies().len(), 1, "DONE 后不得重新发起请求");
+}
+
+#[tokio::test]
 async fn stream_emits_completed_after_trailing_qwen_usage() {
     let transport = Arc::new(FakeTransport::with_response(FakeResponse {
         status: 200,
