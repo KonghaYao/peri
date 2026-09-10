@@ -627,6 +627,24 @@ fn test_with_ancestor_sets_boundary() {
     assert!(t.get(a2.id()).is_some());
 }
 
+#[test]
+fn test_loaded_root_history_remains_in_compactable_own_region() {
+    let history = vec![
+        PersistedPayload::Message(make_human("previous question")),
+        PersistedPayload::Message(make_ai("previous answer")),
+    ];
+
+    // Mirrors the main-agent Phase 5 history seeding path.
+    let transcript = MessageTranscript::new().with_own_payloads(history);
+
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(
+        transcript.ancestor_len(),
+        0,
+        "主 Agent 已加载历史是自身 transcript，不得被标成只读 SubAgent ancestor"
+    );
+}
+
 // ── ID 寻址 ─────────────────────────────────────────────────────────────────
 
 #[test]

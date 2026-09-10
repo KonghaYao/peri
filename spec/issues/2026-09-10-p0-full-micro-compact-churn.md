@@ -91,7 +91,8 @@ Compact stage 会暂时取走 transcript 所有权，跨 `await` 执行后再放
 
 ## 工作假设
 
-- **H1：Full 后基线过大（部分缓解，仍待量化）。** 历史 `Read` 路径曾使同一文件在连续 Full 中重新注入；现已限制为 Full 前可见 `Read` 来源。摘要、Skills 与新文件注入后的真实 provider-facing 基线仍待测量。
+- **H0：普通 root Agent 历史 ownership 错接（已确认并修复）。** `build_and_execute_agent_v2` 的 Phase 5 声明已加载 history 是当前 Agent 的 own region，却调用 `MessageTranscript::with_ancestor_payloads` 将全部历史置于只读 ancestor boundary。Full 摘要请求仍读取这些可见历史，但提交时 `skip(ancestor_len)` 无法排除它们；下一次 provider 请求继续携带原历史并返回新的高位 usage，从而再次触发 Full。普通 root 主路径现改用 `with_own_payloads`。该修复不等于已解决含 parent snapshot 的混合 history：SubAgent spawn/resume 与直接加载 hidden child thread 仍缺少显式 payload provenance，必须区分只读父快照和当前 thread 的可压缩 own history，不能把整个平铺 payload 列表统一归类。
+- **H1：Full 后基线过大（ownership 主因已修复，剩余载荷仍待量化）。** 历史 `Read` 路径曾使同一文件在连续 Full 中重新注入；现已限制为 Full 前可见 `Read` 来源。摘要、Skills 与新文件注入后的真实 provider-facing 基线仍待测量。
 - **H2：Micro 收益估算偏离真实收益。** planner 的 projection 估算没有覆盖完整 provider request，实际 input tokens 未按 UI 所示幅度下降。
 - **H3：阈值附近缺少 progress/hysteresis 约束。** 每轮根据单次 usage 独立决策，可能在高压区形成合法但低收益的 Full/Micro 交错。
 - **H4：旧压力样本可被重复消费（已修复）。** 正常非零 provider usage 在 RCRA 时序中只供下一次 Compact 使用；但 Micro 后若后续 provider 返回 `input_tokens=0`，旧 `last_usage` 曾会继续存活并再次触发。现以有效 usage generation 与 tool-growth generation 标识压力样本，同一样本只尝试一次。
@@ -162,11 +163,14 @@ Reason usage → Compact → Reason usage → Compact
 2. Full 文件 re-inject 仅从 Full 前可见 `Read` tool call 收集；连续 Full 无新 `Read` 时不再重复注入旧文件，同路径出现新 `Read` 后仍读取并注入更新内容。
 3. Full `affected_count` 仅统计本轮 own-region 非 System 消息的 `excluded: false → true` transition；Micro/Smart→Full 成功时不再重复累加已被 Full transition 覆盖的消息。
 4. Full 的 legacy `estimated_tokens_saved=0` wire 尚未迁移；TUI 对 Full、unknown 和 empty strategy 显示“token 节省量未测量”，Micro/Smart 保持数值展示。
+5. 普通 root Agent Phase 5 改用 `MessageTranscript::with_own_payloads` 装载跨 turn 历史，使 Full 能对其提交 `excluded` transition；ACP `session/fork` 为复制后的 payload 分配新 `MessageId`、迁移 compact flags/projection 引用，并让新 thread 独立拥有可压缩历史；显式 ancestor API 继续保留给来源明确的只读继承区。SubAgent/hidden child 的混合 parent snapshot / own history provenance 仍须另行校准。
 
 RCRA 时序证据：
 
 - `test_run_react_loop_new_high_usage_generations_continue_full_micro_churn` 证明每个新的非零高位 provider usage generation 都会合法重新 arm Compact。该场景的两次 Full 均失败，outcome 为 `MicroAppliedThenFullFailed`；它验证“新证据可重试”，不代表已经复现截图中的成功 Full chronology。
 - `test_run_react_loop_successful_full_replaces_history_reinjects_read_file_and_resets_usage` 覆盖一次成功 Full：旧可见历史被摘要替换，下一次 Reason 收到摘要与文件 re-inject，tracker 完成 reset，并接受随后返回的新低位 provider usage。
+- `test_main_agent_history_is_seeded_as_compactable_own_region` 锁定 `run_session_loop → build_and_execute_agent_v2` 的 Phase 5 ownership；`full_excludes_loaded_root_history` 证明跨 turn 载入的 root history 会被 Full 排除，provider-facing 可见历史不再残留。
+- `forked_payloads_have_independent_ids_flags_and_compaction_lifecycle` 证明 ACP fork 的 payload、projection 引用和 compact flags 迁移到新 ID，Full lifecycle 只更新 fork thread；stdio `test_fork_creates_session_scoped_lsp_pool` 同时锁定 handler 采用持久化复制后的 ID。
 - 独立 verifier 对已确认的 stale-sample、历史 `Read` re-inject、affected count 和 TUI unknown-saving 修复给出 `PASS`。
 
 **决策：不新增 hysteresis/no-progress production guard。** 当前证据表明，同一旧压力样本应被去重，而不同的新 provider usage 或工具增长是必须保留的重新评估证据。宽泛 guard 可能压制 context limit 前必要的 Compact；只有生产观测证明“新的 provider-confirmed 高位样本仍形成无进展紧密循环”时，才重新评估 WP-005。
@@ -177,6 +181,9 @@ RCRA 时序证据：
 
 - [x] RCRA characterization 覆盖连续新高位 usage generation 的串行重复评估，并明确其 Full 失败边界。
 - [x] RCRA successful-Full chronology 覆盖历史替换、文件 re-inject、tracker reset 与后续低位 usage。
+- [x] 普通 root Agent 跨 turn 历史保持在 compactable own region；Full 会排除已加载旧历史。
+- [x] ACP `session/fork` 以新 `MessageId` 复制 payload 和 compact flags；fork Full lifecycle 可提交且不会修改 source flags。
+- [ ] 为 SubAgent spawn/resume 与直接加载含祖先链的 child thread 保留显式 provenance：父快照是 ancestor，当前 thread 历史是 own，且 compact lifecycle 只写当前 thread。
 - [x] 连续 Full 测试覆盖：无新文件版本时不再 re-inject；同路径新 `Read` 后可注入更新内容。
 - [ ] 记录并比较 Micro planner estimated saving 与实际 provider-facing request token delta。
 - [x] 验证 Full 后 tracker reset 保留 generation 单调性，新非零 provider usage 产生新的权威压力样本。
@@ -186,10 +193,10 @@ RCRA 时序证据：
 - [ ] effective `re_inject_max_files` 与事件/UI files 数量一致，解释现场的 10 files。
 - [ ] 采集 runtime 事件顺序；若发现并发或乱序，再补旧 revision 不得覆盖新 transcript 的测试。
 - [x] 根据现有 RCRA 证据决定不加入 no-progress guard，并保留新压力证据触发必要 Compact 的行为。
-- [x] `cargo build -p peri-agent -p peri-tui` 通过。
-- [x] `cargo test -p peri-agent --lib --quiet`：726 passed / 0 failed。
-- [x] `cargo test -p peri-tui --lib --quiet`：1457 passed / 2 ignored；首次并行执行出现一个无关 flaky，单测与串行完整重跑通过。
-- [x] `cargo clippy -p peri-agent --all-targets -- -D warnings` 与 `cargo clippy -p peri-tui --all-targets -- -D warnings` 通过。
+- [x] `cargo build -p peri-agent -p peri-acp -p peri-tui` 通过。
+- [x] `cargo test -p peri-agent --lib --quiet`：729 passed / 0 failed；`cargo test -p peri-acp --lib --quiet`：606 passed / 0 failed。
+- [x] `cargo test -p peri-tui --lib --quiet`：1460 passed / 2 ignored；此前一次并行执行出现一个无关 flaky，单测与串行完整重跑通过。
+- [x] `cargo clippy -p peri-agent -p peri-acp --all-targets -- -D warnings` 与 `cargo clippy -p peri-tui --all-targets -- -D warnings` 通过。
 - [x] 独立 verification 复验为 `PASS`，`git diff --check` 通过。
 
 ## P0 退出条件

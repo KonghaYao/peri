@@ -1286,12 +1286,14 @@ async fn test_run_react_loop_successful_full_replaces_history_reinjects_read_fil
         "Read".to_string(),
         Arc::new(SuccessfulFullReadTool) as Arc<dyn crate::tools::BaseTool>,
     )])));
-    let mut config = CompactConfig::default();
-    config.micro_compact_stale_steps = 0;
-    config.target_headroom_tokens = 50_000;
-    config.micro_field_threshold_chars = 32;
-    config.micro_field_keep_head_chars = 8;
-    config.micro_field_keep_tail_chars = 8;
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        target_headroom_tokens: 50_000,
+        micro_field_threshold_chars: 32,
+        micro_field_keep_head_chars: 8,
+        micro_field_keep_tail_chars: 8,
+        ..Default::default()
+    };
     let mut budget = crate::agent::token::ContextBudget::new(100_000);
     budget.output_reserve = 40_000;
     let turn = session.start_turn();
@@ -1322,24 +1324,25 @@ async fn test_run_react_loop_successful_full_replaces_history_reinjects_read_fil
     assert_eq!(reason_calls.load(Ordering::SeqCst), 2);
     assert_eq!(compact_calls.load(Ordering::SeqCst), 1);
 
-    let requests = reason_requests.lock().unwrap();
-    assert!(requests[0]
-        .iter()
-        .any(|content| content.contains(prompt_marker)));
-    let post_full = &requests[1];
-    assert!(post_full
-        .iter()
-        .any(|content| content.contains("compact generation 0")));
-    assert!(post_full
-        .iter()
-        .any(|content| content.contains(file_marker)));
-    assert!(!post_full
-        .iter()
-        .any(|content| content.contains(prompt_marker)));
-    assert!(!post_full
-        .iter()
-        .any(|content| content.contains("original reasoning marker")));
-    drop(requests);
+    {
+        let requests = reason_requests.lock().unwrap();
+        assert!(requests[0]
+            .iter()
+            .any(|content| content.contains(prompt_marker)));
+        let post_full = &requests[1];
+        assert!(post_full
+            .iter()
+            .any(|content| content.contains("compact generation 0")));
+        assert!(post_full
+            .iter()
+            .any(|content| content.contains(file_marker)));
+        assert!(!post_full
+            .iter()
+            .any(|content| content.contains(prompt_marker)));
+        assert!(!post_full
+            .iter()
+            .any(|content| content.contains("original reasoning marker")));
+    }
 
     let outcomes: Vec<_> = std::iter::from_fn(|| handles.try_observe())
         .filter_map(|event| match event {
@@ -1361,11 +1364,13 @@ async fn test_run_react_loop_successful_full_replaces_history_reinjects_read_fil
         "Full reset 后第二次 Reason 的低 usage 应成为权威样本"
     );
 
-    context
+    let persist_tx = context
         .session
         .transcript
-        .write()
-        .flush_persistence()
+        .read()
+        .persist_tx_handle()
+        .expect("测试 transcript 应绑定持久化 writer");
+    crate::session::transcript::MessageTranscript::flush_via_tx(&persist_tx)
         .await
         .unwrap();
     let persisted = store.load_messages(&thread_id).await.unwrap();
@@ -1411,12 +1416,14 @@ async fn test_run_react_loop_new_high_usage_generations_continue_full_micro_chur
         "usage_churn_tool".to_string(),
         Arc::new(UsageChurnTool) as Arc<dyn crate::tools::BaseTool>,
     )])));
-    let mut config = CompactConfig::default();
-    config.micro_compact_stale_steps = 0;
-    config.target_headroom_tokens = 50_000;
-    config.micro_field_threshold_chars = 32;
-    config.micro_field_keep_head_chars = 8;
-    config.micro_field_keep_tail_chars = 8;
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        target_headroom_tokens: 50_000,
+        micro_field_threshold_chars: 32,
+        micro_field_keep_head_chars: 8,
+        micro_field_keep_tail_chars: 8,
+        ..Default::default()
+    };
     let mut budget = crate::agent::token::ContextBudget::new(100_000);
     budget.output_reserve = 40_000;
     let context = StageContext::builder(turn, session.transcript(), session.queue().clone())

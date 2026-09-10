@@ -630,9 +630,15 @@ pub(crate) async fn handle_fork(
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
     let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
-    let (source_payloads, source_frozen) = sessions
+    let (source_payloads, source_frozen, source_thread_id) = sessions
         .get(source_id)
-        .map(|state| (state.history_payloads.clone(), state.frozen.clone()))
+        .map(|state| {
+            (
+                state.history_payloads.clone(),
+                state.frozen.clone(),
+                state.thread_id.clone(),
+            )
+        })
         .ok_or_else(|| AcpError::new(-32602, format!("source session not found: {source_id}")))?;
     let source_frozen = source_frozen.ok_or_else(|| {
         AcpError::new(
@@ -641,10 +647,14 @@ pub(crate) async fn handle_fork(
         )
     })?;
 
-    let (new_thread_id, _copied_history) =
-        dispatch::fork_session(cfg.controller.as_ref(), source_id, &source_payloads, cwd)
-            .await
-            .map_err(|e| AcpError::new(-32603, format!("{e}")))?;
+    let (new_thread_id, copied_payloads) = dispatch::fork_session(
+        cfg.controller.as_ref(),
+        &source_thread_id,
+        &source_payloads,
+        cwd,
+    )
+    .await
+    .map_err(|e| AcpError::new(-32603, format!("{e}")))?;
 
     let new_session_id = new_thread_id.clone();
 
@@ -664,11 +674,11 @@ pub(crate) async fn handle_fork(
             session_id: new_session_id.clone(),
             thread_id: new_thread_id.clone(),
             cwd: cwd.to_string(),
-            history: source_payloads
+            history: copied_payloads
                 .iter()
                 .filter_map(|payload| payload.as_message().cloned())
                 .collect(),
-            history_payloads: source_payloads,
+            history_payloads: copied_payloads,
             cancel_token: None,
             frozen: Some(frozen_data),
             recall_items: Vec::new(),

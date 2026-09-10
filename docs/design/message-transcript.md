@@ -65,7 +65,7 @@ graph TB
   - ❌ 禁止 prepend 或中间插入——破坏 Prompt Cache 前缀
   - ❌ 禁止删除或修改——Compact 通过重建 Transcript 实现，标记不改变消息内容本身
 - **代码位置**：`BaseMessage` / `ContentBlock` / `MessageContent` 定义于 `peri-agent/src/messages/`；`MessageTranscript` 定义于 `peri-agent/src/session/transcript.rs`；`MessageQueue` 定义于 `peri-agent/src/session/queue.rs`。Transcript 和 Queue 属于 session 模块，messages 模块仅含消息数据类型定义。
-- **ancestor 边界**：Fork/Background Agent 从父 Agent 继承消息时，Transcript 维护 `ancestor_len` 边界。继承的祖先消息只读——Compact 仅操作边界之后的自有消息，祖先消息不可压缩、不可删除。
+- **ancestor 边界**：SubAgent/Fork-mode Agent 引用父 Agent 快照时，Transcript 维护 `ancestor_len` 边界；继承的祖先消息只读，Compact 仅操作边界之后由当前 thread 持有的自有消息。ACP `session/fork` 是独立会话复制：复制后的 payload 使用新 `MessageId` 并归新 thread 所有，因此属于可压缩 own region，而非共享 ancestor。
 - **Staging 两阶段写入**：Reason 阶段产出的 AI 消息（含 tool_calls）不直接追加到 Transcript——先 Staging。Act 阶段收集所有 ToolResult 后，AI 消息 + ToolResult 作为一组原子提交到 Transcript。Staging 期间的消息 LLM 请求不可见。提交后触发持久化。若 Act 阶段异常终止（Cancel/Error），staging 消息丢弃——Transcript 回到本轮开始前的状态，不留半个 AI 消息。
 
 ### 2.3 MessageQueue
