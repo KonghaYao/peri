@@ -1,4 +1,5 @@
 //! 从 tool_dispatch.rs 分离的测试模块
+use crate::middleware::capabilities as hook_state;
 use std::collections::BTreeMap;
 
 use super::*;
@@ -366,7 +367,7 @@ async fn test_dispatch_rejects_duplicate_and_empty_ids_before_policy_or_invoke()
         }
         async fn before_tools_batch(
             &self,
-            _state: &mut dyn crate::middleware::state::MiddlewareState,
+            _state: &mut dyn hook_state::BeforeToolState,
             calls: &[ToolCall],
         ) -> Vec<crate::error::AgentResult<ToolCall>> {
             self.0

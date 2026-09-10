@@ -2,6 +2,7 @@
 use super::*;
 use crate::agent::stages::StageContext;
 use crate::messages::{BaseMessage, MessageContent};
+use crate::middleware::capabilities as hook_state;
 use crate::session::store::FrozenContext;
 use crate::session::Session;
 use std::sync::Arc;
@@ -88,7 +89,10 @@ impl crate::middleware::Middleware for ReplaceAppendRecall {
         "ReplaceAppendRecall"
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> crate::error::AgentResult<()> {
+    async fn before_agent(
+        &self,
+        state: &mut dyn hook_state::BeforeAgentState,
+    ) -> crate::error::AgentResult<()> {
         let original = state
             .messages()
             .iter()
@@ -116,7 +120,10 @@ impl crate::middleware::Middleware for ObserveReplacement {
         "ObserveReplacement"
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> crate::error::AgentResult<()> {
+    async fn before_agent(
+        &self,
+        state: &mut dyn hook_state::BeforeAgentState,
+    ) -> crate::error::AgentResult<()> {
         assert_eq!(
             state
                 .messages()

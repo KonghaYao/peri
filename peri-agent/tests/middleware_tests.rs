@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use peri_agent::middleware::capabilities as hook_state;
 use peri_agent::prelude::*;
 
 // ── 辅助 ──────────────────────────────────────────────────────────────────────
@@ -24,7 +25,7 @@ impl Middleware for OrderTracker {
         &self.name
     }
 
-    async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         self.log
             .lock()
             .unwrap()
@@ -34,7 +35,7 @@ impl Middleware for OrderTracker {
 
     async fn after_agent(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::AfterAgentState,
         output: &AgentOutput,
     ) -> AgentResult<AgentOutput> {
         self.log
@@ -101,7 +102,7 @@ async fn test_chain_before_tool_modifies_call() {
 
         async fn before_tool(
             &self,
-            _state: &mut dyn MiddlewareState,
+            _state: &mut dyn hook_state::BeforeToolState,
             tool_call: &ToolCall,
         ) -> AgentResult<ToolCall> {
             Ok(ToolCall::new(

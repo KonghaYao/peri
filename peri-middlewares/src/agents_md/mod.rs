@@ -1,3 +1,4 @@
+use peri_agent::middleware::capabilities as hook_state;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -5,10 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use peri_agent::{
-    error::AgentResult,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
-};
+use peri_agent::{error::AgentResult, middleware::r#trait::Middleware};
 
 /// AgentsMdMiddleware - 注入项目指引文件（AGENTS.md / CLAUDE.md）
 ///
@@ -332,7 +330,7 @@ impl Middleware for AgentsMdMiddleware {
         self.cached_contribution.read().unwrap().clone()
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         let contribution = self.build_contribution(state.cwd()).await?;
         *self.cached_contribution.write().unwrap() = contribution;
         Ok(())

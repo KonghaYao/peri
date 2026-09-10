@@ -1,6 +1,7 @@
 mod file_reader;
 mod parser;
 
+use peri_agent::middleware::capabilities as hook_state;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -8,7 +9,7 @@ pub use file_reader::FileContent;
 use peri_agent::{
     error::AgentResult,
     messages::{BaseMessage, ContentBlock},
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::r#trait::Middleware,
 };
 
 use crate::tool_search::core_tools::TOOL_READ;
@@ -41,7 +42,7 @@ impl Middleware for AtMentionMiddleware {
         "AtMentionMiddleware"
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         // 取最后一条 Human 消息
         let last_human = state
             .messages()

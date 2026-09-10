@@ -1,10 +1,8 @@
+use peri_agent::middleware::capabilities as hook_state;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use peri_agent::{
-    error::AgentResult,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
-};
+use peri_agent::{error::AgentResult, middleware::r#trait::Middleware};
 
 pub use peri_acp_types::agents::AgentOverrides;
 
@@ -125,7 +123,7 @@ impl Middleware for AgentDefineMiddleware {
         "AgentDefineMiddleware"
     }
 
-    async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         // 覆盖注入已在构建 LLM 时通过 build_system_prompt(overrides, cwd) 完成，
         // 中间件层无需再操作消息列表。
         //

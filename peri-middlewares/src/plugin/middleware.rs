@@ -1,6 +1,7 @@
+use peri_agent::middleware::capabilities as hook_state;
 use std::sync::Arc;
 
-use peri_agent::middleware::{r#trait::Middleware, state::MiddlewareState};
+use peri_agent::middleware::r#trait::Middleware;
 
 use crate::plugin::loader::LoadedPlugin;
 
@@ -28,7 +29,7 @@ impl Middleware for PluginMiddleware {
 
     async fn before_agent(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::BeforeAgentState,
     ) -> peri_agent::error::AgentResult<()> {
         let plugins = &self.plugins;
         if plugins.is_empty() {

@@ -1,9 +1,10 @@
+use crate::middleware::capabilities as hook_state;
 use async_trait::async_trait;
 
 use crate::{
     agent::react::{AgentOutput, ToolCall, ToolResult},
     error::{AgentError, AgentResult},
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::r#trait::Middleware,
 };
 
 /// 日志中间件 - 记录 Agent 执行过程
@@ -39,14 +40,14 @@ impl Middleware for LoggingMiddleware {
         &self.name
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         tracing::info!(name = %self.name, cwd = %state.cwd(), "Agent starting");
         Ok(())
     }
 
     async fn before_tool(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         let step = state.current_step();
@@ -71,7 +72,7 @@ impl Middleware for LoggingMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         result: &ToolResult,
     ) -> AgentResult<()> {
@@ -101,7 +102,7 @@ impl Middleware for LoggingMiddleware {
 
     async fn after_agent(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::AfterAgentState,
         output: &AgentOutput,
     ) -> AgentResult<AgentOutput> {
         tracing::info!(name = %self.name, steps = output.steps, "Agent completed");
@@ -110,7 +111,7 @@ impl Middleware for LoggingMiddleware {
 
     async fn on_error(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::StateView,
         error: &AgentError,
     ) -> AgentResult<()> {
         tracing::warn!(name = %self.name, error = %error, "Agent error");
@@ -145,7 +146,7 @@ impl Middleware for MetricsMiddleware {
 
     async fn after_agent(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::AfterAgentState,
         output: &AgentOutput,
     ) -> AgentResult<AgentOutput> {
         tracing::info!(

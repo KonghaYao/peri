@@ -1,6 +1,6 @@
-//! MiddlewareState trait — middleware 钩子的状态上下文
+//! MiddlewareState — AgentContext / AgentState 的底层状态适配接口
 //!
-//! object-safe trait，让 `trait Middleware` 接收 `&mut dyn MiddlewareState`。
+//! hook 通过 capabilities 中的窄接口访问状态，不接收整个适配器接口。
 //!
 //! ## 与 `AgentState` 的关系
 //!
@@ -9,10 +9,10 @@
 
 use crate::{agent::state::AgentState, messages::BaseMessage};
 
-/// Middleware 在每次钩子调用中看到的状态上下文。
+/// 状态适配器的真实操作集合；不直接作为 hook 参数。
 ///
 /// object-safe：无 `Clone`/`'static` 约束、无泛型方法（`impl Into<String>` 改为 `String`）。
-/// 这让 `trait Middleware` 可以改为非泛型，钩子签名用 `&mut dyn MiddlewareState`。
+/// 各生命周期的公开能力由 `capabilities` 组合，适配器不持有新的 owner。
 pub trait MiddlewareState: Send + Sync {
     fn cwd(&self) -> &str;
 

@@ -1,5 +1,6 @@
 mod compressor;
 
+use peri_agent::middleware::capabilities as hook_state;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -67,10 +68,7 @@ impl Middleware for ImageMiddleware {
         "ImageMiddleware"
     }
 
-    async fn before_agent(
-        &self,
-        state: &mut dyn peri_agent::middleware::state::MiddlewareState,
-    ) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         // 取最后一条 Human 消息的索引
         let last_human_idx = state
             .messages()

@@ -94,6 +94,12 @@
 - **Rule**：中间件顺序是行为契约，不得按名称、便利性或局部需求重排；链的唯一事实源是 Agent 层 session 工厂（链序蓝本 `production_blueprint`），装配实现位于 `peri-middlewares/src/assembly.rs`（依赖反转完成后物理迁入 Agent 层），详细任务入口为 `peri-middlewares/CLAUDE.md`。
 - **Verify**：人工检查 `peri-agent/src/session/factory.rs` 的 `production_blueprint` 槽位顺序与 `peri-middlewares/src/assembly.rs` 的槽位构造（蓝本与构造一一对应，条件注册按装配入口判断，Hook 组展开见 `peri-middlewares/src/assembly/hooks.rs`）；修改该顺序时按 `docs/standards/testing.md` 增加或更新验证。
 
+### ARC-MIDDLEWARE-CAPABILITY-001
+
+- **Scope**：`peri-agent` hook 接口、执行适配器与 `peri-middlewares` 消费方。
+- **Rule**：hook 只接收其阶段真实支持的能力组合，不得继承完整 `MiddlewareState` 或通过 no-op 写方法、不可回写快照模拟能力。`StateView` 只读消息与 turn 元数据，不得暴露可写 queue/catalog 句柄；队列与目录操作分别由 `QueueState`、`CatalogState` 显式提供。输入替换仅在 `before_agent` 按已有稳定 MessageId 进行，不增删或重排；整链成功或 Err 后均须 reconcile，追加消息同步写入 transcript 与本次视图。`before_model` 追加对后续 `after_model` 可见；工具审批通过 ToolCall 返回修改，after-tool/after-agent 反馈通过队列保留原唤醒语义。目录重绑仍遵守 ARC-TOOLS-001 的 Reason 发布顺序；不得持 transcript、queue 或 catalog guard 跨外部 await。
+- **Verify**：`cargo test -p peri-agent --doc`（不支持能力的 compile-fail）；`cargo test -p peri-agent --lib middleware::capabilities`（model/目录/工具与队列的生产 runner）；`cargo test -p peri-agent --lib before_agent_reconciles`（成功与 Err 回写）；`cargo test -p peri-middlewares --lib middleware::image`；检查 `peri-agent/src/middleware/{capabilities,trait}.rs` 与 `peri-agent/src/agent/stages/middleware_runner.rs`。
+
 ### ARC-SECRET-001
 
 - **Scope**：配置加载、日志、错误、遥测、测试与提交。

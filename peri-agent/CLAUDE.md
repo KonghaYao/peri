@@ -14,6 +14,7 @@
 | --- | --- |
 | RCRA、Prompt frozen、工具 direct/deferred | `../docs/standards/architecture-contracts.md` |
 | 中间件链装配入口与链序蓝本（ARC-MIDDLEWARE-001） | `src/session/factory.rs`；装配实现在 `../peri-middlewares/src/assembly.rs` |
+| hook 状态能力与回写（ARC-MIDDLEWARE-CAPABILITY-001） | `../docs/standards/architecture-contracts.md`；`src/middleware/capabilities.rs` 与 `src/agent/stages/middleware_runner.rs` |
 | Rust、async、文本宽度、doc tests | `../docs/standards/rust.md` |
 | 测试位置与覆盖要求 | `../docs/standards/testing.md` |
 | compact 阈值与环境覆盖 | `src/agent/compact_v2/config.rs` 的 `CompactConfig` |

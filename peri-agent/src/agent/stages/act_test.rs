@@ -4,7 +4,7 @@ use crate::agent::events_v2::{EventBus, EventHandles, RenderEvent};
 use crate::agent::react::{AgentOutput, Reasoning, ToolCall};
 use crate::agent::stages::{MiddlewareChain, StageContext};
 use crate::error::{AgentError, AgentResult};
-use crate::middleware::state::MiddlewareState;
+use crate::middleware::capabilities as hook_state;
 use crate::middleware::Middleware;
 use crate::session::store::FrozenContext;
 use crate::session::Session;
@@ -42,7 +42,7 @@ impl Middleware for FailingAfterAgentMiddleware {
 
     async fn after_agent(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::AfterAgentState,
         _output: &AgentOutput,
     ) -> AgentResult<AgentOutput> {
         Err(AgentError::MiddlewareError {

@@ -1,4 +1,5 @@
 pub mod base;
+pub mod capabilities;
 pub mod chain;
 pub mod prompt_sections;
 pub mod queue_enqueue;

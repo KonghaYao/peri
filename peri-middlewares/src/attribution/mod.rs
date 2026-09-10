@@ -14,6 +14,7 @@
 mod model_email;
 mod state;
 
+use peri_agent::middleware::capabilities as hook_state;
 use std::{
     collections::HashMap,
     process::Stdio,
@@ -26,7 +27,7 @@ pub use model_email::get_attribution_email;
 use peri_agent::{
     agent::react::{ToolCall, ToolResult},
     error::AgentResult,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::r#trait::Middleware,
 };
 pub use state::AttributionState;
 
@@ -140,7 +141,7 @@ impl Middleware for GitAttributionMiddleware {
 
     async fn before_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         // 仅处理 Write 和 Edit
@@ -161,7 +162,7 @@ impl Middleware for GitAttributionMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         _result: &ToolResult,
     ) -> AgentResult<()> {
@@ -190,7 +191,7 @@ impl Middleware for GitAttributionMiddleware {
         Ok(())
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         if let Some(branch) = Self::current_branch(state.cwd()).await {
             if let Some((previous_branch, current_branch)) = self.observe_branch(branch) {
                 tracing::info!(

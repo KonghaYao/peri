@@ -1,3 +1,4 @@
+use peri_agent::middleware::capabilities as hook_state;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -64,7 +65,7 @@ impl Middleware for TodoMiddleware {
 
     async fn after_agent(
         &self,
-        state: &mut dyn peri_agent::middleware::state::MiddlewareState,
+        state: &mut dyn hook_state::AfterAgentState,
         output: &peri_agent::agent::react::AgentOutput,
     ) -> AgentResult<peri_agent::agent::react::AgentOutput> {
         // 1. 前面已有 block_continue → 不干预，尊重优先级（防御性 guard：

@@ -1,3 +1,4 @@
+use peri_agent::middleware::capabilities as hook_state;
 use std::{collections::BTreeMap, sync::Arc};
 
 #[cfg(unix)]
@@ -10,7 +11,7 @@ use peri_agent::{
         react::{Reasoning, ToolCall},
         stages::{tool_dispatch::dispatch_tools, SharedToolMap, StageContext},
     },
-    middleware::{r#trait::Middleware, state::MiddlewareState, MiddlewareChain},
+    middleware::{r#trait::Middleware, MiddlewareChain},
     session::{tool_catalog::SessionToolCatalog, FrozenContext, Session},
     tools::{BaseTool, ToolContext},
 };
@@ -70,7 +71,7 @@ impl Middleware for PolicyRecorder {
 
     async fn before_tools_batch(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::BeforeToolState,
         calls: &[ToolCall],
     ) -> Vec<peri_agent::error::AgentResult<ToolCall>> {
         self.0.lock().extend_from_slice(calls);
