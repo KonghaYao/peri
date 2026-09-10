@@ -72,18 +72,18 @@
 | peri-middlewares | client、dynamic registry、assembly、staged_connection、subagent tool、middleware capability | client/registry/assembly 已提交；capability A/B/C 已验证；subagent tool 待治理 |
 | peri-acp | host、session、event_sink、prompt、session lifecycle | host/session 已提交；event_sink 已拆分验证；prompt 模型/观测/stage 装配已拆分；canonical 旧测试副本待与 transcript 治理收敛 |
 | peri-resources | SQLite 连接、行映射、祖先上下文、compaction 事务 | SQLite 拆分已提交，65 项存储测试通过 |
-| peri-agent | stage_builder、tool_dispatch、workflow agent、transcript、subagent factory、MiddlewareState | stage_builder、capability、tool_dispatch 已拆分验证；workflow/transcript/subagent factory 待治理 |
-| peri-acp-types | session 混合 runtime/错误/消息投递，event_v2 契约与映射；Agent queue_test 文件存在但未挂载 | session 拆分已验证，Agent queue 7 项测试恢复挂载；event_v2 待审 |
+| peri-agent | stage_builder、tool_dispatch、workflow agent、transcript、subagent factory、MiddlewareState | stage_builder、capability、tool_dispatch 已拆分验证；transcript writer 已分离并修复失败态空转；workflow agent/subagent factory 待治理 |
+| peri-acp-types | session 混合 runtime/错误/消息投递，event_v2 契约与映射；Agent queue_test 文件存在但未挂载 | session 拆分已验证，Agent queue 7 项测试恢复挂载；event_v2 契约/通道/纯映射已拆分，53项测试迁回定义crate |
 | peri-tui | client、ask_user、acp_notifier、current_turn、input_area、plugin panel | client 已提交；ask_user/notifier/current_turn 已拆分验证；input_area 主体保留清晰边界；plugin 搜索状态与请求 owner 已拆分，真实桥接回归通过 |
 | peri-controller | Langfuse tracer registry、bridge 与控制面状态所有权 | 已拆分；漏关观测回归2红→全套130+5绿；移除6个仅装配阶段使用的锁 |
 | peri-model | protocol/runtime/transport/provider 分层清楚；测试专用 async SSE 重复路径需收敛 | 已审保留总体结构；测试专用 SSE 整链已删除，生产路径147项测试通过 |
 | peri-runtime | destroy 跨 await 后无条件 remove 可能误删替换后的 session；旧事件也可能借新 entry 补打 | 已修复并提交：4项旧实现回归失败；16项Runtime及16项Controller关联测试通过 |
-| peri-workflow | runner、tool preflight、journal、progress | runner 已提交；progress 锁顺序/完成摘要、tool observer 取消窗口、journal 写失败待回归治理 |
+| peri-workflow | runner、tool preflight、journal、progress | runner 已提交；progress 按 run 共持投影/执行标记、journal Git/输出职责已分离，2红→91绿；tool observer/preflight 取消窗口待治理 |
 | peri-js-runtime | 分层可保留；artifact launch 未纳入 deadline/cancel、run_execute 错误提前返回可能跳过显式收尾 | preparation/install/invocation owner 已修复；4红到42全绿，含实际Unix进程回收；Windows runtime 未验证 |
 | peri-lsp | document sync/dispatcher 可分离；重复 readiness、请求 id 碰撞和进程任务 owner 需核查 | dispatcher 已拆分，双向ID/畸形响应/close pending 三回归由红到72全绿；client/pool readiness 与请求跨重启归属已修复；document sync 已归属单次连接，缓存与 writer 准入同步提交；92项通过 |
 | peri-theme | loader 混合查找/引用/构造；visited 跨根复用、Unicode hex切片、忽略 extends、重复默认主题 | 已拆分并修复引用链/Unicode hex/extends；29项单元与集成测试通过，索引已补建 |
 | peri-web-pty | handle_socket 混合协议/阻塞I/O/child监控；reader未join、末尾输出drain需实测 | Unix 连接 owner、非阻塞 I/O 与协议边界已拆分；24单元+7真实WS测试通过，Windows阻塞读取收尾仍有平台缺口 |
-| langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 事件族转换已拆分，73项测试通过；batcher flush 失败确认已修复，77项通过；shutdown/backpressure 待治理 |
+| langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 事件族转换已拆分，73项测试通过；batcher flush 失败确认已修复，77项通过；shutdown owner已验证83项；宿主接线/backpressure待治理 |
 | side-projects/git-stats | 结构清楚；外层log sentinel碰撞、聚合展示名新旧次序需核查 | NUL framing与最新展示名修复已验证：28项测试含真实Git fixture，独立Clippy通过 |
 | side-projects/md-scan-matrix | 结构清楚；FAIL/前缀稳定性/collision结果只打印，不能据exit0宣称验收通过 | 评估/报告已分离；6项回归、45矩阵+33补充checks及独立Clippy通过 |
 | side-projects/image-spike | 目标单一的TestBackend buffer/Kitty transmit实验，无需拆分 | 已审保留；本地2项buffer行为测试及all-targets Clippy通过；不等于真实终端验证 |
@@ -162,3 +162,16 @@
 - ACP prompt：模型工厂、turn 观测与 stage/compact hook 装配拆为私有模块，公开 hook 路径保留；借用既有 AcpServerConfig 将调用参数从27项收敛为7项。配置快照时点、池 owner、原回调与 await 顺序保持。依赖门仅随已存在装配职责移动到精确新文件，不扩大目录豁免；模块指引修正链序蓝本与具体装配位置。
 - 关联完整验证：Agent742单元+4集成、ACP611单元+8集成、Langfuse77单元、Controller130单元+5集成通过；对应 doc tests 8项通过。middleware1612单元+8集成通过，单元4项与doc1项原有 ignored。
 - workspace all-targets Clippy（`-D warnings`）、格式与16条依赖方向检查通过。代码索引已同步；分组提交须通过 hooks。本批结果不替代后续修改的最终 workspace 验证。
+
+
+## 第八批验证记录
+
+- 事件契约：event_v2 根18行保留全部公共 re-export，私有 types/bus/executor_mapping 管类型身份、通道、纯映射；三段生产代码去注释/空白核对完全相同。53项原测试迁回 types，Agent 新增公共路径身份保护。同步实际有界 broadcast、Render 完成事件与测试导航；已有事件饱和 Open issue 保持未关闭。
+- Transcript：唯一生产持久化 writer 提取到私有 persistence 模块，内存/canonical compaction 仍由 Transcript 持有。真实 writer +虚拟时钟/计数Waker回归先红（无新op仍被失败batch deadline唤醒），修复后 terminal failure 只等待新操作；sticky barrier、未落盘payload和Shutdown顺序保持。
+- Workflow progress：新回归先证实完成保留期中phase token从20变0；TrackedRun 同时拥有公开投影与本次执行标记，删除两把锁的逆序获取路径。保留期内统计不丢、cache-hit历史用量不混入，到期 run/marker 同时释放；时点注入验证精确过期边界。
+- Workflow journal：Git baseline/postcondition、JSON 输出提取与磁盘记录拆开，public 路径保留。真实目录冲突回归先证实写失败仍把原文替换为无效引用；修复只在文件写成功后提交引用，失败保留原文。Workflow 全套91项通过、3项原有 ignored。
+- Langfuse shutdown：admission、worker、join owner 分离；独立关闭信号不受队列满阻塞，只排空已提交命令，保留JoinHandle跨取消/重试，缓存固定终态。6项新增回归覆盖本机HTTP gate、满队列、未轮询生产者、并发重复关闭及真实abort/panic；83项全包通过，Controller130+5通过。新API没有旧实现，未把编译缺失或模拟shutdown当作旧行为红灯；宿主/print接线仍需下一批完成。
+- 分层验证：types384单元+3集成、Agent691单元+4集成、ACP611单元+8集成通过；Agent实际doc tests 8项通过，types2项原有ignored。
+- 完整 workspace 测试：46个目标共5618通过、0失败、12项原有ignored。初次strictClippy发现journal拆分后两处unused import，删除后workspace all-targets Clippy（`-D warnings`）、完整build与格式检查均以exit0通过；本批分组提交通过hooks。Markdown本地链接86项无失效，16条依赖方向门与typos通过。
+
+当前仍需处理子Agent恢复取消回滚/事件排空、workflow tool完成observer、workflow agent装配，以及Langfuse部署关闭和背压配置；本批不宣称全仓治理完成。
