@@ -1,6 +1,6 @@
 # peri-workflow 代码索引
 
-> 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-09-09（Workflow RPC 所有权校准）
+> 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-09-10（runner 职责拆分）
 > 依据：`docs/design/workflow.md`、`docs/standards/architecture-contracts.md`、源码（无 crate 级 CLAUDE.md）
 
 ## 架构速览
@@ -18,11 +18,16 @@
 | --- | --- | --- |
 | 改通用 JS RPC 传输/进程生命周期 | `peri-js-runtime/src/{rpc,host}.rs` | `peri_js_runtime::RpcChannel::send_request`、`JsExecutionHost::spawn/kill/wait`；pending 先登记后写，stdout/exit/cancel drain pending，stderr 并行消费 |
 | 改 Workflow agent 挂起/kill | `peri-workflow/src/rpc.rs` | `register_agent`、`deregister_agent`、`kill_agent`；ownership token 防 stale deregister，kill 同时响应 RPC error 与 cancel |
-| 改脚本执行/Node 消息循环 | `peri-workflow/src/{runner,protocol}.rs` | `WorkflowRunner::run`、`workflow_start_params`、`parse_agent_run_params`；所有 run-scoped RPC 必须匹配 active run_id |
+| 改启动、host 所有权与取消收敛 | `peri-workflow/src/runner.rs` | `WorkflowRunner::run`；拥有 message task 的 spawn/abort/join，启动失败先移除 active channel，kill 分支回收进程并等待 message task 后发布 killed |
+| 改 runtime artifact/安装/命令准备 | `peri-workflow/src/runner/artifact.rs` | `prepare_workflow_command`、`validate_workflow_artifact`；固定 bundle 身份/字节校验，staging 原子发布与显式网络 fallback；`runner::WORKFLOW_ARTIFACT_BYTES` 仅为 preflight 兼容 re-export |
+| 改 run-scoped RPC 校验/启动握手 | `peri-workflow/src/runner/run_protocol.rs` + `peri-workflow/src/protocol.rs` | `parse_run_scoped`、`parse_agent_run_params`、`workflow_start_params`、`validate_start_ack`；请求匹配 active run_id，wire DTO 仍由 `protocol.rs` 定义或 re-export |
+| 改 Node 消息分派 | `peri-workflow/src/runner/message_loop.rs` | `MessageLoop::run`；分派 domain method，参数错误继续接收，限额/协议错误终止循环，终态持久化与进度投影完成后发送 done |
+| 改 Workflow agent task/响应门控 | `peri-workflow/src/runner/agent_dispatch.rs` | `AgentDispatcher::dispatch`；先注册再 spawn，task 持有 permit，token 决定响应所有权，duplicate/kill 不产生重复响应 |
+| 改自然终态/Git 交付投影 | `peri-workflow/src/runner/terminal.rs` | `finalize_workflow`、`project_postcondition`、`send_failure`；Git postcondition → state.json → progress，持久化失败使对外结果降级为 failed/blocked |
 | 改 Workflow 工具/preflight | `peri-workflow/src/tool.rs` | `WorkflowTool::invoke`、`preflight_validate_script`、`resolve_script_path`；run_id 前校验脚本、cwd/repo、writeIntent、JS-safe limits，并捕获 GitBaseline |
 | 改 Git ownership/postcondition | `peri-workflow/src/journal.rs` | `GitBaseline::capture`、`validate_write_intent`、`verify_postcondition`；`GIT_OPTIONAL_LOCKS=0`，canonical repo/cwd、allowlist、HEAD/commit paths fail-safe 对账 |
 | 改 state/journal/resume | `peri-workflow/src/journal.rs` + `npm-packages/@peri-workflow/src/server.ts` | `WorkflowJournalStore::{init_run,append,read_all,write_state}`；state 原子写；legacy attempt identity 不得用 journal seq 伪造 |
-| 改 runtime limits | `peri-workflow/src/runner.rs` | `WorkflowLimits`、agent/run 分支、elapsed/tool count 门限；live agent 才计 attempt，cache-hit 不重复计数 |
+| 改 runtime limits | `peri-workflow/src/runner/{limits,agent_dispatch,message_loop}.rs` | `try_reserve_live_attempt` 与 `LiveAttemptPermit::drop` 管 live 配额；`AgentDispatcher::dispatch` 检查 agent/tool 门限，`MessageLoop::run` 检查等待 deadline；配置事实源为 `protocol.rs::WorkflowLimits`，cache-hit 不重复计数 |
 | 改并发限制/完成通知 | `peri-workflow/src/registry.rs`、`peri-middlewares/src/workflow/mod.rs` | `reserve`、`attach_child`、`complete`、`kill`、`resume_workflow`；complete 保留历史并广播，kill 清理由 runner 收敛 |
 | 改进度/ACP snapshot | `peri-workflow/src/progress.rs`、`peri-middlewares/src/workflow/mod.rs` | `WorkflowProgressStore::apply_event/set_terminal_projection/get_all_runs_snapshot`、`WorkflowMiddlewarePort::runs_snapshot`；四维状态随 snapshot 序列化 |
 | 改 TUI Workflow 面板 | `peri-tui/src/kit/{workflow_snapshot.rs,panels/workflow.rs}` | `TuiRunProgress` legacy 四维默认 unknown；panel footer 只展示快捷键，不渲染 execution/acceptance/post-processing/delivery |

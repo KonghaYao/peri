@@ -74,7 +74,7 @@
 
 - **Scope**：`peri-workflow` Node stdio JSON-RPC 与 agent 生命周期。
 - **Rule**：RPC 请求必须先登记 pending 再写入；每帧使用 NDJSON 并 flush；stdout/child 结束及 malformed protocol frame 必须 drain pending，不能静默丢帧。`agent/run` 必须先注册再 spawn，kill/deregister 以所有权 token 防止旧 task 删除新句柄；`workflow/start` 失败或超时必须移除 active channel；kill 后 `killed` 是唯一终态，message loop 或 EOF 不得覆盖为 `failed`。
-- **Verify**：`cargo test -p peri-workflow --lib rpc`；`cargo test -p peri-workflow --lib runner`；检查 `peri-workflow/src/rpc.rs` 的 `send_request`、`write_line`、`drain_pending` 与 `runner.rs` 的 register/spawn/kill 顺序。
+- **Verify**：`cargo test -p peri-workflow --lib rpc`；`cargo test -p peri-workflow --lib runner`；检查 `peri-js-runtime/src/rpc.rs` 的 `send_request`、`write_line`、`drain_pending`，`peri-workflow/src/rpc.rs` 的 agent ownership token，以及 `peri-workflow/src/runner/agent_dispatch.rs` 的 register/spawn 与 `peri-workflow/src/runner.rs` 的 kill 顺序。
 
 ### ARC-KEEPGOING-001
 
