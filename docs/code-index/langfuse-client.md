@@ -6,7 +6,7 @@
 ## 架构速览
 
 - 数据流：`调用方构造 IngestionEvent → Batcher（mpsc 队列 + 后台 task）→ LangfuseClient::ingest（OTLP 转换 + HTTP 重试）→ Langfuse API`
-- 入口：`LangfuseClient::new`（client.rs:31）；`Batcher::new`（batcher.rs:44，同时启动后台 task）；`ClientConfig::from_env`（config.rs:25，读 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL）
+- 入口：`LangfuseClient::new`（client.rs:31）；`Batcher::new`（batcher.rs:49，同时启动后台 task）；`ClientConfig::from_env`（config.rs:25，读 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL）
 - 稳定不变量：发送走 OTLP 端点 `POST /api/public/otel/v1/traces`，必带 `x-langfuse-ingestion-version: 4` 头与 Basic auth（base64(public_key:secret_key)，client.rs:32-34）；4xx 不重试，网络错误/5xx 按 max_retries 指数退避（1s, 2s, 4s…）
 
 ## 速查表
@@ -14,7 +14,8 @@
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
 | 改 HTTP 发送/重试 | `src/client.rs` | `LangfuseClient::new`（:31）；`from_config`（:52）；`ingest`（:73） | 空事件直接 Ok；4xx 返回 `LangfuseError::IngestionApi`；5xx/网络错误重试 `max_retries` 次指数退避；reqwest 连接超时 5s / 请求超时 30s（:37-40） |
-| 改批量/背压策略 | `src/batcher.rs` + `src/config.rs` | `Batcher::new`（:44）；`run_loop`（:75）；`add`（:189）/`try_add`（:225）/`flush`（:249，oneshot ack）；`BackpressurePolicy`（config.rs:47） | mpsc channel 容量 = max_events；定量（buffer ≥ max_events）或定时（flush_interval）触发 `do_flush`（:146）；DropNew/DropOldest 在命令通道满时均拒绝新事件；flush ack 不回传 HTTP 错误；Drop 尽力通知后台排空，无 join 等待；丢弃计数 `dropped_count`（:263） |
+| 改批量/背压策略 | `src/batcher.rs` + `src/config.rs` | `Batcher::new`（:49）；`run_loop`（:84）；`add`（:201）/`try_add`（:237）；`BackpressurePolicy`（config.rs:47） | mpsc 容量 = max_events；定量或定时触发 `do_flush`（:156）；DropNew/DropOldest 在命令通道满时均拒绝新事件；Drop 尽力通知后台排空，无 join 等待；`dropped_count`（:283）仍仅统计准入丢弃 |
+| 改 flush 错误确认 | `src/batcher.rs` + `src/batcher/failure.rs` | `Batcher::flush`（:266）；`FailureLedger::record_failure` / `snapshot` / `observe` | FIFO barrier 返回尚未确认的失败水位；调用方实际收到 Err 才确认，取消/worker ack 不清错，旧确认不影响后续失败；错误仅含安全批次计数 |
 | 改遥测事件类型 | `src/types/mod.rs` | `IngestionEvent`（:330，12 变体）；`ObservationType`（:35）；`event_timestamp`（:14） | 所有变体必带 `id` + `timestamp` + `body`；body 结构 `deny_unknown_fields`；`SessionCreate/Update` 用 `session::SessionBody`（session.rs:6） |
 | 改 Ingestion→OTLP 映射 | `src/types/conversion.rs` + `src/types/conversion/` | `ingestion_events_to_otel`（:31，`pub(crate)`）；`trace_create` / `span_create` / `generation_create` / `observation_create` / `score_create` 等私有纯函数 | 唯一穷尽 dispatch 按输入顺序逐事件产生 span，不合并 Create/Update；事件族保留各自属性差异；共享 ID 去 dash（`build_span_id` :17）与 RFC3339→nano（:130） |
 | 改 OTLP 载荷结构 | `src/types/otlp.rs` | `OtelTraceExportRequest`（:10）；`OtelSpan`（:56）；`OtelAttributeValue::string/int/bool`（:118/127/136） | 直接对应 OTLP JSON wire 格式；属性值支持 string/int/double/bool；Score 数值优先转 double |
@@ -26,7 +27,9 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | HTTP 客户端 | src/client.rs | `LangfuseClient`（:17，持 reqwest::Client + auth_header + max_retries） |
-| 批量聚合 | src/batcher.rs | `Batcher`（:34）；`BatcherCommand`（:21，Add/Flush/Shutdown）；`report_dropped`（:172） |
+| 批量聚合 | src/batcher.rs | `Batcher`（:38）；`BatcherCommand`（:25，Add/Flush/Shutdown）；`report_dropped`（:184） |
+| flush 失败水位 | src/batcher/failure.rs | `FailureLedger`（:14）/`FlushSnapshot`（:19）；worker 记录失败，公开 flush 的接收方确认快照，重叠确认幂等 |
+| flush 契约回归 | src/batcher_test.rs | `test_flush_barrier_*`：自动失败后空 flush、ack 后取消、旧确认保留新失败、并发观察顺序与安全摘要 |
 | 配置 | src/config.rs | `ClientConfig`（:5）；`BatcherConfig`（:59）；`BackpressurePolicy`（:47） |
 | 事件/载荷类型 | src/types/mod.rs | `TraceBody`（:95）/`ObservationBody`（:128）/`SpanBody`（:172）/`GenerationBody`（:207）/`EventBody`（:260）/`ScoreBody`（:291）/`SdkLogBody`（:322） |
 | OTLP dispatch / 通用属性 | src/types/conversion.rs | `ingestion_events_to_otel`（:31）；12 分支顺序与 resource/scope 包装；`append_common_obs_attrs`（:82）、`build_status`（:116） |

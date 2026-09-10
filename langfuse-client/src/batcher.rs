@@ -1,3 +1,7 @@
+mod failure;
+
+use failure::{FailureLedger, FlushSnapshot};
+
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -22,7 +26,7 @@ enum BatcherCommand {
     /// 添加事件到待发送队列
     Add(IngestionEvent),
     /// 手动 flush：发送当前队列中的所有事件，完成后通过 oneshot 通知调用方
-    Flush(oneshot::Sender<()>),
+    Flush(oneshot::Sender<FlushSnapshot>),
     /// 关闭后台 task（先 flush 剩余事件再退出）
     Shutdown,
 }
@@ -37,6 +41,7 @@ pub struct Batcher {
     /// 因命令通道满/关闭而被丢弃的事件计数（add/try_add 侧累加；
     /// run_loop 每次 flush 完成后汇总输出并清零——S5.2 丢弃可观测性）
     dropped: Arc<AtomicUsize>,
+    failures: Arc<FailureLedger>,
 }
 
 impl Batcher {
@@ -51,6 +56,8 @@ impl Batcher {
         let flush_interval = config.flush_interval;
         let dropped = Arc::new(AtomicUsize::new(0));
         let run_dropped = Arc::clone(&dropped);
+        let failures = Arc::new(FailureLedger::default());
+        let run_failures = Arc::clone(&failures);
 
         let _handle = tokio::spawn(async move {
             Self::run_loop(
@@ -60,6 +67,7 @@ impl Batcher {
                 flush_interval,
                 backpressure,
                 run_dropped,
+                run_failures,
             )
             .await;
         });
@@ -68,6 +76,7 @@ impl Batcher {
             tx,
             backpressure,
             dropped,
+            failures,
         }
     }
 
@@ -79,6 +88,7 @@ impl Batcher {
         flush_interval: Duration,
         backpressure: BackpressurePolicy,
         dropped: Arc<AtomicUsize>,
+        failures: Arc<FailureLedger>,
     ) {
         let mut buffer: std::collections::VecDeque<IngestionEvent> =
             std::collections::VecDeque::with_capacity(max_events);
@@ -103,14 +113,14 @@ impl Batcher {
                             }
                             buffer.push_back(event);
                             if buffer.len() >= max_events {
-                                Self::do_flush(&client, &mut buffer).await;
+                                Self::do_flush(&client, &mut buffer, &failures).await;
                                 Self::report_dropped(&dropped);
                             }
                         }
                         Some(BatcherCommand::Flush(ack)) => {
-                            Self::do_flush(&client, &mut buffer).await;
+                            Self::do_flush(&client, &mut buffer, &failures).await;
                             Self::report_dropped(&dropped);
-                            if ack.send(()).is_err() {
+                            if ack.send(failures.snapshot()).is_err() {
                                 warn!("Batcher: flush ack receiver dropped");
                             }
                         }
@@ -120,7 +130,7 @@ impl Batcher {
                                     "Batcher shutting down, flushing {} remaining events",
                                     buffer.len()
                                 );
-                                Self::do_flush(&client, &mut buffer).await;
+                                Self::do_flush(&client, &mut buffer, &failures).await;
                             }
                             Self::report_dropped(&dropped);
                             return;
@@ -134,7 +144,7 @@ impl Batcher {
                             buffer.len(),
                             flush_interval
                         );
-                        Self::do_flush(&client, &mut buffer).await;
+                        Self::do_flush(&client, &mut buffer, &failures).await;
                         Self::report_dropped(&dropped);
                     }
                 }
@@ -146,6 +156,7 @@ impl Batcher {
     async fn do_flush(
         client: &LangfuseClient,
         buffer: &mut std::collections::VecDeque<IngestionEvent>,
+        failures: &FailureLedger,
     ) {
         if buffer.is_empty() {
             return;
@@ -159,6 +170,7 @@ impl Batcher {
                 debug!("Batcher OTLP flush successful");
             }
             Err(_) => {
+                failures.record_failure();
                 error!("Batcher native ingestion flush failed");
             }
         }
@@ -245,17 +257,25 @@ impl Batcher {
         })
     }
 
-    /// 手动触发 flush，等待所有待发送事件发送完毕
+    /// 等待此前入队事件完成发送尝试，报告该确认点尚未被调用方观察的批次失败。
+    ///
+    /// 返回 Err 后只确认本次快照的失败水位；后续失败仍由下次 flush 报告。
+    /// 取消等待或仅由后台发送 ack 不会确认错误。并发 flush 可观察到同一失败，
+    /// 确认是幂等的；已观察的历史失败不会使后续干净的 flush 永久失败。
+    /// HTTP 重试仍由 LangfuseClient 负责，错误摘要不包含事件或响应内容。
     pub async fn flush(&self) -> Result<(), LangfuseError> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(BatcherCommand::Flush(tx)).await.map_err(|_| {
             warn!("Batcher channel closed, cannot flush");
             LangfuseError::ChannelClosed
         })?;
-        rx.await.map_err(|_| {
+        let snapshot = rx.await.map_err(|_| {
             warn!("Batcher dropped flush acknowledgment");
             LangfuseError::ChannelClosed
-        })
+        })?;
+        // No await between receipt and confirmation: a cancelled waiter cannot
+        // consume a failure it never observed.
+        self.failures.observe(snapshot)
     }
 
     /// 当前累计的丢弃事件数（通道满/关闭导致；run_loop 每次 flush 后清零）。
