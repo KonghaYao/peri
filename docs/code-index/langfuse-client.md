@@ -49,6 +49,7 @@
 
 ## 跨模块契约
 
+- 部署生命周期：Controller `LangfuseSession::new_owned` 授予 non-Clone shutdown 权限；ACP `host/lifecycle.rs::AcpHostHandle` 在资源 drain 完整后关闭，TUI/print `acp_client/deployment.rs` 显式 close transport 并 await host；turn 继续只 flush（ARC-HOST-SHUTDOWN-001）。
 - 消费方（唯一生产消费方）：`peri-controller/src/langfuse/session.rs`（实例化 `LangfuseClient` + `Batcher`，组合进 `LangfuseSession`）；`peri-controller/src/langfuse/tracer/event_builder.rs`（经 `LangfuseSessionLike::try_add` 同步上报事件）；`peri-controller/src/langfuse/drop_telemetry.rs`（`LangfuseError::ChannelClosed` → BatcherClosed 丢弃原因映射）。Langfuse bridge/tracer 的实现已归 `peri-controller/src/langfuse/`；`peri-acp/src/event/forwarder.rs` 仍只是把协议化前事件分支接到可选 `LangfuseBridge` 的接线点，不是 bridge 实现或遥测状态宿主。
 - **新增 trace 阶段/span 的改动点在消费侧而非本 crate**：`peri-controller/src/langfuse/tracer/`（`span_events.rs` 的 `on_stage_start` :117 / `on_stage_end` :138，SpanCreate 延迟到 end 且仅 duration>0 才发送）、`tracer/stages.rs`（`StageSpans` 生命周期）、`peri-acp-types/src/event.rs:207` 的 `Stage` 枚举（阶段事实源）；本 crate 只在类型/OTLP 映射变化时才动（`types/mod.rs`、`types/conversion.rs`）
 - `peri-agent/src/session/transcript.rs:254/:763` 仅注释引用 batcher 的 Shutdown 模式（flush 后退出），无代码依赖

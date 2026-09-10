@@ -1,6 +1,6 @@
 # peri-controller 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-10。
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11。
 > 依据：`docs/standards/architecture-contracts.md`、manifest、源码与契约测试；无 crate 级 CLAUDE.md。
 
 ## 架构速览
@@ -28,6 +28,7 @@ peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引
 | 等待、销毁或注入会话 | `peri-controller/src/controller.rs` | `join_session`:364、`destroy_session`:385、`submit_input`:406 | 捕获 Runtime Arc 后调用；销毁返回的已补打事件经 publish 按顺序双投递 |
 | 注入部署端口 | `peri-controller/src/controller.rs` | `Controller::new`:198、`with_runtime`:216、`with_resources`:223、`with_mcp_pool`、`with_cron_scheduler`、`with_tool_search`、`with_lsp_servers` | builder 消费 self 后赋值；对应 pick 方法克隆句柄/配置，不引入共享可写配置 |
 | 调整启动参数 | `peri-controller/src/controller.rs` | `AgentRef`:49、`LiteParams`:70 | 仅承载定义引用、cwd、初始消息和工具；消费与执行归 Agent |
+| 关闭部署 Langfuse | `peri-controller/src/langfuse/session.rs` | `LangfuseSession::new_owned`（:50）；`LangfuseShutdownOwner::shutdown`（:43）；`LangfuseSession::shutdown`（:63） | fresh deployment 得到不可克隆的关闭权限；只转发唯一 Batcher join，安全区分 HTTP/worker 失败，turn-facing SessionLike 仍只提供 flush（ARC-HOST-SHUTDOWN-001） |
 | 修改 Langfuse 事件入口 | `peri-controller/src/langfuse/bridge.rs` | `LangfuseBridge`:34、`process_event`:92 | 保留统一事件分发与 tracer 锁，trait 入口先持有该 bridge 的 stage 表锁 |
 | 修改 v1 事件转换 | `peri-controller/src/langfuse/bridge/v1_conversion.rs` | `UnifiedLangfuseEvent::from_executor_event` | 无映射事件返回 None；v1 LLM 使用 MAIN_AGENT_KEY，工具优先保留 source_agent_id |
 | 修改 v2 事件转换 | `peri-controller/src/langfuse/bridge/v2_conversion.rs` | `from_render_event`、`from_observe_event` | 保留 agent identity、request_id、usage 和 compact 语义数据，不修改事件来源 |

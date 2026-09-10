@@ -70,20 +70,20 @@
 | Crate / 项目 | 重点入口与职责问题 | 当前状态 |
 | --- | --- | --- |
 | peri-middlewares | client、dynamic registry、assembly、staged_connection、subagent tool、middleware capability | client/registry/assembly 已提交；capability A/B/C 已验证；subagent tool 待治理 |
-| peri-acp | host、session、event_sink、prompt、session lifecycle | host/session 已提交；event_sink 已拆分验证；prompt 模型/观测/stage 装配已拆分；canonical 旧测试副本待与 transcript 治理收敛 |
+| peri-acp | host、session、event_sink、prompt、session lifecycle | host/session 已提交；event_sink 已拆分验证；prompt 模型/观测/stage 装配已拆分；canonical 旧测试副本已移除，真实 transcript/SQLite 冷重载覆盖保留；部署关闭接线已实现 |
 | peri-resources | SQLite 连接、行映射、祖先上下文、compaction 事务 | SQLite 拆分已提交，65 项存储测试通过 |
-| peri-agent | stage_builder、tool_dispatch、workflow agent、transcript、subagent factory、MiddlewareState | stage_builder、capability、tool_dispatch 已拆分验证；transcript writer 已分离并修复失败态空转；workflow agent/subagent factory 待治理 |
+| peri-agent | stage_builder、tool_dispatch、workflow agent、transcript、subagent factory、MiddlewareState | stage_builder、capability、tool_dispatch 已拆分验证；transcript writer 已分离并修复失败态空转；workflow agent 观察/结果投影已分离，subagent factory 的 context/spawn/resume/claim 已分离，恢复状态取消owner已实现 |
 | peri-acp-types | session 混合 runtime/错误/消息投递，event_v2 契约与映射；Agent queue_test 文件存在但未挂载 | session 拆分已验证，Agent queue 7 项测试恢复挂载；event_v2 契约/通道/纯映射已拆分，53项测试迁回定义crate |
 | peri-tui | client、ask_user、acp_notifier、current_turn、input_area、plugin panel | client 已提交；ask_user/notifier/current_turn 已拆分验证；input_area 主体保留清晰边界；plugin 搜索状态与请求 owner 已拆分，真实桥接回归通过 |
 | peri-controller | Langfuse tracer registry、bridge 与控制面状态所有权 | 已拆分；漏关观测回归2红→全套130+5绿；移除6个仅装配阶段使用的锁 |
 | peri-model | protocol/runtime/transport/provider 分层清楚；测试专用 async SSE 重复路径需收敛 | 已审保留总体结构；测试专用 SSE 整链已删除，生产路径147项测试通过 |
 | peri-runtime | destroy 跨 await 后无条件 remove 可能误删替换后的 session；旧事件也可能借新 entry 补打 | 已修复并提交：4项旧实现回归失败；16项Runtime及16项Controller关联测试通过 |
-| peri-workflow | runner、tool preflight、journal、progress | runner 已提交；progress 按 run 共持投影/执行标记、journal Git/输出职责已分离，2红→91绿；tool observer/preflight 取消窗口待治理 |
+| peri-workflow | runner、tool preflight、journal、progress | runner 已提交；progress 按 run 共持投影/执行标记、journal Git/输出职责已分离，2红→91绿；tool 完成发布与preflight进程生命周期已分离并修复取消窗口，94项全绿 |
 | peri-js-runtime | 分层可保留；artifact launch 未纳入 deadline/cancel、run_execute 错误提前返回可能跳过显式收尾 | preparation/install/invocation owner 已修复；4红到42全绿，含实际Unix进程回收；Windows runtime 未验证 |
 | peri-lsp | document sync/dispatcher 可分离；重复 readiness、请求 id 碰撞和进程任务 owner 需核查 | dispatcher 已拆分，双向ID/畸形响应/close pending 三回归由红到72全绿；client/pool readiness 与请求跨重启归属已修复；document sync 已归属单次连接，缓存与 writer 准入同步提交；92项通过 |
 | peri-theme | loader 混合查找/引用/构造；visited 跨根复用、Unicode hex切片、忽略 extends、重复默认主题 | 已拆分并修复引用链/Unicode hex/extends；29项单元与集成测试通过，索引已补建 |
 | peri-web-pty | handle_socket 混合协议/阻塞I/O/child监控；reader未join、末尾输出drain需实测 | Unix 连接 owner、非阻塞 I/O 与协议边界已拆分；24单元+7真实WS测试通过，Windows阻塞读取收尾仍有平台缺口 |
-| langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 事件族转换已拆分，73项测试通过；batcher flush 失败确认已修复，77项通过；shutdown owner已验证83项；宿主接线/backpressure待治理 |
+| langfuse-client | OTLP穷尽转换函数应按事件族拆分；batcher溢出策略/flush错误/shutdown语义需核查 | 事件族转换已拆分，73项测试通过；batcher flush 失败确认已修复，77项通过；shutdown owner已验证83项；宿主关闭权限/任务join/Incomplete重试已接线；backpressure与非法配置待治理 |
 | side-projects/git-stats | 结构清楚；外层log sentinel碰撞、聚合展示名新旧次序需核查 | NUL framing与最新展示名修复已验证：28项测试含真实Git fixture，独立Clippy通过 |
 | side-projects/md-scan-matrix | 结构清楚；FAIL/前缀稳定性/collision结果只打印，不能据exit0宣称验收通过 | 评估/报告已分离；6项回归、45矩阵+33补充checks及独立Clippy通过 |
 | side-projects/image-spike | 目标单一的TestBackend buffer/Kitty transmit实验，无需拆分 | 已审保留；本地2项buffer行为测试及all-targets Clippy通过；不等于真实终端验证 |
@@ -175,3 +175,17 @@
 - 完整 workspace 测试：46个目标共5618通过、0失败、12项原有ignored。初次strictClippy发现journal拆分后两处unused import，删除后workspace all-targets Clippy（`-D warnings`）、完整build与格式检查均以exit0通过；本批分组提交通过hooks。Markdown本地链接86项无失效，16条依赖方向门与typos通过。
 
 当前仍需处理子Agent恢复取消回滚/事件排空、workflow tool完成observer、workflow agent装配，以及Langfuse部署关闭和背压配置；本批不宣称全仓治理完成。
+
+## 第九批验证记录
+
+- Workflow tool：真实 Node 回归先确认调用在快速窗口取消会丢通知、快速 kill 被另一套投影改成 Failed；单一 RunCompletion 任务等待 runner 收尾并发布一次投影，快速响应仅观察。preflight 独立进程回归先确认取消后进程与目录均残留；改为 TempDir 与 kill-on-drop 进程所有权，正常路径等待回收，取消 Drop 仅尽力回收。Unix 实测修复后三项回归均通过，全 crate 94通过、3项原有ignored；all-targets严格Clippy通过，doc target执行0项，不能计为行为证明。
+- 子 Agent 恢复：真实 dispatch 取消回归先失败；factory 按 claim/context/spawn/resume 分离，唯一 worker 顺序持有 active、回滚及恢复的同步终态写入。准备取消恢复旧状态，运行取消写 cancelled；同步 Start/Stop 顺序保持，后台成功注册后才移交。原中断返回契约在首轮全仓暴露回归后恢复，23项Agent与18项middleware恢复用例均通过；原有契约断言未改。
+- 动态 MCP 关闭：真实 registration 的首次 Incomplete/取消后重试两回归先红；修复仅实际 Complete 后缓存完成。ACP 部署保留原 host task 及实际待关闭 AcpSession，取消等待/Incomplete可重试，完整drain后才关闭新部署拥有的Langfuse；外部共享会话不提前关闭。print正常/业务错误统一close与join，资源Incomplete/TaskFailed可见，遥测HTTP失败旁路报告。最终ACP610单元+8集成、middleware1614单元+8集成、TUI1478单元及部署回归通过；middleware4项、TUI2项原有ignored保留。
+
+- 首轮完整workspace：46个目标5634通过、2失败、12项原有ignored；失败为恢复中断返回兼容与既有TUI reminder测试未串行化却清空共享atom。前者按既有跨crate契约修复，后者仅给三个使用共享atom的测试补串行锁，不改生产快照/断言。首次编译另修正新transcript测试使用专用payload编码API，不为测试添加生产Serialize实现。
+
+- Workflow agent：观察/进度与结果投影进入私有模块，单一RunStats owner保持loop→close bus→join→stats/result→terminal次序；子Agent转发器不再因observe关闭提前丢弃其他通道的缓冲事件，真实回归先红后绿。
+- ACP canonical清理：删除两个tests-only持久化投影替身、七项依赖替身测试与三项无消费计算；新真实transcript→writer→compaction→SQLite冷重载回归覆盖reminder在摘要前/后的身份、类型、顺序与单次投影，既有失败原子性/staging测试保留。
+- 最终完整workspace测试：46个目标共5637通过、0失败、12项原有ignored，包含8项实际doc tests；Agent704单元+4集成、Workflow94单元通过。workspace all-targets Clippy（`-D warnings`）、完整build、格式均exit0，16条依赖方向门与typos通过；六组代码提交均通过hooks。Markdown本地文件链接86项无失效，索引与架构关闭契约同步。
+
+尚余SubAgent tool的定义/审批/意图装配边界，以及Langfuse背压与非法配置；保持本治理issue为Open。现有平台与独立后台任务边界不因本批验证被扩大。
