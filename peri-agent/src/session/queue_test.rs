@@ -1,8 +1,9 @@
 use super::*;
-use crate::messages::MessageContent;
+use crate::messages::{BaseMessage, MessageContent};
 use peri_acp_types::system_reminder::{
-    ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity, ReminderSource as CanonicalSource,
-    SystemReminder, TrustedSystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource as CanonicalSource, SystemReminder, TrustedSystemReminder,
+    TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
 use serde_json::json;
 
