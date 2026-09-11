@@ -214,17 +214,9 @@ while :; do sleep 1; done
     let (mut socket, _) = tokio_tungstenite::connect_async(fixture.url())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Some(Ok(Message::Text(text))) = socket.next().await {
-                if text.contains("READY") {
-                    break;
-                }
-            }
-        }
-    })
-    .await
-    .unwrap();
+    wait_for_fixture_output(&mut socket, "READY", Duration::from_secs(10))
+        .await
+        .unwrap();
     let pid = std::fs::read_to_string(fixture.home.path().join("pids"))
         .unwrap()
         .parse::<i32>()
@@ -263,6 +255,63 @@ while :; do sleep 1; done
     std::fs::remove_file(fixture.home.path().join("pids")).unwrap();
 }
 
+// PTY reads may be split across WebSocket messages.
+async fn wait_for_fixture_output<S>(
+    socket: &mut S,
+    expected: &str,
+    deadline: Duration,
+) -> anyhow::Result<()>
+where
+    S: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let mut output = String::new();
+    tokio::time::timeout(deadline, async {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    output.push_str(&text);
+                    if output.contains(expected) {
+                        return Ok(());
+                    }
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                message => anyhow::bail!(
+                    "PTY fixture ended before {expected:?}: {message:?}; output={output:?}"
+                ),
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("PTY fixture timed out waiting for {expected:?}; output={output:?}")
+    })?
+}
+
+#[tokio::test]
+async fn test_fixture_output_recognizes_ready_split_across_frames() {
+    let mut frames = futures::stream::iter([
+        Ok(Message::Text("RE".into())),
+        Ok(Message::Text("ADY\n".into())),
+    ])
+    .chain(futures::stream::pending());
+    wait_for_fixture_output(&mut frames, "READY", Duration::from_millis(100))
+        .await
+        .expect("READY must be recognized across frame boundaries");
+}
+
+#[tokio::test]
+async fn test_fixture_output_reports_eof_with_partial_output() {
+    let mut frames = futures::stream::iter([Ok(Message::Text("RE".into()))]);
+    let error = wait_for_fixture_output(&mut frames, "READY", Duration::from_millis(100))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("ended before") && error.contains("RE"),
+        "{error}"
+    );
+}
+
 #[tokio::test]
 async fn test_text_and_binary_frames_share_resize_and_stdin_protocol() {
     let fixture = Fixture::new(
@@ -278,17 +327,9 @@ done
     let (mut socket, _) = tokio_tungstenite::connect_async(fixture.url())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Some(Ok(Message::Text(text))) = socket.next().await {
-                if text.contains("READY") {
-                    break;
-                }
-            }
-        }
-    })
-    .await
-    .unwrap();
+    wait_for_fixture_output(&mut socket, "READY", Duration::from_secs(10))
+        .await
+        .unwrap();
     for (resize, stdin, expected) in [
         (
             Message::Text(r#"{"type":"resize","cols":100,"rows":30}"#.into()),
@@ -303,22 +344,9 @@ done
     ] {
         socket.send(resize).await.unwrap();
         socket.send(stdin).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
-            let mut output = String::new();
-            loop {
-                match socket.next().await {
-                    Some(Ok(Message::Text(text))) => {
-                        output.push_str(&text);
-                        if output.contains(expected) {
-                            break;
-                        }
-                    }
-                    message => panic!("expected PTY size response, got {message:?}"),
-                }
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_fixture_output(&mut socket, expected, Duration::from_secs(10))
+            .await
+            .unwrap();
     }
     socket.send(Message::Text("quit\n".into())).await.unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -346,17 +374,9 @@ exec sleep 30
     let (mut socket, _) = tokio_tungstenite::connect_async(fixture.url())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Some(Ok(Message::Text(text))) = socket.next().await {
-                if text.contains("READY") {
-                    break;
-                }
-            }
-        }
-    })
-    .await
-    .unwrap();
+    wait_for_fixture_output(&mut socket, "READY", Duration::from_secs(10))
+        .await
+        .unwrap();
     let pid = std::fs::read_to_string(fixture.home.path().join("pids"))
         .unwrap()
         .parse::<i32>()

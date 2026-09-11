@@ -29,7 +29,7 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | WebSocket 基础端到端 | `tests/ws_e2e_test.rs` | child exit 文本、spawn 失败错误与关闭 |
-| Unix 连接端到端 | `tests/ws_lifecycle_test.rs` | 持续 Ping 不重置 child 检查、完整 CJK/emoji tail 先于 exit、断连 reap、满 PTY 输入时仍响应断连、Text/Binary resize 与 stdin 等价 |
+| Unix 连接端到端 | `tests/ws_lifecycle_test.rs` | 持续 Ping 不重置 child 检查、完整 CJK/emoji tail 先于 exit、断连 reap、满 PTY 输入时仍响应断连、Text/Binary resize 与 stdin 等价；fixture 等待累计跨帧输出、EOF 显式失败且保留有界就绪期限 |
 | Unix I/O owner | `src/ws_handler/connection_test.rs` | 闲读取消后 shutdown 显式 reap；另一个 fixture 仍持有 slave 时也不依赖 EOF；blocking pool 饱和下取消 shutdown 后重试原 join |
 | 输入队列契约 | `src/ws_handler/input_test.rs` | 部分写入与满队列下的真实跨块 DSR 解码、关闭写端后的晚到 query/command；拒绝新输入不覆盖已接收字节 |
 | 输出协议 | `src/ws_handler/protocol_test.rs` | 多字节每个 read 边界、跨块 DSR 仅回应一次、不完整尾字节只 flush 一次 |

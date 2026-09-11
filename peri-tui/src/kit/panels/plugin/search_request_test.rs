@@ -5,7 +5,7 @@ use super::{
     render, search_request,
 };
 use crate::acp_client::AcpTuiClient;
-use crate::kit::atoms::{ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, PLUGIN_SEARCH_RESULTS};
+use crate::kit::atoms::{ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER};
 use peri_acp::transport::{
     AcpTransport,
     mpsc::mpsc_transport_pair,
@@ -21,7 +21,6 @@ use tokio_util::sync::CancellationToken;
 struct SearchAtomsGuard {
     session: String,
     reset: u64,
-    results: Vec<crate::kit::atoms::PluginSummary>,
 }
 
 impl SearchAtomsGuard {
@@ -29,7 +28,6 @@ impl SearchAtomsGuard {
         Self {
             session: ACTIVE_SESSION_ID.state().read().clone(),
             reset: BRIDGE_RESET_COUNTER.get(),
-            results: PLUGIN_SEARCH_RESULTS.state().read().clone(),
         }
     }
 }
@@ -40,7 +38,6 @@ impl Drop for SearchAtomsGuard {
         // shared atoms, including the same-session reset counter.
         *ACTIVE_SESSION_ID.state().write() = std::mem::take(&mut self.session);
         *BRIDGE_RESET_COUNTER.state().write() = self.reset;
-        *PLUGIN_SEARCH_RESULTS.state().write() = std::mem::take(&mut self.results);
     }
 }
 
@@ -75,7 +72,6 @@ fn discover_text(state: &DiscoverState) -> String {
 async fn completed_search_view(fail: bool) -> String {
     crate::kit::atoms::init_atoms();
     *ACTIVE_SESSION_ID.state().write() = "plugin-search-session".into();
-    PLUGIN_SEARCH_RESULTS.state().write().clear();
     let (client_transport, server) = mpsc_transport_pair();
     let (client, notification_tx, notification_rx) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("plugin-search-session", true);
@@ -160,12 +156,8 @@ async fn completed_search_view(fail: bool) -> String {
         assert!(
             tokio::time::timeout(Duration::from_secs(2), observed_rx.recv())
                 .await
-                .expect("search result must be projected by the bridge")
+                .expect("legacy search notification must pass through the bridge")
                 .expect("bridge observation channel remains open")
-        );
-        assert_eq!(
-            PLUGIN_SEARCH_RESULTS.state().read()[0].name,
-            "compiler-helper"
         );
     }
     tokio::time::timeout(Duration::from_secs(2), request)
@@ -174,7 +166,7 @@ async fn completed_search_view(fail: bool) -> String {
         .unwrap();
     if !fail {
         // A delayed, same-query legacy notification has no request identity.
-        // Even after bridge publication it must not replace the owned response.
+        // Even after bridge dispatch it must not replace the owned response.
         server
             .send_notification(
                 "peri/unstable_event",
@@ -195,10 +187,6 @@ async fn completed_search_view(fail: bool) -> String {
                 .await
                 .unwrap()
                 .unwrap()
-        );
-        assert_eq!(
-            PLUGIN_SEARCH_RESULTS.state().read()[0].name,
-            "late-unowned-result"
         );
         assert!(!discover_text(&status.lock()).contains("late-unowned-result"));
     }
@@ -462,6 +450,7 @@ async fn plugin_search_empty_response_does_not_fall_back_to_local_catalog() {
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("empty", true);
     let owner = search_owner();
+    assert_eq!(owner.lock().visible_items(&[item("local-match")]).len(), 1);
     let request = launch_owned(&owner, &Arc::new(client));
     let id = receive_search(&server).await;
     server

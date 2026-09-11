@@ -63,7 +63,7 @@ id 前缀即类型签名：`gen_*`=GENERATION、`span_*`=SPAN、`obs_*`=TOOL、`
 - `model`：`langfuse.observation.model.name`；参数：`...model.parameters`
 - `usage`：`langfuse.observation.usage_details`（含 cache_read/cache_creation_input_tokens）
 - `metadata`：`langfuse.observation.metadata`
-- 上传侧构造点在 `peri-controller/src/langfuse/tracer/mod.rs` 的事件构造（`GenerationBody`/`SpanBody`/`ToolBody` 等）
+- 上传侧按事件职责构造：`peri-controller/src/langfuse/tracer/llm_events.rs` 构造 `GenerationBody`，`span_events.rs` 构造阶段/Compact/Workflow 的 `SpanBody`，`tool_events.rs::emit_tools_flush` 构造工具批次 `SpanBody` 与工具 `ObservationBody`，`turn.rs` 构造 Trace/Session/agent-run。共同入队入口是 `event_builder.rs::try_add_or_warn_via_session`；`tracer/mod.rs` 保留门面与共享状态。
 
 ---
 

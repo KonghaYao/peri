@@ -2,12 +2,12 @@
 
 use tokio::task::JoinHandle;
 
-use super::failure::{FailureLedger, FlushSnapshot};
+use super::failure::ShutdownSnapshot;
 use crate::LangfuseError;
 
 pub(super) enum WorkerOwner {
-    Running(JoinHandle<FlushSnapshot>),
-    Joined(Result<FlushSnapshot, WorkerFailure>),
+    Running(JoinHandle<ShutdownSnapshot>),
+    Joined(Result<ShutdownSnapshot, WorkerFailure>),
 }
 
 #[derive(Clone, Copy)]
@@ -16,7 +16,7 @@ pub(super) struct WorkerFailure {
 }
 
 impl WorkerOwner {
-    pub(super) async fn join(&mut self, failures: &FailureLedger) -> Result<(), LangfuseError> {
+    pub(super) async fn join(&mut self) -> Result<(), LangfuseError> {
         if let Self::Running(handle) = self {
             // Borrow, never take: cancelling this future leaves the handle in
             // the owner for another caller to join. No await after completion
@@ -27,7 +27,7 @@ impl WorkerOwner {
             *self = Self::Joined(outcome);
         }
         match self {
-            Self::Joined(Ok(snapshot)) => failures.observe(*snapshot),
+            Self::Joined(Ok(snapshot)) => snapshot.result(),
             Self::Joined(Err(failure)) => Err(LangfuseError::WorkerJoinFailed {
                 cancelled: failure.cancelled,
             }),

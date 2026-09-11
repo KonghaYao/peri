@@ -192,7 +192,8 @@ pub async fn build_app_and_acp(
 /// 对称 `build_app_and_acp`——所有路径在退出前都应该调用。
 ///
 /// 显式关闭 ACP transport 并等待原 host：任务/会话排空后才关闭部署拥有的 Langfuse。
-/// Incomplete 时部署 owner 留在 App，允许后续重试。
+/// Incomplete 时部署 owner 仅在 App 仍被调用方持有时可重试，本函数不安排重试。
+/// 全屏退出路径随后会 Drop App；未完成的关闭不能因此视为已 join。
 pub async fn teardown_app(app: &mut App) {
     // Fire SessionEnd hooks before shutdown
     {
@@ -245,7 +246,10 @@ pub async fn teardown_app(app: &mut App) {
         if report.is_complete() {
             app.acp_deployment.take();
         } else {
-            tracing::warn!(?report, "ACP deployment retained for shutdown retry");
+            tracing::warn!(
+                ?report,
+                "ACP deployment shutdown incomplete or failed; no automatic retry is scheduled"
+            );
         }
     }
     app.acp_client.take();

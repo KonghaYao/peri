@@ -384,7 +384,7 @@ async fn test_resolution_error_emits_tool_started_and_ended() {
 }
 /// Both properties are real API fields: approval must describe the same input
 /// that the target receives, including any approved change to `path`.
-async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>) {
+async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>, wrapped: bool) {
     type InputTrace = Arc<parking_lot::Mutex<Vec<(&'static str, serde_json::Value)>>>;
     struct DualPathTool(InputTrace);
 
@@ -409,6 +409,44 @@ async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>) 
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             self.0.lock().push(("invoke", input));
             Ok("executed".into())
+        }
+    }
+
+    // Use the production binding seam: policy/events see the target, while the
+    // transcript must retain the model's original wrapper request for pairing.
+    struct Wrapper(Arc<dyn BaseTool>);
+    #[async_trait::async_trait]
+    impl BaseTool for Wrapper {
+        fn name(&self) -> &str {
+            "ExecuteExtraTool"
+        }
+        fn description(&self) -> &str {
+            "binds the fixture's canonical target"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {
+                "tool_name": {"type": "string"}, "params": {"type": "object"}
+            }})
+        }
+        fn bind_invocation(
+            &self,
+            input: serde_json::Value,
+        ) -> Result<
+            Option<crate::tools::BoundToolInvocation>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Some(crate::tools::BoundToolInvocation {
+                policy_name: self.0.name().into(),
+                policy_input: input["params"].clone(),
+                target: Arc::clone(&self.0),
+            }))
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            panic!("dispatch must invoke the bound target")
         }
     }
 
@@ -442,9 +480,21 @@ async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>) 
 
     let trace: InputTrace = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mut ctx = make_test_ctx();
+    let (bus, mut events) = crate::agent::events_v2::EventBus::new(Default::default());
+    ctx.runtime.event_bus = Arc::new(bus);
+    let target: Arc<dyn BaseTool> = Arc::new(DualPathTool(Arc::clone(&trace)));
     ctx.runtime.tools.write().insert(
-        "DualPath".into(),
-        Arc::new(DualPathTool(Arc::clone(&trace))),
+        if wrapped {
+            "ExecuteExtraTool"
+        } else {
+            "DualPath"
+        }
+        .into(),
+        if wrapped {
+            Arc::new(Wrapper(target))
+        } else {
+            target
+        },
     );
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(ApprovePath {
@@ -452,14 +502,20 @@ async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>) 
         replacement: approved_path.map(str::to_owned),
     }));
     ctx.runtime.middleware_chain = Arc::new(chain);
-    let reasoning = Reasoning::with_tools(
-        "",
-        vec![ToolCall::new(
-            "dual-path",
-            "DualPath",
-            json!({"path": "requested/root"}),
-        )],
+    let raw_call = ToolCall::new(
+        "dual-path",
+        if wrapped {
+            "ExecuteExtraTool"
+        } else {
+            "DualPath"
+        },
+        if wrapped {
+            json!({"tool_name": "DualPath", "params": {"path": "requested/root"}})
+        } else {
+            json!({"path": "requested/root"})
+        },
     );
+    let reasoning = Reasoning::with_tools("", vec![raw_call.clone()]);
     let catalog = ctx
         .runtime
         .tool_catalog
@@ -481,16 +537,51 @@ async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>) 
         ],
         "dispatch must not reinterpret a declared field after policy approval"
     );
+    let transcript = ctx.session.transcript.read();
+    let messages = transcript.visible_messages();
+    let raw = &messages[0].tool_calls()[0];
+    assert_eq!(raw.id, raw_call.id);
+    assert_eq!(raw.name, raw_call.name);
+    assert_eq!(
+        raw.arguments, raw_call.input,
+        "approval must not rewrite the model's source call"
+    );
+    assert_eq!(outcome.results[0].1.tool_call_id, raw_call.id);
+    let starts: Vec<_> = std::iter::from_fn(|| events.try_render())
+        .filter_map(|event| match event {
+            RenderEvent::ToolStarted {
+                tool_call_id,
+                name,
+                input,
+                ..
+            } => Some((tool_call_id, name, input)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        vec![(
+            raw_call.id,
+            "DualPath".into(),
+            json!({"path": approved_path.unwrap_or("requested/root")})
+        )],
+        "ToolStarted/toolcard must describe the same approved target input that was invoked"
+    );
 }
 
 #[tokio::test]
 async fn test_dispatch_preserves_dual_path_schema_after_approval() {
-    assert_dual_path_schema_survives_dispatch(None).await;
+    assert_dual_path_schema_survives_dispatch(None, false).await;
 }
 
 #[tokio::test]
 async fn test_dispatch_preserves_approved_replacement_of_declared_path() {
-    assert_dual_path_schema_survives_dispatch(Some("approved/root")).await;
+    assert_dual_path_schema_survives_dispatch(Some("approved/root"), false).await;
+}
+
+#[tokio::test]
+async fn test_approved_wrapper_started_uses_edited_target_input() {
+    assert_dual_path_schema_survives_dispatch(Some("approved/root"), true).await;
 }
 
 #[tokio::test]

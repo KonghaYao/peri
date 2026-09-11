@@ -112,6 +112,7 @@ impl Batcher {
     /// 返回 Err 后只确认本次快照的失败水位；后续失败仍由下次 flush 报告。
     /// 取消等待或仅由后台发送 ack 不会确认错误。并发 flush 可观察到同一失败，
     /// 确认是幂等的；已观察的历史失败不会使后续干净的 flush 永久失败。
+    /// 确认不抹去部署的累计失败，shutdown 仍会报告这些失败。
     /// HTTP 重试仍由 LangfuseClient 负责，错误摘要不包含事件或响应内容。
     /// 关闭期间及关闭后改为等待并返回同一个 shutdown 终态。
     pub async fn flush(&self) -> Result<(), LangfuseError> {
@@ -135,12 +136,13 @@ impl Batcher {
     /// 停止准入，排空已接受的事件并 join 唯一后台任务。
     ///
     /// 取消等待不取消 worker，也不取走 join handle；后续或并发调用继续等待同一任务。
-    /// 返回值是固定终态：IngestionApi 表示 worker 已正常 join，但存在未观察的发送失败；
+    /// 返回值是固定终态：IngestionApi 表示 worker 已正常 join，但其生命周期内存在发送失败，
+    /// 包括此前已由 flush 观察的失败；
     /// WorkerJoinFailed 表示已取得 JoinError，worker 未正常排空（取消或 panic）。
     /// 错误摘要不包含 HTTP 响应或 panic 内容。重复调用返回相同终态，不重新发送事件。
     pub async fn shutdown(&self) -> Result<(), LangfuseError> {
         self.admission.close();
-        self.worker.lock().await.join(&self.failures).await
+        self.worker.lock().await.join().await
     }
 
     /// 当前累计的准入丢弃事件数；worker 每次 flush 后清零。

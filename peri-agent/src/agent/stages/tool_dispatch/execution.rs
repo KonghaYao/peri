@@ -148,7 +148,7 @@ async fn run_before_tool_approvals(
                     agent_id,
                     tool_call_id: raw_call.id.clone(),
                     name: raw_call.name.clone(),
-                    input: raw_call.input.clone(),
+                    input: modified_call.input.clone(),
                 });
                 ready_calls.push(modified_call);
             }

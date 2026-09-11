@@ -59,6 +59,7 @@ impl LangfuseSession {
     }
 
     /// 部署在全部生产者结束后关闭；取消等待保留原 Batcher join owner，允许重试。
+    /// 发送结果覆盖整个部署生命周期，包括此前已由 turn flush 观察的失败。
     /// 此入口不属于 turn-facing LangfuseSessionLike。
     pub async fn shutdown(&self) -> LangfuseShutdownReport {
         match self.batcher.shutdown().await {

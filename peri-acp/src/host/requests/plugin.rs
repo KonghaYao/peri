@@ -517,7 +517,12 @@ fn search_marketplace_plugins(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            let manifest_path = mp_dir.join("marketplace.json");
+            let Some(manifest_path) =
+                peri_middlewares::plugin::marketplace::find_marketplace_json(&mp_dir)
+            else {
+                continue;
+            };
+            let marketplace_matches = mp_name.to_lowercase().contains(&query_lower);
             let Ok(content) = std::fs::read_to_string(&manifest_path) else {
                 continue;
             };
@@ -530,6 +535,7 @@ fn search_marketplace_plugins(
                     let desc = p.get("description").and_then(|v| v.as_str()).unwrap_or("");
                     if name.to_lowercase().contains(&query_lower)
                         || desc.to_lowercase().contains(&query_lower)
+                        || marketplace_matches
                     {
                         results.push(PluginSnapshotEntry {
                             name: name.to_string(),

@@ -305,11 +305,10 @@ async fn test_shutdown_owner_reports_cancelled_worker_separately_from_http_failu
 
 #[tokio::test]
 async fn test_shutdown_owner_join_panic_keeps_safe_terminal_without_payload() {
-    let failures = FailureLedger::default();
     let mut owner = WorkerOwner::Running(tokio::spawn(async {
         panic!("private-worker-panic-marker");
     }));
-    let error = owner.join(&failures).await.unwrap_err();
+    let error = owner.join().await.unwrap_err();
     assert!(matches!(
         error,
         LangfuseError::WorkerJoinFailed { cancelled: false }
@@ -321,9 +320,48 @@ async fn test_shutdown_owner_join_panic_keeps_safe_terminal_without_payload() {
     assert!(!error.to_string().contains("private-worker-panic-marker"));
     assert!(matches!(owner, WorkerOwner::Joined(_)));
     assert_eq!(
-        owner.join(&failures).await.unwrap_err().to_string(),
+        owner.join().await.unwrap_err().to_string(),
         error.to_string()
     );
+}
+
+/// Turn confirmation must not erase lifetime delivery evidence, and observing
+/// that failure repeatedly must not inflate the final batch count.
+#[tokio::test]
+async fn test_shutdown_owner_counts_observed_and_unobserved_http_failures_once() {
+    let server = gated_ingestion(vec![400, 400]).await;
+    let batcher = batcher(&server.url);
+    batcher.add(event("observed-turn-failure")).await.unwrap();
+    server.started.await.unwrap();
+    server.release.send(()).unwrap();
+    let turn_result = batcher.flush().await;
+    let clean_turn_result = batcher.flush().await;
+
+    batcher
+        .add(event("unobserved-final-failure"))
+        .await
+        .unwrap();
+    let shutdown_result = batcher.shutdown().await;
+    let repeated_result = batcher.shutdown().await;
+    let closed_flush_result = batcher.flush().await;
+    let requests = server.worker.await.unwrap();
+
+    assert_eq!(requests.len(), 2);
+    assert!(matches!(turn_result, Err(LangfuseError::IngestionApi(_))));
+    assert!(
+        clean_turn_result.is_ok(),
+        "turn confirmation remains incremental"
+    );
+    let expected = "2 batch submission(s) failed before the flush barrier";
+    for result in [shutdown_result, repeated_result, closed_flush_result] {
+        match result {
+            Err(LangfuseError::IngestionApi(summary)) => {
+                assert_eq!(summary, expected);
+                assert!(!summary.contains("private-response-marker"));
+            }
+            other => panic!("expected cumulative delivery failure, got {other:?}"),
+        }
+    }
 }
 
 /// [回归测试] HTTP 发送阻塞期间，DropOldest 必须替换命令队列中的最旧事件。

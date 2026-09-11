@@ -6,7 +6,9 @@
 ## 架构速览
 
 - 定位：Workflow 与 PTC 共用的 Node lifecycle、NDJSON JSON-RPC 和 execution host；不解释 `workflow/*`、`agent/run` 或 `tool/call` 业务语义。
-- 稳定不变量：pending request 在写帧前登记；每帧有字节上限、换行并 flush；execution 有 wall timeout、资源/并发预算与稳定错误分类；所有终态统一取消 router、回收进程树并 wait；stderr 正文不写 tracing，仅在内存保留有界 tail 供上层安全摘要。
+- 稳定不变量：pending request 在写帧前登记；每帧有字节上限、换行并 flush；execution 有 wall timeout、资源/并发预算与稳定错误分类；正常返回路径统一取消 router、回收进程树并 wait，收尾超时/失败如实保留错误；stderr 正文不写 tracing，仅在内存保留有界 tail 供上层安全摘要。
+
+生命周期边界：上层直接 drop/abort `JsExecutor::execute` future 会跳过尚未执行的异步收尾；`Invocation::Drop` 只取消 token、abort request/router，host/process-tree Drop 只作尽力终止，不能证明 reader/router 已 join 或 child 已 reap。调用方应保留 execution future，触发其 CancellationToken 并等待返回；即使如此，cleanup 超时或失败也不能宣称完成回收。单独取消 host 的 wait/kill 等待而仍保留 host 时，reader JoinHandle 留在原 owner 中供重试；释放整个 owner 不提供同样的可重试保证。Windows Job Object 的真实运行验证不由 Unix 回归或跨编译代替。
 
 ## 速查表
 

@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use super::{
     admission::CommandReceiver,
-    failure::{FailureLedger, FlushSnapshot},
+    failure::{FailureLedger, ShutdownSnapshot},
     BatcherCommand,
 };
 use crate::{config::BatcherConfig, types::IngestionEvent, LangfuseClient};
@@ -51,7 +51,7 @@ impl BatchWorker {
         mut rx: CommandReceiver,
         mut closing: watch::Receiver<bool>,
         flush_interval: Duration,
-    ) -> FlushSnapshot {
+    ) -> ShutdownSnapshot {
         let mut interval = interval(flush_interval);
         interval.tick().await;
         loop {
@@ -86,7 +86,7 @@ impl BatchWorker {
             );
         }
         self.flush_buffer().await;
-        self.failures.snapshot()
+        self.failures.shutdown_snapshot()
     }
 
     async fn process(&mut self, command: BatcherCommand) {
