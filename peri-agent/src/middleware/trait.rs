@@ -1,16 +1,17 @@
+use crate::middleware::capabilities as hook_state;
 use async_trait::async_trait;
 
 use crate::{
     agent::react::{AgentOutput, Reasoning, ToolCall, ToolResult},
     error::{AgentError, AgentResult},
     hitl::BatchItem,
-    middleware::{prompt_sections::PromptSection, state::MiddlewareState},
+    middleware::prompt_sections::PromptSection,
     tools::BaseTool,
 };
 
 /// 中间件 trait - 与 TypeScript AgentMiddleware 对齐（v2 扩展）
 ///
-/// 所有钩子用 `&mut dyn MiddlewareState`，MiddlewareChain 不泛型，v2 stages 直接调用。
+/// 所有钩子按生命周期使用 `capabilities` 中的窄接口，MiddlewareChain 不泛型，v2 stages 直接调用。
 ///
 /// ## 生命周期钩子执行顺序
 ///
@@ -63,7 +64,7 @@ pub trait Middleware: Send + Sync {
 
     /// Agent 执行前调用
     /// 可用于初始化状态、注入上下文等
-    async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         Ok(())
     }
 
@@ -74,11 +75,12 @@ pub trait Middleware: Send + Sync {
     /// （`<system-reminder>` 包裹）先行入队——首轮 Receive 即消费，模型首轮
     /// 可见。
     ///
-    /// 约定：文本应短小精炼（摘要级）；返回 `None` 表示无贡献。纯生成无记账——
-    /// 入队前失败/取消不产生副作用，下个首 turn 重新生成即可。
+    /// 约定：文本应短小精炼（摘要级）；返回 `None` 表示无文本贡献。
+    /// QueueState 也允许直接投递结构化 Info reminder（MCP 概览使用此路径），
+    /// 因此实现若已入队，应返回 None，避免重复注入。
     async fn first_turn_reminder(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::QueueState,
     ) -> AgentResult<Option<String>> {
         Ok(None)
     }
@@ -87,7 +89,7 @@ pub trait Middleware: Send + Sync {
     /// 返回可能被修改的 ToolCall（用于参数注入、权限检查等）
     async fn before_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         Ok(tool_call.clone())
@@ -102,7 +104,7 @@ pub trait Middleware: Send + Sync {
     /// 返回的错误可以是 `ToolRejected`（不中断流程）或其它错误（中断流程）。
     async fn before_tools_batch(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::BeforeToolState,
         calls: &[ToolCall],
     ) -> Vec<AgentResult<ToolCall>> {
         let mut results = Vec::with_capacity(calls.len());
@@ -116,7 +118,7 @@ pub trait Middleware: Send + Sync {
     /// 可用于日志记录、结果转换等
     async fn after_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::AfterToolState,
         _tool_call: &ToolCall,
         _result: &ToolResult,
     ) -> AgentResult<()> {
@@ -127,7 +129,7 @@ pub trait Middleware: Send + Sync {
     /// 可用于聚合检查、批量日志等。
     async fn after_tools_batch(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::StateView,
         _results: &[(ToolCall, ToolResult)],
     ) -> AgentResult<()> {
         Ok(())
@@ -137,7 +139,10 @@ pub trait Middleware: Send + Sync {
     ///
     /// 仅用于把依赖工具目录的 request-local middleware 视图重绑到当前
     /// working map；默认无副作用。不得在此执行一般性的 `before_agent` 初始化。
-    async fn before_reason_catalog(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_reason_catalog(
+        &self,
+        _state: &mut dyn hook_state::CatalogState,
+    ) -> AgentResult<()> {
         Ok(())
     }
 
@@ -145,7 +150,7 @@ pub trait Middleware: Send + Sync {
     ///
     /// 可用于上下文压缩、token 预算检查等预处理操作。
     /// 默认空实现。
-    async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_model(&self, _state: &mut dyn hook_state::BeforeModelState) -> AgentResult<()> {
         Ok(())
     }
 
@@ -156,7 +161,7 @@ pub trait Middleware: Send + Sync {
     /// 默认空实现。
     async fn after_model(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::StateView,
         _reasoning: &Reasoning,
     ) -> AgentResult<()> {
         Ok(())
@@ -166,7 +171,7 @@ pub trait Middleware: Send + Sync {
     /// 返回可能被修改的 AgentOutput（用于后处理、格式化等）
     async fn after_agent(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::AfterAgentState,
         output: &AgentOutput,
     ) -> AgentResult<AgentOutput> {
         Ok(output.clone())
@@ -176,7 +181,7 @@ pub trait Middleware: Send + Sync {
     /// 可用于记录错误、触发告警等
     async fn on_error(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::StateView,
         _error: &AgentError,
     ) -> AgentResult<()> {
         Ok(())
@@ -214,14 +219,14 @@ pub trait Middleware: Send + Sync {
     /// Session 创建时触发（`session/new` 完成后、ReAct 循环启动前）。
     ///
     /// 可用于初始化会话级状态、注册一次性资源等。
-    async fn on_session_start(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn on_session_start(&self, _state: &mut dyn hook_state::StateView) -> AgentResult<()> {
         Ok(())
     }
 
     /// Session 销毁时触发。
     ///
     /// 可用于资源释放、孤儿 Agent 清理等。
-    async fn on_session_end(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn on_session_end(&self, _state: &mut dyn hook_state::StateView) -> AgentResult<()> {
         Ok(())
     }
 
@@ -232,7 +237,7 @@ pub trait Middleware: Send + Sync {
     /// 可用于 prompt 预处理、意图识别、上下文注入等。
     async fn on_user_prompt(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::StateView,
         _prompt: &str,
     ) -> AgentResult<()> {
         Ok(())
@@ -243,14 +248,14 @@ pub trait Middleware: Send + Sync {
     /// Compact 启动前触发（观测层）。
     ///
     /// 可用于外部监听压缩开始事件，不修改 State。
-    async fn before_compact(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_compact(&self, _state: &mut dyn hook_state::StateView) -> AgentResult<()> {
         Ok(())
     }
 
     /// Compact 完成后触发（观测层）。
     ///
     /// 可用于外部监听压缩结束事件、验证压缩结果等。
-    async fn after_compact(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn after_compact(&self, _state: &mut dyn hook_state::StateView) -> AgentResult<()> {
         Ok(())
     }
 
@@ -261,7 +266,7 @@ pub trait Middleware: Send + Sync {
     /// 可用于审计日志、审批遥测上报等。
     async fn on_permission_request(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::StateView,
         _request: &BatchItem,
     ) -> AgentResult<()> {
         Ok(())
@@ -274,7 +279,7 @@ pub trait Middleware: Send + Sync {
     /// 可用于子 Agent 生命周期追踪、资源分配等。
     async fn on_subagent_start(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::StateView,
         _agent_id: &str,
         _name: &str,
     ) -> AgentResult<()> {
@@ -286,7 +291,7 @@ pub trait Middleware: Send + Sync {
     /// `reason` 描述子 Agent 的退出原因（正常完成/错误/中断等）。
     async fn on_subagent_stop(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::StateView,
         _agent_id: &str,
         _reason: &str,
     ) -> AgentResult<()> {
@@ -298,7 +303,7 @@ pub trait Middleware: Send + Sync {
     /// 每轮 ReAct 迭代结束时触发（在 `after_agent` 之后）。
     ///
     /// 可用于 turn 边界标记、Langfuse 遥测上报等。
-    async fn on_turn_end(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn on_turn_end(&self, _state: &mut dyn hook_state::StateView) -> AgentResult<()> {
         Ok(())
     }
 
@@ -309,7 +314,7 @@ pub trait Middleware: Send + Sync {
     /// 可用于将外部事件桥接到 Agent 上下文。
     async fn on_notification(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::StateView,
         _message: &str,
     ) -> AgentResult<()> {
         Ok(())

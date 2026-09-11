@@ -2,10 +2,10 @@
 
 use peri_acp_types::session::QueuedMessage;
 
-use super::state::MiddlewareState;
+use super::capabilities::QueueState;
 
 /// 将消息写入会话级队列；有 inbox 时走 `InboxHandle::push`（Defer/Prompt 会 wake）。
-pub fn enqueue_v2_message(state: &dyn MiddlewareState, msg: QueuedMessage) {
+pub fn enqueue_v2_message(state: &dyn QueueState, msg: QueuedMessage) {
     if let Some(inbox) = state.inbox_handle() {
         inbox.push(msg);
     } else {

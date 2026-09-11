@@ -1,133 +1,33 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::time::Duration;
+//! SQLite ThreadStore 的唯一 pool owner 与契约实现。
+//! 连接、行映射、上下文和 compaction 事务由私有模块负责。
+
+mod compaction;
+mod connection;
+mod context;
+mod row_mapping;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    AssertSqlSafe, SqlitePool,
-};
-
+pub use connection::{ReadOnlyStoreErrorKind, ReadOnlyThreadStoreError};
 use peri_acp_types::{
     messages::BaseMessage,
     store::{
         deserialize_persisted_payload, serialize_persisted_payload, CompactionLifecycle,
         InheritedContext, MessageFlags, PersistedPayload, ThreadStore,
     },
-    thread::{AgentStatus, CancelPolicy, ThreadId, ThreadListEntry, ThreadMeta},
+    thread::{AgentStatus, ThreadId, ThreadListEntry, ThreadMeta},
 };
+use row_mapping::{
+    extract_title, meta_from_row, role_of, ThreadRow, THREAD_COLUMNS, THREAD_META_COLUMNS,
+};
+use sqlx::{AssertSqlSafe, SqlitePool};
+use std::{collections::HashMap, str::FromStr};
 
-/// SELECT 所有 thread 列的统一常量（含 cached_context，仅 load_context 等需要完整数据的场景使用）
-const THREAD_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
-    (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
-    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, t.cached_context, t.agent_status";
-
-/// SELECT thread 元数据列（不含 cached_context），用于 list_threads 等列表场景。
-/// cached_context 包含完整消息历史 JSON，加载所有线程时会占用大量内存（~1MB/线程）。
-const THREAD_META_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
-    (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
-    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, NULL as cached_context, t.agent_status";
-
-const READ_ONLY_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
-const REQUIRED_THREAD_COLUMNS: &[&str] = &[
-    "id",
-    "title",
-    "cwd",
-    "created_at",
-    "updated_at",
-    "message_count",
-    "parent_thread_id",
-    "snapshot_at_message_id",
-    "hidden",
-    "cancel_policy",
-    "config",
-    "cached_context",
-    "agent_status",
-];
-const REQUIRED_MESSAGE_COLUMNS: &[&str] = &["thread_id", "content"];
-
-/// 只读 session 数据库访问的稳定失败分类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadOnlyStoreErrorKind {
-    DatabaseNotFound,
-    DatabaseUnreadable,
-    SchemaIncompatible,
-    SessionNotFound,
-    CorruptSessionData,
-    Internal,
-}
-
-/// 只读 session 数据库错误；所有公开格式及 source chain 均不携带数据库行值或 SQL 文本。
-#[derive(Debug)]
-pub enum ReadOnlyThreadStoreError {
-    DatabaseNotFound,
-    DatabaseUnreadable,
-    SchemaIncompatible,
-    SessionNotFound,
-    CorruptSessionData,
-    Internal,
-}
-
-impl ReadOnlyThreadStoreError {
-    fn from_kind(kind: ReadOnlyStoreErrorKind) -> Self {
-        match kind {
-            ReadOnlyStoreErrorKind::DatabaseNotFound => Self::DatabaseNotFound,
-            ReadOnlyStoreErrorKind::DatabaseUnreadable => Self::DatabaseUnreadable,
-            ReadOnlyStoreErrorKind::SchemaIncompatible => Self::SchemaIncompatible,
-            ReadOnlyStoreErrorKind::SessionNotFound => Self::SessionNotFound,
-            ReadOnlyStoreErrorKind::CorruptSessionData => Self::CorruptSessionData,
-            ReadOnlyStoreErrorKind::Internal => Self::Internal,
-        }
-    }
-
-    pub fn kind(&self) -> ReadOnlyStoreErrorKind {
-        match self {
-            Self::DatabaseNotFound => ReadOnlyStoreErrorKind::DatabaseNotFound,
-            Self::DatabaseUnreadable => ReadOnlyStoreErrorKind::DatabaseUnreadable,
-            Self::SchemaIncompatible => ReadOnlyStoreErrorKind::SchemaIncompatible,
-            Self::SessionNotFound => ReadOnlyStoreErrorKind::SessionNotFound,
-            Self::CorruptSessionData => ReadOnlyStoreErrorKind::CorruptSessionData,
-            Self::Internal => ReadOnlyStoreErrorKind::Internal,
-        }
-    }
-}
-
-impl std::fmt::Display for ReadOnlyThreadStoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self.kind() {
-            ReadOnlyStoreErrorKind::DatabaseNotFound => "session database not found",
-            ReadOnlyStoreErrorKind::DatabaseUnreadable => "session database is unreadable",
-            ReadOnlyStoreErrorKind::SchemaIncompatible => "session database schema is incompatible",
-            ReadOnlyStoreErrorKind::SessionNotFound => "session not found",
-            ReadOnlyStoreErrorKind::CorruptSessionData => "session data is corrupt",
-            ReadOnlyStoreErrorKind::Internal => "internal storage error",
-        };
-        f.write_str(message)
-    }
-}
-
-impl std::error::Error for ReadOnlyThreadStoreError {}
-
-/// 只读 shape probe 查询失败的分类。
-///
-/// 只有确定性的「不是 SQLite 数据库 / 镜像损坏」才能判定 schema 不兼容；锁竞争、
-/// IO 故障、`-wal`/`-shm` 不可用等瞬时或环境故障必须保持可诊断，否则一次并发
-/// checkpoint 会被误报成 schema 问题。SQLite primary result code：
-/// `SQLITE_CORRUPT` = 11，`SQLITE_NOTADB` = 26。
-fn classify_shape_probe_failure(error: &sqlx::Error) -> ReadOnlyThreadStoreError {
-    let damaged_image = match error {
-        sqlx::Error::Database(db) => matches!(db.code().as_deref(), Some("11") | Some("26")),
-        _ => false,
-    };
-    if damaged_image {
-        ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::SchemaIncompatible)
-    } else {
-        ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::DatabaseUnreadable)
-    }
-}
+#[cfg(test)]
+use connection::{classify_shape_probe_failure, REQUIRED_MESSAGE_COLUMNS, REQUIRED_THREAD_COLUMNS};
+#[cfg(test)]
+use sqlx::sqlite::SqliteConnectOptions;
 
 /// 基于 SQLite 的 ThreadStore 实现
 ///
@@ -135,371 +35,6 @@ fn classify_shape_probe_failure(error: &sqlx::Error) -> ReadOnlyThreadStoreError
 pub struct SqliteThreadStore {
     pool: SqlitePool,
     read_only: bool,
-}
-
-impl SqliteThreadStore {
-    /// 使用指定路径打开（或创建）数据库，并初始化 Schema
-    pub async fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
-        let db_path = db_path.into();
-        // 确保父目录存在
-        if let Some(parent) = db_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("创建目录失败: {}", parent.display()))?;
-        }
-        let options = SqliteConnectOptions::new()
-            .filename(&db_path)
-            .create_if_missing(true)
-            .pragma("journal_mode", "WAL")
-            .pragma("synchronous", "NORMAL")
-            .pragma("foreign_keys", "ON");
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(options)
-            .await?;
-        let store = Self {
-            pool,
-            read_only: false,
-        };
-        store.init_schema().await?;
-        Ok(store)
-    }
-
-    /// 关闭连接池并等待全部连接释放。
-    ///
-    /// `Drop` 返回时不等待连接关闭完成，最后一次连接关闭触发的 WAL checkpoint 与
-    /// `-wal`/`-shm` 清理因此可能晚于 `Drop` 返回，并与并发只读打开重叠。需要确定性
-    /// 收尾时调用本方法：返回后本进程不再持有该数据库的连接，且侧车文件已完成收尾。
-    pub async fn close(&self) {
-        self.pool.close().await;
-    }
-
-    /// 以 SQLite read-only capability 打开已存在的数据库。
-    ///
-    /// 该路径不创建目录、数据库或 schema，也不执行 migration。
-    pub async fn open_existing_read_only(
-        db_path: impl AsRef<Path>,
-    ) -> std::result::Result<Self, ReadOnlyThreadStoreError> {
-        let db_path = db_path.as_ref();
-        let metadata = tokio::fs::metadata(db_path).await.map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::DatabaseNotFound)
-            } else {
-                ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::DatabaseUnreadable)
-            }
-        })?;
-        if !metadata.is_file() {
-            return Err(ReadOnlyThreadStoreError::from_kind(
-                ReadOnlyStoreErrorKind::DatabaseUnreadable,
-            ));
-        }
-
-        let options = SqliteConnectOptions::new()
-            .filename(db_path)
-            .read_only(true)
-            .create_if_missing(false)
-            .busy_timeout(READ_ONLY_BUSY_TIMEOUT);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .map_err(|_| {
-                ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::DatabaseUnreadable)
-            })?;
-        let store = Self {
-            pool,
-            read_only: true,
-        };
-        store.probe_load_meta_shape().await?;
-        Ok(store)
-    }
-
-    async fn probe_load_meta_shape(&self) -> std::result::Result<(), ReadOnlyThreadStoreError> {
-        for (table, required) in [
-            ("threads", REQUIRED_THREAD_COLUMNS),
-            ("messages", REQUIRED_MESSAGE_COLUMNS),
-        ] {
-            let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(format!(
-                "SELECT name FROM pragma_table_info('{table}')"
-            )))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|error| classify_shape_probe_failure(&error))?;
-            let actual: HashSet<String> = rows.into_iter().map(|(name,)| name).collect();
-            if !required.iter().all(|column| actual.contains(*column)) {
-                return Err(ReadOnlyThreadStoreError::from_kind(
-                    ReadOnlyStoreErrorKind::SchemaIncompatible,
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// 使用默认路径 `~/.peri/threads/threads.db` 创建
-    pub async fn default_path() -> Result<Self> {
-        let db_path = dirs_next::home_dir()
-            .context("无法获取 home 目录")?
-            .join(".peri")
-            .join("threads")
-            .join("threads.db");
-        Self::new(db_path).await
-    }
-
-    /// 初始化 Schema（幂等，可重复调用）
-    async fn init_schema(&self) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS threads (
-                id          TEXT PRIMARY KEY,
-                title       TEXT,
-                cwd         TEXT NOT NULL DEFAULT '',
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL,
-                message_count INTEGER NOT NULL DEFAULT 0
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS messages (
-                message_id  TEXT PRIMARY KEY,
-                thread_id   TEXT NOT NULL,
-                role        TEXT NOT NULL,
-                content     TEXT NOT NULL,
-                FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages (thread_id ASC)",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // 迁移：为已有表添加新列（忽略 "duplicate column" 错误实现幂等）
-        let alter_columns = [
-            "ALTER TABLE threads ADD COLUMN parent_thread_id TEXT",
-            "ALTER TABLE threads ADD COLUMN snapshot_at_message_id TEXT",
-            "ALTER TABLE threads ADD COLUMN hidden BOOLEAN NOT NULL DEFAULT 0",
-            "ALTER TABLE threads ADD COLUMN cancel_policy TEXT NOT NULL DEFAULT 'cascade'",
-            "ALTER TABLE threads ADD COLUMN config TEXT",
-            "ALTER TABLE threads ADD COLUMN cached_context TEXT",
-            "ALTER TABLE threads ADD COLUMN frozen_context TEXT",
-            "ALTER TABLE threads ADD COLUMN inherited_context TEXT",
-            "ALTER TABLE threads ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'active'",
-            "ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0",
-            "ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0",
-            "ALTER TABLE messages ADD COLUMN projection TEXT",
-            // H6: context cache 纪元，每次 compact 提交后递增
-            "ALTER TABLE threads ADD COLUMN context_cache_epoch INTEGER NOT NULL DEFAULT 0",
-        ];
-        for sql in &alter_columns {
-            // SQLite 返回 "duplicate column name" 时忽略
-            // 常量数组（'static str）仅含 DDL 列名，无动态输入；sqlx 0.9 需显式断言
-            if let Err(e) = sqlx::query(AssertSqlSafe(*sql)).execute(&self.pool).await {
-                let msg = e.to_string();
-                if !msg.contains("duplicate column name") {
-                    return Err(e.into());
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// 沿 parent_thread_id 链向上回溯，返回从根到自身的有序列表
-    async fn resolve_ancestor_chain(&self, thread_id: &ThreadId) -> Result<Vec<ThreadId>> {
-        let mut chain = vec![thread_id.clone()];
-        let mut current = thread_id.clone();
-        loop {
-            let row: Option<(Option<String>,)> =
-                sqlx::query_as("SELECT parent_thread_id FROM threads WHERE id = ?1")
-                    .bind(current.as_str())
-                    .fetch_optional(&self.pool)
-                    .await?;
-            match row {
-                Some((Some(parent),)) => {
-                    if chain.contains(&parent) {
-                        anyhow::bail!("cyclic thread ancestry");
-                    }
-                    chain.push(parent.clone());
-                    current = parent;
-                }
-                _ => break,
-            }
-        }
-        chain.reverse();
-        Ok(chain)
-    }
-
-    async fn load_payloads_up_to(
-        &self,
-        thread_id: &ThreadId,
-        message_id: &str,
-    ) -> Result<Vec<PersistedPayload>> {
-        let target_row: Option<(i64,)> =
-            sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
-                .bind(thread_id.as_str())
-                .bind(message_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        let Some((target_rowid,)) = target_row else {
-            return Ok(vec![]);
-        };
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT message_id, content FROM messages WHERE thread_id = ?1 AND rowid <= ?2 ORDER BY rowid",
-        )
-        .bind(thread_id.as_str())
-        .bind(target_rowid)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|(row_id, content)| {
-                let payload = deserialize_persisted_payload(&content)?;
-                if payload.id().as_uuid().to_string() != row_id {
-                    anyhow::bail!("persisted payload message id mismatch");
-                }
-                Ok(payload)
-            })
-            .collect()
-    }
-
-    /// 加载指定 thread 中 rowid <= 目标消息 rowid 的所有消息
-    #[allow(dead_code)]
-    async fn load_messages_up_to(
-        &self,
-        thread_id: &ThreadId,
-        message_id: &str,
-    ) -> Result<Vec<BaseMessage>> {
-        // 先查找目标消息的 rowid
-        let target_row: Option<(i64,)> =
-            sqlx::query_as("SELECT rowid FROM messages WHERE message_id = ?1")
-                .bind(message_id)
-                .fetch_optional(&self.pool)
-                .await?;
-
-        let target_rowid = match target_row {
-            Some((rid,)) => rid,
-            None => {
-                // 消息不存在，返回空
-                return Ok(vec![]);
-            }
-        };
-
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT content FROM messages WHERE thread_id = ?1 AND rowid <= ?2 ORDER BY rowid",
-        )
-        .bind(thread_id.as_str())
-        .bind(target_rowid)
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter()
-            .map(|(content,)| serde_json::from_str(&content).map_err(Into::into))
-            .collect()
-    }
-
-    /// 将消息序列化为 JSON 并保存到 cached_context 列
-    async fn save_context_cache(
-        &self,
-        thread_id: &ThreadId,
-        messages: &[BaseMessage],
-    ) -> Result<()> {
-        let cached = serde_json::to_string(messages)?;
-        let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE threads SET cached_context = ?1, updated_at = ?2 WHERE id = ?3")
-            .bind(&cached)
-            .bind(&now)
-            .bind(thread_id.as_str())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-}
-
-// ── 辅助函数 ──────────────────────────────────────────────────────────────────
-
-fn role_of(msg: &BaseMessage) -> &'static str {
-    match msg {
-        BaseMessage::Human { .. } => "user",
-        BaseMessage::Ai { .. } => "assistant",
-        BaseMessage::System { .. } => "system",
-        BaseMessage::Tool { .. } => "tool",
-    }
-}
-
-// meta_from_row 从行列提取 8+ 字段；拆分参数列表不具可读性优势，此处抑制 `too_many_arguments`
-#[allow(clippy::too_many_arguments)]
-fn meta_from_row(
-    id: String,
-    title: Option<String>,
-    cwd: String,
-    created_at: String,
-    updated_at: String,
-    message_count: i64,
-    content_size: i64,
-    parent_thread_id: Option<String>,
-    snapshot_at_message_id: Option<String>,
-    hidden: bool,
-    cancel_policy: String,
-    config: Option<String>,
-    cached_context: Option<String>,
-    agent_status: String,
-) -> Result<ThreadMeta> {
-    let message_count = usize::try_from(message_count).context("message_count is negative")?;
-    let content_size = u64::try_from(content_size).context("content_size is negative")?;
-    // 关键约束：DB 字符串必须经 FromStr 解析为强类型枚举；非法值不静默 fallback
-    let cancel_policy = CancelPolicy::from_str(&cancel_policy)
-        .with_context(|| format!("解析 cancel_policy 失败（thread_id={}）", id))?;
-    let agent_status = AgentStatus::from_str(&agent_status)
-        .with_context(|| format!("解析 agent_status 失败（thread_id={}）", id))?;
-    Ok(ThreadMeta {
-        id,
-        title,
-        cwd,
-        created_at: created_at.parse::<DateTime<Utc>>()?,
-        updated_at: updated_at.parse::<DateTime<Utc>>()?,
-        message_count,
-        content_size,
-        parent_thread_id,
-        snapshot_at_message_id,
-        hidden,
-        cancel_policy,
-        config,
-        cached_context,
-        agent_status,
-    })
-}
-
-/// 从消息列表中提取标题（取第一条 Human 消息的前 50 字符）
-fn extract_title(msgs: &[BaseMessage]) -> Option<String> {
-    use peri_acp_types::messages::{ContentBlock, MessageContent};
-    for msg in msgs {
-        if let BaseMessage::Human { content, .. } = msg {
-            let text = match content {
-                MessageContent::Text(t) => t.clone(),
-                MessageContent::Blocks(blocks) => blocks
-                    .iter()
-                    .filter_map(|b| {
-                        if let ContentBlock::Text { text } = b {
-                            Some(text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                MessageContent::Raw(_) => continue,
-            };
-            let title: String = text.chars().take(50).collect();
-            if !title.is_empty() {
-                return Some(title);
-            }
-        }
-    }
-    None
 }
 
 // ── ThreadStore impl ───────────────────────────────────────────────────────────
@@ -623,22 +158,7 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn load_meta(&self, id: &ThreadId) -> Result<ThreadMeta> {
-        let row: (
-            String,
-            Option<String>,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            Option<String>,
-            Option<String>,
-            bool,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-        ) = match sqlx::query_as(AssertSqlSafe(format!(
+        let row: ThreadRow = match sqlx::query_as(AssertSqlSafe(format!(
             "SELECT {THREAD_COLUMNS} FROM threads t WHERE t.id = ?1"
         )))
         .bind(id.as_str())
@@ -735,22 +255,7 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>> {
-        let rows: Vec<(
-            String,
-            Option<String>,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            Option<String>,
-            Option<String>,
-            bool,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-        )> = sqlx::query_as(AssertSqlSafe(format!(
+        let rows: Vec<ThreadRow> = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.hidden = 0 ORDER BY t.updated_at DESC"
         )))
         .fetch_all(&self.pool)
@@ -830,164 +335,29 @@ impl ThreadStore for SqliteThreadStore {
     async fn store_inherited_context(
         &self,
         thread_id: &ThreadId,
-        context: &InheritedContext,
+        inherited: &InheritedContext,
     ) -> Result<()> {
-        let snapshot = context.to_json()?;
-        // Validate before publishing, including the message/flag reference boundary.
-        InheritedContext::from_json(&snapshot)?;
-        let result = sqlx::query(
-            "UPDATE threads SET inherited_context = ?1 WHERE id = ?2 AND inherited_context IS NULL",
-        )
-        .bind(snapshot)
-        .bind(thread_id)
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() != 1 {
-            anyhow::bail!("inherited context already exists or thread is missing");
-        }
-        Ok(())
+        context::store_inherited_context(self, thread_id, inherited).await
     }
 
     async fn load_inherited_context(&self, thread_id: &ThreadId) -> Result<InheritedContext> {
-        let row: (Option<String>,) =
-            sqlx::query_as("SELECT inherited_context FROM threads WHERE id = ?1")
-                .bind(thread_id)
-                .fetch_one(&self.pool)
-                .await?;
-        if let Some(snapshot) = row.0 {
-            return InheritedContext::from_json(&snapshot);
-        }
-        let chain = self.resolve_ancestor_chain(thread_id).await?;
-        let mut context = InheritedContext::default();
-        // Each edge's cutoff belongs to its child. A stored snapshot replaces all
-        // inherited state, so later parent compaction/rewind cannot change it.
-        for (index, tid) in chain.iter().enumerate() {
-            let row: (Option<String>,) =
-                sqlx::query_as("SELECT inherited_context FROM threads WHERE id = ?1")
-                    .bind(tid)
-                    .fetch_one(&self.pool)
-                    .await?;
-            if let Some(snapshot) = row.0 {
-                context = InheritedContext::from_json(&snapshot)?;
-                continue;
-            }
-            if index == 0 {
-                continue;
-            }
-            let meta = self.load_meta(tid).await?;
-            let Some(cutoff) = meta.snapshot_at_message_id else {
-                context = InheritedContext::default();
-                continue;
-            };
-            let parent = &chain[index - 1];
-            let own = self.load_payloads_up_to(parent, &cutoff).await?;
-            if own.is_empty() {
-                // A parent with no own entries can point into its inherited region.
-                if let Some(position) = context
-                    .payloads
-                    .iter()
-                    .position(|payload| payload.id().as_uuid().to_string() == cutoff)
-                {
-                    context.payloads.truncate(position + 1);
-                } else {
-                    anyhow::bail!("inherited context cutoff is missing");
-                }
-            } else {
-                let own_ids = own.iter().map(PersistedPayload::id).collect::<HashSet<_>>();
-                context.flags.extend(
-                    self.load_message_flags(parent)
-                        .await?
-                        .into_iter()
-                        .filter(|(id, _)| own_ids.contains(id)),
-                );
-                context.payloads.extend(own);
-            }
-            let ids = context
-                .payloads
-                .iter()
-                .map(PersistedPayload::id)
-                .collect::<HashSet<_>>();
-            context.flags.retain(|id, _| ids.contains(id));
-        }
-        Ok(context)
+        context::load_inherited_context(self, thread_id).await
     }
 
     async fn load_context_payloads(&self, thread_id: &ThreadId) -> Result<Vec<PersistedPayload>> {
-        let mut payloads = self.load_inherited_context(thread_id).await?.payloads;
-        payloads.extend(self.load_payloads(thread_id).await?);
-        Ok(payloads)
+        context::load_context_payloads(self, thread_id).await
     }
 
     async fn load_context(&self, thread_id: &ThreadId) -> Result<Vec<BaseMessage>> {
-        let messages = self
-            .load_context_payloads(thread_id)
-            .await?
-            .into_iter()
-            .filter_map(|payload| payload.as_message().cloned())
-            .collect::<Vec<_>>();
-        if !messages.is_empty() {
-            self.save_context_cache(thread_id, &messages).await?;
-        }
-        Ok(messages)
+        context::load_context(self, thread_id).await
     }
 
     async fn list_child_threads(&self, parent_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
-        let rows: Vec<(String, Option<String>, String, String, String, i64, i64,
-                       Option<String>, Option<String>, bool, String, Option<String>, Option<String>, String)> =
-            sqlx::query_as(AssertSqlSafe(format!(
-                "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.parent_thread_id = ?1 ORDER BY t.created_at ASC"
-            )))
-            .bind(parent_id.as_str())
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter()
-            .map(|row| {
-                meta_from_row(
-                    row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
-                    row.11, row.12, row.13,
-                )
-            })
-            .collect()
+        context::list_child_threads(self, parent_id).await
     }
 
     async fn list_session_threads(&self, root_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
-        let rows: Vec<(
-            String,
-            Option<String>,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            Option<String>,
-            Option<String>,
-            bool,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-        )> = sqlx::query_as(AssertSqlSafe(format!(
-            "WITH RECURSIVE session_tree AS (
-                    SELECT * FROM threads WHERE id = ?1
-                    UNION ALL
-                    SELECT t.* FROM threads t
-                    INNER JOIN session_tree st ON t.parent_thread_id = st.id
-                )
-                SELECT {THREAD_META_COLUMNS} FROM session_tree t ORDER BY t.created_at ASC"
-        )))
-        .bind(root_id.as_str())
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter()
-            .map(|row| {
-                meta_from_row(
-                    row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
-                    row.11, row.12, row.13,
-                )
-            })
-            .collect()
+        context::list_session_threads(self, root_id).await
     }
 
     async fn update_thread_status(&self, id: &ThreadId, status: &str) -> Result<()> {
@@ -1005,20 +375,11 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn invalidate_context_cache(&self, thread_id: &ThreadId) -> Result<()> {
-        sqlx::query("UPDATE threads SET cached_context = NULL WHERE id = ?1")
-            .bind(thread_id.as_str())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        context::invalidate_context_cache(self, thread_id).await
     }
 
     async fn get_context_cache_epoch(&self, thread_id: &ThreadId) -> Result<u64> {
-        let row: Option<(i64,)> =
-            sqlx::query_as("SELECT context_cache_epoch FROM threads WHERE id = ?1")
-                .bind(thread_id.as_str())
-                .fetch_optional(&self.pool)
-                .await?;
-        Ok(row.map(|(e,)| e as u64).unwrap_or(0))
+        context::get_context_cache_epoch(self, thread_id).await
     }
 
     async fn delete_messages(
@@ -1026,31 +387,7 @@ impl ThreadStore for SqliteThreadStore {
         thread_id: &ThreadId,
         message_ids: &[peri_acp_types::messages::MessageId],
     ) -> Result<()> {
-        if message_ids.is_empty() {
-            return Ok(());
-        }
-        let mut tx = self.pool.begin().await?;
-        for mid in message_ids {
-            let uuid_str = mid.as_uuid().to_string();
-            sqlx::query("DELETE FROM messages WHERE message_id = ?1 AND thread_id = ?2")
-                .bind(&uuid_str)
-                .bind(thread_id.as_str())
-                .execute(&mut *tx)
-                .await?;
-        }
-        let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE threads SET updated_at = ?1,
-                message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
-             WHERE id = ?2",
-        )
-        .bind(&now)
-        .bind(thread_id.as_str())
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        self.invalidate_context_cache(thread_id).await?;
-        Ok(())
+        compaction::delete_messages(self, thread_id, message_ids).await
     }
 
     async fn update_message_flags(
@@ -1058,33 +395,7 @@ impl ThreadStore for SqliteThreadStore {
         message_id: &peri_acp_types::messages::MessageId,
         flags: &MessageFlags,
     ) -> Result<()> {
-        let id_str = message_id.as_uuid().to_string();
-        let projection_json = if let Some(ref directive) = flags.projection {
-            Some(serde_json::to_string(directive)?)
-        } else {
-            None
-        };
-        sqlx::query(
-            "UPDATE messages SET truncated = ?, excluded = ?, projection = ? WHERE message_id = ?",
-        )
-        .bind(flags.truncated)
-        .bind(flags.excluded)
-        .bind(&projection_json)
-        .bind(&id_str)
-        .execute(&self.pool)
-        .await?;
-
-        // 消息可见性变更（truncation/excluded/projection）影响上下文视图，失效 cached_context
-        let thread_id: Option<(String,)> =
-            sqlx::query_as("SELECT thread_id FROM messages WHERE message_id = ?1")
-                .bind(&id_str)
-                .fetch_optional(&self.pool)
-                .await?;
-        if let Some((tid,)) = thread_id {
-            self.invalidate_context_cache(&tid).await?;
-        }
-
-        Ok(())
+        compaction::update_message_flags(self, message_id, flags).await
     }
 
     fn supports_compaction_lifecycle(&self) -> bool {
@@ -1096,94 +407,14 @@ impl ThreadStore for SqliteThreadStore {
         thread_id: &ThreadId,
         lifecycle: &CompactionLifecycle,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-
-        for (message_id, flags) in &lifecycle.flag_updates {
-            let projection_json = flags
-                .projection
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?;
-            let result = sqlx::query(
-                "UPDATE messages
-                 SET truncated = ?1, excluded = ?2, projection = ?3
-                 WHERE message_id = ?4 AND thread_id = ?5",
-            )
-            .bind(flags.truncated)
-            .bind(flags.excluded)
-            .bind(&projection_json)
-            .bind(message_id.as_uuid().to_string())
-            .bind(thread_id.as_str())
-            .execute(&mut *tx)
-            .await?;
-            anyhow::ensure!(
-                result.rows_affected() == 1,
-                "message {} not found in thread {}",
-                message_id.as_uuid(),
-                thread_id.as_str()
-            );
-        }
-
-        for message in &lifecycle.appended_messages {
-            let message_id = message.id().as_uuid().to_string();
-            let content = serde_json::to_string(message)?;
-            sqlx::query(
-                "INSERT INTO messages (message_id, thread_id, role, content)
-                 VALUES (?1, ?2, ?3, ?4)",
-            )
-            .bind(&message_id)
-            .bind(thread_id.as_str())
-            .bind(role_of(message))
-            .bind(&content)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE threads
-             SET updated_at = ?1,
-                 message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2),
-                 cached_context = NULL,
-                 context_cache_epoch = context_cache_epoch + 1
-             WHERE id = ?2",
-        )
-        .bind(&now)
-        .bind(thread_id.as_str())
-        .execute(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
-        Ok(())
+        compaction::commit_compaction_lifecycle(self, thread_id, lifecycle).await
     }
 
     async fn load_message_flags(
         &self,
         thread_id: &ThreadId,
     ) -> Result<HashMap<peri_acp_types::messages::MessageId, MessageFlags>> {
-        let rows: Vec<(String, bool, bool, Option<String>)> = sqlx::query_as(
-            "SELECT message_id, truncated, excluded, projection FROM messages \
-             WHERE thread_id = ?1 AND (truncated = 1 OR excluded = 1 OR projection IS NOT NULL)",
-        )
-        .bind(thread_id.as_str())
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut flags = HashMap::with_capacity(rows.len());
-        for (id_str, truncated, excluded, projection_json) in rows {
-            if let Ok(uid) = uuid::Uuid::parse_str(&id_str) {
-                let projection = projection_json.and_then(|json| serde_json::from_str(&json).ok());
-                flags.insert(
-                    uid.into(),
-                    MessageFlags {
-                        truncated,
-                        excluded,
-                        projection,
-                    },
-                );
-            }
-        }
-        Ok(flags)
+        compaction::load_message_flags(self, thread_id).await
     }
 
     async fn delete_messages_since(
@@ -1191,35 +422,7 @@ impl ThreadStore for SqliteThreadStore {
         thread_id: &ThreadId,
         message_id: &peri_acp_types::messages::MessageId,
     ) -> Result<()> {
-        // 通过 rowid 定位目标消息在时间线上的位置
-        let target_rowid: Option<(i64,)> =
-            sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
-                .bind(thread_id.as_str())
-                .bind(message_id.as_uuid().to_string())
-                .fetch_optional(&self.pool)
-                .await?;
-
-        if let Some((rowid,)) = target_rowid {
-            let mut tx = self.pool.begin().await?;
-            sqlx::query("DELETE FROM messages WHERE thread_id = ?1 AND rowid > ?2")
-                .bind(thread_id.as_str())
-                .bind(rowid)
-                .execute(&mut *tx)
-                .await?;
-            let now = Utc::now().to_rfc3339();
-            sqlx::query(
-                "UPDATE threads SET updated_at = ?1,
-                    message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
-                 WHERE id = ?2",
-            )
-            .bind(&now)
-            .bind(thread_id.as_str())
-            .execute(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            self.invalidate_context_cache(thread_id).await?;
-        }
-        Ok(())
+        compaction::delete_messages_since(self, thread_id, message_id).await
     }
 }
 

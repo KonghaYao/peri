@@ -25,12 +25,13 @@ async fn test_local_cache_spawn_failure_invalidates() {
 
     #[async_trait]
     impl PtcArtifactProvider for SpawnFailureProvider {
-        async fn launch(&self, _node: &str) -> Result<PtcLaunch> {
+        async fn launch(&self, _node: &str, cancel: &CancellationToken) -> Result<PtcLaunch> {
             launch_in(
                 "/definitely/missing/peri-node",
                 self.home.path(),
                 &FixtureInstaller,
                 false,
+                cancel,
             )
             .await
         }
@@ -75,8 +76,9 @@ async fn test_execute_rpc_failure_after_handshake_does_not_invalidate() {
 
     #[async_trait]
     impl PtcArtifactProvider for ExecuteFailureProvider {
-        async fn launch(&self, node: &str) -> Result<PtcLaunch> {
-            let launch = launch_in(node, self.home.path(), &FixtureInstaller, false).await?;
+        async fn launch(&self, node: &str, cancel: &CancellationToken) -> Result<PtcLaunch> {
+            let launch =
+                launch_in(node, self.home.path(), &FixtureInstaller, false, cancel).await?;
             tokio::fs::write(
                 Path::new(&launch.spec.args[0]),
                 b"process.stdin.resume(); let started=false; process.stdin.on('data', data => { if (!started) { started=true; process.stdout.write('{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"protocolVersion\":1,\"buildId\":\"@peri-code/ptc@0.2.3\"}}\\n'); } else { process.exit(1); } });",
@@ -125,8 +127,9 @@ async fn test_handshake_process_exit_reports_status_and_invalidates() {
 
     #[async_trait]
     impl PtcArtifactProvider for ExitingHandshakeProvider {
-        async fn launch(&self, node: &str) -> Result<PtcLaunch> {
-            let launch = launch_in(node, self.home.path(), &FixtureInstaller, false).await?;
+        async fn launch(&self, node: &str, cancel: &CancellationToken) -> Result<PtcLaunch> {
+            let launch =
+                launch_in(node, self.home.path(), &FixtureInstaller, false, cancel).await?;
             tokio::fs::write(
                 Path::new(&launch.spec.args[0]),
                 b"process.stdin.resume(); process.stdin.once('data', () => process.exit(7));",
@@ -180,8 +183,9 @@ async fn test_handshake_failure_invalidates_local_cache_after_cleanup() {
 
     #[async_trait]
     impl PtcArtifactProvider for BrokenHandshakeProvider {
-        async fn launch(&self, node: &str) -> Result<PtcLaunch> {
-            let launch = launch_in(node, self.home.path(), &FixtureInstaller, false).await?;
+        async fn launch(&self, node: &str, cancel: &CancellationToken) -> Result<PtcLaunch> {
+            let launch =
+                launch_in(node, self.home.path(), &FixtureInstaller, false, cancel).await?;
             let entry = Path::new(&launch.spec.args[0]);
             tokio::fs::write(
                 entry,
@@ -230,7 +234,7 @@ struct FixtureInstaller;
 
 #[async_trait]
 impl Installer for FixtureInstaller {
-    async fn install(&self, staging: &Path) -> std::io::Result<bool> {
+    async fn install(&self, staging: &Path, _cancel: &CancellationToken) -> std::io::Result<bool> {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../npm-packages/@peri-ptc");
         let package = staging.join("node_modules/@peri-code/ptc");
         tokio::fs::create_dir_all(package.join("dist")).await?;
@@ -252,8 +256,8 @@ struct FixtureProvider {
 
 #[async_trait]
 impl PtcArtifactProvider for FixtureProvider {
-    async fn launch(&self, node: &str) -> Result<PtcLaunch> {
-        launch_in(node, self.home.path(), &FixtureInstaller, false).await
+    async fn launch(&self, node: &str, cancel: &CancellationToken) -> Result<PtcLaunch> {
+        launch_in(node, self.home.path(), &FixtureInstaller, false, cancel).await
     }
 
     async fn invalidate(&self) -> Result<()> {
@@ -691,3 +695,6 @@ async fn test_execute_classifies_adapter_result_limit() {
     assert_eq!(error.code(), "RESOURCE_LIMIT");
     assert_eq!(error.public_message(), "JavaScript resource limit exceeded");
 }
+
+#[path = "executor_lifecycle_test.rs"]
+mod lifecycle;

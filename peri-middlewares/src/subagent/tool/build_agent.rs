@@ -1,10 +1,10 @@
 //! SubAgent v2 装配：从 agent_def 构造 v2-ready 数据（LLM + tools + system_prompt +
-//! skill_names + max_iterations），调用方组装 [`SubagentSpawnConfig`] 后经
-//! [`spawn_subagent`]（Agent 层统一入口）创建与运行。
+//! skill_names + max_iterations），调用方组装 [`SubagentSpawnConfig`](peri_agent::session::subagent::SubagentSpawnConfig) 后经
+//! [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)（Agent 层统一入口）创建与运行。
 //!
 //! **P5.1 重构**：旧版本通过 `SubAgentBuilder.build()` 构造 v1 Agent，
 //! 现在直接产出 v2 字段。L3：建 thread / cancel token / 事件 / 运行收尾
-//! 全部移入 [`spawn_subagent`]，本模块只保留 agent_def 解析、工具过滤与
+//! 全部移入 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)，本模块只保留 agent_def 解析、工具过滤与
 //! SandboxWrite 注入等 middlewares 能力。
 
 use peri_agent::{
@@ -36,7 +36,7 @@ pub(crate) struct AgentBuildResult {
 
 impl super::SubAgentTool {
     /// 从 agent 定义构造 v2-ready SubAgent 数据（L3：不含 thread 创建 / 事件 /
-    /// cancel token——统一入口 [`spawn_subagent`] 负责）。
+    /// cancel token——统一入口 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent) 负责）。
     ///
     /// `model_override`（Agent 工具 `model` 参数，仅新建定义型 subagent 生效）：
     /// - `None`（省略）→ 保持 agent 定义 frontmatter model（含空 / "inherit" → 父模型）

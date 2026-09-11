@@ -1,3 +1,4 @@
+use peri_agent::middleware::capabilities as hook_state;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -12,7 +13,7 @@ use peri_acp_types::system_reminder::{
 };
 use peri_agent::{
     agent::AgentCancellationToken,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::r#trait::Middleware,
     session::{MessageKind, MessageSource as QueueMessageSource, QueuedMessage},
     tools::BaseTool,
 };
@@ -310,7 +311,7 @@ impl McpMiddleware {
     /// 状态变化以 canonical Info reminder 注入模型上下文。
     ///
     /// 首条推送附 tool search 提示（每个会话恰好一次），后续只推送变化行。
-    fn push_status_changes(&self, state: &mut dyn MiddlewareState) {
+    fn push_status_changes(&self, state: &mut dyn hook_state::QueueState) {
         let changes = self.pool.drain_pending_changes();
         if changes.is_empty() {
             return;
@@ -388,7 +389,7 @@ impl Middleware for McpMiddleware {
     /// 事件"的场景）。由 executor 在首 turn 组装前调用。
     async fn first_turn_reminder(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::QueueState,
     ) -> peri_agent::error::AgentResult<Option<String>> {
         let Some(body) = self.overview_text() else {
             return Ok(None);
@@ -437,7 +438,7 @@ impl Middleware for McpMiddleware {
     ///   命令面）。
     async fn before_agent(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::BeforeAgentState,
     ) -> peri_agent::error::AgentResult<()> {
         self.ensure_discovery();
         Ok(())
@@ -447,7 +448,7 @@ impl Middleware for McpMiddleware {
     /// 空闲期变化由下个 turn 首轮 Receive 消费）。
     async fn before_model(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::BeforeModelState,
     ) -> peri_agent::error::AgentResult<()> {
         self.push_status_changes(state);
         Ok(())

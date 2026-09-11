@@ -5,14 +5,12 @@ edition.workspace = true
 description = "Runtime layer — multi-session orchestrator: session_id -> SessionHandle map + event stamping"
 
 [dependencies]
-# 层依赖（§0 依赖规则）：仅 peri-acp-types（接口契约）/ peri-agent（Agent 层，
-# 句柄实现与装配随 L5 落地）；不依赖 peri-acp / peri-tui / peri-controller。
+# 通过 peri-acp-types 的 SessionHandle 注入实现，不依赖具体 Agent 装配。
 peri-acp-types = { path = "../peri-acp-types" }
-peri-agent = { path = "../peri-agent" }
 anyhow.workspace = true
-async-trait.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+async-trait.workspace = true

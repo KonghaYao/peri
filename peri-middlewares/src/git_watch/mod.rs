@@ -2,6 +2,7 @@
 
 mod snapshot;
 
+use peri_agent::middleware::capabilities as hook_state;
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -18,7 +19,7 @@ use peri_acp_types::system_reminder::{
 use peri_agent::{
     agent::react::{ToolCall, ToolResult},
     error::AgentResult,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::r#trait::Middleware,
     session::{MessageKind, MessageSource, QueuedMessage},
 };
 use serde_json::json;
@@ -81,7 +82,7 @@ impl GitWatchMiddleware {
         Self::with_timing(throttle, GIT_WATCH_SAMPLE_TIMEOUT)
     }
 
-    fn schedule_sample(&self, state: &dyn MiddlewareState) {
+    fn schedule_sample(&self, state: &dyn hook_state::AfterToolState) {
         if matches!(
             *self
                 .inner
@@ -248,7 +249,7 @@ impl Middleware for GitWatchMiddleware {
 
     async fn after_tool(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::AfterToolState,
         _tool_call: &ToolCall,
         result: &ToolResult,
     ) -> AgentResult<()> {

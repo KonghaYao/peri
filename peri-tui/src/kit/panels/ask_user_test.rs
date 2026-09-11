@@ -34,42 +34,38 @@ fn test_ask_user_same_question_ids_new_owner_resets_answers() {
         payload: AskUser { questions },
     };
 
-    let mut fingerprint = interaction_fingerprint(Some(&a));
-    let mut focused = 2;
-    let mut answers = vec![vec![1]];
-    let mut focused_option = 1;
-    let mut is_typing = true;
-    let mut typing_state = TextAreaState::default();
-    typing_state.insert_str("answer owned by A");
-    let mut custom_answers = vec![Some("A custom".into())];
+    let mut form = FormState::default();
+    assert!(form.reset_for_owner_change(Some(&a)));
+    form.focused = 2;
+    form.answers = vec![vec![1]];
+    form.focused_option = 1;
+    form.is_typing = true;
+    form.typing_state.insert_str("answer owned by A");
+    form.custom_answers = vec![Some("A custom".into())];
     let mut scroll =
         ScrollViewState::with_offset(ratatui_kit::ratatui::layout::Position::new(0, 9));
 
-    assert!(reset_for_owner_change(
-        &mut fingerprint,
-        Some(&b),
-        1,
-        &mut focused,
-        &mut answers,
-        &mut focused_option,
-        &mut is_typing,
-        &mut typing_state,
-        &mut custom_answers,
-        &mut scroll,
-    ));
-    assert_eq!(focused, 0);
-    assert_eq!(answers, vec![Vec::<usize>::new()]);
-    assert_eq!(focused_option, 0);
-    assert!(!is_typing);
-    assert_eq!(typing_state.all_text(), "");
-    assert_eq!(typing_state.cursor_byte(), 0);
-    assert_eq!(custom_answers, vec![None]);
+    // Re-rendering the same owner must preserve both form edits and scroll.
+    assert!(!reset_for_owner_change(&mut form, Some(&a), &mut scroll));
+    assert_eq!(form.typing_state.all_text(), "answer owned by A");
+    assert_eq!(scroll.offset().y, 9);
+    assert!(reset_for_owner_change(&mut form, Some(&b), &mut scroll));
+    assert_eq!(form.focused, 0);
+    assert_eq!(form.answers, vec![Vec::<usize>::new()]);
+    assert_eq!(form.focused_option, 0);
+    assert!(!form.is_typing);
+    assert_eq!(form.typing_state.all_text(), "");
+    assert_eq!(form.typing_state.cursor_byte(), 0);
+    assert_eq!(form.custom_answers, vec![None]);
     assert_eq!(scroll.offset().y, 0);
-    assert_eq!(fingerprint, interaction_fingerprint(Some(&b)));
+    assert!(!reset_for_owner_change(&mut form, Some(&b), &mut scroll));
     assert_eq!(
-        build_answers_map(Some(&b.payload), &answers, &custom_answers),
+        build_answers_map(Some(&b.payload), &form.answers, &form.custom_answers),
         json!({"same": ""})
     );
+    assert!(reset_for_owner_change(&mut form, None, &mut scroll));
+    assert!(form.answers.is_empty());
+    assert!(form.custom_answers.is_empty());
 }
 
 fn make_question(id: &str, multi_select: bool, labels: &[&str]) -> Question {
@@ -245,4 +241,191 @@ fn test_textarea_state_delete_word_backward() {
     state.cursor = state.text.len();
     state.delete_word_backward();
     assert!(state.text.is_empty());
+}
+
+fn form_for(payload: &AskUser) -> FormState {
+    let mut form = FormState::default();
+    form.reset_for_owner_change(Some(&PendingInteraction {
+        owner: crate::acp_client::InteractionOwner {
+            token: 1,
+            ..Default::default()
+        },
+        request_id_json: "1".into(),
+        payload: payload.clone(),
+    }));
+    form
+}
+
+fn press(
+    form: &mut FormState,
+    payload: &AskUser,
+    code: ratatui_kit::crossterm::event::KeyCode,
+) -> FormOutcome {
+    use ratatui_kit::crossterm::event::{KeyEvent, KeyModifiers};
+    form.handle_key(&KeyEvent::new(code, KeyModifiers::NONE), Some(payload), 40)
+}
+
+#[test]
+fn form_mouse_and_space_share_single_and_multi_selection_semantics() {
+    use ratatui_kit::crossterm::event::KeyCode;
+    for multi in [false, true] {
+        let payload = make_ask_user(vec![make_question("q", multi, &["A", "B"])]);
+        let mut mouse_form = form_for(&payload);
+        let mut key_form = form_for(&payload);
+        for index in [0, 1, 1, 0] {
+            mouse_form.toggle_option(0, index, multi);
+            key_form.focused_option = index;
+            assert_eq!(
+                press(&mut key_form, &payload, KeyCode::Char(' ')),
+                FormOutcome::Consumed
+            );
+            assert_eq!(mouse_form.answers, key_form.answers);
+        }
+    }
+}
+
+#[test]
+fn form_confirm_moves_to_unanswered_question_then_emits_complete_answers() {
+    use ratatui_kit::crossterm::event::KeyCode;
+    let payload = make_ask_user(vec![
+        make_question("first", false, &["A", "B"]),
+        make_question("optional", false, &[]),
+        make_question("last", true, &["X", "Y"]),
+    ]);
+    let mut form = form_for(&payload);
+    press(&mut form, &payload, KeyCode::Char(' '));
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Enter),
+        FormOutcome::Consumed
+    );
+    assert_eq!(
+        form.focused, 2,
+        "confirmation skips questions without options"
+    );
+    assert_eq!(form.focused_option, 0);
+    press(&mut form, &payload, KeyCode::Char(' '));
+    press(&mut form, &payload, KeyCode::Down);
+    press(&mut form, &payload, KeyCode::Char(' '));
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Enter),
+        FormOutcome::Submit(json!({"first": "A", "optional": "", "last": ["X", "Y"]}))
+    );
+    // The decision leaves canonical answers available until the owner closes.
+    assert_eq!(form.answers, vec![vec![0], vec![], vec![0, 1]]);
+}
+
+#[test]
+fn form_custom_answer_enter_saves_trimmed_text_and_escape_only_exits_editor() {
+    use ratatui_kit::crossterm::event::KeyCode;
+    let payload = make_ask_user(vec![make_question("q", false, &["A"])]);
+    let mut form = form_for(&payload);
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Down),
+        FormOutcome::Consumed
+    );
+    assert!(form.is_typing);
+    for c in " 中文 ".chars() {
+        press(&mut form, &payload, KeyCode::Char(c));
+    }
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Enter),
+        FormOutcome::Consumed
+    );
+    assert_eq!(form.custom_answers, vec![Some("中文".into())]);
+    assert!(!form.is_typing);
+    press(&mut form, &payload, KeyCode::Char(' '));
+    assert_eq!(form.typing_state.all_text(), "中文");
+    press(&mut form, &payload, KeyCode::Char('!'));
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Esc),
+        FormOutcome::Consumed
+    );
+    assert_eq!(form.custom_answers, vec![Some("中文".into())]);
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Esc),
+        FormOutcome::RequestCancel
+    );
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Enter),
+        FormOutcome::Submit(json!({"q": "中文"}))
+    );
+}
+
+#[test]
+fn form_empty_edit_preserves_saved_answer_and_up_returns_to_last_preset() {
+    use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let payload = make_ask_user(vec![make_question("q", false, &["A", "B"])]);
+    let mut form = form_for(&payload);
+    form.custom_answers[0] = Some("saved".into());
+    form.begin_custom_input(0);
+    form.handle_key(
+        &KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        Some(&payload),
+        40,
+    );
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Enter),
+        FormOutcome::Consumed
+    );
+    assert_eq!(form.custom_answers[0].as_deref(), Some("saved"));
+    form.begin_custom_input(0);
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Up),
+        FormOutcome::Consumed
+    );
+    assert!(!form.is_typing);
+    assert_eq!(form.focused_option, 1);
+    assert_eq!(form.custom_answers[0].as_deref(), Some("saved"));
+}
+
+#[test]
+fn form_tab_restores_selected_option_and_does_not_leave_active_editor() {
+    use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let payload = make_ask_user(vec![
+        make_question("a", false, &["A", "B"]),
+        make_question("b", false, &["X"]),
+    ]);
+    let mut form = form_for(&payload);
+    form.toggle_option(0, 1, false);
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Tab),
+        FormOutcome::Consumed
+    );
+    assert_eq!(form.focused, 1);
+    assert_eq!(
+        form.handle_key(
+            &KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            Some(&payload),
+            40
+        ),
+        FormOutcome::Consumed
+    );
+    assert_eq!(form.focused, 0);
+    assert_eq!(form.focused_option, 1);
+    form.begin_custom_input(0);
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Tab),
+        FormOutcome::Consumed
+    );
+    assert_eq!(form.focused, 0);
+    assert!(form.is_typing);
+}
+
+#[test]
+fn form_empty_questions_and_unrelated_keys_have_explicit_decisions() {
+    use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let payload = make_ask_user(vec![]);
+    let mut form = form_for(&payload);
+    for code in [KeyCode::Tab, KeyCode::Char('x')] {
+        let key = KeyEvent::new(code, KeyModifiers::NONE);
+        assert!(!form.accepts_key(&key, Some(&payload)));
+        assert_eq!(
+            form.handle_key(&key, Some(&payload), 40),
+            FormOutcome::Ignored
+        );
+    }
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Enter),
+        FormOutcome::Submit(json!({}))
+    );
 }

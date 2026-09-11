@@ -23,6 +23,3 @@ pub mod sync;
 pub mod thread;
 pub mod truncate;
 pub mod update;
-
-#[cfg(test)]
-mod alloc_config_test;

@@ -48,7 +48,7 @@ use ratatui_kit::{
 /// spawn kit 四链路（notifier / bridge / submit_consumer / service_snapshot），
 /// 进入 ratatui-kit 全屏。
 ///
-/// 返回时已调用 `teardown_app`——hooks 清理、MCP 池关闭、Langfuse flush。
+/// 返回时已调用 `teardown_app`——hooks 清理、MCP 池关闭、ACP host 与 Langfuse shutdown。
 pub async fn run_kit_fullscreen(
     opts: TuiLaunchOptions,
     mut panic_notify_rx: mpsc::UnboundedReceiver<String>,

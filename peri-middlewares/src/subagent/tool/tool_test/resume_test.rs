@@ -477,3 +477,38 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
         *captured
     );
 }
+
+/// UUID 两侧空格和多余分支字段不能改变恢复优先级；非字符串 prompt 视为缺省。
+#[tokio::test]
+async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
+    let dir = tempdir().unwrap();
+    write_test_agent(&dir);
+    let store = make_fs_store(&dir);
+    let id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(&store, &id, "test-agent", None, vec![]).await;
+    let tool = make_subagent_tool(vec![]).with_thread_store(store.clone());
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "resume_thread_id": format!("  {id}\n"),
+                "subagent_type": "mcp__missing__agent",
+                "fork": true,
+                "model": "invalid-model",
+                "prompt": null,
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.starts_with(&format!("child_thread_id: {id}\n")));
+    assert!(result.contains("Continue your previous task where you left off."));
+    // 恢复线程为 hidden；按真实根 ID 查询包含隐藏线程的会话树。
+    let session_threads = store.list_session_threads(&id).await.unwrap();
+    assert_eq!(session_threads.len(), 1, "恢复不得 fork 子线程");
+    assert_eq!(session_threads[0].id, id);
+    assert_eq!(
+        store.load_meta(&id).await.unwrap().agent_status,
+        peri_agent::thread::AgentStatus::Done
+    );
+}

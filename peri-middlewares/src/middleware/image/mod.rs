@@ -1,5 +1,6 @@
 mod compressor;
 
+use peri_agent::middleware::capabilities as hook_state;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -67,10 +68,7 @@ impl Middleware for ImageMiddleware {
         "ImageMiddleware"
     }
 
-    async fn before_agent(
-        &self,
-        state: &mut dyn peri_agent::middleware::state::MiddlewareState,
-    ) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         // 取最后一条 Human 消息的索引
         let last_human_idx = state
             .messages()
@@ -146,7 +144,12 @@ impl Middleware for ImageMiddleware {
         }
 
         let new_msg = state.messages()[idx].clone_with_content(MessageContent::Blocks(new_blocks));
-        state.messages_mut()[idx] = new_msg;
+        if !state.replace_message(new_msg) {
+            return Err(peri_agent::error::AgentError::MiddlewareError {
+                middleware: self.name().to_string(),
+                reason: "image input message is no longer visible".to_string(),
+            });
+        }
 
         Ok(())
     }
@@ -207,3 +210,7 @@ fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
 }
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;

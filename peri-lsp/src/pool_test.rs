@@ -142,14 +142,31 @@ async fn test_ensure_server_for_file_no_match() {
 
 #[tokio::test]
 async fn test_ensure_server_for_file_already_initialized() {
-    let pool = LspServerPool::new("/tmp", make_config());
-    // 手动标记为已初始化
-    pool.initialized.write().insert("rust-analyzer".to_string());
-    // 不应尝试启动
-    let result = pool.ensure_server_for_file("/test/main.rs").await;
-    assert!(result.is_ok());
-    // typescript 仍然未初始化
-    assert!(!pool.initialized.read().contains("typescript"));
+    let dir = tempfile::tempdir().unwrap();
+    let count = dir.path().join("spawns");
+    let pool = make_fake_pool(&count);
+    pool.ensure_server_for_file("/test/main.rs").await.unwrap();
+    pool.ensure_server_for_file("/test/main.rs").await.unwrap();
+    let spawned = std::fs::read_to_string(count).unwrap().lines().count();
+    pool.shutdown().await;
+    assert_eq!(spawned, 1, "已经就绪时复用同一进程");
+}
+
+/// [回归测试] 单个 client 关闭后，pool 不能用旧 initialized 名称跳过重新握手。
+#[tokio::test]
+async fn test_ensure_uses_current_client_readiness_after_client_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let count = dir.path().join("spawns");
+    let pool = make_fake_pool(&count);
+    pool.ensure_server_for_file("/tmp/main.rs").await.unwrap();
+    let client = pool.server_for_file("/tmp/main.rs").unwrap();
+    client.shutdown().await;
+    pool.ensure_server_for_file("/tmp/main.rs").await.unwrap();
+    let ready = client.is_ready();
+    let spawned = std::fs::read_to_string(count).unwrap().lines().count();
+    pool.shutdown().await;
+    assert!(ready, "pool 必须依据当前 client 状态重新初始化");
+    assert_eq!(spawned, 2, "单服务器关闭后必须启动新的进程");
 }
 
 /// perl 编写的极简 LSP 服务器（同 client_test.rs）：
@@ -328,7 +345,7 @@ async fn test_shutdown_kills_child_process() {
     );
 }
 
-/// 生命周期：shutdown 清空 initialized；再次 ensure 重新 spawn（不残留旧进程复用）。
+/// 生命周期：shutdown 清空激活状态；再次 ensure 重新 spawn（不残留旧进程复用）。
 #[tokio::test]
 async fn test_shutdown_then_ensure_respawns() {
     let dir = tempfile::tempdir().unwrap();
@@ -336,13 +353,10 @@ async fn test_shutdown_then_ensure_respawns() {
     let pool = make_fake_pool(&count_file);
 
     pool.ensure_server_for_file("/test/main.rs").await.unwrap();
-    assert_eq!(pool.initialized.read().len(), 1);
+    assert!(pool.any_server().is_some());
 
     pool.shutdown().await;
-    assert!(
-        pool.initialized.read().is_empty(),
-        "shutdown 后 initialized 应清空"
-    );
+    assert!(pool.any_server().is_none(), "shutdown 后不能残留就绪服务器");
 
     pool.ensure_server_for_file("/test/main.rs").await.unwrap();
     let count = std::fs::read_to_string(&count_file)
@@ -373,7 +387,52 @@ async fn test_concurrent_ensure_server_for_file_spawns_once() {
         count, 1,
         "并发 ensure_server_for_file 只应 spawn 一次子进程"
     );
-    assert_eq!(pool.initialized.read().len(), 1, "initialized 只插入一次");
+    assert!(pool.any_server().is_some(), "握手完成后服务器可用");
 
+    pool.shutdown().await;
+}
+
+/// [回归测试] 同名动态替换必须关闭旧进程，旧 client Arc 与旧扩展名不能成为第二个 owner。
+#[tokio::test]
+async fn test_replacing_server_closes_old_client_and_replaces_extension_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let count = dir.path().join("spawns");
+    let pid_file = dir.path().join("pid");
+    let pool = make_fake_pool_with_pid(&count, &pid_file);
+    pool.ensure_server_for_file("/test/main.rs").await.unwrap();
+    let old = pool.server_for_file("/test/main.rs").unwrap();
+    let pid = std::fs::read_to_string(pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    pool.add_server(LspServerConfig {
+        name: "fake-lsp".into(),
+        command: "perl".into(),
+        args: vec!["-e".into(), FAKE_LSP_SCRIPT.into()],
+        env: Some(HashMap::from([(
+            "PERI_LSP_TEST_COUNT".into(),
+            count.to_string_lossy().into_owned(),
+        )])),
+        extension_to_language: HashMap::from([(".py".into(), "python".into())]),
+        initialization_options: None,
+        disabled: None,
+        max_restarts: None,
+        startup_timeout: None,
+        source: None,
+    })
+    .await;
+    let current = pool.server_for_file("/test/main.py").unwrap();
+    assert!(!old.is_ready());
+    assert!(
+        !process_alive(pid),
+        "外部仍持有旧 Arc 时也必须回收被替换进程"
+    );
+    assert!(
+        pool.server_for_file("/test/main.rs").is_none(),
+        "移除已不属于新配置的扩展名"
+    );
+    assert!(!Arc::ptr_eq(&old, &current));
+    assert!(current.is_ready(), "已激活的池自动握手新实例");
     pool.shutdown().await;
 }

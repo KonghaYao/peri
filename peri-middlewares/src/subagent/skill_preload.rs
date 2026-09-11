@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_agent::middleware::capabilities as hook_state;
 use peri_agent::{
     error::AgentResult,
     messages::{BaseMessage, ContentBlock},
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::r#trait::Middleware,
 };
 
 use crate::skills::{SkillMetadata, SkillRoot, SkillSource};
@@ -107,7 +108,7 @@ impl Middleware for SkillPreloadMiddleware {
         "SkillPreloadMiddleware"
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         // 确定要预加载的 skill 名称列表
         let skill_names = if !self.skill_names.is_empty() {
             // SubAgent 路径：使用构造时传入的显式列表

@@ -8,6 +8,7 @@
 //! executor 在 `execute()` 开始时收集所有中间件工具并写入 `shared_tools`，
 //! 然后 `ToolSearchMiddleware` 的 `before_agent` 从 `shared_tools` 构建搜索索引。
 
+use peri_agent::middleware::capabilities as hook_state;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -15,11 +16,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use peri_acp_types::tasks::TaskManager;
-use peri_agent::{
-    error::AgentResult,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
-    tools::BaseTool,
-};
+use peri_agent::{error::AgentResult, middleware::r#trait::Middleware, tools::BaseTool};
 use peri_resources::workflow::{
     journal::WorkflowJournalStore,
     progress::WorkflowProgressStore,
@@ -445,7 +442,7 @@ impl Middleware for WorkflowMiddlewareAdaptor {
         vec![Box::new(self.inner.create_tool())]
     }
 
-    async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         Ok(())
     }
 }

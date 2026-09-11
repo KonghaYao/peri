@@ -296,32 +296,6 @@ pub(super) fn render_discover_list(
     title_color: Color,
     title_style: Style,
 ) {
-    // Early return for search state
-    match search_state {
-        SearchState::Loading => {
-            lines.push(Line::from(vec![Span::styled("  Discover", bold_style)]));
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![Span::styled(
-                i18n::tr("panel-plugin-search-loading"),
-                muted_style,
-            )]));
-            return;
-        }
-        SearchState::Error(msg) => {
-            lines.push(Line::from(vec![Span::styled("  Discover", bold_style)]));
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![Span::styled(
-                i18n::tr_args(
-                    "panel-plugin-search-error",
-                    &[("error".into(), FluentValue::from(msg.clone()))],
-                ),
-                _error_style,
-            )]));
-            return;
-        }
-        SearchState::Idle => {}
-    }
-
     lines.push(Line::from(vec![Span::styled("  Discover", bold_style)]));
     lines.push(Line::from(""));
 
@@ -340,6 +314,28 @@ pub(super) fn render_discover_list(
         )]));
     }
     lines.push(Line::from(""));
+
+    // Early return for search state
+    match search_state {
+        SearchState::Loading => {
+            lines.push(Line::from(vec![Span::styled(
+                i18n::tr("panel-plugin-search-loading"),
+                muted_style,
+            )]));
+            return;
+        }
+        SearchState::Error(msg) => {
+            lines.push(Line::from(vec![Span::styled(
+                i18n::tr_args(
+                    "panel-plugin-search-error",
+                    &[("error".into(), FluentValue::from(msg.clone()))],
+                ),
+                _error_style,
+            )]));
+            return;
+        }
+        SearchState::Idle => {}
+    }
 
     if items.is_empty() {
         if search_text.is_empty() {

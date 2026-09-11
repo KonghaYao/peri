@@ -7,3 +7,7 @@
 pub use peri_acp_types::session::{
     MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload,
 };
+
+#[cfg(test)]
+#[path = "queue_test.rs"]
+mod tests;

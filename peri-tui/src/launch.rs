@@ -169,14 +169,16 @@ pub async fn build_app_and_acp(
             // 该句柄此前仅由 ServiceRegistry 持有但无任何消费者读取。
 
             let (client_transport, server_transport) = mpsc_transport_pair();
-            tokio::spawn(async move {
-                peri_acp::host::run_acp_server(Arc::new(server_transport), host_config).await;
-            });
+            let host = peri_acp::host::spawn_acp_server(Arc::new(server_transport), host_config);
 
             let (acp_client, notification_tx, notification_rx) =
                 AcpTuiClient::new_interactive(client_transport);
             acp_client.spawn_pump(notification_tx);
 
+            app.acp_deployment = Some(crate::acp_client::AcpDeployment::new(
+                acp_client.clone(),
+                host,
+            ));
             app.acp_client = Some(acp_client.clone());
 
             Some((acp_client, notification_rx))
@@ -192,9 +194,8 @@ pub async fn build_app_and_acp(
 ///
 /// 对称 `build_app_and_acp`——所有路径在退出前都应该调用。
 ///
-/// (I16-B) Langfuse flush 等待已退役——`ChatSession.langfuse` 字段删除后，
-/// flush handle 永远是 None。Langfuse 退出 flush 由 ACP server 端的
-/// `LangfuseSession` Drop 自动处理。
+/// 显式关闭 ACP transport 并等待原 host：任务/会话排空后才关闭部署拥有的 Langfuse。
+/// Incomplete 时部署 owner 留在 App，允许后续重试。
 pub async fn teardown_app(app: &mut App) {
     // Fire SessionEnd hooks before shutdown
     {
@@ -242,6 +243,15 @@ pub async fn teardown_app(app: &mut App) {
             tracing::warn!(?report, "MCP 连接池关闭未完全收敛");
         }
     }
+    if let Some(deployment) = app.acp_deployment.as_mut() {
+        let report = deployment.shutdown().await;
+        if report.is_complete() {
+            app.acp_deployment.take();
+        } else {
+            tracing::warn!(?report, "ACP deployment retained for shutdown retry");
+        }
+    }
+    app.acp_client.take();
 }
 
 pub(crate) async fn shutdown_mcp_pool(

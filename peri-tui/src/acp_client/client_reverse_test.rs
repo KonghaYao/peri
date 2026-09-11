@@ -7,7 +7,12 @@ use serde_json::{Value, json};
 use serial_test::serial;
 use tokio::sync::mpsc::error::TryRecvError;
 
+use super::pump::plan_reverse_request;
 use super::*;
+use crate::acp_client::interaction_lifecycle::{
+    ClaimCause, RegisterDecision, ReverseInteractionKind, TransitionKind,
+};
+use peri_acp::transport::types::{IncomingMessage, RequestId};
 
 fn lifecycle(current: Option<&str>, accepting: bool) -> InteractionLifecycle {
     let lifecycle = InteractionLifecycle::new();

@@ -1221,8 +1221,14 @@ async fn test_duplicate_start() {
     );
     assert_eq!(t.subagent.incomplete_count(), 1);
 
-    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
-    tokio::task::yield_now().await;
+    t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed)
+        .await
+        .unwrap();
+    assert_eq!(
+        agent_obs_updates(&session.events_snapshot()).len(),
+        1,
+        "turn-end 必须关闭已打开的异常 observation，且只关闭一次"
+    );
     let _ = main_act;
 }
 
@@ -1257,8 +1263,14 @@ async fn test_duplicate_stop() {
     );
     assert_eq!(t.subagent.incomplete_count(), 1);
 
-    let _h = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
-    tokio::task::yield_now().await;
+    t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed)
+        .await
+        .unwrap();
+    assert_eq!(
+        agent_obs_updates(&session.events_snapshot()).len(),
+        1,
+        "turn-end 必须关闭已打开的异常 observation，且只关闭一次"
+    );
     let _ = main_act;
 }
 

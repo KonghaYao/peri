@@ -1,13 +1,11 @@
-//! v1 兼容映射测试（原 events_v2_mapper.rs 的测试，随转换函数迁入
-//! events_v2.rs；`2026-07-18-events-v2-mapper-removal.md` 退役步骤）。
+//! 协议映射与显式过滤契约。
 
 use super::*;
 
-use crate::agent::events::ExecutorEvent;
-use crate::agent::events_v2::{RenderEvent, StateEvent};
-use crate::session::turn::TurnId;
-use peri_acp_types::event::CompactTrigger;
-use peri_acp_types::identity::AgentId;
+use crate::event::CompactTrigger;
+use crate::event::ExecutorEvent;
+use crate::identity::AgentId;
+use crate::session::TurnId;
 
 fn ids() -> (TurnId, AgentId) {
     (TurnId::new(), AgentId::new())
@@ -19,7 +17,7 @@ fn test_text_chunk_maps() {
     let r = RenderEvent::TextChunk {
         turn_id,
         agent_id,
-        message_id: peri_acp_types::messages::MessageId::new(),
+        message_id: crate::messages::MessageId::new(),
         chunk: "hello".to_string(),
     };
     let executor_event = render_event_to_executor(r).expect("TextChunk 应映射");
@@ -45,7 +43,7 @@ fn test_thinking_chunk_maps() {
     let r = RenderEvent::ThinkingChunk {
         turn_id,
         agent_id,
-        message_id: peri_acp_types::messages::MessageId::new(),
+        message_id: crate::messages::MessageId::new(),
         chunk: "thinking".to_string(),
     };
     match render_event_to_executor(r).unwrap() {
@@ -118,7 +116,7 @@ fn test_tool_ended_maps() {
 
 #[test]
 fn test_render_event_tool_ended_carries_output() {
-    // ToolEnded 携带非空 output → mapper_v2 透传后 ExecutorEvent::ToolEnd.output 非空
+    // ToolEnded 携带非空 output → 共享协议映射 透传后 ExecutorEvent::ToolEnd.output 非空
     let (turn_id, agent_id) = ids();
     let r = RenderEvent::ToolEnded {
         turn_id,
@@ -323,7 +321,7 @@ fn test_observe_llm_call_end_maps_with_usage() {
 
 #[test]
 fn test_observe_llm_call_end_maps_with_output() {
-    // v2 LlmCallEnd.output 非空 → mapper_v2 透传到 ExecutorEvent::LlmCallEnd.output 非空
+    // v2 LlmCallEnd.output 非空 → 共享协议映射 透传到 ExecutorEvent::LlmCallEnd.output 非空
     let (turn_id, agent_id) = ids();
     let o = ObserveEvent::LlmCallEnd {
         turn_id,
@@ -358,7 +356,7 @@ fn test_observe_llm_call_end_maps_with_output() {
 
 #[test]
 fn test_observe_llm_call_start_maps_with_messages_tools() {
-    // v2 LlmCallStart 携带 messages + tools → mapper_v2 不再返回 None
+    // v2 LlmCallStart 携带 messages + tools → 共享协议映射 不再返回 None
     let (turn_id, agent_id) = ids();
     let s = ObserveEvent::LlmCallStart {
         turn_id,
@@ -395,7 +393,7 @@ fn test_observe_messages_compacted_maps() {
         files: vec![],
         skills: vec![],
         re_inject_count: 0,
-        strategy: crate::agent::events::CompactStrategy::Micro,
+        strategy: crate::event::CompactStrategy::Micro,
         affected_count: 0,
         estimated_tokens_saved: 0,
         estimated_tokens_before: 0,
@@ -405,7 +403,7 @@ fn test_observe_messages_compacted_maps() {
         no_op_candidates: 0,
         full_escalation_reason: None,
         cache_hit_rate_before: 0.0,
-        outcome: crate::agent::compact_v2::CompactOutcome::MicroApplied,
+        outcome: crate::compact::CompactOutcome::MicroApplied,
     };
     // Phase 5 Step 4：映射收敛为重建信号三字段（summary/messages/trigger）。
     match observe_event_to_executor(o).unwrap() {

@@ -14,6 +14,7 @@
 //! 不写 state（仅 `after_agent` 的 stop_block 写 state）。
 
 // 兼容旧调用点（`crate::hooks::middleware::fire_standalone_lifecycle_hooks`）：
+use peri_agent::middleware::capabilities as hook_state;
 // 函数已迁移到 `dispatcher.rs`，此处保留 pub use 以维持 ABI。
 pub use crate::hooks::dispatcher::fire_standalone_lifecycle_hooks;
 
@@ -29,7 +30,7 @@ use peri_agent::{
     agent::react::{AgentOutput, ReactLLM, ToolCall, ToolResult},
     error::{AgentError, AgentResult},
     messages::BaseMessage,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::r#trait::Middleware,
     session::{MessageKind, MessageSource, QueuedMessage},
 };
 use serde_json::json;
@@ -162,7 +163,10 @@ impl HookMiddleware {
 
     /// 在一批并行工具调用全部完成后触发 PostToolBatch hook。
     /// 由 dispatch_tools 在所有 tool_result 写入后调用。
-    pub async fn fire_post_tool_batch(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    pub async fn fire_post_tool_batch(
+        &self,
+        state: &mut dyn hook_state::StateView,
+    ) -> AgentResult<()> {
         let prompt_text = state
             .messages()
             .iter()
@@ -195,7 +199,7 @@ impl Middleware for HookMiddleware {
         "HookMiddleware"
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         // Extract the latest human message as prompt text
         let prompt = state
             .messages()
@@ -287,7 +291,7 @@ impl Middleware for HookMiddleware {
 
     async fn before_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         let permission_mode_str = format!("{:?}", self.permission_mode.load());
@@ -385,7 +389,7 @@ impl Middleware for HookMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         result: &ToolResult,
     ) -> AgentResult<()> {
@@ -416,7 +420,7 @@ impl Middleware for HookMiddleware {
 
     async fn after_tools_batch(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::StateView,
         _results: &[(ToolCall, ToolResult)],
     ) -> AgentResult<()> {
         self.fire_post_tool_batch(state).await
@@ -424,7 +428,7 @@ impl Middleware for HookMiddleware {
 
     async fn after_agent(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::AfterAgentState,
         output: &AgentOutput,
     ) -> AgentResult<AgentOutput> {
         let input = input_builder::stop(
@@ -499,7 +503,7 @@ impl Middleware for HookMiddleware {
 
     async fn on_error(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::StateView,
         error: &AgentError,
     ) -> AgentResult<()> {
         // StopFailure 仅在 API/LLM 调用失败时触发，

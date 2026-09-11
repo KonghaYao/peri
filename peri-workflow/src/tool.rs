@@ -9,19 +9,22 @@ use async_trait::async_trait;
 use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager};
 use peri_acp_types::tools::BaseTool;
 use serde_json::Value;
-use tokio::sync::{oneshot, watch};
-use tracing::debug;
+use tokio::sync::oneshot;
 use tracing::warn;
 
 use crate::journal::WorkflowJournalStore;
 use crate::progress::WorkflowProgressStore;
-use crate::registry::{WorkflowRunStatus, WorkflowTaskRegistry, WorkflowTaskResult};
-use crate::runner::{receive_workflow_result, WorkflowInput, WorkflowResult, WorkflowRunner};
+use crate::registry::{WorkflowRunStatus, WorkflowTaskRegistry};
+use crate::runner::{WorkflowInput, WorkflowRunner};
+
+mod completion;
+mod preflight;
+
+use preflight::preflight_validate_script;
 
 const MAX_SAFE_BUDGET_TOTAL: u64 = 9_007_199_254_740_991;
 const MAX_SAFE_INTEGER: u64 = MAX_SAFE_BUDGET_TOTAL;
 const MAX_CONCURRENCY_CAP: u64 = 16;
-const PREFLIGHT_ARTIFACT: &[u8] = crate::runner::WORKFLOW_ARTIFACT_BYTES;
 
 /// Workflow 工具 — 启动 workflow（fire-and-forget）
 pub struct WorkflowTool {
@@ -249,9 +252,6 @@ impl BaseTool for WorkflowTool {
             git_baseline,
         };
 
-        // Create channels for the runner
-        // watch channel: 支持多接收者——fast_rx 用于快速失败检测，done_rx 用于通知任务
-        let (done_tx, done_rx) = watch::channel::<Option<crate::runner::WorkflowResult>>(None);
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
         let started_at = std::time::Instant::now();
 
@@ -268,32 +268,6 @@ impl BaseTool for WorkflowTool {
                 kill_tx: Some(kill_tx),
             })
             .map_err(|error| format!("Workflow concurrency limit: {error}"))?;
-
-        let runner = Arc::clone(&self.runner);
-        let progress_store = Arc::clone(&self.progress_store);
-        let journal_store = Arc::clone(&self.journal_store);
-        let run_id_clone = run_id.clone();
-        let child_handle = tokio::spawn(async move {
-            match runner
-                .run(
-                    run_id_clone,
-                    wf_input,
-                    progress_store,
-                    journal_store,
-                    done_tx,
-                    kill_rx,
-                )
-                .await
-            {
-                Ok(()) => {
-                    debug!("Workflow started successfully");
-                }
-                Err(e) => {
-                    warn!(error = %e, "Workflow failed to start");
-                }
-            }
-        });
-        self.registry.attach_child(&run_id, child_handle);
 
         // 注册到统一后台任务注册表（经 acp-types 契约，装配注入的 Agent 层 TaskManager）
         if let Some(ref bg) = self.bg_registry {
@@ -318,70 +292,37 @@ impl BaseTool for WorkflowTool {
             }
         }
 
-        // ─── 快速失败检测（1s 内 done 到来即同步报错）───
-        let mut fast_rx = done_rx.clone(); // clone 用于快速失败检测
-        let fast_result = tokio::select! {
-            result = receive_workflow_result(&mut fast_rx) => {
-                Some(result.unwrap_or_else(|| WorkflowResult {
-                    run_id: run_id.clone(),
-                    status: "failed".to_string(),
-                    return_value: None,
-                    error: Some("workflow process exited before reporting result".to_string()),
-                    post_processing_status:
-                        peri_acp_types::workflow::PostProcessingStatus::Failed,
-                    delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
-                    stderr_tail: None,
-                }))
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => None,
+        let completion = completion::RunCompletion {
+            registry: Arc::downgrade(&self.registry),
+            progress: Arc::clone(&self.progress_store),
+            journal: Arc::clone(&self.journal_store),
+            run_id: run_id.clone(),
+            name: workflow_name.clone(),
+            started_at,
         };
+        let (child_handle, mut fast_rx) =
+            completion.spawn(Arc::clone(&self.runner), wf_input, kill_rx);
+        self.registry.attach_child(&run_id, child_handle);
 
-        if let Some(ref result) = fast_result {
-            if result.status != "completed" {
-                let error_msg = result
+        // The one-second fast path observes the same already-published terminal projection.
+        // Dropping this caller cannot cancel the registered execution/completion task.
+        if let Ok(Some(completed)) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            completion::receive_completion(&mut fast_rx),
+        )
+        .await
+        {
+            if completed.result.status != WorkflowRunStatus::Completed {
+                let error_msg = completed
+                    .result
                     .error
-                    .clone()
-                    .unwrap_or_else(|| "workflow failed with no error details".to_string());
-                let detail = result
+                    .as_deref()
+                    .unwrap_or("workflow failed with no error details");
+                let detail = completed
                     .stderr_tail
                     .as_ref()
                     .map(|s| format!("\n\nstderr (last 20 lines):\n{}", s))
                     .unwrap_or_default();
-
-                let fast_duration = started_at.elapsed().as_millis() as u64;
-                // 不在此处 bg.complete()：须在 session consumer push_defer 之后再递减
-                // active_count，否则 idle_should_wait 提前为 false，Defer 无法唤起 loop（#117）。
-                // BgTaskArea / registry 终态由 agent_build 通知 consumer 在 Defer 入队后处理。
-                // 同步标记 registry 为失败，发送通知给 agent
-                self.registry.complete(
-                    &run_id,
-                    WorkflowTaskResult {
-                        run_id: run_id.clone(),
-                        workflow_name: workflow_name.clone(),
-                        success: false,
-                        status: WorkflowRunStatus::Failed,
-                        execution_status: peri_acp_types::workflow::ExecutionStatus::Failed,
-                        acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
-                        post_processing_status:
-                            peri_acp_types::workflow::PostProcessingStatus::Blocked,
-                        delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
-                        state_artifact_exists: self
-                            .journal_store
-                            .run_dir(&run_id)
-                            .join("state.json")
-                            .is_file(),
-                        duration_ms: fast_duration,
-                        agent_count: 0,
-                        tool_calls_count: 0,
-                        error: Some(error_msg.clone()),
-                        phase_summaries: Vec::new(),
-                        attempts: self
-                            .journal_store
-                            .read_attempts(&run_id)
-                            .unwrap_or_default(),
-                    },
-                );
-
                 return Err(format!(
                     "Workflow '{}' failed: {}{}",
                     workflow_name, error_msg, detail
@@ -389,107 +330,6 @@ impl BaseTool for WorkflowTool {
                 .into());
             }
         }
-        // ─── 快速失败检测结束 ───
-
-        // Notification task: wait for completion → registry.complete()
-        let registry_for_complete = Arc::clone(&self.registry);
-        let notify_name = workflow_name.clone();
-        let notify_started = started_at;
-        let notify_run_id = run_id.clone();
-        let notify_progress_store = Arc::clone(&self.progress_store);
-        let notify_journal_store = Arc::clone(&self.journal_store);
-        tokio::spawn(async move {
-            let mut done_rx = done_rx;
-            let Some(result) = receive_workflow_result(&mut done_rx).await else {
-                // sender dropped → workflow 异常
-                warn!("Workflow done channel closed unexpectedly — marking as failed");
-                let (agent_count, tool_calls_count) = notify_progress_store
-                    .get_run_stats(&notify_run_id)
-                    .unwrap_or((0, 0));
-                let phase_summaries = notify_progress_store.get_phase_summaries(&notify_run_id);
-                let duration = notify_started.elapsed().as_millis() as u64;
-                registry_for_complete.complete(
-                    &notify_run_id,
-                    WorkflowTaskResult {
-                        run_id: notify_run_id.clone(),
-                        workflow_name: notify_name.clone(),
-                        success: false,
-                        status: WorkflowRunStatus::Failed,
-                        execution_status: peri_acp_types::workflow::ExecutionStatus::Failed,
-                        acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
-                        post_processing_status:
-                            peri_acp_types::workflow::PostProcessingStatus::Blocked,
-                        delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
-                        state_artifact_exists: notify_journal_store
-                            .run_dir(&notify_run_id)
-                            .join("state.json")
-                            .is_file(),
-                        duration_ms: duration,
-                        agent_count,
-                        tool_calls_count,
-                        error: Some("workflow process exited unexpectedly".to_string()),
-                        phase_summaries,
-                        attempts: notify_journal_store
-                            .read_attempts(&notify_run_id)
-                            .unwrap_or_default(),
-                    },
-                );
-                // bg.complete_workflow() 已移至 executor.rs 的 broadcast consumer 中
-                // （在 Defer 入队之后调用），消除 active_count 提前归零的竞态窗口
-                return;
-            };
-            // 从 progress_store 获取真实 agent 数量与 tool count
-            // 必须在 done_rx 之后读取——此时 workflow 已执行完毕，
-            // progress_store 已被所有 progress/event RPC 填充。
-            let (agent_count, tool_calls_count) = notify_progress_store
-                .get_run_stats(&notify_run_id)
-                .unwrap_or((0, 0));
-            let phase_summaries = notify_progress_store.get_phase_summaries(&notify_run_id);
-            let acceptance_status = notify_journal_store
-                .read_state(&notify_run_id)
-                .map(|state| state.acceptance_status)
-                .unwrap_or_default();
-            let delivery_status = result.delivery_status;
-            let success = result.status == "completed"
-                && delivery_status != peri_acp_types::workflow::DeliveryStatus::Blocked;
-            let status = match result.status.as_str() {
-                "completed" => WorkflowRunStatus::Completed,
-                "killed" => WorkflowRunStatus::Killed,
-                _ => WorkflowRunStatus::Failed,
-            };
-            let execution_status = match result.status.as_str() {
-                "completed" => peri_acp_types::workflow::ExecutionStatus::Completed,
-                "killed" => peri_acp_types::workflow::ExecutionStatus::Killed,
-                _ => peri_acp_types::workflow::ExecutionStatus::Failed,
-            };
-            registry_for_complete.complete(
-                &notify_run_id,
-                WorkflowTaskResult {
-                    run_id: notify_run_id.clone(),
-                    workflow_name: notify_name,
-                    success,
-                    status,
-                    execution_status,
-                    acceptance_status,
-                    post_processing_status: result.post_processing_status,
-                    delivery_status: result.delivery_status,
-                    state_artifact_exists: notify_journal_store
-                        .run_dir(&notify_run_id)
-                        .join("state.json")
-                        .is_file(),
-                    duration_ms: notify_started.elapsed().as_millis() as u64,
-                    agent_count,
-                    tool_calls_count,
-                    error: result.error,
-                    phase_summaries,
-                    attempts: notify_journal_store
-                        .read_attempts(&notify_run_id)
-                        .unwrap_or_default(),
-                },
-            );
-            // bg.complete_workflow() 已移至 executor.rs 的 broadcast consumer 中
-            // （在 Defer 入队之后调用），消除 active_count 提前归零的竞态窗口
-        });
 
         Ok(format!(
             "Workflow '{}' started.\n\
@@ -527,44 +367,6 @@ fn parse_bounded_integer(
         ));
     }
     Ok(Some(value))
-}
-
-async fn preflight_validate_script(script: &str) -> Result<(), String> {
-    let temp =
-        std::env::temp_dir().join(format!("peri-workflow-preflight-{}", uuid::Uuid::now_v7()));
-    std::fs::create_dir(&temp)
-        .map_err(|error| format!("Workflow preflight unavailable: {error}"))?;
-    let artifact = temp.join("peri-workflow.js");
-    let source = temp.join("script.js");
-    let result = (|| {
-        std::fs::write(&artifact, PREFLIGHT_ARTIFACT)?;
-        std::fs::write(&source, script)?;
-        Ok::<_, std::io::Error>(())
-    })();
-    if let Err(error) = result {
-        let _ = std::fs::remove_dir_all(&temp);
-        return Err(format!("Workflow preflight unavailable: {error}"));
-    }
-
-    let output = tokio::process::Command::new("node")
-        .arg(&artifact)
-        .arg("validate")
-        .arg(&source)
-        .arg("--json")
-        .output()
-        .await
-        .map_err(|error| format!("Workflow preflight unavailable: {error}"));
-    let _ = std::fs::remove_dir_all(&temp);
-    let output = output?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let message = serde_json::from_slice::<Value>(&output.stdout)
-        .ok()
-        .and_then(|value| value["errors"].as_array().cloned())
-        .and_then(|errors| errors.first().and_then(Value::as_str).map(str::to_string))
-        .unwrap_or_else(|| "script validation failed".to_string());
-    Err(format!("Workflow preflight failed: {message}"))
 }
 
 /// 从脚本中提取 workflow 名称（简单 heuristic：查找 `name:` 后的第一个引号字符串）

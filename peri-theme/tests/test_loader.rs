@@ -1,61 +1,59 @@
-//! 验证 JSON loader: 加载、$ref 解析、extends 继承、循环引用检测。
+//! 公共 loader API 在独立 HOME 中验证，避免本机主题影响测试或污染环境。
 
 use peri_theme::loader::{ThemeLoadError, list_available_themes, load_theme};
+use ratatui::style::Color;
 
 #[test]
-fn test_load_dark_from_json() {
-    let result = load_theme("peri-dark");
-    assert!(result.is_ok());
-    let theme = result.unwrap();
-    assert_eq!(theme.name, "peri-dark");
-}
-
-#[test]
-fn test_load_light_from_json() {
-    let result = load_theme("peri-light");
-    assert!(result.is_ok());
-    let theme = result.unwrap();
-    assert_eq!(theme.name, "peri-light");
-}
-
-#[test]
-fn test_load_unknown_theme() {
-    let result = load_theme("nonexistent");
-    assert!(matches!(result, Err(ThemeLoadError::ThemeNotFound(_))));
-}
-
-/// [用户主题] 验证 ~/.peri/themes/nord.json 能被 loader 正确解析。
-/// 仅在本机存在 nord.json 时运行，CI 环境下跳过。
-#[test]
-fn test_load_user_nord_theme() {
-    let themes = list_available_themes();
-    if !themes.contains(&"nord".to_string()) {
-        eprintln!("SKIP: nord.json not found in ~/.peri/themes/");
+fn public_loader_uses_isolated_home() {
+    const CHILD_MARKER: &str = "PERI_THEME_LOADER_TEST_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let themes = home.path().join(".peri/themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(
+            themes.join("nord.json"),
+            serde_json::json!({
+                "name": "nord", "extends": "peri-dark",
+                "semantic": { "accent": "#88C0D0", "text": { "primary": "#D8DEE9" } },
+                "palette.base.bg": "#2E3440"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "public_loader_uses_isolated_home", "--nocapture"])
+            .env(CHILD_MARKER, "1")
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated loader tests failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         return;
     }
-    let result = load_theme("nord");
-    assert!(
-        result.is_ok(),
-        "load_theme(\"nord\") 失败: {:?}",
-        result.err()
-    );
-    let theme = result.unwrap();
-    assert_eq!(theme.name, "nord");
-    // 验证几个关键色值已正确解析（$ref 解析后的实际值）
+
+    assert_eq!(load_theme("peri-dark").unwrap().name, "peri-dark");
+    assert_eq!(load_theme("peri-light").unwrap().name, "peri-light");
     assert_eq!(
-        theme.palette.accent.primary,
-        ratatui::style::Color::Rgb(136, 192, 208)
-    ); // #88C0D0
-    assert_eq!(
-        theme.semantic.accent,
-        ratatui::style::Color::Rgb(136, 192, 208)
+        load_theme("dark").unwrap(),
+        load_theme("peri-dark").unwrap()
     );
     assert_eq!(
-        theme.semantic.text.primary,
-        ratatui::style::Color::Rgb(216, 222, 233)
-    ); // #D8DEE9
-    assert_eq!(
-        theme.palette.base.bg,
-        ratatui::style::Color::Rgb(46, 52, 64)
-    ); // #2E3440
+        load_theme("light").unwrap(),
+        load_theme("peri-light").unwrap()
+    );
+    assert!(matches!(
+        load_theme("nonexistent"),
+        Err(ThemeLoadError::ThemeNotFound(_))
+    ));
+    assert_eq!(list_available_themes(), ["nord", "peri-dark", "peri-light"]);
+    let nord = load_theme("nord").unwrap();
+    assert_eq!(nord.name, "nord");
+    assert_eq!(nord.palette.accent.primary, Color::Rgb(136, 192, 208));
+    assert_eq!(nord.semantic.accent, Color::Rgb(136, 192, 208));
+    assert_eq!(nord.semantic.text.primary, Color::Rgb(216, 222, 233));
+    assert_eq!(nord.palette.base.bg, Color::Rgb(46, 52, 64));
 }

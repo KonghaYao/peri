@@ -36,7 +36,7 @@
 - `peri-model/src/anthropic/cache.rs` —— 并行静态分析发现并修复的 tool_result breakpoint 缺陷（不是 #114 `chatcmpl-*` 主路径证据）。
 - `peri-agent/src/agent/model_bridge.rs` —— transcript 到 ModelRequest 的投影。
 - `peri-agent/src/session/exec/executor_helpers/v2_execute.rs` —— final usage 的 EventBus completion barrier。
-- `peri-tui/src/kit/acp_notifier.rs` / `acp_events/turn.rs` —— coverage 聚合与一次性告警。
+- `peri-tui/src/kit/acp_notifier/session_update.rs` / `peri-tui/src/kit/acp_events/turn.rs` —— root cache sample 解码与逐次 coverage 提示；当前契约见 `docs/standards/architecture-contracts.md` 的 ARC-EVENT-001。
 
 ## 状态变更记录
 
@@ -50,11 +50,12 @@
 
 - OpenAI prepared-body 回归测试锁定 N→N+1 工具轮：system/tools 完全相同，每个既有 message element 的序列化 bytes 完全相同；未添加未经 provider 文档验证的 request 字段。
 - root EventBus forwarder 变为可 await 的 completion barrier。真实 gated integration test 证明 final `LlmCallEnd` 被延迟时 session 不会提前 `AgentDone`；release 后 usage 严格早于 done。JoinError 发 ordered `AgentExecutionFailed` 并使 turn 失败。
-- child/workflow `LlmCallEnd.source_agent_id` 经 ACP `_meta.peri.sourceAgentId` 透传；父 TUI 忽略 auxiliary usage，避免迟到低 coverage 覆盖 root final sample。
-- TUI 只在 TurnDone 使用 latest root sample，至多产生一条 coverage note；展示 cached/input/uncached 绝对 token，不再从比例宣称 eviction。
+- child/workflow `LlmCallEnd.source_agent_id` 经 ACP `_meta.peri.sourceAgentId` 透传；父 TUI 忽略 auxiliary usage，避免迟到低 coverage 覆盖 root sample。
+- 当前 TUI 行为（源码与契约测试核对于 2026-09-11）：非 replay root usage 缺失 `cacheReadTokens` 时只更新进度并保留已有 sample；显式零值在 input>0 时替换为零样本但不告警；字段可用但 input=0 或 cached>input 时清空。`show_cache_warning` 开启时，每次有效 sample 在 0<cached/input<0.8 时即时提示；TurnDone 只清 pending，不补发或撤销既有提示。展示 cached/input/uncached 绝对 token，不从比例宣称 eviction。
 
 ## 验收结论与残余
 
-- 本修复关闭的是错误观测语义与 terminal ordering hole；不宣称 provider 绝对 cached token 增加，也不把重启解释为服务端 cache 恢复。
+- terminal ordering hole 已有契约测试保护；逐次提示的当前行为由 `peri-tui/src/kit/acp_events_test/turn_archive_test.rs` 覆盖，wire 缺省/零值/invalid 区别由 `peri-tui/src/kit/acp_notifier_test.rs` 覆盖。不宣称 provider 绝对 cached token 增加，也不把重启解释为服务端 cache 恢复。
+- 仍待用户原场景验收：核对 `show_cache_warning`、provider 原始 usage 与实际提示可见性，确认“修复后提示不可见”的反馈是否解除；本次结构治理与单测不替代该验收，状态保留 Reopen。
 - 正常 append-only OpenAI prepared request 未发现本地 prefix drift。若未来 absolute cached tokens 确实逐轮下降，须带 provider 原始响应与 prepared bodies 另开上游/provider 调查。
 - 多 buffered prompt 并发执行是独立残余，不在本 issue 修改。

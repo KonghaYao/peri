@@ -29,6 +29,8 @@ struct MockHandle {
     last_input: Mutex<Option<MessageContent>>,
     /// submit_input 是否报错（注入失败路径断言用）。
     submit_ok: AtomicBool,
+    pause_join: AtomicBool,
+    resume_join: tokio::sync::Notify,
 }
 
 impl MockHandle {
@@ -41,6 +43,8 @@ impl MockHandle {
             last_cancel: Mutex::new(None),
             last_input: Mutex::new(None),
             submit_ok: AtomicBool::new(true),
+            pause_join: AtomicBool::new(false),
+            resume_join: tokio::sync::Notify::new(),
         })
     }
 
@@ -98,6 +102,9 @@ impl SessionHandle for MockHandle {
 
     async fn join(&self, _deadline: Duration) -> bool {
         self.calls.lock().unwrap().push("join");
+        if self.pause_join.load(Ordering::SeqCst) {
+            self.resume_join.notified().await;
+        }
         self.join_ok.load(Ordering::SeqCst)
     }
 
@@ -431,4 +438,134 @@ fn submit_input_forwards_to_handle() {
         .submit_input("s1", MessageContent::text("hi"))
         .unwrap_err();
     assert!(matches!(err, RuntimeError::SubmitFailed(s, _) if s == "s1"));
+}
+
+fn assert_pending<F: std::future::Future>(future: std::pin::Pin<&mut F>) {
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(future.poll(&mut context).is_pending());
+}
+
+#[tokio::test]
+async fn destroy_preserves_replacement_and_continues_shared_sequence() {
+    let rt = Runtime::new();
+    let old = MockHandle::new(true, vec![ev("old", "agent")]);
+    old.pause_join.store(true, Ordering::SeqCst);
+    rt.register("session", old.clone()).unwrap();
+    let mut destroy = Box::pin(rt.destroy("session", Duration::from_secs(1)));
+    assert_pending(destroy.as_mut());
+    let replacement = MockHandle::new(true, vec![]);
+    rt.register_or_replace("session", replacement.clone());
+    let before = rt.stamp("session", &ev("new", "agent")).unwrap();
+    old.resume_join.notify_one();
+    let drained = destroy.await.unwrap();
+    let expected: Arc<dyn SessionHandle> = replacement.clone();
+    assert!(Arc::ptr_eq(&rt.handle("session").unwrap(), &expected));
+    assert_eq!(drained[0].turn_id, "old");
+    assert_eq!(drained[0].session_seq, before.session_seq.next());
+    assert_eq!(
+        rt.stamp("session", &ev("new", "agent"))
+            .unwrap()
+            .session_seq,
+        drained[0].session_seq.next()
+    );
+    assert!(replacement.call_sequence().is_empty());
+}
+
+#[tokio::test]
+async fn destroy_preserves_a_new_registration_of_the_same_handle() {
+    let rt = Runtime::new();
+    let handle = MockHandle::new(true, vec![]);
+    handle.pause_join.store(true, Ordering::SeqCst);
+    rt.register("session", handle.clone()).unwrap();
+    let mut destroy = Box::pin(rt.destroy("session", Duration::from_secs(1)));
+    assert_pending(destroy.as_mut());
+    rt.register_or_replace("session", handle.clone());
+    handle.resume_join.notify_one();
+    destroy.await.unwrap();
+    assert!(rt.contains("session"));
+}
+
+#[tokio::test]
+async fn late_destroy_does_not_consume_a_fresh_registration_sequence() {
+    let rt = Runtime::new();
+    let old = MockHandle::new(true, vec![ev("old", "agent")]);
+    old.pause_join.store(true, Ordering::SeqCst);
+    rt.register("session", old.clone()).unwrap();
+    rt.stamp("session", &ev("old", "agent")).unwrap();
+    let mut destroy = Box::pin(rt.destroy("session", Duration::from_secs(1)));
+    assert_pending(destroy.as_mut());
+    rt.register_or_replace("session", MockHandle::new(true, vec![]));
+    rt.destroy("session", Duration::from_secs(1)).await.unwrap();
+    rt.register("session", MockHandle::new(true, vec![]))
+        .unwrap();
+    old.resume_join.notify_one();
+    let drained = destroy.await.unwrap();
+    assert_eq!(drained[0].session_seq, SessionSeq::initial().next());
+    assert_eq!(
+        rt.stamp("session", &ev("fresh", "agent"))
+            .unwrap()
+            .session_seq,
+        SessionSeq::initial()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_destroy_drains_once() {
+    let rt = Runtime::new();
+    let handle = MockHandle::new(true, vec![ev("turn", "agent")]);
+    handle.pause_join.store(true, Ordering::SeqCst);
+    rt.register("session", handle.clone()).unwrap();
+    let mut first = Box::pin(rt.destroy("session", Duration::from_secs(1)));
+    let mut second = Box::pin(rt.destroy("session", Duration::from_secs(1)));
+    assert_pending(first.as_mut());
+    assert_pending(second.as_mut());
+    handle.resume_join.notify_waiters();
+    assert_eq!(first.await.unwrap().len(), 1);
+    assert!(second.await.unwrap().is_empty());
+    assert_eq!(
+        handle.call_sequence(),
+        vec!["stop_accepting", "cancel_owned", "join", "persist", "drain"]
+    );
+}
+
+#[tokio::test]
+async fn cancelled_destroy_can_be_retried() {
+    let rt = Runtime::new();
+    let handle = MockHandle::new(true, vec![ev("turn", "agent")]);
+    handle.pause_join.store(true, Ordering::SeqCst);
+    rt.register("session", handle.clone()).unwrap();
+    let mut interrupted = Box::pin(rt.destroy("session", Duration::from_secs(1)));
+    assert_pending(interrupted.as_mut());
+    drop(interrupted);
+    handle.pause_join.store(false, Ordering::SeqCst);
+    assert_eq!(
+        rt.destroy("session", Duration::from_secs(1))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!rt.contains("session"));
+}
+
+#[tokio::test]
+async fn old_persist_failure_preserves_replacement() {
+    let rt = Runtime::new();
+    let old = MockHandle::new(true, vec![ev("old", "agent")]);
+    old.pause_join.store(true, Ordering::SeqCst);
+    old.persist_ok.store(false, Ordering::SeqCst);
+    rt.register("session", old.clone()).unwrap();
+    let mut destroy = Box::pin(rt.destroy("session", Duration::from_secs(1)));
+    assert_pending(destroy.as_mut());
+    let replacement = MockHandle::new(true, vec![]);
+    rt.register_or_replace("session", replacement.clone());
+    old.resume_join.notify_one();
+    assert!(matches!(
+        destroy.await,
+        Err(RuntimeError::PersistFailed(..))
+    ));
+    let expected: Arc<dyn SessionHandle> = replacement.clone();
+    assert!(Arc::ptr_eq(&rt.handle("session").unwrap(), &expected));
+    assert_eq!(old.drained.lock().unwrap().len(), 1);
+    assert!(replacement.call_sequence().is_empty());
 }

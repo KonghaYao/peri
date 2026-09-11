@@ -1,5 +1,6 @@
 //! Tests for chain
 
+use crate::middleware::capabilities as hook_state;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -13,7 +14,6 @@ use crate::{
         project_enabled_sections,
         prompt_sections::{PromptSection, PromptSectionZone},
         r#trait::{Middleware, NoopMiddleware},
-        state::MiddlewareState,
     },
 };
 
@@ -38,7 +38,7 @@ impl Middleware for OrderRecorder {
         &self.name
     }
 
-    async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         self.log
             .lock()
             .unwrap()
@@ -48,7 +48,7 @@ impl Middleware for OrderRecorder {
 
     async fn before_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         self.log
@@ -60,7 +60,7 @@ impl Middleware for OrderRecorder {
 
     async fn after_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::AfterToolState,
         _tool_call: &ToolCall,
         _result: &ToolResult,
     ) -> AgentResult<()> {
@@ -85,7 +85,7 @@ impl Middleware for InputModifier {
 
     async fn before_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         let mut modified = tool_call.clone();
@@ -104,7 +104,7 @@ impl Middleware for FailMiddleware {
         "FailMiddleware"
     }
 
-    async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         Err(AgentError::MiddlewareError {
             middleware: "FailMiddleware".to_string(),
             reason: "intentional failure".to_string(),
@@ -352,7 +352,7 @@ async fn test_before_tools_batch_mixed_approval() {
         }
         async fn before_tool(
             &self,
-            _state: &mut dyn MiddlewareState,
+            _state: &mut dyn hook_state::BeforeToolState,
             tc: &ToolCall,
         ) -> AgentResult<ToolCall> {
             let mut m = tc.clone();
@@ -370,7 +370,7 @@ async fn test_before_tools_batch_mixed_approval() {
         }
         async fn before_tools_batch(
             &self,
-            _state: &mut dyn MiddlewareState,
+            _state: &mut dyn hook_state::BeforeToolState,
             calls: &[ToolCall],
         ) -> Vec<AgentResult<ToolCall>> {
             calls
@@ -424,7 +424,7 @@ async fn test_before_tools_batch_equivalent_to_individual() {
         }
         async fn before_tool(
             &self,
-            _state: &mut dyn MiddlewareState,
+            _state: &mut dyn hook_state::BeforeToolState,
             tc: &ToolCall,
         ) -> AgentResult<ToolCall> {
             let mut m = tc.clone();
@@ -466,7 +466,10 @@ async fn test_before_model_sequential_order() {
         fn name(&self) -> &str {
             &self.name
         }
-        async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        async fn before_model(
+            &self,
+            _state: &mut dyn hook_state::BeforeModelState,
+        ) -> AgentResult<()> {
             self.log
                 .lock()
                 .unwrap()
@@ -505,7 +508,10 @@ async fn test_before_model_error_short_circuits() {
         fn name(&self) -> &str {
             "FailBeforeModel"
         }
-        async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        async fn before_model(
+            &self,
+            _state: &mut dyn hook_state::BeforeModelState,
+        ) -> AgentResult<()> {
             Err(AgentError::MiddlewareError {
                 middleware: "FailBeforeModel".to_string(),
                 reason: "intentional failure".to_string(),
@@ -525,7 +531,10 @@ async fn test_before_model_error_short_circuits() {
         fn name(&self) -> &str {
             &self.name
         }
-        async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        async fn before_model(
+            &self,
+            _state: &mut dyn hook_state::BeforeModelState,
+        ) -> AgentResult<()> {
             self.log
                 .lock()
                 .unwrap()
@@ -567,7 +576,7 @@ async fn test_after_model_sequential_order() {
         }
         async fn after_model(
             &self,
-            _state: &mut dyn MiddlewareState,
+            _state: &mut dyn hook_state::StateView,
             _reasoning: &Reasoning,
         ) -> AgentResult<()> {
             self.log
@@ -617,7 +626,7 @@ async fn test_after_model_error_short_circuits() {
         }
         async fn after_model(
             &self,
-            _state: &mut dyn MiddlewareState,
+            _state: &mut dyn hook_state::StateView,
             _reasoning: &Reasoning,
         ) -> AgentResult<()> {
             Err(AgentError::MiddlewareError {
@@ -641,7 +650,7 @@ async fn test_after_model_error_short_circuits() {
         }
         async fn after_model(
             &self,
-            _state: &mut dyn MiddlewareState,
+            _state: &mut dyn hook_state::StateView,
             _reasoning: &Reasoning,
         ) -> AgentResult<()> {
             self.log
@@ -745,13 +754,16 @@ async fn test_mixed_before_and_after_model_in_same_chain() {
         fn name(&self) -> &str {
             "A"
         }
-        async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        async fn before_model(
+            &self,
+            _state: &mut dyn hook_state::BeforeModelState,
+        ) -> AgentResult<()> {
             self.log.lock().unwrap().push("A.before_model".into());
             Ok(())
         }
         async fn after_model(
             &self,
-            _state: &mut dyn MiddlewareState,
+            _state: &mut dyn hook_state::StateView,
             _r: &Reasoning,
         ) -> AgentResult<()> {
             self.log.lock().unwrap().push("A.after_model".into());
@@ -768,7 +780,10 @@ async fn test_mixed_before_and_after_model_in_same_chain() {
         fn name(&self) -> &str {
             "B"
         }
-        async fn before_model(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        async fn before_model(
+            &self,
+            _state: &mut dyn hook_state::BeforeModelState,
+        ) -> AgentResult<()> {
             self.log.lock().unwrap().push("B.before_model".into());
             Ok(())
         }
@@ -785,7 +800,7 @@ async fn test_mixed_before_and_after_model_in_same_chain() {
         }
         async fn after_model(
             &self,
-            _state: &mut dyn MiddlewareState,
+            _state: &mut dyn hook_state::StateView,
             _r: &Reasoning,
         ) -> AgentResult<()> {
             self.log.lock().unwrap().push("C.after_model".into());
@@ -847,7 +862,10 @@ async fn test_state_mutation_visible_across_hooks() {
         fn name(&self) -> &str {
             "Writer"
         }
-        async fn before_model(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        async fn before_model(
+            &self,
+            state: &mut dyn hook_state::BeforeModelState,
+        ) -> AgentResult<()> {
             let msg =
                 BaseMessage::system(vec![ContentBlock::text("marker written by before_model")]);
             let id = msg.id();
@@ -867,7 +885,7 @@ async fn test_state_mutation_visible_across_hooks() {
         }
         async fn after_model(
             &self,
-            state: &mut dyn MiddlewareState,
+            state: &mut dyn hook_state::StateView,
             _r: &Reasoning,
         ) -> AgentResult<()> {
             let expected_id = self.marker_id.lock().unwrap().unwrap();
@@ -917,7 +935,7 @@ async fn test_after_model_with_tool_calls() {
         }
         async fn after_model(
             &self,
-            _state: &mut dyn MiddlewareState,
+            _state: &mut dyn hook_state::StateView,
             r: &Reasoning,
         ) -> AgentResult<()> {
             self.log
@@ -1016,7 +1034,7 @@ impl Middleware for ReminderMw {
 
     async fn first_turn_reminder(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::QueueState,
     ) -> AgentResult<Option<String>> {
         Ok(self.text.clone())
     }
@@ -1033,7 +1051,7 @@ impl Middleware for ReminderFailMw {
 
     async fn first_turn_reminder(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::QueueState,
     ) -> AgentResult<Option<String>> {
         Err(AgentError::MiddlewareError {
             middleware: "ReminderFailMw".to_string(),

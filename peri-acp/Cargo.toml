@@ -17,7 +17,7 @@ peri-acp-types = { path = "../peri-acp-types" }
 #   + workflow agent 执行体与装配端口（`agent::workflow`，p1-wa 迁入），保留。
 # - peri-middlewares：L5 宿主装配面引用（host/prompt.rs + prompt_exec.rs 注入
 #   闭包构造 parent_tools / chain_assembler / tool_invocation_resolver /
-#   session/mod.rs build_frozen_data 渲染面）+ ACP Host 部署装配点
+#   session/frozen.rs build_frozen_data 渲染面）+ ACP Host 部署装配点
 #   （host/assemble.rs + host/stdio/init.rs 内部构造 CronScheduler /
 #   McpClientPool / ToolSearchIndex / workflow 中间件工厂，M-TUI 装配迁移
 #   落点），保留（L5 复核时再收）。

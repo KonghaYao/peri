@@ -252,7 +252,7 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
     m.set_parent_session(Arc::clone(&session));
     let tool = m.build_tool("/tmp");
 
-    let host = tool.host().expect("build_tool 后 host 应可读");
+    let host = tool.host();
     assert!(
         host.task_manager.is_some(),
         "tool.host().task_manager 应为 Some（parent_session 注入后构建工具）"

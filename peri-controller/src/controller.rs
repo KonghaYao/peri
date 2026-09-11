@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use peri_acp_types::event::{EventMessage, ExecutorEvent};
 use peri_acp_types::identity::{CancelRequest, EventEnvelope};
 use peri_acp_types::messages::MessageContent;
@@ -170,18 +170,18 @@ impl Subscription {
 pub struct Controller {
     /// 持久化存储通道（等价包装 `ThreadStore`，不改变其 trait 语义）。
     sessions: Arc<dyn ThreadStore>,
-    /// 多 session 编排器（§3；注入后为共享实例，非本层新建）。
-    runtime: RwLock<Arc<Runtime>>,
+    /// 多 session 编排器；仅在消费 self 的装配阶段替换，运行时登记状态归 Runtime。
+    runtime: Arc<Runtime>,
     /// 外部系统资源门面（§5；以 context 形式提供给 Controller）。
-    resources: RwLock<Option<Resources>>,
+    resources: Option<Resources>,
     /// MCP 客户端池端口（pick 目标源；缺省未注入）。
-    mcp_pool: RwLock<Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>>,
+    mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     /// Cron 调度器端口（pick 目标源；缺省未注入）。
-    cron_scheduler: RwLock<Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>>,
+    cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
     /// 工具检索索引端口（pick 目标源；缺省未注入）。
-    tool_search: RwLock<Option<Arc<dyn peri_acp_types::ports::ToolSearchPort>>>,
+    tool_search: Option<Arc<dyn peri_acp_types::ports::ToolSearchPort>>,
     /// LSP 服务器配置（pick 目标源；缺省空）。
-    lsp_servers: RwLock<Vec<peri_acp_types::lsp::LspServerConfig>>,
+    lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
     /// 弹出队列发送端（pop_events 消费；有界满丢弃）。
     events_tx: mpsc::Sender<EventMessage>,
     /// 弹出队列接收端（控制面第五步 pop events）。
@@ -200,12 +200,12 @@ impl Controller {
         let (subscribers, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             sessions,
-            runtime: RwLock::new(Arc::new(Runtime::new())),
-            resources: RwLock::new(None),
-            mcp_pool: RwLock::new(None),
-            cron_scheduler: RwLock::new(None),
-            tool_search: RwLock::new(None),
-            lsp_servers: RwLock::new(Vec::new()),
+            runtime: Arc::new(Runtime::new()),
+            resources: None,
+            mcp_pool: None,
+            cron_scheduler: None,
+            tool_search: None,
+            lsp_servers: Vec::new(),
             events_tx,
             events_rx: Mutex::new(events_rx),
             subscribers,
@@ -213,72 +213,75 @@ impl Controller {
     }
 
     /// 注入 Runtime 编排器（pick Runtime 的目标源；部署装配点调用）。
-    pub fn with_runtime(self, runtime: Arc<Runtime>) -> Self {
-        *self.runtime.write() = runtime;
+    pub fn with_runtime(mut self, runtime: Arc<Runtime>) -> Self {
+        self.runtime = runtime;
         self
     }
 
     /// 注入 Resources 门面（pick Resources 的目标源；部署装配点在
     /// `Resources::open()` 后调用）。
-    pub fn with_resources(self, resources: Resources) -> Self {
-        *self.resources.write() = Some(resources);
+    pub fn with_resources(mut self, resources: Resources) -> Self {
+        self.resources = Some(resources);
         self
     }
 
     /// 注入 MCP 客户端池端口（pick MCP 池的目标源；宿主装配点构造具体
     /// `McpClientPool` 后 upcast 注入）。
     pub fn with_mcp_pool(
-        self,
+        mut self,
         mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     ) -> Self {
-        *self.mcp_pool.write() = mcp_pool;
+        self.mcp_pool = mcp_pool;
         self
     }
 
     /// 注入 Cron 调度器端口（pick cron 调度器的目标源；宿主装配点构造
     /// `CronSchedulerPortHandle` 后注入）。
     pub fn with_cron_scheduler(
-        self,
+        mut self,
         cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
     ) -> Self {
-        *self.cron_scheduler.write() = cron_scheduler;
+        self.cron_scheduler = cron_scheduler;
         self
     }
 
     /// 注入工具检索索引端口（pick 工具检索索引的目标源；宿主装配点构造
     /// `ToolSearchIndex` 后 upcast 注入）。
     pub fn with_tool_search(
-        self,
+        mut self,
         tool_search: Option<Arc<dyn peri_acp_types::ports::ToolSearchPort>>,
     ) -> Self {
-        *self.tool_search.write() = tool_search;
+        self.tool_search = tool_search;
         self
     }
 
     /// 注入 LSP 服务器配置（pick LSP 配置的目标源）。
-    pub fn with_lsp_servers(self, lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>) -> Self {
-        *self.lsp_servers.write() = lsp_servers;
+    pub fn with_lsp_servers(
+        mut self,
+        lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
+    ) -> Self {
+        self.lsp_servers = lsp_servers;
         self
     }
 
     /// pick MCP 客户端池（控制面资源取用；未注入返回 `None`）。
     pub fn pick_mcp_pool(&self) -> Option<Arc<dyn peri_acp_types::ports::McpPoolPort>> {
-        self.mcp_pool.read().clone()
+        self.mcp_pool.clone()
     }
 
     /// pick Cron 调度器（控制面资源取用；未注入返回 `None`）。
     pub fn pick_cron_scheduler(&self) -> Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>> {
-        self.cron_scheduler.read().clone()
+        self.cron_scheduler.clone()
     }
 
     /// pick 工具检索索引（控制面资源取用；未注入返回 `None`）。
     pub fn pick_tool_search(&self) -> Option<Arc<dyn peri_acp_types::ports::ToolSearchPort>> {
-        self.tool_search.read().clone()
+        self.tool_search.clone()
     }
 
     /// pick LSP 服务器配置（控制面资源取用；未注入返回空）。
     pub fn pick_lsp_servers(&self) -> Vec<peri_acp_types::lsp::LspServerConfig> {
-        self.lsp_servers.read().clone()
+        self.lsp_servers.clone()
     }
 
     /// Controller 侧 sessions 访问通道。
@@ -293,12 +296,12 @@ impl Controller {
     /// 未注入（部署装配点尚未提供）时返回 `None`；组装注入上下文的职责
     /// 随 L5 装配落位。
     pub fn pick_resources(&self) -> Option<Resources> {
-        self.resources.read().clone()
+        self.resources.clone()
     }
 
     /// pick Runtime（控制面第三步）：取注入的 Runtime 编排器引用。
     pub fn pick_runtime(&self) -> Arc<Runtime> {
-        Arc::clone(&self.runtime.read())
+        Arc::clone(&self.runtime)
     }
 
     /// run Session（控制面第四步）：经 Runtime 查映射拿 `SessionHandle` 发起执行。
@@ -306,7 +309,7 @@ impl Controller {
     /// 只发起不解释：执行结果（含终态）由 Agent 层产生，错误经 Runtime 边界
     /// 包 context 为 [`ControllerError::RunFailed`]。
     pub async fn run_session(&self, session_id: &str) -> Result<(), ControllerError> {
-        let runtime = Arc::clone(&self.runtime.read());
+        let runtime = Arc::clone(&self.runtime);
         runtime
             .run(session_id)
             .await
@@ -325,7 +328,7 @@ impl Controller {
     where
         H: peri_acp_types::runtime::SessionHandle + 'static,
     {
-        self.runtime.read().register_or_replace(session_id, handle);
+        self.runtime.register_or_replace(session_id, handle);
     }
 
     /// cancel 转发（§6/§9）：按 (session_id, turn_id, attempt_id) 三元组
@@ -335,7 +338,6 @@ impl Controller {
     /// （session 未注册等）包 context 为 [`ControllerError::CancelFailed`]。
     pub fn cancel(&self, request: &CancelRequest) -> Result<(), ControllerError> {
         self.runtime
-            .read()
             .cancel(request)
             .map_err(|err| ControllerError::CancelFailed(request.identity.session_id.clone(), err))
     }
@@ -346,12 +348,12 @@ impl Controller {
     /// 无顺序保证（Runtime 簿记为 HashMap）；list_sessions 需要的元数据
     /// （标题/时间等）经存储通道（[`Controller::sessions`]）合并。
     pub fn session_ids(&self) -> Vec<String> {
-        self.runtime.read().session_ids()
+        self.runtime.session_ids()
     }
 
     /// 该会话是否已注册（Runtime 映射命中）。
     pub fn contains_session(&self, session_id: &str) -> bool {
-        self.runtime.read().contains(session_id)
+        self.runtime.contains(session_id)
     }
 
     /// join 会话：等待 session 结束（带 deadline）。
@@ -364,7 +366,7 @@ impl Controller {
         session_id: &str,
         deadline: Duration,
     ) -> Result<bool, ControllerError> {
-        let runtime = Arc::clone(&self.runtime.read());
+        let runtime = Arc::clone(&self.runtime);
         runtime
             .join(session_id, deadline)
             .await
@@ -385,7 +387,7 @@ impl Controller {
         session_id: &str,
         join_deadline: Duration,
     ) -> Result<Vec<EventEnvelope>, ControllerError> {
-        let runtime = Arc::clone(&self.runtime.read());
+        let runtime = Arc::clone(&self.runtime);
         let drained = runtime
             .destroy(session_id, join_deadline)
             .await
@@ -406,7 +408,7 @@ impl Controller {
         session_id: &str,
         input: MessageContent,
     ) -> Result<(), ControllerError> {
-        let runtime = Arc::clone(&self.runtime.read());
+        let runtime = Arc::clone(&self.runtime);
         runtime
             .submit_input(session_id, input)
             .map_err(|err| ControllerError::InjectFailed(session_id.to_string(), err))
@@ -434,7 +436,7 @@ impl Controller {
     /// 订阅广播慢消费者 lagging（Broadcast 类）。未注册 session（迟到事件 /
     /// 销毁后事件）无法补打，降级为发射方提供的身份直接投递（不 panic）。
     pub fn publish_event(&self, session_id: &str, source: &UnstampedEvent, event: ExecutorEvent) {
-        let runtime = Arc::clone(&self.runtime.read());
+        let runtime = Arc::clone(&self.runtime);
         let envelope = match runtime.stamp(session_id, source) {
             Ok(stamped) => stamped,
             Err(_) => EventEnvelope::new(

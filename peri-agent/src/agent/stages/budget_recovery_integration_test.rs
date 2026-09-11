@@ -1,9 +1,12 @@
 use super::*;
 use crate::agent::react::{AgentOutput, Reasoning, StreamingContext};
 use crate::error::{AgentError, AgentResult};
-use crate::middleware::{Middleware, MiddlewareState};
+use crate::middleware::{
+    capabilities::{AfterAgentState, BeforeAgentState},
+    Middleware,
+};
 use crate::session::store::FrozenContext;
-use crate::session::{MessageKind, MessageSource, Session};
+use crate::session::{MessageKind, MessageQueue, MessageSource, Session};
 use crate::thread::{SqliteThreadStore, ThreadId, ThreadMeta, ThreadStore};
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{
@@ -30,7 +33,11 @@ fn make_reminder(marker: &str) -> TrustedSystemReminder {
         .unwrap()
 }
 
-struct ContinuingReminderMiddleware;
+struct ContinuingReminderMiddleware {
+    // The fixture owns the same session inbox as an external reminder producer.
+    // before_agent itself intentionally has no queue mutation capability.
+    queue: MessageQueue,
+}
 
 #[async_trait::async_trait]
 impl Middleware for ContinuingReminderMiddleware {
@@ -38,8 +45,8 @@ impl Middleware for ContinuingReminderMiddleware {
         "budget_recovery_reminder"
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
-        state.enqueue_v2_message(QueuedMessage::system_reminder(
+    async fn before_agent(&self, _state: &mut dyn BeforeAgentState) -> AgentResult<()> {
+        self.queue.push(QueuedMessage::system_reminder(
             MessageKind::Defer,
             MessageSource::GoalSteering,
             make_reminder("before_agent reminder"),
@@ -49,7 +56,7 @@ impl Middleware for ContinuingReminderMiddleware {
 
     async fn after_agent(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn AfterAgentState,
         output: &AgentOutput,
     ) -> AgentResult<AgentOutput> {
         state.enqueue_v2_message(QueuedMessage::system_reminder(
@@ -169,7 +176,9 @@ async fn make_scenario(cancel_on_third: bool) -> BudgetScenario {
     let compact_calls = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(ContinuingReminderMiddleware));
+    chain.add(Box::new(ContinuingReminderMiddleware {
+        queue: session.queue().clone(),
+    }));
     let (bus, handles) = crate::agent::events_v2::EventBus::new(Default::default());
     let context = StageContext::builder(
         session.start_turn(),

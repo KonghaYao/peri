@@ -120,14 +120,19 @@ pub(crate) async fn fire_subagent_lifecycle_hooks_static(
 }
 
 mod build_agent;
+mod configuration;
 mod define;
+mod definitions;
 mod execute_bg;
 mod execute_fork;
 mod execute_resume;
+mod invocation;
+mod mcp_activation;
+mod spawn_context;
 pub use define::SubAgentTool;
 
 /// 子 agent 链装配器实现（L3）：经 [`SubagentChainAssembler`] trait 依赖反转，
-/// 由 middlewares 提供实现——Agent 层 [`spawn_subagent`] 从父 session copy frozen
+/// 由 middlewares 提供实现——Agent 层 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent) 从父 session copy frozen
 /// 数据后调用本实现构建子链，链序保持 [`build_subagent_middlewares`] 不变
 /// （AgentsMd→Skills→[SkillPreload]→Todo，ARC-MIDDLEWARE-001）。
 pub struct SubagentChainAssemblerImpl;

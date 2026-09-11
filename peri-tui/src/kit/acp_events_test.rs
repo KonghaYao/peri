@@ -70,6 +70,7 @@ fn ensure_cache_warning_enabled_for_tests() {
     let _ = PERI_CONFIG_HANDLE.set(Arc::new(parking_lot::RwLock::new(cfg)));
 }
 
+// 此 fixture 会清空全局 TODO_ITEMS / VIEW_MODELS 等 atom，调用测试必须使用 #[serial]。
 fn make_fold_test_state() -> BridgeState {
     crate::kit::atoms::init_atoms();
     ensure_cache_warning_enabled_for_tests();

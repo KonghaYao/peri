@@ -385,3 +385,39 @@ async fn test_agent_model_override_applies_to_background() {
         }
     }
 }
+
+/// 宽容解码不能将字符串布尔值当成分支开关，也不能把非字符串 model 当覆盖值。
+#[tokio::test]
+async fn test_agent_invoke_wrong_optional_types_keep_definition_and_parent_cwd() {
+    let dir = tempdir().unwrap();
+    write_test_agent_with_model(&dir, "sonnet");
+    let aliases = Arc::default();
+    let mut tool = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
+    tool.parent_cwd = dir.path().to_str().unwrap().to_string();
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "prompt": "  preserve spaces  ",
+                "subagent_type": "test-agent",
+                "resume_thread_id": 42,
+                "model": ["opus"],
+                "cwd": false,
+                "fork": "true",
+                "run_in_background": "true",
+                "name": {"ignored": true},
+                "description": ["ignored"],
+                "isolation": 1
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        result == "echo:   preserve spaces",
+        "prompt 前导空格必须原样进入执行（返回文本沿用末尾 trim）：{result}"
+    );
+    assert_eq!(
+        aliases.lock().unwrap().as_slice(),
+        &[Some("sonnet".to_string())]
+    );
+}

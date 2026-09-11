@@ -1029,6 +1029,7 @@ panel-plugin-discover-input = Type to search...
 panel-plugin-search-loading = Searching...
 panel-plugin-search-no-results = No results found
 panel-plugin-search-error = Search failed: { $error }
+panel-plugin-search-invalid-response = Invalid search response
 panel-plugin-operation-complete = operation complete
 panel-plugin-operation-failed = operation failed
 panel-plugin-discover-press-enter = Press Enter to search

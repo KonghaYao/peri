@@ -677,3 +677,67 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
         events
     );
 }
+/// [回归测试] observe 已关闭不表示 render/state 的已入队事件都已排空。
+#[tokio::test]
+async fn test_forwarder_drains_buffered_render_and_state_after_producer_drop() {
+    let (bus, handles) = EventBus::new(EventBusConfig::default());
+    let captured: Arc<Mutex<Vec<ExecutorEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let handler = Arc::new(CapturingHandler {
+        events: Arc::clone(&captured),
+    });
+    let (turn_id, agent_id) = ids();
+    bus.emit_render(RenderEvent::TextChunk {
+        turn_id,
+        agent_id,
+        message_id: peri_acp_types::messages::MessageId::new(),
+        chunk: "queued-text".into(),
+    });
+    bus.emit_render(RenderEvent::ToolStarted {
+        turn_id,
+        agent_id,
+        tool_call_id: "queued-tool".into(),
+        name: "Read".into(),
+        input: serde_json::Value::Null,
+    });
+    bus.emit_render(RenderEvent::ToolEnded {
+        turn_id,
+        agent_id,
+        tool_call_id: "queued-tool".into(),
+        name: "Read".into(),
+        output: "queued-output".into(),
+        is_error: false,
+    });
+    bus.emit_state(StateEvent::SyntheticUserMessage {
+        turn_id,
+        agent_id,
+        text: "queued-state".into(),
+    });
+    // 生产端先退出，消费者尚未运行；无需 sleep 即可固定三个通道同时关闭。
+    drop(bus);
+    let forwarder =
+        spawn_subagent_event_forwarder(handles, Some(handler), None, "child-instance".into());
+    tokio::time::timeout(std::time::Duration::from_secs(2), forwarder)
+        .await
+        .expect("排空缓冲后 forwarder 应结束")
+        .unwrap();
+    let events = captured.lock();
+    assert_eq!(
+        events.len(),
+        4,
+        "observe Closed 不得丢弃已排队的 render/state"
+    );
+    assert!(
+        matches!(&events[0], ExecutorEvent::TextChunk { chunk, source_agent_id, .. }
+        if chunk == "queued-text" && source_agent_id.as_deref() == Some("child-instance"))
+    );
+    assert!(
+        matches!(&events[1], ExecutorEvent::ToolStart { tool_call_id, .. }
+        if tool_call_id == "queued-tool")
+    );
+    assert!(
+        matches!(&events[2], ExecutorEvent::ToolEnd { tool_call_id, output, .. }
+        if tool_call_id == "queued-tool" && output == "queued-output")
+    );
+    assert!(matches!(&events[3], ExecutorEvent::MessageAdded(message)
+        if message.content() == "queued-state"));
+}

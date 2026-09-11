@@ -6,6 +6,7 @@
 //! 注入路径：通过 v2 MessageQueue push canonical Defer reminder（Receive 保留 → End 消费唤醒续跑）。
 //! 结构化 reminder 在模型投影边界编码为 Human role，不破坏 frozen_system_prompt。
 
+use peri_agent::middleware::capabilities as hook_state;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -16,7 +17,7 @@ use peri_acp_types::system_reminder::{
 };
 use peri_agent::{
     error::{AgentError, AgentResult},
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::r#trait::Middleware,
     session::{MessageKind, MessageSource, QueuedMessage},
 };
 use serde_json::json;
@@ -87,7 +88,7 @@ impl Middleware for GoalMiddleware {
 
     async fn after_agent(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::AfterAgentState,
         output: &peri_agent::agent::react::AgentOutput,
     ) -> AgentResult<peri_agent::agent::react::AgentOutput> {
         // 1. 前面已有 block_continue（如 HookMiddleware stop block）→ 不干预

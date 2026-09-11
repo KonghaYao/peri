@@ -1,6 +1,6 @@
 # peri-model 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-09（ModelStream 终态语义校准）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-10（SSE 流测试收敛到生产路径）
 > 依据：docs/standards/architecture-contracts.md、源码（无 crate 级 CLAUDE.md）
 
 ## 架构速览
@@ -14,11 +14,11 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 加新 provider/模型适配 | 模板 `src/openai_compatible/`；trait 事实源 `src/protocol/model.rs`（`Model` :153）；装配面 `peri-acp/src/provider/mod.rs`（`LlmProvider::into_model`） | `impl Model for OpenAiModel`（openai_compatible/mod.rs:156）；`stream::decoders()`（:32）返回 `SseDecoderFactory` | 实现 `capabilities`/`prepare_request`/`stream` 三方法；stream 走 `runtime_http_sse_stream`（runtime/stream.rs:68）串 transport+retry；`prepare_request` 默认实现明确拒绝（model.rs:149-153）；`build_request` 须产出可脱敏观测的 `PreparedModelRequest`（observe，request.rs:153） |
-| 改流式事件 | `src/protocol/model.rs` `ModelStreamEvent`（:17：TextDelta/ReasoningDelta/ToolCallDelta/Usage/Completed）+ `src/runtime/stream.rs`；消费方 `peri-agent/src/agent/model_bridge.rs:246`（generate_from_request） | 各 adapter `decode_event`（anthropic/stream.rs:66、openai_compatible/stream.rs:44）；`Model::complete` 聚合（model.rs:171） | 流必须以 Completed 收尾，否则 `StreamEndedWithoutCompleted`（model.rs:222）；Completed 后流终止（model.rs:126-133）；新增事件变体须同步改 complete 聚合 + model_bridge 消费 + ACP 映射（ARC-EVENT-001） |
+| 加新 provider/模型适配 | 模板 `src/openai_compatible/`；trait 事实源 `src/protocol/model.rs`（`Model` :153）；装配面 `peri-acp/src/provider/mod.rs`（`LlmProvider::into_model`） | `impl Model for OpenAiModel`（openai_compatible/mod.rs:156）；`stream::decoders()`（:32）返回 `SseDecoderFactory` | 实现 `capabilities`/`prepare_request`/`stream` 三方法；stream 走 `runtime_http_sse_stream`（runtime/stream.rs:57）串 transport+retry；`prepare_request` 默认实现明确拒绝（model.rs:149-153）；`build_request` 须产出可脱敏观测的 `PreparedModelRequest`（observe，request.rs:153） |
+| 改流式事件 | `src/protocol/model.rs` `ModelStreamEvent`（:17：TextDelta/ReasoningDelta/ToolCallDelta/Usage/Completed）+ `src/runtime/stream.rs`；消费方 `peri-agent/src/agent/model_bridge.rs:246`（generate_from_request） | 各 adapter `decode_event`（anthropic/stream.rs:66、openai_compatible/stream.rs:44）；`Model::complete` 聚合（model.rs:171） | 流必须以 Completed 收尾，否则 `StreamEndedWithoutCompleted`（model.rs:222）；生产 retry driver 在 Completed 后终止发射（runtime/retry.rs:311）；新增事件变体须同步改 complete 聚合 + model_bridge 消费 + ACP 映射（ARC-EVENT-001） |
 | 改 TokenUsage/StopReason 语义 | 事实源 `src/protocol/types.rs`：`TokenUsage` :453（cache_creation/cache_read 可选，`new` :463）、`StopReason` :475（tagged，`Other{value}` 兜底） | 构造点：anthropic/stream.rs `current_usage`（:364）/`completed_response`（:378）；openai_compatible/response.rs 解码 | usage 溢出（input+output 超 u32）→ provider error 且不发 Completed（anthropic/mod_test.rs:604）；StopReason 语义消费方在 model_bridge（映射 agent 层 stop reason） |
 | 改消息内容模型 | 事实源 `src/protocol/types.rs`：`ContentBlock` :71（Text/Image/Document/Reasoning/ToolUse/ToolResult/RedactedReasoning）、`ModelMessage` :229（role-tagged）、`ToolCall` :152、`ToolResult` :182 | 两端映射：`content_to_anthropic`（anthropic/request.rs:222）、`block_to_openai_part`（openai_compatible/request.rs:217）；`ContentBlock::text_content`（types.rs:113） | 新增 block 变体必须同时改两端映射 + `text_content`（否则判空/文本提取漏分支）；Anthropic tool_use 只序列化一次（mod_test.rs:205）；序列化顺序须确定（ARC-SERIAL-001） |
-| 改传输层（HTTP/SSE） | `src/transport/http.rs`（`HttpTransport` :46、`ReqwestTransport` :55）、`src/transport/sse.rs`（`SseEvent` :5、`SseParser` :11） | 组装点 `runtime_http_sse_stream`（runtime/stream.rs:68）、`retrying_http_sse_stream_async`（:88） | transport 是 crate-private seam（transport/mod.rs:5-10），公共 API 不暴露 client/headers/原始请求；只供 crate 内 adapter 使用 |
+| 改传输层（HTTP/SSE） | `src/transport/http.rs`（`HttpTransport` :46、`ReqwestTransport` :55）、`src/transport/sse.rs`（`SseEvent` :5、`SseParser` :11） | 组装点 `runtime_http_sse_stream`（runtime/stream.rs:57）→ `retrying_http_sse_stream`（:25）→ `response_to_sse_stream`（:76） | transport 是 crate-private seam（transport/mod.rs:5-10）；两个 provider 共享同步 `SseDecoderFactory`，每次 retry 新建 decoder 状态；SSE DONE 调用 completion decoder，EOF 不等于成功；公共 API 不暴露 client/headers/原始请求 |
 | 改重试策略 | 事实源 `src/runtime/retry.rs`：`RetryConfig` :88（`delay_for_retry` :138）、`RetryableErrorClasses` :12、`RetryObserver` :202 | `retrying_stream`（:220）；`ModelRuntimeConfig::with_retry`（request.rs:78） | 已发出可见 delta 后传输失败 → interrupted 不重试（anthropic/mod_test.rs:928）；observer 不接收请求/响应/认证信息（request.rs:83） |
 | 改观测/脱敏 | `src/runtime/request.rs`：`PreparedModelRequest` :126、`observe` :153、`ObservedProviderBody` :99；`ModelRuntimeConfig` :36（`with_full_observation` :70） | 配置显式构造，不读环境变量（request.rs:34）；`AnthropicConfig::new`（anthropic/mod.rs:45）/`OpenAiConfig::new`（openai_compatible/mod.rs:43） | 敏感键/非 ASCII 键/data URI 恒脱敏（request.rs:347）；config Debug 永不输出凭据（anthropic/mod.rs:82-97）；契约 ARC-SECRET-001 |
 | 改错误类型/分类 | `src/runtime/error.rs`：`ModelError` :202、`ProtocolErrorKind` :47、`ModelError::cancelled` :234、`is_stream_interrupted` :259 | 构造点 `ModelError::protocol` :224、`http_status` :212 | error summary 走 `SafeErrorContext`（:126），不携带 secret；cancelled 与 interrupted 语义区分（重试判定依赖） |
@@ -30,7 +30,7 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 内容块/消息/请求响应 | protocol/types.rs | `JsonObject` :11（BTreeMap 承载）；`ContentBlock` :71；`ModelMessage` :229；`ModelRequest` :302；`ModelResponse` :335（`new` :366 强制 assistant）；`TokenUsage` :453；`StopReason` :475；`ModelCapabilities` :484；`ProviderProtocol` :498 |
-| 流式模型接口 | protocol/model.rs | `ModelStreamEvent` :17；`ModelStream` :60（`abort` :112、Drop 取消 :143）；`Model` trait :153；`complete` :171 |
+| 流式模型接口 | protocol/model.rs | `ModelStreamEvent` :17；`ModelStream` :60（`abort` :111、Drop 取消 :142）；`Model` trait :153；`complete` :171 |
 | re-export 事实源 | lib.rs:9-20 + protocol/mod.rs:4-10 | 新增公共类型须在此两处登记 |
 
 ### anthropic/（Anthropic Messages API adapter）
@@ -56,7 +56,8 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 运行时配置/观测投影 | runtime/request.rs | `ModelRuntimeConfig` :36；`PreparedModelRequest::observe` :153（redacted_paths/truncated_paths） |
-| 流编排 | runtime/stream.rs | `cancellable_stream` :26；`retrying_http_sse_stream` :36；`runtime_http_sse_stream` :68；`retrying_http_sse_stream_async` :88 |
+| 流编排 | runtime/stream.rs | `SseDecoderFactory`（:20）；`retrying_http_sse_stream`（:25）；`runtime_http_sse_stream`（:57）；`response_to_sse_stream`（:76）；HTTP、parser、同步 provider decoder 与 retry 只有一条实现路径 |
+| 取消 / 首字节 / SSE 终态回归 | runtime/stream_test.rs + openai_compatible/mod_test.rs | runtime 测试经 HttpResponse → 生产 SSE reader 验证首字节未成帧时取消、已解码 delta 后 abort 与 connect/body/backoff/drop；OpenAiModel::stream 回归验证 DONE 只产生一个 Completed，并忽略其后同 chunk/后续 chunk 的帧 |
 | 重试 | runtime/retry.rs | `retrying_stream` :220；`RetryObserver` :202；`RetryObservation` :159 |
 | 错误模型 | runtime/error.rs | `ModelError` :202；`ProtocolErrorKind` :47；`TransportErrorKind` :7；`RetryErrorKind` :28 |
 

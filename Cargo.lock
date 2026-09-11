@@ -4111,7 +4111,6 @@ dependencies = [
  "async-trait",
  "parking_lot",
  "peri-acp-types",
- "peri-agent",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -4124,6 +4123,7 @@ dependencies = [
  "ratatui-kit",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
 ]
 
@@ -4199,10 +4199,12 @@ dependencies = [
  "axum",
  "clap",
  "futures",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",
  "serial_test",
+ "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",
@@ -4216,6 +4218,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "futures",
  "indexmap 2.14.0",
  "parking_lot",
  "peri-acp-types",

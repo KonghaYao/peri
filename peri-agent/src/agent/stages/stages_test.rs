@@ -1,6 +1,7 @@
 //! 从 mod.rs 分离的测试模块
 use super::*;
 use crate::messages::MessageContent;
+use crate::middleware::capabilities as hook_state;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
 use crate::session::Session;
@@ -184,7 +185,7 @@ impl crate::middleware::Middleware for IterationBudgetProbe {
 
     async fn before_agent(
         &self,
-        state: &mut dyn crate::middleware::MiddlewareState,
+        state: &mut dyn hook_state::BeforeAgentState,
     ) -> crate::error::AgentResult<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.prompt_visible.lock().unwrap().push(
@@ -869,7 +870,7 @@ async fn test_p0_2_before_agent_runs_once_after_tool_round_trip() {
 
         async fn before_agent(
             &self,
-            state: &mut dyn crate::middleware::MiddlewareState,
+            state: &mut dyn hook_state::BeforeAgentState,
         ) -> crate::error::AgentResult<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.prompt_visible.lock().unwrap().push(
@@ -962,7 +963,7 @@ async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cance
 
         async fn before_agent(
             &self,
-            state: &mut dyn crate::middleware::MiddlewareState,
+            state: &mut dyn hook_state::BeforeAgentState,
         ) -> crate::error::AgentResult<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.prompt_visible.lock().unwrap().push(

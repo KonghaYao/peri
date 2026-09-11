@@ -11,12 +11,11 @@ use std::sync::Arc;
 
 use crate::cli_args::OutputFormat;
 use anyhow::Result;
-use peri_acp::LangfuseSessionLike;
 use peri_acp::host::assemble::{HostAssemblyInput, assemble_server_config};
 use peri_acp::transport::mpsc::mpsc_transport_pair;
 use peri_acp_types::messages::MessageContent;
 use peri_tui::acp_client::{
-    AcpNotification, AcpTuiClient,
+    AcpDeployment, AcpNotification, AcpTuiClient,
     interaction_response::{elicitation_cancel_response, permission_selected_allow_once_response},
 };
 use serde_json::{Value, json};
@@ -154,79 +153,66 @@ pub async fn run_print(
         drive_cron_tick: false,
     })
     .await;
-    // Langfuse 句柄先行 clone：host_config 将 move 进 host task，
-    // 退出前 flush 仍需引用（短生命周期进程语义，见下方冲刷点）。
-    let langfuse_session = host_config.langfuse_session.clone();
-
     let (client_transport, server_transport) = mpsc_transport_pair();
-    let host_task = tokio::spawn(async move {
-        peri_acp::host::run_acp_server(Arc::new(server_transport), host_config).await;
-    });
+    let host = peri_acp::host::spawn_acp_server(Arc::new(server_transport), host_config);
 
     let (acp_client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     acp_client.spawn_pump(notification_tx);
 
-    // ── ephemeral session：new → prompt（流式收集事件）→ close ──
-    let session_id = acp_client.new_session(&cwd, None).await?;
+    let mut deployment = AcpDeployment::new(acp_client.clone(), host);
+    let operation = async {
+        // ── ephemeral session：new → prompt（流式收集事件）→ close ──
+        let session_id = acp_client.new_session(&cwd, None).await?;
 
-    let mut output = PrintOutput::new(fmt);
-    {
-        // prompt future 借用 acp_client，收敛在块内以便之后 drop(client)
-        let content = MessageContent::text(prompt_text);
-        let prompt_fut = acp_client.prompt(&content, None);
-        tokio::pin!(prompt_fut);
+        let mut output = PrintOutput::new(fmt);
+        {
+            // prompt future 借用 acp_client，收敛在块内以便之后 drop(client)
+            let content = MessageContent::text(prompt_text);
+            let prompt_fut = acp_client.prompt(&content, None);
+            tokio::pin!(prompt_fut);
 
-        let mut prompt_returned = false;
-        loop {
-            if !prompt_returned {
-                tokio::select! {
-                    res = &mut prompt_fut => {
-                        res.map_err(|e| anyhow::anyhow!("session/prompt 失败: {e}"))?;
-                        prompt_returned = true;
-                    }
-                    notif = notification_rx.recv() => {
-                        if !consume_print_notification(&acp_client, &mut output, notif).await {
-                            break;
+            let mut prompt_returned = false;
+            loop {
+                if !prompt_returned {
+                    tokio::select! {
+                        res = &mut prompt_fut => {
+                            res.map_err(|e| anyhow::anyhow!("session/prompt 失败: {e}"))?;
+                            prompt_returned = true;
+                        }
+                        notif = notification_rx.recv() => {
+                            if !consume_print_notification(&acp_client, &mut output, notif).await {
+                                break;
+                            }
                         }
                     }
-                }
-            } else {
-                // prompt 响应已返回：turn 已结束，drain 尾部事件后退出
-                match notification_rx.recv().await {
-                    Some(notif) => {
-                        if !consume_print_notification(&acp_client, &mut output, Some(notif)).await
-                        {
-                            break;
+                } else {
+                    // prompt 响应已返回：turn 已结束，drain 尾部事件后退出
+                    match notification_rx.recv().await {
+                        Some(notif) => {
+                            if !consume_print_notification(&acp_client, &mut output, Some(notif))
+                                .await
+                            {
+                                break;
+                            }
                         }
+                        None => break,
                     }
-                    None => break,
+                }
+                if prompt_returned && notification_rx.is_empty() {
+                    break;
                 }
             }
-            if prompt_returned && notification_rx.is_empty() {
-                break;
-            }
         }
-    }
 
-    output.output_final();
+        output.output_final();
 
-    // 关闭 ephemeral session（释放 host 侧 history/frozen/agent_pool）
-    let _ = acp_client
-        .send_raw_request("session/close", json!({ "sessionId": session_id }))
-        .await;
-    drop(acp_client); // drop transport → host loop 退出
-
-    // 短生命周期进程冲刷：Langfuse 事件在 host 侧收集，退出前显式 flush
-    // （fire-and-forget 的 flush task 会随进程退出被 abort，导致 trace 丢失）。
-    if let Some(session) = &langfuse_session {
-        match session.flush().await {
-            Ok(()) => tracing::info!("Langfuse trace flushed before exit (print mode)"),
-            Err(e) => tracing::warn!(error = %e, "langfuse: print 模式退出前 flush 失败"),
-        }
-    }
-
-    let _ = host_task.await;
-    Ok(())
+        // 关闭 ephemeral session（释放 host 侧 history/frozen/agent_pool）
+        let _ = acp_client
+            .send_raw_request("session/close", json!({ "sessionId": session_id }))
+            .await;
+        Ok(())
+    };
+    deployment.run(operation).await
 }
 
 /// 消费一条 ACP 通知：流式输出 / 自动批准 / 忽略。返回 `false` 表示通道关闭。

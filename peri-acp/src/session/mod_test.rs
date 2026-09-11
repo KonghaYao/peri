@@ -676,15 +676,15 @@ fn default_state() -> peri_acp_types::meta_harness::MetaHarnessState {
 
 #[test]
 fn build_meta_harness_state_empty_config_is_default() {
-    let state = super::build_meta_harness_state(None, HashMap::new());
+    let state = super::frozen::build_meta_harness_state(None, HashMap::new());
     assert_eq!(state, default_state());
-    let state = super::build_meta_harness_state(Some(&HashMap::new()), HashMap::new());
+    let state = super::frozen::build_meta_harness_state(Some(&HashMap::new()), HashMap::new());
     assert_eq!(state, default_state());
 }
 
 #[test]
 fn build_meta_harness_state_can_disable_built_in_subagents() {
-    let state = super::build_meta_harness_state(
+    let state = super::frozen::build_meta_harness_state(
         Some(&mh_cfg(&[("BuiltInSubagents", false)])),
         HashMap::new(),
     );
@@ -695,7 +695,7 @@ fn build_meta_harness_state_can_disable_built_in_subagents() {
 fn build_meta_harness_state_section_true_with_doc_enters_overrides() {
     let mut docs = HashMap::new();
     docs.insert("01_intro".to_string(), "custom intro".to_string());
-    let state = super::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", true)])), docs);
+    let state = super::frozen::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", true)])), docs);
     assert_eq!(
         state.section_overrides.get("01_intro").map(|s| s.as_ref()),
         Some("custom intro")
@@ -705,8 +705,10 @@ fn build_meta_harness_state_section_true_with_doc_enters_overrides() {
 
 #[test]
 fn build_meta_harness_state_section_true_without_doc_warns_and_ignores() {
-    let state =
-        super::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", true)])), HashMap::new());
+    let state = super::frozen::build_meta_harness_state(
+        Some(&mh_cfg(&[("01_intro", true)])),
+        HashMap::new(),
+    );
     assert!(
         state.section_overrides.is_empty(),
         "文档缺失时忽略覆盖（保持内置段落）"
@@ -717,7 +719,8 @@ fn build_meta_harness_state_section_true_without_doc_warns_and_ignores() {
 fn build_meta_harness_state_section_false_does_not_override() {
     let mut docs = HashMap::new();
     docs.insert("01_intro".to_string(), "custom intro".to_string());
-    let state = super::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", false)])), docs);
+    let state =
+        super::frozen::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", false)])), docs);
     assert!(
         state.section_overrides.is_empty(),
         "section + false = 显式不覆盖，即使文档存在"
@@ -726,16 +729,20 @@ fn build_meta_harness_state_section_false_does_not_override() {
 
 #[test]
 fn build_meta_harness_state_middleware_false_enters_disabled() {
-    let state =
-        super::build_meta_harness_state(Some(&mh_cfg(&[("WebMiddleware", false)])), HashMap::new());
+    let state = super::frozen::build_meta_harness_state(
+        Some(&mh_cfg(&[("WebMiddleware", false)])),
+        HashMap::new(),
+    );
     assert!(state.disabled_middlewares.contains("WebMiddleware"));
     assert!(state.section_overrides.is_empty());
 }
 
 #[test]
 fn build_meta_harness_state_middleware_true_not_disabled() {
-    let state =
-        super::build_meta_harness_state(Some(&mh_cfg(&[("WebMiddleware", true)])), HashMap::new());
+    let state = super::frozen::build_meta_harness_state(
+        Some(&mh_cfg(&[("WebMiddleware", true)])),
+        HashMap::new(),
+    );
     assert!(
         state.disabled_middlewares.is_empty(),
         "middleware + true = 显式恢复装配"
@@ -747,7 +754,7 @@ fn build_meta_harness_state_mixed_entries() {
     let mut docs = HashMap::new();
     docs.insert("01_intro".to_string(), "intro".to_string());
     docs.insert("05_using_tools".to_string(), "tools".to_string());
-    let state = super::build_meta_harness_state(
+    let state = super::frozen::build_meta_harness_state(
         Some(&mh_cfg(&[
             ("01_intro", true),
             ("05_using_tools", false),

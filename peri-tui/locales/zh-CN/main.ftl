@@ -1027,6 +1027,7 @@ panel-plugin-discover-input = 输入以搜索...
 panel-plugin-search-loading = 搜索中...
 panel-plugin-search-no-results = 未找到结果
 panel-plugin-search-error = 搜索失败: { $error }
+panel-plugin-search-invalid-response = 搜索响应格式无效
 panel-plugin-operation-complete = 操作完成
 panel-plugin-operation-failed = 操作失败
 panel-plugin-discover-press-enter = 按 Enter 搜索

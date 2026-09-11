@@ -191,6 +191,7 @@ async fn test_execute_view_action_export_text_writes_notification() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_clear_request_bypasses_prompt() {
     use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, tui_hash_str};
 

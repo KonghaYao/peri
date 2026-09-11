@@ -5,7 +5,7 @@
 //!
 //! L3：创建（建 thread / session / 运行 / 收尾）统一经
 //! `peri_agent::session::subagent::spawn_subagent`（Agent 层统一入口），
-//! 本文件只组装意图（[`SubagentSpawnConfig`]）。
+//! 本文件只组装意图（[`SubagentSpawnConfig`](peri_agent::session::subagent::SubagentSpawnConfig)）。
 
 use std::sync::Arc;
 
@@ -27,8 +27,8 @@ impl super::SubAgentTool {
 
         // system prompt（frozen 优先 + system_builder 回退）
         let system_prompt = host
-            .as_ref()
-            .and_then(|h| h.frozen_system_prompt.clone())
+            .frozen_system_prompt
+            .clone()
             .map(|sp| sp.as_ref().to_string())
             .or_else(|| self.system_builder.as_ref().map(|b| b(None, cwd)));
 
@@ -76,7 +76,7 @@ impl super::SubAgentTool {
             block_continue: None,
         };
         let result_text = format_subagent_result(&output);
-        if host.as_ref().and_then(|h| h.thread_store.clone()).is_some() {
+        if host.thread_store.is_some() {
             Ok(format!(
                 "child_thread_id: {}\n{}",
                 spawned.child_thread_id, result_text

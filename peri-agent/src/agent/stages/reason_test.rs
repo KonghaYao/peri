@@ -5,6 +5,7 @@ use crate::agent::stages::StageContext;
 use crate::messages::BaseMessage;
 #[cfg(test)]
 use crate::messages::MessageContent;
+use crate::middleware::capabilities as hook_state;
 use crate::session::store::FrozenContext;
 use crate::session::Session;
 use std::sync::Arc;
@@ -189,7 +190,7 @@ impl crate::middleware::Middleware for RecordingErrorMiddleware {
 
     async fn on_error(
         &self,
-        _state: &mut dyn crate::middleware::MiddlewareState,
+        _state: &mut dyn hook_state::StateView,
         error: &crate::error::AgentError,
     ) -> crate::error::AgentResult<()> {
         self.calls.lock().unwrap().push(error.to_string());

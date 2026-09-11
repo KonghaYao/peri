@@ -12,7 +12,7 @@ pub mod session_like;
 pub mod tracer;
 
 pub use config::LangfuseConfig;
-pub use session::LangfuseSession;
+pub use session::{LangfuseSession, LangfuseShutdownOwner, LangfuseShutdownReport};
 pub use session_like::LangfuseSessionLike;
 // TODO: Phase 5 引入 fake session 测试后将移除此 allow
 #[allow(unused_imports)]

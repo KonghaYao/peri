@@ -1,7 +1,7 @@
 //! ACP Prompt execution — builds and executes the agent via crate::executor.
 //! Extracted from original acp_server.rs (2026-05-20 split).
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     broker::AcpTransportBroker,
@@ -9,56 +9,22 @@ use crate::{
     transport::types::AcpError,
 };
 use agent_client_protocol::schema::v1::{PromptResponse, StopReason};
-use parking_lot::RwLock;
-use peri_acp_types::cron::CronSchedulerPort;
-use peri_acp_types::hooks::RegisteredHook;
 use peri_acp_types::interaction::{
-    ApprovalDecision, ApprovalItem, ChannelState, InteractionContext, InteractionResponse,
-    UserInteractionBroker,
+    ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, UserInteractionBroker,
 };
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
-use peri_acp_types::ports::{McpPoolPort, ToolSearchPort};
 use peri_acp_types::session::{ExecutionFailure, ExecutionFailureKind};
-use peri_controller::langfuse::bridge::LangfuseBridge;
-use peri_controller::langfuse::tracer::LangfuseTracer;
-use peri_controller::langfuse::LangfuseSession;
 use serde_json::Value;
 use tracing::info;
 
-use peri_agent::session::exec::executor_helpers::{
-    CommandLookupFn, ForwarderLauncherFn, StageBuildFn,
-};
-use peri_agent::session::exec::stage_builder::CachedLlmInstances;
+use peri_agent::session::exec::executor_helpers::CommandLookupFn;
+
+mod models;
+mod stage;
+mod telemetry;
+pub(crate) use stage::build_compact_hooks;
 
 use super::SharedSessions;
-use crate::provider::{LlmProvider, PeriConfig};
-
-#[cfg(test)]
-fn rebuild_compacted_payloads(
-    previous: &[peri_acp_types::store::PersistedPayload],
-    projected: &[peri_acp_types::messages::BaseMessage],
-) -> Vec<peri_acp_types::store::PersistedPayload> {
-    use peri_acp_types::store::PersistedPayload;
-
-    let reminders = previous
-        .iter()
-        .filter_map(|payload| match payload {
-            PersistedPayload::SystemReminder { id, reminder } => Some((*id, reminder.clone())),
-            PersistedPayload::Message(_) => None,
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    projected
-        .iter()
-        .cloned()
-        .map(|message| match reminders.get(&message.id()) {
-            Some(reminder) => PersistedPayload::SystemReminder {
-                id: message.id(),
-                reminder: reminder.clone(),
-            },
-            None => PersistedPayload::Message(message),
-        })
-        .collect()
-}
 
 // ── Prompt execution (spawned into background task) ──────────────────────────
 
@@ -186,44 +152,38 @@ pub(crate) async fn approve_scheduled_trigger(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_prompt(
     params: Value,
     sessions: &SharedSessions,
-    provider: &Arc<RwLock<LlmProvider>>,
-    peri_config: &Arc<RwLock<PeriConfig>>,
-    permission_mode: &Arc<SharedPermissionMode>,
-    cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
-    plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
-    plugin_agent_dirs: &[std::path::PathBuf],
-    plugin_loaded: &[peri_acp_types::plugin::LoadedPlugin],
-    hook_groups: &[Vec<peri_acp_types::hooks::RegisteredHook>],
-    mcp_pool: Option<Arc<dyn McpPoolPort>>,
-    dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
-    channel_state: Option<Arc<ChannelState>>,
-    tool_search_index: Arc<dyn ToolSearchPort>,
-    skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
-    shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
-    plugin_lsp_servers: &[peri_acp_types::lsp::LspServerConfig],
+    deployment: &super::AcpServerConfig,
     transport: &Arc<dyn crate::transport::AcpTransport>,
-    thread_store: &Arc<dyn peri_acp_types::store::ThreadStore>,
-    controller: &Arc<peri_controller::Controller>,
-    langfuse_session: Option<Arc<LangfuseSession>>,
     pool: Arc<parking_lot::Mutex<crate::session::agent_pool::AgentPool>>,
-    session_manager: crate::session::SessionManager,
-    // p1-wa：workflow agent 装配端口（宿主装配点注入，ACP 侧只持端口）。
-    workflow_middleware_factory: &Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory>,
-    // 内部 continuation 通知通道（注入 SessionContext，供 on_bg_complete
-    // 闭包通知 server 的 continuation scheduler）。stdio 等无 scheduler 场景为 None。
-    cont_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>,
-    >,
-    // 内部 AsyncContinuation（bg 完成唤醒被取消的 turn）：不 push 空 user
-    // prompt、不触发 keepgoing 语义。仅由 continuation scheduler 调用。
+    cont_tx: Option<tokio::sync::mpsc::UnboundedSender<executor::ContinuationRequest>>,
     continuation: bool,
-    // stdio 部署过滤 rewind/clear（仅 stdio 置 true；TUI/print 恒 false）。
-    stdio_command_filter: bool,
 ) -> Result<Value, AcpError> {
+    // Borrow deployment services; turn-owned callbacks clone only their existing handles.
+    // Provider/config snapshots remain below, after the session snapshot is captured.
+    let provider = &deployment.provider;
+    let peri_config = &deployment.peri_config;
+    let permission_mode = &deployment.permission_mode;
+    let cron_scheduler = deployment.cron_scheduler.clone();
+    let plugin_skill_roots = deployment.plugin_skill_roots.as_slice();
+    let plugin_agent_dirs = deployment.plugin_agent_dirs.as_slice();
+    let plugin_loaded = deployment.plugin_loaded.as_slice();
+    let hook_groups = deployment.hook_groups.as_slice();
+    let mcp_pool = deployment.mcp_pool.clone();
+    let dynamic_mcp = deployment.dynamic_mcp.clone();
+    let channel_state = deployment.channel_state.clone();
+    let tool_search_index = deployment.tool_search_index.clone();
+    let skills = deployment.skills.clone();
+    let shared_tools = deployment.shared_tools.clone();
+    let plugin_lsp_servers = deployment.plugin_lsp_servers.as_slice();
+    let thread_store = &deployment.thread_store;
+    let controller = &deployment.controller;
+    let langfuse_session = deployment.langfuse_session.clone();
+    let session_manager = deployment.session_manager.clone();
+    let workflow_middleware_factory = &deployment.workflow_middleware_factory;
+    let stdio_command_filter = deployment.stdio_command_filter;
     let (session_id, content, _attachments) =
         crate::dispatch::prompt::extract_and_validate_run_prompt_params(&params)?;
     // v2 路径下 MessageQueue 由 run_session_loop 从 session_manager.v2_message_queue
@@ -290,15 +250,6 @@ pub(crate) async fn run_prompt(
             state.lsp_pool.clone(),
         )
     };
-    // Every canonical payload projects to exactly one model message. This is the only
-    // safe prefix boundary when reminders are interleaved with ordinary messages.
-    let _projected_history_len = history_payloads.len();
-    // Compact replacement must delete every canonical row, including reminder rows.
-    let _history_ids: Vec<peri_acp_types::messages::MessageId> = history_payloads
-        .iter()
-        .map(|payload| payload.id())
-        .collect();
-
     let broker = build_transport_broker(transport, &session_id);
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),
@@ -378,10 +329,6 @@ pub(crate) async fn run_prompt(
         },
     );
 
-    // Track first history message ID for cancel-with-progress path (history is moved below)
-    // Uses Option<MessageId> (16 bytes) instead of cloning the entire history.
-    let _first_history_id = history.first().map(|m| m.id());
-
     // ── L5：SessionContext 投影（provider / peri_config / pool / SessionManager /
     //    Controller 端口化——执行体迁入 peri-agent 后由本宿主构造注入面）──
     let provider_name = provider_snapshot.display_name().to_string();
@@ -402,109 +349,20 @@ pub(crate) async fn run_prompt(
     compact_config.apply_env_overrides();
     let retry_events = pool.lock().retry_events.clone();
 
-    // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
-    let get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>> = {
-        let pool = Arc::clone(&pool);
-        let provider = provider_snapshot.clone();
-        Some(Arc::new(move || {
-            let guard = pool.lock();
-            if guard.has_valid_cache(&provider) {
-                guard.get_cached_llm().cloned()
-            } else {
-                None
-            }
-        }))
-    };
-    // fresh auxiliary model（缓存缺失时；retry observer 烘焙）
-    let fresh_auxiliary_model: Option<Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>> = {
-        let pool = Arc::clone(&pool);
-        let provider = provider_snapshot.clone();
-        Some(Arc::new(move || {
-            let provider = provider
-                .clone()
-                .with_retry_observer(Some(pool.lock().retry_events.as_retry_observer()));
-            provider.into_model().into()
-        }))
-    };
-    // LLM 缓存回写（AgentPool store_llm 语义）
-    let store_llm: Option<Arc<dyn Fn(CachedLlmInstances) + Send + Sync>> = {
-        let pool = Arc::clone(&pool);
-        Some(Arc::new(move |cache: CachedLlmInstances| {
-            pool.lock().store_llm(cache);
-        }))
-    };
-    // stage 装配 LLM 工厂（主 LLM / auto-classifier / 子 agent；与迁移前
-    // stage_builder 桥内构造同源——AgentPool 缓存 + RetryObserver 烘焙）
-    let primary_llm_factory: Option<Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>> = {
-        let pool = Arc::clone(&pool);
-        let provider = provider_snapshot.clone();
-        let retry_events = retry_events.clone();
-        Some(Arc::new(move || {
-            let fp = crate::session::agent_pool::fingerprint(&provider);
-            crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(&pool, &fp, || {
-                provider
-                    .clone()
-                    .with_retry_observer(Some(retry_events.as_retry_observer()))
-                    .into_model()
-            })
-        }))
-    };
-    let auto_classifier_factory: Option<executor::AutoClassifierFactory> = {
-        let provider = provider_snapshot.clone();
-        let retry_events = retry_events.clone();
-        Some(Arc::new(move || {
-            Arc::new(tokio::sync::Mutex::new(
-                provider
-                    .clone()
-                    .with_retry_observer(Some(retry_events.as_retry_observer()))
-                    .into_model(),
-            ))
-        }))
-    };
-    let subagent_llm_factory: Option<executor::SubagentLlmFactory> = {
-        let provider = provider_snapshot.clone();
-        let peri_config = Arc::clone(&peri_config_snapshot);
-        let pool = Arc::clone(&pool);
-        let retry_events = retry_events.clone();
-        let sid = session_id.clone();
-        Some(Arc::new(move |model_alias: Option<&str>| {
-            // 解析 provider 并构建 fingerprint
-            let (p, fp) = if let Some(alias) = model_alias {
-                match LlmProvider::from_config_for_alias(&peri_config, alias) {
-                    Some(p) => {
-                        let fp = crate::session::agent_pool::fingerprint(&p);
-                        (Some(p), fp)
-                    }
-                    None => {
-                        let fp = crate::session::agent_pool::fingerprint(&provider);
-                        (None, fp)
-                    }
-                }
-            } else {
-                let fp = crate::session::agent_pool::fingerprint(&provider);
-                (None, fp)
-            };
-            // 尝试 SubAgent 缓存
-            let model: Arc<dyn peri_model::Model> =
-                crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(
-                    &pool,
-                    &fp,
-                    || match &p {
-                        Some(p) => p
-                            .clone()
-                            .with_retry_observer(Some(retry_events.as_retry_observer()))
-                            .into_model(),
-                        None => provider
-                            .clone()
-                            .with_retry_observer(Some(retry_events.as_retry_observer()))
-                            .into_model(),
-                    },
-                );
-            let mut llm = peri_agent::agent::model_bridge::AgentModelBridge::from_arc(model);
-            llm = llm.with_session_id(sid.clone());
-            Box::new(llm)
-        }))
-    };
+    let models::ModelFactories {
+        get_cached_llm,
+        fresh_auxiliary_model,
+        store_llm,
+        primary_llm_factory,
+        auto_classifier_factory,
+        subagent_llm_factory,
+    } = models::build_model_factories(
+        &provider_snapshot,
+        &peri_config_snapshot,
+        &pool,
+        &retry_events,
+        &session_id,
+    );
 
     // 事件端口（Controller 适配）
     let event_publisher: Arc<dyn peri_acp_types::event::EventPublisher> = Arc::new(
@@ -624,120 +482,16 @@ pub(crate) async fn run_prompt(
     // ── L5：TurnInput 注入面（Langfuse hooks / stage 装配桥 / forwarder）──
     // Langfuse hooks：从 session 级 LangfuseSession 构造 tracer 并烘焙三个闭包
     //（turn 开始/结束 trace + 观测旁路 bridge 工厂）。
-    let langfuse_hooks: Option<executor::LangfuseHooks> = langfuse_session.as_ref().map(|s| {
-        let session_clone = Arc::clone(s);
-        let config = session_clone.config.clone();
-        let session: std::sync::Arc<dyn peri_controller::langfuse::LangfuseSessionLike> =
-            session_clone;
-        let tracer = Arc::new(parking_lot::Mutex::new(LangfuseTracer::new(
-            session,
-            session_id.clone(),
-            config,
-        )));
-        executor::LangfuseHooks {
-            on_turn_start: {
-                let tracer = Arc::clone(&tracer);
-                Arc::new(move |input: &str| {
-                    tracer.lock().on_turn_start(input);
-                }) as Arc<dyn Fn(&str) + Send + Sync>
-            },
-            on_turn_end: {
-                let tracer = Arc::clone(&tracer);
-                Arc::new(
-                    move |outcome: peri_acp_types::session::TurnTelemetryOutcome| {
-                        tracer.lock().on_turn_end(outcome).into()
-                    },
-                )
-                    as Arc<
-                        dyn Fn(
-                                peri_acp_types::session::TurnTelemetryOutcome,
-                            ) -> Option<tokio::task::JoinHandle<()>>
-                            + Send
-                            + Sync,
-                    >
-            },
-            bridge_factory: {
-                let tracer = Arc::clone(&tracer);
-                Arc::new(move |name: String, agent_id: Option<String>| {
-                    Some(
-                        Arc::new(LangfuseBridge::new(Arc::clone(&tracer), name, agent_id))
-                            as Arc<dyn peri_agent::agent::LangfuseBridgeLike>,
-                    )
-                })
-                    as Arc<
-                        dyn Fn(
-                                String,
-                                Option<String>,
-                            )
-                                -> Option<Arc<dyn peri_agent::agent::LangfuseBridgeLike>>
-                            + Send
-                            + Sync,
-                    >
-            },
-        }
-    });
+    let langfuse_hooks = telemetry::build_langfuse_hooks(langfuse_session.as_ref(), &session_id);
 
     // stage 装配桥：从 SessionContext 投影 StageBuildInput 并补齐注入面
     //（Langfuse bridge factory 经 turn 级 hooks 构造），再调用 ACP 装配桥。
-    let ctx_for_stage = ctx.clone();
-    let bridge_factory_for_stage: Option<
-        Arc<dyn Fn() -> Arc<dyn peri_agent::agent::LangfuseBridgeLike> + Send + Sync>,
-    > = langfuse_hooks.as_ref().map(|h| {
-        let bf = Arc::clone(&h.bridge_factory);
-        let provider_display = ctx_for_stage.provider_name.clone();
-        Arc::new(move || {
-            bf(provider_display.clone(), None)
-                .expect("stage bridge_factory: hooks 存在时 bridge 构造必须成功")
-        }) as Arc<dyn Fn() -> Arc<dyn peri_agent::agent::LangfuseBridgeLike> + Send + Sync>
-    });
-    let stage_build: StageBuildFn = Arc::new(move |sbr| {
-        // compact hook 闭包在每次装配时构造（hook_groups 非空才产生动作；
-        // 与迁移前 stage_builder 内构造时机逐次一致）
-        let (compact_pre_hook, compact_post_hook) = crate::host::prompt::build_compact_hooks(
-            &ctx_for_stage.hook_groups,
-            &ctx_for_stage.cwd,
-            &ctx_for_stage.session_id,
-            &ctx_for_stage.provider_model_name,
-        );
-        crate::host::stage_builder::build_stage_context(
-            &ctx_for_stage,
-            &peri_middlewares::assembly::ProductionChainAssembler, // ZST 装配器
-            compact_pre_hook,
-            compact_post_hook,
-            sbr.cached_llm.as_ref(),
-            sbr.frozen_session,
-            sbr.event_handler,
-            sbr.agent_overrides,
-            sbr.preload_skills,
-            sbr.child_handler_factory,
-            sbr.auxiliary_model,
-            sbr.thread_persistence,
-            sbr.goal_controller,
-            sbr.task_manager,
-            sbr.on_bg_complete,
-            bridge_factory_for_stage.clone(),
-        )
-    });
+    let stage_build = stage::build_stage_bridge(&ctx, langfuse_hooks.as_ref());
 
     // EventBus forwarder 启动器（Langfuse bridge 构造留在 ACP——观测旁路；
     // biased select 顺序不变量单点保持在 crate::event::spawn_eventbus_forwarder）。
-    let forwarder_launcher: ForwarderLauncherFn = {
-        let provider_display = ctx.provider_name.clone();
-        let bridge_factory = langfuse_hooks
-            .as_ref()
-            .map(|h| Arc::clone(&h.bridge_factory));
-        Arc::new(move |handles, agent_id, on_event| {
-            let bridge: Option<LangfuseBridge> = bridge_factory
-                .as_ref()
-                .and_then(|bf| bf(provider_display.clone(), Some(agent_id.clone())))
-                .and_then(|b| {
-                    // LangfuseBridgeLike: Any 上界（L5）——trait upcasting 还原具体类型
-                    let any: Arc<dyn std::any::Any + Send + Sync> = b;
-                    any.downcast::<LangfuseBridge>().ok().map(|b| (*b).clone())
-                });
-            crate::event::spawn_eventbus_forwarder(handles, on_event, bridge)
-        })
-    };
+    let forwarder_launcher =
+        telemetry::build_forwarder_launcher(&ctx.provider_name, langfuse_hooks.as_ref());
 
     let turn = executor::TurnInput {
         event_sink,
@@ -825,115 +579,12 @@ fn take_recall_for_turn(recall_items: &mut Vec<String>, continuation: bool) -> V
     }
 }
 
-/// 构造 compact plugin hook 回调（宿主装配面职责，L5 归位自
-/// host/stage_builder.rs：hook_groups 非空时构造 `fire_pre_compact` /
-/// `fire_post_compact` 转发闭包；语义同迁移前——tokio::spawn 转发、不阻塞
-/// 管线；hook_groups 为空返回 `(None, None)`）。
-#[allow(clippy::type_complexity)]
-pub(crate) fn build_compact_hooks(
-    hook_groups: &[Vec<RegisteredHook>],
-    cwd: &str,
-    session_id: &str,
-    model: &str,
-) -> (
-    Option<Arc<dyn Fn() + Send + Sync>>,
-    Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
-) {
-    let hook_groups_flat: Vec<RegisteredHook> = hook_groups.iter().flatten().cloned().collect();
-    if hook_groups_flat.is_empty() {
-        return (None, None);
-    }
-    let cwd = cwd.to_string();
-    let sid = session_id.to_string();
-    let model = model.to_string();
-    let pre: Arc<dyn Fn() + Send + Sync> = {
-        let hooks = hook_groups_flat.clone();
-        let cwd = cwd.clone();
-        let sid = sid.clone();
-        let model = model.clone();
-        Arc::new(move || {
-            let hooks = hooks.clone();
-            let cwd = cwd.clone();
-            let sid = sid.clone();
-            let model = model.clone();
-            tokio::spawn(async move {
-                peri_middlewares::hooks::stage_firing::fire_pre_compact(
-                    &hooks, &cwd, &sid, "", &model, 0,
-                )
-                .await;
-            });
-        })
-    };
-    let post: Arc<dyn Fn(bool, usize) + Send + Sync> = {
-        let hooks = hook_groups_flat.clone();
-        let cwd = cwd.clone();
-        let sid = sid.clone();
-        let model = model.clone();
-        Arc::new(move |_compacted: bool, affected_count: usize| {
-            let hooks = hooks.clone();
-            let cwd = cwd.clone();
-            let sid = sid.clone();
-            let model = model.clone();
-            tokio::spawn(async move {
-                peri_middlewares::hooks::stage_firing::fire_post_compact(
-                    &hooks,
-                    &cwd,
-                    &sid,
-                    "",
-                    &model,
-                    affected_count,
-                )
-                .await;
-            });
-        })
-    };
-    (Some(pre), Some(post))
-}
-
 /// 本轮结束时是否允许用 `result.recall_items` 覆盖 `SessionState.recall_items`。
 ///
 /// 续跑结束时**不改变** SessionState 中的 recall（保留续跑开始前的值给后续
 /// 用户 prompt）；用户 prompt 正常回写本轮产生的 recall。
 fn recall_overwrite_allowed(continuation: bool) -> bool {
     !continuation
-}
-
-/// Returns `None` when a partial result omits existing history. A committed Full Compact
-/// explicitly replaces prior visible messages with its persisted summary, so it is accepted.
-#[cfg(test)]
-fn strip_leaked_prepends(
-    result_messages: &[peri_acp_types::messages::BaseMessage],
-    first_history_id: Option<peri_acp_types::messages::MessageId>,
-    full_compaction_committed: bool,
-) -> Option<Vec<peri_acp_types::messages::BaseMessage>> {
-    match first_history_id {
-        Some(first_id) => {
-            // Find where original history starts in result (skip leaked prepends).
-            if let Some(start) = result_messages.iter().position(|m| m.id() == first_id) {
-                Some(result_messages[start..].to_vec())
-            } else if full_compaction_committed {
-                Some(
-                    result_messages
-                        .iter()
-                        .skip_while(|m| m.is_system())
-                        .cloned()
-                        .collect(),
-                )
-            } else {
-                None
-            }
-        }
-        None => {
-            // Original history was empty — strip leading system messages (all prepends).
-            Some(
-                result_messages
-                    .iter()
-                    .skip_while(|m| m.is_system())
-                    .cloned()
-                    .collect(),
-            )
-        }
-    }
 }
 
 #[cfg(test)]
