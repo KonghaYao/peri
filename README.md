@@ -2,21 +2,103 @@
 
 # Peri Code
 
-**A coding agent built in Rust. Work in your terminal, connect your models, extend your tools.**
+### One goal. Coordinated agents. Your models.
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Built_with-Rust-orange.svg)](Cargo.toml)
-[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg)](#install)
+A native Rust coding agent for macOS, Linux, and Windows.<br>
+Bring an Anthropic or OpenAI-compatible endpoint.
 
-[Get started](#get-started) · [Documentation](https://konghayao.github.io/peri-cool/) · [Releases](https://github.com/konghayao/peri/releases) · [Contributing](#contributing)
+[**Get started ↓**](#get-started) · [Documentation](https://konghayao.github.io/peri-cool/) · [Releases](https://github.com/konghayao/peri/releases)
 
 </div>
 
-Peri Code (Perihelion) reads code, edits files, runs commands, and delegates work to subagents. It brings model configuration, tool approvals, session history, and background tasks into a terminal interface, with the same agent available through headless commands and ACP clients.
+---
 
-Use your own Anthropic or OpenAI-compatible endpoint. Extend the agent with skills, hooks, MCP servers, plugins, and JavaScript workflows.
+<div align="center">
 
-## Install
+**HIGH-LEVEL AGENT COORDINATION**
+
+From the whole delivery to the individual tool call.
+
+</div>
+
+<table>
+<tr>
+<td width="33%" valign="top">
+<h3>01 / Ultra-ADLC</h3>
+<strong>Coordinate delivery.</strong>
+<p>Discovery → design → independent review → implementation → verification.</p>
+<p>Decisions, handoffs, and acceptance evidence stay with the project.</p>
+<code>/ultra-adlc</code>
+</td>
+<td width="33%" valign="top">
+<h3>02 / Ultracode</h3>
+<strong>Orchestrate a team.</strong>
+<p>Parallel investigations. Staged execution. Models chosen per agent.</p>
+<p>Track workflow progress and resume saved runs.</p>
+<code>/ultracode</code>
+</td>
+<td width="33%" valign="top">
+<h3>03 / PTC</h3>
+<strong>Compose tool calls.</strong>
+<p>Use JavaScript to call, filter, and combine tools.</p>
+<p>Keep intermediate data in code; bring concise results back to the model.</p>
+<code>/ptc</code>
+</td>
+</tr>
+</table>
+
+```text
+/ultracode Review this branch for correctness, performance, and test coverage
+in parallel. Compare the findings and return an actionable review.
+```
+
+<table>
+<tr>
+<td colspan="2">
+<h3>🔌 MCPP Support</h3>
+<strong>Connect tools, expertise, and conversations.</strong>
+<p>Remote Skills &amp; Agents · Version-aware discovery caching · Dynamic MCP · Channels</p>
+Load capabilities as work evolves. Receive messages and approval responses through compatible Channel servers.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<h3>🛠️ MetaHarness</h3>
+<strong>Shape the agent itself.</strong>
+<p>Replace prompt sections. Select middleware capabilities. Control built-in agent definitions.</p>
+</td>
+<td width="50%" valign="top">
+<h3>🧩 MCP Apps Support</h3>
+<strong>Connect interactive apps.</strong>
+<p>App resources and interactions over ACP, with Peri's tool permissions. Your compatible host supplies the UI.</p>
+</td>
+</tr>
+<tr>
+<td valign="top">
+<h3>📄 Artifacts</h3>
+<strong>Give your results a URL.</strong>
+<p>Publish reports, charts, and progress pages from HTML or Markdown through a hosting service. Share public pages beyond the terminal.</p>
+</td>
+<td valign="top">
+<h3>⏱️ Goals &amp; Automation</h3>
+<strong>Keep the work moving.</strong>
+<p>Track goals across turns. Schedule recurring checks and reports while Peri is running.</p>
+</td>
+</tr>
+</table>
+
+<div align="center">
+
+**The essentials, included.**
+
+Streaming Markdown · Compaction · LSP · Langfuse<br>
+Skills & hooks · Plugins · Model profiles<br>
+Rewind · Fork · Resume<br>
+**Terminal · Headless · ACP · Web PTY**
+
+</div>
+
+## Get started
 
 **macOS / Linux**
 
@@ -30,138 +112,35 @@ curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install
 irm https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.ps1 | iex
 ```
 
-Follow the installer's PATH instructions, then open a new terminal if needed. To update an existing installation:
+Enter your project and run `peri`. Follow the installer’s PATH instructions and the first-run model setup, then restart Peri after saving.
 
 ```bash
-peri update
+peri                         # Start in your project
+peri -c                      # Continue your last session
+peri -p "Review this branch"  # Run a task and exit
+peri update                  # Update Peri
 ```
 
-You can also choose a version from [Releases](https://github.com/konghayao/peri/releases), or [build from source](#build-from-source).
+Default mode automatically approves tool calls. Use `--permission-mode default` for approval prompts.
 
-## Get started
+<details>
+<summary><strong>Configuration & runtime notes</strong></summary>
 
-Start in the repository you want to work on:
+- `/login` manages providers; `/model` selects profiles; `/threads` opens saved sessions.
+- Settings: `~/.peri/settings.json`. Sessions: `~/.peri/threads/threads.db`. Override with `--config-file` and `--db-path`.
+- `peri acp --cwd /path/to/project` connects ACP clients; `peri web --host 127.0.0.1` starts a local browser terminal.
+- Workflow and PTC require Node.js. PTC executes ordinary Node.js code, not a sandbox. Extensions may have additional dependencies.
+- Claude Code configuration import and compatibility vary by feature. Cache behavior depends on the provider and workload.
+- Coordination modes use built-in skills and the shared runtime. MetaHarness changes apply to new sessions; MCP Apps requires a compatible host.
 
-```bash
-cd /path/to/your/project
-peri
-```
+Full options: `peri --help`. More: [Documentation](https://konghayao.github.io/peri-cool/).
 
-Peri defaults to Bypass and automatically approves tool calls. Use `--permission-mode default` when you want approval prompts for sensitive tool calls.
+</details>
 
-On first launch, the setup wizard lets you choose a language and configure a model provider, or migrate from Claude Code configuration. Have your API key, endpoint, and model names ready. After saving the initial setup, exit and restart `peri` to load it into the agent session.
+<details>
+<summary><strong>Build & contribute</strong></summary>
 
-Try a focused first task:
-
-```text
-Explain how this project's tests are organized. Read the relevant configuration,
-identify the smallest useful test command, and do not modify any files.
-```
-
-Then ask for a change with a clear scope and a way to verify it. The conversation shows tool activity and results as the agent works.
-
-Useful commands inside the TUI:
-
-| Command | Purpose |
-| --- | --- |
-| `/login` | Add or edit model providers |
-| `/model` | Select a model profile and adjust its settings |
-| `/threads` | Browse saved sessions |
-| `/mcp` | Inspect MCP servers |
-| `/status` | View service status |
-
-## What you can do
-
-- **Work interactively.** Read streaming Markdown, code blocks, tables, and tool results; reference files from the input area and manage tasks through TUI panels.
-- **Choose your models.** Configure providers and model profiles, then change the active model from the terminal.
-- **Continue longer tasks.** Resume saved sessions, use goal tracking, and let context compaction reduce accumulated conversation history. Prompt caching depends on the provider, model, and workload.
-- **Delegate work.** Run subagents in the background, or define parallel and staged execution in JavaScript workflows.
-- **Extend the toolset.** Load skills, hooks, plugins, and MCP servers. Deferred tool search exposes additional tools when needed; dynamic MCP supports session-scoped connections.
-- **Reuse familiar configuration.** Import Claude Code configuration and use supported skill, hook, MCP, plugin, and agent formats. Compatibility depends on the feature and configuration involved.
-- **Inspect execution.** Use LSP integration for code intelligence and optional Langfuse tracing for model and tool activity.
-
-The core application ships as a native binary. Extensions can require additional runtimes: JavaScript workflows and programmatic tool calling use Node.js, and MCP servers or plugins may have their own dependencies.
-
-## Beyond the interactive terminal
-
-### Resume a session
-
-```bash
-# Continue the most recent conversation in this directory
-peri -c
-
-# Resume a specific session
-peri -r <session-id>
-```
-
-### Run a prompt and exit
-
-After configuring a provider, use print mode for scripts and one-off tasks:
-
-```bash
-peri -p "Explain the architecture of this repository"
-peri -p "Summarize the test configuration" --output-format json
-```
-
-Print mode also supports `stream-json` output and `--max-turns` to limit agentic rounds. These commands use the default Bypass permission mode and may execute tools.
-
-### Connect an ACP client
-
-Configure your ACP-compatible client to launch:
-
-```bash
-peri acp --cwd /path/to/your/project
-```
-
-The terminal, print mode, and ACP stdio entry points share the same host and agent execution path.
-
-### Open a browser terminal
-
-```bash
-peri web --host 127.0.0.1
-```
-
-This starts a local Web PTY server. See the [Web Terminal guide](peri-web-pty/README.md) for details.
-
-### Choose configuration and storage paths
-
-Peri stores global settings in `~/.peri/settings.json` and session data in `~/.peri/threads/threads.db`. Override them when you need a separate setup:
-
-```bash
-peri --config-file ./peri-settings.json --db-path ./peri-sessions.db
-```
-
-These options apply to TUI, print, and ACP modes. Relative paths resolve from the launch directory; an explicitly supplied database path fails visibly if it cannot be opened. `--settings` is a separate settings/env input, not a replacement for `--config-file`.
-
-Run `peri --help` or `peri <command> --help` for the full CLI reference.
-
-## How it fits together
-
-ACP is the boundary between the client interface and agent execution:
-
-```mermaid
-flowchart TD
-    TUI[Terminal UI] --> ACP[ACP host]
-    PRINT[Print mode] --> ACP
-    IDE[ACP client / stdio] --> ACP
-    ACP --> CTRL[Controller]
-    CTRL --> RT[Runtime]
-    RT --> AGENT[Agent loop]
-    AGENT --> MODEL[Model adapters]
-    AGENT --> MW[Middleware: tools, skills, MCP, plugins]
-```
-
-The host assembles session capabilities, the runtime coordinates sessions, and the agent loop drives model requests and tool execution. Langfuse observes execution through a separate telemetry path.
-
-See the [architecture](docs/design/architecture.md), [design index](docs/design/README.md), and [code index](docs/code-index/) for implementation details.
-
-## Contributing
-
-Peri is developed with AI assistance; humans remain responsible for product direction, review, and releases. Changes should be grounded in repository behavior and include appropriate verification.
-
-### Build from source
-
-With a Rust toolchain supporting Edition 2024 and the platform's native build tools installed:
+Use a Rust toolchain supporting Edition 2024 and your platform's native build tools.
 
 ```bash
 git clone https://github.com/konghayao/peri.git
@@ -170,24 +149,14 @@ cargo build -p peri-tui --release
 cargo run -p peri-tui
 ```
 
-The release binary is written to `target/release/peri` (`peri.exe` on Windows). Documentation and TUI E2E tooling live in separate Git submodules.
+AI-assisted development, with human responsibility for review and release.
 
-Before making a change, read [repository guidance](CLAUDE.md) and the relevant module guide. Use these entry points:
+[Repository guidance](CLAUDE.md) · [Architecture](docs/design/architecture.md) · [Code index](docs/code-index/) · [Standards](docs/standards/index.md) · [Testing](docs/standards/testing.md)
 
-| Looking for | Start here |
-| --- | --- |
-| Engineering rules and architecture contracts | [Standards](docs/standards/index.md) |
-| Current and approved target designs | [Designs](docs/design/README.md) |
-| Source files and behavior entry points | [Code index](docs/code-index/) |
-| Active work and acceptance criteria | [Issues](spec/issues/) |
-| Test scope and commands | [Testing standards](docs/standards/testing.md) |
+</details>
 
-## Acknowledgments
+---
 
-Built on [Ratatui](https://ratatui.rs), [ratatui-kit](https://github.com/KonghaYao/ratatui-kit), [Tokio](https://tokio.rs), and the [Agent Client Protocol](https://agentclientprotocol.com), with [Langfuse](https://langfuse.com) for observability.
-
-Thanks to [Claude Code Best](https://github.com/claude-code-best/claude-code) for community feedback, and to [Superpowers](https://github.com/obra/superpowers) and [Matt Pocock's Skills](https://github.com/mattpocock/skills) for their contributions to the project's engineering workflow.
-
-## License
+Built with [Ratatui](https://ratatui.rs), [ratatui-kit](https://github.com/KonghaYao/ratatui-kit), [Tokio](https://tokio.rs), [ACP](https://agentclientprotocol.com), and [Langfuse](https://langfuse.com). Thanks to [Claude Code Best](https://github.com/claude-code-best/claude-code), [Superpowers](https://github.com/obra/superpowers), and [Matt Pocock's Skills](https://github.com/mattpocock/skills).
 
 [Apache 2.0](LICENSE)
