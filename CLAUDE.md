@@ -47,7 +47,7 @@ Crate 拓扑：`peri-tui → peri-acp → peri-agent`；`peri-middlewares` 由 A
 cargo build --workspace
 cargo test -p <crate> --lib -- <test_name>
 cargo test --workspace --doc
-cargo run -p peri-tui -- -a
+cargo run -p peri-tui
 lefthook run pre-commit
 cargo clippy --workspace --all-targets -- -D warnings # 非常重要
 ```

@@ -502,7 +502,7 @@ fn json_grammar_failures_are_single_stable_process_errors() {
             "--json",
         ],
         &[
-            "--approve",
+            "--bare",
             "--definitely-invalid",
             "meta",
             "session",
@@ -570,7 +570,6 @@ fn malformed_prefix_meta_shape_has_stable_real_process_errors() {
 fn every_unrelated_top_level_option_is_rejected_by_real_process() {
     let sandbox = TempDir::new().unwrap();
     let cases: &[&[&str]] = &[
-        &["--approve"],
         &["--print=prompt"],
         &["--output-format", "json"],
         &["--max-turns", "1"],

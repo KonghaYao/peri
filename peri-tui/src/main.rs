@@ -24,10 +24,6 @@ use peri_tui::kit::panic::init_panic_notify;
 #[derive(Parser)]
 #[command(name = "peri", version, about = "Peri AI Agent")]
 struct Cli {
-    /// 启用 HITL 审批模式（等同 --permission-mode default）
-    #[arg(short = 'a', long = "approve")]
-    approve: bool,
-
     // ── 非交互模式 ──
     /// 非交互模式：输出响应后退出
     #[arg(short = 'p', long = "print")]
@@ -428,8 +424,7 @@ fn validate_cli(cli: &Cli) -> std::result::Result<(), &'static str> {
         return Err("--print cannot be used with a subcommand");
     }
     if matches!(cli.command, Some(Commands::Meta { .. }))
-        && (cli.approve
-            || cli.print.is_some()
+        && (cli.print.is_some()
             || cli.output_format.is_some()
             || cli.max_turns.is_some()
             || cli.bare
@@ -667,7 +662,6 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => match run_tui(TuiOptions {
-            approve: cli.approve,
             permission_mode: cli.permission_mode,
             skip_permissions: cli.skip_permissions,
             model: cli.model,
@@ -821,7 +815,6 @@ fn main() -> Result<()> {
 /// TUI 模式启动选项
 #[allow(dead_code)] // 部分 CLI 桥接字段尚未接入
 struct TuiOptions {
-    approve: bool,
     permission_mode: Option<String>,
     skip_permissions: bool,
     model: Option<String>,
@@ -865,7 +858,6 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
         // ratatui-kit fullscreen() 自行管理 raw mode / alternate screen / 事件循环。
         // 外层不做任何终端操作。
         let launch_opts = peri_tui::launch::TuiLaunchOptions {
-            approve: opts.approve,
             permission_mode: opts.permission_mode.clone(),
             skip_permissions: opts.skip_permissions,
             model: opts.model.clone(),

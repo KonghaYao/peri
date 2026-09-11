@@ -20,7 +20,6 @@ use peri_acp_types::permission::PermissionMode;
 /// 字段语义与 `main.rs::TuiOptions` 一致，但放在 lib 层供 kit 路径复用。
 #[derive(Default, Clone)]
 pub struct TuiLaunchOptions {
-    pub approve: bool,
     pub permission_mode: Option<String>,
     pub skip_permissions: bool,
     pub model: Option<String>,
@@ -65,8 +64,6 @@ pub async fn build_app_and_acp(
                     PermissionMode::Bypass
                 }
             }
-        } else if opts.approve {
-            PermissionMode::Default
         } else {
             PermissionMode::Bypass
         };

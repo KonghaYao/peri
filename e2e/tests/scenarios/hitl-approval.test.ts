@@ -1,13 +1,13 @@
 /**
  * 场景测试: HITL 审批弹窗
  *
- * 验证 -a 模式下敏感工具调用触发审批弹窗：
+ * 验证 Default 权限模式下敏感工具调用触发审批弹窗：
  * - 弹窗标题 "审批请求" / "Approval Required"
  * - 工具信息（名称、参数）可读
  * - Enter 批准后工具继续执行
  * - 工具执行结果正常显示
  *
- * 注意：此测试需要 -a 模式启动 peri，审批交互涉及 HITL 中间件。
+ * 注意：此测试需要 Default 权限模式启动 peri，审批交互由 PermissionMiddleware 处理。
  * 审批超时默认 120s，测试需在超时前完成交互。
  */
 import { describe, it, expect, afterEach } from "vitest";
