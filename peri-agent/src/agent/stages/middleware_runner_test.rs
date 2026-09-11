@@ -153,7 +153,7 @@ async fn assert_before_agent_reconciles_replacement(fail: bool) {
     chain.add(Box::new(ObserveReplacement(Arc::clone(&observed))));
     ctx.runtime.middleware_chain = Arc::new(chain);
 
-    let result = run_before_agent(&ctx).await;
+    let result = run_before_agent(&ctx, &[]).await;
     assert_eq!(result.is_err(), fail);
     assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst), !fail);
     assert_eq!(*ctx.recall_buffer.read(), vec!["replacement recall"]);

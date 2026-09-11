@@ -54,6 +54,40 @@ pub struct TransportEventSink {
 }
 
 impl TransportEventSink {
+    pub(crate) async fn push_user_input_started(
+        &self,
+        session_id: &str,
+        generation: String,
+        request_id: String,
+    ) -> Result<(), crate::transport::types::AcpError> {
+        if !self
+            .caps_registry
+            .get(session_id)
+            .is_some_and(|caps| caps.user_input_queue)
+        {
+            return Err(crate::transport::types::AcpError::new(
+                -32601,
+                "user input queue capability not negotiated",
+            ));
+        }
+        let event = crate::event::AcpEvent::UserInputRunStarted {
+            generation,
+            request_id,
+        };
+        let event_json = serde_json::to_string(&event).map_err(|_| {
+            crate::transport::types::AcpError::new(-32603, "user input start serialization failed")
+        })?;
+        self.transport
+            .send_notification(
+                "peri/agent_event",
+                json!({
+                    "sessionId": session_id,
+                    "event_json": event_json,
+                }),
+            )
+            .await
+    }
+
     pub fn new(
         transport: std::sync::Arc<dyn AcpTransport>,
         caps_registry: Arc<DashMap<String, PeriCaps>>,
@@ -137,6 +171,21 @@ impl EventSink for TransportEventSink {
                 );
                 PeriCaps::all_enabled()
             });
+        if matches!(
+            event,
+            ExecutorEvent::UserInputQueueChanged(_)
+                | ExecutorEvent::UserInputRunStarted { .. }
+                | ExecutorEvent::UserInputDelivered { .. }
+        ) {
+            if self
+                .caps_registry
+                .get(session_id)
+                .is_some_and(|caps| caps.user_input_queue)
+            {
+                self.push_legacy_event(session_id, event).await;
+            }
+            return;
+        }
         tracing::debug!(
             target: "acp.event_sink",
             session_id = %session_id,
@@ -234,7 +283,7 @@ impl EventSink for TransportEventSink {
                 );
                 PeriCaps::all_enabled()
             });
-        if caps.agent_event_done {
+        if caps.agent_event_done || caps.user_input_queue {
             debug!(session_id = %session_id, "EventSink: sending agent_event_done");
             let mut payload = json!({ "sessionId": session_id, "stopReason": stop_reason });
             // requestId 为可选字段：有则回带（TUI stale TurnInterrupted 配对），

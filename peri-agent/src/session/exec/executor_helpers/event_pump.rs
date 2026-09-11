@@ -51,6 +51,13 @@ async fn pump_process(
     session_id: &str,
     effective_context_window: u32,
 ) {
+    // 队列快照由会话订阅投递，运行开始由宿主在执行前可靠发送；本轮泵跳过两者。
+    if matches!(
+        exec_event,
+        ExecutorEvent::UserInputQueueChanged(_) | ExecutorEvent::UserInputRunStarted { .. }
+    ) {
+        return;
+    }
     // Capture error_kind from TurnEnded for on_turn_end at pump tail
     if let ExecutorEvent::TurnEnded { error_kind, .. } = exec_event {
         *last_error = error_kind.as_ref().map(|k| format!("{:?}", k));

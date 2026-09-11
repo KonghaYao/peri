@@ -81,6 +81,14 @@ impl ServerLoop<'_> {
                     &cont_tx,
                 )
                 .await;
+                super::user_input::schedule_mailbox(
+                    &prompt_session_id,
+                    &sessions,
+                    &prompt_locks,
+                    &cfg,
+                    &transport,
+                    &cont_tx,
+                );
                 if let Err(error) = transport.send_response(id, result).await {
                     tracing::warn!(%error, "prompt terminal response send failed");
                     return;
@@ -184,6 +192,18 @@ impl ServerLoop<'_> {
             let mut sessions = sessions.lock().await;
             handle_request(&method, &params, cfg, &mut sessions, transport).await
         };
+        if result.is_ok() && super::user_input::starts_execution(&method) {
+            if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
+                super::user_input::schedule_mailbox(
+                    session_id,
+                    self.sessions,
+                    self.prompt_locks,
+                    self.cfg,
+                    self.transport,
+                    self.cont_tx,
+                );
+            }
+        }
         if method == "initialize" && result.is_ok() {
             connection.lock().await.commit_initialize();
         }

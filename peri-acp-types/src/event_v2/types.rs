@@ -46,6 +46,14 @@ impl fmt::Display for TurnErrorReason {
 /// critical 通道有界，满时降级丢弃。所有变体强制携带 `turn_id` 和 `agent_id`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RenderEvent {
+    /// 用户输入已进入 canonical transcript，与后续 assistant 输出保持 FIFO。
+    UserInputDelivered {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        generation: String,
+        input_id: String,
+        content: crate::messages::MessageContent,
+    },
     /// LLM 输出文本块（流式，可能拆分为多次）
     ///
     /// `message_id`：所属 AI 消息的稳定 ID（一次 LLM 调用的 assistant 输出）。
@@ -129,6 +137,7 @@ impl RenderEvent {
     pub fn turn_id(&self) -> TurnId {
         match self {
             Self::TextChunk { turn_id, .. }
+            | Self::UserInputDelivered { turn_id, .. }
             | Self::ThinkingChunk { turn_id, .. }
             | Self::ToolStarted { turn_id, .. }
             | Self::ToolEnded { turn_id, .. }
@@ -142,6 +151,7 @@ impl RenderEvent {
     pub fn agent_id(&self) -> AgentId {
         match self {
             Self::TextChunk { agent_id, .. }
+            | Self::UserInputDelivered { agent_id, .. }
             | Self::ThinkingChunk { agent_id, .. }
             | Self::ToolStarted { agent_id, .. }
             | Self::ToolEnded { agent_id, .. }
@@ -163,6 +173,19 @@ impl RenderEvent {
 /// biased select! 无法保证跨通道顺序。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StateEvent {
+    /// 已取得执行权，客户端须在 HITL 请求到达前建立本次交互身份。
+    UserInputRunStarted {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        generation: String,
+        request_id: String,
+    },
+    /// 会话级待发队列投影；正文只允许进入协商过的专用客户端通道。
+    UserInputQueueChanged {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        snapshot: crate::session::UserInputQueueSnapshot,
+    },
     /// Low-frequency protocol display event emitted at the queue→transcript boundary.
     ProtocolEvent {
         turn_id: TurnId,
@@ -232,6 +255,8 @@ impl StateEvent {
     pub fn turn_id(&self) -> TurnId {
         match self {
             Self::ProtocolEvent { turn_id, .. }
+            | Self::UserInputRunStarted { turn_id, .. }
+            | Self::UserInputQueueChanged { turn_id, .. }
             | Self::StateSnapshot { turn_id, .. }
             | Self::GoalSnapshot { turn_id, .. }
             | Self::SyntheticUserMessage { turn_id, .. }
@@ -243,6 +268,8 @@ impl StateEvent {
     pub fn agent_id(&self) -> AgentId {
         match self {
             Self::ProtocolEvent { agent_id, .. }
+            | Self::UserInputRunStarted { agent_id, .. }
+            | Self::UserInputQueueChanged { agent_id, .. }
             | Self::StateSnapshot { agent_id, .. }
             | Self::GoalSnapshot { agent_id, .. }
             | Self::SyntheticUserMessage { agent_id, .. }

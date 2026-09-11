@@ -2,149 +2,161 @@
 
 # Peri Code
 
-**A Rust-built coding agent — fast, lean, Claude Code compatible, any LLM.**
+### One goal. Coordinated agents. Your models.
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Rust](https://img.shields.io/badge/Built%20with-Rust%20🦀-orange.svg)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg)](#install)
-[![Models](https://img.shields.io/badge/LLMs-Anthropic%20%7C%20DeepSeek%20%7C%20GLM%20%7C%20Qwen-green.svg)](#why-peri)
-[![Stars](https://img.shields.io/github/stars/konghayao/peri?style=social)](https://github.com/konghayao/peri)
+A native Rust coding agent for macOS, Linux, and Windows.<br>
+Bring an Anthropic or OpenAI-compatible endpoint.
+
+[**Get started ↓**](#get-started) · [Documentation](https://konghayao.github.io/peri-cool/) · [Releases](https://github.com/konghayao/peri/releases)
 
 </div>
 
-One **13 MB binary**, **~50 MB of RAM**, **98% cache hits** — bring any API key (DeepSeek, GLM, Qwen, Anthropic) and switch on the fly. Your Claude Code config works today: skills, hooks, MCP, plugins, sub-agents. **Zero migration, zero lock-in.**
-
-We believe the agent pattern is proven — planning, tool use, context management, delegation. What's missing is a harness that makes this complexity feel simple: fast startup, any provider, every surface. So we rebuilt it from scratch in Rust, with ACP at the core. We are the best like Claude Code. The foundation every agent deserves. Three things we bet on:
-
-## Why Perihelion
-
-### ⚡ Perf Care
-
-The agent that respects your machine — not the one that borrows it.
-
-- 🦀 **Rust, not Node.js** — 13 MB binary, ~50 MB RAM. Starts instantly, stays out of your way
-- ⚡ **95–99% cache hit rate** — Frozen system prompt never recomputes. Tokens you don't pay for
-- 🗜️ **Auto Compact** — Hours-long sessions stay lean automatically. Micro at 70%, full at 85% budget
-
-### 🧠 Harness Design
-
-Built for agents that plan, delegate, and finish — not just reply.
-
-- 🤖 **7 Sub-agents + Fork Mode** — coder, explorer, plan, code-reviewer, web-researcher, verification, general-purpose. Fork clones context for deep follow-up. All run in background
-- 🔄 **Ultracode Workflow** — Split one task into N agents, merge results. Pipeline, parallel, or sequential — one command
-- 🎯 **Goal Tracking** — Declare a goal, the agent keeps going across turns. No babysitting
-- 🔍 **Deferred Tool Search** — 12 core tools visible, the rest on demand. Lean prompt, hot cache, cheap tokens
-- 🌐 **Any LLM, no lock-in** — Anthropic, OpenAI, DeepSeek, GLM, Qwen. Swap mid-session, bring your own key
-- 🔌 **Claude Code compatible** — Skills, hooks, MCP, plugins. Point at your config and it just works
-
-### 🖥️ TUI & Ecosystem
-
-Every surface you need, everywhere you work.
-
-- 🪟 **macOS · Linux · Windows** — One binary. Native ConPTY, true color, cross-platform spawn
-- 📝 **Streaming Markdown** — Code blocks, tables, diffs render as the agent types. Read while it writes
-- 📡 **Channel Support** — WeChat, Slack, Feishu. Reply in-thread, terminal stays synced
-- 🌐 **Web Terminal** (`peri web`) — Browser shell, one command. xterm.js + split panes
-- 🔧 **LSP + Langfuse** — Code intelligence and per-turn tracing out of the box
-
 ---
 
-## Architecture
+<div align="center">
 
-Perihelion is not just a TUI. It's a layered platform where the **agent core** is decoupled from the **frontend** via the [Agent Client Protocol](https://agentclientprotocol.com). The same core powers three entry points:
+**HIGH-LEVEL AGENT COORDINATION**
 
-```mermaid
-graph TD
-    TUI["peri-tui<br/>Terminal UI"]
-    IDE["IDE ACP client"]
-    PRINT["Print / headless"]
-    ACP["peri-acp<br/>unified host · stdio/mpsc · protocol mapping"]
-    CTRL["peri-controller<br/>routing · event envelope · Langfuse bridge"]
-    RUNTIME["peri-runtime<br/>session/turn routing"]
-    AGENT["peri-agent<br/>session runtime · ReAct loop"]
-    MW["peri-middlewares<br/>tools · MCP · skills · HITL · plugins"]
-    WF["peri-workflow<br/>Node JSON-RPC orchestration"]
-    LF["langfuse-client"]
+From the whole delivery to the individual tool call.
 
-    TUI -->|MpscTransport| ACP
-    IDE -->|ACP stdio| ACP
-    PRINT -->|shared host/config| ACP
-    ACP --> CTRL --> RUNTIME --> AGENT
-    AGENT --> MW
-    MW --> WF
-    ACP -.->|pre-protocol observer| CTRL
-    CTRL -.->|non-blocking telemetry| LF
+</div>
+
+<table>
+<tr>
+<td width="33%" valign="top">
+<h3>01 / Ultra-ADLC</h3>
+<strong>Coordinate delivery.</strong>
+<p>Discovery → design → independent review → implementation → verification.</p>
+<p>Decisions, handoffs, and acceptance evidence stay with the project.</p>
+<code>/ultra-adlc</code>
+</td>
+<td width="33%" valign="top">
+<h3>02 / Ultracode</h3>
+<strong>Orchestrate a team.</strong>
+<p>Parallel investigations. Staged execution. Models chosen per agent.</p>
+<p>Track workflow progress and resume saved runs.</p>
+<code>/ultracode</code>
+</td>
+<td width="33%" valign="top">
+<h3>03 / PTC</h3>
+<strong>Compose tool calls.</strong>
+<p>Use JavaScript to call, filter, and combine tools.</p>
+<p>Keep intermediate data in code; bring concise results back to the model.</p>
+<code>/ptc</code>
+</td>
+</tr>
+</table>
+
+```text
+/ultracode Review this branch for correctness, performance, and test coverage
+in parallel. Compare the findings and return an actionable review.
 ```
 
-**Architecture boundary**: `peri-tui / print / IDE → peri-acp host → peri-controller → peri-runtime → peri-agent`; middleware capabilities are assembled per session, and Langfuse remains a non-blocking observer rather than part of the business event path. The root workspace membership is defined only by `Cargo.toml`.
+<table>
+<tr>
+<td colspan="2">
+<h3>🔌 MCPP Support</h3>
+<strong>Connect tools, expertise, and conversations.</strong>
+<p>Remote Skills &amp; Agents · Version-aware discovery caching · Dynamic MCP · Channels</p>
+Load capabilities as work evolves. Receive messages and approval responses through compatible Channel servers.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<h3>🛠️ MetaHarness</h3>
+<strong>Shape the agent itself.</strong>
+<p>Replace prompt sections. Select middleware capabilities. Control built-in agent definitions.</p>
+</td>
+<td width="50%" valign="top">
+<h3>🧩 MCP Apps Support</h3>
+<strong>Connect interactive apps.</strong>
+<p>App resources and interactions over ACP, with Peri's tool permissions. Your compatible host supplies the UI.</p>
+</td>
+</tr>
+<tr>
+<td valign="top">
+<h3>📄 Artifacts</h3>
+<strong>Give your results a URL.</strong>
+<p>Publish reports, charts, and progress pages from HTML or Markdown through a hosting service. Share public pages beyond the terminal.</p>
+</td>
+<td valign="top">
+<h3>⏱️ Goals &amp; Automation</h3>
+<strong>Keep the work moving.</strong>
+<p>Track goals across turns. Schedule recurring checks and reports while Peri is running.</p>
+</td>
+</tr>
+</table>
 
-**One core, three entry paths.** Use `peri` for TUI, `peri -p <prompt>` for print/headless execution, and `peri acp` for IDE/stdio clients. All three share configuration and database path handling; ACP stdio and TUI requests converge on the same host dispatch path.
+<div align="center">
 
----
+**The essentials, included.**
 
-## Install
+Streaming Markdown · Compaction · LSP · Langfuse<br>
+Skills & hooks · Plugins · Model profiles<br>
+Rewind · Fork · Resume<br>
+**Terminal · Headless · ACP · Web PTY**
 
-Binaries available for macOS (x86_64 / Apple Silicon), Linux (x86_64 / aarch64 / riscv64), and Windows (x86_64).
+</div>
+
+## Get started
+
+**macOS / Linux**
 
 ```bash
-# macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.sh | bash
-
 ```
 
-```bash
-# Windows (PowerShell)
+**Windows PowerShell**
+
+```powershell
 irm https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.ps1 | iex
 ```
 
-```bash
-# start peri
-peri
+Enter your project and run `peri`. Follow the installer’s PATH instructions and the first-run model setup, then restart Peri after saving.
 
-# self-update
-peri update
+```bash
+peri                         # Start in your project
+peri -c                      # Continue your last session
+peri -p "Review this branch"  # Run a task and exit
+peri update                  # Update Peri
 ```
 
-First launch guides you through model and API key configuration — no config file editing required.
+Default mode automatically approves tool calls. Use `--permission-mode default` for approval prompts.
 
-### CLI 全局参数（路径重定向）
+<details>
+<summary><strong>Configuration & runtime notes</strong></summary>
 
-- `--config-file <path>`（别名 `--configFile`）— 重定向全局配置文件（默认 `~/.peri/settings.json`），TUI / `-p` print / `peri acp` 三路径的配置读取与保存均跟随；相对路径按启动时 cwd 解析。
-- `--db-path <path>`（别名 `--dbPath`）— 重定向 SQLite 会话数据库（默认 `~/.peri/threads/threads.db`）；显式指定路径打开失败时直接报错（不 fallback 临时目录），TUI/print/acp 均以非零码退出。
-- `--settings <file|json>` 语义不同：仅注入 env 字段（接受 JSON 字符串），不改变配置读写路径；`-p` 模式下 `--settings` 全权替换配置加载，`--config-file` 仍负责 env 注入与保存目标。
+- `/login` manages providers; `/model` selects profiles; `/threads` opens saved sessions.
+- Settings: `~/.peri/settings.json`. Sessions: `~/.peri/threads/threads.db`. Override with `--config-file` and `--db-path`.
+- `peri acp --cwd /path/to/project` connects ACP clients; `peri web --host 127.0.0.1` starts a local browser terminal.
+- Workflow and PTC require Node.js. PTC executes ordinary Node.js code, not a sandbox. Extensions may have additional dependencies.
+- Claude Code configuration import and compatibility vary by feature. Cache behavior depends on the provider and workload.
+- Coordination modes use built-in skills and the shared runtime. MetaHarness changes apply to new sessions; MCP Apps requires a compatible host.
+
+Full options: `peri --help`. More: [Documentation](https://konghayao.github.io/peri-cool/).
+
+</details>
+
+<details>
+<summary><strong>Build & contribute</strong></summary>
+
+Use a Rust toolchain supporting Edition 2024 and your platform's native build tools.
+
+```bash
+git clone https://github.com/konghayao/peri.git
+cd peri
+cargo build -p peri-tui --release
+cargo run -p peri-tui
+```
+
+AI-assisted development, with human responsibility for review and release.
+
+[Repository guidance](CLAUDE.md) · [Architecture](docs/design/architecture.md) · [Code index](docs/code-index/) · [Standards](docs/standards/index.md) · [Testing](docs/standards/testing.md)
+
+</details>
 
 ---
 
-## Built by AI, Published by Human
+Built with [Ratatui](https://ratatui.rs), [ratatui-kit](https://github.com/KonghaYao/ratatui-kit), [Tokio](https://tokio.rs), [ACP](https://agentclientprotocol.com), and [Langfuse](https://langfuse.com). Thanks to [Claude Code Best](https://github.com/claude-code-best/claude-code), [Superpowers](https://github.com/obra/superpowers), and [Matt Pocock's Skills](https://github.com/mattpocock/skills).
 
-Perihelion's code is primarily AI-assisted, with human responsibility for product direction, review, and release. The repository keeps its engineering knowledge in explicit, scoped facts rather than accumulating incident notes in one root prompt:
-
-| Knowledge | Canonical location |
-|---|---|
-| Stable engineering rules and cross-crate contracts | `docs/standards/` |
-| Approved current and target designs | `docs/design/` |
-| Non-authoritative guides and operational references | `docs/reference/` |
-| Current implementation navigation | `docs/code-index/` |
-| Active changes, defects, and acceptance status | `spec/issues/` |
-| Historical problem records | `spec/global/problems.md` |
-| Repository and module routing | root/module `CLAUDE.md` and `AGENTS.md` |
-
-A non-obvious constraint discovered during a fix is promoted only when it is stable: rules go to standards, behavior navigation goes to code-index, and temporary investigation stays in the active spec. Root guidance files remain small routers so every agent reaches the same canonical source instead of inheriting duplicated “TRAP” narratives.
-
----
-
-## Acknowledgments
-
-- [Claude Code Best](https://github.com/claude-code-best/claude-code) — community support and feedback
-- [Superpowers](https://github.com/obra/superpowers) & [Matt Pocock's Skills](https://github.com/mattpocock/skills) — the skill suites that drive Perihelion's AI engineering workflow
-- [ACP](https://agentclientprotocol.com) — open protocol for agent-IDE communication
-- [rmcp](https://github.com/anthropics/rmcp) — Rust MCP client library
-- [ratatui-kit](https://github.com/KonghaYao/ratatui-kit) — React-style component framework powering the entire TUI (components, hooks, state atoms, routing, the `element!` macro)
-- [Ratatui](https://ratatui.rs) — terminal rendering backend
-- [Tokio](https://tokio.rs)
-- [Langfuse](https://langfuse.com) — LLM observability
-- [Zed](https://zed.dev) — first ACP-compatible IDE
-
-## License
-
-Apache 2.0
+[Apache 2.0](LICENSE)

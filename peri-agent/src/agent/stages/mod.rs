@@ -58,6 +58,7 @@ pub struct SessionHandle {
     pub turn: Arc<TurnContext>,
     pub transcript: Arc<RwLock<MessageTranscript>>,
     pub queue: MessageQueue,
+    pub user_input_mailbox: Option<Arc<crate::session::user_input_mailbox::UserInputMailbox>>,
     pub agent_id: AgentId,
     /// metrics/tracing 用键值对（不作为 middleware hook 的隐式共享协议）
     pub session_context: Arc<RwLock<HashMap<String, String>>>,
@@ -164,6 +165,7 @@ impl StageContext {
                 turn: turn_arc,
                 transcript,
                 queue,
+                user_input_mailbox: None,
                 agent_id: AgentId::new(),
                 session_context: sctx,
             },
@@ -211,6 +213,7 @@ impl StageContext {
                 turn: Arc::new(turn),
                 transcript,
                 queue,
+                user_input_mailbox: None,
                 agent_id: AgentId::new(),
                 session_context: Arc::new(RwLock::new(std::collections::HashMap::new())),
             },
@@ -473,6 +476,8 @@ pub struct ReceiveOutput {
     pub consumed_count: usize,
     /// 本轮消费的可驱动语义续跑消息数量（Prompt / Defer）
     pub wake_up_count: usize,
+    /// 本次消费的非空用户 Human 消息身份，供首次输入准备精准处理。
+    pub input_message_ids: Vec<crate::messages::MessageId>,
 }
 
 // ─── Reason 阶段类型 ─────────────────────────────────────────────────────────
@@ -668,6 +673,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                         if let Some(flag) = &context.async_ctx.idle_suspended_flag {
                             flag.store(true, Ordering::Release);
                         }
+                        if let Some(mailbox) = &context.session.user_input_mailbox {
+                            mailbox.set_suspended(true);
+                        }
                         context.runtime.event_bus.emit_state(
                             crate::agent::events_v2::StateEvent::TurnSuspended {
                                 turn_id: context.turn_id(),
@@ -682,6 +690,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                                 // 标志——后续 Receive 会 drain 队列并继续本 turn。
                                 if let Some(flag) = &context.async_ctx.idle_suspended_flag {
                                     flag.store(false, Ordering::Release);
+                                }
+                                if let Some(mailbox) = &context.session.user_input_mailbox {
+                                    mailbox.set_suspended(false);
                                 }
                                 if context.session.turn.is_cancelled() {
                                     return LoopResult::Interrupted;
@@ -698,6 +709,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                             _ = &mut cancel_fut => {
                                 if let Some(flag) = &context.async_ctx.idle_suspended_flag {
                                     flag.store(false, Ordering::Release);
+                                }
+                                if let Some(mailbox) = &context.session.user_input_mailbox {
+                                    mailbox.set_suspended(false);
                                 }
                                 return LoopResult::Interrupted;
                             }
@@ -742,7 +756,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // 替代原来在 run_react_loop 外部的 Phase 6.7 调用。
             if !loop_state.before_agent_has_run {
                 loop_state.before_agent_has_run = true;
-                if let Err(e) = middleware_runner::run_before_agent(&context).await {
+                if let Err(e) =
+                    middleware_runner::run_before_agent(&context, &receive_out.input_message_ids)
+                        .await
+                {
                     tracing::warn!(error = %e, "[v2] before_agent hook failed");
                 }
             }

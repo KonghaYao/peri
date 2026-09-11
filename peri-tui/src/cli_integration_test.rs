@@ -6,8 +6,6 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "peri")]
 struct TestCli {
-    #[arg(short = 'a', long = "approve")]
-    approve: bool,
     #[arg(short = 'p', long = "print")]
     print: Option<Option<String>>,
     #[arg(long = "output-format", visible_alias = "outputFormat")]
@@ -165,7 +163,6 @@ fn test_print_conflicts_with_meta() {
 #[test]
 fn test_meta_rejects_every_unrelated_top_level_option() {
     let cases: &[&[&str]] = &[
-        &["--approve"],
         &["--print=prompt"],
         &["--output-format", "json"],
         &["--max-turns", "1"],
@@ -289,7 +286,7 @@ fn test_argv_meta_detection_respects_top_level_subcommand_position() {
             "--json",
         ],
         &[
-            "--approve",
+            "--bare",
             "--unknown",
             "meta",
             "session",
@@ -560,4 +557,21 @@ fn test_real_cli_parses_config_and_db_flags() {
     .unwrap();
     assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
     assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
+}
+
+/// [回归测试] 退役的审批快捷参数不得再被真实 CLI 接受。
+#[test]
+fn test_removed_approve_flags_are_rejected() {
+    for flag in ["-a", "--approve"] {
+        let error = Cli::try_parse_from(["peri", flag])
+            .err()
+            .expect("removed flag accepted");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+}
+
+#[test]
+fn test_real_cli_accepts_explicit_default_permission_mode() {
+    let cli = Cli::try_parse_from(["peri", "--permission-mode", "default"]).unwrap();
+    assert_eq!(cli.permission_mode.as_deref(), Some("default"));
 }

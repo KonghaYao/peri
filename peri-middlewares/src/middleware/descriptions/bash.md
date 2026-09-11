@@ -1,7 +1,7 @@
 Executes a given shell command and returns its output.
 
 Usage:
-- The working directory persists between commands, but shell state does not. The shell environment is initialized from the user's profile (bash or zsh)
+- Each invocation starts a new shell in the tool's configured working directory. A `cd` in one invocation does not change the starting directory of later invocations; use `cd "path" && command` within the same invocation when needed. Shell variables and other shell state do not persist between invocations. Do not assume user profile files are loaded; see the platform-specific shell invocation below.
 - IMPORTANT: Avoid using this tool to run find, grep, cat, head, tail, sed, awk, or echo commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task
 - Instead, use the appropriate dedicated tool which will provide a much better experience for the user:
   - File search: Use Glob (NOT find or ls)
@@ -13,11 +13,17 @@ Usage:
 - When issuing multiple commands, use && to chain them together rather than using separate tool calls if the commands depend on each other
 - For builds, installs, or tests that may exceed 15s, set a longer `timeout` value (e.g. `timeout: 300000` for 5 minutes). Only use `run_in_background: true` for truly long-running processes like dev servers or watchers that should keep running while you continue work.
 
+Timeout behavior:
+- Foreground timeout returns a timeout error, but does not always terminate the process. When background task registration is available and succeeds, the process continues as a background task; the result includes its `task_id` and `pid`. The foreground timeout is not a new deadline for that continued task.
+- If background task registration is unavailable or fails, foreground timeout requests process termination.
+- For commands explicitly started with `run_in_background: true`, a positive `timeout` requests process termination when reached. Omitting `timeout` or setting it to `0` leaves that background command without a timeout.
+- Read the returned process status before retrying. If it says the process is still running, track that task or explicitly stop it before starting a replacement.
+
 Platform behavior:
 - Windows: uses powershell -NoProfile -NoLogo -NonInteractive -Command to execute commands
 - Unix/macOS: uses bash -c to execute commands
-- On Unix, child processes run in their own process group; timeout/cancel kills the entire process group (shell and all descendants), so no orphaned children survive
-- On Windows, timeout only terminates the PowerShell wrapper process tree via taskkill; the process group semantics of Unix do not apply
+- On Unix, child processes run in their own process group. When termination is requested, cleanup targets the process group; this does not apply to a foreground timeout that continues in the background.
+- On Windows, termination uses taskkill for the PowerShell process tree; Unix process-group semantics do not apply.
 - The command's stdin is redirected to /dev/null: interactive commands (read, prompts, editors, stdio services waiting on stdin) fail fast with an EOF error instead of hanging until timeout. Do not rely on terminal input; provide input via pipes or files instead
 
 Output handling:

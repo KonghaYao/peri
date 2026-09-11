@@ -14,6 +14,16 @@ use crate::{
 /// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`（穷尽匹配）。
 pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
     match event {
+        RenderEvent::UserInputDelivered {
+            generation,
+            input_id,
+            content,
+            ..
+        } => Some(ExecutorEvent::UserInputDelivered {
+            generation,
+            input_id,
+            content,
+        }),
         RenderEvent::TextChunk {
             message_id, chunk, ..
         } => Some(ExecutorEvent::TextChunk {
@@ -87,6 +97,17 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
 /// 将 v2 `StateEvent` 转换为 `ExecutorEvent`（穷尽匹配）。
 pub fn state_event_to_executor(event: StateEvent) -> Option<ExecutorEvent> {
     match event {
+        StateEvent::UserInputRunStarted {
+            generation,
+            request_id,
+            ..
+        } => Some(ExecutorEvent::UserInputRunStarted {
+            generation,
+            request_id,
+        }),
+        StateEvent::UserInputQueueChanged { snapshot, .. } => {
+            Some(ExecutorEvent::UserInputQueueChanged(snapshot))
+        }
         StateEvent::ProtocolEvent { event, .. } => Some(event),
         StateEvent::StateSnapshot {
             message_count,

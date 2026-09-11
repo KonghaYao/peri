@@ -20,6 +20,27 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
 impl TransportEventSink {
     pub(super) async fn push_legacy_event(&self, session_id: &str, event: &ExecutorEvent) {
         let acp_event = match event {
+            ExecutorEvent::UserInputRunStarted {
+                generation,
+                request_id,
+            } => Some(AcpEvent::UserInputRunStarted {
+                generation: generation.clone(),
+                request_id: request_id.clone(),
+            }),
+            ExecutorEvent::UserInputQueueChanged(snapshot) => {
+                Some(AcpEvent::UserInputQueueChanged {
+                    snapshot: snapshot.clone(),
+                })
+            }
+            ExecutorEvent::UserInputDelivered {
+                input_id,
+                generation,
+                content,
+            } => Some(AcpEvent::UserInputDelivered {
+                input_id: input_id.clone(),
+                generation: generation.clone(),
+                content: content.clone(),
+            }),
             ExecutorEvent::SubagentStarted {
                 agent_name,
                 instance_id,

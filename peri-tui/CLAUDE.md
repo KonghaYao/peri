@@ -46,7 +46,6 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 
 ```bash
 cargo run -p peri-tui
-cargo run -p peri-tui -- -a
 ./dev.sh
 cargo build -p peri-tui
 cargo check -p peri-tui

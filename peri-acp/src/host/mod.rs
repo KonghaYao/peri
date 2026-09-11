@@ -64,6 +64,7 @@ mod task_scope;
 #[cfg(test)]
 #[path = "unify_wire_baseline_test.rs"]
 mod unify_wire_baseline_tests;
+mod user_input;
 pub mod workflow_agent;
 
 pub(crate) use continuation::{

@@ -47,6 +47,106 @@ fn make_context() -> StageContext {
 }
 
 #[tokio::test]
+async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo() {
+    use crate::agent::events_v2::{EventBus, RenderEvent};
+    use crate::session::user_input_mailbox::{UserInputAttemptOutcome, UserInputMailbox};
+    use peri_acp_types::session::{
+        DispatchUserInputsRequest, EnqueueUserInputRequest, SessionInbox,
+    };
+    use tokio_util::sync::CancellationToken;
+    let mut context = make_context();
+    let inbox = Arc::new(SessionInbox::new(Arc::new(context.session.queue.clone())));
+    let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
+    let current = mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    let a = EnqueueUserInputRequest {
+        session_id: "session".into(),
+        generation: mailbox.generation().into(),
+        command_id: "enqueue-a".into(),
+        input_id: uuid::Uuid::now_v7().to_string(),
+        content: MessageContent::text("A"),
+        original_draft: "A".into(),
+    };
+    let b = EnqueueUserInputRequest {
+        command_id: "enqueue-b".into(),
+        input_id: uuid::Uuid::now_v7().to_string(),
+        content: MessageContent::text("B"),
+        original_draft: "B".into(),
+        ..a.clone()
+    };
+    mailbox.enqueue(&a).unwrap();
+    mailbox.enqueue(&b).unwrap();
+    for (command_id, input) in [("dispatch-b", &b), ("dispatch-a", &a)] {
+        mailbox
+            .dispatch(&DispatchUserInputsRequest {
+                session_id: "session".into(),
+                generation: mailbox.generation().into(),
+                command_id: command_id.into(),
+                input_ids: vec![input.input_id.clone()],
+            })
+            .unwrap();
+    }
+    mailbox.finish_attempt(&current, UserInputAttemptOutcome::Interrupted);
+    let ticket = mailbox.reserve_run().unwrap();
+    mailbox.attach_attempt(&ticket, CancellationToken::new());
+    context.session.user_input_mailbox = Some(mailbox.clone());
+    let (bus, mut handles) = EventBus::new(Default::default());
+    context.runtime.event_bus = Arc::new(bus);
+    run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+    context
+        .runtime
+        .event_bus
+        .emit_render(RenderEvent::TextChunk {
+            turn_id: context.turn_id(),
+            agent_id: context.session.agent_id,
+            message_id: crate::messages::MessageId::new(),
+            chunk: "assistant".into(),
+        });
+    for input in [&b, &a] {
+        let RenderEvent::UserInputDelivered {
+            input_id,
+            generation,
+            content,
+            ..
+        } = handles.render_rx.recv().await.unwrap()
+        else {
+            panic!("真实用户气泡必须先于 assistant token");
+        };
+        assert_eq!(input_id, input.input_id, "逐条接受顺序必须保留");
+        assert_eq!(generation, mailbox.generation(), "投递事件绑定同一会话实例");
+        assert_eq!(
+            content.text_content(),
+            input.content.text_content(),
+            "内容保留"
+        );
+    }
+    assert!(
+        matches!(
+            handles.render_rx.recv().await.unwrap(),
+            RenderEvent::TextChunk { .. }
+        ),
+        "assistant 输出在全部用户接收事件之后"
+    );
+    let transcript = context.session.transcript.read();
+    assert_eq!(
+        transcript.entries()[0].message().id().as_uuid().to_string(),
+        b.input_id,
+        "canonical transcript 与气泡使用同一稳定 ID"
+    );
+    assert_eq!(
+        transcript.entries()[1].message().id().as_uuid().to_string(),
+        a.input_id,
+        "顺序不按历史队列位置重排"
+    );
+    assert!(mailbox.snapshot().items.is_empty(), "写入后从待发送区移除");
+}
+
+#[tokio::test]
 async fn test_receive_empty_queue() {
     let ctx = make_context();
     let input = ReceiveInput {

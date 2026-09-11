@@ -479,6 +479,28 @@ pub(crate) fn dispatch_for_bridge(
         // ── Unknown / forward-compat ──
         Unknown { .. } => system::handle_unknown(),
         LocalUserBubble { text } => turn::handle_local_user_bubble(state, text),
+        UserInputQueueChanged { snapshot } => {
+            crate::kit::steer_state::STEERS
+                .state()
+                .write()
+                .accept_snapshot(
+                    snapshot.clone(),
+                    crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
+                    false,
+                );
+        }
+        UserInputDelivered {
+            generation,
+            input_id,
+            content,
+        } => turn::handle_user_input_delivered(state, generation, input_id, content),
+        ReplayedUserBubble { input_id, text } => {
+            crate::kit::steer_state::STEERS
+                .state()
+                .write()
+                .claim_delivery(&state.active_session_id, input_id);
+            turn::handle_local_user_bubble(state, text);
+        }
         LocalLoadingReset => turn::handle_loading_reset(state),
         BgCallbackBubble { .. } => turn::handle_bg_callback_bubble(state),
         CommittedAssistantText { text, reasoning } => {

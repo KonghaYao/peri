@@ -16,7 +16,7 @@ use crate::tool_search::core_tools::TOOL_READ;
 
 /// AtMentionMiddleware — 解析用户消息中的 @path 提及，注入 Read 工具调用结果
 ///
-/// 在 `before_agent` 时从最后一条 Human 消息中提取 @ 提及，
+/// 在 `before_agent` 时从本批 Human 消息中提取 @ 提及，
 /// 读取对应文件内容，以 Ai[ToolUse{Read}] → Tool[ToolResult] 消息序列追加到 state。
 ///
 /// 消息结构（与 SkillPreloadMiddleware 一致）：
@@ -43,19 +43,38 @@ impl Middleware for AtMentionMiddleware {
     }
 
     async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
-        // 取最后一条 Human 消息
-        let last_human = state
-            .messages()
-            .iter()
-            .rev()
-            .find(|m| matches!(m, BaseMessage::Human { .. }));
-
-        let text = match last_human {
-            Some(msg) => msg.content(),
-            None => return Ok(()),
+        let inputs: Vec<String> = match state.input_message_ids() {
+            Some(ids) => state
+                .messages()
+                .iter()
+                .filter(|message| {
+                    matches!(message, BaseMessage::Human { .. }) && ids.contains(&message.id())
+                })
+                .map(BaseMessage::content)
+                .collect(),
+            None => state
+                .messages()
+                .iter()
+                .rev()
+                .find(|message| matches!(message, BaseMessage::Human { .. }))
+                .map(BaseMessage::content)
+                .into_iter()
+                .collect(),
         };
+        for text in inputs {
+            self.prepare_mentions(state, &text).await?;
+        }
+        Ok(())
+    }
+}
 
-        let mentions = parser::extract_at_mentions(&text);
+impl AtMentionMiddleware {
+    async fn prepare_mentions(
+        &self,
+        state: &mut dyn hook_state::BeforeAgentState,
+        text: &str,
+    ) -> AgentResult<()> {
+        let mentions = parser::extract_at_mentions(text);
         if mentions.is_empty() {
             return Ok(());
         }

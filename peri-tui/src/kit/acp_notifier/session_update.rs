@@ -291,7 +291,14 @@ pub(super) fn decode_stream_update(params: &Value, session_id: &str) -> StreamUp
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            Some(AcpEventData::LocalUserBubble { text })
+            if let Some(input_id) = update.get("messageId").and_then(serde_json::Value::as_str) {
+                Some(AcpEventData::ReplayedUserBubble {
+                    input_id: input_id.to_owned(),
+                    text,
+                })
+            } else {
+                Some(AcpEventData::LocalUserBubble { text })
+            }
         }
         _ => None, // unknown tags, including session_info_update (metadata-only, no stream event)
     };

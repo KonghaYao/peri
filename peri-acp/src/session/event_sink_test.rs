@@ -59,6 +59,110 @@ fn compact_test_sink() -> (Arc<MockTransport>, TransportEventSink) {
 }
 
 #[tokio::test]
+async fn test_user_input_events_use_queue_capability_without_duplicate_chat_projection() {
+    let (transport, sink) = compact_test_sink();
+    sink.caps_registry.insert(
+        "s1".into(),
+        PeriCaps {
+            user_input_queue: true,
+            agent_activity: true,
+            ..PeriCaps::default()
+        },
+    );
+    let snapshot = peri_acp_types::session::UserInputQueueSnapshot {
+        session_id: "s1".into(),
+        active_request_id: None,
+        generation: "generation-1".into(),
+        revision: 7,
+        items: vec![peri_acp_types::session::UserInputQueueItem {
+            input_id: "input-1".into(),
+            content: MessageContent::text("用户原文"),
+            original_draft: "用户原文".into(),
+            state: peri_acp_types::session::UserInputState::Queued,
+        }],
+    };
+    sink.push_event("s1", &ExecutorEvent::UserInputQueueChanged(snapshot), 0)
+        .await;
+    sink.push_event(
+        "s1",
+        &ExecutorEvent::UserInputDelivered {
+            input_id: "input-1".into(),
+            generation: "generation-1".into(),
+            content: MessageContent::text("用户原文"),
+        },
+        0,
+    )
+    .await;
+    let notifications = transport.notifications.lock().unwrap();
+    assert_eq!(
+        notifications.len(),
+        2,
+        "每个状态只投影一次，不额外生成标准聊天块或 activity"
+    );
+    assert!(
+        notifications
+            .iter()
+            .all(|(method, _)| method == "peri/agent_event"),
+        "专属能力可独立于 legacy agent_event 能力使用"
+    );
+    let changed: AcpEvent =
+        serde_json::from_str(notifications[0].1["event_json"].as_str().unwrap()).unwrap();
+    let delivered: AcpEvent =
+        serde_json::from_str(notifications[1].1["event_json"].as_str().unwrap()).unwrap();
+    assert!(
+        matches!(changed, AcpEvent::UserInputQueueChanged { snapshot } if snapshot.revision == 7 && snapshot.generation == "generation-1"),
+        "快照 wire 保留顺序与实例身份"
+    );
+    assert!(
+        matches!(delivered, AcpEvent::UserInputDelivered { input_id, generation, content } if input_id == "input-1" && generation == "generation-1" && content.text_content() == "用户原文"),
+        "接收事件保留稳定身份及完整内容"
+    );
+}
+
+#[tokio::test]
+async fn test_user_input_events_fail_closed_without_queue_capability() {
+    let (transport, sink) = compact_test_sink();
+    let event = ExecutorEvent::UserInputDelivered {
+        input_id: "input-1".into(),
+        generation: "generation-1".into(),
+        content: MessageContent::text("不应泄漏的输入"),
+    };
+    sink.push_event("s1", &event, 0).await;
+    sink.push_event("unregistered", &event, 0).await;
+    assert!(
+        transport.notifications.lock().unwrap().is_empty(),
+        "legacy 能力或缺失 session caps 均不得隐式开启队列正文事件"
+    );
+}
+
+#[tokio::test]
+async fn test_user_input_queue_capability_includes_paired_done() {
+    let (transport, sink) = compact_test_sink();
+    sink.caps_registry.insert(
+        "s1".into(),
+        PeriCaps {
+            user_input_queue: true,
+            ..PeriCaps::default()
+        },
+    );
+    sink.push_user_input_started("s1", "generation-1".into(), "ticket-1".into())
+        .await
+        .unwrap();
+    sink.push_done("s1", "end_turn", Some("ticket-1")).await;
+    let notifications = transport.notifications.lock().unwrap();
+    assert_eq!(
+        notifications.len(),
+        2,
+        "仅声明队列能力也必须收到启动与结束配对"
+    );
+    assert_eq!(notifications[1].0, "peri/agent_event_done");
+    assert_eq!(
+        notifications[1].1["requestId"], "ticket-1",
+        "终态必须使用同一执行身份"
+    );
+}
+
+#[tokio::test]
 async fn push_event_forwards_compact_started() {
     let (transport, sink) = compact_test_sink();
     sink.push_event(

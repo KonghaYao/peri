@@ -2693,5 +2693,8 @@ async fn test_plugin_uninstall_removes_stale_plugin_entries() {
     );
 }
 
+#[path = "user_input_test.rs"]
+mod user_input_tests;
+
 #[path = "requests/plugin_search_test.rs"]
 mod plugin_search_tests;

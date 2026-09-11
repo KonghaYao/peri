@@ -85,6 +85,7 @@ pub type StageBuildFn = Arc<
 pub struct V2ExecuteRequest {
     // ── 会话数据 ──
     pub session_id: String,
+    pub user_input_mailbox: Option<Arc<crate::session::user_input_mailbox::UserInputMailbox>>,
     pub cwd: String,
     pub cancel: CancellationToken,
     pub thread_store: Option<Arc<dyn ThreadStore>>,
@@ -137,6 +138,10 @@ pub struct V2ExecuteRequest {
 /// workflow 消费者 spawn、goal_controller）。所有副作用与 v1 一致。
 pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     use peri_acp_types::session::{MessageKind, MessageSource as V2MessageSource, QueuedMessage};
+    let input_ticket = req
+        .user_input_mailbox
+        .as_ref()
+        .and_then(|mailbox| mailbox.active_run_ticket());
 
     // Restore the inherited boundary and compact state before spawning forwarders.
     // A failed/corrupt snapshot must not enter Reason with unclassified history.
@@ -159,7 +164,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             tm as Arc<dyn std::any::Any + Send + Sync>;
         tm_any.downcast::<AgentTaskManager>().ok()
     });
-    let (v2_out, new_cache, inherited, own_flags) =
+    let (mut v2_out, new_cache, inherited, own_flags) =
         match restored_history.and_then(|(inherited, own_flags)| {
             (req.stage_build)(StageBuildRequest {
                 cached_llm: req.cached_llm,
@@ -205,6 +210,10 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 };
             }
         };
+    v2_out.context.session.user_input_mailbox = req.user_input_mailbox.clone();
+    if let Some(mailbox) = &req.user_input_mailbox {
+        v2_out.session.set_user_input_mailbox(mailbox.clone());
+    }
     if let Some(cache) = new_cache {
         (req.store_llm)(cache);
     }
@@ -301,7 +310,12 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
 
     // Phase 5: restore the frozen ancestor prefix, then this thread's own history.
     // 首轮用户 turn 判定需在 history move 前捕获（Phase 5.9 使用）。
-    let is_first_user_turn = !req.continuation && req.history_payloads.is_empty();
+    let is_first_user_turn = req.history_payloads.is_empty()
+        && (!req.continuation
+            || req
+                .user_input_mailbox
+                .as_ref()
+                .is_some_and(|mailbox| mailbox.has_handed_off_inputs()));
     let history_payloads_snapshot = req.history_payloads.clone();
     {
         let transcript_arc = v2_out.session.transcript();
@@ -344,40 +358,38 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             V2MessageSource::UserInput,
             BaseMessage::human(req.agent_input.content),
         ));
-
-        // Phase 6.2: 首轮用户 turn 的一次性受控通知（MCP 概览等）。
-        // 仅在首个模型可见 turn（history 为空且非 continuation）触发：收集
-        // middleware chain 的 `first_turn_reminder` 非空贡献，作为 Info 消息
-        // （`<system-reminder>` 包裹，见 append_messages_to_transcript）在用户
-        // Prompt **之后**入队——Receive drain 顺序为 user 输入在前、reminder
-        // 在后（"加入到 user prompt"语义，不抢在用户输入前）。
-        // 纯生成无记账：入队前失败/取消无副作用，下个首 turn 重新生成。
-        if is_first_user_turn {
-            let mut cx = AgentContext::from_stage(&v2_out.context);
-            match v2_out
-                .context
-                .runtime
-                .middleware_chain
-                .run_first_turn_reminders(&mut cx)
-                .await
-            {
-                Ok(reminders) if !reminders.is_empty() => {
-                    for text in reminders {
-                        v2_out.context.session.queue.push(QueuedMessage::new(
-                            MessageKind::Info,
-                            V2MessageSource::SystemInjected,
-                            BaseMessage::human(text),
-                        ));
-                    }
+    }
+    // Phase 6.2: 首轮用户 turn 的一次性受控通知（MCP 概览等）。
+    // 仅在首个模型可见 turn（history 为空且非 continuation）触发：收集
+    // middleware chain 的 `first_turn_reminder` 非空贡献，作为 Info 消息
+    // （`<system-reminder>` 包裹，见 append_messages_to_transcript）在用户
+    // Prompt **之后**入队——Receive drain 顺序为 user 输入在前、reminder
+    // 在后（"加入到 user prompt"语义，不抢在用户输入前）。
+    // 纯生成无记账：入队前失败/取消无副作用，下个首 turn 重新生成。
+    if is_first_user_turn {
+        let mut cx = AgentContext::from_stage(&v2_out.context);
+        match v2_out
+            .context
+            .runtime
+            .middleware_chain
+            .run_first_turn_reminders(&mut cx)
+            .await
+        {
+            Ok(reminders) if !reminders.is_empty() => {
+                for text in reminders {
+                    v2_out.context.session.queue.push(QueuedMessage::new(
+                        MessageKind::Info,
+                        V2MessageSource::SystemInjected,
+                        BaseMessage::human(text),
+                    ));
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "[v2] first_turn_reminder hooks failed");
-                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "[v2] first_turn_reminder hooks failed");
             }
         }
     }
-
     // Phase 6.5: clone recall_buffer 的 Arc，便于 Phase 8.5 在 context 被
     // run_react_loop 消费后仍可访问累积的 recall。
     let recall_buffer = Arc::clone(&v2_out.context.recall_buffer);
@@ -514,6 +526,20 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         Some(failure) => internal_failure_terminal(failure),
         None => classify_loop_terminal(&loop_result, sampled_cancel),
     };
+    if let (Some(mailbox), Some(ticket)) = (&req.user_input_mailbox, &input_ticket) {
+        use crate::session::user_input_mailbox::UserInputAttemptOutcome;
+        let outcome = if terminal.ok {
+            UserInputAttemptOutcome::Completed
+        } else if terminal.stop_reason == PromptStopReason::Cancelled {
+            UserInputAttemptOutcome::Interrupted
+        } else {
+            UserInputAttemptOutcome::Failed
+        };
+        mailbox.record_attempt_outcome(ticket, outcome);
+        if persistence_inconsistent {
+            mailbox.invalidate();
+        }
+    }
     // 诊断日志与 wire 使用同一安全投影：保留错误原意和 HTTP status，但不得把
     // provider body 中的凭据或完整 cause chain 写入日志。
     if let Some(failure) = &terminal.failure {
@@ -567,7 +593,12 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     }
 
     // Cancel cascade children when this agent is cancelled
-    if terminal.stop_reason == PromptStopReason::Cancelled {
+    let steer_interruption = req
+        .user_input_mailbox
+        .as_ref()
+        .zip(input_ticket.as_ref())
+        .is_some_and(|(mailbox, ticket)| mailbox.is_steer_interruption(ticket));
+    if terminal.stop_reason == PromptStopReason::Cancelled && !steer_interruption {
         (req.cancel_cascade)(&req.session_id);
     }
 

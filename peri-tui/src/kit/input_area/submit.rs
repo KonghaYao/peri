@@ -6,10 +6,35 @@ use crate::kit::panel_registry::open_panel;
 use crate::kit::submit_request::{SessionControlRequest, SubmitRequest, parse_submit_request};
 
 pub(super) fn submit_text(submitted: String) {
+    if crate::kit::steer_state::is_enabled()
+        && submitted.trim().is_empty()
+        && !crate::kit::atoms::PENDING_ATTACHMENTS
+            .state()
+            .read()
+            .is_empty()
+    {
+        let attachments =
+            std::mem::take(&mut *crate::kit::atoms::PENDING_ATTACHMENTS.state().write());
+        let _ = crate::kit::steer_state::enqueue(submitted, attachments);
+        return;
+    }
     let Some(request) = parse_submit_request(&submitted) else {
         return;
     };
 
+    if crate::kit::steer_state::is_enabled()
+        && matches!(request, SubmitRequest::AgentText(_))
+        && !is_remote_command(&submitted)
+    {
+        push_history(&submitted);
+        reset_history_cursor();
+        let attachments =
+            std::mem::take(&mut *crate::kit::atoms::PENDING_ATTACHMENTS.state().write());
+        if let Err(error) = crate::kit::steer_state::enqueue(submitted, attachments) {
+            tracing::warn!(error = %error, "user input queue submission rejected locally");
+        }
+        return;
+    }
     let is_loading = ACP_STATE.state().read().is_loading;
     dispatch_submit_request(request, is_loading, |request| {
         if let Some(tx) = SUBMIT_TX.get() {
@@ -31,13 +56,15 @@ pub(super) fn dispatch_submit_request<F>(
             *WIZARD_ACTIVE.state().write() = true;
         }
         SubmitRequest::AgentText(text) => {
+            if crate::kit::steer_state::is_enabled() && !is_remote_command(&text) {
+                let _ = crate::kit::steer_state::enqueue(text, Vec::new());
+                return;
+            }
             push_history(&text);
             reset_history_cursor();
             if is_loading {
-                // §10 queued（Slice 3 D4 反转）：loading 期间**只入队**，不提前进
-                // transcript——排队项显示在 composer 上方队列；TurnDone/取消
-                // 复位时 drain（send_local_user_bubble + AgentText），气泡恰出现
-                // 一次。保留 32 条上限（防无限堆积）。
+                // 旧服务端兼容队列：运行期间延后提交，出队时再加入聊天记录。
+                // 支持用户输入队列的服务端在上方分支处理普通输入。
                 let input_buffer = INPUT_BUFFER.state();
                 let mut guard = input_buffer.write();
                 guard.push_back(text);
@@ -63,10 +90,11 @@ pub(super) fn dispatch_submit_request<F>(
     }
 }
 
-fn show_submit_blocked_notification(request: &SubmitRequest) {
+pub(super) fn show_submit_blocked_notification(request: &SubmitRequest) {
     let message = match request {
-        SubmitRequest::SessionControl(_) => i18n::tr("submit-blocked"),
-        SubmitRequest::ViewAction(_) => i18n::tr("submit-blocked"),
+        SubmitRequest::SessionControl(_)
+        | SubmitRequest::ViewAction(_)
+        | SubmitRequest::AgentText(_) => i18n::tr("submit-blocked"),
         _ => return,
     };
     *crate::kit::atoms::NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
@@ -75,6 +103,25 @@ fn show_submit_blocked_notification(request: &SubmitRequest) {
     });
     crate::kit::atoms::RENDER_HEARTBEAT
         .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
+}
+
+pub(crate) fn is_remote_command(text: &str) -> bool {
+    let Some(name) = text
+        .split_whitespace()
+        .next()
+        .and_then(|token| token.strip_prefix('/'))
+    else {
+        return false;
+    };
+    crate::kit::atoms::AVAILABLE_SLASH_COMMANDS
+        .state()
+        .read()
+        .iter()
+        .any(|entry| {
+            name == entry.fullname
+                || entry.aliases.iter().any(|alias| name == alias)
+                || (entry.level == 1 && name.strip_prefix("core:") == Some(entry.fullname.as_str()))
+        })
 }
 
 /// 发送本地 user bubble 事件（`LocalUserBubble`）到 acp_bridge。

@@ -13,6 +13,7 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 改待发送队列控制与执行准入 | `src/host/requests/user_input.rs` + `src/host/user_input.rs` + `src/host/prompt_dispatch.rs` | `handle_user_input`；`ensure_mailbox` / `schedule_mailbox`；`dispatch_prompt_turn_with_input` | 四短 RPC 不等 prompt_lock，session 持 Agent Mailbox；Agent ticket 经同一执行锁启动，RunStarted/done 身份配对，Stop 精确定位，MPSC/stdio 共用请求与事件链（ARC-BOUNDARY-001 / ARC-EVENT-001） |
 | 改插件 marketplace 搜索 | `src/host/requests/plugin.rs` + `plugin_search_test.rs` | `handle_search` / `search_marketplace_plugins` | 经 PluginManagerPort 获取缓存目录，复用 `plugin::marketplace::find_marketplace_json` 读取根或 `.claude-plugin` 布局；名称、描述、marketplace 名均忽略大小写匹配；无匹配明确返回空数组；回归经真实 `handle_request` 读取临时磁盘目录 |
 | 改 compact 后失败恢复 | `src/host/prompt.rs` + `src/host/compact_recovery_test.rs` | `finish_prompt_turn` | 不按 `ok` 丢弃可信 canonical snapshot；取消/模型或 forwarder 失败仍保留已提交 Full 摘要；persistence_inconsistent 移除热会话，冷加载恢复磁盘，ARC-COMPACT-001 |
 | 改 System Reminder producer/ACP 投影 | `src/session/dynamic_mcp.rs` + `src/host/continuation.rs` + `src/session/event_sink.rs` + `src/dispatch/session_replay.rs` | `SessionDynamicMcpNotificationSink`；`enqueue_cron_trigger`；`push_system_reminder`；`send_system_reminder` | Dynamic MCP lifecycle/OAuth 与 Cron trigger 直接入 canonical queue；不改变 OAuth/cron 控制；ACP client 声明 `peri.systemReminder` 时收结构化 event，否则只收展示 fallback；load/replay 不伪装 user message；旧 Compact plain-text Human 经 `compact_reminder::legacy_compact_reminders` 生成 Legacy 通知，MPSC/stdio 共用出口 |

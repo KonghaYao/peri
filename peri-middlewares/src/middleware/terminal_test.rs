@@ -34,6 +34,28 @@ async fn test_bash_nonzero_exit_code() {
     assert!(result.contains("42"), "应包含退出码: {result}");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bash_cd_does_not_persist_between_invocations() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let fixture = tempfile::tempdir().unwrap();
+    let cwd = fixture.path().canonicalize().unwrap();
+    let nested = cwd.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let tool = BashTool::new(cwd.to_str().unwrap());
+
+    for (command, expected) in [("cd nested && pwd -P", &nested), ("pwd -P", &cwd)] {
+        let output = tool
+            .invoke(
+                serde_json::json!({"command": command}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.trim(), expected.to_str().unwrap());
+    }
+}
+
 /// 验证超时后在合理时间内返回，且进程组（bash + 全部子进程）被清理
 #[tokio::test]
 async fn test_bash_timeout_returns_quickly() {

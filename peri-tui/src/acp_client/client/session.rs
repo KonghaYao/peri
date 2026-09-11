@@ -117,6 +117,7 @@ impl AcpTuiClient {
             .lifecycle
             .commit_stable(start.generation, session_id.clone());
         transition.disarm();
+        self.initialize_user_inputs_under_gate(&session_id).await?;
         self.flush_buffered(buffered);
         Ok(session_id)
     }
@@ -334,7 +335,18 @@ impl AcpTuiClient {
         self.lifecycle
             .commit_stable(start.generation, session_id.to_string());
         transition.disarm();
+        self.initialize_user_inputs_under_gate(session_id).await?;
         Ok(session_id.to_string())
+    }
+
+    async fn initialize_user_inputs_under_gate(&self, session_id: &str) -> Result<(), AcpError> {
+        if self.supports_user_input_queue() {
+            let snapshot = self.user_input_snapshot_under_gate(session_id).await?;
+            if self.projection_mode == ClientProjectionMode::Interactive {
+                crate::kit::steer_state::establish_session_snapshot(snapshot);
+            }
+        }
+        Ok(())
     }
 
     /// Delete a session from history (standard ACP `session/delete`).

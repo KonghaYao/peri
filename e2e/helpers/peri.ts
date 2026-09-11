@@ -377,7 +377,7 @@ export async function takePeriSnapshot(
 }
 
 /**
- * 启动 peri TUI（HITL 审批模式，等同 -a 参数）
+ * 启动 peri TUI（HITL 审批模式，使用 --permission-mode default）
  *
  * 用于测试 HITL 审批弹窗交互。
  */
@@ -385,7 +385,7 @@ export async function launchPeriHITL(
   options: PeriLaunchOptions = {},
 ): Promise<TmuxTester> {
   const env = buildPeriLaunchEnv(options, { isolateHome: false });
-  const tester = createPeriTester(options, env, ["-a"]);
+  const tester = createPeriTester(options, env, ["--permission-mode", "default"]);
 
   await startTester(tester, "launchPeriHITL");
   await waitForPeriReady(tester, "launchPeriHITL");

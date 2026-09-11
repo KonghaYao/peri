@@ -145,6 +145,12 @@ async fn handle_agent_text_submit(
     cwd: &str,
     text: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if acp_client.supports_user_input_queue() && !crate::kit::input_area::is_remote_command(&text) {
+        if let Err(error) = crate::kit::steer_state::enqueue(text, Vec::new()) {
+            warn!(error = %error, "user input enqueue failed; draft retained for recovery");
+        }
+        return Ok(());
+    }
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Ok(());

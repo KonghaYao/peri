@@ -65,6 +65,8 @@ use peri_acp_types::tasks::{BgRegistryEvent, BgTaskKind};
 use crate::agent::react::AgentInput;
 use crate::session::async_router::AsyncRouter;
 
+mod input_recalls;
+
 // 子流程 helper 同 crate 迁移（`session::exec::executor_helpers`）：
 // intercept_immediate_command / InterceptRequest / spawn_event_pump /
 // SpawnPumpRequest / PumpHandle / collect_result / CollectRequest /
@@ -239,7 +241,11 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     // 由 run_prompt 保留在 SessionState（clone 而非 take），续跑只消费已 route 的
     // Defer/Info 消息；recall 留给后续用户 prompt 注入。
     let is_keepgoing = !continuation && is_keepgoing(&content);
-    let incoming_recalls = if is_keepgoing || continuation {
+    let mailbox_input = ctx
+        .user_input_mailbox
+        .as_ref()
+        .is_some_and(|mailbox| mailbox.is_managed_attempt());
+    let mut incoming_recalls = if is_keepgoing || (continuation && !mailbox_input) {
         tracing::debug!(
             skip = if continuation {
                 "continuation"
@@ -256,7 +262,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     // 空历史 + 空 prompt：无内容可继续——直接短路返回，避免跑一轮无意义 LLM 调用。
     // （TUI 侧 handle_keepgoing_submit 已有 has_session 防御；此处防御 stdio 等
     // 其他 transport 对全新 session 发空 prompt 的场景。）
-    if is_keepgoing && history.is_empty() {
+    if is_keepgoing
+        && history.is_empty()
+        && !ctx
+            .user_input_mailbox
+            .as_ref()
+            .is_some_and(|mailbox| mailbox.has_handed_off_inputs())
+    {
         tracing::debug!("keepgoing: empty history, short-circuiting (nothing to continue)");
         // [TRAP] 短路路径绕过 agent event pump（spawn_event_pump 的 push_done
         // 不会执行），必须手动发送终止通知（ARC-EVENT-001），否则 TUI 依赖
@@ -294,6 +306,10 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         .as_ref()
         .and_then(|sa| sa.v2_message_queue(&ctx.session_id))
         .unwrap_or_default();
+    if mailbox_input && !incoming_recalls.is_empty() {
+        input_recalls::push_input_recalls(&v2_message_queue, &incoming_recalls);
+        incoming_recalls.clear();
+    }
 
     // 解析 session-level SessionInbox（await-wake wrapper）。
     // 用于：(1) executor idle 期间 await_wake 阻塞等待异步事件，

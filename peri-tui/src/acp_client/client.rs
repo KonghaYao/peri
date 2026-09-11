@@ -19,6 +19,7 @@ mod interaction;
 mod pump;
 mod requests;
 mod session;
+mod steer;
 
 pub(crate) use session::SessionLoadReservation;
 
@@ -104,6 +105,7 @@ pub struct AcpTuiClient {
     /// with it.
     startup_restore_tx: watch::Sender<bool>,
     session_load_reservations: Arc<SessionLoadReservationState>,
+    user_input_queue: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     transition_commit_hook:
         Arc<Mutex<Option<mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>>>,
@@ -174,6 +176,7 @@ impl AcpTuiClient {
                 pending: Mutex::new(0),
                 epoch_tx: load_epoch_tx,
             }),
+            user_input_queue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             transition_commit_hook: Arc::new(Mutex::new(None)),
         };

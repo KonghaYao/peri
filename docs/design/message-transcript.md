@@ -70,7 +70,11 @@ graph TB
 
 ### 2.3 MessageQueue
 
-临时收件箱，独立于 Transcript，**不持久化**。Session 重建时 Queue 从空开始。代码位置：`peri-agent/src/session/queue.rs`。
+临时收件箱，独立于 Transcript，**不持久化**。冷重建会话时 Queue 从空开始；同一宿主会话跨 turn 共享队列实例。实现位于 `peri-acp-types/src/session/queue.rs`，Agent session 模块保留 re-export。
+
+用户尚未获准消费的内容保存在 Agent `UserInputMailbox` 待发区，不能提前进入本消费 MQ。
+只有指定发送或运行协调允许的内容才交接，Receive 领取与 Stop 精确撤出共享同一队列锁。
+完整投递和恢复语义见[用户待发送队列](user-input-queue.md)。
 
 #### MessageKind 三类消息
 

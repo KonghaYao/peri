@@ -152,6 +152,7 @@ pub(crate) async fn approve_scheduled_trigger(
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Shared host execution wiring plus optional Agent-owned input ticket.
 pub(crate) async fn run_prompt(
     params: Value,
     sessions: &SharedSessions,
@@ -160,6 +161,7 @@ pub(crate) async fn run_prompt(
     pool: Arc<parking_lot::Mutex<crate::session::agent_pool::AgentPool>>,
     cont_tx: Option<tokio::sync::mpsc::UnboundedSender<executor::ContinuationRequest>>,
     continuation: bool,
+    input_ticket: Option<super::user_input::UserInputRun>,
 ) -> Result<Value, AcpError> {
     // Borrow deployment services; turn-owned callbacks clone only their existing handles.
     // Provider/config snapshots remain below, after the session snapshot is captured.
@@ -203,10 +205,38 @@ pub(crate) async fn run_prompt(
         .and_then(|v| v.as_str())
         .map(String::from);
 
+    let user_input_mailbox = super::user_input::ensure_mailbox(&session_id, deployment, transport)?;
+
     // Create cancel token and register in sessions.
     // `AgentCancellationToken` 即 `tokio_util::sync::CancellationToken` 别名
     // （peri-agent re-export；ACP 协议面直接使用底层类型，不经业务 crate）。
     let cancel = tokio_util::sync::CancellationToken::new();
+    let managed_input = input_ticket.is_some();
+    let input_attempt = match &input_ticket {
+        Some(run) => {
+            if !user_input_mailbox.attach_attempt(&run.ticket, cancel.clone()) {
+                return Ok(Value::Null);
+            }
+            run.ticket.clone()
+        }
+        None => user_input_mailbox
+            .attach_external_attempt(cancel.clone(), !continuation && content.is_empty())
+            .ok_or_else(|| AcpError::new(-32800, "user input attempt superseded"))?,
+    };
+    let mut input_attempt_guard = super::user_input::InputAttemptGuard::new(
+        Arc::clone(&user_input_mailbox),
+        input_attempt.clone(),
+    );
+    if managed_input {
+        super::user_input::publish_run_started(
+            &session_id,
+            &user_input_mailbox,
+            &input_attempt,
+            deployment,
+            transport,
+        )
+        .await?;
+    }
     {
         let mut sessions = sessions.lock().await;
         let state = sessions
@@ -242,10 +272,8 @@ pub(crate) async fn run_prompt(
             state.history_payloads.is_empty(),
             state.thread_id.clone(),
             state.frozen.clone(),
-            // [AsyncContinuation] 续跑不 take recall：上一轮留给用户 prompt 的
-            // recall 必须保留在 SessionState（后续用户 prompt 注入），续跑自身
-            // 也不注入（见 executor::run_session_loop 的 continuation 分支）。
-            take_recall_for_turn(&mut state.recall_items, continuation),
+            // 后台 continuation 保留 recall；队列承载的新用户输入仍消费 recall。
+            take_recall_for_turn(&mut state.recall_items, continuation && !managed_input),
             state.workflow_middleware.clone(),
             state.lsp_pool.clone(),
         )
@@ -468,7 +496,7 @@ pub(crate) async fn run_prompt(
         command_lookup,
         compact_config_loader,
         tool_invocation_resolver,
-        session_start_source: if !continuation && is_empty {
+        session_start_source: if (!continuation || managed_input) && is_empty {
             Some("startup".to_string())
         } else {
             None
@@ -476,6 +504,7 @@ pub(crate) async fn run_prompt(
         request_id,
         allow_await_wake: true,
         continuation_notify: cont_tx,
+        user_input_mailbox: Some(Arc::clone(&user_input_mailbox)),
         frozen_fallback_builder,
     };
 
@@ -519,8 +548,24 @@ pub(crate) async fn run_prompt(
         .await
         .map_err(|e| AcpError::new(-32603, format!("run_session failed: {e}")))?;
     let result = handle.take_result();
+    if let Some(run) = &input_ticket {
+        run.mark_terminal_delivered();
+    }
 
-    finish_prompt_turn(sessions, &session_id, continuation, result).await
+    if result.persistence_inconsistent {
+        deployment
+            .session_manager
+            .invalidate_user_input_mailbox(&session_id);
+    }
+    input_attempt_guard.finish(&result);
+
+    finish_prompt_turn(
+        sessions,
+        &session_id,
+        continuation && !managed_input,
+        result,
+    )
+    .await
 }
 
 // Durable progress is independent of the terminal status. This boundary also owns wire

@@ -1159,3 +1159,8 @@ app-note-cache-coverage-low = Prompt cache 覆盖率 {$pct}% < 80% — 已缓存
 reminder-compact-file = 文件上下文
 reminder-compact-skill = Skill 指令
 reminder-compact-summary = 压缩摘要
+
+# 待发送队列
+steer-queue-title = 待发送 { $count }
+steer-input-rejected = 输入未被接收，原稿已保留。
+steer-input-uncertain = 暂未收到输入回执，正在核对并重试。

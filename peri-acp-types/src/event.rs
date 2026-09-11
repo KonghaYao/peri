@@ -320,6 +320,19 @@ pub enum MiddlewareHook {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExecutorEvent {
+    /// Mailbox 执行身份已建立，用于客户端交互生命周期准入。
+    UserInputRunStarted {
+        generation: String,
+        request_id: String,
+    },
+    /// 来自 Agent mailbox 的会话队列投影。
+    UserInputQueueChanged(crate::session::UserInputQueueSnapshot),
+    /// 已进入 transcript 的真实用户输入，稳定身份供既有聊天投影去重。
+    UserInputDelivered {
+        generation: String,
+        input_id: String,
+        content: crate::messages::MessageContent,
+    },
     /// Canonical System Reminder display payload; trusted provenance is never serialized.
     SystemReminder(crate::system_reminder::SystemReminder),
     /// 系统级通知文本（MCP 上下线、连接状态变化等），经 peri/agent_event

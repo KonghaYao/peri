@@ -203,6 +203,14 @@ pub(crate) async fn run_cron_continuation_scheduler(
                     cont_tx.as_ref(),
                 )
                 .await;
+                super::user_input::schedule_mailbox(
+                    &req.session_id,
+                    &sessions,
+                    &locks,
+                    &cfg,
+                    &transport,
+                    &cont_tx,
+                );
             },
         );
     }
@@ -306,6 +314,14 @@ pub(crate) async fn run_continuation_scheduler(
                     cont_tx2.as_ref(),
                 )
                 .await;
+                super::user_input::schedule_mailbox(
+                    &session_id,
+                    &sessions2,
+                    &locks2,
+                    &cfg2,
+                    &transport2,
+                    &cont_tx2,
+                );
             },
         );
     }

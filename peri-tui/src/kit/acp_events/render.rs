@@ -722,6 +722,9 @@ pub(crate) fn push_popup_kind(state: &BridgeState) {
 /// 严格 FIFO。第一条立即触发 prompt，后续在 submit_consumer 内部顺序处理
 /// （每条都等上一条的 RPC 完成）。
 pub(crate) fn drain_input_buffer() {
+    if crate::kit::steer_state::is_enabled() {
+        return;
+    }
     let tx = SUBMIT_TX.get().cloned();
     if tx.is_none() {
         return;

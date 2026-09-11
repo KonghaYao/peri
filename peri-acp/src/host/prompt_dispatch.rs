@@ -31,6 +31,32 @@ pub(crate) async fn dispatch_prompt_turn(
     cfg: &AcpServerConfig,
     cont_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>,
 ) -> Result<Value, AcpError> {
+    dispatch_prompt_turn_with_input(
+        params,
+        is_continuation,
+        continuation_epoch,
+        sessions,
+        prompt_locks,
+        transport,
+        cfg,
+        cont_tx,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch_prompt_turn_with_input(
+    params: Value,
+    is_continuation: bool,
+    continuation_epoch: Option<u64>,
+    sessions: &SharedSessions,
+    prompt_locks: &PromptLocks,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    cfg: &AcpServerConfig,
+    cont_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>,
+    input_ticket: Option<super::user_input::UserInputRun>,
+) -> Result<Value, AcpError> {
     let prompt_session_id = extract_session_id(&params, "").to_string();
 
     // 多读者 + 单 writer lease：prompt 是写入操作，仅 writer 可提交。
@@ -160,6 +186,7 @@ pub(crate) async fn dispatch_prompt_turn(
         pool_arc.clone(),
         Some(cont_tx.clone()),
         is_continuation,
+        input_ticket,
     )
     .await;
 
@@ -175,6 +202,11 @@ pub(crate) async fn dispatch_prompt_turn(
     let mq_steering_reschedule = {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
+            if result.is_err() {
+                // Early assembly/controller errors may precede finish_prompt_turn.
+                // The prompt lock still identifies this attempt as the sole writer.
+                state.cancel_token = None;
+            }
             if let Ok(mutex) = Arc::try_unwrap(pool_arc) {
                 state.agent_pool = mutex.into_inner();
             }
