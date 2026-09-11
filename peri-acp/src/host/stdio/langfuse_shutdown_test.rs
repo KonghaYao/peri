@@ -306,3 +306,49 @@ async fn test_owned_host_http_failure_keeps_joined_terminal_report() {
     ));
     request.assert_async().await;
 }
+
+#[tokio::test]
+async fn test_owned_host_shutdown_retains_http_failure_observed_by_turn_flush() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut http = mockito::Server::new_async().await;
+    let request = http
+        .mock("POST", "/api/public/otel/v1/traces")
+        .with_status(400)
+        .with_body("private-earlier-turn-response")
+        .expect(1)
+        .create_async()
+        .await;
+    let (cfg, session) = owned_config(&tmp, &http.url()).await;
+    session.try_add(event("earlierturnfailure")).unwrap();
+    // The turn-facing SessionLike flush observes the real batcher's failed HTTP
+    // barrier. Joining only synchronizes this test with the detached turn path;
+    // the deployment must retain delivery evidence even after this observation.
+    let turn_session = Arc::clone(&session);
+    let turn_flush = tokio::spawn(async move { turn_session.flush().await })
+        .await
+        .unwrap();
+    let clean_turn_flush = session.flush().await;
+    let (transport, input, _output) = duplex_transport();
+    let mut host = crate::host::spawn_acp_server(Arc::new(transport), cfg);
+    drop(input);
+    let report = host.shutdown().await;
+    let repeated = host.shutdown().await;
+
+    // Real ingestion and host/worker shutdown have completed before assertions.
+    request.assert_async().await;
+    assert!(matches!(turn_flush, Err(LangfuseError::IngestionApi(_))));
+    assert!(
+        clean_turn_flush.is_ok(),
+        "turn-level confirmation remains incremental"
+    );
+    assert_eq!(
+        report,
+        crate::host::AcpHostShutdownReport::TelemetryFailed(
+            peri_controller::langfuse::LangfuseShutdownReport::DeliveryFailed {
+                summary: "1 batch submission(s) failed before the flush barrier".into()
+            }
+        ),
+        "observing a failed turn flush must not erase deployment delivery evidence"
+    );
+    assert_eq!(repeated, report);
+}

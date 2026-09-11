@@ -26,14 +26,15 @@ pub struct AllocStats {
     pub current_allocated: usize,
 }
 
-/// jemalloc 详细统计（需要 advance epoch 才准确）。
+/// jemalloc 缓存统计（advance epoch 刷新）。
+/// 并发分配/释放时，各内部计数不构成同一时刻的原子快照，不能断言字段间的大小关系。
 #[derive(Debug, Clone, Copy)]
 pub struct JemallocBreakdown {
     /// 应用实际分配的字节
     pub allocated: usize,
-    /// 活跃页中的字节（页对齐，>= allocated）
+    /// 活跃页中的字节（页对齐；静止状态下 >= allocated）
     pub active: usize,
-    /// 物理驻留字节（含脏页、元数据，>= active）
+    /// 物理驻留字节（含脏页、元数据；静止状态下 >= active）
     pub resident: usize,
     /// jemalloc 元数据开销
     pub metadata: usize,

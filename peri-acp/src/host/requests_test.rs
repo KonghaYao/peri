@@ -2235,6 +2235,7 @@ impl Drop for HomeDirGuard {
 /// 空实现（install/uninstall 分支仅消费 install/uninstall + snapshot +
 /// cache_dir；`unstable_event` caps 默认关闭，push_plugin_* 不发通知）。
 struct MockPluginManager {
+    cache_dir: PathBuf,
     install_result: std::sync::Mutex<Result<InstalledPlugin, String>>,
     uninstall_result: std::sync::Mutex<Result<(), String>>,
 }
@@ -2242,6 +2243,7 @@ struct MockPluginManager {
 impl MockPluginManager {
     fn install_ok(id: &str) -> Self {
         Self {
+            cache_dir: PathBuf::from("/tmp/mock-cache"),
             install_result: std::sync::Mutex::new(Ok(InstalledPlugin {
                 id: id.to_string(),
                 name: id.to_string(),
@@ -2285,7 +2287,7 @@ impl PluginManagerPort for MockPluginManager {
     }
 
     fn cache_dir(&self) -> PathBuf {
-        PathBuf::from("/tmp/mock-cache")
+        self.cache_dir.clone()
     }
 
     async fn update(
@@ -2690,3 +2692,6 @@ async fn test_plugin_uninstall_removes_stale_plugin_entries() {
         "install/uninstall 各触发一次投影推送（首发 + 2 次重发）"
     );
 }
+
+#[path = "requests/plugin_search_test.rs"]
+mod plugin_search_tests;
