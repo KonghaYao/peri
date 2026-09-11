@@ -235,6 +235,9 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         // 见 event_sink.rs），或为 Langfuse/tracer-only（Stage*、
         // TurnStarted/Ended、LlmCallStart/RequestPayload、BudgetThresholdHit 等）。
         ExecutorEvent::StateSnapshot(_)
+        | ExecutorEvent::UserInputQueueChanged(_)
+        | ExecutorEvent::UserInputRunStarted { .. }
+        | ExecutorEvent::UserInputDelivered { .. }
         | ExecutorEvent::TurnCommitted { .. }
         | ExecutorEvent::StateSnapshotMeta { .. }
         | ExecutorEvent::GoalSnapshot { .. }

@@ -7,7 +7,7 @@
 //! 不暴露无法回写的 token/context 快照或 cwd/step setter。
 
 use crate::agent::stages::StageContext;
-use crate::messages::BaseMessage;
+use crate::messages::{BaseMessage, MessageId};
 use crate::middleware::state::MiddlewareState;
 use crate::session::MessageQueue;
 
@@ -18,6 +18,9 @@ pub struct AgentContext<'a> {
 
     /// 从 transcript.visible_messages() 克隆的消息缓存
     messages_cache: Vec<BaseMessage>,
+
+    /// 首次 Receive 的输入身份，只供本次 before_agent 链读取。
+    input_message_ids: Option<&'a [MessageId]>,
 
     /// 标记已有消息是否被替换（用于 before_agent runner reconcile）
     messages_modified: bool,
@@ -42,9 +45,16 @@ impl<'a> AgentContext<'a> {
         Self {
             ctx,
             messages_cache,
+            input_message_ids: None,
             messages_modified: false,
             recall_buffer: Vec::new(),
         }
+    }
+
+    /// 为本次输入准备绑定精确批次，Some(empty) 表示不处理历史用户消息。
+    pub(crate) fn with_input_message_ids(mut self, input_message_ids: &'a [MessageId]) -> Self {
+        self.input_message_ids = Some(input_message_ids);
+        self
     }
 
     /// 获取消息缓存快照（供 runner reconcile 到 transcript 使用）
@@ -78,6 +88,10 @@ impl MiddlewareState for AgentContext<'_> {
 
     fn messages(&self) -> &[BaseMessage] {
         &self.messages_cache
+    }
+
+    fn input_message_ids(&self) -> Option<&[MessageId]> {
+        self.input_message_ids
     }
 
     /// 双写 transcript + cache。

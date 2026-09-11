@@ -1161,3 +1161,8 @@ app-note-cache-coverage-low = Prompt cache coverage {$pct}% < 80% — cached {$c
 reminder-compact-file = File context
 reminder-compact-skill = Skill instructions
 reminder-compact-summary = Compaction summary
+
+# Pending input queue
+steer-queue-title = Pending { $count }
+steer-input-rejected = Input was not accepted. Your draft has been kept.
+steer-input-uncertain = Waiting for the input receipt. Retrying with the same input ID.

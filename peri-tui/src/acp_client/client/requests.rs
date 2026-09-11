@@ -33,7 +33,16 @@ impl AcpTuiClient {
             "protocolVersion": 1,
             "clientCapabilities": { "_meta": caps.to_agent_meta() },
         });
-        self.transport.send_request("initialize", params).await?;
+        let result = self.transport.send_request("initialize", params).await?;
+        let supported = result
+            .pointer("/agentCapabilities/_meta/peri.userInputQueue")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.user_input_queue
+            .store(supported, std::sync::atomic::Ordering::Release);
+        if self.projection_mode == super::ClientProjectionMode::Interactive {
+            crate::kit::steer_state::STEERS.state().write().enabled = supported;
+        }
         Ok(())
     }
 
@@ -188,9 +197,17 @@ impl AcpTuiClient {
             .lifecycle
             .current_session_id()
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
+        let managed_run = self
+            .supports_user_input_queue()
+            .then(|| self.lifecycle.active_user_input_run())
+            .flatten();
         let claims = self.lifecycle.cancel_active_prompt();
         self.settle_claims_owned(claims).await;
-        let params = json!({ "sessionId": session_id });
+        let mut params = json!({ "sessionId": session_id });
+        if let Some((_, generation, request_id)) = managed_run {
+            params["generation"] = json!(generation);
+            params["requestId"] = json!(request_id);
+        }
         self.transport
             .send_notification("session/cancel", params)
             .await

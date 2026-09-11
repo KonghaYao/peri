@@ -37,7 +37,8 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
 | `session/prompt` | `{ sessionId, message: { role: "user", content }, attachments?, bgResults?, requestId? }` | `{ stopReason }` | 提交用户输入（**request-response**，响应携带 `StopReason`；sessionId 同时支持 `session_id` 别名；`requestId` 为可选的本轮 turn 标识，服务器随 `peri/agent_event_done` 回带，供 TUI stale 事件配对）。长耗时 prompt 在服务端 spawn 后台执行，避免阻塞 `session/cancel` 等后续消息 |
-| `session/cancel` | `{ sessionId }` | — | 中断当前 Agent（notification，非 request-response） |
+| `session/cancel` | `{ sessionId, generation?, requestId? }` | — | 中断当前 Agent（notification）；待发送队列的运行可携成对 generation/requestId，旧身份不得取消新执行；缺省保留既有取消语义 |
+| `session/input/*` | 见共享 `UserInput*Request` DTO | 队列快照或操作回执 | `peri.userInputQueue` 协商的 enqueue / dispatch / takeback / snapshot；短控制请求与实际运行分离，见[用户待发送设计](user-input-queue.md) |
 | `session/execute-command` | — | — | **无生产调用者**。Slash 命令由 executor 入口的 `session/command/` 注册表（`CommandRegistry`）拦截处理，不走此 JSON-RPC 方法；HITL 审批和 AskUser 回答也不经过它（见 §2.3 注） |
 
 ### 2.3 查询与控制
@@ -170,7 +171,7 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 | 标准交互 | `session/request_permission`、`elicitation/create` | ACP method/response | HITL 与 AskUser 往返 |
 | 兼容/扩展 | `peri/unstable_event` | 兼容或特定扩展 payload | 不作为新 Agent 事件的默认通道 |
 | 输入预测 | `peri/prediction_ready` | `{method: "peri/prediction_ready", params: {sessionId, text, actions}}` | 服务 → 客户端输入预测建议 |
-| Turn 结束信号 | `peri/agent_event_done` | `{method: "peri/agent_event_done", params: {sessionId, stopReason, requestId?}}` | 服务 → 客户端 turn 完成（wire 字段为 camelCase `stopReason`；`requestId` 可选，仅提交 prompt 时携带时回带） |
+| Turn 结束信号 | `peri/agent_event_done` | `{method: "peri/agent_event_done", params: {sessionId, stopReason, requestId?}}` | 服务 → 客户端 turn 完成（wire 字段为 camelCase `stopReason`；`requestId` 可选，prompt 携带时回带；待发送队列的服务端 run 始终与 RunStarted 身份配对） |
 
 ### 6.2 传输实现
 

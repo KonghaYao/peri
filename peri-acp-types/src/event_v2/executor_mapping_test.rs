@@ -12,6 +12,83 @@ fn ids() -> (TurnId, AgentId) {
 }
 
 #[test]
+fn test_user_input_delivered_maps_identity_generation_and_full_content() {
+    let (turn_id, agent_id) = ids();
+    let input_id = uuid::Uuid::now_v7().to_string();
+    let event = RenderEvent::UserInputDelivered {
+        turn_id,
+        agent_id,
+        generation: "generation".into(),
+        input_id: input_id.clone(),
+        content: crate::messages::MessageContent::text("完整\n用户输入"),
+    };
+    assert_eq!(event.turn_id(), turn_id, "事件身份来自发射源");
+    assert_eq!(event.agent_id(), agent_id, "Agent 身份必须保留");
+    let encoded = serde_json::to_value(&event).unwrap();
+    let decoded: RenderEvent = serde_json::from_value(encoded).unwrap();
+    let ExecutorEvent::UserInputDelivered {
+        generation,
+        input_id: mapped_id,
+        content,
+    } = render_event_to_executor(decoded).unwrap()
+    else {
+        panic!("应映射真实用户输入投递事件");
+    };
+    assert_eq!(mapped_id, input_id, "稳定输入身份不可重新生成");
+    assert_eq!(generation, "generation", "会话代际必须保留");
+    assert_eq!(content.text_content(), "完整\n用户输入", "多行输入必须保真");
+}
+
+#[test]
+fn test_user_input_queue_snapshot_maps_without_losing_revision() {
+    let (turn_id, agent_id) = ids();
+    let event = StateEvent::UserInputQueueChanged {
+        turn_id,
+        agent_id,
+        snapshot: crate::session::UserInputQueueSnapshot {
+            session_id: "session".into(),
+            generation: "generation".into(),
+            revision: 42,
+            active_request_id: None,
+            items: vec![],
+        },
+    };
+    assert_eq!(event.turn_id(), turn_id, "会话控制事件也有稳定身份");
+    assert_eq!(event.agent_id(), agent_id, "不允许 mapper 补造来源");
+    let encoded = serde_json::to_value(&event).unwrap();
+    let decoded: StateEvent = serde_json::from_value(encoded).unwrap();
+    let ExecutorEvent::UserInputQueueChanged(snapshot) = state_event_to_executor(decoded).unwrap()
+    else {
+        panic!("应映射队列快照");
+    };
+    assert_eq!(snapshot.revision, 42, "快照版本不可丢失");
+    assert_eq!(snapshot.generation, "generation", "快照代际不可丢失");
+}
+
+#[test]
+fn test_user_input_run_started_maps_prompt_identity() {
+    let (turn_id, agent_id) = ids();
+    let event = StateEvent::UserInputRunStarted {
+        turn_id,
+        agent_id,
+        generation: "generation".into(),
+        request_id: "ticket".into(),
+    };
+    let ExecutorEvent::UserInputRunStarted {
+        generation,
+        request_id,
+    } = state_event_to_executor(event).unwrap()
+    else {
+        panic!("应映射 mailbox 执行准入");
+    };
+    assert_eq!(
+        (generation.as_str(), request_id.as_str()),
+        ("generation", "ticket"),
+        "HITL 生命周期必须绑定实际执行 ticket"
+    );
+}
+
+#[test]
 fn test_text_chunk_maps() {
     let (turn_id, agent_id) = ids();
     let r = RenderEvent::TextChunk {

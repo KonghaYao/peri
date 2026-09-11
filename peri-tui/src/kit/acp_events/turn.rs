@@ -323,6 +323,46 @@ pub(super) fn handle_local_user_bubble(state: &mut BridgeState, text: &str) {
     super::render::push_acp_state(state);
 }
 
+pub(super) fn handle_user_input_delivered(
+    state: &mut BridgeState,
+    generation: &str,
+    input_id: &str,
+    content: &peri_acp_types::messages::MessageContent,
+) {
+    let current_generation = crate::kit::steer_state::STEERS
+        .state()
+        .read()
+        .snapshot(
+            &state.active_session_id,
+            crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
+        )
+        .map(|snapshot| snapshot.generation.clone());
+    if current_generation
+        .as_deref()
+        .is_some_and(|current| current != generation)
+    {
+        return;
+    }
+    if !crate::kit::steer_state::STEERS
+        .state()
+        .write()
+        .claim_delivery(&state.active_session_id, input_id)
+    {
+        return;
+    }
+    state.flush_current_turn();
+    state.last_submitted_text = None;
+    state.phase = SessionPhase::PromptRunning;
+    state.variant = 1;
+    state
+        .committed
+        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
+            content.text_content(),
+        )));
+    super::render::push_view_models(state);
+    super::render::push_acp_state(state);
+}
+
 /// S4.2: 本地 loading 复位请求（cancel / /clear / prompt 失败兜底，由
 /// submit_consumer 注入 LOCAL_EVENT_TX）。幂等：phase 非 PromptRunning 时
 /// no-op（不 push）——命令 compact、replay、正常提交等场景不受影响；phase

@@ -31,6 +31,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | PTC | [programmatic-tool-calling.md](programmatic-tool-calling.md) | JavaScript host、RPC 与 effective tool dispatch |
 | 交互 broker | [interaction-brokers.md](interaction-brokers.md) | Approval/Questions broker 与多路审批 |
 | 消息存储 | [message-transcript.md](message-transcript.md) | Transcript、MessageQueue、staging 与持久化 |
+| 用户待发送队列 | [user-input-queue.md](user-input-queue.md) | Mailbox、单条/全部投递、取回与运行身份 |
 | Compact | [micro-compact.md](micro-compact.md) | 压缩计划与 LLM projection |
 | Dynamic MCP | [dynamic-mcp.md](dynamic-mcp.md) | session 动态加载、目录发布与关闭 |
 | MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | stdio Apps profile、binding lease 与多路数据隔离 |

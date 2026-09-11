@@ -6,7 +6,7 @@
 use super::state::MiddlewareState;
 use crate::{
     agent::stages::SharedToolMap,
-    messages::BaseMessage,
+    messages::{BaseMessage, MessageId},
     session::{MessageQueue, QueuedMessage},
 };
 
@@ -54,8 +54,17 @@ pub trait CatalogState: Send + Sync {
     fn push_recall(&mut self, item: String);
 }
 
-/// 输入准备：读取、追加、稳定 ID 替换，以及初始工具目录重绑。
-pub trait BeforeAgentState: StateView + MessageAppend + MessageReplace + CatalogState {}
+/// 本次 Receive 接纳的用户输入身份；空集合不能回退扫描历史。
+pub trait InputBatchState: Send + Sync {
+    /// None 仅表示 legacy 适配器没有批次信息。
+    fn input_message_ids(&self) -> Option<&[MessageId]>;
+}
+
+/// 输入准备：读取本批身份、追加、稳定 ID 替换，以及初始工具目录重绑。
+pub trait BeforeAgentState:
+    StateView + InputBatchState + MessageAppend + MessageReplace + CatalogState
+{
+}
 
 /// 工具审批仅观察状态，工具参数修改通过 ToolCall 返回值表达。
 ///
@@ -148,7 +157,16 @@ impl<T: MiddlewareState + ?Sized> CatalogState for T {
     }
 }
 
-impl<T: StateView + MessageAppend + MessageReplace + CatalogState + ?Sized> BeforeAgentState for T {}
+impl<T: MiddlewareState + ?Sized> InputBatchState for T {
+    fn input_message_ids(&self) -> Option<&[MessageId]> {
+        MiddlewareState::input_message_ids(self)
+    }
+}
+
+impl<T: StateView + InputBatchState + MessageAppend + MessageReplace + CatalogState + ?Sized>
+    BeforeAgentState for T
+{
+}
 impl<T: StateView + ?Sized> BeforeToolState for T {}
 impl<T: StateView + QueueState + ?Sized> AfterToolState for T {}
 impl<T: StateView + QueueState + ?Sized> AfterAgentState for T {}

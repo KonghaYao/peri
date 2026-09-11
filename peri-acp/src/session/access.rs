@@ -12,6 +12,26 @@ use tokio_util::sync::CancellationToken;
 use super::SessionManager;
 
 impl SessionManager {
+    pub(crate) fn user_input_mailbox_for(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<peri_agent::session::user_input_mailbox::UserInputMailbox>> {
+        self.inner
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.user_input_mailbox.clone())
+    }
+
+    pub(crate) fn invalidate_user_input_mailbox(&self, session_id: &str) {
+        if let Some(mut session) = self.inner.sessions.get_mut(session_id) {
+            if let Some(mailbox) = session.user_input_mailbox.take() {
+                mailbox.invalidate();
+            }
+            session.user_input_events_cancel.cancel();
+            session.user_input_events_cancel = CancellationToken::new();
+        }
+    }
+
     /// 取指定 session 的 goal_state 句柄（用于 TUI/stdio 注入到 middleware 链）。
     ///
     /// 调用方应先调用 [`ensure_session`] 保证记录存在。

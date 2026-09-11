@@ -7,7 +7,10 @@
 //! - `AgentState` 提供 legacy/test 适配，`AgentContext` 提供生产 v2 适配
 //! - middleware_runner 通过此 trait 桥接 v2 stages ↔ middleware 钩子
 
-use crate::{agent::state::AgentState, messages::BaseMessage};
+use crate::{
+    agent::state::AgentState,
+    messages::{BaseMessage, MessageId},
+};
 
 /// 状态适配器的真实操作集合；不直接作为 hook 参数。
 ///
@@ -17,6 +20,10 @@ pub trait MiddlewareState: Send + Sync {
     fn cwd(&self) -> &str;
 
     fn messages(&self) -> &[BaseMessage];
+    /// 本次输入准备的用户消息身份；legacy/test 适配器没有批次信息。
+    fn input_message_ids(&self) -> Option<&[MessageId]> {
+        None
+    }
     fn add_message(&mut self, message: BaseMessage);
     /// 按稳定 MessageId 替换已有可见消息，保持消息顺序和数量。
     ///

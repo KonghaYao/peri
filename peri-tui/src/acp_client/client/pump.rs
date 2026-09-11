@@ -116,9 +116,10 @@ impl AcpTuiClient {
     pub fn spawn_pump(&self, notification_tx: mpsc::UnboundedSender<AcpNotification>) {
         let transport = self.transport.clone();
         let lifecycle = self.lifecycle.clone();
+        let user_input_queue = self.user_input_queue.clone();
         *self.notification_weak.lock().unwrap() = Some(notification_tx.downgrade());
         tokio::spawn(async move {
-            Self::run_pump(transport, notification_tx, lifecycle).await;
+            Self::run_pump(transport, notification_tx, lifecycle, user_input_queue).await;
         });
     }
 
@@ -149,6 +150,7 @@ impl AcpTuiClient {
         transport: Arc<MpscClientTransport>,
         notification_tx: mpsc::UnboundedSender<AcpNotification>,
         lifecycle: InteractionLifecycle,
+        user_input_queue: Arc<std::sync::atomic::AtomicBool>,
     ) {
         let mut event_count: u64 = 0;
         loop {
@@ -178,6 +180,47 @@ impl AcpTuiClient {
                         };
                         match event_result {
                             Ok(event) => {
+                                if let AcpEvent::UserInputDelivered { generation, .. } = &event {
+                                    let _gate = lifecycle.operation_gate().lock().await;
+                                    if user_input_queue.load(std::sync::atomic::Ordering::Acquire)
+                                        && lifecycle
+                                            .matches_user_input_generation(&session_id, generation)
+                                    {
+                                        let _ = notification_tx.send(AcpNotification::AgentEvent {
+                                            session_id,
+                                            event,
+                                        });
+                                    }
+                                    continue;
+                                }
+                                if let AcpEvent::UserInputRunStarted {
+                                    generation,
+                                    request_id,
+                                } = &event
+                                {
+                                    if !user_input_queue.load(std::sync::atomic::Ordering::Acquire)
+                                    {
+                                        continue;
+                                    }
+                                    let _gate = lifecycle.operation_gate().lock().await;
+                                    let Some(claims) = lifecycle.open_user_input_run(
+                                        &session_id,
+                                        generation,
+                                        request_id,
+                                    ) else {
+                                        continue;
+                                    };
+                                    Self::settle_claims(&transport, &notification_tx, claims).await;
+                                    // Publish while holding the session gate so a snapshot
+                                    // cannot project a newer run before this start.
+                                    Self::deliver_ordinary(
+                                        &lifecycle,
+                                        &notification_tx,
+                                        session_id.clone(),
+                                        AcpNotification::AgentEvent { session_id, event },
+                                    );
+                                    continue;
+                                }
                                 debug!(
                                     event_count = event_count,
                                     session_id = %session_id,
@@ -266,22 +309,27 @@ impl AcpTuiClient {
                             .get("requestId")
                             .and_then(|v| v.as_str())
                             .map(String::from);
-                        if lifecycle.is_current_session(&session_id) {
+                        {
                             let _gate = lifecycle.operation_gate().lock().await;
+                            if !lifecycle
+                                .should_forward_prompt_terminal(&session_id, request_id.as_deref())
+                            {
+                                continue;
+                            }
                             let claims = lifecycle
                                 .close_prompt_by_wire_identity(&session_id, request_id.as_deref());
                             Self::settle_claims(&transport, &notification_tx, claims).await;
+                            Self::deliver_ordinary(
+                                &lifecycle,
+                                &notification_tx,
+                                session_id.clone(),
+                                AcpNotification::AgentDone {
+                                    session_id,
+                                    stop_reason,
+                                    request_id,
+                                },
+                            );
                         }
-                        Self::deliver_ordinary(
-                            &lifecycle,
-                            &notification_tx,
-                            session_id.clone(),
-                            AcpNotification::AgentDone {
-                                session_id,
-                                stop_reason,
-                                request_id,
-                            },
-                        );
                     } else if method == "peri/prediction_ready" {
                         let session_id = params
                             .get("sessionId")
@@ -334,6 +382,11 @@ impl AcpTuiClient {
                     }
                 }
                 Some(IncomingMessage::Request { id, method, params }) => {
+                    let _gate = if user_input_queue.load(std::sync::atomic::Ordering::Acquire) {
+                        Some(lifecycle.operation_gate().lock().await)
+                    } else {
+                        None
+                    };
                     match plan_reverse_request(&method, id, params, &lifecycle) {
                         Some(RegisterDecision::Settle { kind, id }) => {
                             Self::settle_reverse_request(&transport, kind, id).await;
@@ -440,3 +493,7 @@ impl AcpTuiClient {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "user_input_run_test.rs"]
+mod user_input_run_tests;

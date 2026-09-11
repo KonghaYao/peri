@@ -10,7 +10,7 @@
 | ACP、事件、transport、session | `peri-acp/CLAUDE.md`、`docs/code-index/peri-acp.md`、`docs/standards/architecture-contracts.md` | `spec/archive-issues/acp-protocol/`、`spec/archive-issues/architecture/` |
 | Middleware、工具、SubAgent、MCP、Workflow | `peri-middlewares/CLAUDE.md`、`docs/code-index/peri-middlewares.md`、`docs/design/tool-system.md` | `spec/archive-issues/tools/`、`spec/archive-issues/subagent/`、`spec/archive-issues/workflow/` |
 | Model provider 与 prompt cache | `docs/code-index/peri-model.md`、`docs/design/model-adapters.md`、`docs/design/system-prompt.md` | `spec/archive-issues/llm-provider/` |
-| TUI 渲染、输入、面板、交互 | `peri-tui/CLAUDE.md`、`docs/code-index/peri-tui.md`、`docs/design/tui-acp-data-flow.md` | `spec/archive-issues/tui-*/` |
+| TUI 渲染、输入、面板、交互 | `peri-tui/CLAUDE.md`、`docs/code-index/peri-tui.md`、`docs/design/tui-acp-data-flow.md`、`docs/design/user-input-queue.md` | `spec/archive-issues/tui-*/` |
 | Langfuse | `docs/reference/langfuse-data-integrity.md`、`docs/code-index/peri-controller.md` | `spec/archive-issues/langfuse/` |
 | 测试、CI 与跨平台证据 | `docs/standards/testing.md`、`e2e/CLAUDE.md` | `spec/archive-issues/code-quality/`、`spec/reviews/` |
 

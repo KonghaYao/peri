@@ -21,7 +21,7 @@ const SUPPORTED_MIME: &[(&str, &str)] = &[
 
 /// ImageMiddleware — 解析用户消息中的 @image <path>，替换为 ContentBlock::Image
 ///
-/// 在 `before_agent` 钩子中扫描最新一条 user message，查找 `@image <path>` 标记，
+/// 在 `before_agent` 钩子中扫描本批用户消息，查找 `@image <path>` 标记，
 /// 读取对应图片文件，base64 编码后替换为 `ContentBlock::Image`。
 /// 压缩管线为预留切面，MVP 为空——不对图片做任何压缩处理。
 pub struct ImageMiddleware {
@@ -69,25 +69,43 @@ impl Middleware for ImageMiddleware {
     }
 
     async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
-        // 取最后一条 Human 消息的索引
-        let last_human_idx = state
-            .messages()
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(i, m)| matches!(m, BaseMessage::Human { .. }).then_some(i));
-
-        let idx = match last_human_idx {
-            Some(i) => i,
-            None => return Ok(()),
+        let inputs: Vec<BaseMessage> = match state.input_message_ids() {
+            Some(ids) => state
+                .messages()
+                .iter()
+                .filter(|message| {
+                    matches!(message, BaseMessage::Human { .. }) && ids.contains(&message.id())
+                })
+                .cloned()
+                .collect(),
+            None => state
+                .messages()
+                .iter()
+                .rev()
+                .find(|message| matches!(message, BaseMessage::Human { .. }))
+                .cloned()
+                .into_iter()
+                .collect(),
         };
-
-        let text = state.messages()[idx].content();
         let re = match Regex::new(r"@image\s+(\S+)") {
             Ok(r) => r,
             Err(_) => return Ok(()),
         };
+        for message in inputs {
+            self.prepare_image_input(state, message, &re).await?;
+        }
+        Ok(())
+    }
+}
 
+impl ImageMiddleware {
+    async fn prepare_image_input(
+        &self,
+        state: &mut dyn hook_state::BeforeAgentState,
+        message: BaseMessage,
+        re: &Regex,
+    ) -> AgentResult<()> {
+        let text = message.content();
         // 收集所有 @image 路径
         let paths: Vec<String> = re
             .captures_iter(&text)
@@ -100,20 +118,18 @@ impl Middleware for ImageMiddleware {
 
         // 在 blocking 线程中批量进行文件 I/O（读取 + MIME 检测）
         let max_size = self.max_size;
-        let raw_results: Vec<Result<ImageFileData, String>> = tokio::task::spawn_blocking({
-            let paths = paths.clone();
-            move || {
+        let raw_results: Vec<Result<ImageFileData, String>> =
+            tokio::task::spawn_blocking(move || {
                 paths
                     .iter()
                     .map(|path| load_image_file(path, max_size))
                     .collect()
-            }
-        })
-        .await
-        .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-            middleware: "ImageMiddleware".to_string(),
-            reason: format!("spawn_blocking 失败: {e}"),
-        })?;
+            })
+            .await
+            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+                middleware: "ImageMiddleware".to_string(),
+                reason: format!("spawn_blocking 失败: {e}"),
+            })?;
 
         // 在主线程中执行压缩管线 + base64 编码
         let results: Vec<Result<ContentBlock, String>> = raw_results
@@ -127,23 +143,27 @@ impl Middleware for ImageMiddleware {
             })
             .collect();
 
-        // 重建 MessageContent：删除 @image 文本，追加 Image/Error 块
-        let clean_text = re.replace_all(&text, "").to_string();
-        let clean_text = clean_text.trim().to_string();
+        // 只移除文本中的附件标记，保留输入原有的图片等内容块。
+        let mut new_blocks: Vec<ContentBlock> = message
+            .content_blocks()
+            .into_iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => {
+                    let clean_text = re.replace_all(&text, "").trim().to_owned();
+                    (!clean_text.is_empty()).then(|| ContentBlock::text(clean_text))
+                }
+                block => Some(block),
+            })
+            .collect();
 
-        let mut new_blocks: Vec<ContentBlock> = Vec::new();
-        if !clean_text.is_empty() {
-            new_blocks.push(ContentBlock::text(clean_text));
-        }
-
-        for result in &results {
+        for result in results {
             match result {
-                Ok(block) => new_blocks.push(block.clone()),
+                Ok(block) => new_blocks.push(block),
                 Err(err) => new_blocks.push(ContentBlock::text(format!("[{}]", err))),
             }
         }
 
-        let new_msg = state.messages()[idx].clone_with_content(MessageContent::Blocks(new_blocks));
+        let new_msg = message.clone_with_content(MessageContent::Blocks(new_blocks));
         if !state.replace_message(new_msg) {
             return Err(peri_agent::error::AgentError::MiddlewareError {
                 middleware: self.name().to_string(),

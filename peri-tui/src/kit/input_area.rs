@@ -20,6 +20,7 @@ mod submit;
 use image::insert_image_reference;
 pub(crate) use image::png_encode;
 pub(crate) use popup::{get_cached_slash_items, refresh_slash_items};
+pub(crate) use submit::is_remote_command;
 pub(crate) use submit::send_local_user_bubble;
 
 use hooks::{AreaTracker, CjkGhostFix};
@@ -117,6 +118,9 @@ pub struct InputAreaProps {
 pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 单一编辑状态——闭包编辑 + 渲染读取共享同一实例
     let state = hooks.use_state(TextAreaState::default);
+    let steer_height = hooks.use_state(|| 0u16);
+    let steers = hooks.use_atom(&crate::kit::steer_state::STEERS);
+    let steer_session = hooks.use_atom(&crate::kit::atoms::ACTIVE_SESSION_ID);
     // 终端窗口焦点：FocusGained/FocusLost 事件驱动，切换 tmux 窗格/终端标签时隐藏光标
     let term_focused = hooks.use_state(|| true);
     // i18n 语言切换订阅
@@ -189,6 +193,17 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     KeyCode::Enter if !is_shift && !is_alt && !mention_active && !slash_active => {
                         exit_entry_focus_on_edit();
                         let mut s = state.write();
+                        if crate::kit::steer_state::is_enabled()
+                            && crate::kit::atoms::ACP_STATE.state().read().is_loading
+                            && is_remote_command(&s.text)
+                        {
+                            submit::show_submit_blocked_notification(
+                                &crate::kit::submit_request::SubmitRequest::AgentText(
+                                    s.text.clone(),
+                                ),
+                            );
+                            return EventResult::Consumed;
+                        }
                         let submitted = s.take_text();
                         drop(s);
 
@@ -772,7 +787,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         .collect();
     let queue_has_more = input_buffer_handle.read().len() > QUEUE_VISIBLE_MAX;
     let queue_lines = build_queue_lines(&queue_items, queue_has_more, text_width);
-    let queue_height = if hidden || queue_lines.is_empty() {
+    let legacy_queue_height = if hidden || queue_lines.is_empty() {
         0
     } else {
         let n = queue_lines.len() as u16;
@@ -782,6 +797,59 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             None => n,
         }
     };
+    let steer_enabled = steers.read().enabled;
+    let steer_session_id = steer_session.read().clone();
+    let steer_items = steers.read().rows(&steer_session_id);
+    let steer_budget = props
+        .max_total_height
+        .map(|budget| budget.saturating_sub(composer_height + ov_height));
+    let queue_height = if steer_enabled {
+        if hidden || steer_items.is_empty() {
+            0
+        } else {
+            (*steer_height.read()).min(steer_budget.unwrap_or(u16::MAX))
+        }
+    } else {
+        legacy_queue_height
+    };
+    *overlay_height.lock() = ov_height.saturating_add(queue_height);
+    let restore_epoch = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
+    let restore_pending = steers.read().pending_recovery_ids(&steer_session_id);
+    let draft_empty = text.is_empty() && PENDING_ATTACHMENTS.state().read().is_empty();
+    let restore_deps = (
+        steer_session_id.clone(),
+        restore_epoch,
+        restore_pending,
+        draft_empty,
+    );
+    hooks.use_effect(
+        move || {
+            let mut editor = state.write();
+            if crate::kit::atoms::ACTIVE_SESSION_ID.state().read().as_str() != steer_session_id
+                || crate::kit::atoms::BRIDGE_RESET_COUNTER.get() != restore_epoch
+            {
+                return;
+            }
+            let draft_is_empty =
+                editor.text.is_empty() && PENDING_ATTACHMENTS.state().read().is_empty();
+            let recovered = crate::kit::steer_state::STEERS.state().write().recover(
+                &steer_session_id,
+                restore_epoch,
+                draft_is_empty,
+            );
+            if let Some(input) = recovered {
+                editor.replace_all_no_undo(input.original_draft);
+                drop(editor);
+                PENDING_ATTACHMENTS.set(crate::kit::steer_state::attachments_from_content(
+                    &input.content,
+                ));
+                crate::kit::input_history::reset_history_cursor();
+                reset_mention_popup();
+                reset_slash_popup();
+            }
+        },
+        restore_deps,
+    );
 
     let total_height = if hidden {
         0
@@ -905,7 +973,21 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             } else {
                 element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
             } }
-            { if !hidden && !queue_lines.is_empty() {
+            { if !hidden && steer_enabled {
+                element!(crate::kit::steer_queue::SteerQueue(
+                    items: steer_items,
+                    max_rows: 5usize,
+                    max_height: steer_budget,
+                    on_height_change: Arc::new(Mutex::new(Handler::from(move |height: u16| {
+                        if *steer_height.read() != height { *steer_height.write() = height; }
+                    }))),
+                    on_action: Arc::new(Mutex::new(Handler::from(move |action: crate::kit::steer_queue::SteerQueueAction| {
+                        let draft_is_empty = state.read().text.is_empty()
+                            && PENDING_ATTACHMENTS.state().read().is_empty();
+                        crate::kit::steer_state::act(action, draft_is_empty);
+                    }))),
+                )).into_any()
+            } else if !hidden && !queue_lines.is_empty() {
                 // §10 queued 队列（Slice 3b）：composer 边框上方的排队提示行，
                 // 不进 transcript/不参与滚动模型；drain 后本列表随 buffer 清空。
                 element!(

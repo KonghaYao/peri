@@ -17,6 +17,7 @@ mod mcp_oauth;
 mod plugin;
 mod rewind;
 pub(crate) mod session_lifecycle;
+mod user_input;
 mod workflow;
 
 pub(crate) async fn handle_request(
@@ -35,6 +36,12 @@ pub(crate) async fn handle_request(
         }
         "session/load" => session_lifecycle::handle_load(params, cfg, sessions, transport).await,
         "session/list" => session_lifecycle::handle_list(params, cfg).await,
+        "session/input/enqueue"
+        | "session/input/dispatch"
+        | "session/input/takeback"
+        | "session/input/snapshot" => {
+            user_input::handle_user_input(method, params, cfg, sessions, transport)
+        }
         "workflow/list_runs" => workflow::handle_list_runs(params, sessions),
         "workflow/kill_agent" => workflow::handle_kill_agent(params, sessions).await,
         "workflow/kill_run" => workflow::handle_kill_run(params, sessions),

@@ -30,6 +30,9 @@ fn test_all_executor_event_variants_mapped() {
     // 非 Category ① 变体必须显式穷尽列出（禁止 wildcard 兜底）
     let exhausted_variants = [
         "StateSnapshot",
+        "UserInputQueueChanged",
+        "UserInputRunStarted",
+        "UserInputDelivered",
         "TurnCommitted",
         "StateSnapshotMeta",
         "TurnSuspended",

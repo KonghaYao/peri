@@ -10,6 +10,10 @@ use crate::kit::{acp_events, atoms, input_history, panel_registry};
 pub fn project_session_boundary(target_session_id: Option<&str>) {
     atoms::ACTIVE_SESSION_ID.set(target_session_id.unwrap_or_default().to_string());
     atoms::BRIDGE_RESET_COUNTER.set(atoms::BRIDGE_RESET_COUNTER.get().wrapping_add(1));
+    crate::kit::steer_state::session_boundary(
+        target_session_id.unwrap_or_default(),
+        atoms::BRIDGE_RESET_COUNTER.get(),
+    );
     acp_events::push_view_models_for_reset();
     {
         let state = atoms::ACP_STATE.state();

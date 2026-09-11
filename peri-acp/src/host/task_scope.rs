@@ -30,6 +30,7 @@ pub(crate) enum HostTaskKind {
     Prediction,
     LegacyCancelHook,
     McpAppsRelay,
+    UserInputEvents,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

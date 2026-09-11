@@ -226,6 +226,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         auto_classifier_factory: None,
         subagent_llm_factory: None,
         session_id: session_id.to_string(),
+        user_input_mailbox: None,
         cancel: AgentCancellationToken::new(),
         broker: Arc::new(NoopBroker),
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
@@ -386,6 +387,54 @@ async fn test_missing_frozen_without_builder_builds_complete_snapshot_for_cancel
     assert_eq!(snapshot.date().as_bytes()[4], b'-');
     assert_eq!(snapshot.date().as_bytes()[7], b'-');
     assert_eq!(snapshot.meta_harness(), &Default::default());
+}
+
+#[tokio::test]
+async fn test_user_input_keepgoing_with_empty_history_reaches_stage_for_resumed_queue() {
+    use crate::session::user_input_mailbox::UserInputMailbox;
+    use peri_acp_types::session::{EnqueueUserInputRequest, MessageQueue, SessionInbox};
+    let stage_calls = Arc::new(AtomicUsize::new(0));
+    let recorded = Arc::new(Mutex::new(None));
+    let mut context = make_session_context("queued-keepgoing");
+    let mailbox = UserInputMailbox::new(
+        "queued-keepgoing".into(),
+        Arc::new(SessionInbox::new(Arc::new(MessageQueue::new()))),
+        Arc::new(|_| {}),
+    );
+    mailbox
+        .enqueue(&EnqueueUserInputRequest {
+            session_id: "queued-keepgoing".into(),
+            generation: mailbox.generation().into(),
+            command_id: "enqueue".into(),
+            input_id: uuid::Uuid::now_v7().to_string(),
+            content: MessageContent::text("首条输入尚未领取"),
+            original_draft: "首条输入尚未领取".into(),
+        })
+        .unwrap();
+    mailbox.stop();
+    mailbox
+        .attach_external_attempt(AgentCancellationToken::new(), true)
+        .unwrap();
+    context.user_input_mailbox = Some(mailbox);
+    let sink = Arc::new(MockEventSink::new());
+    let mut turn = make_turn_input(
+        sink as Arc<dyn EventSink>,
+        MessageContent::text(""),
+        false,
+        vec![],
+    );
+    turn.stage_build = make_recording_cancelled_stage(stage_calls.clone(), recorded);
+    let result = run_session_loop(context, turn).await;
+    assert_eq!(
+        stage_calls.load(Ordering::SeqCst),
+        1,
+        "恢复已排队输入时，空历史不能触发无内容短路"
+    );
+    assert_eq!(
+        result.stop_reason,
+        PromptStopReason::Cancelled,
+        "应进入已设置取消的真实 stage，而不是假成功"
+    );
 }
 
 // ── is_keepgoing: 跨层判空契约测试 ───────────────────────────────────────

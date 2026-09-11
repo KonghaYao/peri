@@ -36,6 +36,7 @@ pub mod subagent;
 pub mod tool_catalog;
 pub mod transcript;
 pub mod turn;
+pub mod user_input_mailbox;
 pub mod workflow_completion;
 
 pub use config::{PermissionMode, SessionConfig, ThinkingConfig};
@@ -77,6 +78,7 @@ pub struct Session {
     transcript: Arc<RwLock<MessageTranscript>>,
     /// 收件箱（独立于 Transcript，会话内持续可变）
     queue: MessageQueue,
+    user_input_mailbox: RwLock<Option<Arc<user_input_mailbox::UserInputMailbox>>>,
     /// 可变配置（Arc 共享，外部写入，循环读取）
     config: Arc<SessionConfig>,
     /// 异步 owner 容器（set-once，RwLock 保护）。
@@ -105,6 +107,7 @@ impl Session {
             store,
             transcript,
             queue,
+            user_input_mailbox: RwLock::new(None),
             config,
             async_owners: None,
             subagent_host: parking_lot::RwLock::new(None),
@@ -132,6 +135,7 @@ impl Session {
             store,
             transcript,
             queue,
+            user_input_mailbox: RwLock::new(None),
             config,
             async_owners: None,
             subagent_host: parking_lot::RwLock::new(None),
@@ -167,6 +171,7 @@ impl Session {
             store,
             transcript,
             queue,
+            user_input_mailbox: RwLock::new(None),
             config,
             // v2 路径启用 async owner 容器（RwLock，允许后续 set_async_owners 注入）
             async_owners: Some(parking_lot::RwLock::new(None)),
@@ -187,6 +192,10 @@ impl Session {
     /// 收件箱
     pub fn queue(&self) -> &MessageQueue {
         &self.queue
+    }
+
+    pub fn set_user_input_mailbox(&self, mailbox: Arc<user_input_mailbox::UserInputMailbox>) {
+        *self.user_input_mailbox.write() = Some(mailbox);
     }
 
     /// 子 agent 运行时宿主（L3）。executor/builder 在主 session 创建后注入；

@@ -42,6 +42,18 @@ pub struct PendingInteraction<T> {
 /// captured as [`AcpEventData::Unknown`] for forward compatibility.
 #[derive(Debug, Clone)]
 pub enum AcpEventData {
+    UserInputQueueChanged {
+        snapshot: peri_acp_types::session::UserInputQueueSnapshot,
+    },
+    UserInputDelivered {
+        generation: String,
+        input_id: String,
+        content: peri_acp_types::messages::MessageContent,
+    },
+    ReplayedUserBubble {
+        input_id: String,
+        text: String,
+    },
     // -- §4.1 Streaming (high-frequency) ------------------------------------
     /// `"text-chunk"` -- incremental text for the current assistant bubble.
     TextChunk(TuiTextChunk),
@@ -63,7 +75,9 @@ pub enum AcpEventData {
     /// submit_consumer 发出，bridge 收到后设 phase=PromptRunning, variant=1。
     /// `request_id` 为本轮 prompt RPC 的 id（submit_consumer 生成）——bridge
     /// 记录为"当前 turn 的 id"，供 stale TurnInterrupted 配对判定。
-    PromptSubmitted { request_id: Option<String> },
+    PromptSubmitted {
+        request_id: Option<String>,
+    },
 
     /// Root-agent usage observation for one model request. Auxiliary agent updates
     /// are filtered by the notifier. `Some` includes an explicit zero cache read;
@@ -94,7 +108,9 @@ pub enum AcpEventData {
     TurnSuspended,
 
     /// TUI 内部事件：本地用户提交的 UserBubble。仅 TUI 内部使用，不走 ACP 协议。
-    LocalUserBubble { text: String },
+    LocalUserBubble {
+        text: String,
+    },
 
     /// TUI 内部事件：本地 loading 复位请求（cancel / /clear / prompt 失败
     /// 兜底时由 submit_consumer 发出）。仅 TUI 内部使用，不走 ACP 协议。
@@ -109,7 +125,9 @@ pub enum AcpEventData {
     /// 再 push 自身。与 LocalUserBubble 的纯追加不同，此变体主动切分视觉 turn：
     /// 在 agent ReAct 循环中间插入用户气泡，把同一轮 TurnDone 的 AI 内容
     /// 分割为「bg 回调前」和「bg 回调后」两段。
-    BgCallbackBubble { text: String },
+    BgCallbackBubble {
+        text: String,
+    },
 
     /// TUI 内部事件：直接将完整 AI 文本气泡追加到 committed。
     /// 用于 session/load replay 及任何需要旁路 current_turn 直接归档的场景。
@@ -194,22 +212,31 @@ pub enum AcpEventData {
     /// Rewind 已完成——messages_json 为 BaseMessage 数组的 JSON。
     /// 由 AcpEvent::RewindCompleted（peri/agent_event）转换而来，
     /// dispatch_and_notify 反序列化后替换 state.committed。
-    RewindCompleted { messages_json: String },
+    RewindCompleted {
+        messages_json: String,
+    },
 
     /// `"oauth-needed"` -- MCP server authorization required.
     OauthNeeded(OauthNeeded),
 
     /// `"oauth-completed"` -- MCP OAuth 授权完成（授权码流程走完/回调成功）。
     /// 由 AcpEvent::OauthCompleted（peri/agent_event）转换而来。
-    OauthCompleted { server_name: String },
+    OauthCompleted {
+        server_name: String,
+    },
 
     /// `"oauth-failed"` -- MCP OAuth 授权失败（超时/取消/服务端拒绝）。
     /// 由 AcpEvent::OauthFailed（peri/agent_event）转换而来。
-    OauthFailed { server_name: String, error: String },
+    OauthFailed {
+        server_name: String,
+        error: String,
+    },
 
     /// `"oauth-restored"` -- MCP OAuth 凭证恢复成功（快速路径：磁盘已有
     /// 有效凭证，跳过浏览器授权）。由 AcpEvent::OauthRestored 转换而来。
-    OauthRestored { server_name: String },
+    OauthRestored {
+        server_name: String,
+    },
 
     // -- §4.6 Structure (control message-area layout) ------------------------
     /// `"subagent-started"` -- sub-agent created, TUI opens a collapsible group.
@@ -251,14 +278,20 @@ pub enum AcpEventData {
     },
 
     /// `"bg-task-cancelled"` -- a background task was cancelled.
-    BgTaskCancelled { task_id: String, reason: String },
+    BgTaskCancelled {
+        task_id: String,
+        reason: String,
+    },
 
     /// `"bg-task-snapshot"` -- full list of active background tasks.
     BgTaskSnapshot(Vec<BgTaskEntry>),
 
     // -- §4.8 Agent Event Extensions (P1-5) ----------------------------------
     /// `"turn-committed"` — ReAct 迭代提交信号。
-    TurnCommitted { messages_json: String, steps: usize },
+    TurnCommitted {
+        messages_json: String,
+        steps: usize,
+    },
 
     /// `"compact-started"` — 上下文压缩开始。
     CompactStarted,
@@ -301,7 +334,9 @@ pub enum AcpEventData {
     },
 
     /// `"agent-execution-failed"` — agent 执行失败。
-    AgentExecutionFailed { message: String },
+    AgentExecutionFailed {
+        message: String,
+    },
 
     /// `"workflow-progress"` — 工作流进度更新。
     WorkflowProgress {
@@ -325,7 +360,10 @@ pub enum AcpEventData {
     },
 
     /// Explicit text-only compatibility display; never promoted to canonical trust.
-    SystemReminderFallback { text: String, replay: bool },
+    SystemReminderFallback {
+        text: String,
+        replay: bool,
+    },
 
     // -- §4.9 Plugin events ------------------------------------------------
     /// `"plugin-snapshot"` — 插件列表全量快照。

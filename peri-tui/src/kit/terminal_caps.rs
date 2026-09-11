@@ -76,6 +76,12 @@ pub struct SymbolSet {
     pub todo_reopened: &'static str,
     /// todo change：ActiveFormUpdated（表单更新）
     pub todo_edited: &'static str,
+    /// 立即发送单条输入。
+    pub send: &'static str,
+    /// 立即发送全部选定输入。
+    pub send_all: &'static str,
+    /// 取回待发送输入供编辑。
+    pub take_back: &'static str,
 }
 
 const UNICODE_SYMBOLS: SymbolSet = SymbolSet {
@@ -90,6 +96,9 @@ const UNICODE_SYMBOLS: SymbolSet = SymbolSet {
     todo_started: "\u{25b6}",  // ▶
     todo_reopened: "\u{21bb}", // ↻
     todo_edited: "\u{270e}",   // ✎
+    send: "\u{2191}",          // ↑
+    send_all: "\u{21c8}",      // ⇈
+    take_back: "\u{21b6}",     // ↶
 };
 
 const ASCII_SYMBOLS: SymbolSet = SymbolSet {
@@ -104,6 +113,9 @@ const ASCII_SYMBOLS: SymbolSet = SymbolSet {
     todo_started: ">",
     todo_reopened: "~",
     todo_edited: "*",
+    send: "^",
+    send_all: "^^",
+    take_back: "<",
 };
 
 /// 按终端能力选择符号集：unicode 不可用时降级 ASCII（§4.1 降级表）。
@@ -309,6 +321,9 @@ mod tests {
         assert_eq!(s.todo_started, "▶");
         assert_eq!(s.todo_reopened, "↻");
         assert_eq!(s.todo_edited, "✎");
+        assert_eq!(s.send, "↑");
+        assert_eq!(s.send_all, "⇈");
+        assert_eq!(s.take_back, "↶");
     }
 
     #[test]
@@ -334,6 +349,9 @@ mod tests {
         assert_eq!(s.todo_started, ">");
         assert_eq!(s.todo_reopened, "~");
         assert_eq!(s.todo_edited, "*");
+        assert_eq!(s.send, "^");
+        assert_eq!(s.send_all, "^^");
+        assert_eq!(s.take_back, "<");
         // 显式状态文本后备与符号等价性（无 unicode 时每个语义仍有明确符号）
         let all = [
             s.running,
@@ -347,6 +365,9 @@ mod tests {
             s.todo_started,
             s.todo_reopened,
             s.todo_edited,
+            s.send,
+            s.send_all,
+            s.take_back,
         ];
         assert!(all.iter().all(|c| c.is_ascii()));
     }

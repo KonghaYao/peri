@@ -39,6 +39,7 @@ fn test_receive_input_output_contract() {
     let output = ReceiveOutput {
         consumed_count: 0,
         wake_up_count: 0,
+        input_message_ids: Vec::new(),
     };
     assert_eq!(output.consumed_count, 0);
     assert_eq!(output.wake_up_count, 0);
@@ -111,6 +112,141 @@ fn test_stage_context_builder_default() {
 /// Mock LLM：首轮返回 final_answer，无 tool_calls
 struct FinalAnswerLLM {
     answer: &'static str,
+}
+
+struct InputBatchProbe {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    batches: Arc<parking_lot::Mutex<Vec<Vec<crate::messages::MessageId>>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::middleware::Middleware for InputBatchProbe {
+    fn name(&self) -> &str {
+        "InputBatchProbe"
+    }
+
+    async fn before_agent(
+        &self,
+        state: &mut dyn hook_state::BeforeAgentState,
+    ) -> crate::error::AgentResult<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let ids = state
+            .input_message_ids()
+            .expect("生产 runner 必须明确传入输入批次")
+            .to_vec();
+        self.batches.lock().push(ids.clone());
+        let inputs: Vec<_> = state
+            .messages()
+            .iter()
+            .filter(|message| ids.contains(&message.id()))
+            .cloned()
+            .collect();
+        for input in inputs {
+            let content = MessageContent::text(format!("{} prepared", input.content()));
+            assert!(state.replace_message(input.clone_with_content(content)));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_input_batch_reaches_single_before_agent_without_history_or_background() {
+    let mut ctx = make_stage_context();
+    ctx.runtime.llm = Arc::new(FinalAnswerLLM { answer: "done" });
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let batches = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(InputBatchProbe {
+        calls: calls.clone(),
+        batches: batches.clone(),
+    }));
+    ctx.runtime.middleware_chain = Arc::new(chain);
+    let historical = BaseMessage::human("history @image old.png");
+    ctx.session.transcript.write().append(historical.clone());
+    let first = BaseMessage::human("A @image current.png");
+    let second = BaseMessage::human("B @src/current.rs");
+    let background = BaseMessage::human("background @image ignored.png");
+    ctx.session.queue.push_batch(vec![
+        QueuedMessage::prompt(MessageSource::UserInput, first.clone()),
+        QueuedMessage::prompt(MessageSource::UserInput, second.clone()),
+        QueuedMessage::prompt(MessageSource::UserInput, BaseMessage::human("")),
+        QueuedMessage::defer(MessageSource::SubAgentComplete, background.clone()),
+    ]);
+
+    assert!(matches!(
+        run_react_loop(ctx.clone(), 1).await,
+        LoopResult::Completed
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "整条 before_agent 链只能执行一次"
+    );
+    assert_eq!(
+        *batches.lock(),
+        vec![vec![first.id(), second.id()]],
+        "批次仅包含本次非空用户输入且顺序不变"
+    );
+    let transcript = ctx.session.transcript.read();
+    for input in [&first, &second] {
+        assert_eq!(
+            transcript.get(input.id()).unwrap().message().content(),
+            format!("{} prepared", input.content()),
+            "每条输入都经同一链准备且稳定 ID 写回"
+        );
+    }
+    for untouched in [&historical, &background] {
+        assert_eq!(
+            transcript.get(untouched.id()).unwrap().message().content(),
+            untouched.content(),
+            "历史与后台 Human 不属于本批用户输入"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_input_batch_empty_background_attempt_does_not_reprocess_history() {
+    let mut ctx = make_stage_context();
+    ctx.runtime.llm = Arc::new(FinalAnswerLLM { answer: "done" });
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let batches = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(InputBatchProbe {
+        calls: calls.clone(),
+        batches: batches.clone(),
+    }));
+    ctx.runtime.middleware_chain = Arc::new(chain);
+    let historical = BaseMessage::human("history @image old.png");
+    ctx.session.transcript.write().append(historical.clone());
+    ctx.session.queue.push(QueuedMessage::defer(
+        MessageSource::SubAgentComplete,
+        BaseMessage::human("background result"),
+    ));
+
+    assert!(matches!(
+        run_react_loop(ctx.clone(), 1).await,
+        LoopResult::Completed
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "后台 attempt 仍只调用一次原 hook 链"
+    );
+    assert_eq!(
+        *batches.lock(),
+        vec![Vec::<crate::messages::MessageId>::new()],
+        "生产空批次明确为 Some(empty)，不能按最后 Human 回退"
+    );
+    assert_eq!(
+        ctx.session
+            .transcript
+            .read()
+            .get(historical.id())
+            .unwrap()
+            .message()
+            .content(),
+        historical.content()
+    );
 }
 #[async_trait::async_trait]
 impl ReactLLM for FinalAnswerLLM {

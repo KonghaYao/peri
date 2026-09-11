@@ -304,6 +304,9 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
         }
         ExecutorEvent::BgRegistryEvent(event) => map_bg_registry_activity(event),
         ExecutorEvent::AiReasoning { .. }
+        | ExecutorEvent::UserInputQueueChanged(_)
+        | ExecutorEvent::UserInputRunStarted { .. }
+        | ExecutorEvent::UserInputDelivered { .. }
         | ExecutorEvent::TextChunk { .. }
         | ExecutorEvent::ToolStart { .. }
         | ExecutorEvent::ToolEnd { .. }

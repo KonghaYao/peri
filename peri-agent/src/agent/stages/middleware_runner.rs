@@ -59,8 +59,11 @@ pub async fn run_after_compact(ctx: &StageContext) -> crate::error::AgentResult<
 }
 
 /// 调用 middleware chain 的 `before_agent` 钩子
-pub async fn run_before_agent(ctx: &StageContext) -> crate::error::AgentResult<()> {
-    let mut cx = make_context_from_stage(ctx);
+pub async fn run_before_agent(
+    ctx: &StageContext,
+    input_message_ids: &[crate::messages::MessageId],
+) -> crate::error::AgentResult<()> {
+    let mut cx = make_context_from_stage(ctx).with_input_message_ids(input_message_ids);
     let result = ctx.runtime.middleware_chain.run_before_agent(&mut cx).await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {

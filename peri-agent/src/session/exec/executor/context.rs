@@ -189,6 +189,7 @@ pub struct SessionContext {
 
     // ── session: session identity & transport ──────────────────────────────
     pub session_id: String,
+    pub user_input_mailbox: Option<Arc<crate::session::user_input_mailbox::UserInputMailbox>>,
     pub cancel: AgentCancellationToken,
     pub broker: Arc<dyn UserInteractionBroker>,
     pub permission_mode: Arc<peri_acp_types::permission::SharedPermissionMode>,

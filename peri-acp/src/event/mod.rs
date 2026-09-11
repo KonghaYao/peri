@@ -11,7 +11,7 @@ mod forwarder_test;
 pub mod mapper;
 pub mod oauth;
 
-pub(crate) use self::forwarder::spawn_eventbus_forwarder;
+pub(crate) use self::forwarder::{forward_eventbus, spawn_eventbus_forwarder};
 pub use mapper::{map_event, MappedEvent};
 pub use peri_acp_types::summary::{
     CompactFileInfoDto, StopReasonDto, TodoItemDto, TodoStatusDto, TokenUsageDto,
@@ -40,6 +40,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum AcpEvent {
+    UserInputRunStarted {
+        generation: String,
+        request_id: String,
+    },
+    UserInputQueueChanged {
+        snapshot: peri_acp_types::session::UserInputQueueSnapshot,
+    },
+    UserInputDelivered {
+        input_id: String,
+        generation: String,
+        content: peri_acp_types::messages::MessageContent,
+    },
     /// State snapshot (complete message history) — messages serialized as JSON strings.
     /// TUI deserializes via `serde_json::from_str::<Vec<BaseMessage>>`.
     StateSnapshot {

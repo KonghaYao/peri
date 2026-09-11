@@ -285,6 +285,8 @@ pub async fn run_kit_fullscreen(
         // 4a. SUBMIT channel：InputArea → submit_consumer
         let (submit_tx, submit_rx) = mpsc::unbounded_channel::<SubmitRequest>();
         let _ = atoms::SUBMIT_TX.set(submit_tx);
+        let (steer_tx, steer_rx) = mpsc::unbounded_channel();
+        let _ = crate::kit::steer_state::STEER_TX.set(steer_tx);
 
         // 4b. REWIND_ACTION channel：RewindPopup → rewind_consumer
         let (rewind_tx, rewind_rx) = mpsc::unbounded_channel();
@@ -338,6 +340,26 @@ pub async fn run_kit_fullscreen(
         }
         // 4dz. ACP client handle — for panels to send raw requests
         let _ = atoms::ACP_CLIENT_HANDLE.set(std::sync::Arc::new(client.clone()));
+        let specs: Vec<peri_acp_types::command::command_route::UiCommandSpec> = ui_command_specs()
+            .iter()
+            .map(
+                |spec| peri_acp_types::command::command_route::UiCommandSpec {
+                    name: spec.name.into(),
+                    aliases: spec.aliases.iter().map(|alias| (*alias).into()).collect(),
+                    description: spec.description.into(),
+                    args: None,
+                },
+            )
+            .collect();
+        if let Err(error) = client.register_ui_commands(&specs).await {
+            tracing::warn!(error = %error, "kit: ui command capability negotiation failed");
+        }
+        let _steer_handle = crate::kit::steer_consumer::spawn_steer_consumer(
+            client.clone(),
+            steer_rx,
+            cwd.clone(),
+            shutdown.clone(),
+        );
         let _submit_handle =
             spawn_submit_consumer(client.clone(), submit_rx, cwd.clone(), shutdown.clone());
         let _rewind_handle = spawn_rewind_consumer(client.clone(), rewind_rx, shutdown.clone());
@@ -370,19 +392,6 @@ pub async fn run_kit_fullscreen(
                 //     host 将明细注册为 ui:* 条目 → 投影回推刷新补全缓存。
                 //     上送失败仅 warn——host 回退 all_enabled 兜底明细（11 条
                 //     旧表），不阻断会话创建（R2 双写窗口防御）。
-                let specs: Vec<peri_acp_types::command::command_route::UiCommandSpec> =
-                    ui_command_specs()
-                        .iter()
-                        .map(|s| peri_acp_types::command::command_route::UiCommandSpec {
-                            name: s.name.into(),
-                            aliases: s.aliases.iter().map(|a| (*a).into()).collect(),
-                            description: s.description.into(),
-                            args: None, // 面板命令无参数 schema（第一版）
-                        })
-                        .collect();
-                if let Err(e) = client.register_ui_commands(&specs).await {
-                    tracing::warn!(error = %e, "kit: ui 命令上送注册失败（host 回退兜底明细）");
-                }
                 match client.ensure_session(&cwd_for_init, None).await {
                     Ok(session_id) => {
                         tracing::info!(%session_id, "kit: initial session created");

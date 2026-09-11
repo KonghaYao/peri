@@ -126,6 +126,8 @@ impl SessionManager {
             ),
             v2_message_queue: peri_acp_types::session::MessageQueue::new(),
             session_inbox: None,
+            user_input_mailbox: None,
+            user_input_events_cancel: CancellationToken::new(),
             cron_bridge: None,
             task_manager,
             idle_suspended: Arc::new(AtomicBool::new(false)),

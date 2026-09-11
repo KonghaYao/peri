@@ -1358,3 +1358,66 @@ async fn test_non_terminal_tool_update_is_not_forwarded_as_tool_end() {
     );
     shutdown.cancel();
 }
+
+#[test]
+fn test_user_input_notifier_retains_delivered_identity_and_content() {
+    let content = peri_acp_types::messages::MessageContent::text("  中文\n");
+    let event = convert_agent_event(AcpEvent::UserInputDelivered {
+        generation: "g".into(),
+        input_id: "i".into(),
+        content: content.clone(),
+    });
+    assert!(
+        matches!(event, Some(AcpEventData::UserInputDelivered { generation, input_id, content:received })
+        if generation == "g" && input_id == "i" && received == content),
+        "canonical 消息必须保留实例、稳定身份和完整正文"
+    );
+}
+
+#[test]
+fn test_user_input_notifier_opens_existing_prompt_lifecycle() {
+    let event = convert_agent_event(AcpEvent::UserInputRunStarted {
+        generation: "g".into(),
+        request_id: "run".into(),
+    });
+    assert!(
+        matches!(event, Some(AcpEventData::PromptSubmitted { request_id:Some(id) }) if id == "run"),
+        "运行标记必须复用已有 loading 生命周期并携带配对 ID"
+    );
+}
+
+#[test]
+fn test_user_input_notifier_preserves_queue_snapshot_revision() {
+    let snapshot = peri_acp_types::session::UserInputQueueSnapshot {
+        session_id: "s".into(),
+        generation: "g".into(),
+        revision: 9,
+        active_request_id: Some("run".into()),
+        items: vec![],
+    };
+    let event = convert_agent_event(AcpEvent::UserInputQueueChanged {
+        snapshot: snapshot.clone(),
+    });
+    assert!(
+        matches!(event, Some(AcpEventData::UserInputQueueChanged { snapshot:received }) if serde_json::to_value(&received).unwrap() == serde_json::to_value(&snapshot).unwrap()),
+        "队列通知必须保留完整权威快照"
+    );
+}
+
+#[test]
+fn test_user_input_replay_keeps_message_id_for_canonical_dedup() {
+    let update = session_update::decode_stream_update(
+        &json!({
+            "sessionId":"s", "update":{
+                "sessionUpdate":"user_message_chunk", "messageId":"i",
+                "content":{"type":"text","text":"历史输入"}
+            }
+        }),
+        "s",
+    );
+    assert!(
+        matches!(update.event, Some(AcpEventData::ReplayedUserBubble { input_id, text })
+        if input_id == "i" && text == "历史输入"),
+        "重放原用户气泡时必须保存 messageId，供迟到 Delivered 去重"
+    );
+}

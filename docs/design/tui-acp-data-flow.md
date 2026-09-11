@@ -36,14 +36,17 @@ interaction response 与详情请求等运行时动作仍必须经 ACP client/tr
 
 ```text
 InputArea
-  → SubmitRequest / SUBMIT_TX
-  → submit_consumer
-  → AcpTuiClient::ensure_session + prompt
-  → ACP session/input
+  → SteerCommand / STEER_TX
+  → steer_consumer
+  → AcpTuiClient::ensure_session + session/input/enqueue
   → Agent session runtime
 ```
 
-用户气泡通过 TUI local event 进入同一 bridge 归约路径，不从组件直接改写 transcript。
+上述普通输入路径在协商 `peri.userInputQueue` 后启用；未协商时仍经
+`SubmitRequest / SUBMIT_TX → submit_consumer → session/prompt`，已注册 slash 命令也保留原路由。
+新路径的用户气泡由 canonical `UserInputDelivered` 经 bridge 使用既有渲染器生成；
+旧路径仍通过 TUI local event 进入 bridge。组件不直接改写 transcript。
+待发送投影、完整取回与运行身份见[用户待发送队列](user-input-queue.md)。
 加载、取消、rewind、AskUser 和 permission response 各有独立 consumer/channel，但都经 ACP
 执行，不建立旁路。
 

@@ -160,6 +160,9 @@ impl UnifiedLangfuseEvent {
             }),
             // 无 Langfuse 映射的事件
             ExecutorEvent::TurnStarted { .. }
+            | ExecutorEvent::UserInputRunStarted { .. }
+            | ExecutorEvent::UserInputQueueChanged(_)
+            | ExecutorEvent::UserInputDelivered { .. }
             | ExecutorEvent::GoalSnapshot { .. }
             | ExecutorEvent::TurnEnded { .. }
             | ExecutorEvent::StateSnapshotMeta { .. }

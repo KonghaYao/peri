@@ -183,6 +183,24 @@ impl MessageQueue {
         drained
     }
 
+    /// 与 Receive 领取共享同一锁，仅撤出尚未被领取的指定用户输入。
+    pub fn withdraw_user_inputs(&self, ids: &[crate::messages::MessageId]) -> Vec<QueuedMessage> {
+        let mut inner = self.inner.lock();
+        let mut withdrawn = Vec::new();
+        let mut kept = VecDeque::with_capacity(inner.len());
+        for message in inner.drain(..) {
+            if message.source == MessageSource::UserInput
+                && matches!(message.message(), Some(BaseMessage::Human { id, .. }) if ids.contains(id))
+            {
+                withdrawn.push(message);
+            } else {
+                kept.push_back(message);
+            }
+        }
+        *inner = kept;
+        withdrawn
+    }
+
     /// 是否有能唤醒循环的消息（Prompt 或 Defer）
     pub fn has_wake_up(&self) -> bool {
         self.inner.lock().iter().any(|m| m.kind.wakes_up())

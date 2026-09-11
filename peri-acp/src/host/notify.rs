@@ -36,7 +36,6 @@ pub(crate) fn handle_notification(
         "session/cancel" => {
             let session_id = extract_session_id(params, "");
             if let Some(state) = sessions.get_mut(session_id) {
-                let token = state.cancel_token.as_ref()?;
                 // 多读者 + 单 writer lease：cancel 是写入操作，仅 writer 可发起。
                 // 协议无客户端身份字段，writer 恒为 session 创建方（"default"）——
                 // 观察者（非 writer）的 cancel 请求被忽略（只读）。
@@ -44,6 +43,26 @@ pub(crate) fn handle_notification(
                     debug!(session_id = %session_id, "Cancel ignored: read-only observer");
                     return None;
                 }
+                let targeted =
+                    params.get("requestId").is_some() || params.get("generation").is_some();
+                if targeted {
+                    let (Some(request_id), Some(generation)) = (
+                        params.get("requestId").and_then(Value::as_str),
+                        params.get("generation").and_then(Value::as_str),
+                    ) else {
+                        return None;
+                    };
+                    let mailbox = cfg.session_manager.user_input_mailbox_for(session_id)?;
+                    if !mailbox.stop_attempt(request_id, generation) {
+                        debug!(session_id, "Cancel ignored: superseded user input attempt");
+                        return None;
+                    }
+                } else if let Some(mailbox) = cfg.session_manager.user_input_mailbox_for(session_id)
+                {
+                    // Legacy cancellation also revokes a ticket still waiting for its prompt lock.
+                    mailbox.stop();
+                }
+                let token = state.cancel_token.as_ref()?;
                 token.cancel();
                 // 置位内部续跑标记（只影响当前被取消的 prompt）：被取消 prompt
                 // 的独立 bg agent 结果完成时，continuation scheduler 原子 take

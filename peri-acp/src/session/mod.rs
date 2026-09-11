@@ -100,6 +100,10 @@ pub struct AcpSession {
     /// `None` means the session doesn't support async wake (e.g., print mode
     /// without a SessionManager). The executor falls back to direct return.
     pub session_inbox: Option<Arc<peri_acp_types::session::SessionInbox>>,
+    /// Agent-owned user input lifecycle, shared across prompt attempts.
+    pub(crate) user_input_mailbox:
+        Option<Arc<peri_agent::session::user_input_mailbox::UserInputMailbox>>,
+    pub(crate) user_input_events_cancel: CancellationToken,
     /// Session 级 cron bridge（lazy-init，跨 turn 存活；close_session 时随本结构 drop）。
     pub cron_bridge: Option<crate::session::cron_bridge::SessionCronBridge>,
     /// 后台任务管理器（Agent 层 per-session 聚合：registry + bg shell 执行；
@@ -173,6 +177,10 @@ impl AcpSession {
     pub(crate) async fn close_resources(
         &self,
     ) -> peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport {
+        if let Some(mailbox) = &self.user_input_mailbox {
+            mailbox.invalidate();
+        }
+        self.user_input_events_cancel.cancel();
         if let Some(projection) = self.dynamic_mcp_projection.lock().take() {
             projection.close();
         }
@@ -260,6 +268,10 @@ impl SessionManager {
     /// cooperatively unwinding prompt.
     pub(crate) fn pre_close_session(&self, session_id: &str) {
         if let Some(session) = self.inner.sessions.get(session_id) {
+            if let Some(mailbox) = &session.user_input_mailbox {
+                mailbox.invalidate();
+            }
+            session.user_input_events_cancel.cancel();
             peri_acp_types::session::cancel_all_agents(session.active_agents.values());
             session.cancel_token.cancel();
             session.task_manager.cancel_all();
@@ -299,6 +311,9 @@ impl SessionManager {
 
     pub fn cancel_session(&self, session_id: &str) {
         if let Some(mut session) = self.inner.sessions.get_mut(session_id) {
+            if let Some(mailbox) = &session.user_input_mailbox {
+                mailbox.stop();
+            }
             // Cascade/Independent 判定与终止执行归 Agent 层（L5：cancel 最终
             // 执行权在 Agent，top-level.md §2/§9）；此处仅定位并传递注册表。
             peri_acp_types::session::cancel_cascade_agents(session.active_agents.values());

@@ -10,6 +10,7 @@ mod execution;
 mod inbox;
 mod queue;
 mod runtime;
+mod user_input;
 
 use crate::{command_registry::CommandRegistry, mcp_skills::McpSkillRegistry};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,11 @@ pub use inbox::{InboxHandle, SessionInbox};
 pub use queue::{MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload};
 pub use runtime::{
     cancel_all_agents, cancel_all_in, cancel_cascade_agents, cancel_cascade_in, AgentRuntime,
+};
+pub use user_input::{
+    DispatchUserInputsRequest, EnqueueUserInputRequest, TakeBackUserInputRequest, UserInput,
+    UserInputItemResult, UserInputQueueItem, UserInputQueueReceipt, UserInputQueueSnapshot,
+    UserInputQueueSnapshotRequest, UserInputState,
 };
 
 // ─── TurnId ──────────────────────────────────────────────────────────────────

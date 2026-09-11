@@ -217,6 +217,7 @@ pub(super) async fn build_and_execute_agent(
     // v2 单一路径。
     build_and_execute_agent_v2(V2ExecuteRequest {
         session_id: ctx.session_id.clone(),
+        user_input_mailbox: ctx.user_input_mailbox.clone(),
         cwd: ctx.cwd.clone(),
         cancel: ctx.cancel.clone(),
         thread_store: ctx.thread_store.clone(),

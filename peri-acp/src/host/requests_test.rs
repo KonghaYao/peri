@@ -2690,3 +2690,6 @@ async fn test_plugin_uninstall_removes_stale_plugin_entries() {
         "install/uninstall 各触发一次投影推送（首发 + 2 次重发）"
     );
 }
+
+#[path = "user_input_test.rs"]
+mod user_input_tests;

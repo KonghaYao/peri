@@ -444,6 +444,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         request_id: None,
         allow_await_wake: false,
         continuation_notify: None,
+        user_input_mailbox: None,
         frozen_fallback_builder: None,
     }
 }
