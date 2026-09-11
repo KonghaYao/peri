@@ -2,7 +2,7 @@
 //!
 //! 下载进度弹窗：展示从 GitHub 下载主题文件的进度。
 //! - 下载中：逐文件显示状态（Pending → Downloading → Done/Failed）
-//! - 下载完成后 Esc 关闭；下载中 Esc 无效（防止误关闭）
+//! - 完成后本组件处理 Esc；下载中交给 root 关闭展示，后台任务继续
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -22,6 +22,28 @@ use peri_theme::atoms::THEME_ATOM;
 /// 弹窗最大行数（标题 + 条目）
 const MAX_VISIBLE_ITEMS: usize = 16;
 
+pub(crate) fn handle_download_progress_event(event: Event) -> EventResult {
+    let Event::Key(key) = event else {
+        return EventResult::Ignored;
+    };
+    if key.kind != KeyEventKind::Press {
+        return EventResult::Ignored;
+    }
+    match (key.modifiers, key.code) {
+        // 未完成时交给 root Esc 链关闭展示；展示清空不释放下载 owner。
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            let dl = DOWNLOAD_PROGRESS.state();
+            let current = dl.read().clone();
+            if current.finished {
+                close_popup();
+                return EventResult::Consumed;
+            }
+            EventResult::Ignored
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
 #[component]
 pub fn DownloadProgressPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
@@ -31,27 +53,11 @@ pub fn DownloadProgressPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let _ = progress_store;
     let _ = hooks.use_atom(&LANG_VERSION);
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
-        let Event::Key(key) = event else {
-            return EventResult::Ignored;
-        };
-        if key.kind != KeyEventKind::Press {
-            return EventResult::Ignored;
-        }
-        match (key.modifiers, key.code) {
-            // Esc 仅在下载完成后可关闭；下载中忽略 Esc（防止误关闭）
-            (KeyModifiers::NONE, KeyCode::Esc) => {
-                let dl = DOWNLOAD_PROGRESS.state();
-                let current = dl.read().clone();
-                if current.finished {
-                    close_popup();
-                    return EventResult::Consumed;
-                }
-                EventResult::Ignored
-            }
-            _ => EventResult::Ignored,
-        }
-    });
+    hooks.use_event_handler(
+        EventScope::Current,
+        EventPriority::High,
+        handle_download_progress_event,
+    );
 
     let guard = theme_def.read();
     let title_fg = guard.semantic.text.primary;

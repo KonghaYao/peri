@@ -1,13 +1,18 @@
 // ─── E2E 集成测试（需要 @peri-code/workflow 已安装）──────────────
 
+use super::artifact::{workflow_local_dist_in, WORKFLOW_ARTIFACT_BYTES};
+use super::limits::try_reserve_live_attempt;
+use super::run_protocol::{
+    parse_agent_run_params, parse_run_scoped, validate_start_ack, workflow_start_params,
+    JournalTruncateParams,
+};
+use super::terminal::project_postcondition;
 use super::{
-    parse_agent_run_params, parse_run_scoped, project_postcondition, receive_workflow_result,
-    try_reserve_live_attempt, validate_start_ack, workflow_local_dist_in, workflow_start_params,
-    AgentExecutor, JournalTruncateParams, WorkflowDoneParams, WorkflowInput, WorkflowResult,
-    WorkflowRunner, WORKFLOW_ARTIFACT_BYTES,
+    receive_workflow_result, AgentExecutor, WorkflowInput, WorkflowResult, WorkflowRunner,
 };
 use crate::journal::WorkflowJournalStore;
 use crate::progress::{RunStatus, WorkflowProgressStore};
+use crate::protocol::WorkflowDoneParams;
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage, WorkflowLimits};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

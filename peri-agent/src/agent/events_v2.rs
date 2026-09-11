@@ -13,7 +13,3 @@ pub use peri_acp_types::event_v2::{
 #[cfg(test)]
 #[path = "events_v2_test.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "events_v2_mapper_test.rs"]
-mod v1_compat_tests;

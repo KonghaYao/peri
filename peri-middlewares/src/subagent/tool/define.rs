@@ -3,10 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use peri_acp_types::identity::AgentId;
-use peri_agent::session::subagent::{
-    SessionFactory, SubagentHost, SubagentLifecycleStart, SubagentLifecycleStop,
-    SubagentSpawnConfig, SubagentSpawned,
-};
+use peri_agent::session::subagent::SubagentHost;
 use peri_agent::{
     agent::{events::AgentEventHandler, react::ReactLLM},
     messages::BaseMessage,
@@ -14,16 +11,9 @@ use peri_agent::{
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::{fire_subagent_lifecycle_hooks_static, SubagentChainAssemblerImpl};
+use super::invocation::InvocationArgs;
 use crate::tool_search::core_tools::TOOL_AGENT;
-use crate::tool_search::ExecuteExtraToolResolver;
-use crate::{
-    agent_define::{AgentDefineMiddleware, AgentOverrides},
-    claude_agent_parser::{parse_agent_file, ClaudeAgent, ToolsValue},
-    hooks::types::RegisteredHook,
-    mcp::McpAgentRegistry,
-    subagent::built_in_agents::get_built_in_agent,
-};
+use crate::{agent_define::AgentOverrides, hooks::types::RegisteredHook, mcp::McpAgentRegistry};
 
 /// SubAgentTool - implements the `Agent` tool, allowing LLM to delegate sub-tasks to specialized sub-agents
 const AGENT_DESCRIPTION: &str = include_str!("descriptions/agent.md");
@@ -31,7 +21,7 @@ const AGENT_DESCRIPTION: &str = include_str!("descriptions/agent.md");
 /// SubAgentTool（L3 瘦身）：只声明工具与发起意图，不持有创建实现。
 ///
 /// 创建（建 thread / 建 session / 运行 / 收尾）统一经
-/// [`spawn_subagent`]（peri-agent `SessionFactory` 统一入口）。父侧运行时通道
+/// [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)（peri-agent `SessionFactory` 统一入口）。父侧运行时通道
 /// （thread_store / task_manager / bg 事件 / register / deregister / frozen
 /// 回退值）聚合在 [`SubagentHost`]；生产路径经 `parent_session` 的 host 读取
 /// （builder 在主 session 创建后注入），测试/遗留路径经 `with_*` 直接注入
@@ -78,504 +68,6 @@ pub struct SubAgentTool {
     pub(crate) broker: Option<Arc<dyn peri_agent::interaction::UserInteractionBroker>>,
     /// 子链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
     pub(crate) chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler>,
-}
-
-impl SubAgentTool {
-    #[allow(clippy::type_complexity)]
-    pub fn new(
-        parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
-        event_handler: Option<Arc<dyn AgentEventHandler>>,
-        llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
-        parent_cwd: String,
-    ) -> Self {
-        Self {
-            parent_tools,
-            event_handler,
-            llm_factory,
-            parent_cwd,
-            system_builder: None,
-            cancel: None,
-            parent_messages: None,
-            registered_hooks: Arc::new(Vec::new()),
-            child_handler_factory: None,
-            parent_agent_id: Arc::new(RwLock::new(None)),
-            parent_session: Arc::new(RwLock::new(None)),
-            host: SubagentHost::default(),
-            plugin_agent_dirs: Arc::new(Vec::new()),
-            mcp_agent_registry: None,
-            broker: None,
-            chain_assembler: Arc::new(SubagentChainAssemblerImpl),
-        }
-    }
-
-    pub(crate) fn with_plugin_agent_dirs(mut self, dirs: Arc<Vec<std::path::PathBuf>>) -> Self {
-        self.plugin_agent_dirs = dirs;
-        self
-    }
-
-    pub(crate) fn with_mcp_agents(
-        mut self,
-        registry: Option<Arc<McpAgentRegistry>>,
-        broker: Option<Arc<dyn peri_agent::interaction::UserInteractionBroker>>,
-    ) -> Self {
-        self.mcp_agent_registry = registry;
-        self.broker = broker;
-        self
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn with_system_builder(
-        mut self,
-        builder: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>,
-    ) -> Self {
-        self.system_builder = Some(builder);
-        self
-    }
-
-    pub fn with_cancel(mut self, cancel: AgentCancellationToken) -> Self {
-        self.cancel = Some(cancel);
-        self
-    }
-
-    pub fn with_parent_messages(mut self, messages: Arc<RwLock<Vec<BaseMessage>>>) -> Self {
-        self.parent_messages = Some(messages);
-        self
-    }
-
-    pub fn with_registered_hooks(mut self, hooks: Vec<RegisteredHook>) -> Self {
-        self.registered_hooks = Arc::new(hooks);
-        self
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn with_child_handler_factory(
-        mut self,
-        factory: Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>,
-    ) -> Self {
-        self.child_handler_factory = Some(factory);
-        self
-    }
-
-    /// 注入父 agent 事件侧 AgentId 共享 cell（与 SubAgentMiddleware 同一 Arc）。
-    pub(crate) fn with_parent_agent_id(mut self, cell: Arc<RwLock<Option<AgentId>>>) -> Self {
-        self.parent_agent_id = cell;
-        self
-    }
-
-    /// 注入父 v2 session（L3）：builder 在主 session 创建后调用。
-    pub(crate) fn with_parent_session(self, session: Arc<peri_agent::session::Session>) -> Self {
-        *self.parent_session.write() = Some(session);
-        self
-    }
-
-    // ── 运行时通道回退注入（测试/遗留路径；生产路径经 parent_session 的 host） ──
-
-    pub fn with_task_manager(
-        mut self,
-        task_manager: Arc<peri_agent::agent::async_tasks::TaskManager>,
-    ) -> Self {
-        self.host.task_manager = Some(task_manager);
-        self
-    }
-
-    pub fn with_bg_event_sender(
-        mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
-    ) -> Self {
-        self.host.bg_event_sender = Some(sender);
-        self
-    }
-
-    pub fn with_thread_store(mut self, store: Arc<dyn peri_agent::thread::ThreadStore>) -> Self {
-        self.host.thread_store = Some(store);
-        self
-    }
-
-    pub fn with_parent_thread_id(mut self, id: String) -> Self {
-        self.host.parent_thread_id = Some(id);
-        self
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn with_register_runtime(
-        mut self,
-        cb: Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync>,
-    ) -> Self {
-        self.host.register_runtime = Some(cb);
-        self
-    }
-
-    pub fn with_deregister_runtime(mut self, cb: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
-        self.host.deregister_runtime = Some(cb);
-        self
-    }
-
-    /// 注入 main agent 捕获的 frozen CLAUDE.md/Skills 数据（测试/遗留回退；
-    /// 生产路径 frozen 数据由 [`spawn_subagent`] 从 parent session copy）。
-    pub fn with_frozen_data(
-        mut self,
-        claude_md: Option<Arc<String>>,
-        claude_local_md: Option<Arc<String>>,
-        skill_summary: Option<Arc<String>>,
-    ) -> Self {
-        self.host.frozen_claude_md = claude_md;
-        self.host.frozen_claude_local_md = claude_local_md;
-        self.host.frozen_skill_summary = skill_summary;
-        self
-    }
-
-    /// 注入 main agent 捕获的 frozen system prompt（fork 路径复用以避免重建）。
-    pub fn with_frozen_system_prompt(mut self, sp: Arc<String>) -> Self {
-        self.host.frozen_system_prompt = Some(sp);
-        self
-    }
-
-    /// 设置 bg 完成时的同步回调（测试/遗留回退；生产路径经 parent_session 的 host）。
-    pub fn with_on_bg_complete(
-        mut self,
-        cb: Arc<
-            dyn Fn(
-                    &peri_agent::agent::events::BackgroundTaskResult,
-                    peri_agent::agent::async_tasks::BgTaskKind,
-                ) + Send
-                + Sync,
-        >,
-    ) -> Self {
-        self.host.on_bg_complete = Some(cb);
-        self
-    }
-
-    /// 设置 Langfuse 桥接器（测试/遗留回退；生产路径经 parent_session 的 host）。
-    pub fn with_langfuse_bridge(
-        mut self,
-        bridge: Arc<dyn peri_agent::agent::LangfuseBridgeLike>,
-    ) -> Self {
-        self.host.langfuse_bridge = Some(bridge);
-        self
-    }
-
-    /// 父侧运行时通道（生产路径：parent_session 的 host；测试/遗留：tool 自身 host 回退）。
-    pub(crate) fn host(&self) -> Option<Arc<SubagentHost>> {
-        self.parent_session
-            .read()
-            .as_ref()
-            .and_then(|s| s.subagent_host())
-            .or_else(|| Some(Arc::new(self.host.clone())))
-    }
-
-    /// 生命周期 hook 闭包（middlewares 构造：内部触发 RegisteredHook；
-    /// registered_hooks 为空时不构造闭包）。
-    pub(crate) fn lifecycle_closures(
-        &self,
-    ) -> (
-        Option<SubagentLifecycleStart>,
-        Option<SubagentLifecycleStop>,
-    ) {
-        if self.registered_hooks.is_empty() {
-            return (None, None);
-        }
-        let hooks_start = self.registered_hooks.clone();
-        let on_subagent_start: Option<SubagentLifecycleStart> =
-            Some(Arc::new(move |name: &str, cwd: &str| {
-                let hooks = hooks_start.clone();
-                let name = name.to_string();
-                let cwd = cwd.to_string();
-                tokio::spawn(async move {
-                    fire_subagent_lifecycle_hooks_static(
-                        &hooks,
-                        crate::hooks::types::HookEvent::SubagentStart,
-                        &cwd,
-                        &name,
-                        None,
-                    )
-                    .await;
-                });
-            }));
-        let hooks_stop = self.registered_hooks.clone();
-        let on_subagent_stop: Option<SubagentLifecycleStop> = Some(Arc::new(
-            move |name: &str, cwd: &str, result: &str, is_error: bool| {
-                let hooks = hooks_stop.clone();
-                let name = name.to_string();
-                let cwd = cwd.to_string();
-                let result = result.to_string();
-                tokio::spawn(async move {
-                    fire_subagent_lifecycle_hooks_static(
-                        &hooks,
-                        crate::hooks::types::HookEvent::SubagentStop,
-                        &cwd,
-                        &name,
-                        Some(&result),
-                    )
-                    .await;
-                });
-                let _ = is_error; // SubagentStop hook 不区分 error/正常
-            },
-        ));
-        (on_subagent_start, on_subagent_stop)
-    }
-
-    pub(crate) fn load_agent_def(&self, agent_id: &str, cwd: &str) -> Result<ClaudeAgent, String> {
-        self.load_agent_def_with_built_ins(agent_id, cwd, self.built_in_subagents_enabled())
-    }
-
-    /// Resume 已有 thread 时允许恢复其原 built-in definition；新建路径遵守
-    /// 父 session 冻结的 MetaHarness policy。
-    pub(crate) fn load_agent_def_for_resume(
-        &self,
-        agent_id: &str,
-        cwd: &str,
-    ) -> Result<ClaudeAgent, String> {
-        self.load_agent_def_with_built_ins(agent_id, cwd, true)
-    }
-
-    fn built_in_subagents_enabled(&self) -> bool {
-        self.parent_session
-            .read()
-            .as_ref()
-            .map(|session| {
-                session
-                    .store()
-                    .frozen
-                    .meta_harness
-                    .built_in_subagents_enabled
-            })
-            .unwrap_or(true)
-    }
-
-    fn load_agent_def_with_built_ins(
-        &self,
-        agent_id: &str,
-        cwd: &str,
-        include_built_ins: bool,
-    ) -> Result<ClaudeAgent, String> {
-        if agent_id.starts_with("mcp__") {
-            return self
-                .mcp_agent_registry
-                .as_ref()
-                .and_then(|registry| registry.cached(agent_id))
-                .map(|activated| activated.definition)
-                .ok_or_else(|| {
-                    format!(
-                        "Error: MCP agent definition '{}' is not activated in this session",
-                        agent_id
-                    )
-                });
-        }
-
-        let project_candidates = AgentDefineMiddleware::candidate_paths(cwd, agent_id);
-        if project_candidates.is_empty() {
-            return Err(format!("Error: invalid agent definition ID '{}'", agent_id));
-        }
-        let agent_path = project_candidates.into_iter().find(|p| p.is_file());
-
-        if let Some(path) = agent_path {
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| format!("Error: failed to read agent definition file: {}", e))?;
-            return parse_agent_file(&content).ok_or_else(|| {
-                format!(
-                    "Error: failed to parse agent definition file '{}'",
-                    path.display()
-                )
-            });
-        }
-
-        if include_built_ins {
-            if let Some(built_in) = get_built_in_agent(agent_id) {
-                return parse_agent_file(built_in.content).ok_or_else(|| {
-                    format!(
-                        "Error: failed to parse built-in agent definition '{}'",
-                        agent_id
-                    )
-                });
-            }
-        }
-
-        for dir in self.plugin_agent_dirs.iter() {
-            let candidates = [
-                dir.join(format!("{agent_id}.md")),
-                dir.join(agent_id).join("agent.md"),
-            ];
-            if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
-                let content = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("Error: failed to read agent definition file: {}", e))?;
-                return parse_agent_file(&content).ok_or_else(|| {
-                    format!(
-                        "Error: failed to parse agent definition file '{}'",
-                        path.display()
-                    )
-                });
-            }
-        }
-
-        Err(format!(
-            "Error: cannot find agent definition '{}'. Check .claude/agents/ directory{}",
-            agent_id,
-            if include_built_ins {
-                " or configured plugin agents"
-            } else {
-                " or configured plugin agents (built-in agents are disabled)"
-            }
-        ))
-    }
-
-    pub(crate) async fn load_and_approve_mcp_agent(
-        &self,
-        agent_id: &str,
-    ) -> Result<ClaudeAgent, Box<dyn std::error::Error + Send + Sync>> {
-        use peri_agent::interaction::{
-            ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse,
-        };
-
-        let registry = self
-            .mcp_agent_registry
-            .as_ref()
-            .ok_or("MCP Agents are not available in this session")?;
-        let activated = registry.activate(agent_id).await?;
-        let effective_tools: Vec<String> = self
-            .filter_tools(
-                &activated.definition.frontmatter.tools,
-                &activated.definition.frontmatter.disallowed_tools,
-            )
-            .into_iter()
-            .map(|tool| tool.name().to_string())
-            .collect();
-        let approval_key = McpAgentRegistry::approval_key(&activated, &effective_tools);
-        if !registry.is_approved(&approval_key) {
-            let broker = self
-                .broker
-                .as_ref()
-                .ok_or("MCP Agent activation requires an interaction broker")?;
-            let response = broker
-                .request(InteractionContext::Approval {
-                    items: vec![ApprovalItem {
-                        tool_call_id: format!("mcp-agent:{}", activated.metadata.id),
-                        tool_name: "MCP Agent activation".to_string(),
-                        tool_input: serde_json::json!({
-                            "origin": activated.metadata.origin,
-                            "name": activated.metadata.name,
-                            "uri": activated.metadata.uri,
-                            "digest": activated.digest,
-                            "effective_tools": effective_tools,
-                        }),
-                    }],
-                })
-                .await;
-            match response {
-                InteractionResponse::Decisions(decisions)
-                    if matches!(decisions.first(), Some(ApprovalDecision::Approve { .. })) =>
-                {
-                    registry.approve(approval_key);
-                }
-                InteractionResponse::Decisions(decisions) => {
-                    let reason = match decisions.first() {
-                        Some(ApprovalDecision::Reject { reason, .. }) => reason.as_str(),
-                        Some(ApprovalDecision::Respond { message }) => message.as_str(),
-                        Some(ApprovalDecision::Edit { .. }) => {
-                            "MCP Agent activation approval cannot be edited"
-                        }
-                        _ => "MCP Agent activation was not approved",
-                    };
-                    return Err(reason.to_string().into());
-                }
-                _ => return Err("MCP Agent activation was rejected".into()),
-            }
-        }
-        Ok(activated.definition)
-    }
-
-    pub(crate) fn overrides_from_agent_def(
-        system_prompt: &str,
-        tone: &Option<String>,
-        proactiveness: &Option<String>,
-        mode: &Option<String>,
-    ) -> Option<AgentOverrides> {
-        crate::subagent::fork::overrides_from_agent_def(system_prompt, tone, proactiveness, mode)
-    }
-
-    pub(crate) fn filter_tools(
-        &self,
-        allowed: &ToolsValue,
-        disallowed: &ToolsValue,
-    ) -> Vec<Box<dyn BaseTool>> {
-        crate::subagent::fork::filter_tools(&self.parent_tools, allowed, disallowed)
-    }
-
-    /// 组装 [`SubagentSpawnConfig`] 的公共部分（父侧通道 + 意图骨架）。
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    pub(crate) fn spawn_config_base(
-        &self,
-        agent_name: String,
-        prompt: String,
-        parent_messages: Vec<BaseMessage>,
-        cancel_policy: peri_agent::session::subagent::SubagentCancelPolicy,
-        max_iterations: usize,
-        fork_directive_kind: Option<peri_agent::session::subagent::ForkDirectiveKind>,
-        run_mode: peri_agent::session::subagent::SubagentRunMode,
-        llm: Box<dyn ReactLLM + Send + Sync>,
-        tools: Vec<Arc<dyn BaseTool>>,
-        tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
-        system_prompt: Option<String>,
-        skill_names: Vec<String>,
-        cwd: String,
-    ) -> SubagentSpawnConfig {
-        let host = self.host();
-        let (on_subagent_start, on_subagent_stop) = self.lifecycle_closures();
-        SubagentSpawnConfig {
-            agent_name,
-            prompt,
-            parent_messages,
-            cancel_policy,
-            max_iterations,
-            fork_directive_kind,
-            run_mode,
-            skill_names,
-            llm,
-            chain_assembler: Arc::clone(&self.chain_assembler),
-            tools,
-            tool_filter,
-            system_prompt,
-            error_suggest_registry: None,
-            tool_registry_snapshot: None,
-            tool_invocation_resolver: Some(Arc::new(ExecuteExtraToolResolver::default())),
-            compact_config: None,
-            context_budget: None,
-            compact_llm: None,
-            thread_store: host.as_ref().and_then(|h| h.thread_store.clone()),
-            event_handler: self.event_handler.clone(),
-            bg_event_sender: host.as_ref().and_then(|h| h.bg_event_sender.clone()),
-            task_manager: host.as_ref().and_then(|h| h.task_manager.clone()),
-            on_bg_complete: host.as_ref().and_then(|h| h.on_bg_complete.clone()),
-            langfuse_bridge: host.as_ref().and_then(|h| h.langfuse_bridge.clone()),
-            on_subagent_start,
-            on_subagent_stop,
-            register_runtime: host.as_ref().and_then(|h| h.register_runtime.clone()),
-            deregister_runtime: host.as_ref().and_then(|h| h.deregister_runtime.clone()),
-            parent_agent_id: *self.parent_agent_id.read(),
-            // 父侧数据回退（parent session 存在时由 spawn_subagent 覆盖）
-            cancel_token: self.cancel.clone(),
-            cwd: Some(cwd),
-            parent_thread_id: host.as_ref().and_then(|h| h.parent_thread_id.clone()),
-            frozen_claude_md: host
-                .as_ref()
-                .and_then(|h| h.frozen_claude_md.as_deref().map(|s| s.to_string())),
-            frozen_claude_local_md: host
-                .as_ref()
-                .and_then(|h| h.frozen_claude_local_md.as_deref().map(|s| s.to_string())),
-            frozen_skill_summary: host
-                .as_ref()
-                .and_then(|h| h.frozen_skill_summary.as_deref().map(|s| s.to_string())),
-            frozen_date: None,
-        }
-    }
-
-    /// 调用统一入口（parent 存在时 frozen/thread 父子链自 parent session 读取）。
-    pub(crate) async fn spawn(
-        &self,
-        config: SubagentSpawnConfig,
-    ) -> Result<SubagentSpawned, Box<dyn std::error::Error + Send + Sync>> {
-        let parent = self.parent_session.read().clone();
-        SessionFactory::spawn_subagent(parent.as_ref(), config).await
-    }
 }
 
 #[async_trait]
@@ -672,49 +164,15 @@ impl BaseTool for SubAgentTool {
         input: serde_json::Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // resume_thread_id 仅在值为有效 UUID 时才视为恢复意图（「不填 = 新建」语义）：
-        // LLM 表达「省略」时常用 "" / "new" / "__omit__" 等占位符（或把意图填进
-        // 该字段），若按 is_some 判断会被劫持进 resume 分支并触发 invalid thread id
-        // 失败——占位符一律忽略，走正常新建路径（subagent_type / fork / prompt）。
-        // 真实 child_thread_id 恒为 UUID（spawn 时 Uuid::now_v7 生成），过滤不损失语义。
-        let resume_thread_id = input
-            .get("resume_thread_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty() && uuid::Uuid::parse_str(s).is_ok())
-            .map(|s| s.to_string());
-        // prompt 改为 Option：resume 路径可缺省（缺省注入隐式 continue，issue 决策 9）；
-        // 非 resume 路径下方运行时校验兜底（required:[] 后语义不变）
-        let prompt = input
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let subagent_type = input
-            .get("subagent_type")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        // model 档位覆盖（仅新建定义型 subagent 消费；fork/resume 路径忽略，
-        // 与 resume 忽略 subagent_type/fork 的宽容语义一致）
-        let model = input
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-        let _description = input.get("description").and_then(|v| v.as_str());
-        let _name = input.get("name").and_then(|v| v.as_str());
-        let _isolation = input.get("isolation").and_then(|v| v.as_str());
-        let run_in_background = input
-            .get("run_in_background")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let cwd = input
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&self.parent_cwd)
-            .to_string();
-        let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
-            || subagent_type.as_deref() == Some("fork");
+        let InvocationArgs {
+            resume_thread_id,
+            prompt,
+            subagent_type,
+            model,
+            run_in_background,
+            cwd,
+            is_fork,
+        } = InvocationArgs::parse(&input, &self.parent_cwd);
 
         // host 提前获取（resume 校验需要 thread_store；R-M2 分支优先级）
         let host = self.host();
@@ -725,9 +183,7 @@ impl BaseTool for SubAgentTool {
         // 宽容处理使恢复总是可成功，多余字段无副作用）。非 UUID 占位符已在解析时
         // 过滤（见上），不会劫持新建路径。
         // 恢复需要持久化现场：磁盘 thread 是恢复的唯一来源（无 thread_store 无法恢复）
-        if resume_thread_id.is_some()
-            && host.as_ref().and_then(|h| h.thread_store.clone()).is_none()
-        {
+        if resume_thread_id.is_some() && host.thread_store.is_none() {
             return Err("Error: resume_thread_id requires a thread store".into());
         }
         if let Some(thread_id) = resume_thread_id.as_ref() {
@@ -741,30 +197,7 @@ impl BaseTool for SubAgentTool {
             return Err("Error: missing required parameter prompt".into());
         };
 
-        // 优先读 _ctx.messages（工具调用当下的实时快照），为空时才回退到
-        // self.parent_messages（SubAgentMiddleware::before_agent 时刻的旧快照）。
-        //
-        // Fork 需要继承当前调用现场的完整对话上下文；parent_messages 只在每轮
-        // before_agent 刷新一次，若本轮中途调用 Agent(fork:true)，它会缺少本轮
-        // 新增消息。
-        //
-        // 剪掉最后一条含 tool_calls 的 AI 消息——它包含未完成的 tool_use block（如 Agent 工具本身），
-        // 缺少 tool_result 会导致 LLM API 400 错误。
-        let current_messages: Vec<peri_agent::messages::BaseMessage> = {
-            let mut msgs: Vec<peri_agent::messages::BaseMessage> = if !_ctx.messages.is_empty() {
-                _ctx.messages.to_vec()
-            } else if let Some(ref pm) = self.parent_messages {
-                pm.read().clone()
-            } else {
-                Vec::new()
-            };
-            if let Some(last) = msgs.last() {
-                if last.has_tool_calls() {
-                    msgs.pop();
-                }
-            }
-            msgs
-        };
+        let current_messages = self.current_messages(_ctx.messages);
 
         let is_mcp_agent = subagent_type
             .as_deref()
@@ -776,10 +209,7 @@ impl BaseTool for SubAgentTool {
         // 后台路径需要 task_manager（L3：经 parent_session 的 host 或 tool host 回退）。
         // resume_thread_id.is_none() 为双保险（R-M2）：resume 分支已先返回，此处不可能
         // 再有 resume 调用——防止未来分支重排时 resume 被 bg 分支静默吞掉。
-        if resume_thread_id.is_none()
-            && run_in_background
-            && host.as_ref().and_then(|h| h.task_manager.clone()).is_some()
-        {
+        if resume_thread_id.is_none() && run_in_background && host.task_manager.is_some() {
             return self
                 .invoke_background(
                     prompt,
@@ -860,7 +290,7 @@ impl BaseTool for SubAgentTool {
             ));
         }
 
-        if host.as_ref().and_then(|h| h.thread_store.clone()).is_some() {
+        if host.thread_store.is_some() {
             Ok(format!(
                 "child_thread_id: {}
 {}",

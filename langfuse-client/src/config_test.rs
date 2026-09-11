@@ -103,3 +103,73 @@ fn test_batcher_config_from_client() {
     assert_eq!(batcher_cfg.backpressure, BackpressurePolicy::Block);
     assert_eq!(batcher_cfg.max_retries, 3);
 }
+
+#[test]
+fn test_batcher_invalid_config_is_rejected_before_worker_spawn() {
+    use crate::{Batcher, LangfuseClient, LangfuseError};
+    let invalid = [
+        BatcherConfig {
+            max_events: 0,
+            ..Default::default()
+        },
+        BatcherConfig {
+            max_events: tokio::sync::Semaphore::MAX_PERMITS + 1,
+            ..Default::default()
+        },
+        BatcherConfig {
+            flush_interval: Duration::ZERO,
+            ..Default::default()
+        },
+    ];
+    // 故意无 Tokio runtime：必须先拒绝配置，不能进入 spawn 后才报错。
+    for config in invalid {
+        let make_client = || LangfuseClient::new("pk-test", "sk-test", "http://127.0.0.1:1", 0);
+        assert!(matches!(
+            Batcher::try_new(make_client(), config.clone()),
+            Err(LangfuseError::Config(_))
+        ));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Batcher::new(make_client(), config);
+        }))
+        .expect_err("兼容 new 必须立即 panic，不能返回假就绪对象");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(message.contains("invalid batcher configuration"));
+    }
+}
+
+#[test]
+fn test_batcher_config_validation_keeps_supported_bounds_and_values() {
+    for max_events in [1, tokio::sync::Semaphore::MAX_PERMITS] {
+        let config = BatcherConfig {
+            max_events,
+            flush_interval: Duration::from_nanos(1),
+            backpressure: BackpressurePolicy::DropOldest,
+            max_retries: 99,
+        };
+        config.validate().unwrap();
+        assert_eq!(config.max_events, max_events);
+        assert_eq!(config.flush_interval, Duration::from_nanos(1));
+        assert_eq!(config.max_retries, 99, "兼容字段不应被校验或重写");
+    }
+}
+
+#[tokio::test]
+async fn test_batcher_maximum_valid_capacity_constructs_and_shuts_down_without_preallocation() {
+    let client = crate::LangfuseClient::new("pk-test", "sk-test", "http://127.0.0.1:1", 0);
+    let batcher = crate::Batcher::try_new(
+        client,
+        BatcherConfig {
+            max_events: tokio::sync::Semaphore::MAX_PERMITS,
+            ..Default::default()
+        },
+    )
+    .expect("有效上限应只设容量约束，不预分配事件数组");
+    tokio::time::timeout(Duration::from_secs(5), batcher.shutdown())
+        .await
+        .expect("空队列必须及时关闭")
+        .expect("正常 join 不应有发送失败");
+}

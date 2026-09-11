@@ -104,6 +104,11 @@ pub struct MpscClientTransport {
 }
 
 impl MpscClientTransport {
+    /// 显式关闭两端共享 router，使保留 transport Arc 的 pump 和 pending 请求退出。
+    pub fn close(&self) {
+        self.router.close();
+    }
+
     fn new(
         client_tx: mpsc::UnboundedSender<ChannelMessage>,
         server_rx: mpsc::UnboundedReceiver<ChannelMessage>,

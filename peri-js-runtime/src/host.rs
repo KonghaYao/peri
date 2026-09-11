@@ -220,14 +220,16 @@ impl JsExecutionHost {
         grace: Duration,
     ) -> Result<std::process::ExitStatus> {
         self.channel.drain_pending(reason);
-        if let Some(status) = self.child.lock().await.try_wait()? {
-            self.join_readers().await;
-            return Ok(status);
-        }
+        let exited = self.child.lock().await.try_wait()?;
+        // A reaped leader can leave descendants holding stdout/stderr open. Close
+        // the owned tree before awaiting reader EOF, even when the leader exited.
         if let Err(error) = self.process_tree.terminate(grace).await {
             return self.recover_termination_race(error, grace).await;
         }
-        let status = self.child.lock().await.wait().await?;
+        let status = match exited {
+            Some(status) => status,
+            None => self.child.lock().await.wait().await?,
+        };
         self.join_readers().await;
         Ok(status)
     }
@@ -259,14 +261,21 @@ impl JsExecutionHost {
     }
 
     async fn join_readers(&self) {
-        if let Some(task) = self.stdout_task.lock().await.take() {
-            let _ = task.await;
-        }
-        if let Some(task) = self.stderr_task.lock().await.take() {
-            let _ = task.await;
+        for slot in [&self.stdout_task, &self.stderr_task] {
+            let mut slot = slot.lock().await;
+            if let Some(task) = slot.as_mut() {
+                // Cancellation releases the lock but leaves the same handle in
+                // the host, so a later waiter still observes actual completion.
+                let _ = task.await;
+            }
+            let _ = slot.take();
         }
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "host_lifecycle_test.rs"]
+mod host_lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

@@ -30,8 +30,8 @@ use peri_acp_types::runtime::UnstampedEvent;
 use peri_controller::langfuse::bridge::{LangfuseBridge, UnifiedLangfuseEvent};
 use peri_controller::langfuse::tracer::stages::StageHandle;
 
-/// 从 v1 payload 提取 message_id（v2 事件无 message 级身份；映射后的事件
-/// 携带 `MessageId`，作为 envelope 身份的一部分）。
+/// 从协议载荷提取 message_id：chunk 保留消息级身份，工具事件由 turn_id 派生；
+/// 提取结果作为 envelope 身份的一部分。
 fn extract_message_id(event: &ExecutorEvent) -> Option<String> {
     match event {
         ExecutorEvent::TextChunk { message_id, .. }

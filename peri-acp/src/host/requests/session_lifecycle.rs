@@ -586,6 +586,7 @@ pub(crate) async fn handle_resume(
         if let Some(s) = sessions.get_mut(req_session_id) {
             if s.history.is_empty() {
                 s.history = history;
+                s.history_payloads = history_payloads.clone();
             }
             if s.frozen.is_none() {
                 s.frozen = Some(frozen_data.clone());
@@ -792,6 +793,10 @@ fn prewarm_session_mcp_discovery(cfg: &AcpServerConfig, session_id: &str) {
 struct TuiReplaySender<'a> {
     transport: &'a dyn crate::transport::AcpTransport,
 }
+
+#[cfg(test)]
+#[path = "session_lifecycle_replay_test.rs"]
+mod replay_tests;
 
 #[async_trait::async_trait]
 impl ReplaySender for TuiReplaySender<'_> {

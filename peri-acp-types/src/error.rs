@@ -40,6 +40,13 @@ pub enum AgentError {
     #[error("Full Compact failed: LLM returned empty summary")]
     CompactEmptyResponse,
 
+    #[error("Full Compact did not restore the context budget after {full_attempts} attempts for the same work ({input_tokens}/{context_window} input tokens). Reduce retained instructions or use a larger context window.")]
+    CompactBudgetUnrecovered {
+        input_tokens: u32,
+        context_window: u32,
+        full_attempts: u32,
+    },
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

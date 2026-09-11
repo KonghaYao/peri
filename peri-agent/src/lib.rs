@@ -55,8 +55,8 @@ pub mod prelude {
             BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, ToolCallRequest,
         },
         middleware::{
-            r#trait::Middleware, state::MiddlewareState, LoggingMiddleware, MetricsMiddleware,
-            MiddlewareChain, NoopMiddleware,
+            capabilities, r#trait::Middleware, state::MiddlewareState, LoggingMiddleware,
+            MetricsMiddleware, MiddlewareChain, NoopMiddleware,
         },
         session::{
             FrozenContext, FrozenContextBuilder, MessageKind, MessageQueue, MessageSource,

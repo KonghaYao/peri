@@ -473,7 +473,8 @@ pub(crate) fn dispatch_for_bridge(
         // ── §4.9 Plugin events ──
         PluginSnapshot(snapshot) => system::handle_plugin_snapshot(snapshot),
         PluginActionResult(result) => system::handle_plugin_action_result(result),
-        PluginSearchResult(result) => system::handle_plugin_search_result(result),
+        // Legacy notifications lack request identity; Discover owns RPC results.
+        PluginSearchResult(_) => {}
 
         // ── Unknown / forward-compat ──
         Unknown { .. } => system::handle_unknown(),

@@ -10,8 +10,7 @@ use crate::kit::acp_types::{
 };
 use crate::kit::atoms::PluginSummary;
 use crate::kit::atoms::{
-    ASK_USER_PENDING, BG_DISPLAY, BG_TASKS, NOTIFICATION, PLUGIN_LIST, PLUGIN_SEARCH_RESULTS,
-    PREDICTION, RENDER_HEARTBEAT,
+    ASK_USER_PENDING, BG_DISPLAY, BG_TASKS, NOTIFICATION, PLUGIN_LIST, PREDICTION, RENDER_HEARTBEAT,
 };
 use crate::kit::bg_task_identity::upsert_identity_from_started;
 use crate::kit::bg_task_live::{
@@ -23,8 +22,8 @@ use crate::kit::tui_render_unit::{
 };
 use fluent_bundle::FluentValue;
 use peri_acp_types::event_data::{
-    AskUser, BudgetWarning, HitlPending, OauthNeeded, PluginActionResult, PluginSearchResult,
-    PluginSnapshot, Prediction, PredictionAction, RewindMessage, RewindPreview, SystemNotification,
+    AskUser, BudgetWarning, HitlPending, OauthNeeded, PluginActionResult, PluginSnapshot,
+    Prediction, PredictionAction, RewindMessage, RewindPreview, SystemNotification,
 };
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -811,29 +810,6 @@ pub(super) fn handle_plugin_action_result(result: &PluginActionResult) {
         });
     // 触发 PluginPanel 重渲染以清除 operation_loading
     RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
-}
-
-pub(super) fn handle_plugin_search_result(result: &PluginSearchResult) {
-    let items: Vec<PluginSummary> = result
-        .results
-        .iter()
-        .map(|r| PluginSummary {
-            name: r.name.clone(),
-            version: r.version.clone(),
-            enabled: false,
-            root: String::new(),
-            description: r.description.clone(),
-            marketplace: r.marketplace.clone(),
-            author: r.author.clone(),
-            skills_count: r.skills_count,
-            commands_count: r.commands_count,
-            agents_count: r.agents_count,
-            mcp_count: r.mcp_count,
-            install_scope: r.install_scope.clone(),
-            load_error: None,
-        })
-        .collect();
-    PLUGIN_SEARCH_RESULTS.state().write().clone_from(&items);
 }
 
 // ── Other ──

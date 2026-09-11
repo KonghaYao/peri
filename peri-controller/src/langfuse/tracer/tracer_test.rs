@@ -7,6 +7,9 @@
 //! 提供异步运行时。
 
 use super::*;
+use langfuse_client::ObservationType;
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::session::{ExecutionFailure, TurnTelemetryOutcome};
 use peri_agent::agent::events::{Stage, StageStatus};
 
 fn make_tracer(

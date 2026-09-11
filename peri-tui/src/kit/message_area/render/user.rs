@@ -28,10 +28,23 @@ pub(super) fn render_system_reminder_lines(
     } else {
         i18n::tr("reminder-structured-marker")
     };
-    let heading = format!(
-        "{} · {} · {} · {:?}",
-        marker, data.category, data.source, data.severity
-    );
+    let compact_label = data
+        .wire
+        .as_ref()
+        .and_then(|reminder| match reminder.kind.as_str() {
+            "compact_file" => Some("reminder-compact-file"),
+            "compact_skill" => Some("reminder-compact-skill"),
+            "compact_summary" => Some("reminder-compact-summary"),
+            _ => None,
+        });
+    let heading = if let Some(label) = compact_label {
+        format!("{} · {}", marker, i18n::tr(label))
+    } else {
+        format!(
+            "{} · {} · {} · {:?}",
+            marker, data.category, data.source, data.severity
+        )
+    };
     let symbol = if data.fold == FoldState::Expanded {
         sym().expanded
     } else {

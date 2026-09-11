@@ -48,7 +48,8 @@ use ratatui_kit::{
 /// spawn kit 四链路（notifier / bridge / submit_consumer / service_snapshot），
 /// 进入 ratatui-kit 全屏。
 ///
-/// 返回时已调用 `teardown_app`——hooks 清理、MCP 池关闭、Langfuse flush。
+/// 返回前调用一次 `teardown_app`，尝试关闭 hooks、MCP、ACP host 与 Langfuse。
+/// 关闭报告不完整时仍会退出并 Drop App，不安排重试，也不保证未完成资源已 join。
 pub async fn run_kit_fullscreen(
     opts: TuiLaunchOptions,
     mut panic_notify_rx: mpsc::UnboundedReceiver<String>,
@@ -486,7 +487,7 @@ pub async fn run_kit_fullscreen(
     // 6. 退出前触发 shutdown，让后台任务干净退出
     shutdown.cancel();
 
-    // 7. teardown：hooks / MCP / Langfuse
+    // 7. 单次 teardown；随后 App Drop，不建立后台重试或完整 drain 保证。
     teardown_app(&mut app).await;
 
     result?;

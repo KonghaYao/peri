@@ -87,43 +87,6 @@ fn test_current_step_delegates_to_turn() {
 }
 
 #[test]
-fn test_get_set_context_on_owned_hashmap() {
-    let ctx = make_context();
-    {
-        let mut guard = ctx.session.session_context.write();
-        guard.insert("session_id".to_string(), "s1".to_string());
-    }
-    let mut ac = AgentContext::from_stage(&ctx);
-
-    // get_context 读取 from_stage 时的快照
-    assert_eq!(ac.get_context("session_id"), Some("s1"));
-
-    // set_context 修改自有 HashMap
-    ac.set_context("key".to_string(), "value".to_string());
-    assert_eq!(ac.get_context("key"), Some("value"));
-
-    // ctx.session.session_context 不受影响（自有克隆）
-    let guard = ctx.session.session_context.read();
-    assert_eq!(guard.get("key"), None);
-}
-
-#[test]
-fn test_token_tracker_is_default() {
-    let ctx = make_context();
-    let ac = AgentContext::from_stage(&ctx);
-    assert_eq!(ac.token_tracker().total_input_tokens, 0);
-    assert!(ac.token_tracker().last_usage.is_none());
-}
-
-#[test]
-fn test_token_tracker_mut_is_mutable() {
-    let ctx = make_context();
-    let mut ac = AgentContext::from_stage(&ctx);
-    ac.token_tracker_mut().total_input_tokens = 100;
-    assert_eq!(ac.token_tracker().total_input_tokens, 100);
-}
-
-#[test]
 fn test_push_and_drain_recall() {
     let ctx = make_context();
     let mut ac = AgentContext::from_stage(&ctx);
@@ -149,37 +112,62 @@ fn test_v2_queue_is_shared() {
 }
 
 #[test]
-fn test_messages_mut_emits_warning() {
+fn replacement_preserves_visible_message_order_and_defers_transcript_write() {
     let ctx = make_context();
+    let first = BaseMessage::human(MessageContent::text("first"));
+    let second = BaseMessage::human(MessageContent::text("second"));
+    ctx.session
+        .transcript
+        .write()
+        .append_batch(vec![first.clone(), second.clone()]);
     let mut ac = AgentContext::from_stage(&ctx);
-    ac.add_message(BaseMessage::human(MessageContent::text("msg1")));
 
-    // messages_mut 应只影响 cache，不写入 transcript
-    let cache = ac.messages_mut();
-    cache.push(BaseMessage::human(MessageContent::text("cache-only")));
-
-    // transcript 不应有 cache-only 消息
-    let transcript = ctx.session.transcript.read();
-    assert_eq!(transcript.len(), 1, "messages_mut 不应写入 transcript");
-    assert!(!transcript
-        .entries()
-        .iter()
-        .any(|e| e.message().content() == "cache-only"));
+    assert!(ac.replace_message(second.clone_with_content(MessageContent::text("updated"))));
+    assert!(ac.messages_modified());
+    assert_eq!(
+        ac.messages()
+            .iter()
+            .map(BaseMessage::id)
+            .collect::<Vec<_>>(),
+        vec![first.id(), second.id()]
+    );
+    assert_eq!(ac.messages()[1].content(), "updated");
+    assert_eq!(
+        ctx.session
+            .transcript
+            .read()
+            .get(second.id())
+            .unwrap()
+            .message()
+            .content(),
+        "second"
+    );
 }
 
 #[test]
-fn test_prepend_message_emits_warning() {
+fn replacement_rejects_unknown_id_without_changing_cache() {
     let ctx = make_context();
+    let original = BaseMessage::human(MessageContent::text("original"));
+    ctx.session.transcript.write().append(original.clone());
     let mut ac = AgentContext::from_stage(&ctx);
-    ac.add_message(BaseMessage::human(MessageContent::text("msg1")));
 
-    // prepend_message 应只影响 cache，不写入 transcript
-    ac.prepend_message(BaseMessage::human(MessageContent::text("prepended")));
+    assert!(!ac.replace_message(BaseMessage::human(MessageContent::text("unknown"))));
+    assert!(!ac.messages_modified());
+    assert_eq!(ac.messages().len(), 1);
+    assert_eq!(ac.messages()[0].id(), original.id());
+    assert_eq!(ac.messages()[0].content(), "original");
+}
 
-    assert_eq!(ac.messages().len(), 2);
-    assert_eq!(ac.messages()[0].content(), "prepended");
+#[test]
+fn legacy_state_replacement_uses_the_same_id_contract() {
+    let original = BaseMessage::human(MessageContent::text("original"));
+    let mut legacy = crate::agent::state::AgentState::new("/tmp/test");
+    legacy.add_message(original.clone());
+    let state: &mut dyn MiddlewareState = &mut legacy;
 
-    // transcript 不应有 prepended 消息
-    let transcript = ctx.session.transcript.read();
-    assert_eq!(transcript.len(), 1);
+    assert!(state.replace_message(original.clone_with_content(MessageContent::text("updated"))));
+    assert!(!state.replace_message(BaseMessage::human(MessageContent::text("unknown"))));
+    assert_eq!(state.messages().len(), 1);
+    assert_eq!(state.messages()[0].id(), original.id());
+    assert_eq!(state.messages()[0].content(), "updated");
 }

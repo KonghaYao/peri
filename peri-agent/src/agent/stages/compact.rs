@@ -67,7 +67,9 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 estimated_tokens: tracker.estimated_context_tokens().unwrap_or(0),
                 context_window: budget.context_window,
                 output_reserve: budget.output_reserve,
-                predicted_tool_growth: tracker.estimated_tool_tokens_since_last_llm as u32,
+                // 已提交工具增长已计入 estimated_context_tokens；不能再从目标
+                // 预算扣除同一增长。未来工具预测需要独立的输入事实源。
+                predicted_tool_growth: 0,
                 safety_buffer: 5000,
                 cache_hit_rate: tracker.cache_hit_rate(),
             }
@@ -160,6 +162,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
 
         // G6: 记录 compact 前的可见消息数，供 cancel arm 发射 MessagesCompacted 事件使用
         let before_visible_len = transcript_owned.visible_messages().len();
+        let before_entries_len = transcript_owned.len();
 
         if let Some(key) = pressure_sample {
             ctx.compact
@@ -189,6 +192,10 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 ctx.compact
                     .compact_consecutive_failures
                     .store(consecutive, std::sync::atomic::Ordering::Relaxed);
+
+                if ctx.session.transcript.read().compaction_commit_state().is_uncertain() {
+                    break 'compact_core Err(uncertain_compaction_error(ctx));
+                }
 
                 if post_compact_flagged > pre_compact_flagged {
                     // G6: 发射配对事件，防止 Langfuse span 孤立
@@ -246,6 +253,11 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 ctx.cwd(),
             ) => r,
         };
+
+        if transcript_owned.compaction_commit_state().is_uncertain() {
+            *ctx.session.transcript.write() = transcript_owned;
+            break 'compact_core Err(uncertain_compaction_error(ctx));
+        }
 
         // G6: 检查是否在 compact 执行期间被取消（r arm 胜出但 cancel 已被触发）
         if ctx.session.turn.cancel_token.is_cancelled() {
@@ -356,6 +368,13 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             // compact 前的累积 token 数，导致每轮都触发 compact
             // 注：与 v1 CompactMiddleware 行为对齐（v1 已删除）
             if did_compact && r.outcome().is_full_applied() {
+                {
+                    let transcript = ctx.session.transcript.read();
+                    ctx.compact
+                        .budget_recovery
+                        .lock()
+                        .record_full_applied(&transcript, before_entries_len);
+                }
                 // P1-3: 直接操作 StageContext.token_tracker
                 ctx.compact.token_tracker.write().reset();
                 // 注：token_tracker reset 为只读 token 操作，无需 drain recall
@@ -409,6 +428,21 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
     }
 
     output
+}
+
+// An unacknowledged durable commit must stop the loop before Reason can consume the
+// old in-memory history. Phase 8 carries this state to the host for cold recovery.
+fn uncertain_compaction_error(ctx: &super::StageContext) -> crate::error::AgentError {
+    ctx.runtime
+        .event_bus
+        .emit_observe(crate::agent::events_v2::ObserveEvent::CompactEnded {
+            turn_id: ctx.turn_id(),
+            agent_id: ctx.session.agent_id,
+            step: ctx.session.turn.current_step(),
+            strategy: crate::agent::events::CompactStrategy::Full,
+            outcome: crate::agent::compact_v2::CompactOutcome::FullFailed,
+        });
+    anyhow::anyhow!("compact persistence outcome is unknown; reload the session").into()
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

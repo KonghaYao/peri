@@ -231,7 +231,7 @@ sequenceDiagram
 
 ### 6.1 旧版的问题
 
-旧版决策流是先提交 Micro 标记，再根据标记数量决定要不要升级 Full。两个问题：（1）Micro 标记已经写盘了，如果后面升级 Full，这些标记白写了；（2）决策依据是 `affected_count`（标记了几条），不是实际节省了多少 token。
+仅凭 `affected_count`（标记了几条）无法判断是否需要升级 Full：少量长结果可能释放较多预算，许多已隐藏结果则没有新的可回收量。决策应使用当前可见模型视图的增量收益估算。
 
 ### 6.2 新版 dry-run 决策
 
@@ -242,19 +242,25 @@ flowchart TD
     PM["plan_micro() · dry run"] --> Q1{"estimated_tokens_saved<br/>≥ reclaim_target ?"}
     Q1 -->|"✅ 够用了"| APPLY["micro_compact() 应用"]
     Q1 -->|"❌ 不够"| Q2{"预算逼近上限<br/>budget ≥ auto_compact_threshold ?"}
-    Q2 -->|"是"| SKIP["不跑 Micro 了<br/>直接 Full Compact"]
+    Q2 -->|"是"| FULL["提交有效 Micro<br/>再尝试 Full Compact"]
     Q2 -->|"否"| PARTIAL["虽然不够，聊胜于无<br/>应用 Micro"]
 ```
 
-**Skip-Micro-when-Full**：当 Micro 回收量严重不足、且预算已经逼近上限时，不再白白提交 Micro 标记——直接跑 Full Compact。
+当 Micro 回收量不足且预算达到 Full 阈值时，先提交有效 Micro，再尝试 Full；Full 失败时保留已经取得的 Micro 收益。planner 与收益估算都跳过 excluded 消息，且只规划 own region，不能把 Full 已排除的历史重复算作可回收量。stale round 也只从当前可见 own history 计算。
 
-### 6.3 缓存感知
+压力样本由有效 provider usage generation 与 canonical 工具结果增长 generation 共同标识；同一样本只自动尝试一次。Act 提交工具结果后计入估算，下一次有效 input usage 结清估算；missing/zero usage 不清账。预算中已包含该增长，不能再次扣减 headroom。
+
+### 6.3 Full 后预算验证
+
+成功 Full 后，Reason 将实际请求与该 Full generation 绑定，用对应响应的有效 input usage 检查是否降到 `auto_compact_threshold` 以下。没有新增用户或工具工作时，连续两次 Full 后仍高压会返回 `CompactBudgetUnrecovered`，结束本轮；cancel 优先。AI 输出、摘要和 canonical Reminder 不重置次数，新的用户或工具工作开启新一轮验证。未知、零或过期 usage 不作为进展证据。此保护限制无工作进展的重复压缩，不删减保留的 Reminder。
+
+### 6.4 缓存感知
 
 高缓存命中率 + 充足 headroom 的情况下，compact 可以推迟——缓存还在有效期内，提前压缩反而损失缓存带来的 token 节省。
 
 当 `cache_aware_enabled = true` 且 `cache_hit_rate > 0.7` 且 headroom > 20% 时，跳过本次 compact。
 
-### 6.4 Shadow Mode
+### 6.5 Shadow Mode
 
 当 `shadow_mode_enabled = true` 时，只跑 `plan_micro()` 估算，不应用任何标记。日志输出估算值。用于校准 chars→tokens 估算模型——对比估算值与下一次真实 LLM 请求的 `input_tokens`。
 
@@ -284,7 +290,7 @@ MessageFlags {
 
 ### 7.3 Session 恢复
 
-SQLite 新增 `projection TEXT` 列（通过 ALTER TABLE 幂等迁移）。恢复时 `load_message_flags()` 同时读取、反序列化 `projection` 字段。下一轮 `render_llm_view()` 的投影结果与 compact 时一致。
+SQLite 的 `projection TEXT` 列通过幂等迁移添加。恢复时 `load_message_flags()` 同时读取、反序列化 projection。Reason 仅渲染已提交且有效的 directive，无 directive 时使用 canonical 可见消息；此恢复不依赖自动 compact 是否启用。子会话另行持久化继承 payload 与 flags 的冻结快照，避免父会话后续 compact 改变 child 视图。完整恢复契约见 `ARC-COMPACT-001` 与 [会话消息设计](message-transcript.md)。
 
 ---
 

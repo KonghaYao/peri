@@ -110,14 +110,14 @@ pub struct ToolExchange {
 impl TurnGroup {
     /// 从 transcript 自有消息中构建 TurnGroup 列表
     ///
-    /// 跳过 `ancestor_len` 之前的祖先消息，仅处理自有消息。
+    /// 跳过只读祖先和 excluded 消息，仅以当前可见自有消息计算轮次。
     /// 每个 TurnGroup 以 Human 消息开头。
-    pub fn collect(entries: &[TranscriptEntry], ancestor_len: usize) -> Vec<TurnGroup> {
+    pub fn collect(transcript: &MessageTranscript) -> Vec<TurnGroup> {
         let mut groups = Vec::new();
         let mut current: Option<TurnGroup> = None;
 
-        for (i, entry) in entries.iter().enumerate() {
-            if i < ancestor_len {
+        for (i, entry) in transcript.entries().iter().enumerate() {
+            if i < transcript.ancestor_len() || transcript.flags(entry.id()).excluded {
                 continue;
             }
             let Some(message) = entry.as_message() else {
@@ -228,9 +228,7 @@ pub fn plan_micro(
     config: &CompactConfig,
     skip_existing_truncated: bool,
 ) -> MicroCompactPlan {
-    let ancestor_len = transcript.ancestor_len();
-    let entries = transcript.entries();
-    let groups = TurnGroup::collect(entries, ancestor_len);
+    let groups = TurnGroup::collect(transcript);
 
     let total_groups = groups.len();
     let stale_limit = total_groups.saturating_sub(config.micro_compact_stale_steps);
@@ -246,8 +244,8 @@ pub fn plan_micro(
 
         for exchange in group.tool_exchanges() {
             // 跳过已有 truncated flag 且 directive 版本一致的消息（避免重复）
-            // 仅在 Compact 阶段跳过（skip_existing_truncated=true），
-            // Reason 阶段（skip_existing_truncated=false）需要为已标记消息生成完整投影
+            // Compact 阶段跳过（skip_existing_truncated=true）；false 只供显式
+            // 计划检查，Reason 从已提交 directive 恢复，不自行规划。
             // v1 directive 被视为脏数据，不跳过，允许重新规划为 v2
             if skip_existing_truncated
                 && transcript.flags(exchange.ai_message_id).truncated

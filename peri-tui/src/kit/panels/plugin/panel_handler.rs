@@ -6,10 +6,8 @@ use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, M
 use ratatui_kit::prelude::{EventResult, State};
 use ratatui_kit::ratatui::layout::Rect;
 
-use super::data::{
-    get_discover_cache, get_marketplace_cache, refresh_discover_cache, refresh_marketplace_cache,
-};
-use super::{DiscoverDetailAction, VISIBLE_ITEMS, action_list, cycle_backward, cycle_forward};
+use super::data::{get_marketplace_cache, refresh_discover_cache, refresh_marketplace_cache};
+use super::{VISIBLE_ITEMS, action_list, cycle_backward, cycle_forward};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_panel_event(
@@ -17,18 +15,14 @@ pub(super) fn handle_panel_event(
     area: Option<Rect>,
     selected: State<usize>,
     active_tab: State<PluginViewTab>,
+    discover: State<super::discover::DiscoverState>,
     action_index: State<usize>,
     confirm_action: State<Option<String>>,
     operation_loading: State<Option<String>>,
     detail_plugin_idx: State<Option<usize>>,
-    discover_cursor: State<usize>,
-    discover_detail_idx: State<Option<usize>>,
-    discover_detail_action: State<usize>,
-    discover_filtered: State<Vec<usize>>,
     marketplace_detail: State<Option<usize>>,
     marketplace_detail_action: State<usize>,
     marketplace_refreshing: State<bool>,
-    search_text: State<TextAreaState>,
     add_marketplace_input: State<TextAreaState>,
     add_marketplace_active: State<bool>,
 ) -> EventResult {
@@ -103,89 +97,6 @@ pub(super) fn handle_panel_event(
                             *operation_loading.write() = None;
                         });
                     }
-                }
-                return EventResult::Consumed;
-            }
-            // ── Discover 详情：点击 action 行 = 执行（Enter @L487）──
-            // if-let scrutinee 中的临时 guard 会存活到整个块结束，
-            // 块内对同一 atom 的 write() 会死锁——先提取为 bool。
-            let in_discover_detail = discover_detail_idx.read().is_some();
-            if in_discover_detail
-                && let Some(idx) = hit_item(
-                    &mouse,
-                    area,
-                    ListLayout {
-                        header_rows: 10,
-                        item_rows: 1,
-                        footer_rows: 0,
-                        visible_items: 3,
-                        scroll_start: 0,
-                        item_count: 3,
-                    },
-                )
-            {
-                *discover_detail_action.write() = idx;
-                let disc_idx = discover_detail_idx.read().unwrap_or(0);
-                match DiscoverDetailAction::ALL.get(idx).copied() {
-                    Some(DiscoverDetailAction::InstallUser) => {
-                        let items = get_discover_cache();
-                        if let Some(dp) = items.get(disc_idx) {
-                            let name = dp.name.clone();
-                            let marketplace = dp.marketplace.clone();
-                            *operation_loading.write() = Some("install".into());
-                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                let client = cl.clone();
-                                let sid = client.current_session_id().unwrap_or_default();
-                                tokio::spawn(async move {
-                                    let _ = client
-                                        .send_raw_request(
-                                            "plugin/install",
-                                            serde_json::json!({
-                                                "name": name,
-                                                "marketplace": marketplace,
-                                                "scope": "user",
-                                                "sessionId": sid,
-                                            }),
-                                        )
-                                        .await;
-                                });
-                            }
-                        }
-                        *discover_detail_idx.write() = None;
-                        *discover_detail_action.write() = 0;
-                    }
-                    Some(DiscoverDetailAction::InstallProject) => {
-                        let items = get_discover_cache();
-                        if let Some(dp) = items.get(disc_idx) {
-                            let name = dp.name.clone();
-                            let marketplace = dp.marketplace.clone();
-                            *operation_loading.write() = Some("install".into());
-                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                let client = cl.clone();
-                                let sid = client.current_session_id().unwrap_or_default();
-                                tokio::spawn(async move {
-                                    let _ = client
-                                        .send_raw_request(
-                                            "plugin/install",
-                                            serde_json::json!({
-                                                "name": name,
-                                                "marketplace": marketplace,
-                                                "scope": "project",
-                                                "sessionId": sid,
-                                            }),
-                                        )
-                                        .await;
-                                });
-                            }
-                        }
-                        *discover_detail_idx.write() = None;
-                        *discover_detail_action.write() = 0;
-                    }
-                    Some(DiscoverDetailAction::BackToList) => {
-                        *discover_detail_idx.write() = None;
-                        *discover_detail_action.write() = 0;
-                    }
-                    None => {}
                 }
                 return EventResult::Consumed;
             }
@@ -440,7 +351,6 @@ pub(super) fn handle_panel_event(
         return EventResult::Ignored;
     }
     let in_detail = detail_plugin_idx.read().is_some();
-    let in_discover_detail = discover_detail_idx.read().is_some();
     let in_marketplace_detail = marketplace_detail.read().is_some();
 
     // 任意键盘事件清除 operation_loading（操作完成后用户按任意键消除 loading 状态）
@@ -452,107 +362,6 @@ pub(super) fn handle_panel_event(
         *operation_loading.write() = None;
         tokio::task::spawn_blocking(refresh_discover_cache);
         return EventResult::Consumed;
-    }
-
-    // ── Discover detail 模式 ──
-    if in_discover_detail {
-        return match key.code {
-            KeyCode::Up => {
-                let mut da = discover_detail_action.write();
-                *da = da.saturating_sub(1);
-                EventResult::Consumed
-            }
-            KeyCode::Down => {
-                let mut da = discover_detail_action.write();
-                let max = DiscoverDetailAction::ALL.len().saturating_sub(1);
-                if *da < max {
-                    *da += 1;
-                }
-                EventResult::Consumed
-            }
-            KeyCode::Enter => {
-                let action = DiscoverDetailAction::ALL
-                    .get(*discover_detail_action.read())
-                    .copied();
-                let idx = discover_detail_idx.read().unwrap_or(0);
-                match action {
-                    Some(DiscoverDetailAction::InstallUser) => {
-                        let items = get_discover_cache();
-                        if let Some(dp) = items.get(idx) {
-                            let name = dp.name.clone();
-                            let marketplace = dp.marketplace.clone();
-                            *operation_loading.write() = Some("install".into());
-                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                let client = cl.clone();
-                                let sid = client.current_session_id().unwrap_or_default();
-                                tokio::spawn(async move {
-                                    let _ = client
-                                        .send_raw_request(
-                                            "plugin/install",
-                                            serde_json::json!({
-                                                "name": name,
-                                                "marketplace": marketplace,
-                                                "scope": "user",
-                                                "sessionId": sid,
-                                            }),
-                                        )
-                                        .await;
-                                });
-                            }
-                        }
-                        *discover_detail_idx.write() = None;
-                        *discover_detail_action.write() = 0;
-                    }
-                    Some(DiscoverDetailAction::InstallProject) => {
-                        let items = get_discover_cache();
-                        if let Some(dp) = items.get(idx) {
-                            let name = dp.name.clone();
-                            let marketplace = dp.marketplace.clone();
-                            *operation_loading.write() = Some("install".into());
-                            if let Some(cl) = ACP_CLIENT_HANDLE.get() {
-                                let client = cl.clone();
-                                let sid = client.current_session_id().unwrap_or_default();
-                                tokio::spawn(async move {
-                                    let _ = client
-                                        .send_raw_request(
-                                            "plugin/install",
-                                            serde_json::json!({
-                                                "name": name,
-                                                "marketplace": marketplace,
-                                                "scope": "project",
-                                                "sessionId": sid,
-                                            }),
-                                        )
-                                        .await;
-                                });
-                            }
-                        }
-                        *discover_detail_idx.write() = None;
-                        *discover_detail_action.write() = 0;
-                    }
-                    Some(DiscoverDetailAction::BackToList) => {
-                        *discover_detail_idx.write() = None;
-                        *discover_detail_action.write() = 0;
-                    }
-                    None => {}
-                }
-                EventResult::Consumed
-            }
-            KeyCode::Esc => {
-                *discover_detail_idx.write() = None;
-                *discover_detail_action.write() = 0;
-                EventResult::Consumed
-            }
-            KeyCode::Tab => {
-                *discover_detail_idx.write() = None;
-                *discover_detail_action.write() = 0;
-                let mut tab = active_tab.write();
-                *tab = cycle_forward(*tab);
-                *selected.write() = 0;
-                EventResult::Consumed
-            }
-            _ => EventResult::Consumed,
-        };
     }
 
     // ── Marketplace detail 模式 ──
@@ -712,13 +521,13 @@ pub(super) fn handle_panel_event(
             let mut tab = active_tab.write();
             *tab = cycle_forward(*tab);
             *selected.write() = 0;
-            *discover_cursor.write() = 0;
+            discover.write().selected = 0;
         }
         (false, false, KeyCode::BackTab) => {
             let mut tab = active_tab.write();
             *tab = cycle_backward(*tab);
             *selected.write() = 0;
-            *discover_cursor.write() = 0;
+            discover.write().selected = 0;
         }
         // ── List: Enter → 进入详情 / 删除 marketplace / discover detail ──
         (false, false, KeyCode::Enter) => {
@@ -865,21 +674,18 @@ pub(super) fn handle_panel_event(
             let mut tab = active_tab.write();
             *tab = cycle_backward(*tab);
             *selected.write() = 0;
-            *discover_cursor.write() = 0;
+            discover.write().selected = 0;
         }
         (false, false, KeyCode::Right) => {
             let mut tab = active_tab.write();
             *tab = cycle_forward(*tab);
             *selected.write() = 0;
-            *discover_cursor.write() = 0;
+            discover.write().selected = 0;
         }
         (false, false, KeyCode::Up) => {
             if *active_tab.read() == PluginViewTab::Installed {
                 let mut s = selected.write();
                 *s = previous_selection(*s);
-            } else if *active_tab.read() == PluginViewTab::Discover {
-                let mut c = discover_cursor.write();
-                *c = previous_selection(*c);
             } else if *active_tab.read() == PluginViewTab::Marketplaces {
                 let mut s = selected.write();
                 *s = previous_selection(*s);
@@ -891,18 +697,6 @@ pub(super) fn handle_panel_event(
                 let c = PLUGIN_LIST.state().read().len();
                 if c > 0 {
                     *s = next_selection(*s, c);
-                }
-            } else if *active_tab.read() == PluginViewTab::Discover {
-                let items = get_discover_cache();
-                let filtered = discover_filtered.read().clone();
-                let count = if search_text.read().text.is_empty() {
-                    items.len()
-                } else {
-                    filtered.len()
-                };
-                if count > 0 {
-                    let mut c = discover_cursor.write();
-                    *c = next_selection(*c, count);
                 }
             } else if *active_tab.read() == PluginViewTab::Marketplaces {
                 let mut s = selected.write();

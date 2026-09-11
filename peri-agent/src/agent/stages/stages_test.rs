@@ -1,6 +1,7 @@
 //! 从 mod.rs 分离的测试模块
 use super::*;
 use crate::messages::MessageContent;
+use crate::middleware::capabilities as hook_state;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
 use crate::session::Session;
@@ -184,7 +185,7 @@ impl crate::middleware::Middleware for IterationBudgetProbe {
 
     async fn before_agent(
         &self,
-        state: &mut dyn crate::middleware::MiddlewareState,
+        state: &mut dyn hook_state::BeforeAgentState,
     ) -> crate::error::AgentResult<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.prompt_visible.lock().unwrap().push(
@@ -869,7 +870,7 @@ async fn test_p0_2_before_agent_runs_once_after_tool_round_trip() {
 
         async fn before_agent(
             &self,
-            state: &mut dyn crate::middleware::MiddlewareState,
+            state: &mut dyn hook_state::BeforeAgentState,
         ) -> crate::error::AgentResult<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.prompt_visible.lock().unwrap().push(
@@ -962,7 +963,7 @@ async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cance
 
         async fn before_agent(
             &self,
-            state: &mut dyn crate::middleware::MiddlewareState,
+            state: &mut dyn hook_state::BeforeAgentState,
         ) -> crate::error::AgentResult<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.prompt_visible.lock().unwrap().push(
@@ -1472,19 +1473,19 @@ async fn test_run_react_loop_new_high_usage_generations_continue_full_micro_chur
         vec![
             (
                 crate::agent::events::CompactStrategy::Micro,
-                96_000,
+                96_070,
                 Some(crate::agent::compact_v2::planner::FullEscalationReason::InsufficientReclaim),
                 crate::agent::compact_v2::CompactOutcome::MicroAppliedThenFullFailed,
             ),
             (
                 crate::agent::events::CompactStrategy::Micro,
-                80_000,
+                80_070,
                 None,
                 crate::agent::compact_v2::CompactOutcome::MicroApplied,
             ),
             (
                 crate::agent::events::CompactStrategy::Micro,
-                97_000,
+                97_070,
                 Some(crate::agent::compact_v2::planner::FullEscalationReason::InsufficientReclaim),
                 crate::agent::compact_v2::CompactOutcome::MicroAppliedThenFullFailed,
             ),
@@ -1495,6 +1496,294 @@ async fn test_run_react_loop_new_high_usage_generations_continue_full_micro_chur
         compact_calls.load(Ordering::SeqCst),
         2,
         "两次 Full 各调用一次 compact LLM；中间 Micro 不调用"
+    );
+}
+
+struct AuditAlternatingOutputTool;
+
+#[async_trait::async_trait]
+impl crate::tools::BaseTool for AuditAlternatingOutputTool {
+    fn name(&self) -> &str {
+        "usage_churn_tool"
+    }
+
+    fn description(&self) -> &str {
+        "为审计循环交替提供长短结果"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {"generation": {"type": "integer"}}})
+    }
+
+    async fn invoke(
+        &self,
+        input: serde_json::Value,
+        _ctx: crate::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(if input["generation"].as_u64().unwrap().is_multiple_of(2) {
+            "x".repeat(8_000)
+        } else {
+            "ok".to_string()
+        })
+    }
+}
+
+/// [回归测试] SQLite Full 后新高 usage 可再次 Full，但不能对 excluded 历史发 Micro。
+/// usage 数列为受控输入，只证明新高样本下的执行链，不代表现场 token 测量。
+#[tokio::test]
+async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history() {
+    use crate::agent::compact_v2::{planner::plan_micro, projection, CompactOutcome};
+    use crate::thread::{SqliteThreadStore, ThreadMeta, ThreadStore};
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ThreadStore> = Arc::new(
+        SqliteThreadStore::new(dir.path().join("audit-full-churn.db"))
+            .await
+            .unwrap(),
+    );
+    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let session = Session::new(
+        Arc::from("/tmp"),
+        FrozenContext::builder().build(),
+        Some(thread_id.clone()),
+    );
+    {
+        let transcript = session.transcript();
+        let mut transcript = transcript.write();
+        *transcript =
+            std::mem::take(&mut *transcript).with_persistence(store.clone(), thread_id.clone());
+    }
+    let reason_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let compact_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
+    let tools: SharedToolMap = Arc::new(parking_lot::RwLock::new(BTreeMap::from([(
+        "usage_churn_tool".to_string(),
+        Arc::new(AuditAlternatingOutputTool) as Arc<dyn crate::tools::BaseTool>,
+    )])));
+    let config = CompactConfig {
+        micro_compact_stale_steps: 0,
+        ..Default::default()
+    };
+    let mut budget = crate::agent::token::ContextBudget::new(100_000);
+    budget.output_reserve = 40_000;
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(UsageChurnReactLLM {
+        usages: vec![96_000, 80_000, 96_000, 80_000, 1_000],
+        calls: reason_calls.clone(),
+        requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+    }))
+    .with_tools(tools)
+    .with_event_bus(Arc::new(bus))
+    .with_context_budget(budget)
+    .with_compact_config(config.clone())
+    .with_compact_llm(Arc::new(CountingCompactModel {
+        calls: compact_calls.clone(),
+    }))
+    .build();
+    context.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human("audit churn"),
+    ));
+    assert!(matches!(
+        run_react_loop(context.clone(), 5).await,
+        LoopResult::Completed
+    ));
+    assert_eq!(reason_calls.load(Ordering::SeqCst), 5);
+    assert_eq!(compact_calls.load(Ordering::SeqCst), 2);
+    let compacted: Vec<_> = std::iter::from_fn(|| handles.try_observe())
+        .filter_map(|event| match event {
+            ObserveEvent::MessagesCompacted {
+                outcome,
+                estimated_tokens_saved,
+                affected_count,
+                ..
+            } => Some((outcome, estimated_tokens_saved, affected_count)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        compacted.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+        vec![CompactOutcome::FullApplied, CompactOutcome::FullApplied,]
+    );
+    {
+        let transcript = context.session.transcript.read();
+        let plan = plan_micro(&transcript, &config, false);
+        assert!(
+            plan.actions.is_empty(),
+            "Full 后只有短结果可见，不应再次规划旧工具输出"
+        );
+        let canonical = transcript.visible_model_messages().unwrap();
+        let projected =
+            projection::render_llm_view(&transcript, &plan, &Default::default()).unwrap();
+        assert_eq!(
+            serde_json::to_value(canonical).unwrap(),
+            serde_json::to_value(projected).unwrap(),
+            "无 Micro action 时维持 canonical 模型视图"
+        );
+    }
+    let tx = context
+        .session
+        .transcript
+        .read()
+        .persist_tx_handle()
+        .unwrap();
+    crate::session::transcript::MessageTranscript::flush_via_tx(&tx)
+        .await
+        .unwrap();
+    let flags = store.load_message_flags(&thread_id).await.unwrap();
+    assert_eq!(
+        flags
+            .values()
+            .filter(|flag| flag.excluded && flag.projection.is_some())
+            .count(),
+        0
+    );
+}
+
+/// [回归测试] 工具结果已进入 transcript 后，下一轮 Compact 必须看见其新增压力。
+#[tokio::test]
+async fn test_audit_dispatch_must_account_for_tool_output_pressure() {
+    let context = make_stage_context();
+    context.runtime.tools.write().insert(
+        "usage_churn_tool".into(),
+        Arc::new(AuditAlternatingOutputTool),
+    );
+    let catalog = context
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&context.runtime.tools.read())
+        .unwrap();
+    context
+        .compact
+        .token_tracker
+        .write()
+        .accumulate(&peri_model::TokenUsage {
+            input_tokens: 74_000,
+            output_tokens: 100,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+    let reasoning = crate::agent::react::Reasoning::with_tools(
+        "inspect",
+        vec![crate::agent::react::ToolCall::new(
+            "audit-output",
+            "usage_churn_tool",
+            serde_json::json!({"generation": 0}),
+        )],
+    );
+    super::tool_dispatch::dispatch_tools(
+        &context,
+        &reasoning,
+        &catalog,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        context
+            .session
+            .transcript
+            .read()
+            .visible_messages()
+            .iter()
+            .any(|message| {
+                matches!(message, BaseMessage::Tool { .. }) && message.content().len() == 8_000
+            }),
+        "必须实际执行工具并写入其完整结果"
+    );
+    assert_eq!(
+        context
+            .compact
+            .token_tracker
+            .read()
+            .estimated_context_tokens(),
+        Some(76_000),
+        "74k provider input 加上已提交的 8k 字符工具结果，按 tracker 的 chars/4 应为 76k"
+    );
+}
+
+/// [回归测试] Reason 已投影的内容不能在随后 Micro 中再次报告增量回收收益。
+#[tokio::test]
+async fn test_audit_micro_savings_must_change_previous_reason_view() {
+    let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
+    {
+        let transcript = session.transcript();
+        let mut transcript = transcript.write();
+        for turn in 0..4 {
+            let call_id = format!("audit-reason-{turn}");
+            transcript.append(BaseMessage::human("inspect"));
+            transcript.append(BaseMessage::ai_with_tool_calls(
+                "inspect",
+                vec![crate::messages::ToolCallRequest::new(
+                    &call_id,
+                    "Bash",
+                    serde_json::json!({"command": "fixture"}),
+                )],
+            ));
+            transcript.append(BaseMessage::tool_result(&call_id, "x".repeat(8_000)));
+        }
+    }
+    let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(UsageChurnReactLLM {
+        usages: vec![80_000, 80_000],
+        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+    }))
+    .with_event_bus(Arc::new(bus))
+    .with_context_budget(crate::agent::token::ContextBudget::new(100_000))
+    .with_compact_config(CompactConfig::default())
+    .build();
+    let first = super::reason::run_reason(ReasonInput {
+        context: context.clone(),
+        has_tool_calls: false,
+    })
+    .await
+    .unwrap();
+    let first_tool_outputs = first
+        .messages_snapshot
+        .iter()
+        .filter(|message| matches!(message, BaseMessage::Tool { .. }))
+        .map(|message| message.content().chars().count())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_tool_outputs,
+        vec![8_000; 4],
+        "没有已提交 directive 时 Reason 必须发送 canonical 工具结果"
+    );
+    super::compact::run_compact(CompactInput {
+        context: context.clone(),
+        has_tool_calls: false,
+    })
+    .await
+    .unwrap();
+    let saved = std::iter::from_fn(|| handles.try_observe())
+        .find_map(|event| match event {
+            ObserveEvent::MessagesCompacted {
+                estimated_tokens_saved,
+                ..
+            } => Some(estimated_tokens_saved),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let second = super::reason::run_reason(ReasonInput {
+        context,
+        has_tool_calls: false,
+    })
+    .await
+    .unwrap();
+    assert!(
+        saved == 0
+            || serde_json::to_value(&*first.messages_snapshot).unwrap()
+                != serde_json::to_value(&*second.messages_snapshot).unwrap(),
+        "Micro 报告节省 {saved} tokens，但两次真实 Reason 消息快照完全相同"
     );
 }
 

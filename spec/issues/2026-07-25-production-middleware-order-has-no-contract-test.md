@@ -48,7 +48,7 @@
 
 ## 关联 Issue
 
-- `spec/issues/2026-07-25-middleware-capabilities-can-silently-no-op.md` —— capability interface 迁移期间依靠本 issue 防止链顺序回归。
+- [ARC-MIDDLEWARE-CAPABILITY-001](../../docs/standards/architecture-contracts.md#arc-middleware-capability-001) —— hook 能力边界；链顺序仍由生产装配契约固定。
 - `spec/issues/2026-07-16-architecture-upgrade-checklist.md` —— 既有架构升级与链顺序约束背景。
 
 ## 涉及文件

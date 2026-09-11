@@ -8,7 +8,10 @@
 //! - **异步持久化**：append 后通过 unbounded_channel 异步触发 ThreadStore 写入
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 
 use anyhow::anyhow;
 
@@ -17,6 +20,29 @@ use crate::messages::{BaseMessage, MessageContent, MessageId};
 use crate::thread::{ThreadId, ThreadStore};
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::{encode_system_reminder, TrustedSystemReminder};
+
+// The command interceptor retains a clone while its cancellable pipeline owns the
+// transcript, so dropping that future cannot erase the persistence outcome.
+#[derive(Debug, Clone, Default)]
+pub struct CompactionCommitState(Arc<AtomicU8>);
+
+impl CompactionCommitState {
+    pub fn is_uncertain(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == 1
+    }
+
+    pub fn has_committed(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == 2
+    }
+
+    fn mark_pending(&self) {
+        self.0.store(1, Ordering::SeqCst);
+    }
+
+    fn mark_committed(&self) {
+        self.0.store(2, Ordering::SeqCst);
+    }
+}
 
 // ─── TranscriptEntry ──────────────────────────────────────────────────────────
 
@@ -53,7 +79,25 @@ impl TranscriptEntry {
     /// Canonical model projection shared by normal Reason and compact rendering.
     pub fn project_message(&self) -> anyhow::Result<BaseMessage> {
         match self {
-            Self::Message(message) => Ok(message.clone()),
+            Self::Message(message) => {
+                let reminders = peri_acp_types::compact_reminder::legacy_compact_reminders(message);
+                if reminders.is_empty() {
+                    return Ok(message.clone());
+                }
+                let encoded = reminders
+                    .iter()
+                    .map(|reminder| {
+                        peri_acp_types::system_reminder::encode_legacy_system_reminder(
+                            &reminder.body,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join("\n");
+                Ok(BaseMessage::Human {
+                    id: message.id(),
+                    content: MessageContent::text(encoded),
+                })
+            }
             Self::Reminder { id, reminder } => Ok(BaseMessage::Human {
                 id: *id,
                 content: MessageContent::text(encode_system_reminder(reminder)?),
@@ -95,35 +139,7 @@ pub enum PersistOp {
     Shutdown,
 }
 
-// ─── 持久化 writer 辅助 ──────────────────────────────────────────────────────
-
-/// 将积压的 Append 批量落库（单次 `append_messages` 调用 → SQLite 单事务）。
-///
-/// 失败时记录 warn 并按 `barrier_error` 语义保留首个错误；无论成败均清空积压。
-async fn flush_appends(
-    store: &dyn ThreadStore,
-    tid: &ThreadId,
-    pending: &mut Vec<PersistedPayload>,
-    barrier_error: &mut Option<String>,
-    processed: &mut u64,
-) {
-    if pending.is_empty() {
-        return;
-    }
-    if barrier_error.is_some() {
-        return;
-    }
-    if let Err(e) = store.append_payloads(tid, pending).await {
-        tracing::warn!(
-            pending = pending.len(),
-            "transcript persist entered terminal failure: {e}"
-        );
-        *barrier_error = Some(e.to_string());
-        return;
-    }
-    *processed = processed.saturating_add(pending.len() as u64);
-    pending.clear();
-}
+mod persistence;
 
 // ─── MessageTranscript ────────────────────────────────────────────────────────
 
@@ -153,6 +169,7 @@ pub struct MessageTranscript {
     /// 此标记不持久化；executor 用它区分 Full Compact 的合法可见快照和
     /// 取消后可能不完整的临时 transcript。
     full_compaction_committed: bool,
+    compaction_commit_state: CompactionCommitState,
     /// 持久化后端引用（保留 Arc 让 store 在 transcript 存活期间不被释放，
     /// spawned writer task 持有独立 clone）
     store: Option<Arc<dyn ThreadStore>>,
@@ -190,6 +207,7 @@ impl MessageTranscript {
             persist_handle: None,
             thread_id: None,
             full_compaction_committed: false,
+            compaction_commit_state: CompactionCommitState::default(),
             store: None,
         }
     }
@@ -247,190 +265,12 @@ impl MessageTranscript {
     /// 绑定后 append / rewind / 标记变更自动异步写入 ThreadStore。
     /// 使用有序通道保证操作按调用顺序执行。
     pub fn with_persistence(mut self, store: Arc<dyn ThreadStore>, thread_id: ThreadId) -> Self {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PersistOp>();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PersistOp>();
         self.persist_tx = Some(Arc::new(tx));
         self.thread_id = Some(thread_id.clone());
         self.store = Some(store.clone());
 
-        let tid = thread_id;
-        let handle = tokio::spawn(async move {
-            let mut processed: u64 = 0;
-            let mut last_warn_at: u64 = 0;
-            let mut barrier_error = None;
-            // 短窗口 Append 合并：把 ≤100ms 窗口（或 ≥APPEND_BATCH_MAX 条）内的
-            // Append 积压为一次 `append_messages` 批量调用（SQLite 单事务 = 一次
-            // WAL fsync），消除工具消息风暴下每消息一次 fsync。
-            //
-            // 可见性语义不变：
-            // - Barrier 到达时先 flush 积压再 ack（flush_persistence 确认 = 已落库）
-            // - 其他 op 到达时先 flush 积压，保持 FIFO 顺序
-            // - 通道关闭时 flush 剩余
-            const FAILED_PENDING_MAX: usize = 256;
-            let mut dropped_after_failure = 0usize;
-            let mut pending_appends: Vec<PersistedPayload> = Vec::new();
-            let mut window_start: std::time::Instant = std::time::Instant::now();
-            const APPEND_BATCH_MAX: usize = 64;
-            const APPEND_BATCH_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
-
-            loop {
-                // 有积压时等待窗口到期或下一个 op 到达
-                let op = if pending_appends.is_empty() {
-                    rx.recv().await
-                } else {
-                    let remaining = APPEND_BATCH_WINDOW.saturating_sub(window_start.elapsed());
-                    match tokio::time::timeout(remaining, rx.recv()).await {
-                        Ok(op) => op,
-                        Err(_) => {
-                            // 窗口到期：批量落库后继续等待
-                            flush_appends(
-                                store.as_ref(),
-                                &tid,
-                                &mut pending_appends,
-                                &mut barrier_error,
-                                &mut processed,
-                            )
-                            .await;
-                            continue;
-                        }
-                    }
-                };
-
-                match op {
-                    Some(PersistOp::Append(entry)) => {
-                        if pending_appends.is_empty() {
-                            window_start = std::time::Instant::now();
-                        }
-                        let payload = match entry {
-                            TranscriptEntry::Message(message) => PersistedPayload::Message(message),
-                            TranscriptEntry::Reminder { id, reminder } => {
-                                PersistedPayload::SystemReminder { id, reminder }
-                            }
-                        };
-                        if barrier_error.is_some() && pending_appends.len() >= FAILED_PENDING_MAX {
-                            dropped_after_failure = dropped_after_failure.saturating_add(1);
-                            tracing::warn!(
-                                dropped_after_failure,
-                                "terminal transcript persistence failure dropped payload"
-                            );
-                        } else {
-                            pending_appends.push(payload);
-                        }
-                        if pending_appends.len() >= APPEND_BATCH_MAX {
-                            flush_appends(
-                                store.as_ref(),
-                                &tid,
-                                &mut pending_appends,
-                                &mut barrier_error,
-                                &mut processed,
-                            )
-                            .await;
-                        }
-                    }
-                    Some(PersistOp::Barrier(ack)) => {
-                        // Barrier 语义：确认此前所有 op 均已实际调用 store
-                        flush_appends(
-                            store.as_ref(),
-                            &tid,
-                            &mut pending_appends,
-                            &mut barrier_error,
-                            &mut processed,
-                        )
-                        .await;
-                        let result = barrier_error.as_ref().map_or(Ok(()), |error| {
-                            Err(anyhow!(
-                                "{error}; {} payload(s) remain unpersisted, {} dropped after terminal failure",
-                                pending_appends.len(),
-                                dropped_after_failure
-                            ))
-                        });
-                        let _ = ack.send(result);
-                    }
-                    Some(PersistOp::Shutdown) | None => {
-                        // 优雅关闭：flush 剩余积压后退出。
-                        // - Shutdown：Drop / shutdown_persistence 显式请求（参照
-                        //   langfuse-client/src/batcher.rs 的 Shutdown 模式——不 abort，
-                        //   abort 会立即取消任务导致 pending_appends 和通道中未处理的
-                        //   消息被直接丢弃）
-                        // - None：通道关闭（所有发送端已 drop），等效于 Shutdown
-                        // 注意：必须放在 `Some(other)` 通配分支之前，否则 Shutdown
-                        // 会被当作普通 op 落入 unreachable!。
-                        flush_appends(
-                            store.as_ref(),
-                            &tid,
-                            &mut pending_appends,
-                            &mut barrier_error,
-                            &mut processed,
-                        )
-                        .await;
-                        break;
-                    }
-                    Some(other) => {
-                        // 保序：先 flush 积压 Append，再处理非 Append op
-                        flush_appends(
-                            store.as_ref(),
-                            &tid,
-                            &mut pending_appends,
-                            &mut barrier_error,
-                            &mut processed,
-                        )
-                        .await;
-                        let result = if let Some(error) = barrier_error.as_ref() {
-                            Err(anyhow!(error.clone()))
-                        } else {
-                            match other {
-                                PersistOp::RewindTo(id) => {
-                                    store.delete_messages_since(&tid, &id).await
-                                }
-                                PersistOp::UpdateFlags(id, flags) => {
-                                    store.update_message_flags(&id, &flags).await
-                                }
-                                PersistOp::ApplyCompactionBatch { updates } => {
-                                    let mut first_err = None;
-                                    for (id, flags) in &updates {
-                                        if let Err(err) =
-                                            store.update_message_flags(id, flags).await
-                                        {
-                                            if first_err.is_none() {
-                                                first_err = Some(err);
-                                            }
-                                        }
-                                    }
-                                    // 无论标记更新是否部分失败，均需使缓存失效。
-                                    if let Err(err) = store.invalidate_context_cache(&tid).await {
-                                        if first_err.is_none() {
-                                            first_err = Some(err);
-                                        }
-                                    }
-                                    first_err.map_or(Ok(()), Err)
-                                }
-                                PersistOp::Append(_)
-                                | PersistOp::Barrier(_)
-                                | PersistOp::Shutdown => {
-                                    unreachable!("handled in dedicated branches above")
-                                }
-                            }
-                        };
-                        if let Err(e) = result {
-                            tracing::warn!("transcript persist failed: {e}");
-                            if barrier_error.is_none() {
-                                barrier_error = Some(e.to_string());
-                            }
-                        }
-                        processed = processed.saturating_add(1);
-                    }
-                }
-
-                let bucket = processed / 1000;
-                if bucket > last_warn_at {
-                    last_warn_at = bucket;
-                    tracing::trace!(
-                        thread_id = %tid,
-                        processed,
-                        "transcript persist writer: 已处理 {processed} 条操作"
-                    );
-                }
-            }
-        });
+        let handle = tokio::spawn(persistence::run_writer(store, thread_id, rx));
         self.persist_handle = Some(handle.abort_handle());
 
         self
@@ -507,6 +347,15 @@ impl MessageTranscript {
             .map(|entry| entry.project_message().expect("validated transcript entry"))
             .collect();
         Arc::new(filtered)
+    }
+
+    pub fn with_compaction_commit_state(mut self, state: CompactionCommitState) -> Self {
+        self.compaction_commit_state = state;
+        self
+    }
+
+    pub fn compaction_commit_state(&self) -> CompactionCommitState {
+        self.compaction_commit_state.clone()
     }
 
     /// 当前执行期间是否已提交 Full Compact。
@@ -654,8 +503,22 @@ impl MessageTranscript {
 
     // ── 标记 ──────────────────────────────────────────────────────────────────
 
+    fn can_update_own_flags(&self, id: MessageId) -> bool {
+        let allowed = self
+            .id_index
+            .get(&id)
+            .is_some_and(|index| *index >= self.ancestor_len);
+        if !allowed {
+            tracing::warn!(?id, "ignoring flag mutation outside own transcript region");
+        }
+        allowed
+    }
+
     /// 设置 truncated 标记（Micro compact）
     pub fn set_truncated(&mut self, id: MessageId, value: bool) {
+        if !self.can_update_own_flags(id) {
+            return;
+        }
         self.flags.entry(id).or_default().truncated = value;
         let flags = self.flags[&id].clone();
         self.send_persist(PersistOp::UpdateFlags(id, flags));
@@ -663,6 +526,9 @@ impl MessageTranscript {
 
     /// 设置 excluded 标记（Full / Smart compact）
     pub fn set_excluded(&mut self, id: MessageId, value: bool) {
+        if !self.can_update_own_flags(id) {
+            return;
+        }
         self.flags.entry(id).or_default().excluded = value;
         let flags = self.flags[&id].clone();
         self.send_persist(PersistOp::UpdateFlags(id, flags));
@@ -674,6 +540,9 @@ impl MessageTranscript {
     /// per-message directive 持久化到 flags，避免后续每 turn 重新规划。
     /// 设置 projection 的同时也会设置 truncated=true。
     pub fn set_flags_projection(&mut self, id: MessageId, directive: MessageProjectionDirective) {
+        if !self.can_update_own_flags(id) {
+            return;
+        }
         let entry = self.flags.entry(id).or_default();
         entry.truncated = true;
         entry.projection = Some(directive);
@@ -683,6 +552,9 @@ impl MessageTranscript {
 
     /// 清除指定消息的所有标记
     pub fn clear_flags(&mut self, id: MessageId) {
+        if !self.can_update_own_flags(id) {
+            return;
+        }
         self.flags.remove(&id);
         self.send_persist(PersistOp::UpdateFlags(id, MessageFlags::default()));
     }
@@ -705,7 +577,11 @@ impl MessageTranscript {
         &mut self,
         lifecycle: crate::thread::CompactionLifecycle,
     ) -> anyhow::Result<()> {
-        self.flush_persistence().await?;
+        if self.compaction_commit_state.is_uncertain() {
+            return Err(anyhow!(
+                "compact persistence outcome is unknown; reload the session"
+            ));
+        }
 
         let (store, thread_id) = match (&self.store, &self.thread_id) {
             (Some(store), Some(thread_id)) => (store.clone(), thread_id.clone()),
@@ -716,6 +592,11 @@ impl MessageTranscript {
             if !self.id_index.contains_key(id) {
                 return Err(anyhow!(
                     "compact lifecycle flag target id {id:?} not found in transcript"
+                ));
+            }
+            if self.id_index[id] < self.ancestor_len {
+                return Err(anyhow!(
+                    "compact lifecycle cannot mutate ancestor message {id:?}"
                 ));
             }
         }
@@ -730,10 +611,15 @@ impl MessageTranscript {
             }
         }
 
+        // Both awaits can be cancelled, or report an error after durable effects. Only
+        // applying the acknowledged lifecycle to memory makes this snapshot safe again.
+        self.compaction_commit_state.mark_pending();
+        self.flush_persistence().await?;
         store
             .commit_compaction_lifecycle(&thread_id, &lifecycle)
             .await?;
         self.apply_compaction_lifecycle_memory(&lifecycle);
+        self.compaction_commit_state.mark_committed();
 
         Ok(())
     }
@@ -790,6 +676,7 @@ impl MessageTranscript {
             persist_handle: self.persist_handle.take(),
             thread_id: self.thread_id.take(),
             full_compaction_committed: self.full_compaction_committed,
+            compaction_commit_state: self.compaction_commit_state.clone(),
             store: self.store.take(),
         }
     }
@@ -845,7 +732,7 @@ impl MessageTranscript {
     /// 等待此前已排队的持久化操作完成。
     ///
     /// 同一 writer 按 FIFO 处理 barrier，因此收到确认时，所有此前操作都已调用 store。
-    /// 返回并消费自上个 barrier 以来的第一个持久化错误。
+    /// 首个持久化错误会保持为终态失败；后续 barrier 继续返回该错误，不消费或重试。
     pub async fn flush_persistence(&self) -> anyhow::Result<()> {
         let Some(tx) = self.persist_tx_handle() else {
             return Ok(());

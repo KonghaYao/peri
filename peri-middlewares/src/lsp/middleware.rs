@@ -1,3 +1,4 @@
+use peri_agent::middleware::capabilities as hook_state;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -5,7 +6,7 @@ use async_trait::async_trait;
 use peri_agent::{
     agent::react::{ToolCall, ToolResult},
     error::AgentResult,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::r#trait::Middleware,
     tools::BaseTool,
 };
 use peri_resources::lsp::uri::path_to_uri;
@@ -60,7 +61,7 @@ impl Middleware for LspMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         _result: &ToolResult,
     ) -> AgentResult<()> {

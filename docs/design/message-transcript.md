@@ -9,10 +9,10 @@
 ## 1. 设计原则
 
 1. **永远 id 寻址**：每条消息拥有唯一 `MessageId`（UUID v7，时间有序）。所有外部操作——rewind、compact、持久化恢复——一律按 id 定位消息。禁止使用 Vec 下标定位——下标可因消息标记漂移而引入隐性错误。
-2. **只追加优先**：正常 ReAct 循环中消息仅尾部追加，禁止 prepend 或中间插入。保证 Prompt Cache 前缀稳定，LLM 请求构造路径简单无分支。Compact 是唯一例外——读取后重建新 Transcript，非增量追加。
-3. **修改即新消息**：消息内容不可原地修改。需要变更时，正常路径产生新消息（新 id）。Compact 在重建 Transcript 时通过标记实现——Micro 标 `truncated`（LLM 请求时截断输出）、Full 标 `excluded`（LLM 请求时跳过）——标记不改变消息内容本身。（Smart Compact 已实现为 planner 兼容入口，见 §2.6）
-4. **Transcript 为权威源**：Transcript 是会话全部消息的唯一真相源。持久化是 Transcript 的镜像——落后时以 Transcript 为准重建。不持久化 MessageQueue——Queue 是临时收件箱。
-5. **持久化不阻塞循环**：消息追加到 Transcript 后异步触发持久化。持久化失败不阻塞 Agent 循环——仅记录错误，内存 Transcript 始终可用。
+2. **只追加优先**：正常 ReAct 循环中消息仅尾部追加，禁止 prepend 或中间插入。Compact 保留消息本体，通过标记改变模型视图，Full 另行追加摘要与 re-inject 消息。
+3. **修改即新消息**：消息内容不可原地修改。需要变更时，正常路径产生新消息（新 id）。Micro 持久化 projection directive，Full 标 `excluded`；标记不改变消息内容本身。（Smart Compact 为 planner 兼容入口，见 §2.6）
+4. **Transcript 为运行时事实源**：运行时从 Transcript 构造消息视图；冷恢复从持久化 payload 与 flags 重建。已提交的 compact 结果跨 turn 保留，包括随后取消或失败的 turn。不持久化 MessageQueue——Queue 是临时收件箱。
+5. **追加异步、提交有确认**：普通追加经异步 writer，compact lifecycle 与 turn 收尾必须检查持久化结果。writer 失败后停止使用热会话，保留已落盘内容，重新加载后才能继续；不以删除新增 ID 模拟事务回滚。
 6. **标记代替删除**：Compact 不删除、不修改消息内容。Micro 标 `truncated`（LLM 请求时截断输出），Full 标 `excluded`（LLM 请求时跳过该消息）。（Smart Compact 已实现为 planner 兼容入口，见 §2.6）标记可撤销，消息本体不变。仅 rewind 允许真删除。
 
 ---
@@ -30,7 +30,7 @@ graph TB
         MSGS["消息列表<br/>id 寻址·按序追加<br/>id 索引表常驻"]
     end
 
-    TRANSCRIPT -->|"全量消息 + ToolDefs"| LLM["LLM Request"]
+    TRANSCRIPT -->|"可见消息投影 + ToolDefs"| LLM["LLM Request"]
     TRANSCRIPT -->|"增量持久化"| PERSIST["ThreadStore"]
 
     subgraph COMPACT["Compact 例外操作"]
@@ -63,9 +63,9 @@ graph TB
   - ✅ Info 类型消息（含 SystemReminder）经 MessageQueue 中转后尾部追加
   - ✅ `append_batch()` 批量追加——逐条触发独立 `PersistOp::Append`
   - ❌ 禁止 prepend 或中间插入——破坏 Prompt Cache 前缀
-  - ❌ 禁止删除或修改——Compact 通过重建 Transcript 实现，标记不改变消息内容本身
+  - ❌ 禁止删除或修改——Compact 通过标记改变模型视图，不改变消息本体
 - **代码位置**：`BaseMessage` / `ContentBlock` / `MessageContent` 定义于 `peri-agent/src/messages/`；`MessageTranscript` 定义于 `peri-agent/src/session/transcript.rs`；`MessageQueue` 定义于 `peri-agent/src/session/queue.rs`。Transcript 和 Queue 属于 session 模块，messages 模块仅含消息数据类型定义。
-- **ancestor 边界**：SubAgent/Fork-mode Agent 引用父 Agent 快照时，Transcript 维护 `ancestor_len` 边界；继承的祖先消息只读，Compact 仅操作边界之后由当前 thread 持有的自有消息。ACP `session/fork` 是独立会话复制：复制后的 payload 使用新 `MessageId` 并归新 thread 所有，因此属于可压缩 own region，而非共享 ancestor。
+- **ancestor 边界**：SubAgent 引用父上下文时，将 payload 与 flags 一起冻结为版本化 `InheritedContext`，恢复时先放 ancestor、再放 child own history；父会话后续 compact 不改变该快照。祖先标记允许初始化恢复，普通标记 setter 与 compact lifecycle 拒绝改写祖先。ACP `session/fork` 是独立会话复制：复制后的 payload 使用新 `MessageId` 并归新 thread 所有，因此属于可压缩 own region，而非共享 ancestor。
 - **Staging 两阶段写入**：Reason 阶段产出的 AI 消息（含 tool_calls）不直接追加到 Transcript——先 Staging。Act 阶段收集所有 ToolResult 后，AI 消息 + ToolResult 作为一组原子提交到 Transcript。Staging 期间的消息 LLM 请求不可见。提交后触发持久化。若 Act 阶段异常终止（Cancel/Error），staging 消息丢弃——Transcript 回到本轮开始前的状态，不留半个 AI 消息。
 
 ### 2.3 MessageQueue
@@ -102,16 +102,17 @@ ThreadStore 负责 Transcript 的完整持久化。`ThreadStore` trait 定义已
 | `create_thread` / `delete_thread` | Thread 生命周期管理 |
 | `append_messages` / `append_message` | 增量追加消息（append_message 默认复用 append_messages） |
 | `load_messages` / `load_context` | 加载全部消息 / 含祖先链 + 缓存的完整上下文 |
+| `store_inherited_context` / `load_inherited_context` | 子会话冻结继承 payload 与 flags；未知版本或损坏快照拒绝加载 |
 | `load_meta` / `update_meta` / `update_title` | 元数据读写 |
 | `list_threads` / `list_child_threads` / `list_session_threads` | Thread 列举与层级遍历 |
 | `update_thread_status` / `invalidate_context_cache` | 状态与缓存管理 |
 | `delete_messages` / `delete_messages_since` | 精确删除 / 按 id 后缀删除（rewind 用） |
 | `update_message_flags` | 更新 compact 标记（truncated / excluded），默认 no-op |
 
-- **触发时机**：消息追加到 Transcript 后**异步**触发持久化——Transcript 先更新，持久化随后跟进。不阻塞 Agent 循环。
-- **增量持久化**：仅持久化新消息（按 id 对比）。Transcript 中已持久化的消息跳过，只写增量。Compact 重建 Transcript 后，持久化层同步变更——标记变更 UPDATE、新增消息 INSERT。rewind 触发 DELETE。
+- **触发时机**：消息追加到 Transcript 后异步触发持久化；compact lifecycle 先 flush 追加，再原子提交摘要与标记。turn 收尾检查 writer 结果。
+- **增量持久化**：仅追加新消息；compact 标记变更 UPDATE、新增消息 INSERT。rewind 触发 DELETE。
 - **Compact 标记**：Micro 标记 `truncated`、Full 标记 `excluded`。标记持久化同步（UPDATE 标记字段，不修改 content）。Full 追加新 Human 消息（INSERT）。Smart Compact 为 planner 兼容入口，标记与 Micro 一致（见 §2.6）。
-- **崩溃保护**：Transcript 始终是权威源。恢复时检测 Transcript 与持久化的差异——Transcript 有而持久化无的消息从 Transcript 补写，持久化有而 Transcript 无的消息视为脏数据丢弃。
+- **失败恢复**：host 对可信的执行结果采纳 canonical payload 快照，不以 `ok` 决定是否更新历史。writer 错误、compact 提交结果不确定或缺失执行结果会使热会话失效；冷加载恢复磁盘已提交的 payload 与 flags，不能把已提交摘要视为脏数据删除。失败的追加不自动补写。
 
 ### 2.5 Rewind
 
@@ -123,7 +124,7 @@ ThreadStore 负责 Transcript 的完整持久化。`ThreadStore` trait 定义已
 
 ### 2.6 与 Compact 的交互
 
-Compact 不修改现有 Transcript，而是读取后**重建新 Transcript**。旧 Transcript 被替换，非增量操作。三种模式的重建策略：
+Compact 保留消息本体，通过标记改变可见性或模型投影；Micro directive 随 writer 持久化并在收尾检查，Full lifecycle 在存储确认成功后发布摘要与标记的内存状态。三种模式的策略：
 
 | Compact 模式 | 重建策略 | 持久化影响 |
 |-------------|---------|-----------|
@@ -133,14 +134,14 @@ Compact 不修改现有 Transcript，而是读取后**重建新 Transcript**。�
 
 - Micro 和 Full 两种已实现模式通过标记实现——Micro 标 `truncated`，Full 标 `excluded`。消息不删，标记可撤销。rewind 清标记恢复原状
 - Smart Compact 已实现为 planner 兼容入口（`peri-agent/src/agent/compact_v2/smart.rs`）：不再走独立 LLM 筛选分支，而是通过 `plan_micro` 生成计划再应用（`set_flags_projection` 统一持久化 directive），并带 deprecation warning（"will be removed, converging to Micro"）；`compact_v2` 已目录化（原 `compact_v2.rs:57` stub 位置不复存在）
-- Full 追加新 Human 消息（新 id），摘要和旧消息并存于新 Transcript
+- Full 将新摘要、re-inject 消息和旧消息 excluded transitions 作为同一 lifecycle 提交。后续取消或失败不撤销已提交事务；恢复须保持摘要与 flags 配对。提交前置 pending 状态，只有存储确认成功并应用内存后才标记 committed；取消或错误留下的不确定状态由自动 executor 与手动命令 interceptor 传播给 host，不能仅以普通 writer barrier 成功确认一致性。
 
 ### 2.7 与 v2 其他模块的关系
 
 | 模块 | 关系 |
 |------|------|
 | **Session** | Transcript 是 Session 核心实体之一。Session 创建时 Transcript 为空，销毁时丢弃。CronOwner 由 AcpSession（session 级）持有，跨 turn 存活；SessionInbox 为 session 级 lazy-init，cron/channel 事件经 inbox 唤醒 executor，绕过 TUI 轮询 |
-| **LLM 适配器** | Reason 阶段从 Transcript 读取全量消息构造 ModelRequest。Token 计数在 LLM adapter 层完成，不属于 MessageTranscript 职责 |
+| **LLM 适配器** | Reason 过滤 excluded 并恢复已提交 projection 构造 ModelRequest，即使关闭自动 compact 也恢复投影。无 directive 时使用 canonical 可见消息，不在 Reason 规划新 Micro。Token 计数在 LLM adapter 层完成 |
 | **ReAct 循环** | Receive 将 Queue 消息写入 Transcript。Act 将工具结果写入 Transcript |
 | **AgentGroup** | Fork Agent 创建时 Transcript 全量 Copy |
 | **Hook 系统** | Hook 不能直接写 Transcript——通过 MessageQueue 注入 |

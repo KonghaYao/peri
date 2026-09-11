@@ -1027,6 +1027,7 @@ panel-plugin-discover-input = 输入以搜索...
 panel-plugin-search-loading = 搜索中...
 panel-plugin-search-no-results = 未找到结果
 panel-plugin-search-error = 搜索失败: { $error }
+panel-plugin-search-invalid-response = 搜索响应格式无效
 panel-plugin-operation-complete = 操作完成
 panel-plugin-operation-failed = 操作失败
 panel-plugin-discover-press-enter = 按 Enter 搜索
@@ -1154,3 +1155,7 @@ app-note-cache-hit-low = Prompt cache 覆盖率 {$pct}% < 80%（req: { $req_id }
 app-note-cache-coverage-low = Prompt cache 覆盖率 {$pct}% < 80% — 已缓存 {$cached} / 输入 {$input}，未缓存 {$uncached}（req: {$req_id}）
 
 # ---- 语义工具卡片 ----
+
+reminder-compact-file = 文件上下文
+reminder-compact-skill = Skill 指令
+reminder-compact-summary = 压缩摘要

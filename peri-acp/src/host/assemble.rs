@@ -476,15 +476,17 @@ async fn assemble_server_config_with_mcp_profile(
     );
 
     // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）
-    let langfuse_session =
-        if let Some(config) = peri_controller::langfuse::LangfuseConfig::from_env() {
-            tracing::info!("Langfuse tracing enabled (host mode)");
-            peri_controller::langfuse::LangfuseSession::new(config, "live".into())
-                .await
-                .map(Arc::new)
-        } else {
-            None
-        };
+    let (langfuse_session, langfuse_shutdown_owner) = if let Some(config) =
+        peri_controller::langfuse::LangfuseConfig::from_env()
+    {
+        tracing::info!("Langfuse tracing enabled (host mode)");
+        match peri_controller::langfuse::LangfuseSession::new_owned(config, "live".into()).await {
+            Some((session, owner)) => (Some(session), Some(owner)),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
 
     AcpServerConfig {
         host_task_owner: Some(host_task_owner),
@@ -519,6 +521,7 @@ async fn assemble_server_config_with_mcp_profile(
         thread_store: thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),
         langfuse_session,
+        langfuse_shutdown_owner,
         // 默认 false（TUI/print 保留全部命令）；stdio 装配点（assemble_stdio_config）
         // 显式置 true，过滤 rewind/clear。
         stdio_command_filter: false,

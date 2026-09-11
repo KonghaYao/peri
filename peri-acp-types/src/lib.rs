@@ -37,6 +37,7 @@ pub mod command;
 // 挂载本体在 command.rs 契约子模块区，避免双份模块实例）。
 pub use command::command_registry;
 pub mod compact;
+pub mod compact_reminder;
 pub mod cron;
 pub mod dynamic_mcp;
 pub mod error;

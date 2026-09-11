@@ -2,6 +2,7 @@ pub mod builtin;
 pub mod loader;
 pub mod tools;
 
+use peri_agent::middleware::capabilities as hook_state;
 use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
@@ -19,7 +20,6 @@ use peri_agent::{
     middleware::{
         prompt_sections::{PromptSection, PromptSectionZone},
         r#trait::Middleware,
-        state::MiddlewareState,
     },
     tools::BaseTool,
 };
@@ -401,7 +401,7 @@ impl Middleware for SkillsMiddleware {
         ]
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         // 扫描 skills 并缓存 structured metadata（frozen/non-frozen 两条路径都需要，避免工具调用时懒扫描）
         let roots = self.resolve_roots(state.cwd());
         let mut skills = tokio::task::spawn_blocking(move || scan_skill_roots(&roots))

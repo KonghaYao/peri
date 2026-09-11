@@ -24,7 +24,56 @@ pub struct LangfuseSession {
     pub config: LangfuseConfig,
 }
 
+/// 部署退出结果；HTTP 失败和 worker 异常均不等同于成功发送。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LangfuseShutdownReport {
+    Complete,
+    DeliveryFailed { summary: String },
+    WorkerFailed { cancelled: bool },
+    UnexpectedFailure,
+}
+
+/// 新建部署独占的关闭权限。共享给 turn 的 SessionLike 不包含此权限。
+/// 这里只保留原 session；Batcher 仍是唯一的 worker/join owner。
+pub struct LangfuseShutdownOwner {
+    session: Arc<LangfuseSession>,
+}
+
+impl LangfuseShutdownOwner {
+    pub async fn shutdown(&self) -> LangfuseShutdownReport {
+        self.session.shutdown().await
+    }
+}
+
 impl LangfuseSession {
+    /// 为新部署同时创建共享会话和不可克隆的关闭权限。
+    pub async fn new_owned(
+        config: LangfuseConfig,
+        session_id: String,
+    ) -> Option<(Arc<Self>, LangfuseShutdownOwner)> {
+        let session = Arc::new(Self::new(config, session_id).await?);
+        let owner = LangfuseShutdownOwner {
+            session: Arc::clone(&session),
+        };
+        Some((session, owner))
+    }
+
+    /// 部署在全部生产者结束后关闭；取消等待保留原 Batcher join owner，允许重试。
+    /// 发送结果覆盖整个部署生命周期，包括此前已由 turn flush 观察的失败。
+    /// 此入口不属于 turn-facing LangfuseSessionLike。
+    pub async fn shutdown(&self) -> LangfuseShutdownReport {
+        match self.batcher.shutdown().await {
+            Ok(()) => LangfuseShutdownReport::Complete,
+            Err(LangfuseError::IngestionApi(summary)) => {
+                LangfuseShutdownReport::DeliveryFailed { summary }
+            }
+            Err(LangfuseError::WorkerJoinFailed { cancelled }) => {
+                LangfuseShutdownReport::WorkerFailed { cancelled }
+            }
+            Err(_) => LangfuseShutdownReport::UnexpectedFailure,
+        }
+    }
+
     /// 从配置构造 Session，失败时返回 None（静默降级）
     pub async fn new(config: LangfuseConfig, session_id: String) -> Option<Self> {
         let public_key = config.public_key.as_deref()?;
@@ -43,7 +92,13 @@ impl LangfuseSession {
             backpressure: BackpressurePolicy::DropNew,
             max_retries: 3,
         };
-        let batcher = Batcher::new((*client).clone(), batcher_config);
+        let batcher = match Batcher::try_new((*client).clone(), batcher_config) {
+            Ok(batcher) => batcher,
+            Err(error) => {
+                tracing::warn!(%error, "Langfuse batcher configuration rejected");
+                return None;
+            }
+        };
 
         Some(Self {
             client,
@@ -72,3 +127,7 @@ impl LangfuseSessionLike for LangfuseSession {
         &self.drop_registry
     }
 }
+
+#[cfg(test)]
+#[path = "session_test.rs"]
+mod tests;

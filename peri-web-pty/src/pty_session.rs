@@ -15,14 +15,9 @@ pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
-    /// Windows 上必须保活到 session 结束。ConPTY 的 slave 是 pseudoconsole
-    /// 对象句柄，提前 drop 会破坏引用计数，导致 `try_clone_reader` 拿到的
-    /// read pipe 进入未连接状态，read 永久阻塞（wez/wezterm#4206、#1396）。
-    /// Unix 上 slave 在 `spawn` 中立即 drop（见该函数注释）。
-    ///
-    /// 包装为 `Option` 以支持 `close_slave()` 显式关闭 pseudoconsole，
-    /// 用于子进程退出后 unblock 读管道（Windows 上 ConPTY 在子进程退出后
-    /// 不一定立即产生 EOF，需主动 drop slave）。
+    /// Windows 会话保留一个 ConPTY slave 引用；master 同时持有同一 Inner。
+    /// 显式释放 slave 不保证 reader EOF，不能作为阻塞读取消的替代品。
+    /// Unix slave 在 spawn 内立即释放。
     #[cfg(target_os = "windows")]
     _slave: Option<Box<dyn SlavePty + Send>>,
 }
@@ -117,6 +112,27 @@ impl PtySession {
         ))
     }
 
+    /// Borrow only for the Unix WebSocket owner's exclusive nonblocking conversion.
+    #[cfg(unix)]
+    pub(crate) fn master_fd(&self) -> io::Result<std::os::fd::BorrowedFd<'_>> {
+        let raw = self
+            .master
+            .as_raw_fd()
+            .ok_or_else(|| io::Error::other("PTY master has no fd"))?;
+        // SAFETY: the master owns raw and remains borrowed for the returned lifetime.
+        Ok(unsafe { std::os::fd::BorrowedFd::borrow_raw(raw) })
+    }
+
+    /// Consume and reap a connection's child on a blocking worker.
+    #[cfg(unix)]
+    pub(crate) fn finish(mut self) -> io::Result<()> {
+        if self.child.try_wait()?.is_none() {
+            self.child.kill()?;
+        }
+        self.child.wait()?;
+        Ok(())
+    }
+
     /// 写 stdin 到 PTY。
     ///
     /// Windows 上将行结束符归一化为 `\r\n`（`normalize_crlf`），因为
@@ -172,13 +188,11 @@ impl PtySession {
         }
     }
 
-    /// 关闭 pseudoconsole slave 句柄。
+    /// 释放会话持有的 pseudoconsole slave 引用。
     ///
-    /// 在子进程退出后调用，drop slave 句柄使 ConPTY 关闭，
-    /// unblock 读管道让它返回 EOF。提前调用（子进程仍在运行时）可能
-    /// 导致 read pipe 进入未连接状态，见 `_slave` 字段注释。
-    ///
-    /// Unix 上为 no-op（slave 已在 spawn 中 drop）。
+    /// Windows master 仍可能持有同一 ConPTY；此操作本身不保证阻塞读收到
+    /// EOF。Windows adapter 的原生读取消与 join 仍需单独实现和平台验证。
+    /// Unix 上为 no-op（slave 已在 spawn 中释放）。
     pub fn close_slave(&mut self) {
         #[cfg(target_os = "windows")]
         drop(self._slave.take());
@@ -187,8 +201,10 @@ impl PtySession {
 
 impl Drop for PtySession {
     fn drop(&mut self) {
-        // 尽力 kill，portable-pty 在 master drop 时会清理
-        let _ = self.child.kill();
+        // 同步 API 的 best-effort 保底；Unix 连接正常退出通过 finish 显式 wait。
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
     }
 }
 

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::acp_client::AcpTuiClient;
-use crate::kit::acp_types::CacheUsageSample;
+use crate::kit::acp_types::{CacheUsageSample, FeedbackChannel, FeedbackLevel};
 use crate::kit::slash_completion::SlashActionKind;
 use crate::kit::slash_projection::ArgKind;
 use peri_acp::event::AcpEvent;

@@ -154,6 +154,7 @@ fn make_server_config(
         thread_store: arc_thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(arc_thread_store)),
         langfuse_session: None,
+        langfuse_shutdown_owner: None,
         config_source: Arc::new(
             // 空 cwd（无工作区配置）+ 显式全局路径：persist_config 写回该路径
             crate::provider::ConfigSource::load_at(
@@ -1782,6 +1783,86 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
     assert!(!restored_claude_md.contains("FROZEN_PROMPT_V2"));
 }
 
+/// 驻留空会话恢复后，fork 必须读到同一份 canonical 历史，而非只补展示缓存。
+#[tokio::test]
+async fn test_session_resume_existing_empty_history_is_available_to_fork() {
+    use peri_acp_types::messages::BaseMessage;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let cwd = tmp.path().to_str().unwrap();
+    let created = handle_request(
+        "session/new",
+        &json!({ "cwd": cwd }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let session_id = created["sessionId"].as_str().unwrap().to_string();
+    let original = BaseMessage::human("persisted while the resident session is empty");
+    cfg.thread_store
+        .append_messages(&session_id, std::slice::from_ref(&original))
+        .await
+        .unwrap();
+
+    handle_request(
+        "session/resume",
+        &json!({ "sessionId": session_id, "cwd": cwd }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let forked = handle_request(
+        "session/fork",
+        &json!({ "sessionId": session_id, "cwd": cwd }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let fork_id = forked["sessionId"].as_str().unwrap().to_string();
+    let persisted_fork = cfg.thread_store.load_payloads(&fork_id).await.unwrap();
+    assert_eq!(
+        persisted_fork.len(),
+        1,
+        "resume 后的真实 fork 不得丢失已持久化历史"
+    );
+    let copied = persisted_fork[0].as_message().unwrap();
+    assert_eq!(copied.content(), original.content());
+    assert_ne!(copied.id(), original.id(), "fork 保持独立 payload identity");
+    assert_eq!(
+        sessions[&session_id].history_payloads[0].id(),
+        original.id()
+    );
+    assert_eq!(
+        cfg.thread_store.load_payloads(&session_id).await.unwrap()[0].id(),
+        original.id()
+    );
+    assert_eq!(
+        sessions[&fork_id].frozen.as_ref().unwrap().system_prompt(),
+        sessions[&session_id]
+            .frozen
+            .as_ref()
+            .unwrap()
+            .system_prompt(),
+        "恢复与 fork 不得重建 frozen 前缀"
+    );
+}
+
 #[tokio::test]
 async fn test_session_load_future_frozen_snapshot_fails_without_overwrite() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2154,6 +2235,7 @@ impl Drop for HomeDirGuard {
 /// 空实现（install/uninstall 分支仅消费 install/uninstall + snapshot +
 /// cache_dir；`unstable_event` caps 默认关闭，push_plugin_* 不发通知）。
 struct MockPluginManager {
+    cache_dir: PathBuf,
     install_result: std::sync::Mutex<Result<InstalledPlugin, String>>,
     uninstall_result: std::sync::Mutex<Result<(), String>>,
 }
@@ -2161,6 +2243,7 @@ struct MockPluginManager {
 impl MockPluginManager {
     fn install_ok(id: &str) -> Self {
         Self {
+            cache_dir: PathBuf::from("/tmp/mock-cache"),
             install_result: std::sync::Mutex::new(Ok(InstalledPlugin {
                 id: id.to_string(),
                 name: id.to_string(),
@@ -2204,7 +2287,7 @@ impl PluginManagerPort for MockPluginManager {
     }
 
     fn cache_dir(&self) -> PathBuf {
-        PathBuf::from("/tmp/mock-cache")
+        self.cache_dir.clone()
     }
 
     async fn update(
@@ -2609,3 +2692,6 @@ async fn test_plugin_uninstall_removes_stale_plugin_entries() {
         "install/uninstall 各触发一次投影推送（首发 + 2 次重发）"
     );
 }
+
+#[path = "requests/plugin_search_test.rs"]
+mod plugin_search_tests;

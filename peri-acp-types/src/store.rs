@@ -122,6 +122,57 @@ pub fn deserialize_persisted_payload(input: &str) -> Result<PersistedPayload> {
     }
 }
 
+/// Frozen, read-only context inherited by a child thread, including projection state.
+#[derive(Clone, Debug, Default)]
+pub struct InheritedContext {
+    pub payloads: Vec<PersistedPayload>,
+    pub flags: HashMap<MessageId, MessageFlags>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct InheritedContextEnvelope {
+    version: u16,
+    payloads: Vec<String>,
+    flags: HashMap<MessageId, MessageFlags>,
+}
+
+impl InheritedContext {
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string(&InheritedContextEnvelope {
+            version: 1,
+            payloads: self
+                .payloads
+                .iter()
+                .map(serialize_persisted_payload)
+                .collect::<Result<_>>()?,
+            flags: self.flags.clone(),
+        })?)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self> {
+        let envelope: InheritedContextEnvelope = serde_json::from_str(json)?;
+        if envelope.version != 1 {
+            anyhow::bail!("unsupported inherited context version {}", envelope.version);
+        }
+        let payloads = envelope
+            .payloads
+            .iter()
+            .map(|payload| deserialize_persisted_payload(payload))
+            .collect::<Result<Vec<_>>>()?;
+        let ids = payloads
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<std::collections::HashSet<_>>();
+        if ids.len() != payloads.len() || envelope.flags.keys().any(|id| !ids.contains(id)) {
+            anyhow::bail!("invalid inherited context message references");
+        }
+        Ok(Self {
+            payloads,
+            flags: envelope.flags,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CompactionLifecycle {
     pub flag_updates: Vec<(MessageId, MessageFlags)>,
@@ -237,6 +288,22 @@ pub trait ThreadStore: Send + Sync {
         let mut meta = self.load_meta(id).await?;
         meta.title = Some(title.to_string());
         self.update_meta(id, meta).await
+    }
+
+    /// Load read-only inherited history separately from this thread's own payloads.
+    /// Legacy stores may return no inherited context; snapshots must preserve the flags
+    /// captured at child creation, never substitute the parent's current flags.
+    async fn load_inherited_context(&self, _thread_id: &ThreadId) -> Result<InheritedContext> {
+        Ok(InheritedContext::default())
+    }
+
+    /// Persist the child's inherited snapshot once. Unsupported stores must fail explicitly.
+    async fn store_inherited_context(
+        &self,
+        _thread_id: &ThreadId,
+        _context: &InheritedContext,
+    ) -> Result<()> {
+        anyhow::bail!("unsupported inherited context persistence")
     }
 
     /// 加载 thread 的完整逻辑上下文（含祖先链）。默认仅包装 legacy message context。

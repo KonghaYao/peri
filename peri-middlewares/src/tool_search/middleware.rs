@@ -1,5 +1,6 @@
 //! ToolSearchMiddleware — 注册元工具并注入延迟工具列表到 system prompt
 
+use peri_agent::middleware::capabilities as hook_state;
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock as StdRwLock},
@@ -7,11 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use peri_agent::{
-    error::AgentResult,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
-    tools::BaseTool,
-};
+use peri_agent::{error::AgentResult, middleware::r#trait::Middleware, tools::BaseTool};
 
 use super::{
     declaration::collect_declarations, execute_tool::ExecuteExtraTool,
@@ -55,7 +52,7 @@ impl ToolSearchMiddleware {
         .expect("tool snapshot fingerprint must serialize")
     }
 
-    async fn rebind_catalog(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn rebind_catalog(&self, state: &mut dyn hook_state::CatalogState) -> AgentResult<()> {
         // 优先读取 v2 每 turn 本地工具视图（stage_builder 构建，含当前链全部
         // 工具）；无本地视图时回退宿主级 shared_tools（v1 / 测试路径）。
         let deferred_arcs: Vec<Arc<dyn BaseTool>>;
@@ -150,11 +147,14 @@ impl Middleware for ToolSearchMiddleware {
         self.cached_contribution.read().unwrap().clone()
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         self.rebind_catalog(state).await
     }
 
-    async fn before_reason_catalog(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_reason_catalog(
+        &self,
+        state: &mut dyn hook_state::CatalogState,
+    ) -> AgentResult<()> {
         self.rebind_catalog(state).await
     }
 }

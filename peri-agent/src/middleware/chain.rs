@@ -1,13 +1,14 @@
+use crate::middleware::capabilities as hook_state;
 use crate::{
     agent::react::{AgentOutput, Reasoning, ToolCall, ToolResult},
     error::AgentResult,
-    middleware::{prompt_sections::PromptSection, r#trait::Middleware, state::MiddlewareState},
+    middleware::{prompt_sections::PromptSection, r#trait::Middleware},
     tools::BaseTool,
 };
 
 /// 中间件链 - 按顺序执行所有中间件
 ///
-/// 所有 `run_*` 方法接收 `&mut dyn MiddlewareState`，MiddlewareChain 不泛型，
+/// 所有 `run_*` 方法按生命周期接收对应的窄能力接口，MiddlewareChain 不泛型，
 /// v2 stages 可以直接持有 `MiddlewareChain` 而无需泛型参数。
 pub struct MiddlewareChain {
     middlewares: Vec<Box<dyn Middleware>>,
@@ -65,7 +66,10 @@ impl MiddlewareChain {
     }
 
     /// 顺序执行 before_agent 钩子
-    pub async fn run_before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    pub async fn run_before_agent(
+        &self,
+        state: &mut dyn hook_state::BeforeAgentState,
+    ) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.before_agent(state).await?;
         }
@@ -75,7 +79,7 @@ impl MiddlewareChain {
     /// 顺序执行 Reason 工具目录刷新钩子。
     pub async fn run_before_reason_catalog(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::CatalogState,
     ) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.before_reason_catalog(state).await?;
@@ -86,7 +90,7 @@ impl MiddlewareChain {
     /// 顺序执行 before_tool 钩子（每个中间件可修改 tool_call）
     pub async fn run_before_tool(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::BeforeToolState,
         tool_call: ToolCall,
     ) -> AgentResult<ToolCall> {
         let mut current = tool_call;
@@ -106,7 +110,7 @@ impl MiddlewareChain {
     /// 链式处理中断，后续中间件不再执行，其余位置填充相同错误。
     pub async fn run_before_tools_batch(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::BeforeToolState,
         calls: Vec<ToolCall>,
     ) -> Vec<AgentResult<ToolCall>> {
         let mut results: Vec<AgentResult<ToolCall>> = calls.into_iter().map(Ok).collect();
@@ -139,7 +143,7 @@ impl MiddlewareChain {
     /// 顺序执行 after_tool 钩子
     pub async fn run_after_tool(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         result: &ToolResult,
     ) -> AgentResult<()> {
@@ -155,7 +159,7 @@ impl MiddlewareChain {
     /// 每个中间件按注册顺序依次执行，遇错即停。
     pub async fn run_after_tools_batch(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::StateView,
         results: &[(ToolCall, ToolResult)],
     ) -> AgentResult<()> {
         for middleware in &self.middlewares {
@@ -168,7 +172,10 @@ impl MiddlewareChain {
     ///
     /// 在每个 ReAct step 的 LLM 调用前执行。
     /// 遇错即停——后续中间件不执行，错误向上传播。
-    pub async fn run_before_model(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    pub async fn run_before_model(
+        &self,
+        state: &mut dyn hook_state::BeforeModelState,
+    ) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.before_model(state).await?;
         }
@@ -182,7 +189,7 @@ impl MiddlewareChain {
     /// 遇错即停。
     pub async fn run_after_model(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::StateView,
         reasoning: &Reasoning,
     ) -> AgentResult<()> {
         for middleware in &self.middlewares {
@@ -194,7 +201,7 @@ impl MiddlewareChain {
     /// 顺序执行 after_agent 钩子（每个中间件可修改 output）
     pub async fn run_after_agent(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::AfterAgentState,
         output: AgentOutput,
     ) -> AgentResult<AgentOutput> {
         let mut current = output;
@@ -207,7 +214,7 @@ impl MiddlewareChain {
     /// 顺序执行 on_error 钩子
     pub async fn run_on_error(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::StateView,
         error: &crate::error::AgentError,
     ) -> AgentResult<()> {
         for middleware in &self.middlewares {
@@ -219,7 +226,10 @@ impl MiddlewareChain {
     // ── Session 生命周期 ──
 
     /// 顺序执行 on_session_start 钩子
-    pub async fn run_on_session_start(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    pub async fn run_on_session_start(
+        &self,
+        state: &mut dyn hook_state::StateView,
+    ) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.on_session_start(state).await?;
         }
@@ -227,7 +237,10 @@ impl MiddlewareChain {
     }
 
     /// 顺序执行 on_session_end 钩子
-    pub async fn run_on_session_end(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    pub async fn run_on_session_end(
+        &self,
+        state: &mut dyn hook_state::StateView,
+    ) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.on_session_end(state).await?;
         }
@@ -239,7 +252,7 @@ impl MiddlewareChain {
     /// 顺序执行 on_user_prompt 钩子
     pub async fn run_on_user_prompt(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::StateView,
         prompt: &str,
     ) -> AgentResult<()> {
         for middleware in &self.middlewares {
@@ -254,7 +267,7 @@ impl MiddlewareChain {
     /// 返回按链序收集的非空文本列表（`None`/空串跳过）。
     pub async fn run_first_turn_reminders(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::QueueState,
     ) -> AgentResult<Vec<String>> {
         let mut out = Vec::new();
         for middleware in &self.middlewares {
@@ -270,7 +283,10 @@ impl MiddlewareChain {
     // ── Compact ──
 
     /// 顺序执行 before_compact 钩子
-    pub async fn run_before_compact(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    pub async fn run_before_compact(
+        &self,
+        state: &mut dyn hook_state::StateView,
+    ) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.before_compact(state).await?;
         }
@@ -278,7 +294,10 @@ impl MiddlewareChain {
     }
 
     /// 顺序执行 after_compact 钩子
-    pub async fn run_after_compact(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    pub async fn run_after_compact(
+        &self,
+        state: &mut dyn hook_state::StateView,
+    ) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.after_compact(state).await?;
         }
@@ -290,7 +309,7 @@ impl MiddlewareChain {
     /// 顺序执行 on_permission_request 钩子（观测层）
     pub async fn run_on_permission_request(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::StateView,
         request: &crate::hitl::BatchItem,
     ) -> AgentResult<()> {
         for middleware in &self.middlewares {
@@ -304,7 +323,7 @@ impl MiddlewareChain {
     /// 顺序执行 on_subagent_start 钩子（观测层）
     pub async fn run_on_subagent_start(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::StateView,
         agent_id: &str,
         name: &str,
     ) -> AgentResult<()> {
@@ -317,7 +336,7 @@ impl MiddlewareChain {
     /// 顺序执行 on_subagent_stop 钩子（观测层）
     pub async fn run_on_subagent_stop(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::StateView,
         agent_id: &str,
         reason: &str,
     ) -> AgentResult<()> {
@@ -330,7 +349,7 @@ impl MiddlewareChain {
     // ── Turn 结束 ──
 
     /// 顺序执行 on_turn_end 钩子
-    pub async fn run_on_turn_end(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    pub async fn run_on_turn_end(&self, state: &mut dyn hook_state::StateView) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.on_turn_end(state).await?;
         }
@@ -342,7 +361,7 @@ impl MiddlewareChain {
     /// 顺序执行 on_notification 钩子
     pub async fn run_on_notification(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::StateView,
         message: &str,
     ) -> AgentResult<()> {
         for middleware in &self.middlewares {

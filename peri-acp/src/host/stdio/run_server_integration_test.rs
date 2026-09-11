@@ -185,6 +185,7 @@ fn make_server_config_with(
         thread_store: arc_thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(arc_thread_store)),
         langfuse_session: None,
+        langfuse_shutdown_owner: None,
         config_source: Arc::new(
             crate::provider::ConfigSource::load_at(
                 &tmp.path().join("empty-cwd"),
@@ -1119,3 +1120,6 @@ async fn test_rename_over_stdio_transport() {
         .expect("run_acp_server 应在 stdin EOF 后退出")
         .expect("server task 不应 panic");
 }
+
+#[path = "langfuse_shutdown_test.rs"]
+mod langfuse_shutdown_tests;

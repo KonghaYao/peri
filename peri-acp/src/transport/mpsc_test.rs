@@ -258,3 +258,39 @@ async fn test_peer_drop_preserves_forwarded_incoming_queue() {
         other => panic!("expected two queued notifications, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn test_explicit_close_rejects_both_pending_directions_and_delivers_eof() {
+    let (client, server) = mpsc_transport_pair();
+    let client = Arc::new(client);
+    let server = Arc::new(server);
+    let outbound = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.send_request("pending-client", json!({})).await }
+    });
+    assert!(matches!(
+        server.recv().await,
+        Some(IncomingMessage::Request { .. })
+    ));
+    let inbound = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move { server.send_request("pending-server", json!({})).await }
+    });
+    assert!(matches!(
+        client.recv().await,
+        Some(IncomingMessage::Request { .. })
+    ));
+    client.close();
+    client.close();
+    assert_transport_closed(outbound.await.unwrap().unwrap_err());
+    assert_transport_closed(inbound.await.unwrap().unwrap_err());
+    assert!(tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(tokio::time::timeout(Duration::from_secs(5), client.recv())
+        .await
+        .unwrap()
+        .is_none());
+    assert_transport_closed(client.send_request("late", json!({})).await.unwrap_err());
+}

@@ -88,6 +88,10 @@ fn create_database(path: &Path, metas: Vec<ThreadMeta>) {
         for meta in metas {
             store.create_thread(meta).await.unwrap();
         }
+        // 必须在子进程读取前确定性收尾：仅依赖 Drop 会让最后一次连接关闭触发的
+        // WAL checkpoint 与 `-wal`/`-shm` 清理异步落在只读打开窗口内，使子进程
+        // 撞上 mmap 独占锁，在负载高的机器上超出 busy 上限。
+        store.close().await;
     });
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
 }

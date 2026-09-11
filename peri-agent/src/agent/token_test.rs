@@ -472,6 +472,28 @@ fn test_reset_clears_estimated_tool_tokens() {
 }
 
 #[test]
+fn test_zero_usage_preserves_unconfirmed_tool_growth() {
+    let mut tracker = TokenTracker::default();
+    tracker.accumulate(&make_usage(74_000, 100, None, None));
+    tracker.add_estimated_tool_tokens(&"x".repeat(8_000));
+    let sample = tracker.pressure_sample_key();
+    tracker.accumulate(&make_usage(0, 100, None, None));
+    assert_eq!(tracker.estimated_context_tokens(), Some(76_000));
+    assert_eq!(
+        tracker.pressure_sample_key(),
+        sample,
+        "零 usage 不是新的权威压力证据"
+    );
+    tracker.accumulate(&make_usage(76_000, 100, None, None));
+    assert_eq!(tracker.estimated_tool_tokens_since_last_llm, 0);
+    assert_eq!(
+        tracker.estimated_context_tokens(),
+        Some(76_000),
+        "下一次有效 usage 不得重复累加工具增长"
+    );
+}
+
+#[test]
 fn test_pressure_sample_generations_and_reset_are_monotonic() {
     let mut tracker = TokenTracker::default();
     tracker.accumulate(&make_usage(196_000, 100, None, None));

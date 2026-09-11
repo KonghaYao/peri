@@ -32,11 +32,18 @@ impl Resources {
     /// `~/.peri/threads/threads.db`。任一路径打开失败都直接返回包含路径的错误，
     /// 不再静默 fallback 到共享临时数据库。
     pub async fn open_with(db_path: Option<PathBuf>) -> Result<Self> {
+        Self::open_with_default(db_path, SqliteThreadStore::default_path()).await
+    }
+
+    async fn open_with_default(
+        db_path: Option<PathBuf>,
+        default_store: impl std::future::Future<Output = Result<SqliteThreadStore>>,
+    ) -> Result<Self> {
         let store = match db_path {
             Some(path) => SqliteThreadStore::new(path.clone()).await.map_err(|e| {
                 anyhow::anyhow!("无法打开指定 SQLite 数据库 {}: {e}", path.display())
             })?,
-            None => SqliteThreadStore::default_path().await.map_err(|e| {
+            None => default_store.await.map_err(|e| {
                 anyhow::anyhow!("无法打开默认 SQLite 数据库 ~/.peri/threads/threads.db: {e}")
             })?,
         };

@@ -246,6 +246,11 @@ stderr。
 错误不得回退到其他数据库、最近 session 或进程内状态。非法
 `agent_status` 等数据库值必须上抛，不能静默使用默认值。
 
+`schema_incompatible` 只能来自确定性证据：所需表/列缺失，或镜像不是 SQLite 数据库
+（`SQLITE_NOTADB`）、镜像损坏（`SQLITE_CORRUPT`）。锁竞争、IO 故障、`-wal`/`-shm`
+不可用等瞬时或环境失败必须按 `database_unreadable` 上报，不得伪装成 schema 判定——
+否则一次并发 checkpoint 会被误诊为 schema 问题，使真实原因不可诊断。
+
 ## 8. 并发与一致性
 
 - 查询是一次数据库读取，不获取 Agent 进程锁。
@@ -254,6 +259,9 @@ stderr。
 - writer 正在事务中时，读取遵循 SQLite 已提交数据语义；不等待“最新运行态”。
 - 读取不得改变 session 生命周期，也不得阻塞 Agent 超出数据库正常锁等待边界。
 - busy/locked 情况应有明确的有限等待策略，耗尽后返回可诊断错误，不无限挂起。
+- 写端收尾（WAL checkpoint 与 `-wal`/`-shm` 清理）与只读打开可以重叠；该窗口属于环境
+  时序而不是 schema 证据，期间的失败按上面的瞬时失败语义上报，不得返回空结果或降级成
+  schema 判定。
 
 ## 9. 非目标
 
@@ -304,5 +312,5 @@ SQL/query command。Workflow 已有独立二进制，不进入 `peri meta`。其
 - 不存在的数据库不会被创建，查询不执行 migration 或业务写入；
 - 不存在 session、损坏枚举和不兼容 schema 均类型化失败；
 - JSON DTO 不含禁止字段，`ThreadMeta` 新增字段不会自动进入输出；
-- 并发 writer 下读取已提交快照，busy 等待有界；
+- 并发 writer 下读取已提交快照，busy 等待有界，且锁竞争不产生 schema 判定；
 - human/JSON 的 stdout、stderr 和退出码符合契约。

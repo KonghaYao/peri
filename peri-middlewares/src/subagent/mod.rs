@@ -1,3 +1,4 @@
+use peri_agent::middleware::capabilities as hook_state;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -11,7 +12,6 @@ use peri_agent::{
     middleware::{
         prompt_sections::{PromptSection, PromptSectionZone},
         r#trait::Middleware,
-        state::MiddlewareState,
     },
     session::Session,
     tools::BaseTool,
@@ -581,7 +581,7 @@ impl Middleware for SubAgentMiddleware {
         tools
     }
 
-    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         // Snapshot current state.messages to shared reference for Fork child agent inheritance
         if let Some(ref pm) = self.parent_messages {
             *pm.write() = state.messages().to_vec();

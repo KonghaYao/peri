@@ -517,3 +517,23 @@ fn test_extract_long_texts_nested() {
             .unwrap();
     assert_eq!(content, inner_long);
 }
+
+/// [回归测试] 文件写失败时不能把仍未持久化的原文替换成不可读取的引用。
+#[test]
+fn test_extract_long_texts_preserves_content_when_output_write_fails() {
+    let (_tmp, store) = make_store();
+    store.init_run("failed-output", "script").unwrap();
+    let outputs = store.run_dir("failed-output").join("outputs");
+    std::fs::create_dir_all(outputs.join("blocked.txt")).unwrap();
+    let original = "retained".repeat(40);
+    let saved = "persisted".repeat(40);
+    let mut value = serde_json::json!({"blocked": original, "saved": saved});
+    let extracted = extract_long_texts(&mut value, "failed-output", &store, 200);
+    assert_eq!(extracted, vec!["saved"]);
+    assert_eq!(value["blocked"], original, "失败分支必须保留可用正文");
+    assert_eq!(value["saved"], "${saved}");
+    assert_eq!(
+        std::fs::read_to_string(outputs.join("saved.txt")).unwrap(),
+        saved
+    );
+}

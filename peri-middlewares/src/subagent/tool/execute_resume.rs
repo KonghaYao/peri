@@ -13,26 +13,21 @@
 //!
 //! L3：校验/重建/运行/收尾统一经
 //! `peri_agent::session::subagent::resume_subagent`（Agent 层统一入口），
-//! 本文件只组装意图（[`SubagentResumeConfig`]）。
+//! 本文件只组装意图（[`SubagentResumeConfig`](peri_agent::session::subagent::SubagentResumeConfig)）。
 
 use std::sync::Arc;
 
-use peri_agent::agent::react::ReactLLM;
 use peri_agent::session::subagent::{
-    extract_last_ai_text, format_subagent_result, SessionFactory, SubagentCancelPolicy,
-    SubagentResumeConfig, SubagentRunMode, SubagentSpawned,
+    extract_last_ai_text, format_subagent_result, SubagentCancelPolicy, SubagentRunMode,
 };
-use peri_agent::thread::ThreadStore;
 use peri_agent::tools::BaseTool;
-
-use crate::tool_search::ExecuteExtraToolResolver;
 
 impl super::SubAgentTool {
     /// 恢复被中断 subagent（唯一调用方：define.rs invoke 的 resume 分支）。
     ///
-    /// 前置校验（define.rs 已做）：resume_thread_id 与 fork / subagent_type 互斥、
+    /// 前置校验（define.rs 已做）：有效 resume_thread_id 优先于 fork / subagent_type，
     /// thread_store 存在。本方法 load_meta 取 title 决定工具集 / 迭代上限，
-    /// 组装 [`SubagentResumeConfig`] 经 [`SessionFactory::resume_subagent`] 执行。
+    /// 组装 [`SubagentResumeConfig`](peri_agent::session::subagent::SubagentResumeConfig) 经 [`SessionFactory::resume_subagent`](peri_agent::session::subagent::SessionFactory::resume_subagent) 执行。
     ///
     /// 返回文本与 spawn 路径一致：
     /// - Background → 启动确认（task_id 文本，execute_bg.rs 同款；thread 恒存在 → 带 thread）
@@ -48,14 +43,14 @@ impl super::SubAgentTool {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let host = self.host();
         // 双保险：define.rs 已拦截 thread_store 缺失（恢复需要持久化现场）
-        let thread_store = host.as_ref().and_then(|h| h.thread_store.clone()).ok_or(
+        let thread_store = host.thread_store.clone().ok_or(
             "resume_subagent: thread store required (resume_thread_id needs a persisted thread)",
         )?;
 
         // 双保险（review MEDIUM-1）：bg resume 在 agent 层注册失败会回滚 status，
         // 但无 task_manager 时先在此预检，避免「置 active → 注册失败 → 回滚」的
         // 无效往返（execute_bg.rs:29-32 同款文本）
-        if run_in_background && host.as_ref().and_then(|h| h.task_manager.clone()).is_none() {
+        if run_in_background && host.task_manager.is_none() {
             return Err("Background tasks not available: no task manager configured".into());
         }
 
@@ -168,82 +163,5 @@ impl super::SubAgentTool {
                 block_continue: None,
             })
         ))
-    }
-
-    /// 组装 [`SubagentResumeConfig`] 公共部分（通道段逐字段对照
-    /// [`spawn_config_base`]：error_suggest_registry / tool_registry_snapshot /
-    /// compact_config / context_budget / compact_llm 恒 None 与 spawn 一致；
-    /// `tool_invocation_resolver: Some(ExecuteExtraToolResolver::default())`
-    /// 显式设置保持包装层语义，R2 补充）。
-    ///
-    /// `agent_name` 恒传 None——由 agent 层从 `meta.title` 取（R2 补充：避免
-    /// 双源；thread 创建时 title 已固化 = spawn 时的 agent_name）。
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    pub(crate) fn resume_config_base(
-        &self,
-        thread_id: String,
-        prompt: Option<String>,
-        run_mode: SubagentRunMode,
-        max_iterations: usize,
-        llm: Box<dyn ReactLLM + Send + Sync>,
-        tools: Vec<Arc<dyn BaseTool>>,
-        tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
-        thread_store: Arc<dyn ThreadStore>,
-        cwd: String,
-    ) -> SubagentResumeConfig {
-        let host = self.host();
-        let (on_subagent_start, on_subagent_stop) = self.lifecycle_closures();
-        SubagentResumeConfig {
-            thread_id,
-            prompt,
-            agent_name: None,
-            run_mode,
-            max_iterations,
-            llm,
-            chain_assembler: Arc::clone(&self.chain_assembler),
-            tools,
-            tool_filter,
-            tool_invocation_resolver: Some(Arc::new(ExecuteExtraToolResolver::default())),
-            error_suggest_registry: None,
-            tool_registry_snapshot: None,
-            compact_config: None,
-            context_budget: None,
-            compact_llm: None,
-            thread_store,
-            event_handler: self.event_handler.clone(),
-            bg_event_sender: host.as_ref().and_then(|h| h.bg_event_sender.clone()),
-            task_manager: host.as_ref().and_then(|h| h.task_manager.clone()),
-            on_bg_complete: host.as_ref().and_then(|h| h.on_bg_complete.clone()),
-            langfuse_bridge: host.as_ref().and_then(|h| h.langfuse_bridge.clone()),
-            on_subagent_start,
-            on_subagent_stop,
-            register_runtime: host.as_ref().and_then(|h| h.register_runtime.clone()),
-            deregister_runtime: host.as_ref().and_then(|h| h.deregister_runtime.clone()),
-            parent_agent_id: *self.parent_agent_id.read(),
-            // 父侧数据回退（parent session 存在时由 resume_subagent 覆盖）
-            cancel_token: self.cancel.clone(),
-            cwd: Some(cwd),
-            frozen_claude_md: host
-                .as_ref()
-                .and_then(|h| h.frozen_claude_md.as_deref().map(|s| s.to_string())),
-            frozen_claude_local_md: host
-                .as_ref()
-                .and_then(|h| h.frozen_claude_local_md.as_deref().map(|s| s.to_string())),
-            frozen_skill_summary: host
-                .as_ref()
-                .and_then(|h| h.frozen_skill_summary.as_deref().map(|s| s.to_string())),
-            frozen_date: None,
-        }
-    }
-
-    /// 调用统一恢复入口（parent 存在时 frozen copy 自 parent session 读取；
-    /// 与 [`spawn`] :402-408 同款包装。parent 链校验已移除，见
-    /// `peri_agent::session::subagent::resume_subagent_impl`）。
-    pub(crate) async fn resume(
-        &self,
-        config: SubagentResumeConfig,
-    ) -> Result<SubagentSpawned, Box<dyn std::error::Error + Send + Sync>> {
-        let parent = self.parent_session.read().clone();
-        SessionFactory::resume_subagent(parent.as_ref(), config).await
     }
 }

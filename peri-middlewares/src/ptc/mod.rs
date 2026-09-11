@@ -1,3 +1,4 @@
+use peri_agent::middleware::capabilities as hook_state;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, LazyLock, Mutex, RwLock},
@@ -5,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use peri_agent::{
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::r#trait::Middleware,
     tools::{
         BaseTool, EffectiveToolCall, EffectiveToolDefinition, EffectiveToolDispatcher, ToolContext,
         RUN_PTC_CODE_TOOL_NAME,
@@ -252,7 +253,7 @@ impl Middleware for PtcMiddleware {
 
     async fn before_agent(
         &self,
-        state: &mut dyn MiddlewareState,
+        state: &mut dyn hook_state::BeforeAgentState,
     ) -> peri_agent::error::AgentResult<()> {
         let mut catalog: Vec<EffectiveToolDefinition> = state
             .local_tools()

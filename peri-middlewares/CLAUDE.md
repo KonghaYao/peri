@@ -20,6 +20,7 @@
 | 任务 | 首选位置 |
 | --- | --- |
 | 生产链顺序、条件注册、跨 crate 装配 | `../peri-agent/src/session/factory.rs`（蓝本）与 `src/assembly.rs`（槽位构造） |
+| hook 状态能力与回写（ARC-MIDDLEWARE-CAPABILITY-001） | `../docs/standards/architecture-contracts.md`；`../peri-agent/src/middleware/capabilities.rs` |
 | MCP 合并、server/tool bridge | `src/mcp/` |
 | Plugin manifest、commands、agents、MCP 回退 | `src/plugin/` |
 | Hook 事件与执行器 | `src/hooks/` |

@@ -28,56 +28,18 @@ impl peri_agent::middleware::state::MiddlewareState for TestState {
 
     fn add_message(&mut self, _message: peri_agent::messages::BaseMessage) {}
 
-    fn prepend_message(&mut self, _message: peri_agent::messages::BaseMessage) {}
-
-    fn messages_mut(&mut self) -> &mut Vec<peri_agent::messages::BaseMessage> {
-        panic!("not used in git_watch tests");
+    fn replace_message(&mut self, _message: peri_agent::messages::BaseMessage) -> bool {
+        false
     }
 
     fn current_step(&self) -> usize {
         0
     }
 
-    #[allow(deprecated)]
-    fn set_cwd(&mut self, cwd: String) {
-        self.cwd = cwd;
-    }
-
-    #[allow(deprecated)]
-    fn set_current_step(&mut self, _step: usize) {}
-
-    fn get_context(&self, _key: &str) -> Option<&str> {
-        None
-    }
-
-    fn set_context(&mut self, _key: String, _value: String) {}
-
-    fn token_tracker(&self) -> &peri_agent::agent::token::TokenTracker {
-        panic!("not used");
-    }
-
-    fn token_tracker_mut(&mut self) -> &mut peri_agent::agent::token::TokenTracker {
-        panic!("not used");
-    }
-
     fn push_recall(&mut self, _item: String) {}
 
     fn drain_recall(&mut self) -> Vec<String> {
         vec![]
-    }
-
-    fn ancestor_len(&self) -> usize {
-        0
-    }
-
-    #[allow(deprecated)]
-    fn store(&self) -> Option<&std::sync::Arc<dyn peri_agent::thread::ThreadStore>> {
-        None
-    }
-
-    #[allow(deprecated)]
-    fn own_thread_id(&self) -> Option<&peri_agent::thread::ThreadId> {
-        None
     }
 
     fn v2_queue(&self) -> &MessageQueue {

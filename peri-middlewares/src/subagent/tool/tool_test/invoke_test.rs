@@ -493,3 +493,79 @@ async fn test_cancel_token_interrupts_subagent() {
         result
     );
 }
+
+/// MCP 同步限制早于后台缺 owner 的降级和 fork 分支；同步 fork 仍忽略 type。
+#[tokio::test]
+async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
+    let dir = tempdir().unwrap();
+    let tool = make_subagent_tool(vec![]);
+    let messages = vec![BaseMessage::human("parent context")];
+    let mut input = serde_json::json!({
+        "subagent_type": "mcp__missing__agent",
+        "fork": true,
+        "run_in_background": true,
+        "prompt": "fork task",
+        "cwd": dir.path().to_str().unwrap()
+    });
+    let error = tool
+        .invoke(
+            input.clone(),
+            peri_agent::tools::ToolContext::new(&messages, "."),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Error: MCP Agents currently support synchronous activation only"
+    );
+    input["run_in_background"] = serde_json::json!(false);
+    let result = tool
+        .invoke(input, peri_agent::tools::ToolContext::new(&messages, "."))
+        .await
+        .unwrap();
+    assert!(
+        result.contains("fork task"),
+        "同步 fork 不应尝试远端 definition 激活：{result}"
+    );
+}
+
+/// 父 host 整体覆盖 builder 回退：空 task_manager 也不能从旧 host 拼回后台能力。
+#[tokio::test]
+async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
+    let dir = tempdir().unwrap();
+    let fallback_dir = tempdir().unwrap();
+    let store = make_fs_store(&dir);
+    let fallback_store = make_fs_store(&fallback_dir);
+    let parent = peri_agent::session::Session::new(
+        Arc::from(dir.path().to_str().unwrap()),
+        peri_agent::session::FrozenContext::builder().build(),
+        None,
+    );
+    parent.set_subagent_host(peri_agent::session::subagent::SubagentHost {
+        thread_store: Some(store.clone()),
+        ..Default::default()
+    });
+    let fallback_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let tool = make_subagent_tool(vec![])
+        .with_thread_store(fallback_store.clone())
+        .with_task_manager(fallback_manager.clone())
+        .with_parent_session(parent);
+    let result = tool.invoke(
+        serde_json::json!({"fork": true, "run_in_background": true, "prompt": "sync fallback", "cwd": dir.path().to_str().unwrap()}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    ).await.unwrap();
+    let thread_id = result
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("child_thread_id: ")
+        .unwrap()
+        .to_string();
+    // 子代理为 hidden，用户可见的 list_threads 会过滤它；直接核对真实持久化记录。
+    let meta = store.load_meta(&thread_id).await.unwrap();
+    assert!(meta.hidden);
+    assert_eq!(meta.agent_status, peri_agent::thread::AgentStatus::Done);
+    assert!(result.contains("sync fallback") && !result.contains("Background task"));
+    assert!(fallback_store.load_meta(&thread_id).await.is_err());
+    assert_eq!(fallback_manager.active_count(), 0);
+}

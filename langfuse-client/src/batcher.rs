@@ -1,13 +1,19 @@
+mod admission;
+mod failure;
+mod shutdown;
+mod worker;
+
+use admission::{Admission, AdmissionOutcome};
+use failure::{FailureLedger, FlushSnapshot};
+use shutdown::WorkerOwner;
+use worker::BatchWorker;
+
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-
-use tokio::{
-    sync::{mpsc, oneshot},
-    time::{interval, Duration},
-};
-use tracing::{debug, error, info, warn};
+use tokio::sync::{oneshot, Mutex};
+use tracing::warn;
 
 use crate::{
     config::{BackpressurePolicy, BatcherConfig},
@@ -19,265 +25,149 @@ use crate::{
 /// Batcher 内部命令（不导出）
 #[allow(clippy::large_enum_variant)]
 enum BatcherCommand {
-    /// 添加事件到待发送队列
     Add(IngestionEvent),
-    /// 手动 flush：发送当前队列中的所有事件，完成后通过 oneshot 通知调用方
-    Flush(oneshot::Sender<()>),
-    /// 关闭后台 task（先 flush 剩余事件再退出）
-    Shutdown,
+    Flush(oneshot::Sender<FlushSnapshot>),
 }
 
-/// Langfuse 事件批量聚合器
+/// Langfuse 事件批量聚合器。
 ///
-/// 通过后台 tokio task 异步收集事件，按 `max_events`（定量）或 `flush_interval`（定时）
-/// 自动发送到 Langfuse API。支持手动 flush 和两种背压策略。
+/// 后台 task 按 `max_events` 或 `flush_interval` 自动发送，支持手动 flush。
+/// 部署/进程 owner 应在所有事件生产者结束后调用 [`Self::shutdown`]，等待排空及 join；
+/// 单个 turn 只调用 [`Self::flush`]。Drop 仅尽力通知排空，不能等待后台任务结束。
 pub struct Batcher {
-    tx: mpsc::Sender<BatcherCommand>,
+    admission: Admission,
+    worker: Mutex<WorkerOwner>,
     backpressure: BackpressurePolicy,
-    /// 因命令通道满/关闭而被丢弃的事件计数（add/try_add 侧累加；
-    /// run_loop 每次 flush 完成后汇总输出并清零——S5.2 丢弃可观测性）
+    /// 准入丢弃计数；worker 每次 flush 后汇总输出并清零。
     dropped: Arc<AtomicUsize>,
+    failures: Arc<FailureLedger>,
 }
 
 impl Batcher {
-    /// 创建新的 Batcher 实例，同时启动后台事件处理 task
+    /// 创建聚合器并启动唯一的后台事件处理 task。
+    ///
+    /// # Panics
+    /// 配置容量无效或间隔为零时立即 panic；可恢复配置错误请使用 [`Self::try_new`]。
+    /// 与 Tokio spawn 一样，必须在 Tokio runtime 内调用。
     pub fn new(client: LangfuseClient, config: BatcherConfig) -> Self {
-        let client = Arc::new(client);
-        let (tx, rx) = mpsc::channel(config.max_events);
-        let backpressure = config.backpressure;
+        Self::try_new(client, config).expect("invalid batcher configuration")
+    }
 
-        let batch_client = Arc::clone(&client);
-        let max_events = config.max_events;
-        let flush_interval = config.flush_interval;
+    /// 在启动 worker 前验证配置；无效容量或零间隔返回 Config 错误。
+    /// 必须在 Tokio runtime 内调用。HTTP 重试仍仅由传入的 client 决定。
+    pub fn try_new(client: LangfuseClient, config: BatcherConfig) -> Result<Self, LangfuseError> {
+        config.validate()?;
+        let (admission, rx, closing) = Admission::new(config.max_events);
         let dropped = Arc::new(AtomicUsize::new(0));
-        let run_dropped = Arc::clone(&dropped);
-
-        let _handle = tokio::spawn(async move {
-            Self::run_loop(
-                batch_client,
-                rx,
-                max_events,
-                flush_interval,
-                backpressure,
-                run_dropped,
-            )
-            .await;
-        });
-
-        Self {
-            tx,
-            backpressure,
+        let failures = Arc::new(FailureLedger::default());
+        let worker = BatchWorker::new(client, &config, Arc::clone(&dropped), Arc::clone(&failures));
+        let handle = tokio::spawn(worker.run(rx, closing, config.flush_interval));
+        Ok(Self {
+            admission,
+            worker: Mutex::new(WorkerOwner::Running(handle)),
+            backpressure: config.backpressure,
             dropped,
-        }
-    }
-
-    /// 后台事件处理循环
-    async fn run_loop(
-        client: Arc<LangfuseClient>,
-        mut rx: mpsc::Receiver<BatcherCommand>,
-        max_events: usize,
-        flush_interval: Duration,
-        backpressure: BackpressurePolicy,
-        dropped: Arc<AtomicUsize>,
-    ) {
-        let mut buffer: std::collections::VecDeque<IngestionEvent> =
-            std::collections::VecDeque::with_capacity(max_events);
-        let mut interval = interval(flush_interval);
-        interval.tick().await;
-
-        loop {
-            tokio::select! {
-                cmd = rx.recv() => {
-                    match cmd {
-                        Some(BatcherCommand::Add(event)) => {
-                            // DropOldest：buffer 满时弹出最旧事件，为新事件腾出空间
-                            if buffer.len() >= max_events
-                                && backpressure == BackpressurePolicy::DropOldest
-                            {
-                                if let Some(_dropped) = buffer.pop_front() {
-                                    warn!(
-                                        target: "langfuse::batcher",
-                                        "DropOldest: 弹出最旧事件以容纳新事件"
-                                    );
-                                }
-                            }
-                            buffer.push_back(event);
-                            if buffer.len() >= max_events {
-                                Self::do_flush(&client, &mut buffer).await;
-                                Self::report_dropped(&dropped);
-                            }
-                        }
-                        Some(BatcherCommand::Flush(ack)) => {
-                            Self::do_flush(&client, &mut buffer).await;
-                            Self::report_dropped(&dropped);
-                            if ack.send(()).is_err() {
-                                warn!("Batcher: flush ack receiver dropped");
-                            }
-                        }
-                        Some(BatcherCommand::Shutdown) | None => {
-                            if !buffer.is_empty() {
-                                info!(
-                                    "Batcher shutting down, flushing {} remaining events",
-                                    buffer.len()
-                                );
-                                Self::do_flush(&client, &mut buffer).await;
-                            }
-                            Self::report_dropped(&dropped);
-                            return;
-                        }
-                    }
-                }
-                _ = interval.tick() => {
-                    if !buffer.is_empty() {
-                        debug!(
-                            "Batcher periodic flush: {} events (interval: {:?})",
-                            buffer.len(),
-                            flush_interval
-                        );
-                        Self::do_flush(&client, &mut buffer).await;
-                        Self::report_dropped(&dropped);
-                    }
-                }
-            }
-        }
-    }
-
-    /// 执行一次 flush：将 buffer 中的事件通过原生 Ingestion 端点发送到 Langfuse API
-    async fn do_flush(
-        client: &LangfuseClient,
-        buffer: &mut std::collections::VecDeque<IngestionEvent>,
-    ) {
-        if buffer.is_empty() {
-            return;
-        }
-
-        let events: Vec<IngestionEvent> = buffer.drain(..).collect();
-        debug!("Batcher flushing {} events via OTLP", events.len());
-
-        match client.ingest(events).await {
-            Ok(()) => {
-                debug!("Batcher OTLP flush successful");
-            }
-            Err(_) => {
-                error!("Batcher native ingestion flush failed");
-            }
-        }
-    }
-
-    /// 输出丢弃汇总日志并清零计数（每次 flush 完成后调用）。
-    ///
-    /// S5.2：`do_flush`（HTTP + 重试）await 期间 run_loop 无法消费命令通道，
-    /// DropNew/DropOldest 在通道满时会丢弃事件；本函数保证"已丢弃 N 条"
-    /// 至少在每个 flush 周期后可见，避免静默丢失。
-    fn report_dropped(dropped: &AtomicUsize) {
-        let n = dropped.swap(0, Ordering::Relaxed);
-        if n > 0 {
-            warn!(
-                target: "langfuse::batcher",
-                dropped = n,
-                "Batcher 已丢弃 {} 条事件（上一 flush 周期内命令通道满/关闭）",
-                n
-            );
-        }
-    }
-
-    /// 添加事件到批量队列
-    ///
-    /// DropNew/DropOldest：使用 try_send 非阻塞发送，channel 满时 DropNew 直接丢弃，
-    /// DropOldest 由 run_loop 在 buffer 层面弹出最旧事件。
-    /// Block：使用 send 阻塞等待，直到 channel 有空位。
-    pub async fn add(&self, event: IngestionEvent) -> Result<(), LangfuseError> {
-        let cmd = BatcherCommand::Add(event);
-        match self.backpressure {
-            BackpressurePolicy::DropNew | BackpressurePolicy::DropOldest => {
-                self.tx.try_send(cmd).map_err(|e| match e {
-                    mpsc::error::TrySendError::Full(_) => {
-                        self.dropped.fetch_add(1, Ordering::Relaxed);
-                        let policy_name = if self.backpressure == BackpressurePolicy::DropOldest {
-                            "DropOldest"
-                        } else {
-                            "DropNew"
-                        };
-                        warn!(
-                            "Batcher queue full, dropping event ({} policy)",
-                            policy_name
-                        );
-                        LangfuseError::QueueFull
-                    }
-                    mpsc::error::TrySendError::Closed(_) => {
-                        self.dropped.fetch_add(1, Ordering::Relaxed);
-                        warn!("Batcher channel closed, event dropped");
-                        LangfuseError::ChannelClosed
-                    }
-                })
-            }
-            BackpressurePolicy::Block => self.tx.send(cmd).await.map_err(|_| {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                warn!("Batcher channel closed during send");
-                LangfuseError::ChannelClosed
-            }),
-        }
-    }
-
-    /// 同步添加事件到批量队列（非阻塞，支持 DropNew/DropOldest 背压策略）
-    ///
-    /// 保证事件按调用顺序入队，适用于需要严格顺序的场景（如父 span 必须在子 span 之前）。
-    pub fn try_add(&self, event: IngestionEvent) -> Result<(), LangfuseError> {
-        let cmd = BatcherCommand::Add(event);
-        self.tx.try_send(cmd).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                warn!(
-                    "Batcher queue full, dropping event ({} policy)",
-                    if self.backpressure == BackpressurePolicy::DropOldest {
-                        "DropOldest"
-                    } else {
-                        "DropNew"
-                    }
-                );
-                LangfuseError::QueueFull
-            }
-            mpsc::error::TrySendError::Closed(_) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                warn!("Batcher channel closed, event dropped");
-                LangfuseError::ChannelClosed
-            }
+            failures,
         })
     }
 
-    /// 手动触发 flush，等待所有待发送事件发送完毕
+    /// 添加事件。DropNew 拒绝满队列；DropOldest 替换未受 flush 保护的最旧事件；Block 等待空位。
+    /// 关闭开始后均返回 ChannelClosed；等待空位尚未提交的事件不属于排空集合。
+    pub async fn add(&self, event: IngestionEvent) -> Result<(), LangfuseError> {
+        match self.backpressure {
+            BackpressurePolicy::DropNew | BackpressurePolicy::DropOldest => self.try_add(event),
+            BackpressurePolicy::Block => {
+                let result = self.admission.send(BatcherCommand::Add(event)).await;
+                self.report_rejection(result)
+            }
+        }
+    }
+
+    /// 同步非阻塞添加事件。DropOldest 可替换最后一个已准入 flush 之后的最旧 Add，
+    /// 新事件始终追加在队尾；队列已满时，其他策略或无可驱逐事件会返回 QueueFull。
+    pub fn try_add(&self, event: IngestionEvent) -> Result<(), LangfuseError> {
+        match self.admission.try_add(event, self.backpressure) {
+            Ok(AdmissionOutcome::Accepted) => Ok(()),
+            Ok(AdmissionOutcome::ReplacedOldest) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                warn!("Batcher replaced oldest unprotected queued event");
+                Ok(())
+            }
+            Err(error) => self.report_rejection(Err(error)),
+        }
+    }
+
+    fn report_rejection(&self, result: Result<(), LangfuseError>) -> Result<(), LangfuseError> {
+        if let Err(error) = &result {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            warn!("Batcher event rejected: {error}");
+        }
+        result
+    }
+
+    /// 等待此前仍在队列中的事件完成发送尝试，报告该确认点尚未被调用方观察的批次失败。
+    /// 已准入的 flush 保护其前缀不再被驱逐；准入前已被 DropOldest 替换的事件不在集合内。
+    /// flush 等待容量、尚未准入时不建立保护前缀，也不恢复此前已驱逐的事件。
+    ///
+    /// 返回 Err 后只确认本次快照的失败水位；后续失败仍由下次 flush 报告。
+    /// 取消等待或仅由后台发送 ack 不会确认错误。并发 flush 可观察到同一失败，
+    /// 确认是幂等的；已观察的历史失败不会使后续干净的 flush 永久失败。
+    /// 确认不抹去部署的累计失败，shutdown 仍会报告这些失败。
+    /// HTTP 重试仍由 LangfuseClient 负责，错误摘要不包含事件或响应内容。
+    /// 关闭期间及关闭后改为等待并返回同一个 shutdown 终态。
     pub async fn flush(&self) -> Result<(), LangfuseError> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(BatcherCommand::Flush(tx)).await.map_err(|_| {
-            warn!("Batcher channel closed, cannot flush");
-            LangfuseError::ChannelClosed
-        })?;
-        rx.await.map_err(|_| {
-            warn!("Batcher dropped flush acknowledgment");
-            LangfuseError::ChannelClosed
-        })
+        if self
+            .admission
+            .send(BatcherCommand::Flush(tx))
+            .await
+            .is_err()
+        {
+            return self.shutdown().await;
+        }
+        match rx.await {
+            // No await between receipt and confirmation: a cancelled waiter
+            // cannot consume a failure it never observed.
+            Ok(snapshot) => self.failures.observe(snapshot),
+            Err(_) => self.shutdown().await,
+        }
     }
 
-    /// 当前累计的丢弃事件数（通道满/关闭导致；run_loop 每次 flush 后清零）。
-    /// 供调用方/测试观测丢弃量——S5.2 慢 flush 期间 DropNew 丢事件的可观测性。
+    /// 停止准入，排空已接受的事件并 join 唯一后台任务。
+    ///
+    /// 取消等待不取消 worker，也不取走 join handle；后续或并发调用继续等待同一任务。
+    /// 返回值是固定终态：IngestionApi 表示 worker 已正常 join，但其生命周期内存在发送失败，
+    /// 包括此前已由 flush 观察的失败；
+    /// WorkerJoinFailed 表示已取得 JoinError，worker 未正常排空（取消或 panic）。
+    /// 错误摘要不包含 HTTP 响应或 panic 内容。重复调用返回相同终态，不重新发送事件。
+    pub async fn shutdown(&self) -> Result<(), LangfuseError> {
+        self.admission.close();
+        self.worker.lock().await.join().await
+    }
+
+    /// 当前累计的准入丢弃事件数；worker 每次 flush 后清零。
     pub fn dropped_count(&self) -> usize {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    async fn worker_is_joined(&self) -> bool {
+        matches!(*self.worker.lock().await, WorkerOwner::Joined(_))
     }
 }
 
 impl Drop for Batcher {
     fn drop(&mut self) {
-        // 发送 Shutdown 命令，后台任务会 flush 剩余事件后自行退出
-        // 不调用 abort()：abort 会立即取消任务，导致缓冲区中的事件丢失
-        let shutdown_cmd = BatcherCommand::Shutdown;
-        if self.tx.try_send(shutdown_cmd).is_err() {
-            debug!("Batcher Drop: channel already closed, background task may have exited");
-        }
-        // handle 不显式 abort：后台任务在处理完 Shutdown 后自行结束
-        // Drop handle 会使 JoinHandle detach，任务继续运行到完成
+        // Nonblocking best effort. Explicit shutdown retains the join guarantee;
+        // dropping the handle here detaches without aborting admitted work.
+        self.admission.close();
     }
 }
 
 #[cfg(test)]
 #[path = "batcher_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "batcher_shutdown_test.rs"]
+mod shutdown_tests;

@@ -47,17 +47,21 @@ pub use peri_acp_types::workflow::{
 
 // ─── Store ──────────────────────────────────────────────────
 
+/// One run owns both its public projection and this execution's accounting provenance.
+struct TrackedRun {
+    progress: RunProgress,
+    /// AgentStarted is emitted only for live execution, not a resume cache hit.
+    started_agents: HashSet<u64>,
+}
+
 pub struct WorkflowProgressStore {
-    runs: RwLock<HashMap<String, RunProgress>>,
-    /// AgentStarted 仅由本次真实执行产生；resume cache-hit 只会收到 AgentDone。
-    started_agents: RwLock<HashSet<(String, u64)>>,
+    runs: RwLock<HashMap<String, TrackedRun>>,
 }
 
 impl WorkflowProgressStore {
     pub fn new() -> Self {
         Self {
             runs: RwLock::new(HashMap::new()),
-            started_agents: RwLock::new(HashSet::new()),
         }
     }
 
@@ -73,9 +77,6 @@ impl WorkflowProgressStore {
 
         match event {
             ProgressEvent::RunStarted { workflow_name, .. } => {
-                self.started_agents
-                    .write()
-                    .retain(|(started_run_id, _)| started_run_id != &run_id);
                 let run = RunProgress {
                     run_id: run_id.clone(),
                     workflow_name: workflow_name.clone(),
@@ -89,15 +90,23 @@ impl WorkflowProgressStore {
                     agents: IndexMap::new(),
                     completed_at: None,
                 };
-                runs.insert(run_id, run);
+                runs.insert(
+                    run_id,
+                    TrackedRun {
+                        progress: run,
+                        started_agents: HashSet::new(),
+                    },
+                );
             }
             ProgressEvent::PhaseStarted { phase, .. } => {
-                if let Some(run) = runs.get_mut(&run_id) {
+                if let Some(tracked) = runs.get_mut(&run_id) {
+                    let run = &mut tracked.progress;
                     set_or_update_phase(&mut run.phases, phase, PhaseStatus::Active);
                 }
             }
             ProgressEvent::PhaseDone { phase, .. } => {
-                if let Some(run) = runs.get_mut(&run_id) {
+                if let Some(tracked) = runs.get_mut(&run_id) {
+                    let run = &mut tracked.progress;
                     set_or_update_phase(&mut run.phases, phase, PhaseStatus::Done);
                 }
             }
@@ -107,10 +116,9 @@ impl WorkflowProgressStore {
                 phase,
                 ..
             } => {
-                self.started_agents
-                    .write()
-                    .insert((run_id.clone(), *agent_id));
-                if let Some(run) = runs.get_mut(&run_id) {
+                if let Some(tracked) = runs.get_mut(&run_id) {
+                    tracked.started_agents.insert(*agent_id);
+                    let run = &mut tracked.progress;
                     set_or_update_agent(&mut run.agents, *agent_id, |agent| {
                         if label.is_some() {
                             agent.label = label.clone();
@@ -130,7 +138,8 @@ impl WorkflowProgressStore {
                 tool_count,
                 ..
             } => {
-                if let Some(run) = runs.get_mut(&run_id) {
+                if let Some(tracked) = runs.get_mut(&run_id) {
+                    let run = &mut tracked.progress;
                     set_or_update_agent(&mut run.agents, *agent_id, |agent| {
                         // model 仅在 Some 时更新：运行中由 agent 侧 0 token/0 tool
                         // 的专用更新携带，后续不带 model 的进度事件不得覆盖。
@@ -157,11 +166,9 @@ impl WorkflowProgressStore {
                 result,
                 ..
             } => {
-                let executed_in_this_run = self
-                    .started_agents
-                    .read()
-                    .contains(&(run_id.clone(), *agent_id));
-                if let Some(run) = runs.get_mut(&run_id) {
+                if let Some(tracked) = runs.get_mut(&run_id) {
+                    let executed_in_this_run = tracked.started_agents.contains(agent_id);
+                    let run = &mut tracked.progress;
                     set_or_update_agent(&mut run.agents, *agent_id, |agent| {
                         agent.status = match result {
                             AgentRunResult::Ok { .. } => AgentStatus::Done,
@@ -192,7 +199,8 @@ impl WorkflowProgressStore {
                 }
             }
             ProgressEvent::RunDone { status, .. } => {
-                if let Some(run) = runs.get_mut(&run_id) {
+                if let Some(tracked) = runs.get_mut(&run_id) {
+                    let run = &mut tracked.progress;
                     run.status = match status.as_str() {
                         "completed" => RunStatus::Completed,
                         "killed" => RunStatus::Killed,
@@ -220,11 +228,15 @@ impl WorkflowProgressStore {
     }
 
     pub fn get_run(&self, run_id: &str) -> Option<RunProgress> {
-        self.runs.read().get(run_id).cloned()
+        self.runs.read().get(run_id).map(|run| run.progress.clone())
     }
 
     pub fn list_runs(&self) -> Vec<RunProgress> {
-        self.runs.read().values().cloned().collect()
+        self.runs
+            .read()
+            .values()
+            .map(|run| run.progress.clone())
+            .collect()
     }
 
     pub fn set_terminal_projection(
@@ -235,7 +247,8 @@ impl WorkflowProgressStore {
         post_processing_status: peri_acp_types::workflow::PostProcessingStatus,
         delivery_status: peri_acp_types::workflow::DeliveryStatus,
     ) {
-        if let Some(run) = self.runs.write().get_mut(run_id) {
+        if let Some(tracked) = self.runs.write().get_mut(run_id) {
+            let run = &mut tracked.progress;
             run.execution_status = execution_status;
             run.acceptance_status = acceptance_status;
             run.post_processing_status = post_processing_status;
@@ -245,15 +258,19 @@ impl WorkflowProgressStore {
 
     /// 获取所有 runs 的快照（供 ACP handler 序列化用）。
     pub fn get_all_runs_snapshot(&self) -> Vec<RunProgress> {
-        self.runs.read().values().cloned().collect()
+        self.runs
+            .read()
+            .values()
+            .map(|run| run.progress.clone())
+            .collect()
     }
 
     pub fn active_runs(&self) -> Vec<RunProgress> {
         self.runs
             .read()
             .values()
-            .filter(|r| matches!(r.status, RunStatus::Running))
-            .cloned()
+            .filter(|r| matches!(r.progress.status, RunStatus::Running))
+            .map(|run| run.progress.clone())
             .collect()
     }
 
@@ -261,20 +278,17 @@ impl WorkflowProgressStore {
     const COMPLETED_RETENTION: std::time::Duration = std::time::Duration::from_secs(300);
 
     pub fn cleanup_completed(&self) {
-        let now = std::time::Instant::now();
-        self.runs.write().retain(|_, r| {
-            matches!(r.status, RunStatus::Running)
-                || r.completed_at
-                    .map(|at| now.duration_since(at) < Self::COMPLETED_RETENTION)
+        self.cleanup_completed_at(std::time::Instant::now());
+    }
+
+    fn cleanup_completed_at(&self, now: std::time::Instant) {
+        self.runs.write().retain(|_, tracked| {
+            let run = &tracked.progress;
+            matches!(run.status, RunStatus::Running)
+                || run
+                    .completed_at
+                    .map(|at| now.saturating_duration_since(at) < Self::COMPLETED_RETENTION)
                     .unwrap_or(true)
-        });
-        // 已清理 run 的执行标记一并释放（P2-2026-08-11：否则随
-        // 每个完成 workflow 的 agent marker 永久残留，长期运行无界增长）。
-        self.started_agents.write().retain(|(run_id, _)| {
-            self.runs
-                .read()
-                .get(run_id)
-                .is_some_and(|r| matches!(r.status, RunStatus::Running))
         });
     }
 }
@@ -353,7 +367,8 @@ mod agents_as_map {
 impl WorkflowProgressStore {
     /// 获取 run 的统计数据，避免 clone 整个 RunProgress。
     pub fn get_run_stats(&self, run_id: &str) -> Option<(usize, usize)> {
-        self.runs.read().get(run_id).map(|run| {
+        self.runs.read().get(run_id).map(|tracked| {
+            let run = &tracked.progress;
             let agent_count = run.agents.len();
             let tool_calls_count = run
                 .agents
@@ -370,17 +385,18 @@ impl WorkflowProgressStore {
     /// 获取按 phase 分组的统计摘要（供通知格式化）。
     pub fn get_phase_summaries(&self, run_id: &str) -> Vec<PhaseSummary> {
         let runs = self.runs.read();
-        let Some(run) = runs.get(run_id) else {
+        let Some(tracked) = runs.get(run_id) else {
             return Vec::new();
         };
-        let started_agents = self.started_agents.read();
+        let run = &tracked.progress;
+        let started_agents = &tracked.started_agents;
         let mut phase_map: std::collections::HashMap<String, (usize, u64, u64)> =
             std::collections::HashMap::new();
         for agent in run.agents.values() {
             let phase = agent.phase.as_deref().unwrap_or(run.workflow_name.as_str());
             let entry = phase_map.entry(phase.to_string()).or_insert((0, 0, 0));
             entry.0 += 1;
-            if started_agents.contains(&(run_id.to_string(), agent.agent_id)) {
+            if started_agents.contains(&agent.agent_id) {
                 entry.1 += agent
                     .token_count
                     .or_else(|| agent.result.as_ref().and_then(|r| r.token_count()))
@@ -421,7 +437,7 @@ impl WorkflowProgressStore {
     /// 获取指定 agent 的 phase（供 journal 注入）。
     pub fn get_agent_phase(&self, run_id: &str, agent_id: u64) -> Option<String> {
         let runs = self.runs.read();
-        let run = runs.get(run_id)?;
+        let run = &runs.get(run_id)?.progress;
         let agent = run.agents.get(&agent_id)?;
         agent.phase.clone()
     }

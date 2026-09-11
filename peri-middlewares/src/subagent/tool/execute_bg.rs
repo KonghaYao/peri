@@ -2,7 +2,7 @@
 //!
 //! `run_in_background: true` 的执行路径：
 //! 1. 经 `build_agent_from_def` 装配 v2 字段（cancel_policy=Independent）
-//! 2. 组装 [`SubagentSpawnConfig`] 经 [`spawn_subagent`]（Agent 层统一入口）：
+//! 2. 组装 [`SubagentSpawnConfig`](peri_agent::session::subagent::SubagentSpawnConfig) 经 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)（Agent 层统一入口）：
 //!    tokio::spawn 内运行 `run_react_loop`，主流程立即返回
 //! 3. 任务完成时统一入口负责 bg_event_sender 通知主 agent + lifecycle hook +
 //!    thread_store 更新 + TaskManager 收尾
@@ -28,10 +28,10 @@ impl super::SubAgentTool {
         // task_manager 必填（后台任务注册）；来自 parent_session 的 host 或 tool host 回退
         let host = self.host();
         let task_manager = host
-            .as_ref()
-            .and_then(|h| h.task_manager.clone())
+            .task_manager
+            .clone()
             .ok_or("Background tasks not available: no task manager configured")?;
-        let thread_store = host.as_ref().and_then(|h| h.thread_store.clone());
+        let thread_store = host.thread_store.clone();
 
         if task_manager.active_count() >= 3 {
             return Err("Error: maximum 3 concurrent background tasks reached. \
@@ -44,8 +44,8 @@ impl super::SubAgentTool {
             // model 参数忽略——fork 恒继承父模型（与同步 fork 路径一致）
             let llm = (self.llm_factory)(None);
             let system_prompt = host
-                .as_ref()
-                .and_then(|h| h.frozen_system_prompt.clone())
+                .frozen_system_prompt
+                .clone()
                 .map(|sp| sp.as_ref().to_string())
                 .or_else(|| self.system_builder.as_ref().map(|b| b(None, &cwd)));
             let tools: Vec<Arc<dyn BaseTool>> = self.parent_tools.iter().cloned().collect();

@@ -342,15 +342,24 @@ fn test_cleanup_completed_purges_started_agents_markers() {
         phase: Some("Run".into()),
     });
 
-    store.cleanup_completed();
-    let markers = store.started_agents.read();
+    let completed_at = store.get_run("done-run").unwrap().completed_at.unwrap();
+    store.cleanup_completed_at(completed_at);
+    assert!(store
+        .runs
+        .read()
+        .get("done-run")
+        .unwrap()
+        .started_agents
+        .contains(&7));
+    store.cleanup_completed_at(completed_at + WorkflowProgressStore::COMPLETED_RETENTION);
+    let runs = store.runs.read();
     assert!(
-        !markers.contains(&("done-run".to_string(), 7)),
-        "已完成 run 的标记应被清理"
+        !runs.contains_key("done-run"),
+        "过期 run 与自身标记必须共同释放"
     );
     assert!(
-        markers.contains(&("running-run".to_string(), 9)),
-        "运行中 run 的标记必须保留"
+        runs.get("running-run").unwrap().started_agents.contains(&9),
+        "运行中标记保留"
     );
 }
 
@@ -620,4 +629,72 @@ fn test_resume_cache_hit_excludes_historical_usage_and_preserves_phase() {
     assert_eq!(fallback.agent_count, 1);
     assert_eq!(fallback.token_count, 0);
     assert_eq!(fallback.duration_ms, None);
+}
+
+/// [回归测试] 保留完成 run 时必须同时保留本次执行标记，通知不能被清理变成零统计。
+#[test]
+fn test_completed_cleanup_preserves_phase_usage_until_run_expiration() {
+    let store = make_store();
+    let run_id = "retained";
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: run_id.into(),
+        workflow_name: "review".into(),
+        meta: None,
+    });
+    store.apply_event(&ProgressEvent::AgentStarted {
+        run_id: run_id.into(),
+        agent_id: 1,
+        label: None,
+        phase: Some("Review".into()),
+    });
+    for (agent_id, tokens, duration) in [(1, 20, 40), (2, 900, 1800)] {
+        store.apply_event(&ProgressEvent::AgentDone {
+            run_id: run_id.into(),
+            agent_id,
+            label: None,
+            phase: Some("Review".into()),
+            result: AgentRunResult::Ok {
+                output: serde_json::json!("done"),
+                usage: Usage {
+                    output_tokens: tokens,
+                },
+                model: None,
+                tool_count: Some(3),
+                token_count: Some(tokens),
+                phase: Some("Review".into()),
+                duration_ms: Some(duration),
+            },
+        });
+    }
+    store.apply_event(&ProgressEvent::RunDone {
+        run_id: run_id.into(),
+        status: "completed".into(),
+        return_value: None,
+        error: None,
+    });
+    let before = serde_json::to_value(store.get_run(run_id).unwrap()).unwrap();
+    store.cleanup_completed();
+    let summaries = store.get_phase_summaries(run_id);
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].name, "Review");
+    assert_eq!(summaries[0].agent_count, 2);
+    assert_eq!(
+        summaries[0].token_count, 20,
+        "仍保留的通知只统计本次真实执行"
+    );
+    assert_eq!(summaries[0].duration_ms, Some(40));
+    assert_eq!(
+        serde_json::to_value(store.get_run(run_id).unwrap()).unwrap(),
+        before
+    );
+    let completed_at = store.get_run(run_id).unwrap().completed_at.unwrap();
+    store.cleanup_completed_at(
+        completed_at + WorkflowProgressStore::COMPLETED_RETENTION
+            - std::time::Duration::from_nanos(1),
+    );
+    assert_eq!(store.get_phase_summaries(run_id)[0].token_count, 20);
+    store.cleanup_completed_at(completed_at + WorkflowProgressStore::COMPLETED_RETENTION);
+    assert!(store.get_run(run_id).is_none());
+    assert!(store.get_phase_summaries(run_id).is_empty());
+    assert!(!store.runs.read().contains_key(run_id));
 }

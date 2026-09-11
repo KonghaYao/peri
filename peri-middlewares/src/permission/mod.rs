@@ -1,3 +1,4 @@
+use peri_agent::middleware::capabilities as hook_state;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,7 +12,6 @@ use peri_agent::{
     middleware::{
         prompt_sections::{PromptSection, PromptSectionZone},
         r#trait::Middleware,
-        state::MiddlewareState,
     },
 };
 
@@ -526,7 +526,7 @@ impl Middleware for PermissionMiddleware {
     /// 通过 broker 弹出一个 [多工具审批] 弹窗，避免逐个弹窗打断用户。
     async fn before_tools_batch(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::BeforeToolState,
         calls: &[ToolCall],
     ) -> Vec<AgentResult<ToolCall>> {
         self.process_batch(calls).await
@@ -534,7 +534,7 @@ impl Middleware for PermissionMiddleware {
 
     async fn before_tool(
         &self,
-        _state: &mut dyn MiddlewareState,
+        _state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         // 1. 非敏感工具 → 所有模式都放行

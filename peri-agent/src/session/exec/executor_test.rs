@@ -820,3 +820,6 @@ async fn test_main_agent_history_is_seeded_as_compactable_own_region() {
         "main-agent Phase 5 不得把已加载历史误标为 SubAgent ancestor"
     );
 }
+
+#[path = "executor_provenance_test.rs"]
+mod provenance_tests;

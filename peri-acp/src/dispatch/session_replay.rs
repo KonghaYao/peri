@@ -61,6 +61,15 @@ pub async fn replay_session_history(
     for msg in history.iter().filter(|m| !m.is_system()) {
         match msg {
             BaseMessage::Human { content, .. } => {
+                let reminders = peri_acp_types::compact_reminder::legacy_compact_reminders(msg);
+                if !reminders.is_empty() {
+                    for reminder in reminders {
+                        sender
+                            .send_system_reminder(session_id, &reminder, caps)
+                            .await?;
+                    }
+                    continue;
+                }
                 let update = SessionUpdate::UserMessageChunk(replay_chunk(
                     ContentBlock::Text(TextContent::new(extract_text(content))),
                     caps,

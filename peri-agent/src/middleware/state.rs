@@ -1,67 +1,35 @@
-//! MiddlewareState trait — middleware 钩子的状态上下文
+//! MiddlewareState — AgentContext / AgentState 的底层状态适配接口
 //!
-//! object-safe trait，让 `trait Middleware` 接收 `&mut dyn MiddlewareState`。
+//! hook 通过 capabilities 中的窄接口访问状态，不接收整个适配器接口。
 //!
 //! ## 与 `AgentState` 的关系
 //!
-//! - `AgentState`（`crate::agent::state::AgentState`）是唯一实现者
+//! - `AgentState` 提供 legacy/test 适配，`AgentContext` 提供生产 v2 适配
 //! - middleware_runner 通过此 trait 桥接 v2 stages ↔ middleware 钩子
 
-use std::sync::Arc;
+use crate::{agent::state::AgentState, messages::BaseMessage};
 
-use crate::{
-    agent::state::AgentState,
-    agent::token::TokenTracker,
-    messages::BaseMessage,
-    thread::{ThreadId, ThreadStore},
-};
-
-/// Middleware 在每次钩子调用中看到的状态上下文。
+/// 状态适配器的真实操作集合；不直接作为 hook 参数。
 ///
 /// object-safe：无 `Clone`/`'static` 约束、无泛型方法（`impl Into<String>` 改为 `String`）。
-/// 这让 `trait Middleware` 可以改为非泛型，钩子签名用 `&mut dyn MiddlewareState`。
+/// 各生命周期的公开能力由 `capabilities` 组合，适配器不持有新的 owner。
 pub trait MiddlewareState: Send + Sync {
     fn cwd(&self) -> &str;
-    #[deprecated(
-        since = "0.2.0",
-        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
-    )]
-    fn set_cwd(&mut self, cwd: String);
 
     fn messages(&self) -> &[BaseMessage];
     fn add_message(&mut self, message: BaseMessage);
-    fn prepend_message(&mut self, message: BaseMessage);
-    fn messages_mut(&mut self) -> &mut Vec<BaseMessage>;
+    /// 按稳定 MessageId 替换已有可见消息，保持消息顺序和数量。
+    ///
+    /// 返回 false 表示 ID 不在当前视图，不插入新消息。生产 v2 在
+    /// `before_agent` 链结束后（包括 Err）将替换同步至 transcript；
+    /// 该操作用于输入附件转换，不支持 Vec 增删/重排。
+    #[must_use]
+    fn replace_message(&mut self, message: BaseMessage) -> bool;
 
     fn current_step(&self) -> usize;
-    #[deprecated(
-        since = "0.2.0",
-        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
-    )]
-    fn set_current_step(&mut self, step: usize);
-
-    fn get_context(&self, key: &str) -> Option<&str>;
-    fn set_context(&mut self, key: String, value: String);
-
-    fn token_tracker(&self) -> &TokenTracker;
-    fn token_tracker_mut(&mut self) -> &mut TokenTracker;
 
     fn push_recall(&mut self, item: String);
     fn drain_recall(&mut self) -> Vec<String>;
-
-    fn ancestor_len(&self) -> usize;
-
-    #[deprecated(
-        since = "0.2.0",
-        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
-    )]
-    fn store(&self) -> Option<&Arc<dyn ThreadStore>>;
-
-    #[deprecated(
-        since = "0.2.0",
-        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
-    )]
-    fn own_thread_id(&self) -> Option<&ThreadId>;
 
     /// 返回共享的 v2 MessageQueue 引用（用于 goal steering / stop-hook feedback 等异步注入）
     ///
@@ -96,17 +64,13 @@ pub trait MiddlewareState: Send + Sync {
     }
 }
 
-/// `AgentState` 唯一实现 `MiddlewareState`。
+/// `AgentState` 的 MiddlewareState 适配；自身完整状态 API 不经 hook 暴露。
 ///
 /// 通过显式 `AgentState::method(self, ...)` 调用避免与 `MiddlewareState` 自身方法递归。
 /// `String` 参数满足 `AgentState` 的 `impl Into<String>` 约束（`String: Into<String>`）。
 impl MiddlewareState for AgentState {
     fn cwd(&self) -> &str {
         AgentState::cwd(self)
-    }
-
-    fn set_cwd(&mut self, cwd: String) {
-        AgentState::set_cwd(self, cwd);
     }
 
     fn messages(&self) -> &[BaseMessage] {
@@ -117,36 +81,19 @@ impl MiddlewareState for AgentState {
         AgentState::add_message(self, message);
     }
 
-    fn prepend_message(&mut self, message: BaseMessage) {
-        AgentState::prepend_message(self, message);
-    }
-
-    fn messages_mut(&mut self) -> &mut Vec<BaseMessage> {
-        AgentState::messages_mut(self)
+    fn replace_message(&mut self, message: BaseMessage) -> bool {
+        let Some(existing) = AgentState::messages_mut(self)
+            .iter_mut()
+            .find(|existing| existing.id() == message.id())
+        else {
+            return false;
+        };
+        *existing = message;
+        true
     }
 
     fn current_step(&self) -> usize {
         AgentState::current_step(self)
-    }
-
-    fn set_current_step(&mut self, step: usize) {
-        AgentState::set_current_step(self, step);
-    }
-
-    fn get_context(&self, key: &str) -> Option<&str> {
-        AgentState::get_context(self, key)
-    }
-
-    fn set_context(&mut self, key: String, value: String) {
-        AgentState::set_context(self, key, value);
-    }
-
-    fn token_tracker(&self) -> &TokenTracker {
-        AgentState::token_tracker(self)
-    }
-
-    fn token_tracker_mut(&mut self) -> &mut TokenTracker {
-        AgentState::token_tracker_mut(self)
     }
 
     fn push_recall(&mut self, item: String) {
@@ -155,18 +102,6 @@ impl MiddlewareState for AgentState {
 
     fn drain_recall(&mut self) -> Vec<String> {
         AgentState::drain_recall(self)
-    }
-
-    fn ancestor_len(&self) -> usize {
-        AgentState::ancestor_len(self)
-    }
-
-    fn store(&self) -> Option<&Arc<dyn ThreadStore>> {
-        AgentState::store(self)
-    }
-
-    fn own_thread_id(&self) -> Option<&ThreadId> {
-        AgentState::own_thread_id(self)
     }
 
     fn v2_queue(&self) -> &crate::session::MessageQueue {

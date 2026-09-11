@@ -36,6 +36,7 @@ pub struct StdioInput {
 /// （cli 白名单文件，见 `peri-tui/src/main.rs`）构造后经 [`StdioInput`] 注入；
 /// ACP 层只持端口接口（3.0 批 2 波 2，§0 依赖方向）。
 pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
+    let _telemetry = peri_agent::telemetry::init_tracing("peri-acp");
     let cfg = assemble_stdio_config(input).await?;
     let cancel_task_spawner = cfg.host_task_spawner.clone();
 
@@ -89,8 +90,6 @@ fn load_stdio_config_source(
 }
 
 async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpServerConfig> {
-    let _telemetry = peri_agent::telemetry::init_tracing("peri-acp");
-
     // 解析工作目录
     let cwd = std::path::Path::new(&input.cwd)
         .canonicalize()

@@ -1,9 +1,11 @@
 # P0：长会话中 Full 与 Micro Compact 反复交错且缺少可信进展度量
 
-**状态**：Investigating
+**状态**：Fixed（代码与自动验证完成；待现场验收）
 **优先级**：P0
 **类型**：可用性 / Token 成本 / Compact 活性 / 可观测性
 **创建日期**：2026-09-10
+
+> 2026-09-10 再次审计：用户反馈修复后 Full / Micro 仍反复交错。已增加 4 个可显式运行的失败回归和 1 个真实 SQLite Full 成功的循环反例，见文末「修复后逻辑复审」。本事故仍未修复完成。
 
 ## 事故摘要
 
@@ -217,3 +219,170 @@ RCRA 时序证据：
 - 不因截图交错直接重构整个 RCRA 循环。
 - 不在缺乏证据时宣称存在并发竞态。
 - 不把 telemetry 修复包装成 compact 活性根因修复。
+
+## 修复后逻辑复审（2026-09-10）
+
+### 范围与结论
+
+复审基线为 `74e29dc0`，重点核查 `0d98cdc6`（压力样本）和 `36ddc645`（root history ownership）。用户明确补充现象仍为「Full / Micro 反复交错」。
+
+此前 root ownership、旧样本去重、可见 Read re-inject 修复有效，但没有覆盖下列缺陷。此次只增加审计测试和本节记录，未修改生产实现。未获得用户现场会话 ID、provider 请求或 runtime 日志；因此区分「代码可确定复现」与「现场主要成本来源已量化」。
+
+### A1：已被 Full 排除的消息再次成为 Micro 候选，并参与 Full 升级决策
+
+**证据：已执行默认配置失败回归，以及真实 RCRA 成功 Full 循环。优先级 P1，属于本 P0 事故待修项。**
+
+- `peri-agent/src/agent/compact_v2/planner.rs::plan_micro` 将全部 entries 交给 `TurnGroup::collect`，没有排除 `flags.excluded` 的消息。
+- `projection.rs::estimate_projection_chars` 对全部 entries 估算收益，同样没有 visible 过滤。
+- `full.rs::full_compact_inner` 新排除消息时将 flags 替换为 `excluded=true` 和其他默认值，清掉此前的 Micro directive。
+- 因而这些消息又能通过 Micro 的 truncated/directive 检查；`set_flags_projection` 保留 excluded，renderer 始终不会发送它们。此次 Micro 实际模型消息增量收益为零。
+- 虚假 saving 仍用于 `run_compact` 的 `estimated_tokens_saved >= reclaim_target` 决策，足够大时会阻止高压下需要的 Full。
+
+默认配置反例：4 个 Human turn，每轮含一对 Bash 调用/40,000 字符结果；SQLite Full 成功排除 12 条消息后，只剩 summary 可见。默认 stale=3 下仍选出两个已排除工具结果，报告 **19,763 tokens** 收益；完整模型可见 JSON 前后相同。新压力设为 96k / 100k、输出预留 4k、安全缓冲 5k 时，虚假收益超过 5k 回收目标，实际结果为 `MicroApplied`，没有执行 Full。
+
+完整循环反例使用脚本 usage `96k → 80k → 96k → 80k → 1k`、stale=0，以及交替长短工具结果，实际得到：
+
+```text
+FullApplied → MicroApplied → FullApplied → MicroApplied
+```
+
+两次 Full 均成功提交 SQLite，两次 Micro 均报告正 saving，最终两条持久化 projection 都指向 excluded 消息，模型消息无投影变化。这补上此前「成功 Full 测试后只给低 usage」和「交错测试中的 Full 全失败」的组合缺口。脚本 usage 证明状态机路径，不是现场实际 token 基线测量；默认 stale 可达性由前一个回归单独证明。
+
+这不表示同一批消息会立即无限重复：Micro 重新标记后会被 truncated 检查跳过；后续 Full 新排除的工具结果、以及新增 Human 边界使其他旧 group 变 stale，都可再次引入无收益候选。
+
+测试：
+
+- `test_audit_full_excluded_history_must_not_be_micro_candidate`
+- `test_audit_excluded_savings_must_not_suppress_full`
+- `test_audit_run_react_loop_successful_full_micro_churn_has_zero_micro_delta`
+
+### A2：Reason 已经投影过的收益，随后又被 Micro 记为本轮回收量
+
+**证据：已执行真实 `Reason → Compact → Reason` 失败回归。优先级 P2。**
+
+`stages/reason.rs::run_reason` 在没有持久化 directive 时直接 `plan_micro(..., false)` 并渲染，不以本轮 Compact 是否触发为条件。后续 Compact 仍从 canonical 原文估算同样的投影收益。
+
+默认配置、四个 Human turn 的反例中，两次成功 Reason 的完整消息快照完全相同，但中间 Micro 报告 **1,882 tokens** 节省。此路径不依赖 excluded，说明即使修复 A1，也不能把当前 estimated saving 当成实际增量回收量。
+
+测试：`test_audit_micro_savings_must_change_previous_reason_view`。
+
+### A3：新增工具输出没有接入生产压力追踪
+
+**证据：已执行真实 tool dispatch 失败回归。优先级 P1。**
+
+`TokenTracker::add_estimated_tool_tokens` 在生产代码中没有调用者；已有调用只在 token/stage 测试里。`tool_dispatch::dispatch_tools` 已把工具结果写入 transcript，却未增加 tool-growth generation 或 estimated tool tokens。
+
+测试从 provider usage 74,000 开始，执行工具并确认 8,000 字符结果已进入 transcript，压力仍为 **74,000**，按该 tracker 已定义的 chars/4 估算应为 **76,000**。因此「新工具增长可重新评估」目前只在直接调用 tracker 的单测中成立，实际大结果可能在下一次请求前绕过应有的 Compact 检查。
+
+测试：`test_audit_dispatch_must_account_for_tool_output_pressure`。
+
+### A4：Full 成功后本轮失败，host 丢弃已提交摘要快照
+
+**证据：静态完整调用链确认，尚未新增 host runtime 回归。优先级 P1；后续写失败回滚分支有持久内容不可见风险。**
+
+成立条件：Full 已成功提交，之后本轮因 Interrupted/cancel、MaxIterations、LLM failure 或 forwarder error 以 `ok=false` 结束，且 host session 未被移除。
+
+1. `full_compact_inner` 已在 SQLite 提交 old excluded + summary/re-inject。
+2. `executor_helpers/v2_execute.rs` 的 Phase 8 flush 成功时，仍正确取出包含摘要的 canonical `persisted_payloads`；`collect.rs` 原样返回。
+3. `peri-acp/src/host/prompt.rs::run_prompt` 只有 `result.ok` 时采纳这些 payload；失败分支只 truncate `state.history`，保留旧 `state.history_payloads`。
+4. 下一轮从旧 payload snapshot 重建，Phase 5.5 却恢复新 excluded flags：旧历史被隐藏，新摘要又不在 snapshot 内。
+
+正常 Completed 后 cancel token 被置位不属于此条件，因为 terminal classifier 优先认定 Completed 为成功。自动 Compact 没有强制 TUI reload；已有非空 history 的热 `session/load` 也不替换 host snapshot。真正移除内存 session 后冷加载可恢复磁盘上的摘要。
+
+更严重的条件分支：若 Full 已提交后 writer flush 失败，Phase 8 rollback 删除本 turn 新增 ID（包括摘要），只比较旧 payload IDs 判定恢复成功，却不恢复旧消息的 excluded flags。此时冷加载也无法恢复被删摘要。这需要故障注入回归，不能把单纯取消误写成此分支。
+
+### A5：Full 不能降低 canonical Reminder 本身的累积基线
+
+**证据：静态路径与已有 `full_compact_preserves_canonical_reminder_without_flags` 测试。现场影响未量化。**
+
+`MessageTranscript::visible_messages` 不包含 canonical Reminder；Full 的摘要输入和排除集合都基于普通消息。Reason 的 `visible_model_messages` 则包含 canonical Reminder（其中包括 model audience）。现有契约测试明确要求 Full 保留 Reminder，Goal steering 等生产者又可持续追加。
+
+若该基线本身已高于触发阈值，反复成功 Full 只替换普通消息/摘要，无法使基线回落；每次新高位 usage 都可重新 arm。不能为降低 token 直接删除仍有效指令，需要为可过期/可替换控制消息定义生命周期，或在不可回收的高压区返回明确 outcome。用户现场是否满足规模条件仍待观测。
+
+### A6：子会话与混合历史边界仍不完整
+
+**证据：静态子链审计；不归因于普通 root 交错。**
+
+- SubAgent resume 只加载 child own payload，又全部 `with_ancestor_payloads`，不恢复 flags。若显式配置自动 Compact，旧 own 历史无法被 Full 排除。当前生产 Agent 工具 spawn/resume 的 compact config、budget、LLM 为 None，不能把此风险说成当前普通子任务自动交错来源。
+- fork 子任务把父消息以原 MessageId append；SQLite 全局 ID 冲突 `INSERT OR IGNORE`，child 本地磁盘行没有父快照；resume 只读 child 行，继承上下文丢失。
+- spawn 把 parent snapshot 截止 ID 写在 child metadata；`load_context_payloads` 却读 ancestor 自己的 snapshot，普通 fresh parent 没有该字段，祖先被跳过。
+- 如果 legacy metadata 使混合父/子 payload 真正加载到 hidden child 的 root 执行，统一 own 分类会使 Micro 按全局 MessageId 更新 parent flags，而 Full 的 thread-scoped 事务拒绝 parent ID 并回滚。普通 ACP `session/fork` 的独立 ID 复制路径本轮未发现这个问题。
+
+### 本次验证与后续修复入口
+
+本次审计新加 5 个测试：1 个默认运行的成功 Full 循环 characterization，4 个带明确原因的 ignored regression。4 个 ignored 测试已显式执行并失败；ignored 只为不把此次审计变成默认套件永久失败，绝不代表缺陷已验证通过。修复时须移除 ignore，并调整 characterization，使其锁定正确行为。
+
+```bash
+# 应当绿色：完整成功 Full 循环已复现当前错误行为
+cargo test -p peri-agent --lib test_audit_run_react_loop -- --nocapture
+# 当前应当红色：4 个明确的正确性断言
+cargo test -p peri-agent --lib test_audit_ -- --ignored --nocapture
+# 默认 suite 的绿色不能替代上面的 4 项失败
+cargo test -p peri-agent --lib -- --quiet
+```
+
+- 初始 baseline：compact 过滤 190 passed；run_react_loop 过滤 10 passed，均 exit 0。
+- 新增 RCRA characterization：1 passed，exit 0，2 次 Full 真正成功。
+- 显式 ignored regression：0 passed / 4 failed，exit 101；失败分别为 19,763 虚假 saving、压制 Full、74k 未计工具增长、1,882 重复 saving。
+- 最终默认 peri-agent suite：731 passed / 4 ignored，exit 0；期间工作区其他任务新增了 1 项测试。
+- `cargo clippy -p peri-agent --all-targets -- -D warnings`：exit 0；审计测试 rustfmt 检查、`git diff --check` 通过。
+- 独立只读审查确认测试 seam 与断言有效。工作区其他任务的 reminder/replay/storage 变更不属于本次审计产出。
+
+建议修复顺序与验收：
+
+- [ ] A1：planner、estimator 与 renderer 使用一致可见集合；默认 stale 下 excluded 永不入选，虚假 saving 不能压制 Full。
+- [ ] A2：明确一次已发送请求的 projection 基线，禁止重复计算增量收益；不要把 planner saving 写入 provider usage。
+- [ ] A3：在最终工具结果提交处接入压力增长，覆盖零 usage、失败结果、PTC 最终结果与避免重复计数。
+- [ ] A4：host 采纳已提交 canonical progress 与终态成功与否解耦；增加 Full→cancel/error→next turn、Full→writer failure 的真实恢复测试。
+- [ ] A5：量化不可压缩 reminder/frozen/system/tool schema 基线，建立有语义的生命周期或无法降压 outcome。
+- [ ] A6：恢复 payload provenance、flags 与 snapshot producer/consumer 契约，防止 child 写 parent flags。
+- [ ] 用现场同一会话实际 provider input 与事件链补证，量化成功 Full 后基线和额外调用成本，再决定是否需要 no-progress guard。
+
+此前「仅旧压力样本去重即可、不加 no-progress guard」的结论应保留为当时证据下的决策，不能作为本次剩余问题已经解决的依据。此次尚未修改生产策略或关闭 P0。
+
+
+## 修复实现与验收（2026-09-11）
+
+用户明确要求先提交审计，再设计并修复、验证后提交。审计已独立提交为 `c415e661`；以下为该审计之后的修复，不将前文历史失败结果改写为成功。
+
+### 修复决策
+
+| 缺陷 | 实现与正确性场景 |
+| --- | --- |
+| A1 重复回收 excluded 历史 | TurnGroup、Micro planner 与 estimator 跳过 excluded，只规划 visible own history；Full 后已排除的长工具结果不能产生新 Micro saving，也不能压制必要的 Full。真实 SQLite 循环不再对这些历史交替触发 Micro。 |
+| A2 Reason 隐式预投影 | Reason 仅应用已提交 directive，Absent 使用 canonical 可见消息；渲染已有 directive 与自动 compact 开关独立。消除请求已经变短后又把同一收益记给下次 Micro 的路径。 |
+| A3 工具增长未入账 | canonical 工具批次原子提交之后、after_tools_batch 之前，统一记成功和解析失败结果的增长；内部 PTC 调用不重复结算。有效新 provider input usage 结清估算，zero/missing 保留未确认增长，预算不重复扣减。 |
+| A4 Full 后错误丢摘要 | host 不以终态 ok 决定是否采纳可信 payload 快照。Full 后 cancel、LLM error、forwarder error 均保留已提交摘要；writer 失败停止热会话、保留磁盘已提交内容，删除原有仅按新增 ID 回滚的路径。 |
+| A5 Full 成功但预算未恢复 | 采用顾问建议的一次重试窗口：无新增用户或工具工作时，两次 Full 后的对应真实请求仍高于 Full 阈值，返回 CompactBudgetUnrecovered；只认匹配请求的有效 usage，AI/摘要/Reminder 不重置计数，cancel 优先于预算错误。SQLite/RCRA 场景验证两次 Full、第三次 Reason 明确终止，canonical Reminder 完整保留。 |
+| A6 子会话来源边界丢失 | 新子会话冻结 inherited payload + flags 的版本化快照，own 消息独立持久化；spawn、resume、hidden child executor 恢复同一祖先边界；标记 setter 与 lifecycle 拒绝改写 parent IDs。覆盖 child Full/Micro、parent 后续 Full、关闭数据库重开、child resume，以及关闭自动 compact 后恢复已有投影。 |
+
+独立代码复核额外发现：Full 的数据库 COMMIT 可能已经成功，但取消先于内存 apply；store 返回错误也不能证明 COMMIT 未发生。普通 writer barrier 成功无法证明这类状态一致。自动与手动 `/compact` 都须传播共享提交状态，遇到不确定结果停止运行并要求冷恢复；已确认提交后的普通取消仍保留摘要。持久化不确定属于收尾失败，不等同于普通 cancel 或预算错误。
+
+### 验证记录
+
+审计中的四个 ignored correctness regression 已移除 ignore，并作为默认套件断言运行；旧成功 Full churn characterization 已改为正确行为回归。
+
+最终自动验证（命令退出码均为 0）：
+
+| 验证 | 结果 |
+| --- | --- |
+| `cargo test -p peri-agent -p peri-acp -p peri-acp-types -p peri-resources --lib --no-fail-fast -- --quiet` | Agent 754、ACP 619、types 334、resources 69 passed；均 0 failed / 0 ignored；ACP 日志通过 `RUST_LOG_FILE` 指向临时目录 |
+| `cargo test -p peri-middlewares --lib -- --test-threads=1` | 1611 passed、0 failed、4 既有 ignored；需允许本地回环端口与子进程状态读取 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 通过 |
+| `cargo build --workspace` | 通过 |
+| `cargo test --workspace --doc` | 1 passed、0 failed、3 既有 ignored |
+| 审计 correctness regression | 4 passed、0 ignored；首次 Reason 保留 canonical 内容、解析失败工具结果压力入账亦有断言 |
+| 手动与自动取消/恢复 | 6 个手动、10 个自动真实 SQLite 场景包含在上述完整套件中 |
+
+验证过程如实保留：Middleware 默认并发运行最初出现 26 项失败；串行后剩 4 项涉及沙箱的回环端口/进程观察限制。对应测试在允许所需系统能力后单独通过，随后完整串行套件通过。本次未改 Middleware 生产代码或削弱断言。格式检查、`git diff --check` 和变更文档本地链接检查通过；提交钩子由提交时再次执行。
+
+### 验收边界
+
+- 新 snapshot 可以准确冻结创建时 payload/flags。legacy 子会话未保存历史 snapshot，无法凭现存数据库重建创建时 flags；兼容加载修正 child cutoff 并恢复当前可获得状态，不声称回溯修复历史缺失。
+- 预算保护针对同一工作单元的重复 Full。持续新增非空 Human/Tool 会开启新窗口；本次未改变 canonical Reminder 生命周期，也未测出 frozen/system/tool schema 的不可压缩 token 下限。
+- 自动测试使用真实 SQLite、executor/host 收尾和模拟 provider usage；没有替代现场同一会话真实 token/事件链验收。P0 现场验收与成本量化继续留在本 issue，不因测试绿色归档。
+- 全局测试此前访问真实用户默认数据库，新增 schema 迁移在沙箱下暴露该问题。Resources 默认路径选择测试改为注入临时 SQLite，生产默认路径不变；ACP 验证日志通过 RUST_LOG_FILE 放入临时目录。
+
+- 独立复核确认当前自动 compact 与 `session/prompt` 的 `/compact` 主路径无剩余阻断发现。新增自动恢复 10 场景、手动取消与恢复 6 场景均通过。
+- 未注入 SQLite 内部 worker 已排队但尚未执行 COMMIT 的更窄时序；本轮稳定验证的是 COMMIT 已生效、ACK 返回前的取消与错误。若需严格验证该内部窗口，须另外建立存储层事务完成屏障实验。
+- 公开 Rust `dispatch::execute_command` 保留 API 尚未共享手动恢复保护；全仓库调用仅测试，host/router 未接线，不能归因于当前用户主路径。后续接入前须复用本轮提交状态契约。

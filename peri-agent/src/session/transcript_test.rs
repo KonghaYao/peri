@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn test_ancestor_flags_can_restore_but_cannot_mutate() {
+    let ancestor = BaseMessage::human("parent snapshot");
+    let ancestor_id = ancestor.id();
+    let mut transcript = MessageTranscript::new().with_ancestor(vec![ancestor]);
+    let restored = MessageFlags {
+        excluded: true,
+        ..Default::default()
+    };
+    transcript.set_flags_batch(HashMap::from([(ancestor_id, restored.clone())]));
+    transcript.set_excluded(ancestor_id, false);
+    transcript.set_truncated(ancestor_id, true);
+    transcript.set_flags_projection(
+        ancestor_id,
+        MessageProjectionDirective {
+            policy_version: 2,
+            entries: vec![],
+        },
+    );
+    transcript.clear_flags(ancestor_id);
+    assert_eq!(
+        transcript.flags(ancestor_id),
+        restored,
+        "所有普通flag写入口都必须保留只读祖先快照"
+    );
+    let own_id = transcript.append(BaseMessage::human("own work"));
+    transcript.set_excluded(own_id, true);
+    assert!(transcript.flags(own_id).excluded, "own区域仍允许压缩");
+}
+
+/// [回归测试] 内部 Compact 文本仅在模型出口包装，数据库原始内容和 ID 保持不变。
+#[test]
+fn test_legacy_compact_model_projection_preserves_storage() {
+    let text = "[最近读取的文件: /a.rs]\nfn main() { /* </system-reminder> */ }";
+    let mut transcript = MessageTranscript::new();
+    let id = transcript.append(BaseMessage::human(text));
+    let view = transcript.visible_model_messages().unwrap();
+    assert_eq!(view[0].id(), id);
+    assert!(view[0].content().starts_with("<system-reminder>"));
+    assert!(view[0].content().contains("&lt;/system-reminder&gt;"));
+    assert_eq!(transcript.get(id).unwrap().message().content(), text);
+    transcript.set_excluded(id, true);
+    assert!(transcript.visible_model_messages().unwrap().is_empty());
+}
+
+#[test]
 fn reminder_entry_preserves_stable_identity_without_placeholder_state() {
     use peri_acp_types::system_reminder::{
         ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
@@ -392,6 +437,150 @@ async fn test_commit_compaction_lifecycle_filesystem_failure_leaves_memory_and_s
     assert!(messages.iter().all(|message| message.id() != summary_id));
     let flags = store.load_message_flags(&thread_id).await.unwrap();
     assert!(flags.is_empty());
+}
+
+/// [回归测试] compact 历史必须从 canonical transcript 持久化，而非从模型投影重建。
+/// reminder 在摘要前保留或在摘要后追加，冷重载均保持同一 typed payload 和顺序。
+#[tokio::test]
+async fn test_compaction_reload_preserves_canonical_reminder_once() {
+    use peri_acp_types::system_reminder::{
+        encode_system_reminder, ReminderAudience, ReminderAudiences, ReminderCategory,
+        ReminderDelivery, ReminderSeverity, ReminderSource, SystemReminder,
+        TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let dir = tempdir().unwrap();
+    for reminder_after_compact in [false, true] {
+        let db_path = dir
+            .path()
+            .join(format!("reminder-{reminder_after_compact}.db"));
+        let store: Arc<dyn ThreadStore> = Arc::new(SqliteThreadStore::new(&db_path).await.unwrap());
+        let thread_id = store.create_thread(ThreadMeta::new("/test")).await.unwrap();
+        let reminder = TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Task,
+                source: ReminderSource("compact_reload_test".into()),
+                kind: "notice".into(),
+                severity: ReminderSeverity::Info,
+                delivery: ReminderDelivery::Configurable,
+                audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+                body: "canonical reminder".into(),
+                summary: None,
+                metadata: serde_json::json!({}),
+            })
+            .unwrap();
+        let encoded_reminder = encode_system_reminder(&reminder).unwrap();
+        let mut transcript =
+            MessageTranscript::new().with_persistence(store.clone(), thread_id.clone());
+        let first_id = transcript.append(make_human("旧用户消息"));
+        let existing_reminder =
+            (!reminder_after_compact).then(|| transcript.append_system_reminder(reminder.clone()));
+        let second_id = transcript.append(make_ai("旧助手回答"));
+        let summary = make_human("压缩摘要");
+        let summary_id = summary.id();
+        // 不手工删行：生产 API 先排空 writer，再原子追加摘要与 excluded flags。
+        transcript
+            .commit_compaction_lifecycle(CompactionLifecycle {
+                flag_updates: [first_id, second_id]
+                    .into_iter()
+                    .map(|id| {
+                        (
+                            id,
+                            MessageFlags {
+                                excluded: true,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+                appended_messages: vec![summary],
+            })
+            .await
+            .unwrap();
+        let reminder_id =
+            existing_reminder.unwrap_or_else(|| transcript.append_system_reminder(reminder));
+        transcript.flush_persistence().await.unwrap();
+        let canonical = transcript.persisted_payloads();
+        let visible_ids = if reminder_after_compact {
+            vec![summary_id, reminder_id]
+        } else {
+            vec![reminder_id, summary_id]
+        };
+        assert_eq!(
+            transcript
+                .visible_model_messages()
+                .unwrap()
+                .iter()
+                .map(BaseMessage::id)
+                .collect::<Vec<_>>(),
+            visible_ids
+        );
+        transcript.shutdown_persistence();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while transcript.flush_persistence().await.is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("冷重载前 writer 必须退出");
+        drop(transcript);
+        drop(store);
+        // 新建 SQLite store 和 transcript，从磁盘 payload/flags 恢复。
+        let reopened = SqliteThreadStore::new(&db_path).await.unwrap();
+        let loaded = reopened.load_payloads(&thread_id).await.unwrap();
+        let flags = reopened.load_message_flags(&thread_id).await.unwrap();
+        assert_eq!(
+            loaded.len(),
+            4,
+            "compact 保留旧 canonical 行，以 flags 控制可见性"
+        );
+        let encoded = |payloads: &[PersistedPayload]| {
+            payloads
+                .iter()
+                .map(|payload| {
+                    serde_json::from_str::<serde_json::Value>(
+                        &peri_acp_types::store::serialize_persisted_payload(payload).unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(encoded(&loaded), encoded(&canonical));
+        assert_eq!(
+            loaded
+                .iter()
+                .filter(|payload| payload.id() == reminder_id)
+                .count(),
+            1
+        );
+        assert!(matches!(
+            loaded
+                .iter()
+                .find(|payload| payload.id() == reminder_id)
+                .unwrap(),
+            PersistedPayload::SystemReminder { .. }
+        ));
+        let mut restored = MessageTranscript::new().with_own_payloads(loaded);
+        restored.set_flags_batch(flags);
+        let projected = restored.visible_model_messages().unwrap();
+        assert_eq!(
+            projected.iter().map(BaseMessage::id).collect::<Vec<_>>(),
+            visible_ids
+        );
+        assert_eq!(
+            projected
+                .iter()
+                .find(|message| message.id() == reminder_id)
+                .unwrap()
+                .content(),
+            encoded_reminder
+        );
+        assert_eq!(
+            restored.visible_messages().len(),
+            1,
+            "普通消息视图只含摘要，不将 reminder 反写为普通 human"
+        );
+    }
 }
 
 // ── 持久化 flush/barrier ───────────────────────────────────────────────────
@@ -1126,4 +1315,81 @@ fn test_projection_directive_none_when_not_set() {
         !json.contains("projection"),
         "JSON 应不含 projection 字段（skip_serializing_if）"
     );
+}
+/// The terminal failure must disarm batching: pending payloads are retained for
+/// diagnostics, but only a new channel operation may wake the failed writer.
+#[tokio::test(start_paused = true)]
+async fn test_failed_writer_does_not_rearm_expired_batch_deadline() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct WakeCounter(AtomicUsize);
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let store = Arc::new(FaultInjectingStore::new([1]));
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut writer = Box::pin(super::persistence::run_writer(
+        store.clone(),
+        "failed-writer-idle".into(),
+        rx,
+    ));
+    let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wakes));
+    tx.send(PersistOp::Append(TranscriptEntry::Message(make_human(
+        "not persisted",
+    ))))
+    .unwrap();
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    tx.send(PersistOp::Barrier(ack_tx)).unwrap();
+    // Poll the actual production future through Append -> failed flush -> Barrier.
+    // No executor task is attached to this waker, so an expired timer cannot
+    // automatically repoll the old writer into a hot loop in the test itself.
+    assert!(matches!(
+        writer.as_mut().poll(&mut Context::from_waker(&waker)),
+        Poll::Pending
+    ));
+    let first_error = ack_rx.await.unwrap().unwrap_err().to_string();
+    assert!(first_error.contains("deterministic injected error on append 1"));
+    assert!(store.messages().is_empty());
+    let before = wakes.0.load(Ordering::SeqCst);
+
+    // The production deadline was registered during the first poll (<=100ms).
+    // Its std::Instant bookkeeping need not change: no second writer poll occurs
+    // before this assertion. A subsequent virtual timer ensures the time driver
+    // has processed the earlier deadline before we inspect the counter.
+    tokio::time::advance(std::time::Duration::from_millis(150)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    assert_eq!(
+        wakes.0.load(Ordering::SeqCst),
+        before,
+        "a terminally failed writer must wait for operations, not an expired batching timer"
+    );
+
+    // Failure remains sticky; later Barrier and Shutdown still make progress.
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    tx.send(PersistOp::Barrier(ack_tx)).unwrap();
+    assert!(matches!(
+        writer.as_mut().poll(&mut Context::from_waker(&waker)),
+        Poll::Pending
+    ));
+    assert_eq!(ack_rx.await.unwrap().unwrap_err().to_string(), first_error);
+    assert_eq!(
+        *store.append_count.lock().unwrap(),
+        1,
+        "terminal failure must not retry a possibly partial batch"
+    );
+    tx.send(PersistOp::Shutdown).unwrap();
+    assert!(matches!(
+        writer.as_mut().poll(&mut Context::from_waker(&waker)),
+        Poll::Ready(())
+    ));
+    assert!(tx.is_closed(), "Shutdown must drop the production receiver");
 }

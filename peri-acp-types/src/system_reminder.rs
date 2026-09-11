@@ -490,7 +490,19 @@ pub enum ReminderCodecError {
     Serialization(#[from] serde_json::Error),
 }
 
-/// The sole canonical model/legacy wire encoder. Control-bearing output requires trusted provenance.
+/// Encodes legacy display/model context without asserting canonical producer provenance.
+pub fn encode_legacy_system_reminder(body: &str) -> Result<String, ReminderCodecError> {
+    if body.len() > MAX_REMINDER_BODY_BYTES {
+        return Err(ReminderValidationError::BodyTooLarge.into());
+    }
+    let encoded = format!("<system-reminder>{}</system-reminder>", escape_xml(body));
+    if encoded.len() > MAX_REMINDER_WIRE_BYTES {
+        return Err(ReminderCodecError::WireTooLarge);
+    }
+    Ok(encoded)
+}
+
+/// Canonical wire encoder. Control-bearing output requires trusted provenance.
 pub fn encode_system_reminder(
     reminder: &TrustedSystemReminder,
 ) -> Result<String, ReminderCodecError> {

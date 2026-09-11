@@ -50,16 +50,20 @@ pub enum BackpressurePolicy {
     DropNew,
     /// 队列满时阻塞等待
     Block,
-    /// 队列满时弹出最旧事件
+    /// 队列满时替换最旧的待发送事件；已准入 flush 及其前缀不可驱逐。
+    /// 无可驱逐事件时返回 QueueFull，在途 HTTP 批次不受影响。
     DropOldest,
 }
 
 /// Batcher 批量聚合配置
 #[derive(Debug, Clone)]
 pub struct BatcherConfig {
+    /// 命令队列容量及单批上限，必须为 1..=tokio::sync::Semaphore::MAX_PERMITS。
     pub max_events: usize,
+    /// 自动发送间隔，必须非零。
     pub flush_interval: Duration,
     pub backpressure: BackpressurePolicy,
+    /// 兼容保留，不参与执行；实际重试次数由 LangfuseClient 构造参数独占。
     pub max_retries: usize,
 }
 
@@ -75,6 +79,20 @@ impl Default for BatcherConfig {
 }
 
 impl BatcherConfig {
+    pub(crate) fn validate(&self) -> Result<(), crate::LangfuseError> {
+        if self.max_events == 0 || self.max_events > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(crate::LangfuseError::Config(
+                "batch max_events is outside the supported nonzero capacity range".into(),
+            ));
+        }
+        if self.flush_interval.is_zero() {
+            return Err(crate::LangfuseError::Config(
+                "batch flush_interval must be nonzero".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// 从 ClientConfig 构造 Batcher 配置
     pub fn from_client(client: &ClientConfig) -> Self {
         Self {
