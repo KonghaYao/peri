@@ -266,7 +266,9 @@ hooks、插件与 MCP 展示取当前会话环境。TUI 本地配置面板仍编
 
 默认读写始终使用 `~/.peri/threads/threads.db`，`--db-path` 仍可选择显式路径。
 schema 版本记录在 `PRAGMA user_version`，当前为 `3`，不另建数据库文件。新 writer
-识别旧版未设置版本号的已知 `threads` / `messages` schema，在单个事务中补齐
+按必需的 `threads` / `messages` 真实表及其列识别未设置版本号的旧 schema；
+同库额外业务表（例如 `thread_goals`）及其数据保持原样，不能以整库表数量拒绝
+兼容旧库。在单个事务中补齐
 缺失列、增加 Project / Workspace / SessionBinding / execution_runs 表及索引。
 新建与旧库补列共享同一组列定义；已存在的 schema 2 在事务中删除无状态用途的
 binding `revision` 列，保留其余绑定与执行状态，最后提交版本号。并发开库由

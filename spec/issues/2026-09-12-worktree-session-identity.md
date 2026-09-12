@@ -127,6 +127,26 @@ RecoveryRequired，不用超时或 PID 缺失假定已经安全收尾。
   HOME 隔离的默认路径测试限定 Unix，Windows 使用系统 known-folder API，
   不通过 HOME/USERPROFILE 覆盖测试位置。未打开实际用户数据库，未提交 Git。
 
+## 实际旧库启动回归（2026-09-12）
+
+- 用户运行 `./dev.sh` 被 `UnsupportedDatabaseSchema` 阻断。只读检查实际 DDL
+  确认 user_version 为 0，除 threads/messages 外还保留 thread_goals；此前检查
+  错误要求全库恰好两张表，合成测试遗漏了这一历史结构。
+- 修正为验证必需真实表与列，允许并保留其他业务表；不硬编码 thread_goals 白名单。
+  从实际库导出无用户行数据的 `fixtures/legacy_with_goals.sql`，通过 Resources
+  启动入口验证目标、消息、旧索引和额外扩展表不变，且新会话仍可绑定/写入。
+- 回归测试先复现同一启动错误（`/tmp/peri-legacy-goals-red.log`）；补充同名 VIEW
+  不得替代必需表的拒绝路径。
+- Resources 102 个测试通过；`cargo build -p peri-tui` 与 workspace 全目标
+  Clippy（`-D warnings`）通过。重新构建的真实 CLI 在隔离 HOME 下使用实际旧库
+  DDL 与合成数据，走默认数据库路径、标准 print 模式和本地 mock provider，完成
+  启动、新会话持久化、模型响应与退出（exit 0）；旧目标记录与外键完整性保持。
+- 日志：`/tmp/peri-legacy-goals-final.log`、`/tmp/peri-legacy-goals-build.log`、
+  `/tmp/peri-legacy-goals-clippy.log`；进程验证脚本：
+  `/tmp/peri-legacy-goals-print-smoke.py`。实际用户库仅只读检查 DDL，未写入。
+  PTY 探针观察到 TUI 进入 alternate screen，但未验证正常交互退出，因此不算
+  交互式 TUI 验收证据。
+
 ## 仍需平台验收
 
 - 在 Windows 与 Linux 主机验证真实跨进程 lease、Git worktree 文件身份、

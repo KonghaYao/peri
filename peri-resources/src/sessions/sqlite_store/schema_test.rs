@@ -8,6 +8,130 @@ use peri_acp_types::{
 use sqlx::{sqlite::SqliteConnectOptions, Connection};
 use std::path::Path;
 
+/// [回归测试] 实际旧库包含 thread_goals，不能因额外业务表而拒绝启动。
+#[tokio::test]
+async fn test_legacy_with_goals_upgrades_and_preserves_auxiliary_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("threads.db");
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true),
+    )
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!("fixtures/legacy_with_goals.sql"))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count)
+            VALUES ('old-session', '旧会话', '/old/worktree', '2026-09-01T00:00:00Z', '2026-09-02T00:00:00Z', 1);
+        INSERT INTO messages (message_id, thread_id, role, content)
+            VALUES ('old-message', 'old-session', 'user', 'original message bytes');
+        INSERT INTO thread_goals VALUES ('old-session', 'goal-1', '保留目标', 'paused', 1000, 42, 9, 1, 2);
+        CREATE TABLE extension_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO extension_state VALUES ('state', 'preserved extension bytes');",
+    ).execute(&mut connection).await.unwrap();
+    let before = history_bytes(&mut connection).await;
+    let auxiliary_query =
+        "SELECT json_array(thread_id, goal_id, objective, status, token_budget, tokens_used,
+        time_used_seconds, created_at_ms, updated_at_ms) FROM thread_goals";
+    let goals: (String,) = sqlx::query_as(AssertSqlSafe(auxiliary_query))
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    let extra_schema: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT name, sql FROM sqlite_schema WHERE name IN ('thread_goals', 'extension_state', 'idx_threads_parent_thread_id') ORDER BY name",
+    ).fetch_all(&mut connection).await.unwrap();
+    connection.close().await.unwrap();
+    // 调用应用启动所用的 Resources 门面，复现相同的写打开入口。
+    let resources = crate::Resources::open_with(Some(path.clone()))
+        .await
+        .unwrap();
+    let store = resources.thread_store();
+    assert_eq!(
+        store
+            .load_meta(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("旧会话")
+    );
+    assert!(store
+        .load_session_binding(&"old-session".to_owned())
+        .await
+        .unwrap()
+        .is_none());
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new().filename(&path).read_only(true),
+    )
+    .await
+    .unwrap();
+    let after_goals: (String,) = sqlx::query_as(AssertSqlSafe(auxiliary_query))
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(after_goals, goals);
+    let after_schema: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT name, sql FROM sqlite_schema WHERE name IN ('thread_goals', 'extension_state', 'idx_threads_parent_thread_id') ORDER BY name",
+    ).fetch_all(&mut connection).await.unwrap();
+    assert_eq!(after_schema, extra_schema);
+    let (value,): (String,) =
+        sqlx::query_as("SELECT value FROM extension_state WHERE key = 'state'")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(value, "preserved extension bytes");
+    assert_eq!(history_bytes(&mut connection).await, before);
+    let violations = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+    assert!(violations.is_empty());
+    connection.close().await.unwrap();
+    let workspace = store.resolve_workspace(dir.path()).await.unwrap();
+    let id = store
+        .create_bound_thread(ThreadMeta::new(dir.path().to_str().unwrap()), &workspace)
+        .await
+        .unwrap();
+    let lease = store.acquire_execution_lease(&id).await.unwrap();
+    store
+        .append_messages(&id, &[BaseMessage::human("新会话")])
+        .await
+        .unwrap();
+    lease.mark_clean().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_legacy_auxiliary_tables_do_not_allow_views_to_replace_required_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("threads.db");
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true),
+    )
+    .await
+    .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE auxiliary_state (id TEXT PRIMARY KEY);
+        CREATE VIEW threads AS SELECT 'id' AS id, 'title' AS title, '/cwd' AS cwd,
+            'created' AS created_at, 'updated' AS updated_at, 1 AS message_count;
+        CREATE TABLE messages (message_id TEXT PRIMARY KEY, thread_id TEXT, role TEXT, content TEXT);",
+    ).execute(&mut connection).await.unwrap();
+    connection.close().await.unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let error = SqliteThreadStore::new(&path).await.err().unwrap();
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::UnsupportedDatabaseSchema)
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!path.with_extension("db-wal").exists());
+}
+
 // 旧 writer 未设置 user_version；fixture 独立于新 schema 初始化代码。
 async fn legacy_database(path: &Path) -> SqliteConnection {
     let mut connection = SqliteConnection::connect_with(

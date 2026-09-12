@@ -14,7 +14,7 @@ pub(super) enum SchemaState {
     Current,
 }
 
-/// 旧版未设置 user_version；只接受已知基础表，防止改写无关或未来版本的库。
+/// 旧版未设置 user_version；校验本模块所需基础表，保留同库的其他业务表。
 pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaState> {
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&mut *connection)
@@ -33,10 +33,10 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
     if tables.is_empty() {
         return Ok(SchemaState::Empty);
     }
-    if tables.len() != 2
-        || !tables
-            .iter()
-            .all(|(name,)| matches!(name.as_str(), "threads" | "messages"))
+    // 只要求必需的真实表存在，不限制整库的表集合；VIEW 不能替代可升级的表。
+    if !["threads", "messages"]
+        .iter()
+        .all(|required| tables.iter().any(|(name,)| name == required))
     {
         return Err(WorkspaceError::UnsupportedDatabaseSchema.into());
     }
