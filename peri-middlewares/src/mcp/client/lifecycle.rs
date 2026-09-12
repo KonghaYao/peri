@@ -9,22 +9,28 @@ use std::sync::Arc;
 pub(super) enum ServiceShutdownState {
     Idle,
     Running {
-        handle: tokio::task::JoinHandle<McpPoolShutdownReport>,
+        handle: tokio::task::JoinHandle<(McpPoolShutdownReport, Vec<(String, McpServiceWrapper)>)>,
         total_services: usize,
+    },
+    Retry {
+        report: McpPoolShutdownReport,
+        services: Vec<(String, McpServiceWrapper)>,
     },
     Terminal(McpPoolShutdownReport),
 }
 
-async fn close_services(services: Vec<(String, McpServiceWrapper)>) -> McpPoolShutdownReport {
-    let mut settled_services = 0;
-    let mut unfinished_services = 0;
-    let mut failed_services = 0;
+async fn close_services(
+    services: Vec<(String, McpServiceWrapper)>,
+    mut settled_services: usize,
+    mut failed_services: usize,
+) -> (McpPoolShutdownReport, Vec<(String, McpServiceWrapper)>) {
+    let mut remaining = Vec::new();
     for (server_name, mut service) in services {
         match service.close_with_timeout(SHUTDOWN_TIMEOUT).await {
             Ok(Some(_reason)) => settled_services += 1,
             Ok(None) => {
-                unfinished_services += 1;
                 tracing::warn!(server = %server_name, "MCP service cleanup remained unfinished");
+                remaining.push((server_name, service));
             }
             Err(error) => {
                 settled_services += 1;
@@ -33,7 +39,8 @@ async fn close_services(services: Vec<(String, McpServiceWrapper)>) -> McpPoolSh
             }
         }
     }
-    if unfinished_services == 0 {
+    let unfinished_services = remaining.len();
+    let report = if unfinished_services == 0 {
         McpPoolShutdownReport::Complete {
             settled_services,
             failed_services,
@@ -44,10 +51,42 @@ async fn close_services(services: Vec<(String, McpServiceWrapper)>) -> McpPoolSh
             unfinished_services,
             failed_services,
         }
-    }
+    };
+    (report, remaining)
 }
 
 impl McpClientPool {
+    pub(crate) fn retain_service(&self, service: McpServiceWrapper) -> McpServiceWrapper {
+        let peer = service.peer().clone();
+        McpServiceWrapper::shared(self.own_service(service), peer)
+    }
+
+    pub(crate) fn own_service(&self, service: McpServiceWrapper) -> Arc<super::McpServiceOwner> {
+        let _admission = self.lifecycle_registration.lock();
+        let owner = Arc::new(super::McpServiceOwner::new(service));
+        if !self.is_open() {
+            owner.begin_close();
+        }
+        let mut services = self.shared_services.lock();
+        services.retain(|service| !service.is_stopped());
+        services.push(owner.clone());
+        owner
+    }
+
+    async fn close_shared_services(&self) -> usize {
+        let services = self.shared_services.lock().clone();
+        for service in services {
+            let _ = tokio::time::timeout(
+                SHUTDOWN_TIMEOUT,
+                service.close_with_timeout(SHUTDOWN_TIMEOUT),
+            )
+            .await;
+        }
+        let mut services = self.shared_services.lock();
+        services.retain(|service| !service.is_stopped());
+        services.len()
+    }
+
     pub(crate) fn handle_generation(&self, handle: &Arc<McpClientHandle>) -> u64 {
         self.handle_generations
             .lock()
@@ -139,6 +178,12 @@ impl McpClientPool {
         self.oauth_event_callback.write().take();
         self.pending_oauth_callbacks.lock().clear();
         self.active_oauth_flows.lock().clear();
+        for process in self.processes.lock().iter() {
+            process.begin_close();
+        }
+        for service in self.shared_services.lock().iter() {
+            service.begin_close();
+        }
     }
 
     pub fn spawn_background<F>(
@@ -194,32 +239,93 @@ impl McpClientPool {
             let mut services: Vec<_> = self.services.lock().drain().collect();
             services.sort_unstable_by(|left, right| left.0.cmp(&right.0));
             let total_services = services.len();
-            let handle = tokio::spawn(close_services(services));
+            let handle = tokio::spawn(close_services(services, 0, 0));
             *transaction = ServiceShutdownState::Running {
                 handle,
                 total_services,
             };
         }
 
-        let report = match &mut *transaction {
+        if let ServiceShutdownState::Retry { report, services } = &mut *transaction {
+            let McpPoolShutdownReport::Incomplete {
+                settled_services,
+                unfinished_services,
+                failed_services,
+            } = *report
+            else {
+                unreachable!()
+            };
+            let handle = tokio::spawn(close_services(
+                std::mem::take(services),
+                settled_services,
+                failed_services,
+            ));
+            *transaction = ServiceShutdownState::Running {
+                handle,
+                total_services: settled_services + unfinished_services,
+            };
+        }
+
+        let (report, remaining) = match &mut *transaction {
             ServiceShutdownState::Idle => unreachable!("shutdown transaction must be installed"),
-            ServiceShutdownState::Terminal(report) => return *report,
+            ServiceShutdownState::Retry { .. } => {
+                unreachable!("retry transaction must be installed")
+            }
+            ServiceShutdownState::Terminal(report) => (*report, Vec::new()),
             ServiceShutdownState::Running {
                 handle,
                 total_services,
             } => match handle.await {
-                Ok(report) => report,
+                Ok(result) => result,
                 Err(error) => {
                     tracing::error!(%error, "MCP service shutdown transaction failed");
-                    McpPoolShutdownReport::Incomplete {
-                        settled_services: 0,
-                        unfinished_services: *total_services,
-                        failed_services: *total_services,
-                    }
+                    (
+                        McpPoolShutdownReport::Incomplete {
+                            settled_services: 0,
+                            unfinished_services: *total_services,
+                            failed_services: *total_services,
+                        },
+                        Vec::new(),
+                    )
                 }
             },
         };
-        *transaction = ServiceShutdownState::Terminal(report);
+        *transaction = if remaining.is_empty() {
+            ServiceShutdownState::Terminal(report)
+        } else {
+            ServiceShutdownState::Retry {
+                report,
+                services: remaining,
+            }
+        };
+        let unfinished_shared = self.close_shared_services().await;
+        let unfinished_processes = self.close_processes().await + unfinished_shared;
+        let report = match (report, unfinished_processes) {
+            (report, 0) => report,
+            (
+                McpPoolShutdownReport::Complete {
+                    settled_services,
+                    failed_services,
+                },
+                unfinished_services,
+            ) => McpPoolShutdownReport::Incomplete {
+                settled_services,
+                unfinished_services,
+                failed_services,
+            },
+            (
+                McpPoolShutdownReport::Incomplete {
+                    settled_services,
+                    unfinished_services,
+                    failed_services,
+                },
+                processes,
+            ) => McpPoolShutdownReport::Incomplete {
+                settled_services,
+                unfinished_services: unfinished_services + processes,
+                failed_services,
+            },
+        };
         if report.is_complete() {
             self.lifecycle
                 .store(2, std::sync::atomic::Ordering::Release);

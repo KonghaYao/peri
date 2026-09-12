@@ -8,10 +8,13 @@
 use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::RwLock;
+use peri_acp_types::tasks::TaskManager;
 use peri_agent::agent::react::ReactLLM;
 
 use crate::hooks::{
-    executor::{execute_agent_hook, execute_command_hook, execute_http_hook, execute_prompt_hook},
+    executor::{
+        execute_agent_hook, execute_command_hook_owned, execute_http_hook, execute_prompt_hook,
+    },
     input_builder,
     matcher::{matches_if_condition, matches_matcher},
     once_tracker::OnceTracker,
@@ -33,6 +36,7 @@ pub struct HookDispatcher {
     once_tracker: Arc<OnceTracker>,
     /// Agent hook 执行时的工作目录（对齐原 HookMiddleware.cwd）。
     cwd: String,
+    task_manager: Option<Arc<dyn TaskManager>>,
 }
 
 impl HookDispatcher {
@@ -47,7 +51,13 @@ impl HookDispatcher {
             llm_factory,
             once_tracker,
             cwd,
+            task_manager: None,
         }
+    }
+
+    pub fn with_task_manager(mut self, task_manager: Arc<dyn TaskManager>) -> Self {
+        self.task_manager = Some(task_manager);
+        self
     }
 
     /// 分发一次 hook 事件。
@@ -146,21 +156,11 @@ impl HookDispatcher {
                 );
             }
             let action = if registered.hook.is_async() {
-                // Fire-and-forget: spawn in background, return Allow immediately
-                let hook = registered.hook.clone();
-                let owned_input = input.clone();
-                let registered = registered.clone();
-                tokio::spawn(async move {
-                    let _ = match &hook {
-                        HookType::Command { .. } => {
-                            execute_command_hook(&hook, &owned_input, &registered).await
-                        }
-                        HookType::Http { .. } => execute_http_hook(&hook, &owned_input).await,
-                        // Prompt/Agent hooks need LLM factory which can't be cloned into spawn;
-                        // async only applies to Command per schema definition.
-                        _ => HookAction::Allow,
-                    };
-                });
+                if let Err(error) =
+                    spawn_async_hook(registered.clone(), input.clone(), self.task_manager.clone())
+                {
+                    tracing::warn!(%error, "Async hook rejected by session execution scope");
+                }
                 HookAction::Allow
             } else {
                 self.execute_sync(&registered.hook, &input, registered)
@@ -207,7 +207,10 @@ impl HookDispatcher {
         registered: &RegisteredHook,
     ) -> HookAction {
         match hook {
-            HookType::Command { .. } => execute_command_hook(hook, input, registered).await,
+            HookType::Command { .. } => {
+                execute_command_hook_owned(hook, input, registered, self.task_manager.as_deref())
+                    .await
+            }
             HookType::Prompt { .. } => execute_prompt_hook(hook, input, &self.llm_factory).await,
             HookType::Http { .. } => execute_http_hook(hook, input).await,
             HookType::Agent { .. } => {
@@ -219,8 +222,8 @@ impl HookDispatcher {
 
 /// Fire standalone lifecycle hooks outside of the middleware lifecycle.
 ///
-/// Used by the TUI layer for events that occur outside the agent ReAct loop:
-/// - `SessionEnd`: when `/clear` resets the session
+/// Used by ACP lifecycle paths outside the agent ReAct loop:
+/// - `SessionEnd`: on session close, including `/clear` and host shutdown
 /// - `PreCompact` / `PostCompact`: before/after context compaction
 /// - `Notification`: when agent needs user attention (e.g. AskUserQuestion)
 ///
@@ -239,6 +242,35 @@ pub async fn fire_standalone_lifecycle_hooks(
     current_model: &str,
     message_count: Option<usize>,
     reason: Option<&str>,
+) {
+    fire_standalone_lifecycle_hooks_owned(
+        registered_hooks,
+        event,
+        cwd,
+        session_id,
+        transcript_path,
+        current_model,
+        message_count,
+        reason,
+        None,
+    )
+    .await;
+}
+
+/// Run lifecycle hooks using their session's execution owner.
+/// SessionEnd awaits even asynchronous hooks in the environment's cleanup scope;
+/// all other events preserve normal asynchronous dispatch.
+#[allow(clippy::too_many_arguments)]
+pub async fn fire_standalone_lifecycle_hooks_owned(
+    registered_hooks: &[RegisteredHook],
+    event: HookEvent,
+    cwd: &str,
+    session_id: &str,
+    transcript_path: &str,
+    current_model: &str,
+    message_count: Option<usize>,
+    reason: Option<&str>,
+    task_manager: Option<Arc<dyn TaskManager>>,
 ) {
     // Filter hooks matching the event
     let matching: Vec<&RegisteredHook> = registered_hooks
@@ -319,26 +351,24 @@ pub async fn fire_standalone_lifecycle_hooks(
             );
         }
 
-        if registered.hook.is_async() {
-            // Fire-and-forget async hook
-            let hook = registered.hook.clone();
-            let input = input.clone();
-            let registered = registered.clone();
-            tokio::spawn(async move {
-                let _ = match &hook {
-                    HookType::Command { .. } => {
-                        execute_command_hook(&hook, &input, &registered).await
-                    }
-                    HookType::Http { .. } => execute_http_hook(&hook, &input).await,
-                    _ => HookAction::Allow,
-                };
-            });
+        if registered.hook.is_async() && event != HookEvent::SessionEnd {
+            if let Err(error) =
+                spawn_async_hook(registered.clone(), input.clone(), task_manager.clone())
+            {
+                tracing::warn!(%error, "Async lifecycle hook rejected by session execution scope");
+            }
             continue;
         }
 
         let _action = match &registered.hook {
             HookType::Command { .. } => {
-                execute_command_hook(&registered.hook, &input, registered).await
+                execute_command_hook_owned(
+                    &registered.hook,
+                    &input,
+                    registered,
+                    task_manager.as_deref(),
+                )
+                .await
             }
             HookType::Prompt { .. } => {
                 // No LLM factory available in standalone context; skip
@@ -351,4 +381,52 @@ pub async fn fire_standalone_lifecycle_hooks(
             }
         };
     }
+}
+
+/// Async completion stays in the session scope while its command owner drains
+/// the process tree independently of the ignored HookAction result.
+fn spawn_async_hook(
+    registered: RegisteredHook,
+    input: HookInput,
+    task_manager: Option<Arc<dyn TaskManager>>,
+) -> Result<(), String> {
+    let manager = task_manager.clone();
+    let cancellation = manager
+        .as_ref()
+        .and_then(|manager| manager.execution_cancel_token());
+    let task = async move {
+        let execute = async {
+            match &registered.hook {
+                HookType::Command { .. } => {
+                    execute_command_hook_owned(
+                        &registered.hook,
+                        &input,
+                        &registered,
+                        manager.as_deref(),
+                    )
+                    .await
+                }
+                HookType::Http { .. } => execute_http_hook(&registered.hook, &input).await,
+                _ => HookAction::Allow,
+            }
+        };
+        if let Some(token) = cancellation {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => {}
+                _ = execute => {}
+            }
+        } else {
+            let _ = execute.await;
+        }
+    };
+    match task_manager {
+        Some(manager) => {
+            manager.spawn_owned(Box::pin(task))?;
+        }
+        None => {
+            tokio::spawn(task);
+        }
+    }
+    Ok(())
 }

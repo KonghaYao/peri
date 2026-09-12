@@ -104,18 +104,18 @@ fn make_peri_config_with_provider(provider: ProviderConfig) -> PeriConfig {
     peri_config
 }
 
-fn make_server_config(
+async fn make_server_config(
     peri_config: PeriConfig,
     provider: LlmProvider,
     tmp: &tempfile::TempDir,
 ) -> AcpServerConfig {
-    make_server_config_with(peri_config, provider, tmp, Vec::new(), None, None)
+    make_server_config_with(peri_config, provider, tmp, Vec::new(), None, None).await
 }
 
 /// 同 [`make_server_config`]，另注入 `plugin_lsp_servers`（H1 会话级 LSP 池
 /// 测试）与 `mcp_pool`（MCP 发现预热 smoke 测试）——与迁移前
 /// `create_test.rs::make_stdio_context` 的「装配后显式替换」等价的参数化形态。
-fn make_server_config_with(
+async fn make_server_config_with(
     peri_config: PeriConfig,
     provider: LlmProvider,
     tmp: &tempfile::TempDir,
@@ -125,7 +125,9 @@ fn make_server_config_with(
 ) -> AcpServerConfig {
     use std::collections::BTreeMap;
 
-    let thread_store = peri_agent::thread::FilesystemThreadStore::new(tmp.path().join("threads"));
+    let thread_store = peri_agent::thread::SqliteThreadStore::new(tmp.path().join("threads.db"))
+        .await
+        .unwrap();
     let arc_thread_store: Arc<dyn peri_acp_types::store::ThreadStore> = Arc::new(thread_store);
     let session_manager = crate::session::SessionManager::new(
         arc_thread_store.clone(),
@@ -151,6 +153,7 @@ fn make_server_config_with(
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
+        workspace_assembly: None,
         host_task_owner: Some(host_task_owner),
         host_task_spawner,
         mcp_task_owner: Some(Box::new(mcp_task_owner)),
@@ -237,7 +240,7 @@ async fn read_line(stream: &mut DuplexStream) -> String {
 }
 
 /// 待测试的最小 `AcpServerConfig`（provider 假 key + bare 语义，无外部依赖）。
-fn test_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
+async fn test_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
     let peri_config = make_peri_config_with_provider(make_provider_config(
         "a",
         "openai",
@@ -245,7 +248,7 @@ fn test_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    make_server_config(peri_config, provider, tmp)
+    make_server_config(peri_config, provider, tmp).await
 }
 
 /// 最小 LSP 服务器配置（`command: "true"` 立即可退出的假服务器；与迁移前
@@ -266,7 +269,7 @@ fn make_lsp_config() -> peri_acp_types::lsp::LspServerConfig {
 }
 
 /// 带 `plugin_lsp_servers` 注入的测试配置（H1 会话级 LSP 池断言）。
-fn test_config_with_lsp(
+async fn test_config_with_lsp(
     tmp: &tempfile::TempDir,
     lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
 ) -> AcpServerConfig {
@@ -277,12 +280,12 @@ fn test_config_with_lsp(
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    make_server_config_with(peri_config, provider, tmp, lsp_servers, None, None)
+    make_server_config_with(peri_config, provider, tmp, lsp_servers, None, None).await
 }
 
 /// 带 pending `mcp_pool` 注入的测试配置（MCP 发现预热 smoke：pool 存在但
 /// 无已连接 server）。
-fn test_config_with_pending_mcp_pool(tmp: &tempfile::TempDir) -> AcpServerConfig {
+async fn test_config_with_pending_mcp_pool(tmp: &tempfile::TempDir) -> AcpServerConfig {
     let peri_config = make_peri_config_with_provider(make_provider_config(
         "a",
         "openai",
@@ -292,7 +295,7 @@ fn test_config_with_pending_mcp_pool(tmp: &tempfile::TempDir) -> AcpServerConfig
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let pool: Arc<dyn peri_acp_types::ports::McpPoolPort> =
         Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
-    make_server_config_with(peri_config, provider, tmp, Vec::new(), Some(pool), None)
+    make_server_config_with(peri_config, provider, tmp, Vec::new(), Some(pool), None).await
 }
 
 #[derive(Default)]
@@ -301,6 +304,19 @@ struct RecordingTaskManager {
 }
 
 impl peri_acp_types::tasks::TaskManager for RecordingTaskManager {
+    fn is_execution_idle(&self) -> bool {
+        true
+    }
+    fn shutdown(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = peri_acp_types::tasks::TaskShutdownReport> + Send + '_,
+        >,
+    > {
+        self.cancel_all();
+        Box::pin(async { peri_acp_types::tasks::TaskShutdownReport::Complete })
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -460,10 +476,34 @@ async fn await_server_exit(server_task: tokio::task::JoinHandle<()>, input: Dupl
         .expect("server task 不应 panic");
 }
 
-async fn create_legacy_thread(cfg: &AcpServerConfig, session_id: &str, cwd: &str) {
+async fn create_bound_thread_fixture(cfg: &AcpServerConfig, session_id: &str, cwd: &str) {
     let mut meta = peri_acp_types::thread::ThreadMeta::new(cwd);
     meta.id = session_id.to_string();
-    cfg.thread_store.create_thread(meta).await.unwrap();
+    let workspace = cfg
+        .thread_store
+        .resolve_workspace(std::path::Path::new(cwd))
+        .await
+        .unwrap();
+    cfg.thread_store
+        .create_bound_thread(meta, &workspace)
+        .await
+        .unwrap();
+    let owner = cfg
+        .thread_store
+        .acquire_execution_lease(&session_id.to_owned())
+        .await
+        .unwrap();
+    let frozen = cfg.session_manager.build_frozen_data(
+        workspace.cwd.to_str().unwrap(),
+        &cfg.plugin_skill_roots,
+        &cfg.plugin_agent_dirs,
+    );
+    let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
+    cfg.thread_store
+        .store_frozen_snapshot_if_absent(&session_id.to_owned(), &encoded)
+        .await
+        .unwrap();
+    owner.mark_clean().await.unwrap();
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
@@ -472,7 +512,7 @@ async fn create_legacy_thread(cfg: &AcpServerConfig, session_id: &str, cwd: &str
 #[tokio::test]
 async fn test_rejected_prompt_task_returns_terminal_error() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config(&tmp);
+    let cfg = test_config(&tmp).await;
     cfg.host_task_owner
         .as_ref()
         .expect("test config should own host task scope")
@@ -507,7 +547,7 @@ async fn test_rejected_prompt_task_returns_terminal_error() {
 #[tokio::test]
 async fn test_initialize_and_session_new_over_stdio_transport() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config(&tmp);
+    let cfg = test_config(&tmp).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let server_task = tokio::spawn(host::run_acp_server(transport, cfg));
@@ -618,7 +658,8 @@ async fn test_transport_eof_closes_sessions_and_drains_host_tasks() {
         Vec::new(),
         None,
         Some(task_manager_factory),
-    );
+    )
+    .await;
     let manager = cfg.session_manager.clone();
     manager
         .new_session_with_id("manager-only", tmp.path().to_str().unwrap())
@@ -657,6 +698,9 @@ async fn test_transport_eof_closes_sessions_and_drains_host_tasks() {
                 session_id: "local-only".to_string(),
                 thread_id: "local-only".to_string(),
                 cwd: tmp.path().to_string_lossy().into_owned(),
+                execution_owner: None,
+                environment: None,
+                closing: false,
                 history: Vec::new(),
                 history_payloads: Vec::new(),
                 cancel_token: Some(local_cancel),
@@ -732,7 +776,7 @@ async fn test_transport_eof_closes_sessions_and_drains_host_tasks() {
 #[tokio::test]
 async fn test_prompt_wire_shape_unknown_session_returns_error() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config(&tmp);
+    let cfg = test_config(&tmp).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let server_task = tokio::spawn(host::run_acp_server(transport, cfg));
@@ -791,8 +835,8 @@ async fn test_prompt_wire_shape_unknown_session_returns_error() {
 #[tokio::test]
 async fn test_load_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]);
-    create_legacy_thread(&cfg, "load-test-session", tmp.path().to_str().unwrap()).await;
+    let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]).await;
+    create_bound_thread_fixture(&cfg, "load-test-session", tmp.path().to_str().unwrap()).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -832,8 +876,8 @@ async fn test_load_creates_session_scoped_lsp_pool() {
 #[tokio::test]
 async fn test_resume_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]);
-    create_legacy_thread(&cfg, "resume-test-session", tmp.path().to_str().unwrap()).await;
+    let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]).await;
+    create_bound_thread_fixture(&cfg, "resume-test-session", tmp.path().to_str().unwrap()).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -869,7 +913,7 @@ async fn test_resume_creates_session_scoped_lsp_pool() {
 #[tokio::test]
 async fn test_fork_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]);
+    let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]).await;
     let thread_store = Arc::clone(&cfg.thread_store);
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
@@ -878,10 +922,16 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
     let source_message = peri_acp_types::messages::BaseMessage::human("hello");
     let source_message_id = source_message.id();
     let source_payload = peri_acp_types::store::PersistedPayload::Message(source_message.clone());
-    let source_thread_id = "fork-source-thread".to_string();
-    let mut source_meta = peri_acp_types::thread::ThreadMeta::new(tmp.path().to_string_lossy());
-    source_meta.id = source_thread_id.clone();
-    thread_store.create_thread(source_meta).await.unwrap();
+    let source_thread_id = "fork-source-session".to_string();
+    create_bound_thread_fixture(&cfg, &source_thread_id, tmp.path().to_str().unwrap()).await;
+    let owner = thread_store
+        .acquire_execution_lease(&source_thread_id)
+        .await
+        .unwrap();
+    cfg.session_manager.ensure_session(
+        &source_thread_id,
+        std::fs::canonicalize(tmp.path()).unwrap().to_str().unwrap(),
+    );
     thread_store
         .append_payloads(&source_thread_id, std::slice::from_ref(&source_payload))
         .await
@@ -896,7 +946,14 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
         crate::host::SessionState {
             session_id: "fork-source-session".to_string(),
             thread_id: source_thread_id,
-            cwd: tmp.path().to_string_lossy().into_owned(),
+            cwd: std::fs::canonicalize(tmp.path())
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            execution_owner: Some(owner),
+            environment: None,
+            closing: false,
             history: vec![source_message],
             history_payloads: vec![source_payload],
             cancel_token: None,
@@ -966,8 +1023,8 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
 #[tokio::test]
 async fn test_load_without_lsp_config_has_no_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config(&tmp); // plugin_lsp_servers = []
-    create_legacy_thread(&cfg, "no-lsp-session", tmp.path().to_str().unwrap()).await;
+    let cfg = test_config(&tmp).await; // plugin_lsp_servers = []
+    create_bound_thread_fixture(&cfg, "no-lsp-session", tmp.path().to_str().unwrap()).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -1003,7 +1060,7 @@ async fn test_load_without_lsp_config_has_no_pool() {
 #[tokio::test]
 async fn test_new_prewarms_mcp_discovery_smoke() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config_with_pending_mcp_pool(&tmp);
+    let cfg = test_config_with_pending_mcp_pool(&tmp).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -1040,7 +1097,7 @@ async fn test_new_prewarms_mcp_discovery_smoke() {
 #[tokio::test]
 async fn test_rename_over_stdio_transport() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config(&tmp);
+    let cfg = test_config(&tmp).await;
     let thread_store = cfg.thread_store.clone();
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);

@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 use chrono::Local;
 use fluent_bundle::FluentValue;
 use peri_acp_types::messages::MessageContent;
-use peri_acp_types::permission::PermissionMode;
 use ratatui::text::Line;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -25,8 +24,8 @@ use crate::acp_client::AcpTuiClient;
 use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{
-    ACP_STATE, EXIT_REQUESTED, LOADING_EPOCH, LOCAL_EVENT_TX, NOTIFICATION, PERI_CONFIG_HANDLE,
-    PERMISSION_MODE_HANDLE, RENDER_HEARTBEAT, REWIND_ACTION_TX,
+    ACP_STATE, EXIT_REQUESTED, LOADING_EPOCH, LOCAL_EVENT_TX, NOTIFICATION, RENDER_HEARTBEAT,
+    REWIND_ACTION_TX,
 };
 use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
@@ -115,7 +114,10 @@ async fn handle_submit(
         }
         SubmitRequest::ViewAction(action) => {
             info!(action = ?action, "kit submit_consumer: view-layer command intercepted");
-            execute_view_action(action, acp_client, cwd);
+            let execution_cwd = acp_client
+                .current_execution_cwd()
+                .unwrap_or_else(|| cwd.to_string());
+            execute_view_action(action, acp_client, &execution_cwd);
             Ok(())
         }
         SubmitRequest::OpenPanel(kind) => {
@@ -253,34 +255,26 @@ async fn handle_keepgoing_submit(
 fn execute_view_action(action: ViewActionRequest, acp_client: &AcpTuiClient, cwd: &str) {
     match action {
         ViewActionRequest::CycleProvider => {
-            // 语义改为循环 active_alias 四档（fable → opus → sonnet → haiku）
-            if let Some(cfg_handle) = PERI_CONFIG_HANDLE.get() {
-                let cfg = cfg_handle.read();
-                let aliases = ["fable", "opus", "sonnet", "haiku"];
-                let current = &cfg.config.active_alias;
-                let idx = aliases.iter().position(|a| *a == current).unwrap_or(0);
-                let next = aliases[(idx + 1) % aliases.len()].to_string();
-                drop(cfg);
-                let client = acp_client.clone();
-                let cfg_handle = cfg_handle.clone();
-                tokio::spawn(async move {
-                    let mut new_cfg = cfg_handle.read().clone();
-                    new_cfg.config.active_alias = next;
-                    let _ = client.update_config(&new_cfg).await;
-                });
-            }
+            let current = crate::kit::atoms::SERVICE_SNAPSHOT
+                .state()
+                .read()
+                .model_alias
+                .clone();
+            let aliases = ["fable", "opus", "sonnet", "haiku"];
+            let index = aliases
+                .iter()
+                .position(|alias| *alias == current)
+                .unwrap_or(0);
+            let next = aliases[(index + 1) % aliases.len()];
+            let client = acp_client.clone();
+            tokio::spawn(async move {
+                if let Err(error) = client.set_model(next).await {
+                    tracing::warn!(%error, "session model switch failed");
+                }
+            });
         }
         ViewActionRequest::CyclePermissionMode => {
-            if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get() {
-                let current = mode_handle.load();
-                let next = match current {
-                    PermissionMode::Default => PermissionMode::AcceptEdit,
-                    PermissionMode::AcceptEdit => PermissionMode::AutoMode,
-                    PermissionMode::AutoMode => PermissionMode::Bypass,
-                    PermissionMode::Bypass => PermissionMode::Default,
-                };
-                mode_handle.store(next);
-            }
+            crate::kit::permission_mode::cycle(acp_client.clone());
         }
         ViewActionRequest::ExportText(mode) => {
             let message = match export_debug_text(mode, cwd) {

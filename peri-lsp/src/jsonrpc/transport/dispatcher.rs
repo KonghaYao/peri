@@ -103,6 +103,7 @@ impl NotificationPermit<'_> {
 
 /// 消息分发器：后台读取 stdout，分发到 pending_requests 或 notification_handlers
 pub struct MessageDispatcher {
+    tree: Arc<peri_process::ProcessTree>,
     /// 共享分发状态，供后台 dispatch loop 使用
     dispatch_state: Arc<DispatchState>,
     writer_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -116,7 +117,13 @@ pub struct MessageDispatcher {
 }
 
 impl MessageDispatcher {
+    #[cfg(test)]
+    pub(crate) fn process_tree_stopped(&self) -> bool {
+        self.tree.is_stopped()
+    }
+
     pub fn new(transport: LspTransport) -> (Self, mpsc::UnboundedReceiver<String>) {
+        let tree = transport.tree;
         let stdin = transport.stdin;
         let mut stdout_reader = transport.stdout_reader;
         let mut child = transport.child;
@@ -162,6 +169,7 @@ impl MessageDispatcher {
         // 子进程句柄与 read task 共享：EOF 或 close() 时都能 kill
         let child_handle = Arc::new(tokio::sync::Mutex::new(Some(child)));
         let task_child = Arc::clone(&child_handle);
+        let read_tree = Arc::clone(&tree);
 
         // 启动 stdout 读取任务（独立 task）
         let read_handle = tokio::spawn(async move {
@@ -183,12 +191,14 @@ impl MessageDispatcher {
                 }
             }
             // EOF/读取失败：尝试 kill 子进程（若 close() 已 kill，此处失败无害）
+            read_tree.terminate();
             if let Some(child) = task_child.lock().await.as_mut() {
                 let _ = child.kill().await;
             }
         });
 
         let dispatcher = Self {
+            tree,
             dispatch_state,
             writer_task: Mutex::new(Some(writer_handle)),
             read_task: Mutex::new(Some(read_handle)),
@@ -283,14 +293,10 @@ impl MessageDispatcher {
 
     /// 同步撤销准入并请求终止；保留 join 槽位供 close 或后续重试回收。
     pub(crate) fn begin_close(&self) {
+        self.tree.terminate();
         self.dispatch_state
             .reject_all_pending("LSP transport 已关闭");
-        for slot in [
-            &self.writer_task,
-            &self.read_task,
-            &self.stderr_task,
-            &self.dispatch_task,
-        ] {
+        for slot in [&self.writer_task, &self.read_task, &self.dispatch_task] {
             if let Some(handle) = slot.lock().as_ref() {
                 handle.abort();
             }
@@ -308,10 +314,14 @@ impl MessageDispatcher {
         self.begin_close();
         abort_and_join(&self.writer_task).await;
         if let Some(child) = self.child.lock().await.as_mut() {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), child.kill()).await;
+            if let Err(error) = child.wait().await {
+                tracing::warn!(%error, "LSP child exit could not be confirmed");
+                std::future::pending::<()>().await;
+            }
         }
+        self.tree.wait_for_exit().await;
         abort_and_join(&self.read_task).await;
-        abort_and_join(&self.stderr_task).await;
+        join_task(&self.stderr_task).await;
         abort_and_join(&self.dispatch_task).await;
     }
 }
@@ -320,6 +330,10 @@ async fn abort_and_join(slot: &Mutex<Option<tokio::task::JoinHandle<()>>>) {
     if let Some(handle) = slot.lock().as_ref() {
         handle.abort();
     }
+    join_task(slot).await;
+}
+
+async fn join_task(slot: &Mutex<Option<tokio::task::JoinHandle<()>>>) {
     // Keep the handle in its owner slot across await: cancelling close must not
     // detach the task and make a later close skip its join.
     std::future::poll_fn(|cx| {
@@ -339,6 +353,7 @@ async fn abort_and_join(slot: &Mutex<Option<tokio::task::JoinHandle<()>>>) {
 
 impl Drop for MessageDispatcher {
     fn drop(&mut self) {
+        self.tree.terminate();
         self.dispatch_state
             .reject_all_pending("LSP dispatcher 已释放");
         for slot in [

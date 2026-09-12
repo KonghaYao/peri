@@ -61,7 +61,7 @@ pub(super) async fn spawn_background_subagent(
     let prompt_summary_for_task = prompt_summary.clone();
     let cwd_for_task = cwd.clone();
 
-    let join_handle = tokio::spawn(async move {
+    let execution = async move {
         // S3.1 门控：注册结果（失败时调用方已发 Err；sender 被 drop 同样返回）
         match reg_rx.await {
             Ok(Ok(())) => {}
@@ -306,7 +306,11 @@ pub(super) async fn spawn_background_subagent(
         }
         task_manager_spawn.complete(&task_id_for_task, result);
         // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
-    });
+    };
+    let join_handle = peri_acp_types::tasks::TaskManager::spawn_owned(
+        task_manager.as_ref(),
+        Box::pin(execution),
+    )?;
 
     // 注册到 BackgroundTaskRegistry
     let bg_task = BackgroundTask {

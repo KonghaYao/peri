@@ -31,6 +31,7 @@ pub(crate) enum HostTaskKind {
     LegacyCancelHook,
     McpAppsRelay,
     UserInputEvents,
+    CompactHook,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -172,6 +172,9 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         session_id: ctx.session_id.clone(),
         thread_id: ctx.thread_id.clone().unwrap(),
         cwd: ctx.cwd.clone(),
+        execution_owner: None,
+        environment: None,
+        closing: false,
         history: payloads
             .iter()
             .filter_map(|payload| payload.as_message().cloned())

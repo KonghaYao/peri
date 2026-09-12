@@ -39,6 +39,7 @@ pub mod panel_registry;
 pub mod panel_scroll;
 pub mod panels;
 pub mod panic;
+pub(crate) mod permission_mode;
 pub mod popup_overlay;
 pub mod popups;
 pub mod rewind_action;

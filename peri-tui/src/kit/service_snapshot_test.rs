@@ -4,21 +4,170 @@
 use super::*;
 use crate::app::service_registry::ProcessResourceMonitor;
 use chrono::Utc;
+use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::IncomingMessage};
 use peri_middlewares::cron::CronScheduler;
-use peri_resources::sessions::SqliteThreadStore;
+use serde_json::{Value, json};
 use serial_test::serial;
 
-/// 创建一个 SQLite in-memory thread store 用于测试。
-async fn make_sqlite_store() -> Arc<dyn ThreadStore> {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("test_threads.db");
-    // SAFETY: tempdir 保持到函数返回前有效；我们 leak 它让 store 在测试期间存活。
-    // 测试结束后 OS 会清理 tempfile。
-    std::mem::forget(tmp);
-    Arc::new(SqliteThreadStore::new(path).await.unwrap())
+fn reset_snapshot_atoms() {
+    crate::kit::atoms::init_atoms();
+    ACTIVE_EXECUTION_CWD.set(None);
+    ACTIVE_SESSION_ID.set(String::new());
+    THREAD_BROWSER_SCOPE.set(ThreadBrowserScope::Project);
+    THREAD_LIST_PAGE_COUNT.set(1);
+    THREAD_LIST_ERROR.set(None);
+    THREAD_LIST.state().write().clear();
 }
 
-fn make_minimal_source(thread_store: Arc<dyn ThreadStore>) -> SnapshotSource {
+fn isolated_refresh() -> SlowSnapshotRefresh {
+    SlowSnapshotRefresh {
+        next_memory_scan: Instant::now() + Duration::from_secs(3600),
+        ..SlowSnapshotRefresh::default()
+    }
+}
+
+fn workspace_json(cwd: &str) -> Value {
+    json!({
+        "project_id":"00000000-0000-0000-0000-000000000001",
+        "workspace_id":"00000000-0000-0000-0000-000000000002",
+        "cwd":cwd,"root":cwd,"relative_cwd":""
+    })
+}
+
+fn entry_json(cwd: &str, title: &str) -> Value {
+    json!({
+        "thread": {"id":"00000000-0000-0000-0000-000000000003", "cwd":"/creation/path",
+            "title":title,"message_count":3,"updated_at":"2026-09-12T00:00:00Z"},
+        "binding": {"schema_version":1,"revision":1,
+            "project_id":"00000000-0000-0000-0000-000000000001",
+            "workspace_id":"00000000-0000-0000-0000-000000000002",
+            "cwd_relative_to_workspace":""},
+        "effective_cwd":cwd,"workspace_root":cwd
+    })
+}
+
+async fn snapshot_client(cwd: &str) -> (AcpTuiClient, tokio::sync::mpsc::UnboundedReceiver<Value>) {
+    let (transport, server) = mpsc_transport_pair();
+    let (client, _, _) = AcpTuiClient::new(transport);
+    let cwd = cwd.to_string();
+    let (queries, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(IncomingMessage::Request { id, method, params }) = server.recv().await {
+            let result = match method.as_str() {
+                "initialize" => {
+                    json!({"agentCapabilities":{"_meta":{"peri.sessionWorkspaceV1":true}}})
+                }
+                "peri/session_context" => json!({"version":1,"workspace":workspace_json(&cwd),
+                    "binding":entry_json(&cwd,"title")["binding"],"title":"Session title"}),
+                "session/metadata" => {
+                    json!({"title":"Session title","permissionMode":"accept_edit","modelAlias":"workspace-model"})
+                }
+                "plugin/list" => {
+                    assert_eq!(params["sessionId"], "00000000-0000-0000-0000-000000000003");
+                    json!({"plugins":[],"hooks":[{"event":"pretooluse","plugin_name":"target-hooks","command":"echo target","matcher":null}]})
+                }
+                "mcp/list" => {
+                    assert_eq!(params["sessionId"], "00000000-0000-0000-0000-000000000003");
+                    json!({"servers":[{"name":"target-mcp","transport":"stdio","connectionStatus":"connected","oauthStatus":"none","toolsCount":2}]})
+                }
+                "session/list" => {
+                    queries.send(params).unwrap();
+                    json!({"sessions":[],"_meta":{"peri.sessionWorkspaceV1":{
+                        "threads":[entry_json(&cwd,"Project thread")],"nextCursor":null}}})
+                }
+                other => panic!("unexpected request: {other}"),
+            };
+            server.send_response(id, Ok(result)).await.unwrap();
+        }
+    });
+    client.register_ui_commands(&[]).await.unwrap();
+    (client, rx)
+}
+
+#[tokio::test]
+#[serial]
+async fn project_history_uses_host_scope_and_actual_execution_path() {
+    reset_snapshot_atoms();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+    let (client, mut queries) = snapshot_client(cwd).await;
+    let mut src = make_minimal_source(Some(client));
+    src.cwd = cwd.into();
+    let mut slow = isolated_refresh();
+    tick_once(&src, &mut slow).await.unwrap();
+    assert_eq!(
+        queries.recv().await.unwrap()["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
+        "project"
+    );
+    let threads = THREAD_LIST.state().read().clone();
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].cwd, cwd);
+    assert_eq!(threads[0].message_count, 3);
+    THREAD_BROWSER_SCOPE.set(ThreadBrowserScope::Workspace);
+    tick_once(&src, &mut slow).await.unwrap();
+    assert_eq!(
+        queries.recv().await.unwrap()["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
+        "workspace"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn active_execution_directory_invalidates_file_cache_and_updates_title() {
+    reset_snapshot_atoms();
+    let original = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    std::fs::write(original.path().join("original.rs"), "old").unwrap();
+    std::fs::write(target.path().join("target.rs"), "new").unwrap();
+    let (client, _queries) = snapshot_client(target.path().to_str().unwrap()).await;
+    let mut src = make_minimal_source(Some(client));
+    src.cwd = original.path().to_str().unwrap().into();
+    let mut slow = isolated_refresh();
+    tick_once(&src, &mut slow).await.unwrap();
+    assert_eq!(*FILE_LIST.state().read(), vec!["original.rs"]);
+    ACTIVE_EXECUTION_CWD.set(Some(target.path().to_str().unwrap().into()));
+    ACTIVE_SESSION_ID.set("00000000-0000-0000-0000-000000000003".into());
+    tick_once(&src, &mut slow).await.unwrap();
+    assert_eq!(*FILE_LIST.state().read(), vec!["target.rs"]);
+    assert_eq!(
+        SERVICE_SNAPSHOT.state().read().cwd,
+        target.path().to_str().unwrap()
+    );
+    assert_eq!(*CURRENT_SESSION_TITLE.state().read(), "Session title");
+    assert_eq!(
+        SERVICE_SNAPSHOT.state().read().permission_mode,
+        "accept-edit"
+    );
+    assert_eq!(
+        SERVICE_SNAPSHOT.state().read().model_alias,
+        "workspace-model"
+    );
+    assert_eq!(HOOK_LIST.state().read()[0].plugin_name, "target-hooks");
+    assert_eq!(MCP_SERVERS.state().read()[0].name, "target-mcp");
+    ACTIVE_EXECUTION_CWD.set(None);
+    ACTIVE_SESSION_ID.set(String::new());
+}
+
+#[tokio::test]
+#[serial]
+async fn missing_workspace_capability_is_visible_as_query_error() {
+    reset_snapshot_atoms();
+    let (transport, _server) = mpsc_transport_pair();
+    let (client, _, _) = AcpTuiClient::new(transport);
+    let src = make_minimal_source(Some(client));
+    tick_once(&src, &mut isolated_refresh()).await.unwrap();
+    assert!(
+        THREAD_LIST_ERROR
+            .state()
+            .read()
+            .clone()
+            .unwrap()
+            .contains("does not support")
+    );
+    assert!(THREAD_LIST.state().read().is_empty());
+}
+
+fn make_minimal_source(client: Option<AcpTuiClient>) -> SnapshotSource {
     let peri_config = Arc::new(parking_lot::RwLock::new(
         crate::config::PeriConfig::default(),
     ));
@@ -30,7 +179,7 @@ fn make_minimal_source(thread_store: Arc<dyn ThreadStore>) -> SnapshotSource {
 
     SnapshotSource {
         cwd: ".".into(),
-        thread_store,
+        client,
         peri_config,
         permission_mode,
         cron_scheduler: scheduler,
@@ -47,11 +196,10 @@ fn make_minimal_source(thread_store: Arc<dyn ThreadStore>) -> SnapshotSource {
 #[serial]
 async fn test_tick_once_writes_atoms() {
     // 先 init atoms（避免 SERVICE_SNAPSHOT.get() 返回 None）
-    crate::kit::atoms::init_atoms();
+    reset_snapshot_atoms();
 
-    let store = make_sqlite_store().await;
-    let src = make_minimal_source(store);
-    let mut slow = SlowSnapshotRefresh::default();
+    let src = make_minimal_source(None);
+    let mut slow = isolated_refresh();
     let result = tick_once(&src, &mut slow).await;
     assert!(result.is_ok(), "tick_once should succeed");
 
@@ -67,12 +215,11 @@ async fn test_tick_once_writes_atoms() {
 #[tokio::test]
 #[serial]
 async fn test_tick_once_empty_thread_list() {
-    crate::kit::atoms::init_atoms();
+    reset_snapshot_atoms();
 
-    let store = make_sqlite_store().await;
-    let src = make_minimal_source(store);
-    // 空 SQLite store——list_threads 返回空 Vec
-    let mut slow = SlowSnapshotRefresh::default();
+    let src = make_minimal_source(None);
+    // ACP 项目列表为空时不生成会话行
+    let mut slow = isolated_refresh();
     let result = tick_once(&src, &mut slow).await;
     assert!(result.is_ok());
 
@@ -82,59 +229,10 @@ async fn test_tick_once_empty_thread_list() {
 
 #[tokio::test]
 #[serial]
-async fn test_tick_once_lists_only_nonempty_threads_for_current_cwd() {
-    crate::kit::atoms::init_atoms();
-
-    let store = make_sqlite_store().await;
-    let mut src = make_minimal_source(store.clone());
-    src.cwd = "/workspace".into();
-
-    let visible_id = store
-        .create_thread(peri_acp_types::thread::ThreadMeta::new("/workspace"))
-        .await
-        .unwrap();
-    store
-        .append_messages(
-            &visible_id,
-            &[peri_acp_types::messages::BaseMessage::human("visible")],
-        )
-        .await
-        .unwrap();
-
-    let _empty_id = store
-        .create_thread(peri_acp_types::thread::ThreadMeta::new("/workspace"))
-        .await
-        .unwrap();
-
-    let other_id = store
-        .create_thread(peri_acp_types::thread::ThreadMeta::new("/other"))
-        .await
-        .unwrap();
-    store
-        .append_messages(
-            &other_id,
-            &[peri_acp_types::messages::BaseMessage::human("other")],
-        )
-        .await
-        .unwrap();
-
-    let mut slow = SlowSnapshotRefresh::default();
-    tick_once(&src, &mut slow).await.unwrap();
-
-    let threads = THREAD_LIST.state().read().clone();
-    assert_eq!(threads.len(), 1);
-    assert_eq!(threads[0].id, visible_id);
-    assert_eq!(threads[0].cwd, "/workspace");
-    assert_eq!(threads[0].message_count, 1);
-}
-
-#[tokio::test]
-#[serial]
 async fn test_cron_tasks_collected() {
-    crate::kit::atoms::init_atoms();
+    reset_snapshot_atoms();
 
-    let store = make_sqlite_store().await;
-    let src = make_minimal_source(store);
+    let src = make_minimal_source(None);
     // 注册两个 cron 任务（一个 disabled）
     {
         let mut scheduler = src.cron_scheduler.lock();
@@ -143,7 +241,7 @@ async fn test_cron_tasks_collected() {
         scheduler.toggle(&id2); // disable
     }
 
-    let mut slow = SlowSnapshotRefresh::default();
+    let mut slow = isolated_refresh();
     let result = tick_once(&src, &mut slow).await;
     assert!(result.is_ok());
 
@@ -153,87 +251,6 @@ async fn test_cron_tasks_collected() {
     let snap = SERVICE_SNAPSHOT.state().read().clone();
     assert_eq!(snap.cron_total, 2);
     assert_eq!(snap.cron_enabled, 1);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_tick_once_derives_current_session_title() {
-    use peri_acp_types::thread::ThreadMeta;
-
-    crate::kit::atoms::init_atoms();
-    crate::kit::atoms::ACTIVE_SESSION_ID.set(String::new());
-
-    let store = make_sqlite_store().await;
-    let src = make_minimal_source(store.clone());
-
-    // 建一个带标题的 thread，并设为当前会话
-    let mut meta = ThreadMeta::new(".".to_string());
-    meta.title = Some("测试会话".to_string());
-    let id = src.thread_store.create_thread(meta).await.unwrap();
-    crate::kit::atoms::ACTIVE_SESSION_ID.set(id.clone());
-
-    let mut slow = SlowSnapshotRefresh::default();
-    let result = tick_once(&src, &mut slow).await;
-    assert!(result.is_ok());
-
-    assert_eq!(
-        crate::kit::atoms::CURRENT_SESSION_TITLE
-            .state()
-            .read()
-            .as_str(),
-        "测试会话"
-    );
-
-    // 空标题 thread：tick 后应清空 CURRENT_SESSION_TITLE（会话切到无标题 thread）
-    let meta2 = ThreadMeta::new(".".to_string());
-    let id2 = src.thread_store.create_thread(meta2).await.unwrap();
-    crate::kit::atoms::ACTIVE_SESSION_ID.set(id2);
-    let result = tick_once(&src, &mut slow).await;
-    assert!(result.is_ok());
-    assert!(
-        crate::kit::atoms::CURRENT_SESSION_TITLE
-            .state()
-            .read()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn test_tick_once_missing_thread_keeps_previous_title() {
-    use peri_acp_types::thread::ThreadMeta;
-
-    crate::kit::atoms::init_atoms();
-
-    let store = make_sqlite_store().await;
-    let src = make_minimal_source(store.clone());
-
-    // 先派生一个真实标题
-    let mut meta = ThreadMeta::new(".".to_string());
-    meta.title = Some("真实标题".to_string());
-    let id = src.thread_store.create_thread(meta).await.unwrap();
-    crate::kit::atoms::ACTIVE_SESSION_ID.set(id.clone());
-    let mut slow = SlowSnapshotRefresh::default();
-    let _ = tick_once(&src, &mut slow).await;
-    assert_eq!(
-        crate::kit::atoms::CURRENT_SESSION_TITLE
-            .state()
-            .read()
-            .as_str(),
-        "真实标题"
-    );
-
-    // 切到不存在的 thread id：load_meta 失败 → 保留上一个标题（不 panic）
-    crate::kit::atoms::ACTIVE_SESSION_ID.set("nonexistent-id".to_string());
-    let result = tick_once(&src, &mut slow).await;
-    assert!(result.is_ok());
-    assert_eq!(
-        crate::kit::atoms::CURRENT_SESSION_TITLE
-            .state()
-            .read()
-            .as_str(),
-        "真实标题"
-    );
 }
 
 #[tokio::test]

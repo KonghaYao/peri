@@ -15,15 +15,10 @@ dashmap = "6"
 parking_lot.workspace = true
 tempfile.workspace = true
 fs2 = "0.4"
+peri-process = { path = "../peri-process" }
 
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_System_JobObjects",
-] }
 
 [dev-dependencies]
 tempfile.workspace = true

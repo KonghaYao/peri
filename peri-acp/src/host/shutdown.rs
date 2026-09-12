@@ -40,7 +40,7 @@ pub(super) async fn shutdown_host(
     }
     mcp_task_owner.begin_shutdown();
     cont_tx.take();
-    let (local_ids, mut lsp_pools) = {
+    let (local_ids, lsp_pools) = {
         let sessions = sessions.lock().await;
         let mut ids = Vec::with_capacity(sessions.len());
         let mut pools = Vec::new();
@@ -78,6 +78,9 @@ pub(super) async fn shutdown_host(
     };
     let _ = mcp_task_owner.shutdown().await;
     for session_id in &all_ids {
+        if !cfg.session_manager.drain_session_tasks(session_id).await {
+            continue;
+        }
         if let Some(session) = cfg.session_manager.take_for_close(session_id) {
             closing_sessions.insert(session_id.clone(), session);
         }
@@ -95,16 +98,30 @@ pub(super) async fn shutdown_host(
             tracing::warn!(session_id = %session_id, "session resources retained for shutdown retry");
         }
     }
-    let session_close_failures = closing_sessions.len();
-    {
+    let session_close_failures = closing_sessions.len() + cfg.session_manager.session_ids().len();
+    let environments = {
         let mut sessions = sessions.lock().await;
-        for (_, state) in sessions.drain() {
-            if let Some(pool) = state.lsp_pool {
-                lsp_pools.push(pool);
-            }
+        sessions
+            .values_mut()
+            .filter_map(|state| {
+                state.closing = true;
+                state
+                    .environment
+                    .clone()
+                    .map(|environment| (state.session_id.clone(), environment))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut environment_failures = 0;
+    for (session_id, environment) in environments {
+        if !matches!(host_report, task_scope::HostShutdownReport::Complete)
+            || cfg.session_manager.get_session(&session_id).is_some()
+            || closing_sessions.contains_key(&session_id)
+            || !environment.shutdown().await
+        {
+            environment_failures += 1;
         }
     }
-    prompt_locks.lock().await.clear();
     let mut unique_lsp = Vec::<Arc<dyn LspPoolPort>>::new();
     for pool in lsp_pools {
         if !unique_lsp.iter().any(|known| Arc::ptr_eq(known, &pool)) {
@@ -140,10 +157,29 @@ pub(super) async fn shutdown_host(
         host_report,
         dynamic_report,
         pool_report,
-        session_close_failures,
+        session_close_failures + environment_failures,
     );
     match terminal_report {
         task_scope::HostTerminalShutdownReport::Complete { .. } => {
+            let owners = sessions
+                .lock()
+                .await
+                .values()
+                .filter_map(|state| state.execution_owner.clone())
+                .collect::<Vec<_>>();
+            for owner in owners {
+                if let Err(error) = owner.mark_clean().await {
+                    tracing::warn!(%error, "execution owner cleanup could not be persisted");
+                    return task_scope::HostTerminalShutdownReport::aggregate(
+                        host_report,
+                        dynamic_report,
+                        pool_report,
+                        1,
+                    );
+                }
+            }
+            sessions.lock().await.clear();
+            prompt_locks.lock().await.clear();
             tracing::info!(?terminal_report, "ACP host terminal shutdown complete");
         }
         task_scope::HostTerminalShutdownReport::Incomplete { .. } => {

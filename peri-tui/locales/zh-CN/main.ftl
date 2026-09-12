@@ -193,7 +193,7 @@ config-field-cache-warning = 缓存警告
 config-field-diff = 显示 Diff
 config-field-1m-context = 1M 上下文
 config-field-active-alias = 当前别名
-config-field-permission-mode = 权限模式
+config-field-permission-mode = 当前会话权限
 config-value-on = 开
 config-value-off = 关
 config-streaming-value-streaming = streaming
@@ -560,7 +560,7 @@ thread-browser-time-minutes = { $count } 分钟前
 thread-browser-time-hours = { $count } 小时前
 thread-browser-time-days = { $count } 天前
 panel-threads-header-hint =   Enter::打开 · Esc::关闭
-panel-threads-nav-hint =   ↑/↓::navigate  Enter::open  d::delete  Esc::close
+panel-threads-nav-hint =   ↑/↓::选择  Enter::打开  Tab::范围  d::删除  Esc::关闭
 panel-threads-confirm-hint =   Enter::confirm  Esc::cancel
 
 # ---- Rewind 弹窗 ----
@@ -1164,3 +1164,14 @@ reminder-compact-summary = 压缩摘要
 steer-queue-title = 待发送 { $count }
 steer-input-rejected = 输入未被接收，原稿已保留。
 steer-input-uncertain = 暂未收到输入回执，正在核对并重试。
+
+thread-browser-project = 项目
+thread-browser-workspace = 工作区
+thread-browser-scope-count =   { $scope } · { $count } 个会话
+thread-browser-messages = { $count } 条消息
+panel-threads-more-hint =   ↑/↓::选择  Enter::打开  Tab::范围  n::更多  d::删除
+session-restore-failed = 会话恢复失败：{ $error }。请重试或使用 /clear 创建会话。
+
+panel-host-settings = 宿主配置
+
+permission-mode-update-failed = 权限模式更新失败：{ $error }

@@ -78,6 +78,10 @@ impl SqliteThreadStore {
         thread_id: &ThreadId,
         messages: &[BaseMessage],
     ) -> Result<()> {
+        // Read APIs must remain usable without an execution owner and never dirty a bound session.
+        if self.read_only || self.load_session_binding_impl(thread_id).await?.is_some() {
+            return Ok(());
+        }
         let cached = serde_json::to_string(messages)?;
         let now = Utc::now().to_rfc3339();
         sqlx::query("UPDATE threads SET cached_context = ?1, updated_at = ?2 WHERE id = ?3")

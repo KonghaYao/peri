@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use peri_acp_types::tasks::TaskManager;
 use peri_agent::agent::async_tasks::{
-    bg_shell_task_id, drain_pipe, kill_process_group_escalating, parse_timeout, shell_command,
-    truncate_bytes, BgTaskKind,
+    bg_shell_task_id, drain_pipe, kill_process_group, parse_timeout, shell_command, truncate_bytes,
+    BgTaskKind, ShellExecutionGuard,
 };
 use peri_agent::{
     agent::events::BackgroundTaskResult, middleware::r#trait::Middleware, tools::BaseTool,
@@ -298,6 +298,12 @@ impl BaseTool for BashTool {
 
         // ── 同步执行路径 ──
         let timeout_opt = parse_timeout(&input, false);
+        let ownership = self
+            .task_manager
+            .as_ref()
+            .map(|manager| manager.begin_external_execution())
+            .transpose()?;
+        let mut execution = ShellExecutionGuard::new(ownership);
 
         let mut cmd = shell_command(command, &[]);
         cmd.current_dir(&self.cwd)
@@ -307,10 +313,12 @@ impl BaseTool for BashTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // 注意：不设 kill_on_drop——超时 promote 转后台时 child 不能被 drop 误杀
+        // Promotion moves the Child; cancellation drops it and must stop the leader.
+        cmd.kill_on_drop(true);
         #[cfg(unix)]
         cmd.process_group(0);
 
+        execution.prepare(&mut cmd)?;
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return Err(format!("Error executing command: {e}").into()),
@@ -318,6 +326,11 @@ impl BaseTool for BashTool {
         let pid = child
             .id()
             .expect("shell_command spawn succeeded but child.id() is None");
+        if let Err(error) = execution.attach(&child) {
+            let _ = child.kill().await;
+            execution.confirm_stopped();
+            return Err(error.into());
+        }
 
         // 流式读取 stdout/stderr 到共享缓冲（超时时部分输出不再全丢）
         let stdout_buf = Arc::new(Mutex::new(String::new()));
@@ -361,16 +374,18 @@ impl BaseTool for BashTool {
                                 kind: BgTaskKind::Shell,
                                 summary: command.chars().take(80).collect(),
                                 pid: Some(pid),
-                                kill: None,
+                                kill: execution.cancel_callback(),
                             });
                         match register_result {
                             Ok(()) => {
                                 let task_manager = task_manager.clone();
+                                execution.track_registration(task_manager.clone(), task_id.clone());
                                 let on_bg_complete_cb = self.on_bg_complete.clone();
                                 let command_owned = command.to_string();
                                 let task_id_owned = task_id.clone();
                                 // 续跑任务：继续读 pipe 至 EOF → wait → finalize → 通知 Agent
-                                tokio::spawn(async move {
+                                let task_owner = task_manager.clone();
+                                task_owner.spawn_owned(Box::pin(async move {
                                     let started = std::time::Instant::now();
                                     let _ = drain_stdout.await;
                                     let _ = drain_stderr.await;
@@ -395,6 +410,8 @@ impl BaseTool for BashTool {
                                         Err(poisoned) => poisoned.into_inner().clone(),
                                     };
                                     let combined = merge_output(&stdout, &stderr, exit_code);
+                                    execution.wait_for_exit().await;
+                                    execution.confirm_stopped();
                                     task_manager.finalize_bg_shell(
                                         &on_bg_complete_cb,
                                         task_id_owned,
@@ -404,7 +421,7 @@ impl BaseTool for BashTool {
                                         started.elapsed().as_millis() as u64,
                                         false,
                                     );
-                                });
+                                }))?;
                                 if has_output {
                                     // 有部分输出：进程在产生进展，续跑是合理的
                                     return Err(format!(
@@ -423,7 +440,11 @@ impl BaseTool for BashTool {
                             }
                             Err(e) => {
                                 // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
-                                kill_process_group_escalating(pid);
+                                kill_process_group(pid, "KILL");
+                                let _ = child.wait().await;
+                                let _ = drain_stdout.await;
+                                let _ = drain_stderr.await;
+                                execution.confirm_stopped();
                                 return Err(format!(
                                     "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{ps_line}\n{partial_hint}\nCommand that timed out: {command}",
                                     ms as f64 / 1000.0
@@ -433,7 +454,11 @@ impl BaseTool for BashTool {
                         }
                     } else {
                         // ── 无 TaskManager：杀进程组 + 部分输出落盘 ──
-                        kill_process_group_escalating(pid);
+                        kill_process_group(pid, "KILL");
+                        let _ = child.wait().await;
+                        let _ = drain_stdout.await;
+                        let _ = drain_stderr.await;
+                        execution.confirm_stopped();
                         return Err(format!(
                             "Command timed out after {:.1}s. The default timeout is deliberately short (15s) to encourage efficient commands.\n\
                              {ps_line}\n\
@@ -464,7 +489,39 @@ impl BaseTool for BashTool {
                     Ok(g) => g.clone(),
                     Err(poisoned) => poisoned.into_inner().clone(),
                 };
-                let output = merge_output(&stdout, &stderr, status.code());
+                let mut output = merge_output(&stdout, &stderr, status.code());
+                if execution.is_stopped() {
+                    execution.confirm_stopped();
+                } else if let Some(manager) = &self.task_manager {
+                    // A successful shell can leave `command &` running with redirected pipes.
+                    // Register that group before returning so normal completion does not kill it.
+                    let task_id = bg_shell_task_id();
+                    manager.register(peri_acp_types::tasks::BgTaskRegistration {
+                        task_id: task_id.clone(),
+                        kind: BgTaskKind::Shell,
+                        summary: command.chars().take(80).collect(),
+                        pid: Some(pid),
+                        kill: execution.cancel_callback(),
+                    })?;
+                    execution.track_registration(manager.clone(), task_id.clone());
+                    let task_manager = manager.clone();
+                    let on_complete = self.on_bg_complete.clone();
+                    let summary: String = command.chars().take(80).collect();
+                    let task_id_for_wait = task_id.clone();
+                    manager.spawn_owned(Box::pin(async move {
+                        let started = std::time::Instant::now();
+                        execution.wait_for_exit().await;
+                        execution.confirm_stopped();
+                        task_manager.finalize_bg_shell(&on_complete, task_id_for_wait, summary, status.success(),
+                            "Background processes have stopped; individual exit codes are unavailable.".into(),
+                            started.elapsed().as_millis() as u64, false);
+                    }))?;
+                    output.push_str(&format!(
+                        "\nRemaining processes continue as background task {task_id}."
+                    ));
+                } else {
+                    execution.release_unmanaged();
+                }
                 Ok(truncate_output(&output))
             }
             Err(e) => Err(format!("Error executing command: {e}").into()),

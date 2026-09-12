@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn make_user_input_session(
+async fn make_user_input_session(
     tmp: &tempfile::TempDir,
 ) -> (AcpServerConfig, HashMap<String, SessionState>, String) {
     let config = make_peri_config_with_provider(make_provider_config(
@@ -12,9 +12,10 @@ fn make_user_input_session(
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&config).unwrap();
-    let cfg = make_server_config(config, provider, tmp);
+    let cfg = make_server_config(config, provider, tmp).await;
     let mut sessions = HashMap::new();
-    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    let sid =
+        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
     cfg.session_manager
         .ensure_session(&sid, tmp.path().to_str().unwrap());
     cfg.session_manager.ensure_session_caps(&sid);
@@ -35,7 +36,7 @@ fn make_user_input_request(sid: &str, generation: &str, input_id: &str, text: &s
 #[tokio::test]
 async fn test_user_input_methods_require_capability() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (cfg, mut sessions, sid) = make_user_input_session(&tmp);
+    let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     cfg.session_manager
         .caps_registry()
         .insert(sid.clone(), PeriCaps::default());
@@ -66,7 +67,7 @@ async fn test_user_input_methods_require_capability() {
 #[tokio::test]
 async fn test_user_input_takeback_and_dispatch_share_server_state() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (cfg, mut sessions, sid) = make_user_input_session(&tmp);
+    let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let initial = handle_request(
         "session/input/snapshot",
@@ -142,7 +143,7 @@ async fn test_user_input_takeback_and_dispatch_share_server_state() {
 #[tokio::test]
 async fn test_user_input_generation_invalidation_rejects_old_command() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (cfg, mut sessions, sid) = make_user_input_session(&tmp);
+    let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let old = handle_request(
         "session/input/snapshot",
@@ -185,7 +186,7 @@ async fn test_user_input_generation_invalidation_rejects_old_command() {
 #[tokio::test]
 async fn test_user_input_observer_can_read_but_cannot_mutate() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (cfg, mut sessions, sid) = make_user_input_session(&tmp);
+    let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     sessions[&sid].lease.release("default");
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let snapshot = handle_request(
@@ -230,7 +231,7 @@ async fn test_user_input_observer_can_read_but_cannot_mutate() {
 #[tokio::test]
 async fn test_user_input_stop_revokes_ticket_before_cancel_token_registration() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (cfg, mut sessions, sid) = make_user_input_session(&tmp);
+    let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let snapshot = handle_request(
         "session/input/snapshot",
@@ -284,7 +285,7 @@ async fn test_user_input_wire_control_responds_while_prompt_lock_is_held() {
     use crate::transport::AcpTransport;
     use tokio_util::sync::CancellationToken;
     let tmp = tempfile::TempDir::new().unwrap();
-    let (cfg, mut states, sid) = make_user_input_session(&tmp);
+    let (cfg, mut states, sid) = make_user_input_session(&tmp).await;
     let cfg = Arc::new(cfg);
     let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let client = Arc::new(client);
@@ -364,7 +365,7 @@ async fn test_user_input_wire_control_responds_while_prompt_lock_is_held() {
 #[tokio::test]
 async fn test_user_input_run_started_is_delivered_before_execution_can_continue() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (cfg, mut sessions, sid) = make_user_input_session(&tmp);
+    let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
     let initial = handle_request(
@@ -427,7 +428,7 @@ async fn test_user_input_stdio_uses_same_short_control_requests() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio_util::sync::CancellationToken;
     let tmp = tempfile::TempDir::new().unwrap();
-    let (mut cfg, states, sid) = make_user_input_session(&tmp);
+    let (mut cfg, states, sid) = make_user_input_session(&tmp).await;
     cfg.stdio_command_filter = true;
     let cfg = Arc::new(cfg);
     let (mut input, transport_read) = tokio::io::duplex(64 * 1024);
@@ -515,7 +516,7 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
     use peri_agent::session::user_input_mailbox::UserInputAttemptOutcome;
     use tokio_util::sync::CancellationToken;
     let tmp = tempfile::TempDir::new().unwrap();
-    let (cfg, mut sessions, sid) = make_user_input_session(&tmp);
+    let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let initial = handle_request(
         "session/input/snapshot",

@@ -139,6 +139,15 @@ impl HookMiddleware {
         }
     }
 
+    /// Keep asynchronous hooks and command processes in the session execution scope.
+    pub fn with_task_manager(
+        mut self,
+        task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+    ) -> Self {
+        self.dispatcher = self.dispatcher.with_task_manager(task_manager);
+        self
+    }
+
     // -----------------------------------------------------------------------
     // fire_event — Facade 委托给 dispatcher，保留 pub(crate) 接口供测试与
     // middleware trait 方法调用。

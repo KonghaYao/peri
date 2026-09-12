@@ -2343,3 +2343,63 @@ async fn test_resume_provenance_overlap_rolls_back_claim_before_retry() {
             .unwrap();
     assert_eq!(resumed.child_thread_id, thread_id);
 }
+
+#[tokio::test]
+async fn test_bound_subagent_resume_requires_same_root_but_allows_siblings() {
+    let fixture = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        peri_resources::sessions::SqliteThreadStore::new(fixture.path().join("sessions.db"))
+            .await
+            .unwrap(),
+    );
+    let workspace = store.resolve_workspace(fixture.path()).await.unwrap();
+    let cwd = workspace.cwd.to_str().unwrap();
+    let root_a = store
+        .create_bound_thread(ThreadMeta::new(cwd), &workspace)
+        .await
+        .unwrap();
+    let root_b = store
+        .create_bound_thread(ThreadMeta::new(cwd), &workspace)
+        .await
+        .unwrap();
+    let owner_a = store.acquire_execution_lease(&root_a).await.unwrap();
+    let owner_b = store.acquire_execution_lease(&root_b).await.unwrap();
+    let mut child = ThreadMeta::new(cwd);
+    child.parent_thread_id = Some(root_a.clone());
+    child.agent_status = AgentStatus::Done;
+    let child_id = store
+        .create_bound_thread(child.clone(), &workspace)
+        .await
+        .unwrap();
+    child.id = uuid::Uuid::now_v7().to_string();
+    let sibling_id = store.create_bound_thread(child, &workspace).await.unwrap();
+    let caller_b = Session::new(
+        Arc::from(cwd),
+        FrozenContext::builder().build(),
+        Some(root_b),
+    );
+    let mut config = resume_config(Arc::new(MockThreadStore::new()), child_id.clone());
+    config.thread_store = store.clone();
+    let error = resume_err(Some(&caller_b), config).await;
+    assert!(error.contains("another root session"), "{error}");
+    assert_eq!(
+        store.load_meta(&child_id).await.unwrap().agent_status,
+        AgentStatus::Done
+    );
+    let sibling = Session::new(
+        Arc::from(cwd),
+        FrozenContext::builder().build(),
+        Some(sibling_id),
+    );
+    let mut config = resume_config(Arc::new(MockThreadStore::new()), child_id.clone());
+    config.thread_store = store.clone();
+    SessionFactory::resume_subagent(Some(&sibling), config)
+        .await
+        .expect("same-root siblings can resume");
+    assert_eq!(
+        store.load_meta(&child_id).await.unwrap().agent_status,
+        AgentStatus::Done
+    );
+    owner_a.mark_clean().await.unwrap();
+    owner_b.mark_clean().await.unwrap();
+}

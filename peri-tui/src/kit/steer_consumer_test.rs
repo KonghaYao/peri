@@ -207,6 +207,17 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
                 .send_response(id, Err(AcpError::new(-32603, "snapshot failed")))
                 .await
                 .unwrap();
+            let IncomingMessage::Request { id, method, params } =
+                server_transport.recv().await.unwrap()
+            else {
+                panic!("初始化失败必须关闭已创建的会话");
+            };
+            assert_eq!(method, "session/close", "清理不是enqueue或fallback prompt");
+            assert_eq!(params, json!({"sessionId":"new"}));
+            server_transport
+                .send_response(id, Ok(json!({})))
+                .await
+                .unwrap();
         } else {
             server_transport
                 .send_response(id, Err(AcpError::new(-32603, "session unavailable")))
@@ -222,6 +233,9 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
     });
     client.register_ui_commands(&[]).await.unwrap();
     let error = execute(&client, &mut command, "/tmp").await.unwrap_err();
+    assert!(!client.has_session(), "失败不能留下可发送输入的会话");
+    assert!(atoms::ACTIVE_SESSION_ID.state().read().is_empty());
+    assert!(client.current_execution_cwd().is_none());
     assert!(
         atoms::BRIDGE_RESET_COUNTER.get() > 3,
         "真实交互 client 已推进会话边界"

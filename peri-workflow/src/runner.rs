@@ -5,6 +5,7 @@ mod artifact;
 mod limits;
 mod message_loop;
 mod run_protocol;
+mod scope;
 mod terminal;
 
 use std::sync::Arc;
@@ -17,12 +18,12 @@ use tokio::sync::{oneshot, watch};
 use artifact::prepare_workflow_command;
 use message_loop::MessageLoop;
 use run_protocol::{validate_start_ack, workflow_start_params};
-use terminal::send_failure;
+use terminal::{send_failure, send_killed};
 
 use crate::error::WorkflowError;
 use crate::journal::WorkflowJournalStore;
 use crate::progress::WorkflowProgressStore;
-use crate::protocol::{ProgressEvent, WorkflowLimits};
+use crate::protocol::WorkflowLimits;
 use crate::rpc::RpcChannel;
 
 pub(crate) use artifact::WORKFLOW_ARTIFACT_BYTES;
@@ -85,8 +86,12 @@ pub struct WorkflowRunner {
     /// 活跃 workflow run 的 RPC 通道（run_id → channel），供 kill_agent 查找（GAP-07）。
     active_channels: dashmap::DashMap<String, Arc<RpcChannel>>,
     /// 进度事件接收通道（从 workflow agent 内部发送，合并到 msg_loop）
-    progress_rx: parking_lot::Mutex<
-        Option<tokio::sync::mpsc::UnboundedReceiver<crate::protocol::ProgressEvent>>,
+    progress_rx: Option<
+        Arc<
+            tokio::sync::Mutex<
+                tokio::sync::mpsc::UnboundedReceiver<crate::protocol::ProgressEvent>,
+            >,
+        >,
     >,
 }
 
@@ -100,8 +105,16 @@ impl WorkflowRunner {
             agent_executor,
             cwd: cwd.to_string(),
             active_channels: dashmap::DashMap::new(),
-            progress_rx: parking_lot::Mutex::new(progress_rx),
+            progress_rx: progress_rx.map(|rx| Arc::new(tokio::sync::Mutex::new(rx))),
         }
+    }
+
+    /// Bind workflow agent tools to the owning session's execution scope.
+    pub fn bind_execution_manager(
+        &self,
+        manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+    ) -> Result<(), String> {
+        self.agent_executor.bind_execution_manager(manager)
     }
 
     /// 返回工作目录路径。
@@ -131,7 +144,7 @@ impl WorkflowRunner {
         progress_store: Arc<WorkflowProgressStore>,
         journal_store: Arc<WorkflowJournalStore>,
         done_tx: watch::Sender<Option<WorkflowResult>>,
-        kill_rx: oneshot::Receiver<()>,
+        mut kill_rx: oneshot::Receiver<()>,
     ) -> Result<(), WorkflowError> {
         let started_at_iso = chrono::Utc::now().to_rfc3339();
 
@@ -176,7 +189,9 @@ impl WorkflowRunner {
                 return Err(e);
             }
         };
-        let host = match JsExecutionHost::spawn(JsProcessSpec::new(command.program, command.args)) {
+        let host = match JsExecutionHost::spawn(
+            JsProcessSpec::new(command.program, command.args).with_cwd(&self.cwd),
+        ) {
             Ok(host) => Arc::new(host),
             Err(error) => {
                 let err = WorkflowError::from(error);
@@ -214,7 +229,9 @@ impl WorkflowRunner {
             Ok(v) => v,
             Err(e) => {
                 self.active_channels.remove(&run_id);
-                let _ = host.kill().await;
+                host.kill()
+                    .await
+                    .map_err(|error| WorkflowError::CleanupFailed(error.to_string()))?;
                 let err = WorkflowError::from(e);
                 send_failure(
                     &done_tx,
@@ -228,16 +245,27 @@ impl WorkflowRunner {
                 return Err(err);
             }
         };
-        let start_resp = match tokio::time::timeout(
+        let start_request = tokio::time::timeout(
             START_TIMEOUT,
             channel.send_request("workflow/start", start_params),
-        )
-        .await
-        {
+        );
+        let start_result = tokio::select! {
+            biased;
+            _ = &mut kill_rx => {
+                self.active_channels.remove(&run_id);
+                host.kill().await.map_err(|error| WorkflowError::CleanupFailed(error.to_string()))?;
+                send_killed(&done_tx, &journal_store, &progress_store, &run_id, &input, &started_at_iso, host.stderr_tail());
+                return Ok(());
+            }
+            result = start_request => result,
+        };
+        let start_resp = match start_result {
             Ok(Ok(resp)) => resp,
             Ok(Err(_rpc_error)) => {
                 self.active_channels.remove(&run_id);
-                let _ = host.kill().await;
+                host.kill()
+                    .await
+                    .map_err(|error| WorkflowError::CleanupFailed(error.to_string()))?;
                 let stderr_tail = host.stderr_tail();
                 let err = WorkflowError::SpawnFailed("workflow/start RPC failed".into());
                 send_failure(
@@ -253,7 +281,9 @@ impl WorkflowRunner {
             }
             Err(_timeout) => {
                 self.active_channels.remove(&run_id);
-                let _ = host.kill().await;
+                host.kill()
+                    .await
+                    .map_err(|error| WorkflowError::CleanupFailed(error.to_string()))?;
                 let stderr_tail = host.stderr_tail();
                 let err = WorkflowError::SpawnFailed(
                     "workflow/start timed out (15s) — node process may have crashed".into(),
@@ -272,7 +302,9 @@ impl WorkflowRunner {
         };
         if let Err(err) = validate_start_ack(start_resp) {
             self.active_channels.remove(&run_id);
-            let _ = host.kill().await;
+            host.kill()
+                .await
+                .map_err(|error| WorkflowError::CleanupFailed(error.to_string()))?;
             let stderr_tail = host.stderr_tail();
             send_failure(
                 &done_tx,
@@ -289,31 +321,27 @@ impl WorkflowRunner {
         // 8. Message loop (spawned task)
         let run_started = std::time::Instant::now();
 
-        // Clone values needed by the kill branch before they're moved into msg_loop
-        let kill_wf_name = input.workflow_name.clone();
-        let kill_script = input.script.clone();
-        let kill_limits = input.limits.clone();
-        let kill_budget_total = input.budget_total;
-        let kill_write_intent = input.write_intent.clone();
+        let kill_input = input.clone();
         let kill_started_at = started_at_iso.clone();
 
         // Clone done_tx for kill branch — must happen before async move consumes it
         let done_tx_for_kill = done_tx.clone();
 
-        // 提取 progress_rx 供独立转发任务使用（Mutex::lock().take() 消费 Option 内的 receiver）
-        let progress_rx_for_loop = self.progress_rx.lock().take();
-
-        // 独立的 progress 转发任务：从 workflow agent 内部接收实时进度事件并写入 progress_store
-        if let Some(mut progress_rx) = progress_rx_for_loop {
-            let progress_store_for_progress = Arc::clone(&progress_store);
-            let _progress_task = tokio::spawn(async move {
+        let run_scope = Arc::new(scope::RunScope::new());
+        // A live run forwards shared progress. Its successor can take over the
+        // receiver after cancellation; no detached session-lifetime task remains.
+        if let Some(progress_rx) = self.progress_rx.clone() {
+            let progress_store = Arc::clone(&progress_store);
+            run_scope.spawn(async move {
+                let mut progress_rx = progress_rx.lock().await;
                 while let Some(event) = progress_rx.recv().await {
-                    progress_store_for_progress.apply_event(&event);
+                    progress_store.apply_event(&event);
                 }
             });
         }
 
         let message_loop = MessageLoop {
+            run_scope: Arc::clone(&run_scope),
             agent_executor: Arc::clone(&self.agent_executor),
             channel: Arc::clone(&channel),
             journal_store: Arc::clone(&journal_store),
@@ -333,13 +361,13 @@ impl WorkflowRunner {
         tokio::select! {
             biased;
             _ = kill_rx => {
+                run_scope.cancel();
                 // 超时保护：Node crash 时不会阻塞 (M-ARCH6)
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     channel.send_request("workflow/kill", serde_json::json!({"runId": run_id})),
                 )
                 .await;
-                let _ = host.kill().await;
 
                 // Abort msg_loop 防止 state.json 和 done_tx 被覆写为 "failed"
                 // （msg_loop 检测到 stdout 关闭后会以默认 status="failed" 写 state.json + done_tx，
@@ -347,49 +375,9 @@ impl WorkflowRunner {
                 msg_loop.abort();
                 let _ = (&mut msg_loop).await;
 
-                // 写入 killed state.json
-                let stderr_tail = host.stderr_tail();
-                let state = crate::journal::RunState {
-                    run_id: run_id.clone(),
-                    workflow_name: kill_wf_name,
-                    status: "killed".to_string(),
-                    execution_status: peri_acp_types::workflow::ExecutionStatus::Killed,
-                    acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
-                    post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
-                    delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
-                    write_intent: kill_write_intent,
-                    limits: kill_limits,
-                    budget_total: kill_budget_total,
-                    attempts: journal_clone2.read_attempts(&run_id).unwrap_or_default(),
-                    return_value: None,
-                    script: kill_script,
-                    started_at: kill_started_at,
-                    finished_at: Some(chrono::Utc::now().to_rfc3339()),
-                    error: Some("workflow killed by user".to_string()),
-                };
-                let _ = journal_clone2.write_state(&run_id, &state);
-
-                // 复用 reducer 标记 Killed 终态（与 Node 正常路径 run_done 同一状态机入口）：
-                // msg_loop 已被 abort，Node 侧 run_done 不会到达；不标记则 progress_store 会
-                // 永久保留 Running 条目（workflow/list_runs 幽灵 running）
-                progress_store.apply_event(&ProgressEvent::RunDone {
-                    run_id: run_id.clone(),
-                    status: "killed".to_string(),
-                    return_value: None,
-                    error: Some("workflow killed by user".to_string()),
-                });
-
-                // 发送 done_tx（kill 分支作为唯一出口，确保通知任务收到 "killed" 状态）
-                let killed_result = WorkflowResult {
-                    run_id: run_id.clone(),
-                    status: "killed".to_string(),
-                    return_value: None,
-                    error: Some("workflow killed by user".to_string()),
-                    post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
-                    delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
-                    stderr_tail,
-                };
-                let _ = done_tx_for_kill.send(Some(killed_result));
+                run_scope.drain().await;
+                send_killed(&done_tx_for_kill, &journal_clone2, &progress_store,
+                    &run_id, &kill_input, &kill_started_at, host.stderr_tail());
             }
             _ = &mut msg_loop => {
                 // Message loop completed naturally
@@ -397,7 +385,8 @@ impl WorkflowRunner {
         }
 
         // Cleanup: ensure child process is terminated（防止僵尸进程）
-        let _ = host.kill().await;
+        run_scope.drain().await;
+        let cleanup = host.kill().await;
 
         // Cleanup: remove channel from active tracking (GAP-07)
         self.active_channels.remove(&run_id);
@@ -408,7 +397,7 @@ impl WorkflowRunner {
         // Cleanup completed runs from progress store（防止内存泄漏 S-PERF4）
         progress_store.cleanup_completed();
 
-        Ok(())
+        cleanup.map_err(|error| WorkflowError::CleanupFailed(error.to_string()))
     }
 }
 

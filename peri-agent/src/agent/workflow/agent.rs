@@ -140,11 +140,15 @@ pub struct WorkflowAgentContext {
 /// Workflow agent executor — builds and runs v2 stages for workflow agent() calls.
 pub struct WorkflowAgentExecutor {
     ctx: WorkflowAgentContext,
+    execution_manager: std::sync::OnceLock<Arc<dyn peri_acp_types::tasks::TaskManager>>,
 }
 
 impl WorkflowAgentExecutor {
     pub fn new(ctx: WorkflowAgentContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            execution_manager: std::sync::OnceLock::new(),
+        }
     }
 }
 
@@ -212,6 +216,23 @@ fn requested_model<'a>(
 
 #[async_trait::async_trait]
 impl AgentExecutor for WorkflowAgentExecutor {
+    fn bind_execution_manager(
+        &self,
+        manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+    ) -> Result<(), String> {
+        match self.execution_manager.set(manager) {
+            Ok(()) => Ok(()),
+            Err(manager)
+                if self
+                    .execution_manager
+                    .get()
+                    .is_some_and(|current| Arc::ptr_eq(current, &manager)) =>
+            {
+                Ok(())
+            }
+            Err(_) => Err("workflow executor is already bound to another session owner".into()),
+        }
+    }
     async fn execute(&self, params: AgentRunParams) -> AgentRunResult {
         debug!(
             agent_id = params.agent_id,
@@ -307,10 +328,11 @@ impl AgentExecutor for WorkflowAgentExecutor {
         // skills——workflow agent 无 plugin_skill_roots）。
         // MetaHarness：disabled 集合源自父会话冻结状态（WorkflowAgentContext
         // 字段，装配实现据此连坐过滤——设计 §2.5）。
-        let mut tools = self
-            .ctx
-            .middleware_factory
-            .build_tools(&self.ctx.cwd, &self.ctx.meta_harness_disabled);
+        let mut tools = self.ctx.middleware_factory.build_tools(
+            &self.ctx.cwd,
+            &self.ctx.meta_harness_disabled,
+            self.execution_manager.get().cloned(),
+        );
 
         // 3. agent definition 工具边界优先，再叠加 workflow allowedTools。
         if let Some(definition) = agent_definition.as_ref() {
@@ -372,6 +394,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 .as_ref()
                 .map(|definition| definition.skill_names.as_slice())
                 .unwrap_or_default(),
+            self.execution_manager.get().cloned(),
         ) {
             chain.add(mw);
         }

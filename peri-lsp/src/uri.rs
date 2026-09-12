@@ -17,7 +17,7 @@ use std::path::Path;
 /// Windows：盘符绝对路径输出标准 file URI `file:///C:/a/b`（空 authority、
 /// 盘符后跟 `/`、分隔符转正斜杠），LSP 服务器（rust-analyzer 等）才能正确
 /// parse；`file://C%3A%5C...` 形式把 `C%3A%5C` 当作 authority，服务器端会
-/// 解析失败。UNC 前缀（`\\server\share`）不在处理范围内。
+/// 解析失败。canonicalize 的 verbatim 盘符/UNC 路径使用标准 drive/authority URI。
 pub fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy();
     if s.starts_with("file://") {
@@ -32,13 +32,7 @@ pub fn path_to_uri(path: &Path) -> String {
 
     #[cfg(windows)]
     {
-        // 盘符路径 `D:\a\b` → `/D:/a/b`（encode 前补前导斜杠构成空 authority）
-        let norm = if is_drive_path(&abs) {
-            format!("/{}", abs.replace('\\', "/"))
-        } else {
-            abs
-        };
-        format!("file://{}", percent_encode(&norm))
+        windows_path_to_uri(&abs)
     }
     #[cfg(not(windows))]
     {
@@ -58,16 +52,48 @@ pub fn uri_to_path(uri: &str) -> String {
     let decoded = percent_decode(rest);
     #[cfg(windows)]
     {
-        if is_drive_path(&decoded) {
-            return decoded.trim_start_matches('/').replace('/', "\\");
-        }
+        return windows_uri_path(uri, decoded);
+    }
+    #[cfg(not(windows))]
+    decoded
+}
+
+#[cfg(any(windows, test))]
+fn windows_path_to_uri(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let normalized = if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else {
+        normalized
+            .strip_prefix("//?/")
+            .unwrap_or(&normalized)
+            .to_owned()
+    };
+    if let Some(authority_and_path) = normalized.strip_prefix("//") {
+        return format!("file://{}", percent_encode(authority_and_path));
+    }
+    let path = if is_drive_path(&normalized) {
+        format!("/{}", normalized.trim_start_matches('/'))
+    } else {
+        normalized
+    };
+    format!("file://{}", percent_encode(&path))
+}
+
+#[cfg(any(windows, test))]
+fn windows_uri_path(uri: &str, decoded: String) -> String {
+    if is_drive_path(&decoded) {
+        return decoded.trim_start_matches('/').replace('/', "\\");
+    }
+    if uri.starts_with("file://") && !decoded.starts_with('/') {
+        return format!(r"\\{}", decoded.replace('/', "\\"));
     }
     decoded
 }
 
 /// 是否为盘符绝对路径：`C:\...`（原生路径）/ `C:/...` / `/C:/...`
 /// （标准 file URI 的 path 段带前导斜杠）。
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn is_drive_path(s: &str) -> bool {
     let b = s.as_bytes();
     let start = usize::from(b.first() == Some(&b'/'));

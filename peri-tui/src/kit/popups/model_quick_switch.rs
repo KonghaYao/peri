@@ -42,6 +42,26 @@ use crate::kit::popup_overlay::close_popup;
 use peri_theme::atoms::THEME_ATOM;
 use unicode_width::UnicodeWidthStr;
 
+fn switch_session_alias(index: usize) {
+    let Some(alias) = PROFILE_KEYS.get(index) else {
+        return;
+    };
+    if let Some(client) = crate::kit::atoms::ACP_CLIENT_HANDLE
+        .get()
+        .filter(|client| client.has_session())
+    {
+        let client = client.clone();
+        let alias = alias.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = client.set_model(&alias).await {
+                tracing::warn!(%error, "session model switch failed");
+            }
+        });
+    } else {
+        switch_active_alias(index);
+    }
+}
+
 /// 四档行数（与 PROFILE_KEYS 长度一致）
 const ROW_COUNT: usize = 4;
 /// 弹窗总高度：内容 4 行 + 全边框上下各 1 行
@@ -152,11 +172,21 @@ pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let anchor_store = hooks.use_atom(&MODEL_SWITCH_ANCHOR);
     let (term_w, term_h) = hooks.use_terminal_size();
 
-    // 当前 active alias（配置唯一事实源；弹窗每次打开都是新实例，初始值正确）
-    let active_alias = PERI_CONFIG_HANDLE
+    let session = hooks
+        .use_atom(&crate::kit::atoms::SERVICE_SNAPSHOT)
+        .read()
+        .clone();
+    let has_session = crate::kit::atoms::ACP_CLIENT_HANDLE
         .get()
-        .map(|h| h.read().config.active_alias.clone())
-        .unwrap_or_else(|| "opus".to_string());
+        .is_some_and(|client| client.has_session());
+    let active_alias = if has_session {
+        session.model_alias.clone()
+    } else {
+        PERI_CONFIG_HANDLE
+            .get()
+            .map(|h| h.read().config.active_alias.clone())
+            .unwrap_or_else(|| "opus".to_string())
+    };
     let initial_sel = PROFILE_KEYS
         .iter()
         .position(|k| *k == active_alias)
@@ -165,7 +195,21 @@ pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
 
     // 弹窗几何（每帧按当前 anchor/终端尺寸重算，闭包按值捕获副本）
     let cfg = PERI_CONFIG_HANDLE.get().map(|h| h.read().clone());
-    let rows = cfg.as_ref().map(quick_switch_rows).unwrap_or_default();
+    let rows = if has_session {
+        PROFILE_KEYS
+            .iter()
+            .map(|alias| QuickSwitchRow {
+                alias: alias.to_string(),
+                model: if *alias == active_alias {
+                    session.model_name.clone()
+                } else {
+                    String::new()
+                },
+            })
+            .collect()
+    } else {
+        cfg.as_ref().map(quick_switch_rows).unwrap_or_default()
+    };
     let width = popup_width(&rows);
     let height = POPUP_HEIGHT;
     let (x, y) = match *anchor_store.read() {
@@ -194,7 +238,7 @@ pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                     return EventResult::Consumed;
                 }
                 Some(ListNavAction::Confirm) => {
-                    switch_active_alias(*sel.read());
+                    switch_session_alias(*sel.read());
                     close_popup();
                     return EventResult::Consumed;
                 }
@@ -238,7 +282,7 @@ pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(idx) = row_index_at(mouse.row, mouse.column, &area) {
-                        switch_active_alias(idx);
+                        switch_session_alias(idx);
                         close_popup();
                         return EventResult::Consumed;
                     }

@@ -28,7 +28,7 @@ use crate::thread::ThreadMeta;
 /// parent 为 `None` 时返回 `None`：spawn 侧继续走 `parent_thread_id_cfg` 回退。
 /// （resume 路径不再做 parent 链校验——该解析链路在生产路径与写盘值常有
 /// 偏差，误判拒绝；resume 仅以 thread_id 存在性 / status 为准）
-fn parent_thread_id_of(parent: Option<&Arc<Session>>) -> Option<String> {
+pub(super) fn parent_thread_id_of(parent: Option<&Arc<Session>>) -> Option<String> {
     parent
         .and_then(|p| p.store().thread_id.clone())
         .or_else(|| parent.and_then(|p| p.subagent_host().and_then(|h| h.parent_thread_id.clone())))
@@ -199,10 +199,26 @@ pub(super) async fn spawn_subagent_impl(
         child_meta.hidden = true;
         child_meta.cancel_policy = cancel_policy;
         child_meta.title = Some(agent_name.clone());
-        store
-            .create_thread(child_meta)
-            .await
-            .map_err(|e| format!("Failed to create child thread: {}", e))?;
+        let binding = match &parent_thread_id {
+            Some(id) => store.load_session_binding(id).await?,
+            None => None,
+        };
+        if binding.is_some() {
+            let workspace = store
+                .validate_session_binding(parent_thread_id.as_ref().expect("bound parent"))
+                .await?;
+            if workspace.cwd != std::path::Path::new(&cwd) {
+                return Err(
+                    peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch.into(),
+                );
+            }
+            store.create_bound_thread(child_meta, &workspace).await?;
+        } else {
+            store
+                .create_thread(child_meta)
+                .await
+                .map_err(|e| format!("Failed to create child thread: {}", e))?;
+        }
         if let Err(error) = store
             .store_inherited_context(&child_thread_id, &inherited)
             .await

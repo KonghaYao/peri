@@ -71,67 +71,292 @@ async fn load_or_backfill_frozen_data(
     cfg: &AcpServerConfig,
     session_id: &str,
 ) -> Result<crate::session::executor::FrozenSessionData, AcpError> {
-    match cfg
-        .thread_store
-        .load_frozen_snapshot(&session_id.to_string())
+    let snapshot = cfg
+        .controller
+        .sessions()
+        .load_frozen_snapshot(&session_id.to_owned())
         .await
-    {
-        Ok(Some(snapshot)) => decode_frozen_snapshot(&snapshot).map_err(|error| {
-            AcpError::new(
-                -32603,
-                format!("Frozen snapshot restore failed for {session_id}: {error}"),
-            )
-        }),
-        Ok(None) => {
-            let meta = cfg
-                .thread_store
-                .load_meta(&session_id.to_string())
-                .await
-                .map_err(|error| {
-                    AcpError::new(
-                        -32603,
-                        format!("Legacy frozen snapshot metadata load failed: {error}"),
-                    )
-                })?;
-            let frozen_data = cfg.session_manager.build_frozen_data(
-                &meta.cwd,
-                &cfg.plugin_skill_roots,
-                &cfg.plugin_agent_dirs,
-            );
-            if store_frozen_snapshot(cfg, session_id, &frozen_data).await? {
-                return Ok(frozen_data);
+        .map_err(super::super::workspace::workspace_error)?
+        .ok_or_else(|| AcpError::new(-32603, "Bound session has no frozen snapshot"))?;
+    decode_frozen_snapshot(&snapshot).map_err(super::super::workspace::workspace_error)
+}
+
+async fn prepare_existing(
+    params: &Value,
+    cfg: &AcpServerConfig,
+    sessions: &mut HashMap<String, SessionState>,
+) -> Result<(String, Option<Value>), AcpError> {
+    let id = params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+    let (workspace, owner) = super::super::workspace::acquire_for_load(
+        cfg,
+        sessions,
+        id,
+        params.get("cwd").and_then(Value::as_str),
+    )
+    .await?;
+    let identity = match response_identity(cfg, id).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            if !sessions.contains_key(id) {
+                owner
+                    .mark_clean()
+                    .await
+                    .map_err(super::super::workspace::workspace_error)?;
             }
-            // Another process won the write-once backfill. Its complete snapshot
-            // is canonical; use it instead of this process's potentially different
-            // environment rendering.
-            let winner = cfg
-                .thread_store
-                .load_frozen_snapshot(&session_id.to_string())
-                .await
-                .map_err(|error| {
-                    AcpError::new(
-                        -32603,
-                        format!("Frozen snapshot winner reload failed: {error}"),
-                    )
-                })?
-                .ok_or_else(|| {
-                    AcpError::new(
-                        -32603,
-                        format!("Frozen snapshot backfill lost without winner: {session_id}"),
-                    )
-                })?;
-            decode_frozen_snapshot(&winner).map_err(|error| {
-                AcpError::new(
-                    -32603,
-                    format!("Frozen snapshot winner restore failed for {session_id}: {error}"),
-                )
-            })
+            return Err(error);
         }
-        Err(error) => Err(AcpError::new(
-            -32603,
-            format!("Frozen snapshot load failed for {session_id}: {error}"),
+    };
+    if let Some(state) = sessions.get_mut(id) {
+        if state.history_payloads.is_empty() {
+            let payloads = dispatch::load_session_payloads(cfg.controller.as_ref(), id).await?;
+            state.history = payloads
+                .iter()
+                .filter_map(|payload| payload.as_message().cloned())
+                .collect();
+            state.history_payloads = payloads;
+        }
+        return Ok((id.to_owned(), identity));
+    }
+    let prepared = async {
+        let frozen = load_or_backfill_frozen_data(cfg, id).await?;
+        let payloads = dispatch::load_session_payloads(cfg.controller.as_ref(), id).await?;
+        let cwd = workspace
+            .cwd
+            .to_str()
+            .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
+            .to_owned();
+        let environment =
+            super::super::workspace::SessionEnvironment::assemble(cfg, &cwd, id).await?;
+        let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+        local.session_manager.ensure_session(id, &cwd);
+        local.session_manager.ensure_session_caps(id);
+        let workflow_middleware = create_session_workflow_middleware(local, &cwd, id, &frozen);
+        let lsp_pool = create_session_lsp_pool(local, &cwd);
+        Ok::<_, AcpError>(SessionState {
+            session_id: id.to_owned(),
+            thread_id: id.to_owned(),
+            cwd,
+            execution_owner: Some(owner.clone()),
+            environment,
+            closing: false,
+            history: payloads
+                .iter()
+                .filter_map(|p| p.as_message().cloned())
+                .collect(),
+            history_payloads: payloads,
+            cancel_token: None,
+            frozen: Some(frozen),
+            recall_items: Vec::new(),
+            agent_pool: crate::session::agent_pool::AgentPool::new(),
+            workflow_middleware,
+            lsp_pool,
+            title: None,
+            tags: Vec::new(),
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
+            lease: super::super::lease::WriterLease::acquired("default"),
+        })
+    }
+    .await;
+    match prepared {
+        Ok(state) => {
+            if let Some(environment) = &state.environment {
+                environment.activate();
+            }
+            sessions.insert(id.to_owned(), state);
+        }
+        Err(error) => {
+            owner
+                .mark_clean()
+                .await
+                .map_err(super::super::workspace::workspace_error)?;
+            return Err(error);
+        }
+    }
+    Ok((id.to_owned(), identity))
+}
+
+fn identity_response(mut response: Value, identity: Option<Value>) -> Result<Value, AcpError> {
+    if let Some(identity) = identity {
+        response["_meta"]["peri.sessionWorkspaceV1"] = identity;
+    }
+    Ok(response)
+}
+
+async fn response_identity(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+) -> Result<Option<Value>, AcpError> {
+    if cfg
+        .session_manager
+        .effective_host_caps()
+        .session_workspace_v1
+    {
+        context_for_session(cfg, session_id).await.map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+pub(super) fn retain_failed_assembly(
+    sessions: &mut HashMap<String, SessionState>,
+    id: &str,
+    cwd: &str,
+    owner: Arc<dyn peri_acp_types::workspace::SessionExecutionLease>,
+    environment: Arc<super::super::workspace::SessionEnvironment>,
+) {
+    sessions.insert(
+        id.to_owned(),
+        SessionState {
+            session_id: id.to_owned(),
+            thread_id: id.to_owned(),
+            cwd: cwd.to_owned(),
+            execution_owner: Some(owner),
+            environment: Some(environment),
+            closing: true,
+            history: Vec::new(),
+            history_payloads: Vec::new(),
+            cancel_token: None,
+            frozen: None,
+            recall_items: Vec::new(),
+            agent_pool: crate::session::agent_pool::AgentPool::new(),
+            workflow_middleware: None,
+            lsp_pool: None,
+            title: None,
+            tags: Vec::new(),
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
+            lease: super::super::lease::WriterLease::acquired("default"),
+        },
+    );
+}
+
+async fn context_for_session(cfg: &AcpServerConfig, session_id: &str) -> Result<Value, AcpError> {
+    let store = cfg.controller.sessions();
+    let workspace = store
+        .validate_session_binding(&session_id.to_owned())
+        .await
+        .map_err(super::super::workspace::workspace_error)?;
+    let binding = store
+        .load_session_binding(&session_id.to_owned())
+        .await
+        .map_err(super::super::workspace::workspace_error)?;
+    let meta = store
+        .load_meta(&session_id.to_owned())
+        .await
+        .map_err(super::super::workspace::workspace_error)?;
+    Ok(
+        serde_json::json!({ "version": 1, "workspace": workspace, "binding": binding, "title": meta.title }),
+    )
+}
+
+pub(crate) async fn handle_context(
+    params: &Value,
+    cfg: &AcpServerConfig,
+) -> Result<Value, AcpError> {
+    if !cfg
+        .session_manager
+        .effective_host_caps()
+        .session_workspace_v1
+    {
+        return Err(AcpError::new(
+            -32601,
+            "Session workspace capability was not negotiated",
+        ));
+    }
+    match (
+        params.get("sessionId").and_then(Value::as_str),
+        params.get("cwd").and_then(Value::as_str),
+    ) {
+        (Some(id), None) => context_for_session(cfg, id).await,
+        (None, Some(cwd)) => {
+            let workspace = cfg
+                .controller
+                .sessions()
+                .resolve_workspace(std::path::Path::new(cwd))
+                .await
+                .map_err(super::super::workspace::workspace_error)?;
+            Ok(serde_json::json!({ "version": 1, "workspace": workspace }))
+        }
+        _ => Err(AcpError::new(
+            -32602,
+            "Specify exactly one of sessionId or cwd",
         )),
     }
+}
+
+pub(crate) async fn handle_metadata(
+    params: &Value,
+    cfg: &AcpServerConfig,
+    history: bool,
+) -> Result<Value, AcpError> {
+    if !cfg
+        .session_manager
+        .effective_host_caps()
+        .session_workspace_v1
+    {
+        return Err(AcpError::new(
+            -32601,
+            "Session workspace capability was not negotiated",
+        ));
+    }
+    let id = params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
+        .to_owned();
+    let store = cfg.controller.sessions();
+    let meta = store
+        .load_meta(&id)
+        .await
+        .map_err(super::super::workspace::workspace_error)?;
+    let mut response = serde_json::json!({ "sessionId": id, "title": meta.title, "cwd": meta.cwd, "permissionMode": build_mode_state(&cfg.permission_mode).current_mode_id.to_string(), "modelAlias": cfg.peri_config.read().config.active_alias });
+    {
+        let provider = cfg.provider.read();
+        response["modelName"] = Value::String(provider.model_name().to_owned());
+        let effort = match &*provider {
+            crate::provider::LlmProvider::OpenAi { effort, .. }
+            | crate::provider::LlmProvider::Anthropic { effort, .. } => effort.clone(),
+        };
+        response["effort"] = serde_json::json!(effort);
+        let config = cfg.peri_config.read();
+        response["providerName"] = serde_json::json!(config
+            .config
+            .profiles
+            .get(&config.config.active_alias)
+            .map(|profile| profile.provider.clone()));
+    }
+    if history {
+        let payloads = store
+            .load_context_payloads(&id)
+            .await
+            .map_err(super::super::workspace::workspace_error)?;
+        response["payloads"] = Value::Array(
+            payloads
+                .iter()
+                .map(|payload| {
+                    let encoded = peri_acp_types::store::serialize_persisted_payload(payload)?;
+                    Ok::<Value, anyhow::Error>(serde_json::from_str(&encoded)?)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(super::super::workspace::workspace_error)?,
+        );
+        response["binding"] = serde_json::to_value(
+            store
+                .load_session_binding(&id)
+                .await
+                .map_err(super::super::workspace::workspace_error)?,
+        )
+        .map_err(super::super::workspace::workspace_error)?;
+    }
+    Ok(response)
 }
 
 /// 创建 session 级 WorkflowMiddleware（session/new / load / resume 共用，GAP-05）。
@@ -146,7 +371,7 @@ fn create_session_workflow_middleware(
     session_id: &str,
     frozen_data: &crate::session::executor::FrozenSessionData,
 ) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
-    crate::host::workflow_agent::create_session_workflow_middleware(
+    let middleware = crate::host::workflow_agent::create_session_workflow_middleware(
         Arc::clone(&cfg.provider),
         &cfg.peri_config,
         cwd,
@@ -157,7 +382,13 @@ fn create_session_workflow_middleware(
         // 内部 handler 消费：usage/progress）；统一发射接线留待单独裁定。
         None,
         Arc::clone(&cfg.skills),
-    )
+    );
+    if let (Some(middleware), Some(session)) =
+        (&middleware, cfg.session_manager.get_session(session_id))
+    {
+        middleware.set_bg_registry(session.task_manager.clone());
+    }
+    middleware
 }
 
 /// 创建 session 级 LSP 服务器池（session/new / load / resume / fork 共用，H1）。
@@ -199,18 +430,69 @@ pub(crate) async fn handle_new(
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
 ) -> Result<Value, AcpError> {
-    let cwd = params
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".")
-        .to_string();
-    let meta = ThreadMeta::new(&cwd);
-    let thread_id = cfg
-        .thread_store
-        .create_thread(meta)
+    let store = cfg.controller.sessions();
+    let requested = params.get("cwd").and_then(Value::as_str).unwrap_or(".");
+    let workspace = store
+        .resolve_workspace(std::path::Path::new(requested))
         .await
-        .map_err(|e| AcpError::new(-32603, format!("Thread creation failed: {e}")))?;
+        .map_err(super::super::workspace::workspace_error)?;
+    let cwd = workspace
+        .cwd
+        .to_str()
+        .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
+        .to_owned();
+    let thread_id = store
+        .create_bound_thread(ThreadMeta::new(&cwd), &workspace)
+        .await
+        .map_err(super::super::workspace::workspace_error)?;
     let session_id = thread_id.clone();
+    let owner = store
+        .acquire_execution_lease(&thread_id)
+        .await
+        .map_err(super::super::workspace::workspace_error)?;
+    if let Err(error) =
+        super::super::workspace::validate_expected(cfg, &thread_id, Some(&cwd)).await
+    {
+        store
+            .delete_thread(&thread_id)
+            .await
+            .map_err(super::super::workspace::workspace_error)?;
+        owner
+            .mark_clean()
+            .await
+            .map_err(super::super::workspace::workspace_error)?;
+        return Err(error);
+    }
+    let identity = match response_identity(cfg, &session_id).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            store
+                .delete_thread(&thread_id)
+                .await
+                .map_err(super::super::workspace::workspace_error)?;
+            owner
+                .mark_clean()
+                .await
+                .map_err(super::super::workspace::workspace_error)?;
+            return Err(error);
+        }
+    };
+    let environment =
+        match super::super::workspace::SessionEnvironment::assemble(cfg, &cwd, &session_id).await {
+            Ok(environment) => environment,
+            Err(error) => {
+                store
+                    .delete_thread(&thread_id)
+                    .await
+                    .map_err(super::super::workspace::workspace_error)?;
+                owner
+                    .mark_clean()
+                    .await
+                    .map_err(super::super::workspace::workspace_error)?;
+                return Err(error);
+            }
+        };
+    let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
 
     // ── Freeze system prompt data at session creation ──
     // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
@@ -221,7 +503,30 @@ pub(crate) async fn handle_new(
         &cfg.plugin_skill_roots,
         &cfg.plugin_agent_dirs,
     );
-    store_new_frozen_snapshot_or_compensate(cfg, &session_id, &frozen_data).await?;
+    if let Err(error) =
+        store_new_frozen_snapshot_or_compensate(cfg, &session_id, &frozen_data).await
+    {
+        if let Some(environment) = environment.as_ref() {
+            if !environment.shutdown().await {
+                retain_failed_assembly(
+                    sessions,
+                    &session_id,
+                    &cwd,
+                    owner.clone(),
+                    environment.clone(),
+                );
+                return Err(AcpError::new(
+                    -32010,
+                    "Session assembly cleanup incomplete; resources retained for shutdown retry",
+                ));
+            }
+        }
+        owner
+            .mark_clean()
+            .await
+            .map_err(super::super::workspace::workspace_error)?;
+        return Err(error);
+    }
     cfg.session_manager.ensure_session(&session_id, &cwd);
 
     // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
@@ -236,6 +541,9 @@ pub(crate) async fn handle_new(
             session_id: session_id.clone(),
             thread_id: thread_id.clone(),
             cwd: cwd.clone(),
+            execution_owner: Some(owner),
+            environment: environment.clone(),
+            closing: false,
             history: Vec::new(),
             history_payloads: Vec::new(),
             cancel_token: None,
@@ -254,6 +562,9 @@ pub(crate) async fn handle_new(
         },
     );
 
+    if let Some(environment) = &environment {
+        environment.activate();
+    }
     info!(session_id = %session_id, "ACP session created with ThreadStore");
     let modes = build_mode_state(&cfg.permission_mode);
     let config_options = {
@@ -271,7 +582,10 @@ pub(crate) async fn handle_new(
     cfg.session_manager.ensure_session_caps(&session_id);
 
     // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
-    serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+    identity_response(
+        serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
+        identity,
+    )
 }
 
 /// `session/new` response 成功写入 transport 后执行的初始化通知。
@@ -301,76 +615,13 @@ pub(crate) async fn handle_load(
     sessions: &mut HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
-    let req_session_id = params
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-    let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
-
-    // Load history from ThreadStore via Controller
-    let history_payloads =
-        dispatch::load_session_payloads(cfg.controller.as_ref(), req_session_id).await?;
-    let history = history_payloads
-        .iter()
-        .filter_map(peri_acp_types::store::PersistedPayload::as_message)
-        .cloned()
-        .collect::<Vec<_>>();
-
-    // ── 先恢复 frozen，再产生任何 SessionManager side effect ──
-    let frozen_data = if let Some(frozen) = sessions
-        .get(req_session_id)
-        .and_then(|state| state.frozen.clone())
-    {
-        frozen
-    } else {
-        load_or_backfill_frozen_data(cfg, req_session_id).await?
-    };
-    cfg.session_manager.ensure_session(req_session_id, cwd);
+    let (id, identity) = prepare_existing(params, cfg, sessions).await?;
+    let req_session_id = id.as_str();
+    let state = sessions.get(req_session_id).expect("prepared session");
+    let environment = state.environment.clone();
+    let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    let history_payloads = state.history_payloads.clone();
     let caps = cfg.session_manager.ensure_session_caps(req_session_id);
-    let workflow_middleware =
-        create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
-    let lsp_pool = create_session_lsp_pool(cfg, cwd);
-
-    // Insert into sessions if not already present
-    if let Some(state) = sessions.get_mut(req_session_id) {
-        if state.history.is_empty() {
-            state.history = history;
-            state.history_payloads = history_payloads.clone();
-        }
-        if state.frozen.is_none() {
-            state.frozen = Some(frozen_data.clone());
-        }
-        if state.workflow_middleware.is_none() {
-            state.workflow_middleware = workflow_middleware;
-        }
-        if state.lsp_pool.is_none() {
-            state.lsp_pool = lsp_pool;
-        }
-    } else {
-        sessions.insert(
-            req_session_id.to_string(),
-            SessionState {
-                session_id: req_session_id.to_string(),
-                thread_id: req_session_id.to_string(),
-                cwd: cwd.to_string(),
-                history,
-                history_payloads: history_payloads.clone(),
-                cancel_token: None,
-                frozen: Some(frozen_data),
-                recall_items: Vec::new(),
-                agent_pool: crate::session::agent_pool::AgentPool::new(),
-                workflow_middleware,
-                lsp_pool,
-                title: None,
-                tags: Vec::new(),
-                continuation_armed: false,
-                continuation_epoch: 0,
-                continuation_in_flight: false,
-                continuation_mq_steering_pending: false,
-                lease: super::super::lease::WriterLease::acquired("default"),
-            },
-        );
-    }
 
     // ── ACP v1 spec: replay history via session/update BEFORE responding ──
     let replay_sender = TuiReplaySender {
@@ -416,10 +667,72 @@ pub(crate) async fn handle_load(
     // on_change 重发）。幂等（Started 去重）；pool/registry 缺失或
     // 连接中 → 空跑，由首 turn 装配与连接完成事件兜底。
     prewarm_session_mcp_discovery(cfg, req_session_id);
-    serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+    identity_response(
+        serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
+        identity,
+    )
 }
 
 pub(crate) async fn handle_list(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
+    if let Some(extension) = params
+        .get("_meta")
+        .and_then(|meta| meta.get("peri.sessionWorkspaceV1"))
+    {
+        if !cfg
+            .session_manager
+            .effective_host_caps()
+            .session_workspace_v1
+        {
+            return Err(AcpError::new(
+                -32602,
+                "Session workspace capability was not negotiated",
+            ));
+        }
+        let scope = serde_json::from_value(
+            extension
+                .get("scope")
+                .cloned()
+                .ok_or_else(|| AcpError::new(-32602, "missing scope"))?,
+        )
+        .map_err(|e| AcpError::new(-32602, format!("Invalid scope: {e}")))?;
+        let cursor = extension
+            .get("cursor")
+            .filter(|v| !v.is_null())
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()
+            .map_err(|e| AcpError::new(-32602, format!("Invalid cursor: {e}")))?;
+        let limit = extension
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(100)
+            .clamp(1, 500) as u32;
+        let page = cfg
+            .controller
+            .sessions()
+            .list_scoped_threads(&peri_acp_types::workspace::ScopedThreadQuery {
+                scope,
+                cursor,
+                limit,
+            })
+            .await
+            .map_err(super::super::workspace::workspace_error)?;
+        let entries = page
+            .entries
+            .iter()
+            .map(|entry| {
+                agent_client_protocol::schema::v1::SessionInfo::new(
+                    SessionId::new(entry.thread.id.clone()),
+                    entry.effective_cwd.clone(),
+                )
+                .title(entry.thread.title.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut response = serde_json::to_value(ListSessionsResponse::new(entries))
+            .map_err(super::super::workspace::workspace_error)?;
+        response["_meta"]["peri.sessionWorkspaceV1"] =
+            serde_json::json!({ "threads": page.entries, "nextCursor": page.next_cursor });
+        return Ok(response);
+    }
     let cwd_filter = params.get("cwd").and_then(|v| v.as_str());
     let entries = dispatch::list_sessions_as_info(cfg.controller.as_ref(), cwd_filter)
         .await
@@ -455,70 +768,125 @@ pub(super) fn handle_cancel_bg_task(
     Ok(serde_json::json!({ "success": true }))
 }
 
+async fn close_owned_session(
+    cfg: &AcpServerConfig,
+    sessions: &mut HashMap<String, SessionState>,
+    session_id: &str,
+    delete: bool,
+) -> Result<(), AcpError> {
+    if let Some(state) = sessions.get_mut(session_id) {
+        state.closing = true;
+        state.continuation_armed = false;
+        if let Some(token) = state.cancel_token.as_ref() {
+            token.cancel();
+        }
+        cfg.session_manager.pre_close_session(session_id);
+        if state.cancel_token.is_some() {
+            return Err(AcpError::new(
+                -32010,
+                "Session close incomplete: prompt is still active",
+            ));
+        }
+        let environment = state.environment.clone();
+        let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+        local
+            .session_manager
+            .close_session(session_id)
+            .await
+            .map_err(super::super::workspace::workspace_error)?;
+        if let Some(pool) = state.lsp_pool.as_ref() {
+            pool.shutdown().await;
+        }
+        if let Some(environment) = environment.as_ref() {
+            if !environment.shutdown().await {
+                return Err(AcpError::new(
+                    -32010,
+                    "Session close incomplete: resources are still active",
+                ));
+            }
+        }
+        let owner = state.execution_owner.as_ref().ok_or_else(|| {
+            super::super::workspace::workspace_error(
+                peri_acp_types::workspace::WorkspaceError::ExecutionLeaseRequired,
+            )
+        })?;
+        if delete {
+            cfg.controller
+                .sessions()
+                .delete_thread(&session_id.to_owned())
+                .await
+                .map_err(super::super::workspace::workspace_error)?;
+        }
+        owner
+            .mark_clean()
+            .await
+            .map_err(super::super::workspace::workspace_error)?;
+        sessions.remove(session_id);
+    } else if delete {
+        let store = cfg.controller.sessions();
+        if store
+            .load_session_binding(&session_id.to_owned())
+            .await
+            .map_err(super::super::workspace::workspace_error)?
+            .is_none()
+        {
+            // Missing delete remains idempotent; unresolved rows are never mutated.
+            let exists = store
+                .list_threads()
+                .await
+                .map_err(super::super::workspace::workspace_error)?
+                .iter()
+                .any(|thread| thread.id == session_id);
+            if !exists {
+                return Ok(());
+            }
+        }
+        let owner = cfg
+            .controller
+            .sessions()
+            .acquire_execution_lease(&session_id.to_owned())
+            .await
+            .map_err(super::super::workspace::workspace_error)?;
+        let result = cfg
+            .controller
+            .sessions()
+            .delete_thread(&session_id.to_owned())
+            .await;
+        owner
+            .mark_clean()
+            .await
+            .map_err(super::super::workspace::workspace_error)?;
+        result.map_err(super::super::workspace::workspace_error)?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_close(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
 ) -> Result<Value, AcpError> {
-    let req_session_id = params
+    let id = params
         .get("sessionId")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-
-    if let Some(state) = sessions.remove(req_session_id) {
-        if let Some(ref token) = state.cancel_token {
-            token.cancel();
-        }
-        info!(session_id = %req_session_id, "Session closed");
-    }
-    // 同步从 SessionManager 移除 AcpSession 记录（取消所有 cascade 子 agent）
-    let _ = cfg.session_manager.close_session(req_session_id).await;
-    let resp = CloseSessionResponse::new();
-    serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+    close_owned_session(cfg, sessions, id, false).await?;
+    serde_json::to_value(CloseSessionResponse::new())
+        .map_err(super::super::workspace::workspace_error)
 }
 
-// session/delete（标准 ACP，agentclientprotocol.com/protocol/v1/session-delete）：
-// 从 session history 中移除会话——先做与 session/close 相同的内存态清理，
-// 再从 ThreadStore 持久化删除线程（消息级联删除）。存储层幂等：线程
-// 不存在时不视为错误；真实 IO 失败仅记录日志（与 stdio 路径一致）。
 pub(crate) async fn handle_delete(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
 ) -> Result<Value, AcpError> {
-    let req_session_id = params
+    let id = params
         .get("sessionId")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-
-    // 与 stdio 路径（handle_delete）一致：锁外 shutdown LSP pool，
-    // 避免删除活跃会话后 LSP 服务器子进程/read task 残留（M2）
-    let lsp_pool = {
-        if let Some(state) = sessions.remove(req_session_id) {
-            if let Some(ref token) = state.cancel_token {
-                token.cancel();
-            }
-            info!(session_id = %req_session_id, "Session removed on delete");
-            state.lsp_pool
-        } else {
-            None
-        }
-    };
-    if let Some(pool) = lsp_pool {
-        pool.shutdown().await;
-    }
-    let _ = cfg.session_manager.close_session(req_session_id).await;
-    if let Err(e) = cfg
-        .thread_store
-        .delete_thread(&req_session_id.to_string())
-        .await
-    {
-        warn!(session_id = %req_session_id, error = %e, "session/delete: thread deletion failed");
-    } else {
-        info!(session_id = %req_session_id, "Session history deleted");
-    }
-    let resp = DeleteSessionResponse::new();
-    serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+    close_owned_session(cfg, sessions, id, true).await?;
+    serde_json::to_value(DeleteSessionResponse::new())
+        .map_err(super::super::workspace::workspace_error)
 }
 
 pub(crate) async fn handle_resume(
@@ -527,79 +895,13 @@ pub(crate) async fn handle_resume(
     sessions: &mut HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
-    let req_session_id = params
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-    let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
-
-    // Load history from ThreadStore via Controller (deferred load)
-    let history_payloads =
-        dispatch::load_session_payloads(cfg.controller.as_ref(), req_session_id).await?;
-    let history = history_payloads
-        .iter()
-        .filter_map(|payload| payload.as_message().cloned())
-        .collect();
-
-    // ── 先恢复 frozen，再产生任何 SessionManager side effect ──
-    let frozen_data = if let Some(frozen) = sessions
+    let (id, identity) = prepare_existing(params, cfg, sessions).await?;
+    let req_session_id = id.as_str();
+    let environment = sessions
         .get(req_session_id)
-        .and_then(|state| state.frozen.clone())
-    {
-        frozen
-    } else {
-        load_or_backfill_frozen_data(cfg, req_session_id).await?
-    };
-    cfg.session_manager.ensure_session(req_session_id, cwd);
+        .and_then(|state| state.environment.clone());
+    let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
     let caps = cfg.session_manager.ensure_session_caps(req_session_id);
-    let workflow_middleware =
-        create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
-    let lsp_pool = create_session_lsp_pool(cfg, cwd);
-
-    if !sessions.contains_key(req_session_id) {
-        sessions.insert(
-            req_session_id.to_string(),
-            SessionState {
-                session_id: req_session_id.to_string(),
-                thread_id: req_session_id.to_string(),
-                cwd: cwd.to_string(),
-                history,
-                history_payloads: history_payloads.clone(),
-                cancel_token: None,
-                frozen: Some(frozen_data),
-                recall_items: Vec::new(),
-                agent_pool: crate::session::agent_pool::AgentPool::new(),
-                workflow_middleware,
-                lsp_pool,
-                title: None,
-                tags: Vec::new(),
-                continuation_armed: false,
-                continuation_epoch: 0,
-                continuation_in_flight: false,
-                continuation_mq_steering_pending: false,
-                lease: super::super::lease::WriterLease::acquired("default"),
-            },
-        );
-        info!(session_id = %req_session_id, "Session resumed (new)");
-    } else {
-        // Existing session: populate missing fields
-        if let Some(s) = sessions.get_mut(req_session_id) {
-            if s.history.is_empty() {
-                s.history = history;
-                s.history_payloads = history_payloads.clone();
-            }
-            if s.frozen.is_none() {
-                s.frozen = Some(frozen_data.clone());
-            }
-            if s.workflow_middleware.is_none() {
-                s.workflow_middleware = workflow_middleware;
-            }
-            if s.lsp_pool.is_none() {
-                s.lsp_pool = lsp_pool;
-            }
-        }
-        info!(session_id = %req_session_id, "Session resumed (existing)");
-    }
 
     // Push AvailableCommandsUpdate notification + 预热 MCP skill 发现
     // （决策 B 扩展，与 session/load 同构；stdio 装配面同款行为——恢复会话
@@ -616,7 +918,10 @@ pub(crate) async fn handle_resume(
     prewarm_session_mcp_discovery(cfg, req_session_id);
 
     let resp = ResumeSessionResponse::new();
-    serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+    identity_response(
+        serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
+        identity,
+    )
 }
 
 pub(crate) async fn handle_fork(
@@ -629,40 +934,104 @@ pub(crate) async fn handle_fork(
         .get("sessionId")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-    let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
-
-    let (source_payloads, source_frozen, source_thread_id) = sessions
-        .get(source_id)
-        .map(|state| {
-            (
-                state.history_payloads.clone(),
-                state.frozen.clone(),
-                state.thread_id.clone(),
-            )
-        })
-        .ok_or_else(|| AcpError::new(-32602, format!("source session not found: {source_id}")))?;
-    let source_frozen = source_frozen.ok_or_else(|| {
-        AcpError::new(
-            -32603,
-            format!("source session has no frozen snapshot: {source_id}"),
-        )
-    })?;
-
-    let (new_thread_id, copied_payloads) = dispatch::fork_session(
-        cfg.controller.as_ref(),
-        &source_thread_id,
-        &source_payloads,
-        cwd,
+    prepare_existing(params, cfg, sessions).await?;
+    let (workspace, _source_owner) = super::super::workspace::acquire_for_load(
+        cfg,
+        sessions,
+        source_id,
+        params.get("cwd").and_then(Value::as_str),
     )
-    .await
-    .map_err(|e| AcpError::new(-32603, format!("{e}")))?;
+    .await?;
+    let source = sessions
+        .get(source_id)
+        .ok_or_else(|| AcpError::new(-32602, "Load the source session before forking"))?;
+    if source.cancel_token.is_some()
+        || source.continuation_in_flight
+        || cfg
+            .session_manager
+            .get_session(source_id)
+            .is_some_and(|s| !s.active_agents.is_empty() || !s.task_manager.is_execution_idle())
+    {
+        return Err(AcpError::new(
+            -32010,
+            "Cannot fork while source execution is active",
+        ));
+    }
+    let source_frozen = source
+        .frozen
+        .clone()
+        .ok_or_else(|| AcpError::new(-32603, "Source frozen snapshot is missing"))?;
+    let cwd_owned = workspace
+        .cwd
+        .to_str()
+        .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
+        .to_owned();
+    let cwd = cwd_owned.as_str();
+    let (new_thread_id, copied_payloads, owner) =
+        dispatch::fork_bound_session(cfg.controller.as_ref(), source_id, &workspace)
+            .await
+            .map_err(super::super::workspace::workspace_error)?;
+    let identity = match response_identity(cfg, &new_thread_id).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            cfg.thread_store
+                .delete_thread(&new_thread_id)
+                .await
+                .map_err(super::super::workspace::workspace_error)?;
+            owner
+                .mark_clean()
+                .await
+                .map_err(super::super::workspace::workspace_error)?;
+            return Err(error);
+        }
+    };
+    let environment =
+        match super::super::workspace::SessionEnvironment::assemble(cfg, cwd, &new_thread_id).await
+        {
+            Ok(environment) => environment,
+            Err(error) => {
+                cfg.thread_store
+                    .delete_thread(&new_thread_id)
+                    .await
+                    .map_err(super::super::workspace::workspace_error)?;
+                owner
+                    .mark_clean()
+                    .await
+                    .map_err(super::super::workspace::workspace_error)?;
+                return Err(error);
+            }
+        };
+    let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
 
     let new_session_id = new_thread_id.clone();
 
     // Fork inherits the source session's exact frozen prefix. Rebuilding from the
     // current environment would invalidate the provider cache on its first turn.
     let frozen_data = source_frozen;
-    store_new_frozen_snapshot_or_compensate(cfg, &new_session_id, &frozen_data).await?;
+    if let Err(error) =
+        store_new_frozen_snapshot_or_compensate(cfg, &new_session_id, &frozen_data).await
+    {
+        if let Some(environment) = environment.as_ref() {
+            if !environment.shutdown().await {
+                retain_failed_assembly(
+                    sessions,
+                    &new_session_id,
+                    cwd,
+                    owner.clone(),
+                    environment.clone(),
+                );
+                return Err(AcpError::new(
+                    -32010,
+                    "Fork cleanup incomplete; resources retained for shutdown retry",
+                ));
+            }
+        }
+        owner
+            .mark_clean()
+            .await
+            .map_err(super::super::workspace::workspace_error)?;
+        return Err(error);
+    }
     cfg.session_manager.ensure_session(&new_session_id, cwd);
     let caps = cfg.session_manager.ensure_session_caps(&new_session_id);
     let workflow_middleware =
@@ -675,6 +1044,9 @@ pub(crate) async fn handle_fork(
             session_id: new_session_id.clone(),
             thread_id: new_thread_id.clone(),
             cwd: cwd.to_string(),
+            execution_owner: Some(owner),
+            environment: environment.clone(),
+            closing: false,
             history: copied_payloads
                 .iter()
                 .filter_map(|payload| payload.as_message().cloned())
@@ -696,6 +1068,9 @@ pub(crate) async fn handle_fork(
         },
     );
 
+    if let Some(environment) = &environment {
+        environment.activate();
+    }
     info!(source = %source_id, new = %new_session_id, "Session forked");
     // Push AvailableCommandsUpdate notification + 预热 MCP skill 发现
     // （决策 B 扩展，与 session/new 同构；stdio 装配面同款行为——fork 产生
@@ -709,8 +1084,11 @@ pub(crate) async fn handle_fork(
     )
     .await;
     prewarm_session_mcp_discovery(cfg, &new_session_id);
-    let resp = ForkSessionResponse::new(SessionId::new(new_session_id));
-    serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+    let resp = ForkSessionResponse::new(SessionId::new(new_session_id.clone()));
+    identity_response(
+        serde_json::to_value(resp).map_err(super::super::workspace::workspace_error)?,
+        identity,
+    )
 }
 
 pub(super) async fn handle_rename(

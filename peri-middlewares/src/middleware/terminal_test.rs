@@ -6,6 +6,62 @@ use peri_agent::tools::BaseTool;
 
 use super::*;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_cancelled_foreground_shell_retains_owner_until_process_exit() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let fixture = tempfile::tempdir().unwrap();
+    let manager = Arc::new(TaskManager::new());
+    let tool = BashTool::new(fixture.path().to_str().unwrap()).with_task_manager(manager.clone());
+    let command = tokio::spawn(async move {
+        tool.invoke(
+            serde_json::json!({"command": "echo $$ > ready; sleep 60", "timeout": 0}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fixture.path().join("ready").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    command.abort();
+    assert!(command.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete,
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_successful_shell_keeps_redirected_background_process_owned() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let fixture = tempfile::tempdir().unwrap();
+    let manager = Arc::new(TaskManager::new());
+    let tool = BashTool::new(fixture.path().to_str().unwrap()).with_task_manager(manager.clone());
+    let output = tool.invoke(serde_json::json!({
+        "command": "(while [ ! -f release ]; do sleep 0.01; done; printf done > survived) >/dev/null 2>&1 &",
+        "timeout": 0
+    }), peri_agent::tools::ToolContext::new(&[], ".")).await.unwrap();
+    assert!(output.contains("background task"), "{output}");
+    assert_eq!(manager.active_count(), 1);
+    std::fs::write(fixture.path().join("release"), "go").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fixture.path().join("survived").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background process must remain alive after Bash returns");
+    assert_eq!(
+        peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
+}
+
 #[tokio::test]
 async fn test_bash_normal_command() {
     let _process_env = crate::process_env::lock().expect("process env lock");

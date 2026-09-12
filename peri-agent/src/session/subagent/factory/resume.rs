@@ -22,9 +22,8 @@ use crate::session::Session;
 /// 1. 存在性：`load_meta` 失败/不存在 → `thread not found`
 /// 2. status：`agent_status == Active`（可能未正常收尾）→ 拒绝恢复
 ///
-/// parent 链校验已移除：parent_thread_id 解析链路（store().thread_id 优先、
-/// 回退 host 注入值）在生产路径经常与写盘值不一致，误判导致兄弟 subagent
-/// 无法恢复；thread_id 本身就是不透明凭证，持有 child_thread_id 即可恢复。
+/// bound 子会话必须与调用者属于同一根会话及工作区，兄弟子会话可互相恢复。
+/// legacy 无绑定入口保留旧行为；新执行权不能仅由持有 child_thread_id 推断。
 ///
 /// 校验 → 置 active 段整体持锁（R-M1：防并发双 resume 双执行同一 thread）；
 /// 锁内仅 load_meta + update_thread_status（无嵌套锁，不 await run_react_loop）。
@@ -86,7 +85,35 @@ pub(super) async fn resume_subagent_impl(
         frozen_date: frozen_date_cfg,
     } = config;
 
-    let (meta, claim) = ResumeClaim::acquire(Arc::clone(&thread_store), thread_id.clone()).await?;
+    let workspace = if thread_store
+        .load_session_binding(&thread_id)
+        .await?
+        .is_some()
+    {
+        let child = thread_store.validate_session_binding(&thread_id).await?;
+        let parent_id = super::spawn::parent_thread_id_of(parent)
+            .ok_or("bound child resume requires its owning parent session")?;
+        let current = thread_store.validate_session_binding(&parent_id).await?;
+        if child != current {
+            return Err(peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch.into());
+        }
+        if execution_root(thread_store.as_ref(), &thread_id).await?
+            != execution_root(thread_store.as_ref(), &parent_id).await?
+        {
+            return Err("bound subagent belongs to another root session execution owner".into());
+        }
+        Some(child)
+    } else {
+        None
+    };
+    let ownership = task_manager
+        .as_ref()
+        .map(|manager| {
+            peri_acp_types::tasks::TaskManager::begin_external_execution(manager.as_ref())
+        })
+        .transpose()?;
+    let (meta, claim) =
+        ResumeClaim::acquire(Arc::clone(&thread_store), thread_id.clone(), ownership).await?;
 
     // The claim remains owned across history I/O and session construction. A
     // dropped caller closes its decision channel, leaving ordered rollback to
@@ -137,7 +164,14 @@ pub(super) async fn resume_subagent_impl(
     }
 
     // 2. cwd 取 meta.cwd（thread 创建时固化的；进程重启后不得改用父 cwd）
-    let cwd = meta.cwd.clone();
+    let cwd = match workspace {
+        Some(workspace) => workspace
+            .cwd
+            .to_str()
+            .ok_or("session cwd is not UTF-8")?
+            .to_string(),
+        None => meta.cwd.clone(),
+    };
 
     // 3. frozen 从父 session copy（ARC-FROZEN-001：不重读磁盘；parent None 用
     //    config 回退，与 spawn 的父侧解析一致）
@@ -301,6 +335,23 @@ pub(super) async fn resume_subagent_impl(
                 cancel_token,
                 interrupted: false,
             })
+        }
+    }
+}
+
+async fn execution_root(
+    store: &dyn crate::thread::ThreadStore,
+    id: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut current = id.to_owned();
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if visited.len() >= 128 || !visited.insert(current.clone()) {
+            return Err(peri_acp_types::workspace::WorkspaceError::InvalidBinding.into());
+        }
+        match store.load_meta(&current).await?.parent_thread_id {
+            Some(parent) => current = parent,
+            None => return Ok(current),
         }
     }
 }

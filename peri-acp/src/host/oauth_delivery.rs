@@ -19,6 +19,7 @@ pub(super) fn oauth_delivery_policy(caps: &peri_acp_types::PeriCaps) -> OAuthDel
 
 async fn send_safe_oauth_event(
     transport: &Arc<dyn crate::transport::AcpTransport>,
+    session_id: &str,
     notification: Result<
         crate::event::oauth::OAuthWireNotification,
         crate::event::oauth::OAuthWireError,
@@ -27,7 +28,10 @@ async fn send_safe_oauth_event(
     match notification {
         Ok(notification) => {
             if let Err(error) = transport
-                .send_notification("peri/oauth", notification.into_params())
+                .send_notification(
+                    "peri/oauth",
+                    scoped_params(notification.into_params(), session_id),
+                )
                 .await
             {
                 tracing::debug!(error = %error, "safe OAuth notification send failed");
@@ -42,6 +46,7 @@ async fn send_safe_oauth_event(
 
 async fn send_legacy_oauth_event(
     transport: &Arc<dyn crate::transport::AcpTransport>,
+    session_id: &str,
     event: crate::event::AcpEvent,
 ) {
     let event_json = match serde_json::to_string(&event) {
@@ -55,7 +60,7 @@ async fn send_legacy_oauth_event(
         .send_notification(
             "peri/agent_event",
             serde_json::json!({
-                "sessionId": "",
+                "sessionId": session_id,
                 "event_json": event_json,
             }),
         )
@@ -88,8 +93,28 @@ pub(super) fn spawn_oauth_consumer(
                     };
                     let caps = oauth_sessions.effective_host_caps();
                     let policy = oauth_delivery_policy(&caps);
-                    deliver_oauth_event(event, policy, &oauth_transport, dynamic_mcp.as_ref())
-                        .await;
+                    let (session_id, event) = match event {
+                        crate::event::oauth::HostOAuthEvent::Session { session_id, event } => {
+                            (session_id, *event)
+                        }
+                        event => (String::new(), event),
+                    };
+                    let session_dynamic = if session_id.is_empty() {
+                        dynamic_mcp.clone()
+                    } else {
+                        let Some(session) = oauth_sessions.get_session(&session_id) else {
+                            continue;
+                        };
+                        session.dynamic_mcp_deployment.clone()
+                    };
+                    deliver_oauth_event(
+                        event,
+                        policy,
+                        &oauth_transport,
+                        &session_id,
+                        session_dynamic.as_ref(),
+                    )
+                    .await;
                 }
             },
         );
@@ -100,9 +125,11 @@ async fn deliver_oauth_event(
     event: crate::event::oauth::HostOAuthEvent,
     policy: OAuthDeliveryPolicy,
     oauth_transport: &Arc<dyn crate::transport::AcpTransport>,
+    session_id: &str,
     dynamic_mcp: Option<&Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
 ) {
     match event {
+        crate::event::oauth::HostOAuthEvent::Session { .. } => {}
         crate::event::oauth::HostOAuthEvent::DynamicAuthorizationNeeded {
             instance,
             flow_id,
@@ -130,7 +157,10 @@ async fn deliver_oauth_event(
                 ) {
                     Ok(notification) => {
                         let _ = oauth_transport
-                            .send_notification("peri/oauth", notification.into_params())
+                            .send_notification(
+                                "peri/oauth",
+                                scoped_params(notification.into_params(), session_id),
+                            )
                             .await;
                     }
                     Err(error) => tracing::warn!(
@@ -142,6 +172,7 @@ async fn deliver_oauth_event(
             if policy.legacy {
                 send_legacy_oauth_event(
                     oauth_transport,
+                    session_id,
                     crate::event::AcpEvent::OauthNeeded {
                         server_name,
                         auth_url: authorization_url,
@@ -157,6 +188,7 @@ async fn deliver_oauth_event(
             if policy.safe {
                 send_safe_oauth_event(
                     oauth_transport,
+                    session_id,
                     crate::event::oauth::OAuthWireNotification::terminal(
                         flow_id,
                         server_name.clone(),
@@ -168,6 +200,7 @@ async fn deliver_oauth_event(
             if policy.legacy {
                 send_legacy_oauth_event(
                     oauth_transport,
+                    session_id,
                     crate::event::AcpEvent::OauthCompleted { server_name },
                 )
                 .await;
@@ -182,6 +215,7 @@ async fn deliver_oauth_event(
             if policy.safe {
                 send_safe_oauth_event(
                     oauth_transport,
+                    session_id,
                     crate::event::oauth::OAuthWireNotification::failed(
                         flow_id,
                         server_name.clone(),
@@ -193,6 +227,7 @@ async fn deliver_oauth_event(
             if policy.legacy {
                 send_legacy_oauth_event(
                     oauth_transport,
+                    session_id,
                     crate::event::AcpEvent::OauthFailed {
                         server_name,
                         error: legacy_error,
@@ -208,6 +243,7 @@ async fn deliver_oauth_event(
             if policy.safe {
                 send_safe_oauth_event(
                     oauth_transport,
+                    session_id,
                     crate::event::oauth::OAuthWireNotification::terminal(
                         flow_id,
                         server_name.clone(),
@@ -219,6 +255,7 @@ async fn deliver_oauth_event(
             if policy.legacy {
                 send_legacy_oauth_event(
                     oauth_transport,
+                    session_id,
                     crate::event::AcpEvent::OauthFailed {
                         server_name,
                         error: "OAuth authorization cancelled".to_string(),
@@ -234,6 +271,7 @@ async fn deliver_oauth_event(
             if policy.safe {
                 send_safe_oauth_event(
                     oauth_transport,
+                    session_id,
                     crate::event::oauth::OAuthWireNotification::terminal(
                         flow_id,
                         server_name.clone(),
@@ -245,10 +283,18 @@ async fn deliver_oauth_event(
             if policy.legacy {
                 send_legacy_oauth_event(
                     oauth_transport,
+                    session_id,
                     crate::event::AcpEvent::OauthRestored { server_name },
                 )
                 .await;
             }
         }
     }
+}
+
+fn scoped_params(mut params: serde_json::Value, session_id: &str) -> serde_json::Value {
+    if !session_id.is_empty() {
+        params["sessionId"] = serde_json::Value::String(session_id.to_owned());
+    }
+    params
 }

@@ -1,10 +1,10 @@
-//! SQLite 连接、只读 schema 探测、迁移与安全错误分类。
+//! SQLite 连接、只读 schema 探测、单库升级与安全错误分类。
 
 use super::SqliteThreadStore;
 use anyhow::{Context, Result};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    AssertSqlSafe,
+    AssertSqlSafe, Connection,
 };
 use std::{
     collections::HashSet,
@@ -111,7 +111,7 @@ pub(super) fn classify_shape_probe_failure(error: &sqlx::Error) -> ReadOnlyThrea
 }
 
 impl SqliteThreadStore {
-    /// 使用指定路径打开（或创建）数据库，并初始化 Schema
+    /// 打开或创建会话数据库，原地升级已知旧 schema 并保留历史数据。
     pub async fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
         let db_path = db_path.into();
         // 确保父目录存在
@@ -119,6 +119,23 @@ impl SqliteThreadStore {
             tokio::fs::create_dir_all(parent)
                 .await
                 .with_context(|| format!("创建目录失败: {}", parent.display()))?;
+        }
+        let _schema_lock = lock_schema_open(&db_path).await?;
+        // 在 WAL/DDL 写入前识别未知 schema；已知旧库交给事务升级。
+        if tokio::fs::metadata(&db_path)
+            .await
+            .is_ok_and(|meta| meta.len() > 0)
+        {
+            let mut probe = sqlx::SqliteConnection::connect_with(
+                &SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .read_only(true)
+                    .create_if_missing(false),
+            )
+            .await?;
+            let schema = super::schema::inspect(&mut probe).await;
+            probe.close().await?;
+            schema?;
         }
         let options = SqliteConnectOptions::new()
             .filename(&db_path)
@@ -133,8 +150,13 @@ impl SqliteThreadStore {
         let store = Self {
             pool,
             read_only: false,
+            db_path: tokio::fs::canonicalize(&db_path).await?,
+            execution_leases: Default::default(),
         };
-        store.init_schema().await?;
+        if let Err(error) = store.init_schema().await {
+            store.close().await;
+            return Err(error);
+        }
         Ok(store)
     }
 
@@ -182,6 +204,8 @@ impl SqliteThreadStore {
         let store = Self {
             pool,
             read_only: true,
+            db_path: db_path.to_path_buf(),
+            execution_leases: Default::default(),
         };
         store.probe_load_meta_shape().await?;
         Ok(store)
@@ -210,75 +234,47 @@ impl SqliteThreadStore {
 
     /// 使用默认路径 `~/.peri/threads/threads.db` 创建
     pub async fn default_path() -> Result<Self> {
-        let db_path = dirs_next::home_dir()
-            .context("无法获取 home 目录")?
-            .join(".peri")
-            .join("threads")
-            .join("threads.db");
+        let db_path = super::super::default_database_path().context("无法获取 home 目录")?;
         Self::new(db_path).await
     }
+}
 
-    /// 初始化 Schema（幂等，可重复调用）
-    async fn init_schema(&self) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS threads (
-                id          TEXT PRIMARY KEY,
-                title       TEXT,
-                cwd         TEXT NOT NULL DEFAULT '',
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL,
-                message_count INTEGER NOT NULL DEFAULT 0
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS messages (
-                message_id  TEXT PRIMARY KEY,
-                thread_id   TEXT NOT NULL,
-                role        TEXT NOT NULL,
-                content     TEXT NOT NULL,
-                FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages (thread_id ASC)",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // 迁移：为已有表添加新列（忽略 "duplicate column" 错误实现幂等）
-        let alter_columns = [
-            "ALTER TABLE threads ADD COLUMN parent_thread_id TEXT",
-            "ALTER TABLE threads ADD COLUMN snapshot_at_message_id TEXT",
-            "ALTER TABLE threads ADD COLUMN hidden BOOLEAN NOT NULL DEFAULT 0",
-            "ALTER TABLE threads ADD COLUMN cancel_policy TEXT NOT NULL DEFAULT 'cascade'",
-            "ALTER TABLE threads ADD COLUMN config TEXT",
-            "ALTER TABLE threads ADD COLUMN cached_context TEXT",
-            "ALTER TABLE threads ADD COLUMN frozen_context TEXT",
-            "ALTER TABLE threads ADD COLUMN inherited_context TEXT",
-            "ALTER TABLE threads ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'active'",
-            "ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0",
-            "ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0",
-            "ALTER TABLE messages ADD COLUMN projection TEXT",
-            // H6: context cache 纪元，每次 compact 提交后递增
-            "ALTER TABLE threads ADD COLUMN context_cache_epoch INTEGER NOT NULL DEFAULT 0",
-        ];
-        for sql in &alter_columns {
-            // SQLite 返回 "duplicate column name" 时忽略
-            // 常量数组（'static str）仅含 DDL 列名，无动态输入；sqlx 0.9 需显式断言
-            if let Err(e) = sqlx::query(AssertSqlSafe(*sql)).execute(&self.pool).await {
-                let msg = e.to_string();
-                if !msg.contains("duplicate column name") {
-                    return Err(e.into());
+/// SQLite's initial journal-mode switch can return BUSY despite busy_timeout when
+/// two fresh connections upgrade together. Serialize writable opens before connecting.
+async fn lock_schema_open(path: &Path) -> Result<std::fs::File> {
+    let canonical = if tokio::fs::try_exists(path).await? {
+        tokio::fs::canonicalize(path).await?
+    } else {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        tokio::fs::canonicalize(parent)
+            .await?
+            .join(path.file_name().context("database filename missing")?)
+    };
+    let mut lock_path = canonical.into_os_string();
+    lock_path.push(".schema-lock");
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    anyhow::bail!("session database initialization is busy")
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
-
-        Ok(())
-    }
+    })
+    .await?
 }

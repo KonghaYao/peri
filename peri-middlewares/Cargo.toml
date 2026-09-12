@@ -10,6 +10,7 @@ peri-agent = { path = "../peri-agent" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-model = { path = "../peri-model" }
 peri-js-runtime = { path = "../peri-js-runtime" }
+peri-process = { path = "../peri-process" }
 anyhow.workspace = true
 async-trait.workspace = true
 serde.workspace = true

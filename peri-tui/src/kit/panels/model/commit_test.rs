@@ -191,7 +191,10 @@ impl Fixture {
             panic!("expected update request")
         };
         assert_eq!(method, "session/update_config");
-        assert_eq!(params["sessionId"], "model-session");
+        assert!(
+            params.get("sessionId").is_none(),
+            "complete host configuration must not target the active workspace"
+        );
         if save_succeeded {
             self.assert_disk_and_frame(&params);
         } else {
@@ -213,12 +216,7 @@ impl Fixture {
     }
 
     async fn expect_notification(&self) {
-        let IncomingMessage::Notification { method, params } = self.recv().await else {
-            panic!("expected config notification")
-        };
-        assert_eq!(method, "session/config_update");
-        assert!(params.get("sessionId").is_none());
-        self.assert_disk_and_frame(&params);
+        self.expect_request(true, false).await;
     }
 
     async fn finish(mut self) {
@@ -249,18 +247,9 @@ fn model_commit_switch_persists_workspace_before_request() {
             let before = SERVICE_SNAPSHOT.state().read().clone();
             switch_active_alias(3);
             let snapshot = SERVICE_SNAPSHOT.state().read().clone();
-            assert_eq!(snapshot.model_alias, "haiku");
-            assert_eq!(snapshot.model_name, "a-haiku");
-            assert_eq!(snapshot.effort, "xhigh");
-            assert_eq!(snapshot.provider_name, before.provider_name);
             assert_eq!(
-                (snapshot.cwd, snapshot.memory_mb, snapshot.cron_total),
-                (before.cwd, 42, 3)
-            );
-            assert!(
-                MODEL_HIGHLIGHT_UNTIL
-                    .get()
-                    .is_some_and(|until| until > Instant::now())
+                snapshot, before,
+                "host edits must not overwrite the active session projection"
             );
             fixture.expect_request(true, false).await;
             assert_eq!(
@@ -290,13 +279,9 @@ fn model_commit_active_provider_updates_mapping_and_request() {
             assert_eq!(profile.max_tokens, 32000);
             assert!(!profile.context_1m);
             let snapshot = SERVICE_SNAPSHOT.state().read().clone();
-            assert_eq!(
-                (
-                    snapshot.model_alias.as_str(),
-                    snapshot.model_name.as_str(),
-                    snapshot.provider_name.as_str()
-                ),
-                ("sonnet", "b-sonnet", "anthropic")
+            assert_ne!(
+                snapshot.model_name, "b-sonnet",
+                "editing host settings must not change the session model"
             );
             assert_eq!(snapshot.memory_mb, 42);
             assert!(MODEL_HIGHLIGHT_UNTIL.get().is_none());

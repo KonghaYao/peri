@@ -129,3 +129,64 @@ pub async fn fork_session(
 
     Ok((new_thread_id, copied_payloads))
 }
+
+/// Fork a bound, idle source while the caller holds its lifecycle gate and owner.
+pub(crate) async fn fork_bound_session(
+    controller: &Controller,
+    source_thread_id: &str,
+    workspace: &peri_acp_types::workspace::ResolvedWorkspace,
+) -> Result<(
+    String,
+    Vec<PersistedPayload>,
+    std::sync::Arc<dyn peri_acp_types::workspace::SessionExecutionLease>,
+)> {
+    let store = controller.sessions();
+    let source_id = source_thread_id.to_owned();
+    let payloads = store.load_payloads(&source_id).await?;
+    // A source snapshot must finish every assistant tool invocation before it can
+    // be copied into an independently executable history.
+    let mut pending = std::collections::HashSet::new();
+    for message in payloads.iter().filter_map(PersistedPayload::as_message) {
+        for call in message.tool_calls() {
+            pending.insert(call.id.clone());
+        }
+        if let peri_acp_types::messages::BaseMessage::Tool { tool_call_id, .. } = message {
+            pending.remove(tool_call_id);
+        }
+    }
+    anyhow::ensure!(
+        pending.is_empty(),
+        "Cannot fork history with incomplete tool calls"
+    );
+    let flags = store.load_message_flags(&source_id).await?;
+    let cwd = workspace
+        .cwd
+        .to_str()
+        .context("Execution directory is not UTF-8")?;
+    let id = store
+        .create_bound_thread(ThreadMeta::new(cwd), workspace)
+        .await?;
+    let lease = store.acquire_execution_lease(&id).await?;
+    let copied: Vec<_> = payloads.iter().map(clone_payload_for_fork).collect();
+    let result = async {
+        store.append_payloads(&id, &copied).await?;
+        for (source, copied) in payloads.iter().zip(&copied) {
+            if let Some(flags) = flags.get(&source.id()) {
+                store
+                    .update_message_flags(
+                        &copied.id(),
+                        &clone_flags_for_fork(flags.clone(), source.id(), copied.id()),
+                    )
+                    .await?;
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = result {
+        cleanup_failed_fork(store.as_ref(), source_thread_id, &id).await?;
+        lease.mark_clean().await?;
+        return Err(error);
+    }
+    Ok((id, copied, lease))
+}

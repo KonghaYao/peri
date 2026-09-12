@@ -4,7 +4,11 @@
 mod compaction;
 mod connection;
 mod context;
+mod discovery;
+mod execution;
 mod row_mapping;
+mod schema;
+mod workspace;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -35,12 +39,53 @@ use sqlx::sqlite::SqliteConnectOptions;
 pub struct SqliteThreadStore {
     pool: SqlitePool,
     read_only: bool,
+    db_path: std::path::PathBuf,
+    execution_leases:
+        std::sync::Mutex<HashMap<ThreadId, std::sync::Weak<execution::ExecutionLease>>>,
 }
 
 // ── ThreadStore impl ───────────────────────────────────────────────────────────
 
 #[async_trait]
 impl ThreadStore for SqliteThreadStore {
+    async fn resolve_workspace(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<peri_acp_types::workspace::ResolvedWorkspace> {
+        self.resolve_workspace_impl(cwd).await
+    }
+    async fn create_bound_thread(
+        &self,
+        meta: ThreadMeta,
+        workspace: &peri_acp_types::workspace::ResolvedWorkspace,
+    ) -> Result<ThreadId> {
+        self.create_bound_thread_impl(meta, workspace).await
+    }
+    async fn load_session_binding(
+        &self,
+        id: &ThreadId,
+    ) -> Result<Option<peri_acp_types::workspace::SessionBinding>> {
+        self.load_session_binding_impl(id).await
+    }
+    async fn validate_session_binding(
+        &self,
+        id: &ThreadId,
+    ) -> Result<peri_acp_types::workspace::ResolvedWorkspace> {
+        self.validate_session_binding_impl(id).await
+    }
+    async fn list_scoped_threads(
+        &self,
+        query: &peri_acp_types::workspace::ScopedThreadQuery,
+    ) -> Result<peri_acp_types::workspace::ScopedThreadPage> {
+        self.list_scoped_threads_impl(query).await
+    }
+    async fn acquire_execution_lease(
+        &self,
+        id: &ThreadId,
+    ) -> Result<std::sync::Arc<dyn peri_acp_types::workspace::SessionExecutionLease>> {
+        self.acquire_execution_lease_impl(id).await
+    }
+
     async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId> {
         let id = meta.id.clone();
         sqlx::query(
@@ -92,51 +137,59 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn append_payloads(&self, id: &ThreadId, payloads: &[PersistedPayload]) -> Result<()> {
-        if payloads.is_empty() {
-            return Ok(());
-        }
-        let mut tx = self.pool.begin().await?;
-        for payload in payloads {
-            let message_id = payload.id().as_uuid().to_string();
-            let role = payload
-                .as_message()
-                .map(role_of)
-                .unwrap_or("system_reminder");
-            let content = serialize_persisted_payload(payload)?;
-            sqlx::query(
-                "INSERT OR IGNORE INTO messages (message_id, thread_id, role, content)
+        let write_guard = self.require_execution_lease(id).await?;
+        let result = async {
+            if payloads.is_empty() {
+                return Ok(());
+            }
+            let mut tx = self.pool.begin().await?;
+            for payload in payloads {
+                let message_id = payload.id().as_uuid().to_string();
+                let role = payload
+                    .as_message()
+                    .map(role_of)
+                    .unwrap_or("system_reminder");
+                let content = serialize_persisted_payload(payload)?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO messages (message_id, thread_id, role, content)
                  VALUES (?1, ?2, ?3, ?4)",
-            )
-            .bind(&message_id)
-            .bind(id.as_str())
-            .bind(role)
-            .bind(&content)
-            .execute(&mut *tx)
-            .await?;
-        }
-        sqlx::query(
-            "UPDATE threads SET updated_at = ?1,
-                message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
-             WHERE id = ?2",
-        )
-        .bind(Utc::now().to_rfc3339())
-        .bind(id.as_str())
-        .execute(&mut *tx)
-        .await?;
-        let messages = payloads
-            .iter()
-            .filter_map(PersistedPayload::as_message)
-            .cloned()
-            .collect::<Vec<_>>();
-        if let Some(title) = extract_title(&messages) {
-            sqlx::query("UPDATE threads SET title = ?1 WHERE id = ?2 AND title IS NULL")
-                .bind(&title)
+                )
+                .bind(&message_id)
                 .bind(id.as_str())
+                .bind(role)
+                .bind(&content)
                 .execute(&mut *tx)
                 .await?;
+            }
+            sqlx::query(
+                "UPDATE threads SET updated_at = ?1,
+                message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
+             WHERE id = ?2",
+            )
+            .bind(Utc::now().to_rfc3339())
+            .bind(id.as_str())
+            .execute(&mut *tx)
+            .await?;
+            let messages = payloads
+                .iter()
+                .filter_map(PersistedPayload::as_message)
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Some(title) = extract_title(&messages) {
+                sqlx::query("UPDATE threads SET title = ?1 WHERE id = ?2 AND title IS NULL")
+                    .bind(&title)
+                    .bind(id.as_str())
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
+            Ok(())
         }
-        tx.commit().await?;
-        Ok(())
+        .await;
+        if let Some(guard) = write_guard {
+            guard.finish();
+        }
+        result
     }
 
     async fn load_payloads(&self, id: &ThreadId) -> Result<Vec<PersistedPayload>> {
@@ -197,27 +250,47 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn update_meta(&self, id: &ThreadId, meta: ThreadMeta) -> Result<()> {
-        sqlx::query(
-            "UPDATE threads SET title = ?1, cwd = ?2, updated_at = ?3, message_count = ?4,
+        let write_guard = self.require_execution_lease(id).await?;
+        let result = async {
+            if self.load_session_binding_impl(id).await?.is_some() {
+                let original: (String, Option<String>) =
+                    sqlx::query_as("SELECT cwd, parent_thread_id FROM threads WHERE id = ?")
+                        .bind(id)
+                        .fetch_one(&self.pool)
+                        .await?;
+                if original.0 != meta.cwd || original.1 != meta.parent_thread_id {
+                    return Err(
+                        peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch.into(),
+                    );
+                }
+            }
+            sqlx::query(
+                "UPDATE threads SET title = ?1, cwd = ?2, updated_at = ?3, message_count = ?4,
                 parent_thread_id = ?5, snapshot_at_message_id = ?6, hidden = ?7,
                 cancel_policy = ?8, config = ?9, cached_context = ?10, agent_status = ?11
              WHERE id = ?12",
-        )
-        .bind(&meta.title)
-        .bind(&meta.cwd)
-        .bind(meta.updated_at.to_rfc3339())
-        .bind(meta.message_count as i64)
-        .bind(&meta.parent_thread_id)
-        .bind(&meta.snapshot_at_message_id)
-        .bind(meta.hidden)
-        .bind(meta.cancel_policy.as_str())
-        .bind(&meta.config)
-        .bind(&meta.cached_context)
-        .bind(meta.agent_status.as_str())
-        .bind(id.as_str())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+            )
+            .bind(&meta.title)
+            .bind(&meta.cwd)
+            .bind(meta.updated_at.to_rfc3339())
+            .bind(meta.message_count as i64)
+            .bind(&meta.parent_thread_id)
+            .bind(&meta.snapshot_at_message_id)
+            .bind(meta.hidden)
+            .bind(meta.cancel_policy.as_str())
+            .bind(&meta.config)
+            .bind(&meta.cached_context)
+            .bind(meta.agent_status.as_str())
+            .bind(id.as_str())
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        }
+        .await;
+        if let Some(guard) = write_guard {
+            guard.finish();
+        }
+        result
     }
 
     async fn load_frozen_snapshot(&self, id: &ThreadId) -> Result<Option<String>> {
@@ -230,28 +303,36 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn store_frozen_snapshot_if_absent(&self, id: &ThreadId, snapshot: &str) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL",
-        )
-        .bind(snapshot)
-        .bind(id.as_str())
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 1 {
-            return Ok(true);
+        let write_guard = self.require_execution_lease(id).await?;
+        let result = async {
+            let result = sqlx::query(
+                "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL",
+            )
+            .bind(snapshot)
+            .bind(id.as_str())
+            .execute(&self.pool)
+            .await?;
+            if result.rows_affected() == 1 {
+                return Ok(true);
+            }
+            let row: Option<(Option<String>,)> =
+                sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
+                    .bind(id.as_str())
+                    .fetch_optional(&self.pool)
+                    .await?;
+            match row {
+                Some((Some(_),)) => Ok(false),
+                Some((None,)) => anyhow::bail!(
+                    "frozen snapshot write lost without a persisted winner for thread: {id}"
+                ),
+                None => anyhow::bail!("thread 不存在，无法写入 frozen snapshot: {id}"),
+            }
         }
-        let row: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
-                .bind(id.as_str())
-                .fetch_optional(&self.pool)
-                .await?;
-        match row {
-            Some((Some(_),)) => Ok(false),
-            Some((None,)) => anyhow::bail!(
-                "frozen snapshot write lost without a persisted winner for thread: {id}"
-            ),
-            None => anyhow::bail!("thread 不存在，无法写入 frozen snapshot: {id}"),
+        .await;
+        if let Some(guard) = write_guard {
+            guard.finish();
         }
+        result
     }
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>> {
@@ -296,40 +377,56 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn delete_thread(&self, id: &ThreadId) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        // 级联删除整个线程树：hidden 子 agent 线程沿 parent_thread_id 挂链，
-        // 若不递归删除会留下永远无法通过 UI/协议访问的孤儿数据（messages 表
-        // 依赖 threads 行 FK ON DELETE CASCADE 一并清除）。
-        let mut to_delete = vec![id.as_str().to_string()];
-        let mut idx = 0;
-        while idx < to_delete.len() {
-            let children: Vec<(String,)> =
-                sqlx::query_as("SELECT id FROM threads WHERE parent_thread_id = ?1")
-                    .bind(&to_delete[idx])
-                    .fetch_all(&mut *tx)
+        let write_guard = self.require_execution_lease(id).await?;
+        let result = async {
+            let mut tx = self.pool.begin().await?;
+            // 级联删除整个线程树：hidden 子 agent 线程沿 parent_thread_id 挂链，
+            // 若不递归删除会留下永远无法通过 UI/协议访问的孤儿数据（messages 表
+            // 依赖 threads 行 FK ON DELETE CASCADE 一并清除）。
+            let mut to_delete = vec![id.as_str().to_string()];
+            let mut idx = 0;
+            while idx < to_delete.len() {
+                let children: Vec<(String,)> =
+                    sqlx::query_as("SELECT id FROM threads WHERE parent_thread_id = ?1")
+                        .bind(&to_delete[idx])
+                        .fetch_all(&mut *tx)
+                        .await?;
+                to_delete.extend(children.into_iter().map(|(cid,)| cid));
+                idx += 1;
+            }
+            for tid in &to_delete {
+                sqlx::query("DELETE FROM threads WHERE id = ?1")
+                    .bind(tid)
+                    .execute(&mut *tx)
                     .await?;
-            to_delete.extend(children.into_iter().map(|(cid,)| cid));
-            idx += 1;
+            }
+            tx.commit().await?;
+            Ok(())
         }
-        for tid in &to_delete {
-            sqlx::query("DELETE FROM threads WHERE id = ?1")
-                .bind(tid)
-                .execute(&mut *tx)
-                .await?;
+        .await;
+        if let Some(guard) = write_guard {
+            guard.finish();
         }
-        tx.commit().await?;
-        Ok(())
+        result
     }
 
     async fn update_title(&self, id: &ThreadId, title: &str) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE threads SET title = ?1, updated_at = ?2 WHERE id = ?3")
-            .bind(title)
-            .bind(&now)
-            .bind(id.as_str())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        let write_guard = self.require_execution_lease(id).await?;
+        let result = async {
+            let now = Utc::now().to_rfc3339();
+            sqlx::query("UPDATE threads SET title = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(title)
+                .bind(&now)
+                .bind(id.as_str())
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        }
+        .await;
+        if let Some(guard) = write_guard {
+            guard.finish();
+        }
+        result
     }
 
     async fn store_inherited_context(
@@ -337,7 +434,13 @@ impl ThreadStore for SqliteThreadStore {
         thread_id: &ThreadId,
         inherited: &InheritedContext,
     ) -> Result<()> {
-        context::store_inherited_context(self, thread_id, inherited).await
+        let write_guard = self.require_execution_lease(thread_id).await?;
+        let result =
+            async { context::store_inherited_context(self, thread_id, inherited).await }.await;
+        if let Some(guard) = write_guard {
+            guard.finish();
+        }
+        result
     }
 
     async fn load_inherited_context(&self, thread_id: &ThreadId) -> Result<InheritedContext> {
@@ -361,21 +464,34 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn update_thread_status(&self, id: &ThreadId, status: &str) -> Result<()> {
-        // 关键约束：参数字符串必须经 FromStr 解析，非法值直接返回错误，不静默 fallback
-        let status = AgentStatus::from_str(status)
-            .with_context(|| format!("非法 agent_status 值: {status:?}"))?;
-        let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3")
-            .bind(status.as_str())
-            .bind(&now)
-            .bind(id.as_str())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        let write_guard = self.require_execution_lease(id).await?;
+        let result = async {
+            // 关键约束：参数字符串必须经 FromStr 解析，非法值直接返回错误，不静默 fallback
+            let status = AgentStatus::from_str(status)
+                .with_context(|| format!("非法 agent_status 值: {status:?}"))?;
+            let now = Utc::now().to_rfc3339();
+            sqlx::query("UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(status.as_str())
+                .bind(&now)
+                .bind(id.as_str())
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        }
+        .await;
+        if let Some(guard) = write_guard {
+            guard.finish();
+        }
+        result
     }
 
     async fn invalidate_context_cache(&self, thread_id: &ThreadId) -> Result<()> {
-        context::invalidate_context_cache(self, thread_id).await
+        let write_guard = self.require_execution_lease(thread_id).await?;
+        let result = async { context::invalidate_context_cache(self, thread_id).await }.await;
+        if let Some(guard) = write_guard {
+            guard.finish();
+        }
+        result
     }
 
     async fn get_context_cache_epoch(&self, thread_id: &ThreadId) -> Result<u64> {
@@ -387,7 +503,13 @@ impl ThreadStore for SqliteThreadStore {
         thread_id: &ThreadId,
         message_ids: &[peri_acp_types::messages::MessageId],
     ) -> Result<()> {
-        compaction::delete_messages(self, thread_id, message_ids).await
+        let write_guard = self.require_execution_lease(thread_id).await?;
+        let result =
+            async { compaction::delete_messages(self, thread_id, message_ids).await }.await;
+        if let Some(guard) = write_guard {
+            guard.finish();
+        }
+        result
     }
 
     async fn update_message_flags(
@@ -395,7 +517,22 @@ impl ThreadStore for SqliteThreadStore {
         message_id: &peri_acp_types::messages::MessageId,
         flags: &MessageFlags,
     ) -> Result<()> {
-        compaction::update_message_flags(self, message_id, flags).await
+        let owner: Option<(String,)> =
+            sqlx::query_as("SELECT thread_id FROM messages WHERE message_id = ?")
+                .bind(message_id.as_uuid().to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+        let write_guard = match owner {
+            Some((id,)) => self.require_execution_lease(&id).await?,
+            None => None,
+        };
+
+        let result =
+            async { compaction::update_message_flags(self, message_id, flags).await }.await;
+        if let Some(guard) = write_guard {
+            guard.finish();
+        }
+        result
     }
 
     fn supports_compaction_lifecycle(&self) -> bool {
@@ -407,7 +544,14 @@ impl ThreadStore for SqliteThreadStore {
         thread_id: &ThreadId,
         lifecycle: &CompactionLifecycle,
     ) -> Result<()> {
-        compaction::commit_compaction_lifecycle(self, thread_id, lifecycle).await
+        let write_guard = self.require_execution_lease(thread_id).await?;
+        let result =
+            async { compaction::commit_compaction_lifecycle(self, thread_id, lifecycle).await }
+                .await;
+        if let Some(guard) = write_guard {
+            guard.finish();
+        }
+        result
     }
 
     async fn load_message_flags(
@@ -422,7 +566,13 @@ impl ThreadStore for SqliteThreadStore {
         thread_id: &ThreadId,
         message_id: &peri_acp_types::messages::MessageId,
     ) -> Result<()> {
-        compaction::delete_messages_since(self, thread_id, message_id).await
+        let write_guard = self.require_execution_lease(thread_id).await?;
+        let result =
+            async { compaction::delete_messages_since(self, thread_id, message_id).await }.await;
+        if let Some(guard) = write_guard {
+            guard.finish();
+        }
+        result
     }
 }
 

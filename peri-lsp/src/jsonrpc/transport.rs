@@ -15,6 +15,8 @@ pub use dispatcher::{run_dispatch_loop, DispatchState, MessageDispatcher};
 
 /// LSP 传输层：管理子进程的 stdin/stdout/stderr 管道
 pub struct LspTransport {
+    tree: std::sync::Arc<peri_process::ProcessTree>,
+    pub(crate) startup_error: Option<LspError>,
     child: Child,
     stdin: ChildStdin,
     stdout_reader: BufReader<ChildStdout>,
@@ -26,9 +28,11 @@ impl LspTransport {
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
+        cwd: &std::path::Path,
     ) -> Result<Self, LspError> {
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(args)
+            .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -38,33 +42,44 @@ impl LspTransport {
             cmd.env(key, value);
         }
 
+        let mut tree =
+            peri_process::ProcessTree::new().map_err(|error| LspError::LaunchFailed {
+                server: command.to_owned(),
+                reason: error.to_string(),
+            })?;
+        tree.prepare(&mut cmd);
+
         let mut child = cmd.spawn().map_err(|e| LspError::LaunchFailed {
             server: command.to_string(),
             reason: e.to_string(),
         })?;
+        let mut startup_error = tree
+            .attach(&child)
+            .err()
+            .map(|error| LspError::LaunchFailed {
+                server: command.to_owned(),
+                reason: error.to_string(),
+            });
 
-        let stdin = child.stdin.take().ok_or_else(|| LspError::LaunchFailed {
-            server: command.to_string(),
-            reason: "无法获取 stdin".to_string(),
-        })?;
+        // These handles are guaranteed by the piped Command configured above.
+        let stdin = child.stdin.take().expect("piped LSP stdin");
 
-        let stdout = child.stdout.take().ok_or_else(|| LspError::LaunchFailed {
-            server: command.to_string(),
-            reason: "无法获取 stdout".to_string(),
-        })?;
+        let stdout = child.stdout.take().expect("piped LSP stdout");
 
         // 启动后立即检查进程是否存活（捕获参数错误等立即退出的情况）
         // 对参数无效等场景，进程退出极快，try_wait 通常能立即捕获
         if let Some(status) = child.try_wait().ok().flatten() {
             let code = status.code().unwrap_or(-1);
             let reason = format!("进程立即退出 (exit code: {code})，请检查命令和参数是否正确");
-            return Err(LspError::LaunchFailed {
+            startup_error = Some(LspError::LaunchFailed {
                 server: command.to_string(),
                 reason,
             });
         }
 
         Ok(Self {
+            tree: std::sync::Arc::new(tree),
+            startup_error,
             child,
             stdin,
             stdout_reader: BufReader::new(stdout),
@@ -103,7 +118,10 @@ impl LspTransport {
 
     /// 终止子进程
     pub async fn kill(&mut self) {
-        let _ = self.child.start_kill();
-        let _ = self.child.wait().await;
+        self.tree.terminate();
+        if self.child.wait().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        self.tree.wait_for_exit().await;
     }
 }

@@ -195,42 +195,6 @@ pub async fn build_app_and_acp(
 /// Incomplete 时部署 owner 仅在 App 仍被调用方持有时可重试，本函数不安排重试。
 /// 全屏退出路径随后会 Drop App；未完成的关闭不能因此视为已 join。
 pub async fn teardown_app(app: &mut App) {
-    // Fire SessionEnd hooks before shutdown
-    {
-        let mut hooks = app
-            .services
-            .plugin_data
-            .as_ref()
-            .map(|pd| pd.all_hooks.clone())
-            .unwrap_or_default();
-        hooks.extend(peri_middlewares::hooks::loader::load_global_settings_hooks());
-        hooks.extend(
-            peri_middlewares::hooks::loader::load_settings_project_hooks(&app.services.cwd),
-        );
-        hooks.extend(peri_middlewares::hooks::loader::load_settings_local_hooks(
-            &app.services.cwd,
-        ));
-        if !hooks.is_empty() {
-            let cwd = app.services.cwd.clone();
-            let provider_name = app.services.provider_name.clone();
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    peri_middlewares::hooks::middleware::fire_standalone_lifecycle_hooks(
-                        &hooks,
-                        peri_middlewares::hooks::types::HookEvent::SessionEnd,
-                        &cwd,
-                        "",
-                        "",
-                        &provider_name,
-                        None,
-                        Some("prompt_input_exit"),
-                    )
-                    .await;
-                })
-            });
-        }
-    }
-
     // 关闭 MCP 连接池
     if let Some(pool) = app.services.mcp_pool.take() {
         tracing::info!("正在关闭 MCP 连接池...");

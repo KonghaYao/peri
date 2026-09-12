@@ -67,6 +67,7 @@ pub trait WorkflowMiddlewareFactory: Send + Sync {
         &self,
         cwd: &str,
         disabled: &std::collections::HashSet<String>,
+        execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
     ) -> Vec<Box<dyn BaseTool>>;
 
     /// 为 agent.md 的 `allowedWriteDirs` 创建最小权限的 SandboxWrite 工具。
@@ -85,6 +86,7 @@ pub trait WorkflowMiddlewareFactory: Send + Sync {
         ctx: &WorkflowAgentContext,
         model_name: &str,
         skill_names: &[String],
+        execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
     ) -> Vec<Box<dyn Middleware>>;
 
     /// 构造 tool invocation resolver（迁移前语义 =

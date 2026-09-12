@@ -360,6 +360,7 @@ pub struct AgentProgress {
 - AgentPool（LLM 实例缓存池）
 - Langfuse session / tracer
 - ThreadStore（持久化）
+- 根会话 TaskManager（Workflow Agent 的 Bash 工具和终端中间件共用执行 owner）
 
 **条件注册**：
 - `CompactMiddleware`：**已移除**。Workflow agent 的自动 compact 由 v2 `stages/compact.rs` 统一接管（`run_react_loop` 在每轮开头调 `compact_v2::run_compact`）
@@ -381,18 +382,17 @@ fn parameters() -> JSON Schema { script, scriptPath, name, args, maxConcurrency,
 
 **invoke() 执行流程**：
 
-1. 解析参数：`script` 或 `scriptPath`（二选一），`name`（显示名，可选），`args`, `maxConcurrency`, `resumeFromRunId`
-2. `extract_workflow_name(script)` — 启发式从脚本中提取 `name:` 字段（可选）
-3. 生成 `run_id` (UUID v7)
-4. `registry.register(run, ...)` — 并发限流检查
-5. `tokio::spawn(runner.run())` — 后台启动执行（watch channel: done_tx/done_rx + kill_tx/kill_rx）
-6. `bg_registry.register_workflow()` — 注册到统一后台任务系统（BackgroundTaskRegistry），可选步骤
-7. **快速失败检测**（1s timeout）：clone watch channel `fast_rx` + `tokio::select!` + `sleep(1s)`，在 spawn 后 1 秒内检测 workflow 是否快速失败（如 Node 二进制不存在、脚本语法错误）。快速失败时：
-   - **同步**向 LLM 返回 `Err`（含 `stderr_tail` 等诊断信息）；
-   - **仅**调用 `registry.complete()` 广播失败态 `WorkflowTaskResult`，**不在** `WorkflowTool` 内调用 `TaskManager::complete()`（#117：须在 consumer `push_defer` 之后再递减 `active_count`）；
-   - BgTaskArea（Path A）与 Defer（Path B）由 session consumer 在 Defer 入队**之后**写入 `BackgroundTaskResult`（§4.2）。
-8. `tokio::spawn(notification_task(receiver))` — 等待 done_rx；完成后**只**调用 `registry.complete()`（**不**在 notification task 内 `TaskManager::complete()`；bg 终态由 consumer 在 Defer 之后处理，与慢路径一致）
-9. **立即返回**（多行格式）：
+1. 解析和校验参数、脚本路径、cwd、预算与 Git write intent；构建 `WorkflowInput`。
+2. run 与 resume 共用 `WorkflowTool::start_run`：取得 session execution owner，生成
+   `run_id`，原子 reserve 并发槽，再登记统一后台任务及其取消通道。
+3. `RunCompletion::spawn` 经 `TaskManager::spawn_owned` 启动唯一执行任务，并将句柄
+   attach 到 run。会话已进入 Closing 时拒绝执行，撤销本次登记。
+4. Runner 拥有 JS 进程、消息读取和 run 内 Agent；取消后等待实际收尾。
+   无法证明进程或子任务排空返回 `CleanupFailed`，会话 owner 保持未结清。
+5. `RunCompletion` 在实际执行结束后结算外部执行证据，再发布最终结果到 registry。
+   这个结算不改变 UI active count；session consumer 仍先投递 Defer，再完成后台任务
+   （§4.2）。调用者取消等待不会丢失实际执行和最终通知。
+6. 快速窗口观察同一个完成结果：快速失败向工具调用者返回诊断；尚未结束则返回：
    ```
    Workflow 'xxx' started.
    run_id: {uuid}

@@ -296,23 +296,23 @@ fn explicit_database_selection_never_falls_back_to_another_database() {
 
 #[test]
 #[serial]
-fn default_database_uses_only_isolated_home() {
+fn default_database_reads_existing_single_store_without_modifying_history() {
     let sandbox = TempDir::new().unwrap();
     let home = sandbox.path().join("home");
     let cwd = sandbox.path().join("cwd");
     std::fs::create_dir_all(&cwd).unwrap();
     let db = home.join(".peri/threads/threads.db");
-    create_database(
-        &db,
-        vec![fixture_meta(SESSION_ID, "default-home", "/isolated")],
-    );
+    create_database(&db, vec![fixture_meta(SESSION_ID, "old-history", "/old")]);
+    let before = std::fs::read(&db).unwrap();
 
     let output = run_peri(&home, &cwd, &["meta", "session", SESSION_ID, "--json"]);
 
     assert_success(&output);
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["title"], "default-home");
-    assert_eq!(value["cwd"], "/isolated");
+    assert_eq!(value["title"], "old-history");
+    assert_eq!(value["cwd"], "/old");
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+    assert!(!home.join(".peri/threads/threads-v2.db").exists());
     assert_forbidden_output(&output);
 }
 

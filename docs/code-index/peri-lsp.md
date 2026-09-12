@@ -1,6 +1,6 @@
 # peri-lsp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-12（工作区进程 cwd）
 > 依据：peri-lsp/src、peri-resources/src/lsp.rs、docs/standards/architecture-contracts.md
 
 ## 架构速览
@@ -19,7 +19,7 @@
 | 发请求/通知 | `src/client/requests.rs` | `ready_dispatcher` / `request_on` / `request` / `notify` | 一次捕获同一 dispatcher 完成登记、发送和等待；超时覆盖排队/写入/响应，PendingRequest guard 在取消时清理原登记 |
 | 改文件同步 | `src/client/documents.rs` + `src/client.rs` | `did_open` / `did_change` / `did_save`；`RegisteredConnection` / `infer_language_id` | 一次捕获 Running 连接及其缓存；先等 writer permit，文档锁内规划版本、序列化、同步准入与缓存提交，锁外等写入确认；准入前取消不记缓存，准入后取消不撤销已入队帧；旧连接任务不能写新缓存 |
 | 改路由与动态服务器 | `src/pool.rs` | `ensure_initialized` / `ensure_server_for_file` / `add_server` / `shutdown` | 池操作锁串行化路由选择、添加与关闭；同名替换先关闭旧 client，清除其旧扩展名；ensure 查询当前 client 就绪 |
-| 改进程管道 | `src/jsonrpc/transport.rs` | `LspTransport::spawn` / `read_message` / `kill` | 启动设置 kill_on_drop，独立 stdin/stdout 管道，立即 try_wait 检查早退 |
+| 改进程管道 | `src/jsonrpc/transport.rs` + `src/client/lifecycle.rs` | `LspTransport::spawn` / `read_message` / `kill` | start/restart 从 session root_uri 取得进程 current_dir，相对命令及文件写入不继承宿主目录；启动设置 kill_on_drop，独立 stdin/stdout 管道，立即 try_wait 检查早退 |
 | 改请求登记/分发 | `src/jsonrpc/transport/dispatcher.rs` | `register_owned_request` / `DispatchState::dispatch` / `run_dispatch_loop` | admission 同锁管理 closed/pending/writer；guard 用原 state 弱引用和独立 token 防止删除复用 ID；双向请求先按 method 分类，result/error 响应才消费 pending |
 | 改写入背压与取消 | `src/jsonrpc/transport/dispatcher.rs` + `dispatcher/writer.rs` | `reserve_notification` / `NotificationPermit::enqueue` / `WriteCompletion::wait`；`run` / `Frame` | 唯一 writer 持 stdin，16帧有界队列；容量等待、closed 门控下同步准入与实际写入确认分离，已入队帧不被调用者取消截断；错误关闭准入并通知上层 |
 | 改任务回收 | `src/jsonrpc/transport/dispatcher.rs` | `begin_close` / `close` / `abort_and_join` | 同步拒绝 pending、请求杀进程并 abort；异步 close 回收 child、join writer/stdout/stderr/dispatch；join 句柄跨关闭取消留在 owner 槽位 |

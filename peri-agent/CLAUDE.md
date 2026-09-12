@@ -1,5 +1,7 @@
 # peri-agent
 
+> 工作区绑定与执行所有权遵循 `ARC-WORKSPACE-001`。子会话继承父工作区，实际执行与异步状态收尾纳入 `TaskManager` 关闭证据；可见任务条目删除不代表执行结束。入口见 `docs/code-index/peri-agent.md`。
+
 ## Scope
 
 `peri-agent` 提供会话、消息、RCRA 执行阶段、LLM 抽象、工具 trait 与中间件接口；不承担 ACP transport 或 TUI 状态。

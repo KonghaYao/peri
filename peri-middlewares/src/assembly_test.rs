@@ -1340,7 +1340,11 @@ fn workflow_context_with_disabled(disabled: &[&str]) -> WorkflowAgentContext {
 fn workflow_build_tools_filters_disabled() {
     let factory = default_workflow_middleware_factory();
     // 全开：fs + terminal + web + skills 工具齐全
-    let all = factory.build_tools("/tmp/contract-test", &std::collections::HashSet::new());
+    let all = factory.build_tools(
+        "/tmp/contract-test",
+        &std::collections::HashSet::new(),
+        None,
+    );
     let all_names: Vec<&str> = all.iter().map(|t| t.name()).collect();
     for expected in [
         "Read",
@@ -1367,7 +1371,7 @@ fn workflow_build_tools_filters_disabled() {
     ];
     for (mw, expected_gone) in cases {
         let disabled: std::collections::HashSet<String> = std::iter::once(mw.to_string()).collect();
-        let tools = factory.build_tools("/tmp/contract-test", &disabled);
+        let tools = factory.build_tools("/tmp/contract-test", &disabled, None);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for tool in *expected_gone {
             assert!(
@@ -1387,6 +1391,7 @@ fn workflow_build_middlewares_filters_disabled() {
         &workflow_context_with_disabled(&[]),
         "contract-model",
         &["test-skill".to_string()],
+        None,
     );
     let all_names: Vec<&str> = all.iter().map(|m| m.name()).collect();
     assert_eq!(
@@ -1420,6 +1425,7 @@ fn workflow_build_middlewares_filters_disabled() {
             &workflow_context_with_disabled(&[mw]),
             "contract-model",
             &["test-skill".to_string()],
+            None,
         );
         let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
         assert!(
@@ -1430,6 +1436,45 @@ fn workflow_build_middlewares_filters_disabled() {
         let baseline: Vec<&str> = all_names.iter().copied().filter(|n| *n != mw).collect();
         assert_eq!(names, baseline, "disabled {mw} 后剩余顺序漂移");
     }
+}
+
+#[tokio::test]
+async fn workflow_shell_tools_reject_execution_after_session_owner_closes() {
+    let fixture = tempfile::tempdir().unwrap();
+    let cwd = fixture.path().to_str().unwrap();
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> = Arc::new(TaskManager::new());
+    assert_eq!(
+        manager.shutdown().await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
+    let factory = default_workflow_middleware_factory();
+    let mut tools = factory.build_tools(
+        cwd,
+        &std::collections::HashSet::new(),
+        Some(manager.clone()),
+    );
+    for middleware in factory.build_middlewares(
+        &workflow_context_with_disabled(&[]),
+        "model",
+        &[],
+        Some(manager),
+    ) {
+        tools.extend(middleware.collect_tools(cwd));
+    }
+    let mut shell_count = 0;
+    for tool in tools.into_iter().filter(|tool| tool.name() == "Bash") {
+        shell_count += 1;
+        let error = tool
+            .invoke(
+                serde_json::json!({"command": "echo leaked > unexpected"}),
+                peri_agent::tools::ToolContext::new(&[], cwd),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("closing"), "{error}");
+    }
+    assert_eq!(shell_count, 2);
+    assert!(!fixture.path().join("unexpected").exists());
 }
 
 // ─── 波 4 演进 C2/C3：段落持有者（基础段 + gated 段）────────────────────

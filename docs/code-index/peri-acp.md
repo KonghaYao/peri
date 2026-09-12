@@ -1,6 +1,6 @@
 # peri-acp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11（模块职责拆分与 compact/历史恢复修复合并）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-12（模块职责拆分与 compact/历史恢复修复合并）
 > 依据：peri-acp/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/peri-acp-protocol.md、源码
 
 ## 架构速览
@@ -13,6 +13,8 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 改 worktree 绑定、恢复与会话环境 | `src/host/workspace.rs` + `src/host/requests/session_lifecycle.rs` + `src/host/assemble.rs` | `SessionExecutionLease`；workspace lifecycle helpers | new/load/resume/fork 统一验证绑定，环境按会话 cwd 装配，Incomplete 保留资源与 lease；身份契约见 `session-workspace-identity.md` |
+| 改会话终止 hooks 与定时审批 | `src/host/workspace.rs` + `src/host/assemble.rs` + `src/host/continuation.rs` | `finish_session_end`、`SessionEndState`、`build_session_end_task`、scheduled permission selection | 装配层构造hook执行，环境负责准入和等待；SessionEnd按实际会话单次执行并保留cleanup owner；无效binding仅跳过未开始hook，继续资源关闭；cron校验live owner并消费会话权限 |
 | 改待发送队列控制与执行准入 | `src/host/requests/user_input.rs` + `src/host/user_input.rs` + `src/host/prompt_dispatch.rs` | `handle_user_input`；`ensure_mailbox` / `schedule_mailbox`；`dispatch_prompt_turn_with_input` | 四短 RPC 不等 prompt_lock，session 持 Agent Mailbox；Agent ticket 经同一执行锁启动，RunStarted/done 身份配对，Stop 精确定位，MPSC/stdio 共用请求与事件链（ARC-BOUNDARY-001 / ARC-EVENT-001） |
 | 改插件 marketplace 搜索 | `src/host/requests/plugin.rs` + `plugin_search_test.rs` | `handle_search` / `search_marketplace_plugins` | 经 PluginManagerPort 获取缓存目录，复用 `plugin::marketplace::find_marketplace_json` 读取根或 `.claude-plugin` 布局；名称、描述、marketplace 名均忽略大小写匹配；无匹配明确返回空数组；回归经真实 `handle_request` 读取临时磁盘目录 |
 | 改 compact 后失败恢复 | `src/host/prompt.rs` + `src/host/compact_recovery_test.rs` | `finish_prompt_turn` | 不按 `ok` 丢弃可信 canonical snapshot；取消/模型或 forwarder 失败仍保留已提交 Full 摘要；persistence_inconsistent 移除热会话，冷加载恢复磁盘，ARC-COMPACT-001 |

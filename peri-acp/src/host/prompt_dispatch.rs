@@ -58,6 +58,20 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     input_ticket: Option<super::user_input::UserInputRun>,
 ) -> Result<Value, AcpError> {
     let prompt_session_id = extract_session_id(&params, "").to_string();
+    let environment = sessions
+        .lock()
+        .await
+        .get(&prompt_session_id)
+        .and_then(|state| state.environment.clone());
+    let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    {
+        let sessions = sessions.lock().await;
+        let state = sessions
+            .get(&prompt_session_id)
+            .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+        super::workspace::require_owner(state)?;
+    }
+    super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
 
     // 多读者 + 单 writer lease：prompt 是写入操作，仅 writer 可提交。
     // 协议无客户端身份字段，writer 恒为 session 创建方（"default"）——
@@ -100,6 +114,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // 的 bgResults 在 run_session_loop 内 push Defer——挂起注入路径不携带
     // bgResults（该 RPC 仅 stdio 会话使用，allow_await_wake=false 永不挂起）。
     if !is_continuation && cfg.session_manager.is_idle_suspended(&prompt_session_id) {
+        super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
         let (_, content, _attachments) = extract_and_validate_run_prompt_params(&params)?;
         if let Some(inbox) = cfg.session_manager.session_inbox_for(&prompt_session_id) {
             inbox.handle().push_prompt(
@@ -125,6 +140,14 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // Serialize prompts per session: wait for any in-flight prompt to finish
     // so that state.history is up-to-date when this prompt reads it.
     let _guard = prompt_lock.lock().await;
+    {
+        let sessions = sessions.lock().await;
+        let state = sessions
+            .get(&prompt_session_id)
+            .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+        super::workspace::require_owner(state)?;
+    }
+    super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
 
     // AsyncContinuation 与用户 prompt 竞争时，必须在持有同一 prompt lock 后
     // 校验代际与 pending callback：此时不会与 Receive 的 drain_all 并发，确认

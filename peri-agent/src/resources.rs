@@ -22,7 +22,7 @@ use peri_acp_types::store::ThreadStore;
 /// 打开默认 thread 存储并返回共享 `ThreadStore` 句柄。
 ///
 /// 保持 `Resources::open()` 既有行为：默认路径 `~/.peri/threads/threads.db`
-/// 打开失败时 fallback 到临时目录。
+/// 打开失败时直接返回错误。
 pub async fn open_thread_store() -> anyhow::Result<Arc<dyn ThreadStore>> {
     open_thread_store_with(None).await
 }
@@ -31,7 +31,7 @@ pub async fn open_thread_store() -> anyhow::Result<Arc<dyn ThreadStore>> {
 ///
 /// `Some(path)` 直接使用指定 SQLite 路径，打开失败时直接报错
 /// （不 fallback 临时目录），错误携带路径；`None` 与 [`open_thread_store`]
-/// 行为一致（默认路径 + fallback 临时目录）。
+/// 行为一致（默认路径，失败直接返回错误）。
 pub async fn open_thread_store_with(
     db_path: Option<PathBuf>,
 ) -> anyhow::Result<Arc<dyn ThreadStore>> {

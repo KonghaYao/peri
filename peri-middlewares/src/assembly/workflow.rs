@@ -88,6 +88,7 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         &self,
         cwd: &str,
         disabled: &std::collections::HashSet<String>,
+        execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
     ) -> Vec<Box<dyn BaseTool>> {
         let mut tools: Vec<Box<dyn BaseTool>> = Vec::new();
         // MetaHarness（设计 §2.5）：关闭的 middleware 连坐，其工具不进列表。
@@ -95,7 +96,10 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
             tools.extend(FilesystemMiddleware::build_tools(cwd));
         }
         if !disabled.contains("TerminalMiddleware") {
-            tools.extend(TerminalMiddleware::build_tools(cwd));
+            tools.extend(TerminalMiddleware::build_tools_with_registry(
+                cwd,
+                execution_manager,
+            ));
         }
         if !disabled.contains("WebMiddleware") {
             tools.extend(WebMiddleware::build_tools());
@@ -149,6 +153,7 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         ctx: &WorkflowAgentContext,
         model_name: &str,
         skill_names: &[String],
+        execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
     ) -> Vec<Box<dyn Middleware>> {
         let mut middlewares: Vec<Box<dyn Middleware>> = Vec::new();
 
@@ -191,7 +196,11 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         }
 
         if !disabled.contains("TerminalMiddleware") {
-            middlewares.push(Box::new(TerminalMiddleware::new()));
+            let mut terminal = TerminalMiddleware::new();
+            if let Some(manager) = execution_manager {
+                terminal = terminal.with_task_manager(manager);
+            }
+            middlewares.push(Box::new(terminal));
         }
         if !disabled.contains("WebMiddleware") {
             middlewares.push(Box::new(WebMiddleware::new()));

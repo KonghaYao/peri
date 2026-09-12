@@ -23,9 +23,20 @@ impl AcpTuiClient {
         session_id: &str,
         params: &P,
     ) -> Result<R, AcpError> {
-        let _operation = self.lifecycle.operation_gate().lock().await;
-        self.input_request_under_gate(method, session_id, params)
-            .await
+        let mut epoch = self.session_load_reservations.epoch_tx.subscribe();
+        loop {
+            let operation = self.lifecycle.operation_gate().lock().await;
+            let pending = *self.session_load_reservations.pending.lock().unwrap() > 0;
+            if pending {
+                drop(operation);
+                self.wait_for_session_load(&mut epoch).await?;
+                continue;
+            }
+            self.check_restore_error()?;
+            return self
+                .input_request_under_gate(method, session_id, params)
+                .await;
+        }
     }
 
     async fn input_request_under_gate<P: Serialize, R: DeserializeOwned>(

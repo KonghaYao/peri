@@ -255,3 +255,31 @@ fn test_notification_includes_saved_state_only_when_artifact_exists() {
     assert!(!notification.contains("Error:"));
     std::fs::remove_dir_all(state_dir).unwrap();
 }
+
+#[tokio::test]
+async fn cancellation_before_child_attachment_keeps_cleanup_running() {
+    let (registry, _) = make_registry();
+    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
+    registry
+        .reserve(WorkflowRun {
+            run_id: "attaching".into(),
+            workflow_name: "test".into(),
+            script_preview: String::new(),
+            status: WorkflowRunStatus::Running,
+            started_at: std::time::Instant::now(),
+            child_handle: None,
+            kill_tx: Some(kill_tx),
+        })
+        .unwrap();
+    registry.kill("attaching").unwrap();
+    let (stopped, observed) = tokio::sync::oneshot::channel();
+    let child = tokio::spawn(async move {
+        kill_rx.await.unwrap();
+        let _ = stopped.send(());
+    });
+    registry.attach_child("attaching", child);
+    tokio::time::timeout(std::time::Duration::from_secs(1), observed)
+        .await
+        .unwrap()
+        .expect("the removed row must not abort its cleanup owner");
+}

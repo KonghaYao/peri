@@ -213,6 +213,12 @@ fn commit_snapshot(snap: PeriConfig, change: ModelChange) {
 }
 
 fn project_model_change(snap: &PeriConfig, change: ModelChange) {
+    if ACP_CLIENT_HANDLE
+        .get()
+        .is_some_and(|client| client.has_session())
+    {
+        return;
+    }
     let (alias, switch_active) = match change {
         ModelChange::ActiveAlias(alias) => (alias, true),
         ModelChange::ProfileField(alias) => (alias, false),

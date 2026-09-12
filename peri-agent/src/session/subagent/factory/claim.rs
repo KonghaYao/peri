@@ -32,6 +32,7 @@ impl ResumeClaim {
     pub(super) async fn acquire(
         store: Arc<dyn ThreadStore>,
         thread_id: String,
+        mut ownership: Option<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>>,
     ) -> Result<(ThreadMeta, Self), Box<dyn std::error::Error + Send + Sync>> {
         let (meta_tx, meta_rx) = oneshot::channel();
         let (release, decision) = oneshot::channel();
@@ -39,6 +40,8 @@ impl ResumeClaim {
             let result = own_claim(&store, &thread_id, meta_tx, decision).await;
             if let Err(error) = &result {
                 tracing::error!(%thread_id, %error, "resume status finalization failed");
+            } else if let Some(owner) = &mut ownership {
+                owner.confirm_stopped();
             }
             result
         });

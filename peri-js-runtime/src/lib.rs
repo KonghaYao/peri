@@ -7,7 +7,6 @@ mod artifact;
 mod error;
 mod executor;
 mod host;
-mod process_tree;
 mod rpc;
 
 pub use error::{JsExecutionFailure, JsRuntimeError, ResourceKind, Result};

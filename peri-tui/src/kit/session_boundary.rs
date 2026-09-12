@@ -24,6 +24,8 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
     atoms::INPUT_BUFFER.state().write().clear();
     *atoms::HITL_PENDING.state().write() = None;
     *atoms::ASK_USER_PENDING.state().write() = None;
+    atoms::OAUTH_INFO.set(None);
+    atoms::OAUTH_SESSION_ID.set(None);
     panel_registry::close_panel(PanelKind::AskUser);
 
     let popup = *atoms::POPUP_KIND.state().read();
@@ -39,7 +41,7 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
         });
     if matches!(
         popup,
-        Some(atoms::PopupKind::Hitl | atoms::PopupKind::AskUser)
+        Some(atoms::PopupKind::Hitl | atoms::PopupKind::AskUser | atoms::PopupKind::OAuth)
     ) || (popup == Some(atoms::PopupKind::Confirm) && reject_confirm)
     {
         *atoms::POPUP_KIND.state().write() = None;

@@ -65,6 +65,108 @@ async fn wait_for_file(path: &Path) {
     .expect("真实服务器未到达预期协议边界");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_handshake_cleans_descendants_and_cancelled_start_retains_owner() {
+    let fixture = tempfile::tempdir().unwrap();
+    let script = r#"
+my $child = fork();
+die $! unless defined $child;
+if (!$child) {
+    close STDIN; close STDOUT;
+    while (1) { open my $marker, '>>', 'marker'; print $marker 'x'; close $marker; select undef, undef, undef, 0.02; }
+}
+open my $pid, '>', 'descendant'; print $pid $child; close $pid;
+sleep 60;
+"#;
+    let client = Arc::new(LspClient::new(
+        "tree".into(),
+        "perl".into(),
+        vec!["-e".into(), script.into()],
+        HashMap::new(),
+        None,
+        3,
+        60_000,
+        Arc::new(DiagnosticsRegistry::new()),
+    ));
+    let uri = crate::uri::path_to_uri(fixture.path());
+    let starting = tokio::spawn({
+        let client = client.clone();
+        async move { client.start(&uri).await }
+    });
+    wait_for_file(&fixture.path().join("marker")).await;
+    starting.abort();
+    assert!(starting.await.unwrap_err().is_cancelled());
+    let dispatcher = client
+        .connection
+        .read()
+        .registered
+        .as_ref()
+        .expect("cancelled start must retain original process owner")
+        .dispatcher
+        .clone();
+    tokio::time::timeout(std::time::Duration::from_secs(5), client.shutdown())
+        .await
+        .unwrap();
+    assert!(client.connection.read().registered.is_none());
+    assert!(dispatcher.process_tree_stopped());
+    // A fresh start failure must also wait for tree cleanup before returning its error.
+    let client = LspClient::new(
+        "timeout-tree".into(),
+        "perl".into(),
+        vec!["-e".into(), script.into()],
+        HashMap::new(),
+        None,
+        3,
+        20,
+        Arc::new(DiagnosticsRegistry::new()),
+    );
+    let error = client.start(&crate::uri::path_to_uri(fixture.path())).await;
+    assert!(error.is_err());
+    assert!(client.connection.read().registered.is_none());
+    drop(dispatcher);
+}
+
+/// Relative server scripts and their writes must follow the target workspace on restart too.
+#[tokio::test]
+async fn worktree_server_process_uses_root_directory_on_start_and_restart() {
+    let fixture = tempfile::tempdir().unwrap();
+    for name in ["worktree a", "worktree b"] {
+        let cwd = fixture.path().join(name);
+        std::fs::create_dir(&cwd).unwrap();
+        let script = format!(
+            r#"
+use Cwd qw(getcwd);
+open my $marker, '>>', 'starts' or die $!;
+print $marker getcwd() . "\n";
+close $marker;
+{SCRIPT}
+"#
+        );
+        std::fs::write(cwd.join("server.pl"), script).unwrap();
+        let client = LspClient::new(
+            name.into(),
+            "perl".into(),
+            vec!["server.pl".into()],
+            HashMap::from([("FIXTURE".into(), cwd.to_str().unwrap().into())]),
+            None,
+            3,
+            5_000,
+            Arc::new(DiagnosticsRegistry::new()),
+        );
+        let uri = crate::uri::path_to_uri(&cwd);
+        client.start(&uri).await.unwrap();
+        client.try_restart(&uri).await.unwrap();
+        client.shutdown().await;
+        let starts = std::fs::read_to_string(cwd.join("starts")).unwrap();
+        let expected = std::fs::canonicalize(cwd).unwrap();
+        assert_eq!(
+            starts.lines().collect::<Vec<_>>(),
+            vec![expected.to_str().unwrap(); 2]
+        );
+    }
+}
+
 /// [回归测试] initialize 响应被 gate 时，第二个 start 不得看到提前发布的 Running。
 #[tokio::test]
 async fn test_start_waits_for_initialize_before_publishing_readiness() {
@@ -135,8 +237,12 @@ async fn test_cancelled_start_releases_connection_and_child() {
     let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
     start.abort();
     assert!(start.await.unwrap_err().is_cancelled());
-    assert!(client.connection.read().registered.is_none());
+    assert!(
+        client.connection.read().registered.is_some(),
+        "cancel must preserve the actual owner for shutdown/restart"
+    );
     assert!(!client.is_ready());
+    client.shutdown().await;
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         while std::process::Command::new("kill")
             .args(["-0", &pid])

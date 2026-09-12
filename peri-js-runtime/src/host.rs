@@ -1,7 +1,6 @@
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -9,9 +8,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
-use crate::process_tree::ProcessTree;
 use crate::rpc::spawn_stdout_reader;
 use crate::{IncomingMessage, JsRuntimeError, Result, RpcChannel};
+use peri_process::ProcessTree;
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const STDERR_CHUNK_BYTES: usize = 8 * 1024;
@@ -93,10 +92,7 @@ impl JsExecutionHost {
             .args(&spec.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
+            .stderr(Stdio::piped());
         if !spec.inherit_environment {
             command.env_clear();
         }
@@ -105,36 +101,27 @@ impl JsExecutionHost {
             command.current_dir(cwd);
         }
 
+        let mut process_tree =
+            ProcessTree::new().map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
+        process_tree.prepare(&mut command);
         let mut child = command
             .spawn()
             .map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
-        #[cfg(unix)]
-        let child_id = child
-            .id()
-            .ok_or_else(|| JsRuntimeError::SpawnFailed("child pid unavailable".into()))?;
-        #[cfg(unix)]
-        let process_tree = ProcessTree::new(child_id)
-            .map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
-        #[cfg(windows)]
-        let process_tree = ProcessTree::new(
-            child
-                .raw_handle()
-                .ok_or_else(|| JsRuntimeError::SpawnFailed("child handle unavailable".into()))?
-                as _,
-        )
-        .map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
+        process_tree
+            .attach(&child)
+            .map_err(|error| JsRuntimeError::CleanupFailed(error.to_string()))?;
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| JsRuntimeError::SpawnFailed("no stdin".into()))?;
+            .ok_or_else(|| JsRuntimeError::CleanupFailed("no stdin".into()))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| JsRuntimeError::SpawnFailed("no stdout".into()))?;
+            .ok_or_else(|| JsRuntimeError::CleanupFailed("no stdout".into()))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| JsRuntimeError::SpawnFailed("no stderr".into()))?;
+            .ok_or_else(|| JsRuntimeError::CleanupFailed("no stderr".into()))?;
 
         let channel = Arc::new(RpcChannel::new(stdin, max_frame_bytes));
         let (sender, incoming) = mpsc::channel(256);
@@ -193,16 +180,19 @@ impl JsExecutionHost {
     }
 
     pub async fn kill(&self) -> Result<()> {
-        self.terminate_and_wait("JavaScript process cancelled", Duration::from_millis(100))
+        self.terminate_and_wait("JavaScript process cancelled")
             .await
             .map(|_| ())
     }
 
     pub async fn wait(&self) -> Result<std::process::ExitStatus> {
-        let status = self.child.lock().await.wait().await?;
+        let status = self.child.lock().await.wait().await;
         self.channel.drain_pending("JavaScript process exited");
+        // Redirected descendants can outlive both the leader and reader EOF.
+        // Natural wait keeps their owner until the complete tree has stopped.
+        self.process_tree.wait_for_exit().await;
         self.join_readers().await;
-        Ok(status)
+        status.map_err(Into::into)
     }
 
     pub fn stderr_tail(&self) -> Option<String> {
@@ -217,47 +207,15 @@ impl JsExecutionHost {
     pub(crate) async fn terminate_and_wait(
         &self,
         reason: &'static str,
-        grace: Duration,
     ) -> Result<std::process::ExitStatus> {
         self.channel.drain_pending(reason);
-        let exited = self.child.lock().await.try_wait()?;
         // A reaped leader can leave descendants holding stdout/stderr open. Close
         // the owned tree before awaiting reader EOF, even when the leader exited.
-        if let Err(error) = self.process_tree.terminate(grace).await {
-            return self.recover_termination_race(error, grace).await;
-        }
-        let status = match exited {
-            Some(status) => status,
-            None => self.child.lock().await.wait().await?,
-        };
+        self.process_tree.terminate();
+        let status = self.child.lock().await.wait().await;
+        self.process_tree.wait_for_exit().await;
         self.join_readers().await;
-        Ok(status)
-    }
-
-    async fn recover_termination_race(
-        &self,
-        signal_error: std::io::Error,
-        grace: Duration,
-    ) -> Result<std::process::ExitStatus> {
-        // A successful SIGTERM can make the group leader a zombie before the immediate
-        // SIGKILL. macOS may report that window as EPERM while Tokio has not reaped the child
-        // yet, so one immediate try_wait is insufficient. Bound the reap wait, then retry the
-        // process group to kill any descendants that outlived the leader. Real signal failures
-        // remain fatal if the child does not exit or the retry cannot converge.
-        let status = {
-            let mut child = self.child.lock().await;
-            match tokio::time::timeout(grace, child.wait()).await {
-                Ok(Ok(status)) => status,
-                Ok(Err(error)) => return Err(error.into()),
-                Err(_) => return Err(JsRuntimeError::CleanupFailed(signal_error.to_string())),
-            }
-        };
-        self.process_tree
-            .terminate(grace)
-            .await
-            .map_err(|error| JsRuntimeError::CleanupFailed(error.to_string()))?;
-        self.join_readers().await;
-        Ok(status)
+        status.map_err(Into::into)
     }
 
     async fn join_readers(&self) {

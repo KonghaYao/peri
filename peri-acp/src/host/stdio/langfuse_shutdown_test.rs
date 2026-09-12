@@ -36,7 +36,7 @@ async fn owned_config(
     )
     .await
     .unwrap();
-    let mut cfg = test_config(tmp);
+    let mut cfg = test_config(tmp).await;
     cfg.langfuse_session = Some(Arc::clone(&session));
     cfg.langfuse_shutdown_owner = Some(owner);
     (cfg, session)

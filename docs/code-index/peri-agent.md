@@ -1,6 +1,6 @@
 # peri-agent 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11（模块职责拆分与 compact/历史恢复修复合并）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-12（模块职责拆分与 compact/历史恢复修复合并）
 > 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
 
 ## 架构速览
@@ -13,6 +13,7 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 改会话执行排空与子会话归属 | `src/agent/async_tasks/{scope,manager,registry,shell}.rs` + `src/session/subagent/factory/{spawn,resume,claim}.rs` | `ExecutionScope`、`TaskManager::shutdown`、`ShellExecutionGuard` | 排空证据独立于可见任务列表；绑定子会话使用父工作区与根执行 lease；取消不等于清理完成；Windows Job 在执行前加入 |
 | 改用户待发送、立即发送与停止恢复 | `src/session/user_input_mailbox.rs` + `src/agent/stages/receive.rs` + `src/session/exec/executor_helpers/v2_execute.rs` | `UserInputMailbox::{enqueue,dispatch,take_back,reserve_run,attach_attempt,finish_attempt,stop_attempt}`；`run_receive` | 跨 turn 唯一 owner 保留待发区与幂等回执，selected 交接 MQ；Stop 只回收未领取项，自然成功后释放普通项，Delivered 走本轮 render FIFO；契约 ARC-BOUNDARY-001 / ARC-CANCEL-001 / ARC-EVENT-001 |
 | 改 compact 失败后的历史恢复 | `src/session/transcript.rs` + `src/session/exec/executor_helpers/{v2_execute,intercept}.rs` + `peri-acp/src/host/prompt.rs` | `CompactionCommitState`；Phase 8 flush；`intercept_immediate_command`；`finish_prompt_turn` | 取消/模型错误仍返回可信 canonical snapshot；writer 失败或 compact commit uncertain 停止使用热状态、保留已提交磁盘内容供冷恢复，禁止按新增 ID 回滚已提交摘要；ARC-COMPACT-001 |
 | 改 Full 后预算恢复判定 | `src/agent/stages/compact_progress.rs` + `src/agent/stages/reason.rs` | `CompactBudgetRecovery::{record_full_applied,begin_request,observe_response}` | 无新 Human/Tool 工作时，两次成功 Full 后的对应实际请求 usage 仍高压则返回 `CompactBudgetUnrecovered`；Reminder/AI 不重置次数，缺失/零/过期 usage 不作证据；cancel 优先；ARC-COMPACT-001 |

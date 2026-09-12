@@ -102,6 +102,10 @@ pub struct OAuthWireNotification {
 /// a URL or raw local error, so it intentionally implements neither `Debug` nor
 /// serde traits.
 pub enum HostOAuthEvent {
+    Session {
+        session_id: String,
+        event: Box<HostOAuthEvent>,
+    },
     DynamicAuthorizationNeeded {
         instance: peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey,
         flow_id: String,

@@ -15,16 +15,24 @@ use std::sync::Arc;
 
 use peri_acp_types::store::ThreadStore;
 
+/// 只解析默认数据库位置；不创建目录、数据库或连接。
+fn default_database_path() -> Option<PathBuf> {
+    dirs_next::home_dir().map(|home| home.join(".peri").join("threads").join("threads.db"))
+}
+
 /// 只读打开显式路径或默认路径下已存在的 thread database。
 pub async fn open_thread_store_read_only(
     db_path: Option<PathBuf>,
 ) -> Result<Arc<dyn ThreadStore>, ReadOnlyThreadStoreError> {
     let path = match db_path {
         Some(path) => path,
-        None => dirs_next::home_dir()
-            .map(|home| home.join(".peri").join("threads").join("threads.db"))
-            .ok_or(ReadOnlyThreadStoreError::Internal)?,
+        None => default_database_path().ok_or(ReadOnlyThreadStoreError::Internal)?,
     };
     let store = SqliteThreadStore::open_existing_read_only(path).await?;
     Ok(Arc::new(store))
 }
+
+// dirs-next uses the Windows profile known folder, so HOME cannot isolate these tests there.
+#[cfg(all(test, unix))]
+#[path = "default_path_test.rs"]
+mod default_path_tests;

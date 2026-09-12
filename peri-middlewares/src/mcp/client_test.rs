@@ -813,7 +813,11 @@ async fn test_timed_out_service_is_recorded_incomplete_and_never_publishes_close
         }
     );
     assert_eq!(repeated, first);
-    assert_eq!(close_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        close_count.load(Ordering::SeqCst),
+        2,
+        "retry must retain and revisit the original service owner"
+    );
     assert_eq!(
         pool.lifecycle.load(Ordering::Acquire),
         1,

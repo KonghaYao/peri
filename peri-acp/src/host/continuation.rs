@@ -171,9 +171,12 @@ pub(crate) async fn run_cron_continuation_scheduler(
             HostTaskOwnerKind::Session,
             HostTaskKind::ContinuationTurn,
             async move {
+                let Ok(permission_mode) = scheduled_permission_mode(&cfg, &sessions, &req.session_id).await else {
+                    return;
+                };
                 let broker = super::prompt::build_transport_broker(&transport, &req.session_id);
                 if !super::prompt::approve_scheduled_trigger(
-                    cfg.permission_mode.as_ref(),
+                    permission_mode.as_ref(),
                     Some(&broker),
                     &req.trigger.task_id,
                     &req.trigger.prompt,
@@ -183,12 +186,14 @@ pub(crate) async fn run_cron_continuation_scheduler(
                     info!(session_id = %req.session_id, task_id = %req.trigger.task_id, "cron trigger rejected");
                     return;
                 }
-                if !enqueue_cron_trigger(&cfg, &req.session_id, &req.trigger) {
-                    return;
-                }
                 let epoch = {
                     let mut sessions = sessions.lock().await;
                     let Some(state) = sessions.get_mut(&req.session_id) else { return };
+                    if super::workspace::require_owner(state).is_err()
+                        || !enqueue_cron_trigger(&cfg, &req.session_id, &req.trigger)
+                    {
+                        return;
+                    }
                     state.continuation_mq_steering_pending = true;
                     state.continuation_epoch
                 };
@@ -214,6 +219,30 @@ pub(crate) async fn run_cron_continuation_scheduler(
             },
         );
     }
+}
+
+pub(crate) async fn scheduled_permission_mode(
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    session_id: &str,
+) -> Result<Arc<peri_acp_types::permission::SharedPermissionMode>, crate::transport::types::AcpError>
+{
+    let permission_mode = {
+        let sessions = sessions.lock().await;
+        let state = sessions
+            .get(session_id)
+            .ok_or_else(|| crate::transport::types::AcpError::new(-32602, "session not found"))?;
+        super::workspace::require_owner(state)?;
+        state
+            .environment
+            .as_ref()
+            .map(|env| &env.cfg)
+            .unwrap_or(cfg)
+            .permission_mode
+            .clone()
+    };
+    super::workspace::validate_expected(cfg, session_id, None).await?;
+    Ok(permission_mode)
 }
 
 fn enqueue_cron_trigger(cfg: &AcpServerConfig, session_id: &str, trigger: &CronTrigger) -> bool {

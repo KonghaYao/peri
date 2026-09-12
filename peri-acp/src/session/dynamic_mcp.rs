@@ -114,8 +114,13 @@ impl DynamicMcpNotificationSinkPort for SessionDynamicMcpNotificationSink {
 
 impl SessionManager {
     pub fn dynamic_mcp_instance_is_current(&self, instance: &DynamicMcpInstanceKey) -> bool {
-        self.inner
-            .dynamic_mcp
+        let deployment = self
+            .inner
+            .sessions
+            .get(&instance.logical.session_id)
+            .and_then(|session| session.dynamic_mcp_deployment.clone())
+            .or_else(|| self.inner.dynamic_mcp.clone());
+        deployment
             .as_ref()
             .is_some_and(|deployment| deployment.accepts_instance(instance))
     }

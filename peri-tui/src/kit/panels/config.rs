@@ -3,7 +3,7 @@
 //! H1a（Iteration 14）：从 PERI_CONFIG_HANDLE 读取真实 PeriConfig，操作时
 //! write + 调用 config::save_effective 持久化到当前生效层（全局或工作区，
 //! 路径决策由 ConfigSource 加载时确定）。permission_mode
-//! 通过 PERMISSION_MODE_HANDLE 写运行时 SharedPermissionMode（非持久化——
+//! 经 session/set_mode 修改当前会话运行权限，不写宿主持久配置。
 
 use crate::app::panel_types::PanelKind;
 use crate::config::TuiConfig;
@@ -74,6 +74,7 @@ const CONFIG_ROWS: &[(&str, RowType)] = &[
 
 #[component]
 pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    hooks.use_atom(&crate::kit::atoms::SERVICE_SNAPSHOT);
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
@@ -348,11 +349,24 @@ fn read_cycle_idx(row: usize, options: &[&str]) -> usize {
             }
         }
         ROW_PERMISSION_MODE => {
-            let cur = PERMISSION_MODE_HANDLE
-                .get()
-                .map(|m| permission_mode_label(m.load()))
-                .unwrap_or("default");
-            options.iter().position(|o| *o == cur).unwrap_or(0)
+            let snapshot = crate::kit::atoms::SERVICE_SNAPSHOT
+                .state()
+                .read()
+                .permission_mode
+                .clone();
+            let cur = if snapshot.is_empty() {
+                PERMISSION_MODE_HANDLE
+                    .get()
+                    .map(|mode| permission_mode_label(mode.load()))
+                    .unwrap_or("default")
+                    .to_string()
+            } else {
+                snapshot
+            };
+            options
+                .iter()
+                .position(|option| *option == cur)
+                .unwrap_or(0)
         }
         ROW_SCROLL_FPS => {
             let cur = TUI_CONFIG_HANDLE
@@ -554,12 +568,9 @@ fn activate_row(row: usize, forward: bool) {
                     }
                 }
                 ROW_PERMISSION_MODE => {
-                    if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get()
-                        && let Some(mode) = parse_permission_mode(new_val)
-                    {
-                        mode_handle.store(mode);
+                    if let Some(mode) = parse_permission_mode(new_val) {
+                        crate::kit::permission_mode::request(permission_mode_label(mode));
                     }
-                    // permission_mode 不持久化到 settings.json（运行时状态）
                 }
                 ROW_SCROLL_FPS => {
                     // TUI field: write to TUI_CONFIG_HANDLE + sync to PeriConfig.extra

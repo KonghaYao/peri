@@ -119,6 +119,9 @@ pub struct AcpSession {
     /// Session 级命令注册表（随 session 创建初始化并注册内置命令；跨轮常驻，
     /// 动态注入条目不因轮次丢失；随本结构 drop 释放，杜绝全局挂点）。
     pub command_registry: Arc<CommandRegistry>,
+    pub(crate) mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
+    pub(crate) dynamic_mcp_deployment:
+        Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     /// Idempotent Dynamic MCP cleanup lease.
     pub dynamic_mcp_close: Option<Arc<dyn peri_acp_types::ports::SessionCloseRegistration>>,
     /// Strong owner for the checked session-local MCP projection across stage builds.
@@ -129,7 +132,7 @@ pub struct AcpSession {
 }
 
 struct SessionManagerInner {
-    sessions: DashMap<String, AcpSession>,
+    sessions: Arc<DashMap<String, AcpSession>>,
     thread_store: Arc<dyn ThreadStore>,
     provider: LlmProvider,
     peri_config: Arc<PeriConfig>,
@@ -190,8 +193,16 @@ impl AcpSession {
         };
         peri_acp_types::session::cancel_all_agents(self.active_agents.values());
         self.cancel_token.cancel();
-        self.task_manager.cancel_all();
-        report
+        let tasks = self.task_manager.shutdown().await;
+        if tasks == peri_acp_types::tasks::TaskShutdownReport::Incomplete
+            || !self.active_agents.is_empty()
+        {
+            peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Incomplete {
+                unfinished_instances: 1,
+            }
+        } else {
+            report
+        }
     }
 }
 
@@ -213,7 +224,7 @@ impl SessionManager {
     ) -> Self {
         Self {
             inner: Arc::new(SessionManagerInner {
-                sessions: DashMap::new(),
+                sessions: Arc::new(DashMap::new()),
                 thread_store,
                 provider,
                 peri_config,
@@ -233,6 +244,15 @@ impl SessionManager {
         }
     }
 
+    pub(crate) fn share_registry_with(&mut self, host: &SessionManager) {
+        let inner = Arc::get_mut(&mut self.inner).expect("fresh session manager");
+        inner.sessions = Arc::clone(&host.inner.sessions);
+        inner.caps_registry = Arc::clone(&host.inner.caps_registry);
+        *inner.pending_caps.lock() = host.inner.pending_caps.lock().clone();
+        *inner.cron_continuation_tx.lock() = host.inner.cron_continuation_tx.lock().clone();
+        inner.cron_scheduler = host.inner.cron_scheduler.clone();
+    }
+
     /// 使用指定 session_id 创建会话（用于 session/load 和 session/resume）
     pub async fn new_session_with_id(&self, session_id: &str, cwd: &str) -> anyhow::Result<()> {
         if self.inner.sessions.contains_key(session_id) {
@@ -246,22 +266,44 @@ impl SessionManager {
         Ok(())
     }
 
+    pub(crate) async fn drain_session_tasks(&self, session_id: &str) -> bool {
+        self.pre_close_session(session_id);
+        let manager = self
+            .inner
+            .sessions
+            .get(session_id)
+            .map(|session| session.task_manager.clone());
+        match manager {
+            Some(manager) => {
+                manager.shutdown().await == peri_acp_types::tasks::TaskShutdownReport::Complete
+            }
+            None => true,
+        }
+    }
+
     pub async fn close_session(&self, session_id: &str) -> anyhow::Result<()> {
+        if !self.drain_session_tasks(session_id).await {
+            anyhow::bail!("Session close incomplete: background tasks are still active");
+        }
         if let Some(session) = self.take_for_close(session_id) {
-            let _ = session.close_resources().await;
+            if session.close_resources().await
+                != peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
+            {
+                self.inner.sessions.insert(session_id.to_owned(), session);
+                anyhow::bail!("Session close incomplete: owned resources are still active");
+            }
         }
         Ok(())
     }
 
     /// Transfer the removed record to the host's retryable exit context.
     pub(crate) fn take_for_close(&self, session_id: &str) -> Option<AcpSession> {
-        if let Some(port) = &self.inner.mcp_subscription {
-            port.unregister_inbox(session_id);
-        }
-        self.inner
-            .sessions
-            .remove(session_id)
-            .map(|(_, session)| session)
+        self.inner.sessions.remove(session_id).map(|(_, session)| {
+            if let Some(port) = &session.mcp_subscription {
+                port.unregister_inbox(session_id);
+            }
+            session
+        })
     }
 
     /// Begin terminal shutdown without removing the record needed by a

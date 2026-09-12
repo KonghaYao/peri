@@ -4,6 +4,8 @@
 //! 的参数组装。调用方（ACP builder / compact pipeline）仅需传入已注册的 hook 列表与会话上下文。
 
 use crate::hooks::types::{HookEvent, RegisteredHook};
+use peri_acp_types::tasks::TaskManager;
+use std::sync::Arc;
 
 /// 触发 PreCompact hook（compact 开始前）。
 ///
@@ -16,8 +18,9 @@ pub async fn fire_pre_compact(
     transcript_path: &str,
     current_model: &str,
     message_count: usize,
+    task_manager: Option<Arc<dyn TaskManager>>,
 ) {
-    super::dispatcher::fire_standalone_lifecycle_hooks(
+    super::dispatcher::fire_standalone_lifecycle_hooks_owned(
         registered_hooks,
         HookEvent::PreCompact,
         cwd,
@@ -26,6 +29,7 @@ pub async fn fire_pre_compact(
         current_model,
         Some(message_count),
         None,
+        task_manager,
     )
     .await;
 }
@@ -41,8 +45,9 @@ pub async fn fire_post_compact(
     transcript_path: &str,
     current_model: &str,
     message_count: usize,
+    task_manager: Option<Arc<dyn TaskManager>>,
 ) {
-    super::dispatcher::fire_standalone_lifecycle_hooks(
+    super::dispatcher::fire_standalone_lifecycle_hooks_owned(
         registered_hooks,
         HookEvent::PostCompact,
         cwd,
@@ -51,6 +56,7 @@ pub async fn fire_post_compact(
         current_model,
         Some(message_count),
         None,
+        task_manager,
     )
     .await;
 }

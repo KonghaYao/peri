@@ -346,7 +346,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // Programmatic Tool Calling：注册 deferred RunPtcCode，由 ToolSearch 发现/执行。
                 ChainSlot::Ptc if disabled.contains("PtcMiddleware") => {}
                 ChainSlot::Ptc => {
-                    chain.add(Box::new(PtcMiddleware::new()));
+                    let middleware =
+                        PtcMiddleware::new().with_task_manager(ctx.task_manager.clone());
+                    chain.add(Box::new(middleware));
                 }
                 // ToolSearch 中间件
                 ChainSlot::ToolSearch if disabled.contains("ToolSearch") => {}

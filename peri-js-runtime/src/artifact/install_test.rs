@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 #[cfg(unix)]
 #[tokio::test]

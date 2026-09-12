@@ -73,3 +73,5 @@ pub mod tasks;
 pub mod thread;
 pub mod tools;
 pub mod workflow;
+
+pub mod workspace;

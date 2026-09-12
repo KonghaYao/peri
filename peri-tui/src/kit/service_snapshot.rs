@@ -6,7 +6,7 @@
 //! ## 为什么不直接持 `&App`
 //!
 //! `App` 含 TextArea 等非 Send 字段，无法跨 tokio task 共享。本任务持的是
-//! `ServiceRegistry` 中已经 Arc 化的共享字段（thread_store / peri_config /
+//! `ServiceRegistry` 中已经 Arc 化的共享字段（ACP client / peri_config /
 //! permission_mode / cron / mcp_pool），它们天然 Send+Sync，可安全跨越 task 边界。
 //!
 //! ## 派生而非直读
@@ -25,14 +25,21 @@ use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::acp_client::AcpTuiClient;
 use crate::app::service_registry::{ProcessResourceMonitor, SharedPeriConfig};
+use crate::kit::atoms::{
+    ACTIVE_EXECUTION_CWD, THREAD_BROWSER_SCOPE, THREAD_LIST_ERROR, THREAD_LIST_HAS_MORE,
+    THREAD_LIST_PAGE_COUNT, ThreadBrowserScope,
+};
 use crate::kit::atoms::{
     ACTIVE_SESSION_ID, CRON_JOBS, CURRENT_SESSION_TITLE, CronJobSummary, FILE_LIST, HOOK_LIST,
     Handle, HookSummary, MCP_SERVERS, MEMORY_LIST, McpInitPhase, McpServerSummary,
     McpStatusSnapshot, MemoryEntry, PLUGIN_LIST, PROVIDER_LIST, PluginSummary, ProviderSummary,
     SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST, ThreadSummary,
 };
-use crate::thread::ThreadStore;
+use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadQuery, ThreadScope};
+
+mod session_services;
 
 /// 快照源——`build_app_and_acp` 后从 `ServiceRegistry` 抽出的 Arc 共享句柄。
 ///
@@ -40,7 +47,7 @@ use crate::thread::ThreadStore;
 #[derive(Clone)]
 pub struct SnapshotSource {
     pub cwd: String,
-    pub thread_store: Arc<dyn ThreadStore>,
+    pub client: Option<AcpTuiClient>,
     pub peri_config: SharedPeriConfig,
     pub permission_mode: Arc<SharedPermissionMode>,
     /// Cron/MCP 资源句柄直读（C 类豁免至 M-TUI，见批 3 tui-deps 未做项）
@@ -92,6 +99,11 @@ pub fn spawn_service_snapshot(
 
 struct SlowSnapshotRefresh {
     next_file_scan: Instant,
+    file_cwd: String,
+    list_cwd: String,
+    list_workspace: Option<ResolvedWorkspace>,
+    list_scope: ThreadBrowserScope,
+    list_page_count: u32,
     next_thread_scan: Instant,
     next_memory_scan: Instant,
     files: Vec<String>,
@@ -100,13 +112,17 @@ struct SlowSnapshotRefresh {
     /// 当前会话标题派生缓存：上次查询的 session id + 结果 + 下次刷新时刻。
     current_title_session_id: String,
     current_title: String,
-    next_title_refresh: Instant,
 }
 
 impl Default for SlowSnapshotRefresh {
     fn default() -> Self {
         Self {
             next_file_scan: Instant::now(),
+            file_cwd: String::new(),
+            list_cwd: String::new(),
+            list_workspace: None,
+            list_scope: ThreadBrowserScope::default(),
+            list_page_count: 1,
             next_thread_scan: Instant::now(),
             next_memory_scan: Instant::now(),
             files: Vec::new(),
@@ -114,13 +130,11 @@ impl Default for SlowSnapshotRefresh {
             memory_entries: Vec::new(),
             current_title_session_id: String::new(),
             current_title: String::new(),
-            // 首 tick 立即查询（Instant::now() 已过期）
-            next_title_refresh: Instant::now(),
         }
     }
 }
 
-/// 单次快照派发——读所有源 → 写所有 atom。返回 Err 仅在 thread_store I/O 失败时。
+/// 单次快照派发——读所有源 → 写所有 atom。通过 ACP 查询会话投影。
 async fn tick_once(
     src: &SnapshotSource,
     slow: &mut SlowSnapshotRefresh,
@@ -133,14 +147,14 @@ async fn tick_once(
     };
 
     // ── 2. provider/model 从 peri_config 派生 ──────────────────────────
-    let (provider_name, model_alias, model_name, effort) =
+    let (mut provider_name, mut model_alias, mut model_name, mut effort) =
         derive_provider_and_model(&src.peri_config);
 
     // ── 3. permission_mode ─────────────────────────────────────────────
-    let permission_mode = permission_mode_label(src.permission_mode.load());
+    let mut permission_mode = permission_mode_label(src.permission_mode.load()).to_string();
 
     // ── 4. MCP 池状态 ────────────────────────────────────────────────────
-    let mcp = derive_mcp_status(&src.mcp_pool, &src.mcp_init_rx);
+    let mut mcp = derive_mcp_status(&src.mcp_pool, &src.mcp_init_rx);
 
     // ── 5. Cron 任务 ─────────────────────────────────────────────────────
     let (cron_total, cron_enabled, cron_jobs) = {
@@ -161,50 +175,51 @@ async fn tick_once(
         (total, enabled, jobs)
     };
 
-    // ── 6. Thread 列表：慢频刷新，避免空闲时持续打 SQLite / I/O ───────────────
     let now = Instant::now();
-    if now >= slow.next_thread_scan {
-        slow.threads = match src.thread_store.list_thread_entries(&src.cwd).await {
-            Ok(entries) => entries
-                .into_iter()
-                .map(|entry| ThreadSummary {
-                    id: entry.id,
-                    title: entry.title,
-                    cwd: entry.cwd,
-                    message_count: entry.message_count,
-                    updated_at: Some(entry.updated_at),
-                })
-                .collect(),
-            Err(e) => {
-                warn!(error = %e, "service_snapshot: list_threads failed");
-                Vec::new()
+    let active_cwd = ACTIVE_EXECUTION_CWD.state().read().clone();
+    let cwd = active_cwd.clone().unwrap_or_else(|| src.cwd.clone());
+    let scope = THREAD_BROWSER_SCOPE.get();
+    let mut thread_error = THREAD_LIST_ERROR.state().read().clone();
+    let mut has_more = THREAD_LIST_HAS_MORE.get();
+    let page_count = THREAD_LIST_PAGE_COUNT.get();
+    let list_changed =
+        cwd != slow.list_cwd || scope != slow.list_scope || page_count != slow.list_page_count;
+    if now >= slow.next_thread_scan || list_changed {
+        if cwd != slow.list_cwd {
+            slow.list_workspace = None;
+        }
+        slow.list_cwd = cwd.clone();
+        slow.list_scope = scope;
+        slow.list_page_count = page_count;
+        if let Some(client) = &src.client {
+            match refresh_threads(client, slow).await {
+                Ok((entries, next_page)) => {
+                    slow.threads = entries;
+                    thread_error = None;
+                    has_more = next_page;
+                }
+                Err(error) => {
+                    slow.threads.clear();
+                    thread_error = Some(error.to_string());
+                    has_more = false;
+                }
             }
-        };
+        }
         slow.next_thread_scan = now + Duration::from_secs(2);
     }
     let threads = slow.threads.clone();
 
-    // ── 6b. C2: cwd 文件浅扫（@mention 补全用） ────────────────────────
-    // 文件列表不需要 2 秒刷新；慢频刷新可避免大型 cwd 空闲时持续扫盘。
-    if now >= slow.next_file_scan {
-        let cwd_for_scan = src.cwd.clone();
-        slow.files = match tokio::task::spawn_blocking(move || {
-            scan_cwd_files_shallow(&cwd_for_scan)
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                warn!(error = %e, "service_snapshot: spawn_blocking for cwd scan failed");
-                Vec::new()
-            }
-        };
+    // The active execution directory invalidates the file projection immediately.
+    if now >= slow.next_file_scan || cwd != slow.file_cwd {
+        let cwd_for_scan = cwd.clone();
+        slow.files = tokio::task::spawn_blocking(move || scan_cwd_files_shallow(&cwd_for_scan))
+            .await
+            .unwrap_or_default();
+        slow.file_cwd = cwd.clone();
         slow.next_file_scan = now + Duration::from_secs(30);
     }
     let files = slow.files.clone();
-
-    // ── 6c. H1d: MCP server 详细列表（从 pool 派生） ───────────────────
-    let mcp_servers: Vec<McpServerSummary> = derive_mcp_servers(&src.mcp_pool);
+    let mut mcp_servers: Vec<McpServerSummary> = derive_mcp_servers(&src.mcp_pool);
 
     // ── 6d. H1h: ~/.claude/memory 文件扫描 ──────────────────────────────
     // Memory 面板数据慢频刷新即可，避免空闲时每 2 秒扫 ~/.claude/memory。
@@ -220,39 +235,98 @@ async fn tick_once(
     }
     let memory_entries = slow.memory_entries.clone();
 
-    // ── 6e. 当前会话标题：从 thread_store 派生（节流查询） ───────────────
-    // session id 变化立即查询；同 id 每 10s 刷新一次（覆盖标题中途被
-    // 自动生成 / rename 的情况）。load_meta 是主键查询，开销极低。
+    // ── 6e. 当前会话标题：从 ACP metadata 派生（节流查询） ───────────────
+    // 标题与实际运行配置一起查询；metadata 是主键查询，不运行 Git 探测。
     let session_id = ACTIVE_SESSION_ID.state().read().clone();
+    let (hooks, plugins) = if let Some(client) = &src.client
+        && !session_id.is_empty()
+    {
+        let services = session_services::query(client, &session_id).await;
+        mcp = services.mcp;
+        mcp_servers = services.mcp_servers;
+        (services.hooks, services.plugins)
+    } else {
+        (src.hooks.clone(), src.plugins.clone())
+    };
+
     let session_changed = session_id != slow.current_title_session_id;
     if session_changed && session_id.is_empty() {
         // 会话已关闭（id 清空）：清空标题缓存，避免旧会话标题残留到状态栏
         slow.current_title.clear();
         slow.current_title_session_id.clear();
-        slow.next_title_refresh = now + Duration::from_secs(10);
-    } else if (session_changed || now >= slow.next_title_refresh) && !session_id.is_empty() {
-        match src.thread_store.load_meta(&session_id).await {
-            Ok(meta) => {
-                slow.current_title = meta.title.unwrap_or_default();
-                slow.current_title_session_id = session_id;
-            }
-            Err(e) => {
-                warn!(error = %e, sid = %session_id, "service_snapshot: load_meta for session title failed");
+    } else if !session_id.is_empty() {
+        if session_changed {
+            slow.current_title.clear();
+        }
+        if let Some(client) = &src.client {
+            match client
+                .send_raw_request(
+                    "session/metadata",
+                    serde_json::json!({"sessionId":session_id}),
+                )
+                .await
+            {
+                Ok(metadata) => {
+                    if let Some(mode) = metadata
+                        .get("permissionMode")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        permission_mode = match mode {
+                            "accept_edit" => "accept-edit",
+                            "auto" => "auto-mode",
+                            mode => mode,
+                        }
+                        .to_string();
+                    }
+                    if let Some(alias) = metadata
+                        .get("modelAlias")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        model_alias = alias.to_string();
+                    }
+                    model_name = metadata
+                        .get("modelName")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(&model_alias)
+                        .to_string();
+                    provider_name = metadata
+                        .get("providerName")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    effort = metadata
+                        .get("effort")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    slow.current_title = metadata
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                }
+                Err(error) => {
+                    permission_mode.clear();
+                    model_alias.clear();
+                    model_name.clear();
+                    provider_name.clear();
+                    effort.clear();
+                    tracing::warn!(%error, "session metadata lookup failed");
+                }
             }
         }
-        slow.next_title_refresh = now + Duration::from_secs(10);
+        slow.current_title_session_id = session_id.clone();
     }
     let current_title = slow.current_title.clone();
-    write_if_changed(&CURRENT_SESSION_TITLE.state(), current_title);
 
     // ── 7. 写入 atoms ───────────────────────────────────────────────────
     let snap = ServiceSnapshot {
-        cwd: src.cwd.clone(),
+        cwd,
         provider_name,
         model_alias,
         model_name,
         effort,
-        permission_mode: permission_mode.to_string(),
+        permission_mode,
         memory_mb,
         cpu_percent: cpu_percent.round(),
         mcp,
@@ -260,20 +334,72 @@ async fn tick_once(
         cron_enabled,
     };
 
+    if ACTIVE_EXECUTION_CWD.state().read().clone() != active_cwd
+        || ACTIVE_SESSION_ID.state().read().clone() != session_id
+        || THREAD_BROWSER_SCOPE.get() != scope
+        || THREAD_LIST_PAGE_COUNT.get() != page_count
+    {
+        return Ok(());
+    }
+    write_if_changed(&CURRENT_SESSION_TITLE.state(), current_title);
+    write_if_changed(&THREAD_LIST_ERROR.state(), thread_error);
+    write_if_changed(&THREAD_LIST_HAS_MORE.state(), has_more);
     write_if_changed(&SERVICE_SNAPSHOT.state(), snap);
     write_if_changed(&THREAD_LIST.state(), threads);
     write_if_changed(&CRON_JOBS.state(), cron_jobs);
     write_if_changed(&FILE_LIST.state(), files);
-    // H1 系列：hooks/plugins 来自 launch 时派生的静态数据；providers 每 tick
+    // hooks/plugins/MCP 显示 active session 环境；providers 每 tick
     // 从 peri_config 动态派生以反映 is_active 最新状态。MCP server 详细列表
     // 每 tick 重新派生以反映连接状态；Memory 列表每 tick 重新扫描。
-    write_if_changed(&HOOK_LIST.state(), src.hooks.clone());
-    write_if_changed(&PLUGIN_LIST.state(), src.plugins.clone());
+    write_if_changed(&HOOK_LIST.state(), hooks);
+    write_if_changed(&PLUGIN_LIST.state(), plugins);
     write_if_changed(&PROVIDER_LIST.state(), derive_providers(&src.peri_config));
     write_if_changed(&MCP_SERVERS.state(), mcp_servers);
     write_if_changed(&MEMORY_LIST.state(), memory_entries);
 
     Ok(())
+}
+
+async fn refresh_threads(
+    client: &AcpTuiClient,
+    slow: &mut SlowSnapshotRefresh,
+) -> Result<(Vec<ThreadSummary>, bool), peri_acp::transport::types::AcpError> {
+    if slow.list_workspace.is_none() {
+        slow.list_workspace = Some(
+            client
+                .session_context(None, Some(&slow.list_cwd))
+                .await?
+                .workspace,
+        );
+    }
+    let workspace = slow.list_workspace.as_ref().expect("resolved above");
+    let scope = match slow.list_scope {
+        ThreadBrowserScope::Project => ThreadScope::Project(workspace.project_id),
+        ThreadBrowserScope::Workspace => ThreadScope::Workspace(workspace.workspace_id),
+    };
+    let mut cursor = None;
+    let mut threads = Vec::new();
+    for _ in 0..slow.list_page_count.max(1) {
+        let page = client
+            .list_scoped_threads(&ScopedThreadQuery {
+                scope: scope.clone(),
+                cursor,
+                limit: 50,
+            })
+            .await?;
+        threads.extend(page.entries.into_iter().map(|entry| ThreadSummary {
+            id: entry.thread.id,
+            title: entry.thread.title,
+            cwd: entry.effective_cwd.to_string_lossy().into_owned(),
+            message_count: entry.thread.message_count,
+            updated_at: Some(entry.thread.updated_at),
+        }));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok((threads, cursor.is_some()))
 }
 
 fn write_if_changed<T>(state: &Handle<T>, next: T)

@@ -5,6 +5,7 @@
 //! （per-session 聚合，生命周期/取消/事件跟随 session，§2 async tasks manager）。
 
 use std::sync::Arc;
+use std::{future::Future, pin::Pin};
 
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +63,21 @@ pub struct BgTaskRegistration {
 /// bg 完成回调（TaskManager 完成收尾时通知调用方）。
 pub type OnBgCompleteFn = Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>;
 
+/// Cleanup evidence for a session's background execution scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskShutdownReport {
+    Complete,
+    Incomplete,
+}
+
+pub type OwnedTaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// Keeps external execution in the session scope until its caller proves cleanup.
+/// Dropping without confirmation leaves shutdown incomplete.
+pub trait ExternalExecutionGuard: Send {
+    fn confirm_stopped(&mut self);
+}
+
 /// 后台 shell 启动结果（`TaskManager::spawn_shell` 返回值）。
 ///
 /// 工具层将 task_id / pid / 日志路径回显给 LLM：LLM 可通过另一个 shell
@@ -89,6 +105,13 @@ pub struct BgShellHandle {
 /// `TaskManager`（per-session 聚合根）；本 trait 只承载跨层需要的操作，
 /// `Arc<dyn TaskManager>` 由 Agent 层实现、经装配注入到 ACP / middlewares。
 pub trait TaskManager: std::any::Any + Send + Sync {
+    /// Record actual external drain without changing notification delivery or UI state.
+    /// Call only after the registered execution and its children have joined.
+    fn confirm_external_execution_stopped(&self, _task_id: &str) {}
+    /// No owned execution or unresolved external cleanup remains. UI task count is insufficient.
+    fn is_execution_idle(&self) -> bool {
+        false
+    }
     /// 向下转型（装配面需要具体类型时用，如 /bg 的 SubAgent 发起）。
     fn as_any(&self) -> &dyn std::any::Any;
 
@@ -124,6 +147,27 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     /// 取消全部 owned 任务（session 销毁 / close_session 时调用）。
     fn cancel_all(&self);
 
+    /// Signals session shutdown to owned work without a user-visible task entry.
+    /// Cancellation requests cleanup; `spawn_owned` still tracks its completion.
+    fn execution_cancel_token(&self) -> Option<tokio_util::sync::CancellationToken> {
+        None
+    }
+
+    /// Spawn within the session's tracked scope; reject after shutdown starts.
+    fn spawn_owned(&self, _task: OwnedTaskFuture) -> Result<tokio::task::JoinHandle<()>, String> {
+        Err("task manager does not support owned execution".into())
+    }
+
+    fn begin_external_execution(&self) -> Result<Box<dyn ExternalExecutionGuard>, String> {
+        Err("task manager does not support external execution ownership".into())
+    }
+
+    /// Stop admission and await actual cleanup. A cancellation request is not completion.
+    fn shutdown(&self) -> Pin<Box<dyn Future<Output = TaskShutdownReport> + Send + '_>> {
+        self.cancel_all();
+        Box::pin(async { TaskShutdownReport::Incomplete })
+    }
+
     /// 启动后台 shell 任务（run_in_background 路径；进程 spawn / 进程组 /
     /// 超时 / 输出收集 / 完成收尾全部在 Agent 层完成）。
     ///
@@ -155,6 +199,9 @@ pub trait TaskManager: std::any::Any + Send + Sync {
 pub struct NoopTaskManager;
 
 impl TaskManager for NoopTaskManager {
+    fn is_execution_idle(&self) -> bool {
+        true
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -183,6 +230,10 @@ impl TaskManager for NoopTaskManager {
     }
 
     fn cancel_all(&self) {}
+
+    fn shutdown(&self) -> Pin<Box<dyn Future<Output = TaskShutdownReport> + Send + '_>> {
+        Box::pin(async { TaskShutdownReport::Complete })
+    }
 
     fn spawn_shell(
         &self,

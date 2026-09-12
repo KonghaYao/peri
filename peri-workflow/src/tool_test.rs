@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use peri_acp_types::tools::{BaseTool, ToolContext};
 
+use super::preflight::preflight_validate_script;
 use super::*;
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage};
 use crate::runner::AgentExecutor;

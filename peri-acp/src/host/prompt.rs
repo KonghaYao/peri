@@ -515,7 +515,11 @@ pub(crate) async fn run_prompt(
 
     // stage 装配桥：从 SessionContext 投影 StageBuildInput 并补齐注入面
     //（Langfuse bridge factory 经 turn 级 hooks 构造），再调用 ACP 装配桥。
-    let stage_build = stage::build_stage_bridge(&ctx, langfuse_hooks.as_ref());
+    let stage_build = stage::build_stage_bridge(
+        &ctx,
+        langfuse_hooks.as_ref(),
+        deployment.host_task_spawner.clone(),
+    );
 
     // EventBus forwarder 启动器（Langfuse bridge 构造留在 ACP——观测旁路；
     // biased select 顺序不变量单点保持在 crate::event::spawn_eventbus_forwarder）。

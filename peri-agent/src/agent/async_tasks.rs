@@ -13,6 +13,7 @@
 
 mod manager;
 mod registry;
+mod scope;
 mod shell;
 
 #[cfg(test)]
@@ -28,7 +29,7 @@ pub use registry::{
 pub use shell::{
     bg_shell_task_id, drain_pipe, finalize_bg_shell, kill_process_group,
     kill_process_group_escalating, parse_timeout, persist_truncated_output, shell_command,
-    tee_pipe, truncate_bytes,
+    tee_pipe, truncate_bytes, ShellExecutionGuard,
 };
 
 /// 后台任务类别（事实源 peri-acp-types::tasks）
@@ -41,3 +42,6 @@ pub use peri_acp_types::tasks::BgRegistryEvent;
 #[cfg(test)]
 #[path = "async_tasks_test.rs"]
 mod tests;
+
+#[cfg(test)]
+mod shutdown_test;

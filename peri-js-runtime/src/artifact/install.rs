@@ -1,6 +1,6 @@
 //! npm 安装子进程 owner：取消/安装超时均先回收进程树，再 join stderr。
 
-use std::{io, path::Path, process::Stdio, time::Duration};
+use std::{io, path::Path, process::Stdio};
 use tokio::{
     io::AsyncReadExt,
     process::{Child, Command},
@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use super::{npm_command, Installer, INSTALL_TIMEOUT, MAX_INSTALL_STDERR_BYTES};
-use crate::process_tree::ProcessTree;
+use peri_process::ProcessTree;
 
 pub(super) struct NpmInstaller;
 
@@ -36,29 +36,16 @@ impl InstallProcess {
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
+            .stderr(Stdio::piped());
+        let mut tree = ProcessTree::new()?;
+        tree.prepare(&mut command);
         let mut child = command.spawn()?;
-        #[cfg(unix)]
-        let tree = ProcessTree::new(
-            child
-                .id()
-                .ok_or_else(|| io::Error::other("missing npm pid"))?,
-        );
-        #[cfg(windows)]
-        let tree = child
-            .raw_handle()
-            .ok_or_else(|| io::Error::other("missing npm process handle"))
-            .and_then(|handle| ProcessTree::new(handle as _));
-        let tree = match tree {
-            Ok(tree) => tree,
-            Err(error) => {
-                let _ = child.kill().await;
-                return Err(error);
-            }
-        };
+        if let Err(error) = tree.attach(&child) {
+            tree.terminate();
+            let _ = child.wait().await;
+            tree.wait_for_exit().await;
+            return Err(error);
+        }
         let mut stderr = child.stderr.take().expect("npm stderr configured as piped");
         let stderr = tokio::spawn(async move {
             let mut tail = Vec::new();
@@ -83,21 +70,13 @@ impl InstallProcess {
     }
 
     async fn finish(&mut self) -> io::Result<Vec<u8>> {
-        let signal = self.tree.terminate(Duration::from_millis(100)).await;
-        if signal.is_err() {
-            let _ = self.child.start_kill();
-        }
+        self.tree.terminate();
         let reaped = self.child.wait().await;
-        // macOS can report EPERM for an already-zombie group leader; retry after reap.
-        let signal = match signal {
-            Ok(()) => Ok(()),
-            Err(_) => self.tree.terminate(Duration::from_millis(100)).await,
-        };
+        self.tree.wait_for_exit().await;
         let stderr = (&mut self.stderr)
             .await
             .map_err(|_| io::Error::other("npm stderr task failed"))?;
         reaped?;
-        signal?;
         stderr
     }
 }

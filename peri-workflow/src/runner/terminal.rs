@@ -211,3 +211,51 @@ pub(super) fn finalize_workflow(
     final_result.stderr_tail = stderr_tail;
     final_result
 }
+
+/// Cancellation has one projection for both startup and an active message loop.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn send_killed(
+    done: &tokio::sync::watch::Sender<Option<super::WorkflowResult>>,
+    journal: &crate::journal::WorkflowJournalStore,
+    progress: &crate::progress::WorkflowProgressStore,
+    run_id: &str,
+    input: &super::WorkflowInput,
+    started_at: &str,
+    stderr_tail: Option<String>,
+) {
+    let error = Some("workflow killed by user".to_string());
+    let state = crate::journal::RunState {
+        run_id: run_id.into(),
+        workflow_name: input.workflow_name.clone(),
+        status: "killed".into(),
+        execution_status: peri_acp_types::workflow::ExecutionStatus::Killed,
+        acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
+        post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
+        delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+        write_intent: input.write_intent.clone(),
+        limits: input.limits.clone(),
+        budget_total: input.budget_total,
+        attempts: journal.read_attempts(run_id).unwrap_or_default(),
+        return_value: None,
+        script: input.script.clone(),
+        started_at: started_at.into(),
+        finished_at: Some(chrono::Utc::now().to_rfc3339()),
+        error: error.clone(),
+    };
+    let _ = journal.write_state(run_id, &state);
+    progress.apply_event(&crate::protocol::ProgressEvent::RunDone {
+        run_id: run_id.into(),
+        status: "killed".into(),
+        return_value: None,
+        error: error.clone(),
+    });
+    let _ = done.send(Some(super::WorkflowResult {
+        run_id: run_id.into(),
+        status: "killed".into(),
+        return_value: None,
+        error,
+        post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
+        delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+        stderr_tail: public_stderr_summary(stderr_tail),
+    }));
+}

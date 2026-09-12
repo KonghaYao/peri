@@ -1,6 +1,6 @@
 # peri-tui 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11（面板配置提交、下载生命周期与内存统计）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-12（面板配置提交、下载生命周期与内存统计）
 > 依据：peri-tui/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
 
 ## 架构速览
@@ -14,6 +14,8 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 改跨 worktree 列表与恢复目录 | `src/acp_client/client/workspace.rs` + `src/kit/service_snapshot.rs` + `src/kit/service_snapshot/session_services.rs` | workspace RPC、active cwd、service snapshot | Project/Workspace/ExactDirectory 经 ACP 查询；恢复成功才提交 cwd；失败阻止自动新建发送，服务视图丢弃过期响应 |
+| 改会话权限、模型与宿主配置边界 | `src/kit/permission_mode.rs` + `src/kit/popups/model_quick_switch.rs` + `src/kit/panels/{model/edit,config}.rs` | `session/set_mode`、`session/set_config_option`、宿主 `update_config` | 会话修改经 active session RPC；宿主配置不携带 sessionId，配置面板显示实际保存路径 |
 | 改待发送投影、短 RPC 与运行身份 | `src/kit/{steer_state,steer_consumer}.rs` + `src/acp_client/client/{steer,pump,session}.rs` + `src/acp_client/interaction_lifecycle.rs` | `SteerState`；`spawn_steer_consumer`；`user_input_snapshot_under_gate`；`open_user_input_run` | cap 开启时普通输入走唯一 enqueue；同命令重试，非空草稿只撤回，空稿才恢复且不覆盖回执期间的新输入；generation/revision 隔离会话，新建/加载 gate 内恢复 run owner；Delivered/replay 稳定 ID 去重后使用原聊天气泡（ARC-EVENT-001 / ARC-SESSION-LOAD-001） |
 | 改待发送队列交互与终端验收入口 | `src/kit/steer_queue.rs` + `src/kit/steer_queue/` + `src/kit/terminal_caps.rs` | `SteerQueue`；`SteerQueueAction`；`SteerQueueItem`；`SymbolSet` | 组件只展示投影并发出指定 ID 集合的发送／取回意图；单行、折叠、空态隐藏，鼠标按完成帧命中。动作符号及 ASCII 降级统一由 SymbolSet 提供，边线复用输入框主题色。正式 InputArea 消费服务端投影；真实终端验收位于 `e2e/tests/smoke/steer-queue-live.test.ts`，使用本地模型服务 |
 | 改主题下载、进度终态与重复准入 | `src/kit/panels/theme.rs` + `src/kit/panels/theme/download.rs` + `src/kit/panels/theme_download_test.rs` + `src/kit/popups/download_progress.rs` | `trigger_download_themes` / `DownloadRun::try_claim` / `run_download` / `download_file` / `DownloadRun::finish` | Ctrl+D 在 open/spawn 前同步取得唯一任务 lease；完整进度由任务持有并投影到 atom，关闭弹窗不取消任务或释放准入。目录/HTTP 错误与 abort 都收敛到完成态，catalog/notification/progress 写完才释放 owner；保留原下载 URL、HOME 保存路径与串行文件处理 |

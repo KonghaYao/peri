@@ -115,45 +115,6 @@ where
     }
 }
 
-pub(crate) fn spawn_stdio_transport(
-    command: &str,
-    args: &[String],
-    env: &HashMap<String, String>,
-) -> std::io::Result<rmcp::transport::child_process::TokioChildProcess> {
-    use std::process::Stdio;
-
-    let arg_strs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let mut cmd = peri_agent::agent::async_tasks::shell_command(command, &arg_strs);
-    cmd.envs(env);
-
-    let builder = rmcp::transport::child_process::TokioChildProcess::builder(cmd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let (child_process, stderr_opt) = builder.spawn()?;
-
-    // 启动后台任务消费 stderr 并记录到 tracing
-    if let Some(stderr) = stderr_opt {
-        let cmd_name = command.to_string();
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!(
-                    command = %cmd_name,
-                    stderr = %line,
-                    "MCP 子进程 stderr"
-                );
-            }
-        });
-    }
-
-    Ok(child_process)
-}
-
 pub(crate) fn build_http_transport(
     url: &str,
     headers: &HashMap<String, String>,

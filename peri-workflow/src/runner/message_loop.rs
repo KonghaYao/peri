@@ -19,6 +19,7 @@ use crate::protocol::*;
 use crate::rpc::{IncomingMessage, RpcChannel};
 
 pub(super) struct MessageLoop {
+    pub(super) run_scope: Arc<super::scope::RunScope>,
     pub(super) agent_executor: Arc<dyn AgentExecutor>,
     pub(super) channel: Arc<RpcChannel>,
     pub(super) journal_store: Arc<WorkflowJournalStore>,
@@ -35,6 +36,7 @@ pub(super) struct MessageLoop {
 impl MessageLoop {
     pub(super) async fn run(self) {
         let Self {
+            run_scope,
             agent_executor,
             channel,
             journal_store,
@@ -52,6 +54,7 @@ impl MessageLoop {
         let limit_breach = Arc::new(parking_lot::Mutex::new(None::<String>));
         let run_limits = input.limits.clone();
         let agent_dispatcher = AgentDispatcher {
+            run_scope: Arc::clone(&run_scope),
             run_id: run_id.clone(),
             agent_executor,
             channel: Arc::clone(&channel),
@@ -239,6 +242,7 @@ impl MessageLoop {
             "msg_loop exiting — summary"
         );
 
+        run_scope.drain().await;
         let final_result = finalize_workflow(
             final_result,
             &input,
