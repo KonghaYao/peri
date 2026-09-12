@@ -12,6 +12,23 @@ return { answer: r }
 `
 
 describe('validateScript', () => {
+  test('内置 Ultra-ADLC 的完整 W1 示例通过真实引擎预检', async () => {
+    const skill = await Bun.file(new URL(
+      '../../../peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md',
+      import.meta.url,
+    )).text()
+    const source = skill
+      .split('Canonical W1 script shape:\n\n```javascript\n')[1]
+      ?.split('\n```')[0]
+    if (!source) throw new Error('未找到内置 Ultra-ADLC W1 完整示例')
+
+    const result = validateScript(source)
+    expect(result.meta?.name).toBe('adlc:task:discovery-design')
+    expect(result.errors).toEqual([])
+    expect(result.warnings).toEqual([])
+    expect(result.ok).toBe(true)
+  })
+
   test('合法脚本：ok + meta 解析 + 无错误无警告', () => {
     const r = validateScript(GOOD)
     expect(r.ok).toBe(true)

@@ -11,6 +11,8 @@ description: >
 
 单入口技能，覆盖 issue 的创建 → 修复 → 验证 → 归档全流程。你根据用户输入**自动判断阶段**并执行对应操作。
 
+先按当前仓库 `docs/standards/documentation.md`、`testing.md` 与 `git.md` 核对文档生命周期、验证命令和改动归属；本技能不另建归档目录或覆盖已有授权。
+
 ---
 
 ## 阶段分发
@@ -22,7 +24,7 @@ description: >
 | 描述 bug/异常/性能/重构需求，无明确 issue 路径 | **创建** | 访谈 → 生成 issue 文档 |
 | 给出 `spec/issues/xxx.md` 路径或 issue 标题 + "修"/"fix" | **修复** | 读 issue → 改代码 → 更新文档 |
 | "验证"/"verify"/"好了"/"还是不行" + issue 引用 | **验证** | 定位 issue → 问反馈 → 更新状态 |
-| "归档"/"archive" + 可选 issue 引用 | **归档** | 扫描终态 issue → 移动 → 提炼认知 |
+| "归档"/"archive" + 可选 issue 引用 | **归档** | 核对验收 → 更新事实源 → 清理过程文档 |
 
 **优先级**：如果用户输入同时匹配多个阶段（如 "修一下 xxx issue 然后验证"），按 创建→修复→验证→归档 的顺序逐一执行，每阶段完成后自动进入下一阶段。
 
@@ -146,21 +148,18 @@ slug 从标题生成，kebab-case，描述现象。`spec/issues/` 不存在时�
 - 遵循项目编码规范（参考 CLAUDE.md）
 - 保持最小修改范围——只改需要的
 - 每处 Edit 前先 Read 确认当前文件状态
-- 超过 3 处修改用 Write 整体重写
+- 保留本任务之外的改动，不以修改处数决定整文件重写；提交与隔离验证遵守 Git 标准
 
 ### 2.5 验证修复
 
-```bash
-cargo build --workspace 2>&1 | tail -20
-```
-
-编译通过后跑相关测试：
+先按 `docs/standards/testing.md` 确定所属项目与受影响范围；Rust 修改可从目标 crate 检查开始：
 
 ```bash
-cargo test -p <涉及 crate> --lib 2>&1 | tail -30
+cargo check -p <涉及 crate>
+cargo test -p <涉及 crate> --lib -- <目标测试>
 ```
 
-**最多重试 2 次**（总计 3 次尝试）。2 次后仍失败，汇报失败原因和已尝试方案。
+确认命令最终退出状态与非零目标用例，不能以过滤后的日志尾部替代通过证据。跨层、doc test、E2E 和平台验证按对应标准扩大范围，不以本段命令替代契约要求。重试前依据失败证据调整假设；没有新证据或执行条件未变时，不机械重跑同一命令。
 
 ### 2.6 自动更新 Issue 文档
 
@@ -193,7 +192,7 @@ cargo test -p <涉及 crate> --lib 2>&1 | tail -30
 
 状态：Open → Fixed
 涉及文件：N 个
-验证：cargo build 通过 / cargo test 通过
+验证：[实际命令、最终退出状态、目标用例数与结果]
 ```
 
 ---
@@ -267,7 +266,7 @@ cargo test -p <涉及 crate> --lib 2>&1 | tail -30
 |------|------|
 | Verified | 是 |
 | Closed | 是 |
-| Fixed | 是（含 Fixed + Verify 等变体） |
+| Fixed / 待验证 | 否；修复已写入不代表验收完成 |
 | Done/已完成/Resolved | 是（旧格式兼容） |
 | Open/Partial/Reopen | 否 |
 
@@ -286,23 +285,15 @@ cargo test -p <涉及 crate> --lib 2>&1 | tail -30
 
 将提炼结果写入临时文件 `/tmp/issue-archive-learnings-<timestamp>.md`，按领域分组。纯 UI 小 bug（错位、样式）标注"无可提炼认知"。
 
-### 4.2 移动文件
+### 4.2 更新当前事实源
 
-用 Bash `mv` 将归档 issue 移到 `spec/archive-issues/`，并在文件顶部插入：
+先去重，再把稳定规则、已落地设计或代码入口更新到对应 standard、design 或 code-index；模块指引只更新受影响的入口和不变量。根 `CLAUDE.md` 保留设计哲学与路由，不追加事故陷阱或逐 issue 内联链接。
 
-```
-> 归档于 YYYY-MM-DD，原路径 spec/issues/<filename>
-```
+### 4.3 清理过程文档与引用
 
-### 4.3 更新 Domain 文件
+按 `DOC-HISTORY-001` / `DOC-LINK-001` 核实没有未完成的实施或验收后，删除已关闭的过程文档，并同步当前引用；仍有未验证工作则留在 `spec/issues/`。完整历史由 Git 保留，不移动到 `spec/archive-issues/`，不重建 `spec/reviews/` 或 `spec/global/domains/`。
 
-用 Agent subagent 更新各领域文件（`spec/global/domains/<domain>.md`）：
-- 在「Issue 经验附录」段追加提炼内容（去重）
-- 更新 `spec/global/problems.md` 关键词索引
-
-### 4.4 更新 CLAUDE.md
-
-对本阶段中「CLAUDE.md 链接: true」的 issue，在 CLAUDE.md 的「陷阱速查」对应条目追加内联链接。
+`spec/global/problems.md` 只在主题检索路由变化时更新，不追加逐 issue 摘要。运行本地链接检查与 `git diff --check`，确认当前文档不再指向被删过程文件。
 
 ### 4.5 报告
 
@@ -310,9 +301,9 @@ cargo test -p <涉及 crate> --lib 2>&1 | tail -30
 ✅ Issue 归档完成
 
 归档数量：N 个
-归档位置：spec/archive-issues/
-Domain 更新：<domain>: N 条新增
-问题索引更新：N 个关键词
+历史位置：Git
+更新的当前事实源：[文件与稳定结论]
+保留待验收项：[如有]
 ```
 
 ---

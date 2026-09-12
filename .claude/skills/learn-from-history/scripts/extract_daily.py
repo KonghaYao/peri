@@ -207,138 +207,231 @@ def format_timestamp(ts_str):
         return ts_str[:19] if ts_str else "??:??:??"
 
 
-def parse_message(row):
-    """解析消息行，并返回显式的截断与解析失败统计。"""
+def _tool_call(name, tid, inp, stats):
+    # 精简参数摘要
+    if isinstance(inp, dict):
+        if name == "Read":
+            param_summary = inp.get("file_path", "") or inp.get("path", "") or inp.get("filePath", "")
+        elif name == "Edit":
+            param_summary = f"{inp.get('file_path', '')}"
+        elif name == "Write":
+            param_summary = f"{inp.get('file_path', '')}"
+        elif name == "Bash":
+            cmd = inp.get("command", "")
+            cmd = cmd if isinstance(cmd, str) else str(cmd)
+            param_summary = " ".join(line.strip() for line in cmd.split("\n") if line.strip())
+        elif name == "Grep":
+            param_summary = f"pattern={inp.get('pattern', '')}"
+        elif name == "Glob":
+            param_summary = inp.get("pattern", "")
+        elif name == "WebFetch":
+            param_summary = inp.get("url", "")
+        elif name == "Agent":
+            param_summary = f"type={inp.get('subagent_type', '')}: {str(inp.get('description', ''))[:80]}"
+        elif name == "WebSearch":
+            param_summary = inp.get("query", "")
+        elif name == "TodoWrite":
+            param_summary = "update todo list"
+        else:
+            # 通用参数摘要 (取前 2 个 key)
+            keys = list(inp.keys())[:2]
+            param_summary = ", ".join(f"{k}={str(inp[k])[:60]}" for k in keys)
+    else:
+        param_summary = str(inp)[:80]
+
+    param_summary, truncated = truncate_text(str(param_summary), 400, "tool input")
+    stats["truncations"] += int(truncated)
+    return {"id": tid, "name": redact_sensitive(name), "summary": param_summary}
+
+
+def _valid_persisted_id(value):
+    """UUID string forms accepted by MessageId's UUID serde representation."""
+    if not isinstance(value, str):
+        return False
+    hyphenated = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+    return re.fullmatch(rf"(?:[0-9a-fA-F]{{32}}|{hyphenated}|\{{{hyphenated}\}}|urn:uuid:{hyphenated})", value) is not None
+
+
+def _valid_system_reminder(reminder):
+    """Validate the persisted V1 DTO against system_reminder.rs; do not confer trust."""
+    if not isinstance(reminder, dict):
+        return False
+    if (type(reminder.get("version")) is not int or reminder["version"] != 1
+            or not all(isinstance(reminder.get(key), str) for key in ("source", "kind", "body"))
+            or any(re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reminder[key]) is None for key in ("source", "kind"))
+            or reminder.get("category") not in ("capability", "task", "lifecycle", "guidance", "security", "external_event", "diagnostic", "legacy")
+            or reminder.get("severity") not in ("info", "warning", "error", "critical")
+            or reminder.get("delivery") not in ("required", "configurable", "diagnostic_only")):
+        return False
+    audiences = reminder.get("audiences")
+    if (not isinstance(audiences, list) or not audiences
+            or any(a not in ("model", "tui", "diagnostics", "automation") for a in audiences)
+            or len(set(audiences)) != len(audiences)):
+        return False
+    summary = reminder.get("summary")
+    metadata = reminder.get("metadata", {})
+    if (summary is not None and not isinstance(summary, str)) or not isinstance(metadata, dict):
+        return False
+    try:
+        if (len(reminder["body"].encode("utf-8")) > 64 * 1024
+                or (summary is not None and len(summary.encode("utf-8")) > 4 * 1024)
+                or len(json.dumps(reminder, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")) > 96 * 1024):
+            return False
+        # Match the Rust validator's node/depth and approximate serialized-byte budget.
+        byte_count = node_count = 0
+        stack = [(metadata, 1)]
+        while stack:
+            value, depth = stack.pop()
+            node_count += 1
+            if node_count > 1024 or depth > 16:
+                return False
+            if isinstance(value, dict):
+                byte_count += len(value) + sum(len(key.encode("utf-8")) for key in value)
+                stack.extend((child, depth + 1) for child in value.values())
+            elif isinstance(value, list):
+                byte_count += len(value)
+                stack.extend((child, depth + 1) for child in value)
+            elif isinstance(value, str):
+                byte_count += len(value.encode("utf-8"))
+            else:
+                byte_count += len(json.dumps(value, allow_nan=False))
+            if byte_count > 16 * 1024:
+                return False
+    except (UnicodeError, ValueError):
+        return False
+    return True
+
+
+def _parse_message_details(row):
+    """Read legacy BaseMessage or the store's V1 envelope, without projecting reasoning."""
     msg_id, role, raw = row
     stats = {"truncations": 0, "parse_failures": 0}
-    text_limit = MAX_TOOL_RESULT_CHARS if role == "tool" else MAX_PLAIN_TEXT_CHARS
-    try:
-        content = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        stats["parse_failures"] += 1
-        return msg_id, role, PARSE_FAILURE_MARKER, None, False, stats
+    parsed = {"id": msg_id, "role": role, "text": "", "tool_calls": [],
+              "tool_results": [], "is_error": False, "stats": stats}
 
-    # content 可能是字符串或 BaseMessage 字典
-    if isinstance(content, str):
-        text, truncated = truncate_text(content, text_limit, "plain message")
-        stats["truncations"] += int(truncated)
-        return msg_id, role, text, None, False, stats
-    if not isinstance(content, dict):
+    def failed():
         stats["parse_failures"] += 1
-        return msg_id, role, PARSE_FAILURE_MARKER, None, False, stats
+        return PARSE_FAILURE_MARKER
+
+    def bounded(text, limit, label):
+        text, truncated = truncate_text(text, limit, label)
+        stats["truncations"] += int(truncated)
+        return text
+
+    def invalid_payload():
+        parsed["text"] = failed()
+        return parsed
+
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return invalid_payload()
+
+    # Version/type select the envelope just as deserialize_persisted_payload does.
+    enveloped = isinstance(payload, dict) and ("version" in payload or "type" in payload)
+    if enveloped:
+        if type(payload.get("version")) is not int or payload["version"] != 1:
+            return invalid_payload()
+        if payload.get("type") == "system_reminder":
+            parsed["role"] = "system_reminder"
+            reminder = payload.get("reminder")
+            if not _valid_persisted_id(payload.get("id")) or not _valid_system_reminder(reminder):
+                return invalid_payload()
+            provenance = bounded(f"source={reminder['source']} kind={reminder['kind']}", 400, "reminder source")
+            body = bounded(reminder["body"], MAX_TOOL_RESULT_CHARS, "system reminder")
+            parsed["text"] = f"{provenance}\n{body}"
+            return parsed
+        if payload.get("type") != "message" or not isinstance(payload.get("message"), dict):
+            return invalid_payload()
+        payload = payload["message"]
+        if (not _valid_persisted_id(payload.get("id"))
+                or payload.get("role") not in ("user", "assistant", "system", "tool")):
+            return invalid_payload()
+
+    text_limit = MAX_TOOL_RESULT_CHARS if role == "tool" else MAX_PLAIN_TEXT_CHARS
+    if isinstance(payload, str):
+        parsed["text"] = bounded(payload, text_limit, "plain message")
+        return parsed
+    if not isinstance(payload, dict) or "content" not in payload:
+        return invalid_payload()
+    if payload.get("role", role) != role or role not in ("user", "assistant", "system", "tool"):
+        return invalid_payload()
 
     text_parts = []
-    tool_calls = []
-    is_error = False
+    calls_by_id = {}
 
-    # 处理 content 数组
-    content_list = content.get("content", [])
-    if isinstance(content_list, str):
-        # 工具错误消息：content 是纯错误字符串
-        is_error = content.get("is_error", False)
-        text, truncated = truncate_text(content_list, text_limit, "message content")
-        stats["truncations"] += int(truncated)
-        return msg_id, role, text, None, is_error, stats
-    if not isinstance(content_list, list):
-        content_list = []
-        text_parts.append(PARSE_FAILURE_MARKER)
-        stats["parse_failures"] += 1
+    def add_call(block, input_key):
+        if (not isinstance(block, dict) or not isinstance(block.get("id"), str) or not block["id"]
+                or not isinstance(block.get("name"), str) or not block["name"]
+                or input_key not in block):
+            text_parts.append(failed())
+            return
+        # ContentBlock::ToolUse is canonical; top-level tool_calls is a derived cache.
+        if block["id"] not in calls_by_id:
+            calls_by_id[block["id"]] = _tool_call(block["name"], block["id"], block[input_key], stats)
 
-    for block in content_list:
-        if not isinstance(block, dict):
-            text_parts.append(PARSE_FAILURE_MARKER)
-            stats["parse_failures"] += 1
-            continue
-        block_type = block.get("type", "")
-
-        if block_type == "text":
-            text = block.get("text", "")
-            if isinstance(text, str) and text:
-                text_parts.append(text)
-            elif not isinstance(text, str):
-                text_parts.append(PARSE_FAILURE_MARKER)
-                stats["parse_failures"] += 1
-
-        elif block_type == "tool_use":
-            name = block.get("name", "unknown")
-            tid = block.get("id", "")
-            inp = block.get("input", {})
-            # 精简参数摘要
-            if isinstance(inp, dict):
-                if name == "Read":
-                    param_summary = inp.get("file_path", "") or inp.get("path", "") or inp.get("filePath", "")
-                elif name == "Edit":
-                    param_summary = f"{inp.get('file_path', '')}"
-                elif name == "Write":
-                    param_summary = f"{inp.get('file_path', '')}"
-                elif name == "Bash":
-                    cmd = inp.get("command", "")
-                    cmd = cmd if isinstance(cmd, str) else str(cmd)
-                    param_summary = " ".join(line.strip() for line in cmd.split("\n") if line.strip())
-                elif name == "Grep":
-                    param_summary = f"pattern={inp.get('pattern', '')}"
-                elif name == "Glob":
-                    param_summary = inp.get("pattern", "")
-                elif name == "WebFetch":
-                    param_summary = inp.get("url", "")
-                elif name == "Agent":
-                    param_summary = f"type={inp.get('subagent_type', '')}: {str(inp.get('description', ''))[:80]}"
-                elif name == "WebSearch":
-                    param_summary = inp.get("query", "")
-                elif name == "TodoWrite":
-                    param_summary = "update todo list"
-                else:
-                    # 通用参数摘要 (取前 2 个 key)
-                    keys = list(inp.keys())[:2]
-                    param_summary = ", ".join(f"{k}={str(inp[k])[:60]}" for k in keys)
+    def content_text(value, allow_tools=True):
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, list):
+            return failed()
+        parts = []
+        for block in value:
+            if not isinstance(block, dict):
+                parts.append(failed())
+                continue
+            kind = block.get("type")
+            if kind in ("reasoning", "thinking", "redacted_thinking"):
+                continue
+            if kind == "text":
+                parts.append(block["text"] if isinstance(block.get("text"), str) else failed())
+            elif kind in ("image", "document"):
+                parts.append(f"[NON_TEXT_OMITTED: {kind}]")
+            elif kind == "tool_use" and allow_tools:
+                add_call(block, "input")
+            elif kind == "tool_result" and allow_tools:
+                parse_result(block.get("tool_use_id"), block.get("content"), block.get("is_error", False))
             else:
-                param_summary = str(inp)[:80]
+                parts.append(failed())
+        return "\n".join(parts)
 
-            param_summary, truncated = truncate_text(str(param_summary), 400, "tool input")
-            stats["truncations"] += int(truncated)
-            tool_calls.append({
-                "id": tid,
-                "name": name,
-                "summary": param_summary
-            })
+    def parse_result(call_id, content, is_error):
+        before = stats["parse_failures"]
+        result_text = content_text(content, allow_tools=False)
+        if not isinstance(call_id, str) or not call_id:
+            result_text += "\n" + failed()
+            call_id = ""
+        if type(is_error) is not bool:
+            result_text += "\n" + failed()
+            is_error = False
+        parsed["tool_results"].append({
+            "id": call_id, "text": bounded(result_text, MAX_TOOL_RESULT_CHARS, "tool result"),
+            "is_error": is_error, "received": True, "valid": stats["parse_failures"] == before,
+        })
+        parsed["is_error"] = parsed["is_error"] or is_error
 
-        elif block_type == "tool_result":
-            tc = block.get("content", "")
-            is_error = block.get("is_error", False)
-            if isinstance(tc, list):
-                # tool_result content 可能是 ContentBlock 数组
-                tc_texts = []
-                for sub in tc:
-                    if isinstance(sub, dict) and sub.get("type") == "text" and isinstance(sub.get("text", ""), str):
-                        tc_texts.append(sub.get("text", ""))
-                    else:
-                        stats["parse_failures"] += 1
-                        tc_texts.append(PARSE_FAILURE_MARKER)
-                tc = "\n".join(tc_texts)
-            if isinstance(tc, str):
-                tc, truncated = truncate_text(tc, MAX_TOOL_RESULT_CHARS, "tool result")
-                stats["truncations"] += int(truncated)
-            else:
-                tc = PARSE_FAILURE_MARKER
-                stats["parse_failures"] += 1
-
-            # 工具结果会被 later 合并到 tool_calls 条目中
-            for tc_item in tool_calls:
-                if tc_item.get("id") == block.get("tool_use_id", ""):
-                    tc_item["result"] = tc
-                    tc_item["is_error"] = block.get("is_error", False)
-
-        elif block_type == "reasoning":
-            # 跳过 reasoning block（体积大且非必要）
-            pass
+    if role == "tool":
+        parse_result(payload.get("tool_call_id"), payload["content"], payload.get("is_error", False))
+        parsed["text"] = parsed["tool_results"][0]["text"]
+    else:
+        text_parts.insert(0, content_text(payload["content"]))
+        calls = payload.get("tool_calls", [])
+        if not isinstance(calls, list):
+            text_parts.append(failed())
         else:
-            text_parts.append(f"{PARSE_FAILURE_MARKER} unsupported content block")
-            stats["parse_failures"] += 1
+            for call in calls:
+                add_call(call, "arguments")
+        limit = MAX_PLAIN_TEXT_CHARS if isinstance(payload["content"], str) else MAX_MESSAGE_TEXT_CHARS
+        parsed["text"] = bounded("\n".join(part for part in text_parts if part), limit, "message text")
+    parsed["tool_calls"] = list(calls_by_id.values())
+    return parsed
 
-    text = "\n".join(text_parts) if text_parts else ""
-    text, truncated = truncate_text(text, MAX_MESSAGE_TEXT_CHARS, "message text")
-    stats["truncations"] += int(truncated)
-    return msg_id, role, text, tool_calls, is_error, stats
+
+def parse_message(row):
+    """Public compatibility tuple, including explicit truncation/parse-failure counts."""
+    parsed = _parse_message_details(row)
+    return (parsed["id"], parsed["role"], parsed["text"], parsed["tool_calls"],
+            parsed["is_error"], parsed["stats"])
 
 
 def thread_file_stem(thread_id):
@@ -371,110 +464,45 @@ def _format_thread(t, cur):
 
     messages = cur.fetchall()
 
-    # 解析并合并消息
-    parsed = []
-    pending_tool_result = {}
-    last_assistant_tool_calls = []
+    # Keep call entries in original order; later results update only the matching ID.
+    ordered = []
+    pending_calls = {}
     truncation_count = 0
     parse_failure_count = 0
-
     for msg in messages:
-        msg_id, role, text, tool_calls, is_error, stats = parse_message(msg)
+        parsed = _parse_message_details(msg)
+        stats = parsed["stats"]
         truncation_count += stats["truncations"]
         parse_failure_count += stats["parse_failures"]
-
-        if role == "assistant" and tool_calls:
-            last_assistant_tool_calls = tool_calls
-            if text:
-                parsed.append(("assistant_text", text))
-            continue
-        elif role == "tool":
-            tc_id = None
-            try:
-                content_obj = json.loads(msg[2]) if isinstance(msg[2], str) else msg[2]
-                if isinstance(content_obj, dict):
-                    tc_id = content_obj.get("tool_call_id", "")
-            except (json.JSONDecodeError, TypeError):
-                pass
-            if tc_id:
-                pending_tool_result[tc_id] = {
-                    "is_error": is_error,
-                    "text": text
-                }
-            if last_assistant_tool_calls:
-                all_collected = all(
-                    tc.get("id") in pending_tool_result
-                    for tc in last_assistant_tool_calls
-                )
-                if all_collected:
-                    parsed.append(("tool_results", last_assistant_tool_calls, pending_tool_result.copy()))
-                    last_assistant_tool_calls = []
-                    pending_tool_result = {}
-            continue
-
-        if role == "assistant" and not tool_calls:
-            if text:
-                parsed.append(("assistant_text", text))
-        elif role == "user":
-            parsed.append(("user_text", text))
-        elif role == "system":
-            pass
-
-    # flush 未合并的 tool_calls
-    if last_assistant_tool_calls:
-        parsed.append(("tool_results", last_assistant_tool_calls, pending_tool_result))
-
-    # 构建有序列表
-    ordered = []
-    for entry in parsed:
-        if entry[0] == "tool_results":
-            tool_list = entry[1]
-            results = entry[2]
-            for tc in tool_list:
-                tid = tc.get("id", "")
-                tr = results.get(tid, {})
-                ordered.append({
-                    "type": "tool_call",
-                    "name": tc["name"],
-                    "summary": tc["summary"],
-                    "is_error": tr.get("is_error", False),
-                    "text": tr.get("text", ""),
-                })
-        elif entry[0] in ("assistant_text", "user_text"):
-            ordered.append({"type": entry[0], "text": entry[1]})
-
-    # 去重连续相同工具调用
-    deduped = []
-    error_count = 0
-    i = 0
-    while i < len(ordered):
-        entry = ordered[i]
-        if entry["type"] == "tool_call":
-            count = 1
-            results = [entry]
-            j = i + 1
-            while j < len(ordered) and ordered[j]["type"] == "tool_call" and ordered[j]["name"] == entry["name"] and ordered[j]["summary"] == entry["summary"]:
-                count += 1
-                results.append(ordered[j])
-                j += 1
-            last = results[-1]
-            if last.get("is_error"):
-                error_count += 1
-            if count > 1:
-                deduped.append({
-                    "type": "dup_tool",
-                    "count": count,
-                    "name": entry["name"],
-                    "summary": entry["summary"],
-                    "is_error": last["is_error"],
-                    "text": last["text"],
-                })
+        role, text = parsed["role"], parsed["text"]
+        if text and (role != "tool" or not parsed["tool_results"]):
+            ordered.append({"type": role + "_text", "text": text})
+        for call in parsed["tool_calls"]:
+            entry = {"type": "tool_call", **call, "is_error": False,
+                     "text": "", "received": False, "valid": False}
+            ordered.append(entry)
+            pending_calls.setdefault(call["id"], []).append(entry)
+        for result in parsed["tool_results"]:
+            matching = pending_calls.get(result["id"], [])
+            if matching:
+                matching.pop(0).update(result)
             else:
-                deduped.append(last)
-            i = j
+                # Orphan results are evidence too; never silently drop their failures.
+                ordered.append({"type": "tool_call", "name": "[未匹配工具结果]",
+                                "summary": redact_sensitive(result["id"]), **result})
+
+    # Merge only identical observations. A retry must not erase a preceding error.
+    deduped = []
+    error_count = sum(entry.get("is_error", False) for entry in ordered)
+    for entry in ordered:
+        if (deduped and entry["type"] == "tool_call"
+                and deduped[-1]["type"] in ("tool_call", "dup_tool")
+                and all(deduped[-1].get(key) == entry.get(key)
+                        for key in ("name", "summary", "is_error", "text", "received", "valid"))):
+            deduped[-1]["type"] = "dup_tool"
+            deduped[-1]["count"] = deduped[-1].get("count", 1) + 1
         else:
-            deduped.append(entry)
-            i += 1
+            deduped.append(entry.copy())
 
     # 格式化输出
     for entry in deduped:
@@ -488,6 +516,12 @@ def _format_thread(t, cur):
             lines.append("[助手]:")
             for line in entry["text"].split("\n"):
                 lines.append(f"  {line}")
+            lines.append("")
+
+        elif entry["type"] in ("system_reminder_text", "system_text", "tool_text"):
+            label = {"system_reminder_text": "系统提醒", "system_text": "系统消息", "tool_text": "工具消息"}[entry["type"]]
+            lines.append(f"[{label}]:")
+            lines.extend(f"  {line}" for line in entry["text"].split("\n"))
             lines.append("")
 
         elif entry["type"] == "tool_call":
@@ -625,7 +659,14 @@ def _format_tool_line(entry):
     summary = entry["summary"]
     is_err = entry.get("is_error", False)
     text = strip_ansi(entry.get("text", ""))
-    status = "✗ 失败" if is_err else "完成"
+    if is_err:
+        status = "✗ 失败"
+    elif not entry.get("received"):
+        status = "未收到结果"
+    elif not entry.get("valid"):
+        status = "结果无法解析"
+    else:
+        status = "完成"
     line = f"  >> {name} {summary} → {status}"
     if is_err and text:
         err_key = text.split("\n")[0][:200] if text else text[:200]

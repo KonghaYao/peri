@@ -20,7 +20,9 @@ Use the Workflow tool when:
 - You need to explore multiple approaches simultaneously
 - The user explicitly asks for "ultracode", "workflow", or parallel execution
 
-Do NOT use workflows for:
+An explicit user request for this skill or a workflow takes precedence over the convenience guidelines below. Use the requested workflow even when direct execution would be faster; keep its scope small. If the required tool is unavailable, explain the blocker and obtain the user's choice before replacing the requested execution method.
+
+When the user has not specified a workflow, prefer direct execution for:
 - Simple single-agent tasks (just do the work directly)
 - Tasks requiring tight sequential conversation (use normal tool calls)
 - Tasks that are faster to do inline than to script

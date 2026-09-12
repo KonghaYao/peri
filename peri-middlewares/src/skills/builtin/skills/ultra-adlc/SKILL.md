@@ -666,7 +666,9 @@ a substitute for user intent or authority. If required arbitration capability is
 unavailable, return `blocked`; do not downgrade to `sonnet` or let the synthesizer
 self-approve.
 
-Launch with an externally injected argument object. Canonical W1 script shape:
+Launch with an externally injected argument object. The host injects `agent`,
+`parallel`, `phase`, and `args`; only `meta` is exported. The private helper below
+is invoked by the script's top-level return. Canonical W1 script shape:
 
 ```javascript
 export const meta = {
@@ -674,7 +676,7 @@ export const meta = {
   description: 'Discover, design, and arbitrate an Ultra-ADLC delivery',
 }
 
-export default async function run({ agent, parallel, phase }, args) {
+async function run({ agent, parallel, phase }, args) {
   // args supplies workflowMode, adlcId, adlcTaskRoot, createdAt, goal,
   // decisionId/title, packetId/revisions, prepareAttemptId,
   // expectedDecisionPacketCandidatePath, expectedDecisionPacketPath,
@@ -1035,6 +1037,8 @@ export default async function run({ agent, parallel, phase }, args) {
     adlcId: args.adlcId,
   }
 }
+
+return await run({ agent, parallel, phase }, args)
 ```
 
 Handoff paths stay under `args.adlcTaskRoot` (`{cwd}/.peri/adlc/tasks/<id>/`).

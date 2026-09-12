@@ -259,6 +259,213 @@ class ExtractionIntegrityTest(ThreadDatabaseTestCase):
         self.assertEqual(sum(result["truncations"] for result in results.values()), 1)
 
 
+class PersistedMessageExtractionTest(ThreadDatabaseTestCase):
+    """Exercise serialized store payloads through SQLite and the public extractor."""
+
+    def message(self, role, content, **fields):
+        return {"id": "01900000-0000-7000-8000-000000000001", "role": role, "content": content, **fields}
+
+    def envelope(self, message):
+        return {"version": 1, "type": "message", "message": message}
+
+    def extract_messages(self, messages):
+        while len(messages) < 3:
+            messages.append(("assistant", self.message("assistant", "end")))
+        self.add_thread("persisted", "2026-08-24", messages=messages)
+        count, results = extract_date_by_thread("2026-08-24", str(self.db_path), str(self.root / "out"))
+        self.assertEqual(count, 1)
+        result = next(iter(results.values()))
+        return Path(result["path"]).read_text(), result
+
+    def test_v1_and_legacy_text_survive_sqlite_roundtrip(self):
+        output, result = self.extract_messages([
+            ("user", self.envelope(self.message("user", "enveloped user request"))),
+            ("assistant", self.envelope(self.message("assistant", [{"type": "text", "text": "enveloped reply"}]))),
+            ("user", self.message("user", "legacy user request")),
+        ])
+        for expected in ("enveloped user request", "enveloped reply", "legacy user request"):
+            self.assertIn(expected, output)
+        self.assertEqual(result["parse_failures"], 0)
+
+    def test_v1_and_legacy_top_level_calls_match_nested_results_and_keep_errors(self):
+        output, result = self.extract_messages([
+            ("assistant", self.envelope(self.message("assistant", "running", tool_calls=[
+                {"id": "v1-call", "name": "Read", "arguments": {"file_path": "v1.rs"}},
+            ]))),
+            ("tool", self.envelope(self.message("tool", [{"type": "text", "text": "permission denied"}], tool_call_id="v1-call", is_error=True))),
+            ("assistant", self.message("assistant", "", tool_calls=[
+                {"id": "legacy-call", "name": "Read", "arguments": {"file_path": "legacy.rs"}},
+            ])),
+            ("tool", self.message("tool", "legacy contents", tool_call_id="legacy-call", is_error=False)),
+        ])
+        self.assertIn("Read v1.rs → ✗ 失败", output)
+        self.assertIn("permission denied", output)
+        self.assertIn("Read legacy.rs → 完成", output)
+        self.assertIn("legacy contents", output)
+        self.assertEqual(result["errors"], 1)
+        self.assertEqual(result["parse_failures"], 0)
+
+    def test_content_calls_are_canonical_and_derived_call_ids_are_deduplicated(self):
+        output, result = self.extract_messages([
+            ("assistant", self.envelope(self.message("assistant", [
+                {"type": "tool_use", "id": "call", "name": "Read", "input": {"path": "canonical.rs"}},
+            ], tool_calls=[{"id": "call", "name": "Read", "arguments": {"path": "derived.rs"}}]))),
+            ("user", self.envelope(self.message("user", [
+                {"type": "tool_result", "tool_use_id": "call", "is_error": True,
+                 "content": [{"type": "text", "text": "content block failure"}]},
+            ]))),
+        ])
+        self.assertEqual(output.count(">> Read"), 1)
+        self.assertIn("Read canonical.rs → ✗ 失败", output)
+        self.assertNotIn("derived.rs", output)
+        self.assertIn("content block failure", output)
+        self.assertEqual(result["errors"], 1)
+
+    def test_later_calls_do_not_discard_earlier_unfinished_batches(self):
+        messages = [("assistant", self.envelope(self.message("assistant", "", tool_calls=[
+            {"id": call_id, "name": "Read", "arguments": {"path": path}},
+        ]))) for call_id, path in (("a", "early.rs"), ("b", "later.rs"), ("c", "pending.rs"))]
+        messages.extend([
+            ("tool", self.envelope(self.message("tool", "late result for first", tool_call_id="a"))),
+            ("tool", self.envelope(self.message("tool", "second result", tool_call_id="b"))),
+        ])
+        output, result = self.extract_messages(messages)
+        self.assertIn("Read early.rs → 完成", output)
+        self.assertIn("late result for first", output)
+        self.assertIn("Read later.rs → 完成", output)
+        self.assertIn("Read pending.rs → 未收到结果", output)
+        self.assertNotIn("Read pending.rs → 完成", output)
+        self.assertEqual(result["parse_failures"], 0)
+
+    def test_future_unknown_and_malformed_payloads_are_visible_failures(self):
+        invalid = [
+            {"version": 2, "type": "message", "message": self.message("user", "future must not leak")},
+            {"version": 1, "type": "unknown"},
+            {"version": 1, "type": "message", "message": {}},
+            {"version": 1, "type": "message", "message": "not a message"},
+            {"version": True, "type": "message", "message": self.message("user", "boolean version")},
+            {},
+        ]
+        output, result = self.extract_messages([("user", item) for item in invalid])
+        self.assertEqual(result["parse_failures"], len(invalid))
+        self.assertEqual(output.count(PARSE_FAILURE_MARKER), len(invalid))
+        self.assertNotIn("future must not leak", output)
+
+    def test_malformed_tool_result_is_not_reported_as_success(self):
+        output, result = self.extract_messages([
+            ("assistant", self.envelope(self.message("assistant", "", tool_calls=[
+                {"id": "bad", "name": "Read", "arguments": {"path": "bad.rs"}},
+            ]))),
+            ("tool", self.envelope(self.message("tool", {"unknown": "result"}, tool_call_id="bad"))),
+        ])
+        self.assertIn(PARSE_FAILURE_MARKER, output)
+        self.assertIn("Read bad.rs → 结果无法解析", output)
+        self.assertNotIn("Read bad.rs → 完成", output)
+        self.assertEqual(result["parse_failures"], 1)
+
+    def test_retry_success_does_not_hide_prior_tool_failure(self):
+        messages = []
+        for call_id, failed, content in (("first", True, "first failure"), ("retry", False, "recovered")):
+            messages.extend([
+                ("assistant", self.message("assistant", "", tool_calls=[{"id": call_id, "name": "Read", "arguments": {"path": "same.rs"}}])),
+                ("tool", self.message("tool", content, tool_call_id=call_id, is_error=failed)),
+            ])
+        output, result = self.extract_messages(messages)
+        self.assertIn("Read same.rs → ✗ 失败", output)
+        self.assertIn("first failure", output)
+        self.assertIn("Read same.rs → 完成", output)
+        self.assertEqual(result["errors"], 1)
+
+    def reminder(self, **fields):
+        return {"version": 1, "type": "system_reminder", "id": "01900000-0000-7000-8000-000000000002",
+                "reminder": {"version": 1, "category": "task", "source": "todo_tracker", "kind": "pending",
+                             "severity": "info", "delivery": "required", "audiences": ["model"],
+                             "body": "valid reminder", **fields}}
+
+    def test_v1_requires_valid_message_and_reminder_id_but_legacy_stays_compatible(self):
+        messages = []
+        for missing_or_invalid in (None, "not-a-uuid", 42):
+            message = self.message("tool", "corrupt identity result", tool_call_id="call")
+            reminder = self.reminder()
+            if missing_or_invalid is None:
+                del message["id"]
+                del reminder["id"]
+            else:
+                message["id"] = missing_or_invalid
+                reminder["id"] = missing_or_invalid
+            messages.extend([("tool", self.envelope(message)), ("user", reminder)])
+        messages.insert(0, ("assistant", self.envelope(self.message("assistant", "", tool_calls=[
+            {"id": "call", "name": "Read", "arguments": {"path": "invalid-id.rs"}},
+        ]))))
+        messages.extend([("user", {"content": "legacy without ID"}),
+                         ("user", self.envelope(self.message("user", "valid V1 identity")))])
+        output, result = self.extract_messages(messages)
+        self.assertEqual(result["parse_failures"], 6)
+        self.assertEqual(output.count(PARSE_FAILURE_MARKER), 6)
+        self.assertIn("Read invalid-id.rs → 未收到结果", output)
+        self.assertNotIn("invalid-id.rs → 完成", output)
+        self.assertNotIn("corrupt identity result", output)
+        self.assertIn("legacy without ID", output)
+        self.assertIn("valid V1 identity", output)
+
+    def test_reminder_contract_rejects_invalid_identifiers_audiences_and_metadata(self):
+        invalid_fields = [
+            {"source": ""}, {"source": "Bad-Source"}, {"kind": "1invalid"}, {"kind": "a" * 129},
+            {"audiences": []}, {"audiences": ["model", "model"]}, {"audiences": ["unknown"]},
+            {"metadata": []}, {"metadata": {"value": "x" * (16 * 1024)}},
+            {"metadata": {"nodes": [0] * 1024}}, {"metadata": {"nested": [[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]}},
+            {"body": "汉" * (64 * 1024 // 3 + 1)}, {"summary": 123}, {"summary": "x" * (4 * 1024 + 1)},
+        ]
+        output, result = self.extract_messages([("user", self.reminder(**fields)) for fields in invalid_fields])
+        self.assertEqual(result["parse_failures"], len(invalid_fields))
+        self.assertEqual(output.count(PARSE_FAILURE_MARKER), len(invalid_fields))
+
+    def test_reminder_contract_accepts_optional_defaults_and_valid_bounded_fields(self):
+        output, result = self.extract_messages([
+            ("user", self.reminder()),
+            ("user", self.reminder(category="legacy", source="new_producer_2", kind="valid_2",
+                                   audiences=["model", "diagnostics"], summary=None,
+                                   metadata={"nested": [True, None, 1.5, {"value": "可读"}]})),
+            ("user", self.reminder(summary="x" * (4 * 1024), body="x" * (64 * 1024))),
+        ])
+        self.assertEqual(result["parse_failures"], 0)
+        self.assertEqual(output.count("[系统提醒]"), 3)
+        self.assertIn("new_producer_2", output)
+        self.assertEqual(result["truncations"], 1)
+
+    def test_reminder_provenance_is_distinct_and_bounded_multimodal_is_omitted(self):
+        reminder = {
+            "version": 1, "type": "system_reminder", "id": "01900000-0000-7000-8000-000000000002",
+            "reminder": {"version": 1, "category": "task", "source": "todo_tracker", "kind": "pending",
+                         "severity": "info", "delivery": "required", "audiences": ["model"],
+                         "body": "reminder body " + "x" * 5000},
+        }
+        output, result = self.extract_messages([
+            ("user", reminder),
+            ("user", self.envelope(self.message("user", [
+                {"type": "text", "text": "actual user words"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "hidden image bytes"}},
+                {"type": "document", "source": {"type": "text", "text": "hidden document contents"}},
+            ]))),
+            ("assistant", self.envelope(self.message("assistant", [
+                {"type": "reasoning", "text": "hidden reasoning sentinel"},
+                {"type": "thinking", "thinking": "hidden thinking sentinel"},
+                {"type": "text", "text": "visible reply"},
+            ]))),
+        ])
+        self.assertIn("[系统提醒]", output)
+        self.assertIn("todo_tracker", output)
+        self.assertIn("reminder body", output)
+        self.assertEqual(output.count("[用户]:"), 1)
+        self.assertIn("[NON_TEXT_OMITTED: image]", output)
+        self.assertIn("[NON_TEXT_OMITTED: document]", output)
+        self.assertIn("visible reply", output)
+        self.assertNotIn("hidden", output)
+        self.assertLess(len(output), 4000)
+        self.assertEqual(result["parse_failures"], 0)
+        self.assertEqual(result["truncations"], 1)
+
+
 class WorkloadPlanningTest(unittest.TestCase):
     def test_plan_units_balances_by_size_and_preserves_each_input_once(self):
         items = [
