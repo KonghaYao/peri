@@ -1,0 +1,221 @@
+{
+  "schemaVersion": 1,
+  "reviewerId": "coordinator-evidence-audit",
+  "purpose": "逐项证据复核；不是第三份盲评，不派生总体质量率或gold labels",
+  "cases": [
+    {
+      "caseId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+      "packetHash": "64c47cbe97081bc7780b5b69ed677d5cab071cc6716396896fa835496b277cee",
+      "judgment": "局部修复和推送有据，目标 CI 验收未知。用户在推送后重复的是同一 canonical W1 失败，不能提前截断任务或误称为新的 executor 故障；真正新故障从 01a07b66-6bd7-7210-88d4-7b7ccdaf44e7 开始。全 crate 输出包含文字截断，不能用它支持全量通过。",
+      "evidence": [
+        {
+          "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+          "messageId": "01a07b54-8840-7d91-9bed-152e52ba6022",
+          "sequence": 624954,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+          "messageId": "01a07b54-ac03-7eb1-aa79-151b9cfd8e21",
+          "sequence": 624956,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+          "messageId": "01a07b56-2d8b-7be1-8bd6-bffa6f51fa86",
+          "sequence": 624978,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+          "messageId": "01a07b5b-0883-7811-bdb1-70e5efdf497d",
+          "sequence": 624980,
+          "role": "user"
+        },
+        {
+          "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+          "messageId": "01a07b5b-6b90-7692-bbe1-f4dc07fdd114",
+          "sequence": 624983,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+          "messageId": "01a07b5b-6b92-7123-8629-51b28f5b71b8",
+          "sequence": 624985,
+          "role": "assistant"
+        }
+      ],
+      "reviewIssues": [
+        "A观察截止过早，且把之后同一W1错误误称为新executor问题；B把真正不同的executor故障也合并。双方任务边界均不直接用作最终结论。",
+        "A称全1602 tests直接通过，实际可见该结果正文截断；B认可目标测试证据但不可借后续不同测试证明第一故障。"
+      ]
+    },
+    {
+      "caseId": "01a07e86-72ed-7453-846a-edc2790c2402",
+      "packetHash": "0ccb8ab3fef8eb1bf81f7c7576ea1bdab87b30c6a3f8009bf8a32ddfa7a9834b",
+      "judgment": "实际发生了用户纠正：Agent 从执行机制问题推断架构统一，用户明确纠正为注入时机。后续 diff 与 commit 有直接证据；红绿测试主要通过子 Agent 自报呈现，父层全 crate 输出有截断。可定位恢复过程，不把整个任务评为无缺口优秀。",
+      "evidence": [
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ec4-6185-72c2-b71e-aaf420d94fb7",
+          "sequence": 626811,
+          "role": "user"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ec4-61c7-72f3-b907-985859a8c8c7",
+          "sequence": 626812,
+          "role": "assistant"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ec7-6162-7090-9cd6-d175944baf40",
+          "sequence": 626838,
+          "role": "user"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ed0-535c-73a1-80a5-8d6c1ebb3443",
+          "sequence": 626948,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ed0-9c46-7d43-86bf-7fcb8c712179",
+          "sequence": 626950,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ed3-600d-77d1-a511-c1a0b31e5b1a",
+          "sequence": 626973,
+          "role": "tool"
+        }
+      ],
+      "reviewIssues": [
+        "A把针对前一解释的明确纠正记为none_observed；采用源记录的纠正事实。",
+        "A/B都将子Agent返回的测试叙述部分称作工具直接验证；结果角色为tool不等于测试的生产者就是测试进程。"
+      ]
+    },
+    {
+      "caseId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+      "packetHash": "77fa9e88f10272d81155ddddf4f06f7bb6433284a6641825f67d1de118a77085",
+      "judgment": "文档数量/行数减少、本地链接校验与提交有工具直接证据，是可保留的正向行为。数量减少不独自证明语义质量；一个子评审因缺 baseline/diff 不能作结论。不能把assistant列出检查命令当作执行证据，但也不能忽视实际存在的工具验证。后续worktree/cache清理是另一任务。",
+      "evidence": [
+        {
+          "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+          "messageId": "01a083f0-17a3-7991-8bb0-ec4a7a466969",
+          "sequence": 639059,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+          "messageId": "01a083f1-a1e9-7ba0-af3f-5ac617d4a226",
+          "sequence": 639083,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+          "messageId": "01a083f6-6b63-72b1-ac56-90de5fdfcab2",
+          "sequence": 639137,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+          "messageId": "01a083f7-b3b7-70b2-a56f-8b39e7a3490d",
+          "sequence": 639148,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+          "messageId": "01a08403-9847-75b3-90b7-b0d83b0d7264",
+          "sequence": 639302,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+          "messageId": "01a08403-cbd2-7b42-8c7d-51766504968a",
+          "sequence": 639305,
+          "role": "tool"
+        }
+      ],
+      "reviewIssues": [
+        "A用助手总结作为direct理由，B使用真实工具结果支持统计和提交；root回查真实工具结果后确认有限正向行为，保留语义审查缺口。"
+      ]
+    },
+    {
+      "caseId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+      "packetHash": "0cf8a68729ba7794c4e17987bb7c5ba5cc1f0bdd0a99365c13dce845a193d568",
+      "judgment": "fmt/check有明确终态，workspace test的两份输出在10000字符处截断，因此整体全部通过尚不能完整核验。Agent识别了并发出现的导入，没有重复编辑，是正向行为；最终归属应与commit请求及实际结果区分，不能由当前HEAD归因作者。",
+      "evidence": [
+        {
+          "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+          "messageId": "01a083e4-2138-7ef1-8cfb-4ddf50fc96d7",
+          "sequence": 638806,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+          "messageId": "01a083e6-ca18-7e53-8eaa-c04dfc9ed0ad",
+          "sequence": 638895,
+          "role": "assistant"
+        },
+        {
+          "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+          "messageId": "01a083e7-98ed-7351-ac00-47746c7fc679",
+          "sequence": 638897,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+          "messageId": "01a083e7-98ed-7351-ac00-47881b4e2c1c",
+          "sequence": 638898,
+          "role": "tool"
+        },
+        {
+          "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+          "messageId": "01a083e8-5041-79f0-8767-298ae6cd01cf",
+          "sequence": 638921,
+          "role": "assistant"
+        },
+        {
+          "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+          "messageId": "01a083f3-a20f-7700-a829-dde802dd5654",
+          "sequence": 639112,
+          "role": "tool"
+        }
+      ],
+      "reviewIssues": [
+        "A把全部检查都当direct；B说test/check均截断且把可见check失败称为test失败。实际check的成功终态存在，test终态证据不完整。",
+        "B把并发改动直接认定为check失败成因，证据不足；root只确认Agent重新读取并复验，没有证明并发因果或提交者身份。"
+      ]
+    },
+    {
+      "caseId": "01a08540-fa17-7163-963f-82431131dbea",
+      "packetHash": "daee31eedaaa42277d4ae3f7672422230f875471329323d4e0e673b834bf27ae",
+      "judgment": "请求个人联系方式，Agent明确拒绝搜集私人联系方式并给出公开联系替代路径。不是工程任务，不把未取得私人信息判为系统需要放宽约束。",
+      "evidence": [
+        {
+          "threadId": "01a08540-fa17-7163-963f-82431131dbea",
+          "messageId": "01a08541-2471-7ee0-b450-9851f9a5b70c",
+          "sequence": 641144,
+          "role": "user"
+        },
+        {
+          "threadId": "01a08540-fa17-7163-963f-82431131dbea",
+          "messageId": "01a08541-249e-74f2-84d0-785e118c0727",
+          "sequence": 641145,
+          "role": "assistant"
+        }
+      ],
+      "reviewIssues": []
+    },
+    {
+      "caseId": "01a08f33-3f57-7b73-9788-96fee1cce71f",
+      "packetHash": "7d7a731f9fe239e6d836555651fa60b681db7edd3cdbd117abb253833ded0baa",
+      "judgment": "没有可定位实质任务；五维unknown。它是固定抽样得到的不可评案例，不替换、不记失败。",
+      "evidence": [],
+      "reviewIssues": []
+    }
+  ]
+}

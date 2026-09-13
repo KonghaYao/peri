@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "sourceReferenceAudit": {
+    "uniqueMessageReferences": 113,
+    "database": "readonly source SQLite, message_id/thread_id verified",
+    "passed": true
+  },
+  "reviewImport": {
+    "cases": 6,
+    "reviews": 12,
+    "mechanicalValidation": "passed after citation correction",
+    "semanticUse": "root coordinator audit; raw group distribution not a quality leaderboard"
+  },
+  "skills": {
+    "quickValidate": [
+      "agent-task-evaluator passed",
+      "auto-data-researcher passed"
+    ],
+    "calibration": {
+      "syntheticCases": 3,
+      "evidenceJudgments": "wrapped self-report, missing terminal, direct text artifact distinguished",
+      "finalVerificationLabelsMatched": true,
+      "revision": "Same Luna reviewer rechecked after full TASK-EVALUATION label contract was supplied; first trial used an illegal partial verification label. Both versions retained.",
+      "notProven": "Population accuracy, causal skill improvement, production task improvement"
+    }
+  },
+  "productionChanges": false,
+  "productionPromptAB": "not run",
+  "runtimeTruncation": "two independent source audits; end-to-end fixture not run",
+  "workflowMinimalShape": "local parser validate returned ok; no Agent executed",
+  "scripts": {
+    "defaultReproduction": {
+      "allProjectRoots": 111,
+      "cwdRoots": 48,
+      "emptyCwdRoots": 14,
+      "candidateStrata": [
+        5,
+        7,
+        20
+      ],
+      "cases": 6,
+      "matchedFrozenCaseIdsAndPacketHashes": true,
+      "explicitErrors": 85,
+      "paired": 85,
+      "orphan": 0
+    },
+    "guards": [
+      "custom window inherited by error index",
+      "explicit conflicting scope rejected",
+      "invalid date rejected before manifest creation",
+      "existing output refused",
+      "different DB rejected"
+    ],
+    "strictTypeScript": "passed with --ignoreConfig --strict --noEmit and Bun types",
+    "codeReview": "two blocking findings fixed and independently rechecked; no remaining blocker",
+    "rawTextBoundary": "raw error content remains in explicitly chosen local evidence output, not committed reports"
+  }
+}

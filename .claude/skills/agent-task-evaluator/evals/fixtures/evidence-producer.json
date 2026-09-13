@@ -1,0 +1,86 @@
+{
+  "synthetic": true,
+  "purpose": "Evidence producer and truncation calibration, not production data",
+  "cases": [
+    {
+      "caseId": "wrapped-claim",
+      "messages": [
+        {
+          "id": "w1",
+          "role": "user",
+          "text": "修复测试并运行完整测试集。"
+        },
+        {
+          "id": "w2",
+          "role": "assistant",
+          "call": {
+            "tool": "Agent",
+            "id": "a1",
+            "task": "实现并运行测试"
+          }
+        },
+        {
+          "id": "w3",
+          "role": "tool",
+          "callId": "a1",
+          "text": "子 Agent 汇报：已修复，全部 42 项测试通过。"
+        },
+        {
+          "id": "w4",
+          "role": "assistant",
+          "text": "已完成，42 项测试通过。"
+        }
+      ]
+    },
+    {
+      "caseId": "tail-gap",
+      "coverage": {
+        "exportTruncated": false,
+        "sourceTruncated": false
+      },
+      "messages": [
+        {
+          "id": "t1",
+          "role": "user",
+          "text": "运行完整测试集并报告结果。"
+        },
+        {
+          "id": "t2",
+          "role": "assistant",
+          "call": {
+            "tool": "Bash",
+            "id": "b1",
+            "command": "project-test"
+          }
+        },
+        {
+          "id": "t3",
+          "role": "tool",
+          "callId": "b1",
+          "isError": false,
+          "text": "Running 42 tests\ntest one ... passed\n[Output truncated at 10000 chars]"
+        },
+        {
+          "id": "t4",
+          "role": "assistant",
+          "text": "42 项全部通过。"
+        }
+      ]
+    },
+    {
+      "caseId": "direct-text",
+      "messages": [
+        {
+          "id": "d1",
+          "role": "user",
+          "text": "将 a,b 两列、值 1,2 写成 JSON。"
+        },
+        {
+          "id": "d2",
+          "role": "assistant",
+          "text": "{\"a\":1,\"b\":2}"
+        }
+      ]
+    }
+  ]
+}

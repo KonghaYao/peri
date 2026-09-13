@@ -1,0 +1,965 @@
+{
+  "purpose": "Stored frozen prefix only; does not prove each full model request",
+  "results": [
+    {
+      "threadId": "01a0796b-d1a5-7020-bd08-39f09979feb0",
+      "version": null,
+      "promptHash": null,
+      "promptBytes": null,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": null
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": null
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": null
+        }
+      ]
+    },
+    {
+      "threadId": "01a07984-c42f-72f3-a24e-301b1b58c335",
+      "version": 1,
+      "promptHash": "d434a2f2b878e04a1070092be496bb5583c21458641eb6e5319e37f3b97791d4",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a07a6a-8ec5-7031-b95d-9374ae7758ec",
+      "version": null,
+      "promptHash": null,
+      "promptBytes": null,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": null
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": null
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": null
+        }
+      ]
+    },
+    {
+      "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+      "version": null,
+      "promptHash": null,
+      "promptBytes": null,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": null
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": null
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": null
+        }
+      ]
+    },
+    {
+      "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+      "version": 1,
+      "promptHash": "a590ba03992dbb827aa6b03f97a5c58c6f429939af479e239e5e723bbb6595cb",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a07e87-74c5-7491-b028-0c57ee14e408",
+      "version": 1,
+      "promptHash": "a590ba03992dbb827aa6b03f97a5c58c6f429939af479e239e5e723bbb6595cb",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a07ed4-ee0d-7460-9063-7008f4ecd0b9",
+      "version": 1,
+      "promptHash": "a590ba03992dbb827aa6b03f97a5c58c6f429939af479e239e5e723bbb6595cb",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a07ed6-ed97-7b60-bc62-e6683c1a0841",
+      "version": 1,
+      "promptHash": "a590ba03992dbb827aa6b03f97a5c58c6f429939af479e239e5e723bbb6595cb",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a07fc9-cf21-7243-a2da-3b1be30ba495",
+      "version": 1,
+      "promptHash": "a590ba03992dbb827aa6b03f97a5c58c6f429939af479e239e5e723bbb6595cb",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+      "version": 1,
+      "promptHash": "a590ba03992dbb827aa6b03f97a5c58c6f429939af479e239e5e723bbb6595cb",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a0807c-97e2-73d0-9a1e-1b0fa94e1fe2",
+      "version": 1,
+      "promptHash": "a590ba03992dbb827aa6b03f97a5c58c6f429939af479e239e5e723bbb6595cb",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+      "version": 1,
+      "promptHash": "e0a7cc9ff9a5f8c40f697fe0cb34a8ab363123c726c7c5e4f5638beb38942725",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a083af-cb6a-7563-846d-cb665ed7c3df",
+      "version": 1,
+      "promptHash": "e0a7cc9ff9a5f8c40f697fe0cb34a8ab363123c726c7c5e4f5638beb38942725",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a083b3-0b7e-7a92-96d8-1306406a3521",
+      "version": 1,
+      "promptHash": "e0a7cc9ff9a5f8c40f697fe0cb34a8ab363123c726c7c5e4f5638beb38942725",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a083e0-5933-74c1-b2d0-bff7fcabbe00",
+      "version": 1,
+      "promptHash": "e0a7cc9ff9a5f8c40f697fe0cb34a8ab363123c726c7c5e4f5638beb38942725",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+      "version": 1,
+      "promptHash": "e0a7cc9ff9a5f8c40f697fe0cb34a8ab363123c726c7c5e4f5638beb38942725",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+      "version": 1,
+      "promptHash": "e0a7cc9ff9a5f8c40f697fe0cb34a8ab363123c726c7c5e4f5638beb38942725",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08535-3ef4-7402-a936-93589662fd31",
+      "version": 1,
+      "promptHash": "e0a7cc9ff9a5f8c40f697fe0cb34a8ab363123c726c7c5e4f5638beb38942725",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08540-fa17-7163-963f-82431131dbea",
+      "version": 1,
+      "promptHash": "e0a7cc9ff9a5f8c40f697fe0cb34a8ab363123c726c7c5e4f5638beb38942725",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a0855e-e05e-7770-8d4b-168d973b1bad",
+      "version": 1,
+      "promptHash": "e0a7cc9ff9a5f8c40f697fe0cb34a8ab363123c726c7c5e4f5638beb38942725",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08561-09f0-7430-8304-7fc931996cfd",
+      "version": 1,
+      "promptHash": "e0a7cc9ff9a5f8c40f697fe0cb34a8ab363123c726c7c5e4f5638beb38942725",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08a33-e1a3-7441-a35c-de1ef517373b",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08a35-515d-7373-88eb-bdb4f87248d8",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08aac-77cc-79a1-adac-57920fd61f22",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08abe-0268-7093-8fa2-921216bf9eb3",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08ac0-7c95-7b02-9a55-b13971804bef",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08add-87dc-7e23-b5da-f265887cc75c",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08add-e588-7612-9a09-b61b4e85c499",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08b26-307f-7593-a83f-051fc6435b7b",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08bc6-3edf-7b32-9c07-37c85b0b7811",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08bdc-2e39-7ba2-b4f0-579ab22e91e5",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08bdc-b6a0-7cd1-8564-6c937b28257e",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08bdd-a6be-7e41-9842-1ee99d77d9f3",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08c05-28fd-7973-805c-2594b9ece75a",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08c07-a0fd-7e81-94a8-41c066ae8bd2",
+      "version": 1,
+      "promptHash": "7cb36b49f88de28a60c2e444b906a6b4e1d47fa21fde6acd3e924c14dd467ac0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08e11-cf1f-7913-9473-9a94fe5c16b1",
+      "version": 1,
+      "promptHash": "b77d485b5b5778dd4aea7f99546258861ceec91e675aec2ecd8c9775724655b0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08e63-8412-7782-807a-e5780c0e5b9d",
+      "version": 1,
+      "promptHash": "b77d485b5b5778dd4aea7f99546258861ceec91e675aec2ecd8c9775724655b0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08f21-cada-7bf0-962c-e0673d8fb221",
+      "version": 1,
+      "promptHash": "b77d485b5b5778dd4aea7f99546258861ceec91e675aec2ecd8c9775724655b0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08f33-1186-7673-803b-f246993697f2",
+      "version": 1,
+      "promptHash": "b77d485b5b5778dd4aea7f99546258861ceec91e675aec2ecd8c9775724655b0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08f33-3f57-7b73-9788-96fee1cce71f",
+      "version": 1,
+      "promptHash": "b77d485b5b5778dd4aea7f99546258861ceec91e675aec2ecd8c9775724655b0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08f3e-4753-7c40-b77d-0e976a8e5773",
+      "version": 1,
+      "promptHash": "b77d485b5b5778dd4aea7f99546258861ceec91e675aec2ecd8c9775724655b0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a08fba-f302-7ca1-867c-54a2078edbe4",
+      "version": 1,
+      "promptHash": "b77d485b5b5778dd4aea7f99546258861ceec91e675aec2ecd8c9775724655b0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a09052-51cc-76d0-b88c-0a30533aaf23",
+      "version": 1,
+      "promptHash": "b77d485b5b5778dd4aea7f99546258861ceec91e675aec2ecd8c9775724655b0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+      "version": 1,
+      "promptHash": "b77d485b5b5778dd4aea7f99546258861ceec91e675aec2ecd8c9775724655b0",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a095cd-375e-7063-93d8-6ccbe1b10d79",
+      "version": 1,
+      "promptHash": "f09218a3307b47553194b914e04032b17b615b9f7ab68a4b48b60d0bc7d41b98",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+      "version": 1,
+      "promptHash": "f09218a3307b47553194b914e04032b17b615b9f7ab68a4b48b60d0bc7d41b98",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    },
+    {
+      "threadId": "01a095fb-6bbe-7b43-a451-3adc31762b05",
+      "version": 1,
+      "promptHash": "f09218a3307b47553194b914e04032b17b615b9f7ab68a4b48b60d0bc7d41b98",
+      "promptBytes": 24692,
+      "present": [
+        {
+          "text": "If uncertain, ask.",
+          "present": true
+        },
+        {
+          "text": "Transform tasks into verifiable goals.",
+          "present": true
+        },
+        {
+          "text": "NEVER assume specific test framework or test script.",
+          "present": true
+        }
+      ]
+    }
+  ]
+}

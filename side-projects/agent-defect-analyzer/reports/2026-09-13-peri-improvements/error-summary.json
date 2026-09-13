@@ -1,0 +1,562 @@
+{
+  "scope": {
+    "scope": "roots",
+    "includeHidden": false,
+    "cwdRoot": "/Users/konghayao/code/ai/perihelion",
+    "cwdPolicy": "thread.cwd === cwdRoot or startsWith(cwdRoot + '/')",
+    "threadCount": 48
+  },
+  "counts": {
+    "normalizedMessages": 8645,
+    "explicitErrorResults": 85,
+    "pairedExplicitErrors": 85,
+    "orphanExplicitErrors": 0,
+    "parseIssueCategories": {}
+  },
+  "categories": [
+    {
+      "category": "Read",
+      "results": 14,
+      "threads": 9,
+      "evidence": [
+        {
+          "threadId": "01a0796b-d1a5-7020-bd08-39f09979feb0",
+          "messageId": "01a0796c-e368-7191-b358-92b922df0ebf",
+          "callId": "call_se1oiC0AS5DU7MWvDf08YMbb"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ebe-a5f7-7d51-bd01-cfae2d3f0787",
+          "callId": "call_wmQI5xpnWRgqo6dxq4Fg0L4L"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ebe-e0f3-77a2-8410-819726a37262",
+          "callId": "call_HD3sKFYYp7WumPpXSQA0QATk"
+        },
+        {
+          "threadId": "01a07e87-74c5-7491-b028-0c57ee14e408",
+          "messageId": "01a07e88-7f37-7063-a60b-45927eabc99b",
+          "callId": "call_xFKb0FLc0m8b6TU1mozivP4Y"
+        },
+        {
+          "threadId": "01a083af-cb6a-7563-846d-cb665ed7c3df",
+          "messageId": "01a08422-8c09-7a11-b13d-650f7cb3b1e1",
+          "callId": "call_GeYG9NmWPPTr5EUBBNarfeU0"
+        },
+        {
+          "threadId": "01a083b3-0b7e-7a92-96d8-1306406a3521",
+          "messageId": "01a083c3-d0b1-7972-bab8-888538b642e7",
+          "callId": "call_yrq8u31k3kUNAEjOkxZUEOV6"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a0893b-de0b-7552-bef9-c89a66885322",
+          "callId": "call_csc5CHJWMwrvC6b2tzXZFvio"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a08962-8d9a-72d1-9436-daa35e2a2783",
+          "callId": "call_txRtjsyDFPg0pAdQHBjN7zBX"
+        },
+        {
+          "threadId": "01a08a35-515d-7373-88eb-bdb4f87248d8",
+          "messageId": "01a08a3e-06a5-76e2-8356-a26dcb3264f0",
+          "callId": "call_Sk6pMW5abfrhedv93WzxTERd"
+        },
+        {
+          "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "messageId": "01a08ad3-4f66-7403-b0e2-ddf9fe1cfd90",
+          "callId": "call_WthOzuEcLdwfhVbjUHKzHJzk"
+        },
+        {
+          "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "messageId": "01a08afc-2945-76e2-8ca5-2437dbfb01c8",
+          "callId": "call_N3GZkxdN7BmkdVMjJxn2l3fJ"
+        },
+        {
+          "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "messageId": "01a08afc-2945-76e2-8ca5-24454be22e8b",
+          "callId": "call_07YVGSBCRuOadvEGSCNGeZzY"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09071-7389-7973-b5bb-b9795d063423",
+          "callId": "call_wNzBZEmAevey1iuIbrFQub2y"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a092bb-8d7d-7012-ba3f-d8bef75d72fd",
+          "callId": "call_Gr4wcILzUelHBzJ495633MG9"
+        }
+      ]
+    },
+    {
+      "category": "Edit",
+      "results": 13,
+      "threads": 8,
+      "evidence": [
+        {
+          "threadId": "01a07984-c42f-72f3-a24e-301b1b58c335",
+          "messageId": "01a079fb-5b75-7f63-988b-8b25095184e6",
+          "callId": "call_bKrE8XgKy0odLjfuqOu1vvf6"
+        },
+        {
+          "threadId": "01a07984-c42f-72f3-a24e-301b1b58c335",
+          "messageId": "01a07a3a-155e-7d52-82c3-271aa2ca4f84",
+          "callId": "call_cxN2UgEGOCKzEtsq4ZJ0CULs"
+        },
+        {
+          "threadId": "01a07984-c42f-72f3-a24e-301b1b58c335",
+          "messageId": "01a07a44-a059-7f20-b293-b456fc4eaa24",
+          "callId": "call_jORbSh0NwCFviRoBrY6lWK71"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ebe-8695-7150-b2c1-bc81da3155f6",
+          "callId": "call_iJC10CPkKPvEogVASu0iOtxW"
+        },
+        {
+          "threadId": "01a07e87-74c5-7491-b028-0c57ee14e408",
+          "messageId": "01a07f05-6cfa-7b92-bc38-20a33eb9b29c",
+          "callId": "call_b5TJfCMEL0AaQ3wXPB1j0zbm"
+        },
+        {
+          "threadId": "01a07e87-74c5-7491-b028-0c57ee14e408",
+          "messageId": "01a07f72-28ba-7612-80ce-41ea62f70961",
+          "callId": "call_K3S5KWk6hlGkDmQqQ4SxO9TY"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a0855a-1b04-7d91-b894-541b13248e43",
+          "callId": "call_m6b1sZHH8mKV8cy5SXCv7koV"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a0895c-8c8a-7e10-b113-7a21e892b3e4",
+          "callId": "call_48De8w911M87yQBIMcoSgn5r"
+        },
+        {
+          "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "messageId": "01a08b53-2518-7e33-9568-d6c3caf8c7ce",
+          "callId": "call_kFmtOfGPncSMkn4Hq6xwOSZf"
+        },
+        {
+          "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "messageId": "01a08b55-fcb4-7611-a464-32fb91534fea",
+          "callId": "call_8pxukGLScrJo82STv6jnHFLi"
+        },
+        {
+          "threadId": "01a08bc6-3edf-7b32-9c07-37c85b0b7811",
+          "messageId": "01a08bf8-b96d-74a3-b7ef-44b0efee2989",
+          "callId": "call_00_5bo6PU4PSh3rtERaqWQp8733"
+        },
+        {
+          "threadId": "01a09052-51cc-76d0-b88c-0a30533aaf23",
+          "messageId": "01a09054-1bab-7f71-8f33-f3924f0adfd8",
+          "callId": "call_HgzxGFI3W2FSlAEM14kbbmty"
+        },
+        {
+          "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+          "messageId": "01a096b9-499d-7221-910c-dd524e74574c",
+          "callId": "call_01_IKr1Ucxngf04WcNDhcW33949"
+        }
+      ]
+    },
+    {
+      "category": "bash_background_promotion",
+      "results": 7,
+      "threads": 4,
+      "evidence": [
+        {
+          "threadId": "01a07a6a-8ec5-7031-b95d-9374ae7758ec",
+          "messageId": "01a07a73-2e5a-74c1-8295-df9576f7c30c",
+          "callId": "call_Ml44SjlqzTzIozWtDRuCww4M"
+        },
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a08144-70d3-74f3-a4fd-47eaac8a7e35",
+          "callId": "call_tYDJtJQbOFDxIkyBfrpTOCBN"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09305-c004-77d3-b223-51c0a66c9a7b",
+          "callId": "call_01_lQy0Fq0EHnAqrAQTHNUy0404"
+        },
+        {
+          "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+          "messageId": "01a095da-fda2-7f72-9684-8b7bae114a92",
+          "callId": "call_01_fJN5qlsEOzTjQdSlcN1x6477"
+        },
+        {
+          "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+          "messageId": "01a095e2-7a25-7c32-aebb-883c4339445c",
+          "callId": "call_00_qsBTbbcURoZfKAXX4xVN1598"
+        },
+        {
+          "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+          "messageId": "01a096be-222e-7dc1-bad6-c0198958803c",
+          "callId": "call_00_aouQK9CBUGdtp6JBcdEa7628"
+        },
+        {
+          "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+          "messageId": "01a096fe-e98d-7282-a50d-481cdc368aff",
+          "callId": "call_01_GlH5LQUgtQrBqmc8u44x2530"
+        }
+      ]
+    },
+    {
+      "category": "agent_http_400",
+      "results": 14,
+      "threads": 6,
+      "evidence": [
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07e8a-3e88-7520-9261-33fdd66f8722",
+          "callId": "call_Cjb90VgCP9es914P1qJfhMDP"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07e8b-e21e-7633-88b5-3aa1931ca853",
+          "callId": "call_L9Oc5R6SInokBD2shrM5nb6J"
+        },
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a08101-297a-7991-a22c-326bdc0a2237",
+          "callId": "call_1yZzVf9Cn8gOm0CWE7Hb45vA"
+        },
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a08101-72d4-7400-a429-bdf5b26c4060",
+          "callId": "call_0FenigaKXoTC6s863uUBt3ql"
+        },
+        {
+          "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+          "messageId": "01a083b0-0c03-7f83-9cbb-8e23fcaf4742",
+          "callId": "call_jyKKUFI26kPD1QAq0HvTXexM"
+        },
+        {
+          "threadId": "01a08a33-e1a3-7441-a35c-de1ef517373b",
+          "messageId": "01a08a5b-b2b1-7070-aea2-a1d94b841f39",
+          "callId": "call_uaiWbwFfghNrK1m4E7ubZ3pq"
+        },
+        {
+          "threadId": "01a08a33-e1a3-7441-a35c-de1ef517373b",
+          "messageId": "01a08a8e-2371-79b1-a1ed-8d0bd8863c6f",
+          "callId": "call_vcovsL3k8mhDfl8R8GShJnJ9"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09304-b354-79d1-a173-5b2961f5fc62",
+          "callId": "call_00_KnqObNAEMRRcJcZSTOp53830"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09304-b354-79d1-a173-5b35ad89b3df",
+          "callId": "call_01_jmz5B0LIOjAPC4jk0a4S4658"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a0947d-1891-7d50-922a-2199a3be3970",
+          "callId": "call_01_SvJYbcArPcGAlPGNpNVm0009"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a0947d-1891-7d50-922a-21ae7404ea16",
+          "callId": "call_02_WHXIJJyuCSbVYMfApREE3848"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09544-d635-75b2-adc0-959b4f135d1e",
+          "callId": "call_03_4Q0ibr29O0gZYn4ByRXa2058"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09544-d635-75b2-adc0-95a7f50c092b",
+          "callId": "call_04_5mB9pWDVFzPi5mqYcbCk7200"
+        },
+        {
+          "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+          "messageId": "01a095d0-4e16-7c12-b1ef-34d4403c6969",
+          "callId": "call_00_MeKbHU1hZUl1gPvvtwPQ4921"
+        }
+      ]
+    },
+    {
+      "category": "agent_stream_interrupted",
+      "results": 7,
+      "threads": 4,
+      "evidence": [
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07e8a-3e88-7520-9261-340f6d3fc620",
+          "callId": "call_9IKGRMuWbvaszIPshwbrzXzf"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07e8b-e21e-7633-88b5-3ab44438e320",
+          "callId": "call_GjBPAei9HHtfGbbHC7qqRpWZ"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07e92-b9a6-77f0-a08c-e932efcc7365",
+          "callId": "call_Gzoee3CRbs6eTp3S86MM3R0v"
+        },
+        {
+          "threadId": "01a07fc9-cf21-7243-a2da-3b1be30ba495",
+          "messageId": "01a07fd2-77b4-7891-a426-8c9656fa9fad",
+          "callId": "call_He0lKTV1PeexHJfREmWdAjp1"
+        },
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a0812e-3cab-7b33-a866-3f2c34441881",
+          "callId": "call_Xwv90XwcgFZQohq57fxLIGc9"
+        },
+        {
+          "threadId": "01a08f21-cada-7bf0-962c-e0673d8fb221",
+          "messageId": "01a08f4b-2fa6-70e2-9698-76af795e336b",
+          "callId": "call_1plpWQcI6ez1gE0Shyd9vyej"
+        },
+        {
+          "threadId": "01a08f21-cada-7bf0-962c-e0673d8fb221",
+          "messageId": "01a08f7e-51db-78d3-8317-a9cadbd64bb5",
+          "callId": "call_LkA1m6Zg589fAqhSnwQgIpzD"
+        }
+      ]
+    },
+    {
+      "category": "agent_http_403",
+      "results": 1,
+      "threads": 1,
+      "evidence": [
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07eb5-ca4a-7fc3-9b3f-44d486762c60",
+          "callId": "call_S9RE3NkjfO0EBLwdSIWFAHHr"
+        }
+      ]
+    },
+    {
+      "category": "workflow_meta",
+      "results": 6,
+      "threads": 3,
+      "evidence": [
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a0802c-9dbf-7370-9fd2-000bad7fe2c6",
+          "callId": "call_WPwYNsTxOwob0QCacTX874wR"
+        },
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a0802d-5f17-7472-afea-4fb1d73c202a",
+          "callId": "call_aRotWGJaxGsRemCJ0nl0DdHK"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a08539-b971-7c72-ab66-77589cb8abda",
+          "callId": "call_6DgsJolrfIjMciZ1JkuQ2zW7"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a0853a-afd1-7310-9309-6b682c560d1f",
+          "callId": "call_CwFEHvimwg6SOzCHlLNIA9g6"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09078-5827-7881-9cc9-054828d0ffc7",
+          "callId": "call_QRM2HnPHX20PcuqZrENszu1i"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a0909a-1aa2-7272-b61e-3543bda89979",
+          "callId": "call_85MQz9NPFPJerhgoOYcZqSs4"
+        }
+      ]
+    },
+    {
+      "category": "ExecuteExtraTool",
+      "results": 1,
+      "threads": 1,
+      "evidence": [
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a0802d-ea10-7e40-9d6a-b81c99f307eb",
+          "callId": "call_MXCtcynhApJW4MksbOpo5hbh"
+        }
+      ]
+    },
+    {
+      "category": "workflow_write_intent",
+      "results": 2,
+      "threads": 1,
+      "evidence": [
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a0802e-7dee-79f3-9422-a762a699d1cb",
+          "callId": "call_ZgXUWrZu9pW75mwEvblmjyzc"
+        },
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a0802f-0455-7452-a5f0-1e4d6a365729",
+          "callId": "call_4yjgwzd91FHOfSkiN3BQPOlT"
+        }
+      ]
+    },
+    {
+      "category": "folder_operations",
+      "results": 1,
+      "threads": 1,
+      "evidence": [
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a0811f-d80d-75c3-a629-94968e9bf11c",
+          "callId": "call_OJFF0W49glAgOrDRVAv6w1Ek"
+        }
+      ]
+    },
+    {
+      "category": "Glob",
+      "results": 1,
+      "threads": 1,
+      "evidence": [
+        {
+          "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+          "messageId": "01a083b7-bd32-7e11-9f10-7f598478b16f",
+          "callId": "call_494a2TeKgjuJf1TWBQNrl33n"
+        }
+      ]
+    },
+    {
+      "category": "question_rejected",
+      "results": 5,
+      "threads": 4,
+      "evidence": [
+        {
+          "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+          "messageId": "01a084bd-dc12-78b0-b6be-52ab0532d776",
+          "callId": "call_lldPnfdN0Aa0pU0RN9GRdCBo"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a0894e-bb93-72c3-875a-9c053954d7be",
+          "callId": "call_HLkJRwlkoqiRmdBY66jSCs7b"
+        },
+        {
+          "threadId": "01a08bc6-3edf-7b32-9c07-37c85b0b7811",
+          "messageId": "01a08bff-9a0b-7120-a448-a6eb871f123e",
+          "callId": "call_00_c81I214scIBUx91SMBLX3427"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09481-e7ee-7440-8ee7-85d48925e261",
+          "callId": "call_00_ZoWsc4UcHP6M4nRircJJ3830"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09547-6ab8-7be0-bfed-80cd0ac6a8a6",
+          "callId": "call_00_ZP2OUWDMM5l4zTUZ1frP5716"
+        }
+      ]
+    },
+    {
+      "category": "agent_definition_missing",
+      "results": 2,
+      "threads": 1,
+      "evidence": [
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a0895a-53cb-7c30-b418-a3dee35d618b",
+          "callId": "call_ZFn3auUcsOyqnELwoSuLpaiw"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a08984-490e-7b21-9135-d66209bc34d6",
+          "callId": "call_bVIidUuyEPqMW69sRfUUvDGv"
+        }
+      ]
+    },
+    {
+      "category": "WebFetch",
+      "results": 6,
+      "threads": 2,
+      "evidence": [
+        {
+          "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "messageId": "01a08b90-4049-7be1-a0bc-25b740b53722",
+          "callId": "call_ePLUtSorERq3LbTk8zEG5jiF"
+        },
+        {
+          "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "messageId": "01a08b90-889f-77a3-9e86-4aed721ca236",
+          "callId": "call_6yOhNRKF20m9xmRx9cUNsDoB"
+        },
+        {
+          "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "messageId": "01a08b90-889f-77a3-9e86-4af30640717e",
+          "callId": "call_3KiEx6ewYknOBH7MnKIsMwfk"
+        },
+        {
+          "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "messageId": "01a08bae-e84c-7bf0-8d39-b5ca6987f58b",
+          "callId": "call_pGQjYWPscH1F3fqz1rvACrsk"
+        },
+        {
+          "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "messageId": "01a08bb2-03db-7180-ac82-21bda78eebef",
+          "callId": "call_awxq7iI1zoYIbdfNPk762V1O"
+        },
+        {
+          "threadId": "01a08f21-cada-7bf0-962c-e0673d8fb221",
+          "messageId": "01a08fb3-954b-7170-9b3d-049c5d7f7ca1",
+          "callId": "call_7Pm2LqRdsBzYXICPgg9LSeU9"
+        }
+      ]
+    },
+    {
+      "category": "WebSearch",
+      "results": 2,
+      "threads": 2,
+      "evidence": [
+        {
+          "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "messageId": "01a08bac-65dd-71b0-9591-840320277fd3",
+          "callId": "call_48aBl5H7IWuoDB20Y3FkLZen"
+        },
+        {
+          "threadId": "01a08f21-cada-7bf0-962c-e0673d8fb221",
+          "messageId": "01a08fb3-445d-7672-be82-0ad736ba3233",
+          "callId": "call_aKj2RMff84UXpIfRkYofbr7f"
+        }
+      ]
+    },
+    {
+      "category": "Grep",
+      "results": 1,
+      "threads": 1,
+      "evidence": [
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a0908f-44e2-7d80-a8b4-5520562ef35e",
+          "callId": "call_rmqrt8ABP80OjZy40ySxMv7J"
+        }
+      ]
+    },
+    {
+      "category": "workflow_syntax",
+      "results": 2,
+      "threads": 1,
+      "evidence": [
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09340-56c6-74f2-b143-6ddb0d3a8de7",
+          "callId": "call_00_ET_ZdAt8wSyClr1cf6UHAPo2711"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09549-4f98-7a61-98c5-e3e8af210547",
+          "callId": "call_00_CxjkRKz7wXL5PPG54hgV4288"
+        }
+      ]
+    }
+  ]
+}

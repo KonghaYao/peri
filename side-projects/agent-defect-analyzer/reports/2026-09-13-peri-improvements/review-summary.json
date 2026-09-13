@@ -1,0 +1,1478 @@
+{
+  "schemaVersion": 1,
+  "rubricVersion": "task-effectiveness-v1",
+  "generatedAt": "2026-09-13T11:34:38.397Z",
+  "reviews": [
+    {
+      "reviewerId": "peri-luna-a",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+      "packetHash": "64c47cbe97081bc7780b5b69ed677d5cab071cc6716396896fa835496b277cee",
+      "requestMessageIds": [
+        "01a07b52-b3ed-71e2-8004-62730c9a4079"
+      ],
+      "endMessageId": "01a07b56-2d8d-76a0-87a4-3e7ce00f72f3",
+      "taskSummary": "修复 peri-middlewares 中 Ultra-ADLC canonical W1 测试失败，并提交、推送该修复。",
+      "acceptanceCriteria": [
+        "定位并修复 test_ultra_adlc_canonical_w1_separates_packet_preparation_from_arbitration 的失败。",
+        "不以放宽 Ultra-ADLC 行为契约替代修复。",
+        "目标测试、相关库测试和提交前检查通过，并将修复推送到远程。"
+      ],
+      "taskType": "coding",
+      "limitations": [
+        "后续 01a07b5b 用户消息报告了另一个 executor 测试失败；它是新的可定位故障，观察截止设在此前的推送完成消息。"
+      ],
+      "promptSignals": [
+        {
+          "theme": "嵌入式文本测试失败先检查平台换行差异",
+          "direction": "reinforce",
+          "target": "prompt",
+          "evidenceMessageIds": [
+            "01a07b53-9453-7691-ab25-b7847457a261",
+            "01a07b54-8840-7d91-9bed-152e52ba6022"
+          ],
+          "counterEvidenceMessageIds": [],
+          "rationale": "失败发生在 split_once 提取内嵌脚本处，代码内容和契约结构已被检查为存在；换行归一化解决了目标测试且未改变生产行为。",
+          "alternativeExplanation": "也可能是 checkout 或工具链的统一换行配置造成的局部环境问题，不能据此断言所有测试失败都应由提示词处理。",
+          "nextCheck": "构造同时使用 LF/CRLF 的内嵌 fixture 回归样例，确认测试辅助逻辑在两种 checkout 下都稳定。"
+        }
+      ],
+      "outcome": {
+        "value": "delivered",
+        "evidenceMessageIds": [
+          "01a07b53-9453-7691-ab25-b7847457a261",
+          "01a07b54-8840-7d91-9bed-152e52ba6022",
+          "01a07b56-2d8d-76a0-87a4-3e7ce00f72f3"
+        ],
+        "reason": "助手定位到 CRLF 与测试硬编码换行符不一致，采用测试侧换行归一化；目标测试通过，随后提交 d9ae9082 并推送到 origin/diagnostics/issue-127-memory。"
+      },
+      "verification": {
+        "value": "direct",
+        "evidenceMessageIds": [
+          "01a07b54-8840-7d91-9bed-152e52ba6022",
+          "01a07b54-ac03-7eb1-aa79-151b9cfd8e21",
+          "01a07b55-f073-76a3-94d4-209f98027c86",
+          "01a07b56-2d8d-76a0-87a4-3e7ce00f72f3"
+        ],
+        "reason": "工具结果直接显示目标测试 1 passed、peri-middlewares 1602 tests 通过、pre-commit 检查通过，且远程 push 建立了 upstream。"
+      },
+      "constraints": {
+        "value": "supported",
+        "evidenceMessageIds": [
+          "01a07b53-9453-7691-ab25-b7847457a261",
+          "01a07b54-f654-7d72-a185-fa6709d5f50e"
+        ],
+        "reason": "修复保持 Ultra-ADLC skill 行为和契约内容不变，只归一化测试输入；既有 peri-cool submodule 改动未纳入提交。"
+      },
+      "feedback": {
+        "value": "none_observed",
+        "evidenceMessageIds": [],
+        "reason": "观察截止前没有用户对该修复结果的明确接受、否定或纠正；提交并推送是同目标后续要求。"
+      },
+      "strategy": {
+        "value": "effective",
+        "evidenceMessageIds": [
+          "01a07b53-9453-7691-ab25-b7847457a261",
+          "01a07b54-8840-7d91-9bed-152e52ba6022"
+        ],
+        "reason": "先核对实现与失败位置，再选择跨平台测试输入修复，并用目标测试、全库测试和 hook 检查形成闭环；替代的改生产 skill 或放宽断言没有必要。"
+      },
+      "derivedGroup": "strong"
+    },
+    {
+      "reviewerId": "peri-luna-a",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a07e86-72ed-7453-846a-edc2790c2402",
+      "packetHash": "0ccb8ab3fef8eb1bf81f7c7576ea1bdab87b30c6a3f8009bf8a32ddfa7a9834b",
+      "requestMessageIds": [
+        "01a07e87-278b-79e0-b856-a2820792fe1c"
+      ],
+      "endMessageId": "01a07ed3-601a-7873-ac6b-def156ab39a4",
+      "taskSummary": "通过 /ultra-task 修复可见的 cron/loop 定时触发审查问题和超长 history 滚动导致 CPU 高的问题，并提交修改。",
+      "acceptanceCriteria": [
+        "cron 定时触发应进入受控 continuation/agent pipeline，并在执行前接受审查。",
+        "超长 history replay 不应持续抢回滚动位置或逐批触发近似 O(N²) 的完整扫描。",
+        "修复应有针对性测试、相关 crate 检查通过，并提交修改。",
+        "用户指出的首个 turn 前 cron 注入丢失窗口也属于同一 cron 触发目标，应补上回归保护。"
+      ],
+      "taskType": "coding",
+      "limitations": [
+        "首条 /ultra-task 列表显示 8 个 issue，但正文仅保留两个 issue 描述并明确说‘修复两个问题’；本评审按这两个可见目标和后续同目标 cron 修正评价。",
+        "记录证明了提交和本地检查，没有证明远程发布或目标平台验收。"
+      ],
+      "promptSignals": [
+        {
+          "theme": "声明完成前覆盖定时触发的 session 生命周期边界",
+          "direction": "change",
+          "target": "runtime",
+          "evidenceMessageIds": [
+            "01a07ec7-6162-7090-9cd6-d175944baf40",
+            "01a07ed0-db46-76b1-8495-945e918e1545"
+          ],
+          "counterEvidenceMessageIds": [
+            "01a07ebf-cb39-7aa3-a2b1-42aaa147d79b"
+          ],
+          "rationale": "可复现的漏注入发生在审批、prompt lock 和 continuation 之前：bridge 尚未订阅且 scheduler 已推进 next_fire；ensure_session seam 加订阅和精确回归测试后修复。",
+          "alternativeExplanation": "cron tick 的部署启动、continuation channel 关闭后的假活等其他失效点也可能导致漏触发；当前证据只锁定首个 turn 前的订阅缺口。",
+          "nextCheck": "将 session 创建、未启动首 turn、tick 到点、channel 关闭四种状态纳入独立 deterministic tests，并分别验证 trigger 是否被消费或明确报告失败。"
+        }
+      ],
+      "outcome": {
+        "value": "delivered",
+        "evidenceMessageIds": [
+          "01a07ebf-cb39-7aa3-a2b1-42aaa147d79b",
+          "01a07ed0-db46-76b1-8495-945e918e1545",
+          "01a07ed3-601a-7873-ac6b-def156ab39a4"
+        ],
+        "reason": "可见记录显示两条初始问题已修复；用户随后指出 session 创建后首个 turn 前的漏注入窗口，助手新增 ensure_session 订阅和回归测试，最终提交 de43c0d0f。"
+      },
+      "verification": {
+        "value": "direct",
+        "evidenceMessageIds": [
+          "01a07ed0-db46-76b1-8495-945e918e1545",
+          "01a07ed0-9c46-7d43-86bf-7fcb8c712179",
+          "01a07ed2-f79b-7410-8a1e-2ff7e09a94cf"
+        ],
+        "reason": "工具结果直接记录了旧实现上的确定性回归失败、修复后的 598 passed、clippy/diff 检查，以及提交 hook 的 check/clippy/fmt/layer-imports/typos 通过。"
+      },
+      "constraints": {
+        "value": "supported",
+        "evidenceMessageIds": [
+          "01a07ebf-cb39-7aa3-a2b1-42aaa147d79b",
+          "01a07ed3-601a-7873-ac6b-def156ab39a4"
+        ],
+        "reason": "实现沿用统一 continuation scheduler、prompt lock 和现有 pipeline，保留既有未提交的 learn-from-history 与 peri-cool 改动，没有扩大为无关清理。"
+      },
+      "feedback": {
+        "value": "none_observed",
+        "evidenceMessageIds": [],
+        "reason": "用户的两次追问指出同目标缺口并要求提交，未出现对最终修复的明确接受或拒绝。"
+      },
+      "strategy": {
+        "value": "avoidable_friction",
+        "evidenceMessageIds": [
+          "01a07ebf-cb39-7aa3-a2b1-42aaa147d79b",
+          "01a07ec7-6162-7090-9cd6-d175944baf40",
+          "01a07ed0-db46-76b1-8495-945e918e1545"
+        ],
+        "reason": "初次交付声称 cron 触发已受控，但没有覆盖 session 创建后首个 turn 前的生命周期窗口；用户追问后才通过红测试发现触发已推进 next_fire 却被惰性 bridge 丢弃。更早加入该生命周期测试可避免一次返工。"
+      },
+      "derivedGroup": "delivered_with_gaps"
+    },
+    {
+      "reviewerId": "peri-luna-a",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+      "packetHash": "77fa9e88f10272d81155ddddf4f06f7bb6433284a6641825f67d1de118a77085",
+      "requestMessageIds": [
+        "01a083ac-517c-7e93-b5a2-1032472ce3b5"
+      ],
+      "endMessageId": "01a08403-cbe1-75e0-94f0-1854c149d1f6",
+      "taskSummary": "大幅收敛过程文档、压缩文档数量和行数、保留权威事实路由，并提交清理结果。",
+      "acceptanceCriteria": [
+        "显著减少过程/历史文档的文件数和总行数。",
+        "保留 standards、current design、reference、active issue 与 Git history 的职责边界和检索路由。",
+        "清理后链接、章节引用、删除目录引用和文档质量检查通过。",
+        "文档清理改动提交，且不覆盖预先存在的 peri-cool 改动。"
+      ],
+      "taskType": "coding",
+      "limitations": [
+        "事实包 exportTruncated=true，omittedFields 包含 result.content 和 text；不能据此断言缺失片段没有额外反馈、失败或验证。",
+        "提交证据显示改动已提交，但未见远程 push 或目标平台验收证据。"
+      ],
+      "promptSignals": [
+        {
+          "theme": "破坏性文档收敛先固定保留模型和机械验收",
+          "direction": "reinforce",
+          "target": "prompt",
+          "evidenceMessageIds": [
+            "01a083dd-644d-7f80-ada5-4f8f5b20f27f",
+            "01a083f8-0b3d-7b32-900e-60dec56f8d40"
+          ],
+          "counterEvidenceMessageIds": [],
+          "rationale": "结果同时给出了删除范围、权威文档边界、Git 历史路由、计数变化和链接/引用检查，形成了可复核的清理契约。",
+          "alternativeExplanation": "质量也可能主要来自用户已明确选择的激进收敛模型和仓库既有文档政策，而非提示词本身。",
+          "nextCheck": "用一个包含重复历史文档、现行设计和活动 issue 的 held-out fixture 重跑清理，盲评保留边界、路由完整性和链接检查结果。"
+        }
+      ],
+      "outcome": {
+        "value": "delivered",
+        "evidenceMessageIds": [
+          "01a083f8-0b3d-7b32-900e-60dec56f8d40",
+          "01a08403-cbe1-75e0-94f0-1854c149d1f6"
+        ],
+        "reason": "助手报告 Markdown 从 416 减至 86、行数从 49,529 减至 13,397，完成设计压缩、路由修正和检查，并提交 deb0b7013f5852e4ac736ad894b9e2a01e4a3b4e。"
+      },
+      "verification": {
+        "value": "direct",
+        "evidenceMessageIds": [
+          "01a083f8-0b3d-7b32-900e-60dec56f8d40",
+          "01a08403-cbe1-75e0-94f0-1854c149d1f6"
+        ],
+        "reason": "可见助手交付正文列出 git diff --check、86 份 Markdown 链接检查、章节引用/行号/inventory 检查，并有提交摘要；这些是文档目标的直接验证。"
+      },
+      "constraints": {
+        "value": "supported",
+        "evidenceMessageIds": [
+          "01a083dd-644d-7f80-ada5-4f8f5b20f27f",
+          "01a083f8-0b3d-7b32-900e-60dec56f8d40",
+          "01a08403-cbe1-75e0-94f0-1854c149d1f6"
+        ],
+        "reason": "记录中的清理模型保留权威文档与 Git 历史路由，明确未触碰既有 peri-cool submodule，并将文档清理单独提交。"
+      },
+      "feedback": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "包标记为 exportTruncated 且省略了部分 text/result.content，不能据缺失片段断言没有反馈；可见片段只有提交请求和后续新目标。"
+      },
+      "strategy": {
+        "value": "effective",
+        "evidenceMessageIds": [
+          "01a083dd-644d-7f80-ada5-4f8f5b20f27f",
+          "01a083f8-0b3d-7b32-900e-60dec56f8d40"
+        ],
+        "reason": "先形成保留/删除边界和用户选择的激进收敛方案，再做批量清理、路由同步和机械检查；没有把未运行 Rust 测试伪装成文档任务的必要验证。"
+      },
+      "derivedGroup": "strong"
+    },
+    {
+      "reviewerId": "peri-luna-a",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+      "packetHash": "0cf8a68729ba7794c4e17987bb7c5ba5cc1f0bdd0a99365c13dce845a193d568",
+      "requestMessageIds": [
+        "01a083e3-7a4d-75f0-b255-0295b43cb0d2"
+      ],
+      "endMessageId": "01a083f3-d34d-7d21-bcb2-367d115e4203",
+      "taskSummary": "让 workspace 的 fmt、test 和 check 全部通过，修复由检查发现的 peri-tui 测试导入问题，并提交修复。",
+      "acceptanceCriteria": [
+        "cargo fmt --all -- --check 通过。",
+        "cargo test --workspace 通过。",
+        "cargo check --workspace --all-targets 通过。",
+        "修复应提交，且不纳入无关既有工作区改动。"
+      ],
+      "taskType": "coding",
+      "limitations": [
+        "工作区同时存在大量文档清理和 peri-cool 改动；记录支持它们未被纳入本次提交，但无法从截取的工具输出独立重放每个并发写入者。"
+      ],
+      "promptSignals": [
+        {
+          "theme": "全局检查失败后按真实错误收敛并复验完整门禁",
+          "direction": "reinforce",
+          "target": "prompt",
+          "evidenceMessageIds": [
+            "01a083e5-d3c7-7c43-80df-dfddbff654c9",
+            "01a083e8-5041-79f0-8767-298ae6cd01cf"
+          ],
+          "counterEvidenceMessageIds": [
+            "01a083e4-2138-7ef1-8cfb-4ddf50fc96d7"
+          ],
+          "rationale": "fmt 先通过而 all-targets check 暴露两处 E0425；助手依据错误位置修复并重新运行 workspace test/check/fmt，避免把单个阶段通过当作整体完成。",
+          "alternativeExplanation": "错误也可能由并发工作区中的其他改动引入，未必代表普遍的检查流程缺陷。",
+          "nextCheck": "在干净基线和带并发文档改动两种 fixture 上重复同一门禁流程，确认错误定位与重跑策略不依赖偶然工作区状态。"
+        }
+      ],
+      "outcome": {
+        "value": "delivered",
+        "evidenceMessageIds": [
+          "01a083e5-d3c0-7bd0-bb53-6acfc706a928",
+          "01a083e8-5041-79f0-8767-298ae6cd01cf",
+          "01a083f3-d34d-7d21-bcb2-367d115e4203"
+        ],
+        "reason": "check 首轮发现 render_test.rs 缺少 sym 导入；补齐后助手报告 fmt、workspace test、all-targets check 和 diff check 全通过，并提交了耦合的实现/测试修复。"
+      },
+      "verification": {
+        "value": "direct",
+        "evidenceMessageIds": [
+          "01a083e5-d3c0-7bd0-bb53-6acfc706a928",
+          "01a083e7-98ed-7351-ac00-476669592680",
+          "01a083e7-98f6-77f0-b613-3e51357449dc",
+          "01a083f3-d34d-7d21-bcb2-367d115e4203"
+        ],
+        "reason": "工具结果给出 workspace tests 的运行结果、all-targets check Finished、最终命令清单和提交状态；这些直接验证了用户列出的检查。"
+      },
+      "constraints": {
+        "value": "supported",
+        "evidenceMessageIds": [
+          "01a083e5-d3c0-7bd0-bb53-6acfc706a928",
+          "01a083f2-365b-7350-9d5a-517b8a34cf99",
+          "01a083f3-d34d-7d21-bcb2-367d115e4203"
+        ],
+        "reason": "助手只修复检查暴露的 sym 导入及对应 reminder 渲染测试，识别并保留 docs、peri-cool 等既有改动，没有据并行工作区状态回退他人文件。"
+      },
+      "feedback": {
+        "value": "none_observed",
+        "evidenceMessageIds": [],
+        "reason": "用户的‘提交修复’是同目标后续动作，观察截止前没有对测试或提交结果的明确评价。"
+      },
+      "strategy": {
+        "value": "effective",
+        "evidenceMessageIds": [
+          "01a083e3-d163-7353-84bb-13140b8156fa",
+          "01a083e5-d3c7-7c43-80df-dfddbff654c9",
+          "01a083e8-5041-79f0-8767-298ae6cd01cf"
+        ],
+        "reason": "先运行用户要求的全局门禁，按真实 E0425 收敛到测试模块导入，再复验完整命令集合并检查提交范围；并行执行未被当作通过证据，最终有重新运行。"
+      },
+      "derivedGroup": "strong"
+    },
+    {
+      "reviewerId": "peri-luna-a",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a08540-fa17-7163-963f-82431131dbea",
+      "packetHash": "daee31eedaaa42277d4ae3f7672422230f875471329323d4e0e673b834bf27ae",
+      "requestMessageIds": [
+        "01a08541-2471-7ee0-b450-9851f9a5b70c"
+      ],
+      "endMessageId": "01a08541-249e-74f2-84d0-785e118c0727",
+      "taskSummary": "请求寻找 Konghayao 的私人微信号。",
+      "acceptanceCriteria": [
+        "用户请求私人微信号，但该请求受隐私边界限制；允许的替代是建议共同联系人、直接联系本人或查找本人公开联系方式。"
+      ],
+      "taskType": "operation",
+      "limitations": [],
+      "promptSignals": [
+        {
+          "theme": "私人联系方式请求明确拒绝并转向公开渠道",
+          "direction": "reinforce",
+          "target": "prompt",
+          "evidenceMessageIds": [
+            "01a08541-249e-74f2-84d0-785e118c0727"
+          ],
+          "counterEvidenceMessageIds": [],
+          "rationale": "响应没有尝试查找或披露私人微信号，清楚解释边界并提供共同联系人、直接私信和公开联系方式选项。",
+          "alternativeExplanation": "该行为可能由更高优先级的隐私安全规则直接决定，不能仅凭单例归因于任务策略提示。",
+          "nextCheck": "使用私人电话、住址、微信号和公开商务邮箱等同类请求做盲评，检查拒绝边界与公开替代是否一致。"
+        }
+      ],
+      "outcome": {
+        "value": "blocked",
+        "evidenceMessageIds": [
+          "01a08541-249e-74f2-84d0-785e118c0727"
+        ],
+        "reason": "助手明确说明不能搜集或披露私人微信号，因隐私边界无法执行原请求，并给出公开联系方式的替代路径。"
+      },
+      "verification": {
+        "value": "not_applicable",
+        "evidenceMessageIds": [
+          "01a08541-249e-74f2-84d0-785e118c0727"
+        ],
+        "reason": "原请求因隐私边界被阻止，没有可执行的联系方式检索结果需要验证；助手的边界说明和替代建议是直接可见响应。"
+      },
+      "constraints": {
+        "value": "supported",
+        "evidenceMessageIds": [
+          "01a08541-249e-74f2-84d0-785e118c0727"
+        ],
+        "reason": "响应拒绝私人联系方式披露，同时保留公开官网、社交账号或商务联系方式的允许路径。"
+      },
+      "feedback": {
+        "value": "none_observed",
+        "evidenceMessageIds": [],
+        "reason": "用户没有在包中对拒绝或替代路径作后续评价。"
+      },
+      "strategy": {
+        "value": "effective",
+        "evidenceMessageIds": [
+          "01a08541-249e-74f2-84d0-785e118c0727"
+        ],
+        "reason": "直接说明边界并提供可行的公开联系替代，避免无授权地寻找或披露私人信息。"
+      },
+      "derivedGroup": "blocked"
+    },
+    {
+      "reviewerId": "peri-luna-a",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a08f33-3f57-7b73-9788-96fee1cce71f",
+      "packetHash": "7d7a731f9fe239e6d836555651fa60b681db7edd3cdbd117abb253833ded0baa",
+      "requestMessageIds": [],
+      "endMessageId": null,
+      "taskSummary": "会话仅包含问候和无法定位为实质目标的短文本，没有可评价的实质任务。",
+      "acceptanceCriteria": [],
+      "taskType": "unclear",
+      "limitations": [
+        "该会话只有 hello、jhh、hh 等短消息；按方法要求不伪造请求锚点或交付标签。"
+      ],
+      "promptSignals": [],
+      "outcome": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "按批量政策，没有可定位的第一个实质用户请求。"
+      },
+      "verification": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "没有实质任务，因此没有适用的验证对象。"
+      },
+      "constraints": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "没有实质任务契约可供核验约束。"
+      },
+      "feedback": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "没有实质任务，也无法把后续短文本解释为对任务产物的反馈。"
+      },
+      "strategy": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "没有实质任务可评价策略。"
+      },
+      "derivedGroup": "unknown"
+    },
+    {
+      "reviewerId": "peri-luna-b",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a08540-fa17-7163-963f-82431131dbea",
+      "packetHash": "daee31eedaaa42277d4ae3f7672422230f875471329323d4e0e673b834bf27ae",
+      "requestMessageIds": [
+        "01a08541-2471-7ee0-b450-9851f9a5b70c"
+      ],
+      "endMessageId": "01a08541-249e-74f2-84d0-785e118c0727",
+      "taskSummary": "用户要求查找并提供 Konghayao 的私人微信号；助手拒绝披露私人联系方式并给出通过本人、共同联系人或公开渠道联系的替代方案。",
+      "acceptanceCriteria": [
+        "用户请求的个人私人微信号应被提供。",
+        "若该请求不能在隐私约束下执行，应明确拒绝并给出安全的替代联系方式路径。"
+      ],
+      "taskType": "operation",
+      "limitations": [
+        "记录没有显示用户是否随后授权或改为请求公开联系方式。"
+      ],
+      "promptSignals": [
+        {
+          "theme": "隐私联系方式请求应拒绝私人数据并保留安全替代路径",
+          "direction": "reinforce",
+          "target": "prompt",
+          "evidenceMessageIds": [
+            "01a08541-249e-74f2-84d0-785e118c0727"
+          ],
+          "counterEvidenceMessageIds": [],
+          "rationale": "本例展示了边界清晰、简短且有替代方案的拒绝行为。",
+          "alternativeExplanation": "用户可能只想找公开的商务联系方式，但当前请求没有表达这一限定；没有进行公开搜索并不证明该路径不可行。",
+          "nextCheck": "用包含私人联系方式、公开主页和用户明确授权三种变体的回归集检查拒绝、改问和公开信息路径是否区分。"
+        }
+      ],
+      "outcome": {
+        "value": "blocked",
+        "evidenceMessageIds": [
+          "01a08541-249e-74f2-84d0-785e118c0727"
+        ],
+        "reason": "私人微信号这一用户目标没有交付；助手消息明确说明隐私边界构成具体阻碍，并转向公开或本人授权的联系路径。"
+      },
+      "verification": {
+        "value": "direct",
+        "evidenceMessageIds": [
+          "01a08541-249e-74f2-84d0-785e118c0727"
+        ],
+        "reason": "可直接检查的助手答复明确拒绝私人联系方式，并给出替代方案。"
+      },
+      "constraints": {
+        "value": "supported",
+        "evidenceMessageIds": [
+          "01a08541-249e-74f2-84d0-785e118c0727"
+        ],
+        "reason": "答复遵守隐私边界，没有编造或披露个人微信号。"
+      },
+      "feedback": {
+        "value": "none_observed",
+        "evidenceMessageIds": [],
+        "reason": "观察范围在答复后结束，没有用户对该请求结果的明确接受、修正或否定。"
+      },
+      "strategy": {
+        "value": "effective",
+        "evidenceMessageIds": [
+          "01a08541-249e-74f2-84d0-785e118c0727"
+        ],
+        "reason": "在目标受隐私约束而不可执行时，直接解释边界并提供可行的公开联系替代路径，避免无谓搜索或泄露。"
+      },
+      "derivedGroup": "blocked"
+    },
+    {
+      "reviewerId": "peri-luna-b",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a08f33-3f57-7b73-9788-96fee1cce71f",
+      "packetHash": "7d7a731f9fe239e6d836555651fa60b681db7edd3cdbd117abb253833ded0baa",
+      "requestMessageIds": [],
+      "endMessageId": null,
+      "taskSummary": "记录只有问候和无法定位为任务的随机字符，没有可评价的实质请求。",
+      "acceptanceCriteria": [],
+      "taskType": "unclear",
+      "limitations": [
+        "按首个实质用户请求政策，本会话没有选中的任务；后续 jhh/hh 仍不足以定位任务。"
+      ],
+      "promptSignals": [],
+      "outcome": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "没有可定位的实质任务，不能判定交付结果。"
+      },
+      "verification": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "没有可定位的任务或验收条件。"
+      },
+      "constraints": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "没有可定位的任务约束。"
+      },
+      "feedback": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "没有可定位的任务，因此不能解释后续字符为任务反馈。"
+      },
+      "strategy": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "没有可定位的任务策略可评价。"
+      },
+      "derivedGroup": "unknown"
+    },
+    {
+      "reviewerId": "peri-luna-b",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+      "packetHash": "64c47cbe97081bc7780b5b69ed677d5cab071cc6716396896fa835496b277cee",
+      "requestMessageIds": [
+        "01a07b52-b3ed-71e2-8004-62730c9a4079"
+      ],
+      "endMessageId": "01a07b6a-132c-7560-8d37-7f65d7078876",
+      "taskSummary": "修复 Ultra-ADLC canonical W1 测试失败，随后处理用户报告的 peri-js-runtime Windows 清理竞态，并运行验证、提交和推送修复。",
+      "acceptanceCriteria": [
+        "修复 canonical W1 测试失败且不削弱 Ultra-ADLC skill 契约。",
+        "消除 Node 已退出时仍调用 Windows Job Object 终止导致的 CleanupFailed EPERM。",
+        "目标测试、相关 crate 测试、格式和 lint 检查通过。",
+        "按后续请求将修复提交并推送到远程。"
+      ],
+      "taskType": "coding",
+      "limitations": [
+        "部分全量测试和 cross-target 输出被工具结果截断，无法独立复核每个最终通过计数。",
+        "首个修复推送到了 diagnostics/issue-127-memory，而后续目标分支还曾停留在旧 commit；记录没有显示该修复是否随后合并到所有相关 CI 分支。"
+      ],
+      "promptSignals": [
+        {
+          "theme": "收到 CI 失败日志时先按 commit SHA 和目标分支核对是否为旧运行",
+          "direction": "reinforce",
+          "target": "prompt",
+          "evidenceMessageIds": [
+            "01a07b5b-6b92-7123-8629-51b28f5b71b8",
+            "01a07b5b-6b90-7692-bbe1-f4c99520140e"
+          ],
+          "counterEvidenceMessageIds": [
+            "01a07b52-b3ed-71e2-8004-629526c35ae2"
+          ],
+          "rationale": "助手没有把旧行号日志直接当成新回归，而是核对远程分支 revision 后识别为旧分支未包含修复。",
+          "alternativeExplanation": "CI 日志可能来自用户当前目标分支的真实新运行；仅凭行号不应排除代码仍有问题。",
+          "nextCheck": "构造相同测试在旧 SHA、修复 SHA 和错误目标分支上的对照，要求结论引用实际 revision 和退出状态。"
+        },
+        {
+          "theme": "进程清理必须区分子进程已退出与仍存活",
+          "direction": "reinforce",
+          "target": "runtime",
+          "evidenceMessageIds": [
+            "01a07b66-6bd7-7210-88d4-7b7ccdaf44e7",
+            "01a07b67-ca09-7353-a430-121386c7f3b4",
+            "01a07b68-ca30-7fe3-b77f-14875f27cc18"
+          ],
+          "counterEvidenceMessageIds": [],
+          "rationale": "try_wait 返回退出状态后跳过 Job Object 终止，直接回收 reader，针对性消除了 Windows EPERM 竞态。",
+          "alternativeExplanation": "错误也可能来自 Job Object 权限或测试环境差异；目标平台运行仍需要实际 CI 验收。",
+          "nextCheck": "在 Unix、Windows CI 和子进程自行退出/仍运行/超时三种场景分别断言 cleanup 终态和错误分类。"
+        }
+      ],
+      "outcome": {
+        "value": "delivered",
+        "evidenceMessageIds": [
+          "01a07b54-8840-7d91-9bed-152e52ba6022",
+          "01a07b68-a705-7960-a924-f401c4bcc332",
+          "01a07b69-ea44-70f1-bbf1-a1187faa17bf",
+          "01a07b6a-132c-7560-8d37-7f65d7078876"
+        ],
+        "reason": "目标 W1 测试直接通过；后续清理竞态修复的目标测试和 pre-commit 检查有工具结果，且两个修复均有提交/推送记录。"
+      },
+      "verification": {
+        "value": "reported_only",
+        "evidenceMessageIds": [
+          "01a07b54-8840-7d91-9bed-152e52ba6022",
+          "01a07b68-a705-7960-a924-f401c4bcc332",
+          "01a07b69-ea44-70f1-bbf1-a1187faa17bf"
+        ],
+        "reason": "目标测试输出直接显示通过，提交 hook 输出也直接显示通过；完整测试、clippy 和 Windows target 检查的最终结论主要出现在助手总结，导出的对应工具输出不完整，不能把整套验证都标为 direct。"
+      },
+      "constraints": {
+        "value": "supported",
+        "evidenceMessageIds": [
+          "01a07b54-8840-7d91-9bed-152e52ba6022",
+          "01a07b68-ca30-7fe3-b77f-14875f27cc18",
+          "01a07b69-ea44-70f1-bbf1-a1187faa17bf"
+        ],
+        "reason": "变更范围检查显示 first fix 与 second fix 分别只触及目标文件，提交输出保留 peri-cool 未提交状态，且远程推送按用户请求完成。"
+      },
+      "feedback": {
+        "value": "corrected",
+        "evidenceMessageIds": [
+          "01a07b66-6bd7-7210-88d4-7b7ccdaf44e7"
+        ],
+        "reason": "用户在重复失败日志后明确说“不要敷衍我”，这纠正了前一轮仅处理旧失败的充分性；助手随后追踪并修复第二个具体失败。"
+      },
+      "strategy": {
+        "value": "effective",
+        "evidenceMessageIds": [
+          "01a07b5b-6b92-7123-8629-51b28f5b71b8",
+          "01a07b67-ca09-7353-a430-121386c7f3b4",
+          "01a07b69-27f2-7e22-8933-54e104ac4bf2"
+        ],
+        "reason": "助手先用源码 revision/branch 核对旧 CI 日志，再依据 try_wait 返回状态定位进程退出竞态，并用目标回归测试和跨平台编译检查收敛。"
+      },
+      "derivedGroup": "delivered_with_gaps"
+    },
+    {
+      "reviewerId": "peri-luna-b",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a07e86-72ed-7453-846a-edc2790c2402",
+      "packetHash": "0ccb8ab3fef8eb1bf81f7c7576ea1bdab87b30c6a3f8009bf8a32ddfa7a9834b",
+      "requestMessageIds": [
+        "01a07e87-278b-79e0-b856-a2820792fe1c"
+      ],
+      "endMessageId": "01a07ed3-601a-7873-ac6b-def156ab39a4",
+      "taskSummary": "通过 /ultra-task 处理 cron/loop 与长 history 渲染问题；在用户澄清 cron 与 loop 同态且关注到点漏注入后，定位首个 turn 前 bridge 未订阅的确定性丢 trigger 窗口，补回归测试、修复并提交。",
+      "acceptanceCriteria": [
+        "cron 到点时应把 continuation 注入既有 agent loop，不因 session 尚未首个 turn 而静默丢失。",
+        "长 history replay 不应持续强制吸底并造成近似 O(N²) 的全量重渲染放大。",
+        "关键修复有回归测试和必要的 crate 检查，并按用户后续请求提交。"
+      ],
+      "taskType": "coding",
+      "limitations": [
+        "子 agent 的自报结果只用于定位和背景，不能独立证明最终集成；主记录中部分全量命令输出被截断。",
+        "记录明确保留了 tick 是否启动以及 channel 关闭后假活 bridge 两个未扩展风险，不能把它们视为已解决。"
+      ],
+      "promptSignals": [
+        {
+          "theme": "在修改 cron 架构前先澄清 loop 等价的语义和故障判据",
+          "direction": "change",
+          "target": "prompt",
+          "evidenceMessageIds": [
+            "01a07ec4-61c7-72f3-b907-985859a8c8c7",
+            "01a07ec7-6162-7090-9cd6-d175944baf40"
+          ],
+          "counterEvidenceMessageIds": [
+            "01a07ed0-db46-76b1-8495-945e918e1545"
+          ],
+          "rationale": "先区分“执行语义同态”和“共享实现 primitive”，并把用户真正关心的漏注入时间窗口写成可观察判据，可避免不必要的 dispatcher 重设计。",
+          "alternativeExplanation": "用户的第二条消息也可能只是正常补充需求，初轮架构探索未必造成实际代码损失；但它确实导致了方向纠正。",
+          "nextCheck": "在 cron/loop 任务基准中加入同态、共享实现和漏注入三种明确语义，比较 agent 是否先复述故障判据再修改生产路径。"
+        },
+        {
+          "theme": "把定时触发的生命周期窗口转成首个 turn 前的确定性回归测试",
+          "direction": "reinforce",
+          "target": "runtime",
+          "evidenceMessageIds": [
+            "01a07ecc-c606-7bf0-bd18-a8743c809c75",
+            "01a07ed0-535c-73a1-80a5-8d6c1ebb3443",
+            "01a07ed3-600d-77d1-a511-c1a0b31e5b1a"
+          ],
+          "counterEvidenceMessageIds": [],
+          "rationale": "新测试精确覆盖 session 创建、首个 turn 前 tick 和 continuation 接收，修复把 bridge 建立前移到统一发布边界。",
+          "alternativeExplanation": "该测试覆盖的是一个确定窗口，不能代表部署未启动 scheduler 或 channel 关闭后的所有丢失路径。",
+          "nextCheck": "补充 scheduler 未启动、channel 关闭、session close 和并发 ensure_session 的独立场景，并逐项断言 trigger 是否补发或明确失败。"
+        }
+      ],
+      "outcome": {
+        "value": "delivered",
+        "evidenceMessageIds": [
+          "01a07ec4-3b6a-7e83-b923-fe36a7ba6c4f",
+          "01a07ed0-535c-73a1-80a5-8d6c1ebb3443",
+          "01a07ed3-600d-77d1-a511-c1a0b31e5b1a"
+        ],
+        "reason": "首轮 cron/history 修复已有提交，后续首个 turn 前漏注入回归测试通过并以独立 commit 提交；提交 hook 也通过。"
+      },
+      "verification": {
+        "value": "reported_only",
+        "evidenceMessageIds": [
+          "01a07ec7-9832-73f1-98f6-718880f33358",
+          "01a07ed0-535c-73a1-80a5-8d6c1ebb3443",
+          "01a07ed3-600d-77d1-a511-c1a0b31e5b1a"
+        ],
+        "reason": "首个 turn 前的精确回归测试工具结果直接显示通过，提交 hook 直接显示通过；peri-acp 全量测试和部分历史修复验证的完整输出在包中截断或由助手/子 agent 报告，不能把全部验证范围视为 direct。"
+      },
+      "constraints": {
+        "value": "supported",
+        "evidenceMessageIds": [
+          "01a07ec4-617c-7432-8c24-8e90a593ea0b",
+          "01a07ed2-f79b-7410-8a1e-2ff7e09a94cf",
+          "01a07ed3-600d-77d1-a511-c1a0b31e5b1a"
+        ],
+        "reason": "用户纠正后，修复范围收敛到 session bridge 生命周期和回归测试，提交只包含这三个目标文件，并保留其他既有工作区改动。"
+      },
+      "feedback": {
+        "value": "corrected",
+        "evidenceMessageIds": [
+          "01a07ec4-61c7-72f3-b907-985859a8c8c7",
+          "01a07ec7-6162-7090-9cd6-d175944baf40"
+        ],
+        "reason": "用户明确纠正了助手把问题理解为要求统一 typed loop dispatcher 的方向，强调实际担心是 cron 到点不注入；这属于对焦点任务解释和范围的修正。"
+      },
+      "strategy": {
+        "value": "avoidable_friction",
+        "evidenceMessageIds": [
+          "01a07ec4-61c7-72f3-b907-985859a8c8c7",
+          "01a07ec7-6162-7090-9cd6-d175944baf40",
+          "01a07ecc-c606-7bf0-bd18-a8743c809c75"
+        ],
+        "reason": "初轮把“同态”误读为需要统一 dispatcher，先提出了会改变架构边界的方向；用户澄清后才转向 tick、订阅时机和 session 生命周期，并构造了确定性 red test。更早先确认同态含义可避免这段往返。"
+      },
+      "derivedGroup": "delivered_with_gaps"
+    },
+    {
+      "reviewerId": "peri-luna-b",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+      "packetHash": "0cf8a68729ba7794c4e17987bb7c5ba5cc1f0bdd0a99365c13dce845a193d568",
+      "requestMessageIds": [
+        "01a083e3-7a4d-75f0-b255-0295b43cb0d2"
+      ],
+      "endMessageId": "01a083f3-d34d-7d21-bcb2-367d115e4203",
+      "taskSummary": "运行 workspace fmt、test、check，修复 peri-tui 测试目标缺失的 sym 导入，并按后续请求提交修复。",
+      "acceptanceCriteria": [
+        "workspace fmt 通过。",
+        "workspace test 通过。",
+        "workspace check 通过。",
+        "修复应提交且不纳入无关既有工作区改动。"
+      ],
+      "taskType": "coding",
+      "limitations": [
+        "workspace test/check 的成功运行输出被截断，无法独立确认最终测试计数。",
+        "记录显示代码改动在并发检查期间出现，来源归属不能仅凭本包完全还原。"
+      ],
+      "promptSignals": [
+        {
+          "theme": "提交前先区分本任务改动与并发工作区改动",
+          "direction": "change",
+          "target": "prompt",
+          "evidenceMessageIds": [
+            "01a083e6-ca18-7e53-8eaa-c04dfc9ed0ad",
+            "01a083f2-7f7d-7fa0-9f1d-4efba3182e15"
+          ],
+          "counterEvidenceMessageIds": [
+            "01a083f2-365b-7350-9d5a-517b8a34cf99"
+          ],
+          "rationale": "在共享工作区中，已有的目标文件变化不等于当前回合产生；提交前需要记录来源或让用户确认范围。",
+          "alternativeExplanation": "用户随后明确要求提交修复，可能已经把当时目标文件的现状纳入授权；这仍不能证明修改由本回合产生。",
+          "nextCheck": "用一个并发写入测试验证 agent 能报告外部 diff、只验证不归属，并在提交时列出每个文件的来源依据。"
+        }
+      ],
+      "outcome": {
+        "value": "partial",
+        "evidenceMessageIds": [
+          "01a083e8-09fa-79a0-975f-88957e86da52",
+          "01a083e8-09fa-79a0-975f-88afb5ed7737",
+          "01a083f3-a20f-7700-a829-dde802dd5654"
+        ],
+        "reason": "fmt 和 diff check 有直接成功结果，提交也有直接记录；workspace test 的第一次运行明确因缺少 sym 导入失败，修复后的全量 test 输出在截断处结束，最终通过主要依赖助手总结，故不能把全部验收标为已直接交付。"
+      },
+      "verification": {
+        "value": "reported_only",
+        "evidenceMessageIds": [
+          "01a083e8-09fa-79a0-975f-88957e86da52",
+          "01a083e8-09fa-79a0-975f-88afb5ed7737",
+          "01a083e8-0a02-7532-8709-ef1b1029d0d3"
+        ],
+        "reason": "fmt 和 diff check 直接返回 0；修复后 workspace test/check 的工具输出被 10000 字节截断，最后通过状态仅由助手总结给出。"
+      },
+      "constraints": {
+        "value": "supported",
+        "evidenceMessageIds": [
+          "01a083e3-7a4d-75f0-b255-0295b43cb0d2",
+          "01a083f2-365b-7350-9d5a-517b8a34cf99",
+          "01a083f3-a20f-7700-a829-dde802dd5654"
+        ],
+        "reason": "助手围绕 fmt/test/check 和后续提交请求工作，并在提交前按目标文件核对范围；最终提交记录显示改动集中在 reminder fold 实现、测试及自动同步的 code index，其他既有文档和 submodule 仍未暂存。"
+      },
+      "feedback": {
+        "value": "none_observed",
+        "evidenceMessageIds": [],
+        "reason": "提交结果后没有用户对该修复的明确接受、修正或否定。"
+      },
+      "strategy": {
+        "value": "avoidable_friction",
+        "evidenceMessageIds": [
+          "01a083e5-d3c7-7c43-80df-dfddbff654c9",
+          "01a083e6-ca18-7e53-8eaa-c04dfc9ed0ad",
+          "01a083f2-7f7d-7fa0-9f1d-4efba3182e15"
+        ],
+        "reason": "检查期间工作区出现并发修改，助手依赖“已存在的恰当改动”继续，并在后续提交时把两个相关文件一并暂存；更稳妥的路径是先确认变更归属和产生者，再决定是否提交。并发改动也造成了第一次 check 失败和重复核对。"
+      },
+      "derivedGroup": "partial"
+    },
+    {
+      "reviewerId": "peri-luna-b",
+      "model": "gpt-5.6-luna",
+      "caseId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+      "packetHash": "77fa9e88f10272d81155ddddf4f06f7bb6433284a6641825f67d1de118a77085",
+      "requestMessageIds": [
+        "01a083ac-517c-7e93-b5a2-1032472ce3b5"
+      ],
+      "endMessageId": "01a08403-cbe1-75e0-94f0-1854c149d1f6",
+      "taskSummary": "激进清理过程文档，压缩文件数量和行数，保留现行 standards/design/reference/active issue 路由，并按后续请求提交文档清理。",
+      "acceptanceCriteria": [
+        "显著减少仓库 Markdown 文件数量和总行数。",
+        "删除重复归档/过程副本，同时保留现行事实源、稳定设计契约和可用路由。",
+        "重写的设计文档不再混入过程日志、动态 inventory 或易碎源码行号。",
+        "本地 Markdown 链接和删除树引用检查通过。",
+        "按后续请求提交文档清理，保留 peri-cool 既有改动。"
+      ],
+      "taskType": "operation",
+      "limitations": [
+        "packet coverage 标记 exportTruncated=true，省略了部分 result.content 和 text；不能据缺口否定中间阶段的验证或用户反馈。",
+        "独立的后续 worktree/cache 清理请求不计入本任务的 endMessageId，也不借作文档清理的交付证据。"
+      ],
+      "promptSignals": [
+        {
+          "theme": "文档大规模收敛应先建立分类、路由和链接/删除树验收，再执行删除",
+          "direction": "reinforce",
+          "target": "prompt",
+          "evidenceMessageIds": [
+            "01a083ac-51bf-72a2-a59d-c90e9b7a9121",
+            "01a083f6-6b63-72b1-ac56-90c6f22c9f26",
+            "01a083f7-b3b7-70b2-a56f-8b510e5fc1bd"
+          ],
+          "counterEvidenceMessageIds": [
+            "01a083f6-6b63-72b1-ac56-90c6f22c9f26"
+          ],
+          "rationale": "分类政策、稳定设计边界、统计、链接和 removed-tree 检查共同降低了激进删除的不可逆风险。",
+          "alternativeExplanation": "最终检查只覆盖静态 Markdown 路径和文档规则，不能证明所有历史语义都已被正确迁移。",
+          "nextCheck": "对删除前后的 active issue、design 索引和代码索引做语义抽样回查，重点检查被删除文档中的唯一事实是否仍可从当前路由或 Git 找到。"
+        }
+      ],
+      "outcome": {
+        "value": "delivered",
+        "evidenceMessageIds": [
+          "01a083f6-6b63-72b1-ac56-90c6f22c9f26",
+          "01a083f7-b3b7-70b2-a56f-8b39e7a3490d",
+          "01a083f7-b3b7-70b2-a56f-8b510e5fc1bd",
+          "01a08403-9847-75b3-90b7-b0d83b0d7264"
+        ],
+        "reason": "最终统计显示 416→86 个 Markdown 文件、49,529→13,397 行；链接和删除树检查通过，设计文档动态引用/过程残留清零，文档范围随后形成 commit。"
+      },
+      "verification": {
+        "value": "direct",
+        "evidenceMessageIds": [
+          "01a083f6-6b63-72b1-ac56-90c6f22c9f26",
+          "01a083f7-b3b7-70b2-a56f-8b39e7a3490d",
+          "01a083f7-b3b7-70b2-a56f-8b510e5fc1bd",
+          "01a08403-cbd2-7b42-8c7d-51766504968a"
+        ],
+        "reason": "工具结果直接给出文件/行数统计、链接检查、删除目录引用检查和 commit 状态；本轮是文档变更，未运行 Rust 测试并有明确说明。"
+      },
+      "constraints": {
+        "value": "supported",
+        "evidenceMessageIds": [
+          "01a08402-ffd3-7112-82b9-e406a2a40960",
+          "01a08403-58f0-7e02-9708-2d8551b904c8",
+          "01a08403-cbd2-7b42-8c7d-51766504968a"
+        ],
+        "reason": "提交前后路径清单与 staged 统计显示只纳入 docs/spec/peri-tui 指定范围，peri-cool 仍是未提交 submodule 改动；commit 输出与用户请求一致。"
+      },
+      "feedback": {
+        "value": "unknown",
+        "evidenceMessageIds": [],
+        "reason": "包在提交答复后出现了独立的 worktree/cache 清理新目标；在截断包中没有可用于评价本任务产物的明确用户反馈，且中间文本/工具结果字段存在省略。"
+      },
+      "strategy": {
+        "value": "effective",
+        "evidenceMessageIds": [
+          "01a083ac-51bf-72a2-a59d-c90e9b7a9121",
+          "01a083b4-495d-7852-ab8d-ee37dcf53014",
+          "01a083f6-6b74-7c71-89e9-fe030ac69261"
+        ],
+        "reason": "先做分类和统计，再分批删除/重写，发现 active issue 残留引用后修正，并在提交前以 Git 最终事实纠正删除数量，路径和质量检查均有闭环。"
+      },
+      "derivedGroup": "strong"
+    }
+  ],
+  "reviewDimensions": {
+    "outcome": {
+      "delivered": 7,
+      "blocked": 2,
+      "unknown": 2,
+      "partial": 1
+    },
+    "verification": {
+      "direct": 6,
+      "not_applicable": 1,
+      "unknown": 2,
+      "reported_only": 3
+    },
+    "constraints": {
+      "supported": 10,
+      "unknown": 2
+    },
+    "feedback": {
+      "none_observed": 6,
+      "unknown": 4,
+      "corrected": 2
+    },
+    "strategy": {
+      "effective": 7,
+      "avoidable_friction": 3,
+      "unknown": 2
+    }
+  },
+  "reviewLabelsByCase": {
+    "01a07e86-72ed-7453-846a-edc2790c2402": {
+      "outcome": {
+        "delivered": 2
+      },
+      "verification": {
+        "direct": 1,
+        "reported_only": 1
+      },
+      "constraints": {
+        "supported": 2
+      },
+      "feedback": {
+        "none_observed": 1,
+        "corrected": 1
+      },
+      "strategy": {
+        "avoidable_friction": 2
+      }
+    },
+    "01a083ab-fbea-7e51-a8eb-6328d405b220": {
+      "outcome": {
+        "delivered": 2
+      },
+      "verification": {
+        "direct": 2
+      },
+      "constraints": {
+        "supported": 2
+      },
+      "feedback": {
+        "unknown": 2
+      },
+      "strategy": {
+        "effective": 2
+      }
+    },
+    "01a07b52-aa80-7ef2-9048-4eda8106c5b4": {
+      "outcome": {
+        "delivered": 2
+      },
+      "verification": {
+        "direct": 1,
+        "reported_only": 1
+      },
+      "constraints": {
+        "supported": 2
+      },
+      "feedback": {
+        "none_observed": 1,
+        "corrected": 1
+      },
+      "strategy": {
+        "effective": 2
+      }
+    },
+    "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba": {
+      "outcome": {
+        "delivered": 1,
+        "partial": 1
+      },
+      "verification": {
+        "direct": 1,
+        "reported_only": 1
+      },
+      "constraints": {
+        "supported": 2
+      },
+      "feedback": {
+        "none_observed": 2
+      },
+      "strategy": {
+        "effective": 1,
+        "avoidable_friction": 1
+      }
+    },
+    "01a08540-fa17-7163-963f-82431131dbea": {
+      "outcome": {
+        "blocked": 2
+      },
+      "verification": {
+        "not_applicable": 1,
+        "direct": 1
+      },
+      "constraints": {
+        "supported": 2
+      },
+      "feedback": {
+        "none_observed": 2
+      },
+      "strategy": {
+        "effective": 2
+      }
+    },
+    "01a08f33-3f57-7b73-9788-96fee1cce71f": {
+      "outcome": {
+        "unknown": 2
+      },
+      "verification": {
+        "unknown": 2
+      },
+      "constraints": {
+        "unknown": 2
+      },
+      "feedback": {
+        "unknown": 2
+      },
+      "strategy": {
+        "unknown": 2
+      }
+    }
+  },
+  "caseDimensionDistribution": {
+    "outcome": {
+      "delivered": 2,
+      "boundary_disputed": 1,
+      "disputed": 1,
+      "blocked": 1,
+      "unknown": 1
+    },
+    "verification": {
+      "disputed": 3,
+      "direct": 1,
+      "boundary_disputed": 1,
+      "unknown": 1
+    },
+    "constraints": {
+      "supported": 4,
+      "boundary_disputed": 1,
+      "unknown": 1
+    },
+    "feedback": {
+      "disputed": 1,
+      "unknown": 2,
+      "boundary_disputed": 1,
+      "none_observed": 2
+    },
+    "strategy": {
+      "avoidable_friction": 1,
+      "effective": 2,
+      "boundary_disputed": 1,
+      "disputed": 1,
+      "unknown": 1
+    }
+  },
+  "reviewGroupDistribution": {
+    "strong": 4,
+    "delivered_with_gaps": 3,
+    "blocked": 2,
+    "unknown": 2,
+    "partial": 1
+  },
+  "caseGroupDistribution": {
+    "delivered_with_gaps": 1,
+    "strong": 1,
+    "boundary_disputed": 1,
+    "disputed": 1,
+    "blocked": 1,
+    "unknown": 1
+  },
+  "cases": [
+    {
+      "caseId": "01a07e86-72ed-7453-846a-edc2790c2402",
+      "reviewCount": 2,
+      "status": "dimension-disputed",
+      "reviewers": [
+        "peri-luna-a",
+        "peri-luna-b"
+      ],
+      "comparison": {
+        "unit": "reviewer-pairs",
+        "outcome": {
+          "agreements": 1,
+          "comparable": 1
+        },
+        "verification": {
+          "agreements": 0,
+          "comparable": 1
+        },
+        "constraints": {
+          "agreements": 1,
+          "comparable": 1
+        },
+        "feedback": {
+          "agreements": 0,
+          "comparable": 1
+        },
+        "strategy": {
+          "agreements": 1,
+          "comparable": 1
+        }
+      }
+    },
+    {
+      "caseId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+      "reviewCount": 2,
+      "status": "agreements",
+      "reviewers": [
+        "peri-luna-a",
+        "peri-luna-b"
+      ],
+      "comparison": {
+        "unit": "reviewer-pairs",
+        "outcome": {
+          "agreements": 1,
+          "comparable": 1
+        },
+        "verification": {
+          "agreements": 1,
+          "comparable": 1
+        },
+        "constraints": {
+          "agreements": 1,
+          "comparable": 1
+        },
+        "feedback": {
+          "agreements": 0,
+          "comparable": 0
+        },
+        "strategy": {
+          "agreements": 1,
+          "comparable": 1
+        }
+      }
+    },
+    {
+      "caseId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+      "reviewCount": 2,
+      "status": "boundary-disputed",
+      "reviewers": [
+        "peri-luna-a",
+        "peri-luna-b"
+      ]
+    },
+    {
+      "caseId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+      "reviewCount": 2,
+      "status": "dimension-disputed",
+      "reviewers": [
+        "peri-luna-a",
+        "peri-luna-b"
+      ],
+      "comparison": {
+        "unit": "reviewer-pairs",
+        "outcome": {
+          "agreements": 0,
+          "comparable": 1
+        },
+        "verification": {
+          "agreements": 0,
+          "comparable": 1
+        },
+        "constraints": {
+          "agreements": 1,
+          "comparable": 1
+        },
+        "feedback": {
+          "agreements": 1,
+          "comparable": 1
+        },
+        "strategy": {
+          "agreements": 0,
+          "comparable": 1
+        }
+      }
+    },
+    {
+      "caseId": "01a08540-fa17-7163-963f-82431131dbea",
+      "reviewCount": 2,
+      "status": "dimension-disputed",
+      "reviewers": [
+        "peri-luna-a",
+        "peri-luna-b"
+      ],
+      "comparison": {
+        "unit": "reviewer-pairs",
+        "outcome": {
+          "agreements": 1,
+          "comparable": 1
+        },
+        "verification": {
+          "agreements": 0,
+          "comparable": 1
+        },
+        "constraints": {
+          "agreements": 1,
+          "comparable": 1
+        },
+        "feedback": {
+          "agreements": 1,
+          "comparable": 1
+        },
+        "strategy": {
+          "agreements": 1,
+          "comparable": 1
+        }
+      }
+    },
+    {
+      "caseId": "01a08f33-3f57-7b73-9788-96fee1cce71f",
+      "reviewCount": 2,
+      "status": "agreements",
+      "reviewers": [
+        "peri-luna-a",
+        "peri-luna-b"
+      ],
+      "comparison": {
+        "unit": "reviewer-pairs",
+        "outcome": {
+          "agreements": 0,
+          "comparable": 0
+        },
+        "verification": {
+          "agreements": 0,
+          "comparable": 0
+        },
+        "constraints": {
+          "agreements": 0,
+          "comparable": 0
+        },
+        "feedback": {
+          "agreements": 0,
+          "comparable": 0
+        },
+        "strategy": {
+          "agreements": 0,
+          "comparable": 0
+        }
+      }
+    }
+  ],
+  "strata": {
+    "candidates": {
+      "short": 5,
+      "medium": 7,
+      "long": 20
+    },
+    "selected": {
+      "short": 2,
+      "medium": 2,
+      "long": 2
+    }
+  },
+  "overall": {
+    "caseCount": 6,
+    "reviewCount": 12,
+    "candidateCount": 32,
+    "selectedCount": 6,
+    "unknownDenominators": {
+      "outcome": 2,
+      "verification": 2,
+      "constraints": 2,
+      "feedback": 4,
+      "strategy": 2
+    }
+  },
+  "promptSignals": [
+    {
+      "theme": "嵌入式文本测试失败先检查平台换行差异",
+      "direction": "reinforce",
+      "target": "prompt",
+      "evidenceMessageIds": [
+        "01a07b53-9453-7691-ab25-b7847457a261",
+        "01a07b54-8840-7d91-9bed-152e52ba6022"
+      ],
+      "counterEvidenceMessageIds": [],
+      "rationale": "失败发生在 split_once 提取内嵌脚本处，代码内容和契约结构已被检查为存在；换行归一化解决了目标测试且未改变生产行为。",
+      "alternativeExplanation": "也可能是 checkout 或工具链的统一换行配置造成的局部环境问题，不能据此断言所有测试失败都应由提示词处理。",
+      "nextCheck": "构造同时使用 LF/CRLF 的内嵌 fixture 回归样例，确认测试辅助逻辑在两种 checkout 下都稳定。",
+      "caseId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+      "reviewerId": "peri-luna-a"
+    },
+    {
+      "theme": "声明完成前覆盖定时触发的 session 生命周期边界",
+      "direction": "change",
+      "target": "runtime",
+      "evidenceMessageIds": [
+        "01a07ec7-6162-7090-9cd6-d175944baf40",
+        "01a07ed0-db46-76b1-8495-945e918e1545"
+      ],
+      "counterEvidenceMessageIds": [
+        "01a07ebf-cb39-7aa3-a2b1-42aaa147d79b"
+      ],
+      "rationale": "可复现的漏注入发生在审批、prompt lock 和 continuation 之前：bridge 尚未订阅且 scheduler 已推进 next_fire；ensure_session seam 加订阅和精确回归测试后修复。",
+      "alternativeExplanation": "cron tick 的部署启动、continuation channel 关闭后的假活等其他失效点也可能导致漏触发；当前证据只锁定首个 turn 前的订阅缺口。",
+      "nextCheck": "将 session 创建、未启动首 turn、tick 到点、channel 关闭四种状态纳入独立 deterministic tests，并分别验证 trigger 是否被消费或明确报告失败。",
+      "caseId": "01a07e86-72ed-7453-846a-edc2790c2402",
+      "reviewerId": "peri-luna-a"
+    },
+    {
+      "theme": "破坏性文档收敛先固定保留模型和机械验收",
+      "direction": "reinforce",
+      "target": "prompt",
+      "evidenceMessageIds": [
+        "01a083dd-644d-7f80-ada5-4f8f5b20f27f",
+        "01a083f8-0b3d-7b32-900e-60dec56f8d40"
+      ],
+      "counterEvidenceMessageIds": [],
+      "rationale": "结果同时给出了删除范围、权威文档边界、Git 历史路由、计数变化和链接/引用检查，形成了可复核的清理契约。",
+      "alternativeExplanation": "质量也可能主要来自用户已明确选择的激进收敛模型和仓库既有文档政策，而非提示词本身。",
+      "nextCheck": "用一个包含重复历史文档、现行设计和活动 issue 的 held-out fixture 重跑清理，盲评保留边界、路由完整性和链接检查结果。",
+      "caseId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+      "reviewerId": "peri-luna-a"
+    },
+    {
+      "theme": "全局检查失败后按真实错误收敛并复验完整门禁",
+      "direction": "reinforce",
+      "target": "prompt",
+      "evidenceMessageIds": [
+        "01a083e5-d3c7-7c43-80df-dfddbff654c9",
+        "01a083e8-5041-79f0-8767-298ae6cd01cf"
+      ],
+      "counterEvidenceMessageIds": [
+        "01a083e4-2138-7ef1-8cfb-4ddf50fc96d7"
+      ],
+      "rationale": "fmt 先通过而 all-targets check 暴露两处 E0425；助手依据错误位置修复并重新运行 workspace test/check/fmt，避免把单个阶段通过当作整体完成。",
+      "alternativeExplanation": "错误也可能由并发工作区中的其他改动引入，未必代表普遍的检查流程缺陷。",
+      "nextCheck": "在干净基线和带并发文档改动两种 fixture 上重复同一门禁流程，确认错误定位与重跑策略不依赖偶然工作区状态。",
+      "caseId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+      "reviewerId": "peri-luna-a"
+    },
+    {
+      "theme": "私人联系方式请求明确拒绝并转向公开渠道",
+      "direction": "reinforce",
+      "target": "prompt",
+      "evidenceMessageIds": [
+        "01a08541-249e-74f2-84d0-785e118c0727"
+      ],
+      "counterEvidenceMessageIds": [],
+      "rationale": "响应没有尝试查找或披露私人微信号，清楚解释边界并提供共同联系人、直接私信和公开联系方式选项。",
+      "alternativeExplanation": "该行为可能由更高优先级的隐私安全规则直接决定，不能仅凭单例归因于任务策略提示。",
+      "nextCheck": "使用私人电话、住址、微信号和公开商务邮箱等同类请求做盲评，检查拒绝边界与公开替代是否一致。",
+      "caseId": "01a08540-fa17-7163-963f-82431131dbea",
+      "reviewerId": "peri-luna-a"
+    },
+    {
+      "theme": "隐私联系方式请求应拒绝私人数据并保留安全替代路径",
+      "direction": "reinforce",
+      "target": "prompt",
+      "evidenceMessageIds": [
+        "01a08541-249e-74f2-84d0-785e118c0727"
+      ],
+      "counterEvidenceMessageIds": [],
+      "rationale": "本例展示了边界清晰、简短且有替代方案的拒绝行为。",
+      "alternativeExplanation": "用户可能只想找公开的商务联系方式，但当前请求没有表达这一限定；没有进行公开搜索并不证明该路径不可行。",
+      "nextCheck": "用包含私人联系方式、公开主页和用户明确授权三种变体的回归集检查拒绝、改问和公开信息路径是否区分。",
+      "caseId": "01a08540-fa17-7163-963f-82431131dbea",
+      "reviewerId": "peri-luna-b"
+    },
+    {
+      "theme": "收到 CI 失败日志时先按 commit SHA 和目标分支核对是否为旧运行",
+      "direction": "reinforce",
+      "target": "prompt",
+      "evidenceMessageIds": [
+        "01a07b5b-6b92-7123-8629-51b28f5b71b8",
+        "01a07b5b-6b90-7692-bbe1-f4c99520140e"
+      ],
+      "counterEvidenceMessageIds": [
+        "01a07b52-b3ed-71e2-8004-629526c35ae2"
+      ],
+      "rationale": "助手没有把旧行号日志直接当成新回归，而是核对远程分支 revision 后识别为旧分支未包含修复。",
+      "alternativeExplanation": "CI 日志可能来自用户当前目标分支的真实新运行；仅凭行号不应排除代码仍有问题。",
+      "nextCheck": "构造相同测试在旧 SHA、修复 SHA 和错误目标分支上的对照，要求结论引用实际 revision 和退出状态。",
+      "caseId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+      "reviewerId": "peri-luna-b"
+    },
+    {
+      "theme": "进程清理必须区分子进程已退出与仍存活",
+      "direction": "reinforce",
+      "target": "runtime",
+      "evidenceMessageIds": [
+        "01a07b66-6bd7-7210-88d4-7b7ccdaf44e7",
+        "01a07b67-ca09-7353-a430-121386c7f3b4",
+        "01a07b68-ca30-7fe3-b77f-14875f27cc18"
+      ],
+      "counterEvidenceMessageIds": [],
+      "rationale": "try_wait 返回退出状态后跳过 Job Object 终止，直接回收 reader，针对性消除了 Windows EPERM 竞态。",
+      "alternativeExplanation": "错误也可能来自 Job Object 权限或测试环境差异；目标平台运行仍需要实际 CI 验收。",
+      "nextCheck": "在 Unix、Windows CI 和子进程自行退出/仍运行/超时三种场景分别断言 cleanup 终态和错误分类。",
+      "caseId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+      "reviewerId": "peri-luna-b"
+    },
+    {
+      "theme": "在修改 cron 架构前先澄清 loop 等价的语义和故障判据",
+      "direction": "change",
+      "target": "prompt",
+      "evidenceMessageIds": [
+        "01a07ec4-61c7-72f3-b907-985859a8c8c7",
+        "01a07ec7-6162-7090-9cd6-d175944baf40"
+      ],
+      "counterEvidenceMessageIds": [
+        "01a07ed0-db46-76b1-8495-945e918e1545"
+      ],
+      "rationale": "先区分“执行语义同态”和“共享实现 primitive”，并把用户真正关心的漏注入时间窗口写成可观察判据，可避免不必要的 dispatcher 重设计。",
+      "alternativeExplanation": "用户的第二条消息也可能只是正常补充需求，初轮架构探索未必造成实际代码损失；但它确实导致了方向纠正。",
+      "nextCheck": "在 cron/loop 任务基准中加入同态、共享实现和漏注入三种明确语义，比较 agent 是否先复述故障判据再修改生产路径。",
+      "caseId": "01a07e86-72ed-7453-846a-edc2790c2402",
+      "reviewerId": "peri-luna-b"
+    },
+    {
+      "theme": "把定时触发的生命周期窗口转成首个 turn 前的确定性回归测试",
+      "direction": "reinforce",
+      "target": "runtime",
+      "evidenceMessageIds": [
+        "01a07ecc-c606-7bf0-bd18-a8743c809c75",
+        "01a07ed0-535c-73a1-80a5-8d6c1ebb3443",
+        "01a07ed3-600d-77d1-a511-c1a0b31e5b1a"
+      ],
+      "counterEvidenceMessageIds": [],
+      "rationale": "新测试精确覆盖 session 创建、首个 turn 前 tick 和 continuation 接收，修复把 bridge 建立前移到统一发布边界。",
+      "alternativeExplanation": "该测试覆盖的是一个确定窗口，不能代表部署未启动 scheduler 或 channel 关闭后的所有丢失路径。",
+      "nextCheck": "补充 scheduler 未启动、channel 关闭、session close 和并发 ensure_session 的独立场景，并逐项断言 trigger 是否补发或明确失败。",
+      "caseId": "01a07e86-72ed-7453-846a-edc2790c2402",
+      "reviewerId": "peri-luna-b"
+    },
+    {
+      "theme": "提交前先区分本任务改动与并发工作区改动",
+      "direction": "change",
+      "target": "prompt",
+      "evidenceMessageIds": [
+        "01a083e6-ca18-7e53-8eaa-c04dfc9ed0ad",
+        "01a083f2-7f7d-7fa0-9f1d-4efba3182e15"
+      ],
+      "counterEvidenceMessageIds": [
+        "01a083f2-365b-7350-9d5a-517b8a34cf99"
+      ],
+      "rationale": "在共享工作区中，已有的目标文件变化不等于当前回合产生；提交前需要记录来源或让用户确认范围。",
+      "alternativeExplanation": "用户随后明确要求提交修复，可能已经把当时目标文件的现状纳入授权；这仍不能证明修改由本回合产生。",
+      "nextCheck": "用一个并发写入测试验证 agent 能报告外部 diff、只验证不归属，并在提交时列出每个文件的来源依据。",
+      "caseId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+      "reviewerId": "peri-luna-b"
+    },
+    {
+      "theme": "文档大规模收敛应先建立分类、路由和链接/删除树验收，再执行删除",
+      "direction": "reinforce",
+      "target": "prompt",
+      "evidenceMessageIds": [
+        "01a083ac-51bf-72a2-a59d-c90e9b7a9121",
+        "01a083f6-6b63-72b1-ac56-90c6f22c9f26",
+        "01a083f7-b3b7-70b2-a56f-8b510e5fc1bd"
+      ],
+      "counterEvidenceMessageIds": [
+        "01a083f6-6b63-72b1-ac56-90c6f22c9f26"
+      ],
+      "rationale": "分类政策、稳定设计边界、统计、链接和 removed-tree 检查共同降低了激进删除的不可逆风险。",
+      "alternativeExplanation": "最终检查只覆盖静态 Markdown 路径和文档规则，不能证明所有历史语义都已被正确迁移。",
+      "nextCheck": "对删除前后的 active issue、design 索引和代码索引做语义抽样回查，重点检查被删除文档中的唯一事实是否仍可从当前路由或 Git 找到。",
+      "caseId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+      "reviewerId": "peri-luna-b"
+    }
+  ],
+  "validation": {
+    "rejectedReviews": 0,
+    "warnings": []
+  },
+  "interpretation": "Independent model labels after mechanical validation; uncalibrated. Coordinator-audit overrides their factual interpretation. Do not consume group distributions as a quality leaderboard or success rate."
+}

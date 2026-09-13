@@ -1,0 +1,267 @@
+{
+  "schemaVersion": 1,
+  "scope": "observational candidates; priorities are engineering ordering, not measured effect sizes",
+  "items": [
+    {
+      "id": "PERI-20260913-WORKFLOW-GRAMMAR",
+      "priority": 1,
+      "status": "candidate",
+      "target": "tooling",
+      "problem": "Workflow script描述为JavaScript ESM，实际只允许唯一meta export的AsyncFunction body；错误修复序列再次破坏必需结构。",
+      "impact": "启动前往返失败，增加编排成本。",
+      "metrics": {
+        "unit": "explicit error result / affected root thread",
+        "count": 6,
+        "affectedThreads": 3,
+        "denominator": {
+          "scope": "48 visible roots selected by thread.cwd and creation window",
+          "workflowExplicitErrors": 10
+        },
+        "notTaskFailureRate": true
+      },
+      "evidence": [
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a0802c-9dbf-7370-9fd2-000bad7fe2c6",
+          "callId": "call_WPwYNsTxOwob0QCacTX874wR"
+        },
+        {
+          "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "messageId": "01a0802d-5f17-7472-afea-4fb1d73c202a",
+          "callId": "call_aRotWGJaxGsRemCJ0nl0DdHK"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a08539-b971-7c72-ab66-77589cb8abda",
+          "callId": "call_6DgsJolrfIjMciZ1JkuQ2zW7"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09078-5827-7881-9cc9-054828d0ffc7",
+          "callId": "call_QRM2HnPHX20PcuqZrENszu1i"
+        }
+      ],
+      "currentEntries": [
+        "peri-workflow/src/tool.rs",
+        "npm-packages/@peri-workflow/src/validate.ts",
+        "peri-workflow/src/journal/git.rs"
+      ],
+      "currentValidation": "Source audit: description/parser mismatch; meta and canonical repository guards already exist. No production run replay. Local parser-only validation of minimal meta + top-level return/agent shape passed; no Agent/provider execution.",
+      "proposedChange": "校正script描述并提供经过实际parser验证的最小形状；writeIntent描述明确只读/写入与canonical cwd限制；保持副作用前预检。",
+      "limitations": [
+        "错误文本不能证明description造成模型生成错误。",
+        "参数损坏、任务上下文、模型差异是替代解释。",
+        "不放宽canonical repo与path_allowlist。"
+      ],
+      "nextValidation": "现行/候选description在相同模型与固定上下文上生成只读脚本，仅调用preflight不执行Agent；覆盖额外export、缺meta、import、return、cwd不符和合法示例。",
+      "successCriteria": [
+        "候选示例均通过现有parser；非法/越界输入继续在副作用前拒绝。",
+        "记录每个固定任务首次有效调用及修复轮次；重复并盲化后才讨论行为提升。"
+      ]
+    },
+    {
+      "id": "PERI-20260913-AGENT-SUGGESTIONS",
+      "priority": 1,
+      "status": "candidate",
+      "target": "tooling",
+      "problem": "Agent定义加载失败后建议相同不可加载名称；错误建议snapshot与调用cwd和loader来源可能不同。",
+      "impact": "恢复提示不能使下一次调用变为有效。",
+      "metrics": {
+        "unit": "explicit error result / affected root thread",
+        "count": 2,
+        "affectedThreads": 1,
+        "denominator": {
+          "agentExplicitErrors": 24,
+          "scope": "same 48 roots; this thread later operated on another project"
+        }
+      },
+      "evidence": [
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a0895a-53cb-7c30-b418-a3dee35d618b",
+          "callId": "call_ZFn3auUcsOyqnELwoSuLpaiw"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a08984-490e-7b21-9135-d66209bc34d6",
+          "callId": "call_bVIidUuyEPqMW69sRfUUvDGv"
+        }
+      ],
+      "currentEntries": [
+        "peri-middlewares/src/error_suggest/suggesters/subagent_suggester.rs",
+        "peri-middlewares/src/error_suggest/default_registry.rs",
+        "peri-middlewares/src/subagent/tool/definitions.rs",
+        "peri-agent/src/agent/stages/tool_dispatch/execution.rs",
+        "peri-acp/prompts/sections/11_subagent.md"
+      ],
+      "currentValidation": "Source audit confirms snapshot/actual loader/cwd sources differ; historical causal reconstruction unavailable.",
+      "proposedChange": "让建议复用调用cwd的真实定义解析能力；不可加载的同名项不进入建议。会话目录文字明确snapshot时效。",
+      "limitations": [
+        "历史错误不证明定义在会话中途被删除。",
+        "相同cwd真实可加载的近似名称仍应得到建议。"
+      ],
+      "nextValidation": "临时两个cwd，仅A有定义；在B调用同名，验证不能自荐；补agents/和plugin-only来源、定义移除、合法typo成功反例。",
+      "successCriteria": [
+        "建议候选可在该调用解析上下文中加载。",
+        "同名失败不再产生无效重试建议；合法发现能力不退化。"
+      ]
+    },
+    {
+      "id": "PERI-20260913-CORRECTION-SCENARIO",
+      "priority": 1,
+      "status": "candidate",
+      "target": "prompt",
+      "problem": "用户质疑cron机制时先推断统一架构要求，用户随后纠正为触发时机漏注入。",
+      "impact": "修复目标偏移并增加用户纠正成本。",
+      "metrics": {
+        "unit": "audited sampled focal task",
+        "count": 1,
+        "denominator": {
+          "sampledSessions": 6,
+          "engineeringFocalTasks": 4
+        },
+        "populationRate": null
+      },
+      "evidence": [
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ec4-6185-72c2-b71e-aaf420d94fb7"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ec4-61c7-72f3-b907-985859a8c8c7"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ec7-6162-7090-9cd6-d175944baf40"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07ed0-db46-76b1-8495-945e918e1545"
+        }
+      ],
+      "currentEntries": [
+        "peri-acp/prompts/sections/03_doing_tasks.md",
+        "peri-middlewares/src/skills/builtin/skills/ultra-task/SKILL.md"
+      ],
+      "currentValidation": "45 persisted prefixes contain verifiable-goal instruction; not evidence of full provider inputs or causality.",
+      "proposedChange": "用户纠正后先核验当前目标的可观察触发场景，用证据排除解释，避免无根据升级成架构重构。",
+      "limitations": [
+        "一例不能推出系统普遍误解。",
+        "明确要求新架构是必须保留的反例。"
+      ],
+      "nextValidation": "8个固定纠正场景做同任务配对、盲评、重复运行；冻结模型/工具/初始状态。",
+      "successCriteria": [
+        "不再把明确故障纠正转成未经支持的新目标。",
+        "不遗漏用户真实新增目标，不增加不必要询问，不削弱授权边界。"
+      ]
+    },
+    {
+      "id": "PERI-20260913-VERIFICATION-EVIDENCE",
+      "priority": 1,
+      "status": "candidate",
+      "target": "runtime",
+      "problem": "持久化长测试输出的正文截断后，最终全部通过主张缺少完整终态证据；模型reviewer进一步放大了这种误读。",
+      "impact": "无法可靠评价任务交付和从任务结果优化prompt。",
+      "metrics": {
+        "unit": "root-audited medium focal task",
+        "count": 2,
+        "denominator": {
+          "sampledSessions": 6
+        },
+        "populationRate": null
+      },
+      "evidence": [
+        {
+          "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+          "messageId": "01a07b54-ac03-7eb1-aa79-151b9cfd8e21"
+        },
+        {
+          "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+          "messageId": "01a07b54-f654-7d72-a185-fa6709d5f50e"
+        },
+        {
+          "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+          "messageId": "01a083e7-98ed-7351-ac00-47881b4e2c1c"
+        },
+        {
+          "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+          "messageId": "01a083e8-5041-79f0-8767-298ae6cd01cf"
+        }
+      ],
+      "currentEntries": [
+        "peri-middlewares/src/middleware/terminal.rs",
+        "peri-agent/src/agent/stages/tool_dispatch/execution.rs",
+        "side-projects/agent-defect-analyzer/src/data/loader.ts",
+        "side-projects/agent-defect-analyzer/src/research/task-reviews.ts",
+        "peri-acp/prompts/sections/03_doing_tasks.md"
+      ],
+      "currentValidation": "Source audit confirms two truncation layers: terminal merges status and saves/truncates; dispatch then takes first10000 chars, potentially removing exit marker and saved-output path. No structured exit field. Production end-to-end fixture not yet run.",
+      "proposedChange": "沿最终ToolResult/持久化链路保证执行identity、terminal/exit status和完整输出引用不被正文截断；分析器和完成报告区分直接证据/自报/目标环境未知。不要只在Bash中追加尾部提示。",
+      "limitations": [
+        "截断不证明测试失败或当时模型没有完整输入。",
+        "子Agent叙述在tool消息中仍是自报，不因role=tool升级为直接测试结果。"
+      ],
+      "nextValidation": "大输出末尾失败、后台未终止、成功、取消四类fixture，经生产tool pipeline与持久化导出后核对终态；再审计完成主张。",
+      "successCriteria": [
+        "每个测试fixture的执行状态可按稳定身份恢复。",
+        "未知不会被算作通过；完整已通过检查不会被误判失败。"
+      ]
+    },
+    {
+      "id": "PERI-20260913-LLM-ERROR-CONTEXT",
+      "priority": 2,
+      "status": "candidate",
+      "target": "runtime",
+      "problem": "ModelError typed安全上下文经过Agent桥接后部分变为字符串，subagent恢复只能从显示文本读取请求诊断。",
+      "impact": "无法可靠区分临时中断与请求/配置拒绝后的下一步。",
+      "metrics": {
+        "unit": "explicit Agent error result",
+        "count": 14,
+        "affectedThreads": 6,
+        "denominator": {
+          "agentExplicitErrors": 24,
+          "scope": "same 48 roots"
+        }
+      },
+      "evidence": [
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07e8a-3e88-7520-9261-33fdd66f8722",
+          "callId": "call_Cjb90VgCP9es914P1qJfhMDP"
+        },
+        {
+          "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+          "messageId": "01a07e8b-e21e-7633-88b5-3aa1931ca853",
+          "callId": "call_L9Oc5R6SInokBD2shrM5nb6J"
+        }
+      ],
+      "currentEntries": [
+        "peri-model/src/runtime/error.rs",
+        "peri-model/src/runtime/retry.rs",
+        "peri-model/src/runtime/retry_test.rs",
+        "peri-agent/src/agent/model_bridge.rs",
+        "peri-acp-types/src/error.rs",
+        "peri-agent/src/session/retry_events.rs"
+      ],
+      "currentValidation": "Current model retry excludes400/401/403/404; source test covers one attempt. Repeated parent Agent resume is distinct from automatic model retry.",
+      "proposedChange": "先证明上层诊断需要，必要时安全投影保留类别/status/request identity；不改400默认不重试策略，不让prompt接管retry状态机。",
+      "limitations": [
+        "HTTP400不能确定是配置、endpoint、schema或请求体根因。",
+        "请求ID必须走现有安全投影；不导出原始provider body。"
+      ],
+      "nextValidation": "400/429/500/visible-delta interruption各一fixture追到subagent结果/ACP事件；先检查现有数据是否足够，再决定是否扩展字段。",
+      "successCriteria": [
+        "已有retry策略不回归。",
+        "需要的恢复分支可用typed事实判断；若现有数据已足够则撤回扩展。"
+      ]
+    }
+  ],
+  "recommendedOrder": [
+    "PERI-20260913-VERIFICATION-EVIDENCE",
+    "PERI-20260913-WORKFLOW-GRAMMAR",
+    "PERI-20260913-AGENT-SUGGESTIONS",
+    "PERI-20260913-CORRECTION-SCENARIO",
+    "PERI-20260913-LLM-ERROR-CONTEXT"
+  ]
+}

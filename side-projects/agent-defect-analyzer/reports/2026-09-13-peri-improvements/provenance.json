@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "localArtifactRoot": "output/peri-improvements-2026-09-13",
+  "artifacts": {
+    "manifest.json": {
+      "sha256": "520ff468298355cdb4505011a79944f0e95685795c0a715ba2692fe0fbdd1299",
+      "bytes": 22172
+    },
+    "error-index.json": {
+      "sha256": "268a28b49982902e9ea23aba54a0c20c164db09f9a2cf3e82e7a45c75c49d336",
+      "bytes": 84420
+    },
+    "select-and-export.ts": {
+      "sha256": "d6d05996fa39f4181b35cd4642a581dbfa343083d0dde573340dbcd01adf00e6",
+      "bytes": 10386
+    },
+    "error-index.ts": {
+      "sha256": "4665489c3fb9d9a116480475572e55ba40e08e846f86cac3b5677f661513aee4",
+      "bytes": 6462
+    },
+    "quality/quality.json": {
+      "sha256": "9b3d042dc169fd3bbf719971f81af101a6991606950b7ac9145ed688a78635b5",
+      "bytes": 18548
+    },
+    "recent-behavior/report.json": {
+      "sha256": "9c95c2df93f2802f14f817ed14f97f2696a1a35dcf3aa2cd9d099fd8efd915e6",
+      "bytes": 30992
+    },
+    "current-prompt-audit.md": {
+      "sha256": "7040324087541c3751ffd0164243e0f2493b1816ccbae39dd4330a635d19e049",
+      "bytes": 14699
+    },
+    "workflow-chain/evidence.json": {
+      "sha256": "18f5c9a6d895cc32e33879009ba47fdf06bcdaef7ddcb7a61a651f64992df0e8",
+      "bytes": 59963
+    },
+    "agent-missing/evidence.json": {
+      "sha256": "b3dbab63636f701d75244eafcd2145447d4c0bbb22336d97f44350934f95b653",
+      "bytes": 13752
+    },
+    "repeat-a/evidence.json": {
+      "sha256": "5a6db004cf131aeb4285f33cfd8e64a4fbcf2ee07284b03f3ebebfd4a46854be",
+      "bytes": 39703
+    },
+    "repeat-b/evidence.json": {
+      "sha256": "597b4de09081166904dd4009fdad992505454ae932f1bcf47c7d89d44eb0383e",
+      "bytes": 60490
+    },
+    "repeat-b-first/evidence.json": {
+      "sha256": "ba55c9e897d02f195f8e42b98af0b40a83ec66b0eeb027def3af50e9e9e62ec5",
+      "bytes": 1606
+    },
+    "repeat-b-second/evidence.json": {
+      "sha256": "ed31401a33d32e27c33cca02646e8b808f6faaf1da4ddbb615c4a83fce5e8c24",
+      "bytes": 1606
+    },
+    "repeat-b-metadata/evidence.json": {
+      "sha256": "bf16ae4edae8d893ad773eb826b09b47f949495e4c7e06ab8d17843180de18ac",
+      "bytes": 5067
+    },
+    "packet-bundle.json": {
+      "sha256": "d6650276560772ae5b8babda65c753d888f8bcd81b7b5ee0ca45519ef3214d16",
+      "bytes": 2251924
+    },
+    "review-a-original.json": {
+      "sha256": "7af52b047a7028738b06b69903a4db5abf057e208a8ead345e335a598c11ae2f",
+      "bytes": 20092
+    },
+    "review-a.json": {
+      "sha256": "541a364c70b6dbfac62ec993767f585bc4e8958e8c508386091afafd065624bb",
+      "bytes": 20122
+    },
+    "review-a-notes.md": {
+      "sha256": "badd748fe8a474e5185a48823ddc9fa37e9d9b624e3328f123bc3c1da29c9771",
+      "bytes": 683
+    },
+    "review-b.json": {
+      "sha256": "9b9f42febc5f45fe14aab8fcfaf2ef5d0c23afe906155ed2e37f350520a6fba8",
+      "bytes": 24199
+    },
+    "combined-reviews.json": {
+      "sha256": "3d271c6327e25cbb9683478d60c3373481d814a72c5308634ccac79aff9edbd4",
+      "bytes": 38244
+    },
+    "validated-combined/task-review.json": {
+      "sha256": "588a7a4cb89b780356fc043588d25805b62c5dc76644bf3bacc909a70ad691a4",
+      "bytes": 65279
+    },
+    "runtime-candidate-audit.md": {
+      "sha256": "0096aa7271d9055b33e4c96f0641cf4b703a5a49e4b51ee1c25f5c1ab93df22d",
+      "bytes": 14875
+    },
+    "skill-calibration-original.json": {
+      "sha256": "678421dc316da90108fc0d1bf7efa855a33f45faa99def4a7f7e490bc90c3b0b",
+      "bytes": 2187
+    },
+    "skill-calibration.json": {
+      "sha256": "d4e88427611a9ee21c960fad99759c57e382b61477e57091f0ff9887dc3fd65f",
+      "bytes": 2193
+    }
+  },
+  "note": "File hashes bind local artifacts; schema/metadata fingerprints have their own scopes. Exports were separate read transactions, not one simultaneous full-database snapshot.",
+  "artifactNote": "artifacts maps the frozen/local study output, including original study scripts. deliveryFiles below binds the portable checked-in reproduction scripts and revised skills; these are separate identities.",
+  "frozenMethodNote": "Original task reviews used the pre-amendment method hashes in sample-manifest.json. New skill clarification is tested separately; original labels were not relabeled as new-method results.",
+  "deliveryFiles": {
+    "side-projects/agent-defect-analyzer/reports/2026-09-13-peri-improvements/scripts/select-and-export.ts": {
+      "sha256": "8f27b7f3b02caff7682824a9315dcc9aab0bf0e2c837a2df5f4b58f0d4f0a610",
+      "bytes": 12490
+    },
+    "side-projects/agent-defect-analyzer/reports/2026-09-13-peri-improvements/scripts/README.md": {
+      "sha256": "b6c5e799b53deed093f342ce96d9e8ef010a92be405decae56105302e7dc7af5",
+      "bytes": 2356
+    },
+    "side-projects/agent-defect-analyzer/reports/2026-09-13-peri-improvements/scripts/error-index.ts": {
+      "sha256": "e9027be71ab47f534e012044020102e17af8a23908a934f1531e2f37a82ce548",
+      "bytes": 11539
+    },
+    ".claude/skills/auto-data-researcher/SKILL.md": {
+      "sha256": "404ed3b96e6e2d0e77259c71ed7ada8f136e6990ce509615b88fec60ce1a36bb",
+      "bytes": 9735
+    },
+    ".claude/skills/agent-task-evaluator/SKILL.md": {
+      "sha256": "bedc34f1c1c286bda6b7e46b64c6926b1eba909a6ca41e01375c7cda6f874b73",
+      "bytes": 7065
+    },
+    ".claude/skills/agent-task-evaluator/references/claim-ledger.md": {
+      "sha256": "ec96e25f3d459f37b0fdc16698a305643f8fa924441adf3640ef8dcd8769968a",
+      "bytes": 2618
+    },
+    ".claude/skills/agent-task-evaluator/evals/evals.json": {
+      "sha256": "d48577c73104d6fcadc22cfb0cfc0d48ecbb921a7ab6a7ac04d3ee962673c219",
+      "bytes": 3082
+    },
+    ".claude/skills/agent-task-evaluator/evals/fixtures/evidence-producer.json": {
+      "sha256": "7bf3cb07c05ea1fe67bedaaf67eefa06d18bdff73030fc5d563dbdb359640d90",
+      "bytes": 1964
+    }
+  }
+}

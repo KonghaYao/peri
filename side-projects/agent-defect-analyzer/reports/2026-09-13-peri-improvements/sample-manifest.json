@@ -1,0 +1,603 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Exploratory stratified task evidence selection for Peri improvements; no task outcome judgments.",
+  "generatedAt": "2026-09-13T11:14:36.471Z",
+  "window": {
+    "since": "2026-09-06T00:00:00Z",
+    "until": "2026-09-13T00:00:00Z",
+    "interval": "[since, until)",
+    "timeBasis": "visible root thread created_at"
+  },
+  "filters": {
+    "scope": "roots",
+    "includeHidden": false,
+    "cwdRoot": "/Users/konghayao/code/ai/perihelion",
+    "cwdPolicy": "thread.cwd === cwdRoot or startsWith(cwdRoot + '/')",
+    "beforeCwdCount": 111,
+    "afterCwdCount": 48,
+    "noOwnMessagesBeforeCwd": 23,
+    "noOwnMessagesAfterCwd": 14,
+    "priorExclusion": {
+      "policy": "exclude every candidate ID present in the prior pilot manifest before stratification",
+      "manifest": "reports/2026-09-13-task-effectiveness/pilot-manifest.json",
+      "priorCaseIdCount": 12,
+      "matchedCandidateCount": 2,
+      "matchedCandidateIds": [
+        "01a08a33-e1a3-7441-a35c-de1ef517373b",
+        "01a08bdd-a6be-7e41-9842-1ee99d77d9f3"
+      ]
+    }
+  },
+  "sampling": {
+    "seed": "peri-improvements-2026-09-13-v1",
+    "perStratum": 2,
+    "scope": "roots",
+    "includeHidden": false,
+    "strata": {
+      "short": {
+        "range": "1..20",
+        "candidateCount": 5,
+        "selectedCount": 2,
+        "candidateIds": [
+          "01a08540-fa17-7163-963f-82431131dbea",
+          "01a08f33-3f57-7b73-9788-96fee1cce71f",
+          "01a08f3e-4753-7c40-b77d-0e976a8e5773",
+          "01a08fba-f302-7ca1-867c-54a2078edbe4",
+          "01a095fb-6bbe-7b43-a451-3adc31762b05"
+        ],
+        "selectedIds": [
+          "01a08540-fa17-7163-963f-82431131dbea",
+          "01a08f33-3f57-7b73-9788-96fee1cce71f"
+        ],
+        "candidates": [
+          {
+            "threadId": "01a08540-fa17-7163-963f-82431131dbea",
+            "createdAt": "2026-09-09T08:20:23.191549+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 2,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08f33-3f57-7b73-9788-96fee1cce71f",
+            "createdAt": "2026-09-11T06:41:35.575603+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 6,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08f3e-4753-7c40-b77d-0e976a8e5773",
+            "createdAt": "2026-09-11T06:53:38.515603+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 12,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08fba-f302-7ca1-867c-54a2078edbe4",
+            "createdAt": "2026-09-11T09:09:48.930110+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 5,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a095fb-6bbe-7b43-a451-3adc31762b05",
+            "createdAt": "2026-09-12T14:17:57.438963+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 3,
+            "parentThreadId": null,
+            "hidden": false
+          }
+        ],
+        "selected": [
+          {
+            "threadId": "01a08540-fa17-7163-963f-82431131dbea",
+            "createdAt": "2026-09-09T08:20:23.191549+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 2,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08f33-3f57-7b73-9788-96fee1cce71f",
+            "createdAt": "2026-09-11T06:41:35.575603+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 6,
+            "parentThreadId": null,
+            "hidden": false
+          }
+        ],
+        "rangeHash": "c0825b94844d129dab5693c510b66fd6fa6c338473939282df57655f18b3d5f6"
+      },
+      "medium": {
+        "range": "21..100",
+        "candidateCount": 7,
+        "selectedCount": 2,
+        "candidateIds": [
+          "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+          "01a07ed4-ee0d-7460-9063-7008f4ecd0b9",
+          "01a07ed6-ed97-7b60-bc62-e6683c1a0841",
+          "01a07fc9-cf21-7243-a2da-3b1be30ba495",
+          "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+          "01a08abe-0268-7093-8fa2-921216bf9eb3",
+          "01a09052-51cc-76d0-b88c-0a30533aaf23"
+        ],
+        "selectedIds": [
+          "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+          "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba"
+        ],
+        "candidates": [
+          {
+            "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+            "createdAt": "2026-09-07T10:03:30.304411+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 93,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a07ed4-ee0d-7460-9063-7008f4ecd0b9",
+            "createdAt": "2026-09-08T02:24:38.925576+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 38,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a07ed6-ed97-7b60-bc62-e6683c1a0841",
+            "createdAt": "2026-09-08T02:26:49.879519+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 57,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a07fc9-cf21-7243-a2da-3b1be30ba495",
+            "createdAt": "2026-09-08T06:52:07.329946+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 100,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+            "createdAt": "2026-09-09T01:58:30.814821+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 62,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08abe-0268-7093-8fa2-921216bf9eb3",
+            "createdAt": "2026-09-10T09:55:03.400545+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 32,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a09052-51cc-76d0-b88c-0a30533aaf23",
+            "createdAt": "2026-09-11T11:55:09.132083+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 58,
+            "parentThreadId": null,
+            "hidden": false
+          }
+        ],
+        "selected": [
+          {
+            "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+            "createdAt": "2026-09-07T10:03:30.304411+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 93,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+            "createdAt": "2026-09-09T01:58:30.814821+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 62,
+            "parentThreadId": null,
+            "hidden": false
+          }
+        ],
+        "rangeHash": "f39d078d8bb9ae1ca2a69691f55fe17ecde6d2dc50349cf2eaf90845b9c896c1"
+      },
+      "long": {
+        "range": ">100",
+        "candidateCount": 20,
+        "selectedCount": 2,
+        "candidateIds": [
+          "01a0796b-d1a5-7020-bd08-39f09979feb0",
+          "01a07984-c42f-72f3-a24e-301b1b58c335",
+          "01a07a6a-8ec5-7031-b95d-9374ae7758ec",
+          "01a07e86-72ed-7453-846a-edc2790c2402",
+          "01a07e87-74c5-7491-b028-0c57ee14e408",
+          "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+          "01a0807c-97e2-73d0-9a1e-1b0fa94e1fe2",
+          "01a083ab-fbea-7e51-a8eb-6328d405b220",
+          "01a083af-cb6a-7563-846d-cb665ed7c3df",
+          "01a083b3-0b7e-7a92-96d8-1306406a3521",
+          "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "01a08561-09f0-7430-8304-7fc931996cfd",
+          "01a08a35-515d-7373-88eb-bdb4f87248d8",
+          "01a08abd-adab-7891-a3f9-3d80e92367ea",
+          "01a08ac0-7c95-7b02-9a55-b13971804bef",
+          "01a08bc6-3edf-7b32-9c07-37c85b0b7811",
+          "01a08e11-cf1f-7913-9473-9a94fe5c16b1",
+          "01a08f21-cada-7bf0-962c-e0673d8fb221",
+          "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "01a095cd-aff2-7b61-b640-72437dd85ed5"
+        ],
+        "selectedIds": [
+          "01a07e86-72ed-7453-846a-edc2790c2402",
+          "01a083ab-fbea-7e51-a8eb-6328d405b220"
+        ],
+        "candidates": [
+          {
+            "threadId": "01a0796b-d1a5-7020-bd08-39f09979feb0",
+            "createdAt": "2026-09-07T01:11:44.293058+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 108,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a07984-c42f-72f3-a24e-301b1b58c335",
+            "createdAt": "2026-09-07T01:38:59.247282+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 835,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a07a6a-8ec5-7031-b95d-9374ae7758ec",
+            "createdAt": "2026-09-07T05:49:58.853367+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 266,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+            "createdAt": "2026-09-08T00:58:55.597654+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 118,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a07e87-74c5-7491-b028-0c57ee14e408",
+            "createdAt": "2026-09-08T01:00:01.605949+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 966,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08017-0fc9-72a3-aeda-576b5c9e500e",
+            "createdAt": "2026-09-08T08:16:30.153934+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 265,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a0807c-97e2-73d0-9a1e-1b0fa94e1fe2",
+            "createdAt": "2026-09-08T10:07:24.130668+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 121,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+            "createdAt": "2026-09-09T00:58:01.578071+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 382,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a083af-cb6a-7563-846d-cb665ed7c3df",
+            "createdAt": "2026-09-09T01:02:11.306958+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 452,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a083b3-0b7e-7a92-96d8-1306406a3521",
+            "createdAt": "2026-09-09T01:05:44.318342+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 108,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+            "createdAt": "2026-09-09T03:15:39.744098+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 772,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08561-09f0-7430-8304-7fc931996cfd",
+            "createdAt": "2026-09-09T08:55:24.400718+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 133,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08a35-515d-7373-88eb-bdb4f87248d8",
+            "createdAt": "2026-09-10T07:25:45.181893+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 125,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08abd-adab-7891-a3f9-3d80e92367ea",
+            "createdAt": "2026-09-10T09:54:41.707698+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 913,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08ac0-7c95-7b02-9a55-b13971804bef",
+            "createdAt": "2026-09-10T09:57:45.749591+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 270,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08bc6-3edf-7b32-9c07-37c85b0b7811",
+            "createdAt": "2026-09-10T14:43:40.383425+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 317,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08e11-cf1f-7913-9473-9a94fe5c16b1",
+            "createdAt": "2026-09-11T01:25:26.943406+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 148,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a08f21-cada-7bf0-962c-e0673d8fb221",
+            "createdAt": "2026-09-11T06:22:31.642678+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 274,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+            "createdAt": "2026-09-11T12:25:32.553240+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 762,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+            "createdAt": "2026-09-12T13:28:00.242305+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 526,
+            "parentThreadId": null,
+            "hidden": false
+          }
+        ],
+        "selected": [
+          {
+            "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+            "createdAt": "2026-09-08T00:58:55.597654+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 118,
+            "parentThreadId": null,
+            "hidden": false
+          },
+          {
+            "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+            "createdAt": "2026-09-09T00:58:01.578071+00:00",
+            "cwd": "/Users/konghayao/code/ai/perihelion",
+            "ownMessageCount": 382,
+            "parentThreadId": null,
+            "hidden": false
+          }
+        ],
+        "rangeHash": "61e0d87542239275ed3eb9bbe66d1c42319875b4ac720a3f977eefdee145ccfa"
+      }
+    },
+    "noOwnMessagesEligible": 14,
+    "selectedIds": [
+      "01a07e86-72ed-7453-846a-edc2790c2402",
+      "01a083ab-fbea-7e51-a8eb-6328d405b220",
+      "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+      "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+      "01a08540-fa17-7163-963f-82431131dbea",
+      "01a08f33-3f57-7b73-9788-96fee1cce71f"
+    ]
+  },
+  "source": {
+    "database": "~/.peri/threads/threads.db",
+    "normalizer": "peri-normalizer-v2",
+    "schemaIdentity": "a95ace4ab069500bf8f4fffd01264d9e882e98ae305de41d5a5a5e206487c3a8",
+    "snapshot": "readonly-transaction",
+    "selectionSnapshotStatements": 112
+  },
+  "methods": {
+    "taskPackets": "src/research/task-packets.ts",
+    "taskPacketsSha256": "bd86d1c6acf33c8893b24384adb6b1b3ea6c7a89ecf42c53969baa06d6b32d6c",
+    "taskEvaluationSha256": "228ed177d754b709837c24996f06ff1ed08930a9f2c980c2fb14c21e69c84ed0",
+    "activeSkillSha256": "2477310f24640c322a319a5c8dab4567c2caf27ff1392ef89b58ac8b15242b17",
+    "priorManifestSha256": "804d2e9060477cb8e990e517d1faa513c7f0d0ed5b92948ac53aca496ecea597"
+  },
+  "quality": {
+    "selectedCount": 6,
+    "sourceTruncatedCases": 0,
+    "exportTruncatedCases": 1,
+    "omittedMessages": 0,
+    "omittedFields": [
+      "result.content",
+      "text"
+    ],
+    "sourceMessageCount": 663,
+    "exportedMessageCount": 663,
+    "packetBytes": 2213756
+  },
+  "supplements": {
+    "errorIndex": {
+      "path": "error-index.json",
+      "sha256": "268a28b49982902e9ea23aba54a0c20c164db09f9a2cf3e82e7a45c75c49d336",
+      "counts": {
+        "normalizedMessages": 8645,
+        "explicitErrorResults": 85,
+        "pairedExplicitErrors": 85,
+        "orphanExplicitErrors": 0,
+        "parseIssueCategories": {}
+      }
+    }
+  },
+  "cases": [
+    {
+      "caseId": "01a07e86-72ed-7453-846a-edc2790c2402",
+      "threadId": "01a07e86-72ed-7453-846a-edc2790c2402",
+      "stratum": "long",
+      "createdAt": "2026-09-08T00:58:55.597654+00:00",
+      "cwd": "/Users/konghayao/code/ai/perihelion",
+      "ownMessageCount": 118,
+      "packetHash": "0ccb8ab3fef8eb1bf81f7c7576ea1bdab87b30c6a3f8009bf8a32ddfa7a9834b",
+      "coverage": {
+        "sourceMessageCount": 118,
+        "exportedMessageCount": 118,
+        "omittedMessages": 0,
+        "omittedFields": [],
+        "sourceTruncatedMessages": 0,
+        "exportTruncated": false,
+        "truncated": false,
+        "includeContent": true,
+        "byteCount": 547142
+      },
+      "path": "cases/01a07e86-72ed-7453-846a-edc2790c2402.json"
+    },
+    {
+      "caseId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+      "threadId": "01a083ab-fbea-7e51-a8eb-6328d405b220",
+      "stratum": "long",
+      "createdAt": "2026-09-09T00:58:01.578071+00:00",
+      "cwd": "/Users/konghayao/code/ai/perihelion",
+      "ownMessageCount": 382,
+      "packetHash": "77fa9e88f10272d81155ddddf4f06f7bb6433284a6641825f67d1de118a77085",
+      "coverage": {
+        "sourceMessageCount": 382,
+        "exportedMessageCount": 382,
+        "omittedMessages": 0,
+        "omittedFields": [
+          "result.content",
+          "text"
+        ],
+        "sourceTruncatedMessages": 0,
+        "exportTruncated": true,
+        "truncated": true,
+        "includeContent": true,
+        "byteCount": 1046155
+      },
+      "path": "cases/01a083ab-fbea-7e51-a8eb-6328d405b220.json"
+    },
+    {
+      "caseId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+      "threadId": "01a07b52-aa80-7ef2-9048-4eda8106c5b4",
+      "stratum": "medium",
+      "createdAt": "2026-09-07T10:03:30.304411+00:00",
+      "cwd": "/Users/konghayao/code/ai/perihelion",
+      "ownMessageCount": 93,
+      "packetHash": "64c47cbe97081bc7780b5b69ed677d5cab071cc6716396896fa835496b277cee",
+      "coverage": {
+        "sourceMessageCount": 93,
+        "exportedMessageCount": 93,
+        "omittedMessages": 0,
+        "omittedFields": [],
+        "sourceTruncatedMessages": 0,
+        "exportTruncated": false,
+        "truncated": false,
+        "includeContent": true,
+        "byteCount": 334015
+      },
+      "path": "cases/01a07b52-aa80-7ef2-9048-4eda8106c5b4.json"
+    },
+    {
+      "caseId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+      "threadId": "01a083e3-5c9e-7df0-89fa-7a0b43ee4eba",
+      "stratum": "medium",
+      "createdAt": "2026-09-09T01:58:30.814821+00:00",
+      "cwd": "/Users/konghayao/code/ai/perihelion",
+      "ownMessageCount": 62,
+      "packetHash": "0cf8a68729ba7794c4e17987bb7c5ba5cc1f0bdd0a99365c13dce845a193d568",
+      "coverage": {
+        "sourceMessageCount": 62,
+        "exportedMessageCount": 62,
+        "omittedMessages": 0,
+        "omittedFields": [],
+        "sourceTruncatedMessages": 0,
+        "exportTruncated": false,
+        "truncated": false,
+        "includeContent": true,
+        "byteCount": 282481
+      },
+      "path": "cases/01a083e3-5c9e-7df0-89fa-7a0b43ee4eba.json"
+    },
+    {
+      "caseId": "01a08540-fa17-7163-963f-82431131dbea",
+      "threadId": "01a08540-fa17-7163-963f-82431131dbea",
+      "stratum": "short",
+      "createdAt": "2026-09-09T08:20:23.191549+00:00",
+      "cwd": "/Users/konghayao/code/ai/perihelion",
+      "ownMessageCount": 2,
+      "packetHash": "daee31eedaaa42277d4ae3f7672422230f875471329323d4e0e673b834bf27ae",
+      "coverage": {
+        "sourceMessageCount": 2,
+        "exportedMessageCount": 2,
+        "omittedMessages": 0,
+        "omittedFields": [],
+        "sourceTruncatedMessages": 0,
+        "exportTruncated": false,
+        "truncated": false,
+        "includeContent": true,
+        "byteCount": 1462
+      },
+      "path": "cases/01a08540-fa17-7163-963f-82431131dbea.json"
+    },
+    {
+      "caseId": "01a08f33-3f57-7b73-9788-96fee1cce71f",
+      "threadId": "01a08f33-3f57-7b73-9788-96fee1cce71f",
+      "stratum": "short",
+      "createdAt": "2026-09-11T06:41:35.575603+00:00",
+      "cwd": "/Users/konghayao/code/ai/perihelion",
+      "ownMessageCount": 6,
+      "packetHash": "7d7a731f9fe239e6d836555651fa60b681db7edd3cdbd117abb253833ded0baa",
+      "coverage": {
+        "sourceMessageCount": 6,
+        "exportedMessageCount": 6,
+        "omittedMessages": 0,
+        "omittedFields": [],
+        "sourceTruncatedMessages": 0,
+        "exportTruncated": false,
+        "truncated": false,
+        "includeContent": true,
+        "byteCount": 2501
+      },
+      "path": "cases/01a08f33-3f57-7b73-9788-96fee1cce71f.json"
+    }
+  ]
+}
