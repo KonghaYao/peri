@@ -1,5 +1,12 @@
 (function() { "use strict";
 
+var detailMessages = [];
+var detailPage = 1;
+var detailHasMore = false;
+var detailThreadId = null;
+var detailRequestId = 0;
+var detailLoading = false;
+
 window.originalOnPageActivate3 = window.onPageActivate;
 window.onPageActivate = function(pageName) {
   if (window.originalOnPageActivate3) window.originalOnPageActivate3(pageName);
@@ -12,6 +19,8 @@ function escHtml(s) {
 }
 
 window.loadDetail = async function(threadId) {
+  var requestId = ++detailRequestId;
+  detailLoading = true;
   var metaEl = document.getElementById("detail-meta");
   var relEl = document.getElementById("detail-relations");
   var msgEl = document.getElementById("detail-messages");
@@ -22,19 +31,49 @@ window.loadDetail = async function(threadId) {
 
   try {
     var data = await window.api.get("/api/threads/" + encodeURIComponent(threadId));
-    if (data.error) { metaEl.innerHTML = '<div class="empty-state">Error: ' + escHtml(data.error) + '</div>'; return; }
+    if (requestId !== detailRequestId) return;
+    if (data.error) { metaEl.innerHTML = '<div class="empty-state">Error: ' + escHtml(data.error) + '</div>'; detailLoading = false; return; }
     renderMeta(data.thread);
     renderRelations(data.thread, data.parent, data.children);
   } catch (e) {
     metaEl.innerHTML = '<div class="empty-state">Failed to load</div>';
+    detailLoading = false;
     return;
   }
 
   try {
-    var msgData = await window.api.get("/api/threads/" + encodeURIComponent(threadId) + "/messages");
-    if (msgData.error) return;
-    renderMessages(msgData.messages, threadId);
-  } catch (e) { console.error(e); }
+    detailThreadId = threadId;
+    detailPage = 1;
+    detailMessages = [];
+    var msgData = await window.api.get("/api/threads/" + encodeURIComponent(threadId) + "/messages?page=1&perPage=100");
+    if (requestId !== detailRequestId) return;
+    if (msgData.error) { msgEl.innerHTML = '<div class="empty-state">Error: ' + escHtml(msgData.error) + '</div>'; return; }
+    detailMessages = msgData.messages || [];
+    detailHasMore = !!msgData.hasMore;
+    renderMessages(detailMessages, threadId);
+  } catch (e) {
+    if (requestId === detailRequestId) msgEl.innerHTML = '<div class="empty-state">Failed to load messages. <button onclick="loadDetail(\'' + escHtml(threadId) + '\')">Retry</button></div>';
+  } finally { if (requestId === detailRequestId) detailLoading = false; }
+};
+
+window.loadMoreMessages = async function() {
+  if (!detailHasMore || !detailThreadId || detailLoading) return;
+  detailLoading = true;
+  var requestId = detailRequestId;
+  var nextPage = detailPage + 1;
+  try {
+    var data = await window.api.get("/api/threads/" + encodeURIComponent(detailThreadId) + "/messages?page=" + nextPage + "&perPage=100");
+    if (requestId !== detailRequestId) return;
+    if (data.error) throw new Error(data.error);
+    detailMessages = detailMessages.concat(data.messages || []);
+    detailPage = nextPage;
+    detailHasMore = !!data.hasMore;
+    renderMessages(detailMessages, detailThreadId);
+  } catch (e) {
+    if (requestId === detailRequestId) document.getElementById("detail-messages").insertAdjacentHTML("beforeend", '<div class="empty-state">Failed to load more messages. <button onclick="loadMoreMessages()">Retry</button></div>');
+  } finally {
+    if (requestId === detailRequestId) detailLoading = false;
+  }
 };
 
 // ── 渲染元数据卡片 ──
@@ -113,68 +152,31 @@ function renderMessages(messages, threadId) {
     return;
   }
 
-  // 倒序显示（最新在前）
+  // API returns normalized messages. Rendering those fields keeps V1 top-level
+  // calls and system_reminder records visible even when raw content is absent.
   messages = messages.slice().reverse();
-
-  // Pass 1: 构建 tool_call_id → tool_name 映射
-  var toolNameMap = {};
-  messages.forEach(function(m) {
-    var p = null;
-    try { p = JSON.parse(m.content); } catch (e) {}
-    if (p && p.role === "assistant" && Array.isArray(p.content)) {
-      p.content.forEach(function(block) {
-        if (block.type === "tool_use" && block.id && block.name) {
-          toolNameMap[block.id] = block.name;
-        }
-      });
-    }
-  });
-
+  var toolNameMap = Object.create(null);
+  messages.forEach(function(m) { (m.calls || []).forEach(function(call) { toolNameMap[call.id] = call.name; }); });
   el.innerHTML = messages.map(function(m, idx) {
-    var parsed = null;
-    try { parsed = JSON.parse(m.content); } catch (e) {}
-
-    if (parsed && parsed.role === "tool") {
-      // 独立 tool 消息（role: "tool"）
-      return renderToolMessage(parsed, idx, toolNameMap, messages.length);
-    }
-
-    var roleClass = "message-role role-" + m.role;
-    var blocksHtml = "";
-
-    if (parsed && Array.isArray(parsed.content)) {
-      blocksHtml = parsed.content.map(function(block) {
-        switch (block.type) {
-          case "text":
-            return renderTextBlock(block);
-          case "tool_use":
-            return renderToolUseBlock(block);
-          case "tool_result":
-            return renderToolResultBlock(block, toolNameMap);
-          case "reasoning":
-          case "thinking":
-            return renderReasoningBlock(block);
-          default:
-            return renderUnknownBlock(block);
-        }
-      }).join("");
-    } else if (parsed && typeof parsed.content === "string") {
-      // user/system 等消息的 content 是纯文本
-      blocksHtml = '<div class="message-content-block block-text">' +
-        escHtml(window.api.truncate(parsed.content, 2000)) + '</div>';
-    } else {
-      blocksHtml = '<div class="message-raw">' + escHtml(
-        typeof m.content === "string" ? window.api.truncate(m.content, 2000) : JSON.stringify(m.content).substring(0, 2000)
-      ) + '</div>';
-    }
-
-    return '<div class="message-item">' +
-      '<div class="' + roleClass + '">' + escHtml(m.role) + ' #' + (messages.length - idx) +
-      ' <span class="message-id-label">' + escHtml(m.message_id ? m.message_id.substring(0, 8)+"..." : "") + '</span>' +
-      '</div>' +
-      blocksHtml +
-      '</div>';
-  }).join("");
+    var blocksHtml = '';
+    var displayText = m.text || "";
+    // Some historical normalized rows expose result content through text too.
+    // Render it once as a result so the detail view does not duplicate output.
+    (m.results || []).forEach(function(result) {
+      if (result.content && displayText === result.content) displayText = "";
+    });
+    if (displayText) blocksHtml += renderTextBlock({ text: displayText });
+    (m.calls || []).forEach(function(call) {
+      blocksHtml += renderToolUseBlock({ id: call.id, name: call.name, input: call.arguments });
+    });
+    (m.results || []).forEach(function(result) {
+      blocksHtml += renderToolResultBlock({ tool_use_id: result.id, content: result.content, is_error: result.isError }, toolNameMap);
+    });
+    if (!blocksHtml) blocksHtml = '<div class="message-raw">(empty message)</div>';
+    if (m.parseIssues && m.parseIssues.length) blocksHtml += '<div class="message-raw">Parse issue: ' + escHtml(m.parseIssues.join(', ')) + '</div>';
+    return '<div class="message-item"><div class="message-role role-' + escHtml(m.role) + '">' + escHtml(m.role) + ' #' + (messages.length - idx) +
+      ' <span class="message-id-label">' + escHtml(m.messageId ? m.messageId.substring(0, 8) + "..." : "") + '</span></div>' + blocksHtml + '</div>';
+  }).join('') + (detailHasMore ? '<button class="load-more-messages" onclick="loadMoreMessages()">Load more messages</button>' : '');
 }
 
 // ── 独立 tool 消息 ──

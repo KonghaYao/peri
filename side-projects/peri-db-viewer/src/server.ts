@@ -1,101 +1,63 @@
-import { Hono } from "hono";
-import { join, extname, dirname } from "path";
-import { stat, readFile } from "fs/promises";
-import { fileURLToPath } from "url";
-import { DataLoader } from "./data/loader.js";
-import { registerApiRoutes } from "./routes/api.js";
+import { createApp, MemCache } from "./app.js";
+import type { ViewerDataSource } from "./routes/api.js";
+import { ViewerDataAdapter } from "./data_adapter.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PORT = 8741;
-const PUBLIC_DIR = join(__dirname, "public");
-
-const dl = new DataLoader();
-
-// ── 简单内存缓存 ──
-interface CacheEntry<T = unknown> {
-  data: T;
-  expiresAt: number;
+export interface ViewerConfig {
+  host: string;
+  port: number;
+  dbPath: string;
 }
 
-class MemCache {
-  private store = new Map<string, CacheEntry>();
-
-  get<T>(key: string): T | null {
-    const entry = this.store.get(key);
-    if (!entry) return null;
-    if (Date.now() > entry.expiresAt) {
-      this.store.delete(key);
-      return null;
-    }
-    return entry.data as T;
-  }
-
-  set<T>(key: string, data: T, ttlMs: number): void {
-    this.store.set(key, { data, expiresAt: Date.now() + ttlMs });
-  }
-
-  /** 定期清理过期条目 */
-  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
-
-  startCleanup(intervalMs = 120_000) {
-    this.cleanupInterval = setInterval(() => {
-      const now = Date.now();
-      for (const [k, v] of this.store) {
-        if (now > v.expiresAt) this.store.delete(k);
-      }
-    }, intervalMs);
-  }
-
-  stopCleanup() {
-    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
-  }
+export function loadConfig(env: Record<string, string | undefined> = process.env): ViewerConfig {
+  const port = Number(env.PERI_DB_VIEWER_PORT ?? env.PORT ?? "8741");
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("PERI_DB_VIEWER_PORT must be between 1 and 65535");
+  return {
+    // The viewer is a local diagnostic surface; binding is deliberately not configurable.
+    host: "127.0.0.1",
+    port,
+    dbPath: env.PERI_DB_PATH ?? env.PERI_THREADS_DB ?? "~/.peri/threads/threads.db",
+  };
 }
 
-const cache = new MemCache();
-cache.startCleanup();
+export interface RunningViewer {
+  stop(): void;
+}
 
-const app = new Hono();
-
-// API 路由
-registerApiRoutes(app, dl, cache);
-
-// 静态文件 catch-all（必须最后注册）
-app.get("/*", async (c) => {
-  const reqPath = c.req.path === "/" ? "/index.html" : c.req.path;
-
-  // 路径穿越防护
-  if (reqPath.includes("..")) {
-    return c.text("Forbidden", 403);
-  }
-
-  const filePath = join(PUBLIC_DIR, reqPath);
+/** Start an already-open read-only data source. The caller owns database construction and cleanup. */
+export function startServer(dataSource: ViewerDataSource, config: ViewerConfig = loadConfig()): RunningViewer {
+  const cache = new MemCache();
+  cache.startCleanup();
+  let server: ReturnType<typeof Bun.serve>;
   try {
-    const statInfo = await stat(filePath);
-    if (statInfo.isFile()) {
-      const content = await readFile(filePath);
-      const ext = extname(filePath).toLowerCase();
-      const mimeMap: Record<string, string> = {
-        ".html": "text/html; charset=utf-8",
-        ".css": "text/css; charset=utf-8",
-        ".js": "application/javascript; charset=utf-8",
-        ".mjs": "application/javascript; charset=utf-8",
-        ".json": "application/json",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".svg": "image/svg+xml",
-        ".ico": "image/x-icon",
-        ".woff2": "font/woff2",
-        ".map": "application/json",
-      };
-      return c.body(content, 200, {
-        "Content-Type": mimeMap[ext] || "application/octet-stream",
-      });
-    }
-  } catch {}
-  return c.notFound();
-});
+    const app = createApp(dataSource, { cache });
+    server = Bun.serve({ hostname: config.host, port: config.port, fetch: app.fetch });
+  } catch (error) {
+    cache.stopCleanup();
+    dataSource.close();
+    throw error;
+  }
+  console.log(`Peri DB Viewer running at http://${config.host}:${server.port}`);
+  let stopped = false;
+  return {
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      server.stop(true);
+      cache.stopCleanup();
+      dataSource.close();
+    },
+  };
+}
 
-Bun.serve({ fetch: app.fetch, port: PORT });
+export { createApp } from "./app.js";
 
-console.log(`Peri DB Viewer running at http://localhost:${PORT}`);
+if (import.meta.main) {
+  try {
+    const config = loadConfig();
+    const dataSource = await ViewerDataAdapter.open(config.dbPath);
+    startServer(dataSource, config);
+  } catch (error) {
+    console.error(`Peri DB Viewer failed to start: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
+}
