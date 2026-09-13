@@ -17,6 +17,9 @@ Peri 运行数据的离线分析归 `side-projects/agent-defect-analyzer/`，本
 - 可继承的研究方法由 [auto-data-researcher](../../.claude/skills/auto-data-researcher/SKILL.md)
   维护。该目录是仓库内的维护源；会话若加载 `.agents/skills/auto-data-researcher/` 副本，
   更新时同步对应文件并检查一致性，避免旧方法继续被加载。
+- 任务级评价的口径与 subagent 复核流程见
+  [任务有效性研究](../../side-projects/agent-defect-analyzer/TASK-EVALUATION.md)。
+  评审标签独立于持久化事实，缺失证据与评审分歧须保留。
 
 ## 入口
 
