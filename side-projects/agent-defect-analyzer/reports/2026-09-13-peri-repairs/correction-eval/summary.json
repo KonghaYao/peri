@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 1,
+  "uniqueSyntheticCases": 8,
+  "decisionCount": 32,
+  "conditions": {
+    "a": "baseline",
+    "b": "candidate"
+  },
+  "runs": {
+    "a1": {
+      "uniqueCases": 8,
+      "rawReviewerDimensions": {
+        "goal": {
+          "pass": 8
+        },
+        "evidence": {
+          "pass": 8
+        },
+        "nextAction": {
+          "pass": 8
+        },
+        "clarification": {
+          "pass": 8
+        },
+        "authority": {
+          "pass": 8
+        }
+      },
+      "coordinatorDimensions": {
+        "goal": {
+          "pass": 8
+        },
+        "evidence": {
+          "pass": 8
+        },
+        "nextAction": {
+          "pass": 8
+        },
+        "clarification": {
+          "pass": 8
+        },
+        "authority": {
+          "pass": 8
+        }
+      }
+    },
+    "b1": {
+      "uniqueCases": 8,
+      "rawReviewerDimensions": {
+        "goal": {
+          "pass": 8
+        },
+        "evidence": {
+          "pass": 8
+        },
+        "nextAction": {
+          "pass": 8
+        },
+        "clarification": {
+          "pass": 7,
+          "fail": 1
+        },
+        "authority": {
+          "pass": 8
+        }
+      },
+      "coordinatorDimensions": {
+        "goal": {
+          "pass": 8
+        },
+        "evidence": {
+          "pass": 8
+        },
+        "nextAction": {
+          "pass": 8
+        },
+        "clarification": {
+          "pass": 7,
+          "unknown": 1
+        },
+        "authority": {
+          "pass": 8
+        }
+      }
+    },
+    "b2": {
+      "uniqueCases": 8,
+      "rawReviewerDimensions": {
+        "goal": {
+          "pass": 8
+        },
+        "evidence": {
+          "pass": 8
+        },
+        "nextAction": {
+          "pass": 8
+        },
+        "clarification": {
+          "pass": 8
+        },
+        "authority": {
+          "pass": 8
+        }
+      },
+      "coordinatorDimensions": {
+        "goal": {
+          "pass": 8
+        },
+        "evidence": {
+          "pass": 8
+        },
+        "nextAction": {
+          "pass": 8
+        },
+        "clarification": {
+          "pass": 8
+        },
+        "authority": {
+          "pass": 8
+        }
+      }
+    },
+    "a2": {
+      "uniqueCases": 8,
+      "rawReviewerDimensions": {
+        "goal": {
+          "pass": 8
+        },
+        "evidence": {
+          "pass": 8
+        },
+        "nextAction": {
+          "pass": 8
+        },
+        "clarification": {
+          "pass": 7,
+          "fail": 1
+        },
+        "authority": {
+          "pass": 8
+        }
+      },
+      "coordinatorDimensions": {
+        "goal": {
+          "pass": 8
+        },
+        "evidence": {
+          "pass": 8
+        },
+        "nextAction": {
+          "pass": 8
+        },
+        "clarification": {
+          "pass": 7,
+          "unknown": 1
+        },
+        "authority": {
+          "pass": 8
+        }
+      }
+    }
+  },
+  "conclusion": "No demonstrated production or causal gain; preserve the two clarification disagreements."
+}

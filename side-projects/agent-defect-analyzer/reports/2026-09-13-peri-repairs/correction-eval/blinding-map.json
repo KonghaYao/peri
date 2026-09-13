@@ -1,0 +1,164 @@
+{
+  "mapping": [
+    {
+      "id": "decision-01",
+      "run": "a2",
+      "caseId": "permission-scope"
+    },
+    {
+      "id": "decision-02",
+      "run": "a2",
+      "caseId": "explicit-new-target"
+    },
+    {
+      "id": "decision-03",
+      "run": "a2",
+      "caseId": "timed-injection"
+    },
+    {
+      "id": "decision-04",
+      "run": "a1",
+      "caseId": "timed-injection"
+    },
+    {
+      "id": "decision-05",
+      "run": "b2",
+      "caseId": "ambiguous-cancel"
+    },
+    {
+      "id": "decision-06",
+      "run": "a1",
+      "caseId": "stale-ci"
+    },
+    {
+      "id": "decision-07",
+      "run": "a1",
+      "caseId": "ambiguous-trigger"
+    },
+    {
+      "id": "decision-08",
+      "run": "b2",
+      "caseId": "timed-injection"
+    },
+    {
+      "id": "decision-09",
+      "run": "b1",
+      "caseId": "permission-scope"
+    },
+    {
+      "id": "decision-10",
+      "run": "b1",
+      "caseId": "explicit-architecture"
+    },
+    {
+      "id": "decision-11",
+      "run": "a2",
+      "caseId": "stale-ci"
+    },
+    {
+      "id": "decision-12",
+      "run": "a1",
+      "caseId": "clipboard-platform"
+    },
+    {
+      "id": "decision-13",
+      "run": "a1",
+      "caseId": "ambiguous-cancel"
+    },
+    {
+      "id": "decision-14",
+      "run": "a1",
+      "caseId": "explicit-new-target"
+    },
+    {
+      "id": "decision-15",
+      "run": "a1",
+      "caseId": "permission-scope"
+    },
+    {
+      "id": "decision-16",
+      "run": "b2",
+      "caseId": "permission-scope"
+    },
+    {
+      "id": "decision-17",
+      "run": "a2",
+      "caseId": "clipboard-platform"
+    },
+    {
+      "id": "decision-18",
+      "run": "b2",
+      "caseId": "explicit-new-target"
+    },
+    {
+      "id": "decision-19",
+      "run": "b1",
+      "caseId": "ambiguous-cancel"
+    },
+    {
+      "id": "decision-20",
+      "run": "a2",
+      "caseId": "ambiguous-cancel"
+    },
+    {
+      "id": "decision-21",
+      "run": "b1",
+      "caseId": "stale-ci"
+    },
+    {
+      "id": "decision-22",
+      "run": "b2",
+      "caseId": "stale-ci"
+    },
+    {
+      "id": "decision-23",
+      "run": "b1",
+      "caseId": "timed-injection"
+    },
+    {
+      "id": "decision-24",
+      "run": "b1",
+      "caseId": "clipboard-platform"
+    },
+    {
+      "id": "decision-25",
+      "run": "a2",
+      "caseId": "ambiguous-trigger"
+    },
+    {
+      "id": "decision-26",
+      "run": "a1",
+      "caseId": "explicit-architecture"
+    },
+    {
+      "id": "decision-27",
+      "run": "b2",
+      "caseId": "explicit-architecture"
+    },
+    {
+      "id": "decision-28",
+      "run": "a2",
+      "caseId": "explicit-architecture"
+    },
+    {
+      "id": "decision-29",
+      "run": "b2",
+      "caseId": "ambiguous-trigger"
+    },
+    {
+      "id": "decision-30",
+      "run": "b1",
+      "caseId": "explicit-new-target"
+    },
+    {
+      "id": "decision-31",
+      "run": "b1",
+      "caseId": "ambiguous-trigger"
+    },
+    {
+      "id": "decision-32",
+      "run": "b2",
+      "caseId": "clipboard-platform"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "baseCommit": "73df17f7",
+  "model": "gpt-5.6-luna",
+  "reasoningEffort": "high",
+  "history": "none",
+  "repetitionsPerCondition": 2,
+  "caseCount": 8,
+  "blindingSeed": "peri-correction-decisions-20260913-v1",
+  "allowedActions": "Read only the three designated input files; write the evaluation JSON. Do not execute simulated task actions.",
+  "inputs": {
+    "cases.json": "ea0c34d7a59a8b5816a9dfaa27522111c614a7dce16fa2dca426690581b82364",
+    "protocol.md": "16c4d9b57ca2fd062ebb0e0ce5855dcc6e0849ab2b1fd061108046a124c1392b",
+    "baseline-prompt.md": "bd1969c53c55488c35ac29cfb66f434731086c2cb7bebb38e5f36c86515c42e3",
+    "baseline-skill.md": "cdd93753bdedc7a85f2b3f7df7746d0f62dce5495ee47e5a2b7a5104d8c34ae4",
+    "candidate-prompt.md": "cce6723f5abae31d0c8c22de39e4ec426ae36b2abecb97c5327916191979285a",
+    "candidate-skill.md": "63deda96c4fdf631f76b2e3a1a7ad121aaed60ec02b1c29a0d358bf095917511"
+  },
+  "actualRunOrder": [
+    "a1",
+    "b1",
+    "b2",
+    "a2"
+  ],
+  "outputHashes": {
+    "outputs-a1.json": "94f7ca9d70d687b7459447c09ba3bf2e5ed882a1388445807ea317800a455a9c",
+    "outputs-a2.json": "6f3cc39ebb43700bf2c1b6beff882f510751830974f0d0821bb3508217650b7b",
+    "outputs-b1.json": "fe107403aa6af4557bbb32ba47efafd784dfe269140bde533937760f369c563e",
+    "outputs-b2.json": "298b654fafb02a2ea8a71a3ae0a0a9efcdcf6345cff40d2da5229eac15c32071"
+  }
+}

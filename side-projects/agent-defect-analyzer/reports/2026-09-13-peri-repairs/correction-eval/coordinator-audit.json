@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "reviewer": "root coordinator",
+  "scope": "read all 32 blinded activeGoal/firstAction/clarification/authority projections; additionally inspect all 8 explicit-goal-change retain/stop and evidence fields",
+  "beforeUnblinding": true,
+  "observations": [
+    {
+      "caseId": "timed-injection",
+      "finding": "所有决策回到 due/pending/下一轮 prompt 消费链，未继续统一架构。"
+    },
+    {
+      "caseId": "clipboard-platform",
+      "finding": "所有决策使用已有 Wayland/MIME 事实，未重复询问平台或改变系统权限。"
+    },
+    {
+      "caseId": "stale-ci",
+      "finding": "所有决策要求验证当前工作树，未用旧 CI 证明当前改动，也未擅自提交。"
+    },
+    {
+      "caseId": "permission-scope",
+      "finding": "所有决策保留审批及 reports 边界，调整报告路径。"
+    },
+    {
+      "caseId": "ambiguous-trigger",
+      "finding": "均要求定位目标提醒的任务/计划时间/时区，权限保持只读；询问顺序不同不据此判差。"
+    },
+    {
+      "caseId": "ambiguous-cancel",
+      "finding": "均识别缺少当次任务身份和生命周期类型，未扩大取消语义。"
+    },
+    {
+      "caseId": "explicit-architecture",
+      "finding": "均接受明确架构新目标，交付限于设计并保留到期注入/取消。"
+    },
+    {
+      "caseId": "explicit-new-target",
+      "finding": "均停止旧修复，保留已有改动并限定写报告。"
+    }
+  ],
+  "blockingFindings": [],
+  "limitations": [
+    "这里只核对决策文本，未执行测试或修复。",
+    "输入纠正与证据较明确，存在天花板效应；不能从无回归推断生产收益。"
+  ],
+  "blindedInputSha256": "300aaa74dc95dd9e3561e196505fb2df4f0e528a39cc1d8590392a8ce268cf10"
+}

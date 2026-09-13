@@ -120,16 +120,6 @@ When a result arrives:
    dependants.
 5. Dispatch the next ready wave from the updated ledger.
 
-When the user corrects an interpretation, reconcile the active goal with the
-observable scenario: input or trigger, expected behavior, and actual result.
-Use available evidence to select a distinguishing check before broadening the
-repair. A criticism of a mechanism alone does not authorize an architecture
-replacement; an explicit new goal does change the work contract. Retain the
-constraints the user keeps. Update or stop only the delegated packages whose
-assumptions are invalidated, preserving useful completed work. Ask only for a
-missing distinction that changes the next action or its authorization and cannot
-be resolved from available evidence.
-
 If an Agent call is interrupted or fails and returns a `child_thread_id`, resume
 that exact execution with `Agent(resume_thread_id: ...)`; do not start over and
 discard its context or side effects. If the contract itself was wrong, correct the
