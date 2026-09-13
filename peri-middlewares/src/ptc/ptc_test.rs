@@ -256,6 +256,25 @@ async fn test_run_code_routes_concurrent_calls_through_effective_dispatcher() {
 }
 
 #[tokio::test]
+async fn test_ptc_string_projection_does_not_fabricate_nested_execution_evidence() {
+    let _home = HomeGuard::with_ptc_fixture();
+    let output = RunPtcCodeTool::default()
+        .invoke_output(
+            json!({"source": "return await tools.Read({ file: 'nested' });"}),
+            ToolContext::new(&[], ".").with_effective_tool_dispatcher(
+                Arc::new(FakeDispatcher),
+                "outer-run-ptc-code",
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(output.execution.is_none());
+    let result: Value = serde_json::from_str(&output.text).unwrap();
+    assert_eq!(result["value"], json!("{\"file\":\"nested\"}"));
+}
+
+#[tokio::test]
 async fn test_run_code_preserves_effective_tool_error_code() {
     let _home = HomeGuard::with_ptc_fixture();
     let result = RunPtcCodeTool::default()

@@ -8,13 +8,15 @@ use peri_agent::agent::async_tasks::{
     BgTaskKind, ShellExecutionGuard,
 };
 use peri_agent::{
-    agent::events::BackgroundTaskResult, middleware::r#trait::Middleware, tools::BaseTool,
+    agent::events::BackgroundTaskResult,
+    middleware::r#trait::Middleware,
+    tools::{BaseTool, ToolExecutionEvidence, ToolExecutionStatus, ToolOutput},
 };
 use serde_json::Value;
 use tokio::time::{timeout, Duration};
 use tracing::warn;
 
-use crate::tools::output_persist::persist_truncated_output;
+use crate::tools::output_persist::persist_truncated_output_with_ref;
 
 /// BashTool - 终端命令执行工具，与 TypeScript TerminalMiddleware 对齐
 const BASH_DESCRIPTION: &str = include_str!("descriptions/bash.md");
@@ -55,12 +57,17 @@ const MAX_OUTPUT_CHARS: usize = 65_000;
 /// 输出最大行数（在第 N 行截断后，若还有行数超过上限再截字节）
 const MAX_OUTPUT_LINES: usize = 2_000;
 
+#[cfg(test)]
 fn truncate_output(output: &str) -> String {
+    truncate_output_with_ref(output).0
+}
+
+fn truncate_output_with_ref(output: &str) -> (String, Option<String>) {
     let lines: Vec<&str> = output.split('\n').collect();
     if lines.len() > MAX_OUTPUT_LINES {
         let total_lines = lines.len();
         // Persist full content before truncating
-        let persist_hint = persist_truncated_output(output);
+        let (persist_hint, output_ref) = persist_truncated_output_with_ref(output);
         let head_count = MAX_OUTPUT_LINES / 2;
         let tail_count = MAX_OUTPUT_LINES - head_count;
         let head: Vec<&str> = lines.iter().take(head_count).copied().collect();
@@ -82,22 +89,52 @@ fn truncate_output(output: &str) -> String {
         // Check byte limit after adding hint
         if result.len() > MAX_OUTPUT_CHARS {
             let truncated = truncate_bytes(&result, MAX_OUTPUT_CHARS);
-            return format!(
-                "{}\n\n[Output truncated: exceeds {} byte limit]{}",
-                truncated, MAX_OUTPUT_CHARS, persist_hint
+            return (
+                format!(
+                    "{}\n\n[Output truncated: exceeds {} byte limit]{}",
+                    truncated,
+                    MAX_OUTPUT_CHARS,
+                    persist_hint.as_str()
+                ),
+                output_ref,
             );
         }
-        return result;
+        return (result, output_ref);
     }
     if output.len() > MAX_OUTPUT_CHARS {
-        let persist_hint = persist_truncated_output(output);
+        let (persist_hint, output_ref) = persist_truncated_output_with_ref(output);
         let truncated = truncate_bytes(output, MAX_OUTPUT_CHARS);
-        return format!(
-            "{}\n\n[Output truncated: exceeds {} byte limit]{}",
-            truncated, MAX_OUTPUT_CHARS, persist_hint
+        return (
+            format!(
+                "{}\n\n[Output truncated: exceeds {} byte limit]{}",
+                truncated,
+                MAX_OUTPUT_CHARS,
+                persist_hint.as_str()
+            ),
+            output_ref,
         );
     }
-    output.to_string()
+    (output.to_string(), None)
+}
+
+/// Bash declares a 10k character model projection. Persist the source before
+/// applying that final bound, including outputs that are below the historical
+/// 65k/2000-line middleware threshold.
+fn bounded_bash_output(output: &str) -> (String, Option<String>) {
+    const BASH_OUTPUT_LIMIT: usize = 10_000;
+    // Reserve room for the typed execution summary appended by canonical
+    // dispatch. This keeps near-limit outputs from being truncated a second
+    // time after Bash has already decided whether to persist the source.
+    const EXECUTION_SUMMARY_BUDGET: usize = 512;
+    if output.chars().count() <= BASH_OUTPUT_LIMIT - EXECUTION_SUMMARY_BUDGET {
+        return truncate_output_with_ref(output);
+    }
+    let (hint, output_ref) = persist_truncated_output_with_ref(output);
+    let marker = format!("\n\n[Output truncated at {BASH_OUTPUT_LIMIT} chars]");
+    let content_limit = BASH_OUTPUT_LIMIT
+        .saturating_sub(marker.chars().count() + hint.chars().count() + EXECUTION_SUMMARY_BUDGET);
+    let truncated = truncate_bytes(output, content_limit);
+    (format!("{truncated}{marker}{hint}"), output_ref)
 }
 
 /// 合并 stdout/stderr 为既有输出格式：stderr 加 `[stderr]` 前缀；
@@ -131,20 +168,26 @@ fn merge_output(stdout: &str, stderr: &str, exit_code: Option<i32>) -> String {
 
 /// 将超时前捕获的部分输出写入临时文件，返回提示字符串（含 "partial output" 字样）。
 /// 文件路径：`{temp_dir}/peri-tool-output-{uuid}.txt`
-fn persist_partial_output(output: &str) -> String {
+fn persist_partial_output_with_ref(output: &str) -> (String, Option<String>) {
     let id = uuid::Uuid::new_v4();
     let dir = std::env::temp_dir();
     let file_name = format!("peri-tool-output-{id}.txt");
     let file_path = dir.join(&file_name);
 
     match std::fs::write(&file_path, output) {
-        Ok(_) => format!(
-            "\n\n[Partial output saved to {} — use Read tool to view captured output so far]",
-            file_path.display()
+        Ok(_) => (
+            format!(
+                "\n\n[Partial output saved to {} — use Read tool to view captured output so far]",
+                file_path.display()
+            ),
+            Some(file_path.to_string_lossy().into_owned()),
         ),
-        Err(e) => format!(
-            "\n\n[Failed to save partial output to {}: {e}]",
-            file_path.display()
+        Err(e) => (
+            format!(
+                "\n\n[Failed to save partial output to {}: {e}]",
+                file_path.display()
+            ),
+            None,
         ),
     }
 }
@@ -233,11 +276,11 @@ impl BaseTool for BashTool {
         None
     }
 
-    async fn invoke(
+    async fn invoke_output(
         &self,
         input: Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
         let command = input["command"]
             .as_str()
             .ok_or("Missing command parameter")?;
@@ -293,7 +336,20 @@ impl BaseTool for BashTool {
                     "\n(process failed to spawn — a failure notification will arrive shortly)",
                 ),
             }
-            return Ok(msg);
+            return Ok(ToolOutput::with_execution(
+                msg,
+                ToolExecutionEvidence {
+                    status: if handle.pid.is_some() {
+                        ToolExecutionStatus::Running
+                    } else {
+                        ToolExecutionStatus::Unknown
+                    },
+                    exit_code: None,
+                    output_ref: None,
+                    output_truncated: false,
+                    task_id: Some(handle.task_id),
+                },
+            ));
         }
 
         // ── 同步执行路径 ──
@@ -358,12 +414,12 @@ impl BaseTool for BashTool {
                         Err(poisoned) => poisoned.into_inner().clone(),
                     };
                     let partial = merge_output(&partial_stdout, &partial_stderr, None);
-                    let partial_hint = persist_partial_output(&partial);
+                    let (partial_hint, partial_ref) = persist_partial_output_with_ref(&partial);
                     // 诊断信号：进程是否产生过任何输出（区分"慢但活跃"与"挂起/无进展"）
                     let has_output = !partial_stdout.is_empty() || !partial_stderr.is_empty();
                     let ps_line = process_status_snapshot(pid)
                         .map(|s| format!("Process state: {s}"))
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| "Process state: unavailable".to_string());
 
                     if let Some(task_manager) = self.task_manager.as_ref() {
                         // ── 有 TaskManager：不杀进程，promote 为后台任务续跑 ──
@@ -424,19 +480,29 @@ impl BaseTool for BashTool {
                                 }))?;
                                 if has_output {
                                     // 有部分输出：进程在产生进展，续跑是合理的
-                                    return Err(format!(
+                                    return Ok(ToolOutput::with_execution(format!(
                                         "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.\n- Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
                                         ms as f64 / 1000.0
-                                    )
-                                    .into());
+                                    ), ToolExecutionEvidence {
+                                        status: ToolExecutionStatus::RunningAfterTimeout,
+                                        exit_code: None,
+                                        output_ref: partial_ref.clone(),
+                                        output_truncated: true,
+                                        task_id: Some(task_id),
+                                    }));
                                 }
                                 // 无输出：进程可能挂起（等输入/资源）而非正常变慢——
                                 // 仍 promote（避免误杀静默启动的慢任务），但如实说明不确定性
-                                return Err(format!(
+                                return Ok(ToolOutput::with_execution(format!(
                                     "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).\nIf it does not complete on its own, terminate it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
                                     ms as f64 / 1000.0
-                                )
-                                .into());
+                                ), ToolExecutionEvidence {
+                                    status: ToolExecutionStatus::RunningAfterTimeout,
+                                    exit_code: None,
+                                    output_ref: partial_ref,
+                                    output_truncated: true,
+                                    task_id: Some(task_id),
+                                }));
                             }
                             Err(e) => {
                                 // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
@@ -445,11 +511,16 @@ impl BaseTool for BashTool {
                                 let _ = drain_stdout.await;
                                 let _ = drain_stderr.await;
                                 execution.confirm_stopped();
-                                return Err(format!(
+                                return Ok(ToolOutput::with_execution(format!(
                                     "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{ps_line}\n{partial_hint}\nCommand that timed out: {command}",
                                     ms as f64 / 1000.0
-                                )
-                                .into());
+                                ), ToolExecutionEvidence {
+                                    status: ToolExecutionStatus::TimedOut,
+                                    exit_code: None,
+                                    output_ref: partial_ref.clone(),
+                                    output_truncated: true,
+                                    task_id: None,
+                                }));
                             }
                         }
                     } else {
@@ -459,7 +530,7 @@ impl BaseTool for BashTool {
                         let _ = drain_stdout.await;
                         let _ = drain_stderr.await;
                         execution.confirm_stopped();
-                        return Err(format!(
+                        return Ok(ToolOutput::with_execution(format!(
                             "Command timed out after {:.1}s. The default timeout is deliberately short (15s) to encourage efficient commands.\n\
                              {ps_line}\n\
                              Options:\n\
@@ -469,8 +540,13 @@ impl BaseTool for BashTool {
                              {partial_hint}\n\
                              Command that timed out: {command}",
                             ms as f64 / 1000.0
-                        )
-                        .into());
+                        ), ToolExecutionEvidence {
+                            status: ToolExecutionStatus::TimedOut,
+                            exit_code: None,
+                            output_ref: partial_ref,
+                            output_truncated: true,
+                            task_id: None,
+                        }));
                     }
                 }
             },
@@ -490,12 +566,14 @@ impl BaseTool for BashTool {
                     Err(poisoned) => poisoned.into_inner().clone(),
                 };
                 let mut output = merge_output(&stdout, &stderr, status.code());
+                let mut background_task_id = None;
                 if execution.is_stopped() {
                     execution.confirm_stopped();
                 } else if let Some(manager) = &self.task_manager {
                     // A successful shell can leave `command &` running with redirected pipes.
                     // Register that group before returning so normal completion does not kill it.
                     let task_id = bg_shell_task_id();
+                    background_task_id = Some(task_id.clone());
                     manager.register(peri_acp_types::tasks::BgTaskRegistration {
                         task_id: task_id.clone(),
                         kind: BgTaskKind::Shell,
@@ -522,9 +600,52 @@ impl BaseTool for BashTool {
                 } else {
                     execution.release_unmanaged();
                 }
-                Ok(truncate_output(&output))
+                let (text, output_ref) = bounded_bash_output(&output);
+                let execution_status = if background_task_id.is_some() {
+                    ToolExecutionStatus::Running
+                } else if command.contains('&') && status.success() {
+                    // Without a task manager we cannot account for children
+                    // left behind by shell background syntax.
+                    ToolExecutionStatus::Unknown
+                } else if status.success() {
+                    ToolExecutionStatus::Completed
+                } else {
+                    ToolExecutionStatus::Failed
+                };
+                let output_truncated =
+                    output_ref.is_some() || text.chars().count() < output.chars().count();
+                Ok(ToolOutput::with_execution(
+                    text,
+                    ToolExecutionEvidence {
+                        status: execution_status,
+                        exit_code: status.code(),
+                        output_truncated,
+                        output_ref,
+                        task_id: background_task_id,
+                    },
+                ))
             }
             Err(e) => Err(format!("Error executing command: {e}").into()),
+        }
+    }
+
+    async fn invoke(
+        &self,
+        input: Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        match self.invoke_output(input, ctx).await? {
+            ToolOutput {
+                text,
+                execution: Some(evidence),
+            } if matches!(
+                evidence.status,
+                ToolExecutionStatus::TimedOut | ToolExecutionStatus::RunningAfterTimeout
+            ) =>
+            {
+                Err(text.into())
+            }
+            output => Ok(output.text),
         }
     }
 

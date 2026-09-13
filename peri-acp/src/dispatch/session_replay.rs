@@ -17,6 +17,7 @@ use peri_acp_types::messages::{
     BaseMessage, ContentBlock as PeriContentBlock, MessageContent as PeriMessageContent,
 };
 use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::tools::ToolOutput;
 use peri_acp_types::PeriCaps;
 
 pub async fn replay_persisted_session_history(
@@ -182,9 +183,14 @@ pub async fn replay_session_history(
                 content,
                 is_error,
                 tool_call_id,
+                execution,
                 ..
             } => {
-                let result_text = extract_text(content);
+                let result_text = ToolOutput {
+                    text: extract_text(content),
+                    execution: execution.clone(),
+                }
+                .projected_text(None);
                 let fields = ToolCallUpdateFields::new()
                     .status(Some(if *is_error {
                         ToolCallStatus::Failed

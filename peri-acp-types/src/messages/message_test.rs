@@ -88,3 +88,43 @@ fn test_tool_call_id_persistence() {
         unreachable!("Tool 消息反序列化失败");
     }
 }
+
+#[test]
+fn test_tool_execution_evidence_persists_and_legacy_payload_is_unknown() {
+    let evidence = crate::tools::ToolExecutionEvidence {
+        status: crate::tools::ToolExecutionStatus::Failed,
+        exit_code: Some(9),
+        output_ref: Some("/tmp/full-output.txt".into()),
+        output_truncated: true,
+        task_id: None,
+    };
+    let message =
+        BaseMessage::tool_result_with_execution("call-1", "bounded", true, Some(evidence.clone()));
+    let restored: BaseMessage =
+        serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+    let BaseMessage::Tool {
+        execution: Some(restored_evidence),
+        is_error,
+        ..
+    } = restored
+    else {
+        panic!("typed evidence should survive message persistence");
+    };
+    assert!(is_error);
+    assert_eq!(restored_evidence, evidence);
+
+    let mut legacy_json =
+        serde_json::to_value(BaseMessage::tool_result("call-legacy", "old result")).unwrap();
+    legacy_json
+        .as_object_mut()
+        .expect("tool message object")
+        .remove("execution");
+    let legacy: BaseMessage = serde_json::from_value(legacy_json).unwrap();
+    assert!(matches!(
+        legacy,
+        BaseMessage::Tool {
+            execution: None,
+            ..
+        }
+    ));
+}

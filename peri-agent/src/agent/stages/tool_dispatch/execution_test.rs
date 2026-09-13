@@ -74,7 +74,7 @@ async fn test_dispatch_concurrent_single_tool_succeeds() {
     .await;
     assert_eq!(results.len(), 1);
     assert!(results[0].is_ok(), "工具应成功执行");
-    assert_eq!(results[0].as_ref().unwrap(), "ok");
+    assert_eq!(results[0].as_ref().unwrap().text, "ok");
 }
 
 #[tokio::test]
@@ -138,8 +138,8 @@ async fn test_settle_results_mixed_ready_settled() {
             ToolResult::error("call_rejected", "Bash", "HITL rejected"),
         )],
     };
-    let tool_results: Vec<Result<String, EffectiveToolError>> =
-        vec![Ok("success output".to_string())];
+    let tool_results: Vec<Result<crate::tools::ToolOutput, EffectiveToolError>> =
+        vec![Ok(crate::tools::ToolOutput::from_legacy("success output"))];
     let all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
     let outcome = settle_results(&ctx, approval, tool_results, false, &all_tools).await;
     // ready + settled = 2 条
@@ -168,4 +168,21 @@ fn test_post_process_result_no_registry() {
         "无 registry 时 output 不应变化，实际: {}",
         result.output
     );
+}
+
+#[test]
+fn test_effective_cancel_and_timeout_errors_keep_typed_execution_facts() {
+    let cancelled = execution_for_effective_error(EffectiveToolErrorCode::Cancelled)
+        .expect("cancel must carry evidence");
+    assert_eq!(
+        cancelled.status,
+        crate::tools::ToolExecutionStatus::Cancelled
+    );
+    let timed_out = execution_for_effective_error(EffectiveToolErrorCode::Timeout)
+        .expect("timeout must carry evidence");
+    assert_eq!(
+        timed_out.status,
+        crate::tools::ToolExecutionStatus::TimedOut
+    );
+    assert!(execution_for_effective_error(EffectiveToolErrorCode::ToolFailed).is_none());
 }

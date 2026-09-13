@@ -235,6 +235,31 @@ fn test_tool_end_success_writes_standard_output_content() {
 }
 
 #[test]
+fn test_tool_end_typed_projection_keeps_status_summary_in_raw_output() {
+    let output = "head\n[Execution status: failed, exit_code: 7, output_ref: /tmp/full-output.txt]";
+    let event = ExecutorEvent::ToolEnd {
+        message_id: MessageId::new(),
+        tool_call_id: "tc-evidence".to_string(),
+        name: "Bash".to_string(),
+        output: output.to_string(),
+        is_error: true,
+        source_agent_id: None,
+    };
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
+    match &mapped[0].updates[0] {
+        SessionUpdate::ToolCallUpdate(update) => {
+            assert_eq!(update.fields.status, Some(ToolCallStatus::Failed));
+            assert!(tool_call_output_text(&update.fields).contains("status: failed"));
+            assert_eq!(
+                update.fields.raw_output,
+                Some(serde_json::Value::String(output.to_string()))
+            );
+        }
+        other => panic!("预期 ToolCallUpdate，实际: {other:?}"),
+    }
+}
+
+#[test]
 fn test_tool_end_preserves_read_truncation_metadata_in_standard_content() {
     let output = "     1\talpha\n[Output truncated: 12000 bytes total; showing lines 1..=1 of 800; continue reading with offset=2]";
     let event = ExecutorEvent::ToolEnd {

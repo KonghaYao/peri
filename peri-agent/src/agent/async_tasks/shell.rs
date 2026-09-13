@@ -302,19 +302,33 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
 /// 返回追加到截断信息后的提示字符串。
 /// 文件路径：`{temp_dir}/peri-tool-output-{uuid}.txt`
 pub fn persist_truncated_output(full_content: &str) -> String {
+    let (hint, _) = persist_truncated_output_with_ref(full_content);
+    hint
+}
+
+/// Persist a full output and return both the display hint and durable path.
+/// The caller should carry the path as typed evidence instead of recovering it
+/// from rendered text.
+pub fn persist_truncated_output_with_ref(full_content: &str) -> (String, Option<String>) {
     let id = uuid::Uuid::new_v4();
     let dir = std::env::temp_dir();
     let file_name = format!("peri-tool-output-{id}.txt");
     let file_path = dir.join(&file_name);
 
     match std::fs::write(&file_path, full_content) {
-        Ok(_) => format!(
-            "\n\n[Full output saved to {} — use Read tool to view complete content]",
-            file_path.display()
+        Ok(_) => (
+            format!(
+                "\n\n[Full output saved to {} — use Read tool to view complete content]",
+                file_path.display()
+            ),
+            Some(file_path.to_string_lossy().into_owned()),
         ),
-        Err(e) => format!(
-            "\n\n[Failed to save full output to {}: {e}]",
-            file_path.display()
+        Err(e) => (
+            format!(
+                "\n\n[Failed to save full output to {}: {e}]",
+                file_path.display()
+            ),
+            None,
         ),
     }
 }

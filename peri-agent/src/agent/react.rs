@@ -11,7 +11,7 @@ use crate::{
     agent::events_v2::EventBus,
     messages::{BaseMessage, MessageContent},
     session::turn::TurnId,
-    tools::BaseTool,
+    tools::{BaseTool, ToolExecutionEvidence, ToolExecutionStatus, ToolOutput},
 };
 
 /// Agent 输入
@@ -104,6 +104,9 @@ pub struct ToolResult {
     pub tool_name: String,
     pub output: String,
     pub is_error: bool,
+    /// Optional typed execution facts. Legacy tools leave this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ToolExecutionEvidence>,
     #[serde(skip)]
     pub effective_error_code: Option<crate::tools::EffectiveToolErrorCode>,
 }
@@ -119,6 +122,7 @@ impl ToolResult {
             tool_name: tool_name.into(),
             output: output.into(),
             is_error: false,
+            execution: None,
             effective_error_code: None,
         }
     }
@@ -133,6 +137,31 @@ impl ToolResult {
             tool_name: tool_name.into(),
             output: message.into(),
             is_error: true,
+            execution: None,
+            effective_error_code: None,
+        }
+    }
+
+    pub fn from_output(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        output: ToolOutput,
+    ) -> Self {
+        let is_error = output.execution.as_ref().is_some_and(|e| {
+            matches!(
+                e.status,
+                ToolExecutionStatus::Failed
+                    | ToolExecutionStatus::Cancelled
+                    | ToolExecutionStatus::TimedOut
+                    | ToolExecutionStatus::RunningAfterTimeout
+            )
+        });
+        Self {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            output: output.text,
+            is_error,
+            execution: output.execution,
             effective_error_code: None,
         }
     }

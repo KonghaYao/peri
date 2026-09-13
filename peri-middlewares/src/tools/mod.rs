@@ -11,7 +11,7 @@ use async_trait::async_trait;
 pub use filesystem::{
     EditFileTool, FolderOperationsTool, GlobFilesTool, GrepTool, ReadFileTool, WriteFileTool,
 };
-use peri_agent::tools::BaseTool;
+use peri_agent::tools::{BaseTool, ToolOutput};
 pub use todo::{TodoItem, TodoState, TodoStatus, TodoWriteTool};
 
 /// 严格解析 JSON 数值参数（工具共享，禁止静默回退）。
@@ -75,6 +75,14 @@ impl BaseTool for BoxToolWrapper {
         self.0.invoke(input, ctx).await
     }
 
+    async fn invoke_output(
+        &self,
+        input: serde_json::Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
+        self.0.invoke_output(input, ctx).await
+    }
+
     fn bind_invocation(
         &self,
         input: serde_json::Value,
@@ -122,6 +130,14 @@ impl BaseTool for ArcToolWrapper {
         ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.0.invoke(input, ctx).await
+    }
+
+    async fn invoke_output(
+        &self,
+        input: serde_json::Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
+        self.0.invoke_output(input, ctx).await
     }
 
     fn bind_invocation(

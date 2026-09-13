@@ -329,6 +329,7 @@ async fn test_after_tool_sequential_order() {
         tool_name: "tool".to_string(),
         output: "ok".to_string(),
         is_error: false,
+        execution: None,
         effective_error_code: None,
     };
     chain

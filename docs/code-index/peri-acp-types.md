@@ -48,10 +48,10 @@
 
 | 功能 | 入口/关键点 |
 | --- | --- |
-| 工具 trait | `BaseTool`（:146）；`is_direct`（:199，默认 false）；`context_retention`（:193，默认 Preserve）；`timeout`（:170，默认 120s）；`aliases`（:176）；`output_char_limit`（:181）；`prefers_persist`（:186）；`title`/`namespace`（:204/:209）；`tool_description` 组装 |
-| 描述契约 | `ToolDefinition`（:37，线上 LLM 投影）；`ToolDescription`（:51，title/namespace 仅进程内与提示词层）；`derive_title_from_name`（:70，CamelCase/snake_case 拆词） |
-| 压缩保留策略 | `ContextRetention`（:113：Preserve/StateBearing/SideEffectReceipt/Recomputable） |
-| 只读上下文 | `ToolContext`（:129，messages + cwd 只读借用）；Todo 契约 `TodoStatus`/`TodoItem`（:15/:24，与 event.rs 同构但独立定义） |
+| 工具 trait | `BaseTool::invoke_output`（默认 legacy `execution=None`）；`ToolOutput::projected_text` / `bounded_text`（live/transcript 共用有界投影）；`ToolOutput` / `ToolExecutionEvidence` / `ToolExecutionStatus`；`is_direct`（默认 false）；`context_retention`（默认 Preserve）；`timeout`（默认 120s）；`aliases`；`output_char_limit`；`prefers_persist`；`title`/`namespace`；`tool_description` 组装 |
+| 描述契约 | `ToolDefinition`（线上 LLM 投影）；`ToolDescription`（title/namespace 仅进程内与提示词层）；`derive_title_from_name`（CamelCase/snake_case 拆词） |
+| 压缩保留策略 | `ContextRetention`：Preserve/StateBearing/SideEffectReceipt/Recomputable |
+| 只读上下文 | `ToolContext`（messages + cwd 只读借用）；`EffectiveToolDispatcher::dispatch_output`（typed wrapper seam）；Todo 契约 `TodoStatus`/`TodoItem`（与 event.rs 同构但独立定义） |
 
 ### session（src/session.rs + 私有 session/ 子模块）
 

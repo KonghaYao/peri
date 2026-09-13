@@ -231,6 +231,7 @@ impl AnthropicAdapter {
                     tool_call_id,
                     content,
                     is_error,
+                    ..
                 } => {
                     let block_id = msg_id.as_uuid().to_string();
                     let tool_result_block = json!({

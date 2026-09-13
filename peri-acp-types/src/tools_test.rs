@@ -126,3 +126,115 @@ fn test_prompt_declaration_default_is_none() {
     assert_eq!(MinimalTool.title(), None);
     assert_eq!(MinimalTool.namespace(), None);
 }
+
+#[test]
+fn test_tool_output_default_keeps_execution_evidence_unknown() {
+    let output = ToolOutput::from_legacy("ordinary result");
+    assert_eq!(output.text, "ordinary result");
+    assert_eq!(output.execution, None);
+}
+
+#[test]
+fn test_tool_execution_evidence_serde_roundtrip() {
+    let evidence = ToolExecutionEvidence {
+        status: ToolExecutionStatus::RunningAfterTimeout,
+        exit_code: None,
+        output_ref: Some("/tmp/peri-tool-output-1.txt".into()),
+        output_truncated: true,
+        task_id: Some("shell-1".into()),
+    };
+    let encoded = serde_json::to_string(&evidence).unwrap();
+    let decoded: ToolExecutionEvidence = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, evidence);
+}
+
+#[test]
+fn test_tool_output_bounded_projection_always_keeps_execution_summary() {
+    let output = ToolOutput::with_execution(
+        "x".repeat(200),
+        ToolExecutionEvidence {
+            status: ToolExecutionStatus::Failed,
+            exit_code: Some(7),
+            output_ref: Some("/tmp/full-output.txt".into()),
+            output_truncated: true,
+            task_id: None,
+        },
+    );
+    let projected = output.bounded_text(120);
+    assert!(projected.chars().count() <= 120);
+    assert!(projected.contains("status: failed"));
+    assert!(projected.contains("exit_code: 7"));
+}
+
+#[test]
+fn test_tool_output_small_limits_do_not_cut_status_names() {
+    let output = ToolOutput::with_execution(
+        "body",
+        ToolExecutionEvidence {
+            status: ToolExecutionStatus::RunningAfterTimeout,
+            exit_code: None,
+            output_ref: Some("/tmp/a-very-long-output-reference.txt".into()),
+            output_truncated: true,
+            task_id: Some("shell-123".into()),
+        },
+    );
+
+    assert_eq!(output.bounded_text(0), "");
+    assert_eq!(output.bounded_text(1), "…");
+    assert_eq!(output.bounded_text(7).chars().count(), 7);
+    assert_eq!(
+        output.bounded_text("running_after_timeout".len()),
+        "running_after_timeout"
+    );
+    assert!(!output.bounded_text(20).contains("running"));
+}
+
+#[test]
+fn test_tool_output_compact_summary_prioritizes_status_then_facts() {
+    let output = ToolOutput::with_execution(
+        "body",
+        ToolExecutionEvidence {
+            status: ToolExecutionStatus::Failed,
+            exit_code: Some(7),
+            output_ref: Some("/tmp/a-very-long-output-reference.txt".into()),
+            output_truncated: true,
+            task_id: None,
+        },
+    );
+
+    assert_eq!(output.bounded_text("failed".len()), "failed");
+    assert_eq!(
+        output.bounded_text("failed, exit_code: 7".len()),
+        "failed, exit_code: 7"
+    );
+    assert_eq!(output.bounded_text(8), "failed");
+    assert!(output.bounded_text(120).contains("status: failed"));
+
+    let normal_limit = ToolOutput::with_execution(
+        "x".repeat(9_500),
+        ToolExecutionEvidence {
+            status: ToolExecutionStatus::Completed,
+            exit_code: Some(0),
+            output_ref: None,
+            output_truncated: false,
+            task_id: None,
+        },
+    )
+    .bounded_text(10_000);
+    assert!(normal_limit.chars().count() <= 10_000);
+    assert!(normal_limit.contains("status: completed"));
+}
+
+#[test]
+fn test_tool_output_exact_summary_is_not_appended_twice() {
+    let evidence = ToolExecutionEvidence {
+        status: ToolExecutionStatus::Failed,
+        exit_code: Some(7),
+        output_ref: Some("/tmp/full-output.txt".into()),
+        output_truncated: true,
+        task_id: None,
+    };
+    let summary = evidence.render_summary();
+    let output = ToolOutput::with_execution(format!("head\n{summary}"), evidence);
+    assert_eq!(output.projected_text(None), output.text);
+}

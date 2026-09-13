@@ -197,11 +197,12 @@ pub async fn dispatch_tools(
         let mut tx = ctx.session.transcript.write();
         tx.stage_ai_message(ai_msg);
         for (_, result) in &collect_outcome.results {
-            let tool_msg = if result.is_error {
-                BaseMessage::tool_error(&result.tool_call_id, result.output.as_str())
-            } else {
-                BaseMessage::tool_result(&result.tool_call_id, result.output.as_str())
-            };
+            let tool_msg = BaseMessage::tool_result_with_execution(
+                &result.tool_call_id,
+                result.output.as_str(),
+                result.is_error,
+                result.execution.clone(),
+            );
             tx.stage_tool_result(tool_msg);
         }
         for (_, result) in &resolution_errors {
