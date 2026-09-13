@@ -17,9 +17,9 @@
 | 维度 | 标签 | 判定边界 |
 | --- | --- | --- |
 | outcome | delivered / partial / not_delivered / blocked / unknown | delivered 要求任务验收条件有直接证据；not_delivered 要求可见的未交付或反证，不能由沉默或日志结束推出；blocked 要有具体障碍 |
-| verification | direct / reported_only / none / not_applicable / unknown | 工具结果、可检查交付内容或明确验收是 direct；assistant 声称“已测试”只是 reported_only；none 表示可见地没有做必要验证，缺失片段用 unknown |
+| verification | direct / reported_only / none / not_applicable / unknown | 工具结果、可检查交付正文或明确验收是 direct，不要求使用工具；assistant 声称“已测试”只是 reported_only；none 表示可见地没有做必要验证，缺失片段用 unknown；not_applicable 仅用于无实际验收对象的纯社交互动等情形 |
 | constraints | supported / violated / unknown | 依据该任务实际约束核验，不能默认不存在约束，也不按自己偏好的实现路径扣分 |
-| feedback | accepted / corrected / rejected / mixed / none_observed / unknown | 仅解释可定位的用户反馈及所指对象；“继续”不等于拒绝，后续新目标不等于验收；不称作用户满意度 |
+| feedback | accepted / corrected / rejected / mixed / none_observed / unknown | 仅解释用户对焦点任务产物/行为的明确接受、修正或否定；普通范围更新、停止和新目标属于任务契约变化，不自动记 corrected；none_observed 仅用于观察范围完整且未见反馈，存在缺口用 unknown；不称作用户满意度 |
 | strategy | effective / avoidable_friction / unknown | 是否针对该目标形成进展、合理处理不确定和交接；判定可避免摩擦需给替代路径与上下文，不用长度/工具次数当效率 |
 
 `taskType` 选 coding / research / review / planning / operation / conversation / other / unclear。复杂度、权限、数据缺失作为局限，不按消息数认定任务难度。工具错误、必要澄清、合法受阻并不自动降低质量；没有工具的解释类任务也可能有可直接检查的优秀交付。
@@ -33,6 +33,8 @@
 导出按可见主会话、固定创建窗口、固定 seed 分层。短（1–20 条）/中（21–100 条）/长（超过 100 条）只用于覆盖不同记录规模，明确报告各层候选数和选中数，不能把等额分层样本的比例当成总体估计。自有记录为空的会话单列数量与不可评原因，不判失败、不混入有内容的抽样层。默认每层四个，空层不偷换样本；先核查缓存 message_count 与实际自有记录差异。
 
 包中的消息保持持久化顺序。保存自有 user/assistant、工具请求与结果及完整 ID；截断标明字段和消息遗漏，保留首尾并说明中间缺口，不能伪装成连续轨迹。源记录已有 truncated/summary/parseIssues 时一并保留。子会话关系仅提供定位，父任务与子任务的归属需额外证据，不递归倾倒所有子会话。
+
+当前归一化 `text` 拼接内容块的文本，未保留可核验的用户可见 channel。它可提供持久化内容证据，但不能仅据此判定 UI 泄露思考过程、用户看到了某段内部叙述或回答的显示形式。交付标签限定在现有记录支持的范围；界面可见性另需生产协议/渲染证据。
 
 评审 sidecar 独立于事实包，至少包含：
 

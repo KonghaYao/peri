@@ -14,6 +14,10 @@ description: >
 研究 Peri 会话、工具或 agent 行为时，先读 [Peri 数据研究入口](references/perihelion.md)，复用仓库已有分析器。
 其他数据集使用下述方法，不套用 Peri 字段。形成正式研究记录时按需使用 [报告骨架](REPORT-TEMPLATE.md)。
 
+当问题是“任务做得好不好”、任务分组或从任务结果调整提示词时，接续
+[agent-task-evaluator](../agent-task-evaluator/SKILL.md) 的任务契约与独立评审流程。
+本 skill 的工具行为统计不能直接充当任务质量标签。
+
 ## 1. 建立研究口径
 
 先用已有上下文确定要回答的问题及其支持的决策，写清：

@@ -4,6 +4,8 @@ import { inspectDatabase, writeQualityReports } from "./reporting/quality.js";
 import { reportDatabase, writeReportReports } from "./reporting/report.js";
 import { compareReportFiles, writeCompareReports } from "./reporting/compare.js";
 import { evidenceForMessage, sampleThreads } from "./research/evidence.js";
+import { sampleTaskPackets, exportTaskPacket, writeTaskPacketBundle } from "./research/task-packets.js";
+import { reviewTaskFiles, writeTaskReviewReport } from "./research/task-reviews.js";
 
 interface CommonArgs { db: string; out: string; }
 interface SampleArgs extends CommonArgs {
@@ -16,29 +18,32 @@ interface EvidenceArgs extends CommonArgs {
 interface CompareArgs { command: "compare"; baseline: string; candidate: string; out: string; }
 interface InspectArgs extends CommonArgs { command: "inspect"; }
 interface ReportArgs extends CommonArgs { command: "report"; }
+interface TaskSampleArgs extends CommonArgs { command: "task-sample"; seed: string; perStratum: number; scope: AnalysisScope; includeHidden: boolean; includeContent: boolean; since?: string; until?: string; }
+interface TaskPacketArgs extends CommonArgs { command: "task-packet"; threadId: string; includeContent: boolean; }
+interface TaskReviewArgs { command: "task-review"; packets: string; reviews: string; out: string; }
 
-export type CliArgs = InspectArgs | (ReportArgs & AnalysisOptions) | SampleArgs | EvidenceArgs | CompareArgs;
+export type CliArgs = InspectArgs | (ReportArgs & AnalysisOptions) | SampleArgs | EvidenceArgs | CompareArgs | TaskSampleArgs | TaskPacketArgs | TaskReviewArgs;
 
 function usage(): string {
-  return "Usage: bun run src/cli.ts inspect|report|sample|evidence|compare ...";
+  return "Usage: bun run src/cli.ts inspect|report|sample|evidence|compare|task-sample|task-packet|task-review ...";
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
   const command = argv[0];
-  const commands = ["inspect", "report", "sample", "evidence", "compare"];
-  if (!commands.includes(command)) throw new Error(`expected 'inspect', 'report', 'sample', 'evidence', or 'compare' command\n${usage()}`);
+  const commands = ["inspect", "report", "sample", "evidence", "compare", "task-sample", "task-packet", "task-review"];
+  if (!commands.includes(command)) throw new Error(`expected 'inspect', 'report', 'sample', 'evidence', 'compare', 'task-sample', 'task-packet', or 'task-review' command\n${usage()}`);
   const values = new Map<string, string>();
   let includeHidden = false;
   let includeContent = false;
   for (let i = 1; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--include-hidden") {
-      if (!["report", "sample"].includes(command) || includeHidden) throw new Error(`unknown or duplicate argument: ${flag}\n${usage()}`);
+      if (!["report", "sample", "task-sample"].includes(command) || includeHidden) throw new Error(`unknown or duplicate argument: ${flag}\n${usage()}`);
       includeHidden = true;
       continue;
     }
     if (flag === "--include-content") {
-      if (command !== "evidence" || includeContent) throw new Error(`unknown or duplicate argument: ${flag}\n${usage()}`);
+      if (!["evidence", "task-sample", "task-packet"].includes(command) || includeContent) throw new Error(`unknown or duplicate argument: ${flag}\n${usage()}`);
       includeContent = true;
       continue;
     }
@@ -47,6 +52,9 @@ export function parseCliArgs(argv: string[]): CliArgs {
       sample: ["--db", "--out", "--seed", "--size", "--scope", "--since", "--until", "--min-messages"],
       evidence: ["--db", "--out", "--thread", "--message", "--radius"],
       compare: ["--baseline", "--candidate", "--out"],
+      "task-sample": ["--db", "--out", "--seed", "--per-stratum", "--scope", "--since", "--until"],
+      "task-packet": ["--db", "--out", "--thread"],
+      "task-review": ["--packets", "--reviews", "--out"],
     };
     const allowed = allowedByCommand[command];
     if (!allowed.includes(flag)) throw new Error(`unknown or misplaced argument: ${flag}\n${usage()}`);
@@ -58,7 +66,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
   const out = values.get("--out");
   if (!out) throw new Error(`--out is required\n${usage()}`);
   const db = values.get("--db");
-  if (command !== "compare") {
+  if (!["compare", "task-review"].includes(command)) {
     if (!db) throw new Error(`--db is required\n${usage()}`);
     if (!existsSync(db)) throw new Error(`database does not exist: ${db}`);
     if (!statSync(db).isFile()) throw new Error(`database is not a file: ${db}`);
@@ -70,6 +78,13 @@ export function parseCliArgs(argv: string[]): CliArgs {
     if (!existsSync(candidate) || !statSync(candidate).isFile()) throw new Error(`candidate is not a file: ${candidate}`);
     return { command: "compare", baseline, candidate, out };
   }
+  if (command === "task-review") {
+    const packets = values.get("--packets"); const reviews = values.get("--reviews");
+    if (!packets || !reviews) throw new Error(`--packets and --reviews are required\n${usage()}`);
+    if (!existsSync(packets) || !statSync(packets).isFile()) throw new Error(`packets is not a file: ${packets}`);
+    if (!existsSync(reviews) || !statSync(reviews).isFile()) throw new Error(`reviews is not a file: ${reviews}`);
+    return { command: "task-review", packets, reviews, out };
+  }
   if (command === "inspect") return { command: "inspect", db: db!, out };
   const scope = values.get("--scope") ?? "roots";
   if (scope !== "roots" && scope !== "children" && scope !== "all") throw new Error(`--scope must be roots, children, or all\n${usage()}`);
@@ -80,6 +95,17 @@ export function parseCliArgs(argv: string[]): CliArgs {
     const size = Number(sizeText); const minMessages = Number(values.get("--min-messages") ?? "0");
     if (!Number.isInteger(size) || size < 1 || !Number.isInteger(minMessages) || minMessages < 0) throw new Error(`--size must be a positive integer and --min-messages a non-negative integer\n${usage()}`);
     return { command: "sample", db: db!, out, seed, size, scope: scope as AnalysisScope, includeHidden, minMessages, ...(values.has("--since") ? { since: values.get("--since") } : {}), ...(values.has("--until") ? { until: values.get("--until") } : {}) };
+  }
+  if (command === "task-sample") {
+    const seed = values.get("--seed"); const perText = values.get("--per-stratum");
+    if (seed === undefined) throw new Error(`--seed is required\n${usage()}`);
+    const perStratum = Number(perText ?? "4");
+    if (!Number.isInteger(perStratum) || perStratum < 1 || perStratum > 10) throw new Error(`--per-stratum must be an integer between 1 and 10\n${usage()}`);
+    return { command: "task-sample", db: db!, out, seed, perStratum, scope: scope as AnalysisScope, includeHidden, includeContent, ...(values.has("--since") ? { since: values.get("--since") } : {}), ...(values.has("--until") ? { until: values.get("--until") } : {}) };
+  }
+  if (command === "task-packet") {
+    const threadId = values.get("--thread"); if (!threadId) throw new Error(`--thread is required\n${usage()}`);
+    return { command: "task-packet", db: db!, out, threadId, includeContent };
   }
   const threadId = values.get("--thread"); const messageId = values.get("--message");
   if (!threadId || !messageId) throw new Error(`--thread and --message are required\n${usage()}`);
@@ -108,6 +134,17 @@ export function run(argv: string[]): void {
     mkdirSync(args.out, { recursive: true });
     writeFileSync(`${args.out}/evidence.json`, JSON.stringify(result, null, 2));
     process.stdout.write(`evidence complete: ${args.out}/evidence.json\n`);
+  } else if (args.command === "task-sample") {
+    const result = sampleTaskPackets(args.db, { seed: args.seed, perStratum: args.perStratum, scope: args.scope, includeHidden: args.includeHidden, since: args.since, until: args.until, includeContent: args.includeContent });
+    writeTaskPacketBundle(result, args.out);
+    process.stdout.write(`task-sample complete: ${args.out}/task-packets.json\n`);
+  } else if (args.command === "task-packet") {
+    const result = exportTaskPacket(args.db, args.threadId, { includeContent: args.includeContent });
+    mkdirSync(args.out, { recursive: true }); writeFileSync(`${args.out}/task-packet.json`, JSON.stringify(result));
+    process.stdout.write(`task-packet complete: ${args.out}/task-packet.json\n`);
+  } else if (args.command === "task-review") {
+    const result = reviewTaskFiles(args.packets, args.reviews); writeTaskReviewReport(result, args.out);
+    process.stdout.write(`task-review complete: ${args.out}/task-review.json\n`);
   } else {
     const result = compareReportFiles(args.baseline, args.candidate);
     writeCompareReports(result, args.out);

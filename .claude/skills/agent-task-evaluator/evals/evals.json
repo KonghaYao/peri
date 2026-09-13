@@ -1,0 +1,16 @@
+{
+  "skill_name": "agent-task-evaluator",
+  "evals": [{
+    "id": "task-outcome-evidence-boundaries",
+    "prompt": "请按 agent-task-evaluator 分析这组合成任务，分别写焦点任务、五个评价维度、证据 ID 和局限，并说明可支持哪些提示词方向。这里只测试分析判断，不生成生产 packet 或修改代码。",
+    "input_files": ["fixtures/calibration.json"],
+    "expectations": [
+      "visible-answer 的两句交付可直接检查，无工具不妨碍 delivered/direct；不能把缺少用户反馈当失败。",
+      "claim-only 的修复和测试只有自述，不能判有据交付；verification 为 reported_only，不把日志结束判失败。",
+      "blocked-input 有明确缺失日志证据，应保留受阻并允许策略合理；一次工具错误不等于任务执行策略低劣。",
+      "goal-switch 的焦点修复只有定位阶段，后续欢迎语及用户接受不能为修复验收；标注部分交付和任务边界；普通目标切换不能自动记为质量纠正。",
+      "missing-middle 不得断言未测试或没有反馈；反馈标 unknown 而非 none_observed，保留缺口和未知，必要时提出补读。",
+      "引用真实存在的消息 ID，区分观察、提示词候选和未验证根因；不把一致性当准确率。"
+    ]
+  }]
+}

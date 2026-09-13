@@ -20,6 +20,8 @@ Peri 运行数据的离线分析归 `side-projects/agent-defect-analyzer/`，本
 - 任务级评价的口径与 subagent 复核流程见
   [任务有效性研究](../../side-projects/agent-defect-analyzer/TASK-EVALUATION.md)。
   评审标签独立于持久化事实，缺失证据与评审分歧须保留。
+  编排与提示词实验方法由 [agent-task-evaluator](../../.claude/skills/agent-task-evaluator/SKILL.md)
+  维护，活动 `.agents/skills/` 副本采用上面相同的同步规则。
 
 ## 入口
 
@@ -32,6 +34,8 @@ Peri 运行数据的离线分析归 `side-projects/agent-defect-analyzer/`，本
 | 生成统计与候选报告 | `agent-defect-analyzer/src/reporting/report.ts`：`reportDatabase` |
 | 校验口径并比较两个报告 | `agent-defect-analyzer/src/reporting/compare.ts`：`compareReportFiles`、`compareReports` |
 | 确定性抽样与有限上下文回查 | `agent-defect-analyzer/src/research/evidence.ts`：`sampleThreads`、`evidenceForMessage` |
+| 分层抽样、带正文指纹的任务事实包 | `agent-defect-analyzer/src/research/task-packets.ts`：`sampleTaskPackets`、`exportTaskPacket`、`computeTaskPacketHash` |
+| 校验任务评审、保留分歧并按 case 汇总 | `agent-defect-analyzer/src/research/task-reviews.ts`：`reviewTaskFiles`、`writeTaskReviewReport` |
 | 查看本地会话与工具记录 | `peri-db-viewer/src/server.ts`：`startServer`；`src/app.ts`：`createApp` |
 | 查询 API 与共享解析适配 | `peri-db-viewer/src/routes/api.ts`：`registerApiRoutes`；`src/data_adapter.ts`：`ViewerDataAdapter` |
 

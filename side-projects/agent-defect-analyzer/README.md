@@ -30,6 +30,22 @@ bun run compare --baseline output/baseline/report.json --candidate output/candid
 
 `evidence` 按自有消息的 `--thread`、`--message` 定位，`--radius` 默认为 2、范围为 0–20。默认仅输出 metadata；`--include-content` 才输出正文、参数和结果。最终 JSON 最多 64 KiB，截断与省略通过标志和 `omissions` 明示；证据指纹覆盖窗口元数据。继承上下文可在 viewer 中阅读。
 
+任务有效性事实包使用实际自有消息数分为短（1–20）、中（21–100）和长（>100），默认每层固定抽取 4 个可见根会话；`--per-stratum` 可设为 1–10。默认只导出消息元数据，加入 `--include-content` 才导出正文、工具参数和结果文本。每个包最多 128 KiB、160 条消息，省略范围和源记录截断会明确记录。
+
+```bash
+bun run src/cli.ts task-sample --db ~/.peri/threads/threads.db --out output/task-packets --seed audit-1 \
+  --since 2026-08-14T00:00:00Z --until 2026-09-13T00:00:00Z
+bun run src/cli.ts task-packet --db ~/.peri/threads/threads.db --out output/task-packet --thread THREAD_ID --include-content
+bun run src/cli.ts task-review --packets output/task-packets/task-packets.json --reviews reviews.json --out output/task-review
+```
+
+任务评价口径见 [TASK-EVALUATION.md](TASK-EVALUATION.md)，编排方法见
+[agent-task-evaluator skill](../../.claude/skills/agent-task-evaluator/SKILL.md)。实际评审需对抽样命令显式加
+`--include-content`；metadata 包只能保留未知。review JSON 以 `src/research/task-reviews.ts` 的
+`TaskReviewInput` 为准，保留每个 reviewer 的身份、任务边界、包 hash、五维标签和证据 ID。
+`task-review` 校验引用和格式，不代替语义复核。`review*` 分布按评审计数，`case*` 分布按唯一任务样本计数；
+缺评、单评和边界分歧单列，不能把 24 份双评当成 24 个任务，也不能把分层样本当总体完成率。
+
 `compare` 不需要数据库参数，只接受两个当前格式的 report JSON。它检查版本、范围、规则定义与阈值，并校验数值和分母关系。旧报告缺少必需字段时应重新运行 `report`，不要手工补零；工具未出现或分母为零时，相关比例保留空值。
 
 当前可运行的项目检查：

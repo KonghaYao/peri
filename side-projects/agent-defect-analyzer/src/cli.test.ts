@@ -13,6 +13,19 @@ test("inspect CLI rejects missing and unknown arguments", () => {
   expect(() => parseCliArgs(["inspect", "--db", "/tmp/x", "--out", "/tmp/y", "--scope", "roots"])).toThrow("unknown");
 });
 
+test("task packet CLI exports sampled content, review report, and rejects invalid bounds", () => {
+  const root = mkdtempSync(join(tmpdir(), "peri-task-cli-")); const dbPath = join(root, "threads.db"); const db = new Database(dbPath);
+  db.exec(`CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT,cwd TEXT,created_at TEXT,updated_at TEXT,message_count INTEGER,parent_thread_id TEXT,hidden INTEGER DEFAULT 0); CREATE TABLE messages(message_id TEXT PRIMARY KEY,thread_id TEXT,role TEXT,content TEXT,excluded INTEGER DEFAULT 0,truncated INTEGER DEFAULT 0,projection TEXT);`);
+  db.query("INSERT INTO threads VALUES(?,?,?,?,?,?,?,?)").run("root", "root", "/tmp", "2026-08-15T00:00:00Z", "2026-08-15T00:00:01Z", 99, null, 0);
+  db.query("INSERT INTO messages VALUES(?,?,?,?,?,?,?)").run("u1", "root", "user", JSON.stringify({ role: "user", content: "审计任务" }), 0, 0, null);
+  db.query("INSERT INTO messages VALUES(?,?,?,?,?,?,?)").run("a1", "root", "assistant", JSON.stringify({ role: "assistant", content: "完成" }), 0, 0, null); db.close();
+  const packetOut = join(root, "packets"); run(["task-sample", "--db", dbPath, "--out", packetOut, "--seed", "s", "--per-stratum", "1", "--include-content"]);
+  const bundle = JSON.parse(readFileSync(join(packetOut, "task-packets.json"), "utf8")); expect(bundle.packets).toHaveLength(1); expect(bundle.packets[0].coverage.includeContent).toBe(true); expect(bundle.packets[0].messages[0].text).toBe("审计任务");
+  const singleOut = join(root, "single"); run(["task-packet", "--db", dbPath, "--out", singleOut, "--thread", "root"]); const single = JSON.parse(readFileSync(join(singleOut, "task-packet.json"), "utf8")); expect(single.coverage.includeContent).toBe(false); expect(single.messages[0].text).toBeUndefined(); expect(single.thread.messageCount).toBe(99);
+  const reviewInput = join(root, "reviews.json"); writeFileSync(reviewInput, JSON.stringify({ schemaVersion: 1, rubricVersion: "task-effectiveness-v1", reviews: [] })); const reviewOut = join(root, "review"); run(["task-review", "--packets", join(packetOut, "task-packets.json"), "--reviews", reviewInput, "--out", reviewOut]); expect(existsSync(join(reviewOut, "task-review.json"))).toBe(true);
+  expect(() => parseCliArgs(["task-sample", "--db", dbPath, "--out", root, "--seed", "s", "--per-stratum", "0"])).toThrow("between 1 and 10"); expect(() => parseCliArgs(["task-sample", "--db", dbPath, "--out", root, "--seed", "s", "--bad", "x"])).toThrow("unknown");
+});
+
 test("report emits filtered metrics, rules, and bounded evidence", () => {
   const root = mkdtempSync(join(tmpdir(), "peri-report-"));
   const dbPath = join(root, "threads.db");
