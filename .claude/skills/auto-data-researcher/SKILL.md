@@ -18,6 +18,8 @@ description: >
 [agent-task-evaluator](../agent-task-evaluator/SKILL.md) 的任务契约与独立评审流程。
 本 skill 的工具行为统计不能直接充当任务质量标签。
 
+研究 ADLC 等长流程的卡点时，再读其 [长流程与恢复审计](../agent-task-evaluator/references/workflow-bottlenecks.md)：合并同目标续跑，分开逻辑阶段与物理尝试，并检查目标修订、缓存恢复、上下文投影和可见末尾，避免把长会话或多次执行直接当成低效。
+
 ## 1. 建立研究口径
 
 先用已有上下文确定要回答的问题及其支持的决策，写清：

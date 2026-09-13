@@ -1,0 +1,429 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-13T13:06:19.192932+00:00",
+  "window": {
+    "since": "2026-08-30T00:00:00Z",
+    "until": "2026-09-14T00:00:00Z",
+    "interval": "[since, until)",
+    "timeBasis": "visible root thread created_at"
+  },
+  "selection": "Manual purposive selection: four execution cases plus two local-run mechanism cases; not a proven top-N ranking or population estimate. Any Workflow is only a broad screening signal, not proof of ADLC execution.",
+  "counts": {
+    "rootsInWindow": 221,
+    "selectedCases": 6,
+    "selectedRoots": 7,
+    "candidatesWithAnyAdlcSignal": 22
+  },
+  "source": {
+    "normalizer": "peri-normalizer-v2",
+    "schemaIdentity": "a95ace4ab069500bf8f4fffd01264d9e882e98ae305de41d5a5a5e206487c3a8",
+    "snapshotLimitation": "inventory/pages use a loader transaction; task packets are exported through separate read-only connections; no global same-instant snapshot is claimed.",
+    "manifestSha256": "1178e1723b774a79c59b7e5d0a760c4490d0add00f8517641aaa58d5c79dea27",
+    "inventorySha256": "ada7e546edfdaea98142645308ea277e30bb888cd1aeb3a5d9a30e8fe5366235",
+    "rawExportScriptSha256": "26085d06a5fc660e2f5b6bede92b644337f76f0737e72cbf8534f3cb1aafe73d"
+  },
+  "cases": [
+    {
+      "caseId": "2026-09-11-sandbox-mcp-server",
+      "selectionReason": "同一 structured adlcId 跨两个根会话续跑，必须合并为一案",
+      "workflowCallsInStoredRootMessages": 15,
+      "explicitWorkflowErrorsInStoredRootMessages": 4,
+      "rootThreads": [
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "ownStoredNormalizedMessages": 762,
+          "packet": {
+            "path": "cases/2026-09-11-sandbox-mcp-server/packet-01a0906e-2489-7702-8198-87eee6bcce6e.json",
+            "sha256": "038ca72439be5b793fad464a5dd47469732e00e8ebfb2b54f2adda7da2b272d0",
+            "packetHash": "c6a14f115607e47bde9a86794216825900d1f4839368ef72ca1fb2dc3dbc8f2f",
+            "coverage": {
+              "sourceMessageCount": 762,
+              "exportedMessageCount": 762,
+              "omittedMessages": 0,
+              "omittedFields": [
+                "result.content",
+                "text"
+              ],
+              "sourceTruncatedMessages": 0,
+              "exportTruncated": true,
+              "truncated": true,
+              "includeContent": true,
+              "byteCount": 1048519
+            }
+          },
+          "pages": {
+            "pageCount": 16,
+            "pageHashes": [
+              "721dc7cae722022fdfedcb7e827c4230ca4a44176f37b0e16f2fe23f978b35d4",
+              "e6356dd4edad8814435a0f2d3f992024bb8fd65b9d092c44045117a2924eec59",
+              "3838878ce670fb4a3c6ff508e23cf6d5b264da8e4b3a737a4a373514dad2f1bd",
+              "8a7ea1e67f9c0954a27ca92491c90a855a7046d530054f6812bd423665f0c66a",
+              "1505f6cb5495c2b604bce11dbb6ded72066b749693d77ac6e0a8671b632f3909",
+              "cca9685ab49b1b15ca24b21951e90e2774e6531c2a21d4f722906c719065746f",
+              "69d95f38859cabba5ab070e9c48221c6e63765a01329bc61ec754dd13ec76b38",
+              "d01187763d3351e467462ff3c0dd045c5713480e163b0bee97903fe6507b0ba7",
+              "dd957a2c18df743e63f4372f11ed6f3392cb3996023b113fb4dacda52c3c7c08",
+              "1dd3dc3139cb59c5aa666efecd3007cd2fe4a736aae30cd6403e430c8595cbf2",
+              "76ff99639edbaa7d15cd0c1301501f3492d3ebab7576da8fcc88c85d9837a5a1",
+              "bba5556210f4060cbc385ae2953daeaeba4047be64b538c2780e1b0b80615e67",
+              "ad2d446b1c683b895ab1e392cfc5e234396b279b3a813af1418eda6648515458",
+              "50b3d86882c93e0298bde5cf9568a82aa4356ea71ef0b1ee5045f4cbf64cf3d9",
+              "0f7f3c8039469130216ab89c2ed0950258558a8dfdd125c29fb49e6eadf62181",
+              "41604c5c99276b75982bf7f69294827897df074d679891ee5eef5d89d836dcb5"
+            ],
+            "sourceMessageCount": 762,
+            "omittedMessages": 0,
+            "exportTruncated": false
+          },
+          "childIds": [
+            "01a09304-afc2-7340-9934-2c5f713bd095",
+            "01a09304-afcb-7ac1-98ee-46d96a8dd128",
+            "01a0947d-1448-7c61-97de-3da765ec626f",
+            "01a0947d-145e-7dd2-88e2-ae48949d4c6d",
+            "01a09538-bb24-7761-af4b-66eaca329fd9",
+            "01a09544-d1f3-78f2-84a2-a0d1abc82e5a",
+            "01a09544-d203-7982-ad3d-a0337800137b",
+            "01a095a7-eba8-7843-8d54-f51cea82b7e8"
+          ]
+        },
+        {
+          "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+          "ownStoredNormalizedMessages": 526,
+          "packet": {
+            "path": "cases/2026-09-11-sandbox-mcp-server/packet-01a095cd-aff2-7b61-b640-72437dd85ed5.json",
+            "sha256": "27bfc81cbe9d84b1bc7a09846e955385fb1dabe7b0685cf16aa1d3892b37e5b4",
+            "packetHash": "4e1901a1a88395a0ebd78c0c17a0cbc9b8d3a0a844f38db85a926ddbe672fd75",
+            "coverage": {
+              "sourceMessageCount": 526,
+              "exportedMessageCount": 526,
+              "omittedMessages": 0,
+              "omittedFields": [
+                "result.content",
+                "text"
+              ],
+              "sourceTruncatedMessages": 0,
+              "exportTruncated": true,
+              "truncated": true,
+              "includeContent": true,
+              "byteCount": 1048558
+            }
+          },
+          "pages": {
+            "pageCount": 11,
+            "pageHashes": [
+              "46fbfbca134b1470050b0afd7daf9e3482aa11eed048fdd5458c75b5ec5a1eea",
+              "3d2222f21ba4a066534ac14ce1f766be553a13b729533022cc10a9a415f83a3c",
+              "bd4a82ad3b357b5dceb191e93bedbdf1b01c2a422cf13b9d4f437aa009c0815b",
+              "fbb616f13861d955c182b3daacac20c3d0bcfed38b7b1fe08ed52f614786c2d1",
+              "d85029c6132427abaa11c1c3015a72be4479580e701c34eb3ce75ce71281b025",
+              "200ab1f04689a5bde0084d74525ef867d8033889f3e6c4b5485711469ca31367",
+              "c7945b8cc5a4970299c2ccddbe72b9b9a36afda49000e8f2058fb5a90da6cc2c",
+              "77a9c0c34a16a9d0e531311f511692b89f49447d19613b0fc290872bbb29f564",
+              "042857a6234b345fc862b56e9df5ebf8f09dc468c3a282a40fc2dd425f56cd52",
+              "81cddae989f8de4f55b086c34d944a51f6bc29c20c985b400c5cf2898123aa9d",
+              "afe9b3c686c6b1f4be1fc23214d2940690793b6ae4c628c870f43dd3d3be5c6e"
+            ],
+            "sourceMessageCount": 526,
+            "omittedMessages": 0,
+            "exportTruncated": false
+          },
+          "childIds": [
+            "01a095d0-4a64-7c21-a00e-34df39c21133"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "2026-09-09-micro-compact-tool-input-p0",
+      "selectionReason": "SkillTool + 用户调用 + 多次 Workflow 启动",
+      "workflowCallsInStoredRootMessages": 6,
+      "explicitWorkflowErrorsInStoredRootMessages": 2,
+      "rootThreads": [
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "ownStoredNormalizedMessages": 772,
+          "packet": {
+            "path": "cases/2026-09-09-micro-compact-tool-input-p0/packet-01a08429-fe60-7b72-8f2a-6dcf13d6728d.json",
+            "sha256": "656cffc305b5738270b13fb99ffefa88738551f666332673c3f753127ed08578",
+            "packetHash": "c999cda96638dab52ed14633375fb0ce5912660c7288bf4cdbf5e54b66f7dccf",
+            "coverage": {
+              "sourceMessageCount": 772,
+              "exportedMessageCount": 771,
+              "omittedMessages": 1,
+              "omittedFields": [
+                "messages",
+                "result.content",
+                "text"
+              ],
+              "sourceTruncatedMessages": 0,
+              "exportTruncated": true,
+              "truncated": true,
+              "includeContent": true,
+              "byteCount": 1046938
+            }
+          },
+          "pages": {
+            "pageCount": 16,
+            "pageHashes": [
+              "a742192805dc2695d3e25b03ea8eda121cf1eb25221ef23fbcc3211f5ac68b82",
+              "8044d29b4c168f5598536724f9226675c78aacbd82d856fbb415156b8e0399ed",
+              "f251fe4b46b867194acb7324f8fcbe24204e8a79d4d20def8ef4e006c09f0071",
+              "32cb68f92599c15f16d4d9592e4c78edbe391f87033d9e36a4edf5d04b9b9538",
+              "342fdf60fcb2b5dfce1978f64fed5d572b0c2708b2b4a62844e38db279073c4d",
+              "ec343f6963c2d7561cbe0ecbec4a6e122301dd23afc04914c90af99fef0bf7e6",
+              "c2fe2b53eb61e3e26a645def4b1dc72b272de146ad34f88e01037d6b1598be75",
+              "ff509e06300f62064fec3523acdce3f1be993ec2bdcbc0204cbcb03ff979681d",
+              "00ad84c7d58834466fad4cfc1d83e291486d70b70ebca9f6959a93401cd716c4",
+              "5b6dcb762cb9891afd8b313249745d631ac1ed4ea5bb9bdf4969dab613bf4b77",
+              "f97c15efae85349c0cb4c2db46c20f4ac8334b6797ebe18bdbc064f2bcb506f5",
+              "4c32d935c7e073696db8ecd7555d060369da4d780556256aec1599c8b640cdd5",
+              "2d28598d3f291030715f46529bfd9a8d25da83ad095a0b10dbd5a7a5eb0ecf7e",
+              "b97a2397a28652f2d21dc8916c991b174f51a94e4cbd38b186e6f5f0ec729010",
+              "cdb30170dccf5f318b434854cd51a2d963ff1bd94a87efa02189e957c356685b",
+              "d57983ecca2570a35a84f272f194c3f425e0a5ceacf121f076cf93331d3ba8c5"
+            ],
+            "sourceMessageCount": 772,
+            "omittedMessages": 0,
+            "exportTruncated": false
+          },
+          "childIds": [
+            "01a084e9-b586-79e3-b2ed-c4a6130625d5",
+            "01a084e9-b58d-7710-8167-e04fe5fb9f7e",
+            "01a084f2-8f61-76e0-923e-599cb9d55705",
+            "01a084f2-8f68-7393-a5e5-3b338a7dbe8b",
+            "01a084fb-c1b2-73f3-965c-1070e2d0f7ce",
+            "01a08502-e9a2-7400-9f02-42c7223098e8",
+            "01a0850b-0e16-7382-a2b1-4c2d842b5c79",
+            "01a08520-dc51-7eb2-b9c6-5e958034cedf",
+            "01a08520-dc58-7f92-abaa-d12dcea8911a",
+            "01a08527-28c1-7ed0-a89c-f8e41a7e23de",
+            "01a0854f-ebf8-7012-b74d-1d84cc1328cf",
+            "01a0855f-1e84-7093-97c3-636ec54fbb28",
+            "01a08583-12b9-7890-a357-7ac4d0392041",
+            "01a08588-9dfd-7420-95e7-0e41c8f8bfab",
+            "01a0858b-0d97-7e12-b2c9-a25e4d91d371",
+            "01a085a0-6436-7203-9d51-9bff8f8930c4",
+            "01a085a7-c91d-7e63-b23e-4e1f3690727a",
+            "01a085a7-c925-7b12-bcec-5276d4fd96e9",
+            "01a085af-0e24-73e1-a55f-fda69f56403b",
+            "01a085bf-dcbe-75b2-93f2-d494b66f0f4f",
+            "01a085c6-7956-71e0-97f0-3d9627248a03",
+            "01a085d0-120c-7bb2-ba3f-9520e0e8467d",
+            "01a0895d-9d8e-7e61-a0c3-36c63f476ad4",
+            "01a08966-b908-7bb0-b9f7-5c979e76358a",
+            "01a08970-7008-7503-99fd-dd25dc588be4",
+            "01a08976-8fb3-7032-be88-3df5863d0ce3",
+            "01a08984-7312-7850-9a52-76c74dbcd6c6",
+            "01a0898a-3d47-7413-bd5b-322494066d5e"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "2026-09-04-tui-long-markdown-streaming-cpu",
+      "selectionReason": "SkillTool + 用户调用 + discovery/delivery/assessment Workflow",
+      "workflowCallsInStoredRootMessages": 10,
+      "explicitWorkflowErrorsInStoredRootMessages": 2,
+      "rootThreads": [
+        {
+          "threadId": "01a06bb5-eb91-72c3-948e-961cfabbe1e3",
+          "ownStoredNormalizedMessages": 260,
+          "packet": {
+            "path": "cases/2026-09-04-tui-long-markdown-streaming-cpu/packet-01a06bb5-eb91-72c3-948e-961cfabbe1e3.json",
+            "sha256": "b15ce0332e4c35f145b1dbfaa064b2eadd575b5de948f2218b34600735f64641",
+            "packetHash": "0246baec6717c9422b1dc1c1e0be5a63522aa18431008edfdc85159f6163cda5",
+            "coverage": {
+              "sourceMessageCount": 260,
+              "exportedMessageCount": 260,
+              "omittedMessages": 0,
+              "omittedFields": [],
+              "sourceTruncatedMessages": 0,
+              "exportTruncated": false,
+              "truncated": false,
+              "includeContent": true,
+              "byteCount": 1015943
+            }
+          },
+          "pages": {
+            "pageCount": 6,
+            "pageHashes": [
+              "9e85ba4826bc3f18998b825e88464f3d7075d1686b6ecfead4ead4907ed0041d",
+              "cb4b94e9666e38b370c7cc0074a3a2031f520b3f5145ad6db3f712ad28d389b7",
+              "def5f3ffe6ae38d1e91decfde8d66aac64e02f31a0ed18db21fabab0769e8f2a",
+              "3d3db262399585d6bf9def733cc266498654986068875f27b279baea3263cfe2",
+              "1913b6bb1acf972fa14d1830a67e56136812c499ce7c4743187dce2dc4098d0e",
+              "0ba522eefef9d2dade52bb05fd2a81cd0db1868b01000dc999bbfc8ed8b75409"
+            ],
+            "sourceMessageCount": 260,
+            "omittedMessages": 0,
+            "exportTruncated": false
+          },
+          "childIds": []
+        }
+      ]
+    },
+    {
+      "caseId": "2026-09-02-steer-mq-loop-exit",
+      "selectionReason": "SkillTool + 用户调用 + Workflow；含明确 preflight 错误",
+      "workflowCallsInStoredRootMessages": 2,
+      "explicitWorkflowErrorsInStoredRootMessages": 1,
+      "rootThreads": [
+        {
+          "threadId": "01a05fc2-7d69-7fe2-85f1-4995a4233bda",
+          "ownStoredNormalizedMessages": 422,
+          "packet": {
+            "path": "cases/2026-09-02-steer-mq-loop-exit/packet-01a05fc2-7d69-7fe2-85f1-4995a4233bda.json",
+            "sha256": "44f9e0719665b5a9064d46420db89bb3aaf763330c7a6d12acd059ad8036be49",
+            "packetHash": "dec880132eb5a1fa40b78b0773bab7e9cf1326701385e18cb1d19a2f7d005a70",
+            "coverage": {
+              "sourceMessageCount": 422,
+              "exportedMessageCount": 421,
+              "omittedMessages": 1,
+              "omittedFields": [
+                "messages",
+                "result.content",
+                "text"
+              ],
+              "sourceTruncatedMessages": 117,
+              "exportTruncated": true,
+              "truncated": true,
+              "includeContent": true,
+              "byteCount": 1048185
+            }
+          },
+          "pages": {
+            "pageCount": 9,
+            "pageHashes": [
+              "6d4975e000764938fe76e59f9acd5998990cd0a67351f2973ddc6a52efc407f6",
+              "3414126e3f70febb45f53a5a360d755977c417e7d51010dccb3782ca0f4f4a42",
+              "799f96f0f69848ce6af07d11886d2802166ab7f434e02660291fca3508c47bc3",
+              "142aee331580abed43c6548a25e8fff7e580f178f065ef277466f072d1dafcdf",
+              "b7ad33a10532a1116e616410758a8c263e32b6a42763d8060bd5785f5f95313d",
+              "1ec97eb4bf1888aa40c86f15d8467c9986c391488805e1c8c812f1811be3a74c",
+              "3695708a88b187ac0d4725e881ec45ea66f224b0831a0b0eb6d868baf54cc0f4",
+              "2c5e28c3102286fde467e8c81c51b4c8243e1a2d34a4367003282cb241e1afe0",
+              "efba340a2a2da3487bbb9f53e653de06626e36b07f0470116e7b5fd63fe93dc6"
+            ],
+            "sourceMessageCount": 422,
+            "omittedMessages": 0,
+            "exportTruncated": false
+          },
+          "childIds": [
+            "01a05fc9-2b2d-7780-927a-5a1204c3a293",
+            "01a05fc9-2b37-7381-b942-475211b59a51",
+            "01a05fc9-2b40-7ca0-a5f1-fb2191439d9b",
+            "01a05fdd-5178-7a40-9463-00bc5e5ad152"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "2026-09-04-meta-session",
+      "selectionReason": "任务目录与续跑/子会话证据可见，但该根的 Workflow 调用不在当前归一化消息中，保留缺口",
+      "workflowCallsInStoredRootMessages": 0,
+      "explicitWorkflowErrorsInStoredRootMessages": 0,
+      "rootThreads": [
+        {
+          "threadId": "01a069fd-581c-75b0-9e9a-9b7e3eefb7c7",
+          "ownStoredNormalizedMessages": 266,
+          "packet": {
+            "path": "cases/2026-09-04-meta-session/packet-01a069fd-581c-75b0-9e9a-9b7e3eefb7c7.json",
+            "sha256": "1767d17bc5ec4220a02b0aa55eeb3d0a8e63b94b5d96e3fb6ef298b02cbd6aa4",
+            "packetHash": "05f6e39d3caf94adb73e91ba2146dbea6ebb6585a1c77a7468d10be147126d33",
+            "coverage": {
+              "sourceMessageCount": 266,
+              "exportedMessageCount": 266,
+              "omittedMessages": 0,
+              "omittedFields": [
+                "result.content",
+                "text"
+              ],
+              "sourceTruncatedMessages": 15,
+              "exportTruncated": true,
+              "truncated": true,
+              "includeContent": true,
+              "byteCount": 1047962
+            }
+          },
+          "pages": {
+            "pageCount": 6,
+            "pageHashes": [
+              "75617bbedd0a49e098ed1949eeb4375d42499fa78c5a42003708b8c29438f141",
+              "670765801e10c02fd29ead944d5dfd202359db45bc85d79628c574077a19fb93",
+              "7175dc5b802263dec7058d1746b4a59f62fb0d97afa1efa5099fc4d24671575f",
+              "15e259ed4ae19146b83cf6d651d456ac3d48831d4548225839141cbd3cc92c5e",
+              "9afb718d286db6fb850b63cce956a1d799de3cd3c327f9d99ac5b6856fb43543",
+              "3db64c53fb1dce691c64ee43c82aaa7880180e7e8a2701043cc1fa467edd21ea"
+            ],
+            "sourceMessageCount": 266,
+            "omittedMessages": 0,
+            "exportTruncated": false
+          },
+          "childIds": [
+            "01a069ff-62e6-7c72-ac8f-7cdc80f41517",
+            "01a06a03-d7a1-79b2-94e0-27492ad6600b",
+            "01a06a14-acf6-7962-baf2-1268b325cc2e",
+            "01a06a18-9e26-7d21-9607-05e66341ed8d",
+            "01a06b12-ba58-7383-a4a6-689518f2765a"
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "2026-09-08-system-reminder-protocol",
+      "selectionReason": "任务目录与多个 child 可见；根消息没有可核对 Workflow 调用，保留为对照而非强实际执行样本",
+      "workflowCallsInStoredRootMessages": 0,
+      "explicitWorkflowErrorsInStoredRootMessages": 0,
+      "rootThreads": [
+        {
+          "threadId": "01a07ed4-ee0d-7460-9063-7008f4ecd0b9",
+          "ownStoredNormalizedMessages": 38,
+          "packet": {
+            "path": "cases/2026-09-08-system-reminder-protocol/packet-01a07ed4-ee0d-7460-9063-7008f4ecd0b9.json",
+            "sha256": "db88276c06bac1187174dd30d82bafa92f4f4d69d5abd5ff319e38a9621bd7b0",
+            "packetHash": "b0b8a3656166e1f3cc048f545270058a75dca72791de66ea0002a74fce5965ae",
+            "coverage": {
+              "sourceMessageCount": 38,
+              "exportedMessageCount": 38,
+              "omittedMessages": 0,
+              "omittedFields": [],
+              "sourceTruncatedMessages": 0,
+              "exportTruncated": false,
+              "truncated": false,
+              "includeContent": true,
+              "byteCount": 281061
+            }
+          },
+          "pages": {
+            "pageCount": 1,
+            "pageHashes": [
+              "45b83ed6becef4871f7c45de703f130a2c5aaecd39f4c95224d11c0c65f5d7ba"
+            ],
+            "sourceMessageCount": 38,
+            "omittedMessages": 0,
+            "exportTruncated": false
+          },
+          "childIds": [
+            "01a07f0a-3ab5-7d91-8e42-a0d208a25247",
+            "01a07f56-b7fc-78b3-b2d6-ad035701badc",
+            "01a07f61-52e5-7011-a570-dcbff544f30f",
+            "01a07f63-afb5-71c3-a60d-bfb927e85b99",
+            "01a07f74-9458-77f2-954f-9570fd157b96",
+            "01a07f81-9f65-7242-9a3a-641f7d919dc7",
+            "01a07fb6-4edb-7852-a622-d018f76d56fb",
+            "01a07fce-45d2-7420-989a-a9345c87420b",
+            "01a07ffb-c929-7dd1-801f-5db0ac267809",
+            "01a08001-5a92-7ae0-bf5e-078f5c391648",
+            "01a08011-25a4-76c3-9d7c-ae0182f264ac",
+            "01a0801e-1962-70d2-ac15-a98be76c7693",
+            "01a08030-2ca6-7c31-8a98-ca8db3c3dbdd",
+            "01a08033-8b1d-7562-9851-47162c7bec5c",
+            "01a08054-e45e-7d71-8084-95fd07162056",
+            "01a0805d-6523-7b31-8a51-35541ee058f2",
+            "01a0805d-652f-71b3-8234-7fcbede48de9"
+          ]
+        }
+      ]
+    }
+  ]
+}

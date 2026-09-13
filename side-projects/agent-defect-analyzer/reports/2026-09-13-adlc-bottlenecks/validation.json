@@ -1,0 +1,36 @@
+{
+  "checkedAt": "2026-09-13T13:07:01.372668+00:00",
+  "checks": {
+    "packetFileHashes": 7,
+    "pageHashes": 65,
+    "uniqueSourceMessages": 3046,
+    "perPageMaximum": 50,
+    "monotonicSequencesPerRoot": true,
+    "sourceTruncatedFlagCount": 132,
+    "errors": [],
+    "curatedEvidenceEntries": 15,
+    "curatedReferencesResolved": 45,
+    "scopedLocalMarkdownLinks": 19,
+    "skillQuickValidate": [
+      "auto-data-researcher",
+      "agent-task-evaluator"
+    ],
+    "explicitTypeScriptFileTypecheck": "passed",
+    "typescriptExportRealRun": "worker reported passed:7 roots/65 pages",
+    "pythonJournalRealRun": "worker reported passed:50 runs",
+    "activeSkillCopiesByteEqual": 3,
+    "finalScriptHashes": {
+      "analyze_adlc_bottlenecks.py": "130f905e152cce7bbe0a2e4740fb773653234a3b0992727261b4d7e243339576",
+      "export-adlc-cases.ts": "78a3a2f36dfebb00c53cdeb7c26b105bd794527c375672f7e33475fe65af1470"
+    },
+    "scriptReview": "Luna v3: no blocking findings; fresh real CLI success independently reported",
+    "scriptReviewSha256": "7375ef99cc0ac128286e92d9af3ef85c3e5cd03e2001a6fef36a415a60fc1177",
+    "pythonV3OutputRowsCheckedByCoordinator": 50
+  },
+  "limitations": [
+    "Page integrity does not prove source history is complete.",
+    "Source-text tool truncation and compaction summaries may exist despite false truncated flag.",
+    "Message-reference and semantic review checks are reported separately.",
+    "Repository-wide Rust tests are not part of this research-only change; concurrent production changes belong to other tasks."
+  ]
+}

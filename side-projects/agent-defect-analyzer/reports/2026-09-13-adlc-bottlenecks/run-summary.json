@@ -1,0 +1,1467 @@
+{
+  "schemaVersion": 1,
+  "sourceSummarySha256": "a8f531bc67b3f40c34f496e33ca367cd3d30730b5cc5f469f456c064c6559900",
+  "scope": {
+    "runRoot": "/Users/konghayao/code/ai/perihelion/.claude/workflow-runs",
+    "taskRoot": "/Users/konghayao/code/ai/perihelion/.peri/adlc/tasks",
+    "runDirectories": 50,
+    "manifestTasks": 5,
+    "manifestExpectedRuns": 54,
+    "associationRule": "manifest workflowRuns run ID is authoritative; workflow_name is a cross-check only",
+    "readSources": [
+      ".claude/workflow-runs/*/{state.json,journal.jsonl,script.js}",
+      ".peri/adlc/tasks/*/manifest.json",
+      ".peri/adlc/tasks/*/handoffs/**"
+    ]
+  },
+  "coverage": {
+    "observedRuns": 50,
+    "unassociatedRuns": [],
+    "missingRunIdsByTask": {
+      "2026-09-04-meta-session": [
+        "01a06a33-325c-7412-bc7c-df80b2714924",
+        "01a06a3f-a5dd-7511-acdd-e75055d37f2e",
+        "01a06a4e-70a3-7c21-b8db-81517a4db491",
+        "01a06a5a-17d0-7650-824a-39565cdea3aa"
+      ]
+    },
+    "missingJournalRunIds": [
+      "01a06ae8-0608-7513-9e19-f168427b8089",
+      "01a06af6-de2e-7b52-b01e-2ff3818a1f46",
+      "01a06c6b-bbfd-7641-894c-0e03a3bcb711",
+      "01a08578-cc32-7e23-9aa3-1b2aee9b81f7",
+      "01a09340-8a41-7512-a699-664ff1b7baf5"
+    ],
+    "missingJournalIsUnknown": true
+  },
+  "attemptCounts": {
+    "ok": 131,
+    "error": 0,
+    "cancelled": 0,
+    "dead": 22
+  },
+  "attemptDispositions": {
+    "produced": 153
+  },
+  "deadCategories": {
+    "runagent_provider_http_error": 18,
+    "no_structured_output_schema": 1,
+    "runagent_max_iterations": 2,
+    "no_structured_output_invalid_json": 1
+  },
+  "tasks": {
+    "2026-09-04-meta-session": {
+      "expectedRunCount": 18,
+      "observedRunCount": 14,
+      "missingRunIds": [
+        "01a06a33-325c-7412-bc7c-df80b2714924",
+        "01a06a3f-a5dd-7511-acdd-e75055d37f2e",
+        "01a06a4e-70a3-7c21-b8db-81517a4db491",
+        "01a06a5a-17d0-7650-824a-39565cdea3aa"
+      ],
+      "contractRevisions": {
+        "intent": 2,
+        "execution": 2,
+        "evidence": 1
+      },
+      "handoffFileCount": 30,
+      "attemptCounts": {
+        "ok": 18,
+        "error": 0,
+        "cancelled": 0,
+        "dead": 0,
+        "unknown": 0,
+        "parse_error": 0
+      },
+      "states": {
+        "execution_status": {
+          "completed": 7,
+          "failed": 7
+        },
+        "acceptance_status": {
+          "unknown": 14
+        },
+        "delivery_status": {
+          "blocked": 14
+        },
+        "post_processing_status": {
+          "failed": 1,
+          "passed": 13
+        }
+      }
+    },
+    "2026-09-04-tui-long-markdown-streaming-cpu": {
+      "expectedRunCount": 8,
+      "observedRunCount": 8,
+      "missingRunIds": [],
+      "contractRevisions": {
+        "intent": 1,
+        "execution": 1,
+        "evidence": 1
+      },
+      "handoffFileCount": 22,
+      "attemptCounts": {
+        "ok": 16,
+        "error": 0,
+        "cancelled": 0,
+        "dead": 0,
+        "unknown": 0,
+        "parse_error": 0
+      },
+      "states": {
+        "execution_status": {
+          "failed": 4,
+          "completed": 4
+        },
+        "acceptance_status": {
+          "unknown": 8
+        },
+        "delivery_status": {
+          "blocked": 6,
+          "unknown": 2
+        },
+        "post_processing_status": {
+          "failed": 6,
+          "passed": 2
+        }
+      }
+    },
+    "2026-09-08-system-reminder-protocol": {
+      "expectedRunCount": 11,
+      "observedRunCount": 11,
+      "missingRunIds": [],
+      "contractRevisions": {
+        "intent": 0,
+        "execution": 1,
+        "evidence": 1
+      },
+      "handoffFileCount": 18,
+      "attemptCounts": {
+        "ok": 15,
+        "error": 0,
+        "cancelled": 0,
+        "dead": 1,
+        "unknown": 0,
+        "parse_error": 0
+      },
+      "states": {
+        "execution_status": {
+          "failed": 7,
+          "completed": 4
+        },
+        "acceptance_status": {
+          "unknown": 11
+        },
+        "delivery_status": {
+          "blocked": 7,
+          "unknown": 4
+        },
+        "post_processing_status": {
+          "passed": 8,
+          "failed": 3
+        }
+      }
+    },
+    "2026-09-09-micro-compact-tool-input-p0": {
+      "expectedRunCount": 4,
+      "observedRunCount": 4,
+      "missingRunIds": [],
+      "contractRevisions": {
+        "intent": 1,
+        "execution": 1,
+        "evidence": 1
+      },
+      "handoffFileCount": 12,
+      "attemptCounts": {
+        "ok": 8,
+        "error": 0,
+        "cancelled": 0,
+        "dead": 1,
+        "unknown": 0,
+        "parse_error": 0
+      },
+      "states": {
+        "execution_status": {
+          "failed": 4
+        },
+        "acceptance_status": {
+          "unknown": 4
+        },
+        "delivery_status": {
+          "blocked": 4
+        },
+        "post_processing_status": {
+          "passed": 2,
+          "failed": 2
+        }
+      }
+    },
+    "2026-09-11-sandbox-mcp-server": {
+      "expectedRunCount": 13,
+      "observedRunCount": 13,
+      "missingRunIds": [],
+      "contractRevisions": {
+        "intent": 2,
+        "execution": 6,
+        "evidence": 1
+      },
+      "handoffFileCount": 87,
+      "attemptCounts": {
+        "ok": 74,
+        "error": 0,
+        "cancelled": 0,
+        "dead": 20,
+        "unknown": 0,
+        "parse_error": 0
+      },
+      "states": {
+        "execution_status": {
+          "completed": 11,
+          "failed": 1,
+          "killed": 1
+        },
+        "acceptance_status": {
+          "unknown": 13
+        },
+        "delivery_status": {
+          "unknown": 8,
+          "blocked": 5
+        },
+        "post_processing_status": {
+          "passed": 8,
+          "failed": 4,
+          "blocked": 1
+        }
+      }
+    }
+  },
+  "runs": [
+    {
+      "runId": "01a06a6d-e219-7690-9492-3a32ffe54a4f",
+      "taskId": "2026-09-04-meta-session",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-04T03:19:41.337597+00:00",
+        "finished_at": "2026-09-04T03:38:13.959384+00:00",
+        "error": "Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": "complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 5
+      },
+      "phases": [
+        "ADLC/W2/BinaryHandoff",
+        "ADLC/W2/Integrate",
+        "ADLC/W2/Review"
+      ]
+    },
+    {
+      "runId": "01a06a7f-e4c3-7601-a582-9fe1405523f1",
+      "taskId": "2026-09-04-meta-session",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T03:39:21.667992+00:00",
+        "finished_at": "2026-09-04T03:59:21.817922+00:00",
+        "error": "workflow exceeded maxElapsedMs (1200000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {},
+      "phases": []
+    },
+    {
+      "runId": "01a06a93-3fb9-7f52-91e1-969711ed7caf",
+      "taskId": "2026-09-04-meta-session",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T04:00:30.137529+00:00",
+        "finished_at": "2026-09-04T04:12:38.589345+00:00",
+        "error": null
+      },
+      "returnValueStatus": "complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 4
+      },
+      "phases": [
+        "ADLC/W2/ReReview",
+        "ADLC/W2/RepairHandoff"
+      ]
+    },
+    {
+      "runId": "01a06a9f-3f0e-7e70-8e67-0d5fad441ab2",
+      "taskId": "2026-09-04-meta-session",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T04:13:36.398863+00:00",
+        "finished_at": "2026-09-04T04:28:36.557660+00:00",
+        "error": "workflow exceeded maxElapsedMs (900000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/Repair2"
+      ]
+    },
+    {
+      "runId": "01a06aae-4fff-7f73-a864-30808eea2f37",
+      "taskId": "2026-09-04-meta-session",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T04:30:03.775993+00:00",
+        "finished_at": "2026-09-04T04:40:03.874618+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/Repair3"
+      ]
+    },
+    {
+      "runId": "01a06ab8-952d-7942-811d-3d378d90da3d",
+      "taskId": "2026-09-04-meta-session",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T04:41:16.845402+00:00",
+        "finished_at": "2026-09-04T04:44:48.637736+00:00",
+        "error": null
+      },
+      "returnValueStatus": "complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/ParserReviewResume"
+      ]
+    },
+    {
+      "runId": "01a06abc-ddb9-7e71-9487-dc9e360e0d8c",
+      "taskId": "2026-09-04-meta-session",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T04:45:57.561275+00:00",
+        "finished_at": "2026-09-04T04:50:36.042416+00:00",
+        "error": null
+      },
+      "returnValueStatus": "complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/Verify"
+      ]
+    },
+    {
+      "runId": "01a06ac2-387a-73e0-b31f-af483ee51651",
+      "taskId": "2026-09-04-meta-session",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T04:51:48.474107+00:00",
+        "finished_at": "2026-09-04T05:01:48.570077+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/Repair4"
+      ]
+    },
+    {
+      "runId": "01a06acc-8a6f-72e0-8c32-b9d41f1be1c1",
+      "taskId": "2026-09-04-meta-session",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T05:03:04.815759+00:00",
+        "finished_at": "2026-09-04T05:05:41.370569+00:00",
+        "error": null
+      },
+      "returnValueStatus": "complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/FinalParserReview"
+      ]
+    },
+    {
+      "runId": "01a06acf-c13f-7f82-92e0-e8ee3030d9be",
+      "taskId": "2026-09-04-meta-session",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T05:06:35.455877+00:00",
+        "finished_at": "2026-09-04T05:10:55.767084+00:00",
+        "error": null
+      },
+      "returnValueStatus": "complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/VerifyRerun"
+      ]
+    },
+    {
+      "runId": "01a06ad4-c169-7781-8a9e-bd0977e3f264",
+      "taskId": "2026-09-04-meta-session",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T05:12:03.177460+00:00",
+        "finished_at": "2026-09-04T05:15:42.144741+00:00",
+        "error": null
+      },
+      "returnValueStatus": "complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/VerifyRetry"
+      ]
+    },
+    {
+      "runId": "01a06ad9-24a7-78e1-b34a-ef3a1816ab48",
+      "taskId": "2026-09-04-meta-session",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T05:16:50.727512+00:00",
+        "finished_at": "2026-09-04T05:31:50.879017+00:00",
+        "error": "workflow exceeded maxElapsedMs (900000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/Docs"
+      ]
+    },
+    {
+      "runId": "01a06ae8-0608-7513-9e19-f168427b8089",
+      "taskId": "2026-09-04-meta-session",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T05:33:05.928402+00:00",
+        "finished_at": "2026-09-04T05:48:06.048822+00:00",
+        "error": "workflow exceeded maxElapsedMs (900000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": false,
+      "journalAttemptCounts": {},
+      "phases": []
+    },
+    {
+      "runId": "01a06af6-de2e-7b52-b01e-2ff3818a1f46",
+      "taskId": "2026-09-04-meta-session",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T05:49:18.766736+00:00",
+        "finished_at": "2026-09-04T05:57:43.356186+00:00",
+        "error": "workflow exceeded maxToolCalls (70)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": false,
+      "journalAttemptCounts": {},
+      "phases": []
+    },
+    {
+      "runId": "01a06bbc-89dc-7c60-894d-bfa0ef34dca9",
+      "taskId": "2026-09-04-tui-long-markdown-streaming-cpu",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-04T09:25:13.309815+00:00",
+        "finished_at": "2026-09-04T09:41:25.638616+00:00",
+        "error": "workflow exceeded maxToolCalls (240); Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 4
+      },
+      "phases": [
+        "ADLC/W1/Discover"
+      ]
+    },
+    {
+      "runId": "01a06bcd-f72d-7c73-8430-a93329bc4819",
+      "taskId": "2026-09-04-tui-long-markdown-streaming-cpu",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-04T09:44:15.405486+00:00",
+        "finished_at": "2026-09-04T10:14:15.501236+00:00",
+        "error": "workflow exceeded maxElapsedMs (1800000); Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 2
+      },
+      "phases": [
+        "ADLC/W2/Baseline",
+        "ADLC/W2/Plan"
+      ]
+    },
+    {
+      "runId": "01a06bea-b711-78c2-ba52-60307bd5626e",
+      "taskId": "2026-09-04-tui-long-markdown-streaming-cpu",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-04T10:15:39.537551+00:00",
+        "finished_at": "2026-09-04T11:07:39.010193+00:00",
+        "error": "Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": "complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 4
+      },
+      "phases": [
+        "ADLC/W2/Profile-gate",
+        "ADLC/W2/Resume-core"
+      ]
+    },
+    {
+      "runId": "01a06c1b-26fa-7882-b4e3-946220aacc76",
+      "taskId": "2026-09-04-tui-long-markdown-streaming-cpu",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-04T11:08:33.914997+00:00",
+        "finished_at": "2026-09-04T11:34:37.424058+00:00",
+        "error": "Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": "complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/Conditional-resume"
+      ]
+    },
+    {
+      "runId": "01a06c33-e08a-7253-b201-9d0eb0cf82f5",
+      "taskId": "2026-09-04-tui-long-markdown-streaming-cpu",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-04T11:35:34.282202+00:00",
+        "finished_at": "2026-09-04T12:35:34.417586+00:00",
+        "error": "workflow exceeded maxElapsedMs (3600000); Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 3
+      },
+      "phases": [
+        "ADLC/W2/Independent-review",
+        "ADLC/W2/Integrate"
+      ]
+    },
+    {
+      "runId": "01a06c6b-bbfd-7641-894c-0e03a3bcb711",
+      "taskId": "2026-09-04-tui-long-markdown-streaming-cpu",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-04T12:36:34.941886+00:00",
+        "finished_at": "2026-09-04T13:36:35.084778+00:00",
+        "error": "workflow exceeded maxElapsedMs (3600000); Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": false,
+      "journalAttemptCounts": {},
+      "phases": []
+    },
+    {
+      "runId": "01a06ca3-8db1-77a2-beb9-33da4fd450b0",
+      "taskId": "2026-09-04-tui-long-markdown-streaming-cpu",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T13:37:33.105844+00:00",
+        "finished_at": "2026-09-04T13:48:15.726659+00:00",
+        "error": null
+      },
+      "returnValueStatus": "complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/Converge-finish"
+      ]
+    },
+    {
+      "runId": "01a06cae-3320-7ec3-9961-82375f7f391e",
+      "taskId": "2026-09-04-tui-long-markdown-streaming-cpu",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-04T13:49:10.816229+00:00",
+        "finished_at": "2026-09-04T13:55:39.951677+00:00",
+        "error": null
+      },
+      "returnValueStatus": "complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/Assess"
+      ]
+    },
+    {
+      "runId": "01a07eec-4eeb-7903-a288-a2cafb404bba",
+      "taskId": "2026-09-08-system-reminder-protocol",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-08T02:50:11.051378+00:00",
+        "finished_at": "2026-09-08T03:00:11.168499+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "dead": 1,
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W1/Discover"
+      ]
+    },
+    {
+      "runId": "01a07ef6-95f7-7d60-b4d9-d7e8af46f701",
+      "taskId": "2026-09-08-system-reminder-protocol",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-08T03:01:24.599196+00:00",
+        "finished_at": "2026-09-08T03:11:24.756758+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W1/Discover"
+      ]
+    },
+    {
+      "runId": "01a07f00-7cad-7773-9c6f-a903561e34d5",
+      "taskId": "2026-09-08-system-reminder-protocol",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-08T03:12:13.485543+00:00",
+        "finished_at": "2026-09-08T03:22:13.588105+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W1/Discover"
+      ]
+    },
+    {
+      "runId": "01a07f10-8b80-7483-ba92-d3170fcc4076",
+      "taskId": "2026-09-08-system-reminder-protocol",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-08T03:29:45.856168+00:00",
+        "finished_at": "2026-09-08T03:39:45.988477+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 2
+      },
+      "phases": [
+        "ADLC/W2/WP0"
+      ]
+    },
+    {
+      "runId": "01a07f1a-9f3f-7622-9143-36ead3c7e332",
+      "taskId": "2026-09-08-system-reminder-protocol",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-08T03:40:46.271168+00:00",
+        "finished_at": "2026-09-08T03:50:46.365337+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000); Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/WP1-WP2"
+      ]
+    },
+    {
+      "runId": "01a07f24-ec27-7201-86cd-918e75aae93f",
+      "taskId": "2026-09-08-system-reminder-protocol",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-08T03:52:01.319961+00:00",
+        "finished_at": "2026-09-08T03:59:45.810833+00:00",
+        "error": null
+      },
+      "returnValueStatus": "review_complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 2
+      },
+      "phases": [
+        "ADLC/W2/WP1-WP2-Review"
+      ]
+    },
+    {
+      "runId": "01a07f2c-e3b4-7ab3-b8c5-07ce41aed8a1",
+      "taskId": "2026-09-08-system-reminder-protocol",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-08T04:00:43.444355+00:00",
+        "finished_at": "2026-09-08T04:10:43.560348+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000); Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {},
+      "phases": []
+    },
+    {
+      "runId": "01a07f36-e880-7d30-8880-0603dfb4672b",
+      "taskId": "2026-09-08-system-reminder-protocol",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-08T04:11:40.032305+00:00",
+        "finished_at": "2026-09-08T04:16:44.039959+00:00",
+        "error": null
+      },
+      "returnValueStatus": "rereview_complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/WP1-WP2-ReReview"
+      ]
+    },
+    {
+      "runId": "01a07f3c-5d03-7730-8dd1-e4caff11b1ff",
+      "taskId": "2026-09-08-system-reminder-protocol",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-08T04:17:37.539293+00:00",
+        "finished_at": "2026-09-08T04:27:37.344643+00:00",
+        "error": "workflow exceeded maxToolCalls (100); Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/WP1-WP2-APIFix"
+      ]
+    },
+    {
+      "runId": "01a07f46-853c-7423-918c-469e550e662e",
+      "taskId": "2026-09-08-system-reminder-protocol",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-08T04:28:43.196468+00:00",
+        "finished_at": "2026-09-08T04:37:17.440791+00:00",
+        "error": null
+      },
+      "returnValueStatus": "wave_complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 3
+      },
+      "phases": [
+        "ADLC/W2/WP3-WP4",
+        "ADLC/W2/WP3-WP4-Review"
+      ]
+    },
+    {
+      "runId": "01a07f4f-2c36-7790-99fe-8a357d81566e",
+      "taskId": "2026-09-08-system-reminder-protocol",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-08T04:38:10.230524+00:00",
+        "finished_at": "2026-09-08T04:45:37.607777+00:00",
+        "error": null
+      },
+      "returnValueStatus": "wp3_complete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 2
+      },
+      "phases": [
+        "ADLC/W2/WP3-Fix",
+        "ADLC/W2/WP3-Review"
+      ]
+    },
+    {
+      "runId": "01a0853b-8502-7550-b741-dcc347327f24",
+      "taskId": "2026-09-09-micro-compact-tool-input-p0",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-09T08:14:25.538185+00:00",
+        "finished_at": "2026-09-09T08:24:25.631532+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 3
+      },
+      "phases": [
+        "ADLC/W1/Discover"
+      ]
+    },
+    {
+      "runId": "01a08545-ef32-71e2-8de6-2cad0a404e7c",
+      "taskId": "2026-09-09-micro-compact-tool-input-p0",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-09T08:25:48.082211+00:00",
+        "finished_at": "2026-09-09T08:35:48.158975+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000)"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 4,
+        "dead": 1
+      },
+      "phases": [
+        "ADLC/W1/Design",
+        "ADLC/W1/Discover"
+      ]
+    },
+    {
+      "runId": "01a0856d-f576-77e2-8ddb-f727d95700ae",
+      "taskId": "2026-09-09-micro-compact-tool-input-p0",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-09T09:09:31.126791+00:00",
+        "finished_at": "2026-09-09T09:19:31.220972+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000); Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W2/ImplementShared"
+      ]
+    },
+    {
+      "runId": "01a08578-cc32-7e23-9aa3-1b2aee9b81f7",
+      "taskId": "2026-09-09-micro-compact-tool-input-p0",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-09T09:21:21.458330+00:00",
+        "finished_at": "2026-09-09T09:31:21.540322+00:00",
+        "error": "workflow exceeded maxElapsedMs (600000); Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": false,
+      "journalAttemptCounts": {},
+      "phases": []
+    },
+    {
+      "runId": "01a09079-1869-7b71-8647-f613e2fdccd0",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-11T12:37:30.346197+00:00",
+        "finished_at": "2026-09-11T12:56:56.147110+00:00",
+        "error": null
+      },
+      "returnValueStatus": "packet_ready",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 7
+      },
+      "phases": [
+        "ADLC/W1/Design",
+        "ADLC/W1/Discover",
+        "ADLC/W1/Synthesize"
+      ]
+    },
+    {
+      "runId": "01a0909a-95b1-7592-bf1d-77d9bf90a421",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-11T13:14:05.105665+00:00",
+        "finished_at": "2026-09-11T13:19:18.407791+00:00",
+        "error": null
+      },
+      "returnValueStatus": "packet_ready",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W1/Synthesize"
+      ]
+    },
+    {
+      "runId": "01a090a7-63d9-7d91-923c-3b264fdf62db",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-11T13:28:04.313814+00:00",
+        "finished_at": "2026-09-11T13:34:05.097620+00:00",
+        "error": null
+      },
+      "returnValueStatus": "invalid",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "dead": 1
+      },
+      "phases": []
+    },
+    {
+      "runId": "01a090b4-c7b0-7781-a0a9-4e5467413c32",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-11T13:42:41.840620+00:00",
+        "finished_at": "2026-09-11T13:47:18.210800+00:00",
+        "error": null
+      },
+      "returnValueStatus": "decided",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 1
+      },
+      "phases": [
+        "ADLC/W1/Arbitrate"
+      ]
+    },
+    {
+      "runId": "01a090c9-dc0e-7410-ba0a-7fdb4c11d885",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "failed",
+      "state": {
+        "execution_status": "failed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-11T14:05:43.310974+00:00",
+        "finished_at": "2026-09-11T16:34:17.927527+00:00",
+        "error": "Assessor structured output unavailable; resume same logical workflow without accepting completion; Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 9,
+        "dead": 3
+      },
+      "phases": [
+        "ADLC/W2/Decompose",
+        "ADLC/W2/Implement/Round-1",
+        "ADLC/W2/Verify/Round-1"
+      ]
+    },
+    {
+      "runId": "01a092c3-7852-7553-9dc3-2950573bf871",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-11T23:17:58.994496+00:00",
+        "finished_at": "2026-09-12T00:23:17.974414+00:00",
+        "error": null
+      },
+      "returnValueStatus": "blocked",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 8,
+        "dead": 2
+      },
+      "phases": [
+        "ADLC/W2/Implement/Round-2",
+        "ADLC/W2/Integrate/Round-2",
+        "ADLC/W2/Verify/Round-2"
+      ]
+    },
+    {
+      "runId": "01a09309-3019-7343-962e-369d6d073dd0",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-12T00:34:08.025387+00:00",
+        "finished_at": "2026-09-12T01:29:21.628226+00:00",
+        "error": null
+      },
+      "returnValueStatus": "blocked",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 6,
+        "dead": 2
+      },
+      "phases": [
+        "ADLC/W2/Gates/Round-3",
+        "ADLC/W2/Implement/Round-3",
+        "ADLC/W2/Verify/Round-3"
+      ]
+    },
+    {
+      "runId": "01a09340-8a41-7512-a699-664ff1b7baf5",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "killed",
+      "state": {
+        "execution_status": "killed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "blocked",
+        "started_at": "2026-09-12T01:34:35.585500+00:00",
+        "finished_at": "2026-09-12T07:15:10.375268+00:00",
+        "error": "workflow killed by user"
+      },
+      "returnValueStatus": null,
+      "journalFilePresent": false,
+      "journalAttemptCounts": {},
+      "phases": []
+    },
+    {
+      "runId": "01a09486-5f8a-7152-a105-0a8adea09a5f",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-12T07:30:29.386281+00:00",
+        "finished_at": "2026-09-12T08:59:00.880159+00:00",
+        "error": "Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": "blocked",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 8,
+        "dead": 2
+      },
+      "phases": [
+        "ADLC/W2/Build/Round-4",
+        "ADLC/W2/Gates/Round-4",
+        "ADLC/W2/Implement/Round-4",
+        "ADLC/W2/Integrate/Round-4",
+        "ADLC/W2/Verify/Round-4"
+      ]
+    },
+    {
+      "runId": "01a094e0-2591-7a71-9955-27462d44a81f",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-12T09:08:32.786014+00:00",
+        "finished_at": "2026-09-12T10:44:53.745770+00:00",
+        "error": "Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": "blocked",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 8,
+        "dead": 2
+      },
+      "phases": [
+        "ADLC/W2/Build/Round-5",
+        "ADLC/W2/Gates/Round-5",
+        "ADLC/W2/Implement/Round-5",
+        "ADLC/W2/Integrate/Round-5",
+        "ADLC/W2/Verify/Round-5"
+      ]
+    },
+    {
+      "runId": "01a09549-caaa-7461-8c3a-1a90a404a783",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "blocked",
+        "post_processing_status": "failed",
+        "started_at": "2026-09-12T11:03:56.330251+00:00",
+        "finished_at": "2026-09-12T12:45:54.993535+00:00",
+        "error": "Git postcondition failed: git changes escaped writeIntent.path_allowlist"
+      },
+      "returnValueStatus": "blocked",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 9,
+        "dead": 3
+      },
+      "phases": [
+        "ADLC/W2/Build/Round-6",
+        "ADLC/W2/Gates/Round-6",
+        "ADLC/W2/Implement/Round-6",
+        "ADLC/W2/Integrate/Round-6",
+        "ADLC/W2/Ledger/Round-6",
+        "ADLC/W2/Verify/Round-6"
+      ]
+    },
+    {
+      "runId": "01a095ee-8701-7991-87d8-96f9adcf9f66",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-12T14:03:52.449804+00:00",
+        "finished_at": "2026-09-12T17:39:40.876669+00:00",
+        "error": null
+      },
+      "returnValueStatus": "blocked",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 10,
+        "dead": 3
+      },
+      "phases": [
+        "ADLC/W2/Decompose/Round-7",
+        "ADLC/W2/Implement/Round-7",
+        "ADLC/W2/Verify/Round-7"
+      ]
+    },
+    {
+      "runId": "01a096bd-d52c-79a3-9f95-912c7f5ba42d",
+      "taskId": "2026-09-11-sandbox-mcp-server",
+      "status": "completed",
+      "state": {
+        "execution_status": "completed",
+        "acceptance_status": "unknown",
+        "delivery_status": "unknown",
+        "post_processing_status": "passed",
+        "started_at": "2026-09-12T17:50:18.412954+00:00",
+        "finished_at": "2026-09-12T18:59:26.905559+00:00",
+        "error": null
+      },
+      "returnValueStatus": "incomplete",
+      "journalFilePresent": true,
+      "journalAttemptCounts": {
+        "ok": 7,
+        "dead": 2
+      },
+      "phases": [
+        "ADLC/W2/Assess/Round-8",
+        "ADLC/W2/Converge/Round-8",
+        "ADLC/W2/Fix/Round-8",
+        "ADLC/W2/Verify/Round-8"
+      ]
+    }
+  ],
+  "inputHashes": {
+    ".peri/adlc/tasks/2026-09-04-meta-session/manifest.json": "5963f14b67e04bb5f3a2b283b73e74506ab7b660c4c3cd01057052c5958c4abc",
+    ".peri/adlc/tasks/2026-09-04-tui-long-markdown-streaming-cpu/manifest.json": "70377eba245472216858a09ce733cd2e575c13d5d8dbd4ac1964c77d65549b99",
+    ".peri/adlc/tasks/2026-09-08-system-reminder-protocol/manifest.json": "67f232436b87074f44c1aeff83404a174e7967835c45a0477d73ecddf5ffcb33",
+    ".peri/adlc/tasks/2026-09-09-micro-compact-tool-input-p0/manifest.json": "704c90d111e70bfb8a929219c2f9eca0457d7b7b0f6f98599ceddfe60cf5d3d6",
+    ".peri/adlc/tasks/2026-09-11-sandbox-mcp-server/manifest.json": "aa57da83fd14aef61b641c0a7c18fee3115a820a6a9ad7ee6cabcd40430ef95f",
+    ".claude/workflow-runs/01a06a6d-e219-7690-9492-3a32ffe54a4f/state.json": "c57d2c16311638e07fc311d763c33e34745119e56ce9caed3e7c0577aaa7e8cc",
+    ".claude/workflow-runs/01a06a6d-e219-7690-9492-3a32ffe54a4f/journal.jsonl": "bd1bfd1fba8db6606b910091d2c5f943b1dcbdfa17daadfcc473749db26a6115",
+    ".claude/workflow-runs/01a06a7f-e4c3-7601-a582-9fe1405523f1/state.json": "0d55e41e157131797055600914f061b3ce4ca1942a5f944cafea49a5f5907471",
+    ".claude/workflow-runs/01a06a7f-e4c3-7601-a582-9fe1405523f1/journal.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ".claude/workflow-runs/01a06a93-3fb9-7f52-91e1-969711ed7caf/state.json": "e37ff68a0dfffb334b173814d7dfeee4aabdf86d7bd681f5c1ffca7d24d0c810",
+    ".claude/workflow-runs/01a06a93-3fb9-7f52-91e1-969711ed7caf/journal.jsonl": "8442c8a13d1f8b8454765099e82881a0976f080f4dfae3bb78059572a3841eb1",
+    ".claude/workflow-runs/01a06a9f-3f0e-7e70-8e67-0d5fad441ab2/state.json": "1e27815b57f686c95b15b23f8564151f08463344c69bde28658357f8d54a730c",
+    ".claude/workflow-runs/01a06a9f-3f0e-7e70-8e67-0d5fad441ab2/journal.jsonl": "a6388291ba952ea7a94686a9f64a9460c6d53149ff95bbc0dd692f8e038aa975",
+    ".claude/workflow-runs/01a06aae-4fff-7f73-a864-30808eea2f37/state.json": "365cf0ffab0c3c98d535aa7f42b005fb079299f4549522cb5c20a52851cad8f8",
+    ".claude/workflow-runs/01a06aae-4fff-7f73-a864-30808eea2f37/journal.jsonl": "2bff125bcb062b59821d1a2de9cb710ca3b91723185594783ef8634b66b2bc42",
+    ".claude/workflow-runs/01a06ab8-952d-7942-811d-3d378d90da3d/state.json": "4afb2fb3b0cd6230bb81c8b72e1796ee8cc95fe0e22d269793b85737f62ed49a",
+    ".claude/workflow-runs/01a06ab8-952d-7942-811d-3d378d90da3d/journal.jsonl": "fb0396d7d49880e9934199a7779370207988ceba610a5b92df22ef33588603ee",
+    ".claude/workflow-runs/01a06abc-ddb9-7e71-9487-dc9e360e0d8c/state.json": "8de146da9969fc541860cf97369ed3d9dde506e6452e8984e5f17b6aec9c0a3f",
+    ".claude/workflow-runs/01a06abc-ddb9-7e71-9487-dc9e360e0d8c/journal.jsonl": "2812256ee87bbbaea6603f328607e3dc4e6722f46738a0275e9b5966b701d236",
+    ".claude/workflow-runs/01a06ac2-387a-73e0-b31f-af483ee51651/state.json": "19fc65d69693caf5caddf437d54f67f12577c9325fcad1ba8289263d7c7c252c",
+    ".claude/workflow-runs/01a06ac2-387a-73e0-b31f-af483ee51651/journal.jsonl": "0d9364c4c75cf6a1363bde3530dba50373bc1c02a4aab89333b032be849faee3",
+    ".claude/workflow-runs/01a06acc-8a6f-72e0-8c32-b9d41f1be1c1/state.json": "c5c429f070463a22eaf0601a035ae0f86ec2e176aa5ad6973c15984d707b1824",
+    ".claude/workflow-runs/01a06acc-8a6f-72e0-8c32-b9d41f1be1c1/journal.jsonl": "e03ff0d0df132a0e81bbde868ef9df5efc63e8defddb60d35086511fd2ca620b",
+    ".claude/workflow-runs/01a06acf-c13f-7f82-92e0-e8ee3030d9be/state.json": "e633c037d2ff61a012b4b5f7d242a30cb930b477bd4aaa14549b4cbbf6715a9e",
+    ".claude/workflow-runs/01a06acf-c13f-7f82-92e0-e8ee3030d9be/journal.jsonl": "bfaa7a0f8d14bbff1b7a006615513a47fb97b93fcd133014c4b181db60157204",
+    ".claude/workflow-runs/01a06ad4-c169-7781-8a9e-bd0977e3f264/state.json": "b0657ffa53d1b3787aadafa2180b617d0634f748362438cffa64411dfacb299a",
+    ".claude/workflow-runs/01a06ad4-c169-7781-8a9e-bd0977e3f264/journal.jsonl": "1bd7f7206389eb6315b4bceca20110c9f160808917d613ad834b426c76f6338a",
+    ".claude/workflow-runs/01a06ad9-24a7-78e1-b34a-ef3a1816ab48/state.json": "63c8cbd5ae7e347f60b4a7dcf14f5d378b7703cceaae988f8edfdbc1024943e6",
+    ".claude/workflow-runs/01a06ad9-24a7-78e1-b34a-ef3a1816ab48/journal.jsonl": "08ca4a46f59db7fe850f6ca0012d68bd4ee641df656d0af638391958289400f4",
+    ".claude/workflow-runs/01a06ae8-0608-7513-9e19-f168427b8089/state.json": "37beac3818127fa001a03d1e114cb040add252c328309b107f0d6d08b24dc0f5",
+    ".claude/workflow-runs/01a06ae8-0608-7513-9e19-f168427b8089/journal.jsonl": null,
+    ".claude/workflow-runs/01a06af6-de2e-7b52-b01e-2ff3818a1f46/state.json": "9a0b426f6c497300b2673ab08ae4add6103a83df996139983e55763a45288f95",
+    ".claude/workflow-runs/01a06af6-de2e-7b52-b01e-2ff3818a1f46/journal.jsonl": null,
+    ".claude/workflow-runs/01a06bbc-89dc-7c60-894d-bfa0ef34dca9/state.json": "717e86fb664303dcc21c8b35f9803e76082ae29ce56ad35495fbd75c56e27337",
+    ".claude/workflow-runs/01a06bbc-89dc-7c60-894d-bfa0ef34dca9/journal.jsonl": "82295d9a0c1138b65781e3d33185d4a2a0c9a3a00f36f4613fcd3ca1167cf27f",
+    ".claude/workflow-runs/01a06bcd-f72d-7c73-8430-a93329bc4819/state.json": "c5b37b8cd5356297207579048df52f32ba3898dc381f9d1182cae2da998fc85c",
+    ".claude/workflow-runs/01a06bcd-f72d-7c73-8430-a93329bc4819/journal.jsonl": "5847f8bc027af5f032d097617af07a28434fc25249a31556311ca3b3362f6624",
+    ".claude/workflow-runs/01a06bea-b711-78c2-ba52-60307bd5626e/state.json": "85c93922752f36200bdf0834dcc264beb20ab0b97a51b6b69949ec5a3f4675d5",
+    ".claude/workflow-runs/01a06bea-b711-78c2-ba52-60307bd5626e/journal.jsonl": "c341e0bec7c3a1aa0e092dbcdac0392994be6f97e8707c0f3b3803f5d01ec11f",
+    ".claude/workflow-runs/01a06c1b-26fa-7882-b4e3-946220aacc76/state.json": "0c3fb5cdce6e4e6d5b424dbf78e5a0b721b58f93a6e25cdb859703f23421a047",
+    ".claude/workflow-runs/01a06c1b-26fa-7882-b4e3-946220aacc76/journal.jsonl": "1403fd691d6adbc8d8fa3e10fff0d397bb35dce1d78bee418cc5e447a22ea076",
+    ".claude/workflow-runs/01a06c33-e08a-7253-b201-9d0eb0cf82f5/state.json": "e6c663af725dc97d38532f861f2dd0aa68385a37ccac137c01035b3f9949c170",
+    ".claude/workflow-runs/01a06c33-e08a-7253-b201-9d0eb0cf82f5/journal.jsonl": "b0209b648ee69b2d13c2705b0fa4f9ed22e772a967e3fddc15c088577ef5d270",
+    ".claude/workflow-runs/01a06c6b-bbfd-7641-894c-0e03a3bcb711/state.json": "527a08d2238efb3c8fb32578bf73b953a60e25549be564233d2db6519d272a65",
+    ".claude/workflow-runs/01a06c6b-bbfd-7641-894c-0e03a3bcb711/journal.jsonl": null,
+    ".claude/workflow-runs/01a06ca3-8db1-77a2-beb9-33da4fd450b0/state.json": "41ea2652fb4991440d46abbf21f129d1af8b170a22f728732a1d1a61910cab5a",
+    ".claude/workflow-runs/01a06ca3-8db1-77a2-beb9-33da4fd450b0/journal.jsonl": "8050d2a2dcca061243814896a7736d6e1ec223badfaccede1b9d39b17d64e840",
+    ".claude/workflow-runs/01a06cae-3320-7ec3-9961-82375f7f391e/state.json": "19c853eb010791381c11388cea2aaf5a497e35d83fbcd2287300cfc3c192436c",
+    ".claude/workflow-runs/01a06cae-3320-7ec3-9961-82375f7f391e/journal.jsonl": "11f9557bb583e6148ceeabf8f525774366084478190af876df63b7b1d411f100",
+    ".claude/workflow-runs/01a07eec-4eeb-7903-a288-a2cafb404bba/state.json": "12d818648ae46fa821f4c3937ca6a887c22ef05764bab139851b2625d1874214",
+    ".claude/workflow-runs/01a07eec-4eeb-7903-a288-a2cafb404bba/journal.jsonl": "41b9199e8b1300afb2a12ca4483cda486d3fe80fbd07825b27a5fb0c04ac8d82",
+    ".claude/workflow-runs/01a07ef6-95f7-7d60-b4d9-d7e8af46f701/state.json": "4d0338768dc2ddeaa0939ad05b5f64d7208de9aedbd3adb4bce9cb3ad5cd01dd",
+    ".claude/workflow-runs/01a07ef6-95f7-7d60-b4d9-d7e8af46f701/journal.jsonl": "1172c90e9cdb09fabafc46842c6b9a067597969d89971643f1b09e36f2069b58",
+    ".claude/workflow-runs/01a07f00-7cad-7773-9c6f-a903561e34d5/state.json": "95f593a7c2116a23ee685b88a193cd6dfc6318a8fade9fd16973dd0bea2490e8",
+    ".claude/workflow-runs/01a07f00-7cad-7773-9c6f-a903561e34d5/journal.jsonl": "5ae04da280ee2336f482705029690616b25fa75775153c88276c5acf56b2886d",
+    ".claude/workflow-runs/01a07f10-8b80-7483-ba92-d3170fcc4076/state.json": "266ef9f3114d3af39acb464b68bfc8d77234591fe46f799f3bd3416abe64cf71",
+    ".claude/workflow-runs/01a07f10-8b80-7483-ba92-d3170fcc4076/journal.jsonl": "5cb4aabed598a245dc96dd07c55d91525760e25419c773297533a0a538222d00",
+    ".claude/workflow-runs/01a07f1a-9f3f-7622-9143-36ead3c7e332/state.json": "13e88812becad756a56465620df918329acb8fd9a75cf4443186e9d0a4a91f0a",
+    ".claude/workflow-runs/01a07f1a-9f3f-7622-9143-36ead3c7e332/journal.jsonl": "e1de47443d7b3d80781e3725cc572f18d00738b740d502bace9532429ec47b93",
+    ".claude/workflow-runs/01a07f24-ec27-7201-86cd-918e75aae93f/state.json": "8fa340babe9f67e00a6060eebab3309623a9dce682934aaf1fcd1e7faaa555c6",
+    ".claude/workflow-runs/01a07f24-ec27-7201-86cd-918e75aae93f/journal.jsonl": "b0a2598748c0d50b6ba6fc909513a6c596b3a431839cad58ef345f183760eb8c",
+    ".claude/workflow-runs/01a07f2c-e3b4-7ab3-b8c5-07ce41aed8a1/state.json": "5127a2d9104089f15b63d8481798173fb85fdacd2a4ba5e24271d80763ed0294",
+    ".claude/workflow-runs/01a07f2c-e3b4-7ab3-b8c5-07ce41aed8a1/journal.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ".claude/workflow-runs/01a07f36-e880-7d30-8880-0603dfb4672b/state.json": "598212901486d21c032b059fae5a542977bb4a0c51a16375f05331875fb8b8c2",
+    ".claude/workflow-runs/01a07f36-e880-7d30-8880-0603dfb4672b/journal.jsonl": "dd645ce4f484b3340d4a415100cf6bd56a7c783b15ae7dd0190586dc9f2ea00e",
+    ".claude/workflow-runs/01a07f3c-5d03-7730-8dd1-e4caff11b1ff/state.json": "b326a93f86d726bcf1a58e9ba78c26057c8a3e3631a07525a83cd930a954ecaa",
+    ".claude/workflow-runs/01a07f3c-5d03-7730-8dd1-e4caff11b1ff/journal.jsonl": "91a30a74b7dc5b01fd8d440b23121a3b9c7f15ab6c8cbb519cbe4a437803e105",
+    ".claude/workflow-runs/01a07f46-853c-7423-918c-469e550e662e/state.json": "81181bf5522419fb7d5ac39bc6fc9a041db253bde8d527bf21a3712d5312ef6b",
+    ".claude/workflow-runs/01a07f46-853c-7423-918c-469e550e662e/journal.jsonl": "f20c69744ad73efa775bb3aa3be2dfa64c41e7bee274686351247b15bb0ec0eb",
+    ".claude/workflow-runs/01a07f4f-2c36-7790-99fe-8a357d81566e/state.json": "6f61d7ab1bacf2492678bb737150cbbd30ec48069e6067dbf1012807072d43ff",
+    ".claude/workflow-runs/01a07f4f-2c36-7790-99fe-8a357d81566e/journal.jsonl": "5d7b6d6e504447569320decd57d434e462c10fa84e23a58f618d0f8ad63192b5",
+    ".claude/workflow-runs/01a0853b-8502-7550-b741-dcc347327f24/state.json": "a2b4aa828668a187ce7f3a43461e26d6da44a0365a9296ddc517a1f4e04658aa",
+    ".claude/workflow-runs/01a0853b-8502-7550-b741-dcc347327f24/journal.jsonl": "7984e37595517a629d3aa35b80754082cc86ff28696c5936cee4ab45536a5a96",
+    ".claude/workflow-runs/01a08545-ef32-71e2-8de6-2cad0a404e7c/state.json": "7ae9077be1dac469619b94ff3701146c4b1f27e971011c45cbe9df72d164b52c",
+    ".claude/workflow-runs/01a08545-ef32-71e2-8de6-2cad0a404e7c/journal.jsonl": "8b7543b970fdd5422cc3f809f10d7b5f26a7d06e5912b2c3f81d22a3ce1a9c09",
+    ".claude/workflow-runs/01a0856d-f576-77e2-8ddb-f727d95700ae/state.json": "4f346697cbc9c644171f96bd37cd301d3d42456dc41d3d2a199d48084e2d68a2",
+    ".claude/workflow-runs/01a0856d-f576-77e2-8ddb-f727d95700ae/journal.jsonl": "33183665ab1d13fac403c81e321f7ee62b88520086329b2d5d1840b4edafbd63",
+    ".claude/workflow-runs/01a08578-cc32-7e23-9aa3-1b2aee9b81f7/state.json": "0562dcc5c992bf1f7b8108573c8ac7684e6d4c62c012cb42e5bff0c429b00fce",
+    ".claude/workflow-runs/01a08578-cc32-7e23-9aa3-1b2aee9b81f7/journal.jsonl": null,
+    ".claude/workflow-runs/01a09079-1869-7b71-8647-f613e2fdccd0/state.json": "cea0e95d140a106c1bf32533e439f3d6af3f0e8ff563dca4a8fb06af09ac94bb",
+    ".claude/workflow-runs/01a09079-1869-7b71-8647-f613e2fdccd0/journal.jsonl": "26ede2b52e2b8edd1cfb98676862a03780c55f26523062771708fa6f3bc27302",
+    ".claude/workflow-runs/01a0909a-95b1-7592-bf1d-77d9bf90a421/state.json": "3065fb56dc793111ba1b020902896e3c396a6f86f24c05305f56e8d8e20e0562",
+    ".claude/workflow-runs/01a0909a-95b1-7592-bf1d-77d9bf90a421/journal.jsonl": "c031984a66161e530f3df95b63c25a6468351874e4d82d0f5cae7d35760facbc",
+    ".claude/workflow-runs/01a090a7-63d9-7d91-923c-3b264fdf62db/state.json": "812956b623e6fc56249fe4834fc3aa04109dd63512937daccfe1783a779bdbbd",
+    ".claude/workflow-runs/01a090a7-63d9-7d91-923c-3b264fdf62db/journal.jsonl": "725100f22fcb67752055b8662f3168a4e1567ba23cf6c17a9f8a49ba8ef73f53",
+    ".claude/workflow-runs/01a090b4-c7b0-7781-a0a9-4e5467413c32/state.json": "eae5b9e3fffb10a419b49f6389b54f22220e09457659dae430e50ac69680ae75",
+    ".claude/workflow-runs/01a090b4-c7b0-7781-a0a9-4e5467413c32/journal.jsonl": "ca38602c861c048591fb8a77eb358d904b90d73cbce11ae8488e1b94d7275deb",
+    ".claude/workflow-runs/01a090c9-dc0e-7410-ba0a-7fdb4c11d885/state.json": "b5808dc222a875a5765f88d1ed7adf1936fc26542ce396b71676ac4d9ba46c10",
+    ".claude/workflow-runs/01a090c9-dc0e-7410-ba0a-7fdb4c11d885/journal.jsonl": "08077c9fbe601786741100aaaff02cec463f8ce4e0a24b7859821eec53da261f",
+    ".claude/workflow-runs/01a092c3-7852-7553-9dc3-2950573bf871/state.json": "ae8724b908413daf67ddd6a124b47a671f06108da9cd5982898182698eb4c979",
+    ".claude/workflow-runs/01a092c3-7852-7553-9dc3-2950573bf871/journal.jsonl": "9867a6b97ccc87a34a2a44bcf974960a2ede991e1795125480084d72ec7040f7",
+    ".claude/workflow-runs/01a09309-3019-7343-962e-369d6d073dd0/state.json": "d8d8967a3d5a0623f0d92508d223ba5b9999ed0b71d37de24a4a4e27d8cd9a7d",
+    ".claude/workflow-runs/01a09309-3019-7343-962e-369d6d073dd0/journal.jsonl": "498a0d03a646adad0c511bb036a21f3aa161751f27b88b227779d9c31fefd8c5",
+    ".claude/workflow-runs/01a09340-8a41-7512-a699-664ff1b7baf5/state.json": "6e664428298c75978df66dc5f7259405e0c12ace751cd4782b1d0cae02597d60",
+    ".claude/workflow-runs/01a09340-8a41-7512-a699-664ff1b7baf5/journal.jsonl": null,
+    ".claude/workflow-runs/01a09486-5f8a-7152-a105-0a8adea09a5f/state.json": "fcb0bf7b57dd9337efbeceedbf61acc3935f848482a028719eedb51a4eb0537b",
+    ".claude/workflow-runs/01a09486-5f8a-7152-a105-0a8adea09a5f/journal.jsonl": "97af6013c570fb36d421a1b7f38250c615aab16f74bf53d32a9f2eef932501f3",
+    ".claude/workflow-runs/01a094e0-2591-7a71-9955-27462d44a81f/state.json": "466d77d5ce4e71d33612e2fa6ea9c35f3e212e2d23ff561729a94f2c9111334f",
+    ".claude/workflow-runs/01a094e0-2591-7a71-9955-27462d44a81f/journal.jsonl": "66922859e4e2401b37bc9df255e53be117bec94a8801821c482000ebde0da436",
+    ".claude/workflow-runs/01a09549-caaa-7461-8c3a-1a90a404a783/state.json": "f2ae3990b03a230f8e65911c796e0252c52b12a1fb5e4055aa41f9b8cbe8ac5d",
+    ".claude/workflow-runs/01a09549-caaa-7461-8c3a-1a90a404a783/journal.jsonl": "9b32db65e797fa89c5fa624cee0a4405553f83f36f86fd932a591cd9617f7214",
+    ".claude/workflow-runs/01a095ee-8701-7991-87d8-96f9adcf9f66/state.json": "c3aa1d84e2c9bfdeb31ce043f74ae15b0553e817e37e27849485c8bddbd8089f",
+    ".claude/workflow-runs/01a095ee-8701-7991-87d8-96f9adcf9f66/journal.jsonl": "88d10c268e68227ad16b4e4f0c36c64fb8e98da1eac562d3ddb0368b55ceeb34",
+    ".claude/workflow-runs/01a096bd-d52c-79a3-9f95-912c7f5ba42d/state.json": "8ae7843b1e747f20ccdff8c7685bbbfff70b284de413ebc007f5e596d38f721a",
+    ".claude/workflow-runs/01a096bd-d52c-79a3-9f95-912c7f5ba42d/journal.jsonl": "d08539ddff0fa5d8fde79cc8657612925795fd0af060f95e3bba764bf4b58ba0"
+  },
+  "limitations": [
+    "Counts concern retained journal rows, not task outcomes.",
+    "All observed attempts are produced; do not assume missing journal means zero agent execution.",
+    "Physical run span and child duration sums are not interchangeable."
+  ]
+}

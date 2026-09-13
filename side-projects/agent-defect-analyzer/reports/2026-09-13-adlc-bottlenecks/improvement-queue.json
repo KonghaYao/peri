@@ -1,0 +1,171 @@
+{
+  "schemaVersion": 1,
+  "evidenceLedger": "evidence-ledger.json",
+  "items": [
+    {
+      "id": "ADLC-20260913-01",
+      "priority": 1,
+      "title": "修正结构化结果的整数契约",
+      "evidenceState": "historical_direct_and_current_static",
+      "evidence": [
+        "E01",
+        "E02"
+      ],
+      "metric": {
+        "unit": "named arbitration attempt",
+        "observed": 1,
+        "denominator": "selected sandbox arbitration failure; not population frequency"
+      },
+      "currentEntry": [
+        "peri-agent/src/agent/workflow/agent/result.rs::validate_json_schema",
+        "peri-agent/src/agent/workflow/agent/result.rs::json_type_name",
+        "peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md::arbitrationResultSchema"
+      ],
+      "minimalChange": "使真实结果验证器按整数语义接受JSON整数并拒绝非整数；能力预检和正式返回共用验证路径。",
+      "counterexample": "正确拒收无效结果、只恢复仲裁是必要机制；不得放宽全部schema。",
+      "validation": "对真实validator运行integer/number/小数/嵌套/required fixture；重放原packet_revision=2应通过，2.5应失败。",
+      "success": "合法仲裁不因整数类型比较而失效；非法输出仍被拒收。",
+      "limitation": "本轮静态核查，未执行生产fixture，未验证性能收益。",
+      "status": "candidate_not_implemented"
+    },
+    {
+      "id": "ADLC-20260913-02",
+      "priority": 1,
+      "title": "将边界比较变为有界工具并先验证输入",
+      "evidenceState": "retained_artifact_and_direct_tool_error",
+      "evidence": [
+        "E05",
+        "E06"
+      ],
+      "metric": {
+        "unit": "retained round8 baseline",
+        "entries": 820879,
+        "bytes": 158699816,
+        "elapsedMs": null,
+        "denominator": "one named local artifact, not runtime sample mean"
+      },
+      "currentEntry": [
+        "peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md::filesystem write-boundary contract",
+        ".peri/adlc/tasks/2026-09-11-sandbox-mcp-server/artifacts/boundary.py"
+      ],
+      "minimalChange": "基线用显式ID与验证过的路径引用，先校验存在/格式；确定扫描范围、生成目录和非Git写入观察，缓存稳定输入，避免每轮自写全仓递归hash。",
+      "counterexample": "边界审计仍须捕获真实越权，不能简单排除全部ignored文件或扩大allowlist。",
+      "validation": "重放缺失基线路径先快速失败；在大量target产物下测read files/bytes/elapsed，同时注入允许范围外的写入。",
+      "success": "输入错误在扫描前暴露，扫描工作量有界，越权检出能力保持。",
+      "limitation": "82万条目证明规模；历史等待分钟数仅自报，不作为收益基线。",
+      "status": "candidate_not_implemented"
+    },
+    {
+      "id": "ADLC-20260913-03",
+      "priority": 2,
+      "title": "按产品缺口、能力、协议和收尾原因选择恢复范围",
+      "evidenceState": "cross_round_observation_conditional_optimization",
+      "evidence": [
+        "E02",
+        "E03",
+        "E04",
+        "E08"
+      ],
+      "metric": {
+        "unit": "sandbox physical runs",
+        "observed": 13,
+        "avoidableReruns": null,
+        "denominator": "13 named runs; no avoidable-rerun rate claimed"
+      },
+      "currentEntry": [
+        "peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md::W2 gap loop",
+        "peri-middlewares/src/workflow/mod.rs::resume_workflow",
+        "peri-acp/src/host/workflow_agent.rs::model alias resolution"
+      ],
+      "minimalChange": "记录blocker类别和仍有效的产物/依赖指纹；仅assessor不可用时先检查授权的可用评估路线，满足证据有效性条件才只恢复评估。",
+      "counterexample": "源码、镜像、用户目标或验收契约变化使相关旧证据失效，必须重跑受影响工作。",
+      "validation": "同一初始产物下对照四类blocker，断言只有受影响包启动；400/403后不重复相同无效能力调用；评估保持独立。",
+      "success": "减少无效能力调用和不必要启动，验收缺口与越权没有漏检。",
+      "limitation": "未证明历史某整轮没有源码变化；不是已确认的节省比例。",
+      "status": "candidate_not_implemented"
+    },
+    {
+      "id": "ADLC-20260913-04",
+      "priority": 2,
+      "title": "预算与交接按实际工作包安排",
+      "evidenceState": "multiple_historical_timeouts_with_recovery",
+      "evidence": [
+        "E07",
+        "E08",
+        "E10",
+        "E11"
+      ],
+      "metric": {
+        "unit": "micro physical timeout runs",
+        "observed": 4,
+        "limitMs": 600000,
+        "denominator": "all 4 locally retained micro runs; total task cost unknown"
+      },
+      "currentEntry": [
+        "peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md::work package handoff and convergence",
+        "peri-workflow/src/runner/agent_dispatch.rs::budget enforcement"
+      ],
+      "minimalChange": "保留两个逻辑Workflow，拆合适物理运行；source可编译后启动依赖sink，预算到限前保存最小真实handoff和恢复入口。",
+      "counterexample": "TUI和Micro复核发现真实问题，不能靠缩短审查或取消预算保证来优化。",
+      "validation": "在源码半完成、已写但未回包、review中三位置终止重放；检查checkpoint和依赖是否阻止无效下游启动。",
+      "success": "保留可复用产物、减少重新调查，不把未验证修改宣称完成，取消和总预算有效。",
+      "limitation": "工作包复杂度与模型速度未控制，不能只由600秒推断超时配置必然错误。",
+      "status": "candidate_not_implemented"
+    },
+    {
+      "id": "ADLC-20260913-05",
+      "priority": 2,
+      "title": "分离已有dirty基线、并发变化与本任务写入归属",
+      "evidenceState": "cross_case_postcondition_and_baseline_evidence",
+      "evidence": [
+        "E09",
+        "E10",
+        "E12"
+      ],
+      "metric": {
+        "unit": "purposive task mechanisms",
+        "denominator": "micro/TUI/meta visible evidence; no overall false-positive rate"
+      },
+      "currentEntry": [
+        "peri-workflow/src/journal/git.rs",
+        "peri-workflow/src/runner/terminal.rs::postprocessing",
+        "peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md::baseline and boundary checks"
+      ],
+      "minimalChange": "持久化基线身份与变化归属；已存在且未变的dirty不误归任务，新外部变化无归属则保持unknown并继续可做的范围内工作。",
+      "counterexample": "用户排除peri-cool并不消除缺测试或真实越权；不能将所有并发变化自动变baseline exception。",
+      "validation": "分别覆盖不变dirty、可归属的外部变化、未知外部变化、本任务实际越权、独立缺失验收项。",
+      "success": "给出可操作的收尾原因，任务真实越权仍失败，验收缺口不被范围纠正掩盖。",
+      "limitation": "历史path-allowlist失败不能一概定性为执行器误报。",
+      "status": "candidate_not_implemented"
+    },
+    {
+      "id": "ADLC-20260913-06",
+      "priority": 2,
+      "title": "按ADLC阶段必需产物判定业务完成",
+      "evidenceState": "single_direct_empty_adlc_run_and_current_state_contract",
+      "evidence": [
+        "E13",
+        "E14",
+        "E15"
+      ],
+      "metric": {
+        "unit": "MQ required-agent W1",
+        "durationMs": 108,
+        "agents": 0,
+        "toolCalls": 0,
+        "denominator": "one explicitly required-agent stage"
+      },
+      "currentEntry": [
+        "peri-workflow/src/runner/terminal.rs::finalize_workflow",
+        "peri-workflow/src/tool/completion.rs",
+        "peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md::required handoffs"
+      ],
+      "minimalChange": "阶段声明必需handoff与独立验收；缺失时输出可操作业务状态，不以引擎completed补造交付。",
+      "counterexample": "通用纯JS和缓存恢复可合法零agent；主线有测试/提交也不自动等于ADLC完成。",
+      "validation": "对需要agent交付的ADLC空脚本、合法纯JS、缓存恢复、产物不完整和产品完整五种fixture分别验证业务状态。",
+      "success": "ADLC空跑得到明确恢复原因，合法通用Workflow不被误伤。",
+      "limitation": "当前engine acceptance unknown是既有协议事实，本轮未设计完整跨层新状态协议。",
+      "status": "candidate_not_implemented"
+    }
+  ]
+}

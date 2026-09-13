@@ -1,0 +1,466 @@
+{
+  "schemaVersion": 1,
+  "checkedAt": "2026-09-13T13:29:23.274345+00:00",
+  "entries": [
+    {
+      "id": "E01",
+      "claim": "Sandbox 仲裁结果因 integer/number 类型校验被拒收。",
+      "references": [
+        {
+          "runId": "01a090a7-63d9-7d91-923c-3b264fdf62db",
+          "journalSeq": 0,
+          "kind": "dead",
+          "reason": "no-structured-output",
+          "disposition": "produced",
+          "journalSha256": "725100f22fcb67752055b8662f3168a4e1567ba23cf6c17a9f8a49ba8ef73f53"
+        }
+      ],
+      "limitation": "该run跨度约6分钟；不是已量化的全部净浪费。当前validator另经静态核查。"
+    },
+    {
+      "id": "E02",
+      "claim": "后续只重跑独立仲裁并得到 decided。",
+      "references": [
+        {
+          "runId": "01a090b4-c7b0-7781-a0a9-4e5467413c32",
+          "journalSeq": 0,
+          "kind": "ok",
+          "reason": null,
+          "disposition": "produced",
+          "journalSha256": "ca38602c861c048591fb8a77eb358d904b90d73cbce11ae8488e1b94d7275deb"
+        }
+      ],
+      "limitation": "合理恢复反例，kind=ok不等于整个产品完成。"
+    },
+    {
+      "id": "E03",
+      "claim": "Sandbox 多轮存在 provider 失败，以及两个 max-iterations 子尝试。",
+      "references": [
+        {
+          "runId": "01a090c9-dc0e-7410-ba0a-7fdb4c11d885",
+          "journalSeq": 7,
+          "kind": "dead",
+          "reason": "runagent-threw",
+          "disposition": "produced",
+          "journalSha256": "08077c9fbe601786741100aaaff02cec463f8ce4e0a24b7859821eec53da261f"
+        },
+        {
+          "runId": "01a090c9-dc0e-7410-ba0a-7fdb4c11d885",
+          "journalSeq": 9,
+          "kind": "dead",
+          "reason": "runagent-threw",
+          "disposition": "produced",
+          "journalSha256": "08077c9fbe601786741100aaaff02cec463f8ce4e0a24b7859821eec53da261f"
+        },
+        {
+          "runId": "01a092c3-7852-7553-9dc3-2950573bf871",
+          "journalSeq": 9,
+          "kind": "dead",
+          "reason": "runagent-threw",
+          "disposition": "produced",
+          "journalSha256": "9867a6b97ccc87a34a2a44bcf974960a2ede991e1795125480084d72ec7040f7"
+        },
+        {
+          "runId": "01a09549-caaa-7461-8c3a-1a90a404a783",
+          "journalSeq": 1,
+          "kind": "dead",
+          "reason": "runagent-threw",
+          "disposition": "produced",
+          "journalSha256": "9b32db65e797fa89c5fa624cee0a4405553f83f36f86fd932a591cd9617f7214"
+        },
+        {
+          "runId": "01a09549-caaa-7461-8c3a-1a90a404a783",
+          "journalSeq": 10,
+          "kind": "dead",
+          "reason": "runagent-threw",
+          "disposition": "produced",
+          "journalSha256": "9b32db65e797fa89c5fa624cee0a4405553f83f36f86fd932a591cd9617f7214"
+        }
+      ],
+      "limitation": "这些只是具名实例；父run.error不能归到全部子尝试，重做可避免性需另核依赖。"
+    },
+    {
+      "id": "E04",
+      "claim": "用户明确将Docker方向改为local-mcp-server。",
+      "references": [
+        {
+          "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+          "messageId": "01a095da-9094-7640-b489-a506c54b99f5",
+          "sequence": 660193,
+          "recordRole": "user",
+          "evidenceKind": "direct_user",
+          "contentSha256": "cf8ff90d68daad4627b3d6b6c50cb3db1e0178aa328e362d1d4ab1566da38664"
+        }
+      ],
+      "limitation": "保留目标修订；不能将旧方向工作全部归为无效返工。"
+    },
+    {
+      "id": "E05",
+      "claim": "Round9准备时边界比较文件路径不存在，随后用户询问进度。",
+      "references": [
+        {
+          "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+          "messageId": "01a09703-7e36-7930-b040-c2bcfacf270a",
+          "sequence": 660610,
+          "recordRole": "tool",
+          "evidenceKind": "direct_tool_result",
+          "contentSha256": "49749ae97b6141469df760fed74003976789947dd3f3813b5e7e7e6587d7c6f2"
+        },
+        {
+          "threadId": "01a095cd-aff2-7b61-b640-72437dd85ed5",
+          "messageId": "01a0982a-7280-7f21-925a-4618c9d0838b",
+          "sequence": 660612,
+          "recordRole": "user",
+          "evidenceKind": "direct_user",
+          "contentSha256": "1cf14e0e606408219d95724c7abbe65ea252cc2ec30eb53d07b3ea3ced11d92c"
+        }
+      ],
+      "limitation": "不是整个任务永久失败；当前manifest后来已记录外部收口。"
+    },
+    {
+      "id": "E06",
+      "claim": "留存边界快照达820879/840149条目；coordinator脚本遍历仓库并hash regular files。",
+      "references": [
+        {
+          "artifactProvenance": "boundary-provenance.json"
+        }
+      ],
+      "limitation": "规模来自当前留存artifact；没有测得历史elapsed，不认定所有外部变化属于本任务。"
+    },
+    {
+      "id": "E07",
+      "claim": "Micro四次运行各约600秒到限并有后置检查阻塞。",
+      "references": [
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a08544-ad20-79b3-85d8-d7661f728a95",
+          "sequence": 641153,
+          "recordRole": "user",
+          "evidenceKind": "workflow_notification",
+          "contentSha256": "2f0892527eaa7763ad7915d2cc31d3825aef482ef0101948812c46ec723dbf46"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a0854f-173f-7fe0-b8dc-9183d71aee9b",
+          "sequence": 641207,
+          "recordRole": "user",
+          "evidenceKind": "workflow_notification",
+          "contentSha256": "60664a06177f7cc9c806737aef0cae9e85c412b06aca5c6b0351772ca8cdabce"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a08577-1d95-7e10-a8ea-773108a1c8dd",
+          "sequence": 641987,
+          "recordRole": "user",
+          "evidenceKind": "workflow_notification",
+          "contentSha256": "d641c806fcba3c558a0e63ecaa56028c6e55af9b83ae5906b7eb151ac4b9f85c"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a08581-f444-79d3-9919-954b945d4ef9",
+          "sequence": 642083,
+          "recordRole": "user",
+          "evidenceKind": "workflow_notification",
+          "contentSha256": "62208a05131613a5ae2442d9c29a10a5e5f69edd36ba4dcd526060b4cce65e24"
+        }
+      ],
+      "limitation": "通知为系统投影，不是用户反馈；不能把整个跨度算无效工作。"
+    },
+    {
+      "id": "E08",
+      "claim": "Micro在最后一次Workflow失败后继续WP002、sink与独立复核，发现两个P1。",
+      "references": [
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a0858a-3bf5-7271-a6cc-e3a23a93d80b",
+          "sequence": 642197,
+          "recordRole": "assistant",
+          "evidenceKind": "assistant_self_report",
+          "contentSha256": "7af8cd0e974edb37f8414a9fb7fa3e444d5dd24fef8761bf855887123a5828c9"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a085a0-0b0f-7b81-949c-63a5ebad538f",
+          "sequence": 642449,
+          "recordRole": "assistant",
+          "evidenceKind": "assistant_self_report",
+          "contentSha256": "58d5da8cfd51100cab5d11092f9beb6c3530b7b788615b92e1b7029e5f555758"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a085ae-332a-7c30-b1b2-6772b049b631",
+          "sequence": 642566,
+          "recordRole": "assistant",
+          "evidenceKind": "assistant_review_summary",
+          "contentSha256": "3a62f39301fb9f83a8cb59d4b0ec9b3497cf6b848d894baf9df3e032f042d8d4"
+        }
+      ],
+      "limitation": "代码缺陷与通过陈述属报告层，直接测试另列E09。"
+    },
+    {
+      "id": "E09",
+      "claim": "Micro继续进行单线程验证、默认并行失败和干净基线复现，最后写baseline exception。",
+      "references": [
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a085b8-4eb5-79c1-9a16-81dcb6a5fff9",
+          "sequence": 642666,
+          "recordRole": "tool",
+          "evidenceKind": "direct_tool_result",
+          "contentSha256": "0fa38a89946da8414a6f5e09f00fab6221f9510826c3869bf39cae51399fcb15"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a085b8-f0dd-7b83-8930-126c96c275bc",
+          "sequence": 642673,
+          "recordRole": "tool",
+          "evidenceKind": "direct_tool_result",
+          "contentSha256": "1520f949fe7bf75a959421c34d5bb6f431ee50798e895b5c4df7f6500626bec6"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a085b9-ea79-7e92-8cc7-cbf68c4970da",
+          "sequence": 642675,
+          "recordRole": "tool",
+          "evidenceKind": "direct_tool_result",
+          "contentSha256": "226c9bb34654b28105b806fc255ad17953d6f76f3f8b9ca615c107fcc964581f"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a085b9-ea7f-72c2-b9e5-cc863cae3aed",
+          "sequence": 642676,
+          "recordRole": "assistant",
+          "evidenceKind": "assistant_plan",
+          "contentSha256": "0112d816e834dca83d026bbc2dec664e9feb0d02c7ed63ab1d99b1fea1eb339a"
+        },
+        {
+          "threadId": "01a08429-fe60-7b72-8f2a-6dcf13d6728d",
+          "messageId": "01a085ba-4dbf-76c3-983a-f62550b9be39",
+          "sequence": 642677,
+          "recordRole": "tool",
+          "evidenceKind": "direct_tool_write_ack",
+          "contentSha256": "8436a9b16f2bc1427f91abd852fd1d196e83cc3e4ea5d440a9965faa9b071af6"
+        }
+      ],
+      "limitation": "642677是下一新用户目标644695之前的可见末尾；round2计划不等于验收完成。"
+    },
+    {
+      "id": "E10",
+      "claim": "TUI多次触及运行/工具预算与path-allowlist postcondition。",
+      "references": [
+        {
+          "threadId": "01a06bb5-eb91-72c3-948e-961cfabbe1e3",
+          "messageId": "01a06bcb-6007-7d52-b5f2-2a06037e0fb9",
+          "sequence": 616361,
+          "recordRole": "user",
+          "evidenceKind": "workflow_notification",
+          "contentSha256": "06ed8f70c0dbf35612e0488d55b414cd90b354b643b3efd5ebbac4cbd0a5c0ea"
+        },
+        {
+          "threadId": "01a06bb5-eb91-72c3-948e-961cfabbe1e3",
+          "messageId": "01a06be9-6ecd-71e3-b42f-2092040e1641",
+          "sequence": 616400,
+          "recordRole": "user",
+          "evidenceKind": "workflow_notification",
+          "contentSha256": "d693adc1ea9def11fb27f282a3a3d496f842074e23d0b346b0dbc3060dbfd9b7"
+        },
+        {
+          "threadId": "01a06bb5-eb91-72c3-948e-961cfabbe1e3",
+          "messageId": "01a06c1a-5082-76b0-873f-f8f847486eb8",
+          "sequence": 616418,
+          "recordRole": "user",
+          "evidenceKind": "workflow_notification",
+          "contentSha256": "f2bb12cd0957ed241008c729ee84e18046d3455eff2f3925d2df9ed817ecd537"
+        },
+        {
+          "threadId": "01a06bb5-eb91-72c3-948e-961cfabbe1e3",
+          "messageId": "01a06c6a-cf92-7d50-b6be-3acbaeea9b99",
+          "sequence": 616447,
+          "recordRole": "user",
+          "evidenceKind": "workflow_notification",
+          "contentSha256": "dcd9a2bd5f9161d27709e8a25cc92e1e3e71c12ab6fb1d35211978cb730cce12"
+        }
+      ],
+      "limitation": "状态投影不证明产品错误或每轮无效；对话无逐消息计时。"
+    },
+    {
+      "id": "E11",
+      "claim": "TUI复核报告了具体修复，最终交付总结给出覆盖与门禁。",
+      "references": [
+        {
+          "threadId": "01a06bb5-eb91-72c3-948e-961cfabbe1e3",
+          "messageId": "01a06ca3-3ba8-7642-a6b4-7c3435aed79d",
+          "sequence": 616475,
+          "recordRole": "tool",
+          "evidenceKind": "subagent_handoff",
+          "contentSha256": "191b2a4589cdbfc9a612cfed679ff688e4191b5c2faf2141e43d0740e15ea328"
+        },
+        {
+          "threadId": "01a06bb5-eb91-72c3-948e-961cfabbe1e3",
+          "messageId": "01a06cb4-2330-7dd1-a57a-67a9ce50a07d",
+          "sequence": 616497,
+          "recordRole": "user",
+          "evidenceKind": "workflow_notification",
+          "contentSha256": "19e65e43d76904f5916f62ca93d1b73eae42fefb3884ab5b04860afee3e27ace"
+        },
+        {
+          "threadId": "01a06bb5-eb91-72c3-948e-961cfabbe1e3",
+          "messageId": "01a06cb5-d73f-7eb3-b9ed-7332257e1f02",
+          "sequence": 616519,
+          "recordRole": "assistant",
+          "evidenceKind": "assistant_self_report",
+          "contentSha256": "884fc72426f989c6fe08bf4a6753447f86f88452758da48dbec93705a8e57686"
+        }
+      ],
+      "limitation": "没有重新验收产品或把自报直接升级为测试事实。"
+    },
+    {
+      "id": "E12",
+      "claim": "Meta用户排除peri-cool，仍有独立验收缺口、真实newline测试失败与定向修复。",
+      "references": [
+        {
+          "threadId": "01a069fd-581c-75b0-9e9a-9b7e3eefb7c7",
+          "messageId": "01a06b0d-bf0b-7c40-b808-14592eb466c7",
+          "sequence": 614700,
+          "recordRole": "user",
+          "evidenceKind": "direct_user",
+          "contentSha256": "8744caed32fe2615f3e75629acce742470647d4f09a4435ba2cf92a0e35cb98c"
+        },
+        {
+          "threadId": "01a069fd-581c-75b0-9e9a-9b7e3eefb7c7",
+          "messageId": "01a06b0e-4c88-77b2-9f1d-867130cb4cd5",
+          "sequence": 614706,
+          "recordRole": "assistant",
+          "evidenceKind": "assistant_gap_analysis",
+          "contentSha256": "3dfb5def2faa591a584f806202288d505a2cb3c821fd9b816af2148d326c3ff1"
+        },
+        {
+          "threadId": "01a069fd-581c-75b0-9e9a-9b7e3eefb7c7",
+          "messageId": "01a06b11-bcea-79a3-8ffd-4d9c540cbd0e",
+          "sequence": 614760,
+          "recordRole": "tool",
+          "evidenceKind": "direct_tool_result",
+          "contentSha256": "425e35347f2b662319bbd7c81fd2ef4fd4bfc05e590e7d2450358df1bd691b9e"
+        },
+        {
+          "threadId": "01a069fd-581c-75b0-9e9a-9b7e3eefb7c7",
+          "messageId": "01a06b12-1d9f-78c2-9382-dee2dd1734cf",
+          "sequence": 614766,
+          "recordRole": "tool",
+          "evidenceKind": "direct_tool_result",
+          "contentSha256": "cf658ceb7f4b5115eb6c31ffde26526cffce8d360e6b32488aa903f7948f93b4"
+        },
+        {
+          "threadId": "01a069fd-581c-75b0-9e9a-9b7e3eefb7c7",
+          "messageId": "01a06b14-192c-7f52-a8d4-474c808b0c40",
+          "sequence": 614816,
+          "recordRole": "tool",
+          "evidenceKind": "subagent_assessment",
+          "contentSha256": "6ecb32fed464b8a1e6de63ec2c1ecb54f92a2e6a511476bf910ce0343fd24c10"
+        },
+        {
+          "threadId": "01a069fd-581c-75b0-9e9a-9b7e3eefb7c7",
+          "messageId": "01a06b14-195a-77f0-b9ec-4a3eb4fd8a33",
+          "sequence": 614819,
+          "recordRole": "assistant",
+          "evidenceKind": "assistant_metadata_check",
+          "contentSha256": "a6da8fd501ce3b7399c00ddd1181dda518d2b6462dbce02c7b8cc4a90170cf56"
+        }
+      ],
+      "limitation": "原始启动不在存留根记录；packet发生导出截断，完整分页仍不能恢复源已丢内容。"
+    },
+    {
+      "id": "E13",
+      "claim": "MQ明确ADLC阶段要求交接，却出现108ms零agent零工具结束与delivery blocked。",
+      "references": [
+        {
+          "threadId": "01a05fc2-7d69-7fe2-85f1-4995a4233bda",
+          "messageId": "01a05fe2-cf44-7282-a434-27c93f1ae2f7",
+          "sequence": 602362,
+          "recordRole": "user",
+          "evidenceKind": "direct_user",
+          "contentSha256": "0b1bd90911ce6fdfca826c4550802c23a3f760f9a996b4d347446e0153e153d5"
+        },
+        {
+          "threadId": "01a05fc2-7d69-7fe2-85f1-4995a4233bda",
+          "messageId": "01a05fe4-a559-72e0-b618-9f38d2d124cb",
+          "sequence": 602458,
+          "recordRole": "user",
+          "evidenceKind": "workflow_notification",
+          "contentSha256": "7813987b2651164b960e4ed4422114962b38137213a28d3b79b1742c26f03cfc"
+        },
+        {
+          "threadId": "01a05fc2-7d69-7fe2-85f1-4995a4233bda",
+          "messageId": "01a05fe4-cd6c-7d20-8551-13e0e9ad6b00",
+          "sequence": 602463,
+          "recordRole": "tool",
+          "evidenceKind": "direct_tool_result",
+          "contentSha256": "b1239dad2cb85e970271b3a875f62f5ea0ef305c691e5c3547eaf5645a013119"
+        }
+      ],
+      "limitation": "结论限本ADLC阶段；通用纯JS或恢复缓存零agent可合法。"
+    },
+    {
+      "id": "E14",
+      "claim": "MQ主线之后有实际测试与提交记录。",
+      "references": [
+        {
+          "threadId": "01a05fc2-7d69-7fe2-85f1-4995a4233bda",
+          "messageId": "01a05fff-1298-7322-b1ac-de1c3f0a9d06",
+          "sequence": 603629,
+          "recordRole": "tool",
+          "evidenceKind": "direct_tool_result",
+          "contentSha256": "fcbaab8822ffe01f84213d0406c90a50bbb259d31dae60ab102eeda94aad886a"
+        },
+        {
+          "threadId": "01a05fc2-7d69-7fe2-85f1-4995a4233bda",
+          "messageId": "01a06009-69a8-79d1-a701-3b2b6d713e71",
+          "sequence": 604063,
+          "recordRole": "user",
+          "evidenceKind": "tool_commit_report",
+          "contentSha256": "e1d03545269c86c8857ffe234747dc03369d2438c76f2d2c223e4639ccbeabeb"
+        }
+      ],
+      "limitation": "不能据此补造ADLC独立裁决或完整W2验收，提交报告不替代测试范围。"
+    },
+    {
+      "id": "E15",
+      "claim": "System-reminder材料主要是后续整理与明确授权提交。",
+      "references": [
+        {
+          "threadId": "01a07ed4-ee0d-7460-9063-7008f4ecd0b9",
+          "messageId": "01a08070-790a-70d1-8d11-5d48f37d4859",
+          "sequence": 633476,
+          "recordRole": "user",
+          "evidenceKind": "direct_user",
+          "contentSha256": "901dfc0ac972f1b2dd647fa34ef47817775e156df8dd39cd58b4145edd4704bc"
+        },
+        {
+          "threadId": "01a07ed4-ee0d-7460-9063-7008f4ecd0b9",
+          "messageId": "01a08075-7fd0-7412-a558-92c4a4623080",
+          "sequence": 633597,
+          "recordRole": "user",
+          "evidenceKind": "compaction_projection",
+          "contentSha256": "f3ab76479adcbe4479edb93ca41ce4fc02686516eb559e479c56ff607d27307b"
+        },
+        {
+          "threadId": "01a07ed4-ee0d-7460-9063-7008f4ecd0b9",
+          "messageId": "01a08079-37c8-7741-8990-b99c72ab00c4",
+          "sequence": 633688,
+          "recordRole": "user",
+          "evidenceKind": "direct_user",
+          "contentSha256": "768c6f14e8ab4eeb6e2fdb6651e86314d6539b2eb696f1333d37ae1c65da213e"
+        },
+        {
+          "threadId": "01a07ed4-ee0d-7460-9063-7008f4ecd0b9",
+          "messageId": "01a0807a-aac7-7da3-b22b-172300e914de",
+          "sequence": 633742,
+          "recordRole": "tool",
+          "evidenceKind": "tool_commit_report",
+          "contentSha256": "82e4856fbdc5ae02e107c5bb17e03fcfe18a703351e925ae951dd237513872c1"
+        }
+      ],
+      "limitation": "原始ADLC执行缺失；此组不当短流程高效反例。"
+    }
+  ]
+}

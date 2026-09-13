@@ -1,0 +1,39 @@
+{
+  "observedAt": "2026-09-13T12:59:52.133871+00:00",
+  "head": "73df17f70122fb6826fe5a3971eb4ae1863507e0",
+  "note": "Working tree source snapshot; concurrent tasks may modify production files. Hashes bind this research reading, not historical runtime versions.",
+  "files": [
+    {
+      "path": "peri-agent/src/agent/workflow/agent/result.rs",
+      "sha256": "2521068018938eb80eab1a24d7a706504684b23d8a59f6e5b5aa7a2886a147fe"
+    },
+    {
+      "path": "peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md",
+      "sha256": "4304a969d1ea5b823b5208843f877cecd11ec9062fdf6e09188a4ae97e703f8a"
+    },
+    {
+      "path": "peri-workflow/src/runner/terminal.rs",
+      "sha256": "7b234ebdf03f63c27dcc713011f691bddf810cf497519501f0fa30e789435e72"
+    },
+    {
+      "path": "peri-workflow/src/tool/completion.rs",
+      "sha256": "260ca755a31466a51e3400b30f1f4a9674fad4883c04d2a069e23d72cbf6762f"
+    },
+    {
+      "path": "peri-acp/src/host/workflow_agent.rs",
+      "sha256": "baca4efd97b0f7df6af49dd39b5e6b60a4edfe2da64d43b500dbca18960079ed"
+    },
+    {
+      "path": "peri-workflow/src/tool.rs",
+      "sha256": "e41dabff92086ca4964ec22d729899abbc51c29437f887b7412717b879e30bc0"
+    },
+    {
+      "path": "npm-packages/@peri-workflow/src/validate.ts",
+      "sha256": "ab016740f1c9fcaecae9bc5fd8afe5a98805e6520cca95590eafeb11008395d5"
+    },
+    {
+      "path": "peri-middlewares/src/workflow/mod.rs",
+      "sha256": "a3a636f38a54ad98b5d1d461c30982c898116838aac6a1c444d4a4e54b1c0331"
+    }
+  ]
+}

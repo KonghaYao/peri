@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-13T13:47:54.552032+00:00",
+  "reviewArtifacts": {
+    "reviews/micro-mq-refs.json": "a3e55124e449775a204efbb119b2b3174e814ddbd837ac73c397057816227c62",
+    "reviews/micro-mq-v2-refs.json": "bb2e3b802efa36cd562d020a1fbc79cae89df0f7dc631214a51893328eb97de1",
+    "reviews/micro-mq-v2.md": "79c93921145d6048020dddeb7c71d4bab63392847483b619f1a0d094bd432a3b",
+    "reviews/micro-mq.md": "4602e4dee53f782b9c140417f4d7d142917b04e66a3dc781b5d7c58ad9bde2f8",
+    "reviews/refs-v2.json": "463e3c350e52157ef7acdc8664fb6a11e3ebd2ac5065205deee6751d1947bef5",
+    "reviews/refs.json": "74bc82b0ba616065ee67bace0ccf8536a8736dbf64fe0900ea7904e8155bf30d",
+    "reviews/sandbox-v2.md": "97e8f8f19b81c88cacc7f1942c902e94116a778785af7418a3493cba9e5f7a4c",
+    "reviews/sandbox.md": "8ab221a50bb26fe7b14f0405e7f5aea61db3b3ffd83fbfc72f1c4eed4b0b532f",
+    "reviews/script-review-v2.md": "85b98cc18d4c68d824f38668e12bfd431eb5a18236c830f96894c7d549ace442",
+    "reviews/script-review-v3.md": "7375ef99cc0ac128286e92d9af3ef85c3e5cd03e2001a6fef36a415a60fc1177",
+    "reviews/script-review.md": "550eba64015761d8c75c15f825b5fa7592c99fc0b074358e588efbb6d328f2f4",
+    "reviews/tui-meta-system-refs.json": "62a406cc10dfb6e912f815570bd214a7c1b4b4eb4d97381641ac460018ba6f51",
+    "reviews/tui-meta-system.md": "0686c47f07c31b1ba620b27a51362d3c1a62614772ab1d0d36660a177dc571bc"
+  },
+  "corrections": [
+    {
+      "topic": "sandbox pivot",
+      "original": "Skill projection was cited as a user decision.",
+      "resolution": "Use direct user message 01a095da-9094-7640-b489-a506c54b99f5; projections are not authorization."
+    },
+    {
+      "topic": "identity",
+      "original": "A workflow run ID appeared in message ID fields.",
+      "resolution": "Separate (runId,journalSeq) from (threadId,messageId); curated ledger references resolve."
+    },
+    {
+      "topic": "observation tail",
+      "original": "Reviews stopped at round8 or the final Workflow timeout.",
+      "resolution": "Sandbox includes round9 preparation failure and last progress request. Micro includes continued fixes/reviews/baseline check through sequence642677; later artifact completion is separate."
+    },
+    {
+      "topic": "Meta coverage",
+      "original": "Reviewer refs labelled packetTruncated=false.",
+      "resolution": "Use authoritative packet coverage in sampling.json: Meta exportTruncated=true; 15 source flags. Full pages do not recover missing original startup."
+    },
+    {
+      "topic": "failure attribution",
+      "original": "Journal reason categories were derived from parent state.error.",
+      "resolution": "Recomputed journals-v2/v3 using result.reason/detail, retaining original outputs; 18 provider,2 iteration,1 schema,1 invalidJSON."
+    },
+    {
+      "topic": "counterfactual safety",
+      "original": "Zero agents or outside-allowlist changes were generalized too broadly.",
+      "resolution": "Empty-stage rule limited to required ADLC deliverables; pure JS/cache may be valid. Outside changes need attribution, not automatic exemption."
+    },
+    {
+      "topic": "snapshot and export",
+      "original": "Independent snapshots were described together; an initial guard then rejected legitimate bounded packets.",
+      "resolution": "Record separate snapshot scopes; verify ordered ID subset/counts without claiming identical content. Preserve bounded packet coverage and full pages."
+    }
+  ],
+  "basis": "Root semantic adjudication plus mechanical integrity checks; no majority voting; selected reports contain candidates, not established performance gains."
+}
