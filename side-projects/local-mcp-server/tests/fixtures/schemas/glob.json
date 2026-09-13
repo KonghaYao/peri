@@ -1,0 +1,43 @@
+{
+  "fixture_schema": "sandbox-mcp/tool-schema-fixture-v1",
+  "tool": "Glob",
+  "aliases": [],
+  "namespace": "filesystem",
+  "description": "Fast file pattern matching tool that works with any codebase size. Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\". Returns matching file paths sorted by modification time.\n\nUsage:\n- Use this tool when you need to find files by name patterns\n- Returns file paths sorted by modification time (most recently modified first)\n- Maximum 1000 results returned; collection stops once the limit is exceeded and results are truncated with a notice. The shown 1000 are the newest among the collected matches (walk order), not necessarily the globally newest files in the tree\n- Output exceeding 20000 bytes is persisted to a temp file; only the first 100 paths are returned inline with a path hint\n- Common directories like node_modules, .git, target, dist, build are automatically excluded from results\n- The path parameter is optional; defaults to the current working directory\n- Symbolic links are not followed during the walk: symlinked files and directories are skipped, so globbing a project root won't pull in trees linked from outside the workspace\n- Searches taking longer than 15 seconds time out with an error; use a more specific pattern or an explicit path\n- For searching file contents, use Grep instead\n\nWhen to use:\n- Use Glob when searching for files by name pattern (e.g., find all TypeScript files, find a specific config file)\n- Use Grep when searching for content within files (e.g., find where a function is defined)\n- For open-ended searches requiring multiple rounds, consider using a sub-agent via Agent\n\nAnti-patterns (will be warned):\n- Glob(\"*\") or Glob(\"**/*\") produces massive directory dumps — use folder_operations or Bash ls to list directories.\n- Prefer specific patterns like \"**/*.rs\" over \"**/*\" — extension filtering keeps output bounded.\n\nOutput-size protection (always active, no opt-in):\n- Directories named node_modules, .git, target, dist, build, worktrees, and similar caches/copies are skipped during the walk, so globbing the project root won't enumerate worktree or build copies. The blacklist applies by directory name at every level, including the search root itself.\n- Results exceeding 1000 entries or 20000 bytes are truncated inline; the collected output is persisted to a temp file and the path is returned in the output. Collection stops at the result limit, so the persisted file may not contain every match in the tree.\n- Note: wildcards are matched with the glob crate defaults, so `*`/`?` also cross `/` (e.g. `*.rs` matches nested files too). Use a directory prefix such as `src/**/*.rs` to scope the walk; the walk only descends into directories matching the pattern's literal prefix.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "pattern": {
+        "type": "string",
+        "description": "The glob pattern to match file paths relative to the search root (e.g. \"src/**/*.rs\", \"*.config.json\"). Wildcards follow the glob crate defaults: `*` and `?` match across `/`, so `*.rs` matches .rs files at ANY depth, not just the current directory. To scope the walk, use a literal directory prefix (e.g. \"src/*.rs\") or the path parameter"
+      },
+      "path": {
+        "type": "string",
+        "description": "The directory to search in. Absolute path or relative to cwd. If not specified, the current working directory is used"
+      }
+    },
+    "required": [
+      "pattern"
+    ]
+  },
+  "host_projection": {
+    "base_tool_timeout_ms": 120000,
+    "output_char_limit_chars": null,
+    "prefers_persist": false,
+    "note": "glob 内部另有 15s 扫描超时（SCAN_TIMEOUT），与基类 timeout 无关，属工具语义。"
+  },
+  "required_error_messages": {
+    "pattern": "The 'pattern' parameter is required for the Glob tool."
+  },
+  "param_alias_groups": [],
+  "business_error_rule": "缺失 pattern、非法 glob 语法、目录不存在、遍历错误均为 tool business error。",
+  "provenance": {
+    "source_file": "peri-middlewares/src/tools/filesystem/glob.rs",
+    "source_symbol": "GlobFilesTool::parameters",
+    "source_sha256": "aa7540d649ba1bb74f01828ed7d119d64160928629d13f604029b5b70499367a",
+    "schema_macro_start_line": 342,
+    "description_file": "peri-middlewares/src/tools/filesystem/descriptions/glob.md",
+    "description_symbol": "GlobFilesTool::description",
+    "description_sha256": "faf9259d69981c4addce29f53273630dfe9448964bd0a54f8b914b9c712b7e2d"
+  }
+}

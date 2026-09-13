@@ -1,0 +1,77 @@
+[package]
+name = "local-mcp-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "独立本机 MCP server：单进程直接在本机执行 Peri 的七个文件系统/Bash 工具，工作区根为能力边界"
+license = "MIT"
+
+# 独立 workspace：本包位于 perihelion 仓库树内但不是其成员，空 [workspace] 表把本目录
+# 隔离成自己的 workspace 根，保证这里的 Cargo.toml/Cargo.lock/target 不触碰根 workspace。
+[workspace]
+
+[[bin]]
+name = "local-mcp-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "io-util",
+    "io-std",
+    "process",
+    "signal",
+    "net",
+    "fs",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+parking_lot = "0.12"
+tempfile = "3"
+
+# ── 工具语义 ────────────────────────────────────────────────────────────────
+# 版本与 peri-middlewares 现有实现对齐，保证迁移后的行为可比对。
+glob = "0.3"
+walkdir = "2.5"
+ignore = "0.4"
+grep = "0.4"
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# ── MCP 面 ──────────────────────────────────────────────────────────────────
+# rmcp 固定在 3.1.4：D-001 接受的设计版本，且已自带 2026-07-28 支持。
+# server              → ServerHandler/ServerInfo
+# transport-io        → stdio()
+# transport-streamable-http-server → StreamableHttpService/StreamableHttpServerConfig
+rmcp = { version = "=3.1.4", default-features = false, features = [
+    "server",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
+clap = { version = "4", features = ["derive", "env"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
+http = { version = "1" }
+http-body-util = { version = "0.1" }
+bytes = { version = "1" }
+# 常量时间比较（bearer token）；不引入任何哈希/加密实现。
+subtle = { version = "2" }
+
+[target.'cfg(unix)'.dependencies]
+# 进程组（setsid/killpg）与信号升级清理；tasks 消费。
+libc = "0.2"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"

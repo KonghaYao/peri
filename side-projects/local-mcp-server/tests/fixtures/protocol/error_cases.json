@@ -1,0 +1,56 @@
+{
+  "fixture_schema": "sandbox-mcp/protocol-error-cases-v1",
+  "note": "WP-005 错误族用例（至少三类独立错误）。kind=jsonrpc_error 表示必须是 JSON-RPC 错误响应（result 缺席）；kind=tool_error 表示必须是 isError=true 的工具结果。code=null 表示只断言'属于冻结错误码集合且不是 -32002'（形状错误的具体码由 SDK 反序列化路径决定，不在本包内自造）。",
+  "cases": [
+    {
+      "name": "unknown_tool",
+      "tool": "SandboxWrite",
+      "arguments": {},
+      "expect": {
+        "kind": "jsonrpc_error",
+        "code": -32602,
+        "message_prefix": "Unknown tool: "
+      }
+    },
+    {
+      "name": "business_error",
+      "tool": "Read",
+      "arguments": { "file_path": "missing.md", "__test_mode": "business_error" },
+      "expect": {
+        "kind": "tool_error",
+        "is_error": true,
+        "text": "Error: scripted business failure"
+      }
+    },
+    {
+      "name": "internal_error",
+      "tool": "Read",
+      "arguments": { "file_path": "notes.md", "__test_mode": "internal_error" },
+      "expect": {
+        "kind": "jsonrpc_error",
+        "code": -32603,
+        "message_prefix": "scripted internal failure"
+      }
+    },
+    {
+      "name": "backend_unavailable",
+      "tool": "Bash",
+      "arguments": { "command": "echo hi", "__test_mode": "backend_down" },
+      "expect": {
+        "kind": "jsonrpc_error",
+        "code": -32603,
+        "message_prefix": "Backend unavailable: "
+      }
+    },
+    {
+      "name": "arguments_not_an_object",
+      "tool": "Read",
+      "arguments": "not-an-object",
+      "expect": {
+        "kind": "jsonrpc_error",
+        "code": -32602,
+        "message_prefix": "Invalid params for method tools/call"
+      }
+    }
+  ]
+}

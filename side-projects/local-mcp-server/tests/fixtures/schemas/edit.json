@@ -1,0 +1,55 @@
+{
+  "fixture_schema": "sandbox-mcp/tool-schema-fixture-v1",
+  "tool": "Edit",
+  "aliases": [],
+  "namespace": "filesystem",
+  "description": "Performs exact string replacements in files.\n\nUsage:\n- You must use your Read tool at least once in the conversation before editing. This tool will fail if you attempt an edit without reading the file\n- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix\n- ALWAYS prefer editing existing files in the codebase. DO NOT create new files unless explicitly required\n- The file_path parameter must be an absolute path, not a relative path\n- The old_string parameter must match exactly, including all whitespace and indentation\n- The edit will FAIL if old_string is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use replace_all to change every instance of old_string\n- Use replace_all for replacing and renaming strings across the file\n\nError handling:\n- old_string not found: returns an error indicating the string does not exist in the file\n- old_string not unique: returns an error with the count of occurrences, suggesting more context or replace_all\n- old_string is empty: returns an error rejecting the operation\n- File not found: returns an error indicating the path does not exist",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "The absolute path to the file to modify"
+      },
+      "old_string": {
+        "type": "string",
+        "description": "The text to replace. Must match EXACTLY including all whitespace, indentation, and newlines. The edit will fail if old_string is not unique in the file unless replace_all is true"
+      },
+      "new_string": {
+        "type": "string",
+        "description": "The text to replace it with (must be different from old_string)"
+      },
+      "replace_all": {
+        "type": "boolean",
+        "description": "If true, replace all occurrences of old_string. If false (default), replace only the first occurrence. Use this to rename variables or update repeated patterns across the file"
+      }
+    },
+    "required": [
+      "file_path",
+      "old_string",
+      "new_string"
+    ]
+  },
+  "host_projection": {
+    "base_tool_timeout_ms": 120000,
+    "output_char_limit_chars": null,
+    "prefers_persist": false,
+    "note": "基类默认 timeout 生效。"
+  },
+  "required_error_messages": {
+    "file_path": "The 'file_path' parameter is required for the Edit tool.",
+    "old_string": "The 'old_string' parameter is required for the Edit tool.",
+    "new_string": "The 'new_string' parameter is required for the Edit tool."
+  },
+  "param_alias_groups": [],
+  "business_error_rule": "缺失参数、空 old_string、文件不存在、读失败、old_string 非唯一、提交失败均为 tool business error；不得产生半成品文件。",
+  "provenance": {
+    "source_file": "peri-middlewares/src/tools/filesystem/edit.rs",
+    "source_symbol": "EditFileTool::parameters",
+    "source_sha256": "1f05698c9a1b5127ff01f8e6513143d05c8ab73ee40140bd4c98a5383b024100",
+    "schema_macro_start_line": 114,
+    "description_file": "peri-middlewares/src/tools/filesystem/descriptions/edit.md",
+    "description_symbol": "EditFileTool::description",
+    "description_sha256": "5c4dbc56f96431332db59590f2c54658b2f9a13a001fbdbdf95e29f1b301bfe2"
+  }
+}
