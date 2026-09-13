@@ -74,6 +74,7 @@ bun test
 
 当前参考产物：
 
+- [任务有效性试点：12 个样本双评、证据回查与提示词方向](reports/2026-09-13-task-effectiveness/03-findings.md)
 - [本轮分析结论与改进方向](reports/2026-09-13-review.md)
 - [foundation quality](reports/2026-09-13-foundation/quality.md)
 - [all roots behavior](reports/2026-09-13-behavior/all-roots/report.md)

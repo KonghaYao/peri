@@ -17,7 +17,7 @@
 | 维度 | 标签 | 判定边界 |
 | --- | --- | --- |
 | outcome | delivered / partial / not_delivered / blocked / unknown | delivered 要求任务验收条件有直接证据；not_delivered 要求可见的未交付或反证，不能由沉默或日志结束推出；blocked 要有具体障碍 |
-| verification | direct / reported_only / none / not_applicable / unknown | 工具结果、可检查交付正文或明确验收是 direct，不要求使用工具；assistant 声称“已测试”只是 reported_only；none 表示可见地没有做必要验证，缺失片段用 unknown；not_applicable 仅用于无实际验收对象的纯社交互动等情形 |
+| verification | direct / reported_only / none / not_applicable / unknown | 工具结果、可检查交付正文或明确验收是 direct，不要求使用工具；assistant 声称“已测试”只是 reported_only；none 表示可见地没有做必要验证，缺失片段用 unknown；not_applicable 只表示已定位任务中该维度确实不适用，不能代替无任务的 unknown |
 | constraints | supported / violated / unknown | 依据该任务实际约束核验，不能默认不存在约束，也不按自己偏好的实现路径扣分 |
 | feedback | accepted / corrected / rejected / mixed / none_observed / unknown | 仅解释用户对焦点任务产物/行为的明确接受、修正或否定；普通范围更新、停止和新目标属于任务契约变化，不自动记 corrected；none_observed 仅用于观察范围完整且未见反馈，存在缺口用 unknown；不称作用户满意度 |
 | strategy | effective / avoidable_friction / unknown | 是否针对该目标形成进展、合理处理不确定和交接；判定可避免摩擦需给替代路径与上下文，不用长度/工具次数当效率 |
@@ -25,6 +25,8 @@
 `taskType` 选 coding / research / review / planning / operation / conversation / other / unclear。复杂度、权限、数据缺失作为局限，不按消息数认定任务难度。工具错误、必要澄清、合法受阻并不自动降低质量；没有工具的解释类任务也可能有可直接检查的优秀交付。
 
 “优秀”只作为可解释分组：交付有据、验证适用、约束有据且策略有效时记 strong；已交付但验证/过程未充分支持时记 delivered_with_gaps；其余分别为 partial、not_delivered、blocked、unknown。分组由维度派生，保留原始标签和理由，不另让模型打一个无法解释的总分。
+
+直接验证存在不代表全部验收条件已满足。强结论逐条核对任务要求及解释性主张；本机测试、目标平台验收、提交和子 agent 结果各自需要对应证据。纯问候不在本试点实质任务政策内，空请求锚点要求截止为空、taskType 为 unclear、五维均 unknown；不能因此派生 strong。
 
 ## 事实包与评审 sidecar
 
