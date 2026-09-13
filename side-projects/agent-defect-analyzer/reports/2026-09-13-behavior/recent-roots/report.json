@@ -1,0 +1,1199 @@
+{
+  "schema_version": "report.v1",
+  "source": {
+    "fingerprint": "258472bf423399fbd0d40e2c24569122a91e075adc1380de8c0b8a91423bace4",
+    "normalizer": "peri-normalizer-v2",
+    "metrics": "agent-metrics-v1"
+  },
+  "filters": {
+    "scope": "roots",
+    "includeHidden": false,
+    "since": "2026-09-01T00:00:00Z",
+    "until": "2026-09-13T00:00:00Z"
+  },
+  "totals": {
+    "threads": 204,
+    "messages": 33961,
+    "calls": 19891,
+    "pairedResults": 19891,
+    "pairedKnownResults": 19891,
+    "missingResults": 0,
+    "orphanResults": 0,
+    "duplicateCallIds": 0,
+    "duplicateResultIds": 0,
+    "unknownErrorResults": 0,
+    "explicitErrors": 323,
+    "parseIssues": 0
+  },
+  "pairing": {
+    "paired_results": 19891,
+    "paired_known_results": 19891,
+    "calls": 19891,
+    "missing_results": 0,
+    "orphan_results": 0,
+    "duplicate_call_ids": 0,
+    "duplicate_result_ids": 0,
+    "pairing_rate": 1,
+    "known_result_rate": 1
+  },
+  "top_tool_errors": [
+    {
+      "label": "Edit",
+      "outerName": "Edit",
+      "effectiveName": "Edit",
+      "calls": 3667,
+      "pairedResults": 3667,
+      "pairedKnownResults": 3667,
+      "errors": 84,
+      "unknownErrors": 0,
+      "calledThreads": 108,
+      "errorAffectedThreads": 41,
+      "errorRate": 0.02290700845377693
+    },
+    {
+      "label": "Read",
+      "outerName": "Read",
+      "effectiveName": "Read",
+      "calls": 5298,
+      "pairedResults": 5298,
+      "pairedKnownResults": 5298,
+      "errors": 69,
+      "unknownErrors": 0,
+      "calledThreads": 129,
+      "errorAffectedThreads": 44,
+      "errorRate": 0.013023782559456399
+    },
+    {
+      "label": "Agent",
+      "outerName": "Agent",
+      "effectiveName": "Agent",
+      "calls": 347,
+      "pairedResults": 347,
+      "pairedKnownResults": 347,
+      "errors": 41,
+      "unknownErrors": 0,
+      "calledThreads": 56,
+      "errorAffectedThreads": 17,
+      "errorRate": 0.11815561959654179
+    },
+    {
+      "label": "ExecuteExtraTool→Workflow",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "Workflow",
+      "calls": 61,
+      "pairedResults": 61,
+      "pairedKnownResults": 61,
+      "errors": 24,
+      "unknownErrors": 0,
+      "calledThreads": 16,
+      "errorAffectedThreads": 12,
+      "errorRate": 0.39344262295081966
+    },
+    {
+      "label": "Bash",
+      "outerName": "Bash",
+      "effectiveName": "Bash",
+      "calls": 4235,
+      "pairedResults": 4235,
+      "pairedKnownResults": 4235,
+      "errors": 21,
+      "unknownErrors": 0,
+      "calledThreads": 144,
+      "errorAffectedThreads": 18,
+      "errorRate": 0.0049586776859504135
+    },
+    {
+      "label": "StrReplace",
+      "outerName": "StrReplace",
+      "effectiveName": "StrReplace",
+      "calls": 19,
+      "pairedResults": 19,
+      "pairedKnownResults": 19,
+      "errors": 19,
+      "unknownErrors": 0,
+      "calledThreads": 6,
+      "errorAffectedThreads": 6,
+      "errorRate": 1
+    },
+    {
+      "label": "WebFetch",
+      "outerName": "WebFetch",
+      "effectiveName": "WebFetch",
+      "calls": 66,
+      "pairedResults": 66,
+      "pairedKnownResults": 66,
+      "errors": 14,
+      "unknownErrors": 0,
+      "calledThreads": 12,
+      "errorAffectedThreads": 6,
+      "errorRate": 0.21212121212121213
+    },
+    {
+      "label": "Grep",
+      "outerName": "Grep",
+      "effectiveName": "Grep",
+      "calls": 3656,
+      "pairedResults": 3656,
+      "pairedKnownResults": 3656,
+      "errors": 13,
+      "unknownErrors": 0,
+      "calledThreads": 124,
+      "errorAffectedThreads": 9,
+      "errorRate": 0.0035557986870897156
+    },
+    {
+      "label": "AskUserQuestion",
+      "outerName": "AskUserQuestion",
+      "effectiveName": "AskUserQuestion",
+      "calls": 91,
+      "pairedResults": 91,
+      "pairedKnownResults": 91,
+      "errors": 9,
+      "unknownErrors": 0,
+      "calledThreads": 45,
+      "errorAffectedThreads": 8,
+      "errorRate": 0.0989010989010989
+    },
+    {
+      "label": "Glob",
+      "outerName": "Glob",
+      "effectiveName": "Glob",
+      "calls": 589,
+      "pairedResults": 589,
+      "pairedKnownResults": 589,
+      "errors": 7,
+      "unknownErrors": 0,
+      "calledThreads": 116,
+      "errorAffectedThreads": 5,
+      "errorRate": 0.011884550084889643
+    },
+    {
+      "label": "Write",
+      "outerName": "Write",
+      "effectiveName": "Write",
+      "calls": 260,
+      "pairedResults": 260,
+      "pairedKnownResults": 260,
+      "errors": 6,
+      "unknownErrors": 0,
+      "calledThreads": 48,
+      "errorAffectedThreads": 3,
+      "errorRate": 0.023076923076923078
+    },
+    {
+      "label": "folder_operations",
+      "outerName": "folder_operations",
+      "effectiveName": "folder_operations",
+      "calls": 288,
+      "pairedResults": 288,
+      "pairedKnownResults": 288,
+      "errors": 2,
+      "unknownErrors": 0,
+      "calledThreads": 62,
+      "errorAffectedThreads": 2,
+      "errorRate": 0.006944444444444444
+    },
+    {
+      "label": "WebSearch",
+      "outerName": "WebSearch",
+      "effectiveName": "WebSearch",
+      "calls": 54,
+      "pairedResults": 54,
+      "pairedKnownResults": 54,
+      "errors": 2,
+      "unknownErrors": 0,
+      "calledThreads": 13,
+      "errorAffectedThreads": 2,
+      "errorRate": 0.037037037037037035
+    },
+    {
+      "label": "Workflow",
+      "outerName": "Workflow",
+      "effectiveName": "Workflow",
+      "calls": 8,
+      "pairedResults": 8,
+      "pairedKnownResults": 8,
+      "errors": 2,
+      "unknownErrors": 0,
+      "calledThreads": 2,
+      "errorAffectedThreads": 1,
+      "errorRate": 0.25
+    },
+    {
+      "label": "Delete",
+      "outerName": "Delete",
+      "effectiveName": "Delete",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "ExecuteExtraTool",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "ExecuteExtraTool",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_projects_by_id_logs",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_projects_by_id_logs",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_system_servers",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_system_servers",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__plugin_hindsight-memory_hindsight__agent_knowledge_recall",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__plugin_hindsight-memory_hindsight__agent_knowledge_recall",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "ExecuteExtraTool→RunPtcCode",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "RunPtcCode",
+      "calls": 20,
+      "pairedResults": 20,
+      "pairedKnownResults": 20,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 3,
+      "errorAffectedThreads": 1,
+      "errorRate": 0.05
+    },
+    {
+      "label": "Gash",
+      "outerName": "Gash",
+      "effectiveName": "Gash",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "mcp__plugin_hindsight-memory_hindsight__agent_knowledge_recall",
+      "outerName": "mcp__plugin_hindsight-memory_hindsight__agent_knowledge_recall",
+      "effectiveName": "mcp__plugin_hindsight-memory_hindsight__agent_knowledge_recall",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "Shell",
+      "outerName": "Shell",
+      "effectiveName": "Shell",
+      "calls": 36,
+      "pairedResults": 36,
+      "pairedKnownResults": 36,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 3,
+      "errorAffectedThreads": 1,
+      "errorRate": 0.027777777777777776
+    },
+    {
+      "label": "SkillTool",
+      "outerName": "SkillTool",
+      "effectiveName": "SkillTool",
+      "calls": 118,
+      "pairedResults": 118,
+      "pairedKnownResults": 118,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 67,
+      "errorAffectedThreads": 1,
+      "errorRate": 0.00847457627118644
+    }
+  ],
+  "all_tools": [
+    {
+      "label": "Edit",
+      "outerName": "Edit",
+      "effectiveName": "Edit",
+      "calls": 3667,
+      "pairedResults": 3667,
+      "pairedKnownResults": 3667,
+      "errors": 84,
+      "unknownErrors": 0,
+      "calledThreads": 108,
+      "errorAffectedThreads": 41,
+      "errorRate": 0.02290700845377693
+    },
+    {
+      "label": "Read",
+      "outerName": "Read",
+      "effectiveName": "Read",
+      "calls": 5298,
+      "pairedResults": 5298,
+      "pairedKnownResults": 5298,
+      "errors": 69,
+      "unknownErrors": 0,
+      "calledThreads": 129,
+      "errorAffectedThreads": 44,
+      "errorRate": 0.013023782559456399
+    },
+    {
+      "label": "Agent",
+      "outerName": "Agent",
+      "effectiveName": "Agent",
+      "calls": 347,
+      "pairedResults": 347,
+      "pairedKnownResults": 347,
+      "errors": 41,
+      "unknownErrors": 0,
+      "calledThreads": 56,
+      "errorAffectedThreads": 17,
+      "errorRate": 0.11815561959654179
+    },
+    {
+      "label": "ExecuteExtraTool→Workflow",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "Workflow",
+      "calls": 61,
+      "pairedResults": 61,
+      "pairedKnownResults": 61,
+      "errors": 24,
+      "unknownErrors": 0,
+      "calledThreads": 16,
+      "errorAffectedThreads": 12,
+      "errorRate": 0.39344262295081966
+    },
+    {
+      "label": "Bash",
+      "outerName": "Bash",
+      "effectiveName": "Bash",
+      "calls": 4235,
+      "pairedResults": 4235,
+      "pairedKnownResults": 4235,
+      "errors": 21,
+      "unknownErrors": 0,
+      "calledThreads": 144,
+      "errorAffectedThreads": 18,
+      "errorRate": 0.0049586776859504135
+    },
+    {
+      "label": "StrReplace",
+      "outerName": "StrReplace",
+      "effectiveName": "StrReplace",
+      "calls": 19,
+      "pairedResults": 19,
+      "pairedKnownResults": 19,
+      "errors": 19,
+      "unknownErrors": 0,
+      "calledThreads": 6,
+      "errorAffectedThreads": 6,
+      "errorRate": 1
+    },
+    {
+      "label": "WebFetch",
+      "outerName": "WebFetch",
+      "effectiveName": "WebFetch",
+      "calls": 66,
+      "pairedResults": 66,
+      "pairedKnownResults": 66,
+      "errors": 14,
+      "unknownErrors": 0,
+      "calledThreads": 12,
+      "errorAffectedThreads": 6,
+      "errorRate": 0.21212121212121213
+    },
+    {
+      "label": "Grep",
+      "outerName": "Grep",
+      "effectiveName": "Grep",
+      "calls": 3656,
+      "pairedResults": 3656,
+      "pairedKnownResults": 3656,
+      "errors": 13,
+      "unknownErrors": 0,
+      "calledThreads": 124,
+      "errorAffectedThreads": 9,
+      "errorRate": 0.0035557986870897156
+    },
+    {
+      "label": "AskUserQuestion",
+      "outerName": "AskUserQuestion",
+      "effectiveName": "AskUserQuestion",
+      "calls": 91,
+      "pairedResults": 91,
+      "pairedKnownResults": 91,
+      "errors": 9,
+      "unknownErrors": 0,
+      "calledThreads": 45,
+      "errorAffectedThreads": 8,
+      "errorRate": 0.0989010989010989
+    },
+    {
+      "label": "Glob",
+      "outerName": "Glob",
+      "effectiveName": "Glob",
+      "calls": 589,
+      "pairedResults": 589,
+      "pairedKnownResults": 589,
+      "errors": 7,
+      "unknownErrors": 0,
+      "calledThreads": 116,
+      "errorAffectedThreads": 5,
+      "errorRate": 0.011884550084889643
+    },
+    {
+      "label": "Write",
+      "outerName": "Write",
+      "effectiveName": "Write",
+      "calls": 260,
+      "pairedResults": 260,
+      "pairedKnownResults": 260,
+      "errors": 6,
+      "unknownErrors": 0,
+      "calledThreads": 48,
+      "errorAffectedThreads": 3,
+      "errorRate": 0.023076923076923078
+    },
+    {
+      "label": "folder_operations",
+      "outerName": "folder_operations",
+      "effectiveName": "folder_operations",
+      "calls": 288,
+      "pairedResults": 288,
+      "pairedKnownResults": 288,
+      "errors": 2,
+      "unknownErrors": 0,
+      "calledThreads": 62,
+      "errorAffectedThreads": 2,
+      "errorRate": 0.006944444444444444
+    },
+    {
+      "label": "WebSearch",
+      "outerName": "WebSearch",
+      "effectiveName": "WebSearch",
+      "calls": 54,
+      "pairedResults": 54,
+      "pairedKnownResults": 54,
+      "errors": 2,
+      "unknownErrors": 0,
+      "calledThreads": 13,
+      "errorAffectedThreads": 2,
+      "errorRate": 0.037037037037037035
+    },
+    {
+      "label": "Workflow",
+      "outerName": "Workflow",
+      "effectiveName": "Workflow",
+      "calls": 8,
+      "pairedResults": 8,
+      "pairedKnownResults": 8,
+      "errors": 2,
+      "unknownErrors": 0,
+      "calledThreads": 2,
+      "errorAffectedThreads": 1,
+      "errorRate": 0.25
+    },
+    {
+      "label": "Delete",
+      "outerName": "Delete",
+      "effectiveName": "Delete",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "ExecuteExtraTool",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "ExecuteExtraTool",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_projects_by_id_logs",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_projects_by_id_logs",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_system_servers",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_system_servers",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__plugin_hindsight-memory_hindsight__agent_knowledge_recall",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__plugin_hindsight-memory_hindsight__agent_knowledge_recall",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "ExecuteExtraTool→RunPtcCode",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "RunPtcCode",
+      "calls": 20,
+      "pairedResults": 20,
+      "pairedKnownResults": 20,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 3,
+      "errorAffectedThreads": 1,
+      "errorRate": 0.05
+    },
+    {
+      "label": "Gash",
+      "outerName": "Gash",
+      "effectiveName": "Gash",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "mcp__plugin_hindsight-memory_hindsight__agent_knowledge_recall",
+      "outerName": "mcp__plugin_hindsight-memory_hindsight__agent_knowledge_recall",
+      "effectiveName": "mcp__plugin_hindsight-memory_hindsight__agent_knowledge_recall",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 1,
+      "errorRate": 1
+    },
+    {
+      "label": "Shell",
+      "outerName": "Shell",
+      "effectiveName": "Shell",
+      "calls": 36,
+      "pairedResults": 36,
+      "pairedKnownResults": 36,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 3,
+      "errorAffectedThreads": 1,
+      "errorRate": 0.027777777777777776
+    },
+    {
+      "label": "SkillTool",
+      "outerName": "SkillTool",
+      "effectiveName": "SkillTool",
+      "calls": 118,
+      "pairedResults": 118,
+      "pairedKnownResults": 118,
+      "errors": 1,
+      "unknownErrors": 0,
+      "calledThreads": 67,
+      "errorAffectedThreads": 1,
+      "errorRate": 0.00847457627118644
+    },
+    {
+      "label": "artifact",
+      "outerName": "artifact",
+      "effectiveName": "artifact",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "DiscoverSkillsTool",
+      "outerName": "DiscoverSkillsTool",
+      "effectiveName": "DiscoverSkillsTool",
+      "calls": 9,
+      "pairedResults": 9,
+      "pairedKnownResults": 9,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 8,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→cron_list",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "cron_list",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→cron_register",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "cron_register",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_deployments",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_deployments",
+      "calls": 2,
+      "pairedResults": 2,
+      "pairedKnownResults": 2,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 2,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_github_repos_by_owner_by_repo",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_github_repos_by_owner_by_repo",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_github_repos_by_owner_by_repo_branches",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_github_repos_by_owner_by_repo_branches",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_github_repos_by_owner_by_repo_detect",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_github_repos_by_owner_by_repo_detect",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_github_status",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_github_status",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_issues",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_issues",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_projects",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_projects",
+      "calls": 2,
+      "pairedResults": 2,
+      "pairedKnownResults": 2,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 2,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_projects_by_id",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_projects_by_id",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_projects_by_id_incidents",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_projects_by_id_incidents",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_projects_by_id_info",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_projects_by_id_info",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_projects_by_id_pending_actions",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_projects_by_id_pending_actions",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_projects_by_id_resources",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_projects_by_id_resources",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_projects_by_id_services",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_projects_by_id_services",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_projects_by_id_services_containers",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_projects_by_id_services_containers",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__get_settings",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__get_settings",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__openship__post_projects",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__openship__post_projects",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "ExecuteExtraTool→mcp__plugin_hindsight-memory_hindsight__agent_knowledge_list_pages",
+      "outerName": "ExecuteExtraTool",
+      "effectiveName": "mcp__plugin_hindsight-memory_hindsight__agent_knowledge_list_pages",
+      "calls": 1,
+      "pairedResults": 1,
+      "pairedKnownResults": 1,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 1,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "SearchExtraTools",
+      "outerName": "SearchExtraTools",
+      "effectiveName": "SearchExtraTools",
+      "calls": 34,
+      "pairedResults": 34,
+      "pairedKnownResults": 34,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 25,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    },
+    {
+      "label": "TodoWrite",
+      "outerName": "TodoWrite",
+      "effectiveName": "TodoWrite",
+      "calls": 1006,
+      "pairedResults": 1006,
+      "pairedKnownResults": 1006,
+      "errors": 0,
+      "unknownErrors": 0,
+      "calledThreads": 96,
+      "errorAffectedThreads": 0,
+      "errorRate": 0
+    }
+  ],
+  "result_bytes": {
+    "count": 19891,
+    "giantCount": 1,
+    "p50": 631,
+    "p95": 10035,
+    "errorBytes": 93680
+  },
+  "candidates": [
+    {
+      "ruleId": "explicit-failure",
+      "evidenceKind": "candidate",
+      "counts": 28,
+      "denominator": 19891,
+      "evidence": {
+        "entries": [
+          {
+            "threadId": "01a05fb3-1aaa-7aa0-af14-26ccd444eb92",
+            "messageId": "01a05fc9-b93c-74c1-985e-64354be17a64",
+            "callId": "tool_118e3d17-068b-4f37-bf30-7df0ceb81f8"
+          },
+          {
+            "threadId": "01a05fd0-c143-7813-b7dc-79d65fdffdae",
+            "messageId": "01a05fef-d434-7a41-b1e1-f6db90b93462",
+            "callId": "tool_5da940c7-3613-4a0d-bd1e-1afe1ea8eca"
+          },
+          {
+            "threadId": "01a0600b-70a3-79a3-80d7-1db56cd6e63a",
+            "messageId": "01a06010-8f4a-7d80-9b5f-fe46caf03cfd",
+            "callId": "tool_c576007e-7a19-48d8-a86a-1ba28144c7c"
+          },
+          {
+            "threadId": "01a060aa-7bdf-7c13-9002-c05d2673c43d",
+            "messageId": "01a060ce-aad5-7e42-aca8-20678c8c0bf3",
+            "callId": "tool_6249ddef-300b-43ff-b16e-866f5ea172e"
+          },
+          {
+            "threadId": "01a060ca-6af4-7df1-82c4-0b4060f3f3e3",
+            "messageId": "01a060d6-fc97-7750-9fad-27f37e213ada",
+            "callId": "tool_03905aae-eef4-43e6-8d7a-c218651845d"
+          },
+          {
+            "threadId": "01a060e1-38d0-7a12-a6e3-bdbdd12ac5f6",
+            "messageId": "01a06537-45f4-7410-8737-43e81e9ec4a5",
+            "callId": "tool_1ffebd22-a13f-4cfa-8888-d8b9b9bca43"
+          },
+          {
+            "threadId": "01a060fd-efe9-7b83-9854-4b83f52c17d8",
+            "messageId": "01a06120-bb44-7d83-baa0-a43db5e4ed5f",
+            "callId": "call_43ZTfYa9BJjgOLrrfwy5OIGw"
+          },
+          {
+            "threadId": "01a06a64-bef0-7f40-a119-9f27987b86ca",
+            "messageId": "01a06a7d-27fe-7b90-86ac-1398dcf5307d",
+            "callId": "call_uwpLiULaJJ1FBiOI2IStQw8p"
+          }
+        ]
+      },
+      "nextVerification": "Inspect both failed results and the next user or assistant message before attributing a strategy defect."
+    },
+    {
+      "ruleId": "repeated-call",
+      "evidenceKind": "candidate",
+      "counts": 2,
+      "denominator": 19891,
+      "evidence": {
+        "entries": [
+          {
+            "threadId": "01a084d2-9b15-7162-8cf8-61724378efff",
+            "messageId": "01a084d8-1c8b-70e3-8a0a-5936645f0fa7",
+            "callId": "call_J90BQW3EGVM8i7n6UGm5bpEK"
+          },
+          {
+            "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+            "messageId": "01a09303-556c-7760-af8a-d11eb43bbcf4",
+            "callId": "call_486b2d98f4584cc7ab71fa91c846f014"
+          }
+        ]
+      },
+      "nextVerification": "Read the triggering thread's preceding and following messages to distinguish polling from no-progress repetition."
+    },
+    {
+      "ruleId": "large-tool-output",
+      "evidenceKind": "observation",
+      "counts": 1,
+      "denominator": 19891,
+      "evidence": {
+        "entries": [
+          {
+            "threadId": "01a07e87-74c5-7491-b028-0c57ee14e408",
+            "messageId": "01a07e89-751e-7192-bee7-372640371692",
+            "callId": "call_sgJh0Jo8j9E8Vm5E99KELYUB"
+          }
+        ]
+      },
+      "nextVerification": "Inspect the cited result in its surrounding conversation before drawing a conclusion."
+    }
+  ],
+  "rules": [
+    {
+      "id": "pairing-quality",
+      "kind": "quality",
+      "threshold": "paired results / normalized tool calls; known result state / paired results",
+      "numerator": 19891,
+      "denominator": 19891,
+      "rate": 1,
+      "evidence_ids": [],
+      "next_verification": "Inspect missing and orphan result evidence before using error rates for behavior claims."
+    },
+    {
+      "id": "known-result-state",
+      "kind": "quality",
+      "threshold": "paired results with explicit success or error state / paired results",
+      "numerator": 19891,
+      "denominator": 19891,
+      "rate": 1,
+      "evidence_ids": [],
+      "next_verification": "Review unknown result states and source serialization before treating error rates as complete."
+    },
+    {
+      "id": "explicit-failure",
+      "kind": "candidate",
+      "threshold": "the same labeled tool produces at least 2 consecutive explicit errors within a thread",
+      "numerator": 28,
+      "denominator": 19891,
+      "rate": 0.0014076718113719773,
+      "evidence_ids": [
+        {
+          "threadId": "01a05fb3-1aaa-7aa0-af14-26ccd444eb92",
+          "messageId": "01a05fc9-b93c-74c1-985e-64354be17a64",
+          "callId": "tool_118e3d17-068b-4f37-bf30-7df0ceb81f8"
+        },
+        {
+          "threadId": "01a05fd0-c143-7813-b7dc-79d65fdffdae",
+          "messageId": "01a05fef-d434-7a41-b1e1-f6db90b93462",
+          "callId": "tool_5da940c7-3613-4a0d-bd1e-1afe1ea8eca"
+        },
+        {
+          "threadId": "01a0600b-70a3-79a3-80d7-1db56cd6e63a",
+          "messageId": "01a06010-8f4a-7d80-9b5f-fe46caf03cfd",
+          "callId": "tool_c576007e-7a19-48d8-a86a-1ba28144c7c"
+        },
+        {
+          "threadId": "01a060aa-7bdf-7c13-9002-c05d2673c43d",
+          "messageId": "01a060ce-aad5-7e42-aca8-20678c8c0bf3",
+          "callId": "tool_6249ddef-300b-43ff-b16e-866f5ea172e"
+        },
+        {
+          "threadId": "01a060ca-6af4-7df1-82c4-0b4060f3f3e3",
+          "messageId": "01a060d6-fc97-7750-9fad-27f37e213ada",
+          "callId": "tool_03905aae-eef4-43e6-8d7a-c218651845d"
+        },
+        {
+          "threadId": "01a060e1-38d0-7a12-a6e3-bdbdd12ac5f6",
+          "messageId": "01a06537-45f4-7410-8737-43e81e9ec4a5",
+          "callId": "tool_1ffebd22-a13f-4cfa-8888-d8b9b9bca43"
+        },
+        {
+          "threadId": "01a060fd-efe9-7b83-9854-4b83f52c17d8",
+          "messageId": "01a06120-bb44-7d83-baa0-a43db5e4ed5f",
+          "callId": "call_43ZTfYa9BJjgOLrrfwy5OIGw"
+        },
+        {
+          "threadId": "01a06a64-bef0-7f40-a119-9f27987b86ca",
+          "messageId": "01a06a7d-27fe-7b90-86ac-1398dcf5307d",
+          "callId": "call_uwpLiULaJJ1FBiOI2IStQw8p"
+        }
+      ],
+      "next_verification": "Inspect both failed results and the next user or assistant message before attributing a strategy defect."
+    },
+    {
+      "id": "repeated-call",
+      "kind": "candidate",
+      "threshold": "same canonical call and arguments occur at least 3 times consecutively within a thread",
+      "numerator": 2,
+      "denominator": 19891,
+      "rate": 0.00010054798652656981,
+      "evidence_ids": [
+        {
+          "threadId": "01a084d2-9b15-7162-8cf8-61724378efff",
+          "messageId": "01a084d8-1c8b-70e3-8a0a-5936645f0fa7",
+          "callId": "call_J90BQW3EGVM8i7n6UGm5bpEK"
+        },
+        {
+          "threadId": "01a0906e-2489-7702-8198-87eee6bcce6e",
+          "messageId": "01a09303-556c-7760-af8a-d11eb43bbcf4",
+          "callId": "call_486b2d98f4584cc7ab71fa91c846f014"
+        }
+      ],
+      "next_verification": "Read the triggering thread's preceding and following messages to distinguish polling from no-progress repetition."
+    },
+    {
+      "id": "large-tool-output",
+      "kind": "observation",
+      "threshold": "UTF-8 result content is at least 100000 bytes",
+      "numerator": 1,
+      "denominator": 19891,
+      "rate": 0.000050273993263284905,
+      "evidence_ids": [
+        {
+          "threadId": "01a07e87-74c5-7491-b028-0c57ee14e408",
+          "messageId": "01a07e89-751e-7192-bee7-372640371692",
+          "callId": "call_sgJh0Jo8j9E8Vm5E99KELYUB"
+        }
+      ],
+      "next_verification": "Inspect the cited result in its surrounding conversation before drawing a conclusion."
+    }
+  ],
+  "capabilities": {
+    "tool_errors": {
+      "status": "available",
+      "reason": "paired normalized tool results with explicit error state"
+    },
+    "repeated_calls": {
+      "status": "available",
+      "reason": "same labeled tool and stable canonical arguments within a thread"
+    },
+    "result_bytes": {
+      "status": "available",
+      "reason": "UTF-8 byte counts from normalized tool results"
+    },
+    "token_usage": {
+      "status": "unavailable",
+      "reason": "no stable token source in the analysis contract"
+    },
+    "latency": {
+      "status": "unavailable",
+      "reason": "persisted event timestamps are not a stable execution duration source"
+    },
+    "completion": {
+      "status": "unavailable",
+      "reason": "completion requires an explicit outcome label or human evidence"
+    }
+  }
+}

@@ -10,6 +10,56 @@ test("inspect CLI rejects missing and unknown arguments", () => {
   expect(() => parseCliArgs(["inspect", "--db", "/tmp/x"])).toThrow("required");
   expect(() => parseCliArgs(["inspect", "--db", "/tmp/x", "--out", "/tmp/y", "--bad", "x"])).toThrow("unknown");
   expect(() => parseCliArgs(["inspect", "--db", "/tmp/no-such-peri-db", "--out", "/tmp/y"])).toThrow("does not exist");
+  expect(() => parseCliArgs(["inspect", "--db", "/tmp/x", "--out", "/tmp/y", "--scope", "roots"])).toThrow("unknown");
+});
+
+test("report emits filtered metrics, rules, and bounded evidence", () => {
+  const root = mkdtempSync(join(tmpdir(), "peri-report-"));
+  const dbPath = join(root, "threads.db");
+  const outDir = join(root, "out");
+  const db = new Database(dbPath);
+  db.exec(`
+    CREATE TABLE threads (
+      id TEXT PRIMARY KEY, title TEXT, cwd TEXT, created_at TEXT, updated_at TEXT,
+      message_count INTEGER, parent_thread_id TEXT, hidden INTEGER DEFAULT 0
+    );
+    CREATE TABLE messages (
+      message_id TEXT PRIMARY KEY, thread_id TEXT, role TEXT, content TEXT,
+      excluded INTEGER DEFAULT 0, truncated INTEGER DEFAULT 0, projection TEXT
+    );
+  `);
+  const addThread = db.query("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  addThread.run("root", "root", "/private/project", "2026-01-01T00:00:00Z", "2026-01-01T00:00:01Z", 3, null, 0);
+  addThread.run("child", "child", "/private/project", "2026-01-03T00:00:00Z", "2026-01-03T00:00:01Z", 2, "root", 1);
+  const addMessage = db.query("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
+  addMessage.run("m1", "root", "assistant", JSON.stringify({ role: "assistant", content: [{ type: "tool_use", id: "c1", name: "Read", input: { secret: "raw-argument" } }] }), 0, 0, null);
+  addMessage.run("m2", "root", "tool", JSON.stringify({ role: "tool", tool_call_id: "c1", content: "é".repeat(10), is_error: true }), 0, 0, null);
+  addMessage.run("m3", "root", "user", JSON.stringify({ role: "user", content: "continue" }), 0, 0, null);
+  addMessage.run("m4", "child", "assistant", JSON.stringify({ role: "assistant", content: [{ type: "tool_use", id: "c2", name: "Hidden", input: {} }] }), 0, 0, null);
+  addMessage.run("m5", "child", "tool", JSON.stringify({ role: "tool", tool_call_id: "c2", content: "hidden", is_error: false }), 0, 0, null);
+  db.close();
+
+  run(["report", "--db", dbPath, "--out", outDir, "--scope", "roots", "--since", "2026-01-01T00:00:00Z", "--until", "2026-01-02T00:00:00Z"]);
+  const json = readFileSync(join(outDir, "report.json"), "utf8");
+  const report = JSON.parse(json);
+  expect(report.schema_version).toBe("report.v1");
+  expect(report.filters).toEqual({ scope: "roots", includeHidden: false, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z" });
+  expect(report.totals.threads).toBe(1);
+  expect(report.totals.explicitErrors).toBe(1);
+  expect(report.top_tool_errors[0].label).toBe("Read");
+  expect(report.top_tool_errors[0].errorAffectedThreads).toBe(1);
+  expect(report.all_tools.map((tool: { label: string }) => tool.label)).toContain("Read");
+  expect(report.result_bytes.p50).toBeGreaterThan(0);
+  expect(report.capabilities.token_usage.status).toBe("unavailable");
+  expect(json).not.toContain("raw-argument");
+  expect(json).not.toContain("/private/project");
+
+  const emptyOut = join(root, "empty");
+  run(["report", "--db", dbPath, "--out", emptyOut, "--scope", "roots", "--since", "2027-01-01T00:00:00Z"]);
+  const empty = JSON.parse(readFileSync(join(emptyOut, "report.json"), "utf8"));
+  expect(empty.totals.threads).toBe(0);
+  expect(empty.result_bytes.p50).toBeNull();
+  expect(empty.pairing.pairing_rate).toBeNull();
 });
 
 test("inspect reports an incompatible schema without reading raw data", () => {

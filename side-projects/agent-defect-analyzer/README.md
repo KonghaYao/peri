@@ -12,9 +12,16 @@ Peri 会话数据的只读分析项目。它的目标是把可复核的观测转
 cd side-projects/agent-defect-analyzer
 bun install --frozen-lockfile
 bun run inspect --db ~/.peri/threads/threads.db --out output/quality
+bun run report --db ~/.peri/threads/threads.db --out output/behavior
+# 指定会话创建窗口，UTC 半开区间
+bun run report --db ~/.peri/threads/threads.db --since 2026-09-01T00:00:00Z --until 2026-09-13T00:00:00Z --out output/recent
 ```
 
 报告默认不含对话正文、工具参数和文件路径。异常证据保留会话与消息 ID，便于在本机复核。`output/` 是被忽略的本地产物目录。缺失能力、未知格式和解析错误必须查看，不能只读总数。
+
+`report` 输出 `report.json` 与 `report.md`，默认分析可见主会话自己持久化的历史。可选 `--scope roots|children|all`、`--include-hidden`；子会话通常隐藏，分析子会话时显式加 `--include-hidden`。时间筛选依据会话创建时间，纳入该会话的全部持久化消息，不能解释为窗口内发生的工具事件。
+
+错误率的分母是已配对且明确记录成功/错误状态的结果。重复调用与连续失败规则输出达到阈值的候选位置数，不能解释为已经确认的缺陷数量。JSON 包含有界的 `threadId/messageId/callId` 证据与 `nextVerification`；按证据复核后再创建修复任务。
 
 当前可运行的项目检查：
 
@@ -38,7 +45,7 @@ bun test
 | `timeline_study.ts`、`ultracode_prompts.ts` | 移除硬编码/一次性研究入口 | `report` 或历史化 |
 | `optimization_chart.ts`、`tool_token_chart.ts`、`tool_token_charts.ts` | 移除硬编码图表生成器 | 统一报告产物（阶段 2） |
 
-当前提供 `inspect`。`report` 是下一阶段的行为指标入口，`compare`、`sample`、`evidence` 随后接入。
+当前提供 `inspect` 和 `report`。`compare`、`sample`、`evidence` 随后接入。
 
 ## 历史产物
 

@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "inspect": "bun run src/cli.ts inspect",
+    "report": "bun run src/cli.ts report",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
