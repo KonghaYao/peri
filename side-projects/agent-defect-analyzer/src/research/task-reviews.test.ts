@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { reviewTaskFiles, TaskReviewInputError } from "./task-reviews.js";
-import { computeTaskPacketHash } from "./task-packets.js";
+import { computeTaskPacketHash, exportTaskPacket } from "./task-packets.js";
 import type { TaskPacket, TaskPacketBundle } from "./task-reviews.js";
 
 function packet(includeContent = true, caseId = "case-1"): TaskPacket {
@@ -25,14 +26,27 @@ function filesForPackets(sources: TaskPacket[], reviews: unknown): [string, stri
     medium: { range: "21..100", candidateCount: 0, selectedCount: 0, candidateIds: [], selectedIds: [], ...empty, rangeHash: "x" },
     long: { range: ">100", candidateCount: 0, selectedCount: 0, candidateIds: [], selectedIds: [], ...empty, rangeHash: "x" },
   };
-  const bundle: TaskPacketBundle = { schemaVersion: 1, rubricVersion: "task-effectiveness-v1", sampling: { seed: "x", perStratum: 1, scope: "roots", includeHidden: false, since: null, until: null, strata, noOwnMessages: 0, source: { normalizer: "x", schemaIdentity: "x", snapshot: "readonly-transaction" } }, packets: sources };
+  const bundle: TaskPacketBundle = { schemaVersion: 2, rubricVersion: "task-effectiveness-v1", sampling: { seed: "x", perStratum: 1, scope: "roots", includeHidden: false, since: null, until: null, strata, noOwnMessages: 0, source: { normalizer: "x", schemaIdentity: "x", snapshot: "readonly-transaction" } }, packets: sources };
   const reviewFile = join(dir, "reviews.json");
   const packetFile = join(dir, "packets.json");
   writeFileSync(packetFile, JSON.stringify(bundle));
-  writeFileSync(reviewFile, JSON.stringify({ schemaVersion: 1, rubricVersion: "task-effectiveness-v1", reviews }));
+  writeFileSync(reviewFile, JSON.stringify({ schemaVersion: 2, rubricVersion: "task-effectiveness-v1", reviews }));
   return [packetFile, reviewFile];
 }
 function review(p: TaskPacket, overrides: Record<string, unknown> = {}): Record<string, unknown> { const dimension = (value: string) => ({ value, evidenceMessageIds: value === "unknown" ? [] : ["a1"], reason: "evidence" }); return { reviewerId: "r1", model: "m", caseId: p.caseId, packetHash: p.packetHash, requestMessageIds: ["u1"], endMessageId: "a1", taskSummary: "task", acceptanceCriteria: ["done"], taskType: "coding", outcome: dimension("delivered"), verification: dimension("direct"), constraints: dimension("supported"), feedback: dimension("none_observed"), strategy: dimension("effective"), limitations: [], promptSignals: [], ...overrides }; }
+function unknownReview(p: TaskPacket, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const unknown = { value: "unknown", evidenceMessageIds: [], reason: "execution metadata alone cannot establish task outcome" };
+  return review(p, { requestMessageIds: ["request"], endMessageId: "capture-message", taskType: "coding", outcome: unknown, verification: unknown, constraints: unknown, feedback: unknown, strategy: unknown, ...overrides });
+}
+function realMetadataPacket(): TaskPacket {
+  const capture = JSON.parse(readFileSync(join(import.meta.dir, "../../reports/2026-09-13-peri-repairs/execution-evidence/rust-bash-failure-capture.json"), "utf8"))[0];
+  const dir = mkdtempSync(join(tmpdir(), "task-review-real-capture-")); const path = join(dir, "threads.db"); const db = new Database(path);
+  db.exec("CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT,cwd TEXT,created_at TEXT,updated_at TEXT,message_count INTEGER,parent_thread_id TEXT,hidden INTEGER DEFAULT 0); CREATE TABLE messages(message_id TEXT PRIMARY KEY,thread_id TEXT,role TEXT,content TEXT,truncated INTEGER DEFAULT 0,excluded INTEGER DEFAULT 0,projection TEXT);");
+  db.query("INSERT INTO threads VALUES(?,?,?,?,?,?,?,?)").run("capture", "capture", "/tmp", "2026-09-13T00:00:00Z", "2026-09-13T00:00:01Z", 2, null, 0);
+  db.query("INSERT INTO messages VALUES(?,?,?,?,?,?,?)").run("request", "capture", "user", JSON.stringify({ role: "user", content: "run the command" }), 0, 0, null);
+  db.query("INSERT INTO messages VALUES(?,?,?,?,?,?,?)").run("capture-message", "capture", "tool", JSON.stringify(capture), 0, 0, null); db.close();
+  return exportTaskPacket(path, "capture");
+}
 
 test("validates hash, derives strong, and reports strata", () => { const p = packet(); const [packets, reviews] = files([review(p)]); const report = reviewTaskFiles(packets, reviews); expect(report.reviews[0]?.derivedGroup).toBe("strong"); expect(report.overall.caseCount).toBe(1); expect(report.strata.candidates.short).toBe(1); });
 test("aggregates reviewer groups per case and keeps pairwise comparison units explicit", () => {
@@ -101,3 +115,51 @@ test("rejects determinate, bounded, or signaled empty anchors", () => {
 
 test("rejects evidence after the observation boundary", () => { const p = packet(); const r = review(p, { outcome: { value: "delivered", evidenceMessageIds: ["a1"], reason: "after boundary" }, endMessageId: "u1" }); const [packets, reviews] = files([r], p); expect(() => reviewTaskFiles(packets, reviews)).toThrow("after endMessageId"); });
 test("metadata packets cannot assert determinate labels", () => { const p = packet(false); const [packets, reviews] = files([review(p)], p); expect(() => reviewTaskFiles(packets, reviews)).toThrow("metadata packet"); });
+
+test("rejects malformed external execution facts before semantic review", () => {
+  const p = packet();
+  p.messages[1]!.results = [{ id: "c1", source: "message", isError: "false" as never, execution: { status: "completed", exitCode: 0, hasOutputRef: false, outputTruncated: false, hasTaskId: false, source: "typed" } }];
+  p.packetHash = computeTaskPacketHash(p);
+  const [packets, reviews] = files([review(p)], p);
+  expect(() => reviewTaskFiles(packets, reviews)).toThrow("invalid isError");
+});
+
+test("rejects legacy packets that claim a known execution status", () => {
+  const p = packet();
+  p.messages[1]!.results = [{ id: "c1", source: "message", isError: false, execution: { status: "completed", exitCode: 0, hasOutputRef: false, outputTruncated: false, hasTaskId: false, source: "legacy" } }];
+  p.packetHash = computeTaskPacketHash(p);
+  const [packets, reviews] = files([review(p)], p);
+  expect(() => reviewTaskFiles(packets, reviews)).toThrow("legacy execution");
+});
+
+test("requires schema 2 re-export for legacy packet inputs", () => {
+  const p = packet(); const [packets, reviews] = files([review(p)], p);
+  const bundle = JSON.parse(readFileSync(packets, "utf8")) as { schemaVersion: number };
+  bundle.schemaVersion = 1; writeFileSync(packets, JSON.stringify(bundle));
+  expect(() => reviewTaskFiles(packets, reviews)).toThrow("re-export packets with schema 2");
+});
+
+test("accepts real default metadata packets with hidden refs only when review remains unknown", () => {
+  const p = realMetadataPacket();
+  expect(p.coverage.includeContent).toBe(false);
+  expect(p.messages[1]?.results[0]?.execution.hasOutputRef).toBe(true);
+  expect(p.messages[1]?.results[0]?.execution.outputRef).toBeUndefined();
+  const [packets, reviews] = files([unknownReview(p)], p);
+  expect(reviewTaskFiles(packets, reviews).reviews[0]?.derivedGroup).toBe("unknown");
+});
+
+test("metadata raw refs, determinate labels, and content flag mismatches are rejected", () => {
+  const metadata = realMetadataPacket();
+  const result = metadata.messages[1]!.results[0]!;
+  (result.execution as Record<string, unknown>).outputRef = "/tmp/leak";
+  (result.execution as Record<string, unknown>).taskId = "task-leak";
+  metadata.packetHash = computeTaskPacketHash(metadata);
+  const [metadataPackets, metadataReviews] = files([unknownReview(metadata)], metadata);
+  expect(() => reviewTaskFiles(metadataPackets, metadataReviews)).toThrow("metadata packet cannot carry raw execution references");
+  const determinate = realMetadataPacket();
+  const [determinatePackets, determinateReviews] = files([unknownReview(determinate, { outcome: { value: "delivered", evidenceMessageIds: ["capture-message"], reason: "claimed" } })], determinate);
+  expect(() => reviewTaskFiles(determinatePackets, determinateReviews)).toThrow("metadata packet");
+  const content = packet(true); content.messages[1]!.results = [{ id: "c1", source: "message", isError: false, execution: { status: "completed", exitCode: 0, hasOutputRef: true, outputTruncated: false, hasTaskId: true, source: "typed" } }]; content.packetHash = computeTaskPacketHash(content);
+  const [contentPackets, contentReviews] = files([review(content)], content);
+  expect(() => reviewTaskFiles(contentPackets, contentReviews)).toThrow("flag is inconsistent");
+});

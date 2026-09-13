@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import { DataLoader, DEFAULT_DB_PATH, NORMALIZER_VERSION } from "../data/loader.js";
 import { validateThreadFilter, type ValidatedThreadFilter } from "../data/filters.js";
-import type { NormalizedMessage, ThreadSummary, ToolCall, ToolResult } from "../data/types.js";
+import { projectExecution, type ExecutionProjection, type NormalizedMessage, type ThreadSummary, type ToolCall, type ToolResult } from "../data/types.js";
 
 const MAX_RADIUS = 20;
 const MAX_CONTENT_BYTES = 64 * 1024;
@@ -34,7 +34,7 @@ export interface SourceIdentity {
   fingerprint: Fingerprint;
 }
 export interface ToolCallEvidence { id: string; name: string; source: string; arguments?: string; argumentsTruncated?: boolean; }
-export interface ToolResultEvidence { id: string; source: string; isError: boolean | null; content?: string; contentTruncated?: boolean; }
+export interface ToolResultEvidence { id: string; source: string; isError: boolean | null; execution: ExecutionProjection; content?: string; contentTruncated?: boolean; }
 export interface EvidenceRecord {
   messageId: string; threadId: string; sequence: number; role: string; origin: string;
   excludedFromContext: boolean; truncated: boolean; isSummary: boolean; parseIssues: string[];
@@ -121,7 +121,7 @@ function threadMetadata(thread: ThreadSummary): unknown {
 }
 
 function sourceFields(call: ToolCall): ToolCallEvidence { return { id: call.id, name: call.name, source: call.sources.join(",") }; }
-function resultFields(result: ToolResult): ToolResultEvidence { return { id: result.id, source: result.sources.join(","), isError: result.isError }; }
+function resultFields(result: ToolResult, includeContent = false): ToolResultEvidence { return { id: result.id, source: result.sources.join(","), isError: result.isError, execution: projectExecution(result.execution, includeContent) }; }
 
 /** Truncate on Unicode code-point boundaries, so output never exceeds maxBytes. */
 function truncateUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
@@ -139,7 +139,7 @@ function truncateUtf8(value: string, maxBytes: number): { value: string; truncat
 
 function recordOf(message: NormalizedMessage, includeContent: boolean): EvidenceRecord {
   const calls = message.calls.map(sourceFields);
-  const results = message.results.map(resultFields);
+  const results = message.results.map((result) => resultFields(result));
   const record: EvidenceRecord = { messageId: message.messageId, threadId: message.threadId, sequence: message.sequence, role: message.role, origin: message.origin, excludedFromContext: message.excludedFromContext, truncated: message.truncated, isSummary: message.isSummary, parseIssues: [...message.parseIssues], calls, results };
   if (includeContent) {
     const text = truncateUtf8(message.text, MAX_FIELD_BYTES);
@@ -153,7 +153,7 @@ function recordOf(message: NormalizedMessage, includeContent: boolean): Evidence
       }),
       results: message.results.map((result) => {
         const content = truncateUtf8(result.content, MAX_FIELD_BYTES);
-        return { ...resultFields(result), content: content.value, contentTruncated: content.truncated };
+        return { ...resultFields(result, true), content: content.value, contentTruncated: content.truncated };
       }),
     };
   }

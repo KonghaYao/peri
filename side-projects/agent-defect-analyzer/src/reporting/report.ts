@@ -117,6 +117,7 @@ function buildReport(analysis: AnalysisReport): ReportDto {
       token_usage: { status: "unavailable", reason: "no stable token source in the analysis contract" },
       latency: { status: "unavailable", reason: "persisted event timestamps are not a stable execution duration source" },
       completion: { status: "unavailable", reason: "completion requires an explicit outcome label or human evidence" },
+      execution_evidence: { status: "available", reason: "typed execution metadata is counted separately from is_error tool-call errors; missing legacy metadata remains unknown" },
     },
   };
 }
@@ -157,6 +158,13 @@ export function renderReportMarkdown(report: ReportDto): string {
     "- threads=" + report.totals.threads + ", messages=" + report.totals.messages + ", calls=" + report.totals.calls,
     "- explicit_errors=" + report.totals.explicitErrors + ", unknown_error_results=" +
       report.totals.unknownErrorResults + ", parse_issues=" + report.totals.parseIssues, "",
+    ...(report.totals.execution ? [
+      "## Execution evidence", "",
+      "- typed=" + report.totals.execution.typedCount + "/" + report.totals.execution.resultCount +
+        " (" + percent(report.totals.execution.coverage) + "), known statuses=" + report.totals.execution.knownCount,
+      "- statuses=" + JSON.stringify(report.totals.execution.statusCounts) + ", output_refs=" +
+        report.totals.execution.outputRefCount + ", truncated_outputs=" + report.totals.execution.outputTruncatedCount, "",
+    ] : []),
     "## Top tool errors", "",
     "| tool | errors | affected threads | known result denominator | error rate |",
     "| --- | ---: | ---: | ---: | ---: |", topErrors, "",

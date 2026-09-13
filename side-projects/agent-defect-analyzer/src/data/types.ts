@@ -44,11 +44,57 @@ export interface ToolCall {
   sources: Array<"content" | "tool_calls">;
 }
 
+export type ToolExecutionStatus =
+  | "unknown"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "timed_out"
+  | "running"
+  | "running_after_timeout";
+
+/** Durable execution facts. This is independent from the bounded result text. */
+export interface ToolExecutionEvidence {
+  status: ToolExecutionStatus;
+  exitCode: number | null;
+  outputRef: string | null;
+  outputTruncated: boolean;
+  taskId: string | null;
+  source: "typed" | "legacy";
+}
+
+/** Narrow, privacy-aware projection shared by evidence and task packet exports. */
+export interface ExecutionProjection {
+  status: ToolExecutionStatus;
+  exitCode: number | null;
+  hasOutputRef: boolean;
+  outputTruncated: boolean;
+  hasTaskId: boolean;
+  source: ToolExecutionEvidence["source"];
+  outputRef?: string;
+  taskId?: string;
+}
+
+export function projectExecution(evidence: ToolExecutionEvidence, includeContent: boolean): ExecutionProjection {
+  return {
+    status: evidence.status,
+    exitCode: evidence.exitCode,
+    hasOutputRef: evidence.outputRef !== null,
+    outputTruncated: evidence.outputTruncated,
+    hasTaskId: evidence.taskId !== null,
+    source: evidence.source,
+    ...(includeContent && evidence.outputRef !== null ? { outputRef: evidence.outputRef } : {}),
+    ...(includeContent && evidence.taskId !== null ? { taskId: evidence.taskId } : {}),
+  };
+}
+
 export interface ToolResult {
   id: string;
   content: string;
   /** null means the persisted payload did not state success or failure. */
   isError: boolean | null;
+  /** Missing legacy metadata is retained explicitly as unknown. */
+  execution: ToolExecutionEvidence;
   source: "content" | "message";
   sources: Array<"content" | "message">;
 }

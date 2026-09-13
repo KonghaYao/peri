@@ -1,0 +1,193 @@
+{
+  "purpose": "Read-only compatibility inspection of the local persisted history; not task-success or repair-effect measurement",
+  "command": "bun run inspect --db <local Peri threads.db> --out output/peri-repairs-2026-09-13/final-legacy-quality",
+  "exitCode": 0,
+  "normalizerVersion": "peri-normalizer-v3",
+  "loaderSha256": "63c1e5981d95515516d08b40f9e2a40b3b00ce854f46b08b8f3de4c946cb9d5c",
+  "qualityArtifactSha256": "1505fd4b9da9d25b3d5beb4b2193be26e7aac6c4ba2f99c7a8f6436215d64fe7",
+  "source": {
+    "snapshot_fingerprint": "sha256:c6710fef10e4fb99486c7e69210c2ff45ca0c945ede2c795113afebb83edca32",
+    "generated_at": "2026-09-13T15:06:04.290Z",
+    "schema_user_version": 3,
+    "tables": [
+      "execution_runs",
+      "messages",
+      "projects",
+      "session_bindings",
+      "thread_goals",
+      "threads",
+      "workspaces"
+    ],
+    "optional_missing": {
+      "threads": [],
+      "messages": []
+    },
+    "time_range": {
+      "created_min": "2026-06-05T12:58:04.409637+00:00",
+      "updated_max": "2026-09-13T00:28:33.896041+00:00"
+    }
+  },
+  "scope": {
+    "threads": {
+      "total": 10909,
+      "roots": 4586,
+      "children": 6323,
+      "hidden": 6323
+    },
+    "messages": {
+      "total": 564115,
+      "own": 564115,
+      "inherited": 0,
+      "orphan_rows": 0,
+      "snapshot_inherited": 1617,
+      "snapshot_inherited_errors": 0,
+      "by_role": {
+        "user": 23349,
+        "assistant": 223353,
+        "tool": 315266,
+        "system": 2010,
+        "system_reminder": 137
+      },
+      "count_mismatch_threads": 0,
+      "count_mismatch_messages": 0
+    }
+  },
+  "parsing": {
+    "json_ok": 564115,
+    "json_fail": 0,
+    "empty_content": 0,
+    "role_mismatch": 0,
+    "unknown_role": 0,
+    "normalization_issues": {
+      "conflictingToolCall": 14,
+      "tool_call_missing_id_or_name": 5,
+      "tool_message_missing_id": 5
+    }
+  },
+  "pairing": {
+    "paired_results": 315257,
+    "orphan_results": 4,
+    "unmatched_uses": 1
+  },
+  "checks": [
+    {
+      "id": "schema.required_tables",
+      "status": "pass",
+      "numerator": 2,
+      "denominator": 2,
+      "rate": 1,
+      "unit": "tables",
+      "scope": "full",
+      "definition": "required threads and messages tables exist"
+    },
+    {
+      "id": "schema.required_columns",
+      "status": "pass",
+      "numerator": 10,
+      "denominator": 10,
+      "rate": 1,
+      "unit": "columns",
+      "scope": "full",
+      "definition": "loader contract columns are present"
+    },
+    {
+      "id": "messages.parse_fail",
+      "status": "pass",
+      "numerator": 0,
+      "denominator": 564115,
+      "rate": 0,
+      "unit": "messages",
+      "scope": "full",
+      "definition": "message content is valid JSON object"
+    },
+    {
+      "id": "messages.normalization_issues",
+      "status": "warn",
+      "numerator": 24,
+      "denominator": 564115,
+      "rate": 4.254451663224697e-05,
+      "unit": "issues",
+      "scope": "full",
+      "definition": "normalized payload has no observable schema/format issues",
+      "reason": "{\"conflictingToolCall\":14,\"tool_call_missing_id_or_name\":5,\"tool_message_missing_id\":5}"
+    },
+    {
+      "id": "messages.count_reconciliation",
+      "status": "pass",
+      "numerator": 0,
+      "denominator": 10909,
+      "rate": 0,
+      "unit": "threads",
+      "scope": "full",
+      "definition": "threads.message_count equals persisted message rows"
+    },
+    {
+      "id": "messages.orphan_rows",
+      "status": "pass",
+      "numerator": 0,
+      "denominator": 564115,
+      "rate": 0,
+      "unit": "messages",
+      "scope": "full",
+      "definition": "every persisted message references a known thread"
+    },
+    {
+      "id": "messages.snapshot_inherited",
+      "status": "pass",
+      "numerator": 0,
+      "denominator": 10909,
+      "rate": 0,
+      "unit": "threads",
+      "scope": "full",
+      "definition": "inherited_context payloads normalize without errors"
+    },
+    {
+      "id": "tool_results.pairing",
+      "status": "warn",
+      "numerator": 315257,
+      "denominator": 315261,
+      "rate": 0.9999873121001329,
+      "unit": "tool_results",
+      "scope": "full",
+      "definition": "tool results pair by thread and tool call ID",
+      "reason": "orphans=4; unmatched_uses=1"
+    },
+    {
+      "id": "format.dual_write",
+      "status": "warn",
+      "numerator": 113729,
+      "denominator": 223353,
+      "rate": 0.5091894892837795,
+      "unit": "assistant_messages",
+      "scope": "full",
+      "definition": "normalized duplicate call IDs identify content/top-level dual writes"
+    },
+    {
+      "id": "format.ambiguous_tool_use",
+      "status": "warn",
+      "numerator": 5,
+      "denominator": 315263,
+      "rate": 1.58597742202542e-05,
+      "unit": "tool_uses",
+      "scope": "full",
+      "definition": "tool uses have stable IDs and names"
+    },
+    {
+      "id": "messages.role_contract",
+      "status": "pass",
+      "numerator": 0,
+      "denominator": 564115,
+      "rate": 0,
+      "unit": "messages",
+      "scope": "full",
+      "definition": "stored role agrees with normalized payload and known roles",
+      "reason": "role_mismatch=0; unknown_role=0"
+    }
+  ],
+  "limits": [
+    "Full local database across projects and dates, including hidden child sessions; not the earlier 48-root research sample.",
+    "Command exit 0 does not mean every quality check passed; normalization and pairing warnings remain.",
+    "This inspection does not measure execution-metadata coverage or task completion."
+  ],
+  "recheck": "Rerun after final loader fixes; scope/parsing/pairing agree with the earlier read-only inspection."
+}

@@ -20,7 +20,7 @@ function fixture(): string {
   const m = db.query("INSERT INTO messages VALUES (?,?,?,?,?,?,?)");
   m.run("u", "root-a", "user", JSON.stringify({ role: "user", content: "private text" }), 0, 0, null);
   m.run("a", "root-a", "assistant", JSON.stringify({ role: "assistant", content: [{ type: "tool_use", id: "call-a", name: "Read", input: { path: "x".repeat(100000) } }] }), 0, 0, null);
-  m.run("r", "root-a", "tool", JSON.stringify({ role: "tool", tool_call_id: "call-a", content: "x".repeat(100000), is_error: false }), 0, 0, null);
+  m.run("r", "root-a", "tool", JSON.stringify({ role: "tool", tool_call_id: "call-a", content: "x".repeat(100000), is_error: false, execution: { status: "completed", exit_code: 0, output_ref: "/tmp/private-output", output_truncated: true, task_id: "task-1" } }), 0, 0, null);
   db.close(); return path;
 }
 
@@ -47,6 +47,10 @@ test("message evidence defaults to metadata and never crosses the thread", () =>
   const result = evidenceForMessage(path, { threadId: "root-a", messageId: "a", radius: 1 });
   expect(result.records.map((record) => record.messageId)).toEqual(["u", "a", "r"]);
   expect(result.records.every((record) => record.content === undefined)).toBe(true);
+  const resultFacts = result.records.find((record) => record.messageId === "r")?.results[0]?.execution;
+  expect(resultFacts?.hasOutputRef).toBe(true);
+  expect(resultFacts?.outputRef).toBeUndefined();
+  expect(resultFacts?.taskId).toBeUndefined();
   expect(JSON.stringify(result)).not.toContain("secret");
   expect(() => evidenceForMessage(path, { threadId: "child", messageId: "a" })).toThrow(EvidenceNotFoundError);
 });
@@ -57,6 +61,7 @@ test("content evidence is bounded and reports truncation", () => {
   expect(result.truncated).toBe(true);
   expect(result.records[0]?.content).toBeDefined();
   expect(result.records[0]?.content?.results[0]?.contentTruncated).toBe(true);
+  expect(result.records[0]?.content?.results[0]?.execution.outputRef).toBe("/tmp/private-output");
 
   const call = evidenceForMessage(fixture(), { threadId: "root-a", messageId: "a", radius: 0, includeContent: true });
   expect(call.records[0]?.content?.calls[0]?.argumentsTruncated).toBe(true);

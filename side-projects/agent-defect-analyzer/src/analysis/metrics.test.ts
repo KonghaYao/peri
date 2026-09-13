@@ -67,6 +67,34 @@ test("root analysis pairs per thread, separates wrappers, and bounds candidates"
   expect(repeated?.evidence.entries).toHaveLength(1);
 });
 
+test("counts execution coverage and statuses separately from isError error rates", () => {
+  const path = makeDb(); const db = new Database(path);
+  db.query("UPDATE messages SET content=? WHERE message_id='r1'").run(JSON.stringify({ role: "tool", tool_call_id: "c1", content: "failed", is_error: true, execution: { status: "failed", exit_code: 9, output_truncated: false } }));
+  db.close();
+  const report = analyzeDatabase(path);
+  expect(report.totals.execution?.resultCount).toBe(5);
+  expect(report.totals.execution?.typedCount).toBe(1);
+  expect(report.totals.execution?.knownCount).toBe(1);
+  expect(report.totals.execution?.coverage).toBeCloseTo(1 / 5);
+  expect(report.totals.execution?.statusCounts.failed).toBe(1);
+  // Existing tool error rate remains based on explicit is_error and known results.
+  expect(report.tools.Read.errorRate).toBeCloseTo(2 / 3);
+});
+
+test("malformed and double-written execution metadata stays unknown in metric status counts", () => {
+  const path = makeDb(); const db = new Database(path);
+  db.query("UPDATE messages SET content=? WHERE message_id='r1'").run(JSON.stringify({ role: "tool", tool_call_id: "c1", content: "failed", is_error: false, execution: { status: "completed", exit_code: 7 } }));
+  db.query("INSERT INTO messages VALUES (?,?,?,?,?,?,?)").run("conflict-result", "root", "tool", JSON.stringify({ role: "tool", tool_call_id: "c2", content: [{ type: "tool_result", tool_use_id: "c2", content: "ok", execution: { status: "completed", exit_code: 0 } }], execution: { status: "failed", exit_code: 2 } }), 0, 0, null);
+  db.query("INSERT INTO messages VALUES (?,?,?,?,?,?,?)").run("conflict-call", "root", "assistant", JSON.stringify({ role: "assistant", content: [{ type: "tool_use", id: "c2", name: "Conflict", input: {} }] }), 0, 0, null);
+  db.close();
+  const report = analyzeDatabase(path);
+  expect(report.parseIssues.conflictingExecutionExitCode).toBe(1);
+  expect(report.parseIssues.conflictingExecutionMetadata).toBe(1);
+  expect(report.totals.execution?.knownCount).toBe(0);
+  expect(report.totals.execution?.statusCounts.unknown).toBe(6);
+  expect(report.totals.execution?.statusCounts.completed).toBe(0);
+});
+
 test("long consecutive runs contribute one threshold event", () => {
   const path = makeDb();
   const before = analyzeDatabase(path);

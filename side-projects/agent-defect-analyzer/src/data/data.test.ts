@@ -22,6 +22,47 @@ test("normalizes Anthropic and OpenAI dual writes once, retaining unknown error"
   expect(result.results[0]?.isError).toBeNull();
 });
 
+test("retains typed execution evidence and never upgrades a string-shaped header", () => {
+  const typed = normalizeMessage(row({ role: "tool", tool_call_id: "c1", content: "exit 0", is_error: false, execution: {
+    status: "completed", exit_code: 0, output_ref: "/tmp/full-output", output_truncated: true, task_id: "task-1",
+  } }, "tool"));
+  expect(typed.results[0]?.execution).toEqual({ status: "completed", exitCode: 0, outputRef: "/tmp/full-output", outputTruncated: true, taskId: "task-1", source: "typed" });
+  const legacy = normalizeMessage(row({ role: "tool", tool_call_id: "c2", content: "[execution] status=completed exit_code=0", is_error: false }, "tool"));
+  expect(legacy.results[0]?.execution.status).toBe("unknown");
+  expect(legacy.results[0]?.execution.source).toBe("legacy");
+});
+
+test("keeps illegal and contradictory execution metadata observable", () => {
+  const message = normalizeMessage(row({ role: "tool", tool_call_id: "c1", content: "failed", is_error: false, execution: {
+    status: "failed", exit_code: "0", output_truncated: "yes", task_id: 4, extra: true,
+  } }, "tool"));
+  expect(message.results[0]?.execution.status).toBe("unknown");
+  expect(message.parseIssues).toEqual(expect.arrayContaining([
+    "invalidExecutionExitCode", "invalidExecutionOutputTruncated", "invalidExecutionTaskId", "unknownExecutionField:extra", "conflictingExecutionErrorFlag",
+  ]));
+});
+
+test("normalizes bash terminal lifecycle statuses without inferring from exit text", () => {
+  const cases = [
+    ["completed", 0, false], ["failed", 2, true], ["running", null, false], ["cancelled", null, true],
+  ] as const;
+  for (const [status, exitCode, isError] of cases) {
+    const message = normalizeMessage(row({ role: "tool", tool_call_id: status, content: `exit_code=${exitCode ?? "?"}`, is_error: isError, execution: { status, exit_code: exitCode } }, "tool"));
+    expect(message.results[0]?.execution.status).toBe(status);
+    expect(message.parseIssues).toEqual([]);
+  }
+  const legacy = normalizeMessage(row({ role: "tool", tool_call_id: "legacy", content: "process exited with code 0" }, "tool"));
+  expect(legacy.results[0]?.execution.status).toBe("unknown");
+});
+
+test("rejects contradictory execution facts from dual persisted representations", () => {
+  const message = normalizeMessage(row({ role: "tool", tool_call_id: "c1", content: [
+    { type: "tool_result", tool_use_id: "c1", content: "ok", is_error: false, execution: { status: "completed", exit_code: 0 } },
+  ], execution: { status: "failed", exit_code: 3 }, is_error: true }, "tool"));
+  expect(message.results[0]?.execution.status).toBe("unknown");
+  expect(message.parseIssues).toContain("conflictingExecutionMetadata:c1");
+});
+
 test("treats reordered JSON object keys as the same dual write", () => {
   const message = normalizeMessage(row({
     role: "assistant",

@@ -30,11 +30,11 @@ Peri 运行数据的离线分析归 `side-projects/agent-defect-analyzer/`，本
 | 运行离线分析命令 | `agent-defect-analyzer/src/cli.ts`：`parseCliArgs`、`run` |
 | 探测 SQLite 契约、读取并归一化消息 | `agent-defect-analyzer/src/data/loader.ts`：`DataLoader`、`normalizeMessage` |
 | 检查数据质量与观测缺口 | `agent-defect-analyzer/src/reporting/quality.ts`：`inspectDatabase` |
-| 工具配对、错误、重复调用和输出体积 | `agent-defect-analyzer/src/analysis/metrics.ts`：`analyzeDatabase` |
+| 工具配对、`is_error` 工具错误、执行证据覆盖/状态、重复调用和输出体积 | `agent-defect-analyzer/src/analysis/metrics.ts`：`analyzeDatabase`；执行证据由 `src/data/loader.ts` 归一化 |
 | 生成统计与候选报告 | `agent-defect-analyzer/src/reporting/report.ts`：`reportDatabase` |
 | 校验口径并比较两个报告 | `agent-defect-analyzer/src/reporting/compare.ts`：`compareReportFiles`、`compareReports` |
-| 确定性抽样与有限上下文回查 | `agent-defect-analyzer/src/research/evidence.ts`：`sampleThreads`、`evidenceForMessage` |
-| 分层抽样、带正文指纹的任务事实包 | `agent-defect-analyzer/src/research/task-packets.ts`：`sampleTaskPackets`、`exportTaskPacket`、`computeTaskPacketHash` |
+| 确定性抽样与有限上下文回查（含共享脱敏 execution projection） | `agent-defect-analyzer/src/research/evidence.ts`：`sampleThreads`、`evidenceForMessage` |
+| 分层抽样、带正文指纹的任务事实包 schema 2（含独立 execution facts） | `agent-defect-analyzer/src/research/task-packets.ts`：`sampleTaskPackets`、`exportTaskPacket`、`computeTaskPacketHash` |
 | 校验任务评审、保留分歧并按 case 汇总 | `agent-defect-analyzer/src/research/task-reviews.ts`：`reviewTaskFiles`、`writeTaskReviewReport` |
 | 查看本地会话与工具记录 | `peri-db-viewer/src/server.ts`：`startServer`；`src/app.ts`：`createApp` |
 | 查询 API 与共享解析适配 | `peri-db-viewer/src/routes/api.ts`：`registerApiRoutes`；`src/data_adapter.ts`：`ViewerDataAdapter` |

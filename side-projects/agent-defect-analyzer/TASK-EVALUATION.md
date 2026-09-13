@@ -36,7 +36,13 @@
 
 包中的消息保持持久化顺序。保存自有 user/assistant、工具请求与结果及完整 ID；截断标明字段和消息遗漏，保留首尾并说明中间缺口，不能伪装成连续轨迹。源记录已有 truncated/summary/parseIssues 时一并保留。子会话关系仅提供定位，父任务与子任务的归属需额外证据，不递归倾倒所有子会话。
 
+工具结果的执行证据沿独立字段导出，不从正文推断：`status` 缺失或旧消息无 metadata 时为 `unknown`，`exit_code`、`output_truncated`、`task_id` 和 `output_ref` 的非法/矛盾值在源消息的 `parseIssues` 中保留。任务包默认只保留 `hasOutputRef`、`hasTaskId` 与其他脱敏事实，避免泄露本地路径或原始任务 ID；只有明确加入 `--include-content` 才导出 `output_ref`/`task_id`，且不会自动打开或读取引用文件。执行状态计数与现有工具调用 `is_error` 错误率分开，前者不能解释为任务验收或测试通过。
+
+execution facts 纳入任务包 schema 2 的必需 contract。schema 1 packet 或 review 会被拒绝；需要重新导出 packet、重新绑定 packet hash 并重新评审，不能把旧 hash 当作兼容输入。
+
 当前归一化 `text` 拼接内容块的文本，未保留可核验的用户可见 channel。它可提供持久化内容证据，但不能仅据此判定 UI 泄露思考过程、用户看到了某段内部叙述或回答的显示形式。交付标签限定在现有记录支持的范围；界面可见性另需生产协议/渲染证据。
+
+PTC 嵌套调用在当前持久化格式中没有独立 canonical transcript；分析器只能报告实际持久化的外层消息与其中的 typed execution facts，不能声称恢复从未持久化的嵌套调用、参数或结果。
 
 评审 sidecar 独立于事实包，至少包含：
 

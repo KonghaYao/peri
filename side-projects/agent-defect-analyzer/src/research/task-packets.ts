@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { DataLoader, DEFAULT_DB_PATH, NORMALIZER_VERSION } from "../data/loader.js";
 import { validateThreadFilter, type ValidatedThreadFilter } from "../data/filters.js";
-import type { NormalizedMessage, ThreadSummary, ToolCall, ToolResult } from "../data/types.js";
+import { projectExecution, type NormalizedMessage, type ThreadSummary, type ToolCall, type ToolResult } from "../data/types.js";
 
-export const TASK_PACKET_SCHEMA_VERSION = 1 as const;
+export const TASK_PACKET_SCHEMA_VERSION = 2 as const;
 export const TASK_PACKET_RUBRIC_VERSION = "task-effectiveness-v1" as const;
 export const TASK_PACKET_MAX_BYTES = 128 * 1024;
 export const TASK_PACKET_MAX_MESSAGES = 160;
@@ -15,7 +15,17 @@ export type TaskStratum = "short" | "medium" | "long";
 export interface TaskPacketMessage {
   messageId: string; threadId: string; sequence: number; role: string; origin: "own" | "inherited";
   calls: Array<{ id: string; name: string; source: string; arguments?: unknown; argumentsTruncated?: boolean }>;
-  results: Array<{ id: string; source: string; isError: boolean | null; content?: string; contentTruncated?: boolean }>;
+  results: Array<{
+    id: string; source: string; isError: boolean | null;
+    execution: {
+      status: ToolResult["execution"]["status"]; exitCode: number | null; hasOutputRef: boolean;
+      outputTruncated: boolean; hasTaskId: boolean; source: ToolResult["execution"]["source"];
+      taskId?: string;
+      /** Local references are exported only after the caller explicitly opts into content. */
+      outputRef?: string;
+    };
+    content?: string; contentTruncated?: boolean;
+  }>;
   truncated: boolean; isSummary: boolean; parseIssues: string[];
   text?: string; exportTruncated?: boolean; omittedFields?: string[];
 }
@@ -32,7 +42,7 @@ export interface TaskPacket {
   thread?: { createdAt: string; updatedAt: string; title: string | null; messageCount: number; hidden: boolean };
 }
 export interface TaskPacketBundle {
-  schemaVersion: 1; rubricVersion: "task-effectiveness-v1";
+  schemaVersion: 2; rubricVersion: "task-effectiveness-v1";
   sampling: {
     seed: string; perStratum: number; scope: "roots" | "children" | "all"; includeHidden: boolean;
     since: string | null; until: string | null;
@@ -61,7 +71,10 @@ function stratum(count: number): TaskStratum | "none" { return count < 1 ? "none
 function seedNumber(seed: string): number { let n = 2166136261; for (const b of new TextEncoder().encode(seed)) n = Math.imul(n ^ b, 16777619); return n >>> 0; }
 function shuffle<T>(items: T[], seed: string): T[] { let state = seedNumber(seed) || 1; const out = [...items]; for (let i = out.length - 1; i > 0; i--) { state = Math.imul(state ^ (state >>> 16), 2246822519) >>> 0; state = Math.imul(state ^ (state >>> 13), 3266489917) >>> 0; const j = state % (i + 1); [out[i], out[j]] = [out[j], out[i]]; } return out; }
 function callRecord(call: ToolCall, includeContent: boolean): TaskPacketMessage["calls"][number] { return { id: call.id, name: call.name, source: call.sources.join(","), ...(includeContent ? { arguments: call.arguments } : {}) }; }
-function resultRecord(result: ToolResult, includeContent: boolean): TaskPacketMessage["results"][number] { return { id: result.id, source: result.sources.join(","), isError: result.isError, ...(includeContent ? { content: result.content } : {}) }; }
+function resultRecord(result: ToolResult, includeContent: boolean): TaskPacketMessage["results"][number] {
+  const execution = projectExecution(result.execution, includeContent) as TaskPacketMessage["results"][number]["execution"];
+  return { id: result.id, source: result.sources.join(","), isError: result.isError, execution, ...(includeContent ? { content: result.content } : {}) };
+}
 function messageRecord(message: NormalizedMessage, includeContent: boolean): TaskPacketMessage {
   const record: TaskPacketMessage = { messageId: message.messageId, threadId: message.threadId, sequence: message.sequence, role: message.role, origin: message.origin, calls: message.calls.map((c) => callRecord(c, includeContent)), results: message.results.map((r) => resultRecord(r, includeContent)), truncated: message.truncated, isSummary: message.isSummary, parseIssues: [...message.parseIssues] };
   if (includeContent) record.text = message.text;

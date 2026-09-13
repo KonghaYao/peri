@@ -3,11 +3,11 @@
 import { Database } from "bun:sqlite";
 import { homedir } from "os";
 import { join } from "path";
-import type { MessageRow, NormalizedMessage, SchemaCapabilities, ThreadRow, ThreadSummary, ToolCall, ToolResult } from "./types.js";
+import type { MessageRow, NormalizedMessage, SchemaCapabilities, ThreadRow, ThreadSummary, ToolCall, ToolExecutionEvidence, ToolExecutionStatus, ToolResult } from "./types.js";
 export * from "./types.js";
 
 export const DEFAULT_DB_PATH = join(homedir(), ".peri/threads/threads.db");
-export const NORMALIZER_VERSION = "peri-normalizer-v2";
+export const NORMALIZER_VERSION = "peri-normalizer-v3";
 const REQUIRED: Record<string, string[]> = {
   threads: ["id", "title", "cwd", "created_at", "updated_at", "message_count"],
   messages: ["message_id", "thread_id", "role", "content"],
@@ -32,6 +32,71 @@ const obj = (v: unknown): Obj | null => v !== null && typeof v === "object" && !
 const str = (v: unknown): string | null => typeof v === "string" ? v : null;
 const bool = (v: unknown): boolean | null => typeof v === "boolean" ? v : v === 1 ? true : v === 0 ? false : null;
 const text = (v: unknown): string => typeof v === "string" ? v : Array.isArray(v) ? v.map((x) => typeof obj(x)?.text === "string" ? obj(x)!.text as string : "").join("") : "";
+const EXECUTION_STATUSES: ReadonlySet<string> = new Set(["unknown", "completed", "failed", "cancelled", "timed_out", "running", "running_after_timeout"]);
+
+function unknownExecution(source: "typed" | "legacy" = "legacy"): ToolExecutionEvidence {
+  return { status: "unknown", exitCode: null, outputRef: null, outputTruncated: false, taskId: null, source };
+}
+
+function executionEqual(left: ToolExecutionEvidence, right: ToolExecutionEvidence): boolean {
+  return left.status === right.status && left.exitCode === right.exitCode && left.outputRef === right.outputRef &&
+    left.outputTruncated === right.outputTruncated && left.taskId === right.taskId;
+}
+
+/** Parse only the persisted typed `execution` object; result text is never a source of execution facts. */
+function parseExecution(payload: Obj, issues: string[], isError: boolean | null, invalidIds: Set<string>, id: string): ToolExecutionEvidence {
+  if (!("execution" in payload) || payload.execution === null) return unknownExecution();
+  const raw = obj(payload.execution);
+  if (!raw) { issues.push("invalidExecutionMetadata"); invalidIds.add(id); return unknownExecution("typed"); }
+  const unknownFields = Object.keys(raw).filter((key) => !["status", "exit_code", "output_ref", "output_truncated", "task_id"].includes(key));
+  for (const key of unknownFields) issues.push(`unknownExecutionField:${key}`);
+  const status = str(raw.status);
+  if (!status || !EXECUTION_STATUSES.has(status)) { issues.push("invalidExecutionStatus"); invalidIds.add(id); return unknownExecution("typed"); }
+  let invalid = false;
+  const exitCodeValue = raw.exit_code;
+  let exitCode: number | null = null;
+  if (exitCodeValue !== undefined && exitCodeValue !== null) {
+    if (typeof exitCodeValue !== "number" || !Number.isInteger(exitCodeValue) || exitCodeValue < -2147483648 || exitCodeValue > 2147483647) { issues.push("invalidExecutionExitCode"); invalid = true; }
+    else exitCode = exitCodeValue;
+  }
+  const outputRefValue = raw.output_ref;
+  let outputRef: string | null = null;
+  if (outputRefValue !== undefined && outputRefValue !== null) {
+    if (typeof outputRefValue !== "string") { issues.push("invalidExecutionOutputRef"); invalid = true; }
+    else outputRef = outputRefValue;
+  }
+  const truncatedValue = raw.output_truncated;
+  let outputTruncated = false;
+  if (truncatedValue !== undefined) {
+    if (typeof truncatedValue !== "boolean") { issues.push("invalidExecutionOutputTruncated"); invalid = true; }
+    else outputTruncated = truncatedValue;
+  }
+  const taskIdValue = raw.task_id;
+  let taskId: string | null = null;
+  if (taskIdValue !== undefined && taskIdValue !== null) {
+    if (typeof taskIdValue !== "string") { issues.push("invalidExecutionTaskId"); invalid = true; }
+    else taskId = taskIdValue;
+  }
+  // Rust's ToolResult::from_output marks `running` as is_error=false; the
+  // terminal promotion state remains an error-like running_after_timeout.
+  const errorStatus = ["failed", "cancelled", "timed_out", "running_after_timeout"].includes(status);
+  if (isError !== null && status !== "unknown" && errorStatus !== isError) { issues.push("conflictingExecutionErrorFlag"); invalid = true; }
+  // Current producers leave exit_code empty for non-terminal lifecycle states.
+  if ((status === "completed" && exitCode !== null && exitCode !== 0) || (status === "failed" && exitCode === 0) ||
+    (["cancelled", "timed_out", "running", "running_after_timeout"].includes(status) && exitCode !== null)) {
+    issues.push("conflictingExecutionExitCode"); invalid = true;
+  }
+  if (invalid) { invalidIds.add(id); return unknownExecution("typed"); }
+  return { status: status as ToolExecutionStatus, exitCode, outputRef, outputTruncated, taskId, source: "typed" };
+}
+
+function mergeExecution(existing: ToolExecutionEvidence, incoming: ToolExecutionEvidence, issues: string[], invalidIds: Set<string>, id: string): ToolExecutionEvidence {
+  if (invalidIds.has(id)) return unknownExecution("typed");
+  if (existing.source === "legacy" && incoming.source === "typed") return incoming;
+  if (existing.source === "typed" && incoming.source === "legacy") return existing;
+  if (!executionEqual(existing, incoming)) { issues.push(`conflictingExecutionMetadata:${id}`); invalidIds.add(id); return unknownExecution("typed"); }
+  return existing;
+}
 
 function sameJson(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
@@ -79,6 +144,7 @@ export function normalizeMessage(row: MessageRow, origin: "own" | "inherited" = 
   }
   catch { issues.push("invalidJson"); }
   const calls: ToolCall[] = [], results: ToolResult[] = [];
+  const invalidExecutionIds = new Set<string>();
   const callIds = new Set<string>(), resultIds = new Set<string>();
   const blocks = Array.isArray(p?.content) ? p!.content : [];
   for (const raw of blocks) {
@@ -95,12 +161,14 @@ export function normalizeMessage(row: MessageRow, origin: "own" | "inherited" = 
     } else if (b.type === "tool_result") {
       const id = str(b.tool_use_id) ?? str(b.tool_call_id); if (!id) { issues.push("tool_result_missing_id"); continue; }
       const existing = results.find((result) => result.id === id);
+      const execution = parseExecution(b, issues, bool(b.is_error), invalidExecutionIds, id);
       if (existing) {
         addSource(existing.sources, "content");
+        existing.execution = mergeExecution(existing.execution, execution, issues, invalidExecutionIds, id);
         if (existing.content !== text(b.content) || existing.isError !== bool(b.is_error)) issues.push(`conflictingToolResult:${id}`);
         continue;
       }
-      resultIds.add(id); results.push({ id, content: text(b.content), isError: bool(b.is_error), source: "content", sources: ["content"] });
+      resultIds.add(id); results.push({ id, content: text(b.content), isError: bool(b.is_error), execution, source: "content", sources: ["content"] });
     }
   }
   if (Array.isArray(p?.tool_calls)) for (const raw of p!.tool_calls as unknown[]) {
@@ -119,14 +187,17 @@ export function normalizeMessage(row: MessageRow, origin: "own" | "inherited" = 
   if (row.role === "tool") {
     const id = str(p?.tool_call_id) ?? str(p?.tool_use_id);
     const existing = id ? results.find((result) => result.id === id) : undefined;
+    const execution = parseExecution(p ?? {}, issues, bool(p?.is_error), invalidExecutionIds, id ?? "");
     if (id && existing) {
       addSource(existing.sources, "message");
+      existing.execution = mergeExecution(existing.execution, execution, issues, invalidExecutionIds, id);
       if (existing.content !== text(p?.content) || existing.isError !== bool(p?.is_error)) issues.push(`conflictingToolResult:${id}`);
     } else if (id) {
-      resultIds.add(id); results.push({ id, content: text(p?.content), isError: bool(p?.is_error), source: "message", sources: ["message"] });
+      resultIds.add(id); results.push({ id, content: text(p?.content), isError: bool(p?.is_error), execution, source: "message", sources: ["message"] });
     }
     else if (!id) issues.push("tool_message_missing_id");
   }
+  for (const result of results) if (invalidExecutionIds.has(result.id)) result.execution = unknownExecution("typed");
   const payloadRole = str(p?.role);
   if (payloadRole && payloadRole !== row.role) issues.push("role_mismatch");
   return {

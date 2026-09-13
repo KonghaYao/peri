@@ -3,7 +3,7 @@ import { join } from "path";
 import { computeTaskPacketHash } from "./task-packets.js";
 import type { TaskPacket as SourceTaskPacket, TaskPacketBundle as SourceTaskPacketBundle } from "./task-packets.js";
 
-export const TASK_REVIEW_SCHEMA_VERSION = 1;
+export const TASK_REVIEW_SCHEMA_VERSION = 2;
 export const TASK_REVIEW_RUBRIC_VERSION = "task-effectiveness-v1";
 
 export type Dimension = "outcome" | "verification" | "constraints" | "feedback" | "strategy";
@@ -41,6 +41,8 @@ export interface TaskReviewReport {
 }
 
 export class TaskReviewInputError extends Error {}
+
+const EXECUTION_STATUSES = new Set(["unknown", "completed", "failed", "cancelled", "timed_out", "running", "running_after_timeout"]);
 
 const ENUMS: Record<Dimension, readonly string[]> = {
   outcome: ["delivered", "partial", "not_delivered", "blocked", "unknown"],
@@ -84,6 +86,30 @@ function validateReview(raw: unknown, packet: TaskPacket): TaskReview {
     if (message.origin !== "own" && message.origin !== "inherited") throw new TaskReviewInputError("packet message origin is invalid");
     if (!Number.isInteger(message.sequence) || message.sequence <= previousSequence) throw new TaskReviewInputError("packet message sequence is not strictly increasing");
     previousSequence = message.sequence;
+    if (!Array.isArray(message.results)) throw new TaskReviewInputError(`messages[${index}].results must be an array`);
+    for (const [resultIndex, result] of message.results.entries()) {
+      if (typeof result.isError !== "boolean" && result.isError !== null) throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] has invalid isError`);
+      const execution = result.execution as unknown as Record<string, unknown> | undefined;
+      if (!execution || typeof execution !== "object" || Array.isArray(execution)) throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] is missing execution facts`);
+      if (typeof execution.status !== "string" || !EXECUTION_STATUSES.has(execution.status)) throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] has invalid execution status`);
+      if (typeof execution.exitCode !== "number" && execution.exitCode !== null || (typeof execution.exitCode === "number" && (!Number.isInteger(execution.exitCode) || execution.exitCode < -2147483648 || execution.exitCode > 2147483647))) throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] has invalid execution exitCode`);
+      if (typeof execution.hasOutputRef !== "boolean" || typeof execution.outputTruncated !== "boolean") throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] has invalid execution flags`);
+      if (typeof execution.hasTaskId !== "boolean") throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] has invalid execution taskId flag`);
+      if (execution.source !== "typed" && execution.source !== "legacy") throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] has invalid execution source`);
+      if (execution.source === "legacy" && execution.status !== "unknown") throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] legacy execution cannot claim a known status`);
+      if (execution.source === "legacy" && (execution.exitCode !== null || execution.outputTruncated || execution.hasOutputRef || execution.hasTaskId || "outputRef" in execution || "taskId" in execution)) throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] legacy execution carries fabricated facts`);
+      const errorStatus = ["failed", "cancelled", "timed_out", "running_after_timeout"].includes(execution.status);
+      if (result.isError !== null && execution.status !== "unknown" && result.isError !== errorStatus) throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] execution status conflicts with isError`);
+      if ((execution.status === "completed" && execution.exitCode !== null && execution.exitCode !== 0) || (execution.status === "failed" && execution.exitCode === 0) || (["cancelled", "timed_out", "running", "running_after_timeout"].includes(execution.status) && execution.exitCode !== null)) throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] execution status conflicts with exitCode`);
+      if (packet.coverage.includeContent) {
+        if ("taskId" in execution && typeof execution.taskId !== "string") throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] has invalid execution taskId`);
+        if (execution.hasTaskId !== ("taskId" in execution && typeof execution.taskId === "string")) throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] taskId flag is inconsistent`);
+        if ("outputRef" in execution && typeof execution.outputRef !== "string") throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] has invalid outputRef`);
+        if (execution.hasOutputRef !== ("outputRef" in execution && typeof execution.outputRef === "string")) throw new TaskReviewInputError(`messages[${index}].results[${resultIndex}] outputRef flag is inconsistent`);
+      } else {
+        if ("outputRef" in execution || "taskId" in execution) throw new TaskReviewInputError("metadata packet cannot carry raw execution references");
+      }
+    }
   }
   if (!Number.isInteger(packet.coverage.sourceMessageCount) || packet.coverage.sourceMessageCount < messages.length) throw new TaskReviewInputError("packet coverage sourceMessageCount is invalid");
   if (packet.coverage.omittedMessages !== packet.coverage.sourceMessageCount - messages.length) throw new TaskReviewInputError("packet coverage omittedMessages is inconsistent");
@@ -134,8 +160,8 @@ function validateReview(raw: unknown, packet: TaskPacket): TaskReview {
 export function reviewTaskFiles(packetsPath: string, reviewsPath: string): TaskReviewReport {
   const bundle = object(readJson(packetsPath), "packet bundle") as unknown as TaskPacketBundle;
   const input = object(readJson(reviewsPath), "review input") as unknown as TaskReviewInput;
-  if (bundle.schemaVersion !== 1 || bundle.rubricVersion !== TASK_REVIEW_RUBRIC_VERSION) throw new TaskReviewInputError("unsupported packet schema or rubric");
-  if (input.schemaVersion !== 1 || input.rubricVersion !== TASK_REVIEW_RUBRIC_VERSION) throw new TaskReviewInputError("unsupported review schema or rubric");
+  if (bundle.schemaVersion !== 2 || bundle.rubricVersion !== TASK_REVIEW_RUBRIC_VERSION) throw new TaskReviewInputError("unsupported packet schema or rubric; re-export packets with schema 2");
+  if (input.schemaVersion !== TASK_REVIEW_SCHEMA_VERSION || input.rubricVersion !== TASK_REVIEW_RUBRIC_VERSION) throw new TaskReviewInputError("unsupported review schema or rubric; re-run review with schema 2");
   const packets = array(bundle.packets, "packets") as TaskPacket[]; const packetByCase = new Map<string, TaskPacket>();
   for (const packet of packets) {
     const caseId = string(packet.caseId, "packet.caseId");
@@ -253,7 +279,7 @@ export function reviewTaskFiles(packetsPath: string, reviewsPath: string): TaskR
   }
   const promptSignals = reviews.flatMap((review) => review.promptSignals.map((signal) => ({ ...signal, caseId: review.caseId, reviewerId: review.reviewerId })));
   const strata = { candidates: {}, selected: {} } as { candidates: Record<string, number>; selected: Record<string, number> }; for (const [stratum, info] of Object.entries(bundle.sampling.strata)) { strata.candidates[stratum] = info.candidateCount; strata.selected[stratum] = info.selectedCount; }
-  return { schemaVersion: 1, rubricVersion: TASK_REVIEW_RUBRIC_VERSION, generatedAt: new Date().toISOString(), reviews, reviewDimensions, reviewLabelsByCase, caseDimensionDistribution, reviewGroupDistribution, caseGroupDistribution, cases, strata, overall: { caseCount: packets.length, reviewCount: reviews.length, candidateCount: Object.values(strata.candidates).reduce((a, b) => a + b, 0), selectedCount: packets.length, unknownDenominators: Object.fromEntries((Object.keys(reviewDimensions) as Dimension[]).map((d) => [d, reviewDimensions[d].unknown ?? 0])) }, promptSignals, validation: { rejectedReviews: 0, warnings } };
+  return { schemaVersion: TASK_REVIEW_SCHEMA_VERSION, rubricVersion: TASK_REVIEW_RUBRIC_VERSION, generatedAt: new Date().toISOString(), reviews, reviewDimensions, reviewLabelsByCase, caseDimensionDistribution, reviewGroupDistribution, caseGroupDistribution, cases, strata, overall: { caseCount: packets.length, reviewCount: reviews.length, candidateCount: Object.values(strata.candidates).reduce((a, b) => a + b, 0), selectedCount: packets.length, unknownDenominators: Object.fromEntries((Object.keys(reviewDimensions) as Dimension[]).map((d) => [d, reviewDimensions[d].unknown ?? 0])) }, promptSignals, validation: { rejectedReviews: 0, warnings } };
 }
 
 export function writeTaskReviewReport(report: TaskReviewReport, outDir: string): void {

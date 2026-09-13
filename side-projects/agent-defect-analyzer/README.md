@@ -30,6 +30,10 @@ bun run compare --baseline output/baseline/report.json --candidate output/candid
 
 `evidence` 按自有消息的 `--thread`、`--message` 定位，`--radius` 默认为 2、范围为 0–20。默认仅输出 metadata；`--include-content` 才输出正文、参数和结果。最终 JSON 最多 64 KiB，截断与省略通过标志和 `omissions` 明示；证据指纹覆盖窗口元数据。继承上下文可在 viewer 中阅读。
 
+工具结果的 `execution` 是独立的持久化事实：`status`、`exit_code`、`output_truncated`、`task_id` 和是否存在 `output_ref` 均按 typed metadata 读取。缺少旧 metadata 的结果保持 `unknown`；正文中的退出码、`is_error=false`、Agent 自报或退出码为 0 都不会被分析器升级为目标任务通过。非法或互相矛盾的 metadata 保留在 `parseIssues`。任务包默认只导出 `hasOutputRef`、`hasTaskId` 等脱敏事实，不导出本地 `output_ref` 或原始 `task_id`；`--include-content` 才允许导出这些引用，分析器也不会自动读取引用文件。正文被包大小限制截断时，execution facts 仍保留。
+
+任务事实包 schema 当前为 2，因为 execution facts 已成为 packet contract 的必需字段；schema 1 的旧 packet 和旧 review 不做旧 hash 兼容，必须重新导出并重新评审。
+
 任务有效性事实包使用实际自有消息数分为短（1–20）、中（21–100）和长（>100），默认每层固定抽取 4 个可见根会话；`--per-stratum` 可设为 1–10。默认只导出消息元数据，加入 `--include-content` 才导出正文、工具参数和结果文本。每个包最多 128 KiB、160 条消息，省略范围和源记录截断会明确记录。
 
 ```bash

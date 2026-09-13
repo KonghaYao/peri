@@ -1,9 +1,9 @@
 import { createHash } from "crypto";
 import { DataLoader, DEFAULT_DB_PATH, NORMALIZER_VERSION } from "../data/loader.js";
 import { validateThreadFilter } from "../data/filters.js";
-import type { NormalizedMessage, ThreadSummary, ToolCall, ToolResult } from "../data/types.js";
+import type { NormalizedMessage, ThreadSummary, ToolCall, ToolExecutionStatus } from "../data/types.js";
 
-export const METRICS_VERSION = "agent-metrics-v1";
+export const METRICS_VERSION = "agent-metrics-v2";
 
 export type AnalysisScope = "roots" | "children" | "all";
 export interface AnalysisOptions { scope?: AnalysisScope; includeHidden?: boolean; since?: string; until?: string; }
@@ -39,6 +39,10 @@ export interface AnalysisReport {
     missingResults: number; orphanResults: number; duplicateCallIds: number;
     duplicateResultIds: number; unknownErrorResults: number; explicitErrors: number;
     parseIssues: number;
+    execution?: {
+      resultCount: number; typedCount: number; knownCount: number; coverage: number | null;
+      statusCounts: Record<ToolExecutionStatus, number>; outputRefCount: number; outputTruncatedCount: number;
+    };
   };
   tools: Record<string, ToolMetric>;
   resultBytes: { count: number; giantCount: number; p50: number | null; p95: number | null; errorBytes: number };
@@ -90,6 +94,10 @@ function evidence(entries: EvidenceEntry[]): Evidence {
   return { entries: entries.slice(0, 8) };
 }
 
+function emptyExecutionStatusCounts(): Record<ToolExecutionStatus, number> {
+  return { unknown: 0, completed: 0, failed: 0, cancelled: 0, timed_out: 0, running: 0, running_after_timeout: 0 };
+}
+
 /** Analyze one immutable SQLite snapshot. This function never writes the source DB. */
 export function analyzeDatabase(dbPath: string = DEFAULT_DB_PATH, input: AnalysisOptions = {}): AnalysisReport {
   const validated = validateThreadFilter(input);
@@ -116,6 +124,9 @@ export function analyzeDatabase(dbPath: string = DEFAULT_DB_PATH, input: Analysi
       let messages = 0, calls = 0, pairedResults = 0, pairedKnownResults = 0, missingResults = 0;
       let orphanResults = 0, duplicateCallIds = 0, duplicateResultIds = 0;
       let unknownErrorResults = 0, explicitErrors = 0;
+      let executionResultCount = 0, typedExecutionCount = 0, knownExecutionCount = 0;
+      let executionOutputRefCount = 0, executionOutputTruncatedCount = 0;
+      const executionStatusCounts = emptyExecutionStatusCounts();
       let repeatKey: string | null = null;
       let repeatCount = 0;
       let failureStreak: { label: string; count: number; threadId: string; messageId: string; callId: string } | null = null;
@@ -182,6 +193,12 @@ export function analyzeDatabase(dbPath: string = DEFAULT_DB_PATH, input: Analysi
             else { seenCalls.add(call.id); pending.set(pairingKey, record); }
           }
           for (const result of message.results) {
+            executionResultCount++;
+            if (result.execution.source === "typed") typedExecutionCount++;
+            executionStatusCounts[result.execution.status]++;
+            if (result.execution.status !== "unknown") knownExecutionCount++;
+            if (result.execution.outputRef !== null) executionOutputRefCount++;
+            if (result.execution.outputTruncated) executionOutputTruncatedCount++;
             const resultSize = bytes(result.content);
             resultSizes.push(resultSize);
             if (result.isError === true) errorResultSizes.push(resultSize);
@@ -237,7 +254,17 @@ export function analyzeDatabase(dbPath: string = DEFAULT_DB_PATH, input: Analysi
         version: { normalizer: NORMALIZER_VERSION, metrics: METRICS_VERSION },
         source: { fingerprint },
         filters: { scope, includeHidden, since: validated.sinceText, until: validated.untilText },
-        totals: { threads: threads.length, messages, calls, pairedResults, pairedKnownResults, missingResults, orphanResults, duplicateCallIds, duplicateResultIds, unknownErrorResults, explicitErrors, parseIssues: Object.values(parsedIssues).reduce((sum, count) => sum + count, 0) },
+        totals: {
+          threads: threads.length, messages, calls, pairedResults, pairedKnownResults, missingResults, orphanResults,
+          duplicateCallIds, duplicateResultIds, unknownErrorResults, explicitErrors,
+          parseIssues: Object.values(parsedIssues).reduce((sum, count) => sum + count, 0),
+          execution: {
+            resultCount: executionResultCount, typedCount: typedExecutionCount, knownCount: knownExecutionCount,
+            coverage: executionResultCount === 0 ? null : typedExecutionCount / executionResultCount,
+            statusCounts: executionStatusCounts, outputRefCount: executionOutputRefCount,
+            outputTruncatedCount: executionOutputTruncatedCount,
+          },
+        },
         tools: Object.fromEntries([...metrics].map(([name, metric]) => [name, {
           label: metric.label,
           outerName: metric.outerName,
