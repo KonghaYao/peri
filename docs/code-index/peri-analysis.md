@@ -14,6 +14,9 @@ Peri 运行数据的离线分析归 `side-projects/agent-defect-analyzer/`，本
   标记被丢弃。继承消息与双写消息需防止重复统计。
 - 分析方法与复核边界见 [ANALYSIS.md](../../side-projects/agent-defect-analyzer/ANALYSIS.md)。
   报告输出改进候选，确认缺陷需回到源消息、当前代码和回归测试。
+- 可继承的研究方法由 [auto-data-researcher](../../.claude/skills/auto-data-researcher/SKILL.md)
+  维护。该目录是仓库内的维护源；会话若加载 `.agents/skills/auto-data-researcher/` 副本，
+  更新时同步对应文件并检查一致性，避免旧方法继续被加载。
 
 ## 入口
 

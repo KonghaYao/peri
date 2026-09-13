@@ -1,0 +1,15 @@
+{"record_id": "thread-a-call-1-1-top-level", "thread_id": "thread-a", "call_id": "call-1", "event": "call", "tool": "Shell", "arguments": {"command": "sleep 1"}, "sequence": 1, "origin": "own", "representation": "top-level"}
+{"record_id": "thread-a-call-1-1-content", "thread_id": "thread-a", "call_id": "call-1", "event": "call", "tool": "Shell", "arguments": {"command": "sleep 1"}, "sequence": 1, "origin": "own", "representation": "content"}
+{"record_id": "thread-a-call-1-2-result", "thread_id": "thread-a", "call_id": "call-1", "event": "result", "content": "completed", "sequence": 2, "origin": "own", "is_error": false}
+{"record_id": "thread-a-call-2-3-top-level", "thread_id": "thread-a", "call_id": "call-2", "event": "call", "tool": "Edit", "arguments": {"file": "fixture.txt"}, "sequence": 3, "origin": "own", "representation": "top-level"}
+{"record_id": "thread-a-call-2-4-result", "thread_id": "thread-a", "call_id": "call-2", "event": "result", "content": "requested text not found", "sequence": 4, "origin": "own", "is_error": true}
+{"record_id": "thread-a-call-3-5-top-level", "thread_id": "thread-a", "call_id": "call-3", "event": "call", "tool": "Read", "arguments": {"file": "fixture.txt"}, "sequence": 5, "origin": "own", "representation": "top-level"}
+{"record_id": "thread-a-call-3-6-result", "thread_id": "thread-a", "call_id": "call-3", "event": "result", "content": "file content", "sequence": 6, "origin": "own", "is_error": false}
+{"record_id": "thread-b-call-1-1-top-level", "thread_id": "thread-b", "call_id": "call-1", "event": "call", "tool": "Shell", "arguments": {"command": "echo check"}, "sequence": 1, "origin": "own", "representation": "top-level"}
+{"record_id": "thread-b-call-1-2-result", "thread_id": "thread-b", "call_id": "call-1", "event": "result", "content": "check", "sequence": 2, "origin": "own"}
+{"record_id": "thread-c-call-1-1-top-level", "thread_id": "thread-c", "call_id": "call-1", "event": "call", "tool": "Shell", "arguments": {"command": "sleep 1"}, "sequence": 1, "origin": "inherited", "representation": "top-level"}
+{"record_id": "thread-c-call-1-2-result", "thread_id": "thread-c", "call_id": "call-1", "event": "result", "content": "completed", "sequence": 2, "origin": "inherited", "is_error": false}
+{"record_id": "thread-c-call-4-3-top-level", "thread_id": "thread-c", "call_id": "call-4", "event": "call", "tool": "Agent", "arguments": {"task": "inspect fixture"}, "sequence": 3, "origin": "own", "representation": "top-level"}
+{"record_id": "thread-c-call-4-4-result", "thread_id": "thread-c", "call_id": "call-4", "event": "result", "content": "model stream interrupted", "sequence": 4, "origin": "own", "is_error": true}
+{"record_id": "thread-c-call-5-5-top-level", "thread_id": "thread-c", "call_id": "call-5", "event": "call", "tool": "Bash", "arguments": {"command": "pwd"}, "sequence": 5, "origin": "own", "representation": "top-level"}
+{"record_id": "thread-c-call-5-6-result", "thread_id": "thread-c", "call_id": "call-5", "event": "result", "content": "fixture-dir", "sequence": 6, "origin": "own", "is_error": false}

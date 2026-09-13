@@ -207,6 +207,8 @@ settings.json
 .claude/*
 !.claude/skills/
 .claude/skills/*
+!.claude/skills/auto-data-researcher/
+!.claude/skills/auto-data-researcher/**
 !.claude/skills/learn-from-history/**
 !.claude/skills/learn-from-history/
 !.claude/skills/start-devflow/**
