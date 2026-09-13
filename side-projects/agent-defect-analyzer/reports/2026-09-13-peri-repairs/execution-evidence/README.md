@@ -1,6 +1,6 @@
 # 执行证据：从真实命令到任务评价
 
-对应 `PERI-20260913-VERIFICATION-EVIDENCE`，原 issue 位于基线 commit `73df17f7`。当前实现进入最终独立复审，关闭和提交信息由总报告更新。
+对应 `PERI-20260913-VERIFICATION-EVIDENCE`，原 issue 位于基线 commit `73df17f7`。运行时与分析器均已通过目标验收，关闭与提交信息见总报告；分析器阶段 commit 为 `4d233f43`。
 
 ## 已观察到的链路结果
 
@@ -27,3 +27,9 @@
 分析器最终 `bun run typecheck` 与 `bun test` 均以 0 退出，57 个测试通过，0 失败，265 个断言；记录在 `analyzer-validation.json` 与对应原始测试输出。任务事实包和 review schema 升为 2；旧包及绑定它的评审应按当前 README/TASK-EVALUATION 重新导出并评审，不能只替换版本号或复用旧 hash。默认 metadata 包允许引用存在标记，但禁止原始引用和 task ID；缺正文的评审只允许未知结论。
 
 退出码 0 证明命令成功退出，尚需核对目标用例是否实际运行。完整输出引用当时可读不承诺以后仍存在；这轮数据也不证明历史缺失终态的任务通过或失败。
+
+## 运行时验收
+
+独立复审确认小预算优先保留完整状态，放不下状态时显式省略；回放从 typed facts 构造摘要，已有投影不重复追加。协调者在仅包含本阶段改动的干净提交快照中执行：生产 dispatch 场景 6 个、ToolOutput 契约 14 个、typed replay 2 个，全部通过。真实命令覆盖尾部失败、长输出成功、近上限持久化、live 投影、超时转后台、外层取消；测试中 canonical 消息经 serde 核对，只有失败样本额外导出供分析器贯穿验证。
+
+`runtime-validation.json` 记录快照文件 hash、命令与计数；对应原始输出保存在 `runtime-validation.txt`。格式、拼写、依赖方向检查在该快照通过，普通提交还会运行仓库原有编译与 Clippy 门禁。本轮为当前 macOS 运行验证，不声明其他平台或历史任务已获得相同证据。

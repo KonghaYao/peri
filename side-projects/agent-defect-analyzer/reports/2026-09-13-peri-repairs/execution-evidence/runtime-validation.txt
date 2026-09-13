@@ -1,0 +1,63 @@
+   Compiling peri-process v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-process)
+   Compiling peri-model v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-model)
+   Compiling peri-js-runtime v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-js-runtime)
+   Compiling peri-acp-types v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-acp-types)
+   Compiling peri-workflow v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-workflow)
+   Compiling peri-lsp v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-lsp)
+   Compiling peri-resources v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-resources)
+   Compiling peri-agent v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-agent)
+   Compiling peri-middlewares v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-middlewares)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 58.76s
+     Running unittests src/lib.rs (/Users/konghayao/code/ai/perihelion/target/debug/deps/peri_middlewares-ca9559f8573c99bb)
+
+running 6 tests
+test middleware::terminal::tests::test_production_dispatch_persists_outer_cancel_evidence ... ok
+test middleware::terminal::tests::test_production_dispatch_persists_promoted_timeout_lifecycle ... ok
+test middleware::terminal::tests::test_production_dispatch_near_limit_output_persists_before_metadata_projection ... ok
+test middleware::terminal::tests::test_production_dispatch_persists_bash_success_projection_and_ref ... ok
+test middleware::terminal::tests::test_production_dispatch_live_tool_end_matches_canonical_projection ... ok
+test middleware::terminal::tests::test_production_dispatch_persists_bash_tail_failure_evidence ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1655 filtered out; finished in 0.15s
+
+   Compiling peri-acp-types v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-acp-types)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.87s
+     Running unittests src/lib.rs (/Users/konghayao/code/ai/perihelion/target/debug/deps/peri_acp_types-f54d0dddc30a2fa4)
+
+running 14 tests
+test tools::tests::test_prompt_declaration_default_is_none ... ok
+test tools::tests::test_tool_output_default_keeps_execution_evidence_unknown ... ok
+test tools::tests::test_tool_description_honors_explicit_title_namespace ... ok
+test tools::tests::test_tool_output_exact_summary_is_not_appended_twice ... ok
+test tools::tests::test_derive_title_from_name_mixed_case ... ok
+test tools::tests::test_derive_title_from_name_camel_case ... ok
+test tools::tests::test_tool_description_default_derives_title ... ok
+test tools::tests::test_derive_title_from_name_single_word ... ok
+test tools::tests::test_derive_title_from_name_snake_case ... ok
+test tools::tests::test_tool_output_small_limits_do_not_cut_status_names ... ok
+test tools::tests::test_tool_output_bounded_projection_always_keeps_execution_summary ... ok
+test tools::tests::test_tool_output_compact_summary_prioritizes_status_then_facts ... ok
+test tools::tests::test_tool_description_serde_roundtrip ... ok
+test tools::tests::test_tool_execution_evidence_serde_roundtrip ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 391 filtered out; finished in 0.00s
+
+   Compiling peri-js-runtime v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-js-runtime)
+   Compiling peri-acp-types v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-acp-types)
+   Compiling langfuse-client v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/langfuse-client)
+   Compiling peri-lsp v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-lsp)
+   Compiling peri-workflow v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-workflow)
+   Compiling peri-runtime v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-runtime)
+   Compiling peri-resources v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-resources)
+   Compiling peri-agent v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-agent)
+   Compiling peri-controller v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-controller)
+   Compiling peri-middlewares v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-middlewares)
+   Compiling peri-acp v0.2.0 (/private/tmp/peri-analysis-stage.DdL3hX/peri-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 02s
+     Running unittests src/lib.rs (/Users/konghayao/code/ai/perihelion/target/debug/deps/peri_acp-8a31376ebb825fc5)
+
+running 2 tests
+test dispatch::session_replay::tests::test_replay_typed_execution_message_keeps_bounded_text_and_failure_status ... ok
+test dispatch::session_replay::tests::test_replay_typed_execution_facts_project_summary_when_body_has_none ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 649 filtered out; finished in 0.00s
