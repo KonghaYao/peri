@@ -5,7 +5,7 @@
 
 ## 架构速览
 
-- 定位：多 Agent 编排子系统。用户 JS ESM 脚本在独立 Node.js 进程运行，经 stdio NDJSON 与 Rust host 双向 JSON-RPC；agent 回调复用 v2 `run_react_loop`。
+- 定位：多 Agent 编排子系统。用户 JS AsyncFunction body（剥离唯一 `export const meta` 后执行）在独立 Node.js 进程运行，经 stdio NDJSON 与 Rust host 双向 JSON-RPC；agent 回调复用 v2 `run_react_loop`。
 - 主链：`WorkflowTool::invoke → preflight/GitBaseline → registry.reserve → RunCompletion::spawn → WorkflowRunner::run → peri-js-runtime → Node engine → agent/run → AgentExecutor → Git postcondition/state.json → done_tx → RunCompletion::project → registry.complete → session consumer → TUI/Defer`。
 - 入口：`peri-workflow/src/tool.rs::WorkflowTool::invoke`；执行与终态：`peri-workflow/src/runner.rs::WorkflowRunner::run`；通用进程 host 与 NDJSON framing/pending：`peri-js-runtime/src/{host,rpc}.rs`；Workflow agent ownership/kill：`peri-workflow/src/rpc.rs`。
 - 契约事实源：`peri-acp-types/src/workflow.rs` 的 `AgentExecutor`、`AgentRunParams`、`AgentRunResult`、`ProgressEvent`、四维状态、`WorkflowAttempt`、`WorkflowTaskResult`。wire 变更须同步 `npm-packages/@peri-workflow/src/types.ts`。
@@ -20,6 +20,7 @@
 | 改 run 内 Agent 的取消排空 | `peri-workflow/src/runner/scope.rs` + `runner/agent_dispatch.rs` | `RunScope::spawn/drain`；取消必须等待所有子 future 结束，runner 还须等待 JS host/reader 退出，无法证明排空返回 `CleanupFailed` |
 | 改通用 JS RPC 传输/进程生命周期 | `peri-js-runtime/src/{rpc,host}.rs` | `peri_js_runtime::RpcChannel::send_request`、`JsExecutionHost::spawn/kill/wait`；pending 先登记后写，stdout/exit/cancel drain pending，stderr 并行消费 |
 | 改 Agent 执行观察与结果投影 | `peri-agent/src/agent/workflow/agent.rs` + `agent/{observation,result}.rs` | `WorkflowAgentExecutor::execute` 保留装配与 loop → close bus → join forwarder → stats/result → terminal；`WorkflowObservation` 单 owner 维护统计并先发 progress 后发 Langfuse，`project_run_result` 维持 schema/字符串 wire/终态语义 |
+| 改结构化 Agent 结果校验 | `peri-agent/src/agent/workflow/agent/result.rs` + `result_test.rs` | `completed_result → validate_json_schema`；有限子集递归校验 type/required/properties/items，RawValue 保留数字原文精确判断 integer，number 仍接受整数；不宣称完整 JSON Schema |
 | 改 Workflow agent 挂起/kill | `peri-workflow/src/rpc.rs` | `register_agent`、`deregister_agent`、`kill_agent`；ownership token 防 stale deregister，kill 同时响应 RPC error 与 cancel |
 | 改启动、host 所有权与取消收敛 | `peri-workflow/src/runner.rs` | `WorkflowRunner::run`；拥有 message task 的 spawn/abort/join，启动失败先移除 active channel，kill 分支回收进程并等待 message task 后发布 killed |
 | 改 runtime artifact/安装/命令准备 | `peri-workflow/src/runner/artifact.rs` | `prepare_workflow_command`、`validate_workflow_artifact`；固定 bundle 身份/字节校验，staging 原子发布与显式网络 fallback；`runner::WORKFLOW_ARTIFACT_BYTES` 仅为 preflight 兼容 re-export |

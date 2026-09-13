@@ -84,6 +84,139 @@ fn completed_structured_output_validates_without_changing_wire_or_actual_usage()
 }
 
 #[test]
+fn completed_structured_output_accepts_integer_nested_array() {
+    let schema = json!({
+        "type": "object",
+        "required": ["packet_revision", "attempts"],
+        "properties": {
+            "packet_revision": {"type": "integer"},
+            "attempts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["attempt_number", "status"],
+                    "properties": {"attempt_number": {"type": "integer"}}
+                }
+            }
+        }
+    });
+    let result = completed_result(
+        r#"{"packet_revision":2,"attempts":[{"attempt_number":1,"status":"valid"}]}"#.into(),
+        RunStats::default(),
+        &params(Some(schema)),
+        "effective",
+        Instant::now(),
+    );
+
+    assert!(matches!(result, AgentRunResult::Ok { .. }));
+}
+
+#[test]
+fn completed_structured_output_accepts_numeric_integer_semantics() {
+    for output in ["2", "2.0", "2e1"] {
+        let result = completed_result(
+            output.into(),
+            RunStats::default(),
+            &params(Some(json!({"type": "integer"}))),
+            "effective",
+            Instant::now(),
+        );
+        assert!(matches!(result, AgentRunResult::Ok { .. }), "{output}");
+    }
+}
+
+#[test]
+fn completed_structured_output_accepts_integer_and_fractional_number_values() {
+    let schema = json!({"type": "number"});
+    for output in ["2", "2.5"] {
+        let result = completed_result(
+            output.into(),
+            RunStats::default(),
+            &params(Some(schema.clone())),
+            "effective",
+            Instant::now(),
+        );
+        assert!(matches!(result, AgentRunResult::Ok { .. }), "{output}");
+    }
+}
+
+#[test]
+fn completed_structured_output_rejects_lossless_fractional_integer_lexemes() {
+    for output in [
+        "2.0000000000000001",
+        "2.5",
+        "1e-999",
+        "1e-999999999999999999999",
+    ] {
+        let result = completed_result(
+            output.into(),
+            RunStats::default(),
+            &params(Some(json!({"type": "integer"}))),
+            "effective",
+            Instant::now(),
+        );
+        assert!(
+            matches!(result, AgentRunResult::Dead { reason, .. }
+                if reason.as_deref() == Some("no-structured-output")),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn completed_structured_output_rejects_fractional_integer() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"packet_revision": {"type": "integer"}}
+    });
+    let result = completed_result(
+        r#"{"packet_revision":2.5}"#.into(),
+        RunStats::default(),
+        &params(Some(schema)),
+        "effective",
+        Instant::now(),
+    );
+
+    assert!(matches!(
+        result,
+        AgentRunResult::Dead { reason, detail }
+        if reason.as_deref() == Some("no-structured-output")
+            && detail.as_deref()
+                == Some("field 'packet_revision': expected type 'integer', got 'number'")
+    ));
+}
+
+#[test]
+fn completed_structured_output_rejects_missing_nested_required_field() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "attempts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["attempt_number"]
+                }
+            }
+        }
+    });
+    let result = completed_result(
+        r#"{"attempts":[{}]}"#.into(),
+        RunStats::default(),
+        &params(Some(schema)),
+        "effective",
+        Instant::now(),
+    );
+
+    assert!(matches!(
+        result,
+        AgentRunResult::Dead { reason, detail }
+        if reason.as_deref() == Some("no-structured-output")
+            && detail.as_deref() == Some("missing required field: attempts[0].attempt_number")
+    ));
+}
+
+#[test]
 fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
     let session = Session::new(Arc::from("/unused"), FrozenContext::builder().build(), None);
     let params = params(None);
