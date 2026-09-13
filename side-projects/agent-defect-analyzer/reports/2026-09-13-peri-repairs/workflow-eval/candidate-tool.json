@@ -1,0 +1,115 @@
+{
+  "name": "Workflow",
+  "description": "Launch a workflow with multiple agents working in parallel or pipeline. The workflow runs asynchronously — this tool returns immediately with a run_id. When the workflow completes, you'll receive a notification with the result summary. Use the workflow when you need to orchestrate multiple agents for complex tasks.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "script": {
+        "type": "string",
+        "description": "The script is the body of an async function (`new AsyncFunction`), not an ESM module; use JavaScript (TypeScript syntax is not transpiled). It must contain exactly one plain-literal `export const meta = { name, description }`; the engine removes that metadata before executing the body. The body receives these top-level injected primitives directly: `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, and `workflow()`, plus `args` and `budget`. Do not use static or dynamic `import`, `export default`, or any other `export`; do not use old `workflow.agent(...)`, `workflow.parallel(...)`, `workflow.pipeline(...)`, `workflow.phase(...)`, or `workflow.log(...)` calls. Return the workflow result with a top-level `return`; omitting it is accepted with a warning and returns undefined. Minimal read-only example:\n\n```javascript\nexport const meta = {\n  name: 'read-only-demo',\n  description: 'Inspect files without changing the repository',\n}\n\nconst result = await agent('Inspect the requested files and summarize findings.')\nreturn result\n```\n\nInvoke this example with the tool parameter `writeIntent: { \"kind\": \"read_only\" }` when you want a read-only Git postcondition. This is not a permission boundary or filesystem sandbox.\n\nEither `script` or `scriptPath` must be provided."
+      },
+      "args": {
+        "type": "object",
+        "description": "Optional arguments passed to the workflow script."
+      },
+      "maxConcurrency": {
+        "type": "number",
+        "description": "Maximum concurrent agents (default 3).",
+        "default": 3
+      },
+      "budgetTotal": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991,
+        "description": "Maximum total token budget for this workflow. Omit for no explicit budget."
+      },
+      "maxAgents": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991,
+        "description": "Fail-safe host limit for live agent attempts. Resume cache hits are not charged."
+      },
+      "maxToolCalls": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991,
+        "description": "Fail-safe host limit for tool calls reported by completed live agents."
+      },
+      "maxElapsedMs": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991,
+        "description": "Fail-safe host wall-clock limit in milliseconds."
+      },
+      "resumeFromRunId": {
+        "type": "string",
+        "description": "If provided, resume the workflow from the given run ID. The journal from the previous run will be loaded for cache-hit."
+      },
+      "name": {
+        "type": "string",
+        "description": "Optional workflow name (for display). If omitted, extracted from script's meta.name."
+      },
+      "strictPreflight": {
+        "type": "boolean",
+        "default": false,
+        "description": "Reject unless workflow primitives and graph can be statically validated. The current engine cannot provide that proof."
+      },
+      "writeIntent": {
+        "description": "Declarative repository postcondition, not a permission boundary or filesystem sandbox. Pass {kind: 'read_only'} for a workflow that should leave a Git repository unchanged: when the active cwd is in a Git repository, the host compares canonical HEAD, index, worktree, and untracked status after execution. This check does not block script or agent capabilities and does not observe ignored files or writes outside the repository; a non-Git cwd has no baseline and cannot produce a deliverable result. For {kind: 'write'}, repo_root and cwd must equal the active canonical repository root and workflow cwd, and path_allowlist must be non-empty repository-relative paths without parent traversal. Postcondition checks allow changes only under that list; head_may_change and commit_required control the current HEAD checks. Omit only for legacy runs; omitted intent can never produce a deliverable result.",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "read_only"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "write"
+              },
+              "repo_root": {
+                "type": "string"
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "path_allowlist": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "head_may_change": {
+                "type": "boolean",
+                "default": false
+              },
+              "commit_required": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "repo_root",
+              "cwd",
+              "path_allowlist"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "scriptPath": {
+        "type": "string",
+        "description": "Path to a workflow script file (alternative to inline script). The file is canonicalized and must remain inside the active workflow cwd; its contents follow the same async-function-body grammar as `script`."
+      }
+    },
+    "required": []
+  }
+}

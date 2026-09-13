@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "model": "gpt-5.6-luna",
+  "reasoningEffort": "high",
+  "history": "none",
+  "repetitionsPerCondition": 1,
+  "maxRepairRounds": 1,
+  "scope": "synthetic grammar preflight only; no Agent/provider/Workflow invocation; no causal effect estimate",
+  "inputs": {
+    "cases.json": "2f3ec1a6524802672ace8144ccb0d73be8469df37a7dd188516824301f4718ff",
+    "baseline-tool.json": "866ff946d4a486c378174b78f48c2e1540fa20a2be9f84c396a2b986f32b6b6f",
+    "candidate-tool.json": "ff6fec119d4195b741692bf340855d15980c5a12d8fb1e5e06ac7107895f18c4"
+  },
+  "parserSha256": "79e12b8a4bc9d5bdf19a273ffcd6752b235d6582cc86dad9cbb7f92f62d04982",
+  "actualRuns": [
+    {
+      "condition": "baseline",
+      "generationAgent": "workflow_trial_a",
+      "feedbackRounds": 1,
+      "feedback": "missing meta from parser"
+    },
+    {
+      "condition": "candidate",
+      "generationAgent": "workflow_trial_b",
+      "feedbackRounds": 1,
+      "feedback": "JSON encoding only; no parser feedback"
+    }
+  ],
+  "artifacts": {
+    "baseline-tool.json": "866ff946d4a486c378174b78f48c2e1540fa20a2be9f84c396a2b986f32b6b6f",
+    "candidate-tool.json": "ff6fec119d4195b741692bf340855d15980c5a12d8fb1e5e06ac7107895f18c4",
+    "cases.json": "2f3ec1a6524802672ace8144ccb0d73be8469df37a7dd188516824301f4718ff",
+    "outputs-a-repair.json": "3d8c87d0e99e0a6b544a31f08e1c8da8efc8644d02e75f65a32c7634fa20ead9",
+    "outputs-a.json": "ce62563e0781eca54a73a2e2740fb86c74829a5ce2b2f281374de005ee8c3b5b",
+    "outputs-b-encoding-repair.json": "e29c00489420df766d2af47e9282af88f555f5ae4c865be87c1acd7b736dc7ae",
+    "outputs-b.invalid.txt": "76d30bb9dde883840e8733a921fe8a130dd0a3444efcad230e3397b613f7f71e",
+    "preflight-a1.json": "22d98ddce5caf2f5dd8f58cdd840d78b161769f1014e2bd7227854cf360cb468",
+    "preflight-a2.json": "6386aa478710c008c0efebceac47d78c1ed8a7662ff11e6706a13082784da8d6",
+    "preflight-b1.json": "ccbea42ca23ae9cf8dbb5fbea20bcab0349c4b535586589849541f8c4abc4e8f",
+    "preflight-b2.json": "441fd9b3e0df7bad3b1ed7b8a4e7bba52c9a390d778ec4373f0b750e89a21e0a",
+    "production-tool.json": "70108e91522d4cdceebd699ce774f95f8723bbb49dcbf581f05178d0f3de5435"
+  },
+  "postTrialProductionChange": "Missing-return validation described as advisory; candidate-tool.json remains the trial version."
+}

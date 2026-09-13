@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "stage": "output-artifact-json-decoding",
+  "passed": false,
+  "error": "Invalid escape at line 15 column 247 (char 845)",
+  "parserRan": false,
+  "repair": "Two JavaScript apostrophe escapes encoded correctly in JSON; script semantics preserved."
+}

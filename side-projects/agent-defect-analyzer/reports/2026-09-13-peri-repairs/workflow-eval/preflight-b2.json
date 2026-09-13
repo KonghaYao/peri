@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "scope": "grammar after one JSON encoding repair only; scripts were not executed; temporary input paths omitted",
+  "results": [
+    {
+      "caseId": "readme-review",
+      "attempt": 2,
+      "exitCode": 0,
+      "parser": {
+        "ok": true,
+        "meta": {
+          "name": "readme-review",
+          "description": "Review README installation steps without modifying the repository"
+        },
+        "errors": [],
+        "warnings": []
+      },
+      "declaredReadOnly": true,
+      "scriptSha256": "68dc3119424606d329c6240fdec90de92fdef80163436c8c1599079a2caf33cb"
+    },
+    {
+      "caseId": "parallel-inspection",
+      "attempt": 2,
+      "exitCode": 0,
+      "parser": {
+        "ok": true,
+        "meta": {
+          "name": "parallel-inspection",
+          "description": "Inspect error handling and cancellation propagation in parallel read-only tasks"
+        },
+        "errors": [],
+        "warnings": []
+      },
+      "declaredReadOnly": true,
+      "scriptSha256": "e27dab5e64d35adc09fae7de46ec824c62c9212162f771c8eef58645c71925dd"
+    },
+    {
+      "caseId": "config-investigation",
+      "attempt": 2,
+      "exitCode": 0,
+      "parser": {
+        "ok": true,
+        "meta": {
+          "name": "config-investigation",
+          "description": "Read package.json and report the test command without modifying the project"
+        },
+        "errors": [],
+        "warnings": []
+      },
+      "declaredReadOnly": true,
+      "scriptSha256": "420f81add04b37089f129359fc1854630e15c7559c70914d3ec654ec0a15c5bf"
+    },
+    {
+      "caseId": "nested-workspace",
+      "attempt": 2,
+      "exitCode": 0,
+      "parser": {
+        "ok": true,
+        "meta": {
+          "name": "nested-workspace",
+          "description": "Inspect interface definitions in the current workspace directory without modifying files"
+        },
+        "errors": [],
+        "warnings": []
+      },
+      "declaredReadOnly": true,
+      "scriptSha256": "9e667b9d9fb6d8294ed8984053877c9079c99c3fba06eaf57113a2841c8dc640"
+    }
+  ]
+}

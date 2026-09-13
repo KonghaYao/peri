@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "scope": "grammar only; generated scripts were not executed; temporary input file paths omitted",
+  "results": [
+    {
+      "caseId": "readme-review",
+      "attempt": 2,
+      "exitCode": 0,
+      "parser": {
+        "ok": true,
+        "meta": {
+          "name": "readme-review",
+          "description": "只读检查 README 的安装步骤是否清楚"
+        },
+        "errors": [],
+        "warnings": []
+      },
+      "declaredReadOnly": true,
+      "scriptSha256": "56305e867e0876a9c61fd541b61268c6cb4993972450d68b4dad4d371115e347"
+    },
+    {
+      "caseId": "parallel-inspection",
+      "attempt": 2,
+      "exitCode": 0,
+      "parser": {
+        "ok": true,
+        "meta": {
+          "name": "parallel-inspection",
+          "description": "并行只读检查错误处理与取消传播"
+        },
+        "errors": [],
+        "warnings": []
+      },
+      "declaredReadOnly": true,
+      "scriptSha256": "2648f62bb10d530625baf74a26bd48f84d039bb8f461851d25149f51c1518b7e"
+    },
+    {
+      "caseId": "config-investigation",
+      "attempt": 2,
+      "exitCode": 0,
+      "parser": {
+        "ok": true,
+        "meta": {
+          "name": "config-investigation",
+          "description": "只读读取 package.json 并说明测试命令"
+        },
+        "errors": [],
+        "warnings": []
+      },
+      "declaredReadOnly": true,
+      "scriptSha256": "8bf46d6f5b207e058805203476821d7649d89536c03eb7e276f55e6fd5d29011"
+    },
+    {
+      "caseId": "nested-workspace",
+      "attempt": 2,
+      "exitCode": 0,
+      "parser": {
+        "ok": true,
+        "meta": {
+          "name": "nested-workspace",
+          "description": "在仓库子目录中只读检查接口定义"
+        },
+        "errors": [],
+        "warnings": []
+      },
+      "declaredReadOnly": true,
+      "scriptSha256": "010a9875b7cf726aeff678e230f9522ee8181b6b9aaa4b9ff3c6527f9de818e2"
+    }
+  ]
+}
