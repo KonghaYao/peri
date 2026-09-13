@@ -149,6 +149,15 @@ deno.lock
 .xyd
 data
 
+# Analysis source lives beside ignored local datasets.
+!side-projects/agent-defect-analyzer/src/data/
+side-projects/agent-defect-analyzer/src/data/*
+!side-projects/agent-defect-analyzer/src/data/*.ts
+!side-projects/peri-db-viewer/src/data/
+side-projects/peri-db-viewer/src/data/*
+!side-projects/peri-db-viewer/src/data/*.ts
+side-projects/agent-defect-analyzer/output/
+
 claude-blog
 claude-blog-cn
 

@@ -1,5 +1,6 @@
 # 超长会话场景调研（内部记录）
 
+> 历史快照（2026-08-09）：本报告保留研究上下文，不是当前数据结论。原分析入口已移除；请按项目 README 和 `ANALYSIS.md` 使用统一 CLI 重算。
 > 数据源：`~/.peri/threads/threads.db`（活跃库，快照 2026-08-09）｜分析脚本：`src/long_session_study.ts`（可重跑复现，输出 `src/data/long-session-study.json`）｜本文件为内部记录：方法、口径、反证与局限完整披露，供分析追溯。
 
 ## 1. 调查方法
