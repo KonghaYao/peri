@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { DataLoader, DEFAULT_DB_PATH, NORMALIZER_VERSION } from "../data/loader.js";
+import { validateThreadFilter } from "../data/filters.js";
 import type { NormalizedMessage, ThreadSummary, ToolCall, ToolResult } from "../data/types.js";
 
 export const METRICS_VERSION = "agent-metrics-v1";
@@ -71,25 +72,17 @@ function quantile(values: number[], fraction: number): number | null {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * fraction))] ?? 0;
 }
-function dateFilter(value: string, name: string): number {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
-    throw new RangeError(`${name} must be an ISO date with timezone`);
-  }
-  const time = Date.parse(value);
-  if (!Number.isFinite(time)) throw new RangeError(`${name} must be an ISO date with timezone`);
-  return time;
-}
 function issueCategory(issue: string): string {
   const separator = issue.indexOf(":");
   return separator < 0 ? issue : issue.slice(0, separator);
 }
 function selectedThreads(rows: ThreadSummary[], options: Required<Pick<AnalysisOptions, "scope" | "includeHidden">> & { since: number | null; until: number | null }): ThreadSummary[] {
   return rows.filter((thread) => {
+    const created = Date.parse(thread.created_at);
+    if (!Number.isFinite(created)) throw new RangeError(`thread ${thread.id} has invalid created_at`);
     if (!options.includeHidden && thread.hidden !== 0) return false;
     if (options.scope === "roots" && thread.parent_thread_id !== null) return false;
     if (options.scope === "children" && thread.parent_thread_id === null) return false;
-    const created = Date.parse(thread.created_at);
-    if (!Number.isFinite(created)) throw new RangeError(`thread ${thread.id} has invalid created_at`);
     return (options.since === null || created >= options.since) && (options.until === null || created < options.until);
   });
 }
@@ -99,17 +92,17 @@ function evidence(entries: EvidenceEntry[]): Evidence {
 
 /** Analyze one immutable SQLite snapshot. This function never writes the source DB. */
 export function analyzeDatabase(dbPath: string = DEFAULT_DB_PATH, input: AnalysisOptions = {}): AnalysisReport {
-  const scope = input.scope ?? "roots";
-  const includeHidden = input.includeHidden ?? false;
-  const since = input.since === undefined ? null : dateFilter(input.since, "since");
-  const until = input.until === undefined ? null : dateFilter(input.until, "until");
-  if (since !== null && until !== null && since >= until) throw new RangeError("since must be earlier than until");
+  const validated = validateThreadFilter(input);
+  const scope = validated.scope;
+  const includeHidden = validated.includeHidden;
+  const since = validated.since;
+  const until = validated.until;
   const loader = new DataLoader(dbPath);
   try {
     const snapshot = loader.withSnapshot((db) => {
       const threads = selectedThreads(db.loadThreadSummaries(), { scope, includeHidden, since, until });
       const fingerprintHash = createHash("sha256");
-      fingerprintHash.update(JSON.stringify({ schema: loader.capabilities, scope, includeHidden, since: input.since ?? null, until: input.until ?? null }));
+      fingerprintHash.update(JSON.stringify({ schema: loader.capabilities, scope, includeHidden, since: validated.sinceText, until: validated.untilText }));
       for (const thread of threads) fingerprintHash.update(`${thread.id}\0${thread.created_at}\0${thread.hidden}\0${thread.parent_thread_id ?? ""}`);
       const metrics = new Map<string, MutableMetric>();
       const pending = new Map<string, CallRecord>();
@@ -243,7 +236,7 @@ export function analyzeDatabase(dbPath: string = DEFAULT_DB_PATH, input: Analysi
       return {
         version: { normalizer: NORMALIZER_VERSION, metrics: METRICS_VERSION },
         source: { fingerprint },
-        filters: { scope, includeHidden, since: input.since ?? null, until: input.until ?? null },
+        filters: { scope, includeHidden, since: validated.sinceText, until: validated.untilText },
         totals: { threads: threads.length, messages, calls, pairedResults, pairedKnownResults, missingResults, orphanResults, duplicateCallIds, duplicateResultIds, unknownErrorResults, explicitErrors, parseIssues: Object.values(parsedIssues).reduce((sum, count) => sum + count, 0) },
         tools: Object.fromEntries([...metrics].map(([name, metric]) => [name, {
           label: metric.label,

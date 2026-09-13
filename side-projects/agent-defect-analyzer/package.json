@@ -5,6 +5,9 @@
   "scripts": {
     "inspect": "bun run src/cli.ts inspect",
     "report": "bun run src/cli.ts report",
+    "sample": "bun run src/cli.ts sample",
+    "evidence": "bun run src/cli.ts evidence",
+    "compare": "bun run src/cli.ts compare",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },

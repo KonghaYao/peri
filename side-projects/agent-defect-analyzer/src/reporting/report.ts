@@ -4,6 +4,7 @@ import { analyzeDatabase, type AnalysisReport, type AnalysisOptions, type Candid
 export interface ReportRule {
   id: string;
   kind: "observation" | "candidate" | "quality";
+  definition: string;
   threshold: string;
   numerator: number | null;
   denominator: number | null;
@@ -43,9 +44,21 @@ function thresholdFor(ruleId: string): string {
   }
 }
 
+function definitionFor(ruleId: string): string {
+  switch (ruleId) {
+    case "repeated-call": return "count of consecutive-call runs at the first point each run reaches 3 calls; a longer run contributes one event";
+    case "explicit-failure": return "count of explicit-failure runs at the first point each run reaches 2 errors; a longer run contributes one event";
+    case "large-tool-output": return "count of normalized tool results at or above the UTF-8 byte threshold";
+    case "pairing-quality": return "paired normalized tool results divided by normalized tool calls";
+    case "known-result-state": return "paired results with explicit success or error divided by paired results";
+    default: return "defined by the metrics analyzer";
+  }
+}
+
 function candidateRule(candidate: Candidate): ReportRule {
   return {
     id: candidate.ruleId, kind: candidate.evidenceKind, threshold: thresholdFor(candidate.ruleId),
+    definition: definitionFor(candidate.ruleId),
     numerator: candidate.counts, denominator: candidate.denominator,
     rate: ratio(candidate.counts, candidate.denominator),
     evidence_ids: candidate.evidence.entries, next_verification: candidate.nextVerification,
@@ -67,23 +80,36 @@ function buildReport(analysis: AnalysisReport): ReportDto {
   const qualityRules: ReportRule[] = [
     {
       id: "pairing-quality", kind: "quality",
+      definition: definitionFor("pairing-quality"),
       threshold: "paired results / normalized tool calls; known result state / paired results",
       numerator: pairing.paired_results, denominator: pairing.calls, rate: pairing.pairing_rate,
       evidence_ids: [], next_verification: "Inspect missing and orphan result evidence before using error rates for behavior claims.",
     },
     {
       id: "known-result-state", kind: "quality",
+      definition: definitionFor("known-result-state"),
       threshold: "paired results with explicit success or error state / paired results",
       numerator: pairing.paired_known_results, denominator: pairing.paired_results, rate: pairing.known_result_rate,
       evidence_ids: [], next_verification: "Review unknown result states and source serialization before treating error rates as complete.",
     },
+  ];
+  const candidateByRule = new Map(analysis.candidates.map((candidate) => [candidate.ruleId, candidate]));
+  const fixedRules: ReportRule[] = [
+    ...qualityRules,
+    ...(["repeated-call", "explicit-failure", "large-tool-output"] as const).map((ruleId) => {
+      const candidate = candidateByRule.get(ruleId);
+      const denominator = ruleId === "repeated-call" ? analysis.totals.calls : ruleId === "explicit-failure" ? analysis.totals.pairedKnownResults : analysis.resultBytes.count;
+      const numerator = candidate?.counts ?? 0;
+      const kind: ReportRule["kind"] = ruleId === "large-tool-output" ? "observation" : "candidate";
+      return { id: ruleId, kind, definition: definitionFor(ruleId), threshold: thresholdFor(ruleId), numerator, denominator, rate: ratio(numerator, denominator), evidence_ids: candidate?.evidence.entries ?? [], next_verification: candidate?.nextVerification ?? "No qualifying observation in this report; verify the denominator and inspect a seeded sample before concluding absence." } as ReportRule;
+    }),
   ];
   return {
     schema_version: "report.v1",
     source: { fingerprint: analysis.source.fingerprint, normalizer: analysis.version.normalizer, metrics: analysis.version.metrics },
     filters: analysis.filters, totals: analysis.totals, pairing, top_tool_errors: tools, all_tools: allTools,
     result_bytes: analysis.resultBytes, candidates: analysis.candidates,
-    rules: [...qualityRules, ...analysis.candidates.map(candidateRule)],
+    rules: fixedRules,
     capabilities: {
       tool_errors: { status: "available", reason: "paired normalized tool results with explicit error state" },
       repeated_calls: { status: "available", reason: "same labeled tool and stable canonical arguments within a thread" },
@@ -115,10 +141,10 @@ export function renderReportMarkdown(report: ReportDto): string {
     (rule.numerator ?? "-") + " | " + (rule.denominator ?? "-") + " | " + cell(percent(rule.rate)) +
     " | " + cell(rule.next_verification) + " |").join("\n");
   const candidates = report.candidates.length === 0
-    ? "| - | 0 | 0 | 0 | - |"
+    ? "| - | 0 | 0 | - |"
     : report.candidates.map((candidate) =>
       "| " + cell(candidate.ruleId) + " | " + candidate.counts + " | " + candidate.denominator + " | " +
-      candidate.evidence.entries.length + " | " + cell(candidate.nextVerification) + " |").join("\n");
+      (candidate.evidence.entries.length === 0 ? "-" : candidate.evidence.entries.map((entry) => "[report.json](report.json) :: " + entry.threadId + "/" + entry.messageId + "/" + entry.callId).join("; ")) + " | " + cell(candidate.nextVerification) + " |").join("\n");
   return [
     "# Agent behavior report", "",
     "- schema: " + report.schema_version,
@@ -126,7 +152,7 @@ export function renderReportMarkdown(report: ReportDto): string {
     "- normalizer: " + cell(report.source.normalizer) + "; metrics: " + cell(report.source.metrics),
     "- filters: scope=" + cell(report.filters.scope) + ", include_hidden=" + report.filters.includeHidden +
       ", since=" + cell(report.filters.since ?? "-") + ", until=" + cell(report.filters.until ?? "-"),
-    "- 默认输出只包含统计、规则和 evidence IDs，不包含原始消息、参数或路径。", "",
+    "- 默认输出只包含统计、规则和 bounded evidence refs，不包含原始消息、参数或路径。", "",
     "## Totals", "",
     "- threads=" + report.totals.threads + ", messages=" + report.totals.messages + ", calls=" + report.totals.calls,
     "- explicit_errors=" + report.totals.explicitErrors + ", unknown_error_results=" +
@@ -148,8 +174,8 @@ export function renderReportMarkdown(report: ReportDto): string {
     "| rule | kind | threshold | numerator | denominator | rate | next verification |",
     "| --- | --- | --- | ---: | ---: | ---: | --- |", rules, "",
     "## Candidates", "",
-    "| rule | count | denominator | evidence IDs | next verification |",
-    "| --- | ---: | ---: | ---: | --- |", candidates, "",
+    "| rule | count | denominator | evidence refs | next verification |",
+    "| --- | ---: | ---: | --- | --- |", candidates, "",
     "## Capabilities", "",
     ...Object.entries(report.capabilities).map(([name, capability]) =>
       "- " + cell(name) + ": **" + cell(capability.status) + "** — " + cell(capability.reason)),

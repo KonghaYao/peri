@@ -199,7 +199,15 @@ export class DataLoader {
   loadAllSubAgents(): ThreadRow[] { return this.capabilities.columns.threads?.includes("parent_thread_id") ? this.query<ThreadRow>(`SELECT ${this.threadColumns()} FROM threads t WHERE t.parent_thread_id IS NOT NULL ORDER BY t.created_at,t.id`) : []; }
   loadSubAgents(id: string): ThreadRow[] { return this.capabilities.columns.threads?.includes("parent_thread_id") ? this.query<ThreadRow>(`SELECT ${this.threadColumns()} FROM threads t WHERE t.parent_thread_id=? ORDER BY t.created_at,t.id`, id) : []; }
   loadThreadsByIds(ids: string[]): ThreadRow[] { const out: ThreadRow[] = []; for (let i=0;i<ids.length;i+=900) { const x=ids.slice(i,i+900); if (x.length) out.push(...this.query<ThreadRow>(`SELECT ${this.threadColumns()} FROM threads t WHERE t.id IN (${x.map(()=>"?").join(",")})`, ...x)); } return out; }
+  hasThread(id: string): boolean { return this.one<{ present: number }>("SELECT 1 AS present FROM threads WHERE id=?", id) !== null; }
   loadMessages(threadId: string): MessageRow[] { return this.query<MessageRow>(`SELECT ${this.messageColumns()} FROM messages m WHERE m.thread_id=? ORDER BY m.rowid`, threadId); }
+  loadNormalizedMessageWindow(threadId: string, messageId: string, radius: number): NormalizedMessage[] | null {
+    const target = this.one<MessageRow>(`SELECT ${this.messageColumns()} FROM messages m WHERE m.thread_id=? AND m.message_id=?`, threadId, messageId);
+    if (!target) return null;
+    const before = this.query<MessageRow>(`SELECT ${this.messageColumns()} FROM messages m WHERE m.thread_id=? AND m.rowid<? ORDER BY m.rowid DESC LIMIT ?`, threadId, target.sequence, radius);
+    const after = this.query<MessageRow>(`SELECT ${this.messageColumns()} FROM messages m WHERE m.thread_id=? AND m.rowid>? ORDER BY m.rowid ASC LIMIT ?`, threadId, target.sequence, radius);
+    return [...before.reverse(), target, ...after].map((row) => normalizeMessage(row));
+  }
   *iterateMessages(threadId?: string): Generator<MessageRow> { yield* (threadId === undefined ? this.iterateRows<MessageRow>(`SELECT ${this.messageColumns()} FROM messages m ORDER BY m.thread_id,m.rowid`) : this.iterateRows<MessageRow>(`SELECT ${this.messageColumns()} FROM messages m WHERE m.thread_id=? ORDER BY m.rowid`, threadId)); }
   *iterateNormalizedMessages(threadId?: string, origin: "own"|"inherited" = "own"): Generator<NormalizedMessage> { for (const row of this.iterateMessages(threadId)) yield normalizeMessage(row, origin); }
   loadNormalizedMessages(threadId: string): NormalizedMessage[] { return [...this.iterateNormalizedMessages(threadId)]; }

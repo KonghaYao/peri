@@ -2364,6 +2364,7 @@
     {
       "id": "pairing-quality",
       "kind": "quality",
+      "definition": "paired normalized tool results divided by normalized tool calls",
       "threshold": "paired results / normalized tool calls; known result state / paired results",
       "numerator": 183364,
       "denominator": 183375,
@@ -2374,6 +2375,7 @@
     {
       "id": "known-result-state",
       "kind": "quality",
+      "definition": "paired results with explicit success or error divided by paired results",
       "threshold": "paired results with explicit success or error state / paired results",
       "numerator": 183364,
       "denominator": 183364,
@@ -2382,59 +2384,9 @@
       "next_verification": "Review unknown result states and source serialization before treating error rates as complete."
     },
     {
-      "id": "explicit-failure",
-      "kind": "candidate",
-      "threshold": "the same labeled tool produces at least 2 consecutive explicit errors within a thread",
-      "numerator": 296,
-      "denominator": 183364,
-      "rate": 0.0016142754302916602,
-      "evidence_ids": [
-        {
-          "threadId": "019e9a4b-879e-79e3-b0a0-89c840fd01f0",
-          "messageId": "019e9a6d-41c4-7c20-828f-1b8362556ecf",
-          "callId": "call_01_RYtrz9bokNtTqoDntOIb4772"
-        },
-        {
-          "threadId": "019e9c74-33b0-7070-9919-ad428a44f7db",
-          "messageId": "019e9c77-e903-7cb2-8706-008178935caa",
-          "callId": "call_00_zVen60QGvLqfK38x8gP57532"
-        },
-        {
-          "threadId": "019e9cdc-d71c-7532-8c1c-ad3878b6d544",
-          "messageId": "019e9cdf-10a9-7c21-90ad-34e286056a7b",
-          "callId": "call_02_d8hRiUWnQdxnuGyL7P2W1148"
-        },
-        {
-          "threadId": "019e9d6a-ed8c-7093-ad3e-f276c36a8f67",
-          "messageId": "019e9d6e-f98b-7011-9015-f62b0829bd72",
-          "callId": "call_04_Zr1TZsEcppxaw0V8yCH36483"
-        },
-        {
-          "threadId": "019ea5e1-1015-7383-b2af-1d95b20de876",
-          "messageId": "019ea5e9-2e78-7153-a9e8-bb6dee7c048a",
-          "callId": "call_2842056fe6ac4580acb99dba"
-        },
-        {
-          "threadId": "019eab0a-9e5a-7cb1-9891-7059b7dc2b62",
-          "messageId": "019eab0b-8eb9-7301-8df2-a3c53b338fe3",
-          "callId": "call_01_hnXwEHMsk9MYuqn9vJfB5659"
-        },
-        {
-          "threadId": "019eab37-0cbd-7cb3-bc12-f1d40d64b870",
-          "messageId": "019eab42-8811-7f31-b2bc-fc9e7924fc1f",
-          "callId": "call_01_yUenZy1u1YIfcQaypphE7781"
-        },
-        {
-          "threadId": "019eab9c-64ed-70a3-8c9d-07d21ecc1945",
-          "messageId": "019eabf2-ae43-7172-b6e0-0e7ad87818ec",
-          "callId": "tooluse_Iftr3FirFgIUVJeudRnNjO"
-        }
-      ],
-      "next_verification": "Inspect both failed results and the next user or assistant message before attributing a strategy defect."
-    },
-    {
       "id": "repeated-call",
       "kind": "candidate",
+      "definition": "count of consecutive-call runs at the first point each run reaches 3 calls; a longer run contributes one event",
       "threshold": "same canonical call and arguments occur at least 3 times consecutively within a thread",
       "numerator": 78,
       "denominator": 183375,
@@ -2484,8 +2436,61 @@
       "next_verification": "Read the triggering thread's preceding and following messages to distinguish polling from no-progress repetition."
     },
     {
+      "id": "explicit-failure",
+      "kind": "candidate",
+      "definition": "count of explicit-failure runs at the first point each run reaches 2 errors; a longer run contributes one event",
+      "threshold": "the same labeled tool produces at least 2 consecutive explicit errors within a thread",
+      "numerator": 296,
+      "denominator": 183364,
+      "rate": 0.0016142754302916602,
+      "evidence_ids": [
+        {
+          "threadId": "019e9a4b-879e-79e3-b0a0-89c840fd01f0",
+          "messageId": "019e9a6d-41c4-7c20-828f-1b8362556ecf",
+          "callId": "call_01_RYtrz9bokNtTqoDntOIb4772"
+        },
+        {
+          "threadId": "019e9c74-33b0-7070-9919-ad428a44f7db",
+          "messageId": "019e9c77-e903-7cb2-8706-008178935caa",
+          "callId": "call_00_zVen60QGvLqfK38x8gP57532"
+        },
+        {
+          "threadId": "019e9cdc-d71c-7532-8c1c-ad3878b6d544",
+          "messageId": "019e9cdf-10a9-7c21-90ad-34e286056a7b",
+          "callId": "call_02_d8hRiUWnQdxnuGyL7P2W1148"
+        },
+        {
+          "threadId": "019e9d6a-ed8c-7093-ad3e-f276c36a8f67",
+          "messageId": "019e9d6e-f98b-7011-9015-f62b0829bd72",
+          "callId": "call_04_Zr1TZsEcppxaw0V8yCH36483"
+        },
+        {
+          "threadId": "019ea5e1-1015-7383-b2af-1d95b20de876",
+          "messageId": "019ea5e9-2e78-7153-a9e8-bb6dee7c048a",
+          "callId": "call_2842056fe6ac4580acb99dba"
+        },
+        {
+          "threadId": "019eab0a-9e5a-7cb1-9891-7059b7dc2b62",
+          "messageId": "019eab0b-8eb9-7301-8df2-a3c53b338fe3",
+          "callId": "call_01_hnXwEHMsk9MYuqn9vJfB5659"
+        },
+        {
+          "threadId": "019eab37-0cbd-7cb3-bc12-f1d40d64b870",
+          "messageId": "019eab42-8811-7f31-b2bc-fc9e7924fc1f",
+          "callId": "call_01_yUenZy1u1YIfcQaypphE7781"
+        },
+        {
+          "threadId": "019eab9c-64ed-70a3-8c9d-07d21ecc1945",
+          "messageId": "019eabf2-ae43-7172-b6e0-0e7ad87818ec",
+          "callId": "tooluse_Iftr3FirFgIUVJeudRnNjO"
+        }
+      ],
+      "next_verification": "Inspect both failed results and the next user or assistant message before attributing a strategy defect."
+    },
+    {
       "id": "large-tool-output",
       "kind": "observation",
+      "definition": "count of normalized tool results at or above the UTF-8 byte threshold",
       "threshold": "UTF-8 result content is at least 100000 bytes",
       "numerator": 111,
       "denominator": 183379,

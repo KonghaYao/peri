@@ -15,6 +15,9 @@ bun run inspect --db ~/.peri/threads/threads.db --out output/quality
 bun run report --db ~/.peri/threads/threads.db --out output/behavior
 # 指定会话创建窗口，UTC 半开区间
 bun run report --db ~/.peri/threads/threads.db --since 2026-09-01T00:00:00Z --until 2026-09-13T00:00:00Z --out output/recent
+bun run sample --db ~/.peri/threads/threads.db --out output/sample --seed review-1 --size 5 --scope roots
+bun run evidence --db ~/.peri/threads/threads.db --out output/evidence --thread 'THREAD_ID' --message 'MESSAGE_ID'
+bun run compare --baseline output/baseline/report.json --candidate output/candidate/report.json --out output/comparison
 ```
 
 报告默认不含对话正文、工具参数和文件路径。异常证据保留会话与消息 ID，便于在本机复核。`output/` 是被忽略的本地产物目录。缺失能力、未知格式和解析错误必须查看，不能只读总数。
@@ -22,6 +25,12 @@ bun run report --db ~/.peri/threads/threads.db --since 2026-09-01T00:00:00Z --un
 `report` 输出 `report.json` 与 `report.md`，默认分析可见主会话自己持久化的历史。可选 `--scope roots|children|all`、`--include-hidden`；子会话通常隐藏，分析子会话时显式加 `--include-hidden`。时间筛选依据会话创建时间，纳入该会话的全部持久化消息，不能解释为窗口内发生的工具事件。
 
 错误率的分母是已配对且明确记录成功/错误状态的结果。重复调用与连续失败规则输出达到阈值的候选位置数，不能解释为已经确认的缺陷数量。JSON 包含有界的 `threadId/messageId/callId` 证据与 `nextVerification`；按证据复核后再创建修复任务。
+
+`sample` 与 `report` 使用相同的范围过滤器；抽样要求 `--seed` 与 `--size`（1–50），可加 `--min-messages` 限定会话消息数。时间参数必须是带时区的 ISO 时间戳，统一换算为 UTC，并拒绝无效日期或逆序范围。固定 seed、候选集合与算法产生相同样本；样本指纹只覆盖候选和选中会话元数据，不代表全库内容。
+
+`evidence` 按自有消息的 `--thread`、`--message` 定位，`--radius` 默认为 2、范围为 0–20。默认仅输出 metadata；`--include-content` 才输出正文、参数和结果。最终 JSON 最多 64 KiB，截断与省略通过标志和 `omissions` 明示；证据指纹覆盖窗口元数据。继承上下文可在 viewer 中阅读。
+
+`compare` 不需要数据库参数，只接受两个当前格式的 report JSON。它检查版本、范围、规则定义与阈值，并校验数值和分母关系。旧报告缺少必需字段时应重新运行 `report`，不要手工补零；工具未出现或分母为零时，相关比例保留空值。
 
 当前可运行的项目检查：
 
@@ -35,21 +44,31 @@ bun test
 
 ## 迁移表
 
-| 旧入口 | 阶段 1 处理 | 统一 CLI 归属 |
+| 旧入口 | 迁移处理 | 统一 CLI 归属 |
 | --- | --- | --- |
 | `long_session_study.ts` | 移除活动入口；历史 JSON/报告保留 | `inspect` / `report` |
 | `agent_dispatch_study.ts` | 移除活动入口；历史 JSON/报告保留 | `inspect` / `report` |
 | `tool_token_consumption.ts` | 移除活动入口；历史 JSON/报告保留 | `inspect` / `report`；字节量独立统计，实际 token 暂不可测 |
-| `ratio_analysis.ts` | 移除活动入口；双窗口研究待重建 | `compare`（阶段 3） |
-| `wander.ts`、`export_sessions.ts` | 移除一次性导出入口 | `sample` / `evidence`（阶段 3） |
+| `ratio_analysis.ts` | 移除活动入口；旧双窗口口径不复用 | `compare`（只比较兼容 report） |
+| `wander.ts`、`export_sessions.ts` | 移除一次性导出入口 | `sample` / `evidence`（默认 metadata） |
 | `timeline_study.ts`、`ultracode_prompts.ts` | 移除硬编码/一次性研究入口 | `report` 或历史化 |
-| `optimization_chart.ts`、`tool_token_chart.ts`、`tool_token_charts.ts` | 移除硬编码图表生成器 | 统一报告产物（阶段 2） |
+| `optimization_chart.ts`、`tool_token_chart.ts`、`tool_token_charts.ts` | 移除硬编码图表生成器 | 统一报告产物 |
 
-当前提供 `inspect` 和 `report`。`compare`、`sample`、`evidence` 随后接入。
+创建窗口变化只能支持描述性差异，不能解释为因果改善。具体复核流程见 [ANALYSIS.md](ANALYSIS.md)。
+
+当前参考产物：
+
+- [本轮分析结论与改进方向](reports/2026-09-13-review.md)
+- [foundation quality](reports/2026-09-13-foundation/quality.md)
+- [all roots behavior](reports/2026-09-13-behavior/all-roots/report.md)
+- [recent roots behavior](reports/2026-09-13-behavior/recent-roots/report.md)
+- [validation findings](reports/2026-09-13-validation/findings.md)
+- [相邻窗口对比](reports/2026-09-13-comparison/compare.md)
+- [固定 seed 抽样](reports/2026-09-13-sample/sample.json)
 
 ## 历史产物
 
-下列旧报告和本机可能留存的 `src/data/*.json` 是特定数据库快照的历史记录，不构成当前数据结论。后续报告通过统一入口生成，并包含快照指纹、范围、生成时间、解析质量和分母；源数据库路径由运行者本地保留。
+下列旧报告和本机可能留存的 `src/data/*.json` 是特定数据库快照的历史记录，不构成当前数据结论。后续报告通过统一入口生成，并包含来源指纹、范围、解析质量和分母；源数据库路径由运行者本地保留。
 
 历史报告：
 

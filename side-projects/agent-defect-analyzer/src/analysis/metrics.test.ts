@@ -34,6 +34,21 @@ function makeDb(): string {
   return path;
 }
 
+function appendLongRuns(path: string): void {
+  const db = new Database(path);
+  const message = db.query("INSERT INTO messages VALUES (?,?,?,?,?,?,?)");
+  const add = (id: string, value: { role: string; [key: string]: unknown }) => message.run(id, "root", value.role, JSON.stringify(value), 0, 0, null);
+  for (let index = 1; index <= 4; index++) {
+    add(`long-call-${index}`, { role: "assistant", content: [{ type: "tool_use", id: `long-${index}`, name: "Read", input: { path: "long" } }] });
+    add(`long-result-${index}`, { role: "tool", tool_call_id: `long-${index}`, content: "ok", is_error: false });
+  }
+  for (let index = 1; index <= 3; index++) {
+    add(`fail-call-${index}`, { role: "assistant", content: [{ type: "tool_use", id: `fail-${index}`, name: "FailTool", input: { path: `failure-${index}` } }] });
+    add(`fail-result-${index}`, { role: "tool", tool_call_id: `fail-${index}`, content: "failed", is_error: true });
+  }
+  db.close();
+}
+
 test("root analysis pairs per thread, separates wrappers, and bounds candidates", () => {
   const report = analyzeDatabase(makeDb());
   expect(report.filters.scope).toBe("roots");
@@ -50,6 +65,16 @@ test("root analysis pairs per thread, separates wrappers, and bounds candidates"
   expect(repeated?.counts).toBe(1);
   expect(repeated?.denominator).toBe(4);
   expect(repeated?.evidence.entries).toHaveLength(1);
+});
+
+test("long consecutive runs contribute one threshold event", () => {
+  const path = makeDb();
+  const before = analyzeDatabase(path);
+  appendLongRuns(path);
+  const after = analyzeDatabase(path);
+  const count = (report: ReturnType<typeof analyzeDatabase>, ruleId: string): number => report.candidates.find((candidate) => candidate.ruleId === ruleId)?.counts ?? 0;
+  expect(count(after, "repeated-call") - count(before, "repeated-call")).toBe(1);
+  expect(count(after, "explicit-failure") - count(before, "explicit-failure")).toBe(1);
 });
 
 test("scope, hidden filter, and half-open creation window are explicit", () => {

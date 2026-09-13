@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
@@ -43,12 +43,16 @@ test("report emits filtered metrics, rules, and bounded evidence", () => {
   const json = readFileSync(join(outDir, "report.json"), "utf8");
   const report = JSON.parse(json);
   expect(report.schema_version).toBe("report.v1");
-  expect(report.filters).toEqual({ scope: "roots", includeHidden: false, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z" });
+  expect(report.filters).toEqual({ scope: "roots", includeHidden: false, since: "2026-01-01T00:00:00.000Z", until: "2026-01-02T00:00:00.000Z" });
   expect(report.totals.threads).toBe(1);
   expect(report.totals.explicitErrors).toBe(1);
   expect(report.top_tool_errors[0].label).toBe("Read");
   expect(report.top_tool_errors[0].errorAffectedThreads).toBe(1);
   expect(report.all_tools.map((tool: { label: string }) => tool.label)).toContain("Read");
+  expect(report.rules.find((rule: { id: string }) => rule.id === "repeated-call").kind).toBe("candidate");
+  expect(report.rules.find((rule: { id: string }) => rule.id === "explicit-failure").kind).toBe("candidate");
+  expect(report.rules.find((rule: { id: string }) => rule.id === "large-tool-output").kind).toBe("observation");
+  expect(report.rules.find((rule: { id: string }) => rule.id === "repeated-call").definition).toContain("longer run contributes one event");
   expect(report.result_bytes.p50).toBeGreaterThan(0);
   expect(report.capabilities.token_usage.status).toBe("unavailable");
   expect(json).not.toContain("raw-argument");
@@ -60,6 +64,31 @@ test("report emits filtered metrics, rules, and bounded evidence", () => {
   expect(empty.totals.threads).toBe(0);
   expect(empty.result_bytes.p50).toBeNull();
   expect(empty.pairing.pairing_rate).toBeNull();
+
+  const sampleOut = join(root, "sample");
+  run(["sample", "--db", dbPath, "--out", sampleOut, "--seed", "fixture", "--size", "1", "--scope", "roots"]);
+  const sample = readFileSync(join(sampleOut, "sample.json"), "utf8");
+  expect(JSON.parse(sample).samples).toHaveLength(1);
+  expect(sample).not.toContain("raw-argument");
+
+  const evidenceOut = join(root, "evidence");
+  run(["evidence", "--db", dbPath, "--out", evidenceOut, "--thread", "root", "--message", "m1"]);
+  const evidence = readFileSync(join(evidenceOut, "evidence.json"), "utf8");
+  expect(JSON.parse(evidence).includeContent).toBe(false);
+  expect(evidence).not.toContain("raw-argument");
+  const contentOut = join(root, "content-evidence");
+  run(["evidence", "--db", dbPath, "--out", contentOut, "--thread", "root", "--message", "m1", "--include-content"]);
+  expect(readFileSync(join(contentOut, "evidence.json"), "utf8")).toContain("raw-argument");
+
+  const compareOut = join(root, "compare");
+  run(["compare", "--baseline", join(outDir, "report.json"), "--candidate", join(emptyOut, "report.json"), "--out", compareOut]);
+  const comparison = JSON.parse(readFileSync(join(compareOut, "compare.json"), "utf8"));
+  expect(comparison.filters.window_comparison).toBe("descriptive-different-creation-window");
+  expect(readFileSync(join(compareOut, "compare.md"), "utf8")).toContain("Limitations");
+  const malformed = join(root, "malformed.json"); const malformedOut = join(root, "malformed-compare");
+  writeFileSync(malformed, "{ malformed");
+  expect(() => run(["compare", "--baseline", malformed, "--candidate", join(outDir, "report.json"), "--out", malformedOut])).toThrow();
+  expect(existsSync(join(malformedOut, "compare.json"))).toBe(false);
 });
 
 test("inspect reports an incompatible schema without reading raw data", () => {

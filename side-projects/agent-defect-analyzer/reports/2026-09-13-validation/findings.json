@@ -1,0 +1,111 @@
+{
+  "generatedAt": "2026-09-13",
+  "statusDefinitions": {
+    "observed": "Directly supported by the bounded normalized record and evidence context.",
+    "candidate": "A bounded observation that identifies a useful next check, without asserting cause.",
+    "unverified": "A plausible interpretation that requires an additional source or replay before action."
+  },
+  "range": {
+    "scope": "roots",
+    "includeHidden": false,
+    "since": "2026-09-01T00:00:00.000Z",
+    "until": "2026-09-13T00:00:00.000Z",
+    "timeBasis": "thread.created_at, UTC half-open"
+  },
+  "source": {
+    "fingerprint": "c22d493aab76d24e24925b6352b5137cf5b3535563b6aa65c8d73904834da1e1",
+    "normalizerVersion": "peri-normalizer-v2",
+    "metricsVersion": "agent-metrics-v1",
+    "databasePathExported": false
+  },
+  "population": {
+    "threads": 204,
+    "messages": 33961,
+    "calls": 19891,
+    "pairedResults": 19891,
+    "pairedKnownResults": 19891,
+    "explicitErrors": 323,
+    "missingResults": 0,
+    "orphanResults": 0,
+    "parseIssues": 0,
+    "toolMetrics": [
+      {"label": "StrReplace", "calls": 19, "knownResults": 19, "errors": 19, "calledThreads": 6, "errorAffectedThreads": 6},
+      {"label": "ExecuteExtraTool→Workflow", "calls": 61, "knownResults": 61, "errors": 24, "calledThreads": 16, "errorAffectedThreads": 12},
+      {"label": "Agent", "calls": 347, "knownResults": 347, "errors": 41, "calledThreads": 56, "errorAffectedThreads": 17}
+    ]
+  },
+  "review": {
+    "errorCases": 9,
+    "independentCasesPerLabel": 3,
+    "uniqueThreads": 5,
+    "selection": "first error per label in three distinct qualifying threads; evidence radius 3; bounded context",
+    "observations": [
+      {
+        "status": "observed",
+        "ruleId": "strreplace-missing-registry-name",
+        "label": "StrReplace",
+        "category": "tool_not_found",
+        "safeSummary": "The result identifies the requested historical tool name as unavailable in all three sampled threads.",
+        "evidence": [
+          {"threadId": "01a05fb3-1aaa-7aa0-af14-26ccd444eb92", "messageId": "01a05fc9-b93c-74c1-985e-6421375d5b55", "callId": "tool_be96c893-b9e9-4fd1-9a4b-20956a7509a", "errorBytes": 26, "afterSuccess": true, "afterUserInput": true},
+          {"threadId": "01a05fc2-7d69-7fe2-85f1-4995a4233bda", "messageId": "01a05ffb-91d5-7c72-b72f-f1f9a723df60", "callId": "tool_7dfd254f-ff2d-4293-97ff-9fa941cefdf", "errorBytes": 26, "afterSuccess": true, "afterUserInput": true},
+          {"threadId": "01a05fd0-c143-7813-b7dc-79d65fdffdae", "messageId": "01a05fdf-2b8d-7243-936c-2029af7818ab", "callId": "tool_77cea4ce-b0f2-48e2-97e9-e2fd3a6e7e3", "errorBytes": 26, "afterSuccess": true, "afterUserInput": true}
+        ]
+      },
+      {
+        "status": "observed",
+        "ruleId": "workflow-preflight-or-runner-error",
+        "label": "ExecuteExtraTool→Workflow",
+        "category": "mixed_preflight_and_runner",
+        "safeSummary": "Two sampled failures are preflight input diagnostics; one is a runner spawn/RPC failure. They are separate error classes.",
+        "evidence": [
+          {"threadId": "01a05a79-88e7-7a31-ac05-b3df6cad2afa", "messageId": "01a05bfa-47c8-7123-993f-785b2c8b932a", "callId": "call_jUaewjibOmb7RAPS8PhmnDYd", "category": "runner_spawn_rpc", "errorBytes": 144, "afterSuccess": true, "afterUserInput": true},
+          {"threadId": "01a05fc2-7d69-7fe2-85f1-4995a4233bda", "messageId": "01a05fe4-25f4-7972-bac3-0b5970813182", "callId": "tool_7bd6f5a3-27b2-49e8-9644-f1b586b9f18", "category": "preflight_export_restriction", "errorBytes": 239, "afterSuccess": true, "afterUserInput": true},
+          {"threadId": "01a060aa-7bdf-7c13-9002-c05d2673c43d", "messageId": "01a060d6-6db7-7911-8b18-c5c06e25633e", "callId": "tool_c5689612-b604-4eaa-b4a4-4b95c0250aa", "category": "preflight_syntax", "errorBytes": 111, "afterSuccess": true, "afterUserInput": true}
+        ]
+      },
+      {
+        "status": "observed",
+        "ruleId": "agent-provider-or-runtime-interruption",
+        "label": "Agent",
+        "category": "model_stream_or_retry",
+        "safeSummary": "The three sampled Agent failures report interrupted or exhausted model execution; each has later successful activity in its bounded context.",
+        "evidence": [
+          {"threadId": "01a05a79-88e7-7a31-ac05-b3df6cad2afa", "messageId": "01a05b96-1f0a-7fb2-8308-0cc5d4877a10", "callId": "call_VELzS70BVBI2QcGl1zAmVHB5", "category": "stream_interrupted", "errorBytes": 147, "afterSuccess": true, "afterUserInput": true},
+          {"threadId": "01a05fbd-90da-7003-9d8f-7987937a3b9b", "messageId": "01a05fe8-09ba-78f0-86d7-e276e5edeb89", "callId": "call_iInflC4SNOc3kScRWeR6aG5q", "category": "retry_exhausted", "errorBytes": 154, "afterSuccess": true, "afterUserInput": false},
+          {"threadId": "01a05fc2-7d69-7fe2-85f1-4995a4233bda", "messageId": "01a05fdc-7f5b-7b62-a5fd-908702e078c8", "callId": "tool_540866a9-ceea-4be7-9223-611afb86ddc", "category": "retry_exhausted", "errorBytes": 188, "afterSuccess": true, "afterUserInput": true}
+        ]
+      }
+    ]
+  },
+  "improvementQueue": [
+    {
+      "status": "candidate",
+      "problem": "Historical StrReplace calls fail because the requested name is unavailable in the current tool view.",
+      "evidence": "3 of 3 sampled independent error cases report tool_not_found; current source exposes EditFileTool as Edit through FilesystemMiddleware.",
+      "nextCheck": "Reconcile historical StrReplace with the current Edit registration and any compatibility alias, then replay a fixture before changing prompts or migration logic.",
+      "codeEntry": ["peri-middlewares/src/middleware/filesystem.rs", "peri-middlewares/src/tools/filesystem/edit.rs", "peri-middlewares/src/tool_search/execute_tool.rs"]
+    },
+    {
+      "status": "candidate",
+      "problem": "Workflow failures mix deterministic preflight input diagnostics with runner spawn/RPC failure.",
+      "evidence": "2 of 3 sampled Workflow errors are preflight export/syntax diagnostics; 1 is a runner spawn/RPC error. All three have later successful activity.",
+      "nextCheck": "Split full-range Workflow errors by preflight versus runner/RPC category and add targeted regression fixtures for each path.",
+      "codeEntry": ["peri-workflow/src/tool/preflight.rs", "peri-workflow/src/tool.rs", "peri-workflow/src/rpc.rs", "peri-workflow/src/error.rs"]
+    },
+    {
+      "status": "unverified",
+      "problem": "Agent error results may reflect provider or model-stream interruption.",
+      "evidence": "3 sampled errors say stream interrupted or retry exhausted, with later successful activity; the SQLite record does not identify provider root cause.",
+      "nextCheck": "Join the same calls to provider/runtime attempt diagnostics by stable call/thread ID and compare model, provider, retry, and cancellation state.",
+      "codeEntry": ["peri-acp/src/provider/mod.rs", "peri-agent/src", "peri-model/src"]
+    },
+    {
+      "status": "unverified",
+      "problem": "A sampled error followed by success must not be treated as a permanent capability failure or as cancellation without an explicit cancellation event.",
+      "evidence": "All 9 sampled error cases have later successful activity; this evidence contains no cancellation event classification.",
+      "nextCheck": "Require an explicit cancellation/event source before assigning cancellation semantics or counting an error as an inability.",
+      "codeEntry": ["peri-acp/src/session/mod.rs", "docs/code-index/peri-acp.md"]
+    }
+  ]
+}
