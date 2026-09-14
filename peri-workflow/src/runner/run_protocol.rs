@@ -96,13 +96,12 @@ pub(super) fn workflow_start_params(
 /// entries before it.
 pub(super) fn reusable_journal_prefix(mut entries: Vec<JournalEntry>) -> Vec<JournalEntry> {
     entries.sort_by_key(|entry| entry.seq);
-    let mut next_seq = 0;
     let mut prefix = Vec::new();
-    for entry in entries {
-        if entry.seq != next_seq || !matches!(entry.result, AgentRunResult::Ok { .. }) {
+    for (expected_seq, entry) in entries.into_iter().enumerate() {
+        let expected_seq = u64::try_from(expected_seq).expect("journal prefix index fits in u64");
+        if entry.seq != expected_seq || !matches!(entry.result, AgentRunResult::Ok { .. }) {
             break;
         }
-        next_seq += 1;
         prefix.push(entry);
     }
     prefix
