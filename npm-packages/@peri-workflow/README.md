@@ -8,7 +8,7 @@
 `@peri-code/workflow` 是一个独立的 Node.js 进程，承担两件事：
 
 1. **工作流编排（JSON-RPC 模式，主路径）**——解析用户编写的 workflow 脚本，按 DAG 逻辑调度 agent 调用（`agent()`、`parallel()`、`phase()`），并通过 JSON-RPC 2.0 协议与宿主进程通信。
-2. **运行结果读取（CLI 子命令模式）**——`read` / `list` 子命令读取宿主落盘的运行结果，无需再维护独立的读取脚本（合一）。
+2. **运行诊断（CLI 子命令模式）**——读取运行结果、验证脚本，并提供 ADLC 文件边界与阶段产物检查。
 
 宿主进程（Rust、Go、Python 等）负责**执行 agent**——管理 LLM API 密钥、运行 ReAct 循环、执行工具调用。
 
@@ -27,9 +27,11 @@
 └───────────────────┘                  └─────────────────────┘
 ```
 
-无参数运行时为 JSON-RPC 模式（宿主集成）；首参为 `read` / `list` / `--help` 时为 CLI 模式，互不干扰。
+无参数运行时为 JSON-RPC 模式；`read`、`list`、`validate`、`boundary`、`adlc` 和 help 使用 CLI 模式。
 
 ## 安装
+
+Peri 内部使用随二进制分发的固定 artifact。运行 `peri workflow --help` 可调用同一份 CLI，配置和会话初始化之前分发，不下载 npm 包。仓库开发时先 `bun run build`，再用 `node dist/peri-workflow.js --help`；新增能力是否已发布到 registry 需单独核实。
 
 ```bash
 npm install -g @peri-code/workflow
@@ -45,7 +47,7 @@ npm install -g @peri-code/workflow
 
 ### 1. 写一个 workflow 脚本
 
-脚本为 ESM 格式，**只允许一个 `export const meta`**（name + description 必填）；其余代码是脚本主体，engine 注入顶层自由函数 `agent()` / `parallel()` / `phase()`，结果用**顶层 `return`** 返回（禁止 `export default`）。
+脚本是 AsyncFunction body，**只允许一个 `export const meta`**（name + description 必填，执行前剥离）；engine 注入顶层自由函数 `agent()` / `parallel()` / `phase()`，结果用**顶层 `return`** 返回，禁止 import 和其他 export。
 
 ```javascript
 // workflow-demo.js
@@ -169,6 +171,10 @@ peri-workflow list                 # 列出所有 run（按结束时间倒序）
 peri-workflow list --json          # 同上，JSON 形式
 peri-workflow validate <script.mjs> # 校验 workflow 脚本语法（exit 0/1）
 peri-workflow validate <script.mjs> --json # 结构化校验结果
+peri-workflow boundary snapshot <request.json> # 有界文件基线
+peri-workflow boundary compare <request.json>  # 基线与当前文件对账
+peri-workflow adlc check-stage <request.json>  # 必需产物和身份检查
+peri-workflow adlc plan <request.json>         # 按依赖和缺口生成恢复建议
 peri-workflow --help               # 用法帮助
 ```
 
@@ -179,6 +185,12 @@ npx -y @peri-code/workflow@0.2.0 list
 npx -y @peri-code/workflow@0.2.0 read 019fc025-c4d9-7d52-a30a-7409229e3148 --short
 npx -y @peri-code/workflow@0.2.0 validate my-workflow.mjs
 ```
+
+Peri 用户可把上述前缀替换为 `peri workflow`，始终使用当前二进制内嵌版本。
+`boundary` 和 `adlc` 使用请求文件，返回 JSON；非零退出或 `ok: false` 不能当作检查通过。
+请求类型和固定上限见 `src/boundary.ts`、`src/adlc.ts`；编排策略与完整步骤由
+[ultra-adlc skill](../../peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md) 维护。
+文件 gate 不评价产品语义，通用 Workflow 仍允许零次 Agent 调用；任何检查都不构成写权限沙箱。
 
 ### validate：agent 写脚本前的语法校验
 

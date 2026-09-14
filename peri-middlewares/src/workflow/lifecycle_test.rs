@@ -2,11 +2,20 @@ use super::*;
 use peri_acp_types::tasks::TaskShutdownReport;
 use peri_acp_types::tools::ToolContext;
 use peri_resources::workflow::protocol::{AgentRunParams, AgentRunResult};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 const SCRIPT: &str =
     "export const meta = { name: 'scope', description: 'lifecycle' }; return await agent('wait');";
+
+const RESUME_INPUT_SCRIPT: &str = r#"
+export const meta = { name: 'resume-input', description: 'resume input and concurrency' };
+const responses = await parallel([
+  () => agent('first', { label: 'first' }),
+  () => agent('second', { label: 'second' }),
+]);
+return { marker: args.marker, responses };
+"#;
 
 struct ExecutionDrop {
     dropping: Arc<tokio::sync::Notify>,
@@ -25,6 +34,32 @@ impl Drop for ExecutionDrop {
 struct GatedExecutor {
     entered: Arc<tokio::sync::Notify>,
     cleanup: parking_lot::Mutex<Option<ExecutionDrop>>,
+}
+
+struct RecordingExecutor {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+    prompts: parking_lot::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl AgentExecutor for RecordingExecutor {
+    async fn execute(&self, params: AgentRunParams) -> AgentRunResult {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        self.prompts.lock().push(params.prompt.clone());
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        AgentRunResult::Ok {
+            output: serde_json::json!({ "prompt": params.prompt }),
+            usage: peri_resources::workflow::protocol::Usage { output_tokens: 0 },
+            model: None,
+            tool_count: None,
+            token_count: Some(0),
+            phase: None,
+            duration_ms: Some(40),
+        }
+    }
 }
 #[async_trait]
 impl AgentExecutor for GatedExecutor {
@@ -59,9 +94,31 @@ fn isolated(test: &str) -> bool {
 fn historical_run(mw: &WorkflowMiddleware) -> String {
     let id = uuid::Uuid::now_v7().to_string();
     mw.journal_store.init_run(&id, SCRIPT).unwrap();
+    // A resumable run must have an explicit (possibly empty) journal. Missing
+    // journal files are now treated as a recovery protocol error rather than
+    // silently degrading to a full re-run.
+    std::fs::write(mw.journal_store.run_dir(&id).join("journal.jsonl"), "").unwrap();
     let state = serde_json::from_value(serde_json::json!({
         "run_id":id,"workflow_name":"scope","status":"killed",
         "script":SCRIPT,"started_at":"2026-09-12T00:00:00Z"
+    }))
+    .unwrap();
+    mw.journal_store.write_state(&id, &state).unwrap();
+    id
+}
+
+fn historical_run_with_input(mw: &WorkflowMiddleware) -> String {
+    let id = uuid::Uuid::now_v7().to_string();
+    mw.journal_store.init_run(&id, RESUME_INPUT_SCRIPT).unwrap();
+    std::fs::write(mw.journal_store.run_dir(&id).join("journal.jsonl"), "").unwrap();
+    let state = serde_json::from_value(serde_json::json!({
+        "run_id": id,
+        "workflow_name": "resume-input",
+        "status": "killed",
+        "script": RESUME_INPUT_SCRIPT,
+        "started_at": "2026-09-12T00:00:00Z",
+        "args": {"marker": "restored-args"},
+        "max_concurrency": 1
     }))
     .unwrap();
     mw.journal_store.write_state(&id, &state).unwrap();
@@ -209,4 +266,67 @@ fn execution_manager_binding_cannot_be_replaced() {
     mw.set_bg_registry(first.clone());
     mw.set_bg_registry(other);
     assert!(Arc::ptr_eq(mw.bg_registry.read().as_ref().unwrap(), &first));
+}
+
+#[test]
+fn resume_restores_args_and_max_concurrency_through_node() {
+    if isolated("workflow::lifecycle_tests::resume_restores_args_and_max_concurrency_through_node")
+    {
+        return;
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let executor = Arc::new(RecordingExecutor {
+                active: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                prompts: parking_lot::Mutex::new(Vec::new()),
+            });
+            let (tx, _) = tokio::sync::broadcast::channel(8);
+            let mw = Arc::new(WorkflowMiddleware::new(
+                executor.clone(),
+                dir.path().to_str().unwrap(),
+                tx,
+                None,
+            ));
+            let old = historical_run_with_input(&mw);
+            let mut notifications = mw.subscribe_notifications();
+
+            let resumed = mw.resume_workflow(&old).await.unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(10), notifications.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                result.status,
+                peri_resources::workflow::registry::WorkflowRunStatus::Completed
+            );
+            assert_eq!(result.agent_count, 2);
+
+            let state = mw.journal_store.read_state(&resumed).unwrap();
+            assert_eq!(
+                state.args,
+                Some(serde_json::json!({"marker": "restored-args"}))
+            );
+            assert_eq!(state.max_concurrency, 1);
+            assert_eq!(
+                state.return_value,
+                Some(serde_json::json!({
+                    "marker": "restored-args",
+                    "responses": [
+                        {"prompt": "first"},
+                        {"prompt": "second"}
+                    ]
+                }))
+            );
+            assert_eq!(executor.peak.load(Ordering::SeqCst), 1);
+            let prompts = executor.prompts.lock().clone();
+            assert_eq!(prompts.len(), 2);
+            assert!(prompts.iter().any(|prompt| prompt == "first"));
+            assert!(prompts.iter().any(|prompt| prompt == "second"));
+        });
 }

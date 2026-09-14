@@ -402,7 +402,7 @@ fn parameters() -> JSON Schema { script, scriptPath, name, args, maxConcurrency,
    Results will be saved to .claude/workflow-runs/{uuid}/state.json
    ```
 
-**Resume 支持**：当 `resumeFromRunId` 非空时，从 `journal_store.read_all(prev_run_id)` 读取历史 journal entries，传入 `WorkflowStartParams.resume`。Node 引擎按 `journalEntry.key` (SHA256) 匹配 cache-hit——命中则直接返回缓存结果，未命中则重新执行。
+**Resume 支持**：当 `resumeFromRunId` 非空时，使用 `journal_store.read_all_strict(prev_run_id)`；缺失、IO 错误、损坏 JSON 或序号不连续/重复均报错，不得降级成无缓存新运行；序号损坏需依据工作包 checkpoint 显式重新规划。有效 journal 仅把从 `seq=0` 开始的连续 `ok` 前缀交给 Node；首个 dead/skipped 及后缀重新执行。Node 仍按调用 key 匹配前缀，不能用调用缓存代替工作包依赖与产物有效性检查。`state.json` 保存启动 `args` 与 `max_concurrency`，ACP resume 原样恢复；legacy 缺失参数不可重建，并发兼容默认是 3。改变契约/恢复计划时通过 Workflow tool 显式传完整新 args。现有 budget/limits 是物理运行上限，不是跨运行计费账本。
 
 ---
 
@@ -506,8 +506,8 @@ Path B 通知经 `AsyncRouter → InboxHandle → push_defer(Defer kind)` 注入
 用于中断恢复或缓存复用。流程：
 
 1. LLM 调用 `WorkflowTool { resumeFromRunId: "prev-run-id" }`
-2. `journal_store.read_all("prev-run-id")` → `Vec<JournalEntry>`
-3. 传入 `WorkflowStartParams.resume`
+2. `journal_store.read_all_strict("prev-run-id")`，缺失、损坏或序号不连续/重复时失败
+3. 仅将从 seq=0 开始的连续 ok 前缀传入 `WorkflowStartParams.resume`
 4. Node 引擎逐条对比 `journalEntry.key`（SHA256 hash of agent params）
    - cache-hit → 直接返回缓存结果（不执行 agent）
    - cache-miss → 正常调用 agent，结果 `journal/append` 增量写入

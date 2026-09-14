@@ -5,6 +5,7 @@
 //! peri-workflow crate。实例化与持有（runner/registry 生命周期）随装配归位
 //! （L5）后收口至 Resources context，本模块仅为类型/能力出口，不解释业务语义。
 
+pub use peri_workflow::cli;
 pub use peri_workflow::error;
 pub use peri_workflow::journal;
 pub use peri_workflow::progress;

@@ -15,6 +15,9 @@ pub use peri_controller::langfuse::LangfuseSessionLike;
 // 过渡 re-export：telemetry 当前驻留 peri-agent；L5 从 peri-acp 移除
 // peri-agent 依赖时须先给 telemetry 独立归宿（届时处理）。
 pub use peri_agent::telemetry;
+// Workflow CLI is exposed through the ACP host boundary so TUI does not reach
+// the resource layer directly while dispatching before configuration loading.
+pub use peri_resources::workflow::cli as workflow_cli;
 
 pub mod agent;
 pub mod broker;

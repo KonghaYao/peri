@@ -42,6 +42,43 @@ fn test_append_and_read_all_journal() {
 }
 
 #[test]
+fn strict_resume_read_rejects_missing_and_malformed_journal() {
+    let (_tmp, store) = make_store();
+    store.init_run("missing", "script").unwrap();
+    assert!(store.read_all_strict("missing").is_err());
+
+    store.init_run("malformed", "script").unwrap();
+    std::fs::write(
+        store.run_dir("malformed").join("journal.jsonl"),
+        "{\"key\":\"ok\",\"seq\":0,\"result\":{\"kind\":\"ok\",\"output\":\"ok\",\"usage\":{\"outputTokens\":1}}}\nnot-json\n",
+    )
+    .unwrap();
+    let error = store.read_all_strict("malformed").unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("line 2"));
+
+    store.init_run("gap", "script").unwrap();
+    std::fs::write(
+        store.run_dir("gap").join("journal.jsonl"),
+        "{\"key\":\"later\",\"seq\":1,\"result\":{\"kind\":\"ok\",\"output\":\"later\",\"usage\":{\"outputTokens\":1}}}\n",
+    )
+    .unwrap();
+    let error = store.read_all_strict("gap").unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("expected seq 0"));
+
+    store.init_run("duplicate", "script").unwrap();
+    std::fs::write(
+        store.run_dir("duplicate").join("journal.jsonl"),
+        "{\"key\":\"a\",\"seq\":0,\"result\":{\"kind\":\"ok\",\"output\":\"a\",\"usage\":{\"outputTokens\":1}}}\n{\"key\":\"b\",\"seq\":0,\"result\":{\"kind\":\"ok\",\"output\":\"b\",\"usage\":{\"outputTokens\":1}}}\n",
+    )
+    .unwrap();
+    let error = store.read_all_strict("duplicate").unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("expected seq 1"));
+}
+
+#[test]
 fn test_truncate_clears_journal() {
     let (_tmp, store) = make_store();
     store.init_run("run-1", "script").unwrap();
@@ -72,6 +109,8 @@ fn test_write_and_read_state() {
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
         budget_total: Some(9_007_199_254_740_991),
+        args: Some(serde_json::json!({"task": "round-trip"})),
+        max_concurrency: 7,
         attempts: Vec::new(),
         return_value: Some(serde_json::json!({"ok": true})),
         script: "script".into(),
@@ -84,6 +123,8 @@ fn test_write_and_read_state() {
     assert_eq!(read.run_id, "run-1");
     assert_eq!(read.status, "completed");
     assert_eq!(read.budget_total, Some(9_007_199_254_740_991));
+    assert_eq!(read.args, Some(serde_json::json!({"task": "round-trip"})));
+    assert_eq!(read.max_concurrency, 7);
 }
 
 #[test]
@@ -98,6 +139,8 @@ fn test_legacy_state_defaults_budget_total_to_none() {
     .unwrap();
 
     assert_eq!(state.budget_total, None);
+    assert_eq!(state.args, None);
+    assert_eq!(state.max_concurrency, 3);
 }
 
 #[test]
@@ -116,6 +159,8 @@ fn test_state_error_field_round_trip() {
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
         budget_total: None,
+        args: None,
+        max_concurrency: 3,
         attempts: Vec::new(),
         return_value: None,
         script: "script".into(),
@@ -148,6 +193,8 @@ fn test_state_error_skipped_when_none() {
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
         budget_total: None,
+        args: None,
+        max_concurrency: 3,
         attempts: Vec::new(),
         return_value: None,
         script: "script".into(),

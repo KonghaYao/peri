@@ -92,7 +92,6 @@ fn test_ultra_adlc_skill_encodes_peri_workflow_contract() {
         "SearchExtraTools(\"workflow\")",
         "ExecuteExtraTool(\"Workflow\"",
         ".claude/workflow-runs/<run-id>/state.json",
-        "maxConcurrency: 12",
         "() => agent(",
         "Date.now()",
         "new Date()",

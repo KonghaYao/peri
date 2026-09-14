@@ -158,8 +158,8 @@ impl WorkflowMiddleware {
         .map_err(|error| format!("Workflow resume preflight failed: {error}"))?;
         let wf_input = WorkflowInput {
             script: state.script.clone(),
-            args: None,
-            max_concurrency: 3,
+            args: state.args.clone(),
+            max_concurrency: state.max_concurrency,
             budget_total: state.budget_total,
             limits: state.limits.clone(),
             workflow_name: state.workflow_name.clone(),

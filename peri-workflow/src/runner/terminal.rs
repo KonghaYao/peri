@@ -38,6 +38,8 @@ fn persist_failed_state(
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
         budget_total: input.budget_total,
+        args: input.args.clone(),
+        max_concurrency: input.max_concurrency,
         attempts: journal_store.read_attempts(run_id).unwrap_or_default(),
         return_value: None,
         script: input.script.clone(),
@@ -156,6 +158,8 @@ pub(super) fn finalize_workflow(
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
         budget_total: input.budget_total,
+        args: input.args.clone(),
+        max_concurrency: input.max_concurrency,
         attempts: journal_store
             .read_attempts(&final_result.run_id)
             .unwrap_or_default(),
@@ -235,6 +239,8 @@ pub(super) fn send_killed(
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
         budget_total: input.budget_total,
+        args: input.args.clone(),
+        max_concurrency: input.max_concurrency,
         attempts: journal.read_attempts(run_id).unwrap_or_default(),
         return_value: None,
         script: input.script.clone(),

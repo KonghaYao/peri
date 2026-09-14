@@ -17,7 +17,7 @@ use tokio::sync::{oneshot, watch};
 
 use artifact::prepare_workflow_command;
 use message_loop::MessageLoop;
-use run_protocol::{validate_start_ack, workflow_start_params};
+use run_protocol::{reusable_journal_prefix, validate_start_ack, workflow_start_params};
 use terminal::{send_failure, send_killed};
 
 use crate::error::WorkflowError;
@@ -168,7 +168,23 @@ impl WorkflowRunner {
 
         // 2. Resume: read old journal if resume_from is set
         let resume_entries = if let Some(ref old_run_id) = input.resume_from {
-            journal_store.read_all(old_run_id).ok()
+            let entries = match journal_store.read_all_strict(old_run_id) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    let err = WorkflowError::Io(error);
+                    send_failure(
+                        &done_tx,
+                        Some(&journal_store),
+                        &run_id,
+                        &input,
+                        &started_at_iso,
+                        &err,
+                        None,
+                    );
+                    return Err(err);
+                }
+            };
+            Some(reusable_journal_prefix(entries))
         } else {
             None
         };

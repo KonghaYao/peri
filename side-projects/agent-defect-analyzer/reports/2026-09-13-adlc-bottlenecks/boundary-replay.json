@@ -1,0 +1,389 @@
+{
+  "schemaVersion": 1,
+  "experiment": "adlc-boundary-replay",
+  "startedAt": "2026-09-13T15:55:48.677Z",
+  "finishedAt": "2026-09-13T15:55:50.921Z",
+  "inputs": {
+    "repoRootProvided": true,
+    "artifact": "npm-packages/@peri-workflow/dist/peri-workflow.js",
+    "artifactSha256": "0ca2007a66096bfa792bbaed1ba8f57142bdbd5dcb670ed53a395920ec8947a4",
+    "generatedFileCount": 10000,
+    "emptyComparisonCount": 0,
+    "limits": {
+      "maxEntries": 1000,
+      "maxBytes": 268435456,
+      "maxDepth": 32,
+      "deadlineMs": 30000
+    }
+  },
+  "scenarios": {
+    "populated": {
+      "generatedFileCount": 10000,
+      "snapshot": {
+        "label": "populated-snapshot",
+        "operation": "snapshot",
+        "exitCode": 0,
+        "wallMs": 52,
+        "ok": true,
+        "baselineId": "01923456-789a-7abc-8def-0123456789ab",
+        "fingerprint": "sha256:bac3805cd70e2ce390ef0c86dfe8605fee13be68476570f812615cc418bef874",
+        "readFiles": 5,
+        "readBytes": 122,
+        "scannerElapsedMs": 18,
+        "coverage": {
+          "complete": true,
+          "scope": "full",
+          "readFiles": 5,
+          "readBytes": 122,
+          "elapsedMs": 18,
+          "maxEntries": 1000,
+          "maxBytes": 268435456,
+          "maxDepth": 32,
+          "deadlineMs": 30000,
+          "entries": 11,
+          "excludedRoots": [
+            ".git",
+            "target"
+          ],
+          "errors": []
+        }
+      },
+      "unchanged": {
+        "label": "populated-unchanged",
+        "operation": "compare",
+        "exitCode": 0,
+        "wallMs": 52,
+        "ok": true,
+        "baselineId": "01923456-789a-7abc-8def-0123456789ab",
+        "fingerprint": "sha256:bac3805cd70e2ce390ef0c86dfe8605fee13be68476570f812615cc418bef874",
+        "readFiles": 5,
+        "readBytes": 122,
+        "scannerElapsedMs": 18,
+        "coverage": {
+          "complete": true,
+          "scope": "full",
+          "readFiles": 5,
+          "readBytes": 122,
+          "elapsedMs": 18,
+          "maxEntries": 1000,
+          "maxBytes": 268435456,
+          "maxDepth": 32,
+          "deadlineMs": 30000,
+          "entries": 11,
+          "excludedRoots": [
+            ".git",
+            "target"
+          ],
+          "errors": []
+        },
+        "changes": {
+          "created": [],
+          "removed": [],
+          "typeChanged": [],
+          "contentChanged": [],
+          "allowed": [],
+          "outOfScope": [],
+          "generatedRootChanges": []
+        }
+      },
+      "allowlisted": {
+        "label": "populated-allowlisted",
+        "operation": "compare",
+        "exitCode": 0,
+        "wallMs": 54,
+        "ok": true,
+        "baselineId": "01923456-789a-7abc-8def-0123456789ab",
+        "fingerprint": "sha256:bac3805cd70e2ce390ef0c86dfe8605fee13be68476570f812615cc418bef874",
+        "readFiles": 5,
+        "readBytes": 116,
+        "scannerElapsedMs": 18,
+        "coverage": {
+          "complete": true,
+          "scope": "full",
+          "readFiles": 5,
+          "readBytes": 116,
+          "elapsedMs": 18,
+          "maxEntries": 1000,
+          "maxBytes": 268435456,
+          "maxDepth": 32,
+          "deadlineMs": 30000,
+          "entries": 11,
+          "excludedRoots": [
+            ".git",
+            "target"
+          ],
+          "errors": []
+        },
+        "changes": {
+          "created": [],
+          "removed": [],
+          "typeChanged": [],
+          "contentChanged": [
+            "src/main.rs"
+          ],
+          "allowed": [
+            "src/main.rs"
+          ],
+          "outOfScope": [],
+          "generatedRootChanges": []
+        }
+      },
+      "ignoredChanged": {
+        "label": "populated-ignored-changed",
+        "operation": "compare",
+        "exitCode": 2,
+        "wallMs": 51,
+        "ok": false,
+        "baselineId": "01923456-789a-7abc-8def-0123456789ab",
+        "fingerprint": "sha256:bac3805cd70e2ce390ef0c86dfe8605fee13be68476570f812615cc418bef874",
+        "readFiles": 5,
+        "readBytes": 116,
+        "scannerElapsedMs": 16,
+        "coverage": {
+          "complete": true,
+          "scope": "full",
+          "readFiles": 5,
+          "readBytes": 116,
+          "elapsedMs": 16,
+          "maxEntries": 1000,
+          "maxBytes": 268435456,
+          "maxDepth": 32,
+          "deadlineMs": 30000,
+          "entries": 11,
+          "excludedRoots": [
+            ".git",
+            "target"
+          ],
+          "errors": []
+        },
+        "changes": {
+          "created": [],
+          "removed": [],
+          "typeChanged": [],
+          "contentChanged": [
+            "protected/secret.txt",
+            "src/main.rs"
+          ],
+          "allowed": [
+            "src/main.rs"
+          ],
+          "outOfScope": [
+            "protected/secret.txt"
+          ],
+          "generatedRootChanges": []
+        }
+      },
+      "missingBaseline": {
+        "label": "populated-missing-baseline",
+        "operation": "compare",
+        "exitCode": 1,
+        "wallMs": 32,
+        "ok": false
+      },
+      "wrongBaseline": {
+        "label": "populated-wrong-baseline",
+        "operation": "compare",
+        "exitCode": 1,
+        "wallMs": 33,
+        "ok": false
+      }
+    },
+    "empty": {
+      "generatedFileCount": 0,
+      "snapshot": {
+        "label": "empty-snapshot",
+        "operation": "snapshot",
+        "exitCode": 0,
+        "wallMs": 50,
+        "ok": true,
+        "baselineId": "01923456-789a-7abc-8def-0123456789ac",
+        "fingerprint": "sha256:ab5f3fc354914cd3928de0f58f6b5de741fff79b59c25dd5560a147e5a2e27b2",
+        "readFiles": 5,
+        "readBytes": 122,
+        "scannerElapsedMs": 17,
+        "coverage": {
+          "complete": true,
+          "scope": "full",
+          "readFiles": 5,
+          "readBytes": 122,
+          "elapsedMs": 17,
+          "maxEntries": 1000,
+          "maxBytes": 268435456,
+          "maxDepth": 32,
+          "deadlineMs": 30000,
+          "entries": 11,
+          "excludedRoots": [
+            ".git",
+            "target"
+          ],
+          "errors": []
+        }
+      },
+      "unchanged": {
+        "label": "empty-unchanged",
+        "operation": "compare",
+        "exitCode": 0,
+        "wallMs": 50,
+        "ok": true,
+        "baselineId": "01923456-789a-7abc-8def-0123456789ac",
+        "fingerprint": "sha256:ab5f3fc354914cd3928de0f58f6b5de741fff79b59c25dd5560a147e5a2e27b2",
+        "readFiles": 5,
+        "readBytes": 122,
+        "scannerElapsedMs": 17,
+        "coverage": {
+          "complete": true,
+          "scope": "full",
+          "readFiles": 5,
+          "readBytes": 122,
+          "elapsedMs": 17,
+          "maxEntries": 1000,
+          "maxBytes": 268435456,
+          "maxDepth": 32,
+          "deadlineMs": 30000,
+          "entries": 11,
+          "excludedRoots": [
+            ".git",
+            "target"
+          ],
+          "errors": []
+        },
+        "changes": {
+          "created": [],
+          "removed": [],
+          "typeChanged": [],
+          "contentChanged": [],
+          "allowed": [],
+          "outOfScope": [],
+          "generatedRootChanges": []
+        }
+      },
+      "allowlisted": {
+        "label": "empty-allowlisted",
+        "operation": "compare",
+        "exitCode": 0,
+        "wallMs": 50,
+        "ok": true,
+        "baselineId": "01923456-789a-7abc-8def-0123456789ac",
+        "fingerprint": "sha256:ab5f3fc354914cd3928de0f58f6b5de741fff79b59c25dd5560a147e5a2e27b2",
+        "readFiles": 5,
+        "readBytes": 116,
+        "scannerElapsedMs": 17,
+        "coverage": {
+          "complete": true,
+          "scope": "full",
+          "readFiles": 5,
+          "readBytes": 116,
+          "elapsedMs": 17,
+          "maxEntries": 1000,
+          "maxBytes": 268435456,
+          "maxDepth": 32,
+          "deadlineMs": 30000,
+          "entries": 11,
+          "excludedRoots": [
+            ".git",
+            "target"
+          ],
+          "errors": []
+        },
+        "changes": {
+          "created": [],
+          "removed": [],
+          "typeChanged": [],
+          "contentChanged": [
+            "src/main.rs"
+          ],
+          "allowed": [
+            "src/main.rs"
+          ],
+          "outOfScope": [],
+          "generatedRootChanges": []
+        }
+      },
+      "ignoredChanged": {
+        "label": "empty-ignored-changed",
+        "operation": "compare",
+        "exitCode": 2,
+        "wallMs": 50,
+        "ok": false,
+        "baselineId": "01923456-789a-7abc-8def-0123456789ac",
+        "fingerprint": "sha256:ab5f3fc354914cd3928de0f58f6b5de741fff79b59c25dd5560a147e5a2e27b2",
+        "readFiles": 5,
+        "readBytes": 116,
+        "scannerElapsedMs": 17,
+        "coverage": {
+          "complete": true,
+          "scope": "full",
+          "readFiles": 5,
+          "readBytes": 116,
+          "elapsedMs": 17,
+          "maxEntries": 1000,
+          "maxBytes": 268435456,
+          "maxDepth": 32,
+          "deadlineMs": 30000,
+          "entries": 11,
+          "excludedRoots": [
+            ".git",
+            "target"
+          ],
+          "errors": []
+        },
+        "changes": {
+          "created": [],
+          "removed": [],
+          "typeChanged": [],
+          "contentChanged": [
+            "protected/secret.txt",
+            "src/main.rs"
+          ],
+          "allowed": [
+            "src/main.rs"
+          ],
+          "outOfScope": [
+            "protected/secret.txt"
+          ],
+          "generatedRootChanges": []
+        }
+      },
+      "missingBaseline": {
+        "label": "empty-missing-baseline",
+        "operation": "compare",
+        "exitCode": 1,
+        "wallMs": 33,
+        "ok": false
+      },
+      "wrongBaseline": {
+        "label": "empty-wrong-baseline",
+        "operation": "compare",
+        "exitCode": 1,
+        "wallMs": 32,
+        "ok": false
+      }
+    }
+  },
+  "observations": {
+    "generatedFilesDoNotEnterScan": true,
+    "normalUnchangedPreexistingDirtyPasses": true,
+    "allowlistedModificationPasses": true,
+    "ignoredSameLengthModificationCaptured": true,
+    "missingBaselineNonZero": true,
+    "wrongBaselineNonZero": true,
+    "populatedScanner": {
+      "readFiles": 5,
+      "readBytes": 122,
+      "elapsedMs": 18,
+      "cliWallMs": 52
+    },
+    "emptyScanner": {
+      "readFiles": 5,
+      "readBytes": 122,
+      "elapsedMs": 17,
+      "cliWallMs": 50
+    }
+  },
+  "limitations": [
+    "This is a synthetic fixture replay through the packaged CLI, not a measurement of real task efficiency.",
+    "The generated root is explicitly authorized and its contents are intentionally not enumerated by the boundary scanner.",
+    "No historical 820k-file corpus or speedup claim is inferred from this run.",
+    "Re-run after the final Rust/package build to refresh artifactSha256 and observations."
+  ]
+}

@@ -3,8 +3,8 @@
 use super::artifact::{workflow_local_dist_in, WORKFLOW_ARTIFACT_BYTES};
 use super::limits::try_reserve_live_attempt;
 use super::run_protocol::{
-    parse_agent_run_params, parse_run_scoped, validate_start_ack, workflow_start_params,
-    JournalTruncateParams,
+    parse_agent_run_params, parse_run_scoped, reusable_journal_prefix, validate_start_ack,
+    workflow_start_params, JournalTruncateParams,
 };
 use super::terminal::project_postcondition;
 use super::{
@@ -16,6 +16,120 @@ use crate::protocol::WorkflowDoneParams;
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage, WorkflowLimits};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+#[test]
+fn resume_reuses_only_the_contiguous_success_prefix() {
+    let entries: Vec<crate::protocol::JournalEntry> = serde_json::from_value(serde_json::json!([
+        {
+            "key": "first",
+            "seq": 0,
+            "result": {"kind": "ok", "output": "one", "usage": {"outputTokens": 1}}
+        },
+        {
+            "key": "failed",
+            "seq": 1,
+            "result": {"kind": "dead", "reason": "runagent-threw"}
+        },
+        {
+            "key": "later",
+            "seq": 2,
+            "result": {"kind": "ok", "output": "must-replay", "usage": {"outputTokens": 1}}
+        }
+    ]))
+    .unwrap();
+
+    let prefix = reusable_journal_prefix(entries);
+    assert_eq!(prefix.len(), 1);
+    assert_eq!(prefix[0].key, "first");
+}
+
+#[test]
+fn resume_skipped_entry_is_a_cache_boundary() {
+    let entries: Vec<crate::protocol::JournalEntry> = serde_json::from_value(serde_json::json!([
+        {
+            "key": "first",
+            "seq": 0,
+            "result": {"kind": "skipped"}
+        },
+        {
+            "key": "later",
+            "seq": 1,
+            "result": {"kind": "ok", "output": "must-replay", "usage": {"outputTokens": 1}}
+        }
+    ]))
+    .unwrap();
+
+    assert!(reusable_journal_prefix(entries).is_empty());
+}
+
+#[test]
+fn resume_gap_is_not_treated_as_a_success_prefix() {
+    let entries: Vec<crate::protocol::JournalEntry> = serde_json::from_value(serde_json::json!([
+        {
+            "key": "later",
+            "seq": 2,
+            "result": {"kind": "ok", "output": "must-replay", "usage": {"outputTokens": 1}}
+        }
+    ]))
+    .unwrap();
+
+    assert!(reusable_journal_prefix(entries).is_empty());
+}
+
+struct CountingAgentExecutor {
+    calls: Arc<AtomicU64>,
+}
+
+#[async_trait::async_trait]
+impl AgentExecutor for CountingAgentExecutor {
+    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        AgentRunResult::Dead {
+            reason: Some("test executor must not run".into()),
+            detail: None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn resume_sequence_gap_fails_before_any_agent_execution() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+    let journal = Arc::new(WorkflowJournalStore::new(cwd));
+    journal.init_run("source", "script").unwrap();
+    std::fs::write(
+        journal.run_dir("source").join("journal.jsonl"),
+        "{\"key\":\"later\",\"seq\":1,\"result\":{\"kind\":\"ok\",\"output\":\"later\",\"usage\":{\"outputTokens\":1}}}\n",
+    )
+    .unwrap();
+
+    let calls = Arc::new(AtomicU64::new(0));
+    let executor = Arc::new(CountingAgentExecutor {
+        calls: Arc::clone(&calls),
+    });
+    let runner = WorkflowRunner::new(executor, cwd, None);
+    let progress = Arc::new(WorkflowProgressStore::new());
+    let (done_tx, _done_rx) = tokio::sync::watch::channel(None);
+    let (_kill_tx, kill_rx) = tokio::sync::oneshot::channel();
+    let input = WorkflowInput {
+        script: "export const meta = { name: 'gap', description: 'gap' }".into(),
+        args: None,
+        max_concurrency: 3,
+        budget_total: None,
+        limits: WorkflowLimits::default(),
+        workflow_name: "gap".into(),
+        resume_from: Some("source".into()),
+        write_intent: None,
+        git_baseline: None,
+    };
+
+    let error = runner
+        .run("target".into(), input, progress, journal, done_tx, kill_rx)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("expected seq 0"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
 
 /// Mock executor: 返回固定结果（delay 用于模拟慢 agent，保证 kill 测试的窗口）
 struct MockAgentExecutor {

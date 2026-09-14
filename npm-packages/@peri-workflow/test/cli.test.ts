@@ -81,10 +81,11 @@ afterAll(() => {
 // ─── isCliCommand ──────────────────────────────────────────
 
 describe('isCliCommand', () => {
-  test('read/list/validate/help 变体都是 CLI 命令', () => {
+  test('read/list/validate/boundary/help 变体都是 CLI 命令', () => {
     expect(isCliCommand('read')).toBe(true)
     expect(isCliCommand('list')).toBe(true)
     expect(isCliCommand('validate')).toBe(true)
+    expect(isCliCommand('boundary')).toBe(true)
     expect(isCliCommand('--help')).toBe(true)
     expect(isCliCommand('-h')).toBe(true)
     expect(isCliCommand('help')).toBe(true)
@@ -95,6 +96,38 @@ describe('isCliCommand', () => {
     expect(isCliCommand('')).toBe(false)
     expect(isCliCommand('workflow/start')).toBe(false)
     expect(isCliCommand('foo')).toBe(false)
+  })
+})
+
+describe('cliMain boundary', () => {
+  test('snapshot then compare emits structured boundary evidence', () => {
+    logs = []
+    const repo = mkdtempSync(join(tmpdir(), 'workflow-boundary-cli-repo-'))
+    const requests = mkdtempSync(join(tmpdir(), 'workflow-boundary-cli-request-'))
+    writeFileSync(join(repo, 'tracked.txt'), 'baseline\n')
+    const requestPath = join(requests, 'request.json')
+    const request = {
+      schemaVersion: 1,
+      operation: 'snapshot',
+      baselineId: '018f3d5a-7b2c-4a11-8cde-1234567890ab',
+      repoRoot: repo,
+      cwd: repo,
+      limits: { maxEntries: 100, maxBytes: 1024 * 1024, maxDepth: 8, deadlineMs: 10_000 },
+      baselinePath: '.boundary.json',
+    }
+    writeFileSync(requestPath, JSON.stringify(request))
+
+    cliMain(['boundary', 'snapshot', requestPath])
+    const snapshot = JSON.parse(logs.join('\n'))
+    expect(snapshot.ok).toBe(true)
+    expect(snapshot.fingerprint).toMatch(/^sha256:[0-9a-f]{64}$/)
+
+    logs = []
+    writeFileSync(requestPath, JSON.stringify({ ...request, operation: 'compare', expectedBaselineFingerprint: snapshot.fingerprint }))
+    cliMain(['boundary', 'compare', requestPath])
+    const comparison = JSON.parse(logs.join('\n'))
+    expect(comparison.ok).toBe(true)
+    expect(comparison.changes.outOfScope).toEqual([])
   })
 })
 

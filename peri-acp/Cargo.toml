@@ -35,6 +35,7 @@ peri-agent = { path = "../peri-agent" }
 peri-controller = { path = "../peri-controller" }
 peri-model = { path = "../peri-model" }
 peri-middlewares = { path = "../peri-middlewares" }
+peri-resources = { path = "../peri-resources" }
 agent-client-protocol = { version = "2", features = ["unstable"] }
 agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_elicitation"] }
 tokio.workspace = true
@@ -62,5 +63,4 @@ langfuse-client = { path = "../langfuse-client" }
 # 测试面（requests_test.rs 构造真实 WorkflowMiddleware：WorkflowRun /
 # AgentExecutor 等 registry/runner 类型仅测试构造使用，不构成协议/业务面依赖）
 peri-workflow = { path = "../peri-workflow" }
-peri-resources = { path = "../peri-resources" }
 tracing-subscriber.workspace = true

@@ -30,6 +30,10 @@ fn limits_are_empty(limits: &crate::protocol::WorkflowLimits) -> bool {
         && limits.max_elapsed_ms.is_none()
 }
 
+fn default_max_concurrency() -> u32 {
+    3
+}
+
 /// workflow 运行的持久化状态快照。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
@@ -50,6 +54,15 @@ pub struct RunState {
     pub limits: crate::protocol::WorkflowLimits,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_total: Option<u64>,
+    /// Exact script arguments are part of the workflow input. Keeping them in
+    /// state makes an ACP resume reproducible instead of silently changing the
+    /// script's `args` value to `undefined`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+    /// The concurrency setting is input state too; legacy runs used the tool
+    /// default and therefore deserialize as three.
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<peri_acp_types::workflow::WorkflowAttempt>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,21 +127,60 @@ impl WorkflowJournalStore {
 
     /// 读取 journal.jsonl 全部条目，跳过空行和解析失败的行（宽容模式）。
     pub fn read_all(&self, run_id: &str) -> std::io::Result<Vec<JournalEntry>> {
+        self.read_all_impl(run_id, false)
+    }
+
+    /// Read a journal for resume without hiding corruption. The historical
+    /// inspection API remains permissive, but execution recovery must fail
+    /// closed when the source is missing, malformed, or has a sequence gap;
+    /// an interrupted run must return to its package checkpoint instead of
+    /// silently starting a fresh run.
+    pub fn read_all_strict(&self, run_id: &str) -> std::io::Result<Vec<JournalEntry>> {
+        self.read_all_impl(run_id, true)
+    }
+
+    fn read_all_impl(&self, run_id: &str, strict: bool) -> std::io::Result<Vec<JournalEntry>> {
         let path = self.run_dir(run_id).join("journal.jsonl");
         let file = File::open(path)?;
         let reader = std::io::BufReader::new(file);
         let mut entries = Vec::new();
-        for line in reader.lines() {
+        for (line_number, line) in reader.lines().enumerate() {
             let line = line?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(entry) = serde_json::from_str(trimmed) {
-                entries.push(entry);
+            match serde_json::from_str(trimmed) {
+                Ok(entry) => entries.push(entry),
+                Err(error) if strict => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid journal entry at line {}: {error}", line_number + 1),
+                    ));
+                }
+                Err(_) => {}
             }
         }
         entries.sort_by_key(|entry: &JournalEntry| entry.seq);
+        if strict {
+            for (expected_seq, entry) in entries.iter().enumerate() {
+                let expected_seq = u64::try_from(expected_seq).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "journal sequence exceeds u64",
+                    )
+                })?;
+                if entry.seq != expected_seq {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "journal sequence is not contiguous: expected seq {}, found seq {}; resume requires a workflow checkpoint replan",
+                            expected_seq, entry.seq
+                        ),
+                    ));
+                }
+            }
+        }
         Ok(entries)
     }
 

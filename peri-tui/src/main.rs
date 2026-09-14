@@ -12,6 +12,7 @@ mod cli_args;
 mod cli_meta;
 mod cli_plugin;
 mod cli_print;
+mod cli_workflow;
 
 // ─── Panic Hook（TUI 专用）───────────────────────────────────────────────────
 // 实现已移至 peri_tui::kit::panic（lib 侧），AppShell mount 后重装 hook，
@@ -107,6 +108,12 @@ enum Commands {
         /// Agent 类型（从 .claude/agents/ 中选择）
         #[arg(short = 'g', long)]
         agent: Option<String>,
+    },
+    /// 运行 workflow CLI 子命令（read/list/validate/boundary/adlc/help）
+    #[command(disable_help_flag = true)]
+    Workflow {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
     /// 查询 Peri 持久化 metadata
     Meta {
@@ -607,6 +614,9 @@ fn try_run_meta_before_configuration(args: &[OsString]) -> Option<Result<()>> {
 
 fn main() -> Result<()> {
     let args: Vec<OsString> = std::env::args_os().collect();
+    if cli_workflow::argv_requests_workflow(&args) {
+        return cli_workflow::run_before_configuration(&args);
+    }
     if argv_requests_meta(&args) {
         return try_run_meta_before_configuration(&args)
             .expect("Meta argv detection and dispatch must agree");
@@ -701,6 +711,9 @@ fn main() -> Result<()> {
             })
         }
         Some(Commands::Meta { .. }) => unreachable!("Meta 在配置读取前完成 dispatch"),
+        Some(Commands::Workflow { .. }) => {
+            unreachable!("Workflow 在配置读取前完成 dispatch")
+        }
         Some(Commands::Update) => {
             // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
             let rt = build_runtime()?;
