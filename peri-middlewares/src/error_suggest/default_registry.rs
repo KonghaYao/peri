@@ -4,12 +4,12 @@ use crate::error_suggest::suggesters::{
     bash_command_suggester::BashCommandSuggester, glob_pattern_suggester::GlobPatternSuggester,
     json_schema_suggester::JsonSchemaSuggester, path_suggester::PathSuggester,
     range_suggester::RangeSuggester, regex_suggester::RegexSuggester,
-    subagent_suggester::SubagentSuggester,
 };
 use std::sync::Arc;
 
 /// 构造默认 registry，按短路顺序注册
-/// 顺序：参数语法类（廉价）-> 范围 -> 路径 -> 命令 -> subagent（需 registry 查询）
+/// 顺序：参数语法类（廉价）-> 范围 -> 路径 -> 命令。
+/// Agent 建议由 SubAgentTool 在实际 loader 调用中生成，不能从 session snapshot 推断。
 pub fn build_default_registry() -> Arc<ErrorSuggestRegistry> {
     let suggesters: Vec<Box<dyn ErrorSuggester>> = vec![
         Box::new(JsonSchemaSuggester),  // B5 最先：参数级错误最廉价
@@ -18,7 +18,6 @@ pub fn build_default_registry() -> Arc<ErrorSuggestRegistry> {
         Box::new(RangeSuggester),       // B2
         Box::new(PathSuggester),        // A1-A4（需 IO）
         Box::new(BashCommandSuggester), // C1（需 PATH 扫描）
-        Box::new(SubagentSuggester),    // C3（registry 查询）
     ];
     Arc::new(ErrorSuggestRegistry::new(suggesters))
 }

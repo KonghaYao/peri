@@ -229,10 +229,8 @@ impl BaseTool for SubAgentTool {
         let agent_id = match &subagent_type {
             Some(id) => id.clone(),
             None => {
-                return Err(
-                    "Error: please provide subagent_type parameter to specify the agent type, or use fork: true for fork mode"
-                        .into(),
-                )
+                let error = "Error: please provide subagent_type parameter to specify the agent type, or use fork: true for fork mode";
+                return Err(self.agent_error_with_suggestions(error, None, &cwd).into());
             }
         };
 
@@ -241,7 +239,11 @@ impl BaseTool for SubAgentTool {
         } else {
             match self.load_agent_def(&agent_id, &cwd) {
                 Ok(agent) => agent,
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    return Err(self
+                        .agent_error_with_suggestions(&error, Some(&agent_id), &cwd)
+                        .into());
+                }
             }
         };
 

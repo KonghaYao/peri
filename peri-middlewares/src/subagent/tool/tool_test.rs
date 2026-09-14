@@ -221,6 +221,318 @@ fn plugin_definition_loader_rejects_traversal_agent_id() {
     assert!(error.contains("invalid agent definition ID"));
 }
 
+#[test]
+fn agent_suggestions_follow_the_invocation_cwd() {
+    let a = tempdir().unwrap();
+    let b = tempdir().unwrap();
+    let agents = a.path().join(".claude/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("local-agent.md"),
+        "---\nname: local-agent\ndescription: Local agent\n---\n\nLocal.\n",
+    )
+    .unwrap();
+    let tool = make_subagent_tool(Vec::new());
+    let error = "Error: cannot find agent definition 'local'";
+
+    let from_b =
+        tool.agent_error_with_suggestions(error, Some("local"), b.path().to_str().unwrap());
+    assert!(!from_b.contains("local-agent"));
+    let from_a =
+        tool.agent_error_with_suggestions(error, Some("local"), a.path().to_str().unwrap());
+    assert!(from_a.contains("local-agent"));
+}
+
+#[test]
+fn agent_suggestions_track_files_added_and_removed_mid_session() {
+    let dir = tempdir().unwrap();
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let path = agents.join("changing-agent.md");
+    std::fs::write(
+        &path,
+        "---\nname: changing-agent\ndescription: Changing agent\n---\n\nChanging.\n",
+    )
+    .unwrap();
+    let tool = make_subagent_tool(Vec::new());
+    let error = "Error: cannot find agent definition 'changing'";
+    let cwd = dir.path().to_str().unwrap();
+
+    assert!(tool
+        .agent_error_with_suggestions(error, Some("changing"), cwd)
+        .contains("changing-agent"));
+    std::fs::remove_file(path).unwrap();
+    assert!(!tool
+        .agent_error_with_suggestions(error, Some("changing"), cwd)
+        .contains("changing-agent"));
+}
+
+#[test]
+fn agent_suggestions_validate_flat_nested_plugin_and_builtin_sources() {
+    let dir = tempdir().unwrap();
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(agents.join("nested")).unwrap();
+    std::fs::write(
+        agents.join("flat.md"),
+        "---\nname: flat\ndescription: Flat agent\n---\n\nFlat.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        agents.join("nested/agent.md"),
+        "---\nname: nested\ndescription: Nested agent\n---\n\nNested.\n",
+    )
+    .unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let tool = make_subagent_tool(Vec::new());
+    let error = "Error: cannot find agent definition";
+    assert!(tool
+        .agent_error_with_suggestions(error, Some("neste"), cwd)
+        .contains("nested"));
+    assert!(tool
+        .agent_error_with_suggestions(error, Some("fla"), cwd)
+        .contains("flat"));
+
+    let plugin = tempdir().unwrap();
+    std::fs::write(
+        plugin.path().join("plugin-only.md"),
+        "---\nname: plugin-only\ndescription: Plugin agent\n---\n\nPlugin.\n",
+    )
+    .unwrap();
+    let plugin_tool = tool_with_built_ins_disabled(cwd)
+        .with_plugin_agent_dirs(Arc::new(vec![plugin.path().to_path_buf()]));
+    assert!(plugin_tool
+        .agent_error_with_suggestions(error, Some("plugin"), cwd)
+        .contains("plugin-only"));
+    assert!(!plugin_tool
+        .agent_error_with_suggestions(error, Some("explor"), cwd)
+        .contains("explorer"));
+
+    assert!(tool
+        .agent_error_with_suggestions(error, Some("explor"), cwd)
+        .contains("explorer"));
+}
+
+#[test]
+fn agent_suggestions_skip_invalid_and_shadowed_definitions() {
+    let dir = tempdir().unwrap();
+    let agents = dir.path().join(".claude/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(agents.join("broken.md"), "not valid frontmatter").unwrap();
+    std::fs::write(agents.join("coder.md"), "not valid frontmatter").unwrap();
+    let tool = make_subagent_tool(Vec::new());
+    let cwd = dir.path().to_str().unwrap();
+    let error = "Error: cannot find agent definition";
+
+    assert!(!tool
+        .agent_error_with_suggestions(error, Some("broke"), cwd)
+        .contains("broken"));
+    assert!(!tool
+        .agent_error_with_suggestions(error, Some("code"), cwd)
+        .contains("coder"));
+}
+
+#[tokio::test]
+async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let a = tempdir().unwrap();
+    let b = tempdir().unwrap();
+    let agents = b.path().join(".claude/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("actual-agent.md"),
+        "---\nname: actual-agent\ndescription: Actual agent\n---\n\nActual.\n",
+    )
+    .unwrap();
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let factory_calls_clone = Arc::clone(&factory_calls);
+    let tool = SubAgentTool::new(
+        Arc::new(Vec::new()),
+        None,
+        Arc::new(move |_| {
+            factory_calls_clone.fetch_add(1, Ordering::SeqCst);
+            Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+        }),
+        a.path().to_str().unwrap().to_string(),
+    );
+    let a_cwd = a.path().to_str().unwrap();
+    let b_cwd = b.path().to_str().unwrap();
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "actual-agent",
+                "prompt": "from B",
+                "cwd": b_cwd,
+            }),
+            peri_agent::tools::ToolContext::new(&[], a_cwd),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("echo: from B"));
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+
+    let typo = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "actual",
+                "prompt": "typo",
+                "cwd": b_cwd,
+            }),
+            peri_agent::tools::ToolContext::new(&[], a_cwd),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(typo.contains("actual-agent"));
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+
+    let stale = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "actual",
+                "prompt": "stale cwd",
+                "cwd": a_cwd,
+            }),
+            peri_agent::tools::ToolContext::new(&[], a_cwd),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!stale.contains("actual-agent"));
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn background_invoke_uses_argument_cwd_for_loader_failure() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let a = tempdir().unwrap();
+    let b = tempdir().unwrap();
+    let agents = b.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("background-agent.md"),
+        "---\nname: background-agent\ndescription: Background agent\n---\n\nBackground.\n",
+    )
+    .unwrap();
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let factory_calls_clone = Arc::clone(&factory_calls);
+    let tool = SubAgentTool::new(
+        Arc::new(Vec::new()),
+        None,
+        Arc::new(move |_| {
+            factory_calls_clone.fetch_add(1, Ordering::SeqCst);
+            Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+        }),
+        a.path().to_str().unwrap().to_string(),
+    )
+    .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()));
+    let a_cwd = a.path().to_str().unwrap();
+    let b_cwd = b.path().to_str().unwrap();
+
+    let typo = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "background",
+                "run_in_background": true,
+                "prompt": "typo",
+                "cwd": b_cwd,
+            }),
+            peri_agent::tools::ToolContext::new(&[], a_cwd),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(typo.contains("background-agent"));
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+
+    let stale = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "background",
+                "run_in_background": true,
+                "prompt": "stale cwd",
+                "cwd": a_cwd,
+            }),
+            peri_agent::tools::ToolContext::new(&[], a_cwd),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!stale.contains("background-agent"));
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn mcp_agent_suggestions_require_activation_and_connection() {
+    use crate::mcp::{
+        client::{ClientStatus, McpClientHandle, OAuthStatus},
+        McpAgentRegistry, McpClientPool,
+    };
+    use rmcp::model::Resource;
+
+    let empty_pool = Arc::new(McpClientPool::new_empty());
+    let empty_registry = Arc::new(McpAgentRegistry::new(empty_pool));
+    let empty_tool = make_subagent_tool(Vec::new()).with_mcp_agents(Some(empty_registry), None);
+    let unactivated = empty_tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "mcp__offline__review",
+                "prompt": "remote",
+            }),
+            peri_agent::tools::ToolContext::new(&[], "/tmp"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(unactivated.contains("cannot find MCP agent definition"));
+    assert!(!unactivated.contains("Suggestion"));
+    assert!(!unactivated.contains("Available agent types"));
+
+    let pool = Arc::new(McpClientPool::new_empty());
+    pool.clients.write().insert(
+        "offline".to_string(),
+        Arc::new(McpClientHandle {
+            name: "offline".to_string(),
+            version: None,
+            cache_version: None,
+            peer: None,
+            tools: Vec::new(),
+            resources: vec![Resource::new(
+                "agent://review/agent.md".to_string(),
+                "Review agent",
+            )],
+            // The catalog can expose metadata while the runtime peer has already gone away.
+            status: ClientStatus::Connected,
+            oauth_status: OAuthStatus::None,
+            source: None,
+            url: None,
+            skills_capable: false,
+            channel_capable: false,
+        }),
+    );
+    let registry = Arc::new(McpAgentRegistry::new(pool));
+    let tool = make_subagent_tool(Vec::new()).with_mcp_agents(Some(registry), None);
+    let disconnected = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "mcp__offline__review",
+                "prompt": "remote",
+            }),
+            peri_agent::tools::ToolContext::new(&[], "/tmp"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        disconnected.contains("no active peer"),
+        "unexpected disconnected activation error: {disconnected}"
+    );
+    assert!(!disconnected.contains("Suggestion"));
+    assert!(!disconnected.contains("Available agent types"));
+}
+
 /// 构造 FilesystemThreadStore（写盘即时刷新，无需 flush）
 fn make_fs_store(dir: &tempfile::TempDir) -> Arc<peri_agent::thread::FilesystemThreadStore> {
     Arc::new(peri_agent::thread::FilesystemThreadStore::new(

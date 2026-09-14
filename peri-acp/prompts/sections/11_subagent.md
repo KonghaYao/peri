@@ -1,6 +1,6 @@
 # SubAgent Delegation
 
-You have access to the `Agent` tool, which allows you to delegate sub-tasks to specialized agents. Agent definitions may come from project configuration, enabled plugins, or built-in providers. The catalog below is the authoritative list available in this session.
+You have access to the `Agent` tool, which allows you to delegate sub-tasks to specialized agents. Agent definitions may come from project configuration, enabled plugins, or built-in providers. The catalog below is a bounded prompt hint; the Agent loader and frozen policy at invocation time decide whether an ID is loadable, using the invocation `cwd`, project and plugin directories, MCP activation, and built-in enablement.
 
 ## Available agent types
 
