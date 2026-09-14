@@ -1,0 +1,26 @@
+{
+  "date": "2026-09-14",
+  "reviewer": "independent Luna subagent execution_evidence_review",
+  "verdict": "No remaining blocker within issue5 scope; root final snapshot validation recorded separately.",
+  "source_hashes": {
+    "peri-model/src/runtime/error.rs": "64b854ec54581a32de4b5f8929329693a0b7938f9b54b5c2d76b7d591d9b459a",
+    "peri-model/src/runtime/retry.rs": "69747d4ae0de17714396b1ddcb85f0e4e3860ea5edcd6acf8e935154303ecc37",
+    "peri-acp-types/src/error.rs": "681c499f233eb51362263ae78993d1cf1bdc4ba001bec62e9fcd922186569f17",
+    "peri-acp/src/session/retry_events_test.rs": "14a2185aa6d9994c72598f20edc00952e11a3639945ca0ff420b56de56f77034",
+    "peri-middlewares/src/subagent/tool/model_failure_test.rs": "931d014ce2563c9c487e724d5f075432d23ad4fd0f3df32bcdda6706efd37ed0",
+    "peri-middlewares/src/subagent/mod_test.rs": "45164b3aa4288969eccb5d5d90a5bd8ceb31c8448b8c9fa3a4fa1995761495cd"
+  },
+  "closed_findings": [
+    "Producer-compatible diagnostic matrix and safe serde roundtrip",
+    "Zero retry attempts rejected by fallible public constructor",
+    "Retry category and diagnostic derived from one ModelError",
+    "Canonical, background, live, replay and ACP safe projections",
+    "Exactly one stop per child in actual sync/background fixture paths",
+    "Remaining middleware prompt assertion aligned with loader suggestion semantics; independent review and targeted test passed."
+  ],
+  "limits": [
+    "Loopback provider and deterministic parent driver replace external uncertainty; internal child runtime and dispatch remain real.",
+    "ACP activity intentionally exposes less than legacy Agent events.",
+    "Tests do not establish production task-quality improvement."
+  ]
+}

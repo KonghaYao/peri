@@ -1,0 +1,31 @@
+{
+  "base": "4231b80370c978affb61f188fb7ac30a15af33b6",
+  "worktree": "/private/tmp/peri-prompt-completion.vp5214_g",
+  "files": {
+    "peri-acp/prompts/sections/11_subagent.md": "3bd085f985bba4141afc236b0f143558f2d7f2e5fc7fc16c07e25cb72185e5b5",
+    "peri-acp/src/prompt/prompt_test.rs": "4931700ac17ef364920abae14ae46423f0f0be2be4a5d9b807da042e337698ba",
+    ".claude/skills/auto-data-researcher/SKILL.md": "c4fdbe3b0437941714e47159c63985bd2f03da17038b6fb22cc359fff7bc0804"
+  },
+  "validation": {
+    "command": "cargo test -p peri-acp --lib prompt::tests",
+    "exit_code": 0,
+    "test_results": [
+      "test result: ok. 105 passed; 0 failed; 0 ignored; 0 measured; 546 filtered out; finished in 0.62s"
+    ],
+    "log": "prompt-completion-validation.txt",
+    "log_sha256": "c8d460f60abc93e53483cf995806ae9b34f8f7f436f19f81a7f6cdc467ecca7d",
+    "saved_log_sha256": "9a5323d70322673db1be2903c96fef6346699dc3c6cfb1d69e8ce2e2b07757ed",
+    "normalization": "Trailing blank lines removed only."
+  },
+  "commit": "9495928bb06c973bd1b1ee3ae3a2f6d636a9a29b",
+  "normal_pre_commit_hooks": {
+    "exit_code": 0,
+    "checks": [
+      "cargo check",
+      "cargo clippy -- -W clippy::all",
+      "cargo fmt --check",
+      "typos",
+      "layer-imports"
+    ]
+  }
+}

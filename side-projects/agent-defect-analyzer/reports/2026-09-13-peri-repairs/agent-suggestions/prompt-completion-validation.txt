@@ -1,0 +1,124 @@
+   Compiling peri-process v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-process)
+   Compiling peri-model v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-model)
+   Compiling langfuse-client v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/langfuse-client)
+   Compiling peri-js-runtime v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-js-runtime)
+   Compiling peri-acp-types v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-acp-types)
+   Compiling peri-lsp v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-lsp)
+   Compiling peri-workflow v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-workflow)
+   Compiling peri-runtime v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-runtime)
+   Compiling peri-resources v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-resources)
+   Compiling peri-agent v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-agent)
+   Compiling peri-middlewares v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-middlewares)
+   Compiling peri-controller v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-controller)
+   Compiling peri-acp v0.2.0 (/private/tmp/peri-prompt-completion.vp5214_g/peri-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 58.13s
+     Running unittests src/lib.rs (/Users/konghayao/code/ai/perihelion/target/debug/deps/peri_acp-8a31376ebb825fc5)
+
+running 105 tests
+test dispatch::prompt::tests::test_handle_prompt_missing_session_id ... ok
+test dispatch::prompt::tests::test_extract_prompt_params_missing_session_id ... ok
+test dispatch::prompt::tests::test_validate_run_prompt_body_allows_empty_prompt_array ... ok
+test dispatch::prompt::tests::test_extract_and_validate_run_prompt_params_missing_message ... ok
+test dispatch::prompt::tests::test_extract_prompt_params_defaults_empty_content_without_body_keys ... ok
+test dispatch::prompt::tests::test_validate_run_prompt_body_missing_message_when_no_keys_and_empty ... ok
+test dispatch::prompt::tests::test_validate_run_prompt_body_rejects_non_array_prompt ... ok
+test host::prompt::tests::wire_projection::execution_failure_kind_exhaustive_mapping_pins_named_code ... ok
+test host::prompt::tests::test_stdio_filters_rewind_and_clear_only_when_stdio ... ok
+test dispatch::prompt::tests::test_extract_prompt_params_basic ... ok
+test dispatch::prompt::tests::test_prompt_blocks_to_content_empty_or_malformed_falls_back_text ... ok
+test dispatch::prompt::tests::test_extract_prompt_params_message_takes_priority_over_prompt ... ok
+test dispatch::prompt::tests::test_handle_prompt_success ... ok
+test dispatch::prompt::tests::test_handle_prompt_session_not_found ... ok
+test host::prompt::tests::wire_projection::fatal_failure_empty_message_falls_back_to_nonempty_safe_text ... ok
+test host::prompt::tests::wire_projection::fatal_failure_maps_to_server_error_with_code_message_data ... ok
+test host::prompt::tests::wire_projection::non_http_failure_omits_status_even_for_inconsistent_input ... ok
+test host::prompt::tests::test_continuation_recall_not_consumed_or_overwritten ... ok
+test dispatch::prompt::tests::test_extract_prompt_params_stdio_prompt_text_blocks ... ok
+test host::prompt::tests::wire_projection::prompt_wire_response_cancel_is_success_prompt_response ... ok
+test dispatch::prompt::tests::test_extract_and_validate_run_prompt_params_attachments_only ... ok
+test host::prompt::tests::wire_projection::llm_http_failure_maps_status_and_redacted_original_to_wire ... ok
+test host::prompt::tests::wire_projection::prompt_wire_response_end_turn_is_success_prompt_response ... ok
+test host::prompt::tests::wire_projection::prompt_wire_response_max_turn_requests_is_success_prompt_response ... ok
+test dispatch::prompt::tests::test_validate_run_prompt_body_allows_attachments_only ... ok
+test dispatch::prompt::tests::test_extract_prompt_params_stdio_prompt_with_attachments_image ... ok
+test dispatch::prompt::tests::test_extract_prompt_params_attachments_only ... ok
+test dispatch::prompt::tests::test_prompt_blocks_to_content_image_and_unknown_skipped ... ok
+test dispatch::prompt::tests::test_extract_prompt_params_with_attachments ... ok
+test dispatch::prompt::tests::test_prompt_blocks_to_content_image_snake_case_fallback ... ok
+test host::prompt::tests::wire_projection::prompt_wire_response_fatal_returns_error_with_allowlist_data ... ok
+test host::prompt::tests::wire_projection::llm_http_serialized_error_redacts_structured_secrets ... ok
+test prompt::tests::collected_section_overrides_builtin_by_id ... ok
+test prompt::tests::meta_harness_override_05_using_tools ... ok
+test prompt::tests::meta_harness_override_13_skills_gated ... ok
+test prompt::tests::collected_duplicate_id_last_wins ... ok
+test prompt::tests::meta_harness_disabling_holder_removes_section ... ok
+test prompt::tests::collected_empty_content_skipped ... ok
+test prompt::tests::meta_harness_gated_enabled_shows_override ... ok
+test prompt::tests::collected_sections_render_regardless_of_feature_gates ... ok
+test prompt::tests::meta_harness_disabled_set_does_not_affect_sections ... ok
+test prompt::tests::section_ids_match_arrays_and_holders ... ok
+test prompt::tests::collected_content_merged_with_meta_harness_override ... ok
+test prompt::tests::meta_harness_override_empty_removes_section ... ok
+test prompt::tests::meta_harness_override_11_subagent_replaces_holder_section ... ok
+test prompt::tests::meta_harness_multiple_overrides_apply_together ... ok
+test prompt::tests::collected_same_zone_order_stable ... ok
+test prompt::tests::collected_sections_render_in_position_order ... ok
+test prompt::tests::collected_dynamic_content_rendered ... ok
+test prompt::tests::test_declaration_segment_is_single_source_and_05_has_no_tool_entries ... ok
+test prompt::tests::meta_harness_override_whitespace_renders_as_is ... ok
+test prompt::tests::test_detect_default_values ... ok
+test prompt::tests::meta_harness_override_placeholders_still_substituted ... ok
+test prompt::tests::test_detect_is_git_repo_in_subdirectory ... ok
+test prompt::tests::test_detect_is_git_repo_non_repo ... ok
+test prompt::tests::meta_harness_override_not_trimmed ... ok
+test prompt::tests::test_detect_is_git_repo_with_git_file_worktree ... ok
+test prompt::tests::test_format_available_agents_empty_dir ... ok
+test prompt::tests::meta_harness_override_replaces_section_full_text ... ok
+test prompt::tests::test_format_available_agents_with_agents ... ok
+test prompt::tests::meta_harness_persona_full_keeps_overridden_immutable_sections ... ok
+test prompt::tests::meta_harness_unoverridden_section_unchanged ... ok
+test prompt::tests::meta_harness_build_and_template_byte_identical ... ok
+test prompt::tests::test_boundary_marker_before_dynamic_content ... ok
+test prompt::tests::meta_harness_gated_override_hidden_only_when_holder_disabled ... ok
+test prompt::tests::test_all_features_enabled_includes_all ... ok
+test prompt::tests::test_available_agents_replaced_when_subagent_holder_enabled ... ok
+test prompt::tests::test_boundary_marker_with_all_features ... ok
+test prompt::tests::test_available_agents_placeholder_empty_dir ... ok
+test prompt::tests::test_detect_channel_gate_never_enabled ... ok
+test prompt::tests::test_available_agents_placeholder_replaced ... ok
+test prompt::tests::test_env_contains_cwd ... ok
+test prompt::tests::test_language_custom_code_passthrough ... ok
+test prompt::tests::test_gated_sections_render_in_position_order ... ok
+test prompt::tests::meta_harness_override_language_without_config ... ok
+test prompt::tests::test_features_none_excludes_only_unheld_channel_section ... ok
+test prompt::tests::test_language_none_no_injection ... ok
+test prompt::tests::test_language_section_after_dynamic_content ... ok
+test prompt::tests::meta_harness_override_persona_without_overrides ... ok
+test prompt::tests::test_hitl_section_rendered_by_holder ... ok
+test prompt::tests::test_no_overrides_contains_all_sections ... ok
+test prompt::tests::test_language_simplified_chinese_injected ... ok
+test prompt::tests::test_no_overrides_no_duplicate_tone_proactiveness ... ok
+test prompt::tests::test_language_zh_maps_to_simplified_chinese ... ok
+test prompt::tests::test_no_overrides_no_leading_newlines ... ok
+test prompt::tests::test_default_production_template_emits_one_cache_boundary ... ok
+test prompt::tests::test_overrides_after_boundary_marker ... ok
+test prompt::tests::test_placeholders_replaced ... ok
+test prompt::tests::test_render_full_mode_keeps_env ... ok
+test prompt::tests::test_render_full_mode_preserves_tool_discipline ... ok
+test prompt::tests::test_render_full_mode_preserves_git_guardrails ... ok
+test prompt::tests::test_subagent_section_rendered_by_holder ... ok
+test prompt::tests::test_render_full_mode_preserves_immutable_layers ... ok
+test prompt::tests::test_subagent_section_does_not_hardcode_built_in_agent_ids ... ok
+test prompt::tests::test_render_full_mode_preserves_secret_policy ... ok
+test prompt::tests::test_render_immutable_layer_order ... ok
+test prompt::tests::test_skills_section_rendered_by_holder ... ok
+test prompt::tests::test_subagent_selection_guide_has_no_specific_mapping ... ok
+test prompt::tests::test_with_overrides_uses_override_block ... ok
+test prompt::tests::test_render_full_mode_prefix_aligned_with_extend ... ok
+test prompt::tests::test_render_extend_mode_unchanged ... ok
+test prompt::tests::test_template_byte_identical_and_one_boundary_marker ... ok
+test prompt::tests::test_workflow_section_deleted_entirely ... ok
+test prompt::tests::test_prompt_cache_boundary_four_state_matrix_preserves_old_wire_bytes ... ok
+test prompt::tests::test_prompt_template_byte_identical_to_build_system_prompt ... ok
+
+test result: ok. 105 passed; 0 failed; 0 ignored; 0 measured; 546 filtered out; finished in 0.62s

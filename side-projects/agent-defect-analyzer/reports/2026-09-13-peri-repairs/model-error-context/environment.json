@@ -1,0 +1,38 @@
+{
+  "platform": "Darwin",
+  "machine": "arm64",
+  "versions": {
+    "rustc": {
+      "exit_code": 0,
+      "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+    },
+    "cargo": {
+      "exit_code": 0,
+      "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+    },
+    "node": {
+      "exit_code": 0,
+      "version": "v22.20.0"
+    },
+    "bun": {
+      "exit_code": 0,
+      "version": "1.4.0"
+    }
+  },
+  "ptc_fixture_preparation": {
+    "command": "bun run build",
+    "directory": "npm-packages/@peri-ptc",
+    "exit_code": 0,
+    "dependencies": "reused already installed node_modules; built dist from the isolated Git source",
+    "artifacts": [
+      {
+        "path": "npm-packages/@peri-ptc/dist/peri-ptc.js",
+        "sha256": "2fc964c662b51528e99141ded3827c49f7da358c1a0fc23e899f9f69fba55190"
+      },
+      {
+        "path": "npm-packages/@peri-ptc/dist/index.js",
+        "sha256": "a205112436e6d02b5899e61f7f004b989b161a32e66d46799bede84cce13ca08"
+      }
+    ]
+  }
+}
