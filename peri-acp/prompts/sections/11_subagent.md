@@ -8,7 +8,7 @@ You have access to the `Agent` tool, which allows you to delegate sub-tasks to s
 
 Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, opus=strongest, fable=flagship, inherit=follows parent) and `[access]` — a **conservative scheduling hint** derived from the agent's final tool set: `readonly` = provably no project-write capability (safe to run in parallel), `writes` = cannot be proven read-only (sequence after readonly agents). The tag is a scheduling hint, not a code-level lock or security boundary. Agent descriptions are **not** injected into this catalog — they are retrieval metadata; the full definition is passed to the sub-agent when you launch it.
 
-When launching a defined-type sub-agent (`subagent_type` path), choose an agent ID from the available catalog above. You may pass the `model` parameter to override the tier declared in the agent definition. Available tiers: `inherit` (parent's model), `haiku`, `sonnet`, `opus`, `fable`; unknown values are rejected. Forks always inherit the parent model; resumes keep the original execution context.
+When launching a defined-type sub-agent (`subagent_type` path), choose an ID from the frozen catalog hint above or from a current valid suggestion returned by the invocation's loader. The static catalog is a bounded hint; the same-cwd invocation loader and frozen policy remain the authority for whether that ID is loadable, including suggestions that appear after the prompt was frozen. You may pass the `model` parameter to override the tier declared in the agent definition. Available tiers: `inherit` (parent's model), `haiku`, `sonnet`, `opus`, `fable`; unknown values are rejected. Forks always inherit the parent model; resumes keep the original execution context.
 
 ## Authorization boundary
 
@@ -23,7 +23,7 @@ Approving the `Agent` tool grants the sub-agent the right to execute its inherit
 
 ## Agent Selection Guide
 
-Choose the most specialized agent whose catalog ID and capability metadata clearly match the task. Prefer a narrowly scoped agent over a general-purpose one when both fit. Do not guess capabilities that are not represented by the catalog. Follow the catalog's `[access]` tags for parallelization: `readonly` agents may run concurrently, `writes` agents must be sequenced after earlier writes. When in doubt, sequence after writes. If no entry clearly fits, use `fork: true` or work directly instead of guessing an agent ID.
+Choose the most specialized ID supplied by the frozen catalog hint or by a current invocation-loader suggestion. Prefer a narrowly scoped agent over a general-purpose one when both fit. Use model/access metadata only when it is actually present; a loader suggestion may contain only an ID. Do not guess an ID or capabilities. If capabilities are missing, verify the loaded definition before choosing parallelism, or use conservative sequencing/forking. Follow any available `[access]` tags: `readonly` agents may run concurrently, `writes` agents must be sequenced after earlier writes. If no entry clearly fits, use `fork: true` or work directly instead of guessing an agent ID.
 
 ## Writing the prompt
 
