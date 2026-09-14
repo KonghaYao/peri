@@ -67,6 +67,41 @@ pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpE
             data.insert("status".to_string(), Value::from(status));
         }
     }
+    if let Some(diagnostic) = &failure.diagnostic {
+        let mut projection = serde_json::Map::new();
+        projection.insert(
+            "category".to_string(),
+            Value::String(diagnostic.category_name().to_string()),
+        );
+        if let Some(status) = diagnostic.status() {
+            projection.insert("status".to_string(), Value::from(status));
+        }
+        if let Some(provider) = diagnostic.provider() {
+            projection.insert("provider".to_string(), Value::String(provider.to_string()));
+        }
+        if let Some(request_id) = diagnostic.request_id() {
+            projection.insert(
+                "request_id".to_string(),
+                Value::String(request_id.to_string()),
+            );
+        }
+        if let Some(transport) = diagnostic.transport() {
+            projection.insert(
+                "transport".to_string(),
+                Value::String(transport.to_string()),
+            );
+        }
+        if let Some(protocol) = diagnostic.protocol() {
+            projection.insert("protocol".to_string(), Value::String(protocol.to_string()));
+        }
+        if let Some(attempts) = diagnostic.retry_attempts() {
+            projection.insert("retry_attempts".to_string(), Value::from(attempts));
+        }
+        if let Some(kind) = diagnostic.retry_kind() {
+            projection.insert("retry_kind".to_string(), Value::String(kind.to_string()));
+        }
+        data.insert("diagnostic".to_string(), Value::Object(projection));
+    }
     AcpError {
         code: execution_failure_kind_code(failure.kind),
         message: failure.public_message.clone(),

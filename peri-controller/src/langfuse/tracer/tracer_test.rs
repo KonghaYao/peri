@@ -483,6 +483,7 @@ async fn test_turn_error_reason_is_safe_in_error_span() {
             kind: peri_acp_types::session::ExecutionFailureKind::Llm,
             public_message: "LLM failure".to_string(),
             http_status: None,
+            diagnostic: None,
         },
     });
     tokio::task::yield_now().await;

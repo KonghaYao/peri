@@ -184,6 +184,7 @@ pub async fn replay_session_history(
                 is_error,
                 tool_call_id,
                 execution,
+                subagent_failure,
                 ..
             } => {
                 let result_text = ToolOutput {
@@ -205,10 +206,16 @@ pub async fn replay_session_history(
                         *is_error,
                     ))
                     .raw_output(Some(serde_json::Value::String(result_text)));
-                let update = SessionUpdate::ToolCallUpdate(replay_tool_update(
-                    ToolCallUpdate::new(ToolCallId::new(tool_call_id.clone()), fields),
-                    caps,
-                ));
+                let update = ToolCallUpdate::new(ToolCallId::new(tool_call_id.clone()), fields);
+                let update = if let Some(failure) = subagent_failure {
+                    update.meta(serde_json::Map::from_iter([(
+                        "peri".to_string(),
+                        serde_json::json!({ "subagentFailure": failure }),
+                    )]))
+                } else {
+                    update
+                };
+                let update = SessionUpdate::ToolCallUpdate(replay_tool_update(update, caps));
                 let notif =
                     SessionNotification::new(SessionId::new(session_id.to_string()), update);
                 sender.send(notif).await?;
@@ -252,9 +259,9 @@ fn replay_tool(mut tc: ToolCall, caps: &PeriCaps) -> ToolCall {
 /// 给 `ToolCallUpdate` 打上 periReplay meta 标记。
 fn replay_tool_update(mut tu: ToolCallUpdate, caps: &PeriCaps) -> ToolCallUpdate {
     if caps.replay {
-        let mut meta = serde_json::Map::new();
-        meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
-        tu.meta = Some(meta);
+        tu.meta
+            .get_or_insert_with(serde_json::Map::new)
+            .insert("periReplay".to_string(), serde_json::Value::Bool(true));
     }
     tu
 }

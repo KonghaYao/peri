@@ -60,6 +60,7 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
             name,
             output,
             is_error,
+            subagent_failure,
             ..
         } => Some(ExecutorEvent::ToolEnd {
             message_id: MessageId::from(turn_id.as_uuid()),
@@ -68,6 +69,7 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
             output,
             is_error,
             source_agent_id: None,
+            subagent_failure,
         }),
         RenderEvent::BudgetWarning {
             used_tokens,
@@ -247,12 +249,14 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             child_agent_id,
             result,
             is_error,
+            subagent_failure,
             ..
         } => Some(ExecutorEvent::SubagentStopped {
             agent_name,
             result,
             is_error,
             instance_id: child_agent_id.to_string(),
+            subagent_failure,
         }),
         ObserveEvent::LlmRequestPayload { step, body, .. } => {
             Some(ExecutorEvent::LlmRequestPayload { step, body })

@@ -107,6 +107,26 @@ pub(crate) fn build_subagent_stop_v2(
     result: &str,
     is_error: bool,
 ) -> ObserveEvent {
+    build_subagent_stop_v2_with_failure(
+        turn_id,
+        parent_agent_id,
+        child_agent_id,
+        agent_name,
+        result,
+        is_error,
+        None,
+    )
+}
+
+pub(crate) fn build_subagent_stop_v2_with_failure(
+    turn_id: TurnId,
+    parent_agent_id: Option<AgentId>,
+    child_agent_id: AgentId,
+    agent_name: &str,
+    result: &str,
+    is_error: bool,
+    subagent_failure: Option<peri_acp_types::error::SafeSubagentFailure>,
+) -> ObserveEvent {
     ObserveEvent::SubagentStop {
         turn_id,
         agent_id: parent_agent_id.unwrap_or(child_agent_id),
@@ -114,21 +134,33 @@ pub(crate) fn build_subagent_stop_v2(
         agent_name: agent_name.to_string(),
         result: result.to_string(),
         is_error,
+        subagent_failure,
     }
 }
 
-/// 经 child EventBus 发射 v2 `SubagentStop`（C3）。
-///
-/// 与 [`emit_subagent_start_v2`] 同一通道；parent_agent_id 为 None 时同样跳过。
-pub(crate) fn emit_subagent_stop_v2(
+pub(crate) struct SubagentStopV2Input<'a> {
+    pub(crate) turn_id: TurnId,
+    pub(crate) parent_agent_id: Option<AgentId>,
+    pub(crate) child_agent_id: AgentId,
+    pub(crate) agent_name: &'a str,
+    pub(crate) result: &'a str,
+    pub(crate) is_error: bool,
+    pub(crate) subagent_failure: Option<peri_acp_types::error::SafeSubagentFailure>,
+}
+
+pub(crate) fn emit_subagent_stop_v2_with_failure(
     event_bus: &Arc<EventBus>,
-    turn_id: TurnId,
-    parent_agent_id: Option<AgentId>,
-    child_agent_id: AgentId,
-    agent_name: &str,
-    result: &str,
-    is_error: bool,
+    input: SubagentStopV2Input<'_>,
 ) {
+    let SubagentStopV2Input {
+        turn_id,
+        parent_agent_id,
+        child_agent_id,
+        agent_name,
+        result,
+        is_error,
+        subagent_failure,
+    } = input;
     if parent_agent_id.is_none() {
         tracing::warn!(
             target: "langfuse::subagent",
@@ -138,13 +170,14 @@ pub(crate) fn emit_subagent_stop_v2(
         );
         return;
     }
-    event_bus.emit_observe(build_subagent_stop_v2(
+    event_bus.emit_observe(build_subagent_stop_v2_with_failure(
         turn_id,
         parent_agent_id,
         child_agent_id,
         agent_name,
         result,
         is_error,
+        subagent_failure,
     ));
 }
 

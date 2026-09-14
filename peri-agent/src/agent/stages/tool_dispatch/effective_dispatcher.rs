@@ -105,7 +105,11 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
                     EffectiveToolErrorCode::ToolFailed
                 }
             });
-            return Err(EffectiveToolError::new(code, result.output));
+            let mut error = EffectiveToolError::new(code, result.output);
+            if let Some(failure) = result.subagent_failure {
+                error = error.with_subagent_failure(failure);
+            }
+            return Err(error);
         }
         Ok(result.output)
     }
@@ -117,12 +121,16 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
     ) -> Result<ToolOutput, EffectiveToolError> {
         let result = self.dispatch_result(call, cancel).await?;
         if result.is_error && result.execution.is_none() {
-            return Err(EffectiveToolError::new(
+            let mut error = EffectiveToolError::new(
                 result
                     .effective_error_code
                     .unwrap_or(EffectiveToolErrorCode::ToolFailed),
                 result.output,
-            ));
+            );
+            if let Some(failure) = result.subagent_failure {
+                error = error.with_subagent_failure(failure);
+            }
+            return Err(error);
         }
         Ok(ToolOutput {
             text: result.output,

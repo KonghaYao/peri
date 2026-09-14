@@ -158,3 +158,7 @@ impl SubagentChainAssembler for SubagentChainAssemblerImpl {
 #[cfg(test)]
 #[path = "tool_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "model_failure_test.rs"]
+mod model_failure_tests;

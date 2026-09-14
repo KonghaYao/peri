@@ -119,6 +119,8 @@ pub enum AcpEvent {
         result: String,
         is_error: bool,
         instance_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent_failure: Option<peri_acp_types::error::SafeSubagentFailure>,
     },
     /// Context compaction started
     CompactStarted,
@@ -201,6 +203,8 @@ pub enum AcpEvent {
         max_attempts: usize,
         delay_ms: u64,
         error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<peri_acp_types::error::SafeModelErrorDiagnostic>,
     },
     /// Workflow progress update
     WorkflowProgress {

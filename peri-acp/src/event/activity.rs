@@ -111,6 +111,7 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
             is_error,
             instance_id,
             result: _,
+            subagent_failure: _,
         } => AgentActivityWire::new(
             K::Subagent,
             if *is_error { S::Failed } else { S::Completed },
@@ -180,6 +181,7 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
             max_attempts,
             delay_ms,
             error: _,
+            diagnostic: _,
         } => {
             let mut item = AgentActivityWire::new(K::LlmRetry, S::Warning);
             item.metrics.insert("attempt".into(), *attempt as u64);
@@ -430,6 +432,7 @@ mod tests {
             result: "SECRET_RESULT_SENTINEL".into(),
             is_error: false,
             instance_id: "private-instance-id".into(),
+            subagent_failure: None,
         })
         .unwrap();
         assert_eq!(started.correlation_id, stopped.correlation_id);
@@ -483,6 +486,7 @@ mod tests {
             duration_ms: 900,
             timed_out: true,
             child_thread_id: Some("raw-thread-id".into()),
+            subagent_failure: None,
         });
         let wire = serde_json::to_string(&map_agent_activity(&event).unwrap()).unwrap();
         assert!(wire.contains("\"tool_count\":7"));

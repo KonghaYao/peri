@@ -308,6 +308,7 @@ impl TaskManager {
                     duration_ms: 0,
                     child_thread_id: None,
                     timed_out: false,
+                    subagent_failure: None,
                 };
                 // 回调通知 Agent inbox（在 registry 操作之前）
                 if let Some(ref cb) = on_bg_complete_cb {
@@ -444,6 +445,7 @@ impl TaskManager {
                                     duration_ms: started.elapsed().as_millis() as u64,
                                     child_thread_id: None,
                                     timed_out: true,
+                                    subagent_failure: None,
                                 };
                                 // 回调通知 Agent inbox（在 registry 操作之前）
                                 if let Some(ref cb) = on_bg_complete_cb {
@@ -529,6 +531,7 @@ impl TaskManager {
                     duration_ms: started.elapsed().as_millis() as u64,
                     child_thread_id: None,
                     timed_out: false,
+                    subagent_failure: None,
                 };
                 // 嘗試註冊 + 完成（即使 register 失敗也調 complete，發送 cleanup 事件到 TUI）
                 let bg_task = BackgroundTask {

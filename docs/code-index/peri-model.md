@@ -22,6 +22,7 @@
 | 改重试策略 | 事实源 `src/runtime/retry.rs`：`RetryConfig` :88（`delay_for_retry` :138）、`RetryableErrorClasses` :12、`RetryObserver` :202 | `retrying_stream`（:220）；`ModelRuntimeConfig::with_retry`（request.rs:78） | 已发出可见 delta 后传输失败 → interrupted 不重试（anthropic/mod_test.rs:928）；observer 不接收请求/响应/认证信息（request.rs:83） |
 | 改观测/脱敏 | `src/runtime/request.rs`：`PreparedModelRequest` :126、`observe` :153、`ObservedProviderBody` :99；`ModelRuntimeConfig` :36（`with_full_observation` :70） | 配置显式构造，不读环境变量（request.rs:34）；`AnthropicConfig::new`（anthropic/mod.rs:45）/`OpenAiConfig::new`（openai_compatible/mod.rs:43） | 敏感键/非 ASCII 键/data URI 恒脱敏（request.rs:347）；config Debug 永不输出凭据（anthropic/mod.rs:82-97）；契约 ARC-SECRET-001 |
 | 改错误类型/分类 | `src/runtime/error.rs`：`ModelError` :202、`ProtocolErrorKind` :47、`ModelError::cancelled` :234、`is_stream_interrupted` :259 | 构造点 `ModelError::protocol` :224、`http_status` :212 | error summary 走 `SafeErrorContext`（:126），不携带 secret；cancelled 与 interrupted 语义区分（重试判定依赖） |
+| 改安全模型诊断 / 重试耗尽事实 | `src/runtime/error.rs` + `src/runtime/retry.rs` | `ModelErrorDiagnostic`；`ModelError::diagnostic`；`RetryObservation::diagnostic`；`retry_exhausted_with_context` | 仅保留 category/status/受限 provider/request-id/transport/protocol kind/retry attempts；provider body、headers、URL、prompt、凭据与自由文本 summary 不跨边界；无信息时为 None，serde 枚举使用 snake_case |
 
 ## 子系统
 

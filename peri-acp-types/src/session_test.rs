@@ -117,6 +117,58 @@ fn llm_failure_message_is_limited_without_splitting_unicode() {
 }
 
 #[test]
+fn typed_model_failure_preserves_safe_diagnostic_without_provider_body() {
+    let error = AgentError::ModelError(peri_model::ModelError::http_status(
+        429,
+        "anthropic",
+        Some("req_429"),
+    ));
+    let failure = ExecutionFailure::from_agent_error(&error);
+
+    assert_eq!(failure.kind, ExecutionFailureKind::LlmHttp);
+    assert_eq!(failure.http_status, Some(429));
+    let diagnostic = failure.diagnostic.expect("typed model facts");
+    assert_eq!(diagnostic.category_name(), "http_status");
+    assert_eq!(diagnostic.status(), Some(429));
+    assert_eq!(diagnostic.provider(), Some("anthropic"));
+    assert_eq!(diagnostic.request_id(), Some("req_429"));
+}
+
+#[test]
+fn typed_model_failure_drops_invalid_identity() {
+    let error = AgentError::ModelError(peri_model::ModelError::http_status(
+        401,
+        "provider with spaces",
+        Some("request id with spaces"),
+    ));
+    let failure = ExecutionFailure::from_agent_error(&error);
+    let diagnostic = failure.diagnostic.expect("typed model facts");
+
+    assert_eq!(diagnostic.provider(), None);
+    assert_eq!(diagnostic.request_id(), None);
+    assert!(!failure.public_message.contains("[invalid]"));
+}
+
+#[test]
+fn typed_retry_failure_preserves_safe_exhaustion_facts_at_execution_boundary() {
+    let error = AgentError::ModelError(
+        peri_model::ModelError::retry_exhausted(3, peri_model::RetryErrorKind::HttpStatus)
+            .expect("valid attempts"),
+    );
+    let failure = ExecutionFailure::from_agent_error(&error);
+    let diagnostic = failure
+        .diagnostic
+        .expect("retry facts should cross the execution DTO");
+    assert_eq!(diagnostic.category_name(), "retry_exhausted");
+    assert_eq!(diagnostic.retry_attempts(), Some(3));
+    assert_eq!(
+        diagnostic.retry_kind(),
+        Some(peri_model::RetryErrorKind::HttpStatus)
+    );
+    assert_eq!(diagnostic.status(), None);
+}
+
+#[test]
 fn public_error_sanitizer_redacts_bearer_credentials_and_url_components() {
     let secret = "sentinel-secret";
     let sanitized = sanitize_public_error(

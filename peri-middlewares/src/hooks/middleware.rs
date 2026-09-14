@@ -521,6 +521,7 @@ impl Middleware for HookMiddleware {
             error,
             AgentError::LlmError(_)
                 | AgentError::LlmHttpError { .. }
+                | AgentError::ModelError(..)
                 | AgentError::MiddlewareError { .. }
         );
 

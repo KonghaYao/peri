@@ -329,6 +329,7 @@ async fn push_event_forwards_llm_retrying() {
             max_attempts: 6,
             delay_ms: 500,
             error: "transport".into(),
+            diagnostic: None,
         },
         0,
     )
@@ -456,6 +457,7 @@ async fn push_event_emits_only_safe_activity_when_cap_is_declared() {
             result: "SECRET_RESULT_SENTINEL".into(),
             is_error: false,
             instance_id: "raw-instance-id".into(),
+            subagent_failure: None,
         },
         0,
     )
@@ -491,6 +493,7 @@ async fn test_subagent_completion_keeps_activity_safe_before_legacy_output() {
             result: "PRIVATE_RESULT_SENTINEL".into(),
             is_error: false,
             instance_id: "private-instance-id".into(),
+            subagent_failure: None,
         },
         0,
     )
@@ -519,6 +522,58 @@ async fn test_subagent_completion_keeps_activity_safe_before_legacy_output() {
             if result == "PRIVATE_RESULT_SENTINEL" && instance_id == "private-instance-id"),
         "兼容事件应保留客户端消费的结果和实例标识"
     );
+}
+
+#[tokio::test]
+async fn subagent_stopped_wire_carries_only_safe_failure_facts() {
+    let transport = Arc::new(MockTransport::default());
+    let caps = Arc::new(DashMap::new());
+    caps.insert(
+        "s1".to_string(),
+        PeriCaps {
+            agent_event: true,
+            ..PeriCaps::default()
+        },
+    );
+    let sink = TransportEventSink::new(transport.clone(), caps);
+    let failure = peri_acp_types::error::SafeSubagentFailure::new(
+        "child-1",
+        peri_acp_types::error::SafeModelErrorDiagnostic::from_model(
+            peri_model::ModelError::http_status(500, "provider.example", Some("req-500"))
+                .diagnostic(),
+        ),
+    )
+    .expect("valid safe failure");
+
+    sink.push_event(
+        "s1",
+        &ExecutorEvent::SubagentStopped {
+            agent_name: "explorer".into(),
+            result: "safe summary".into(),
+            is_error: true,
+            instance_id: "instance-1".into(),
+            subagent_failure: Some(failure),
+        },
+        0,
+    )
+    .await;
+
+    let notifications = transport.notifications.lock().unwrap();
+    assert_eq!(notifications.len(), 1);
+    let event_json = notifications[0].1["event_json"].as_str().unwrap();
+    let event: AcpEvent = serde_json::from_str(event_json).unwrap();
+    let AcpEvent::SubagentStopped {
+        subagent_failure: Some(failure),
+        ..
+    } = event
+    else {
+        panic!("typed safe failure should be present on ACP wire");
+    };
+    let wire = serde_json::to_value(failure).unwrap();
+    assert_eq!(wire["child_thread_id"], "child-1");
+    assert_eq!(wire["diagnostic"]["status"], 500);
+    assert_eq!(wire["diagnostic"]["request_id"], "req-500");
+    assert!(!wire.to_string().contains("provider body"));
 }
 
 #[tokio::test]

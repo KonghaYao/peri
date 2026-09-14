@@ -205,6 +205,7 @@ mod tests {
             name: "Read".to_string(),
             output: "文件内容是 hello world".to_string(),
             is_error: false,
+            subagent_failure: None,
         });
         bridge.process_observe_event(&ObserveEvent::StageEnded {
             turn_id,
@@ -222,6 +223,7 @@ mod tests {
             name: "Agent".to_string(),
             output: "子 agent 执行完毕".to_string(),
             is_error: false,
+            subagent_failure: None,
         });
         // SubagentStop:关闭 AGENT obs
         bridge.process_observe_event(&ObserveEvent::SubagentStop {
@@ -231,6 +233,7 @@ mod tests {
             agent_name: "fork".to_string(),
             result: "子 agent 执行完毕".to_string(),
             is_error: false,
+            subagent_failure: None,
         });
 
         let _h = tracer
@@ -327,6 +330,7 @@ mod tests {
             name: "Agent".to_string(),
             output: "后台任务已分派".to_string(),
             is_error: false,
+            subagent_failure: None,
         });
 
         // 子 agent 内部执行(Stop 永不出现)
@@ -495,6 +499,7 @@ mod tests {
             name: "Bash".to_string(),
             output: "file1 file2".to_string(),
             is_error: false,
+            subagent_failure: None,
         });
         bridge.process_observe_event(&ObserveEvent::StageEnded {
             turn_id,
@@ -510,6 +515,7 @@ mod tests {
             name: "Agent".to_string(),
             output: "子 agent 完成".to_string(),
             is_error: false,
+            subagent_failure: None,
         });
         bridge.process_observe_event(&ObserveEvent::SubagentStop {
             turn_id,
@@ -518,6 +524,7 @@ mod tests {
             agent_name: "child".to_string(),
             result: "子 agent 完成".to_string(),
             is_error: false,
+            subagent_failure: None,
         });
         // 主 agent Act stage 结束:发出 stage-act SpanCreate(供 parent 断言)
         bridge.process_observe_event(&ObserveEvent::StageEnded {

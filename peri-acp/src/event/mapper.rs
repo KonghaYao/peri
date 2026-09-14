@@ -108,27 +108,37 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             output,
             is_error,
             source_agent_id,
+            subagent_failure,
             ..
         } => {
             let raw_output = match serde_json::from_str::<serde_json::Value>(output) {
                 Ok(v) => Some(v),
                 Err(_) => Some(serde_json::Value::String(output.clone())),
             };
+            let update = ToolCallUpdate::new(
+                tool_call_id.clone(),
+                ToolCallUpdateFields::new()
+                    .title(name.clone())
+                    .status(if *is_error {
+                        ToolCallStatus::Failed
+                    } else {
+                        ToolCallStatus::Completed
+                    })
+                    // 标准 `content`：与 session replay 共用同一投影规则，
+                    // 失败空文本由 helper 提供稳定非空 fallback。
+                    .content(tool_result_content(output, *is_error))
+                    .raw_output(raw_output),
+            );
+            let update = if let Some(failure) = subagent_failure {
+                update.meta(serde_json::Map::from_iter([(
+                    "peri".to_string(),
+                    serde_json::json!({ "subagentFailure": failure }),
+                )]))
+            } else {
+                update
+            };
             vec![MappedEvent::standard_with_src(
-                vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                    tool_call_id.clone(),
-                    ToolCallUpdateFields::new()
-                        .title(name.clone())
-                        .status(if *is_error {
-                            ToolCallStatus::Failed
-                        } else {
-                            ToolCallStatus::Completed
-                        })
-                        // 标准 `content`：与 session replay 共用同一投影规则，
-                        // 失败空文本由 helper 提供稳定非空 fallback。
-                        .content(tool_result_content(output, *is_error))
-                        .raw_output(raw_output),
-                ))],
+                vec![SessionUpdate::ToolCallUpdate(update)],
                 source_agent_id.clone(),
             )]
         }

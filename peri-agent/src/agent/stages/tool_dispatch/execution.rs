@@ -15,6 +15,7 @@ use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, MessageId};
+use crate::session::subagent::SubagentFailure;
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{
     normalize_params, BaseTool, EffectiveToolError, EffectiveToolErrorCode, ToolExecutionEvidence,
@@ -30,6 +31,19 @@ pub(super) fn effective_tool_error(error: AgentError) -> EffectiveToolError {
         _ => EffectiveToolErrorCode::ToolFailed,
     };
     EffectiveToolError::new(code, error.user_facing_message())
+}
+
+fn effective_tool_error_from_boxed(
+    error: Box<dyn std::error::Error + Send + Sync>,
+) -> EffectiveToolError {
+    let mut effective =
+        EffectiveToolError::new(EffectiveToolErrorCode::ToolFailed, error.to_string());
+    if let Some(failure) = error.downcast_ref::<SubagentFailure>() {
+        if let Some(safe_failure) = failure.safe_failure() {
+            effective = effective.with_subagent_failure(safe_failure);
+        }
+    }
+    effective
 }
 
 fn execution_for_effective_error(code: EffectiveToolErrorCode) -> Option<ToolExecutionEvidence> {
@@ -147,6 +161,7 @@ async fn run_before_tool_approvals(
                     name: raw_call.name.clone(),
                     output: "interrupted by user".to_string(),
                     is_error: true,
+                    subagent_failure: None,
                 });
             }
             return Err(AgentError::Interrupted);
@@ -189,6 +204,7 @@ async fn run_before_tool_approvals(
                     name: raw_call.name.clone(),
                     output: rejection_result.output.clone(),
                     is_error: true,
+                    subagent_failure: rejection_result.subagent_failure.clone(),
                 });
                 settled_results.push((tool_call.clone(), rejection_result));
             }
@@ -202,6 +218,7 @@ async fn run_before_tool_approvals(
                         name: tc.name.clone(),
                         output: e.to_string(),
                         is_error: true,
+                        subagent_failure: None,
                     });
                 }
                 return Err(e);
@@ -298,13 +315,13 @@ async fn dispatch_concurrent(
                             dispatch_context.session.turn.turn_id.to_string(),
                         );
                     match tool {
-                        Some(t) => t.invoke_output(input, ctx_param).await.map_err(|e| {
-                            AgentError::ToolExecutionFailed {
-                                tool: tool_name.clone(),
-                                reason: e.to_string(),
-                            }
-                        }),
-                        None => Err(AgentError::ToolNotFound(tool_name.clone())),
+                        Some(t) => t
+                            .invoke_output(input, ctx_param)
+                            .await
+                            .map_err(effective_tool_error_from_boxed),
+                        None => Err(effective_tool_error(AgentError::ToolNotFound(
+                            tool_name.clone(),
+                        ))),
                     }
                 };
                 let result = tokio::select! {
@@ -323,7 +340,7 @@ async fn dispatch_concurrent(
                         }
                     } => {
                         match result {
-                            Ok(tool_result) => tool_result.map_err(effective_tool_error),
+                            Ok(tool_result) => tool_result,
                             Err(_elapsed) => {
                                 // 安全：Err 分支仅在 timeout_opt 为 Some 时可达
                                 let secs = timeout_opt.unwrap().as_secs();
@@ -365,6 +382,10 @@ async fn dispatch_concurrent(
                         )
                     }
                 };
+                let subagent_failure = result
+                    .as_ref()
+                    .err()
+                    .and_then(|error| error.subagent_failure().cloned());
                 event_bus.emit_render(RenderEvent::ToolEnded {
                     turn_id,
                     agent_id,
@@ -372,6 +393,7 @@ async fn dispatch_concurrent(
                     name: raw_call.name.clone(),
                     output,
                     is_error,
+                    subagent_failure,
                 });
                 result
             }
@@ -410,6 +432,11 @@ async fn settle_results(
                     ToolResult::error(&modified_call.id, &modified_call.name, e.to_string());
                 result.effective_error_code = Some(e.code);
                 result.execution = execution_for_effective_error(e.code);
+                result.subagent_failure = e.subagent_failure.clone();
+                if let Some(failure) = &result.subagent_failure {
+                    result.output.push('\n');
+                    result.output.push_str(&failure.render_model_summary());
+                }
                 result
             }
         };

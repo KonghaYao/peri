@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use peri_acp_types::error::SafeSubagentFailure;
 use peri_acp_types::identity::AgentId;
 use peri_model::{StopReason, TokenUsage};
 use tokio_util::sync::CancellationToken;
@@ -109,6 +110,10 @@ pub struct ToolResult {
     pub execution: Option<ToolExecutionEvidence>,
     #[serde(skip)]
     pub effective_error_code: Option<crate::tools::EffectiveToolErrorCode>,
+    /// Safe typed facts for a child agent failure.  Raw causes stay inside the
+    /// child and are never serialized into the canonical tool result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_failure: Option<SafeSubagentFailure>,
 }
 
 impl ToolResult {
@@ -124,6 +129,7 @@ impl ToolResult {
             is_error: false,
             execution: None,
             effective_error_code: None,
+            subagent_failure: None,
         }
     }
 
@@ -139,6 +145,7 @@ impl ToolResult {
             is_error: true,
             execution: None,
             effective_error_code: None,
+            subagent_failure: None,
         }
     }
 
@@ -163,6 +170,7 @@ impl ToolResult {
             is_error,
             execution: output.execution,
             effective_error_code: None,
+            subagent_failure: None,
         }
     }
 }

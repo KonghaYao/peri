@@ -27,7 +27,7 @@ impl Default for MessageId {
 }
 
 use super::content::{ContentBlock, MessageContent};
-use crate::tools::ToolExecutionEvidence;
+use crate::{error::SafeSubagentFailure, tools::ToolExecutionEvidence};
 
 // ─── ToolCallRequest ──────────────────────────────────────────────────────────
 
@@ -102,6 +102,8 @@ pub enum BaseMessage {
         is_error: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         execution: Option<ToolExecutionEvidence>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent_failure: Option<SafeSubagentFailure>,
     },
 }
 
@@ -173,6 +175,7 @@ impl BaseMessage {
             content: content.into(),
             is_error: false,
             execution: None,
+            subagent_failure: None,
         }
     }
 
@@ -183,6 +186,7 @@ impl BaseMessage {
             content: error.into(),
             is_error: true,
             execution: None,
+            subagent_failure: None,
         }
     }
 
@@ -198,6 +202,24 @@ impl BaseMessage {
             content: content.into(),
             is_error,
             execution,
+            subagent_failure: None,
+        }
+    }
+
+    pub fn tool_result_with_execution_and_failure(
+        id: impl Into<String>,
+        content: impl Into<MessageContent>,
+        is_error: bool,
+        execution: Option<ToolExecutionEvidence>,
+        subagent_failure: Option<SafeSubagentFailure>,
+    ) -> Self {
+        Self::Tool {
+            id: MessageId::new(),
+            tool_call_id: id.into(),
+            content: content.into(),
+            is_error,
+            execution,
+            subagent_failure,
         }
     }
 
@@ -286,6 +308,7 @@ impl BaseMessage {
                 tool_call_id,
                 is_error,
                 execution,
+                subagent_failure,
                 ..
             } => Self::Tool {
                 id: *id,
@@ -293,6 +316,7 @@ impl BaseMessage {
                 content,
                 is_error: *is_error,
                 execution: execution.clone(),
+                subagent_failure: subagent_failure.clone(),
             },
         }
     }

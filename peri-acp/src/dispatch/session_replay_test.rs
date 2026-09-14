@@ -117,6 +117,39 @@ async fn test_replay_tool_failure_writes_standard_output_raw_and_meta() {
 }
 
 #[tokio::test]
+async fn test_replay_tool_failure_keeps_safe_subagent_diagnostic_meta() {
+    let failure = peri_acp_types::error::SafeSubagentFailure::new(
+        "child-1",
+        peri_acp_types::error::SafeModelErrorDiagnostic::from_model(
+            peri_model::ModelError::http_status(429, "provider.example", Some("req-1"))
+                .diagnostic(),
+        ),
+    )
+    .expect("valid safe failure");
+    let message = BaseMessage::tool_result_with_execution_and_failure(
+        "tc-safe",
+        "child failed",
+        true,
+        None,
+        Some(failure),
+    );
+    let updates = collect_replay(vec![message]).await;
+    let SessionUpdate::ToolCallUpdate(update) = &updates[0] else {
+        panic!("expected ToolCallUpdate");
+    };
+    let meta = update.meta.as_ref().expect("replay meta must exist");
+    assert_eq!(meta["periReplay"], serde_json::Value::Bool(true));
+    assert_eq!(
+        meta["peri"]["subagentFailure"]["child_thread_id"],
+        "child-1"
+    );
+    assert_eq!(meta["peri"]["subagentFailure"]["diagnostic"]["status"], 429);
+    assert!(!serde_json::to_string(meta)
+        .unwrap()
+        .contains("provider body"));
+}
+
+#[tokio::test]
 async fn test_replay_tool_success_writes_standard_output() {
     // replay 成功工具 → status=completed + 标准 content 文本 + rawOutput
     let updates = collect_replay(vec![BaseMessage::tool_result("tc-2", "ok")]).await;

@@ -66,6 +66,7 @@ fn emit_settled_tool_render(ctx: &StageContext, call: &ToolCall, result: &ToolRe
         name: call.name.clone(),
         output: result.output.clone(),
         is_error: result.is_error,
+        subagent_failure: result.subagent_failure.clone(),
     });
 }
 
@@ -197,11 +198,12 @@ pub async fn dispatch_tools(
         let mut tx = ctx.session.transcript.write();
         tx.stage_ai_message(ai_msg);
         for (_, result) in &collect_outcome.results {
-            let tool_msg = BaseMessage::tool_result_with_execution(
+            let tool_msg = BaseMessage::tool_result_with_execution_and_failure(
                 &result.tool_call_id,
                 result.output.as_str(),
                 result.is_error,
                 result.execution.clone(),
+                result.subagent_failure.clone(),
             );
             tx.stage_tool_result(tool_msg);
         }

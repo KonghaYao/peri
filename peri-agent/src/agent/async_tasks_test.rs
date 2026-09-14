@@ -78,6 +78,7 @@ async fn test_complete_updates_status() {
         duration_ms: 100,
         child_thread_id: None,
         timed_out: false,
+        subagent_failure: None,
     };
 
     registry.complete("bg-1", result);
@@ -317,6 +318,7 @@ fn make_result(task_id: &str, success: bool) -> BackgroundTaskResult {
         duration_ms: 100,
         child_thread_id: None,
         timed_out: false,
+        subagent_failure: None,
     }
 }
 

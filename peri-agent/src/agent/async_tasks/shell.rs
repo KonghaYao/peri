@@ -496,6 +496,7 @@ pub fn finalize_bg_shell(
         duration_ms,
         child_thread_id: None,
         timed_out,
+        subagent_failure: None,
     };
     // 回调通知 Agent inbox（在 registry.complete() 之前，与 execute_bg.rs 对齐）
     if let Some(ref cb) = on_bg_complete {

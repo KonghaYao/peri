@@ -15,7 +15,8 @@ pub use protocol::{
     StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
 };
 pub use runtime::{
-    ModelError, ModelResult, ModelRuntimeConfig, ObservedProviderBody, PreparedModelRequest,
-    ProtocolError, ProtocolErrorKind, RetryConfig, RetryErrorKind, RetryObservation, RetryObserver,
+    ModelError, ModelErrorCategory, ModelErrorDiagnostic, ModelErrorDiagnosticParts, ModelResult,
+    ModelRuntimeConfig, ObservedProviderBody, PreparedModelRequest, ProtocolError,
+    ProtocolErrorKind, RetryConfig, RetryErrorKind, RetryObservation, RetryObserver,
     RetryableErrorClasses, TransportErrorKind,
 };

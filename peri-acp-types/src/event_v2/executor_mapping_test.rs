@@ -177,6 +177,7 @@ fn test_tool_ended_maps() {
         name: "Read".to_string(),
         output: "rejected".to_string(),
         is_error: true,
+        subagent_failure: None,
     };
     match render_event_to_executor(r).unwrap() {
         ExecutorEvent::ToolEnd {
@@ -202,6 +203,7 @@ fn test_render_event_tool_ended_carries_output() {
         name: "Bash".to_string(),
         output: "hello world\nline2".to_string(),
         is_error: false,
+        subagent_failure: None,
     };
     match render_event_to_executor(r).expect("ToolEnded 应映射为 ToolEnd") {
         ExecutorEvent::ToolEnd {
@@ -525,6 +527,7 @@ fn test_observe_subagent_lifecycle_maps() {
         agent_name: "researcher".to_string(),
         result: "done".to_string(),
         is_error: false,
+        subagent_failure: None,
     };
     match observe_event_to_executor(stop).unwrap() {
         ExecutorEvent::SubagentStopped {

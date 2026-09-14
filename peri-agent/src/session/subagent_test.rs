@@ -19,6 +19,28 @@ use crate::session::subagent::{
 };
 use crate::thread::ThreadId;
 
+#[test]
+fn subagent_failure_keeps_child_identity_and_typed_model_diagnostic() {
+    let failure = crate::session::subagent::SubagentFailure::new(
+        "child-123",
+        "explorer",
+        crate::error::AgentError::ModelError(peri_model::ModelError::http_status(
+            429,
+            "anthropic",
+            Some("req-123"),
+        )),
+    );
+
+    assert_eq!(failure.child_thread_id(), "child-123");
+    assert_eq!(failure.agent_name(), "explorer");
+    let diagnostic = failure.diagnostic().expect("typed model diagnostic");
+    assert_eq!(diagnostic.status(), Some(429));
+    assert_eq!(diagnostic.provider(), Some("anthropic"));
+    assert_eq!(diagnostic.request_id(), Some("req-123"));
+    assert!(failure.to_string().contains("child_thread_id: child-123"));
+    assert!(!failure.to_string().contains("req-123"));
+}
+
 fn build_ctx_with(agent_id: Option<AgentId>) -> V2SubagentContext {
     build_v2_subagent_context(
         None,

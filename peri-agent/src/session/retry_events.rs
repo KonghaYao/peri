@@ -23,6 +23,10 @@ pub(crate) fn translate_observation(
         max_attempts: observation.max_attempts() as usize,
         delay_ms: observation.delay().as_millis() as u64,
         error: observation.error_kind().to_string(),
+        diagnostic: observation
+            .diagnostic()
+            .cloned()
+            .map(peri_acp_types::error::SafeModelErrorDiagnostic::from_model),
     });
 }
 

@@ -23,6 +23,9 @@ pub enum BgTaskKind {
 /// 后台任务注册表事件（registry → executor 事件推送通道）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
+// BackgroundTaskResult is the canonical completion DTO and must remain
+// non-boxed for existing event consumers; keep the enum wire-compatible.
+#[allow(clippy::large_enum_variant)]
 pub enum BgRegistryEvent {
     Started {
         task_id: String,

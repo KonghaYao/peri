@@ -586,7 +586,13 @@ fn subagent_section_declaration_shape() {
         "具体任务→agent 映射已删除"
     );
     assert!(
-        content.contains("Choose the most specialized agent"),
-        "通用选择原则保留"
+        content.contains("Choose the most specialized ID supplied by the frozen catalog hint")
+            && content.contains("current invocation-loader suggestion"),
+        "冻结 hint 与动态 loader suggestion 的选择原则保留"
+    );
+    assert!(
+        content.contains("a loader suggestion may contain only an ID")
+            && content.contains("verify the loaded definition before choosing parallelism"),
+        "缺少 metadata 时必须验证定义或保守执行"
     );
 }

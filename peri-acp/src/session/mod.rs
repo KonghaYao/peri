@@ -32,6 +32,10 @@ pub use dynamic_mcp::SessionDynamicMcpNotificationSink;
 pub(crate) use frozen::build_collected_sections;
 pub use retry_events::RetryEventForwarder;
 
+#[cfg(test)]
+#[path = "retry_events_test.rs"]
+mod retry_events_tests;
+
 use std::{
     collections::HashMap,
     sync::{atomic::AtomicBool, Arc},

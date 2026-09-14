@@ -52,6 +52,7 @@ impl UnifiedLangfuseEvent {
                 max_attempts,
                 delay_ms,
                 error,
+                ..
             } => Some(UnifiedLangfuseEvent::LlmRetrying {
                 attempt,
                 max_attempts,

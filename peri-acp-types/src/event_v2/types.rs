@@ -1,6 +1,9 @@
 //! 三层事件载荷与身份提取；枚举本身不持有发送端或执行状态。
 
-use crate::{event::ExecutorEvent, identity::AgentId, messages::BaseMessage, session::TurnId};
+use crate::{
+    error::SafeSubagentFailure, event::ExecutorEvent, identity::AgentId, messages::BaseMessage,
+    session::TurnId,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -95,6 +98,8 @@ pub enum RenderEvent {
         name: String,
         output: String,
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent_failure: Option<SafeSubagentFailure>,
     },
     /// 上下文窗口预算警告
     BudgetWarning {
@@ -406,6 +411,8 @@ pub enum ObserveEvent {
         agent_name: String,
         result: String,
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent_failure: Option<SafeSubagentFailure>,
     },
     /// LLM Provider 实际请求体（raw body），紧随 [`Self::LlmCallStart`] 之后 emit。
     ///

@@ -128,3 +128,65 @@ fn test_tool_execution_evidence_persists_and_legacy_payload_is_unknown() {
         }
     ));
 }
+
+#[test]
+fn test_tool_message_roundtrips_safe_retry_failure_facts() {
+    let failure = crate::error::SafeSubagentFailure::new(
+        "child-retry",
+        crate::error::SafeModelErrorDiagnostic::from_model(
+            peri_model::ModelError::retry_exhausted(3, peri_model::RetryErrorKind::HttpStatus)
+                .expect("valid attempts")
+                .diagnostic(),
+        ),
+    )
+    .expect("valid safe child failure");
+    let message = BaseMessage::tool_result_with_execution_and_failure(
+        "call-retry",
+        "child failed after retries",
+        true,
+        None,
+        Some(failure.clone()),
+    );
+    let restored: BaseMessage =
+        serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+    let BaseMessage::Tool {
+        subagent_failure: Some(restored_failure),
+        ..
+    } = restored
+    else {
+        panic!("safe child failure should survive canonical message serde");
+    };
+    assert_eq!(restored_failure, failure);
+    assert_eq!(restored_failure.diagnostic().retry_attempts(), Some(3));
+}
+
+#[test]
+fn test_tool_message_persists_safe_subagent_failure_facts_only() {
+    let failure = crate::error::SafeSubagentFailure::new(
+        "child-123",
+        crate::error::SafeModelErrorDiagnostic::from_model(
+            peri_model::ModelError::http_status(429, "provider.example", Some("req-123"))
+                .diagnostic(),
+        ),
+    )
+    .expect("safe child failure");
+    let message = BaseMessage::tool_result_with_execution_and_failure(
+        "call-1",
+        "child-123\nmodel_error_status: 429",
+        true,
+        None,
+        Some(failure),
+    );
+    let wire = serde_json::to_string(&message).expect("serialize tool message");
+    assert!(wire.contains("child_thread_id"));
+    assert!(wire.contains("model_error_status"));
+    assert!(!wire.contains("request body"));
+    let restored: BaseMessage = serde_json::from_str(&wire).expect("deserialize tool message");
+    assert!(matches!(
+        restored,
+        BaseMessage::Tool {
+            subagent_failure: Some(_),
+            ..
+        }
+    ));
+}

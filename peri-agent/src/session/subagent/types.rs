@@ -234,6 +234,101 @@ pub struct SubagentSpawned {
     pub interrupted: bool,
 }
 
+/// Typed failure crossing the Agent-owned subagent boundary.
+#[derive(Debug)]
+pub struct SubagentFailure {
+    child_thread_id: String,
+    agent_name: String,
+    error: crate::error::AgentError,
+}
+
+impl SubagentFailure {
+    pub fn new(
+        child_thread_id: impl Into<String>,
+        agent_name: impl Into<String>,
+        error: crate::error::AgentError,
+    ) -> Self {
+        Self {
+            child_thread_id: child_thread_id.into(),
+            agent_name: agent_name.into(),
+            error,
+        }
+    }
+
+    pub fn child_thread_id(&self) -> &str {
+        &self.child_thread_id
+    }
+
+    pub fn agent_name(&self) -> &str {
+        &self.agent_name
+    }
+
+    pub fn error(&self) -> &crate::error::AgentError {
+        &self.error
+    }
+
+    pub fn diagnostic(&self) -> Option<peri_model::ModelErrorDiagnostic> {
+        match &self.error {
+            crate::error::AgentError::ModelError(error) => Some(error.diagnostic()),
+            _ => None,
+        }
+    }
+
+    /// Project only the child identity and validated model facts for a parent
+    /// canonical result. Raw AgentError causes never cross this boundary.
+    pub fn safe_failure(&self) -> Option<peri_acp_types::error::SafeSubagentFailure> {
+        let diagnostic = self.diagnostic()?;
+        peri_acp_types::error::SafeSubagentFailure::new(
+            &self.child_thread_id,
+            peri_acp_types::error::SafeModelErrorDiagnostic::from_model(diagnostic),
+        )
+    }
+
+    pub fn safe_failure_from_error(
+        child_thread_id: &str,
+        error: &crate::error::AgentError,
+    ) -> Option<peri_acp_types::error::SafeSubagentFailure> {
+        let diagnostic = match error {
+            crate::error::AgentError::ModelError(error) => error.diagnostic(),
+            _ => return None,
+        };
+        peri_acp_types::error::SafeSubagentFailure::new(
+            child_thread_id,
+            peri_acp_types::error::SafeModelErrorDiagnostic::from_model(diagnostic),
+        )
+    }
+
+    pub fn public_message(&self) -> String {
+        self.error.user_facing_message()
+    }
+}
+
+impl std::fmt::Display for SubagentFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The typed diagnostic travels separately through canonical facts. Keep
+        // the boxed error's compatibility text free of even safe identities so
+        // legacy string consumers cannot accidentally turn it into a payload.
+        let message = match &self.error {
+            crate::error::AgentError::ModelError(error) => error
+                .http_status_code()
+                .map(|status| format!("An LLM API error occurred (HTTP {status})."))
+                .unwrap_or_else(|| "An LLM API error occurred.".to_string()),
+            _ => self.public_message(),
+        };
+        write!(
+            formatter,
+            "child_thread_id: {}\n{} execution failed: {}",
+            self.child_thread_id, self.agent_name, message
+        )
+    }
+}
+
+impl std::error::Error for SubagentFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 // ─── resume 配置（统一恢复入口 [`resume_subagent`] 的输入） ─────────────────
 
 /// 子 agent 恢复意图 + 装配产物 + 运行时通道（[`SessionFactory::resume_subagent`] 的输入）。
