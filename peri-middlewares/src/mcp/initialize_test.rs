@@ -7,6 +7,12 @@ const readline = require('node:readline').createInterface({ input: process.stdin
 readline.on('line', line => {
   const request = JSON.parse(line);
   if (request.id === undefined) return;
+  // Legacy servers must reject discovery so Auto can fall back to initialize.
+  if (!['initialize', 'tools/list', 'resources/list', 'ping'].includes(request.method)) {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32601, message: 'Method not found' } }) + '\n');
+    return;
+  }
   let result = {};
   if (request.method === 'initialize') result = {
     protocolVersion: '2025-11-25', capabilities: {},
