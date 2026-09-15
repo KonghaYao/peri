@@ -52,7 +52,7 @@ pub fn uri_to_path(uri: &str) -> String {
     let decoded = percent_decode(rest);
     #[cfg(windows)]
     {
-        return windows_uri_path(uri, decoded);
+        windows_uri_path(uri, decoded)
     }
     #[cfg(not(windows))]
     decoded
