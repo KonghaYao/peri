@@ -1,0 +1,3991 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Peri 4.0 · 内部分层演进稿</title>
+    <style>
+      :root {
+        --ink: #172e4b;
+        --muted: #536780;
+        --line: #d6e0eb;
+        --paper: #f3f7fc;
+        --blue: #2563eb;
+        --purple: #7854c8;
+        --teal: #087f8c;
+        --amber: #ad6800;
+        --red: #b34b35;
+        --display: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+        --body:
+          system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+        --mono: "SFMono-Regular", Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+        scroll-padding-top: 90px;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font: 15px/1.7 var(--body);
+      }
+      a {
+        color: var(--blue);
+        text-underline-offset: 4px;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+      }
+      button:focus-visible,
+      a:focus-visible,
+      [tabindex]:focus-visible {
+        outline: 3px solid var(--blue);
+        outline-offset: 4px;
+      }
+      .shell {
+        max-width: 1500px;
+        padding: 0 36px;
+        margin: auto;
+      }
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        background: rgba(243, 247, 252, 0.97);
+        border-bottom: 1px solid var(--line);
+      }
+      .bar {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        min-height: 70px;
+        flex-wrap: wrap;
+        padding-top: 12px;
+        padding-bottom: 12px;
+      }
+      .brand {
+        font: 800 20px var(--display);
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+      }
+      .brand span {
+        font: 12px var(--body);
+        color: var(--muted);
+        margin-left: 10px;
+      }
+      nav {
+        display: flex;
+        gap: 15px;
+        flex-wrap: wrap;
+        margin-left: auto;
+        font-size: 13px;
+      }
+      nav a {
+        text-decoration: none;
+      }
+      .plain {
+        border: 1px solid var(--line);
+        background: white;
+        border-radius: 6px;
+        padding: 7px 12px;
+        font-size: 13px;
+      }
+      header {
+        padding: 35px 0 26px;
+      }
+      .eyebrow {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .tag {
+        display: inline-block;
+        border: 1px solid #b8dce1;
+        background: #e6f4f5;
+        color: #096a76;
+        padding: 3px 9px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 650;
+      }
+      .tag.warn {
+        background: #fff3df;
+        border-color: #e6ce9f;
+        color: #855108;
+      }
+      h1 {
+        font: 750 clamp(28px, 3.5vw, 47px) / 1.25 var(--display);
+        letter-spacing: -0.035em;
+        margin: 17px 0 12px;
+      }
+      h2 {
+        font: 750 25px/1.3 var(--display);
+        margin: 0 0 7px;
+      }
+      h3 {
+        font: 700 18px/1.45 var(--display);
+        margin: 0 0 8px;
+      }
+      p {
+        margin: 0 0 12px;
+      }
+      header > p {
+        color: var(--muted);
+        max-width: 970px;
+      }
+      .principles {
+        display: flex;
+        gap: 8px 22px;
+        flex-wrap: wrap;
+        margin-top: 18px;
+        font-size: 13px;
+        font-weight: 650;
+      }
+      .principles span {
+        padding-left: 10px;
+        border-left: 3px solid var(--teal);
+      }
+      section {
+        margin: 24px 0 46px;
+        scroll-margin-top: 85px;
+      }
+      .section-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 20px;
+        margin-bottom: 16px;
+      }
+      .section-head p {
+        color: var(--muted);
+        font-size: 14px;
+        max-width: 920px;
+      }
+      .section-index {
+        font: 11px var(--mono);
+        letter-spacing: 0.09em;
+        white-space: nowrap;
+        color: var(--muted);
+        padding-top: 8px;
+      }
+      .toolbar {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+        padding: 12px 15px;
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 10px 10px 0 0;
+      }
+      .toolbar button,
+      .switch button,
+      .stage-tabs button,
+      .step-buttons button {
+        border: 1px solid var(--line);
+        background: white;
+        border-radius: 5px;
+        padding: 7px 12px;
+        font-size: 13px;
+      }
+      button[aria-pressed="true"] {
+        color: white;
+        background: var(--ink);
+        border-color: var(--ink);
+      }
+      .toolbar .plain {
+        margin-left: auto;
+      }
+      .map-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 290px;
+        border: 1px solid var(--line);
+        border-top: 0;
+        border-radius: 0 0 10px 10px;
+        background: white;
+        overflow: hidden;
+      }
+      .diagram-scroll {
+        overflow-x: auto;
+        min-width: 0;
+        background-image: radial-gradient(#dce5f0 0.7px, transparent 0.7px);
+        background-size: 17px 17px;
+      }
+      .diagram {
+        display: block;
+        width: 100%;
+        min-width: 820px;
+        height: auto;
+      }
+      .diagram text {
+        font-family: var(--body);
+        fill: var(--ink);
+        pointer-events: none;
+      }
+      .node {
+        cursor: pointer;
+      }
+      .node > .box {
+        fill: white;
+        stroke: #b7c6d9;
+        stroke-width: 1.6;
+        transition:
+          fill 0.15s,
+          stroke 0.15s;
+      }
+      .node .stripe {
+        fill: var(--node-color, var(--blue));
+      }
+      .node:hover > .box {
+        fill: #f4f7fc;
+      }
+      .node[aria-pressed="true"] > .box {
+        fill: #f0ecfa;
+        stroke: var(--purple);
+        stroke-width: 2.8;
+      }
+      .node .node-title {
+        font-size: 17px;
+        font-weight: 750;
+      }
+      .node .node-sub {
+        font-size: 12px;
+        fill: var(--muted);
+      }
+      .node .node-code {
+        font: 11px var(--mono);
+        fill: var(--muted);
+      }
+      .diagram .caption {
+        font-size: 11px;
+        fill: var(--muted);
+        letter-spacing: 0.05em;
+      }
+      .edge path {
+        fill: none;
+        stroke-width: 2;
+      }
+      .edge[data-flow="call"] path {
+        stroke: var(--blue);
+        marker-end: url(#arrow-call);
+      }
+      .edge[data-flow="event"] path {
+        stroke: var(--purple);
+        stroke-dasharray: 7 4;
+        marker-end: url(#arrow-event);
+      }
+      .edge[data-flow="state"] path {
+        stroke: var(--teal);
+        marker-end: url(#arrow-state);
+      }
+      .edge[data-flow="cancel"] path {
+        stroke: var(--red);
+        stroke-dasharray: 3 5;
+        stroke-width: 2.5;
+        marker-end: url(#arrow-cancel);
+      }
+      .edge.hidden {
+        display: none;
+      }
+      .edge text {
+        font-size: 10px;
+        font-weight: 600;
+        paint-order: stroke;
+        stroke: white;
+        stroke-width: 5px;
+        stroke-linejoin: round;
+      }
+      .inspector {
+        border-left: 1px solid var(--line);
+        padding: 20px;
+        background: #fbfcff;
+      }
+      .inspector .kicker {
+        font: 11px var(--mono);
+        color: var(--purple);
+      }
+      .inspector h3 {
+        font-size: 23px;
+        margin: 7px 0;
+      }
+      .inspector dl {
+        font-size: 13px;
+        margin: 17px 0;
+      }
+      .inspector dt {
+        font-weight: 750;
+        margin: 13px 0 4px;
+      }
+      .inspector dd {
+        margin: 0;
+        color: var(--muted);
+      }
+      .inspector a {
+        font: 11px/1.6 var(--mono);
+        overflow-wrap: anywhere;
+      }
+      .map-note {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 20px;
+        font-size: 12px;
+        padding: 12px 0;
+        color: var(--muted);
+      }
+      .map-note b {
+        font-weight: 650;
+      }
+      .flow-key {
+        display: inline-block;
+        width: 22px;
+        vertical-align: middle;
+        margin-right: 5px;
+        border-top: 2px solid var(--blue);
+      }
+      .flow-key.event {
+        border-color: var(--purple);
+        border-top-style: dashed;
+      }
+      .flow-key.state {
+        border-color: var(--teal);
+      }
+      .flow-key.cancel {
+        border-color: var(--red);
+        border-top-style: dotted;
+      }
+      .notice {
+        border-left: 3px solid var(--amber);
+        padding: 12px 16px;
+        background: #fff8ec;
+        color: #624e32;
+        font-size: 13px;
+        margin: 13px 0;
+      }
+      details {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 13px 17px;
+        margin: 13px 0;
+      }
+      summary {
+        cursor: pointer;
+        font-weight: 650;
+      }
+      details ul {
+        margin-bottom: 0;
+      }
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+      }
+      article.card {
+        border: 1px solid var(--line);
+        background: white;
+        border-radius: 9px;
+        padding: 20px;
+      }
+      .card p,
+      .card li {
+        font-size: 14px;
+        color: var(--muted);
+      }
+      .card .tag {
+        margin-bottom: 12px;
+      }
+      .switch {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .deployment {
+        border: 1px solid var(--line);
+        background: white;
+        border-radius: 9px;
+        padding: 23px;
+        margin-top: 14px;
+      }
+      .deploy-flow {
+        display: flex;
+        gap: 14px;
+        align-items: center;
+        flex-wrap: wrap;
+        padding: 17px;
+        background: #f7f9fd;
+        border: 1px dashed #adbed4;
+        border-radius: 7px;
+        margin: 12px 0;
+      }
+      .deploy-flow strong {
+        padding: 12px 15px;
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+      }
+      .deploy-flow em {
+        font: 12px var(--mono);
+        color: var(--blue);
+        font-style: normal;
+      }
+      .muted {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .table-scroll {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: white;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        min-width: 790px;
+        font-size: 13px;
+      }
+      th {
+        background: #eaf0f8;
+        text-align: left;
+        color: #344e6d;
+      }
+      th,
+      td {
+        border-bottom: 1px solid var(--line);
+        padding: 14px 16px;
+        vertical-align: top;
+      }
+      tr:last-child td {
+        border-bottom: 0;
+      }
+      td:first-child {
+        font-weight: 700;
+        width: 19%;
+      }
+      code {
+        font: 12px/1.55 var(--mono);
+        overflow-wrap: anywhere;
+        color: #5c438c;
+      }
+      .stage-tabs {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .stage-tabs button {
+        text-align: left;
+        padding: 15px;
+        border-top: 4px solid var(--purple);
+      }
+      .stage-tabs strong {
+        display: block;
+        font: 750 19px var(--display);
+        margin-bottom: 5px;
+      }
+      .stage-tabs span {
+        font-size: 12px;
+      }
+      .stage-detail {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 22px;
+        margin-top: 13px;
+      }
+      .stage-detail .io {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin-top: 14px;
+      }
+      .io div {
+        background: #f5f8fc;
+        padding: 12px 15px;
+        font-size: 13px;
+      }
+      .io b {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--purple);
+      }
+      .loop-return {
+        color: var(--purple);
+        font: 12px var(--mono);
+        text-align: center;
+        margin: 12px;
+      }
+      .event-lanes {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .lane {
+        background: white;
+        border: 1px solid var(--line);
+        border-top: 3px solid var(--purple);
+        border-radius: 7px;
+        padding: 18px;
+      }
+      .lane p {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .route {
+        margin: 14px 0;
+        padding: 17px 20px;
+        background: #eaf0f9;
+        font: 13px/1.9 var(--mono);
+        border-radius: 7px;
+        overflow-wrap: anywhere;
+      }
+      .step-buttons {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .timeline ol {
+        padding: 0;
+        list-style: none;
+        counter-reset: step;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .timeline li {
+        counter-increment: step;
+        position: relative;
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 17px 18px 17px 56px;
+      }
+      .timeline li:before {
+        content: counter(step, decimal-leading-zero);
+        position: absolute;
+        left: 16px;
+        top: 18px;
+        color: var(--muted);
+        font: 12px var(--mono);
+      }
+      .timeline li.active {
+        border-color: var(--blue);
+        box-shadow: inset 3px 0 var(--blue);
+        background: #f3f7ff;
+      }
+      .timeline li p {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 6px 0 0;
+      }
+      .evidence {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .evidence a {
+        padding: 15px 17px;
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        text-decoration: none;
+        font-size: 13px;
+      }
+      .evidence small {
+        display: block;
+        color: var(--muted);
+        margin-top: 4px;
+        font: 11px/1.6 var(--mono);
+        overflow-wrap: anywhere;
+      }
+      .all-entities {
+        display: none;
+      }
+      footer {
+        border-top: 1px solid var(--line);
+        padding: 22px 0;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      footer .shell {
+        display: flex;
+        justify-content: space-between;
+        gap: 15px;
+        flex-wrap: wrap;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      @media (max-width: 1150px) {
+        .map-layout {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .inspector {
+          border-left: 0;
+          border-top: 1px solid var(--line);
+        }
+        .inspector dl {
+          display: grid;
+          grid-template-columns: 95px 1fr;
+          gap: 8px;
+        }
+        .inspector dt,
+        .inspector dd {
+          margin: 0;
+        }
+        .bar {
+          gap: 12px;
+        }
+        nav {
+          margin-left: 0;
+        }
+      }
+      @media (max-width: 650px) {
+        .shell {
+          padding: 0 18px;
+        }
+        .topbar {
+          position: static;
+        }
+        .bar {
+          padding-top: 14px;
+          padding-bottom: 14px;
+        }
+        nav {
+          gap: 9px 14px;
+        }
+        .brand span {
+          display: none;
+        }
+        header {
+          padding-top: 25px;
+        }
+        .section-index {
+          display: none;
+        }
+        .cards,
+        .event-lanes,
+        .evidence,
+        .timeline ol {
+          grid-template-columns: 1fr;
+        }
+        .stage-tabs {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .stage-detail .io {
+          grid-template-columns: 1fr;
+        }
+        .toolbar .plain {
+          margin-left: 0;
+        }
+        .section-head {
+          flex-direction: column;
+          gap: 5px;
+        }
+        .deployment {
+          padding: 16px;
+        }
+        h2 {
+          font-size: 23px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+        * {
+          transition: none !important;
+        }
+      }
+      @media print {
+        @page {
+          size: A4 landscape;
+          margin: 12mm;
+        }
+        body {
+          background: white;
+          font-size: 11px;
+        }
+        .shell {
+          max-width: none;
+          padding: 0;
+        }
+        .topbar {
+          position: static;
+        }
+        nav,
+        .toolbar,
+        .switch,
+        .step-buttons,
+        .plain {
+          display: none !important;
+        }
+        header {
+          padding: 15px 0;
+        }
+        section {
+          margin: 20px 0;
+        }
+        .map-layout {
+          grid-template-columns: 1fr;
+        }
+        .diagram-scroll {
+          overflow: visible;
+        }
+        .diagram {
+          min-width: 0;
+        }
+        .inspector {
+          display: none;
+        }
+        .all-entities {
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 10px;
+          margin-top: 14px;
+        }
+        .all-entities article {
+          border: 1px solid var(--line);
+          padding: 12px;
+          break-inside: avoid;
+        }
+        .all-entities p {
+          font-size: 10px;
+        }
+        .table-scroll {
+          overflow: visible;
+        }
+        table {
+          min-width: 0;
+          font-size: 10px;
+        }
+        td,
+        th {
+          padding: 8px;
+        }
+        .stage-tabs button {
+          color: var(--ink);
+          background: white;
+        }
+        .deployment[hidden] {
+          display: block !important;
+        }
+        .cards,
+        .event-lanes {
+          grid-template-columns: repeat(3, 1fr);
+        }
+        .edge.hidden {
+          display: block;
+        }
+        .timeline li,
+        .card,
+        .lane,
+        .evidence a {
+          break-inside: avoid;
+        }
+        .tag,
+        .node > .box {
+          print-color-adjust: exact;
+        }
+        a {
+          color: inherit;
+        }
+      }
+      .target-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.7fr) minmax(270px, 1fr);
+        gap: 22px;
+        align-items: start;
+      }
+      .target-map {
+        width: 100%;
+        min-width: 620px;
+        display: block;
+      }
+      .target-node {
+        cursor: pointer;
+      }
+      .target-node .target-box {
+        stroke: #b6c6dc;
+        stroke-width: 1.5;
+        transition: stroke 0.15s;
+      }
+      .target-node[aria-pressed="true"] .target-box {
+        stroke: var(--purple);
+        stroke-width: 3;
+      }
+      .target-node:focus-visible .target-box {
+        stroke: var(--blue);
+        stroke-width: 4;
+      }
+      .target-inspector {
+        background: white;
+        border: 1px solid var(--line);
+        border-top: 4px solid var(--purple);
+        border-radius: 12px;
+        padding: 24px;
+      }
+      .target-inspector h3 {
+        font-size: 25px;
+        margin: 8px 0 16px;
+      }
+      .target-inspector dt {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 18px;
+      }
+      .target-inspector dd {
+        margin: 4px 0 0;
+      }
+      .target-policy {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+        margin-top: 22px;
+      }
+      .target-policy article {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 22px;
+      }
+      .target-policy h3 {
+        margin: 10px 0;
+      }
+      .target-policy ul {
+        padding-left: 19px;
+      }
+      .target-reference {
+        margin-top: 18px;
+      }
+      .target-reference summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      @media (max-width: 1000px) {
+        .bar {
+          flex-wrap: wrap;
+        }
+        .target-layout {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (max-width: 650px) {
+        .target-policy {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media print {
+        .target-layout,
+        .target-policy {
+          display: block;
+        }
+        .target-inspector {
+          display: none;
+        }
+        .target-map {
+          min-width: 0;
+        }
+        .target-reference {
+          display: block;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .target-node .target-box {
+          transition: none;
+        }
+      }
+      /* 4.0 评审视图：保持职责色，使用线型区分依赖、绑定和运行时请求。 */
+      header {
+        padding-bottom: 28px;
+      }
+      .review-switch {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin: 0 0 16px;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #eaf0f8;
+      }
+      .review-switch button {
+        border: 0;
+        padding: 11px 18px;
+        border-radius: 9px;
+        background: transparent;
+        color: var(--muted);
+        font-weight: 650;
+      }
+      .review-switch button[aria-pressed="true"] {
+        background: white;
+        color: var(--purple);
+        box-shadow: 0 2px 8px #172e4b10;
+      }
+      .review-switch p {
+        margin: 0 10px 0 auto;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .target-layout {
+        gap: 18px;
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: white;
+        box-shadow: 0 12px 32px #172e4b06;
+      }
+      .target-layout > div {
+        min-width: 0;
+      }
+      .target-layout .diagram-scroll {
+        border: 0;
+        background: radial-gradient(#cdd8e5 0.6px, transparent 0.6px);
+        background-size: 16px 16px;
+        border-radius: 12px;
+      }
+      .target-map {
+        min-width: 610px;
+      }
+      .target-inspector {
+        border: 0;
+        border-left: 1px solid var(--line);
+        border-radius: 0;
+        padding: 20px 20px 20px 26px;
+      }
+      .target-inspector dt {
+        margin-top: 13px;
+      }
+      [data-architecture-panel][hidden] {
+        display: none;
+      }
+      .architecture-caption {
+        padding: 0 18px 12px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .review-ribbon {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 24px;
+        padding: 16px 20px;
+        margin: 18px 0;
+        border-left: 3px solid var(--teal);
+        background: #eaf5f5;
+        border-radius: 0 10px 10px 0;
+        font-size: 13px;
+      }
+      .review-ribbon strong {
+        color: var(--teal);
+      }
+      .authority-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 1px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--line);
+      }
+      .authority-cell {
+        background: white;
+        padding: 20px 22px;
+      }
+      .authority-cell h3 {
+        font-size: 17px;
+        margin: 4px 0 8px;
+      }
+      .authority-cell p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .authority-label {
+        font: 11px var(--mono);
+        letter-spacing: 0.08em;
+        color: var(--teal);
+      }
+      .outcome-proof {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        padding: 20px 0 4px;
+      }
+      .outcome-proof span {
+        border: 1px solid var(--line);
+        padding: 8px 12px;
+        border-radius: 8px;
+        background: white;
+        font-size: 13px;
+      }
+      .outcome-proof .success {
+        background: #eaf5f5;
+        border-color: #add4d8;
+        color: #075d66;
+      }
+      .outcome-proof .failure {
+        background: #fff2ed;
+        border-color: #e5baac;
+        color: #873b28;
+      }
+      .outcome-proof p {
+        flex-basis: 100%;
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .contract-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+      }
+      .contract-card {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 24px;
+        border-top: 3px solid var(--purple);
+      }
+      .contract-card:nth-child(2) {
+        border-top-color: var(--blue);
+      }
+      .contract-card:nth-child(3) {
+        border-top-color: var(--teal);
+      }
+      .contract-card h3 {
+        margin: 12px 0;
+        font-size: 22px;
+      }
+      .contract-card p {
+        font-size: 14px;
+      }
+      .contract-card dl {
+        margin-bottom: 0;
+      }
+      .contract-card dt {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 14px;
+        font-weight: 700;
+      }
+      .contract-card dd {
+        margin: 4px 0 0;
+        font-size: 13px;
+      }
+      .race-board {
+        margin: 22px 0;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: white;
+        overflow: hidden;
+      }
+      .race-head {
+        padding: 20px 24px 0;
+      }
+      .race-head h3 {
+        margin: 0 0 5px;
+      }
+      .race-head p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .race-lanes {
+        padding: 18px 24px;
+        display: grid;
+        gap: 9px;
+      }
+      .race-lane {
+        display: grid;
+        grid-template-columns: 155px minmax(0, 1fr);
+        align-items: center;
+        gap: 15px;
+      }
+      .race-lane strong {
+        font-size: 13px;
+      }
+      .race-track {
+        border-left: 3px solid var(--blue);
+        padding: 8px 12px;
+        background: #edf3ff;
+        border-radius: 0 7px 7px 0;
+        font-size: 13px;
+      }
+      .race-lane:nth-child(2) .race-track {
+        border-color: var(--purple);
+        background: #f3effb;
+      }
+      .race-lane:nth-child(3) .race-track {
+        border-color: var(--teal);
+        background: #eaf5f5;
+      }
+      .race-foot {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        border-top: 1px solid var(--line);
+      }
+      .race-foot p {
+        margin: 0;
+        padding: 16px 24px;
+        font-size: 13px;
+      }
+      .race-foot p + p {
+        border-left: 1px solid var(--line);
+      }
+      .trust-strip {
+        display: grid;
+        grid-template-columns: 1fr 1.5fr;
+        gap: 24px;
+        padding: 24px;
+        background: #fff8ec;
+        border: 1px solid #e8d6b5;
+        border-radius: 14px;
+      }
+      .trust-strip h3 {
+        color: #845000;
+        margin: 0 0 8px;
+      }
+      .trust-strip p {
+        margin: 6px 0;
+        font-size: 13px;
+      }
+      .permission-pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+        margin-top: 12px;
+      }
+      .permission-pills span {
+        background: white;
+        border: 1px solid #e8d6b5;
+        border-radius: 6px;
+        padding: 5px 9px;
+        font-size: 12px;
+      }
+      .decision-summary {
+        margin-top: 22px;
+      }
+      .decision-summary summary {
+        cursor: pointer;
+        font-weight: 650;
+      }
+      .decision-summary ul {
+        padding-left: 20px;
+      }
+      .decision-summary li {
+        padding: 6px 0;
+        font-size: 14px;
+      }
+      .runtime-node {
+        cursor: pointer;
+      }
+      .runtime-node:focus-visible rect,
+      .runtime-node[aria-pressed="true"] rect {
+        stroke: var(--purple);
+        stroke-width: 3;
+      }
+      @media (max-width: 1000px) {
+        .target-inspector {
+          border-left: 0;
+          border-top: 1px solid var(--line);
+          padding: 20px;
+        }
+        .contract-grid {
+          grid-template-columns: 1fr;
+        }
+        .review-switch p {
+          flex-basis: 100%;
+          margin: 4px 10px;
+        }
+      }
+      @media (max-width: 650px) {
+        .authority-grid,
+        .trust-strip,
+        .race-foot {
+          grid-template-columns: 1fr;
+        }
+        .target-layout {
+          padding: 8px;
+        }
+        .race-lane {
+          grid-template-columns: 1fr;
+          gap: 4px;
+        }
+        .race-foot p + p {
+          border-left: 0;
+          border-top: 1px solid var(--line);
+        }
+      }
+      @media print {
+        .review-switch {
+          display: none;
+        }
+        .target-layout {
+          border: 0;
+          padding: 0;
+          box-shadow: none;
+        }
+        [data-architecture-panel][hidden] {
+          display: block !important;
+        }
+        [data-architecture-panel] {
+          break-inside: avoid;
+        }
+        .authority-grid,
+        .contract-grid {
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+        }
+        .contract-card,
+        .authority-cell,
+        .race-board,
+        .trust-strip {
+          break-inside: avoid;
+        }
+        .target-layout > .diagram-scroll {
+          background: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <div class="shell bar">
+        <div class="brand">PERI 4.0 <span>内部分层演进稿</span></div>
+        <nav aria-label="页面导航">
+          <a href="#target">4.0 分层</a><a href="#contracts">执行契约</a
+          ><a href="#layers">实现剖面</a><a href="#state">状态归属</a
+          ><a href="#rcra">RCRA</a><a href="#events">事件上行</a
+          ><a href="agent-architecture-overview.html"
+            >目标：Peri 4.0 生态稿 ↗</a
+          >
+        </nav>
+        <button class="plain" id="print">打印 / 保存 PDF</button>
+      </div>
+    </div>
+    <main class="shell">
+      <header>
+        <div class="eyebrow">
+          <span class="tag">沿用现有架构 · 分层目标与实现剖面对照</span
+          ><time datetime="2026-09-11">2026-09-11</time
+          ><span>逻辑分层 / 调用路径 / 状态所有权</span>
+        </div>
+        <h1>先保证 Core，<br />再向上构建协作。</h1>
+        <p>
+          现有架构的大部分分层可以保留。4.0 先保证 Core 独立完整，SubAgent 复用
+          Core 在进程内执行，Workflow 再基于 SubAgent
+          编排；不是重建三套循环，也不是把标准协作交给 TS 重写。
+        </p>
+        <div class="principles">
+          <span>Workflow → SubAgent → Core</span
+          ><span>一个主 Agent 进程，可包含子执行</span
+          ><span>保留基础 / 收敛切面 / 迁移能力</span>
+        </div>
+      </header>
+      <noscript
+        ><p class="notice">
+          JavaScript
+          未启用：图、职责矩阵、完整步骤和证据仍可阅读；节点检查器与筛选不可用。
+        </p></noscript
+      >
+      <section id="target" aria-labelledby="target-title">
+        <div class="section-head">
+          <div>
+            <h2 id="target-title">4.0 分层：执行内核完整，协作逐层构建</h2>
+            <p>
+              静态依赖保持单向，运行时通过装配接入协作。切换视图，看清“依赖谁”和“调用谁”的区别。
+            </p>
+          </div>
+          <span class="section-index">CORE FIRST / 架构原则已采纳</span>
+        </div>
+        <div class="review-switch" role="group" aria-label="架构视角">
+          <button data-architecture-view="dependency" aria-pressed="true">
+            静态依赖
+          </button>
+          <button data-architecture-view="runtime" aria-pressed="false">
+            运行时协作
+          </button>
+          <p id="architecture-note" aria-live="polite">
+            实线箭头：上层依赖下层，不表示调用时间顺序。
+          </p>
+        </div>
+        <div class="target-layout">
+          <div>
+            <div data-architecture-panel="dependency">
+              <div
+                class="diagram-scroll"
+                tabindex="0"
+                aria-label="4.0 分层图，窄屏可横向滚动"
+              >
+                <svg
+                  class="target-map"
+                  viewBox="0 0 780 700"
+                  role="group"
+                  aria-labelledby="target-svg-title target-svg-desc"
+                >
+                  <title id="target-svg-title">
+                    Workflow 依赖进程内 SubAgent，SubAgent 依赖 Core
+                  </title>
+                  <desc id="target-svg-desc">
+                    一个 Peri 主 Agent 进程内，Core 为主 Agent 与 SubAgent
+                    提供同一执行机制；Workflow 基于 SubAgent 编排。Core
+                    不依赖上层。外部 TS 通过 ACP 管理主进程。
+                  </desc>
+                  <defs>
+                    <marker
+                      id="target-arrow"
+                      markerWidth="9"
+                      markerHeight="9"
+                      refX="7"
+                      refY="4"
+                      orient="auto"
+                    >
+                      <path d="M0 0L8 4L0 8Z" fill="#7854c8" />
+                    </marker>
+                  </defs>
+                  <rect
+                    x="22"
+                    y="15"
+                    width="736"
+                    height="63"
+                    rx="10"
+                    fill="#eaf1ff"
+                    stroke="#b8cdf8"
+                  />
+                  <text
+                    x="42"
+                    y="41"
+                    font-size="16"
+                    font-weight="700"
+                    fill="#172e4b"
+                  >
+                    TS 宿主 ⇄ ACP 通信管道 ⇄ Peri 主 Agent
+                  </text>
+                  <text x="42" y="63" font-size="13" fill="#536780">
+                    管理主进程与跨主 Agent 业务；不逐个创建 SubAgent OS 进程
+                  </text>
+                  <rect
+                    x="22"
+                    y="96"
+                    width="736"
+                    height="577"
+                    rx="16"
+                    fill="#fbfaff"
+                    stroke="#b69ad7"
+                    stroke-dasharray="7 5"
+                  />
+                  <text
+                    x="44"
+                    y="126"
+                    font-size="15"
+                    font-weight="700"
+                    fill="#7854c8"
+                  >
+                    Peri 标准执行与协作体系 · 一个主 Agent 进程
+                  </text>
+                  <g
+                    class="target-node"
+                    data-target="workflow"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Workflow 职责"
+                    aria-pressed="false"
+                  >
+                    <rect
+                      class="target-box"
+                      x="145"
+                      y="148"
+                      width="490"
+                      height="84"
+                      rx="10"
+                      fill="#fff"
+                    />
+                    <text
+                      x="168"
+                      y="179"
+                      font-size="21"
+                      font-weight="700"
+                      fill="#172e4b"
+                    >
+                      Workflow · 标准编排层
+                    </text>
+                    <text x="168" y="207" font-size="14" fill="#536780">
+                      依赖 / 顺序 / 并行 / 失败处理 · 基于 SubAgent
+                    </text>
+                  </g>
+                  <path
+                    d="M390 234V279"
+                    fill="none"
+                    stroke="#7854c8"
+                    stroke-width="2.5"
+                    marker-end="url(#target-arrow)"
+                  />
+                  <text x="407" y="261" font-size="12" fill="#7854c8">
+                    组合执行单元，不复制 RCRA
+                  </text>
+                  <g
+                    class="target-node"
+                    data-target="subagent"
+                    role="button"
+                    tabindex="0"
+                    aria-label="进程内 SubAgent 职责"
+                    aria-pressed="false"
+                  >
+                    <rect
+                      class="target-box"
+                      x="145"
+                      y="288"
+                      width="490"
+                      height="101"
+                      rx="10"
+                      fill="#fff"
+                    />
+                    <text
+                      x="168"
+                      y="320"
+                      font-size="21"
+                      font-weight="700"
+                      fill="#172e4b"
+                    >
+                      SubAgent · 进程内协作层
+                    </text>
+                    <text x="168" y="348" font-size="14" fill="#536780">
+                      子执行创建 / 父子关系 / 结果回传 / 取消传播
+                    </text>
+                    <text x="168" y="371" font-size="13" fill="#536780">
+                      复用 Core；不是独立进程，也不是同一份可变 Session
+                    </text>
+                  </g>
+                  <path
+                    d="M390 391V436"
+                    fill="none"
+                    stroke="#7854c8"
+                    stroke-width="2.5"
+                    marker-end="url(#target-arrow)"
+                  />
+                  <text x="407" y="418" font-size="12" fill="#7854c8">
+                    创建受管理的 Core 执行单元
+                  </text>
+                  <g
+                    class="target-node"
+                    data-target="core"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Core 职责"
+                    aria-pressed="true"
+                  >
+                    <rect
+                      class="target-box"
+                      x="80"
+                      y="445"
+                      width="620"
+                      height="170"
+                      rx="12"
+                      fill="#f1ebfa"
+                    />
+                    <text
+                      x="105"
+                      y="480"
+                      font-size="25"
+                      font-weight="700"
+                      fill="#172e4b"
+                    >
+                      Core · 先保证它独立、完整、可运行
+                    </text>
+                    <text x="105" y="512" font-size="16" fill="#7854c8">
+                      Receive → Compact → Reason → Act
+                    </text>
+                    <text x="105" y="542" font-size="14" fill="#536780">
+                      模型 / 上下文 / MCP 执行 / Session Store 访问 / 取消与终态
+                    </text>
+                    <text x="105" y="570" font-size="14" fill="#536780">
+                      主 Agent 直接使用；SubAgent 复用；不反向依赖 Workflow
+                    </text>
+                    <text x="105" y="595" font-size="12" fill="#536780">
+                      共享执行机制 ≠ 共享同一个 Run、上下文或可变 Session
+                    </text>
+                  </g>
+                  <text x="44" y="643" font-size="12" fill="#536780">
+                    逻辑归属图：SubAgent 执行在进程内；Workflow 的语言 / 辅助
+                    runner 不由此图规定。
+                  </text>
+                </svg>
+              </div>
+              <p class="architecture-caption">
+                依赖契约：Core 不 import SubAgent / Workflow
+                实现；共享执行机制，不共享同一份可变 Session。
+              </p>
+            </div>
+            <div data-architecture-panel="runtime" hidden>
+              <div
+                class="diagram-scroll"
+                tabindex="0"
+                aria-label="运行时协作图，窄屏可横向滚动"
+              >
+                <svg
+                  class="target-map"
+                  viewBox="0 0 780 700"
+                  role="group"
+                  aria-labelledby="runtime-title runtime-desc"
+                >
+                  <title id="runtime-title">
+                    装配入口接线，Core 经注入能力请求协作
+                  </title>
+                  <desc id="runtime-desc">
+                    装配入口绑定 Core
+                    的能力接口和标准协作适配器。调用经适配器进入 SubAgent 或
+                    Workflow，SubAgent 创建复用 Core
+                    的独立子执行。蓝色虚线表示装配，紫色实线表示请求，青色虚线表示结果返回，不是模块依赖。
+                  </desc>
+                  <defs>
+                    <marker
+                      id="rt-call"
+                      markerWidth="9"
+                      markerHeight="9"
+                      refX="7"
+                      refY="4"
+                      orient="auto"
+                    >
+                      <path d="M0 0L8 4L0 8Z" fill="#7854c8" />
+                    </marker>
+                    <marker
+                      id="rt-result"
+                      markerWidth="9"
+                      markerHeight="9"
+                      refX="7"
+                      refY="4"
+                      orient="auto"
+                    >
+                      <path d="M0 0L8 4L0 8Z" fill="#087f8c" />
+                    </marker>
+                  </defs>
+                  <rect
+                    x="22"
+                    y="16"
+                    width="736"
+                    height="648"
+                    rx="18"
+                    fill="#fbfaff"
+                    stroke="#b69ad7"
+                    stroke-dasharray="7 5"
+                  />
+                  <text
+                    x="44"
+                    y="44"
+                    font-size="14"
+                    fill="#7854c8"
+                    font-weight="700"
+                  >
+                    同一个 Peri 进程 · 主 Agent + 进程内 SubAgent
+                  </text>
+                  <g
+                    class="runtime-node"
+                    data-target="assembly"
+                    role="button"
+                    tabindex="0"
+                    aria-label="进程装配入口职责"
+                    aria-pressed="false"
+                  >
+                    <rect
+                      x="62"
+                      y="66"
+                      width="656"
+                      height="72"
+                      rx="12"
+                      fill="#eaf1ff"
+                      stroke="#b8cdf8"
+                    />
+                    <text
+                      x="84"
+                      y="96"
+                      font-size="19"
+                      fill="#172e4b"
+                      font-weight="700"
+                    >
+                      进程装配入口
+                    </text>
+                    <text x="84" y="121" font-size="13" fill="#536780">
+                      组装与绑定 · 复用现有宿主机制，不新增业务服务或状态注册表
+                    </text>
+                  </g>
+                  <path
+                    d="M184 138V200 M599 138V200"
+                    fill="none"
+                    stroke="#2563eb"
+                    stroke-width="2"
+                    stroke-dasharray="5 5"
+                  />
+                  <text x="196" y="174" font-size="12" fill="#2563eb">
+                    注入能力接口
+                  </text>
+                  <text x="612" y="174" font-size="12" fill="#2563eb">
+                    绑定实现
+                  </text>
+                  <g
+                    class="runtime-node"
+                    data-target="core"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Core 运行时职责"
+                    aria-pressed="true"
+                  >
+                    <rect
+                      x="62"
+                      y="200"
+                      width="274"
+                      height="112"
+                      rx="14"
+                      fill="#efe8fb"
+                      stroke="#b69ad7"
+                    />
+                    <text
+                      x="82"
+                      y="233"
+                      font-size="21"
+                      fill="#172e4b"
+                      font-weight="700"
+                    >
+                      Core · 父执行
+                    </text>
+                    <text x="82" y="262" font-size="14" fill="#7854c8">
+                      RCRA → 能力执行接口
+                    </text>
+                    <text x="82" y="289" font-size="12" fill="#536780">
+                      不引用上层实现，不管理流程图
+                    </text>
+                  </g>
+                  <g
+                    class="runtime-node"
+                    data-target="adapter"
+                    role="button"
+                    tabindex="0"
+                    aria-label="协作能力适配职责"
+                    aria-pressed="false"
+                  >
+                    <rect
+                      x="470"
+                      y="200"
+                      width="248"
+                      height="112"
+                      rx="14"
+                      fill="#edf3ff"
+                      stroke="#b8cdf8"
+                    />
+                    <text
+                      x="490"
+                      y="233"
+                      font-size="19"
+                      fill="#172e4b"
+                      font-weight="700"
+                    >
+                      标准协作适配器
+                    </text>
+                    <text x="490" y="262" font-size="13" fill="#536780">
+                      启动 / 等待 / 取消 / 结果
+                    </text>
+                    <text x="490" y="289" font-size="12" fill="#536780">
+                      先复用接口；具体契约待定
+                    </text>
+                  </g>
+                  <path
+                    d="M336 236H470"
+                    fill="none"
+                    stroke="#7854c8"
+                    stroke-width="2.5"
+                    marker-end="url(#rt-call)"
+                  />
+                  <text x="354" y="223" font-size="12" fill="#7854c8">
+                    能力请求 →
+                  </text>
+                  <path
+                    d="M470 283H336"
+                    fill="none"
+                    stroke="#087f8c"
+                    stroke-width="2"
+                    stroke-dasharray="5 4"
+                    marker-end="url(#rt-result)"
+                  />
+                  <text x="354" y="306" font-size="12" fill="#087f8c">
+                    ← 结果返回
+                  </text>
+                  <path
+                    d="M596 312V356"
+                    fill="none"
+                    stroke="#7854c8"
+                    stroke-width="2.5"
+                    marker-end="url(#rt-call)"
+                  />
+                  <g
+                    class="runtime-node"
+                    data-target="workflow"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Workflow 运行时职责"
+                    aria-pressed="false"
+                  >
+                    <rect
+                      x="470"
+                      y="356"
+                      width="248"
+                      height="78"
+                      rx="12"
+                      fill="#f3effb"
+                      stroke="#b69ad7"
+                    />
+                    <text
+                      x="490"
+                      y="387"
+                      font-size="18"
+                      fill="#172e4b"
+                      font-weight="700"
+                    >
+                      Workflow
+                    </text>
+                    <text x="490" y="413" font-size="12" fill="#536780">
+                      需要流程时：依赖 / 并行 / 聚合
+                    </text>
+                  </g>
+                  <path
+                    d="M596 434V488"
+                    fill="none"
+                    stroke="#7854c8"
+                    stroke-width="2.5"
+                    marker-end="url(#rt-call)"
+                  />
+                  <text x="608" y="466" font-size="12" fill="#7854c8">
+                    组合子执行
+                  </text>
+                  <path
+                    d="M718 254H739V528H718"
+                    fill="none"
+                    stroke="#7854c8"
+                    stroke-width="1.7"
+                    marker-end="url(#rt-call)"
+                  />
+                  <g
+                    class="runtime-node"
+                    data-target="subagent"
+                    role="button"
+                    tabindex="0"
+                    aria-label="SubAgent 运行时职责"
+                    aria-pressed="false"
+                  >
+                    <rect
+                      x="470"
+                      y="488"
+                      width="248"
+                      height="102"
+                      rx="12"
+                      fill="#eaf1ff"
+                      stroke="#b8cdf8"
+                    />
+                    <text
+                      x="490"
+                      y="520"
+                      font-size="19"
+                      fill="#172e4b"
+                      font-weight="700"
+                    >
+                      SubAgent
+                    </text>
+                    <text x="490" y="547" font-size="13" fill="#536780">
+                      父子关系 / 隔离 / 取消传播
+                    </text>
+                    <text x="490" y="570" font-size="12" fill="#536780">
+                      也可直接请求，不必经过流程层
+                    </text>
+                  </g>
+                  <g
+                    class="runtime-node"
+                    data-target="core"
+                    role="button"
+                    tabindex="0"
+                    aria-label="子执行复用 Core"
+                    aria-pressed="true"
+                  >
+                    <rect
+                      x="62"
+                      y="488"
+                      width="274"
+                      height="102"
+                      rx="14"
+                      fill="#efe8fb"
+                      stroke="#b69ad7"
+                    />
+                    <text
+                      x="82"
+                      y="520"
+                      font-size="19"
+                      fill="#172e4b"
+                      font-weight="700"
+                    >
+                      Core · 子执行
+                    </text>
+                    <text x="82" y="547" font-size="13" fill="#536780">
+                      独立 Run / 上下文 / 准入能力
+                    </text>
+                    <text x="82" y="570" font-size="12" fill="#536780">
+                      子执行终态仍由 Core 裁决
+                    </text>
+                  </g>
+                  <path
+                    d="M470 524H336"
+                    fill="none"
+                    stroke="#7854c8"
+                    stroke-width="2.5"
+                    marker-end="url(#rt-call)"
+                  />
+                  <text x="355" y="510" font-size="12" fill="#7854c8">
+                    创建并执行
+                  </text>
+                  <path
+                    d="M336 563H470"
+                    fill="none"
+                    stroke="#087f8c"
+                    stroke-width="2"
+                    stroke-dasharray="5 4"
+                    marker-end="url(#rt-result)"
+                  />
+                  <text x="355" y="585" font-size="12" fill="#087f8c">
+                    返回结果 →
+                  </text>
+                  <text x="45" y="633" font-size="12" fill="#536780">
+                    这是调用与绑定图，不是静态依赖图；重入、等待与取消规则仍需契约验证。
+                  </text>
+                </svg>
+              </div>
+              <p class="architecture-caption">
+                蓝色虚线：启动时绑定　紫色实线：运行时请求　青色虚线：执行结果。运行时回调不等于
+                Core 依赖上层实现。
+              </p>
+            </div>
+          </div>
+          <aside class="target-inspector" aria-live="polite" aria-atomic="true">
+            <span class="tag" id="target-level">基础执行层</span>
+            <h3 id="target-name">Core</h3>
+            <p id="target-summary">
+              先完成一个执行单元的全部运行契约，再向上增加协作能力。
+            </p>
+            <dl>
+              <dt>负责</dt>
+              <dd id="target-does">
+                RCRA、模型与上下文、MCP Client、Store 访问及取消终态。
+              </dd>
+              <dt>不负责</dt>
+              <dd id="target-not">
+                不解释 Workflow 依赖图，不内置领域
+                Skills，不让模型决定状态是否保存。
+              </dd>
+              <dt>状态与依赖</dt>
+              <dd id="target-state">
+                每次执行有独立 Run 与上下文；持久 Session 经 Store 访问，活动
+                token 与连接留在本地。
+              </dd>
+              <dt>与现有架构的关系</dt>
+              <dd id="target-reuse">
+                保留 RCRA、Model、事件分层及存储契约；收敛 Core
+                必需策略，不另造执行循环。
+              </dd>
+            </dl>
+          </aside>
+        </div>
+        <div class="target-policy">
+          <article>
+            <span class="tag">保留</span>
+            <h3>现有基础大部分是正确的</h3>
+            <ul>
+              <li>RCRA、Model、ACP 与事件分层。</li>
+              <li>
+                Controller / Runtime 的控制、登记语义；不承诺 crate
+                边界永远不变。
+              </li>
+              <li>取消最终执行权、ThreadStore 访问契约。</li>
+              <li>官方进程内 SubAgent；Workflow 在其上组合。</li>
+            </ul>
+          </article>
+          <article>
+            <span class="tag">收敛</span>
+            <h3>Middleware 不再包揽所有功能</h3>
+            <ul>
+              <li>保留 Core 必要策略与真正可组合的扩展点。</li>
+              <li>MCP 连接与调用归入 Core 执行面。</li>
+              <li>
+                Resources 保持数据访问接口，支持远程统一
+                Store，也允许本地开发实现。
+              </li>
+              <li>活动连接、token、Run 不整体远程化。</li>
+            </ul>
+          </article>
+          <article>
+            <span class="tag">迁移</span>
+            <h3>官方工具成为 Builtin MCP</h3>
+            <ul>
+              <li>Cron、文件、Shell 由官方 Builtin MCP 提供。</li>
+              <li>文件 / Shell 执行经 MCP Server 后方 Sandbox。</li>
+              <li>
+                外部 Skills、工具与官方能力使用相同 MCP 边界，不因 builtin
+                绕过权限。
+              </li>
+              <li>Cron 触发入口与生命周期待定，不另建 Agent loop。</li>
+            </ul>
+          </article>
+        </div>
+        <p class="notice">
+          <strong>不改变的状态边界：</strong>TS 经 ACP 只传 Session
+          标识或引用，Peri 直接读写 Store；Store 是基础设施，不是模型可选调用的
+          MCP 工具。父子 Session 隔离与继承、Store 协议、版本提交时点、Skill
+          映射仍待设计。下方保留当前工作树剖面，不能把目标当作已实现。
+        </p>
+        <details class="target-reference">
+          <summary>完整职责文字（打印时展开）</summary>
+          <div id="target-reference-content"></div>
+        </details>
+      </section>
+      <section id="authority" aria-labelledby="authority-title">
+        <div class="section-head">
+          <div>
+            <h2 id="authority-title">每一种事实，只由一个角色裁决</h2>
+            <p>
+              分开执行结果、流程结果和持久化结果。这里是已采纳的职责原则，不是已完成的状态协议。
+            </p>
+          </div>
+          <span class="section-index">AUTHORITY / 权威状态</span>
+        </div>
+        <div class="authority-grid">
+          <article class="authority-cell">
+            <span class="authority-label">EXECUTION</span>
+            <h3>Core → 单次 Run</h3>
+            <p>
+              运行、停止与执行终态。子执行也使用相同契约，不由 Workflow
+              改写结果。
+            </p>
+          </article>
+          <article class="authority-cell">
+            <span class="authority-label">COOPERATION</span>
+            <h3>SubAgent → 父子关系</h3>
+            <p>
+              受管理的子执行集合、等待、结果回传与取消传播策略，不接管子执行的终态裁决。
+            </p>
+          </article>
+          <article class="authority-cell">
+            <span class="authority-label">ORCHESTRATION</span>
+            <h3>Workflow → 流程状态</h3>
+            <p>
+              节点依赖、流程策略与聚合结果。流程失败不等于所有已完成子任务失败。
+            </p>
+          </article>
+          <article class="authority-cell">
+            <span class="authority-label">PERSISTENCE</span>
+            <h3>Store → Session 与版本</h3>
+            <p>
+              保存 Core
+              产生的合法状态变化，保证提交一致性；不裁决执行业务成功与否。
+            </p>
+          </article>
+          <article class="authority-cell">
+            <span class="authority-label">TRANSPORT</span>
+            <h3>ACP → 连接与请求关联</h3>
+            <p>
+              传输请求、响应与事件。连接断开不自动等同于 Run 已停止或 Session
+              已删除。
+            </p>
+          </article>
+          <article class="authority-cell">
+            <span class="authority-label">HOST</span>
+            <h3>TS → 主进程生命周期</h3>
+            <p>
+              创建、配置、关闭主 Agent 进程。只传 Session 引用，不代理状态提交。
+            </p>
+          </article>
+        </div>
+        <div
+          class="outcome-proof"
+          aria-label="流程失败不会重写成功子执行的结果"
+        >
+          <span class="success">子 Run A：成功</span
+          ><span class="success">子 Run B：成功</span
+          ><span class="failure">子 Run C：失败</span><b aria-hidden="true">→</b
+          ><span class="failure">Workflow：失败</span>
+          <p>
+            A、B
+            的成功结果与已发生副作用仍然存在。流程层可以决定后续策略，但不能改写
+            Core 已裁决的子执行事实。
+          </p>
+        </div>
+      </section>
+      <section id="contracts" aria-labelledby="contracts-title">
+        <div class="section-head">
+          <div>
+            <h2 id="contracts-title">先闭合三份契约，不急着增加层</h2>
+            <p>
+              架构评审已融入；下面是实施前需要验证的边界。具体接口、字段与提交协议仍待设计。
+            </p>
+          </div>
+          <span class="section-index">CONTRACTS / 待实现验证</span>
+        </div>
+        <div class="contract-grid">
+          <article class="contract-card">
+            <span class="tag">基础执行</span>
+            <h3>Core 执行契约</h3>
+            <p>输入与结果、执行 identity、唯一终态，以及取消请求何时生效。</p>
+            <dl>
+              <dt>失败场景</dt>
+              <dd>
+                取消、模型返回、工具结果同时抵达，上层已经显示“停止”，底层仍执行。
+              </dd>
+              <dt>验收</dt>
+              <dd>
+                完成先于取消生效时允许成功；取消请求不冒充停止。独立 Core
+                宿主无需协作实现即可运行。
+              </dd>
+            </dl>
+          </article>
+          <article class="contract-card">
+            <span class="tag">进程内协作</span>
+            <h3>SubAgent 协作契约</h3>
+            <p>父子 identity、Session 隔离、权限范围、等待与传播边界。</p>
+            <dl>
+              <dt>失败场景</dt>
+              <dd>
+                父执行等待子执行，子执行又等待同一父 Run；或并发写入同一可变
+                Session。
+              </dd>
+              <dt>验收</dt>
+              <dd>
+                禁止非法重入与循环等待；先复用能力接口，不足时才增加窄
+                port，不暴露上层具体实现给 Core。
+              </dd>
+            </dl>
+          </article>
+          <article class="contract-card">
+            <span class="tag">独立状态</span>
+            <h3>Session 提交契约</h3>
+            <p>版本或单写者约束、提交时点、冲突处理及持久化失败语义。</p>
+            <dl>
+              <dt>失败场景</dt>
+              <dd>工具已修改文件，远程 Store 随后不可用；结果流已经显示。</dd>
+              <dt>验收</dt>
+              <dd>
+                同时报告“副作用已发生”和“提交失败”，不能声称完整成功或自动回滚；冲突不能覆盖历史。
+              </dd>
+            </dl>
+          </article>
+        </div>
+        <div class="race-board">
+          <div class="race-head">
+            <h3>取消不是一个布尔值</h3>
+            <p>
+              三条事实通道，不是强制串行阶段；完成、取消与提交可能竞态发生。
+            </p>
+          </div>
+          <div class="race-lanes">
+            <div class="race-lane">
+              <strong>取消已请求</strong>
+              <div class="race-track">
+                TS / Workflow 发出意图；ACP 送达不等于 Core 已停止。
+              </div>
+            </div>
+            <div class="race-lane">
+              <strong>执行已停止</strong>
+              <div class="race-track">
+                Core 裁决完成或中止；传播层不提前伪造终态。
+              </div>
+            </div>
+            <div class="race-lane">
+              <strong>结果已持久化</strong>
+              <div class="race-track">
+                Store 确认提交；存储失败必须与执行结果分开表达。
+              </div>
+            </div>
+          </div>
+          <div class="race-foot">
+            <p>
+              <strong>完成先赢：</strong
+              >完成早于取消生效，可以返回成功；不能规定所有取消都覆盖成功。
+            </p>
+            <p>
+              <strong>取消已生效：</strong
+              >依已定义规则停止并清理，保持终态唯一。具体仲裁点与提交边界待定。
+            </p>
+          </div>
+        </div>
+        <div class="trust-strip">
+          <div>
+            <h3>共享连接 ≠ 共享权限</h3>
+            <p>
+              连接池是通信资源，不是 authority。父子使用同一 MCP
+              transport，也必须保有不同的能力准入范围。
+            </p>
+            <div class="permission-pills">
+              <span>主 Agent：读 + 执行</span><span>子 A：只读</span
+              ><span>子 B：仅检索</span>
+            </div>
+          </div>
+          <div>
+            <p>
+              <strong>Core 守住调用准入。</strong
+              >服务端需要识别调用者时，使用协议已有认证能力或独立连接，不强行追加自定义
+              MCP 身份字段。
+            </p>
+            <p>
+              <strong>Sandbox 守住执行环境边界。</strong>Builtin
+              不自动豁免，本地 TS
+              托管能力需要明确部署信任策略；静态资源读取不必一律进入 Sandbox。
+            </p>
+          </div>
+        </div>
+        <details class="decision-summary">
+          <summary>查看评审后的架构取舍</summary>
+          <ul>
+            <li>
+              <strong>采纳：</strong>静态依赖反转、权威状态分离、Store
+              失败显式报告、连接与授权分离。
+            </li>
+            <li>
+              <strong>约束后采纳：</strong>协作 port
+              先复用后新增；取消允许完成先赢；远端身份表达遵守现有协议，不预设新字段。
+            </li>
+            <li>
+              <strong>暂缓：</strong>删除 Controller / Runtime、通用
+              DI、事件溯源平台、完整 Workflow / Cron
+              跨重启恢复。先证明现有机制无法满足契约，再增加系统复杂度。
+            </li>
+            <li>
+              <strong>仍待裁决：</strong>Session 分叉与写入约束、Run
+              审计／Checkpoint 持久化范围、Cron schedule
+              的所有者与触发幂等、Workflow 恢复策略。活动 Run
+              本地化不禁止未来持久化审计。
+            </li>
+          </ul>
+        </details>
+      </section>
+      <section id="layers" aria-labelledby="layers-title">
+        <div class="section-head">
+          <div>
+            <h2 id="layers-title">现有实现：可复用的基础结构</h2>
+            <p>
+              当前工作树实现快照（2026-09-11，非发布版本）。箭头表示运行中的调用、事件或数据访问，不是
+              Cargo 依赖图。逻辑分层的能力提供方向，见现行架构文档。
+            </p>
+          </div>
+          <span class="section-index">IMPLEMENTATION SECTION</span>
+        </div>
+        <div class="toolbar" role="group" aria-label="关系筛选">
+          <button data-filter="all" aria-pressed="true">全部关系</button
+          ><button data-filter="call" aria-pressed="false">执行调用</button
+          ><button data-filter="event" aria-pressed="false">事件返回</button
+          ><button data-filter="state" aria-pressed="false">状态访问</button
+          ><button data-filter="cancel" aria-pressed="false">取消路径</button
+          ><button class="plain" id="reset">重置视图</button>
+        </div>
+        <div class="map-layout">
+          <div
+            class="diagram-scroll"
+            tabindex="0"
+            aria-label="架构图，窄屏可横向滚动"
+          >
+            <svg
+              class="diagram"
+              viewBox="0 0 1120 790"
+              role="group"
+              aria-labelledby="map-title map-desc"
+            >
+              <title id="map-title">
+                现有 Peri 前台执行分层与状态、事件关系图
+              </title>
+              <desc id="map-desc">
+                TUI 经 ACP transport 到宿主，宿主经 Controller、Runtime
+                的句柄调入 Agent。Agent 侧向使用中间件、模型及存储。取消从 ACP
+                会话 token 直接进入
+                Agent。每个实体可通过键盘选择，完整文本关系在图下方。
+              </desc>
+              <defs>
+                <marker
+                  id="arrow-call"
+                  markerWidth="7"
+                  markerHeight="7"
+                  refX="6"
+                  refY="3"
+                  orient="auto"
+                >
+                  <path d="M0 0L6 3L0 6Z" fill="#2563eb" />
+                </marker>
+                <marker
+                  id="arrow-event"
+                  markerWidth="7"
+                  markerHeight="7"
+                  refX="6"
+                  refY="3"
+                  orient="auto"
+                >
+                  <path d="M0 0L6 3L0 6Z" fill="#7854c8" />
+                </marker>
+                <marker
+                  id="arrow-state"
+                  markerWidth="7"
+                  markerHeight="7"
+                  refX="6"
+                  refY="3"
+                  orient="auto"
+                >
+                  <path d="M0 0L6 3L0 6Z" fill="#087f8c" />
+                </marker>
+                <marker
+                  id="arrow-cancel"
+                  markerWidth="7"
+                  markerHeight="7"
+                  refX="6"
+                  refY="3"
+                  orient="auto"
+                >
+                  <path d="M0 0L6 3L0 6Z" fill="#b34b35" />
+                </marker>
+              </defs>
+              <text class="caption" x="40" y="30">呈现与协议入口</text>
+              <text class="caption" x="590" y="30">执行主轴 · 前台 prompt</text>
+              <text class="caption" x="870" y="30">事件与协议能力</text>
+              <g class="edges">
+                <g class="edge" data-flow="call">
+                  <path d="M240 92H300" />
+                  <text x="251" y="82">请求</text>
+                </g>
+                <g class="edge" data-flow="call">
+                  <path d="M510 92H590" />
+                  <text x="525" y="82">dispatch</text>
+                </g>
+                <g class="edge" data-flow="call">
+                  <path d="M700 150V230" />
+                  <text x="708" y="184">register / run</text>
+                </g>
+                <g class="edge" data-flow="call">
+                  <path d="M700 320V365" />
+                  <text x="708" y="347">查句柄</text>
+                </g>
+                <g class="edge" data-flow="call">
+                  <path d="M700 455V500" />
+                  <text x="708" y="483">run()</text>
+                </g>
+                <g class="edge" data-flow="call">
+                  <path d="M590 545H510" />
+                  <text x="518" y="534">hooks / tools</text>
+                </g>
+                <g class="edge" data-flow="call">
+                  <path d="M810 545H870" />
+                  <text x="817" y="534">stream</text>
+                </g>
+                <g class="edge" data-flow="state">
+                  <path d="M590 117H555V208H275V271H250" />
+                  <text x="310" y="222">构造与共享热态</text>
+                </g>
+                <g class="edge" data-flow="state">
+                  <path d="M590 565H550V350H250" />
+                  <text x="314" y="341">SessionAccessPort / 共享引用</text>
+                </g>
+                <g class="edge" data-flow="state">
+                  <path d="M590 590H566V638H145V610" />
+                  <text x="285" y="631">Transcript → ThreadStore 持久化</text>
+                </g>
+                <g class="edge" data-flow="state">
+                  <path d="M145 395V500" />
+                  <text x="154" y="445">metadata / frozen</text>
+                </g>
+                <g class="edge" data-flow="event">
+                  <path d="M790 500V478H833V295H810" />
+                  <text x="844" y="399" transform="rotate(-90 844 399)">
+                    EventPublisher · 事件身份
+                  </text>
+                </g>
+                <g class="edge" data-flow="event">
+                  <path d="M790 230V197H970V170" />
+                  <text x="810" y="190">stamp / subscribe / pump</text>
+                </g>
+                <g class="edge" data-flow="event">
+                  <path d="M920 60V44H500V60" />
+                  <text x="570" y="40">标准 update / gated 扩展</text>
+                </g>
+                <g class="edge" data-flow="event">
+                  <path d="M300 123H240" />
+                  <text x="252" y="143">更新</text>
+                </g>
+                <g class="edge" data-flow="event">
+                  <path d="M810 267H870" />
+                  <text x="815" y="257">旁路</text>
+                </g>
+                <g class="edge" data-flow="cancel">
+                  <path d="M220 150V190H330V150" />
+                  <text x="242" y="183">cancel 请求</text>
+                </g>
+                <g class="edge" data-flow="cancel">
+                  <path d="M480 150V175H550V140H590" />
+                </g>
+                <g class="edge" data-flow="cancel">
+                  <path d="M650 150V212H570V515H590" />
+                  <text x="557" y="423" transform="rotate(-90 557 423)">
+                    SessionManager → cancel token → Agent
+                  </text>
+                </g>
+              </g>
+              <g
+                class="node"
+                data-node="tui"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="TUI 表现层"
+                style="--node-color: #2563eb"
+              >
+                <rect
+                  class="box"
+                  x="40"
+                  y="60"
+                  width="200"
+                  height="90"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="40"
+                  y="60"
+                  width="4"
+                  height="90"
+                  rx="2"
+                />
+                <text class="node-title" x="56" y="88">TUI / ACP Client</text>
+                <text class="node-sub" x="56" y="111">
+                  输入 · BridgeState · atoms
+                </text>
+                <text class="node-code" x="56" y="133">peri-tui</text>
+              </g>
+              <g
+                class="node"
+                data-node="transport"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="ACP 通信通道"
+                style="--node-color: #536780"
+              >
+                <rect
+                  class="box"
+                  x="300"
+                  y="60"
+                  width="210"
+                  height="90"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="300"
+                  y="60"
+                  width="4"
+                  height="90"
+                  rx="2"
+                />
+                <text class="node-title" x="316" y="88">ACP transport</text>
+                <text class="node-sub" x="316" y="111">
+                  MPSC / stdio · 请求与事件
+                </text>
+                <text class="node-code" x="316" y="133">
+                  peri-acp::transport
+                </text>
+              </g>
+              <g
+                class="node"
+                data-node="host"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="ACP 宿主与会话管理"
+                style="--node-color: #2563eb"
+              >
+                <rect
+                  class="box"
+                  x="590"
+                  y="60"
+                  width="220"
+                  height="90"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="590"
+                  y="60"
+                  width="4"
+                  height="90"
+                  rx="2"
+                />
+                <text class="node-title" x="606" y="88">ACP Host</text>
+                <text class="node-sub" x="606" y="111">
+                  SessionManager · caps · 装配
+                </text>
+                <text class="node-code" x="606" y="133">peri-acp</text>
+              </g>
+              <g
+                class="node"
+                data-node="projection"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="ACP 事件投影"
+                style="--node-color: #7854c8"
+              >
+                <rect
+                  class="box"
+                  x="870"
+                  y="60"
+                  width="205"
+                  height="110"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="870"
+                  y="60"
+                  width="4"
+                  height="110"
+                  rx="2"
+                />
+                <text class="node-title" x="886" y="88">ACP 事件投影</text>
+                <text class="node-sub" x="886" y="111">
+                  mapper / sink / caps
+                </text>
+                <text class="node-sub" x="886" y="133">
+                  标准 + 私有 + 安全摘要
+                </text>
+                <text class="node-code" x="886" y="155">peri-acp::event</text>
+              </g>
+              <g
+                class="node"
+                data-node="hot"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="会话热状态"
+                style="--node-color: #087f8c"
+              >
+                <rect
+                  class="box"
+                  x="40"
+                  y="230"
+                  width="210"
+                  height="165"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="40"
+                  y="230"
+                  width="4"
+                  height="165"
+                  rx="2"
+                />
+                <text class="node-title" x="56" y="258">跨轮会话热态</text>
+                <text class="node-sub" x="56" y="284">AcpSession 热表</text>
+                <text class="node-sub" x="56" y="307">
+                  MQ / Mailbox / history
+                </text>
+                <text class="node-sub" x="56" y="330">
+                  caps / cancel handles
+                </text>
+                <text class="node-sub" x="56" y="357">
+                  构造、持有与消费分层
+                </text>
+                <text class="node-code" x="56" y="379">SessionAccessPort</text>
+              </g>
+              <g
+                class="node"
+                data-node="controller"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="Controller 控制层"
+                style="--node-color: #2563eb"
+              >
+                <rect
+                  class="box"
+                  x="590"
+                  y="230"
+                  width="220"
+                  height="90"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="590"
+                  y="230"
+                  width="4"
+                  height="90"
+                  rx="2"
+                />
+                <text class="node-title" x="606" y="258">Controller</text>
+                <text class="node-sub" x="606" y="281">
+                  执行发起 · 事件发布
+                </text>
+                <text class="node-code" x="606" y="303">peri-controller</text>
+              </g>
+              <g
+                class="node"
+                data-node="telemetry"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="Langfuse 旁路观测"
+                style="--node-color: #7854c8"
+              >
+                <rect
+                  class="box"
+                  x="870"
+                  y="230"
+                  width="205"
+                  height="90"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="870"
+                  y="230"
+                  width="4"
+                  height="90"
+                  rx="2"
+                />
+                <text class="node-title" x="886" y="258">旁路观测</text>
+                <text class="node-sub" x="886" y="281">
+                  Langfuse bridge / tracer
+                </text>
+                <text class="node-code" x="886" y="303">peri-controller</text>
+              </g>
+              <g
+                class="node"
+                data-node="runtime"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="Runtime 登记层"
+                style="--node-color: #7854c8"
+              >
+                <rect
+                  class="box"
+                  x="590"
+                  y="365"
+                  width="220"
+                  height="90"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="590"
+                  y="365"
+                  width="4"
+                  height="90"
+                  rx="2"
+                />
+                <text class="node-title" x="606" y="393">Runtime</text>
+                <text class="node-sub" x="606" y="416">
+                  SessionHandle 表 · EventClock
+                </text>
+                <text class="node-code" x="606" y="438">peri-runtime</text>
+              </g>
+              <g
+                class="node"
+                data-node="resources"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="Resources 与持久化"
+                style="--node-color: #087f8c"
+              >
+                <rect
+                  class="box"
+                  x="40"
+                  y="500"
+                  width="210"
+                  height="110"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="40"
+                  y="500"
+                  width="4"
+                  height="110"
+                  rx="2"
+                />
+                <text class="node-title" x="56" y="528">Resources</text>
+                <text class="node-sub" x="56" y="552">
+                  ThreadStore → SQLite
+                </text>
+                <text class="node-sub" x="56" y="575">
+                  配置 / LSP / Workflow 门面
+                </text>
+                <text class="node-code" x="56" y="596">peri-resources</text>
+              </g>
+              <g
+                class="node"
+                data-node="middleware"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="Middleware 能力实现"
+                style="--node-color: #ad6800"
+              >
+                <rect
+                  class="box"
+                  x="300"
+                  y="500"
+                  width="210"
+                  height="110"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="300"
+                  y="500"
+                  width="4"
+                  height="110"
+                  rx="2"
+                />
+                <text class="node-title" x="316" y="528">Middleware</text>
+                <text class="node-sub" x="316" y="552">
+                  内置能力 + MCP pool
+                </text>
+                <text class="node-sub" x="316" y="575">
+                  hooks / ToolSearch / HITL
+                </text>
+                <text class="node-code" x="316" y="596">peri-middlewares</text>
+              </g>
+              <g
+                class="node"
+                data-node="agent"
+                role="button"
+                tabindex="0"
+                aria-pressed="true"
+                aria-label="Agent 执行内核，当前选中"
+                style="--node-color: #7854c8"
+              >
+                <rect
+                  class="box"
+                  x="590"
+                  y="500"
+                  width="220"
+                  height="110"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="590"
+                  y="500"
+                  width="4"
+                  height="110"
+                  rx="2"
+                />
+                <text class="node-title" x="606" y="528">Agent / RCRA</text>
+                <text class="node-sub" x="606" y="552">
+                  PromptHandle → session loop
+                </text>
+                <text class="node-sub" x="606" y="575">
+                  Transcript · turn · bg tasks
+                </text>
+                <text class="node-code" x="606" y="596">peri-agent</text>
+              </g>
+              <g
+                class="node"
+                data-node="model"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="Model 协议适配"
+                style="--node-color: #ad6800"
+              >
+                <rect
+                  class="box"
+                  x="870"
+                  y="500"
+                  width="205"
+                  height="110"
+                  rx="8"
+                />
+                <rect
+                  class="stripe"
+                  x="870"
+                  y="500"
+                  width="4"
+                  height="110"
+                  rx="2"
+                />
+                <text class="node-title" x="886" y="528">Model</text>
+                <text class="node-sub" x="886" y="552">
+                  OpenAI / Anthropic adapter
+                </text>
+                <text class="node-sub" x="886" y="575">
+                  统一消息与流 · retry
+                </text>
+                <text class="node-code" x="886" y="596">peri-model</text>
+              </g>
+              <g
+                class="node"
+                data-node="contracts"
+                role="button"
+                tabindex="0"
+                aria-pressed="false"
+                aria-label="跨层契约类型"
+                style="--node-color: #536780"
+              >
+                <rect
+                  class="box"
+                  x="40"
+                  y="675"
+                  width="1035"
+                  height="65"
+                  rx="8"
+                  stroke-dasharray="6 4"
+                />
+                <rect
+                  class="stripe"
+                  x="40"
+                  y="675"
+                  width="4"
+                  height="65"
+                  rx="2"
+                />
+                <text class="node-title" x="57" y="702">peri-acp-types</text>
+                <text class="node-sub" x="260" y="702">
+                  跨层 DTO / ports / identity / event / ThreadStore trait
+                </text>
+                <text class="node-sub" x="57" y="724">
+                  共享语言与端口，不是单独运行的服务，也不因此拥有所有类型实例。
+                </text>
+              </g>
+              <text class="caption" x="40" y="773">
+                主图按前台 prompt 聚合；SubAgent 可直接进入 Agent
+                loop。不是一张穷尽的 crate 依赖图。
+              </text>
+            </svg>
+          </div>
+          <aside
+            class="inspector"
+            aria-labelledby="inspector-title"
+            aria-live="polite"
+          >
+            <span class="kicker" id="inspector-code">peri-agent</span>
+            <h3 id="inspector-title">Agent / RCRA</h3>
+            <p class="muted" id="inspector-summary">执行循环与会话运行单元。</p>
+            <dl>
+              <dt>负责</dt>
+              <dd id="inspector-do"></dd>
+              <dt>不负责</dt>
+              <dd id="inspector-not"></dd>
+              <dt>持有与生命周期</dt>
+              <dd id="inspector-state"></dd>
+              <dt>关键关系</dt>
+              <dd id="inspector-link"></dd>
+            </dl>
+            <a
+              id="inspector-source"
+              href="../peri-agent/src/agent/stages/mod.rs"
+              >查看源码入口 ↗</a
+            >
+          </aside>
+        </div>
+        <div class="map-note">
+          <span><i class="flow-key"></i>执行调用</span
+          ><span><i class="flow-key event"></i>事件发布 / 订阅</span
+          ><span><i class="flow-key state"></i>状态访问</span
+          ><span><i class="flow-key cancel"></i>取消定位与 token</span
+          ><b id="filter-status" aria-live="polite"
+            >显示全部关系；筛选只改变阅读视图。</b
+          ><span>窄屏可横向滚动图形；节点支持 Enter / 空格。</span>
+        </div>
+        <div class="notice">
+          <strong>不要把取消画成前台执行的原路返回。</strong>当前 ACP 的
+          <code>PromptHandle.cancel()</code> 是 no-op；实际取消由
+          <code>SessionManager</code> 定位会话并操作 cancel token，Agent
+          完成中止与终态判断。Controller / Runtime
+          的取消接口存在，不等于此句柄已接通。
+        </div>
+        <details>
+          <summary>完整文字关系与图示边界</summary>
+          <ul>
+            <li>
+              前台：TUI → ACP transport → ACP Host → Controller → Runtime 查
+              SessionHandle → PromptHandle.run → Agent session loop。
+            </li>
+            <li>
+              Agent：Reason 调 Model；Act 经会话工具视图分发 middleware / MCP
+              工具；SubAgent 的执行入口可直接调用 run_react_loop。
+            </li>
+            <li>
+              事件：Agent EventBus → forwarder / EventPublisher → Controller
+              发布（Runtime stamp）→ 订阅泵 → ACP mapper / sink → transport →
+              TUI。
+            </li>
+            <li>
+              状态：ACP 构造并持有跨轮共享热态；Agent 通过 SessionAccessPort
+              使用 MQ 等引用；消息与 frozen 等持久化经 ThreadStore 实现落入
+              SQLite。
+            </li>
+            <li>
+              取消：ACP 请求定位会话 → cancel token → Agent
+              中止。图中取消请求线表示穿过 ACP transport，并非绕过协议。
+            </li>
+            <li>
+              旁路：Langfuse 实现在 peri-controller，装配和生命周期入口接在
+              ACP；它不参与 RCRA 的业务控制。
+            </li>
+            <li>
+              底座：peri-acp-types 提供类型与接口，不是所有运行状态的实例
+              owner。主图不把所有源码依赖画成调用箭头。
+            </li>
+          </ul>
+        </details>
+        <div class="all-entities" id="print-entities"></div>
+      </section>
+      <section id="deployment" aria-labelledby="deployment-title">
+        <div class="section-head">
+          <div>
+            <h2 id="deployment-title">相同协议核心，两种部署边界</h2>
+            <p>
+              层与进程是两张图。当前 host 可容纳多个 Session，SubAgent
+              已可同进程执行；4.0 明确一个进程对应一个宿主管理的主
+              Agent，仍保留进程内 SubAgent。
+            </p>
+          </div>
+          <span class="section-index">DEPLOYMENT</span>
+        </div>
+        <div class="switch" role="group" aria-label="部署视图">
+          <button data-deploy="tui" aria-pressed="true">
+            TUI / print：同进程</button
+          ><button data-deploy="stdio" aria-pressed="false">
+            外部客户端：stdio
+          </button>
+        </div>
+        <div class="deployment" data-deployment="tui">
+          <span class="tag">一个 Peri 进程内</span>
+          <div class="deploy-flow">
+            <strong>TUI / print client</strong><em>⇄ MPSC transport ⇄</em
+            ><strong>ACP host task</strong><em>→</em
+            ><strong>多个会话 / 执行任务</strong>
+          </div>
+          <p>
+            TUI 通过 <code>mpsc_transport_pair()</code> 与
+            <code>spawn_acp_server()</code> 通信。没有跳过
+            ACP，也没有为了这一条通道额外启动 Agent 子进程。
+          </p>
+          <p class="muted">
+            部署入口：<a href="../peri-tui/src/launch.rs">launch.rs</a> 与
+            <a href="../peri-tui/src/cli_print.rs">cli_print.rs</a
+            >。同进程还可以产生 SubAgent 执行任务；任务不等于操作系统进程。
+          </p>
+        </div>
+        <div class="deployment" data-deployment="stdio" hidden>
+          <span class="tag">客户端进程 ⇄ Peri 宿主进程</span>
+          <div class="deploy-flow">
+            <strong>IDE / 外部 ACP client</strong><em>⇄ JSON-RPC · stdio ⇄</em
+            ><strong>run_acp_stdio</strong><em>→</em
+            ><strong>同一 ACP host 核心</strong>
+          </div>
+          <p>
+            输入输出采用换行分隔的 JSON-RPC 消息。stdio 部署装配
+            provider、配置与资源，再进入共享 host 与方法分发路径。
+          </p>
+          <p class="muted">
+            部署入口：<a href="../peri-acp/src/host/stdio/mod.rs"
+              >host/stdio/mod.rs</a
+            >。这是现有外部接入形态，不表示 4.0 的引用 schema、独立 Store
+            协议已落地。
+          </p>
+        </div>
+      </section>
+      <section id="state" aria-labelledby="state-title">
+        <div class="section-head">
+          <div>
+            <h2 id="state-title">状态归属：谁构造，谁持有，谁消费</h2>
+            <p>
+              “Session 归 Agent”是职责归层；当前具体实例还通过 ACP 宿主跨 turn
+              保持。两种描述必须同时看，不能只画理想聚合根。
+            </p>
+          </div>
+          <span class="section-index">OWNERSHIP</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>状态或实例</th>
+                <th>当前持有 / 访问位置</th>
+                <th>执行规则与生命周期</th>
+                <th>不应误读为</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>AcpSession 热表</td>
+                <td>
+                  <code>peri-acp::SessionManager</code
+                  >：history、caps、共享队列、取消句柄等。
+                </td>
+                <td>
+                  宿主定位会话，跨 turn 复用；提供
+                  <code>SessionAccessPort</code> 给执行体。
+                </td>
+                <td>ACP 只有 wire、完全没有会话状态。</td>
+              </tr>
+              <tr>
+                <td>Agent Session / turn</td>
+                <td>
+                  <code>peri-agent</code>
+                  的执行上下文、Transcript、运行状态与后台任务机制。
+                </td>
+                <td>RCRA 阶段消费状态；最终取消与循环终态由 Agent 裁决。</td>
+                <td>Runtime 或 TUI 自己判定执行已经结束。</td>
+              </tr>
+              <tr>
+                <td>MessageQueue</td>
+                <td>
+                  类型在 <code>peri-acp-types</code>；ACP
+                  构造跨轮共享实例，Agent 获取引用。
+                </td>
+                <td>
+                  <code>Receive</code> 消费 Prompt / Defer /
+                  Info，决定是否有工作可推进。
+                </td>
+                <td>类型定义所在 crate 自动成为实例 owner。</td>
+              </tr>
+              <tr>
+                <td>UserInputMailbox</td>
+                <td>
+                  Agent 模块定义，ACP 宿主持有跨 turn 实例并提供输入队列接口。
+                </td>
+                <td>
+                  当前工作树的待发送队列：enqueue / dispatch / takeback /
+                  snapshot；经能力协商启用。
+                </td>
+                <td>
+                  与已投递 MQ 或历史 Transcript 是同一队列；或已发布版本保证。
+                </td>
+              </tr>
+              <tr>
+                <td>MessageTranscript</td>
+                <td>
+                  <code>peri-agent::session::transcript</code>；会话消息事实与
+                  staging。
+                </td>
+                <td>
+                  追加、标记和上下文投影；配置持久化时经 ThreadStore
+                  写入，不是只在最终响应后一次保存。
+                </td>
+                <td>TUI 渲染列表就是完整会话事实。</td>
+              </tr>
+              <tr>
+                <td>Frozen snapshot</td>
+                <td>
+                  新会话冻结配置／提示词资源，持久化 owner state 在
+                  ThreadStore。
+                </td>
+                <td>
+                  load / resume / fork 复用已保存内容；legacy
+                  缺失快照走受控回填。
+                </td>
+                <td>每一轮重读项目文件、悄悄改变 system prompt 前缀。</td>
+              </tr>
+              <tr>
+                <td>SessionHandle / EventClock</td>
+                <td>
+                  <code>peri-runtime</code> 持有登记映射与事件 epoch / seq。
+                </td>
+                <td>
+                  Controller 访问 Runtime 查句柄、发布时 stamp；前台
+                  PromptHandle 为单轮句柄。
+                </td>
+                <td>Runtime 存了一份完整消息历史或第二份持久态。</td>
+              </tr>
+              <tr>
+                <td>ThreadStore / SQLite</td>
+                <td>
+                  trait 在 <code>peri-acp-types</code>；生产实现
+                  <code>peri-resources::SqliteThreadStore</code>。
+                </td>
+                <td>
+                  部署装配注入存储；消息、metadata、frozen 和 compact
+                  生命周期按存储接口落盘。
+                </td>
+                <td>
+                  4.0 的独立 <code>storeRef</code> 解析与远程 Store
+                  契约已经存在。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="notice">
+          <strong>三个不同的“消息集合”。</strong>待发送 Mailbox
+          还没有进入执行；MQ 是待消费输入；Transcript
+          是已经纳入会话的消息事实。取回未发送消息，不应等同于回滚已执行历史。
+        </div>
+      </section>
+      <section id="rcra" aria-labelledby="rcra-title">
+        <div class="section-head">
+          <div>
+            <h2 id="rcra-title">RCRA：循环本体在 Agent 层</h2>
+            <p>
+              阶段名称来自实际枚举与
+              <code>run_react_loop</code>，不是泛化的“模型 →
+              工具”示意。点击阶段查看输入、产物和退出边界。
+            </p>
+          </div>
+          <span class="section-index">EXECUTION KERNEL</span>
+        </div>
+        <div class="stage-tabs" role="group" aria-label="RCRA 阶段">
+          <button data-stage="0" aria-pressed="true">
+            <strong>Receive</strong><span>接收与正常退出判断</span></button
+          ><button data-stage="1" aria-pressed="false">
+            <strong>Compact</strong><span>上下文压缩与投影</span></button
+          ><button data-stage="2" aria-pressed="false">
+            <strong>Reason</strong><span>模型请求与流式响应</span></button
+          ><button data-stage="3" aria-pressed="false">
+            <strong>Act</strong><span>工具执行与结果回流</span>
+          </button>
+        </div>
+        <div class="loop-return">
+          Receive → Compact → Reason → Act ↲ Receive
+        </div>
+        <div class="stage-detail" aria-live="polite">
+          <span class="tag" id="stage-index">阶段 1 / 4</span>
+          <h3 id="stage-title">Receive</h3>
+          <p id="stage-description"></p>
+          <div class="io">
+            <div><b>输入</b><span id="stage-input"></span></div>
+            <div><b>产物与控制</b><span id="stage-output"></span></div>
+          </div>
+        </div>
+        <details>
+          <summary>完整阶段说明与退出规则</summary>
+          <ul>
+            <li>
+              <strong>Receive：</strong
+              >消费会话输入、接入待办与工具调用状态；正常队列耗尽的完成判断在这里。
+            </li>
+            <li>
+              <strong>Compact：</strong
+              >根据上下文压力与策略执行压缩，更新模型可见投影并保持消息与压缩状态一致。
+            </li>
+            <li>
+              <strong>Reason：</strong>构造会话本轮模型视图，使用 Model
+              统一协议，消费文本、思考和 tool calls。
+            </li>
+            <li>
+              <strong>Act：</strong>通过 effective tool dispatch 执行工具与
+              hook，产出 tool result，随后回到 Receive。
+            </li>
+            <li>
+              <strong>并非所有退出都经过 Receive：</strong>循环顶与等待点的
+              cancel、阶段错误／中断、最大迭代限制也可结束循环；不能把“正常退出判断点”写成“唯一任何退出路径”。
+            </li>
+          </ul>
+        </details>
+        <div class="cards">
+          <article class="card">
+            <span class="tag">内核</span>
+            <h3>模型协议不进入业务层</h3>
+            <p>
+              Reason 使用 <code>Model</code> trait 的 stream 路径；OpenAI /
+              Anthropic 的 wire 差异在
+              <code>peri-model</code> 归一化。模型层不持有会话业务状态。
+            </p>
+          </article>
+          <article class="card">
+            <span class="tag warn">执行边界</span>
+            <h3>工具不是任意函数集合</h3>
+            <p>
+              每轮基于 session-local 工具视图决定可见性与执行入口。direct
+              工具直接暴露；deferred 工具通过 ToolSearch 发现与调用。
+            </p>
+          </article>
+          <article class="card">
+            <span class="tag">路径例外</span>
+            <h3>SubAgent 也使用同一循环</h3>
+            <p>
+              同步和后台 SubAgent 可直接进入
+              <code>run_react_loop</code>，不应把所有子执行都画成再次穿过
+              Controller / Runtime。
+            </p>
+          </article>
+        </div>
+      </section>
+      <section id="capabilities" aria-labelledby="capabilities-title">
+        <div class="section-head">
+          <div>
+            <h2 id="capabilities-title">
+              能力装配：当前是内置 middleware 与 MCP 并存
+            </h2>
+            <p>
+              现有 Peri 不是“全部能力都在 MCP
+              后面”。编译期蓝图、运行期装配与外部连接各有明确入口。
+            </p>
+          </div>
+          <span class="section-index">ASSEMBLY &amp; CAPABILITIES</span>
+        </div>
+        <div class="route">
+          peri-agent::production_blueprint →
+          peri-middlewares::ProductionChainAssembler → session middleware chain
+          → hooks / tool view → Reason &amp; Act
+        </div>
+        <div class="cards">
+          <article class="card">
+            <h3>Agent 定义链序</h3>
+            <p>
+              <code>production_blueprint()</code> 与 ChainSlot
+              是生产装配顺序事实源。ACP 准备
+              frozen、provider、资源等装配输入，不另维护一套执行循环。
+            </p>
+            <a href="../peri-agent/src/session/factory.rs">factory.rs ↗</a>
+          </article>
+          <article class="card">
+            <h3>Middleware 实现能力</h3>
+            <p>
+              Filesystem、Terminal、Skills、SubAgent、HITL、MCP
+              等在这里实现；MetaHarness 可关闭对应切面。MCP pool
+              与连接生命周期实现也位于此 crate，不能笼统写成“本层没有 I/O”。
+            </p>
+            <a href="../peri-middlewares/src/assembly.rs">assembly.rs ↗</a>
+          </article>
+          <article class="card">
+            <h3>Resources 提供访问门面</h3>
+            <p>
+              配置与 ThreadStore 等资源经统一入口打开，LSP / Workflow
+              暴露资源能力。资源通道归属、实际实例持有与业务决策不是同一件事。
+            </p>
+            <a href="../peri-resources/src/context.rs">context.rs ↗</a>
+          </article>
+        </div>
+        <div class="notice">
+          <strong>MCP Apps relay ≠ 完整 MCP over ACP。</strong>当前 stdio Apps
+          profile 提供受限工具调用和资源读取，并有 binding / allowlist /
+          capability 门控。它不等同于 4.0 稿里宿主通用 MCP Server
+          的反向接入能力；也不意味着所有工具已统一部署在 MCP 后置 Sandbox。
+        </div>
+      </section>
+      <section id="events" aria-labelledby="events-title">
+        <div class="section-head">
+          <div>
+            <h2 id="events-title">事件往上走，界面不接管执行</h2>
+            <p>
+              内部 v2 EventBus 的三条 lane、ACP wire 输出，以及 TUI
+              自己的会话路由是不同层次，不应混成一套通道。
+            </p>
+          </div>
+          <span class="section-index">EVENT PROJECTION</span>
+        </div>
+        <div class="event-lanes">
+          <article class="lane">
+            <h3>render</h3>
+            <p>
+              文本与呈现相关事件；通过内部 mpsc 传递，转发顺序需保护流式片段与
+              turn 边界。
+            </p>
+          </article>
+          <article class="lane">
+            <h3>state</h3>
+            <p>
+              执行状态变更；与 render 分
+              lane，不能把跨通道处理顺序当作天然全序。
+            </p>
+          </article>
+          <article class="lane">
+            <h3>observe</h3>
+            <p>
+              观测事件使用 broadcast；消费者需要处理
+              lag。观测不是一条新的业务控制路径。
+            </p>
+          </article>
+        </div>
+        <div class="route">
+          EventBus → forwarder / EventPublisher →
+          Controller.publish_event（Runtime stamp）→ subscription / event pump →
+          ACP mapper + sink + caps → transport → client
+        </div>
+        <div class="cards">
+          <article class="card">
+            <h3>协议化输出</h3>
+            <p>
+              标准 <code>session/update</code> 承载文本、思考、工具、plan
+              等；<code>peri/agent_event</code>
+              等私有扩展按协商能力投递。ExecutorEvent
+              仍是协议化适配载体，不能据此认定存在两套执行真相。
+            </p>
+          </article>
+          <article class="card">
+            <h3>TUI 的状态投影</h3>
+            <p>
+              <code>pump → acp_notifier → BridgeState → atoms → components</code
+              >。会话切换路由与渲染缓存归前端；TUI 不直接调用 Agent loop
+              来推进执行。
+            </p>
+          </article>
+          <article class="card">
+            <h3>安全摘要与旁路</h3>
+            <p>
+              Hub / Web 使用 allowlist 的
+              <code>peri.agentActivity</code>，不能复制含正文的 TUI
+              私有载荷。Langfuse 的 bridge / tracer 在
+              Controller，随宿主接线但不改变 RCRA 决策。
+            </p>
+          </article>
+        </div>
+        <p class="muted">
+          此图聚合主要事件路径；部分队列快照与运行开始通知由会话订阅／宿主可靠投递，不应硬塞成模型事件。具体出口以当前
+          <a
+            href="../peri-agent/src/session/exec/executor_helpers/event_pump.rs"
+            >event_pump.rs</a
+          >
+          为准。
+        </p>
+      </section>
+      <section class="timeline" id="prompt" aria-labelledby="prompt-title">
+        <div class="section-head">
+          <div>
+            <h2 id="prompt-title">一次前台 prompt 的七个观察点</h2>
+            <p>
+              选择步骤聚焦职责；事件和持久化可以与执行并行。下面不是“先全部执行、再全部回传”的串行网络时序。
+            </p>
+          </div>
+          <span class="section-index">REQUEST WALKTHROUGH</span>
+        </div>
+        <div class="step-buttons" role="group" aria-label="执行步骤">
+          <button data-step="0" aria-pressed="true">1 输入</button
+          ><button data-step="1" aria-pressed="false">2 会话</button
+          ><button data-step="2" aria-pressed="false">3 登记</button
+          ><button data-step="3" aria-pressed="false">4 循环</button
+          ><button data-step="4" aria-pressed="false">5 能力</button
+          ><button data-step="5" aria-pressed="false">6 事件</button
+          ><button data-step="6" aria-pressed="false">7 收尾</button>
+        </div>
+        <ol>
+          <li class="active">
+            <strong>客户端提交输入</strong>
+            <p>
+              TUI 或外部 ACP client 发出 prompt。当前工作树还提供独立待发送
+              Mailbox 接口；输入尚未投递时不等于历史消息。
+            </p>
+          </li>
+          <li>
+            <strong>ACP 准备会话与本轮上下文</strong>
+            <p>
+              分发、定位 SessionManager、复用
+              frozen、组织权限和能力；随后建立本轮 SessionContext 与 TurnInput。
+            </p>
+          </li>
+          <li>
+            <strong>Controller 登记，Runtime 查句柄</strong>
+            <p>
+              宿主创建 PromptHandle，register_session 后 run_session；Runtime
+              登记表定位句柄，调用 run()。
+            </p>
+          </li>
+          <li>
+            <strong>Agent 驱动 RCRA</strong>
+            <p>
+              PromptHandle 调入 Agent 的
+              run_session_loop；Receive、Compact、Reason、Act
+              消费消息并推进执行。
+            </p>
+          </li>
+          <li>
+            <strong>模型与工具承担具体工作</strong>
+            <p>
+              Reason 使用 Model adapter；Act 调用 session-local
+              工具。能力可能来自本地 middleware，也可能由 MCP 远端提供。
+            </p>
+          </li>
+          <li>
+            <strong>流式事件进入客户端投影</strong>
+            <p>
+              事件发布、stamp、订阅和 ACP 映射持续发生；TUI 只更新
+              BridgeState、atoms 与视图，不拥有循环终态。
+            </p>
+          </li>
+          <li>
+            <strong>结算执行并维护持久状态</strong>
+            <p>
+              循环结果、事件 drain
+              和宿主后处理共同收尾；Transcript、frozen、compact
+              等各有持久化边界，不把 UI 已显示等同于存储事务已提交。
+            </p>
+          </li>
+        </ol>
+      </section>
+      <section id="comparison" aria-labelledby="comparison-title">
+        <div class="section-head">
+          <div>
+            <h2 id="comparison-title">沿用基础结构，明确 4.0 调整点</h2>
+            <p>
+              不是整体替换现有架构。保留执行、控制登记、事件和数据访问的基础语义，收敛能力归属；右列为目标，不倒推为左列已经实现。
+            </p>
+          </div>
+          <span class="section-index">NOW / PERI 4.0</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>边界</th>
+                <th>现有工作树</th>
+                <th>Peri 4.0 生态方向</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>宿主与通信</td>
+                <td>
+                  TUI / print 同进程 MPSC；外部 ACP client 使用 stdio，共用
+                  host。
+                </td>
+                <td>TS 为宿主与编排层，经独立 ACP 管道控制 Peri 进程。</td>
+              </tr>
+              <tr>
+                <td>进程粒度</td>
+                <td>host 持有多个 Session；SubAgent 可在同进程中执行。</td>
+                <td>
+                  一个 Peri 进程对应一个主 Agent，包含进程内 SubAgent；TS
+                  管理主进程，不为每个子执行启动 OS 进程。
+                </td>
+              </tr>
+              <tr>
+                <td>Session / Store</td>
+                <td>
+                  ACP 热态与 Agent 执行态通过端口共享，ThreadStore 实现落入
+                  SQLite。
+                </td>
+                <td>
+                  Session 是独立状态；TS 只传引用，Peri 经 Resources
+                  数据访问接口直连统一远程 Store；本地实现仍可用于开发。
+                </td>
+              </tr>
+              <tr>
+                <td>能力来源</td>
+                <td>内置 middleware、Skills、工具与外部 MCP 并存。</td>
+                <td>
+                  Cron、文件、Shell 迁入官方 Builtin MCP；Skills 与领域扩展走
+                  MCP。Middleware 仅保留 Core 必要策略，不整体消失。
+                </td>
+              </tr>
+              <tr>
+                <td>标准协作</td>
+                <td>
+                  已存在 SubAgent 与 Workflow 能力，子执行复用 Agent 循环。
+                </td>
+                <td>
+                  先保证 Core；SubAgent 是官方进程内协作层；Workflow 基于
+                  SubAgent 构建，不移交 TS 重新实现，也不另造 RCRA。
+                </td>
+              </tr>
+              <tr>
+                <td>宿主 MCP 通道</td>
+                <td>
+                  受限 stdio MCP Apps relay；不是通用 MCP over ACP 实现声明。
+                </td>
+                <td>
+                  反向宿主 MCP 能力直接复用 MCP over ACP，不再设计桥接协议。
+                </td>
+              </tr>
+              <tr>
+                <td>执行环境</td>
+                <td>本地工具、运行时与外部 MCP 等多条路径。</td>
+                <td>
+                  MCP Server 后方用 Sandbox
+                  表达执行环境；具体隔离与生命周期待决。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="notice">
+          两份稿件都不改变代码契约。4.0 未决项仍包括 Store
+          引用与提交协议、配置兼容、Skill 映射与 Sandbox 细节。已结束的 TS POC
+          包已经移除，不再作为可运行交付引用。
+        </p>
+        <a class="plain" href="agent-architecture-overview.html"
+          >查看 Peri 4.0 生态架构稿 ↗</a
+        >
+      </section>
+      <section id="evidence" aria-labelledby="evidence-title">
+        <div class="section-head">
+          <div>
+            <h2 id="evidence-title">从图回到事实源</h2>
+            <p>
+              本页是本地仓库阅读视图，不是新的权威规范。代码与契约测试优先，其次是
+              standards、模块路由与现行设计。源码链接适用于完整仓库目录。
+            </p>
+          </div>
+          <span class="section-index">SOURCE TRAIL</span>
+        </div>
+        <div class="evidence">
+          <a href="design/architecture.md"
+            >总体逻辑分层<small
+              >design/architecture.md · 箭头为能力提供方向</small
+            ></a
+          >
+          <a href="standards/architecture-contracts.md"
+            >跨层约束与边界<small>standards/architecture-contracts.md</small></a
+          >
+          <a href="code-index/peri-acp.md"
+            >协议宿主与部署索引<small>code-index/peri-acp.md</small></a
+          >
+          <a href="code-index/peri-agent.md"
+            >Agent 执行入口索引<small>code-index/peri-agent.md</small></a
+          >
+          <a href="../peri-acp/src/host/prompt_handle.rs"
+            >前台执行与 cancel 的真实分叉<small
+              >PromptHandle::run / cancel</small
+            ></a
+          >
+          <a href="../peri-controller/src/controller.rs"
+            >登记、执行与事件发布<small
+              >Controller::register_session / run_session / publish_event</small
+            ></a
+          >
+          <a href="../peri-runtime/src/runtime.rs"
+            >句柄表与事件时钟<small>Runtime / EventClock</small></a
+          >
+          <a href="../peri-agent/src/agent/stages/mod.rs"
+            >循环本体<small
+              >run_react_loop · Receive / Compact / Reason / Act</small
+            ></a
+          >
+          <a href="design/message-transcript.md"
+            >消息、staging 与持久化<small
+              >design/message-transcript.md</small
+            ></a
+          >
+          <a href="design/user-input-queue.md"
+            >当前工作树输入队列<small
+              >UserInputMailbox · enqueue / dispatch / takeback /
+              snapshot</small
+            ></a
+          >
+          <a href="design/tui-acp-data-flow.md"
+            >客户端投影与路由<small
+              >notifier → BridgeState → atoms → components</small
+            ></a
+          >
+          <a href="design/mcp-multiplexing.md"
+            >MCP Apps relay 的实际范围<small
+              >stdio Apps profile · binding / allowlist</small
+            ></a
+          >
+          <a href="../peri-acp/src/event/forwarder.rs"
+            >内部事件转发约束<small
+              >EventBus → EventPublisher / 协议化载体</small
+            ></a
+          >
+          <a href="code-index/peri-resources.md"
+            >存储实现与资源入口<small
+              >ThreadStore / SqliteThreadStore / frozen snapshot</small
+            ></a
+          >
+        </div>
+      </section>
+    </main>
+    <footer>
+      <div class="shell">
+        <span>Peri 4.0 · 内部分层演进稿 · 实现剖面快照 2026-09-11</span
+        ><span
+          >单文件 / 离线可用 / 无 CDN　<a href="#layers">返回调用剖面</a></span
+        >
+      </div>
+    </footer>
+    <script>
+      const targetLayers = {
+        core: {
+          name: "Core",
+          level: "基础执行层 · 先保证完整",
+          summary: "先完成一个执行单元的全部运行契约，再向上增加协作能力。",
+          does: "RCRA、模型与上下文、MCP Client、Store 访问及取消终态。主 Agent 可以不启用协作层而独立运行。",
+          not: "不解释 Workflow 依赖图，不内置领域 Skills，不让模型决定状态是否保存。",
+          state:
+            "每次执行有独立 Run 与上下文；持久 Session 经 Store 访问，活动 token 与连接留在本地。",
+          reuse:
+            "保留 RCRA、Model、事件分层及存储契约；收敛 Core 必需策略，不另造执行循环。",
+        },
+        assembly: {
+          name: "进程装配入口",
+          level: "组装职责 · 不是新服务",
+          summary:
+            "将 Core、SubAgent 和 Workflow 的实现接线，依赖方向与运行时调用方向分开。",
+          does: "在启动时绑定能力接口与标准协作实现，可复用现有宿主装配机制。",
+          not: "不新增第二套 Runtime 登记表，不持有 Workflow policy，也不变成通用 DI 框架。",
+          state:
+            "只定义装配责任；Run、父子关系、流程与 Session 各有自己的权威所有者。",
+          reuse: "保留现有 trait 与装配分离经验，具体模块位置按职责再定。",
+        },
+        adapter: {
+          name: "标准协作适配器",
+          level: "建议接线方式 · 接口未定",
+          summary: "Core 经注入的能力入口请求协作，不 import 上层实现。",
+          does: "将能力请求适配为启动、等待、取消与结果回传；具体动作和 API 仍需验证。",
+          not: "不把 SubAgent / Workflow 变成另一套 RCRA，也不要求造万能 SubExecution 接口。",
+          state:
+            "异步等待与重入规则必须明确；返回执行结果，不直接改写 Core 内部状态。",
+          reuse: "优先复用现有能力执行接口，不足时才定义窄 port。",
+        },
+        subagent: {
+          name: "SubAgent",
+          level: "标准进程内协作层",
+          summary: "在同一个 Peri 进程中创建受管理的子执行单元，复用 Core。",
+          does: "子执行创建、父子关系、结果回传、等待与取消传播；标准语义由 Peri 提供。",
+          not: "不为每个子执行创建独立 OS 进程，不要求 TS 重写协作，不复制 RCRA。",
+          state:
+            "父子拥有各自执行状态；Session 的隔离、继承与分叉契约待定，不能默认共享同一可变状态。",
+          reuse:
+            "沿用现有进程内 SubAgent 与统一循环的基础，明确它依赖 Core、被 Workflow 组合。",
+        },
+        workflow: {
+          name: "Workflow",
+          level: "基于 SubAgent 的标准编排层",
+          summary:
+            "组合子执行的依赖、顺序与并行关系，不成为另一套 Agent 执行内核。",
+          does: "基于 SubAgent 管理流程依赖、结果聚合、失败处理与取消编排。",
+          not: "不直接操纵 RCRA 阶段，不把标准 Workflow 交给每个 TS 应用自行实现，不依赖普通 MCP 工具来替代协作语义。",
+          state:
+            "持有编排状态，子执行终态仍由 Core 裁决。实现语言与可选辅助 runner 不由此分层图规定。",
+          reuse:
+            "保留官方 Workflow 能力，收敛为 Workflow → SubAgent → Core 的依赖方向。",
+        },
+      };
+      function selectTarget(key) {
+        const data = targetLayers[key];
+        for (const field of [
+          "name",
+          "level",
+          "summary",
+          "does",
+          "not",
+          "state",
+          "reuse",
+        ])
+          document.getElementById("target-" + field).textContent = data[field];
+        document
+          .querySelectorAll("[data-target]")
+          .forEach((node) =>
+            node.setAttribute(
+              "aria-pressed",
+              String(node.dataset.target === key),
+            ),
+          );
+      }
+      document.querySelectorAll("[data-target]").forEach((node) => {
+        node.addEventListener("click", () => selectTarget(node.dataset.target));
+        node.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectTarget(node.dataset.target);
+          }
+        });
+      });
+      for (const data of Object.values(targetLayers)) {
+        const article = document.createElement("article");
+        const heading = document.createElement("h3");
+        heading.textContent = data.name + " · " + data.level;
+        article.append(heading);
+        for (const [key, label] of [
+          ["summary", "定位"],
+          ["does", "负责"],
+          ["not", "不负责"],
+          ["state", "状态与依赖"],
+          ["reuse", "沿用基础"],
+        ]) {
+          const p = document.createElement("p");
+          p.textContent = label + "：" + data[key];
+          article.append(p);
+        }
+        document.getElementById("target-reference-content").append(article);
+      }
+      function selectArchitecture(view) {
+        document
+          .querySelectorAll("[data-architecture-view]")
+          .forEach((button) => {
+            button.setAttribute(
+              "aria-pressed",
+              String(button.dataset.architectureView === view),
+            );
+          });
+        document
+          .querySelectorAll("[data-architecture-panel]")
+          .forEach((panel) => {
+            panel.hidden = panel.dataset.architecturePanel !== view;
+          });
+        document.getElementById("architecture-note").textContent =
+          view === "runtime"
+            ? "蓝虚线是装配；紫实线是请求；青虚线是结果。不是模块依赖。"
+            : "实线箭头：上层依赖下层，不表示调用时间顺序。";
+        selectTarget("core");
+      }
+      document
+        .querySelectorAll("[data-architecture-view]")
+        .forEach((button) => {
+          button.addEventListener("click", () =>
+            selectArchitecture(button.dataset.architectureView),
+          );
+        });
+      document
+        .getElementById("reset")
+        .addEventListener("click", () => selectArchitecture("dependency"));
+      selectTarget("core");
+      let targetDetailsOpen = false;
+      let reviewDetailsOpen = false;
+      window.addEventListener("beforeprint", () => {
+        const details = document.querySelector(".target-reference");
+        targetDetailsOpen = details.open;
+        details.open = true;
+        const review = document.querySelector(".decision-summary");
+        reviewDetailsOpen = review.open;
+        review.open = true;
+      });
+      window.addEventListener("afterprint", () => {
+        document.querySelector(".target-reference").open = targetDetailsOpen;
+        document.querySelector(".decision-summary").open = reviewDetailsOpen;
+      });
+      const entities = {
+        tui: {
+          title: "TUI / ACP Client",
+          code: "peri-tui",
+          summary: "用户交互与运行事实的客户端投影。",
+          owns: "输入状态、BridgeState、atoms、呈现缓存和会话切换路由。",
+          does: "提交 ACP 请求，解码更新，把状态投影成界面。",
+          not: "不直接驱动 Agent loop；不把呈现状态当作执行终态。",
+          link: "通过 MPSC 或外部 stdio 的 ACP 语义与 host 协作；界面上行路径止于协议。",
+          source: "../peri-tui/src/kit/acp_bridge.rs",
+        },
+        transport: {
+          title: "ACP transport",
+          code: "peri-acp::transport",
+          summary: "同一协议，不同部署载体。",
+          owns: "请求与响应关联、读写泵及连接关闭状态。",
+          does: "在 MPSC 或 stdio 端点间传递请求、响应与通知。",
+          not: "不推进 RCRA，不拥有会话消息，不决策工具执行。",
+          link: "TUI / print 用同进程 MPSC；外部 client 用 JSON-RPC stdio；两者共用 host。",
+          source: "../peri-acp/src/transport/mod.rs",
+        },
+        host: {
+          title: "ACP Host",
+          code: "peri-acp::host",
+          summary: "协议分发与部署装配，也持有当前会话热表。",
+          owns: "SessionManager、caps、部署 task owner 和装配资源引用。",
+          does: "处理 session 生命周期、冻结资料、prompt 分发、能力门控及宿主关闭。",
+          not: "不重写执行循环；不能简单概括成完全无状态的 wire 薄壳。",
+          link: "前台经 Controller / Runtime 调 PromptHandle；取消则经会话 token 进入 Agent。",
+          source: "../peri-acp/src/host/prompt.rs",
+        },
+        hot: {
+          title: "跨轮会话热态",
+          code: "peri-acp::session",
+          summary: "把运行规则与实际持有位置分开看。",
+          owns: "AcpSession map 内的 history、共享 MQ、UserInputMailbox、caps 和取消句柄。",
+          does: "在 prompt 之间保留热实例，通过 SessionAccessPort 提供访问。",
+          not: "不代替 Agent 的 Receive 消费规则；不是 4.0 的独立 Session Store 服务。",
+          link: "ACP 构造与持有共享队列，Agent 使用它们；frozen 与 metadata 经 ThreadStore 保存。",
+          source: "../peri-acp/src/session/construction.rs",
+        },
+        controller: {
+          title: "Controller",
+          code: "peri-controller",
+          summary: "业务执行发起与协议化之前的事件发布。",
+          owns: "Runtime 引用、事件订阅出口及观测接线；不持第二份完整 session 表。",
+          does: "register_session、run_session、事件发布，提供控制面操作。",
+          not: "不解释 RCRA 退出语义；当前 PromptHandle.cancel 是 no-op，不能宣称此链取消已接通。",
+          link: "run_session 经 Runtime 查 SessionHandle；publish_event 经 Runtime stamp 后发布。",
+          source: "../peri-controller/src/controller.rs",
+        },
+        runtime: {
+          title: "Runtime",
+          code: "peri-runtime",
+          summary: "多 session 登记与执行句柄定位。",
+          owns: "session_id → SessionHandle 映射、EventClock；生命周期为宿主运行期。",
+          does: "登记与替换句柄、查映射、补事件序号、提供销毁编排接口。",
+          not: "不持消息历史、持久态或第二套业务配置。",
+          link: "Controller 内部持有 Runtime；前台句柄是单轮 PromptHandle，而非整个会话历史。",
+          source: "../peri-runtime/src/runtime.rs",
+        },
+        agent: {
+          title: "Agent / RCRA",
+          code: "peri-agent",
+          summary: "执行循环与会话运行单元，最终执行权在这里。",
+          owns: "执行上下文、turn 状态、Transcript 与后台任务机制；使用宿主提供的共享输入引用。",
+          does: "Receive → Compact → Reason → Act，构建模型上下文，调度工具，响应取消与错误。",
+          not: "不处理 ACP wire，不维护 TUI 渲染；正常完成判断在 Receive，不代表所有退出只能发生在那里。",
+          link: "前台由 PromptHandle 调入 run_session_loop；SubAgent 可直接进入 run_react_loop。",
+          source: "../peri-agent/src/agent/stages/mod.rs",
+        },
+        middleware: {
+          title: "Middleware",
+          code: "peri-middlewares",
+          summary: "内置业务切面与外部能力桥接。",
+          owns: "会话链实例与 MCP pool 等具体资源实现；后台任务管理权不因此转移到每个切面。",
+          does: "实现 hooks、工具、提示词贡献、HITL、Skills、SubAgent 与 MCP 连接／执行。",
+          not: "不是只有 MCP，也不能笼统声称这里不做 I/O；链序事实源在 Agent factory。",
+          link: "ProductionChainAssembler 按 blueprint 装配；session-local tool view 接入 Reason / Act。",
+          source: "../peri-middlewares/src/assembly.rs",
+        },
+        model: {
+          title: "Model",
+          code: "peri-model",
+          summary: "provider 无关的模型协议层。",
+          owns: "请求与流式调用资源，不持有 session 业务状态。",
+          does: "OpenAI / Anthropic adapter、统一消息与流、取消及模型请求重试。",
+          not: "不解释 ACP，不决定业务工具策略；模型重试不能等同于重复有副作用的工具调用。",
+          link: "Reason 的 model bridge 构造输入并消费 ModelStreamEvent。",
+          source: "../peri-model/src/protocol/model.rs",
+        },
+        resources: {
+          title: "Resources",
+          code: "peri-resources",
+          summary: "资源访问入口与存储实现，不等于所有外部能力都在此实现。",
+          owns: "SqliteThreadStore 生产 pool，配置和资源门面；由部署装配注入。",
+          does: "打开资源，提供 ThreadStore 和配置、LSP、Workflow 的访问出口。",
+          not: "不裁决 RCRA；MCP pool 实际实现仍在 middlewares，不能把它移到理想框图里。",
+          link: "Agent Transcript 及 ACP 会话生命周期使用 ThreadStore；trait 在 peri-acp-types。",
+          source: "../peri-resources/src/context.rs",
+        },
+        projection: {
+          title: "ACP 事件投影",
+          code: "peri-acp::event",
+          summary: "把内部运行事实转换成客户端协议。",
+          owns: "协议转换与 caps 门控所需的上下文，不持独立执行真相。",
+          does: "标准 session/update、私有扩展与安全 activity 摘要的映射、发送。",
+          not: "内部 render / state / observe 不是三条 ACP wire；私有 TUI 正文不能当作 Hub/Web 安全输出。",
+          link: "Controller 订阅泵接到 EventSink，再由 transport 回到 client。",
+          source: "../peri-acp/src/event/mapper.rs",
+        },
+        telemetry: {
+          title: "旁路观测",
+          code: "peri-controller::langfuse",
+          summary: "运行可观测性，不是另一条控制链。",
+          owns: "bridge / tracer 观测资源；部署生命周期由宿主接线。",
+          does: "把执行与用量信息转换为 trace，随关闭策略回收。",
+          not: "不改变循环决策，不因遥测失败创造第二套业务终态。",
+          link: "ACP forwarder 和事件泵注入观测回调；具体实现归 Controller。",
+          source: "../peri-acp/src/event/forwarder.rs",
+        },
+        contracts: {
+          title: "跨层契约",
+          code: "peri-acp-types",
+          summary: "共享类型与端口底座，不是一个运行服务。",
+          owns: "类型定义本身；实例的 owner 必须继续按生命周期判断。",
+          does: "定义 identity、messages、event、SessionHandle、ThreadStore、tool 与资源端口。",
+          not: "不编排执行；定义 MessageQueue 类型不代表负责消费每个队列。",
+          link: "各层通过契约连接，避免把协议 DTO、运行态与 UI 状态混为一体。",
+          source: "../peri-acp-types/src/lib.rs",
+        },
+      };
+      const stages = [
+        {
+          title: "Receive",
+          text: "进入接收阶段并处理队列与可执行工作。正常的队列耗尽完成判断归这里；等待时仍需响应取消。",
+          input: "共享 MessageQueue、待处理工具调用与唤醒条件。",
+          output: "推进本轮、继续等待或正常完成；不由 TUI 决定是否有工作。",
+        },
+        {
+          title: "Compact",
+          text: "在 Reason 前管理上下文压力，执行压缩策略并维护模型可见投影。消息事实与压缩生命周期有自己的存储契约。",
+          input: "Transcript、上下文预算与压缩策略。",
+          output: "可供模型消费的上下文，以及相应压缩状态变化。",
+        },
+        {
+          title: "Reason",
+          text: "通过 model bridge 构造 provider 无关请求，按 session-local 工具视图暴露能力，消费统一模型流。",
+          input: "system prompt、上下文消息、工具 schema、模型配置。",
+          output: "文本 / 思考增量、模型消息与待执行工具调用。",
+        },
+        {
+          title: "Act",
+          text: "通过会话有效工具入口与 middleware hooks 执行调用，接收工具结果，并把下一步工作送回循环。",
+          input: "Reason 产出的 tool calls、工具准入及执行上下文。",
+          output: "工具结果、执行事件或错误；回到 Receive 继续判断。",
+        },
+      ];
+      const filterLabels = {
+        all: "全部关系",
+        call: "执行调用",
+        event: "事件返回",
+        state: "状态访问",
+        cancel: "当前 ACP 取消路径",
+      };
+      function selectEntity(key) {
+        const entity = entities[key];
+        document.querySelectorAll("[data-node]").forEach((node) => {
+          node.setAttribute("aria-pressed", String(node.dataset.node === key));
+          node.setAttribute("aria-label", entities[node.dataset.node].title);
+        });
+        document.getElementById("inspector-code").textContent = entity.code;
+        document.getElementById("inspector-title").textContent = entity.title;
+        document.getElementById("inspector-summary").textContent =
+          entity.summary;
+        document.getElementById("inspector-do").textContent = entity.does;
+        document.getElementById("inspector-not").textContent = entity.not;
+        document.getElementById("inspector-state").textContent = entity.owns;
+        document.getElementById("inspector-link").textContent = entity.link;
+        const source = document.getElementById("inspector-source");
+        source.href = entity.source;
+        source.textContent = entity.source + " ↗";
+      }
+      function filterFlow(flow) {
+        document
+          .querySelectorAll("[data-filter]")
+          .forEach((button) =>
+            button.setAttribute(
+              "aria-pressed",
+              String(button.dataset.filter === flow),
+            ),
+          );
+        document
+          .querySelectorAll(".edge")
+          .forEach((edge) =>
+            edge.classList.toggle(
+              "hidden",
+              flow !== "all" && edge.dataset.flow !== flow,
+            ),
+          );
+        const count = document.querySelectorAll(".edge:not(.hidden)").length;
+        document.getElementById("filter-status").textContent =
+          filterLabels[flow] +
+          " · " +
+          count +
+          " 条关系；隐藏仅用于聚焦，不删除真实联系。";
+      }
+      function selectStage(index) {
+        const stage = stages[index];
+        document
+          .querySelectorAll("[data-stage]")
+          .forEach((button) =>
+            button.setAttribute(
+              "aria-pressed",
+              String(Number(button.dataset.stage) === index),
+            ),
+          );
+        document.getElementById("stage-index").textContent =
+          "阶段 " + (index + 1) + " / 4";
+        document.getElementById("stage-title").textContent = stage.title;
+        document.getElementById("stage-description").textContent = stage.text;
+        document.getElementById("stage-input").textContent = stage.input;
+        document.getElementById("stage-output").textContent = stage.output;
+      }
+      function selectDeployment(mode) {
+        document
+          .querySelectorAll("[data-deploy]")
+          .forEach((button) =>
+            button.setAttribute(
+              "aria-pressed",
+              String(button.dataset.deploy === mode),
+            ),
+          );
+        document.querySelectorAll("[data-deployment]").forEach((panel) => {
+          panel.hidden = panel.dataset.deployment !== mode;
+        });
+      }
+      function selectStep(index) {
+        document
+          .querySelectorAll("[data-step]")
+          .forEach((button) =>
+            button.setAttribute(
+              "aria-pressed",
+              String(Number(button.dataset.step) === index),
+            ),
+          );
+        document
+          .querySelectorAll(".timeline li")
+          .forEach((item, i) => item.classList.toggle("active", i === index));
+      }
+      document.querySelectorAll("[data-node]").forEach((node) => {
+        node.addEventListener("click", () => selectEntity(node.dataset.node));
+        node.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectEntity(node.dataset.node);
+          }
+        });
+      });
+      document
+        .querySelectorAll("[data-filter]")
+        .forEach((button) =>
+          button.addEventListener("click", () =>
+            filterFlow(button.dataset.filter),
+          ),
+        );
+      document
+        .querySelectorAll("[data-stage]")
+        .forEach((button) =>
+          button.addEventListener("click", () =>
+            selectStage(Number(button.dataset.stage)),
+          ),
+        );
+      document
+        .querySelectorAll("[data-deploy]")
+        .forEach((button) =>
+          button.addEventListener("click", () =>
+            selectDeployment(button.dataset.deploy),
+          ),
+        );
+      document
+        .querySelectorAll("[data-step]")
+        .forEach((button) =>
+          button.addEventListener("click", () =>
+            selectStep(Number(button.dataset.step)),
+          ),
+        );
+      document.getElementById("reset").addEventListener("click", () => {
+        selectTarget("core");
+        filterFlow("all");
+        selectEntity("agent");
+        selectStage(0);
+        selectStep(0);
+        selectDeployment("tui");
+      });
+      document
+        .getElementById("print")
+        .addEventListener("click", () => window.print());
+      for (const entity of Object.values(entities)) {
+        const article = document.createElement("article");
+        const title = document.createElement("h3");
+        title.textContent = entity.title;
+        article.append(title);
+        for (const [label, value] of [
+          ["负责", entity.does],
+          ["不负责", entity.not],
+          ["持有", entity.owns],
+        ]) {
+          const p = document.createElement("p");
+          p.textContent = label + "：" + value;
+          article.append(p);
+        }
+        document.getElementById("print-entities").append(article);
+      }
+      let previouslyOpen = [];
+      window.addEventListener("beforeprint", () => {
+        previouslyOpen = [...document.querySelectorAll("details")].map(
+          (detail) => detail.open,
+        );
+        document.querySelectorAll("details").forEach((detail) => {
+          detail.open = true;
+        });
+      });
+      window.addEventListener("afterprint", () =>
+        document.querySelectorAll("details").forEach((detail, index) => {
+          detail.open = previouslyOpen[index] ?? false;
+        }),
+      );
+      selectEntity("agent");
+      filterFlow("all");
+      selectStage(0);
+    </script>
+  </body>
+</html>

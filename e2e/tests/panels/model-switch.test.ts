@@ -6,7 +6,7 @@
  * - 右侧：当前 profile 的 K/V 编辑行，→ 进入右侧焦点，←/→ 切换字段值并立即写入；
  * - Model / Effort 字段切换后值必须真的变化（确定性断言，回归保护）；
  * - Esc 退出右侧焦点后再次 Esc 关闭面板；
- * - 状态栏中的 alias/model/effort 随 active profile 更新。
+ * - 宿主 settings.json 中 active profile 的 alias/model/effort 持久化更新。
  *
  * 隔离策略：以临时 HOME（含预置测试配置）启动 peri，避免读取/修改用户真实
  * ~/.peri/settings.json（此前测试会把 sonnet 档位的 model/effort 持久化成
@@ -182,18 +182,9 @@ describe("panels: model switch", () => {
       expect(extractRightValue(panelCapture.text, "Effort")).toBe("max");
       expect(extractRightValue(panelCapture.text, "Max tokens")).toBe("32000");
       expect(extractRightValue(panelCapture.text, "1m enable")).toBe("off");
-      // 状态栏三段式（<mode> · <cwd> · alias model effort）：初始 active=fable
-      expect(panelCapture.text).toMatch(
-        /Bypass · .+ · fable test-model-fable max/,
-      );
-
       // 阶段 2 确定性断言：激活标记（●）应移动到 sonnet 档位（选择即激活，替代原 judge 调用）
       expect(profileCapture.text).toContain("● sonnet");
       expect(profileCapture.text).not.toContain("● fable");
-      // 状态栏随 active profile 更新（alias/effort 均切到 sonnet 档位）
-      expect(profileCapture.text).toMatch(
-        /Bypass · .+ · sonnet test-model-sonnet medium/,
-      );
 
       // 阶段 3a 回归断言：Model 行值必须真的变化（此前 ←/→ 触发写入但值不变）
       const modelBefore = extractRightValue(profileCapture.text, "Model");
@@ -202,10 +193,7 @@ describe("panels: model switch", () => {
       expect(modelBefore).not.toBeNull();
       expect(modelAfter).not.toBeNull();
       expect(modelAfter).not.toBe(modelBefore);
-      // 状态栏 Model 段同步更新（候选序 opus→sonnet→haiku→fable，→ 一次：sonnet→haiku）
-      expect(modelCapture.text).toMatch(
-        /Bypass · .+ · sonnet test-model-haiku medium/,
-      );
+      // 宿主配置编辑不改变实际会话模型。
 
       // 阶段 3b 回归断言：Effort 行值必须真的变化（与 Model 同理，确定性断言不依赖 LLM judge）
       const effortBefore = extractRightValue(modelCapture.text, "Effort");
@@ -214,17 +202,16 @@ describe("panels: model switch", () => {
       expect(effortBefore).not.toBeNull();
       expect(effortAfter).not.toBeNull();
       expect(effortAfter).not.toBe(effortBefore);
-      // 状态栏 Effort 段同步更新（EFFORT_LEVELS low→medium→high→xhigh→max，→ 一次：medium→high）
-      expect(editCapture.text).toMatch(
-        /Bypass · .+ · sonnet test-model-haiku high/,
+      // 宿主配置已写盘；这与实际 session 状态栏的来源保持独立。
+      const persisted = JSON.parse(
+        fs.readFileSync(path.join(testHome!, ".peri", "settings.json"), "utf8"),
       );
+      expect(persisted.config.active_alias).toBe("sonnet");
+      expect(persisted.config.profiles.sonnet.model).toBe("test-model-haiku");
+      expect(persisted.config.profiles.sonnet.effort).toBe("high");
 
-      // 确定性断言（替代原 LLM judge）：面板已关闭（回到主界面）+ 状态栏三段式
-      // 与最终配置一致（alias=sonnet ≠ 初始 fable，model/effort 为循环后终值）
+      // 面板已关闭（回到主界面）。
       expect(capture.text).not.toContain("Select model");
-      expect(capture.text).toMatch(
-        /Bypass · .+ · sonnet test-model-haiku high/,
-      );
     },
   );
 });

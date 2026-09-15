@@ -64,13 +64,19 @@ describe("scenarios: /compact 命令", () => {
       // 完成提示文案：zh "压缩完成" / en "compaction completed"（旧 fluent
       // 注入，已退役）；Phase 5 Step 7 起为服务端 CommandFeedback 文案
       // 「已压缩 N 条消息」（UiOnly → SystemNote），三者都接受。
-      await tester.waitFor(
-        (screen) =>
-          screen.includes("已压缩") ||
-          screen.includes("压缩完成") ||
-          screen.includes("compaction completed"),
-        { timeout: 120_000, interval: 1000, message: "/compact 完成提示（已压缩/压缩完成/compaction completed）未出现" },
-      );
+      try {
+        await tester.waitFor(
+          (screen) =>
+            screen.includes("已压缩") ||
+            screen.includes("压缩完成") ||
+            screen.includes("compaction completed"),
+          { timeout: 120_000, interval: 1000, message: "/compact 完成提示（已压缩/压缩完成/compaction completed）未出现" },
+        );
+      } catch (error) {
+        // 清理终端前保留失败现场；录制失败不能覆盖原来的等待错误。
+        await takePeriSnapshot(tester, "compact-timeout").catch(() => {});
+        throw error;
+      }
       await waitForStableScreen(tester, 60_000);
 
       // 抓取 compact 后的屏幕

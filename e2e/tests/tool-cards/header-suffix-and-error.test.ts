@@ -17,7 +17,6 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
-import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
 /** 各阶段 prompt 前缀（屏幕回显中的独有文本，用于定位当前 turn） */
@@ -91,7 +90,7 @@ describe("tool-card: header suffix + error display", () => {
       tester = await launchPeri({ size: { cols: 120, rows: 60 } });
 
       // ── 阶段 1：Read 头行 "— N lines" ──
-      await sendPrompt(tester, `请用 Read 工具读取 Cargo.toml 文件的内容`);
+      await sendPrompt(tester, `请用 Read 工具读取 Cargo.toml 文件的内容，完成后只回复已读取，不要总结文件`);
       await waitTurnCompleted(tester, STAGE.read, 120_000);
       const readCapture = await takePeriSnapshot(tester, "header-suffix-read");
 
@@ -100,27 +99,41 @@ describe("tool-card: header suffix + error display", () => {
         tester,
         "请先使用 Glob 搜索 'peri-tui/src/**/*.rs' 匹配 Rust 源文件，\n" +
           "再使用 Grep 在 peri-tui/src 目录搜索 'fn main' 找到所有主函数。\n" +
-          "必须使用 Glob 和 Grep 两个工具，不要跳过",
+          "必须使用 Glob 和 Grep 两个工具，不要跳过。完成后只回复已搜索，不要罗列结果",
       );
       await waitTurnCompleted(tester, STAGE.globGrep, 180_000);
 
-      // agent 回复可能很长（如 markdown 表格），turn 完成后消息区吸底会把
-      // 位于 Grep 卡上方的 Glob 卡挤出屏幕，Judge 将误判为缺少匹配数后缀。
-      // 用 Ctrl+Home 滚动到消息区顶部，确保两张工具卡进入可见区域再截图
-      //（scroll.rs 键盘滚动：Global/High handler 放行 Ctrl+Home）。
+      // 回复长度与工具聚合都会改变卡片位置；从顶部扫描真实工具行，
+      // 不把包含 Glob 的 prompt 回显当作卡片已经进入视口。
       await tester.sendKey("Home", { ctrl: true });
-      await tester.waitFor(
-        (screen) => screen.includes("Glob"),
-        {
-          timeout: 10_000,
-          interval: 500,
-          message: "滚动到顶部后 Glob 工具行应可见",
-        },
-      );
+      let foundMatchCounts = false;
+      for (let scan = 0; scan < 40; scan++) {
+        const screen = await tester.getScreenText();
+        const groupRow = screen.split("\n")
+          .findIndex((line) => /▸.*Glob \d+.*Grep \d+/.test(line));
+        if (groupRow >= 0) {
+          await tester.click(4, groupRow);
+          await tester.sendText(`\u001b[<0;5;${groupRow + 1}m`);
+          continue;
+        }
+        if (/✓[ ]+Glob[^\n]*— [1-9]\d* matches/.test(screen)
+          && /✓[ ]+Grep[^\n]*— [1-9]\d* matches/.test(screen)) {
+          foundMatchCounts = true;
+          break;
+        }
+        for (let line = 0; line < 5; line++) {
+          await tester.sendKey("Down", { ctrl: true });
+        }
+      }
+      expect(foundMatchCounts, "扫描消息区后应看见 Glob/Grep 各自的匹配数").toBe(true);
       const globGrepCapture = await takePeriSnapshot(
         tester,
         "header-suffix-glob-grep",
       );
+      // 阶段 2 为查看 Glob 卡片滚到了顶部；恢复到底部后再提交下一阶段，
+      // 让后续 turn 的完成 footer 和工具卡保持在当前消息视口。
+      await tester.sendKey("End", { ctrl: true });
+      await tester.sleep(200);
 
       // ── 阶段 3：Write + Edit 头行 diff 摘要 ──
       await sendPrompt(
@@ -133,22 +146,31 @@ describe("tool-card: header suffix + error display", () => {
       // 等待 Write/Edit 变更摘要：独立行（`✓ Write path · +N` 计数后缀——
       // §6.4 摘要文本含路径不重复拼接；符号后为网格 gap + 前导空格，用 `[ ]+`
       // 容忍）或 §7 分组聚合行（`Write 1 · Edit 1`，含 diff 工具不合并、不分组）
-      await tester.waitFor(
-        (screen) => {
-          const t = currentTurn(screen, STAGE.writeEdit);
-          return (
-            t !== undefined &&
-            t.completed &&
-            /(?:✓[ ]+Write\b[^\n]*|Write \d+)/m.test(t.section) &&
-            /(?:✓[ ]+Edit\b[^\n]*|Edit \d+)/m.test(t.section)
-          );
-        },
-        {
-          timeout: 180_000,
-          interval: 1000,
-          message: "等待 Write/Edit 变更摘要超时",
-        },
-      );
+      try {
+        await tester.waitFor(
+          (screen) => {
+            const t = currentTurn(screen, STAGE.writeEdit);
+            return (
+              t !== undefined &&
+              t.completed &&
+              /(?:✓[ ]+Write\b[^\n]*|Write \d+)/m.test(t.section) &&
+              /(?:✓[ ]+Edit\b[^\n]*|Edit \d+)/m.test(t.section)
+            );
+          },
+          {
+            timeout: 180_000,
+            interval: 1000,
+            message: "等待 Write/Edit 变更摘要超时",
+          },
+        );
+      } catch (error) {
+        // 失败时也保存当前终端，区分输入未送达、工具未执行和摘要渲染问题。
+        await takePeriSnapshot(tester, "header-suffix-edit-failure");
+        await tester.sendKey("End", { ctrl: true });
+        await tester.sleep(200);
+        await takePeriSnapshot(tester, "header-suffix-edit-failure-bottom");
+        throw error;
+      }
       const editCapture = await takePeriSnapshot(tester, "header-suffix-edit");
 
       // ── 阶段 4：Read 不存在文件 → 错误态默认折叠 + 头行无后缀 ──
@@ -162,21 +184,25 @@ describe("tool-card: header suffix + error display", () => {
         "header-suffix-error-collapsed",
       );
 
-      // 从末尾 entry 向上遍历并切换折叠，直到错误详情出现。错误态 header
-      // 始终保持 `×`，不能像成功工具一样用 `▾` 判断展开状态。
-      let errorExpanded = false;
-      for (let i = 0; i < 12; i++) {
-        await tester.sendKey("Up", { alt: true });
-        await tester.sleep(100);
-        await tester.sendKey("Enter");
-        await tester.sleep(250);
-        const screen = await tester.getScreenText();
-        if (screen.includes("Tool execution failed") && screen.includes("not found")) {
-          errorExpanded = true;
-          break;
-        }
+      // 点击工具卡首行切换折叠。
+      // 错误态 header 始终保持 `×`，通过详细错误输出判断展开状态。
+      const collapsedScreen = await tester.getScreenText();
+      const errorRow = collapsedScreen
+        .split("\n")
+        .findIndex((line) => line.includes("×") && line.includes("/nonexistent"));
+      expect(errorRow, "错误工具卡应位于当前视口").toBeGreaterThanOrEqual(0);
+      await tester.click(4, errorRow);
+      // tui-tester.click 当前只发 SGR Down；Peri 在 Up 时提交单击动作。
+      await tester.sendText(`\u001b[<0;5;${errorRow + 1}m`);
+      try {
+        await tester.waitFor(
+          (screen) => /×[^\n]*Read[^\n]*\/nonexistent[^\n]*\n[^\n]*Error: File not found at \/nonexistent/.test(screen),
+          { timeout: 5_000, interval: 200, message: "点击错误工具卡后应显示详细错误" },
+        );
+      } catch (error) {
+        await takePeriSnapshot(tester, "header-suffix-error-expand-failure").catch(() => {});
+        throw error;
       }
-      expect(errorExpanded, "应能聚焦并展开错误工具卡").toBe(true);
       const errorExpandedCapture = await takePeriSnapshot(
         tester,
         "header-suffix-error-expanded",
@@ -188,40 +214,12 @@ describe("tool-card: header suffix + error display", () => {
       expect(errorCollapsedCapture.text.length).toBeGreaterThan(50);
       expect(errorExpandedCapture.text.length).toBeGreaterThan(50);
 
-      // Judge: Read 头行行数后缀
-      const r1 = await judge({
-        ansiRaw: readCapture.raw,
-        criteria: [
-          "Read 工具行应包含文件路径和行数摘要，格式如 'Read  Cargo.toml — N lines'（成功符号 + 工具名 + 路径 + 行数后缀）",
-          "行数 N 应是一个合理的正整数（> 0），函数调用应成功读取并显示文件行数",
-        ],
-      });
-      console.log("Judge (read):", JSON.stringify(r1, null, 2));
-      expect(r1.pass).toBe(true);
-
-      // Judge: Glob/Grep 匹配数后缀
-      const r2 = await judge({
-        ansiRaw: globGrepCapture.raw,
-        criteria: [
-          "屏幕上应出现 Glob 和 Grep 两个工具调用的痕迹（成功符号 + 工具名 + 搜索参数）",
-          "Glob 工具行应包含匹配数后缀，格式如 'Glob  pattern — N matches'",
-          "Grep 工具行应包含匹配数后缀，格式如 'Grep  pattern — N matches'",
-          "匹配数 N 应为至少为 1 的正整数",
-        ],
-      });
-      console.log("Judge (glob-grep):", JSON.stringify(r2, null, 2));
-      expect(r2.pass).toBe(true);
-
-      // Judge: Write/Edit diff 摘要（独立变更行或 §7 分组聚合行均可）
-      const r3 = await judge({
-        ansiRaw: editCapture.raw,
-        criteria: [
-          "屏幕上应出现 Write 和 Edit 两个工具调用的痕迹（成功符号 + 工具名，或 §7 分组行如 'Write 1 · Edit 1'）",
-          "Write/Edit 的变更摘要应可见——独立行形式（如 '· +N' 或 '· +N · -N' 计数后缀），或分组行中包含工具名与次数",
-        ],
-      });
-      console.log("Judge (edit):", JSON.stringify(r3, null, 2));
-      expect(r3.pass).toBe(true);
+      // 这些后缀是确定的终端文本，直接核验工具卡，不依赖 Judge 生成 JSON。
+      expect(readCapture.text).toMatch(/✓[ ]+Read[^\n]*Cargo\.toml — [1-9]\d* lines/);
+      expect(globGrepCapture.text).toMatch(/✓[ ]+Glob[^\n]*— [1-9]\d* matches/);
+      expect(globGrepCapture.text).toMatch(/✓[ ]+Grep[^\n]*— [1-9]\d* matches/);
+      expect(editCapture.text).toMatch(/✓[ ]+Write[^\n]*· \+[1-9]\d*/);
+      expect(editCapture.text).toMatch(/✓[ ]+Edit[^\n]*· \+[1-9]\d* · -[1-9]\d*/);
 
       // 确定性断言：错误态终态默认折叠，头行无 "— N lines" 后缀且明确错误词。
       // 选择器必须命中**工具卡错误行**而非 prompt 回显——回显行
@@ -238,20 +236,10 @@ describe("tool-card: header suffix + error display", () => {
         errHeader!.includes("失败") || errHeader!.includes("Failed"),
         `错误态头行含错误词：${errHeader}`,
       ).toBe(true);
-      expect(errorCollapsedCapture.text).not.toContain("Tool execution failed");
-      expect(errorExpandedCapture.text).toContain("Tool execution failed");
-      expect(errorExpandedCapture.text).toContain("not found");
+      const expandedError = /×[^\n]*Read[^\n]*\/nonexistent[^\n]*\n[^\n]*Error: File not found at \/nonexistent/;
+      expect(errorCollapsedCapture.text).not.toMatch(expandedError);
+      expect(errorExpandedCapture.text).toMatch(expandedError);
 
-      // Judge（信息性）：默认折叠保持错误信号，显式展开后显示详情。
-      const r4 = await judge({
-        ansiRaw: errorExpandedCapture.raw,
-        criteria: [
-          "Read 工具行应只包含文件名参数与错误词（如 'Read  /nonexistent... — Failed'），不应有 '— N lines' 等行数后缀",
-          "用户显式展开后，错误详细信息应在独立的输出行中可见（如 'Error:' 或 'not found' 或 'Tool execution failed'）",
-          "agent 应感知到文件不存在（如 'not found'、'不存在' 等错误提示）",
-        ],
-      });
-      console.log("Judge (error):", JSON.stringify(r4, null, 2));
     },
   );
 });

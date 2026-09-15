@@ -3,8 +3,7 @@
     "openspec": {
       "type":"http",
       "url": "https://peri-mcpp-gateway.claude-code-best.workers.dev/openspec/mcp",
-      "cwd": ".",
-       "protocolVersion": "2026-07-28"
+      "cwd": "."
       },
       "ip-as-logo": {
         "type": "streamable-http",
