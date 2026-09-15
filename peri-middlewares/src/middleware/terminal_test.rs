@@ -13,6 +13,16 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 
+// Exercise the real platform shell without relying on Python availability or
+// PowerShell's native-executable argument quoting. Tail is fixture-owned text.
+fn output_command(count: usize, tail: &str, exit_code: i32) -> String {
+    if cfg!(windows) {
+        format!("[Console]::Out.WriteLine(('x' * {count}) + '{tail}'); exit {exit_code}")
+    } else {
+        format!("printf '%*s' {count} '' | tr ' ' x; printf '%s\\n' '{tail}'; exit {exit_code}")
+    }
+}
+
 fn dispatch_context(cwd: &Path, tool: BashTool) -> StageContext {
     let turn = peri_agent::session::turn::TurnContext::new(
         Arc::from(cwd.to_string_lossy().into_owned()),
@@ -154,7 +164,7 @@ async fn test_bash_typed_evidence_preserves_nonzero_exit() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let output = tool
         .invoke_output(
-            serde_json::json!({"command": "printf 'tail-failure'; exit 7"}),
+            serde_json::json!({"command": output_command(0, "tail-failure", 7)}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
@@ -172,7 +182,7 @@ async fn test_bash_typed_evidence_persists_10k_to_65k_projection() {
     let output = tool
         .invoke_output(
             serde_json::json!({
-                "command": "python3 -c 'print(\"x\" * 20000)'"
+                "command": output_command(20000, "", 0)
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
@@ -244,7 +254,7 @@ async fn test_production_dispatch_persists_bash_tail_failure_evidence() {
     let outcome = dispatch_bash(
         &context,
         serde_json::json!({
-            "command": "python3 -c 'import sys; sys.stdout.write(\"x\" * 20000 + \"TAIL_FAILURE\\n\"); sys.exit(7)'"
+            "command": output_command(20000, "TAIL_FAILURE", 7)
         }),
         CancellationToken::new(),
     )
@@ -257,7 +267,9 @@ async fn test_production_dispatch_persists_bash_tail_failure_evidence() {
     assert_eq!(evidence.exit_code, Some(7));
     assert!(evidence.output_truncated);
     let output_ref = evidence.output_ref.as_ref().expect("full output ref");
-    assert!(std::fs::metadata(output_ref).unwrap().is_file());
+    assert!(std::fs::read_to_string(output_ref)
+        .unwrap()
+        .contains(&format!("{}TAIL_FAILURE", "x".repeat(20_000))));
     assert!(result.output.chars().count() <= 10_000);
 
     let transcript = context.session.transcript.read();
@@ -290,7 +302,7 @@ async fn test_production_dispatch_persists_bash_success_projection_and_ref() {
     let outcome = dispatch_bash(
         &context,
         serde_json::json!({
-            "command": "python3 -c 'print(\"x\" * 20000)'"
+            "command": output_command(20000, "", 0)
         }),
         CancellationToken::new(),
     )
@@ -317,13 +329,16 @@ async fn test_production_dispatch_live_tool_end_matches_canonical_projection() {
     let outcome = dispatch_bash(
         &context,
         serde_json::json!({
-            "command": "python3 -c 'import sys; sys.stdout.write(\"x\" * 20000); sys.exit(7)'"
+            "command": output_command(20000, "", 7)
         }),
         CancellationToken::new(),
     )
     .await
     .unwrap();
     let result = &outcome.results[0].1;
+    let evidence = result.execution.as_ref().expect("typed Bash evidence");
+    assert_eq!(evidence.exit_code, Some(7));
+    assert!(evidence.output_truncated);
     let event = loop {
         let event = handles.try_render().expect("ToolEnded render event");
         if let peri_acp_types::event_v2::RenderEvent::ToolEnded { .. } = event {
@@ -351,7 +366,7 @@ async fn test_production_dispatch_near_limit_output_persists_before_metadata_pro
     let outcome = dispatch_bash(
         &context,
         serde_json::json!({
-            "command": "python3 -c 'print(\"x\" * 9900)'"
+            "command": output_command(9900, "", 0)
         }),
         CancellationToken::new(),
     )

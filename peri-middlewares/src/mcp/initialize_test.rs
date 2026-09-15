@@ -62,8 +62,11 @@ async fn worktree_static_server_uses_target_directory_on_initialize_and_reconnec
         let starts = std::fs::read_to_string(cwd.join("starts")).unwrap();
         let expected = std::fs::canonicalize(cwd).unwrap();
         assert_eq!(
-            starts.lines().collect::<Vec<_>>(),
-            vec![expected.to_str().unwrap(); 2]
+            starts
+                .lines()
+                .map(|path| std::fs::canonicalize(path).unwrap())
+                .collect::<Vec<_>>(),
+            vec![expected; 2]
         );
     }
 }
