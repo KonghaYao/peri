@@ -375,7 +375,36 @@ async function runSuccessfulRelay(workspace: string, settingsPath: string) {
     );
     expectResult(await promptResponse, "session/prompt");
 
-    return { sessionId, appSessionId, resourceCount: resources.length, appRequestId };
+    const invokeResponse = await client.request(7, "peri/mcp/invoke", {
+      envelopeVersion,
+      appsProtocolVersion,
+      serverId,
+      ownerSessionId: sessionId,
+      toolName,
+      arguments: {},
+    });
+    const invoked = expectResult(invokeResponse, "peri/mcp/invoke");
+    invariant(typeof invoked.toolCallId === "string" && invoked.toolCallId.length > 0, "invoke response is missing toolCallId");
+    invariant(invoked.toolCallId !== observedInvocationToken, "invoke must issue a new toolCallId");
+    await client.waitForNotification(
+      (message) => hasCompletedToolCall(message, String(invoked.toolCallId)),
+      "host invoke completed canonical MCP ToolCallUpdate notification",
+    );
+    const reopened = expectResult(
+      await client.request(8, "peri/mcp/open", {
+        envelopeVersion,
+        appsProtocolVersion,
+        serverId,
+        ownerSessionId: sessionId,
+        invocationToken: invoked.toolCallId,
+        toolName,
+      }),
+      "peri/mcp/open after invoke",
+    );
+    invariant(typeof reopened.appSessionId === "string", "invoke lease did not open");
+    invariant(reopened.appSessionId !== appSessionId, "invoke must create a new app session");
+
+    return { sessionId, appSessionId, resourceCount: resources.length, appRequestId, invokedToolCallId: invoked.toolCallId };
   } finally {
     client.close();
   }

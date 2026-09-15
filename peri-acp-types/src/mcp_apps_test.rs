@@ -2,6 +2,53 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn inbound_invoke_envelope_rejects_mcp_protocol_version() {
+    let value = json!({
+        "envelopeVersion": "1",
+        "appsProtocolVersion": MCP_APPS_PROTOCOL_VERSION,
+        "mcpProtocolVersion": "2025-11-25",
+        "serverId": "cursor-canvas",
+        "toolName": "show_canvas",
+        "ownerSessionId": "session",
+        "arguments": {"source": "export default function App(){return null}"}
+    });
+    assert!(serde_json::from_value::<McpAppInvokeRequest>(value).is_err());
+}
+
+#[test]
+fn invoke_request_roundtrip_keeps_inner_mcp_arguments() {
+    let value = json!({
+        "envelopeVersion": "1",
+        "appsProtocolVersion": MCP_APPS_PROTOCOL_VERSION,
+        "serverId": "cursor-canvas",
+        "toolName": "show_canvas",
+        "ownerSessionId": "acp-session-1",
+        "arguments": {"source": "export default function App(){return null}", "title": "Board"}
+    });
+    let decoded: McpAppInvokeRequest = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(decoded.server_id, "cursor-canvas");
+    assert_eq!(decoded.tool_name, "show_canvas");
+    assert_eq!(decoded.arguments["title"], "Board");
+    let encoded = serde_json::to_value(&decoded).unwrap();
+    assert_eq!(encoded["toolName"], "show_canvas");
+    assert_eq!(encoded["ownerSessionId"], "acp-session-1");
+}
+
+#[test]
+fn invoke_response_exposes_camel_case_tool_call_id() {
+    let response = McpAppInvokeResponse {
+        envelope_version: MCP_APPS_ENVELOPE_VERSION.into(),
+        apps_protocol_version: MCP_APPS_PROTOCOL_VERSION.into(),
+        mcp_protocol_version: "2025-03-26".into(),
+        server_id: "cursor-canvas".into(),
+        tool_call_id: "tool-new-1".into(),
+    };
+    let value = serde_json::to_value(response).unwrap();
+    assert_eq!(value["toolCallId"], "tool-new-1");
+    assert!(value.get("tool_call_id").is_none());
+}
+
+#[test]
 fn inbound_app_envelope_rejects_mcp_protocol_version() {
     let value = json!({
         "envelopeVersion": "1",

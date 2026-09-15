@@ -141,6 +141,10 @@ impl McpAppBindingLeaseRegistry {
         self.cleanup();
     }
 
+    pub fn current_turn(&self, owner_session_id: &str) -> Option<String> {
+        self.current_turns.lock().get(owner_session_id).cloned()
+    }
+
     pub fn is_current_turn(&self, lease: &McpAppBindingLease) -> bool {
         lease.is_valid()
             && self

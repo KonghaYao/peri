@@ -122,6 +122,62 @@ fn binding_lease_is_single_consume_and_cancel_aware() {
 }
 
 #[test]
+fn current_turn_tracks_latest_issued_lease() {
+    let registry = McpAppBindingLeaseRegistry::default();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    assert!(registry.current_turn("session").is_none());
+    registry.issue(McpAppBindingLease::new(
+        "session".into(),
+        "turn-a".into(),
+        "server".into(),
+        1,
+        "ui://app".into(),
+        "tool".into(),
+        "token-a".into(),
+        HashMap::from([("tool".into(), "mcp__server__tool".into())]),
+        Arc::new(FakeDispatcher),
+        cancel.clone(),
+    ));
+    assert_eq!(registry.current_turn("session").as_deref(), Some("turn-a"));
+    registry.issue(McpAppBindingLease::new(
+        "session".into(),
+        "turn-a".into(),
+        "server".into(),
+        1,
+        "ui://app".into(),
+        "tool".into(),
+        "token-b".into(),
+        HashMap::from([("tool".into(), "mcp__server__tool".into())]),
+        Arc::new(FakeDispatcher),
+        cancel,
+    ));
+    assert_eq!(registry.current_turn("session").as_deref(), Some("turn-a"));
+    let first = registry.consume(
+        "server",
+        "tool",
+        1,
+        "ui://app",
+        "session",
+        "token-a",
+        "connection",
+    );
+    assert!(
+        first.is_some(),
+        "issuing a new lease must not consume the previous token"
+    );
+    let second = registry.consume(
+        "server",
+        "tool",
+        1,
+        "ui://app",
+        "session",
+        "token-b",
+        "connection",
+    );
+    assert!(second.is_some());
+}
+
+#[test]
 fn connection_cleanup_purges_only_owned_raw_results() {
     let registry = McpAppBindingLeaseRegistry::default();
     registry.record_raw_result(

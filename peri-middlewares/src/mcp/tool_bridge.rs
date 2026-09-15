@@ -47,7 +47,7 @@ const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12
 const MAX_MCP_LINES: usize = 2000;
 
 /// Sanitize name components to match API tool name pattern: ^[a-zA-Z0-9_-]+$
-fn sanitize_name_component(name: &str) -> String {
+pub(crate) fn sanitize_name_component(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
@@ -78,11 +78,7 @@ fn app_allowed_tools(
         })
         .filter_map(|tool| {
             let name = tool.name.to_string();
-            let effective = format!(
-                "mcp__{}__{}",
-                sanitize_name_component(server_name),
-                sanitize_name_component(&name)
-            );
+            let effective = effective_mcp_tool_name(server_name, &name);
             dispatcher_tools
                 .contains(&effective)
                 .then_some((name, effective))
@@ -90,14 +86,18 @@ fn app_allowed_tools(
         .collect()
 }
 
+pub(crate) fn effective_mcp_tool_name(server_name: &str, tool_name: &str) -> String {
+    format!(
+        "mcp__{}__{}",
+        sanitize_name_component(server_name),
+        sanitize_name_component(tool_name)
+    )
+}
+
 impl McpToolBridge {
     pub fn new(server_name: &str, tool: &Tool, client: Arc<McpClientHandle>) -> Self {
         let tool_name = tool.name.to_string();
-        let full_name = format!(
-            "mcp__{}__{}",
-            sanitize_name_component(server_name),
-            sanitize_name_component(&tool_name)
-        );
+        let full_name = effective_mcp_tool_name(server_name, &tool_name);
         let description = format!(
             "[MCP:{}] {}",
             server_name,
@@ -141,7 +141,7 @@ impl McpToolBridge {
         );
         Ok(Self {
             server_name: server_name.to_string(),
-            full_name: format!("mcp__{server_name}__{tool_name}"),
+            full_name: effective_mcp_tool_name(server_name, &tool_name),
             tool_name,
             description,
             input_schema: serde_json::to_value(&*tool.input_schema)
