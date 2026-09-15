@@ -2,7 +2,7 @@ use super::view::{QueueFrame, QueueView, Selection, ViewState, preview, validate
 use super::{SteerItemState, SteerQueueAction, SteerQueueItem};
 use crate::kit::terminal_caps::{TerminalCaps, symbols};
 use peri_theme::prelude::dark_theme;
-use ratatui_kit::ratatui::{layout::Rect, style::Style};
+use ratatui_kit::ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::Widget};
 use std::sync::{Arc, Mutex};
 use unicode_width::UnicodeWidthStr;
 
@@ -54,17 +54,28 @@ fn test_queue_layout_mouse_target_uses_stable_id() {
     // 中文不改变固定行尾动作列，也不把正文点击误认作发送。
     let frame = make_view(make_items()).layout(Rect::new(2, 10, 80, 7));
     assert_eq!(
-        frame.hit(76, 13).map(|hit| &hit.selection),
+        frame.hit(76, 12).map(|hit| &hit.selection),
         Some(&Selection::Dispatch("B".to_owned())),
         "第二行发送应绑定 B"
     );
     assert_eq!(
-        frame.hit(80, 13).map(|hit| &hit.selection),
+        frame.hit(80, 12).map(|hit| &hit.selection),
         Some(&Selection::TakeBack("B".to_owned())),
         "第二行取回应绑定 B"
     );
-    assert!(frame.hit(5, 13).is_none(), "正文不能触发发送");
-    assert!(frame.hit(76, 10).is_none(), "上边线不能触发发送");
+    assert!(frame.hit(5, 12).is_none(), "正文不能触发发送");
+    assert_eq!(
+        frame.hit(81, 10).map(|hit| &hit.selection),
+        Some(&Selection::All),
+        "全发提示应位于上边线"
+    );
+    assert!(
+        frame
+            .rows
+            .iter()
+            .all(|(_, row)| row.y < frame.area.bottom() - 1),
+        "队列底部应保留一行空白"
+    );
 }
 
 #[test]
@@ -84,7 +95,7 @@ fn test_queue_layout_expanded_scroll_keeps_correct_identity() {
         "展开窗口应从 E 开始"
     );
     assert_eq!(
-        frame.hit(74, 13).map(|hit| &hit.selection),
+        frame.hit(74, 12).map(|hit| &hit.selection),
         Some(&Selection::Dispatch("F".to_owned())),
         "滚动后应发送可见 F"
     );
@@ -110,6 +121,19 @@ fn test_queue_layout_queued_items_keep_takeback_enabled() {
             .filter(|control| matches!(control.selection, Selection::Dispatch(_)))
             .all(|control| control.enabled),
         "普通发送仍然可用"
+    );
+}
+
+#[test]
+fn test_queue_render_clears_bottom_spacer() {
+    let area = Rect::new(0, 0, 20, 4);
+    let mut buffer = Buffer::filled(area, ratatui_kit::ratatui::buffer::Cell::new("─"));
+
+    make_view(make_items()).render(area, &mut buffer);
+
+    assert!(
+        (area.x..area.right()).all(|x| buffer[(x, area.bottom() - 1)].symbol() == " "),
+        "底部间隔必须清除旧边线字符"
     );
 }
 
