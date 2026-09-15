@@ -39,7 +39,7 @@ function unknownReview(p: TaskPacket, overrides: Record<string, unknown> = {}): 
   return review(p, { requestMessageIds: ["request"], endMessageId: "capture-message", taskType: "coding", outcome: unknown, verification: unknown, constraints: unknown, feedback: unknown, strategy: unknown, ...overrides });
 }
 function realMetadataPacket(): TaskPacket {
-  const capture = JSON.parse(readFileSync(join(import.meta.dir, "../../reports/2026-09-13-peri-repairs/execution-evidence/rust-bash-failure-capture.json"), "utf8"))[0];
+  const capture = JSON.parse(readFileSync(join(import.meta.dir, "./fixtures/rust-bash-failure.json"), "utf8"))[0];
   const dir = mkdtempSync(join(tmpdir(), "task-review-real-capture-")); const path = join(dir, "threads.db"); const db = new Database(path);
   db.exec("CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT,cwd TEXT,created_at TEXT,updated_at TEXT,message_count INTEGER,parent_thread_id TEXT,hidden INTEGER DEFAULT 0); CREATE TABLE messages(message_id TEXT PRIMARY KEY,thread_id TEXT,role TEXT,content TEXT,truncated INTEGER DEFAULT 0,excluded INTEGER DEFAULT 0,projection TEXT);");
   db.query("INSERT INTO threads VALUES(?,?,?,?,?,?,?,?)").run("capture", "capture", "/tmp", "2026-09-13T00:00:00Z", "2026-09-13T00:00:01Z", 2, null, 0);

@@ -76,17 +76,7 @@ bun test
 
 创建窗口变化只能支持描述性差异，不能解释为因果改善。具体复核流程见 [ANALYSIS.md](ANALYSIS.md)。
 
-当前参考产物：
-
-- [Peri 实际任务研究：六例双评与五项改进队列](reports/2026-09-13-peri-improvements/README.md)
-- [任务有效性试点：12 个样本双评、证据回查与提示词方向](reports/2026-09-13-task-effectiveness/03-findings.md)
-- [本轮分析结论与改进方向](reports/2026-09-13-review.md)
-- [foundation quality](reports/2026-09-13-foundation/quality.md)
-- [all roots behavior](reports/2026-09-13-behavior/all-roots/report.md)
-- [recent roots behavior](reports/2026-09-13-behavior/recent-roots/report.md)
-- [validation findings](reports/2026-09-13-validation/findings.md)
-- [相邻窗口对比](reports/2026-09-13-comparison/compare.md)
-- [固定 seed 抽样](reports/2026-09-13-sample/sample.json)
+研究、eval 与 ADLC 的运行日志、审计快照和阶段报告保存在本地 `output/` 或按日期命名的 `reports/YYYY-MM-DD*` 中，不提交到仓库。测试必需的脱敏协议样本存放在 `src/research/fixtures/`。
 
 ## 历史产物
 

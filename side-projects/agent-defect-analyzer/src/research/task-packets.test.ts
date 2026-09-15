@@ -63,7 +63,7 @@ test("execution facts survive transcript content truncation", () => {
 });
 
 test("preserves the real Rust Bash failure capture through SQLite packet and evidence projections", () => {
-  const capturePath = join(import.meta.dir, "../../reports/2026-09-13-peri-repairs/execution-evidence/rust-bash-failure-capture.json");
+  const capturePath = join(import.meta.dir, "./fixtures/rust-bash-failure.json");
   const capture = JSON.parse(readFileSync(capturePath, "utf8")) as unknown[];
   expect(capture).toHaveLength(1);
   const message = capture[0] as Record<string, unknown>;
