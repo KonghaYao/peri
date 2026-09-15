@@ -61,7 +61,7 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: Option<bool>,
     /// 显式 MCP 协议版本。仅 `2026-07-28` 使用 `server/discover` lifecycle；
-    /// 未配置保持 legacy `initialize` 握手，未知版本会使配置解析失败。
+    /// 未配置使用官方 Auto 自动协商，未知版本会使配置解析失败。
     #[serde(
         default,
         rename = "protocolVersion",

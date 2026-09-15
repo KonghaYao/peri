@@ -14,6 +14,7 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 改 MCP 版本协商 | `src/mcp/client/transport.rs` | `serve_client_auto` | 缺省直接使用 rmcp Auto；显式版本使用 Discover；探测、回退和版本选择均由 SDK 负责。initialize/reconnect/Dynamic 共用入口，保留外层总超时；wire 回归见 `transport_test.rs` |
 | 改 MCP 子进程与协议关闭重试 | `src/mcp/client/{process,service,lifecycle}.rs` + `src/mcp/dynamic/staged_connection.rs` | `McpProcessOwner`、`McpServiceOwner`、`McpServiceWrapper::close_with_timeout` | pool保留stdio child/ProcessTree/stderr及staged协议owner；超时/取消不丢唯一join，重试等待同一次关闭；static与Dynamic共用；真实回归在`client/{process,service}_test.rs` |
 | 改 hooks 执行 owner 与关闭排空 | `src/hooks/{executor,dispatcher,stage_firing}.rs` + `src/assembly/hooks.rs` | `execute_command_hook_owned`、`fire_standalone_lifecycle_hooks_owned`、`spawn_async_hook`、`with_task_manager` | cwd来自session；async经spawn_owned+execution_cancel_token；command进程树清理保留外部token；SessionEnd内联等待；真实回归在`hooks/lifecycle_test.rs` |
 | 改静态 MCP 执行目录 | `src/mcp/client.rs` + `src/mcp/client/transport.rs` + `src/mcp/{initialize,reconnect}.rs` | `bind_execution_cwd`、`spawn_stdio_transport` | pool 初始化固定执行 cwd，init/reconnect 都显式传给子进程，不继承宿主目录；不同会话不得重绑同一 pool |

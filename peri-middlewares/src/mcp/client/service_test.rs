@@ -39,6 +39,17 @@ async fn delayed_service() -> (
         let mut lines = BufReader::new(server_read).lines();
         while let Some(line) = lines.next_line().await.unwrap() {
             let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if request["method"] == "server/discover" {
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0", "id": request["id"],
+                    "error": { "code": -32601, "message": "Method not found" }
+                });
+                server_write
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+                server_write.flush().await.unwrap();
+            }
             if request["method"] == "initialize" {
                 let response = serde_json::json!({
                     "jsonrpc": "2.0", "id": request["id"], "result": {
