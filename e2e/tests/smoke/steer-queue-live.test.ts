@@ -165,6 +165,19 @@ describe("smoke: 正式待发送队列", () => {
     ), { timeout: 10_000, interval: 100, message: `${text} 应确认入队且可操作` });
   }
 
+  it("队列出现后输入框分隔线保持连续实线", async () => {
+    await submit("STEER_SEED");
+    await waitRequest(1);
+    await submit("dd");
+    await waitPending(1);
+    await queued("dd");
+    const lines = plain(await tester!.getScreenText()).split("\n");
+    const header = lines.findIndex((line) => /待发送\s+1/.test(line));
+    const border = lines.slice(header + 1).find((line) => /^\s*[─━]/.test(line));
+    expect(border, "队列下方输入框应有实线边框").toBeDefined();
+    expect(border!.startsWith("─".repeat(12)), `输入框边线不得出现间隙：${border}`).toBe(true);
+  });
+
   it("单发 B 保留 A/C，全发不带上随后新增 D，自然完成再发送 D", async () => {
     await submit("STEER_SEED");
     const first = await waitRequest(1);

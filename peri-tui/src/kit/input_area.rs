@@ -917,8 +917,8 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         ""
     };
 
-    // 显式背景色：防止 Paragraph 文本缩短时旧内容残留（ghosting）。
-    // 未设背景时 ratatui 仅渲染文本 span，超出新文本的列保留终端原有像素。
+    // 通过 widget 直接保留显式背景。Text 会用组件主题替换 Paragraph 的 style，
+    // 丢失背景后，队列中文标题移开时输入框边线可能留下宽字符尾列的空隙。
     let composer_paragraph = Paragraph::new(composer_lines)
         .block(build_composer_block(
             loading,
@@ -1009,7 +1009,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         width: Constraint::Fill(1),
                         height: Constraint::Length(composer_height),
                     ) {
-                        Text(text: composer_paragraph)
+                        widget(composer_paragraph)
                     }
                 ).into_any()
             } else {
