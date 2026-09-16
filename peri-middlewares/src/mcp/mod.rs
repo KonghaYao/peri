@@ -1,5 +1,6 @@
 pub mod agent_registry;
 pub mod apps;
+pub mod apps_invoke;
 pub mod apps_relay;
 pub mod auth_store;
 pub mod callback_server;

@@ -439,14 +439,14 @@ Peri 侧数据流：
 
 1. Peri 在 MCP pool prewarm 前读取一次 `PERI_MCP_APPS` 是否存在并冻结 deployment profile；值不解析。
 2. 变量存在时，初始连接和重连均传播 `io.modelcontextprotocol/ui` 及 `text/html;profile=mcp-app`；不存在时使用普通 MCP capabilities。
-3. Peri 从 `tools/list` 发现 `Tool._meta.ui.resourceUri`，通过 `peri/mcp/open` 建立 connection-owned resource binding，再以 `peri/mcp/resource` 获取 `ui://` resource。
+3. Peri 从 `tools/list` 发现 `Tool._meta.ui.resourceUri`，通过 `peri/mcp/open` 建立 connection-owned resource binding，再以 `peri/mcp/resource` 获取 `ui://` resource。Host 重开历史 App 走 `peri/mcp/invoke`：新的 MCP `tools/call` + 新 lease + `session/update` 投影新 `toolCallId`，随后仍用 `peri/mcp/open` 消费该 lease。
 4. Peri 保留 resource 的 `text|blob`/`_meta` 与 `CallToolResult` 的 `content`、`structuredContent`、`_meta`、`isError`。
 5. 下游是否创建 iframe、如何执行 `postMessage`、如何消费 Apps tool notifications，完全由下游 Web Host 决定。
 
 ### 6.3 Peri ACP 如何透传
 
 - **payload 保留 MCP Apps 原始消息**：Peri 解析外层 envelope 进行 server/session 路由校验，但不实现下游 Web Host 的 `postMessage` bridge。
-- **外层方法名统一包装**：`peri/mcp/app` 与 `peri/mcp/resource`；信封分离 `envelopeVersion`、`mcpProtocolVersion`、`appsProtocolVersion`，并携带 `serverId` / `appSessionId` / `resourceUri` 与 Apps payload。
+- **外层方法名统一包装**：`peri/mcp/open`、`peri/mcp/app`、`peri/mcp/resource`、`peri/mcp/invoke`；信封分离 `envelopeVersion`、`mcpProtocolVersion`、`appsProtocolVersion`，并携带 `serverId` / `appSessionId` / `resourceUri` 与 Apps payload。`invoke` 成功体带 `toolCallId`（即后续 `open` 的 `invocationToken`）。
 - **能力开关由环境驱动**：`PERI_MCP_APPS` 存在即启用整个进程的 immutable deployment profile；不再读取或回显 ACP MCP Apps capability。
 - **Web Host 属于下游**：iframe、sandbox、CSP、Permissions Policy、`postMessage` 和 MCP Apps FE 均不在 Peri 实现范围。
 - **工具调用不绕过权限**：App 发起的调用与 agent 发起的 MCP 工具调用共用既有执行路径与 HITL 权限。

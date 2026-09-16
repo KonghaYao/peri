@@ -22,7 +22,7 @@ const MAX_ACTIVE_LEASES: usize = 1024;
 /// Resource/catalog access and App `tools/call` are backed by the same deployment pool.
 /// Tool calls require a consumed, connection-bound canonical dispatcher lease.
 pub struct PoolMcpAppsRelay {
-    pool: Arc<McpClientPool>,
+    pub(crate) pool: Arc<McpClientPool>,
     active_leases: Mutex<HashMap<String, super::apps::McpAppBindingLease>>,
 }
 
@@ -277,8 +277,16 @@ impl McpAppsRelayPort for PoolMcpAppsRelay {
         };
         Ok((protocol, response))
     }
+
+    async fn invoke_app(
+        &self,
+        request: &peri_acp_types::mcp_apps::McpAppInvokeRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<peri_acp_types::mcp_apps::McpAppInvokeOutcome, McpAppsRelayError> {
+        self.invoke_app_inner(request, cancellation).await
+    }
 }
 
-fn relay_error(kind: McpAppsErrorKind) -> McpAppsRelayError {
+pub(crate) fn relay_error(kind: McpAppsErrorKind) -> McpAppsRelayError {
     McpAppsRelayError { kind }
 }

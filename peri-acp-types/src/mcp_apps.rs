@@ -31,6 +31,43 @@ pub struct McpAppOpenResponse {
     pub app_session_id: String,
     pub resource_uri: String,
 }
+
+/// Host-initiated App tool rerun (`peri/mcp/invoke`).
+///
+/// Issues a **new** model-equivalent MCP Apps lease; does not consume a
+/// historical `invocationToken`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpAppInvokeRequest {
+    pub envelope_version: String,
+    pub apps_protocol_version: String,
+    pub server_id: String,
+    pub tool_name: String,
+    pub owner_session_id: String,
+    #[serde(default)]
+    pub arguments: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAppInvokeResponse {
+    pub envelope_version: String,
+    pub apps_protocol_version: String,
+    pub mcp_protocol_version: String,
+    pub server_id: String,
+    pub tool_call_id: String,
+}
+
+/// Successful host invoke: ACP `toolCallId` plus projection fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpAppInvokeOutcome {
+    pub mcp_protocol_version: String,
+    pub tool_call_id: String,
+    pub effective_tool_name: String,
+    pub arguments: serde_json::Map<String, Value>,
+    pub output: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpAppRequest {
@@ -249,6 +286,15 @@ pub trait McpAppsRelayPort: Send + Sync {
         binding: &AppSessionBinding,
         request: JsonRpcRequest,
     ) -> Result<(String, JsonRpcResponse), McpAppsRelayError>;
+
+    /// Host-initiated App tool call: MCP `tools/call` + `issue()` a new lease.
+    ///
+    /// The returned `tool_call_id` is the ACP `toolCallId` / later `invocationToken`.
+    async fn invoke_app(
+        &self,
+        request: &McpAppInvokeRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<McpAppInvokeOutcome, McpAppsRelayError>;
 }
 
 #[cfg(test)]

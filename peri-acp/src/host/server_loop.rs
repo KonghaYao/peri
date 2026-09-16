@@ -29,7 +29,7 @@ impl ServerLoop<'_> {
             match msg {
                 IncomingMessage::Request { id, method, params } => match method.as_str() {
                     "session/prompt" => self.spawn_prompt(id, params).await,
-                    "peri/mcp/open" | "peri/mcp/app" | "peri/mcp/resource" => {
+                    "peri/mcp/open" | "peri/mcp/app" | "peri/mcp/resource" | "peri/mcp/invoke" => {
                         self.spawn_mcp_apps_request(id, method, params).await;
                     }
                     _ => self.dispatch_request(id, method, params).await,
@@ -126,6 +126,7 @@ impl ServerLoop<'_> {
         let cfg = self.cfg;
         let connection = self.connection;
         let connection_cancellation = self.connection_cancellation;
+        let sessions = self.sessions;
         let transport = Arc::clone(transport);
         let owner_id = if method == "peri/mcp/open" {
             params
@@ -153,6 +154,7 @@ impl ServerLoop<'_> {
             .and_then(|env| env.cfg.mcp_apps_relay.clone())
             .or_else(|| cfg.mcp_apps_relay.clone());
         let connection = Arc::clone(connection);
+        let sessions = Arc::clone(sessions);
         let app_spawner = cfg.host_task_spawner.clone();
         let connection_cancellation = connection_cancellation.clone();
         let rejected_transport = Arc::clone(&transport);
@@ -176,6 +178,67 @@ impl ServerLoop<'_> {
                                     relay.as_ref(),
                                 )
                                 .await
+                            }
+                            "peri/mcp/invoke" => {
+                                let owner_session_id = params
+                                    .get("ownerSessionId")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+                                let gate = {
+                                    let sessions = sessions.lock().await;
+                                    match sessions.get(owner_session_id) {
+                                        Some(state) => mcp_apps::InvokeSessionGate {
+                                            known: true,
+                                            prompt_in_flight: state.cancel_token.is_some(),
+                                        },
+                                        None => mcp_apps::InvokeSessionGate {
+                                            known: false,
+                                            prompt_in_flight: false,
+                                        },
+                                    }
+                                };
+                                let request_connection = {
+                                    let connection = connection.lock().await;
+                                    connection.snapshot_for_request()
+                                };
+                                match mcp_apps::handle_invoke(
+                                    &params,
+                                    &request_connection,
+                                    relay.as_ref(),
+                                    gate,
+                                )
+                                .await
+                                {
+                                    Ok(result) => {
+                                        for update in result.updates {
+                                            let payload = serde_json::to_value(
+                                                agent_client_protocol::schema::v1::SessionNotification::new(
+                                                    agent_client_protocol::schema::v1::SessionId::new(
+                                                        result.session_id.clone(),
+                                                    ),
+                                                    update,
+                                                ),
+                                            )
+                                            .map_err(|_| {
+                                                crate::transport::types::AcpError::new(
+                                                    -32603,
+                                                    "MCP Apps relay request failed",
+                                                )
+                                            })?;
+                                            if let Err(error) = transport
+                                                .send_notification("session/update", payload)
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    %error,
+                                                    "MCP Apps invoke session/update send failed"
+                                                );
+                                            }
+                                        }
+                                        Ok(result.value)
+                                    }
+                                    Err(error) => Err(error),
+                                }
                             }
                             _ => {
                                 let mut request_connection = {

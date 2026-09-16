@@ -1,14 +1,20 @@
 use std::sync::Arc;
 
 use peri_acp_types::mcp_apps::{
-    AppSessionBinding, McpAppOpenRequest, McpAppOpenResponse, McpAppRequest, McpAppResponse,
-    McpAppsErrorKind, McpAppsRelayError, McpAppsRelayPort, McpResourceRequest, McpResourceResponse,
-    MCP_APPS_ENVELOPE_VERSION, MCP_APPS_PROTOCOL_VERSION,
+    AppSessionBinding, McpAppInvokeRequest, McpAppInvokeResponse, McpAppOpenRequest,
+    McpAppOpenResponse, McpAppRequest, McpAppResponse, McpAppsErrorKind, McpAppsRelayError,
+    McpAppsRelayPort, McpResourceRequest, McpResourceResponse, MCP_APPS_ENVELOPE_VERSION,
+    MCP_APPS_PROTOCOL_VERSION,
 };
 use serde_json::Value;
 
 use super::connection::ConnectionContext;
+use crate::event::map_event;
 use crate::transport::types::AcpError;
+use agent_client_protocol::schema::v1::SessionUpdate;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::PeriCaps;
 
 pub(crate) async fn handle_request(
     method: &str,
@@ -26,6 +32,89 @@ pub(crate) async fn handle_request(
         "peri/mcp/app" => handle_app(params, connection, relay).await,
         _ => Err(outer_error(McpAppsErrorKind::UnsupportedMethod)),
     }
+}
+
+pub(crate) struct InvokeSessionGate {
+    pub known: bool,
+    pub prompt_in_flight: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct InvokeHostResult {
+    pub value: Value,
+    pub session_id: String,
+    pub updates: Vec<SessionUpdate>,
+}
+
+pub(crate) async fn handle_invoke(
+    params: &Value,
+    connection: &ConnectionContext,
+    relay: Option<&Arc<dyn McpAppsRelayPort>>,
+    gate: InvokeSessionGate,
+) -> Result<InvokeHostResult, AcpError> {
+    if !connection.apps_enabled() {
+        return Err(outer_error(McpAppsErrorKind::CapabilityDisabled));
+    }
+    let relay = relay.ok_or_else(|| outer_error(McpAppsErrorKind::CapabilityDisabled))?;
+    let request: McpAppInvokeRequest = decode(params)?;
+    validate_versions(&request.envelope_version, &request.apps_protocol_version)?;
+    if !gate.known {
+        return Err(outer_error(McpAppsErrorKind::InvalidSession));
+    }
+    if gate.prompt_in_flight {
+        return Err(outer_error(McpAppsErrorKind::PolicyDenied));
+    }
+    let cancellation = connection.cancellation();
+    let outcome = tokio::select! {
+        _ = cancellation.cancelled() => {
+            return Err(outer_error(McpAppsErrorKind::Cancelled));
+        }
+        result = relay.invoke_app(&request, cancellation.child_token()) => {
+            result.map_err(map_relay_error)?
+        }
+    };
+    if outcome.tool_call_id.trim().is_empty() {
+        return Err(outer_error(McpAppsErrorKind::UpstreamProtocolError));
+    }
+    let updates = invoke_session_updates(&outcome);
+    let response = McpAppInvokeResponse {
+        envelope_version: MCP_APPS_ENVELOPE_VERSION.into(),
+        apps_protocol_version: MCP_APPS_PROTOCOL_VERSION.into(),
+        mcp_protocol_version: outcome.mcp_protocol_version,
+        server_id: request.server_id,
+        tool_call_id: outcome.tool_call_id,
+    };
+    Ok(InvokeHostResult {
+        value: serialize(response)?,
+        session_id: request.owner_session_id,
+        updates,
+    })
+}
+
+fn invoke_session_updates(
+    outcome: &peri_acp_types::mcp_apps::McpAppInvokeOutcome,
+) -> Vec<SessionUpdate> {
+    let message_id = MessageId::new();
+    let start = ExecutorEvent::ToolStart {
+        message_id,
+        tool_call_id: outcome.tool_call_id.clone(),
+        name: outcome.effective_tool_name.clone(),
+        input: Value::Object(outcome.arguments.clone()),
+        source_agent_id: None,
+    };
+    let end = ExecutorEvent::ToolEnd {
+        message_id,
+        tool_call_id: outcome.tool_call_id.clone(),
+        name: outcome.effective_tool_name.clone(),
+        output: outcome.output.clone(),
+        is_error: false,
+        source_agent_id: None,
+    };
+    [&start, &end]
+        .into_iter()
+        .flat_map(|event| map_event(event, 0, &PeriCaps::default()))
+        .flat_map(|mapped| mapped.updates)
+        .collect()
 }
 
 async fn handle_open(
