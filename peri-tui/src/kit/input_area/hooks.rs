@@ -20,8 +20,14 @@ impl Hook for CjkGhostFix {
         let right = area.right();
         let bottom = area.bottom();
         for y in area.y..bottom {
+            let border_row = area.x < right && buf[(area.x, y)].symbol() == "─";
             let mut x = area.x;
             while x < right {
+                // 透明边线覆盖旧中文标题时，重绘实线格子以清除终端尾列残留。
+                // 只改变 diff 策略，保留原有前景、背景和标题样式。
+                if border_row && buf[(x, y)].symbol() == "─" {
+                    buf[(x, y)].diff_option = CellDiffOption::AlwaysUpdate;
+                }
                 let w = {
                     let symbol = buf[(x, y)].symbol();
                     if symbol.is_empty() {

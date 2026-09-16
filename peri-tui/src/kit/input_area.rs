@@ -917,19 +917,16 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         ""
     };
 
-    // 通过 widget 直接保留显式背景。Text 会用组件主题替换 Paragraph 的 style，
-    // 丢失背景后，队列中文标题移开时输入框边线可能留下宽字符尾列的空隙。
-    let composer_paragraph = Paragraph::new(composer_lines)
-        .block(build_composer_block(
-            loading,
-            shown_session_title,
-            files_label.as_deref(),
-            footer_right,
-            props.session_title_visible,
-            props.max_lines.is_none(),
-            composer_area.map(|a| a.width).unwrap_or(80),
-        ))
-        .style(Style::default().bg(THEME_ATOM.state().read().semantic.surface.default));
+    // 保持 Text 的主题与透明背景；边线重绘由 CjkGhostFix 处理。
+    let composer_paragraph = Paragraph::new(composer_lines).block(build_composer_block(
+        loading,
+        shown_session_title,
+        files_label.as_deref(),
+        footer_right,
+        props.session_title_visible,
+        props.max_lines.is_none(),
+        composer_area.map(|a| a.width).unwrap_or(80),
+    ));
 
     element!(
         View(
@@ -1009,7 +1006,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         width: Constraint::Fill(1),
                         height: Constraint::Length(composer_height),
                     ) {
-                        widget(composer_paragraph)
+                        Text(text: composer_paragraph)
                     }
                 ).into_any()
             } else {
