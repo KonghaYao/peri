@@ -1,5 +1,6 @@
 use super::*;
 use peri_acp_types::tasks::{TaskManager as TaskManagerPort, TaskShutdownReport};
+#[cfg(unix)]
 use std::sync::Arc;
 
 #[tokio::test]
