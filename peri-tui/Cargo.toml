@@ -13,6 +13,7 @@ name = "peri"
 path = "src/main.rs"
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 serial_test.workspace = true
 tracing-subscriber.workspace = true

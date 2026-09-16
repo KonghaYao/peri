@@ -271,6 +271,7 @@ pub enum ThreadBrowserScope {
     #[default]
     Project,
     Workspace,
+    All,
 }
 
 pub static ACTIVE_EXECUTION_CWD: AtomStatic<Option<String>> = AtomStatic::new(|| None);
@@ -279,6 +280,7 @@ pub static THREAD_BROWSER_SCOPE: AtomStatic<ThreadBrowserScope> =
 pub static THREAD_LIST_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 pub static THREAD_LIST_HAS_MORE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static THREAD_LIST_PAGE_COUNT: AtomStatic<u32> = AtomStatic::new(|| 1);
+pub const THREAD_LIST_PAGE_SIZE: u32 = 50;
 
 pub static THREAD_LIST: AtomStatic<Vec<ThreadSummary>> = AtomStatic::new(Vec::new);
 pub static CRON_JOBS: AtomStatic<Vec<CronJobSummary>> = AtomStatic::new(Vec::new);

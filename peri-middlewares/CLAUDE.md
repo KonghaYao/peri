@@ -37,7 +37,7 @@
 - **MCP**：保留三层合并、内容去重和插件命名空间；配置来源或工具注册变更必须同时检查 pool、资源与 bridge 路径。init/OAuth/reconnect/subscription 任务由 deployment-held non-Clone `McpTaskOwner` 持有，并实现契约层 `McpTaskOwnerPort` 供 ACP boxed 注入；pool 只持 weak spawner。正常关闭顺序固定为 pool begin-close → owner abort/join → pool service close。Pool service close 由 pool-held 单一 transaction 持有，waiter 取消/并发/重试必须观察同一 `McpPoolShutdownReport`；cleanup timeout 保持 `Closing`，不得发布 `Closed`（ARC-HOST-SHUTDOWN-001）。
 - **Plugin manifest**：`commands` 条目兼容字符串路径与对象；字符串是相对插件根目录的路径。agents 未声明时仍保留约定目录回退。不要把路径条目当作名称。
 - **Skills**：扫描必须保持根优先级、递归边界、符号链接防环、叶子语义和同名覆盖规则；插件 skill root 通过既有扩展点传入。
-- **SubAgent**：同一会话的子 Agent 复用冻结的项目指引、skills 与 system prompt；同步子任务继承父取消，独立后台任务使用自身取消策略。事件必须按 `source_agent_id` 归属，新增事件同时检查父/子边界、完成和取消路径。
+- **SubAgent**：同一会话的子 Agent 复用冻结的项目指引、skills 与 system prompt；同步子任务继承父取消，独立后台任务使用自身取消策略。`Agent(resume_thread_id, prompt)` 优先向当前会话的 live 后台执行投递 Info（非空 prompt），返回 `action: send / status: queued`；无 live 接收者且磁盘仍 active 时拒绝，非 active 才恢复并返回 `action: resume`。Info 不中断或唤醒模型，queued 不代表已读。事件必须按 `source_agent_id` 归属，新增事件同时检查父/子边界、完成和取消路径。
 - **HITL**：审批以解析后的 effective tool name 为准，包装、搜索或代理工具不得绕过审批；权限模式与 broker 的选择必须保持一致。
 - **工具可见性**：direct/deferred 语义由工具声明和工具搜索路径共同保证，包装层不得改变其可见性。
 

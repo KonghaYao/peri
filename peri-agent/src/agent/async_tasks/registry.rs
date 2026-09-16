@@ -8,6 +8,8 @@ use tracing::warn;
 
 use crate::agent::events::BackgroundTaskResult;
 
+use super::agent_inbox::{BackgroundAgentInbox, QueuedSubagentMessage, SubagentMessageError};
+
 /// bg agent 取消的优雅退出窗口（秒）：cancel() 先 `token.cancel()` 让任务响应
 /// 取消链走完整收尾；超过该窗口任务仍未结束才 abort 兜底。
 const CANCEL_GRACE_SECS: u64 = 3;
@@ -78,6 +80,8 @@ pub struct BackgroundTask {
     pub pid: Option<u32>,
     /// 输出预览（completed 时写入，最多 500 字符）
     pub output_preview: Option<String>,
+    /// Present only for live background sub-agents; revoked before terminal events.
+    pub agent_inbox: Option<Arc<BackgroundAgentInbox>>,
 }
 
 /// 后台任务状态
@@ -166,6 +170,32 @@ impl BackgroundTaskRegistry {
             .count()
     }
 
+    pub(super) fn send_subagent_message(
+        &self,
+        thread_id: &str,
+        prompt: Option<&str>,
+    ) -> Result<Option<QueuedSubagentMessage>, SubagentMessageError> {
+        let _admission = self
+            .scope
+            .admit()
+            .map_err(|_| SubagentMessageError::Closed)?;
+        let tasks = self.tasks.lock();
+        let target = tasks.values().find_map(|task| {
+            if task.kind != BgTaskKind::Agent
+                || !matches!(task.status, BackgroundTaskStatus::Running)
+            {
+                return None;
+            }
+            task.agent_inbox
+                .as_ref()
+                .filter(|inbox| inbox.thread_id == thread_id)
+                .map(|inbox| (task, inbox))
+        });
+        target
+            .map(|(task, inbox)| inbox.send(&task.id, prompt))
+            .transpose()
+    }
+
     /// 按类型注册新任务（独立上限）
     pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
         let _admission = self
@@ -248,6 +278,9 @@ impl BackgroundTaskRegistry {
         let kind = tasks.get(task_id).map(|task| task.kind);
         let existed = tasks.contains_key(task_id);
         if let Some(task) = tasks.get_mut(task_id) {
+            if let Some(inbox) = &task.agent_inbox {
+                inbox.close();
+            }
             task.status = if result.success {
                 BackgroundTaskStatus::Completed
             } else {
@@ -328,6 +361,9 @@ impl BackgroundTaskRegistry {
             ));
         }
         if let Some(task) = tasks.remove(task_id) {
+            if let Some(inbox) = &task.agent_inbox {
+                inbox.close();
+            }
             match task.cancel_handle {
                 BgCancelHandle::Abort(mut handle) => {
                     // S3.2：先触发工具层取消链——任务在下一个响应 cancel 的 await 点

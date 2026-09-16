@@ -29,7 +29,7 @@ use crate::acp_client::AcpTuiClient;
 use crate::app::service_registry::{ProcessResourceMonitor, SharedPeriConfig};
 use crate::kit::atoms::{
     ACTIVE_EXECUTION_CWD, THREAD_BROWSER_SCOPE, THREAD_LIST_ERROR, THREAD_LIST_HAS_MORE,
-    THREAD_LIST_PAGE_COUNT, ThreadBrowserScope,
+    THREAD_LIST_PAGE_COUNT, THREAD_LIST_PAGE_SIZE, ThreadBrowserScope,
 };
 use crate::kit::atoms::{
     ACTIVE_SESSION_ID, CRON_JOBS, CURRENT_SESSION_TITLE, CronJobSummary, FILE_LIST, HOOK_LIST,
@@ -68,33 +68,64 @@ pub struct SnapshotSource {
 
 /// 启动 service snapshot 后台任务。
 ///
-/// 默认 2 秒一拍：CPU/MEM 采样本身已是 2s 节流，更短间隔无收益；更长间隔会让
-/// 面板（如 MCP/Cron）数据陈旧。返回 JoinHandle，调用方可丢弃（任务自管生命周期）。
+/// 每 2 秒轮询，并在 client 发布执行目录（会话 new/load 完成）时立即刷新。
+/// CPU/MEM 仍由监控器保持 2s 节流；采样期间的会话变化会触发后续重采。
+/// 返回 JoinHandle，调用方可丢弃（任务自管生命周期）。
 pub fn spawn_service_snapshot(
     src: SnapshotSource,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
-        let mut slow_refresh = SlowSnapshotRefresh::default();
-        // 起始 tick 立即触发一次（首次 interval.tick() 立即返回）——让 UI 启动后
-        // 立即拿到首帧服务快照，而非 2s 后才出现数据。
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tokio::spawn(run_service_snapshot(
+        src,
+        shutdown,
+        SlowSnapshotRefresh::default(),
+    ))
+}
 
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => {
-                    debug!("service_snapshot: shutdown signal received, exiting");
-                    break;
+async fn run_service_snapshot(
+    src: SnapshotSource,
+    shutdown: CancellationToken,
+    mut slow_refresh: SlowSnapshotRefresh,
+) {
+    let mut execution_cwd = src
+        .client
+        .as_ref()
+        .map(AcpTuiClient::subscribe_execution_cwd);
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    // 起始 tick 立即触发一次（首次 interval.tick() 立即返回）——让 UI 启动后
+    // 立即拿到首帧服务快照，而非 2s 后才出现数据。
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                debug!("service_snapshot: shutdown signal received, exiting");
+                break;
+            }
+            Ok(()) = async {
+                match execution_cwd.as_mut() {
+                    Some(changes) => changes.changed().await,
+                    None => std::future::pending().await,
                 }
-                _ = interval.tick() => {
-                    if let Err(e) = tick_once(&src, &mut slow_refresh).await {
-                        warn!(error = %e, "service_snapshot: tick failed");
-                    }
+            } => {}
+            _ = interval.tick() => {}
+        }
+        // Coalesce changes observed before sampling. A commit during the
+        // sample stays unseen and wakes a fresh sample if this one is stale.
+        if let Some(changes) = execution_cwd.as_mut() {
+            changes.borrow_and_update();
+        }
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+            result = tick_once(&src, &mut slow_refresh) => {
+                if let Err(e) = result {
+                    warn!(error = %e, "service_snapshot: tick failed");
                 }
             }
         }
-    })
+    }
 }
 
 struct SlowSnapshotRefresh {
@@ -364,7 +395,7 @@ async fn refresh_threads(
     client: &AcpTuiClient,
     slow: &mut SlowSnapshotRefresh,
 ) -> Result<(Vec<ThreadSummary>, bool), peri_acp::transport::types::AcpError> {
-    if slow.list_workspace.is_none() {
+    if slow.list_scope != ThreadBrowserScope::All && slow.list_workspace.is_none() {
         slow.list_workspace = Some(
             client
                 .session_context(None, Some(&slow.list_cwd))
@@ -372,10 +403,20 @@ async fn refresh_threads(
                 .workspace,
         );
     }
-    let workspace = slow.list_workspace.as_ref().expect("resolved above");
     let scope = match slow.list_scope {
-        ThreadBrowserScope::Project => ThreadScope::Project(workspace.project_id),
-        ThreadBrowserScope::Workspace => ThreadScope::Workspace(workspace.workspace_id),
+        ThreadBrowserScope::Project => ThreadScope::Project(
+            slow.list_workspace
+                .as_ref()
+                .expect("resolved above")
+                .project_id,
+        ),
+        ThreadBrowserScope::Workspace => ThreadScope::Workspace(
+            slow.list_workspace
+                .as_ref()
+                .expect("resolved above")
+                .workspace_id,
+        ),
+        ThreadBrowserScope::All => ThreadScope::All,
     };
     let mut cursor = None;
     let mut threads = Vec::new();
@@ -384,7 +425,7 @@ async fn refresh_threads(
             .list_scoped_threads(&ScopedThreadQuery {
                 scope: scope.clone(),
                 cursor,
-                limit: 50,
+                limit: THREAD_LIST_PAGE_SIZE,
             })
             .await?;
         threads.extend(page.entries.into_iter().map(|entry| ThreadSummary {

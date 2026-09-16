@@ -223,6 +223,18 @@ pub trait ThreadStore: Send + Sync {
         Ok(None)
     }
 
+    /// Adopt an unbound root using its unchanged saved cwd and a validated workspace.
+    /// Binding and the missing frozen snapshot commit atomically; existing values never change.
+    async fn adopt_legacy_thread(
+        &self,
+        _id: &ThreadId,
+        _saved_cwd: &str,
+        _workspace: &crate::workspace::ResolvedWorkspace,
+        _frozen_snapshot: &str,
+    ) -> Result<()> {
+        Err(crate::workspace::WorkspaceError::Unsupported.into())
+    }
+
     async fn validate_session_binding(
         &self,
         _id: &ThreadId,

@@ -108,7 +108,7 @@ pub struct AcpTuiClient {
     session_load_reservations: Arc<SessionLoadReservationState>,
     user_input_queue: Arc<std::sync::atomic::AtomicBool>,
     session_workspace: Arc<std::sync::atomic::AtomicBool>,
-    execution_cwd: Arc<Mutex<Option<String>>>,
+    execution_cwd: watch::Sender<Option<String>>,
     restore_error: Arc<Mutex<Option<String>>>,
     #[cfg(test)]
     transition_commit_hook:
@@ -182,7 +182,7 @@ impl AcpTuiClient {
             }),
             user_input_queue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_workspace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            execution_cwd: Arc::new(Mutex::new(None)),
+            execution_cwd: watch::channel(None).0,
             restore_error: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             transition_commit_hook: Arc::new(Mutex::new(None)),

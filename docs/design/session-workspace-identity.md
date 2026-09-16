@@ -274,10 +274,29 @@ schema 版本记录在 `PRAGMA user_version`，当前为 `3`，不另建数据�
 binding `revision` 列，保留其余绑定与执行状态，最后提交版本号。并发开库由
 schema OS 锁序列化；升级失败回滚整次 DDL。
 
-已有会话、消息、配置和 frozen / inherited / cached context 列值保持原样，不回填
-binding，不根据历史 cwd 猜测 Project 或 Workspace。旧历史仍可通过只读 metadata
-等历史读取入口访问；执行列表只查询已绑定会话，旧会话 load / resume / fork
-因 `BindingMissing` 拒绝执行。新会话在同一个库中强制创建 binding。
+开库时已有会话、消息、配置和 frozen / inherited / cached context 列值保持原样，
+不批量扫描目录或回填 binding。列表保留未绑定历史，`ScopedThreadEntry.binding`
+与 `workspace_root` 同时为空，`effective_cwd` 是保存路径，只用于展示。Project /
+Workspace 以已登记 root 的目录边界关联旧 cwd，ExactDirectory 精确匹配；比较兼容
+Windows 普通/verbatim/UNC 路径与 macOS 系统 `/private` 路径别名。这种展示
+关联不证明历史 Git 身份。All 包含无法关联或目录已失效的历史，分页对新旧记录统一
+排序。TUI 可切换全部历史，并经 `peri/session_history` 只读预览，不切换当前执行会话。
+
+显式 load / resume / fork 可接纳未绑定根会话：从保存的绝对 `ThreadMeta.cwd`
+发现并验证当前工作区，请求 cwd 仍只作期望校验；不使用当前终端目录兜底。
+`adopt_legacy_thread` 在写事务中重读 cwd、根关系与绑定，验证解析结果仍有效，
+原子插入 binding 并只在 frozen 缺失时保存兼容快照。缺失快照的配置、语言、
+MetaHarness 与插件目录均从保存 cwd 发现，不沿用启动项目，也不提前装配执行资源。
+已有快照先校验并保持原样，
+并发竞争复用赢家，失败或中断不得只提交其中一项。接纳后恢复继续遵守原有 lease、
+dirty 和目录身份校验；已绑定会话缺失快照不再被视为 legacy。没有 binding 却已有
+execution_runs 的记录拒绝接纳，避免把绑定损坏当成升级。此流程同样适用于已经由
+3.15.0 升级为 schema 3、仍未绑定的旧行，无需再次升级 schema。
+
+旧数据未保存目录对象身份，不能追溯证明当前同名目录就是历史实例；接纳以保存 cwd
+和当前可验证身份为依据，已登记身份冲突继续拒绝。缺目录或非绝对 cwd 保留只读历史。
+旧 child 不独立接纳或取得根 lease；其写入沿持久化父链要求接纳后的根 owner。
+新会话在同一个库中强制创建 binding。
 
 未知 schema 或未来版本在配置 WAL、DDL 或业务写入前返回
 `UnsupportedDatabaseSchema`。升级前需停止旧版 Peri 进程，升级后由支持 binding

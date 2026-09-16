@@ -7,6 +7,7 @@ use serial_test::serial;
 
 #[test]
 fn test_permission_mode_display() {
+    assert_eq!(permission_mode_display(""), "Initializing…");
     assert_eq!(permission_mode_display("default"), "Don't Ask");
     assert_eq!(permission_mode_display("accept-edit"), "Accept Edit");
     assert_eq!(permission_mode_display("auto-mode"), "Auto Mode");

@@ -42,6 +42,55 @@ pub(crate) struct WorkspaceAssembly {
     pub(crate) mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
 }
 
+/// Discover frozen inputs for the saved workspace without starting MCP, hooks or tasks.
+/// Plugin discovery follows normal session assembly (including its manifest cache repair).
+pub(crate) fn build_legacy_frozen_data(
+    host: &AcpServerConfig,
+    cwd: &str,
+) -> anyhow::Result<crate::session::executor::FrozenSessionData> {
+    let Some(source) = host.workspace_assembly.as_ref() else {
+        return Ok(host.session_manager.build_frozen_data(
+            cwd,
+            &host.plugin_skill_roots,
+            &host.plugin_agent_dirs,
+        ));
+    };
+    let config = if std::fs::canonicalize(&source.startup_cwd).ok().as_deref()
+        == Some(std::path::Path::new(cwd))
+    {
+        host.peri_config.read().clone()
+    } else {
+        crate::provider::ConfigSource::load_at(
+            std::path::Path::new(cwd),
+            host.config_source.global_path().to_owned(),
+        )?
+        .loaded_merged()
+    };
+    let plugins = if source.bare {
+        None
+    } else {
+        let claude_dir = dirs_next::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".claude");
+        Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
+            &claude_dir,
+            Some(std::path::Path::new(cwd)),
+        ))
+    };
+    Ok(host.session_manager.build_frozen_data_with_config(
+        &config,
+        cwd,
+        plugins
+            .as_ref()
+            .map(|plugins| plugins.all_skill_roots.as_slice())
+            .unwrap_or_default(),
+        plugins
+            .as_ref()
+            .map(|plugins| plugins.all_agent_dirs.as_slice())
+            .unwrap_or_default(),
+    ))
+}
+
 /// Bind session execution identity before static discovery or dynamic load can use the pool.
 /// A host-only pool stays unbound; its dynamic connector must reject implicit execution.
 fn pending_mcp_pool(

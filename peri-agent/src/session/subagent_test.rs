@@ -1800,6 +1800,7 @@ async fn test_resume_subagent_bg_register_cap_rolls_back() {
                 cancel_token: None,
                 pid: None,
                 output_preview: None,
+                agent_inbox: None,
             })
             .expect("占位任务注册应成功");
     }

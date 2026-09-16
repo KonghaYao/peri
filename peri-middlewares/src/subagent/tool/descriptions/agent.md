@@ -40,9 +40,10 @@ Background execution (run_in_background: true):
 - The main agent will be notified when the task completes via a system message.
 - **Only use when you genuinely need to continue working while the sub-agent runs** (e.g., offloading a long-running code review while you proceed with other edits). For most cases, run sub-agents synchronously to integrate their results immediately.
 
-Resume execution (resume_thread_id):
-- Resume an interrupted sub-agent from its persisted thread: the execution state (transcript) is replayed from disk and execution continues — **no new sub-agent is created**
-- The thread must not be active: interrupted or failed threads can be resumed; threads left active by a crash require manual handling
-- Takes priority over `subagent_type` and `fork`: when `resume_thread_id` is provided, those fields are ignored (no error); `prompt` is optional — when omitted, the sub-agent implicitly continues where it left off, and you may also provide new instructions to adjust direction
-- Can be combined with `run_in_background: true` (the resumed execution follows that mode)
+Send or resume (resume_thread_id):
+- Use the existing `resume_thread_id` and `prompt` fields to continue interacting with a sub-agent. The target's current execution state determines the behavior; read the returned `action` to distinguish sending from resuming.
+- **Active background sub-agent in this session:** a non-empty `prompt` is queued as Info and the tool immediately returns `action: send`, `status: queued`, and the target IDs. It does not create or resume execution, interrupt an in-flight model/tool call, or trigger an extra model call. Info enters the transcript at the next Receive; the agent may finish before the model sees it. Queued does not mean read or durably saved. `run_in_background` is ignored for sending.
+- **Non-active thread:** the persisted transcript is replayed and execution resumes, returning `action: resume`. `prompt` is optional; omitting it implicitly continues the task. `run_in_background: true` selects background execution for this resume.
+- Active threads without a live background receiver in this session (including crash leftovers or another session's tasks) return an error. They are not silently resumed or recreated.
+- Both paths take priority over `subagent_type` and `fork`; those fields are ignored. Sending requires no additional tool or parameters.
 - **Common failures**: (1) passing `subagent_type` or `fork` together with `resume_thread_id` — harmless, they are ignored; resume always wins. (2) `thread not found` / `invalid thread id` → the id is stale or malformed; use the `child_thread_id` exactly as returned in the interrupted/error/bg notification text.

@@ -357,9 +357,9 @@ async fn test_worktree_binding_keeps_wire_revision_without_persisted_column() {
         .unwrap();
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].thread.id, id);
-    assert_eq!(page.entries[0].binding, expected);
+    assert_eq!(page.entries[0].binding, Some(expected));
     assert_eq!(page.entries[0].effective_cwd, workspace.cwd);
-    assert_eq!(page.entries[0].workspace_root, workspace.root);
+    assert_eq!(page.entries[0].workspace_root, Some(workspace.root));
     store.close().await;
 }
 

@@ -199,6 +199,70 @@ impl SqliteThreadStore {
         row.map(decode_binding).transpose()
     }
 
+    pub(super) async fn adopt_legacy_thread_impl(
+        &self,
+        id: &ThreadId,
+        saved_cwd: &str,
+        workspace: &ResolvedWorkspace,
+        frozen_snapshot: &str,
+    ) -> Result<()> {
+        if self.read_only {
+            return Err(WorkspaceError::ExecutionLeaseRequired.into());
+        }
+        if !Path::new(saved_cwd).is_absolute() {
+            return Err(WorkspaceError::Unavailable.into());
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let (cwd, parent): (String, Option<String>) =
+            sqlx::query_as("SELECT cwd, parent_thread_id FROM threads WHERE id = ?")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if cwd != saved_cwd || parent.is_some() {
+            return Err(WorkspaceError::ExecutionBindingMismatch.into());
+        }
+        let canonical = tokio::fs::canonicalize(&cwd)
+            .await
+            .map_err(|_| WorkspaceError::Unavailable)?;
+        if canonical != workspace.cwd {
+            return Err(WorkspaceError::ExecutionBindingMismatch.into());
+        }
+        Self::validate_resolved_on(&mut tx, workspace).await?;
+        let existing: Option<BindingRow> = sqlx::query_as("SELECT schema_version, project_id, workspace_id, relative_cwd FROM session_bindings WHERE thread_id = ?")
+            .bind(id).fetch_optional(&mut *tx).await?;
+        if let Some(row) = existing {
+            // A concurrent restorer may have won. Never overwrite or repair its binding.
+            decode_binding(row)?;
+            if Self::validate_session_binding_on(&mut tx, id).await? != *workspace {
+                return Err(WorkspaceError::ExecutionBindingMismatch.into());
+            }
+        } else {
+            let run: Option<(i64,)> =
+                sqlx::query_as("SELECT generation FROM execution_runs WHERE thread_id = ?")
+                    .bind(id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if run.is_some() {
+                // Losing a native binding must not become a way around dirty recovery.
+                return Err(WorkspaceError::InvalidBinding.into());
+            }
+            sqlx::query(
+                "UPDATE threads SET frozen_context = COALESCE(frozen_context, ?) WHERE id = ?",
+            )
+            .bind(frozen_snapshot)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd) VALUES (?, ?, ?, ?, ?)")
+                .bind(id).bind(i64::from(SESSION_BINDING_VERSION))
+                .bind(workspace.project_id.to_string()).bind(workspace.workspace_id.to_string())
+                .bind(discovery::path_text(&workspace.relative_cwd)?)
+                .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub(super) async fn validate_session_binding_impl(
         &self,
         id: &ThreadId,
@@ -238,25 +302,40 @@ impl SqliteThreadStore {
     ) -> Result<ScopedThreadPage> {
         let limit = query.limit.clamp(1, 200) as usize;
         let mut sql: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT t.id, t.title, t.message_count, t.updated_at,
-            b.schema_version, b.project_id, b.workspace_id, b.relative_cwd, w.root
-            FROM threads t JOIN session_bindings b ON b.thread_id = t.id JOIN workspaces w ON w.id = b.workspace_id
+            b.schema_version, b.project_id, b.workspace_id, b.relative_cwd, w.root, t.cwd, b.thread_id
+            FROM threads t LEFT JOIN session_bindings b ON b.thread_id = t.id LEFT JOIN workspaces w ON w.id = b.workspace_id
             WHERE t.hidden = 0 AND t.message_count > 0");
         match &query.scope {
             ThreadScope::Project(id) => {
-                sql.push(" AND b.project_id = ").push_bind(id.to_string());
+                sql.push(" AND (b.project_id = ").push_bind(id.to_string());
+                push_legacy_scope(&mut sql, "project_id", id.to_string());
             }
             ThreadScope::Workspace(id) => {
-                sql.push(" AND b.workspace_id = ").push_bind(id.to_string());
+                sql.push(" AND (b.workspace_id = ")
+                    .push_bind(id.to_string());
+                push_legacy_scope(&mut sql, "id", id.to_string());
             }
             ThreadScope::ExactDirectory {
                 workspace_id,
                 relative_cwd,
             } => {
                 validate_relative(relative_cwd)?;
-                sql.push(" AND b.workspace_id = ")
+                sql.push(" AND ((b.workspace_id = ")
                     .push_bind(workspace_id.to_string())
                     .push(" AND b.relative_cwd = ")
-                    .push_bind(discovery::path_text(relative_cwd)?);
+                    .push_bind(discovery::path_text(relative_cwd)?)
+                    .push(") OR (b.thread_id IS NULL AND EXISTS (SELECT 1 FROM workspaces legacy WHERE legacy.id = ")
+                    .push_bind(workspace_id.to_string())
+                    .push(" AND ").push(legacy_path_sql("t.cwd"))
+                    .push(" = ").push(legacy_path_sql("legacy.root"));
+                if !relative_cwd.as_os_str().is_empty() {
+                    sql.push(" || '/' || ").push_bind(if cfg!(windows) {
+                        discovery::path_text(relative_cwd)?.replace('\\', "/")
+                    } else {
+                        discovery::path_text(relative_cwd)?.to_owned()
+                    });
+                }
+                sql.push(")))");
             }
             ThreadScope::All => {}
         }
@@ -272,14 +351,20 @@ impl SqliteThreadStore {
         let rows = sql.build().fetch_all(&self.pool).await?;
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
-            let binding = decode_binding((
-                row.try_get(4)?,
-                row.try_get(5)?,
-                row.try_get(6)?,
-                row.try_get(7)?,
-            ))?;
-            let root = PathBuf::from(row.try_get::<String, _>(8)?);
-            let effective_cwd = root.join(&binding.cwd_relative_to_workspace);
+            let (binding, root, effective_cwd) = if row.try_get::<Option<String>, _>(10)?.is_some()
+            {
+                let binding = decode_binding((
+                    row.try_get(4)?,
+                    row.try_get(5)?,
+                    row.try_get(6)?,
+                    row.try_get(7)?,
+                ))?;
+                let root = PathBuf::from(row.try_get::<String, _>(8)?);
+                let cwd = root.join(&binding.cwd_relative_to_workspace);
+                (Some(binding), Some(root), cwd)
+            } else {
+                (None, None, PathBuf::from(row.try_get::<String, _>(9)?))
+            };
             let count: i64 = row.try_get(2)?;
             entries.push(ScopedThreadEntry {
                 thread: ThreadListEntry {
@@ -308,6 +393,61 @@ impl SqliteThreadStore {
             entries,
             next_cursor,
         })
+    }
+}
+
+/// Legacy paths are display associations only. EXISTS avoids duplicates for overlapping roots;
+/// substring equality treats SQL wildcard characters as ordinary path characters.
+fn push_legacy_scope(sql: &mut QueryBuilder<Sqlite>, column: &str, id: String) {
+    let cwd = legacy_path_sql("t.cwd");
+    let root = legacy_path_sql("legacy.root");
+    sql.push(" OR (b.thread_id IS NULL AND EXISTS (SELECT 1 FROM workspaces legacy WHERE legacy.")
+        .push(column)
+        .push(" = ")
+        .push_bind(id)
+        .push(format!(
+            " AND ({cwd} = {root} OR substr({cwd}, 1, length({root}) + 1) = {root} || '/'))))"
+        ));
+}
+
+/// Only a display comparison: never use this normalization as execution identity.
+fn legacy_path_sql(column: &str) -> String {
+    #[cfg(windows)]
+    let column = windows_legacy_path_sql(column);
+    #[cfg(target_os = "macos")]
+    let column = format!(
+        "CASE WHEN {column} IN ('/private/var', '/private/tmp', '/private/etc') OR substr({column}, 1, 13) IN ('/private/var/', '/private/tmp/', '/private/etc/') THEN substr({column}, 9) ELSE {column} END"
+    );
+    format!("rtrim({column}, '/')")
+}
+
+#[cfg(any(windows, test))]
+fn windows_legacy_path_sql(column: &str) -> String {
+    let path = format!("replace({column}, char(92), '/')");
+    format!("(CASE WHEN substr({path}, 1, 8) = '//?/UNC/' THEN '//' || substr({path}, 9) WHEN substr({path}, 1, 4) = '//?/' THEN substr({path}, 5) ELSE {path} END) COLLATE NOCASE")
+}
+
+#[tokio::test]
+async fn legacy_windows_path_comparison_accepts_verbatim_drive_and_unc() {
+    use sqlx::Connection;
+    let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+    let left = windows_legacy_path_sql("?1");
+    let right = windows_legacy_path_sql("?2");
+    let sql = format!("SELECT rtrim({left}, '/') = rtrim({right}, '/')");
+    for (saved, registered, matches) in [
+        (r"C:\repo", r"\\?\C:\repo", true),
+        ("c:/repo/", r"\\?\C:\repo", true),
+        (r"\\server\share\repo", r"\\?\UNC\server\share\repo", true),
+        (r"C:\repo-other", r"\\?\C:\repo", false),
+    ] {
+        let (equal,): (bool,) = QueryBuilder::<Sqlite>::new(&sql)
+            .build_query_as()
+            .bind(saved)
+            .bind(registered)
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(equal, matches, "{saved} vs {registered}");
     }
 }
 

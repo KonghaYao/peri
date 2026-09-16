@@ -76,6 +76,7 @@ lang-unsupported = 不支持的语言: { $lang }
 # ---- Status Bar ----
 
 statusbar-permission-dont-ask = Don't Ask
+statusbar-initializing = 初始化中…
 statusbar-permission-accept-edit = Accept Edit
 statusbar-permission-auto = Auto Mode
 statusbar-permission-bypass = Bypass
@@ -559,8 +560,8 @@ thread-browser-time-just-now = 刚刚
 thread-browser-time-minutes = { $count } 分钟前
 thread-browser-time-hours = { $count } 小时前
 thread-browser-time-days = { $count } 天前
-panel-threads-header-hint =   Enter::打开 · Esc::关闭
-panel-threads-nav-hint =   ↑/↓::选择  Enter::打开  Tab::范围  d::删除  Esc::关闭
+panel-threads-header-hint =   Enter::继续 · v::查看历史 · Esc::关闭
+panel-threads-nav-hint =   ↑/↓::选择  Enter::继续  v::查看  Tab::范围  d::删除  Esc::关闭
 panel-threads-confirm-hint =   Enter::confirm  Esc::cancel
 
 # ---- Rewind 弹窗 ----
@@ -1168,8 +1169,22 @@ steer-input-uncertain = 暂未收到输入回执，正在核对并重试。
 thread-browser-project = 项目
 thread-browser-workspace = 工作区
 thread-browser-scope-count =   { $scope } · { $count } 个会话
+thread-browser-scope-loaded =   { $scope } · 已加载 { $count } 个会话 · 还有更多
 thread-browser-messages = { $count } 条消息
-panel-threads-more-hint =   ↑/↓::选择  Enter::打开  Tab::范围  n::更多  d::删除
+panel-threads-more-hint =   ↑/↓::浏览（到末尾自动加载）  PgUp/PgDn::翻页  Tab::范围  n::更多  d::删除
+thread-browser-all = 全部历史
+thread-browser-selected = 选中：{ $title }
+thread-browser-selected-path = 路径：{ $path } · ID：{ $id }
+thread-browser-actions = ↑↓ 选择  Enter 继续  v 查看  Tab 范围  d 删除  Esc 关闭
+thread-browser-actions-compact = Enter 继续  v 查看  Tab 范围  d 删除  Esc 关闭
+thread-browser-preview-actions = v 返回  ↑↓ 滚动  PgUp/PgDn 翻页  Esc 关闭
+thread-history-preview-hint = 只读历史 · ↑/↓::滚动 · v::返回 · Esc::关闭
+thread-history-loading = 正在加载历史…
+thread-history-disconnected = 未连接，无法读取历史。
+thread-history-user = 用户
+thread-history-assistant = 助手
+thread-history-system = 系统上下文
+thread-history-tool = 工具结果
 session-restore-failed = 会话恢复失败：{ $error }。请重试或使用 /clear 创建会话。
 
 panel-host-settings = 宿主配置

@@ -29,6 +29,55 @@ fn client() -> (AcpTuiClient, MpscServerTransport) {
     (client, server)
 }
 
+#[tokio::test]
+async fn legacy_history_context_without_binding_can_restore_saved_directory() {
+    let (client, server) = client();
+    let loader = client.clone();
+    let load = tokio::spawn(async move { loader.load_session("legacy", "/startup", None).await });
+    let (id, _) = request(&server, "peri/session_context").await;
+    let mut legacy = context("/saved/project");
+    legacy["binding"] = Value::Null;
+    server.send_response(id, Ok(legacy)).await.unwrap();
+    let (id, params) = request(&server, "session/load").await;
+    assert_eq!(params["cwd"], "/saved/project");
+    server.send_response(id, Ok(json!({}))).await.unwrap();
+    assert_eq!(load.await.unwrap().unwrap(), "legacy");
+    assert_eq!(
+        client.current_execution_cwd().as_deref(),
+        Some("/saved/project")
+    );
+}
+
+#[tokio::test]
+async fn legacy_history_preview_does_not_switch_or_prepare_execution() {
+    use peri_acp_types::{
+        messages::BaseMessage,
+        store::{PersistedPayload, serialize_persisted_payload},
+    };
+    let (client, server) = client();
+    client.lifecycle.force_stable("active", false);
+    client.project_execution_cwd(Some("/active".into()));
+    let reader = client.clone();
+    let read = tokio::spawn(async move { reader.read_session_history("legacy").await });
+    let (id, params) = request(&server, "peri/session_history").await;
+    assert_eq!(params, json!({"sessionId":"legacy"}));
+    let message = serialize_persisted_payload(&PersistedPayload::Message(BaseMessage::human(
+        "saved message",
+    )))
+    .unwrap();
+    server.send_response(id, Ok(json!({"sessionId":"legacy","binding":null,"payloads":[serde_json::from_str::<Value>(&message).unwrap()]}))).await.unwrap();
+    assert_eq!(
+        read.await.unwrap().unwrap()[0]
+            .as_message()
+            .unwrap()
+            .content(),
+        "saved message"
+    );
+    assert_eq!(client.current_session_id().as_deref(), Some("active"));
+    assert_eq!(client.current_execution_cwd().as_deref(), Some("/active"));
+    assert!(client.check_restore_error().is_ok());
+}
+
 async fn request(server: &MpscServerTransport, expected: &str) -> (RequestId, Value) {
     let msg = tokio::time::timeout(Duration::from_secs(5), server.recv())
         .await
@@ -231,7 +280,7 @@ async fn unsupported_context_version_cannot_be_used_for_execution() {
             .unwrap()
             .unwrap_err()
             .to_string()
-            .contains("unsupported or missing")
+            .contains("unsupported session context version")
     );
 }
 

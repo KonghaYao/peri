@@ -12,7 +12,8 @@ use super::{
     SubagentStopV2Input,
 };
 use crate::agent::async_tasks::{
-    BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind, TaskManager,
+    BackgroundAgentInbox, BackgroundAgentInboxGuard, BackgroundTask, BackgroundTaskStatus,
+    BgCancelHandle, BgTaskKind, TaskManager,
 };
 use crate::agent::events::{AgentEventHandler, ExecutorEvent};
 use crate::agent::stages::{run_react_loop, LoopResult};
@@ -50,6 +51,12 @@ pub(super) async fn spawn_background_subagent(
     let task_manager =
         task_manager.ok_or("Background tasks not available: no task manager configured")?;
     let task_manager_spawn = Arc::clone(&task_manager);
+    let agent_inbox = BackgroundAgentInbox::new(
+        child_thread_id.clone(),
+        v2_ctx.session.queue().clone(),
+        cancel_token.clone(),
+    );
+    let inbox_guard = BackgroundAgentInboxGuard(Arc::clone(&agent_inbox));
 
     let prompt_summary: String = prompt.chars().take(100).collect();
 
@@ -94,6 +101,9 @@ pub(super) async fn spawn_background_subagent(
                 sender: bg_event_sender.clone(),
             }),
         };
+        // Declared after cleanup_guard so panic/abort revokes admission before
+        // cleanup publishes deregistration or SubagentStop (reverse drop order).
+        let inbox_guard = inbox_guard;
 
         // v1 协议化发射目标（bg 泵）：BG pump 独立于主 pump，主 turn 结束后仍存活。
         // 构造提前到 Started 直发之前（start 借用、stop 直发 clone、forwarder move）。
@@ -157,6 +167,8 @@ pub(super) async fn spawn_background_subagent(
         );
 
         let loop_result = run_react_loop(context, max_iterations).await;
+        // Stop accepting messages before any async terminal work or notifications.
+        drop(inbox_guard);
 
         // 补发 v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error。
         let stop_failure = match &loop_result {
@@ -341,6 +353,7 @@ pub(super) async fn spawn_background_subagent(
         cancel_token: Some(cancel_token.clone()),
         pid: None,
         output_preview: None,
+        agent_inbox: Some(agent_inbox),
     };
     if let Err(e) = task_manager.register_with_kind(bg_task) {
         // S3.1：注册失败（并发撞 kind 上限）——通知包装任务直接 return（不执行

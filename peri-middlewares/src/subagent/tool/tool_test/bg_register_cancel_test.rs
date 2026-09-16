@@ -20,6 +20,7 @@ fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::Backgrou
         cancel_token: None,
         pid: None,
         output_preview: None,
+        agent_inbox: None,
     }
 }
 

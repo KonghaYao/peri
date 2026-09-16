@@ -108,6 +108,7 @@ fn invoke_session_updates(
         name: outcome.effective_tool_name.clone(),
         output: outcome.output.clone(),
         is_error: false,
+        subagent_failure: None,
         source_agent_id: None,
     };
     [&start, &end]
