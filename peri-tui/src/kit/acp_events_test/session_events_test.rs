@@ -556,6 +556,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
 }
 
 #[test]
+#[serial]
 fn test_auto_compact_completed_injects_detailed_system_note() {
     let mut state = BridgeState {
         variant: 0,
@@ -602,6 +603,7 @@ fn test_auto_compact_completed_injects_detailed_system_note() {
 }
 
 #[test]
+#[serial]
 fn test_full_compact_completed_shows_unmeasured_token_saving() {
     let mut state = BridgeState {
         variant: 0,
@@ -644,6 +646,7 @@ fn test_full_compact_completed_shows_unmeasured_token_saving() {
 }
 
 #[test]
+#[serial]
 fn test_unknown_and_empty_compact_strategy_use_full_unmeasured_detail() {
     for strategy in ["unknown", ""] {
         let mut state = BridgeState {
