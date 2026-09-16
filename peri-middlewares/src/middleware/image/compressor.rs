@@ -1,6 +1,6 @@
 //! 图片压缩切面 —— 为后续实现预留接口，MVP 空管线。
 
-use std::error::Error;
+use std::{borrow::Cow, error::Error};
 
 /// 图片压缩器 trait
 ///
@@ -44,13 +44,20 @@ impl CompressorPipeline {
         self.compressors.push(compressor);
     }
 
-    /// 按序执行压缩链，任一失败则降级返回原始数据
-    pub fn run(&self, data: &[u8], media_type: &str) -> Vec<u8> {
-        let mut current = data.to_vec();
+    /// 按序执行压缩链，任一失败则降级返回原始数据。
+    ///
+    /// 空管线和失败回退借用 `data`；只有压缩器成功返回新字节时才拥有
+    /// 一份结果。
+    pub fn run<'a>(&self, data: &'a [u8], media_type: &str) -> Cow<'a, [u8]> {
+        if self.compressors.is_empty() {
+            return Cow::Borrowed(data);
+        }
+
+        let mut current = Cow::Borrowed(data);
         for c in &self.compressors {
-            match c.compress(&current, media_type) {
-                Ok(compressed) => current = compressed,
-                Err(_) => return data.to_vec(), // 降级：返回原始数据
+            match c.compress(current.as_ref(), media_type) {
+                Ok(compressed) => current = Cow::Owned(compressed),
+                Err(_) => return Cow::Borrowed(data), // 降级：返回原始数据
             }
         }
         current
@@ -67,3 +74,7 @@ impl Default for CompressorPipeline {
         Self::new()
     }
 }
+
+#[cfg(test)]
+#[path = "compressor_test.rs"]
+mod tests;

@@ -116,32 +116,24 @@ impl ImageMiddleware {
             return Ok(());
         }
 
-        // 在 blocking 线程中批量进行文件 I/O（读取 + MIME 检测）
-        let max_size = self.max_size;
-        let raw_results: Vec<Result<ImageFileData, String>> =
-            tokio::task::spawn_blocking(move || {
-                paths
-                    .iter()
-                    .map(|path| load_image_file(path, max_size))
-                    .collect()
-            })
-            .await
-            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                middleware: "ImageMiddleware".to_string(),
-                reason: format!("spawn_blocking 失败: {e}"),
-            })?;
-
-        // 在主线程中执行压缩管线 + base64 编码
-        let results: Vec<Result<ContentBlock, String>> = raw_results
-            .into_iter()
-            .map(|r| {
-                r.map(|file_data| {
-                    let processed = self.compressors.run(&file_data.data, file_data.media_type);
-                    let base64_data = base64_encode(&processed);
-                    ContentBlock::image_base64(file_data.media_type, base64_data)
-                })
-            })
-            .collect();
+        // Read one file at a time so raw file buffers do not remain live for the
+        // whole attachment batch. The blocking boundary also keeps filesystem
+        // I/O off the async runtime.
+        let mut results = Vec::with_capacity(paths.len());
+        for path in paths {
+            let max_size = self.max_size;
+            let raw_result = tokio::task::spawn_blocking(move || load_image_file(&path, max_size))
+                .await
+                .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+                    middleware: "ImageMiddleware".to_string(),
+                    reason: format!("spawn_blocking 失败: {e}"),
+                })?;
+            results.push(raw_result.map(|file_data| {
+                let processed = self.compressors.run(&file_data.data, file_data.media_type);
+                let base64_data = base64_encode(processed.as_ref());
+                ContentBlock::image_base64(file_data.media_type, base64_data)
+            }));
+        }
 
         // 只移除文本中的附件标记，保留输入原有的图片等内容块。
         let mut new_blocks: Vec<ContentBlock> = message

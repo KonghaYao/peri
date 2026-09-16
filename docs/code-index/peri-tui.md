@@ -55,7 +55,7 @@
 | 语义选区 | `message_area/selection.rs` | 拖拽选区与语义复制（`map_slice_to_semantic` :469，复制时剥视觉前缀） |
 | markdown 渲染 | `markdown/`（convert.rs / code_block.rs / table.rs / scan.rs） | 文本 → 带样式的行渲染；代码块、表格、扫描 |
 | subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`（:29）、`subagent_tool_line`（:92，固定 2 格缩进 `SUBAGENT_TOOL_INDENT` :22、label 无 bold）、`subagent_error_reason_line`（:168，错误不弱化） |
-| InputArea（输入区） | `input_area.rs` | 编辑、@mention、slash 补全、提交分发（`input_area/submit.rs::dispatch_submit_request` :21）；多行渲染按显示宽度 |
+| InputArea（输入区） | `input_area.rs` + `input_area/image.rs` | 编辑、@mention、slash 补全、提交分发（`input_area/submit.rs::dispatch_submit_request` :21）；图片粘贴移动 arboard owned RGBA 后校验像素长度并流式编码 PNG，避免整图复制；多行渲染按显示宽度 |
 | input_history（输入历史） | `input_history.rs` | `push_history`（:23）/`history_up`（:54）；持久化 `~/.peri/input-history.json`（唯一存储，`load_history` :119） |
 | StatusBar（状态栏） | `status_bar.rs` | `StatusBarProps`（:353）/`StatusBar`（:361）：Row1/Row2/NotifRow、模型点击区、权限模式显示 |
 | BgTaskArea（后台任务栏） | `bg_task_area.rs` | `BgTaskArea`（:46）：bg agent 运行中条目 + 动画 |

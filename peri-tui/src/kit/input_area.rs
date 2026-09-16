@@ -450,7 +450,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                                 .ok()
                                 .and_then(|mut cb2| cb2.get_image().ok())
                             {
-                                let img_bytes = image_bytes.to_vec();
+                                // arboard may already own the clipboard allocation.  Move it
+                                // out instead of cloning every RGBA byte before encoding.
+                                let img_bytes = image_bytes.into_owned();
                                 if !img_bytes.is_empty() {
                                     use std::hash::{DefaultHasher, Hash, Hasher};
                                     let mut hasher = DefaultHasher::new();
