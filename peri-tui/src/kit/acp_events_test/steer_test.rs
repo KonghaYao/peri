@@ -147,3 +147,58 @@ fn test_steer_stop_keeps_canonical_bubble_and_server_queue() {
         "停止应结束loading"
     );
 }
+
+/// [回归测试] 空闲提交跳过待发送区，canonical Delivered 仍生成且仅生成一个气泡。
+#[test]
+#[serial]
+fn test_steer_idle_input_goes_directly_to_chat_on_delivery() {
+    use crate::kit::steer_state::{SteerCommand, SteerCommandKind};
+    use peri_acp_types::session::UserInput;
+    let (mut state, _restore) = make_steer_bridge();
+    let epoch = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
+    let mut snapshot = STEERS
+        .state()
+        .read()
+        .snapshot(&state.active_session_id, epoch)
+        .unwrap()
+        .clone();
+    snapshot.revision += 1;
+    snapshot.items.clear();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::UserInputQueueChanged { snapshot },
+    );
+    STEERS.state().write().begin(SteerCommand {
+        session_id: state.active_session_id.clone(),
+        epoch,
+        command_id: "submit".into(),
+        generation: Some("g".into()),
+        kind: SteerCommandKind::Enqueue(UserInput {
+            input_id: "accepted".into(),
+            content: MessageContent::text("新的输入"),
+            original_draft: "新的输入".into(),
+        }),
+    });
+    assert!(
+        STEERS
+            .state()
+            .read()
+            .rows(&state.active_session_id)
+            .is_empty(),
+        "直接提交不显示队列行"
+    );
+    assert!(state.committed.is_empty(), "尚未确认不能伪造正式消息");
+    dispatch_and_notify(&mut state, &delivered());
+    dispatch_and_notify(&mut state, &delivered());
+    assert_eq!(state.committed.len(), 1);
+    assert!(
+        matches!(&state.committed[0], TuiRenderUnit::TuiUserBubble(bubble) if bubble.text == "新的输入")
+    );
+    assert!(
+        STEERS
+            .state()
+            .read()
+            .rows(&state.active_session_id)
+            .is_empty()
+    );
+}
