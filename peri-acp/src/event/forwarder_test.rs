@@ -98,6 +98,7 @@ async fn test_forwarder_branches_to_bridge_before_mapper() {
         name: "Read".to_string(),
         output: "内容".to_string(),
         is_error: false,
+        subagent_failure: None,
     });
 
     // ── observe 层：LlmCallStart / LlmCallEnd（StageStarted 为 tracer-only）───

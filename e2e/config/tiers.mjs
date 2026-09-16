@@ -38,7 +38,7 @@ export const TIERS = {
   l2: {
     id: "l2",
     label: "L2 发版全量",
-    description: "全部用例；parallel 3，retry 1；首轮最多 2 个 flake，最终须 28/28。",
+    description: "全部用例；parallel 3，retry 1；首轮最多 2 个 flake，最终须全部通过。",
     all: true,
     parallel: 3,
     retry: 1,

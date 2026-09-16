@@ -5,7 +5,7 @@ use ratatui_kit::ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -13,7 +13,8 @@ use unicode_width::UnicodeWidthStr;
 use super::{SteerItemState, SteerQueueAction, SteerQueueItem};
 use crate::kit::terminal_caps::SymbolSet;
 
-pub(super) const HEADER_ROWS: u16 = 2;
+/// 队列除可见条目外固定占用上边线和底部间隔各一行。
+pub(super) const CHROME_ROWS: u16 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Selection {
@@ -171,11 +172,11 @@ impl QueueView {
     }
 
     pub(super) fn layout(&self, area: Rect) -> QueueFrame {
-        if self.items.is_empty() || area.is_empty() || area.height < HEADER_ROWS {
+        if self.items.is_empty() || area.is_empty() || area.height < CHROME_ROWS {
             return QueueFrame::default();
         }
         let visible =
-            usize::from(area.height.saturating_sub(HEADER_ROWS)).min(if self.state.expanded {
+            usize::from(area.height.saturating_sub(CHROME_ROWS)).min(if self.state.expanded {
                 self.items.len()
             } else {
                 self.max_rows
@@ -210,7 +211,7 @@ impl QueueView {
             offset,
             ..QueueFrame::default()
         };
-        let header_y = area.y.saturating_add(1);
+        let header_y = area.y;
         let all_width =
             (self.symbols.send_all.width().saturating_add(2)).min(usize::from(area.width)) as u16;
         frame.controls.push(Control {
@@ -238,10 +239,7 @@ impl QueueView {
         let (send_width, edit_width) = self.action_widths();
         let actions_width = send_width.saturating_add(edit_width).saturating_add(1);
         for (row, item) in self.items.iter().skip(offset).take(visible).enumerate() {
-            let y = area
-                .y
-                .saturating_add(HEADER_ROWS)
-                .saturating_add(row as u16);
+            let y = area.y.saturating_add(1).saturating_add(row as u16);
             let row_area = Rect::new(area.x, y, area.width, 1);
             frame.rows.push((item.id.clone(), row_area));
             if area.width >= actions_width {
@@ -265,6 +263,7 @@ impl Widget for QueueView {
     fn render(self, area: Rect, buffer: &mut Buffer) {
         let frame = self.layout(area);
         let normal = Style::default().fg(self.semantic.text.secondary);
+        Clear.render(area, buffer);
         buffer.set_style(area, normal);
         if !frame.area.is_empty() {
             Block::default()
@@ -285,7 +284,7 @@ impl Widget for QueueView {
             .render(
                 Rect::new(
                     area.x.saturating_add(title_start),
-                    area.y.saturating_add(1),
+                    area.y,
                     all_start.saturating_sub(area.x).saturating_sub(title_start),
                     1,
                 ),

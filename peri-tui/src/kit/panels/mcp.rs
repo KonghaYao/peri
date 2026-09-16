@@ -529,8 +529,11 @@ fn close_panel() {
 fn start_oauth(server_name: String) {
     if let Some(client_handle) = ACP_CLIENT_HANDLE.get() {
         let client = client_handle.clone();
+        let Some(session_id) = client.current_session_id() else {
+            return;
+        };
         tokio::spawn(async move {
-            let params = serde_json::json!({ "server_name": server_name });
+            let params = serde_json::json!({ "server_name": server_name, "sessionId":session_id });
             if let Err(e) = client.send_raw_request("mcp/oauth_start", params).await {
                 tracing::warn!(error = %e, "mcp/oauth_start RPC failed");
             }

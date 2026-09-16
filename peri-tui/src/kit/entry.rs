@@ -169,7 +169,7 @@ pub async fn run_kit_fullscreen(
         }
     }
     // 2c. H1a: 把 SharedPermissionMode 句柄塞到全局 OnceLock，让 ConfigPanel
-    //     能切换 permission_mode。ServiceRegistry + ACP server 持同一 Arc。
+    //     提供无会话时的默认权限显示；当前会话权限经 ACP 读取和修改。
     let _ = atoms::PERMISSION_MODE_HANDLE.set(app.services.permission_mode.clone());
     // 2d. H1g: 把 CronScheduler 共享句柄塞到全局 OnceLock，让 CronPanel
     //     能直接 toggle/remove。service_snapshot 下次 tick 自动派生新列表。
@@ -189,7 +189,8 @@ pub async fn run_kit_fullscreen(
 
     // 3. service_snapshot 任务——无论是否配 ACP provider 都要启动：
     //    用户即使离线，也需要看到 CPU/MEM/Cron/Thread 列表。
-    let snapshot_src = build_snapshot_source(&app);
+    let snapshot_src =
+        build_snapshot_source(&app, acp_client.as_ref().map(|(client, _)| client.clone()));
     let _snapshot_handle = spawn_service_snapshot(snapshot_src, shutdown.clone());
 
     // 3a. Panic 通知消费——任意线程 panic（agent task / 渲染线程）时在状态栏
@@ -412,44 +413,34 @@ pub async fn run_kit_fullscreen(
         //     client gate 的 startup load，不与普通 `/thread` channel 竞争。
         if opts.resume_session.is_some() || opts.continue_session {
             let restore_client = client.clone();
-            let thread_store = app.services.thread_store.clone();
             let cwd_for_restore = app.services.cwd.clone();
             let resume_id = opts.resume_session.clone();
             tokio::spawn(async move {
                 let thread_id = match resume_id.as_deref() {
-                    Some(id) => {
-                        tracing::info!(session_id = %id, "-r: 触发 load_session");
-                        Some(id.to_string())
-                    }
+                    Some(id) => Ok(Some(id.to_string())),
                     None => {
-                        // -c: 查 thread_store 找当前 cwd 最近 thread
-                        match thread_store.list_threads().await {
-                            Ok(threads) => threads
-                                .into_iter()
-                                .find(|t| t.cwd == cwd_for_restore)
-                                .map(|t| {
-                                    tracing::info!(thread_id = %t.id, "-c: 触发 load_session");
-                                    t.id.to_string()
-                                }),
-                            Err(e) => {
-                                tracing::warn!(error = %e, "-c: list_threads 失败");
-                                None
-                            }
-                        }
+                        restore_client
+                            .latest_thread_in_directory(&cwd_for_restore)
+                            .await
                     }
                 };
                 match thread_id {
-                    Some(id) => {
+                    Ok(Some(id)) => {
                         if let Err(e) = restore_client
                             .load_startup_session(&id, &cwd_for_restore, None)
                             .await
                         {
                             tracing::warn!(error = %e, "kit 恢复：startup load_session 失败");
+                            crate::kit::thread_load_consumer::notify_restore_error(&e.to_string());
                         }
                     }
-                    None => {
+                    Ok(None) => {
                         restore_client.release_startup_restore().await;
                         tracing::warn!("kit 恢复：没有可恢复 thread，允许首次提交创建会话");
+                    }
+                    Err(error) => {
+                        restore_client.fail_startup_restore(&error).await;
+                        crate::kit::thread_load_consumer::notify_restore_error(&error.to_string());
                     }
                 }
             });
@@ -508,7 +499,10 @@ pub async fn run_kit_fullscreen(
 /// 关键技巧：`ResourceMonitor` 独立新建（采样进程级数据，多实例不影响正确性），
 /// 避免 `ServiceRegistry.resource_monitor: Mutex<ProcessResourceMonitor>`（非 Arc）
 /// 的所有权冲突。
-fn build_snapshot_source(app: &crate::app::App) -> SnapshotSource {
+fn build_snapshot_source(
+    app: &crate::app::App,
+    client: Option<crate::acp_client::AcpTuiClient>,
+) -> SnapshotSource {
     use crate::kit::atoms::{HookSummary, PluginSummary, ProviderSummary};
 
     let s = &app.services;
@@ -583,7 +577,7 @@ fn build_snapshot_source(app: &crate::app::App) -> SnapshotSource {
 
     SnapshotSource {
         cwd: s.cwd.clone(),
-        thread_store: s.thread_store.clone(),
+        client,
         peri_config: s.peri_config.clone(),
         permission_mode: s.permission_mode.clone(),
         cron_scheduler: s.cron.scheduler.clone(),

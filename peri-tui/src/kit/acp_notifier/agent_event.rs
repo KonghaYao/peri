@@ -96,6 +96,7 @@ pub(super) fn decode_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             max_attempts,
             delay_ms,
             error,
+            ..
         } => Some(AcpEventData::LlmRetrying {
             attempt,
             max_attempts,

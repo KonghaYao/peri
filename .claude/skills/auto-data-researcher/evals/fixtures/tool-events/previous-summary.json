@@ -1,0 +1,14 @@
+{
+  "logical_calls": 8,
+  "success_rate": 1,
+  "excluded_test_commands": [
+    "sleep 1",
+    "echo check"
+  ],
+  "permanently_failed_tools": [
+    "Edit",
+    "Agent"
+  ],
+  "estimated_tokens": 400,
+  "conclusion": "Later successful tool activity proves the interrupted task recovered."
+}

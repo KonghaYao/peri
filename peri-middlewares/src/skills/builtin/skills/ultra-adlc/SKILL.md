@@ -71,8 +71,11 @@ await parallel([() => agent(...)])
 After every Workflow completion notification, read
 `.claude/workflow-runs/<run-id>/state.json` before the decision seam or any
 delivery claim. If the run has `0 agents`, or it finishes in a few seconds with
-an empty handoff directory, the script failed: fix the script and relaunch.
-Do not enter the decision seam or claim discovery finished.
+an empty handoff directory, check the stage's declared required outputs before
+proceeding. Missing required Handoffs, evidence, or an independent assessment are
+an invalid ADLC stage with a named recovery action. Elapsed time and Agent count
+alone do not establish failure: a generic pure-JS run or a valid cache-only resume
+can have no new Agent calls. Never use an empty stage to claim discovery finished.
 
 Engine four-layer status is not product completion. Read
 `execution_status`, `acceptance_status`, `post_processing_status`, and
@@ -83,17 +86,18 @@ and a finalized `evidence.md`.
 
 `writeIntent.path_allowlist` is enforced against the Git baseline captured when the
 Workflow starts. The existing Git postcondition omits ignored paths, so the Ultra-ADLC
-orchestrator must also capture a filesystem write-boundary snapshot at preflight and compare it during post-processing. That check
-must report both created files and files whose content or type changed, including under
-ignored paths such as `.peri/adlc/`; merge those paths with Git `changed_paths` and
-validate every repo-relative path against the same allowlist. The Git postcondition
+orchestrator must also capture a filesystem write-boundary snapshot at preflight
+and compare it during post-processing, using `peri workflow boundary` below.
+The check reports created, removed, content-changed and type-changed paths,
+including ignored paths such as `.peri/adlc/`; reconcile those paths with Git
+`changed_paths` against the same literal path allowlist. The Git postcondition
 checks only paths whose status changed during the run by comparing before/after
 porcelain records. A pre-existing unrelated dirty or ignored path is therefore allowed
 when its status and filesystem snapshot remain unchanged; record it once as an
 out-of-scope baseline, preserve it, and do not treat it as a blocker or ask the user to
 clean it. Before launching a write Workflow, run `git status --porcelain` and capture
 the filesystem write-boundary snapshot to establish that context. The allowlist lists
-only authorized write paths (product crates plus `{cwd}/.peri/adlc/tasks/<id>/**` and
+only authorized repository-relative paths (product crates plus `.peri/adlc/tasks/<id>` and
 the designated evolution record); never add unrelated dirty paths merely to widen
 write authority.
 
@@ -108,6 +112,66 @@ infer the culprit from the final dirty set. Treat the event as a Git close-out
 failure rather than a product failure, and do not stash, commit, reset, clean, or
 ask the user to alter unrelated changes. Keep `head_may_change: false` unless the
 user explicitly authorizes a commit.
+
+### Bounded filesystem evidence
+
+Use the CLI bundled with the current Peri binary; do not install an unversioned
+package, copy an old task's scanner, or invent a baseline filename during recovery:
+
+```sh
+peri workflow boundary snapshot /absolute/task/snapshot-request.json
+peri workflow boundary compare /absolute/task/compare-request.json
+```
+
+The Main Agent creates the task's audit directories before the snapshot and writes
+the request as JSON. Generate a fresh lowercase UUID outside the Workflow script.
+Use one explicit repository-relative baseline path in both requests. Example:
+
+```json
+{
+  "schemaVersion": 1,
+  "operation": "snapshot",
+  "baselineId": "00000000-0000-4000-8000-000000000001",
+  "repoRoot": "/canonical/repository",
+  "cwd": "/canonical/repository",
+  "baselinePath": ".peri/adlc/tasks/example/artifacts/boundary-run-1.json",
+  "pathAllowlist": ["src", ".peri/adlc/tasks/example", "target"],
+  "generatedRoots": ["target"],
+  "limits": {
+    "maxEntries": 20000,
+    "maxBytes": 268435456,
+    "maxDepth": 32,
+    "deadlineMs": 30000
+  }
+}
+```
+
+Replace every example identity/path with this task's values. Normal build output
+directories and host-owned Workflow journals may be declared as generated roots
+when their writes are part of the authorized work. Add those exact directories to
+the allowlist and record the reason before capture. Their directory type/identity
+is observed; their internal contents are authorized but not enumerated or hashed.
+Never classify source code, tests, another task's data, or arbitrary ignored paths
+as generated merely to pass the check. Limits are an explicit work allowance;
+exceeding one is missing boundary evidence, not success or permission to skip files.
+
+Store the snapshot's `fingerprint`, baseline ID/path and scope in the Main-owned
+manifest. For compare, preserve the identical scope/limits, change `operation` to
+`compare`, and set `expectedBaselineFingerprint` to that independently saved
+fingerprint. Do not obtain this trusted value by rereading the baseline itself.
+A missing, altered, mismatched or incomplete baseline must fail before the scan.
+Use the returned `coverage`, `readFiles`, `readBytes`, `elapsedMs`, `changes.outOfScope`
+and `changes.generatedRootChanges` as evidence; nonzero exit or `ok: false` prevents
+boundary sign-off. A partial scan is useful diagnosis but cannot close the gate.
+
+The helper performs bounded fresh scans; it does not yet cache content hashes.
+Its evidence covers observed endpoint states within the repository, with `.git`
+handled separately by Git checks and declared generated contents excluded. It is
+not an OS permission boundary, a transactionally frozen filesystem, a detector of
+writes outside the repository or writes reverted between captures, or proof of
+which concurrent task wrote a changed path. Preserve unknown attribution and
+continue independent in-scope work; never label every outside change a baseline
+exception or complete the task while a required boundary result is unresolved.
 
 The Main Agent authors every Workflow script from engine primitives. `parallel`
 must receive `() => agent(` factories, never already-started promises.
@@ -283,7 +347,9 @@ downstream work.
 Every Work Package records `id`, a concise semantic title, `goal`, `dependencies`,
 `profile`, allowed tools, read scope, exclusive write scope, inputs, outputs,
 acceptance evidence, retry limit, escalation profile/condition, and immutable
-handoff path. Exhausting one Worker's retry limit escalates or replans the package;
+handoff path. Also record its physical-run budget, checkpoint milestones, and the
+specific dependency evidence that permits it to start. Exhausting one Worker's
+retry limit escalates or replans the package;
 it does not defer or remove the requirement. Every intent requirement must map to
 one or more packages, actual implementation, and independent verification in the
 Completion Ledger. Unmapped means incomplete. In every supervisor-visible ledger,
@@ -332,7 +398,7 @@ work_package_title: <concise semantic title>
 agent_id: <label>
 role: <role>
 profile: haiku | sonnet | opus | fable
-status: complete | blocked
+status: complete | incomplete | blocked
 intent_revision: <n>
 execution_revision: <n>
 ---
@@ -351,14 +417,20 @@ Rules:
 
 - One Agent owns one unique Handoff path. Never overwrite it; use `-r2`, `-r3`,
   and so on for revisions.
-- `status: complete` requires an empty `Remaining Items` section. `blocked`
-  identifies the precise external condition or authority needed.
+- `status: complete` requires an empty `Remaining Items` section and passing
+  required evidence. `incomplete` records usable partial work and the next bounded
+  action; `blocked` identifies the precise external condition or authority needed.
 - Each completion claim cites code, a test, a command result, or another concrete
   artifact. A narrative claim is not evidence.
 - Never put a secret, token, password, private key, full connection string, or
   unnecessary user data in a Handoff, prompt, artifact, provenance, or test log.
 - Agents write only their designated Handoff/artifact and exclusive product-code
   write scope. Shared code, manifest, or contract writes have a single owner.
+- Save immutable checkpoints after a meaningful edit, a completed check, and before
+  a long check or review. Include changed paths, exact input/contract fingerprints,
+  finished and pending checks, and the next command. A tool call that started but
+  has no terminal result remains pending. Do not depend on a final response or a
+  timeout handler to save the only Handoff: hard cancellation can prevent both.
 
 Expected short result:
 
@@ -384,11 +456,22 @@ failure; `sonnet -> opus` for cross-module contracts or high-cost ambiguity; use
 make the stronger profile repeat the whole scan. Profile misrouting is a
 coordinator defect, not a Worker defect.
 
+Before costly fan-out, use a small real Agent node with the same structured-result
+protocol as the planned role, or use that role's first bounded useful package as
+the probe. Do this only for routes that will actually be used. Record the resolved
+route, schema/input fingerprint, terminal result, and attempt identity. Passing a
+probe is evidence of that attempt, not a guarantee of future provider availability.
+Do not repeatedly probe an unchanged route after an explained authorization or
+capability failure. Inspect its structured reason and provider detail first: an
+HTTP status by itself does not establish whether the model, credentials, request,
+or service is at fault. Fix the request or use an already authorized independent
+route; an unresolvable dependency is a precise blocker, not a product repair.
+
 ## Concurrency rules
 
-Pass `maxConcurrency: 12` explicitly to both Workflow launches. Downshift only for
-a known provider, budget, or host limit and record the reason. Maximize useful
-concurrency:
+Choose `maxConcurrency` explicitly from ready independent packages, disjoint write
+scopes, and the actual provider/host budget. A larger limit does not make dependent
+work ready. Record the selected limit in the Execution Contract:
 
 - Start ready, independent read-only work immediately.
 - Parallelize writes only when their declared write scopes do not overlap.
@@ -666,7 +749,9 @@ a substitute for user intent or authority. If required arbitration capability is
 unavailable, return `blocked`; do not downgrade to `sonnet` or let the synthesizer
 self-approve.
 
-Launch with an externally injected argument object. Canonical W1 script shape:
+Launch with an externally injected argument object. The host injects `agent`,
+`parallel`, `phase`, and `args`; only `meta` is exported. The private helper below
+is invoked by the script's top-level return. Canonical W1 script shape:
 
 ```javascript
 export const meta = {
@@ -674,7 +759,7 @@ export const meta = {
   description: 'Discover, design, and arbitrate an Ultra-ADLC delivery',
 }
 
-export default async function run({ agent, parallel, phase }, args) {
+async function run({ agent, parallel, phase }, args) {
   // args supplies workflowMode, adlcId, adlcTaskRoot, createdAt, goal,
   // decisionId/title, packetId/revisions, prepareAttemptId,
   // expectedDecisionPacketCandidatePath, expectedDecisionPacketPath,
@@ -1035,6 +1120,8 @@ export default async function run({ agent, parallel, phase }, args) {
     adlcId: args.adlcId,
   }
 }
+
+return await run({ agent, parallel, phase }, args)
 ```
 
 Handoff paths stay under `args.adlcTaskRoot` (`{cwd}/.peri/adlc/tasks/<id>/`).
@@ -1043,7 +1130,7 @@ Use only `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, and normal J
 After `ExecuteExtraTool` returns the run id, append it to the Workflow 1 manifest
 slot and wait for the asynchronous completion notification. When notified, read
 `.claude/workflow-runs/<run-id>/state.json`, the Decision Packet, and the
-arbitration Handoff. Apply the empty-run failure rule above. A start response or
+arbitration Handoff. Apply the required-output check above. A start response or
 completion notification alone is not the result.
 
 ## Main Agent decision seam
@@ -1090,17 +1177,21 @@ W2 `writeIntent` example:
 
 ```javascript
 writeIntent: {
+  kind: 'write',
+  repo_root: '<canonical repository root>',
+  cwd: '<canonical workflow cwd>',
   head_may_change: false,
   path_allowlist: [
-    '.peri/adlc/tasks/<id>/**',
+    '.peri/adlc/tasks/<id>',
     '.peri/adlc/evolution/records/<adlc-id>.json',
-    'the/authorized/product/crate/**',
+    'the/authorized/product/crate',
   ],
 }
 ```
 
-Replace the product-crate glob with the actual authorized crates. Do not list
-unrelated dirty paths.
+Replace placeholders with actual canonical paths and authorized repository-relative
+directories/files. `path_allowlist` uses literal path components, not glob syntax;
+do not append `/**`. Do not list unrelated dirty paths.
 
 1. `phase('ADLC/W2/Decompose')` then one `opus` planning owner validates the full
    Work Package inventory and Completion Ledger. It may report contract gaps but
@@ -1149,20 +1240,130 @@ a reported percentage without that evidence is missing evidence, not 100%. Do no
 average them or move a required check to `Remaining Risks`. For missing evidence,
 return `incomplete` when Workflow 2 can obtain it or `blocked` when an external
 constraint prevents it. For `incomplete`, write
-`handoffs/workflow-2/gap-round-N.md`, compile every fixable gap into a Work
-Package, then loop through parallel repair, integration, verification, and one new
-assessment. Do not return from Workflow 2 while a gap is internally fixable.
+`handoffs/workflow-2/gap-round-N.md` and map each fixable gap to its owning Work
+Package. Invalidate changed packages and their dependent evidence; keep unrelated
+current evidence. Run the affected repair/integration/verification work, then one
+new independent assessment. A later physical run remains in logical Workflow 2;
+do not abandon an internally fixable gap when a physical run ends.
 
 For `blocked`, identify the missing external dependency or authorization precisely
 and return a short blocked result. The Main Agent records `blocked`, asks the user
-only if user authority can resolve it, then resumes the same logical Workflow 2
-with `resumeFromRunId` and injected updated contract revisions. Append the new
-physical run id; do not create Workflow 3. Cancellation likewise remains
+only if user authority can resolve it, then resumes the same logical Workflow 2.
+Use the Workflow tool with explicit complete `args` when contracts or the recovery
+plan change. `resumeFromRunId` is an Agent-call cache source, not a work-package
+plan or permission to reuse stale evidence. Append the new physical run id; do not
+create Workflow 3. Cancellation likewise remains
 `cancelled` and retains the audit files.
 
 After launching Workflow 2, again wait for its completion notification and read
 the four engine statuses, saved state, and Handoffs before acting. Never infer
 delivery from the immediate run-id response.
+
+## Recovery scope and work-package budgets
+
+Classify the observed blocker before choosing a new run. More than one category
+may apply; resolving a close-out error never clears a separate missing test.
+
+| Observed blocker | Next bounded action | Evidence retained |
+| --- | --- | --- |
+| Product gap: missing/failed requirement, implementation, check, or changed input | Repair its owning package, then affected dependents and verification; assess after they are ready | Unaffected current Handoffs and evidence |
+| Capability: a needed route/tool/service cannot execute the required request | Diagnose once for the current route/request; repair configuration/request within authority or use an authorized independent route | Product and review evidence whose fingerprints are unchanged |
+| Protocol: invalid schema, missing/corrupt resume source, wrong args/path/revision, absent required Handoff | Correct the concrete protocol defect, rerun its producer or required stage | Only verified artifacts outside the invalid dependency chain |
+| Close-out: process drain, state persistence, Git or filesystem boundary check fails | Resolve that exact close-out condition; preserve unknown write attribution | Product evidence, without a premature completion verdict |
+
+The Main Agent verifies reusable files itself: regular file, canonical in-scope
+path, exact bytes/hash, accepted intent/execution revision, source/input identity,
+direct-dependency fingerprints, required check results, and producer identity.
+An unchanged filename or old `status: complete` is insufficient. If any required
+identity cannot be established, mark the evidence unknown and reacquire it. An
+assessor-only recovery is allowed only when all product, integration, and review
+evidence remains current and independent assessment is the sole missing result.
+It always launches a fresh independent assessor. Do not replay design or edits to
+compensate for an unavailable assessor.
+
+Plan each physical run around ready packages that fit its budget. A dependent sink
+starts only after the source package's required compile/contract check passed and
+its Handoff is durable. For a budget interruption, inspect the last checkpoint:
+edited-but-unverified code resumes at verification; verified code without a final
+response is reconciled against its artifacts; interrupted review remains pending.
+None of these states is automatically complete.
+
+Record the logical Workflow's budget allocation and each physical run's limits in
+the Execution Contract. Pass the remaining authorized allocation to the next run,
+reserving capacity for integration and independent assessment. Deduplicate observed
+usage by produced attempt identity; recovered cache entries do not spend tokens a
+second time. Missing/dead-attempt usage is unknown, not zero or proof that budget
+remains. Existing engine limits apply per physical run; this ledger does not claim
+to implement a cross-run billing meter. Do not reset a logical allocation merely by
+creating a new run, globally raise timeouts, or remove required checks to fit it.
+
+### Run the deterministic stage and recovery checks
+
+Use Main-owned request files with the bundled CLI:
+
+```sh
+peri workflow adlc check-stage /absolute/task/stage-request.json
+peri workflow adlc plan /absolute/task/recovery-request.json
+```
+
+Declare required output paths before launching the stage. After completion, read
+the host state/journal and those files, verify their current contract/attempt
+bindings and substantive evidence, then record their trusted hashes in the request.
+Do not hash an arbitrary pre-existing file and relabel it this round's delivery.
+The file gate checks integrity and identity, not the truth of the file's claims.
+Use the canonical `stage: "assessment"` for every assessment gate so identity
+checks apply. Example assessment request:
+
+```json
+{
+  "schemaVersion": 1,
+  "adlcDeclared": true,
+  "stage": "assessment",
+  "canonicalRoot": "/canonical/repository/.peri/adlc/tasks/example",
+  "currentRunId": "current-physical-run-id",
+  "requiredOutputs": [
+    { "path": "handoffs/workflow-2/assessment-round-1.md", "sha256": "sha256:<trusted hash>" }
+  ],
+  "participantIdentities": [
+    { "runId": "current-physical-run-id", "agentId": 0 }
+  ],
+  "producerIdentity": { "runId": "current-physical-run-id", "agentId": 1 }
+}
+```
+
+Use actual host-observed `(runId, agentId)` pairs; a label or model's claim of
+independence cannot supply them. Agent IDs are nonnegative safe integers, never
+string labels. Supply the participant list explicitly, including an empty list
+when host evidence confirms there are none. Include all task participants who designed,
+implemented, repaired or reviewed this evidence. Missing host identity is unknown.
+`adlcDeclared` remains true throughout ADLC; changing it to generic mode to avoid
+required outputs is invalid. Generic pure-JS workflows can legitimately omit them.
+A cache-only ADLC stage still declares and verifies its required outputs, so zero
+new Agent calls alone cannot fail it. `semanticAcceptance: not_checked` is explicit:
+only the independent assessor's supported verdict decides product acceptance.
+
+For `plan`, provide a `packages` array. Each package has `id`, `status`,
+`dependencies`, `requiredChecksPassed`, optional `sourceCompileGatePassed`, and
+`current`/`previous` snapshots containing `contract`, `input`, `dependencies`
+(dependency ID to fingerprint), and `verifiedArtifacts` (`path`, `sha256`). These
+are Main-verified observations bound to accepted revisions, not Worker assertions.
+Mark the assessor package with `assessment: true`. Supply unresolved `blockers`
+with `kind`, `code`, `message`, and optional owning `packageId`, plus any explicitly
+invalid `invalidPackageIds`. Retain the request as the recovery evidence source.
+
+Consume the compact `reusable`, `ready`, `pending`, `blockers` and `actions`
+result when writing the next Workflow script. `ready` lists executable unfinished
+packages; `pending` includes all unfinished packages, including those ready to
+start. A downstream package waits until its dependencies have verified results,
+not merely a place in the same ready queue. `ok: true` and `planValid: true`
+mean the plan is valid; pending work remains unfinished and semantic acceptance
+remains `not_checked`. Only ready packages may start;
+unresolved capability/protocol/close-out conditions are handled first for their
+affected scope. Recompute after a repair or a changed fact. The helper neither
+launches Agents nor changes engine status, grants authority, or converts unknown
+evidence into completion. Its hard input/file limits are part of the contract;
+split legitimate large evidence into referenced artifacts instead of increasing
+model context or copying full logs into every package.
 
 ## Progress reporting
 

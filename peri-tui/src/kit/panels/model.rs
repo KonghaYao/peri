@@ -52,7 +52,7 @@ const VALUE_ALIGN_COL: usize = 40;
 #[component]
 pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
-    // 左侧 profile 无独立光标：键盘导航基于 active_alias（SERVICE_SNAPSHOT 的事实源）
+    // 左侧 profile 无独立光标：键盘导航基于宿主配置的 active_alias。
     // 移动，与渲染高亮（active_idx）天然一致——此前 cursor 固定从 0（fable）初始化，
     // active ≠ fable 时按 ↓ 会从当前档位跳到错误的下一档。
     let right_cursor = hooks.use_state(|| 0usize); // 右侧字段光标
@@ -60,10 +60,14 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 渲染版本计数器——edit_field/switch_active_alias 修改 PERI_CONFIG_HANDLE 后
     // 递增此计数，触发 ModelPanel 重渲染以显示最新值。
     let render_version = hooks.use_state(|| 0u64);
-    // S6c: 订阅 SERVICE_SNAPSHOT——active alias 来自 atom，确保面板和 status bar 一致
-    let snapshot = hooks.use_atom(&SERVICE_SNAPSHOT);
-    let active_alias = snapshot.read().model_alias.clone();
-    let _ = snapshot; // StoreState 是 Copy，无需显式 drop
+    // Model 面板编辑宿主配置；active alias 必须来自配置事实源，不能混用会话状态栏
+    // 的 SERVICE_SNAPSHOT（会话可能仍为另一档模型）。订阅 snapshot 仅用于会话变化时
+    // 触发重绘，面板选择和编辑始终读取 PERI_CONFIG_HANDLE。
+    let _snapshot = hooks.use_atom(&SERVICE_SNAPSHOT);
+    let active_alias = PERI_CONFIG_HANDLE
+        .get()
+        .map(|h| h.read().config.active_alias.clone())
+        .unwrap_or_else(|| "opus".to_string());
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
     // 左侧 profile 列表的滚动状态——鼠标点击行号反推需要滚动偏移（外部受控，
@@ -79,8 +83,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     let rv = render_version;
-    // 事件闭包 move 捕获；渲染部分仍使用 active_alias，故此处克隆一份给闭包
-    let handler_alias = active_alias.clone();
+    let render_version_for_handler = render_version;
     let left_scroll_for_handler = left_scroll;
     hooks.use_event_handler_with_options(
         EventScope::Current,
@@ -111,6 +114,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             )
                         {
                             switch_active_alias(idx);
+                            *render_version_for_handler.write() += 1;
                             return EventResult::Consumed;
                         }
                     }
@@ -126,6 +130,10 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if key.kind != KeyEventKind::Press {
                     return EventResult::Ignored;
                 }
+                let current_alias = PERI_CONFIG_HANDLE
+                    .get()
+                    .map(|h| h.read().config.active_alias.clone())
+                    .unwrap_or_else(|| "opus".to_string());
                 match key.code {
                     KeyCode::Esc => {
                         if *right_focus.read() {
@@ -144,9 +152,10 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             // 从当前 active 档位出发上移（与渲染高亮一致）
                             let idx = PROFILE_KEYS
                                 .iter()
-                                .position(|k| *k == handler_alias)
+                                .position(|k| *k == current_alias)
                                 .unwrap_or(1);
                             switch_active_alias(previous_selection(idx));
+                            *render_version_for_handler.write() += 1;
                         }
                     }
                     KeyCode::Down => {
@@ -157,9 +166,10 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             // 从当前 active 档位出发下移（与渲染高亮一致）
                             let idx = PROFILE_KEYS
                                 .iter()
-                                .position(|k| *k == handler_alias)
+                                .position(|k| *k == current_alias)
                                 .unwrap_or(1);
                             switch_active_alias(next_selection(idx, PROFILE_KEYS.len()));
+                            *render_version_for_handler.write() += 1;
                         }
                     }
                     KeyCode::Tab => {
@@ -169,7 +179,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     KeyCode::Right => {
                         if *right_focus.read() {
-                            edit_field(handler_alias.clone(), *right_cursor.read(), true);
+                            edit_field(current_alias.clone(), *right_cursor.read(), true);
                             *rv.write() += 1;
                         } else {
                             // 进入右侧编辑焦点
@@ -178,7 +188,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     KeyCode::Left => {
                         if *right_focus.read() {
-                            edit_field(handler_alias.clone(), *right_cursor.read(), false);
+                            edit_field(current_alias.clone(), *right_cursor.read(), false);
                             *rv.write() += 1;
                         } else {
                             *right_focus.write() = false;

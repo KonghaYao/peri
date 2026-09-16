@@ -283,9 +283,15 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
         None,
     );
 
-    assert!(result.contains("The catalog below is the authoritative list"));
+    assert!(result.contains("The catalog below is a bounded prompt hint"));
+    assert!(result.contains(
+        "the Agent loader and frozen policy at invocation time decide whether an ID is loadable"
+    ));
+    assert!(result.contains("using the invocation `cwd`"));
+    assert!(result.contains("current valid suggestion returned by the invocation's loader"));
+    assert!(result.contains("including suggestions that appear after the prompt was frozen"));
     assert!(result.contains("project configuration, enabled plugins, or built-in providers"));
-    assert!(result.contains("Do not guess capabilities"));
+    assert!(result.contains("Do not guess an ID or capabilities"));
     assert!(!result.contains("`general-purpose`"));
     assert!(!result.contains("subagent_type: \"explorer\""));
     assert!(result.contains("If no entry clearly fits"));
@@ -352,9 +358,11 @@ fn test_subagent_selection_guide_has_no_specific_mapping() {
     );
     // 通用选择原则保留（不绑定 agent 名）
     assert!(
-        result.contains("Choose the most specialized agent whose catalog ID"),
-        "选择原则应以当前 catalog 为事实源并优先 specialized agent"
+        result.contains("Choose the most specialized ID supplied by the frozen catalog hint"),
+        "选择原则应允许冻结 hint 与当前 loader suggestion 两类来源"
     );
+    assert!(result.contains("a loader suggestion may contain only an ID"));
+    assert!(result.contains("verify the loaded definition before choosing parallelism"));
     assert!(
         !result.contains("`general-purpose`") && !result.contains("subagent_type: \"explorer\""),
         "静态段落不应硬编码 built-in agent ID"

@@ -4,9 +4,8 @@ use super::{
     auth_store::FileCredentialStore,
     client::{
         build_authed_transport, build_http_transport, serve_client_auto, setup_subscription,
-        spawn_stdio_transport, ClientStatus, McpClientHandle, McpClientPool, McpPoolError,
-        OAuthStartDisposition, OAuthStatus, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT,
-        STDIO_CONNECT_TIMEOUT,
+        ClientStatus, McpClientHandle, McpClientPool, McpPoolError, OAuthStartDisposition,
+        OAuthStatus, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT, STDIO_CONNECT_TIMEOUT,
     },
     oauth_flow::{OAuthFlowEvent, OAuthFlowManager},
     transport::TransportConfig,
@@ -83,7 +82,14 @@ impl McpClientPool {
         let mut used_oauth = false;
         let result = match &tc {
             TransportConfig::Stdio { command, args, env } => {
-                match spawn_stdio_transport(command, args, env) {
+                let cwd =
+                    self.execution_cwd
+                        .get()
+                        .ok_or_else(|| McpPoolError::ConnectionFailed {
+                            server: server_name.to_owned(),
+                            reason: "MCP execution directory is not initialized".into(),
+                        })?;
+                match self.spawn_stdio_transport(command, args, env, cwd) {
                     Ok(t) => {
                         serve_client_auto(
                             t,
@@ -196,6 +202,7 @@ impl McpClientPool {
 
         match result {
             Ok(Ok(rs)) => {
+                let rs = self.retain_service(rs);
                 // 订阅配置存在：按 server 配置重建 subscriptions/listen 长流
                 // （2026-07-28）。失败仅告警——server 可能不支持，连接本身仍可用。
                 if let Some(sub) = subscriptions {

@@ -36,6 +36,25 @@ function parseBudgetTotal(params: unknown): number | undefined {
   return value
 }
 
+function parseResumeParams(params: unknown): string | undefined {
+  if (!params || typeof params !== 'object') return undefined
+  const raw = params as Record<string, unknown>
+  const hasSource = Object.hasOwn(raw, 'resumeFromRunId')
+  const hasJournal = Object.hasOwn(raw, 'resume')
+  if (!hasSource && !hasJournal) return undefined
+  // Rust's fresh-run wire shape may serialize an omitted resume source as
+  // `resume: null`; preserve that legacy no-source form. Once a source run is
+  // named, null/missing is a protocol error rather than a fresh execution.
+  if (!hasSource) return raw.resume === null || Array.isArray(raw.resume) ? undefined : 'resume must be an array when provided'
+  if (typeof raw.resumeFromRunId !== 'string' || raw.resumeFromRunId.length === 0) {
+    return 'resumeFromRunId must be a non-empty string'
+  }
+  if (!hasJournal || !Array.isArray(raw.resume)) {
+    return 'resume must be an array when resumeFromRunId is present'
+  }
+  return undefined
+}
+
 function createPorts(): WorkflowPorts {
   return {
     agentAdapterRegistry: new engine.AgentAdapterRegistry()
@@ -74,7 +93,17 @@ function createPorts(): WorkflowPorts {
 
     journalStore: {
       async read(): Promise<JournalEntry[]> {
-        return (currentResumeJournal ?? []).map((entry) => {
+        // A failed/skipped result is a cache boundary. Reusing entries after
+        // it would let the engine return `null` for the failed call and would
+        // make later results depend on an execution that never completed.
+        const reusable: WorkflowJournalEntry[] = []
+        let nextSeq = 0
+        for (const entry of [...(currentResumeJournal ?? [])].sort((a, b) => a.seq - b.seq)) {
+          if (entry.seq !== nextSeq || entry.result.kind !== 'ok') break
+          nextSeq += 1
+          reusable.push(entry)
+        }
+        return reusable.map((entry) => {
           const recovered: WorkflowJournalEntry = {
             ...entry,
             attempt: {
@@ -154,6 +183,15 @@ export async function handleRequest(msg: JsonRpcRequest): Promise<void> {
             code: -32602,
             message: error instanceof Error ? error.message : 'invalid budgetTotal',
           },
+        })
+        return
+      }
+      const resumeError = parseResumeParams(params)
+      if (resumeError) {
+        send({
+          jsonrpc: '2.0',
+          id: id!,
+          error: { code: -32602, message: resumeError },
         })
         return
       }

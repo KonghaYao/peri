@@ -60,6 +60,9 @@ pub struct PeriCaps {
     /// 用户待发送队列与逐条发送控制，默认不协商。
     #[serde(default)]
     pub user_input_queue: bool,
+    /// Versioned project/workspace queries and immutable session execution context.
+    #[serde(default)]
+    pub session_workspace_v1: bool,
     /// `peri.uiCommands`：TUI 上送的 ui 域命令明细（空 = 不广播 ui 条目）。
     /// 门控语义反转：TUI 声明明细 → ACP 注册为 `ui:*` 条目，而非 ACP 附加
     /// 硬编码列表；旧客户端 bool `true` 由 [`PeriCaps::from_client_meta`]
@@ -89,6 +92,7 @@ impl PeriCaps {
             rewind: meta_bool(meta, "peri.rewind"),
             system_reminder: meta_bool(meta, "peri.systemReminder"),
             user_input_queue: meta_bool(meta, "peri.userInputQueue"),
+            session_workspace_v1: meta_bool(meta, "peri.sessionWorkspaceV1"),
             ui_commands: Self::meta_ui_commands(meta),
         }
     }
@@ -152,6 +156,10 @@ impl PeriCaps {
             Value::Bool(self.user_input_queue),
         );
         m.insert(
+            "peri.sessionWorkspaceV1".into(),
+            Value::Bool(self.session_workspace_v1),
+        );
+        m.insert(
             "peri.uiCommands".into(),
             serde_json::to_value(&self.ui_commands).expect("Vec<UiCommandSpec> 序列化不应失败"),
         );
@@ -175,6 +183,7 @@ impl PeriCaps {
             rewind: true,
             system_reminder: true,
             user_input_queue: true,
+            session_workspace_v1: true,
             ui_commands: default_ui_commands(),
         }
     }

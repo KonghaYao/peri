@@ -1,0 +1,17 @@
+{
+  "fixture_schema": "sandbox-mcp/protocol-resources-v1",
+  "note": "WP-005 任务资源用例。owned_task_id 的快照由脚本任务源用调用方真实身份回填，因此属于该连接；foreign_task_id 的快照属于其它 owner/连接实例，协议层必须与'不存在'同形处理（-32602，且不得发出 -32002）。malformed_uris 覆盖 URI 走私形态：不得被解析为有效任务资源。",
+  "owned_task_id": "shell-0192f0f0-0000-7000-8000-000000000001",
+  "foreign_task_id": "shell-0192f0f0-0000-7000-8000-000000000002",
+  "panic_task_id": "shell-0192f0f0-0000-7000-8000-000000000003",
+  "panic_note": "panic_task_id 让脚本任务源在被查询时 panic（故障注入），用于验证服务端主动下线订阅流时必须发送 notifications/cancelled。除该用例外的任何用例都不得引用这个 id。",
+  "collection_uri": "sandbox://tasks",
+  "flip_after_polls": 2,
+  "flip_note": "自己的任务在前 flip_after_polls 次查询中报 running，之后报 completed。取值 2 保证：resources/list 与 resources/read 各占一次查询后仍是 running（所有者用例），而订阅轮询建立基线后必然观察到一次真实变化（订阅用例）。",
+  "malformed_uris": [
+    "sandbox://tasks/..",
+    "sandbox://tasks/a/b",
+    "sandbox://tasks/a%2Fb",
+    "file:///etc/passwd"
+  ]
+}

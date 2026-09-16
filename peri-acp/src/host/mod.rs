@@ -40,6 +40,7 @@ pub mod assemble;
 pub(crate) mod compact_config;
 mod connection;
 mod lifecycle;
+mod workspace;
 pub use lifecycle::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport};
 mod continuation;
 pub mod controller_ports;
@@ -84,6 +85,9 @@ pub(crate) struct SessionState {
     pub(crate) session_id: String,
     pub(crate) thread_id: String,
     pub(crate) cwd: String,
+    pub(crate) execution_owner: Option<Arc<dyn peri_acp_types::workspace::SessionExecutionLease>>,
+    pub(crate) environment: Option<Arc<workspace::SessionEnvironment>>,
+    pub(crate) closing: bool,
     pub(crate) history: Vec<BaseMessage>,
     /// Canonical persisted history; `history` is a compatibility projection for legacy commands.
     pub(crate) history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
@@ -129,6 +133,7 @@ pub(crate) struct SessionState {
 
 /// All cross-session configuration needed by the ACP server.
 pub struct AcpServerConfig {
+    pub(crate) workspace_assembly: Option<assemble::WorkspaceAssembly>,
     pub(crate) host_task_owner: Option<task_scope::HostTaskOwner>,
     pub(crate) host_task_spawner: task_scope::HostTaskSpawner,
     pub(crate) mcp_task_owner: Option<Box<dyn McpTaskOwnerPort>>,
@@ -306,7 +311,12 @@ async fn run_acp_server_inner(
     );
 
     let connection = Arc::new(tokio::sync::Mutex::new(connection::ConnectionContext::new(
-        cfg.stdio_command_filter && cfg.mcp_apps_relay.is_some(),
+        cfg.stdio_command_filter
+            && (cfg.mcp_apps_relay.is_some()
+                || cfg
+                    .workspace_assembly
+                    .as_ref()
+                    .is_some_and(|source| source.mcp_profile.apps_enabled())),
     )));
     let connection_cancellation = connection.lock().await.cancellation();
     server_loop::ServerLoop {

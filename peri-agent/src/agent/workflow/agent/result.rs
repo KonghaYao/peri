@@ -135,65 +135,26 @@ pub(super) fn reported_model(last_model: Option<String>, effective_model: &str) 
     last_model.or_else(|| Some(effective_model.to_string()))
 }
 
-/// JSON Schema 校验——基础类型 + required 字段检查。
+/// JSON Schema 校验——工作流结果实际使用的有限子集。
 ///
 /// 调用时始终验证合法 JSON；空 {} 或非 object schema 不增加字段约束。
 /// 未提供 schema 时，调用方跳过本校验。
-/// 否则检查：
-/// 1. 顶层 type 匹配（object/array/string/number/boolean/null）
-/// 2. 若 type 为 object，检查 required 字段存在
-/// 3. 若 type 为 object 且有 properties，检查各属性 type 匹配
+/// 否则递归检查 type、object 的 required/properties 和 array 的 items。
+/// 这不是完整 JSON Schema 实现；其他关键字不参与校验。
 fn validate_json_schema(text: &str, schema: &serde_json::Value) -> Result<(), String> {
+    let raw_value: Box<serde_json::value::RawValue> =
+        serde_json::from_str(text).map_err(|e| format!("output is not valid JSON: {e}"))?;
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("output is not valid JSON: {e}"))?;
 
     // 如果 schema 为空或不是 object，仅验证 JSON 格式
     let schema_obj = match schema.as_object() {
         Some(obj) if obj.is_empty() => return Ok(()),
-        Some(_) => schema,
+        Some(obj) => obj,
         _ => return Ok(()),
     };
 
-    // 检查顶层 type
-    if let Some(expected_type) = schema_obj.get("type").and_then(|v| v.as_str()) {
-        let actual_type = json_type_name(&value);
-        if actual_type != expected_type {
-            return Err(format!(
-                "expected top-level type '{expected_type}', got '{actual_type}'"
-            ));
-        }
-    }
-
-    // 对 object 类型检查 required + properties
-    if let Some(obj) = value.as_object() {
-        if let Some(required) = schema_obj.get("required").and_then(|v| v.as_array()) {
-            for field in required {
-                let field_name = field
-                    .as_str()
-                    .ok_or_else(|| format!("required 数组元素不是字符串: {field}"))?;
-                if !obj.contains_key(field_name) {
-                    return Err(format!("missing required field: {field_name}"));
-                }
-            }
-        }
-
-        if let Some(properties) = schema_obj.get("properties").and_then(|v| v.as_object()) {
-            for (prop_name, prop_schema) in properties {
-                if let Some(prop_value) = obj.get(prop_name) {
-                    if let Some(expected_type) = prop_schema.get("type").and_then(|v| v.as_str()) {
-                        let actual_type = json_type_name(prop_value);
-                        if actual_type != expected_type {
-                            return Err(format!(
-                                "field '{prop_name}': expected type '{expected_type}', got '{actual_type}'"
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
+    validate_schema_value(&value, schema_obj, None, Some(raw_value.as_ref()))
 }
 
 /// 返回 JSON value 的类型名称（用于错误消息）。
@@ -206,6 +167,140 @@ fn json_type_name(value: &serde_json::Value) -> &'static str {
         serde_json::Value::Array(_) => "array",
         serde_json::Value::Object(_) => "object",
     }
+}
+
+fn decimal_parts(raw: &str) -> Option<(bool, String, i64)> {
+    let (negative, raw) = raw
+        .strip_prefix('-')
+        .map_or((false, raw), |raw| (true, raw));
+    let (mantissa, exponent) = match raw.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (raw, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let mut digits = String::with_capacity(whole.len() + fraction.len());
+    digits.push_str(whole);
+    digits.push_str(fraction);
+    let first_digit = digits.bytes().position(|digit| digit != b'0');
+    let Some(first_digit) = first_digit else {
+        return Some((false, "0".into(), 0));
+    };
+    digits.drain(..first_digit);
+    let mut scale = (fraction.len() as i64).checked_sub(exponent)?;
+    while digits.ends_with('0') {
+        digits.pop();
+        scale = scale.checked_sub(1)?;
+    }
+    Some((negative, digits, scale))
+}
+
+fn json_number_is_integer(
+    number: &serde_json::Number,
+    raw: Option<&serde_json::value::RawValue>,
+) -> bool {
+    let Some(raw) = raw else {
+        return number.as_i64().is_some() || number.as_u64().is_some();
+    };
+    decimal_parts(raw.get()).is_some_and(|(_, _, scale)| scale <= 0)
+}
+
+fn schema_type_matches(
+    value: &serde_json::Value,
+    expected_type: &str,
+    raw: Option<&serde_json::value::RawValue>,
+) -> bool {
+    match expected_type {
+        "number" => value.is_number(),
+        "integer" => value
+            .as_number()
+            .is_some_and(|number| json_number_is_integer(number, raw)),
+        _ => json_type_name(value) == expected_type,
+    }
+}
+
+fn validate_schema_value(
+    value: &serde_json::Value,
+    schema: &serde_json::Map<String, serde_json::Value>,
+    field_path: Option<&str>,
+    raw: Option<&serde_json::value::RawValue>,
+) -> Result<(), String> {
+    if let Some(expected_type) = schema.get("type").and_then(|value| value.as_str()) {
+        if !schema_type_matches(value, expected_type, raw) {
+            let actual_type = json_type_name(value);
+            return Err(match field_path {
+                Some(field_path) => format!(
+                    "field '{field_path}': expected type '{expected_type}', got '{actual_type}'"
+                ),
+                None => format!("expected top-level type '{expected_type}', got '{actual_type}'"),
+            });
+        }
+    }
+
+    if let Some(object) = value.as_object() {
+        if let Some(required) = schema.get("required").and_then(|value| value.as_array()) {
+            for field in required {
+                let field_name = field
+                    .as_str()
+                    .ok_or_else(|| format!("required 数组元素不是字符串: {field}"))?;
+                if !object.contains_key(field_name) {
+                    return Err(match field_path {
+                        Some(parent) => format!("missing required field: {parent}.{field_name}"),
+                        None => format!("missing required field: {field_name}"),
+                    });
+                }
+            }
+        }
+
+        if let Some(properties) = schema.get("properties").and_then(|value| value.as_object()) {
+            let raw_properties = raw.and_then(|raw| {
+                serde_json::from_str::<
+                    std::collections::HashMap<String, Box<serde_json::value::RawValue>>,
+                >(raw.get())
+                .ok()
+            });
+            for (property_name, property_schema) in properties {
+                let Some(property_value) = object.get(property_name) else {
+                    continue;
+                };
+                let Some(property_schema) = property_schema.as_object() else {
+                    continue;
+                };
+                let property_path = field_path
+                    .map(|parent| format!("{parent}.{property_name}"))
+                    .unwrap_or_else(|| property_name.clone());
+                let property_raw = raw_properties
+                    .as_ref()
+                    .and_then(|properties| properties.get(property_name))
+                    .map(|raw| raw.as_ref());
+                validate_schema_value(
+                    property_value,
+                    property_schema,
+                    Some(&property_path),
+                    property_raw,
+                )?;
+            }
+        }
+    }
+
+    if let Some(items_schema) = schema.get("items").and_then(|value| value.as_object()) {
+        if let Some(items) = value.as_array() {
+            let raw_items = raw.and_then(|raw| {
+                serde_json::from_str::<Vec<Box<serde_json::value::RawValue>>>(raw.get()).ok()
+            });
+            for (index, item) in items.iter().enumerate() {
+                let item_path = field_path
+                    .map(|parent| format!("{parent}[{index}]"))
+                    .unwrap_or_else(|| format!("[{index}]"));
+                let item_raw = raw_items
+                    .as_ref()
+                    .and_then(|items| items.get(index))
+                    .map(|raw| raw.as_ref());
+                validate_schema_value(item, items_schema, Some(&item_path), item_raw)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

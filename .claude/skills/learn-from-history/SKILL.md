@@ -9,7 +9,7 @@ description: >
 
 把历史学习当成一个**可观测改进环**，而不是经验摘抄：固定输入，分层下钻证据，定位最窄变更面，为每项建议同时声明预测收益与回归风险，再由后续历史验证。
 
-默认审计当前项目最近 7 个自然日期（含今天），不跨项目。报告和 decision manifest 是审计产物，不构成编辑授权；不自动修改或回滚规则、skill、代码。
+默认审计当前项目最近 7 个自然日期（含今天），不跨项目。默认只报告；用户已明确要求应用建议或提交时，按其授权范围完成，不重复确认。报告和 decision manifest 本身不扩大编辑、回滚或发布权限。
 
 本流程采用 [Agentic Harness Engineering](https://arxiv.org/abs/2604.25850) 的三层可观测思想，并适配为有人确认的项目审计：
 
@@ -28,6 +28,12 @@ description: >
 `extract_range.py` 仅保留手工范围导出的兼容用途，不是主路径。
 
 ## 流程
+
+### 0. 核对当前仓库的入口、产物位置与授权
+
+先读根指引和 `docs/standards/documentation.md`。本仓库的维护入口是本文件及相邻 `scripts/`；其他安装目录中的旧副本不能替代受版本控制的实现。显式保留本轮用户要求的日期、项目、更新范围与提交授权，交接后从原始请求核对，不让压缩摘要重新解释权限。
+
+本仓库按 `DOC-HISTORY-001` / `DOC-LINK-001` 禁止重建 `spec/reviews/`，因此使用**临时报告模式**：报告与变更/验收记录写到本次 run 目录，稳定结论更新对应事实源；完整过程不进入仓库。该模式执行步骤 1–4、6 和已授权的编辑，使用 run validator 验证输入覆盖；步骤 5 和步骤 7 的持久 decision ledger 分支不适用，不声称通过 decision ledger 校验或形成跨轮因果归因。完成后按步骤 9 的临时模式清理输入。后文的 `spec/reviews/` 账本协议仅用于明确允许该目录的仓库，不能借技能恢复已废弃目录。
 
 ### 1. 创建 snapshot run
 
@@ -68,6 +74,8 @@ Read `manifest.json`，核对：
 - `window.active_days`、`totals.thread_count`、`totals.message_count`；
 - `totals.truncations` 与 `totals.parse_failures`；
 - 每个 `unit` 的输入、消息数、prompt、summary 和 sidecar 路径。
+
+再试读窗口两端及不同消息格式的 thread：有消息计数却只有空白正文、工具调用消失或系统提醒被当成用户原话时，先检查提取器与持久化协议。`parse_failures=0` 不单独证明内容完整。格式契约以 `peri-acp-types/src/store.rs` 和 `messages/` 为准；修改提取器须用 legacy/V1 的真实 SQLite 往返、工具配对与损坏输入回归验证，不只测 JSON helper。修复后从同一 snapshot 补提取，记录旧/新 manifest 与 extractor digest，重审变化的输入；不得沿用旧 digest 或旧行号宣称完成。
 
 本流程按 thread 的 `updated_at` 日期归档**完整 thread**，不按消息切断因果链。报告中写清该语义。
 
@@ -144,7 +152,7 @@ validator 检查：
 
 再读取当前项目根路由和 finding 所需的最小事实源：
 
-- 根 `CLAUDE.md`：只判断路由，不写工程规则正文；
+- 根 `CLAUDE.md`：判断项目哲学与路由，不复制工程细则或事故叙事；
 - `docs/standards/` 与测试 canonical standard：稳定规则；
 - 对应模块 `CLAUDE.md`：模块入口和专属不变量；
 - `spec/issues/`：active change、事故验收和具体产品风险；
@@ -172,6 +180,10 @@ validator 检查：
 只有多次证据、影响明确且存在事实源缺口时才建议新稳定规则；单次事件默认不制度化。若可观测，记录消息数、重复工具调用、错误重试或耗时等效率代理，但不能以“更短”替代任务正确性。
 
 ### 7. 生成报告与 decision manifest
+
+**临时报告模式**：写入本次 run 的 `findings.md` 与 `changes.json`，记录范围、证据/反证、已有覆盖、采用或未采用的建议、目标与保留行为的验收及实际结果。引用已通过 run validator 的 unit sidecar；不传 `--decision-manifest`，不把这份临时记录称为已认证的跨轮账本。没有可核对的旧账本时，旧建议的效果为 `inconclusive`。随后按已有授权进入步骤 8。
+
+**持久账本模式（仅允许 `spec/reviews/` 的仓库）**：
 
 写入同日配对产物：
 
@@ -301,9 +313,9 @@ python3 .claude/skills/learn-from-history/scripts/validate_run.py \
 
 **完成标准**：run 与 decision manifest 均为 `passed`，每个 change 都能追溯到当前 unit finding。
 
-### 8. 分层确认后编辑
+### 8. 按已有授权编辑
 
-报告生成后必须询问用户，不能把模糊的“全部”跨作用域解释：
+先核对本轮和前文的授权。用户已明确要求更新项目内规则、技能或提交时，直接执行该范围；仅缺失会影响操作范围的授权时提问，不能把模糊的“全部”跨作用域解释：
 
 - **仅报告**：不改文件；
 - **项目内稳定规则**：只改项目 standards/模块事实源；
@@ -316,13 +328,17 @@ python3 .claude/skills/learn-from-history/scripts/validate_run.py \
 编辑时保持一项 change 对应最小 diff。完成后：
 
 1. 运行该项 `acceptance` 中的目标检查与 preserved-success 检查；
-2. 将 decision manifest 的 `status` 改为 `implemented`；`verification` 为 `acceptance.target` 与 `acceptance.preserved_success` 的每个检查写一个 `{check, command, status, result}` 对象，`check` 必须与 acceptance 原文完全一致，且全部为 `passed`；未实施保持 `proposed`，受阻写 `blocked`；
-3. 再次运行 decision manifest 校验；
-4. 不 commit，除非用户另行明确要求。
+2. 在本轮变更记录中填写实际实施状态与逐项验证结果；持久账本模式将 decision manifest 的 `status` 改为 `implemented`，`verification` 为 `acceptance.target` 与 `acceptance.preserved_success` 每个检查写一个 `{check, command, status, result}`，`check` 与原文一致且全部为 `passed`；未实施保持 `proposed`，受阻写 `blocked`；
+3. 临时报告模式核对 run validation 和逐项验收；持久账本模式再次运行 decision manifest 校验；
+4. 用户已明确要求提交时，按 `docs/standards/git.md` 核对改动归属与 staged diff 后提交；未授权提交则只报告，不把 commit 授权扩展成 push。
 
 若多个 change 同时落地且作用面重叠，下一轮无法可靠单项归因；优先分批实施或在报告中显式标记 confounded。
 
 ### 9. 清理敏感输入
+
+临时报告模式在 run 校验通过、报告写完且逐项验收完成后，执行 `python3 .claude/skills/learn-from-history/scripts/validate_run.py <run_dir> --cleanup-inputs`。保留 manifest、validation、unit summary/sidecar 与本轮脱敏报告、变更记录；若曾补提取，还须清理本次生成的旧原始提取物和补充 diff，不删除其他 run。该模式不产生持久账本 attestation。
+
+以下为持久账本模式：
 
 最终报告和 decision manifest 写完、全部校验通过后，默认清理 snapshot、原始提取物和 prompts：
 

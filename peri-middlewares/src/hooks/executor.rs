@@ -1,5 +1,7 @@
 use std::{collections::HashSet, process::Stdio, sync::Arc, time::Duration};
 
+use peri_acp_types::tasks::TaskManager;
+use peri_agent::agent::async_tasks::ShellExecutionGuard;
 use peri_agent::{agent::react::ReactLLM, messages::BaseMessage};
 use tokio::io::AsyncWriteExt;
 
@@ -20,6 +22,16 @@ pub async fn execute_command_hook(
     hook: &HookType,
     input: &HookInput,
     registered: &RegisteredHook,
+) -> HookAction {
+    execute_command_hook_owned(hook, input, registered, None).await
+}
+
+/// Execute in the session directory and retain process-tree cleanup ownership.
+pub async fn execute_command_hook_owned(
+    hook: &HookType,
+    input: &HookInput,
+    registered: &RegisteredHook,
+    task_manager: Option<&dyn TaskManager>,
 ) -> HookAction {
     let (command, _shell, timeout_secs) = match hook {
         HookType::Command {
@@ -53,9 +65,28 @@ pub async fn execute_command_hook(
     let plugin_data_str = registered.plugin_data_dir.to_string_lossy().to_string();
     let hook_event_str = format!("{:?}", input.hook_event_name);
 
-    let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+    let ownership = match task_manager
+        .map(TaskManager::begin_external_execution)
+        .transpose()
+    {
+        Ok(ownership) => ownership,
+        Err(error) => {
+            tracing::warn!(%error, "Command hook rejected by session execution scope");
+            return HookAction::Allow;
+        }
+    };
+    let mut execution = ShellExecutionGuard::new(ownership);
+    let cancellation = task_manager.and_then(TaskManager::execution_cancel_token);
+    let cancelled = async move {
+        match cancellation {
+            Some(token) => token.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    let run = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
         let mut cmd = peri_agent::agent::async_tasks::shell_command(&command, &[]);
-        cmd.stdin(Stdio::piped())
+        cmd.current_dir(&input.cwd)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("CLAUDE_PROJECT_DIR", &input.cwd)
@@ -70,7 +101,18 @@ pub async fn execute_command_hook(
             cmd.env(env_key, value.to_string());
         }
 
+        #[cfg(unix)]
+        cmd.process_group(0);
+        execution.prepare(&mut cmd)?;
         let mut child = cmd.spawn()?;
+        if let Err(error) = execution.attach(&child) {
+            // Windows may fail before assigning a suspended child to the job.
+            // Reap that exact child before accepting any cleanup proof.
+            let _ = child.kill().await;
+            child.wait().await?;
+            execution.confirm_stopped();
+            return Err(error);
+        }
 
         // Write input JSON to stdin
         if let Some(mut stdin) = child.stdin.take() {
@@ -82,8 +124,15 @@ pub async fn execute_command_hook(
 
         let output = child.wait_with_output().await?;
         Ok::<_, std::io::Error>(output)
-    })
-    .await;
+    });
+    let result = tokio::select! {
+        biased;
+        _ = cancelled => return HookAction::Allow,
+        result = run => result,
+    };
+    if matches!(&result, Ok(Ok(_))) {
+        execution.confirm_stopped();
+    }
 
     match result {
         Ok(Ok(output)) => {

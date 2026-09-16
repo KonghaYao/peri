@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use peri_acp_types::tools::{BaseTool, ToolContext};
 
+use super::preflight::preflight_validate_script;
 use super::*;
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage};
 use crate::runner::AgentExecutor;
@@ -40,6 +41,181 @@ fn make_tool(cwd: &str, calls: Arc<AtomicUsize>) -> (WorkflowTool, Arc<WorkflowT
         Arc::new(WorkflowJournalStore::new(cwd)),
     );
     (tool, registry)
+}
+
+fn script_example_from_parameters(tool: &WorkflowTool) -> String {
+    let schema = tool.parameters();
+    let description = schema["properties"]["script"]["description"]
+        .as_str()
+        .expect("script description must be text");
+    let marker = "```javascript\n";
+    let start = description
+        .find(marker)
+        .map(|index| index + marker.len())
+        .expect("production script description must contain a JavaScript example");
+    let end = description[start..]
+        .find("\n```")
+        .map(|index| start + index)
+        .expect("production script example must close its fence");
+    description[start..end].to_string()
+}
+
+/// [回归测试] 生产 tool description 中的示例必须通过随包 Node parser。
+#[tokio::test]
+async fn test_production_description_example_passes_real_node_preflight() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
+    let script = script_example_from_parameters(&tool);
+
+    preflight_validate_script(&script)
+        .await
+        .expect("生产 description 示例必须通过随包 parser");
+}
+
+/// [回归测试] 生产示例的 grammar 变异必须在副作用前命中 parser 拒绝边界。
+#[tokio::test]
+async fn test_production_description_mutations_hit_parser_rejection_boundaries() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
+    let script = script_example_from_parameters(&tool);
+    let cases = [
+        (
+            "额外 export",
+            format!("{script}\nexport default result"),
+            "only one export",
+        ),
+        (
+            "静态 import",
+            format!("import fs from 'node:fs'\n{script}"),
+            "import is not supported",
+        ),
+        (
+            "缺少 meta",
+            script.replacen("export const meta", "const meta", 1),
+            "export const meta",
+        ),
+    ];
+
+    for (label, invalid, expected) in cases {
+        let error = match preflight_validate_script(&invalid).await {
+            Ok(()) => panic!("{label} 必须被 parser 拒绝"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains(expected),
+            "{label} 错误应包含 {expected:?}：{error}"
+        );
+    }
+
+    let old_api_cases = [
+        (
+            "workflow.agent(...)",
+            script.replacen("agent(", "workflow.agent(", 1),
+        ),
+        (
+            "workflow.parallel(...)",
+            format!("{script}\nworkflow.parallel([])"),
+        ),
+        (
+            "workflow.pipeline(...)",
+            format!("{script}\nworkflow.pipeline([], () => null)"),
+        ),
+        (
+            "workflow.phase(...)",
+            format!("{script}\nworkflow.phase('extra')"),
+        ),
+        (
+            "workflow.log(...)",
+            format!("{script}\nworkflow.log('extra')"),
+        ),
+    ];
+    for (label, invalid) in old_api_cases {
+        let error = match preflight_validate_script(&invalid).await {
+            Ok(()) => panic!("旧式 {label} 必须被 parser 拒绝"),
+            Err(error) => error,
+        };
+        assert!(error.contains(label), "旧式调用错误应包含 {label}：{error}");
+    }
+
+    let no_return = script.replacen("return result", "void result", 1);
+    preflight_validate_script(&no_return)
+        .await
+        .expect("缺少顶层 return 只应产生 warning，不能作为 parser error");
+}
+
+/// [回归测试] writeIntent 的 cwd 偏离 canonical cwd 时必须在 workflow 启动前拒绝。
+#[tokio::test]
+async fn test_write_intent_rejects_noncanonical_cwd_before_workflow_side_effects() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+    let nested = tmp.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let run_git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .current_dir(&tmp)
+                .status()
+                .unwrap()
+                .success(),
+            "git command failed: {args:?}"
+        );
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("README.md"), "baseline\n").unwrap();
+    run_git(&["add", "README.md"]);
+    run_git(&[
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (tool, registry) = make_tool(cwd, Arc::clone(&calls));
+    let error = tool
+        .invoke(
+            serde_json::json!({
+                "script": "export const meta = { name: 'guard', description: 'guard' }; return 1",
+                "writeIntent": {
+                    "kind": "write",
+                    "repo_root": cwd,
+                    "cwd": nested.to_string_lossy(),
+                    "path_allowlist": ["README.md"]
+                }
+            }),
+            ToolContext::new(&[], cwd),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not match the active canonical repository"),
+        "非 canonical cwd 必须在启动前拒绝：{error}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "preflight guard 拒绝后不得调用 Agent"
+    );
+    assert_eq!(
+        registry.active_count(),
+        0,
+        "preflight guard 拒绝后不得登记运行"
+    );
+    assert!(
+        !tmp.path().join(".claude/workflow-runs").exists(),
+        "preflight guard 拒绝后不得写入 workflow journal"
+    );
 }
 
 #[test]

@@ -1,0 +1,55 @@
+{
+  "fixture_schema": "sandbox-mcp/tool-schema-fixture-v1",
+  "tool": "Read",
+  "aliases": [
+    "reading"
+  ],
+  "namespace": "filesystem",
+  "description": "Reads a file from the local filesystem. You can access any file directly by using this tool.\nAssume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.\n\nUsage:\n- The file_path parameter must be an absolute path, not a relative path\n- By default, it reads up to 2000 lines starting from the beginning of the file\n- Omit offset by default. Set offset only when its 1-based line number is already known from Read/Grep output or was explicitly provided by the user\n- Never guess or estimate an offset, and never use a large offset to probe the end of a file. If the file length is unknown, read without offset\n- To continue after a partial or truncated result, use the last line number actually shown plus 1. Do not calculate the next offset from limit or an assumed file length\n- Any lines longer than 65536 characters will be truncated; the result reports the original and retained character counts before the line content\n- Results exceeding 5000 bytes are truncated at a line boundary with the original byte count; continue reading the rest with the suggested offset (Read never persists output to a file)\n- Results are returned using cat -n format, with line numbers starting at 1\n- This tool reads files from the local filesystem; it cannot handle URLs\n- You can call multiple tools in a single response. It is always better to speculatively read multiple files before making edits\n- You should prefer using the Read tool over the Bash tool with commands like cat, head, tail, or sed to read files. This provides better output formatting and filtering\n- For open-ended searches that may require multiple rounds of globbing and grepping, use the Agent tool instead\n\nError handling:\n- File not found: returns an error message indicating the path does not exist\n- Binary files: detected by extension and returns a message indicating the file cannot be displayed as text\n- Files exceeding 32 MB: returns an error; offset/limit cannot bypass the file-size limit, so use Grep to locate content or another suitable file-processing tool\n- Offset exceeds file length: returns the actual line count and valid offset range. Do not guess another offset; omit it to restart from the beginning\n- Empty files: return an explicit `[EMPTY FILE]` marker instead of a numbered blank line\n- Directories: explicitly reports that Read converted the directory to a listing and directs callers to `folder_operations` with `operation=\"list\"`",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "The absolute path to the file to read"
+      },
+      "offset": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Optional 1-based start line. OMIT by default. NEVER guess or estimate this value, and never use a large offset to probe the end of a file. Set it only to a line number already observed in Read/Grep output or explicitly provided by the user. For continuation, use the last line actually shown plus 1; do not derive it from limit or an assumed file length"
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "The number of lines to read. Only provide if the file is too large to read in a single call. Not providing this parameter reads the whole file (recommended)"
+      },
+      "pages": {
+        "type": "string",
+        "description": "For PDF files, the page range to read, e.g. '1-5', '3', '10-20'. Only applies to PDF files"
+      }
+    },
+    "required": [
+      "file_path"
+    ]
+  },
+  "host_projection": {
+    "base_tool_timeout_ms": 120000,
+    "output_char_limit_chars": null,
+    "prefers_persist": true,
+    "note": "prefers_persist 在 Peri 内只有声明没有消费者；记录为事实，宿主投影不进入 MCP wire。"
+  },
+  "required_error_messages": {
+    "file_path": "The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file."
+  },
+  "param_alias_groups": [],
+  "business_error_rule": "缺失/非法参数、文件不存在、二进制扩展、超大文件、目录语义分支均为 tool business error（is_error=true 的 tool result），不是 JSON-RPC error。",
+  "provenance": {
+    "source_file": "peri-middlewares/src/tools/filesystem/read.rs",
+    "source_symbol": "ReadFileTool::parameters",
+    "source_sha256": "45c13636bd265444cbe7120f08d68807542bf2b918b11a4ec8578b58645bff41",
+    "schema_macro_start_line": 128,
+    "description_file": "peri-middlewares/src/tools/filesystem/descriptions/read.md",
+    "description_symbol": "ReadFileTool::description",
+    "description_sha256": "6b481d73d788b5348b2b3163a84ef876eccc40e648a3bcfeb69cdbcf447ff417"
+  }
+}

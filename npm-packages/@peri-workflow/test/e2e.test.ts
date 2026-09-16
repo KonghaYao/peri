@@ -185,6 +185,31 @@ return { answer: r }`
     )
   })
 
+  test('fresh workflow with Rust-compatible resume:null still dispatches and completes', async () => {
+    const s = startRpc()
+    sessions.push(s)
+    const script = `export const meta = { name: 'e2e-fresh-null-resume', description: 'fresh null resume' }
+return await agent('fresh-null')`
+
+    s.send({
+      jsonrpc: '2.0',
+      id: 11,
+      method: 'workflow/start',
+      params: { runId: 'e2e-fresh-null-resume', cwd: '/tmp', script, resume: null },
+    })
+    await s.waitFor((m) => m.id === 11 && 'result' in m)
+    const agentReq = await s.waitFor((m) => m.method === 'agent/run')
+    expect((agentReq.params as { runId: string }).runId).toBe('e2e-fresh-null-resume')
+    s.send({
+      jsonrpc: '2.0',
+      id: agentReq.id,
+      result: { kind: 'ok', output: 'fresh-result', usage: { outputTokens: 1 } },
+    })
+    const done = await s.waitFor((m) => m.method === 'workflow/done', 15000)
+    expect((done.params as { status: string; returnValue: string }).status).toBe('completed')
+    expect((done.params as { returnValue: string }).returnValue).toBe('fresh-result')
+  })
+
   test('invalid-present budgetTotal 同步拒绝且不启动 workflow', async () => {
     const s = startRpc()
     sessions.push(s)
@@ -413,7 +438,8 @@ describe('CLI 子命令模式', () => {
   })
 
   test('read 非法 runId：exit 1 + 拒绝信息', async () => {
-    const r = await runCli(['read', '../evil'])
+    const cwd = makeRunsRoot()
+    const r = await runCli(['read', '../evil'], { cwd })
     expect(r.code).toBe(1)
     expect(r.stderr).toContain('非法 runId')
   })

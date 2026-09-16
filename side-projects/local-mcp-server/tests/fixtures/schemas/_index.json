@@ -1,0 +1,36 @@
+{
+  "fixture_schema": "sandbox-mcp/tool-schema-index-v1",
+  "note": "工具注册面索引；tools/list 恰好这七个名字。别名不是额外工具条目，只在 tools/call 名称解析中生效。",
+  "tool_count": 7,
+  "tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "folder_operations",
+    "Bash"
+  ],
+  "fixtures": [
+    "read.json",
+    "write.json",
+    "edit.json",
+    "glob.json",
+    "grep.json",
+    "folder_operations.json",
+    "bash.json"
+  ],
+  "aliases": {
+    "Read": [
+      "reading"
+    ],
+    "Bash": [
+      "Shell"
+    ]
+  },
+  "generated_from": {
+    "overlay": ".peri/adlc/tasks/2026-09-11-sandbox-mcp-server/artifacts/test-results/WP-001-r1/tool_contract_overlay.json",
+    "repo": ".",
+    "generator": "artifacts/test-results/WP-001-r1/extract_tool_schemas.py"
+  }
+}

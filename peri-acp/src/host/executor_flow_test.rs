@@ -510,6 +510,8 @@ fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
             &ctx_for_stage.cwd,
             &ctx_for_stage.session_id,
             &ctx_for_stage.provider_model_name,
+            None,
+            None,
         );
         crate::host::stage_builder::build_stage_context(
             &ctx_for_stage,

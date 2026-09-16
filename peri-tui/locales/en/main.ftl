@@ -194,7 +194,7 @@ config-field-cache-warning = Cache Warning
 config-field-diff = Show Diff
 config-field-1m-context = 1M Context
 config-field-active-alias = Active Alias
-config-field-permission-mode = Permission Mode
+config-field-permission-mode = Active Session Permissions
 config-value-on = ON
 config-value-off = OFF
 config-streaming-value-streaming = streaming
@@ -561,7 +561,7 @@ thread-browser-time-minutes = { $count } minute{ $suffix } ago
 thread-browser-time-hours = { $count } hour{ $suffix } ago
 thread-browser-time-days = { $count } day{ $suffix } ago
 panel-threads-header-hint =   Enter::open · Esc::close
-panel-threads-nav-hint =   ↑/↓::navigate  Enter::open  d::delete  Esc::close
+panel-threads-nav-hint =   ↑/↓::navigate  Enter::open  Tab::scope  d::delete  Esc::close
 panel-threads-confirm-hint =   Enter::confirm  Esc::cancel
 
 # ---- Rewind Popup ----
@@ -1166,3 +1166,14 @@ reminder-compact-summary = Compaction summary
 steer-queue-title = Pending { $count }
 steer-input-rejected = Input was not accepted. Your draft has been kept.
 steer-input-uncertain = Waiting for the input receipt. Retrying with the same input ID.
+
+thread-browser-project = Project
+thread-browser-workspace = Workspace
+thread-browser-scope-count =   { $scope } · { $count } sessions
+thread-browser-messages = { $count } messages
+panel-threads-more-hint =   ↑/↓::navigate  Enter::open  Tab::scope  n::more  d::delete
+session-restore-failed = Session restore failed: { $error }. Retry or use /clear to create a session.
+
+panel-host-settings = Host settings
+
+permission-mode-update-failed = Permission mode update failed: { $error }

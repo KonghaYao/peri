@@ -189,7 +189,7 @@ pub fn SteerQueue(props: &SteerQueueProps, mut hooks: Hooks) -> impl Into<AnyEle
         0
     } else {
         visible
-            .saturating_add(usize::from(view::HEADER_ROWS))
+            .saturating_add(usize::from(view::CHROME_ROWS))
             .min(usize::from(u16::MAX)) as u16
     }
     .min(props.max_height.unwrap_or(u16::MAX));

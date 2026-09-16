@@ -345,9 +345,9 @@ impl AgentModelBridge {
                 }
                 Some(Err(error)) => return Err(map_model_error(error)),
                 None => {
-                    return Err(AgentError::LlmError(
-                        "model stream ended without completion".into(),
-                    ))
+                    return Err(AgentError::ModelError(peri_model::ModelError::protocol(
+                        peri_model::ProtocolErrorKind::StreamEndedWithoutCompleted,
+                    )))
                 }
             }
         }
@@ -627,13 +627,8 @@ fn convert_model_block(block: &ModelContentBlock) -> AgentResult<ContentBlock> {
 pub(crate) fn map_model_error(error: peri_model::ModelError) -> AgentError {
     if error.is_cancelled() {
         AgentError::Interrupted
-    } else if let Some(status) = error.http_status_code() {
-        AgentError::LlmHttpError {
-            status,
-            message: error.to_string(),
-        }
     } else {
-        AgentError::LlmError(error.to_string())
+        AgentError::ModelError(error)
     }
 }
 

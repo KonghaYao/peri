@@ -1,0 +1,23 @@
+{
+  "skill_name": "auto-data-researcher",
+  "evals": [
+    {
+      "id": "stale-summary-and-event-identity",
+      "prompt": "帮我复查这个离线工具数据包的使用模式和改进方向，先前摘要也在里面。给下一位 agent 一份短报告和可验证改进队列。只读输入，产物写入独立临时目录，不修改 skill 或仓库代码。",
+      "input_files": [
+        "fixtures/tool-events/contract.txt",
+        "fixtures/tool-events/events.jsonl",
+        "fixtures/tool-events/previous-summary.json"
+      ],
+      "expectations": [
+        "重新计算自有逻辑调用为 6；双写表示与 inherited 快照不增加执行次数，不跨线程合并相同 call_id。",
+        "6 个自有结果中 5 个状态已知、2 个显式错误、1 个未知；已知结果错误比例为 2/5，未知不填成功或失败；如列出 3/6，须称为成功记录覆盖比例而非成功率。",
+        "保留 sleep 与 echo 调用，不能只凭命令词认定测试数据。",
+        "不沿用旧摘要的 8 次调用、100% 成功或 token 估算作为观测事实；旧计算过程未提供时，不把某种去重/过滤错误断言为已证实原因。",
+        "区分 Edit 输入失败、Agent 流中断与永久能力失败；后续其他工具成功不能证明原任务完成，未记录取消则不推断取消。",
+        "输出可定位的证据与下一步验证，明确小样本及缺失观测的局限，源输入文件保持不变。",
+        "报告及队列的每个证据 ID 都能在源文件中解析到正确线程及内容，并实际执行检查；不能拼造结果 ID。"
+      ]
+    }
+  ]
+}

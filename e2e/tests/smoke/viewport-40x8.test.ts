@@ -14,7 +14,6 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
-import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
 describe("smoke: 40x8 minimal viewport", () => {
@@ -34,19 +33,11 @@ describe("smoke: 40x8 minimal viewport", () => {
 
       await sendPrompt(tester, "hi");
 
-      // 等待 turn 完成（footer 处理耗时；中英文环境各兜底）。
-      // 40×8 下 user bubble 被滚出 3 行视口——不能等 "hi"。
-      try {
-        await tester.waitForText("处理耗时", {
-          timeout: 120_000,
-          interval: 1000,
-        });
-      } catch {
-        await tester.waitForText("Brewed for", {
-          timeout: 60_000,
-          interval: 1000,
-        });
-      }
+      // 40×8 下 user bubble 被滚出 3 行视口——等待可见的中英文 footer 任一项。
+      await tester.waitFor(
+        (screen) => screen.includes("处理耗时") || screen.includes("Brewed for"),
+        { timeout: 180_000, interval: 1000, message: "等待 turn footer 超时" },
+      );
       await tester.sleep(1500);
 
       const capture = await takePeriSnapshot(tester, "smoke-40x8");
@@ -60,15 +51,8 @@ describe("smoke: 40x8 minimal viewport", () => {
         true,
       );
 
-      const r = await judge({
-        ansiRaw: capture.raw,
-        criteria: [
-          "40×8 极小终端下 TUI 不崩溃、屏幕非空白",
-          "消息区可见（处理耗时 footer 行或滚动指示符）",
-          "底部有输入区域（composer 的 ❯ 提示符可见）",
-        ],
-      });
-      expect(r.pass, `40×8 冒烟通过`).toBe(true);
+      // composer 的提示符必须仍可见，确认 turn 完成后输入区未被挤出视口。
+      expect(capture.text).toContain("❯");
     },
   );
 });

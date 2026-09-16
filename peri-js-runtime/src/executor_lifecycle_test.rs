@@ -97,6 +97,87 @@ async fn test_prepare_deadline_releases_pending_launch() {
     pending_launch_stops(false).await;
 }
 
+struct IncompleteLaunchProvider {
+    started: Arc<Notify>,
+}
+
+#[async_trait]
+impl PtcArtifactProvider for IncompleteLaunchProvider {
+    async fn launch(&self, _: &str, cancel: &CancellationToken) -> Result<PtcLaunch> {
+        self.started.notify_one();
+        cancel.cancelled().await;
+        Err(JsRuntimeError::CleanupFailed(
+            "fixture cleanup unfinished".into(),
+        ))
+    }
+
+    async fn invalidate(&self) -> Result<()> {
+        panic!("准备清理未完成时不能隔离缓存")
+    }
+}
+
+async fn incomplete_launch_survives_interruption(cancel_prepare: bool) {
+    let started = Arc::new(Notify::new());
+    let executor = JsExecutor::with_artifact_provider(
+        "node",
+        JsExecutionLimits {
+            wall_timeout: if cancel_prepare {
+                Duration::from_secs(10)
+            } else {
+                Duration::from_millis(20)
+            },
+            ..JsExecutionLimits::default()
+        },
+        Arc::new(IncompleteLaunchProvider {
+            started: started.clone(),
+        }),
+    )
+    .unwrap();
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            executor
+                .execute(
+                    JsExecutionRequest {
+                        source: "return 1".into(),
+                        input: Value::Null,
+                    },
+                    Arc::new(EchoRouter),
+                    cancel,
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), started.notified())
+        .await
+        .unwrap();
+    if cancel_prepare {
+        cancel.cancel();
+    }
+    let error = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("provider 收到准备取消后应返回清理结果")
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        matches!(error, JsRuntimeError::CleanupFailed(ref reason) if reason == "fixture cleanup unfinished"),
+        "取消或deadline不能将未知清理状态覆盖成可释放owner的普通错误: {error:?}"
+    );
+}
+
+/// [回归测试] 用户取消准备仍必须保留 provider 的未知清理状态。
+#[tokio::test]
+async fn test_prepare_cancel_preserves_incomplete_cleanup() {
+    incomplete_launch_survives_interruption(true).await;
+}
+
+/// [回归测试] 准备超时不能把 CleanupFailed 覆盖成普通 Timeout。
+#[tokio::test]
+async fn test_prepare_deadline_preserves_incomplete_cleanup() {
+    incomplete_launch_survives_interruption(false).await;
+}
+
 struct ScriptProvider {
     home: tempfile::TempDir,
     script: String,

@@ -13,7 +13,7 @@ use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort, P
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::thread::ThreadMeta;
-use peri_agent::thread::FilesystemThreadStore;
+use peri_agent::thread::SqliteThreadStore;
 use peri_middlewares::permission::shared_mode::{PermissionMode, SharedPermissionMode};
 use peri_middlewares::workflow::WorkflowMiddleware;
 use peri_workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
@@ -94,12 +94,14 @@ fn make_peri_config_with_provider(provider: ProviderConfig) -> PeriConfig {
     peri_config
 }
 
-fn make_server_config(
+async fn make_server_config(
     peri_config: PeriConfig,
     provider: LlmProvider,
     tmp: &tempfile::TempDir,
 ) -> AcpServerConfig {
-    let thread_store = FilesystemThreadStore::new(tmp.path().join("threads"));
+    let thread_store = SqliteThreadStore::new(tmp.path().join("threads.db"))
+        .await
+        .unwrap();
     let arc_thread_store: Arc<dyn peri_acp_types::store::ThreadStore> = Arc::new(thread_store);
     let session_manager = crate::session::SessionManager::new(
         arc_thread_store.clone(),
@@ -122,6 +124,7 @@ fn make_server_config(
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
+        workspace_assembly: None,
         host_task_owner: Some(host_task_owner),
         host_task_spawner,
         mcp_task_owner: Some(Box::new(mcp_task_owner)),
@@ -168,6 +171,36 @@ fn make_server_config(
     }
 }
 
+async fn create_bound_fixture(cfg: &AcpServerConfig, cwd: &str, id: Option<&str>) -> String {
+    let workspace = cfg
+        .thread_store
+        .resolve_workspace(Path::new(cwd))
+        .await
+        .unwrap();
+    let mut meta = ThreadMeta::new(cwd);
+    if let Some(id) = id {
+        meta.id = id.to_owned();
+    }
+    let id = cfg
+        .thread_store
+        .create_bound_thread(meta, &workspace)
+        .await
+        .unwrap();
+    let owner = cfg.thread_store.acquire_execution_lease(&id).await.unwrap();
+    let frozen = cfg.session_manager.build_frozen_data(
+        workspace.cwd.to_str().unwrap(),
+        &cfg.plugin_skill_roots,
+        &cfg.plugin_agent_dirs,
+    );
+    let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
+    cfg.thread_store
+        .store_frozen_snapshot_if_absent(&id, &encoded)
+        .await
+        .unwrap();
+    owner.mark_clean().await.unwrap();
+    id
+}
+
 // ── 测试 ──────────────────────────────────────────────────────────────────────
 
 /// 验证 session/update_config 切换 active profile 的 provider 后 cfg.provider 正确更新
@@ -194,7 +227,7 @@ async fn test_update_config_切换provider后cfg_provider更新() {
         "初始 provider 应为 OpenAI"
     );
 
-    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp);
+    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
@@ -261,7 +294,7 @@ async fn test_update_config_空providers返回错误() {
     peri_config.config.providers = vec![provider_a];
 
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp);
+    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
@@ -309,7 +342,7 @@ async fn test_update_config_不存在的provider_id返回错误() {
     peri_config.config.providers = vec![provider_a];
 
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp);
+    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
@@ -354,9 +387,10 @@ async fn test_update_config_不存在的provider_id返回错误() {
 // ── Rewind RPC 路由测试 ─────────────────────────────────────────────────────
 
 /// 注册一个含 user/ai 消息的 SessionState（字段以 mod.rs 定义为准）。
-fn register_session_with_history(
+async fn register_session_with_history(
     sessions: &mut HashMap<String, SessionState>,
     cwd: &str,
+    cfg: &AcpServerConfig,
 ) -> String {
     let history = vec![
         peri_acp_types::messages::BaseMessage::human("第一轮用户问题"),
@@ -369,12 +403,35 @@ fn register_session_with_history(
         .map(peri_acp_types::store::PersistedPayload::Message)
         .collect();
     let sid = "rewind-test-session".to_string();
+    let workspace = cfg
+        .thread_store
+        .resolve_workspace(Path::new(cwd))
+        .await
+        .unwrap();
+    let mut meta = ThreadMeta::new(cwd);
+    meta.id = sid.clone();
+    cfg.thread_store
+        .create_bound_thread(meta, &workspace)
+        .await
+        .unwrap();
+    let owner = cfg
+        .thread_store
+        .acquire_execution_lease(&sid)
+        .await
+        .unwrap();
+    cfg.thread_store
+        .append_messages(&sid, &history)
+        .await
+        .unwrap();
     sessions.insert(
         sid.clone(),
         SessionState {
             session_id: sid.clone(),
-            thread_id: "thread-1".to_string(),
-            cwd: cwd.to_string(),
+            thread_id: sid.clone(),
+            cwd: workspace.cwd.to_str().unwrap().to_owned(),
+            execution_owner: Some(owner),
+            environment: None,
+            closing: false,
             history,
             history_payloads,
             cancel_token: None,
@@ -405,10 +462,11 @@ async fn test_rewind_methods_require_explicit_capability() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    let sid =
+        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
     cfg.session_manager
         .caps_registry()
         .insert(sid.clone(), PeriCaps::default());
@@ -462,10 +520,11 @@ async fn test_rewind_candidates_routes_to_dispatch() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    let sid =
+        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
     cfg.session_manager.caps_registry().insert(
         sid.clone(),
         PeriCaps {
@@ -501,10 +560,11 @@ async fn test_rewind_preview_routes_to_dispatch() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    let sid =
+        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
     cfg.session_manager.caps_registry().insert(
         sid.clone(),
         PeriCaps {
@@ -544,10 +604,11 @@ async fn test_rewind_preview_missing_target_returns_not_found() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    let sid =
+        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
     cfg.session_manager.caps_registry().insert(
         sid.clone(),
         PeriCaps {
@@ -585,10 +646,11 @@ async fn test_rewind_routes_to_dispatch() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    let sid =
+        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
     cfg.session_manager.caps_registry().insert(
         sid.clone(),
         PeriCaps {
@@ -647,10 +709,11 @@ async fn test_rewind_rejects_stale_preview_without_mutating_history() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    let sid =
+        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
     cfg.session_manager.caps_registry().insert(
         sid.clone(),
         PeriCaps {
@@ -714,14 +777,19 @@ async fn test_cancel_bg_task_workflow_invokes_kill_closure() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid = "cancel-bg-session".to_string();
-    cfg.session_manager
-        .new_session_with_id(&sid, tmp.path().to_str().unwrap())
-        .await
-        .unwrap();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd":tmp.path()}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let sid = created["sessionId"].as_str().unwrap().to_owned();
 
     let killed = Arc::new(AtomicBool::new(false));
     let killed_clone = killed.clone();
@@ -772,7 +840,7 @@ async fn test_cancel_bg_task_session_not_found_returns_error() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
@@ -806,7 +874,7 @@ async fn test_cancel_bg_task_task_not_found_returns_error() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = "cancel-bg-session".to_string();
@@ -854,11 +922,26 @@ impl AgentExecutor for MockWorkflowExecutor {
 }
 
 /// 构造带 workflow_middleware 的 SessionState，返回 middleware 引用（供注册 run 用）。
-fn register_session_with_workflow(
+async fn register_session_with_workflow(
     sessions: &mut HashMap<String, SessionState>,
     sid: &str,
     cwd: &str,
+    cfg: &AcpServerConfig,
 ) -> Arc<WorkflowMiddleware> {
+    if cfg
+        .thread_store
+        .load_session_binding(&sid.to_owned())
+        .await
+        .unwrap()
+        .is_none()
+    {
+        create_bound_fixture(cfg, cwd, Some(sid)).await;
+    }
+    let owner = cfg
+        .thread_store
+        .acquire_execution_lease(&sid.to_owned())
+        .await
+        .unwrap();
     let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
     let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
     let mw = Arc::new(WorkflowMiddleware::new(
@@ -871,8 +954,15 @@ fn register_session_with_workflow(
         sid.to_string(),
         SessionState {
             session_id: sid.to_string(),
-            thread_id: format!("thread-{sid}"),
-            cwd: cwd.to_string(),
+            thread_id: sid.to_owned(),
+            cwd: std::fs::canonicalize(cwd)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            execution_owner: Some(owner),
+            environment: None,
+            closing: false,
             history: Vec::new(),
             history_payloads: Vec::new(),
             cancel_token: None,
@@ -923,13 +1013,13 @@ async fn test_kill_run_targets_requested_session() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
 
-    let mw_a = register_session_with_workflow(&mut sessions, "sess-a", cwd);
-    let mw_b = register_session_with_workflow(&mut sessions, "sess-b", cwd);
+    let mw_a = register_session_with_workflow(&mut sessions, "sess-a", cwd, &cfg).await;
+    let mw_b = register_session_with_workflow(&mut sessions, "sess-b", cwd, &cfg).await;
     register_run(&mw_a, "run-a");
     register_run(&mw_b, "run-b");
 
@@ -998,7 +1088,7 @@ async fn test_kill_run_targets_requested_session() {
     );
 
     // session 存在但无 workflow middleware → 明确错误
-    let sid = register_session_with_history(&mut sessions, cwd);
+    let sid = register_session_with_history(&mut sessions, cwd, &cfg).await;
     let err = handle_request(
         "workflow/kill_run",
         &json!({ "sessionId": sid, "runId": "run-a" }),
@@ -1028,13 +1118,13 @@ async fn test_kill_agent_targets_requested_session() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
 
-    register_session_with_workflow(&mut sessions, "sess-a", cwd);
-    register_session_with_workflow(&mut sessions, "sess-b", cwd);
+    register_session_with_workflow(&mut sessions, "sess-a", cwd, &cfg).await;
+    register_session_with_workflow(&mut sessions, "sess-b", cwd, &cfg).await;
 
     // 存在 session：正常返回 killed（sess-b 无该 run 的 active channel → false，不报错）
     let resp = handle_request(
@@ -1094,13 +1184,13 @@ async fn test_resume_targets_requested_session() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
 
-    register_session_with_workflow(&mut sessions, "sess-a", cwd);
-    register_session_with_workflow(&mut sessions, "sess-b", cwd);
+    register_session_with_workflow(&mut sessions, "sess-a", cwd, &cfg).await;
+    register_session_with_workflow(&mut sessions, "sess-b", cwd, &cfg).await;
 
     // 请求 sess-b + 不存在的 run → 错误来自 sess-b 的 middleware（read_state 失败），
     // 而非 "session not found"——证明分发到了 sess-b 而非第一个 session
@@ -1166,21 +1256,17 @@ async fn test_delete_removes_thread_and_active_session() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
 
     // 真实创建线程（id 即 session id）
-    let thread_id = cfg
-        .thread_store
-        .create_thread(ThreadMeta::new(cwd))
-        .await
-        .unwrap();
+    let thread_id = create_bound_fixture(&cfg, cwd, None).await;
     let sid = thread_id.clone();
 
     // 活跃会话登记（与 session/new 后的内存态一致）
-    register_session_with_workflow(&mut sessions, &sid, cwd);
+    register_session_with_workflow(&mut sessions, &sid, cwd, &cfg).await;
 
     let resp = handle_request(
         "session/delete",
@@ -1228,7 +1314,7 @@ async fn test_delete_unknown_session_is_idempotent() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
@@ -1255,7 +1341,7 @@ async fn test_delete_missing_session_id_returns_error() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
@@ -1289,18 +1375,14 @@ async fn test_rename_persists_title_and_pushes_session_info_update() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let mock = std::sync::Arc::new(MockTransport::default());
     let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
     let cwd = tmp.path().to_str().unwrap();
 
     // 真实创建线程（id 即 session id），与 session/new 后的持久层状态一致
-    let sid = cfg
-        .thread_store
-        .create_thread(ThreadMeta::new(cwd))
-        .await
-        .unwrap();
+    let sid = create_bound_fixture(&cfg, cwd, None).await;
     let new_title = "重构 ACP 协议".to_string();
 
     let resp = handle_request(
@@ -1345,7 +1427,7 @@ async fn test_rename_missing_session_id_returns_error() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
@@ -1377,7 +1459,7 @@ async fn test_rename_missing_title_returns_error() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
@@ -1428,17 +1510,13 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
 
     // 真实创建线程（id 即 session id），与 delete 分支的 thread_store 删除对应
-    let sid = cfg
-        .thread_store
-        .create_thread(ThreadMeta::new(cwd))
-        .await
-        .unwrap();
+    let sid = create_bound_fixture(&cfg, cwd, None).await;
 
     let shutdown_calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let pool: Arc<dyn peri_acp_types::ports::LspPoolPort> = Arc::new(MockLspPool {
@@ -1460,6 +1538,14 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
             session_id: sid.clone(),
             thread_id: sid.clone(),
             cwd: cwd.to_string(),
+            execution_owner: Some(
+                cfg.thread_store
+                    .acquire_execution_lease(&sid)
+                    .await
+                    .unwrap(),
+            ),
+            environment: None,
+            closing: false,
             history: Vec::new(),
             history_payloads: Vec::new(),
             cancel_token: None,
@@ -1517,7 +1603,7 @@ async fn test_available_commands_update_mcp_callback_resend() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
@@ -1662,12 +1748,10 @@ async fn test_session_load_prewarms_mcp_discovery_smoke() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps::default());
     cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
-    let mut legacy_meta = ThreadMeta::new(tmp.path().to_str().unwrap());
-    legacy_meta.id = "s1".to_string();
-    cfg.thread_store.create_thread(legacy_meta).await.unwrap();
+    create_bound_fixture(&cfg, tmp.path().to_str().unwrap(), Some("s1")).await;
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
@@ -1711,7 +1795,7 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config.clone(), provider.clone(), &tmp);
+    let cfg = make_server_config(peri_config.clone(), provider.clone(), &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let created = handle_request(
@@ -1747,10 +1831,19 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
         )
         .await
         .unwrap();
+    handle_request(
+        "session/close",
+        &json!({"sessionId": session_id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
     drop(cfg);
     drop(sessions);
     std::fs::write(tmp.path().join("CLAUDE.md"), "FROZEN_PROMPT_V2").unwrap();
-    let restarted = make_server_config(peri_config, provider, &tmp);
+    let restarted = make_server_config(peri_config, provider, &tmp).await;
     let mut restored_sessions = HashMap::new();
     // Act
     handle_request(
@@ -1796,7 +1889,7 @@ async fn test_session_resume_existing_empty_history_is_available_to_fork() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
@@ -1873,32 +1966,32 @@ async fn test_session_load_future_frozen_snapshot_fails_without_overwrite() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config.clone(), provider.clone(), &tmp);
-    let mut sessions = HashMap::new();
+    let cfg = make_server_config(peri_config.clone(), provider.clone(), &tmp).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let created = handle_request(
-        "session/new",
-        &json!({ "cwd": tmp.path().to_str().unwrap() }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let session_id = created["sessionId"].as_str().unwrap().to_string();
-    let future_snapshot = r#"{"version":999,"data":{"must":"remain"}}"#;
-    let snapshot_path = tmp
-        .path()
-        .join("threads")
-        .join(&session_id)
-        .join("frozen.json");
-    tokio::fs::write(&snapshot_path, future_snapshot)
+    let workspace = cfg
+        .thread_store
+        .resolve_workspace(tmp.path())
         .await
         .unwrap();
+    let session_id = cfg
+        .thread_store
+        .create_bound_thread(ThreadMeta::new(tmp.path().to_str().unwrap()), &workspace)
+        .await
+        .unwrap();
+    let owner = cfg
+        .thread_store
+        .acquire_execution_lease(&session_id)
+        .await
+        .unwrap();
+    let future_snapshot = r#"{"version":999,"data":{"must":"remain"}}"#;
+    cfg.thread_store
+        .store_frozen_snapshot_if_absent(&session_id, future_snapshot)
+        .await
+        .unwrap();
+    owner.mark_clean().await.unwrap();
     drop(cfg);
-    drop(sessions);
 
-    let restarted = make_server_config(peri_config, provider, &tmp);
+    let restarted = make_server_config(peri_config, provider, &tmp).await;
     let mut restored_sessions = HashMap::new();
     let error = handle_request(
         "session/load",
@@ -1919,7 +2012,12 @@ async fn test_session_load_future_frozen_snapshot_fails_without_overwrite() {
     assert!(restored_sessions.is_empty());
     assert!(restarted.session_manager.get_session(&session_id).is_none());
     assert_eq!(
-        tokio::fs::read_to_string(snapshot_path).await.unwrap(),
+        restarted
+            .thread_store
+            .load_frozen_snapshot(&session_id)
+            .await
+            .unwrap()
+            .unwrap(),
         future_snapshot,
         "future snapshot must be preserved for a newer binary"
     );
@@ -1938,7 +2036,7 @@ async fn test_available_commands_update_ui_entries_from_caps_details() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
     // 协商 caps：仅上送两条自定义 ui 明细（大写 name 验证小写归一 + alias 透传）
     cfg.session_manager.set_pending_caps(PeriCaps {
         ui_commands: vec![
@@ -2035,7 +2133,7 @@ async fn test_available_commands_update_callbacks_do_not_hold_strong_refs() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let _cfg = make_server_config(peri_config, provider, &tmp);
+    let _cfg = make_server_config(peri_config, provider, &tmp).await;
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
 
@@ -2070,7 +2168,7 @@ async fn test_mcp_list_requires_negotiated_oauth_capability() {
         "gpt-test",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps::default());
     cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
@@ -2097,7 +2195,7 @@ async fn test_mcp_list_returns_bounded_safe_empty_snapshot_when_negotiated() {
         "gpt-test",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps {
         oauth: true,
         ..PeriCaps::default()
@@ -2128,7 +2226,7 @@ async fn test_oauth_start_rejects_missing_flow_id_before_spawning() {
         "gpt-test",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps {
         oauth: true,
         ..PeriCaps::default()
@@ -2158,7 +2256,7 @@ async fn test_safe_oauth_capability_rejects_callback_secrets_over_acp() {
         "gpt-test",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps {
         oauth: true,
         ..PeriCaps::default()
@@ -2428,7 +2526,7 @@ async fn test_plugin_install_refreshes_plugin_domain_and_pushes_once() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
     cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
@@ -2542,7 +2640,7 @@ async fn test_plugin_install_reload_failure_keeps_domain_empty_and_does_not_bloc
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
     cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
@@ -2615,7 +2713,7 @@ async fn test_plugin_uninstall_removes_stale_plugin_entries() {
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
     cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
@@ -2698,3 +2796,682 @@ mod user_input_tests;
 
 #[path = "requests/plugin_search_test.rs"]
 mod plugin_search_tests;
+
+#[tokio::test]
+async fn worktree_binding_hot_cold_resume_and_owner_are_consistent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let repo = tmp.path().join("main");
+    let linked = tmp.path().join("linked");
+    std::fs::create_dir(&repo).unwrap();
+    let run_git = |args: &[&std::ffi::OsStr]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_git(&["init".as_ref(), "--quiet".as_ref()]);
+    run_git(&[
+        "-c".as_ref(),
+        "user.name=Test".as_ref(),
+        "-c".as_ref(),
+        "user.email=test@example.invalid".as_ref(),
+        "commit".as_ref(),
+        "--allow-empty".as_ref(),
+        "-m".as_ref(),
+        "initial".as_ref(),
+        "--quiet".as_ref(),
+    ]);
+    run_git(&[
+        "worktree".as_ref(),
+        "add".as_ref(),
+        "--detach".as_ref(),
+        linked.as_os_str(),
+    ]);
+    let sub = repo.join("src");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("CLAUDE.md"), "SOURCE_WORKTREE_FROZEN_SENTINEL").unwrap();
+    let provider_config = make_provider_config("test", "openai", "key", "model");
+    let peri_config = make_peri_config_with_provider(provider_config);
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config.clone(), provider.clone(), &tmp).await;
+    let second = make_server_config(peri_config, provider, &tmp).await;
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": sub}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let id = created["sessionId"].as_str().unwrap().to_owned();
+    let original_cwd = std::fs::canonicalize(&sub).unwrap();
+    assert_eq!(sessions[&id].cwd, original_cwd.to_str().unwrap());
+    assert_eq!(
+        created["_meta"]["peri.sessionWorkspaceV1"]["workspace"]["cwd"],
+        original_cwd.to_str().unwrap()
+    );
+    let frozen = cfg
+        .thread_store
+        .load_frozen_snapshot(&id)
+        .await
+        .unwrap()
+        .unwrap();
+    cfg.thread_store
+        .append_messages(
+            &id,
+            &[peri_acp_types::messages::BaseMessage::human(
+                "visible project session",
+            )],
+        )
+        .await
+        .unwrap();
+    for method in ["session/load", "session/resume", "session/fork"] {
+        assert!(handle_request(
+            method,
+            &json!({"sessionId": id, "cwd": linked}),
+            &cfg,
+            &mut sessions,
+            &transport
+        )
+        .await
+        .is_err());
+        assert_eq!(sessions[&id].cwd, original_cwd.to_str().unwrap());
+    }
+    let project = handle_request(
+        "peri/session_context",
+        &json!({"cwd": linked}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let list = handle_request("session/list", &json!({"_meta":{"peri.sessionWorkspaceV1":{"scope":{"kind":"project","value":project["workspace"]["project_id"]}}}}), &cfg, &mut sessions, &transport).await.unwrap();
+    assert_eq!(list["sessions"].as_array().unwrap().len(), 1);
+    let exact = handle_request(
+        "session/list",
+        &json!({"cwd": linked}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert!(exact["sessions"].as_array().unwrap().is_empty());
+    let forked = handle_request(
+        "session/fork",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let fork_id = forked["sessionId"].as_str().unwrap().to_owned();
+    assert_eq!(
+        cfg.thread_store
+            .load_session_binding(&fork_id)
+            .await
+            .unwrap(),
+        cfg.thread_store.load_session_binding(&id).await.unwrap()
+    );
+    assert_eq!(
+        cfg.thread_store
+            .load_frozen_snapshot(&fork_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        frozen
+    );
+    assert_eq!(
+        cfg.thread_store
+            .load_messages(&fork_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    handle_request(
+        "session/close",
+        &json!({"sessionId": fork_id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let mut cold = HashMap::new();
+    let error = handle_request(
+        "session/load",
+        &json!({"sessionId": id, "cwd": sub}),
+        &second,
+        &mut cold,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.message.contains("owned"), "{}", error.message);
+    assert!(cold.is_empty());
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    std::fs::write(sub.join("CLAUDE.md"), "MUTATED_AFTER_CLOSE").unwrap();
+    handle_request(
+        "session/resume",
+        &json!({"sessionId": id}),
+        &second,
+        &mut cold,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(cold[&id].cwd, original_cwd.to_str().unwrap());
+    assert_eq!(
+        second
+            .thread_store
+            .load_frozen_snapshot(&id)
+            .await
+            .unwrap()
+            .unwrap(),
+        frozen
+    );
+    assert!(cold[&id]
+        .frozen
+        .as_ref()
+        .unwrap()
+        .system_prompt()
+        .contains(original_cwd.to_str().unwrap()));
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &second,
+        &mut cold,
+        &transport,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn worktree_missing_directory_history_is_read_only_and_load_is_rejected() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().join("project");
+    std::fs::create_dir(&cwd).unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let cfg = make_server_config(config, provider, &tmp).await;
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": cwd}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let id = created["sessionId"].as_str().unwrap();
+    cfg.thread_store
+        .append_messages(
+            &id.to_owned(),
+            &[peri_acp_types::messages::BaseMessage::human(
+                "saved history",
+            )],
+        )
+        .await
+        .unwrap();
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    std::fs::remove_dir(&cwd).unwrap();
+    let history = handle_request(
+        "peri/session_history",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(history["payloads"].as_array().unwrap().len(), 1);
+    assert!(sessions.is_empty());
+    assert!(handle_request(
+        "session/load",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport
+    )
+    .await
+    .is_err());
+    assert!(sessions.is_empty());
+}
+
+#[tokio::test]
+async fn worktree_new_resources_use_the_target_directory() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let startup = tmp.path().join("startup");
+    let target = tmp.path().join("target");
+    std::fs::create_dir(&startup).unwrap();
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("CLAUDE.md"), "TARGET_FROZEN_CONFIGURATION").unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let mut cfg = make_server_config(config.clone(), provider, &tmp).await;
+    crate::provider::save_to(&config, cfg.config_source.global_path()).unwrap();
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: startup.to_str().unwrap().to_owned(),
+        bare: true,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+    });
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": target}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let id = created["sessionId"].as_str().unwrap();
+    let state = &sessions[id];
+    let environment = state.environment.as_ref().unwrap();
+    assert!(state
+        .frozen
+        .as_ref()
+        .unwrap()
+        .v2_frozen()
+        .claude_md
+        .contains("TARGET_FROZEN_CONFIGURATION"));
+    assert_eq!(
+        environment.cfg.session_manager.get_session(id).unwrap().cwd,
+        state.cwd
+    );
+    assert!(environment.cfg.mcp_pool.is_none());
+    assert!(environment.cfg.hook_groups.is_empty());
+    assert_eq!(cfg.session_manager.get_session(id).unwrap().cwd, state.cwd);
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+}
+
+/// A resource that keeps closing until its external cleanup is acknowledged.
+struct RetryShutdownPool {
+    settled: AtomicBool,
+    called: AtomicBool,
+}
+
+#[async_trait]
+impl peri_acp_types::ports::McpPoolPort for RetryShutdownPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
+        self.called.store(true, Ordering::Release);
+        if self.settled.load(Ordering::Acquire) {
+            peri_acp_types::ports::McpPoolShutdownReport::Complete {
+                settled_services: 1,
+                failed_services: 0,
+            }
+        } else {
+            peri_acp_types::ports::McpPoolShutdownReport::Incomplete {
+                settled_services: 0,
+                unfinished_services: 1,
+                failed_services: 0,
+            }
+        }
+    }
+
+    fn snapshot(&self) -> Value {
+        json!({})
+    }
+}
+
+#[tokio::test]
+async fn worktree_failed_assembly_retains_resources_and_lease_until_cleanup_retry() {
+    use peri_acp_types::store::ThreadStore;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let mut cfg = make_server_config(config, provider, &tmp).await;
+    let cwd = tmp.path().canonicalize().unwrap();
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: cwd.to_str().unwrap().to_owned(),
+        bare: true,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+    });
+    let id = create_bound_fixture(&cfg, cwd.to_str().unwrap(), None).await;
+    let owner = cfg.thread_store.acquire_execution_lease(&id).await.unwrap();
+    let mut environment =
+        crate::host::workspace::SessionEnvironment::assemble(&cfg, cwd.to_str().unwrap(), &id)
+            .await
+            .unwrap()
+            .unwrap();
+    let pool = Arc::new(RetryShutdownPool {
+        settled: AtomicBool::new(false),
+        called: AtomicBool::new(false),
+    });
+    Arc::get_mut(&mut environment).unwrap().cfg.mcp_pool = Some(pool.clone());
+    assert!(!environment.shutdown().await);
+    let mut sessions = HashMap::new();
+    session_lifecycle::retain_failed_assembly(
+        &mut sessions,
+        &id,
+        cwd.to_str().unwrap(),
+        owner,
+        environment,
+    );
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let competing = SqliteThreadStore::new(tmp.path().join("threads.db"))
+        .await
+        .unwrap();
+    assert!(sessions[&id].closing);
+    assert!(competing.acquire_execution_lease(&id).await.is_err());
+    let close = json!({"sessionId": id});
+    assert!(
+        handle_request("session/close", &close, &cfg, &mut sessions, &transport)
+            .await
+            .is_err()
+    );
+    assert!(sessions.contains_key(&id));
+    assert!(competing.acquire_execution_lease(&id).await.is_err());
+    // A closing owner cannot mutate session configuration or restart execution.
+    assert!(handle_request(
+        "session/set_mode",
+        &json!({"sessionId": id, "modeId": "ask"}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .is_err());
+    pool.settled.store(true, Ordering::Release);
+    handle_request("session/close", &close, &cfg, &mut sessions, &transport)
+        .await
+        .unwrap();
+    assert!(!sessions.contains_key(&id));
+    competing
+        .acquire_execution_lease(&id)
+        .await
+        .unwrap()
+        .mark_clean()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn worktree_scheduled_approval_uses_session_permission_and_rejects_closed_owner() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let mut cfg = make_server_config(config, provider, &tmp).await;
+    let cwd = tmp.path().canonicalize().unwrap();
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: cwd.to_str().unwrap().to_owned(),
+        bare: true,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+    });
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": cwd}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let id = created["sessionId"].as_str().unwrap();
+    sessions[id]
+        .environment
+        .as_ref()
+        .unwrap()
+        .cfg
+        .permission_mode
+        .store(PermissionMode::Default);
+    assert_eq!(cfg.permission_mode.load(), PermissionMode::Bypass);
+    let sessions = Arc::new(tokio::sync::Mutex::new(sessions));
+    let permission = crate::host::continuation::scheduled_permission_mode(&cfg, &sessions, id)
+        .await
+        .unwrap();
+    assert_eq!(permission.load(), PermissionMode::Default);
+    assert!(
+        !crate::host::prompt::approve_scheduled_trigger(permission.as_ref(), None, "task", "run")
+            .await
+    );
+    sessions.lock().await.get_mut(id).unwrap().closing = true;
+    assert!(
+        crate::host::continuation::scheduled_permission_mode(&cfg, &sessions, id)
+            .await
+            .is_err()
+    );
+    assert!(
+        crate::host::continuation::scheduled_permission_mode(&cfg, &sessions, "missing")
+            .await
+            .is_err()
+    );
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut *sessions.lock().await,
+        &transport,
+    )
+    .await
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worktree_session_end_retains_owner_and_joins_same_hook_on_retry() {
+    use peri_acp_types::hooks::{HookEvent, RegisteredHook};
+    use peri_acp_types::store::ThreadStore;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let target = tmp.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    let target = target.canonicalize().unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let mut cfg = make_server_config(config, provider, &tmp).await;
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: target.to_str().unwrap().to_owned(),
+        bare: true,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+    });
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": target}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let id = created["sessionId"].as_str().unwrap();
+    let environment = sessions.get_mut(id).unwrap().environment.as_mut().unwrap();
+    Arc::get_mut(environment).unwrap().cfg.hook_groups = vec![vec![RegisteredHook {
+        hook: serde_json::from_value(json!({
+            "type": "command",
+            "command": "cat > ended.json; pwd > ended.cwd; echo end >> ended.count; while [ ! -f release ]; do sleep 0.02; done",
+            "async": true,
+            "timeout": 30,
+        })).unwrap(),
+        event: HookEvent::SessionEnd,
+        matcher: None,
+        plugin_name: "test".into(),
+        plugin_id: "test".into(),
+        plugin_root: target.clone(),
+        plugin_data_dir: target.clone(),
+        plugin_options: HashMap::new(),
+    }]];
+    let close = json!({"sessionId": id});
+    let error = handle_request("session/close", &close, &cfg, &mut sessions, &transport)
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("incomplete"));
+    let input: Value =
+        serde_json::from_str(&std::fs::read_to_string(target.join("ended.json")).unwrap()).unwrap();
+    assert_eq!(input["session_id"], id);
+    assert_eq!(input["cwd"], target.to_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(target.join("ended.cwd"))
+            .unwrap()
+            .trim(),
+        target.to_str().unwrap()
+    );
+    let competing = SqliteThreadStore::new(tmp.path().join("threads.db"))
+        .await
+        .unwrap();
+    assert!(competing
+        .acquire_execution_lease(&id.to_owned())
+        .await
+        .is_err());
+    std::fs::write(target.join("release"), "ready").unwrap();
+    handle_request("session/close", &close, &cfg, &mut sessions, &transport)
+        .await
+        .unwrap();
+    assert!(!sessions.contains_key(id));
+    assert_eq!(
+        std::fs::read_to_string(target.join("ended.count")).unwrap(),
+        "end\n"
+    );
+    competing
+        .acquire_execution_lease(&id.to_owned())
+        .await
+        .unwrap()
+        .mark_clean()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn worktree_invalid_session_end_binding_skips_hook_but_drains_existing_resources() {
+    use peri_acp_types::hooks::{HookEvent, RegisteredHook};
+    use peri_acp_types::store::ThreadStore;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let target = tmp.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    let target = target.canonicalize().unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let mut cfg = make_server_config(config, provider, &tmp).await;
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: target.to_str().unwrap().to_owned(),
+        bare: true,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+    });
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": target}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let id = created["sessionId"].as_str().unwrap();
+    let environment =
+        Arc::get_mut(sessions.get_mut(id).unwrap().environment.as_mut().unwrap()).unwrap();
+    environment.cfg.hook_groups = vec![vec![RegisteredHook {
+        hook: serde_json::from_value(
+            json!({"type":"command", "command":"echo unexpected > ended"}),
+        )
+        .unwrap(),
+        event: HookEvent::SessionEnd,
+        matcher: None,
+        plugin_name: "test".into(),
+        plugin_id: "test".into(),
+        plugin_root: target.clone(),
+        plugin_data_dir: target.clone(),
+        plugin_options: HashMap::new(),
+    }]];
+    let pool = Arc::new(RetryShutdownPool {
+        settled: AtomicBool::new(false),
+        called: AtomicBool::new(false),
+    });
+    environment.cfg.mcp_pool = Some(pool.clone());
+    let moved = tmp.path().join("moved");
+    std::fs::rename(&target, &moved).unwrap();
+    std::fs::create_dir(&target).unwrap();
+    let close = json!({"sessionId": id});
+    assert!(
+        handle_request("session/close", &close, &cfg, &mut sessions, &transport)
+            .await
+            .is_err()
+    );
+    assert!(
+        pool.called.load(Ordering::Acquire),
+        "invalid hook binding must not prevent MCP shutdown"
+    );
+    assert!(!target.join("ended").exists());
+    assert!(
+        sessions.contains_key(id),
+        "actual incomplete resource drain must retain the owner"
+    );
+    pool.settled.store(true, Ordering::Release);
+    handle_request("session/close", &close, &cfg, &mut sessions, &transport)
+        .await
+        .unwrap();
+    assert!(!sessions.contains_key(id));
+    assert!(
+        !target.join("ended").exists(),
+        "terminal hook must never run in a replacement directory"
+    );
+    std::fs::remove_dir(&target).unwrap();
+    std::fs::rename(&moved, &target).unwrap();
+    let competing = SqliteThreadStore::new(tmp.path().join("threads.db"))
+        .await
+        .unwrap();
+    competing
+        .acquire_execution_lease(&id.to_owned())
+        .await
+        .unwrap()
+        .mark_clean()
+        .await
+        .unwrap();
+}

@@ -14,6 +14,7 @@ use crate::protocol::{AgentRunResult, WorkflowLimits, ERR_ABORTED, ERR_INVALID_P
 use crate::rpc::RpcChannel;
 
 pub(super) struct AgentDispatcher {
+    pub(super) run_scope: Arc<super::scope::RunScope>,
     pub(super) run_id: String,
     pub(super) agent_executor: Arc<dyn AgentExecutor>,
     pub(super) channel: Arc<RpcChannel>,
@@ -117,7 +118,7 @@ impl AgentDispatcher {
         let tool_calls_for_agent = Arc::clone(&self.observed_tool_calls);
         let breach_for_agent = Arc::clone(&self.limit_breach);
         let max_tool_calls = self.run_limits.max_tool_calls;
-        tokio::spawn(async move {
+        self.run_scope.spawn(async move {
             // permit 随 task 生命周期持有；成功、失败、取消或 panic unwind
             // 都由 Drop 释放 live maxAgents 配额。
             let _live_attempt_permit = live_attempt_permit;

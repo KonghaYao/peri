@@ -1,0 +1,34 @@
+{
+  "fixture_schema": "sandbox-mcp/protocol-tool-calls-v1",
+  "note": "WP-005 stdio raw wire 用例：七个规范工具各一次成功调用。参数取自各工具夹具 inputSchema 的必填字段（用于验证 MCP 层原样透传，不解释、不补默认、不增删字段）。脚本执行器把收到的 arguments 原样回显到 structuredContent.echo_arguments，断言因此能证明参数未被协议层改写。",
+  "cases": [
+    {
+      "tool": "Read",
+      "arguments": { "file_path": "notes.md" }
+    },
+    {
+      "tool": "Write",
+      "arguments": { "file_path": "notes.md", "content": "hello sandbox\n" }
+    },
+    {
+      "tool": "Edit",
+      "arguments": { "file_path": "notes.md", "old_string": "hello", "new_string": "world" }
+    },
+    {
+      "tool": "Glob",
+      "arguments": { "pattern": "**/*.md", "path": "." }
+    },
+    {
+      "tool": "Grep",
+      "arguments": { "pattern": "hello", "path": ".", "output_mode": "content" }
+    },
+    {
+      "tool": "folder_operations",
+      "arguments": { "operation": "list", "folder_path": "." }
+    },
+    {
+      "tool": "Bash",
+      "arguments": { "command": "echo hello", "timeout": 15000, "run_in_background": false }
+    }
+  ]
+}

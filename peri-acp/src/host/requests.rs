@@ -27,7 +27,68 @@ pub(crate) async fn handle_request(
     sessions: &mut HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
-    match method {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(Value::as_str);
+    let lifecycle = matches!(
+        method,
+        "session/new"
+            | "session/load"
+            | "session/resume"
+            | "session/fork"
+            | "session/close"
+            | "session/delete"
+    );
+    let environment = session_id
+        .and_then(|id| sessions.get(id))
+        .and_then(|state| state.environment.clone());
+    let cfg = if lifecycle {
+        cfg
+    } else {
+        environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg)
+    };
+    if matches!(
+        method,
+        "session/rewind"
+            | "session/set_mode"
+            | "session/set_config_option"
+            | "session/rename"
+            | "workflow/resume"
+            | "workflow/kill_agent"
+            | "workflow/kill_run"
+            | "session/cancel-bg-task"
+            | "session/input/enqueue"
+            | "session/input/dispatch"
+            | "session/input/takeback"
+    ) {
+        let id = session_id.ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+        if let Some(state) = sessions.get(id) {
+            super::workspace::require_owner(state)?;
+        } else if method != "session/rename" {
+            return Err(AcpError::new(-32602, "session not found"));
+        }
+    }
+    if method == "session/rename" && params.get("title").and_then(Value::as_str).is_none() {
+        return Err(AcpError::new(-32602, "missing title"));
+    }
+    if method == "workflow/resume" {
+        super::workspace::validate_expected(cfg, session_id.expect("checked"), None).await?;
+    }
+    // Renaming an unloaded session is a short mutation lease; never steals a live owner.
+    let transient_owner =
+        if method == "session/rename" && session_id.is_some_and(|id| !sessions.contains_key(id)) {
+            Some(
+                cfg.controller
+                    .sessions()
+                    .acquire_execution_lease(&session_id.expect("checked").to_owned())
+                    .await
+                    .map_err(super::workspace::workspace_error)?,
+            )
+        } else {
+            None
+        };
+    let result = match method {
         "initialize" => session_lifecycle::handle_initialize(params, cfg),
         "session/new" => session_lifecycle::handle_new(params, cfg, sessions).await,
         "session/set_mode" => config_options::handle_set_mode(params, cfg, transport).await,
@@ -36,6 +97,9 @@ pub(crate) async fn handle_request(
         }
         "session/load" => session_lifecycle::handle_load(params, cfg, sessions, transport).await,
         "session/list" => session_lifecycle::handle_list(params, cfg).await,
+        "peri/session_context" => session_lifecycle::handle_context(params, cfg).await,
+        "session/metadata" => session_lifecycle::handle_metadata(params, cfg, false).await,
+        "peri/session_history" => session_lifecycle::handle_metadata(params, cfg, true).await,
         "session/input/enqueue"
         | "session/input/dispatch"
         | "session/input/takeback"
@@ -60,6 +124,7 @@ pub(crate) async fn handle_request(
         "plugin/uninstall" => plugin::handle_uninstall(params, cfg, sessions, transport).await,
         "plugin/toggle" => plugin::handle_toggle(params, cfg, transport).await,
         "plugin/search" => plugin::handle_search(params, cfg, transport).await,
+        "plugin/list" => plugin::handle_session_snapshot(cfg),
         "plugin/update" => plugin::handle_update(params, cfg, transport).await,
         "session/rename" => session_lifecycle::handle_rename(params, cfg, transport).await,
         "session/rewind-candidates" => rewind::handle_rewind_candidates(params, cfg, sessions),
@@ -71,7 +136,14 @@ pub(crate) async fn handle_request(
         "mcp/oauth_callback" => mcp_oauth::handle_oauth_callback(params, cfg),
         "mcp/oauth_cancel" => mcp_oauth::handle_oauth_cancel(params, cfg),
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
+    };
+    if let Some(owner) = transient_owner {
+        owner
+            .mark_clean()
+            .await
+            .map_err(super::workspace::workspace_error)?;
     }
+    result
 }
 
 #[cfg(test)]

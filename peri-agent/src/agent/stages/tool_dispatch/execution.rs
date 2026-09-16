@@ -15,8 +15,12 @@ use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, MessageId};
+use crate::session::subagent::SubagentFailure;
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
-use crate::tools::{normalize_params, BaseTool, EffectiveToolError, EffectiveToolErrorCode};
+use crate::tools::{
+    normalize_params, BaseTool, EffectiveToolError, EffectiveToolErrorCode, ToolExecutionEvidence,
+    ToolExecutionStatus, ToolOutput,
+};
 
 pub(super) fn effective_tool_error(error: AgentError) -> EffectiveToolError {
     let code = match error {
@@ -27,6 +31,34 @@ pub(super) fn effective_tool_error(error: AgentError) -> EffectiveToolError {
         _ => EffectiveToolErrorCode::ToolFailed,
     };
     EffectiveToolError::new(code, error.user_facing_message())
+}
+
+fn effective_tool_error_from_boxed(
+    error: Box<dyn std::error::Error + Send + Sync>,
+) -> EffectiveToolError {
+    let mut effective =
+        EffectiveToolError::new(EffectiveToolErrorCode::ToolFailed, error.to_string());
+    if let Some(failure) = error.downcast_ref::<SubagentFailure>() {
+        if let Some(safe_failure) = failure.safe_failure() {
+            effective = effective.with_subagent_failure(safe_failure);
+        }
+    }
+    effective
+}
+
+fn execution_for_effective_error(code: EffectiveToolErrorCode) -> Option<ToolExecutionEvidence> {
+    let status = match code {
+        EffectiveToolErrorCode::Cancelled => ToolExecutionStatus::Cancelled,
+        EffectiveToolErrorCode::Timeout => ToolExecutionStatus::TimedOut,
+        _ => return None,
+    };
+    Some(ToolExecutionEvidence {
+        status,
+        exit_code: None,
+        output_ref: None,
+        output_truncated: false,
+        task_id: None,
+    })
 }
 
 /// 收集阶段产物（内部使用）
@@ -129,6 +161,7 @@ async fn run_before_tool_approvals(
                     name: raw_call.name.clone(),
                     output: "interrupted by user".to_string(),
                     is_error: true,
+                    subagent_failure: None,
                 });
             }
             return Err(AgentError::Interrupted);
@@ -171,6 +204,7 @@ async fn run_before_tool_approvals(
                     name: raw_call.name.clone(),
                     output: rejection_result.output.clone(),
                     is_error: true,
+                    subagent_failure: rejection_result.subagent_failure.clone(),
                 });
                 settled_results.push((tool_call.clone(), rejection_result));
             }
@@ -184,6 +218,7 @@ async fn run_before_tool_approvals(
                         name: tc.name.clone(),
                         output: e.to_string(),
                         is_error: true,
+                        subagent_failure: None,
                     });
                 }
                 return Err(e);
@@ -209,7 +244,7 @@ async fn dispatch_concurrent(
     catalog: &Arc<SessionToolCatalogSnapshot>,
     cancel: &CancellationToken,
     ai_msg: &BaseMessage,
-) -> Vec<Result<String, EffectiveToolError>> {
+) -> Vec<Result<ToolOutput, EffectiveToolError>> {
     if ready_calls.is_empty() {
         return Vec::new();
     }
@@ -256,6 +291,7 @@ async fn dispatch_concurrent(
                 tool.name = %tool_name,
                 tool.call_id = %call_id,
             );
+            let output_limit = tool.as_ref().and_then(|tool| tool.output_char_limit());
             async move {
                 let timeout_opt = tool.as_ref().and_then(|t| t.timeout());
                 let invoke_fut = async {
@@ -279,13 +315,13 @@ async fn dispatch_concurrent(
                             dispatch_context.session.turn.turn_id.to_string(),
                         );
                     match tool {
-                        Some(t) => t.invoke(input, ctx_param).await.map_err(|e| {
-                            AgentError::ToolExecutionFailed {
-                                tool: tool_name.clone(),
-                                reason: e.to_string(),
-                            }
-                        }),
-                        None => Err(AgentError::ToolNotFound(tool_name.clone())),
+                        Some(t) => t
+                            .invoke_output(input, ctx_param)
+                            .await
+                            .map_err(effective_tool_error_from_boxed),
+                        None => Err(effective_tool_error(AgentError::ToolNotFound(
+                            tool_name.clone(),
+                        ))),
                     }
                 };
                 let result = tokio::select! {
@@ -304,7 +340,7 @@ async fn dispatch_concurrent(
                         }
                     } => {
                         match result {
-                            Ok(tool_result) => tool_result.map_err(effective_tool_error),
+                            Ok(tool_result) => tool_result,
                             Err(_elapsed) => {
                                 // 安全：Err 分支仅在 timeout_opt 为 Some 时可达
                                 let secs = timeout_opt.unwrap().as_secs();
@@ -319,9 +355,37 @@ async fn dispatch_concurrent(
                 // 工具完成即刻 emit ToolEnded，不等 join_all 返回
                 // 快速工具的 Langfuse observation endTime 不再被慢工具拖高
                 let (output, is_error) = match &result {
-                    Ok(o) => (o.clone(), false),
-                    Err(e) => (e.to_string(), true),
+                    Ok(o) => (
+                        output_limit
+                            .map(|limit| o.bounded_text(limit))
+                            .unwrap_or_else(|| o.projected_text(None)),
+                        o.execution.as_ref().is_some_and(|e| {
+                            matches!(
+                                e.status,
+                                crate::tools::ToolExecutionStatus::Failed
+                                    | crate::tools::ToolExecutionStatus::Cancelled
+                                    | crate::tools::ToolExecutionStatus::TimedOut
+                                    | crate::tools::ToolExecutionStatus::RunningAfterTimeout
+                            )
+                        }),
+                    ),
+                    Err(e) => {
+                        let output = ToolOutput {
+                            text: e.to_string(),
+                            execution: execution_for_effective_error(e.code),
+                        };
+                        (
+                            output_limit
+                                .map(|limit| output.bounded_text(limit))
+                                .unwrap_or_else(|| output.projected_text(None)),
+                            true,
+                        )
+                    }
                 };
+                let subagent_failure = result
+                    .as_ref()
+                    .err()
+                    .and_then(|error| error.subagent_failure().cloned());
                 event_bus.emit_render(RenderEvent::ToolEnded {
                     turn_id,
                     agent_id,
@@ -329,6 +393,7 @@ async fn dispatch_concurrent(
                     name: raw_call.name.clone(),
                     output,
                     is_error,
+                    subagent_failure,
                 });
                 result
             }
@@ -345,7 +410,7 @@ async fn dispatch_concurrent(
 async fn settle_results(
     ctx: &StageContext,
     approval: ApprovalOutcome,
-    tool_results: Vec<Result<String, EffectiveToolError>>,
+    tool_results: Vec<Result<ToolOutput, EffectiveToolError>>,
     was_cancelled: bool,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
 ) -> CollectOutcome {
@@ -361,11 +426,17 @@ async fn settle_results(
 
     for (modified_call, tool_result) in ready_calls.into_iter().zip(tool_results) {
         let mut result = match tool_result {
-            Ok(output) => ToolResult::success(&modified_call.id, &modified_call.name, output),
+            Ok(output) => ToolResult::from_output(&modified_call.id, &modified_call.name, output),
             Err(ref e) => {
                 let mut result =
                     ToolResult::error(&modified_call.id, &modified_call.name, e.to_string());
                 result.effective_error_code = Some(e.code);
+                result.execution = execution_for_effective_error(e.code);
+                result.subagent_failure = e.subagent_failure.clone();
+                if let Some(failure) = &result.subagent_failure {
+                    result.output.push('\n');
+                    result.output.push_str(&failure.render_model_summary());
+                }
                 result
             }
         };
@@ -456,11 +527,23 @@ fn post_process_result(
 
     // output_char_limit 截断：已经解析完成的 target 工具声明输出上限时按字符截断
     if let Some(tool) = all_tools.get(&modified_call.id) {
-        if let Some(limit) = tool.output_char_limit() {
-            if result.output.chars().count() > limit {
-                let truncated: String = result.output.chars().take(limit).collect();
-                result.output = format!("{}\n\n[Output truncated at {} chars]", truncated, limit);
+        let limit = tool.output_char_limit();
+        let original = result.output.clone();
+        let projected = ToolOutput {
+            text: original.clone(),
+            execution: result.execution.clone(),
+        }
+        .projected_text(limit);
+        if projected != original {
+            let body_truncated = ToolOutput {
+                text: original.clone(),
+                execution: result.execution.clone(),
             }
+            .body_was_truncated(limit);
+            if let Some(evidence) = result.execution.as_mut() {
+                evidence.output_truncated |= body_truncated;
+            }
+            result.output = projected;
         }
     }
 }

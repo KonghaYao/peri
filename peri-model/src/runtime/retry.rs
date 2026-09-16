@@ -155,12 +155,13 @@ impl RetryConfig {
 }
 
 /// 可安全发送给上层的 retry 观测；不包含 request、response、Agent 或 telemetry 类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RetryObservation {
     attempt: u32,
     max_attempts: u32,
     delay: Duration,
     error_kind: RetryErrorKind,
+    diagnostic: Option<crate::ModelErrorDiagnostic>,
 }
 
 impl RetryObservation {
@@ -175,6 +176,7 @@ impl RetryObservation {
             max_attempts,
             delay,
             error_kind,
+            diagnostic: None,
         }
     }
 
@@ -192,6 +194,37 @@ impl RetryObservation {
 
     pub fn error_kind(&self) -> RetryErrorKind {
         self.error_kind
+    }
+
+    /// Safe facts from the failed attempt.  No retryability decision is
+    /// exposed; the policy remains owned by `RetryConfig`.
+    pub fn diagnostic(&self) -> Option<&crate::ModelErrorDiagnostic> {
+        self.diagnostic.as_ref()
+    }
+
+    /// Derive the retry class and safe facts from one model error. This keeps
+    /// the observer from receiving two independently supplied classifications.
+    pub fn from_model_error(
+        attempt: u32,
+        max_attempts: u32,
+        delay: Duration,
+        error: &crate::ModelError,
+    ) -> Option<Self> {
+        let error_kind = match error.diagnostic().category() {
+            crate::ModelErrorCategory::Transport => RetryErrorKind::Transport,
+            crate::ModelErrorCategory::HttpStatus => RetryErrorKind::HttpStatus,
+            crate::ModelErrorCategory::Protocol => RetryErrorKind::Protocol,
+            crate::ModelErrorCategory::Cancelled
+            | crate::ModelErrorCategory::StreamInterrupted
+            | crate::ModelErrorCategory::RetryExhausted => return None,
+        };
+        Some(Self {
+            attempt,
+            max_attempts,
+            delay,
+            error_kind,
+            diagnostic: Some(error.diagnostic()),
+        })
     }
 }
 
@@ -396,19 +429,19 @@ async fn retry_or_finish(
         let _ = send_event(
             sender,
             cancellation,
-            Err(ModelError::retry_exhausted(attempt, error_kind)),
+            Err(ModelError::retry_exhausted_with_context(
+                attempt, error_kind, &error,
+            )),
         )
         .await;
         return false;
     }
     let delay = config.delay_for_retry(attempt);
     if let Some(observer) = observer {
-        observer.on_retry(RetryObservation {
-            attempt,
-            max_attempts: config.max_attempts(),
-            delay,
-            error_kind,
-        });
+        observer.on_retry(
+            RetryObservation::from_model_error(attempt, config.max_attempts(), delay, &error)
+                .expect("retryable model errors must have a retryable diagnostic category"),
+        );
     }
     tokio::select! {
         biased;

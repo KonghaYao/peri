@@ -129,6 +129,10 @@ export interface RunState {
   delivery_status?: WorkflowDeliveryStatus
   limits?: WorkflowLimits
   budget_total?: number
+  /** Exact workflow script arguments; absent in legacy state snapshots. */
+  args?: unknown
+  /** Persisted concurrency; absent in legacy snapshots (Rust defaults to 3). */
+  max_concurrency?: number
   attempts?: WorkflowAttempt[]
   return_value?: unknown
   script?: string

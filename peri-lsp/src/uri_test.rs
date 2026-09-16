@@ -106,3 +106,28 @@ fn test_path_uri_roundtrip() {
         assert_eq!(uri_to_path(&path_to_uri(&abs)), abs_str);
     }
 }
+
+#[test]
+fn windows_verbatim_drive_and_unc_use_standard_file_uris() {
+    for (path, uri, decoded) in [
+        (
+            r"\\?\C:\worktree a\src",
+            "file:///C:/worktree%20a/src",
+            r"C:\worktree a\src",
+        ),
+        (
+            r"\\?\UNC\server\share\worktree a",
+            "file://server/share/worktree%20a",
+            r"\\server\share\worktree a",
+        ),
+        (
+            r"\\server\share\中文",
+            "file://server/share/%E4%B8%AD%E6%96%87",
+            r"\\server\share\中文",
+        ),
+    ] {
+        assert_eq!(super::windows_path_to_uri(path), uri);
+        let rest = super::percent_decode(uri.strip_prefix("file://").unwrap());
+        assert_eq!(super::windows_uri_path(uri, rest), decoded);
+    }
+}

@@ -1,3 +1,4 @@
+use peri_acp_types::tasks::TaskManager;
 use peri_agent::middleware::capabilities as hook_state;
 use std::{
     collections::{HashMap, VecDeque},
@@ -152,12 +153,13 @@ fn format_run_ptc_code_error(error: JsRuntimeError) -> Box<dyn std::error::Error
 
 #[derive(Default)]
 pub struct RunPtcCodeTool {
-    _private: (),
+    task_manager: Option<Arc<dyn TaskManager>>,
 }
 
 impl RunPtcCodeTool {
-    fn executor(&self) -> &JsExecutor {
-        &PTC_EXECUTOR
+    pub fn with_task_manager(mut self, manager: Arc<dyn TaskManager>) -> Self {
+        self.task_manager = Some(manager);
+        self
     }
 }
 
@@ -207,17 +209,62 @@ impl BaseTool for RunPtcCodeTool {
             parent_invocation_id,
             invocations: Mutex::new(InvocationState::default()),
         });
-        let result = self
-            .executor()
-            .execute(
-                JsExecutionRequest {
-                    source: input.source,
-                    input: input.input,
-                },
-                router,
-                ctx.cancellation,
-            )
+        let cwd = ctx.cwd.to_owned();
+        let cancel = ctx.cancellation.child_token();
+        let _cancel_on_drop = cancel.clone().drop_guard();
+        let manager = self.task_manager.clone();
+        let (completed, result) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            let result = async {
+                let mut owner = manager
+                    .as_ref()
+                    .map(|manager| manager.begin_external_execution())
+                    .transpose()
+                    .map_err(JsRuntimeError::SpawnFailed)?;
+                let shutdown = manager
+                    .as_ref()
+                    .and_then(|manager| manager.execution_cancel_token());
+                let run = PTC_EXECUTOR.execute_in_directory(
+                    JsExecutionRequest {
+                        source: input.source,
+                        input: input.input,
+                    },
+                    router,
+                    cancel.clone(),
+                    &cwd,
+                );
+                tokio::pin!(run);
+                let shutdown = async {
+                    match shutdown {
+                        Some(token) => token.cancelled().await,
+                        None => std::future::pending::<()>().await,
+                    }
+                };
+                let result = tokio::select! {
+                    result = &mut run => result,
+                    _ = shutdown => {
+                        cancel.cancel();
+                        run.await
+                    }
+                };
+                if !matches!(&result, Err(JsRuntimeError::CleanupFailed(_))) {
+                    if let Some(owner) = &mut owner {
+                        owner.confirm_stopped();
+                    }
+                }
+                result
+            }
+            .await;
+            let _ = completed.send(result);
+        };
+        if let Some(manager) = &self.task_manager {
+            manager.spawn_owned(Box::pin(execution))?;
+        } else {
+            execution.await;
+        }
+        let result = result
             .await
+            .map_err(|_| "PTC execution ended before cleanup result")?
             .map_err(format_run_ptc_code_error)?;
         Ok(serde_json::to_string(&result)?)
     }
@@ -225,13 +272,20 @@ impl BaseTool for RunPtcCodeTool {
 
 pub struct PtcMiddleware {
     cached_contribution: Arc<RwLock<Option<String>>>,
+    task_manager: Option<Arc<dyn TaskManager>>,
 }
 
 impl PtcMiddleware {
     pub fn new() -> Self {
         Self {
             cached_contribution: Arc::new(RwLock::new(None)),
+            task_manager: None,
         }
+    }
+
+    pub fn with_task_manager(mut self, manager: Arc<dyn TaskManager>) -> Self {
+        self.task_manager = Some(manager);
+        self
     }
 }
 
@@ -248,7 +302,9 @@ impl Middleware for PtcMiddleware {
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        vec![Box::new(RunPtcCodeTool::default())]
+        vec![Box::new(RunPtcCodeTool {
+            task_manager: self.task_manager.clone(),
+        })]
     }
 
     async fn before_agent(

@@ -5,6 +5,8 @@
  * （read/list 的成功路径不触发 process.exit）。
  */
 import { readFileSync } from 'node:fs'
+import { adlcFile } from './adlc'
+import { boundaryCli } from './boundary'
 import { listRuns, reportRun } from './reader'
 import { validateScript } from './validate'
 
@@ -13,6 +15,10 @@ export function cliUsage(): void {
   peri-workflow read <runId> [--short] [--json]   # 完整报告（state + return_value + agents 全量输出）
   peri-workflow list [--json]                     # 列出所有 run（按结束时间倒序）
   peri-workflow validate <script.mjs> [--json]    # 校验 workflow 脚本语法（引擎检查 + 静态补充）
+  peri-workflow boundary snapshot <request.json>  # 捕获有界 filesystem baseline
+  peri-workflow boundary compare <request.json>   # 比较 baseline 与当前 filesystem
+  peri-workflow adlc check-stage <request.json>   # 校验 ADLC 阶段必需产物与验收身份
+  peri-workflow adlc plan <request.json>          # 生成确定性 ADLC 恢复建议
   peri-workflow --help                            # 本帮助
 
 无参数时以 JSON-RPC 模式运行（宿主集成，见 DESIGN.md）。
@@ -25,6 +31,8 @@ export function isCliCommand(cmd: string | undefined): boolean {
     cmd === 'read' ||
     cmd === 'list' ||
     cmd === 'validate' ||
+    cmd === 'boundary' ||
+    cmd === 'adlc' ||
     cmd === '--help' ||
     cmd === '-h' ||
     cmd === 'help'
@@ -44,9 +52,35 @@ export function cliMain(args: string[]): void {
     listRuns(args.includes('--json'))
   } else if (cmd === 'validate') {
     validateFile(args.slice(1).find((a) => !a.startsWith('--')), args.includes('--json'))
+  } else if (cmd === 'boundary') {
+    boundaryFile(args.slice(1))
+  } else if (cmd === 'adlc') {
+    adlcFile(args.slice(1))
   } else {
     cliUsage()
     process.exit(0)
+  }
+}
+
+/** boundary 子命令：读取 request JSON，输出结构化证据；失败使用非零退出。 */
+export function boundaryFile(args: string[]): void {
+  const operation = args[0]
+  const requestPath = args[1]
+  if ((operation !== 'snapshot' && operation !== 'compare') || args.length !== 2) {
+    console.error('用法：peri-workflow boundary snapshot|compare <request.json>')
+    process.exit(1)
+  }
+  if (!requestPath || requestPath.startsWith('--')) {
+    console.error('用法：peri-workflow boundary snapshot|compare <request.json>')
+    process.exit(1)
+  }
+  try {
+    const result = boundaryCli(operation, requestPath)
+    console.log(JSON.stringify(result, null, 2))
+    if (!result.ok) process.exit(2)
+  } catch (error) {
+    console.error(`boundary ${operation} failed: ${(error as Error).message}`)
+    process.exit(1)
   }
 }
 

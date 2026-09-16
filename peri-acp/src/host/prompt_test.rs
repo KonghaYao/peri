@@ -145,11 +145,51 @@ mod wire_projection {
     }
 
     #[test]
+    fn typed_model_failure_projects_only_allowlisted_diagnostic() {
+        let failure = ExecutionFailure::from_agent_error(&AgentError::ModelError(
+            peri_model::ModelError::http_status(429, "anthropic", Some("req_429")),
+        ));
+        let err = execution_failure_to_acp_error(&failure);
+
+        assert_eq!(
+            err.data,
+            Some(serde_json::json!({
+                "kind": "llm_http",
+                "status": 429,
+                "diagnostic": {
+                    "category": "http_status",
+                    "status": 429,
+                    "provider": "anthropic",
+                    "request_id": "req_429"
+                }
+            }))
+        );
+        let wire = serde_json::to_string(&err).expect("safe ACP error should serialize");
+        assert!(!wire.contains("body"));
+        assert!(!wire.contains("prompt"));
+    }
+
+    #[test]
+    fn typed_model_failure_does_not_project_sk_credential_identity() {
+        let credential = "sk-ant-api03-very-secret";
+        let failure = ExecutionFailure::from_agent_error(&AgentError::ModelError(
+            peri_model::ModelError::http_status(401, credential, Some(credential)),
+        ));
+        let err = execution_failure_to_acp_error(&failure);
+        let wire = serde_json::to_string(&err).expect("safe ACP error should serialize");
+
+        assert!(!wire.contains(credential));
+        assert!(!wire.contains("provider"));
+        assert!(!wire.contains("request_id"));
+    }
+
+    #[test]
     fn non_http_failure_omits_status_even_for_inconsistent_input() {
         let failure = ExecutionFailure {
             kind: ExecutionFailureKind::Llm,
             public_message: "LLM failure".to_string(),
             http_status: Some(500),
+            diagnostic: None,
         };
 
         let err = execution_failure_to_acp_error(&failure);

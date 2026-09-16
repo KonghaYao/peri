@@ -1,6 +1,21 @@
 use super::{default_ui_commands, PeriCaps};
 
 #[test]
+fn test_session_workspace_v1_requires_explicit_negotiation() {
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!({"peri.sessionWorkspaceV1":"true"}),
+    ] {
+        assert!(!PeriCaps::from_client_meta(value.as_object().unwrap()).session_workspace_v1);
+    }
+    let value = serde_json::json!({"peri.sessionWorkspaceV1":true});
+    let caps = PeriCaps::from_client_meta(value.as_object().unwrap());
+    assert!(caps.session_workspace_v1);
+    assert_eq!(caps.to_agent_meta()["peri.sessionWorkspaceV1"], true);
+    assert!(PeriCaps::all_enabled().session_workspace_v1);
+}
+
+#[test]
 fn test_user_input_queue_cap_is_opt_in_and_echoed() {
     let empty = serde_json::Map::new();
     assert!(

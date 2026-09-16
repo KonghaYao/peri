@@ -12,6 +12,7 @@ pub(super) fn add_hooks(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
         cwd,
         permission_mode,
         provider_name,
+        task_manager,
         ..
     } = ctx;
     tracing::info!(
@@ -40,7 +41,8 @@ pub(super) fn add_hooks(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
                 permission_mode.clone(),
                 provider_name.clone(),
                 session_start_source.clone(),
-            );
+            )
+            .with_task_manager(task_manager.clone());
             tracing::info!(
                 group_index = i,
                 group_size,

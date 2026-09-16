@@ -35,8 +35,8 @@ pub(crate) use lifecycle::{
 };
 pub use types::{
     ForkDirectiveKind, SubagentCancelPolicy, SubagentChainAssembler, SubagentChainContext,
-    SubagentHost, SubagentLifecycleStart, SubagentLifecycleStop, SubagentResumeConfig,
-    SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
+    SubagentFailure, SubagentHost, SubagentLifecycleStart, SubagentLifecycleStop,
+    SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
 };
 pub use util::{count_tool_calls_from_session, extract_last_ai_text, format_subagent_result};
 pub use v2_bridge::{
@@ -44,7 +44,8 @@ pub use v2_bridge::{
     SubagentV2ContextBuilder, V2SubagentContext,
 };
 pub(crate) use v2_bridge::{
-    build_subagent_start_v2, build_subagent_stop_v2, emit_subagent_start_v2, emit_subagent_stop_v2,
+    build_subagent_start_v2, build_subagent_stop_v2, build_subagent_stop_v2_with_failure,
+    emit_subagent_start_v2, emit_subagent_stop_v2_with_failure, SubagentStopV2Input,
 };
 
 #[cfg(test)]

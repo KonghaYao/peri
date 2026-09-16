@@ -13,7 +13,9 @@ use peri_model::{
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use super::{convert_model_message, stop_reason_display, AgentModelBridge, StreamingContext};
+use super::{
+    convert_model_message, map_model_error, stop_reason_display, AgentModelBridge, StreamingContext,
+};
 use crate::{
     agent::{
         compact_v2::projection::{ProviderCapabilities, ProviderProtocol},
@@ -25,6 +27,24 @@ use crate::{
     session::turn::TurnId,
 };
 use peri_acp_types::identity::AgentId;
+
+#[test]
+fn bridge_keeps_typed_model_error_context() {
+    let error = map_model_error(peri_model::ModelError::http_status(
+        429,
+        "anthropic",
+        Some("req_429"),
+    ));
+
+    match error {
+        AgentError::ModelError(error) => {
+            assert_eq!(error.http_status_code(), Some(429));
+            assert_eq!(error.provider(), Some("anthropic"));
+            assert_eq!(error.request_id(), Some("req_429"));
+        }
+        other => panic!("typed model error was flattened: {other:?}"),
+    }
+}
 
 struct FakeModel;
 
@@ -283,6 +303,47 @@ impl Model for FakeModel {
             ]),
             cancellation,
         ))
+    }
+}
+
+struct EmptyStreamModel;
+
+#[async_trait]
+impl Model for EmptyStreamModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_streaming: true,
+            ..ModelCapabilities::default()
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        Ok(ModelStream::with_parent_cancellation(
+            stream::empty::<ModelResult<ModelStreamEvent>>(),
+            cancellation,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn bridge_maps_empty_stream_to_typed_protocol_error() {
+    let bridge = AgentModelBridge::from_arc(Arc::new(EmptyStreamModel));
+    let result = bridge
+        .generate_reasoning(&[BaseMessage::human("hello")], &[], None)
+        .await;
+
+    match result {
+        Err(AgentError::ModelError(error)) => {
+            assert_eq!(
+                error.protocol_error().map(|protocol| protocol.kind()),
+                Some(peri_model::ProtocolErrorKind::StreamEndedWithoutCompleted)
+            );
+        }
+        other => panic!("empty stream lost typed protocol error: {other:?}"),
     }
 }
 

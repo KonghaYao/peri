@@ -7,7 +7,6 @@ use serde_json::json;
 #[cfg(test)]
 use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tracing::debug;
 
 use super::super::interaction_lifecycle::{PromptLease, TransitionKind};
 use super::{AcpTuiClient, ClientProjectionMode};
@@ -17,6 +16,30 @@ struct StartupRestoreGuard<'a>(&'a watch::Sender<bool>);
 impl Drop for StartupRestoreGuard<'_> {
     fn drop(&mut self) {
         self.0.send_replace(false);
+    }
+}
+
+/// A dropped transition must also retire the UI target used for load replay.
+/// This guard drops while the operation gate is still held.
+struct SessionProjectionGuard<'a> {
+    client: &'a AcpTuiClient,
+    committed: bool,
+}
+
+impl Drop for SessionProjectionGuard<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        self.client.project_execution_cwd(None);
+        if self.client.projection_mode == ClientProjectionMode::Interactive
+            && !crate::kit::atoms::ACTIVE_SESSION_ID
+                .state()
+                .read()
+                .is_empty()
+        {
+            crate::kit::session_boundary::project_session_boundary(None);
+        }
     }
 }
 
@@ -72,11 +95,17 @@ impl AcpTuiClient {
         cwd: &str,
         model: Option<&str>,
     ) -> Result<String, AcpError> {
+        *self.restore_error.lock().unwrap() = None;
+        self.project_execution_cwd(None);
         let start = self
             .lifecycle
             .begin_transition(TransitionKind::New, None)
             .map_err(|message| AcpError::new(-32603, message))?;
         let transition = self.lifecycle.arm_transition(start.generation);
+        let mut projection = SessionProjectionGuard {
+            client: self,
+            committed: false,
+        };
         if self.projection_mode == ClientProjectionMode::Interactive {
             crate::kit::session_boundary::project_session_boundary(None);
         }
@@ -85,7 +114,13 @@ impl AcpTuiClient {
         if let Some(ref old_sid) = old_id {
             let params = json!({ "sessionId": old_sid });
             if let Err(e) = self.transport.send_request("session/close", params).await {
-                debug!(error = %e, "Failed to close previous session (non-fatal)");
+                self.lifecycle.fail_transition(start.generation);
+                transition.disarm();
+                if self.projection_mode == ClientProjectionMode::Interactive {
+                    crate::kit::session_boundary::project_session_boundary(None);
+                }
+                *self.restore_error.lock().unwrap() = Some(e.to_string());
+                return Err(e);
             }
         }
 
@@ -108,6 +143,11 @@ impl AcpTuiClient {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AcpError::new(-32603, "no session_id in response"))?
             .to_string();
+        let effective_cwd = result
+            .pointer("/_meta/peri.sessionWorkspaceV1/workspace/cwd")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(cwd)
+            .to_string();
         #[cfg(test)]
         self.pause_before_transition_commit().await;
         if self.projection_mode == ClientProjectionMode::Interactive {
@@ -116,8 +156,12 @@ impl AcpTuiClient {
         let buffered = self
             .lifecycle
             .commit_stable(start.generation, session_id.clone());
+        self.finish_session_initialization(start.generation, &session_id)
+            .await?;
+        self.project_execution_cwd(Some(effective_cwd));
+        *self.restore_error.lock().unwrap() = None;
+        projection.committed = true;
         transition.disarm();
-        self.initialize_user_inputs_under_gate(&session_id).await?;
         self.flush_buffered(buffered);
         Ok(session_id)
     }
@@ -171,6 +215,7 @@ impl AcpTuiClient {
                 continue;
             }
             if let Some(session_id) = stable_session {
+                self.check_restore_error()?;
                 return Ok(session_id);
             }
             if *startup_restore_rx.borrow_and_update() {
@@ -180,6 +225,7 @@ impl AcpTuiClient {
                 })?;
                 continue;
             }
+            self.check_restore_error()?;
             return self.new_session_under_gate(cwd, model).await;
         }
     }
@@ -206,7 +252,7 @@ impl AcpTuiClient {
         *self.session_load_reservations.pending.lock().unwrap()
     }
 
-    async fn wait_for_session_load(
+    pub(super) async fn wait_for_session_load(
         &self,
         epoch_rx: &mut watch::Receiver<u64>,
     ) -> Result<(), AcpError> {
@@ -234,6 +280,7 @@ impl AcpTuiClient {
                 if *pending > 0 {
                     None
                 } else {
+                    self.check_restore_error()?;
                     let session_id = self
                         .lifecycle
                         .stable_identity()
@@ -304,11 +351,34 @@ impl AcpTuiClient {
         cwd: &str,
         model: Option<&str>,
     ) -> Result<String, AcpError> {
+        *self.restore_error.lock().unwrap() =
+            Some("session restore has not completed; retry or create a new session".into());
+        let effective_cwd = if self.supports_session_workspace() {
+            match self.session_context(Some(session_id), None).await {
+                Ok(context) => context
+                    .workspace
+                    .cwd
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| AcpError::new(-32603, "session cwd is not valid UTF-8"))?,
+                Err(error) => {
+                    *self.restore_error.lock().unwrap() = Some(error.to_string());
+                    return Err(error);
+                }
+            }
+        } else {
+            cwd.to_string()
+        };
+        self.project_execution_cwd(None);
         let start = self
             .lifecycle
             .begin_transition(TransitionKind::Load, Some(session_id.to_string()))
             .map_err(|message| AcpError::new(-32603, message))?;
         let transition = self.lifecycle.arm_transition(start.generation);
+        let mut projection = SessionProjectionGuard {
+            client: self,
+            committed: false,
+        };
         if self.projection_mode == ClientProjectionMode::Interactive {
             crate::kit::session_boundary::project_session_boundary(Some(session_id));
         }
@@ -319,12 +389,19 @@ impl AcpTuiClient {
         {
             let params = json!({ "sessionId": old_sid });
             if let Err(e) = self.transport.send_request("session/close", params).await {
-                debug!(error = %e, "Failed to close previous session (non-fatal)");
+                self.lifecycle.fail_transition(start.generation);
+                transition.disarm();
+                if self.projection_mode == ClientProjectionMode::Interactive {
+                    crate::kit::session_boundary::project_session_boundary(None);
+                }
+                *self.restore_error.lock().unwrap() = Some(e.to_string());
+                return Err(e);
             }
         }
 
-        let params = json!({ "sessionId": session_id, "cwd": cwd, "model": model });
+        let params = json!({ "sessionId": session_id, "cwd": effective_cwd, "model": model });
         if let Err(error) = self.transport.send_request("session/load", params).await {
+            *self.restore_error.lock().unwrap() = Some(error.to_string());
             self.lifecycle.fail_transition(start.generation);
             transition.disarm();
             if self.projection_mode == ClientProjectionMode::Interactive {
@@ -334,9 +411,38 @@ impl AcpTuiClient {
         }
         self.lifecycle
             .commit_stable(start.generation, session_id.to_string());
+        self.finish_session_initialization(start.generation, session_id)
+            .await?;
+        self.project_execution_cwd(Some(effective_cwd));
+        *self.restore_error.lock().unwrap() = None;
+        projection.committed = true;
         transition.disarm();
-        self.initialize_user_inputs_under_gate(session_id).await?;
         Ok(session_id.to_string())
+    }
+
+    async fn finish_session_initialization(
+        &self,
+        generation: u64,
+        session_id: &str,
+    ) -> Result<(), AcpError> {
+        if let Err(error) = self.initialize_user_inputs_under_gate(session_id).await {
+            let claims = self.lifecycle.fail_transition(generation);
+            self.settle_claims_owned(claims).await;
+            self.project_execution_cwd(None);
+            *self.restore_error.lock().unwrap() = Some(error.to_string());
+            if self.projection_mode == ClientProjectionMode::Interactive {
+                crate::kit::session_boundary::project_session_boundary(None);
+            }
+            if let Err(close_error) = self
+                .transport
+                .send_request("session/close", json!({"sessionId": session_id}))
+                .await
+            {
+                tracing::warn!(%close_error, "session initialization cleanup failed");
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn initialize_user_inputs_under_gate(&self, session_id: &str) -> Result<(), AcpError> {
@@ -366,6 +472,7 @@ impl AcpTuiClient {
             .as_ref()
             .is_some_and(|(id, _)| id == session_id);
         let transition = if is_current {
+            self.project_execution_cwd(None);
             let start = self
                 .lifecycle
                 .begin_transition(TransitionKind::DeleteCurrent, None)

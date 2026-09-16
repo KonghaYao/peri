@@ -31,6 +31,7 @@ async fn test_concurrent_bg_tasks_all_emit_completion() {
                     duration_ms: 100 + i as u64 * 10,
                     child_thread_id: None,
                     timed_out: false,
+                    subagent_failure: None,
                 };
                 let _ = tx.send(ExecutorEvent::BackgroundTaskCompleted(result));
             })
@@ -143,6 +144,7 @@ async fn test_bg_event_pump_receives_all_completions() {
                     duration_ms: 100,
                     child_thread_id: None,
                     timed_out: false,
+                    subagent_failure: None,
                 };
                 let _ = tx.send(ExecutorEvent::BackgroundTaskCompleted(result));
             })

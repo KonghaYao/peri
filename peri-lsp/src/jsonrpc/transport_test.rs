@@ -4,6 +4,33 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use super::*;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn close_drains_descendant_after_lsp_leader_has_exited() {
+    let cwd = tempfile::tempdir().unwrap();
+    let script =
+        "(while :; do printf x >> marker; sleep 0.02; done) </dev/null >/dev/null & exit 0";
+    let mut transport = LspTransport::spawn(
+        "bash",
+        &["-c".into(), script.into()],
+        &HashMap::new(),
+        cwd.path(),
+    )
+    .unwrap();
+    let tree = transport.tree.clone();
+    transport.child.wait().await.unwrap();
+    assert!(
+        !tree.is_stopped(),
+        "leader exit is not process tree completion"
+    );
+    let (dispatcher, _incoming) = MessageDispatcher::new(transport);
+    tokio::time::timeout(Duration::from_secs(5), dispatcher.close())
+        .await
+        .unwrap();
+    assert!(tree.is_stopped());
+    assert!(dispatcher.stderr_task.lock().is_none());
+}
+
 /// 伪 LSP 服务器脚本：发出服务器发起请求 workspace/configuration (id=1)，
 /// 然后从 stdin 读客户端响应，校验为 -32601 MethodNotFound（exit 0），否则 exit 1。
 /// 用 perl 实现以跨平台（Unix/macOS 预装，Windows 由 Git for Windows 提供；
@@ -36,6 +63,7 @@ async fn test_server_request_unknown_id_receives_method_not_found() {
         "perl",
         &["-e".to_string(), FAKE_SERVER_SCRIPT.to_string()],
         &HashMap::new(),
+        &std::env::temp_dir(),
     )
     .expect("启动伪服务器失败");
 
@@ -96,7 +124,8 @@ async fn test_close_kills_child_process() {
             "Start-Sleep -Seconds 60".to_string(),
         ],
     );
-    let transport = LspTransport::spawn(command, &args, &HashMap::new()).expect("启动失败");
+    let transport = LspTransport::spawn(command, &args, &HashMap::new(), &std::env::temp_dir())
+        .expect("启动失败");
     let (dispatcher, _rx) = MessageDispatcher::new(transport);
 
     dispatcher.close().await;
@@ -181,6 +210,7 @@ async fn close_rejects_pending_without_an_external_dispatch_loop() {
 
 fn empty_dispatcher() -> MessageDispatcher {
     MessageDispatcher {
+        tree: Arc::new(peri_process::ProcessTree::new().unwrap()),
         dispatch_state: Arc::new(disconnected_state()),
         writer_task: Mutex::new(None),
         read_task: Mutex::new(None),
@@ -406,8 +436,13 @@ my $body = '{"jsonrpc":"2.0","method":"header-read"}';
 print "Content-Length: " . length($body) . "\r\n\r\n" . $body;
 sleep 60;
 "#;
-    let transport =
-        LspTransport::spawn("perl", &["-e".into(), script.into()], &HashMap::new()).unwrap();
+    let transport = LspTransport::spawn(
+        "perl",
+        &["-e".into(), script.into()],
+        &HashMap::new(),
+        &std::env::temp_dir(),
+    )
+    .unwrap();
     let (dispatcher, mut incoming) = MessageDispatcher::new(transport);
     let dispatcher = Arc::new(dispatcher);
     let send = {

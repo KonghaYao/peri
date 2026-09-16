@@ -151,6 +151,7 @@ impl Harness {
             name: "Agent".to_string(),
             output: "dispatched".to_string(),
             is_error: false,
+            subagent_failure: None,
         });
     }
 
@@ -174,6 +175,7 @@ impl Harness {
             agent_name: "fork".to_string(),
             result: result.to_string(),
             is_error: false,
+            subagent_failure: None,
         });
     }
 
@@ -238,6 +240,7 @@ impl Harness {
             name: "Bash".to_string(),
             output: "ok".to_string(),
             is_error: false,
+            subagent_failure: None,
         });
     }
 

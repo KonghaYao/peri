@@ -1,0 +1,10 @@
+{
+  "fixture_schema": "sandbox-mcp/protocol-pagination-v1",
+  "note": "本服务的列表面是单页：tools/list 固定七项，resources/list 只列本连接自己的任务，服务端从不发出 nextCursor。因此调用方提交的任何 cursor（含空字符串）都不是本服务发出的游标，按规范 server/utilities/pagination 的 'Invalid cursors SHOULD result in an error with code -32602 (Invalid params)' 拒绝，而不是悄悄忽略后返回同一页。",
+  "invalid_cursor": "eyJwYWdlIjogM30=",
+  "empty_cursor": "",
+  "expected": {
+    "code": -32602,
+    "message_prefix": "Invalid cursor: "
+  }
+}

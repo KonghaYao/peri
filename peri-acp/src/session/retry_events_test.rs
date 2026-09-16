@@ -26,12 +26,15 @@ fn retry_event_forwarder_translates_observation_to_llm_retrying() {
     forwarder.set(Some(handler));
 
     let observer = forwarder.as_retry_observer();
-    observer.on_retry(peri_model::RetryObservation::new(
-        2,
-        3,
-        std::time::Duration::from_millis(1000),
-        peri_model::RetryErrorKind::Protocol,
-    ));
+    observer.on_retry(
+        peri_model::RetryObservation::from_model_error(
+            2,
+            3,
+            std::time::Duration::from_millis(1000),
+            &peri_model::ModelError::http_status(429, "provider.example", Some("req-429")),
+        )
+        .expect("HTTP model error should derive retry observation"),
+    );
 
     let guard = recorded.lock().expect("record lock");
     assert_eq!(guard.len(), 1);
@@ -42,7 +45,10 @@ fn retry_event_forwarder_translates_observation_to_llm_retrying() {
             max_attempts: 3,
             delay_ms: 1000,
             error,
-        } if error == "protocol"
+            diagnostic: Some(diagnostic),
+        } if error == "http status"
+            && diagnostic.status() == Some(429)
+            && diagnostic.request_id() == Some("req-429")
     ));
     drop(guard);
 

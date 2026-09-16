@@ -4,6 +4,7 @@
 mod cache;
 mod lifecycle;
 mod oauth;
+pub(crate) mod process;
 mod service;
 mod status;
 mod subscription;
@@ -23,7 +24,9 @@ pub(crate) use cache::cache_scope_allows_persistence;
 pub use oauth::OAuthStartDisposition;
 #[cfg(test)]
 pub(crate) use service::ControlledMcpService;
-pub(crate) use service::{mcpp_client_info_for_profile, peer_declares_skills, McpServiceWrapper};
+pub(crate) use service::{
+    mcpp_client_info_for_profile, peer_declares_skills, McpServiceOwner, McpServiceWrapper,
+};
 pub use status::redact_mcp_error;
 #[cfg(test)]
 pub(crate) use status::status_change_text;
@@ -32,9 +35,7 @@ use status::{mcp_error_summary, mcp_status_label};
 #[cfg(test)]
 pub(crate) use subscription::build_subscription_filter;
 pub(crate) use subscription::setup_subscription;
-pub(crate) use transport::{
-    build_authed_transport, build_http_transport, serve_client_auto, spawn_stdio_transport,
-};
+pub(crate) use transport::{build_authed_transport, build_http_transport, serve_client_auto};
 pub(crate) use types::McpConnectionKey;
 pub use types::{
     ClientStatus, McpClientHandle, McpInitStatus, McpPoolError, OAuthStatus, ServerInfo,
@@ -42,6 +43,11 @@ pub use types::{
 
 /// MCP 客户端连接池
 pub struct McpClientPool {
+    shared_services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
+    /// Includes failed handshakes until their actual process tree and stderr have drained.
+    processes: parking_lot::Mutex<Vec<Arc<process::McpProcessOwner>>>,
+    /// Static transports reconnect in the same session directory used for initial discovery.
+    pub(crate) execution_cwd: std::sync::OnceLock<std::path::PathBuf>,
     /// Pool-wide admission gate. 0=open, 1=closing, 2=closed.
     lifecycle: std::sync::atomic::AtomicU8,
     pub(crate) lifecycle_registration: parking_lot::Mutex<()>,
@@ -114,6 +120,9 @@ impl McpClientPool {
         capability_profile: super::apps::McpCapabilityProfile,
     ) -> Self {
         Self {
+            shared_services: parking_lot::Mutex::new(Vec::new()),
+            processes: parking_lot::Mutex::new(Vec::new()),
+            execution_cwd: std::sync::OnceLock::new(),
             lifecycle: std::sync::atomic::AtomicU8::new(0),
             lifecycle_registration: parking_lot::Mutex::new(()),
             service_shutdown: tokio::sync::Mutex::new(ServiceShutdownState::Idle),
@@ -137,6 +146,23 @@ impl McpClientPool {
             capability_profile,
             app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
         }
+    }
+
+    pub fn bind_execution_cwd(&self, cwd: &std::path::Path) -> std::io::Result<&std::path::Path> {
+        let result = (|| {
+            let cwd = std::path::absolute(cwd)?;
+            let stored = self.execution_cwd.get_or_init(|| cwd.clone());
+            if stored != &cwd {
+                return Err(std::io::Error::other(
+                    "MCP pool cannot change its execution directory",
+                ));
+            }
+            Ok(stored.as_path())
+        })();
+        if let Err(error) = &result {
+            *self.init_status.write() = McpInitStatus::Failed(error.to_string());
+        }
+        result
     }
 
     #[cfg(test)]

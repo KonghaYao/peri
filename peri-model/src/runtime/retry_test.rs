@@ -48,6 +48,23 @@ fn config() -> RetryConfig {
 }
 
 #[test]
+fn retry_observation_rejects_mismatched_diagnostic_and_derives_model_facts() {
+    let http = ModelError::http_status(429, "provider.example", Some("req-429"));
+    let derived = RetryObservation::from_model_error(1, 3, Duration::ZERO, &http)
+        .expect("HTTP model error should derive an observation");
+    assert_eq!(
+        derived.diagnostic().and_then(|value| value.status()),
+        Some(429)
+    );
+    assert_eq!(derived.error_kind(), crate::RetryErrorKind::HttpStatus);
+
+    assert!(
+        RetryObservation::from_model_error(1, 3, Duration::ZERO, &ModelError::cancelled(),)
+            .is_none()
+    );
+}
+
+#[test]
 fn jittered_delay_never_exceeds_max_delay() {
     let config = RetryConfig::default()
         .with_base_delay(Duration::from_millis(100))
@@ -575,6 +592,48 @@ async fn does_not_retry_non_retryable_http_statuses() {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
+}
+
+#[tokio::test]
+async fn retry_exhaustion_keeps_last_http_diagnostic() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let attempt = scripted_attempt(
+        vec![
+            Err(ModelError::http_status(429, "anthropic", Some("req_429"))),
+            Err(ModelError::http_status(429, "anthropic", Some("req_429"))),
+            Err(ModelError::http_status(429, "anthropic", Some("req_429"))),
+        ],
+        calls.clone(),
+    );
+    let mut stream = Box::pin(retrying_stream(
+        config(),
+        CancellationToken::new(),
+        None,
+        attempt,
+    ));
+
+    let error = stream
+        .next()
+        .await
+        .expect("retry exhaustion should produce a terminal error")
+        .expect_err("scripted HTTP failures must remain errors");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        error.retry_error_kind(),
+        Some(crate::RetryErrorKind::HttpStatus)
+    );
+    assert_eq!(error.http_status_code(), Some(429));
+    assert_eq!(error.provider(), Some("anthropic"));
+    assert_eq!(error.request_id(), Some("req_429"));
+    let diagnostic = error.diagnostic();
+    assert_eq!(diagnostic.category_name(), "http_status");
+    assert_eq!(diagnostic.status(), Some(429));
+    assert_eq!(diagnostic.retry_attempts(), Some(3));
+    assert_eq!(
+        diagnostic.retry_kind(),
+        Some(crate::RetryErrorKind::HttpStatus)
+    );
 }
 
 #[tokio::test]

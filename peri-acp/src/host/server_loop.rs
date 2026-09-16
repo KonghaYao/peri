@@ -54,7 +54,14 @@ impl ServerLoop<'_> {
         // continues processing session/cancel notifications.
         let prompt_session_id = extract_session_id(&params, "").to_string();
         if !prompt_session_id.is_empty() {
-            if let Some(relay) = cfg.mcp_apps_relay.as_ref() {
+            let relay = sessions
+                .lock()
+                .await
+                .get(&prompt_session_id)
+                .and_then(|state| state.environment.as_ref())
+                .and_then(|env| env.cfg.mcp_apps_relay.clone())
+                .or_else(|| cfg.mcp_apps_relay.clone());
+            if let Some(relay) = relay {
                 relay.begin_session_turn(&prompt_session_id);
             }
         }
@@ -120,7 +127,31 @@ impl ServerLoop<'_> {
         let connection = self.connection;
         let connection_cancellation = self.connection_cancellation;
         let transport = Arc::clone(transport);
-        let relay = cfg.mcp_apps_relay.clone();
+        let owner_id = if method == "peri/mcp/open" {
+            params
+                .get("ownerSessionId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        } else {
+            let state = connection.lock().await;
+            params
+                .get("appSessionId")
+                .and_then(Value::as_str)
+                .and_then(|id| state.app_session(id))
+                .map(|binding| binding.owner_session_id.clone())
+        };
+        let environment = match owner_id {
+            Some(id) => self.sessions.lock().await.get(&id).and_then(|state| {
+                (!state.closing)
+                    .then(|| state.environment.clone())
+                    .flatten()
+            }),
+            None => None,
+        };
+        let relay = environment
+            .as_ref()
+            .and_then(|env| env.cfg.mcp_apps_relay.clone())
+            .or_else(|| cfg.mcp_apps_relay.clone());
         let connection = Arc::clone(connection);
         let app_spawner = cfg.host_task_spawner.clone();
         let connection_cancellation = connection_cancellation.clone();
@@ -188,10 +219,76 @@ impl ServerLoop<'_> {
         let closed_session_id = matches!(method.as_str(), "session/close" | "session/delete")
             .then(|| extract_session_id(&params, "").to_string())
             .filter(|session_id| !session_id.is_empty());
+        let lifecycle_lock = if matches!(
+            method.as_str(),
+            "session/load"
+                | "session/resume"
+                | "session/fork"
+                | "session/rewind"
+                | "session/close"
+                | "session/delete"
+        ) {
+            let lifecycle_session_id = extract_session_id(&params, "").to_owned();
+            if matches!(method.as_str(), "session/close" | "session/delete") {
+                if let Some(state) = sessions.lock().await.get_mut(&lifecycle_session_id) {
+                    state.closing = true;
+                    state.continuation_armed = false;
+                    if let Some(token) = &state.cancel_token {
+                        token.cancel();
+                    }
+                }
+                cfg.session_manager.pre_close_session(&lifecycle_session_id);
+            }
+            let lock = self
+                .prompt_locks
+                .lock()
+                .await
+                .entry(lifecycle_session_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            if matches!(method.as_str(), "session/close" | "session/delete") {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), lock.lock_owned())
+                    .await
+                {
+                    Ok(guard) => Some(guard),
+                    Err(_) => {
+                        let _ = transport
+                            .send_response(
+                                id,
+                                Err(crate::transport::types::AcpError::new(
+                                    -32010,
+                                    "Session close incomplete: active execution has not stopped",
+                                )),
+                            )
+                            .await;
+                        return;
+                    }
+                }
+            } else {
+                match lock.try_lock_owned() {
+                    Ok(guard) => Some(guard),
+                    Err(_) => {
+                        let _ = transport
+                            .send_response(
+                                id,
+                                Err(crate::transport::types::AcpError::new(
+                                    -32010,
+                                    "Session is executing; retry after the current turn",
+                                )),
+                            )
+                            .await;
+                        return;
+                    }
+                }
+            }
+        } else {
+            None
+        };
         let result = {
             let mut sessions = sessions.lock().await;
             handle_request(&method, &params, cfg, &mut sessions, transport).await
         };
+        drop(lifecycle_lock);
         if result.is_ok() && super::user_input::starts_execution(&method) {
             if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
                 super::user_input::schedule_mailbox(
@@ -227,7 +324,14 @@ impl ServerLoop<'_> {
         let response_sent = transport.send_response(id, result).await.is_ok();
         if response_sent {
             if let Some(session_id) = new_session_id {
-                requests::session_lifecycle::after_new_response(cfg, transport, &session_id).await;
+                let environment = sessions
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .and_then(|state| state.environment.clone());
+                let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+                requests::session_lifecycle::after_new_response(local, transport, &session_id)
+                    .await;
             }
         }
     }
@@ -239,7 +343,14 @@ impl ServerLoop<'_> {
         if method == "session/cancel" {
             let session_id = extract_session_id(&params, "");
             if !session_id.is_empty() {
-                if let Some(relay) = cfg.mcp_apps_relay.as_ref() {
+                let relay = sessions
+                    .lock()
+                    .await
+                    .get(session_id)
+                    .and_then(|state| state.environment.as_ref())
+                    .and_then(|env| env.cfg.mcp_apps_relay.clone())
+                    .or_else(|| cfg.mcp_apps_relay.clone());
+                if let Some(relay) = relay {
                     relay.close_session(session_id);
                 }
             }

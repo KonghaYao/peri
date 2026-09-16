@@ -1,0 +1,26 @@
+{
+  "fixture_schema": "sandbox-mcp/protocol-lifecycle-v1",
+  "note": "WP-005 stdio raw wire 用例的生命周期参数。legacy 走 initialize/initialized 握手；modern 每个请求自带 _meta（protocolVersion + clientCapabilities 必填，clientInfo 仅作显示/能力，不参与授权）。unsupported_protocol_version 用于验证 -32022 与 data.supported/requested。",
+  "legacy": {
+    "protocol_version": "2025-11-25",
+    "client_capabilities": {},
+    "client_info": {
+      "name": "wp005-raw-wire",
+      "version": "1.0.0"
+    }
+  },
+  "modern": {
+    "protocol_version": "2026-07-28",
+    "client_capabilities": {},
+    "client_info": {
+      "name": "wp005-raw-wire",
+      "version": "1.0.0"
+    }
+  },
+  "unsupported_protocol_version": "1900-01-01",
+  "expected": {
+    "server_name": "local-mcp-server",
+    "supported_versions": ["2026-07-28", "2025-11-25"],
+    "tools_list_ttl_ms": 3600000
+  }
+}

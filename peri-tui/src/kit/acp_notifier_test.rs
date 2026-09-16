@@ -348,6 +348,7 @@ async fn test_agent_event_forwards_llm_retrying() {
                 max_attempts: 6,
                 delay_ms: 500,
                 error: "transport".into(),
+                diagnostic: None,
             },
         })
         .unwrap();
@@ -387,6 +388,7 @@ async fn test_agent_event_forwards_subagent_stopped() {
                 instance_id: "abc-123".into(),
                 result: "loop failed: llm error".into(),
                 is_error: true,
+                subagent_failure: None,
             },
         })
         .unwrap();
@@ -416,6 +418,7 @@ async fn test_agent_event_forwards_subagent_stopped() {
                 instance_id: "abc-124".into(),
                 result: "done".into(),
                 is_error: false,
+                subagent_failure: None,
             },
         })
         .unwrap();

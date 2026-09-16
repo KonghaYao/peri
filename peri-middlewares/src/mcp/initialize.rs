@@ -4,14 +4,18 @@ use super::{
     auth_store::FileCredentialStore,
     channel_handler::ChannelHandler,
     client::{
-        build_http_transport, serve_client_auto, setup_subscription, spawn_stdio_transport,
-        ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, OAuthStatus,
-        HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT, STDIO_CONNECT_TIMEOUT,
+        build_http_transport, serve_client_auto, setup_subscription, ClientStatus, McpClientHandle,
+        McpClientPool, McpInitStatus, OAuthStatus, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT,
+        STDIO_CONNECT_TIMEOUT,
     },
     config::OAuthConfig,
     oauth_flow::OAuthFlowEvent,
     transport::TransportConfig,
 };
+
+#[cfg(test)]
+#[path = "initialize_test.rs"]
+mod tests;
 
 impl McpClientPool {
     pub async fn run_initialize(
@@ -23,6 +27,36 @@ impl McpClientPool {
         channel_handler: Option<Arc<ChannelHandler>>,
     ) {
         let (config, plugin_sources) = super::load_merged_config_full(cwd, claude_home);
+        Self::initialize_config(
+            pool,
+            cwd,
+            config,
+            plugin_sources,
+            status_tx,
+            oauth_event_callback,
+            channel_handler,
+        )
+        .await;
+    }
+
+    async fn initialize_config(
+        pool: Arc<Self>,
+        cwd: &Path,
+        config: super::config::McpConfigFile,
+        plugin_sources: std::collections::HashMap<String, String>,
+        status_tx: tokio::sync::watch::Sender<McpInitStatus>,
+        oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
+        channel_handler: Option<Arc<ChannelHandler>>,
+    ) {
+        let cwd = match pool.bind_execution_cwd(cwd) {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                let status = McpInitStatus::Failed(error.to_string());
+                *pool.init_status.write() = status.clone();
+                let _ = status_tx.send(status);
+                return;
+            }
+        };
         let connectable = config
             .mcp_servers
             .iter()
@@ -109,7 +143,7 @@ impl McpClientPool {
                     ref command,
                     ref args,
                     ref env,
-                } => match spawn_stdio_transport(command, args, env) {
+                } => match pool.spawn_stdio_transport(command, args, env, cwd) {
                     Ok(transport) => {
                         serve_client_auto(
                             transport,
@@ -171,6 +205,7 @@ impl McpClientPool {
 
             match connect_result {
                 Ok(Ok(rs)) => {
+                    let rs = pool.retain_service(rs);
                     // 订阅配置存在：建立 subscriptions/listen 长流（2026-07-28）。
                     // 失败仅告警——server 可能不支持，连接本身仍可用。
                     if let Some(sub) = subscriptions {
@@ -307,6 +342,13 @@ impl McpClientPool {
     ) -> Arc<Self> {
         let (config, plugin_sources) = super::load_merged_config_full(cwd, claude_home);
         let pool = Arc::new(Self::new_pending());
+        let cwd = match pool.bind_execution_cwd(cwd) {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                *pool.init_status.write() = McpInitStatus::Failed(error.to_string());
+                return pool;
+            }
+        };
         *pool.plugin_sources.write() = plugin_sources;
         let token_store = Arc::new(FileCredentialStore::new());
         // OAuth 事件回调注入 pool（spawn_oauth_flow / start_oauth_flow 读取；
@@ -367,7 +409,7 @@ impl McpClientPool {
                     ref command,
                     ref args,
                     ref env,
-                } => match spawn_stdio_transport(command, args, env) {
+                } => match pool.spawn_stdio_transport(command, args, env, cwd) {
                     Ok(t) => {
                         serve_client_auto(
                             t,
@@ -429,6 +471,7 @@ impl McpClientPool {
 
             match connect_result {
                 Ok(Ok(rs)) => {
+                    let rs = pool.retain_service(rs);
                     // 订阅配置存在：建立 subscriptions/listen 长流（2026-07-28）。
                     if let Some(sub) = subscriptions {
                         setup_subscription(&pool, &rs, name, sub).await;

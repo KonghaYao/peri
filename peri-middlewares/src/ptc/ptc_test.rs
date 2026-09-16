@@ -62,6 +62,84 @@ impl Drop for HomeGuard {
 
 struct FakeDispatcher;
 
+#[tokio::test]
+async fn test_ptc_native_file_access_uses_each_session_cwd() {
+    use peri_acp_types::tasks::{TaskManager, TaskShutdownReport};
+    let _home = HomeGuard::with_ptc_fixture();
+    let manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let tool = RunPtcCodeTool::default().with_task_manager(manager.clone());
+    for marker in ["workspace-a", "workspace-b"] {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(cwd.path().join("input"), marker).unwrap();
+        let output = tool.invoke(
+            json!({"source": "const fs = await import('node:fs'); const value = fs.readFileSync('input', 'utf8'); fs.writeFileSync('output', value); return value;"}),
+            ToolContext::new(&[], cwd.path().to_str().unwrap()).with_effective_tool_dispatcher(
+                Arc::new(FakeDispatcher), "ptc-cwd", CancellationToken::new(),
+            ),
+        ).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["value"],
+            marker
+        );
+        assert_eq!(
+            std::fs::read_to_string(cwd.path().join("output")).unwrap(),
+            marker
+        );
+    }
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+}
+
+#[tokio::test]
+async fn test_ptc_caller_drop_keeps_cleanup_owned_until_session_shutdown() {
+    use peri_acp_types::tasks::{TaskManager, TaskShutdownReport};
+    let _home = HomeGuard::with_ptc_fixture();
+    let cwd = tempfile::tempdir().unwrap();
+    let manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let tool = RunPtcCodeTool::default().with_task_manager(manager.clone());
+    let execution_cwd = cwd.path().to_str().unwrap().to_owned();
+    let caller = tokio::spawn(async move {
+        tool.invoke(
+            json!({"source": "const fs = await import('node:fs'); fs.writeFileSync('started', 'yes'); await new Promise(resolve => setTimeout(resolve, 60000)); fs.writeFileSync('late', 'bad');"}),
+            ToolContext::new(&[], &execution_cwd).with_effective_tool_dispatcher(
+                Arc::new(FakeDispatcher), "ptc-cancel", CancellationToken::new(),
+            ),
+        ).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !cwd.path().join("started").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!manager.is_execution_idle());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+    assert!(manager.is_execution_idle());
+    assert!(!cwd.path().join("late").exists());
+}
+
+#[tokio::test]
+async fn test_ptc_rejects_new_execution_after_session_shutdown() {
+    use peri_acp_types::tasks::TaskManager;
+    let manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    manager.shutdown().await;
+    let error = RunPtcCodeTool::default()
+        .with_task_manager(manager)
+        .invoke(
+            json!({"source": "return 1"}),
+            ToolContext::new(&[], ".").with_effective_tool_dispatcher(
+                Arc::new(FakeDispatcher),
+                "ptc-closed",
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("closing"));
+}
+
 #[async_trait]
 impl EffectiveToolDispatcher for FakeDispatcher {
     async fn dispatch(
@@ -175,6 +253,25 @@ async fn test_run_code_routes_concurrent_calls_through_effective_dispatcher() {
         result["value"],
         json!(["{\"file\":\"a\"}", "{\"file\":\"b\"}"])
     );
+}
+
+#[tokio::test]
+async fn test_ptc_string_projection_does_not_fabricate_nested_execution_evidence() {
+    let _home = HomeGuard::with_ptc_fixture();
+    let output = RunPtcCodeTool::default()
+        .invoke_output(
+            json!({"source": "return await tools.Read({ file: 'nested' });"}),
+            ToolContext::new(&[], ".").with_effective_tool_dispatcher(
+                Arc::new(FakeDispatcher),
+                "outer-run-ptc-code",
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(output.execution.is_none());
+    let result: Value = serde_json::from_str(&output.text).unwrap();
+    assert_eq!(result["value"], json!("{\"file\":\"nested\"}"));
 }
 
 #[tokio::test]

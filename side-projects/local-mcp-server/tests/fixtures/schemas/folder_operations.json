@@ -1,0 +1,61 @@
+{
+  "fixture_schema": "sandbox-mcp/tool-schema-fixture-v1",
+  "tool": "folder_operations",
+  "aliases": [],
+  "namespace": "filesystem",
+  "description": "Unified folder operations tool supporting create, list, and existence check.\n\nOperations:\n- \"create\": Creates a directory at the specified path. By default creates parent directories recursively (recursive: true). Use recursive: false to only create a single directory level\n- \"list\": Lists the contents of a directory, showing files and subdirectories with sizes and modification dates. Output is truncated beyond 500 entries\n- \"exists\": Checks whether a path exists and whether it is a directory or file\n- \"deep_scan\": Recursively scans a directory tree and outputs entries in tree format with unicode box-drawing characters. Supports max_depth to control recursion depth (default 3, range 1-10). Common cache/build directories (node_modules, .git, target, dist, etc.) are automatically skipped. Output is truncated beyond 500 entries.\n\nUsage:\n- The folder_path parameter must be an absolute path, not a relative path\n- You can call multiple tools in a single response. It is always better to check directory existence before creating or listing\n- When creating a directory, the recursive parameter defaults to true, creating all necessary parent directories\n\nNotes:\n- List output shows entries with file size and modification date\n- Directories are shown with a trailing / indicator\n- For large directories (>500 entries), output is truncated with a summary count",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "operation": {
+        "type": "string",
+        "enum": [
+          "create",
+          "list",
+          "exists",
+          "deep_scan"
+        ],
+        "description": "The folder operation to perform: \"create\" to create a directory, \"list\" to list directory contents, \"exists\" to check if a path exists, \"deep_scan\" to recursively scan directory tree with depth control"
+      },
+      "folder_path": {
+        "type": "string",
+        "description": "The absolute path to the folder for the operation"
+      },
+      "recursive": {
+        "type": "boolean",
+        "description": "For \"create\" operation: whether to create parent directories if needed (default true). Ignored for other operations"
+      },
+      "max_depth": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10,
+        "description": "For \"deep_scan\" operation: maximum recursion depth (1 = current directory only, 2 = one level deep, default 3, max 10). Ignored for other operations"
+      }
+    },
+    "required": [
+      "operation",
+      "folder_path"
+    ]
+  },
+  "host_projection": {
+    "base_tool_timeout_ms": 120000,
+    "output_char_limit_chars": null,
+    "prefers_persist": false,
+    "note": "基类默认 timeout 生效。"
+  },
+  "required_error_messages": {
+    "operation": "Missing operation parameter",
+    "folder_path": "Missing folder_path parameter"
+  },
+  "param_alias_groups": [],
+  "business_error_rule": "缺失 operation/folder_path、目录不存在、非目录、非法 max_depth 等均为 tool business error。",
+  "provenance": {
+    "source_file": "peri-middlewares/src/tools/filesystem/folder.rs",
+    "source_symbol": "FolderOperationsTool::parameters",
+    "source_sha256": "a32f90f381834032990d57770bf7e6946e0abce2fccf08111b6a459bdbdec071",
+    "schema_macro_start_line": 308,
+    "description_file": "peri-middlewares/src/tools/filesystem/descriptions/folder.md",
+    "description_symbol": "FolderOperationsTool::description",
+    "description_sha256": "9ed6904ea000591d7e896e277947f2f95858e8458a6ca24c81866fe3a36de043"
+  }
+}

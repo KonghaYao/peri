@@ -394,6 +394,8 @@ fn project_message(
             tool_call_id,
             content,
             is_error,
+            execution,
+            subagent_failure,
         } => {
             if *is_error {
                 return msg.clone(); // 错误结果不变
@@ -411,6 +413,8 @@ fn project_message(
                 tool_call_id: tool_call_id.clone(),
                 content: projected_content,
                 is_error: *is_error,
+                execution: execution.clone(),
+                subagent_failure: subagent_failure.clone(),
             }
         }
     }

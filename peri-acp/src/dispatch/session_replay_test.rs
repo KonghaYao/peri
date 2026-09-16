@@ -117,6 +117,39 @@ async fn test_replay_tool_failure_writes_standard_output_raw_and_meta() {
 }
 
 #[tokio::test]
+async fn test_replay_tool_failure_keeps_safe_subagent_diagnostic_meta() {
+    let failure = peri_acp_types::error::SafeSubagentFailure::new(
+        "child-1",
+        peri_acp_types::error::SafeModelErrorDiagnostic::from_model(
+            peri_model::ModelError::http_status(429, "provider.example", Some("req-1"))
+                .diagnostic(),
+        ),
+    )
+    .expect("valid safe failure");
+    let message = BaseMessage::tool_result_with_execution_and_failure(
+        "tc-safe",
+        "child failed",
+        true,
+        None,
+        Some(failure),
+    );
+    let updates = collect_replay(vec![message]).await;
+    let SessionUpdate::ToolCallUpdate(update) = &updates[0] else {
+        panic!("expected ToolCallUpdate");
+    };
+    let meta = update.meta.as_ref().expect("replay meta must exist");
+    assert_eq!(meta["periReplay"], serde_json::Value::Bool(true));
+    assert_eq!(
+        meta["peri"]["subagentFailure"]["child_thread_id"],
+        "child-1"
+    );
+    assert_eq!(meta["peri"]["subagentFailure"]["diagnostic"]["status"], 429);
+    assert!(!serde_json::to_string(meta)
+        .unwrap()
+        .contains("provider body"));
+}
+
+#[tokio::test]
 async fn test_replay_tool_success_writes_standard_output() {
     // replay 成功工具 → status=completed + 标准 content 文本 + rawOutput
     let updates = collect_replay(vec![BaseMessage::tool_result("tc-2", "ok")]).await;
@@ -127,6 +160,67 @@ async fn test_replay_tool_success_writes_standard_output() {
             assert!(
                 update.fields.raw_output.is_some(),
                 "raw_output 必须保留以维持机器消费兼容"
+            );
+        }
+        other => panic!("预期 ToolCallUpdate，实际: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_replay_typed_execution_message_keeps_bounded_text_and_failure_status() {
+    let message = BaseMessage::tool_result_with_execution(
+        "tc-evidence",
+        "head\n[Execution status: failed, exit_code: 7, output_ref: /tmp/full-output.txt]",
+        true,
+        Some(peri_acp_types::tools::ToolExecutionEvidence {
+            status: peri_acp_types::tools::ToolExecutionStatus::Failed,
+            exit_code: Some(7),
+            output_ref: Some("/tmp/full-output.txt".into()),
+            output_truncated: true,
+            task_id: None,
+        }),
+    );
+    let updates = collect_replay(vec![message]).await;
+    match &updates[0] {
+        SessionUpdate::ToolCallUpdate(update) => {
+            assert_eq!(update.fields.status, Some(ToolCallStatus::Failed));
+            assert!(tool_call_output_text(&update.fields).contains("status: failed"));
+            assert_eq!(
+                update.fields.raw_output,
+                Some(serde_json::Value::String(
+                    "head\n[Execution status: failed, exit_code: 7, output_ref: /tmp/full-output.txt]"
+                        .into()
+                ))
+            );
+        }
+        other => panic!("预期 ToolCallUpdate，实际: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_replay_typed_execution_facts_project_summary_when_body_has_none() {
+    let message = BaseMessage::tool_result_with_execution(
+        "tc-facts",
+        "raw body",
+        true,
+        Some(peri_acp_types::tools::ToolExecutionEvidence {
+            status: peri_acp_types::tools::ToolExecutionStatus::RunningAfterTimeout,
+            exit_code: None,
+            output_ref: Some("/tmp/full-output.txt".into()),
+            output_truncated: true,
+            task_id: Some("shell-1".into()),
+        }),
+    );
+    let updates = collect_replay(vec![message]).await;
+    match &updates[0] {
+        SessionUpdate::ToolCallUpdate(update) => {
+            let output = tool_call_output_text(&update.fields);
+            assert!(output.contains("status: running_after_timeout"));
+            assert!(output.contains("task_id: shell-1"));
+            assert_eq!(output.matches("status: running_after_timeout").count(), 1);
+            assert_eq!(
+                update.fields.raw_output,
+                Some(serde_json::Value::String(output))
             );
         }
         other => panic!("预期 ToolCallUpdate，实际: {other:?}"),

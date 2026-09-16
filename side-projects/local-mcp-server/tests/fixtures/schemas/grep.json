@@ -1,0 +1,159 @@
+{
+  "fixture_schema": "sandbox-mcp/tool-schema-fixture-v1",
+  "tool": "Grep",
+  "aliases": [],
+  "namespace": "filesystem",
+  "description": "A powerful search tool built on ripgrep. Supports full regex syntax (e.g. \"log.*Error\", \"function\\s+\\w+\"). Filter files with glob parameter (e.g. \"*.js\", \"*.{ts,tsx}\") or type parameter (e.g. \"js\", \"py\", \"rust\", \"go\"). Use output_mode to control result format.\n\nUsage:\n- Always provide pattern parameter\n- Use glob parameter for file type filtering (e.g. \"*.js\", \"*.{ts,tsx}\")\n- Use type parameter for language-based filtering (e.g. \"rust\", \"js\", \"py\")\n- Supports full regex syntax — literal braces need escaping (use \\{\\} to find interface{} in Go code)\n- Output includes line numbers by default (use -n to disable)\n- Search times out after 15 seconds; cancellation is cooperative: the walk stops at file boundaries, but a file already being scanned runs to completion (results are discarded) — use more specific patterns for large codebases\n- Default head_limit is 250 output lines (matched + context lines); exactly N matches are NOT marked truncated, only outputs beyond N are truncated and persisted\n- In files_with_matches / count / files_without_matches modes, head_limit limits the number of files listed (each file counts as one output line)\n- Lines longer than 1000 bytes are truncated at a UTF-8-safe boundary with a \"… [line truncated]\" marker\n- Total output is capped at 20000 bytes; beyond that the full output is saved to a temp file (use Read tool to view) and only the head is returned inline\n- Use fixed_strings (-F) to search literal strings without regex interpretation\n- Use invert_match (-v) to find lines that do NOT match the pattern\n- Use whole_word (-w) to match whole words only\n- Use multiline to match patterns spanning multiple lines\n- Use max_depth to limit search directory depth\n\nOutput modes:\n- \"content\": shows matching lines with line numbers (default)\n- \"files_with_matches\": lists only file paths that contain matches\n- \"count\": shows match counts per file\n- \"files_without_matches\": lists only file paths that do NOT contain matches\n\nContext control:\n- -C: symmetric context lines before and after each match\n- -A: context lines after each match (takes priority over -C)\n- -B: context lines before each match (takes priority over -C)\n\nWhen to use:\n- Prefer Grep over Bash commands like grep or rg for content search\n- Use Glob for file name search, Grep for content search\n- For open-ended searches, start with the most specific query and broaden if needed\n",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "pattern": {
+        "type": "string",
+        "description": "The regular expression pattern to search for in file contents. Supports full regex syntax (e.g. \"log.*Error\", \"function\\s+\\w+\")"
+      },
+      "path": {
+        "type": "string",
+        "description": "File or directory path to search in. Defaults to current working directory if not specified"
+      },
+      "glob": {
+        "type": "string",
+        "description": "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\"). Only files matching the glob will be searched"
+      },
+      "type": {
+        "type": "string",
+        "description": "Filter files by type. Common values: \"rust\", \"js\", \"py\", \"go\", \"java\", \"ts\". More efficient than glob for type-based filtering"
+      },
+      "output_mode": {
+        "type": "string",
+        "enum": [
+          "content",
+          "files_with_matches",
+          "count",
+          "files_without_matches"
+        ],
+        "description": "Output mode: \"content\" shows matching lines with line numbers (default), \"files_with_matches\" lists only file paths, \"count\" shows match counts per file, \"files_without_matches\" lists file paths without matches"
+      },
+      "-i": {
+        "type": "boolean",
+        "description": "Enable case-insensitive search (default: false). Alias of case_insensitive"
+      },
+      "case_insensitive": {
+        "type": "boolean",
+        "description": "Enable case-insensitive search (default: false). Semantic alias of -i"
+      },
+      "-C": {
+        "type": "number",
+        "description": "Number of context lines to show before and after each match. Alias of context"
+      },
+      "context": {
+        "type": "number",
+        "description": "Number of context lines to show before and after each match. Semantic alias of -C"
+      },
+      "-A": {
+        "type": "number",
+        "description": "Number of context lines to show after each match (takes priority over -C). Alias of after_context"
+      },
+      "after_context": {
+        "type": "number",
+        "description": "Number of context lines to show after each match (takes priority over context). Semantic alias of -A"
+      },
+      "-B": {
+        "type": "number",
+        "description": "Number of context lines to show before each match (takes priority over -C). Alias of before_context"
+      },
+      "before_context": {
+        "type": "number",
+        "description": "Number of context lines to show before each match (takes priority over context). Semantic alias of -B"
+      },
+      "-n": {
+        "type": "boolean",
+        "description": "Show line numbers (default: true). Alias of show_line_numbers"
+      },
+      "show_line_numbers": {
+        "type": "boolean",
+        "description": "Show line numbers (default: true). Semantic alias of -n"
+      },
+      "multiline": {
+        "type": "boolean",
+        "description": "Enable multiline mode where ^/$ match line boundaries and . matches newlines (default: false)"
+      },
+      "whole_word": {
+        "type": "boolean",
+        "description": "Match whole words only (default: false)"
+      },
+      "invert_match": {
+        "type": "boolean",
+        "description": "Invert match: show lines that do NOT match the pattern, equivalent to grep -v (default: false)"
+      },
+      "fixed_strings": {
+        "type": "boolean",
+        "description": "Treat pattern as a literal string instead of regex, equivalent to grep -F (default: false)"
+      },
+      "max_depth": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Maximum directory depth to search. Limits how deep the search traverses into subdirectories"
+      },
+      "head_limit": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Limit output to first N matching lines (default 250). Pass 0 for unlimited. Use sparingly — large result sets waste context"
+      },
+      "offset": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Skip first N lines of output before applying head_limit"
+      }
+    },
+    "required": [
+      "pattern"
+    ]
+  },
+  "host_projection": {
+    "base_tool_timeout_ms": null,
+    "output_char_limit_chars": null,
+    "prefers_persist": false,
+    "note": "Grep 显式覆写 timeout()=None；内部另有 15s walk 超时。"
+  },
+  "required_error_messages": {
+    "pattern": "Error: Missing required parameter 'pattern'"
+  },
+  "param_alias_groups": [
+    [
+      "case_insensitive",
+      "-i"
+    ],
+    [
+      "context",
+      "-C"
+    ],
+    [
+      "after_context",
+      "-A"
+    ],
+    [
+      "before_context",
+      "-B"
+    ],
+    [
+      "show_line_numbers",
+      "-n"
+    ]
+  ],
+  "business_error_rule": "缺失 pattern、正则语法错误、搜索路径不存在、非法 output_mode、分数数值参数、遍历错误均为 tool business error；取消/超时只作为已登记事实，不发生 panic。",
+  "provenance": {
+    "source_file": "peri-middlewares/src/tools/filesystem/grep.rs",
+    "source_symbol": "GrepTool::parameters",
+    "source_sha256": "2bd922cabe05c2b2c81f3afecb7d4df666a81571d96607c98f0d8b6def91ab6c",
+    "schema_macro_start_line": 361,
+    "description_file": "peri-middlewares/src/tools/filesystem/descriptions/grep.md",
+    "description_symbol": "GrepTool::description",
+    "description_sha256": "e2e0caf03f772154acb911264b5793caf5f1512f9f2b09bdcd36841ede94bdf2"
+  },
+  "param_alias_rule": "语义名优先：实现按 input.get(\"<semantic>\").or_else(|| input.get(\"<cli>\")) 解析，两者同时出现时语义名生效（grep.rs:494-529；既有测试 test_invoke_semantic_alias_takes_priority_over_cli）。",
+  "additional_facts": {
+    "type_unknown_semantics": "type 未知值映射为空 glob 列表，即不追加过滤器且不报错（grep_args.rs:50-73、:99-104）。",
+    "output_mode_invalid_message": "Invalid output_mode: '<value>'. Must be 'content', 'files_with_matches', 'count', or 'files_without_matches'",
+    "context_precedence": "-A/-B 任一存在时使用 (B,A) 且不再取 -C；否则 -C 同时作为前/后上下文（grep_args.rs:106-115）。"
+  }
+}

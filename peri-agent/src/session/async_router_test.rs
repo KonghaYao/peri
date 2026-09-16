@@ -23,6 +23,7 @@ fn make_bg_result(task_id: &str, agent_name: &str, output: &str) -> BackgroundTa
         duration_ms: 1500,
         child_thread_id: None,
         timed_out: false,
+        subagent_failure: None,
     }
 }
 

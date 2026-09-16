@@ -1,3 +1,4 @@
+#[cfg(windows)]
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -8,15 +9,165 @@ use crate::agent::events::BackgroundTaskResult;
 
 use super::registry::BackgroundTaskRegistry;
 
+/// Keeps an external shell's cleanup evidence across foreground/background handoff.
+pub struct ShellExecutionGuard {
+    ownership: Option<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>>,
+    tree: Option<Arc<peri_process::ProcessTree>>,
+    stopped: bool,
+    registration: Option<(Arc<dyn peri_acp_types::tasks::TaskManager>, String)>,
+}
+
+impl ShellExecutionGuard {
+    pub fn new(ownership: Option<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>>) -> Self {
+        Self {
+            ownership,
+            tree: None,
+            stopped: false,
+            registration: None,
+        }
+    }
+
+    /// Establish OS process-tree ownership before the command can execute.
+    pub fn prepare(&mut self, command: &mut tokio::process::Command) -> std::io::Result<()> {
+        let tree = peri_process::ProcessTree::new()?;
+        tree.prepare(command);
+        self.tree = Some(Arc::new(tree));
+        Ok(())
+    }
+
+    pub fn attach(&mut self, child: &tokio::process::Child) -> std::io::Result<()> {
+        Arc::get_mut(
+            self.tree
+                .as_mut()
+                .ok_or_else(|| std::io::Error::other("shell process tree was not prepared"))?,
+        )
+        .ok_or_else(|| std::io::Error::other("shell process tree already shared"))?
+        .attach(child)
+    }
+
+    /// Windows cancellation retains the exact job handle, never a reusable PID.
+    pub fn cancel_callback(&self) -> Option<Box<dyn FnOnce() + Send + Sync>> {
+        #[cfg(windows)]
+        {
+            self.tree.as_ref().map(|tree| {
+                let tree = Arc::clone(tree);
+                Box::new(move || tree.terminate()) as Box<dyn FnOnce() + Send + Sync>
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.tree.as_ref().is_none_or(|tree| tree.is_stopped())
+    }
+
+    /// Keep proof of a registered process even if its follow-up task is rejected during close.
+    pub fn track_registration(
+        &mut self,
+        manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+        task_id: String,
+    ) {
+        self.registration = Some((manager, task_id));
+    }
+
+    /// A reaped command leader can leave a live, registered background process group.
+    pub async fn wait_for_exit(&mut self) {
+        while !self.is_stopped() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Standalone tool callers without session ownership retain their original process semantics.
+    pub fn release_unmanaged(&mut self) {
+        if self.ownership.is_none() {
+            if let Some(tree) = &mut self.tree {
+                if !Arc::get_mut(tree).is_some_and(|tree| tree.disarm().is_ok()) {
+                    return;
+                }
+            }
+            self.stopped = true;
+        }
+    }
+
+    /// Call only after the child and its pipe readers have been joined.
+    pub fn confirm_stopped(&mut self) {
+        if self.is_stopped() {
+            self.stopped = true;
+            if let Some(owner) = &mut self.ownership {
+                owner.confirm_stopped();
+            }
+            if let Some((manager, id)) = self.registration.take() {
+                manager.confirm_external_execution_stopped(&id);
+            }
+        }
+    }
+}
+
+impl Drop for ShellExecutionGuard {
+    fn drop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        let Some(tree) = self.tree.take() else {
+            if let Some(owner) = &mut self.ownership {
+                owner.confirm_stopped();
+            }
+            return;
+        };
+        tree.terminate();
+        let mut ownership = self.ownership.take();
+        let registration = self.registration.take();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            // The external token remains held while OS reaping catches up with cancellation.
+            runtime.spawn(async move {
+                if tokio::time::timeout(std::time::Duration::from_secs(3), tree.wait_for_exit())
+                    .await
+                    .is_ok()
+                {
+                    if let Some(owner) = &mut ownership {
+                        owner.confirm_stopped();
+                    }
+                    if let Some((manager, id)) = registration {
+                        manager.confirm_external_execution_stopped(&id);
+                    }
+                }
+            });
+        }
+    }
+}
+
+fn process_group_stopped(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
+        if pid == 0 {
+            return false;
+        }
+        // Probe only. ESRCH proves that no process remains in this owned group.
+        let result = unsafe { libc::kill(-pid, 0) };
+        result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        // Child exit alone cannot prove Windows descendant cleanup.
+        false
+    }
+}
+
 // ── Cross-platform shell command spawning ────────────────────────────────────
 
 // [TRAP] 所有子进程 spawn 必须通过 shell_command() 统一 wrapper
 // 新增 spawn 时必须复用，禁止直接用 std::process::Command 裸调。
 
-/// 向进程组发送信号（fire-and-forget，不等待结果）。
+/// 请求终止进程组；成功发送信号本身不代表进程已退出。
 ///
-/// - **Unix**：执行 `kill -<SIG> -- -<pid>`——负号 PID 表示进程组，`--` 防止
-///   PID 被解析为选项（macOS BSD kill 与 Linux GNU kill 均支持）。
+/// - **Unix**：直接调用 `kill(-pid, signal)`，负号 PID 表示进程组。
 ///   前提：调用方 spawn 时已设置 `process_group(0)` 使 bash 成为进程组组长，
 ///   这样 TERM/KILL 会波及 shell 的全部子进程，避免孤儿进程存活。
 /// - **Windows**：无 POSIX 信号/进程组，回退 `taskkill /T /F` 尽力杀进程树。
@@ -31,14 +182,18 @@ pub fn kill_process_group(pid: u32, signal: &str) {
     let _ = signal; // Windows 回退 taskkill /T /F，不使用信号参数
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
-            .arg(format!("-{signal}"))
-            .arg("--")
-            .arg(format!("-{pid}"))
-            // 静默：进程组可能已自然退出（kill 失败属预期），避免噪音日志
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+        let Ok(pid) = i32::try_from(pid) else {
+            return;
+        };
+        let signal = match signal {
+            "TERM" => libc::SIGTERM,
+            "KILL" => libc::SIGKILL,
+            _ => return,
+        };
+        // A direct syscall leaves no detached helper process after session drain.
+        unsafe {
+            libc::kill(-pid, signal);
+        }
     }
     #[cfg(windows)]
     {
@@ -49,7 +204,7 @@ pub fn kill_process_group(pid: u32, signal: &str) {
             .arg("/F")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
+            .status();
     }
 }
 
@@ -147,19 +302,33 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
 /// 返回追加到截断信息后的提示字符串。
 /// 文件路径：`{temp_dir}/peri-tool-output-{uuid}.txt`
 pub fn persist_truncated_output(full_content: &str) -> String {
+    let (hint, _) = persist_truncated_output_with_ref(full_content);
+    hint
+}
+
+/// Persist a full output and return both the display hint and durable path.
+/// The caller should carry the path as typed evidence instead of recovering it
+/// from rendered text.
+pub fn persist_truncated_output_with_ref(full_content: &str) -> (String, Option<String>) {
     let id = uuid::Uuid::new_v4();
     let dir = std::env::temp_dir();
     let file_name = format!("peri-tool-output-{id}.txt");
     let file_path = dir.join(&file_name);
 
     match std::fs::write(&file_path, full_content) {
-        Ok(_) => format!(
-            "\n\n[Full output saved to {} — use Read tool to view complete content]",
-            file_path.display()
+        Ok(_) => (
+            format!(
+                "\n\n[Full output saved to {} — use Read tool to view complete content]",
+                file_path.display()
+            ),
+            Some(file_path.to_string_lossy().into_owned()),
         ),
-        Err(e) => format!(
-            "\n\n[Failed to save full output to {}: {e}]",
-            file_path.display()
+        Err(e) => (
+            format!(
+                "\n\n[Failed to save full output to {}: {e}]",
+                file_path.display()
+            ),
+            None,
         ),
     }
 }
@@ -216,11 +385,20 @@ pub fn parse_timeout(input: &serde_json::Value, is_background: bool) -> Option<u
 /// 向进程组发送 TERM，2 秒后若仍存活则升级为 KILL（fire-and-forget 任务）。
 /// 用于超时分支：TERM 无法终止的进程（如 trap 忽略 TERM）由 KILL 兜底。
 pub fn kill_process_group_escalating(pid: u32) {
+    tokio::spawn(terminate_process_group(pid));
+}
+
+/// The caller owns this future until the TERM/KILL sequence has completed.
+pub(super) async fn terminate_process_group(pid: u32) {
     kill_process_group(pid, "TERM");
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        kill_process_group(pid, "KILL");
-    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !process_group_stopped(pid) {
+        if tokio::time::Instant::now() >= deadline {
+            kill_process_group(pid, "KILL");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 /// 将 stdout/stderr 管道流式读入共享缓冲。缓冲超过 `MAX_PARTIAL_CAPTURE_BYTES`
@@ -318,6 +496,7 @@ pub fn finalize_bg_shell(
         duration_ms,
         child_thread_id: None,
         timed_out,
+        subagent_failure: None,
     };
     // 回调通知 Agent inbox（在 registry.complete() 之前，与 execute_bg.rs 对齐）
     if let Some(ref cb) = on_bg_complete {

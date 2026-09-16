@@ -93,6 +93,7 @@ fn test_render_event_tool_ended_id_extraction() {
         name: "Read".to_string(),
         output: "file contents".to_string(),
         is_error: false,
+        subagent_failure: None,
     };
     assert_eq!(event.turn_id(), turn_id);
     assert_eq!(event.agent_id(), agent_id);
@@ -109,6 +110,7 @@ fn test_render_event_tool_ended_carries_output() {
         name: "Bash".to_string(),
         output: "command output here".to_string(),
         is_error: false,
+        subagent_failure: None,
     };
     // 通过模式匹配断言 output 字段存在且非空
     match event {
@@ -296,6 +298,7 @@ fn test_observe_event_subagent_stop_id_extraction() {
         agent_name: "researcher".to_string(),
         result: "done".to_string(),
         is_error: false,
+        subagent_failure: None,
     };
     assert_eq!(event.turn_id(), turn_id);
     assert_eq!(event.agent_id(), agent_id);
@@ -464,6 +467,7 @@ fn test_observe_event_subagent_stop_serde_roundtrip() {
         agent_name: "code-reviewer".to_string(),
         result: "found 3 issues".to_string(),
         is_error: false,
+        subagent_failure: None,
     };
     let json = serde_json::to_string(&event).unwrap();
     let back: ObserveEvent = serde_json::from_str(&json).unwrap();
@@ -475,6 +479,7 @@ fn test_observe_event_subagent_stop_serde_roundtrip() {
             agent_name,
             result,
             is_error,
+            ..
         } => {
             assert_eq!(t, turn_id);
             assert_eq!(a, agent_id);

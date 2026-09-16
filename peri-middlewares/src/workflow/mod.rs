@@ -20,10 +20,8 @@ use peri_agent::{error::AgentResult, middleware::r#trait::Middleware, tools::Bas
 use peri_resources::workflow::{
     journal::WorkflowJournalStore,
     progress::WorkflowProgressStore,
-    registry::{WorkflowRun, WorkflowRunStatus, WorkflowTaskRegistry, WorkflowTaskResult},
-    runner::{
-        receive_workflow_result, AgentExecutor, WorkflowInput, WorkflowResult, WorkflowRunner,
-    },
+    registry::WorkflowTaskRegistry,
+    runner::{AgentExecutor, WorkflowInput, WorkflowRunner},
     tool::WorkflowTool,
 };
 
@@ -78,13 +76,24 @@ impl WorkflowMiddleware {
 
     /// 设置统一后台任务注册表（构造时链式调用）
     pub fn with_bg_registry(self, bg_registry: Arc<dyn TaskManager>) -> Self {
-        *self.bg_registry.write() = Some(bg_registry);
+        self.set_bg_registry(bg_registry);
         self
     }
 
     /// 延迟注入 bg_registry（创建后设置，通过 RwLock 支持内部可变性）
     pub fn set_bg_registry(&self, bg_registry: Arc<dyn TaskManager>) {
-        *self.bg_registry.write() = Some(bg_registry);
+        let mut current = self.bg_registry.write();
+        if let Some(bound) = current.as_ref() {
+            if !Arc::ptr_eq(bound, &bg_registry) {
+                tracing::error!("Workflow execution manager cannot be replaced");
+            }
+            return;
+        }
+        if let Err(error) = self.runner.bind_execution_manager(Arc::clone(&bg_registry)) {
+            tracing::error!(%error, "Workflow execution manager binding failed");
+            return;
+        }
+        *current = Some(bg_registry);
     }
 
     /// 创建一个新的 WorkflowTool 实例。
@@ -147,11 +156,10 @@ impl WorkflowMiddleware {
             write_intent.as_ref(),
         )
         .map_err(|error| format!("Workflow resume preflight failed: {error}"))?;
-        let new_run_id = uuid::Uuid::now_v7().to_string();
         let wf_input = WorkflowInput {
             script: state.script.clone(),
-            args: None,
-            max_concurrency: 3,
+            args: state.args.clone(),
+            max_concurrency: state.max_concurrency,
             budget_total: state.budget_total,
             limits: state.limits.clone(),
             workflow_name: state.workflow_name.clone(),
@@ -159,204 +167,7 @@ impl WorkflowMiddleware {
             write_intent,
             git_baseline,
         };
-        let wf_name = wf_input.workflow_name.clone();
-
-        let (done_tx, done_rx) = tokio::sync::watch::channel(None);
-        let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
-
-        let runner = Arc::clone(&self.runner);
-        let progress_store = Arc::clone(&self.progress_store);
-        let journal_store = Arc::clone(&self.journal_store);
-        let new_run_id_clone = new_run_id.clone();
-
-        let started_at = std::time::Instant::now();
-        let script_preview: String = state.script.chars().take(100).collect();
-        self.registry
-            .reserve(WorkflowRun {
-                run_id: new_run_id.clone(),
-                workflow_name: wf_name.clone(),
-                script_preview,
-                status: WorkflowRunStatus::Running,
-                started_at,
-                child_handle: None,
-                kill_tx: Some(kill_tx),
-            })
-            .map_err(|e| format!("Failed to reserve resumed workflow: {e}"))?;
-
-        let child_handle = tokio::spawn(async move {
-            let _ = runner
-                .run(
-                    new_run_id_clone,
-                    wf_input,
-                    progress_store,
-                    journal_store,
-                    done_tx,
-                    kill_rx,
-                )
-                .await;
-        });
-
-        self.registry.attach_child(&new_run_id, child_handle);
-
-        // ─── 快速失败检测（1s 内 done 到来即同步报错）───
-        let mut fast_rx = done_rx.clone();
-        let fast_result = tokio::select! {
-            result = receive_workflow_result(&mut fast_rx) => {
-                Some(result.unwrap_or_else(|| WorkflowResult {
-                    run_id: new_run_id.clone(),
-                    status: "failed".to_string(),
-                    return_value: None,
-                    error: Some("workflow process exited before reporting result".to_string()),
-                    post_processing_status:
-                        peri_acp_types::workflow::PostProcessingStatus::Failed,
-                    delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
-                    stderr_tail: None,
-                }))
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => None,
-        };
-
-        if let Some(ref result) = fast_result {
-            if result.status != "completed" {
-                let error_msg = result
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "workflow failed with no error details".to_string());
-                let detail = result
-                    .stderr_tail
-                    .as_ref()
-                    .map(|s| format!("\n\nstderr (last 20 lines):\n{}", s))
-                    .unwrap_or_default();
-
-                self.registry.complete(
-                    &new_run_id,
-                    WorkflowTaskResult {
-                        run_id: new_run_id.clone(),
-                        workflow_name: wf_name.clone(),
-                        success: false,
-                        status: WorkflowRunStatus::Failed,
-                        execution_status: peri_acp_types::workflow::ExecutionStatus::Failed,
-                        acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
-                        post_processing_status: result.post_processing_status,
-                        delivery_status: result.delivery_status,
-                        state_artifact_exists: self
-                            .journal_store
-                            .run_dir(&new_run_id)
-                            .join("state.json")
-                            .is_file(),
-                        duration_ms: started_at.elapsed().as_millis() as u64,
-                        agent_count: 0,
-                        tool_calls_count: 0,
-                        error: Some(error_msg.clone()),
-                        phase_summaries: Vec::new(),
-                        attempts: self
-                            .journal_store
-                            .read_attempts(&new_run_id)
-                            .unwrap_or_default(),
-                    },
-                );
-
-                return Err(format!(
-                    "Workflow resume '{}' failed: {}{}",
-                    wf_name, error_msg, detail
-                ));
-            }
-        }
-        // ─── 快速失败检测结束 ───
-
-        // 完成后通知任务
-        let registry_for_complete = Arc::clone(&self.registry);
-        let notify_progress_store = Arc::clone(&self.progress_store);
-        let notify_journal_store = Arc::clone(&self.journal_store);
-        let notify_name = wf_name;
-        let notify_run_id = new_run_id.clone();
-        tokio::spawn(async move {
-            let mut done_rx = done_rx;
-            let Some(result) = receive_workflow_result(&mut done_rx).await else {
-                let (agent_count, tool_calls_count) = notify_progress_store
-                    .get_run_stats(&notify_run_id)
-                    .unwrap_or((0, 0));
-                let phase_summaries = notify_progress_store.get_phase_summaries(&notify_run_id);
-                let state_artifact_exists = notify_journal_store
-                    .run_dir(&notify_run_id)
-                    .join("state.json")
-                    .is_file();
-                let attempts = notify_journal_store
-                    .read_attempts(&notify_run_id)
-                    .unwrap_or_default();
-                registry_for_complete.complete(
-                    &notify_run_id,
-                    WorkflowTaskResult {
-                        run_id: notify_run_id.clone(),
-                        workflow_name: notify_name,
-                        success: false,
-                        status: WorkflowRunStatus::Failed,
-                        execution_status: peri_acp_types::workflow::ExecutionStatus::Failed,
-                        acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
-                        post_processing_status:
-                            peri_acp_types::workflow::PostProcessingStatus::Blocked,
-                        delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
-                        state_artifact_exists,
-                        duration_ms: started_at.elapsed().as_millis() as u64,
-                        agent_count,
-                        tool_calls_count,
-                        error: Some("workflow process exited unexpectedly".to_string()),
-                        phase_summaries,
-                        attempts,
-                    },
-                );
-                return;
-            };
-            let (agent_count, tool_calls_count) = notify_progress_store
-                .get_run_stats(&notify_run_id)
-                .unwrap_or((0, 0));
-            let phase_summaries = notify_progress_store.get_phase_summaries(&notify_run_id);
-            let state_artifact_exists = notify_journal_store
-                .run_dir(&notify_run_id)
-                .join("state.json")
-                .is_file();
-            let attempts = notify_journal_store
-                .read_attempts(&notify_run_id)
-                .unwrap_or_default();
-            let acceptance_status = notify_journal_store
-                .read_state(&notify_run_id)
-                .map(|state| state.acceptance_status)
-                .unwrap_or_default();
-            let delivery_status = result.delivery_status;
-            let success = result.status == "completed"
-                && delivery_status != peri_acp_types::workflow::DeliveryStatus::Blocked;
-            let status = match result.status.as_str() {
-                "completed" => WorkflowRunStatus::Completed,
-                "killed" => WorkflowRunStatus::Killed,
-                _ => WorkflowRunStatus::Failed,
-            };
-            registry_for_complete.complete(
-                &notify_run_id,
-                WorkflowTaskResult {
-                    run_id: notify_run_id.clone(),
-                    workflow_name: notify_name,
-                    success,
-                    status,
-                    execution_status: match result.status.as_str() {
-                        "completed" => peri_acp_types::workflow::ExecutionStatus::Completed,
-                        "killed" => peri_acp_types::workflow::ExecutionStatus::Killed,
-                        _ => peri_acp_types::workflow::ExecutionStatus::Failed,
-                    },
-                    acceptance_status,
-                    post_processing_status: result.post_processing_status,
-                    delivery_status: result.delivery_status,
-                    state_artifact_exists,
-                    duration_ms: started_at.elapsed().as_millis() as u64,
-                    agent_count,
-                    tool_calls_count,
-                    error: result.error,
-                    phase_summaries,
-                    attempts,
-                },
-            );
-        });
-
-        Ok(new_run_id)
+        self.create_tool().start_run(wf_input).await
     }
 
     /// 订阅 workflow 完成通知。每轮 build_agent 调用一次，获取新的 Receiver。
@@ -469,7 +280,7 @@ mod tests {
         }
     }
 
-    fn make_middleware() -> Arc<WorkflowMiddleware> {
+    pub(super) fn make_middleware() -> Arc<WorkflowMiddleware> {
         let executor: Arc<dyn AgentExecutor> = Arc::new(MockAgentExecutor);
         let (notification_tx, _) = tokio::sync::broadcast::channel(32);
         Arc::new(WorkflowMiddleware::new(
@@ -604,3 +415,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_test.rs"]
+mod lifecycle_tests;

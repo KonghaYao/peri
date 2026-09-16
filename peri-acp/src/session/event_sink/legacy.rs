@@ -55,11 +55,13 @@ impl TransportEventSink {
                 result,
                 is_error,
                 instance_id,
+                subagent_failure,
             } => Some(AcpEvent::SubagentStopped {
                 agent_name: agent_name.clone(),
                 result: result.clone(),
                 is_error: *is_error,
                 instance_id: instance_id.clone(),
+                subagent_failure: subagent_failure.clone(),
             }),
             ExecutorEvent::CompactStarted { .. } => Some(AcpEvent::CompactStarted),
             ExecutorEvent::CompactCompleted {
@@ -200,11 +202,13 @@ impl TransportEventSink {
                 max_attempts,
                 delay_ms,
                 error,
+                diagnostic,
             } => Some(AcpEvent::LlmRetrying {
                 attempt: *attempt,
                 max_attempts: *max_attempts,
                 delay_ms: *delay_ms,
                 error: error.clone(),
+                diagnostic: diagnostic.clone(),
             }),
             // CommandFeedback：命令执行反馈经 peri/agent_event 通道送达 TUI
             // 通知条（level/channel 复用 to_serde_str 先例）；channel=session

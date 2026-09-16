@@ -71,6 +71,7 @@ fn test_from_observe_event_subagent_start_stop_mapping() {
         agent_name: "code-reviewer".to_string(),
         result: "done".to_string(),
         is_error: false,
+        subagent_failure: None,
     };
     match UnifiedLangfuseEvent::from_observe_event(stop) {
         Some(UnifiedLangfuseEvent::SubagentStop {
@@ -193,6 +194,7 @@ fn test_bridge_like_process_observe_start_stop() {
         agent_name: "plan".to_string(),
         result: "done".to_string(),
         is_error: false,
+        subagent_failure: None,
     });
     assert_eq!(bridge.active_subagent_count(), 0);
     assert_eq!(bridge.subagent_event_counts(), (1, 1));

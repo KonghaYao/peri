@@ -87,7 +87,9 @@ impl WorkflowTaskRegistry {
         if let Some(run) = self.runs.lock().get_mut(run_id) {
             run.child_handle = Some(child_handle);
         } else {
-            child_handle.abort();
+            // Cancellation can remove the reservation before this handle arrives.
+            // Its kill signal still owns cleanup; aborting would skip that proof.
+            drop(child_handle);
         }
     }
 

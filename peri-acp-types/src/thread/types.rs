@@ -122,7 +122,7 @@ impl ThreadMetaParseError {
 }
 
 /// Thread 列表的轻量投影，不包含消息内容聚合或完整配置。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadListEntry {
     pub id: ThreadId,
     pub title: Option<String>,

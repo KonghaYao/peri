@@ -10,12 +10,15 @@ use peri_acp_types::{
 };
 use rmcp::model::{Resource, Tool};
 
+#[cfg(test)]
+use crate::mcp::client::McpServiceWrapper;
+
 use super::{
     super::{
         auth_store::FileCredentialStore,
         client::{
             build_authed_transport, serve_client_auto, ClientStatus, McpClientHandle,
-            McpClientPool, McpServiceWrapper, OAuthStatus, SHUTDOWN_TIMEOUT,
+            McpClientPool, McpServiceOwner, OAuthStatus, SHUTDOWN_TIMEOUT,
         },
         config::OAuthConfig,
         oauth_flow::{OAuthFlowEvent, OAuthFlowManager},
@@ -97,10 +100,11 @@ impl Drop for DynamicOAuthCredentialGuard {
 }
 
 pub struct StagedMcpConnection {
+    process: Option<Arc<crate::mcp::client::process::McpProcessOwner>>,
     pub instance_key: DynamicMcpInstanceKey,
     pub handle: Arc<McpClientHandle>,
     pub gate: DynamicMcpAdmissionGate,
-    service: Option<McpServiceWrapper>,
+    service: Option<Arc<McpServiceOwner>>,
     cleanup_spawner: McpTaskSpawner,
     oauth: Option<DynamicOAuthCredentialGuard>,
 }
@@ -113,6 +117,7 @@ impl StagedMcpConnection {
     ) -> Self {
         Self {
             instance_key,
+            process: None,
             handle,
             gate: DynamicMcpAdmissionGate::new(),
             service: None,
@@ -129,9 +134,10 @@ impl StagedMcpConnection {
     ) -> Self {
         Self {
             instance_key,
+            process: None,
             handle,
             gate: DynamicMcpAdmissionGate::new(),
-            service: Some(service),
+            service: Some(Arc::new(McpServiceOwner::new(service))),
             cleanup_spawner: McpTaskSpawner::closed(),
             oauth: None,
         }
@@ -146,9 +152,10 @@ impl StagedMcpConnection {
     ) -> Self {
         Self {
             instance_key,
+            process: None,
             handle,
             gate: DynamicMcpAdmissionGate::new(),
-            service: Some(service),
+            service: Some(Arc::new(McpServiceOwner::new(service))),
             cleanup_spawner,
             oauth: None,
         }
@@ -156,6 +163,7 @@ impl StagedMcpConnection {
 
     pub fn commit(mut self) -> ActiveMcpConnection {
         ActiveMcpConnection {
+            process: self.process.take(),
             instance_key: self.instance_key.clone(),
             handle: Arc::clone(&self.handle),
             gate: self.gate.clone(),
@@ -166,41 +174,63 @@ impl StagedMcpConnection {
 
     pub async fn cleanup(mut self) -> Result<(), DynamicMcpFailure> {
         let oauth_failure = self.oauth.take().and_then(|oauth| oauth.cleanup().err());
-        let service_failure = close_service(self.service.take()).await.err();
-        shutdown_result(oauth_failure, service_failure)
+        let service_failure = close_service(&mut self.service).await.err();
+        let process_failure = close_process(self.process.as_ref()).await.err();
+        shutdown_result(oauth_failure, service_failure.or(process_failure))
     }
 }
 
 impl Drop for StagedMcpConnection {
     fn drop(&mut self) {
-        let service = self.service.take();
+        let mut service = self.service.take();
+        let process = self.process.take();
         let oauth = self.oauth.take();
-        if service.is_none() && oauth.is_none() {
+        if let Some(service) = &service {
+            service.begin_close();
+        }
+        if let Some(process) = &process {
+            process.begin_close();
+        }
+        if service.is_none() && oauth.is_none() && process.is_none() {
             return;
         }
         drop(oauth);
         let key = McpTaskKey::dynamic(DynamicMcpTaskKind::StagedCleanup, &self.instance_key);
         let _ = self.cleanup_spawner.spawn(key, async move {
-            if close_service(service).await.is_err() {
+            if close_service(&mut service).await.is_err() {
                 tracing::error!("dynamic MCP staged service cleanup did not complete");
             }
+            let _ = close_process(process.as_ref()).await;
         });
     }
 }
 
 pub struct ActiveMcpConnection {
+    process: Option<Arc<crate::mcp::client::process::McpProcessOwner>>,
     pub instance_key: DynamicMcpInstanceKey,
     pub handle: Arc<McpClientHandle>,
     pub gate: DynamicMcpAdmissionGate,
-    service: tokio::sync::Mutex<Option<McpServiceWrapper>>,
+    service: tokio::sync::Mutex<Option<Arc<McpServiceOwner>>>,
     oauth: Option<DynamicOAuthCredentialGuard>,
 }
 
 impl ActiveMcpConnection {
     pub async fn close(&self) -> Result<(), DynamicMcpFailure> {
         let oauth_failure = self.oauth.as_ref().and_then(|oauth| oauth.cleanup().err());
-        let service_failure = close_service(self.service.lock().await.take()).await.err();
-        shutdown_result(oauth_failure, service_failure)
+        let service_failure = close_service(&mut *self.service.lock().await).await.err();
+        let process_failure = close_process(self.process.as_ref()).await.err();
+        shutdown_result(oauth_failure, service_failure.or(process_failure))
+    }
+}
+
+impl Drop for ActiveMcpConnection {
+    fn drop(&mut self) {
+        if let Some(service) = self.service.get_mut() {
+            service.begin_close();
+        }
+        if let Some(process) = &self.process {
+            process.begin_close();
+        }
     }
 }
 
@@ -219,23 +249,47 @@ fn shutdown_result(
     }
 }
 
-async fn close_service(service: Option<McpServiceWrapper>) -> Result<(), DynamicMcpFailure> {
-    let Some(mut service) = service else {
+async fn close_service(
+    service: &mut Option<Arc<McpServiceOwner>>,
+) -> Result<(), DynamicMcpFailure> {
+    let Some(active) = service.as_mut() else {
         return Ok(());
     };
     match tokio::time::timeout(
         SHUTDOWN_TIMEOUT + Duration::from_secs(1),
-        service.close_with_timeout(SHUTDOWN_TIMEOUT),
+        active.close_with_timeout(SHUTDOWN_TIMEOUT),
     )
     .await
     {
-        Ok(Ok(Some(_))) => Ok(()),
+        Ok(Ok(Some(_))) => {
+            service.take();
+            Ok(())
+        }
         Ok(Ok(None)) | Ok(Err(_)) | Err(_) => Err(DynamicMcpFailure::new(
             DynamicMcpErrorCode::ShutdownIncomplete,
             DynamicMcpOperationState::Draining,
             "Dynamic MCP service cleanup did not complete",
         )),
     }
+}
+
+async fn close_process(
+    process: Option<&Arc<crate::mcp::client::process::McpProcessOwner>>,
+) -> Result<(), DynamicMcpFailure> {
+    let Some(process) = process else {
+        return Ok(());
+    };
+    if matches!(
+        tokio::time::timeout(SHUTDOWN_TIMEOUT, process.close()).await,
+        Ok(Ok(()))
+    ) {
+        return Ok(());
+    }
+    Err(DynamicMcpFailure::new(
+        DynamicMcpErrorCode::ShutdownIncomplete,
+        DynamicMcpOperationState::Draining,
+        "Dynamic MCP process cleanup did not complete",
+    ))
 }
 
 fn secret_failure(error: SecretResolveError) -> DynamicMcpFailure {
@@ -337,19 +391,21 @@ fn dynamic_stdio_default_path() -> &'static str {
 }
 
 fn spawn_dynamic_stdio_transport(
+    pool: &McpClientPool,
     command: &str,
     args: &[String],
     env: &HashMap<String, String>,
     cwd: Option<&str>,
-) -> std::io::Result<rmcp::transport::child_process::TokioChildProcess> {
-    use std::process::Stdio;
-
-    let mut command = dynamic_stdio_command(command, args, env, cwd);
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    rmcp::transport::child_process::TokioChildProcess::new(command)
+) -> std::io::Result<crate::mcp::client::process::McpStdioTransport> {
+    let cwd = cwd
+        .map(Path::new)
+        .or_else(|| pool.execution_cwd.get().map(|cwd| cwd.as_path()))
+        .ok_or_else(|| {
+            std::io::Error::other("Dynamic MCP execution directory is not initialized")
+        })?;
+    let mut command = dynamic_stdio_command(command, args, env, None);
+    command.current_dir(cwd);
+    pool.spawn_process_command(command, None)
 }
 
 pub async fn prepare_single_server(
@@ -363,6 +419,7 @@ pub async fn prepare_single_server(
 ) -> Result<StagedMcpConnection, DynamicMcpFailure> {
     let timeout = Duration::from_millis(config.timeout_ms);
     let mut oauth_lease = None;
+    let mut process = None;
     let connect_result = match &config.transport {
         CanonicalDynamicMcpTransport::Stdio {
             command,
@@ -371,14 +428,16 @@ pub async fn prepare_single_server(
             cwd,
         } => {
             let env = resolve_secret_map(env, resolver).await?;
-            let transport = spawn_dynamic_stdio_transport(command, args, &env, cwd.as_deref())
-                .map_err(|_| {
-                    DynamicMcpFailure::new(
-                        DynamicMcpErrorCode::StartRejected,
-                        DynamicMcpOperationState::Starting,
-                        "Dynamic MCP stdio process could not be started",
-                    )
-                })?;
+            let transport =
+                spawn_dynamic_stdio_transport(&oauth_pool, command, args, &env, cwd.as_deref())
+                    .map_err(|_| {
+                        DynamicMcpFailure::new(
+                            DynamicMcpErrorCode::StartRejected,
+                            DynamicMcpOperationState::Starting,
+                            "Dynamic MCP stdio process could not be started",
+                        )
+                    })?;
+            process = Some(transport.process_owner());
             serve_client_auto(
                 transport,
                 None,
@@ -477,6 +536,7 @@ pub async fn prepare_single_server(
     };
     let service = match connect_result {
         Err(_) => {
+            close_process(process.as_ref()).await?;
             return Err(DynamicMcpFailure::new(
                 DynamicMcpErrorCode::ConnectTimeout,
                 DynamicMcpOperationState::Connecting,
@@ -484,6 +544,7 @@ pub async fn prepare_single_server(
             ));
         }
         Ok(Err(_)) => {
+            close_process(process.as_ref()).await?;
             return Err(DynamicMcpFailure::new(
                 DynamicMcpErrorCode::InitializeFailed,
                 DynamicMcpOperationState::Connecting,
@@ -493,6 +554,15 @@ pub async fn prepare_single_server(
         Ok(Ok(service)) => service,
     };
     let peer = service.peer().clone();
+    let mut staged = StagedMcpConnection {
+        process,
+        instance_key,
+        handle: Arc::new(empty_handle()),
+        gate: DynamicMcpAdmissionGate::new(),
+        service: Some(oauth_pool.own_service(service)),
+        cleanup_spawner,
+        oauth: oauth_lease,
+    };
     let discovery = tokio::time::timeout(timeout, async {
         let tools = peer.list_all_tools().await?;
         let resources = list_all_resources(&peer).await?;
@@ -502,14 +572,6 @@ pub async fn prepare_single_server(
     let (tools, resources) = match discovery {
         Ok(Ok(discovered)) => discovered,
         Ok(Err(_)) | Err(_) => {
-            let staged = StagedMcpConnection {
-                instance_key,
-                handle: Arc::new(empty_handle()),
-                gate: DynamicMcpAdmissionGate::new(),
-                service: Some(service),
-                cleanup_spawner: cleanup_spawner.clone(),
-                oauth: oauth_lease.take(),
-            };
             staged.cleanup().await?;
             return Err(DynamicMcpFailure::new(
                 DynamicMcpErrorCode::ToolDiscoveryFailed,
@@ -518,30 +580,24 @@ pub async fn prepare_single_server(
             ));
         }
     };
-    let name = instance_key.logical.server_name.clone();
-    Ok(StagedMcpConnection {
-        instance_key,
-        handle: Arc::new(McpClientHandle {
-            name,
-            version: peer
-                .peer_info()
-                .and_then(|info| info.server_info.as_ref().map(|value| value.version.clone())),
-            cache_version: None,
-            peer: Some(peer.clone()),
-            tools,
-            resources,
-            status: ClientStatus::Connected,
-            oauth_status: OAuthStatus::None,
-            source: None,
-            url: None,
-            channel_capable: false,
-            skills_capable: super::super::client::peer_declares_skills(&peer),
-        }),
-        gate: DynamicMcpAdmissionGate::new(),
-        service: Some(service),
-        cleanup_spawner,
-        oauth: oauth_lease,
-    })
+    let name = staged.instance_key.logical.server_name.clone();
+    staged.handle = Arc::new(McpClientHandle {
+        name,
+        version: peer
+            .peer_info()
+            .and_then(|info| info.server_info.as_ref().map(|value| value.version.clone())),
+        cache_version: None,
+        peer: Some(peer.clone()),
+        tools,
+        resources,
+        status: ClientStatus::Connected,
+        oauth_status: OAuthStatus::None,
+        source: None,
+        url: None,
+        channel_capable: false,
+        skills_capable: super::super::client::peer_declares_skills(&peer),
+    });
+    Ok(staged)
 }
 
 fn empty_handle() -> McpClientHandle {

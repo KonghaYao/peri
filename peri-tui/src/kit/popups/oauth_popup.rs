@@ -49,10 +49,15 @@ use peri_theme::atoms::THEME_ATOM;
 fn submit_oauth_callback(server_name: &str, code: String) {
     if let Some(client_handle) = ACP_CLIENT_HANDLE.get() {
         let client = client_handle.clone();
+        let session_id = crate::kit::atoms::OAUTH_SESSION_ID.state().read().clone();
+        if client.current_session_id() != session_id {
+            return;
+        }
         let server_name = server_name.to_string();
         tokio::spawn(async move {
             let params = serde_json::json!({
                 "server_name": server_name,
+                "sessionId": session_id,
                 "code": code,
                 "state": "",
             });
@@ -71,9 +76,13 @@ fn submit_oauth_callback(server_name: &str, code: String) {
 fn cancel_oauth(server_name: &str) {
     if let Some(client_handle) = ACP_CLIENT_HANDLE.get() {
         let client = client_handle.clone();
+        let session_id = crate::kit::atoms::OAUTH_SESSION_ID.state().read().clone();
+        if client.current_session_id() != session_id {
+            return;
+        }
         let server_name = server_name.to_string();
         tokio::spawn(async move {
-            let params = serde_json::json!({ "server_name": server_name });
+            let params = serde_json::json!({ "server_name": server_name, "sessionId": session_id });
             if let Err(e) = client.send_raw_request("mcp/oauth_cancel", params).await {
                 tracing::warn!(error = %e, "mcp/oauth_cancel RPC failed");
             }

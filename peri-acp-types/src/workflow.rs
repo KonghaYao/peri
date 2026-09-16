@@ -535,6 +535,13 @@ impl WorkflowTaskResult {
 /// Agent 回调执行器 trait（由 peri-acp 实现）
 #[async_trait]
 pub trait AgentExecutor: Send + Sync {
+    /// Bind session execution ownership before any workflow agent is admitted.
+    fn bind_execution_manager(
+        &self,
+        _manager: std::sync::Arc<dyn crate::tasks::TaskManager>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// 执行单个 workflow agent，返回 AgentRunResult
     async fn execute(&self, params: AgentRunParams) -> AgentRunResult;
 }

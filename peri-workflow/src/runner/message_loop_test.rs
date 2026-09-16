@@ -59,6 +59,7 @@ async fn run_messages(
     drop(msg_tx);
     let (done_tx, mut done_rx) = watch::channel(None);
     let message_loop = MessageLoop {
+        run_scope: Arc::new(super::super::scope::RunScope::new()),
         agent_executor: Arc::new(CountingExecutor(Arc::clone(&calls))),
         channel: Arc::new(RpcChannel::new(host.channel())),
         journal_store: Arc::clone(&journal),

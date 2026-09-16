@@ -470,6 +470,7 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
         name: "Read".to_string(),
         output: "content".to_string(),
         is_error: false,
+        subagent_failure: None,
     });
     bus.emit_render(RenderEvent::TurnCompleted {
         turn_id,
@@ -647,6 +648,7 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
         agent_name: "explore".to_string(),
         result: "done".to_string(),
         is_error: false,
+        subagent_failure: None,
     });
 
     // 等待 forwarder 消费（足够时间让过滤逻辑执行）
@@ -706,6 +708,7 @@ async fn test_forwarder_drains_buffered_render_and_state_after_producer_drop() {
         name: "Read".into(),
         output: "queued-output".into(),
         is_error: false,
+        subagent_failure: None,
     });
     bus.emit_state(StateEvent::SyntheticUserMessage {
         turn_id,

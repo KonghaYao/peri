@@ -3,9 +3,15 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "bun --watch src/server.ts"
+    "dev": "bun run src/server.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "hono": "^4.6"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^6.0.3"
   }
 }

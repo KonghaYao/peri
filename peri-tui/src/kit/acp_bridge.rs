@@ -267,8 +267,21 @@ impl PublicationScheduler {
 /// 清 INPUT_BUFFER、push_view_models_for_reset。
 fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, counter: u64) -> u64 {
     let old = *last_reset_counter;
+    // A manual compact schedules a same-session replay.  Keep its UI-only note
+    // across the reset, regardless of which bridge branch observed the counter
+    // first.  A regular thread switch must consume the pending note instead:
+    // otherwise a compact completion from the old thread leaks into the new one.
+    let replay_session_id = state.active_session_id.clone();
+    let active_session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
+    let same_session_replay =
+        !replay_session_id.is_empty() && replay_session_id == active_session_id;
+    let pending_note = if same_session_replay {
+        atoms::PENDING_COMPACT_NOTE.state().read().clone()
+    } else {
+        None
+    };
     *last_reset_counter = counter;
-    state.active_session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
+    state.active_session_id = active_session_id;
     state.committed = im::Vector::new();
     state.current_turn.reset();
     state.generation = 0;
@@ -286,7 +299,21 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     state.next_todo_sequence = 0;
     state.todo_call_inputs.clear();
     atoms::INPUT_BUFFER.state().write().clear();
+    if let Some(text) = pending_note {
+        use crate::kit::tui_render_unit::{TuiNoteLevel, tui_hash_str};
+        state
+            .current_turn
+            .push_system_note(text.clone(), TuiNoteLevel::Info, tui_hash_str(&text));
+        atoms::PENDING_COMPACT_NOTE.set(None);
+    } else if !same_session_replay {
+        // The note belongs to a completed compact in another session and must
+        // never be replayed after a normal thread switch.
+        atoms::PENDING_COMPACT_NOTE.set(None);
+    }
     acp_events::push_view_models_for_reset();
+    if state.current_turn.has_unprojected_changes() {
+        acp_events::push_view_models(state);
+    }
     tracing::info!(
         old,
         new = counter,
@@ -443,28 +470,6 @@ fn spawn_acp_bridge_inner(
                             if just_reset {
                                 scheduler.invalidate();
                                 apply_bridge_reset(&mut state, &mut last_reset_counter, counter);
-                                // Phase 5 Step 7 补遗（Step 8 回归修复）：
-                                // CommandFeedback(UiOnly) 的 compact 完成提示跨
-                                // replay 存活——reset 清空 committed/current_turn
-                                // 后从 PENDING_COMPACT_NOTE 重建 SystemNote
-                                // （机制沿袭 aecc2834，死锁教训：显式块提取值、
-                                // guard 立即 drop 后再 set 清空，见 issue
-                                // 2026-08-08-e2e-compact-command-screenshot-too-early）。
-                                {
-                                    let pending = atoms::PENDING_COMPACT_NOTE
-                                        .state()
-                                        .read()
-                                        .clone();
-                                    if let Some(text) = pending {
-                                        use crate::kit::tui_render_unit::{
-                                            TuiNoteLevel, tui_hash_str,
-                                        };
-                                        state
-                                            .current_turn
-                                            .push_system_note(text.clone(), TuiNoteLevel::Info, tui_hash_str(&text));
-                                        atoms::PENDING_COMPACT_NOTE.set(None);
-                                    }
-                                }
                             }
 
                             let interaction_owner = match &epoch_event.event {

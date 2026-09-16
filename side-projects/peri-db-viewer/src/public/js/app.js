@@ -58,6 +58,11 @@ document.addEventListener("DOMContentLoaded", function() {
       }
     });
   });
+  // Activate the initially visible page as well as responding to tab clicks.
+  // Without this, the dashboard's data loader only runs after a manual click.
+  var activeTab = document.querySelector(".nav-tab.active") || tabs[0];
+  var initialPage = activeTab && activeTab.getAttribute("data-page");
+  if (initialPage && window.onPageActivate) window.onPageActivate(initialPage);
 });
 
 })();

@@ -38,6 +38,33 @@ fn test_quick_switch_rows_profile_model_wins() {
 }
 
 #[test]
+fn test_session_quick_switch_rows_preserves_inactive_models() {
+    // 回归：has_session 分支曾只给 active 档位填模型，其他三档渲染为空白。
+    let cfg = make_cfg();
+    let rows = session_quick_switch_rows(Some(&cfg), "opus", "session-opus");
+    assert_eq!(rows[0].model, "claude-opus");
+    assert_eq!(rows[1].model, "session-opus");
+    assert_eq!(rows[2].model, "claude-sonnet");
+    assert_eq!(rows[3].model, "claude-haiku");
+}
+
+#[test]
+fn test_session_quick_switch_rows_without_config_keeps_four_aliases() {
+    let rows = session_quick_switch_rows(None, "sonnet", "session-sonnet");
+    assert_eq!(rows.len(), PROFILE_KEYS.len());
+    assert_eq!(rows[0].model, "fable");
+    assert_eq!(rows[2].model, "session-sonnet");
+    assert_eq!(rows[3].model, "haiku");
+}
+
+#[test]
+fn test_session_quick_switch_rows_empty_session_model_keeps_configured_model() {
+    let cfg = make_cfg();
+    let rows = session_quick_switch_rows(Some(&cfg), "opus", " ");
+    assert_eq!(rows[1].model, "custom-opus");
+}
+
+#[test]
 fn test_quick_switch_rows_no_provider_fallback_to_alias() {
     // 无 provider 时 model 回退 alias 名
     let cfg = crate::config::PeriConfig::default();

@@ -7,6 +7,232 @@ use serde::{Deserialize, Serialize};
 
 use crate::messages::BaseMessage;
 
+/// Stable execution state carried alongside a tool's bounded display text.
+///
+/// `None` on [`ToolOutput::execution`] means that the legacy tool contract did
+/// not provide execution evidence. Callers must preserve that uncertainty
+/// rather than treating an arbitrary string result as a completed command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionStatus {
+    Unknown,
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+    /// The deadline elapsed but the process was promoted and is still alive.
+    RunningAfterTimeout,
+    Running,
+}
+
+impl ToolExecutionStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::RunningAfterTimeout => "running_after_timeout",
+            Self::Running => "running",
+        }
+    }
+}
+
+/// Typed facts about one tool execution. The text remains a bounded model/UI
+/// projection; these fields are the durable evidence used by persistence and
+/// offline analysis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolExecutionEvidence {
+    pub status: ToolExecutionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<String>,
+    /// Whether the bounded text is a projection of a larger output. A missing
+    /// `output_ref` then means persistence failed (or was unavailable), not
+    /// that the output was complete.
+    #[serde(default)]
+    pub output_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+}
+
+impl ToolExecutionEvidence {
+    /// Compact bounded display summary derived from the same typed facts that
+    /// are persisted. Consumers must not infer these fields from tool text.
+    pub fn render_summary(&self) -> String {
+        let mut summary = format!("[Execution status: {}", self.status.as_str());
+        if let Some(code) = self.exit_code {
+            summary.push_str(&format!(", exit_code: {code}"));
+        }
+        if let Some(ref output_ref) = self.output_ref {
+            summary.push_str(&format!(", output_ref: {output_ref}"));
+        } else if self.output_truncated {
+            summary.push_str(", output_ref: unavailable");
+        }
+        if let Some(ref task_id) = self.task_id {
+            summary.push_str(&format!(", task_id: {task_id}"));
+        }
+        summary.push(']');
+        summary
+    }
+
+    /// Render the facts without truncating a status name. This fallback is
+    /// used when the full labelled summary cannot fit in the display budget;
+    /// the typed fields remain authoritative for facts omitted from the view.
+    pub fn render_compact_summary(&self, limit: usize) -> String {
+        if limit == 0 {
+            return String::new();
+        }
+
+        let status = self.status.as_str();
+        if status.chars().count() > limit {
+            return "…".repeat(limit);
+        }
+
+        let mut compact = status.to_string();
+        let mut append = |field: String| {
+            let candidate = format!("{compact}, {field}");
+            if candidate.chars().count() <= limit {
+                compact = candidate;
+            }
+        };
+
+        if let Some(code) = self.exit_code {
+            append(format!("exit_code: {code}"));
+        }
+        if let Some(output_ref) = &self.output_ref {
+            append(format!("output_ref: {output_ref}"));
+        } else if self.output_truncated {
+            append("output_ref: unavailable".to_string());
+        }
+        if let Some(task_id) = &self.task_id {
+            append(format!("task_id: {task_id}"));
+        }
+        compact
+    }
+}
+
+/// Tool text plus optional execution evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolOutput {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ToolExecutionEvidence>,
+}
+
+impl ToolOutput {
+    pub fn from_legacy(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            execution: None,
+        }
+    }
+
+    pub fn with_execution(text: impl Into<String>, execution: ToolExecutionEvidence) -> Self {
+        Self {
+            text: text.into(),
+            execution: Some(execution),
+        }
+    }
+
+    /// Produce the bounded model/live-event projection while retaining a
+    /// compact execution summary whenever typed evidence exists.
+    pub fn projected_text(&self, limit: Option<usize>) -> String {
+        let summary = self
+            .execution
+            .as_ref()
+            .map(ToolExecutionEvidence::render_summary)
+            .unwrap_or_default();
+        // Canonical messages may already contain this exact metadata-derived
+        // suffix. Replay should reuse the projection without appending it a
+        // second time; arbitrary body text is never parsed for status.
+        if limit.is_none()
+            && self
+                .execution
+                .as_ref()
+                .is_some_and(|_| self.has_rendered_summary(&summary))
+        {
+            return self.text.clone();
+        }
+        if summary.is_empty() {
+            return match limit {
+                Some(limit) if self.text.chars().count() > limit => self.bounded_text(limit),
+                _ => self.text.clone(),
+            };
+        }
+        if let Some(limit) = limit {
+            if self.text.chars().count() + 1 + summary.chars().count() <= limit {
+                return format!("{}\n{}", self.text, summary);
+            }
+            let marker = format!("\n\n[Output truncated at {limit} chars]");
+            let suffix = format!("{summary}{marker}");
+            if suffix.chars().count() >= limit {
+                if summary.chars().count() <= limit {
+                    // The truncation marker is omitted, but the typed
+                    // output_truncated fact still records why the body was
+                    // shortened. Never cut a status/ref halfway through.
+                    return summary;
+                }
+                return self
+                    .execution
+                    .as_ref()
+                    .expect("summary is non-empty only with execution evidence")
+                    .render_compact_summary(limit);
+            }
+            let head_budget = limit - suffix.chars().count();
+            let head: String = self.text.chars().take(head_budget).collect();
+            return format!("{head}{suffix}");
+        }
+        format!("{}\n{}", self.text, summary)
+    }
+
+    fn has_rendered_summary(&self, summary: &str) -> bool {
+        if summary.is_empty() {
+            return false;
+        }
+        let summary_suffix = format!("\n{summary}");
+        self.text.ends_with(&summary_suffix)
+            || self
+                .text
+                .split_once("\n\n[Output truncated at ")
+                .is_some_and(|(body, _)| body.ends_with(&summary_suffix))
+            || self.text == summary
+    }
+
+    pub fn bounded_text(&self, limit: usize) -> String {
+        if self.text.chars().count() <= limit && self.execution.is_none() {
+            return self.text.clone();
+        }
+        if self.execution.is_some() {
+            return self.projected_text(Some(limit));
+        }
+        if self.text.chars().count() <= limit {
+            return self.text.clone();
+        }
+        let marker = format!("\n\n[Output truncated at {limit} chars]");
+        if marker.chars().count() >= limit {
+            return marker.chars().take(limit).collect();
+        }
+        let head_budget = limit - marker.chars().count();
+        let head: String = self.text.chars().take(head_budget).collect();
+        format!("{head}{marker}")
+    }
+
+    pub fn body_was_truncated(&self, limit: Option<usize>) -> bool {
+        let Some(limit) = limit else {
+            return false;
+        };
+        let summary_len = self
+            .execution
+            .as_ref()
+            .map(|evidence| 1 + evidence.render_summary().chars().count())
+            .unwrap_or_default();
+        self.text.chars().count() + summary_len > limit
+    }
+}
+
 /// Programmatic Tool Calling 的 public canonical 工具名。
 ///
 /// 置于工具契约 crate，供 Agent dispatch guard 与 middleware 实现共享，避免
@@ -178,6 +404,9 @@ impl EffectiveToolErrorCode {
 pub struct EffectiveToolError {
     pub code: EffectiveToolErrorCode,
     pub message: String,
+    /// Typed child failure facts, when this effective call crossed a subagent
+    /// boundary.  The textual message remains the user-facing projection.
+    pub subagent_failure: Option<crate::error::SafeSubagentFailure>,
 }
 
 impl EffectiveToolError {
@@ -185,7 +414,17 @@ impl EffectiveToolError {
         Self {
             code,
             message: message.into(),
+            subagent_failure: None,
         }
+    }
+
+    pub fn with_subagent_failure(mut self, failure: crate::error::SafeSubagentFailure) -> Self {
+        self.subagent_failure = Some(failure);
+        self
+    }
+
+    pub fn subagent_failure(&self) -> Option<&crate::error::SafeSubagentFailure> {
+        self.subagent_failure.as_ref()
     }
 }
 
@@ -197,6 +436,19 @@ pub trait EffectiveToolDispatcher: Send + Sync {
         call: EffectiveToolCall,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, EffectiveToolError>;
+
+    /// Execute an effective call while retaining typed evidence when the
+    /// target owns lifecycle facts. The compatibility default deliberately
+    /// leaves legacy string-only dispatches unknown.
+    async fn dispatch_output(
+        &self,
+        call: EffectiveToolCall,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolOutput, EffectiveToolError> {
+        self.dispatch(call, cancel)
+            .await
+            .map(ToolOutput::from_legacy)
+    }
 
     fn tools(&self) -> Vec<EffectiveToolDefinition>;
 }
@@ -293,6 +545,17 @@ pub trait BaseTool: Send + Sync {
         input: serde_json::Value,
         ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Execute with optional typed evidence. The compatibility default keeps
+    /// legacy tools' execution state unknown; only tools that own process or
+    /// lifecycle facts should override this method.
+    async fn invoke_output(
+        &self,
+        input: serde_json::Value,
+        ctx: ToolContext<'_>,
+    ) -> Result<ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
+        self.invoke(input, ctx).await.map(ToolOutput::from_legacy)
+    }
 
     /// Canonicalize one target invocation before middleware/HITL.
     ///

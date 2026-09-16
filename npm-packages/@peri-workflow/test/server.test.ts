@@ -6,6 +6,7 @@
  * （engine 完成后会调用，测试进程不能真退出）。
  */
 import { afterAll, describe, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { handleRequest } from '../src/server'
 import { handleResponse, setOutWriter } from '../src/rpc'
 
@@ -121,6 +122,9 @@ return { phaseUpdated: true }`
     written = []
     const script = `export const meta = { name: 'resume-demo', description: 'resume test' }
 return await agent('hello')`
+    const key = createHash('sha256')
+      .update('hello\n' + JSON.stringify({ prompt: 'hello' }))
+      .digest('hex')
 
     await handleRequest({
       jsonrpc: '2.0',
@@ -131,7 +135,7 @@ return await agent('hello')`
         cwd: '/tmp',
         script,
         resumeFromRunId: '018-source-run',
-        resume: [{ key: 'unused-in-unit-fixture', seq: 7, result: { kind: 'skipped' } }],
+        resume: [{ key, seq: 0, result: { kind: 'ok', output: 'cached', usage: { outputTokens: 1 } } }],
       },
     })
 
@@ -139,11 +143,75 @@ return await agent('hello')`
     const entry = (append.params as { entry: { attempt: Record<string, unknown> } }).entry
     expect(entry.attempt).toEqual({
       runId: '019-current-run',
-      journalSeq: 7,
-      recoveredFrom: { runId: '018-source-run', journalSeq: 7 },
+      journalSeq: 0,
+      recoveredFrom: { runId: '018-source-run', journalSeq: 0 },
       consumed: true,
       disposition: 'recovered',
     })
+  })
+
+  test('resume dead/skipped cache entry re-executes the live call', async () => {
+    written = []
+    const script = `export const meta = { name: 'resume-dead', description: 'resume dead test' }
+return await agent('retry-me')`
+
+    await handleRequest({
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'workflow/start',
+      params: {
+        runId: '019-retry-run',
+        cwd: '/tmp',
+        script,
+        resumeFromRunId: '018-dead-run',
+        resume: [{ key: 'dead-entry', seq: 0, result: { kind: 'dead', reason: 'runagent-threw' } }],
+      },
+    })
+
+    const agentReq = await waitFor((m) => m.method === 'agent/run')
+    expect(agentReq.params).toMatchObject({ runId: '019-retry-run', agentId: 0, prompt: 'retry-me' })
+    handleResponse({
+      jsonrpc: '2.0',
+      id: agentReq.id as number,
+      result: { kind: 'ok', output: 'recovered-live', usage: { outputTokens: 1 } },
+    } as never)
+    const done = await waitFor((m) => m.method === 'workflow/done')
+    expect((done.params as { returnValue: string }).returnValue).toBe('recovered-live')
+    expect(written.filter((m) => m.method === 'agent/run')).toHaveLength(1)
+    const produced = written
+      .filter((m) => m.method === 'journal/append')
+      .map((m) => (m.params as { entry: { attempt?: Record<string, unknown> } }).entry)
+      .find((entry) => entry.attempt?.disposition === 'produced')
+    expect(produced?.attempt).toEqual({
+      runId: '019-retry-run',
+      journalSeq: 0,
+      consumed: true,
+      disposition: 'produced',
+    })
+  })
+
+  test('resumeFromRunId without a journal is a parameter error and starts no agent', async () => {
+    for (const resume of [undefined, null, { invalid: true }]) {
+      written = []
+      await handleRequest({
+        jsonrpc: '2.0',
+        id: 40,
+        method: 'workflow/start',
+        params: {
+          runId: '019-invalid-resume',
+          cwd: '/tmp',
+          script: "return 'must-not-run'",
+          resumeFromRunId: '018-source-run',
+          ...(resume === undefined ? {} : { resume }),
+        },
+      })
+      expect(written).toEqual([{
+        jsonrpc: '2.0',
+        id: 40,
+        error: { code: -32602, message: 'resume must be an array when resumeFromRunId is present' },
+      }])
+    }
+    expect(written.some((message) => message.method === 'agent/run')).toBe(false)
   })
 
   test('workflow/start：invalid-present budgetTotal 在启动前同步拒绝', async () => {

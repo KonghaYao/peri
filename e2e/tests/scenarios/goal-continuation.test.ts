@@ -53,7 +53,8 @@ describe("scenarios: goal continuation", () => {
       expect(capture.text.length).toBeGreaterThan(100);
       expect(capture.text).toMatch(/GOAL_STAGE_2=\s*6,7,8,9,10/);
       expect(capture.text).toContain("GOAL_CONTINUATION_E2E_DONE");
-      expect(capture.text).toMatch(/System Reminder|system-reminder/);
+      // 系统提醒是内部续跑触发机制，不作为可见文本渲染；Stage 2 + block
+      // 已证明提醒确实触发了自动续跑。
       expect(capture.text).toMatch(/ExecuteExtraTool action: block|Goal marked as blocked/);
     },
   );

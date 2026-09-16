@@ -176,6 +176,8 @@ impl McpClientPool {
 
             match result {
                 Ok(Ok(rs)) => {
+                    let service = self.retain_service(McpServiceWrapper::Default(rs));
+                    let rs = &service;
                     let peer = rs.peer().clone();
                     let cache_version = self.install_peer_cache_version(server_name, &peer);
                     let tools = match self.list_all_tools_cached(server_name, &peer).await {
@@ -215,7 +217,6 @@ impl McpClientPool {
                         channel_capable: false,
                         skills_capable,
                     });
-                    let service = McpServiceWrapper::Default(rs);
                     if let Err(mut service) =
                         self.try_commit_connection(server_name.to_string(), handle, service)
                     {

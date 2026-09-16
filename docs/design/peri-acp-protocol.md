@@ -32,6 +32,20 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | `session/list` | `{ cwd? }` | `{ sessions: SessionInfo[] }` | 列出会话（可按 cwd 过滤） |
 | `session/rename` | `{ sessionId, title }` | `{ sessionId, title }` | 重命名会话并持久化标题 |
 
+会话工作区扩展由 initialize 的 `peri.sessionWorkspaceV1: true` 显式协商：
+
+- `peri/session_context` 接受互斥的 `{ cwd }` 或 `{ sessionId }`，返回 `version: 1`、
+  已校验 `workspace`，会话查询额外返回保存的 `binding`。不取得执行权。
+- `session/list` 的 `_meta["peri.sessionWorkspaceV1"]` 承载 `ScopedThreadQuery`，
+  返回相同扩展键中的 `threads` 与 `nextCursor`。scope 支持项目、工作区、精确目录
+  和全局；普通 `cwd` 字段仍表示精确目录。
+- new/load/resume/fork 的响应扩展投影绑定；请求 cwd 与保存的 binding 不符时拒绝。
+  能力未协商不改变旧标准字段解释，也不能允许错误目录执行。
+- `session/metadata` 读取轻量标题与当前会话配置投影；不做逐 tick Git 发现。
+
+类型事实源为 `peri-acp-types::workspace`；身份、恢复和执行锁约束见
+[会话工作区设计](session-workspace-identity.md)。
+
 ### 2.2 交互
 
 | 方法 | 参数 | 返回值 | 语义 |

@@ -149,6 +149,15 @@ deno.lock
 .xyd
 data
 
+# Analysis source lives beside ignored local datasets.
+!side-projects/agent-defect-analyzer/src/data/
+side-projects/agent-defect-analyzer/src/data/*
+!side-projects/agent-defect-analyzer/src/data/*.ts
+!side-projects/peri-db-viewer/src/data/
+side-projects/peri-db-viewer/src/data/*
+!side-projects/peri-db-viewer/src/data/*.ts
+side-projects/agent-defect-analyzer/output/
+
 claude-blog
 claude-blog-cn
 
@@ -198,6 +207,10 @@ settings.json
 .claude/*
 !.claude/skills/
 .claude/skills/*
+!.claude/skills/auto-data-researcher/
+!.claude/skills/auto-data-researcher/**
+!.claude/skills/agent-task-evaluator/
+!.claude/skills/agent-task-evaluator/**
 !.claude/skills/learn-from-history/**
 !.claude/skills/learn-from-history/
 !.claude/skills/start-devflow/**
@@ -228,3 +241,6 @@ __pycache__
 dsh-tui
 acp-hub/web/test-results/
 peri
+
+# Dated research, eval and ADLC run artifacts
+/side-projects/agent-defect-analyzer/reports/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]*

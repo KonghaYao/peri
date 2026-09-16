@@ -430,7 +430,40 @@ pub fn panel_title(kind: PanelKind) -> String {
         PanelKind::ShellDetail => "panel-title-shell-detail",
         PanelKind::Goal => "panel-title-goal",
     };
-    format!(" {} ", i18n::tr(key))
+    if matches!(
+        kind,
+        PanelKind::Config
+            | PanelKind::Model
+            | PanelKind::Login
+            | PanelKind::Betas
+            | PanelKind::Theme
+    ) {
+        format!(" {} · {} ", i18n::tr(key), i18n::tr("panel-host-settings"))
+    } else {
+        format!(" {} ", i18n::tr(key))
+    }
+}
+
+pub fn panel_config_source(kind: PanelKind) -> String {
+    if !matches!(
+        kind,
+        PanelKind::Config
+            | PanelKind::Model
+            | PanelKind::Login
+            | PanelKind::Betas
+            | PanelKind::Theme
+    ) {
+        return String::new();
+    }
+    crate::kit::atoms::CONFIG_SOURCE_HANDLE
+        .get()
+        .map(|source| {
+            let path = source
+                .workspace_path()
+                .unwrap_or_else(|| source.global_path());
+            format!(" {} ", path.display())
+        })
+        .unwrap_or_default()
 }
 
 pub fn panel_description(kind: PanelKind) -> String {

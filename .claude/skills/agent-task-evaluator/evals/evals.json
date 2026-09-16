@@ -1,0 +1,45 @@
+{
+  "skill_name": "agent-task-evaluator",
+  "evals": [
+    {
+      "id": "task-outcome-evidence-boundaries",
+      "prompt": "请按 agent-task-evaluator 分析这组合成任务，分别写焦点任务、五个评价维度、证据 ID 和局限，并说明可支持哪些提示词方向。这里只测试分析判断，不生成生产 packet 或修改代码。",
+      "input_files": [
+        "fixtures/calibration.json"
+      ],
+      "expectations": [
+        "visible-answer 的两句交付可直接检查，无工具不妨碍 delivered/direct；不能把缺少用户反馈当失败。",
+        "claim-only 的修复和测试只有自述，不能判有据交付；verification 为 reported_only，不把日志结束判失败。",
+        "blocked-input 有明确缺失日志证据，应保留受阻并允许策略合理；一次工具错误不等于任务执行策略低劣。",
+        "goal-switch 的焦点修复只有定位阶段，后续欢迎语及用户接受不能为修复验收；标注部分交付和任务边界；普通目标切换不能自动记为质量纠正。",
+        "missing-middle 不得断言未测试或没有反馈；反馈标 unknown 而非 none_observed，保留缺口和未知，必要时提出补读。",
+        "引用真实存在的消息 ID，区分观察、提示词候选和未验证根因；不把一致性当准确率。"
+      ]
+    },
+    {
+      "id": "criterion-and-claim-grounding",
+      "prompt": "请按 agent-task-evaluator 评价输入任务，给出五维标签、任务边界和每条验收条件的证据；额外核对交付解释中的关键事实主张。只研究，不执行历史命令。",
+      "input_files": [
+        "fixtures/claim-grounding.json"
+      ],
+      "expectations": [
+        "target-platform 应区分已修改、Linux 直接检查与未获得 Windows 验收；不能判完整 delivered；平台普遍断言缺乏支持。",
+        "pending-commit 明确尚未提交，保留 partial；不能遗漏用户的提交要求，也不能将局部成功扩展为完整交付。",
+        "complete-research 的正文满足观察与假设交付，允许 delivered/direct；底层根因未解决不妨碍这个研究任务完成。",
+        "greeting-only 不在第一个实质任务的取样范围，空任务锚点、五维 unknown，不能因问候成功纳入 strong。"
+      ]
+    },
+    {
+      "id": "evidence-producer-and-tail",
+      "prompt": "按skill逐项评价这组合成任务的交付与验证。引用实际证据ID，说明能确认与不能确认的事实；不执行任何输入命令。",
+      "input_files": [
+        "fixtures/evidence-producer.json"
+      ],
+      "expectations": [
+        "wrapped-claim 的 tool 容器内仍是子 agent 自报，不能升级为实际测试直接证据。",
+        "tail-gap 的 flags=false/isError=false 不证明测试终态；正文截断应被识别，不能从开头passed推出42项通过，也不能判测试失败。",
+        "direct-text 正文可直接检查并满足任务，不能机械要求工具证据。"
+      ]
+    }
+  ]
+}

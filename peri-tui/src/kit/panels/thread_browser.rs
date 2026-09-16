@@ -1,7 +1,7 @@
 //! Thread Browser 面板（spec/global/domains/tui/tui-panels.md §6.6）
 //!
 //! S6c：thread 列表从 `THREAD_LIST` atom 读取（由 `service_snapshot` 后台任务
-//! 周期性从 ServiceRegistry.thread_store 派生）。Enter 切换 thread 操作 S11
+//! 周期性经 ACP 查询项目 / 工作区会话）。Enter 切换 thread 操作 S11
 //! 解耦后通过 AcpClient 触发。
 //!
 //! 仿 Login 面板模式：Vec<Line> → Paragraph → ScrollView(Text)。手动键盘
@@ -10,7 +10,9 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, LANG_VERSION, THREAD_LIST, THREAD_LOAD_TX, ThreadSummary,
+    ACP_CLIENT_HANDLE, LANG_VERSION, THREAD_BROWSER_SCOPE, THREAD_LIST, THREAD_LIST_ERROR,
+    THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT, THREAD_LOAD_TX, ThreadBrowserScope,
+    ThreadSummary,
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
@@ -37,6 +39,10 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_atom(&LANG_VERSION);
 
     // S6c: 订阅 THREAD_LIST atom——后台 service_snapshot 2s 派生一次
+    let scope_store = hooks.use_atom(&THREAD_BROWSER_SCOPE);
+    let list_error = hooks.use_atom(&THREAD_LIST_ERROR).read().clone();
+    let has_more = hooks.use_atom(&THREAD_LIST_HAS_MORE).get();
+    let scope = scope_store.get();
     let threads_store = hooks.use_atom(&THREAD_LIST);
     let threads: Vec<ThreadSummary> = threads_store.read().clone();
     let _ = threads_store;
@@ -148,6 +154,18 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
 
                 match key.code {
+                    KeyCode::Tab => {
+                        THREAD_BROWSER_SCOPE.set(match scope {
+                            ThreadBrowserScope::Project => ThreadBrowserScope::Workspace,
+                            ThreadBrowserScope::Workspace => ThreadBrowserScope::Project,
+                        });
+                        THREAD_LIST_PAGE_COUNT.set(1);
+                        THREAD_LIST.state().write().clear();
+                        *cursor.write() = 0;
+                    }
+                    KeyCode::Char('n') if has_more => {
+                        THREAD_LIST_PAGE_COUNT.set(THREAD_LIST_PAGE_COUNT.get().saturating_add(1));
+                    }
                     KeyCode::Up => {
                         let mut c = cursor.write();
                         *c = previous_selection(*c);
@@ -196,7 +214,20 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // header
     lines.push(Line::from(vec![Span::styled(
-        format!("  {} threads", item_count),
+        i18n::tr_args(
+            "thread-browser-scope-count",
+            &[
+                (
+                    "scope".into(),
+                    i18n::tr(match scope {
+                        ThreadBrowserScope::Project => "thread-browser-project",
+                        ThreadBrowserScope::Workspace => "thread-browser-workspace",
+                    })
+                    .into(),
+                ),
+                ("count".into(), (item_count as i64).into()),
+            ],
+        ),
         header_style,
     )]));
     lines.push(Line::from(vec![Span::styled(
@@ -205,7 +236,12 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     )]));
     lines.push(Line::from(""));
 
-    if threads.is_empty() {
+    if let Some(error) = &list_error {
+        lines.push(Line::styled(
+            error.clone(),
+            Style::new().fg(semantic.status.warning),
+        ));
+    } else if threads.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             i18n::tr("thread-browser-empty"),
             item_meta_style,
@@ -234,7 +270,10 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .updated_at
                 .map(|dt| dt.format("%Y-%m-%d").to_string())
                 .unwrap_or_else(|| "-".to_string());
-            let cwd: String = entry.cwd.chars().take(40).collect();
+            let cwd = path_tail(
+                &entry.cwd,
+                area.map_or(72, |area| area.width.saturating_sub(6) as usize),
+            );
 
             // 第一行：标记 + 日期 + 标题
             lines.push(Line::from(vec![
@@ -248,8 +287,12 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // 第二行：id + 消息数 + 工作目录
             lines.push(Line::from(vec![Span::styled(
                 format!(
-                    "    id: {}...  {} messages  {}",
-                    id_short, entry.message_count, cwd
+                    "    id: {}...  {}",
+                    id_short,
+                    i18n::tr_args(
+                        "thread-browser-messages",
+                        &[("count".into(), (entry.message_count as i64).into())]
+                    )
                 ),
                 if is_selected {
                     dim_style
@@ -258,8 +301,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 },
             )]));
 
-            // 条目间空行
-            lines.push(Line::from(""));
+            lines.push(Line::styled(format!("    {cwd}"), item_meta_style));
         }
     }
 
@@ -271,7 +313,11 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         )]));
     } else {
         lines.push(Line::from(vec![Span::styled(
-            i18n::tr("panel-threads-nav-hint"),
+            i18n::tr(if has_more {
+                "panel-threads-more-hint"
+            } else {
+                "panel-threads-nav-hint"
+            }),
             muted_style,
         )]));
     }
@@ -295,4 +341,34 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Text(text: content)
         }
     })
+}
+
+fn path_tail(path: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if path.width() <= width {
+        return path.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut used = 1;
+    let suffix: Vec<char> = path
+        .chars()
+        .rev()
+        .take_while(|ch| {
+            used += ch.width().unwrap_or(0);
+            used <= width
+        })
+        .collect();
+    format!("…{}", suffix.into_iter().rev().collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn directory_suffix_keeps_workspace_name_and_unicode_width() {
+        assert_eq!(super::path_tail("/long/仓库/feature", 12), "…库/feature");
+        assert_eq!(super::path_tail("/a", 10), "/a");
+        assert_eq!(super::path_tail("/a", 0), "");
+    }
 }

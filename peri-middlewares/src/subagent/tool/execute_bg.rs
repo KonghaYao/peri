@@ -69,15 +69,20 @@ impl super::SubAgentTool {
             // agent 定义路径（bg agent）
             let agent_id = match &subagent_type {
                 Some(id) => id.clone(),
-                None => return Err(
-                    "Error: background mode requires subagent_type parameter (or use fork: true)"
-                        .into(),
-                ),
+                None => {
+                    let error =
+                        "Error: background mode requires subagent_type parameter (or use fork: true)";
+                    return Err(self.agent_error_with_suggestions(error, None, &cwd).into());
+                }
             };
 
             let agent_def = match self.load_agent_def(&agent_id, &cwd) {
                 Ok(a) => a,
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    return Err(self
+                        .agent_error_with_suggestions(&e, Some(&agent_id), &cwd)
+                        .into());
+                }
             };
 
             let build_result = self

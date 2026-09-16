@@ -14,6 +14,9 @@ macro_rules! panel_shell {
                 .fg(peri_theme::atoms::THEME_ATOM.state().read().component.panel.title)
                 .bold()
                 .centered(),
+                bottom_title: ratatui_kit::ratatui::text::Line::from(
+                    crate::kit::panel_registry::panel_config_source($kind),
+                ),
                 width: ratatui_kit::ratatui::layout::Constraint::Fill(1),
             ) {
                 $($children)*

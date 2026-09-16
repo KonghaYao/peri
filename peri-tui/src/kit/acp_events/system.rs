@@ -582,6 +582,8 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
 pub(super) fn handle_oauth_needed(state: &mut BridgeState, on: &OauthNeeded) {
     // I20-D：保存 payload 到 OAUTH_INFO atom，供 OAuthPopup 读取真实数据
     *crate::kit::atoms::OAUTH_INFO.state().write() = Some(on.clone());
+    crate::kit::atoms::OAUTH_SESSION_ID
+        .set((!state.active_session_id.is_empty()).then(|| state.active_session_id.clone()));
     state.popup_kind = Some(crate::kit::atoms::PopupKind::OAuth);
     state.variant = 2;
     super::render::push_popup_kind(state);
@@ -592,6 +594,7 @@ pub(super) fn handle_oauth_needed(state: &mut BridgeState, on: &OauthNeeded) {
 fn close_oauth_popup(state: &mut BridgeState) {
     state.popup_kind = None;
     *crate::kit::atoms::OAUTH_INFO.state().write() = None;
+    crate::kit::atoms::OAUTH_SESSION_ID.set(None);
     super::render::push_popup_kind(state);
 }
 
@@ -604,13 +607,6 @@ pub(super) fn handle_oauth_completed(state: &mut BridgeState, server_name: &str)
     );
     state.inject_system_note(text, TuiNoteLevel::Info);
     super::render::push_acp_state(state);
-
-    // TUI 面板直读 pool：授权凭证已落盘（host pool 完成），触发该 server
-    // reconnect 恢复连接（reconnect 内部走凭证快速路径，不重复弹授权）。
-    if let Some(pool) = crate::kit::atoms::MCP_PANEL_POOL.get() {
-        let name = server_name.to_string();
-        let _ = pool.spawn_reconnect(name);
-    }
 }
 
 pub(super) fn handle_oauth_failed(state: &mut BridgeState, server_name: &str, error: &str) {
@@ -636,12 +632,6 @@ pub(super) fn handle_oauth_restored(state: &mut BridgeState, server_name: &str) 
     );
     state.inject_system_note(text, TuiNoteLevel::Info);
     super::render::push_acp_state(state);
-
-    // 同步 TUI 面板池（reconnect 走凭证快速路径，不重复弹授权）。
-    if let Some(pool) = crate::kit::atoms::MCP_PANEL_POOL.get() {
-        let name = server_name.to_string();
-        let _ = pool.spawn_reconnect(name);
-    }
 }
 
 // ── §4.7 Background Tasks ──

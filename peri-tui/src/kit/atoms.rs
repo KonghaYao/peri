@@ -125,7 +125,7 @@ pub struct CronJobSummary {
     pub next_fire: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
 pub struct HookSummary {
     pub event: String,
     pub plugin_name: String,
@@ -142,7 +142,7 @@ pub enum PluginViewTab {
     Errors = 3,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
 pub struct PluginSummary {
     pub name: String,
     pub version: String,
@@ -266,6 +266,20 @@ pub static RESIZE_TX: OnceLock<UnboundedSender<u16>> = OnceLock::new();
 
 pub static SERVICE_SNAPSHOT: AtomStatic<ServiceSnapshot> =
     AtomStatic::new(ServiceSnapshot::default);
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThreadBrowserScope {
+    #[default]
+    Project,
+    Workspace,
+}
+
+pub static ACTIVE_EXECUTION_CWD: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+pub static THREAD_BROWSER_SCOPE: AtomStatic<ThreadBrowserScope> =
+    AtomStatic::new(ThreadBrowserScope::default);
+pub static THREAD_LIST_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+pub static THREAD_LIST_HAS_MORE: AtomStatic<bool> = AtomStatic::new(|| false);
+pub static THREAD_LIST_PAGE_COUNT: AtomStatic<u32> = AtomStatic::new(|| 1);
+
 pub static THREAD_LIST: AtomStatic<Vec<ThreadSummary>> = AtomStatic::new(Vec::new);
 pub static CRON_JOBS: AtomStatic<Vec<CronJobSummary>> = AtomStatic::new(Vec::new);
 pub static HOOK_LIST: AtomStatic<Vec<HookSummary>> = AtomStatic::new(Vec::new);
@@ -371,6 +385,7 @@ pub static REWIND_QUERY_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| N
 /// （P1 竞态防护）。
 pub static REWIND_QUERY_GEN: AtomStatic<u64> = AtomStatic::new(|| 0);
 
+pub static OAUTH_SESSION_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 pub static OAUTH_INFO: AtomStatic<Option<OauthNeeded>> = AtomStatic::new(|| None);
 pub static HITL_PENDING: AtomStatic<
     Option<crate::kit::acp_types::PendingInteraction<HitlPending>>,
@@ -503,8 +518,8 @@ pub static RENDER_HEARTBEAT: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// acp_bridge 在 reset 后用于过滤陈旧事件（event.active_session_id != ACTIVE_SESSION_ID → 丢弃）。
 pub static ACTIVE_SESSION_ID: AtomStatic<String> = AtomStatic::new(String::new);
 
-/// 当前活跃 session 的标题。由 service_snapshot 周期性从 thread_store 派生
-/// （load_meta(ACTIVE_SESSION_ID)），InputArea 上边栏右侧以 hash 稳定底色展示。
+/// 当前活跃 session 的标题。由 service_snapshot 经 ACP session/metadata 查询，
+/// InputArea 上边栏右侧以 hash 稳定底色展示。
 /// 空字符串表示尚无标题（新会话 / 未加载），此时不渲染。
 pub static CURRENT_SESSION_TITLE: AtomStatic<String> = AtomStatic::new(String::new);
 

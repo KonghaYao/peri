@@ -10,7 +10,6 @@ use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager};
 use peri_acp_types::tools::BaseTool;
 use serde_json::Value;
 use tokio::sync::oneshot;
-use tracing::warn;
 
 use crate::journal::WorkflowJournalStore;
 use crate::progress::WorkflowProgressStore;
@@ -20,11 +19,25 @@ use crate::runner::{WorkflowInput, WorkflowRunner};
 mod completion;
 mod preflight;
 
-use preflight::preflight_validate_script;
-
 const MAX_SAFE_BUDGET_TOTAL: u64 = 9_007_199_254_740_991;
 const MAX_SAFE_INTEGER: u64 = MAX_SAFE_BUDGET_TOTAL;
 const MAX_CONCURRENCY_CAP: u64 = 16;
+
+const WORKFLOW_SCRIPT_DESCRIPTION: &str = r#"The script is the body of an async function (`new AsyncFunction`), not an ESM module; use JavaScript (TypeScript syntax is not transpiled). It must contain exactly one plain-literal `export const meta = { name, description }`; the engine removes that metadata before executing the body. The body receives these top-level injected primitives directly: `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, and `workflow()`, plus `args` and `budget`. Do not use static or dynamic `import`, `export default`, or any other `export`; do not use old `workflow.agent(...)`, `workflow.parallel(...)`, `workflow.pipeline(...)`, `workflow.phase(...)`, or `workflow.log(...)` calls. Return the workflow result with a top-level `return`; without it the body returns undefined. Missing-return validation is advisory and does not prove that a result will be returned. Minimal read-only example:
+
+```javascript
+export const meta = {
+  name: 'read-only-demo',
+  description: 'Inspect files without changing the repository',
+}
+
+const result = await agent('Inspect the requested files and summarize findings.')
+return result
+```
+
+Invoke this example with the tool parameter `writeIntent: { "kind": "read_only" }` when you want a read-only Git postcondition. This is not a permission boundary or filesystem sandbox.
+
+Either `script` or `scriptPath` must be provided."#;
 
 /// Workflow 工具 — 启动 workflow（fire-and-forget）
 pub struct WorkflowTool {
@@ -57,6 +70,109 @@ impl WorkflowTool {
         self.bg_registry = Some(bg_registry);
         self
     }
+
+    /// Start a prepared run with session admission and owned completion.
+    /// The returned id is stable even when the caller stops waiting after admission.
+    pub async fn start_run(&self, wf_input: WorkflowInput) -> Result<String, String> {
+        let owner = completion::ExecutionOwner::admit(self.bg_registry.as_deref())?;
+        let run_id = uuid::Uuid::now_v7().to_string();
+        let workflow_name = wf_input.workflow_name.clone();
+        let (kill_tx, kill_rx) = oneshot::channel::<()>();
+        let started_at = std::time::Instant::now();
+
+        // 先原子占用 registry 并发槽，再 spawn，避免并发失败产生孤儿 run。
+        let script_preview: String = wf_input.script.chars().take(100).collect();
+        self.registry
+            .reserve(crate::registry::WorkflowRun {
+                run_id: run_id.clone(),
+                workflow_name: workflow_name.clone(),
+                script_preview,
+                status: WorkflowRunStatus::Running,
+                started_at,
+                child_handle: None,
+                kill_tx: Some(kill_tx),
+            })
+            .map_err(|error| format!("Workflow concurrency limit: {error}"))?;
+
+        // 注册到统一后台任务注册表（经 acp-types 契约，装配注入的 Agent 层 TaskManager）
+        if let Some(ref bg) = self.bg_registry {
+            // 携带 kill 闭包：session/cancel-bg-task 时转发到 WorkflowTaskRegistry::kill
+            // （kill_tx 的唯一持有者，与 workflow/kill_run RPC 同一通道）。
+            let kill_registry = Arc::clone(&self.registry);
+            let kill_run_id = run_id.clone();
+            if let Err(e) = bg.register(BgTaskRegistration {
+                task_id: run_id.clone(),
+                kind: BgTaskKind::Workflow,
+                summary: format!(
+                    "{}: {}",
+                    workflow_name,
+                    wf_input.script.chars().take(80).collect::<String>()
+                ),
+                pid: None,
+                kill: Some(Box::new(move || {
+                    let _ = kill_registry.kill(&kill_run_id);
+                })),
+            }) {
+                let _ = self.registry.kill(&run_id);
+                return Err(format!("Workflow background admission failed: {e}"));
+            }
+        }
+
+        let completion = completion::RunCompletion {
+            registry: Arc::downgrade(&self.registry),
+            progress: Arc::clone(&self.progress_store),
+            journal: Arc::clone(&self.journal_store),
+            run_id: run_id.clone(),
+            name: workflow_name.clone(),
+            started_at,
+        };
+        let (child_handle, mut fast_rx) = match completion.spawn(
+            Arc::clone(&self.runner),
+            wf_input,
+            kill_rx,
+            self.bg_registry.clone(),
+            owner,
+        ) {
+            Ok(started) => started,
+            Err(error) => {
+                let _ = self.registry.kill(&run_id);
+                if let Some(bg) = &self.bg_registry {
+                    bg.confirm_external_execution_stopped(&run_id);
+                    let _ = bg.cancel(&run_id);
+                }
+                return Err(error);
+            }
+        };
+        self.registry.attach_child(&run_id, child_handle);
+
+        // The one-second fast path observes the same already-published terminal projection.
+        // Dropping this caller cannot cancel the registered execution/completion task.
+        if let Ok(Some(completed)) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            completion::receive_completion(&mut fast_rx),
+        )
+        .await
+        {
+            if completed.result.status != WorkflowRunStatus::Completed {
+                let error_msg = completed
+                    .result
+                    .error
+                    .as_deref()
+                    .unwrap_or("workflow failed with no error details");
+                let detail = completed
+                    .stderr_tail
+                    .as_ref()
+                    .map(|s| format!("\n\nstderr (last 20 lines):\n{}", s))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Workflow '{}' failed: {}{}",
+                    workflow_name, error_msg, detail
+                ));
+            }
+        }
+
+        Ok(run_id)
+    }
 }
 
 #[async_trait]
@@ -78,9 +194,7 @@ impl BaseTool for WorkflowTool {
             "properties": {
                 "script": {
                     "type": "string",
-                    "description": "The workflow script (JavaScript ESM). \
-                    Uses primitives: agent(), parallel(), pipeline(), phase(), log(), workflow(). \
-                    Either `script` or `scriptPath` must be provided."
+                    "description": WORKFLOW_SCRIPT_DESCRIPTION
                 },
                 "args": {
                     "type": "object",
@@ -131,7 +245,7 @@ impl BaseTool for WorkflowTool {
                     "description": "Reject unless workflow primitives and graph can be statically validated. The current engine cannot provide that proof."
                 },
                 "writeIntent": {
-                    "description": "Declarative repository write ownership. Omit only for legacy runs; omitted intent can never produce a deliverable result.",
+                    "description": "Declarative repository postcondition, not a permission boundary or filesystem sandbox. Pass {kind: 'read_only'} for a workflow that should leave a Git repository unchanged: when the active cwd is in a Git repository, the host compares canonical HEAD, index, worktree, and untracked status after execution. This check does not block script or agent capabilities and does not observe ignored files or writes outside the repository; a non-Git cwd has no baseline and cannot produce a deliverable result. For {kind: 'write'}, repo_root and cwd must equal the active canonical repository root and workflow cwd, and path_allowlist must be non-empty repository-relative paths without parent traversal. Postcondition checks allow changes only under that list; head_may_change and commit_required control the current HEAD checks. Omit only for legacy runs; omitted intent can never produce a deliverable result.",
                     "oneOf": [
                         {"type": "object", "properties": {"kind": {"const": "read_only"}}, "required": ["kind"], "additionalProperties": false},
                         {
@@ -151,8 +265,7 @@ impl BaseTool for WorkflowTool {
                 },
                 "scriptPath": {
                     "type": "string",
-                    "description": "Path to a workflow script file (alternative to inline script). \
-                    If provided, the file is read and used as the workflow script."
+                    "description": "Path to a workflow script file (alternative to inline script). The file is canonicalized and must remain inside the active workflow cwd; its contents follow the same async-function-body grammar as `script`."
                 }
             },
             "required": []
@@ -224,7 +337,6 @@ impl BaseTool for WorkflowTool {
             .transpose()
             .map_err(|error| format!("Invalid writeIntent: {error}"))?;
 
-        preflight_validate_script(script).await?;
         let git_baseline = crate::journal::GitBaseline::capture_for_intent(
             std::path::Path::new(self.runner.cwd()),
             write_intent.as_ref(),
@@ -236,9 +348,6 @@ impl BaseTool for WorkflowTool {
             .as_str()
             .map(|s| s.to_string())
             .unwrap_or_else(|| extract_workflow_name(script));
-
-        // 在 spawn 前生成 run_id，立即返回给 LLM（GAP-02）
-        let run_id = uuid::Uuid::now_v7().to_string();
 
         let wf_input = WorkflowInput {
             script: script.to_string(),
@@ -252,84 +361,7 @@ impl BaseTool for WorkflowTool {
             git_baseline,
         };
 
-        let (kill_tx, kill_rx) = oneshot::channel::<()>();
-        let started_at = std::time::Instant::now();
-
-        // 先原子占用 registry 并发槽，再 spawn，避免并发失败产生孤儿 run。
-        let script_preview: String = script.chars().take(100).collect();
-        self.registry
-            .reserve(crate::registry::WorkflowRun {
-                run_id: run_id.clone(),
-                workflow_name: workflow_name.clone(),
-                script_preview,
-                status: WorkflowRunStatus::Running,
-                started_at,
-                child_handle: None,
-                kill_tx: Some(kill_tx),
-            })
-            .map_err(|error| format!("Workflow concurrency limit: {error}"))?;
-
-        // 注册到统一后台任务注册表（经 acp-types 契约，装配注入的 Agent 层 TaskManager）
-        if let Some(ref bg) = self.bg_registry {
-            // 携带 kill 闭包：session/cancel-bg-task 时转发到 WorkflowTaskRegistry::kill
-            // （kill_tx 的唯一持有者，与 workflow/kill_run RPC 同一通道）。
-            let kill_registry = Arc::clone(&self.registry);
-            let kill_run_id = run_id.clone();
-            if let Err(e) = bg.register(BgTaskRegistration {
-                task_id: run_id.clone(),
-                kind: BgTaskKind::Workflow,
-                summary: format!(
-                    "{}: {}",
-                    workflow_name,
-                    script.chars().take(80).collect::<String>()
-                ),
-                pid: None,
-                kill: Some(Box::new(move || {
-                    let _ = kill_registry.kill(&kill_run_id);
-                })),
-            }) {
-                warn!(error = %e, "workflow bg registry: register failed");
-            }
-        }
-
-        let completion = completion::RunCompletion {
-            registry: Arc::downgrade(&self.registry),
-            progress: Arc::clone(&self.progress_store),
-            journal: Arc::clone(&self.journal_store),
-            run_id: run_id.clone(),
-            name: workflow_name.clone(),
-            started_at,
-        };
-        let (child_handle, mut fast_rx) =
-            completion.spawn(Arc::clone(&self.runner), wf_input, kill_rx);
-        self.registry.attach_child(&run_id, child_handle);
-
-        // The one-second fast path observes the same already-published terminal projection.
-        // Dropping this caller cannot cancel the registered execution/completion task.
-        if let Ok(Some(completed)) = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            completion::receive_completion(&mut fast_rx),
-        )
-        .await
-        {
-            if completed.result.status != WorkflowRunStatus::Completed {
-                let error_msg = completed
-                    .result
-                    .error
-                    .as_deref()
-                    .unwrap_or("workflow failed with no error details");
-                let detail = completed
-                    .stderr_tail
-                    .as_ref()
-                    .map(|s| format!("\n\nstderr (last 20 lines):\n{}", s))
-                    .unwrap_or_default();
-                return Err(format!(
-                    "Workflow '{}' failed: {}{}",
-                    workflow_name, error_msg, detail
-                )
-                .into());
-            }
-        }
+        let run_id = self.start_run(wf_input).await?;
 
         Ok(format!(
             "Workflow '{}' started.\n\

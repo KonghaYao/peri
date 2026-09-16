@@ -6,12 +6,13 @@ description = "Rust Agent framework with middleware system, aligned with @langgr
 license = "Apache-2.0"
 
 [dependencies]
+peri-process = { path = "../peri-process" }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 dirs-next.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
 futures.workspace = true
 tokio.workspace = true
@@ -26,10 +27,10 @@ peri-model = { path = "../peri-model" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-resources = { path = "../peri-resources" }
 sysinfo.workspace = true
+libc = "0.2"
 fuzzy-matcher = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-libc = "0.2"
 tempfile.workspace = true
 url.workspace = true

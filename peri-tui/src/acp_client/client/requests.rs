@@ -34,6 +34,13 @@ impl AcpTuiClient {
             "clientCapabilities": { "_meta": caps.to_agent_meta() },
         });
         let result = self.transport.send_request("initialize", params).await?;
+        self.session_workspace.store(
+            result
+                .pointer("/agentCapabilities/_meta/peri.sessionWorkspaceV1")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Release,
+        );
         let supported = result
             .pointer("/agentCapabilities/_meta/peri.userInputQueue")
             .and_then(Value::as_bool)
@@ -108,29 +115,44 @@ impl AcpTuiClient {
 
     /// Change the model for the current session.
     pub async fn set_model(&self, alias: &str) -> Result<(), AcpError> {
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        self.check_restore_error()?;
         let session_id = self
             .lifecycle
             .current_session_id()
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
-        let params = json!({ "sessionId": session_id, "modelId": alias });
+        let params = json!({ "sessionId": session_id, "configId": "model", "value": alias });
         let _ = self
             .transport
-            .send_request("session/set_model", params)
+            .send_request("session/set_config_option", params)
             .await?;
         Ok(())
     }
 
     /// Change the permission mode for the current session.
     pub async fn set_mode(&self, mode: &str) -> Result<(), AcpError> {
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        self.check_restore_error()?;
         let session_id = self
             .lifecycle
             .current_session_id()
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
-        let params = json!({ "sessionId": session_id, "modeId": mode });
+        let wire_mode = match mode {
+            "accept-edit" => "accept_edit",
+            "auto-mode" => "auto",
+            mode => mode,
+        };
+        let params = json!({ "sessionId": session_id, "modeId": wire_mode });
         let _ = self
             .transport
             .send_request("session/set_mode", params)
             .await?;
+        if self.projection_mode == super::ClientProjectionMode::Interactive {
+            crate::kit::atoms::SERVICE_SNAPSHOT
+                .state()
+                .write()
+                .permission_mode = mode.to_string();
+        }
         Ok(())
     }
 
@@ -160,33 +182,15 @@ impl AcpTuiClient {
         Ok(())
     }
 
-    /// Update the full PeriConfig on the ACP server (for Login panel CRUD).
-    /// When no session exists, uses notification to update server state directly.
+    /// Update the host configuration selected at launch.
+    ///
+    /// A complete host configuration must never be copied into the active
+    /// session's workspace. Session model selection uses `set_model` instead.
     pub async fn update_config(&self, config: &crate::config::PeriConfig) -> Result<(), AcpError> {
-        let session_id = self.lifecycle.current_session_id();
-        match session_id {
-            Some(session_id) => {
-                let params = json!({
-                    "sessionId": session_id,
-                    "config": config,
-                });
-                let _ = self
-                    .transport
-                    .send_request("session/update_config", params)
-                    .await?;
-            }
-            None => {
-                // No session yet — send via notification so ACP server updates
-                // peri_config/provider before any session is created.
-                tracing::info!("update_config: no session, sending via notification");
-                let params = json!({
-                    "config": config,
-                });
-                self.transport
-                    .send_notification("session/config_update", params)
-                    .await?;
-            }
-        }
+        let _ = self
+            .transport
+            .send_request("session/update_config", json!({"config": config}))
+            .await?;
         Ok(())
     }
 

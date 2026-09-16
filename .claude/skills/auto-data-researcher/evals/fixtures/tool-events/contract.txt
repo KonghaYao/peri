@@ -1,0 +1,2 @@
+工具记录契约 v1
+每行是事件的一种持久化表示。逻辑请求按 (thread_id, call_id) 标识；同一请求可有 content 与 top-level 两种相同表示，不能算两次执行。result 按同一身份关联，is_error 缺失表示状态未知。origin=inherited 的行是上下文副本；origin=own 是该会话的新记录。包含所有会话的自有执行，不按 root/child 或 hidden 过滤。没有 token/cost/outcome/cancel 事件字段。created_at 是会话创建时间，sequence 是会话内顺序。

@@ -3,8 +3,8 @@
 ### DOC-ROOT-001
 
 - **Scope**：根 `CLAUDE.md`。
-- **Rule**：根文件只做路由：仓库概览、模块入口、standards、design、active spec 与命令入口；不得复制工程细则。预算：不超过 6KB 且不超过 120 行。
-- **Verify**：`wc -c -l CLAUDE.md`；人工检查内容是否仅为路由而非规则副本。
+- **Rule**：根文件承载项目设计哲学与任务路由：先阐明产品目标、设计取舍、行事风格、代码与测试理念，再提供模块、standards、design、active spec 与命令入口。理念说明理由、默认选择及适用边界，不充当已实现能力清单；可执行工程细则仍由 standards 单一维护，不复制模块 inventory、实现细节或事故叙事。预算：不超过 6KB 且不超过 120 行。
+- **Verify**：`wc -c -l CLAUDE.md`；人工检查是否能据此判断方案取舍，且具体约束与验证仍路由到对应 standards。
 
 ### DOC-MODULE-001
 
@@ -21,7 +21,7 @@
 ### DOC-STABLE-001
 
 - **Scope**：全部规范和 CLAUDE 文档。
-- **Rule**：每条工程规则使用稳定 ID、Scope、Rule、Verify；不写动态数量、固定源码行号或事故叙事。用路径、符号、测试名或命令定位事实源。
+- **Rule**：可执行工程规则在 standards 中使用稳定 ID、Scope、Rule、Verify；根文件的设计哲学不另造规则 ID，具体约束引用适用标准。不写动态数量、固定源码行号或事故叙事。用路径、符号、测试名或命令定位事实源。
 - **Verify**：`rg -n ':[0-9]+|[0-9]+\s*个' docs/standards peri-agent/CLAUDE.md peri-acp/CLAUDE.md` 后人工确认命中不是命令、ID 或必要语义。
 
 ### DOC-UPDATE-001

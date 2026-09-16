@@ -1,9 +1,10 @@
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// 传输层失败的安全分类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TransportErrorKind {
     Connection,
     Timeout,
@@ -24,7 +25,8 @@ impl fmt::Display for TransportErrorKind {
 }
 
 /// 重试耗尽时最后一次失败的安全分类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RetryErrorKind {
     Transport,
     HttpStatus,
@@ -43,7 +45,8 @@ impl fmt::Display for RetryErrorKind {
 }
 
 /// Provider 协议失败的稳定分类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProtocolErrorKind {
     InvalidJsonObject,
     AssistantMessageRequired,
@@ -91,7 +94,7 @@ impl ProtocolError {
     fn with_summary(kind: ProtocolErrorKind, summary: impl AsRef<str>) -> Self {
         Self {
             kind,
-            summary: Some(SafeErrorContext::new(summary)),
+            summary: SafeErrorContext::new(summary),
         }
     }
 
@@ -114,7 +117,6 @@ impl fmt::Display for ProtocolError {
     }
 }
 
-const INVALID_ERROR_CONTEXT: &str = "[invalid]";
 const MAX_ERROR_CONTEXT_LEN: usize = 128;
 
 /// 经过长度、字符集和敏感内容检查的错误上下文。
@@ -124,7 +126,7 @@ const MAX_ERROR_CONTEXT_LEN: usize = 128;
 struct SafeErrorContext(String);
 
 impl SafeErrorContext {
-    fn new(value: impl AsRef<str>) -> Self {
+    fn new(value: impl AsRef<str>) -> Option<Self> {
         let value = value.as_ref();
         if value.len() <= MAX_ERROR_CONTEXT_LEN
             && value
@@ -132,9 +134,9 @@ impl SafeErrorContext {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
             && !contains_sensitive_context(value)
         {
-            Self(value.to_owned())
+            Some(Self(value.to_owned()))
         } else {
-            Self(INVALID_ERROR_CONTEXT.into())
+            None
         }
     }
 
@@ -144,6 +146,10 @@ impl SafeErrorContext {
 }
 
 fn contains_sensitive_context(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("sk-") || lower.starts_with("sk_") {
+        return true;
+    }
     let normalized = value
         .bytes()
         .filter_map(|byte| {
@@ -179,7 +185,7 @@ enum ModelErrorInner {
     },
     HttpStatus {
         status: u16,
-        provider: SafeErrorContext,
+        provider: Option<SafeErrorContext>,
         request_id: Option<SafeErrorContext>,
     },
     Protocol(ProtocolError),
@@ -191,7 +197,199 @@ enum ModelErrorInner {
     RetryExhausted {
         attempts: u32,
         last_error: RetryErrorKind,
+        diagnostic: Option<ModelErrorDiagnostic>,
     },
+}
+
+/// A bounded, allowlisted model failure projection safe to pass across an
+/// Agent/ACP boundary.  It deliberately contains no provider body, headers,
+/// prompt, URL, free-form protocol summary or retryability decision. Protocol
+/// diagnostics carry only their stable kind; the summary remains local.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelErrorDiagnostic {
+    category: ModelErrorCategory,
+    status: Option<u16>,
+    provider: Option<String>,
+    request_id: Option<String>,
+    transport: Option<TransportErrorKind>,
+    protocol: Option<ProtocolErrorKind>,
+    retry_attempts: Option<u32>,
+    retry_kind: Option<RetryErrorKind>,
+}
+
+/// Untrusted diagnostic facts supplied by a serialization boundary. Keeping
+/// these inputs together makes it harder to omit fields covered by validation.
+pub struct ModelErrorDiagnosticParts<'a> {
+    pub category: ModelErrorCategory,
+    pub status: Option<u16>,
+    pub provider: Option<&'a str>,
+    pub request_id: Option<&'a str>,
+    pub transport: Option<TransportErrorKind>,
+    pub protocol: Option<ProtocolErrorKind>,
+    pub retry_attempts: Option<u32>,
+    pub retry_kind: Option<RetryErrorKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelErrorCategory {
+    Transport,
+    HttpStatus,
+    Protocol,
+    Cancelled,
+    StreamInterrupted,
+    RetryExhausted,
+}
+
+impl ModelErrorDiagnostic {
+    /// Construct a diagnostic from an external boundary only after validating
+    /// every identity field with the same runtime safe-context rules.
+    pub fn from_parts(parts: ModelErrorDiagnosticParts<'_>) -> Option<Self> {
+        let ModelErrorDiagnosticParts {
+            category,
+            status,
+            provider,
+            request_id,
+            transport,
+            protocol,
+            retry_attempts,
+            retry_kind,
+        } = parts;
+        let retry_pair = match (retry_attempts, retry_kind) {
+            (None, None) => true,
+            (Some(attempts), Some(_)) => attempts > 0,
+            _ => false,
+        };
+        let retry_matches_category = match retry_kind {
+            None => retry_attempts.is_none(),
+            Some(kind) => match category {
+                ModelErrorCategory::Transport => kind == RetryErrorKind::Transport,
+                ModelErrorCategory::HttpStatus => kind == RetryErrorKind::HttpStatus,
+                ModelErrorCategory::Protocol => kind == RetryErrorKind::Protocol,
+                ModelErrorCategory::RetryExhausted => true,
+                ModelErrorCategory::Cancelled | ModelErrorCategory::StreamInterrupted => false,
+            },
+        };
+        let valid_shape = match category {
+            ModelErrorCategory::Transport => {
+                transport.is_some()
+                    && status.is_none()
+                    && protocol.is_none()
+                    && retry_pair
+                    && retry_matches_category
+            }
+            ModelErrorCategory::HttpStatus => {
+                status.is_some()
+                    && transport.is_none()
+                    && protocol.is_none()
+                    && retry_pair
+                    && retry_matches_category
+            }
+            ModelErrorCategory::Protocol => {
+                protocol.is_some()
+                    && status.is_none()
+                    && transport.is_none()
+                    && retry_pair
+                    && retry_matches_category
+            }
+            ModelErrorCategory::Cancelled => {
+                status.is_none()
+                    && transport.is_none()
+                    && protocol.is_none()
+                    && retry_pair
+                    && retry_matches_category
+                    && provider.is_none()
+                    && request_id.is_none()
+            }
+            ModelErrorCategory::StreamInterrupted => {
+                status.is_none()
+                    && transport.is_none()
+                    && protocol.is_none()
+                    && retry_pair
+                    && retry_matches_category
+            }
+            ModelErrorCategory::RetryExhausted => {
+                let retry_shape = retry_pair && retry_kind.is_some();
+                let cause_shape = match retry_kind {
+                    None => status.is_none() && transport.is_none() && protocol.is_none(),
+                    Some(RetryErrorKind::Transport) => status.is_none() && protocol.is_none(),
+                    Some(RetryErrorKind::HttpStatus) => transport.is_none() && protocol.is_none(),
+                    Some(RetryErrorKind::Protocol) => status.is_none() && transport.is_none(),
+                };
+                retry_shape && cause_shape
+            }
+        };
+        if !valid_shape {
+            return None;
+        }
+        let provider = match provider {
+            Some(value) => Some(SafeErrorContext::new(value)?.0),
+            None => None,
+        };
+        let request_id = match request_id {
+            Some(value) => Some(SafeErrorContext::new(value)?.0),
+            None => None,
+        };
+        Some(Self {
+            category,
+            status,
+            provider,
+            request_id,
+            transport,
+            protocol,
+            retry_attempts,
+            retry_kind,
+        })
+    }
+
+    pub fn category(&self) -> ModelErrorCategory {
+        self.category
+    }
+
+    pub fn category_name(&self) -> &'static str {
+        match self.category() {
+            ModelErrorCategory::Transport => "transport",
+            ModelErrorCategory::HttpStatus => "http_status",
+            ModelErrorCategory::Protocol => "protocol",
+            ModelErrorCategory::Cancelled => "cancelled",
+            ModelErrorCategory::StreamInterrupted => "stream_interrupted",
+            ModelErrorCategory::RetryExhausted => "retry_exhausted",
+        }
+    }
+
+    pub fn status(&self) -> Option<u16> {
+        self.status
+    }
+
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    pub fn transport(&self) -> Option<TransportErrorKind> {
+        self.transport
+    }
+
+    pub fn protocol(&self) -> Option<ProtocolErrorKind> {
+        self.protocol
+    }
+
+    pub fn retry_attempts(&self) -> Option<u32> {
+        self.retry_attempts
+    }
+
+    pub fn retry_kind(&self) -> Option<RetryErrorKind> {
+        self.retry_kind
+    }
+
+    fn with_retry(mut self, attempts: u32, kind: RetryErrorKind) -> Self {
+        self.retry_attempts = Some(attempts);
+        self.retry_kind = Some(kind);
+        self
+    }
 }
 
 /// 模型调用失败的结构化、安全错误。
@@ -205,7 +403,7 @@ impl ModelError {
     pub fn transport(kind: TransportErrorKind, provider: Option<impl AsRef<str>>) -> Self {
         Self(ModelErrorInner::Transport {
             kind,
-            provider: provider.map(SafeErrorContext::new),
+            provider: provider.and_then(|value| SafeErrorContext::new(value)),
         })
     }
 
@@ -217,7 +415,7 @@ impl ModelError {
         Self(ModelErrorInner::HttpStatus {
             status,
             provider: SafeErrorContext::new(provider),
-            request_id: request_id.map(SafeErrorContext::new),
+            request_id: request_id.and_then(|value| SafeErrorContext::new(value)),
         })
     }
 
@@ -240,15 +438,32 @@ impl ModelError {
         request_id: Option<impl AsRef<str>>,
     ) -> Self {
         Self(ModelErrorInner::StreamInterrupted {
-            provider: provider.map(SafeErrorContext::new),
-            request_id: request_id.map(SafeErrorContext::new),
+            provider: provider.and_then(|value| SafeErrorContext::new(value)),
+            request_id: request_id.and_then(|value| SafeErrorContext::new(value)),
         })
     }
 
-    pub fn retry_exhausted(attempts: u32, last_error: RetryErrorKind) -> Self {
+    pub fn retry_exhausted(attempts: u32, last_error: RetryErrorKind) -> Option<Self> {
+        (attempts > 0).then_some(Self(ModelErrorInner::RetryExhausted {
+            attempts,
+            last_error,
+            diagnostic: None,
+        }))
+    }
+
+    pub(crate) fn retry_exhausted_with_context(
+        attempts: u32,
+        last_error: RetryErrorKind,
+        error: &Self,
+    ) -> Self {
+        debug_assert!(
+            attempts > 0,
+            "retry exhaustion requires at least one attempt"
+        );
         Self(ModelErrorInner::RetryExhausted {
             attempts,
             last_error,
+            diagnostic: Some(error.diagnostic().with_retry(attempts, last_error)),
         })
     }
 
@@ -263,6 +478,9 @@ impl ModelError {
     pub fn transport_kind(&self) -> Option<TransportErrorKind> {
         match &self.0 {
             ModelErrorInner::Transport { kind, .. } => Some(*kind),
+            ModelErrorInner::RetryExhausted { diagnostic, .. } => {
+                diagnostic.as_ref().and_then(|value| value.transport)
+            }
             _ => None,
         }
     }
@@ -270,6 +488,9 @@ impl ModelError {
     pub fn http_status_code(&self) -> Option<u16> {
         match &self.0 {
             ModelErrorInner::HttpStatus { status, .. } => Some(*status),
+            ModelErrorInner::RetryExhausted { diagnostic, .. } => {
+                diagnostic.as_ref().and_then(|value| value.status)
+            }
             _ => None,
         }
     }
@@ -277,6 +498,10 @@ impl ModelError {
     pub fn protocol_error(&self) -> Option<ProtocolError> {
         match &self.0 {
             ModelErrorInner::Protocol(error) => Some(error.clone()),
+            ModelErrorInner::RetryExhausted { diagnostic, .. } => diagnostic
+                .as_ref()
+                .and_then(|value| value.protocol)
+                .map(ProtocolError::new),
             _ => None,
         }
     }
@@ -294,7 +519,12 @@ impl ModelError {
             | ModelErrorInner::StreamInterrupted { provider, .. } => {
                 provider.as_ref().map(SafeErrorContext::as_str)
             }
-            ModelErrorInner::HttpStatus { provider, .. } => Some(provider.as_str()),
+            ModelErrorInner::HttpStatus { provider, .. } => {
+                provider.as_ref().map(SafeErrorContext::as_str)
+            }
+            ModelErrorInner::RetryExhausted { diagnostic, .. } => diagnostic
+                .as_ref()
+                .and_then(|value| value.provider.as_deref()),
             _ => None,
         }
     }
@@ -305,7 +535,88 @@ impl ModelError {
             | ModelErrorInner::StreamInterrupted { request_id, .. } => {
                 request_id.as_ref().map(SafeErrorContext::as_str)
             }
+            ModelErrorInner::RetryExhausted { diagnostic, .. } => diagnostic
+                .as_ref()
+                .and_then(|value| value.request_id.as_deref()),
             _ => None,
+        }
+    }
+
+    /// Return the bounded diagnostic projection. Invalid or absent provider and
+    /// request identities are represented as `None`, never as a sentinel.
+    pub fn diagnostic(&self) -> ModelErrorDiagnostic {
+        match &self.0 {
+            ModelErrorInner::Transport { kind, provider } => ModelErrorDiagnostic {
+                category: ModelErrorCategory::Transport,
+                status: None,
+                provider: provider.as_ref().map(|value| value.as_str().to_owned()),
+                request_id: None,
+                transport: Some(*kind),
+                protocol: None,
+                retry_attempts: None,
+                retry_kind: None,
+            },
+            ModelErrorInner::HttpStatus {
+                status,
+                provider,
+                request_id,
+            } => ModelErrorDiagnostic {
+                category: ModelErrorCategory::HttpStatus,
+                status: Some(*status),
+                provider: provider.as_ref().map(|value| value.as_str().to_owned()),
+                request_id: request_id.as_ref().map(|value| value.as_str().to_owned()),
+                transport: None,
+                protocol: None,
+                retry_attempts: None,
+                retry_kind: None,
+            },
+            ModelErrorInner::Protocol(error) => ModelErrorDiagnostic {
+                category: ModelErrorCategory::Protocol,
+                status: None,
+                provider: None,
+                request_id: None,
+                transport: None,
+                protocol: Some(error.kind()),
+                retry_attempts: None,
+                retry_kind: None,
+            },
+            ModelErrorInner::Cancelled => ModelErrorDiagnostic {
+                category: ModelErrorCategory::Cancelled,
+                status: None,
+                provider: None,
+                request_id: None,
+                transport: None,
+                protocol: None,
+                retry_attempts: None,
+                retry_kind: None,
+            },
+            ModelErrorInner::StreamInterrupted {
+                provider,
+                request_id,
+            } => ModelErrorDiagnostic {
+                category: ModelErrorCategory::StreamInterrupted,
+                status: None,
+                provider: provider.as_ref().map(|value| value.as_str().to_owned()),
+                request_id: request_id.as_ref().map(|value| value.as_str().to_owned()),
+                transport: None,
+                protocol: None,
+                retry_attempts: None,
+                retry_kind: None,
+            },
+            ModelErrorInner::RetryExhausted {
+                attempts,
+                last_error,
+                diagnostic,
+            } => diagnostic.clone().unwrap_or(ModelErrorDiagnostic {
+                category: ModelErrorCategory::RetryExhausted,
+                status: None,
+                provider: None,
+                request_id: None,
+                transport: None,
+                protocol: None,
+                retry_attempts: Some(*attempts),
+                retry_kind: Some(*last_error),
+            }),
         }
     }
 }
@@ -322,11 +633,8 @@ impl fmt::Display for ModelError {
                 provider,
                 request_id,
             } => {
-                write!(
-                    formatter,
-                    "model HTTP status {status} from {}",
-                    provider.as_str()
-                )?;
+                write!(formatter, "model HTTP status {status}")?;
+                write_provider_suffix(formatter, provider.as_ref())?;
                 write_request_id_suffix(formatter, request_id.as_ref())
             }
             ModelErrorInner::Protocol(error) => write!(formatter, "model protocol error: {error}"),
@@ -342,6 +650,7 @@ impl fmt::Display for ModelError {
             ModelErrorInner::RetryExhausted {
                 attempts,
                 last_error,
+                ..
             } => write!(
                 formatter,
                 "model retry exhausted after {attempts} attempts; last failure: {last_error}"

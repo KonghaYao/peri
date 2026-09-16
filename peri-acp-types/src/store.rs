@@ -199,6 +199,51 @@ pub struct MessageFlags {
 
 #[async_trait]
 pub trait ThreadStore: Send + Sync {
+    /// Resolve and register one local execution workspace.
+    async fn resolve_workspace(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> Result<crate::workspace::ResolvedWorkspace> {
+        Err(crate::workspace::WorkspaceError::Unsupported.into())
+    }
+
+    /// Atomically create a thread with an immutable, validated execution binding.
+    async fn create_bound_thread(
+        &self,
+        _meta: ThreadMeta,
+        _workspace: &crate::workspace::ResolvedWorkspace,
+    ) -> Result<ThreadId> {
+        Err(crate::workspace::WorkspaceError::Unsupported.into())
+    }
+
+    async fn load_session_binding(
+        &self,
+        _id: &ThreadId,
+    ) -> Result<Option<crate::workspace::SessionBinding>> {
+        Ok(None)
+    }
+
+    async fn validate_session_binding(
+        &self,
+        _id: &ThreadId,
+    ) -> Result<crate::workspace::ResolvedWorkspace> {
+        Err(crate::workspace::WorkspaceError::Unsupported.into())
+    }
+
+    async fn list_scoped_threads(
+        &self,
+        _query: &crate::workspace::ScopedThreadQuery,
+    ) -> Result<crate::workspace::ScopedThreadPage> {
+        Err(crate::workspace::WorkspaceError::Unsupported.into())
+    }
+
+    async fn acquire_execution_lease(
+        &self,
+        _id: &ThreadId,
+    ) -> Result<std::sync::Arc<dyn crate::workspace::SessionExecutionLease>> {
+        Err(crate::workspace::WorkspaceError::Unsupported.into())
+    }
+
     /// 创建新 thread，返回分配的 ThreadId
     async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId>;
 

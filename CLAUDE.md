@@ -1,45 +1,60 @@
 <!--
-ROLE: repository router。
-MUST 规则 → docs/standards/；active changes → spec/issues/；history lookup → spec/global/problems.md。
-根文件禁止复制模块 inventory、issue narrative、实现细节或规范正文。
+ROLE: 设计哲学与任务路由。工程细则 → docs/standards/。
 -->
 
 # CLAUDE.md — Perihelion
 
-终端 AI 编程助手, 人文交流、撰写文档以研究员风格为主，务实谨慎，不可过度营销；主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`。执行阶段与退出语义见 `peri-agent/CLAUDE.md`。
+Perihelion 是终端 AI 编程助手：用户交付任务，Agent 推进工作，过程可理解、可介入，结果可核对。长期可维护性是设计目标。
 
-## 先读什么
+## 设计哲学
 
-信息优先级：代码/契约测试 > `docs/standards/` > 模块 `CLAUDE.md` > `docs/design/` > active spec > history；冲突服从更高项。`AgentsMdMiddleware` loader 不自动继承父目录：进入模块任务前，显式 Read 对应模块 `CLAUDE.md` 和适用 standard。
+- **任务完成与用户控制共同成立。** Agent 主动推进已授权的工作，需要人判断的取舍交还用户。界面优先呈现结果、阻塞和必要决策，过程按需展开；不让用户学习内部编排才能完成任务，不以自动化为由隐藏失败或削弱取消、审批能力。
+- **模型负责判断，系统负责确定性。** 模型输出可以不确定，执行的身份、顺序、权限与终态应可验证。能由类型、协议和状态机保证的约束就在代码落实；不靠提示词弥补执行层缺口，不用重试或兜底把未知状态伪装成成功。
+- **事实与视图分离。** 先确定事实的持有者，再派生模型上下文和界面视图。压缩、缓存和渲染围绕事实构建，不另建可独立漂移的真相。
+- **边界稳定，能力可组合。** 用生命周期和职责决定状态归属，协议、执行、外部能力与界面各守边界。新能力优先接入已有扩展点；不为少写几行跨层直连，不为假想需求预建框架。
+- **成本是设计输入。** 上下文、token、CPU、内存和用户注意力都有限。按需加载、渐进披露，让历史处理、后台任务和缓存的成本有界。性能取舍依据测量，不用数据失真、关键事件丢失或不可恢复状态换取速度。
 
-- 标准入口：`docs/standards/index.md`；架构契约：`docs/standards/architecture-contracts.md`；权威设计索引：`docs/design/README.md`。
-- Rust：`docs/standards/rust.md`；TUI：`docs/standards/tui.md`；文档维护：`docs/standards/documentation.md`。
-- Git 分支、upstream 与 push 安全：`docs/standards/git.md`。
-- 测试：`docs/standards/testing.md`；活动需求读对应 `spec/issues/`；历史仅查 `spec/global/problems.md`。
+理念不代表能力已实现。取舍先守住数据、权限与生命周期契约，再比较交付收益、理解成本和运行成本。
 
-## 跨仓库契约
+## 行事风格
 
-修改 ACP 边界、frozen prompt、事件链、工具可见性或序列化、中间件顺序、安全配置前，先读 `docs/standards/architecture-contracts.md`；根文件不复制规则正文。
+- **像研究员一样判断，像工程师一样交付。** 区分观察、推断和假设，用代码、复现或实验形成结论。直说理由与局限，不营销、不补造数字，不把计划或命令启动当成完成。
+- **在授权范围内主动闭环。** 常规选择依据仓库证据自行处理；改变用户目标、权限或不可逆结果的歧义及时澄清。不同意方案时说明代价并给出替代方案，不迎合，也不把日常判断推给用户。
+- **改动要小而完整。** 沿因果链修复，覆盖受影响的调用方、契约和文档；不遮盖症状，不混入无关重构。必要重构以减少本次问题的复杂性为界；交付说明改动、验证证据和未验证项。
 
-## 任务路由
+## 代码风格的取舍
 
-| 任务 | 先读 | 稳定入口 |
-| --- | --- | --- |
-| Agent loop、Compact、provider、session runtime | `peri-agent/CLAUDE.md` + architecture/rust | `peri-agent/src/agent/`、`peri-agent/src/session/`、`run_react_loop` |
-| ACP host、stdio、prompt、event、caps | `peri-acp/CLAUDE.md` + architecture/rust | `peri-acp/src/host/`、`peri-acp/src/event/`、`peri-acp/src/session/` |
-| Controller/Runtime、cancel、事件 envelope、Langfuse | architecture/rust + 对应 code-index | `peri-controller/src/`、`peri-runtime/src/`、`peri-controller/src/langfuse/` |
-| MCP、plugin、skills、subagent、HITL、tool search、LSP | `peri-middlewares/CLAUDE.md` + architecture/rust | `peri-middlewares/src/` |
-| Workflow 注册与运行 | middleware guide + `docs/code-index/peri-workflow.md` | `peri-middlewares/src/workflow/`、`peri-workflow/src/{runner,rpc}.rs`、`peri-acp-types/src/workflow.rs` |
-| TUI | `peri-tui/CLAUDE.md` + tui/rust | `peri-tui/src/kit/`、`peri-tui/src/kit/acp_events/` |
-| E2E | `e2e/CLAUDE.md` + testing standards | `e2e/` |
-| 文档站 | `peri-cool/CLAUDE.md` + documentation | `peri-cool/`（submodule） |
-| Rust 通用、测试、CLAUDE 维护 | 对应 standard | `docs/standards/`、`docs/standards/testing.md` |
+- **显式表达领域语义。** 命名体现职责，类型表达身份、状态和错误；所有权与副作用沿调用链可见。避免用字符串约定、布尔组合和隐式共享状态承载关键语义。
+- **降低理解成本。** 优先清楚的控制流、小接口和内聚实现；抽象应封装变化，减少调用方的认知负担。少量重复可接受，不为消除重复制造通用层、无语义转发或参数开关集合。
+- **遵循邻近模式，解释必要例外。** 格式、依赖和惯用法沿用已有实践；注释解释不变量、取舍与非显然原因。局部模式违反契约时修正问题，不机械复制。细则见 [rust.md](docs/standards/rust.md)。
 
-## 代码定位
+## 测试风格的取舍
 
-定位或修改代码行为时，先查 `docs/code-index/` 速查表（每 crate 一个文件：「我想做什么」→ 主文件 + 入口/关键函数 + 一句话关键逻辑，跨 crate 链路在「跨模块契约」节指向 ARC 编号）：从「我想做什么」列匹配意图 → 打开主文件 → Grep 验证入口函数。索引缺失、过期或行为变更后，按 `codebase-index` skill 的构建/更新流程重建对应条目。
+- **测试保护行为和契约。** 按场景断言可观察结果：纯逻辑看输入输出，边界看序列化、错误、顺序与生命周期。内部重构不应迫使无关测试跟着改；不靠复制一遍实现来证明正确。
+- **测试要能揭示目标故障。** 回归测试暴露原问题，并在修复后通过；覆盖相关失败、取消与边界情况。外部不确定性在边界替换，内部关键链路用真实实现；不以全套 mock 自洽推导生产可用。
+- **验证力度随风险扩大。** 从目标测试开始，跨层验证完整链路，进程、恢复或平台承诺验证相应生命周期。测试要确定、隔离、可独立运行；不追求用例数量，不为样板代码制造负担。范围、门禁和证据见 [testing.md](docs/standards/testing.md)。
 
-Crate 拓扑：`peri-tui → peri-acp → peri-agent`；`peri-middlewares` 由 ACP 装配；其他 workspace crates 以 `Cargo.toml` 为事实源。
+## 事实源与任务路由
+
+信息优先级：代码/契约测试 > `docs/standards/` > 模块 `CLAUDE.md` > `docs/design/` > active spec > history。此顺序核对现行行为，不把缺陷当作目标；变更时同步事实源。
+
+先读 [标准索引](docs/standards/index.md)。定位先查 `docs/code-index/`，按意图找主文件、核实入口符号，变更时同步索引。loader 不继承父目录，需显式读取模块指引。
+
+| 任务 | 先读 |
+| --- | --- |
+| Agent loop、Compact、provider、session | `peri-agent/CLAUDE.md` + architecture/rust |
+| ACP host、stdio、prompt、event、caps | `peri-acp/CLAUDE.md` + architecture/rust |
+| Controller/Runtime、cancel、Langfuse | architecture/rust + 对应 code-index |
+| MCP、plugin、skills、subagent、HITL、工具、LSP | `peri-middlewares/CLAUDE.md` + architecture/rust |
+| Workflow | middleware guide + `docs/code-index/peri-workflow.md` |
+| TUI | `peri-tui/CLAUDE.md` + tui/rust |
+| E2E | `e2e/CLAUDE.md` + testing |
+| 文档站 | `peri-cool/CLAUDE.md` + documentation |
+| 历史学习 | `.claude/skills/learn-from-history/SKILL.md` |
+
+简称均指 `docs/standards/`：architecture = `architecture-contracts.md`，其余同名。跨层边界、prompt、事件、工具、中间件顺序或安全变更先读 architecture；Git 操作读 `git.md`，指引维护读 `documentation.md`。
+
+设计：`docs/design/README.md`；需求：`spec/issues/`；历史：`spec/global/problems.md`。主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`，退出语义见 Agent 指引；workspace 以 `Cargo.toml` 为准。
 
 ## Workspace 命令
 
@@ -49,13 +64,7 @@ cargo test -p <crate> --lib -- <test_name>
 cargo test --workspace --doc
 cargo run -p peri-tui
 lefthook run pre-commit
-cargo clippy --workspace --all-targets -- -D warnings # 非常重要
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-E2E 命令只在 `e2e/CLAUDE.md` 维护。
-
-## 检查
-
-**变更前**：读取适用 guide、standard 与 active spec；先检查邻近代码和 manifest，遵循其模式。
-
-**完成前**：运行目标测试；跨层事件同步验证完整链路；改 doc comment 时运行 doc tests；按 `DOC-UPDATE-001` 检查路由事实源。除非用户明确要求，不 commit；临时事故只写 active spec/history，不写回根文件。
+按变更范围选择命令；改 doc comment 跑 doc tests；E2E 命令见其指引。完成前按 `DOC-UPDATE-001` 核对路由。未经用户要求不 commit。

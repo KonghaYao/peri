@@ -3,15 +3,16 @@
   "version": "0.2.0",
   "type": "module",
   "scripts": {
-    "ultracode-prompts": "bun run src/ultracode_prompts.ts",
-    "wander": "bun run src/wander.ts",
-    "tool-token-consumption": "bun run src/tool_token_consumption.ts",
-    "tool-token-chart": "bun run src/tool_token_chart.ts",
-    "ratio-analysis": "bun run src/ratio_analysis.ts"
-  },
-  "dependencies": {
-    "chalk": "^5.3.0",
-    "echarts": "^6.1.0"
+    "inspect": "bun run src/cli.ts inspect",
+    "report": "bun run src/cli.ts report",
+    "sample": "bun run src/cli.ts sample",
+    "evidence": "bun run src/cli.ts evidence",
+    "compare": "bun run src/cli.ts compare",
+    "task-sample": "bun run src/cli.ts task-sample",
+    "task-packet": "bun run src/cli.ts task-packet",
+    "task-review": "bun run src/cli.ts task-review",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 use peri_acp_types::tasks::{BgRegistryEvent, BgShellHandle, BgTaskKind, BgTaskRegistration};
-use tracing::warn;
 
 use crate::agent::events::BackgroundTaskResult;
 
@@ -12,7 +11,7 @@ use super::registry::{
     BgCancelHandle, BgTaskInfo,
 };
 use super::shell::{
-    bg_shell_task_id, finalize_bg_shell, kill_process_group_escalating, shell_command, tee_pipe,
+    bg_shell_task_id, finalize_bg_shell, kill_process_group, shell_command, tee_pipe,
 };
 
 // ── TaskManager（per-session 聚合）────────────────────────────────────────────
@@ -36,6 +35,12 @@ impl Default for TaskManager {
 }
 
 impl peri_acp_types::tasks::TaskManager for TaskManager {
+    fn confirm_external_execution_stopped(&self, task_id: &str) {
+        self.registry.confirm_external_stopped(task_id);
+    }
+    fn is_execution_idle(&self) -> bool {
+        self.registry.scope.is_idle() && self.registry.external_settled()
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -54,10 +59,13 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
 
     fn register(&self, request: BgTaskRegistration) -> Result<(), String> {
         let cancel_handle = match request.kind {
-            BgTaskKind::Shell => request
-                .pid
-                .map(BgCancelHandle::Pid)
-                .ok_or_else(|| "bg shell register: pid 缺失".to_string())?,
+            BgTaskKind::Shell => match request.kill {
+                Some(kill) => BgCancelHandle::Kill(Some(kill)),
+                None => request
+                    .pid
+                    .map(BgCancelHandle::Pid)
+                    .ok_or_else(|| "bg shell register: pid 缺失".to_string())?,
+            },
             BgTaskKind::Workflow => BgCancelHandle::Kill(request.kill),
             BgTaskKind::Agent => BgCancelHandle::Kill(request.kill),
         };
@@ -92,6 +100,41 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
 
     fn cancel_all(&self) {
         self.cancel_all();
+    }
+
+    fn execution_cancel_token(&self) -> Option<tokio_util::sync::CancellationToken> {
+        Some(self.registry.scope.cancel_token())
+    }
+
+    fn spawn_owned(
+        &self,
+        task: peri_acp_types::tasks::OwnedTaskFuture,
+    ) -> Result<tokio::task::JoinHandle<()>, String> {
+        self.registry.scope.spawn(task)
+    }
+
+    fn begin_external_execution(
+        &self,
+    ) -> Result<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>, String> {
+        self.registry.scope.begin_external()
+    }
+
+    fn shutdown(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = peri_acp_types::tasks::TaskShutdownReport> + Send + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.registry.scope.close();
+            self.cancel_all();
+            if self.registry.scope.wait().await && self.registry.external_settled() {
+                peri_acp_types::tasks::TaskShutdownReport::Complete
+            } else {
+                peri_acp_types::tasks::TaskShutdownReport::Incomplete
+            }
+        })
     }
 
     fn spawn_shell(
@@ -216,7 +259,7 @@ impl TaskManager {
     /// [`finalize_bg_shell`] 收尾（超长输出落盘 → on_bg_complete 回调 → complete）。
     ///
     /// `timeout_ms`：`None` = 不超时（后台语义：跑完为止）；`Some(ms)` 超时后
-    /// kill 整个进程组（TERM → 2s 后 KILL 升级）。
+    /// kill 整个进程组并等待 child 与输出管道收尾。
     ///
     /// 返回 [`BgShellHandle`]（`task_id` 格式 `shell-{uuid v7}` + 进程 PID）；
     /// PID 供工具层回显，LLM 可经另一个 shell `kill` 进程组终止任务。
@@ -229,6 +272,9 @@ impl TaskManager {
         timeout_ms: Option<u64>,
         on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
     ) -> Result<BgShellHandle, Box<dyn std::error::Error + Send + Sync>> {
+        let ownership = self.registry.scope.begin_external()?;
+        let mut execution = super::shell::ShellExecutionGuard::new(Some(ownership));
+        let _admission = self.registry.scope.admit()?;
         let task_id = bg_shell_task_id();
         let registry = Arc::clone(&self.registry);
         let command_owned = command;
@@ -247,6 +293,7 @@ impl TaskManager {
         #[cfg(unix)]
         cmd.process_group(0);
 
+        execution.prepare(&mut cmd)?;
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -261,6 +308,7 @@ impl TaskManager {
                     duration_ms: 0,
                     child_thread_id: None,
                     timed_out: false,
+                    subagent_failure: None,
                 };
                 // 回调通知 Agent inbox（在 registry 操作之前）
                 if let Some(ref cb) = on_bg_complete_cb {
@@ -280,7 +328,7 @@ impl TaskManager {
                     pid: None,
                     output_preview: None,
                 };
-                let _ = registry.register_with_kind(bg_task);
+                let _ = registry.register_admitted(bg_task);
                 let complete_task_id = result.task_id.clone();
                 registry.complete(&complete_task_id, result);
                 return Ok(BgShellHandle {
@@ -294,6 +342,13 @@ impl TaskManager {
         let pid = child
             .id()
             .expect("bg shell: child.id() returned None after successful spawn");
+        if let Err(error) = execution.attach(&child) {
+            self.registry.scope.spawn_admitted(async move {
+                let _ = child.kill().await;
+                execution.confirm_stopped();
+            });
+            return Err(error.into());
+        }
 
         // 创建实时输出日志文件（尽力而为：创建失败仅降级为不落盘，不影响执行链）。
         // 运行期间 agent 可经 Read 工具读取；完成后文件保留。
@@ -308,49 +363,39 @@ impl TaskManager {
             .as_ref()
             .map(|_| stderr_log.to_string_lossy().into_owned());
 
-        tokio::spawn(async move {
+        // 任务启动即注册：推送 BgTaskStarted 事件，运行期间 TUI 展示栏可见。
+        // 完成时 finalize_bg_shell 只调 complete()，不再重复注册。
+        let bg_task = BackgroundTask {
+            id: task_id.clone(),
+            agent_name: "bg-shell".to_string(),
+            prompt_summary: command_owned.chars().take(80).collect(),
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            chrono_started_at: chrono::Utc::now(),
+            kind: BgTaskKind::Shell,
+            cancel_handle: execution
+                .cancel_callback()
+                .map_or(BgCancelHandle::Pid(pid), |kill| {
+                    BgCancelHandle::Kill(Some(kill))
+                }),
+            cancel_token: None,
+            pid: Some(pid),
+            output_preview: None,
+        };
+        if let Err(error) = registry.register_admitted(bg_task) {
+            kill_process_group(pid, "KILL");
+            self.registry.scope.spawn_admitted(async move {
+                let _ = child.wait().await;
+                execution.confirm_stopped();
+            });
+            return Err(error.into());
+        }
+
+        self.registry.scope.spawn_admitted(async move {
             // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
             // 防止 bg shell 任務殘留在狀態欄。
             let started = std::time::Instant::now();
             let result = std::panic::AssertUnwindSafe(async {
-
-                // 任务启动即注册：推送 BgTaskStarted 事件，运行期间 TUI 展示栏可见。
-                // 完成时 finalize_bg_shell 只调 complete()，不再重复注册。
-                let bg_task = BackgroundTask {
-                    id: task_id.clone(),
-                    agent_name: "bg-shell".to_string(),
-                    prompt_summary: command_owned.chars().take(80).collect(),
-                    status: BackgroundTaskStatus::Running,
-                    started_at: std::time::Instant::now(),
-                    chrono_started_at: chrono::Utc::now(),
-                    kind: BgTaskKind::Shell,
-                    cancel_handle: BgCancelHandle::Pid(pid),
-                    cancel_token: None,
-                    pid: Some(pid),
-                    output_preview: None,
-                };
-                if let Err(e) = registry.register_with_kind(bg_task) {
-                    // 并发上限已满：杀掉进程组，按失败收尾（防孤儿进程 + 推送 Completed）
-                    warn!(error = %e, task_id = %task_id, "bg shell: register_with_kind failed at start, killing process group");
-                    kill_process_group_escalating(pid);
-                    let result = BackgroundTaskResult {
-                        task_id: task_id.clone(),
-                        agent_name: "bg-shell".to_string(),
-                        prompt_summary: command_owned.chars().take(80).collect(),
-                        success: false,
-                        output: format!("Failed to register background task: {}", e),
-                        tool_calls_count: 0,
-                        duration_ms: started.elapsed().as_millis() as u64,
-                        child_thread_id: None,
-                        timed_out: false,
-                    };
-                    if let Some(ref cb) = on_bg_complete_cb {
-                        cb(&result, BgTaskKind::Shell);
-                    }
-                    registry.complete(&result.task_id.clone(), result);
-                    return;
-                }
-
                 // 流式读取 stdout/stderr：tee 到日志文件（运行期 agent 可读）+ 内存缓冲
                 // （wait_with_output 内部消费管道无法 tee，故显式 take pipe 自行读取）
                 let stdout_reader = tokio::io::BufReader::new(
@@ -370,22 +415,26 @@ impl TaskManager {
                 let wait_result = match timeout_ms {
                     None => child.wait().await.map(Some),
                     Some(ms) => {
-                        match tokio::time::timeout(std::time::Duration::from_millis(ms), child.wait())
-                            .await
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(ms),
+                            child.wait(),
+                        )
+                        .await
                         {
                             Ok(status) => status.map(Some),
                             Err(_elapsed) => {
                                 // 超时：kill 整个进程组（bash 为组长，负号 PID 语义），
-                                // 2s 后若 TERM 无效再升级 KILL（fire-and-forget）
-                                kill_process_group_escalating(pid);
+                                // 等待实际终态后再发完成事件。
+                                kill_process_group(pid, "KILL");
+                                let _ = child.wait().await;
+                                let _ = drain_stdout.await;
+                                let _ = drain_stderr.await;
+                                execution.confirm_stopped();
                                 // 构造超时错误结果
                                 let result = BackgroundTaskResult {
                                     task_id: task_id.clone(),
                                     agent_name: "bg-shell".to_string(),
-                                    prompt_summary: command_owned
-                                        .chars()
-                                        .take(80)
-                                        .collect(),
+                                    prompt_summary: command_owned.chars().take(80).collect(),
                                     success: false,
                                     output: format!(
                                         "Command timed out after {}s.\nCommand: {}",
@@ -396,6 +445,7 @@ impl TaskManager {
                                     duration_ms: started.elapsed().as_millis() as u64,
                                     child_thread_id: None,
                                     timed_out: true,
+                                    subagent_failure: None,
                                 };
                                 // 回调通知 Agent inbox（在 registry 操作之前）
                                 if let Some(ref cb) = on_bg_complete_cb {
@@ -435,8 +485,7 @@ impl TaskManager {
                             combined.push_str(&stderr);
                         }
                         if combined.is_empty() {
-                            combined =
-                                format!("[exit code: {}]", status.code().unwrap_or(-1));
+                            combined = format!("[exit code: {}]", status.code().unwrap_or(-1));
                         }
                         (success, combined)
                     }
@@ -447,6 +496,8 @@ impl TaskManager {
                     }
                 };
 
+                execution.wait_for_exit().await;
+                execution.confirm_stopped();
                 // 回调通知 + 完成（任务在启动时已注册，与 promote 续跑共用收尾逻辑）
                 finalize_bg_shell(
                     &registry,
@@ -480,6 +531,7 @@ impl TaskManager {
                     duration_ms: started.elapsed().as_millis() as u64,
                     child_thread_id: None,
                     timed_out: false,
+                    subagent_failure: None,
                 };
                 // 嘗試註冊 + 完成（即使 register 失敗也調 complete，發送 cleanup 事件到 TUI）
                 let bg_task = BackgroundTask {

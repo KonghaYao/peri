@@ -73,13 +73,16 @@ pub struct ExecutionFailure {
     pub public_message: String,
     /// LLM HTTP 失败的状态码；其他类别为 `None`。
     pub http_status: Option<u16>,
+    /// Optional allowlisted model facts. ACP serializes these through an
+    /// explicit host projection; this DTO itself is not serde.
+    pub diagnostic: Option<peri_model::ModelErrorDiagnostic>,
 }
 
 impl ExecutionFailure {
     /// 构造 [`ExecutionFailureKind::Internal`] 类别，并保证 `public_message`
     /// 非空（空输入 → [`EXECUTION_FAILURE_FALLBACK_MESSAGE`]）。
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(ExecutionFailureKind::Internal, message, None)
+        Self::new(ExecutionFailureKind::Internal, message, None, None)
     }
 
     /// 从 [`crate::error::AgentError`] 构造安全的失败投影。
@@ -92,12 +95,28 @@ impl ExecutionFailure {
                 ExecutionFailureKind::LlmHttp,
                 format!("LLM HTTP {status}: {}", redact_public_error(message)),
                 Some(*status),
+                None,
             ),
             crate::error::AgentError::LlmError(message) => Self::new(
                 ExecutionFailureKind::Llm,
                 format!("LLM error: {}", redact_public_error(message)),
                 None,
+                None,
             ),
+            crate::error::AgentError::ModelError(error) => {
+                let diagnostic = error.diagnostic();
+                let kind = if diagnostic.status().is_some() {
+                    ExecutionFailureKind::LlmHttp
+                } else {
+                    ExecutionFailureKind::Llm
+                };
+                Self::new(
+                    kind,
+                    crate::error::AgentError::ModelError(error.clone()).user_facing_message(),
+                    diagnostic.status(),
+                    Some(diagnostic),
+                )
+            }
             other => Self::internal(other.user_facing_message()),
         }
     }
@@ -106,6 +125,7 @@ impl ExecutionFailure {
         kind: ExecutionFailureKind,
         message: impl Into<String>,
         http_status: Option<u16>,
+        diagnostic: Option<peri_model::ModelErrorDiagnostic>,
     ) -> Self {
         let message = message.into();
         let public_message = if message.trim().is_empty() {
@@ -117,6 +137,7 @@ impl ExecutionFailure {
             kind,
             public_message,
             http_status,
+            diagnostic,
         }
     }
 

@@ -35,6 +35,35 @@ use super::AcpServerConfig;
 /// ——「ACP Host = 部署单元」，TUI/print/stdio 只提供协议面输入
 /// （provider / config / permission / thread_store / cwd），不再直接触碰
 /// 业务 crate（§0 依赖方向，`docs/top-level.md` §7/§8）。
+#[derive(Clone)]
+pub(crate) struct WorkspaceAssembly {
+    pub(crate) startup_cwd: String,
+    pub(crate) bare: bool,
+    pub(crate) mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
+}
+
+/// Bind session execution identity before static discovery or dynamic load can use the pool.
+/// A host-only pool stays unbound; its dynamic connector must reject implicit execution.
+fn pending_mcp_pool(
+    spawner: peri_middlewares::mcp::McpTaskSpawner,
+    profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
+    session_cwd: Option<&std::path::Path>,
+) -> Arc<peri_middlewares::mcp::McpClientPool> {
+    let pool = Arc::new(
+        peri_middlewares::mcp::McpClientPool::new_pending_with_spawner_and_profile(
+            spawner, profile,
+        ),
+    );
+    if let Some(cwd) = session_cwd {
+        if let Err(error) = pool.bind_execution_cwd(cwd) {
+            // The pool records initialization failure and remains unusable for
+            // implicit subprocess launches. Never fall back to the host's cwd.
+            tracing::error!(%error, cwd = %cwd.display(), "MCP session execution directory binding failed");
+        }
+    }
+    pool
+}
+
 pub struct HostAssemblyInput {
     pub provider: LlmProvider,
     pub peri_config: Arc<RwLock<PeriConfig>>,
@@ -50,6 +79,30 @@ pub struct HostAssemblyInput {
     /// 驱动 cron tick（TUI=true，复刻迁移前 TUI 每秒 tick 行为；print/stdio
     /// 保持现状无 tick——行为零变化，L2 遗留登记 M-TUI issue）。
     pub drive_cron_tick: bool,
+}
+
+/// Construct terminal hook execution; the session environment owns admission and joining.
+pub(super) fn build_session_end_task(
+    hooks: Vec<RegisteredHook>,
+    cwd: String,
+    session_id: String,
+    model: String,
+    tasks: Arc<dyn peri_acp_types::tasks::TaskManager>,
+) -> peri_acp_types::tasks::OwnedTaskFuture {
+    Box::pin(async move {
+        peri_middlewares::hooks::fire_standalone_lifecycle_hooks_owned(
+            &hooks,
+            peri_acp_types::hooks::HookEvent::SessionEnd,
+            &cwd,
+            &session_id,
+            "",
+            &model,
+            None,
+            Some("session_close"),
+            Some(tasks),
+        )
+        .await;
+    })
 }
 
 /// 组装 settings hook 组（plugin → global → project → local，顺序即迁移前
@@ -140,6 +193,8 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
     assemble_server_config_with_mcp_profile(
         input,
         peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        false,
+        None,
     )
     .await
 }
@@ -153,13 +208,17 @@ pub async fn assemble_server_config_with_mcp_apps(
     assemble_server_config_with_mcp_profile(
         input,
         peri_middlewares::mcp::apps::deployment_profile(apps_enabled),
+        false,
+        None,
     )
     .await
 }
 
-async fn assemble_server_config_with_mcp_profile(
+pub(crate) async fn assemble_server_config_with_mcp_profile(
     input: HostAssemblyInput,
     mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
+    session_resources: bool,
+    activation: Option<tokio_util::sync::CancellationToken>,
 ) -> AcpServerConfig {
     let (host_task_owner, host_task_spawner) = HostTaskOwner::new();
     let (mcp_task_owner, mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
@@ -179,7 +238,7 @@ async fn assemble_server_config_with_mcp_profile(
         .join(".claude");
 
     // ── 插件聚合数据（bare 时跳过；迁移前 TUI launch / cli_print 各自构造）──
-    let plugin_data: Option<PluginLoadResult> = if bare {
+    let plugin_data: Option<PluginLoadResult> = if bare || !session_resources {
         None
     } else {
         Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
@@ -221,14 +280,15 @@ async fn assemble_server_config_with_mcp_profile(
     // 经 tx 转发 AcpEvent，run_acp_server 侧消费者以 peri/agent_event 送达 TUI。
     let (oauth_event_tx, oauth_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::event::oauth::HostOAuthEvent>();
-    let mcp_pool_concrete: Option<Arc<peri_middlewares::mcp::McpClientPool>> = if bare {
+    let mcp_pool_concrete: Option<Arc<peri_middlewares::mcp::McpClientPool>> = if bare
+        || !session_resources
+    {
         None
     } else {
-        let pool = Arc::new(
-            peri_middlewares::mcp::McpClientPool::new_pending_with_spawner_and_profile(
-                mcp_task_spawner.clone(),
-                mcp_profile.clone(),
-            ),
+        let pool = pending_mcp_pool(
+            mcp_task_spawner.clone(),
+            mcp_profile.clone(),
+            Some(std::path::Path::new(&cwd)),
         );
         let pool_clone = pool.clone();
         let cwd_clone = cwd.clone();
@@ -340,6 +400,9 @@ async fn assemble_server_config_with_mcp_profile(
             }))
         };
         let _ = pool.spawn_background(peri_middlewares::mcp::McpTaskKey::Initialize, async move {
+            if let Some(activation) = activation {
+                activation.cancelled().await;
+            }
             peri_middlewares::mcp::McpClientPool::run_initialize(
                 pool_clone,
                 std::path::Path::new(&cwd_clone),
@@ -358,11 +421,10 @@ async fn assemble_server_config_with_mcp_profile(
             peri_middlewares::mcp::dynamic::ProductionDynamicMcpConnector::from_environment(
                 mcp_task_spawner.clone(),
                 mcp_pool_concrete.clone().unwrap_or_else(|| {
-                    Arc::new(
-                        peri_middlewares::mcp::McpClientPool::new_pending_with_spawner_and_profile(
-                            mcp_task_spawner.clone(),
-                            mcp_profile.clone(),
-                        ),
+                    pending_mcp_pool(
+                        mcp_task_spawner.clone(),
+                        mcp_profile.clone(),
+                        session_resources.then_some(std::path::Path::new(&cwd)),
                     )
                 }),
             ),
@@ -400,7 +462,7 @@ async fn assemble_server_config_with_mcp_profile(
         peri_middlewares::assembly::default_workflow_middleware_factory();
 
     // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
-    if !bare {
+    if !bare && !session_resources {
         let claude_dir_clone = claude_dir.clone();
         let _ = host_task_spawner.spawn(
             HostTaskOwnerKind::Startup,
@@ -450,7 +512,12 @@ async fn assemble_server_config_with_mcp_profile(
         .map(|pd| pd.plugins.clone())
         .unwrap_or_default();
 
-    let hook_groups = assemble_hook_groups(&plugin_hooks, settings_hooks.as_ref(), &cwd, bare);
+    let hook_groups = assemble_hook_groups(
+        &plugin_hooks,
+        settings_hooks.as_ref(),
+        &cwd,
+        bare || !session_resources,
+    );
     let flat_hooks: Vec<RegisteredHook> = hook_groups.iter().flatten().cloned().collect();
     tracing::info!(
         groups = hook_groups.len(),
@@ -476,8 +543,9 @@ async fn assemble_server_config_with_mcp_profile(
     );
 
     // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）
-    let (langfuse_session, langfuse_shutdown_owner) = if let Some(config) =
-        peri_controller::langfuse::LangfuseConfig::from_env()
+    let (langfuse_session, langfuse_shutdown_owner) = if let Some(config) = (!session_resources)
+        .then(peri_controller::langfuse::LangfuseConfig::from_env)
+        .flatten()
     {
         tracing::info!("Langfuse tracing enabled (host mode)");
         match peri_controller::langfuse::LangfuseSession::new_owned(config, "live".into()).await {
@@ -489,6 +557,11 @@ async fn assemble_server_config_with_mcp_profile(
     };
 
     AcpServerConfig {
+        workspace_assembly: (!session_resources).then(|| WorkspaceAssembly {
+            startup_cwd: cwd.clone(),
+            bare,
+            mcp_profile,
+        }),
         host_task_owner: Some(host_task_owner),
         host_task_spawner,
         mcp_task_owner: Some(Box::new(mcp_task_owner)),
@@ -527,5 +600,28 @@ async fn assemble_server_config_with_mcp_profile(
         stdio_command_filter: false,
         config_source,
         session_manager,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worktree_mcp_pool_is_bound_before_deferred_initialization() {
+        let target = tempfile::TempDir::new().unwrap();
+        let sibling = tempfile::TempDir::new().unwrap();
+        let (_owner, spawner) = peri_middlewares::mcp::McpTaskOwner::new();
+        let pool = pending_mcp_pool(
+            spawner,
+            peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+            Some(target.path()),
+        );
+        assert_eq!(pool.snapshot()["initPhase"], "pending");
+        assert!(pool.bind_execution_cwd(sibling.path()).is_err());
+        assert_eq!(
+            pool.bind_execution_cwd(target.path()).unwrap(),
+            target.path()
+        );
     }
 }

@@ -21,11 +21,20 @@ flowchart BT
     Resources[Peri Resources] --> Middleware
     Resources --> Agent
     Resources --> Controller
+    Process[Peri Process] --> Agent
+    Process --> Middleware
+    Process --> LSP[LSP transport]
+    Process --> JS[JavaScript runtime]
 ```
 
 - 边含义：Model 提供协议能力；Agent 提供 session 运行单元；Runtime 提供多 session 编排；Controller 提供业务操作；ACP 提供协议服务；Middleware 提供 Hook 实现；Resources 提供外部数据抓手
 - 未声明边一律禁止
 - crate 依赖方向进 CI 验证
+
+`peri-process` 是不依赖业务层的 OS 子进程能力：在 spawn 前配置独立进程组或
+Windows 挂起进程，attach 后提供终止请求与实际退出证据。它不拥有 session、
+数据库 lease、协议或 UI；Bash、MCP、LSP 和 JavaScript 的各自 owner 持有它并
+负责等待清理。进程树实现不得因复用而让 LSP 反向依赖 Agent。
 
 归层判据（三问定层）：
 

@@ -224,10 +224,10 @@ workflow 执行完毕（不管成功/失败/中止）。
 ### Resume 流程
 
 ```
-[1] 宿主从磁盘加载历史 journal
-[2] 宿主 → runner: workflow/start { resume: [...历史entries] }
-[3] runner 重放 journal，跳过已命中的 agent 调用
-[4] 仅执行新任务
+[1] 宿主严格读取历史 journal；缺失、IO 错误和坏 JSON 行必须失败
+[2] 宿主 → runner: workflow/start { resume: [...连续成功前缀] }
+[3] runner 仅复用从 seq=0 开始、key 匹配的连续 ok 调用
+[4] 首个 dead/skipped 及后缀重新执行，保留 recovered/produced 身份；序号缺口/重复由宿主 strict read 拒绝，需依据工作包 checkpoint 显式重规划
 ```
 
 ---
@@ -256,6 +256,8 @@ snake_case 命名（`serde` 未做 rename，Rust `RunState` 直出）：
 | `status` | string | `"completed"` \| `"failed"` \| `"killed"` |
 | `return_value` | unknown | 脚本顶层 return（超长字符串已外置为占位符，见下） |
 | `script` | string | 脚本源码副本 |
+| `args` | unknown \| 省略 | 新运行保存的启动参数，ACP resume 原样恢复；旧记录缺失时不可重建 |
+| `max_concurrency` | number \| 省略 | 启动并发数；旧记录缺失时 Rust 兼容默认 3 |
 | `started_at` | string | 运行启动 ISO 时间戳 |
 | `finished_at` | string \| 省略 | 完成时间戳 |
 | `error` | string \| 省略 | 失败原因（非失败时省略） |

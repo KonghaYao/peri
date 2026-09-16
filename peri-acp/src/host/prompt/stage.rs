@@ -7,6 +7,7 @@ use std::sync::Arc;
 pub(super) fn build_stage_bridge(
     ctx: &executor::SessionContext,
     langfuse_hooks: Option<&executor::LangfuseHooks>,
+    task_spawner: crate::host::task_scope::HostTaskSpawner,
 ) -> StageBuildFn {
     let ctx_for_stage = ctx.clone();
     let bridge_factory_for_stage: Option<
@@ -27,6 +28,10 @@ pub(super) fn build_stage_bridge(
             &ctx_for_stage.cwd,
             &ctx_for_stage.session_id,
             &ctx_for_stage.provider_model_name,
+            Some(task_spawner.clone()),
+            sbr.task_manager
+                .clone()
+                .map(|manager| manager as Arc<dyn peri_acp_types::tasks::TaskManager>),
         );
         crate::host::stage_builder::build_stage_context(
             &ctx_for_stage,
@@ -59,56 +64,79 @@ pub(crate) fn build_compact_hooks(
     cwd: &str,
     session_id: &str,
     model: &str,
+    task_spawner: Option<crate::host::task_scope::HostTaskSpawner>,
+    task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
 ) -> (
     Option<Arc<dyn Fn() + Send + Sync>>,
     Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
 ) {
     let hook_groups_flat: Vec<RegisteredHook> = hook_groups.iter().flatten().cloned().collect();
-    if hook_groups_flat.is_empty() {
+    if hook_groups_flat.is_empty() || task_spawner.is_none() {
         return (None, None);
     }
+    let task_spawner = task_spawner.expect("hook task owner");
     let cwd = cwd.to_string();
     let sid = session_id.to_string();
     let model = model.to_string();
     let pre: Arc<dyn Fn() + Send + Sync> = {
+        let task_manager = task_manager.clone();
+        let task_spawner = task_spawner.clone();
         let hooks = hook_groups_flat.clone();
         let cwd = cwd.clone();
         let sid = sid.clone();
         let model = model.clone();
         Arc::new(move || {
+            let task_manager = task_manager.clone();
             let hooks = hooks.clone();
             let cwd = cwd.clone();
             let sid = sid.clone();
             let model = model.clone();
-            tokio::spawn(async move {
-                peri_middlewares::hooks::stage_firing::fire_pre_compact(
-                    &hooks, &cwd, &sid, "", &model, 0,
-                )
-                .await;
-            });
+            let _ = task_spawner.spawn(
+                crate::host::task_scope::HostTaskOwnerKind::Session,
+                crate::host::task_scope::HostTaskKind::CompactHook,
+                async move {
+                    peri_middlewares::hooks::stage_firing::fire_pre_compact(
+                        &hooks,
+                        &cwd,
+                        &sid,
+                        "",
+                        &model,
+                        0,
+                        task_manager,
+                    )
+                    .await;
+                },
+            );
         })
     };
     let post: Arc<dyn Fn(bool, usize) + Send + Sync> = {
+        let task_spawner = task_spawner.clone();
         let hooks = hook_groups_flat.clone();
         let cwd = cwd.clone();
         let sid = sid.clone();
         let model = model.clone();
         Arc::new(move |_compacted: bool, affected_count: usize| {
+            let task_manager = task_manager.clone();
             let hooks = hooks.clone();
             let cwd = cwd.clone();
             let sid = sid.clone();
             let model = model.clone();
-            tokio::spawn(async move {
-                peri_middlewares::hooks::stage_firing::fire_post_compact(
-                    &hooks,
-                    &cwd,
-                    &sid,
-                    "",
-                    &model,
-                    affected_count,
-                )
-                .await;
-            });
+            let _ = task_spawner.spawn(
+                crate::host::task_scope::HostTaskOwnerKind::Session,
+                crate::host::task_scope::HostTaskKind::CompactHook,
+                async move {
+                    peri_middlewares::hooks::stage_firing::fire_post_compact(
+                        &hooks,
+                        &cwd,
+                        &sid,
+                        "",
+                        &model,
+                        affected_count,
+                        task_manager,
+                    )
+                    .await;
+                },
+            );
         })
     };
     (Some(pre), Some(post))

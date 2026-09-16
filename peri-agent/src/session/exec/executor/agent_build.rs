@@ -118,7 +118,7 @@ pub(super) async fn build_and_execute_agent(
         // WorkflowMiddleware 是 session 级实例（session/new 创建），
         // 因此每个 session 的消费者只 spawn 一次，无跨 session 污染。
         if wf_mw.init_notification_buffer() {
-            let wf_mw_for_notify = Arc::clone(wf_mw);
+            let mut rx = wf_mw.subscribe_notifications();
             // AsyncRouter（v2 路径：push_defer + wake Notify）
             // 或回退 v2 queue clone（无 inbox 时直接 push，无 wake）
             let wf_router = async_router.clone();
@@ -126,7 +126,6 @@ pub(super) async fn build_and_execute_agent(
             // task_manager 用于在 Defer 入队后递减 active_count，消除竞态窗口
             let notify_bg = task_manager.clone();
             tokio::spawn(async move {
-                let mut rx = wf_mw_for_notify.subscribe_notifications();
                 loop {
                     match rx.recv().await {
                         Ok(task_result) => {

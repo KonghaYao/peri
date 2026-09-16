@@ -48,6 +48,7 @@ pub fn apply_workflow_task_result(
         duration_ms: task_result.duration_ms,
         child_thread_id: None,
         timed_out: false,
+        subagent_failure: None,
     };
     notify_bg.complete(&task_result.run_id, bg);
 }

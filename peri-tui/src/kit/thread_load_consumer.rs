@@ -146,6 +146,7 @@ pub fn spawn_thread_load_consumer(
                             drop(request);
                             if let Err(e) = result {
                                 error!(error = %e, "kit thread_load_consumer: load_session failed");
+                                notify_restore_error(&e.to_string());
                             }
                         }
                     }
@@ -183,3 +184,10 @@ async fn handle_load(
 #[cfg(test)]
 #[path = "thread_load_consumer_test.rs"]
 mod tests;
+
+pub(crate) fn notify_restore_error(error: &str) {
+    atoms::NOTIFICATION.set(Some(atoms::Notification {
+        message: i18n::tr_args("session-restore-failed", &[("error".into(), error.into())]),
+        until: std::time::Instant::now() + std::time::Duration::from_secs(15),
+    }));
+}

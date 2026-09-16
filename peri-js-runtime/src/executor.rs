@@ -17,7 +17,6 @@ mod invocation;
 use invocation::Invocation;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
-const CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -170,6 +169,31 @@ impl JsExecutor {
         router: Arc<dyn JsRpcRouter>,
         cancel: CancellationToken,
     ) -> Result<JsExecutionResult> {
+        self.execute_with_directory(request, router, cancel, None)
+            .await
+    }
+
+    /// Execute native Node file operations in the caller's validated session directory.
+    /// The opt-in npx fallback retains its private directory and cannot serve this path;
+    /// session execution requires the artifact installed by normal preparation.
+    pub async fn execute_in_directory(
+        &self,
+        request: JsExecutionRequest,
+        router: Arc<dyn JsRpcRouter>,
+        cancel: CancellationToken,
+        cwd: &str,
+    ) -> Result<JsExecutionResult> {
+        self.execute_with_directory(request, router, cancel, Some(cwd))
+            .await
+    }
+
+    async fn execute_with_directory(
+        &self,
+        request: JsExecutionRequest,
+        router: Arc<dyn JsRpcRouter>,
+        cancel: CancellationToken,
+        cwd: Option<&str>,
+    ) -> Result<JsExecutionResult> {
         self.check_request(&request)?;
         let deadline = tokio::time::Instant::now() + self.limits.wall_timeout;
         let _permit = tokio::select! {
@@ -189,24 +213,35 @@ impl JsExecutor {
             biased;
             _ = cancel.cancelled() => {
                 prepare_cancel.cancel();
-                let _ = launch.await;
+                if let Err(error @ JsRuntimeError::CleanupFailed(_)) = launch.await {
+                    return Err(error);
+                }
                 return Err(JsRuntimeError::Cancelled);
             }
             _ = tokio::time::sleep_until(deadline) => {
                 prepare_cancel.cancel();
-                let _ = launch.await;
+                if let Err(error @ JsRuntimeError::CleanupFailed(_)) = launch.await {
+                    return Err(error);
+                }
                 return Err(JsRuntimeError::Timeout { limit: self.limits.wall_timeout });
             }
             launch = &mut launch => launch?,
         };
         let local_cache = launch.local_cache;
-        let host = match JsExecutionHost::spawn_with_frame_limit(
-            launch.spec.clone(),
-            self.limits.max_frame_bytes,
-        ) {
+        let mut spec = launch.spec.clone();
+        if let Some(cwd) = cwd {
+            if !local_cache {
+                // Running npx in the project directory would also load its npm
+                // configuration. Keep installation isolation and fail explicitly.
+                return Err(JsRuntimeError::ArtifactUnavailable);
+            }
+            spec = spec.with_cwd(cwd);
+        }
+        let host = match JsExecutionHost::spawn_with_frame_limit(spec, self.limits.max_frame_bytes)
+        {
             Ok(host) => Arc::new(host),
             Err(error) => {
-                if local_cache {
+                if local_cache && !matches!(error, JsRuntimeError::CleanupFailed(_)) {
                     let _ = self.artifact_provider.invalidate().await;
                 }
                 return Err(error);
@@ -215,11 +250,12 @@ impl JsExecutor {
         let outcome = self
             .run(host.clone(), request, router, cancel, deadline)
             .await;
-        let cleanup = tokio::time::timeout(
-            CLEANUP_GRACE,
-            host.terminate_and_wait("JavaScript execution finished", Duration::from_millis(100)),
-        )
-        .await;
+        // A cancelled execution still owns its process tree. Do not turn a local
+        // cleanup timeout into a finished invocation while descendants can run.
+        let cleanup = host
+            .terminate_and_wait("JavaScript execution finished")
+            .await;
+        cleanup?;
         drop(host);
         if local_cache
             && matches!(
@@ -232,15 +268,7 @@ impl JsExecutor {
         {
             let _ = self.artifact_provider.invalidate().await;
         }
-        let outcome = outcome.map_err(|failure| failure.error);
-        if outcome.is_ok() {
-            match cleanup {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => return Err(error),
-                Err(_) => return Err(JsRuntimeError::CleanupFailed("cleanup timed out".into())),
-            }
-        }
-        outcome
+        outcome.map_err(|failure| failure.error)
     }
 
     fn check_request(&self, request: &JsExecutionRequest) -> Result<()> {

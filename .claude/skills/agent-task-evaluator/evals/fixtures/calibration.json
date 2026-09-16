@@ -1,0 +1,51 @@
+{
+  "kind": "synthetic task narratives, not production packet schema",
+  "cases": [
+    {
+      "caseId": "visible-answer",
+      "coverage": "complete",
+      "messages": [
+        {"messageId": "va-1", "role": "user", "text": "用两句话解释为什么会话数不等于任务数。"},
+        {"messageId": "va-2", "role": "assistant", "text": "一个会话可能包含多个独立目标，也可能只有闲聊或初始化记录。一个任务也可能跨多个会话继续，因此需要按目标及其边界统计任务。"}
+      ]
+    },
+    {
+      "caseId": "claim-only",
+      "coverage": "complete persisted transcript; no artifact snapshot supplied",
+      "messages": [
+        {"messageId": "co-1", "role": "user", "text": "修复 parser.ts 的空输入崩溃，并运行相关回归测试。"},
+        {"messageId": "co-2", "role": "assistant", "text": "已完成修复，所有测试通过。"}
+      ]
+    },
+    {
+      "caseId": "blocked-input",
+      "coverage": "complete",
+      "messages": [
+        {"messageId": "bi-1", "role": "user", "text": "只读检查 fixture.log 中的错误原因，不要改文件。"},
+        {"messageId": "bi-2", "role": "assistant", "toolCall": {"id": "read-1", "name": "Read", "path": "fixture.log"}},
+        {"messageId": "bi-3", "role": "tool", "toolResult": {"id": "read-1", "isError": true, "text": "file not found"}},
+        {"messageId": "bi-4", "role": "assistant", "text": "指定日志不存在，因此暂时无法分析。请提供有效日志位置；本次没有修改文件。"}
+      ]
+    },
+    {
+      "caseId": "goal-switch",
+      "coverage": "complete",
+      "messages": [
+        {"messageId": "gs-1", "role": "user", "text": "找出 clamp 的边界错误并修复，补上测试。"},
+        {"messageId": "gs-2", "role": "tool", "toolResult": {"id": "read-2", "isError": false, "text": "function clamp(x) { return Math.min(0, Math.max(10, x)); }"}},
+        {"messageId": "gs-3", "role": "assistant", "text": "上下界组合写反了，会固定返回零；目前只完成定位，还没有修改和测试。"},
+        {"messageId": "gs-4", "role": "user", "text": "这个修复先停下。换个任务：写一句欢迎语。"},
+        {"messageId": "gs-5", "role": "assistant", "text": "欢迎来到项目工作区。"},
+        {"messageId": "gs-6", "role": "user", "text": "这句欢迎语很好。"}
+      ]
+    },
+    {
+      "caseId": "missing-middle",
+      "coverage": "middle records omitted; first and last messages only",
+      "messages": [
+        {"messageId": "mm-1", "role": "user", "text": "修改配置并验证服务可以启动。"},
+        {"messageId": "mm-9", "role": "assistant", "text": "配置已修改，启动验证通过。"}
+      ]
+    }
+  ]
+}

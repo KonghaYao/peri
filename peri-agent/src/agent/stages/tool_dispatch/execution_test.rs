@@ -9,6 +9,36 @@ struct OutputTool {
     output: String,
 }
 
+struct FailingSubagentTool;
+
+#[async_trait::async_trait]
+impl BaseTool for FailingSubagentTool {
+    fn name(&self) -> &str {
+        "SubAgent"
+    }
+    fn description(&self) -> &str {
+        "test child failure"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: crate::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Err(Box::new(crate::session::subagent::SubagentFailure::new(
+            "child-123",
+            "worker",
+            crate::error::AgentError::ModelError(peri_model::ModelError::http_status(
+                500,
+                "provider.example",
+                Some("req-123"),
+            )),
+        )))
+    }
+}
+
 #[async_trait::async_trait]
 impl BaseTool for OutputTool {
     fn name(&self) -> &str {
@@ -74,7 +104,7 @@ async fn test_dispatch_concurrent_single_tool_succeeds() {
     .await;
     assert_eq!(results.len(), 1);
     assert!(results[0].is_ok(), "工具应成功执行");
-    assert_eq!(results[0].as_ref().unwrap(), "ok");
+    assert_eq!(results[0].as_ref().unwrap().text, "ok");
 }
 
 #[tokio::test]
@@ -121,6 +151,41 @@ async fn test_dispatch_concurrent_cancelled() {
 }
 
 #[tokio::test]
+async fn test_dispatch_concurrent_preserves_typed_subagent_failure() {
+    let ctx = make_test_ctx();
+    let tool = std::sync::Arc::new(FailingSubagentTool);
+    let mut target_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
+    target_tools.insert("call_1".to_string(), tool);
+    let cancel = CancellationToken::new();
+    let ai_msg = BaseMessage::ai(MessageContent::text("thinking...".to_string()));
+    let ready_calls = vec![ToolCall {
+        id: "call_1".to_string(),
+        name: "SubAgent".to_string(),
+        input: serde_json::json!({}),
+    }];
+    let raw_calls = HashMap::new();
+    let catalog = ctx.runtime.tool_catalog.snapshot();
+    let results = dispatch_concurrent(
+        &ctx,
+        &ready_calls,
+        &raw_calls,
+        &target_tools,
+        &catalog,
+        &cancel,
+        &ai_msg,
+    )
+    .await;
+    let error = results[0].as_ref().expect_err("child failure");
+    let failure = error
+        .subagent_failure()
+        .expect("typed child failure must survive dispatch");
+    assert_eq!(failure.child_thread_id(), "child-123");
+    assert_eq!(failure.diagnostic().status(), Some(500));
+    assert_eq!(failure.diagnostic().request_id(), Some("req-123"));
+    assert!(!error.to_string().contains("provider body"));
+}
+
+#[tokio::test]
 async fn test_settle_results_mixed_ready_settled() {
     let ctx = make_test_ctx();
     let approval = ApprovalOutcome {
@@ -138,8 +203,8 @@ async fn test_settle_results_mixed_ready_settled() {
             ToolResult::error("call_rejected", "Bash", "HITL rejected"),
         )],
     };
-    let tool_results: Vec<Result<String, EffectiveToolError>> =
-        vec![Ok("success output".to_string())];
+    let tool_results: Vec<Result<crate::tools::ToolOutput, EffectiveToolError>> =
+        vec![Ok(crate::tools::ToolOutput::from_legacy("success output"))];
     let all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
     let outcome = settle_results(&ctx, approval, tool_results, false, &all_tools).await;
     // ready + settled = 2 条
@@ -168,4 +233,21 @@ fn test_post_process_result_no_registry() {
         "无 registry 时 output 不应变化，实际: {}",
         result.output
     );
+}
+
+#[test]
+fn test_effective_cancel_and_timeout_errors_keep_typed_execution_facts() {
+    let cancelled = execution_for_effective_error(EffectiveToolErrorCode::Cancelled)
+        .expect("cancel must carry evidence");
+    assert_eq!(
+        cancelled.status,
+        crate::tools::ToolExecutionStatus::Cancelled
+    );
+    let timed_out = execution_for_effective_error(EffectiveToolErrorCode::Timeout)
+        .expect("timeout must carry evidence");
+    assert_eq!(
+        timed_out.status,
+        crate::tools::ToolExecutionStatus::TimedOut
+    );
+    assert!(execution_for_effective_error(EffectiveToolErrorCode::ToolFailed).is_none());
 }

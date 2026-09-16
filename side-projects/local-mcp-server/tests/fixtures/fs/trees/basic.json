@@ -1,0 +1,33 @@
+{
+  "spec": "sandbox-mcp/fs-tree-v1",
+  "note": "capability / 五工具测试的确定性目录树。$OUTSIDE 在物化时替换为授权根之外的绝对路径；$OUTSIDE/secret.txt 内含哨兵文本，任何越界读取都会在断言中暴露。",
+  "dirs": [
+    "src",
+    "src/nested",
+    "docs",
+    "node_modules",
+    "node_modules/pkg",
+    ".git",
+    "target",
+    "empty_dir"
+  ],
+  "files": {
+    "src/lib.rs": "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+    "src/main.rs": "fn main() {\n    println!(\"hi\");\n}\n",
+    "src/nested/deep.txt": "deep\n",
+    "docs/readme.md": "# readme\n\nline three\n",
+    "node_modules/pkg/index.js": "module.exports = {};\n",
+    "target/artifact.bin": "binary\n",
+    ".git/config.json": "{}\n",
+    "notes.txt": "alpha\nbeta\ngamma\n",
+    "edit_me.txt": "one\ntwo\nthree\n"
+  },
+  "symlinks": {
+    "link_to_file": "src/lib.rs",
+    "link_to_dir": "src",
+    "link_outside_file": "$OUTSIDE/secret.txt",
+    "link_outside_dir": "$OUTSIDE",
+    "link_to_parent_escape": "../outside-escape.txt",
+    "link_loop": "link_loop"
+  }
+}

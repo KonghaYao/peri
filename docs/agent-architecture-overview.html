@@ -1,0 +1,3001 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Peri 4.0 · 生态架构稿</title>
+    <style>
+      :root {
+        --ink: #172e4b;
+        --muted: #536780;
+        --line: #d6e0eb;
+        --paper: #f3f7fc;
+        --blue: #2563eb;
+        --purple: #7854c8;
+        --teal: #087f8c;
+        --amber: #ad6800;
+        --display: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+        --body:
+          system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+        --mono: "SFMono-Regular", Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+        scroll-padding-top: 82px;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font: 15px/1.65 var(--body);
+      }
+      button,
+      a {
+        -webkit-tap-highlight-color: transparent;
+      }
+      button {
+        font: inherit;
+        cursor: pointer;
+      }
+      a {
+        color: var(--blue);
+        text-underline-offset: 4px;
+      }
+      button:focus-visible,
+      a:focus-visible,
+      [tabindex]:focus-visible {
+        outline: 3px solid var(--blue);
+        outline-offset: 4px;
+      }
+      button:disabled {
+        cursor: default;
+        opacity: 0.4;
+      }
+      button {
+        color: var(--ink);
+      }
+      .shell {
+        max-width: 1500px;
+        margin: auto;
+        padding: 0 36px;
+      }
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        background: rgba(243, 247, 252, 0.97);
+        border-bottom: 1px solid var(--line);
+      }
+      .bar {
+        min-height: 66px;
+        display: flex;
+        align-items: center;
+        gap: 24px;
+      }
+      .brand {
+        font: 700 18px var(--display);
+        letter-spacing: 0.04em;
+        white-space: nowrap;
+      }
+      .brand span {
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0;
+        margin-left: 8px;
+      }
+      .nav {
+        display: flex;
+        gap: 22px;
+        margin-left: auto;
+        flex-wrap: wrap;
+      }
+      .nav a {
+        font-size: 13px;
+        text-decoration: none;
+        color: var(--muted);
+      }
+      .nav a:hover {
+        color: var(--blue);
+      }
+      .plain {
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 6px 12px;
+        font-size: 13px;
+      }
+      .plain:hover {
+        border-color: var(--blue);
+      }
+      header {
+        padding: 30px 0 24px;
+      }
+      .eyebrow {
+        font: 12px var(--mono);
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font: 600 11px/1.4 var(--body);
+        white-space: nowrap;
+        background: #e6edf7;
+        color: var(--ink);
+      }
+      .confirmed {
+        background: #e0f1ee;
+        color: #146a59;
+      }
+      .proposed {
+        background: #ede6fa;
+        color: #6844ad;
+      }
+      .open {
+        background: #fff0d4;
+        color: #805000;
+      }
+      .draft {
+        background: #e5edff;
+        color: #244d9a;
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+      h1 {
+        font: 650 clamp(25px, 3vw, 42px) / 1.35 var(--display);
+        letter-spacing: -0.035em;
+        margin: 12px 0 9px;
+      }
+      header p {
+        color: var(--muted);
+        max-width: 960px;
+        margin: 0;
+      }
+      .principles {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 24px;
+        margin-top: 16px;
+        font-size: 13px;
+      }
+      .principles span::before {
+        content: "";
+        display: inline-block;
+        width: 5px;
+        height: 5px;
+        background: var(--blue);
+        margin: 0 8px 3px 0;
+        border-radius: 50%;
+      }
+      section {
+        margin-bottom: 46px;
+        scroll-margin-top: 86px;
+      }
+      .section-head {
+        display: flex;
+        gap: 20px;
+        justify-content: space-between;
+        align-items: end;
+        margin-bottom: 16px;
+      }
+      .section-head h2 {
+        font: 650 23px/1.3 var(--display);
+        letter-spacing: -0.025em;
+        margin: 0 0 4px;
+      }
+      .section-head p {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 0;
+      }
+      .section-index {
+        font: 11px var(--mono);
+        color: var(--muted);
+        letter-spacing: 0.08em;
+      }
+      .board {
+        border: 1px solid var(--line);
+        background: white;
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 8px 28px #20395b06;
+      }
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .filters {
+        display: flex;
+        gap: 3px;
+        background: var(--paper);
+        padding: 3px;
+        border-radius: 7px;
+      }
+      .filters button {
+        border: 0;
+        background: none;
+        padding: 5px 12px;
+        border-radius: 5px;
+        font-size: 12px;
+      }
+      .filters button[aria-pressed="true"] {
+        background: white;
+        color: var(--blue);
+        box-shadow: 0 1px 4px #1e3d5a1a;
+        font-weight: 650;
+      }
+      .view-note {
+        color: var(--muted);
+        font-size: 11px;
+        flex: 1;
+      }
+      .toolbar .plain {
+        font-size: 11px;
+      }
+      .topology {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 285px;
+      }
+      .graph-wrap {
+        min-width: 0;
+      }
+      .graph-scroll {
+        overflow-x: auto;
+        background-color: #fff;
+        background-image: radial-gradient(#d7e2ef 1px, transparent 1px);
+        background-size: 20px 20px;
+      }
+      .graph {
+        display: block;
+        width: 100%;
+        min-width: 750px;
+        height: auto;
+      }
+      .graph text {
+        font-family: var(--body);
+        fill: var(--ink);
+      }
+      .graph .zone {
+        stroke-width: 1.2;
+      }
+      .graph .zone-title {
+        font-size: 15px;
+        font-weight: 700;
+      }
+      .graph .small {
+        font-size: 11px;
+        fill: var(--muted);
+      }
+      .graph .node-title {
+        font: 650 15px var(--display);
+      }
+      .graph .node-sub {
+        font-size: 11px;
+        fill: var(--muted);
+      }
+      .graph .boundary-label {
+        font: 10px var(--mono);
+        fill: var(--purple);
+      }
+      .node {
+        cursor: pointer;
+        outline: none;
+      }
+      .node .node-box {
+        stroke-width: 1.4;
+        transition:
+          stroke-width 0.15s,
+          filter 0.15s;
+      }
+      .node:hover .node-box,
+      .node:focus-visible .node-box {
+        stroke-width: 3;
+      }
+      .node[aria-pressed="true"] .node-box {
+        stroke-width: 3.5;
+        filter: drop-shadow(0 3px 5px #17385520);
+      }
+      .node[aria-pressed="true"] .node-title {
+        text-decoration: underline;
+        text-underline-offset: 4px;
+      }
+      .edge {
+        transition: opacity 0.2s;
+      }
+      .edge path,
+      .edge line {
+        fill: none;
+        stroke-width: 1.8;
+      }
+      .edge .label-bg {
+        fill: #fff;
+        stroke: #e7edf4;
+        stroke-width: 0.5;
+      }
+      .edge text {
+        font-size: 10px;
+        font-weight: 550;
+      }
+      .edge[data-flow="control"] path {
+        stroke: var(--blue);
+      }
+      .edge[data-flow="execution"] path {
+        stroke: var(--amber);
+      }
+      .edge[data-flow="state"] path {
+        stroke: var(--teal);
+      }
+      .edge.is-dim {
+        opacity: 0.09;
+      }
+      .legend {
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+        padding: 9px 16px;
+        border-top: 1px solid var(--line);
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .legend i {
+        display: inline-block;
+        width: 22px;
+        border-top: 2px solid;
+        margin: 0 6px 3px 0;
+      }
+      .legend .state {
+        color: var(--teal);
+      }
+      .legend .control {
+        color: var(--blue);
+      }
+      .legend .execution {
+        color: var(--amber);
+      }
+      .scroll-note {
+        display: none;
+        padding: 6px 14px;
+        font-size: 11px;
+        color: var(--muted);
+        margin: 0;
+        background: #f3f7fc;
+      }
+      .inspector {
+        padding: 22px 20px;
+        border-left: 1px solid var(--line);
+        background: #fbfcff;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .inspector h3 {
+        font: 650 25px var(--display);
+        margin: 6px 0;
+      }
+      .inspector .subtitle {
+        font-size: 12px;
+        color: var(--muted);
+        margin: 0;
+      }
+      .inspector h4 {
+        font-size: 11px;
+        letter-spacing: 0.03em;
+        margin: 0 0 5px;
+        color: var(--muted);
+      }
+      .inspector p,
+      .inspector ul {
+        font-size: 13px;
+        margin: 0;
+      }
+      .inspector ul {
+        padding-left: 16px;
+      }
+      .inspector li {
+        margin: 3px 0;
+      }
+      .inspector .rule {
+        border-top: 1px solid var(--line);
+        padding-top: 14px;
+        color: var(--teal);
+        font-weight: 550;
+      }
+      .inspector-foot {
+        font-size: 10px !important;
+        color: var(--muted);
+        margin-top: auto !important;
+      }
+      .relations {
+        border-top: 1px solid var(--line);
+        padding: 11px 16px;
+        font-size: 12px;
+      }
+      .relations summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .relation-list {
+        margin: 12px 0 2px;
+        padding-left: 20px;
+        columns: 2;
+        column-gap: 35px;
+        color: var(--muted);
+      }
+      .relation-list li {
+        break-inside: avoid;
+        margin-bottom: 5px;
+      }
+      .thesis {
+        display: flex;
+        gap: 14px;
+        align-items: start;
+        margin-top: 14px;
+        padding: 13px 17px;
+        background: #eaf3f5;
+        border-left: 3px solid var(--teal);
+        font-size: 13px;
+      }
+      .thesis strong {
+        white-space: nowrap;
+      }
+      .thesis p {
+        margin: 0;
+      }
+      .table-scroll {
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: white;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 12px;
+        min-width: 850px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 13px 16px;
+        border-bottom: 1px solid #e6ecf3;
+        vertical-align: top;
+      }
+      th {
+        background: #edf3fa;
+        font-size: 11px;
+        color: var(--muted);
+        font-weight: 650;
+      }
+      tr:last-child td {
+        border-bottom: 0;
+      }
+      td:first-child {
+        width: 150px;
+        font-weight: 700;
+      }
+      td:nth-child(2) {
+        width: 130px;
+        color: var(--muted);
+      }
+      td small {
+        display: block;
+        font-weight: 400;
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 4px;
+      }
+      .split {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+        margin-top: 16px;
+      }
+      .note-box {
+        padding: 17px 20px;
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        font-size: 13px;
+      }
+      .note-box h3 {
+        font-size: 14px;
+        margin: 0 0 7px;
+      }
+      .note-box p {
+        margin: 0;
+        color: var(--muted);
+      }
+      .timeline {
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        background: white;
+        overflow: hidden;
+      }
+      .step-selector {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        border-bottom: 1px solid var(--line);
+      }
+      .step-button {
+        padding: 13px 4px;
+        border: 0;
+        border-right: 1px solid #e5ebf3;
+        background: #f8faff;
+        font-size: 12px;
+      }
+      .step-button:last-child {
+        border-right: 0;
+      }
+      .step-button span {
+        display: block;
+        font: 12px var(--mono);
+        margin-bottom: 4px;
+        color: var(--muted);
+      }
+      .step-button[aria-pressed="true"] {
+        background: #eaf0ff;
+        box-shadow: inset 0 -3px var(--blue);
+        color: #174aaf;
+        font-weight: 650;
+      }
+      .step-main {
+        display: grid;
+        grid-template-columns: 1fr 1.1fr;
+        gap: 36px;
+        padding: 28px;
+      }
+      .step-main h3 {
+        font: 650 23px var(--display);
+        margin: 9px 0;
+      }
+      .step-main p {
+        font-size: 14px;
+        color: var(--muted);
+        margin-bottom: 14px;
+      }
+      .step-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .step-flow {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        background: var(--paper);
+        padding: 28px 18px;
+        border-radius: 9px;
+        min-height: 150px;
+      }
+      .flow-actor {
+        border: 1px solid var(--line);
+        padding: 12px 14px;
+        border-radius: 6px;
+        background: white;
+        font: 600 13px var(--display);
+        text-align: center;
+      }
+      .flow-arrow {
+        color: var(--blue);
+        font-size: 22px;
+      }
+      .step-controls {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-top: 1px solid var(--line);
+        padding: 10px 18px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .step-controls div {
+        display: flex;
+        gap: 6px;
+      }
+      .all-steps {
+        padding: 14px 20px;
+        border-top: 1px solid var(--line);
+        font-size: 12px;
+      }
+      .all-steps summary {
+        cursor: pointer;
+      }
+      .all-steps ol {
+        margin-bottom: 0;
+        padding-left: 22px;
+        color: var(--muted);
+      }
+      .all-steps li {
+        margin: 7px 0;
+      }
+      .lifecycle {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+      }
+      .life-card {
+        border: 1px solid var(--line);
+        background: white;
+        border-radius: 9px;
+        overflow: hidden;
+      }
+      .life-card h3 {
+        font: 600 15px var(--mono);
+        padding: 14px 18px;
+        margin: 0;
+        border-bottom: 1px solid var(--line);
+        background: #f9fbfd;
+      }
+      .life-card div {
+        padding: 17px 18px;
+        font-size: 13px;
+      }
+      .life-card p {
+        margin: 0 0 9px;
+        color: var(--muted);
+      }
+      .life-card strong {
+        font-weight: 600;
+      }
+      .connection {
+        padding: 22px;
+        border-radius: 10px;
+        background: white;
+        border: 1px solid var(--line);
+      }
+      .connection-path {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        flex-wrap: wrap;
+        padding: 15px 0 19px;
+        font-size: 13px;
+      }
+      .connection-path code {
+        padding: 8px 11px;
+        background: #fff5e6;
+        border: 1px solid #eddbbd;
+        border-radius: 5px;
+        color: #825100;
+        font-size: 12px;
+      }
+      .connection p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .warning {
+        margin-top: 14px !important;
+        padding: 10px 13px;
+        background: #fff6e8;
+        border-left: 3px solid var(--amber);
+        color: #795423 !important;
+      }
+      .api-grid {
+        display: grid;
+        grid-template-columns: 1.25fr 1fr;
+        gap: 22px;
+      }
+      .code-panel {
+        background: #edf3fa;
+        border: 1px solid #d6e0ec;
+        border-radius: 10px;
+        overflow: hidden;
+        min-width: 0;
+      }
+      .code-title {
+        padding: 10px 18px;
+        background: #e4edf8;
+        border-bottom: 1px solid #cfdced;
+        font: 11px var(--mono);
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+      }
+      .code-panel pre {
+        font: 12px/1.85 var(--mono);
+        margin: 0;
+        padding: 20px 22px;
+        overflow: auto;
+        color: #24415f;
+        tab-size: 2;
+      }
+      .code-panel .kw {
+        color: #6441a5;
+      }
+      .code-panel .str {
+        color: #08717b;
+      }
+      .code-panel .comment {
+        color: #62738a;
+      }
+      .api-notes {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .api-notes article {
+        padding: 15px 18px;
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      .api-notes h3 {
+        font-size: 14px;
+        margin-bottom: 5px;
+      }
+      .api-notes p {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 0;
+      }
+      .decision-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+      }
+      .decision {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 19px;
+      }
+      .decision h3 {
+        font-size: 15px;
+        margin: 10px 0;
+      }
+      .decision ul {
+        padding-left: 18px;
+        font-size: 13px;
+        color: var(--muted);
+        margin: 0;
+      }
+      .decision li {
+        margin: 8px 0;
+      }
+      .poc-gap {
+        padding: 19px 22px;
+        border: 1px solid #dbcba9;
+        background: #fff8eb;
+        border-radius: 9px;
+        margin-top: 17px;
+      }
+      .poc-gap h3 {
+        font-size: 14px;
+        color: #765014;
+        margin: 0 0 6px;
+      }
+      .poc-gap p {
+        font-size: 13px;
+        color: #795f36;
+        margin: 0;
+      }
+      footer {
+        border-top: 1px solid var(--line);
+        padding: 20px 0 32px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      footer .shell {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        flex-wrap: wrap;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      noscript p {
+        padding: 14px;
+        background: #fff0d4;
+      }
+      @media (min-width: 1500px) {
+        .topology {
+          grid-template-columns: minmax(0, 1fr) 310px;
+        }
+      }
+      @media (max-width: 1100px) {
+        .shell {
+          padding: 0 22px;
+        }
+        .topology {
+          grid-template-columns: minmax(0, 1fr) 250px;
+        }
+        .inspector {
+          padding: 18px 16px;
+        }
+        .nav {
+          gap: 14px;
+        }
+        .brand span {
+          display: none;
+        }
+        .step-main {
+          gap: 20px;
+          padding: 22px;
+        }
+      }
+      @media (max-width: 900px) {
+        .topology {
+          grid-template-columns: 1fr;
+        }
+        .inspector {
+          border-left: 0;
+          border-top: 1px solid var(--line);
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 14px 24px;
+        }
+        .inspector .rule {
+          border: 0;
+          padding: 0;
+        }
+        .inspector-foot {
+          grid-column: 1/-1;
+        }
+        .scroll-note {
+          display: block;
+        }
+        .api-grid {
+          grid-template-columns: 1fr;
+        }
+        .nav {
+          gap: 12px;
+        }
+        .bar {
+          gap: 14px;
+        }
+        .step-main {
+          grid-template-columns: 1fr;
+        }
+        .decision-grid {
+          grid-template-columns: 1fr;
+        }
+        .decision {
+          display: grid;
+          grid-template-columns: 140px 1fr;
+        }
+        .decision .tag {
+          justify-self: start;
+          align-self: start;
+        }
+        .decision h3 {
+          grid-column: 1;
+        }
+        .decision ul {
+          grid-column: 2;
+          grid-row: 1/3;
+        }
+      }
+      @media (max-width: 600px) {
+        .shell {
+          padding: 0 15px;
+        }
+        .bar {
+          padding-top: 10px;
+          padding-bottom: 10px;
+          flex-wrap: wrap;
+          gap: 9px;
+        }
+        .brand {
+          font-size: 16px;
+        }
+        .nav {
+          order: 3;
+          width: 100%;
+          margin: 0;
+          justify-content: space-between;
+        }
+        .bar > .plain {
+          margin-left: auto;
+        }
+        .nav a {
+          font-size: 12px;
+        }
+        header {
+          padding: 22px 0;
+        }
+        h1 {
+          font-size: 28px;
+        }
+        .principles {
+          gap: 6px 13px;
+          font-size: 11px;
+        }
+        .section-head {
+          align-items: start;
+        }
+        .section-index {
+          display: none;
+        }
+        .toolbar {
+          padding: 10px;
+        }
+        .view-note {
+          flex-basis: 100%;
+          order: 3;
+        }
+        .filters button {
+          padding: 5px 9px;
+        }
+        .inspector {
+          grid-template-columns: 1fr;
+        }
+        .inspector-foot {
+          grid-column: auto;
+        }
+        .relation-list {
+          columns: 1;
+        }
+        .thesis {
+          display: block;
+        }
+        .thesis strong {
+          display: block;
+          margin-bottom: 5px;
+        }
+        .split,
+        .lifecycle {
+          grid-template-columns: 1fr;
+        }
+        .step-button {
+          font-size: 10px;
+          padding: 10px 2px;
+        }
+        .step-main {
+          padding: 18px;
+        }
+        .step-flow {
+          padding: 18px 10px;
+        }
+        .decision {
+          display: block;
+        }
+        .section-head h2 {
+          font-size: 21px;
+        }
+        .code-panel pre {
+          padding: 16px;
+          font-size: 11px;
+        }
+        .connection {
+          padding: 16px;
+        }
+        .connection-path {
+          gap: 7px;
+        }
+        .connection-path code {
+          font-size: 11px;
+        }
+        .step-controls {
+          gap: 12px;
+        }
+        .step-controls > span {
+          font-size: 10px;
+        }
+        section {
+          margin-bottom: 34px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+        *,
+        *::before,
+        *::after {
+          transition: none !important;
+          animation: none !important;
+        }
+      }
+      @media print {
+        @page {
+          size: A4 landscape;
+          margin: 12mm;
+        }
+        body {
+          background: white;
+          font-size: 11px;
+        }
+        .shell {
+          max-width: none;
+          padding: 0;
+        }
+        .topbar {
+          position: static;
+        }
+        .nav,
+        .plain,
+        .filters,
+        .view-note,
+        .scroll-note,
+        .step-selector,
+        .step-controls {
+          display: none !important;
+        }
+        .bar {
+          min-height: 35px;
+        }
+        .topology {
+          display: block;
+        }
+        .graph {
+          min-width: 0;
+          max-height: 510px;
+        }
+        .graph-scroll {
+          overflow: visible;
+        }
+        .inspector {
+          display: none;
+        }
+        .edge.is-dim {
+          opacity: 1 !important;
+        }
+        .board,
+        .table-scroll,
+        .timeline {
+          box-shadow: none;
+          border-radius: 0;
+        }
+        .section-head {
+          break-after: avoid;
+        }
+        section {
+          margin-bottom: 22px;
+        }
+        h1 {
+          font-size: 27px;
+        }
+        .relations details,
+        .all-steps details {
+          display: block;
+        }
+        .relations details > ul,
+        .all-steps details > ol {
+          display: block !important;
+        }
+        .relations summary,
+        .all-steps summary {
+          list-style: none;
+        }
+        .step-main {
+          display: none;
+        }
+        .all-steps ol {
+          font-size: 12px;
+        }
+        .split,
+        .decision-grid,
+        .lifecycle {
+          break-inside: avoid;
+        }
+        .api-grid {
+          grid-template-columns: 1.1fr 1fr;
+        }
+        table {
+          min-width: 0;
+          font-size: 10px;
+        }
+        th,
+        td {
+          padding: 8px;
+        }
+        tr {
+          break-inside: avoid;
+        }
+        .table-scroll {
+          overflow: visible;
+        }
+        .code-panel pre {
+          font-size: 10px;
+        }
+        .poc-gap {
+          break-inside: avoid;
+        }
+        .tag {
+          print-color-adjust: exact;
+        }
+        .section-index {
+          display: block;
+        }
+      }
+      .review-brief {
+        display: grid;
+        grid-template-columns: 1.1fr 1fr;
+        gap: 28px;
+        margin: 22px 0;
+        padding: 26px;
+        border: 1px solid #c8d7ea;
+        border-radius: 16px;
+        background: linear-gradient(115deg, #edf3ff, #f4f0fb);
+      }
+      .review-brief h3 {
+        margin: 0 0 10px;
+        font-size: 21px;
+      }
+      .review-brief p {
+        margin: 8px 0;
+        font-size: 14px;
+      }
+      .review-brief .authority-mini {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .authority-mini span {
+        padding: 12px;
+        border-radius: 9px;
+        background: #ffffffbd;
+        font-size: 13px;
+      }
+      .authority-mini strong {
+        display: block;
+        color: var(--purple);
+        font-size: 14px;
+      }
+      .review-brief a {
+        display: inline-block;
+        margin-top: 10px;
+        font-weight: 650;
+      }
+      @media (max-width: 750px) {
+        .review-brief {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media print {
+        .review-brief {
+          break-inside: avoid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <div class="shell bar">
+        <div class="brand">PERI 4.0 <span>生态架构稿 / 目标工作台</span></div>
+        <nav class="nav" aria-label="页面导航">
+          <a href="#overview">全局关系</a><a href="#entities">职责边界</a
+          ><a href="#run">执行过程</a><a href="#decisions">设计决策</a>
+          <a href="peri-internal-architecture.html">4.0：内部分层演进 ↗</a>
+        </nav>
+        <button class="plain" id="print">打印 / 保存 PDF</button>
+      </div>
+    </div>
+    <main class="shell">
+      <header>
+        <div class="eyebrow">
+          <span class="tag draft">Peri 4.0 生态架构稿 · 目标讨论，非已实现</span
+          ><time datetime="2026-09-11">2026-09-11</time
+          ><span>架构实体 / 所有权 / 数据流</span>
+        </div>
+        <h1>引用走 ACP，状态直达 Store。</h1>
+        <p>
+          能力走 MCP，执行进入 Sandbox。TS 只为 Session 提供标识或引用；Peri
+          直接读写 Store。Agent 执行，Session 留存，Run 连接两者。
+        </p>
+        <div class="principles">
+          <span>一个 Peri 进程 = 一个主 Agent + 进程内 SubAgent</span
+          ><span>TS ↔ Peri 使用 ACP</span><span>Session 状态不经过 TS</span
+          ><span>Sandbox 在 MCP Server 后方</span>
+        </div>
+      </header>
+      <section aria-labelledby="cooperation-title">
+        <div class="section-head">
+          <div>
+            <h2 id="cooperation-title">
+              进程内标准分层：Workflow → SubAgent → Core
+            </h2>
+            <p>
+              先保证 Core 独立完整，再构建协作；现有架构大部分保留，不把标准
+              SubAgent / Workflow 移交给 TS 重写。
+            </p>
+          </div>
+          <a href="peri-internal-architecture.html#target">查看分层交互图 ↗</a>
+        </div>
+        <div class="principles">
+          <span>Core：主 Agent 与子执行复用同一机制</span
+          ><span>SubAgent：进程内创建 / 结果 / 取消传播</span
+          ><span>Workflow：基于 SubAgent 的依赖与并行</span>
+        </div>
+        <p>
+          TS 管理主进程与跨主 Agent 的业务关系；Peri
+          提供官方标准协作。子执行不共享同一个 Run 或可变 Session。Workflow
+          的实现语言与可选辅助 runner 不由分层图规定。
+        </p>
+        <div class="review-brief">
+          <div>
+            <h3>依赖向下，协作由装配接入</h3>
+            <p>
+              静态依赖保持
+              <strong>Workflow → SubAgent → Core</strong
+              >。进程装配入口绑定标准协作能力，Core 运行时经注入接口发起请求，不
+              import 上层实现。
+            </p>
+            <p>
+              装配入口不是新业务服务或第二套
+              Runtime。优先复用现有能力接口，不足时才定义窄
+              port；具体接入契约仍待验证。
+            </p>
+            <a href="peri-internal-architecture.html#target"
+              >切换查看依赖与运行时协作图 ↗</a
+            >
+          </div>
+          <div>
+            <h3>状态归属不随调用转移</h3>
+            <div class="authority-mini">
+              <span><strong>Core</strong>单次 Run 执行终态</span>
+              <span><strong>SubAgent</strong>父子关系与传播</span>
+              <span><strong>Workflow</strong>流程状态与聚合结果</span>
+              <span><strong>Session Store</strong>持久内容与版本一致性</span>
+            </div>
+            <p>
+              ACP 只持连接／请求关联，TS
+              只管主进程。流程失败不能重写已成功子执行；请求取消不等于执行已停止。
+            </p>
+            <a href="peri-internal-architecture.html#contracts"
+              >三份契约：执行、协作、状态提交 ↗</a
+            >
+          </div>
+        </div>
+        <p>
+          <strong>能力与数据演进：</strong>Cron、文件、Shell 迁入官方 Builtin
+          MCP，文件 / Shell 执行位于 MCP Server 后方 Sandbox；Middleware 保留
+          Core 必要策略。Resources 支持远程统一 Store 与本地开发实现，活动
+          token、连接和 Run 仍在本地。Store 不是 MCP 工具，Cron
+          触发入口与生命周期仍待定。
+        </p>
+        <p>
+          <strong>执行、持久化与授权分别判断：</strong
+          >完成先于取消生效时允许成功；工具副作用已发生但 Store
+          提交失败时，必须同时报告两件事实。共享 MCP 连接不授予相同权限，Builtin
+          与 Sandbox 都不能替代 Core 的调用准入。
+        </p>
+      </section>
+      <noscript
+        ><p>
+          JavaScript
+          未启用：架构图、职责矩阵和文字说明仍可阅读；节点检查器、流筛选与分步切换不可用。
+        </p></noscript
+      >
+      <section id="overview" aria-labelledby="overview-title">
+        <div class="section-head">
+          <div>
+            <h2 id="overview-title">全局关系，而非类的包含树</h2>
+            <p>
+              点击实体检查职责。实线表示已确认的连接方向；虚线框表示进程或执行环境边界，不代表已实现的安全隔离。
+            </p>
+          </div>
+          <span class="section-index">SYSTEM MAP</span>
+        </div>
+        <div class="board">
+          <div class="toolbar">
+            <div class="filters" role="group" aria-label="关系视图">
+              <button data-filter="all" aria-pressed="true">全部</button
+              ><button data-filter="control" aria-pressed="false">控制流</button
+              ><button data-filter="execution" aria-pressed="false">
+                执行流</button
+              ><button data-filter="state" aria-pressed="false">状态流</button>
+            </div>
+            <span id="view-note" class="view-note" aria-live="polite"
+              >显示全部关系；筛选仅改变视图，不改变架构。</span
+            ><button class="plain" id="reset">重置视图</button>
+          </div>
+          <div class="topology">
+            <div class="graph-wrap">
+              <p class="scroll-note">
+                小屏可横向滚动架构图；下方有完整文字关系清单。
+              </p>
+              <div
+                class="graph-scroll"
+                tabindex="0"
+                role="region"
+                aria-label="架构图，可横向滚动"
+              >
+                <svg
+                  class="graph"
+                  viewBox="0 0 1300 795"
+                  xmlns="http://www.w3.org/2000/svg"
+                  aria-labelledby="graph-title graph-desc"
+                >
+                  <title id="graph-title">
+                    ACP 控制、Store 直连与 MCP 执行环境
+                  </title>
+                  <desc id="graph-desc">
+                    TS 通过独立 ACP 通信管道传入 Session
+                    引用与输入；管道不是服务进程或执行实体。 Peri 直接读取和提交
+                    Session Store，Store 持久化独立 Session 状态。Peri MCP
+                    Client 连接 MCP Server，工具执行由 Server 派发到后方
+                    Sandbox。TS 托管的 McpServer 经同一 ACP 管道提供能力，复用
+                    MCP over ACP；外部 MCP Server 仍由 Peri 直接连接。
+                    节点可使用键盘选择。
+                  </desc>
+                  <defs>
+                    <marker
+                      id="arrow-control"
+                      markerWidth="8"
+                      markerHeight="8"
+                      refX="7"
+                      refY="4"
+                      orient="auto-start-reverse"
+                    >
+                      <path d="M0 0 8 4 0 8Z" fill="#2563eb" />
+                    </marker>
+                    <marker
+                      id="arrow-execution"
+                      markerWidth="8"
+                      markerHeight="8"
+                      refX="7"
+                      refY="4"
+                      orient="auto-start-reverse"
+                    >
+                      <path d="M0 0 8 4 0 8Z" fill="#ad6800" />
+                    </marker>
+                    <marker
+                      id="arrow-state"
+                      markerWidth="8"
+                      markerHeight="8"
+                      refX="7"
+                      refY="4"
+                      orient="auto-start-reverse"
+                    >
+                      <path d="M0 0 8 4 0 8Z" fill="#087f8c" />
+                    </marker>
+                  </defs>
+                  <rect
+                    x="25"
+                    y="25"
+                    width="285"
+                    height="575"
+                    rx="14"
+                    fill="#f3f7ff"
+                    stroke="#c3d4f3"
+                    class="zone"
+                  />
+                  <text x="45" y="54" class="zone-title" fill="#2563eb">
+                    TS 宿主进程
+                  </text>
+                  <text x="45" y="73" class="small">
+                    控制面，也可以是能力服务提供方
+                  </text>
+                  <g transform="translate(200 0)">
+                    <rect
+                      x="405"
+                      y="135"
+                      width="295"
+                      height="278"
+                      rx="14"
+                      fill="#f7f3fc"
+                      stroke="#bda9dc"
+                      stroke-dasharray="7 4"
+                      class="zone"
+                    />
+                    <text x="424" y="159" class="boundary-label">
+                      Peri · 主 Agent + 进程内子执行
+                    </text>
+                  </g>
+                  <g class="edge" data-flow="control" data-also="state">
+                    <path d="M285 147H360" marker-end="url(#arrow-control)" />
+                    <path d="M540 200H625" marker-end="url(#arrow-control)" />
+                    <text x="292" y="130">C1 配置 / 引用</text>
+                    <text x="550" y="183">C1 交付</text>
+                  </g>
+                  <g class="edge" data-flow="control">
+                    <path d="M285 248H360" marker-end="url(#arrow-control)" />
+                    <path d="M540 248H625" marker-end="url(#arrow-control)" />
+                    <text x="292" y="232">C2 控制</text>
+                    <text x="550" y="232">C2 交付</text>
+                  </g>
+                  <g class="edge" data-flow="control" data-also="execution">
+                    <path d="M625 273H540" marker-end="url(#arrow-control)" />
+                    <path d="M360 273H285" marker-end="url(#arrow-control)" />
+                    <text x="292" y="301">C3 回传</text>
+                    <text x="550" y="301">C3 事件 / 响应</text>
+                  </g>
+                  <g transform="translate(200 0)">
+                    <g class="edge" data-flow="execution">
+                      <path
+                        d="M552 177V108"
+                        marker-end="url(#arrow-execution)"
+                        marker-start="url(#arrow-execution)"
+                      />
+                      <rect
+                        class="label-bg"
+                        x="570"
+                        y="110"
+                        width="109"
+                        height="20"
+                        rx="4"
+                      />
+                      <text x="578" y="124">E1 模型请求 / 响应</text>
+                    </g>
+                    <g class="edge" data-flow="execution">
+                      <path
+                        d="M552 286V325"
+                        marker-end="url(#arrow-execution)"
+                        marker-start="url(#arrow-execution)"
+                      />
+                      <rect
+                        class="label-bg"
+                        x="560"
+                        y="293"
+                        width="119"
+                        height="20"
+                        rx="4"
+                      />
+                      <text x="568" y="307">E2 能力调用 / 结果</text>
+                    </g>
+                    <g class="edge" data-flow="execution">
+                      <path
+                        d="M680 356H779V250H817"
+                        marker-end="url(#arrow-execution)"
+                        marker-start="url(#arrow-execution)"
+                      />
+                      <rect
+                        class="label-bg"
+                        x="793"
+                        y="368"
+                        width="106"
+                        height="21"
+                        rx="4"
+                      />
+                      <text x="800" y="382">E3 MCP 协议</text>
+                    </g>
+                    <g class="edge" data-flow="execution">
+                      <path
+                        d="M425 356H340"
+                        marker-end="url(#arrow-execution)"
+                        marker-start="url(#arrow-execution)"
+                      />
+                      <path
+                        d="M160 356H147V448H85"
+                        marker-end="url(#arrow-execution)"
+                        marker-start="url(#arrow-execution)"
+                      />
+                      <rect
+                        class="label-bg"
+                        x="350"
+                        y="395"
+                        width="73"
+                        height="36"
+                        rx="4"
+                      />
+                      <text x="357" y="409">E4 MCP</text>
+                      <text x="357" y="423">over ACP</text>
+                    </g>
+                    <g class="edge" data-flow="state">
+                      <path
+                        d="M680 274H735V544H680"
+                        marker-end="url(#arrow-state)"
+                        marker-start="url(#arrow-state)"
+                      />
+                      <rect
+                        class="label-bg"
+                        x="553"
+                        y="422"
+                        width="167"
+                        height="35"
+                        rx="4"
+                      />
+                      <text x="561" y="436">S1 Peri 直读 / 提交 Store</text>
+                      <text x="561" y="450">主体已定 · 存储协议待设计</text>
+                    </g>
+                    <g class="edge" data-flow="state">
+                      <path d="M552 592V670" marker-end="url(#arrow-state)" />
+                      <rect
+                        class="label-bg"
+                        x="567"
+                        y="621"
+                        width="135"
+                        height="22"
+                        rx="4"
+                      />
+                      <text x="575" y="636">S2 持久化独立状态</text>
+                    </g>
+                    <g class="edge" data-flow="execution">
+                      <path
+                        d="M945 357V460"
+                        marker-end="url(#arrow-execution)"
+                        marker-start="url(#arrow-execution)"
+                      />
+                      <rect
+                        class="label-bg"
+                        x="960"
+                        y="383"
+                        width="122"
+                        height="47"
+                        rx="4"
+                      />
+                      <text x="967" y="397">E5 派发执行 / 结果</text>
+                      <text x="967" y="411">非 MCP 协议约定</text>
+                      <text x="967" y="424">仅需执行环境的能力</text>
+                    </g>
+                  </g>
+                  <g
+                    class="node"
+                    data-node="host"
+                    role="button"
+                    tabindex="0"
+                    aria-label="TS Host 职责"
+                    aria-pressed="false"
+                  >
+                    <rect
+                      class="node-box"
+                      x="45"
+                      y="97"
+                      width="240"
+                      height="98"
+                      rx="9"
+                      fill="#fff"
+                      stroke="#91b0ed"
+                    />
+                    <text x="62" y="122" class="node-title">
+                      TS Host / Agent handle
+                    </text>
+                    <text x="62" y="144" class="node-sub">
+                      创建进程 · 业务编排 · 关闭回收
+                    </text>
+                    <text x="62" y="166" class="node-sub">
+                      Agent Config → 模型 / cwd / MCP JSON
+                    </text>
+                    <text x="62" y="183" class="small">
+                      Session 只传引用，不读写快照
+                    </text>
+                  </g>
+                  <g
+                    class="node"
+                    data-node="run"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Run 执行关系"
+                    aria-pressed="false"
+                  >
+                    <rect
+                      class="node-box"
+                      x="65"
+                      y="222"
+                      width="220"
+                      height="68"
+                      rx="9"
+                      fill="#fff"
+                      stroke="#91b0ed"
+                    />
+                    <text x="82" y="247" class="node-title">Run handle</text>
+                    <text x="82" y="270" class="node-sub">
+                      流 / wait / cancel · 不是一个进程
+                    </text>
+                  </g>
+                  <g
+                    class="node"
+                    data-node="ts-mcp"
+                    role="button"
+                    tabindex="0"
+                    aria-label="TS 托管的 MCP Server"
+                    aria-pressed="false"
+                  >
+                    <rect
+                      class="node-box"
+                      x="45"
+                      y="421"
+                      width="240"
+                      height="97"
+                      rx="9"
+                      fill="#fffbf4"
+                      stroke="#d9b575"
+                    />
+                    <text x="62" y="447" class="node-title">
+                      可选：TS McpServer
+                    </text>
+                    <text x="62" y="471" class="node-sub">
+                      业务回调 / 应用数据 / Agent 协作
+                    </text>
+                    <text x="62" y="494" class="node-sub">
+                      MCP over ACP · 无需额外 endpoint
+                    </text>
+                  </g>
+                  <text x="46" y="549" class="small">
+                    TS 持有句柄 ≠ 持有执行状态的裁决权
+                  </text>
+                  <text x="46" y="569" class="small">
+                    多 Agent = TS 管理多个 Peri 进程
+                  </text>
+                  <g
+                    class="node"
+                    data-node="acp"
+                    role="button"
+                    tabindex="0"
+                    aria-label="ACP 通信管道职责"
+                    aria-pressed="false"
+                  >
+                    <rect
+                      class="node-box"
+                      x="360"
+                      y="97"
+                      width="180"
+                      height="292"
+                      rx="14"
+                      fill="#eef3f7"
+                      stroke="#648198"
+                    />
+                    <text x="378" y="124" class="node-title">ACP 通信管道</text>
+                    <text x="378" y="144" class="node-sub">跨进程协议通道</text>
+                    <text x="378" y="163" class="small">
+                      非执行实体 · 非服务进程
+                    </text>
+                    <path d="M378 177H522" stroke="#b8c9d5" />
+                    <text x="378" y="198" class="node-sub">
+                      → 请求 / 配置 / 引用
+                    </text>
+                    <text x="378" y="219" class="small">
+                      send · cancel · 协议交互
+                    </text>
+                    <text x="378" y="251" class="node-sub">
+                      ← 响应 / 事件 / 内容流
+                    </text>
+                    <text x="378" y="273" class="small">
+                      也支持 Peri 发起反向请求
+                    </text>
+                    <text x="378" y="303" class="small">
+                      传递意图，不裁决执行状态
+                    </text>
+                    <path d="M378 318H522" stroke="#b8c9d5" />
+                    <text x="378" y="340" class="node-sub">
+                      ↔ MCP over ACP
+                    </text>
+                    <text x="378" y="362" class="small">
+                      宿主能力调用 / 结果
+                    </text>
+                    <text x="378" y="378" class="small">复用既有协议能力</text>
+                  </g>
+                  <g transform="translate(200 0)">
+                    <g
+                      class="node"
+                      data-node="core"
+                      role="button"
+                      tabindex="0"
+                      aria-label="Agent Core 职责"
+                      aria-pressed="false"
+                    >
+                      <rect
+                        class="node-box"
+                        x="425"
+                        y="177"
+                        width="255"
+                        height="109"
+                        rx="9"
+                        fill="#fff"
+                        stroke="#b69ad7"
+                      />
+                      <text x="444" y="204" class="node-title">Agent Core</text>
+                      <text x="444" y="228" class="node-sub">
+                        RCRA · 模型适配 · 执行生命周期
+                      </text>
+                      <rect
+                        x="443"
+                        y="244"
+                        width="218"
+                        height="25"
+                        rx="4"
+                        fill="#f1ebfa"
+                      />
+                      <text x="453" y="261" class="node-sub">
+                        输入 → 模型 ↔ 能力执行 → 结果
+                      </text>
+                    </g>
+                    <g
+                      class="node"
+                      data-node="client"
+                      role="button"
+                      tabindex="0"
+                      aria-label="MCP Client 职责"
+                      aria-pressed="false"
+                    >
+                      <rect
+                        class="node-box"
+                        x="425"
+                        y="325"
+                        width="255"
+                        height="70"
+                        rx="9"
+                        fill="#fff"
+                        stroke="#b69ad7"
+                      />
+                      <text x="444" y="351" class="node-title">
+                        MCP Client / 能力执行面
+                      </text>
+                      <text x="444" y="375" class="node-sub">
+                        由 Peri 持有 · 连接 / 发现 / 调用 / 关闭
+                      </text>
+                    </g>
+                    <g
+                      class="node"
+                      data-node="model"
+                      role="button"
+                      tabindex="0"
+                      aria-label="模型服务职责"
+                      aria-pressed="false"
+                    >
+                      <rect
+                        class="node-box"
+                        x="425"
+                        y="30"
+                        width="255"
+                        height="78"
+                        rx="9"
+                        fill="#fff"
+                        stroke="#bac7d9"
+                      />
+                      <text x="444" y="58" class="node-title">模型服务</text>
+                      <text x="444" y="81" class="node-sub">
+                        生成内容与工具调用意图
+                      </text>
+                      <text x="444" y="97" class="small">
+                        Core 内部模型适配，不是 MCP 工具
+                      </text>
+                    </g>
+                    <g
+                      class="node"
+                      data-node="server"
+                      role="button"
+                      tabindex="0"
+                      aria-label="MCP Server 扩展能力"
+                      aria-pressed="false"
+                    >
+                      <rect
+                        class="node-box"
+                        x="817"
+                        y="161"
+                        width="255"
+                        height="196"
+                        rx="10"
+                        fill="#fffbf4"
+                        stroke="#d9b575"
+                      />
+                      <text x="836" y="190" class="node-title">MCP Server</text>
+                      <text x="836" y="212" class="node-sub">
+                        所有外扩能力的统一提供面
+                      </text>
+                      <text x="836" y="240" class="node-sub">
+                        Tools · Resources · Prompts
+                      </text>
+                      <text x="836" y="266" class="node-sub">
+                        Skills · 检索 · 领域服务
+                      </text>
+                      <path d="M835 285H1052" stroke="#ecddc4" />
+                      <text x="836" y="305" class="small">
+                        Skill 不是标准 MCP 原语
+                      </text>
+                      <text x="836" y="324" class="small">
+                        其发现 / 激活映射需要单独约定
+                      </text>
+                      <text x="836" y="343" class="small">
+                        能力内容不具有宿主控制权限
+                      </text>
+                    </g>
+                    <g
+                      class="node"
+                      data-node="session"
+                      role="button"
+                      tabindex="0"
+                      aria-label="Session 独立状态，当前选中"
+                      aria-pressed="true"
+                    >
+                      <rect
+                        class="node-box"
+                        x="417"
+                        y="670"
+                        width="273"
+                        height="99"
+                        rx="11"
+                        fill="#eef9f9"
+                        stroke="#087f8c"
+                      />
+                      <text x="438" y="699" class="node-title">
+                        Session · 独立状态
+                      </text>
+                      <text x="438" y="721" class="node-sub">
+                        Store 持久化的数据，不是中转服务
+                      </text>
+                      <text x="438" y="744" class="small">
+                        建议：消息 / 工具结果 / 压缩 / Skill 引用
+                      </text>
+                      <text x="438" y="760" class="small">
+                        关闭 Agent ≠ 删除 Session
+                      </text>
+                    </g>
+                    <g
+                      class="node"
+                      data-node="store"
+                      role="button"
+                      tabindex="0"
+                      aria-label="Session Store，Peri 直接访问"
+                      aria-pressed="false"
+                    >
+                      <rect
+                        class="node-box"
+                        x="425"
+                        y="494"
+                        width="255"
+                        height="98"
+                        rx="9"
+                        fill="#f7fbfc"
+                        stroke="#087f8c"
+                      />
+                      <text x="444" y="521" class="node-title">
+                        Session Store
+                      </text>
+                      <text x="444" y="545" class="node-sub">
+                        Peri 直接读写 · TS 不代理状态
+                      </text>
+                      <text x="444" y="570" class="small">
+                        协议 / 部署 / 版本与提交约束待定
+                      </text>
+                    </g>
+                    <g
+                      class="node"
+                      data-node="sandbox"
+                      role="button"
+                      tabindex="0"
+                      aria-label="Sandbox 执行环境"
+                      aria-pressed="false"
+                    >
+                      <rect
+                        class="node-box"
+                        x="817"
+                        y="460"
+                        width="255"
+                        height="145"
+                        rx="10"
+                        fill="#fff7e9"
+                        stroke="#ad6800"
+                        stroke-dasharray="5 3"
+                      />
+                      <text x="836" y="488" class="node-title">
+                        Sandbox · 执行环境
+                      </text>
+                      <text x="836" y="513" class="node-sub">
+                        位于 MCP Server 后方
+                      </text>
+                      <text x="836" y="537" class="node-sub">
+                        本地受控环境 / 容器 / 远端环境*
+                      </text>
+                      <text x="836" y="562" class="small">
+                        * 形态示意，不代表隔离已实现
+                      </text>
+                      <text x="836" y="584" class="small">
+                        执行资源边界 ≠ Core 工具准入
+                      </text>
+                    </g>
+                  </g>
+                  <text x="45" y="636" class="small">
+                    TS 不读取快照、不提交 diff、不代理 Store。
+                  </text>
+                  <text x="45" y="657" class="small">
+                    它仍可提供 systemPrompt、配置与消息输入。
+                  </text>
+                </svg>
+              </div>
+              <div class="legend" aria-label="图例">
+                <span><i class="control"></i>C ACP 命令 / 引用 / 事件</span
+                ><span
+                  ><i class="execution"></i>E 模型 / MCP / MCP over ACP</span
+                ><span><i class="state"></i>S Store 直连 / 状态持久化</span>
+                <span
+                  ><i style="background: #648198"></i>蓝灰实体：ACP
+                  通信管道，不是第三个进程</span
+                >
+              </div>
+            </div>
+            <aside
+              class="inspector"
+              aria-label="选中实体详情"
+              aria-live="polite"
+            >
+              <div>
+                <span class="tag confirmed" id="entity-status">已明确方向</span>
+                <h3 id="entity-title">Session</h3>
+                <p class="subtitle" id="entity-subtitle">
+                  独立状态，不是执行者
+                </p>
+              </div>
+              <div>
+                <h4>负责 / 持有</h4>
+                <ul id="entity-owns">
+                  <li>独立保存可供执行读取的状态。</li>
+                  <li>消息、工具结果、压缩产物等为建议组成。</li>
+                </ul>
+              </div>
+              <div>
+                <h4>不负责</h4>
+                <ul id="entity-not">
+                  <li>不持有模型连接、MCP Client 或进程。</li>
+                  <li>不随 Agent.close() 自动删除。</li>
+                </ul>
+              </div>
+              <div>
+                <h4>与其他实体的联系</h4>
+                <p id="entity-relation">
+                  TS 只提供 sessionRef，Peri 直接读写 Session Store；Store
+                  持久化独立 Session 状态，具体协议待设计。
+                </p>
+              </div>
+              <p class="rule" id="entity-rule">
+                Session 可独立存在；独立状态不等于独立服务。
+              </p>
+              <p class="inspector-foot">
+                节点按 Tab 聚焦，Enter /
+                空格选择。全部实体的文字职责见下方矩阵。
+              </p>
+            </aside>
+          </div>
+          <div class="relations">
+            <details>
+              <summary>展开文字关系清单 · 架构图的等价阅读方式</summary>
+              <ul class="relation-list">
+                <li>
+                  <strong>C1 · 请求入口 / 交付</strong> TS → ACP 通信管道 →
+                  Peri： 创建进程后提供配置与引用。对 Session 只提供
+                  sessionRef；storeRef 的解析与鉴权待设计。
+                </li>
+                <li>
+                  <strong>C2 · 控制入口 / 交付</strong> TS Run handle → ACP 管道
+                  → Core：发送输入、请求取消；管道传递意图，Core 裁决执行。
+                </li>
+                <li>
+                  <strong>C3 · 响应 / 事件回传</strong> Core → ACP 管道 → TS：
+                  内容流与执行终态。ACP 也承载 Peri 发起的反向请求及宿主响应；
+                  图中方向表示典型流向，不限定协议只能单向发起请求。wait
+                  观察最终结果，不搬运完整 Session 快照。
+                </li>
+                <li>
+                  <strong>E1</strong> Core ↔
+                  模型：请求、流式响应与工具调用意图。
+                </li>
+                <li>
+                  <strong>E2</strong> Core ↔ MCP Client：能力调用及结果纳入
+                  RCRA。
+                </li>
+                <li>
+                  <strong>E3 · MCP</strong> Peri Client ↔ 外部
+                  Server：发现工具、资源、提示词和约定格式的 Skills。
+                </li>
+                <li>
+                  <strong>E4 · MCP over ACP</strong> Peri MCP Client ↔ ACP
+                  通信管道 ↔ TS
+                  McpServer：宿主反向能力复用既有协议能力，无需额外 HTTP
+                  endpoint。MCP 调用与控制命令语义不同，但共享 ACP 管道；TS
+                  Server 不是 Sandbox。
+                </li>
+                <li>
+                  <strong>E5 · 执行派发</strong> MCP Server ↔
+                  Sandbox：将需要执行环境的工具派发到环境并取回结果。该段协议未规定；静态
+                  Skill/资源读取不必进入 Sandbox。
+                </li>
+                <li>
+                  <strong>S1 · 直连</strong> Peri Core ↔ Session
+                  Store：直接读取与提交，不经
+                  TS；方向已确认，存储协议和提交时点待设计。
+                </li>
+                <li>
+                  <strong>S2 · 持久化</strong> Session Store 保存独立 Session
+                  状态；Session 是数据实体，不是中转 RPC 服务。
+                </li>
+              </ul>
+            </details>
+          </div>
+        </div>
+        <div class="thesis">
+          <strong>三条不同的通路，不共享所有权</strong>
+          <p>
+            引用走 ACP，状态直达 Store；能力走 MCP，执行进入 Sandbox。TS 不搬运
+            Session，Core 不内置业务能力，MCP Server 不等同于执行环境。关闭
+            Agent 不删除 Session，也不自动销毁外部 Sandbox。
+          </p>
+        </div>
+      </section>
+      <section id="entities" aria-labelledby="entities-title">
+        <div class="section-head">
+          <div>
+            <h2 id="entities-title">实体职责：谁持有什么，谁不应越界</h2>
+            <p>
+              “拥有”区分生命周期、运行裁决和数据存储；不以类的嵌套关系代替所有权。
+            </p>
+          </div>
+          <span class="section-index">RESPONSIBILITY MAP</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">实体</th>
+                <th scope="col">性质</th>
+                <th scope="col">负责 / 持有</th>
+                <th scope="col">不负责</th>
+                <th scope="col">关键联系</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>TS Host<small>ACP 控制与编排面</small></td>
+                <td>应用进程 / SDK</td>
+                <td>
+                  创建/关闭 Agent，提供配置、消息与 sessionRef；消费 ACP
+                  流与结果。
+                </td>
+                <td>
+                  不读取完整 Session、不提交 diff、不代理 Store、不重写 RCRA。
+                </td>
+                <td>
+                  仅对 Session 传标识或引用；仍可提供 systemPrompt、模型、MCP
+                  配置和输入。
+                </td>
+              </tr>
+              <tr>
+                <td>ACP 通信管道<small>TS ↔ Peri</small></td>
+                <td>跨进程协议通道 · 非执行实体</td>
+                <td>
+                  请求与响应的关联、配置与引用传递、控制命令、运行事件与内容流；
+                  同一管道复用 MCP over ACP 承载宿主能力调用与结果。
+                </td>
+                <td>
+                  不运行 RCRA、不执行工具、不裁决取消、不持久化
+                  Session；通信序号不是状态版本。
+                </td>
+                <td>
+                  独立连接 TS 宿主与 Peri 进程；宿主 MCP 能力复用 MCP over ACP。
+                  Store 读写与外部 MCP 直连不经过管道；本稿不重设计 MCP
+                  承载协议。
+                </td>
+              </tr>
+              <tr>
+                <td>Agent Config<small>显式运行配置</small></td>
+                <td>配置数据</td>
+                <td>
+                  systemPrompt、cwd、模型、MCP
+                  JSON、storeRef；引用解析规则待设计。
+                </td>
+                <td>
+                  不是 Session 快照；不将 Skill 内容或明文秘密混入控制配置。
+                </td>
+                <td>
+                  TS 经 ACP 交给 Peri；具体 schema、冻结与热变更规则待定。
+                </td>
+              </tr>
+              <tr>
+                <td>Agent Core<small>主 Agent / 子执行的统一内核</small></td>
+                <td>执行实例</td>
+                <td>
+                  RCRA、模型适配、MCP Client；直接读取和提交 Session Store。
+                </td>
+                <td>
+                  不让 TS 搬运状态；不内置业务 Skills；不拥有 Session 删除策略。
+                </td>
+                <td>
+                  ACP 接收引用与输入；Store 直连状态；MCP 连接能力。Core
+                  可独立运行，不依赖 Workflow。
+                </td>
+              </tr>
+              <tr>
+                <td>SubAgent<small>官方进程内协作层</small></td>
+                <td>受管理的子执行</td>
+                <td>复用 Core，管理父子关系、结果回传、等待与取消传播。</td>
+                <td>不另起 OS 进程，不复制 RCRA，不默认共享可变 Session。</td>
+                <td>SubAgent → Core；父子状态隔离与继承规则待定。</td>
+              </tr>
+              <tr>
+                <td>Workflow<small>官方标准编排层</small></td>
+                <td>基于 SubAgent 的组合</td>
+                <td>依赖、顺序、并行、结果聚合及失败 / 取消编排。</td>
+                <td>不直接操纵 RCRA，不要求 TS 重写标准语义。</td>
+                <td>
+                  Workflow → SubAgent → Core；语言及辅助 runner 不由本图规定。
+                </td>
+              </tr>
+              <tr>
+                <td>Builtin MCP<small>官方工具能力</small></td>
+                <td>MCP Server 实现</td>
+                <td>
+                  Cron、文件、Shell 等；文件与 Shell 通过后方 Sandbox 执行。
+                </td>
+                <td>不因 builtin 绕过权限；不是另一套 Agent loop。</td>
+                <td>与外部 MCP 使用统一边界；Cron 触发入口与生命周期待定。</td>
+              </tr>
+              <tr>
+                <td>Session<small>生命周期独立</small></td>
+                <td>状态实体</td>
+                <td>
+                  由 Store 持久化的执行状态。消息、工具结果、压缩与 Skill
+                  引用为建议内容。
+                </td>
+                <td>不是中转服务，不持活动进程或连接，不随 Agent 关闭删除。</td>
+                <td>TS 仅持引用；Peri 通过 Store 使用它，恢复兼容规则待定。</td>
+              </tr>
+              <tr>
+                <td>Run<small>一次执行关系</small></td>
+                <td>执行 + 控制句柄</td>
+                <td>
+                  关联 Agent、sessionRef 与输入；ACP 内容流、wait、cancel；Core
+                  裁决终态。
+                </td>
+                <td>不是服务或存储；流已显示不等于已提交。</td>
+                <td>TS 持 handle；Peri 执行并直接提交 Store。</td>
+              </tr>
+              <tr>
+                <td>MCP Client<small>由 Peri 持有</small></td>
+                <td>连接与调用资源</td>
+                <td>按 JSON 建立连接，协商、发现、调用和关闭。</td>
+                <td>不要求 TS 先连接再代理；不是 Sandbox，不实现领域工具。</td>
+                <td>
+                  外部 Server 按配置直连；TS 托管的 Server 经 MCP over ACP
+                  调用。
+                </td>
+              </tr>
+              <tr>
+                <td>MCP Server<small>统一外扩能力面</small></td>
+                <td>能力服务</td>
+                <td>
+                  工具、资源、提示词、Skills 与领域服务；需运行环境的调用派发给
+                  Sandbox。
+                </td>
+                <td>
+                  不是执行环境，不持 RCRA 终态；静态资源不必进入 Sandbox。
+                </td>
+                <td>面向 Core 使用 MCP；面向环境的派发协议待设计。</td>
+              </tr>
+              <tr>
+                <td>Sandbox<small>MCP Server 后方</small></td>
+                <td>执行环境</td>
+                <td>
+                  承载实际操作与执行资源边界；本地受控环境、容器、远端环境是示意形态。
+                </td>
+                <td>
+                  不是 TS 宿主或 MCP 协议；不代替 Core
+                  工具准入，不代表隔离已实现。
+                </td>
+                <td>
+                  接受 Server 派发并回传结果；建议由 MCP 部署 /
+                  环境提供方管理生命周期。
+                </td>
+              </tr>
+              <tr>
+                <td>Session Store<small>Peri 直接访问</small></td>
+                <td>状态读写与持久化端口</td>
+                <td>读取、保存和提交独立 Session 状态；版本协议待设计。</td>
+                <td>不驱动 RCRA，不让 TS 成为快照或 diff 中转层。</td>
+                <td>
+                  Peri 是直接读写方；协议、部署与鉴权待定，不要求独立服务进程。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="split">
+          <article class="note-box">
+            <h3>配置告诉 Agent 怎么运行</h3>
+            <p>
+              systemPrompt、cwd、模型与 MCP
+              连接属于运行配置。配置可能需要记录来源以便恢复，但不应与对话状态混成同一个可变对象。
+            </p>
+          </article>
+          <article class="note-box">
+            <h3>Session 记录运行留下什么</h3>
+            <p>
+              Agent 可先后处理多个 Session；Session 可先后由不同 Agent
+              使用，这是目标关系的推论，而非无条件恢复承诺。兼容检查和写入规则需要另外确定。
+            </p>
+          </article>
+        </div>
+      </section>
+      <section id="run" aria-labelledby="run-title">
+        <div class="section-head">
+          <div>
+            <h2 id="run-title">一次 Run，如何穿过这些边界</h2>
+            <p>
+              关系演示，不是已实现的协议时序。提交步骤单独展示，不暗示必须整轮结束才保存。
+            </p>
+          </div>
+          <span class="section-index">EXECUTION WALKTHROUGH</span>
+        </div>
+        <div class="timeline">
+          <div class="step-selector" role="group" aria-label="选择执行步骤">
+            <button class="step-button" data-step="0" aria-pressed="true">
+              <span>01</span>引用与配置</button
+            ><button class="step-button" data-step="1" aria-pressed="false">
+              <span>02</span>ACP 发送</button
+            ><button class="step-button" data-step="2" aria-pressed="false">
+              <span>03</span>直读 Store</button
+            ><button class="step-button" data-step="3" aria-pressed="false">
+              <span>04</span>能力与环境</button
+            ><button class="step-button" data-step="4" aria-pressed="false">
+              <span>05</span>ACP 内容流</button
+            ><button class="step-button" data-step="5" aria-pressed="false">
+              <span>06</span>直写 Store</button
+            ><button class="step-button" data-step="6" aria-pressed="false">
+              <span>07</span>ACP 终态
+            </button>
+          </div>
+          <div class="step-main" aria-live="polite">
+            <div>
+              <span id="step-status" class="tag confirmed">已明确方向</span>
+              <h3 id="step-title">选择引用，配置执行者</h3>
+              <p id="step-description">
+                TS 持有 sessionRef / storeRef，创建一个 Peri 进程，经 ACP 提供
+                systemPrompt、cwd、模型与 MCP JSON。TS 不创建或读取完整 Session
+                状态。
+              </p>
+              <div class="step-meta">
+                <span class="tag" id="step-owner">控制方：TS Host</span
+                ><span class="tag" id="step-boundary"
+                  >未知引用创建还是拒绝：待决</span
+                >
+              </div>
+            </div>
+            <div class="step-flow" id="step-flow" aria-label="本步骤参与者">
+              <span class="flow-actor">引用 + 配置</span
+              ><span class="flow-arrow">→</span
+              ><span class="flow-actor">ACP</span
+              ><span class="flow-arrow">→</span
+              ><span class="flow-actor">Peri Agent</span>
+            </div>
+          </div>
+          <div class="step-controls">
+            <span id="step-count">步骤 1 / 7 · 手动切换，不自动播放</span>
+            <div>
+              <button class="plain" id="prev" disabled>上一步</button
+              ><button class="plain" id="next">下一步</button>
+            </div>
+          </div>
+          <div class="all-steps">
+            <details>
+              <summary>完整执行过程 · 展开阅读或打印</summary>
+              <ol>
+                <li>
+                  <strong>选择引用 / 配置：</strong>TS 持有
+                  sessionRef、storeRef，以 ACP 提供 systemPrompt、cwd、模型和
+                  MCP JSON；不加载 Session 快照。
+                </li>
+                <li>
+                  <strong>ACP 发送：</strong>sessionRef 与结构化输入建立 Run，TS
+                  得到 handle。新增 ACP 方法 / schema 待设计。
+                </li>
+                <li>
+                  <strong>Core 直读：</strong>Peri 直接从 Store 读取 Session
+                  状态组织上下文。读写主体已定，版本、鉴权和存储协议待决。
+                </li>
+                <li>
+                  <strong>能力执行：</strong>外部 MCP Server 按配置由 Peri
+                  直连； TS Server 经 ACP 管道中的 MCP over ACP
+                  调用，复用既有协议。 Server 将需环境的操作派发到 Sandbox；静态
+                  Skill / 资源可不进入环境。
+                </li>
+                <li>
+                  <strong>ACP 内容流：</strong>文本、思考、工具调用及结果回到
+                  TS；流是观测，不是完整快照或提交确认。
+                </li>
+                <li>
+                  <strong>Core 直写：</strong>Peri 直接向 Store
+                  提交状态。时点、单写者/CAS、失败与取消后的内容处理待定，可在执行中多次提交。
+                </li>
+                <li>
+                  <strong>ACP 终态：</strong>Core 裁决后 Run.wait()
+                  得到结果或失败。Session 留在 Store，wait
+                  的持久化保证需单独定义。
+                </li>
+              </ol>
+            </details>
+          </div>
+        </div>
+      </section>
+      <section id="lifecycle" aria-labelledby="life-title">
+        <div class="section-head">
+          <div>
+            <h2 id="life-title">三个结束动作，不是同一件事</h2>
+            <p>独立 Session 的价值首先体现在生命周期，而不是类名。</p>
+          </div>
+          <span class="section-index">LIFECYCLE BOUNDARIES</span>
+        </div>
+        <div class="lifecycle">
+          <article class="life-card">
+            <h3>run.cancel()</h3>
+            <div>
+              <p><strong>意图：</strong>停止这一次执行。</p>
+              <p><strong>Core：</strong>处理在途模型与工具调用，报告终态。</p>
+              <p><strong>不意味着：</strong>销毁 Agent 或删除 Session。</p>
+              <span class="tag open">取消后的状态提交规则待决</span>
+            </div>
+          </article>
+          <article class="life-card">
+            <h3>agent.close()</h3>
+            <div>
+              <p><strong>意图：</strong>回收这个执行实例及进程。</p>
+              <p><strong>所有者：</strong>TS 管理进程；Peri 清理其执行资源。</p>
+              <p>
+                <strong>不意味着：</strong>删除独立 Session 或自动销毁外部
+                Sandbox。
+              </p>
+              <span class="tag open">在途 Run 的关闭策略待决</span>
+            </div>
+          </article>
+          <article class="life-card">
+            <h3>删除 Session 状态 <span class="tag open">接口待定</span></h3>
+            <div>
+              <p><strong>意图：</strong>由状态管理层明确删除状态。</p>
+              <p>
+                <strong>所有者：</strong>Store 的状态生命周期契约，不是 TS
+                直接删写状态或 Agent 析构。
+              </p>
+              <p><strong>不意味着：</strong>可以绕过正在执行的写入。</p>
+              <span class="tag open">删除与活跃 Run 的冲突规则待决</span>
+            </div>
+          </article>
+        </div>
+      </section>
+      <section id="reverse" aria-labelledby="reverse-title">
+        <div class="section-head">
+          <div>
+            <h2 id="reverse-title">TS 反向注入能力，不反向接管循环</h2>
+            <p>
+              同一个 TS 进程可以同时充当 ACP 宿主和 MCP
+              Server；它作为能力服务方不等于 Sandbox。
+            </p>
+          </div>
+          <span class="section-index">MCP REVERSE INJECTION</span>
+        </div>
+        <div class="connection">
+          <div class="connection-path">
+            <code>Peri MCP Client</code><span>⇄ 调用 / 结果</span
+            ><code>ACP 管道 · MCP over ACP</code><span>⇄</span
+            ><code>TS 官方 McpServer</code>
+          </div>
+          <p>
+            <strong>MCP over ACP（复用既有协议能力）：</strong>Peri 经现有 ACP
+            管道反向调用 TS 托管的 MCP Server，不额外设计 HTTP endpoint
+            或桥接协议。 业务数据、内存对象或跨 Agent 协作可以由 TS 提供；外部
+            MCP Server 仍按配置由 Peri 直接连接，不经 ACP。MCP 能力语义与 ACP
+            控制语义不同， 但宿主能力共享同一通信管道；工具与 Skill
+            不是宿主配置入口。
+          </p>
+          <div class="connection-path">
+            <code>Peri MCP Client</code><span>⇄ MCP</span><code>MCP Server</code
+            ><span>⇄ 执行派发 / 结果</span><code>Sandbox</code>
+          </div>
+          <p>
+            Sandbox 在 Server 后方代表执行环境；不是每次静态资源或 Skill
+            读取都需要进入它。Core 负责工具准入，Sandbox
+            承担环境资源边界。环境形态与隔离实现待定；建议生命周期由 MCP 部署 /
+            环境提供方管理，不默认跟随 TS Agent 回收。
+          </p>
+          <p class="warning">
+            <strong>避免自等待死锁：</strong>当前 Run 正在等待 MCP
+            工具返回时，该工具不能再等待同一个 Run 完成。跨主 Agent 业务关系由
+            TS 编排；进程内 SubAgent 与基于它的 Workflow 由 Peri
+            标准协作层管理。
+          </p>
+        </div>
+      </section>
+      <section id="api" aria-labelledby="api-title">
+        <div class="section-head">
+          <div>
+            <h2 id="api-title">用 API 表达引用，通信明确使用 ACP</h2>
+            <p>
+              以下仅为目标关系草图，不是当前可运行示例。ACP 已确定；sessionRef /
+              storeRef 对应的新增方法和 schema 尚未实现。宿主 McpServer 接入复用
+              MCP over ACP；此处不杜撰协议字段或另设桥接 API。
+            </p>
+          </div>
+          <span class="section-index">CONCEPTUAL API</span>
+        </div>
+        <div class="api-grid">
+          <div class="code-panel">
+            <div class="code-title">
+              <span>Agent + SessionRef + Input → Run</span
+              ><span class="tag proposed">尚未实现</span>
+            </div>
+            <pre><code><span class="kw">const</span> sessionRef = <span class="str">"session:research"</span>; <span class="comment">// 调用方持有的引用，不是快照</span>
+<span class="kw">const</span> agent = <span class="kw">await</span> agents.create({
+  systemPrompt,
+  cwd,
+  model,
+  storeRef: <span class="str">"store:primary"</span>, <span class="comment">// Peri 解析并直连；机制待设计</span>
+  mcp: mcpConfigJson, <span class="comment">// 外部 MCP 由 Peri 直连；宿主能力复用 MCP over ACP</span>
+});
+
+<span class="kw">try</span> {
+  <span class="kw">const</span> run = agent.send({
+    sessionRef, <span class="comment">// ACP 承载引用；不发送 Session 状态</span>
+    content: [{ type: <span class="str">"text"</span>, text: <span class="str">"分析这个问题"</span> }],
+  });
+
+  <span class="kw">for await</span> (<span class="kw">const</span> event <span class="kw">of</span> run) {
+    render(event); <span class="comment">// 流不等于提交确认</span>
+  }
+  <span class="kw">const</span> result = <span class="kw">await</span> run.wait();
+} <span class="kw">finally</span> {
+  <span class="kw">await</span> agent.close();
+}
+
+<span class="comment">// 执行进程关闭，Session 仍独立存在</span>
+<span class="comment">// Session 仍保存在 Store；TS 不执行 session.read() 或提交 diff</span></code></pre>
+          </div>
+          <div class="api-notes">
+            <article>
+              <h3>Agent details：执行实例信息</h3>
+              <p>
+                经 ACP 观察配置、连接和运行情况；不是完整 Session
+                状态的搬运入口。TS 保留 handle，而不持有权威状态。
+              </p>
+            </article>
+            <article>
+              <h3>Session：Store 中的独立状态</h3>
+              <p>
+                Peri 是直接读写方，TS 只持 sessionRef。状态不依赖 Agent
+                存活；Store 协议、部署和版本约束待设计。
+              </p>
+            </article>
+            <article>
+              <h3>Run：结果与控制，不是快照</h3>
+              <p>
+                wait 等终态，cancel 经 ACP 传递意图。未知引用创建还是拒绝、Run
+                与提交确认的关系尚未确定。
+              </p>
+            </article>
+            <article>
+              <h3>配置仍由 TS 提供，秘密不进入示例</h3>
+              <p>
+                “只传引用”针对 Session，不禁止 systemPrompt 和消息输入。storeRef
+                / MCP 凭据引用的解析与鉴权待设计，不打印秘密。
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+      <section id="decisions" aria-labelledby="decisions-title">
+        <div class="section-head">
+          <div>
+            <h2 id="decisions-title">哪些已经明确，哪些仍需要辩论</h2>
+            <p>
+              边界先于兼容性。这是 Peri 4.0 的生态架构讨论，不把已结束的 TS POC
+              当作目标架构。
+            </p>
+          </div>
+          <span class="section-index">DECISION LEDGER</span>
+        </div>
+        <div class="decision-grid">
+          <article class="decision">
+            <span class="tag confirmed">已明确方向</span>
+            <h3>架构支点</h3>
+            <ul>
+              <li>
+                一个 Peri 进程对应一个宿主管理的主 Agent，包含进程内
+                SubAgent；TS 管理主进程与跨主 Agent 业务。
+              </li>
+              <li>
+                先保证 Core；官方 SubAgent 复用 Core，Workflow 基于 SubAgent
+                构建。
+              </li>
+              <li>
+                Cron、文件、Shell 作为 Builtin MCP；Middleware
+                收敛而非整体删除。
+              </li>
+              <li>
+                Resources 支持远程统一数据访问；Peri 直读
+                Store，活动运行资源留在本地。
+              </li>
+              <li>Peri 是 RCRA Core，持有 MCP Client 执行面。</li>
+              <li>MCP JSON 直接交 Peri；所有外扩能力由 MCP Server 提供。</li>
+              <li>
+                TS 托管的 MCP Server 通过 MCP over ACP
+                反向提供能力，复用同一通信管道。
+              </li>
+              <li>Session 是独立状态，不依赖 Agent 生命周期。</li>
+              <li>TS ↔ Peri 通信使用 ACP；TS 对 Session 只提供引用。</li>
+              <li>Peri 直接读写 Session Store；TS 不代理快照或提交。</li>
+              <li>Sandbox 是 MCP Server 后方的执行环境。</li>
+            </ul>
+          </article>
+          <article class="decision">
+            <span class="tag proposed">建议方案</span>
+            <h3>值得保留的结构</h3>
+            <ul>
+              <li>Core 负责上下文组织、预算、取消终态与执行准入。</li>
+              <li>Run 使用明确的 Session 版本，产生合法状态变化。</li>
+              <li>Session 状态包含消息、工具结果、压缩与 Skill 引用。</li>
+              <li>
+                Sandbox 生命周期由 MCP 部署或环境提供方管理；不默认随 Agent
+                回收。
+              </li>
+              <li>同 Session 单写者或版本校验，避免两套执行事实。</li>
+            </ul>
+          </article>
+          <article class="decision">
+            <span class="tag open">待决契约</span>
+            <h3>下一轮讨论重点</h3>
+            <ul>
+              <li>
+                Store 直连协议、storeRef 解析与鉴权；未知 sessionRef
+                创建还是拒绝？
+              </li>
+              <li>单写者、CAS、提交边界、失败与取消后保存什么？</li>
+              <li>运行配置与 Session 复用、恢复如何判断兼容？</li>
+              <li>Skills 的发现、加载和激活如何映射 MCP？</li>
+              <li>
+                Session 引用相关的 ACP 方法 / schema、凭据引用与配置热变更；MCP
+                over ACP 直接复用，不另设计承载协议。
+              </li>
+              <li>Server 到 Sandbox 的执行协议、隔离机制和回收责任。</li>
+            </ul>
+          </article>
+        </div>
+        <div class="poc-gap">
+          <h3>设计来源与实现现状，不应混读</h3>
+          <p>
+            已结束的 TS POC（源码包已移除）曾验证 ACP 调用、流式句柄与 MCP
+            接入， 当时 Session 与 Agent 绑定、cwd 使用临时目录，宿主 MCP 采用
+            HTTP bridge 和 Client 代理。它完成了接口探索使命，仅保留这份生态稿。
+          </p>
+          <p>
+            Peri 4.0 的 sessionRef / storeRef、独立状态访问、单 Agent
+            进程与统一能力边界 是目标讨论，不是现有实现声明。当前 Rust
+            系统的分层、持有关系及受限 MCP Apps relay， 见
+            <a href="peri-internal-architecture.html">现有 Peri 内部分层设计</a
+            >； MCP Apps relay 不应等同于本稿引用的完整 MCP over ACP 接入方向。
+          </p>
+          <p>
+            协议引用：MCP over ACP（复用既有协议能力）。本稿按协议名称引用，
+            具体版本与规范链接待核对；不在此定义新的消息格式或承载机制。
+          </p>
+        </div>
+      </section>
+    </main>
+    <footer>
+      <div class="shell">
+        <span>Peri 4.0 · 生态架构稿 · 目标讨论 · 2026-09-11</span
+        ><span
+          >单文件 / 离线可用 / 不依赖 CDN　<a href="#overview"
+            >返回全局关系</a
+          ></span
+        >
+      </div>
+    </footer>
+    <script>
+      "use strict";
+      const entities = {
+        acp: {
+          title: "ACP 通信管道",
+          subtitle: "跨进程协议通道 · 非执行实体",
+          status: "confirmed",
+          owns: [
+            "连接 TS 宿主与 Peri 进程，承载配置、引用、输入及控制请求。",
+            "承载响应、运行事件与内容流；复用 MCP over ACP 承载宿主能力调用与结果。",
+          ],
+          not: [
+            "不运行 RCRA、不执行工具、不裁决取消与运行终态。",
+            "不持久化 Session、不代理 Store；通信请求序号不是 Session revision。",
+          ],
+          relation:
+            "TS ↔ ACP 管道 ↔ Peri：控制与宿主 MCP 能力语义不同，但共享管道。Store 读写和外部 MCP 直连不经 ACP；管道不是业务服务进程。",
+          rule: "MCP over ACP 复用既有协议能力，不重设计承载；Session 引用相关 schema 与具体协议版本仍需核对。",
+        },
+        host: {
+          title: "TS Host",
+          subtitle: "ACP 宿主与业务控制面",
+          status: "confirmed",
+          owns: [
+            "创建、配置和关闭主 Agent 进程；跨主 Agent 业务编排。进程内 SubAgent / Workflow 标准语义由 Peri 提供。",
+            "通过 ACP 提供配置、消息和 Session 标识或引用；消费 Run 流。",
+          ],
+          not: [
+            "不读取完整 Session、不提交 diff、不代理 Store。",
+            "不重写 RCRA，不以本地缓存裁决运行终态。",
+          ],
+          relation:
+            "ACP 是 TS 与 Peri 的通信协议。仅 Session 使用引用；systemPrompt、模型、MCP JSON 与消息仍由 TS 提供。",
+          rule: "TS 持引用，不搬运权威 Session 状态。",
+        },
+        run: {
+          title: "Run",
+          subtitle: "一次执行关系；不是服务进程",
+          status: "proposed",
+          owns: [
+            "关联 Agent、sessionRef 与输入；TS 持 handle。",
+            "ACP 内容流、wait 与 cancel；Core 执行和裁决终态。",
+          ],
+          not: [
+            "不是 Session 快照或存储容器。",
+            "wait 不隐含未定义的持久化保证。",
+          ],
+          relation:
+            "Peri 根据引用直读 Store，执行并提交状态；TS 只观察结果与流。",
+          rule: "内容已展示 ≠ 状态已提交。",
+        },
+        core: {
+          title: "Agent Core",
+          subtitle: "主 Agent 与进程内 SubAgent 复用的执行机制",
+          status: "confirmed",
+          owns: [
+            "RCRA、模型适配与 MCP Client 执行面。",
+            "直接读取 / 提交 Session Store；建议保留上下文预算、取消与工具准入。",
+          ],
+          not: [
+            "不内置业务 Skills，不把 TS 当状态代理。",
+            "不决定 Session 删除策略，不把准入误当环境隔离。",
+          ],
+          relation:
+            "Core 可独立运行；SubAgent 在进程内复用它；Workflow 基于 SubAgent。ACP 接收输入，Core 直读 Store，MCP 接入能力。",
+          rule: "Core 驱动执行；Session 生命周期独立。",
+        },
+        client: {
+          title: "MCP Client",
+          subtitle: "Peri 持有的连接与调用资源",
+          status: "confirmed",
+          owns: ["按 MCP JSON 连接、协商、发现、调用和关闭。"],
+          not: [
+            "不要求 TS Client 预连接和二次代理。",
+            "不是 Sandbox，不拥有外部服务与环境的部署生命周期。",
+          ],
+          relation:
+            "外部 MCP Server 按配置直连；TS 托管的 Server 经 MCP over ACP 调用。需要环境的操作仍由 Server 派发。",
+          rule: "Peri → MCP Server → Sandbox，协议边界与环境边界分开。",
+        },
+        model: {
+          title: "模型服务",
+          subtitle: "推理响应，不持有本地执行状态",
+          status: "confirmed",
+          owns: ["响应模型请求，生成内容与工具调用意图。"],
+          not: ["不直接读写 Session Store。", "不裁决工具权限与执行生命周期。"],
+          relation: "由 Peri 模型适配层调用，响应回到 RCRA。",
+          rule: "模型服务不是 MCP 工具，也不是 Session 所有者。",
+        },
+        server: {
+          title: "MCP Server",
+          subtitle: "统一外扩能力提供面",
+          status: "confirmed",
+          owns: [
+            "Tools / Resources / Prompts / Skills / 领域服务；官方 Builtin MCP 提供 Cron、文件、Shell。",
+            "需执行环境的工具操作派发至后方 Sandbox，返回结果。",
+          ],
+          not: [
+            "不是 Sandbox，不持有 RCRA 终态。",
+            "静态 Skill 或资源读取不必进入执行环境。",
+          ],
+          relation:
+            "前端通过 MCP 服务 Peri；后端派发协议待设计。Skill 发现与激活表达仍需约定。",
+          rule: "MCP 内容不能提升 Core 的执行权限。",
+        },
+        "ts-mcp": {
+          title: "TS McpServer",
+          subtitle: "能力服务角色，不是 Sandbox",
+          status: "confirmed",
+          owns: [
+            "暴露业务回调、应用数据或跨 Agent 协作能力。",
+            "复用 MCP over ACP，在既有 ACP 通信管道中提供能力，无需额外 endpoint。",
+          ],
+          not: [
+            "不接管 Peri MCP Client，不是隔离执行环境。",
+            "不在工具回调中等待当前同一个 Run 完成。",
+          ],
+          relation:
+            "Peri MCP Client 经 ACP 管道中的 MCP over ACP 反向调用 TS Server，结果原路返回。若需执行环境，仍由能力服务后方提供。",
+          rule: "控制与能力是不同逻辑用途，共用 ACP 管道；不另设计桥接协议。",
+        },
+        session: {
+          title: "Session",
+          subtitle: "Store 保存的独立状态，不是中转服务",
+          status: "confirmed",
+          owns: [
+            "可独立存续的执行状态。",
+            "消息、工具结果、压缩产物、Skill 引用为建议内容。",
+          ],
+          not: [
+            "不持有模型连接、MCP Client 或 Agent 进程。",
+            "不是 TS 搬运的快照，也不随 Agent.close() 删除。",
+          ],
+          relation:
+            "TS 只提供 sessionRef；Peri 直接通过 Session Store 读取和提交。Session 本身是状态实体。",
+          rule: "状态独立，不等于另一个 RPC 服务。",
+        },
+        store: {
+          title: "Session Store",
+          subtitle: "Peri 直连的状态读写与持久化面",
+          status: "confirmed",
+          owns: [
+            "保存独立 Session 状态，接受 Peri 直接读取与提交。",
+            "版本、冲突和提交约束的具体协议仍待设计。",
+          ],
+          not: [
+            "不经 TS 转发快照或 diff，不驱动 RCRA。",
+            "部署形态待定，不要求一定是远程服务。",
+          ],
+          relation:
+            "Peri 依据 sessionRef 访问状态；storeRef 的解析、鉴权和错误语义待设计。",
+          rule: "读写主体已确定为 Peri；存储协议与提交时点待定。",
+        },
+        sandbox: {
+          title: "Sandbox",
+          subtitle: "MCP Server 后方的执行环境",
+          status: "confirmed",
+          owns: [
+            "承载工具操作所需的执行环境与资源边界。",
+            "本地受控环境、容器、远端环境是示意选项，不是实现承诺。",
+          ],
+          not: [
+            "不是 MCP Server / TS 宿主，不驱动 RCRA。",
+            "不代替 Core 准入，也不代表已经实现安全隔离。",
+          ],
+          relation:
+            "Server 派发需环境的操作并取回结果；静态资源可不进入环境。建议由 MCP 部署或环境提供方管理生命周期。",
+          rule: "派发协议与环境所有权细节待定，不自动随 TS Agent 回收。",
+        },
+      };
+      const statusText = {
+        confirmed: "已明确方向",
+        proposed: "建议方案",
+        open: "待决契约",
+      };
+      function setList(id, values) {
+        const list = document.getElementById(id);
+        list.replaceChildren(
+          ...values.map((value) => {
+            const item = document.createElement("li");
+            item.textContent = value;
+            return item;
+          }),
+        );
+      }
+      function selectEntity(id) {
+        const entity = entities[id];
+        if (!entity) return;
+        document.querySelectorAll(".node").forEach((node) => {
+          const selected = node.dataset.node === id;
+          node.setAttribute("aria-pressed", String(selected));
+          node.setAttribute(
+            "aria-label",
+            entities[node.dataset.node].title +
+              (selected ? "，当前选中" : "，查看职责"),
+          );
+        });
+        document.getElementById("entity-title").textContent = entity.title;
+        document.getElementById("entity-subtitle").textContent =
+          entity.subtitle;
+        const status = document.getElementById("entity-status");
+        status.textContent = statusText[entity.status];
+        status.className = "tag " + entity.status;
+        setList("entity-owns", entity.owns);
+        setList("entity-not", entity.not);
+        document.getElementById("entity-relation").textContent =
+          entity.relation;
+        document.getElementById("entity-rule").textContent = entity.rule;
+      }
+      document.querySelectorAll(".node").forEach((node) => {
+        node.addEventListener("click", () => selectEntity(node.dataset.node));
+        node.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectEntity(node.dataset.node);
+          }
+        });
+      });
+      function setFilter(filter) {
+        document
+          .querySelectorAll("[data-filter]")
+          .forEach((button) =>
+            button.setAttribute(
+              "aria-pressed",
+              String(button.dataset.filter === filter),
+            ),
+          );
+        document
+          .querySelectorAll(".edge")
+          .forEach((edge) =>
+            edge.classList.toggle(
+              "is-dim",
+              filter !== "all" &&
+                edge.dataset.flow !== filter &&
+                edge.dataset.also !== filter,
+            ),
+          );
+        const labels = {
+          all: "显示全部关系",
+          control: "突出 ACP 控制、引用与事件",
+          execution: "突出外部 MCP 直连、宿主 MCP over ACP 与 Sandbox 执行链",
+          state: "突出 ACP 引用 → Core → Store → Session；状态不经 TS",
+        };
+        document.getElementById("view-note").textContent =
+          labels[filter] + "；筛选仅改变视图，不改变架构。";
+      }
+      document
+        .querySelectorAll("[data-filter]")
+        .forEach((button) =>
+          button.addEventListener("click", () =>
+            setFilter(button.dataset.filter),
+          ),
+        );
+      const steps = [
+        {
+          title: "选择引用，配置执行者",
+          status: "confirmed",
+          description:
+            "TS 持有 sessionRef / storeRef，创建一个 Peri 进程，经 ACP 提供 systemPrompt、cwd、模型与 MCP JSON。TS 不创建或读取完整 Session 状态。",
+          owner: "控制方：TS Host",
+          boundary: "未知引用创建还是拒绝：待决",
+          actors: ["引用 + 配置", "→", "ACP 通信管道", "→", "Peri Agent"],
+        },
+        {
+          title: "ACP 发送引用和输入",
+          status: "confirmed",
+          description:
+            "send 经 ACP 传递 sessionRef 与结构化内容，TS 获得 Run handle。协议已确定，sessionRef 等新增方法 / schema 仍是目标草图，不宣称当前 ACP 已支持。",
+          owner: "TS 持有 Run handle",
+          boundary: "仅 Session 用引用，消息仍可直接发送",
+          actors: ["TS 输入", "→", "ACP 管道 · send", "→", "Core / Run"],
+        },
+        {
+          title: "Core 直接读取 Session Store",
+          status: "confirmed",
+          description:
+            "Peri 解析引用并直连 Store，读取执行所需的 Session 状态与组织上下文。不经 TS 搬运快照，也不把 Session 当中转服务。",
+          owner: "直接读取方：Peri",
+          boundary: "Store 协议 / 版本 / 鉴权待设计",
+          actors: ["Peri Core", "→", "Session Store", "→", "状态返回 Core"],
+        },
+        {
+          title: "MCP 能力进入后方执行环境",
+          status: "confirmed",
+          description:
+            "RCRA 调用模型；外部 Server 由 Peri MCP Client 按配置直连，TS Server 则通过 MCP over ACP 复用同一 ACP 管道调用。需执行环境的操作由 Server 派发至 Sandbox；静态 Skill / 资源读取不必进入环境。",
+          owner: "循环：Core；能力：MCP Server",
+          boundary: "MCP over ACP 复用协议，不自建桥接",
+          actors: [
+            "Peri MCP Client",
+            "⇄",
+            "ACP · MCP over ACP",
+            "⇄",
+            "TS McpServer",
+          ],
+        },
+        {
+          title: "ACP 内容流返回 TS",
+          status: "confirmed",
+          description:
+            "文本、思考、工具调用与结果经 ACP 返回 Run handle。应用可以实时呈现；流式内容并非完整 Session 快照，也不能证明状态已持久化。",
+          owner: "协议：ACP；消费：TS / UI",
+          boundary: "内容流 ≠ 提交确认",
+          actors: ["Peri Core", "→", "ACP 管道 · 内容流", "→", "TS Run handle"],
+        },
+        {
+          title: "Core 直接向 Store 提交",
+          status: "confirmed",
+          description:
+            "状态写入主体已确定为 Peri，直接提交 Session Store。此步骤可在执行中多次发生；提交时点、单写者、CAS、失败和取消后保留什么仍待设计。",
+          owner: "直接提交方：Peri",
+          boundary: "提交时点 / 事务保证待决",
+          actors: [
+            "Core 状态变化",
+            "→",
+            "Session Store",
+            "→",
+            "持久化 Session",
+          ],
+        },
+        {
+          title: "ACP 终态抵达 Run.wait()",
+          status: "proposed",
+          description:
+            "Core 裁决完成、取消或失败，经 ACP 将终态交给 Run.wait()。TS 得到结果而非接管状态；Agent 关闭后 Session 仍存于 Store，持久化保证由提交契约明确。",
+          owner: "终态裁决：Core",
+          boundary: "wait 与持久化保证的关系待决",
+          actors: ["Core 终态", "→", "ACP 通信管道", "→", "Run.wait()"],
+        },
+      ];
+      let stepIndex = 0;
+      function showStep(index) {
+        stepIndex = Math.max(0, Math.min(steps.length - 1, index));
+        const step = steps[stepIndex];
+        document
+          .querySelectorAll("[data-step]")
+          .forEach((button) =>
+            button.setAttribute(
+              "aria-pressed",
+              String(Number(button.dataset.step) === stepIndex),
+            ),
+          );
+        for (const [id, key] of [
+          ["step-title", "title"],
+          ["step-description", "description"],
+          ["step-owner", "owner"],
+          ["step-boundary", "boundary"],
+        ])
+          document.getElementById(id).textContent = step[key];
+        const status = document.getElementById("step-status");
+        status.className = "tag " + step.status;
+        status.textContent = statusText[step.status];
+        document.getElementById("step-flow").replaceChildren(
+          ...step.actors.map((actor) => {
+            const span = document.createElement("span");
+            span.className = ["→", "←", "⇄"].includes(actor)
+              ? "flow-arrow"
+              : "flow-actor";
+            span.textContent = actor;
+            return span;
+          }),
+        );
+        document.getElementById("prev").disabled = stepIndex === 0;
+        document.getElementById("next").disabled =
+          stepIndex === steps.length - 1;
+        document.getElementById("step-count").textContent =
+          "步骤 " +
+          (stepIndex + 1) +
+          " / " +
+          steps.length +
+          " · 手动切换，不自动播放";
+      }
+      document
+        .querySelectorAll("[data-step]")
+        .forEach((button) =>
+          button.addEventListener("click", () =>
+            showStep(Number(button.dataset.step)),
+          ),
+        );
+      document
+        .getElementById("prev")
+        .addEventListener("click", () => showStep(stepIndex - 1));
+      document
+        .getElementById("next")
+        .addEventListener("click", () => showStep(stepIndex + 1));
+      document.getElementById("reset").addEventListener("click", () => {
+        setFilter("all");
+        selectEntity("session");
+        showStep(0);
+      });
+      let printDetails = [];
+      window.addEventListener("beforeprint", () => {
+        printDetails = [...document.querySelectorAll("details")].map(
+          (element) => ({ element, open: element.open }),
+        );
+        printDetails.forEach(({ element }) => {
+          element.open = true;
+        });
+      });
+      window.addEventListener("afterprint", () => {
+        printDetails.forEach(({ element, open }) => {
+          element.open = open;
+        });
+      });
+      document
+        .getElementById("print")
+        .addEventListener("click", () => window.print());
+    </script>
+  </body>
+</html>

@@ -1,0 +1,49 @@
+{
+  "fixture_schema": "sandbox-mcp/tool-schema-fixture-v1",
+  "tool": "Bash",
+  "aliases": [
+    "Shell"
+  ],
+  "namespace": "execution",
+  "description": "Executes a given shell command and returns its output.\n\nUsage:\n- Each invocation starts a new shell in the tool's configured working directory. A `cd` in one invocation does not change the starting directory of later invocations; use `cd \"path\" && command` within the same invocation when needed. Shell variables and other shell state do not persist between invocations. Do not assume user profile files are loaded; see the platform-specific shell invocation below.\n- IMPORTANT: Avoid using this tool to run find, grep, cat, head, tail, sed, awk, or echo commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task\n- Instead, use the appropriate dedicated tool which will provide a much better experience for the user:\n  - File search: Use Glob (NOT find or ls)\n  - Content search: Use Grep (NOT grep or rg)\n  - Read files: Use Read (NOT cat/head/tail)\n  - Edit files: Use Edit (NOT sed/awk)\n  - Write files: Use Write (NOT echo/cat with redirect)\n- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). Foreground commands default to 15000ms (15 seconds) to encourage efficient commands; background tasks (run_in_background: true) run until completion unless timeout is explicitly set. Set `timeout: 0` to disable the timeout entirely\n- When issuing multiple commands, use && to chain them together rather than using separate tool calls if the commands depend on each other\n- For builds, installs, or tests that may exceed 15s, set a longer `timeout` value (e.g. `timeout: 300000` for 5 minutes). Only use `run_in_background: true` for truly long-running processes like dev servers or watchers that should keep running while you continue work.\n\nTimeout behavior:\n- Foreground timeout returns a timeout error, but does not always terminate the process. When background task registration is available and succeeds, the process continues as a background task; the result includes its `task_id` and `pid`. The foreground timeout is not a new deadline for that continued task.\n- If background task registration is unavailable or fails, foreground timeout requests process termination.\n- For commands explicitly started with `run_in_background: true`, a positive `timeout` requests process termination when reached. Omitting `timeout` or setting it to `0` leaves that background command without a timeout.\n- Read the returned process status before retrying. If it says the process is still running, track that task or explicitly stop it before starting a replacement.\n\nPlatform behavior:\n- Windows: uses powershell -NoProfile -NoLogo -NonInteractive -Command to execute commands\n- Unix/macOS: uses bash -c to execute commands\n- On Unix, child processes run in their own process group. When termination is requested, cleanup targets the process group; this does not apply to a foreground timeout that continues in the background.\n- On Windows, termination uses taskkill for the PowerShell process tree; Unix process-group semantics do not apply.\n- The command's stdin is redirected to /dev/null: interactive commands (read, prompts, editors, stdio services waiting on stdin) fail fast with an EOF error instead of hanging until timeout. Do not rely on terminal input; provide input via pipes or files instead\n\nOutput handling:\n- Output exceeding 2000 lines is truncated (head + tail preserved)\n- Output exceeding 65000 bytes is truncated\n- Non-zero exit codes are reported\n- Both stdout and stderr are captured\n\nBackground mode (run_in_background: true):\n- Returns immediately with a `task_id`, the process `pid` of the background shell, and log file paths for live output\n- To stop the task, run another shell command with `kill <pid>` (use `kill -- -<pid>` to kill the whole process group including child processes)\n- Read the stdout/stderr log files at any time (they append while the command runs); monitor status and output preview in the Tasks panel\n- The full captured output also arrives via a completion notification when the task finishes\n",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "The bash command (and optional arguments) to execute. This can be complex commands that use pipes, &&, or other shell features. For multiple dependent commands, chain them with && rather than making separate calls"
+      },
+      "timeout": {
+        "type": "number",
+        "description": "Optional timeout in milliseconds (default 15s for foreground; no default timeout for explicit background tasks; 0 = no timeout; max 600000). Foreground timeout returns an error: if background task registration succeeds, the process continues in the background with a task_id and pid, without a new timeout; otherwise termination is requested. A positive timeout on an explicit background task requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a higher timeout (e.g. 300000 for 5 minutes)."
+      },
+      "run_in_background": {
+        "type": "boolean",
+        "description": "If true, runs the command in the background and returns immediately with a task_id. Only use for long-running servers, watchers, or daemons. For builds/installs/tests, prefer a longer timeout instead."
+      }
+    },
+    "required": [
+      "command"
+    ]
+  },
+  "host_projection": {
+    "base_tool_timeout_ms": null,
+    "output_char_limit_chars": 10000,
+    "prefers_persist": false,
+    "note": "output_char_limit=10000 由 Peri Agent 层消费（execution.rs:457），是宿主投影而非 MCP 工具内部截断；工具内部上限为 65000 字节/2000 行，两层都必须登记。"
+  },
+  "required_error_messages": {
+    "command": "Missing command parameter"
+  },
+  "param_alias_groups": [],
+  "business_error_rule": "缺失 command、spawn 失败、非零退出、非法 timeout 均为 tool business error；Bash 公开输入严格保持 command/timeout/run_in_background 三字段，任务控制不得新增输入字段。",
+  "provenance": {
+    "source_file": "peri-middlewares/src/middleware/terminal.rs",
+    "source_symbol": "BashTool::parameters",
+    "source_sha256": "b533194dd4350494967635c67c01c893248087e571c0c708d3fd85755f9fc3d3",
+    "schema_macro_start_line": 208,
+    "description_file": "peri-middlewares/src/middleware/descriptions/bash.md",
+    "description_symbol": "BashTool::description",
+    "description_sha256": "07083add18f3776e650ffa809071ef580cd88c2a5e8e487b6ed446f34a5c3c2c"
+  }
+}

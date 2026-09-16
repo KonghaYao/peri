@@ -6,7 +6,9 @@ use serde_json::Value;
 use super::artifact::{WORKFLOW_BUILD_ID, WORKFLOW_PROTOCOL_VERSION};
 use super::WorkflowInput;
 use crate::error::WorkflowError;
-use crate::protocol::{AgentRunParams, JournalEntry, WorkflowDoneParams, WorkflowStartParams};
+use crate::protocol::{
+    AgentRunParams, AgentRunResult, JournalEntry, WorkflowDoneParams, WorkflowStartParams,
+};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +85,26 @@ pub(super) fn workflow_start_params(
         resume,
         cwd: cwd.to_string(),
     }
+}
+
+/// Resume only the deterministic prefix that was actually completed.
+///
+/// A dead/skipped result is a failed cache boundary: the engine cannot safely
+/// reuse later entries because the script's subsequent call sequence depends on
+/// the missing output. Keeping the prefix (rather than filtering individual
+/// entries) makes the next call live and preserves cache identity for the
+/// entries before it.
+pub(super) fn reusable_journal_prefix(mut entries: Vec<JournalEntry>) -> Vec<JournalEntry> {
+    entries.sort_by_key(|entry| entry.seq);
+    let mut prefix = Vec::new();
+    for (expected_seq, entry) in entries.into_iter().enumerate() {
+        let expected_seq = u64::try_from(expected_seq).expect("journal prefix index fits in u64");
+        if entry.seq != expected_seq || !matches!(entry.result, AgentRunResult::Ok { .. }) {
+            break;
+        }
+        prefix.push(entry);
+    }
+    prefix
 }
 
 // ─── Journal RPC 参数反序列化 ───────────────────────────────────

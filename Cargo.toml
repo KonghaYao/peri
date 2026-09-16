@@ -6,6 +6,7 @@ members = [
     "peri-controller",
     "peri-middlewares",
     "peri-model",
+    "peri-process",
     "peri-resources",
     "peri-runtime",
     "peri-tui",

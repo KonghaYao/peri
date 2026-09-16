@@ -133,6 +133,8 @@ impl SessionManager {
             idle_suspended: Arc::new(AtomicBool::new(false)),
             mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
             command_registry: self.build_command_registry(cwd),
+            mcp_subscription: self.inner.mcp_subscription.clone(),
+            dynamic_mcp_deployment: self.inner.dynamic_mcp.clone(),
             dynamic_mcp_close: self
                 .inner
                 .dynamic_mcp

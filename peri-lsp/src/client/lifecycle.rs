@@ -53,13 +53,17 @@ impl Startup<'_> {
 impl Drop for Startup<'_> {
     fn drop(&mut self) {
         if !self.finished {
-            self.fail(&LspError::RequestFailed {
-                method: "initialize".into(),
-                reason: "启动调用已取消".into(),
-            });
+            self.dispatcher.begin_close();
+            let mut connection = self.client.connection.write();
+            if connection
+                .registered
+                .as_ref()
+                .is_some_and(|registered| Arc::ptr_eq(&registered.dispatcher, &self.dispatcher))
+            {
+                connection.state = ServerState::Error("启动调用已取消".into());
+            }
         }
-        // Dropping the last dispatcher reference aborts tasks/kills the process;
-        // successful and explicit error paths perform their awaited cleanup below.
+        // Keep the registered dispatcher available for shutdown/restart to finish its drain.
     }
 }
 
@@ -77,16 +81,18 @@ impl LspClient {
         let previous = {
             let mut connection = self.connection.write();
             connection.state = ServerState::Starting;
-            connection.registered.take()
+            connection.registered.clone()
         };
         if let Some(previous) = previous {
             previous.dispatcher.close().await;
+            self.connection.write().registered = None;
             self.diagnostics.clear_all();
         }
-        let transport = match crate::jsonrpc::transport::LspTransport::spawn(
+        let mut transport = match crate::jsonrpc::transport::LspTransport::spawn(
             &self.command,
             &self.args,
             &self.env,
+            std::path::Path::new(&crate::uri::uri_to_path(root_uri)),
         ) {
             Ok(transport) => transport,
             Err(error) => {
@@ -94,6 +100,7 @@ impl LspClient {
                 return Err(error);
             }
         };
+        let startup_error = transport.startup_error.take();
         let (dispatcher, rx) = MessageDispatcher::new(transport);
         let dispatcher = Arc::new(dispatcher);
         let diagnostics = self.diagnostics.clone();
@@ -154,6 +161,9 @@ impl LspClient {
         };
         startup.dispatcher.start_dispatch_loop(rx);
         let result = async {
+            if let Some(error) = startup_error {
+                return Err(error);
+            }
             let workspace_uri = root_uri
                 .parse()
                 .unwrap_or_else(|_| "file:///tmp".parse().unwrap());
@@ -194,8 +204,8 @@ impl LspClient {
                 Ok(())
             }
             Err(error) => {
-                startup.fail(&error);
                 startup.dispatcher.close().await;
+                startup.fail(&error);
                 Err(error)
             }
         }

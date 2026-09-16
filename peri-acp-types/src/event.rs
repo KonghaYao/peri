@@ -114,6 +114,10 @@ pub struct BackgroundTaskResult {
     /// SQLite child thread ID（uuid7），用于 TUI 聚焦时 load_messages
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_thread_id: Option<String>,
+    /// Safe child failure facts retained for the parent model and ACP
+    /// projections. Raw child errors never enter this DTO.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_failure: Option<crate::error::SafeSubagentFailure>,
 }
 
 impl BackgroundTaskResult {
@@ -144,6 +148,10 @@ impl BackgroundTaskResult {
                 id, id
             ));
         }
+        if let Some(failure) = &self.subagent_failure {
+            text.push_str("\nmodel-visible failure facts:\n");
+            text.push_str(&failure.render_model_summary());
+        }
         text
     }
 }
@@ -153,6 +161,39 @@ impl BackgroundTaskResult {
 pub struct CompactFileInfo {
     pub path: String,
     pub lines: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BackgroundTaskResult;
+
+    #[test]
+    fn background_failure_notification_contains_safe_model_facts() {
+        let failure = crate::error::SafeSubagentFailure::new(
+            "child-123",
+            crate::error::SafeModelErrorDiagnostic::from_model(
+                peri_model::ModelError::http_status(429, "provider.example", Some("req-123"))
+                    .diagnostic(),
+            ),
+        )
+        .expect("safe child failure");
+        let result = BackgroundTaskResult {
+            task_id: "task-123".into(),
+            agent_name: "worker".into(),
+            prompt_summary: "prompt summary".into(),
+            success: false,
+            output: "An LLM API error occurred (HTTP 429). Please try again.".into(),
+            tool_calls_count: 1,
+            duration_ms: 1,
+            timed_out: false,
+            child_thread_id: Some("child-123".into()),
+            subagent_failure: Some(failure),
+        };
+        let notification = result.to_notification();
+        assert!(notification.contains("model_error_status: 429"));
+        assert!(notification.contains("model_error_request_id: req-123"));
+        assert!(!notification.contains("prompt summary"));
+    }
 }
 
 /// Todo 列表条目（用于 ExecutorEvent::TodoUpdate）
@@ -390,6 +431,8 @@ pub enum ExecutorEvent {
         output: String,
         is_error: bool,
         source_agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent_failure: Option<crate::error::SafeSubagentFailure>,
     },
     /// 状态快照（含完整的消息历史），用于持久化和断点续跑
     StateSnapshot(Vec<crate::messages::BaseMessage>),
@@ -495,6 +538,8 @@ pub enum ExecutorEvent {
         max_attempts: usize,
         delay_ms: u64,
         error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<crate::error::SafeModelErrorDiagnostic>,
     },
     /// 后台 agent 任务完成（TUI 使用，用于空闲时通知）
     BackgroundTaskCompleted(BackgroundTaskResult),
@@ -513,6 +558,8 @@ pub enum ExecutorEvent {
         is_error: bool,
         /// 唯一实例标识符
         instance_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent_failure: Option<crate::error::SafeSubagentFailure>,
     },
     /// 上下文压缩开始
     CompactStarted {

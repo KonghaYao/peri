@@ -3945,6 +3945,7 @@ dependencies = [
  "parking_lot",
  "peri-acp-types",
  "peri-model",
+ "peri-process",
  "peri-resources",
  "serde",
  "serde_json",
@@ -3993,6 +3994,7 @@ dependencies = [
  "fs2",
  "libc",
  "parking_lot",
+ "peri-process",
  "serde",
  "serde_json",
  "tempfile",
@@ -4000,7 +4002,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4011,6 +4012,7 @@ dependencies = [
  "lsp-types",
  "parking_lot",
  "peri-acp-types",
+ "peri-process",
  "serde",
  "serde_json",
  "tempfile",
@@ -4046,6 +4048,7 @@ dependencies = [
  "peri-agent",
  "peri-js-runtime",
  "peri-model",
+ "peri-process",
  "peri-resources",
  "pulldown-cmark 0.13.4",
  "regex",
@@ -4085,6 +4088,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "peri-process"
+version = "0.2.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "peri-resources"
 version = "0.2.0"
 dependencies = [
@@ -4097,10 +4110,12 @@ dependencies = [
  "peri-workflow",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4229,6 +4244,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-test",
+ "tokio-util",
  "tracing",
  "uuid",
 ]

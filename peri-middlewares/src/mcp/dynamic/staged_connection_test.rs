@@ -339,7 +339,7 @@ async fn failed_credential_cleanup_still_revokes_flow_and_closes_service() {
 }
 
 #[tokio::test]
-async fn active_close_aggregates_credential_and_service_failures_and_is_idempotent() {
+async fn active_close_aggregates_failures_and_retries_the_original_service() {
     let key = instance();
     let (guard, pool, connection, _dir) = failing_credential_guard(key.clone());
     let close_count = Arc::new(AtomicUsize::new(0));
@@ -357,7 +357,7 @@ async fn active_close_aggregates_credential_and_service_failures_and_is_idempote
 
     let repeated = active.close().await.unwrap_err();
     assert_eq!(repeated.code, DynamicMcpErrorCode::ShutdownIncomplete);
-    assert_eq!(close_count.load(Ordering::SeqCst), 1);
+    assert_eq!(close_count.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -402,4 +402,90 @@ async fn dropped_staged_connection_cleanup_is_owner_tracked() {
     release.notify_waiters();
     owner.shutdown().await;
     assert_eq!(close_count.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(unix)]
+const PROCESS_FIXTURE: &str = r#"
+const fs = require('node:fs');
+const child = require('node:child_process').spawn(process.execPath, ['-e', `
+  const fs = require('node:fs');
+  fs.writeFileSync('child-started', process.cwd());
+  setInterval(() => fs.appendFileSync('heartbeat', 'x'), 5);
+`], { stdio: 'ignore' });
+const readline = require('node:readline').createInterface({ input: process.stdin });
+readline.on('line', line => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  // Legacy servers must reject discovery so Auto can fall back to initialize.
+  if (!['initialize', 'tools/list', 'resources/list', 'ping'].includes(request.method)) {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32601, message: 'Method not found' } }) + '\n');
+    return;
+  }
+  let result = {};
+  if (request.method === 'initialize') result = {
+    protocolVersion: '2025-11-25', capabilities: {},
+    serverInfo: { name: 'dynamic-process-fixture', version: '1' },
+  };
+  if (request.method === 'tools/list') result = { tools: [] };
+  if (request.method === 'resources/list') result = { resources: [] };
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+});
+"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dynamic_process_uses_session_cwd_and_close_drains_its_descendant() {
+    let fixture = tempfile::tempdir().unwrap();
+    for name in ["worktree a", "worktree b"] {
+        let cwd = fixture.path().join(name);
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::write(cwd.join("server.js"), PROCESS_FIXTURE).unwrap();
+        let (mut tasks, spawner) = crate::mcp::McpTaskOwner::new();
+        let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner.clone()));
+        pool.bind_execution_cwd(&cwd).unwrap();
+        let config = CanonicalDynamicMcpConfig {
+            transport: CanonicalDynamicMcpTransport::Stdio {
+                command: "node".into(),
+                args: vec!["server.js".into()],
+                env: Default::default(),
+                cwd: None,
+            },
+            timeout_ms: 5_000,
+            protocol_version: None,
+            subscriptions: None,
+        };
+        let staged = prepare_single_server(
+            instance(),
+            Default::default(),
+            &config,
+            &RejectingSecretResolver,
+            spawner,
+            pool.clone(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        let active = staged.commit();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !cwd.join("heartbeat").exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("child-started")).unwrap(),
+            std::fs::canonicalize(&cwd).unwrap().to_str().unwrap()
+        );
+        assert!(!active.process.as_ref().unwrap().is_stopped());
+        tokio::time::timeout(Duration::from_secs(5), active.close())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(active.process.as_ref().unwrap().is_stopped());
+        assert!(active.service.lock().await.is_none());
+        assert!(pool.shutdown().await.is_complete());
+        tasks.shutdown().await;
+    }
 }

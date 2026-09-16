@@ -1,0 +1,53 @@
+{
+  "fixture_schema": "sandbox-mcp/tool-schema-fixture-v1",
+  "tool": "Write",
+  "aliases": [],
+  "namespace": "filesystem",
+  "description": "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path\n- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first\n- ALWAYS prefer editing existing files in the codebase. DO NOT create new files unless explicitly required\n- The file_path parameter must be an absolute path, not a relative path\n- Parent directories are created automatically if they do not exist\n\nNotes:\n- Uses atomic write (write to temp file then rename) to prevent data loss on crash\n- NEVER create documentation files (*.md) or README files unless explicitly requested by the User\n- Only use emojis if the User explicitly requests it. Avoid writing emojis to files unless asked\n- For files longer than 200 lines, consider writing in chunks: use Write for the first chunk, then Write with append=true for subsequent chunks. This reduces context window consumption significantly\n",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "The absolute path to the file to write (must be absolute, not relative)"
+      },
+      "content": {
+        "type": "string",
+        "description": "The full content to write to the file. Either 'content' or 'from_draft' must be provided."
+      },
+      "from_draft": {
+        "type": "string",
+        "description": "A draft id returned in a previous Write error message. Recover the failed write without resending content. Mutually exclusive with 'content'; reuse the original file_path."
+      },
+      "append": {
+        "type": "boolean",
+        "description": "If true, append content to the end of the file instead of overwriting. Use this for writing large files in chunks: first call Write without append to create the file with the initial content, then call Write with append=true to add more content. This avoids sending the entire file content in a single tool call, saving context window space.",
+        "default": false
+      }
+    },
+    "required": [
+      "file_path"
+    ]
+  },
+  "host_projection": {
+    "base_tool_timeout_ms": null,
+    "output_char_limit_chars": null,
+    "prefers_persist": false,
+    "note": "Write 显式覆写 timeout()=None（基类默认 120s 被关闭），记录为事实。"
+  },
+  "required_error_messages": {
+    "file_path": "The 'file_path' parameter is required for the Write tool.",
+    "content|from_draft": "Either 'content' or 'from_draft' must be provided for the Write tool."
+  },
+  "param_alias_groups": [],
+  "business_error_rule": "缺失/互斥参数、未知 draft id、draft 目标不匹配、写入或提交失败均为 tool business error；提交失败必须保留 draft 供恢复。",
+  "provenance": {
+    "source_file": "peri-middlewares/src/tools/filesystem/write.rs",
+    "source_symbol": "WriteFileTool::parameters",
+    "source_sha256": "1ec085c1bfeea430ea88e97ec5e5251d19ef4e76f66b58df48c715af354bd2c5",
+    "schema_macro_start_line": 158,
+    "description_file": "peri-middlewares/src/tools/filesystem/descriptions/write.md",
+    "description_symbol": "WriteFileTool::description",
+    "description_sha256": "16418b62016ba532f0752e15ed72e0ce3906d002ed4789835d284230405ec41d"
+  }
+}

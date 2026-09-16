@@ -292,6 +292,7 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
         name: "Read".to_string(),
         output: "ok".to_string(),
         is_error: false,
+        subagent_failure: None,
     });
     bus.emit_render(RenderEvent::TurnCompleted {
         turn_id: turn1,

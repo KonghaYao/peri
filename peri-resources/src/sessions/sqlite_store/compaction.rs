@@ -4,7 +4,7 @@ use super::{row_mapping::role_of, SqliteThreadStore};
 use anyhow::Result;
 use chrono::Utc;
 use peri_acp_types::{
-    store::{CompactionLifecycle, MessageFlags, ThreadStore},
+    store::{CompactionLifecycle, MessageFlags},
     thread::ThreadId,
 };
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ pub(super) async fn delete_messages(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    store.invalidate_context_cache(thread_id).await?;
+    super::context::invalidate_context_cache(store, thread_id).await?;
     Ok(())
 }
 
@@ -69,7 +69,7 @@ pub(super) async fn update_message_flags(
             .fetch_optional(&store.pool)
             .await?;
     if let Some((tid,)) = thread_id {
-        store.invalidate_context_cache(&tid).await?;
+        super::context::invalidate_context_cache(store, &tid).await?;
     }
 
     Ok(())
@@ -201,7 +201,7 @@ pub(super) async fn delete_messages_since(
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        store.invalidate_context_cache(thread_id).await?;
+        super::context::invalidate_context_cache(store, thread_id).await?;
     }
     Ok(())
 }

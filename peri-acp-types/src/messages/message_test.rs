@@ -88,3 +88,105 @@ fn test_tool_call_id_persistence() {
         unreachable!("Tool 消息反序列化失败");
     }
 }
+
+#[test]
+fn test_tool_execution_evidence_persists_and_legacy_payload_is_unknown() {
+    let evidence = crate::tools::ToolExecutionEvidence {
+        status: crate::tools::ToolExecutionStatus::Failed,
+        exit_code: Some(9),
+        output_ref: Some("/tmp/full-output.txt".into()),
+        output_truncated: true,
+        task_id: None,
+    };
+    let message =
+        BaseMessage::tool_result_with_execution("call-1", "bounded", true, Some(evidence.clone()));
+    let restored: BaseMessage =
+        serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+    let BaseMessage::Tool {
+        execution: Some(restored_evidence),
+        is_error,
+        ..
+    } = restored
+    else {
+        panic!("typed evidence should survive message persistence");
+    };
+    assert!(is_error);
+    assert_eq!(restored_evidence, evidence);
+
+    let mut legacy_json =
+        serde_json::to_value(BaseMessage::tool_result("call-legacy", "old result")).unwrap();
+    legacy_json
+        .as_object_mut()
+        .expect("tool message object")
+        .remove("execution");
+    let legacy: BaseMessage = serde_json::from_value(legacy_json).unwrap();
+    assert!(matches!(
+        legacy,
+        BaseMessage::Tool {
+            execution: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn test_tool_message_roundtrips_safe_retry_failure_facts() {
+    let failure = crate::error::SafeSubagentFailure::new(
+        "child-retry",
+        crate::error::SafeModelErrorDiagnostic::from_model(
+            peri_model::ModelError::retry_exhausted(3, peri_model::RetryErrorKind::HttpStatus)
+                .expect("valid attempts")
+                .diagnostic(),
+        ),
+    )
+    .expect("valid safe child failure");
+    let message = BaseMessage::tool_result_with_execution_and_failure(
+        "call-retry",
+        "child failed after retries",
+        true,
+        None,
+        Some(failure.clone()),
+    );
+    let restored: BaseMessage =
+        serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+    let BaseMessage::Tool {
+        subagent_failure: Some(restored_failure),
+        ..
+    } = restored
+    else {
+        panic!("safe child failure should survive canonical message serde");
+    };
+    assert_eq!(restored_failure, failure);
+    assert_eq!(restored_failure.diagnostic().retry_attempts(), Some(3));
+}
+
+#[test]
+fn test_tool_message_persists_safe_subagent_failure_facts_only() {
+    let failure = crate::error::SafeSubagentFailure::new(
+        "child-123",
+        crate::error::SafeModelErrorDiagnostic::from_model(
+            peri_model::ModelError::http_status(429, "provider.example", Some("req-123"))
+                .diagnostic(),
+        ),
+    )
+    .expect("safe child failure");
+    let message = BaseMessage::tool_result_with_execution_and_failure(
+        "call-1",
+        "child-123\nmodel_error_status: 429",
+        true,
+        None,
+        Some(failure),
+    );
+    let wire = serde_json::to_string(&message).expect("serialize tool message");
+    assert!(wire.contains("child_thread_id"));
+    assert!(wire.contains("model_error_status"));
+    assert!(!wire.contains("request body"));
+    let restored: BaseMessage = serde_json::from_str(&wire).expect("deserialize tool message");
+    assert!(matches!(
+        restored,
+        BaseMessage::Tool {
+            subagent_failure: Some(_),
+            ..
+        }
+    ));
+}

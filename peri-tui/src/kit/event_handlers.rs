@@ -16,12 +16,10 @@ use ratatui_kit::{
     prelude::*,
 };
 
-use peri_acp_types::permission::PermissionMode;
-
 use super::atoms::{
     ACP_STATE, CANCEL_TX, INPUT_AREA_ESC_PREFIX, LAST_CTRL_C_PROCESSED, LAST_ESC_TIME,
-    MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, PERMISSION_MODE_HANDLE,
-    PROVIDER_HIGHLIGHT_UNTIL, QUIT_PENDING_SINCE, SERVICE_SNAPSHOT,
+    MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, PROVIDER_HIGHLIGHT_UNTIL,
+    QUIT_PENDING_SINCE,
 };
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
@@ -166,19 +164,8 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
             Some(GlobalShortcut::CyclePermissionMode) => {
                 *MODE_HIGHLIGHT_UNTIL.state().write() =
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
-                // 执行权限模式循环，并即时推送 SERVICE_SNAPSHOT 避免等待 2s 后台轮询
-                if let Some(mode_handle) = PERMISSION_MODE_HANDLE.get() {
-                    let new_mode = mode_handle.cycle();
-                    let label = match new_mode {
-                        PermissionMode::Default => "default",
-                        PermissionMode::AcceptEdit => "accept-edit",
-                        PermissionMode::AutoMode => "auto-mode",
-                        PermissionMode::Bypass => "bypass",
-                    };
-                    let handle = SERVICE_SNAPSHOT.state();
-                    let mut snap = handle.read().clone();
-                    snap.permission_mode = label.to_string();
-                    *handle.write() = snap;
+                if let Some(client) = crate::kit::atoms::ACP_CLIENT_HANDLE.get() {
+                    crate::kit::permission_mode::cycle(client.as_ref().clone());
                 }
                 EventResult::Consumed
             }

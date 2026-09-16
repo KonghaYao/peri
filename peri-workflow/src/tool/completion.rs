@@ -6,11 +6,44 @@ use crate::{
     runner::{WorkflowInput, WorkflowResult, WorkflowRunner},
 };
 use futures::FutureExt;
+use peri_acp_types::tasks::{ExternalExecutionGuard, TaskManager};
 use std::sync::{Arc, Weak};
 use tokio::{
     sync::{oneshot, watch},
     task::JoinHandle,
 };
+
+/// An unpolled admission has no process to drain. Once execution starts, only
+/// an explicit cleanup result can release the session's external owner.
+pub(super) struct ExecutionOwner {
+    guard: Option<Box<dyn ExternalExecutionGuard>>,
+    started: bool,
+}
+
+impl ExecutionOwner {
+    pub(super) fn admit(manager: Option<&dyn TaskManager>) -> Result<Self, String> {
+        Ok(Self {
+            guard: manager
+                .map(TaskManager::begin_external_execution)
+                .transpose()?,
+            started: false,
+        })
+    }
+
+    fn confirm_stopped(&mut self) {
+        if let Some(guard) = self.guard.as_mut() {
+            guard.confirm_stopped();
+        }
+    }
+}
+
+impl Drop for ExecutionOwner {
+    fn drop(&mut self) {
+        if !self.started {
+            self.confirm_stopped();
+        }
+    }
+}
 
 pub(super) struct RunCompletion {
     pub registry: Weak<WorkflowTaskRegistry>,
@@ -33,36 +66,94 @@ impl RunCompletion {
         runner: Arc<WorkflowRunner>,
         input: WorkflowInput,
         kill: oneshot::Receiver<()>,
-    ) -> (JoinHandle<()>, watch::Receiver<Option<CompletedRun>>) {
+        manager: Option<Arc<dyn TaskManager>>,
+        mut owner: ExecutionOwner,
+    ) -> Result<(JoinHandle<()>, watch::Receiver<Option<CompletedRun>>), String> {
         let (done_tx, done_rx) = watch::channel(None);
         let (completed_tx, completed_rx) = watch::channel(None);
-        let task = tokio::spawn(async move {
+        let completion_manager = manager.clone();
+        let execution_task = async move {
+            owner.started = true;
             // Unwinding must still settle the registered run. Panic content is never published.
-            let execution = std::panic::AssertUnwindSafe(runner.run(
-                self.run_id.clone(),
-                input,
-                self.progress.clone(),
-                self.journal.clone(),
-                done_tx,
-                kill,
-            ))
+            let execution = std::panic::AssertUnwindSafe(async {
+                super::preflight::preflight_validate_script(&input.script)
+                    .await
+                    .map_err(crate::error::WorkflowError::ScriptParse)?;
+                runner
+                    .run(
+                        self.run_id.clone(),
+                        input,
+                        self.progress.clone(),
+                        self.journal.clone(),
+                        done_tx,
+                        kill,
+                    )
+                    .await
+            })
             .catch_unwind()
             .await;
-            match execution {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::warn!(error = %error, "Workflow failed to start"),
-                Err(_) => tracing::warn!("Workflow runner panicked before completion"),
+            let (stopped, execution_error) = match execution {
+                Ok(Ok(())) => (true, None),
+                Ok(Err(error)) => {
+                    let stopped = !matches!(error, crate::error::WorkflowError::CleanupFailed(_));
+                    tracing::warn!(%error, "Workflow execution failed");
+                    (
+                        stopped,
+                        Some(peri_acp_types::session::sanitize_public_error(
+                            &error.to_string(),
+                            2_000,
+                        )),
+                    )
+                }
+                Err(_) => (
+                    false,
+                    Some("workflow runner panicked before cleanup".into()),
+                ),
+            };
+            if stopped {
+                if let Some(manager) = &completion_manager {
+                    manager.confirm_external_execution_stopped(&self.run_id);
+                }
+                owner.confirm_stopped();
             }
-            // Runner cleanup is complete; no second task waits on a raw done channel.
-            let raw = done_rx.borrow().clone().unwrap_or_else(|| WorkflowResult {
-                run_id: self.run_id.clone(),
-                status: "failed".into(),
-                return_value: None,
-                error: Some("workflow process exited before reporting result".into()),
-                post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Failed,
-                delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
-                stderr_tail: None,
-            });
+            // A late cleanup failure must override an earlier raw success result.
+            let raw = if let Some(error) = execution_error {
+                if let Ok(mut state) = self.journal.read_state(&self.run_id) {
+                    state.status = "failed".into();
+                    state.execution_status = peri_acp_types::workflow::ExecutionStatus::Failed;
+                    state.post_processing_status =
+                        peri_acp_types::workflow::PostProcessingStatus::Failed;
+                    state.delivery_status = peri_acp_types::workflow::DeliveryStatus::Blocked;
+                    state.error = Some(error.clone());
+                    let _ = self.journal.write_state(&self.run_id, &state);
+                    self.progress
+                        .apply_event(&crate::protocol::ProgressEvent::RunDone {
+                            run_id: self.run_id.clone(),
+                            status: "failed".into(),
+                            return_value: None,
+                            error: Some(error.clone()),
+                        });
+                }
+                WorkflowResult {
+                    run_id: self.run_id.clone(),
+                    status: "failed".into(),
+                    return_value: None,
+                    error: Some(error),
+                    post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Failed,
+                    delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+                    stderr_tail: None,
+                }
+            } else {
+                done_rx.borrow().clone().unwrap_or_else(|| WorkflowResult {
+                    run_id: self.run_id.clone(),
+                    status: "failed".into(),
+                    return_value: None,
+                    error: Some("workflow process exited before reporting result".into()),
+                    post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Failed,
+                    delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+                    stderr_tail: None,
+                })
+            };
             let stderr_tail = raw.stderr_tail.clone();
             let result = self.project(raw);
             // The task cannot keep the registry alive by holding its own owner.
@@ -74,8 +165,12 @@ impl RunCompletion {
                 result,
                 stderr_tail,
             }));
-        });
-        (task, completed_rx)
+        };
+        let task = match manager {
+            Some(manager) => manager.spawn_owned(Box::pin(execution_task))?,
+            None => tokio::spawn(execution_task),
+        };
+        Ok((task, completed_rx))
     }
 
     fn project(&self, result: WorkflowResult) -> WorkflowTaskResult {

@@ -211,7 +211,12 @@ PTC Adapter 负责：
 
 运行时将通过 identity 校验的 package 缓存在 `~/.peri/ptc/0.2.3`，并直接执行校验后的 `node <entry>`，不得使用 `--eval`/`eval`。缓存缺失或无效时，在跨进程锁保护下安装到 staging，完整校验后原子 rename；Node adapter 必须在读取或执行 source 前完成 `ptc/start` handshake，并同时校验 protocol version 与 build identity，任何缺失或不匹配都 fail closed。
 
-默认路径允许对固定版本 `@peri-code/ptc@0.2.3` 执行受控 npm install。只有固定版本安装失败且调用方显式设置 `PERI_PTC_ALLOW_NPX_FALLBACK=1` 时，才允许精确版本 `npx` fallback；安装与 fallback 都必须使用 private `HOME`/npm cache 和最小环境变量。fallback 开关代表调用方主动接受额外的解析链路风险，不能退化为非精确版本。
+默认路径允许对固定版本 `@peri-code/ptc@0.2.3` 执行受控 npm install。standalone
+无目录入口在安装失败且显式设置 `PERI_PTC_ALLOW_NPX_FALLBACK=1` 时允许精确版本
+`npx` fallback；安装与 fallback 均使用 private `HOME`/npm cache 和最小环境。
+会话入口使用 `execute_in_directory`，原生 Node 文件操作与 tools.* 共用保存的 cwd；
+该入口要求正常准备的本地 artifact，拒绝 npx fallback，避免 npm 因切换 cwd 而读取
+工作区配置。不能退化为非精确版本或在宿主目录执行。
 
 ### 5.5 Effective Tool Dispatcher
 
@@ -314,6 +319,10 @@ JavaScript 执行环境为 ESM-only。Node module 只能在函数体内使用动
 每个 `tools.<name>()` 对应独立 invocation ID 和 pending Promise。Host 必须支持并发请求；Peri dispatcher 决定实际并发和工具级限制。单 invocation 的 `tool/call` 注册与先到达的 `tool/cancel` 消费必须在同一状态临界区完成；未知或迟到 cancel 的预取消状态必须有界，不能随 session 生命周期无限增长。
 
 ### 7.3 取消
+
+会话 TaskManager 持有实际 execution future；调用方停止等待只请求取消，不丢弃
+清理。外部执行 token 在 JS 返回已确认的清理结果后才能结清，`CleanupFailed`
+必须保留未知状态。OS 范围遵循 [会话身份设计](session-workspace-identity.md)。
 
 外层 `RunPtcCode` 取消必须：
 

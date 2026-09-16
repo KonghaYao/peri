@@ -1,6 +1,6 @@
 # peri-acp-types 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11（模块职责拆分与 compact/历史恢复修复合并）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-12（模块职责拆分与 compact/历史恢复修复合并）
 > 依据：peri-acp-types/src/lib.rs、docs/standards/architecture-contracts.md、源码（本 crate 无 CLAUDE.md）
 
 ## 架构速览
@@ -14,6 +14,8 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 改项目、工作区与执行绑定协议 | `src/workspace.rs` + `src/store.rs` + `src/peri_caps.rs` | `ProjectId`、`WorkspaceId`、`SessionBinding`、`ResolvedWorkspace`、`ThreadScope`、`ScopedThreadQuery`、`SessionExecutionLease` | 身份独立于路径；ThreadStore封装发现/验证/lease与SQL scope；Peri扩展经sessionWorkspaceV1显式协商，错误不得当空列表或legacy绑定 |
+| 改后台任务与外部执行排空契约 | `src/tasks.rs` | `TaskManager::{spawn_owned,begin_external_execution,execution_cancel_token,shutdown}`、`ExternalExecutionGuard`、`TaskShutdownReport` | 请求取消与实际停止分开；UI活跃数不是执行证据；确认外部停止不抢先改变Defer/完成事件顺序 |
 | 改用户待发送 wire 契约 | `src/session/user_input.rs` + `src/session/queue.rs` + `src/event_v2/{types,executor_mapping}.rs` | 四类 `UserInput*Request`；`UserInputQueueSnapshot` / `UserInputQueueReceipt`；`withdraw_user_inputs` | generation/revision、稳定输入及命令身份、实际运行 request ID；只精确撤出 UserInput，不影响后台消息；三个 canonical 事件经既有 ACP 链路投影，能力为 `peri.userInputQueue`（ARC-EVENT-001） |
 | 改旧 Compact 上下文的传输兼容 | `src/compact_reminder.rs` + `src/system_reminder.rs` | `legacy_compact_reminders`；`encode_legacy_system_reminder` | 精确识别 plain-text Human 的文件/Skill 回注及摘要格式，仅在模型投影和 ACP replay 出口生成 Legacy reminder；保留数据库原文，分块并转义正文，不提升可信来源；kind 区分 `compact_file` / `compact_skill` / `compact_summary`，供客户端显示简短类型标题 |
 | 改 compact 继承与失败契约 | `src/store.rs` + `src/session/execution.rs` + `src/error.rs` | `InheritedContext`；`ThreadStore::{store_inherited_context,load_inherited_context}`；`PromptResult::default`；`AgentError::CompactBudgetUnrecovered` | 版本化 payload/flags 快照校验版本与 ID 完整性；缺失 PromptResult 默认不可恢复热历史；Full 后持续高压给出安全错误文案；ARC-COMPACT-001 |
@@ -30,6 +32,7 @@
 | 改 cancel 判定 / AgentRuntime 注册表 | `src/session/runtime.rs`（`src/session.rs` 保留 public re-export） | `AgentRuntime`（:12）；`cancel_cascade_agents`（:33）；`cancel_all_agents`（:42）；`cancel_cascade_in`（:49）/`cancel_all_in`（:58） | 注册条目持有 thread_id/token/policy/status；Independent 子 agent 不随父取消，仅随 session 根取消；无新增注册表或 token owner |
 | 改消息队列 / inbox 语义 | `src/session/queue.rs` + `src/session/inbox.rs`（根 session 保留 public re-export） | `MessageQueue::{push,drain_all,has_wake_up,has_pending_defer,needs_mq_continuation}`；`SessionInbox::await_wake`；`InboxHandle::{push,push_batch,push_system_reminder}` | queue 仍是共享 Arc 队列 + Notify；inbox 共享 queue 并独立持有 wake Notify，保留唤醒前后 has_wake_up 检查；kind 独立决定唤醒，source 定位 pending defer；行为回归经 `peri-agent/src/session/queue_test.rs` 挂载为 `session::queue::tests` |
 | 改执行失败 / PromptResult 契约 | `src/session/execution.rs`（根 session 保留 public re-export） | `ExecutionFailure` / `ExecutionFailureKind`；`sanitize_public_error`；`PromptResult`；`TurnTelemetryOutcome::from_result` | fatal 失败 DTO 不派生 serde；公开错误保留原脱敏、限长与 fallback 路径；cancel/max iterations 与 fatal 结果区分，测试在 `src/session_test.rs` |
+| 改跨 Agent 安全失败投影 | `src/error.rs` + `src/messages/message.rs` + `src/event.rs` + `src/tools.rs` | `SafeModelErrorDiagnostic`；`SafeSubagentFailure`；`BaseMessage::tool_result_with_execution_and_failure`；`BackgroundTaskResult::subagent_failure`；`EffectiveToolError::with_subagent_failure` | child identity 与受控 ModelError facts 可进入 canonical tool/background 结果；自定义 serde ingress 重新校验 provider/request-id/child identity；ACP/模型投影只读 allowlist，禁止 raw cause/body/headers/prompt/token |
 | 改 slash 命令契约 | `src/command.rs` + `src/command_handler.rs` | `PromptStopReason`（command.rs:69）；`CommandContext`（:95）；`CommandResult`（:256）；`BgForkRequest`（:272）；`CommandHandler`（command_handler.rs:30，`CommandOutcome` :15） | 命令契约与 handler trait 分离：注册表 `command_registry` 经 lib.rs:38 顶层 re-export（挂载本体在 command.rs 子模块区，避免双份模块实例） |
 
 ## 子系统
@@ -46,10 +49,10 @@
 
 | 功能 | 入口/关键点 |
 | --- | --- |
-| 工具 trait | `BaseTool`（:146）；`is_direct`（:199，默认 false）；`context_retention`（:193，默认 Preserve）；`timeout`（:170，默认 120s）；`aliases`（:176）；`output_char_limit`（:181）；`prefers_persist`（:186）；`title`/`namespace`（:204/:209）；`tool_description` 组装 |
-| 描述契约 | `ToolDefinition`（:37，线上 LLM 投影）；`ToolDescription`（:51，title/namespace 仅进程内与提示词层）；`derive_title_from_name`（:70，CamelCase/snake_case 拆词） |
-| 压缩保留策略 | `ContextRetention`（:113：Preserve/StateBearing/SideEffectReceipt/Recomputable） |
-| 只读上下文 | `ToolContext`（:129，messages + cwd 只读借用）；Todo 契约 `TodoStatus`/`TodoItem`（:15/:24，与 event.rs 同构但独立定义） |
+| 工具 trait | `BaseTool::invoke_output`（默认 legacy `execution=None`）；`ToolOutput::projected_text` / `bounded_text`（live/transcript 共用有界投影）；`ToolOutput` / `ToolExecutionEvidence` / `ToolExecutionStatus`；`is_direct`（默认 false）；`context_retention`（默认 Preserve）；`timeout`（默认 120s）；`aliases`；`output_char_limit`；`prefers_persist`；`title`/`namespace`；`tool_description` 组装 |
+| 描述契约 | `ToolDefinition`（线上 LLM 投影）；`ToolDescription`（title/namespace 仅进程内与提示词层）；`derive_title_from_name`（CamelCase/snake_case 拆词） |
+| 压缩保留策略 | `ContextRetention`：Preserve/StateBearing/SideEffectReceipt/Recomputable |
+| 只读上下文 | `ToolContext`（messages + cwd 只读借用）；`EffectiveToolDispatcher::dispatch_output`（typed wrapper seam）；Todo 契约 `TodoStatus`/`TodoItem`（与 event.rs 同构但独立定义） |
 
 ### session（src/session.rs + 私有 session/ 子模块）
 

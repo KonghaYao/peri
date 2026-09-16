@@ -9,12 +9,12 @@ use tokio_util::sync::CancellationToken;
 
 use super::execution::{collect_tool_results, effective_tool_error};
 use super::StageContext;
-use crate::agent::react::ToolCall;
+use crate::agent::react::{ToolCall, ToolResult};
 use crate::messages::{BaseMessage, ToolCallRequest};
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{
     EffectiveToolCall, EffectiveToolDefinition, EffectiveToolDispatcher, EffectiveToolError,
-    EffectiveToolErrorCode, RUN_PTC_CODE_TOOL_NAME,
+    EffectiveToolErrorCode, ToolOutput, RUN_PTC_CODE_TOOL_NAME,
 };
 
 #[derive(Clone)]
@@ -27,15 +27,12 @@ impl StageEffectiveToolDispatcher {
     pub(super) fn new(context: StageContext, catalog: Arc<SessionToolCatalogSnapshot>) -> Self {
         Self { context, catalog }
     }
-}
 
-#[async_trait::async_trait]
-impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
-    async fn dispatch(
+    async fn dispatch_result(
         &self,
         call: EffectiveToolCall,
         cancel: CancellationToken,
-    ) -> Result<String, EffectiveToolError> {
+    ) -> Result<ToolResult, EffectiveToolError> {
         if call.tool_name.eq_ignore_ascii_case(RUN_PTC_CODE_TOOL_NAME) {
             return Err(EffectiveToolError::new(
                 EffectiveToolErrorCode::ToolFailed,
@@ -78,7 +75,7 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
         )
         .await
         .map_err(effective_tool_error)?;
-        let result = outcome
+        outcome
             .results
             .into_iter()
             .next()
@@ -88,7 +85,18 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
                     EffectiveToolErrorCode::ToolFailed,
                     "tool call produced no result",
                 )
-            })?;
+            })
+    }
+}
+
+#[async_trait::async_trait]
+impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
+    async fn dispatch(
+        &self,
+        call: EffectiveToolCall,
+        cancel: CancellationToken,
+    ) -> Result<String, EffectiveToolError> {
+        let result = self.dispatch_result(call, cancel.clone()).await?;
         if result.is_error {
             let code = result.effective_error_code.unwrap_or_else(|| {
                 if cancel.is_cancelled() {
@@ -97,9 +105,37 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
                     EffectiveToolErrorCode::ToolFailed
                 }
             });
-            return Err(EffectiveToolError::new(code, result.output));
+            let mut error = EffectiveToolError::new(code, result.output);
+            if let Some(failure) = result.subagent_failure {
+                error = error.with_subagent_failure(failure);
+            }
+            return Err(error);
         }
         Ok(result.output)
+    }
+
+    async fn dispatch_output(
+        &self,
+        call: EffectiveToolCall,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput, EffectiveToolError> {
+        let result = self.dispatch_result(call, cancel).await?;
+        if result.is_error && result.execution.is_none() {
+            let mut error = EffectiveToolError::new(
+                result
+                    .effective_error_code
+                    .unwrap_or(EffectiveToolErrorCode::ToolFailed),
+                result.output,
+            );
+            if let Some(failure) = result.subagent_failure {
+                error = error.with_subagent_failure(failure);
+            }
+            return Err(error);
+        }
+        Ok(ToolOutput {
+            text: result.output,
+            execution: result.execution,
+        })
     }
 
     fn tools(&self) -> Vec<EffectiveToolDefinition> {

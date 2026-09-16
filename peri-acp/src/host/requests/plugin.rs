@@ -566,3 +566,31 @@ fn search_marketplace_plugins(
     }
     results
 }
+
+/// Session-local display projection; excludes MCP credentials and plugin option values.
+pub(super) fn handle_session_snapshot(cfg: &AcpServerConfig) -> Result<Value, AcpError> {
+    let plugins = cfg
+        .plugin_loaded
+        .iter()
+        .map(|plugin| {
+            serde_json::json!({
+                "name": plugin.name, "version": plugin.version, "enabled": true,
+                "root": plugin.install_path, "description": plugin.manifest.description.clone(),
+                "marketplace": plugin.marketplace, "author": null,
+                "skills_count": plugin.skills_roots.len(), "commands_count": plugin.commands.len(),
+                "agents_count": plugin.agents_dirs.len(), "mcp_count": plugin.mcp_servers.len(),
+                "install_scope": "session", "load_error": null,
+            })
+        })
+        .collect::<Vec<_>>();
+    let hooks = cfg.hook_groups.iter().flatten().map(|hook| {
+        let command = match &hook.hook {
+            peri_acp_types::hooks::HookType::Command { command, .. } => command.clone(),
+            peri_acp_types::hooks::HookType::Prompt { .. } => "[prompt hook]".into(),
+            peri_acp_types::hooks::HookType::Http { .. } => "[HTTP hook]".into(),
+            peri_acp_types::hooks::HookType::Agent { .. } => "[agent hook]".into(),
+        };
+        serde_json::json!({"event": hook.event, "plugin_name": hook.plugin_name, "command": command, "matcher": hook.matcher})
+    }).collect::<Vec<_>>();
+    Ok(serde_json::json!({"plugins": plugins, "hooks": hooks}))
+}

@@ -636,6 +636,78 @@ async fn test_execute_supports_node_dynamic_import() {
     );
 }
 
+/// [回归测试] 共享 executor 的原生 Node 文件读取必须服从各自会话目录。
+#[tokio::test]
+async fn test_execute_in_directory_isolates_concurrent_native_file_reads() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    std::fs::write(first.path().join("workspace.txt"), "worktree A").unwrap();
+    std::fs::write(second.path().join("workspace.txt"), "worktree B").unwrap();
+    let executor = test_executor("node");
+    let request = JsExecutionRequest {
+        source: "const fs = await import('node:fs/promises'); return await fs.readFile('workspace.txt', 'utf8');".into(),
+        input: Value::Null,
+    };
+    let (first, second) = tokio::join!(
+        executor.execute_in_directory(
+            request.clone(),
+            Arc::new(EchoRouter),
+            CancellationToken::new(),
+            first.path().to_str().unwrap(),
+        ),
+        executor.execute_in_directory(
+            request,
+            Arc::new(EchoRouter),
+            CancellationToken::new(),
+            second.path().to_str().unwrap(),
+        ),
+    );
+    assert_eq!(first.unwrap().value, json!("worktree A"));
+    assert_eq!(second.unwrap().value, json!("worktree B"));
+}
+
+/// [回归测试] npx 的隔离目录不得被会话 cwd 替换后读取项目 npm 配置。
+#[tokio::test]
+async fn test_execute_in_directory_rejects_isolated_npx_fallback_before_spawn() {
+    struct FailedInstaller;
+    #[async_trait]
+    impl Installer for FailedInstaller {
+        async fn install(&self, _: &Path, _: &CancellationToken) -> std::io::Result<bool> {
+            Ok(false)
+        }
+    }
+    struct FallbackProvider(tempfile::TempDir);
+    #[async_trait]
+    impl PtcArtifactProvider for FallbackProvider {
+        async fn launch(&self, node: &str, cancel: &CancellationToken) -> Result<PtcLaunch> {
+            launch_in(node, self.0.path(), &FailedInstaller, true, cancel).await
+        }
+        async fn invalidate(&self) -> Result<()> {
+            panic!("无法提供会话 cwd 不代表已安装 artifact 损坏")
+        }
+    }
+    let cwd = tempfile::tempdir().unwrap();
+    let executor = JsExecutor::with_artifact_provider(
+        "/must-not-spawn/node",
+        JsExecutionLimits::default(),
+        Arc::new(FallbackProvider(tempfile::tempdir().unwrap())),
+    )
+    .unwrap();
+    let error = executor
+        .execute_in_directory(
+            JsExecutionRequest {
+                source: "return 1".into(),
+                input: Value::Null,
+            },
+            Arc::new(EchoRouter),
+            CancellationToken::new(),
+            cwd.path().to_str().unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, JsRuntimeError::ArtifactUnavailable));
+}
+
 #[tokio::test]
 async fn test_execute_classifies_require_as_safe_tool_failure() {
     let error = execute_source("require('node:crypto');").await;

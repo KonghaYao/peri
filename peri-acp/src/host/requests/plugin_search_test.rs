@@ -1,7 +1,7 @@
 //! Real request dispatch against temporary marketplace cache files.
 use super::*;
 
-fn search_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
+async fn search_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
     let config = make_peri_config_with_provider(make_provider_config(
         "fixture",
         "openai",
@@ -9,7 +9,7 @@ fn search_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
         "fixture-model",
     ));
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, tmp);
+    let mut cfg = make_server_config(config, provider, tmp).await;
     let mut manager = MockPluginManager::install_ok("unused");
     manager.cache_dir = tmp.path().join("marketplaces");
     cfg.plugin_manager = Arc::new(manager);
@@ -55,7 +55,7 @@ async fn request_search(cfg: &AcpServerConfig, query: &str) -> Value {
 async fn test_plugin_search_handler_reads_root_and_claude_plugin_layouts() {
     for nested in [false, true] {
         let tmp = tempfile::tempdir().unwrap();
-        let cfg = search_config(&tmp);
+        let cfg = search_config(&tmp).await;
         write_search_catalog(&cfg.plugin_manager.cache_dir(), "local-catalog", nested);
         let response = request_search(&cfg, "COMPILER").await;
         assert_eq!(
@@ -72,7 +72,7 @@ async fn test_plugin_search_handler_reads_root_and_claude_plugin_layouts() {
 #[tokio::test]
 async fn test_plugin_search_handler_matches_marketplace_name() {
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = search_config(&tmp);
+    let cfg = search_config(&tmp).await;
     write_search_catalog(&cfg.plugin_manager.cache_dir(), "team-catalog", false);
     let response = request_search(&cfg, "TEAM-CATALOG").await;
     assert_eq!(response["results"].as_array().unwrap().len(), 1);
@@ -83,7 +83,7 @@ async fn test_plugin_search_handler_matches_marketplace_name() {
 #[tokio::test]
 async fn test_plugin_search_handler_returns_explicit_empty_results_for_no_match() {
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = search_config(&tmp);
+    let cfg = search_config(&tmp).await;
     write_search_catalog(&cfg.plugin_manager.cache_dir(), "team-catalog", false);
     assert_eq!(
         request_search(&cfg, "no-such-entry").await,

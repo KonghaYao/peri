@@ -3,12 +3,13 @@ use std::sync::Arc;
 use peri_acp_types::identity::AgentId;
 use tokio_util::sync::CancellationToken;
 
-use super::types::{SubagentLifecycleStart, SubagentLifecycleStop};
+use super::types::{SubagentFailure, SubagentLifecycleStart, SubagentLifecycleStop};
 use super::util::{count_tool_calls_from_session, extract_last_ai_text};
 use super::v2_bridge::{forward_subagent_start_v1, forward_subagent_stop_v1, V2SubagentContext};
 use super::{
-    build_subagent_start_v2, build_subagent_stop_v2, emit_subagent_start_v2, emit_subagent_stop_v2,
-    BgCleanupGuard, BgStopEmitV2,
+    build_subagent_start_v2, build_subagent_stop_v2, build_subagent_stop_v2_with_failure,
+    emit_subagent_start_v2, emit_subagent_stop_v2_with_failure, BgCleanupGuard, BgStopEmitV2,
+    SubagentStopV2Input,
 };
 use crate::agent::async_tasks::{
     BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind, TaskManager,
@@ -61,7 +62,7 @@ pub(super) async fn spawn_background_subagent(
     let prompt_summary_for_task = prompt_summary.clone();
     let cwd_for_task = cwd.clone();
 
-    let join_handle = tokio::spawn(async move {
+    let execution = async move {
         // S3.1 门控：注册结果（失败时调用方已发 Err；sender 被 drop 同样返回）
         match reg_rx.await {
             Ok(Ok(())) => {}
@@ -158,6 +159,12 @@ pub(super) async fn spawn_background_subagent(
         let loop_result = run_react_loop(context, max_iterations).await;
 
         // 补发 v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error。
+        let stop_failure = match &loop_result {
+            LoopResult::Error(error) => {
+                SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, error)
+            }
+            _ => None,
+        };
         let (stop_result, stop_is_error) = match &loop_result {
             LoopResult::Completed => (
                 extract_last_ai_text(&session)
@@ -168,21 +175,24 @@ pub(super) async fn spawn_background_subagent(
             ),
             LoopResult::Interrupted => ("interrupted".to_string(), true),
             LoopResult::Error(e) => (
-                format!("Background sub-agent failed: {}", e)
+                format!("Background sub-agent failed: {}", e.user_facing_message())
                     .chars()
                     .take(500)
                     .collect::<String>(),
                 true,
             ),
         };
-        emit_subagent_stop_v2(
+        emit_subagent_stop_v2_with_failure(
             &event_bus_for_emit,
-            subagent_turn_id,
-            parent_agent_id,
-            subagent_agent_id,
-            &agent_name_for_task,
-            &stop_result,
-            stop_is_error,
+            SubagentStopV2Input {
+                turn_id: subagent_turn_id,
+                parent_agent_id,
+                child_agent_id: subagent_agent_id,
+                agent_name: &agent_name_for_task,
+                result: &stop_result,
+                is_error: stop_is_error,
+                subagent_failure: stop_failure.clone(),
+            },
         );
         // v1 协议化直发（SubagentStopped）在下方各分支显式执行（Error 分支 / 正常
         // 分支），此处仅闭合 v2 发射：guard drop 时不得重复（P1 防双发）。
@@ -192,7 +202,10 @@ pub(super) async fn spawn_background_subagent(
             LoopResult::Completed => (extract_last_ai_text(&session), false),
             LoopResult::Interrupted => (String::new(), true),
             LoopResult::Error(e) => {
-                let output = format!("Background sub-agent failed: {}", e);
+                let failure =
+                    SubagentFailure::new(&child_thread_id_for_task, &agent_name_for_task, e);
+                let safe_failure = failure.safe_failure();
+                let output = format!("Background sub-agent failed: {}", failure.public_message());
                 // 错误路径：lifecycle hook + thread_store + registry notification
                 if let Some(ref on_stop) = on_subagent_stop {
                     on_stop(&agent_name_for_task, &cwd_for_task, &output, true);
@@ -208,13 +221,14 @@ pub(super) async fn spawn_background_subagent(
                 // 必须在 BackgroundTaskResult 构造之前发射——后者会 move output。
                 forward_subagent_stop_v1(
                     bg_stop_handler.as_ref(),
-                    build_subagent_stop_v2(
+                    build_subagent_stop_v2_with_failure(
                         subagent_turn_id,
                         parent_agent_id,
                         subagent_agent_id,
                         &agent_name_for_task,
                         &output,
                         true,
+                        safe_failure.clone(),
                     ),
                 );
                 let result = crate::agent::events::BackgroundTaskResult {
@@ -227,6 +241,7 @@ pub(super) async fn spawn_background_subagent(
                     duration_ms: started_at.elapsed().as_millis() as u64,
                     child_thread_id: Some(child_thread_id_for_task.clone()),
                     timed_out: false,
+                    subagent_failure: safe_failure,
                 };
                 // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
                 if let Some(ref on_complete) = on_bg_complete {
@@ -290,6 +305,7 @@ pub(super) async fn spawn_background_subagent(
             duration_ms: started_at.elapsed().as_millis() as u64,
             child_thread_id: Some(child_thread_id_for_task.clone()),
             timed_out: false,
+            subagent_failure: None,
         };
         if let Some(ref sender) = bg_event_sender {
             let _ = sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()));
@@ -306,7 +322,11 @@ pub(super) async fn spawn_background_subagent(
         }
         task_manager_spawn.complete(&task_id_for_task, result);
         // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
-    });
+    };
+    let join_handle = peri_acp_types::tasks::TaskManager::spawn_owned(
+        task_manager.as_ref(),
+        Box::pin(execution),
+    )?;
 
     // 注册到 BackgroundTaskRegistry
     let bg_task = BackgroundTask {
