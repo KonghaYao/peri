@@ -117,7 +117,7 @@ pub struct MessageDispatcher {
 }
 
 impl MessageDispatcher {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn process_tree_stopped(&self) -> bool {
         self.tree.is_stopped()
     }
