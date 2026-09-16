@@ -440,3 +440,187 @@ fn test_scan_cwd_files_shallow_caps_at_max() {
     let files = scan_cwd_files_shallow(root.to_str().unwrap());
     assert!(files.len() <= 500, "should cap at 500, got {}", files.len());
 }
+
+mod startup {
+    use super::*;
+    use peri_acp::transport::{mpsc::MpscServerTransport, types::RequestId};
+
+    const SESSION_ID: &str = "00000000-0000-0000-0000-000000000003";
+
+    async fn request(server: &MpscServerTransport, expected: &str) -> RequestId {
+        let message = tokio::time::timeout(Duration::from_millis(10), server.recv())
+            .await
+            .expect("会话就绪后必须立即刷新，不能等待 2 秒 tick")
+            .expect("transport 不应关闭");
+        let IncomingMessage::Request { id, method, .. } = message else {
+            panic!("应收到请求");
+        };
+        assert_eq!(method, expected);
+        id
+    }
+
+    async fn setup() -> (SnapshotSource, MpscServerTransport, tempfile::TempDir) {
+        reset_snapshot_atoms();
+        SERVICE_SNAPSHOT.set(ServiceSnapshot::default());
+        let directory = tempfile::tempdir().unwrap();
+        let (transport, server) = mpsc_transport_pair();
+        let (client, _, _) = AcpTuiClient::new_interactive(transport);
+        let initialize = client.clone();
+        let task = tokio::spawn(async move { initialize.register_ui_commands(&[]).await });
+        let id = request(&server, "initialize").await;
+        server
+            .send_response(
+                id,
+                Ok(json!({"agentCapabilities":{"_meta":{
+                    "peri.sessionWorkspaceV1":true
+                }}})),
+            )
+            .await
+            .unwrap();
+        task.await.unwrap().unwrap();
+        let mut source = make_minimal_source(Some(client));
+        source.cwd = directory.path().to_str().unwrap().into();
+        (source, server, directory)
+    }
+
+    fn start(source: SnapshotSource, shutdown: CancellationToken) -> tokio::task::JoinHandle<()> {
+        // 外部文件扫描在已有独立测试覆盖；调度测试不读取开发者 HOME，也不依赖磁盘耗时。
+        let refresh = SlowSnapshotRefresh {
+            file_cwd: source.cwd.clone(),
+            next_file_scan: Instant::now() + Duration::from_secs(3600),
+            ..isolated_refresh()
+        };
+        tokio::spawn(run_service_snapshot(source, shutdown, refresh))
+    }
+
+    async fn complete_initial_scan(server: &MpscServerTransport, id: RequestId, cwd: &str) {
+        server
+            .send_response(
+                id,
+                Ok(json!({
+                    "version":1,"workspace":workspace_json(cwd),"binding":null
+                })),
+            )
+            .await
+            .unwrap();
+        let id = request(server, "session/list").await;
+        server
+            .send_response(
+                id,
+                Ok(json!({"sessions":[],"_meta":{
+                    "peri.sessionWorkspaceV1":{"threads":[],"nextCursor":null}
+                }})),
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn new_session(source: &SnapshotSource, server: &MpscServerTransport) {
+        let client = source.client.clone().unwrap();
+        let cwd = source.cwd.clone();
+        let task = tokio::spawn(async move { client.new_session(&cwd, None).await });
+        let id = request(server, "session/new").await;
+        server
+            .send_response(id, Ok(json!({"sessionId":SESSION_ID})))
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), SESSION_ID);
+    }
+
+    async fn complete_session_snapshot(server: &MpscServerTransport, model: &str) {
+        // query 使用 join!，两条独立服务请求的先后顺序不属于契约。
+        for _ in 0..2 {
+            let message = tokio::time::timeout(Duration::from_millis(10), server.recv())
+                .await
+                .expect("必须在周期 tick 前查询会话服务")
+                .unwrap();
+            let IncomingMessage::Request { id, method, params } = message else {
+                panic!("应收到会话服务请求");
+            };
+            assert_eq!(params["sessionId"], SESSION_ID);
+            let value = match method.as_str() {
+                "plugin/list" => json!({"plugins":[],"hooks":[]}),
+                "mcp/list" => json!({"servers":[]}),
+                other => panic!("未知请求：{other}"),
+            };
+            server.send_response(id, Ok(value)).await.unwrap();
+        }
+        let id = request(server, "session/metadata").await;
+        server
+            .send_response(
+                id,
+                Ok(json!({
+                    "permissionMode":"bypass","modelAlias":"opus","modelName":model,"effort":"high"
+                })),
+            )
+            .await
+            .unwrap();
+        // 暂停时钟下让所有 ready future 完成，仅推进 1 ms，不触发 2 秒周期。
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    /// [回归测试] 首次快照跨越 session commit 被丢弃后，应消费就绪通知立即重采。
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn test_startup_snapshot_discard_refreshes_before_periodic_tick() {
+        let (source, server, _directory) = setup().await;
+        let shutdown = CancellationToken::new();
+        let task = start(source.clone(), shutdown.clone());
+        let first = request(&server, "peri/session_context").await;
+        new_session(&source, &server).await;
+        complete_initial_scan(&server, first, &source.cwd).await;
+        complete_session_snapshot(&server, "stale-model").await;
+        assert!(
+            SERVICE_SNAPSHOT.state().read().model_name.is_empty(),
+            "目录身份变化后，旧采样不得发布"
+        );
+        complete_session_snapshot(&server, "ready-model").await;
+        let snapshot = SERVICE_SNAPSHOT.state().read().clone();
+        assert_eq!(snapshot.model_name, "ready-model");
+        assert_eq!(snapshot.permission_mode, "bypass");
+        assert_eq!(snapshot.cwd, source.cwd);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), server.recv())
+                .await
+                .is_err(),
+            "就绪通知消费后应回到低频轮询，不能持续查询"
+        );
+        shutdown.cancel();
+        task.await.unwrap();
+        source.client.unwrap().close();
+    }
+
+    /// [回归测试] 即使第一次快照已发布，随后建立会话也应唤醒快照任务。
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn test_startup_session_after_first_snapshot_refreshes_immediately() {
+        let (source, server, _directory) = setup().await;
+        let shutdown = CancellationToken::new();
+        let task = start(source.clone(), shutdown.clone());
+        let first = request(&server, "peri/session_context").await;
+        complete_initial_scan(&server, first, &source.cwd).await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(SERVICE_SNAPSHOT.state().read().cwd, source.cwd);
+        new_session(&source, &server).await;
+        complete_session_snapshot(&server, "ready-model").await;
+        assert_eq!(SERVICE_SNAPSHOT.state().read().model_name, "ready-model");
+        shutdown.cancel();
+        task.await.unwrap();
+        source.client.unwrap().close();
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn test_startup_snapshot_shutdown_cancels_pending_query() {
+        let (source, server, _directory) = setup().await;
+        let shutdown = CancellationToken::new();
+        let task = start(source.clone(), shutdown.clone());
+        let _pending = request(&server, "peri/session_context").await;
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_millis(10), task)
+            .await
+            .expect("退出不得等待未返回的 RPC")
+            .unwrap();
+        source.client.unwrap().close();
+    }
+}

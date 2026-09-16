@@ -76,6 +76,7 @@ lang-unsupported = 不支持的语言: { $lang }
 # ---- Status Bar ----
 
 statusbar-permission-dont-ask = Don't Ask
+statusbar-initializing = 初始化中…
 statusbar-permission-accept-edit = Accept Edit
 statusbar-permission-auto = Auto Mode
 statusbar-permission-bypass = Bypass

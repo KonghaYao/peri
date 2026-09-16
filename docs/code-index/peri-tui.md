@@ -98,7 +98,7 @@
 | 提交/清除/keepgoing 消费者 | kit/submit_consumer.rs | `spawn_submit_consumer`（:46）、`handle_submit`（:91）、`handle_keepgoing_submit`（:202）、`spawn_cancel_consumer`（:412） |
 | 本地请求解析 | kit/submit_request.rs | `parse_submit_request`（:49，/clear、/rewind、/export 等本地命令） |
 | 键盘/鼠标/焦点分发 | kit/event_handlers.rs、focus_router.rs、mouse_router.rs | `register_global_handlers`（event_handlers.rs:74，Ctrl+C 判定 :53）、`register_root_handlers`（:156）；`active_layer`/`classify_global_shortcut`（focus_router.rs:105/:117） |
-| 快照与回写消费者 | kit/service_snapshot.rs、rewind_action.rs、hitl_response.rs、ask_user_action.rs、thread_load_consumer.rs | `spawn_service_snapshot`（:66，CPU/MEM/MCP 2s 轮询）、`spawn_rewind_consumer`（rewind_action.rs:123）、`spawn_hitl_response_consumer`（hitl_response.rs:40）、`spawn_ask_user_consumer`（ask_user_action.rs:47）、`spawn_thread_load_consumer`（thread_load_consumer.rs:30） |
+| 快照与回写消费者 | kit/service_snapshot.rs、rewind_action.rs、hitl_response.rs、ask_user_action.rs、thread_load_consumer.rs | `spawn_service_snapshot`：2s 轮询 + client 执行目录 watch 唤醒，采样跨越 session commit 时保留通知并重采，取消可中止等待中的查询；启动回归在 `service_snapshot_test.rs::startup`。其他入口：`spawn_rewind_consumer`、`spawn_hitl_response_consumer`、`spawn_ask_user_consumer`、`spawn_thread_load_consumer` |
 
 ### 面板与弹窗（src/kit/panels/ + popups/ + overlay）
 

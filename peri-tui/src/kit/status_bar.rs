@@ -539,6 +539,7 @@ fn separator() -> Span<'static> {
 /// 把 atom 中的 permission_mode 字符串映射为显示标签。
 fn permission_mode_display(mode: &str) -> String {
     match mode {
+        "" => i18n::tr("statusbar-initializing"),
         "accept-edit" => i18n::tr("statusbar-permission-accept-edit"),
         "auto-mode" => i18n::tr("statusbar-permission-auto"),
         "bypass" => i18n::tr("statusbar-permission-bypass"),

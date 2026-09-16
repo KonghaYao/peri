@@ -31,7 +31,11 @@ impl AcpTuiClient {
     }
 
     pub(crate) fn current_execution_cwd(&self) -> Option<String> {
-        self.execution_cwd.lock().unwrap().clone()
+        self.execution_cwd.borrow().clone()
+    }
+
+    pub(crate) fn subscribe_execution_cwd(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.execution_cwd.subscribe()
     }
 
     pub(crate) async fn session_context(
@@ -126,13 +130,12 @@ impl AcpTuiClient {
     }
 
     pub(super) fn project_execution_cwd(&self, cwd: Option<String>) {
-        *self.execution_cwd.lock().unwrap() = cwd.clone();
         if self.projection_mode == super::ClientProjectionMode::Interactive {
             crate::kit::atoms::ACTIVE_EXECUTION_CWD.set(cwd.clone());
-            if let Some(cwd) = cwd {
+            if let Some(cwd) = cwd.as_ref() {
                 let state = crate::kit::atoms::SERVICE_SNAPSHOT.state();
                 let mut snapshot = state.write();
-                snapshot.cwd = cwd;
+                snapshot.cwd.clone_from(cwd);
                 snapshot.permission_mode.clear();
                 snapshot.model_alias.clear();
                 snapshot.model_name.clear();
@@ -144,6 +147,9 @@ impl AcpTuiClient {
             crate::kit::atoms::PLUGIN_LIST.state().write().clear();
             crate::kit::atoms::MCP_SERVERS.state().write().clear();
         }
+        // Publish after the complete UI projection. Even the same directory can
+        // belong to a newly loaded session with different mode/model settings.
+        self.execution_cwd.send_replace(cwd);
     }
 }
 
