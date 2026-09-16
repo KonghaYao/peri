@@ -450,7 +450,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                                 .ok()
                                 .and_then(|mut cb2| cb2.get_image().ok())
                             {
-                                let img_bytes = image_bytes.to_vec();
+                                // arboard may already own the clipboard allocation.  Move it
+                                // out instead of cloning every RGBA byte before encoding.
+                                let img_bytes = image_bytes.into_owned();
                                 if !img_bytes.is_empty() {
                                     use std::hash::{DefaultHasher, Hash, Hasher};
                                     let mut hasher = DefaultHasher::new();
@@ -917,19 +919,16 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         ""
     };
 
-    // 显式背景色：防止 Paragraph 文本缩短时旧内容残留（ghosting）。
-    // 未设背景时 ratatui 仅渲染文本 span，超出新文本的列保留终端原有像素。
-    let composer_paragraph = Paragraph::new(composer_lines)
-        .block(build_composer_block(
-            loading,
-            shown_session_title,
-            files_label.as_deref(),
-            footer_right,
-            props.session_title_visible,
-            props.max_lines.is_none(),
-            composer_area.map(|a| a.width).unwrap_or(80),
-        ))
-        .style(Style::default().bg(THEME_ATOM.state().read().semantic.surface.default));
+    // 保持 Text 的主题与透明背景；边线重绘由 CjkGhostFix 处理。
+    let composer_paragraph = Paragraph::new(composer_lines).block(build_composer_block(
+        loading,
+        shown_session_title,
+        files_label.as_deref(),
+        footer_right,
+        props.session_title_visible,
+        props.max_lines.is_none(),
+        composer_area.map(|a| a.width).unwrap_or(80),
+    ));
 
     element!(
         View(

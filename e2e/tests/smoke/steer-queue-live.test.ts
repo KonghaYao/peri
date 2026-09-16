@@ -33,6 +33,27 @@ function plain(screen: string): string {
   return screen.replace(/[\u2066-\u2069]/g, "");
 }
 
+// 检查真实终端在输入提示符处的背景，避免只验字符而漏掉颜色回归。
+function promptBackground(raw: string): string {
+  const prompt = raw.lastIndexOf("❯");
+  expect(prompt, "应存在输入提示符").toBeGreaterThanOrEqual(0);
+  let background = "default";
+  for (const match of raw.slice(0, prompt).matchAll(/\x1b\[([0-9;]*)m/g)) {
+    const codes = match[1].split(";").map(Number);
+    for (let i = 0; i < codes.length; i++) {
+      const code = codes[i];
+      if (code === 0 || code === 49) background = "default";
+      else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) background = String(code);
+      else if (code === 38 || code === 48 || code === 58) {
+        const count = codes[i + 1] === 2 ? 4 : 2;
+        if (code === 48) background = codes.slice(i, i + count + 1).join(";");
+        i += count;
+      }
+    }
+  }
+  return background;
+}
+
 function pendingCount(screen: string): number {
   const count = plain(screen).match(/(?:^|\n)\s*(?:[▸▾>v]\s+)?待发送\s+(\d+)/)?.[1];
   return count === undefined ? 0 : Number(count);
@@ -102,8 +123,9 @@ describe("smoke: 正式待发送队列", () => {
       }])),
     }}));
     // 直接使用构建产物，避免 dev.sh source 仓库 .env；所有配置/日志留在临时目录。
+    // 显式移除宿主 NO_COLOR，确保背景颜色回归也能被真实终端测试发现。
     tester = new TmuxTester({
-      command: [path.join(PROJECT_ROOT, "target/debug/peri"), `--config-file=${settings}`],
+      command: ["env", "-u", "NO_COLOR", path.join(PROJECT_ROOT, "target/debug/peri"), `--config-file=${settings}`],
       cwd: directory,
       size: { cols: 120, rows: 40 },
       env: {
@@ -164,6 +186,20 @@ describe("smoke: 正式待发送队列", () => {
       (line) => line.includes(text) && /\s↑\s+↶\s*$/.test(line),
     ), { timeout: 10_000, interval: 100, message: `${text} 应确认入队且可操作` });
   }
+
+  it("队列出现后输入框分隔线保持连续实线", async () => {
+    await submit("STEER_SEED");
+    await waitRequest(1);
+    await submit("dd");
+    await waitPending(1);
+    await queued("dd");
+    const lines = plain(await tester!.getScreenText()).split("\n");
+    const header = lines.findIndex((line) => /待发送\s+1/.test(line));
+    const border = lines.slice(header + 1).find((line) => /^\s*[─━]/.test(line));
+    expect(border, "队列下方输入框应有实线边框").toBeDefined();
+    expect(border!.startsWith("─".repeat(12)), `输入框边线不得出现间隙：${border}`).toBe(true);
+    expect(promptBackground(await tester!.getScreen({ stripAnsi: false })), "输入框应保持终端默认背景，不能新增底色").toBe("default");
+  });
 
   it("单发 B 保留 A/C，全发不带上随后新增 D，自然完成再发送 D", async () => {
     await submit("STEER_SEED");

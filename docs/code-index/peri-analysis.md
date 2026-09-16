@@ -22,6 +22,8 @@ Peri 运行数据的离线分析归 `side-projects/agent-defect-analyzer/`，本
   评审标签独立于持久化事实，缺失证据与评审分歧须保留。
   编排与提示词实验方法由 [agent-task-evaluator](../../.claude/skills/agent-task-evaluator/SKILL.md)
   维护，活动 `.agents/skills/` 副本采用上面相同的同步规则。
+- 持续研究方向 [任务关注点漂移与纠正吸收（RQ-FD-001）](../../side-projects/agent-defect-analyzer/FOCUS-DRIFT.md)
+  维护用户纠正、返工、有效约束保留与后续验收的专题口径；运行证据保存在本地 `output/`。
 
 ## 入口
 

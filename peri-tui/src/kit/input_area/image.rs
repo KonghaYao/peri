@@ -32,28 +32,50 @@ pub(crate) fn png_encode(
     height: usize,
     output_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Error as IoError, ErrorKind, Write};
+
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| IoError::new(ErrorKind::InvalidInput, "image dimensions overflow"))?;
+    if rgba_bytes.len() != expected_len {
+        return Err(IoError::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "RGBA buffer length {} does not match expected {}",
+                rgba_bytes.len(),
+                expected_len
+            ),
+        )
+        .into());
+    }
+    let width = u32::try_from(width)
+        .map_err(|_| IoError::new(ErrorKind::InvalidInput, "image width exceeds PNG limit"))?;
+    let height = u32::try_from(height)
+        .map_err(|_| IoError::new(ErrorKind::InvalidInput, "image height exceeds PNG limit"))?;
+
     let file = std::fs::File::create(output_path)?;
     let mut w = std::io::BufWriter::new(file);
-    let mut encoder = png::Encoder::new(&mut w, width as u32, height as u32);
+    let mut encoder = png::Encoder::new(&mut w, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header()?;
-    writer.write_image_data(rgba_bytes)?;
-    writer.finish()?;
+    // Stream the compressed IDAT chunks. `write_image_data` first builds the
+    // complete compressed image in memory, which defeats the ownership win
+    // above for large clipboard images.
+    let mut png_writer = encoder.write_header()?;
+    {
+        let mut stream = png_writer.stream_writer()?;
+        stream.write_all(rgba_bytes)?;
+        stream.finish()?;
+    }
+    // Writer::finish writes IEND and flushes its underlying writer. Keeping
+    // this explicit ensures errors are propagated instead of being swallowed
+    // by Drop.
+    png_writer.finish()?;
+    w.flush()?;
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn image_reference_ends_before_following_text() {
-        let mut state = TextAreaState::default();
-
-        insert_image_reference(&mut state, std::path::Path::new("/tmp/a.png"));
-        state.insert_str(" 继续描述");
-
-        assert_eq!(state.text, "@image /tmp/a.png\n 继续描述");
-    }
-}
+#[path = "image_test.rs"]
+mod tests;

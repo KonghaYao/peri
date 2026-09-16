@@ -38,6 +38,8 @@ struct SessionSteers {
     pending: Vec<SteerCommand>,
     recovered: Vec<RecoveredInput>,
     delivered: HashSet<String>,
+    // 仅影响待发送区展示；正式聊天气泡仍由 Delivered 确认。
+    direct_submissions: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +60,7 @@ impl SteerState {
         let session = self.sessions.entry(session_id.to_owned()).or_default();
         session.epoch = epoch;
         session.snapshot = None;
+        session.direct_submissions.clear();
         for recovered in &mut session.recovered {
             recovered.epoch = epoch;
         }
@@ -91,19 +94,36 @@ impl SteerState {
             None if !establish => return false,
             _ => {}
         }
+        for item in &snapshot.items {
+            if item.state == UserInputState::Queued {
+                session.direct_submissions.remove(&item.input_id);
+            }
+        }
         session.snapshot = Some(snapshot);
         true
     }
 
     pub(crate) fn begin(&mut self, command: SteerCommand) {
-        self.sessions
+        let session = self
+            .sessions
             .entry(command.session_id.clone())
             .or_insert_with(|| SessionSteers {
                 epoch: command.epoch,
                 ..SessionSteers::default()
-            })
-            .pending
-            .push(command);
+            });
+        if let SteerCommandKind::Enqueue(input) = &command.kind
+            && session.pending.is_empty()
+            && session.direct_submissions.is_empty()
+            && session
+                .snapshot
+                .as_ref()
+                .map_or(command.session_id.is_empty(), |snapshot| {
+                    snapshot.active_request_id.is_none() && snapshot.items.is_empty()
+                })
+        {
+            session.direct_submissions.insert(input.input_id.clone());
+        }
+        session.pending.push(command);
     }
 
     pub(crate) fn pending_command(
@@ -183,7 +203,11 @@ impl SteerState {
     }
 
     pub(crate) fn rebind_initial(&mut self, command: &SteerCommand, session_id: &str, epoch: u64) {
+        let mut direct = false;
         if let Some(previous) = self.sessions.get_mut(&command.session_id) {
+            if let SteerCommandKind::Enqueue(input) = &command.kind {
+                direct = previous.direct_submissions.remove(&input.input_id);
+            }
             previous
                 .pending
                 .retain(|pending| pending.command_id != command.command_id);
@@ -192,10 +216,21 @@ impl SteerState {
         bound.session_id = session_id.to_owned();
         bound.epoch = epoch;
         self.begin(bound);
+        if direct && let SteerCommandKind::Enqueue(input) = &command.kind {
+            self.sessions
+                .get_mut(session_id)
+                .expect("bound session exists")
+                .direct_submissions
+                .insert(input.input_id.clone());
+        }
     }
 
     pub(crate) fn reject(&mut self, command: &SteerCommand, definitely_rejected: bool) {
         let session = self.sessions.entry(command.session_id.clone()).or_default();
+        if let SteerCommandKind::Enqueue(input) = &command.kind {
+            // 超时/未知结果必须重新可见；明确拒绝则交给原稿恢复。
+            session.direct_submissions.remove(&input.input_id);
+        }
         if definitely_rejected {
             session
                 .pending
@@ -214,6 +249,7 @@ impl SteerState {
     pub(crate) fn claim_delivery(&mut self, session_id: &str, input_id: &str) -> bool {
         let session = self.sessions.entry(session_id.to_owned()).or_default();
         let inserted = session.delivered.insert(input_id.to_owned());
+        session.direct_submissions.remove(input_id);
         session.pending.retain(|command| {
             !matches!(&command.kind, SteerCommandKind::Enqueue(input) if input.input_id == input_id)
         });
@@ -270,6 +306,7 @@ impl SteerState {
             .into_iter()
             .flat_map(|snapshot| &snapshot.items)
             .filter(|item| !session.delivered.contains(&item.input_id))
+            .filter(|item| !session.direct_submissions.contains(&item.input_id))
             .map(|item| SteerQueueItem {
                 id: item.input_id.clone(),
                 text: item.original_draft.clone(),
@@ -289,6 +326,7 @@ impl SteerState {
                 SteerCommandKind::Enqueue(input) => {
                     if !rows.iter().any(|row| row.id == input.input_id)
                         && !session.delivered.contains(&input.input_id)
+                        && !session.direct_submissions.contains(&input.input_id)
                     {
                         rows.push(SteerQueueItem {
                             id: input.input_id.clone(),

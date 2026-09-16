@@ -1325,3 +1325,81 @@ async fn stream_without_message_stop_does_not_emit_completed() {
         matches!(events.last(), Some(Err(error)) if error.retry_error_kind() == Some(crate::RetryErrorKind::Transport))
     );
 }
+
+/// [回归测试] 后续帧的 input/cache 必须替换初始值，缺失字段保留，零值可覆盖。
+#[tokio::test]
+async fn test_stream_final_usage_replaces_initial_input_and_cache() {
+    for (delta_usage, stop_usage, expected) in [
+        (
+            json!({"input_tokens": 40, "cache_read_input_tokens": 60, "output_tokens": 7}),
+            json!({}),
+            (105, 5, 60, 7),
+        ),
+        (
+            json!({"output_tokens": 7}),
+            json!({"input_tokens": 80, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 20}),
+            (100, 0, 20, 7),
+        ),
+        (
+            json!({"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 2}),
+            json!({}),
+            (0, 0, 0, 2),
+        ),
+    ] {
+        let response = [
+            ("message_start", json!({"message": {"id": "usage-fixture", "usage": {
+                "input_tokens": 10, "cache_creation_input_tokens": 5, "cache_read_input_tokens": 0
+            }}})),
+            ("message_delta", json!({"delta": {"stop_reason": "end_turn"}, "usage": delta_usage})),
+            ("message_stop", json!({"usage": stop_usage})),
+        ].into_iter().map(|(event, data)| format!("event: {event}\ndata: {data}\n\n")).collect::<String>();
+        let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+            status: 200,
+            request_id: None,
+            body: FakeBody::Chunks(vec![Ok(response.into_bytes())]),
+        }));
+        let model = AnthropicModel::with_transport(config(), transport);
+        let response = model
+            .complete(
+                ModelRequest::new(vec![ModelMessage::user_text("go")]),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let usage = response.usage().unwrap();
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.cache_creation_input_tokens.unwrap(),
+                usage.cache_read_input_tokens.unwrap(),
+                usage.output_tokens
+            ),
+            expected
+        );
+    }
+}
+
+/// [回归测试] 最终 input/cache 溢出不得被旧的合法 start usage 掩盖。
+#[tokio::test]
+async fn test_stream_final_usage_overflow_rejected() {
+    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+        status: 200, request_id: None,
+        body: FakeBody::Chunks(vec![Ok(concat!(
+            "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+            "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":4294967295,\"cache_read_input_tokens\":1}}\n\n",
+            "event: message_stop\ndata: {}\n\n"
+        ).as_bytes().to_vec())]),
+    }));
+    let model = AnthropicModel::with_transport(config(), transport);
+    let error = model
+        .complete(
+            ModelRequest::new(vec![ModelMessage::user_text("go")]),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.protocol_error().map(|error| error.kind()),
+        Some(crate::ProtocolErrorKind::Provider)
+    );
+}

@@ -646,3 +646,41 @@ fn response_decoder_uses_content_thinking_when_top_level_reasoning_is_empty() {
         matches!(&content[0], ContentBlock::Reasoning { text, .. } if text == "actual thought")
     );
 }
+
+/// [回归测试] 同一 Qwen adapter 的连续请求须各取自己的尾帧 usage，不能复用首轮计数。
+#[tokio::test]
+async fn test_qwen_usage_tracks_each_request_with_history() {
+    let transport = Arc::new(FakeTransport::default());
+    for (input, output, cached) in [(100, 7, 20), (500, 11, 60)] {
+        let usage = json!({"prompt_tokens": input, "completion_tokens": output,
+            "prompt_tokens_details": {"cached_tokens": cached}});
+        transport.responses.lock().unwrap().push(FakeResponse {
+            status: 200, request_id: None,
+            chunks: vec![Ok(format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"answer\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: {{\"choices\":[],\"usage\":{usage}}}\n\ndata: [DONE]\n\n"
+            ).into_bytes())],
+        });
+    }
+    let model = OpenAiModel::with_transport(config("qwen3"), transport.clone());
+    let mut history = vec![ModelMessage::user_text("go")];
+    for (input, output, cached) in [(100, 7, 20), (500, 11, 60)] {
+        let response = model
+            .complete(ModelRequest::new(history.clone()), CancellationToken::new())
+            .await
+            .unwrap();
+        let usage = response.usage().unwrap();
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens
+            ),
+            (input, output, Some(cached))
+        );
+        history.push(ModelMessage::user_text("full next-turn history"));
+    }
+    let bodies = transport.bodies();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[1]["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(bodies[1]["stream_options"]["include_usage"], true);
+}
