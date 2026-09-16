@@ -130,6 +130,7 @@ fn decode_event(
                 .and_then(Value::as_str)
                 .ok_or_else(provider_protocol_error)?;
             state.stop_reason = Some(stop_reason.into());
+            update_input_usage(&mut state, value.get("usage"))?;
             update_output_usage(&mut state, value.get("usage"))?;
             Ok(usage_event_if_changed(&mut state)?.into_iter().collect())
         }
@@ -321,14 +322,15 @@ fn update_input_usage(state: &mut StreamState, usage: Option<&Value>) -> ModelRe
     let Some(usage) = usage else {
         return Ok(());
     };
-    if state.input_tokens == 0 {
-        state.input_tokens = token_count(usage, "input_tokens")?.unwrap_or_default();
+    // 后续帧中的字段是本次请求的最新累计值；缺失保留，显式零也须覆盖。
+    if let Some(tokens) = token_count(usage, "input_tokens")? {
+        state.input_tokens = tokens;
     }
-    if state.cache_creation_input_tokens.is_none() {
-        state.cache_creation_input_tokens = token_count(usage, "cache_creation_input_tokens")?;
+    if let Some(tokens) = token_count(usage, "cache_creation_input_tokens")? {
+        state.cache_creation_input_tokens = Some(tokens);
     }
-    if state.cache_read_input_tokens.is_none() {
-        state.cache_read_input_tokens = token_count(usage, "cache_read_input_tokens")?;
+    if let Some(tokens) = token_count(usage, "cache_read_input_tokens")? {
+        state.cache_read_input_tokens = Some(tokens);
     }
     Ok(())
 }

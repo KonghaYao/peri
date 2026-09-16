@@ -284,6 +284,42 @@ fn print_elicitation_response() -> Value {
 struct PrintOutput {
     fmt: OutputFormat,
     text_buffer: String,
+    total_usage: Option<PrintUsage>,
+    usage_count: u64,
+}
+
+// ACP inputTokens 已含缓存；Claude 形状的三个 input 字段互不重叠。
+#[derive(Default, serde::Serialize)]
+struct PrintUsage {
+    input_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    output_tokens: u64,
+}
+
+impl PrintUsage {
+    fn from_meta(meta: &Value) -> Option<Self> {
+        let total_input = meta.get("inputTokens")?.as_u64()?;
+        let cache_read_input_tokens = meta.get("cacheReadTokens").map_or(Some(0), Value::as_u64)?;
+        let cache_creation_input_tokens = meta
+            .get("cacheCreationTokens")
+            .map_or(Some(0), Value::as_u64)?;
+        Some(Self {
+            input_tokens: total_input
+                .checked_sub(cache_read_input_tokens)?
+                .checked_sub(cache_creation_input_tokens)?,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+            output_tokens: meta.get("outputTokens")?.as_u64()?,
+        })
+    }
+
+    fn add(&mut self, usage: &Self) {
+        self.input_tokens += usage.input_tokens;
+        self.cache_read_input_tokens += usage.cache_read_input_tokens;
+        self.cache_creation_input_tokens += usage.cache_creation_input_tokens;
+        self.output_tokens += usage.output_tokens;
+    }
 }
 
 impl PrintOutput {
@@ -291,6 +327,8 @@ impl PrintOutput {
         Self {
             fmt,
             text_buffer: String::new(),
+            total_usage: None,
+            usage_count: 0,
         }
     }
 
@@ -303,6 +341,29 @@ impl PrintOutput {
         let update = params.get("update")?;
         let tag = update.get("sessionUpdate").and_then(|v| v.as_str())?;
         match tag {
+            "usage_update" if self.fmt == OutputFormat::StreamJson => {
+                let meta = update.get("_meta")?;
+                if meta.get("periReplay").and_then(Value::as_bool) == Some(true) {
+                    return None;
+                }
+                let usage = PrintUsage::from_meta(meta)?;
+                self.total_usage
+                    .get_or_insert_with(PrintUsage::default)
+                    .add(&usage);
+                self.usage_count += 1;
+                // 每条 canonical LlmCallEnd 只投影一次；独立生成消息 ID，避免
+                // 网关缺失或复用 requestId 时评测端按 ID 去重丢失不同调用。
+                Some(
+                    json!({
+                        "type": "assistant",
+                        "message": {
+                            "id": format!("msg_peri_{}", self.usage_count),
+                            "usage": usage,
+                        },
+                    })
+                    .to_string(),
+                )
+            }
             "agent_message_chunk" => {
                 let text = update
                     .get("content")
@@ -400,8 +461,13 @@ impl PrintOutput {
                 });
                 println!("{}", serde_json::to_string_pretty(&result).unwrap());
             }
-            OutputFormat::StreamJson => {}
+            OutputFormat::StreamJson => println!("{}", self.stream_result()),
         }
+    }
+
+    fn stream_result(&self) -> Value {
+        // 没有 provider usage / pricing 时保留未知，不把它伪装成零消耗。
+        json!({"type": "result", "usage": self.total_usage, "total_cost_usd": null})
     }
 }
 
@@ -429,3 +495,7 @@ mod tests {
         assert!(matches!(response.action, ElicitationAction::Cancel));
     }
 }
+
+#[cfg(test)]
+#[path = "cli_print_usage_test.rs"]
+mod usage_tests;
