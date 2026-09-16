@@ -181,15 +181,16 @@ impl SqliteThreadStore {
         if self.read_only {
             return Err(WorkspaceError::ExecutionLeaseRequired.into());
         }
-        if self.load_session_binding_impl(id).await?.is_none() {
-            return Ok(None);
-        }
         let mut current = id.clone();
         let mut visited = std::collections::HashSet::new();
+        let mut bound = false;
         loop {
             if !visited.insert(current.clone()) {
                 return Err(WorkspaceError::InvalidBinding.into());
             }
+            // An adopted legacy root can still have unbound children. Their mutations
+            // belong to the same root owner even though their own binding is absent.
+            bound |= self.load_session_binding_impl(&current).await?.is_some();
             let owned = self
                 .execution_leases
                 .lock()
@@ -218,7 +219,8 @@ impl SqliteThreadStore {
                     .await?;
             match parent {
                 Some((Some(parent),)) => current = parent,
-                _ => return Err(WorkspaceError::ExecutionLeaseRequired.into()),
+                _ if bound => return Err(WorkspaceError::ExecutionLeaseRequired.into()),
+                _ => return Ok(None),
             }
         }
     }

@@ -561,8 +561,8 @@ thread-browser-time-just-now = just now
 thread-browser-time-minutes = { $count } minute{ $suffix } ago
 thread-browser-time-hours = { $count } hour{ $suffix } ago
 thread-browser-time-days = { $count } day{ $suffix } ago
-panel-threads-header-hint =   Enter::open · Esc::close
-panel-threads-nav-hint =   ↑/↓::navigate  Enter::open  Tab::scope  d::delete  Esc::close
+panel-threads-header-hint =   Enter::resume · v::read history · Esc::close
+panel-threads-nav-hint =   ↑/↓::navigate  Enter::resume  v::read  Tab::scope  d::delete  Esc::close
 panel-threads-confirm-hint =   Enter::confirm  Esc::cancel
 
 # ---- Rewind Popup ----
@@ -1171,8 +1171,22 @@ steer-input-uncertain = Waiting for the input receipt. Retrying with the same in
 thread-browser-project = Project
 thread-browser-workspace = Workspace
 thread-browser-scope-count =   { $scope } · { $count } sessions
+thread-browser-scope-loaded =   { $scope } · { $count } sessions loaded · more available
 thread-browser-messages = { $count } messages
-panel-threads-more-hint =   ↑/↓::navigate  Enter::open  Tab::scope  n::more  d::delete
+panel-threads-more-hint =   ↑/↓::browse (loads more at end)  PgUp/PgDn::page  Tab::scope  n::more  d::delete
+thread-browser-all = All history
+thread-browser-selected = Selected: { $title }
+thread-browser-selected-path = Path: { $path } · ID: { $id }
+thread-browser-actions = ↑↓ select  Enter resume  v view  Tab scope  d delete  Esc close
+thread-browser-actions-compact = Enter resume  v view  Tab scope  d delete  Esc close
+thread-browser-preview-actions = v back  ↑↓ scroll  PgUp/PgDn page  Esc close
+thread-history-preview-hint = Read-only history · ↑/↓::scroll · v::back · Esc::close
+thread-history-loading = Loading history…
+thread-history-disconnected = History is unavailable while disconnected.
+thread-history-user = User
+thread-history-assistant = Assistant
+thread-history-system = System context
+thread-history-tool = Tool result
 session-restore-failed = Session restore failed: { $error }. Retry or use /clear to create a session.
 
 panel-host-settings = Host settings

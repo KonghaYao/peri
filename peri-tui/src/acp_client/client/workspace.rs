@@ -59,13 +59,45 @@ impl AcpTuiClient {
             .await?;
         let context: SessionContext = serde_json::from_value(value)
             .map_err(|e| AcpError::new(-32603, format!("invalid session context: {e}")))?;
-        if context.version != 1 || (session_id.is_some() && context.binding.is_none()) {
-            return Err(AcpError::new(
-                -32603,
-                "unsupported or missing session binding",
-            ));
+        if context.version != 1 {
+            return Err(AcpError::new(-32603, "unsupported session context version"));
+        }
+        if context.binding.as_ref().is_some_and(|binding| {
+            binding.schema_version != peri_acp_types::workspace::SESSION_BINDING_VERSION
+                || binding.project_id != context.workspace.project_id
+                || binding.workspace_id != context.workspace.workspace_id
+                || binding.cwd_relative_to_workspace != context.workspace.relative_cwd
+        }) {
+            return Err(AcpError::new(-32603, "inconsistent session binding"));
         }
         Ok(context)
+    }
+
+    pub(crate) async fn read_session_history(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<peri_acp_types::store::PersistedPayload>, AcpError> {
+        let response = self
+            .send_raw_request("peri/session_history", json!({"sessionId": session_id}))
+            .await?;
+        if response
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            != Some(session_id)
+        {
+            return Err(AcpError::new(-32603, "history session identity mismatch"));
+        }
+        let payloads = response
+            .get("payloads")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| AcpError::new(-32603, "missing history payloads"))?;
+        payloads
+            .iter()
+            .map(|payload| {
+                peri_acp_types::store::deserialize_persisted_payload(&payload.to_string())
+                    .map_err(|_| AcpError::new(-32603, "invalid history payload"))
+            })
+            .collect()
     }
 
     pub(crate) async fn list_scoped_threads(

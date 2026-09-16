@@ -213,8 +213,15 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
         })
         .await
         .unwrap();
-    assert_eq!(page.entries.len(), 1);
-    assert_eq!(page.entries[0].thread.id, id);
+    assert_eq!(page.entries.len(), 2);
+    assert!(page
+        .entries
+        .iter()
+        .any(|entry| entry.thread.id == id && entry.binding.is_some()));
+    assert!(page
+        .entries
+        .iter()
+        .any(|entry| entry.thread.id == old_id && entry.binding.is_none()));
     assert_eq!(
         reopened.validate_session_binding(&id).await.unwrap(),
         workspace

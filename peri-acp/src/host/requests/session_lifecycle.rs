@@ -22,6 +22,9 @@ use crate::dispatch::ReplaySender;
 use crate::session::frozen_snapshot::{decode_frozen_snapshot, encode_frozen_snapshot};
 use crate::{dispatch, transport::types::AcpError};
 
+#[path = "legacy_session.rs"]
+mod legacy_session;
+
 async fn store_frozen_snapshot(
     cfg: &AcpServerConfig,
     session_id: &str,
@@ -67,7 +70,7 @@ async fn store_new_frozen_snapshot_or_compensate(
     Ok(())
 }
 
-async fn load_or_backfill_frozen_data(
+async fn load_frozen_data(
     cfg: &AcpServerConfig,
     session_id: &str,
 ) -> Result<crate::session::executor::FrozenSessionData, AcpError> {
@@ -90,6 +93,7 @@ async fn prepare_existing(
         .get("sessionId")
         .and_then(Value::as_str)
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+    legacy_session::prepare_for_restore(cfg, id, params.get("cwd").and_then(Value::as_str)).await?;
     let (workspace, owner) = super::super::workspace::acquire_for_load(
         cfg,
         sessions,
@@ -121,7 +125,7 @@ async fn prepare_existing(
         return Ok((id.to_owned(), identity));
     }
     let prepared = async {
-        let frozen = load_or_backfill_frozen_data(cfg, id).await?;
+        let frozen = load_frozen_data(cfg, id).await?;
         let payloads = dispatch::load_session_payloads(cfg.controller.as_ref(), id).await?;
         let cwd = workspace
             .cwd
@@ -240,10 +244,6 @@ pub(super) fn retain_failed_assembly(
 
 async fn context_for_session(cfg: &AcpServerConfig, session_id: &str) -> Result<Value, AcpError> {
     let store = cfg.controller.sessions();
-    let workspace = store
-        .validate_session_binding(&session_id.to_owned())
-        .await
-        .map_err(super::super::workspace::workspace_error)?;
     let binding = store
         .load_session_binding(&session_id.to_owned())
         .await
@@ -252,6 +252,15 @@ async fn context_for_session(cfg: &AcpServerConfig, session_id: &str) -> Result<
         .load_meta(&session_id.to_owned())
         .await
         .map_err(super::super::workspace::workspace_error)?;
+    let workspace = if binding.is_some() {
+        store
+            .validate_session_binding(&session_id.to_owned())
+            .await
+            .map_err(super::super::workspace::workspace_error)?
+    } else {
+        // Resolve the saved location for a restore request; context reads never adopt it.
+        legacy_session::resolve_saved_workspace(cfg, &meta).await?
+    };
     Ok(
         serde_json::json!({ "version": 1, "workspace": workspace, "binding": binding, "title": meta.title }),
     )

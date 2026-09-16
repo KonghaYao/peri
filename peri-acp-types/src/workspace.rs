@@ -92,10 +92,11 @@ pub struct ScopedThreadQuery {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScopedThreadEntry {
     pub thread: ThreadListEntry,
-    pub binding: SessionBinding,
+    /// None for legacy history. Displaying a saved path does not establish execution identity.
+    pub binding: Option<SessionBinding>,
     /// Last registered location, for display only; executable load must validate it.
     pub effective_cwd: PathBuf,
-    pub workspace_root: PathBuf,
+    pub workspace_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

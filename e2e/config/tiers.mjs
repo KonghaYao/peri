@@ -16,6 +16,7 @@ export const TIERS = {
     description:
       "串行、无 retry；偏确定性用例（视口/工具卡/面板冻结），约 5～8 分钟。",
     files: [
+      "tests/scenarios/legacy-history-upgrade.test.ts",
       "tests/smoke/viewport-40x8.test.ts",
       "tests/panels/plugin-uninstall-no-freeze.test.ts",
       "tests/tool-cards/first-tool-stuck-running.test.ts",

@@ -11,10 +11,10 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, LANG_VERSION, THREAD_BROWSER_SCOPE, THREAD_LIST, THREAD_LIST_ERROR,
-    THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT, THREAD_LOAD_TX, ThreadBrowserScope,
-    ThreadSummary,
+    THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT, THREAD_LIST_PAGE_SIZE, THREAD_LOAD_TX,
+    ThreadBrowserScope, ThreadSummary,
 };
-use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
+use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
@@ -28,15 +28,39 @@ use ratatui_kit::{
     },
 };
 
+#[path = "thread_browser/history_preview.rs"]
+mod history_preview;
+
 #[component]
 pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
+    let selected_id = hooks.use_state(|| None::<String>);
+    let last_viewport = hooks.use_state(|| 0usize);
     // 确认删除模式（仿 Cron 面板）：d/Delete 进入，Enter 确认 / Esc 取消
-    let confirm_delete = hooks.use_state(|| false);
+    let confirm_delete = hooks.use_state(|| None::<String>);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
     let sv = hooks.use_state(ScrollViewState::default);
-    hooks.use_atom(&LANG_VERSION);
+    let preview_sv = hooks.use_state(ScrollViewState::default);
+    let preview_id = hooks.use_state(|| None::<String>);
+    let language_version = hooks.use_atom(&LANG_VERSION).get();
+    let preview_request = preview_id.read().clone();
+    let preview = hooks.use_async_state(
+        move || async move {
+            let Some(id) = preview_request else {
+                return Ok::<_, String>(None);
+            };
+            let client = ACP_CLIENT_HANDLE
+                .get()
+                .ok_or_else(|| i18n::tr("thread-history-disconnected"))?;
+            let payloads = client
+                .read_session_history(&id)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Some((id, history_preview::text(&payloads))))
+        },
+        (preview_id.read().clone(), language_version),
+    );
 
     // S6c: 订阅 THREAD_LIST atom——后台 service_snapshot 2s 派生一次
     let scope_store = hooks.use_atom(&THREAD_BROWSER_SCOPE);
@@ -55,11 +79,40 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         area = tracker.rect;
     }
 
-    // 视口跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
-    // panel 高度 18 - border 2 - header 3 = 12 行；每项 3 行 → 可见 4 个。
-    const VISIBLE_ITEMS: usize = 4;
-    let scroll_start = scroll_start_for_selected(*cursor.read(), item_count, VISIBLE_ITEMS);
-    let is_confirming = *confirm_delete.read();
+    let panel_area = hooks.use_previous_size();
+
+    // Shell borders + header + two detail rows + action row are fixed; the
+    // remaining rows belong to this single list viewport.
+    let viewport_rows = panel_area.height.saturating_sub(6).max(1) as usize;
+    let preview_viewport_rows = panel_area.height.saturating_sub(5).max(1) as usize;
+    let selected_index = selected_id
+        .read()
+        .as_ref()
+        .and_then(|id| threads.iter().position(|thread| &thread.id == id))
+        .unwrap_or_else(|| (*cursor.read()).min(item_count.saturating_sub(1)));
+    if *cursor.read() != selected_index {
+        *cursor.write_no_update() = selected_index;
+    }
+    let selected_id_now = threads.get(selected_index).map(|thread| thread.id.clone());
+    if *selected_id.read() != selected_id_now {
+        *selected_id.write_no_update() = selected_id_now;
+    }
+    if *last_viewport.read() != viewport_rows {
+        *last_viewport.write_no_update() = viewport_rows;
+        keep_selection_visible(
+            &mut sv.write_no_update(),
+            selected_index,
+            item_count,
+            viewport_rows,
+        );
+    }
+    let scroll_start = sv
+        .read()
+        .offset()
+        .y
+        .min(item_count.saturating_sub(viewport_rows) as u16) as usize;
+    let is_confirming = confirm_delete.read().is_some();
+    let event_threads = threads.clone();
 
     // ── 键盘 + 鼠标处理 ──
     hooks.use_event_handler_with_options(
@@ -71,6 +124,13 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
                 // 确认删除模式下不触发 load（防止误删时顺手切会话）
                 if let Event::Mouse(mouse) = event {
+                    if preview_id.read().is_some() {
+                        return if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                            EventResult::Consumed
+                        } else {
+                            EventResult::Ignored
+                        };
+                    }
                     if !is_confirming
                         && let Some(area) = area
                         && !is_scrollbar_column(&mouse, area)
@@ -78,18 +138,16 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             &mouse,
                             area,
                             ListLayout {
-                                header_rows: 3,
-                                item_rows: 3,
+                                header_rows: 1,
+                                item_rows: 1,
                                 footer_rows: 1,
-                                visible_items: VISIBLE_ITEMS as u16,
+                                visible_items: viewport_rows as u16,
                                 scroll_start,
                                 item_count,
                             },
                         )
                     {
-                        *cursor.write() = idx;
-                        let threads_snap = THREAD_LIST.state().read().clone();
-                        if let Some(entry) = threads_snap.get(idx) {
+                        if let Some(entry) = event_threads.get(idx) {
                             if let Some(tx) = THREAD_LOAD_TX.get() {
                                 let _ = tx.send(entry.id.clone());
                             }
@@ -109,16 +167,34 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if key.kind != KeyEventKind::Press {
                     return EventResult::Ignored;
                 }
+                if preview_id.read().is_some() {
+                    match key.code {
+                        KeyCode::Char('v') => {
+                            *preview_id.write() = None;
+                        }
+                        KeyCode::Up => preview_sv.write().scroll_up(),
+                        KeyCode::Down => preview_sv.write().scroll_down(),
+                        KeyCode::PageUp => {
+                            for _ in 0..preview_viewport_rows {
+                                preview_sv.write().scroll_up();
+                            }
+                        }
+                        KeyCode::PageDown => {
+                            for _ in 0..preview_viewport_rows {
+                                preview_sv.write().scroll_down();
+                            }
+                        }
+                        _ => {}
+                    }
+                    return EventResult::Consumed;
+                }
 
                 // Confirm-delete mode（标准 session/delete，agentclientprotocol.com）：
                 // Enter 确认删除，Esc 取消，其他按键一律退出确认模式
-                if *confirm_delete.read() {
+                if confirm_delete.read().is_some() {
                     match key.code {
                         KeyCode::Enter => {
-                            let sel = *cursor.read();
-                            let threads_snap = THREAD_LIST.state().read().clone();
-                            if let Some(entry) = threads_snap.get(sel) {
-                                let sid = entry.id.clone();
+                            if let Some(sid) = confirm_delete.read().clone() {
                                 if let Some(client) = ACP_CLIENT_HANDLE.get() {
                                     let client = client.clone();
                                     tokio::spawn(async move {
@@ -141,13 +217,13 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     );
                                 }
                             }
-                            *confirm_delete.write() = false;
+                            *confirm_delete.write() = None;
                         }
                         KeyCode::Esc => {
-                            *confirm_delete.write() = false;
+                            *confirm_delete.write() = None;
                         }
                         _ => {
-                            *confirm_delete.write() = false;
+                            *confirm_delete.write() = None;
                         }
                     }
                     return EventResult::Consumed;
@@ -157,39 +233,83 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     KeyCode::Tab => {
                         THREAD_BROWSER_SCOPE.set(match scope {
                             ThreadBrowserScope::Project => ThreadBrowserScope::Workspace,
-                            ThreadBrowserScope::Workspace => ThreadBrowserScope::Project,
+                            ThreadBrowserScope::Workspace => ThreadBrowserScope::All,
+                            ThreadBrowserScope::All => ThreadBrowserScope::Project,
                         });
                         THREAD_LIST_PAGE_COUNT.set(1);
+                        THREAD_LIST_HAS_MORE.set(false);
                         THREAD_LIST.state().write().clear();
                         *cursor.write() = 0;
+                        *selected_id.write() = None;
+                        *sv.write() = ScrollViewState::default();
                     }
                     KeyCode::Char('n') if has_more => {
-                        THREAD_LIST_PAGE_COUNT.set(THREAD_LIST_PAGE_COUNT.get().saturating_add(1));
+                        request_more_threads();
                     }
                     KeyCode::Up => {
-                        let mut c = cursor.write();
-                        *c = previous_selection(*c);
+                        let selected = previous_selection(*cursor.read());
+                        set_selection(&cursor, &selected_id, selected, &event_threads);
+                        keep_selection_visible(
+                            &mut sv.write(),
+                            selected,
+                            item_count,
+                            viewport_rows,
+                        );
                     }
-                    KeyCode::Down => {
-                        let mut c = cursor.write();
-                        *c = next_selection(*c, item_count);
+                    KeyCode::PageUp => {
+                        let selected = cursor.read().saturating_sub(viewport_rows);
+                        set_selection(&cursor, &selected_id, selected, &event_threads);
+                        keep_selection_visible(
+                            &mut sv.write(),
+                            selected,
+                            item_count,
+                            viewport_rows,
+                        );
+                    }
+                    KeyCode::Home => {
+                        set_selection(&cursor, &selected_id, 0, &event_threads);
+                        keep_selection_visible(&mut sv.write(), 0, item_count, viewport_rows);
+                    }
+                    KeyCode::Down | KeyCode::PageDown | KeyCode::End => {
+                        let selected = match key.code {
+                            KeyCode::Down => next_selection(*cursor.read(), item_count),
+                            KeyCode::PageDown => cursor
+                                .read()
+                                .saturating_add(viewport_rows)
+                                .min(item_count.saturating_sub(1)),
+                            _ => item_count.saturating_sub(1),
+                        };
+                        set_selection(&cursor, &selected_id, selected, &event_threads);
+                        keep_selection_visible(
+                            &mut sv.write(),
+                            selected,
+                            item_count,
+                            viewport_rows,
+                        );
+                        if selected.saturating_add(viewport_rows) >= item_count {
+                            request_more_threads();
+                        }
                     }
                     KeyCode::Enter => {
-                        let sel = *cursor.read();
-                        let threads_snap = THREAD_LIST.state().read().clone();
-                        if let Some(entry) = threads_snap.get(sel) {
+                        if let Some(id) = selected_id.read().clone() {
                             if let Some(tx) = THREAD_LOAD_TX.get() {
-                                let _ = tx.send(entry.id.clone());
+                                let _ = tx.send(id);
                             }
                             crate::kit::panel_registry::close_active_panel();
                         }
                     }
+                    KeyCode::Char('v') => {
+                        if let Some(id) = selected_id.read().clone() {
+                            *preview_id.write() = Some(id);
+                            *preview_sv.write() = ScrollViewState::default();
+                        }
+                    }
                     // d / Delete：进入确认删除模式（列表中无条目时不进入）
                     KeyCode::Char('d') if item_count > 0 => {
-                        *confirm_delete.write() = true;
+                        *confirm_delete.write() = selected_id.read().clone();
                     }
                     KeyCode::Delete if item_count > 0 => {
-                        *confirm_delete.write() = true;
+                        *confirm_delete.write() = selected_id.read().clone();
                     }
                     _ => {}
                 }
@@ -199,12 +319,11 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     );
 
     // ── 构建行列表（仿 Login 面板）──
-    let sel = *cursor.read();
+    let sel = selected_index;
     let guard = theme_def.read();
     let semantic = &guard.semantic;
     let header_style = Style::new().fg(semantic.text.primary).bold();
     let muted_style = Style::new().fg(semantic.text.muted).italic();
-    let dim_style = Style::new().fg(semantic.text.dim);
     let item_meta_style = Style::new().fg(semantic.text.muted);
     let selected_style = Style::new()
         .fg(theme_def.read().component.panel.title)
@@ -215,13 +334,18 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // header
     lines.push(Line::from(vec![Span::styled(
         i18n::tr_args(
-            "thread-browser-scope-count",
+            if has_more {
+                "thread-browser-scope-loaded"
+            } else {
+                "thread-browser-scope-count"
+            },
             &[
                 (
                     "scope".into(),
                     i18n::tr(match scope {
                         ThreadBrowserScope::Project => "thread-browser-project",
                         ThreadBrowserScope::Workspace => "thread-browser-workspace",
+                        ThreadBrowserScope::All => "thread-browser-all",
                     })
                     .into(),
                 ),
@@ -230,12 +354,6 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ),
         header_style,
     )]));
-    lines.push(Line::from(vec![Span::styled(
-        i18n::tr("panel-threads-header-hint"),
-        muted_style,
-    )]));
-    lines.push(Line::from(""));
-
     if let Some(error) = &list_error {
         lines.push(Line::styled(
             error.clone(),
@@ -247,12 +365,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             item_meta_style,
         )]));
     } else {
-        for (i, entry) in threads
-            .iter()
-            .enumerate()
-            .skip(scroll_start)
-            .take(VISIBLE_ITEMS)
-        {
+        for (i, entry) in threads.iter().enumerate() {
             let is_selected = i == sel;
             let cursor_mark = if is_selected { ">" } else { " " };
             let row_style = if is_selected {
@@ -261,47 +374,48 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Style::new().fg(semantic.text.primary)
             };
 
-            let id_short: String = entry.id.chars().take(8).collect();
             let title = entry
                 .title
                 .clone()
                 .unwrap_or_else(|| i18n::tr("thread-browser-untitled"));
             let updated = entry
                 .updated_at
-                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .map(|dt| dt.format("%m-%d").to_string())
                 .unwrap_or_else(|| "-".to_string());
-            let cwd = path_tail(
-                &entry.cwd,
-                area.map_or(72, |area| area.width.saturating_sub(6) as usize),
-            );
-
-            // 第一行：标记 + 日期 + 标题
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", cursor_mark),
-                    Style::new().fg(theme_def.read().component.panel.title),
-                ),
-                Span::styled(format!("{}  {}", updated, title), row_style),
-            ]));
-
-            // 第二行：id + 消息数 + 工作目录
-            lines.push(Line::from(vec![Span::styled(
+            let width = panel_area.width.saturating_sub(2) as usize;
+            let prefix = format!(" {} ", cursor_mark);
+            let metadata = if width < 70 {
+                String::new()
+            } else {
                 format!(
-                    "    id: {}...  {}",
-                    id_short,
+                    "{}  {}",
+                    updated,
                     i18n::tr_args(
                         "thread-browser-messages",
-                        &[("count".into(), (entry.message_count as i64).into())]
+                        &[("count".into(), (entry.message_count as i64).into())],
                     )
+                )
+            };
+            let metadata_width = metadata.width();
+            let available = width.saturating_sub(prefix.width() + metadata_width + 1);
+            let title = truncate_text(&title, available);
+            use unicode_width::UnicodeWidthStr;
+            let title_width = title.width();
+            let prefix_width = prefix.width();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    prefix.clone(),
+                    Style::new().fg(theme_def.read().component.panel.title),
                 ),
-                if is_selected {
-                    dim_style
-                } else {
-                    item_meta_style
-                },
-            )]));
+                Span::styled(title, row_style),
+                Span::raw(
+                    " ".repeat(width.saturating_sub(prefix_width + title_width + metadata_width)),
+                ),
+                Span::styled(metadata, item_meta_style),
+            ]));
 
-            lines.push(Line::styled(format!("    {cwd}"), item_meta_style));
+            // Message count and date share the same compact row; path and ID
+            // are shown only in the fixed selection details below.
         }
     }
 
@@ -313,34 +427,179 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         )]));
     } else {
         lines.push(Line::from(vec![Span::styled(
-            i18n::tr(if has_more {
-                "panel-threads-more-hint"
+            i18n::tr(if panel_area.width < 80 {
+                "thread-browser-actions-compact"
             } else {
-                "panel-threads-nav-hint"
+                "thread-browser-actions"
             }),
             muted_style,
         )]));
     }
 
-    let content = Paragraph::new(ratatui::text::Text::from(lines));
+    if let Some(id) = preview_id.read().as_ref() {
+        lines = vec![Line::from("")];
+        if *preview.loading.read() {
+            lines.push(Line::from(i18n::tr("thread-history-loading")));
+        } else if let Some(error) = preview.error.read().as_ref() {
+            lines.push(Line::from(error.clone()));
+        } else if let Some(Some((loaded_id, text))) = preview.data.read().as_ref()
+            && loaded_id == id
+        {
+            lines.extend(text.lines().map(|line| Line::from(line.to_owned())));
+        }
+    }
+    let content = Paragraph::new(ratatui::text::Text::from(lines.clone()));
+    let content = if preview_id.read().is_some() {
+        content.wrap(ratatui::widgets::Wrap { trim: false })
+    } else {
+        content
+    };
+    let content_height = content
+        .line_count(panel_area.width.max(1))
+        .clamp(1, u16::MAX as usize) as u16;
 
-    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
+    // Preview keeps the full transcript as one scrollable document.
+    let body_area = ratatui_kit::ratatui::layout::Rect::new(
+        panel_area.x,
+        panel_area.y.saturating_add(2),
+        panel_area.width,
+        viewport_rows as u16,
+    );
+    let preview_area = ratatui_kit::ratatui::layout::Rect::new(
+        panel_area.x,
+        panel_area.y.saturating_add(3),
+        panel_area.width,
+        preview_viewport_rows as u16,
+    );
+    if preview_id.read().is_none() {
+        crate::kit::panel_scroll::register_panel_scroll(PanelKind::ThreadBrowser, body_area, sv);
+        let footer = lines.pop().unwrap_or_else(|| Line::from(""));
+        let header = lines.first().cloned().unwrap_or_else(|| Line::from(""));
+        let list_lines = lines.into_iter().skip(1).collect::<Vec<_>>();
+        let selected = threads.get(sel);
+        let details = selected
+            .map(|entry| {
+                let title = entry
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| i18n::tr("thread-browser-untitled"));
+                let id: String = entry.id.chars().take(8).collect();
+                use unicode_width::UnicodeWidthStr;
+                let detail_width = panel_area.width as usize;
+                let title_empty =
+                    i18n::tr_args("thread-browser-selected", &[("title".into(), "".into())]);
+                let title = truncate_text(&title, detail_width.saturating_sub(title_empty.width()));
+                let path_empty = i18n::tr_args(
+                    "thread-browser-selected-path",
+                    &[("path".into(), "".into()), ("id".into(), "".into())],
+                );
+                let id_display = format!("{id}…");
+                let path = path_tail(
+                    &entry.cwd,
+                    detail_width.saturating_sub(path_empty.width() + id_display.width()),
+                );
+                vec![
+                    Line::from(i18n::tr_args(
+                        "thread-browser-selected",
+                        &[("title".into(), title.into())],
+                    )),
+                    Line::from(i18n::tr_args(
+                        "thread-browser-selected-path",
+                        &[
+                            ("path".into(), path.into()),
+                            ("id".into(), id_display.into()),
+                        ],
+                    )),
+                ]
+            })
+            .unwrap_or_else(|| vec![Line::from(""), Line::from("")]);
+        return panel_shell!(PanelKind::ThreadBrowser, {
+            View(height: Constraint::Length(1), width: Constraint::Fill(1)) { Text(text: header) }
+            ScrollView(scrollbars: crate::kit::panel_registry::clean_scrollbars(), state: Some(sv), width: Constraint::Fill(1), height: Constraint::Fill(1)) {
+                for (index, line) in list_lines.iter().enumerate() {
+                    View(key: index, height: Constraint::Length(1), width: Constraint::Fill(1)) { Text(text: line.clone()) }
+                }
+            }
+            View(height: Constraint::Length(2), width: Constraint::Fill(1)) {
+                Text(text: details[0].clone())
+                Text(text: details[1].clone())
+            }
+            View(height: Constraint::Length(1), width: Constraint::Fill(1)) { Text(text: footer) }
+        });
+    }
+
     crate::kit::panel_scroll::register_panel_scroll(
         PanelKind::ThreadBrowser,
-        hooks.use_previous_size(),
-        sv,
+        preview_area,
+        preview_sv,
     );
-
     panel_shell!(PanelKind::ThreadBrowser, {
+        View(height: Constraint::Length(2), width: Constraint::Fill(1)) {
+            Text(text: Line::styled(i18n::tr("thread-history-preview-hint"), header_style))
+            Text(text: Line::from(preview_id.read().clone().unwrap_or_default()))
+        }
         ScrollView(
             scrollbars: crate::kit::panel_registry::clean_scrollbars(),
-            state: Some(sv),
+            state: Some(preview_sv),
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {
-            Text(text: content)
+            View(height: Constraint::Length(content_height), width: Constraint::Fill(1)) {
+                Text(text: content)
+            }
+        }
+        View(height: Constraint::Length(1), width: Constraint::Fill(1)) {
+            Text(text: Line::styled(i18n::tr("thread-browser-preview-actions"), muted_style))
         }
     })
+}
+
+fn request_more_threads() {
+    let loaded = THREAD_LIST.state().read().len();
+    if !THREAD_LIST_HAS_MORE.get() || loaded == 0 {
+        return;
+    }
+    // Coalesce repeated keys while the same next page is still being fetched.
+    let loaded_pages = u32::try_from(loaded)
+        .unwrap_or(u32::MAX)
+        .div_ceil(THREAD_LIST_PAGE_SIZE);
+    let requested = loaded_pages.saturating_add(1);
+    if requested > THREAD_LIST_PAGE_COUNT.get() {
+        THREAD_LIST_PAGE_COUNT.set(requested);
+    }
+}
+
+fn set_selection(
+    cursor: &State<usize>,
+    selected_id: &State<Option<String>>,
+    index: usize,
+    threads: &[ThreadSummary],
+) {
+    let index = index.min(threads.len().saturating_sub(1));
+    *cursor.write() = index;
+    *selected_id.write() = threads.get(index).map(|thread| thread.id.clone());
+}
+
+fn keep_selection_visible(
+    state: &mut ScrollViewState,
+    selected: usize,
+    count: usize,
+    viewport: usize,
+) {
+    if count == 0 || viewport == 0 {
+        return;
+    }
+    let max_start = count.saturating_sub(viewport);
+    let mut start = state.offset().y as usize;
+    if selected < start {
+        start = selected;
+    } else if selected >= start.saturating_add(viewport) {
+        start = selected.saturating_add(1).saturating_sub(viewport);
+    }
+    state.set_offset(ratatui_kit::ratatui::layout::Position::new(
+        0,
+        start.min(max_start) as u16,
+    ));
 }
 
 fn path_tail(path: &str, width: usize) -> String {
@@ -363,12 +622,39 @@ fn path_tail(path: &str, width: usize) -> String {
     format!("…{}", suffix.into_iter().rev().collect::<String>())
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn directory_suffix_keeps_workspace_name_and_unicode_width() {
-        assert_eq!(super::path_tail("/long/仓库/feature", 12), "…库/feature");
-        assert_eq!(super::path_tail("/a", 10), "/a");
-        assert_eq!(super::path_tail("/a", 0), "");
+fn truncate_text(text: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if text.is_empty() {
+        return String::new();
     }
+    if text
+        .chars()
+        .map(|ch| ch.width().unwrap_or(0))
+        .sum::<usize>()
+        <= width
+    {
+        return text.to_owned();
+    }
+    if width == 1 {
+        return "…".to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut used = 0;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w + 1 > width {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
 }
+
+#[cfg(test)]
+#[path = "thread_browser/ui_test.rs"]
+mod ui_test;

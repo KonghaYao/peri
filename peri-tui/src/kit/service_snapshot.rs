@@ -29,7 +29,7 @@ use crate::acp_client::AcpTuiClient;
 use crate::app::service_registry::{ProcessResourceMonitor, SharedPeriConfig};
 use crate::kit::atoms::{
     ACTIVE_EXECUTION_CWD, THREAD_BROWSER_SCOPE, THREAD_LIST_ERROR, THREAD_LIST_HAS_MORE,
-    THREAD_LIST_PAGE_COUNT, ThreadBrowserScope,
+    THREAD_LIST_PAGE_COUNT, THREAD_LIST_PAGE_SIZE, ThreadBrowserScope,
 };
 use crate::kit::atoms::{
     ACTIVE_SESSION_ID, CRON_JOBS, CURRENT_SESSION_TITLE, CronJobSummary, FILE_LIST, HOOK_LIST,
@@ -395,7 +395,7 @@ async fn refresh_threads(
     client: &AcpTuiClient,
     slow: &mut SlowSnapshotRefresh,
 ) -> Result<(Vec<ThreadSummary>, bool), peri_acp::transport::types::AcpError> {
-    if slow.list_workspace.is_none() {
+    if slow.list_scope != ThreadBrowserScope::All && slow.list_workspace.is_none() {
         slow.list_workspace = Some(
             client
                 .session_context(None, Some(&slow.list_cwd))
@@ -403,10 +403,20 @@ async fn refresh_threads(
                 .workspace,
         );
     }
-    let workspace = slow.list_workspace.as_ref().expect("resolved above");
     let scope = match slow.list_scope {
-        ThreadBrowserScope::Project => ThreadScope::Project(workspace.project_id),
-        ThreadBrowserScope::Workspace => ThreadScope::Workspace(workspace.workspace_id),
+        ThreadBrowserScope::Project => ThreadScope::Project(
+            slow.list_workspace
+                .as_ref()
+                .expect("resolved above")
+                .project_id,
+        ),
+        ThreadBrowserScope::Workspace => ThreadScope::Workspace(
+            slow.list_workspace
+                .as_ref()
+                .expect("resolved above")
+                .workspace_id,
+        ),
+        ThreadBrowserScope::All => ThreadScope::All,
     };
     let mut cursor = None;
     let mut threads = Vec::new();
@@ -415,7 +425,7 @@ async fn refresh_threads(
             .list_scoped_threads(&ScopedThreadQuery {
                 scope: scope.clone(),
                 cursor,
-                limit: 50,
+                limit: THREAD_LIST_PAGE_SIZE,
             })
             .await?;
         threads.extend(page.entries.into_iter().map(|entry| ThreadSummary {

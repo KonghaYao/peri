@@ -11,7 +11,7 @@
 ### ARC-WORKSPACE-001
 
 - **Scope**：`peri-acp-types`、`peri-resources`、`peri-process`、ACP session lifecycle、Agent、TUI。
-- **Rule**：新会话的身份归属是持久化 `SessionBinding`：本地仓库 `ProjectId`、checkout `WorkspaceId` 与相对执行目录。路径是定位信息，不是项目或会话主键。Git linked worktrees 共享 Project，独立 clone 不按 remote 合并。load/resume/fork 以保存的 binding 为事实，请求 cwd 只作期望校验；热冷恢复均拒绝不匹配，失败不得改用当前终端目录。所有产生执行副作用的会话环境在取得 `SessionExecutionLease` 后按绑定 cwd 装配；绑定会话的写入要求对应根 owner。close 必须等 owned 执行及资源关闭，再标 clean 释放；进程退出仅释放 OS 锁，未确认的 dirty 保持 `RecoveryRequired`。TUI 项目列表、工作区筛选与精确目录 continue 经 ACP 查询；成功提交恢复后才切换 active cwd 与文件/服务视图。默认读写沿用单库 `threads.db`，已知旧 schema 在事务内补齐列和身份表；历史行保留且不回填 binding，未知 schema / 版本在写入前拒绝。旧会话没有 binding 时不得执行；升级前停止旧 writer，不支持新旧二进制混用。
+- **Rule**：新会话的身份归属是持久化 `SessionBinding`：本地仓库 `ProjectId`、checkout `WorkspaceId` 与相对执行目录。路径是定位信息，不是项目或会话主键。Git linked worktrees 共享 Project，独立 clone 不按 remote 合并。load/resume/fork 以保存的 binding 为事实，请求 cwd 只作期望校验；热冷恢复均拒绝不匹配，失败不得改用当前终端目录。所有产生执行副作用的会话环境在取得 `SessionExecutionLease` 后按绑定 cwd 装配；绑定会话的写入要求对应根 owner。close 必须等 owned 执行及资源关闭，再标 clean 释放；进程退出仅释放 OS 锁，未确认的 dirty 保持 `RecoveryRequired`。TUI 项目列表、工作区筛选与精确目录 continue 经 ACP 查询；成功提交恢复后才切换 active cwd 与文件/服务视图。默认读写沿用单库 `threads.db`，已知旧 schema 在事务内补齐列和身份表；历史行保留，开库不批量发现目录或回填 binding，未知 schema / 版本在写入前拒绝。列表保留未绑定历史（binding/root 为空），路径仅作展示关联；All 与只读历史访问不要求目录可用。旧根会话在显式 load/resume/fork 时按保存的绝对 cwd 校验，在同一事务中接纳 binding 和缺失 frozen snapshot，再取得正常执行 lease；已有 binding、执行记录或损坏快照不得当作 legacy 缺失重建。接纳后旧子会话写入也要求根 owner；升级前停止旧 writer，不支持新旧二进制混用。
 - **Boundary**：OS 执行清理由 `peri-process` 提供证据：Unix 专用进程组、Windows 禁止 breakaway 的 Job；主进程退出与发送终止请求均不足以确认完成。Unix 显式 setsid/setpgid 脱组的进程不在该生命周期保证内，本契约不提供任意代码隔离沙箱。
 - **Verify**：`cargo test -p peri-resources --lib -- worktree`；`cargo test -p peri-process --lib`；`cargo test -p peri-agent --lib -- agent::async_tasks`；`cargo test -p peri-acp --lib -- workspace`；`cargo test -p peri-tui --lib -- workspace`；检查实际 OS 锁跨进程、异常退出、热冷恢复、丢失目录与 TUI 失败提交。平台执行保证须由对应系统实测，交叉编译不替代运行验收。设计见 [session-workspace-identity.md](../design/session-workspace-identity.md)。
 
@@ -24,7 +24,7 @@
 ### ARC-FROZEN-001
 
 - **Scope**：会话、Prompt、SubAgent。
-- **Rule**：会话创建时冻结日期、项目指引、skills 摘要、MetaHarness 和 system prompt；同一会话及其 SubAgent 复用冻结数据，禁止中途重新读取而改变 prompt 前缀。冻结数据必须作为版本化 owner state 经 `ThreadStore` 专用接口持久化（不进入 `ThreadMeta` / list projection）：冷 `session/load` / `resume` 恢复原快照；legacy 缺失时只能用 `ThreadMeta.cwd` 构建，并以原子 write-once/CAS 回填，竞争失败方必须重读 winner。未知未来版本、损坏快照、metadata/store 错误均 fail closed 且不得覆盖原 blob。`fork` 继承 source 的精确快照；new/fork 写快照失败须补偿删除新 thread，禁止留下无 frozen owner state 的可用会话。
+- **Rule**：会话创建时冻结日期、项目指引、skills 摘要、MetaHarness 和 system prompt；同一会话及其 SubAgent 复用冻结数据，禁止中途重新读取而改变 prompt 前缀。冻结数据必须作为版本化 owner state 经 `ThreadStore` 专用接口持久化（不进入 `ThreadMeta` / list projection）：冷 `session/load` / `resume` 恢复原快照；未绑定 legacy 根会话缺失时只能用 `ThreadMeta.cwd` 构建，与 binding 在同一事务中原子 write-once 回填，竞争失败方必须重读 winner；已绑定会话缺失快照保持错误。未知未来版本、损坏快照、metadata/store 错误均 fail closed 且不得覆盖原 blob。`fork` 继承 source 的精确快照；new/fork 写快照失败须补偿删除新 thread，禁止留下无 frozen owner state 的可用会话。
 - **Verify**：`cargo test -p peri-acp --lib frozen_snapshot`、`cargo test -p peri-acp --lib test_session_load_cold_host_restores_original_frozen_prompt`、`cargo test -p peri-resources --lib frozen_snapshot`、`cargo test -p peri-middlewares --lib frozen_claude_md`；人工检查 `build_frozen_data`、`session/frozen_snapshot.rs`、session lifecycle 与 SubAgent `with_frozen_data` 调用。
 
 ### ARC-COMPACT-001

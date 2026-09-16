@@ -73,6 +73,16 @@ impl ThreadStore for SqliteThreadStore {
     ) -> Result<peri_acp_types::workspace::ResolvedWorkspace> {
         self.validate_session_binding_impl(id).await
     }
+    async fn adopt_legacy_thread(
+        &self,
+        id: &ThreadId,
+        saved_cwd: &str,
+        workspace: &peri_acp_types::workspace::ResolvedWorkspace,
+        frozen_snapshot: &str,
+    ) -> Result<()> {
+        self.adopt_legacy_thread_impl(id, saved_cwd, workspace, frozen_snapshot)
+            .await
+    }
     async fn list_scoped_threads(
         &self,
         query: &peri_acp_types::workspace::ScopedThreadQuery,
@@ -583,3 +593,7 @@ mod tests;
 #[cfg(test)]
 #[path = "sqlite_inherited_context_test.rs"]
 mod inherited_context_tests;
+
+#[cfg(test)]
+#[path = "sqlite_store/legacy_test.rs"]
+mod legacy_tests;

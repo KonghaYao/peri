@@ -24,8 +24,24 @@ impl SessionManager {
         plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
     ) -> crate::session::executor::FrozenSessionData {
+        self.build_frozen_data_with_config(
+            &self.inner.peri_config,
+            cwd,
+            plugin_skill_roots,
+            plugin_agent_dirs,
+        )
+    }
+
+    /// Legacy restoration discovers configuration before admitting execution resources.
+    pub(crate) fn build_frozen_data_with_config(
+        &self,
+        config: &crate::provider::PeriConfig,
+        cwd: &str,
+        plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
+        plugin_agent_dirs: &[std::path::PathBuf],
+    ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let frozen_language = self.inner.peri_config.config.language.clone();
+        let frozen_language = config.config.language.clone();
         let (claude_md, claude_local_md) =
             peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
         // 一次性读取 disableBundledSkills 并冻结到 frozen_skill_summary
@@ -41,7 +57,7 @@ impl SessionManager {
         // `.peri/meta/*.md`，构建状态后随冻结载体传播；主 prompt 与 SubAgent
         // 无 workflow 版共用同一状态（同源一致性，防双轨不一致）。
         let meta_harness_state = build_meta_harness_state(
-            self.inner.peri_config.config.meta_harness.as_ref(),
+            config.config.meta_harness.as_ref(),
             peri_middlewares::meta_harness::scan_harness_docs(cwd),
         );
 
