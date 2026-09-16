@@ -13,6 +13,7 @@ use super::registry::{
 use super::shell::{
     bg_shell_task_id, finalize_bg_shell, kill_process_group, shell_command, tee_pipe,
 };
+use super::{QueuedSubagentMessage, SubagentMessageError};
 
 // ── TaskManager（per-session 聚合）────────────────────────────────────────────
 
@@ -86,6 +87,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             cancel_token: None,
             pid: request.pid,
             output_preview: None,
+            agent_inbox: None,
         };
         self.register_with_kind(task).map_err(|e| e.to_string())
     }
@@ -210,6 +212,16 @@ impl TaskManager {
         self.registry.register_with_kind(task)
     }
 
+    /// Send Info to a live child in this session. `None` means no registered
+    /// receiver; an error must not fall through to resume or create an execution.
+    pub fn send_subagent_message(
+        &self,
+        thread_id: &str,
+        prompt: Option<&str>,
+    ) -> Result<Option<QueuedSubagentMessage>, SubagentMessageError> {
+        self.registry.send_subagent_message(thread_id, prompt)
+    }
+
     pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool {
         self.registry.complete(task_id, result)
     }
@@ -327,6 +339,7 @@ impl TaskManager {
                     cancel_token: None,
                     pid: None,
                     output_preview: None,
+                    agent_inbox: None,
                 };
                 let _ = registry.register_admitted(bg_task);
                 let complete_task_id = result.task_id.clone();
@@ -381,6 +394,7 @@ impl TaskManager {
             cancel_token: None,
             pid: Some(pid),
             output_preview: None,
+            agent_inbox: None,
         };
         if let Err(error) = registry.register_admitted(bg_task) {
             kill_process_group(pid, "KILL");
@@ -546,6 +560,7 @@ impl TaskManager {
                     cancel_token: None,
                     pid: None,
                     output_preview: None,
+                    agent_inbox: None,
                 };
                 let _ = registry.register_with_kind(bg_task);
                 let complete_task_id = fallback.task_id.clone();

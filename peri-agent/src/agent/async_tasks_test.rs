@@ -33,6 +33,7 @@ fn make_task(id: &str) -> BackgroundTask {
         cancel_token: None,
         pid: None,
         output_preview: None,
+        agent_inbox: None,
     }
 }
 
@@ -135,6 +136,7 @@ async fn test_cancel_propagates_to_running_task() {
         cancel_token: None,
         pid: None,
         output_preview: None,
+        agent_inbox: None,
     };
 
     registry.register_with_kind(task).unwrap();
@@ -177,6 +179,7 @@ async fn test_cancel_workflow_invokes_kill_closure() {
         cancel_token: None,
         pid: None,
         output_preview: None,
+        agent_inbox: None,
     };
     registry.register_with_kind(task).unwrap();
     assert_eq!(registry.active_count(), 1);
@@ -216,6 +219,7 @@ async fn test_cancel_with_unavailable_handle_returns_error_and_keeps_entry() {
         cancel_token: None,
         pid: None,
         output_preview: None,
+        agent_inbox: None,
     };
     registry.register_with_kind(task).unwrap();
     assert_eq!(registry.active_count(), 1);
@@ -422,6 +426,7 @@ async fn test_cancel_kills_process_group() {
         cancel_token: None,
         pid: Some(pid),
         output_preview: None,
+        agent_inbox: None,
     };
     registry.register_with_kind(task).unwrap();
     assert_eq!(registry.active_count(), 1);
@@ -469,6 +474,7 @@ async fn test_cancel_abort_token_cancels_task_first() {
         cancel_token: Some(token),
         pid: None,
         output_preview: None,
+        agent_inbox: None,
     };
     registry.register_with_kind(task).unwrap();
     assert_eq!(registry.active_count(), 1);
@@ -514,6 +520,7 @@ async fn test_cancel_abort_grace_timeout_fallback() {
         cancel_token: Some(token),
         pid: None,
         output_preview: None,
+        agent_inbox: None,
     };
     registry.register_with_kind(task).unwrap();
     assert_eq!(registry.active_count(), 1);
@@ -598,6 +605,7 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
         cancel_token: None,
         pid: None,
         output_preview: None,
+        agent_inbox: None,
     };
     tm.register_with_kind(task).unwrap();
 

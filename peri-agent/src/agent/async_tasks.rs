@@ -11,6 +11,7 @@
 //!
 //! Task 保持易失投影语义：不持久化，重启不复活。
 
+mod agent_inbox;
 mod manager;
 mod registry;
 mod scope;
@@ -21,6 +22,8 @@ use crate::agent::events::BackgroundTaskResult;
 #[cfg(test)]
 use tokio_util::sync::CancellationToken;
 
+pub(crate) use agent_inbox::BackgroundAgentInboxGuard;
+pub use agent_inbox::{BackgroundAgentInbox, QueuedSubagentMessage, SubagentMessageError};
 pub use manager::TaskManager;
 pub use registry::{
     BackgroundRegistryError, BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus,

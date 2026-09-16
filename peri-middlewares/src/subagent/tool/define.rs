@@ -109,11 +109,11 @@ impl BaseTool for SubAgentTool {
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "The task description to delegate to the sub-agent. Must be clear and self-contained, as the sub-agent has no access to the parent conversation history. Include all necessary context"
+                    "description": "Task instructions for a new or resumed sub-agent. With resume_thread_id targeting an active background sub-agent, this is a required non-empty supplemental message, queued as Info without interrupting or restarting it. For new sub-agents, include all necessary context"
                 },
                 "resume_thread_id": {
                     "type": "string",
-                    "description": "可选，默认不填：不填即新建 subagent。仅当要恢复此前被中断/失败的 subagent 时才填：值为其 child_thread_id（从之前 Agent 调用的返回/错误文本或 bg 通知中获得，恒为 UUID）。提供时从磁盘 thread 恢复现场继续执行，不创建新 subagent，且优先于 subagent_type / fork（两者被忽略）；prompt 可选（缺省隐式继续）；可与 run_in_background 组合（恢复后按此模式执行）。thread 状态须非 active"
+                    "description": "目标 subagent 的 child_thread_id（UUID）；不填即新建。active 后台执行：将非空 prompt 作为 Info 入队并立即返回 action: send / status: queued，不中断、不恢复、不触发额外推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续，run_in_background 决定恢复模式。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
                 },
                 "description": {
                     "type": "string",
@@ -182,10 +182,7 @@ impl BaseTool for SubAgentTool {
         // fork 字段被忽略（LLM 常按 schema 惯性同时携带，报错会让恢复被拦两次而放弃；
         // 宽容处理使恢复总是可成功，多余字段无副作用）。非 UUID 占位符已在解析时
         // 过滤（见上），不会劫持新建路径。
-        // 恢复需要持久化现场：磁盘 thread 是恢复的唯一来源（无 thread_store 无法恢复）
-        if resume_thread_id.is_some() && host.thread_store.is_none() {
-            return Err("Error: resume_thread_id requires a thread store".into());
-        }
+        // invoke_resume 先尝试当前会话的 live Info 投递；只有恢复路径才需要磁盘。
         if let Some(thread_id) = resume_thread_id.as_ref() {
             return self
                 .invoke_resume(thread_id.clone(), prompt, cwd, run_in_background)

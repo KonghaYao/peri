@@ -1,4 +1,4 @@
-//! SubAgent 恢复路径（`resume_thread_id`）：v2 stages 实现
+//! SubAgent 继续交互（`resume_thread_id`）：active 发 Info，非 active 恢复执行。
 //!
 //! 语义（issue 决策）：主 agent 凭中断/错误/bg 通知文本携带的 `child_thread_id`
 //! 恢复被中断 subagent——从磁盘 thread 恢复现场继续执行，不创建新 subagent。
@@ -23,10 +23,10 @@ use peri_agent::session::subagent::{
 use peri_agent::tools::BaseTool;
 
 impl super::SubAgentTool {
-    /// 恢复被中断 subagent（唯一调用方：define.rs invoke 的 resume 分支）。
+    /// 向本会话 active 后台 subagent 发 Info，或恢复非 active thread。
     ///
     /// 前置校验（define.rs 已做）：有效 resume_thread_id 优先于 fork / subagent_type，
-    /// thread_store 存在。本方法 load_meta 取 title 决定工具集 / 迭代上限，
+    /// 本方法先经 TaskManager 投递 live 消息；恢复时 load_meta 取 title 决定工具集，
     /// 组装 [`SubagentResumeConfig`](peri_agent::session::subagent::SubagentResumeConfig) 经 [`SessionFactory::resume_subagent`](peri_agent::session::subagent::SessionFactory::resume_subagent) 执行。
     ///
     /// 返回文本与 spawn 路径一致：
@@ -42,7 +42,21 @@ impl super::SubAgentTool {
         run_in_background: bool,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let host = self.host();
-        // 双保险：define.rs 已拦截 thread_store 缺失（恢复需要持久化现场）
+        // Live 执行是 active 的事实源。投递只做同步查找和入队，不能跨 load_meta
+        // await 后再解析同一 thread，以免把消息投给期间恢复的新执行。
+        if let Some(manager) = &host.task_manager {
+            if let Some(receipt) = manager.send_subagent_message(&thread_id, prompt.as_deref())? {
+                return Ok(format!(
+                    "action: send\nstatus: queued\nchild_thread_id: {thread_id}\ntask_id: {}\n\
+                     Supplemental prompt queued as Info for the active background sub-agent. \
+                     No execution was started or resumed. This does not interrupt the current \
+                     model/tool call or trigger another model call. Queued does not mean read: \
+                     the agent may finish before the model sees this message.",
+                    receipt.task_id,
+                ));
+            }
+        }
+        // 无 live receiver 时才进入磁盘恢复路径。
         let thread_store = host.thread_store.clone().ok_or(
             "resume_subagent: thread store required (resume_thread_id needs a persisted thread)",
         )?;
@@ -65,6 +79,14 @@ impl super::SubAgentTool {
             .load_meta(&thread_id)
             .await
             .map_err(|_| format!("resume_subagent: thread not found: {}", thread_id))?;
+        if meta.agent_status.is_active() {
+            return Err(format!(
+                "send_subagent: thread {thread_id} is still active, but no live background \
+                 receiver is available in this session. Message was not queued; \
+                 no execution was started or resumed."
+            )
+            .into());
+        }
         let title = meta.title.clone().unwrap_or_default();
 
         // 2. 按 title 恢复工具集 / LLM / 迭代上限：
@@ -139,7 +161,7 @@ impl super::SubAgentTool {
         // 5. 返回文本（见方法注释格式约定）
         if let Some(task_id) = &spawned.task_id {
             return Ok(format!(
-                "Background task {} started (thread: {}). You will be notified when it completes. \
+                "action: resume\nBackground task {} started (thread: {}). You will be notified when it completes. \
                  You can continue with other tasks in the meantime.",
                 task_id, spawned.child_thread_id
             ));
@@ -147,13 +169,13 @@ impl super::SubAgentTool {
 
         if spawned.interrupted {
             return Ok(format!(
-                "child_thread_id: {}\nSub-agent execution was interrupted, resume with Agent(resume_thread_id: {})",
+                "child_thread_id: {}\naction: resume\nSub-agent execution was interrupted, resume with Agent(resume_thread_id: {})",
                 spawned.child_thread_id, spawned.child_thread_id
             ));
         }
 
         Ok(format!(
-            "child_thread_id: {}\n{}",
+            "child_thread_id: {}\naction: resume\n{}",
             spawned.child_thread_id,
             format_subagent_result(&peri_agent::agent::react::AgentOutput {
                 text: extract_last_ai_text(&spawned.session),
