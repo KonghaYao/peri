@@ -29,6 +29,23 @@ rustup target add i686-unknown-linux-musl
 默认产物：`target/i686-unknown-linux-musl/release/peri`。
 自定义 `CARGO_TARGET_DIR` 时，验证命令需显式传入对应产物路径。
 
+## GitHub Actions 手动构建
+
+独立工作流 [build-i386.yml](../../.github/workflows/build-i386.yml) 仅监听
+`workflow_dispatch`，不接入正式版本的构建或发布流水线，也不创建 tag / Release。
+工作流检出手动触发时选择的分支或 tag，安装固定版本的 Zig / cargo-zigbuild，
+复用下述容器验证，通过后上传 `peri-linux-i386-<commit SHA>` artifact，保留 14 天。
+下载内容包含 `peri-linux-i386.tar.gz`、`checksums.txt` 与工具链版本/commit 信息。
+
+按 [GitHub 手动运行文档](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)，
+工作流需先进入仓库默认分支，才能从 Actions 页面手动触发：选择
+**Build i386 Static Binary → Run workflow → 目标分支**。
+也可以使用 GitHub CLI：
+
+```bash
+gh workflow run build-i386.yml --ref <branch-or-tag>
+```
+
 ## 验证
 
 需要 Python 3、Docker 与 `linux/386` 执行支持。在 Apple Silicon 上使用
