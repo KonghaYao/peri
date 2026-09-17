@@ -155,6 +155,37 @@ async fn test_timed_out_shell_can_close_cleanly() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_shutdown_reaps_child_owned_by_dropped_shell_guard() {
+    let manager = TaskManager::new();
+    let mut execution = ShellExecutionGuard::new(Some(manager.begin_external_execution().unwrap()));
+    let mut command = shell_command("exec sleep 60", &[]);
+    execution.prepare(&mut command).unwrap();
+    let child = command.spawn().unwrap();
+    let pid = i32::try_from(child.id().unwrap()).unwrap();
+    execution.attach_owned(child).unwrap();
+
+    let mut shutdown = manager.shutdown();
+    assert!(futures::poll!(&mut shutdown).is_pending());
+    drop(execution);
+    assert_eq!(shutdown.await, TaskShutdownReport::Complete);
+    // Complete 必须证明进程组已消失，而且 Child 已被回收而非仅收到 kill。
+    assert_eq!(unsafe { libc::kill(-pid, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    assert_eq!(
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_rejected_promoted_task_settles_registered_process_after_cleanup() {
     let manager = Arc::new(TaskManager::new());
     let mut execution = ShellExecutionGuard::new(Some(manager.begin_external_execution().unwrap()));

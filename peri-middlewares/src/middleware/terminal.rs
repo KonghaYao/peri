@@ -375,15 +375,15 @@ impl BaseTool for BashTool {
         cmd.process_group(0);
 
         execution.prepare(&mut cmd)?;
-        let mut child = match cmd.spawn() {
+        let child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return Err(format!("Error executing command: {e}").into()),
         };
         let pid = child
             .id()
             .expect("shell_command spawn succeeded but child.id() is None");
-        if let Err(error) = execution.attach(&child) {
-            let _ = child.kill().await;
+        if let Err(error) = execution.attach_owned(child) {
+            let _ = execution.child_mut().kill().await;
             execution.confirm_stopped();
             return Err(error.into());
         }
@@ -391,6 +391,7 @@ impl BaseTool for BashTool {
         // 流式读取 stdout/stderr 到共享缓冲（超时时部分输出不再全丢）
         let stdout_buf = Arc::new(Mutex::new(String::new()));
         let stderr_buf = Arc::new(Mutex::new(String::new()));
+        let child = execution.child_mut();
         let stdout_reader =
             tokio::io::BufReader::new(child.stdout.take().expect("shell_command stdout is piped"));
         let stderr_reader =
@@ -446,17 +447,18 @@ impl BaseTool for BashTool {
                                     let _ = drain_stdout.await;
                                     let _ = drain_stderr.await;
                                     // wait 失败（极罕见）按失败完成，保证 finalize 一定执行
-                                    let (success, exit_code) = match child.wait().await {
-                                        Ok(s) => (s.success(), s.code()),
-                                        Err(e) => {
-                                            warn!(
-                                                error = %e,
-                                                task_id = %task_id_owned,
-                                                "promoted bg shell: wait failed"
-                                            );
-                                            (false, None)
-                                        }
-                                    };
+                                    let (success, exit_code) =
+                                        match execution.child_mut().wait().await {
+                                            Ok(s) => (s.success(), s.code()),
+                                            Err(e) => {
+                                                warn!(
+                                                    error = %e,
+                                                    task_id = %task_id_owned,
+                                                    "promoted bg shell: wait failed"
+                                                );
+                                                (false, None)
+                                            }
+                                        };
                                     let stdout = match stdout_buf.lock() {
                                         Ok(g) => g.clone(),
                                         Err(poisoned) => poisoned.into_inner().clone(),
@@ -507,7 +509,7 @@ impl BaseTool for BashTool {
                             Err(e) => {
                                 // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
                                 kill_process_group(pid, "KILL");
-                                let _ = child.wait().await;
+                                let _ = execution.child_mut().wait().await;
                                 let _ = drain_stdout.await;
                                 let _ = drain_stderr.await;
                                 execution.confirm_stopped();
@@ -526,7 +528,7 @@ impl BaseTool for BashTool {
                     } else {
                         // ── 无 TaskManager：杀进程组 + 部分输出落盘 ──
                         kill_process_group(pid, "KILL");
-                        let _ = child.wait().await;
+                        let _ = execution.child_mut().wait().await;
                         let _ = drain_stdout.await;
                         let _ = drain_stderr.await;
                         execution.confirm_stopped();

@@ -13,6 +13,7 @@ use super::registry::BackgroundTaskRegistry;
 pub struct ShellExecutionGuard {
     ownership: Option<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>>,
     tree: Option<Arc<peri_process::ProcessTree>>,
+    child: Option<tokio::process::Child>,
     stopped: bool,
     registration: Option<(Arc<dyn peri_acp_types::tasks::TaskManager>, String)>,
 }
@@ -22,6 +23,7 @@ impl ShellExecutionGuard {
         Self {
             ownership,
             tree: None,
+            child: None,
             stopped: false,
             registration: None,
         }
@@ -43,6 +45,16 @@ impl ShellExecutionGuard {
         )
         .ok_or_else(|| std::io::Error::other("shell process tree already shared"))?
         .attach(child)
+    }
+
+    pub fn attach_owned(&mut self, child: tokio::process::Child) -> std::io::Result<()> {
+        let result = self.attach(&child);
+        self.child = Some(child);
+        result
+    }
+
+    pub fn child_mut(&mut self) -> &mut tokio::process::Child {
+        self.child.as_mut().expect("shell child must be attached")
     }
 
     /// Windows cancellation retains the exact job handle, never a reusable PID.
@@ -118,15 +130,23 @@ impl Drop for ShellExecutionGuard {
             return;
         };
         tree.terminate();
+        let mut child = self.child.take();
         let mut ownership = self.ownership.take();
         let registration = self.registration.take();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            // The external token remains held while OS reaping catches up with cancellation.
+            // 保留 Child 并显式回收；不能让进程组退出证据依赖 orphan reaper 的调度。
             runtime.spawn(async move {
-                if tokio::time::timeout(std::time::Duration::from_secs(3), tree.wait_for_exit())
-                    .await
-                    .is_ok()
-                {
+                let cleanup = async {
+                    if let Some(child) = &mut child {
+                        child.wait().await?;
+                    }
+                    tree.wait_for_exit().await;
+                    Ok::<(), std::io::Error>(())
+                };
+                if matches!(
+                    tokio::time::timeout(std::time::Duration::from_secs(3), cleanup).await,
+                    Ok(Ok(()))
+                ) {
                     if let Some(owner) = &mut ownership {
                         owner.confirm_stopped();
                     }

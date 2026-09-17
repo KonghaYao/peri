@@ -110,10 +110,13 @@ async fn test_cancelled_foreground_shell_retains_owner_until_process_exit() {
     })
     .await
     .unwrap();
+    let mut shutdown = peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref());
+    // 进程仍活着时必须持有 owner，不能仅因 shutdown 请求就报告完成。
+    assert!(futures::poll!(&mut shutdown).is_pending());
     command.abort();
     assert!(command.await.unwrap_err().is_cancelled());
     assert_eq!(
-        peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
+        shutdown.await,
         peri_acp_types::tasks::TaskShutdownReport::Complete,
     );
 }
