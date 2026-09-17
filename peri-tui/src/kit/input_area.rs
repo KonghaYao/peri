@@ -118,6 +118,8 @@ pub struct InputAreaProps {
 pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 单一编辑状态——闭包编辑 + 渲染读取共享同一实例
     let state = hooks.use_state(TextAreaState::default);
+    let paste_gate = hooks.use_state(image::PasteGate::default);
+    let paste_gate = paste_gate.read().clone();
     let steer_height = hooks.use_state(|| 0u16);
     let steers = hooks.use_atom(&crate::kit::steer_state::STEERS);
     let steer_session = hooks.use_atom(&crate::kit::atoms::ACTIVE_SESSION_ID);
@@ -433,10 +435,37 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     KeyCode::Char('v')
                         if is_ctrl && !is_alt && !is_shift && !mention_active && !slash_active =>
                     {
+                        let Some(permit) = paste_gate.try_acquire() else {
+                            *crate::kit::atoms::NOTIFICATION.state().write() =
+                                Some(crate::kit::atoms::Notification {
+                                    message: i18n::tr("paste-in-progress"),
+                                    until: std::time::Instant::now()
+                                        + std::time::Duration::from_secs(2),
+                                });
+                            return EventResult::Consumed;
+                        };
                         exit_history_mode_if_active();
                         exit_entry_focus_on_edit();
                         let state_clone = state;
                         std::thread::spawn(move || {
+                            let _permit = permit;
+                            #[cfg(target_os = "macos")]
+                            match image::save_native_clipboard_png() {
+                                Ok(Some(path)) => {
+                                    insert_image_reference(&mut state_clone.write(), &path);
+                                    return;
+                                }
+                                Ok(None) => {}
+                                Err(_) => {
+                                    *crate::kit::atoms::NOTIFICATION.state().write() =
+                                        Some(crate::kit::atoms::Notification {
+                                            message: i18n::tr("paste-image-failed"),
+                                            until: std::time::Instant::now()
+                                                + std::time::Duration::from_secs(4),
+                                        });
+                                    return;
+                                }
+                            }
                             let Ok(mut cb) = arboard::Clipboard::new() else {
                                 return;
                             };

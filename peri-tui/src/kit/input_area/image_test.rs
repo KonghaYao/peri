@@ -1,6 +1,169 @@
 use super::*;
 
 #[test]
+fn paste_gate_rejects_overlap_and_releases_on_return() {
+    let gate = PasteGate::default();
+    let permit = gate.try_acquire().unwrap();
+    assert!(gate.clone().try_acquire().is_none());
+    drop(permit);
+    assert!(gate.try_acquire().is_some());
+}
+
+#[test]
+fn paste_gate_releases_on_panic() {
+    let gate = PasteGate::default();
+    let worker_gate = gate.clone();
+    let result = std::thread::spawn(move || {
+        let _permit = worker_gate.try_acquire().unwrap();
+        panic!("simulated clipboard failure");
+    })
+    .join();
+    assert!(result.is_err());
+    assert!(gate.try_acquire().is_some());
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::*;
+    use image::ImageEncoder;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG};
+    use objc2_foundation::NSData;
+
+    // 命名剪贴板与用户的 generalPasteboard 隔离；退出时清空测试数据。
+    struct TestPasteboard(objc2::rc::Retained<NSPasteboard>);
+
+    impl TestPasteboard {
+        fn new(bytes: Option<&[u8]>) -> Self {
+            let board = NSPasteboard::pasteboardWithUniqueName();
+            if let Some(bytes) = bytes {
+                let data = NSData::with_bytes(bytes);
+                assert!(unsafe { board.setData_forType(Some(&data), NSPasteboardTypePNG) });
+            }
+            Self(board)
+        }
+    }
+
+    impl Drop for TestPasteboard {
+        fn drop(&mut self) {
+            self.0.clearContents();
+        }
+    }
+
+    #[test]
+    fn clipboard_png_is_saved_byte_for_byte_without_pixel_conversion() {
+        objc2::rc::autoreleasepool(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("source.png");
+            png_encode(&[17, 33, 65, 128], 1, 1, &source).unwrap();
+            let bytes = std::fs::read(source).unwrap();
+            let board = TestPasteboard::new(Some(&bytes));
+            let output = save_pasteboard_png(&board.0, dir.path()).unwrap().unwrap();
+            assert_eq!(std::fs::read(output).unwrap(), bytes);
+        });
+    }
+
+    #[test]
+    fn clipboard_without_png_allows_legacy_fallback() {
+        objc2::rc::autoreleasepool(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            let board = TestPasteboard::new(None);
+            assert!(save_pasteboard_png(&board.0, dir.path()).unwrap().is_none());
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        });
+    }
+
+    #[test]
+    fn clipboard_invalid_png_is_error_not_legacy_fallback() {
+        objc2::rc::autoreleasepool(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            let board = TestPasteboard::new(Some(b"not a PNG"));
+            assert!(save_pasteboard_png(&board.0, dir.path()).is_err());
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        });
+    }
+
+    #[test]
+    fn clipboard_oversized_png_is_rejected_before_writing() {
+        objc2::rc::autoreleasepool(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            let bytes = vec![0; crate::kit::image_safety::MAX_IMAGE_BYTES as usize + 1];
+            let board = TestPasteboard::new(Some(&bytes));
+            assert!(save_pasteboard_png(&board.0, dir.path()).is_err());
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        });
+    }
+
+    // 手动性能实验：合成 4K 桌面图，对比 arboard 的 TIFF→RGBA→PNG 链路。
+    // 不设耗时阈值，避免机器负载影响常规回归测试。
+    #[test]
+    #[ignore = "manual clipboard performance comparison"]
+    fn clipboard_png_performance_comparison() {
+        let subscriber = tracing_subscriber::fmt().with_test_writer().finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        objc2::rc::autoreleasepool(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            let (width, height) = (3840usize, 2160usize);
+            let pixels: Vec<u8> = (0..width * height)
+                .flat_map(|i| {
+                    let (x, y) = (i % width, i / width);
+                    [(x / 16) as u8, (y / 16) as u8, ((x + y) / 32) as u8, 255]
+                })
+                .collect();
+            let mut tiff = std::io::Cursor::new(Vec::new());
+            image::codecs::tiff::TiffEncoder::new(&mut tiff)
+                .write_image(
+                    &pixels,
+                    width as u32,
+                    height as u32,
+                    image::ExtendedColorType::Rgba8,
+                )
+                .unwrap();
+            let source = dir.path().join("source.png");
+            png_encode(&pixels, width, height, &source).unwrap();
+            let png = std::fs::read(source).unwrap();
+            let board = TestPasteboard::new(Some(&png));
+            let start = std::time::Instant::now();
+            let decoded =
+                image::load_from_memory_with_format(tiff.get_ref(), image::ImageFormat::Tiff)
+                    .unwrap()
+                    .into_rgba8();
+            png_encode(
+                decoded.as_raw(),
+                width,
+                height,
+                &dir.path().join("legacy.png"),
+            )
+            .unwrap();
+            let legacy = start.elapsed();
+            let start = std::time::Instant::now();
+            let output = save_pasteboard_png(&board.0, dir.path()).unwrap().unwrap();
+            let native = start.elapsed();
+            assert_eq!(std::fs::read(output).unwrap(), png);
+            tracing::info!(
+                ?legacy,
+                ?native,
+                rgba_bytes = pixels.len(),
+                png_bytes = png.len(),
+                "clipboard performance comparison"
+            );
+        });
+    }
+
+    #[test]
+    fn clipboard_png_write_failure_is_error_not_legacy_fallback() {
+        objc2::rc::autoreleasepool(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("source.png");
+            png_encode(&[0; 4], 1, 1, &source).unwrap();
+            let bytes = std::fs::read(&source).unwrap();
+            let board = TestPasteboard::new(Some(&bytes));
+            assert!(save_pasteboard_png(&board.0, &source).is_err());
+            assert_eq!(std::fs::read(source).unwrap(), bytes);
+        });
+    }
+}
+
+#[test]
 fn image_reference_ends_before_following_text() {
     let mut state = TextAreaState::default();
 
