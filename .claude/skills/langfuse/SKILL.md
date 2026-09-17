@@ -1,6 +1,6 @@
 ---
 name: langfuse
-description: Interact with Langfuse and access its documentation. Use when needing to (1) query or modify Langfuse data programmatically via the CLI — traces, prompts, datasets, scores, sessions, and any other API resource, (2) look up Langfuse documentation, concepts, integration guides, or SDK usage, or (3) understand how any Langfuse feature works. This skill covers CLI-based API access (via bunx) and multiple documentation retrieval methods.
+description: 查询或操作 Langfuse traces、prompts、datasets、scores、sessions，查阅 Langfuse 文档与 SDK 用法；也用于分析本地 llm-gateway 请求/响应日志、查看 LLM 请求、追踪 session、对比上下文、排查 token 用量及缓存命中率。根据数据来源选择 Langfuse API 或本地网关日志脚本；本地分析无需 Langfuse 凭据。
 allowed-tools:
   - WebFetch(domain:langfuse.com)
   - Bash(curl *langfuse.com/*)
@@ -17,9 +17,23 @@ allowed-tools:
   - Bash(bun .claude/skills/langfuse/scripts/traces-list.ts *)
   - Bash(bun .claude/skills/langfuse/scripts/session-analyze.ts *)
   - Bash(bun .claude/skills/langfuse/scripts/daily-report.ts *)
+  - Bash(bun .claude/skills/langfuse/scripts/llm-log-query.mjs *)
+  - Bash(bun .claude/skills/langfuse/scripts/context-growth.mjs *)
 ---
 
 # Langfuse
+
+## 数据来源与分析方式
+
+| 数据来源 / 需求 | 使用方式 |
+| --- | --- |
+| Langfuse trace、observation、session，或平台 API / 文档 | 下文 Langfuse CLI 与 TypeScript 脚本 |
+| 本地 llm-gateway 的 `request.json`、`stream.log`，请求差异、缓存断点、上下文增长 | [本地网关日志分析](references/local-gateway-logs.md)，使用 `scripts/llm-log-query.mjs` 与 `scripts/context-growth.mjs` |
+
+- 本地日志方式不依赖 Langfuse API、凭据或网络，不执行下文远端凭据预检。
+- 用户只说“分析日志”而未明确来源时，先根据已提供的路径或 trace 信息定位；仍无法确定再询问，不默认查询远端。
+- 两种来源不能默认互相替代。跨来源对照需核实 session、请求标识和时间范围；未采集或未返回的字段标记为未检查。
+- 原始日志可能包含凭据和私密内容，不直接展示 headers、完整请求体或原始响应；先使用摘要，内容下钻前确认已脱敏。
 
 ## 1. Langfuse API via CLI
 
@@ -63,7 +77,7 @@ Before attributing missing or malformed data to application behavior:
 
 ## 2. Data Retrieval Tools (脚本工具集)
 
-All scripts accept common filtering options for time range and metadata:
+本节 Langfuse 查询脚本的时间与元数据过滤选项如下；本地网关日志脚本的参数见 [本地网关日志分析](references/local-gateway-logs.md)，不要混用两套参数：
 
 | Option | Description | Example |
 |--------|-------------|---------|
