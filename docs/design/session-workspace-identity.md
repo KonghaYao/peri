@@ -113,15 +113,21 @@ inode / file ID 只能作为一致性证据，不能证明任意复制、重建�
 | 相同 remote、branch 或 commit 的独立 clone | 分别登记项目，不推断同一身份 |
 | 嵌套仓库、submodule | 使用 cwd 所属的最近 Git 仓库，不上卷到 superproject |
 | 非 Git 目录 | 创建目录项目与工作区；不猜测任意父目录是项目根 |
-| Git 缺失、权限不足、unsafe repository 或损坏 | 类型化探测错误，不能伪装为非 Git 项目 |
+| Git 可执行文件缺失 | 新发现使用 cwd 目录模式，不推断仓库关系；已有 Git 绑定仍须匹配原发现快照，缺少证据时拒绝执行 |
+| Git 权限不足、unsafe repository、损坏或探测中途失效 | 类型化探测错误，不能伪装为非 Git 项目 |
 | bare repository | 可作为 linked worktree 的仓库锚点；bare 目录本身不可作为执行工作区 |
 | worktree 删除或目录暂时不可用 | 保留身份和历史，位置标记不可用，阻止执行 |
 | 删除后同路径重新创建 | 不自动继承旧会话绑定；无法确定是否同一实例时要求重关联 |
 | 整仓搬迁、复制、导入或 Git 管理目录重建 | 不承诺透明识别；显式重关联，不能以 remote 相同证明身份 |
 
 发现结果采用 `GitWorkspace` / `DirectoryWorkspace` / `Unavailable` /
-`NeedsRelink` / `DiscoveryError` 等明确分支。只有确定“不是 Git 仓库”才可建立
-目录项目。非 Git 目录随后初始化 Git，也需要显式关联已有会话，不能无声换项目。
+`NeedsRelink` / `DiscoveryError` 等明确分支。Git 确认“不是 Git 仓库”，或首次
+启动 Git 返回 executable-not-found 时，可以建立目录项目；后者仅表示未启用 Git
+发现，不声称目录中没有仓库。两种目录模式均只使用 cwd 及文件对象身份，不推断
+任意父目录归属。Git 探测一旦开始成功，后续失败不能降级为目录模式。
+已有绑定始终复核完整发现快照；Git 安装状态变化不能改写项目/工作区身份。
+非 Git 目录随后初始化 Git，或安装 Git 后发现目录属于仓库，需要显式关联已有
+目录会话，不能无声换项目；原 Git 会话在 Git 恢复可用且证据匹配后可继续恢复。
 
 ## 4. 唯一执行绑定
 

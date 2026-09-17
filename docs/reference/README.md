@@ -6,5 +6,6 @@
 - [mcp-ecosystem.md](mcp-ecosystem.md)：MCP 生态背景与外部互通参考。
 - [langfuse-data-integrity.md](langfuse-data-integrity.md)：Langfuse 数据检查手册。
 - [tui-manual-verification.md](tui-manual-verification.md)：可重复执行的 TUI 手工验证清单。
+- [i386-static-build.md](i386-static-build.md)：cargo-zigbuild 32 位 x86 Linux 静态构建与容器验证。
 
 参考资料不记录某次执行的勾选状态、临时日志或 active issue 进度。

@@ -14,6 +14,7 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 构建/验证 32 位 x86 Linux 静态产物 | 根目录 `scripts/build-i386.sh`、`scripts/test-i386.py`、`.cargo/config.toml` | `cargo zigbuild`；`check_elf`；`check_runtime` | i686 musl 静态 CRT；ELF 检查与隔离容器中的 CLI/ACP/跨进程 SQLite 验证；操作参考见 `docs/reference/i386-static-build.md` |
 | 改历史回放内容发布 | `src/kit/acp_bridge.rs` + `src/kit/acp_bridge_test.rs` | `PublicationScheduler::fire_at`；`flush_on_receiver_close`；`test_replay_persisted_history_publishes_final_assistant_in_order` | ACP replay 经 notifier 将 assistant / 工具写入 committed；Deferred deadline 与 receiver-close 必须发布这些更新，不能只检查 current_turn dirty。reset 优先丢弃旧会话 pending；合成 SQLite 重载 → replay → notifier → VIEW_MODELS 回归覆盖末尾回答与顺序 |
 | 改历史面板布局与选择 | `src/kit/panels/thread_browser.rs` + `src/kit/panels/thread_browser/` | `ThreadBrowserPanel`；`set_selection`；`keep_selection_visible`；`history_preview::text` | 会话一行，列表独立滚动，范围/选中详情/快捷提示固定；可见行数随面板高度派生；刷新按 thread ID 保留选择，预览独立保存滚动位置；字符截断按显示列宽处理。真实终端验收位于 `e2e/tests/scenarios/legacy-history-upgrade.test.ts` |
 | 改跨 worktree 列表与恢复目录 | `src/acp_client/client/workspace.rs` + `src/kit/service_snapshot.rs` + `src/kit/service_snapshot/session_services.rs` | workspace RPC、active cwd、service snapshot | Project/Workspace/All/ExactDirectory 经 ACP 查询并包含旧历史；`panels/thread_browser.rs` 的 v 预览通过 `read_session_history` 只读 RPC，目录丢失也可读；未绑定 context 允许按保存 cwd 发起恢复，成功才提交 cwd；失败阻止自动新建发送，服务视图丢弃过期响应 |
