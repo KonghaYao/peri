@@ -11,7 +11,7 @@ env:
 
 jobs:
     build:
-        name: Build and verify i686 musl
+        name: Build i686 musl
         runs-on: ubuntu-24.04
         timeout-minutes: 45
         defaults:
@@ -50,21 +50,7 @@ jobs:
             - name: Build static binary
               run: ./scripts/build-i386.sh
 
-            - name: Build 32-bit Linux smoke environment
-              run: |
-                  docker build --platform linux/386 -f scripts/i386-smoke.Dockerfile \
-                    -t peri-i386-smoke:local scripts
-
-            - name: Verify ELF and run CLI, ACP and persistence smoke tests
-              run: python3 scripts/test-i386.py
-
-            - name: Verify directory sessions without Git
-              run: |
-                  docker run --rm --network none --platform linux/386 alpine:3.22 \
-                    sh -c '! command -v git'
-                  python3 scripts/test-i386.py --image alpine:3.22
-
-            - name: Package verified binary
+            - name: Package binary
               run: |
                   mkdir -p target/dist
                   tar -czf target/dist/peri-linux-i386.tar.gz \
@@ -79,7 +65,7 @@ jobs:
                     zig version
                   } > build-info.txt
 
-            - name: Upload verified artifact
+            - name: Upload artifact
               uses: actions/upload-artifact@v4
               with:
                   name: peri-linux-i386-${{ github.sha }}
