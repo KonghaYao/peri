@@ -7,3 +7,7 @@ ar = "arm-linux-gnueabihf-ar"
 [build]
 # Disable cross-compile warnings as errors
 rustflags = ["-C", "target-feature=-crt-static"]
+
+[target.i686-unknown-linux-musl]
+# The 32-bit Linux distribution is standalone, including the musl CRT.
+rustflags = ["-C", "target-feature=+crt-static"]

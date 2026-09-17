@@ -162,6 +162,7 @@ claude-blog
 claude-blog-cn
 
 *.py
+!scripts/test-i386.py
 build
 .tmp
 tmp/
