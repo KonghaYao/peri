@@ -38,7 +38,8 @@ rustup target add i686-unknown-linux-musl
 独立工作流 [build-i386.yml](../../.github/workflows/build-i386.yml) 仅监听
 `workflow_dispatch`，不接入正式版本的构建或发布流水线，也不创建 tag / Release。
 工作流检出手动触发时选择的分支或 tag，安装固定版本的 Zig / cargo-zigbuild，
-复用下述容器验证，通过后上传 `peri-linux-i386-<commit SHA>` artifact，保留 14 天。
+编译并打包后上传 `peri-linux-i386-<commit SHA>` artifact，保留 14 天。
+工作流不运行容器验证；需要时可手动执行下述本地验证命令。
 下载内容包含 `peri-linux-i386.tar.gz`、`checksums.txt` 与工具链版本/commit 信息。
 
 按 [GitHub 手动运行文档](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)，
