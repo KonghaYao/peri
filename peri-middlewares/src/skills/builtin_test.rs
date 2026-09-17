@@ -293,30 +293,25 @@ fn test_ultra_adlc_skill_guards_complete_delivery_and_audit() {
 }
 
 #[test]
-fn test_ultra_task_skill_registered_and_discoverable() {
-    let skill = BUILTIN_SKILLS
-        .iter()
-        .find(|skill| skill.name == "ultra-task")
-        .expect("BUILTIN_SKILLS 应含 ultra-task");
-    let (name, aliases, description) =
-        parse_builtin_frontmatter(skill.content).expect("ultra-task frontmatter 应有效");
-
-    assert_eq!(name, "ultra-task");
-    assert!(aliases.is_empty());
-    assert!(description.contains("task supervision"));
-    assert!(description.contains("subagents"));
-    assert!(skill.content.contains("userInvocable: true"));
-    assert!(skill.content.contains("argumentHint:"));
+fn test_ultra_task_skill_not_registered_or_discoverable() {
+    assert!(
+        !BUILTIN_SKILLS.iter().any(|skill| skill.name == "ultra-task"),
+        "BUILTIN_SKILLS 不应含 ultra-task"
+    );
 
     let skills = scan_skill_roots(&[SkillRoot {
         path: PathBuf::new(),
         source: SkillSource::Builtin,
         plugin_name: None,
     }]);
+    assert!(
+        !skills.iter().any(|skill| skill.name == "ultra-task"),
+        "builtin 扫描结果不应含 ultra-task"
+    );
     let summary = SkillsMiddleware::build_summary(&skills);
     assert!(
-        summary.contains("**ultra-task** [builtin]"),
-        "builtin 摘要应暴露 ultra-task，实际: {summary}"
+        !summary.contains("ultra-task"),
+        "builtin 摘要不应暴露 ultra-task，实际: {summary}"
     );
 }
 
