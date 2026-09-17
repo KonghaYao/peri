@@ -9,6 +9,10 @@
 这里的 i386 指 32 位 x86 Linux 发行平台，CPU 基线仍是 Rust i686 目标，
 不承诺原始 80386 CPU 可用。静态链接消除共享库/动态加载器依赖，
 不打包 Git、Bash、Node.js 或插件/MCP 程序；相关能力仍需要对应外部命令。
+Git 不是创建普通目录会话的前置条件：找不到 Git 可执行文件时，以当前目录建立
+目录工作区；Git 可用时自动探测仓库/worktree。仓库权限、信任或损坏错误不会被
+忽略。已有 Git 绑定缺少 Git 时拒绝执行；目录绑定后来被识别为仓库时也不会
+自动改绑。身份规则见 [工作区身份设计](../design/session-workspace-identity.md)。
 
 ## 构建
 
@@ -55,11 +59,14 @@ Docker 的 x86 模拟；模拟结果不等于物理旧 CPU 兼容性验证。
 docker build --platform linux/386 -f scripts/i386-smoke.Dockerfile \
   -t peri-i386-smoke:local scripts
 python3 scripts/test-i386.py
+# 不安装 Git 的精简环境也必须通过同一套会话生命周期测试：
+python3 scripts/test-i386.py --image alpine:3.22
 # 或指定产物 / 测试镜像：
 python3 scripts/test-i386.py /absolute/path/to/peri --image peri-i386-smoke:local
 ```
 
-镜像构建需要网络安装 Git/Bash；实际测试使用 `--network none`，临时 HOME、
+Git 模式的镜像构建需要网络安装 Git/Bash；普通 Alpine 镜像验证 Git 缺失模式。
+实际测试使用 `--network none`，临时 HOME、
 配置和 SQLite 数据库，不读取开发者配置或真实凭据。验证包括：
 
 - ELF32 / Intel 80386 / executable，存在 LOAD 且没有 INTERP 或 DYNAMIC segment。

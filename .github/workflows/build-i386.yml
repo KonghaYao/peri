@@ -58,6 +58,12 @@ jobs:
             - name: Verify ELF and run CLI, ACP and persistence smoke tests
               run: python3 scripts/test-i386.py
 
+            - name: Verify directory sessions without Git
+              run: |
+                  docker run --rm --network none --platform linux/386 alpine:3.22 \
+                    sh -c '! command -v git'
+                  python3 scripts/test-i386.py --image alpine:3.22
+
             - name: Package verified binary
               run: |
                   mkdir -p target/dist

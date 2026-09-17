@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use peri_acp_types::workspace::WorkspaceError;
 use serde::{Deserialize, Serialize};
 use std::{
+    ffi::OsStr,
+    io::ErrorKind,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -175,8 +177,8 @@ async fn bounded_output(reader: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-async fn git(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
-    let mut command = Command::new("git");
+async fn git(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<Option<std::process::Output>> {
+    let mut command = Command::new(program);
     command
         .arg("-C")
         .arg(git_command_path(cwd)?)
@@ -191,9 +193,13 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
             command.env_remove(name);
         }
     }
-    let mut child = command
-        .spawn()
-        .map_err(|_| WorkspaceError::DiscoveryError("Git could not be executed".into()))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(_) => {
+            return Err(WorkspaceError::DiscoveryError("Git could not be executed".into()).into());
+        }
+    };
     let stdout = child.stdout.take().context("Git stdout unavailable")?;
     let stderr = child.stderr.take().context("Git stderr unavailable")?;
     let result = tokio::time::timeout(Duration::from_secs(5), async {
@@ -209,7 +215,7 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
     })
     .await;
     match result {
-        Ok(Ok(output)) => Ok(output),
+        Ok(Ok(output)) => Ok(Some(output)),
         Ok(Err(error)) => {
             let _ = child.kill().await;
             Err(error)
@@ -221,8 +227,10 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
     }
 }
 
-async fn git_path(cwd: &Path, args: &[&str]) -> Result<PathBuf> {
-    let output = git(cwd, args).await?;
+async fn git_path(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<PathBuf> {
+    let output = git(program, cwd, args).await?.ok_or_else(|| {
+        WorkspaceError::DiscoveryError("Git became unavailable during discovery".into())
+    })?;
     if !output.status.success() {
         return Err(WorkspaceError::DiscoveryError("Git location discovery failed".into()).into());
     }
@@ -234,18 +242,28 @@ async fn git_path(cwd: &Path, args: &[&str]) -> Result<PathBuf> {
 }
 
 pub(super) async fn discover(cwd: &Path) -> Result<(PathBuf, Discovery)> {
+    discover_with_git(cwd, OsStr::new("git")).await
+}
+
+async fn discover_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Discovery)> {
     let cwd = tokio::fs::canonicalize(cwd)
         .await
         .map_err(|_| WorkspaceError::Unavailable)?;
     path_text(&cwd)?;
     object_identity(&cwd).await?;
-    let inside = git(&cwd, &["rev-parse", "--is-inside-work-tree"]).await?;
-    if !inside.status.success() {
-        if !inside.stderr.starts_with(b"fatal: not a git repository (") {
+    let inside = git(program, &cwd, &["rev-parse", "--is-inside-work-tree"]).await?;
+    if let Some(output) = &inside {
+        if !output.status.success() && !output.stderr.starts_with(b"fatal: not a git repository (")
+        {
             return Err(
                 WorkspaceError::DiscoveryError("Git rejected repository discovery".into()).into(),
             );
         }
+    }
+    // Missing Git is a directory-only execution mode, not evidence that the path
+    // is outside a repository. Persisted Git bindings still require the exact
+    // discovery snapshot in revalidate; never rewrite them to this directory.
+    let Some(inside) = inside.filter(|output| output.status.success()) else {
         return Ok((
             cwd.clone(),
             Discovery {
@@ -257,7 +275,7 @@ pub(super) async fn discover(cwd: &Path) -> Result<(PathBuf, Discovery)> {
                 private_identity: None,
             },
         ));
-    }
+    };
     if inside.stdout != b"true\n" {
         return Err(WorkspaceError::DiscoveryError(
             "bare repositories are not execution workspaces".into(),
@@ -265,17 +283,23 @@ pub(super) async fn discover(cwd: &Path) -> Result<(PathBuf, Discovery)> {
         .into());
     }
     let root = git_path(
+        program,
         &cwd,
         &["rev-parse", "--path-format=absolute", "--show-toplevel"],
     )
     .await?;
     let common_dir = git_path(
+        program,
         &cwd,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )
     .await?;
-    let private_dir = git_path(&cwd, &["rev-parse", "--absolute-git-dir"]).await?;
-    let worktrees = git(&cwd, &["worktree", "list", "--porcelain", "-z"]).await?;
+    let private_dir = git_path(program, &cwd, &["rev-parse", "--absolute-git-dir"]).await?;
+    let worktrees = git(program, &cwd, &["worktree", "list", "--porcelain", "-z"])
+        .await?
+        .ok_or_else(|| {
+            WorkspaceError::DiscoveryError("Git became unavailable during discovery".into())
+        })?;
     let expected = git_command_path(&root)?;
     if !worktrees.status.success()
         || !worktrees.stdout.split(|byte| *byte == 0).any(|field| {
@@ -303,7 +327,10 @@ pub(super) async fn discover(cwd: &Path) -> Result<(PathBuf, Discovery)> {
 
 impl Discovery {
     pub async fn revalidate(&self, cwd: &Path) -> Result<()> {
-        let (_, current) = discover(cwd).await?;
+        self.revalidate_with_git(cwd, OsStr::new("git")).await
+    }
+    async fn revalidate_with_git(&self, cwd: &Path, program: &OsStr) -> Result<()> {
+        let (_, current) = discover_with_git(cwd, program).await?;
         if &current != self {
             return Err(WorkspaceError::NeedsRelink.into());
         }
