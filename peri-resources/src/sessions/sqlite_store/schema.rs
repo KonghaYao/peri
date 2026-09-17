@@ -11,6 +11,7 @@ pub(super) enum SchemaState {
     Empty,
     Legacy,
     Version2,
+    Version3,
     Current,
 }
 
@@ -20,7 +21,8 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .fetch_one(&mut *connection)
         .await?;
     match version {
-        3 => return Ok(SchemaState::Current),
+        4 => return Ok(SchemaState::Current),
+        3 => return Ok(SchemaState::Version3),
         2 => return Ok(SchemaState::Version2),
         0 => {}
         _ => return Err(WorkspaceError::UnsupportedDatabaseSchema.into()),
@@ -88,7 +90,7 @@ impl SqliteThreadStore {
             sqlx::query("ALTER TABLE session_bindings DROP COLUMN revision")
                 .execute(&mut *tx)
                 .await?;
-        } else {
+        } else if matches!(state, SchemaState::Empty | SchemaState::Legacy) {
             sqlx::raw_sql(
             "CREATE TABLE IF NOT EXISTS threads (
                 id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
@@ -162,12 +164,81 @@ impl SqliteThreadStore {
             );"
         ).execute(&mut *tx).await?;
         }
-        sqlx::query("PRAGMA user_version = 3")
+        if matches!(state, SchemaState::Version2 | SchemaState::Version3) {
+            migrate_identity_values(&mut tx).await?;
+        }
+        sqlx::query("PRAGMA user_version = 4")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         Ok(())
     }
+}
+
+async fn migrate_identity_values(connection: &mut SqliteConnection) -> Result<()> {
+    let tables: Vec<(String,)> = sqlx::query_as(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('projects', 'workspaces')",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+    if tables.len() != 2 {
+        return Err(WorkspaceError::UnsupportedDatabaseSchema.into());
+    }
+
+    let projects: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, object_identity FROM projects ORDER BY id")
+            .fetch_all(&mut *connection)
+            .await?;
+    let mut normalized_projects = Vec::with_capacity(projects.len());
+    let mut project_identities = HashSet::new();
+    for (id, identity) in projects {
+        let value: serde_json::Value = serde_json::from_str(&identity)?;
+        let identity = super::discovery::normalize_identity_json(&value)?;
+        if !project_identities.insert(identity.clone()) {
+            return Err(WorkspaceError::DiscoveryError(
+                "object identity collision during schema migration".into(),
+            )
+            .into());
+        }
+        normalized_projects.push((id, identity));
+    }
+
+    let workspaces: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id, root_identity, discovery FROM workspaces ORDER BY id")
+            .fetch_all(&mut *connection)
+            .await?;
+    let mut normalized_workspaces = Vec::with_capacity(workspaces.len());
+    let mut workspace_identities = HashSet::new();
+    for (id, root_identity, discovery) in workspaces {
+        let identity =
+            super::discovery::normalize_identity_json(&serde_json::from_str(&root_identity)?)?;
+        let discovery =
+            super::discovery::normalize_discovery_json(&serde_json::from_str(&discovery)?)?;
+        if !workspace_identities.insert(identity.clone()) {
+            return Err(WorkspaceError::DiscoveryError(
+                "workspace identity collision during schema migration".into(),
+            )
+            .into());
+        }
+        normalized_workspaces.push((id, identity, discovery));
+    }
+    // Validate every row and all collisions before touching unique columns.
+    for (id, identity) in normalized_projects {
+        sqlx::query("UPDATE projects SET object_identity = ? WHERE id = ?")
+            .bind(identity)
+            .bind(id)
+            .execute(&mut *connection)
+            .await?;
+    }
+    for (id, identity, discovery) in normalized_workspaces {
+        sqlx::query("UPDATE workspaces SET root_identity = ?, discovery = ? WHERE id = ?")
+            .bind(identity)
+            .bind(discovery)
+            .bind(id)
+            .execute(&mut *connection)
+            .await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

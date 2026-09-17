@@ -231,7 +231,7 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
         .fetch_one(&reopened.pool)
         .await
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     reopened.close().await;
     let reader = SqliteThreadStore::open_existing_read_only(&path)
         .await
@@ -344,7 +344,7 @@ async fn test_single_database_future_version_is_rejected_before_writing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = legacy_database(&path).await;
-    sqlx::query("PRAGMA user_version = 4")
+    sqlx::query("PRAGMA user_version = 5")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -465,7 +465,7 @@ async fn test_single_database_default_writer_child_process() {
 async fn version2_database(path: &Path) -> SqliteConnection {
     let mut connection = legacy_database(path).await;
     sqlx::raw_sql(
-        "ALTER TABLE threads ADD COLUMN parent_thread_id TEXT;
+        r#"ALTER TABLE threads ADD COLUMN parent_thread_id TEXT;
         ALTER TABLE threads ADD COLUMN snapshot_at_message_id TEXT;
         ALTER TABLE threads ADD COLUMN hidden BOOLEAN NOT NULL DEFAULT 0;
         ALTER TABLE threads ADD COLUMN cancel_policy TEXT NOT NULL DEFAULT 'cascade';
@@ -500,15 +500,152 @@ async fn version2_database(path: &Path) -> SqliteConnection {
             thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
             generation INTEGER NOT NULL, clean BOOLEAN NOT NULL
         );
-        INSERT INTO projects VALUES ('11111111-1111-4111-8111-111111111111', '/old/project', 'project identity bytes');
+        INSERT INTO projects VALUES ('11111111-1111-4111-8111-111111111111', '/old/project', '{"device":1,"inode":2,"birth_seconds":3,"birth_nanos":4}');
         INSERT INTO workspaces VALUES ('22222222-2222-4222-8222-222222222222',
-            '11111111-1111-4111-8111-111111111111', '/old/worktree', 'root identity bytes', 'discovery bytes');
+            '11111111-1111-4111-8111-111111111111', '/old/worktree', '{"device":5,"inode":6,"birth_seconds":7,"birth_nanos":8}', '{"root":"/old/worktree","root_identity":{"device":5,"inode":6,"birth_seconds":7,"birth_nanos":8},"common_dir":null,"common_identity":null,"private_dir":null,"private_identity":null}');
         INSERT INTO session_bindings VALUES ('old-session', 1, 1,
             '11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', '');
         INSERT INTO execution_runs VALUES ('old-session', 7, 0);
-        PRAGMA user_version = 2;",
+        PRAGMA user_version = 2;"#,
     ).execute(&mut connection).await.unwrap();
     connection
+}
+
+// A real schema-3 registry: old identity payloads still carry birth fields,
+// while all directory values point at the live temporary workspace.
+async fn version3_database(path: &Path, root: &Path) -> SqliteConnection {
+    let mut connection = version2_database(path).await;
+    let (_, discovery) = super::super::discovery::discover(root).await.unwrap();
+    let identity_with_legacy_fields = |value: serde_json::Value| {
+        let mut value = value;
+        value["birth_seconds"] = serde_json::json!(123);
+        value["birth_nanos"] = serde_json::json!(456);
+        value
+    };
+    let project_identity =
+        identity_with_legacy_fields(serde_json::to_value(discovery.project_identity()).unwrap());
+    let mut discovery_json = serde_json::to_value(&discovery).unwrap();
+    for key in ["root_identity", "common_identity", "private_identity"] {
+        assert!(
+            discovery_json[key].is_object(),
+            "Git fixture must include {key}"
+        );
+        discovery_json[key] = identity_with_legacy_fields(discovery_json[key].clone());
+    }
+    let root_identity = discovery_json["root_identity"].clone();
+    let root = discovery.root.to_str().unwrap();
+    let locator = discovery.project_locator().to_str().unwrap();
+    sqlx::query("UPDATE projects SET locator = ?, object_identity = ? WHERE id = ?")
+        .bind(locator)
+        .bind(serde_json::to_string(&project_identity).unwrap())
+        .bind("11111111-1111-4111-8111-111111111111")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workspaces SET root = ?, root_identity = ?, discovery = ? WHERE id = ?")
+        .bind(root)
+        .bind(serde_json::to_string(&root_identity).unwrap())
+        .bind(serde_json::to_string(&discovery_json).unwrap())
+        .bind("22222222-2222-4222-8222-222222222222")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE threads SET frozen_context = ? WHERE id = 'old-session'")
+        .bind("frozen-owner-state")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE session_bindings DROP COLUMN revision")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA user_version = 3")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection
+}
+
+#[tokio::test]
+async fn test_schema3_identity_migration_reuses_binding_and_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("threads.db");
+    let status = std::process::Command::new("git")
+        .args(["init", "-q", dir.path().to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(status.success(), "Git fixture initialization failed");
+    version3_database(&path, dir.path())
+        .await
+        .close()
+        .await
+        .unwrap();
+
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let workspace = store.resolve_workspace(dir.path()).await.unwrap();
+    assert_eq!(
+        workspace.project_id.to_string(),
+        "11111111-1111-4111-8111-111111111111"
+    );
+    assert_eq!(
+        workspace.workspace_id.to_string(),
+        "22222222-2222-4222-8222-222222222222"
+    );
+    let execution: (i64, bool) = sqlx::query_as(
+        "SELECT generation, clean FROM execution_runs WHERE thread_id = 'old-session'",
+    )
+    .fetch_one(&store.pool)
+    .await
+    .unwrap();
+    assert_eq!(execution, (7, false));
+    assert_eq!(
+        store
+            .load_messages(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .load_frozen_snapshot(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("frozen-owner-state")
+    );
+    let binding = store
+        .load_session_binding(&"old-session".to_owned())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        binding.project_id.to_string(),
+        workspace.project_id.to_string()
+    );
+    assert_eq!(
+        store
+            .validate_session_binding(&"old-session".to_owned())
+            .await
+            .unwrap(),
+        workspace
+    );
+    store.close().await;
+
+    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let again = reopened.resolve_workspace(dir.path()).await.unwrap();
+    assert_eq!(again.project_id, workspace.project_id);
+    assert_eq!(again.workspace_id, workspace.workspace_id);
+    assert_eq!(
+        reopened
+            .load_session_binding(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .unwrap()
+            .workspace_id,
+        workspace.workspace_id
+    );
+    reopened.close().await;
 }
 
 /// 记录 v2 升级不能改动的身份与执行数据。
@@ -539,16 +676,15 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_execution
     ).fetch_one(&mut connection).await.unwrap();
     assert_eq!(revision, (1, None));
     let before_history = history_bytes(&mut connection).await;
-    let before_identity = identity_and_execution_bytes(&mut connection).await;
     connection.close().await.unwrap();
 
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let mut connection = store.pool.acquire().await.unwrap();
     assert_eq!(history_bytes(&mut connection).await, before_history);
-    assert_eq!(
-        identity_and_execution_bytes(&mut connection).await,
-        before_identity
-    );
+    let migrated_identity = identity_and_execution_bytes(&mut connection).await;
+    assert!(migrated_identity
+        .iter()
+        .all(|value| !value.contains("birth_")));
     assert!(!column_names(&mut connection, "session_bindings")
         .await
         .unwrap()
@@ -557,7 +693,7 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_execution
         .fetch_one(&mut *connection)
         .await
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     drop(connection);
 
     let old = store
@@ -642,4 +778,62 @@ async fn test_version2_failed_column_drop_preserves_schema_version_and_data() {
         .unwrap();
     assert_eq!(version, 2);
     connection.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_identity_migration_collision_rolls_back_schema_and_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("threads.db");
+    let mut connection = version2_database(&path).await;
+    sqlx::query("INSERT INTO projects VALUES (?, ?, ?)")
+        .bind("33333333-3333-4333-8333-333333333333")
+        .bind("/another/project")
+        .bind(r#"{"device":1,"inode":2,"birth_seconds":9,"birth_nanos":10}"#)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+
+    assert!(SqliteThreadStore::new(&path).await.is_err());
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new().filename(&path).read_only(true),
+    )
+    .await
+    .unwrap();
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(version, 2, "冲突必须回滚版本号");
+    let (identity,): (String,) = sqlx::query_as(
+        "SELECT object_identity FROM projects WHERE id = '11111111-1111-4111-8111-111111111111'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert!(identity.contains("birth_seconds"), "回滚不得改写旧身份");
+}
+
+#[tokio::test]
+async fn test_identity_migration_corrupt_discovery_rolls_back_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("threads.db");
+    let mut connection = version2_database(&path).await;
+    sqlx::query("UPDATE workspaces SET discovery = 'corrupt'")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+
+    assert!(SqliteThreadStore::new(&path).await.is_err());
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new().filename(&path).read_only(true),
+    )
+    .await
+    .unwrap();
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(version, 2, "损坏 discovery 必须回滚版本号");
 }
