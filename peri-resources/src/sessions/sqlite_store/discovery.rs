@@ -16,8 +16,65 @@ use tokio::{
 pub(super) struct ObjectIdentity {
     device: u64,
     inode: u64,
-    birth_seconds: u64,
-    birth_nanos: u32,
+}
+
+/// Decode an identity written by schema 3 and emit the schema 4 canonical
+/// form. Creation timestamps are deliberately accepted only as legacy input;
+/// they are not part of identity or compared during discovery.
+pub(super) fn normalize_identity_json(value: &serde_json::Value) -> Result<String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| WorkspaceError::DiscoveryError("invalid object identity".into()))?;
+    if !object.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "device" | "inode" | "birth_seconds" | "birth_nanos"
+        )
+    }) {
+        return Err(WorkspaceError::DiscoveryError("unknown object identity field".into()).into());
+    }
+    let device = object
+        .get("device")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| WorkspaceError::DiscoveryError("invalid object identity device".into()))?;
+    let inode = object
+        .get("inode")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| WorkspaceError::DiscoveryError("invalid object identity inode".into()))?;
+    serde_json::to_string(&ObjectIdentity { device, inode }).map_err(Into::into)
+}
+
+pub(super) fn normalize_discovery_json(value: &serde_json::Value) -> Result<String> {
+    let mut value = value.clone();
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| WorkspaceError::DiscoveryError("invalid discovery snapshot".into()))?;
+    if !object.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "root"
+                | "root_identity"
+                | "common_dir"
+                | "common_identity"
+                | "private_dir"
+                | "private_identity"
+        )
+    }) {
+        return Err(
+            WorkspaceError::DiscoveryError("unknown discovery snapshot field".into()).into(),
+        );
+    }
+    for key in ["root_identity", "common_identity", "private_identity"] {
+        if let Some(identity) = object.get(key) {
+            if identity.is_null() {
+                continue;
+            }
+            let normalized = normalize_identity_json(identity)?;
+            object.insert(key.into(), serde_json::from_str(&normalized)?);
+        }
+    }
+    let discovery: Discovery = serde_json::from_value(value)?;
+    serde_json::to_string(&discovery).map_err(Into::into)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,22 +103,9 @@ pub(super) async fn object_identity(path: &Path) -> Result<ObjectIdentity> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        // Birth time strengthens inode evidence without depending on mutable directory mtime.
-        // Filesystems that cannot provide it cannot safely establish this registry contract.
-        let birth = meta
-            .created()
-            .map_err(|_| {
-                WorkspaceError::DiscoveryError(
-                    "filesystem does not provide creation identity".into(),
-                )
-            })?
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| WorkspaceError::NeedsRelink)?;
         Ok(ObjectIdentity {
             device: meta.dev(),
             inode: meta.ino(),
-            birth_seconds: birth.as_secs(),
-            birth_nanos: birth.subsec_nanos(),
         })
     }
     #[cfg(windows)]
@@ -97,16 +141,9 @@ fn windows_object_identity(path: &Path) -> Result<ObjectIdentity> {
         return Err(std::io::Error::last_os_error().into());
     }
     let information = unsafe { information.assume_init() };
-    let birth = (u64::from(information.ftCreationTime.dwHighDateTime) << 32)
-        | u64::from(information.ftCreationTime.dwLowDateTime);
-    if birth == 0 {
-        return Err(WorkspaceError::NeedsRelink.into());
-    }
     Ok(ObjectIdentity {
         device: u64::from(information.dwVolumeSerialNumber),
         inode: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
-        birth_seconds: birth / 10_000_000,
-        birth_nanos: ((birth % 10_000_000) * 100) as u32,
     })
 }
 

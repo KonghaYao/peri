@@ -99,6 +99,13 @@ reqwest.workspace = true
 # ── Slice 3：CLI 掩码输入同步码 / keystore 密码（无网络依赖）──
 rpassword = "7"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl.workspace = true

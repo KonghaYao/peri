@@ -14,6 +14,7 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 改历史回放内容发布 | `src/kit/acp_bridge.rs` + `src/kit/acp_bridge_test.rs` | `PublicationScheduler::fire_at`；`flush_on_receiver_close`；`test_replay_persisted_history_publishes_final_assistant_in_order` | ACP replay 经 notifier 将 assistant / 工具写入 committed；Deferred deadline 与 receiver-close 必须发布这些更新，不能只检查 current_turn dirty。reset 优先丢弃旧会话 pending；合成 SQLite 重载 → replay → notifier → VIEW_MODELS 回归覆盖末尾回答与顺序 |
 | 改历史面板布局与选择 | `src/kit/panels/thread_browser.rs` + `src/kit/panels/thread_browser/` | `ThreadBrowserPanel`；`set_selection`；`keep_selection_visible`；`history_preview::text` | 会话一行，列表独立滚动，范围/选中详情/快捷提示固定；可见行数随面板高度派生；刷新按 thread ID 保留选择，预览独立保存滚动位置；字符截断按显示列宽处理。真实终端验收位于 `e2e/tests/scenarios/legacy-history-upgrade.test.ts` |
 | 改跨 worktree 列表与恢复目录 | `src/acp_client/client/workspace.rs` + `src/kit/service_snapshot.rs` + `src/kit/service_snapshot/session_services.rs` | workspace RPC、active cwd、service snapshot | Project/Workspace/All/ExactDirectory 经 ACP 查询并包含旧历史；`panels/thread_browser.rs` 的 v 预览通过 `read_session_history` 只读 RPC，目录丢失也可读；未绑定 context 允许按保存 cwd 发起恢复，成功才提交 cwd；失败阻止自动新建发送，服务视图丢弃过期响应 |
 | 改会话权限、模型与宿主配置边界 | `src/kit/permission_mode.rs` + `src/kit/popups/model_quick_switch.rs` + `src/kit/panels/{model/edit,config}.rs` | `session/set_mode`、`session/set_config_option`、宿主 `update_config` | ModelPanel 选中/编辑宿主配置 active_alias；quick-switch 按 active session RPC，显示宿主配置模型并覆盖会话当前模型；宿主配置不携带 sessionId，配置面板显示实际保存路径 |
@@ -55,7 +56,7 @@
 | 语义选区 | `message_area/selection.rs` | 拖拽选区与语义复制（`map_slice_to_semantic` :469，复制时剥视觉前缀） |
 | markdown 渲染 | `markdown/`（convert.rs / code_block.rs / table.rs / scan.rs） | 文本 → 带样式的行渲染；代码块、表格、扫描 |
 | subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`（:29）、`subagent_tool_line`（:92，固定 2 格缩进 `SUBAGENT_TOOL_INDENT` :22、label 无 bold）、`subagent_error_reason_line`（:168，错误不弱化） |
-| InputArea（输入区） | `input_area.rs` + `input_area/image.rs` | 编辑、@mention、slash 补全、提交分发（`input_area/submit.rs::dispatch_submit_request` :21）；图片粘贴移动 arboard owned RGBA 后校验像素长度并流式编码 PNG，避免整图复制；多行渲染按显示宽度 |
+| InputArea（输入区） | `input_area.rs` + `input_area/image.rs` | 编辑、@mention、slash 补全、提交分发（`input_area/submit.rs::dispatch_submit_request` :21）；图片粘贴由 `PasteGate` 限制为单任务；macOS `save_native_clipboard_png` 优先原样保存 ≤20 MiB PNG（只读 IHDR、不解码像素、不套用预览尺寸限制），仅 PNG 缺席回退 arboard owned RGBA + 流式编码；`image_test.rs` 覆盖独立 NSPasteboard 与手动性能对比；多行渲染按显示宽度 |
 | input_history（输入历史） | `input_history.rs` | `push_history`（:23）/`history_up`（:54）；持久化 `~/.peri/input-history.json`（唯一存储，`load_history` :119） |
 | StatusBar（状态栏） | `status_bar.rs` | `StatusBarProps`（:353）/`StatusBar`（:361）：Row1/Row2/NotifRow、模型点击区、权限模式显示 |
 | BgTaskArea（后台任务栏） | `bg_task_area.rs` | `BgTaskArea`（:46）：bg agent 运行中条目 + 动画 |

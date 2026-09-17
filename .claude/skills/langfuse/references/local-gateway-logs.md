@@ -1,11 +1,10 @@
----
-name: llm-log-analyzer
-description: 分析 llm-gateway 代理产生的请求/响应日志。当用户说"分析日志"、"查看 LLM 请求"、"对比 session"、"检查 token 用量"、"日志里有什么"、"帮我看看 data 目录"、"哪个请求失败了"、"找一下 session 的请求"等涉及 LLM 网关日志分析的场景时使用此 skill。即使用户只是笼统地说"看看日志"或"data 里有什么"，也应触发。
----
+# 本地网关日志分析
 
-# LLM Log Analyzer
+这是 [Langfuse skill](../SKILL.md) 的本地数据分析方式：分析 llm-gateway 产生的请求/响应日志，不需要 Langfuse 凭据或网络。
 
-分析 `./data/` 下的 LLM 请求/响应日志。
+以下命令从仓库根目录执行；建议用 `--dir <data-dir>` 显式指定用户授权分析的日志目录。从其他目录调用时，将脚本路径替换为绝对路径。仅 `llm-log-query.mjs` 支持默认目录查找；`context-growth.mjs` 必须提供 `--dir` 和 `--session`。
+
+原始日志不保证已脱敏，禁止输出凭据（包括部分前缀）。不要使用 `show --headers` 展示原始 headers；`--body`、`--messages`、`--stream`、`--full`、diff、缓存深诊及上下文轨迹可能输出消息或工具参数，只能对已确认脱敏的数据使用。先看摘要，不把完整日志复制到报告或外部服务。
 
 ## 日志结构
 
@@ -53,12 +52,12 @@ data/
 
 ## 分析工具
 
-`scripts/llm-log-query.mjs` 提供以下子命令，用 `bun run scripts/llm-log-query.mjs <command>` 运行：
+`scripts/llm-log-query.mjs` 提供以下子命令，用 `bun .claude/skills/langfuse/scripts/llm-log-query.mjs <command>` 运行：
 
 ### list — 列出请求摘要
 
 ```bash
-bun run scripts/llm-log-query.mjs list [--dir ./data] [--limit 20] [--model NAME] [--session ID] [--route openai|anthropic|deepseek] [--after YYYY-MM-DD] [--before YYYY-MM-DD] [--errors]
+bun .claude/skills/langfuse/scripts/llm-log-query.mjs list [--dir ./data] [--limit 20] [--model NAME] [--session ID] [--route openai|anthropic|deepseek] [--after YYYY-MM-DD] [--before YYYY-MM-DD] [--errors]
 ```
 
 输出表格：序号 | 请求ID | 时间 | 路由 | 模型 | Session | 消息数 | 状态 | 延迟
@@ -66,10 +65,10 @@ bun run scripts/llm-log-query.mjs list [--dir ./data] [--limit 20] [--model NAME
 ### show — 查看单个请求详情
 
 ```bash
-bun run scripts/llm-log-query.mjs show <request-id> [--dir ./data] [--body] [--messages] [--tools] [--stream]
+bun .claude/skills/langfuse/scripts/llm-log-query.mjs show <request-id> [--dir ./data] [--body] [--messages] [--tools] [--stream]
 ```
 
-- 默认显示摘要（headers、模型、状态、延迟、token 用量、thinking 配置、output_config）
+- 默认显示摘要（模型、Session、状态、延迟、token 用量、thinking 配置、output_config），不输出 headers
 - `--body` 显示完整请求体
 - `--messages` 显示 system blocks + 消息列表（role + 内容前 100 字），system blocks 标注 `[cached]`
 - `--tools` 显示工具定义列表，标注 `[cached]` 的 cache_control 状态
@@ -79,7 +78,7 @@ bun run scripts/llm-log-query.mjs show <request-id> [--dir ./data] [--body] [--m
 ### session — 追踪一个 session 的完整请求链
 
 ```bash
-bun run scripts/llm-log-query.mjs session <session-id> [--dir ./data] [--full]
+bun .claude/skills/langfuse/scripts/llm-log-query.mjs session <session-id> [--dir ./data] [--full]
 ```
 
 按时间序列展示同一 session 的所有请求，显示每轮的角色和工具调用。`--full` 输出完整消息内容。
@@ -87,7 +86,7 @@ bun run scripts/llm-log-query.mjs session <session-id> [--dir ./data] [--full]
 ### diff — 对比两个请求的差异
 
 ```bash
-bun run scripts/llm-log-query.mjs session <session-id> diff <round1> <round2> [--dir ./data]
+bun .claude/skills/langfuse/scripts/llm-log-query.mjs session <session-id> diff <round1> <round2> [--dir ./data]
 ```
 
 对比同一 session 中第 N 轮和第 M 轮请求的 messages 差异，高亮新增/删除/修改的消息块。用于观察 agent 如何逐步构建上下文。
@@ -95,13 +94,13 @@ bun run scripts/llm-log-query.mjs session <session-id> diff <round1> <round2> [-
 也可以直接对比两个请求 ID：
 
 ```bash
-bun run scripts/llm-log-query.mjs diff <request-id-1> <request-id-2> [--dir ./data]
+bun .claude/skills/langfuse/scripts/llm-log-query.mjs diff <request-id-1> <request-id-2> [--dir ./data]
 ```
 
 ### stats — 统计汇总
 
 ```bash
-bun run scripts/llm-log-query.mjs stats [--dir ./data] [--by model|session|route|hour]
+bun .claude/skills/langfuse/scripts/llm-log-query.mjs stats [--dir ./data] [--by model|session|route|hour]
 ```
 
 输出汇总：总请求数、按维度分组（模型/session/路由/小时）的请求数、错误率。
@@ -109,7 +108,7 @@ bun run scripts/llm-log-query.mjs stats [--dir ./data] [--by model|session|route
 ### cache — 缓存率深度分析（重要）
 
 ```bash
-bun run scripts/llm-log-query.mjs cache [--dir ./data] [--session <id>] [--by-session] [--after YYYY-MM-DD] [--before YYYY-MM-DD]
+bun .claude/skills/langfuse/scripts/llm-log-query.mjs cache [--dir ./data] [--session <id>] [--by-session] [--after YYYY-MM-DD] [--before YYYY-MM-DD]
 ```
 
 **这是最常用的诊断命令之一。** Prompt Cache 命中率直接影响 API 成本和延迟，每次分析日志时都应主动运行此命令，即使没有明确要求。
@@ -128,7 +127,7 @@ bun run scripts/llm-log-query.mjs cache [--dir ./data] [--session <id>] [--by-se
 ### cache-debug — 缓存诊断深度分析
 
 ```bash
-bun run scripts/llm-log-query.mjs cache-debug <request-id-1> [request-id-2] ... [--dir ./data]
+bun .claude/skills/langfuse/scripts/llm-log-query.mjs cache-debug <request-id-1> [request-id-2] ... [--dir ./data]
 ```
 
 对指定请求进行深度缓存诊断：自动查找同 session 的前一轮请求，对比缓存变化类型（冷启动/缓存失效/缓存稀释/正常），分析 cache_control 断点地图，定位缓存失效的具体原因（system prompt 变化、tools 数组变化、消息前缀变化等）。
@@ -136,7 +135,7 @@ bun run scripts/llm-log-query.mjs cache-debug <request-id-1> [request-id-2] ... 
 ### cache-control — 断点地图与问题检测
 
 ```bash
-bun run scripts/llm-log-query.mjs cache-control <request-id> [--dir ./data]
+bun .claude/skills/langfuse/scripts/llm-log-query.mjs cache-control <request-id> [--dir ./data]
 ```
 
 展示指定请求的 cache_control 断点地图：system blocks、tools、messages 中的缓存标记位置，累积 token 估算，以及断点覆盖问题检测。
@@ -162,7 +161,7 @@ bun run scripts/llm-log-query.mjs cache-control <request-id> [--dir ./data]
 ### context-growth — 上下文膨胀轨迹分析
 
 ```bash
-bun run scripts/context-growth.mjs --dir <data-dir> --session <id>
+bun .claude/skills/langfuse/scripts/context-growth.mjs --dir <data-dir> --session <id>
 ```
 
 **这是诊断"上下文为什么消耗这么快"的核心工具。** 输出 session 内每轮的消息数、估算 token、消息组成占比（system/thinking/tool_calls/tool_results/compacted）、新增消息摘要、compact 事件、LLM 实际调用 usage。
@@ -208,10 +207,11 @@ bun run scripts/context-growth.mjs --dir <data-dir> --session <id>
 
 ## 注意事项
 
-- 工具路径相对于 skill 目录：`scripts/llm-log-query.mjs`、`scripts/context-growth.mjs`
-- 数据目录默认为 `side-projects/llm-gateway/data/`，如果用户指定了其他目录用 `--dir` 覆盖
-- `request.json` 的 headers 字段中 `x-api-key` 等敏感字段已被脱敏（只保留前 12 字符 + `…`），分析时注意不要试图还原
+- 工具已随 Langfuse skill 提供：`../scripts/llm-log-query.mjs`、`../scripts/context-growth.mjs`，不依赖其他 skill 目录。
+- `llm-log-query.mjs` 默认依次查找 `side-projects/llm-gateway/data/`、`data/`；显式 `--dir` 可避免分析错误的数据源。
+- 不假定 `request.json` 的 headers 或正文已脱敏；认证字段即使只剩部分前缀也不应展示。
 - stream.log 是原始 SSE 文本，内容可能很大，展示时注意截断
 - 新格式不再有 `response.json` 和 `log.txt`，路由从 `headers.host` 推导，状态从 stream 内容判断，usage 从 `message_delta` 事件提取
 - 脚本同时兼容旧格式（有 `response.json`/`log.txt`）和新格式（仅 `request.json` + `stream.log`）
-- `context-growth.mjs` 从 `request.json` 的 `body.messages` 估算 token（chars/3.5），LLM usage 从 `stream.log` 的最后一个 `message_delta` 事件提取。估算值与实际值有 ±15% 偏差，用于趋势分析而非精确计量
+- `context-growth.mjs` 依赖封装格式的 `request.json`（`headers.x-session-id` 与 `body.messages`），按 session 前缀匹配；不能假定支持裸 body 或旧格式的全部能力。它按 chars/3.5 估算消息 token，不包括独立的顶层 system/tools；usage 来自 SSE 中包含 usage 的事件。估算与消息分类仅用于趋势线索，没有已验证的误差界限。
+- 文中的阈值及脚本自动诊断是排查启发，不是产品契约或因果证明；需结合模型、provider、请求内容和真实 usage 核实。

@@ -265,7 +265,7 @@ hooks、插件与 MCP 展示取当前会话环境。TUI 本地配置面板仍编
 ## 8. 单库存储与版本边界
 
 默认读写始终使用 `~/.peri/threads/threads.db`，`--db-path` 仍可选择显式路径。
-schema 版本记录在 `PRAGMA user_version`，当前为 `3`，不另建数据库文件。新 writer
+schema 版本记录在 `PRAGMA user_version`，当前为 `4`，不另建数据库文件。新 writer
 按必需的 `threads` / `messages` 真实表及其列识别未设置版本号的旧 schema；
 同库额外业务表（例如 `thread_goals`）及其数据保持原样，不能以整库表数量拒绝
 兼容旧库。在单个事务中补齐
@@ -291,7 +291,12 @@ MetaHarness 与插件目录均从保存 cwd 发现，不沿用启动项目，也
 并发竞争复用赢家，失败或中断不得只提交其中一项。接纳后恢复继续遵守原有 lease、
 dirty 和目录身份校验；已绑定会话缺失快照不再被视为 legacy。没有 binding 却已有
 execution_runs 的记录拒绝接纳，避免把绑定损坏当成升级。此流程同样适用于已经由
-3.15.0 升级为 schema 3、仍未绑定的旧行，无需再次升级 schema。
+3.15.0 升级为 schema 3、仍未绑定的旧行；schema 3 在写打开时于同一事务升级为
+schema 4。迁移只规范化 projects.object_identity、workspaces.root_identity 与
+discovery 中的身份 JSON，移除 legacy birth 字段，保留 ProjectId、WorkspaceId、
+binding、frozen/history 和 execution 状态。迁移前校验全部身份 JSON 与同表唯一性；
+损坏或归一化后冲突使整个事务回滚。升级前必须停止旧版 writer，禁止新旧 schema
+writer 混用。
 
 旧数据未保存目录对象身份，不能追溯证明当前同名目录就是历史实例；接纳以保存 cwd
 和当前可验证身份为依据，已登记身份冲突继续拒绝。缺目录或非绝对 cwd 保留只读历史。
@@ -307,8 +312,8 @@ execution_runs 的记录拒绝接纳，避免把绑定损坏当成升级。此�
 历史处理，损坏和不兼容 shape 返回错误。只读工具可读取已支持的历史 shape，
 但不授予执行权。未知 binding 版本或损坏 binding 不得当作未绑定会话重建。
 
-文件对象身份使用 Unix device/inode/creation time 或 Windows volume/file index/
-creation time；缺少必要证据时明确失败，不降级为路径等同。Windows shell 在挂起
+文件对象身份使用 Unix device/inode 或 Windows volume/file index；不依赖 creation
+time，也不降级为 mtime/ctime 或路径等同。Windows shell 在挂起
 状态下加入 Job Object 后才恢复执行，关闭须确认 Job 的活动进程数归零。运行验收
 按实际平台分别报告，交叉编译不视为进程生命周期验收。
 

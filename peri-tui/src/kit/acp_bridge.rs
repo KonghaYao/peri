@@ -252,11 +252,9 @@ impl PublicationScheduler {
             return false;
         }
         self.pending_deadline = None;
-        if state.current_turn.has_unprojected_changes() {
-            acp_events::push_view_models(state);
-            return true;
-        }
-        false
+        // Deferred 也可能来自只修改 committed 的历史回放，不能仅检查 live turn。
+        acp_events::push_view_models(state);
+        true
     }
 }
 
@@ -328,11 +326,12 @@ fn flush_on_receiver_close(
     scheduler: &mut PublicationScheduler,
     last_reset_counter: &mut u64,
 ) {
+    let pending_publication = scheduler.pending_deadline.is_some();
     scheduler.invalidate();
     let counter = atoms::BRIDGE_RESET_COUNTER.get();
     if counter != *last_reset_counter {
         apply_bridge_reset(state, last_reset_counter, counter);
-    } else if state.current_turn.has_unprojected_changes() {
+    } else if pending_publication || state.current_turn.has_unprojected_changes() {
         acp_events::push_view_models(state);
     }
 }

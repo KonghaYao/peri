@@ -1,5 +1,66 @@
 use crate::components::textarea::TextAreaState;
 
+// 在启动线程前获取许可；释放覆盖正常返回、错误和 panic，避免重复按键叠加整图分配。
+#[derive(Default, Clone)]
+pub(super) struct PasteGate(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+pub(super) struct PastePermit(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl PasteGate {
+    pub(super) fn try_acquire(&self) -> Option<PastePermit> {
+        self.0
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .ok()
+            .map(|_| PastePermit(self.0.clone()))
+    }
+}
+
+impl Drop for PastePermit {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn save_native_clipboard_png() -> anyhow::Result<Option<std::path::PathBuf>> {
+    objc2::rc::autoreleasepool(|_| {
+        let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
+        save_pasteboard_png(
+            &pasteboard,
+            &crate::kit::image_safety::managed_images_root(),
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn save_pasteboard_png(
+    pasteboard: &objc2_app_kit::NSPasteboard,
+    directory: &std::path::Path,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    // PNG 缺席才允许回退 TIFF；超限或读取/落盘失败不能触发更昂贵的解码。
+    let Some(data) = (unsafe { pasteboard.dataForType(objc2_app_kit::NSPasteboardTypePNG) }) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        data.len() as u64 <= crate::kit::image_safety::MAX_IMAGE_BYTES,
+        "clipboard PNG exceeds byte limit"
+    );
+    // SAFETY: 保持 NSData 存活且不修改内容，借用仅在同步校验和写盘期间有效。
+    let bytes = unsafe { data.as_bytes_unchecked() };
+    // 只读 IHDR，不分配像素缓冲；完整解码仍由使用图片的受限入口负责。
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.read_header_info()?;
+    std::fs::create_dir_all(directory)?;
+    let path = directory.join(format!("{}.png", uuid::Uuid::now_v7()));
+    std::fs::write(&path, bytes)?;
+    Ok(Some(path))
+}
+
 /// 在当前光标处插入独占一行的 `@image <path>` 引用。
 ///
 /// 图片路径按行尾结束；前后补换行可避免用户粘贴图片后继续输入的文本被解析为路径。

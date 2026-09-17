@@ -28,6 +28,243 @@ fn scheduler_state() -> BridgeState {
     }
 }
 
+struct ReplayAtomsGuard {
+    view: atoms::ViewModelsSnapshot,
+    acp: atoms::AcpStateSnapshot,
+    steers: crate::kit::steer_state::SteerState,
+}
+
+impl ReplayAtomsGuard {
+    fn new() -> Self {
+        crate::kit::atoms::init_atoms();
+        Self {
+            view: atoms::VIEW_MODELS.state().read().clone(),
+            acp: atoms::ACP_STATE.state().read().clone(),
+            steers: crate::kit::steer_state::STEERS.state().read().clone(),
+        }
+    }
+}
+
+impl Drop for ReplayAtomsGuard {
+    fn drop(&mut self) {
+        *atoms::VIEW_MODELS.state().write() = self.view.clone();
+        *atoms::ACP_STATE.state().write() = self.acp.clone();
+        *crate::kit::steer_state::STEERS.state().write() = self.steers.clone();
+    }
+}
+
+/// [回归测试] 历史 assistant 只改 committed；旧 scheduler 只检查 current_turn，
+/// 导致最后一个 user 之后的回答永远没有进入 VIEW_MODELS。
+#[tokio::test]
+#[serial]
+async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
+    let _restore = ReplayAtomsGuard::new();
+    use crate::acp_client::AcpNotification;
+    use crate::kit::atoms::VIEW_MODELS;
+    use crate::kit::tui_render_unit::TuiRenderUnit;
+    use agent_client_protocol_schema::v1::SessionNotification;
+    use peri_acp::dispatch::{ReplayError, ReplaySender, replay_persisted_session_history};
+    use peri_acp_types::{
+        PeriCaps,
+        messages::{BaseMessage, ContentBlock, MessageContent},
+        store::ThreadStore,
+        thread::ThreadMeta,
+    };
+    use peri_resources::sessions::SqliteThreadStore;
+    struct WireSender(mpsc::UnboundedSender<AcpNotification>);
+    #[async_trait::async_trait]
+    impl ReplaySender for WireSender {
+        async fn send(&self, notif: SessionNotification) -> Result<(), ReplayError> {
+            self.0
+                .send(AcpNotification::SessionUpdate {
+                    session_id: notif.session_id.to_string(),
+                    params: serde_json::to_value(notif).unwrap(),
+                })
+                .unwrap();
+            Ok(())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.db");
+    let cases = [
+        vec![],
+        vec![BaseMessage::human("未回答的问题")],
+        vec![BaseMessage::ai("只有回答")],
+        vec![BaseMessage::human("问题一"), BaseMessage::ai("回答一")],
+        vec![
+            BaseMessage::human("问题一"),
+            BaseMessage::ai("回答一"),
+            BaseMessage::human("问题二"),
+            BaseMessage::ai(MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "最后回答的前半段".into(),
+                },
+                ContentBlock::Text {
+                    text: "最后回答的后半段".into(),
+                },
+            ])),
+        ],
+    ];
+    for messages in cases {
+        let expected: Vec<(bool, String)> = messages
+            .iter()
+            .flat_map(|message| {
+                let content = match message {
+                    BaseMessage::Human { content, .. } | BaseMessage::Ai { content, .. } => content,
+                    _ => unreachable!(),
+                };
+                let parts = match content {
+                    MessageContent::Text(text) => vec![text.clone()],
+                    MessageContent::Blocks(blocks) => blocks
+                        .iter()
+                        .filter_map(|block| {
+                            if let ContentBlock::Text { text } = block {
+                                Some(text.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    _ => unreachable!(),
+                };
+                parts
+                    .into_iter()
+                    .map(|text| (matches!(message, BaseMessage::Human { .. }), text))
+            })
+            .collect();
+        let store = SqliteThreadStore::new(&path).await.unwrap();
+        let id = store
+            .create_thread(ThreadMeta::new(dir.path().to_str().unwrap()))
+            .await
+            .unwrap();
+        store.append_messages(&id, &messages).await.unwrap();
+        drop(store);
+        let reopened = SqliteThreadStore::new(&path).await.unwrap();
+        let payloads = reopened.load_context_payloads(&id).await.unwrap();
+        assert_eq!(payloads.len(), messages.len(), "磁盘重载不得按角色截断");
+        let (notif_tx, notif_rx) = mpsc::unbounded_channel();
+        let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let notifier =
+            crate::kit::acp_notifier::spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+        replay_persisted_session_history(
+            &id,
+            &payloads,
+            &WireSender(notif_tx.clone()),
+            &PeriCaps {
+                replay: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut state = scheduler_state();
+        state.phase = SessionPhase::Idle;
+        state.active_session_id = id;
+        *VIEW_MODELS.state().write() = Default::default();
+        let mut scheduler = PublicationScheduler::default();
+        let now = tokio::time::Instant::now();
+        for _ in &expected {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), bridge_rx.recv())
+                .await
+                .expect("回放通知应及时到达")
+                .unwrap();
+            assert_eq!(event.active_session_id, state.active_session_id);
+            let intent = acp_events::dispatch_for_bridge(&mut state, &event.event);
+            scheduler.accept_at(intent, &mut state, now);
+        }
+        shutdown.cancel();
+        notifier.await.unwrap();
+        assert!(
+            state.current_turn.is_empty(),
+            "回放不应依赖 live turn 的 dirty 标记"
+        );
+        assert!(!scheduler.fire_at(&mut state, now + PUBLICATION_INTERVAL / 2));
+        scheduler.fire_at(&mut state, now + PUBLICATION_INTERVAL);
+        let snapshot = VIEW_MODELS.state().read().clone();
+        let actual: Vec<_> = snapshot
+            .items
+            .iter()
+            .map(|item| match item {
+                TuiRenderUnit::TuiUserBubble(bubble) => (true, bubble.text.clone()),
+                TuiRenderUnit::TuiAssistantBubble(bubble) => (false, bubble.text.clone()),
+                other => panic!("非预期回放条目：{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "恢复须按顺序发布全部内容，包括最后 assistant"
+        );
+        let generation = state.generation;
+        assert!(!scheduler.fire_at(&mut state, now + PUBLICATION_INTERVAL * 2));
+        assert_eq!(state.generation, generation, "完成后不得重复发布");
+    }
+}
+
+/// [回归测试] channel 关闭发生在合帧 deadline 前时，committed 尾部也必须刷新。
+#[test]
+#[serial]
+fn test_replay_receiver_close_publishes_committed_tail() {
+    let _restore = ReplayAtomsGuard::new();
+    use crate::kit::atoms::{BRIDGE_RESET_COUNTER, VIEW_MODELS};
+    let mut state = scheduler_state();
+    *VIEW_MODELS.state().write() = Default::default();
+    let mut scheduler = PublicationScheduler::default();
+    let intent = acp_events::dispatch_for_bridge(
+        &mut state,
+        &AcpEventData::CommittedAssistantText {
+            text: "连接关闭前的最终回答".into(),
+            reasoning: None,
+        },
+    );
+    scheduler.accept(intent, &mut state);
+    let mut last_reset = BRIDGE_RESET_COUNTER.get();
+    flush_on_receiver_close(&mut state, &mut scheduler, &mut last_reset);
+    assert_eq!(VIEW_MODELS.state().read().items.len(), 1);
+    assert!(scheduler.pending_deadline.is_none());
+}
+
+/// [回归测试] 已发布工具卡的完成更新不改变 committed 长度，仍须发布新内容。
+#[test]
+#[serial]
+fn test_replay_tool_completion_publishes_same_length_update() {
+    let _restore = ReplayAtomsGuard::new();
+    use crate::kit::atoms::VIEW_MODELS;
+    use crate::kit::tui_render_unit::TuiRenderUnit;
+    let mut state = scheduler_state();
+    let mut scheduler = PublicationScheduler::default();
+    let now = tokio::time::Instant::now();
+    let intent = acp_events::dispatch_for_bridge(
+        &mut state,
+        &AcpEventData::ReplayToolStarted {
+            tool_id: "tool".into(),
+            tool_name: "Read".into(),
+            input_summary: "合成文件".into(),
+            raw_input: serde_json::json!({}),
+        },
+    );
+    scheduler.accept_at(intent, &mut state, now);
+    assert!(scheduler.fire_at(&mut state, now + PUBLICATION_INTERVAL));
+    let intent = acp_events::dispatch_for_bridge(
+        &mut state,
+        &AcpEventData::ReplayToolEnded {
+            tool_id: "tool".into(),
+            output_summary: "合成失败结果".into(),
+            is_error: true,
+        },
+    );
+    scheduler.accept_at(intent, &mut state, now + PUBLICATION_INTERVAL);
+    assert!(scheduler.fire_at(&mut state, now + PUBLICATION_INTERVAL * 2));
+    let snapshot = VIEW_MODELS.state().read().clone();
+    assert_eq!(snapshot.items.len(), 1);
+    let TuiRenderUnit::TuiToolCard(card) = &snapshot.items[0] else {
+        panic!("应保留工具卡")
+    };
+    assert!(!card.is_running);
+    assert!(card.is_error);
+    assert_eq!(card.output_summary, "合成失败结果");
+}
+
 #[test]
 #[serial]
 fn test_production_scheduler_uses_fixed_deadline_and_terminal_invalidates_it() {

@@ -73,4 +73,4 @@ Agent 在收到"按 devflow 流程"的指令后，可能将 explore+plan 的输�
 
 ## 修复记录
 
-（由 auto-issue-fixer 修复阶段追加，创建时留空）
+（修复阶段追加，创建时留空）

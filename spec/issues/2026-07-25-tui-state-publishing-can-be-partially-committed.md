@@ -80,4 +80,4 @@ TUI 的 `BridgeState` 由多个事件 handler 修改，但 handler 需要自行�
 
 ## 修复记录
 
-（由 auto-issue-fixer 修复阶段追加，创建时留空）
+（修复阶段追加，创建时留空）
