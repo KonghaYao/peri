@@ -86,7 +86,7 @@
 | 状态桥 | kit/acp_bridge.rs | `spawn_acp_bridge`：interaction 经 `AcpTuiClient::publish_if_owned` 后才同步写 UI；普通事件维护 `BridgeState` 并检测 BRIDGE_RESET_COUNTER |
 | 事件分派 | kit/acp_events/mod.rs | `dispatch_and_notify`（:301）；`SessionPhase`（:149）/`BridgeState`（:158） |
 | 流式/工具/边界/系统 handler | kit/acp_events/{streaming,tool,turn,system}.rs | `handle_text_chunk`（streaming.rs:26）、`handle_tool_started`（tool.rs:13）、`handle_turn_done`（turn.rs:12）、`handle_hitl_pending`（system.rs:117）等；subagent（subagent.rs:6/:33）、agent（agent.rs:8）、compact（compact.rs:11/:17） |
-| 渲染管线 | kit/acp_events/render.rs | `push_view_models`（:25）/`push_acp_state`（:615）/`push_view_models_for_reset`（:595）/`handle_plan_update`（:672） |
+| 渲染管线 | kit/acp_events/render.rs | `push_view_models`（:26）/`push_acp_state`（:950）/`push_view_models_for_reset`（:924）/`handle_plan_update`（:1010）；分组 `group_successful_tools`（:485，增量：稳定切点复用前缀、只重建变化后缀；见 `join_into`（:366）） |
 
 ### 状态与模型（src/kit/atoms.rs + acp_types.rs）
 

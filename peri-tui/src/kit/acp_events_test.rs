@@ -19,6 +19,8 @@ use crate::kit::tui_render_unit::{EntryStatus, FoldKey, FoldState, TuiReasoningB
 // 本文件经 acp_events/mod.rs 的 `#[path = "../acp_events_test.rs"]` 挂载；此路径
 // 加载方式下，rustc 不会为聚合根派生 `acp_events_test/` 子目录，子模块需显式
 // `#[path]` 指向。
+#[path = "acp_events_test/append_probe_test.rs"]
+mod append_probe_test;
 #[path = "acp_events_test/bg_task_live_test.rs"]
 mod bg_task_live_test;
 #[path = "acp_events_test/command_feedback_test.rs"]
@@ -27,10 +29,16 @@ mod command_feedback_test;
 mod diff_grouping_test;
 #[path = "acp_events_test/fold_test.rs"]
 mod fold_test;
+#[path = "acp_events_test/group_incremental_test.rs"]
+mod group_incremental_test;
 #[path = "acp_events_test/input_buffer_test.rs"]
 mod input_buffer_test;
 #[path = "acp_events_test/interaction_test.rs"]
 mod interaction_test;
+#[path = "acp_events_test/legacy_group_probe_test.rs"]
+mod legacy_group_probe_test;
+#[path = "acp_events_test/perf_probe_test.rs"]
+mod perf_probe_test;
 #[path = "acp_events_test/session_events_test.rs"]
 mod session_events_test;
 #[path = "acp_events_test/snapshot_test.rs"]
