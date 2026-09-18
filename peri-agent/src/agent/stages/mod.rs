@@ -664,6 +664,17 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     .unwrap_or(false);
                 if should_wait {
                     if let Some(inbox) = &context.async_ctx.idle_inbox {
+                        if let Some(mailbox) = &context.session.user_input_mailbox {
+                            mailbox.enter_idle();
+                        }
+                        // loading 期间的队首输入在 idle 边界交接，直接回 Receive，
+                        // 不先发布一个并未真正等待的 TurnSuspended。
+                        if context.session.queue.has_wake_up() {
+                            if let Some(mailbox) = &context.session.user_input_mailbox {
+                                mailbox.leave_idle();
+                            }
+                            continue;
+                        }
                         tracing::debug!(
                             "Receive: queue empty, awaiting wake (idle_should_wait=true)"
                         );
@@ -672,9 +683,6 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                         // 上阻塞至当前 turn 完成——bg 任务活跃时可能长达数分钟）。
                         if let Some(flag) = &context.async_ctx.idle_suspended_flag {
                             flag.store(true, Ordering::Release);
-                        }
-                        if let Some(mailbox) = &context.session.user_input_mailbox {
-                            mailbox.set_suspended(true);
                         }
                         context.runtime.event_bus.emit_state(
                             crate::agent::events_v2::StateEvent::TurnSuspended {
@@ -692,7 +700,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                                     flag.store(false, Ordering::Release);
                                 }
                                 if let Some(mailbox) = &context.session.user_input_mailbox {
-                                    mailbox.set_suspended(false);
+                                    mailbox.leave_idle();
                                 }
                                 if context.session.turn.is_cancelled() {
                                     return LoopResult::Interrupted;
@@ -711,7 +719,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                                     flag.store(false, Ordering::Release);
                                 }
                                 if let Some(mailbox) = &context.session.user_input_mailbox {
-                                    mailbox.set_suspended(false);
+                                    mailbox.leave_idle();
                                 }
                                 return LoopResult::Interrupted;
                             }

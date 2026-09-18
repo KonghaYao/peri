@@ -38,7 +38,7 @@ fn test_mailbox_running_enqueue_never_wakes_consumption_queue() {
     mailbox
         .attach_external_attempt(CancellationToken::new(), false)
         .unwrap();
-    let input = make_input(&mailbox, "等待自然完成");
+    let input = make_input(&mailbox, "等待下一次 idle");
     let receipt = mailbox.enqueue(&input).unwrap();
     assert_eq!(
         receipt.results[0].state,
@@ -57,6 +57,13 @@ fn test_mailbox_idle_input_handoff_is_once_and_keeps_message_identity() {
     let (mailbox, inbox) = make_mailbox();
     let input = make_input(&mailbox, "空闲时立即处理");
     mailbox.enqueue(&input).unwrap();
+    let second = make_input(&mailbox, "预留前的后续输入");
+    let receipt = mailbox.enqueue(&second).unwrap();
+    assert_eq!(
+        receipt.results[0].state,
+        UserInputState::Queued,
+        "尚未 reserve 也不能批量释放第二条普通输入"
+    );
     let ticket = mailbox.reserve_run().unwrap();
     assert!(
         mailbox.snapshot().active_request_id.is_none(),
@@ -164,15 +171,28 @@ fn test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completio
     mailbox.finish_attempt(&next, UserInputAttemptOutcome::Failed);
     let last = mailbox.reserve_run().unwrap();
     mailbox.attach_attempt(&last, CancellationToken::new());
+    let received = inbox.queue().drain_all();
     assert_eq!(
-        inbox
-            .queue()
-            .drain_all()
+        received
             .iter()
             .map(|message| message.message().unwrap().content())
             .collect::<Vec<_>>(),
-        ["A", "C"],
-        "自然成功按原顺序释放普通待办"
+        ["A"],
+        "自然成功只释放第一条普通待办"
+    );
+    let id = received[0].message().unwrap().id();
+    mailbox.mark_claimed(&[id]);
+    mailbox.mark_delivered(&[id]);
+    assert_eq!(mailbox.snapshot().items[0].state, UserInputState::Queued);
+    mailbox.finish_attempt(&last, UserInputAttemptOutcome::Completed);
+    let next = mailbox.reserve_run().unwrap();
+    mailbox.attach_attempt(&next, CancellationToken::new());
+    let received = inbox.queue().drain_all();
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        received[0].message().unwrap().content(),
+        "C",
+        "A 完成后才自动发送 C"
     );
 }
 
@@ -550,26 +570,110 @@ async fn test_mailbox_suspended_input_handoff_wakes_same_attempt() {
         .unwrap();
     let waiting = make_input(&mailbox, "之前普通待办");
     mailbox.enqueue(&waiting).unwrap();
-    mailbox.set_suspended(true);
+    mailbox.enter_idle();
     mailbox
         .enqueue(&make_input(&mailbox, "挂起时新输入"))
         .unwrap();
-    inbox.await_wake().await;
-    assert_eq!(inbox.queue().len(), 1, "挂起时新输入使用同一 inbox 唤醒");
+    tokio::time::timeout(std::time::Duration::from_secs(1), inbox.await_wake())
+        .await
+        .expect("已有待办必须唤醒同一 inbox");
+    let received = inbox.queue().drain_all();
+    assert_eq!(received.len(), 1, "进入 idle 自动交接第一条已有待办");
+    assert_eq!(
+        received[0].message().unwrap().id().as_uuid().to_string(),
+        waiting.input_id,
+        "后来输入不能越过旧待办"
+    );
     assert_eq!(
         mailbox.active_run_ticket(),
         Some(ticket),
         "挂起输入不能同时启动第二次执行"
     );
     assert_eq!(
-        mailbox.snapshot().items[0].state,
+        mailbox.snapshot().items[1].state,
         UserInputState::Queued,
-        "之前普通待办不能被一并释放"
+        "新输入等待下一次 idle"
     );
 }
 
+/// [回归测试] loading 期间排队的输入应在进入 idle 时逐条交接，跳过已撤回项。
 #[test]
-fn test_mailbox_suspended_steer_then_enqueue_preserves_selected_continuation() {
+fn test_mailbox_idle_transition_dispatches_first_queued_input() {
+    let (mailbox, inbox) = make_mailbox();
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    let withdrawn = make_input(&mailbox, "已撤回");
+    let first = make_input(&mailbox, "第一条");
+    let second = make_input(&mailbox, "第二条");
+    for input in [&withdrawn, &first, &second] {
+        mailbox.enqueue(input).unwrap();
+    }
+    mailbox
+        .take_back(&TakeBackUserInputRequest {
+            session_id: "session".into(),
+            generation: mailbox.generation().into(),
+            command_id: "withdraw-first".into(),
+            input_id: withdrawn.input_id,
+        })
+        .unwrap();
+    mailbox.enter_idle();
+    let delivered = inbox.queue().drain_all();
+    assert_eq!(delivered.len(), 1, "进入 idle 应只交接第一条可执行输入");
+    let id = delivered[0].message().unwrap().id();
+    assert_eq!(id.as_uuid().to_string(), first.input_id);
+    assert_eq!(mailbox.snapshot().items[1].state, UserInputState::Queued);
+    mailbox.mark_claimed(&[id]);
+    mailbox.mark_delivered(&[id]);
+    mailbox.enter_idle();
+    let delivered = inbox.queue().drain_all();
+    assert_eq!(delivered.len(), 1, "下一次 idle 才交接下一条");
+    assert_eq!(
+        delivered[0].message().unwrap().id().as_uuid().to_string(),
+        second.input_id
+    );
+}
+
+/// [回归测试] idle 唤醒后、Receive 尚未开始前的连续提交不能合并为同一批。
+#[test]
+fn test_mailbox_suspended_burst_hands_off_only_one_input() {
+    let (mailbox, inbox) = make_mailbox();
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    mailbox.enter_idle();
+    let first = make_input(&mailbox, "唤醒输入");
+    let second = make_input(&mailbox, "继续排队");
+    mailbox.enqueue(&first).unwrap();
+    let receipt = mailbox.enqueue(&second).unwrap();
+    assert_eq!(receipt.results[0].state, UserInputState::Queued);
+    let delivered = inbox.queue().drain_all();
+    assert_eq!(delivered.len(), 1, "一次 idle 只能自动交接一条");
+    assert_eq!(
+        delivered[0].message().unwrap().id().as_uuid().to_string(),
+        first.input_id
+    );
+}
+
+/// [回归测试] 外部取消与 idle 边界交错时，不向已取消的 attempt 交接输入。
+#[test]
+fn test_mailbox_cancelled_attempt_does_not_dispatch_on_idle() {
+    let (mailbox, inbox) = make_mailbox();
+    let cancel = CancellationToken::new();
+    mailbox
+        .attach_external_attempt(cancel.clone(), false)
+        .unwrap();
+    mailbox
+        .enqueue(&make_input(&mailbox, "取消后保留"))
+        .unwrap();
+    cancel.cancel();
+    mailbox.enter_idle();
+    assert!(inbox.queue().is_empty(), "取消后的旧执行不能领取待办");
+    assert_eq!(mailbox.snapshot().items[0].state, UserInputState::Queued);
+}
+
+#[test]
+fn test_mailbox_steer_then_late_idle_preserves_selected_continuation() {
     let (mailbox, inbox) = make_mailbox();
     let cancel = CancellationToken::new();
     let current = mailbox
@@ -579,10 +683,10 @@ fn test_mailbox_suspended_steer_then_enqueue_preserves_selected_continuation() {
     let selected = make_input(&mailbox, "B 立即发送");
     mailbox.enqueue(&waiting).unwrap();
     mailbox.enqueue(&selected).unwrap();
-    mailbox.set_suspended(true);
     mailbox
         .dispatch(&make_dispatch(&mailbox, &[&selected]))
         .unwrap();
+    mailbox.enter_idle();
     assert!(cancel.is_cancelled(), "立即发送先请求旧执行收尾");
 
     let later = make_input(&mailbox, "C 收尾期间的新待办");
@@ -610,12 +714,12 @@ fn test_mailbox_suspended_steer_then_enqueue_preserves_selected_continuation() {
     assert_eq!(
         pending[0].state,
         UserInputState::Queued,
-        "A 继续等待自然完成"
+        "A 等待新执行 idle"
     );
     assert_eq!(
         pending[2].state,
         UserInputState::Queued,
-        "C 继续等待自然完成"
+        "C 等待新执行 idle"
     );
 }
 
@@ -629,7 +733,9 @@ fn test_mailbox_stop_then_late_suspend_waits_for_fresh_attempt() {
     mailbox.enqueue(&waiting).unwrap();
     mailbox.stop();
     // 旧 loop 可能已越过取消检查，迟到报告挂起。
-    mailbox.set_suspended(true);
+    mailbox.enter_idle();
+    assert!(inbox.queue().is_empty(), "迟到 idle 不能绕过 Stop");
+    assert_eq!(mailbox.snapshot().items[0].state, UserInputState::Queued);
     let resumed = make_input(&mailbox, "用户明确重新提交");
     mailbox.enqueue(&resumed).unwrap();
     assert!(inbox.queue().is_empty(), "新输入不能唤醒已被 Stop 的旧执行");
@@ -638,13 +744,15 @@ fn test_mailbox_stop_then_late_suspend_waits_for_fresh_attempt() {
     let next = mailbox.reserve_run().expect("明确恢复必须保留新执行的准入");
     assert!(mailbox.attach_attempt(&next, CancellationToken::new()));
     let delivered = inbox.queue().drain_all();
-    assert_eq!(delivered.len(), 2, "显式恢复按顺序交接原待办及新输入");
+    assert_eq!(delivered.len(), 1, "显式恢复只交接第一条原待办");
     assert_eq!(
         delivered[0].message().unwrap().id().as_uuid().to_string(),
         waiting.input_id
     );
     assert_eq!(
-        delivered[1].message().unwrap().id().as_uuid().to_string(),
-        resumed.input_id
+        mailbox.snapshot().items[1].input_id,
+        resumed.input_id,
+        "新输入保留在原待办之后"
     );
+    assert_eq!(mailbox.snapshot().items[1].state, UserInputState::Queued);
 }

@@ -267,6 +267,32 @@ describe("smoke: 正式待发送队列", () => {
     await takePeriSnapshot(tester!, "steer-live-withdraw-preserve-draft");
   });
 
+  it("loading 时排队的 A/B 在每次空闲后自动逐条发送", async () => {
+    await submit("STEER_SEED");
+    const first = await waitRequest(1);
+    for (const text of ["STEER_FIFO_A", "STEER_FIFO_B"]) {
+      await submit(text);
+      await queued(text);
+    }
+    await waitPending(2);
+    expect(requests).toHaveLength(1);
+    finish(first);
+    const second = await waitRequest(2);
+    expect(userContent(second)).toContain("STEER_FIFO_A");
+    expect(userContent(second)).not.toContain("STEER_FIFO_B");
+    await waitPending(1);
+    await queued("STEER_FIFO_B");
+    finish(second);
+    const third = await waitRequest(3);
+    const content = userContent(third);
+    for (const text of ["STEER_FIFO_A", "STEER_FIFO_B"]) {
+      expect(content.split(text).length - 1, `${text} 自动发送且不重复`).toBe(1);
+    }
+    expect(content.indexOf("STEER_FIFO_A")).toBeLessThan(content.indexOf("STEER_FIFO_B"));
+    finish(third);
+    await waitPending(0);
+  });
+
   it("取回多行原稿后重新提交，Stop 保留待发队列并可再次单发", async () => {
     await submit("STEER_SEED");
     const first = await waitRequest(1);
