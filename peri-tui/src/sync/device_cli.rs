@@ -114,7 +114,6 @@ pub fn init_impl(
     limits::validate_device_name(name)?;
     // Parent preparation failures must occur before writing private material.
     ensure_parent_dir(&paths.identity)?;
-    ensure_parent_dir(&paths.peers)?;
     if let Some(path) = keystore_path {
         ensure_parent_dir(path)?;
     }

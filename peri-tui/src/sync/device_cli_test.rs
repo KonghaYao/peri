@@ -22,13 +22,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = DeviceCliPaths {
             identity: tmp.path().join("home/.peri/sync-identity.json"),
-            peers: tmp.path().join("home/.peri/sync-trusted-peers.json"),
+            peers: tmp.path().join("unused/sync-trusted-peers.json"),
         };
         let keystore = tmp.path().join("home/.peri/nested/sync-keystore");
 
         init_impl(Some("fresh"), Some(&keystore), "password", &paths).unwrap();
         assert!(paths.identity.is_file());
         assert!(keystore.is_file());
+        assert!(
+            !paths.peers.parent().unwrap().exists(),
+            "初始化不创建未使用的 peers 目录"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
