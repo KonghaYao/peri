@@ -172,9 +172,10 @@ setup-confirm = Confirm
 setup-test-connectivity = [ Test Connectivity ]
 setup-key-switch-type = :Switch type
 setup-key-back-list = :Back to list
-setup-complete-title =  ── Setup Complete ✓
+setup-complete-title =  ── Review Setup
 setup-press-enter = Press
-setup-to-start = to start using
+setup-to-start = to save and activate
+setup-save-failed = Could not save setup. Check the configuration file and permissions; restart if it changed externally, then retry.
 setup-no-key = (no key)
 setup-no-providers = No providers configured. Add one by selecting "Custom API" or importing from Claude Code.
 
@@ -1194,3 +1195,13 @@ session-restore-failed = Session restore failed: { $error }. Retry or use /clear
 panel-host-settings = Host settings
 
 permission-mode-update-failed = Permission mode update failed: { $error }
+setup-activation-failed = Settings were saved, but could not be activated. Press Enter to retry.
+setup-saving = Saving and activating settings…
+setup-connectivity-checking = Checking endpoint…
+setup-connectivity-invalid = Enter a valid HTTP(S) URL without embedded credentials.
+setup-connectivity-failed = Endpoint check failed or timed out. Check the URL and network.
+setup-connectivity-reachable = Endpoint reachable; API key and model not verified.
+setup-connectivity-status = Endpoint returned HTTP { $status }; API key and model not verified.
+setup-migration-failed = Could not find a valid provider in ~/.claude/settings.json. Choose Custom API to enter one.
+setup-provider-incomplete = Select at least one provider and complete its ID, API key, and model fields.
+setup-field-id-readonly = ID (read-only)

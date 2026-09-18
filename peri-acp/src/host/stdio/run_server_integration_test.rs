@@ -373,6 +373,7 @@ impl peri_acp_types::tasks::TaskManager for RecordingTaskManager {
         _output: String,
         _duration_ms: u64,
         _timed_out: bool,
+        _shell_output: Option<peri_acp_types::event::ShellOutput>,
     ) {
     }
 }

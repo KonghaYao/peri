@@ -25,6 +25,7 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let acp_state = hooks.use_atom(&atoms::ACP_STATE);
     let popup_kind = hooks.use_atom(&atoms::POPUP_KIND);
     let wizard_active = hooks.use_atom(&atoms::WIZARD_ACTIVE);
+    let setup_preflight = hooks.use_atom(&atoms::SETUP_PREFLIGHT);
     // 订阅渲染心跳：即使终端无输入，heartbeat 也能周期性唤醒 render loop，
     // 防止窗口切换后 EventStream 永久阻塞。
     let _heartbeat = hooks.use_atom(&atoms::RENDER_HEARTBEAT);
@@ -75,6 +76,21 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         },
         (exit_requested_val,),
+    );
+
+    let setup_preflight_active = *setup_preflight.read();
+    let wizard_open = *wizard_active.read();
+    let exit_for_setup = exit_shared.clone();
+    hooks.use_effect(
+        move || {
+            if setup_preflight_active
+                && !wizard_open
+                && let Some(mut f) = exit_for_setup.lock().take()
+            {
+                f();
+            }
+        },
+        (setup_preflight_active, wizard_open),
     );
 
     // [Fix P0] mount 时重装 panic hook，覆盖 ratatui::init() 的包装 hook。

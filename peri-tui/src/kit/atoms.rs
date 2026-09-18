@@ -448,6 +448,11 @@ pub static WORKFLOW_SNAPSHOT: AtomStatic<Option<WorkflowSnapshot>> = AtomStatic:
 /// 缺省回退 kind=Command/level=1），写入后立即 `refresh_slash_items()`。
 pub static AVAILABLE_SLASH_COMMANDS: AtomStatic<Vec<SlashCommandEntry>> = AtomStatic::new(Vec::new);
 pub static WIZARD_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
+/// True while the first-run wizard owns a temporary fullscreen pass. Closing
+/// that wizard ends the pass; entry attaches ACP only when [`SETUP_COMPLETED`]
+/// is true, and otherwise tears down the process.
+pub static SETUP_PREFLIGHT: AtomStatic<bool> = AtomStatic::new(|| false);
+pub static SETUP_COMPLETED: AtomStatic<bool> = AtomStatic::new(|| false);
 /// Setup Wizard 全量状态（步骤、Provider 列表、光标位置等）
 pub static SETUP_WIZARD: AtomStatic<SetupWizardState> = AtomStatic::new(SetupWizardState::default);
 pub static PREDICTION: AtomStatic<PredictionState> = AtomStatic::new(PredictionState::default);

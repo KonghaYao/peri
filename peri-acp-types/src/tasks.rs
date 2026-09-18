@@ -184,7 +184,7 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         on_bg_complete: Option<OnBgCompleteFn>,
     ) -> Result<BgShellHandle, Box<dyn std::error::Error + Send + Sync>>;
 
-    /// 后台 shell 完成收尾（超长输出落盘 → on_bg_complete 回调 → complete）。
+    /// 后台 shell 完成收尾：接收已写入的输出文件引用，认领完成后通知并提交终态。
     #[allow(clippy::too_many_arguments)] // 收尾参数集为跨层固定契约，不分组
     fn finalize_bg_shell(
         &self,
@@ -195,6 +195,7 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         output: String,
         duration_ms: u64,
         timed_out: bool,
+        shell_output: Option<crate::event::ShellOutput>,
     );
 }
 
@@ -257,6 +258,7 @@ impl TaskManager for NoopTaskManager {
         _output: String,
         _duration_ms: u64,
         _timed_out: bool,
+        _shell_output: Option<crate::event::ShellOutput>,
     ) {
     }
 }

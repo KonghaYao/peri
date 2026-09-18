@@ -157,36 +157,47 @@ pub(crate) async fn handle_update_config(
         }
     }
 
-    *cfg.peri_config.write() = new_cfg.clone();
-
-    if let Some(p) = LlmProvider::from_config(&new_cfg) {
-        tracing::debug!(
-            provider = %p.display_name(),
-            model = %p.model_name(),
-            "update_config: provider updated"
-        );
-        *cfg.provider.write() = p;
-    } else {
-        let active_profile_provider = new_cfg
-            .config
-            .profiles
-            .get(&new_cfg.config.active_alias)
-            .map(|p| p.provider.as_str())
-            .unwrap_or("");
-        tracing::warn!(
-            active_provider = %active_profile_provider,
-            active_alias = %new_cfg.config.active_alias,
-            providers = new_cfg.config.providers.len(),
-            "update_config: LlmProvider::from_config returned None, provider NOT updated"
-        );
+    let new_provider = LlmProvider::from_config(&new_cfg)
+        .ok_or_else(|| AcpError::new(-32602, "active profile has no usable provider"))?;
+    // Each environment owns its model selection; only connection definitions are
+    // shared with environments assembled from this exact configuration source.
+    // Resolve every candidate before persistence so failure leaves live state intact.
+    let mut refreshed = Vec::new();
+    for (id, state) in sessions.iter() {
+        let Some(environment) = state.environment.as_ref() else {
+            continue;
+        };
+        if !Arc::ptr_eq(&environment.cfg.config_source, &cfg.config_source)
+            || Arc::ptr_eq(&environment.cfg.peri_config, &cfg.peri_config)
+        {
+            continue;
+        }
+        let mut candidate = environment.cfg.peri_config.read().clone();
+        candidate.config.providers = new_cfg.config.providers.clone();
+        let provider = LlmProvider::from_config(&candidate).ok_or_else(|| {
+            AcpError::new(-32602, "existing session profile has no usable provider")
+        })?;
+        refreshed.push((id.clone(), environment.clone(), candidate, provider));
     }
-
-    // Model switch → invalidate cached LLM instances (Main Agent + SubAgent)
-    if let Some(s) = sessions.get_mut(session_id) {
-        s.agent_pool.invalidate();
+    cfg.config_source
+        .save(&new_cfg)
+        .map_err(|_| AcpError::new(-32603, "Failed to persist config"))?;
+    *cfg.peri_config.write() = new_cfg;
+    *cfg.provider.write() = new_provider;
+    for (_, environment, candidate, provider) in &refreshed {
+        *environment.cfg.peri_config.write() = candidate.clone();
+        *environment.cfg.provider.write() = provider.clone();
     }
-
-    persist_config(cfg);
+    for state in sessions.values_mut() {
+        if state.environment.as_ref().is_none_or(|environment| {
+            Arc::ptr_eq(&environment.cfg.config_source, &cfg.config_source)
+        }) {
+            state.agent_pool.invalidate();
+        }
+    }
+    for (id, environment, _, _) in &refreshed {
+        send_config_option_update(transport.as_ref(), id, &environment.cfg).await;
+    }
 
     let config_options = {
         let c = cfg.peri_config.read();

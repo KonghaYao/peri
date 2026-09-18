@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use peri_acp_types::tasks::TaskManager;
 use peri_agent::agent::async_tasks::{
-    bg_shell_task_id, drain_pipe, kill_process_group, parse_timeout, shell_command, truncate_bytes,
-    BgTaskKind, ShellExecutionGuard,
+    bg_shell_task_id, kill_process_group, parse_timeout, shell_command, tee_pipe_with_output,
+    truncate_bytes, BgTaskKind, ShellExecutionGuard, ShellOutputCapture,
 };
 use peri_agent::{
     agent::events::BackgroundTaskResult,
@@ -297,12 +297,15 @@ impl BaseTool for BashTool {
             // timeout 参数解析：未传/显式 0 → 不超时（后台语义：跑完为止）
             let timeout_opt = parse_timeout(&input, true);
 
-            let handle = task_manager.spawn_shell(
-                command.to_string(),
-                self.cwd.clone(),
-                timeout_opt,
-                self.on_bg_complete.clone(),
-            )?;
+            let command = command.to_string();
+            let cwd = self.cwd.clone();
+            let on_complete = self.on_bg_complete.clone();
+            // The synchronous port returns a PID and already-created output
+            // paths. Keep its process/file setup off the async runtime.
+            let handle = tokio::task::spawn_blocking(move || {
+                task_manager.spawn_shell(command, cwd, timeout_opt, on_complete)
+            })
+            .await??;
 
             let mut msg = format!(
                 "Background shell task started.\ntask_id: {}\nThe command is running in the background.",
@@ -329,7 +332,7 @@ impl BaseTool for BashTool {
                     }
                     msg.push_str(
                         "\n- Monitor: check the Tasks panel for status and output preview; \
-                         the captured output is returned via a completion notification when the task finishes",
+                         completion notifications include output file paths for reading on demand",
                     );
                 }
                 None => msg.push_str(
@@ -375,28 +378,50 @@ impl BaseTool for BashTool {
         cmd.process_group(0);
 
         execution.prepare(&mut cmd)?;
-        let mut child = match cmd.spawn() {
+        let child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return Err(format!("Error executing command: {e}").into()),
         };
         let pid = child
             .id()
             .expect("shell_command spawn succeeded but child.id() is None");
-        if let Err(error) = execution.attach(&child) {
-            let _ = child.kill().await;
+        if let Err(error) = execution.attach_owned(child) {
+            let _ = execution.child_mut().kill().await;
             execution.confirm_stopped();
             return Err(error.into());
         }
 
+        // Start durable capture before either pipe reader is spawned. A
+        // timeout promotion can therefore retain output beyond the bounded
+        // in-memory preview without reconstructing it after the fact.
+        let mut output_capture =
+            tokio::task::spawn_blocking(|| ShellOutputCapture::new("foreground-shell")).await?;
+        let stdout_writer = output_capture.stdout_writer();
+        let stderr_writer = output_capture.stderr_writer();
+        let output_capture = Arc::new(output_capture);
+
         // 流式读取 stdout/stderr 到共享缓冲（超时时部分输出不再全丢）
         let stdout_buf = Arc::new(Mutex::new(String::new()));
         let stderr_buf = Arc::new(Mutex::new(String::new()));
+        let child = execution.child_mut();
         let stdout_reader =
             tokio::io::BufReader::new(child.stdout.take().expect("shell_command stdout is piped"));
         let stderr_reader =
             tokio::io::BufReader::new(child.stderr.take().expect("shell_command stderr is piped"));
-        let drain_stdout = tokio::spawn(drain_pipe(stdout_reader, stdout_buf.clone()));
-        let drain_stderr = tokio::spawn(drain_pipe(stderr_reader, stderr_buf.clone()));
+        let drain_stdout = tokio::spawn(tee_pipe_with_output(
+            stdout_reader,
+            stdout_buf.clone(),
+            stdout_writer,
+            Arc::clone(&output_capture),
+            "stdout",
+        ));
+        let drain_stderr = tokio::spawn(tee_pipe_with_output(
+            stderr_reader,
+            stderr_buf.clone(),
+            stderr_writer,
+            Arc::clone(&output_capture),
+            "stderr",
+        ));
 
         let wait_result = match timeout_opt {
             None => child.wait().await,
@@ -439,24 +464,32 @@ impl BaseTool for BashTool {
                                 let on_bg_complete_cb = self.on_bg_complete.clone();
                                 let command_owned = command.to_string();
                                 let task_id_owned = task_id.clone();
+                                let background_output = Arc::clone(&output_capture);
                                 // 续跑任务：继续读 pipe 至 EOF → wait → finalize → 通知 Agent
                                 let task_owner = task_manager.clone();
                                 task_owner.spawn_owned(Box::pin(async move {
                                     let started = std::time::Instant::now();
-                                    let _ = drain_stdout.await;
-                                    let _ = drain_stderr.await;
+                                    if let Err(error) = drain_stdout.await {
+                                        background_output.record_task_error("stdout", error);
+                                    }
+                                    if let Err(error) = drain_stderr.await {
+                                        background_output.record_task_error("stderr", error);
+                                    }
                                     // wait 失败（极罕见）按失败完成，保证 finalize 一定执行
-                                    let (success, exit_code) = match child.wait().await {
-                                        Ok(s) => (s.success(), s.code()),
-                                        Err(e) => {
-                                            warn!(
-                                                error = %e,
-                                                task_id = %task_id_owned,
-                                                "promoted bg shell: wait failed"
-                                            );
-                                            (false, None)
-                                        }
-                                    };
+                                    let (success, exit_code) =
+                                        match execution.child_mut().wait().await {
+                                            Ok(s) => (s.success(), s.code()),
+                                            Err(e) => {
+                                                warn!(
+                                                    error = %e,
+                                                    task_id = %task_id_owned,
+                                                    "promoted bg shell: wait failed"
+                                                );
+                                                kill_process_group(pid, "KILL");
+                                                let _ = execution.child_mut().wait().await;
+                                                (false, None)
+                                            }
+                                        };
                                     let stdout = match stdout_buf.lock() {
                                         Ok(g) => g.clone(),
                                         Err(poisoned) => poisoned.into_inner().clone(),
@@ -476,8 +509,10 @@ impl BaseTool for BashTool {
                                         combined,
                                         started.elapsed().as_millis() as u64,
                                         false,
+                                        Some(background_output.finish(exit_code)),
                                     );
                                 }))?;
+                                output_capture.retain_files();
                                 if has_output {
                                     // 有部分输出：进程在产生进展，续跑是合理的
                                     return Ok(ToolOutput::with_execution(format!(
@@ -507,10 +542,11 @@ impl BaseTool for BashTool {
                             Err(e) => {
                                 // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
                                 kill_process_group(pid, "KILL");
-                                let _ = child.wait().await;
+                                let _ = execution.child_mut().wait().await;
                                 let _ = drain_stdout.await;
                                 let _ = drain_stderr.await;
                                 execution.confirm_stopped();
+                                output_capture.cleanup().await;
                                 return Ok(ToolOutput::with_execution(format!(
                                     "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{ps_line}\n{partial_hint}\nCommand that timed out: {command}",
                                     ms as f64 / 1000.0
@@ -526,10 +562,11 @@ impl BaseTool for BashTool {
                     } else {
                         // ── 无 TaskManager：杀进程组 + 部分输出落盘 ──
                         kill_process_group(pid, "KILL");
-                        let _ = child.wait().await;
+                        let _ = execution.child_mut().wait().await;
                         let _ = drain_stdout.await;
                         let _ = drain_stderr.await;
                         execution.confirm_stopped();
+                        output_capture.cleanup().await;
                         return Ok(ToolOutput::with_execution(format!(
                             "Command timed out after {:.1}s. The default timeout is deliberately short (15s) to encourage efficient commands.\n\
                              {ps_line}\n\
@@ -555,8 +592,12 @@ impl BaseTool for BashTool {
         // 正常完成路径：等待管道排空，合并输出，保持既有格式与截断逻辑
         match wait_result {
             Ok(status) => {
-                let _ = drain_stdout.await;
-                let _ = drain_stderr.await;
+                if let Err(error) = drain_stdout.await {
+                    output_capture.record_task_error("stdout", error);
+                }
+                if let Err(error) = drain_stderr.await {
+                    output_capture.record_task_error("stderr", error);
+                }
                 let stdout = match stdout_buf.lock() {
                     Ok(g) => g.clone(),
                     Err(poisoned) => poisoned.into_inner().clone(),
@@ -569,6 +610,7 @@ impl BaseTool for BashTool {
                 let mut background_task_id = None;
                 if execution.is_stopped() {
                     execution.confirm_stopped();
+                    output_capture.cleanup().await;
                 } else if let Some(manager) = &self.task_manager {
                     // A successful shell can leave `command &` running with redirected pipes.
                     // Register that group before returning so normal completion does not kill it.
@@ -586,19 +628,25 @@ impl BaseTool for BashTool {
                     let on_complete = self.on_bg_complete.clone();
                     let summary: String = command.chars().take(80).collect();
                     let task_id_for_wait = task_id.clone();
+                    let background_output = Arc::clone(&output_capture);
                     manager.spawn_owned(Box::pin(async move {
                         let started = std::time::Instant::now();
                         execution.wait_for_exit().await;
                         execution.confirm_stopped();
                         task_manager.finalize_bg_shell(&on_complete, task_id_for_wait, summary, status.success(),
                             "Background processes have stopped; individual exit codes are unavailable.".into(),
-                            started.elapsed().as_millis() as u64, false);
+                            started.elapsed().as_millis() as u64, false,
+                            // Only the leader was waited. The remaining group
+                            // has no observable exit code of its own.
+                            Some(background_output.finish(None)));
                     }))?;
+                    output_capture.retain_files();
                     output.push_str(&format!(
                         "\nRemaining processes continue as background task {task_id}."
                     ));
                 } else {
                     execution.release_unmanaged();
+                    output_capture.cleanup().await;
                 }
                 let (text, output_ref) = bounded_bash_output(&output);
                 let execution_status = if background_task_id.is_some() {
@@ -625,7 +673,15 @@ impl BaseTool for BashTool {
                     },
                 ))
             }
-            Err(e) => Err(format!("Error executing command: {e}").into()),
+            Err(e) => {
+                kill_process_group(pid, "KILL");
+                let _ = execution.child_mut().wait().await;
+                let _ = drain_stdout.await;
+                let _ = drain_stderr.await;
+                execution.confirm_stopped();
+                output_capture.cleanup().await;
+                Err(format!("Error executing command: {e}").into())
+            }
         }
     }
 

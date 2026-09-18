@@ -826,6 +826,7 @@ fn test_background_task_completed_no_session_update() {
             child_thread_id: None,
             timed_out: false,
             subagent_failure: None,
+            shell_output: None,
         }),
         "BackgroundTaskCompleted",
     );

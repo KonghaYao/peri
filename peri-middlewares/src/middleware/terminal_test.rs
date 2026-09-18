@@ -110,10 +110,13 @@ async fn test_cancelled_foreground_shell_retains_owner_until_process_exit() {
     })
     .await
     .unwrap();
+    let mut shutdown = peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref());
+    // 进程仍活着时必须持有 owner，不能仅因 shutdown 请求就报告完成。
+    assert!(futures::poll!(&mut shutdown).is_pending());
     command.abort();
     assert!(command.await.unwrap_err().is_cancelled());
     assert_eq!(
-        peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
+        shutdown.await,
         peri_acp_types::tasks::TaskShutdownReport::Complete,
     );
 }
@@ -143,6 +146,46 @@ async fn test_successful_shell_keeps_redirected_background_process_owned() {
         peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
         peri_acp_types::tasks::TaskShutdownReport::Complete
     );
+}
+
+/// 父 shell 的成功退出不能作为其剩余后台进程的退出码。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_redirected_background_process_reports_unknown_exit_code() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let fixture = tempfile::tempdir().unwrap();
+    let manager = Arc::new(TaskManager::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let tool = BashTool::new(fixture.path().to_str().unwrap())
+        .with_task_manager(manager.clone())
+        .with_on_bg_complete(Arc::new(move |result, _| {
+            let _ = tx.send(result.clone());
+        }));
+    let output = tool.invoke(serde_json::json!({
+        "command": "(while [ ! -f release ]; do sleep 0.01; done; exit 7) >/dev/null 2>&1 &",
+        "timeout": 0
+    }), peri_agent::tools::ToolContext::new(&[], ".")).await.unwrap();
+    assert!(output.contains("background task"), "{output}");
+    std::fs::write(fixture.path().join("release"), "go").unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("descendant completion notification")
+        .unwrap();
+    let files = result.shell_output.as_ref().expect("output references");
+    // 文件已发布给后台任务，worker 结束后仍须可读。
+    assert_eq!(
+        peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
+    for path in [files.stdout_path.as_ref(), files.stderr_path.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        std::fs::read(path).expect("published file remains readable");
+        std::fs::remove_file(path).unwrap();
+    }
+    assert_eq!(files.exit_code, None, "descendant status was never waited");
+    assert!(result.to_notification().contains("退出码未知"));
 }
 
 #[tokio::test]
@@ -771,16 +814,15 @@ async fn test_bg_explicit_timeout_kills_process_group() {
         .unwrap();
     assert!(result.contains("shell-"), "应返回 task_id: {result}");
 
-    // 回调应收到 success=false 且含 "timed out" 的结果
+    // 回调保留失败与真实超时终态，通知不再携带输出正文。
     let notif = rx
         .recv()
         .await
         .expect("bg 超时后应触发 on_bg_complete 回调");
     assert!(!notif.success, "超时结果应为失败");
     assert!(
-        notif.output.contains("timed out"),
-        "输出应含超时提示: {}",
-        notif.output
+        notif.to_notification().contains("超时被终止"),
+        "通知必须区分终止和仍在后台运行"
     );
     assert!(notif.timed_out, "超时结果应标记 timed_out");
 
@@ -901,11 +943,15 @@ async fn test_bg_shell_log_file_tee() {
         .await
         .expect("bg 完成后应触发 on_bg_complete 回调");
     assert!(notif.success);
-    assert!(
-        notif.output.contains("second"),
-        "通知应含完整输出: {}",
-        notif.output
-    );
+    let files = notif
+        .shell_output
+        .as_ref()
+        .expect("typed output references");
+    assert!(files.complete);
+    assert_eq!(files.stdout_path.as_deref(), Some(log_path.as_str()));
+    assert_eq!(files.exit_code, Some(0));
+    assert!(!notif.to_notification().contains("second"));
+    assert!(notif.to_notification().contains("Read"));
     let full = std::fs::read_to_string(&log_path).expect("完成后应可读日志文件");
     assert!(
         full.contains("first") && full.contains("second"),
@@ -917,7 +963,7 @@ async fn test_bg_shell_log_file_tee() {
 }
 
 /// 同步超时 + 有注册表：不杀进程，promote 为后台任务续跑；
-/// 完成回调收到 success=true 含 "done"，active_count 归零。
+/// 完成回调收到 success=true 和完整输出文件引用，active_count 归零。
 #[cfg(unix)]
 #[tokio::test]
 async fn test_sync_timeout_promotes_to_background() {
@@ -968,11 +1014,16 @@ async fn test_sync_timeout_promotes_to_background() {
         .expect("promote 完成后应触发 on_bg_complete 回调");
     assert_eq!(notif.task_id, task_id, "回调任务 id 应与 promote 返回一致");
     assert!(notif.success, "续跑完成应成功");
-    assert!(
-        notif.output.contains("done"),
-        "输出应含 done: {}",
-        notif.output
-    );
+    let files = notif
+        .shell_output
+        .as_ref()
+        .expect("promoted output references");
+    assert!(files.complete);
+    assert_eq!(files.exit_code, Some(0));
+    assert!(std::fs::read_to_string(files.stdout_path.as_ref().unwrap())
+        .unwrap()
+        .contains("done"));
+    assert!(!notif.to_notification().contains("done"));
     assert!(!notif.timed_out, "正常完成不应标记 timed_out");
 
     // complete() 清理后 active_count 归零

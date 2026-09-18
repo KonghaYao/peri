@@ -7,8 +7,8 @@
 //! ### Cached entries
 //! | Cache | Key | Entry | Lifetime |
 //! |-------|-----|-------|----------|
-//! | `cached_llm` | `"provider:model:think=effort:budget"` fingerprint | `auxiliary_model` + `auto_classifier_model` | Validated per-prompt via `has_valid_cache()` |
-//! | `subagent_llm_cache` | `"provider:model:think=effort:budget"` fingerprint | `Arc<dyn Model>` (shared `reqwest::Client`) | Held until `invalidate()` or session close |
+//! | `cached_llm` | provider configuration fingerprint | `auxiliary_model` + `auto_classifier_model` | Validated per-prompt via `has_valid_cache()` |
+//! | `subagent_llm_cache` | provider configuration fingerprint | `Arc<dyn Model>` (shared `reqwest::Client`) | Held until `invalidate()` or session close |
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -32,7 +32,7 @@ pub struct AgentPool {
     cached_llm: Option<CachedLlmInstances>,
     /// Provider fingerprint for invalidation detection.
     fingerprint: String,
-    /// SubAgent LLM cache: keyed by `"provider_name:model_name"` fingerprint.
+    /// SubAgent LLM cache: keyed by the full provider configuration fingerprint.
     /// Each entry holds an `Arc<dyn Model>` with a shared `reqwest::Client`.
     /// Avoids creating a new HTTP client per SubAgent invocation.
     pub(crate) subagent_llm_cache: HashMap<String, Arc<dyn peri_model::Model>>,
@@ -118,12 +118,40 @@ impl AgentPool {
 }
 
 pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
-    format!(
-        "{}:{}{}",
-        provider.display_name(),
-        provider.model_name(),
-        provider.effort_key()
-    )
+    use sha2::{Digest, Sha256};
+    // Do not put credentials or endpoints in the cache key. A process-local salt
+    // also prevents these internal identities from becoming stable credential hashes.
+    static SALT: std::sync::OnceLock<uuid::Uuid> = std::sync::OnceLock::new();
+    let mut digest = Sha256::new();
+    digest.update(SALT.get_or_init(uuid::Uuid::new_v4).as_bytes());
+    let (api_key, base_url, max_tokens) = match provider {
+        LlmProvider::OpenAi {
+            api_key,
+            base_url,
+            max_tokens,
+            ..
+        } => (api_key, Some(base_url.as_str()), max_tokens),
+        LlmProvider::Anthropic {
+            api_key,
+            base_url,
+            max_tokens,
+            ..
+        } => (api_key, base_url.as_deref(), max_tokens),
+    };
+    // JSON tuple framing keeps arbitrary credential/URL strings unambiguous.
+    digest.update(
+        serde_json::to_vec(&(
+            provider.display_name(),
+            provider.model_name(),
+            provider.effort_key(),
+            api_key,
+            base_url,
+            max_tokens,
+            provider.context_1m(),
+        ))
+        .expect("provider cache identity contains only serializable primitives"),
+    );
+    format!("{:x}", digest.finalize())
 }
 
 #[cfg(test)]

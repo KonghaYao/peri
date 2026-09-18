@@ -62,6 +62,50 @@ async fn test_shutdown_accepts_confirmed_external_cleanup() {
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
 }
 
+/// 启动失败且 registry 已满时，必须同步报错，不能承诺不存在的完成通知。
+#[tokio::test]
+async fn test_failed_shell_spawn_with_full_registry_returns_error() {
+    let manager = TaskManager::new();
+    for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
+        manager
+            .register(BgTaskRegistration {
+                task_id: format!("occupied-{index}"),
+                kind: BgTaskKind::Shell,
+                summary: "capacity fixture".into(),
+                pid: None,
+                kill: Some(Box::new(|| {})),
+            })
+            .unwrap();
+    }
+    let fixture = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = manager.spawn_shell(
+        "echo never-started".into(),
+        fixture
+            .path()
+            .join("missing-cwd")
+            .to_string_lossy()
+            .into_owned(),
+        None,
+        Some(std::sync::Arc::new(move |result, _| {
+            tx.send(result.clone()).unwrap();
+        })),
+    );
+    assert_eq!(manager.active_count(), BackgroundTaskRegistry::SHELL_LIMIT);
+    for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
+        let id = format!("occupied-{index}");
+        manager.cancel(&id).unwrap();
+        manager.confirm_external_execution_stopped(&id);
+    }
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+    assert!(
+        rx.try_recv().is_err(),
+        "unregistered failure has no callback"
+    );
+    let error = result.expect_err("spawn failure must be returned synchronously");
+    assert!(error.to_string().contains("Failed to spawn"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_shutdown_joins_cancelled_background_shell() {
@@ -151,6 +195,37 @@ async fn test_timed_out_shell_can_close_cleanly() {
         .unwrap()
         .unwrap();
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_shutdown_reaps_child_owned_by_dropped_shell_guard() {
+    let manager = TaskManager::new();
+    let mut execution = ShellExecutionGuard::new(Some(manager.begin_external_execution().unwrap()));
+    let mut command = shell_command("exec sleep 60", &[]);
+    execution.prepare(&mut command).unwrap();
+    let child = command.spawn().unwrap();
+    let pid = i32::try_from(child.id().unwrap()).unwrap();
+    execution.attach_owned(child).unwrap();
+
+    let mut shutdown = manager.shutdown();
+    assert!(futures::poll!(&mut shutdown).is_pending());
+    drop(execution);
+    assert_eq!(shutdown.await, TaskShutdownReport::Complete);
+    // Complete 必须证明进程组已消失，而且 Child 已被回收而非仅收到 kill。
+    assert_eq!(unsafe { libc::kill(-pid, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    assert_eq!(
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
 }
 
 #[cfg(unix)]

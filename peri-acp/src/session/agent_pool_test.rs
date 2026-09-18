@@ -60,14 +60,19 @@ fn test_has_valid_cache_fingerprint_mismatch() {
 fn test_fingerprint_openai() {
     let provider = make_openai_provider("gpt-4o-mini");
     let fp = fingerprint(&provider);
-    assert_eq!(fp, "OpenAI:gpt-4o-mini");
+    assert_eq!(fp.len(), 64);
+    assert_eq!(fp, fingerprint(&provider.clone()));
 }
 
 #[test]
 fn test_fingerprint_anthropic() {
     let provider = make_anthropic_provider("claude-sonnet-4-20250514");
     let fp = fingerprint(&provider);
-    assert_eq!(fp, "Anthropic:claude-sonnet-4-20250514");
+    assert_eq!(fp.len(), 64);
+    assert_ne!(
+        fp,
+        fingerprint(&make_openai_provider(provider.model_name()))
+    );
 }
 
 #[test]
@@ -181,14 +186,6 @@ fn test_fingerprint_includes_effort() {
     let fp_low = fingerprint(&provider_low);
     let fp_high = fingerprint(&provider_high);
 
-    assert!(fp_none.contains("Anthropic:claude-sonnet-4-6"));
-    assert!(
-        !fp_none.contains(":effort="),
-        "无 effort 时 fingerprint 不应含 :effort="
-    );
-    assert!(fp_low.contains(":effort=low"), "fingerprint 应包含 effort");
-    assert!(fp_high.contains(":effort=high"));
-
     // 不同 effort 产生不同 fingerprint
     assert_ne!(fp_low, fp_high);
     // 不同 effort 状态产生不同 fingerprint
@@ -199,7 +196,7 @@ fn test_fingerprint_includes_effort() {
 #[test]
 fn test_fingerprint_same_effort_stable() {
     let a = LlmProvider::Anthropic {
-        api_key: "k1".into(), // api_key 不应影响 fingerprint
+        api_key: "k1".into(),
         model: "sonnet".into(),
         base_url: None,
         effort: Some("medium".to_string()),
@@ -207,15 +204,7 @@ fn test_fingerprint_same_effort_stable() {
         context_1m: false,
         retry_observer: None,
     };
-    let b = LlmProvider::Anthropic {
-        api_key: "k2".into(), // 不同 api_key，fingerprint 应相同
-        model: "sonnet".into(),
-        base_url: Some("https://different.example.com".into()),
-        effort: Some("medium".to_string()),
-        max_tokens: 32000,
-        context_1m: false,
-        retry_observer: None,
-    };
+    let b = a.clone();
     assert_eq!(fingerprint(&a), fingerprint(&b));
 }
 
@@ -370,5 +359,49 @@ fn mock_model(name: &str) -> impl peri_model::Model {
 
     MockModel {
         name: name.to_string(),
+    }
+}
+
+/// [回归测试] 同 ID/model 的 key 或 endpoint 更新必须避开在途旧工厂回填的模型。
+#[test]
+fn test_provider_connection_update_does_not_reuse_stale_cache() {
+    let original = make_openai_provider("same-model");
+    let mut changed_key = original.clone();
+    if let LlmProvider::OpenAi { api_key, .. } = &mut changed_key {
+        *api_key = "replacement-secret".into();
+    }
+    let mut changed_url = original.clone();
+    if let LlmProvider::OpenAi { base_url, .. } = &mut changed_url {
+        *base_url = "https://replacement.example/v1".into();
+    }
+    let mut changed_options = original.clone();
+    if let LlmProvider::OpenAi {
+        max_tokens,
+        context_1m,
+        ..
+    } = &mut changed_options
+    {
+        *max_tokens = 64000;
+        *context_1m = true;
+    }
+    for replacement in [changed_key, changed_url, changed_options] {
+        let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
+        let old_fp = fingerprint(&original);
+        let new_fp = fingerprint(&replacement);
+        let old = AgentPool::get_or_create_subagent_llm(&pool, &old_fp, || {
+            // 模拟创建期间更新配置清缓存，然后旧工厂才返回并回填。
+            pool.lock().invalidate();
+            Box::new(mock_model("old"))
+        });
+        let new =
+            AgentPool::get_or_create_subagent_llm(&pool, &new_fp, || Box::new(mock_model("new")));
+        assert!(!Arc::ptr_eq(&old, &new), "新连接不得命中旧连接实例");
+        assert!(!new_fp.contains("replacement"), "指纹不得暴露凭据或 URL");
+        assert!(Arc::ptr_eq(
+            &new,
+            &AgentPool::get_or_create_subagent_llm(&pool, &new_fp, || panic!(
+                "相同配置应该复用缓存"
+            ))
+        ));
     }
 }

@@ -1,4 +1,4 @@
-//! 用户待发区与执行准入的会话级 owner，普通待办不会参与 MQ 唤醒。
+//! 用户待发区与执行准入的会话级 owner，普通待办在 idle 时逐条交接给 MQ。
 
 use std::{
     collections::HashMap,
@@ -200,24 +200,11 @@ impl UserInputMailbox {
                 handed_off: false,
             });
             state.revision += 1;
-            // 挂起标记可能晚于取消抵达；只有仍可运行的同一 attempt 可以原地唤醒。
-            let can_wake_suspended = state.suspended
-                && state.active.as_ref().is_some_and(|active| {
-                    active.reason == InterruptReason::None
-                        && active
-                            .cancel
-                            .as_ref()
-                            .is_some_and(|cancel| !cancel.is_cancelled())
-                });
             if state.active.is_none() || state.paused {
                 state.paused = false;
-                promote_all(&mut state);
-                if can_wake_suspended {
-                    self.handoff_locked(&mut state);
-                }
-            } else if can_wake_suspended {
-                promote_ids(&mut state, std::slice::from_ref(&request.input_id));
-                self.handoff_locked(&mut state);
+                promote_next(&mut state);
+            } else {
+                self.wake_suspended_locked(&mut state);
             }
         }
         let results = results_for(&state, std::slice::from_ref(&request.input_id));
@@ -377,7 +364,7 @@ impl UserInputMailbox {
         state.revision += 1;
         if resume_pending {
             state.paused = false;
-            promote_all(&mut state);
+            promote_next(&mut state);
             self.handoff_locked(&mut state);
         }
         let snapshot = self.snapshot_locked(&state);
@@ -463,10 +450,8 @@ impl UserInputMailbox {
         } else if active.reason == InterruptReason::None
             && outcome == UserInputAttemptOutcome::Completed
         {
-            // 已接受的立即发送须优先完成本次工作的延续，再释放普通待办。
-            if state.ready.is_empty() {
-                promote_all(&mut state);
-            }
+            // 已接受的立即发送优先；普通待办每次只释放队首一条。
+            promote_next(&mut state);
         }
         let snapshot = self.snapshot_locked(&state);
         drop(state);
@@ -538,8 +523,41 @@ impl UserInputMailbox {
         self.stop();
     }
 
-    pub(crate) fn set_suspended(&self, suspended: bool) {
-        self.state.lock().suspended = suspended;
+    /// idle 边界与 enqueue 共用同一把锁，覆盖输入在挂起前后到达的两种顺序。
+    pub(crate) fn enter_idle(&self) {
+        let mut state = self.state.lock();
+        state.suspended = true;
+        if self.wake_suspended_locked(&mut state) {
+            let snapshot = self.snapshot_locked(&state);
+            drop(state);
+            self.publish(snapshot);
+        }
+    }
+
+    pub(crate) fn leave_idle(&self) {
+        self.state.lock().suspended = false;
+    }
+
+    fn wake_suspended_locked(&self, state: &mut MailboxState) -> bool {
+        // 迟到的 idle 不能恢复 Stop、立即发送收尾或已经取消的旧 attempt。
+        if !state.valid
+            || state.paused
+            || !state.suspended
+            || !state.active.as_ref().is_some_and(|active| {
+                active.reason == InterruptReason::None
+                    && active
+                        .cancel
+                        .as_ref()
+                        .is_some_and(|cancel| !cancel.is_cancelled())
+            })
+            || !promote_next(state)
+        {
+            return false;
+        }
+        // 交接即占用本次 idle，后续 enqueue 不能在 Receive 开始前追加第二条。
+        state.suspended = false;
+        self.handoff_locked(state);
+        true
     }
 
     /// Receive 已从 MQ 独占取走这些 ID；任何 Stop 都不得再将它们恢复 queued。
@@ -766,14 +784,23 @@ fn discard_payload(record: &mut InputRecord) {
     record.input.original_draft.clear();
 }
 
-fn promote_all(state: &mut MailboxState) {
-    let ids: Vec<_> = state
+fn promote_next(state: &mut MailboxState) -> bool {
+    if !state.ready.is_empty()
+        || state.records.iter().any(|record| {
+            matches!(
+                record.state,
+                UserInputState::Dispatching | UserInputState::Claimed
+            )
+        })
+    {
+        return false;
+    }
+    let next = state
         .records
         .iter()
-        .filter(|record| record.state == UserInputState::Queued)
-        .map(|record| record.input.input_id.clone())
-        .collect();
-    promote_ids(state, &ids);
+        .find(|record| record.state == UserInputState::Queued)
+        .map(|record| record.input.input_id.clone());
+    next.is_some_and(|id| promote_ids(state, &[id]))
 }
 
 fn promote_ids(state: &mut MailboxState, ids: &[String]) -> bool {

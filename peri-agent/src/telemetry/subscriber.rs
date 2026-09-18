@@ -52,12 +52,20 @@ pub fn init_tracing(service_name: &str) -> TracingGuard {
         ),
     };
 
+    std::fs::create_dir_all(&log_dir).unwrap_or_else(|error| {
+        panic!("cannot create log directory {}: {error}", log_dir.display())
+    });
     let file_appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix(file_prefix)
         .max_log_files(5)
         .build(&log_dir)
-        .expect("cannot create rolling file appender");
+        .unwrap_or_else(|error| {
+            panic!(
+                "cannot create rolling file appender in {}: {error}",
+                log_dir.display()
+            )
+        });
 
     if is_json {
         let subscriber = Registry::default()

@@ -23,7 +23,7 @@
 | 改结构化 Agent 结果校验 | `peri-agent/src/agent/workflow/agent/result.rs` + `result_test.rs` | `completed_result → validate_json_schema`；有限子集递归校验 type/required/properties/items，RawValue 保留数字原文精确判断 integer，number 仍接受整数；不宣称完整 JSON Schema |
 | 改 Workflow agent 挂起/kill | `peri-workflow/src/rpc.rs` | `register_agent`、`deregister_agent`、`kill_agent`；ownership token 防 stale deregister，kill 同时响应 RPC error 与 cancel |
 | 改启动、host 所有权与取消收敛 | `peri-workflow/src/runner.rs` | `WorkflowRunner::run`；拥有 message task 的 spawn/abort/join，启动失败先移除 active channel，kill 分支回收进程并等待 message task 后发布 killed |
-| 改 runtime artifact/安装/命令准备 | `peri-workflow/src/runner/artifact.rs` | `prepare_workflow_command`、`validate_workflow_artifact`；固定 bundle 身份/字节校验，staging 原子发布与显式网络 fallback；`runner::WORKFLOW_ARTIFACT_BYTES` 仅为 preflight 兼容 re-export |
+| 改 runtime artifact/安装/命令准备 | `peri-workflow/src/runner/artifact.rs` | `prepare_workflow_command`、`validate_workflow_artifact`；固定 bundle 身份/字节校验，staging 原子发布与显式网络 fallback；安装路径优先非空 HOME，再取平台 home；内嵌 runner 需要 node，npm/npx 仅用于显式网络 fallback；`runner::WORKFLOW_ARTIFACT_BYTES` 仅为 preflight 兼容 re-export |
 | 改内嵌 Workflow CLI 入口 | `peri-workflow/src/cli.rs` + `peri-acp/src/lib.rs` + `peri-tui/src/cli_workflow.rs` | `cli::run`、`argv_requests_workflow`；`peri workflow` 在配置/会话初始化前使用当前内嵌 artifact 运行 CLI，临时文件保留到 Node 退出，不查找网络版本 |
 | 改 ADLC 文件边界证据 | `npm-packages/@peri-workflow/src/boundary.ts` | `snapshotBoundary`、`compareBoundary`；有界扫描、独立基线摘要、字面路径 allowlist、ignored 变化及生成目录身份；不是权限沙箱或写入归属证明 |
 | 改 ADLC 阶段检查与恢复建议 | `npm-packages/@peri-workflow/src/adlc.ts` | `checkAdlcStage`、`planAdlcRecovery`；校验必需产物和 Main 提供的身份/依赖事实，不修改通用引擎终态或代替语义验收；策略由内置 `ultra-adlc/SKILL.md` 维护 |

@@ -33,6 +33,9 @@ pub(super) fn wizard_click(
     area: ratatui_kit::ratatui::layout::Rect,
     state: &mut SetupWizardState,
 ) -> bool {
+    if state.save_in_progress {
+        return true;
+    }
     let enter = ratatui_kit::crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     let visual = mouse.row.saturating_sub(area.y).saturating_sub(1);
     match state.step {
@@ -158,7 +161,8 @@ pub(super) fn wizard_click(
         SetupStep::Done => {
             // 布局：空行 + 标题 + 空行（header 3）+ 每 provider 8 行 + 空行 + Enter 提示行
             let selected_count = state.providers.iter().filter(|p| p.selected).count();
-            let enter_row = (4 + 8 * selected_count) as u16;
+            let error_rows = if state.submit_error.is_some() { 2 } else { 0 };
+            let enter_row = (4 + 8 * selected_count + error_rows) as u16;
             if visual == enter_row {
                 handle_done_keys(state, enter);
                 return true;
@@ -169,11 +173,14 @@ pub(super) fn wizard_click(
 }
 
 pub(super) fn handle_wizard_event(event: Event, mut state: SetupWizardState) -> EventResult {
+    if state.save_in_progress {
+        return EventResult::Consumed;
+    }
     // 处理粘贴事件（仅 Form 编辑模式下且当前字段为文本输入时）
     if let Event::Paste(paste_text) = &event {
         if state.step == SetupStep::Form
             && state.form_mode == FormMode::Edit
-            && state.form_focus.is_text_input()
+            && state.active_field_is_editable()
         {
             handle_paste_to_text_input(&mut state, paste_text);
             *SETUP_WIZARD.state().write() = state;
@@ -250,10 +257,7 @@ fn handle_choose_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
                     if !migrate_from_claude_code(state, None) {
                         state.source = SetupSource::CustomApi;
                         state.choose_cursor = 0;
-                        state.submit_error = Some(
-                            "迁移失败：未在 ~/.claude/settings.json 中找到有效的 Provider 配置。请确保文件中有 env.ANTHROPIC_API_KEY 或 env.OPENAI_API_KEY。"
-                                .into(),
-                        );
+                        state.submit_error = Some(i18n::tr("setup-migration-failed"));
                         return;
                     }
                 }
@@ -290,11 +294,12 @@ fn handle_done_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm::e
     use KeyCode::*;
     match key.code {
         Enter => {
-            // 保存配置并关闭 wizard
-            if let Err(e) = save_setup(state) {
-                tracing::error!("setup wizard: save failed: {e}");
+            if state.save_in_progress {
+                return;
             }
-            *atoms::WIZARD_ACTIVE.state().write() = false;
+            state.invalidate_connectivity();
+            state.submit_error = None;
+            state.save_in_progress = true;
         }
         Esc => {
             state.submit_error = None;
@@ -331,6 +336,7 @@ fn handle_browse_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
         Enter => {
             if state.browse_cursor < state.providers.len() {
                 state.submit_error = None;
+                state.invalidate_connectivity();
                 state.active_provider = state.browse_cursor;
                 state.form_mode = FormMode::Edit;
                 state.form_focus = FormField::ProviderType;
@@ -342,12 +348,10 @@ fn handle_browse_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
                     .any(|p| p.selected && p.is_complete());
                 if has_valid {
                     state.submit_error = None;
+                    state.invalidate_connectivity();
                     state.step = SetupStep::Done;
                 } else {
-                    state.submit_error = Some(
-                        "No provider selected or incomplete. Select at least one provider with all fields filled."
-                            .into(),
-                    );
+                    state.submit_error = Some(i18n::tr("setup-provider-incomplete"));
                 }
             }
         }
@@ -364,7 +368,7 @@ fn handle_edit_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm::e
     let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     // 文本编辑按键：先处理
-    if state.form_focus.is_text_input() {
+    if state.active_field_is_editable() {
         let handled = handle_text_input(state, &key);
         if handled {
             return;
@@ -381,19 +385,25 @@ fn handle_edit_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm::e
             state.edit_cursor_pos = get_raw_field_value(state).chars().count();
         }
         Left | Right if !is_ctrl && state.form_focus == FormField::ProviderType => {
+            state.invalidate_connectivity();
             if let Some(mp) = state.active_provider_mut() {
                 mp.provider_type.cycle();
+                mp.refresh_provider_defaults();
             }
         }
         Char(' ') if state.form_focus == FormField::ProviderType => {
+            state.invalidate_connectivity();
             if let Some(mp) = state.active_provider_mut() {
                 mp.provider_type.cycle();
+                mp.refresh_provider_defaults();
             }
         }
         Enter => {
             if state.form_focus == FormField::TestConnectivity {
-                if let Some(mp) = state.active_provider_ref() {
-                    state.connectivity_result = Some(test_connectivity(&mp.base_url));
+                if !state.connectivity_in_progress && state.active_provider_ref().is_some() {
+                    state.connectivity_generation = state.connectivity_generation.wrapping_add(1);
+                    state.connectivity_in_progress = true;
+                    state.connectivity_result = None;
                 }
             } else if state.form_focus == FormField::Confirm {
                 let mp = match state.active_provider_ref() {
@@ -404,11 +414,13 @@ fn handle_edit_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm::e
                     && !mp.api_key.trim().is_empty()
                     && mp.aliases.iter().all(|a| !a.trim().is_empty())
                 {
+                    state.invalidate_connectivity();
                     state.form_mode = FormMode::Browse;
                 }
             }
         }
         Esc => {
+            state.invalidate_connectivity();
             state.form_mode = FormMode::Browse;
         }
         _ => {}
@@ -533,3 +545,7 @@ fn handle_paste_to_text_input(state: &mut SetupWizardState, paste_text: &str) {
     state.edit_cursor_pos = pos + paste_len;
     state.set_active_field_value(val);
 }
+
+#[cfg(test)]
+#[path = "handler_test.rs"]
+mod tests;

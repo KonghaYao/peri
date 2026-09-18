@@ -821,6 +821,124 @@ async fn test_e2e_final_answer_no_tools() {
     assert!(matches!(visible[1], BaseMessage::Ai { .. }));
 }
 
+/// [回归测试] loading 期间排队的两个 prompt 在后台任务仍活跃时逐条驱动真实 loop。
+#[tokio::test]
+async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
+    use crate::session::user_input_mailbox::UserInputMailbox;
+    use peri_acp_types::session::{EnqueueUserInputRequest, SessionInbox, UserInputState};
+    struct PausedFirstAnswerLLM {
+        entered: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        resume: Arc<tokio::sync::Notify>,
+        seen: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
+    }
+    #[async_trait::async_trait]
+    impl ReactLLM for PausedFirstAnswerLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn crate::tools::BaseTool],
+            _streaming: Option<crate::agent::react::StreamingContext>,
+        ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+            self.seen.lock().push(
+                messages
+                    .iter()
+                    .filter(|message| matches!(message, BaseMessage::Human { .. }))
+                    .map(|message| message.content().to_string())
+                    .collect(),
+            );
+            let entered = self.entered.lock().take();
+            if let Some(entered) = entered {
+                entered.send(()).unwrap();
+                self.resume.notified().await;
+            }
+            Ok(crate::agent::react::Reasoning::with_answer("", "完成"))
+        }
+    }
+    let mut context = make_stage_context();
+    let inbox = Arc::new(SessionInbox::new(Arc::new(context.session.queue.clone())));
+    let mailbox = UserInputMailbox::new("session".into(), inbox.clone(), Arc::new(|_| {}));
+    mailbox
+        .attach_external_attempt(context.session.turn.cancel_token.as_ref().clone(), false)
+        .unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    context.runtime.llm = Arc::new(PausedFirstAnswerLLM {
+        entered: parking_lot::Mutex::new(Some(entered_tx)),
+        resume: resume.clone(),
+        seen: seen.clone(),
+    });
+    context.session.user_input_mailbox = Some(mailbox.clone());
+    context.async_ctx.idle_inbox = Some(inbox.clone());
+    context.async_ctx.idle_should_wait = Some({
+        let seen = seen.clone();
+        Arc::new(move || seen.lock().len() < 3)
+    });
+    let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
+    context.runtime.event_bus = Arc::new(bus);
+    context.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human("初始任务"),
+    ));
+    let task = tokio::spawn(run_react_loop(context, 3));
+    tokio::time::timeout(std::time::Duration::from_secs(1), entered_rx)
+        .await
+        .expect("初始模型调用必须开始")
+        .unwrap();
+    let mut input_ids = Vec::new();
+    for text in ["A", "B"] {
+        let input_id = uuid::Uuid::now_v7().to_string();
+        let receipt = mailbox
+            .enqueue(&EnqueueUserInputRequest {
+                session_id: "session".into(),
+                generation: mailbox.generation().into(),
+                command_id: format!("enqueue-{text}"),
+                input_id: input_id.clone(),
+                content: MessageContent::text(text),
+                original_draft: text.into(),
+            })
+            .unwrap();
+        assert_eq!(receipt.results[0].state, UserInputState::Queued);
+        input_ids.push(input_id);
+    }
+    assert!(inbox.queue().is_empty(), "loading 期间不能交接普通待办");
+    resume.notify_one();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("已有队列必须在 idle 自动继续，无需再次提交或等待后台结果")
+        .unwrap();
+    assert!(matches!(result, LoopResult::Completed));
+    assert_eq!(
+        *seen.lock(),
+        vec![
+            vec!["初始任务"],
+            vec!["初始任务", "A"],
+            vec!["初始任务", "A", "B"]
+        ],
+        "每次进入 idle 只交接 FIFO 队首"
+    );
+    assert!(mailbox.snapshot().items.is_empty());
+    let mut delivered = Vec::new();
+    while let Ok(event) = handles.render_rx.try_recv() {
+        if let crate::agent::events_v2::RenderEvent::UserInputDelivered { input_id, .. } = event {
+            delivered.push(input_id);
+        }
+    }
+    assert_eq!(
+        delivered, input_ids,
+        "聊天投递事件按稳定输入 ID 顺序发射且无重复"
+    );
+    while let Ok(event) = handles.state_rx.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                crate::agent::events_v2::StateEvent::TurnSuspended { .. }
+            ),
+            "已有可执行 prompt 时不发布虚假的挂起状态"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_e2e_cancel_before_loop() {
     // e2e：cancel_token 在 run_react_loop 之前触发 → Interrupted

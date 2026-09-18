@@ -288,11 +288,11 @@ main() {
     # --- Workflow dependency check ---
     echo ""
     step "Checking workflow runner..."
-    if command -v npx &>/dev/null || command -v bunx &>/dev/null; then
-        info "npx/bunx found — workflow will auto-download via npx/bunx @peri-code/workflow"
+    if command -v node &>/dev/null; then
+        info "node found — bundled workflow runner is ready"
     else
-        warn "npx/bunx not found. Install Node.js or Bun for multi-agent workflow support:"
-        echo "    https://nodejs.org/  or  https://bun.sh/"
+        warn "node not found. Install Node.js for workflow and PTC support:"
+        echo "    https://nodejs.org/"
         echo ""
     fi
 

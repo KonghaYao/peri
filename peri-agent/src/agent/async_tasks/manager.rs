@@ -10,10 +10,8 @@ use super::registry::{
     BackgroundRegistryError, BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus,
     BgCancelHandle, BgTaskInfo,
 };
-use super::shell::{
-    bg_shell_task_id, finalize_bg_shell, kill_process_group, shell_command, tee_pipe,
-};
-use super::{QueuedSubagentMessage, SubagentMessageError};
+use super::shell::{bg_shell_task_id, finalize_bg_shell, kill_process_group, shell_command};
+use super::{QueuedSubagentMessage, ShellOutputCapture, SubagentMessageError};
 
 // ── TaskManager（per-session 聚合）────────────────────────────────────────────
 
@@ -158,6 +156,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         output: String,
         duration_ms: u64,
         timed_out: bool,
+        shell_output: Option<peri_acp_types::event::ShellOutput>,
     ) {
         finalize_bg_shell(
             &self.registry,
@@ -168,6 +167,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             output,
             duration_ms,
             timed_out,
+            shell_output,
         );
     }
 }
@@ -268,7 +268,7 @@ impl TaskManager {
     ///
     /// 进程 spawn（经 [`shell_command`] 统一 wrapper）/ 进程组 / 超时 / 输出收集
     /// 全部在 Agent 层完成；任务启动即注册（BgTaskStarted 立即推送），完成时
-    /// [`finalize_bg_shell`] 收尾（超长输出落盘 → on_bg_complete 回调 → complete）。
+    /// [`finalize_bg_shell`] 收尾（输出引用 → 完成认领 → 回调 → 终态提交）。
     ///
     /// `timeout_ms`：`None` = 不超时（后台语义：跑完为止）；`Some(ms)` 超时后
     /// kill 整个进程组并等待 child 与输出管道收尾。
@@ -309,26 +309,11 @@ impl TaskManager {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                // spawn 失败：注册 + 立即按失败收尾（agent 仍收到失败通知，语义不变）
-                let result = BackgroundTaskResult {
-                    task_id: task_id.clone(),
-                    agent_name: "bg-shell".to_string(),
-                    prompt_summary: command_owned.chars().take(80).collect(),
-                    success: false,
-                    output: format!("Failed to spawn: {}", e),
-                    tool_calls_count: 0,
-                    duration_ms: 0,
-                    child_thread_id: None,
-                    timed_out: false,
-                    subagent_failure: None,
-                };
-                // 回调通知 Agent inbox（在 registry 操作之前）
-                if let Some(ref cb) = on_bg_complete_cb {
-                    cb(&result, BgTaskKind::Shell);
-                }
-                // 注册 + 立即完成
+                // Register first, then use the same callback boundary as all
+                // other shell completions. A callback panic must not skip the
+                // registry terminal transition.
                 let bg_task = BackgroundTask {
-                    id: result.task_id.clone(),
+                    id: task_id.clone(),
                     agent_name: "bg-shell".to_string(),
                     prompt_summary: command_owned.chars().take(80).collect(),
                     status: BackgroundTaskStatus::Running,
@@ -341,9 +326,22 @@ impl TaskManager {
                     output_preview: None,
                     agent_inbox: None,
                 };
-                let _ = registry.register_admitted(bg_task);
-                let complete_task_id = result.task_id.clone();
-                registry.complete(&complete_task_id, result);
+                if let Err(registration_error) = registry.register_admitted(bg_task) {
+                    // No registered task can publish a completion. Return the
+                    // failure now instead of promising an eventual notification.
+                    return Err(format!("Failed to spawn: {e}; {registration_error}").into());
+                }
+                finalize_bg_shell(
+                    &registry,
+                    &on_bg_complete_cb,
+                    task_id.clone(),
+                    command_owned.chars().take(80).collect(),
+                    false,
+                    format!("Failed to spawn: {e}"),
+                    0,
+                    false,
+                    None,
+                );
                 return Ok(BgShellHandle {
                     task_id: task_id_for_return,
                     pid: None,
@@ -363,18 +361,11 @@ impl TaskManager {
             return Err(error.into());
         }
 
-        // 创建实时输出日志文件（尽力而为：创建失败仅降级为不落盘，不影响执行链）。
-        // 运行期间 agent 可经 Read 工具读取；完成后文件保留。
-        let stdout_log = std::env::temp_dir().join(format!("peri-bg-{task_id}.stdout.log"));
-        let stderr_log = std::env::temp_dir().join(format!("peri-bg-{task_id}.stderr.log"));
-        let stdout_log_file = std::fs::File::create(&stdout_log).ok();
-        let stderr_log_file = std::fs::File::create(&stderr_log).ok();
-        let stdout_log_path = stdout_log_file
-            .as_ref()
-            .map(|_| stdout_log.to_string_lossy().into_owned());
-        let stderr_log_path = stderr_log_file
-            .as_ref()
-            .map(|_| stderr_log.to_string_lossy().into_owned());
+        // Create durable files before the readers start. The full stream is
+        // therefore retained even when the in-memory preview reaches 2 MiB.
+        let mut output_capture = ShellOutputCapture::new(&format!("bg-{task_id}"));
+        let stdout_log_path = output_capture.stdout_path();
+        let stderr_log_path = output_capture.stderr_path();
 
         // 任务启动即注册：推送 BgTaskStarted 事件，运行期间 TUI 展示栏可见。
         // 完成时 finalize_bg_shell 只调 complete()，不再重复注册。
@@ -401,9 +392,17 @@ impl TaskManager {
             self.registry.scope.spawn_admitted(async move {
                 let _ = child.wait().await;
                 execution.confirm_stopped();
+                output_capture.cleanup().await;
             });
             return Err(error.into());
         }
+
+        // The returned handle publishes live output paths. They outlive the
+        // worker and remain readable even after cancellation/completion.
+        output_capture.retain_files();
+        let stdout_writer = output_capture.stdout_writer();
+        let stderr_writer = output_capture.stderr_writer();
+        let output_capture = Arc::new(output_capture);
 
         self.registry.scope.spawn_admitted(async move {
             // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
@@ -420,10 +419,20 @@ impl TaskManager {
                 );
                 let stdout_buf = Arc::new(std::sync::Mutex::new(String::new()));
                 let stderr_buf = Arc::new(std::sync::Mutex::new(String::new()));
-                let drain_stdout =
-                    tokio::spawn(tee_pipe(stdout_reader, stdout_buf.clone(), stdout_log_file));
-                let drain_stderr =
-                    tokio::spawn(tee_pipe(stderr_reader, stderr_buf.clone(), stderr_log_file));
+                let drain_stdout = tokio::spawn(super::shell::tee_pipe_with_output(
+                    stdout_reader,
+                    stdout_buf.clone(),
+                    stdout_writer,
+                    Arc::clone(&output_capture),
+                    "stdout",
+                ));
+                let drain_stderr = tokio::spawn(super::shell::tee_pipe_with_output(
+                    stderr_reader,
+                    stderr_buf.clone(),
+                    stderr_writer,
+                    Arc::clone(&output_capture),
+                    "stderr",
+                ));
 
                 // 超时包裹 wait（后台未显式传 timeout 或 timeout=0 时不超时）
                 let wait_result = match timeout_ms {
@@ -440,34 +449,35 @@ impl TaskManager {
                                 // 超时：kill 整个进程组（bash 为组长，负号 PID 语义），
                                 // 等待实际终态后再发完成事件。
                                 kill_process_group(pid, "KILL");
-                                let _ = child.wait().await;
-                                let _ = drain_stdout.await;
-                                let _ = drain_stderr.await;
-                                execution.confirm_stopped();
-                                // 构造超时错误结果
-                                let result = BackgroundTaskResult {
-                                    task_id: task_id.clone(),
-                                    agent_name: "bg-shell".to_string(),
-                                    prompt_summary: command_owned.chars().take(80).collect(),
-                                    success: false,
-                                    output: format!(
-                                        "Command timed out after {}s.\nCommand: {}",
-                                        ms as f64 / 1000.0,
-                                        command_owned
-                                    ),
-                                    tool_calls_count: 0,
-                                    duration_ms: started.elapsed().as_millis() as u64,
-                                    child_thread_id: None,
-                                    timed_out: true,
-                                    subagent_failure: None,
-                                };
-                                // 回调通知 Agent inbox（在 registry 操作之前）
-                                if let Some(ref cb) = on_bg_complete_cb {
-                                    cb(&result, BgTaskKind::Shell);
+                                let exit_status = child.wait().await.ok();
+                                if exit_status.is_none() {
+                                    output_capture.mark_incomplete("process exit status unavailable");
                                 }
-                                // 任务在启动时已注册，此处只收尾推送 Completed
-                                let complete_task_id = result.task_id.clone();
-                                registry.complete(&complete_task_id, result);
+                                if let Err(error) = drain_stdout.await {
+                                    output_capture.record_task_error("stdout", error);
+                                }
+                                if let Err(error) = drain_stderr.await {
+                                    output_capture.record_task_error("stderr", error);
+                                }
+                                execution.wait_for_exit().await;
+                                execution.confirm_stopped();
+                                registry.confirm_external_stopped(&task_id);
+                                finalize_bg_shell(
+                                    &registry,
+                                    &on_bg_complete_cb,
+                                    task_id.clone(),
+                                    command_owned.chars().take(80).collect(),
+                                    false,
+                                    format!(
+                                        "Command timed out after {}s; process group was terminated.",
+                                        ms as f64 / 1000.0
+                                    ),
+                                    started.elapsed().as_millis() as u64,
+                                    true,
+                                    Some(output_capture.finish(
+                                        exit_status.as_ref().and_then(std::process::ExitStatus::code),
+                                    )),
+                                );
                                 return;
                             }
                         }
@@ -476,8 +486,12 @@ impl TaskManager {
 
                 let output = match wait_result {
                     Ok(Some(status)) => {
-                        let _ = drain_stdout.await;
-                        let _ = drain_stderr.await;
+                        if let Err(error) = drain_stdout.await {
+                            output_capture.record_task_error("stdout", error);
+                        }
+                        if let Err(error) = drain_stderr.await {
+                            output_capture.record_task_error("stderr", error);
+                        }
                         let success = status.success();
                         let stdout = match stdout_buf.lock() {
                             Ok(g) => g.clone(),
@@ -501,9 +515,23 @@ impl TaskManager {
                         if combined.is_empty() {
                             combined = format!("[exit code: {}]", status.code().unwrap_or(-1));
                         }
-                        (success, combined)
+                        (success, combined, status.code())
                     }
-                    Err(e) => (false, format!("Command failed: {}", e)),
+                    Err(e) => {
+                        tracing::error!(task_id = %task_id, error = %e, "background shell wait failed");
+                        // A failed wait does not prove that the process or
+                        // its pipe readers stopped. Settle both before
+                        // publishing the failure and output references.
+                        kill_process_group(pid, "KILL");
+                        let _ = child.wait().await;
+                        if let Err(error) = drain_stdout.await {
+                            output_capture.record_task_error("stdout", error);
+                        }
+                        if let Err(error) = drain_stderr.await {
+                            output_capture.record_task_error("stderr", error);
+                        }
+                        (false, format!("Command failed: {e}"), None)
+                    }
                     // unreachable: child.wait() 恒返回 Ok(ExitStatus)
                     Ok(None) => {
                         unreachable!("bg shell: child.wait returned Ok(None)")
@@ -512,6 +540,9 @@ impl TaskManager {
 
                 execution.wait_for_exit().await;
                 execution.confirm_stopped();
+                // Process cleanup is independent of the visible task. Cancel
+                // may already have removed it before completion can claim it.
+                registry.confirm_external_stopped(&task_id);
                 // 回调通知 + 完成（任务在启动时已注册，与 promote 续跑共用收尾逻辑）
                 finalize_bg_shell(
                     &registry,
@@ -522,11 +553,17 @@ impl TaskManager {
                     output.1,
                     started.elapsed().as_millis() as u64,
                     false,
+                    Some(output_capture.finish(output.2)),
                 );
             })
             .catch_unwind()
             .await;
             if let Err(panic_err) = result {
+                kill_process_group(pid, "KILL");
+                let _ = child.wait().await;
+                execution.wait_for_exit().await;
+                execution.confirm_stopped();
+                registry.confirm_external_stopped(&task_id);
                 // spawn 閉包內部 panic：嘗試用現有 task_id 發送失敗事件
                 let panic_msg = if let Some(s) = panic_err.downcast_ref::<String>() {
                     s.clone()
@@ -535,36 +572,22 @@ impl TaskManager {
                 } else {
                     "unknown panic".to_string()
                 };
-                let fallback = BackgroundTaskResult {
-                    task_id: task_id.clone(),
-                    agent_name: "bg-shell".to_string(),
-                    prompt_summary: command_owned.chars().take(80).collect(),
-                    success: false,
-                    output: format!("Background shell task panicked: {}", panic_msg),
-                    tool_calls_count: 0,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    child_thread_id: None,
-                    timed_out: false,
-                    subagent_failure: None,
-                };
-                // 嘗試註冊 + 完成（即使 register 失敗也調 complete，發送 cleanup 事件到 TUI）
-                let bg_task = BackgroundTask {
-                    id: fallback.task_id.clone(),
-                    agent_name: "bg-shell".to_string(),
-                    prompt_summary: command_owned.chars().take(80).collect(),
-                    status: BackgroundTaskStatus::Running,
-                    started_at: std::time::Instant::now(),
-                    chrono_started_at: chrono::Utc::now(),
-                    kind: BgTaskKind::Shell,
-                    cancel_handle: BgCancelHandle::Kill(None),
-                    cancel_token: None,
-                    pid: None,
-                    output_preview: None,
-                    agent_inbox: None,
-                };
-                let _ = registry.register_with_kind(bg_task);
-                let complete_task_id = fallback.task_id.clone();
-                registry.complete(&complete_task_id, fallback);
+                output_capture.mark_incomplete("background shell worker panicked");
+                // The task was registered before the worker was spawned. Do
+                // not re-register here: cancellation may already have
+                // removed the entry, and `complete` will then suppress the
+                // duplicate terminal event as intended.
+                finalize_bg_shell(
+                    &registry,
+                    &on_bg_complete_cb,
+                    task_id.clone(),
+                    command_owned.chars().take(80).collect(),
+                    false,
+                    format!("Background shell task panicked: {panic_msg}"),
+                    started.elapsed().as_millis() as u64,
+                    false,
+                    Some(output_capture.finish(None)),
+                );
             }
         });
 

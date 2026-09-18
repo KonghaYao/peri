@@ -346,41 +346,10 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         } else {
             // 回退路径：直接 push（无 wake，兼容 print mode / 无 SessionAccess）
             use peri_acp_types::session::{MessageKind as V2Kind, MessageSource as V2Src};
-            use peri_acp_types::system_reminder::{
-                ReminderCategory, ReminderDelivery, ReminderSeverity,
-            };
             for result in &bg_results {
-                let reminder = crate::session::producer_reminders::trusted_reminder(
-                    ReminderCategory::Task,
-                    "subagent",
-                    if result.success {
-                        "completed"
-                    } else {
-                        "failed"
-                    },
-                    if result.success {
-                        ReminderSeverity::Info
-                    } else {
-                        ReminderSeverity::Error
-                    },
-                    ReminderDelivery::Configurable,
-                    result.to_notification(),
-                    Some(format!(
-                        "{} {}",
-                        result.agent_name,
-                        if result.success {
-                            "completed"
-                        } else {
-                            "failed"
-                        }
-                    )),
-                    serde_json::json!({
-                        "task_id": result.task_id,
-                        "agent_name": result.agent_name,
-                        "success": result.success,
-                        "timed_out": result.timed_out,
-                        "child_thread_id": result.child_thread_id,
-                    }),
+                let reminder = crate::session::async_router::background_result_reminder(
+                    result,
+                    BgTaskKind::Agent,
                 );
                 v2_message_queue.push(QueuedMessage::system_reminder(
                     V2Kind::Defer,

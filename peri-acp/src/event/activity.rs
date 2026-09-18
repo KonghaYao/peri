@@ -487,6 +487,13 @@ mod tests {
             timed_out: true,
             child_thread_id: Some("raw-thread-id".into()),
             subagent_failure: None,
+            shell_output: Some(Box::new(peri_acp_types::event::ShellOutput {
+                stdout_path: Some("/private/SECRET_STDOUT.log".into()),
+                stderr_path: Some("/private/SECRET_STDERR.log".into()),
+                complete: false,
+                error: Some("SECRET_FILE_ERROR".into()),
+                exit_code: Some(1),
+            })),
         });
         let wire = serde_json::to_string(&map_agent_activity(&event).unwrap()).unwrap();
         assert!(wire.contains("\"tool_count\":7"));
@@ -496,6 +503,9 @@ mod tests {
             "SECRET_PROMPT",
             "SECRET_OUTPUT",
             "raw-thread-id",
+            "SECRET_STDOUT",
+            "SECRET_STDERR",
+            "SECRET_FILE_ERROR",
         ] {
             assert!(!wire.contains(prohibited));
         }

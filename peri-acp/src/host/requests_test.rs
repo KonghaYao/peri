@@ -28,6 +28,9 @@ use crate::provider::LlmProvider;
 #[path = "requests_legacy_test.rs"]
 mod legacy_tests;
 
+#[path = "requests_update_config_test.rs"]
+mod update_config_tests;
+
 // ── Mock AcpTransport ─────────────────────────────────────────────────────────
 
 /// 记录全部通知的 mock transport（`Mutex<Vec<(method, payload)>>`，Slice 6

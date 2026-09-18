@@ -19,13 +19,76 @@
 
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::session::{InboxHandle, MessageKind, MessageSource};
-use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
+use peri_acp_types::system_reminder::{
+    ReminderCategory, ReminderDelivery, ReminderSeverity, TrustedSystemReminder,
+};
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::workflow::{PhaseSummary, WorkflowTaskResult};
 use serde_json::json;
 use tracing::debug;
 
-use crate::session::producer_reminders::trusted_reminder;
+use crate::session::producer_reminders::{trusted_reminder, try_trusted_reminder};
+
+/// Shared projection for inbox routing and the queue-only executor path.
+pub(crate) fn background_result_reminder(
+    result: &BackgroundTaskResult,
+    kind: BgTaskKind,
+) -> TrustedSystemReminder {
+    let reminder_source = match kind {
+        BgTaskKind::Agent => "subagent",
+        BgTaskKind::Shell => "shell",
+        BgTaskKind::Workflow => "workflow",
+    };
+    try_trusted_reminder(
+        ReminderCategory::Task,
+        reminder_source,
+        if result.success {
+            "completed"
+        } else {
+            "failed"
+        },
+        if result.success {
+            ReminderSeverity::Info
+        } else {
+            ReminderSeverity::Error
+        },
+        ReminderDelivery::Configurable,
+        result.to_notification(),
+        Some(format!(
+            "{} {}",
+            result.agent_name,
+            if result.success {
+                "completed"
+            } else {
+                "failed"
+            }
+        )),
+        json!({
+            "task_id": result.task_id,
+            "agent_name": result.agent_name,
+            "success": result.success,
+            "timed_out": result.timed_out,
+            "child_thread_id": result.child_thread_id,
+        }),
+    ).unwrap_or_else(|error| {
+        tracing::error!(task_id = %result.task_id, %error, "background completion notification rejected");
+        // Do not truncate paths into misleading references or copy the
+        // rejected output into another field. This diagnostic has only
+        // bounded identity and execution facts; registry still receives
+        // the original result, independently of notification delivery.
+        let task_id: String = result.task_id.chars().take(80).collect();
+        trusted_reminder(
+            ReminderCategory::Task,
+            reminder_source,
+            "notification_failed",
+            ReminderSeverity::Error,
+            ReminderDelivery::Configurable,
+            format!("后台任务 {task_id} 已结束，但详细结果通知未通过校验。请检查运行日志。"),
+            Some("Background completion notification rejected".into()),
+            json!({"task_id": task_id, "success": result.success, "timed_out": result.timed_out}),
+        )
+    })
+}
 
 /// Routes async results (bg SubAgent completion, workflow events) into the Session inbox.
 ///
@@ -70,43 +133,7 @@ impl AsyncRouter {
             BgTaskKind::Shell => MessageSource::ShellComplete,
             BgTaskKind::Workflow => MessageSource::WorkflowComplete,
         };
-        let reminder_source = match kind {
-            BgTaskKind::Agent => "subagent",
-            BgTaskKind::Shell => "shell",
-            BgTaskKind::Workflow => "workflow",
-        };
-        let reminder = trusted_reminder(
-            ReminderCategory::Task,
-            reminder_source,
-            if result.success {
-                "completed"
-            } else {
-                "failed"
-            },
-            if result.success {
-                ReminderSeverity::Info
-            } else {
-                ReminderSeverity::Error
-            },
-            ReminderDelivery::Configurable,
-            result.to_notification(),
-            Some(format!(
-                "{} {}",
-                result.agent_name,
-                if result.success {
-                    "completed"
-                } else {
-                    "failed"
-                }
-            )),
-            json!({
-                "task_id": result.task_id,
-                "agent_name": result.agent_name,
-                "success": result.success,
-                "timed_out": result.timed_out,
-                "child_thread_id": result.child_thread_id,
-            }),
-        );
+        let reminder = background_result_reminder(result, kind);
         self.inbox
             .push_system_reminder(MessageKind::Defer, source, reminder);
         debug!(

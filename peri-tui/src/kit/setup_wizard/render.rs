@@ -303,7 +303,7 @@ fn render_browse(
 
         if !mp.base_url.is_empty() {
             let url_text = if mp.base_url.len() > 60 {
-                format!("{}...", &mp.base_url[..57])
+                format!("{}...", mp.base_url.chars().take(57).collect::<String>())
             } else {
                 mp.base_url.clone()
             };
@@ -448,17 +448,32 @@ fn render_edit(
         ),
     ]));
 
-    // ProviderId
-    lines.push(render_editable_line(
-        i18n::tr("setup-field-id"),
-        mp.provider_id.clone(),
-        state.form_focus == FormField::ProviderId,
-        state.edit_cursor_pos,
-        cursor_color,
-        dim,
-        text_color,
-        focus_color,
-    ));
+    // Persisted IDs are identity keys referenced by profiles, not editable names.
+    if mp.provider_id_is_editable() {
+        lines.push(render_editable_line(
+            i18n::tr("setup-field-id"),
+            mp.provider_id.clone(),
+            state.form_focus == FormField::ProviderId,
+            state.edit_cursor_pos,
+            cursor_color,
+            dim,
+            text_color,
+            focus_color,
+        ));
+    } else {
+        let focused = state.form_focus == FormField::ProviderId;
+        lines.push(Line::from(vec![
+            Span::styled(
+                if focused { "❯ " } else { "  " },
+                Style::default().fg(cursor_color),
+            ),
+            Span::styled(
+                format!("{}: ", i18n::tr("setup-field-id-readonly")),
+                Style::default().fg(if focused { focus_color } else { dim }),
+            ),
+            Span::styled(mp.provider_id.clone(), Style::default().fg(text_color)),
+        ]));
+    }
 
     // BaseUrl
     lines.push(render_editable_line(
@@ -483,10 +498,14 @@ fn render_edit(
         Style::default().fg(dim)
     };
     let tc_label = i18n::tr("setup-field-test-connectivity");
-    let (tc_status, tc_color) = match &state.connectivity_result {
-        Some((true, msg)) => (msg.clone(), accent),
-        Some((false, msg)) => (msg.clone(), error_color),
-        None => (i18n::tr("setup-key-check"), dim),
+    let (tc_status, tc_color) = if state.connectivity_in_progress {
+        (i18n::tr("setup-connectivity-checking"), dim)
+    } else {
+        match &state.connectivity_result {
+            Some((true, msg)) => (msg.clone(), accent),
+            Some((false, msg)) => (msg.clone(), error_color),
+            None => (i18n::tr("setup-key-check"), dim),
+        }
     };
     lines.push(Line::from(vec![
         Span::styled(tc_prefix, Style::default().fg(cursor_color)),
@@ -584,6 +603,7 @@ pub(super) fn render_done_step(
     accent: Color,
     _cursor_color: Color,
     text_color: Color,
+    error_color: Color,
 ) -> (String, Vec<Line<'static>>) {
     let mut lines = vec![
         Line::from(""),
@@ -631,18 +651,29 @@ pub(super) fn render_done_step(
         }
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!(" {} ", i18n::tr("setup-press-enter")),
-            Style::default().fg(text_color),
-        ),
-        Span::styled(
-            "Enter",
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(i18n::tr("setup-to-start"), Style::default().fg(text_color)),
-    ]));
+    if let Some(error) = &state.submit_error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  ⚠ {}", error),
+            Style::default().fg(error_color),
+        )));
+    }
 
+    lines.push(Line::from(""));
+    if state.save_in_progress {
+        lines.push(Line::from(i18n::tr("setup-saving")));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} ", i18n::tr("setup-press-enter")),
+                Style::default().fg(text_color),
+            ),
+            Span::styled(
+                "Enter",
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(i18n::tr("setup-to-start"), Style::default().fg(text_color)),
+        ]));
+    }
     ("setup-complete-title".to_string(), lines)
 }

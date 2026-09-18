@@ -118,13 +118,66 @@ pub struct BackgroundTaskResult {
     /// projections. Raw child errors never enter this DTO.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_failure: Option<crate::error::SafeSubagentFailure>,
+    /// Durable stdout/stderr references for shell tasks. The DTO contains
+    /// evidence only; file I/O remains in the Agent shell collector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_output: Option<Box<ShellOutput>>,
+}
+
+/// Typed evidence for a shell's durable output files.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ShellOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_path: Option<String>,
+    /// True only when both files were created and all pipe reads/writes ended
+    /// without an observed error.
+    #[serde(default)]
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Exit code is absent for signal termination or an unknown wait failure;
+    /// it must never be guessed from the success flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 impl BackgroundTaskResult {
     /// 格式化为注入到 LLM 消息流的通知文本
     pub fn to_notification(&self) -> String {
-        let short_id = &self.task_id[..8.min(self.task_id.len())];
-        let mut text = if self.success {
+        let short_id: String = self.task_id.chars().take(8).collect();
+        let mut text = if let Some(shell) = &self.shell_output {
+            let state = if self.timed_out {
+                "超时被终止"
+            } else if self.success {
+                "已完成"
+            } else {
+                "执行失败"
+            };
+            let exit = shell
+                .exit_code
+                .map_or_else(|| "退出码未知".to_string(), |code| format!("退出码 {code}"));
+            let mut text = format!(
+                "[后台任务 {short_id} {state}] Agent: {} | {exit}",
+                self.agent_name
+            );
+            if let Some(path) = &shell.stdout_path {
+                text.push_str(&format!("\nstdout 输出文件：{path}"));
+            }
+            if let Some(path) = &shell.stderr_path {
+                text.push_str(&format!("\nstderr 输出文件：{path}"));
+            }
+            if shell.complete {
+                text.push_str("\n完整输出已保存到文件系统。需要检查结果时，请使用 Read 工具按需读取；大文件分段读取。");
+            } else {
+                text.push_str("\n输出文件不完整或不可用，请检查文件路径和错误信息后再读取。");
+            }
+            if let Some(error) = &shell.error {
+                text.push_str(&format!("\n落盘诊断：{error}"));
+            }
+            text
+        } else if self.success {
             format!(
                 "[后台任务 {} 已完成] Agent: {} | 工具调用: {} | 耗时: {}ms\n结果:\n{}",
                 short_id, self.agent_name, self.tool_calls_count, self.duration_ms, self.output,
@@ -165,7 +218,7 @@ pub struct CompactFileInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::BackgroundTaskResult;
+    use super::{BackgroundTaskResult, ShellOutput};
 
     #[test]
     fn background_failure_notification_contains_safe_model_facts() {
@@ -188,11 +241,46 @@ mod tests {
             timed_out: false,
             child_thread_id: Some("child-123".into()),
             subagent_failure: Some(failure),
+            shell_output: None,
         };
         let notification = result.to_notification();
         assert!(notification.contains("model_error_status: 429"));
         assert!(notification.contains("model_error_request_id: req-123"));
         assert!(!notification.contains("prompt summary"));
+    }
+
+    #[test]
+    fn shell_notification_is_short_and_serde_compatible() {
+        let result = BackgroundTaskResult {
+            task_id: "shell-123456789".into(),
+            agent_name: "bg-shell".into(),
+            prompt_summary: "printf secret".into(),
+            success: true,
+            output: "x".repeat(200_000),
+            tool_calls_count: 0,
+            duration_ms: 3,
+            timed_out: false,
+            child_thread_id: None,
+            subagent_failure: None,
+            shell_output: Some(Box::new(ShellOutput {
+                stdout_path: Some("/tmp/stdout.log".into()),
+                stderr_path: Some("/tmp/stderr.log".into()),
+                complete: true,
+                error: None,
+                exit_code: Some(0),
+            })),
+        };
+        let notification = result.to_notification();
+        assert!(notification.len() < 2_000);
+        assert!(!notification.contains("secret"));
+        assert!(!notification.contains(&"x".repeat(1_000)));
+        let mut legacy = serde_json::to_value(&result).expect("serialize");
+        legacy
+            .as_object_mut()
+            .expect("object")
+            .remove("shell_output");
+        let decoded: BackgroundTaskResult = serde_json::from_value(legacy).expect("legacy decode");
+        assert!(decoded.shell_output.is_none());
     }
 }
 

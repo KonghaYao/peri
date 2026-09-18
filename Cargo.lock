@@ -4236,6 +4236,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "dirs-next",
  "futures",
  "indexmap 2.14.0",
  "parking_lot",
