@@ -1,8 +1,10 @@
 <div align="center">
 
+<img src="images/img_peri_black_marble_banner_s03.webp" alt="Peri Code — All Coding for you." width="960">
+
 # Peri Code
 
-### One goal. Coordinated agents. Your models.
+### All Coding for you.
 
 A native Rust coding agent for macOS, Linux, and Windows.<br>
 Bring an Anthropic or OpenAI-compatible endpoint.
