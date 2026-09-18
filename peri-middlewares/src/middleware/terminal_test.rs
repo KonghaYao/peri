@@ -774,16 +774,15 @@ async fn test_bg_explicit_timeout_kills_process_group() {
         .unwrap();
     assert!(result.contains("shell-"), "应返回 task_id: {result}");
 
-    // 回调应收到 success=false 且含 "timed out" 的结果
+    // 回调保留失败与真实超时终态，通知不再携带输出正文。
     let notif = rx
         .recv()
         .await
         .expect("bg 超时后应触发 on_bg_complete 回调");
     assert!(!notif.success, "超时结果应为失败");
     assert!(
-        notif.output.contains("timed out"),
-        "输出应含超时提示: {}",
-        notif.output
+        notif.to_notification().contains("超时被终止"),
+        "通知必须区分终止和仍在后台运行"
     );
     assert!(notif.timed_out, "超时结果应标记 timed_out");
 
@@ -904,11 +903,15 @@ async fn test_bg_shell_log_file_tee() {
         .await
         .expect("bg 完成后应触发 on_bg_complete 回调");
     assert!(notif.success);
-    assert!(
-        notif.output.contains("second"),
-        "通知应含完整输出: {}",
-        notif.output
-    );
+    let files = notif
+        .shell_output
+        .as_ref()
+        .expect("typed output references");
+    assert!(files.complete);
+    assert_eq!(files.stdout_path.as_deref(), Some(log_path.as_str()));
+    assert_eq!(files.exit_code, Some(0));
+    assert!(!notif.to_notification().contains("second"));
+    assert!(notif.to_notification().contains("Read"));
     let full = std::fs::read_to_string(&log_path).expect("完成后应可读日志文件");
     assert!(
         full.contains("first") && full.contains("second"),
@@ -920,7 +923,7 @@ async fn test_bg_shell_log_file_tee() {
 }
 
 /// 同步超时 + 有注册表：不杀进程，promote 为后台任务续跑；
-/// 完成回调收到 success=true 含 "done"，active_count 归零。
+/// 完成回调收到 success=true 和完整输出文件引用，active_count 归零。
 #[cfg(unix)]
 #[tokio::test]
 async fn test_sync_timeout_promotes_to_background() {
@@ -971,11 +974,16 @@ async fn test_sync_timeout_promotes_to_background() {
         .expect("promote 完成后应触发 on_bg_complete 回调");
     assert_eq!(notif.task_id, task_id, "回调任务 id 应与 promote 返回一致");
     assert!(notif.success, "续跑完成应成功");
-    assert!(
-        notif.output.contains("done"),
-        "输出应含 done: {}",
-        notif.output
-    );
+    let files = notif
+        .shell_output
+        .as_ref()
+        .expect("promoted output references");
+    assert!(files.complete);
+    assert_eq!(files.exit_code, Some(0));
+    assert!(std::fs::read_to_string(files.stdout_path.as_ref().unwrap())
+        .unwrap()
+        .contains("done"));
+    assert!(!notif.to_notification().contains("done"));
     assert!(!notif.timed_out, "正常完成不应标记 timed_out");
 
     // complete() 清理后 active_count 归零

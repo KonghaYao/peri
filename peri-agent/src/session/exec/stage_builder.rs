@@ -353,6 +353,11 @@ pub fn build_stage_context(
             Arc::new(move || reg.active_count() > 0) as Arc<dyn Fn() -> bool + Send + Sync>
         })
     };
+    // Subscribe before the Receive loop can probe active_count. The watch
+    // version is only a retained wake signal; registry remains the state owner.
+    let idle_registry = task_manager
+        .as_ref()
+        .map(|manager| manager.registry().subscribe_activity());
 
     // 调用 build_agent 构造完整 agent（含中间件链 + LLM）
     // L3：build_agent 消费的字段先 clone 一份（host 注入需要在主 session
@@ -481,6 +486,12 @@ pub fn build_stage_context(
             idle_should_wait,
         },
     );
+
+    let builder = if let Some(receiver) = idle_registry {
+        builder.with_idle_registry(receiver)
+    } else {
+        builder
+    };
 
     let context = builder.build();
 

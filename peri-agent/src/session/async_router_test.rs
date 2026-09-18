@@ -24,6 +24,7 @@ fn make_bg_result(task_id: &str, agent_name: &str, output: &str) -> BackgroundTa
         child_thread_id: None,
         timed_out: false,
         subagent_failure: None,
+        shell_output: None,
     }
 }
 
@@ -100,6 +101,72 @@ fn test_route_bg_result_notification_text_contains_task_info() {
     assert!(text.contains("task-12"), "should contain short task_id");
     assert!(text.contains("my-agent"), "should contain agent_name");
     assert!(text.contains("output text"), "should contain output");
+}
+
+/// [回归测试] 后台 shell 大输出曾经触发 64 KiB reminder 校验 panic。
+#[test]
+fn test_route_shell_output_only_injects_file_references() {
+    let (inbox, handle) = make_inbox();
+    let router = AsyncRouter::new(handle);
+    let mut result = make_bg_result("shell-output", "bg-shell", &"私有输出正文".repeat(100_000));
+    result.success = false;
+    result.shell_output = Some(Box::new(peri_acp_types::event::ShellOutput {
+        stdout_path: Some("/tmp/fixture.stdout.log".into()),
+        stderr_path: Some("/tmp/fixture.stderr.log".into()),
+        complete: true,
+        error: None,
+        exit_code: Some(1),
+    }));
+    router.route_bg_result(&result, BgTaskKind::Shell);
+    assert!(inbox.queue().has_wake_up());
+    let messages = inbox.queue().drain_all();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].source, MessageSource::ShellComplete);
+    let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
+        panic!("完成结果必须使用 canonical reminder");
+    };
+    let reminder = reminder.as_reminder();
+    assert!(reminder.validate().is_ok());
+    let encoded = serde_json::to_string(reminder).unwrap();
+    assert!(encoded.len() < 2_048, "通知大小应与原输出大小无关");
+    assert!(
+        !encoded.contains("私有输出正文"),
+        "正文不能绕过 body 进入 metadata 或 summary"
+    );
+    assert!(reminder.body.contains("/tmp/fixture.stdout.log"));
+    assert!(reminder.body.contains("/tmp/fixture.stderr.log"));
+    assert!(reminder.body.contains("Read"));
+    assert!(reminder.body.contains("退出码 1"));
+    assert_eq!(reminder.severity, ReminderSeverity::Error);
+}
+
+#[test]
+fn test_invalid_background_notification_reports_delivery_failure_without_panicking() {
+    let (inbox, handle) = make_inbox();
+    let router = AsyncRouter::new(handle);
+    let mut result = make_bg_result("shell-invalid", "bg-shell", "private output");
+    result.shell_output = Some(Box::new(peri_acp_types::event::ShellOutput {
+        stdout_path: Some("unrepresentable-path".repeat(10_000)),
+        stderr_path: None,
+        complete: false,
+        error: None,
+        exit_code: Some(0),
+    }));
+    router.route_bg_result(&result, BgTaskKind::Shell);
+    assert!(inbox.queue().has_wake_up());
+    let messages = inbox.queue().drain_all();
+    assert_eq!(messages.len(), 1);
+    let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
+        panic!("expected diagnostic reminder");
+    };
+    let reminder = reminder.as_reminder();
+    assert_eq!(reminder.kind, "notification_failed");
+    assert_eq!(reminder.metadata["success"], true);
+    assert!(reminder.validate().is_ok());
+    let encoded = serde_json::to_string(reminder).unwrap();
+    assert!(encoded.len() < 2_048);
+    assert!(!encoded.contains("unrepresentable-path"));
+    assert!(!encoded.contains("private output"));
 }
 
 #[test]

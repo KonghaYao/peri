@@ -16,6 +16,7 @@ mod manager;
 mod registry;
 mod scope;
 mod shell;
+mod shell_output;
 
 #[cfg(test)]
 use crate::agent::events::BackgroundTaskResult;
@@ -29,12 +30,14 @@ pub use registry::{
     BackgroundRegistryError, BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus,
     BgCancelHandle, BgTaskInfo,
 };
+pub use shell::tee_pipe_with_output;
 pub use shell::{
     bg_shell_task_id, drain_pipe, finalize_bg_shell, kill_process_group,
     kill_process_group_escalating, parse_timeout, persist_truncated_output,
     persist_truncated_output_with_ref, shell_command, tee_pipe, truncate_bytes,
     ShellExecutionGuard,
 };
+pub use shell_output::{ShellOutputCapture, ShellOutputWriter};
 
 /// 后台任务类别（事实源 peri-acp-types::tasks）
 pub use peri_acp_types::tasks::{BgShellHandle, BgTaskKind, BgTaskRegistration};
@@ -46,6 +49,10 @@ pub use peri_acp_types::tasks::BgRegistryEvent;
 #[cfg(test)]
 #[path = "async_tasks_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "async_tasks/registry_wake_test.rs"]
+mod registry_wake_tests;
 
 #[cfg(test)]
 mod shutdown_test;

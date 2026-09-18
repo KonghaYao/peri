@@ -26,6 +26,8 @@ pub enum BackgroundRegistryError {
     ConcurrentLimit(usize),
     #[error("Task {0} not found")]
     TaskNotFound(String),
+    #[error("Task {0} is completing")]
+    TaskCompleting(String),
     #[error("Task {0} cannot be cancelled: kill handle unavailable")]
     KillUnavailable(String),
     #[error("Kind concurrent limit reached: {kind} ({current}/{limit})")]
@@ -89,8 +91,17 @@ pub struct BackgroundTask {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackgroundTaskStatus {
     Running,
+    /// Completion has been claimed; callbacks run outside the registry lock.
+    Completing,
     Completed,
     Failed,
+}
+
+fn is_active_status(status: &BackgroundTaskStatus) -> bool {
+    matches!(
+        status,
+        BackgroundTaskStatus::Running | BackgroundTaskStatus::Completing
+    )
 }
 
 /// 后台任务信息 DTO（序列化用）
@@ -109,6 +120,10 @@ pub struct BgTaskInfo {
 /// 后台任务注册中心
 pub struct BackgroundTaskRegistry {
     tasks: parking_lot::Mutex<HashMap<String, BackgroundTask>>,
+    /// Derived wake signal for consumers waiting on task lifecycle changes.
+    /// The registry remains the sole source of task state; this version is only
+    /// a retained notification channel for re-checking that state.
+    activity_version: tokio::sync::watch::Sender<u64>,
     event_sender: parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>>>,
     session_id: parking_lot::RwLock<String>,
     pub(super) scope: Arc<super::scope::ExecutionScope>,
@@ -127,8 +142,10 @@ impl BackgroundTaskRegistry {
     pub const WORKFLOW_LIMIT: usize = 3;
 
     pub fn new() -> Self {
+        let (activity_version, _) = tokio::sync::watch::channel(0_u64);
         Self {
             tasks: parking_lot::Mutex::new(HashMap::new()),
+            activity_version,
             event_sender: parking_lot::RwLock::new(None),
             session_id: parking_lot::RwLock::new(String::new()),
             scope: super::scope::ExecutionScope::new(),
@@ -157,8 +174,33 @@ impl BackgroundTaskRegistry {
         self.tasks
             .lock()
             .values()
-            .filter(|t| matches!(t.status, BackgroundTaskStatus::Running))
+            .filter(|t| is_active_status(&t.status))
             .count()
+    }
+
+    /// Subscribe to retained notifications of task lifecycle changes.
+    ///
+    /// The returned version is only a wake signal. Callers must re-check
+    /// [`Self::active_count`] and the queue after every notification.
+    pub fn subscribe_activity(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.activity_version.subscribe()
+    }
+
+    /// Claim a single completion before running any external callback.
+    ///
+    /// The claim is linearized with cancellation while holding the task lock,
+    /// but no callback is run under that lock. A claimed task remains active
+    /// until [`Self::complete`] settles and removes it.
+    pub(super) fn claim_completion(&self, task_id: &str) -> bool {
+        let mut tasks = self.tasks.lock();
+        let Some(task) = tasks.get_mut(task_id) else {
+            return false;
+        };
+        if !matches!(task.status, BackgroundTaskStatus::Running) {
+            return false;
+        }
+        task.status = BackgroundTaskStatus::Completing;
+        true
     }
 
     /// 按类型统计运行中任务数
@@ -166,7 +208,7 @@ impl BackgroundTaskRegistry {
         self.tasks
             .lock()
             .values()
-            .filter(|t| matches!(t.status, BackgroundTaskStatus::Running) && t.kind == kind)
+            .filter(|t| is_active_status(&t.status) && t.kind == kind)
             .count()
     }
 
@@ -223,7 +265,7 @@ impl BackgroundTaskRegistry {
         let mut tasks = self.tasks.lock();
         let current = tasks
             .values()
-            .filter(|t| matches!(t.status, BackgroundTaskStatus::Running) && t.kind == kind)
+            .filter(|t| is_active_status(&t.status) && t.kind == kind)
             .count();
         if current >= limit {
             let kind_str = match kind {
@@ -243,6 +285,8 @@ impl BackgroundTaskRegistry {
         }
         tasks.insert(task.id.clone(), task);
         drop(tasks);
+
+        self.notify_activity_change();
 
         // 推送 BgTaskStarted 事件
         self.push_event(BgRegistryEvent::Started {
@@ -273,11 +317,17 @@ impl BackgroundTaskRegistry {
         let success = result.success;
         let output_preview: String = result.output.chars().take(500).collect();
 
-        // 持锁：更新状态 + 清理所有非 Running 任务，防止 JoinHandle 长期驻留内存
+        // 持锁：更新状态 + 清理所有已结算任务，防止 JoinHandle 长期驻留内存
         let mut tasks = self.tasks.lock();
         let kind = tasks.get(task_id).map(|task| task.kind);
-        let existed = tasks.contains_key(task_id);
-        if let Some(task) = tasks.get_mut(task_id) {
+        let existed = tasks
+            .get(task_id)
+            .map(|task| is_active_status(&task.status))
+            .unwrap_or(false);
+        if existed {
+            let task = tasks
+                .get_mut(task_id)
+                .expect("active task must remain present while registry lock is held");
             if let Some(inbox) = &task.agent_inbox {
                 inbox.close();
             }
@@ -288,7 +338,7 @@ impl BackgroundTaskRegistry {
             };
             task.output_preview = Some(output_preview.clone());
         }
-        tasks.retain(|_, t| matches!(t.status, BackgroundTaskStatus::Running));
+        tasks.retain(|_, t| is_active_status(&t.status));
         drop(tasks);
 
         // 已移除条目不推幽灵 Completed 事件（cancel 已通知过用户）。
@@ -305,6 +355,8 @@ impl BackgroundTaskRegistry {
             );
             return false;
         }
+
+        self.notify_activity_change();
 
         // 推送 BgTaskCompleted 事件（携带完整 result 供下游注入主 agent inbox）
         self.push_event(BgRegistryEvent::Completed {
@@ -348,6 +400,15 @@ impl BackgroundTaskRegistry {
     /// 取消指定任务（按 BgCancelHandle 分发取消逻辑）
     pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
         let mut tasks = self.tasks.lock();
+        let Some(status) = tasks.get(task_id).map(|task| &task.status) else {
+            return Err(BackgroundRegistryError::TaskNotFound(task_id.to_string()));
+        };
+        if matches!(status, BackgroundTaskStatus::Completing) {
+            return Err(BackgroundRegistryError::TaskCompleting(task_id.to_string()));
+        }
+        if !matches!(status, BackgroundTaskStatus::Running) {
+            return Err(BackgroundRegistryError::TaskNotFound(task_id.to_string()));
+        }
         // 先校验取消句柄可用性：Kill(None) 表示 kill 通道不可用（如 workflow kill 闭包缺失、
         // shell spawn 失败），此时如实返回错误并保留条目，等待任务自然完成，
         // 而不是移除条目 + 发 cancelled 事件假装成功（issue 2026-08-05）。
@@ -433,6 +494,8 @@ impl BackgroundTaskRegistry {
             }
             drop(tasks);
 
+            self.notify_activity_change();
+
             self.push_event(BgRegistryEvent::Cancelled {
                 task_id: task_id.to_string(),
                 reason: "user cancelled".to_string(),
@@ -446,9 +509,7 @@ impl BackgroundTaskRegistry {
 
     /// 清理已完成的任务
     pub fn cleanup_completed(&self) {
-        self.tasks
-            .lock()
-            .retain(|_, t| matches!(t.status, BackgroundTaskStatus::Running));
+        self.tasks.lock().retain(|_, t| is_active_status(&t.status));
     }
 
     pub(super) fn external_settled(&self) -> bool {
@@ -461,6 +522,11 @@ impl BackgroundTaskRegistry {
 }
 
 impl BackgroundTaskRegistry {
+    fn notify_activity_change(&self) {
+        self.activity_version
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
     /// 推送 registry 事件到 ACP 层（非阻塞，channel 满时静默丢弃）
     fn push_event(&self, event: BgRegistryEvent) {
         if let Some(sender) = self.event_sender.read().as_ref() {

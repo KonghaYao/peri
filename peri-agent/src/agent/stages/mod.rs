@@ -104,6 +104,9 @@ pub struct CompactContext {
 pub struct AsyncContext {
     pub idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
     pub idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Registry lifecycle signal. This is only a wake source; Receive re-checks
+    /// the registry's active count after every notification.
+    pub idle_registry: Option<tokio::sync::watch::Receiver<u64>>,
     /// 会话级 idle-suspended 标志（宿主 SessionAccessPort 注入的共享 Arc）。
     ///
     /// run_react_loop 在 await_wake 挂起期间置 true、醒来/取消时复位。
@@ -194,6 +197,7 @@ impl StageContext {
             async_ctx: AsyncContext {
                 idle_inbox: None,
                 idle_should_wait: None,
+                idle_registry: None,
                 idle_suspended_flag: None,
                 inbox_handle: None,
             },
@@ -244,6 +248,7 @@ impl StageContext {
             async_ctx: AsyncContext {
                 idle_inbox: None,
                 idle_should_wait: None,
+                idle_registry: None,
                 idle_suspended_flag: None,
                 inbox_handle: None,
             },
@@ -405,6 +410,11 @@ impl StageContextBuilder {
 
     pub fn with_idle_inbox(mut self, inbox: Arc<crate::agent::session::SessionInbox>) -> Self {
         self.async_ctx.idle_inbox = Some(inbox);
+        self
+    }
+
+    pub fn with_idle_registry(mut self, receiver: tokio::sync::watch::Receiver<u64>) -> Self {
+        self.async_ctx.idle_registry = Some(receiver);
         self
     }
 
@@ -622,6 +632,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
     let mut loop_state = LoopState::default();
     let mut semantic_iterations = 0usize;
     let mut mq_steering_tail_passes = 0usize;
+    // Keep one receiver for the lifetime of this loop so its observed version
+    // advances across idle retries. StageContext clones are short-lived stage
+    // inputs and must not own the receive cursor.
+    let mut idle_registry = context.async_ctx.idle_registry.clone();
     const MAX_MQ_STEERING_TAIL_PASSES: usize = 8;
 
     'steering_tail: loop {
@@ -653,6 +667,16 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 if context.session.queue.has_wake_up() {
                     tracing::debug!("Receive: consumed=0 but queue has wake-up, continue");
                     continue;
+                }
+
+                // A lifecycle notification may have raced with the first
+                // active-count probe. Consume it before deciding to exit so a
+                // register/complete transition is re-evaluated at Receive.
+                if let Some(receiver) = idle_registry.as_mut() {
+                    if receiver.has_changed().unwrap_or(false) {
+                        receiver.borrow_and_update();
+                        continue;
+                    }
                 }
 
                 // idle_should_wait 逻辑：队列空 → 如有 idle_inbox 且有未完成异步任务，等异步事件续跑。
@@ -692,7 +716,33 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                         );
                         let cancel_fut = context.session.turn.cancel_token.cancelled();
                         tokio::pin!(cancel_fut);
+                        let registry_wait = async {
+                            if let Some(receiver) = idle_registry.as_mut() {
+                                if receiver.changed().await.is_err() {
+                                    // The TaskManager is normally retained by
+                                    // idle_should_wait. If it is dropped, do
+                                    // not turn a closed watch channel into a
+                                    // busy loop.
+                                    std::future::pending::<()>().await;
+                                }
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        };
+                        tokio::pin!(registry_wait);
                         tokio::select! {
+                            biased;
+                            _ = &mut cancel_fut => {
+                                // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
+                                // 标志——后续 Receive 会 drain 队列并继续本 turn。
+                                if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                    flag.store(false, Ordering::Release);
+                                }
+                                if let Some(mailbox) = &context.session.user_input_mailbox {
+                                    mailbox.leave_idle();
+                                }
+                                return LoopResult::Interrupted;
+                            }
                             _ = inbox.await_wake() => {
                                 // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
                                 // 标志——后续 Receive 会 drain 队列并继续本 turn。
@@ -714,14 +764,21 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                                 // 统一处理所有消息（Prompt + Info + Defer），不再需要 post-wake drain_for_end
                                 continue;
                             }
-                            _ = &mut cancel_fut => {
+                            _ = &mut registry_wait => {
                                 if let Some(flag) = &context.async_ctx.idle_suspended_flag {
                                     flag.store(false, Ordering::Release);
                                 }
                                 if let Some(mailbox) = &context.session.user_input_mailbox {
                                     mailbox.leave_idle();
                                 }
-                                return LoopResult::Interrupted;
+                                tracing::debug!(
+                                    turn_id = %context.session.turn.turn_id,
+                                    queue_len_after_wake = context.session.queue.len(),
+                                    "run_react_loop: registry activity changed, continue to Receive"
+                                );
+                                // The signal carries no task result. Receive must
+                                // re-check the queue and registry state itself.
+                                continue;
                             }
                         }
                     }
@@ -732,6 +789,16 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                         "run_react_loop: queue has pending messages, continue Receive"
                     );
                     continue;
+                }
+                // Re-check the derived signal after active_count and the
+                // second queue check. A callback may enqueue and then commit
+                // terminal state in this narrow window; either observation
+                // must send us through Receive once more.
+                if let Some(receiver) = idle_registry.as_mut() {
+                    if receiver.has_changed().unwrap_or(false) {
+                        receiver.borrow_and_update();
+                        continue;
+                    }
                 }
                 tracing::debug!(
                     idle_should_wait = should_wait,
@@ -846,3 +913,7 @@ mod tests;
 #[cfg(test)]
 #[path = "budget_recovery_integration_test.rs"]
 mod budget_recovery_integration_tests;
+
+#[cfg(test)]
+#[path = "terminal_wake_test.rs"]
+mod terminal_wake_tests;

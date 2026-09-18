@@ -8,6 +8,7 @@ use tokio::io::AsyncReadExt;
 use crate::agent::events::BackgroundTaskResult;
 
 use super::registry::BackgroundTaskRegistry;
+use super::shell_output::{ShellOutputCapture, ShellOutputWriter};
 
 /// Keeps an external shell's cleanup evidence across foreground/background handoff.
 pub struct ShellExecutionGuard {
@@ -438,11 +439,7 @@ pub async fn drain_pipe(
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if guard.len() < MAX_PARTIAL_CAPTURE_BYTES {
-            let s = String::from_utf8_lossy(&chunk[..n]);
-            let remaining = MAX_PARTIAL_CAPTURE_BYTES - guard.len();
-            guard.push_str(&s[..s.len().min(remaining)]);
-        }
+        append_preview(&mut guard, &chunk[..n]);
     }
 }
 
@@ -474,16 +471,52 @@ pub async fn tee_pipe(
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if guard.len() < MAX_PARTIAL_CAPTURE_BYTES {
-            let s = String::from_utf8_lossy(&chunk[..n]);
-            let remaining = MAX_PARTIAL_CAPTURE_BYTES - guard.len();
-            guard.push_str(&s[..s.len().min(remaining)]);
-        }
+        append_preview(&mut guard, &chunk[..n]);
     }
 }
 
+/// Variant used by shell tasks whose output may be promoted to the
+/// background. It writes every byte to the durable stream file while keeping
+/// the bounded in-memory preview, and records read/write failures for the
+/// typed completion evidence.
+pub async fn tee_pipe_with_output(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    buf: Arc<std::sync::Mutex<String>>,
+    mut output: ShellOutputWriter,
+    capture: Arc<ShellOutputCapture>,
+    stream: &'static str,
+) {
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(error) => {
+                capture.record_read_error(stream, error);
+                break;
+            }
+        };
+        output.write_chunk(&chunk[..n]).await;
+        let mut guard = match buf.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        append_preview(&mut guard, &chunk[..n]);
+    }
+    output.finish().await;
+}
+
+fn append_preview(preview: &mut String, bytes: &[u8]) {
+    if preview.len() >= MAX_PARTIAL_CAPTURE_BYTES {
+        return;
+    }
+    let remaining = MAX_PARTIAL_CAPTURE_BYTES - preview.len();
+    let text = String::from_utf8_lossy(bytes);
+    preview.push_str(&truncate_bytes(&text, remaining));
+}
+
 /// bg shell 结果收尾（bg 路径与同步超时 promote 续跑共用）：
-/// 超长输出落盘 → 构造 BackgroundTaskResult → on_bg_complete 回调 → complete()。
+/// 输出引用已就绪 → 认领完成 → on_bg_complete 回调 → complete()。
 /// 任务在启动时已注册（BgTaskStarted 已推送），此处只收尾，不再重复注册。
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
@@ -496,32 +529,143 @@ pub fn finalize_bg_shell(
     output: String,
     duration_ms: u64,
     timed_out: bool,
+    shell_output: Option<peri_acp_types::event::ShellOutput>,
 ) {
-    // 输出超长落盘（>100K 字符时截断 + 持久化完整内容到磁盘）
-    const BG_OUTPUT_TRUNC_THRESHOLD: usize = 100_000;
-    let output_str = if output.len() > BG_OUTPUT_TRUNC_THRESHOLD {
-        let persist_hint = persist_truncated_output(&output);
-        let truncated = truncate_bytes(&output, BG_OUTPUT_TRUNC_THRESHOLD);
-        format!("{}{}", truncated, persist_hint)
-    } else {
-        output
-    };
     let result = BackgroundTaskResult {
         task_id: task_id.clone(),
         agent_name: "bg-shell".to_string(),
         prompt_summary,
         success,
-        output: output_str,
+        // Shell output is projected through the typed file reference below;
+        // keep this field short so callback/reminder size is independent of
+        // process output volume.
+        output: if shell_output.is_some() {
+            if success {
+                "Shell command completed; read the output files as needed.".into()
+            } else {
+                "Shell command failed; read the output files as needed.".into()
+            }
+        } else {
+            output
+        },
         tool_calls_count: 0,
         duration_ms,
         child_thread_id: None,
         timed_out,
         subagent_failure: None,
+        shell_output: shell_output.map(Box::new),
     };
+    // Linearize completion against cancel before publishing anything. A
+    // claimed task remains active until the callback and terminal commit
+    // finish, so the idle loop cannot exit before its result is enqueued.
+    if !registry.claim_completion(&task_id) {
+        return;
+    }
     // 回调通知 Agent inbox（在 registry.complete() 之前，与 execute_bg.rs 对齐）
     if let Some(ref cb) = on_bg_complete {
-        cb(&result, BgTaskKind::Shell);
+        let callback = std::panic::AssertUnwindSafe(|| cb(&result, BgTaskKind::Shell));
+        if let Err(panic) = std::panic::catch_unwind(callback) {
+            let detail = panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(ToString::to_string))
+                .unwrap_or_else(|| "unknown panic".to_string());
+            tracing::error!(task_id = %result.task_id, error = %detail, "background shell completion callback panicked");
+        }
     }
     // 任务已在启动时注册（run_in_background / promote 路径），此处只收尾推送 Completed。
     registry.complete(&result.task_id.clone(), result);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finalize_bg_shell;
+    use crate::agent::async_tasks::{
+        BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle,
+    };
+    use peri_acp_types::tasks::BgTaskKind;
+    use std::sync::Arc;
+
+    fn registered_shell() -> Arc<BackgroundTaskRegistry> {
+        let registry = Arc::new(BackgroundTaskRegistry::new());
+        registry
+            .register_with_kind(BackgroundTask {
+                id: "shell-panic".into(),
+                agent_name: "bg-shell".into(),
+                prompt_summary: "test".into(),
+                status: BackgroundTaskStatus::Running,
+                started_at: std::time::Instant::now(),
+                chrono_started_at: chrono::Utc::now(),
+                kind: BgTaskKind::Shell,
+                cancel_handle: BgCancelHandle::Kill(Some(Box::new(|| {}))),
+                cancel_token: None,
+                pid: None,
+                output_preview: None,
+                agent_inbox: None,
+            })
+            .expect("register test shell");
+        registry
+    }
+
+    #[test]
+    fn callback_panic_still_completes_registered_shell() {
+        let registry = registered_shell();
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        registry.set_event_sender(sender, "fixture".into());
+        let callback_registry = Arc::clone(&registry);
+        let callback: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |_, _| {
+            assert_eq!(callback_registry.active_count(), 1);
+            assert!(matches!(
+                callback_registry.cancel("shell-panic"),
+                Err(crate::agent::async_tasks::BackgroundRegistryError::TaskCompleting(_))
+            ));
+            panic!("callback failure");
+        });
+        finalize_bg_shell(
+            &registry,
+            &Some(callback),
+            "shell-panic".into(),
+            "test".into(),
+            true,
+            "completed".into(),
+            1,
+            false,
+            None,
+        );
+        assert_eq!(registry.active_count(), 0);
+        let peri_acp_types::tasks::BgRegistryEvent::Completed { result, .. } =
+            events.try_recv().expect("one terminal event")
+        else {
+            panic!("completion claim must win over cancellation");
+        };
+        assert!(
+            result.success,
+            "callback panic must not change process outcome"
+        );
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn cancelled_shell_does_not_publish_a_completion_callback() {
+        let registry = registered_shell();
+        registry.cancel("shell-panic").unwrap();
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_called = Arc::clone(&called);
+        let callback: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |_, _| {
+            callback_called.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        finalize_bg_shell(
+            &registry,
+            &Some(callback),
+            "shell-panic".into(),
+            "test".into(),
+            true,
+            "completed".into(),
+            1,
+            false,
+            None,
+        );
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(registry.active_count(), 0);
+    }
 }

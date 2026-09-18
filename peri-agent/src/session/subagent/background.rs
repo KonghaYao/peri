@@ -254,6 +254,7 @@ pub(super) async fn spawn_background_subagent(
                     child_thread_id: Some(child_thread_id_for_task.clone()),
                     timed_out: false,
                     subagent_failure: safe_failure,
+                    shell_output: None,
                 };
                 // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
                 if let Some(ref on_complete) = on_bg_complete {
@@ -318,6 +319,7 @@ pub(super) async fn spawn_background_subagent(
             child_thread_id: Some(child_thread_id_for_task.clone()),
             timed_out: false,
             subagent_failure: None,
+            shell_output: None,
         };
         if let Some(ref sender) = bg_event_sender {
             let _ = sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()));

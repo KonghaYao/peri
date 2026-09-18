@@ -49,6 +49,7 @@ pub fn apply_workflow_task_result(
         child_thread_id: None,
         timed_out: false,
         subagent_failure: None,
+        shell_output: None,
     };
     notify_bg.complete(&task_result.run_id, bg);
 }
