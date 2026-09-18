@@ -200,6 +200,7 @@ Receive 也能观察任务终态变化并重新检查退出条件；可从 TaskM
 
 ### 修复 #1（2026-09-18）
 
+- 初始实现已提交：`81585448`（`fix(agent): persist background shell output and settle print completion`）。
 - 按用户要求由 Luna 并行修改输出采集与终态唤醒，主 agent 集成、复审和验收。
 - `ShellOutputCapture` 从原始 stdout/stderr 写入独立文件，保留超过 2 MiB 的输出；原始字节不经过预览截断。文件使用排他创建及 Unix 0600 权限；创建在 blocking context，流式写入、flush、清理使用异步文件 API。
 - `BackgroundTaskResult::shell_output` 保存路径、完整性、错误与已知退出码，旧 JSON 缺少该字段仍可读取。仅两路完成且无读写错误时宣称完整；正常前台未引用文件会清理。
@@ -233,3 +234,15 @@ macOS 构建仍有既有 `__eh_frame section too large` 链接器警告，不影
 原现场完整命令与模型环境未提供，原事故 session 尚未重新运行；本次平台验收使用受控 provider。
 
 验收中发现并修复了取消先赢时清理证据未结算的问题：显式后台进程先独立确认实际停止，再尝试完成认领。最后一轮静态复审无确定阻塞项。未在 Windows 上执行这些 Unix CLI 用例。
+
+### 修复 #2：提交后审查（2026-09-18）
+
+- 按用户要求对 `81585448` 派出独立 Luna code-reviewer，主 agent 同时验证边界场景。
+- 修复前台取消后遗留输出文件：采集状态在最后一个 capture/writer owner 释放后回收未发布文件；成功交给后台任务的路径显式保留，继续供 Read 使用。显式 cleanup 在被取消时也保留待清理路径。新增最后一个 writer 释放、runtime shutdown、已关闭 runtime 拒绝清理任务三个回归场景；清理闭包持有 Drop guard，即使未启动被丢弃也执行删除。测试移至相邻 `shell_output_test.rs`。
+- 修复剩余后台进程误报退出码：父 Shell 退出后只观察进程组是否停止，无法取得后代退出码，故通知使用未知退出码。真实 Shell 回归令后代退出 7，修复前错误报告父 Shell 的 0，修复后报告未知。
+- 两项故障均先用回归测试证实失败，再验证修复通过。隔离子进程的 TMPDIR 验证前台取消：修复前残留两个文件，修复后无残留。
+- 独立 reviewer 发现启动失败与 registry 容量耗尽同时发生时，会返回成功句柄却没有失败通知。新增真实 spawn 失败回归证实，现同步返回启动/注册错误，保留正常注册后的完成通知路径。已关闭 runtime 拒绝清理任务的风险也用失败用例证实后修复。
+- 复验 `cargo test -p peri-middlewares --lib terminal`：43 passed；macOS/Linux ARM64 各运行两个真实 print-mode CLI 用例，均能在后台结束后读取完整输出并自行退出。
+- `cargo test -p peri-agent --lib async_tasks`：68 passed；`cargo clippy --workspace --all-targets -- -D warnings` 与 workspace doc tests 均 exit 0；格式及 diff 检查通过。
+- Linux ARM64 最终异步任务回归同样 68 passed；独立 reviewer 对修复后的失败通知、文件所有权、取消/关闭与未知退出码分支复核，未发现确定的残留阻塞项。
+- 本轮证据：`/tmp/peri-print-review-20260918/`（临时目录可能被系统清理）。

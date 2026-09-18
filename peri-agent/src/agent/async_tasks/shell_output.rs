@@ -23,6 +23,44 @@ struct CaptureState {
     stdout: StreamState,
     stderr: StreamState,
     read_error: Option<String>,
+    retained: bool,
+}
+
+struct UnpublishedFiles([Option<String>; 2]);
+
+impl Drop for UnpublishedFiles {
+    fn drop(&mut self) {
+        for path in self.0.iter().flatten() {
+            if let Err(error) = std::fs::remove_file(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(%path, %error, "unpublished shell output cleanup failed");
+                }
+            }
+        }
+    }
+}
+
+impl Drop for CaptureState {
+    fn drop(&mut self) {
+        if self.retained {
+            return;
+        }
+        let paths = [self.stdout.path.take(), self.stderr.path.take()];
+        if paths.iter().all(Option::is_none) {
+            return;
+        }
+        // The last capture/writer owns cleanup, including cancellation while
+        // the constructor is still on the blocking pool. Never unlink while
+        // another writer can still be using the file.
+        // The closure owns a cleanup guard so even rejection by a closed
+        // runtime removes the files when the unstarted closure is dropped.
+        let cleanup = UnpublishedFiles(paths);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn_blocking(move || drop(cleanup));
+        } else {
+            drop(cleanup);
+        }
+    }
 }
 
 /// Owns the files used by one shell execution. Files are created before the
@@ -46,8 +84,9 @@ pub struct ShellOutputWriter(Option<OutputFile>);
 
 impl ShellOutputCapture {
     /// Create the two output files. Callers should invoke this small
-    /// synchronous setup from a blocking context; all subsequent stream
-    /// writes and cleanup use Tokio's async file APIs.
+    /// synchronous setup from a blocking context. Stream writes and explicit
+    /// cleanup use Tokio's async file APIs; drop cleanup uses its blocking pool
+    /// while a runtime is available.
     pub fn new(prefix: &str) -> Self {
         let state = Arc::new(Mutex::new(CaptureState::default()));
         let stdout_file = Self::open_stream(&state, prefix, "stdout", true);
@@ -127,6 +166,15 @@ impl ShellOutputCapture {
 
     pub fn stderr_writer(&mut self) -> ShellOutputWriter {
         ShellOutputWriter(self.stderr_file.take())
+    }
+
+    /// Preserve paths handed to an accepted background task for later Read.
+    /// Unpublished captures are otherwise removed when their last owner drops.
+    pub fn retain_files(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retained = true;
     }
 
     /// Record a pipe read failure. EOF is represented by `Ok(0)` and is not an
@@ -257,101 +305,5 @@ impl ShellOutputWriter {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::ShellOutputCapture;
-
-    #[tokio::test]
-    async fn capture_preserves_unicode_and_large_tail() {
-        let mut capture = ShellOutputCapture::new("shell-output-test");
-        let stdout_path = capture.stdout_path().expect("stdout file");
-        let stderr_path = capture.stderr_path().expect("stderr file");
-        let mut stdout = capture.stdout_writer();
-        let mut stderr = capture.stderr_writer();
-        let body = "前缀🙂".repeat(1024 * 512);
-        stdout.write_chunk(body.as_bytes()).await;
-        stderr.write_chunk("stderr-尾部\n".as_bytes()).await;
-        stdout.finish().await;
-        stderr.finish().await;
-
-        let evidence = capture.finish(Some(7));
-        assert!(evidence.complete);
-        assert_eq!(evidence.exit_code, Some(7));
-        assert_eq!(
-            std::fs::read(&stdout_path).expect("stdout contents"),
-            body.as_bytes()
-        );
-        assert_eq!(
-            std::fs::read_to_string(&stderr_path).expect("stderr contents"),
-            "stderr-尾部\n"
-        );
-        capture.cleanup().await;
-    }
-
-    #[tokio::test]
-    async fn finish_before_eof_is_incomplete() {
-        let mut capture = ShellOutputCapture::new("shell-output-early-finish");
-        let mut stdout = capture.stdout_writer();
-        let mut stderr = capture.stderr_writer();
-        stdout.write_chunk(b"partial").await;
-        let early = capture.finish(None);
-        assert!(!early.complete);
-        assert!(early
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("not finalized")));
-        stdout.finish().await;
-        stderr.finish().await;
-        assert!(capture.finish(None).complete);
-        capture.cleanup().await;
-    }
-
-    #[tokio::test]
-    async fn discarded_writer_is_reported_incomplete() {
-        let mut capture = ShellOutputCapture::new("shell-output-discarded");
-        let stdout = capture.stdout_writer();
-        drop(stdout);
-        let mut stderr = capture.stderr_writer();
-        stderr.finish().await;
-        let evidence = capture.finish(None);
-        assert!(!evidence.complete);
-        assert!(evidence
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("stdout output stream was not finalized")));
-        capture.cleanup().await;
-    }
-
-    #[test]
-    fn creation_failure_is_explicit() {
-        let prefix = format!("missing-output-parent-{}/stream", uuid::Uuid::new_v4());
-        let capture = ShellOutputCapture::new(&prefix);
-        let evidence = capture.finish(None);
-        assert!(!evidence.complete);
-        assert!(evidence.error.is_some());
-        assert!(evidence.stdout_path.is_none());
-        assert!(evidence.stderr_path.is_none());
-    }
-
-    #[tokio::test]
-    async fn write_failure_is_explicit() {
-        let mut capture = ShellOutputCapture::new("shell-output-write-failure");
-        let mut stdout = capture.stdout_writer();
-        let file =
-            std::fs::File::open(capture.stdout_path().unwrap()).expect("open read-only file");
-        stdout.0.as_mut().expect("stdout writer").file = tokio::fs::File::from_std(file);
-        stdout
-            .write_chunk(b"cannot write to a read-only file")
-            .await;
-        // Tokio may report the blocking write error from the next flush.
-        stdout.finish().await;
-        let mut stderr = capture.stderr_writer();
-        stderr.finish().await;
-        let evidence = capture.finish(None);
-        assert!(!evidence.complete);
-        assert!(evidence
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("stdout output file")));
-        capture.cleanup().await;
-    }
-}
+#[path = "shell_output_test.rs"]
+mod tests;

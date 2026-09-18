@@ -148,6 +148,46 @@ async fn test_successful_shell_keeps_redirected_background_process_owned() {
     );
 }
 
+/// 父 shell 的成功退出不能作为其剩余后台进程的退出码。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_redirected_background_process_reports_unknown_exit_code() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let fixture = tempfile::tempdir().unwrap();
+    let manager = Arc::new(TaskManager::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let tool = BashTool::new(fixture.path().to_str().unwrap())
+        .with_task_manager(manager.clone())
+        .with_on_bg_complete(Arc::new(move |result, _| {
+            let _ = tx.send(result.clone());
+        }));
+    let output = tool.invoke(serde_json::json!({
+        "command": "(while [ ! -f release ]; do sleep 0.01; done; exit 7) >/dev/null 2>&1 &",
+        "timeout": 0
+    }), peri_agent::tools::ToolContext::new(&[], ".")).await.unwrap();
+    assert!(output.contains("background task"), "{output}");
+    std::fs::write(fixture.path().join("release"), "go").unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("descendant completion notification")
+        .unwrap();
+    let files = result.shell_output.as_ref().expect("output references");
+    // 文件已发布给后台任务，worker 结束后仍须可读。
+    assert_eq!(
+        peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
+    for path in [files.stdout_path.as_ref(), files.stderr_path.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        std::fs::read(path).expect("published file remains readable");
+        std::fs::remove_file(path).unwrap();
+    }
+    assert_eq!(files.exit_code, None, "descendant status was never waited");
+    assert!(result.to_notification().contains("退出码未知"));
+}
+
 #[tokio::test]
 async fn test_bash_normal_command() {
     let _process_env = crate::process_env::lock().expect("process env lock");

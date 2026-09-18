@@ -326,21 +326,22 @@ impl TaskManager {
                     output_preview: None,
                     agent_inbox: None,
                 };
-                if registry.register_admitted(bg_task).is_ok() {
-                    finalize_bg_shell(
-                        &registry,
-                        &on_bg_complete_cb,
-                        task_id.clone(),
-                        command_owned.chars().take(80).collect(),
-                        false,
-                        format!("Failed to spawn: {e}"),
-                        0,
-                        false,
-                        None,
-                    );
-                } else {
-                    tracing::error!(task_id = %task_id, "background shell spawn failure could not register terminal task");
+                if let Err(registration_error) = registry.register_admitted(bg_task) {
+                    // No registered task can publish a completion. Return the
+                    // failure now instead of promising an eventual notification.
+                    return Err(format!("Failed to spawn: {e}; {registration_error}").into());
                 }
+                finalize_bg_shell(
+                    &registry,
+                    &on_bg_complete_cb,
+                    task_id.clone(),
+                    command_owned.chars().take(80).collect(),
+                    false,
+                    format!("Failed to spawn: {e}"),
+                    0,
+                    false,
+                    None,
+                );
                 return Ok(BgShellHandle {
                     task_id: task_id_for_return,
                     pid: None,
@@ -396,6 +397,9 @@ impl TaskManager {
             return Err(error.into());
         }
 
+        // The returned handle publishes live output paths. They outlive the
+        // worker and remain readable even after cancellation/completion.
+        output_capture.retain_files();
         let stdout_writer = output_capture.stdout_writer();
         let stderr_writer = output_capture.stderr_writer();
         let output_capture = Arc::new(output_capture);

@@ -464,16 +464,16 @@ impl BaseTool for BashTool {
                                 let on_bg_complete_cb = self.on_bg_complete.clone();
                                 let command_owned = command.to_string();
                                 let task_id_owned = task_id.clone();
-                                let output_capture = Arc::clone(&output_capture);
+                                let background_output = Arc::clone(&output_capture);
                                 // 续跑任务：继续读 pipe 至 EOF → wait → finalize → 通知 Agent
                                 let task_owner = task_manager.clone();
                                 task_owner.spawn_owned(Box::pin(async move {
                                     let started = std::time::Instant::now();
                                     if let Err(error) = drain_stdout.await {
-                                        output_capture.record_task_error("stdout", error);
+                                        background_output.record_task_error("stdout", error);
                                     }
                                     if let Err(error) = drain_stderr.await {
-                                        output_capture.record_task_error("stderr", error);
+                                        background_output.record_task_error("stderr", error);
                                     }
                                     // wait 失败（极罕见）按失败完成，保证 finalize 一定执行
                                     let (success, exit_code) =
@@ -509,9 +509,10 @@ impl BaseTool for BashTool {
                                         combined,
                                         started.elapsed().as_millis() as u64,
                                         false,
-                                        Some(output_capture.finish(exit_code)),
+                                        Some(background_output.finish(exit_code)),
                                     );
                                 }))?;
+                                output_capture.retain_files();
                                 if has_output {
                                     // 有部分输出：进程在产生进展，续跑是合理的
                                     return Ok(ToolOutput::with_execution(format!(
@@ -627,7 +628,7 @@ impl BaseTool for BashTool {
                     let on_complete = self.on_bg_complete.clone();
                     let summary: String = command.chars().take(80).collect();
                     let task_id_for_wait = task_id.clone();
-                    let output_capture = Arc::clone(&output_capture);
+                    let background_output = Arc::clone(&output_capture);
                     manager.spawn_owned(Box::pin(async move {
                         let started = std::time::Instant::now();
                         execution.wait_for_exit().await;
@@ -635,8 +636,11 @@ impl BaseTool for BashTool {
                         task_manager.finalize_bg_shell(&on_complete, task_id_for_wait, summary, status.success(),
                             "Background processes have stopped; individual exit codes are unavailable.".into(),
                             started.elapsed().as_millis() as u64, false,
-                            Some(output_capture.finish(status.code())));
+                            // Only the leader was waited. The remaining group
+                            // has no observable exit code of its own.
+                            Some(background_output.finish(None)));
                     }))?;
+                    output_capture.retain_files();
                     output.push_str(&format!(
                         "\nRemaining processes continue as background task {task_id}."
                     ));
