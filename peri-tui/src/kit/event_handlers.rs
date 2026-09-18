@@ -71,7 +71,6 @@ fn determine_ctrl_c_action(
 /// 注册监听 Ctrl+C 等顶级快捷键。
 pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()>) {
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-        tracing::info!(?event, "kit raw input event");
         let Event::Key(key) = event else {
             return EventResult::Ignored;
         };

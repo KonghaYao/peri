@@ -45,10 +45,14 @@ struct WorkflowPackageMetadata {
 }
 
 fn workflow_prefix() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
+    // Keep explicit HOME overrides portable (including isolated subprocess tests),
+    // while supporting Windows profiles where HOME is normally absent.
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs_next::home_dir)?;
     Some(
-        PathBuf::from(home)
-            .join(".peri")
+        home.join(".peri")
             .join("workflow")
             .join(WORKFLOW_NPM_VERSION),
     )

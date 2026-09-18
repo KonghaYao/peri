@@ -137,6 +137,8 @@ impl ProviderType {
 pub struct MigratedProvider {
     pub provider_type: ProviderType,
     pub provider_id: String,
+    #[serde(default)]
+    original_provider_id: Option<String>,
     pub base_url: String,
     pub api_key: String,
     pub aliases: [String; 4],
@@ -148,11 +150,16 @@ impl MigratedProvider {
         Self {
             provider_type: pt,
             provider_id: pt.default_provider_id().to_string(),
+            original_provider_id: None,
             base_url: pt.default_base_url().to_string(),
             api_key: String::new(),
             aliases: pt.default_model_ids().map(|s| s.to_string()),
             selected: true,
         }
+    }
+
+    pub fn provider_id_is_editable(&self) -> bool {
+        self.original_provider_id.is_none()
     }
 
     /// 字段是否完整
@@ -164,12 +171,27 @@ impl MigratedProvider {
 
     /// 切换 Provider 类型后刷新默认值（保留 api_key）
     pub fn refresh_provider_defaults(&mut self) {
-        self.provider_id = self.provider_type.default_provider_id().to_string();
-        self.base_url = self.provider_type.default_base_url().to_string();
-        self.aliases = self
-            .provider_type
-            .default_model_ids()
-            .map(|s| s.to_string());
+        let old_type = match self.provider_type {
+            ProviderType::Anthropic => ProviderType::OpenAiCompatible,
+            ProviderType::OpenAiCompatible => ProviderType::Anthropic,
+        };
+        let old_defaults = (
+            old_type.default_provider_id(),
+            old_type.default_base_url(),
+            old_type.default_model_ids(),
+        );
+        if self.provider_id_is_editable() && self.provider_id == old_defaults.0 {
+            self.provider_id = self.provider_type.default_provider_id().to_string();
+        }
+        if self.base_url == old_defaults.1 {
+            self.base_url = self.provider_type.default_base_url().to_string();
+        }
+        let new_models = self.provider_type.default_model_ids();
+        for ((value, old), new) in self.aliases.iter_mut().zip(old_defaults.2).zip(new_models) {
+            if value == old {
+                *value = new.to_string();
+            }
+        }
     }
 }
 
@@ -272,6 +294,12 @@ pub struct SetupWizardState {
     pub from_command: bool,
     pub submit_error: Option<String>,
     pub connectivity_result: Option<(bool, String)>,
+    #[serde(default)]
+    pub save_in_progress: bool,
+    #[serde(default)]
+    pub connectivity_generation: u64,
+    #[serde(default)]
+    pub connectivity_in_progress: bool,
     /// Edit 模式下当前文本框的光标位置（字符索引）
     pub edit_cursor_pos: usize,
 }
@@ -292,6 +320,9 @@ impl Default for SetupWizardState {
             from_command: false,
             submit_error: None,
             connectivity_result: None,
+            save_in_progress: false,
+            connectivity_generation: 0,
+            connectivity_in_progress: false,
             edit_cursor_pos: 0,
         }
     }
@@ -323,8 +354,20 @@ impl SetupWizardState {
         })
     }
 
+    pub fn active_field_is_editable(&self) -> bool {
+        self.form_focus.is_text_input()
+            && (self.form_focus != FormField::ProviderId
+                || self
+                    .active_provider_ref()
+                    .is_some_and(MigratedProvider::provider_id_is_editable))
+    }
+
     /// 设置当前聚焦字段的文本值
     pub fn set_active_field_value(&mut self, value: String) {
+        if !self.active_field_is_editable() {
+            return;
+        }
+        self.invalidate_connectivity();
         let field = self.form_focus;
         if let Some(mp) = self.active_provider_mut() {
             match field {
@@ -340,6 +383,12 @@ impl SetupWizardState {
         }
     }
 
+    pub fn invalidate_connectivity(&mut self) {
+        self.connectivity_generation = self.connectivity_generation.wrapping_add(1);
+        self.connectivity_in_progress = false;
+        self.connectivity_result = None;
+    }
+
     pub fn new_from_command() -> Self {
         Self {
             from_command: true,
@@ -352,24 +401,67 @@ impl SetupWizardState {
 
 /// 检测是否需要 Setup 向导
 pub fn needs_setup(config: &crate::config::AppConfig) -> bool {
-    if config.providers.is_empty() {
-        return crate::app::agent::LlmProvider::from_env().is_none();
-    }
-    for provider in &config.providers {
-        if provider.id.trim().is_empty() {
-            return true;
-        }
-        if provider.api_key.is_empty() {
-            let key_env = match provider.provider_type.as_str() {
-                "anthropic" => "ANTHROPIC_API_KEY",
-                _ => "OPENAI_API_KEY",
+    let cfg = crate::config::PeriConfig {
+        config: config.clone(),
+        schema: None,
+    };
+    crate::app::agent::LlmProvider::from_config(&cfg).is_none()
+        && crate::app::agent::LlmProvider::from_env().is_none()
+}
+
+/// 从当前共享配置打开 `/setup` 时构造可编辑草稿。
+pub fn state_from_config(cfg: &crate::config::PeriConfig) -> SetupWizardState {
+    let providers = cfg
+        .config
+        .providers
+        .iter()
+        .map(|p| {
+            let provider_type = if p.provider_type == "anthropic" {
+                ProviderType::Anthropic
+            } else {
+                ProviderType::OpenAiCompatible
             };
-            if std::env::var(key_env).unwrap_or_default().is_empty() {
-                return true;
+            let defaults = provider_type.default_model_ids();
+            MigratedProvider {
+                provider_type,
+                provider_id: p.id.clone(),
+                original_provider_id: Some(p.id.clone()),
+                base_url: p.base_url.clone(),
+                api_key: p.api_key.clone(),
+                aliases: [
+                    if p.models.fable.is_empty() {
+                        defaults[0].into()
+                    } else {
+                        p.models.fable.clone()
+                    },
+                    if p.models.opus.is_empty() {
+                        defaults[1].into()
+                    } else {
+                        p.models.opus.clone()
+                    },
+                    if p.models.sonnet.is_empty() {
+                        defaults[2].into()
+                    } else {
+                        p.models.sonnet.clone()
+                    },
+                    if p.models.haiku.is_empty() {
+                        defaults[3].into()
+                    } else {
+                        p.models.haiku.clone()
+                    },
+                ],
+                selected: true,
             }
-        }
+        })
+        .collect::<Vec<_>>();
+    SetupWizardState {
+        step: SetupStep::Form,
+        source: SetupSource::CustomApi,
+        from_command: true,
+        language: cfg.config.language.clone().unwrap_or_else(|| "en".into()),
+        providers,
+        ..Default::default()
     }
-    false
 }
 
 /// API Key 脱敏显示
@@ -449,56 +541,89 @@ fn apply_peri_free_profiles(cfg: &mut crate::config::AppConfig, provider_id: &st
 
 /// 将 setup wizard 结果合并到已有配置并保存
 pub fn save_setup(state: &SetupWizardState) -> anyhow::Result<crate::config::PeriConfig> {
-    let mut merged = crate::config::load().unwrap_or_else(|_| crate::config::PeriConfig::default());
+    anyhow::ensure!(
+        state.providers.iter().all(|provider| provider
+            .original_provider_id
+            .as_ref()
+            .is_none_or(|original| original == &provider.provider_id)),
+        "existing provider identity cannot be renamed by setup"
+    );
+    let merged = if let Some(source) = crate::kit::atoms::CONFIG_SOURCE_HANDLE.get() {
+        source.reload_merged()?
+    } else {
+        crate::config::load()?
+    };
+    let merged = merge_setup(state, merged);
+    anyhow::ensure!(
+        crate::app::agent::LlmProvider::from_config(&merged).is_some(),
+        "setup configuration has no usable active provider"
+    );
+    crate::config::save_effective(&merged)?;
+    Ok(merged)
+}
 
+fn merge_setup(
+    state: &SetupWizardState,
+    mut merged: crate::config::PeriConfig,
+) -> crate::config::PeriConfig {
     let wizard_cfg = build_wizard_config(state);
 
     for new_provider in &wizard_cfg.config.providers {
-        if !merged
+        if let Some(existing) = merged
             .config
             .providers
-            .iter()
-            .any(|p| p.id == new_provider.id)
+            .iter_mut()
+            .find(|p| p.id == new_provider.id)
         {
+            // The wizard owns these fields. Preserve provider metadata and
+            // forward-compatible extension fields from the existing record.
+            existing.provider_type = new_provider.provider_type.clone();
+            existing.api_key = new_provider.api_key.clone();
+            existing.base_url = new_provider.base_url.clone();
+            existing.models = new_provider.models.clone();
+        } else {
             merged.config.providers.push(new_provider.clone());
         }
     }
 
-    // 合并 wizard 中非默认档位的 profiles（Peri 免费服务会设置全部四档的 effort；
-    // 其余来源仅设置 opus 的 provider，其余档位保持默认不覆盖）
-    let wizard_active = wizard_cfg.config.active_alias.clone();
-    let mut wizard_first_id = String::new();
-    for alias in crate::config::Profiles::ALL {
-        let Some(wp) = wizard_cfg.config.profiles.get(alias) else {
-            continue;
-        };
-        if wp.is_default() {
-            continue;
+    // Reopening the form edits providers, not the user's model/effort choice.
+    // Only repair profile selection when it no longer resolves after these edits.
+    if !state.from_command || crate::app::agent::LlmProvider::from_config(&merged).is_none() {
+        // 合并 wizard 中非默认档位的 profiles（Peri 免费服务会设置全部四档的 effort；
+        // 其余来源仅设置 opus 的 provider，其余档位保持默认不覆盖）
+        let wizard_active = wizard_cfg.config.active_alias.clone();
+        let mut wizard_first_id = String::new();
+        for alias in crate::config::Profiles::ALL {
+            let Some(wp) = wizard_cfg.config.profiles.get(alias) else {
+                continue;
+            };
+            if wp.is_default() {
+                continue;
+            }
+            if wizard_first_id.is_empty() && !wp.provider.is_empty() {
+                wizard_first_id = wp.provider.clone();
+            }
+            *merged
+                .config
+                .profiles
+                .get_mut(alias)
+                .expect("固定四档 profile") = wp.clone();
         }
-        if wizard_first_id.is_empty() && !wp.provider.is_empty() {
-            wizard_first_id = wp.provider.clone();
+        if !wizard_active.is_empty() {
+            merged.config.active_alias = wizard_active;
         }
-        *merged
-            .config
-            .profiles
-            .get_mut(alias)
-            .expect("固定四档 profile") = wp.clone();
-    }
-    if !wizard_active.is_empty() {
-        merged.config.active_alias = wizard_active;
-    }
-    if !wizard_first_id.is_empty()
-        && let Some(profile) = merged.config.profiles.get_mut(&merged.config.active_alias)
-    {
-        profile.provider = wizard_first_id;
+        if !wizard_first_id.is_empty()
+            && let Some(profile) = merged.config.profiles.get_mut(&merged.config.active_alias)
+        {
+            profile.provider = wizard_first_id;
+        }
     }
 
     if let Some(lang) = wizard_cfg.config.language {
         merged.config.language = Some(lang);
     }
 
-    crate::config::save_effective(&merged)?;
-    Ok(merged)
+    merged
 }
 
 /// 从 Claude Code 配置迁移
@@ -625,11 +750,10 @@ pub fn migrate_from_claude_code(
 fn get_env_string(env: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
     match env.get(key) {
         Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
-        Some(v) => {
+        Some(_) => {
             tracing::warn!(
-                "setup wizard: env key '{}' has non-string value (type {:?}), skipping",
-                key,
-                v
+                "setup wizard: env key '{}' has non-string value, skipping",
+                key
             );
             String::new()
         }
@@ -637,76 +761,43 @@ fn get_env_string(env: &serde_json::Map<String, serde_json::Value>, key: &str) -
     }
 }
 
-/// 连通性测试
-pub fn test_connectivity(base_url: &str) -> (bool, String) {
-    use std::io::{Read, Write};
-
-    if base_url.trim().is_empty() {
-        return (false, "Base URL is empty".to_string());
+/// Check an endpoint's HTTP response without sending model data or credentials.
+pub async fn test_connectivity(base_url: &str) -> (bool, String) {
+    let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
+        return (false, crate::i18n::tr("setup-connectivity-invalid"));
+    };
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return (false, crate::i18n::tr("setup-connectivity-invalid"));
     }
-
-    let (host, port, path) = match parse_url_parts(base_url) {
-        Some(p) => p,
-        None => return (false, format!("Invalid URL: {}", base_url)),
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return (false, crate::i18n::tr("setup-connectivity-failed")),
     };
-
-    let addr_str = format!("{}:{}", host, port);
-    use std::net::ToSocketAddrs;
-    let addr = match addr_str.to_socket_addrs().ok().and_then(|mut a| a.next()) {
-        Some(a) => a,
-        None => return (false, format!("DNS resolution failed for {}", host)),
-    };
-
-    let timeout = std::time::Duration::from_secs(5);
-    let mut stream = match std::net::TcpStream::connect_timeout(&addr, timeout) {
-        Ok(s) => s,
-        Err(e) => return (false, format!("{} unreachable: {}", host, e)),
-    };
-    let _ = stream.set_read_timeout(Some(timeout));
-
-    let req = format!("GET {} HTTP/1.0\r\nHost: {}\r\n\r\n", path, host);
-    if stream.write_all(req.as_bytes()).is_err() {
-        return (false, format!("{} connected but send failed", host));
-    }
-
-    let mut buf = [0u8; 1];
-    match stream.read_exact(&mut buf) {
-        Ok(()) => (true, format!("{} reachable", base_url)),
-        Err(e) => (false, format!("{} no response: {}", host, e)),
-    }
-}
-
-fn parse_url_parts(url: &str) -> Option<(&str, u16, &str)> {
-    let s = url.trim();
-    let (scheme, rest) = if let Some(idx) = s.find("://") {
-        (&s[..idx], &s[idx + 3..])
-    } else {
-        ("https", s)
-    };
-    let default_port: u16 = if scheme.eq_ignore_ascii_case("http") {
-        80
-    } else {
-        443
-    };
-    let (host_port, path) = match rest.find('/') {
-        Some(idx) => (&rest[..idx], &rest[idx..]),
-        None => (rest, "/"),
-    };
-    let (host, port_str) = match host_port.rfind(':') {
-        Some(idx) if host_port[idx + 1..].chars().all(|c| c.is_ascii_digit()) => {
-            (&host_port[..idx], &host_port[idx + 1..])
+    // Never include the URL, response body, or reqwest error in user-facing output.
+    match client.get(url).send().await {
+        Ok(response) if response.status().is_success() => {
+            (true, crate::i18n::tr("setup-connectivity-reachable"))
         }
-        _ => (host_port, ""),
-    };
-    if host.is_empty() {
-        return None;
+        Ok(response) => (
+            false,
+            crate::i18n::tr_args(
+                "setup-connectivity-status",
+                &[(
+                    "status".into(),
+                    response.status().as_u16().to_string().into(),
+                )],
+            ),
+        ),
+        Err(_) => (false, crate::i18n::tr("setup-connectivity-failed")),
     }
-    let port: u16 = if port_str.is_empty() {
-        default_port
-    } else {
-        port_str.parse().ok()?
-    };
-    Some((host, port, path))
 }
 
 #[cfg(test)]

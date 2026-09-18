@@ -393,3 +393,69 @@ fn test_redirect_save_to_unaffected_by_override() {
     assert!(explicit.exists());
     assert!(!tmp.path().join("override").join("settings.json").exists());
 }
+
+#[test]
+fn config_source_rejects_corrupt_workspace_even_without_global_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("workspace");
+    write_settings(&cwd, "{preserve-broken-original");
+    let path = cwd.join(".peri/settings.json");
+    let global = tmp.path().join("missing/settings.json");
+    let source = ConfigSource::load_at_lenient(&cwd, global.clone());
+    assert!(source.reload_merged().is_err());
+    assert!(source.save(&PeriConfig::default()).is_err());
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        "{preserve-broken-original"
+    );
+    assert!(!global.exists());
+}
+
+#[test]
+fn config_source_reload_preserves_current_workspace_fields_and_chosen_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("workspace");
+    write_settings(&cwd, r#"{"config":{"language":"en"}}"#);
+    let source = ConfigSource::load_at(&cwd, tmp.path().join("global.json")).unwrap();
+    write_settings(
+        &cwd,
+        r#"{"$schema":"local-schema","config":{"language":"zh-CN","custom-setting":42}}"#,
+    );
+    let mut current = source.reload_merged().unwrap();
+    assert_eq!(current.config.language.as_deref(), Some("zh-CN"));
+    assert_eq!(current.config.extra["custom-setting"], 42);
+    current.config.active_alias = "sonnet".into();
+    source.save(&current).unwrap();
+    let stored = load_from(source.workspace_path().unwrap()).unwrap();
+    assert_eq!(stored.schema.as_deref(), Some("local-schema"));
+    assert_eq!(stored.config.extra["custom-setting"], 42);
+    assert_eq!(stored.config.active_alias, "sonnet");
+}
+
+#[test]
+fn config_source_refuses_stale_global_baseline_without_copying_credentials() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("workspace");
+    let global = tmp.path().join("global.json");
+    std::fs::write(
+        &global,
+        r#"{"config":{"providers":[{"id":"p","type":"openai","apiKey":"old-key"}]}}"#,
+    )
+    .unwrap();
+    write_settings(&cwd, r#"{"config":{}}"#);
+    let source = ConfigSource::load_at(&cwd, global.clone()).unwrap();
+    let old_workspace = std::fs::read(source.workspace_path().unwrap()).unwrap();
+    std::fs::write(
+        &global,
+        r#"{"config":{"providers":[{"id":"p","type":"openai","apiKey":"new-key"}]}}"#,
+    )
+    .unwrap();
+    let mut stale = source.loaded_merged();
+    stale.config.language = Some("zh-CN".into());
+    assert!(source.save(&stale).is_err());
+    assert!(source.save(&source.reload_merged().unwrap()).is_err());
+    assert_eq!(
+        std::fs::read(source.workspace_path().unwrap()).unwrap(),
+        old_workspace
+    );
+}

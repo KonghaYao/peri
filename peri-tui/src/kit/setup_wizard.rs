@@ -37,8 +37,56 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 订阅 wizard 状态
     let wizard_handle = hooks.use_atom(&SETUP_WIZARD);
     let wizard_active = hooks.use_atom(&atoms::WIZARD_ACTIVE);
-    let _ = *wizard_active.read();
+    // The component mounts for each opening. Initialize only once, so later
+    // keystrokes and async completions cannot replace the current draft.
+    hooks.use_effect(
+        || {
+            if atoms::ACP_CLIENT_HANDLE.get().is_some()
+                && let Some(handle) = atoms::PERI_CONFIG_HANDLE.get()
+            {
+                *SETUP_WIZARD.state().write() = state_from_config(&handle.read());
+            }
+        },
+        (),
+    );
     let state = wizard_handle.read().clone();
+    let active_now = *wizard_active.read();
+    let request = state.connectivity_generation;
+    let checking = state.connectivity_in_progress;
+    let provider_index = state.active_provider;
+    let url = state.active_provider_ref().map(|p| p.base_url.clone());
+    // The hook owns exactly one future. Changing input, leaving edit mode, or
+    // unmounting replaces/drops it, cancelling the request in the existing runtime.
+    hooks.use_async_effect(
+        async move {
+            if active_now
+                && checking
+                && let Some(url) = url
+            {
+                let result = test_connectivity(&url).await;
+                let atom = SETUP_WIZARD.state();
+                let mut current = atom.write();
+                if current.connectivity_generation == request
+                    && current.connectivity_in_progress
+                    && current.active_provider == provider_index
+                {
+                    current.connectivity_in_progress = false;
+                    current.connectivity_result = Some(result);
+                }
+            }
+        },
+        (active_now, request, checking),
+    );
+    let saving = state.save_in_progress;
+    let draft = state.clone();
+    hooks.use_async_effect(
+        async move {
+            if saving {
+                finish_setup(draft).await;
+            }
+        },
+        (saving,),
+    );
 
     let step = state.step;
     let cursor_color = semantic.status.warning;
@@ -47,24 +95,6 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let text_color = semantic.text.primary;
     let focus_color = semantic.status.success;
     let error_color = semantic.status.error;
-
-    // 渲染内容
-    let (title, lines) = match step {
-        SetupStep::Language => render_language_step(&state, dim, accent, cursor_color, text_color),
-        SetupStep::Choose => {
-            render_choose_step(&state, dim, accent, cursor_color, text_color, error_color)
-        }
-        SetupStep::Form => render_form_step(
-            &state,
-            dim,
-            accent,
-            cursor_color,
-            text_color,
-            focus_color,
-            error_color,
-        ),
-        SetupStep::Done => render_done_step(&state, dim, accent, cursor_color, text_color),
-    };
 
     // 面板绘制区域（上一帧）——鼠标点击行号反推
     let area;
@@ -75,7 +105,6 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 事件处理器
     {
-        let state = state.clone();
         hooks.use_event_handler_with_options(
             EventScope::Current,
             EventPriority::High,
@@ -98,10 +127,31 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // 区域内点击（未命中行）也消费，防止穿透
                     return EventResult::Consumed;
                 }
-                handle_wizard_event(event, state.clone())
+                let current = SETUP_WIZARD.state().read().clone();
+                handle_wizard_event(event, current)
             },
         );
     }
+
+    // 渲染内容
+    let (title, lines) = match step {
+        SetupStep::Language => render_language_step(&state, dim, accent, cursor_color, text_color),
+        SetupStep::Choose => {
+            render_choose_step(&state, dim, accent, cursor_color, text_color, error_color)
+        }
+        SetupStep::Form => render_form_step(
+            &state,
+            dim,
+            accent,
+            cursor_color,
+            text_color,
+            focus_color,
+            error_color,
+        ),
+        SetupStep::Done => {
+            render_done_step(&state, dim, accent, cursor_color, text_color, error_color)
+        }
+    };
 
     let title_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
 
@@ -124,6 +174,52 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         }
     }
+}
+
+// Durable save and runtime activation are separate stages. The wizard stays
+// open on either failure; only successful activation publishes the shared config.
+async fn finish_setup(draft: SetupWizardState) {
+    let from_command = draft.from_command;
+    let saved = tokio::task::spawn_blocking(move || save_setup(&draft)).await;
+    let config = match saved {
+        Ok(Ok(config)) => config,
+        _ => {
+            report_setup_failure("setup-save-failed");
+            return;
+        }
+    };
+    if from_command {
+        let Some(client) = atoms::ACP_CLIENT_HANDLE.get() else {
+            report_setup_failure("setup-activation-failed");
+            return;
+        };
+        if client.update_config(&config).await.is_err() {
+            report_setup_failure("setup-activation-failed");
+            return;
+        }
+    }
+    let Some(handle) = atoms::PERI_CONFIG_HANDLE.get() else {
+        report_setup_failure("setup-activation-failed");
+        return;
+    };
+    *handle.write() = config;
+    {
+        let atom = SETUP_WIZARD.state();
+        let mut current = atom.write();
+        current.save_in_progress = false;
+        current.submit_error = None;
+    }
+    if !from_command {
+        *atoms::SETUP_COMPLETED.state().write() = true;
+    }
+    *atoms::WIZARD_ACTIVE.state().write() = false;
+}
+
+fn report_setup_failure(key: &str) {
+    let atom = SETUP_WIZARD.state();
+    let mut current = atom.write();
+    current.save_in_progress = false;
+    current.submit_error = Some(i18n::tr(key));
 }
 
 #[cfg(test)]

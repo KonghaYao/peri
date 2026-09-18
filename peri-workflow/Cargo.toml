@@ -20,6 +20,7 @@ dashmap = "6"
 indexmap = { version = "2", features = ["serde"] }
 chrono.workspace = true
 tempfile.workspace = true
+dirs-next.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"

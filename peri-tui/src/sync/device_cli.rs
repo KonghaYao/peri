@@ -110,10 +110,16 @@ pub fn init_impl(
             paths.identity.display()
         );
     }
-    let material = KeyMaterial::generate()?;
-    let device_id = DeviceId::random()?;
     let name = name.unwrap_or("peri-device");
     limits::validate_device_name(name)?;
+    // Parent preparation failures must occur before writing private material.
+    ensure_parent_dir(&paths.identity)?;
+    ensure_parent_dir(&paths.peers)?;
+    if let Some(path) = keystore_path {
+        ensure_parent_dir(path)?;
+    }
+    let material = KeyMaterial::generate()?;
+    let device_id = DeviceId::random()?;
     let public = DevicePublic::from_keys(
         device_id,
         material.ed25519_public(),
@@ -140,6 +146,7 @@ pub fn init_impl(
                 );
             }
             let path = default_keystore_path()?;
+            ensure_parent_dir(&path)?;
             FileStore::create(&path, password, &material)?;
         }
     }
@@ -150,6 +157,14 @@ pub fn init_impl(
     println!("  Name: {}", public.name);
     println!("  Fingerprint: {}", public.fingerprint());
     println!("  Invite: {}", public.invite_uri());
+    Ok(())
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create parent directory {}", parent.display()))?;
+    }
     Ok(())
 }
 

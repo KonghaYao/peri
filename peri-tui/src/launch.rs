@@ -130,6 +130,34 @@ pub async fn build_app_and_acp(
         });
     }
 
+    let needs_setup = {
+        let cfg = app.services.peri_config.read();
+        crate::app::setup_wizard::needs_setup(&cfg.config)
+    };
+    let acp_client = if needs_setup {
+        None
+    } else {
+        Some(attach_acp(&mut app).await?)
+    };
+
+    Ok((app, acp_client))
+}
+
+/// Attach the single ACP deployment for an already-created App.
+///
+/// Keeping this seam separate from [`build_app_and_acp`] is important for the
+/// first-run setup path: the wizard may need to finish before a provider exists,
+/// while the host/client/notification transport must still be assembled exactly
+/// once afterwards. Callers must only invoke this when `app.acp_deployment` is
+/// empty; an already attached deployment is rejected to avoid losing the
+/// notification receiver owned by the original attachment.
+pub async fn attach_acp(
+    app: &mut App,
+) -> Result<(AcpTuiClient, mpsc::UnboundedReceiver<AcpNotification>)> {
+    if app.acp_client.is_some() || app.acp_deployment.is_some() {
+        anyhow::bail!("ACP deployment is already attached to this App");
+    }
+
     // ── ACP Host + Client ────────────────────────────────────────────────
     // 内嵌 server 已迁出为 ACP 层 host（`peri_acp::host`）：控制面装配经
     // `assemble_server_config` 统一完成，TUI 进程不再持有控制面，只经
@@ -178,13 +206,13 @@ pub async fn build_app_and_acp(
             ));
             app.acp_client = Some(acp_client.clone());
 
-            Some((acp_client, notification_rx))
+            (acp_client, notification_rx)
         } else {
-            None
+            anyhow::bail!("No usable provider configured after setup")
         }
     };
 
-    Ok((app, acp_client))
+    Ok(acp_client)
 }
 
 /// App 关闭：fire SessionEnd hooks + MCP pool shutdown。
@@ -230,3 +258,7 @@ pub(crate) async fn shutdown_mcp_pool(
     }
     pool.shutdown().await
 }
+
+#[cfg(test)]
+#[path = "launch_test.rs"]
+mod tests;

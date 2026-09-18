@@ -18,6 +18,46 @@ mod tests {
     }
 
     #[test]
+    fn test_init_creates_empty_home_parents_before_keystore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DeviceCliPaths {
+            identity: tmp.path().join("home/.peri/sync-identity.json"),
+            peers: tmp.path().join("home/.peri/sync-trusted-peers.json"),
+        };
+        let keystore = tmp.path().join("home/.peri/nested/sync-keystore");
+
+        init_impl(Some("fresh"), Some(&keystore), "password", &paths).unwrap();
+        assert!(paths.identity.is_file());
+        assert!(keystore.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&keystore).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn test_init_parent_obstruction_does_not_write_keystore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let obstruction = tmp.path().join("home");
+        std::fs::write(&obstruction, "keep this file").unwrap();
+        let paths = DeviceCliPaths {
+            identity: obstruction.join(".peri/sync-identity.json"),
+            peers: obstruction.join(".peri/sync-trusted-peers.json"),
+        };
+        let keystore = tmp.path().join("keystore");
+        assert!(init_impl(Some("fresh"), Some(&keystore), "password", &paths).is_err());
+        assert!(!keystore.exists());
+        assert_eq!(
+            std::fs::read_to_string(obstruction).unwrap(),
+            "keep this file"
+        );
+    }
+
+    #[test]
     fn test_init_show_add_list_remove_flow() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = paths_in(&tmp);

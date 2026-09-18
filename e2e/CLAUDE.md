@@ -41,6 +41,7 @@ run-e2e.mjs → vitest worker → helpers/peri.ts → dev.sh → Peri TUI (tmux)
 | LLM Judge | `helpers/judge.ts` |
 | 录制 | `helpers/recorder.ts` |
 | 控制面 / 分层门禁 | `scripts/run-e2e.mjs` + `config/tiers.mjs` |
+| 空 HOME 首次配置、保存失败重试、运行时重配置 | `tests/scenarios/fresh-setup.test.ts`（先构建当前 binary；空 HOME/cwd + 本地 SSE，不经预写配置的 launchPeri） |
 | 场景用例 | `tests/**` |
 
 ## 稳定不变量

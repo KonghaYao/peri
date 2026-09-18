@@ -171,9 +171,10 @@ setup-confirm = 确认
 setup-test-connectivity = [ 测试联通性 ]
 setup-key-switch-type = :切换类型
 setup-key-back-list = :返回列表
-setup-complete-title =  ── 设置完成 ✓
+setup-complete-title =  ── 确认设置
 setup-press-enter = 按
-setup-to-start = 开始使用
+setup-to-start = 保存并启用配置
+setup-save-failed = 设置未能保存。请检查配置文件和写入权限；若配置被外部修改，请重启后再试。
 setup-no-key = (无密钥)
 setup-no-providers = 未配置任何 Provider，请选择"Custom API"或从 Claude Code 导入。
 
@@ -1192,3 +1193,13 @@ session-restore-failed = 会话恢复失败：{ $error }。请重试或使用 /c
 panel-host-settings = 宿主配置
 
 permission-mode-update-failed = 权限模式更新失败：{ $error }
+setup-activation-failed = 设置已保存，但未能在当前运行中启用。请按 Enter 重试。
+setup-saving = 正在保存并启用设置…
+setup-connectivity-checking = 正在检查端点…
+setup-connectivity-invalid = 请输入有效的 HTTP(S) URL，且不要内嵌凭据。
+setup-connectivity-failed = 端点检查失败或超时。请检查 URL 和网络。
+setup-connectivity-reachable = 端点可达；尚未验证 API Key 和模型。
+setup-connectivity-status = 端点返回 HTTP { $status }；尚未验证 API Key 和模型。
+setup-migration-failed = 未能在 ~/.claude/settings.json 找到有效的 Provider。请选择自定义 API 手动填写。
+setup-provider-incomplete = 请至少选中一个 Provider，并填写完整的 ID、API Key 和模型。
+setup-field-id-readonly = ID（只读）

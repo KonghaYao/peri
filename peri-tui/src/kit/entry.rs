@@ -67,7 +67,7 @@ pub async fn run_kit_fullscreen(
     // 2. 构建 App + ACP server/client
     // [Fix P0] panic_notify_rx 不再传给 build_app_and_acp（其仅丢弃）——
     // 改由下方 3a 的消费 task 持有，收到 panic 通知后在状态栏提示用户。
-    let (mut app, acp_client) = build_app_and_acp(&opts, None).await?;
+    let (mut app, mut acp_client) = build_app_and_acp(&opts, None).await?;
 
     // 2b. H2: 把 peri_config 共享句柄塞到全局 OnceLock，让 ModelPanel 等组件
     //     在 #[component] 闭包里能直接 write active_alias。ACP server 持同一 Arc。
@@ -181,19 +181,14 @@ pub async fn run_kit_fullscreen(
         let cfg = app.services.peri_config.read();
         if crate::app::setup_wizard::needs_setup(&cfg.config) {
             *atoms::WIZARD_ACTIVE.state().write() = true;
+            *atoms::SETUP_PREFLIGHT.state().write() = true;
             tracing::info!("kit entry: needs_setup=true，触发 SetupWizard");
         }
     }
 
     let shutdown = CancellationToken::new();
 
-    // 3. service_snapshot 任务——无论是否配 ACP provider 都要启动：
-    //    用户即使离线，也需要看到 CPU/MEM/Cron/Thread 列表。
-    let snapshot_src =
-        build_snapshot_source(&app, acp_client.as_ref().map(|(client, _)| client.clone()));
-    let _snapshot_handle = spawn_service_snapshot(snapshot_src, shutdown.clone());
-
-    // 3a. Panic 通知消费——任意线程 panic（agent task / 渲染线程）时在状态栏
+    // 3. Panic 通知消费——任意线程 panic（agent task / 渲染线程）时在状态栏
     //     显示提示，不再静默（原实现把 rx 传入 build_app_and_acp 后丢弃）。
     //     panic hook 见 kit/panic.rs：记录日志 + PANIC_NOTIFY 通道。
     {
@@ -281,8 +276,58 @@ pub async fn run_kit_fullscreen(
         });
     }
 
-    // 4. 接通 kit 四链路（仅当 ACP provider 配置成功——acp_client 为 None 时
-    //    走最小可用路径：UI 可显示但无 agent 交互）。
+    // 首次启动先让向导独占一个 fullscreen 生命周期。成功保存后
+    // AppShell 才退出该 pass，随后在同一 App/共享配置上装配 ACP；取消或
+    // 关闭向导直接沿 teardown 退出，不能落入无消费者的离线主界面。
+    if *atoms::SETUP_PREFLIGHT.state().read() {
+        let _ = execute!(
+            std::io::stdout(),
+            EnableMouseCapture,
+            EnableBracketedPaste,
+            EnableFocusChange
+        );
+        let setup_result = element!(AppShell).fullscreen().await;
+        let _ = execute!(
+            std::io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
+        if let Err(error) = setup_result {
+            shutdown.cancel();
+            teardown_app(&mut app).await;
+            return Err(error.into());
+        }
+        if !*atoms::SETUP_COMPLETED.state().read() {
+            shutdown.cancel();
+            teardown_app(&mut app).await;
+            return Ok(());
+        }
+        *atoms::SETUP_PREFLIGHT.state().write() = false;
+        acp_client = match crate::launch::attach_acp(&mut app).await {
+            Ok(client) => Some(client),
+            Err(error) => {
+                shutdown.cancel();
+                teardown_app(&mut app).await;
+                return Err(error);
+            }
+        };
+    }
+
+    // Start snapshots only after setup has either completed and attached ACP,
+    // or was skipped for an already configured process. A client-less snapshot
+    // would permanently retain offline session/model state.
+    let snapshot_src =
+        build_snapshot_source(&app, acp_client.as_ref().map(|(client, _)| client.clone()));
+    let _snapshot_handle = spawn_service_snapshot(snapshot_src, shutdown.clone());
+
+    // A first fullscreen pass owns these transient controls. Clear exit and
+    // quit state before mounting the normal shell so a setup cancellation or
+    // completion cannot immediately terminate the second pass.
+    *atoms::EXIT_REQUESTED.state().write() = false;
+    *atoms::QUIT_PENDING_SINCE.state().write() = None;
+    *atoms::LAST_CTRL_C_PROCESSED.state().write() = None;
+
+    // 4. 配置就绪后接通 kit 四链路，随后才进入正常交互界面。
     if let Some((client, notification_rx)) = acp_client {
         // 4a. SUBMIT channel：InputArea → submit_consumer
         let (submit_tx, submit_rx) = mpsc::unbounded_channel::<SubmitRequest>();

@@ -80,8 +80,6 @@ pub struct ConfigSource {
     workspace_path: Option<PathBuf>,
     /// 原始全局配置（分层回写的差异基准，不含工作区覆盖）
     global: PeriConfig,
-    /// 原始工作区配置（仅用于保留文件级元数据如 `$schema`）
-    workspace: Option<PeriConfig>,
     /// 加载时刻的合并配置（全局 + 工作区覆盖）
     merged: PeriConfig,
 }
@@ -101,7 +99,6 @@ impl ConfigSource {
             global_path,
             workspace_path,
             global,
-            workspace,
             merged,
         })
     }
@@ -131,7 +128,6 @@ impl ConfigSource {
             global_path: path,
             workspace_path: None,
             global: cfg.clone(),
-            workspace: None,
             merged: cfg,
         })
     }
@@ -157,7 +153,6 @@ impl ConfigSource {
             global_path,
             workspace_path,
             global,
-            workspace,
             merged,
         }
     }
@@ -188,6 +183,23 @@ impl ConfigSource {
         self.merged.clone()
     }
 
+    /// 严格重读已选定的配置文件，保持启动时的读写路径决策。
+    /// 保存前使用此方法保留磁盘上的最新字段；解析失败不能当成空配置。
+    pub fn reload_merged(&self) -> Result<PeriConfig> {
+        let (mut global, workspace) = self.reload_layers()?;
+        if let Some(workspace) = workspace {
+            global.config.merge_overrides(workspace.config);
+        }
+        Ok(global)
+    }
+
+    fn reload_layers(&self) -> Result<(PeriConfig, Option<PeriConfig>)> {
+        Ok((
+            load_from(&self.global_path)?,
+            self.workspace_path.as_deref().map(load_from).transpose()?,
+        ))
+    }
+
     /// 写回当前生效层。
     ///
     /// 分层契约（与 `load` 对称，P0 修复语义）：
@@ -197,11 +209,17 @@ impl ConfigSource {
     ///   全局凭据不会拷贝进项目文件；
     /// - 无工作区配置 → 写全局文件（唯一事实源）。
     pub fn save(&self, merged: &PeriConfig) -> Result<()> {
+        // 容错启动不授予覆盖损坏文件的权限。全局基准变化后，旧内存值与
+        // 用户主动覆盖无法区分；拒绝写项目配置，避免误复制全局凭据。
+        let (global, workspace) = self.reload_layers()?;
         match &self.workspace_path {
             Some(ws_path) => {
+                anyhow::ensure!(
+                    global == self.global,
+                    "Global configuration changed; restart Peri before saving workspace settings"
+                );
                 let overrides = merged.config.extract_overrides(&self.global.config);
-                let schema = self
-                    .workspace
+                let schema = workspace
                     .as_ref()
                     .and_then(|w| w.schema.clone())
                     .or_else(|| merged.schema.clone());
