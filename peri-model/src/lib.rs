@@ -10,9 +10,11 @@ mod transport;
 pub use anthropic::{AnthropicConfig, AnthropicModel};
 pub use openai_compatible::{OpenAiConfig, OpenAiModel};
 pub use protocol::{
-    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, Model, ModelCapabilities,
-    ModelMessage, ModelRequest, ModelResponse, ModelStream, ModelStreamEvent, ProviderProtocol,
-    StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
+    AssistantPhase, ContentBlock, DocumentSource, HistoryError, ImageSource, JsonObject, MediaType,
+    Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelStream,
+    ModelStreamEvent, ProviderProtocol, ResponsesHistoryItem, ResponsesHistoryItemKind,
+    ResponsesHistoryV1, ResponsesSourceIdentity, StopReason, TokenUsage, ToolCall, ToolDefinition,
+    ToolResult, RESPONSES_HISTORY_VERSION,
 };
 pub use runtime::{
     ModelError, ModelErrorCategory, ModelErrorDiagnostic, ModelErrorDiagnosticParts, ModelResult,

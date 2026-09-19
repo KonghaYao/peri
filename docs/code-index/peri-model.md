@@ -74,3 +74,11 @@
 - ARC-EVENT-001：`ModelStreamEvent` 由 model_bridge 消费并直发 v2 事件；改流式事件须覆盖 发射 → ACP 映射 → TUI 全链路，禁止 v1 中间态
 - ARC-SERIAL-001：`JsonObject` 基于 `BTreeMap`（types.rs:11），provider payload 与 tools 序列化顺序须确定，不得依赖 `HashMap` 迭代序
 - ARC-SECRET-001：api_key 只存于 config/模型内部；观测投影（`ObservedProviderBody`）与 config Debug 永不输出凭据；runtime 不读环境变量
+
+### protocol/responses_history.rs（Responses 原生记录与来源身份，W2-1a 纯协议，2026-09-19）
+
+- 事实源：`src/protocol/responses_history.rs`；测试 `responses_history_test.rs`（12 例）；`protocol/mod.rs` + `lib.rs` re-export（`ResponsesHistoryV1`、`ResponsesHistoryItem`、`ResponsesHistoryItemKind`、`ResponsesSourceIdentity`、`HistoryError`、`AssistantPhase`、`RESPONSES_HISTORY_VERSION`）
+- 契约：私有字段 + 校验构造/反序列化（`version == 1`）；只接受已完成 message/reasoning/function_call item——未知语义 item、未完成/缺失 status、重复 item id 或 call_id、arguments 非 JSON 对象、非法 phase 一律 `HistoryError` fail closed；内部按原 JSON 保存未知非语义字段
+- 来源身份：`ResponsesSourceIdentity` 只持久化 16B 随机 nonce（hex）与域分隔 SHA-256 摘要；endpoint 用 `Url` 规范化结果（默认端口折叠、实际 path/query 参与比较），model 原样；`verify/matches` 以存档 nonce 重算，跨进程稳定，不落盘 URL/凭据；Debug 全脱敏；nonce 不是 secret，不提供保密或防篡改
+- 投影与派生：`visible_text`/`refusals`/`tool_calls`（`ToolCall::id` 取 call_id，arguments 复用 `JsonObject`，每项只出现一次）；`project_input_items(endpoint, model)` 非同域返回 `SourceMismatch` 供上层显式降级，wire 只含官方 input 字段
+- 未接线：不接入生产消息/bridge/compact/旧 adapters；终态成功判定、tool result 配对由 W2-1b adapter 负责
