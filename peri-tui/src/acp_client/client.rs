@@ -108,6 +108,7 @@ pub struct AcpTuiClient {
     session_load_reservations: Arc<SessionLoadReservationState>,
     user_input_queue: Arc<std::sync::atomic::AtomicBool>,
     session_workspace: Arc<std::sync::atomic::AtomicBool>,
+    session_recovery: Arc<std::sync::atomic::AtomicBool>,
     execution_cwd: watch::Sender<Option<String>>,
     restore_error: Arc<Mutex<Option<String>>>,
     #[cfg(test)]
@@ -182,6 +183,7 @@ impl AcpTuiClient {
             }),
             user_input_queue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_workspace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            session_recovery: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             execution_cwd: watch::channel(None).0,
             restore_error: Arc::new(Mutex::new(None)),
             #[cfg(test)]

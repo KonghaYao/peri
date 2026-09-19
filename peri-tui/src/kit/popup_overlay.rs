@@ -40,12 +40,47 @@ pub fn PopupOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let kind = *popup_store.read();
     let (term_w, term_h) = hooks.use_terminal_size();
 
+    // 一致性边界：部分调用方直接写 POPUP_KIND（事件分发、鼠标路由、会话切换），
+    // 绕过 `open_popup`/`close_popup`。一旦 dirty 确认不再被显示，就必须按取消
+    // 收敛，否则等待方永久占住 operation gate。effect 不是 render body，写入合法。
+    let confirm_displayed = kind == Some(PopupKind::Confirm);
+    hooks.use_effect(
+        move || {
+            if !confirm_displayed {
+                crate::kit::popups::confirm_popup::cancel_pending_dirty_recovery();
+            }
+        },
+        confirm_displayed,
+    );
+
     match kind {
         Some(PopupKind::Hitl) => render_popup(element!(HitlPopup()).into(), term_w, term_h),
         Some(PopupKind::AskUser) => render_empty(), // AskUser 已迁移为 Panel
         Some(PopupKind::Rewind) => render_popup(element!(RewindPopup()).into(), term_w, term_h),
         Some(PopupKind::OAuth) => render_popup(element!(OAuthPopup()).into(), term_w, term_h),
-        Some(PopupKind::Confirm) => render_popup(element!(ConfirmPopup()).into(), term_w, term_h),
+        Some(PopupKind::Confirm) => {
+            let recovery = atoms::CONFIRM_PAYLOAD
+                .state()
+                .read()
+                .as_ref()
+                .and_then(|p| {
+                    if let atoms::ConfirmAction::RecoverDirty(owner) = &p.pending_action {
+                        Some(owner.clone())
+                    } else {
+                        None
+                    }
+                });
+            if let Some(owner) = recovery {
+                let popup: AnyElement<'static> =
+                    element!(crate::kit::popups::confirm_popup::DirtyRecoveryPopup(
+                        owner: Some(owner)
+                    ))
+                    .into();
+                render_popup(popup, term_w, term_h)
+            } else {
+                render_popup(element!(ConfirmPopup()).into(), term_w, term_h)
+            }
+        }
         Some(PopupKind::Download) => {
             render_popup(element!(DownloadProgressPopup()).into(), term_w, term_h)
         }
@@ -96,7 +131,13 @@ fn render_empty() -> AnyElement<'static> {
 // ── 弹窗操作辅助函数（mutates POPUP_KIND atom） ──────────────────────────
 
 /// 打开弹窗（覆盖式）。已打开其他弹窗会被替换。
+///
+/// 替换边界必须精确结清被覆盖的 dirty 风险选择：新 popup 保留，旧的等待方按
+/// 取消收敛，否则 load 会永久占住 operation gate（首帧之前没有 render Drop）。
 pub fn open_popup(kind: PopupKind) {
+    if kind != PopupKind::Confirm {
+        crate::kit::popups::confirm_popup::cancel_pending_dirty_recovery();
+    }
     *atoms::POPUP_KIND.state().write() = Some(kind);
 }
 
@@ -109,6 +150,9 @@ pub fn open_popup(kind: PopupKind) {
 pub fn close_popup() -> Option<PopupKind> {
     let prev = *atoms::POPUP_KIND.state().read();
     *atoms::POPUP_KIND.state().write() = None;
+    // 撤销边界：弹窗关闭后用户无法再作答，待决的 dirty 风险选择按取消收敛。
+    // 即使当前 kind 已被其他 popup 覆盖（close 不再是 Confirm），也必须结清。
+    crate::kit::popups::confirm_popup::cancel_pending_dirty_recovery();
     // I21-C：根据关闭的 popup 类型清空对应 payload atom
     if let Some(kind) = prev {
         match kind {

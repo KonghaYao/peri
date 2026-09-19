@@ -534,6 +534,29 @@ fn lease_process(path: &Path, id: &str, expected: &str) {
     assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
 }
 
+/// 同 `lease_process`，额外把目标代次传给子进程（reset/观测用）。
+fn lease_process_at(path: &Path, id: &str, expected: &str, generation: i64) {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sessions::sqlite_store::workspace::tests::test_worktree_execution_child_process",
+            "--nocapture",
+        ])
+        .env("PERI_TEST_WORKSPACE_DB", path)
+        .env("PERI_TEST_WORKSPACE_ID", id)
+        .env("PERI_TEST_WORKSPACE_EXPECT", expected)
+        .env("PERI_TEST_WORKSPACE_GENERATION", generation.to_string())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "lease child failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_worktree_execution_competes_across_processes_and_crash_remains_dirty() {
     let repo = repository();
@@ -542,15 +565,55 @@ async fn test_worktree_execution_competes_across_processes_and_crash_remains_dir
     let path = db.path().join("threads.db");
     let lease = store.acquire_execution_lease(&id).await.unwrap();
     lease_process(&path, &id, "busy");
+    lease_process(&path, &id, "reset_busy");
     lease.mark_clean().await.unwrap();
     lease_process(&path, &id, "clean");
     lease_process(&path, &id, "crash");
     let error = store.acquire_execution_lease(&id).await.err().unwrap();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::RecoveryRequired)
+        Some(WorkspaceError::RecoveryRequired(_))
     ));
     lease_process(&path, &id, "recovery");
+    let WorkspaceError::RecoveryRequired(target) = error.downcast_ref::<WorkspaceError>().unwrap()
+    else {
+        unreachable!()
+    };
+    store.reset_dirty_execution(target).await.unwrap();
+    let next = store.acquire_execution_lease(&id).await.unwrap();
+    assert_eq!(next.thread_id(), &id);
+    next.mark_clean().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_worktree_dirty_reset_held_stale_and_exact_generation() {
+    let repo = repository();
+    let (store, db) = store().await;
+    let (id, _) = bound(&store, repo.path()).await;
+    let path = db.path().join("threads.db");
+    let before = store.load_session_binding(&id).await.unwrap();
+
+    // 活 owner：本进程持有稳定锁期间，另一进程只能报忙，不得解除 dirty。
+    let lease = store.acquire_execution_lease(&id).await.unwrap();
+    lease_process_at(&path, &id, "reset_busy", 1);
+    drop(lease);
+
+    // 用户接受风险后的精确解除：只清这一代。
+    lease_process_at(&path, &id, "reset_ok", 1);
+    // 同代重复确认不得再写（已是 clean），过期代次必须拒绝。
+    lease_process_at(&path, &id, "reset_stale", 1);
+
+    // 之后的正常取得所有权只推进代次并保持 dirty，不伪造 clean。
+    lease_process(&path, &id, "crash");
+    lease_process_at(&path, &id, "recovery_gen", 2);
+    // 过期代次不能解掉新代（防止确认旧代次时误清新代）。
+    lease_process_at(&path, &id, "reset_stale", 1);
+    lease_process_at(&path, &id, "recovery_gen", 2);
+    // 精确解除新代后，原 ThreadId 仍可正常取得所有权并收尾。
+    lease_process_at(&path, &id, "reset_ok", 2);
+    lease_process(&path, &id, "clean");
+
+    assert_eq!(store.load_session_binding(&id).await.unwrap(), before);
 }
 
 #[tokio::test]
@@ -561,20 +624,79 @@ async fn test_worktree_execution_child_process() {
     let id = std::env::var("PERI_TEST_WORKSPACE_ID").unwrap();
     let expected = std::env::var("PERI_TEST_WORKSPACE_EXPECT").unwrap();
     let store = SqliteThreadStore::new(path).await.unwrap();
-    let result = store.acquire_execution_lease(&id).await;
+    let generation = std::env::var("PERI_TEST_WORKSPACE_GENERATION")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok());
+    let target = || RecoveryRequiredDetails {
+        thread_id: id.clone(),
+        generation: generation.expect("generation required"),
+    };
+    // reset/观测分支只做目标操作，不能先自行持锁（否则与自身 try_lock 冲突）。
     match expected.as_str() {
         "busy" => assert!(matches!(
-            result.err().unwrap().downcast_ref::<WorkspaceError>(),
+            store
+                .acquire_execution_lease(&id)
+                .await
+                .err()
+                .unwrap()
+                .downcast_ref::<WorkspaceError>(),
             Some(WorkspaceError::ExecutionBusy)
         )),
         "recovery" => assert!(matches!(
-            result.err().unwrap().downcast_ref::<WorkspaceError>(),
-            Some(WorkspaceError::RecoveryRequired)
+            store
+                .acquire_execution_lease(&id)
+                .await
+                .err()
+                .unwrap()
+                .downcast_ref::<WorkspaceError>(),
+            Some(WorkspaceError::RecoveryRequired(_))
         )),
-        "clean" => result.unwrap().mark_clean().await.unwrap(),
+        "recovery_gen" => {
+            let error = store.acquire_execution_lease(&id).await.err().unwrap();
+            let Some(WorkspaceError::RecoveryRequired(details)) =
+                error.downcast_ref::<WorkspaceError>()
+            else {
+                panic!("expected dirty generation, got: {error:?}");
+            };
+            assert_eq!(details.generation, generation.expect("generation required"));
+        }
+        "clean" => store
+            .acquire_execution_lease(&id)
+            .await
+            .unwrap()
+            .mark_clean()
+            .await
+            .unwrap(),
         "crash" => {
-            let _lease = result.unwrap();
+            let _lease = store.acquire_execution_lease(&id).await.unwrap();
             std::process::exit(0);
+        }
+        "reset_busy" => {
+            let error = store
+                .reset_dirty_execution(&RecoveryRequiredDetails {
+                    thread_id: id,
+                    generation: generation.unwrap_or(1),
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<WorkspaceError>(),
+                    Some(WorkspaceError::ExecutionBusy)
+                ),
+                "expected busy rejection, got: {error:?}"
+            );
+        }
+        "reset_ok" => store.reset_dirty_execution(&target()).await.unwrap(),
+        "reset_stale" => {
+            let error = store.reset_dirty_execution(&target()).await.unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<WorkspaceError>(),
+                    Some(WorkspaceError::RecoveryGenerationMismatch)
+                ),
+                "expected stale generation rejection, got: {error:?}"
+            );
         }
         _ => panic!("unknown expected child result"),
     }
@@ -630,13 +752,13 @@ async fn test_worktree_cancelled_mutation_remains_dirty_and_cannot_publish_clean
     let error = lease.mark_clean().await.unwrap_err();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::RecoveryRequired)
+        Some(WorkspaceError::RecoveryRequired(_))
     ));
     drop(lease);
     let error = store.acquire_execution_lease(&id).await.err().unwrap();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::RecoveryRequired)
+        Some(WorkspaceError::RecoveryRequired(_))
     ));
 }
 

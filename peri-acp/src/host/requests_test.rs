@@ -25,6 +25,9 @@ use serial_test::serial;
 use super::*;
 use crate::provider::LlmProvider;
 
+#[path = "requests_recovery_test.rs"]
+mod recovery_tests;
+
 #[path = "requests_legacy_test.rs"]
 mod legacy_tests;
 

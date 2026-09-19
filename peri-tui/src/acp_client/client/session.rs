@@ -70,6 +70,10 @@ impl Drop for SessionLoadReservation {
     }
 }
 
+#[cfg(test)]
+#[path = "recovery_test.rs"]
+mod recovery_tests;
+
 impl AcpTuiClient {
     /// Check whether a session has been created.
     pub fn has_session(&self) -> bool {
@@ -400,7 +404,43 @@ impl AcpTuiClient {
         }
 
         let params = json!({ "sessionId": session_id, "cwd": effective_cwd, "model": model });
-        if let Err(error) = self.transport.send_request("session/load", params).await {
+        let mut result = self
+            .transport
+            .send_request("session/load", params.clone())
+            .await;
+        if let Err(error) = &result {
+            let details = error.data.clone().and_then(|data| {
+                serde_json::from_value::<peri_acp_types::workspace::WorkspaceErrorData>(data).ok()
+            });
+            if let Some(peri_acp_types::workspace::WorkspaceErrorData::RecoveryRequired(target)) =
+                details
+                && target.thread_id == session_id
+                && target.generation > 0
+                && self.projection_mode == ClientProjectionMode::Interactive
+                && self
+                    .session_recovery
+                    .load(std::sync::atomic::Ordering::Acquire)
+                && crate::kit::popups::confirm_popup::confirm_dirty_recovery(target.clone()).await
+            {
+                // operation gate 固定 source/target；确认等待期间不能提交其他 transition。
+                let ack = peri_acp_types::workspace::ResetDirtyRequest {
+                    target,
+                    accept_risk: true,
+                };
+                result = match self
+                    .transport
+                    .send_request(
+                        "peri/session_reset_dirty",
+                        serde_json::to_value(ack).expect("recovery request serialize"),
+                    )
+                    .await
+                {
+                    Ok(_) => self.transport.send_request("session/load", params).await,
+                    Err(error) => Err(error),
+                };
+            }
+        }
+        if let Err(error) = result {
             *self.restore_error.lock().unwrap() = Some(error.to_string());
             self.lifecycle.fail_transition(start.generation);
             transition.disarm();

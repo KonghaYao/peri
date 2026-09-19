@@ -1130,6 +1130,14 @@ popup-ask-user-hint-single-unsubmitted =   ↑/↓::navigate · Space::select ·
 popup-ask-user-title =  Ask User 
 
 # ---- Confirm Popup (P2) ----
+dirty-recovery-title = Clear dirty state and restore this session?
+dirty-recovery-risk = Old child processes may still be running.
+dirty-recovery-unknown = Previous side effects are unknown.
+dirty-recovery-responsibility = You accept the risk and responsibility for what follows.
+dirty-recovery-hint = Up/Down: select · Enter: apply · Esc: cancel
+dirty-recovery-cancel = Cancel (default)
+dirty-recovery-accept = Accept risk, clear dirty state and load
+
 popup-confirm-empty =   No pending confirmation.
 popup-confirm-action-hint =   Enter: confirm  Esc: cancel
 popup-confirm-title =  Confirm 
