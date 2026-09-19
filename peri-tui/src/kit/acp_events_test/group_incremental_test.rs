@@ -39,16 +39,69 @@ fn text(t: &str) -> AcpEventData {
     })
 }
 
+/// 把快照中**由装配时刻读钟得到**的时长字段归一到同一取值，其余字段原样保留。
+///
+/// 两条路径的快照取自不同壁钟时刻，而这些字段按 `started_at.elapsed()` 在装配时
+/// 计算：折叠 pass 在 phase 离开 `PromptRunning` 时冻结正文/推理时长
+/// （`apply_fold_pass`），running 工具卡片的实时时长同样来自 `elapsed()`。相差
+/// 几毫秒是取钟时刻差，不是缓存用错输入——`docs/standards/testing.md` 要求测试
+/// 不依赖真实时钟，逐值比较这些毫秒值只会得到一条随机失败的用例。缓存正确性由
+/// 其余字段承载，它们仍逐值比较：这些字段的**存在性**（`Some`/`None` 即 running
+/// 与冻结状态）、`started_at`、`end_tool` 时已冻结的
+/// `TuiToolCard::completed_duration_ms`，以及其余全部结构字段。
+fn normalize_assembly_clock(unit: &TuiRenderUnit) -> TuiRenderUnit {
+    let mut unit = unit.clone();
+    match &mut unit {
+        TuiRenderUnit::TuiAssistantBubble(bubble) => {
+            bubble.duration_ms = bubble.duration_ms.map(|_| 0);
+            if let Some(reasoning) = bubble.reasoning.as_mut() {
+                reasoning.duration_ms = reasoning.duration_ms.map(|_| 0);
+            }
+        }
+        TuiRenderUnit::TuiToolCard(card) => {
+            card.running_duration_ms = card.running_duration_ms.map(|_| 0);
+        }
+        TuiRenderUnit::TuiCollapsedGroup(group) => {
+            group.view_models = group
+                .view_models
+                .iter()
+                .map(normalize_assembly_clock)
+                .collect();
+        }
+        TuiRenderUnit::TuiSubAgentGroup(group) => {
+            group.view_models = group
+                .view_models
+                .iter()
+                .map(normalize_assembly_clock)
+                .collect();
+        }
+        _ => {}
+    }
+    unit
+}
+
 /// 逐事件差分：dispatch（热缓存）→ 取快照 → 清缓存 → 重新发布（全量重建）→ 取快照
 /// → 断言逐条相等。清缓存后重新发布会把缓存以**参照结果**填回，故下一个事件仍在
 /// 复用路径上（参照结果与热路径等价，正是本测试要证的命题）。
 fn assert_incremental_equivalent(state: &mut BridgeState, events: &[AcpEventData]) {
     for (idx, ev) in events.iter().enumerate() {
         dispatch_and_notify(state, ev);
-        let incremental = VIEW_MODELS.state().read().items.clone();
+        let incremental: Vec<TuiRenderUnit> = VIEW_MODELS
+            .state()
+            .read()
+            .items
+            .iter()
+            .map(normalize_assembly_clock)
+            .collect();
         crate::kit::acp_events::render::reset_tool_group_cache();
         crate::kit::acp_events::render::push_view_models(state);
-        let reference = VIEW_MODELS.state().read().items.clone();
+        let reference: Vec<TuiRenderUnit> = VIEW_MODELS
+            .state()
+            .read()
+            .items
+            .iter()
+            .map(normalize_assembly_clock)
+            .collect();
         assert_eq!(
             incremental, reference,
             "事件 #{idx}（{ev:?}）的增量快照与全量重建不一致"
