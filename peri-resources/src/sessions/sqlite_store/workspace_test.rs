@@ -1034,11 +1034,20 @@ const PROBE_DATABASE: &str = "PERI_TEST_PROBE_DB";
 const PROBE_BEHAVIOR: &str = "PERI_TEST_PROBE_BEHAVIOR";
 const ADMISSION_DATABASE: &str = "PERI_TEST_ADMISSION_DB";
 const ADMISSION_CWD: &str = "PERI_TEST_ADMISSION_CWD";
+const HISTORY_DATABASE: &str = "PERI_TEST_HISTORY_DB";
+const HISTORY_THREAD: &str = "PERI_TEST_HISTORY_THREAD";
+const VALIDATE_DATABASE: &str = "PERI_TEST_VALIDATE_DB";
+const VALIDATE_THREAD: &str = "PERI_TEST_VALIDATE_THREAD";
+const VALIDATE_CWD: &str = "PERI_TEST_VALIDATE_CWD";
 
 const PROBE_GIT_CHILD: &str =
     "sessions::sqlite_store::workspace::tests::test_worktree_probe_git_child";
 const ADMISSION_CHILD: &str =
     "sessions::sqlite_store::workspace::tests::test_worktree_registration_admission_child";
+const HISTORY_CHILD: &str =
+    "sessions::sqlite_store::workspace::tests::test_worktree_history_access_child";
+const VALIDATE_CHILD: &str =
+    "sessions::sqlite_store::workspace::tests::test_worktree_bound_session_validation_child";
 
 /// 子进程模式：作为假 Git 被调用，先记录调用当时写锁是否空闲。
 #[tokio::test]
@@ -1107,6 +1116,123 @@ async fn test_worktree_registration_admission_child() {
         .unwrap();
 }
 
+/// 子进程模式：只读历史访问——列表、消息、frozen 与绑定读取，复核身份的动作不在其中。
+#[tokio::test]
+async fn test_worktree_history_access_child() {
+    let Ok(database) = std::env::var(HISTORY_DATABASE) else {
+        return;
+    };
+    let thread = std::env::var(HISTORY_THREAD).unwrap();
+    for read_only in [false, true] {
+        let store = if read_only {
+            SqliteThreadStore::open_existing_read_only(&database)
+                .await
+                .unwrap()
+        } else {
+            SqliteThreadStore::new(Path::new(&database)).await.unwrap()
+        };
+        let binding = store
+            .load_session_binding(&thread)
+            .await
+            .unwrap()
+            .expect("已登记会话必须能读到绑定");
+        assert_eq!(store.load_meta(&thread).await.unwrap().id, thread);
+        assert_eq!(store.load_messages(&thread).await.unwrap().len(), 1);
+        assert!(store.load_frozen_snapshot(&thread).await.unwrap().is_none());
+        let project = store
+            .list_scoped_threads(&ScopedThreadQuery {
+                scope: ThreadScope::Project(binding.project_id),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(project.entries.len(), 1);
+        let exact = store
+            .list_scoped_threads(&ScopedThreadQuery {
+                scope: ThreadScope::ExactDirectory {
+                    workspace_id: binding.workspace_id,
+                    relative_cwd: binding.cwd_relative_to_workspace.clone(),
+                },
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(exact.entries.len(), 1);
+    }
+}
+
+/// 子进程模式：已有会话恢复执行前的绑定复核（`session/load` 的准入步骤）。
+#[tokio::test]
+async fn test_worktree_bound_session_validation_child() {
+    let Ok(database) = std::env::var(VALIDATE_DATABASE) else {
+        return;
+    };
+    let thread = std::env::var(VALIDATE_THREAD).unwrap();
+    let cwd = std::env::var(VALIDATE_CWD).unwrap();
+    let store = SqliteThreadStore::new(Path::new(&database)).await.unwrap();
+    let workspace = store.validate_session_binding(&thread).await.unwrap();
+    assert_eq!(workspace.cwd, tokio::fs::canonicalize(&cwd).await.unwrap());
+}
+
+/// [回归测试] 历史只读访问不依赖目录可用性，也不触发任何外部探测。
+///
+/// 列出会话、读取消息、读 frozen 与绑定是历史能力，不该因为目录身份发现而失败或被拖慢。
+/// 假 Git 每次被调用都会在日志里记一行，用例要求只读访问前后行数不变——把发现引入列表
+/// 路径会直接失败，而不是只能靠耗时观察。子进程运行前登记目录已被删除，因此读路径若引入
+/// canonicalize / stat 之类的目录检查同样会失败。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_history_access_never_probes_git() {
+    let directory = tempfile::tempdir().unwrap();
+    let work = directory.path().join("plain-project");
+    std::fs::create_dir(&work).unwrap();
+    let (recorded, database) = probe_admission(directory.path(), &work, "git-not-repository", None);
+    assert!(!recorded.is_empty(), "准入必须先真的调用过假 Git");
+    let thread = bound_thread_id(&database).await;
+    // 写入一条历史供只读访问读取；这一步在测量之前完成。
+    let store = SqliteThreadStore::new(&database).await.unwrap();
+    let lease = store.acquire_execution_lease(&thread).await.unwrap();
+    store
+        .append_message(&thread, BaseMessage::human("bound history"))
+        .await
+        .unwrap();
+    lease.mark_clean().await.unwrap();
+    store.close().await;
+    // 登记目录消失后历史仍必须可读：执行身份不可复核不等于历史不可访问。
+    std::fs::remove_dir_all(&work).unwrap();
+
+    let log = directory.path().join("probe.log");
+    let before = std::fs::read_to_string(&log).unwrap().lines().count();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", HISTORY_CHILD, "--nocapture"])
+        .env("PATH", directory.path().join("bin"))
+        .env(PROBE_LOG, &log)
+        .env(PROBE_DATABASE, &database)
+        .env(PROBE_BEHAVIOR, "git-not-repository")
+        .env(HISTORY_DATABASE, &database)
+        .env(HISTORY_THREAD, &thread)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "只读历史访问子进程失败：{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    // 子进程提前返回（例如环境变量名写错）时，用例会变成没有覆盖读路径的空断言。
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+        "子进程必须真的执行了只读历史访问用例：{}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let after = std::fs::read_to_string(&log).unwrap().lines().count();
+    assert_eq!(
+        before, after,
+        "历史只读访问不得调用 Git：调用次数 {before} → {after}",
+    );
+}
+
 #[cfg(unix)]
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
@@ -1131,6 +1257,23 @@ async fn binding_count(database: &Path) -> i64 {
         .await
         .unwrap();
     let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM session_bindings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    row.0
+}
+
+/// 读出准入子进程建立的绑定会话 ID，供只读访问子进程复用它读历史。
+#[cfg(unix)]
+async fn bound_thread_id(database: &Path) -> String {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(database))
+        .await
+        .unwrap();
+    let row: (String,) = sqlx::query_as("SELECT thread_id FROM session_bindings")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1251,5 +1394,64 @@ async fn test_worktree_repository_registration_keeps_git_calls_bounded() {
         binding_count(&database).await,
         1,
         "用例必须真的完成了一次登记"
+    );
+}
+
+/// [回归测试] 已有会话恢复执行前的绑定复核只有一轮观测，且发生在写事务之外。
+///
+/// 恢复执行必须复核 cwd 与登记一致（设计 §3.2），但复核不该比一次发现更贵：重复发现会
+/// 把 Git 的等待时间叠加到每次 `session/load`。子进程复用准入时建好的假 Git，日志尾部
+/// 即本轮复核的调用序列。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_bound_session_validation_probes_once() {
+    let repository = repository();
+    let directory = tempfile::tempdir().unwrap();
+    let (recorded, database) = probe_admission(
+        directory.path(),
+        repository.path(),
+        "log-only",
+        Some(&real_git_path()),
+    );
+    assert_eq!(recorded.len(), 6, "准入本身是两轮观测：{recorded:?}");
+    let thread = bound_thread_id(&database).await;
+
+    let log = directory.path().join("probe.log");
+    let before = std::fs::read_to_string(&log).unwrap().lines().count();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", VALIDATE_CHILD, "--nocapture"])
+        .env("PATH", directory.path().join("bin"))
+        .env(PROBE_LOG, &log)
+        .env(PROBE_DATABASE, &database)
+        .env(PROBE_BEHAVIOR, "log-only")
+        .env(VALIDATE_DATABASE, &database)
+        .env(VALIDATE_THREAD, &thread)
+        .env(VALIDATE_CWD, repository.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "绑定复核子进程失败：{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+        "子进程必须真的执行了绑定复核用例：{}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let calls: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let validation = &calls[before..];
+    assert_eq!(
+        validation.len(),
+        3,
+        "已有会话复核只应观测一轮（三条命令）：{validation:?}",
+    );
+    assert!(
+        validation.iter().all(|state| state == "free"),
+        "复核不得在写事务内执行：{validation:?}",
     );
 }
