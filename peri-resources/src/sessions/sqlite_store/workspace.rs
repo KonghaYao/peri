@@ -126,9 +126,12 @@ impl SqliteThreadStore {
                 (id, project_id)
             }
         };
-        // The write transaction is the registry's common admission point. A changed
-        // filesystem observation cannot commit a stale winner while another host registers.
-        discovered.revalidate(&cwd).await?;
+        // The write transaction is the registry's common admission point: a changed
+        // filesystem observation cannot commit a stale winner while another host
+        // registers. External probing stays outside the lock — the revalidation here
+        // re-checks the critical file objects only, so a slow or missing Git never
+        // blocks other writers of the same database.
+        discovered.reassert_key_objects(&cwd).await?;
         tx.commit().await?;
         let relative_cwd = cwd
             .strip_prefix(&discovered.root)
@@ -145,9 +148,13 @@ impl SqliteThreadStore {
 
     async fn validate_resolved(&self, workspace: &ResolvedWorkspace) -> Result<()> {
         let mut connection = self.pool.acquire().await?;
-        Self::validate_resolved_on(&mut connection, workspace).await
+        Self::validate_resolved_on(&mut connection, workspace).await?;
+        // 事务外才叠加完整快照复核，写事务内不做 Git 探测（设计 §3.2）。
+        Self::revalidate_registered_observation_on(&mut connection, workspace).await
     }
 
+    /// 事务内的复核：SQL 关系加关键文件对象，不启动外部进程。
+    ///
     /// Transaction callers reuse their admitted connection, including every SQL read.
     async fn validate_resolved_on(
         connection: &mut SqliteConnection,
@@ -168,12 +175,25 @@ impl SqliteThreadStore {
         }
         let discovered: Discovery =
             serde_json::from_str(&snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
-        let canonical = tokio::fs::canonicalize(&workspace.cwd)
-            .await
-            .map_err(|_| WorkspaceError::Unavailable)?;
-        if canonical != workspace.cwd {
-            return Err(WorkspaceError::NeedsRelink.into());
-        }
+        discovered.reassert_key_objects(&workspace.cwd).await
+    }
+
+    /// 事务外的完整快照复核：重新执行 Git 发现并与已登记观测比对（设计 §3.2）。
+    ///
+    /// 只能在持有写事务之外调用；事务内的复核见 `validate_resolved_on`。
+    async fn revalidate_registered_observation_on(
+        connection: &mut SqliteConnection,
+        workspace: &ResolvedWorkspace,
+    ) -> Result<()> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT discovery FROM workspaces WHERE id = ? AND project_id = ?")
+                .bind(workspace.workspace_id.to_string())
+                .bind(workspace.project_id.to_string())
+                .fetch_optional(&mut *connection)
+                .await?;
+        let (snapshot,) = row.ok_or(WorkspaceError::InvalidBinding)?;
+        let discovered: Discovery =
+            serde_json::from_str(&snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
         discovered.revalidate(&workspace.cwd).await
     }
 
@@ -304,7 +324,10 @@ impl SqliteThreadStore {
         id: &ThreadId,
     ) -> Result<ResolvedWorkspace> {
         let mut connection = self.pool.acquire().await?;
-        Self::validate_session_binding_on(&mut connection, id).await
+        let workspace = Self::validate_session_binding_on(&mut connection, id).await?;
+        // 事务外才叠加完整快照复核，写事务内不做 Git 探测（设计 §3.2）。
+        Self::revalidate_registered_observation_on(&mut connection, &workspace).await?;
+        Ok(workspace)
     }
 
     pub(super) async fn validate_session_binding_on(

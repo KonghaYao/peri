@@ -864,3 +864,232 @@ async fn test_worktree_concurrent_leases_exceed_pool_capacity_without_nested_acq
         lease.mark_clean().await.unwrap();
     }
 }
+
+// ── 外部探测的时机与次数：写事务内不得执行外部进程 ──
+
+/// 假 Git 的日志：每次调用追加一行，记录调用当时另一连接能否立刻取得写锁。
+const PROBE_LOG: &str = "PERI_TEST_PROBE_LOG";
+const PROBE_DATABASE: &str = "PERI_TEST_PROBE_DB";
+/// `git-not-repository` 时伪装真实 Git 在非仓库目录下的回答（stderr + 退出码）。
+const PROBE_BEHAVIOR: &str = "PERI_TEST_PROBE_BEHAVIOR";
+const ADMISSION_DATABASE: &str = "PERI_TEST_ADMISSION_DB";
+const ADMISSION_CWD: &str = "PERI_TEST_ADMISSION_CWD";
+
+const PROBE_GIT_CHILD: &str =
+    "sessions::sqlite_store::workspace::tests::test_worktree_probe_git_child";
+const ADMISSION_CHILD: &str =
+    "sessions::sqlite_store::workspace::tests::test_worktree_registration_admission_child";
+
+/// 子进程模式：作为假 Git 被调用，先记录调用当时写锁是否空闲。
+#[tokio::test]
+async fn test_worktree_probe_git_child() {
+    let Ok(log) = std::env::var(PROBE_LOG) else {
+        return;
+    };
+    let database = std::env::var(PROBE_DATABASE).unwrap();
+    let state = write_lock_available(&database).await;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .unwrap();
+    std::io::Write::write_all(&mut file, format!("{state}\n").as_bytes()).unwrap();
+    if std::env::var(PROBE_BEHAVIOR).as_deref() == Ok("git-not-repository") {
+        eprintln!("fatal: not a git repository (or any of the parent directories): .git");
+        std::process::exit(128);
+    }
+}
+
+/// 另一连接尝试立刻取得写锁：成功即说明此刻没有写事务持有者。
+async fn write_lock_available(database: &str) -> &'static str {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(database)
+                .busy_timeout(std::time::Duration::ZERO),
+        )
+        .await
+        .unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    let acquired = sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await
+        .is_ok();
+    if acquired {
+        sqlx::query("ROLLBACK")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+    }
+    drop(connection);
+    pool.close().await;
+    if acquired {
+        "free"
+    } else {
+        "busy"
+    }
+}
+
+/// 子进程模式：以受控 PATH 执行一次完整准入（解析 + 绑定）。
+#[tokio::test]
+async fn test_worktree_registration_admission_child() {
+    let Ok(database) = std::env::var(ADMISSION_DATABASE) else {
+        return;
+    };
+    let cwd = std::env::var(ADMISSION_CWD).unwrap();
+    let store = SqliteThreadStore::new(Path::new(&database)).await.unwrap();
+    let workspace = store.resolve_workspace(Path::new(&cwd)).await.unwrap();
+    store
+        .create_bound_thread(ThreadMeta::new(cwd.as_str()), &workspace)
+        .await
+        .unwrap();
+}
+
+#[cfg(unix)]
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+#[cfg(unix)]
+fn real_git_path() -> std::path::PathBuf {
+    let output = std::process::Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "测试环境需要真实 Git");
+    std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+}
+
+#[cfg(unix)]
+async fn binding_count(database: &Path) -> i64 {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(database))
+        .await
+        .unwrap();
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM session_bindings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    row.0
+}
+
+/// 在受控 PATH 下跑一次准入子进程，返回假 Git 记录的调用序列。
+///
+/// `real_git` 为 `None` 时假 Git 直接扮演「明确回答不是仓库」的 Git；为 `Some`
+/// 时先记录再转交真实 Git，用于统计真实仓库下的调用次数。
+#[cfg(unix)]
+fn probe_admission(
+    directory: &Path,
+    work: &Path,
+    behavior: &str,
+    real_git: Option<&Path>,
+) -> (Vec<String>, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let database = directory.join("threads.db");
+    let log = directory.join("probe.log");
+    let shim = directory.join("bin");
+    std::fs::create_dir(&shim).unwrap();
+    let binary = std::env::current_exe().unwrap();
+    // 假 Git 的 stdout 是发现过程解析的对象，测试框架的横幅不能混进去；
+    // 角色扮演所需的 stderr 与退出码仍由子进程自己给出。
+    let probe = format!(
+        "{} --exact {PROBE_GIT_CHILD} --nocapture",
+        shell_quote(&binary)
+    );
+    let script = match real_git {
+        Some(real) => format!(
+            "#!/bin/sh\n{probe} >/dev/null\nexec {} \"$@\"\n",
+            shell_quote(real)
+        ),
+        None => format!("#!/bin/sh\nexec {probe} >/dev/null\n"),
+    };
+    let git = shim.join("git");
+    std::fs::write(&git, script).unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = std::process::Command::new(&binary)
+        .args(["--exact", ADMISSION_CHILD, "--nocapture"])
+        .env("PATH", &shim)
+        .env(ADMISSION_DATABASE, &database)
+        .env(ADMISSION_CWD, work)
+        .env(PROBE_LOG, &log)
+        .env(PROBE_DATABASE, &database)
+        .env(PROBE_BEHAVIOR, behavior)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "准入子进程失败：{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let recorded = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    (recorded, database)
+}
+
+/// [回归测试] 准入的外部探测必须全部发生在写事务之外。
+///
+/// 上一版实现把完整 Git 发现放在 `BEGIN IMMEDIATE` 内，并在一次准入里重复四轮：
+/// 写锁持有期间等待 Git 子进程，慢盘 / 慢 Git 会阻塞同一数据库上的其他 writer。
+/// 假 Git 在每次被调用时尝试立刻取得写锁，把「探测是否在事务外」变成可断言的事实。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_registration_probes_filesystem_outside_write_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let work = directory.path().join("plain-project");
+    std::fs::create_dir(&work).unwrap();
+    let (recorded, database) = probe_admission(directory.path(), &work, "git-not-repository", None);
+    assert!(
+        !recorded.is_empty(),
+        "假 Git 未被调用，用例没有覆盖准入路径"
+    );
+    assert!(
+        recorded.iter().all(|state| state == "free"),
+        "写事务持有期间不得执行外部探测，实际记录：{recorded:?}",
+    );
+    assert_eq!(
+        recorded.len(),
+        2,
+        "目录模式一次准入只应观测两轮（解析 + 绑定复核）：{recorded:?}",
+    );
+    assert_eq!(
+        binding_count(&database).await,
+        1,
+        "用例必须真的完成了一次登记"
+    );
+}
+
+/// [回归测试] 仓库模式一次准入的真实 Git 调用次数保持有界：两轮观测，每轮三条命令。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_repository_registration_keeps_git_calls_bounded() {
+    let repository = repository();
+    let directory = tempfile::tempdir().unwrap();
+    let (recorded, database) = probe_admission(
+        directory.path(),
+        repository.path(),
+        "log-only",
+        Some(&real_git_path()),
+    );
+    assert!(
+        recorded.iter().all(|state| state == "free"),
+        "写事务持有期间不得执行外部探测，实际记录：{recorded:?}",
+    );
+    assert_eq!(
+        recorded.len(),
+        6,
+        "仓库模式一次准入的 Git 调用次数应有界：{recorded:?}",
+    );
+    assert_eq!(
+        binding_count(&database).await,
+        1,
+        "用例必须真的完成了一次登记"
+    );
+}

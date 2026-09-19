@@ -227,7 +227,16 @@ async fn git(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<Option<std::p
     }
 }
 
-async fn git_path(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<PathBuf> {
+/// 一次 `rev-parse` 解析多个位置：输出按参数顺序每行一个。
+///
+/// 三个路径来自同一次调用而不是三次进程启动：准入路径会放大每次发现的外部进程
+/// 数量，位置之间也没有需要分开处理的语义。
+async fn git_paths(
+    program: &OsStr,
+    cwd: &Path,
+    args: &[&str],
+    count: usize,
+) -> Result<Vec<PathBuf>> {
     let output = git(program, cwd, args).await?.ok_or_else(|| {
         WorkspaceError::DiscoveryError("Git became unavailable during discovery".into())
     })?;
@@ -235,10 +244,23 @@ async fn git_path(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<PathBuf>
         return Err(WorkspaceError::DiscoveryError("Git location discovery failed".into()).into());
     }
     let text = String::from_utf8(output.stdout).context("Git path is not UTF-8")?;
-    let text = text.strip_suffix('\n').unwrap_or(&text);
-    tokio::fs::canonicalize(text)
-        .await
-        .map_err(|_| WorkspaceError::Unavailable.into())
+    let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+    if lines.len() != count {
+        // 行数与请求不符说明输出顺序不再可信，不能把错位的位置当成根目录。
+        return Err(WorkspaceError::DiscoveryError(
+            "Git location discovery returned an unexpected number of paths".into(),
+        )
+        .into());
+    }
+    let mut paths = Vec::with_capacity(count);
+    for line in lines {
+        paths.push(
+            tokio::fs::canonicalize(line)
+                .await
+                .map_err(|_| WorkspaceError::Unavailable)?,
+        );
+    }
+    Ok(paths)
 }
 
 /// 一次目录观测：`Discovery` 加上「Git 是否真的回答过」这一证据强度标记。
@@ -260,7 +282,7 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
         .await
         .map_err(|_| WorkspaceError::Unavailable)?;
     path_text(&cwd)?;
-    object_identity(&cwd).await?;
+    let cwd_identity = object_identity(&cwd).await?;
     let inside = git(program, &cwd, &["rev-parse", "--is-inside-work-tree"]).await?;
     // `Some` 表示 Git 给出了回答（即使回答是「不是仓库」）；`None` 表示 Git 不可用。
     let git_answered = inside.is_some();
@@ -281,7 +303,7 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
             cwd.clone(),
             Observation {
                 discovery: Discovery {
-                    root_identity: object_identity(&cwd).await?,
+                    root_identity: cwd_identity,
                     root: cwd,
                     common_dir: None,
                     common_identity: None,
@@ -298,19 +320,26 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
         )
         .into());
     }
-    let root = git_path(
+    // 三个位置共用一次 `rev-parse`：输出顺序与参数顺序一致。
+    let [root, common_dir, private_dir] = git_paths(
         program,
         &cwd,
-        &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-common-dir",
+            "--absolute-git-dir",
+        ],
+        3,
     )
-    .await?;
-    let common_dir = git_path(
-        program,
-        &cwd,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
-    .await?;
-    let private_dir = git_path(program, &cwd, &["rev-parse", "--absolute-git-dir"]).await?;
+    .await?
+    .try_into()
+    .map_err(|_| {
+        anyhow::Error::from(WorkspaceError::DiscoveryError(
+            "Git location discovery returned an unexpected number of paths".into(),
+        ))
+    })?;
     let worktrees = git(program, &cwd, &["worktree", "list", "--porcelain", "-z"])
         .await?
         .ok_or_else(|| {
@@ -358,6 +387,41 @@ impl Discovery {
         }
         Ok(())
     }
+
+    /// 提交前的重验：只复核外部探测所依赖的关键文件对象，不启动任何外部进程。
+    ///
+    /// 设计 §3.2 要求探测在事务外进行、提交前只复核关键文件对象与关联关系。Git
+    /// 布局是同一目录的派生观测，登记层会在下一次准入刷新它，因此在持有 SQLite
+    /// 写事务期间重新执行完整发现既无必要，也会把 Git 的等待时间摊到同库其他
+    /// writer 身上。
+    pub(super) async fn reassert_key_objects(&self, cwd: &Path) -> Result<()> {
+        let canonical = tokio::fs::canonicalize(cwd)
+            .await
+            .map_err(|_| WorkspaceError::Unavailable)?;
+        if canonical != cwd {
+            return Err(WorkspaceError::NeedsRelink.into());
+        }
+        if object_identity(&self.root).await? != self.root_identity {
+            return Err(WorkspaceError::NeedsRelink.into());
+        }
+        for (path, recorded) in [
+            (self.common_dir.as_deref(), self.common_identity.as_ref()),
+            (self.private_dir.as_deref(), self.private_identity.as_ref()),
+        ] {
+            match (path, recorded) {
+                // 记录过的 Git 位置被移除或替换：证据不足，放弃本次结果。
+                (Some(path), Some(recorded)) => match object_identity(path).await {
+                    Ok(current) if current == *recorded => {}
+                    _ => return Err(WorkspaceError::NeedsRelink.into()),
+                },
+                (None, None) => {}
+                // 快照自相矛盾：路径与文件对象身份必须成对出现。
+                _ => return Err(WorkspaceError::InvalidBinding.into()),
+            }
+        }
+        Ok(())
+    }
+
     pub fn project_locator(&self) -> &Path {
         self.common_dir.as_deref().unwrap_or(&self.root)
     }

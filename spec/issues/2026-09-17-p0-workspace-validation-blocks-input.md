@@ -1,6 +1,6 @@
 # P0：文件系统身份与 Git 探测阻断会话创建与发送
 
-**状态**：Open（登记模式冲突与「无 Git 目录建会话」已于 2026-09-19 修复；简化目标与其余验收项待实施）
+**状态**：Open（登记模式冲突、无 Git 目录建会话与准入探测成本已于 2026-09-19 修复；简化目标其余项与其余验收项待实施）
 **优先级**：P0（用户指定；2026-09-19 依据本机确证由 P1 升级）
 **类型**：可用性缺陷 / 设计简化
 **创建日期**：2026-09-17
@@ -97,7 +97,7 @@ done
 | **目录登记模式变化后两个查询不再对称** | `resolve_workspace_impl` 的 `projects` 按 `locator OR object_identity` 匹配，`workspaces` 按 `root OR root_identity` 匹配；「目录 ↔ 仓库」转换时前者改值、后者不变 | 普通目录 `git init`（或仓库移除 `.git`）后，该目录每次建会话都返回 `NeedsRelink`，且无恢复入口；2026-09-19 本机实测确认。**已修复**（`ff3a1391`：同一目录对象的布局变化复用原登记，见「修复记录」） |
 | 普通目录也依赖 Git 可执行文件 | `peri-resources/src/sessions/sqlite_store/discovery.rs::discover` 先调用 `git rev-parse --is-inside-work-tree`；`git` 的 spawn 失败直接返回错误 | 未安装 Git 的精简 Linux / 容器不能建立普通目录会话。**已修复**（`7d59a7b9`：spawn 返回 `NotFound` 时降级为目录模式并记 `git_answered=false`；端到端见「修复记录」第 2 条） |
 | Git 发现依赖一组命令和输出约定 | `discover` 使用 `--path-format=absolute`、`--absolute-git-dir`、`worktree list --porcelain -z`，并按特定英文 stderr 前缀识别非仓库 | Git 版本、权限或命令行为差异可能成为普通会话阻塞；旧版本失败尚未实测 |
-| 相同解析重复完整发现 | `workspace.rs::resolve_workspace_impl` 先 `discover`，又在 `BEGIN IMMEDIATE` 内 `Discovery::revalidate`；后者再次 `discover` | 成功路径执行两轮发现，每轮最多五类 Git 命令，失败分支会提前返回；写事务持有期间仍等待外部进程。放大慢盘 / 慢 Git 对同库写入的影响，具体延迟未测量 |
+| 相同解析重复完整发现 | `workspace.rs::resolve_workspace_impl` 先 `discover`，又在 `BEGIN IMMEDIATE` 内 `Discovery::revalidate`；后者再次 `discover` | 成功路径执行两轮发现，每轮最多五类 Git 命令，失败分支会提前返回；写事务持有期间仍等待外部进程。放大慢盘 / 慢 Git 对同库写入的影响，具体延迟未测量。**已修复**（2026-09-19：事务内只复核关键文件对象，写事务外才做完整快照复核；一次准入的 Git 调用由两轮各 5 条降为两轮各 3 条，见「修复记录」第 3 条） |
 | 持久化身份同时绑定路径和文件对象 | `resolve_workspace_impl` 要求 project locator / identity 一致，workspace 则比较完整 discovery；`ObjectIdentity` 当前仍含 device/inode 或 Windows volume/file index | 路径可用不意味着身份通过；布局变化与旧登记冲突时返回 `NeedsRelink`，重新建会话也经过同一登记入口 |
 | 要求重关联，但没有可达的重关联操作 | `peri-acp-types/src/workspace.rs::WorkspaceError::NeedsRelink` 要求 explicit relinking；全仓静态入口检查未发现对应 Resources 公共操作、ACP request 或 TUI 流程，尚未做运行时流程验收。现行设计 §5.4 明确初始交付不提供该功能 | 同一文件对象搬到新路径，或原登记路径被新的文件对象替换，可能被阻塞，而当前 UI / ACP 缺少对应恢复入口；历史仍可只读，不等于可以继续执行 |
 | 首次输入准备阶段与回执共用期限 | `peri-tui/src/kit/steer_consumer.rs::spawn_steer_consumer` 用 10 秒 timeout 包整个 `execute`，其中包括 `ensure_session` | 准备过慢可能在 enqueue RPC 前拒绝输入；目前是代码确认的边界与条件风险，未注入慢启动复现 |
@@ -133,7 +133,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 - [ ] 目录移动、备份恢复 / 文件对象变化、普通目录执行 `git init`、Git 管理目录变化有明确且可完成的用户操作；历史不被静默改绑或隐藏。
 - [ ] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。
 - [ ] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。
-- [ ] 事务内没有无界或重复的外部探测；慢准备、取消和超时不造成输入丢失或重复执行。
+- [ ] 事务内没有无界或重复的外部探测；慢准备、取消和超时不造成输入丢失或重复执行。（前半 2026-09-19 修复，见「修复记录」第 3 条；慢准备 / 取消 / 超时未验证）
 - [ ] 身份模型调整保留已有消息、frozen snapshot、绑定关系和执行状态；冲突处理可理解、可恢复。
 - [ ] 简化后继续通过错误 cwd、配置/权限隔离、跨进程 owner 竞争及 dirty 状态保护测试。
 
@@ -164,6 +164,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 | 2026-09-19 | — | — | agent | 完成本机取证：定位到 `projects` / `workspaces` 两个查询在登记模式变化后的不对称；只读 SQL 复核并扫描全机冲突目录 |
 | 2026-09-19 | — | Open（部分修复） | 用户 | 用户要求派出 subagent 对抗根因后实施修复；按测试驱动完成登记模式冲突修复，本 issue 的整体简化目标仍未实施 |
 | 2026-09-19 | — | Open（部分修复） | agent | 补充无 Git 路径的真实 TUI 端到端验收（勾选验收条件第 2 项），生产代码未变；并同步旧库 e2e 的 schema 版本期望 |
+| 2026-09-19 | — | Open（部分修复） | agent | 完成准入探测成本收敛：事务内不再执行外部进程，一次准入的 Git 调用由两轮各 5 条降为两轮各 3 条（见「修复记录」第 3 条） |
 
 ## 修复记录
 
@@ -201,7 +202,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 - `test_worktree_dirty_reset_held_stale_and_exact_generation`（曾 6 次运行出现 2 次偶发失败）与 `test_worktree_execution_child_process`（子进程 lease，曾失败于「generation required」）都属在途 dirty 恢复改动，本 issue 未处理其内容。该改动已由他方提交为 `2c243a9d`；2026-09-19 复跑 `cargo test -p peri-resources --lib` 122 项全绿，两者均通过。
 - E2E `tests/scenarios/legacy-history-upgrade.test.ts` 断言 `PRAGMA user_version` 写死为 3，未随 schema 版本 3→4（`51f1bbe4`）同步而失败，与本 issue 无关；已改为从 `schema.rs` 读取当前版本，`run-2026-09-19T03-42-11` 通过（见「修复记录」第 2 条）。
 - 无 Git 环境（Git 可执行文件缺失）下的端到端输入已实测通过（`run-2026-09-19T04-07-31`），验收条件第 2 项已勾选；Git 版本差异、权限拒绝与慢响应仍未实测。
-- 本轮未实测 `rm -rf .git` 与目录搬迁在真实 TUI 下的组合，也未做性能测量；「简化目标」中的探测成本削减仍未实施。
+- 本轮未实测 `rm -rf .git` 与目录搬迁在真实 TUI 下的组合；「简化目标」中的探测成本削减已由「修复记录」第 3 条实施，但未做性能测量。
 
 ### 2026-09-19：无 Git 路径的端到端验收与旧库 e2e 期望同步（第 2 条，生产代码未变）
 
@@ -226,3 +227,32 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 - Git 版本差异（旧版 `--path-format=absolute` 等）、权限拒绝、慢响应仍未实测；验收条件第 6 项待办。
 - L0 唯一失败项 `tests/panels/plugin-uninstall-no-freeze.test.ts` 在全量运行中 90s 超时（用例自设 timeout），单独复跑 48s 通过。两者都不经过本 issue 的发现 / 绑定链路，判定为负载下的慢启动抖动，本 issue 未处理；若要闭环 L0 门禁需另有记录。
+
+### 2026-09-19：准入探测移出写事务并收敛 Git 调用（第 3 条）
+
+**范围**：只处理「相同解析重复完整发现」与「写事务内执行外部探测」两项已确认事实。不改变文件对象身份模型、登记唯一性、`NeedsRelink` 语义与绑定校验强度；简化目标第 3、5 项与其余验收条件仍未实施。
+
+**改动**（`peri-resources/src/sessions/sqlite_store/`）：
+
+- `discovery.rs`：三个 `rev-parse` 位置（`--show-toplevel` / `--git-common-dir` / `--absolute-git-dir`）合并为一次 `git_paths` 调用，输出按参数顺序解析；行数与请求不符时返回类型化 `DiscoveryError`，不把错位的位置当成根目录。新增 `Discovery::reassert_key_objects`：只复核 cwd 规范路径与 root / common / private 三个已记录的目录对象身份，不启动任何外部进程。
+- `workspace.rs`：`resolve_workspace_impl` 提交前的复核改用 `reassert_key_objects`；事务内的 `validate_resolved_on` 同样只复核关键文件对象；完整快照复核移到事务外，由新增的 `revalidate_registered_observation_on` 承担（`validate_resolved` 与 `validate_session_binding_impl` 在 SQL 校验后调用）。
+
+效果：一次准入的 Git 调用从「两轮各 5 条命令、其中一轮在 `BEGIN IMMEDIATE` 内」变为「两轮各 3 条命令、全部在写事务之外」。
+
+**验证证据**（`workspace_test.rs`、`discovery_test.rs` 新增用例，修复前失败）：
+
+| 验证 | 结果 |
+| --- | --- |
+| `test_worktree_registration_probes_filesystem_outside_write_lock` | 假 Git 每次被调用时用独立连接尝试 `BEGIN IMMEDIATE`（`busy_timeout=0`）并把结果写进日志；目录模式一次准入记录 2 次调用，全部为 `free`（写锁空闲），登记产生 1 条 binding |
+| `test_worktree_repository_registration_keeps_git_calls_bounded` | 仓库模式一次准入 6 次调用（两轮 × 3 条命令），全部为 `free` |
+| `test_worktree_key_object_reassertion_rejects_changed_objects` | 事务内复核的判别用例：`.git` 被移除、根目录被新文件对象替换 → `NeedsRelink`；cwd 消失 → `Unavailable`；未变化时通过 |
+| `test_worktree_git_missing_mid_discovery_is_not_directory_mode` | 合并调用后 Git 中途不可用 → 类型化 `DiscoveryError`，不降级为目录模式 |
+| `cargo test -p peri-resources --lib` | 127 项通过（改动前 122 项） |
+| `cargo test -p peri-acp --lib` | 678 项通过 |
+| `cargo clippy -p peri-resources --all-targets -- -D warnings`、`cargo fmt --all -- --check` | 无告警、无格式差异 |
+| E2E `workspace-git-init` / `workspace-no-git` / `steer-queue-live` | `run-2026-09-19T04-33-54` 3/3 通过（38s，串行、无重试） |
+
+**遗留**：
+
+- 未测量慢盘 / 慢 Git 下的实际等待时间；本条第 3 项的断言是「调用次数」与「调用时的持锁状态」，不是耗时。
+- 「准备阶段独立、可取消的期限」（`steer_consumer` 用 10 秒包住整个 `execute`）属验收条件第 7 项后半，本轮未处理。
