@@ -1,0 +1,78 @@
+name: Build LoongArch64 Static Binary
+
+on:
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    build:
+        name: Build loongarch64 musl
+        runs-on: ubuntu-24.04
+        timeout-minutes: 45
+        defaults:
+            run:
+                shell: bash
+
+        steps:
+            - name: Checkout selected ref
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: loongarch64-unknown-linux-musl
+
+            - name: Install Zig 0.15.2
+              working-directory: ${{ runner.temp }}
+              run: |
+                  curl --fail --location --retry 3 --connect-timeout 30 --max-time 300 \
+                    https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz \
+                    --output zig.tar.xz
+                  echo "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239  zig.tar.xz" | sha256sum --check
+                  tar -xf zig.tar.xz
+                  echo "${PWD}/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+
+            - name: Cache Rust build
+              uses: Swatinem/rust-cache@v2
+              with:
+                  key: manual-loongarch64-musl-zig-0.15.2-zigbuild-0.23.4
+
+            - name: Install cargo-zigbuild
+              run: cargo install cargo-zigbuild --version 0.23.4 --locked
+
+            - name: Build static binary
+              run: ./scripts/build-loongarch64.sh
+
+            - name: Package binary
+              run: |
+                  mkdir -p target/dist
+                  tar -czf target/dist/peri-linux-loongarch64.tar.gz \
+                    -C target/loongarch64-unknown-linux-musl/release peri
+                  cd target/dist
+                  sha256sum peri-linux-loongarch64.tar.gz > checksums.txt
+                  {
+                    echo "Commit: $GITHUB_SHA"
+                    echo "Target: loongarch64-unknown-linux-musl"
+                    rustc --version
+                    cargo-zigbuild --version
+                    zig version
+                  } > build-info.txt
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: peri-linux-loongarch64-${{ github.sha }}
+                  path: |
+                      target/dist/peri-linux-loongarch64.tar.gz
+                      target/dist/checksums.txt
+                      target/dist/build-info.txt
+                  if-no-files-found: error
+                  compression-level: 0
+                  retention-days: 14
