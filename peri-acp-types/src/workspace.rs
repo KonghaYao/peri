@@ -133,7 +133,9 @@ pub enum WorkspaceError {
     DiscoveryError(String),
     #[error("workspace location is unavailable")]
     Unavailable,
-    #[error("workspace identity changed; explicit relinking is required")]
+    #[error(
+        "session directory changed; this session cannot continue here: start a new session in the current directory"
+    )]
     NeedsRelink,
     #[error("session execution binding does not match the requested environment")]
     ExecutionBindingMismatch,

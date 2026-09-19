@@ -16,6 +16,29 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(10);
 const FAILURE_NOTICE_DURATION: Duration = Duration::from_secs(6);
 
+/// 失败发生的阶段：会话没准备好与输入未被受理，对用户是不同的结论。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SteerStage {
+    Prepare,
+    Admit,
+}
+
+/// 用户输入链路的失败，附带失败阶段。
+#[derive(Debug)]
+struct SteerFailure {
+    error: AcpError,
+    stage: SteerStage,
+}
+
+impl From<AcpError> for SteerFailure {
+    fn from(error: AcpError) -> Self {
+        Self {
+            error,
+            stage: SteerStage::Admit,
+        }
+    }
+}
+
 pub(crate) fn spawn_steer_consumer(
     client: AcpTuiClient,
     mut receiver: UnboundedReceiver<SteerCommand>,
@@ -44,10 +67,13 @@ pub(crate) fn spawn_steer_consumer(
             let result = tokio::select! {
                 _ = shutdown.cancelled() => break,
                 result = tokio::time::timeout(RECEIPT_TIMEOUT, execute(&client, &mut command, &cwd)) => {
-                    result.unwrap_or_else(|_| Err(AcpError::new(-32603, "user input receipt timed out")))
+                    result.unwrap_or_else(|_| {
+                        Err(AcpError::new(-32603, "user input receipt timed out").into())
+                    })
                 },
             };
-            if let Err(error) = result {
+            if let Err(failure) = result {
+                let SteerFailure { error, stage } = failure;
                 let rejected = reject_command(&mut command, &error);
                 if let Some(snapshot) = error
                     .data
@@ -60,16 +86,12 @@ pub(crate) fn spawn_steer_consumer(
                         .write()
                         .accept_snapshot(snapshot, command.epoch, false);
                 }
-                tracing::warn!(code = error.code, command_id = %command.command_id, "user input command failed");
+                tracing::warn!(code = error.code, stage = ?stage, command_id = %command.command_id, "user input command failed");
                 if !matches!(command.kind, SteerCommandKind::Refresh)
                     && warned.insert(command.command_id.clone())
                 {
                     atoms::NOTIFICATION.set(Some(atoms::Notification {
-                        message: crate::i18n::tr(if rejected {
-                            "steer-input-rejected"
-                        } else {
-                            "steer-input-uncertain"
-                        }),
+                        message: failure_notice(stage, rejected, &error),
                         until: std::time::Instant::now() + FAILURE_NOTICE_DURATION,
                     }));
                 }
@@ -79,6 +101,22 @@ pub(crate) fn spawn_steer_consumer(
             }
         }
     })
+}
+
+/// 失败提示文案。
+///
+/// 会话未能建立的失败发生在输入受理之前，服务端已给出原因：提示必须复述该原因，
+/// 不能沿用「输入未被接收」这一结论——用户据此无法判断是输入被拒还是环境不可用。
+/// 入队被拒或回执不明的结论保持原样。
+fn failure_notice(stage: SteerStage, rejected: bool, error: &AcpError) -> String {
+    match (stage, rejected) {
+        (SteerStage::Prepare, true) => crate::i18n::tr_args(
+            "steer-session-unavailable",
+            &[("error".into(), error.message.clone().into())],
+        ),
+        (_, true) => crate::i18n::tr("steer-input-rejected"),
+        (_, false) => crate::i18n::tr("steer-input-uncertain"),
+    }
 }
 
 fn refresh_command() -> Option<SteerCommand> {
@@ -118,9 +156,15 @@ async fn execute(
     client: &AcpTuiClient,
     command: &mut SteerCommand,
     cwd: &str,
-) -> Result<(), AcpError> {
+) -> Result<(), SteerFailure> {
     if command.session_id.is_empty() && matches!(command.kind, SteerCommandKind::Enqueue(_)) {
-        let session_id = client.ensure_session(cwd, None).await?;
+        let session_id = client
+            .ensure_session(cwd, None)
+            .await
+            .map_err(|error| SteerFailure {
+                error,
+                stage: SteerStage::Prepare,
+            })?;
         let epoch = atoms::BRIDGE_RESET_COUNTER.get();
         STEERS
             .state()
@@ -150,7 +194,8 @@ async fn execute(
                 -32602
             },
             "user input session changed before admission",
-        ));
+        )
+        .into());
     }
     let cached_generation = STEERS
         .state()

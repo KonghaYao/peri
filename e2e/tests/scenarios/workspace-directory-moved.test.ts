@@ -131,6 +131,8 @@ describe("已登记目录搬迁到新位置", () => {
     await tester!.waitForText(`WORKSPACE_MOVED_REPLY_${reply}`, { timeout: 30_000, interval: 100 });
     expect(await tester!.getScreenText(), "修复前这里是 -32010 的拒绝提示")
       .not.toContain("Input was not accepted");
+    // 会话未能建立的提示同样表示输入没有进入队列，不能只挡住旧的拒绝文案。
+    expect(await tester!.getScreenText()).not.toContain("Session could not be established");
   }
 
   /** 只读查询隔离数据库；peri 正在运行时也允许并发读，写入瞬间短暂重试。 */

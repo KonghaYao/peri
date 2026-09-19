@@ -170,6 +170,8 @@ describe("无 Git 环境的工作区", () => {
     await tester!.sendKey("enter");
     await tester!.waitForText(`WORKSPACE_NO_GIT_REPLY_${reply}`, { timeout: 30_000, interval: 100 });
     expect(await tester!.getScreenText(), "无 Git 不应阻断输入").not.toContain("Input was not accepted");
+    // 会话未能建立的提示同样表示输入没有进入队列，不能只挡住旧的拒绝文案。
+    expect(await tester!.getScreenText()).not.toContain("Session could not be established");
   }
 
   /** 只读查询隔离数据库；peri 正在运行时也允许并发读，写入瞬间短暂重试。 */

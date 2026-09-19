@@ -127,6 +127,8 @@ describe("目录登记后出现 .git 的工作区", () => {
     await tester!.waitForText(`WORKSPACE_GIT_INIT_REPLY_${reply}`, { timeout: 30_000, interval: 100 });
     expect(await tester!.getScreenText(), "修复前这里是 -32010 的拒绝提示")
       .not.toContain("Input was not accepted");
+    // 会话未能建立的提示同样表示输入没有进入队列，不能只挡住旧的拒绝文案。
+    expect(await tester!.getScreenText()).not.toContain("Session could not be established");
   }
 
   /**

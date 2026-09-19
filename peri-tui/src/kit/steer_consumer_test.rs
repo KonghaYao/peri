@@ -107,8 +107,9 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
             .await
             .unwrap();
     });
-    let error = execute(&client, &mut command, "/tmp").await.unwrap_err();
+    let SteerFailure { error, stage } = execute(&client, &mut command, "/tmp").await.unwrap_err();
     assert_eq!(error.code, -32603, "首次回执结果不明确");
+    assert_eq!(stage, SteerStage::Admit, "会话已建立，失败属于入队阶段");
     STEERS.state().write().reject(&command, false);
     assert!(
         STEERS.state().read().pending_recovery_ids("s").is_empty(),
@@ -232,7 +233,7 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
         );
     });
     client.register_ui_commands(&[]).await.unwrap();
-    let error = execute(&client, &mut command, "/tmp").await.unwrap_err();
+    let failure = execute(&client, &mut command, "/tmp").await.unwrap_err();
     assert!(!client.has_session(), "失败不能留下可发送输入的会话");
     assert!(atoms::ACTIVE_SESSION_ID.state().read().is_empty());
     assert!(client.current_execution_cwd().is_none());
@@ -240,9 +241,22 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
         atoms::BRIDGE_RESET_COUNTER.get() > 3,
         "真实交互 client 已推进会话边界"
     );
+    assert_eq!(
+        failure.stage,
+        SteerStage::Prepare,
+        "会话建立（含其初始化）期间的失败都属于准备阶段"
+    );
+    let rejected = reject_command(&mut command, &failure.error);
+    assert!(rejected, "入队之前的失败应确认为未受理");
+    let notice = failure_notice(failure.stage, rejected, &failure.error);
+    let reason = if snapshot_failure {
+        "snapshot failed"
+    } else {
+        "session unavailable"
+    };
     assert!(
-        reject_command(&mut command, &error),
-        "入队之前的失败应确认为未受理"
+        notice.contains(reason) && notice != crate::i18n::tr("steer-input-rejected"),
+        "准备会话失败必须说明服务端给出的原因：{notice}"
     );
     let session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
     let epoch = atoms::BRIDGE_RESET_COUNTER.get();
@@ -272,6 +286,41 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
 #[serial_test::serial]
 async fn test_steer_initial_new_session_failure_recovers_unsubmitted_draft() {
     initial_session_failure_recovers_draft(false).await;
+}
+
+#[test]
+fn test_failure_notice_distinguishes_preparation_from_admission() {
+    let reason = "session directory changed";
+    let error = AcpError::new(-32010, reason);
+    let prepared = failure_notice(SteerStage::Prepare, true, &error);
+    assert!(
+        prepared.contains(reason),
+        "准备失败必须复述服务端给出的原因：{prepared}"
+    );
+    assert_eq!(
+        failure_notice(SteerStage::Admit, true, &error),
+        crate::i18n::tr("steer-input-rejected"),
+        "入队被拒沿用原结论"
+    );
+    assert_eq!(
+        failure_notice(SteerStage::Admit, false, &error),
+        crate::i18n::tr("steer-input-uncertain"),
+        "未知回执沿用原结论"
+    );
+}
+
+#[test]
+fn test_steer_session_unavailable_notice_is_translated_in_both_locales() {
+    let error = "session unavailable".to_string();
+    for lang in ["en", "zh-CN"] {
+        let registry = crate::i18n::LcRegistry::new(Some(lang));
+        let args = vec![("error".to_string(), error.clone().into())];
+        let notice = registry.tr_args("steer-session-unavailable", &args);
+        assert!(
+            notice.contains(&error) && !notice.contains("steer-session-unavailable"),
+            "{lang} 缺少 steer-session-unavailable 文案：{notice}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -332,7 +381,7 @@ async fn test_steer_queued_retry_never_replays_into_a_new_server_generation() {
             .await
             .unwrap();
     });
-    let error = execute(&client, &mut command, "/tmp").await.unwrap_err();
+    let SteerFailure { error, .. } = execute(&client, &mut command, "/tmp").await.unwrap_err();
     assert!(
         !reject_command(&mut command, &error),
         "在途请求失败仍是未知结果"

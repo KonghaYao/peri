@@ -1176,6 +1176,7 @@ reminder-compact-summary = 压缩摘要
 steer-queue-title = 待发送 { $count }
 steer-input-rejected = 输入未被接收，原稿已保留。
 steer-input-uncertain = 暂未收到输入回执，正在核对并重试。
+steer-session-unavailable = 会话未能建立：{ $error }。原稿已保留。
 
 thread-browser-project = 项目
 thread-browser-workspace = 工作区

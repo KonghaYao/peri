@@ -1178,6 +1178,7 @@ reminder-compact-summary = Compaction summary
 steer-queue-title = Pending { $count }
 steer-input-rejected = Input was not accepted. Your draft has been kept.
 steer-input-uncertain = Waiting for the input receipt. Retrying with the same input ID.
+steer-session-unavailable = Session could not be established: { $error }. Your draft has been kept.
 
 thread-browser-project = Project
 thread-browser-workspace = Workspace

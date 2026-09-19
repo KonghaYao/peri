@@ -78,6 +78,19 @@ fn test_recovery_required_data_and_reset_request_wire_contract() {
 }
 
 #[test]
+fn test_needs_relink_message_states_a_reachable_next_step() {
+    let message = WorkspaceError::NeedsRelink.to_string();
+    assert!(
+        !message.contains("relinking"),
+        "文案不得要求产品中不存在的操作：{message}"
+    );
+    assert!(
+        message.contains("start a new session"),
+        "文案必须给出可完成的下一步：{message}"
+    );
+}
+
+#[test]
 fn test_workspace_missing_or_malformed_identity_cannot_deserialize() {
     assert!(serde_json::from_value::<SessionBinding>(
         serde_json::json!({"schema_version": 1, "revision": 1})

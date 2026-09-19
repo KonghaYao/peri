@@ -1,6 +1,6 @@
 # P0：文件系统身份与 Git 探测阻断会话创建与发送
 
-**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本与目录搬迁 / 替换的登记可用性已于 2026-09-19 修复；简化目标其余项与其余验收项待实施）
+**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示已于 2026-09-19 修复；简化目标其余项与其余验收项待实施）
 **优先级**：P0（用户指定；2026-09-19 依据本机确证由 P1 升级）
 **类型**：可用性缺陷 / 设计简化
 **创建日期**：2026-09-17
@@ -10,7 +10,7 @@
 
 用户在 SSH 终端启动新版 Peri，第一次发送「你好」即出现 `Input was not accepted. Your draft has been kept.`，输入仍保留在编辑区。2026-09-17 没有机器日志，无法从该提示单独确定失败环节。
 
-2026-09-19 在 macOS 本机取得确定性证据：**普通目录在被 Peri 登记之后执行 `git init`，该目录就永久无法创建会话**，错误为 `WorkspaceError::NeedsRelink`（`workspace identity changed; explicit relinking is required`），而产品没有对应的恢复入口。启动时的 `ensure_session` 与随后的每次输入都经过同一条准入链路，所以失败表现为「输入未被接收」。
+2026-09-19 在 macOS 本机取得确定性证据：**普通目录在被 Peri 登记之后执行 `git init`，该目录就永久无法创建会话**，错误为 `WorkspaceError::NeedsRelink`（当时文案为 `workspace identity changed; explicit relinking is required`，已于「修复记录」第 5 条改写），而产品没有对应的恢复入口。启动时的 `ensure_session` 与随后的每次输入都经过同一条准入链路，所以失败表现为「输入未被接收」。
 
 上一轮发现工作区登记强制读取目录创建时间，已在本地移除此依赖；用户进一步指出：「在 fs 的处理上已经过度设计了，inode 都出来了；然后 git 可能会有阻碍」。本次取证确认后者成立：基本会话能力被文件对象身份和 Git 布局探测绑定，一次正常的 `git init` 就足以阻断。
 
@@ -99,7 +99,7 @@ done
 | Git 发现依赖一组命令和输出约定 | `discover` 使用 `--path-format=absolute`、`--absolute-git-dir`、`worktree list --porcelain -z`，并按特定英文 stderr 前缀识别非仓库 | Git 版本、权限或命令行为差异可能成为普通会话阻塞；旧版本失败尚未实测 |
 | 相同解析重复完整发现 | `workspace.rs::resolve_workspace_impl` 先 `discover`，又在 `BEGIN IMMEDIATE` 内 `Discovery::revalidate`；后者再次 `discover` | 成功路径执行两轮发现，每轮最多五类 Git 命令，失败分支会提前返回；写事务持有期间仍等待外部进程。放大慢盘 / 慢 Git 对同库写入的影响，具体延迟未测量。**已修复**（2026-09-19：事务内只复核关键文件对象，写事务外才做完整快照复核；一次准入的 Git 调用由两轮各 5 条降为两轮各 3 条，见「修复记录」第 3 条） |
 | 持久化身份同时绑定路径和文件对象 | `resolve_workspace_impl` 要求 project locator / identity 一致，workspace 则比较完整 discovery；`ObjectIdentity` 当前仍含 device/inode 或 Windows volume/file index | 路径可用不意味着身份通过；同一登记上的布局变化按各自证据复核。**已部分修复**（2026-09-19：登记键改为组合键后，新对象或新位置单独登记，不再被旧登记挡成 `NeedsRelink`；旧绑定仍失败关闭，见「修复记录」第 4 条） |
-| 要求重关联，但没有可达的重关联操作 | `peri-acp-types/src/workspace.rs::WorkspaceError::NeedsRelink` 要求 explicit relinking；全仓静态入口检查未发现对应 Resources 公共操作、ACP request 或 TUI 流程，尚未做运行时流程验收。现行设计 §5.4 明确初始交付不提供该功能 | 同一文件对象搬到新路径，或原登记路径被新的文件对象替换，可能被阻塞，而当前 UI / ACP 缺少对应恢复入口；历史仍可只读，不等于可以继续执行。**已部分修复**（2026-09-19：当前可访问目录可建立新会话继续工作，改动记录见「修复记录」第 4 条；把已有会话改指到新位置的入口仍未提供） |
+| 要求重关联，但没有可达的重关联操作 | `peri-acp-types/src/workspace.rs::WorkspaceError::NeedsRelink` 曾要求 explicit relinking；全仓静态入口检查未发现对应 Resources 公共操作、ACP request 或 TUI 流程，尚未做运行时流程验收。现行设计 §5.4 明确初始交付不提供该功能 | 同一文件对象搬到新路径，或原登记路径被新的文件对象替换，可能被阻塞，而当前 UI / ACP 缺少对应恢复入口；历史仍可只读，不等于可以继续执行。**已部分修复**（2026-09-19：当前可访问目录可建立新会话继续工作，改动记录见「修复记录」第 4 条；文案已改为指出该前进路径、输入路径会复述失败原因，见第 5 条；把已有会话改指到新位置的入口仍未提供） |
 | 首次输入准备阶段与回执共用期限 | `peri-tui/src/kit/steer_consumer.rs::spawn_steer_consumer` 用 10 秒 timeout 包整个 `execute`，其中包括 `ensure_session` | 准备过慢可能在 enqueue RPC 前拒绝输入；目前是代码确认的边界与条件风险，未注入慢启动复现 |
 
 ## 设计判断
@@ -120,7 +120,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 2. **把 Git 布局变化当作正常演进。** 同一目录对象的 `git init` / 移除 `.git` 不应使该目录失去可用性；项目身份演进需要可预期地迁移或并存，而不是硬拒绝。
 3. **重新论证并削减 inode / file ID 的持久化与硬拒绝。** 以用户可理解的保存目录、显式选择和恢复行为验收；不再为了维持现有实现而不断扩展平台身份探测。（部分实施：登记键与绑定复核仍使用文件对象证据，但「同一路径只允许一个登记」的硬拒绝已解除，见「修复记录」第 4 条；持久化主路径是否继续携带 inode 仍未重新论证）
 4. **限制外部探测成本。** 避免在 SQLite 写事务中运行完整 Git 发现；减少同一次准入的重复检查，给准备阶段独立、可取消的期限与可见状态。（调用位置与次数已收敛，见「修复记录」第 3 条；独立可取消的准备阶段期限未实施）
-5. **提供可完成的恢复操作。** 遇到目录变化应说明影响，并提供实际可达的恢复 / 选择路径；不能只提示一个没有产品入口的「显式重关联」。优先比较简化后的目录选择与明确新会话语义，不预设必须再增加一整套保留所有 ID 的重关联框架。（部分实施：当前可访问目录按新会话语义得到新登记，用户可继续工作，见「修复记录」第 4 条；提示文案与把已有会话改指到新位置的入口仍未提供）
+5. **提供可完成的恢复操作。** 遇到目录变化应说明影响，并提供实际可达的恢复 / 选择路径；不能只提示一个没有产品入口的「显式重关联」。优先比较简化后的目录选择与明确新会话语义，不预设必须再增加一整套保留所有 ID 的重关联框架。（部分实施：当前可访问目录按新会话语义得到新登记，用户可继续工作，见「修复记录」第 4 条；绑定失败文案已改为指出该前进路径、输入路径已复述失败原因，见第 5 条；把已有会话改指到新位置的入口仍未提供）
 6. **保留必要的数据与执行契约。** 历史可读、执行 cwd 明确、不同工作区的配置和权限不串用、同一会话不被两个 owner 并发执行、取消后资源正确收尾。这些要求不因简化文件身份识别而自动取消。
 
 涉及现行 `ARC-WORKSPACE-001` 和 [工作区身份设计](../../docs/design/session-workspace-identity.md) 的调整，应在实施时同步事实源。本报告是变更需求与检查证据，不直接改写现行设计为已实现的新保证。
@@ -134,7 +134,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 - [ ] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。
 - [ ] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。
 - [ ] 事务内没有无界或重复的外部探测；慢准备、取消和超时不造成输入丢失或重复执行。（前半 2026-09-19 修复，见「修复记录」第 3 条；慢准备 / 取消 / 超时未验证）
-- [ ] 身份模型调整保留已有消息、frozen snapshot、绑定关系和执行状态；冲突处理可理解、可恢复。
+- [ ] 身份模型调整保留已有消息、frozen snapshot、绑定关系和执行状态；冲突处理可理解、可恢复。（「可理解」2026-09-19 实施：绑定失败文案指出可完成的下一步，输入路径复述服务端原因而非表述为输入被拒，见「修复记录」第 5 条；「可恢复」按第 4 条的新会话语义覆盖；frozen snapshot 与恢复入口仍未单独验收）
 - [ ] 简化后继续通过错误 cwd、配置/权限隔离、跨进程 owner 竞争及 dirty 状态保护测试。
 
 ## 与前一轮修复的关系
@@ -166,6 +166,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 | 2026-09-19 | — | Open（部分修复） | agent | 补充无 Git 路径的真实 TUI 端到端验收（勾选验收条件第 2 项），生产代码未变；并同步旧库 e2e 的 schema 版本期望 |
 | 2026-09-19 | — | Open（部分修复） | agent | 完成准入探测成本收敛：事务内不再执行外部进程，一次准入的 Git 调用由两轮各 5 条降为两轮各 3 条（见「修复记录」第 3 条） |
 | 2026-09-19 | — | Open（部分修复） | agent | 解除登记键的硬拒绝：同一路径的新文件对象与同一对象的新路径各自登记，旧绑定按各自证据复核；勾选验收条件第 4 项（见「修复记录」第 4 条） |
+| 2026-09-19 | — | Open（部分修复） | agent | 绑定失败文案改为指出可完成的下一步，输入路径在会话未能建立时复述服务端原因而非表述为输入被拒（见「修复记录」第 5 条） |
 
 ## 修复记录
 
@@ -290,6 +291,41 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 **遗留**：
 
 - 文件对象证据（device / inode 或 Windows volume / file index）仍留在登记与绑定复核的持久化主路径；本条第 4 条只解除了它的硬拒绝，没有重新论证是否保留（简化目标第 3 项的剩余部分）。
-- 仍没有把已有会话改指到新位置的入口：用户可完成的是「在当前目录建立新会话」，旧会话保持只读历史且执行失败关闭。提示文案尚未说明这一步。
+- 仍没有把已有会话改指到新位置的入口：用户可完成的是「在当前目录建立新会话」，旧会话保持只读历史且执行失败关闭。该前进路径的文案见第 5 条。
 - 同路径替换（删除重建）只做了单元测试，未做真实 TUI 端到端：运行中的 TUI 其进程 cwd 已被删除，`getcwd` 语义与登记语义无关，不适合作为该场景的端到端入口。
 - 备份恢复（restore）按同路径替换路径覆盖，未单独实测。
+
+### 2026-09-19：绑定失败文案与输入路径的原因提示（第 5 条）
+
+**范围**：只改用户可见的失败文案与输入路径的提示语义。不新增重关联入口、不改变绑定复核强度与 `NeedsRelink` 的触发条件、不动 `steer_consumer` 包住整个 `execute` 的 10 秒期限（验收条件第 7 项后半仍未实施）。
+
+**根因**：`WorkspaceError::NeedsRelink` 的文案要求 `explicit relinking`，而产品没有该操作；TUI 输入路径又在任何失败下都只显示 `steer-input-rejected`。2026-09-19 本机日志里的 84 次 `code=-32010` 都对应这条通用提示，用户无法区分「输入被拒」与「会话根本没建立」。
+
+**改动**：
+
+- `peri-acp-types/src/workspace.rs`：`NeedsRelink` 文案改为 `session directory changed; this session cannot continue here: start a new session in the current directory`，只陈述事实与用户实际可完成的下一步；恢复路径（`session-restore-failed`）本就展示错误正文，因此该文案同时改善恢复失败的提示。
+- `peri-tui/src/kit/steer_consumer.rs`：`execute` 返回 `SteerFailure { error, stage }`，`SteerStage` 区分会话建立（`Prepare`，含 `ensure_session` 内部完成的初次快照）与入队（`Admit`）；`failure_notice` 在 `Prepare` 阶段复述服务端给出的原因（新 key `steer-session-unavailable`），入队被拒与回执不明沿用原两条结论。
+- `peri-tui/locales/{en,zh-CN}/main.ftl`：新增 `steer-session-unavailable`（`会话未能建立：{ $error }。原稿已保留。`）。
+- e2e：三个工作区场景原有断言只挡 `Input was not accepted`；提示拆分后该断言不再覆盖会话建立失败，补挡 `Session could not be established`。
+
+**回归测试**（修复前失败）：
+
+| 验证 | 结果 |
+| --- | --- |
+| `peri-acp-types`：`test_needs_relink_message_states_a_reachable_next_step` | 修改前失败：`文案不得要求产品中不存在的操作：workspace identity changed; explicit relinking is required`；修改后通过，`cargo test -p peri-acp-types --lib` 423 项全绿 |
+| `peri-tui`：`test_failure_notice_distinguishes_preparation_from_admission` | 新增：准备阶段复述服务端原因，入队被拒 / 未知回执保持原结论 |
+| `peri-tui`：`test_steer_session_unavailable_notice_is_translated_in_both_locales` | 未加 FTL key 时失败（`en 缺少 steer-session-unavailable 文案`），两份 FTL 补齐后通过 |
+| `peri-tui`：`test_steer_initial_new_session_failure_recovers_unsubmitted_draft` 与其 snapshot 变体 | 未加文案时失败（`准备会话失败必须说明服务端给出的原因`）；编写断言时同时纠正一处模型错误：初次快照 RPC 在 `ensure_session` 内，两种准备失败都属准备阶段 |
+| `cargo test -p peri-tui --lib -- steer` | 54 项通过 |
+| `cargo test -p peri-tui --lib` | 1634 通过 / 2 失败：两个 macOS 剪贴板用例（`kit::input_area::image::tests::macos::clipboard_*`）在全量并行运行下争用系统 pasteboard，单独运行 5 项全过，与本改动无关 |
+| `cargo fmt --all -- --check` | 无格式差异 |
+| `cargo clippy -p peri-tui -p peri-acp-types --all-targets -- -D warnings` | 被 `peri-tui/src/kit/popups/dirty_recovery_test.rs`（`2c243a9d` 的在途工作，本改动未触及）的 4 个 lint 挡住；屏蔽 `clippy::bool_assert_comparison`、`clippy::clone_on_copy` 后本改动无告警 |
+| E2E `workspace-git-init` / `workspace-no-git` / `workspace-directory-moved` / `steer-queue-live` | `run-2026-09-19T05-05-35`、`05-05-47`、`05-06-03`、`05-06-15` 各 1/1 通过（12s / 15s / 9s / 14s，串行、无重试） |
+
+**事实源同步**：[工作区身份设计](../../docs/design/session-workspace-identity.md) §5.4（失败原因与前进路径随错误呈现；会话未建立的失败发生在输入受理之前，其提示不得表述为输入被拒）；`docs/code-index/peri-tui.md` 待发送投影行（`steer-session-unavailable`）。
+
+**遗留**：
+
+- 把已有会话改指到新位置的入口仍未提供（设计 §5.4 明确初始交付不提供）：用户可完成的是在当前目录建立新会话。
+- 启动时 `entry.rs` 的首次建会话失败仍只写日志；用户在第一次发送时才看到原因。「准备阶段可见状态」属简化目标第 4 项剩余部分，未实施。
+- 未新增覆盖该文案的真实 TUI 端到端用例：现有场景都在成功路径上，失败路径需要注入会话建立失败。
