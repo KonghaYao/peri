@@ -757,6 +757,26 @@ fn lease_process_at(path: &Path, id: &str, expected: &str, generation: i64) {
     assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
 }
 
+/// 启动一个「短命持有者」子进程：取得所有权后打印就绪行、保持 `hold_ms` 再正常收尾。
+///
+/// 返回的句柄带 stdout 管道，父进程据此确定「锁已被持有」——`flock` 的持有者何时释放
+/// 取决于调度，只有就绪信号之后的尝试才是确定性的重叠。
+fn lease_process_hold(path: &Path, id: &str, hold_ms: u64) -> std::process::Child {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sessions::sqlite_store::workspace::tests::test_worktree_execution_child_process",
+            "--nocapture",
+        ])
+        .env("PERI_TEST_WORKSPACE_DB", path)
+        .env("PERI_TEST_WORKSPACE_ID", id)
+        .env("PERI_TEST_WORKSPACE_EXPECT", "hold")
+        .env("PERI_TEST_WORKSPACE_HOLD_MS", hold_ms.to_string())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_worktree_execution_competes_across_processes_and_crash_remains_dirty() {
     let repo = repository();
@@ -871,6 +891,18 @@ async fn test_worktree_execution_child_process() {
             let _lease = store.acquire_execution_lease(&id).await.unwrap();
             std::process::exit(0);
         }
+        "hold" => {
+            let lease = store.acquire_execution_lease(&id).await.unwrap();
+            println!("HOLDER-READY");
+            use std::io::Write as _;
+            std::io::stdout().flush().unwrap();
+            let hold_ms: u64 = std::env::var("PERI_TEST_WORKSPACE_HOLD_MS")
+                .expect("hold duration required")
+                .parse()
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(hold_ms));
+            lease.mark_clean().await.unwrap();
+        }
         "reset_busy" => {
             let error = store
                 .reset_dirty_execution(&RecoveryRequiredDetails {
@@ -900,6 +932,38 @@ async fn test_worktree_execution_child_process() {
         }
         _ => panic!("unknown expected child result"),
     }
+}
+
+/// [回归测试] 短命持有者释放后的取得所有权不得被误报成 ExecutionBusy。
+///
+/// `flock` 的锁挂在 open file description 上：本进程 `fork` 出的子进程在 `exec` 前共享父
+/// 进程的描述符（`CLOEXEC` 只在子进程 `exec` 时关闭），会话生命周期里的 Git 发现、
+/// `sw_vers`、LSP 等子进程因此会留下毫秒级的瞬时持有。没有重试时，这类窗口会被上报成
+/// 「会话已被其他执行宿主占用」，把一次正常的取得所有权变成偶发失败；真正的外部持有者
+/// 并不受重试影响（超时后仍报忙，见 `test_worktree_execution_competes_across_processes_and_crash_remains_dirty`）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_worktree_transient_holder_then_release_is_not_reported_busy() {
+    const HOLD_MS: u64 = 250;
+    use std::io::BufRead as _;
+    let repo = repository();
+    let (store, db) = store().await;
+    let (id, _) = bound(&store, repo.path()).await;
+    let mut holder = lease_process_hold(&db.path().join("threads.db"), &id, HOLD_MS);
+    let mut lines = std::io::BufReader::new(holder.stdout.take().unwrap()).lines();
+    assert!(
+        lines.any(|line| line.unwrap().contains("HOLDER-READY")),
+        "持有者未在尝试前就绪"
+    );
+    let started = std::time::Instant::now();
+    let lease = store.acquire_execution_lease(&id).await.unwrap();
+    // 证明这次成功来自等待而非抢先：取得所有权只能发生在持有者释放之后。
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(HOLD_MS / 2),
+        "取得所有权发生在持有者释放之前：{:?}",
+        started.elapsed()
+    );
+    lease.mark_clean().await.unwrap();
+    assert!(holder.wait().unwrap().success());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
