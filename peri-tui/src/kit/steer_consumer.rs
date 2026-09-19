@@ -171,6 +171,9 @@ async fn execute(
 }
 
 /// 准备首会话。失败发生在输入受理之前，因此有独立的阶段标记与期限。
+///
+/// 准备期间的可见状态由 `AcpTuiClient` 在会话建立时给出（`SESSION_PREPARING`），
+/// 这里不重复投影：等待中的输入既可能自己发起建立，也可能只是在等应用启动的那次。
 async fn prepare(
     client: &AcpTuiClient,
     command: &mut SteerCommand,

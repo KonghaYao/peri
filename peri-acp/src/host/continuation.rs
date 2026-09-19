@@ -241,7 +241,9 @@ pub(crate) async fn scheduled_permission_mode(
             .permission_mode
             .clone()
     };
-    super::workspace::validate_expected(cfg, session_id, None).await?;
+    // 派发前的先行检查：只复核已记录证据。真正的准入复核在 dispatch_prompt_turn
+    // 取得 prompt lock 之后（本次准入的权威检查）。
+    super::workspace::reassert_expected(cfg, session_id, None).await?;
     Ok(permission_mode)
 }
 

@@ -73,6 +73,12 @@ impl ThreadStore for SqliteThreadStore {
     ) -> Result<peri_acp_types::workspace::ResolvedWorkspace> {
         self.validate_session_binding_impl(id).await
     }
+    async fn reassert_session_binding(
+        &self,
+        id: &ThreadId,
+    ) -> Result<peri_acp_types::workspace::ResolvedWorkspace> {
+        self.reassert_session_binding_impl(id).await
+    }
     async fn adopt_legacy_thread(
         &self,
         id: &ThreadId,

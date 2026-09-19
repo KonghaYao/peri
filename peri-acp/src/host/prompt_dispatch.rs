@@ -71,7 +71,9 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
         super::workspace::require_owner(state)?;
     }
-    super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
+    // 等待 session 锁之前的先行检查：只复核已记录证据，让绑定已失效的提交立刻失败，
+    // 而不是先排队等锁。本次准入的权威复核在取得锁之后（见下方 validate_expected）。
+    super::workspace::reassert_expected(cfg, &prompt_session_id, None).await?;
 
     // 多读者 + 单 writer lease：prompt 是写入操作，仅 writer 可提交。
     // 协议无客户端身份字段，writer 恒为 session 创建方（"default"）——

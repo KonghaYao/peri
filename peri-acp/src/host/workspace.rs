@@ -238,35 +238,109 @@ pub(crate) fn require_owner(state: &SessionState) -> Result<(), AcpError> {
     Ok(())
 }
 
+/// 绑定复核强度。
+///
+/// 准入边界（协议读请求、`session/new` | `load` | `resume` | `fork` 的入口）复核完整
+/// 发现快照；同一次准入内的后续检查只复核已记录证据——准入已经观测过完整快照，为
+/// 同一件事再跑一轮 Git 发现不会带来新证据，只会把 Git 的等待叠加到这次准入的每一步。
+#[derive(Clone, Copy)]
+pub(crate) enum BindingCheck {
+    Full,
+    Recorded,
+}
+
+/// 一次准入的权威检查：复核完整发现快照，并比对调用方给出的执行目录。
+///
+/// 一次准入只应调用一次（准入以本次复核为判定依据）；准入内的后续检查用
+/// [`reassert_expected`]。
 pub(crate) async fn validate_expected(
     cfg: &AcpServerConfig,
     session_id: &str,
     expected: Option<&str>,
 ) -> Result<ResolvedWorkspace, AcpError> {
+    check_expected(cfg, session_id, expected, BindingCheck::Full).await
+}
+
+/// 同一次准入内的检查：只复核已记录证据，不重新执行 Git 发现。
+///
+/// 绑定不存在、关系不一致、目录被替换或换位仍然失败；省去的只有「重新执行 Git
+/// 发现」——准入已经观测过完整快照，重复发现只是把 Git 的等待叠加到同一次准入。
+pub(crate) async fn reassert_expected(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    expected: Option<&str>,
+) -> Result<ResolvedWorkspace, AcpError> {
+    check_expected(cfg, session_id, expected, BindingCheck::Recorded).await
+}
+
+async fn check_expected(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    expected: Option<&str>,
+    check: BindingCheck,
+) -> Result<ResolvedWorkspace, AcpError> {
     let store = cfg.controller.sessions();
-    let workspace = store
-        .validate_session_binding(&session_id.to_owned())
-        .await
-        .map_err(workspace_error)?;
+    let id = session_id.to_owned();
+    let workspace = match check {
+        BindingCheck::Full => store.validate_session_binding(&id).await,
+        BindingCheck::Recorded => store.reassert_session_binding(&id).await,
+    }
+    .map_err(workspace_error)?;
     if let Some(expected) = expected {
-        let expected = store
-            .resolve_workspace(Path::new(expected))
-            .await
-            .map_err(workspace_error)?;
-        if expected != workspace {
-            return Err(workspace_error(WorkspaceError::ExecutionBindingMismatch));
-        }
+        expect_directory(expected, &workspace).await?;
     }
     Ok(workspace)
 }
 
+/// 调用方给出的执行目录必须与绑定指向同一目录。
+///
+/// 绑定的 cwd 在登记时已规范化，因此比对规范化后的路径即可：同一目录的等价路径
+/// （符号链接、`/var` 与 `/private/var`）仍然一致，别的目录与绑定不符。比较不再
+/// 解析登记——解析会为比较再跑一轮完整发现，也顺带登记一个与本次执行无关的目录。
+pub(crate) async fn expect_directory(
+    expected: &str,
+    workspace: &ResolvedWorkspace,
+) -> Result<(), AcpError> {
+    let expected = tokio::fs::canonicalize(expected)
+        .await
+        .map_err(|_| workspace_error(WorkspaceError::Unavailable))?;
+    if expected != workspace.cwd {
+        return Err(workspace_error(WorkspaceError::ExecutionBindingMismatch));
+    }
+    Ok(())
+}
+
+/// 加载/恢复/克隆准入的第一步：复核执行目录并取得执行所有权。
+///
+/// 这是准入入口，因此做完整复核；同一次准入内再取一次（如 `session/fork` 在
+/// `prepare_existing` 之后）用 [`reacquire_for_load`]，不重复跑 Git 发现。
 pub(crate) async fn acquire_for_load(
     cfg: &AcpServerConfig,
     sessions: &std::collections::HashMap<String, SessionState>,
     session_id: &str,
     expected: Option<&str>,
 ) -> Result<(ResolvedWorkspace, Arc<dyn SessionExecutionLease>), AcpError> {
-    validate_expected(cfg, session_id, expected).await?;
+    acquire_for_load_with(cfg, sessions, session_id, expected, BindingCheck::Full).await
+}
+
+/// 同一次准入内再次取得执行目录与所有权：只复核已记录证据。
+pub(crate) async fn reacquire_for_load(
+    cfg: &AcpServerConfig,
+    sessions: &std::collections::HashMap<String, SessionState>,
+    session_id: &str,
+    expected: Option<&str>,
+) -> Result<(ResolvedWorkspace, Arc<dyn SessionExecutionLease>), AcpError> {
+    acquire_for_load_with(cfg, sessions, session_id, expected, BindingCheck::Recorded).await
+}
+
+async fn acquire_for_load_with(
+    cfg: &AcpServerConfig,
+    sessions: &std::collections::HashMap<String, SessionState>,
+    session_id: &str,
+    expected: Option<&str>,
+    check: BindingCheck,
+) -> Result<(ResolvedWorkspace, Arc<dyn SessionExecutionLease>), AcpError> {
+    check_expected(cfg, session_id, expected, check).await?;
     let owner = if let Some(state) = sessions.get(session_id) {
         require_owner(state)?;
         state.execution_owner.clone().expect("owner checked")
@@ -277,7 +351,8 @@ pub(crate) async fn acquire_for_load(
             .await
             .map_err(workspace_error)?
     };
-    let workspace = match validate_expected(cfg, session_id, expected).await {
+    // 取得所有权后复核的是同一件事：重新发现的证据与首次复核相同，这里只复核已记录证据。
+    let workspace = match check_expected(cfg, session_id, expected, BindingCheck::Recorded).await {
         Ok(workspace) => workspace,
         Err(error) => {
             if !sessions.contains_key(session_id) {

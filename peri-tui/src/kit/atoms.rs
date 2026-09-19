@@ -251,6 +251,12 @@ pub static TERMINAL_CAPS: AtomStatic<crate::kit::terminal_caps::TerminalCaps> =
 /// message_area 据此检测新的 loading 会话，即便 is_loading 的 false→true 过渡在
 /// 同一渲染周期内完成（如 drain_input_buffer 的立即续跑）也能可靠感知。
 pub static LOADING_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0u64);
+/// 会话是否正在建立：建立过程在途为 true，会话可用或建立失败后为 false。
+///
+/// 由 `AcpTuiClient::new_session_under_gate` 在整段建立过程置位，离开即清除
+/// （成功、失败、超时或 future 被丢弃）；状态栏据此显示「正在准备会话」。这段
+/// 窗口里输入既不在待发送队列、也还没有发出请求，没有别的投影能说明正在做什么。
+pub static SESSION_PREPARING: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static VIEW_MODELS: AtomStatic<ViewModelsSnapshot> =
     AtomStatic::new(ViewModelsSnapshot::default);
 pub static MODEL_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);

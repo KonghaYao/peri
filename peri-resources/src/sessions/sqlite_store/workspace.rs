@@ -40,6 +40,20 @@ fn validate_relative(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 绑定指向的执行目录：相对路径为空时就是工作区根本身。
+///
+/// 不能直接写 `root.join(relative)`：`join("")` 会追加分隔符（`/a/b` → `/a/b/`），
+/// 同一个目录因此出现两种文本形式——登记解析返回不带分隔符的形式，绑定复核返回
+/// 带分隔符的形式。调用方按字符串比较目录（如 TUI 的线程列表缓存工作区解析结果）
+/// 会把同一个目录当成换了目录，为它重跑一次本应只做一次的完整发现。
+fn binding_cwd(root: &Path, relative: &Path) -> PathBuf {
+    if relative.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(relative)
+    }
+}
+
 impl SqliteThreadStore {
     pub(super) async fn resolve_workspace_impl(&self, cwd: &Path) -> Result<ResolvedWorkspace> {
         let (cwd, observed) = discovery::observe(cwd).await?;
@@ -133,13 +147,6 @@ impl SqliteThreadStore {
         })
     }
 
-    async fn validate_resolved(&self, workspace: &ResolvedWorkspace) -> Result<()> {
-        let mut connection = self.pool.acquire().await?;
-        Self::validate_resolved_on(&mut connection, workspace).await?;
-        // 事务外才叠加完整快照复核，写事务内不做 Git 探测（设计 §3.2）。
-        Self::revalidate_registered_observation_on(&mut connection, workspace).await
-    }
-
     /// 事务内的复核：SQL 关系加关键文件对象，不启动外部进程。
     ///
     /// Transaction callers reuse their admitted connection, including every SQL read.
@@ -156,7 +163,7 @@ impl SqliteThreadStore {
         let (project, root, snapshot) = row.ok_or(WorkspaceError::InvalidBinding)?;
         if project != workspace.project_id.to_string()
             || Path::new(&root) != workspace.root
-            || workspace.root.join(&workspace.relative_cwd) != workspace.cwd
+            || binding_cwd(&workspace.root, &workspace.relative_cwd) != workspace.cwd
         {
             return Err(WorkspaceError::ExecutionBindingMismatch.into());
         }
@@ -189,10 +196,13 @@ impl SqliteThreadStore {
         mut meta: ThreadMeta,
         workspace: &ResolvedWorkspace,
     ) -> Result<ThreadId> {
-        self.validate_resolved(workspace).await?;
+        // 提交前的复核在写事务内进行（`validate_resolved_on`：关系加关键文件对象）。
+        // 同一次准入已在解析阶段观测过完整发现，这里再跑一轮 Git 只是把同一次观测
+        // 重复一遍，代价是每个创建方都要等 Git（含慢 Git 的固定等待）。
         let write_guard = if let Some(parent) = &meta.parent_thread_id {
             let guard = self.require_execution_lease(parent).await?;
-            let parent_workspace = self.validate_session_binding_impl(parent).await;
+            // 子线程继承父线程的同一工作区：比对的是已记录的绑定身份，不需要重新发现。
+            let parent_workspace = self.reassert_session_binding_impl(parent).await;
             match parent_workspace {
                 Ok(parent_workspace) if &parent_workspace == workspace => guard,
                 other => {
@@ -306,6 +316,11 @@ impl SqliteThreadStore {
         Ok(())
     }
 
+    /// 已有绑定的权威复核：关系、关键文件对象加一次完整发现快照比对。
+    ///
+    /// 这是**一次准入的复核动作**：调用方（`session/load`、prompt 轮、`workflow/resume`
+    /// 等）以此为本次准入判定的全部依据，一次准入只应调用一次。准入内的后续检查用
+    /// `reassert_session_binding_impl`。
     pub(super) async fn validate_session_binding_impl(
         &self,
         id: &ThreadId,
@@ -315,6 +330,20 @@ impl SqliteThreadStore {
         // 事务外才叠加完整快照复核，写事务内不做 Git 探测（设计 §3.2）。
         Self::revalidate_registered_observation_on(&mut connection, &workspace).await?;
         Ok(workspace)
+    }
+
+    /// 同一次准入内的复核：SQL 关系加关键文件对象，不启动外部进程。
+    ///
+    /// 与 `validate_session_binding_impl` 的差别只有一处：不重新执行 Git 发现。准入已经
+    /// 观测过完整快照并复核过，重复发现只会把 Git 的等待（慢盘、慢 Git、Git 缺失时的
+    /// 探测）叠加到同一次准入的每一步上，不会带来新的证据。目录被替换、被换位或 Git
+    /// 位置消失仍会在这里失败——这些都由关键文件对象身份覆盖。
+    pub(super) async fn reassert_session_binding_impl(
+        &self,
+        id: &ThreadId,
+    ) -> Result<ResolvedWorkspace> {
+        let mut connection = self.pool.acquire().await?;
+        Self::validate_session_binding_on(&mut connection, id).await
     }
 
     pub(super) async fn validate_session_binding_on(
@@ -334,7 +363,7 @@ impl SqliteThreadStore {
         let workspace = ResolvedWorkspace {
             project_id: binding.project_id,
             workspace_id: binding.workspace_id,
-            cwd: root.join(&binding.cwd_relative_to_workspace),
+            cwd: binding_cwd(&root, &binding.cwd_relative_to_workspace),
             root,
             relative_cwd: binding.cwd_relative_to_workspace,
         };
@@ -406,7 +435,7 @@ impl SqliteThreadStore {
                     row.try_get(7)?,
                 ))?;
                 let root = PathBuf::from(row.try_get::<String, _>(8)?);
-                let cwd = root.join(&binding.cwd_relative_to_workspace);
+                let cwd = binding_cwd(&root, &binding.cwd_relative_to_workspace);
                 (Some(binding), Some(root), cwd)
             } else {
                 (None, None, PathBuf::from(row.try_get::<String, _>(9)?))

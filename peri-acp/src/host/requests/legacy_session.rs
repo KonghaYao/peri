@@ -45,13 +45,8 @@ pub(super) async fn prepare_for_restore(
     let meta = store.load_meta(&id).await.map_err(workspace_error)?;
     let workspace = resolve_saved_workspace(cfg, &meta).await?;
     if let Some(expected) = expected_cwd {
-        let expected = store
-            .resolve_workspace(Path::new(expected))
-            .await
-            .map_err(workspace_error)?;
-        if expected != workspace {
-            return Err(workspace_error(WorkspaceError::ExecutionBindingMismatch));
-        }
+        // 与绑定比对的是「同一目录」，不需要为此再解析登记（那会多跑一轮完整发现）。
+        crate::host::workspace::expect_directory(expected, &workspace).await?;
     }
     let snapshot = match store
         .load_frozen_snapshot(&id)

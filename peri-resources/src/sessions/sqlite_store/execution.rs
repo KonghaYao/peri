@@ -158,7 +158,9 @@ impl SqliteThreadStore {
         if self.read_only {
             return Err(WorkspaceError::ExecutionLeaseRequired.into());
         }
-        self.validate_session_binding_impl(id).await?;
+        // 取得执行所有权是准入的最后一步：绑定已在同一次准入里复核过（解析或
+        // `validate_session_binding`），这里只复核已记录证据，不再重复完整发现。
+        self.reassert_session_binding_impl(id).await?;
         let parent: (Option<String>,) =
             sqlx::query_as("SELECT parent_thread_id FROM threads WHERE id = ?")
                 .bind(id)
