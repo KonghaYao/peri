@@ -1,6 +1,6 @@
 # P0：文件系统身份与 Git 探测阻断会话创建与发送
 
-**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分、Git 命令版本兼容、三条路径的探测边界、既有保护链路复核、仓库布局端到端验收、旧版 Git 的 common dir 推导与慢响应实测、慢 Git 的端到端验收已于 2026-09-19 完成，验收条件 9 项全部勾选；简化目标第 3、4、5 项仍为部分实施，本 issue 未关闭）
+**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分、Git 命令版本兼容、三条路径的探测边界、既有保护链路复核、仓库布局端到端验收、旧版 Git 的 common dir 推导与慢响应实测、慢 Git 的端到端验收、真实旧版 Git 2.4.12 二进制验收（含一处大小写分类缺陷的修复）已于 2026-09-19 完成，验收条件 9 项全部勾选；简化目标第 3、4、5 项仍为部分实施，本 issue 未关闭）
 **优先级**：P0（用户指定；2026-09-19 依据本机确证由 P1 升级）
 **类型**：可用性缺陷 / 设计简化
 **创建日期**：2026-09-17
@@ -96,7 +96,7 @@ done
 | 首次建会话先登记完整工作区身份 | `peri-acp/src/host/requests/session_lifecycle.rs::handle_new` 先 `resolve_workspace`，再 `create_bound_thread`、取得 lease 和验证 cwd | 发送第一句话前就必须通过 FS / Git / SQLite 登记链路 |
 | **目录登记模式变化后两个查询不再对称** | `resolve_workspace_impl` 的 `projects` 按 `locator OR object_identity` 匹配，`workspaces` 按 `root OR root_identity` 匹配；「目录 ↔ 仓库」转换时前者改值、后者不变 | 普通目录 `git init`（或仓库移除 `.git`）后，该目录每次建会话都返回 `NeedsRelink`，且无恢复入口；2026-09-19 本机实测确认。**已修复**（`ff3a1391`：同一目录对象的布局变化复用原登记，见「修复记录」） |
 | 普通目录也依赖 Git 可执行文件 | `peri-resources/src/sessions/sqlite_store/discovery.rs::discover` 先调用 `git rev-parse --is-inside-work-tree`；`git` 的 spawn 失败直接返回错误 | 未安装 Git 的精简 Linux / 容器不能建立普通目录会话。**已修复**（`7d59a7b9`：spawn 返回 `NotFound` 时降级为目录模式并记 `git_answered=false`；端到端见「修复记录」第 2 条） |
-| Git 发现依赖一组命令和输出约定 | `discover` 曾使用 `--path-format=absolute`（上游文档记为 Git 2.31 引入）、`--absolute-git-dir`（2.13）与 `worktree list --porcelain -z`，并按特定英文 stderr 前缀识别非仓库 | Git 版本、权限或命令行为差异可能成为普通会话阻塞。**已部分修复**（2026-09-19：不再使用版本相关选项，相对输出按 cwd 还原，`worktree list` 不支持 `-z` 时退回换行分隔，见「修复记录」第 7 条；旧版 Git 二进制仍未实测，最低版本未确定） |
+| Git 发现依赖一组命令和输出约定 | `discover` 曾使用 `--path-format=absolute`（上游文档记为 Git 2.31 引入）、`--absolute-git-dir`（2.13）与 `worktree list --porcelain -z`，并按特定英文 stderr 前缀识别非仓库 | Git 版本、权限或命令行为差异可能成为普通会话阻塞。**已部分修复**（2026-09-19：不再使用版本相关选项，相对输出按 cwd 还原，`worktree list` 不支持 `-z` 时退回换行分隔，见「修复记录」第 7 条；真实旧版 Git 2.4.12 二进制已实测——四种目录组合均可建会话，但实测暴露出一处大小写敏感的分类缺陷并已修复，见第 13 条；2.4.12 之前的版本未测） |
 | 相同解析重复完整发现 | `workspace.rs::resolve_workspace_impl` 先 `discover`，又在 `BEGIN IMMEDIATE` 内 `Discovery::revalidate`；后者再次 `discover` | 成功路径执行两轮发现，每轮最多五类 Git 命令，失败分支会提前返回；写事务持有期间仍等待外部进程。放大慢盘 / 慢 Git 对同库写入的影响，具体延迟未测量。**已修复**（2026-09-19：事务内只复核关键文件对象，写事务外才做完整快照复核；一次准入的 Git 调用由两轮各 5 条降为两轮各 3 条，见「修复记录」第 3 条） |
 | 持久化身份同时绑定路径和文件对象 | `resolve_workspace_impl` 要求 project locator / identity 一致，workspace 则比较完整 discovery；`ObjectIdentity` 当前仍含 device/inode 或 Windows volume/file index | 路径可用不意味着身份通过；同一登记上的布局变化按各自证据复核。**已部分修复**（2026-09-19：登记键改为组合键后，新对象或新位置单独登记，不再被旧登记挡成 `NeedsRelink`；旧绑定仍失败关闭，见「修复记录」第 4 条） |
 | 要求重关联，但没有可达的重关联操作 | `peri-acp-types/src/workspace.rs::WorkspaceError::NeedsRelink` 曾要求 explicit relinking；全仓静态入口检查未发现对应 Resources 公共操作、ACP request 或 TUI 流程，尚未做运行时流程验收。现行设计 §5.4 明确初始交付不提供该功能 | 同一文件对象搬到新路径，或原登记路径被新的文件对象替换，可能被阻塞，而当前 UI / ACP 缺少对应恢复入口；历史仍可只读，不等于可以继续执行。**已部分修复**（2026-09-19：当前可访问目录可建立新会话继续工作，改动记录见「修复记录」第 4 条；文案已改为指出该前进路径、输入路径会复述失败原因，见第 5 条；把已有会话改指到新位置的入口仍未提供） |
@@ -132,7 +132,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 - [x] 新会话、已有会话、历史只读访问分别验证，不让 Git 或目录身份检查不必要地传播到其他能力。（2026-09-19：新会话见「修复记录」第 3 条的调用次数与持锁状态；已有会话与历史只读访问见第 9 条——复核恰好一轮观测且全部在写事务外，列表 / 消息 / frozen / 绑定在读路径上 0 次 Git 调用，登记目录删除后仍可读）
 - [x] 目录移动、备份恢复 / 文件对象变化、普通目录执行 `git init`、Git 管理目录变化有明确且可完成的用户操作；历史不被静默改绑或隐藏。（2026-09-19 修复，见「修复记录」第 4 条：搬迁与同路径替换各有单元测试，搬迁另有真实 TUI 端到端用例；备份恢复按「同路径新对象」路径覆盖，未单独实测）
 - [x] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。（2026-09-19：新增真实 TUI 用例 `e2e/tests/scenarios/workspace-worktree-layouts.test.ts` 覆盖子目录 / linked worktree / 独立 clone 三种布局的执行目录与项目归属，见「修复记录」第 10 条；主仓库与 symlink 由 resources 单元测试 `test_worktree_main_linked_subdirectory_and_clone_identity`、`test_worktree_symlink_discovery_reuses_identity_but_binding_escape_is_rejected` 覆盖——进程 cwd 由 `getcwd` 给出物理路径，TUI 层看不到符号链接代理，该场景无法在 TUI 层观测）
-- [x] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。（缺失见「修复记录」第 2 条端到端；权限拒绝与调用次数见第 3 条假 Git 判别用例——目录模式 2 次、仓库模式 6 次、已有会话复核 3 次，全部在写事务外；旧版本与慢响应见第 11 条：旧版本仍由拒绝新选项的假 Git 验证，未运行真实旧版二进制、最低支持版本未确定；慢响应为实测时间线——假 Git 每次调用固定等待 400ms 时准入总耗时 2.938s、首次到末次调用 2.148s、6 次调用全部记录为写锁空闲，挂起 Git 实测 5.003s 后以类型化超时错误结束。30s = 6 次 × 5s 是静态上限，不是实测耗时；同一条链路在真实 TUI 上的慢 Git 实测见第 12 条——输入到回复 2.489s、窗口内 6 次发现调用、无重复入队）
+- [x] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。（缺失见「修复记录」第 2 条端到端；权限拒绝与调用次数见第 3 条假 Git 判别用例——目录模式 2 次、仓库模式 6 次、已有会话复核 3 次，全部在写事务外；旧版本见第 11 条（假 Git 拒绝新选项）与第 13 条（真实 Git 2.4.12 二进制：仓库、普通目录、子目录与现代 Git 建的 linked worktree 四种组合均可建会话，并修掉实测暴露的大小写分类缺陷）；慢响应为实测时间线——假 Git 每次调用固定等待 400ms 时准入总耗时 2.938s、首次到末次调用 2.148s、6 次调用全部记录为写锁空闲，挂起 Git 实测 5.003s 后以类型化超时错误结束。30s = 6 次 × 5s 是静态上限，不是实测耗时；同一条链路在真实 TUI 上的慢 Git 实测见第 12 条——输入到回复 2.489s、窗口内 6 次发现调用、无重复入队）
 - [x] 事务内没有无界或重复的外部探测；慢准备、取消和超时不造成输入丢失或重复执行。（前半见「修复记录」第 3 条；后半见第 6 条：慢准备仍被受理且只入队一次、准备超时恢复原稿且不发送入队请求、准备期间取消不产生投递，均为 consumer 级回归；回执超时的「未知结果按同身份重试」沿用既有用例 `test_steer_uncertain_receipt_retries_identical_command_and_input`）
 - [x] 身份模型调整保留已有消息、frozen snapshot、绑定关系和执行状态；冲突处理可理解、可恢复。（「可理解」2026-09-19 实施：绑定失败文案指出可完成的下一步，输入路径复述服务端原因而非表述为输入被拒，见「修复记录」第 5 条；「可恢复」按第 4 条的新会话语义覆盖；保留性证据见第 8 条：schema 4→5 迁移前后逐字节比对绑定 / 执行状态与线程行 / 消息，并对 frozen snapshot 做存储层读取。把已有会话改指到新位置的入口仍未提供，属设计 §5.4 的明确限制）
 - [x] 简化后继续通过错误 cwd、配置/权限隔离、跨进程 owner 竞争及 dirty 状态保护测试。（2026-09-19 复核：错误 cwd 见 `legacy_adoption_rejects_changed_cwd_child_and_lost_native_binding`；配置 / 权限隔离见 `worktree_new_resources_use_the_target_directory`、`worktree_scheduled_approval_uses_session_permission_and_rejects_closed_owner`、`test_update_config_refreshes_existing_owner_environments`；跨进程 owner 竞争见 `test_worktree_execution_competes_across_processes_and_crash_remains_dirty`、`test_worktree_execution_child_process`；dirty 保护见 `test_worktree_dirty_reset_held_stale_and_exact_generation`、`test_worktree_cancelled_mutation_remains_dirty_and_cannot_publish_clean`、`test_worktree_clean_waits_for_admitted_mutation_before_releasing_os_ownership` 及 ACP 侧 `test_workspace_dirty_recovery_original_load_and_frozen`、`test_dirty_reset_then_failing_reload_keeps_store_state_and_original_id`、`test_dirty_reset_without_initialize_is_rejected_without_store_effect`。全量 `cargo test -p peri-resources --lib` 138 项、`cargo test -p peri-acp --lib` 678 项通过）
@@ -175,6 +175,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 | 2026-09-19 | — | Open（部分修复） | agent | 新增仓库布局端到端用例：真实 TUI 上验证子目录 / linked worktree / 独立 clone 的执行目录与项目归属，变异检验通过；勾选验收条件第 5 项（见「修复记录」第 10 条，生产代码未变） |
 | 2026-09-19 | — | Open（部分修复） | agent | 旧版 Git 的 common dir 改为读 `commondir` 文件推导（不再请求 Git 2.5 引入的 `--git-common-dir`），未知选项回显按不兼容处理，`worktree` 子命令缺失时只跳过交叉核对；慢 Git 实测等待时间线与单次超时边界，勾选验收条件第 6 项——验收条件 9 项至此全部勾选（见「修复记录」第 11 条） |
 | 2026-09-19 | — | Open（部分修复） | agent | 慢 Git 补端到端验收：真实 TUI / ACP 路径上每次 Git 调用固定等待 300ms，输入到回复 2.489s、6 次发现调用、无重复入队，观测仍为仓库模式（见「修复记录」第 12 条，生产代码未变） |
+| 2026-09-19 | — | Open（部分修复） | agent | 真实旧版 Git 2.4.12 二进制验收：仓库、普通目录、子目录与现代 Git 建的 linked worktree 均可建会话；实测暴露大小写敏感的分类缺陷（旧版 `fatal: Not a git repository…` 被判成类型化发现错误，普通目录在那个版本上完全建不了会话），已修复并补回归用例，真实二进制变异检验通过（见「修复记录」第 13 条） |
 
 ## 修复记录
 
@@ -514,7 +515,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 **遗留**：
 
-- 仍未运行真实旧版 Git（本机只有 2.39）：最低支持版本未确定。`commondir` 文件在各旧版中是否都存在同样只在文档与假 Git 层面验证；若某个版本不写该文件，linked worktree 会各自成项目（不阻断使用，但项目分组退化），宣称支持版本前需实测或查证。
+- 仍未运行真实旧版 Git（本机只有 2.39）：最低支持版本未确定。`commondir` 文件在各旧版中是否都存在同样只在文档与假 Git 层面验证；若某个版本不写该文件，linked worktree 会各自成项目（不阻断使用，但项目分组退化），宣称支持版本前需实测或查证。（真实旧版二进制由第 13 条补上：Git 2.4.12 实测，`commondir` 在新版 Git 建的 linked worktree 上存在但旧版 Git 本身读不了该 worktree，按普通目录降级）
 - 实测是本机单次运行的值（macOS，含每次调用约 100ms 的进程启动与 SQLite 探测开销），不是跨机器的性能保证；两轮共 6 次的静态上限 30s 仍然只是预算。
 - 慢响应的端到端由第 12 条补上：TUI / ACP 全链路用同一个慢 Git 脚本实测，输入到回复 2.49s、窗口内 6 次发现调用、无重复入队。
 
@@ -544,3 +545,54 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 - 端到端与 resources 层用的是同一个常量语义，但两边各自维护注入值（Rust 用例 400ms、E2E 300ms）；没有把「单次调用预算」暴露成可配置项，因此无法用真实慢 Git 逼近 5s 边界。要覆盖边界仍需在 resources 层做（第 11 条已覆盖挂起与超时）。
 - E2E 的耗时断言是下界（≥ 注入等待），不是耗时回归门禁：机器变慢不会失败，只有慢 Git 没有被真正用上或会话被阻断才会失败。
+
+### 2026-09-19：真实旧版 Git 2.4.12 的二进制验收与大小写分类缺陷（第 13 条）
+
+**范围**：把「旧版 Git」的证据从假 Git 脚本升级为真实二进制，并修掉实测暴露出的缺陷。不改动发现命令集合（第 11 条的两条 `rev-parse` 加一次 `worktree list`）、登记键、调用次数与 `git_answered` 语义。
+
+**方法**：本机源码构建 Git 2.4.12，把它放进 PATH shim，**并作为该 PATH 里唯一的 `git`**；被测 Peri 用 `env -i` 显式构造环境启动（与 `workspace-no-git` 同一手法）。构建与下载步骤见下方「取证方法」。
+
+**实测发现（真实缺陷）**：Git 返回的「不是仓库」文案随版本变化——2.4.12 在非仓库目录回答 `fatal: Not a git repository (or any of the parent directories): .git`（大写 `N`），在它读不了的 linked worktree 里回答 `fatal: Not a git repository: <gitdir>`；2.39 回答小写 `not`。`observe_with_git` 用大小写敏感前缀 `fatal: not a git repository (` 判定「不是仓库」（该判定由 `275fa850d` 引入），于是旧版 Git 下**普通目录**与**旧版读不了的 linked worktree** 都被判成 `DiscoveryError("Git rejected repository discovery")`：那个版本的用户在任何非仓库目录都建不了会话，症状与本次 P0 完全相同——草稿留在编辑区、`projects` / `workspaces` / `session_bindings` 三表全空。假 Git 用例（第 11 条）按新版小写文案模拟，覆盖不到这个差异。
+
+**改动**（`peri-resources/src/sessions/sqlite_store/discovery.rs`）：新增 `is_not_a_repository`，前缀按 `eq_ignore_ascii_case` 比较。放宽的只是大小写而非匹配范围——真实拒绝（权限不足、`dubious ownership`、仓库损坏）的文案不含该前缀，仍原样上报为类型化发现错误。
+
+**回归测试**（`discovery_test.rs`）：
+
+| 验证 | 结果 |
+| --- | --- |
+| `test_worktree_legacy_not_a_repository_wording_is_directory_mode`（新增） | 两种旧版文案都必须得到目录模式（`git_answered = true`、root = cwd、common / private 为 null）。修复前失败于 `旧版文案 … 不应报错：workspace discovery failed: Git rejected repository discovery` |
+| `test_worktree_git_rejection_is_not_directory_mode`（既有） | `dubious ownership` 仍上报类型化发现错误：证明放宽没有扩大到真实拒绝 |
+| `cargo test -p peri-resources --lib -- sessions::sqlite_store::discovery` | 17 项通过 |
+
+**端到端证据（真实 Git 2.4.12，临时用例跑完即删，未入库）**：
+
+| 场景 | 修复后 | 变异检验（把分类改回大小写敏感并重编译真实 binary） |
+| --- | --- | --- |
+| 旧版 `git init` 建的仓库 | 通过（2.0s）：仓库模式，`common_dir == private_dir == <repo>/.git`，建会话并发输入收到回复，1 project / 1 binding、模型请求 1 次 | 通过（仓库里 Git 正常退出，不经过该前缀） |
+| 普通目录（非仓库） | 通过（2.0s）：目录模式，`root` = 真实路径，common / private 为 null，会话与回复正常 | **失败**：30s 内收不到回复，草稿留在编辑区，三表全空 |
+| 现代 Git 建的 linked worktree，交给只有旧版 Git 的 Peri | 通过（2.1s）：旧版 Git 回答 `Not a git repository: <gitdir>`，按目录项目降级，会话可用、1 个绑定 | **失败**：同上 |
+
+变异检验用真实二进制证明了失败与修复都发生在生产路径上，而不是测试装置的产物；恢复改动后复跑 3/3 通过。
+
+**结论与限制**：
+
+- Git 2.4.12 可用：仓库、普通目录、子目录、现代 Git 建的 linked worktree 四种组合都能建会话。这是**已验证的版本**，不是「最低支持版本」——2.4.12 之前的版本仍未测。
+- 旧版 Git 读不了现代 Git 建的 linked worktree 是正确的降级（设计 §3.3：Git 明确回答「不是仓库」即目录项目）：该项目分组退化为目录项目，但会话可用，符合「简化目标」第 1 条「不能把所有探测错误悄悄解释成不是仓库」的反面要求——这里是 Git 的真实回答。
+- 真实旧版二进制不进 e2e 常规用例：仓库没有环境变量开关或条件跳过先例，且该二进制需手工构建、机器上不存在，留在 L2 / release 门禁会变成环境依赖。可复用的方法记在下面；缺陷本身由单元回归用例（两种文案）守住。
+
+**取证方法（可复用）**：
+
+```bash
+# 1) 构建真实 Git 2.4.12（无需 OpenSSL；NO_ICONV 不能加，compat/precompose_utf8.c 依赖 iconv）
+curl -LO https://www.kernel.org/pub/software/scm/git/git-2.4.12.tar.gz
+tar xf git-2.4.12.tar.gz && cd git-2.4.12
+make NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_CURL=1 NO_EXPAT=1 \
+     NO_OPENSSL=1 NO_APPLE_COMMON_CRYPTO=1 prefix=/tmp/git-old/install install
+/tmp/git-old/install/bin/git --version   # git version 2.4.12
+
+# 2) 端到端：PATH shim 里只放这一个 git（其余条目从 /usr/bin、/bin 软链并跳过 git*），
+#    用 `env -i` 启动 target/debug/peri，前提守卫断言 `git --version` 含 2.4.12。
+#    参考 e2e/tests/scenarios/workspace-no-git.test.ts 的 shim 与 env -i 构造。
+```
+
+**事实源同步**：[兼容性待办](2026-09-17-platform-compatibility.md)「Git 是普通目录启动的隐式依赖」与「旧 Git 命令能力未覆盖」两条（前者在本次核对时已与现行实现不符，一并更正）；[工作区身份设计](../../docs/design/session-workspace-identity.md) §3.1 补一句「不是仓库」的判定按 stderr 前缀忽略大小写，以及放宽范围止于大小写。`docs/code-index/peri-resources.md` 的工作区身份行只登记入口函数（`resolve_workspace` 等）与整体契约，分类实现是 helper 级细节，该行未涉及、本次未改。

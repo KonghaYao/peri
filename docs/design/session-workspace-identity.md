@@ -104,6 +104,12 @@ linked worktree 的这两者不同；主工作树通常相同。
 这属于证据不足而非「不是仓库」，真实失败仍原样上报。路径按所在文件系统
 canonicalize，不统一小写、不使用 lossy 转换生成身份。
 
+「不是仓库」的判定按 stderr 前缀比较完成，忽略大小写：该文案随版本变化（Git 2.4.12
+为 `fatal: Not a git repository (or any of the parent directories): .git`，2.39 起为
+小写 `not`），按大小写敏感匹配会把旧版 Git 下的普通目录判成类型化发现错误，使这些
+目录完全无法建立会话。放宽的只是大小写，不是匹配范围：权限不足、unsafe repository
+与损坏仓库的文案不含该前缀，仍按真实失败原样上报。
+
 ### 3.2 登记裁决
 
 由 `peri-resources` 持有本地登记表，分配 opaque ID。Git 路径是发现线索，不是

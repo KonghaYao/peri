@@ -141,6 +141,40 @@ async fn test_worktree_git_rejection_is_not_directory_mode() {
     ));
 }
 
+/// [回归测试] 旧版 Git 的「不是仓库」回答必须与新版一样被识别为目录模式。
+///
+/// 文案随版本变化：本机真实 Git 2.4.12 在非仓库目录回答
+/// `fatal: Not a git repository (or any of the parent directories): .git`（大写 N），
+/// Git 2.39 回答小写 `not`；旧版在 linked worktree 里还多一种
+/// `fatal: Not a git repository: <path>`。按大小写敏感的前缀匹配会让**普通目录**在
+/// 旧版 Git 下被判成类型化发现错误——用户在那个版本上根本建不了会话，而 Git 已明确
+/// 回答「不是仓库」，本应得到目录项目（设计 §3.3）。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_legacy_not_a_repository_wording_is_directory_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    for message in [
+        "fatal: Not a git repository (or any of the parent directories): .git",
+        "fatal: Not a git repository: /tmp/repository/.git/worktrees/linked",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("git");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\nprintf '{message}' >&2\nexit 128\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (cwd, observed) = observe_with_git(directory.path(), program.as_os_str())
+            .await
+            .unwrap_or_else(|error| panic!("旧版文案 {message:?} 不应报错：{error:?}"));
+        assert!(observed.git_answered, "Git 给了明确回答：{message:?}");
+        assert_eq!(observed.discovery.root, cwd, "{message:?}");
+        assert_eq!(observed.discovery.common_dir, None, "{message:?}");
+        assert_eq!(observed.discovery.private_dir, None, "{message:?}");
+    }
+}
+
 /// [回归测试] 挂起的 Git 在单次调用预算内以类型化错误结束，不无限等待。
 ///
 /// 静态上限是「单次 5s × 每轮调用数」（仓库模式两轮共 6 次 ⇒ 30s）。这里验证的是没有

@@ -285,6 +285,22 @@ async fn git_paths(
     Ok(paths)
 }
 
+/// Git 回答「这个路径不在仓库里」：只有这种失败是「不是仓库」的证据。
+///
+/// 文案随版本变化。本机真实 Git 2.4.12 回答
+/// `fatal: Not a git repository (or any of the parent directories): .git`，在它读不了的
+/// linked worktree 里回答 `fatal: Not a git repository: <gitdir>`（都是大写 `N`）；
+/// 2.39 起改为小写 `not`。按大小写敏感匹配会把旧版 Git 下的**普通目录**判成
+/// `Git rejected repository discovery`，于是那个版本的用户连非仓库目录都建不了会话——
+/// 而 Git 已经明确回答「不是仓库」，本应得到目录项目（设计 §3.3）。
+///
+/// 放宽的只是大小写，不是匹配范围：真实拒绝（权限、unsafe repository、损坏仓库）的
+/// 文案不含这个前缀，仍然原样上报。
+fn is_not_a_repository(stderr: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"fatal: not a git repository";
+    stderr.len() >= PREFIX.len() && stderr[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+}
+
 /// 旧版 Git 不认识新选项时走用法错误（打印 usage 并非零退出），而不是给出探测结果。
 ///
 /// 只有这种失败才允许退回兼容参数；真实失败（权限、损坏仓库等）必须原样上报，
@@ -405,8 +421,7 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
     // `Some` 表示 Git 给出了回答（即使回答是「不是仓库」）；`None` 表示 Git 不可用。
     let git_answered = inside.is_some();
     if let Some(output) = &inside {
-        if !output.status.success() && !output.stderr.starts_with(b"fatal: not a git repository (")
-        {
+        if !output.status.success() && !is_not_a_repository(&output.stderr) {
             return Err(
                 WorkspaceError::DiscoveryError("Git rejected repository discovery".into()).into(),
             );
