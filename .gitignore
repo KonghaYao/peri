@@ -163,6 +163,7 @@ claude-blog-cn
 
 *.py
 !scripts/test-i386.py
+!scripts/test-loongarch64.py
 build
 .tmp
 tmp/

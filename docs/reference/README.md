@@ -7,5 +7,6 @@
 - [langfuse-data-integrity.md](langfuse-data-integrity.md)：Langfuse 数据检查手册。
 - [tui-manual-verification.md](tui-manual-verification.md)：可重复执行的 TUI 手工验证清单。
 - [i386-static-build.md](i386-static-build.md)：cargo-zigbuild 32 位 x86 Linux 静态构建与容器验证。
+- [loongarch64-build.md](loongarch64-build.md)：cargo-zigbuild 64 位 LoongArch Linux 静态构建与模拟器验证。
 
 参考资料不记录某次执行的勾选状态、临时日志或 active issue 进度。
