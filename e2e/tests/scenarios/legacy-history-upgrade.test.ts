@@ -9,6 +9,21 @@ import { execFileSync } from "node:child_process";
 import { TmuxTester } from "tui-tester";
 import { PROJECT_ROOT, sendPrompt } from "../../helpers/peri.js";
 
+/**
+ * 写打开时把旧库升级到的目标版本，事实源是 `schema.rs` 里的 `PRAGMA user_version`
+ * （设计 §8：读写打开在同一事务内升级；只读打开不升级）。旧库升级到「当前版本」
+ * 是契约本身，写死字面量会在下一次 schema 升版时变成假失败。
+ */
+const CURRENT_SCHEMA_VERSION = (() => {
+  const source = fs.readFileSync(
+    path.join(PROJECT_ROOT, "peri-resources/src/sessions/sqlite_store/schema.rs"),
+    "utf8",
+  );
+  const match = /PRAGMA user_version = (\d+)/.exec(source);
+  if (!match) throw new Error("schema.rs 未声明 PRAGMA user_version");
+  return Number(match[1]);
+})();
+
 describe("legacy history upgrade", () => {
   let directory: string;
   let saved: string;
@@ -114,7 +129,7 @@ describe("legacy history upgrade", () => {
     }, { timeout: 5_000 }).toBe(true);
   }
 
-  it("lists upgraded history and previews a missing directory without binding it, including after reopening schema 3", async () => {
+  it("lists upgraded history and previews a missing directory without binding it, including after reopening the upgraded database", async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       const ui = await launch();
       await ui.waitForText("AI operating system", { timeout: 20_000, interval: 100 });
@@ -125,7 +140,7 @@ describe("legacy history upgrade", () => {
       await ui.waitForText("LEGACY_DELETED_PROJECT", { timeout: 10_000, interval: 100 });
       await ui.sendKey("v");
       await ui.waitForText("LEGACY_READ_ONLY_MESSAGE", { timeout: 10_000, interval: 100 });
-      expect(row("PRAGMA user_version")?.user_version).toBe(3);
+      expect(row("PRAGMA user_version")?.user_version).toBe(CURRENT_SCHEMA_VERSION);
       expect(row("SELECT COUNT(*) AS n FROM session_bindings WHERE thread_id = ?", missingId)?.n).toBe(0);
       expect(row("SELECT COUNT(*) AS n FROM session_bindings WHERE thread_id = ?", oldId)?.n).toBe(0);
       expect(row("SELECT frozen_context FROM threads WHERE id = ?", missingId)?.frozen_context).toBeNull();

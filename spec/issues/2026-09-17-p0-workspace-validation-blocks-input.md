@@ -1,6 +1,6 @@
 # P0：文件系统身份与 Git 探测阻断会话创建与发送
 
-**状态**：Open（登记模式冲突已于 2026-09-19 修复；简化目标与其余验收项待实施）
+**状态**：Open（登记模式冲突与「无 Git 目录建会话」已于 2026-09-19 修复；简化目标与其余验收项待实施）
 **优先级**：P0（用户指定；2026-09-19 依据本机确证由 P1 升级）
 **类型**：可用性缺陷 / 设计简化
 **创建日期**：2026-09-17
@@ -94,8 +94,8 @@ done
 | 事实 | 代码入口与证据 | 用户影响 |
 | --- | --- | --- |
 | 首次建会话先登记完整工作区身份 | `peri-acp/src/host/requests/session_lifecycle.rs::handle_new` 先 `resolve_workspace`，再 `create_bound_thread`、取得 lease 和验证 cwd | 发送第一句话前就必须通过 FS / Git / SQLite 登记链路 |
-| **目录登记模式变化后两个查询不再对称** | `resolve_workspace_impl` 的 `projects` 按 `locator OR object_identity` 匹配，`workspaces` 按 `root OR root_identity` 匹配；「目录 ↔ 仓库」转换时前者改值、后者不变 | 普通目录 `git init`（或仓库移除 `.git`）后，该目录每次建会话都返回 `NeedsRelink`，且无恢复入口；2026-09-19 本机实测确认 |
-| 普通目录也依赖 Git 可执行文件 | `peri-resources/src/sessions/sqlite_store/discovery.rs::discover` 先调用 `git rev-parse --is-inside-work-tree`；`git` 的 spawn 失败直接返回错误 | 未安装 Git 的精简 Linux / 容器不能建立普通目录会话 |
+| **目录登记模式变化后两个查询不再对称** | `resolve_workspace_impl` 的 `projects` 按 `locator OR object_identity` 匹配，`workspaces` 按 `root OR root_identity` 匹配；「目录 ↔ 仓库」转换时前者改值、后者不变 | 普通目录 `git init`（或仓库移除 `.git`）后，该目录每次建会话都返回 `NeedsRelink`，且无恢复入口；2026-09-19 本机实测确认。**已修复**（`ff3a1391`：同一目录对象的布局变化复用原登记，见「修复记录」） |
+| 普通目录也依赖 Git 可执行文件 | `peri-resources/src/sessions/sqlite_store/discovery.rs::discover` 先调用 `git rev-parse --is-inside-work-tree`；`git` 的 spawn 失败直接返回错误 | 未安装 Git 的精简 Linux / 容器不能建立普通目录会话。**已修复**（`7d59a7b9`：spawn 返回 `NotFound` 时降级为目录模式并记 `git_answered=false`；端到端见「修复记录」第 2 条） |
 | Git 发现依赖一组命令和输出约定 | `discover` 使用 `--path-format=absolute`、`--absolute-git-dir`、`worktree list --porcelain -z`，并按特定英文 stderr 前缀识别非仓库 | Git 版本、权限或命令行为差异可能成为普通会话阻塞；旧版本失败尚未实测 |
 | 相同解析重复完整发现 | `workspace.rs::resolve_workspace_impl` 先 `discover`，又在 `BEGIN IMMEDIATE` 内 `Discovery::revalidate`；后者再次 `discover` | 成功路径执行两轮发现，每轮最多五类 Git 命令，失败分支会提前返回；写事务持有期间仍等待外部进程。放大慢盘 / 慢 Git 对同库写入的影响，具体延迟未测量 |
 | 持久化身份同时绑定路径和文件对象 | `resolve_workspace_impl` 要求 project locator / identity 一致，workspace 则比较完整 discovery；`ObjectIdentity` 当前仍含 device/inode 或 Windows volume/file index | 路径可用不意味着身份通过；布局变化与旧登记冲突时返回 `NeedsRelink`，重新建会话也经过同一登记入口 |
@@ -128,7 +128,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 ## 验收条件
 
 - [x] 普通目录登记后执行 `git init`（以及已登记仓库移除 `.git`）仍能创建会话并发送输入；历史绑定不被静默改绑或隐藏。（2026-09-19 修复，见「修复记录」）
-- [ ] 无 Git 的普通目录能新建会话并成功发送一次输入；无重复入队，草稿状态正确。
+- [x] 无 Git 的普通目录能新建会话并成功发送一次输入；无重复入队，草稿状态正确。（2026-09-19 修复，见「修复记录」第 2 条）
 - [ ] 新会话、已有会话、历史只读访问分别验证，不让 Git 或目录身份检查不必要地传播到其他能力。
 - [ ] 目录移动、备份恢复 / 文件对象变化、普通目录执行 `git init`、Git 管理目录变化有明确且可完成的用户操作；历史不被静默改绑或隐藏。
 - [ ] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。
@@ -163,6 +163,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 | 2026-09-19 | P1 | P0 | 用户 | 用户在 macOS 本机确证：普通目录 `git init` 后该目录永久无法创建会话，错误 `NeedsRelink`，且无恢复入口 |
 | 2026-09-19 | — | — | agent | 完成本机取证：定位到 `projects` / `workspaces` 两个查询在登记模式变化后的不对称；只读 SQL 复核并扫描全机冲突目录 |
 | 2026-09-19 | — | Open（部分修复） | 用户 | 用户要求派出 subagent 对抗根因后实施修复；按测试驱动完成登记模式冲突修复，本 issue 的整体简化目标仍未实施 |
+| 2026-09-19 | — | Open（部分修复） | agent | 补充无 Git 路径的真实 TUI 端到端验收（勾选验收条件第 2 项），生产代码未变；并同步旧库 e2e 的 schema 版本期望 |
 
 ## 修复记录
 
@@ -197,8 +198,31 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 **遗留**：
 
-- `test_worktree_dirty_reset_held_stale_and_exact_generation` 在无本修复的基线上 6 次运行出现 2 次偶发失败，属在途 dirty 恢复改动，未在本轮处理。
-- 同属在途 dirty 恢复改动的 `test_worktree_execution_child_process`（子进程 lease 用例）在当前工作区失败于「generation required」；`workspace_test.rs` 在本轮期间被他方持续编辑（+141 → +205 行），未在本轮处理。
-- E2E `tests/scenarios/legacy-history-upgrade.test.ts` 在当前工作区失败（断言 `PRAGMA user_version` 为 3，实际为 4）。已用「回退本修复后重建 binary 仍失败」确认与本 issue 无关，未在本轮处理。
-- 无 Git 环境（Git 可执行文件缺失）下的端到端输入未实测，只有 resources 层单元测试证据；验收条件第 2 项的「无重复入队 / 草稿状态」未验证。
+- `test_worktree_dirty_reset_held_stale_and_exact_generation`（曾 6 次运行出现 2 次偶发失败）与 `test_worktree_execution_child_process`（子进程 lease，曾失败于「generation required」）都属在途 dirty 恢复改动，本 issue 未处理其内容。该改动已由他方提交为 `2c243a9d`；2026-09-19 复跑 `cargo test -p peri-resources --lib` 122 项全绿，两者均通过。
+- E2E `tests/scenarios/legacy-history-upgrade.test.ts` 断言 `PRAGMA user_version` 写死为 3，未随 schema 版本 3→4（`51f1bbe4`）同步而失败，与本 issue 无关；已改为从 `schema.rs` 读取当前版本，`run-2026-09-19T03-42-11` 通过（见「修复记录」第 2 条）。
+- 无 Git 环境（Git 可执行文件缺失）下的端到端输入已实测通过（`run-2026-09-19T04-07-31`），验收条件第 2 项已勾选；Git 版本差异、权限拒绝与慢响应仍未实测。
 - 本轮未实测 `rm -rf .git` 与目录搬迁在真实 TUI 下的组合，也未做性能测量；「简化目标」中的探测成本削减仍未实施。
+
+### 2026-09-19：无 Git 路径的端到端验收与旧库 e2e 期望同步（第 2 条，生产代码未变）
+
+**范围**：把上一轮只有 resources 层单元测试证据的「无 Git / 普通目录」结论补成真实 TUI 端到端证据，勾选验收条件第 2 项；同时修掉一条与本 issue 无关、但会连坐 L0 的旧库 e2e 期望。生产代码无改动——`discovery.rs` 中 spawn `NotFound` 降级为目录模式的实现由 `7d59a7b9` 提供。
+
+**改动**：
+
+- 新增 `e2e/tests/scenarios/workspace-no-git.test.ts`（已入 L0）。用 `env -i` 显式构造进程环境，PATH 只挂一个 shim 目录：把 `/usr/bin`、`/bin` 逐项软链过去，跳过所有 `git*`；用例开头以 `command -v git` 必须失败作为前提守卫。
+- `e2e/tests/scenarios/legacy-history-upgrade.test.ts`：`PRAGMA user_version` 期望值改为解析 `peri-resources/src/sessions/sqlite_store/schema.rs` 中的 `PRAGMA user_version = N`，不再写死字面量（设计 §8：写打开在同一事务内升级，只读打开不升级）。
+
+**验证证据**：
+
+| 验证 | 结果 |
+| --- | --- |
+| E2E `tests/scenarios/workspace-no-git.test.ts` | `run-2026-09-19T04-07-31` 3 项通过（14s）。① 无 Git 建会话、发送输入、收到模型回复；空回车不重复入队（模型请求数仍为 1，消息各 1 条）；`common_dir` / `private_dir` 为 null，1 project / 1 binding；同一会话第二次输入正常。② 重启后同目录再建会话：仍 1 project / 1 workspace，2 个绑定同属该工作区。③ 判别用例：cwd 在 Git 仓库子目录内但 PATH 无 git 时，`discovery.root` 等于 cwd 本身、不推断仓库关系 |
+| E2E `tests/scenarios/legacy-history-upgrade.test.ts` | `run-2026-09-19T03-42-11` 通过（44s），`user_version` 断言随 `schema.rs` 当前版本变化 |
+| E2E L0 全量（`--tier l0 --no-interactive`） | `run-2026-09-19T04-07-56` 8/9 通过（7m28s）：`workspace-git-init` 10s、`workspace-no-git` 13s、`legacy-history-upgrade` 45s 均通过。唯一失败项 `tests/panels/plugin-uninstall-no-freeze.test.ts` 为本轮唯一新增文件之外的既有用例，见「遗留」 |
+
+**方法说明（可复用）**：tmux 的 `-e PATH=` 不会到达会话 shell——会话为 login bash，`/etc/profile` 的 path_helper 会重置 PATH。早先版本的 no-Git 用例因此在本机静默退化成 Git 模式（真实 git 可见），用例看似通过却没有覆盖目标路径。因此「无 Git」必须由命令自身用 `env -i` 保证；上面第 ③ 项判别用例即用于守住这一前提。
+
+**遗留**：
+
+- Git 版本差异（旧版 `--path-format=absolute` 等）、权限拒绝、慢响应仍未实测；验收条件第 6 项待办。
+- L0 唯一失败项 `tests/panels/plugin-uninstall-no-freeze.test.ts` 在全量运行中 90s 超时（用例自设 timeout），单独复跑 48s 通过。两者都不经过本 issue 的发现 / 绑定链路，判定为负载下的慢启动抖动，本 issue 未处理；若要闭环 L0 门禁需另有记录。
