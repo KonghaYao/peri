@@ -1,6 +1,6 @@
 # P0：文件系统身份与 Git 探测阻断会话创建与发送
 
-**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分、Git 命令版本兼容、三条路径的探测边界、既有保护链路复核、仓库布局端到端验收已于 2026-09-19 完成；简化目标其余项与其余验收项待实施）
+**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分、Git 命令版本兼容、三条路径的探测边界、既有保护链路复核、仓库布局端到端验收、旧版 Git 的 common dir 推导与慢响应实测已于 2026-09-19 完成，验收条件 9 项全部勾选；简化目标第 3、4、5 项仍为部分实施，本 issue 未关闭）
 **优先级**：P0（用户指定；2026-09-19 依据本机确证由 P1 升级）
 **类型**：可用性缺陷 / 设计简化
 **创建日期**：2026-09-17
@@ -132,7 +132,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 - [x] 新会话、已有会话、历史只读访问分别验证，不让 Git 或目录身份检查不必要地传播到其他能力。（2026-09-19：新会话见「修复记录」第 3 条的调用次数与持锁状态；已有会话与历史只读访问见第 9 条——复核恰好一轮观测且全部在写事务外，列表 / 消息 / frozen / 绑定在读路径上 0 次 Git 调用，登记目录删除后仍可读）
 - [x] 目录移动、备份恢复 / 文件对象变化、普通目录执行 `git init`、Git 管理目录变化有明确且可完成的用户操作；历史不被静默改绑或隐藏。（2026-09-19 修复，见「修复记录」第 4 条：搬迁与同路径替换各有单元测试，搬迁另有真实 TUI 端到端用例；备份恢复按「同路径新对象」路径覆盖，未单独实测）
 - [x] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。（2026-09-19：新增真实 TUI 用例 `e2e/tests/scenarios/workspace-worktree-layouts.test.ts` 覆盖子目录 / linked worktree / 独立 clone 三种布局的执行目录与项目归属，见「修复记录」第 10 条；主仓库与 symlink 由 resources 单元测试 `test_worktree_main_linked_subdirectory_and_clone_identity`、`test_worktree_symlink_discovery_reuses_identity_but_binding_escape_is_rejected` 覆盖——进程 cwd 由 `getcwd` 给出物理路径，TUI 层看不到符号链接代理，该场景无法在 TUI 层观测）
-- [ ] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。（缺失见「修复记录」第 2 条端到端；权限拒绝、调用次数见第 3 条假 Git 判别用例；旧版本见第 7 条——用拒绝新选项的假 Git 验证，仍未运行真实旧版二进制，最低支持版本未确定）
+- [x] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。（缺失见「修复记录」第 2 条端到端；权限拒绝与调用次数见第 3 条假 Git 判别用例——目录模式 2 次、仓库模式 6 次、已有会话复核 3 次，全部在写事务外；旧版本与慢响应见第 11 条：旧版本仍由拒绝新选项的假 Git 验证，未运行真实旧版二进制、最低支持版本未确定；慢响应为实测时间线——假 Git 每次调用固定等待 400ms 时准入总耗时 2.938s、首次到末次调用 2.148s、6 次调用全部记录为写锁空闲，挂起 Git 实测 5.003s 后以类型化超时错误结束。30s = 6 次 × 5s 是静态上限，不是实测耗时）
 - [x] 事务内没有无界或重复的外部探测；慢准备、取消和超时不造成输入丢失或重复执行。（前半见「修复记录」第 3 条；后半见第 6 条：慢准备仍被受理且只入队一次、准备超时恢复原稿且不发送入队请求、准备期间取消不产生投递，均为 consumer 级回归；回执超时的「未知结果按同身份重试」沿用既有用例 `test_steer_uncertain_receipt_retries_identical_command_and_input`）
 - [x] 身份模型调整保留已有消息、frozen snapshot、绑定关系和执行状态；冲突处理可理解、可恢复。（「可理解」2026-09-19 实施：绑定失败文案指出可完成的下一步，输入路径复述服务端原因而非表述为输入被拒，见「修复记录」第 5 条；「可恢复」按第 4 条的新会话语义覆盖；保留性证据见第 8 条：schema 4→5 迁移前后逐字节比对绑定 / 执行状态与线程行 / 消息，并对 frozen snapshot 做存储层读取。把已有会话改指到新位置的入口仍未提供，属设计 §5.4 的明确限制）
 - [x] 简化后继续通过错误 cwd、配置/权限隔离、跨进程 owner 竞争及 dirty 状态保护测试。（2026-09-19 复核：错误 cwd 见 `legacy_adoption_rejects_changed_cwd_child_and_lost_native_binding`；配置 / 权限隔离见 `worktree_new_resources_use_the_target_directory`、`worktree_scheduled_approval_uses_session_permission_and_rejects_closed_owner`、`test_update_config_refreshes_existing_owner_environments`；跨进程 owner 竞争见 `test_worktree_execution_competes_across_processes_and_crash_remains_dirty`、`test_worktree_execution_child_process`；dirty 保护见 `test_worktree_dirty_reset_held_stale_and_exact_generation`、`test_worktree_cancelled_mutation_remains_dirty_and_cannot_publish_clean`、`test_worktree_clean_waits_for_admitted_mutation_before_releasing_os_ownership` 及 ACP 侧 `test_workspace_dirty_recovery_original_load_and_frozen`、`test_dirty_reset_then_failing_reload_keeps_store_state_and_original_id`、`test_dirty_reset_without_initialize_is_rejected_without_store_effect`。全量 `cargo test -p peri-resources --lib` 138 项、`cargo test -p peri-acp --lib` 678 项通过）
@@ -173,6 +173,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 | 2026-09-19 | — | Open（部分修复） | agent | 三条路径的探测边界补实测断言：历史只读访问 0 次 Git 调用（登记目录删除后仍可读），已有会话复核恰好一轮观测且全在写事务外；勾选验收条件第 3 项（见「修复记录」第 9 条，生产代码未变） |
 | 2026-09-19 | — | Open（部分修复） | agent | 复核简化后的既有保护链路：错误 cwd、配置 / 权限隔离、跨进程 owner 竞争与 dirty 状态保护用例全部通过（resources 138 项、acp 678 项）；勾选验收条件第 9 项（本轮无代码改动） |
 | 2026-09-19 | — | Open（部分修复） | agent | 新增仓库布局端到端用例：真实 TUI 上验证子目录 / linked worktree / 独立 clone 的执行目录与项目归属，变异检验通过；勾选验收条件第 5 项（见「修复记录」第 10 条，生产代码未变） |
+| 2026-09-19 | — | Open（部分修复） | agent | 旧版 Git 的 common dir 改为读 `commondir` 文件推导（不再请求 Git 2.5 引入的 `--git-common-dir`），未知选项回显按不兼容处理，`worktree` 子命令缺失时只跳过交叉核对；慢 Git 实测等待时间线与单次超时边界，勾选验收条件第 6 项——验收条件 9 项至此全部勾选（见「修复记录」第 11 条） |
 
 ## 修复记录
 
@@ -396,8 +397,8 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 **遗留**：
 
 - 仍无真实旧版 Git 证据：本机只有 Git 2.39，最低支持版本、各选项的实际引入版本与旧版在真实仓库中的行为都未验证；现有用例只能证明「不依赖这些选项」这一性质。要宣称支持版本，需要装旧版二进制或在 CI 里准备旧版 fixture。
+- 慢响应与等待阶段已由第 11 条实测；本条只处理版本差异。
 - 退回路径的代价未量化：换行分隔无法表示含换行的路径（该情形下成员判定会精确比对失败并报错，不会静默误判），但也没有覆盖用例构造这样的路径。
-- 慢响应仍未实测（验收条件第 6 项的一部分）：本条只处理版本差异，未测量慢 Git 下的等待时间。
 
 ### 2026-09-19：schema 4→5 迁移的保留性断言（第 8 条，生产代码未变）
 
@@ -451,7 +452,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 **遗留**：
 
 - 「新会话」的调用次数证据沿用第 3 条（目录模式 2 次 / 仓库模式 6 次），本条未重复测量。
-- 旧版 Git、权限拒绝与慢响应仍未实测，「等待阶段」目前只有持锁状态这一项证据（见验收条件第 6 项）。
+- 旧版 Git、权限拒绝与慢响应当时仍未实测，「等待阶段」只有持锁状态这一项证据；慢响应与等待阶段已由第 11 条补上。
 
 ### 2026-09-19：仓库布局的端到端验收（第 10 条，生产代码未变）
 
@@ -478,3 +479,40 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 - symlink 场景无法在 TUI 层观测：启动进程的 cwd 由 `getcwd` 给出物理路径，符号链接代理在 `session/new` 之前已被解析，该场景仍由 resources 单元测试覆盖。
 - 新用例未加入 L0：当前 L0 串行运行已约 7.5 分钟，本用例需要三次 TUI 启动；它只在 L2 / release 全量中运行。
+
+### 2026-09-19：旧版 Git 的 common dir 推导与慢响应实测（第 11 条）
+
+**范围**：补上验收条件第 6 项余下的两部分——common directory 的推导不再请求新版选项，以及慢响应 / 等待阶段的实测。不改变登记键、绑定复核、`NeedsRelink` 判定与目录模式语义。
+
+**缺口**（承接第 7 条遗留）：第 7 条把位置解析改成 `rev-parse --show-toplevel --git-common-dir --git-dir`，仍在请求一个 Git 2.5 才引入的选项；慢响应完全没有实测，30s（两轮 × 三条命令 × 5s 单次超时）只是静态上限。
+
+**改动**（`peri-resources/src/sessions/sqlite_store/discovery.rs`）：
+
+- `observe_with_git` 只请求 `rev-parse --show-toplevel --git-dir`（两个位置共用一次进程启动）；新增 `common_directory`，按 [gitrepository-layout](https://git-scm.com/docs/gitrepository-layout) 的语义读 `$GIT_DIR/commondir` 文件（相对内容按 `$GIT_DIR` 解析）推导 common directory，文件不存在时 common 与 private 相同。linked worktree 的该文件由 `git worktree add` 写入、主工作树没有它——本机 Git 2.39 实测：linked worktree 内容为 `../..`，canonicalize 后与 `rev-parse --git-common-dir` 一致。
+- `git_paths` 拒绝以 `--` 开头的位置行：`rev-parse` 把不认识的选项当普通参数回显到 stdout（本机 Git 2.39 实测退出码 0），不拦住就会被当成相对路径拼在 cwd 下，用「目录不可用」掩盖版本问题。
+- `git_worktree_listing` 拆为返回 `WorktreeMembership` 的 `git_worktree_membership`：子命令或 `--porcelain` 整体缺失（`is_missing_command`，或退回后仍是用法错误）时不做成员交叉核对——位置已由 `rev-parse` 回答，跳过的是交叉核对，真实失败（权限、损坏仓库、非零退出）仍原样上报。
+
+**回归测试**：
+
+| 验证 | 结果 |
+| --- | --- |
+| `test_worktree_common_dir_matches_git_reported_locations` | oracle：主仓库根、含空格子目录、linked worktree 三种 cwd 下的 private / common 与真实 Git 的 `rev-parse --git-dir` / `--git-common-dir` 逐一相等（linked worktree 的 common 是主仓库 `.git`） |
+| `test_worktree_path_discovery_rejects_unknown_option_echoes` | 复现旧版回显行为（stdout 出现 `--git-common-dir`，退出码 0）：报类型化 `DiscoveryError`，不被当成相对路径 |
+| `test_worktree_ancient_git_needs_no_common_dir_option_or_worktree_command` | 把 `--git-common-dir` / `--path-format` / `--absolute-git-dir` 当未知选项、把 `worktree` 当未知子命令的假 Git 下，观测与真实 Git 相等 |
+| `test_worktree_slow_git_wait_is_measured_per_call_outside_the_write_lock` | 假 Git 每次调用前固定等待 400ms：准入成功，6 次调用（两轮 × 三条命令）全部记录为写锁空闲；实测准入总耗时 2.938s、首次到末次调用 2.148s，等待阶段按到达时刻落在具体命令上（两条 `rev-parse` 与一条 `worktree list` 各一轮） |
+| `test_worktree_hanging_git_ends_within_the_call_budget` | `exec sleep 600` 的假 Git：实测 5.003s 后以 `Git discovery timed out` 结束，没有走到 30s 静态上限，也不降级为目录模式 |
+| 变异检验（common dir） | `common_directory` 改为直接返回 private dir：oracle 用例失败于 `left: …/repository/.git/worktrees/linked-tree` / `right: …/repository/.git`，回退后通过 |
+| 变异检验（调用次数） | `worktree list` 成功分支临时多发一次调用：慢响应用例失败于 `left: 8` / `right: 6`，第 3 条的调用次数用例同时失败，回退后通过 |
+| 变异检验（超时预算） | 单次超时预算临时改为 100ms：挂起用例失败于「实测 103.97ms 短于单次预算：没有真正触发超时路径」，回退后通过 |
+| `cargo test -p peri-resources --lib` | 143 项通过（改动前 141 项） |
+| `cargo test -p peri-acp --lib` | 678 项通过 |
+| E2E `workspace-git-init` / `workspace-worktree-layouts` / `workspace-no-git` | `run-2026-09-19T06-23-17`、`06-24-05`、`06-24-16` 各 1/1 通过（7s / 8s / 17s，串行、无重试）：真实 TUI 上「普通目录 `git init`」「子目录与 linked worktree 同项目分组」「无 Git 目录建会话」三条路径都经过新的 common dir 推导 |
+| `cargo clippy -p peri-resources --all-targets -- -D warnings`、`cargo fmt --all` | 无告警、无格式差异 |
+
+**事实源同步**：[工作区身份设计](../../docs/design/session-workspace-identity.md) §3.1（命令契约改为两个位置、common dir 由 `commondir` 推导、未知选项回显按不兼容处理、单次调用超时预算、`worktree` 子命令缺失时的交叉核对行为）；`docs/code-index/peri-resources.md` 工作区身份行；[兼容性待办](2026-09-17-platform-compatibility.md)「旧 Git 命令能力未覆盖」条目。
+
+**遗留**：
+
+- 仍未运行真实旧版 Git（本机只有 2.39）：最低支持版本未确定。`commondir` 文件在各旧版中是否都存在同样只在文档与假 Git 层面验证；若某个版本不写该文件，linked worktree 会各自成项目（不阻断使用，但项目分组退化），宣称支持版本前需实测或查证。
+- 实测是本机单次运行的值（macOS，含每次调用约 100ms 的进程启动与 SQLite 探测开销），不是跨机器的性能保证；两轮共 6 次的静态上限 30s 仍然只是预算。
+- 慢响应的端到端未做：本轮只在 resources 层把 Git 换成慢的假 Git，没有在 TUI / ACP 路径上复现慢 Git。

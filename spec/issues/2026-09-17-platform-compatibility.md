@@ -19,7 +19,7 @@
 ## 依赖与数据边界
 
 - **Git 是普通目录启动的隐式依赖。** `peri-resources/src/sessions/sqlite_store/discovery.rs::git` 在找不到 Git 时返回 discovery error，即使最终可能是非 Git 目录也无法发现工作区。先明确安装依赖和可用性提示；不能简单把所有 `NotFound` 当作非 Git 仓库，否则会改变真实仓库身份。验收最小 Linux 环境中有 Git / 无 Git 的普通目录与仓库目录。
-- **旧 Git 命令能力未覆盖。** `discovery.rs` 曾使用 `rev-parse --path-format=absolute`（上游文档记为 Git 2.31 引入），旧版 Git 会以用法错误退出并使发现失败。2026-09-19 已改为只用更早版本也认得的选项（见 P0 修复记录第 7 条）：位置解析去掉 `--path-format=absolute` / `--absolute-git-dir` 并按 cwd 还原相对输出，`worktree list` 在不支持 `-z` 时退回换行分隔。仍缺旧版 Git 实测：本机没有旧版二进制，最低支持版本与真实旧版行为都未验证，现有证据是拒绝这些选项的假 Git 脚本。
+- **旧 Git 命令能力未覆盖。** `discovery.rs` 曾使用 `rev-parse --path-format=absolute`（上游文档记为 Git 2.31 引入），旧版 Git 会以用法错误退出并使发现失败。2026-09-19 已改为只用更早版本也认得的选项（见 P0 修复记录第 7、11 条）：位置解析只请求 `--show-toplevel --git-dir` 并按 cwd 还原相对输出，common directory 改由 Git 自己写入的 `commondir` 文件推导（不请求 Git 2.5 引入的 `--git-common-dir`），`worktree list` 在不支持 `-z` 时退回换行分隔、子命令整体缺失时跳过成员交叉核对，未知选项回显按不兼容处理。仍缺旧版 Git 实测：本机没有旧版二进制，最低支持版本与真实旧版行为都未验证，现有证据是拒绝这些选项的假 Git 脚本。
 - **配置临时文件名冲突。** `peri-acp/src/provider/store.rs::save_to` 固定使用 `settings.json.tmp`。多个进程同时保存同一路径可能互相覆盖临时内容或 rename 失败；需核对跨进程写入契约并做并发测试，不能仅凭原子 rename 宣称并发安全。
 - **Plugin 的非 UTF-8 路径 panic。** URL 安装对 `cache_dir.to_str().unwrap()`；Unix 下非 UTF-8 插件缓存路径会触发 panic（发生在 blocking task，join 层会转为安装错误，不能称整个应用必然崩溃）。改用 Path / OsStr 参数并补路径回归。
 - **Windows npm 入口差异。** Workflow 直接调用 `npm` / `npx`，PTC 已区分 `npm.cmd` / `npx.cmd`。这是需要 Windows 实测的条件风险，检查真实命令解析后再决定统一入口，避免未经验证宣称 CreateProcess 一定失败。

@@ -141,6 +141,40 @@ async fn test_worktree_git_rejection_is_not_directory_mode() {
     ));
 }
 
+/// [回归测试] 挂起的 Git 在单次调用预算内以类型化错误结束，不无限等待。
+///
+/// 静态上限是「单次 5s × 每轮调用数」（仓库模式两轮共 6 次 ⇒ 30s）。这里验证的是没有
+/// 走到那个上限：第一次调用不返回就以类型化错误结束。断言给的是实测耗时，静态上限只用
+/// 来界定实测值是否越界，不作为耗时证据。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_hanging_git_ends_within_the_call_budget() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let program = directory.path().join("git");
+    // `exec` 让脚本自身变成挂起的进程，超时终止时不会留下后代进程。
+    std::fs::write(&program, "#!/bin/sh\nexec sleep 600\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let started = std::time::Instant::now();
+    let error = observe_with_git(directory.path(), program.as_os_str())
+        .await
+        .unwrap_err();
+    let measured = started.elapsed();
+    println!("挂起 Git 实测：{measured:?} 后以类型化错误结束（单次预算 5s）");
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::DiscoveryError(message)) if message == "Git discovery timed out"
+    ));
+    assert!(
+        measured >= std::time::Duration::from_secs(5),
+        "实测 {measured:?} 短于单次预算：没有真正触发超时路径",
+    );
+    assert!(
+        measured < std::time::Duration::from_secs(30),
+        "实测 {measured:?} 达到仓库模式的静态上限（6 次调用 × 5s）：超时没有在首次挂起时结束",
+    );
+}
+
 /// [回归测试] 提交前的轻量复核只接受关键文件对象未变的观测。
 ///
 /// 这是写事务内唯一允许执行的重验（设计 §3.2：探测在事务外，提交前复核关键文件
@@ -225,6 +259,11 @@ async fn test_worktree_git_missing_mid_discovery_is_not_directory_mode() {
 
 /// 用真实 Git 准备 fixture，环境隔离与其它发现用例一致。
 async fn git_fixture(cwd: &Path, home: &Path, args: &[&str]) {
+    git_stdout(cwd, home, args).await;
+}
+
+/// 真实 Git 的 stdout：fixture 与 oracle 共用同一套环境隔离。
+async fn git_stdout(cwd: &Path, home: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -237,6 +276,204 @@ async fn git_fixture(cwd: &Path, home: &Path, args: &[&str]) {
         .await
         .unwrap();
     assert!(output.status.success(), "Git fixture 失败: {output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// 真实 Git 报告的仓库位置：`--show-toplevel` / `--git-common-dir` / `--git-dir`。
+///
+/// 相对输出按 cwd 还原（与发现实现同一规则），作为发现结果的独立 oracle。
+async fn git_reported_locations(cwd: &Path, home: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let reported = git_stdout(
+        cwd,
+        home,
+        &[
+            "rev-parse",
+            "--show-toplevel",
+            "--git-common-dir",
+            "--git-dir",
+        ],
+    )
+    .await;
+    let mut lines = reported.lines();
+    let root = resolve_reported(cwd, lines.next().unwrap()).await;
+    let common = resolve_reported(cwd, lines.next().unwrap()).await;
+    let private = resolve_reported(cwd, lines.next().unwrap()).await;
+    (root, common, private)
+}
+
+async fn resolve_reported(cwd: &Path, line: &str) -> PathBuf {
+    let path = Path::new(line);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    tokio::fs::canonicalize(path).await.unwrap()
+}
+
+/// 建一个带基础提交的仓库：`git worktree add` 需要有效的 HEAD。
+async fn committed_repository(home: &Path) -> PathBuf {
+    let repository = home.join("repository");
+    tokio::fs::create_dir(&repository).await.unwrap();
+    git_fixture(&repository, home, &["init", "-q"]).await;
+    git_fixture(
+        &repository,
+        home,
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+    )
+    .await;
+    repository
+}
+
+/// [回归测试] common directory 必须等于真实 Git 报告的位置。
+///
+/// 发现不再请求 `--git-common-dir`（Git 2.5 起才有），改为解析 Git 自己写入的
+/// `commondir` 文件；这个文件正是 `$GIT_COMMON_DIR` 的来源。用例以真实 Git 的输出
+/// 为 oracle，覆盖主仓库、子目录与 linked worktree——linked worktree 的两个位置
+/// 不同，是这个改动的关键分支。
+#[tokio::test]
+async fn test_worktree_common_dir_matches_git_reported_locations() {
+    let home = tempfile::tempdir().unwrap();
+    let repository = committed_repository(home.path()).await;
+    let nested = repository.join("nested space");
+    tokio::fs::create_dir(&nested).await.unwrap();
+    let linked = home.path().join("linked tree");
+    git_fixture(
+        &repository,
+        home.path(),
+        &["worktree", "add", "-qb", "linked", linked.to_str().unwrap()],
+    )
+    .await;
+
+    for cwd in [&repository, &nested, &linked] {
+        let (_, observed) = observe(cwd).await.unwrap();
+        let (root, common, private) = git_reported_locations(cwd, home.path()).await;
+        assert_eq!(
+            observed.discovery.root, root,
+            "根目录必须与 Git 报告一致：{cwd:?}"
+        );
+        assert_eq!(
+            observed.discovery.common_dir.as_deref(),
+            Some(common.as_path()),
+            "common directory 必须与 Git 报告一致：{cwd:?}"
+        );
+        assert_eq!(
+            observed.discovery.private_dir.as_deref(),
+            Some(private.as_path()),
+            "private directory 必须与 Git 报告一致：{cwd:?}"
+        );
+    }
+
+    // linked worktree 的两个位置确实不同，否则上面的比较没有覆盖到关键分支。
+    let (_, linked_observed) = observe(&linked).await.unwrap();
+    assert_ne!(
+        linked_observed.discovery.common_dir, linked_observed.discovery.private_dir,
+        "linked worktree 的 common / private 位置必须分开解析"
+    );
+}
+
+/// [回归测试] 旧版 Git 回显未知选项时不得把选项原文当成路径。
+///
+/// `rev-parse` 对未知的长选项不报错，而是把它当普通参数回显到 stdout（本机 Git
+/// 如此，旧版同理）。位置解析若直接拿这行当路径，就会拼出一个不存在的路径，最终
+/// 以「目录不可用」掩盖版本问题。位置输出必须按类型拒绝这种回显。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_path_discovery_rejects_unknown_option_echoes() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let program = directory.path().join("echoing-git");
+    std::fs::write(&program, "#!/bin/sh\nprintf '/tmp\\n--git-dir\\n'\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let error = git_paths(
+        program.as_os_str(),
+        directory.path(),
+        &["rev-parse", "--show-toplevel", "--git-dir"],
+        2,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<WorkspaceError>(),
+            Some(WorkspaceError::DiscoveryError(message))
+                if message == "Git location discovery returned an unknown option"
+        ),
+        "未知选项回显必须按类型拒绝，而不是被当成不可用的路径：{error:?}"
+    );
+}
+
+/// [回归测试] 旧版 Git 也能得到完整观测：不依赖 `--git-common-dir`，也不依赖 `worktree`。
+///
+/// `rev-parse --git-common-dir` 与 `git worktree` 都是 Git 2.5 引入的（上游 2.5 发布
+/// 说明），此前的 Git 会把未知选项当普通参数回显，并把 `worktree` 当作不存在的命令。
+/// 假 Git 只放行最老的 rev-parse 选项，其余按用法错误或「不是 git 命令」回答；发现若
+/// 仍依赖这些入口就拿不到观测，旧版 Git 的仓库会话会被永久阻断。本机没有真实旧版
+/// 二进制，这两种回答按 Git 对未知选项与未知命令的实际输出模拟。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_ancient_git_needs_no_common_dir_option_or_worktree_command() {
+    let home = tempfile::tempdir().unwrap();
+    let repository = committed_repository(home.path()).await;
+    let nested = repository.join("nested space");
+    tokio::fs::create_dir(&nested).await.unwrap();
+    let linked = home.path().join("linked tree");
+    git_fixture(
+        &repository,
+        home.path(),
+        &["worktree", "add", "-qb", "linked", linked.to_str().unwrap()],
+    )
+    .await;
+
+    let log = home.path().join("ancient-git.log");
+    let preamble = r#"case "$3" in
+  rev-parse)
+    case "$*" in
+      *--git-common-dir*|*--path-format*|*--absolute-git-dir*)
+        echo "error: unknown option" >&2
+        echo "usage: git rev-parse" >&2
+        exit 129;;
+    esac;;
+  worktree)
+    echo "git: 'worktree' is not a git command. See 'git --help'." >&2
+    exit 1;;
+esac"#;
+    let program = git_shim(home.path(), "ancient-git", preamble, &log);
+
+    for cwd in [&repository, &nested, &linked] {
+        let (_, ancient) = observe_with_git(cwd, program.as_os_str()).await.unwrap();
+        let (_, real) = observe(cwd).await.unwrap();
+        assert!(
+            ancient.git_answered,
+            "旧版 Git 回答了发现，必须按仓库模式观测：{cwd:?}"
+        );
+        assert_eq!(
+            ancient.discovery, real.discovery,
+            "旧版 Git 的观测必须与真实 Git 完全一致：{cwd:?}"
+        );
+    }
+
+    let invoked = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !invoked.contains("--git-common-dir"),
+        "发现不得依赖 Git 2.5 才有的 --git-common-dir：{invoked}"
+    );
+    assert_eq!(
+        invoked.lines().count(),
+        9,
+        "三次观测各有三条调用（两条 rev-parse 与一次成员探测）：{invoked}"
+    );
 }
 
 #[cfg(unix)]

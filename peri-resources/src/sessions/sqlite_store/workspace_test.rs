@@ -1,6 +1,11 @@
 use super::super::*;
 use peri_acp_types::workspace::*;
-use std::{path::Path, sync::Arc};
+use std::{
+    io::Read,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tempfile::TempDir;
 
 fn git(root: &Path, args: &[&str]) {
@@ -1032,9 +1037,12 @@ async fn test_worktree_concurrent_leases_exceed_pool_capacity_without_nested_acq
 
 // ── 外部探测的时机与次数：写事务内不得执行外部进程 ──
 
-/// 假 Git 的日志：每次调用追加一行，记录调用当时另一连接能否立刻取得写锁。
+/// 假 Git 的日志：每次调用追加一行，记录调用当时另一连接能否立刻取得写锁，
+/// 以及本次调用的参数（用于把等待阶段对应到具体命令）。
 const PROBE_LOG: &str = "PERI_TEST_PROBE_LOG";
 const PROBE_DATABASE: &str = "PERI_TEST_PROBE_DB";
+/// 假 Git 把本次调用的参数透传给记录者。
+const PROBE_ARGS: &str = "PERI_TEST_PROBE_ARGS";
 /// `git-not-repository` 时伪装真实 Git 在非仓库目录下的回答（stderr + 退出码）。
 const PROBE_BEHAVIOR: &str = "PERI_TEST_PROBE_BEHAVIOR";
 const ADMISSION_DATABASE: &str = "PERI_TEST_ADMISSION_DB";
@@ -1061,17 +1069,30 @@ async fn test_worktree_probe_git_child() {
         return;
     };
     let database = std::env::var(PROBE_DATABASE).unwrap();
+    let args = std::env::var(PROBE_ARGS).unwrap_or_default();
     let state = write_lock_available(&database).await;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log)
         .unwrap();
-    std::io::Write::write_all(&mut file, format!("{state}\n").as_bytes()).unwrap();
+    std::io::Write::write_all(&mut file, format!("{state} {args}\n").as_bytes()).unwrap();
     if std::env::var(PROBE_BEHAVIOR).as_deref() == Ok("git-not-repository") {
         eprintln!("fatal: not a git repository (or any of the parent directories): .git");
         std::process::exit(128);
     }
+}
+
+/// 一行记录里的写锁状态（`free` / `busy`）。
+#[cfg(unix)]
+fn lock_state(line: &str) -> &str {
+    line.split_whitespace().next().unwrap_or_default()
+}
+
+/// 一行记录里的调用参数（写锁状态之后的部分）。
+#[cfg(unix)]
+fn call_args(line: &str) -> &str {
+    line.split_once(' ').map_or("", |(_, args)| args)
 }
 
 /// 另一连接尝试立刻取得写锁：成功即说明此刻没有写事务持有者。
@@ -1243,14 +1264,23 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
+/// 在父进程 PATH 里解析一个真实工具并写成绝对路径。
+///
+/// 假 Git 运行在受控 PATH（只有 bin 目录）下，脚本里按名字调用外部工具会找不到：
+/// 那些工具的路径必须在生成脚本时定下来。
 #[cfg(unix)]
-fn real_git_path() -> std::path::PathBuf {
+fn real_tool(name: &str) -> std::path::PathBuf {
     let output = std::process::Command::new("sh")
-        .args(["-c", "command -v git"])
+        .args(["-c", &format!("command -v {name}")])
         .output()
         .unwrap();
-    assert!(output.status.success(), "测试环境需要真实 Git");
+    assert!(output.status.success(), "测试环境需要真实 {name}");
     std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+}
+
+#[cfg(unix)]
+fn real_git_path() -> std::path::PathBuf {
+    real_tool("git")
 }
 
 #[cfg(unix)]
@@ -1286,6 +1316,80 @@ async fn bound_thread_id(database: &Path) -> String {
     row.0
 }
 
+/// 写出受控 PATH 下的假 Git，返回它的 bin 目录。
+///
+/// `sleep_ms` 是每次调用前的固定等待，用来把「等待阶段」变成可测量的时间线；
+/// `real_git` 为 `None` 时假 Git 直接扮演「明确回答不是仓库」的 Git。
+#[cfg(unix)]
+fn write_probe_git(directory: &Path, sleep_ms: u64, real_git: Option<&Path>) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let shim = directory.join("bin");
+    std::fs::create_dir(&shim).unwrap();
+    let binary = std::env::current_exe().unwrap();
+    // 假 Git 的 stdout 是发现过程解析的对象，测试框架的横幅不能混进去；
+    // 角色扮演所需的 stderr 与退出码仍由子进程自己给出。
+    let probe = format!(
+        "{} --exact {PROBE_GIT_CHILD} --nocapture",
+        shell_quote(&binary)
+    );
+    let sleep = if sleep_ms == 0 {
+        String::new()
+    } else {
+        format!(
+            "{} {}.{:03}\n",
+            shell_quote(&real_tool("sleep")),
+            sleep_ms / 1000,
+            sleep_ms % 1000
+        )
+    };
+    let script = match real_git {
+        Some(real) => format!(
+            "#!/bin/sh\n{sleep}{PROBE_ARGS}=\"$*\"\nexport {PROBE_ARGS}\n{probe} >/dev/null\nexec {} \"$@\"\n",
+            shell_quote(real)
+        ),
+        None => format!(
+            "#!/bin/sh\n{sleep}{PROBE_ARGS}=\"$*\"\nexport {PROBE_ARGS}\nexec {probe} >/dev/null\n"
+        ),
+    };
+    let git = shim.join("git");
+    std::fs::write(&git, script).unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    shim
+}
+
+/// 受控 PATH 下一次准入子进程的命令；调用方决定同步等待还是边跑边观察。
+#[cfg(unix)]
+fn admission_command(
+    shim: &Path,
+    database: &Path,
+    work: &Path,
+    behavior: &str,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", ADMISSION_CHILD, "--nocapture"])
+        .env("PATH", shim)
+        .env(ADMISSION_DATABASE, database)
+        .env(ADMISSION_CWD, work)
+        .env(PROBE_LOG, database.parent().unwrap().join("probe.log"))
+        .env(PROBE_DATABASE, database)
+        .env(PROBE_BEHAVIOR, behavior);
+    command
+}
+
+/// 以受控 PATH 跑一次准入子进程；失败留给调用方按用例语义断言。
+#[cfg(unix)]
+fn spawn_admission_child(
+    shim: &Path,
+    database: &Path,
+    work: &Path,
+    behavior: &str,
+) -> std::process::Output {
+    admission_command(shim, database, work, behavior)
+        .output()
+        .unwrap()
+}
+
 /// 在受控 PATH 下跑一次准入子进程，返回假 Git 记录的调用序列。
 ///
 /// `real_git` 为 `None` 时假 Git 直接扮演「明确回答不是仓库」的 Git；为 `Some`
@@ -1297,49 +1401,25 @@ fn probe_admission(
     behavior: &str,
     real_git: Option<&Path>,
 ) -> (Vec<String>, std::path::PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     let database = directory.join("threads.db");
-    let log = directory.join("probe.log");
-    let shim = directory.join("bin");
-    std::fs::create_dir(&shim).unwrap();
-    let binary = std::env::current_exe().unwrap();
-    // 假 Git 的 stdout 是发现过程解析的对象，测试框架的横幅不能混进去；
-    // 角色扮演所需的 stderr 与退出码仍由子进程自己给出。
-    let probe = format!(
-        "{} --exact {PROBE_GIT_CHILD} --nocapture",
-        shell_quote(&binary)
-    );
-    let script = match real_git {
-        Some(real) => format!(
-            "#!/bin/sh\n{probe} >/dev/null\nexec {} \"$@\"\n",
-            shell_quote(real)
-        ),
-        None => format!("#!/bin/sh\nexec {probe} >/dev/null\n"),
-    };
-    let git = shim.join("git");
-    std::fs::write(&git, script).unwrap();
-    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = std::process::Command::new(&binary)
-        .args(["--exact", ADMISSION_CHILD, "--nocapture"])
-        .env("PATH", &shim)
-        .env(ADMISSION_DATABASE, &database)
-        .env(ADMISSION_CWD, work)
-        .env(PROBE_LOG, &log)
-        .env(PROBE_DATABASE, &database)
-        .env(PROBE_BEHAVIOR, behavior)
-        .output()
-        .unwrap();
+    let shim = write_probe_git(directory, 0, real_git);
+    let output = spawn_admission_child(&shim, &database, work, behavior);
     assert!(
         output.status.success(),
         "准入子进程失败：{}",
         String::from_utf8_lossy(&output.stderr),
     );
-    let recorded = std::fs::read_to_string(&log)
-        .unwrap()
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    (recorded, database)
+    (read_probe_log(directory), database)
+}
+
+/// 读出假 Git 的调用记录；文件不存在时返回空序列。
+#[cfg(unix)]
+fn read_probe_log(directory: &Path) -> Vec<String> {
+    let log = directory.join("probe.log");
+    match std::fs::read_to_string(log) {
+        Ok(text) => text.lines().map(str::to_owned).collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// [回归测试] 准入的外部探测必须全部发生在写事务之外。
@@ -1359,7 +1439,7 @@ async fn test_worktree_registration_probes_filesystem_outside_write_lock() {
         "假 Git 未被调用，用例没有覆盖准入路径"
     );
     assert!(
-        recorded.iter().all(|state| state == "free"),
+        recorded.iter().all(|line| lock_state(line) == "free"),
         "写事务持有期间不得执行外部探测，实际记录：{recorded:?}",
     );
     assert_eq!(
@@ -1387,7 +1467,7 @@ async fn test_worktree_repository_registration_keeps_git_calls_bounded() {
         Some(&real_git_path()),
     );
     assert!(
-        recorded.iter().all(|state| state == "free"),
+        recorded.iter().all(|line| lock_state(line) == "free"),
         "写事务持有期间不得执行外部探测，实际记录：{recorded:?}",
     );
     assert_eq!(
@@ -1456,7 +1536,120 @@ async fn test_worktree_bound_session_validation_probes_once() {
         "已有会话复核只应观测一轮（三条命令）：{validation:?}",
     );
     assert!(
-        validation.iter().all(|state| state == "free"),
+        validation.iter().all(|line| lock_state(line) == "free"),
         "复核不得在写事务内执行：{validation:?}",
+    );
+}
+
+/// [回归测试] 慢 Git 的等待是被实测的：每次等待可归因到具体命令，且不在写事务内。
+///
+/// 假 Git 每次调用前固定等待 400ms，把「Git 慢」变成可测量的时间线：调用参数说明等待
+/// 发生在哪个阶段（两轮 × 三条命令），到达时刻给出这些等待的真实分布。断言用实测值；
+/// 代码允许的单次上限（5s × 6 次 = 30s）是静态最坏预算，不作为这里的耗时证据。
+///
+/// 慢响应下准入必须仍然成立（等待远小于单次超时，不能因为慢就失败），代价必须是可测量的
+/// 等待，而不是被写事务挡住其他 writer。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_slow_git_wait_is_measured_per_call_outside_the_write_lock() {
+    const SLEEP_MS: u64 = 400;
+    const POLL_MS: u64 = 20;
+    /// 一轮观测三条命令，准入两轮。
+    const CALLS: u64 = 6;
+    let repository = repository();
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("threads.db");
+    let shim = write_probe_git(directory.path(), SLEEP_MS, Some(&real_git_path()));
+
+    let started = Instant::now();
+    let mut child = admission_command(&shim, &database, repository.path(), "log-only")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // 子进程运行期间轮询日志，按到达时刻记录每次调用；轮询间隔远小于固定等待，
+    // 因此相邻到达的间隔就是上一个阶段真实的 Git 等待。
+    let mut timeline: Vec<(Duration, String)> = Vec::new();
+    while timeline.len() < CALLS as usize && started.elapsed() < Duration::from_secs(60) {
+        for line in read_probe_log(directory.path())
+            .into_iter()
+            .skip(timeline.len())
+        {
+            timeline.push((started.elapsed(), line));
+        }
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
+    }
+    let status = child.wait().unwrap();
+    let measured = started.elapsed();
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+
+    assert!(status.success(), "慢 Git 不得让准入失败：{stdout}");
+    assert!(
+        stdout.contains("running 1 test"),
+        "子进程必须真的执行了准入用例：{stdout}",
+    );
+    assert_eq!(
+        timeline.len(),
+        CALLS as usize,
+        "慢 Git 下的调用次数必须与快 Git 相同：{timeline:?}",
+    );
+    let expected = [
+        "rev-parse --is-inside-work-tree",
+        "rev-parse --show-toplevel --git-dir",
+        "worktree list --porcelain -z",
+    ];
+    // 假 Git 收到的是完整命令行（`-C <cwd>` 在内），去掉前缀后比对命令本身。
+    let prefix = format!(
+        "-C {} ",
+        std::fs::canonicalize(repository.path()).unwrap().display()
+    );
+    let phases: Vec<String> = timeline
+        .iter()
+        .map(|(_, line)| {
+            call_args(line)
+                .trim_start_matches(prefix.as_str())
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        phases,
+        expected.repeat(2),
+        "等待阶段必须对应到具体命令：{timeline:?}",
+    );
+    assert!(
+        timeline.iter().all(|(_, line)| lock_state(line) == "free"),
+        "慢 Git 的等待不得落在写事务内：{timeline:?}",
+    );
+
+    let waits = Duration::from_millis(SLEEP_MS * CALLS);
+    let span = timeline.last().unwrap().0 - timeline[0].0;
+    println!(
+        "慢 Git 实测：准入总耗时 {measured:?}，首次到末次调用 {span:?}，固定等待 {SLEEP_MS}ms × {CALLS}"
+    );
+    for (offset, line) in &timeline {
+        println!("  {offset:>12.3?}  {line}");
+    }
+    assert!(
+        measured >= waits,
+        "实测总耗时 {measured:?} 少于 {CALLS} 次固定等待（{waits:?}）：时间线没有覆盖全部调用",
+    );
+    // 等待分布的下限：首次到末次之间有 CALLS - 1 段固定等待。
+    let floor = Duration::from_millis(SLEEP_MS * (CALLS - 1));
+    assert!(
+        span >= floor,
+        "首次到末次调用只有 {span:?}（下限 {floor:?}），等待没有分布在整条时间线上：{timeline:?}",
+    );
+    assert!(
+        measured < waits + Duration::from_secs(CALLS),
+        "实测总耗时 {measured:?} 超出固定等待（{waits:?}）过多：每次调用的额外开销必须远小于超时预算",
     );
 }

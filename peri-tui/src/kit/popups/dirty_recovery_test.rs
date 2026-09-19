@@ -77,7 +77,7 @@ async fn test_dirty_recovery_generic_confirm_path_cannot_accept_risk() {
         displayed: std::sync::atomic::AtomicBool::new(true),
     });
     execute_confirm_action(&ConfirmAction::RecoverDirty(confirmation), |_| {});
-    assert_eq!(rx.await.unwrap(), false);
+    assert!(!rx.await.unwrap(), "通用确认路径必须按取消收敛");
 }
 
 /// 没有经过渲染确认可见时，任何 accept 都必须失败闭合。
@@ -97,7 +97,7 @@ async fn test_dirty_recovery_accept_requires_displayed_confirmation() {
         tracker.record_area(Rect::new(0, 0, 20, 4));
         assert!(tracker.area.is_none());
     }
-    assert_eq!(hidden_rx.await.unwrap(), false);
+    assert!(!hidden_rx.await.unwrap(), "未渲染确认必须按取消收敛");
 
     let (visible, visible_rx) = owner(false);
     let mut tracker = RecoveryDisplay {
@@ -109,7 +109,7 @@ async fn test_dirty_recovery_accept_requires_displayed_confirmation() {
     tracker.record_area(Rect::new(4, 2, 60, 11));
     assert_eq!(tracker.area, Some(Rect::new(4, 2, 60, 11)));
     visible.answer(true);
-    assert_eq!(visible_rx.await.unwrap(), true);
+    assert!(visible_rx.await.unwrap(), "已渲染且接受风险时才能确认");
 }
 
 /// 默认选中取消：Enter（未切换）与 Esc 都是取消，选择后才可确认接受。
@@ -239,7 +239,7 @@ async fn test_dirty_recovery_revoked_before_first_frame_answers_cancel() {
     let _guard = PopupAtomsGuard::capture();
     let waiter = tokio::spawn(confirm_dirty_recovery(target()));
     wait_for_payload().await;
-    let before = POPUP_KIND.state().read().clone();
+    let before = *POPUP_KIND.state().read();
 
     // 尚未经过任何渲染帧（RecoveryDisplay 未建立，没有 Drop 兜底）。
     crate::kit::popup_overlay::open_popup(crate::kit::atoms::PopupKind::OAuth);

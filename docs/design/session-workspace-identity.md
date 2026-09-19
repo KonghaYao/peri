@@ -72,27 +72,36 @@ binding 不可变，协议中的 `revision` 保持常量 `1` 以兼容已有客�
 
 ```text
 git -C <cwd> rev-parse --is-inside-work-tree
-git -C <cwd> rev-parse --show-toplevel --git-common-dir --git-dir
+git -C <cwd> rev-parse --show-toplevel --git-dir
 git -C <cwd> worktree list --porcelain -z
 ```
 
-三个位置来自同一次 `rev-parse`，输出按参数顺序每行一个；行数与请求不符即视为输出
+两个位置来自同一次 `rev-parse`，输出按参数顺序每行一个；行数与请求不符即视为输出
 不可信，不猜位置。发现不使用 `--path-format=absolute` 与 `--absolute-git-dir`：
 上游文档记为 Git 2.31 / 2.13 引入，更早的 Git 把它们当未知选项按用法错误退出，会让
-普通仓库被判成无法发现。代价是 `--git-common-dir` / `--git-dir` 的默认输出可能是
-相对路径，且同一命令在不同 cwd 下的输出形式不同，因此每个位置都先与 cwd 组合再
-canonicalize，不能按宿主进程的 cwd 解释。
+普通仓库被判成无法发现。common directory 也不请求 `rev-parse --git-common-dir`
+（Git 2.5 引入），而是读 Git 自己写入的 `commondir` 文件：该文件的语义就是
+`$GIT_COMMON_DIR`，`--git-common-dir` 是它的投影；linked worktree 的该文件由
+`git worktree add` 写入（本机 Git 2.39 实测内容为 `../..`），主工作树没有它，两个
+位置相同。代价是 `--git-dir` 的默认输出可能是相对路径，且同一命令在不同 cwd 下的
+输出形式不同（主仓库根给相对 `.git`，子目录的 `--git-dir` 反而给绝对路径），因此位置
+先与 cwd 组合再 canonicalize，不能按宿主进程的 cwd 解释。`rev-parse` 把不认识的选项
+当普通参数回显到 stdout，因此位置行以 `--` 开头即按不兼容的 Git 处理并报类型化错误，
+不能当成相对路径拼在 cwd 下，用「目录不可用」掩盖真正的版本问题。
 
 common directory 用于发现同仓库关联，private Git directory 用于区分 checkout。
 linked worktree 的这两者不同；主工作树通常相同。
 这些 Git 语义来自 [git-worktree](https://git-scm.com/docs/git-worktree#_details)
 与 [git-rev-parse](https://git-scm.com/docs/git-rev-parse#_options_for_files)。
 
-命令使用参数数组、显式 cwd 和有界执行，不拼接 shell。发现过程隔离继承的
+命令使用参数数组、显式 cwd 和有界执行，不拼接 shell。每次调用有固定超时预算，超时
+按类型化发现错误结束，既不重试也不降级为目录模式。发现过程隔离继承的
 `GIT_DIR`、`GIT_WORK_TREE`、`GIT_COMMON_DIR` 等会改写仓库选择的环境变量；不能
 修改用户 Git 配置来使探测成功。解析支持带空格的路径，worktree list 优先 NUL 分隔；
 旧版 Git 不认识 `-z` 时按用法错误退回换行分隔，退回只改变分隔符，成员判定仍按完整
-路径精确比对，真实失败（权限、损坏仓库）不触发退回。路径按所在文件系统
+路径精确比对，真实失败（权限、损坏仓库）不触发退回；`worktree` 子命令或
+`--porcelain` 整体不存在的旧版 Git 不做成员交叉核对（位置已由 `rev-parse` 回答），
+这属于证据不足而非「不是仓库」，真实失败仍原样上报。路径按所在文件系统
 canonicalize，不统一小写、不使用 lossy 转换生成身份。
 
 ### 3.2 登记裁决

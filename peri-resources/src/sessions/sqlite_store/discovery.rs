@@ -229,16 +229,15 @@ async fn git(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<Option<std::p
 
 /// 一次 `rev-parse` 解析多个位置：输出按参数顺序每行一个。
 ///
-/// 三个路径来自同一次调用而不是三次进程启动：准入路径会放大每次发现的外部进程
+/// 两个路径来自同一次调用而不是两次进程启动：准入路径会放大每次发现的外部进程
 /// 数量，位置之间也没有需要分开处理的语义。
 ///
-/// 这里不用 `--path-format=absolute` 与 `--absolute-git-dir`：上游文档把二者记为
-/// Git 2.31 / 2.13 引入，更早的 Git 会把它们当未知选项并以用法错误终止整个发现，
-/// 使普通仓库被判成无法发现（本机没有旧版二进制，最低版本未实测）。代价是
-/// `--git-common-dir` / `--git-dir` 的默认输出可能是相对路径——且同一命令在不同
-/// cwd 下的输出形式不同（主仓库根给相对 `.git`，子目录的 `--git-dir` 反而给绝对
-/// 路径）——因此两类输出逐个判断后都要与 cwd 组合再 canonicalize，不能直接按宿主
-/// 进程的 cwd 解释。
+/// 只请求 `--show-toplevel` / `--git-dir` 这类旧版 Git 也认得的选项。这里不用
+/// `--path-format=absolute` 与 `--absolute-git-dir`（上游文档记为 Git 2.31 / 2.13
+/// 引入），也不请求 `--git-common-dir`（Git 2.5 引入，见 `common_directory`）。代价是
+/// 位置的默认输出可能是相对路径——且同一命令在不同 cwd 下的输出形式不同（主仓库根
+/// 给相对 `.git`，子目录的 `--git-dir` 反而给绝对路径）——因此两类输出逐个判断后
+/// 都要与 cwd 组合再 canonicalize，不能直接按宿主进程的 cwd 解释。
 async fn git_paths(
     program: &OsStr,
     cwd: &Path,
@@ -262,6 +261,15 @@ async fn git_paths(
     }
     let mut paths = Vec::with_capacity(count);
     for line in lines {
+        // 旧版 Git 不认识选项时会把选项原文回显到 stdout（rev-parse 把未知参数当普通
+        // 参数输出），若不拦住就会当成相对路径拼在 cwd 下，最终以「目录不可用」掩盖
+        // 真正的版本问题。
+        if line.starts_with("--") {
+            return Err(WorkspaceError::DiscoveryError(
+                "Git location discovery returned an unknown option".into(),
+            )
+            .into());
+        }
         let path = Path::new(line);
         let path = if path.is_absolute() {
             path.to_path_buf()
@@ -289,31 +297,88 @@ fn is_usage_error(output: &std::process::Output) -> bool {
             .any(|window| window == b"usage:")
 }
 
+/// 旧版 Git 整个子命令都不存在时的回答（`git: 'worktree' is not a git command.`）。
+fn is_missing_command(output: &std::process::Output) -> bool {
+    !output.status.success()
+        && output
+            .stderr
+            .windows(b"is not a git command".len())
+            .any(|window| window == b"is not a git command")
+}
+
+/// 一次 `worktree list --porcelain` 的结果。
+enum WorktreeMembership {
+    /// Git 给出了成员列表与字段分隔符（`-z` 不可用时为换行）。
+    Listed(std::process::Output, u8),
+    /// Git 没有这个子命令或选项：没有成员列表可核对。
+    Unsupported,
+}
+
 /// 一次 `worktree list --porcelain`，附带字段分隔符。
 ///
 /// 优先 `-z`：NUL 分隔能承载含换行的路径。旧版 Git 没有 `-z`，会按用法错误退出，
 /// 此时退回换行分隔；退回只改变分隔符，成员判定仍由调用方按完整路径精确比对。
-async fn git_worktree_listing(program: &OsStr, cwd: &Path) -> Result<(std::process::Output, u8)> {
-    let primary = git(program, cwd, &["worktree", "list", "--porcelain", "-z"]).await?;
-    if primary.as_ref().is_some_and(is_usage_error) {
-        let fallback = git(program, cwd, &["worktree", "list", "--porcelain"]).await?;
-        return Ok((
-            fallback.ok_or_else(|| {
-                anyhow::Error::from(WorkspaceError::DiscoveryError(
-                    "Git became unavailable during discovery".into(),
-                ))
-            })?,
-            b'\n',
-        ));
+/// 子命令或选项整体不存在时返回 `Unsupported`：位置已经由 `rev-parse` 回答，跳过的
+/// 只是交叉核对，真实失败（损坏仓库、权限）仍必须原样上报。
+async fn git_worktree_membership(program: &OsStr, cwd: &Path) -> Result<WorktreeMembership> {
+    let unavailable = || {
+        anyhow::Error::from(WorkspaceError::DiscoveryError(
+            "Git became unavailable during discovery".into(),
+        ))
+    };
+    let primary = git(program, cwd, &["worktree", "list", "--porcelain", "-z"])
+        .await?
+        .ok_or_else(unavailable)?;
+    if is_missing_command(&primary) {
+        return Ok(WorktreeMembership::Unsupported);
     }
-    Ok((
-        primary.ok_or_else(|| {
-            anyhow::Error::from(WorkspaceError::DiscoveryError(
-                "Git became unavailable during discovery".into(),
-            ))
-        })?,
-        0,
-    ))
+    if !is_usage_error(&primary) {
+        return Ok(WorktreeMembership::Listed(primary, 0));
+    }
+    let fallback = git(program, cwd, &["worktree", "list", "--porcelain"])
+        .await?
+        .ok_or_else(unavailable)?;
+    if is_usage_error(&fallback) {
+        // 连 `--porcelain` 都不存在（`worktree list` 刚出现的版本）：没有成员列表可核对。
+        return Ok(WorktreeMembership::Unsupported);
+    }
+    Ok(WorktreeMembership::Listed(fallback, b'\n'))
+}
+
+/// common Git directory：读 Git 自己写入的 `commondir` 文件。
+///
+/// `gitrepository-layout` 把这个文件的语义定义为 `$GIT_COMMON_DIR`（相对路径按
+/// `$GIT_DIR` 解析），`rev-parse --git-common-dir` 是它的投影。这里不请求那个选项，
+/// 因为它从 Git 2.5 起才存在，旧版把未知选项原样回显，位置会被当成不存在的路径。
+/// linked worktree 由 `git worktree add` 写入该文件；主工作树没有它，两个位置相同。
+async fn common_directory(private_dir: &Path) -> Result<PathBuf> {
+    let marker = private_dir.join("commondir");
+    let text = match tokio::fs::read_to_string(&marker).await {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(private_dir.to_path_buf()),
+        Err(_) => {
+            return Err(
+                WorkspaceError::DiscoveryError("Git common directory is unreadable".into()).into(),
+            )
+        }
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(
+            WorkspaceError::DiscoveryError("Git common directory is unreadable".into()).into(),
+        );
+    }
+    let path = Path::new(text);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        private_dir.join(path)
+    };
+    tokio::fs::canonicalize(&path).await.map_err(|_| {
+        anyhow::Error::from(WorkspaceError::DiscoveryError(
+            "Git common directory is unavailable".into(),
+        ))
+    })
 }
 
 /// 一次目录观测：`Discovery` 加上「Git 是否真的回答过」这一证据强度标记。
@@ -373,17 +438,13 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
         )
         .into());
     }
-    // 三个位置共用一次 `rev-parse`：输出顺序与参数顺序一致。
-    let [root, common_dir, private_dir] = git_paths(
+    // 两个位置共用一次 `rev-parse`：输出顺序与参数顺序一致。common directory 由
+    // `commondir` 文件解析，见 `common_directory`。
+    let [root, private_dir] = git_paths(
         program,
         &cwd,
-        &[
-            "rev-parse",
-            "--show-toplevel",
-            "--git-common-dir",
-            "--git-dir",
-        ],
-        3,
+        &["rev-parse", "--show-toplevel", "--git-dir"],
+        2,
     )
     .await?
     .try_into()
@@ -392,23 +453,27 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
             "Git location discovery returned an unexpected number of paths".into(),
         ))
     })?;
-    let (worktrees, separator) = git_worktree_listing(program, &cwd).await?;
-    let expected = git_command_path(&root)?;
-    if !worktrees.status.success()
-        || !worktrees
-            .stdout
-            .split(|byte| *byte == separator)
-            .any(|field| {
-                field
-                    .strip_prefix(b"worktree ")
-                    .and_then(|path| std::str::from_utf8(path).ok())
-                    .is_some_and(|path| Path::new(path) == expected)
-            })
+    let common_dir = common_directory(&private_dir).await?;
+    if let WorktreeMembership::Listed(worktrees, separator) =
+        git_worktree_membership(program, &cwd).await?
     {
-        return Err(WorkspaceError::DiscoveryError(
-            "Git worktree membership is inconsistent".into(),
-        )
-        .into());
+        let expected = git_command_path(&root)?;
+        if !worktrees.status.success()
+            || !worktrees
+                .stdout
+                .split(|byte| *byte == separator)
+                .any(|field| {
+                    field
+                        .strip_prefix(b"worktree ")
+                        .and_then(|path| std::str::from_utf8(path).ok())
+                        .is_some_and(|path| Path::new(path) == expected)
+                })
+        {
+            return Err(WorkspaceError::DiscoveryError(
+                "Git worktree membership is inconsistent".into(),
+            )
+            .into());
+        }
     }
     let discovered = Discovery {
         root_identity: object_identity(&root).await?,
