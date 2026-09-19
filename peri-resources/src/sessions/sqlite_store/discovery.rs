@@ -177,6 +177,36 @@ async fn bounded_output(reader: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+/// 一次 Git 子进程启动的尝试次数。
+///
+/// `Command::spawn` 失败意味着没有子进程被启动，重试不改变语义；而负载下的启动
+/// 失败多是瞬时的资源不足（EAGAIN/ENOMEM 等），尤其在 CI 这类并行度高的环境。
+/// 一次瞬时抖动就让发现失败，用户当次会话就建不起来——代价远大于退让重试。
+const GIT_SPAWN_ATTEMPTS: u32 = 3;
+
+/// 启动 Git 子进程；瞬时失败退让后重试。
+///
+/// `NotFound` 是确定性的环境事实（Git 未安装），由调用方按「Git 不可用」处理，
+/// 不重试；其余错误重试到次数上限后仍按原语义上报「Git 不可执行」。
+async fn spawn_git(command: &mut Command) -> Result<Option<tokio::process::Child>> {
+    let mut attempt = 1;
+    loop {
+        match command.spawn() {
+            Ok(child) => return Ok(Some(child)),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(_) if attempt < GIT_SPAWN_ATTEMPTS => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(10 * u64::from(attempt))).await;
+            }
+            Err(_) => {
+                return Err(
+                    WorkspaceError::DiscoveryError("Git could not be executed".into()).into(),
+                );
+            }
+        }
+    }
+}
+
 async fn git(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<Option<std::process::Output>> {
     let mut command = Command::new(program);
     command
@@ -193,12 +223,8 @@ async fn git(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<Option<std::p
             command.env_remove(name);
         }
     }
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(_) => {
-            return Err(WorkspaceError::DiscoveryError("Git could not be executed".into()).into());
-        }
+    let Some(mut child) = spawn_git(&mut command).await? else {
+        return Ok(None);
     };
     let stdout = child.stdout.take().context("Git stdout unavailable")?;
     let stderr = child.stderr.take().context("Git stderr unavailable")?;

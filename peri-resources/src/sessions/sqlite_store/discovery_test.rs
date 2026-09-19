@@ -120,6 +120,38 @@ async fn test_worktree_git_permission_denied_is_not_directory_mode() {
     ));
 }
 
+/// [回归测试] 启动失败按有限次数退让重试：一次瞬时失败不能直接变成一次发现失败。
+///
+/// 首次尝试时程序还不可执行（EACCES，与权限位尚未生效同类），退让期间权限放开——
+/// 这次发现必须自行恢复拿到 Git 的回答，而不是以「Git 不可执行」失败。断言只看
+/// 结果，不依赖具体退让时长：权限在最后一次尝试前生效即可恢复。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_git_spawn_failure_recovers_within_retries() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let program = directory.path().join("late-git");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf 'fatal: not a git repository' >&2\nexit 128\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let late = program.clone();
+    let opener = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        std::fs::set_permissions(&late, std::fs::Permissions::from_mode(0o755)).unwrap();
+    });
+    let (cwd, observed) = observe_with_git(directory.path(), program.as_os_str())
+        .await
+        .expect("启动失败必须在同一次发现里退让重试");
+    opener.await.unwrap();
+    // 重试后拿到的是 Git 的回答（不是仓库），不是「Git 不可执行」。
+    assert!(observed.git_answered);
+    assert_eq!(observed.discovery.root, cwd);
+    assert_eq!(observed.discovery.common_dir, None);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_worktree_git_rejection_is_not_directory_mode() {
