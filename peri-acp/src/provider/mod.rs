@@ -8,8 +8,14 @@ pub mod store;
 
 use std::sync::Arc;
 
-pub use config::{AppConfig, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels};
-use peri_model::{AnthropicConfig, AnthropicModel, OpenAiConfig, OpenAiModel};
+pub use config::{
+    ApiProtocol, AppConfig, PeriConfig, ProfileConfig, Profiles, ProviderApiError, ProviderConfig,
+    ProviderModels,
+};
+use peri_model::{
+    AnthropicConfig, AnthropicModel, OpenAiConfig, OpenAiModel, OpenAiResponsesConfig,
+    OpenAiResponsesModel,
+};
 pub use store::{
     config_path, load, load_from, save_to, set_global_config_path, workspace_config_path,
     ConfigSource,
@@ -26,6 +32,8 @@ pub enum LlmProvider {
         api_key: String,
         base_url: String,
         model: String,
+        /// 生效的 API 协议（`chat_completions` / `responses`）
+        api: ApiProtocol,
         /// 思考强度 "low".."max"；None 表示不启用 extended thinking
         effort: Option<String>,
         max_tokens: u32,
@@ -89,6 +97,8 @@ impl LlmProvider {
                     api_key,
                     base_url,
                     model,
+                    // 环境变量路径无协议声明入口：缺省 chat_completions（旧行为）
+                    api: ApiProtocol::ChatCompletions,
                     effort: None,
                     max_tokens: 32000,
                     context_1m: false,
@@ -105,6 +115,8 @@ impl LlmProvider {
                     api_key,
                     base_url,
                     model,
+                    // 环境变量路径无协议声明入口：缺省 chat_completions（旧行为）
+                    api: ApiProtocol::ChatCompletions,
                     effort: None,
                     max_tokens: 32000,
                     context_1m: false,
@@ -130,6 +142,20 @@ impl LlmProvider {
             return None;
         }
 
+        // 协议解析失败（anthropic + 显式 api）即拒绝构造：不静默忽略 api 字段，
+        // 也不回退到其它协议。
+        let api = match provider.resolve_api_protocol() {
+            Ok(api) => api,
+            Err(error) => {
+                tracing::warn!(
+                    provider_id = %provider.id,
+                    %error,
+                    "provider 配置的 api 协议与类型不兼容，拒绝构造"
+                );
+                return None;
+            }
+        };
+
         let model = resolve_model_name(provider, alias, profile);
         let effort = Some(profile.effort.clone());
         let max_tokens = profile.max_tokens;
@@ -149,19 +175,30 @@ impl LlmProvider {
                 context_1m,
                 retry_observer: None,
             }),
-            _ => Some(Self::OpenAi {
-                api_key: provider.api_key.clone(),
-                base_url: if provider.base_url.is_empty() {
+            _ => {
+                let base_url = if provider.base_url.is_empty() {
                     "https://api.openai.com/v1".to_string()
                 } else {
                     provider.base_url.clone()
-                },
-                model,
-                effort,
-                max_tokens,
-                context_1m,
-                retry_observer: None,
-            }),
+                };
+                // Responses 走 fail-closed：endpoint 非法时不回落默认 endpoint
+                // （回落会把请求与凭据发往非用户指定的服务），直接拒绝构造。
+                if api == ApiProtocol::Responses
+                    && strict_endpoint(&base_url, "responses base_url").is_none()
+                {
+                    return None;
+                }
+                Some(Self::OpenAi {
+                    api_key: provider.api_key.clone(),
+                    base_url,
+                    model,
+                    api,
+                    effort,
+                    max_tokens,
+                    context_1m,
+                    retry_observer: None,
+                })
+            }
         }
     }
 
@@ -169,6 +206,24 @@ impl LlmProvider {
         match self {
             Self::OpenAi { .. } => "OpenAI",
             Self::Anthropic { .. } => "Anthropic",
+        }
+    }
+
+    /// 生效的 API 协议；Anthropic 无 `api` 字段语义，返回 None。
+    pub fn api_protocol(&self) -> Option<ApiProtocol> {
+        match self {
+            Self::OpenAi { api, .. } => Some(*api),
+            Self::Anthropic { .. } => None,
+        }
+    }
+
+    /// 协议稳定标识，用于 fingerprint / 缓存失效判定。
+    ///
+    /// 同 model、同 base_url 下切换 `api` 必须改变缓存身份，不能复用旧模型对象。
+    pub fn protocol_key(&self) -> &'static str {
+        match self {
+            Self::OpenAi { api, .. } => api.as_str(),
+            Self::Anthropic { .. } => "anthropic",
         }
     }
 
@@ -246,6 +301,7 @@ impl LlmProvider {
     pub fn into_model(self) -> Box<dyn peri_model::Model> {
         match self {
             Self::OpenAi {
+                api,
                 api_key,
                 base_url,
                 model,
@@ -254,21 +310,44 @@ impl LlmProvider {
                 retry_observer,
                 ..
             } => {
-                let endpoint =
-                    parse_endpoint(&base_url, "https://api.openai.com/v1", "openai base_url");
-                let mut config = OpenAiConfig::new(endpoint, api_key, model);
-                if let Some(e) = effort.as_ref() {
-                    config = config.with_reasoning_effort(e);
-                    config = config.with_thinking_enabled(true);
-                }
-                config = config.with_max_tokens(max_tokens);
                 // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
-                config = config.with_runtime(match retry_observer {
+                let runtime = match retry_observer {
                     Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
                         .with_retry_observer(observer),
                     None => peri_model::ModelRuntimeConfig::with_full_observation(),
-                });
-                Box::new(OpenAiModel::new(config))
+                };
+                match api {
+                    ApiProtocol::ChatCompletions => {
+                        let endpoint = parse_endpoint(
+                            &base_url,
+                            "https://api.openai.com/v1",
+                            "openai base_url",
+                        );
+                        let mut config = OpenAiConfig::new(endpoint, api_key, model);
+                        if let Some(e) = effort.as_ref() {
+                            config = config.with_reasoning_effort(e);
+                            config = config.with_thinking_enabled(true);
+                        }
+                        config = config.with_max_tokens(max_tokens);
+                        config = config.with_runtime(runtime);
+                        Box::new(OpenAiModel::new(config))
+                    }
+                    ApiProtocol::Responses => {
+                        // Responses 走 fail-closed：非法 endpoint 绝不回落（回落会把
+                        // 请求与凭据发往非用户指定的服务）。配置入口
+                        // `from_config_for_alias` 已拒绝非法值，此处违反只可能来自
+                        // 手工构造 provider 的代码错误，直接失败而非降级。
+                        let endpoint = strict_endpoint(&base_url, "responses base_url")
+                            .expect("responses base_url 必须已通过配置入口校验");
+                        let mut config = OpenAiResponsesConfig::new(endpoint, api_key, model);
+                        if let Some(e) = effort.as_ref() {
+                            config = config.with_reasoning_effort(e);
+                        }
+                        config = config.with_max_output_tokens(max_tokens);
+                        config = config.with_runtime(runtime);
+                        Box::new(OpenAiResponsesModel::new(config))
+                    }
+                }
             }
             Self::Anthropic {
                 api_key,
@@ -347,16 +426,42 @@ fn resolve_model_name(
 /// 保持 provider 构造期不失败（fail-soft）的语义。
 /// 真正无效的 endpoint 会在 prepare/stream 时由 `peri-model` 返回
 /// `InvalidEndpoint` 错误（fail closed）。
+///
+/// 诊断只记录标签与解析错误种类：base URL 可能内嵌凭据，原样入日志会泄露密钥
+/// （`RUST-TRACE-001` / `ARC-SECRET-001`），与 [`strict_endpoint`] 一致。
 fn parse_endpoint(raw: &str, fallback: &str, label: &str) -> Url {
     Url::parse(raw).unwrap_or_else(|error| {
         tracing::warn!(
             %error,
             %label,
-            raw,
             "provider endpoint 非法，回落到默认 endpoint"
         );
         Url::parse(fallback).expect("默认 endpoint 必须可解析")
     })
+}
+
+/// 严格解析 provider endpoint：scheme/host 合法且不含 URL 凭据才接受。
+///
+/// 与 [`parse_endpoint`] 的 fail-soft 语义相对：Chat 兼容端点沿用旧回落行为，
+/// Responses 必须 fail-closed——非法 URL 返回 None，不回落也不改发其他
+/// endpoint；诊断只记录标签，不记录 URL 本体（避免把凭据写进日志）。
+fn strict_endpoint(raw: &str, label: &str) -> Option<Url> {
+    let parsed = match Url::parse(raw) {
+        Ok(url) => url,
+        Err(_) => {
+            tracing::warn!(%label, "provider endpoint 不是合法 URL，已拒绝");
+            return None;
+        }
+    };
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        tracing::warn!(%label, "provider endpoint 缺少 http(s) host 或携带凭据，已拒绝");
+        return None;
+    }
+    Some(parsed)
 }
 
 #[cfg(test)]

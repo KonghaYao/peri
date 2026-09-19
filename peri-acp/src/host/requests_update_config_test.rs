@@ -216,3 +216,51 @@ async fn test_update_config_persistence_failure_leaves_state_unchanged() {
     assert_eq!(*cfg.peri_config.read(), config);
     assert_eq!(cfg.provider.read().model_name(), "old");
 }
+
+/// [回归测试] 非法协议组合（anthropic + 显式 api）在配置更新入口即被拒绝，
+/// 不落盘、不发布运行时配置（不静默忽略 api，也不回退其他协议）。
+#[tokio::test]
+async fn test_update_config_rejects_anthropic_with_explicit_api() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = make_peri_config_with_provider(make_provider_config(
+        "same",
+        "anthropic",
+        "valid",
+        "claude-sonnet-4-6",
+    ));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let cfg = make_server_config(config.clone(), provider, &tmp).await;
+    let mut updated = config.clone();
+    updated.config.providers[0].api = Some(crate::provider::ApiProtocol::ChatCompletions);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let error = handle_request(
+        "session/update_config",
+        &json!({"config": updated}),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert_eq!(error.message, "active profile has no usable provider");
+    assert_eq!(*cfg.peri_config.read(), config);
+    assert!(!cfg.config_source.global_path().exists());
+    assert!(
+        cfg.provider.read().api_protocol().is_none(),
+        "拒绝后运行时仍是原 anthropic provider"
+    );
+
+    // 同一配置去掉显式 api 即可通过（拒绝的是组合，不是 provider 本身）
+    let mut fixed = config.clone();
+    fixed.config.providers[0].api = None;
+    handle_request(
+        "session/update_config",
+        &json!({"config": fixed}),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .expect("anthropic 未声明 api 时必须接受");
+}

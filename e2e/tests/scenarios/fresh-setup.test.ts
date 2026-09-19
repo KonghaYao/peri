@@ -9,7 +9,7 @@ import path from "node:path";
 import { TmuxTester } from "tui-tester";
 import { PROJECT_ROOT } from "../../helpers/peri.js";
 
-type ModelRequest = { server: number; body: { model: string; messages: unknown[] } };
+type ModelRequest = { server: number; url: string; body: { model: string; messages?: unknown[]; input?: unknown[]; store?: boolean } };
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -49,8 +49,32 @@ describe("首次 setup 的保存与运行时交接", () => {
         const chunks: Buffer[] = [];
         for await (const chunk of request) chunks.push(Buffer.from(chunk));
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        requests.push({ server: id, body });
+        requests.push({ server: id, url: request.url || "", body });
         response.writeHead(200, { "content-type": "text/event-stream" });
+        if (request.url?.endsWith("/responses")) {
+          const text = JSON.stringify(body.input).includes("LOGIN_RESPONSES_INPUT")
+            ? "LOGIN_RESPONSES_REPLY" : `FRESH_SETUP_REPLY_${id}`;
+          const events = [
+            { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: text },
+            { type: "response.completed", response: {
+              id: `resp_${id}`, status: "completed",
+              output: [{ type: "message", id: `msg_${id}`, role: "assistant", status: "completed",
+                content: [{ type: "output_text", text, annotations: [] }] }],
+              usage: { input_tokens: 100, output_tokens: 6 },
+            } },
+          ];
+          response.end(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
+          return;
+        }
+        if (request.url?.endsWith("/chat/completions")) {
+          const chunk = { id: `chat_${id}`, model: body.model,
+            choices: [{ index: 0, delta: { content: `FRESH_SETUP_REPLY_${id}` }, finish_reason: null }] };
+          const completed = { ...chunk,
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            usage: { prompt_tokens: 100, completion_tokens: 6, total_tokens: 106 } };
+          response.end([chunk, completed].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n");
+          return;
+        }
         const events: Array<[string, object]> = [
           ["message_start", { type: "message_start", message: {
             id: `fresh-setup-${id}`, type: "message", role: "assistant", model: body.model,
@@ -128,9 +152,14 @@ describe("首次 setup 的保存与运行时交接", () => {
     await tester.waitForText("Submit");
   }
 
-  async function editProvider(endpoint: string): Promise<void> {
+  async function editProvider(endpoint: string, api: "anthropic" | "responses" | "chat_completions" = "anthropic"): Promise<void> {
     await tester!.sendKey("enter");
     await tester!.waitForText("Test connectivity");
+    if (api !== "anthropic") await tester!.sendKey("right"); // Anthropic → OpenAI
+    // Edit 表单字段顺序（键盘 Down 依赖）：Type → API → ID → Base URL →
+    // Test connectivity → API Key；新增字段时同步调整本序列。
+    await tester!.sendKey("down");
+    if (api === "responses") await tester!.sendKey("right"); // Chat Completions → Responses
     await tester!.sendKey("down");
     await tester!.sendKey("down");
     await tester!.sendKey("end");
@@ -156,9 +185,66 @@ describe("首次 setup 的保存与运行时交接", () => {
     await tester!.paste(marker);
     await tester!.sendKey("enter");
     await tester!.waitForText(`FRESH_SETUP_REPLY_${server}`, { timeout: 20_000, interval: 100 });
-    const matching = requests.filter((request) => JSON.stringify(request.body.messages).includes(marker));
+    const matching = requests.filter((request) => JSON.stringify(request.body.messages ?? request.body.input).includes(marker));
     expect(matching.some((request) => request.server === server), "消息必须到达刚保存的 endpoint").toBe(true);
   }
+
+  it("全新 HOME 选择 Responses 后保存并经真实宿主请求，再次 setup 保留协议", async () => {
+    await launch();
+    await editProvider(endpoints[0], "responses");
+    await saveAndSubmit("RESPONSES_SETUP_INPUT", 0);
+    const saved = JSON.parse(await readFile(settings, "utf8"));
+    expect(saved.config.providers[0].type).toBe("openai");
+    expect(saved.config.providers[0].api).toBe("responses");
+    const request = requests.find((request) => JSON.stringify(request.body.input).includes("RESPONSES_SETUP_INPUT"));
+    expect(request?.url).toBe("/responses");
+    expect(request?.body.store).toBe(false);
+    expect(request?.body.messages).toBeUndefined();
+    await tester!.paste("/setup");
+    await tester!.sendKey("enter");
+    await tester!.waitForText("Responses", { timeout: 10_000, interval: 100 });
+  });
+
+  it("OpenAI 缺省仍使用 Chat Completions", async () => {
+    await launch();
+    await editProvider(endpoints[0], "chat_completions");
+    await saveAndSubmit("CHAT_SETUP_INPUT", 0);
+    const request = requests.find((request) => JSON.stringify(request.body.messages).includes("CHAT_SETUP_INPUT"));
+    expect(request?.url).toBe("/chat/completions");
+    expect(request?.body.input).toBeUndefined();
+  });
+
+  it("login 将已有 provider 切换为 Responses，保存重开并立即生效", async () => {
+    await launch();
+    await editProvider(endpoints[0]);
+    await saveAndSubmit("LOGIN_BEFORE_SWITCH", 0);
+    await tester!.paste("/login");
+    await tester!.sendKey("enter");
+    await tester!.waitForText("providers configured");
+    await tester!.sendKey("enter");
+    await tester!.waitForText("Edit Provider");
+    await tester!.sendKey("right");
+    await tester!.sendKey("down");
+    await tester!.sendKey("right");
+    await tester!.waitForText("Responses");
+    await tester!.sendKey("s", { ctrl: true });
+    await tester!.waitForText("providers configured");
+    const config = JSON.parse(await readFile(settings, "utf8"));
+    expect(config.config.providers[0].api).toBe("responses");
+    await tester!.sendKey("enter");
+    await tester!.waitForText("Edit Provider");
+    expect(await tester!.getScreenText()).toContain("Responses");
+    await tester!.sendKey("s", { ctrl: true });
+    await tester!.waitForText("providers configured");
+    await tester!.sendKey("escape");
+    await tester!.paste("LOGIN_RESPONSES_INPUT");
+    await tester!.sendKey("enter");
+    await expect.poll(() => requests.some((request) =>
+      request.url === "/responses" &&
+      JSON.stringify(request.body.input).includes("LOGIN_RESPONSES_INPUT")),
+    { timeout: 20_000 }).toBe(true);
+    await tester!.waitForText("LOGIN_RESPONSES_REPLY");
+  });
 
   it("全新 HOME 保存后无需重启即可提交，并能再次 setup 更新相同 provider", async () => {
     await launch();

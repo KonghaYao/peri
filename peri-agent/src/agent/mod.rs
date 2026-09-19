@@ -37,3 +37,11 @@ pub use state::AgentState;
 #[doc(hidden)]
 pub use token::{ContextBudget, TokenTracker};
 pub use tokio_util::sync::CancellationToken as AgentCancellationToken;
+
+#[cfg(test)]
+#[path = "responses_http_test.rs"]
+mod responses_http_test;
+
+#[cfg(test)]
+#[path = "responses_lifecycle_test.rs"]
+mod responses_lifecycle_test;

@@ -21,6 +21,49 @@ fn prepared_request(body: serde_json::Value) -> PreparedModelRequest {
 }
 
 #[test]
+fn responses_ciphertext_is_redacted_even_with_full_observation() {
+    // 合成标记，不是真实密文或凭据。
+    let marker = "responses-ciphertext-observation-marker";
+    let observed = PreparedModelRequest::observe_with_runtime(
+        ProviderProtocol::OpenAiResponses,
+        "responses-test",
+        Url::parse("https://api.example.test/v1/responses").unwrap(),
+        json!({
+            "input": [{
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": marker,
+            }],
+            "max_output_tokens": 1024,
+            "tool": {
+                "type": "function_call",
+                "arguments": serde_json::to_string(&json!({"password": marker})).unwrap(),
+            },
+        }),
+        BTreeMap::new(),
+        &ModelRuntimeConfig::with_full_observation(),
+    )
+    .unwrap();
+
+    assert!(!serde_json::to_string(&observed).unwrap().contains(marker));
+    assert!(!format!("{observed:?}").contains(marker));
+    assert!(observed.body().as_value()["input"][0]
+        .get("encrypted_content")
+        .is_none());
+    assert!(observed
+        .redacted_paths()
+        .contains(&"/input/0/encrypted_content".to_owned()));
+    assert!(observed
+        .redacted_paths()
+        .contains(&"/tool/arguments".to_owned()));
+    assert_eq!(
+        observed.body().as_value()["tool"]["arguments"],
+        json!("[REDACTED]")
+    );
+    assert_eq!(observed.body().as_value()["max_output_tokens"], json!(1024));
+}
+
+#[test]
 fn test_endpoint_projection_removes_input_path_and_credentials() {
     let observed = PreparedModelRequest::observe(
         ProviderProtocol::OpenAiCompatible,

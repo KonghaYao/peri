@@ -13,8 +13,12 @@ use crate::error::AgentResult;
 /// emit TurnCompleted（迭代边界提交信号）：从 transcript 读快照，供成功/失败路径共用，
 /// 保证 TUI committed 视图与 transcript 一致（S5.3：run_after_agent / dispatch_tools
 /// 失败时最终回答或工具结果可能已写入 transcript，必须提交迭代边界再传播错误）。
+///
+/// 快照经观察出口脱敏：消费方只需要用户可见内容，provider 原生历史载荷（Responses
+/// 的 reasoning 密文与来源身份）不随事件离开进程；transcript 本身保持原消息。
 fn emit_turn_completed(ctx: &StageContext) {
-    let finalized_messages = ctx.session.transcript.read().visible_snapshot();
+    let finalized_messages =
+        super::observed_message_snapshot(&ctx.session.transcript.read().visible_snapshot());
     ctx.runtime
         .event_bus
         .emit_render(RenderEvent::TurnCompleted {

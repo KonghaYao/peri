@@ -190,3 +190,72 @@ fn test_tool_message_persists_safe_subagent_failure_facts_only() {
         }
     ));
 }
+
+// ── 可观测出口投影（provider 原生历史） ───────────────────────────────────────
+
+fn ai_with_native_history() -> BaseMessage {
+    BaseMessage::ai_with_tool_calls(
+        MessageContent::Blocks(vec![
+            ContentBlock::text("answer"),
+            ContentBlock::responses_native_history(serde_json::json!({
+                "version": 1,
+                "source": {"nonce": "NONCEHEX", "digest": "DIGESTHEX"},
+                "items": [
+                    {"type": "reasoning", "encrypted_content": "CIPHERTEXT"},
+                ],
+            })),
+        ]),
+        vec![ToolCallRequest::new(
+            "call_1",
+            "shell",
+            serde_json::json!({"command": "ls"}),
+        )],
+    )
+}
+
+#[test]
+fn test_message_debug_redacts_native_history_payload() {
+    let message = ai_with_native_history();
+    let debug = format!("{message:?}");
+
+    assert!(
+        !debug.contains("CIPHERTEXT"),
+        "BaseMessage Debug 不得输出密文"
+    );
+    assert!(!debug.contains("NONCEHEX"));
+    assert!(!debug.contains("DIGESTHEX"));
+    assert!(debug.contains("answer"), "可见内容仍应输出");
+    assert!(debug.contains("call_1"), "工具调用身份仍应输出");
+}
+
+#[test]
+fn test_message_observability_projection_preserves_user_visible_facts() {
+    let message = ai_with_native_history();
+    assert!(message.has_provider_native_history());
+
+    let projected = message.redacted_for_observability();
+    assert_eq!(projected.id(), message.id());
+    assert_eq!(projected.content(), "answer");
+    assert_eq!(projected.tool_calls(), message.tool_calls());
+    assert!(projected.has_provider_native_history());
+
+    let wire = serde_json::to_string(&projected).expect("投影可序列化");
+    assert!(!wire.contains("CIPHERTEXT"));
+    assert!(!wire.contains("NONCEHEX"));
+    assert!(wire.contains("answer"));
+    assert!(wire.contains("call_1"));
+}
+
+#[test]
+fn test_redacted_messages_for_observability_only_copies_when_needed() {
+    let plain = BaseMessage::human("hi");
+    let with_history = ai_with_native_history();
+
+    let projected = super::redacted_messages_for_observability(&[plain.clone(), with_history]);
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0].id(), plain.id());
+    assert_eq!(projected[0].content(), plain.content());
+    assert!(!serde_json::to_string(&projected[1])
+        .expect("serialize")
+        .contains("CIPHERTEXT"));
+}

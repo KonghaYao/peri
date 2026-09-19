@@ -13,7 +13,7 @@ use crate::i18n;
 use crate::kit::atoms::{PROVIDER_LIST, ProviderSummary};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::{AreaTracker, is_scrollbar_column};
-use peri_acp::provider::config::ProviderConfig;
+use peri_acp::provider::config::{ApiProtocol, ProviderConfig};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
@@ -33,7 +33,8 @@ mod render;
 use self::config_store::delete_provider;
 use self::edit_handler::{enter_login_edit_mode, handle_login_edit_keys, handle_login_paste};
 use self::render::{
-    make_hint_line_for_login, mask_api_key_display, provider_type_label, render_login_edit_line,
+    api_protocol_label, make_hint_line_for_login, mask_api_key_display, provider_type_label,
+    render_login_edit_line,
 };
 
 // ── Login 编辑模式类型 ─────────────────────────────────────────────────────────
@@ -50,10 +51,12 @@ enum LoginPanelMode {
 }
 
 /// 编辑模式下可编辑的字段（布局与 setup_wizard 的 Form Edit 一致：
-/// Type/ID/BaseUrl/ApiKey + Model 分组 + Confirm 确认按钮）
+/// Type / API / ID / BaseUrl / ApiKey + Model 分组 + Confirm 确认按钮）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoginEditField {
     ProviderType,
+    /// API 协议选择器（chat_completions / responses；仅 openai 类型可切换）
+    ApiProtocol,
     ProviderId,
     BaseUrl,
     ApiKey,
@@ -67,7 +70,8 @@ enum LoginEditField {
 impl LoginEditField {
     fn next(self) -> Self {
         match self {
-            Self::ProviderType => Self::ProviderId,
+            Self::ProviderType => Self::ApiProtocol,
+            Self::ApiProtocol => Self::ProviderId,
             Self::ProviderId => Self::BaseUrl,
             Self::BaseUrl => Self::ApiKey,
             Self::ApiKey => Self::FableModel,
@@ -82,7 +86,8 @@ impl LoginEditField {
     fn prev(self) -> Self {
         match self {
             Self::ProviderType => Self::Confirm,
-            Self::ProviderId => Self::ProviderType,
+            Self::ApiProtocol => Self::ProviderType,
+            Self::ProviderId => Self::ApiProtocol,
             Self::BaseUrl => Self::ProviderId,
             Self::ApiKey => Self::BaseUrl,
             Self::FableModel => Self::ApiKey,
@@ -96,6 +101,7 @@ impl LoginEditField {
     fn i18n_key(self) -> &'static str {
         match self {
             Self::ProviderType => "login-field-type",
+            Self::ApiProtocol => "login-field-api",
             Self::ProviderId => "login-field-name",
             Self::ApiKey => "login-field-api-key",
             Self::BaseUrl => "login-field-base-url",
@@ -106,6 +112,11 @@ impl LoginEditField {
             Self::Confirm => "login-confirm",
         }
     }
+
+    /// 是否接受文本输入（toggle / 按钮字段除外）
+    fn is_text_input(self) -> bool {
+        !matches!(self, Self::ProviderType | Self::ApiProtocol | Self::Confirm)
+    }
 }
 
 /// 编辑模式下的字段值工作副本
@@ -114,6 +125,8 @@ struct LoginEditState {
     /// 进入编辑时的原始 provider_id（用于 save 时定位配置项）
     original_provider_id: String,
     provider_type: String,
+    /// API 协议（chat_completions / responses）；anthropic 下不落盘
+    api: ApiProtocol,
     provider_id: String,
     api_key: String,
     base_url: String,
@@ -128,6 +141,8 @@ impl LoginEditState {
         Self {
             original_provider_id: config.id.clone(),
             provider_type: config.provider_type.clone(),
+            // 未声明协议 = 缺省 chat_completions（与配置解析语义一致）
+            api: config.api.unwrap_or_default(),
             provider_id: config.id.clone(),
             api_key: config.api_key.clone(),
             base_url: config.base_url.clone(),
@@ -142,6 +157,7 @@ impl LoginEditState {
         Self {
             original_provider_id: String::new(),
             provider_type: "anthropic".to_string(),
+            api: ApiProtocol::default(),
             provider_id: String::new(),
             api_key: String::new(),
             base_url: String::new(),
@@ -149,6 +165,34 @@ impl LoginEditState {
             opus_model: String::new(),
             sonnet_model: String::new(),
             haiku_model: String::new(),
+        }
+    }
+
+    /// 该 provider 类型是否使用 `api` 字段（仅 openai 类型可选协议）
+    fn supports_api_selection(&self) -> bool {
+        self.provider_type != "anthropic"
+    }
+
+    /// 落盘生效的协议：anthropic + 显式 api 是非法组合，写入 None。
+    fn effective_api(&self) -> Option<ApiProtocol> {
+        self.supports_api_selection().then_some(self.api)
+    }
+
+    /// 切换 provider 类型；切到 anthropic 时清除不适用协议选择。
+    fn toggle_provider_type(&mut self) {
+        self.provider_type = match self.provider_type.as_str() {
+            "anthropic" => "openai".to_string(),
+            _ => "anthropic".to_string(),
+        };
+        if !self.supports_api_selection() {
+            self.api = ApiProtocol::default();
+        }
+    }
+
+    /// 循环切换 API 协议（anthropic 不使用该字段，无效果）。
+    fn cycle_api_protocol(&mut self) {
+        if self.supports_api_selection() {
+            self.api = self.api.cycle();
         }
     }
 
@@ -162,7 +206,7 @@ impl LoginEditState {
             LoginEditField::OpusModel => &self.opus_model,
             LoginEditField::SonnetModel => &self.sonnet_model,
             LoginEditField::HaikuModel => &self.haiku_model,
-            LoginEditField::Confirm => "",
+            LoginEditField::ApiProtocol | LoginEditField::Confirm => "",
         }
     }
 
@@ -176,7 +220,9 @@ impl LoginEditState {
             LoginEditField::OpusModel => &mut self.opus_model,
             LoginEditField::SonnetModel => &mut self.sonnet_model,
             LoginEditField::HaikuModel => &mut self.haiku_model,
-            LoginEditField::Confirm => unreachable!("Confirm is a button, not a text field"),
+            LoginEditField::ApiProtocol | LoginEditField::Confirm => {
+                unreachable!("ApiProtocol is a toggle and Confirm is a button, not text fields")
+            }
         }
     }
 }
@@ -310,8 +356,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 // 粘贴事件：仅编辑模式下处理
                 if let Event::Paste(paste_text) = &event {
-                    if *mode.read() == LoginPanelMode::Edit
-                        && *edit_focus.read() != LoginEditField::ProviderType
+                    if *mode.read() == LoginPanelMode::Edit && (*edit_focus.read()).is_text_input()
                     {
                         let mut es_guard = edit_state.write();
                         let mut ec_guard = edit_cursor.write();
@@ -440,12 +485,21 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         Style::new().fg(text_color)
                     };
 
+                    // 协议是 provider 的有效配置：浏览态一并显示，用户可确认当前选择
+                    let type_display = match p.api {
+                        Some(api) => format!(
+                            "{} · {}",
+                            p.provider_type,
+                            i18n::tr(api_protocol_label(api))
+                        ),
+                        None => p.provider_type.clone(),
+                    };
                     lines.push(Line::from(vec![
                         Span::styled(
                             format!(" {} ", cursor_mark),
                             Style::new().fg(theme_def.read().component.panel.title),
                         ),
-                        Span::styled(format!("{}  ({})", p.id, p.provider_type), row_style),
+                        Span::styled(format!("{}  ({})", p.id, type_display), row_style),
                     ]));
 
                     let key_marker = if p.has_api_key {
@@ -527,6 +581,33 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     ),
                     Span::styled(
                         format!("[{}]", i18n::tr(provider_type_label(&es.provider_type))),
+                        Style::default().fg(text_color).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+
+                // ── API 协议（toggle；anthropic 下不适用，显示 N/A）
+                let api_focused = ef == LoginEditField::ApiProtocol;
+                let api_prefix = if api_focused { "❯ " } else { "  " };
+                let api_style = if api_focused {
+                    Style::default()
+                        .fg(focus_color)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(dim)
+                };
+                let api_display = if es.supports_api_selection() {
+                    i18n::tr(api_protocol_label(es.api))
+                } else {
+                    i18n::tr("api-protocol-not-applicable")
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(api_prefix, Style::default().fg(cursor_color)),
+                    Span::styled(
+                        format!("{}: ", i18n::tr(LoginEditField::ApiProtocol.i18n_key())),
+                        api_style,
+                    ),
+                    Span::styled(
+                        format!("[{api_display}]"),
                         Style::default().fg(text_color).add_modifier(Modifier::BOLD),
                     ),
                 ]));

@@ -5,6 +5,6 @@
 pub mod adapters;
 
 pub use peri_acp_types::messages::{
-    BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, MessageId,
-    ToolCallRequest,
+    redacted_messages_for_observability, BaseMessage, ContentBlock, DocumentSource, ImageSource,
+    MessageContent, MessageId, ToolCallRequest, RESPONSES_NATIVE_HISTORY_TAG,
 };

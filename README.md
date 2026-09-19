@@ -121,6 +121,8 @@ Tool calls are auto-approved by default. For approval prompts, use `--permission
 
 - `/login`: providers · `/model`: model profiles · `/threads`: saved sessions.
 - Settings: `~/.peri/settings.json` (`--config-file`). Sessions: `~/.peri/threads/threads.db` (`--db-path`).
+- OpenAI 兼容服务保留 `"type": "openai"`，通过 `"api": "responses"` 选择 Responses API；省略 `api` 或填写 `"chat_completions"` 仍使用 Chat Completions。首次配置、`/setup` 和 `/login` 均可选择协议；`anthropic` 配置必须省略 `api`。
+- Responses 的 `baseUrl` 填服务商 API 基址（含所需版本前缀，不含末尾 `/responses`），模型填写该服务商支持的模型 ID。客户端在基址后追加 `/responses`，使用流式请求和 `store: false`；后者不保证服务商零留存。原生推理历史只在同协议、同端点、同模型间回放。
 - ACP client: `peri acp --cwd /path/to/project`. Browser terminal: `peri web --host 127.0.0.1`.
 - Workflows require Node.js. Extensions may need other dependencies.
 - Claude Code compatibility varies by feature. Caching depends on your provider and workload.

@@ -12,7 +12,7 @@ use peri_model::{
 use crate::{
     agent::{
         compact_v2::projection::{ProviderCapabilities, ProviderProtocol},
-        events_v2::{ObserveEvent, RenderEvent},
+        events_v2::{ObserveEvent, RenderEvent, StateEvent},
         react::{ReactLLM, Reasoning, StreamingContext, ToolCall},
     },
     error::{AgentError, AgentResult},
@@ -231,7 +231,21 @@ impl AgentModelBridge {
         &self,
         request: ModelRequest,
         streaming: Option<StreamingContext>,
+        prepared: Option<&peri_model::PreparedModelRequest>,
     ) -> AgentResult<Reasoning> {
+        if let (Some(context), Some(prepared)) = (&streaming, prepared) {
+            if prepared.responses_history_degraded() {
+                // 每个逻辑请求只发一次；重试发生在 Model 内部，通知不进入模型上下文。
+                context.event_bus.emit_state(StateEvent::ProtocolEvent {
+                    turn_id: context.turn_id,
+                    agent_id: context.agent_id,
+                    event: peri_acp_types::event::ExecutorEvent::SystemNotification {
+                        text: "模型来源已变化：保留通用对话和工具历史，不回放原生推理。".into(),
+                        level: "warning".into(),
+                    },
+                });
+            }
+        }
         let model_name = self.model_name();
         // 本条 AI 消息的稳定身份：一次 LLM 调用 = 一条 assistant 消息。流式
         // chunk（ThinkingChunk/TextChunk）共享该 ID，流式结束构建 source_message
@@ -257,6 +271,10 @@ impl AgentModelBridge {
         // 由 dispatch 路径同 id 的正式 ToolStarted 经 TUI start_tool 的
         // 重复 id upsert 填充。
         let mut tool_start_emitted = false;
+        // 调用级用量：失败尝试的真实消耗按累加保留，最终尝试的用量来自 Completed
+        // （provider 未在 Completed 上报时退回最后一个 usage 快照）。
+        let mut attempt_usage: Option<peri_model::TokenUsage> = None;
+        let mut usage_snapshot: Option<peri_model::TokenUsage> = None;
 
         loop {
             let event = tokio::select! {
@@ -333,7 +351,14 @@ impl AgentModelBridge {
                     }
                     // 工具参数流式细节 TUI 不消费（与 Usage 一致丢弃）。
                 }
-                Some(Ok(ModelStreamEvent::Usage(_))) => {}
+                Some(Ok(ModelStreamEvent::Usage(usage))) => {
+                    // 尝试内快照：只在 Completed 未携带 usage 时作为兜底，不参与累加
+                    // （同一尝试可能多次上报，累加会重复计数）。
+                    usage_snapshot = Some(usage);
+                }
+                Some(Ok(ModelStreamEvent::AttemptUsage(usage))) => {
+                    peri_model::TokenUsage::accumulate(&mut attempt_usage, usage);
+                }
                 Some(Ok(ModelStreamEvent::Completed(response))) => {
                     let mut reasoning = Self::response_reasoning(response, streaming.is_some())?;
                     // 流式 chunk 的 messageId 与定型消息 ID 对齐（标准语义）。
@@ -341,9 +366,23 @@ impl AgentModelBridge {
                         reasoning.source_message = Some(msg.with_message_id(message_id));
                     }
                     reasoning.model = model_name;
+                    let mut usage = attempt_usage.take();
+                    if let Some(final_usage) = reasoning.usage.clone().or(usage_snapshot.take()) {
+                        peri_model::TokenUsage::accumulate(&mut usage, final_usage);
+                    }
+                    reasoning.usage = usage;
                     return Ok(reasoning);
                 }
-                Some(Err(error)) => return Err(map_model_error(error)),
+                Some(Err(error)) => {
+                    // 桥接边界：把本次调用已确认的全部用量（失败尝试累加 + 最终失败
+                    // 尝试）随错误带回 Agent 层，失败路径不得伪造零用量。provider 随
+                    // 失败终态上报的值优先，其次该尝试已转发的最后一个快照。
+                    let mut usage = attempt_usage;
+                    if let Some(final_usage) = error.usage().cloned().or(usage_snapshot.take()) {
+                        peri_model::TokenUsage::accumulate(&mut usage, final_usage);
+                    }
+                    return Err(map_model_error(error.with_usage(usage)));
+                }
                 None => {
                     return Err(AgentError::ModelError(peri_model::ModelError::protocol(
                         peri_model::ProtocolErrorKind::StreamEndedWithoutCompleted,
@@ -363,7 +402,9 @@ impl ReactLLM for AgentModelBridge {
         streaming: Option<StreamingContext>,
     ) -> AgentResult<Reasoning> {
         let request = self.build_request(messages, tools)?;
-        self.generate_from_request(request, streaming).await
+        let prepared = self.model.prepare_request(&request).ok();
+        self.generate_from_request(request, streaming, prepared.as_ref())
+            .await
     }
 
     async fn generate_reasoning_with_observed_body(
@@ -374,12 +415,13 @@ impl ReactLLM for AgentModelBridge {
     ) -> AgentResult<(Reasoning, Option<serde_json::Value>)> {
         // 覆盖默认实现：只构建一次 request，观测体复用同一份（消除每轮双构建）
         let request = self.build_request(messages, tools)?;
-        let observed_body = self
-            .model
-            .prepare_request(&request)
-            .ok()
+        let prepared = self.model.prepare_request(&request).ok();
+        let observed_body = prepared
+            .as_ref()
             .map(|prepared| prepared.body().as_value().clone());
-        let reasoning = self.generate_from_request(request, streaming).await?;
+        let reasoning = self
+            .generate_from_request(request, streaming, prepared.as_ref())
+            .await?;
         Ok((reasoning, observed_body))
     }
 
@@ -411,12 +453,15 @@ impl ReactLLM for AgentModelBridge {
             .prepare_request(&ModelRequest::default())
             .map(|request| match request.protocol() {
                 peri_model::ProviderProtocol::OpenAiCompatible => ProviderProtocol::OpenAI,
+                peri_model::ProviderProtocol::OpenAiResponses => ProviderProtocol::OpenAiResponses,
                 peri_model::ProviderProtocol::Anthropic => ProviderProtocol::Anthropic,
                 peri_model::ProviderProtocol::Other { .. } => ProviderProtocol::Generic,
             })
             .unwrap_or(ProviderProtocol::Generic);
         ProviderCapabilities {
             signed_reasoning_must_be_whole: protocol == ProviderProtocol::Anthropic,
+            // Responses 原生历史与其派生视图必须整体保留；compact 投影不得拆改。
+            native_history_must_be_whole: protocol == ProviderProtocol::OpenAiResponses,
             protocol,
         }
     }
@@ -492,6 +537,13 @@ fn convert_block(block: &ContentBlock) -> AgentResult<ModelContentBlock> {
             signature: signature.clone(),
         }),
         ContentBlock::Unknown(value) => {
+            // Responses 原生历史：只有确定 tag 才按版本化解码；损坏或未知版本一律
+            // 拒绝，绝不把无法验证的历史载荷送进请求。
+            if value.get("type").and_then(|t| t.as_str())
+                == Some(crate::messages::RESPONSES_NATIVE_HISTORY_TAG)
+            {
+                return decode_native_history(value);
+            }
             // Agent 暂无显式 RedactedReasoning 变体；标准载荷经 Unknown 容器往返。
             // 仅识别 peri_model::RedactedReasoning 的确定形状，其余 Unknown 一律 fail closed。
             if value.get("type").and_then(|t| t.as_str()) == Some("redacted_reasoning") {
@@ -506,6 +558,20 @@ fn convert_block(block: &ContentBlock) -> AgentResult<ModelContentBlock> {
             ))
         }
     }
+}
+
+/// 解码 Responses 原生历史载体（`Unknown` envelope → 版本化记录）。
+///
+/// 失败信息只含静态原因，不回显载荷（可能含 reasoning 密文与来源身份）。
+fn decode_native_history(value: &serde_json::Value) -> AgentResult<ModelContentBlock> {
+    let payload = value.get("history").cloned().ok_or_else(|| {
+        AgentError::LlmError("responses native history payload is missing".into())
+    })?;
+    let history: peri_model::ResponsesHistoryV1 = serde_json::from_value(payload)
+        .map_err(|_| AgentError::LlmError("responses native history is corrupt".into()))?;
+    Ok(ModelContentBlock::ResponsesNativeHistory {
+        history: Box::new(history),
+    })
 }
 
 fn convert_model_message(message: &ModelMessage) -> AgentResult<BaseMessage> {
@@ -620,6 +686,12 @@ fn convert_model_block(block: &ModelContentBlock) -> AgentResult<ContentBlock> {
                 "type": "redacted_reasoning",
                 "data": data,
             })))
+        }
+        ModelContentBlock::ResponsesNativeHistory { history } => {
+            let payload = serde_json::to_value(history.as_ref()).map_err(|_| {
+                AgentError::LlmError("responses native history is not serializable".into())
+            })?;
+            Ok(ContentBlock::responses_native_history(payload))
         }
     }
 }

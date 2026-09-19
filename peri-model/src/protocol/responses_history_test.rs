@@ -69,6 +69,99 @@ fn case(item: Value) -> Result<ResponsesHistoryV1, HistoryError> {
 }
 
 #[test]
+fn non_string_status_is_rejected_in_constructor_and_deserialization() {
+    for template in [reasoning_item(), message_item(), function_call_item()] {
+        for status in [Value::Null, json!(false), json!(1), json!([]), json!({})] {
+            let mut item = template.clone();
+            item["status"] = status;
+            assert_eq!(
+                case(item.clone()).unwrap_err(),
+                HistoryError::InvalidField { field: "status" }
+            );
+
+            let mut encoded = serde_json::to_value(history()).unwrap();
+            encoded["items"] = json!([item]);
+            let error = serde_json::from_value::<ResponsesHistoryV1>(encoded).unwrap_err();
+            assert!(error.to_string().contains("invalid field value: status"));
+        }
+    }
+}
+
+#[test]
+fn missing_status_is_only_allowed_for_reasoning() {
+    for mut item in [reasoning_item(), message_item(), function_call_item()] {
+        item.as_object_mut().unwrap().remove("status");
+        if item["type"] == "reasoning" {
+            assert!(case(item).is_ok());
+        } else {
+            assert_eq!(
+                case(item).unwrap_err(),
+                HistoryError::MissingField { field: "status" }
+            );
+        }
+    }
+}
+
+#[test]
+fn non_completed_string_status_is_rejected_for_every_item_kind() {
+    for template in [reasoning_item(), message_item(), function_call_item()] {
+        for status in ["in_progress", "incomplete", "failed", "", "unknown"] {
+            let mut item = template.clone();
+            item["status"] = json!(status);
+            assert_eq!(case(item).unwrap_err(), HistoryError::IncompleteItem);
+        }
+    }
+}
+
+#[test]
+fn empty_text_is_valid_but_non_string_text_is_rejected() {
+    for text in ["", " \n\t"] {
+        let mut message = message_item();
+        message["content"][0]["text"] = json!(text);
+        message["content"][1]["refusal"] = json!(text);
+        let record = case(message).unwrap();
+        assert_eq!(record.visible_text(), text);
+        assert_eq!(record.refusals(), vec![text]);
+        let mut reasoning = reasoning_item();
+        reasoning["summary"][0]["text"] = json!(text);
+        assert_eq!(case(reasoning).unwrap().reasoning_summary_text(), text);
+    }
+    let mut message = message_item();
+    message["content"][0]["text"] = json!(false);
+    assert_eq!(
+        case(message).unwrap_err(),
+        HistoryError::InvalidField { field: "text" }
+    );
+}
+
+#[test]
+fn projection_preserves_annotations_and_supplies_empty_legacy_annotations() {
+    let annotation = json!({"type": "url_citation", "url": "https://example.test", "title": "reference", "start_index": 0, "end_index": 1});
+    let mut message = message_item();
+    message["content"][0]["annotations"] = json!([annotation]);
+    let projected = case(message.clone())
+        .unwrap()
+        .project_input_items(&endpoint(ENDPOINT), MODEL)
+        .unwrap();
+    assert_eq!(
+        as_value(&projected[0])["content"][0]["annotations"],
+        json!([annotation])
+    );
+    message["content"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("annotations");
+    let projected = case(message)
+        .unwrap()
+        .project_input_items(&endpoint(ENDPOINT), MODEL)
+        .unwrap();
+    assert_eq!(
+        as_value(&projected[0])["content"][0]["annotations"],
+        json!([])
+    );
+}
+
+#[test]
 fn serde_roundtrip_keeps_items_and_source_match() {
     let encoded = serde_json::to_value(history()).unwrap();
     assert_eq!(encoded["version"], json!(RESPONSES_HISTORY_VERSION));
@@ -288,12 +381,14 @@ fn projection_keeps_phase_and_ciphertext_but_only_legal_fields() {
     assert_eq!(
         projected[0]["content"],
         json!([
-            {"type": "output_text", "text": "hello"},
+            {"type": "output_text", "text": "hello", "annotations": []},
             {"type": "refusal", "refusal": "cannot comply"}
         ])
     );
-    // annotations / vendor_extra 等未知字段不回放。
-    assert_eq!(projected[0].as_object().unwrap().len(), 5);
+    // 官方 id/annotations 保留，vendor_extra 等未知字段不回放。
+    assert_eq!(projected[0]["id"], "msg_1");
+    assert!(projected[0].get("vendor_extra").is_none());
+    assert_eq!(projected[0].as_object().unwrap().len(), 6);
 
     assert_eq!(projected[1]["encrypted_content"], json!(CIPHER_MARKER));
     assert_eq!(

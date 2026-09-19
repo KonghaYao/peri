@@ -199,6 +199,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
 
                 if post_compact_flagged > pre_compact_flagged {
                     // G6: 发射配对事件，防止 Langfuse span 孤立
+                    // 快照经观察出口脱敏：TUI 只重建可见内容，原生历史载荷不外发。
                     let visible: Vec<crate::messages::BaseMessage> = ctx.session.transcript.read()
                         .visible_messages().into_iter().cloned().collect();
                     ctx.runtime.event_bus.emit_observe(
@@ -208,7 +209,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                             before_count: before_visible_len,
                             after_count: visible.len(),
                             summary: String::new(),
-                            messages: visible,
+                            messages: super::observed_messages(&visible),
                             files: vec![],
                             skills: vec![],
                             re_inject_count: 0,
@@ -285,7 +286,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                         before_count: result.before_visible_len,
                         after_count: result.after_visible_len,
                         summary: result.summary.clone().unwrap_or_default(),
-                        messages: visible,
+                        messages: super::observed_messages(&visible),
                         files: vec![],
                         skills: vec![],
                         re_inject_count: 0,
@@ -390,7 +391,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                         before_count: r.before_visible_len,
                         after_count: r.after_visible_len,
                         summary: r.summary.clone().unwrap_or_default(),
-                        messages: messages_snapshot,
+                        messages: super::observed_messages(&messages_snapshot),
                         files,
                         skills,
                         re_inject_count: 0,

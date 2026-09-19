@@ -612,6 +612,12 @@ fn build_snapshot_source(
                 ProviderSummary {
                     id: p.id.clone(),
                     provider_type: p.provider_type.clone(),
+                    // anthropic 不使用 api 字段（显式声明在 provider 构造期即被拒绝）
+                    api: if p.provider_type == "anthropic" {
+                        None
+                    } else {
+                        p.api
+                    },
                     is_active: p.id == active_profile_provider,
                     has_api_key,
                     base_url,

@@ -101,10 +101,11 @@ async fn test_event_bus_observe_no_subscriber_returns_zero() {
         step: 0,
         model: "test".to_string(),
         output: "test output".to_string(),
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
+        usage: Some(peri_model::TokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            ..Default::default()
+        }),
         request_id: None,
     });
     // handles 仍持有 receiver，所以至少 1 个订阅者

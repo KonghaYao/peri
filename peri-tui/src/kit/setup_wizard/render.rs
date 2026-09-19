@@ -1,4 +1,5 @@
 use crate::app::setup_wizard::*;
+use crate::config::ApiProtocol;
 use crate::i18n;
 use ratatui_kit::ratatui::{
     style::{Color, Modifier, Style},
@@ -6,6 +7,27 @@ use ratatui_kit::ratatui::{
 };
 
 // ── 辅助渲染函数 ──────────────────────────────────────────────────────────────
+
+/// API 协议 → i18n 标签 key（与 login 面板共用文案）
+fn api_protocol_label(api: ApiProtocol) -> &'static str {
+    match api {
+        ApiProtocol::ChatCompletions => "api-protocol-chat-completions",
+        ApiProtocol::Responses => "api-protocol-responses",
+    }
+}
+
+/// Browse / Done 的类型标签：openai 类型附带当前协议，anthropic 只显示类型。
+fn provider_type_display(mp: &MigratedProvider) -> String {
+    if mp.provider_type.supports_api_selection() {
+        format!(
+            "{} · {}",
+            i18n::tr(mp.provider_type.label()),
+            i18n::tr(api_protocol_label(mp.api))
+        )
+    } else {
+        i18n::tr(mp.provider_type.label())
+    }
+}
 
 fn make_hint_line(items: Vec<(String, String)>, dim: Color, accent: Color) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -293,10 +315,7 @@ fn render_browse(
                 format!("[{}] ", check_char),
                 Style::default().fg(check_color),
             ),
-            Span::styled(
-                format!("{} ", i18n::tr(mp.provider_type.label())),
-                name_style,
-            ),
+            Span::styled(format!("{} ", provider_type_display(mp)), name_style),
             Span::styled(format!("({}) ", mp.provider_id), Style::default().fg(dim)),
             Span::styled(key_summary, detail_style),
         ]));
@@ -407,6 +426,7 @@ fn render_edit(
     let mut lines = vec![Line::from("")];
     let standard_labels = [
         (FormField::ProviderType, i18n::tr("setup-field-type")),
+        (FormField::ApiProtocol, i18n::tr("setup-field-api")),
         (FormField::ProviderId, i18n::tr("setup-field-id")),
         (FormField::BaseUrl, i18n::tr("setup-field-base-url")),
         (
@@ -444,6 +464,33 @@ fn render_edit(
         ),
         Span::styled(
             format!("[{}]", i18n::tr(mp.provider_type.label())),
+            Style::default().fg(text_color).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // ApiProtocol：仅 openai 类型可切换；anthropic 显示为不适用
+    let api_focused = state.form_focus == FormField::ApiProtocol;
+    let api_prefix = if api_focused { "❯ " } else { "  " };
+    let api_style = if api_focused {
+        Style::default()
+            .fg(focus_color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(dim)
+    };
+    let api_value = if mp.provider_type.supports_api_selection() {
+        i18n::tr(api_protocol_label(mp.api))
+    } else {
+        i18n::tr("api-protocol-not-applicable")
+    };
+    lines.push(Line::from(vec![
+        Span::styled(api_prefix, Style::default().fg(cursor_color)),
+        Span::styled(
+            format!("{}: ", pad_label(&i18n::tr("setup-field-api"), pad_width)),
+            api_style,
+        ),
+        Span::styled(
+            format!("[{}]", api_value),
             Style::default().fg(text_color).add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -621,7 +668,7 @@ pub(super) fn render_done_step(
         let provider_id = mp.provider_id.clone();
         let api_key_display = mask_api_key(&mp.api_key);
         let aliases = mp.aliases.clone();
-        let type_label = i18n::tr(mp.provider_type.label());
+        let type_label = provider_type_display(mp);
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled(" ● ", Style::default().fg(accent)),

@@ -23,6 +23,55 @@ impl EventSink for PendingEventSink {
     async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
 }
 
+#[tokio::test]
+async fn responses_execute_command_redacts_returned_history() {
+    use peri_acp_types::messages::{ContentBlock, MessageContent};
+    let message = BaseMessage::ai(MessageContent::Blocks(vec![
+        ContentBlock::text("visible answer"),
+        ContentBlock::responses_native_history(serde_json::json!({
+            "version": 1, "source": {"nonce": "fixture-nonce", "digest": "fixture-digest"},
+            "items": [{"type": "reasoning", "encrypted_content": "fixture-ciphertext"}],
+        })),
+    ]));
+    let original = serde_json::to_value(&message).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let store: Arc<dyn peri_acp_types::store::ThreadStore> =
+        Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+    let controller = Controller::new(store);
+    let config = Arc::new(PeriConfig::default());
+    let sink: Arc<dyn EventSink> = Arc::new(RecordingEventSink {
+        events: Default::default(),
+    });
+    // 取消路径仍返回完整历史，不能因为命令未执行而漏掉观测脱敏。
+    let cancel = AgentCancellationToken::new();
+    cancel.cancel();
+    let response = execute_command(
+        &serde_json::json!({"sessionId": "test", "command": "/compact"}),
+        vec![message.clone()],
+        tmp.path().to_str().unwrap(),
+        &config,
+        &sink,
+        None,
+        &cancel,
+        &controller,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let wire = response.to_string();
+    assert!(wire.contains("visible answer"));
+    for private in ["encrypted_content", "nonce", "digest", "fixture-ciphertext"] {
+        assert!(!wire.contains(private));
+    }
+    assert_eq!(serde_json::to_value(&message).unwrap(), original);
+}
+
 #[test]
 fn test_extract_params_basic() {
     let params = serde_json::json!({

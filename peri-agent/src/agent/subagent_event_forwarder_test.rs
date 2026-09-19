@@ -178,10 +178,12 @@ async fn test_forwarder_injects_source_agent_id_for_llm_usage() {
         step: 0,
         model: "test".into(),
         output: String::new(),
-        input_tokens: 100,
-        output_tokens: 1,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: Some(70),
+        usage: Some(peri_model::TokenUsage {
+            input_tokens: 100,
+            output_tokens: 1,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(70),
+        }),
         request_id: Some("aux-request".into()),
     });
     wait_for_event_count(&captured, 1).await;

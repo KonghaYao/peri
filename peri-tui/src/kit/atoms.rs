@@ -190,6 +190,8 @@ pub struct SubagentSummary {
 pub struct ProviderSummary {
     pub id: String,
     pub provider_type: String,
+    /// 生效的 API 协议；anthropic 为 None（该类型不使用 api 字段）
+    pub api: Option<crate::config::ApiProtocol>,
     pub is_active: bool,
     pub has_api_key: bool,
     pub base_url: Option<String>,

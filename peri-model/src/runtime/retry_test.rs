@@ -263,9 +263,12 @@ async fn visible_delta_preserves_protocol_error_without_retry() {
 /// [回归测试] 未提交 attempt 的 Usage 不能穿透到重试后的成功响应。
 ///
 /// 历史背景：Anthropic 在首个可见输出前发出 input usage；若该 attempt 随后断连并重试，
-/// 旧 usage 曾被错误转发，`Model::complete()` 还可能把它聚合进下一次成功的响应。
+/// 失败尝试的 usage 不得因重试被删除，但也不能伪装成成功尝试的 Usage 快照。
+///
+/// 历史背景：旧实现直接丢弃该用量，导致重试调用少报真实消耗；同时它也不能作为
+/// `Usage` 快照转发，否则会被 `Model::complete()` 当作最终尝试的用量去重。
 #[tokio::test]
-async fn retry_discards_provisional_usage_from_failed_attempt() {
+async fn retry_preserves_failed_attempt_usage_as_attempt_usage() {
     let calls = Arc::new(AtomicUsize::new(0));
     let attempt = scripted_attempt(
         vec![
@@ -281,10 +284,71 @@ async fn retry_discards_provisional_usage_from_failed_attempt() {
         .collect::<Vec<_>>()
         .await;
     assert!(events.iter().all(ModelResult::is_ok));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Ok(ModelStreamEvent::AttemptUsage(usage)) if *usage == crate::TokenUsage::new(1, 0)))
+            .count(),
+        1,
+        "失败尝试的真实用量必须恰好保留一次"
+    );
     assert!(events
         .iter()
         .all(|event| !matches!(event, Ok(ModelStreamEvent::Usage(_)))));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+/// provider 随失败终态上报的 usage 同样不得丢失：重试后成功时先保留该次尝试用量。
+#[tokio::test]
+async fn retry_preserves_error_carried_usage_from_failed_attempt() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let attempt = scripted_attempt(
+        vec![
+            Err(ModelError::protocol(crate::ProtocolErrorKind::Provider)
+                .with_usage(Some(crate::TokenUsage::new(7, 3)))),
+            Ok(vec![Ok(ModelStreamEvent::Completed(completed()))]),
+        ],
+        calls.clone(),
+    );
+    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Ok(ModelStreamEvent::AttemptUsage(usage)) if *usage == crate::TokenUsage::new(7, 3)))
+            .count(),
+        1
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Ok(ModelStreamEvent::Completed(_)))));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+/// 终态失败（不可重试）时，尝试用量随错误一起上报，不额外制造 AttemptUsage。
+#[tokio::test]
+async fn terminal_failure_carries_attempt_usage_once() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let attempt = scripted_attempt(
+        vec![Err(ModelError::protocol_with_summary(
+            crate::ProtocolErrorKind::Other,
+            "incomplete",
+        )
+        .with_usage(Some(crate::TokenUsage::new(9, 4))))],
+        calls.clone(),
+    );
+    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, Ok(ModelStreamEvent::AttemptUsage(_)))));
+    let Some(Err(error)) = events.last() else {
+        panic!("terminal failure expected: {events:?}");
+    };
+    assert_eq!(error.usage(), Some(&crate::TokenUsage::new(9, 4)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 /// [回归测试] 首个可见 delta 前收到的 Usage 不能关闭流式重试窗口。
@@ -388,6 +452,14 @@ async fn usage_then_eof_retries_stream_ended_without_completed() {
         .collect::<Vec<_>>()
         .await;
     assert!(events.iter().all(ModelResult::is_ok));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Ok(ModelStreamEvent::AttemptUsage(usage)) if *usage == crate::TokenUsage::new(1, 0)))
+            .count(),
+        1,
+        "EOF 结束的尝试已上报的用量同样必须保留一次"
+    );
     assert!(events
         .iter()
         .all(|event| !matches!(event, Ok(ModelStreamEvent::Usage(_)))));

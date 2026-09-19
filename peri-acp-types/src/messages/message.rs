@@ -293,6 +293,18 @@ impl BaseMessage {
         matches!(self, Self::System { .. })
     }
 
+    /// 是否携带 Responses 原生历史载体。
+    pub fn has_provider_native_history(&self) -> bool {
+        self.message_content().has_provider_native_history()
+    }
+
+    /// 可观测投影：剥离 provider 私有状态（原生历史载荷），保留用户可见内容。
+    ///
+    /// 事件、遥测与摘要输入等出口使用；持久化与模型回放必须使用原消息。
+    pub fn redacted_for_observability(&self) -> Self {
+        self.clone_with_content(self.message_content().redacted_for_observability())
+    }
+
     /// 克隆消息但替换 content 字段
     pub fn clone_with_content(&self, content: MessageContent) -> Self {
         match self {
@@ -320,6 +332,25 @@ impl BaseMessage {
             },
         }
     }
+}
+
+// ─── 可观测出口投影 ───────────────────────────────────────────────────────────
+
+/// 事件/遥测出口的消息投影：剥离 provider 原生历史载荷。
+///
+/// 无原生历史时返回输入副本，调用方无需自行判断；有原生历史时逐条投影，确保
+/// reasoning 密文与来源身份不进入观察链路。
+pub fn redacted_messages_for_observability(messages: &[BaseMessage]) -> Vec<BaseMessage> {
+    if !messages
+        .iter()
+        .any(BaseMessage::has_provider_native_history)
+    {
+        return messages.to_vec();
+    }
+    messages
+        .iter()
+        .map(BaseMessage::redacted_for_observability)
+        .collect()
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

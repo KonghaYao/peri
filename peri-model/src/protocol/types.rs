@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::responses_history::ResponsesHistoryV1;
 use crate::{ModelError, ModelResult, ProtocolErrorKind};
 
 /// 受约束的 JSON object，用于工具参数和 JSON Schema。
@@ -96,6 +97,14 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         data: Option<String>,
     },
+    /// Responses 原生 output items（message/reasoning/function_call）的完整记录。
+    ///
+    /// 该 block 是原生事实的唯一载体，用于同 endpoint/model 域的无状态续轮；同一消息中
+    /// 的文本/推理/工具调用是它的派生视图，回放时以本 block 为准。跨协议或跨来源时
+    /// 其他 adapter 必须丢弃本 block（派生视图仍可回放），不得回放其中的 reasoning 密文。
+    ResponsesNativeHistory {
+        history: Box<ResponsesHistoryV1>,
+    },
 }
 
 impl ContentBlock {
@@ -113,12 +122,15 @@ impl ContentBlock {
     pub fn text_content(&self) -> Option<&str> {
         match self {
             Self::Text { text } => Some(text),
+            // 原生记录含派生文本，但文本由同消息的 `Text` block 承载；此处返回 `None`
+            // 避免同一段答案被计两次。
             Self::Image { .. }
             | Self::Document { .. }
             | Self::Reasoning { .. }
             | Self::ToolUse { .. }
             | Self::ToolResult { .. }
-            | Self::RedactedReasoning { .. } => None,
+            | Self::RedactedReasoning { .. }
+            | Self::ResponsesNativeHistory { .. } => None,
         }
     }
 }
@@ -446,6 +458,13 @@ impl ModelResponse {
             self.usage = usage;
         }
     }
+
+    /// 累加失败尝试已确认的真实用量（不覆盖 provider 上报的最终用量）。
+    pub(crate) fn accumulate_usage(&mut self, extra: Option<TokenUsage>) {
+        if let Some(extra) = extra {
+            TokenUsage::accumulate(&mut self.usage, extra);
+        }
+    }
 }
 
 /// 模型调用的 token 使用量。
@@ -466,6 +485,39 @@ impl TokenUsage {
             output_tokens,
             ..Self::default()
         }
+    }
+
+    /// 把一次真实消耗并入住调用级用量（`None` = 尚无已确认用量）。
+    ///
+    /// 一次调用可能经历多次 HTTP 尝试：失败尝试与最终尝试的用量都必须保留且各计
+    /// 一次，因此这里使用累加而非替换。cache 明细按已上报的部分求和；两侧都未知
+    /// 时保持未知（不以 0 冒充未知）。token 计数按饱和加法，不使调用失败。
+    pub fn accumulate(total: &mut Option<Self>, extra: Self) {
+        match total {
+            Some(total) => {
+                total.input_tokens = total.input_tokens.saturating_add(extra.input_tokens);
+                total.output_tokens = total.output_tokens.saturating_add(extra.output_tokens);
+                total.cache_creation_input_tokens = sum_optional_tokens(
+                    total.cache_creation_input_tokens,
+                    extra.cache_creation_input_tokens,
+                );
+                total.cache_read_input_tokens = sum_optional_tokens(
+                    total.cache_read_input_tokens,
+                    extra.cache_read_input_tokens,
+                );
+            }
+            None => *total = Some(extra),
+        }
+    }
+}
+
+fn sum_optional_tokens(left: Option<u32>, right: Option<u32>) -> Option<u32> {
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(
+            left.unwrap_or_default()
+                .saturating_add(right.unwrap_or_default()),
+        ),
     }
 }
 
@@ -497,6 +549,7 @@ pub struct ModelCapabilities {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderProtocol {
     OpenAiCompatible,
+    OpenAiResponses,
     Anthropic,
     Other { value: String },
 }

@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-use crate::error::AgentResult;
+use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, ContentBlock, MessageContent, MessageId};
 use crate::session::transcript::MessageTranscript;
 pub use peri_acp_types::projection::{
@@ -25,6 +25,9 @@ pub const PROJECTION_POLICY_VERSION: u32 = 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderProtocol {
     OpenAI,
+    /// OpenAI Responses API：同一 assistant 消息内可能携带 provider 原生历史
+    /// （message/reasoning/function_call 记录），派生 text/tool 视图必须与之一致。
+    OpenAiResponses,
     Anthropic,
     Generic,
 }
@@ -35,6 +38,11 @@ pub struct ProviderCapabilities {
     pub protocol: ProviderProtocol,
     /// 带签名 reasoning 是否必须整体保留（Anthropic=true）
     pub signed_reasoning_must_be_whole: bool,
+    /// provider 原生历史（Responses）是否必须与其派生视图一起整体保留
+    ///
+    /// 为 true 时，含原生历史的消息不参与微压缩 block 投影：记录与派生 text/tool
+    /// 视图任一被改写都会让下一轮请求无法保真回放。
+    pub native_history_must_be_whole: bool,
 }
 
 impl Default for ProviderCapabilities {
@@ -42,6 +50,7 @@ impl Default for ProviderCapabilities {
         Self {
             protocol: ProviderProtocol::Generic,
             signed_reasoning_must_be_whole: false,
+            native_history_must_be_whole: false,
         }
     }
 }
@@ -51,6 +60,15 @@ impl ProviderCapabilities {
         Self {
             protocol: ProviderProtocol::OpenAI,
             signed_reasoning_must_be_whole: false,
+            native_history_must_be_whole: false,
+        }
+    }
+
+    pub fn openai_responses() -> Self {
+        Self {
+            protocol: ProviderProtocol::OpenAiResponses,
+            signed_reasoning_must_be_whole: false,
+            native_history_must_be_whole: true,
         }
     }
 
@@ -58,6 +76,7 @@ impl ProviderCapabilities {
         Self {
             protocol: ProviderProtocol::Anthropic,
             signed_reasoning_must_be_whole: true,
+            native_history_must_be_whole: false,
         }
     }
 }
@@ -324,8 +343,47 @@ pub fn render_llm_view(
 
     // 4. 验证
     validate_projected_view(&projected, caps)?;
+    if caps.native_history_must_be_whole {
+        validate_native_history_untouched(&visible, &projected)?;
+    }
 
     Ok(projected)
+}
+
+/// 含 Responses 原生历史的消息在投影前后必须保持一致。
+///
+/// 主防线在 [`project_message`]（这类消息不参与 block 投影）；此处按 provider 能力
+/// 做 fail-closed 复核：一旦投影改变了记录载体的内容视图或其派生 tool_calls，宁可
+/// 拒绝投影，也不能把不一致的历史送进下一轮请求。
+fn validate_native_history_untouched(
+    visible: &[BaseMessage],
+    projected: &[BaseMessage],
+) -> AgentResult<()> {
+    let by_id: HashMap<MessageId, &BaseMessage> = projected
+        .iter()
+        .map(|message| (message.id(), message))
+        .collect();
+    for message in visible {
+        if !message.has_provider_native_history() {
+            continue;
+        }
+        match by_id.get(&message.id()) {
+            Some(after)
+                if after.message_content() == message.message_content()
+                    && after.tool_calls() == message.tool_calls() => {}
+            Some(_) => {
+                return Err(AgentError::LlmError(
+                    "compact projection modified a message with provider native history".into(),
+                ))
+            }
+            None => {
+                return Err(AgentError::LlmError(
+                    "compact projection dropped a message with provider native history".into(),
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 // ─── project_message ──────────────────────────────────────────────────────────
@@ -378,6 +436,13 @@ fn project_message(
             content,
             tool_calls,
         } => {
+            // Responses 原生历史是 provider 私有事实源，派生 text/tool 视图是记录的
+            // 一部分：任一侧被拆改（截断/替换/排除）都无法再保真回放。含原生历史的
+            // 消息不参与任何 block 级投影。
+            if content.has_provider_native_history() {
+                return msg.clone();
+            }
+
             // ToolCall 与 ToolUse 是 canonical execution data。无论 plan 中包含何种
             // legacy/非法组合，renderer 都只允许投影独立的非 ToolUse content block。
             let projected_content = project_content(content, &block_actions, caps);
@@ -489,7 +554,9 @@ fn project_block(
     action: Option<&ProjectionAction>,
     _caps: &ProviderCapabilities,
 ) -> ContentBlock {
-    if matches!(block, ContentBlock::ToolUse { .. }) {
+    // ToolUse 是 canonical execution data；Responses 原生历史是 provider 私有事实源。
+    // 二者都不参与投影，任何 action 都原样保留。
+    if matches!(block, ContentBlock::ToolUse { .. }) || block.is_responses_native_history() {
         return block.clone();
     }
 

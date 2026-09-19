@@ -74,7 +74,10 @@ impl TransportEventSink {
                 files,
                 skills,
             } => {
-                let messages_json = match serde_json::to_string(messages) {
+                // 客户端出口：原生历史载荷（reasoning 密文/来源身份）只留在 canonical 存储。
+                let messages =
+                    peri_acp_types::messages::redacted_messages_for_observability(messages);
+                let messages_json = match serde_json::to_string(&messages) {
                     Ok(json) => json,
                     Err(e) => {
                         error!(error = %e, "EventSink: serialize CompactCompleted messages failed");
@@ -107,7 +110,10 @@ impl TransportEventSink {
             // TUI 侧 acp_notifier 转换为 AcpEventData::RewindCompleted 驱动
             // 弹窗关闭 + 消息区重建 + 输入框回填。
             ExecutorEvent::RewindCompleted { summary, messages } => {
-                let messages_json = match serde_json::to_string(messages) {
+                // 客户端出口：原生历史载荷（reasoning 密文/来源身份）只留在 canonical 存储。
+                let messages =
+                    peri_acp_types::messages::redacted_messages_for_observability(messages);
+                let messages_json = match serde_json::to_string(&messages) {
                     Ok(json) => json,
                     Err(e) => {
                         error!(error = %e, "EventSink: serialize RewindCompleted messages failed");

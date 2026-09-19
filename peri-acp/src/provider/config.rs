@@ -452,6 +452,64 @@ impl Default for AppConfig {
     }
 }
 
+/// Provider API 协议。
+///
+/// 与 `provider_type` 正交：`openai` 类型可选 Chat Completions 或 Responses，
+/// `anthropic` 只走原生 Messages API。字段是强类型——未知取值在 serde 解析期
+/// 失败，不会落进 [`ProviderConfig::extra`]，也不能借 extra 绕过。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiProtocol {
+    /// OpenAI Chat Completions API（含 OpenAI 兼容端点）；未显式声明时的缺省协议
+    ChatCompletions,
+    /// OpenAI Responses API
+    Responses,
+}
+
+impl ApiProtocol {
+    /// 稳定标识：配置序列化值与 fingerprint / 诊断输出共用。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
+        }
+    }
+
+    /// 选择器循环（TUI 左右切换用）
+    pub const fn cycle(self) -> Self {
+        match self {
+            Self::ChatCompletions => Self::Responses,
+            Self::Responses => Self::ChatCompletions,
+        }
+    }
+}
+
+impl Default for ApiProtocol {
+    /// 缺省协议：旧配置与未填写情况一律解释为 `chat_completions`。
+    fn default() -> Self {
+        Self::ChatCompletions
+    }
+}
+
+/// Provider 类型与 `api` 字段的非法组合。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderApiError {
+    /// `anthropic` 只有原生 Messages API，显式 api 无对应语义
+    AnthropicWithExplicitApi,
+}
+
+impl std::fmt::Display for ProviderApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AnthropicWithExplicitApi => {
+                write!(formatter, "anthropic provider 不支持显式 api 协议字段")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProviderApiError {}
+
 /// 单个 Provider 配置
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ProviderConfig {
@@ -465,6 +523,10 @@ pub struct ProviderConfig {
     /// OpenAI Base URL
     #[serde(rename = "baseUrl", default)]
     pub base_url: String,
+    /// API 协议；`None` = 未声明（缺省 `chat_completions`，旧配置兼容）。
+    /// 仅 `openai` 类型可显式声明：`anthropic` + 显式 api 是非法组合，构造期拒绝。
+    #[serde(rename = "api", default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<ApiProtocol>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default)]
@@ -476,6 +538,20 @@ pub struct ProviderConfig {
 impl ProviderConfig {
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.id)
+    }
+
+    /// 解析生效的 API 协议并校验类型组合（构造 `LlmProvider` 前唯一入口）。
+    ///
+    /// - `anthropic` + 显式 api → [`ProviderApiError::AnthropicWithExplicitApi`]
+    /// - 未声明 → [`ApiProtocol::ChatCompletions`]（旧配置缺省语义）
+    pub fn resolve_api_protocol(&self) -> Result<ApiProtocol, ProviderApiError> {
+        match self.api {
+            Some(_) if self.provider_type == "anthropic" => {
+                Err(ProviderApiError::AnthropicWithExplicitApi)
+            }
+            Some(api) => Ok(api),
+            None => Ok(ApiProtocol::ChatCompletions),
+        }
     }
 }
 

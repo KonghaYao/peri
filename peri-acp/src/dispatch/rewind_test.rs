@@ -1,10 +1,30 @@
 //! dispatch/rewind 单元测试（预算 + 执行）。
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
+use async_trait::async_trait;
 use peri_acp_types::messages::{BaseMessage, ContentBlock, ToolCallRequest};
+use peri_acp_types::{event::ExecutorEvent, store::ThreadStore, thread::ThreadMeta};
+use peri_agent::thread::FilesystemThreadStore;
+use peri_controller::Controller;
+use tokio_util::sync::CancellationToken;
 
-use super::rewind_preview;
+use super::{rewind_execute, rewind_preview};
+
+/// 记录事件的最小 sink：RPC 路径只需要 push_event / push_done 不阻塞。
+#[derive(Default)]
+struct RecordingEventSink {
+    events: std::sync::Mutex<Vec<ExecutorEvent>>,
+}
+
+#[async_trait]
+impl crate::session::event_sink::EventSink for RecordingEventSink {
+    async fn push_event(&self, _session_id: &str, event: &ExecutorEvent, _context_window: u32) {
+        self.events.lock().unwrap().push(event.clone());
+    }
+
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
+}
 
 /// 跨平台绝对临时目录字符串（Windows 下 `/tmp` 不是绝对路径，
 /// rewind_preview 要求 session cwd 必须绝对）。
@@ -48,6 +68,102 @@ fn make_history_with_tools() -> Vec<BaseMessage> {
             }],
         ),
     ]
+}
+
+/// 携带 Responses 原生历史的 assistant 消息（密文 + 来源身份 + 可见文本）。
+fn ai_with_native_history() -> BaseMessage {
+    BaseMessage::ai(peri_acp_types::messages::MessageContent::Blocks(vec![
+        ContentBlock::text("答案正文"),
+        ContentBlock::responses_native_history(serde_json::json!({
+            "version": 1,
+            "source": {"nonce": "NONCEHEX", "digest": "DIGESTHEX"},
+            "items": [{"type": "reasoning", "encrypted_content": "CIPHERTEXT"}],
+        })),
+    ]))
+}
+
+const PRIVATE_MARKERS: [&str; 4] = ["CIPHERTEXT", "encrypted_content", "NONCEHEX", "DIGESTHEX"];
+
+/// RPC 出口是观测面：retained_messages 里的原生密文不得进入 response，且
+/// canonical 历史与 SQLite 保持原样，预览指纹计算口径不变。
+#[tokio::test]
+async fn test_execute_redacts_native_history_in_rpc_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let store: Arc<dyn ThreadStore> =
+        Arc::new(FilesystemThreadStore::new(dir.path().join("threads")));
+    let thread_id = store.create_thread(ThreadMeta::new(&cwd)).await.unwrap();
+    let history = vec![
+        BaseMessage::human("第一轮问题"),
+        ai_with_native_history(),
+        BaseMessage::human("第二轮问题"),
+    ];
+    for message in &history {
+        store
+            .append_message(&thread_id, message.clone())
+            .await
+            .unwrap();
+    }
+    let canonical_before = store.load_messages(&thread_id).await.unwrap();
+    let target = history[2].id().as_uuid().to_string();
+    let preview_params = serde_json::json!({
+        "target_message_id": target,
+        "revert_files": false,
+    });
+    let preview = rewind_preview(&preview_params, &history, &cwd, "test-session")
+        .await
+        .unwrap();
+
+    let controller = Controller::new(store.clone());
+    let sink: Arc<dyn crate::session::event_sink::EventSink> =
+        Arc::new(RecordingEventSink::default());
+    let response = rewind_execute(
+        &serde_json::json!({
+            "sessionId": "test-session",
+            "target_message_id": target,
+            "revert_files": false,
+            "preview_fingerprint": preview["preview_fingerprint"],
+        }),
+        history.clone(),
+        &cwd,
+        &Arc::new(crate::provider::PeriConfig::default()),
+        &sink,
+        None,
+        &CancellationToken::new(),
+        &controller,
+        Some(thread_id.clone()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response["status"], "executed");
+    let wire = response.to_string();
+    for private in PRIVATE_MARKERS {
+        assert!(
+            !wire.contains(private),
+            "RPC response 泄漏原生私有载荷: {private}"
+        );
+    }
+    // 可见事实与消息身份保留，客户端仍能重建历史。
+    assert!(wire.contains("答案正文"));
+    assert_eq!(response["history"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        response["history"][1]["id"],
+        serde_json::json!(history[1].id().as_uuid().to_string())
+    );
+
+    // canonical/SQLite 保真：目标之后被删除，保留消息仍带密文。
+    let canonical_after = store.load_messages(&thread_id).await.unwrap();
+    assert_eq!(canonical_after.len(), canonical_before.len() - 1);
+    let retained = serde_json::to_string(&canonical_after).unwrap();
+    assert!(retained.contains("CIPHERTEXT"));
+    assert!(retained.contains("NONCEHEX"));
 }
 
 #[tokio::test]

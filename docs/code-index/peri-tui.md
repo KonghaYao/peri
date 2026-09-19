@@ -12,6 +12,8 @@
 
 ## 速查表
 
+- Responses 跨来源提示沿既有 `acp_notifier/agent_event.rs → acp_events/system.rs::handle_system_notification` 消费；warning wire 值为 `"warning"`（不是 `"warn"`）。`acp_events_test/system_reminder_test.rs::responses_source_notification_renders_as_warning` 锁定系统提示 Warning 展示，不注入用户气泡或模型上下文。
+
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
 | 构建/验证 32 位 x86 Linux 静态产物 | 根目录 `scripts/build-i386.sh`、`scripts/test-i386.py`、`.cargo/config.toml` | `cargo zigbuild`；`check_elf`；`check_runtime` | i686 musl 静态 CRT；ELF 检查与隔离容器中的 CLI/ACP/跨进程 SQLite 验证；操作参考见 `docs/reference/i386-static-build.md` |
@@ -37,7 +39,7 @@
 | 验收 print 后台 Bash 完成退出 | `tests/print_background_exit.rs` | `promoted_background_output_is_readable_and_print_exits`、`explicit_background_output_is_readable_and_print_exits` | 本地 provider 驱动真实 Bash、短完成通知和 Read；超过 2 MiB 的 UTF-8 输出与 stderr 完整落盘，保留非零退出码，最终 result 后 CLI 自行退出 |
 | 改内嵌 host / print 退出 | `src/acp_client/deployment.rs` + `src/launch.rs` + `src/cli_print.rs` | `AcpDeployment::shutdown`（deployment.rs:20）/`run`（:27）；`teardown_app`（launch.rs:199）；`run_print`（cli_print.rs:25） | 显式 client close 打破 pump/atoms 的 Arc 保活后等待原 host；print 成功和 new/prompt 错误共用退出路径，资源 Incomplete/TaskFailed 为可见退出错误，HTTP 遥测失败保留旁路报告（ARC-HOST-SHUTDOWN-001） |
 | 改配置/启动流程 | `src/main.rs` + `src/launch.rs` + `src/config/` + `src/app/mod.rs` | `main`；`build_runtime`；`run_tui`；`build_app_and_acp`；`attach_acp`；`App::new`；`TuiConfig::from_extra`；`save_effective` | `PeriConfig` 等类型事实源在 `peri-acp/src/provider/config.rs`，`config/mod.rs` 仅 re-export；CLI 权限使用 `--permission-mode` / `--dangerously-skip-permissions`，默认 Bypass；配置源句柄 `CONFIG_SOURCE_HANDLE` 启动时 set 一次，加载与保存共用同一决策；`teardown_app` 收尾 hooks/MCP 后经 AcpDeployment 关闭并 join ACP host/Langfuse |
-| 改首次 setup / 重新配置 | `src/app/setup_wizard/mod.rs` + `src/kit/setup_wizard.rs` + `src/kit/setup_wizard/handler.rs` + `src/kit/entry.rs` | `needs_setup`、`state_from_config`、`save_setup`；`run_kit_fullscreen` 的首次配置 preflight；`launch::attach_acp` | 无可用 provider 时先完成向导，再装配唯一 ACP 和 consumers；取消退出，保存失败留在向导；运行中配置等待 `update_config` 成功后关闭。回归：`e2e/tests/scenarios/fresh-setup.test.ts` |
+| 改首次 setup / 重新配置 | `src/app/setup_wizard/mod.rs` + `src/kit/setup_wizard.rs` + `src/kit/setup_wizard/handler.rs` + `src/kit/entry.rs` | `needs_setup`、`state_from_config`、`save_setup`；`run_kit_fullscreen` 的首次配置 preflight；`launch::attach_acp` | 无可用 provider 时先完成向导，再装配唯一 ACP 和 consumers；取消退出，保存失败留在向导；运行中配置等待 `update_config` 成功后关闭。openai 兼容 provider 在表单中选择 API 协议（`FormField::ApiProtocol`，缺省 chat_completions）；切到 anthropic 清除不适用选择，落盘不写 `api`。回归：`e2e/tests/scenarios/fresh-setup.test.ts` |
 | 改 `peri workflow` CLI | `src/cli_workflow.rs` + `src/main.rs` | `argv_requests_workflow`；`run_before_configuration` | 经 Clap 识别与冲突校验，在配置初始化前通过 `peri-acp::workflow_cli` 执行内嵌 Node artifact；CLI grammar/退出码回归在 `cli_workflow_test.rs` 与 `peri-workflow/src/cli_test.rs` |
 | 改 `peri meta session` CLI | `src/main.rs` + `src/cli_meta.rs` + `src/thread/mod.rs` | `MetaAction::Session`；`try_run_meta_before_configuration`；`run_meta_session`；`SessionMetaDtoV1`；`open_thread_store_read_only` re-export | Meta 在 settings/config/env 初始化前按受限 grammar 路由；先校验 UUID，再经 `peri-resources` 只读 seam 调用 `ThreadStore::load_meta`；human/JSON 使用九字段 allowlist，稳定错误与退出码由 adapter 映射；不进入 ACP、Agent、Runtime 或 TUI session owner |
 | 改 TUI MCP panel 生命周期 | `src/app/mod.rs` + `src/app/service_registry.rs` + `src/kit/acp_events/system.rs` + `src/launch.rs` | `spawn_mcp_init`；`ServiceRegistry::mcp_task_owner`；`handle_oauth_completed/restored`；`shutdown_mcp_pool` | panel 部署容器保留 non-Clone `McpTaskOwner`，init 和 OAuth-event reconnect 经 weak spawner 准入；teardown 按 pool begin-close → owner join → pool close，并检查 service transaction report，Incomplete 不得记为已关闭（ARC-HOST-SHUTDOWN-001） |
@@ -111,6 +113,7 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 面板目录（tasks/cron/agent/model/config/thread_browser/mcp/plugin/…） | kit/panels/ + kit/panel_registry.rs | `open_panel`（panel_registry.rs:475）；面板渲染按 PanelKind 分发（:438）；`PanelOverlay`（panel_overlay.rs:34） |
+| Provider 登录与编辑（/login） | kit/panels/login.rs + login/{config_store,edit_handler,render}.rs | `LoginPanel` 浏览/编辑/删除；`LoginEditState` 保留 `api` 协议选择（openai 选 chat_completions/responses，anthropic 落盘 None）；`apply_login_edit` 是脱离全局句柄的可测配置变换，保存先落盘再发布 handle/PROVIDER_LIST/ACP |
 | Plugin 面板装配与展示 | kit/panels/plugin.rs + plugin/{data,render,search_handler,panel_handler}.rs | `PluginPanel` 保持公共入口；`data` 管本地目录缓存，`render_discover_list` 保留 loading/error 下的可编辑输入；`handle_search_event` 路由 Discover 与 marketplace 输入，`handle_panel_event` 保留其他 tab 与既有安装操作生命周期 |
 | Plugin 搜索生命周期回归 | kit/panels/plugin/search_request_test.rs | `plugin_search_*`：真实 mpsc 请求/响应及 notifier → bridge → render；覆盖错误重试、同 query 乱序与无身份旧通知、session switch/reset、关闭/Drop、空/无效结果、键鼠提交可达和远端条目身份；回调暂拒收保留结果、可取消延迟重试，接收后只投影一次 |
 | 弹窗（HITL/AskUser/OAuth/Confirm/Rewind/下载进度） | kit/popups/ + kit/popup_overlay.rs + kit/event_handlers.rs | `open_popup`/`close_popup`/`is_popup_active`；Rewind Enter 由根级 Global 模态仲裁发送既有 `REWIND_ACTION_TX`，鼠标与渲染留在 popup |

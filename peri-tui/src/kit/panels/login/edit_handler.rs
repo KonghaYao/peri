@@ -53,17 +53,26 @@ pub(super) fn handle_login_edit_keys(
     if *edit_focus == LoginEditField::ProviderType {
         match key.code {
             KeyCode::Left | KeyCode::Right if !is_ctrl => {
-                es.provider_type = match es.provider_type.as_str() {
-                    "anthropic" => "openai".to_string(),
-                    _ => "anthropic".to_string(),
-                };
+                es.toggle_provider_type();
                 return;
             }
             KeyCode::Char(' ') if !is_ctrl => {
-                es.provider_type = match es.provider_type.as_str() {
-                    "anthropic" => "openai".to_string(),
-                    _ => "anthropic".to_string(),
-                };
+                es.toggle_provider_type();
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // ApiProtocol toggle（仅 openai 类型可切换；anthropic 下按键无效果）
+    if *edit_focus == LoginEditField::ApiProtocol {
+        match key.code {
+            KeyCode::Left | KeyCode::Right if !is_ctrl => {
+                es.cycle_api_protocol();
+                return;
+            }
+            KeyCode::Char(' ') if !is_ctrl => {
+                es.cycle_api_protocol();
                 return;
             }
             _ => {}
@@ -74,18 +83,18 @@ pub(super) fn handle_login_edit_keys(
     match key.code {
         KeyCode::Up if !is_ctrl => {
             *edit_focus = edit_focus.prev();
-            *edit_cursor = if *edit_focus == LoginEditField::ProviderType {
-                0
-            } else {
+            *edit_cursor = if edit_focus.is_text_input() {
                 es.field_value(*edit_focus).chars().count()
+            } else {
+                0
             };
         }
         KeyCode::Down if !is_ctrl => {
             *edit_focus = edit_focus.next();
-            *edit_cursor = if *edit_focus == LoginEditField::ProviderType {
-                0
-            } else {
+            *edit_cursor = if edit_focus.is_text_input() {
                 es.field_value(*edit_focus).chars().count()
+            } else {
+                0
             };
         }
         KeyCode::Enter => {
@@ -116,8 +125,8 @@ fn handle_login_text_input(
     edit_cursor: &mut usize,
     key: &ratatui_kit::crossterm::event::KeyEvent,
 ) -> bool {
-    // ProviderType 是 toggle、Confirm 是按钮，均不接受文本输入
-    if field == LoginEditField::ProviderType || field == LoginEditField::Confirm {
+    // ProviderType 是 toggle、ApiProtocol 是选择器、Confirm 是按钮，均不接受文本输入
+    if !field.is_text_input() {
         return false;
     }
 

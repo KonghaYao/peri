@@ -109,10 +109,11 @@ async fn workflow_forwarder_close_collects_buffered_usage_before_result_snapshot
         step: 0,
         model: "buffered-model".into(),
         output: "done".into(),
-        input_tokens: 10,
-        output_tokens: 23,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
+        usage: Some(peri_model::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 23,
+            ..Default::default()
+        }),
         request_id: None,
     });
     let forwarder = tokio::spawn(async move {

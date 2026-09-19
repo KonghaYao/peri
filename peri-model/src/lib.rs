@@ -2,6 +2,7 @@
 
 pub mod anthropic;
 pub mod openai_compatible;
+pub mod openai_responses;
 pub mod prompt_cache;
 pub mod protocol;
 pub mod runtime;
@@ -9,6 +10,7 @@ mod transport;
 
 pub use anthropic::{AnthropicConfig, AnthropicModel};
 pub use openai_compatible::{OpenAiConfig, OpenAiModel};
+pub use openai_responses::{OpenAiResponsesConfig, OpenAiResponsesModel};
 pub use protocol::{
     AssistantPhase, ContentBlock, DocumentSource, HistoryError, ImageSource, JsonObject, MediaType,
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelStream,

@@ -4,7 +4,6 @@ use super::UnifiedLangfuseEvent;
 use peri_agent::agent::events::CompactTrigger;
 use peri_agent::agent::events_v2::{ObserveEvent, RenderEvent};
 use peri_agent::messages::BaseMessage;
-use peri_model::TokenUsage;
 
 impl UnifiedLangfuseEvent {
     /// 将 RenderEvent 转换为 UnifiedLangfuseEvent（v2 render 路径）。
@@ -76,30 +75,18 @@ impl UnifiedLangfuseEvent {
                 step,
                 model,
                 output,
-                input_tokens,
-                output_tokens,
-                cache_creation_input_tokens,
-                cache_read_input_tokens,
+                usage,
                 request_id,
                 ..
-            } => {
-                let usage = TokenUsage {
-                    input_tokens: input_tokens as u32,
-                    output_tokens: output_tokens as u32,
-                    cache_creation_input_tokens: cache_creation_input_tokens
-                        .and_then(|tokens| tokens.try_into().ok()),
-                    cache_read_input_tokens: cache_read_input_tokens
-                        .and_then(|tokens| tokens.try_into().ok()),
-                };
-                Some(UnifiedLangfuseEvent::LlmCallEnd {
-                    agent_id: agent_id.to_string(),
-                    step,
-                    model,
-                    output,
-                    usage: Some(usage),
-                    request_id,
-                })
-            }
+            } => Some(UnifiedLangfuseEvent::LlmCallEnd {
+                agent_id: agent_id.to_string(),
+                step,
+                model,
+                output,
+                // provider 未上报时保持 None，不伪造零用量。
+                usage,
+                request_id,
+            }),
             ObserveEvent::LlmRequestPayload {
                 agent_id,
                 step,

@@ -121,7 +121,7 @@ enum ItemPayload {
 }
 
 /// 单个已完成的原生 item；未知非语义字段只随原 JSON 保存，不参与投影。
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct ResponsesHistoryItem {
     kind: ResponsesHistoryItemKind,
     id: Option<String>,
@@ -247,7 +247,7 @@ struct ResponsesHistoryV1Repr {
 }
 
 /// 版本化的原生历史记录；私有字段，只能经校验构造或校验反序列化得到。
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "ResponsesHistoryV1Repr")]
 pub struct ResponsesHistoryV1 {
     version: u32,
@@ -332,6 +332,21 @@ impl ResponsesHistoryV1 {
         refusals
     }
 
+    /// 可见推理摘要：按序拼接 reasoning items 的 summary 文本，每段只出现一次。
+    ///
+    /// 这是原生 reasoning item 的派生视图；密文（`encrypted_content`）不在此输出。
+    pub fn reasoning_summary_text(&self) -> String {
+        let mut summary = String::new();
+        for item in &self.items {
+            if let ItemPayload::Reasoning { summary: parts, .. } = &item.payload {
+                for part in parts {
+                    summary.push_str(part);
+                }
+            }
+        }
+        summary
+    }
+
     /// 派生工具调用：`ToolCall::id` 取 call_id（工具结果由 adapter 按 call_id 配对），
     /// 每项 function_call 只出现一次。
     pub fn tool_calls(&self) -> Vec<ToolCall> {
@@ -362,6 +377,19 @@ impl ResponsesHistoryV1 {
     ) -> Result<Vec<JsonObject>, HistoryError> {
         self.source.verify(endpoint, model)?;
         Ok(self.items.iter().map(project_item).collect())
+    }
+
+    /// 非同域降级投影：只回放与来源无关的 message/function_call items。
+    ///
+    /// 调用方必须先确认 [`ResponsesHistoryV1::project_input_items`] 返回
+    /// `SourceMismatch`；本方法不校验来源，也不输出 reasoning item，因此结果中
+    /// 不可能出现密文。降级丢失的是 provider 侧推理缓存，可见对话内容不受影响。
+    pub fn project_generic_input_items(&self) -> Vec<JsonObject> {
+        self.items
+            .iter()
+            .filter(|item| item.kind != ResponsesHistoryItemKind::Reasoning)
+            .map(project_item)
+            .collect()
     }
 }
 
@@ -394,6 +422,9 @@ fn project_item(item: &ResponsesHistoryItem) -> JsonObject {
         ItemPayload::Message { phase, content } => {
             let mut fields = Map::new();
             fields.insert("type".into(), Value::String("message".into()));
+            if let Some(id) = &item.id {
+                fields.insert("id".into(), Value::String(id.clone()));
+            }
             if let Some(phase) = phase {
                 fields.insert("phase".into(), Value::String(phase.as_wire().into()));
             }
@@ -401,7 +432,8 @@ fn project_item(item: &ResponsesHistoryItem) -> JsonObject {
             fields.insert("status".into(), Value::String("completed".into()));
             let parts = content
                 .iter()
-                .map(|part| {
+                .enumerate()
+                .map(|(index, part)| {
                     let entry = match part {
                         MessagePart::OutputText(text) => {
                             [("type", "output_text"), ("text", text.as_str())]
@@ -410,9 +442,24 @@ fn project_item(item: &ResponsesHistoryItem) -> JsonObject {
                             [("type", "refusal"), ("refusal", text.as_str())]
                         }
                     };
-                    Value::Object(Map::from_iter(entry.map(|(key, value)| {
-                        (key.to_owned(), Value::String(value.to_owned()))
-                    })))
+                    let mut projected = Map::from_iter(
+                        entry.map(|(key, value)| (key.to_owned(), Value::String(value.to_owned()))),
+                    );
+                    if matches!(part, MessagePart::OutputText(_)) {
+                        // input union 的 ResponseOutputText 要求 annotations；旧记录缺失时补空数组。
+                        let annotations = item
+                            .raw
+                            .as_map()
+                            .get("content")
+                            .and_then(Value::as_array)
+                            .and_then(|parts| parts.get(index))
+                            .and_then(|part| part.get("annotations"))
+                            .filter(|value| value.is_array())
+                            .cloned()
+                            .unwrap_or_else(|| Value::Array(Vec::new()));
+                        projected.insert("annotations".into(), annotations);
+                    }
+                    Value::Object(projected)
                 })
                 .collect();
             fields.insert("content".into(), Value::Array(parts));
@@ -495,10 +542,10 @@ fn parse_item(value: Value) -> Result<ResponsesHistoryItem, HistoryError> {
                 };
                 content.push(match part.get("type").and_then(Value::as_str) {
                     Some("output_text") => {
-                        MessagePart::OutputText(required_str(part, "text")?.to_owned())
+                        MessagePart::OutputText(required_text(part, "text")?.to_owned())
                     }
                     Some("refusal") => {
-                        MessagePart::Refusal(required_str(part, "refusal")?.to_owned())
+                        MessagePart::Refusal(required_text(part, "refusal")?.to_owned())
                     }
                     _ => return Err(HistoryError::InvalidField { field: "content" }),
                 });
@@ -524,7 +571,7 @@ fn parse_item(value: Value) -> Result<ResponsesHistoryItem, HistoryError> {
                         if part.get("type").and_then(Value::as_str) != Some("summary_text") {
                             return Err(HistoryError::InvalidField { field: "summary" });
                         }
-                        summary.push(required_str(part, "text")?.to_owned());
+                        summary.push(required_text(part, "text")?.to_owned());
                     }
                     summary
                 }
@@ -595,6 +642,18 @@ fn required_str<'a>(
     }
 }
 
+// 文本字段没有标识符的非空约束，保留合法的空文本与空白。
+fn required_text<'a>(
+    fields: &'a Map<String, Value>,
+    field: &'static str,
+) -> Result<&'a str, HistoryError> {
+    match fields.get(field) {
+        Some(Value::String(value)) => Ok(value),
+        Some(_) => Err(HistoryError::InvalidField { field }),
+        None => Err(HistoryError::MissingField { field }),
+    }
+}
+
 fn optional_str(
     fields: &Map<String, Value>,
     field: &'static str,
@@ -607,9 +666,10 @@ fn optional_str(
 }
 
 fn require_completed(fields: &Map<String, Value>, required: bool) -> Result<(), HistoryError> {
-    match fields.get("status").and_then(Value::as_str) {
-        Some("completed") => Ok(()),
-        Some(_) => Err(HistoryError::IncompleteItem),
+    match fields.get("status") {
+        Some(Value::String(status)) if status == "completed" => Ok(()),
+        Some(Value::String(_)) => Err(HistoryError::IncompleteItem),
+        Some(_) => Err(HistoryError::InvalidField { field: "status" }),
         None if required => Err(HistoryError::MissingField { field: "status" }),
         None => Ok(()),
     }

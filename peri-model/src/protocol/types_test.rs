@@ -4,8 +4,8 @@ use crate::ProtocolErrorKind;
 
 use super::{
     ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, ModelCapabilities,
-    ModelMessage, ModelRequest, ModelResponse, ProviderProtocol, StopReason, TokenUsage, ToolCall,
-    ToolDefinition, ToolResult,
+    ModelMessage, ModelRequest, ModelResponse, ProviderProtocol, ResponsesHistoryV1,
+    ResponsesSourceIdentity, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
 };
 
 fn json_object(value: Value) -> JsonObject {
@@ -269,6 +269,7 @@ fn test_stop_reasons_serde_roundtrip_for_all_variants() {
 fn test_provider_protocols_serde_roundtrip_for_all_variants() {
     let protocols = vec![
         ProviderProtocol::OpenAiCompatible,
+        ProviderProtocol::OpenAiResponses,
         ProviderProtocol::Anthropic,
         ProviderProtocol::Other {
             value: "custom".into(),
@@ -316,4 +317,75 @@ fn test_json_object_rejects_non_object_values() {
         error.protocol_error().map(|error| error.kind()),
         Some(ProtocolErrorKind::InvalidJsonObject)
     );
+}
+
+fn native_history_block() -> ContentBlock {
+    let source = ResponsesSourceIdentity::capture(
+        &url::Url::parse("https://proxy.example.test/v1/responses").unwrap(),
+        "gpt-5",
+    )
+    .unwrap();
+    let history = ResponsesHistoryV1::new(
+        source,
+        vec![
+            json!({
+                "id": "rs_1",
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [{ "type": "summary_text", "text": "thinking" }],
+                "encrypted_content": "enc-blob-1",
+            }),
+            json!({
+                "id": "msg_1",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "done" }],
+            }),
+        ],
+    )
+    .unwrap();
+    ContentBlock::ResponsesNativeHistory {
+        history: Box::new(history),
+    }
+}
+
+#[test]
+fn native_history_block_roundtrips_persistently_without_exposing_native_payload() {
+    let block = native_history_block();
+    let encoded = serde_json::to_string(&block).unwrap();
+    let decoded: ContentBlock = serde_json::from_str(&encoded).unwrap();
+
+    assert_eq!(decoded, block);
+    // 派生文本由同消息的 Text block 承载，原生记录不重复提供。
+    assert_eq!(decoded.text_content(), None);
+    assert!(matches!(
+        &decoded,
+        ContentBlock::ResponsesNativeHistory { history } if history.visible_text() == "done"
+    ));
+    // Debug 不输出密文或原生 payload。
+    assert!(!format!("{decoded:?}").contains("enc-blob-1"));
+
+    let projected = match &decoded {
+        ContentBlock::ResponsesNativeHistory { history } => history
+            .project_input_items(
+                &url::Url::parse("https://proxy.example.test/v1/responses").unwrap(),
+                "gpt-5",
+            )
+            .unwrap(),
+        other => panic!("native history expected: {other:?}"),
+    };
+    assert_eq!(projected.len(), 2);
+    assert_eq!(
+        projected[0].as_map().get("encrypted_content"),
+        Some(&json!("enc-blob-1"))
+    );
+}
+
+#[test]
+fn native_history_block_rejects_incomplete_items_on_load() {
+    let mut encoded = serde_json::to_value(native_history_block()).unwrap();
+    encoded["history"]["items"][1]["status"] = json!("in_progress");
+    let error = serde_json::from_value::<ContentBlock>(encoded).unwrap_err();
+    assert!(error.to_string().contains("not completed"));
 }

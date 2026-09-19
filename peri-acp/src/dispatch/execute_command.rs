@@ -163,7 +163,9 @@ pub async fn execute_command(
                 let messages_json: Vec<Value> = result
                     .messages
                     .iter()
-                    .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+                    .map(|m| {
+                        serde_json::to_value(m.redacted_for_observability()).unwrap_or(Value::Null)
+                    })
                     .collect();
                 return Ok(serde_json::json!({
                     "messages": messages_json,
@@ -260,7 +262,7 @@ pub async fn execute_command(
     // Serialize the result messages into a compact JSON array of { role, content }.
     let messages_json: Vec<Value> = messages
         .iter()
-        .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+        .map(|m| serde_json::to_value(m.redacted_for_observability()).unwrap_or(Value::Null))
         .collect();
 
     Ok(serde_json::json!({

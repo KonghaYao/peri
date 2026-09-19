@@ -307,6 +307,68 @@ async fn push_event_forwards_rewind_completed() {
     assert_eq!(msgs.len(), 1, "messages_json 应可反序列化回 BaseMessage");
 }
 
+/// 携带 Responses 原生历史的 assistant 消息（密文 + 来源身份 + 可见文本）。
+fn msg_with_native_history() -> BaseMessage {
+    BaseMessage::ai(MessageContent::Blocks(vec![
+        peri_acp_types::messages::ContentBlock::text("答案正文"),
+        peri_acp_types::messages::ContentBlock::responses_native_history(serde_json::json!({
+            "version": 1,
+            "source": {"nonce": "NONCEHEX", "digest": "DIGESTHEX"},
+            "items": [{"type": "reasoning", "encrypted_content": "CIPHERTEXT"}],
+        })),
+    ]))
+}
+
+/// 客户端消息载荷出口必须脱敏：Rebuild 信号只带用户可见事实，原生密文与
+/// 来源身份留在 canonical 存储，事件源对象本身不被改写。
+#[tokio::test]
+async fn push_event_redacts_native_history_in_client_message_payloads() {
+    let messages = vec![msg_with_native_history()];
+    let events = [
+        ExecutorEvent::RewindCompleted {
+            summary: "已回滚 1 条消息".to_string(),
+            messages: messages.clone(),
+        },
+        ExecutorEvent::CompactCompleted {
+            summary: String::new(),
+            messages: messages.clone(),
+            trigger: peri_acp_types::event::CompactTrigger::Auto,
+            strategy: peri_acp_types::event::CompactStrategy::Full,
+            affected_count: 1,
+            estimated_tokens_saved: 0,
+            files: vec![],
+            skills: vec![],
+        },
+    ];
+
+    for event in events {
+        let (transport, sink) = compact_test_sink();
+        sink.push_event("s1", &event, 0).await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        let wire = notifications[0].1.to_string();
+        for private in ["CIPHERTEXT", "encrypted_content", "NONCEHEX", "DIGESTHEX"] {
+            assert!(
+                !wire.contains(private),
+                "客户端载荷泄漏原生私有状态: {private}"
+            );
+        }
+        assert!(wire.contains("答案正文"), "可见文本必须保留");
+        assert!(
+            wire.contains("responses_native_history"),
+            "载体 tag 仍可解码"
+        );
+    }
+
+    assert!(
+        messages[0].has_provider_native_history(),
+        "事件源对象（canonical 消息）不得被出口投影改写"
+    );
+    assert!(serde_json::to_string(&messages)
+        .unwrap()
+        .contains("CIPHERTEXT"));
+}
+
 /// LLM retry 必须经 peri/agent_event 通道送达 TUI，否则客户端无法展示
 /// attempt/max_attempts/delay，用户会误以为首次失败即终止。
 #[tokio::test]

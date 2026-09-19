@@ -8,5 +8,6 @@ pub mod message;
 
 pub use content::{
     strip_system_reminders, ContentBlock, DocumentSource, ImageSource, MessageContent,
+    RESPONSES_NATIVE_HISTORY_TAG,
 };
-pub use message::{BaseMessage, MessageId, ToolCallRequest};
+pub use message::{redacted_messages_for_observability, BaseMessage, MessageId, ToolCallRequest};

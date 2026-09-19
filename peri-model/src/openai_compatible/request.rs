@@ -16,6 +16,7 @@ pub(super) struct BuiltOpenAiRequest {
     pub(super) endpoint: Url,
     pub(super) body: Value,
     model_id: String,
+    diagnostics: BTreeMap<String, Value>,
 }
 
 impl BuiltOpenAiRequest {
@@ -28,7 +29,7 @@ impl BuiltOpenAiRequest {
             self.model_id.clone(),
             self.endpoint.clone(),
             self.body.clone(),
-            BTreeMap::new(),
+            self.diagnostics.clone(),
             runtime,
         )
     }
@@ -77,6 +78,12 @@ pub(super) fn build_request(
     }
 
     Ok(BuiltOpenAiRequest {
+        diagnostics: PreparedModelRequest::history_diagnostics(
+            request,
+            ProviderProtocol::OpenAiCompatible,
+            &config.endpoint,
+            &config.model,
+        ),
         endpoint: chat_completions_endpoint(&config.endpoint)?,
         body,
         model_id: config.model.clone(),
@@ -246,6 +253,9 @@ fn block_to_openai_part(block: &ContentBlock, supports_thinking_content: bool) -
         | ContentBlock::ToolUse { .. }
         | ContentBlock::ToolResult { .. }
         | ContentBlock::RedactedReasoning { .. } => None,
+        // Responses 原生历史只在 Responses adapter 内回放：本协议无法表达它的 item
+        // 身份与密文，跨协议时丢弃（可见文本/工具调用已由同消息的派生 block 承载）。
+        ContentBlock::ResponsesNativeHistory { .. } => None,
     }
 }
 

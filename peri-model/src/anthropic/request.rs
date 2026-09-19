@@ -16,6 +16,7 @@ pub(super) struct BuiltAnthropicRequest {
     pub(super) body: Value,
     pub(super) session_id: Option<String>,
     model_id: String,
+    diagnostics: BTreeMap<String, Value>,
 }
 
 impl BuiltAnthropicRequest {
@@ -28,7 +29,7 @@ impl BuiltAnthropicRequest {
             self.model_id.clone(),
             self.endpoint.clone(),
             self.body.clone(),
-            BTreeMap::new(),
+            self.diagnostics.clone(),
             runtime,
         )
     }
@@ -39,7 +40,6 @@ pub(super) fn build_request(
     request: &ModelRequest,
 ) -> ModelResult<BuiltAnthropicRequest> {
     let (mut messages, mut system_prompt) = messages_to_anthropic(&request.messages);
-    cache::ensure_thinking_blocks(&mut messages);
     if config.enable_cache {
         cache::apply_cache_to_messages(&mut messages);
     }
@@ -81,6 +81,12 @@ pub(super) fn build_request(
     }
 
     Ok(BuiltAnthropicRequest {
+        diagnostics: PreparedModelRequest::history_diagnostics(
+            request,
+            ProviderProtocol::Anthropic,
+            &config.endpoint,
+            &config.model,
+        ),
         endpoint: messages_endpoint(&config.endpoint)?,
         body,
         session_id: request.session_id.clone(),
@@ -145,7 +151,18 @@ fn messages_to_anthropic(messages: &[ModelMessage]) -> (Vec<Value>, cache::Split
                         .filter(|tool_call| !content_tool_use_ids.contains(tool_call.id()))
                         .map(tool_call_to_anthropic),
                 );
-                result.push(json!({ "role": "assistant", "content": parts }));
+                let mut projected = json!({ "role": "assistant", "content": parts });
+                // 跨协议历史不能补造空签名 thinking；原有 Anthropic 兼容路径保持不变。
+                if !content.iter().any(|block| match block {
+                    ContentBlock::ResponsesNativeHistory { .. } => true,
+                    ContentBlock::Reasoning { signature, .. } => {
+                        signature.as_deref().is_none_or(str::is_empty)
+                    }
+                    _ => false,
+                }) {
+                    cache::ensure_thinking_blocks(std::slice::from_mut(&mut projected));
+                }
+                result.push(projected);
             }
             ModelMessage::ToolResult {
                 result: tool_result,
@@ -236,11 +253,18 @@ fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
             Some(json!({ "type": "document", "source": source, "title": title }))
         }
         ContentBlock::Reasoning { text, signature } => {
-            let mut value = json!({ "type": "thinking", "thinking": text });
-            if let Some(signature) = signature {
-                value["signature"] = json!(signature);
-            }
-            Some(value)
+            // 无签名的跨协议可见摘要不是合法 Anthropic thinking，降级为普通文本。
+            Some(
+                match signature
+                    .as_deref()
+                    .filter(|signature| !signature.is_empty())
+                {
+                    Some(signature) => json!({
+                        "type": "thinking", "thinking": text, "signature": signature,
+                    }),
+                    None => json!({ "type": "text", "text": text }),
+                },
+            )
         }
         ContentBlock::ToolUse { tool_call } => Some(tool_call_to_anthropic(tool_call)),
         ContentBlock::ToolResult { result } => Some(tool_result_to_anthropic(result)),
@@ -248,6 +272,9 @@ fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
             "type": "redacted_thinking",
             "data": data,
         })),
+        // Responses 原生历史只在 Responses adapter 内回放：本协议无法表达它的 item
+        // 身份与密文，跨协议时丢弃（可见文本/工具调用已由同消息的派生 block 承载）。
+        ContentBlock::ResponsesNativeHistory { .. } => None,
     }
 }
 

@@ -310,16 +310,13 @@ pub enum ObserveEvent {
         /// LLM 输出文本（成功路径：final_answer 或 thought；错误路径：format!("ERROR: {}", e)）
         /// 与 v1 ExecutorEvent::LlmCallEnd.output 对齐，用于 Langfuse Generation 追踪
         output: String,
-        input_tokens: u64,
-        output_tokens: u64,
-        /// Prompt cache 创建/读取的 token 数。
+        /// 本次调用的用量。
         ///
-        /// `Some(0)` 表示 provider 明确报告本次未命中；`None` 表示 provider
-        /// 未提供该统计。二者不得折叠，否则 turn 级 coverage 会漏掉零命中请求。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_creation_input_tokens: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_read_input_tokens: Option<u64>,
+        /// `None` 表示 provider 未上报整体 usage；`Some` 表示已上报（内部字段的
+        /// 显式零与缺失仍由 `TokenUsage` 的 Option 字段区分）。二者不得折叠成
+        /// 零用量，否则消费端无法区分「未提供」与「确为零」。重试调用包含失败
+        /// 尝试已确认的真实消耗（累加、不重复）。
+        usage: Option<peri_model::TokenUsage>,
         /// Provider 返回的请求 ID（用于关联日志/遥测；None 表示 Provider 未返回）
         request_id: Option<String>,
     },

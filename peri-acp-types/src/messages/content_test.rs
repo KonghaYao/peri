@@ -304,3 +304,113 @@ fn test_strip_system_reminders_standalone_block_becomes_empty() {
         "纯注入消息剥离后为空（候选过滤依据）"
     );
 }
+
+// ── Responses 原生历史载体 ────────────────────────────────────────────────────
+
+/// 载荷含 provider 私有状态（reasoning 密文 + 来源 nonce/digest）。
+fn native_history_payload() -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "source": {"nonce": "NONCEHEX", "digest": "DIGESTHEX"},
+        "items": [
+            {"type": "reasoning", "id": "rs_1", "encrypted_content": "CIPHERTEXT"},
+            {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+             "content": [{"type": "output_text", "text": "answer"}]}
+        ],
+    })
+}
+
+#[test]
+fn test_responses_native_history_envelope_roundtrip_is_payload_faithful() {
+    let payload = native_history_payload();
+    let block = ContentBlock::responses_native_history(payload.clone());
+
+    assert!(block.is_responses_native_history());
+    assert_eq!(block.responses_native_history_payload(), Some(&payload));
+
+    let json = serde_json::to_string(&block).expect("原生历史载体必须可序列化");
+    assert!(
+        json.contains("CIPHERTEXT"),
+        "持久化载体必须保留载荷（脱敏只作用于可观测出口）"
+    );
+    let back: ContentBlock = serde_json::from_str(&json).expect("持久化载体必须可反序列化");
+    assert_eq!(back, block);
+    assert_eq!(back.responses_native_history_payload(), Some(&payload));
+}
+
+#[test]
+fn test_responses_native_history_debug_redacts_private_state() {
+    let block = ContentBlock::responses_native_history(native_history_payload());
+    let debug = format!("{block:?}");
+
+    assert!(!debug.contains("CIPHERTEXT"), "Debug 不得输出密文");
+    assert!(!debug.contains("NONCEHEX"), "Debug 不得输出来源 nonce");
+    assert!(!debug.contains("DIGESTHEX"), "Debug 不得输出来源 digest");
+    assert!(
+        debug.contains(RESPONSES_NATIVE_HISTORY_TAG),
+        "Debug 仍应表明载体类型：{debug}"
+    );
+}
+
+#[test]
+fn test_observability_projection_drops_private_state_only() {
+    let history = ContentBlock::responses_native_history(native_history_payload());
+    let projected = history.redacted_for_observability();
+
+    assert!(projected.is_responses_native_history());
+    assert_ne!(projected, history);
+    let json = serde_json::to_string(&projected).expect("投影可序列化");
+    assert!(!json.contains("CIPHERTEXT"));
+    assert!(!json.contains("NONCEHEX"));
+    assert!(!json.contains("DIGESTHEX"));
+    // 记录本身不被投影破坏：原 block 仍是事实源
+    assert_eq!(
+        history.responses_native_history_payload(),
+        Some(&native_history_payload())
+    );
+}
+
+#[test]
+fn test_observability_projection_leaves_other_blocks_unchanged() {
+    let text = ContentBlock::text("hello");
+    assert_eq!(text.redacted_for_observability(), text);
+    let unknown = ContentBlock::Unknown(serde_json::json!({"type": "other"}));
+    assert_eq!(unknown.redacted_for_observability(), unknown);
+}
+
+#[test]
+fn test_non_native_unknown_is_not_matched() {
+    let other = ContentBlock::Unknown(serde_json::json!({"type": "other"}));
+    assert!(!other.is_responses_native_history());
+    assert_eq!(other.responses_native_history_payload(), None);
+    // 缺少 history 载荷的载体不算原生历史：payload 访问器返回 None
+    let empty = ContentBlock::Unknown(serde_json::json!({
+        "type": RESPONSES_NATIVE_HISTORY_TAG,
+    }));
+    assert!(empty.is_responses_native_history());
+    assert_eq!(empty.responses_native_history_payload(), None);
+}
+
+#[test]
+fn test_message_content_observability_projection_keeps_visible_content() {
+    let content = MessageContent::Blocks(vec![
+        ContentBlock::reasoning("thought"),
+        ContentBlock::text("answer"),
+        ContentBlock::responses_native_history(native_history_payload()),
+    ]);
+
+    assert!(content.has_provider_native_history());
+    let projected = content.redacted_for_observability();
+    assert_eq!(projected.text_content(), "answer", "可见文本必须保留");
+    assert!(projected.has_provider_native_history());
+    let json = serde_json::to_string(&projected).expect("投影可序列化");
+    assert!(!json.contains("CIPHERTEXT"));
+    assert!(json.contains("answer"));
+}
+
+#[test]
+fn test_message_content_without_native_history_is_unchanged() {
+    let content = MessageContent::text("plain");
+    assert!(!content.has_provider_native_history());
+    assert_eq!(content.redacted_for_observability(), content);
+}

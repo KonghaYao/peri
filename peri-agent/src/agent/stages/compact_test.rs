@@ -5,7 +5,7 @@ use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::events_v2::{EventBus, EventBusConfig, EventHandles, ObserveEvent};
 use crate::agent::stages::StageContext;
 use crate::agent::token::ContextBudget;
-use crate::messages::{BaseMessage, MessageContent, ToolCallRequest};
+use crate::messages::{BaseMessage, ContentBlock, MessageContent, ToolCallRequest};
 use crate::session::store::FrozenContext;
 use crate::session::Session;
 use peri_model::TokenUsage;
@@ -547,5 +547,86 @@ async fn test_compact_stage_cancel_without_commit_emits_compact_ended() {
         ended,
         vec![crate::agent::compact_v2::CompactOutcome::Interrupted],
         "cancel 未提交应恰好 emit 一次 CompactEnded(Interrupted)"
+    );
+}
+
+/// `MessagesCompacted` 是观察出口（遥测 + ACP 客户端重建）：Responses 原生历史载荷
+/// （reasoning 密文与来源身份）不得随事件离开进程，可见派生内容必须保留。
+#[tokio::test]
+async fn test_compact_event_snapshot_strips_provider_native_history() {
+    let (mut ctx, mut handles) = make_context_with_observe();
+    append_compactable_history(&ctx);
+    {
+        let mut transcript = ctx.session.transcript.write();
+        transcript.append(BaseMessage::ai(MessageContent::Blocks(vec![
+            ContentBlock::text("答案正文"),
+            ContentBlock::responses_native_history(serde_json::json!({
+                "version": 1,
+                "source": {"nonce": "ab".repeat(16), "digest": "cd".repeat(32)},
+                "items": [{
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "encrypted_content": "CIPHERTEXT-REASONING",
+                    "status": "completed",
+                }],
+            })),
+        ])));
+    }
+    ctx.compact.context_budget = Some(ContextBudget::new(200_000));
+    ctx.compact.compact_config = Some(CompactConfig {
+        micro_compact_stale_steps: 1,
+        ..Default::default()
+    });
+    ctx.compact.token_tracker.write().accumulate(&TokenUsage {
+        input_tokens: 196_000,
+        output_tokens: 0,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    });
+
+    let output = run_compact(CompactInput {
+        context: ctx.clone(),
+        has_tool_calls: true,
+    })
+    .await
+    .unwrap();
+    assert!(output.compacted, "Micro 应已应用并 emit MessagesCompacted");
+
+    let events = observe_events(&mut handles);
+    let messages: Vec<&BaseMessage> = events
+        .iter()
+        .find_map(|event| match event {
+            ObserveEvent::MessagesCompacted { messages, .. } => Some(messages.iter().collect()),
+            _ => None,
+        })
+        .expect("MessagesCompacted 必须 emit");
+    let wire = serde_json::to_string(&messages).expect("serialize compact snapshot");
+    assert!(
+        !wire.contains("CIPHERTEXT-REASONING"),
+        "事件快照不得携带密文"
+    );
+    assert!(!wire.contains(&"cd".repeat(32)), "事件快照不得携带来源摘要");
+    assert!(wire.contains("答案正文"), "可见文本必须保留");
+    // 脱敏是「载荷替换」而非「消息消失」：占位块仍带确定 tag，消费方无需理解载荷。
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.has_provider_native_history()),
+        "原生历史消息必须仍在快照中（载荷为占位）"
+    );
+
+    // transcript 自身保持原消息：外层脱敏不得改写事实源
+    let stored = serde_json::to_string(&{
+        let guard = ctx.session.transcript.read();
+        guard
+            .visible_messages()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    })
+    .expect("serialize transcript");
+    assert!(
+        stored.contains("CIPHERTEXT-REASONING"),
+        "transcript 必须保留完整原生记录"
     );
 }

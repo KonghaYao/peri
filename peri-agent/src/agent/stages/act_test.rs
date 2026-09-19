@@ -4,6 +4,7 @@ use crate::agent::events_v2::{EventBus, EventHandles, RenderEvent};
 use crate::agent::react::{AgentOutput, Reasoning, ToolCall};
 use crate::agent::stages::{MiddlewareChain, StageContext};
 use crate::error::{AgentError, AgentResult};
+use crate::messages::{BaseMessage, ContentBlock, MessageContent};
 use crate::middleware::capabilities as hook_state;
 use crate::middleware::Middleware;
 use crate::session::store::FrozenContext;
@@ -171,4 +172,74 @@ async fn test_act_tool_path_cancel_emits_turn_completed() {
         }
     }
     assert!(found, "工具路径 cancel 必须 emit TurnCompleted");
+}
+
+/// TurnCompleted 快照是观察出口：Responses 原生历史载荷（reasoning 密文与来源身份）
+/// 不得随事件离开进程，用户可见的派生内容必须保留。
+#[tokio::test]
+async fn test_turn_completed_snapshot_strips_provider_native_history() {
+    let (ctx, mut handles) = make_context_with_handles();
+    {
+        let mut transcript = ctx.session.transcript.write();
+        transcript.append(BaseMessage::ai(MessageContent::Blocks(vec![
+            ContentBlock::text("答案正文"),
+            ContentBlock::responses_native_history(serde_json::json!({
+                "version": 1,
+                "source": {"nonce": "ab".repeat(16), "digest": "cd".repeat(32)},
+                "items": [{
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "encrypted_content": "CIPHERTEXT-REASONING",
+                    "status": "completed",
+                }],
+            })),
+        ])));
+    }
+
+    let reasoning = Reasoning::with_answer("thinking", "final answer");
+    run_act(ActInput {
+        context: ctx.clone(),
+        reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
+    })
+    .await
+    .unwrap();
+
+    let mut turn_completed = None;
+    while let Some(ev) = handles.try_render() {
+        if let RenderEvent::TurnCompleted {
+            finalized_messages, ..
+        } = ev
+        {
+            turn_completed = Some(finalized_messages);
+        }
+    }
+    let wire = serde_json::to_string(&*turn_completed.expect("TurnCompleted 必须 emit"))
+        .expect("serialize snapshot");
+    assert!(
+        !wire.contains("CIPHERTEXT-REASONING"),
+        "事件快照不得携带密文"
+    );
+    assert!(!wire.contains(&"cd".repeat(32)), "事件快照不得携带来源摘要");
+    assert!(wire.contains("答案正文"), "可见文本必须保留");
+    // 脱敏是「载荷替换」而非「消息消失」：占位块仍带确定 tag，消费方无需理解载荷。
+    assert!(
+        wire.contains("responses_native_history") && wire.contains("[REDACTED]"),
+        "原生历史消息必须仍在快照中（载荷为占位）"
+    );
+
+    // transcript 自身保持原消息：外层脱敏不得改写事实源
+    let stored = serde_json::to_string(&{
+        let guard = ctx.session.transcript.read();
+        guard
+            .visible_messages()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    })
+    .expect("serialize transcript");
+    assert!(
+        stored.contains("CIPHERTEXT-REASONING"),
+        "transcript 必须保留完整原生记录"
+    );
 }

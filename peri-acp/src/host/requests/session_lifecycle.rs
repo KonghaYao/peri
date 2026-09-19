@@ -351,7 +351,16 @@ pub(crate) async fn handle_metadata(
             payloads
                 .iter()
                 .map(|payload| {
-                    let encoded = peri_acp_types::store::serialize_persisted_payload(payload)?;
+                    // RPC 是观测出口；脱敏副本不得回写 canonical 存储。
+                    let projected = match payload {
+                        peri_acp_types::store::PersistedPayload::Message(message) => {
+                            peri_acp_types::store::PersistedPayload::Message(
+                                message.redacted_for_observability(),
+                            )
+                        }
+                        other => other.clone(),
+                    };
+                    let encoded = peri_acp_types::store::serialize_persisted_payload(&projected)?;
                     Ok::<Value, anyhow::Error>(serde_json::from_str(&encoded)?)
                 })
                 .collect::<Result<Vec<_>, _>>()
