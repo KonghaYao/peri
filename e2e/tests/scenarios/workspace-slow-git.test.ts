@@ -31,6 +31,8 @@ const GIT = /^git/;
 
 /** 一次准入会执行的三条发现命令，用来从调用日志里挑出发现自身的调用。 */
 const DISCOVERY_CALLS = ["rev-parse --is-inside-work-tree", "rev-parse --show-toplevel", "worktree list"];
+/** 准备阶段的状态栏提示（`statusbar-preparing`，本用例语言为 en）。不含省略号：命中判定不与折行耦合。 */
+const PREPARING_HINT = "Preparing session";
 /** 版本相关选项：发现请求它们会在旧版 Git 上失败（修复记录第 7、11 条）。 */
 const VERSION_DEPENDENT = ["--path-format", "--git-common-dir", "--absolute-git-dir"];
 
@@ -177,7 +179,34 @@ describe("慢 Git 的工作区发现", () => {
       env: { HOME: home },
     });
     await tester.start();
-    await tester.waitForText("AI operating system", { timeout: 20_000, interval: 100 });
+    const launched = Date.now();
+    // 准备窗口的可见状态（简化目标第 4 项后半）：会话建立期间状态栏必须说明
+    // 「正在准备会话」。建立由启动期 `ensure_session` 发起：用户若在这段窗口里提交
+    // 首次输入，等待的就是这一次建立——用例在本文件下方等 Git 安静后再提交，
+    // 那时会话已可用、输入不再等待，所以窗口只能在这里观测。
+    // 两个等待并发：界面先画出欢迎语时提示也已在同一帧上，不能因为等欢迎语而错过窗口。
+    let visibleSince = 0;
+    await Promise.all([
+      tester.waitForText("AI operating system", { timeout: 20_000, interval: 100 }),
+      tester.waitForText(PREPARING_HINT, { timeout: 20_000, interval: 50 }).then(() => {
+        visibleSince = Date.now();
+      }),
+    ]);
+    // 提示必须覆盖整段建立过程，而不是恰好被轮询抓到的一帧：慢 Git 的三条发现
+    // 命令都在建立期间执行，窗口下限就是注入的等待——短于它说明提示提前收尾了。
+    const deadline = Date.now() + 10_000;
+    while ((await tester.getScreenText()).includes(PREPARING_HINT)) {
+      if (Date.now() > deadline) throw new Error("准备提示在会话建立后仍然可见");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const visibleFor = Date.now() - visibleSince;
+    console.log(
+      `准备窗口实测：状态栏提示自 ${visibleSince - launched}ms 起可见 ${visibleFor}ms（注入等待每次 ${SLEEP_MS}ms）`,
+    );
+    expect(
+      visibleFor,
+      `准备提示只可见 ${visibleFor}ms，短于注入的 ${SLEEP_MS}ms 等待：建立期间的状态不完整`,
+    ).toBeGreaterThanOrEqual(SLEEP_MS);
   }
 
   /** 调用日志的当前字节长度，作为观测窗口的起点。 */
@@ -258,7 +287,17 @@ describe("慢 Git 的工作区发现", () => {
     const screen = await tester!.getScreenText();
     expect(screen, "慢 Git 不应被当成输入未被接收").not.toContain("Input was not accepted");
     expect(screen, "慢 Git 不应被当成会话无法建立").not.toContain("Session could not be established");
+    // 准备状态只属于准备窗口：会话建立并受理后继续显示就是在说谎。
+    expect(screen, "会话建立后不应继续显示准备状态").not.toContain(PREPARING_HINT);
     expect(discovery.length, "一次准入至少一条发现命令（每轮三条）").toBeGreaterThanOrEqual(3);
+    // 上限与下限一样是契约：一次准入至多一轮完整发现（见「修复记录」第 14 条）。
+    // 窗口里多出的轮次只可能来自同一个目录被重复解析——准入内的重复检查或
+    // 调用方按目录重新解析，都会把慢 Git 的等待成倍叠加到这次输入上。
+    expect(
+      discovery.length,
+      `一次准入至多一轮发现（每轮三条命令）：窗口内发现 ${discovery.length} 次、`
+        + `调用 ${calls.length} 次，说明同一个目录被重复解析`,
+    ).toBeLessThanOrEqual(3);
     expect(elapsed, "窗口内必须有真实的 Git 等待").toBeGreaterThanOrEqual(SLEEP_MS);
     for (const option of VERSION_DEPENDENT) {
       expect(

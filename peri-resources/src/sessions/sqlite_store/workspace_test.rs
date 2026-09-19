@@ -608,6 +608,36 @@ async fn test_worktree_binding_keeps_wire_revision_without_persisted_column() {
 }
 
 #[tokio::test]
+async fn test_worktree_binding_cwd_text_matches_registration_without_trailing_separator() {
+    let repo = repository();
+    let nested = repo.path().join("sub");
+    std::fs::create_dir(&nested).unwrap();
+    let (store, _db) = store().await;
+
+    // 工作区根与子目录各建一个绑定：两者的执行目录文本都必须与解析结果一致。
+    // `root.join("")` 会给出 `/a/b/` 这样的形式，与解析给出的 `/a/b` 只差一个
+    // 分隔符；Path 比较看不出差别，按字符串比较目录的调用方会据此重跑完整发现。
+    for (cwd, suffix) in [(repo.path().to_path_buf(), ""), (nested.clone(), "/sub")] {
+        let (id, resolved) = bound(&store, &cwd).await;
+        let registered = resolved.cwd.to_str().unwrap();
+        assert!(
+            registered.ends_with(suffix),
+            "解析结果不符合预期：{registered}"
+        );
+        let revalidated = store.validate_session_binding(&id).await.unwrap();
+        assert_eq!(revalidated.cwd.to_str().unwrap(), registered);
+        let reasserted = store.reassert_session_binding(&id).await.unwrap();
+        assert_eq!(reasserted.cwd.to_str().unwrap(), registered);
+        let loaded = store.load_session_binding(&id).await.unwrap().unwrap();
+        assert_eq!(
+            loaded.cwd_relative_to_workspace,
+            resolved.relative_cwd.to_path_buf()
+        );
+    }
+    store.close().await;
+}
+
+#[tokio::test]
 async fn test_worktree_binding_survives_clean_reopen_and_unknown_versions_fail_closed() {
     let repo = repository();
     let (store, db) = store().await;
@@ -727,6 +757,26 @@ fn lease_process_at(path: &Path, id: &str, expected: &str, generation: i64) {
     assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
 }
 
+/// 启动一个「短命持有者」子进程：取得所有权后打印就绪行、保持 `hold_ms` 再正常收尾。
+///
+/// 返回的句柄带 stdout 管道，父进程据此确定「锁已被持有」——`flock` 的持有者何时释放
+/// 取决于调度，只有就绪信号之后的尝试才是确定性的重叠。
+fn lease_process_hold(path: &Path, id: &str, hold_ms: u64) -> std::process::Child {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sessions::sqlite_store::workspace::tests::test_worktree_execution_child_process",
+            "--nocapture",
+        ])
+        .env("PERI_TEST_WORKSPACE_DB", path)
+        .env("PERI_TEST_WORKSPACE_ID", id)
+        .env("PERI_TEST_WORKSPACE_EXPECT", "hold")
+        .env("PERI_TEST_WORKSPACE_HOLD_MS", hold_ms.to_string())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_worktree_execution_competes_across_processes_and_crash_remains_dirty() {
     let repo = repository();
@@ -841,6 +891,18 @@ async fn test_worktree_execution_child_process() {
             let _lease = store.acquire_execution_lease(&id).await.unwrap();
             std::process::exit(0);
         }
+        "hold" => {
+            let lease = store.acquire_execution_lease(&id).await.unwrap();
+            println!("HOLDER-READY");
+            use std::io::Write as _;
+            std::io::stdout().flush().unwrap();
+            let hold_ms: u64 = std::env::var("PERI_TEST_WORKSPACE_HOLD_MS")
+                .expect("hold duration required")
+                .parse()
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(hold_ms));
+            lease.mark_clean().await.unwrap();
+        }
         "reset_busy" => {
             let error = store
                 .reset_dirty_execution(&RecoveryRequiredDetails {
@@ -870,6 +932,38 @@ async fn test_worktree_execution_child_process() {
         }
         _ => panic!("unknown expected child result"),
     }
+}
+
+/// [回归测试] 短命持有者释放后的取得所有权不得被误报成 ExecutionBusy。
+///
+/// `flock` 的锁挂在 open file description 上：本进程 `fork` 出的子进程在 `exec` 前共享父
+/// 进程的描述符（`CLOEXEC` 只在子进程 `exec` 时关闭），会话生命周期里的 Git 发现、
+/// `sw_vers`、LSP 等子进程因此会留下毫秒级的瞬时持有。没有重试时，这类窗口会被上报成
+/// 「会话已被其他执行宿主占用」，把一次正常的取得所有权变成偶发失败；真正的外部持有者
+/// 并不受重试影响（超时后仍报忙，见 `test_worktree_execution_competes_across_processes_and_crash_remains_dirty`）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_worktree_transient_holder_then_release_is_not_reported_busy() {
+    const HOLD_MS: u64 = 250;
+    use std::io::BufRead as _;
+    let repo = repository();
+    let (store, db) = store().await;
+    let (id, _) = bound(&store, repo.path()).await;
+    let mut holder = lease_process_hold(&db.path().join("threads.db"), &id, HOLD_MS);
+    let mut lines = std::io::BufReader::new(holder.stdout.take().unwrap()).lines();
+    assert!(
+        lines.any(|line| line.unwrap().contains("HOLDER-READY")),
+        "持有者未在尝试前就绪"
+    );
+    let started = std::time::Instant::now();
+    let lease = store.acquire_execution_lease(&id).await.unwrap();
+    // 证明这次成功来自等待而非抢先：取得所有权只能发生在持有者释放之后。
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(HOLD_MS / 2),
+        "取得所有权发生在持有者释放之前：{:?}",
+        started.elapsed()
+    );
+    lease.mark_clean().await.unwrap();
+    assert!(holder.wait().unwrap().success());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1131,7 +1225,10 @@ async fn write_lock_available(database: &str) -> &'static str {
     }
 }
 
-/// 子进程模式：以受控 PATH 执行一次完整准入（解析 + 绑定）。
+/// 子进程模式：以受控 PATH 执行一次完整准入（解析 + 绑定 + 取执行所有权 + 准入内复核）。
+///
+/// 这是 `session/new` 在存储层的形状：解析给出本次准入的观测，其余步骤只复核已记录
+/// 证据。用例用它度量「一次准入的外部探测次数」。
 #[tokio::test]
 async fn test_worktree_registration_admission_child() {
     let Ok(database) = std::env::var(ADMISSION_DATABASE) else {
@@ -1140,10 +1237,18 @@ async fn test_worktree_registration_admission_child() {
     let cwd = std::env::var(ADMISSION_CWD).unwrap();
     let store = SqliteThreadStore::new(Path::new(&database)).await.unwrap();
     let workspace = store.resolve_workspace(Path::new(&cwd)).await.unwrap();
-    store
+    let thread = store
         .create_bound_thread(ThreadMeta::new(cwd.as_str()), &workspace)
         .await
         .unwrap();
+    let lease = store.acquire_execution_lease(&thread).await.unwrap();
+    // 准入内复核（host 的 validate_expected / acquire_for_load 第二道检查）：
+    // 复核结果必须与本次准入解析出的工作区一致。
+    let reasserted = store.reassert_session_binding(&thread).await.unwrap();
+    assert_eq!(reasserted, workspace);
+    let identity = store.reassert_session_binding(&thread).await.unwrap();
+    assert_eq!(identity.cwd, workspace.cwd);
+    lease.mark_clean().await.unwrap();
 }
 
 /// 子进程模式：只读历史访问——列表、消息、frozen 与绑定读取，复核身份的动作不在其中。
@@ -1428,7 +1533,7 @@ fn read_probe_log(directory: &Path) -> Vec<String> {
 
 /// [回归测试] 准入的外部探测必须全部发生在写事务之外。
 ///
-/// 上一版实现把完整 Git 发现放在 `BEGIN IMMEDIATE` 内，并在一次准入里重复四轮：
+/// 上一版实现把完整 Git 发现放在 `BEGIN IMMEDIATE` 内，并在一次准入里重复多轮：
 /// 写锁持有期间等待 Git 子进程，慢盘 / 慢 Git 会阻塞同一数据库上的其他 writer。
 /// 假 Git 在每次被调用时尝试立刻取得写锁，把「探测是否在事务外」变成可断言的事实。
 #[cfg(unix)]
@@ -1448,8 +1553,8 @@ async fn test_worktree_registration_probes_filesystem_outside_write_lock() {
     );
     assert_eq!(
         recorded.len(),
-        2,
-        "目录模式一次准入只应观测两轮（解析 + 绑定复核）：{recorded:?}",
+        1,
+        "目录模式一次准入只应观测一轮（准入解析）：{recorded:?}",
     );
     assert_eq!(
         binding_count(&database).await,
@@ -1458,7 +1563,7 @@ async fn test_worktree_registration_probes_filesystem_outside_write_lock() {
     );
 }
 
-/// [回归测试] 仓库模式一次准入的真实 Git 调用次数保持有界：两轮观测，每轮三条命令。
+/// [回归测试] 仓库模式一次准入的真实 Git 调用次数保持有界：一轮观测，三条命令。
 #[cfg(unix)]
 #[tokio::test]
 async fn test_worktree_repository_registration_keeps_git_calls_bounded() {
@@ -1476,8 +1581,8 @@ async fn test_worktree_repository_registration_keeps_git_calls_bounded() {
     );
     assert_eq!(
         recorded.len(),
-        6,
-        "仓库模式一次准入的 Git 调用次数应有界：{recorded:?}",
+        3,
+        "一次准入的 Git 调用次数应有界（一轮观测三条命令）：{recorded:?}",
     );
     assert_eq!(
         binding_count(&database).await,
@@ -1502,7 +1607,7 @@ async fn test_worktree_bound_session_validation_probes_once() {
         "log-only",
         Some(&real_git_path()),
     );
-    assert_eq!(recorded.len(), 6, "准入本身是两轮观测：{recorded:?}");
+    assert_eq!(recorded.len(), 3, "准入本身是一轮观测：{recorded:?}");
     let thread = bound_thread_id(&database).await;
 
     let log = directory.path().join("probe.log");
@@ -1548,8 +1653,8 @@ async fn test_worktree_bound_session_validation_probes_once() {
 /// [回归测试] 慢 Git 的等待是被实测的：每次等待可归因到具体命令，且不在写事务内。
 ///
 /// 假 Git 每次调用前固定等待 400ms，把「Git 慢」变成可测量的时间线：调用参数说明等待
-/// 发生在哪个阶段（两轮 × 三条命令），到达时刻给出这些等待的真实分布。断言用实测值；
-/// 代码允许的单次上限（5s × 6 次 = 30s）是静态最坏预算，不作为这里的耗时证据。
+/// 发生在哪个阶段（一轮 × 三条命令），到达时刻给出这些等待的真实分布。断言用实测值；
+/// 代码允许的单次上限（5s × 3 次 = 15s）是静态最坏预算，不作为这里的耗时证据。
 ///
 /// 慢响应下准入必须仍然成立（等待远小于单次超时，不能因为慢就失败），代价必须是可测量的
 /// 等待，而不是被写事务挡住其他 writer。
@@ -1558,8 +1663,8 @@ async fn test_worktree_bound_session_validation_probes_once() {
 async fn test_worktree_slow_git_wait_is_measured_per_call_outside_the_write_lock() {
     const SLEEP_MS: u64 = 400;
     const POLL_MS: u64 = 20;
-    /// 一轮观测三条命令，准入两轮。
-    const CALLS: u64 = 6;
+    /// 一轮观测三条命令，准入一轮。
+    const CALLS: u64 = 3;
     let repository = repository();
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("threads.db");
@@ -1624,17 +1729,12 @@ async fn test_worktree_slow_git_wait_is_measured_per_call_outside_the_write_lock
                 .to_owned()
         })
         .collect();
-    assert_eq!(
-        phases,
-        expected.repeat(2),
-        "等待阶段必须对应到具体命令：{timeline:?}",
-    );
+    assert_eq!(phases, expected, "等待阶段必须对应到具体命令：{timeline:?}",);
     assert!(
         timeline.iter().all(|(_, line)| lock_state(line) == "free"),
         "慢 Git 的等待不得落在写事务内：{timeline:?}",
     );
 
-    let waits = Duration::from_millis(SLEEP_MS * CALLS);
     let span = timeline.last().unwrap().0 - timeline[0].0;
     println!(
         "慢 Git 实测：准入总耗时 {measured:?}，首次到末次调用 {span:?}，固定等待 {SLEEP_MS}ms × {CALLS}"
@@ -1642,18 +1742,21 @@ async fn test_worktree_slow_git_wait_is_measured_per_call_outside_the_write_lock
     for (offset, line) in &timeline {
         println!("  {offset:>12.3?}  {line}");
     }
-    assert!(
-        measured >= waits,
-        "实测总耗时 {measured:?} 少于 {CALLS} 次固定等待（{waits:?}）：时间线没有覆盖全部调用",
-    );
+    // 每次调用的额外开销必须远小于单次超时预算：相邻两次调用之间只能有上一次调用的
+    // 固定等待加上很小的开销。子进程启动与数据库打开发生在首次调用之前，不属于任何
+    // 一次调用，因此不参与这条判定（否则用例会把启动耗时当成探测开销）。
+    const OVERHEAD_MS: u64 = 2_000;
+    for window in timeline.windows(2) {
+        let gap = window[1].0 - window[0].0;
+        assert!(
+            gap < Duration::from_millis(SLEEP_MS + OVERHEAD_MS),
+            "相邻调用间隔 {gap:?} 超出固定等待 {SLEEP_MS}ms 加开销上限：{timeline:?}",
+        );
+    }
     // 等待分布的下限：首次到末次之间有 CALLS - 1 段固定等待。
     let floor = Duration::from_millis(SLEEP_MS * (CALLS - 1));
     assert!(
         span >= floor,
         "首次到末次调用只有 {span:?}（下限 {floor:?}），等待没有分布在整条时间线上：{timeline:?}",
-    );
-    assert!(
-        measured < waits + Duration::from_secs(CALLS),
-        "实测总耗时 {measured:?} 超出固定等待（{waits:?}）过多：每次调用的额外开销必须远小于超时预算",
     );
 }

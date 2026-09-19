@@ -19,6 +19,25 @@ impl Drop for StartupRestoreGuard<'_> {
     }
 }
 
+/// 建会话期间的用户可见状态：进入时置位 `SESSION_PREPARING`，离开时清除。
+///
+/// 用 `Drop` 而不是在每个返回分支写清除：`session/new` 的 future 会被直接丢弃
+/// （准备超时、应用关闭、取消），逐分支清理漏掉取消路径会把状态栏留在提示上。
+struct PreparingSessionGuard;
+
+impl PreparingSessionGuard {
+    fn enter() -> Self {
+        crate::kit::atoms::SESSION_PREPARING.set(true);
+        Self
+    }
+}
+
+impl Drop for PreparingSessionGuard {
+    fn drop(&mut self) {
+        crate::kit::atoms::SESSION_PREPARING.set(false);
+    }
+}
+
 /// A dropped transition must also retire the UI target used for load replay.
 /// This guard drops while the operation gate is still held.
 struct SessionProjectionGuard<'a> {
@@ -89,6 +108,9 @@ impl AcpTuiClient {
     ///
     /// Closes the previous session (if any) to release its history, AgentPool,
     /// and FrozenSessionData from the server-side sessions HashMap.
+    ///
+    /// 整段建立过程都对用户可见（`SESSION_PREPARING`）：这段窗口里输入既不在待发送
+    /// 队列、也还没有会话，等待中的输入可能来自提交，也可能来自启动时的那一次。
     pub async fn new_session(&self, cwd: &str, model: Option<&str>) -> Result<String, AcpError> {
         let _operation = self.lifecycle.operation_gate().lock().await;
         self.new_session_under_gate(cwd, model).await
@@ -99,6 +121,7 @@ impl AcpTuiClient {
         cwd: &str,
         model: Option<&str>,
     ) -> Result<String, AcpError> {
+        let _preparing = PreparingSessionGuard::enter();
         *self.restore_error.lock().unwrap() = None;
         self.project_execution_cwd(None);
         let start = self

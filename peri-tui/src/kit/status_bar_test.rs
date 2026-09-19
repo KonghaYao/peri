@@ -16,6 +16,18 @@ fn test_permission_mode_display() {
 }
 
 #[test]
+fn test_preparing_label_only_while_preparing() {
+    // 会话建立期间（用户提交了输入、会话还没建好）在别处没有任何可见投影，
+    // 状态栏必须明确说明正在准备，而不是保持提交前的样子。
+    assert_eq!(
+        preparing_label(true).as_deref(),
+        Some("Preparing session…"),
+        "准备在途时状态栏应显示正在准备会话"
+    );
+    assert_eq!(preparing_label(false), None, "准备结束后不得留下提示");
+}
+
+#[test]
 fn test_permission_mode_color() {
     assert_eq!(
         permission_mode_color("accept-edit"),

@@ -15,6 +15,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 pub(super) struct ExecutionLease {
@@ -102,6 +103,17 @@ impl SessionExecutionLease for ExecutionLease {
     }
 }
 
+/// 执行锁的重试预算与间隔。
+///
+/// `flock` 的锁挂在 open file description 上，而 `fork` 出的子进程共享父进程的描述符
+/// （`CLOEXEC` 只在子进程 `exec` 时才关闭）。会话生命周期里必然有子进程（Git 发现、
+/// `sw_vers`、LSP 等），在子进程 `fork` 到 `exec` 的窗口内，本进程自己重开同一 inode
+/// 会被内核拒绝——锁仍被继承者持有。实测窗口在毫秒级，但子进程何时被调度取决于机器
+/// 负载。没有重试时这些瞬时持有会被误报成 `ExecutionBusy`（「会话已被其他执行宿主占用」），
+/// 把一次正常的取得所有权变成偶发失败；真正的外部持有者会持续持有，预算耗尽后仍按原语义上报。
+const EXECUTION_LOCK_RETRY_BUDGET: Duration = Duration::from_millis(500);
+const EXECUTION_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+
 impl SqliteThreadStore {
     async fn lock_execution(&self, id: &ThreadId) -> Result<File> {
         let safe_id = format!("{:x}", Sha256::digest(id.as_bytes()));
@@ -117,12 +129,19 @@ impl SqliteThreadStore {
                 .read(true)
                 .write(true)
                 .open(path)?;
-            file.try_lock().map_err(|error| match error {
-                std::fs::TryLockError::WouldBlock => {
-                    anyhow::Error::from(WorkspaceError::ExecutionBusy)
+            let deadline = std::time::Instant::now() + EXECUTION_LOCK_RETRY_BUDGET;
+            loop {
+                match file.try_lock() {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(WorkspaceError::ExecutionBusy.into());
+                        }
+                        std::thread::sleep(EXECUTION_LOCK_RETRY_INTERVAL);
+                    }
+                    Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
                 }
-                std::fs::TryLockError::Error(error) => error.into(),
-            })?;
+            }
             Ok(file)
         })
         .await?
@@ -158,7 +177,9 @@ impl SqliteThreadStore {
         if self.read_only {
             return Err(WorkspaceError::ExecutionLeaseRequired.into());
         }
-        self.validate_session_binding_impl(id).await?;
+        // 取得执行所有权是准入的最后一步：绑定已在同一次准入里复核过（解析或
+        // `validate_session_binding`），这里只复核已记录证据，不再重复完整发现。
+        self.reassert_session_binding_impl(id).await?;
         let parent: (Option<String>,) =
             sqlx::query_as("SELECT parent_thread_id FROM threads WHERE id = ?")
                 .bind(id)

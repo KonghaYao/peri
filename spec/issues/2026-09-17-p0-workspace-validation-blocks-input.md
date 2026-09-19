@@ -1,6 +1,6 @@
 # P0：文件系统身份与 Git 探测阻断会话创建与发送
 
-**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分、Git 命令版本兼容、三条路径的探测边界、既有保护链路复核、仓库布局端到端验收、旧版 Git 的 common dir 推导与慢响应实测、慢 Git 的端到端验收、真实旧版 Git 2.4.12 二进制验收（含一处大小写分类缺陷的修复）已于 2026-09-19 完成，验收条件 9 项全部勾选；简化目标第 3、4、5 项仍为部分实施，本 issue 未关闭）
+**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分、Git 命令版本兼容、三条路径的探测边界、既有保护链路复核、仓库布局端到端验收、旧版 Git 的 common dir 推导与慢响应实测、慢 Git 的端到端验收、真实旧版 Git 2.4.12 二进制验收（含一处大小写分类缺陷的修复）、准入内重复完整发现的收敛、绑定执行目录的文本形式统一与会话建立期间的用户可见状态已于 2026-09-19 完成，验收条件 9 项全部勾选；简化目标 3 的重新论证已按代码证据补完、简化目标 5 已给出按「新会话语义」收口的处置建议，两项的收口本身仍需产品决策，本 issue 未关闭）
 **优先级**：P0（用户指定；2026-09-19 依据本机确证由 P1 升级）
 **类型**：可用性缺陷 / 设计简化
 **创建日期**：2026-09-17
@@ -94,7 +94,7 @@ done
 | 事实 | 代码入口与证据 | 用户影响 |
 | --- | --- | --- |
 | 首次建会话先登记完整工作区身份 | `peri-acp/src/host/requests/session_lifecycle.rs::handle_new` 先 `resolve_workspace`，再 `create_bound_thread`、取得 lease 和验证 cwd | 发送第一句话前就必须通过 FS / Git / SQLite 登记链路 |
-| **目录登记模式变化后两个查询不再对称** | `resolve_workspace_impl` 的 `projects` 按 `locator OR object_identity` 匹配，`workspaces` 按 `root OR root_identity` 匹配；「目录 ↔ 仓库」转换时前者改值、后者不变 | 普通目录 `git init`（或仓库移除 `.git`）后，该目录每次建会话都返回 `NeedsRelink`，且无恢复入口；2026-09-19 本机实测确认。**已修复**（`ff3a1391`：同一目录对象的布局变化复用原登记，见「修复记录」） |
+| **目录登记模式变化后两个查询不再对称** | 当时 `resolve_workspace_impl` 的两个查询各按 `locator OR object_identity`、`root OR root_identity` 匹配（现已改为两者同时命中的组合键）：「目录 ↔ 仓库」转换时前者改值、后者不变 | 普通目录 `git init`（或仓库移除 `.git`）后，该目录每次建会话都返回 `NeedsRelink`，且无恢复入口；2026-09-19 本机实测确认。**已修复**（`ff3a1391`：同一目录对象的布局变化复用原登记，见「修复记录」） |
 | 普通目录也依赖 Git 可执行文件 | `peri-resources/src/sessions/sqlite_store/discovery.rs::discover` 先调用 `git rev-parse --is-inside-work-tree`；`git` 的 spawn 失败直接返回错误 | 未安装 Git 的精简 Linux / 容器不能建立普通目录会话。**已修复**（`7d59a7b9`：spawn 返回 `NotFound` 时降级为目录模式并记 `git_answered=false`；端到端见「修复记录」第 2 条） |
 | Git 发现依赖一组命令和输出约定 | `discover` 曾使用 `--path-format=absolute`（上游文档记为 Git 2.31 引入）、`--absolute-git-dir`（2.13）与 `worktree list --porcelain -z`，并按特定英文 stderr 前缀识别非仓库 | Git 版本、权限或命令行为差异可能成为普通会话阻塞。**已部分修复**（2026-09-19：不再使用版本相关选项，相对输出按 cwd 还原，`worktree list` 不支持 `-z` 时退回换行分隔，见「修复记录」第 7 条；真实旧版 Git 2.4.12 二进制已实测——四种目录组合均可建会话，但实测暴露出一处大小写敏感的分类缺陷并已修复，见第 13 条；2.4.12 之前的版本未测） |
 | 相同解析重复完整发现 | `workspace.rs::resolve_workspace_impl` 先 `discover`，又在 `BEGIN IMMEDIATE` 内 `Discovery::revalidate`；后者再次 `discover` | 成功路径执行两轮发现，每轮最多五类 Git 命令，失败分支会提前返回；写事务持有期间仍等待外部进程。放大慢盘 / 慢 Git 对同库写入的影响，具体延迟未测量。**已修复**（2026-09-19：事务内只复核关键文件对象，写事务外才做完整快照复核；一次准入的 Git 调用由两轮各 5 条降为两轮各 3 条，见「修复记录」第 3 条） |
@@ -118,21 +118,76 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 1. **拆开基本目录执行与 Git 增强能力。** 定义无 Git、旧 Git、Git 拒绝读取时的普通目录使用行为；不能把所有探测错误悄悄解释成「不是仓库」，造成历史归属变化。
 2. **把 Git 布局变化当作正常演进。** 同一目录对象的 `git init` / 移除 `.git` 不应使该目录失去可用性；项目身份演进需要可预期地迁移或并存，而不是硬拒绝。
-3. **重新论证并削减 inode / file ID 的持久化与硬拒绝。** 以用户可理解的保存目录、显式选择和恢复行为验收；不再为了维持现有实现而不断扩展平台身份探测。（部分实施：登记键与绑定复核仍使用文件对象证据，但「同一路径只允许一个登记」的硬拒绝已解除，见「修复记录」第 4 条；持久化主路径是否继续携带 inode 仍未重新论证）
-4. **限制外部探测成本。** 避免在 SQLite 写事务中运行完整 Git 发现；减少同一次准入的重复检查，给准备阶段独立、可取消的期限与可见状态。（调用位置与次数已收敛，见「修复记录」第 3 条；准备阶段已有独立期限并可被应用关闭取消，见第 6 条；准备期间的用户可见状态仍未提供）
-5. **提供可完成的恢复操作。** 遇到目录变化应说明影响，并提供实际可达的恢复 / 选择路径；不能只提示一个没有产品入口的「显式重关联」。优先比较简化后的目录选择与明确新会话语义，不预设必须再增加一整套保留所有 ID 的重关联框架。（部分实施：当前可访问目录按新会话语义得到新登记，用户可继续工作，见「修复记录」第 4 条；绑定失败文案已改为指出该前进路径、输入路径已复述失败原因，见第 5 条；把已有会话改指到新位置的入口仍未提供）
+3. **重新论证并削减 inode / file ID 的持久化与硬拒绝。** 以用户可理解的保存目录、显式选择和恢复行为验收；不再为了维持现有实现而不断扩展平台身份探测。（部分实施：登记键与绑定复核仍使用文件对象证据，但「同一路径只允许一个登记」的硬拒绝已解除，见「修复记录」第 4 条；持久化主路径是否继续携带这份证据已按代码证据重新论证，见下文「简化目标 3 与 5 的重新论证」，结论是保留但限制用途、不扩展平台探测——收口仍需产品决策）
+4. **限制外部探测成本。** 避免在 SQLite 写事务中运行完整 Git 发现；减少同一次准入的重复检查，给准备阶段独立、可取消的期限与可见状态。（调用位置与次数已收敛，见「修复记录」第 3 条；一次准入至多执行一次完整发现、准入内其余检查只复核已记录证据，见第 14 条，且跨层门禁断言窗口内至多一轮发现；同一个目录不再因文本形式不同被重复解析，见第 15 条；准备阶段已有独立期限并可被应用关闭取消，见第 6 条；准备期间的用户可见状态已实施，见第 16 条——会话建立全程状态栏显示「正在准备会话」，端到端实测该提示可见 1019ms（注入等待每次 300ms 的一轮发现），建立结束即消失。第 15 条实测里「提交后前 10 秒保持不变」的那段窗口就是这次建立本身：等待中的输入与启动期的建立共用同一次状态，不再是一段没有反馈的等待）
+5. **提供可完成的恢复操作。** 遇到目录变化应说明影响，并提供实际可达的恢复 / 选择路径；不能只提示一个没有产品入口的「显式重关联」。优先比较简化后的目录选择与明确新会话语义，不预设必须再增加一整套保留所有 ID 的重关联框架。（部分实施：当前可访问目录按新会话语义得到新登记，用户可继续工作，见「修复记录」第 4 条；绑定失败文案已改为指出该前进路径、输入路径已复述失败原因，见第 5 条；把已有会话改指到新位置的入口仍未提供——按下文「简化目标 3 与 5 的重新论证」的建议，该项按「已由新会话语义解决」收口，不补重定位框架，收口本身待产品决策）
 6. **保留必要的数据与执行契约。** 历史可读、执行 cwd 明确、不同工作区的配置和权限不串用、同一会话不被两个 owner 并发执行、取消后资源正确收尾。这些要求不因简化文件身份识别而自动取消。
 
 涉及现行 `ARC-WORKSPACE-001` 和 [工作区身份设计](../../docs/design/session-workspace-identity.md) 的调整，应在实施时同步事实源。本报告是变更需求与检查证据，不直接改写现行设计为已实现的新保证。
+
+## 简化目标 3 与 5 的重新论证（2026-09-19，按代码证据，未改代码）
+
+简化目标 3 要求「重新论证并削减 inode / file ID 的持久化与硬拒绝」，简化目标 5
+要求「提供可完成的恢复操作」。第 4、5 条已经把硬拒绝改成可继续工作的新登记，把
+失败文案指向前进路径；本节回答剩下两个问题：这份文件对象证据现在还值不值得留在
+持久化主路径上，以及目录变化后用户能不能走完一条路。
+
+### 证据用在哪些地方（代码事实）
+
+| 位置 | 用途 | 不一致时的用户可见结果 |
+| --- | --- | --- |
+| `workspaces` 登记键 `(root, root_identity)`、`projects` 复用键 `(locator, object_identity)`（`workspace.rs::resolve_workspace_impl`） | 区分「同一路径上的新目录对象」与「同一对象的新路径」 | 都不命中已登记行 → 按实际打开的目录建新登记；已有会话继续按各自证据复核（第 4 条） |
+| `Discovery::reassert_key_objects`（写事务内与准入内的复核，`discovery.rs:556`） | 提交前 / 执行前确认 root 与 Git common / private 目录仍是登记时的对象 | `NeedsRelink`：该会话不能在当前目录继续执行，历史仍可读，用户在当前目录建新会话即可继续 |
+| `discovery.rs::object_identity`（发现的一部分） | 取对象证据本身 | 非 Unix / 非 Windows 目标返回 `Unsupported`、元数据不可读返回 `Unavailable`，两者都建不了会话（当前发布目标均在覆盖范围内） |
+
+### 论证
+
+1. **这份证据只回答「同一路径上的两个时刻是不是同一个目录对象」，没有第二用途。**
+   去掉它，登记键就退回路径：`rm -rf` 后重建的同名目录会被当成原对象，旧会话会
+   安静地在另一棵文件树上继续执行——这正是设计禁止的静默改绑，也与「历史归属
+   可解释」冲突。保留它，代价只是「同路径的新对象得到一条新登记」，用户仍然能
+   在打开的目录里工作。
+2. **第 4 条已经把这份证据从「硬拒绝」改成「新登记」。** 布局变化（`git init` /
+   移除 `.git`）不再触发拒绝，对象替换与换位得到新登记；仍会拒绝的只剩「用已有
+   会话在已变化的目录上继续执行」，以及「Git 不可用时无法证明的布局变化」。
+   前者是简化目标 6 的直接体现（执行 cwd 明确、不同工作区不串用），不是可省掉的
+   门槛；后者是第 2 条特意保留的失败关闭方向。
+3. **不再扩展探测面。** 现有实现只比较同一路径上两个时刻的对象，不用 inode 证明
+   复制、重建或历史路径复用（设计 §3.2 已写死这条边界）。本轮没有新增任何平台
+   探测，后续也不应为兼容更多文件系统而扩展它。
+4. **已知代价（未实测，不宣称已解决）**：网络文件系统或容器覆盖层上对象证据可能
+   不稳定。登记边界上不稳定只会多出一条登记，无功能损失；运行时复核不稳定会得到
+   `NeedsRelink`，即与「目录被替换」相同的用户可见结果——路径依然可达（在当前
+   目录建新会话）。这是本模型的代价，记录在此，不实测不结论。
+5. **简化目标 5 的处置建议：按「新会话语义」收口，本轮不建重定位框架。** 设计
+   §5.4 已把「初始交付不提供重定位 / 重关联」写成决定：产品给的是「历史保持可读
+   ＋ 在当前可访问目录建新会话」，而这条路径在同一窗口可达——`/clear` 就是
+   `submit_consumer.rs::handle_clear_submit` 里无条件的新会话，失败提示也已复述
+   服务端原因并指出该前进路径（第 5 条）。本 issue 的简化目标 5 原文同样把这条
+   列为首选（「优先比较简化后的目录选择与明确新会话语义，不预设必须再增加一整套
+   保留所有 ID 的重关联框架」）。因此建议：把该项按「已由新会话语义解决」收口，
+   而不是补一个重定位入口；若要保留 `WorkspaceId` 做身份迁移，属于设计 §5.4 末尾
+   写明的后续工作，不在本 issue 范围。
+
+### 需要用户决策的两点
+
+1. **运行时复核是否继续使用文件对象证据。** 保留＝现状：目录被替换后旧会话只能在
+   原目录可用，用户走新会话；去掉＝同一路径上的任意目录都被当作原会话的执行目录，
+   历史绑定会随路径静默漂移。**建议保留**，理由是第 2 条。
+2. **是否在提示里点名可达操作。** 现行协议层文案是
+   `session directory changed; this session cannot continue here: start a new
+   session in the current directory`，没有点名 `/clear`——协议错误文案不适合宣称
+   某个 TUI 命令。若要点名，应加在 TUI 的 `steer-session-unavailable` 文案上，
+   属产品文案决策，本轮未改。
 
 ## 验收条件
 
 - [x] 普通目录登记后执行 `git init`（以及已登记仓库移除 `.git`）仍能创建会话并发送输入；历史绑定不被静默改绑或隐藏。（2026-09-19 修复，见「修复记录」）
 - [x] 无 Git 的普通目录能新建会话并成功发送一次输入；无重复入队，草稿状态正确。（2026-09-19 修复，见「修复记录」第 2 条）
-- [x] 新会话、已有会话、历史只读访问分别验证，不让 Git 或目录身份检查不必要地传播到其他能力。（2026-09-19：新会话见「修复记录」第 3 条的调用次数与持锁状态；已有会话与历史只读访问见第 9 条——复核恰好一轮观测且全部在写事务外，列表 / 消息 / frozen / 绑定在读路径上 0 次 Git 调用，登记目录删除后仍可读）
+- [x] 新会话、已有会话、历史只读访问分别验证，不让 Git 或目录身份检查不必要地传播到其他能力。（2026-09-19：新会话见「修复记录」第 3 条的调用次数与持锁状态，计数已由第 14 条收敛为一轮完整发现；已有会话与历史只读访问见第 9 条——复核恰好一轮观测且全部在写事务外，列表 / 消息 / frozen / 绑定在读路径上 0 次 Git 调用，登记目录删除后仍可读）
 - [x] 目录移动、备份恢复 / 文件对象变化、普通目录执行 `git init`、Git 管理目录变化有明确且可完成的用户操作；历史不被静默改绑或隐藏。（2026-09-19 修复，见「修复记录」第 4 条：搬迁与同路径替换各有单元测试，搬迁另有真实 TUI 端到端用例；备份恢复按「同路径新对象」路径覆盖，未单独实测）
 - [x] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。（2026-09-19：新增真实 TUI 用例 `e2e/tests/scenarios/workspace-worktree-layouts.test.ts` 覆盖子目录 / linked worktree / 独立 clone 三种布局的执行目录与项目归属，见「修复记录」第 10 条；主仓库与 symlink 由 resources 单元测试 `test_worktree_main_linked_subdirectory_and_clone_identity`、`test_worktree_symlink_discovery_reuses_identity_but_binding_escape_is_rejected` 覆盖——进程 cwd 由 `getcwd` 给出物理路径，TUI 层看不到符号链接代理，该场景无法在 TUI 层观测）
-- [x] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。（缺失见「修复记录」第 2 条端到端；权限拒绝与调用次数见第 3 条假 Git 判别用例——目录模式 2 次、仓库模式 6 次、已有会话复核 3 次，全部在写事务外；旧版本见第 11 条（假 Git 拒绝新选项）与第 13 条（真实 Git 2.4.12 二进制：仓库、普通目录、子目录与现代 Git 建的 linked worktree 四种组合均可建会话，并修掉实测暴露的大小写分类缺陷）；慢响应为实测时间线——假 Git 每次调用固定等待 400ms 时准入总耗时 2.938s、首次到末次调用 2.148s、6 次调用全部记录为写锁空闲，挂起 Git 实测 5.003s 后以类型化超时错误结束。30s = 6 次 × 5s 是静态上限，不是实测耗时；同一条链路在真实 TUI 上的慢 Git 实测见第 12 条——输入到回复 2.489s、窗口内 6 次发现调用、无重复入队）
+- [x] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。（缺失见「修复记录」第 2 条端到端；权限拒绝与调用次数见第 3 条假 Git 判别用例——当时的计数是目录模式 2 轮、仓库模式 6 次 Git 调用、已有会话复核 2 轮，全部在写事务外，现行为第 14 条收敛后的目录模式 1 轮、仓库模式 3 次、已有会话 1 轮；旧版本见第 11 条（假 Git 拒绝新选项）与第 13 条（真实 Git 2.4.12 二进制：仓库、普通目录、子目录与现代 Git 建的 linked worktree 四种组合均可建会话，并修掉实测暴露的大小写分类缺陷）；慢响应为实测时间线——假 Git 每次调用固定等待 400ms 时准入总耗时 2.938s、首次到末次调用 2.148s、6 次调用全部记录为写锁空闲，挂起 Git 实测 5.003s 后以类型化超时错误结束。30s = 6 次 × 5s 是第 14 条之前的静态上限（现为 15s），不是实测耗时；同一条链路在真实 TUI 上的慢 Git 实测见第 12 条——输入到回复 2.489s、窗口内 6 次发现调用、无重复入队，第 14 条后同一用例的窗口内调用降到 3 次、输入到回复 1550ms）
 - [x] 事务内没有无界或重复的外部探测；慢准备、取消和超时不造成输入丢失或重复执行。（前半见「修复记录」第 3 条；后半见第 6 条：慢准备仍被受理且只入队一次、准备超时恢复原稿且不发送入队请求、准备期间取消不产生投递，均为 consumer 级回归；回执超时的「未知结果按同身份重试」沿用既有用例 `test_steer_uncertain_receipt_retries_identical_command_and_input`）
 - [x] 身份模型调整保留已有消息、frozen snapshot、绑定关系和执行状态；冲突处理可理解、可恢复。（「可理解」2026-09-19 实施：绑定失败文案指出可完成的下一步，输入路径复述服务端原因而非表述为输入被拒，见「修复记录」第 5 条；「可恢复」按第 4 条的新会话语义覆盖；保留性证据见第 8 条：schema 4→5 迁移前后逐字节比对绑定 / 执行状态与线程行 / 消息，并对 frozen snapshot 做存储层读取。把已有会话改指到新位置的入口仍未提供，属设计 §5.4 的明确限制）
 - [x] 简化后继续通过错误 cwd、配置/权限隔离、跨进程 owner 竞争及 dirty 状态保护测试。（2026-09-19 复核：错误 cwd 见 `legacy_adoption_rejects_changed_cwd_child_and_lost_native_binding`；配置 / 权限隔离见 `worktree_new_resources_use_the_target_directory`、`worktree_scheduled_approval_uses_session_permission_and_rejects_closed_owner`、`test_update_config_refreshes_existing_owner_environments`；跨进程 owner 竞争见 `test_worktree_execution_competes_across_processes_and_crash_remains_dirty`、`test_worktree_execution_child_process`；dirty 保护见 `test_worktree_dirty_reset_held_stale_and_exact_generation`、`test_worktree_cancelled_mutation_remains_dirty_and_cannot_publish_clean`、`test_worktree_clean_waits_for_admitted_mutation_before_releasing_os_ownership` 及 ACP 侧 `test_workspace_dirty_recovery_original_load_and_frozen`、`test_dirty_reset_then_failing_reload_keeps_store_state_and_original_id`、`test_dirty_reset_without_initialize_is_rejected_without_store_effect`。全量 `cargo test -p peri-resources --lib` 138 项、`cargo test -p peri-acp --lib` 678 项通过）
@@ -176,6 +231,10 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 | 2026-09-19 | — | Open（部分修复） | agent | 旧版 Git 的 common dir 改为读 `commondir` 文件推导（不再请求 Git 2.5 引入的 `--git-common-dir`），未知选项回显按不兼容处理，`worktree` 子命令缺失时只跳过交叉核对；慢 Git 实测等待时间线与单次超时边界，勾选验收条件第 6 项——验收条件 9 项至此全部勾选（见「修复记录」第 11 条） |
 | 2026-09-19 | — | Open（部分修复） | agent | 慢 Git 补端到端验收：真实 TUI / ACP 路径上每次 Git 调用固定等待 300ms，输入到回复 2.489s、6 次发现调用、无重复入队，观测仍为仓库模式（见「修复记录」第 12 条，生产代码未变） |
 | 2026-09-19 | — | Open（部分修复） | agent | 真实旧版 Git 2.4.12 二进制验收：仓库、普通目录、子目录与现代 Git 建的 linked worktree 均可建会话；实测暴露大小写敏感的分类缺陷（旧版 `fatal: Not a git repository…` 被判成类型化发现错误，普通目录在那个版本上完全建不了会话），已修复并补回归用例，真实二进制变异检验通过（见「修复记录」第 13 条） |
+| 2026-09-19 | — | Open（部分修复） | agent | 准入内不再重复完整发现：新增 `reassert_session_binding` / `BindingCheck::Recorded` / `expect_directory`，一次准入至多一次完整发现（`session/new` 6 轮 → 1 轮，慢 Git 端到端窗口内发现调用 6 → 3、输入到回复 2489ms → 1550ms），跨层用例加上限断言（见「修复记录」第 14 条） |
+| 2026-09-19 | — | Open（部分修复） | agent | 绑定复核的执行目录改为 `binding_cwd`，与登记解析返回同一文本形式：同一个目录不再因 `join("")` 产生的尾分隔符被当成换了目录重复解析（新增文本形式断言，变异检验通过；见「修复记录」第 15 条） |
+| 2026-09-19 | — | Open（部分修复） | agent | 补上会话建立期间的用户可见状态：`new_session_under_gate` 全程置位 `SESSION_PREPARING`、`Drop` 清除，状态栏显示「正在准备会话」，建立结束即消失；端到端实测提示可见 1019ms，两处变异检验（不置位 / 不清除）在单元与 e2e 两层都被抓到（见「修复记录」第 16 条） |
+| 2026-09-19 | — | Open（部分修复） | agent | 按代码证据完成简化目标 3 的重新论证，并给出简化目标 5 按「新会话语义」收口的处置建议；同时把验收条件 3 / 6 与第 9 条里已被第 14 条取代的调用计数同步为现行值（本轮未改代码，「简化目标 3、5」的收口仍需产品决策） |
 
 ## 修复记录
 
@@ -453,7 +512,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 **遗留**：
 
-- 「新会话」的调用次数证据沿用第 3 条（目录模式 2 次 / 仓库模式 6 次），本条未重复测量。
+- 「新会话」的调用次数证据沿用当时第 3 条的计数（目录模式 2 轮 / 仓库模式 6 次 Git 调用），本条未重复测量；第 14 条把一次准入收敛为一轮后，现行计数是目录模式 1 轮、仓库模式 3 次。
 - 旧版 Git、权限拒绝与慢响应当时仍未实测，「等待阶段」只有持锁状态这一项证据；慢响应与等待阶段已由第 11 条补上。
 
 ### 2026-09-19：仓库布局的端到端验收（第 10 条，生产代码未变）
@@ -596,3 +655,115 @@ make NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_CURL=1 NO_EXPAT=1 \
 ```
 
 **事实源同步**：[兼容性待办](2026-09-17-platform-compatibility.md)「Git 是普通目录启动的隐式依赖」与「旧 Git 命令能力未覆盖」两条（前者在本次核对时已与现行实现不符，一并更正）；[工作区身份设计](../../docs/design/session-workspace-identity.md) §3.1 补一句「不是仓库」的判定按 stderr 前缀忽略大小写，以及放宽范围止于大小写。`docs/code-index/peri-resources.md` 的工作区身份行只登记入口函数（`resolve_workspace` 等）与整体契约，分类实现是 helper 级细节，该行未涉及、本次未改。
+
+### 2026-09-19：准入内不再重复完整发现（第 14 条）
+
+**范围**：只处理「同一次准入的重复完整发现」。第 3 条把探测移出写事务后，一次准入仍会按环节重复跑完整发现（每轮三条 Git 命令）：计数来自临时插桩实测——`session/new` 6 轮（18 次调用）、`session/load` / `resume` 约 4 轮、prompt 轮 2 轮、`session/fork` 2 轮完全相同的复核。不改变身份模型、登记键、绑定校验强度与失败关闭语义；简化目标第 3、5 项与第 4 项的准备期可见状态仍未实施。
+
+**根因**：准入链路上每个环节各自做一次「权威复核」，而每次权威复核都重新执行完整 Git 发现。这些环节判定的是同一件事（本会话的执行目录仍是登记时那个目录），却把 Git 的等待逐次叠加到同一次准入上；慢 Git / 慢盘下用户看到的就是「准备很久」。
+
+**改动**（准入级规则：**一次准入至多一次完整发现**，准入内其余检查只复核已记录证据——SQL 关系加关键文件对象，不启动外部进程）：
+
+- `peri-acp-types/src/store.rs`：新增 `reassert_session_binding`（默认 `Unsupported`），与 `validate_session_binding` 并列；文档写明后者是**准入级动作**、一次准入只应调用一次。
+- `peri-resources/src/sessions/sqlite_store/workspace.rs`：新增 `reassert_session_binding_impl`（只走 `validate_session_binding_on`）；`create_bound_thread_impl` 不再为子线程重跑完整发现（比对的是已记录的父绑定）；`execution.rs::acquire_execution_lease_impl` 的先行复核改用 `reassert_session_binding_impl`。
+- `peri-acp/src/host/workspace.rs`：新增 `BindingCheck::{Full, Recorded}`；`validate_expected`（准入入口）与 `reassert_expected`（同一次准入内）分派到两个 store 方法；新增 `expect_directory`——用 `canonicalize` 比对调用方给出的目录，不再为比较去解析登记（那会多跑一轮完整发现并顺手登记一个与本次执行无关的目录）；`acquire_for_load_with` 取得所有权后的第二次复核改为 `Recorded`；`finish_session_end` 与协议读请求保持 `Full`。
+- 调用点：`requests/session_lifecycle.rs`（`handle_new` 以 `resolve_workspace` 为本次准入的唯一发现；响应装配 `admission_identity` 用 `Recorded`；`handle_fork` 第二次取得用 `reacquire_for_load`）、`requests/legacy_session.rs`（期望目录比对改走 `expect_directory`）、`host/prompt_dispatch.rs`（等锁前的先行检查 `Recorded`，取得 prompt 锁后的权威检查 `Full`）、`host/continuation.rs`（派发前先行检查 `Recorded`）。
+
+**验证证据**：
+
+| 验证 | 结果 |
+| --- | --- |
+| `test_worktree_registration_probes_filesystem_outside_write_lock` | 目录模式一次准入的观测轮次 2 → **1** |
+| `test_worktree_repository_registration_keeps_git_calls_bounded` | 仓库模式一次准入的 Git 调用 6 → **3** |
+| `test_worktree_bound_session_validation_probes_once` | 已有会话的准入复核 6 → **3** |
+| `test_worktree_slow_git_wait_is_measured_per_call_outside_the_write_lock` | 常量 6 → 3；总耗时断言改为「逐次调用的间隔 ≤ 注入等待 + 2s 开销」加跨度下界，起进程时间不再计入单次判定 |
+| `cargo test -p peri-resources --lib` | 145 项通过（含第 15 条新增用例） |
+| `cargo test -p peri-acp --lib` / `cargo test -p peri-acp-types --lib` | 678 项 / 423 项通过 |
+| `cargo clippy -p peri-resources -p peri-acp -p peri-acp-types --all-targets`、`cargo fmt --all` | 无告警、无格式差异 |
+| E2E `workspace-slow-git` | `run-2026-09-19T07-51-47` 1/1 通过：窗口内发现调用 6 → **3**（正好一轮三条命令），输入到回复 2489ms → **1550ms**（注入等待每次 300ms）；用例新增上限断言「一次准入至多一轮发现」，把「不得为同一个目录重复解析」变成跨层门禁 |
+
+**遗留**：
+
+- 「哪个调用点用 `Full`、哪个用 `Recorded`」没有 ACP 层单元测试：`peri-acp` 测试没有 Git 假脚本基础设施，跨 crate 计数不划算，因此这条判断由跨层 e2e 的轮次上限守住（单进程单元测试不能代表准入时序，见 [testing](../../docs/standards/testing.md)）。
+- subagent 派生路径（`peri-agent` spawn 时调 `validate_session_binding`）保持原样：一次派生一次发现，未纳入准入级去重。
+- 临时插桩（`PERI_DIAG_DISCOVERY` 回溯、ACP 请求耗时日志、TUI `session_context` 耗时日志）与临时观测用例在取证完成后已删除，不进仓库。
+
+### 2026-09-19：绑定复核的执行目录文本形式与登记一致（第 15 条）
+
+**范围**：修掉「同一个目录两种文本形式」导致的重复解析。不改变目录身份证据、绑定关系与失败关闭语义。
+
+**根因**：`validate_session_binding_on` 用 `root.join(&binding.cwd_relative_to_workspace)` 还原执行目录，而 `join("")` 会追加分隔符——工作区根的绑定还原出 `/a/b/`，`resolve_workspace` 解析出的是 `/a/b`。`Path` 比较看不出差别（既有测试因此一直是绿的），但按字符串比较目录的调用方会把它当成换了目录：TUI 的线程列表按目录缓存 `ResolvedWorkspace`（`SlowSnapshotRefresh::list_workspace`），`session/new` 的响应投影（`project_execution_cwd` → `ACTIVE_EXECUTION_CWD`）带回 `…/slow-repository/` 后与启动时的 `…/slow-repository` 不等，缓存被清空并重新发起一次 `peri/session_context`（by cwd）——同一个目录在同一次准备窗口里被解析两遍。
+
+**实测证据**（临时用例，每次 Git 调用固定等待 2s，已删）：提交「PREPARE_OBSERVATION_INPUT」到回复共 **16.4s**、窗口内 Git 调用 14 次；临时插桩记录 4 次完整发现，其中两次 `resolve_workspace_impl` 的 `cwd` 分别打印为 `…/slow-repository` 与 `…/slow-repository/`，后者所在的线程列表刷新日志是 `refresh_threads needs_probe=true`——即缓存因文本形式变化被清空。
+
+**改动**（`peri-resources/src/sessions/sqlite_store/workspace.rs`）：新增 `binding_cwd(root, relative)`——相对路径为空时返回工作区根本身，否则 `root.join(relative)`；绑定复核、`list_scoped_threads_impl` 的执行目录投影与 `validate_resolved_on` 的不变量检查统一走它。
+
+**验证证据**：
+
+| 验证 | 结果 |
+| --- | --- |
+| `test_worktree_binding_cwd_text_matches_registration_without_trailing_separator`（新增） | 工作区根与子目录各建一个绑定，`validate_session_binding` / `reassert_session_binding` 返回的执行目录文本必须与 `resolve_workspace` 一致（`Path` 相等不够——断言的是 `to_str()`）；修复前失败于 `/…/.tmpvbgrer/` 与 `/…/.tmpvbgrer` |
+| 变异检验 | 把 `binding_cwd` 退回无条件 `root.join(relative)`：新用例失败（上一条的左值），恢复后通过 |
+| `cargo test -p peri-resources --lib` | 145 项通过（该计数为测量当时的值；第 14 条之后合入的 `02ad6a7b` 又新增一条旧版文案用例，现为 146 项） |
+
+**遗留**：TUI 侧仍按字符串比较目录（`cwd != slow.list_cwd` 时清缓存）；本轮把生产方的文本形式统一，没有把调用方的比较改成路径比较。（本轮实测里「提交后前 10 秒状态栏没有反馈」的准备期可见状态已由第 16 条实施。）
+
+### 2026-09-19：会话建立期间的用户可见状态（第 16 条）
+
+**范围**：只补「准备期间没有任何可见状态」。不改变准备期限、失败恢复语义，也不改准入链路本身。
+
+**根因**：会话建立（工作区发现 + `session/new` + 初次快照）期间，用户的输入既不在待发送队列（还没入队）、也还没有发出请求（还没到 enqueue），因此队列面板与消息区都投影不到它，状态栏也保持不变——第 15 条的实测里这段窗口超过 10 秒，第 11 秒才因执行目录投影被清空而显示为 `Initializing…`，两段都不是「正在准备」。慢 Git / 慢盘会把这段窗口拉得更长，而这正是用户最需要知道「在推进」的时候。
+
+**为什么放在 client 而不是输入端**：建立由启动期的 `ensure_session` 发起（`kit/entry.rs:442` 的 spawn），首次输入只是等待同一次建立——`ensure_session` 在 operation gate 上排队，等的是正在建立的那个 future。把状态放在消费者一侧会漏掉「还没有输入」的启动窗口，而在会话已存在时又会给出瞬时假状态；放在建立过程本身，则无论建立由谁发起（启动、首次输入、`/clear`、切换模型）都恰好覆盖，等待方也不必自己再投影一次。
+
+**改动**：
+
+- `peri-tui/src/acp_client/client/session.rs`：新增 `PreparingSessionGuard`——进入置位、`Drop` 清除，在 `new_session_under_gate` 开头进入，覆盖整段建立过程（含关闭旧会话、`session/new`、初次快照）。选 `Drop` 而非逐分支清理：`session/new` 的 future 会被准备超时与应用关闭直接丢弃，逐分支清理会漏掉取消路径，把提示留在状态栏上。
+- `peri-tui/src/kit/atoms.rs`：新增 `SESSION_PREPARING`（默认 false）；`src/kit/status_bar.rs`：`StatusBarRow1` 订阅它，`preparing_label` 只在置位时向该行追加一段（`loading` 色），不改动其余段落与折行规则；双语 `locales/*/main.ftl` 新增 `statusbar-preparing`（`Preparing session…` / `正在准备会话…`）。
+- `peri-tui/src/kit/steer_consumer.rs`：注释写明可见状态由 client 拥有，消费者不重复投影。
+- `docs/design/user-input-queue.md`（准备阶段段落）与 `docs/code-index/peri-tui.md`（会话建立期间的用户可见状态行、StatusBar 组件行、ACP client 索引）同步事实源。
+
+**验证证据**（`cargo test -p peri-tui --lib` 1640 项、`cargo fmt --all -- --check`、`cargo clippy -p peri-tui --all-targets -- -D warnings` 均通过）：
+
+| 验证 | 结果 |
+| --- | --- |
+| E2E `tests/scenarios/workspace-slow-git.test.ts` | 状态栏提示自启动后 **2134ms** 起可见 **1019ms**（注入等待每次 300ms 的一轮发现），建立结束即消失；实测值取自用例自身的轮询，并用「可见时长 ≥ 注入等待」作为下限断言，避免把「恰好抓到一帧」当成证据；终屏断言会话可用后不再含该提示 |
+| E2E 单用例跑批 | `run-2026-09-19T09-07-17` 1/1 通过（13s），首轮无失败 |
+| E2E 全量 L0（`--tier l0 --no-interactive`） | `run-2026-09-19T09-08-06` 11/11 通过（5m47s，串行、无重试，flake 预算 0）——状态栏新增的这一段没有影响任何既有用例的首屏文案断言 |
+| 单元回归（`kit::steer_consumer`，9 项） | 建立请求发出时已置位；入队前已清除；准备超时清除；应用关闭丢弃准备中的 future 后清除 |
+| 变异检验：`new_session_under_gate` 不置位 | 单元 2 例失败（"会话建立请求发出后，准备阶段必须对用户可见"）；e2e 失败于 `Text "Preparing session" not found` |
+| 变异检验：`Drop` 不清除 | 单元 3 例失败（超时/取消/入队后仍置位）；e2e 失败于「准备提示在会话建立后仍然可见」 |
+
+**遗留**：
+
+- 会话 **load**（`session/load`、启动恢复的 load）不置位该状态：切换由面板或弹窗发起，那些界面本身可见；被 load 挡住的输入仍只有既有的 loading 投影。是否统一两种「会话尚未可用」的窗口未决。
+- 状态只是进程内 atom：headless / print 路径不渲染，也不受影响；e2e 只在 TUI 上观测。
+
+### 2026-09-19：P1 旧库漏迁移登记键，误标版本 5 后持续阻断目录登记
+
+**本项状态：Fixed（自动验证与独立业务复核通过）**。本 issue 的其他待办与整体验收状态不变。
+
+| 日期 | 原状态 | 新状态 | 操作人 | 说明 |
+| --- | --- | --- | --- | --- |
+| 2026-09-19 | Open | Fixed | agent | 补齐 schema 2/3 直升及已误标 5 的登记键迁移；正常库与受影响库统一升级到 6 |
+
+**复现**：schema 2/3 仅完成身份载荷转换就被标成 5，跳过原先只对 4 执行的组合键迁移。
+关闭并重开后，移动已登记目录再建会话仍报 `UNIQUE constraint failed: projects.object_identity`；
+版本号已经是 5，后续开库无法补迁移。独立临时数据库复现中 2/3 失败、4 对照成功。
+
+**修复**：`schema.rs` 将 2–5 全部迁移到 6；2/3 先完成既有 revision / 身份载荷转换，
+再与 4/5 一样在同一事务重建登记表。健康 5 和误标 5 均执行一次，之后重开不再重建。
+逐行保留 ID、binding、历史/frozen 和 execution generation/dirty，不扫描旧目录，
+不把旧会话重绑到新目录；外键引用损坏时整次回滚，保留旧版本与全部数据。
+
+**验证**：
+
+- 新增回归修复前：2/3/误标 5 均在移动目录时命中唯一约束错误；4 只在目标版本 6 的断言失败。
+- `cargo test -p peri-resources --lib`：152 passed，0 failed。新增六项覆盖 2/3/4/误标 5
+  升级后跨关闭/重开，在移动目录和原位置的新目录分别新建会话并取得执行 lease；
+  旧绑定保持且拒绝在替换目录执行；健康 5 的两类组合登记完整保留；损坏引用完整回滚。
+- `cargo build --workspace`：通过（macOS 链接器提示现有 unwind 表过大，不影响退出状态）。
+- 独立 subagent 仅复核业务合理性：通过，未发现 P0/P1 业务遗漏；未进行代码正确性审查。
+- 设计 §8 与资源代码索引同步到 schema 6；既有升级 E2E 从源码读取目标版本，无须修改常量。
+
+**未验证**：Windows 运行时与完整 E2E 本轮未执行。

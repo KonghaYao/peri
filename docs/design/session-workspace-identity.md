@@ -139,6 +139,14 @@ common directory 未变仍属原项目；不相关的同名副本各自成项目
 两个宿主同时为同一已验证工作区分配不同有效身份。Git 探测在事务外进行，提交
 前复核关键文件对象与关联关系；期间发生变化则放弃该次结果。
 
+完整发现是准入级动作：一次准入（一次 ACP 请求，或一次 prompt 轮）至多执行一次
+Git 发现，其余检查复用已记录证据——SQL 关系加关键文件对象身份，不启动外部
+进程。目录被替换、被换位或 Git 位置消失仍会在这些检查里失败；重复发现不带来新
+证据，只会把 Git 的等待（慢盘、慢 Git、Git 缺失时的探测）叠加到同一次准入的
+每一步上。已有绑定的准入复核（`session/load`、prompt 轮、`workflow/resume`）在
+准入入口执行一次完整发现，其后的身份读取、二次确认与执行所有权取得只复核已
+记录证据。
+
 ### 3.3 情景规则
 
 | 情景 | 行为 |
@@ -163,7 +171,8 @@ common directory 未变仍属原项目；不相关的同名副本各自成项目
 启动 Git 返回 executable-not-found 时，可以建立目录项目；后者仅表示未启用 Git
 发现，不声称目录中没有仓库。两种目录模式均只使用 cwd 及文件对象身份，不推断
 任意父目录归属。Git 探测一旦开始成功，后续失败不能降级为目录模式。
-已有绑定始终复核完整发现快照；Git 安装状态变化不能改写项目/工作区身份。
+已有绑定在每次准入的入口复核一次完整发现快照（准入内的其余检查只复核已记录
+证据，见 §3.2）；Git 安装状态变化不能改写项目/工作区身份。
 非 Git 目录随后初始化 Git，或已登记仓库移除 `.git` 时，该目录仍是同一工作区：
 复用原项目与工作区 ID 并刷新观测快照，已有会话继续可执行。子目录会话不因根
 目录的布局变化被并入或改绑，仍按各自登记快照复核。Git 不可用不构成「该目录
@@ -191,8 +200,9 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 
 ### 5.1 new
 
-验证请求目录 → 发现/登记项目与工作区 → 形成 binding → 创建 thread → 取得执行
-所有权 → 在该环境构建并持久化 frozen snapshot → 装配会话资源 → 发布 session。
+验证请求目录（本次准入唯一的完整发现与登记）→ 发现/登记项目与工作区 → 形成
+binding → 创建 thread → 取得执行所有权（只复核已记录证据）→ 在该环境构建并
+持久化 frozen snapshot → 装配会话资源 → 发布 session。
 中间失败不得留下可执行的半成品；new/frozen 写入失败继续遵守现有补偿规则。
 
 ### 5.2 load / resume
@@ -258,6 +268,11 @@ snapshot，继续满足 `ARC-FROZEN-001`。请求不同 cwd 不得偷偷创建�
 到外部命令。所有调用方复用同一 canonical 数据库路径与锁命名；数据库 hardlink
 别名和网络共享上的多机访问不在支持范围。
 
+`CLOEXEC` 只在子进程 `exec` 时才关闭描述符，因此本进程 fork 出的子进程在 exec
+前仍共享该锁，父进程在窗口内重开同一 inode 会被内核拒绝。取得锁允许在有限预算内
+重试以吸收这类毫秒级窗口（会话生命周期里的 Git 发现、`sw_vers`、LSP 等都会 fork）；
+真正的外部持有者持续持锁，预算耗尽后仍按“其他进程占用”上报，独占语义不变。
+
 取得 lease 后才能装配会产生执行副作用的资源。运行写入通道必须持有对应 owner
 能力；删除、重绑定、rewind、compact、continuation 和子任务写入也不得绕过。
 只读列表/历史访问无需 lease；无法取得时显示“其他进程占用”，不凭 pid 或
@@ -315,7 +330,7 @@ hooks、插件与 MCP 展示取当前会话环境。TUI 本地配置面板仍编
 ## 8. 单库存储与版本边界
 
 默认读写始终使用 `~/.peri/threads/threads.db`，`--db-path` 仍可选择显式路径。
-schema 版本记录在 `PRAGMA user_version`，当前为 `5`，不另建数据库文件。新 writer
+schema 版本记录在 `PRAGMA user_version`，当前为 `6`，不另建数据库文件。新 writer
 按必需的 `threads` / `messages` 真实表及其列识别未设置版本号的旧 schema；
 同库额外业务表（例如 `thread_goals`）及其数据保持原样，不能以整库表数量拒绝
 兼容旧库。在单个事务中补齐
@@ -324,12 +339,16 @@ schema 版本记录在 `PRAGMA user_version`，当前为 `5`，不另建数据�
 binding `revision` 列，保留其余绑定与执行状态，最后提交版本号。并发开库由
 schema OS 锁序列化；升级失败回滚整次 DDL。
 
-schema 4 升级到 5 只放宽登记键：重建 `projects` 与 `workspaces`，把 locator /
+schema 2–5 写打开时在同一事务升级到 6，放宽登记键：重建 `projects` 与 `workspaces`，把 locator /
 root 与 identity 的单列唯一约束换成 §3.2 的组合键。重建逐列复制行内容与引用
 关系，ProjectId、WorkspaceId、binding、frozen / history 和 execution 状态不变；
 该路径需要在事务外关闭外键强制才能替换被引用的父表，因此提交前显式执行
 `PRAGMA foreign_key_check`，发现悬空引用即回滚。升级前的单列唯一约束会拒绝
-同一路径上的第二个文件对象，这正是升级要解除的限制。
+同一路径上的第二个文件对象，这正是升级要解除的限制。schema 2/3 先完成 revision /
+身份 JSON 的既有迁移，再重建登记表，不能跳过中间步骤直接标记最新版本。schema 5
+可能已完成组合键迁移，也可能由旧 writer 漏迁移后误标；两者都重建一次并提交版本 6。
+健康 5 已保存的同路径多对象、同对象多路径登记逐行保留，不合并 ID、不清 dirty，
+也不自动把旧会话迁移到新的目录。后续写打开不再重建；旧二进制拒绝版本 6。
 
 开库时已有会话、消息、配置和 frozen / inherited / cached context 列值保持原样，
 不批量扫描目录或回填 binding。列表保留未绑定历史，`ScopedThreadEntry.binding`
@@ -348,8 +367,8 @@ MetaHarness 与插件目录均从保存 cwd 发现，不沿用启动项目，也
 并发竞争复用赢家，失败或中断不得只提交其中一项。接纳后恢复继续遵守原有 lease、
 dirty 和目录身份校验；已绑定会话缺失快照不再被视为 legacy。没有 binding 却已有
 execution_runs 的记录拒绝接纳，避免把绑定损坏当成升级。此流程同样适用于已经由
-3.15.0 升级为 schema 3、仍未绑定的旧行；schema 3 在写打开时于同一事务升级为
-schema 4。迁移只规范化 projects.object_identity、workspaces.root_identity 与
+3.15.0 升级为 schema 3、仍未绑定的旧行；schema 2/3 在写打开时先完成身份载荷
+规范化，再与上述登记键变更一起提交为 schema 6。身份载荷迁移只规范化 projects.object_identity、workspaces.root_identity 与
 discovery 中的身份 JSON，移除 legacy birth 字段，保留 ProjectId、WorkspaceId、
 binding、frozen/history 和 execution 状态。迁移前校验全部身份 JSON 与同表唯一性；
 损坏或归一化后冲突使整个事务回滚。升级前必须停止旧版 writer，禁止新旧 schema
@@ -387,7 +406,8 @@ time，也不降级为 mtime/ctime 或路径等同。Windows shell 在挂起
 
 不增加通用 workspace 管理框架或新 daemon。Resources 将发现、登记和校验封装在
 小接口后；项目 ID 查找、工作区验证和列表查询复用它。慢 Git 操作在启动、显式
-刷新和恢复边界执行；执行准入独立复核保存的工作区与目录，不使用客户端缓存替代验证。
+刷新和恢复边界执行；执行准入独立复核保存的工作区与目录，不使用客户端缓存替代
+验证，且每次准入至多一次完整发现（准入内其余检查只复核已记录证据，见 §3.2）。
 
 本设计的完成条件是同项目可发现、各工作区执行环境正确、热冷恢复一致、缺失
 目录可读不可误执行、跨进程不重复运行，以及旧数据不会被猜测归属。实施次序与

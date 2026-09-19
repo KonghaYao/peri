@@ -16,6 +16,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use super::super::notify::{send_available_commands_update, send_config_option_update};
+use super::super::workspace::BindingCheck;
 use super::super::{build_mode_state, AcpServerConfig, SessionState};
 use crate::dispatch::config_update::make_config_options;
 use crate::dispatch::ReplaySender;
@@ -201,7 +202,7 @@ async fn response_identity(
         .effective_host_caps()
         .session_workspace_v1
     {
-        context_for_session(cfg, session_id).await.map(Some)
+        admission_identity(cfg, session_id).await.map(Some)
     } else {
         Ok(None)
     }
@@ -242,7 +243,22 @@ pub(super) fn retain_failed_assembly(
     );
 }
 
+/// 绑定复核强度见 [`BindingCheck`](super::super::workspace::BindingCheck)：
+/// 协议读请求复核完整发现快照，同一次准入内的身份读取只复核已记录证据。
 async fn context_for_session(cfg: &AcpServerConfig, session_id: &str) -> Result<Value, AcpError> {
+    session_context_payload(cfg, session_id, BindingCheck::Full).await
+}
+
+/// 准入内的身份读取（`session/new` | `load` | `resume` | `fork` 的响应装配）。
+async fn admission_identity(cfg: &AcpServerConfig, session_id: &str) -> Result<Value, AcpError> {
+    session_context_payload(cfg, session_id, BindingCheck::Recorded).await
+}
+
+async fn session_context_payload(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    check: BindingCheck,
+) -> Result<Value, AcpError> {
     let store = cfg.controller.sessions();
     let binding = store
         .load_session_binding(&session_id.to_owned())
@@ -253,10 +269,12 @@ async fn context_for_session(cfg: &AcpServerConfig, session_id: &str) -> Result<
         .await
         .map_err(super::super::workspace::workspace_error)?;
     let workspace = if binding.is_some() {
-        store
-            .validate_session_binding(&session_id.to_owned())
-            .await
-            .map_err(super::super::workspace::workspace_error)?
+        let id = session_id.to_owned();
+        match check {
+            BindingCheck::Full => store.validate_session_binding(&id).await,
+            BindingCheck::Recorded => store.reassert_session_binding(&id).await,
+        }
+        .map_err(super::super::workspace::workspace_error)?
     } else {
         // Resolve the saved location for a restore request; context reads never adopt it.
         legacy_session::resolve_saved_workspace(cfg, &meta).await?
@@ -460,7 +478,7 @@ pub(crate) async fn handle_new(
         .await
         .map_err(super::super::workspace::workspace_error)?;
     if let Err(error) =
-        super::super::workspace::validate_expected(cfg, &thread_id, Some(&cwd)).await
+        super::super::workspace::reassert_expected(cfg, &thread_id, Some(&cwd)).await
     {
         store
             .delete_thread(&thread_id)
@@ -968,8 +986,9 @@ pub(crate) async fn handle_fork(
         .get("sessionId")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+    // prepare_existing 已在本准入里完整复核过源会话，这里只复核已记录证据。
     prepare_existing(params, cfg, sessions).await?;
-    let (workspace, _source_owner) = super::super::workspace::acquire_for_load(
+    let (workspace, _source_owner) = super::super::workspace::reacquire_for_load(
         cfg,
         sessions,
         source_id,

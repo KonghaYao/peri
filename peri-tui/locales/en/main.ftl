@@ -78,6 +78,7 @@ lang-unsupported = Unsupported language: { $lang }
 
 statusbar-permission-dont-ask = Don't Ask
 statusbar-initializing = Initializing…
+statusbar-preparing = Preparing session…
 statusbar-permission-accept-edit = Accept Edit
 statusbar-permission-auto = Auto Mode
 statusbar-permission-bypass = Bypass

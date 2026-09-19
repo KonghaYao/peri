@@ -235,7 +235,22 @@ pub trait ThreadStore: Send + Sync {
         Err(crate::workspace::WorkspaceError::Unsupported.into())
     }
 
+    /// 已有绑定的权威复核：关系、关键文件对象加一次完整发现比对。
+    ///
+    /// 一次准入只应调用一次（准入以它为判定的全部依据）；准入内的后续检查用
+    /// [`ThreadStore::reassert_session_binding`]。
     async fn validate_session_binding(
+        &self,
+        _id: &ThreadId,
+    ) -> Result<crate::workspace::ResolvedWorkspace> {
+        Err(crate::workspace::WorkspaceError::Unsupported.into())
+    }
+
+    /// 同一次准入内的复核：关系与关键文件对象，不启动外部进程。
+    ///
+    /// 绑定不存在、workspace/project 关系不一致、目录被替换或换位时仍然失败；
+    /// 只有「重新执行 Git 发现」这一步被省去。
+    async fn reassert_session_binding(
         &self,
         _id: &ThreadId,
     ) -> Result<crate::workspace::ResolvedWorkspace> {

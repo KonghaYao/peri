@@ -548,6 +548,11 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
     let server = tokio::spawn(async move {
         answer_initialize(&server_transport).await;
         let create = expect_session_new(&server_transport).await;
+        // 准备在途时必须已经置位：请求都已发出，用户此刻只应看到「正在准备会话」。
+        assert!(
+            atoms::SESSION_PREPARING.get(),
+            "会话建立请求发出后，准备阶段必须对用户可见"
+        );
         // 慢 host：建会话超过受理回执预算，但仍在准备阶段期限内。
         tokio::time::sleep(RECEIPT_TIMEOUT + Duration::from_secs(5)).await;
         server_transport
@@ -577,6 +582,11 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
                 }
                 "session/input/enqueue" => {
                     assert_eq!(params["inputId"], enqueued, "入队必须复用原输入身份");
+                    // 入队已经发生在准备之后：可见状态必须随之收尾。
+                    assert!(
+                        !atoms::SESSION_PREPARING.get(),
+                        "会话建立后不得继续显示准备状态"
+                    );
                     let snapshot = json!({"sessionId":"slow","generation":"g","revision":2,
                         "items":[{"inputId":params["inputId"],
                             "originalDraft":params["originalDraft"],
@@ -700,6 +710,10 @@ async fn test_session_preparation_timeout_recovers_draft_without_admission() {
     })
     .await;
     assert!(recovered.is_ok(), "准备超时后必须恢复未发送原稿");
+    assert!(
+        !atoms::SESSION_PREPARING.get(),
+        "准备超时后不得把状态栏留在「正在准备会话」"
+    );
     let notice = notice_text().expect("准备超时必须给出提示");
     assert!(
         notice.contains("timed out") && notice != crate::i18n::tr("steer-input-rejected"),
@@ -764,8 +778,16 @@ async fn test_shutdown_during_preparation_keeps_unadmitted_input_identity() {
         "准备期间不得提前宣告失败：{:?}",
         notice_text()
     );
+    assert!(
+        atoms::SESSION_PREPARING.get(),
+        "准备尚未返回时必须保持可见状态"
+    );
     shutdown.cancel();
     handle.await.unwrap();
+    assert!(
+        !atoms::SESSION_PREPARING.get(),
+        "应用关闭丢弃准备中的 future 后，可见状态必须被清除（Drop 而非逐分支清理）"
+    );
     let pending = STEERS
         .state()
         .read()
