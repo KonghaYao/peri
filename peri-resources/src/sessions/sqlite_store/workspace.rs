@@ -53,25 +53,20 @@ impl SqliteThreadStore {
         let snapshot = serde_json::to_string(&discovered)?;
         let root_identity = serde_json::to_string(&discovered.root_identity)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        // A registered workspace is identified by its canonical root path plus the
-        // object identity of that same directory. The Git layout is a derived
-        // observation of the directory: `git init`, removing `.git` or replacing it
-        // are normal evolution of one unchanged directory object, so the recorded
-        // observation is refreshed while project_id stays as registered — execution
-        // cwd, project grouping and existing session bindings never move.
-        let registered: Vec<(String, String, String, String, String)> = sqlx::query_as(
-            "SELECT id, project_id, discovery, root, root_identity FROM workspaces WHERE root = ? OR root_identity = ?",
+        // 登记键是 canonical root 路径加上该目录的文件对象证据，两者同时命中才复用
+        // 原登记。目录被替换（同路径的新对象）或换位（同一对象的新路径）都不命中原
+        // 登记，但它们是可访问的目录：为其建立新登记，执行 cwd、项目归属和已有绑定
+        // 都不移动——引用旧登记的会话继续按各自证据复核，不会静默改绑。
+        let registered: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT id, project_id, discovery FROM workspaces WHERE root = ? AND root_identity = ?",
         )
         .bind(root)
         .bind(&root_identity)
-        .fetch_all(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        let same_directory = registered
-            .iter()
-            .find(|row| row.3.as_str() == root && row.4 == root_identity);
-        let (workspace_id, project_id) = match same_directory {
-            Some((id, project, recorded, _, _)) => {
-                if recorded != &snapshot {
+        let (workspace_id, project_id) = match registered {
+            Some((id, project, recorded)) => {
+                if recorded != snapshot {
                     // A directory-only observation without Git answering cannot prove
                     // the recorded repository is gone. Keep failing closed instead of
                     // rewriting a repository into a directory.
@@ -80,33 +75,25 @@ impl SqliteThreadStore {
                     }
                     sqlx::query("UPDATE workspaces SET discovery = ? WHERE id = ?")
                         .bind(&snapshot)
-                        .bind(id)
+                        .bind(&id)
                         .execute(&mut *tx)
                         .await?;
                 }
                 (id.parse::<WorkspaceId>()?, project.parse::<ProjectId>()?)
             }
-            None if !registered.is_empty() => {
-                // Matching the path alone or the object identity alone is not evidence
-                // that this is the directory the user registered: the path can hold a
-                // different object, and the object can live at a different path.
-                return Err(WorkspaceError::NeedsRelink.into());
-            }
             None => {
-                let existing: Option<(String, String, String)> = sqlx::query_as(
-                    "SELECT id, object_identity, locator FROM projects WHERE locator = ? OR object_identity = ?",
+                // 只有定位与证据同时一致才复用项目：Git linked worktree 换位后
+                // common directory 未变而路径已变，它仍属于原项目，而不相关的
+                // 同名副本各自成项目。
+                let existing: Option<(String,)> = sqlx::query_as(
+                    "SELECT id FROM projects WHERE locator = ? AND object_identity = ?",
                 )
                 .bind(locator)
                 .bind(&identity)
                 .fetch_optional(&mut *tx)
                 .await?;
                 let project_id = match existing {
-                    Some((id, evidence, registered_locator))
-                        if evidence == identity && registered_locator == locator =>
-                    {
-                        id.parse::<ProjectId>()?
-                    }
-                    Some(_) => return Err(WorkspaceError::NeedsRelink.into()),
+                    Some((id,)) => id.parse::<ProjectId>()?,
                     None => {
                         let id = ProjectId::new();
                         sqlx::query(

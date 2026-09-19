@@ -127,41 +127,201 @@ async fn test_worktree_symlink_discovery_reuses_identity_but_binding_escape_is_r
     ));
 }
 
+/// 建立绑定会话并写入一条消息，使历史进入列表查询的可见范围。
+async fn bound_with_history(
+    store: &SqliteThreadStore,
+    cwd: &Path,
+) -> (ThreadId, ResolvedWorkspace) {
+    let (id, workspace) = bound(store, cwd).await;
+    let lease = store.acquire_execution_lease(&id).await.unwrap();
+    store
+        .append_message(&id, BaseMessage::human("bound history"))
+        .await
+        .unwrap();
+    lease.mark_clean().await.unwrap();
+    (id, workspace)
+}
+
+/// 断言该会话仍能在原项目范围里被列出（历史可见，不被隐藏或改绑）。
+async fn assert_only_history(store: &SqliteThreadStore, project: ProjectId, thread: &ThreadId) {
+    let page = store
+        .list_scoped_threads(&ScopedThreadQuery {
+            scope: ThreadScope::Project(project),
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(&page.entries[0].thread.id, thread);
+}
+
+/// [回归测试] 目录对象被替换后，新会话仍必须可建立。
+///
+/// 登记键是 (canonical root, 该目录的文件对象证据) 组合：同一路径上的新对象不命中
+/// 原登记，但它仍是可访问的目录，必须得到新的项目与工作区登记；旧绑定按各自登记
+/// 证据复核，继续失败关闭，历史不被改绑或隐藏。
 #[tokio::test]
-async fn test_worktree_missing_recreated_and_moved_locations_never_rebind() {
+async fn test_worktree_replaced_directory_registers_new_workspace_keeps_old_history() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("project");
     std::fs::create_dir(&root).unwrap();
     let (store, _db) = store().await;
-    let (id, _) = bound(&store, &root).await;
-    let moved = directory.path().join("moved");
-    std::fs::rename(&root, &moved).unwrap();
+    let (old_thread, registered) = bound_with_history(&store, &root).await;
+
+    // 同一路径上换成一个新的文件对象：路径可用不等于身份延续。
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::create_dir(&root).unwrap();
+
+    // 旧会话不再可执行，但历史仍可见且绑定没有被改写。
     assert!(matches!(
         store
-            .validate_session_binding(&id)
+            .validate_session_binding(&old_thread)
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::NeedsRelink)
+    ));
+    assert_only_history(&store, registered.project_id, &old_thread).await;
+    let binding = store
+        .load_session_binding(&old_thread)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.workspace_id, registered.workspace_id);
+    assert_eq!(binding.project_id, registered.project_id);
+
+    // 新对象得到独立登记，新会话可建，执行目录就是该路径。
+    let (replacement_thread, replacement) = bound(&store, &root).await;
+    assert_ne!(replacement.workspace_id, registered.workspace_id);
+    assert_ne!(replacement.project_id, registered.project_id);
+    assert_eq!(
+        replacement.cwd,
+        tokio::fs::canonicalize(&root).await.unwrap()
+    );
+    assert_eq!(
+        store
+            .validate_session_binding(&replacement_thread)
+            .await
+            .unwrap(),
+        replacement
+    );
+}
+
+/// [回归测试] 目录换位后，新路径仍必须可建立新会话。
+#[tokio::test]
+async fn test_worktree_moved_directory_registers_new_path_keeps_old_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let (store, _db) = store().await;
+    let (old_thread, registered) = bound_with_history(&store, &root).await;
+
+    let moved = directory.path().join("moved");
+    std::fs::rename(&root, &moved).unwrap();
+
+    // 旧路径消失：旧会话不可执行，历史保留。
+    assert!(matches!(
+        store
+            .validate_session_binding(&old_thread)
             .await
             .unwrap_err()
             .downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::Unavailable)
     ));
+    assert_only_history(&store, registered.project_id, &old_thread).await;
+
+    // 新路径可建会话，且不把旧登记改写到新位置。
+    let (relocated_thread, relocated) = bound(&store, &moved).await;
+    assert_ne!(relocated.workspace_id, registered.workspace_id);
+    assert_ne!(relocated.project_id, registered.project_id);
+    assert_eq!(
+        relocated.cwd,
+        tokio::fs::canonicalize(&moved).await.unwrap()
+    );
+    assert_eq!(
+        store
+            .validate_session_binding(&relocated_thread)
+            .await
+            .unwrap(),
+        relocated
+    );
+}
+
+/// [回归测试] linked worktree 换位后：同一项目复用，新工作区独立，旧路径会话收历史。
+///
+/// `git worktree move` 改变的是工作区位置，common directory 与项目证据未变。
+#[tokio::test]
+async fn test_worktree_moved_linked_worktree_reuses_project_registers_new_workspace() {
+    let repository = repository();
+    let linked = tempfile::tempdir().unwrap();
+    let original = linked.path().join("linked tree");
+    git(
+        repository.path(),
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "linked",
+            original.to_str().unwrap(),
+        ],
+    );
+    let (store, _db) = store().await;
+    let (old_thread, registered) = bound_with_history(&store, &original).await;
+
+    let moved = linked.path().join("moved tree");
+    git(
+        repository.path(),
+        &[
+            "worktree",
+            "move",
+            original.to_str().unwrap(),
+            moved.to_str().unwrap(),
+        ],
+    );
+
     assert!(matches!(
         store
-            .resolve_workspace(&moved)
+            .validate_session_binding(&old_thread)
             .await
             .unwrap_err()
             .downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::NeedsRelink)
+        Some(WorkspaceError::Unavailable)
     ));
+
+    let (relocated_thread, relocated) = bound(&store, &moved).await;
+    assert_ne!(relocated.workspace_id, registered.workspace_id);
+    assert_eq!(relocated.project_id, registered.project_id);
+    assert_eq!(
+        store
+            .validate_session_binding(&relocated_thread)
+            .await
+            .unwrap(),
+        relocated
+    );
+}
+
+/// [回归测试] 同一文件对象在同一路径只登记一次，冲突仍由唯一约束挡住。
+#[tokio::test]
+async fn test_worktree_registration_reuses_exact_object_and_keeps_rows_unique() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
     std::fs::create_dir(&root).unwrap();
-    assert!(matches!(
-        store
-            .resolve_workspace(&root)
-            .await
-            .unwrap_err()
-            .downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::NeedsRelink)
-    ));
-    assert!(store.load_messages(&id).await.unwrap().is_empty());
+    let (store, _db) = store().await;
+    let (_, registered) = bound(&store, &root).await;
+    let resolved = store.resolve_workspace(&root).await.unwrap();
+    assert_eq!(resolved, registered);
+    let duplicate = sqlx::query(
+        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
+         SELECT 'duplicate', project_id, root, root_identity, discovery FROM workspaces WHERE id = ?",
+    )
+    .bind(registered.workspace_id.to_string())
+    .execute(&store.pool)
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "同一 (root, root_identity) 不得重复登记"
+    );
 }
 
 #[tokio::test]

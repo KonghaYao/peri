@@ -94,16 +94,24 @@ linked worktree 的这两者不同；主工作树通常相同。
 ID 本身；不把路径 hash 永久当成项目 ID，也不往受版本控制文件或 Git 管理目录
 写 Peri 身份标记。
 
-登记记录保存 canonical locator、平台文件对象识别信息和登记代际。相同路径
-只有在登记证据仍匹配时才复用身份；观察到删除、替换或冲突时将旧位置失效。
+登记记录保存 canonical locator、平台文件对象识别信息和登记代际。登记键是
+(canonical locator, 该位置的文件对象证据) 组合，两者同时命中才复用原登记：
+路径相同而文件对象已被替换，或同一文件对象出现在新路径，都不是同一次登记。
 inode / file ID 只能作为一致性证据，不能证明任意复制、重建或历史路径复用。
-证据不足返回 `NeedsRelink`，允许用户核对后显式重关联，不自动合并。
+
+新对象或新位置不继承旧身份，也不被旧登记挡住：登记表允许同一路径有多个文件
+对象、同一对象出现在多个路径，各自得到新的 `ProjectId` 与 `WorkspaceId`，
+执行 cwd 就是用户实际打开的目录。旧登记、旧绑定与历史保持原样，引用它们的
+会话继续按各自登记证据复核并失败关闭，不静默改绑、不隐藏历史。项目（而非
+工作区）只在定位与对象证据同时一致时复用，例如 Git linked worktree 换位后
+common directory 未变仍属原项目；不相关的同名副本各自成项目。证据不足返回
+`NeedsRelink`，不自动合并。
 
 工作区身份取 canonical root 路径加上该目录自身的文件对象证据；Git 布局是同一
 目录的派生观测，`git init`、移除 `.git` 或重建其管理目录都属于正常演进。同一
-目录对象再次解析时复用原项目与工作区 ID，只在原行内刷新观测快照：执行 cwd、
-项目归属和已有绑定都不移动。可以覆盖已登记快照的观测必须来自 Git 的真实回答；
-Git 不可用时得到的是不完整目录观测，仍按证据不足拒绝。
+目录对象在同一路径再次解析时复用原项目与工作区 ID，只在原行内刷新观测快照：
+执行 cwd、项目归属和已有绑定都不移动。可以覆盖已登记快照的观测必须来自 Git 的
+真实回答；Git 不可用时得到的是不完整目录观测，仍按证据不足拒绝。
 
 第一次登记与 binding 写入使用唯一约束、事务和竞争失败后重读 winner，避免
 两个宿主同时为同一已验证工作区分配不同有效身份。Git 探测在事务外进行，提交
@@ -124,8 +132,9 @@ Git 不可用时得到的是不完整目录观测，仍按证据不足拒绝。
 | Git 权限不足、unsafe repository、损坏或探测中途失效 | 类型化探测错误，不能伪装为非 Git 项目 |
 | bare repository | 可作为 linked worktree 的仓库锚点；bare 目录本身不可作为执行工作区 |
 | worktree 删除或目录暂时不可用 | 保留身份和历史，位置标记不可用，阻止执行 |
-| 删除后同路径重新创建 | 不自动继承旧会话绑定；无法确定是否同一实例时要求重关联 |
-| 整仓搬迁、复制、导入或 Git 管理目录重建 | 不承诺透明识别；显式重关联，不能以 remote 相同证明身份 |
+| 删除后同路径重新创建 | 不继承旧会话绑定；新对象单独登记，可在该目录建立新会话 |
+| 目录（含仓库）整体搬迁到新路径 | 旧绑定按原登记证据复核并失败关闭，历史保留；新路径单独登记，不自动改绑或改指旧 ID |
+| 整仓复制、导入或 Git 管理目录重建 | 不承诺透明识别，不以 remote 相同证明身份；新位置单独登记并可建立新会话，旧绑定保留历史 |
 
 发现结果采用 `GitWorkspace` / `DirectoryWorkspace` / `Unavailable` /
 `NeedsRelink` / `DiscoveryError` 等明确分支。Git 确认“不是 Git 仓库”，或首次
@@ -203,9 +212,11 @@ snapshot，继续满足 `ARC-FROZEN-001`。请求不同 cwd 不得偷偷创建�
 
 ### 5.4 位置重定位
 
-初始交付不提供重定位或重关联操作。目录移动、移除后重建、Git 管理目录身份变化
-返回 `NeedsRelink` 或 `Unavailable`，保留历史，不自动修改 binding 或 frozen。
-后续显式重定位若要保留 WorkspaceId，必须在无执行 owner 时校验 Git 关联和
+初始交付不提供重定位或重关联操作：没有把已有 binding 改指到新位置或新对象的
+入口。目录移动、移除后重建、Git 管理目录身份变化让原绑定返回 `NeedsRelink`
+或 `Unavailable`，保留历史，不自动修改 binding 或 frozen。用户可完成的前进路径
+是在当前可访问目录建立新会话：该目录按 §3.2 得到新登记，旧会话与历史保持只读
+可查。后续显式重定位若要保留 WorkspaceId，必须在无执行 owner 时校验 Git 关联和
 文件对象证据，并让位置更新与执行准入共享线性化点。
 
 当前在 new/load/resume/fork 和新 prompt 准入时验证目录。运行中的外部
@@ -280,7 +291,7 @@ hooks、插件与 MCP 展示取当前会话环境。TUI 本地配置面板仍编
 ## 8. 单库存储与版本边界
 
 默认读写始终使用 `~/.peri/threads/threads.db`，`--db-path` 仍可选择显式路径。
-schema 版本记录在 `PRAGMA user_version`，当前为 `4`，不另建数据库文件。新 writer
+schema 版本记录在 `PRAGMA user_version`，当前为 `5`，不另建数据库文件。新 writer
 按必需的 `threads` / `messages` 真实表及其列识别未设置版本号的旧 schema；
 同库额外业务表（例如 `thread_goals`）及其数据保持原样，不能以整库表数量拒绝
 兼容旧库。在单个事务中补齐
@@ -288,6 +299,13 @@ schema 版本记录在 `PRAGMA user_version`，当前为 `4`，不另建数据�
 新建与旧库补列共享同一组列定义；已存在的 schema 2 在事务中删除无状态用途的
 binding `revision` 列，保留其余绑定与执行状态，最后提交版本号。并发开库由
 schema OS 锁序列化；升级失败回滚整次 DDL。
+
+schema 4 升级到 5 只放宽登记键：重建 `projects` 与 `workspaces`，把 locator /
+root 与 identity 的单列唯一约束换成 §3.2 的组合键。重建逐列复制行内容与引用
+关系，ProjectId、WorkspaceId、binding、frozen / history 和 execution 状态不变；
+该路径需要在事务外关闭外键强制才能替换被引用的父表，因此提交前显式执行
+`PRAGMA foreign_key_check`，发现悬空引用即回滚。升级前的单列唯一约束会拒绝
+同一路径上的第二个文件对象，这正是升级要解除的限制。
 
 开库时已有会话、消息、配置和 frozen / inherited / cached context 列值保持原样，
 不批量扫描目录或回填 binding。列表保留未绑定历史，`ScopedThreadEntry.binding`

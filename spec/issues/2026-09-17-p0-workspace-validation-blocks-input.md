@@ -1,6 +1,6 @@
 # P0：文件系统身份与 Git 探测阻断会话创建与发送
 
-**状态**：Open（登记模式冲突、无 Git 目录建会话与准入探测成本已于 2026-09-19 修复；简化目标其余项与其余验收项待实施）
+**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本与目录搬迁 / 替换的登记可用性已于 2026-09-19 修复；简化目标其余项与其余验收项待实施）
 **优先级**：P0（用户指定；2026-09-19 依据本机确证由 P1 升级）
 **类型**：可用性缺陷 / 设计简化
 **创建日期**：2026-09-17
@@ -98,8 +98,8 @@ done
 | 普通目录也依赖 Git 可执行文件 | `peri-resources/src/sessions/sqlite_store/discovery.rs::discover` 先调用 `git rev-parse --is-inside-work-tree`；`git` 的 spawn 失败直接返回错误 | 未安装 Git 的精简 Linux / 容器不能建立普通目录会话。**已修复**（`7d59a7b9`：spawn 返回 `NotFound` 时降级为目录模式并记 `git_answered=false`；端到端见「修复记录」第 2 条） |
 | Git 发现依赖一组命令和输出约定 | `discover` 使用 `--path-format=absolute`、`--absolute-git-dir`、`worktree list --porcelain -z`，并按特定英文 stderr 前缀识别非仓库 | Git 版本、权限或命令行为差异可能成为普通会话阻塞；旧版本失败尚未实测 |
 | 相同解析重复完整发现 | `workspace.rs::resolve_workspace_impl` 先 `discover`，又在 `BEGIN IMMEDIATE` 内 `Discovery::revalidate`；后者再次 `discover` | 成功路径执行两轮发现，每轮最多五类 Git 命令，失败分支会提前返回；写事务持有期间仍等待外部进程。放大慢盘 / 慢 Git 对同库写入的影响，具体延迟未测量。**已修复**（2026-09-19：事务内只复核关键文件对象，写事务外才做完整快照复核；一次准入的 Git 调用由两轮各 5 条降为两轮各 3 条，见「修复记录」第 3 条） |
-| 持久化身份同时绑定路径和文件对象 | `resolve_workspace_impl` 要求 project locator / identity 一致，workspace 则比较完整 discovery；`ObjectIdentity` 当前仍含 device/inode 或 Windows volume/file index | 路径可用不意味着身份通过；布局变化与旧登记冲突时返回 `NeedsRelink`，重新建会话也经过同一登记入口 |
-| 要求重关联，但没有可达的重关联操作 | `peri-acp-types/src/workspace.rs::WorkspaceError::NeedsRelink` 要求 explicit relinking；全仓静态入口检查未发现对应 Resources 公共操作、ACP request 或 TUI 流程，尚未做运行时流程验收。现行设计 §5.4 明确初始交付不提供该功能 | 同一文件对象搬到新路径，或原登记路径被新的文件对象替换，可能被阻塞，而当前 UI / ACP 缺少对应恢复入口；历史仍可只读，不等于可以继续执行 |
+| 持久化身份同时绑定路径和文件对象 | `resolve_workspace_impl` 要求 project locator / identity 一致，workspace 则比较完整 discovery；`ObjectIdentity` 当前仍含 device/inode 或 Windows volume/file index | 路径可用不意味着身份通过；同一登记上的布局变化按各自证据复核。**已部分修复**（2026-09-19：登记键改为组合键后，新对象或新位置单独登记，不再被旧登记挡成 `NeedsRelink`；旧绑定仍失败关闭，见「修复记录」第 4 条） |
+| 要求重关联，但没有可达的重关联操作 | `peri-acp-types/src/workspace.rs::WorkspaceError::NeedsRelink` 要求 explicit relinking；全仓静态入口检查未发现对应 Resources 公共操作、ACP request 或 TUI 流程，尚未做运行时流程验收。现行设计 §5.4 明确初始交付不提供该功能 | 同一文件对象搬到新路径，或原登记路径被新的文件对象替换，可能被阻塞，而当前 UI / ACP 缺少对应恢复入口；历史仍可只读，不等于可以继续执行。**已部分修复**（2026-09-19：当前可访问目录可建立新会话继续工作，改动记录见「修复记录」第 4 条；把已有会话改指到新位置的入口仍未提供） |
 | 首次输入准备阶段与回执共用期限 | `peri-tui/src/kit/steer_consumer.rs::spawn_steer_consumer` 用 10 秒 timeout 包整个 `execute`，其中包括 `ensure_session` | 准备过慢可能在 enqueue RPC 前拒绝输入；目前是代码确认的边界与条件风险，未注入慢启动复现 |
 
 ## 设计判断
@@ -118,9 +118,9 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 1. **拆开基本目录执行与 Git 增强能力。** 定义无 Git、旧 Git、Git 拒绝读取时的普通目录使用行为；不能把所有探测错误悄悄解释成「不是仓库」，造成历史归属变化。
 2. **把 Git 布局变化当作正常演进。** 同一目录对象的 `git init` / 移除 `.git` 不应使该目录失去可用性；项目身份演进需要可预期地迁移或并存，而不是硬拒绝。
-3. **重新论证并削减 inode / file ID 的持久化与硬拒绝。** 以用户可理解的保存目录、显式选择和恢复行为验收；不再为了维持现有实现而不断扩展平台身份探测。
-4. **限制外部探测成本。** 避免在 SQLite 写事务中运行完整 Git 发现；减少同一次准入的重复检查，给准备阶段独立、可取消的期限与可见状态。
-5. **提供可完成的恢复操作。** 遇到目录变化应说明影响，并提供实际可达的恢复 / 选择路径；不能只提示一个没有产品入口的「显式重关联」。优先比较简化后的目录选择与明确新会话语义，不预设必须再增加一整套保留所有 ID 的重关联框架。
+3. **重新论证并削减 inode / file ID 的持久化与硬拒绝。** 以用户可理解的保存目录、显式选择和恢复行为验收；不再为了维持现有实现而不断扩展平台身份探测。（部分实施：登记键与绑定复核仍使用文件对象证据，但「同一路径只允许一个登记」的硬拒绝已解除，见「修复记录」第 4 条；持久化主路径是否继续携带 inode 仍未重新论证）
+4. **限制外部探测成本。** 避免在 SQLite 写事务中运行完整 Git 发现；减少同一次准入的重复检查，给准备阶段独立、可取消的期限与可见状态。（调用位置与次数已收敛，见「修复记录」第 3 条；独立可取消的准备阶段期限未实施）
+5. **提供可完成的恢复操作。** 遇到目录变化应说明影响，并提供实际可达的恢复 / 选择路径；不能只提示一个没有产品入口的「显式重关联」。优先比较简化后的目录选择与明确新会话语义，不预设必须再增加一整套保留所有 ID 的重关联框架。（部分实施：当前可访问目录按新会话语义得到新登记，用户可继续工作，见「修复记录」第 4 条；提示文案与把已有会话改指到新位置的入口仍未提供）
 6. **保留必要的数据与执行契约。** 历史可读、执行 cwd 明确、不同工作区的配置和权限不串用、同一会话不被两个 owner 并发执行、取消后资源正确收尾。这些要求不因简化文件身份识别而自动取消。
 
 涉及现行 `ARC-WORKSPACE-001` 和 [工作区身份设计](../../docs/design/session-workspace-identity.md) 的调整，应在实施时同步事实源。本报告是变更需求与检查证据，不直接改写现行设计为已实现的新保证。
@@ -130,7 +130,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 - [x] 普通目录登记后执行 `git init`（以及已登记仓库移除 `.git`）仍能创建会话并发送输入；历史绑定不被静默改绑或隐藏。（2026-09-19 修复，见「修复记录」）
 - [x] 无 Git 的普通目录能新建会话并成功发送一次输入；无重复入队，草稿状态正确。（2026-09-19 修复，见「修复记录」第 2 条）
 - [ ] 新会话、已有会话、历史只读访问分别验证，不让 Git 或目录身份检查不必要地传播到其他能力。
-- [ ] 目录移动、备份恢复 / 文件对象变化、普通目录执行 `git init`、Git 管理目录变化有明确且可完成的用户操作；历史不被静默改绑或隐藏。
+- [x] 目录移动、备份恢复 / 文件对象变化、普通目录执行 `git init`、Git 管理目录变化有明确且可完成的用户操作；历史不被静默改绑或隐藏。（2026-09-19 修复，见「修复记录」第 4 条：搬迁与同路径替换各有单元测试，搬迁另有真实 TUI 端到端用例；备份恢复按「同路径新对象」路径覆盖，未单独实测）
 - [ ] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。
 - [ ] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。
 - [ ] 事务内没有无界或重复的外部探测；慢准备、取消和超时不造成输入丢失或重复执行。（前半 2026-09-19 修复，见「修复记录」第 3 条；慢准备 / 取消 / 超时未验证）
@@ -165,6 +165,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 | 2026-09-19 | — | Open（部分修复） | 用户 | 用户要求派出 subagent 对抗根因后实施修复；按测试驱动完成登记模式冲突修复，本 issue 的整体简化目标仍未实施 |
 | 2026-09-19 | — | Open（部分修复） | agent | 补充无 Git 路径的真实 TUI 端到端验收（勾选验收条件第 2 项），生产代码未变；并同步旧库 e2e 的 schema 版本期望 |
 | 2026-09-19 | — | Open（部分修复） | agent | 完成准入探测成本收敛：事务内不再执行外部进程，一次准入的 Git 调用由两轮各 5 条降为两轮各 3 条（见「修复记录」第 3 条） |
+| 2026-09-19 | — | Open（部分修复） | agent | 解除登记键的硬拒绝：同一路径的新文件对象与同一对象的新路径各自登记，旧绑定按各自证据复核；勾选验收条件第 4 项（见「修复记录」第 4 条） |
 
 ## 修复记录
 
@@ -256,3 +257,39 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 - 未测量慢盘 / 慢 Git 下的实际等待时间；本条第 3 项的断言是「调用次数」与「调用时的持锁状态」，不是耗时。
 - 「准备阶段独立、可取消的期限」（`steer_consumer` 用 10 秒包住整个 `execute`）属验收条件第 7 项后半，本轮未处理。
+
+### 2026-09-19：登记键改为组合键，解除搬迁 / 替换的硬拒绝（第 4 条）
+
+**范围**：解除「同一路径上的新文件对象」与「同一文件对象的新路径」被登记唯一约束与旧登记挡成 `NeedsRelink` 的阻断，让用户在可访问目录继续建立新会话。不改变：文件对象证据仍进入持久化主路径与绑定复核；已有 binding 不自动改写；不新增重关联入口；不做性能测量。
+
+**根因**：原登记表用单列唯一表达身份——`projects.locator` / `workspaces.root` 各自唯一，`resolve_workspace_impl` 又用 `root = ? OR root_identity = ?` 查询。于是「同一路径上的另一个文件对象」在路径上撞唯一约束，「同一对象的新路径」命中旧行却路径不符，两者都只能返回 `NeedsRelink`；而产品没有重关联入口，用户没有可完成的下一步。
+
+**改动**：
+
+- `schema.rs`：`SchemaState::Version4` + `relax_registration_keys`。schema 4→5 在事务内重建 `projects` / `workspaces`，把单列唯一约束换成组合键 `UNIQUE(locator, object_identity)` / `UNIQUE(root, root_identity)`（`UNIQUE(id, project_id)` 与 `session_bindings` 复合外键保持不变），逐列复制行内容，`user_version = 5`。
+- `schema.rs::init_schema`：重建要被引用的父表执行 `DROP TABLE`，而 SQLite 对父表的隐式删除会立即检查外键——实测 `PRAGMA defer_foreign_keys = ON` 挡不住（`sqlite3` 3.51.0 复现），该 PRAGMA 也只在事务外生效。因此重建路径改为：同一连接上事务外 `foreign_keys = OFF` → 事务内迁移并在提交前 `PRAGMA foreign_key_check` 补齐校验（有悬空引用即回滚）→ 恢复 `foreign_keys = ON`（错误路径同样恢复）。其余升级路径不变。
+- `workspace.rs::resolve_workspace_impl`：工作区查询改为 `root = ? AND root_identity = ?` 的组合命中；未命中即为该位置建立新登记（新 `WorkspaceId`）。项目只在 `locator = ? AND object_identity = ?` 同时一致时复用，因此 Git linked worktree 换位后 common directory 未变仍属原项目，不相关的同名副本各自成项目。旧行、旧绑定、执行状态与历史都不改写。
+
+**回归测试**（`workspace_test.rs` 与 `schema_test.rs` 新增用例，修复前失败）：
+
+| 验证 | 结果 |
+| --- | --- |
+| `test_worktree_replaced_directory_registers_new_workspace_keeps_old_history` | 目录被删除并在同路径重建：旧会话 `validate_session_binding` → `NeedsRelink` 且绑定字段未变，历史仍在该项目列表可见；新会话在新登记上建立成功 |
+| `test_worktree_moved_directory_registers_new_path_keeps_old_history` | 目录整体改名：旧会话 → `Unavailable`，历史保留；新路径单独登记，执行 cwd 为新路径 |
+| `test_worktree_moved_linked_worktree_reuses_project_registers_new_workspace` | `git worktree move` 后：新工作区独立、`project_id` 复用原项目（common directory 未变） |
+| `test_worktree_registration_reuses_exact_object_and_keeps_rows_unique` | 同一 `(root, root_identity)` 仍然唯一，重复登记被约束拒绝 |
+| `test_version4_upgrade_relaxes_registration_keys_and_preserves_rows` | schema 4 库升级到 5：升级前同路径第二个文件对象被单列唯一拒绝；升级后旧登记 / 绑定 / 执行状态字节不变，组合键允许新对象登记、仍拒绝同组合重复，孤儿工作区仍被外键拒绝 |
+| `cargo test -p peri-resources --lib` | 131 项通过 |
+| `cargo test -p peri-acp --lib` | 678 项通过 |
+| `cargo clippy -p peri-resources --all-targets -- -D warnings`、`cargo fmt --all -- --check` | 无告警、无格式差异 |
+| E2E `tests/scenarios/workspace-directory-moved.test.ts`（新增，已入 L0） | 真实 TUI：普通目录建会话发消息 → 退出 → 目录整体改名 → 新位置启动建会话发消息成功；2 project / 2 workspace / 2 binding，旧 binding 与项目 locator、工作区 root、旧 thread 的 cwd 均未被改写，历史仍在 |
+| E2E `workspace-git-init` / `workspace-no-git` / `legacy-history-upgrade` 受影响面回归 | 3 文件 12 项全部通过（68s），`legacy-history-upgrade` 的 `user_version` 断言随 `schema.rs` 自动跟随为 5 |
+
+**事实源同步**：[工作区身份设计](../../docs/design/session-workspace-identity.md) §3.2 登记裁决（组合键与新对象 / 新位置各自登记）、§3.3 情景规则、§5.4 位置重定位（可完成的前进路径）、§8 单库存储（当前 schema 5 与重建路径）；`ARC-WORKSPACE-001` Rule 与 `docs/code-index/peri-resources.md` 同步。
+
+**遗留**：
+
+- 文件对象证据（device / inode 或 Windows volume / file index）仍留在登记与绑定复核的持久化主路径；本条第 4 条只解除了它的硬拒绝，没有重新论证是否保留（简化目标第 3 项的剩余部分）。
+- 仍没有把已有会话改指到新位置的入口：用户可完成的是「在当前目录建立新会话」，旧会话保持只读历史且执行失败关闭。提示文案尚未说明这一步。
+- 同路径替换（删除重建）只做了单元测试，未做真实 TUI 端到端：运行中的 TUI 其进程 cwd 已被删除，`getcwd` 语义与登记语义无关，不适合作为该场景的端到端入口。
+- 备份恢复（restore）按同路径替换路径覆盖，未单独实测。
