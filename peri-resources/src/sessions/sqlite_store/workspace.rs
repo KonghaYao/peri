@@ -1,7 +1,7 @@
 //! Registry and session binding transactions; SQL-scoped lightweight history pages.
 
 use super::{
-    discovery::{self, Discovery},
+    discovery::{self, Discovery, Observation},
     SqliteThreadStore,
 };
 use anyhow::{Context, Result};
@@ -42,52 +42,88 @@ fn validate_relative(path: &Path) -> Result<()> {
 
 impl SqliteThreadStore {
     pub(super) async fn resolve_workspace_impl(&self, cwd: &Path) -> Result<ResolvedWorkspace> {
-        let (cwd, discovered) = discovery::discover(cwd).await?;
+        let (cwd, observed) = discovery::observe(cwd).await?;
+        let Observation {
+            discovery: discovered,
+            git_answered,
+        } = observed;
         let root = discovery::path_text(&discovered.root)?;
         let locator = discovery::path_text(discovered.project_locator())?;
         let identity = serde_json::to_string(discovered.project_identity())?;
         let snapshot = serde_json::to_string(&discovered)?;
         let root_identity = serde_json::to_string(&discovered.root_identity)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let existing: Option<(String, String, String)> = sqlx::query_as("SELECT id, object_identity, locator FROM projects WHERE locator = ? OR object_identity = ?")
-            .bind(locator).bind(&identity).fetch_optional(&mut *tx).await?;
-        let project_id = match existing {
-            Some((id, evidence, registered_locator))
-                if evidence == identity && registered_locator == locator =>
-            {
-                id.parse::<ProjectId>()?
-            }
-            Some(_) => return Err(WorkspaceError::NeedsRelink.into()),
-            None => {
-                let id = ProjectId::new();
-                sqlx::query("INSERT INTO projects (id, locator, object_identity) VALUES (?, ?, ?)")
-                    .bind(id.to_string())
-                    .bind(locator)
-                    .bind(&identity)
-                    .execute(&mut *tx)
-                    .await?;
-                id
-            }
-        };
-        let existing: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT id, project_id, discovery FROM workspaces WHERE root = ? OR root_identity = ?",
+        // A registered workspace is identified by its canonical root path plus the
+        // object identity of that same directory. The Git layout is a derived
+        // observation of the directory: `git init`, removing `.git` or replacing it
+        // are normal evolution of one unchanged directory object, so the recorded
+        // observation is refreshed while project_id stays as registered — execution
+        // cwd, project grouping and existing session bindings never move.
+        let registered: Vec<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT id, project_id, discovery, root, root_identity FROM workspaces WHERE root = ? OR root_identity = ?",
         )
         .bind(root)
         .bind(&root_identity)
-        .fetch_optional(&mut *tx)
+        .fetch_all(&mut *tx)
         .await?;
-        let workspace_id = match existing {
-            Some((id, project, evidence))
-                if project == project_id.to_string() && evidence == snapshot =>
-            {
-                id.parse::<WorkspaceId>()?
+        let same_directory = registered
+            .iter()
+            .find(|row| row.3.as_str() == root && row.4 == root_identity);
+        let (workspace_id, project_id) = match same_directory {
+            Some((id, project, recorded, _, _)) => {
+                if recorded != &snapshot {
+                    // A directory-only observation without Git answering cannot prove
+                    // the recorded repository is gone. Keep failing closed instead of
+                    // rewriting a repository into a directory.
+                    if !git_answered {
+                        return Err(WorkspaceError::NeedsRelink.into());
+                    }
+                    sqlx::query("UPDATE workspaces SET discovery = ? WHERE id = ?")
+                        .bind(&snapshot)
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                (id.parse::<WorkspaceId>()?, project.parse::<ProjectId>()?)
             }
-            Some(_) => return Err(WorkspaceError::NeedsRelink.into()),
+            None if !registered.is_empty() => {
+                // Matching the path alone or the object identity alone is not evidence
+                // that this is the directory the user registered: the path can hold a
+                // different object, and the object can live at a different path.
+                return Err(WorkspaceError::NeedsRelink.into());
+            }
             None => {
+                let existing: Option<(String, String, String)> = sqlx::query_as(
+                    "SELECT id, object_identity, locator FROM projects WHERE locator = ? OR object_identity = ?",
+                )
+                .bind(locator)
+                .bind(&identity)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let project_id = match existing {
+                    Some((id, evidence, registered_locator))
+                        if evidence == identity && registered_locator == locator =>
+                    {
+                        id.parse::<ProjectId>()?
+                    }
+                    Some(_) => return Err(WorkspaceError::NeedsRelink.into()),
+                    None => {
+                        let id = ProjectId::new();
+                        sqlx::query(
+                            "INSERT INTO projects (id, locator, object_identity) VALUES (?, ?, ?)",
+                        )
+                        .bind(id.to_string())
+                        .bind(locator)
+                        .bind(&identity)
+                        .execute(&mut *tx)
+                        .await?;
+                        id
+                    }
+                };
                 let id = WorkspaceId::new();
                 sqlx::query("INSERT INTO workspaces (id, project_id, root, root_identity, discovery) VALUES (?, ?, ?, ?, ?)")
                     .bind(id.to_string()).bind(project_id.to_string()).bind(root).bind(&root_identity).bind(&snapshot).execute(&mut *tx).await?;
-                id
+                (id, project_id)
             }
         };
         // The write transaction is the registry's common admission point. A changed

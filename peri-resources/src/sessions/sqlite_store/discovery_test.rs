@@ -22,9 +22,12 @@ async fn test_worktree_missing_git_uses_exact_directory() {
     let nested = directory.path().join("nested space");
     tokio::fs::create_dir(&nested).await.unwrap();
     let missing = directory.path().join("missing-git");
-    let (cwd, discovered) = discover_with_git(&nested, missing.as_os_str())
+    let (cwd, observed) = observe_with_git(&nested, missing.as_os_str())
         .await
         .unwrap();
+    // Git 未回答：目录模式观测不完整，登记层不得据此改写已登记的 Git 布局。
+    assert!(!observed.git_answered);
+    let discovered = observed.discovery;
     assert_eq!(cwd, tokio::fs::canonicalize(&nested).await.unwrap());
     assert_eq!(discovered.root, cwd);
     assert_eq!(discovered.project_locator(), cwd);
@@ -41,7 +44,7 @@ async fn test_worktree_missing_git_uses_exact_directory() {
 #[tokio::test]
 async fn test_worktree_missing_git_does_not_hide_unavailable_directory() {
     let directory = tempfile::tempdir().unwrap();
-    let error = discover_with_git(
+    let error = observe_with_git(
         &directory.path().join("missing-directory"),
         directory.path().join("missing-git").as_os_str(),
     )
@@ -68,9 +71,10 @@ async fn test_worktree_git_availability_change_preserves_binding_boundary() {
         .await
         .unwrap();
     assert!(output.status.success(), "Git fixture 创建失败: {output:?}");
-    let (_, repository) = discover(directory.path()).await.unwrap();
+    let (_, repository) = observe(directory.path()).await.unwrap();
     let missing = directory.path().join("missing-git");
     let error = repository
+        .discovery
         .revalidate_with_git(directory.path(), missing.as_os_str())
         .await
         .unwrap_err();
@@ -78,16 +82,25 @@ async fn test_worktree_git_availability_change_preserves_binding_boundary() {
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::NeedsRelink)
     ));
-    let (_, plain) = discover_with_git(directory.path(), missing.as_os_str())
+    let (_, plain) = observe_with_git(directory.path(), missing.as_os_str())
         .await
         .unwrap();
-    let error = plain.revalidate(directory.path()).await.unwrap_err();
+    assert!(!plain.git_answered);
+    let error = plain
+        .discovery
+        .revalidate(directory.path())
+        .await
+        .unwrap_err();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::NeedsRelink)
     ));
     // Git 恢复可用后，原仓库绑定仍可复核，不受目录模式影响。
-    repository.revalidate(directory.path()).await.unwrap();
+    repository
+        .discovery
+        .revalidate(directory.path())
+        .await
+        .unwrap();
 }
 
 #[cfg(unix)]
@@ -98,7 +111,7 @@ async fn test_worktree_git_permission_denied_is_not_directory_mode() {
     let program = directory.path().join("git");
     std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let error = discover_with_git(directory.path(), program.as_os_str())
+    let error = observe_with_git(directory.path(), program.as_os_str())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -119,7 +132,7 @@ async fn test_worktree_git_rejection_is_not_directory_mode() {
     )
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let error = discover_with_git(directory.path(), program.as_os_str())
+    let error = observe_with_git(directory.path(), program.as_os_str())
         .await
         .unwrap_err();
     assert!(matches!(

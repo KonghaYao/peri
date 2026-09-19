@@ -515,7 +515,8 @@ async fn version2_database(path: &Path) -> SqliteConnection {
 // while all directory values point at the live temporary workspace.
 async fn version3_database(path: &Path, root: &Path) -> SqliteConnection {
     let mut connection = version2_database(path).await;
-    let (_, discovery) = super::super::discovery::discover(root).await.unwrap();
+    let (_, observed) = super::super::discovery::observe(root).await.unwrap();
+    let discovery = observed.discovery;
     let identity_with_legacy_fields = |value: serde_json::Value| {
         let mut value = value;
         value["birth_seconds"] = serde_json::json!(123);

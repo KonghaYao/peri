@@ -2,7 +2,7 @@
 
 **状态**：Open
 
-**关联 P1**：[文件系统身份与 Git 探测阻断会话](2026-09-17-p1-workspace-validation-blocks-input.md)。首次发送、inode 身份门槛、无 Git 普通目录和重关联缺口由该 issue 跟踪整体简化；本文件继续保留独立兼容性待办。
+**关联 P0**：[文件系统身份与 Git 探测阻断会话](2026-09-17-p0-workspace-validation-blocks-input.md)。首次发送、inode 身份门槛、无 Git 普通目录、`git init` 后登记模式冲突和重关联缺口由该 issue 跟踪整体简化；本文件继续保留独立兼容性待办。
 
 **范围**：TUI → ACP 启动与输入、工作区发现和 SQLite、配置保存、Plugin 子进程、PTC / Workflow artifact。依据本地代码及两个独立 subagent 审计交叉核对；这是有界审计，不能代替全部平台验收。
 

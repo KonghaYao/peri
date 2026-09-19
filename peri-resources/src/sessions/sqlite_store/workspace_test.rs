@@ -182,6 +182,80 @@ async fn test_worktree_new_nested_repository_invalidates_original_binding() {
     ));
 }
 
+/// [回归测试] 普通目录登记后出现 `.git`：工作区身份是目录对象本身，Git 布局是
+/// 它的派生观测。同一目录对象必须继续可解析，且项目 / 工作区标识与历史绑定不变。
+#[tokio::test]
+async fn test_worktree_directory_gaining_repository_keeps_registration() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    let nested = root.join("sub");
+    std::fs::create_dir_all(&nested).unwrap();
+    let (store, _db) = store().await;
+    let (root_id, registered) = bound(&store, &root).await;
+    let (nested_id, nested_workspace) = bound(&store, &nested).await;
+    assert_ne!(nested_workspace.workspace_id, registered.workspace_id);
+
+    git(&root, &["init", "-q"]);
+
+    // The registered directory object keeps its identity instead of failing closed.
+    assert_eq!(store.resolve_workspace(&root).await.unwrap(), registered);
+    // Subdirectories now resolve into that same repository workspace.
+    let nested = store.resolve_workspace(&nested).await.unwrap();
+    assert_eq!(nested.workspace_id, registered.workspace_id);
+    assert_eq!(nested.project_id, registered.project_id);
+    assert_eq!(nested.relative_cwd, Path::new("sub"));
+    // The existing session is neither rebound nor hidden, and new sessions work.
+    assert_eq!(
+        store.validate_session_binding(&root_id).await.unwrap(),
+        registered
+    );
+    let (fresh, fresh_workspace) = bound(&store, &root).await;
+    assert_ne!(fresh, root_id);
+    assert_eq!(fresh_workspace, registered);
+    // The session registered inside the directory that became a repository root
+    // keeps its history but no longer executes there; the layout change is not
+    // silently rewritten into a different workspace.
+    assert!(matches!(
+        store
+            .validate_session_binding(&nested_id)
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::NeedsRelink)
+    ));
+}
+
+/// [回归测试] 已登记仓库移除 `.git`：根目录对象仍然相同，注册继续可用。
+#[tokio::test]
+async fn test_worktree_repository_losing_git_keeps_registration() {
+    let repo = repository();
+    let nested = repo.path().join("sub");
+    std::fs::create_dir(&nested).unwrap();
+    let (store, _db) = store().await;
+    let (id, registered) = bound(&store, repo.path()).await;
+    assert_eq!(
+        store.resolve_workspace(&nested).await.unwrap().workspace_id,
+        registered.workspace_id
+    );
+
+    std::fs::remove_dir_all(repo.path().join(".git")).unwrap();
+
+    assert_eq!(
+        store.resolve_workspace(repo.path()).await.unwrap(),
+        registered
+    );
+    assert_eq!(
+        store.validate_session_binding(&id).await.unwrap(),
+        registered
+    );
+    let _ = bound(&store, repo.path()).await;
+    // Without a repository each directory is again its own workspace; the
+    // subdirectory no longer belongs to the registered root workspace.
+    let separate = store.resolve_workspace(&nested).await.unwrap();
+    assert_ne!(separate.workspace_id, registered.workspace_id);
+    assert_eq!(separate.relative_cwd, Path::new(""));
+}
+
 #[tokio::test]
 async fn test_worktree_concurrent_registration_reuses_winner() {
     let repo = repository();

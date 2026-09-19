@@ -241,17 +241,29 @@ async fn git_path(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<PathBuf>
         .map_err(|_| WorkspaceError::Unavailable.into())
 }
 
-pub(super) async fn discover(cwd: &Path) -> Result<(PathBuf, Discovery)> {
-    discover_with_git(cwd, OsStr::new("git")).await
+/// 一次目录观测：`Discovery` 加上「Git 是否真的回答过」这一证据强度标记。
+///
+/// Git 不可用时得到的是不完整的目录模式观测：它不能证明该路径不是仓库，因此
+/// 登记层不得据它改写已登记的 Git 布局。
+#[derive(Debug)]
+pub(super) struct Observation {
+    pub(super) discovery: Discovery,
+    pub(super) git_answered: bool,
 }
 
-async fn discover_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Discovery)> {
+pub(super) async fn observe(cwd: &Path) -> Result<(PathBuf, Observation)> {
+    observe_with_git(cwd, OsStr::new("git")).await
+}
+
+async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Observation)> {
     let cwd = tokio::fs::canonicalize(cwd)
         .await
         .map_err(|_| WorkspaceError::Unavailable)?;
     path_text(&cwd)?;
     object_identity(&cwd).await?;
     let inside = git(program, &cwd, &["rev-parse", "--is-inside-work-tree"]).await?;
+    // `Some` 表示 Git 给出了回答（即使回答是「不是仓库」）；`None` 表示 Git 不可用。
+    let git_answered = inside.is_some();
     if let Some(output) = &inside {
         if !output.status.success() && !output.stderr.starts_with(b"fatal: not a git repository (")
         {
@@ -262,17 +274,21 @@ async fn discover_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Disc
     }
     // Missing Git is a directory-only execution mode, not evidence that the path
     // is outside a repository. Persisted Git bindings still require the exact
-    // discovery snapshot in revalidate; never rewrite them to this directory.
+    // discovery snapshot in revalidate, and the registry never rewrites one from
+    // an observation without `git_answered`; never rewrite them to this directory.
     let Some(inside) = inside.filter(|output| output.status.success()) else {
         return Ok((
             cwd.clone(),
-            Discovery {
-                root_identity: object_identity(&cwd).await?,
-                root: cwd,
-                common_dir: None,
-                common_identity: None,
-                private_dir: None,
-                private_identity: None,
+            Observation {
+                discovery: Discovery {
+                    root_identity: object_identity(&cwd).await?,
+                    root: cwd,
+                    common_dir: None,
+                    common_identity: None,
+                    private_dir: None,
+                    private_identity: None,
+                },
+                git_answered,
             },
         ));
     };
@@ -322,7 +338,13 @@ async fn discover_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Disc
         common_dir: Some(common_dir),
         private_dir: Some(private_dir),
     };
-    Ok((cwd, discovered))
+    Ok((
+        cwd,
+        Observation {
+            discovery: discovered,
+            git_answered,
+        },
+    ))
 }
 
 impl Discovery {
@@ -330,8 +352,8 @@ impl Discovery {
         self.revalidate_with_git(cwd, OsStr::new("git")).await
     }
     async fn revalidate_with_git(&self, cwd: &Path, program: &OsStr) -> Result<()> {
-        let (_, current) = discover_with_git(cwd, program).await?;
-        if &current != self {
+        let (_, current) = observe_with_git(cwd, program).await?;
+        if current.discovery != *self {
             return Err(WorkspaceError::NeedsRelink.into());
         }
         Ok(())

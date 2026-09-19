@@ -118,7 +118,7 @@ peri sync --keystore-path <empty-home>/.peri/sync-keystore device init --name is
 - **Windows 无 HOME 的 Agent Workflow**：`peri-workflow/src/runner/artifact.rs:47` 只读取 `HOME`，缺失时 embedded 发布失败；其他 Peri 路径通过 `dirs_next` 解析 home。仅设置 USERPROFILE 的新 Windows 环境可能在首次 Agent Workflow 失败。未在 Windows 实测；`peri workflow` CLI 使用临时目录，是另一条路径，不能一并归入此结论。
 - **首次日志轮转噪声**：Luna 在空 HOME ACP 启动时观测到 `Error reading the log directory/files: No such file or directory`，随后日志目录创建且启动成功。与 tracing-appender 轮转目录扫描时序一致；本次不计为启动阻塞，未测发生频率。
 - `/setup` 的打开动作只设置 `WIZARD_ACTIVE`，未从当前 config 重建表单；再次打开可能是默认表单，也可能保留本进程上一次向导状态。它加重 F03 的恢复体验，但不另算同级故障。
-- 先前已有的工作区身份/慢首次提交问题继续由 `2026-09-17-p1-workspace-validation-blocks-input.md` 与 `2026-09-17-platform-compatibility.md` 跟踪，本次不重复计数。
+- 先前已有的工作区身份/慢首次提交问题继续由 `2026-09-17-p0-workspace-validation-blocks-input.md` 与 `2026-09-17-platform-compatibility.md` 跟踪，本次不重复计数。
 
 ## 正常行为与首次使用依赖
 
