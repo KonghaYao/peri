@@ -85,21 +85,16 @@ completion requires an independent Completion Assessor verdict of `complete`
 and a finalized `evidence.md`.
 
 `writeIntent.path_allowlist` is enforced against the Git baseline captured when the
-Workflow starts. The existing Git postcondition omits ignored paths, so the Ultra-ADLC
-orchestrator must also capture a filesystem write-boundary snapshot at preflight
-and compare it during post-processing, using `peri workflow boundary` below.
-The check reports created, removed, content-changed and type-changed paths,
-including ignored paths such as `.peri/adlc/`; reconcile those paths with Git
-`changed_paths` against the same literal path allowlist. The Git postcondition
-checks only paths whose status changed during the run by comparing before/after
-porcelain records. A pre-existing unrelated dirty or ignored path is therefore allowed
-when its status and filesystem snapshot remain unchanged; record it once as an
-out-of-scope baseline, preserve it, and do not treat it as a blocker or ask the user to
-clean it. Before launching a write Workflow, run `git status --porcelain` and capture
-the filesystem write-boundary snapshot to establish that context. The allowlist lists
-only authorized repository-relative paths (product crates plus `.peri/adlc/tasks/<id>` and
-the designated evolution record); never add unrelated dirty paths merely to widen
-write authority.
+Workflow starts. Before launching a write Workflow, run `git status --porcelain`
+and record pre-existing unrelated changes as an out-of-scope baseline. Preserve
+them; do not treat their presence as a blocker or ask the user to clean them.
+The Git postcondition compares before/after porcelain records; it omits ignored
+paths and may not detect content changes in already-dirty files whose status is
+unchanged. Do not claim it proves complete filesystem coverage. Review task-scoped
+diffs and declared output files, and keep each Agent within its exclusive write scope.
+The allowlist lists only authorized repository-relative paths (product crates plus
+`.peri/adlc/tasks/<id>` and the designated evolution record); never add unrelated
+dirty paths merely to widen write authority.
 
 Interpret the four engine statuses independently. `delivery_status: blocked`
 alone does not prove a Git failure: an explicit Git postcondition error requires
@@ -112,66 +107,6 @@ infer the culprit from the final dirty set. Treat the event as a Git close-out
 failure rather than a product failure, and do not stash, commit, reset, clean, or
 ask the user to alter unrelated changes. Keep `head_may_change: false` unless the
 user explicitly authorizes a commit.
-
-### Bounded filesystem evidence
-
-Use the CLI bundled with the current Peri binary; do not install an unversioned
-package, copy an old task's scanner, or invent a baseline filename during recovery:
-
-```sh
-peri workflow boundary snapshot /absolute/task/snapshot-request.json
-peri workflow boundary compare /absolute/task/compare-request.json
-```
-
-The Main Agent creates the task's audit directories before the snapshot and writes
-the request as JSON. Generate a fresh lowercase UUID outside the Workflow script.
-Use one explicit repository-relative baseline path in both requests. Example:
-
-```json
-{
-  "schemaVersion": 1,
-  "operation": "snapshot",
-  "baselineId": "00000000-0000-4000-8000-000000000001",
-  "repoRoot": "/canonical/repository",
-  "cwd": "/canonical/repository",
-  "baselinePath": ".peri/adlc/tasks/example/artifacts/boundary-run-1.json",
-  "pathAllowlist": ["src", ".peri/adlc/tasks/example", "target"],
-  "generatedRoots": ["target"],
-  "limits": {
-    "maxEntries": 20000,
-    "maxBytes": 268435456,
-    "maxDepth": 32,
-    "deadlineMs": 30000
-  }
-}
-```
-
-Replace every example identity/path with this task's values. Normal build output
-directories and host-owned Workflow journals may be declared as generated roots
-when their writes are part of the authorized work. Add those exact directories to
-the allowlist and record the reason before capture. Their directory type/identity
-is observed; their internal contents are authorized but not enumerated or hashed.
-Never classify source code, tests, another task's data, or arbitrary ignored paths
-as generated merely to pass the check. Limits are an explicit work allowance;
-exceeding one is missing boundary evidence, not success or permission to skip files.
-
-Store the snapshot's `fingerprint`, baseline ID/path and scope in the Main-owned
-manifest. For compare, preserve the identical scope/limits, change `operation` to
-`compare`, and set `expectedBaselineFingerprint` to that independently saved
-fingerprint. Do not obtain this trusted value by rereading the baseline itself.
-A missing, altered, mismatched or incomplete baseline must fail before the scan.
-Use the returned `coverage`, `readFiles`, `readBytes`, `elapsedMs`, `changes.outOfScope`
-and `changes.generatedRootChanges` as evidence; nonzero exit or `ok: false` prevents
-boundary sign-off. A partial scan is useful diagnosis but cannot close the gate.
-
-The helper performs bounded fresh scans; it does not yet cache content hashes.
-Its evidence covers observed endpoint states within the repository, with `.git`
-handled separately by Git checks and declared generated contents excluded. It is
-not an OS permission boundary, a transactionally frozen filesystem, a detector of
-writes outside the repository or writes reverted between captures, or proof of
-which concurrent task wrote a changed path. Preserve unknown attribution and
-continue independent in-scope work; never label every outside change a baseline
-exception or complete the task while a required boundary result is unresolved.
 
 The Main Agent authors every Workflow script from engine primitives. `parallel`
 must receive `() => agent(` factories, never already-started promises.
@@ -1269,7 +1204,7 @@ may apply; resolving a close-out error never clears a separate missing test.
 | Product gap: missing/failed requirement, implementation, check, or changed input | Repair its owning package, then affected dependents and verification; assess after they are ready | Unaffected current Handoffs and evidence |
 | Capability: a needed route/tool/service cannot execute the required request | Diagnose once for the current route/request; repair configuration/request within authority or use an authorized independent route | Product and review evidence whose fingerprints are unchanged |
 | Protocol: invalid schema, missing/corrupt resume source, wrong args/path/revision, absent required Handoff | Correct the concrete protocol defect, rerun its producer or required stage | Only verified artifacts outside the invalid dependency chain |
-| Close-out: process drain, state persistence, Git or filesystem boundary check fails | Resolve that exact close-out condition; preserve unknown write attribution | Product evidence, without a premature completion verdict |
+| Close-out: process drain, state persistence, or Git postcondition check fails | Resolve that exact close-out condition; preserve unknown write attribution | Product evidence, without a premature completion verdict |
 
 The Main Agent verifies reusable files itself: regular file, canonical in-scope
 path, exact bytes/hash, accepted intent/execution revision, source/input identity,

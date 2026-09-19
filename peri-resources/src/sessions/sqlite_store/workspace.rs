@@ -1,7 +1,7 @@
 //! Registry and session binding transactions; SQL-scoped lightweight history pages.
 
 use super::{
-    discovery::{self, Discovery},
+    discovery::{self, Discovery, Observation},
     SqliteThreadStore,
 };
 use anyhow::{Context, Result};
@@ -42,57 +42,83 @@ fn validate_relative(path: &Path) -> Result<()> {
 
 impl SqliteThreadStore {
     pub(super) async fn resolve_workspace_impl(&self, cwd: &Path) -> Result<ResolvedWorkspace> {
-        let (cwd, discovered) = discovery::discover(cwd).await?;
+        let (cwd, observed) = discovery::observe(cwd).await?;
+        let Observation {
+            discovery: discovered,
+            git_answered,
+        } = observed;
         let root = discovery::path_text(&discovered.root)?;
         let locator = discovery::path_text(discovered.project_locator())?;
         let identity = serde_json::to_string(discovered.project_identity())?;
         let snapshot = serde_json::to_string(&discovered)?;
         let root_identity = serde_json::to_string(&discovered.root_identity)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let existing: Option<(String, String, String)> = sqlx::query_as("SELECT id, object_identity, locator FROM projects WHERE locator = ? OR object_identity = ?")
-            .bind(locator).bind(&identity).fetch_optional(&mut *tx).await?;
-        let project_id = match existing {
-            Some((id, evidence, registered_locator))
-                if evidence == identity && registered_locator == locator =>
-            {
-                id.parse::<ProjectId>()?
-            }
-            Some(_) => return Err(WorkspaceError::NeedsRelink.into()),
-            None => {
-                let id = ProjectId::new();
-                sqlx::query("INSERT INTO projects (id, locator, object_identity) VALUES (?, ?, ?)")
-                    .bind(id.to_string())
-                    .bind(locator)
-                    .bind(&identity)
-                    .execute(&mut *tx)
-                    .await?;
-                id
-            }
-        };
-        let existing: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT id, project_id, discovery FROM workspaces WHERE root = ? OR root_identity = ?",
+        // 登记键是 canonical root 路径加上该目录的文件对象证据，两者同时命中才复用
+        // 原登记。目录被替换（同路径的新对象）或换位（同一对象的新路径）都不命中原
+        // 登记，但它们是可访问的目录：为其建立新登记，执行 cwd、项目归属和已有绑定
+        // 都不移动——引用旧登记的会话继续按各自证据复核，不会静默改绑。
+        let registered: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT id, project_id, discovery FROM workspaces WHERE root = ? AND root_identity = ?",
         )
         .bind(root)
         .bind(&root_identity)
         .fetch_optional(&mut *tx)
         .await?;
-        let workspace_id = match existing {
-            Some((id, project, evidence))
-                if project == project_id.to_string() && evidence == snapshot =>
-            {
-                id.parse::<WorkspaceId>()?
+        let (workspace_id, project_id) = match registered {
+            Some((id, project, recorded)) => {
+                if recorded != snapshot {
+                    // A directory-only observation without Git answering cannot prove
+                    // the recorded repository is gone. Keep failing closed instead of
+                    // rewriting a repository into a directory.
+                    if !git_answered {
+                        return Err(WorkspaceError::NeedsRelink.into());
+                    }
+                    sqlx::query("UPDATE workspaces SET discovery = ? WHERE id = ?")
+                        .bind(&snapshot)
+                        .bind(&id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                (id.parse::<WorkspaceId>()?, project.parse::<ProjectId>()?)
             }
-            Some(_) => return Err(WorkspaceError::NeedsRelink.into()),
             None => {
+                // 只有定位与证据同时一致才复用项目：Git linked worktree 换位后
+                // common directory 未变而路径已变，它仍属于原项目，而不相关的
+                // 同名副本各自成项目。
+                let existing: Option<(String,)> = sqlx::query_as(
+                    "SELECT id FROM projects WHERE locator = ? AND object_identity = ?",
+                )
+                .bind(locator)
+                .bind(&identity)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let project_id = match existing {
+                    Some((id,)) => id.parse::<ProjectId>()?,
+                    None => {
+                        let id = ProjectId::new();
+                        sqlx::query(
+                            "INSERT INTO projects (id, locator, object_identity) VALUES (?, ?, ?)",
+                        )
+                        .bind(id.to_string())
+                        .bind(locator)
+                        .bind(&identity)
+                        .execute(&mut *tx)
+                        .await?;
+                        id
+                    }
+                };
                 let id = WorkspaceId::new();
                 sqlx::query("INSERT INTO workspaces (id, project_id, root, root_identity, discovery) VALUES (?, ?, ?, ?, ?)")
                     .bind(id.to_string()).bind(project_id.to_string()).bind(root).bind(&root_identity).bind(&snapshot).execute(&mut *tx).await?;
-                id
+                (id, project_id)
             }
         };
-        // The write transaction is the registry's common admission point. A changed
-        // filesystem observation cannot commit a stale winner while another host registers.
-        discovered.revalidate(&cwd).await?;
+        // The write transaction is the registry's common admission point: a changed
+        // filesystem observation cannot commit a stale winner while another host
+        // registers. External probing stays outside the lock — the revalidation here
+        // re-checks the critical file objects only, so a slow or missing Git never
+        // blocks other writers of the same database.
+        discovered.reassert_key_objects(&cwd).await?;
         tx.commit().await?;
         let relative_cwd = cwd
             .strip_prefix(&discovered.root)
@@ -109,9 +135,13 @@ impl SqliteThreadStore {
 
     async fn validate_resolved(&self, workspace: &ResolvedWorkspace) -> Result<()> {
         let mut connection = self.pool.acquire().await?;
-        Self::validate_resolved_on(&mut connection, workspace).await
+        Self::validate_resolved_on(&mut connection, workspace).await?;
+        // 事务外才叠加完整快照复核，写事务内不做 Git 探测（设计 §3.2）。
+        Self::revalidate_registered_observation_on(&mut connection, workspace).await
     }
 
+    /// 事务内的复核：SQL 关系加关键文件对象，不启动外部进程。
+    ///
     /// Transaction callers reuse their admitted connection, including every SQL read.
     async fn validate_resolved_on(
         connection: &mut SqliteConnection,
@@ -132,12 +162,25 @@ impl SqliteThreadStore {
         }
         let discovered: Discovery =
             serde_json::from_str(&snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
-        let canonical = tokio::fs::canonicalize(&workspace.cwd)
-            .await
-            .map_err(|_| WorkspaceError::Unavailable)?;
-        if canonical != workspace.cwd {
-            return Err(WorkspaceError::NeedsRelink.into());
-        }
+        discovered.reassert_key_objects(&workspace.cwd).await
+    }
+
+    /// 事务外的完整快照复核：重新执行 Git 发现并与已登记观测比对（设计 §3.2）。
+    ///
+    /// 只能在持有写事务之外调用；事务内的复核见 `validate_resolved_on`。
+    async fn revalidate_registered_observation_on(
+        connection: &mut SqliteConnection,
+        workspace: &ResolvedWorkspace,
+    ) -> Result<()> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT discovery FROM workspaces WHERE id = ? AND project_id = ?")
+                .bind(workspace.workspace_id.to_string())
+                .bind(workspace.project_id.to_string())
+                .fetch_optional(&mut *connection)
+                .await?;
+        let (snapshot,) = row.ok_or(WorkspaceError::InvalidBinding)?;
+        let discovered: Discovery =
+            serde_json::from_str(&snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
         discovered.revalidate(&workspace.cwd).await
     }
 
@@ -268,7 +311,10 @@ impl SqliteThreadStore {
         id: &ThreadId,
     ) -> Result<ResolvedWorkspace> {
         let mut connection = self.pool.acquire().await?;
-        Self::validate_session_binding_on(&mut connection, id).await
+        let workspace = Self::validate_session_binding_on(&mut connection, id).await?;
+        // 事务外才叠加完整快照复核，写事务内不做 Git 探测（设计 §3.2）。
+        Self::revalidate_registered_observation_on(&mut connection, &workspace).await?;
+        Ok(workspace)
     }
 
     pub(super) async fn validate_session_binding_on(

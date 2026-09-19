@@ -34,6 +34,13 @@ impl AcpTuiClient {
             "clientCapabilities": { "_meta": caps.to_agent_meta() },
         });
         let result = self.transport.send_request("initialize", params).await?;
+        self.session_recovery.store(
+            result
+                .pointer("/agentCapabilities/_meta/peri.sessionRecoveryV1")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Release,
+        );
         self.session_workspace.store(
             result
                 .pointer("/agentCapabilities/_meta/peri.sessionWorkspaceV1")

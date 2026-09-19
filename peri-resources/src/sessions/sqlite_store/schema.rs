@@ -3,7 +3,7 @@
 use super::SqliteThreadStore;
 use anyhow::Result;
 use peri_acp_types::workspace::WorkspaceError;
-use sqlx::{AssertSqlSafe, SqliteConnection};
+use sqlx::{AssertSqlSafe, Connection, SqliteConnection};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -12,6 +12,7 @@ pub(super) enum SchemaState {
     Legacy,
     Version2,
     Version3,
+    Version4,
     Current,
 }
 
@@ -21,7 +22,8 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .fetch_one(&mut *connection)
         .await?;
     match version {
-        4 => return Ok(SchemaState::Current),
+        5 => return Ok(SchemaState::Current),
+        4 => return Ok(SchemaState::Version4),
         3 => return Ok(SchemaState::Version3),
         2 => return Ok(SchemaState::Version2),
         0 => {}
@@ -78,12 +80,36 @@ async fn column_names(connection: &mut SqliteConnection, table: &str) -> Result<
 impl SqliteThreadStore {
     /// DDL 与版本号在同一事务中提交；不回填历史 SessionBinding。
     pub(super) async fn init_schema(&self) -> Result<()> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let state = inspect(&mut tx).await?;
+        let mut connection = self.pool.acquire().await?;
+        let state = inspect(&mut connection).await?;
         if state == SchemaState::Current {
-            tx.commit().await?;
             return Ok(());
         }
+        // 登记表重建要对被引用的父表执行 DROP TABLE：SQLite 对父表做隐式删除时会
+        // 立即检查外键，`defer_foreign_keys` 也挡不住。该 PRAGMA 只在事务外生效，
+        // 因此重建路径整段使用同一条连接：先关外键，提交前用 foreign_key_check 补齐
+        // 校验，最后恢复连接设置。
+        let rebuilding = state == SchemaState::Version4;
+        if rebuilding {
+            sqlx::query("PRAGMA foreign_keys = OFF")
+                .execute(&mut *connection)
+                .await?;
+        }
+        let migrated = Self::migrate_schema(&mut connection, state).await;
+        if rebuilding {
+            let restored = sqlx::query("PRAGMA foreign_keys = ON")
+                .execute(&mut *connection)
+                .await;
+            migrated?;
+            restored?;
+        } else {
+            migrated?;
+        }
+        Ok(())
+    }
+
+    async fn migrate_schema(connection: &mut SqliteConnection, state: SchemaState) -> Result<()> {
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         if state == SchemaState::Version2 {
             // v2's unused revision column is NOT NULL without a default. Remove
             // it before current writers stop supplying it; all remaining data stays intact.
@@ -142,12 +168,13 @@ impl SqliteThreadStore {
             }
             sqlx::raw_sql(
             "CREATE TABLE projects (
-                id TEXT PRIMARY KEY, locator TEXT NOT NULL UNIQUE, object_identity TEXT NOT NULL UNIQUE
+                id TEXT PRIMARY KEY, locator TEXT NOT NULL, object_identity TEXT NOT NULL,
+                UNIQUE(locator, object_identity)
             );
             CREATE TABLE workspaces (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-                root TEXT NOT NULL UNIQUE, root_identity TEXT NOT NULL UNIQUE, discovery TEXT NOT NULL,
-                UNIQUE(id, project_id)
+                root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
+                UNIQUE(root, root_identity), UNIQUE(id, project_id)
             );
             CREATE TABLE session_bindings (
                 thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
@@ -167,12 +194,75 @@ impl SqliteThreadStore {
         if matches!(state, SchemaState::Version2 | SchemaState::Version3) {
             migrate_identity_values(&mut tx).await?;
         }
-        sqlx::query("PRAGMA user_version = 4")
+        if state == SchemaState::Version4 {
+            relax_registration_keys(&mut tx).await?;
+            // 本次迁移关闭了外键强制，提交前显式补齐引用校验。
+            let violations: Vec<(String, i64, String, i64)> =
+                sqlx::query_as("PRAGMA foreign_key_check")
+                    .fetch_all(&mut *tx)
+                    .await?;
+            if !violations.is_empty() {
+                return Err(WorkspaceError::DiscoveryError(
+                    "registration rebuild broke references".into(),
+                )
+                .into());
+            }
+        }
+        sqlx::query("PRAGMA user_version = 5")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         Ok(())
     }
+}
+
+/// schema 5：登记键从单列唯一放宽为 (定位路径, 文件对象证据) 组合。
+///
+/// 目录被替换（同路径的新文件对象）或换位（同一对象的新路径）是正常演进：它们
+/// 应当得到新的项目与工作区登记，而不是被单列唯一约束挡成不可登记。放宽只影响
+/// 唯一性判定，不涉及行内容——同一组合仍然唯一，旧登记、旧绑定与执行状态保持原样。
+async fn relax_registration_keys(connection: &mut SqliteConnection) -> Result<()> {
+    let before = registration_counts(connection).await?;
+    // 两个表互为引用，调用方已为本次重建关闭外键强制并在提交前做 foreign_key_check；
+    // 复制必须逐列进行，行内容与引用关系都保持原样。
+    sqlx::raw_sql(
+        "CREATE TABLE projects_relaxed (
+            id TEXT PRIMARY KEY, locator TEXT NOT NULL, object_identity TEXT NOT NULL,
+            UNIQUE(locator, object_identity)
+        );
+        INSERT INTO projects_relaxed (id, locator, object_identity)
+            SELECT id, locator, object_identity FROM projects;
+        DROP TABLE projects;
+        ALTER TABLE projects_relaxed RENAME TO projects;
+        CREATE TABLE workspaces_relaxed (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+            root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
+            UNIQUE(root, root_identity), UNIQUE(id, project_id)
+        );
+        INSERT INTO workspaces_relaxed (id, project_id, root, root_identity, discovery)
+            SELECT id, project_id, root, root_identity, discovery FROM workspaces;
+        DROP TABLE workspaces;
+        ALTER TABLE workspaces_relaxed RENAME TO workspaces;",
+    )
+    .execute(&mut *connection)
+    .await?;
+    if registration_counts(connection).await? != before {
+        return Err(WorkspaceError::DiscoveryError(
+            "registration rows changed during schema migration".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn registration_counts(connection: &mut SqliteConnection) -> Result<(i64, i64)> {
+    let (projects,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM projects")
+        .fetch_one(&mut *connection)
+        .await?;
+    let (workspaces,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM workspaces")
+        .fetch_one(&mut *connection)
+        .await?;
+    Ok((projects, workspaces))
 }
 
 async fn migrate_identity_values(connection: &mut SqliteConnection) -> Result<()> {

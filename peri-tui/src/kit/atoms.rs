@@ -706,6 +706,8 @@ pub static NOTIFICATION: AtomStatic<Option<Notification>> = AtomStatic::new(|| N
 /// 确认弹窗要执行的操作
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
+    /// 仅当前 load transition 消费的一次性风险选择。
+    RecoverDirty(std::sync::Arc<crate::kit::popups::confirm_popup::RecoveryConfirmation>),
     /// 切换到指定 thread_id
     ThreadSwitch(String),
     /// 用户确认拒绝回答 AskUser 提问

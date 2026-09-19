@@ -72,21 +72,43 @@ binding 不可变，协议中的 `revision` 保持常量 `1` 以兼容已有客�
 
 ```text
 git -C <cwd> rev-parse --is-inside-work-tree
-git -C <cwd> rev-parse --path-format=absolute --show-toplevel
-git -C <cwd> rev-parse --absolute-git-dir
-git -C <cwd> rev-parse --path-format=absolute --git-common-dir
+git -C <cwd> rev-parse --show-toplevel --git-dir
 git -C <cwd> worktree list --porcelain -z
 ```
+
+两个位置来自同一次 `rev-parse`，输出按参数顺序每行一个；行数与请求不符即视为输出
+不可信，不猜位置。发现不使用 `--path-format=absolute` 与 `--absolute-git-dir`：
+上游文档记为 Git 2.31 / 2.13 引入，更早的 Git 把它们当未知选项按用法错误退出，会让
+普通仓库被判成无法发现。common directory 也不请求 `rev-parse --git-common-dir`
+（Git 2.5 引入），而是读 Git 自己写入的 `commondir` 文件：该文件的语义就是
+`$GIT_COMMON_DIR`，`--git-common-dir` 是它的投影；linked worktree 的该文件由
+`git worktree add` 写入（本机 Git 2.39 实测内容为 `../..`），主工作树没有它，两个
+位置相同。代价是 `--git-dir` 的默认输出可能是相对路径，且同一命令在不同 cwd 下的
+输出形式不同（主仓库根给相对 `.git`，子目录的 `--git-dir` 反而给绝对路径），因此位置
+先与 cwd 组合再 canonicalize，不能按宿主进程的 cwd 解释。`rev-parse` 把不认识的选项
+当普通参数回显到 stdout，因此位置行以 `--` 开头即按不兼容的 Git 处理并报类型化错误，
+不能当成相对路径拼在 cwd 下，用「目录不可用」掩盖真正的版本问题。
 
 common directory 用于发现同仓库关联，private Git directory 用于区分 checkout。
 linked worktree 的这两者不同；主工作树通常相同。
 这些 Git 语义来自 [git-worktree](https://git-scm.com/docs/git-worktree#_details)
 与 [git-rev-parse](https://git-scm.com/docs/git-rev-parse#_options_for_files)。
 
-命令使用参数数组、显式 cwd 和有界执行，不拼接 shell。发现过程隔离继承的
+命令使用参数数组、显式 cwd 和有界执行，不拼接 shell。每次调用有固定超时预算，超时
+按类型化发现错误结束，既不重试也不降级为目录模式。发现过程隔离继承的
 `GIT_DIR`、`GIT_WORK_TREE`、`GIT_COMMON_DIR` 等会改写仓库选择的环境变量；不能
-修改用户 Git 配置来使探测成功。解析支持带空格的路径，worktree list 使用 NUL
-分隔。路径按所在文件系统 canonicalize，不统一小写、不使用 lossy 转换生成身份。
+修改用户 Git 配置来使探测成功。解析支持带空格的路径，worktree list 优先 NUL 分隔；
+旧版 Git 不认识 `-z` 时按用法错误退回换行分隔，退回只改变分隔符，成员判定仍按完整
+路径精确比对，真实失败（权限、损坏仓库）不触发退回；`worktree` 子命令或
+`--porcelain` 整体不存在的旧版 Git 不做成员交叉核对（位置已由 `rev-parse` 回答），
+这属于证据不足而非「不是仓库」，真实失败仍原样上报。路径按所在文件系统
+canonicalize，不统一小写、不使用 lossy 转换生成身份。
+
+「不是仓库」的判定按 stderr 前缀比较完成，忽略大小写：该文案随版本变化（Git 2.4.12
+为 `fatal: Not a git repository (or any of the parent directories): .git`，2.39 起为
+小写 `not`），按大小写敏感匹配会把旧版 Git 下的普通目录判成类型化发现错误，使这些
+目录完全无法建立会话。放宽的只是大小写，不是匹配范围：权限不足、unsafe repository
+与损坏仓库的文案不含该前缀，仍按真实失败原样上报。
 
 ### 3.2 登记裁决
 
@@ -94,10 +116,24 @@ linked worktree 的这两者不同；主工作树通常相同。
 ID 本身；不把路径 hash 永久当成项目 ID，也不往受版本控制文件或 Git 管理目录
 写 Peri 身份标记。
 
-登记记录保存 canonical locator、平台文件对象识别信息和登记代际。相同路径
-只有在登记证据仍匹配时才复用身份；观察到删除、替换或冲突时将旧位置失效。
+登记记录保存 canonical locator、平台文件对象识别信息和登记代际。登记键是
+(canonical locator, 该位置的文件对象证据) 组合，两者同时命中才复用原登记：
+路径相同而文件对象已被替换，或同一文件对象出现在新路径，都不是同一次登记。
 inode / file ID 只能作为一致性证据，不能证明任意复制、重建或历史路径复用。
-证据不足返回 `NeedsRelink`，允许用户核对后显式重关联，不自动合并。
+
+新对象或新位置不继承旧身份，也不被旧登记挡住：登记表允许同一路径有多个文件
+对象、同一对象出现在多个路径，各自得到新的 `ProjectId` 与 `WorkspaceId`，
+执行 cwd 就是用户实际打开的目录。旧登记、旧绑定与历史保持原样，引用它们的
+会话继续按各自登记证据复核并失败关闭，不静默改绑、不隐藏历史。项目（而非
+工作区）只在定位与对象证据同时一致时复用，例如 Git linked worktree 换位后
+common directory 未变仍属原项目；不相关的同名副本各自成项目。证据不足返回
+`NeedsRelink`，不自动合并。
+
+工作区身份取 canonical root 路径加上该目录自身的文件对象证据；Git 布局是同一
+目录的派生观测，`git init`、移除 `.git` 或重建其管理目录都属于正常演进。同一
+目录对象在同一路径再次解析时复用原项目与工作区 ID，只在原行内刷新观测快照：
+执行 cwd、项目归属和已有绑定都不移动。可以覆盖已登记快照的观测必须来自 Git 的
+真实回答；Git 不可用时得到的是不完整目录观测，仍按证据不足拒绝。
 
 第一次登记与 binding 写入使用唯一约束、事务和竞争失败后重读 winner，避免
 两个宿主同时为同一已验证工作区分配不同有效身份。Git 探测在事务外进行，提交
@@ -113,12 +149,14 @@ inode / file ID 只能作为一致性证据，不能证明任意复制、重建�
 | 相同 remote、branch 或 commit 的独立 clone | 分别登记项目，不推断同一身份 |
 | 嵌套仓库、submodule | 使用 cwd 所属的最近 Git 仓库，不上卷到 superproject |
 | 非 Git 目录 | 创建目录项目与工作区；不猜测任意父目录是项目根 |
+| 已登记目录随后出现或移除 `.git` | 同一目录对象仍取原工作区，刷新观测快照；执行 cwd 与历史绑定不变 |
 | Git 可执行文件缺失 | 新发现使用 cwd 目录模式，不推断仓库关系；已有 Git 绑定仍须匹配原发现快照，缺少证据时拒绝执行 |
 | Git 权限不足、unsafe repository、损坏或探测中途失效 | 类型化探测错误，不能伪装为非 Git 项目 |
 | bare repository | 可作为 linked worktree 的仓库锚点；bare 目录本身不可作为执行工作区 |
 | worktree 删除或目录暂时不可用 | 保留身份和历史，位置标记不可用，阻止执行 |
-| 删除后同路径重新创建 | 不自动继承旧会话绑定；无法确定是否同一实例时要求重关联 |
-| 整仓搬迁、复制、导入或 Git 管理目录重建 | 不承诺透明识别；显式重关联，不能以 remote 相同证明身份 |
+| 删除后同路径重新创建 | 不继承旧会话绑定；新对象单独登记，可在该目录建立新会话 |
+| 目录（含仓库）整体搬迁到新路径 | 旧绑定按原登记证据复核并失败关闭，历史保留；新路径单独登记，不自动改绑或改指旧 ID |
+| 整仓复制、导入或 Git 管理目录重建 | 不承诺透明识别，不以 remote 相同证明身份；新位置单独登记并可建立新会话，旧绑定保留历史 |
 
 发现结果采用 `GitWorkspace` / `DirectoryWorkspace` / `Unavailable` /
 `NeedsRelink` / `DiscoveryError` 等明确分支。Git 确认“不是 Git 仓库”，或首次
@@ -126,8 +164,10 @@ inode / file ID 只能作为一致性证据，不能证明任意复制、重建�
 发现，不声称目录中没有仓库。两种目录模式均只使用 cwd 及文件对象身份，不推断
 任意父目录归属。Git 探测一旦开始成功，后续失败不能降级为目录模式。
 已有绑定始终复核完整发现快照；Git 安装状态变化不能改写项目/工作区身份。
-非 Git 目录随后初始化 Git，或安装 Git 后发现目录属于仓库，需要显式关联已有
-目录会话，不能无声换项目；原 Git 会话在 Git 恢复可用且证据匹配后可继续恢复。
+非 Git 目录随后初始化 Git，或已登记仓库移除 `.git` 时，该目录仍是同一工作区：
+复用原项目与工作区 ID 并刷新观测快照，已有会话继续可执行。子目录会话不因根
+目录的布局变化被并入或改绑，仍按各自登记快照复核。Git 不可用不构成「该目录
+已不是仓库」的证据，不得据此覆盖已登记的仓库布局。
 
 ## 4. 唯一执行绑定
 
@@ -194,8 +234,12 @@ snapshot，继续满足 `ARC-FROZEN-001`。请求不同 cwd 不得偷偷创建�
 
 ### 5.4 位置重定位
 
-初始交付不提供重定位或重关联操作。目录移动、移除后重建、Git 管理目录身份变化
-返回 `NeedsRelink` 或 `Unavailable`，保留历史，不自动修改 binding 或 frozen。
+初始交付不提供重定位或重关联操作：没有把已有 binding 改指到新位置或新对象的
+入口。目录移动、移除后重建、Git 管理目录身份变化让原绑定返回 `NeedsRelink`
+或 `Unavailable`，保留历史，不自动修改 binding 或 frozen。用户可完成的前进路径
+是在当前可访问目录建立新会话：该目录按 §3.2 得到新登记，旧会话与历史保持只读
+可查。该绑定失败的原因与这条前进路径随错误一并呈现，不提示产品中不存在的操作；
+会话未能建立的失败发生在输入受理之前，其提示不得表述为输入被拒。
 后续显式重定位若要保留 WorkspaceId，必须在无执行 owner 时校验 Git 关联和
 文件对象证据，并让位置更新与执行准入共享线性化点。
 
@@ -271,7 +315,7 @@ hooks、插件与 MCP 展示取当前会话环境。TUI 本地配置面板仍编
 ## 8. 单库存储与版本边界
 
 默认读写始终使用 `~/.peri/threads/threads.db`，`--db-path` 仍可选择显式路径。
-schema 版本记录在 `PRAGMA user_version`，当前为 `4`，不另建数据库文件。新 writer
+schema 版本记录在 `PRAGMA user_version`，当前为 `5`，不另建数据库文件。新 writer
 按必需的 `threads` / `messages` 真实表及其列识别未设置版本号的旧 schema；
 同库额外业务表（例如 `thread_goals`）及其数据保持原样，不能以整库表数量拒绝
 兼容旧库。在单个事务中补齐
@@ -279,6 +323,13 @@ schema 版本记录在 `PRAGMA user_version`，当前为 `4`，不另建数据�
 新建与旧库补列共享同一组列定义；已存在的 schema 2 在事务中删除无状态用途的
 binding `revision` 列，保留其余绑定与执行状态，最后提交版本号。并发开库由
 schema OS 锁序列化；升级失败回滚整次 DDL。
+
+schema 4 升级到 5 只放宽登记键：重建 `projects` 与 `workspaces`，把 locator /
+root 与 identity 的单列唯一约束换成 §3.2 的组合键。重建逐列复制行内容与引用
+关系，ProjectId、WorkspaceId、binding、frozen / history 和 execution 状态不变；
+该路径需要在事务外关闭外键强制才能替换被引用的父表，因此提交前显式执行
+`PRAGMA foreign_key_check`，发现悬空引用即回滚。升级前的单列唯一约束会拒绝
+同一路径上的第二个文件对象，这正是升级要解除的限制。
 
 开库时已有会话、消息、配置和 frozen / inherited / cached context 列值保持原样，
 不批量扫描目录或回填 binding。列表保留未绑定历史，`ScopedThreadEntry.binding`

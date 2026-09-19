@@ -96,6 +96,7 @@ pub(crate) async fn handle_request(
             config_options::handle_set_config_option(params, cfg, sessions, transport).await
         }
         "session/load" => session_lifecycle::handle_load(params, cfg, sessions, transport).await,
+        "peri/session_reset_dirty" => session_lifecycle::handle_reset_dirty(params, cfg).await,
         "session/list" => session_lifecycle::handle_list(params, cfg).await,
         "peri/session_context" => session_lifecycle::handle_context(params, cfg).await,
         "session/metadata" => session_lifecycle::handle_metadata(params, cfg, false).await,

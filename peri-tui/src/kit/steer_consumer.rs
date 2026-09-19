@@ -13,8 +13,37 @@ use super::steer_state::{STEERS, SteerCommand, SteerCommandKind};
 use crate::acp_client::AcpTuiClient;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+/// 受理回执期限：只覆盖已发出请求的等待。
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 准备阶段期限：会话创建包含工作区发现与服务端准入，比回执预算宽松。
+///
+/// 两个阶段不共用期限：准备慢于回执预算时输入尚未发出，
+/// 按回执结论收尾会把「还没来得及发送」说成输入未被接收。
+const PREPARE_TIMEOUT: Duration = Duration::from_secs(60);
 const FAILURE_NOTICE_DURATION: Duration = Duration::from_secs(6);
+
+/// 失败发生的阶段：会话没准备好与输入未被受理，对用户是不同的结论。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SteerStage {
+    Prepare,
+    Admit,
+}
+
+/// 用户输入链路的失败，附带失败阶段。
+#[derive(Debug)]
+struct SteerFailure {
+    error: AcpError,
+    stage: SteerStage,
+}
+
+impl From<AcpError> for SteerFailure {
+    fn from(error: AcpError) -> Self {
+        Self {
+            error,
+            stage: SteerStage::Admit,
+        }
+    }
+}
 
 pub(crate) fn spawn_steer_consumer(
     client: AcpTuiClient,
@@ -43,11 +72,10 @@ pub(crate) fn spawn_steer_consumer(
             };
             let result = tokio::select! {
                 _ = shutdown.cancelled() => break,
-                result = tokio::time::timeout(RECEIPT_TIMEOUT, execute(&client, &mut command, &cwd)) => {
-                    result.unwrap_or_else(|_| Err(AcpError::new(-32603, "user input receipt timed out")))
-                },
+                result = execute(&client, &mut command, &cwd) => result,
             };
-            if let Err(error) = result {
+            if let Err(failure) = result {
+                let SteerFailure { error, stage } = failure;
                 let rejected = reject_command(&mut command, &error);
                 if let Some(snapshot) = error
                     .data
@@ -60,16 +88,12 @@ pub(crate) fn spawn_steer_consumer(
                         .write()
                         .accept_snapshot(snapshot, command.epoch, false);
                 }
-                tracing::warn!(code = error.code, command_id = %command.command_id, "user input command failed");
+                tracing::warn!(code = error.code, stage = ?stage, command_id = %command.command_id, "user input command failed");
                 if !matches!(command.kind, SteerCommandKind::Refresh)
                     && warned.insert(command.command_id.clone())
                 {
                     atoms::NOTIFICATION.set(Some(atoms::Notification {
-                        message: crate::i18n::tr(if rejected {
-                            "steer-input-rejected"
-                        } else {
-                            "steer-input-uncertain"
-                        }),
+                        message: failure_notice(stage, rejected, &error),
                         until: std::time::Instant::now() + FAILURE_NOTICE_DURATION,
                     }));
                 }
@@ -79,6 +103,22 @@ pub(crate) fn spawn_steer_consumer(
             }
         }
     })
+}
+
+/// 失败提示文案。
+///
+/// 会话未能建立的失败发生在输入受理之前，服务端已给出原因：提示必须复述该原因，
+/// 不能沿用「输入未被接收」这一结论——用户据此无法判断是输入被拒还是环境不可用。
+/// 入队被拒或回执不明的结论保持原样。
+fn failure_notice(stage: SteerStage, rejected: bool, error: &AcpError) -> String {
+    match (stage, rejected) {
+        (SteerStage::Prepare, true) => crate::i18n::tr_args(
+            "steer-session-unavailable",
+            &[("error".into(), error.message.clone().into())],
+        ),
+        (_, true) => crate::i18n::tr("steer-input-rejected"),
+        (_, false) => crate::i18n::tr("steer-input-uncertain"),
+    }
 }
 
 fn refresh_command() -> Option<SteerCommand> {
@@ -114,21 +154,59 @@ fn reject_command(command: &mut SteerCommand, error: &AcpError) -> bool {
     rejected
 }
 
+/// 一次输入投递：先准备会话，再发送请求并等待受理回执。
+///
+/// 两个阶段各有自己的期限——准备阶段不被回执预算提前放弃，
+/// 已发出的请求也不因准备耗时被误判成未受理。
 async fn execute(
     client: &AcpTuiClient,
     command: &mut SteerCommand,
     cwd: &str,
-) -> Result<(), AcpError> {
-    if command.session_id.is_empty() && matches!(command.kind, SteerCommandKind::Enqueue(_)) {
-        let session_id = client.ensure_session(cwd, None).await?;
-        let epoch = atoms::BRIDGE_RESET_COUNTER.get();
-        STEERS
-            .state()
-            .write()
-            .rebind_initial(command, &session_id, epoch);
-        command.session_id = session_id;
-        command.epoch = epoch;
+) -> Result<(), SteerFailure> {
+    prepare(client, command, cwd).await?;
+    tokio::time::timeout(RECEIPT_TIMEOUT, admit(client, command))
+        .await
+        .unwrap_or_else(|_| Err(AcpError::new(-32603, "user input receipt timed out")))?;
+    Ok(())
+}
+
+/// 准备首会话。失败发生在输入受理之前，因此有独立的阶段标记与期限。
+async fn prepare(
+    client: &AcpTuiClient,
+    command: &mut SteerCommand,
+    cwd: &str,
+) -> Result<(), SteerFailure> {
+    if !command.session_id.is_empty() || !matches!(command.kind, SteerCommandKind::Enqueue(_)) {
+        return Ok(());
     }
+    let session_id =
+        match tokio::time::timeout(PREPARE_TIMEOUT, client.ensure_session(cwd, None)).await {
+            Ok(Ok(session_id)) => session_id,
+            Ok(Err(error)) => {
+                return Err(SteerFailure {
+                    error,
+                    stage: SteerStage::Prepare,
+                });
+            }
+            Err(_) => {
+                return Err(SteerFailure {
+                    error: AcpError::new(-32603, "session preparation timed out"),
+                    stage: SteerStage::Prepare,
+                });
+            }
+        };
+    let epoch = atoms::BRIDGE_RESET_COUNTER.get();
+    STEERS
+        .state()
+        .write()
+        .rebind_initial(command, &session_id, epoch);
+    command.session_id = session_id;
+    command.epoch = epoch;
+    Ok(())
+}
+
+/// 核对实例身份后发送请求并落定回执。
+async fn admit(client: &AcpTuiClient, command: &mut SteerCommand) -> Result<(), AcpError> {
     if !matches!(command.kind, SteerCommandKind::Refresh) {
         let pending_epoch = STEERS
             .state()

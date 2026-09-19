@@ -96,6 +96,13 @@ impl ThreadStore for SqliteThreadStore {
         self.acquire_execution_lease_impl(id).await
     }
 
+    async fn reset_dirty_execution(
+        &self,
+        target: &peri_acp_types::workspace::RecoveryRequiredDetails,
+    ) -> Result<()> {
+        self.reset_dirty_execution_impl(target).await
+    }
+
     async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId> {
         let id = meta.id.clone();
         sqlx::query(

@@ -1128,6 +1128,14 @@ popup-ask-user-hint-single-unsubmitted =   ↑/↓::导航 · Space::选择 · E
 popup-ask-user-title =  用户问答
 
 # ---- Confirm Popup (P2) ----
+dirty-recovery-title = 解除 dirty 状态并恢复原会话？
+dirty-recovery-risk = 旧子进程可能仍在运行。
+dirty-recovery-unknown = 之前的副作用未知。
+dirty-recovery-responsibility = 继续表示你接受风险，并承担后续结果。
+dirty-recovery-hint = 上/下：选择 · Enter：执行 · Esc：取消
+dirty-recovery-cancel = 取消（默认）
+dirty-recovery-accept = 接受风险，解除 dirty 并加载
+
 popup-confirm-empty =   暂无待确认项。
 popup-confirm-action-hint =   Enter: 确认  Esc: 取消
 popup-confirm-title =  确认
@@ -1168,6 +1176,7 @@ reminder-compact-summary = 压缩摘要
 steer-queue-title = 待发送 { $count }
 steer-input-rejected = 输入未被接收，原稿已保留。
 steer-input-uncertain = 暂未收到输入回执，正在核对并重试。
+steer-session-unavailable = 会话未能建立：{ $error }。原稿已保留。
 
 thread-browser-project = 项目
 thread-browser-workspace = 工作区

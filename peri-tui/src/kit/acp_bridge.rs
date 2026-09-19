@@ -33,6 +33,22 @@ pub(crate) struct PerfCounters {
     pub wrap_recalculated_lines: u64,
     pub aggregate_allocations: u64,
     pub aggregate_copied_items: u64,
+    /// 工具分组「整段复用」（零重建）次数与「发生重建」次数（`group_successful_tools`）。
+    pub group_full_reuse: u64,
+    pub group_rebuilds: u64,
+    /// 分组重建时深拷贝的 render unit 数量（组内容 `view_models`）。
+    pub group_copied_units: u64,
+    /// 分组重建覆盖的输入条目数（增量重建 = 变化后缀长度，非全段）。
+    pub group_rebuilt_units: u64,
+    /// 折叠 pass 实际写回的条目数（稳态应为 0——[G3] 只读扫描）。
+    pub fold_pass_writes: u64,
+    /// `push_view_models` 各阶段累计纳秒（组装 / 折叠 pass / todo 摘要 / 分组 / 写快照）
+    /// ——长会话下按阶段定位成本归属，配合 `acp_events_test/perf_probe_test.rs`。
+    pub stage_assemble_ns: u64,
+    pub stage_fold_ns: u64,
+    pub stage_todo_ns: u64,
+    pub stage_group_ns: u64,
+    pub stage_write_ns: u64,
 }
 
 #[cfg(test)]
@@ -51,6 +67,16 @@ pub(crate) enum PerfCounter {
     WrapRecalculatedLines,
     AggregateAllocation,
     AggregateCopiedItems,
+    GroupFullReuse,
+    GroupRebuild,
+    GroupCopiedUnits,
+    GroupRebuiltUnits,
+    FoldPassWrites,
+    StageAssembleNs,
+    StageFoldNs,
+    StageTodoNs,
+    StageGroupNs,
+    StageWriteNs,
 }
 
 #[cfg(test)]
@@ -76,6 +102,16 @@ pub(crate) fn observe_perf(counter: PerfCounter, value: u64) {
             PerfCounter::WrapRecalculatedLines => counters.wrap_recalculated_lines += value,
             PerfCounter::AggregateAllocation => counters.aggregate_allocations += value,
             PerfCounter::AggregateCopiedItems => counters.aggregate_copied_items += value,
+            PerfCounter::GroupFullReuse => counters.group_full_reuse += value,
+            PerfCounter::GroupRebuild => counters.group_rebuilds += value,
+            PerfCounter::GroupCopiedUnits => counters.group_copied_units += value,
+            PerfCounter::GroupRebuiltUnits => counters.group_rebuilt_units += value,
+            PerfCounter::FoldPassWrites => counters.fold_pass_writes += value,
+            PerfCounter::StageAssembleNs => counters.stage_assemble_ns += value,
+            PerfCounter::StageFoldNs => counters.stage_fold_ns += value,
+            PerfCounter::StageTodoNs => counters.stage_todo_ns += value,
+            PerfCounter::StageGroupNs => counters.stage_group_ns += value,
+            PerfCounter::StageWriteNs => counters.stage_write_ns += value,
         }
     });
 }

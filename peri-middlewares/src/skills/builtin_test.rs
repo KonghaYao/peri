@@ -101,7 +101,7 @@ fn test_ultra_adlc_skill_encodes_peri_workflow_contract() {
         "acceptance_status: unknown",
         "delivery is `unknown`, not blocked",
         "pre-existing unrelated",
-        "checks only paths whose status changed during the run",
+        "The Git postcondition compares before/after porcelain records",
         "infer the culprit from the final dirty set",
         "path_allowlist",
         "git status --porcelain",
@@ -290,6 +290,28 @@ fn test_ultra_adlc_skill_guards_complete_delivery_and_audit() {
     ] {
         assert!(content.contains(marker), "ultra-adlc 应锁定 {marker}");
     }
+}
+
+#[test]
+fn test_ultra_adlc_skill_does_not_require_repository_snapshot() {
+    let content = BUILTIN_SKILLS
+        .iter()
+        .find(|skill| skill.name == "ultra-adlc")
+        .expect("BUILTIN_SKILLS 应含 ultra-adlc")
+        .content;
+
+    for marker in [
+        "peri workflow boundary",
+        "filesystem write-boundary snapshot",
+        "Bounded filesystem evidence",
+        "expectedBaselineFingerprint",
+        "filesystem boundary check fails",
+    ] {
+        assert!(!content.contains(marker), "不应恢复仓库快照门禁：{marker}");
+    }
+    assert!(content.contains("git status --porcelain"));
+    assert!(content.contains("writeIntent.path_allowlist"));
+    assert!(content.contains("Review task-scoped"));
 }
 
 #[test]

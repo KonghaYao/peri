@@ -105,13 +105,37 @@ pub struct ScopedThreadPage {
     pub next_cursor: Option<ThreadListCursor>,
 }
 
+/// 精确标识待解除的 dirty 代际；不是旧执行已结束的证明。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryRequiredDetails {
+    pub thread_id: ThreadId,
+    pub generation: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "details")]
+pub enum WorkspaceErrorData {
+    #[serde(rename = "peri.recoveryRequiredV1")]
+    RecoveryRequired(RecoveryRequiredDetails),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResetDirtyRequest {
+    pub target: RecoveryRequiredDetails,
+    pub accept_risk: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceError {
     #[error("workspace discovery failed: {0}")]
     DiscoveryError(String),
     #[error("workspace location is unavailable")]
     Unavailable,
-    #[error("workspace identity changed; explicit relinking is required")]
+    #[error(
+        "session directory changed; this session cannot continue here: start a new session in the current directory"
+    )]
     NeedsRelink,
     #[error("session execution binding does not match the requested environment")]
     ExecutionBindingMismatch,
@@ -122,7 +146,9 @@ pub enum WorkspaceError {
     #[error("session is owned by another execution host")]
     ExecutionBusy,
     #[error("previous session execution did not close cleanly; recovery is required")]
-    RecoveryRequired,
+    RecoveryRequired(RecoveryRequiredDetails),
+    #[error("dirty generation changed; load again before confirming recovery")]
+    RecoveryGenerationMismatch,
     #[error("session mutation requires a live execution lease")]
     ExecutionLeaseRequired,
     #[error("session database schema or version is unsupported")]

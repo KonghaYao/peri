@@ -231,7 +231,7 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
         .fetch_one(&reopened.pool)
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     reopened.close().await;
     let reader = SqliteThreadStore::open_existing_read_only(&path)
         .await
@@ -344,7 +344,7 @@ async fn test_single_database_future_version_is_rejected_before_writing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = legacy_database(&path).await;
-    sqlx::query("PRAGMA user_version = 5")
+    sqlx::query("PRAGMA user_version = 6")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -515,7 +515,8 @@ async fn version2_database(path: &Path) -> SqliteConnection {
 // while all directory values point at the live temporary workspace.
 async fn version3_database(path: &Path, root: &Path) -> SqliteConnection {
     let mut connection = version2_database(path).await;
-    let (_, discovery) = super::super::discovery::discover(root).await.unwrap();
+    let (_, observed) = super::super::discovery::observe(root).await.unwrap();
+    let discovery = observed.discovery;
     let identity_with_legacy_fields = |value: serde_json::Value| {
         let mut value = value;
         value["birth_seconds"] = serde_json::json!(123);
@@ -693,7 +694,7 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_execution
         .fetch_one(&mut *connection)
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     drop(connection);
 
     let old = store
@@ -836,4 +837,178 @@ async fn test_identity_migration_corrupt_discovery_rolls_back_schema() {
         .await
         .unwrap();
     assert_eq!(version, 2, "损坏 discovery 必须回滚版本号");
+}
+
+/// 现行 schema 4：身份载荷已规范化，登记表仍保留单列唯一约束。
+async fn version4_database(path: &Path, root: &Path) -> SqliteConnection {
+    let mut connection = version3_database(path, root).await;
+    let (identity,): (String,) = sqlx::query_as("SELECT object_identity FROM projects")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    let identity =
+        super::super::discovery::normalize_identity_json(&serde_json::from_str(&identity).unwrap())
+            .unwrap();
+    sqlx::query("UPDATE projects SET object_identity = ?")
+        .bind(identity)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let (root_identity, discovery): (String, String) =
+        sqlx::query_as("SELECT root_identity, discovery FROM workspaces")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    let root_identity = super::super::discovery::normalize_identity_json(
+        &serde_json::from_str(&root_identity).unwrap(),
+    )
+    .unwrap();
+    let discovery = super::super::discovery::normalize_discovery_json(
+        &serde_json::from_str(&discovery).unwrap(),
+    )
+    .unwrap();
+    sqlx::query("UPDATE workspaces SET root_identity = ?, discovery = ?")
+        .bind(root_identity)
+        .bind(discovery)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA user_version = 4")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection
+}
+
+/// [回归测试] schema 4 的单列唯一约束把「同一路径上的另一个文件对象」挡在登记之外，
+/// 目录被替换或换位后该路径无法建立新会话。升级只把登记键放宽为组合键：行、绑定、
+/// 外键、线程行与消息（含 frozen snapshot）都保持原样，同一定位 + 同一证据仍然唯一。
+#[tokio::test]
+async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("threads.db");
+    let status = std::process::Command::new("git")
+        .args(["init", "-q", dir.path().to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(status.success(), "Git fixture initialization failed");
+    let mut connection = version4_database(&path, dir.path()).await;
+    // 升级前：同一 root 上的第二个文件对象无法登记。
+    let blocked = sqlx::query(
+        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
+         SELECT '33333333-3333-4333-8333-333333333333', project_id, root, '{\"device\":9,\"inode\":9}', discovery
+         FROM workspaces",
+    )
+    .execute(&mut connection)
+    .await;
+    assert!(blocked.is_err(), "schema 4 的单列唯一约束必须仍然存在");
+    let before = identity_and_execution_bytes(&mut connection).await;
+    let before_history = history_bytes(&mut connection).await;
+    connection.close().await.unwrap();
+
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(version, 5);
+
+    // 原有登记、绑定与历史原样可用。
+    let workspace = store.resolve_workspace(dir.path()).await.unwrap();
+    assert_eq!(
+        workspace.project_id.to_string(),
+        "11111111-1111-4111-8111-111111111111"
+    );
+    assert_eq!(
+        workspace.workspace_id.to_string(),
+        "22222222-2222-4222-8222-222222222222"
+    );
+    assert_eq!(
+        store
+            .validate_session_binding(&"old-session".to_owned())
+            .await
+            .unwrap(),
+        workspace
+    );
+    assert_eq!(
+        store
+            .load_messages(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .load_frozen_snapshot(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("frozen-owner-state"),
+        "迁移不得丢失 frozen snapshot"
+    );
+
+    // 同一路径上的另一个文件对象可以登记，同一 (locator, 证据) 组合仍然唯一。
+    let mut probe = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new().filename(&path).read_only(true),
+    )
+    .await
+    .unwrap();
+    let after = identity_and_execution_bytes(&mut probe).await;
+    let after_history = history_bytes(&mut probe).await;
+    probe.close().await.unwrap();
+    assert_eq!(before, after, "迁移不得改写登记、绑定或执行状态");
+    assert_eq!(
+        before_history, after_history,
+        "迁移不得改写线程行与消息：frozen snapshot 与历史都在其中"
+    );
+
+    sqlx::query(
+        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
+         SELECT '33333333-3333-4333-8333-333333333333', project_id, root, '{\"device\":9,\"inode\":9}', discovery
+         FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
+    )
+    .execute(&store.pool)
+    .await
+    .unwrap();
+    let duplicate_workspace = sqlx::query(
+        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
+         SELECT '44444444-4444-4444-8444-444444444444', project_id, root, root_identity, discovery
+         FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
+    )
+    .execute(&store.pool)
+    .await;
+    assert!(
+        duplicate_workspace.is_err(),
+        "同一 (root, root_identity) 不得重复登记"
+    );
+    // 同一 locator 上的另一个文件对象可以登记（同一路径重新克隆）。
+    sqlx::query(
+        "INSERT INTO projects (id, locator, object_identity)
+         SELECT '55555555-5555-4555-8555-555555555555', locator, '{\"device\":10,\"inode\":10}' FROM projects",
+    )
+    .execute(&store.pool)
+    .await
+    .unwrap();
+    let duplicate_project = sqlx::query(
+        "INSERT INTO projects (id, locator, object_identity)
+         SELECT '66666666-6666-4666-8666-666666666666', locator, object_identity FROM projects
+         WHERE id = '11111111-1111-4111-8111-111111111111'",
+    )
+    .execute(&store.pool)
+    .await;
+    assert!(
+        duplicate_project.is_err(),
+        "同一 (locator, object_identity) 不得重复登记"
+    );
+    // 重建登记表不能丢外键：引用不存在项目的工作区仍被拒绝。
+    let orphan = sqlx::query(
+        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
+         SELECT '77777777-7777-4777-8777-777777777777', 'missing-project', root || '-orphan', root_identity, discovery
+         FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
+    )
+    .execute(&store.pool)
+    .await;
+    assert!(orphan.is_err(), "工作区必须仍受 projects 外键约束");
+    store.close().await;
 }

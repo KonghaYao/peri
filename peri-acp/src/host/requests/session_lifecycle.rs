@@ -618,6 +618,31 @@ pub(crate) async fn after_new_response(
     prewarm_session_mcp_discovery(cfg, session_id);
 }
 
+pub(crate) async fn handle_reset_dirty(
+    params: &Value,
+    cfg: &AcpServerConfig,
+) -> Result<Value, AcpError> {
+    // 显式协商才放行：`negotiated_caps` 在未 initialize 时为默认（全 false），
+    // 不能用 `effective_host_caps` 的 MPSC 全能力兜底放开这条写入路径。
+    if !cfg.session_manager.negotiated_caps().session_recovery_v1 {
+        return Err(AcpError::new(
+            -32601,
+            "Session recovery capability was not negotiated",
+        ));
+    }
+    let request: peri_acp_types::workspace::ResetDirtyRequest =
+        serde_json::from_value(params.clone())
+            .map_err(|_| AcpError::new(-32602, "invalid dirty reset request"))?;
+    if !request.accept_risk {
+        return Err(AcpError::new(-32602, "explicit risk acceptance required"));
+    }
+    cfg.thread_store
+        .reset_dirty_execution(&request.target)
+        .await
+        .map_err(super::super::workspace::workspace_error)?;
+    Ok(serde_json::json!({}))
+}
+
 pub(crate) async fn handle_load(
     params: &Value,
     cfg: &AcpServerConfig,

@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use peri_acp_types::{
     thread::ThreadId,
-    workspace::{SessionExecutionLease, WorkspaceError},
+    workspace::{RecoveryRequiredDetails, SessionExecutionLease, WorkspaceError},
 };
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
@@ -58,7 +58,11 @@ impl SessionExecutionLease for ExecutionLease {
     async fn mark_clean(&self) -> Result<()> {
         let _writes = self.mutation_gate.write().await;
         if self.mutation_uncertain.load(Ordering::Acquire) {
-            return Err(WorkspaceError::RecoveryRequired.into());
+            return Err(WorkspaceError::RecoveryRequired(RecoveryRequiredDetails {
+                thread_id: self.thread_id.clone(),
+                generation: self.generation,
+            })
+            .into());
         }
         let mut file = self.file.lock().await;
         if file.is_none() {
@@ -84,7 +88,11 @@ impl SessionExecutionLease for ExecutionLease {
                     .await?;
                 // New-session compensation can delete its row while the lease owns it.
                 if exists.0 != 0 {
-                    return Err(WorkspaceError::RecoveryRequired.into());
+                    return Err(WorkspaceError::RecoveryRequired(RecoveryRequiredDetails {
+                        thread_id: self.thread_id.clone(),
+                        generation: self.generation,
+                    })
+                    .into());
                 }
             }
         }
@@ -95,6 +103,54 @@ impl SessionExecutionLease for ExecutionLease {
 }
 
 impl SqliteThreadStore {
+    async fn lock_execution(&self, id: &ThreadId) -> Result<File> {
+        let safe_id = format!("{:x}", Sha256::digest(id.as_bytes()));
+        let mut directory = self.db_path.as_os_str().to_os_string();
+        directory.push(".execution-locks");
+        let path = std::path::PathBuf::from(directory).join(format!("{safe_id}.lock"));
+        tokio::task::spawn_blocking(move || -> Result<File> {
+            std::fs::create_dir_all(path.parent().context("lock directory missing")?)?;
+            // 所有进程复用同一 inode，绝不删除锁文件。
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path)?;
+            file.try_lock().map_err(|error| match error {
+                std::fs::TryLockError::WouldBlock => {
+                    anyhow::Error::from(WorkspaceError::ExecutionBusy)
+                }
+                std::fs::TryLockError::Error(error) => error.into(),
+            })?;
+            Ok(file)
+        })
+        .await?
+    }
+
+    pub(super) async fn reset_dirty_execution_impl(
+        &self,
+        target: &RecoveryRequiredDetails,
+    ) -> Result<()> {
+        if self.read_only {
+            return Err(WorkspaceError::ExecutionLeaseRequired.into());
+        }
+        let _file = self.lock_execution(&target.thread_id).await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let updated = sqlx::query(
+            "UPDATE execution_runs SET clean = 1 WHERE thread_id = ? AND generation = ? AND clean = 0",
+        )
+        .bind(&target.thread_id)
+        .bind(target.generation)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(WorkspaceError::RecoveryGenerationMismatch.into());
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub(super) async fn acquire_execution_lease_impl(
         &self,
         id: &ThreadId,
@@ -112,43 +168,24 @@ impl SqliteThreadStore {
         if parent.0.is_some() {
             return Err(WorkspaceError::ExecutionLeaseRequired.into());
         }
-        // ThreadId is an opaque string; hashing keeps arbitrary UTF-8 and long IDs
-        // inside one bounded filename without interpreting path separators or UUIDs.
-        let safe_id = format!("{:x}", Sha256::digest(id.as_bytes()));
-        let mut directory = self.db_path.as_os_str().to_os_string();
-        directory.push(".execution-locks");
-        let path = std::path::PathBuf::from(directory).join(format!("{safe_id}.lock"));
-        let file = tokio::task::spawn_blocking(move || -> Result<File> {
-            std::fs::create_dir_all(path.parent().context("lock directory missing")?)?;
-            // Never unlink these files: every process must lock the same inode.
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(path)?;
-            file.try_lock().map_err(|error| match error {
-                std::fs::TryLockError::WouldBlock => {
-                    anyhow::Error::from(WorkspaceError::ExecutionBusy)
-                }
-                std::fs::TryLockError::Error(error) => error.into(),
-            })?;
-            Ok(file)
-        })
-        .await??;
+        let file = self.lock_execution(id).await?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let prior: Option<(i64, bool)> =
             sqlx::query_as("SELECT generation, clean FROM execution_runs WHERE thread_id = ?")
                 .bind(id)
                 .fetch_optional(&mut *tx)
                 .await?;
-        if matches!(prior, Some((_, false))) {
-            return Err(WorkspaceError::RecoveryRequired.into());
+        if let Some((generation, false)) = prior {
+            return Err(WorkspaceError::RecoveryRequired(RecoveryRequiredDetails {
+                thread_id: id.clone(),
+                generation,
+            })
+            .into());
         }
         Self::validate_session_binding_on(&mut tx, id).await?;
         let generation = prior
             .map_or(Some(1), |(generation, _)| generation.checked_add(1))
-            .ok_or(WorkspaceError::RecoveryRequired)?;
+            .context("execution generation exhausted")?;
         sqlx::query(
             "INSERT INTO execution_runs (thread_id, generation, clean) VALUES (?, ?, 0)
             ON CONFLICT(thread_id) DO UPDATE SET generation = excluded.generation, clean = 0",
@@ -204,7 +241,11 @@ impl SqliteThreadStore {
                     return Err(WorkspaceError::ExecutionLeaseRequired.into());
                 }
                 if lease.mutation_uncertain.load(Ordering::Acquire) {
-                    return Err(WorkspaceError::RecoveryRequired.into());
+                    return Err(WorkspaceError::RecoveryRequired(RecoveryRequiredDetails {
+                        thread_id: lease.thread_id.clone(),
+                        generation: lease.generation,
+                    })
+                    .into());
                 }
                 return Ok(Some(ExecutionWriteGuard {
                     lease,

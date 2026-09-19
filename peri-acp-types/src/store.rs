@@ -256,6 +256,15 @@ pub trait ThreadStore: Send + Sync {
         Err(crate::workspace::WorkspaceError::Unsupported.into())
     }
 
+    /// 用户明确接受残留执行及未知副作用风险后，仅解除指定 dirty 代际。
+    /// 必须持有稳定 OS 独占锁并以事务 CAS 校验；不更改 binding/frozen。
+    async fn reset_dirty_execution(
+        &self,
+        _target: &crate::workspace::RecoveryRequiredDetails,
+    ) -> Result<()> {
+        Err(crate::workspace::WorkspaceError::Unsupported.into())
+    }
+
     /// 创建新 thread，返回分配的 ThreadId
     async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId>;
 

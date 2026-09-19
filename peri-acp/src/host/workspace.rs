@@ -213,8 +213,19 @@ impl SessionEnvironment {
     }
 }
 
-pub(crate) fn workspace_error(error: impl std::fmt::Display) -> AcpError {
-    AcpError::new(-32010, error.to_string())
+pub(crate) fn workspace_error(error: impl Into<anyhow::Error>) -> AcpError {
+    let error = error.into();
+    let mut response = AcpError::new(-32010, error.to_string());
+    if let Some(WorkspaceError::RecoveryRequired(details)) = error.downcast_ref::<WorkspaceError>()
+    {
+        response.data = Some(
+            serde_json::to_value(
+                peri_acp_types::workspace::WorkspaceErrorData::RecoveryRequired(details.clone()),
+            )
+            .expect("recovery details serialize"),
+        );
+    }
+    response
 }
 
 pub(crate) fn require_owner(state: &SessionState) -> Result<(), AcpError> {
