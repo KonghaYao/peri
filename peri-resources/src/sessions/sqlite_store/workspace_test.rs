@@ -161,6 +161,11 @@ async fn assert_only_history(store: &SqliteThreadStore, project: ProjectId, thre
 /// 登记键是 (canonical root, 该目录的文件对象证据) 组合：同一路径上的新对象不命中
 /// 原登记，但它仍是可访问的目录，必须得到新的项目与工作区登记；旧绑定按各自登记
 /// 证据复核，继续失败关闭，历史不被改绑或隐藏。
+///
+/// 文件对象证据只有 device/inode，删除后重建时文件系统可能复用刚释放的 inode，
+/// 那种情况下新旧对象在证据上等同（设计 §8：不依赖 creation time）。所以这里让
+/// 旧对象改名到另一路径继续存活，新对象才确定是一个不同的对象，断言不随分配策略
+/// 摆动。
 #[tokio::test]
 async fn test_worktree_replaced_directory_registers_new_workspace_keeps_old_history() {
     let directory = tempfile::tempdir().unwrap();
@@ -170,7 +175,7 @@ async fn test_worktree_replaced_directory_registers_new_workspace_keeps_old_hist
     let (old_thread, registered) = bound_with_history(&store, &root).await;
 
     // 同一路径上换成一个新的文件对象：路径可用不等于身份延续。
-    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::rename(&root, directory.path().join("replaced")).unwrap();
     std::fs::create_dir(&root).unwrap();
 
     // 旧会话不再可执行，但历史仍可见且绑定没有被改写。
