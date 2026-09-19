@@ -231,6 +231,14 @@ async fn git(program: &OsStr, cwd: &Path, args: &[&str]) -> Result<Option<std::p
 ///
 /// 三个路径来自同一次调用而不是三次进程启动：准入路径会放大每次发现的外部进程
 /// 数量，位置之间也没有需要分开处理的语义。
+///
+/// 这里不用 `--path-format=absolute` 与 `--absolute-git-dir`：上游文档把二者记为
+/// Git 2.31 / 2.13 引入，更早的 Git 会把它们当未知选项并以用法错误终止整个发现，
+/// 使普通仓库被判成无法发现（本机没有旧版二进制，最低版本未实测）。代价是
+/// `--git-common-dir` / `--git-dir` 的默认输出可能是相对路径——且同一命令在不同
+/// cwd 下的输出形式不同（主仓库根给相对 `.git`，子目录的 `--git-dir` 反而给绝对
+/// 路径）——因此两类输出逐个判断后都要与 cwd 组合再 canonicalize，不能直接按宿主
+/// 进程的 cwd 解释。
 async fn git_paths(
     program: &OsStr,
     cwd: &Path,
@@ -254,13 +262,58 @@ async fn git_paths(
     }
     let mut paths = Vec::with_capacity(count);
     for line in lines {
+        let path = Path::new(line);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
         paths.push(
-            tokio::fs::canonicalize(line)
+            tokio::fs::canonicalize(path)
                 .await
                 .map_err(|_| WorkspaceError::Unavailable)?,
         );
     }
     Ok(paths)
+}
+
+/// 旧版 Git 不认识新选项时走用法错误（打印 usage 并非零退出），而不是给出探测结果。
+///
+/// 只有这种失败才允许退回兼容参数；真实失败（权限、损坏仓库等）必须原样上报，
+/// 不能因为退回而看起来已经发现成功。
+fn is_usage_error(output: &std::process::Output) -> bool {
+    !output.status.success()
+        && output
+            .stderr
+            .windows(b"usage:".len())
+            .any(|window| window == b"usage:")
+}
+
+/// 一次 `worktree list --porcelain`，附带字段分隔符。
+///
+/// 优先 `-z`：NUL 分隔能承载含换行的路径。旧版 Git 没有 `-z`，会按用法错误退出，
+/// 此时退回换行分隔；退回只改变分隔符，成员判定仍由调用方按完整路径精确比对。
+async fn git_worktree_listing(program: &OsStr, cwd: &Path) -> Result<(std::process::Output, u8)> {
+    let primary = git(program, cwd, &["worktree", "list", "--porcelain", "-z"]).await?;
+    if primary.as_ref().is_some_and(is_usage_error) {
+        let fallback = git(program, cwd, &["worktree", "list", "--porcelain"]).await?;
+        return Ok((
+            fallback.ok_or_else(|| {
+                anyhow::Error::from(WorkspaceError::DiscoveryError(
+                    "Git became unavailable during discovery".into(),
+                ))
+            })?,
+            b'\n',
+        ));
+    }
+    Ok((
+        primary.ok_or_else(|| {
+            anyhow::Error::from(WorkspaceError::DiscoveryError(
+                "Git became unavailable during discovery".into(),
+            ))
+        })?,
+        0,
+    ))
 }
 
 /// 一次目录观测：`Discovery` 加上「Git 是否真的回答过」这一证据强度标记。
@@ -326,10 +379,9 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
         &cwd,
         &[
             "rev-parse",
-            "--path-format=absolute",
             "--show-toplevel",
             "--git-common-dir",
-            "--absolute-git-dir",
+            "--git-dir",
         ],
         3,
     )
@@ -340,19 +392,18 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
             "Git location discovery returned an unexpected number of paths".into(),
         ))
     })?;
-    let worktrees = git(program, &cwd, &["worktree", "list", "--porcelain", "-z"])
-        .await?
-        .ok_or_else(|| {
-            WorkspaceError::DiscoveryError("Git became unavailable during discovery".into())
-        })?;
+    let (worktrees, separator) = git_worktree_listing(program, &cwd).await?;
     let expected = git_command_path(&root)?;
     if !worktrees.status.success()
-        || !worktrees.stdout.split(|byte| *byte == 0).any(|field| {
-            field
-                .strip_prefix(b"worktree ")
-                .and_then(|path| std::str::from_utf8(path).ok())
-                .is_some_and(|path| Path::new(path) == expected)
-        })
+        || !worktrees
+            .stdout
+            .split(|byte| *byte == separator)
+            .any(|field| {
+                field
+                    .strip_prefix(b"worktree ")
+                    .and_then(|path| std::str::from_utf8(path).ok())
+                    .is_some_and(|path| Path::new(path) == expected)
+            })
     {
         return Err(WorkspaceError::DiscoveryError(
             "Git worktree membership is inconsistent".into(),

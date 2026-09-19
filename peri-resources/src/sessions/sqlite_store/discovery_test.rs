@@ -212,7 +212,7 @@ async fn test_worktree_git_missing_mid_discovery_is_not_directory_mode() {
     let error = git_paths(
         directory.path().join("missing-git").as_os_str(),
         directory.path(),
-        &["rev-parse", "--absolute-git-dir"],
+        &["rev-parse", "--show-toplevel"],
         1,
     )
     .await
@@ -221,4 +221,221 @@ async fn test_worktree_git_missing_mid_discovery_is_not_directory_mode() {
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::DiscoveryError(message)) if message == "Git became unavailable during discovery"
     ));
+}
+
+/// 用真实 Git 准备 fixture，环境隔离与其它发现用例一致。
+async fn git_fixture(cwd: &Path, home: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success(), "Git fixture 失败: {output:?}");
+}
+
+#[cfg(unix)]
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// 真实 Git 的绝对路径：假 Git 把与版本无关的调用转交给它。
+#[cfg(unix)]
+fn real_git() -> std::path::PathBuf {
+    let output = std::process::Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "测试环境需要真实 Git");
+    std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+}
+
+/// 在受控环境里写一个假 Git 脚本，记录调用后转交真实 Git。
+#[cfg(unix)]
+fn git_shim(directory: &Path, name: &str, preamble: &str, log: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let program = directory.join(name);
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{preamble}\nexec {real} \"$@\"\n",
+            log = shell_quote(log),
+            real = shell_quote(&real_git()),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    program
+}
+
+/// [回归测试] 旧版 Git 仍能完成仓库发现：只用 Git 2.7 起就有的选项。
+///
+/// 上一版发现依赖 `rev-parse --path-format=absolute`（Git 2.31）与
+/// `worktree list --porcelain -z`（更晚才出现）。旧版 Git 把它们当未知选项并按用法
+/// 错误退出，于是带 `.git` 的目录被判成无法发现——用户在任何仓库里都建不了会话。
+/// 假 Git 拒绝这些选项、其余转交真实 Git，用来证明发现不依赖版本相关选项，且退回
+/// 之后得到与真实 Git 完全相同的路径与身份。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_legacy_git_discovers_repository_without_version_options() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = directory.path().join("repository");
+    tokio::fs::create_dir(&repository).await.unwrap();
+    git_fixture(&repository, directory.path(), &["init", "-q"]).await;
+    git_fixture(
+        &repository,
+        directory.path(),
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+    )
+    .await;
+    let linked = directory.path().join("linked tree");
+    git_fixture(
+        &repository,
+        directory.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ],
+    )
+    .await;
+    let nested = linked.join("nested space");
+    tokio::fs::create_dir(&nested).await.unwrap();
+
+    // 独立 oracle：同一批目录由真实 Git 得到的观测。
+    let (_, main) = observe(&repository).await.unwrap();
+    let (_, linked_real) = observe(&linked).await.unwrap();
+    let (_, nested_real) = observe(&nested).await.unwrap();
+
+    let log = directory.path().join("legacy-git.log");
+    let preamble = "for arg in \"$@\"; do\n  case \"$arg\" in\n    --path-format=*|-z)\n      echo \"error: unknown option $arg\" >&2\n      echo usage: git >&2\n      exit 129;;\n  esac\ndone";
+    let program = git_shim(directory.path(), "legacy-git", preamble, &log);
+    let (_, main_legacy) = observe_with_git(&repository, program.as_os_str())
+        .await
+        .unwrap();
+    let (_, linked_legacy) = observe_with_git(&linked, program.as_os_str())
+        .await
+        .unwrap();
+    let (_, nested_legacy) = observe_with_git(&nested, program.as_os_str())
+        .await
+        .unwrap();
+
+    assert!(
+        main_legacy.git_answered && linked_legacy.git_answered && nested_legacy.git_answered,
+        "旧版 Git 回答了发现，必须按仓库模式观测"
+    );
+    assert_eq!(
+        main_legacy.discovery, main.discovery,
+        "主仓库的路径与身份不得因旧版 Git 变化"
+    );
+    assert_eq!(
+        linked_legacy.discovery, linked_real.discovery,
+        "linked worktree 的位置不得退化"
+    );
+    assert_eq!(
+        nested_legacy.discovery, nested_real.discovery,
+        "子目录工作区不得退化"
+    );
+    assert_ne!(
+        linked_legacy.discovery.common_dir, linked_legacy.discovery.private_dir,
+        "common directory 与私有目录仍须分开解析"
+    );
+
+    let invoked = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !invoked.contains("--path-format"),
+        "发现不得依赖 Git 2.31 才有的 --path-format：{invoked}"
+    );
+    assert!(
+        invoked.contains("--porcelain -z"),
+        "支持 NUL 分隔的 Git 仍优先用 -z：{invoked}"
+    );
+    assert!(
+        invoked.lines().any(|line| line.ends_with("--porcelain")),
+        "旧版 Git 退回换行分隔：{invoked}"
+    );
+}
+
+/// [回归测试] `rev-parse` 的默认输出相对 cwd：必须还原成仓库的绝对位置。
+///
+/// 兼容调用取代 `--path-format=absolute`（Git 2.31）之后，`--git-common-dir` 会按
+/// cwd 输出相对路径（主仓库子目录里是 `../../.git`），而同一位置的 `--git-dir`
+/// 又可能是绝对路径——两类输出混排，只有逐个与 cwd 组合才能得到同一个仓库位置。
+/// 直接断言具体路径，不拿同一实现的结果互为 oracle。
+#[tokio::test]
+async fn test_worktree_git_paths_resolve_relative_output_against_cwd() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = directory.path().join("repository");
+    tokio::fs::create_dir(&repository).await.unwrap();
+    git_fixture(&repository, directory.path(), &["init", "-q"]).await;
+    let nested = repository.join("nested space");
+    tokio::fs::create_dir(&nested).await.unwrap();
+    let root = tokio::fs::canonicalize(&repository).await.unwrap();
+    let git_dir = root.join(".git");
+
+    let (_, from_root) = observe(&repository).await.unwrap();
+    let (_, from_nested) = observe(&nested).await.unwrap();
+    assert_eq!(
+        from_nested.discovery, from_root.discovery,
+        "子目录与仓库根必须观测到同一份布局"
+    );
+    assert_eq!(from_nested.discovery.root, root);
+    assert_eq!(
+        from_nested.discovery.common_dir.as_deref(),
+        Some(git_dir.as_path()),
+        "相对 cwd 的 --git-common-dir 输出必须按 cwd 还原"
+    );
+    assert_eq!(
+        from_nested.discovery.private_dir.as_deref(),
+        Some(git_dir.as_path()),
+        "绝对输出的 --git-dir 不得再被按 cwd 拼接"
+    );
+}
+
+/// [回归测试] 退回只针对用法错误：真实的 Git 失败不得被当成旧版 Git 重试。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_listing_failure_is_not_retried_as_legacy_git() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = directory.path().join("repository");
+    tokio::fs::create_dir(&repository).await.unwrap();
+    git_fixture(&repository, directory.path(), &["init", "-q"]).await;
+    let log = directory.path().join("failing-git.log");
+    let preamble = "case \"$*\" in\n  *\"worktree list\"*) echo \"fatal: could not read worktrees\" >&2; exit 128;;\nesac";
+    let program = git_shim(directory.path(), "failing-git", preamble, &log);
+    let error = observe_with_git(&repository, program.as_os_str())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::DiscoveryError(message)) if message == "Git worktree membership is inconsistent"
+    ));
+    let invoked = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        invoked
+            .lines()
+            .filter(|line| line.contains("worktree list"))
+            .count(),
+        1,
+        "非用法错误不得触发兼容退回：{invoked}"
+    );
 }

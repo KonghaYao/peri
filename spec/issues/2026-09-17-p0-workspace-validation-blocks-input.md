@@ -1,6 +1,6 @@
 # P0：文件系统身份与 Git 探测阻断会话创建与发送
 
-**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分已于 2026-09-19 修复；简化目标其余项与其余验收项待实施）
+**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分、Git 命令版本兼容已于 2026-09-19 修复；简化目标其余项与其余验收项待实施）
 **优先级**：P0（用户指定；2026-09-19 依据本机确证由 P1 升级）
 **类型**：可用性缺陷 / 设计简化
 **创建日期**：2026-09-17
@@ -96,7 +96,7 @@ done
 | 首次建会话先登记完整工作区身份 | `peri-acp/src/host/requests/session_lifecycle.rs::handle_new` 先 `resolve_workspace`，再 `create_bound_thread`、取得 lease 和验证 cwd | 发送第一句话前就必须通过 FS / Git / SQLite 登记链路 |
 | **目录登记模式变化后两个查询不再对称** | `resolve_workspace_impl` 的 `projects` 按 `locator OR object_identity` 匹配，`workspaces` 按 `root OR root_identity` 匹配；「目录 ↔ 仓库」转换时前者改值、后者不变 | 普通目录 `git init`（或仓库移除 `.git`）后，该目录每次建会话都返回 `NeedsRelink`，且无恢复入口；2026-09-19 本机实测确认。**已修复**（`ff3a1391`：同一目录对象的布局变化复用原登记，见「修复记录」） |
 | 普通目录也依赖 Git 可执行文件 | `peri-resources/src/sessions/sqlite_store/discovery.rs::discover` 先调用 `git rev-parse --is-inside-work-tree`；`git` 的 spawn 失败直接返回错误 | 未安装 Git 的精简 Linux / 容器不能建立普通目录会话。**已修复**（`7d59a7b9`：spawn 返回 `NotFound` 时降级为目录模式并记 `git_answered=false`；端到端见「修复记录」第 2 条） |
-| Git 发现依赖一组命令和输出约定 | `discover` 使用 `--path-format=absolute`、`--absolute-git-dir`、`worktree list --porcelain -z`，并按特定英文 stderr 前缀识别非仓库 | Git 版本、权限或命令行为差异可能成为普通会话阻塞；旧版本失败尚未实测 |
+| Git 发现依赖一组命令和输出约定 | `discover` 曾使用 `--path-format=absolute`（上游文档记为 Git 2.31 引入）、`--absolute-git-dir`（2.13）与 `worktree list --porcelain -z`，并按特定英文 stderr 前缀识别非仓库 | Git 版本、权限或命令行为差异可能成为普通会话阻塞。**已部分修复**（2026-09-19：不再使用版本相关选项，相对输出按 cwd 还原，`worktree list` 不支持 `-z` 时退回换行分隔，见「修复记录」第 7 条；旧版 Git 二进制仍未实测，最低版本未确定） |
 | 相同解析重复完整发现 | `workspace.rs::resolve_workspace_impl` 先 `discover`，又在 `BEGIN IMMEDIATE` 内 `Discovery::revalidate`；后者再次 `discover` | 成功路径执行两轮发现，每轮最多五类 Git 命令，失败分支会提前返回；写事务持有期间仍等待外部进程。放大慢盘 / 慢 Git 对同库写入的影响，具体延迟未测量。**已修复**（2026-09-19：事务内只复核关键文件对象，写事务外才做完整快照复核；一次准入的 Git 调用由两轮各 5 条降为两轮各 3 条，见「修复记录」第 3 条） |
 | 持久化身份同时绑定路径和文件对象 | `resolve_workspace_impl` 要求 project locator / identity 一致，workspace 则比较完整 discovery；`ObjectIdentity` 当前仍含 device/inode 或 Windows volume/file index | 路径可用不意味着身份通过；同一登记上的布局变化按各自证据复核。**已部分修复**（2026-09-19：登记键改为组合键后，新对象或新位置单独登记，不再被旧登记挡成 `NeedsRelink`；旧绑定仍失败关闭，见「修复记录」第 4 条） |
 | 要求重关联，但没有可达的重关联操作 | `peri-acp-types/src/workspace.rs::WorkspaceError::NeedsRelink` 曾要求 explicit relinking；全仓静态入口检查未发现对应 Resources 公共操作、ACP request 或 TUI 流程，尚未做运行时流程验收。现行设计 §5.4 明确初始交付不提供该功能 | 同一文件对象搬到新路径，或原登记路径被新的文件对象替换，可能被阻塞，而当前 UI / ACP 缺少对应恢复入口；历史仍可只读，不等于可以继续执行。**已部分修复**（2026-09-19：当前可访问目录可建立新会话继续工作，改动记录见「修复记录」第 4 条；文案已改为指出该前进路径、输入路径会复述失败原因，见第 5 条；把已有会话改指到新位置的入口仍未提供） |
@@ -132,7 +132,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 - [ ] 新会话、已有会话、历史只读访问分别验证，不让 Git 或目录身份检查不必要地传播到其他能力。
 - [x] 目录移动、备份恢复 / 文件对象变化、普通目录执行 `git init`、Git 管理目录变化有明确且可完成的用户操作；历史不被静默改绑或隐藏。（2026-09-19 修复，见「修复记录」第 4 条：搬迁与同路径替换各有单元测试，搬迁另有真实 TUI 端到端用例；备份恢复按「同路径新对象」路径覆盖，未单独实测）
 - [ ] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。
-- [ ] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。
+- [ ] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。（缺失见「修复记录」第 2 条端到端；权限拒绝、调用次数见第 3 条假 Git 判别用例；旧版本见第 7 条——用拒绝新选项的假 Git 验证，仍未运行真实旧版二进制，最低支持版本未确定）
 - [x] 事务内没有无界或重复的外部探测；慢准备、取消和超时不造成输入丢失或重复执行。（前半见「修复记录」第 3 条；后半见第 6 条：慢准备仍被受理且只入队一次、准备超时恢复原稿且不发送入队请求、准备期间取消不产生投递，均为 consumer 级回归；回执超时的「未知结果按同身份重试」沿用既有用例 `test_steer_uncertain_receipt_retries_identical_command_and_input`）
 - [ ] 身份模型调整保留已有消息、frozen snapshot、绑定关系和执行状态；冲突处理可理解、可恢复。（「可理解」2026-09-19 实施：绑定失败文案指出可完成的下一步，输入路径复述服务端原因而非表述为输入被拒，见「修复记录」第 5 条；「可恢复」按第 4 条的新会话语义覆盖；frozen snapshot 与恢复入口仍未单独验收）
 - [ ] 简化后继续通过错误 cwd、配置/权限隔离、跨进程 owner 竞争及 dirty 状态保护测试。
@@ -168,6 +168,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 | 2026-09-19 | — | Open（部分修复） | agent | 解除登记键的硬拒绝：同一路径的新文件对象与同一对象的新路径各自登记，旧绑定按各自证据复核；勾选验收条件第 4 项（见「修复记录」第 4 条） |
 | 2026-09-19 | — | Open（部分修复） | agent | 绑定失败文案改为指出可完成的下一步，输入路径在会话未能建立时复述服务端原因而非表述为输入被拒（见「修复记录」第 5 条） |
 | 2026-09-19 | — | Open（部分修复） | agent | 准备阶段与受理回执分开计时：慢准备不再被 10 秒回执预算判成输入被拒，准备超时按未受理恢复原稿；勾选验收条件第 7 项（见「修复记录」第 6 条） |
+| 2026-09-19 | — | Open（部分修复） | agent | Git 发现去掉版本相关选项：位置解析不再用 `--path-format=absolute` / `--absolute-git-dir` 并按 cwd 还原相对输出，`worktree list` 不支持 `-z` 时退回换行分隔（见「修复记录」第 7 条） |
 
 ## 修复记录
 
@@ -228,7 +229,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 **遗留**：
 
-- Git 版本差异（旧版 `--path-format=absolute` 等）、权限拒绝、慢响应仍未实测；验收条件第 6 项待办。
+- Git 版本差异（旧版 `--path-format=absolute` 等）、权限拒绝、慢响应仍未实测；验收条件第 6 项待办。（版本差异部分见「修复记录」第 7 条；仍无真实旧版 Git 二进制证据）
 - L0 唯一失败项 `tests/panels/plugin-uninstall-no-freeze.test.ts` 在全量运行中 90s 超时（用例自设 timeout），单独复跑 48s 通过。两者都不经过本 issue 的发现 / 绑定链路，判定为负载下的慢启动抖动，本 issue 未处理；若要闭环 L0 门禁需另有记录。
 
 ### 2026-09-19：准入探测移出写事务并收敛 Git 调用（第 3 条）
@@ -362,3 +363,34 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 - 准备期间的用户可见状态仍未提供：慢 host 上输入停留在 Submitting，60 秒内用户看不到「正在建立会话」的进度，也无法主动撤回（TakeBack 只接受 Queued）。该可见状态是简化目标第 4 项的剩余部分。
 - 60 秒是常量取舍而非测量结果：取有界值是避免无期限等待把输入留在无法撤回的状态；未在慢 host 上实测准备耗时的分布，也未区分发现 / 建会话 / gate 各段的耗时占比。
+
+### 2026-09-19：Git 发现去掉版本相关选项（第 7 条）
+
+**范围**：只解除「旧版 Git 因未知选项而无法完成发现」这一通道，即已确认事实「Git 发现依赖一组命令和输出约定」。不改变文件对象身份模型、登记键、`NeedsRelink` 判定与 `git_answered` 语义，也不新增 Git 版本提示或降级开关。**未运行真实旧版 Git**：最低支持版本仍未确定，本条的旧版证据是拒绝这些选项的假 Git 脚本。
+
+**根因**：发现的每条命令都只认新版选项——`rev-parse --path-format=absolute`、`--absolute-git-dir`，以及 `worktree list --porcelain -z`。把未知选项当致命错误的 Git（本机 Git 2.39 对未知选项退出 129、stderr 打印 `usage:`；`rev-parse --bogus` 则退出 0 并把未知参数当修订回显，因此不能用退出码判断 rev-parse 的选项支持）会在这里直接失败：目录其实在仓库中，用户拿到的却是 `Git location discovery failed`，与无 Git、权限拒绝同属「建不了会话」这类 P0 表现。
+
+**改动**（`peri-resources/src/sessions/sqlite_store/discovery.rs`）：
+
+- `observe_with_git`：仍只启动一次 `rev-parse`，参数改为 `--show-toplevel --git-common-dir --git-dir`；`git_paths` 对非绝对输出先与 cwd 组合再 canonicalize。本机实测（Git 2.39）同一命令的输出形式随 cwd 变化：主仓库根给 `.git`，子目录的 `--git-common-dir` 给 `../../.git`，而同一子目录的 `--git-dir` 反而给绝对路径——两类输出混排，只有逐个判断才能还原。
+- 新增 `git_worktree_listing`：优先 `worktree list --porcelain -z`；仅当非零退出且 stderr 含 `usage:` 时退回 `--porcelain`（换行分隔）。新增 `is_usage_error` 承担该判定；真实失败不退回，仍报 `Git worktree membership is inconsistent`。成员判定按调用方给出的字节分隔符切分后做完整路径精确比对，退回只改变分隔符。
+
+**回归测试**（`discovery_test.rs`，修复前失败）：
+
+| 验证 | 结果 |
+| --- | --- |
+| `test_worktree_legacy_git_discovers_repository_without_version_options` | 假 Git 把 `--path-format=*` 与 `-z` 当未知选项（打印 `usage:`、退出 129），其余转交真实 Git。修复前主仓库即失败于 `Git location discovery failed`；修复后主仓库 / linked worktree / linked worktree 子目录的 `Discovery` 与真实 Git 的观测逐一相等，且调用日志不含 `--path-format`、同时含 `--porcelain -z` 与退回后的 `--porcelain` |
+| `test_worktree_listing_failure_is_not_retried_as_legacy_git` | 假 Git 让 `worktree list` 以退出 128 失败：报错不变，且 `worktree list` 只被调用 1 次（非用法错误不触发退回） |
+| `test_worktree_git_paths_resolve_relative_output_against_cwd` | 子目录观测的 `root` / `common_dir` / `private_dir` 与仓库根观测相等，且断言为字面路径 `<repo>/.git`；变异检验（去掉按 cwd 还原）后该用例失败于 `Unavailable` |
+| `cargo test -p peri-resources --lib` | 134 项通过（改动前 131 项） |
+| `cargo test -p peri-acp --lib` | 678 项通过 |
+| `cargo clippy -p peri-resources --all-targets -- -D warnings`、`cargo fmt --all -- --check` | 无告警、无格式差异 |
+| E2E `workspace-git-init` / `workspace-no-git` / `workspace-directory-moved` | `run-2026-09-19T05-44-11`、`05-44-41`、`05-45-01` 各 1/1 通过（13s / 17s / 10s，串行、无重试） |
+
+**事实源同步**：[工作区身份设计](../../docs/design/session-workspace-identity.md) §3.1（命令契约、按 cwd 还原相对输出、`-z` 退回条件）；`docs/code-index/peri-resources.md` 工作区身份行；[兼容性待办](2026-09-17-platform-compatibility.md)「旧 Git 命令能力未覆盖」条目。
+
+**遗留**：
+
+- 仍无真实旧版 Git 证据：本机只有 Git 2.39，最低支持版本、各选项的实际引入版本与旧版在真实仓库中的行为都未验证；现有用例只能证明「不依赖这些选项」这一性质。要宣称支持版本，需要装旧版二进制或在 CI 里准备旧版 fixture。
+- 退回路径的代价未量化：换行分隔无法表示含换行的路径（该情形下成员判定会精确比对失败并报错，不会静默误判），但也没有覆盖用例构造这样的路径。
+- 慢响应仍未实测（验收条件第 6 项的一部分）：本条只处理版本差异，未测量慢 Git 下的等待时间。

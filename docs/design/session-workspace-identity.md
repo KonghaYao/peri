@@ -72,11 +72,16 @@ binding 不可变，协议中的 `revision` 保持常量 `1` 以兼容已有客�
 
 ```text
 git -C <cwd> rev-parse --is-inside-work-tree
-git -C <cwd> rev-parse --path-format=absolute --show-toplevel
-git -C <cwd> rev-parse --absolute-git-dir
-git -C <cwd> rev-parse --path-format=absolute --git-common-dir
+git -C <cwd> rev-parse --show-toplevel --git-common-dir --git-dir
 git -C <cwd> worktree list --porcelain -z
 ```
+
+三个位置来自同一次 `rev-parse`，输出按参数顺序每行一个；行数与请求不符即视为输出
+不可信，不猜位置。发现不使用 `--path-format=absolute` 与 `--absolute-git-dir`：
+上游文档记为 Git 2.31 / 2.13 引入，更早的 Git 把它们当未知选项按用法错误退出，会让
+普通仓库被判成无法发现。代价是 `--git-common-dir` / `--git-dir` 的默认输出可能是
+相对路径，且同一命令在不同 cwd 下的输出形式不同，因此每个位置都先与 cwd 组合再
+canonicalize，不能按宿主进程的 cwd 解释。
 
 common directory 用于发现同仓库关联，private Git directory 用于区分 checkout。
 linked worktree 的这两者不同；主工作树通常相同。
@@ -85,8 +90,10 @@ linked worktree 的这两者不同；主工作树通常相同。
 
 命令使用参数数组、显式 cwd 和有界执行，不拼接 shell。发现过程隔离继承的
 `GIT_DIR`、`GIT_WORK_TREE`、`GIT_COMMON_DIR` 等会改写仓库选择的环境变量；不能
-修改用户 Git 配置来使探测成功。解析支持带空格的路径，worktree list 使用 NUL
-分隔。路径按所在文件系统 canonicalize，不统一小写、不使用 lossy 转换生成身份。
+修改用户 Git 配置来使探测成功。解析支持带空格的路径，worktree list 优先 NUL 分隔；
+旧版 Git 不认识 `-z` 时按用法错误退回换行分隔，退回只改变分隔符，成员判定仍按完整
+路径精确比对，真实失败（权限、损坏仓库）不触发退回。路径按所在文件系统
+canonicalize，不统一小写、不使用 lossy 转换生成身份。
 
 ### 3.2 登记裁决
 
