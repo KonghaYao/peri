@@ -1,6 +1,6 @@
 # P0：文件系统身份与 Git 探测阻断会话创建与发送
 
-**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分、Git 命令版本兼容、三条路径的探测边界、既有保护链路复核、仓库布局端到端验收、旧版 Git 的 common dir 推导与慢响应实测已于 2026-09-19 完成，验收条件 9 项全部勾选；简化目标第 3、4、5 项仍为部分实施，本 issue 未关闭）
+**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分、Git 命令版本兼容、三条路径的探测边界、既有保护链路复核、仓库布局端到端验收、旧版 Git 的 common dir 推导与慢响应实测、慢 Git 的端到端验收已于 2026-09-19 完成，验收条件 9 项全部勾选；简化目标第 3、4、5 项仍为部分实施，本 issue 未关闭）
 **优先级**：P0（用户指定；2026-09-19 依据本机确证由 P1 升级）
 **类型**：可用性缺陷 / 设计简化
 **创建日期**：2026-09-17
@@ -132,7 +132,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 - [x] 新会话、已有会话、历史只读访问分别验证，不让 Git 或目录身份检查不必要地传播到其他能力。（2026-09-19：新会话见「修复记录」第 3 条的调用次数与持锁状态；已有会话与历史只读访问见第 9 条——复核恰好一轮观测且全部在写事务外，列表 / 消息 / frozen / 绑定在读路径上 0 次 Git 调用，登记目录删除后仍可读）
 - [x] 目录移动、备份恢复 / 文件对象变化、普通目录执行 `git init`、Git 管理目录变化有明确且可完成的用户操作；历史不被静默改绑或隐藏。（2026-09-19 修复，见「修复记录」第 4 条：搬迁与同路径替换各有单元测试，搬迁另有真实 TUI 端到端用例；备份恢复按「同路径新对象」路径覆盖，未单独实测）
 - [x] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。（2026-09-19：新增真实 TUI 用例 `e2e/tests/scenarios/workspace-worktree-layouts.test.ts` 覆盖子目录 / linked worktree / 独立 clone 三种布局的执行目录与项目归属，见「修复记录」第 10 条；主仓库与 symlink 由 resources 单元测试 `test_worktree_main_linked_subdirectory_and_clone_identity`、`test_worktree_symlink_discovery_reuses_identity_but_binding_escape_is_rejected` 覆盖——进程 cwd 由 `getcwd` 给出物理路径，TUI 层看不到符号链接代理，该场景无法在 TUI 层观测）
-- [x] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。（缺失见「修复记录」第 2 条端到端；权限拒绝与调用次数见第 3 条假 Git 判别用例——目录模式 2 次、仓库模式 6 次、已有会话复核 3 次，全部在写事务外；旧版本与慢响应见第 11 条：旧版本仍由拒绝新选项的假 Git 验证，未运行真实旧版二进制、最低支持版本未确定；慢响应为实测时间线——假 Git 每次调用固定等待 400ms 时准入总耗时 2.938s、首次到末次调用 2.148s、6 次调用全部记录为写锁空闲，挂起 Git 实测 5.003s 后以类型化超时错误结束。30s = 6 次 × 5s 是静态上限，不是实测耗时）
+- [x] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。（缺失见「修复记录」第 2 条端到端；权限拒绝与调用次数见第 3 条假 Git 判别用例——目录模式 2 次、仓库模式 6 次、已有会话复核 3 次，全部在写事务外；旧版本与慢响应见第 11 条：旧版本仍由拒绝新选项的假 Git 验证，未运行真实旧版二进制、最低支持版本未确定；慢响应为实测时间线——假 Git 每次调用固定等待 400ms 时准入总耗时 2.938s、首次到末次调用 2.148s、6 次调用全部记录为写锁空闲，挂起 Git 实测 5.003s 后以类型化超时错误结束。30s = 6 次 × 5s 是静态上限，不是实测耗时；同一条链路在真实 TUI 上的慢 Git 实测见第 12 条——输入到回复 2.489s、窗口内 6 次发现调用、无重复入队）
 - [x] 事务内没有无界或重复的外部探测；慢准备、取消和超时不造成输入丢失或重复执行。（前半见「修复记录」第 3 条；后半见第 6 条：慢准备仍被受理且只入队一次、准备超时恢复原稿且不发送入队请求、准备期间取消不产生投递，均为 consumer 级回归；回执超时的「未知结果按同身份重试」沿用既有用例 `test_steer_uncertain_receipt_retries_identical_command_and_input`）
 - [x] 身份模型调整保留已有消息、frozen snapshot、绑定关系和执行状态；冲突处理可理解、可恢复。（「可理解」2026-09-19 实施：绑定失败文案指出可完成的下一步，输入路径复述服务端原因而非表述为输入被拒，见「修复记录」第 5 条；「可恢复」按第 4 条的新会话语义覆盖；保留性证据见第 8 条：schema 4→5 迁移前后逐字节比对绑定 / 执行状态与线程行 / 消息，并对 frozen snapshot 做存储层读取。把已有会话改指到新位置的入口仍未提供，属设计 §5.4 的明确限制）
 - [x] 简化后继续通过错误 cwd、配置/权限隔离、跨进程 owner 竞争及 dirty 状态保护测试。（2026-09-19 复核：错误 cwd 见 `legacy_adoption_rejects_changed_cwd_child_and_lost_native_binding`；配置 / 权限隔离见 `worktree_new_resources_use_the_target_directory`、`worktree_scheduled_approval_uses_session_permission_and_rejects_closed_owner`、`test_update_config_refreshes_existing_owner_environments`；跨进程 owner 竞争见 `test_worktree_execution_competes_across_processes_and_crash_remains_dirty`、`test_worktree_execution_child_process`；dirty 保护见 `test_worktree_dirty_reset_held_stale_and_exact_generation`、`test_worktree_cancelled_mutation_remains_dirty_and_cannot_publish_clean`、`test_worktree_clean_waits_for_admitted_mutation_before_releasing_os_ownership` 及 ACP 侧 `test_workspace_dirty_recovery_original_load_and_frozen`、`test_dirty_reset_then_failing_reload_keeps_store_state_and_original_id`、`test_dirty_reset_without_initialize_is_rejected_without_store_effect`。全量 `cargo test -p peri-resources --lib` 138 项、`cargo test -p peri-acp --lib` 678 项通过）
@@ -174,6 +174,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 | 2026-09-19 | — | Open（部分修复） | agent | 复核简化后的既有保护链路：错误 cwd、配置 / 权限隔离、跨进程 owner 竞争与 dirty 状态保护用例全部通过（resources 138 项、acp 678 项）；勾选验收条件第 9 项（本轮无代码改动） |
 | 2026-09-19 | — | Open（部分修复） | agent | 新增仓库布局端到端用例：真实 TUI 上验证子目录 / linked worktree / 独立 clone 的执行目录与项目归属，变异检验通过；勾选验收条件第 5 项（见「修复记录」第 10 条，生产代码未变） |
 | 2026-09-19 | — | Open（部分修复） | agent | 旧版 Git 的 common dir 改为读 `commondir` 文件推导（不再请求 Git 2.5 引入的 `--git-common-dir`），未知选项回显按不兼容处理，`worktree` 子命令缺失时只跳过交叉核对；慢 Git 实测等待时间线与单次超时边界，勾选验收条件第 6 项——验收条件 9 项至此全部勾选（见「修复记录」第 11 条） |
+| 2026-09-19 | — | Open（部分修复） | agent | 慢 Git 补端到端验收：真实 TUI / ACP 路径上每次 Git 调用固定等待 300ms，输入到回复 2.489s、6 次发现调用、无重复入队，观测仍为仓库模式（见「修复记录」第 12 条，生产代码未变） |
 
 ## 修复记录
 
@@ -515,4 +516,31 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 - 仍未运行真实旧版 Git（本机只有 2.39）：最低支持版本未确定。`commondir` 文件在各旧版中是否都存在同样只在文档与假 Git 层面验证；若某个版本不写该文件，linked worktree 会各自成项目（不阻断使用，但项目分组退化），宣称支持版本前需实测或查证。
 - 实测是本机单次运行的值（macOS，含每次调用约 100ms 的进程启动与 SQLite 探测开销），不是跨机器的性能保证；两轮共 6 次的静态上限 30s 仍然只是预算。
-- 慢响应的端到端未做：本轮只在 resources 层把 Git 换成慢的假 Git，没有在 TUI / ACP 路径上复现慢 Git。
+- 慢响应的端到端由第 12 条补上：TUI / ACP 全链路用同一个慢 Git 脚本实测，输入到回复 2.49s、窗口内 6 次发现调用、无重复入队。
+
+### 2026-09-19：慢 Git 的端到端验收（第 12 条，生产代码未变）
+
+**范围**：补上第 11 条遗留的「慢响应只在 resources 层验证，没有走 TUI / ACP 路径」。验收条件第 7 项要求「慢准备不造成输入丢失」，这是跨层结论，单进程单元测试不能代表（[testing](../../docs/standards/testing.md)）。生产代码无改动——第 11 条的每次调用超时预算与第 6 条的准备 / 回执分开计时由已有实现提供。
+
+**改动**：
+
+- 新增 `e2e/tests/scenarios/workspace-slow-git.test.ts`（已入 L0）。PATH 用 `env -i` 构造：`/usr/bin`、`/bin` 逐项软链过去但跳过 `git*`，再写一个每次调用先记录参数、固定等待 300ms、最后 `exec` 真实 Git 的 `git` 脚本；被测目录是真实仓库（`git init`）。
+- **前提守卫**：用例自己先在该 PATH 下跑一次 `git rev-parse --is-inside-work-tree`，断言耗时 ≥ 300ms。没有这一步，PATH 未被应用时用例会静默退化成普通 Git 路径——`workspace-no-git` 已记录过这个退化方式（tmux `-e PATH=` 会被会话 shell 覆盖）。
+- 观测窗口以调用日志的字节偏移为界：输入前记录偏移，收到模型回复后读取新增行，按到达顺序区分发现调用（`rev-parse --is-inside-work-tree`、`rev-parse --show-toplevel`、`worktree list`）。
+
+**验证证据**：
+
+| 验证 | 结果 |
+| --- | --- |
+| E2E `workspace-slow-git` | `run-2026-09-19T06-29-28` 1/1 通过（16s）。实测：输入到回复 **2489ms**，窗口内 Git 调用 7 次（其中发现调用 6 次、正好两轮三条命令），注入等待每次 300ms；屏幕上没有 `Input was not accepted`，也没有会话未能建立的提示 |
+| 同上（数据库因果） | 登记后 1 project / 1 workspace / 1 binding；观测为仓库模式（`common_dir`、`private_dir` 均非空，`root` 是仓库根），说明慢 Git 仍被识别为 Git，而不是降级成目录模式；一次输入对应 1 次模型请求、user / assistant 各 1 条 |
+| 同上（版本契约） | 全部调用中不含 `--path-format` / `--git-common-dir` / `--absolute-git-dir`：第 7、11 条的兼容约束在真实 TUI 路径上同样成立 |
+| 变异检验（超时预算） | 单次预算临时改为 100ms（小于注入的 300ms）：用例失败于 30s 内收不到模型回复（发现超时 → 会话未建立），回退后复跑通过（2489ms） |
+| E2E L0 全量（`npm run e2e:l0`） | `run-2026-09-19T06-32-22` **11/11 通过**（6m52s，并发 1、无重试、flake 预算 0）：新场景 17s，同层 `workspace-git-init` 10s、`workspace-no-git` 13s、`workspace-directory-moved` 7s，此前偶发超时的 `plugin-uninstall-no-freeze` 本轮也通过 |
+
+**事实源同步**：`e2e/config/tiers.mjs` 的 L0 文件列表（与同类工作区场景同层）。无需改动设计与 code-index——本轮没有实现变更。
+
+**遗留**：
+
+- 端到端与 resources 层用的是同一个常量语义，但两边各自维护注入值（Rust 用例 400ms、E2E 300ms）；没有把「单次调用预算」暴露成可配置项，因此无法用真实慢 Git 逼近 5s 边界。要覆盖边界仍需在 resources 层做（第 11 条已覆盖挂起与超时）。
+- E2E 的耗时断言是下界（≥ 注入等待），不是耗时回归门禁：机器变慢不会失败，只有慢 Git 没有被真正用上或会话被阻断才会失败。
