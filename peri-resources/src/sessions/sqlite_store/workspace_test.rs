@@ -1,11 +1,11 @@
 use super::super::*;
 use peri_acp_types::workspace::*;
-use std::{
-    io::Read,
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+#[cfg(unix)]
+use std::io::Read;
+use std::path::Path;
+use std::sync::Arc;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn git(root: &Path, args: &[&str]) {
@@ -1053,12 +1053,16 @@ const VALIDATE_DATABASE: &str = "PERI_TEST_VALIDATE_DB";
 const VALIDATE_THREAD: &str = "PERI_TEST_VALIDATE_THREAD";
 const VALIDATE_CWD: &str = "PERI_TEST_VALIDATE_CWD";
 
+#[cfg(unix)]
 const PROBE_GIT_CHILD: &str =
     "sessions::sqlite_store::workspace::tests::test_worktree_probe_git_child";
+#[cfg(unix)]
 const ADMISSION_CHILD: &str =
     "sessions::sqlite_store::workspace::tests::test_worktree_registration_admission_child";
+#[cfg(unix)]
 const HISTORY_CHILD: &str =
     "sessions::sqlite_store::workspace::tests::test_worktree_history_access_child";
+#[cfg(unix)]
 const VALIDATE_CHILD: &str =
     "sessions::sqlite_store::workspace::tests::test_worktree_bound_session_validation_child";
 
