@@ -1,6 +1,6 @@
 # P0：文件系统身份与 Git 探测阻断会话创建与发送
 
-**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分、Git 命令版本兼容、三条路径的探测边界已于 2026-09-19 修复；简化目标其余项与其余验收项待实施）
+**状态**：Open（登记模式冲突、无 Git 目录建会话、准入探测成本、目录搬迁 / 替换的登记可用性、绑定失败文案与输入路径的原因提示、准备阶段与受理回执的期限拆分、Git 命令版本兼容、三条路径的探测边界、既有保护链路复核、仓库布局端到端验收已于 2026-09-19 完成；简化目标其余项与其余验收项待实施）
 **优先级**：P0（用户指定；2026-09-19 依据本机确证由 P1 升级）
 **类型**：可用性缺陷 / 设计简化
 **创建日期**：2026-09-17
@@ -131,11 +131,11 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 - [x] 无 Git 的普通目录能新建会话并成功发送一次输入；无重复入队，草稿状态正确。（2026-09-19 修复，见「修复记录」第 2 条）
 - [x] 新会话、已有会话、历史只读访问分别验证，不让 Git 或目录身份检查不必要地传播到其他能力。（2026-09-19：新会话见「修复记录」第 3 条的调用次数与持锁状态；已有会话与历史只读访问见第 9 条——复核恰好一轮观测且全部在写事务外，列表 / 消息 / frozen / 绑定在读路径上 0 次 Git 调用，登记目录删除后仍可读）
 - [x] 目录移动、备份恢复 / 文件对象变化、普通目录执行 `git init`、Git 管理目录变化有明确且可完成的用户操作；历史不被静默改绑或隐藏。（2026-09-19 修复，见「修复记录」第 4 条：搬迁与同路径替换各有单元测试，搬迁另有真实 TUI 端到端用例；备份恢复按「同路径新对象」路径覆盖，未单独实测）
-- [ ] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。
+- [x] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。（2026-09-19：新增真实 TUI 用例 `e2e/tests/scenarios/workspace-worktree-layouts.test.ts` 覆盖子目录 / linked worktree / 独立 clone 三种布局的执行目录与项目归属，见「修复记录」第 10 条；主仓库与 symlink 由 resources 单元测试 `test_worktree_main_linked_subdirectory_and_clone_identity`、`test_worktree_symlink_discovery_reuses_identity_but_binding_escape_is_rejected` 覆盖——进程 cwd 由 `getcwd` 给出物理路径，TUI 层看不到符号链接代理，该场景无法在 TUI 层观测）
 - [ ] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。（缺失见「修复记录」第 2 条端到端；权限拒绝、调用次数见第 3 条假 Git 判别用例；旧版本见第 7 条——用拒绝新选项的假 Git 验证，仍未运行真实旧版二进制，最低支持版本未确定）
 - [x] 事务内没有无界或重复的外部探测；慢准备、取消和超时不造成输入丢失或重复执行。（前半见「修复记录」第 3 条；后半见第 6 条：慢准备仍被受理且只入队一次、准备超时恢复原稿且不发送入队请求、准备期间取消不产生投递，均为 consumer 级回归；回执超时的「未知结果按同身份重试」沿用既有用例 `test_steer_uncertain_receipt_retries_identical_command_and_input`）
 - [x] 身份模型调整保留已有消息、frozen snapshot、绑定关系和执行状态；冲突处理可理解、可恢复。（「可理解」2026-09-19 实施：绑定失败文案指出可完成的下一步，输入路径复述服务端原因而非表述为输入被拒，见「修复记录」第 5 条；「可恢复」按第 4 条的新会话语义覆盖；保留性证据见第 8 条：schema 4→5 迁移前后逐字节比对绑定 / 执行状态与线程行 / 消息，并对 frozen snapshot 做存储层读取。把已有会话改指到新位置的入口仍未提供，属设计 §5.4 的明确限制）
-- [ ] 简化后继续通过错误 cwd、配置/权限隔离、跨进程 owner 竞争及 dirty 状态保护测试。
+- [x] 简化后继续通过错误 cwd、配置/权限隔离、跨进程 owner 竞争及 dirty 状态保护测试。（2026-09-19 复核：错误 cwd 见 `legacy_adoption_rejects_changed_cwd_child_and_lost_native_binding`；配置 / 权限隔离见 `worktree_new_resources_use_the_target_directory`、`worktree_scheduled_approval_uses_session_permission_and_rejects_closed_owner`、`test_update_config_refreshes_existing_owner_environments`；跨进程 owner 竞争见 `test_worktree_execution_competes_across_processes_and_crash_remains_dirty`、`test_worktree_execution_child_process`；dirty 保护见 `test_worktree_dirty_reset_held_stale_and_exact_generation`、`test_worktree_cancelled_mutation_remains_dirty_and_cannot_publish_clean`、`test_worktree_clean_waits_for_admitted_mutation_before_releasing_os_ownership` 及 ACP 侧 `test_workspace_dirty_recovery_original_load_and_frozen`、`test_dirty_reset_then_failing_reload_keeps_store_state_and_original_id`、`test_dirty_reset_without_initialize_is_rejected_without_store_effect`。全量 `cargo test -p peri-resources --lib` 138 项、`cargo test -p peri-acp --lib` 678 项通过）
 
 ## 与前一轮修复的关系
 
@@ -171,6 +171,8 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 | 2026-09-19 | — | Open（部分修复） | agent | Git 发现去掉版本相关选项：位置解析不再用 `--path-format=absolute` / `--absolute-git-dir` 并按 cwd 还原相对输出，`worktree list` 不支持 `-z` 时退回换行分隔（见「修复记录」第 7 条） |
 | 2026-09-19 | — | Open（部分修复） | agent | 补齐 schema 4→5 迁移的保留性断言：迁移前后逐字节比对线程行 / 消息（含 frozen snapshot）并做存储层读取，变异检验通过；勾选验收条件第 8 项（见「修复记录」第 8 条，生产代码未变） |
 | 2026-09-19 | — | Open（部分修复） | agent | 三条路径的探测边界补实测断言：历史只读访问 0 次 Git 调用（登记目录删除后仍可读），已有会话复核恰好一轮观测且全在写事务外；勾选验收条件第 3 项（见「修复记录」第 9 条，生产代码未变） |
+| 2026-09-19 | — | Open（部分修复） | agent | 复核简化后的既有保护链路：错误 cwd、配置 / 权限隔离、跨进程 owner 竞争与 dirty 状态保护用例全部通过（resources 138 项、acp 678 项）；勾选验收条件第 9 项（本轮无代码改动） |
+| 2026-09-19 | — | Open（部分修复） | agent | 新增仓库布局端到端用例：真实 TUI 上验证子目录 / linked worktree / 独立 clone 的执行目录与项目归属，变异检验通过；勾选验收条件第 5 项（见「修复记录」第 10 条，生产代码未变） |
 
 ## 修复记录
 
@@ -450,3 +452,29 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 
 - 「新会话」的调用次数证据沿用第 3 条（目录模式 2 次 / 仓库模式 6 次），本条未重复测量。
 - 旧版 Git、权限拒绝与慢响应仍未实测，「等待阶段」目前只有持锁状态这一项证据（见验收条件第 6 项）。
+
+### 2026-09-19：仓库布局的端到端验收（第 10 条，生产代码未变）
+
+**范围**：补齐验收条件第 5 项的用户可见证据。不改变发现、登记与绑定实现；生产代码无改动。
+
+**缺口**：主仓库 / linked worktree / 独立 clone / 子目录的身份与执行目录此前只有 resources 单元测试证据（`test_worktree_main_linked_subdirectory_and_clone_identity` 等）。单元测试断言的是 `resolve_workspace` 的返回值，没有经过 ACP `session/new` 与 TUI 启动路径，也没有断言「项目展示」所依赖的事实——线程浏览器按 `project_id` 分组、项目定位取 common dir。
+
+**改动**：新增 `e2e/tests/scenarios/workspace-worktree-layouts.test.ts`（本地 SSE 模型端点，无真实凭据、无外部 judge），在真实 TUI 上依次启动三个布局，每次都走完整 `session/new` 准入：
+
+- **子目录**（`<repo>/sub`）：执行目录是子目录本身（`threads.cwd`），工作区根是仓库根，`relative_cwd = sub`，观测快照的 `common_dir` 是仓库 `.git`。
+- **linked worktree**（`git worktree add`）：工作区根是 worktree 路径且 `relative_cwd` 为空，`project_id` 与子目录会话相同、`workspace_id` 不同，`common_dir` 仍指向主仓库 `.git`。
+- **独立 clone**：工作区根是 clone 路径，`project_id` 与源仓库不同，`common_dir` 在 clone 自己身上。
+- 收尾断言：项目 2 个（仓库 + clone）、工作区 3 个、三个会话的历史 cwd 分别是各自的启动目录。
+
+**验证证据**：
+
+| 验证 | 结果 |
+| --- | --- |
+| E2E `workspace-worktree-layouts.test.ts` | `run-2026-09-19T06-01-42` 1/1 通过（11s，串行、无重试） |
+| 变异检验 | 把 `Discovery::project_locator` 从 common dir 改为 private dir：`run-2026-09-19T06-03-21` 失败于「同一仓库的 worktree 属于同一项目」（两个不同的 `project_id`），回退后 `run-2026-09-19T06-04-08` 通过 |
+| 既有 resources 单元测试（138 项） | 通过，含主仓库 / 子目录 / clone / symlink 身份用例 |
+
+**遗留**：
+
+- symlink 场景无法在 TUI 层观测：启动进程的 cwd 由 `getcwd` 给出物理路径，符号链接代理在 `session/new` 之前已被解析，该场景仍由 resources 单元测试覆盖。
+- 新用例未加入 L0：当前 L0 串行运行已约 7.5 分钟，本用例需要三次 TUI 启动；它只在 L2 / release 全量中运行。
