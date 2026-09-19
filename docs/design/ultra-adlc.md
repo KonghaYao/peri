@@ -91,10 +91,11 @@ Profile，不给整个 Workflow 绑定单一档次。profile 和升级条件记�
 
 ### ADLC-GIT-BASELINE-001
 
-`writeIntent.path_allowlist` 以 Workflow 启动时捕获的 Git baseline 为准，只归因运行期间发生
-变化的 tracked path。由于 Git postcondition 不覆盖 ignored path，orchestrator 还必须比较
-preflight/post-processing 文件系统 snapshot，再把变化路径与 Git `changed_paths` 合并后匹配
-allowlist。启动前已存在且未变化的 dirty/ignored path 只记录，不阻塞也不归因给本次执行。
+`writeIntent.path_allowlist` 以 Workflow 启动时捕获的 Git baseline 为准。启动前记录
+`git status --porcelain`，保留已有无关改动，不因它们存在而阻塞或要求用户清理。Git
+postcondition 比较前后 porcelain 状态，不覆盖 ignored path，也可能漏掉状态不变的
+已有 dirty 文件内容变化，因此不宣称完整文件系统覆盖。检查本任务范围内的 diff 与声明
+产物，并遵守各 Agent 的独占写入范围；不要求全仓库文件系统快照或扫描门禁。
 
 ### ADLC-DELIVERY-STATUS-001
 
