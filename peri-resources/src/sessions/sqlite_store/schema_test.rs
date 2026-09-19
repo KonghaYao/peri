@@ -881,8 +881,8 @@ async fn version4_database(path: &Path, root: &Path) -> SqliteConnection {
 }
 
 /// [回归测试] schema 4 的单列唯一约束把「同一路径上的另一个文件对象」挡在登记之外，
-/// 目录被替换或换位后该路径无法建立新会话。升级只把登记键放宽为组合键：行、绑定和
-/// 外键都保持原样，同一定位 + 同一证据仍然唯一。
+/// 目录被替换或换位后该路径无法建立新会话。升级只把登记键放宽为组合键：行、绑定、
+/// 外键、线程行与消息（含 frozen snapshot）都保持原样，同一定位 + 同一证据仍然唯一。
 #[tokio::test]
 async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
     let dir = tempfile::tempdir().unwrap();
@@ -903,6 +903,7 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
     .await;
     assert!(blocked.is_err(), "schema 4 的单列唯一约束必须仍然存在");
     let before = identity_and_execution_bytes(&mut connection).await;
+    let before_history = history_bytes(&mut connection).await;
     connection.close().await.unwrap();
 
     let store = SqliteThreadStore::new(&path).await.unwrap();
@@ -937,6 +938,15 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
             .len(),
         1
     );
+    assert_eq!(
+        store
+            .load_frozen_snapshot(&"old-session".to_owned())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("frozen-owner-state"),
+        "迁移不得丢失 frozen snapshot"
+    );
 
     // 同一路径上的另一个文件对象可以登记，同一 (locator, 证据) 组合仍然唯一。
     let mut probe = SqliteConnection::connect_with(
@@ -945,8 +955,13 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
     .await
     .unwrap();
     let after = identity_and_execution_bytes(&mut probe).await;
+    let after_history = history_bytes(&mut probe).await;
     probe.close().await.unwrap();
     assert_eq!(before, after, "迁移不得改写登记、绑定或执行状态");
+    assert_eq!(
+        before_history, after_history,
+        "迁移不得改写线程行与消息：frozen snapshot 与历史都在其中"
+    );
 
     sqlx::query(
         "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)

@@ -134,7 +134,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 - [ ] 主仓库、linked worktree、独立 clone、子目录和 symlink 场景仍得到正确的执行目录与项目展示。
 - [ ] Git 缺失、旧版本、权限拒绝、慢响应分别验证；记录实际调用次数和等待阶段，避免把静态最坏预算写成实测耗时。（缺失见「修复记录」第 2 条端到端；权限拒绝、调用次数见第 3 条假 Git 判别用例；旧版本见第 7 条——用拒绝新选项的假 Git 验证，仍未运行真实旧版二进制，最低支持版本未确定）
 - [x] 事务内没有无界或重复的外部探测；慢准备、取消和超时不造成输入丢失或重复执行。（前半见「修复记录」第 3 条；后半见第 6 条：慢准备仍被受理且只入队一次、准备超时恢复原稿且不发送入队请求、准备期间取消不产生投递，均为 consumer 级回归；回执超时的「未知结果按同身份重试」沿用既有用例 `test_steer_uncertain_receipt_retries_identical_command_and_input`）
-- [ ] 身份模型调整保留已有消息、frozen snapshot、绑定关系和执行状态；冲突处理可理解、可恢复。（「可理解」2026-09-19 实施：绑定失败文案指出可完成的下一步，输入路径复述服务端原因而非表述为输入被拒，见「修复记录」第 5 条；「可恢复」按第 4 条的新会话语义覆盖；frozen snapshot 与恢复入口仍未单独验收）
+- [x] 身份模型调整保留已有消息、frozen snapshot、绑定关系和执行状态；冲突处理可理解、可恢复。（「可理解」2026-09-19 实施：绑定失败文案指出可完成的下一步，输入路径复述服务端原因而非表述为输入被拒，见「修复记录」第 5 条；「可恢复」按第 4 条的新会话语义覆盖；保留性证据见第 8 条：schema 4→5 迁移前后逐字节比对绑定 / 执行状态与线程行 / 消息，并对 frozen snapshot 做存储层读取。把已有会话改指到新位置的入口仍未提供，属设计 §5.4 的明确限制）
 - [ ] 简化后继续通过错误 cwd、配置/权限隔离、跨进程 owner 竞争及 dirty 状态保护测试。
 
 ## 与前一轮修复的关系
@@ -169,6 +169,7 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 | 2026-09-19 | — | Open（部分修复） | agent | 绑定失败文案改为指出可完成的下一步，输入路径在会话未能建立时复述服务端原因而非表述为输入被拒（见「修复记录」第 5 条） |
 | 2026-09-19 | — | Open（部分修复） | agent | 准备阶段与受理回执分开计时：慢准备不再被 10 秒回执预算判成输入被拒，准备超时按未受理恢复原稿；勾选验收条件第 7 项（见「修复记录」第 6 条） |
 | 2026-09-19 | — | Open（部分修复） | agent | Git 发现去掉版本相关选项：位置解析不再用 `--path-format=absolute` / `--absolute-git-dir` 并按 cwd 还原相对输出，`worktree list` 不支持 `-z` 时退回换行分隔（见「修复记录」第 7 条） |
+| 2026-09-19 | — | Open（部分修复） | agent | 补齐 schema 4→5 迁移的保留性断言：迁移前后逐字节比对线程行 / 消息（含 frozen snapshot）并做存储层读取，变异检验通过；勾选验收条件第 8 项（见「修复记录」第 8 条，生产代码未变） |
 
 ## 修复记录
 
@@ -394,3 +395,28 @@ inode 本身并非错误 API，但「要使用会话就必须证明目录仍是�
 - 仍无真实旧版 Git 证据：本机只有 Git 2.39，最低支持版本、各选项的实际引入版本与旧版在真实仓库中的行为都未验证；现有用例只能证明「不依赖这些选项」这一性质。要宣称支持版本，需要装旧版二进制或在 CI 里准备旧版 fixture。
 - 退回路径的代价未量化：换行分隔无法表示含换行的路径（该情形下成员判定会精确比对失败并报错，不会静默误判），但也没有覆盖用例构造这样的路径。
 - 慢响应仍未实测（验收条件第 6 项的一部分）：本条只处理版本差异，未测量慢 Git 下的等待时间。
+
+### 2026-09-19：schema 4→5 迁移的保留性断言（第 8 条，生产代码未变）
+
+**范围**：只补齐验收条件第 8 项中「身份模型调整保留已有消息、frozen snapshot」的断言。不改变迁移实现、登记键与绑定语义；生产代码无改动。
+
+**缺口**：`test_version4_upgrade_relaxes_registration_keys_and_preserves_rows` 原本只比对 `projects` / `workspaces` / `session_bindings` / `execution_runs` 的行内容，并检查 `load_messages` 条数为 1；它没有比对 `threads` 行本身，因此没有覆盖迁移重建登记表时最可能连带丢失的 `frozen_context`。4→5 的实现会 `DROP TABLE projects` / `workspaces` 并在提交前做 `foreign_key_check`，历史是否原样保留此前靠「迁移不触碰这两张表」推断，没有断言。
+
+**改动**（`peri-resources/src/sessions/sqlite_store/schema_test.rs`：测试与文档注释）：
+
+- 迁移前记录 `history_bytes`（`threads` 全列 + `messages` 行），迁移后用只读连接再次记录并逐一比对：`frozen_context`、`cached_context`、`config`、`message_count` 等列与消息行都在其中。
+- 增加存储层读取断言：迁移后 `store.load_frozen_snapshot` 仍返回 `frozen-owner-state`，把不变量表述为「可读取的 frozen」而不只是「字节恰好相同」。
+
+**验证证据**：
+
+| 验证 | 结果 |
+| --- | --- |
+| `cargo test -p peri-resources --lib -- test_version4_upgrade_relaxes_registration_keys_and_preserves_rows` | 通过（0.42s） |
+| 变异检验 | 在迁移里临时加 `UPDATE threads SET frozen_context = NULL`：该用例失败于「迁移不得丢失 frozen snapshot」（`left: None` / `right: Some("frozen-owner-state")`），回退后通过 |
+| `cargo test -p peri-resources --lib` | 134 项通过 |
+| `cargo fmt --all -- --check` | 无格式差异 |
+
+**遗留**：
+
+- 只覆盖 4→5 这一条迁移路径；2→3、3→4 的历史保留由各自用例覆盖，未逐条比对 `threads` 行。
+- 未覆盖真实二进制在旧库上的端到端行为：`legacy-history-upgrade` e2e 断言 schema 版本与列表可见性，不比对 frozen 内容。
