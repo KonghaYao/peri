@@ -31,7 +31,7 @@
 | Resources 门面（唯一实例化入口） | src/context.rs | `Resources`（:17，持 `Arc<dyn ThreadStore>`） |
 | 全局配置路径 | src/config/mod.rs | `peri_dir` / `settings_path` |
 | SQLite 会话存储 | src/sessions/sqlite_store.rs | `SqliteThreadStore`（:35，唯一 pool owner）；唯一 `ThreadStore` impl 处理 metadata/payload/frozen，context/compaction 委托私有模块 |
-| SQLite 连接与解码 | src/sessions/sqlite_store/{connection,schema,row_mapping}.rs | connection.rs（连接、read-only probe、安全错误）；schema.rs（按必需真实表/列识别旧库、保留额外业务表、共享列定义、事务升级并移除无状态 revision 列；schema 4→5 在事务内重建 projects / workspaces 把单列唯一放宽为组合登记键，重建需在事务外关闭外键并在提交前用 `PRAGMA foreign_key_check` 补齐校验）；row_mapping.rs（`ThreadRow` :24、`meta_from_row` :54、`role_of` :43、`extract_title` :96、完整/列表列投影） |
+| SQLite 连接与解码 | src/sessions/sqlite_store/{connection,schema,row_mapping}.rs | connection.rs（连接、read-only probe、安全错误）；schema.rs（按必需真实表/列识别旧库、保留额外业务表、共享列定义、事务升级并移除无状态 revision 列；schema 2–5→6 在事务内重建 projects / workspaces，把单列唯一放宽为组合登记键（含被旧 writer 误标 5 的漏迁移库，保留健康 5 已有组合登记）；2/3 先完成原有 revision / 身份载荷迁移，重建需在事务外关闭外键并在提交前用 `PRAGMA foreign_key_check` 补齐校验）；row_mapping.rs（`ThreadRow` :24、`meta_from_row` :54、`role_of` :43、`extract_title` :96、完整/列表列投影） |
 | SQLite 上下文与事务 | src/sessions/sqlite_store/{context,compaction}.rs | context.rs（ancestor payload、cache、child/session tree）；compaction.rs（flags、事务提交、回滚删除） |
 | 测试文件存储 | src/sessions/filesystem.rs | `FilesystemThreadStore`（:25） |
 | 会话存储 re-export / 只读入口 | src/sessions/mod.rs | `SqliteThreadStore` / `FilesystemThreadStore`（:10-11）；`open_thread_store_read_only`；`default_database_path`（读写共用的纯路径解析） |

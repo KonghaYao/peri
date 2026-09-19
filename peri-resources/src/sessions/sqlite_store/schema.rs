@@ -13,7 +13,17 @@ pub(super) enum SchemaState {
     Version2,
     Version3,
     Version4,
+    Version5,
     Current,
+}
+
+impl SchemaState {
+    fn needs_registration_rebuild(self) -> bool {
+        matches!(
+            self,
+            Self::Version2 | Self::Version3 | Self::Version4 | Self::Version5
+        )
+    }
 }
 
 /// 旧版未设置 user_version；校验本模块所需基础表，保留同库的其他业务表。
@@ -22,7 +32,8 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .fetch_one(&mut *connection)
         .await?;
     match version {
-        5 => return Ok(SchemaState::Current),
+        6 => return Ok(SchemaState::Current),
+        5 => return Ok(SchemaState::Version5),
         4 => return Ok(SchemaState::Version4),
         3 => return Ok(SchemaState::Version3),
         2 => return Ok(SchemaState::Version2),
@@ -89,7 +100,7 @@ impl SqliteThreadStore {
         // 立即检查外键，`defer_foreign_keys` 也挡不住。该 PRAGMA 只在事务外生效，
         // 因此重建路径整段使用同一条连接：先关外键，提交前用 foreign_key_check 补齐
         // 校验，最后恢复连接设置。
-        let rebuilding = state == SchemaState::Version4;
+        let rebuilding = state.needs_registration_rebuild();
         if rebuilding {
             sqlx::query("PRAGMA foreign_keys = OFF")
                 .execute(&mut *connection)
@@ -194,7 +205,9 @@ impl SqliteThreadStore {
         if matches!(state, SchemaState::Version2 | SchemaState::Version3) {
             migrate_identity_values(&mut tx).await?;
         }
-        if state == SchemaState::Version4 {
+        // 2/3 直升也必须完成登记键迁移；5 既可能已放宽，也可能被旧 writer
+        // 漏迁移后误标。统一重建一次，保留健康 5 已有的所有组合登记。
+        if state.needs_registration_rebuild() {
             relax_registration_keys(&mut tx).await?;
             // 本次迁移关闭了外键强制，提交前显式补齐引用校验。
             let violations: Vec<(String, i64, String, i64)> =
@@ -208,7 +221,7 @@ impl SqliteThreadStore {
                 .into());
             }
         }
-        sqlx::query("PRAGMA user_version = 5")
+        sqlx::query("PRAGMA user_version = 6")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

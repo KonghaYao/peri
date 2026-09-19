@@ -325,7 +325,7 @@ hooks、插件与 MCP 展示取当前会话环境。TUI 本地配置面板仍编
 ## 8. 单库存储与版本边界
 
 默认读写始终使用 `~/.peri/threads/threads.db`，`--db-path` 仍可选择显式路径。
-schema 版本记录在 `PRAGMA user_version`，当前为 `5`，不另建数据库文件。新 writer
+schema 版本记录在 `PRAGMA user_version`，当前为 `6`，不另建数据库文件。新 writer
 按必需的 `threads` / `messages` 真实表及其列识别未设置版本号的旧 schema；
 同库额外业务表（例如 `thread_goals`）及其数据保持原样，不能以整库表数量拒绝
 兼容旧库。在单个事务中补齐
@@ -334,12 +334,16 @@ schema 版本记录在 `PRAGMA user_version`，当前为 `5`，不另建数据�
 binding `revision` 列，保留其余绑定与执行状态，最后提交版本号。并发开库由
 schema OS 锁序列化；升级失败回滚整次 DDL。
 
-schema 4 升级到 5 只放宽登记键：重建 `projects` 与 `workspaces`，把 locator /
+schema 2–5 写打开时在同一事务升级到 6，放宽登记键：重建 `projects` 与 `workspaces`，把 locator /
 root 与 identity 的单列唯一约束换成 §3.2 的组合键。重建逐列复制行内容与引用
 关系，ProjectId、WorkspaceId、binding、frozen / history 和 execution 状态不变；
 该路径需要在事务外关闭外键强制才能替换被引用的父表，因此提交前显式执行
 `PRAGMA foreign_key_check`，发现悬空引用即回滚。升级前的单列唯一约束会拒绝
-同一路径上的第二个文件对象，这正是升级要解除的限制。
+同一路径上的第二个文件对象，这正是升级要解除的限制。schema 2/3 先完成 revision /
+身份 JSON 的既有迁移，再重建登记表，不能跳过中间步骤直接标记最新版本。schema 5
+可能已完成组合键迁移，也可能由旧 writer 漏迁移后误标；两者都重建一次并提交版本 6。
+健康 5 已保存的同路径多对象、同对象多路径登记逐行保留，不合并 ID、不清 dirty，
+也不自动把旧会话迁移到新的目录。后续写打开不再重建；旧二进制拒绝版本 6。
 
 开库时已有会话、消息、配置和 frozen / inherited / cached context 列值保持原样，
 不批量扫描目录或回填 binding。列表保留未绑定历史，`ScopedThreadEntry.binding`
@@ -358,8 +362,8 @@ MetaHarness 与插件目录均从保存 cwd 发现，不沿用启动项目，也
 并发竞争复用赢家，失败或中断不得只提交其中一项。接纳后恢复继续遵守原有 lease、
 dirty 和目录身份校验；已绑定会话缺失快照不再被视为 legacy。没有 binding 却已有
 execution_runs 的记录拒绝接纳，避免把绑定损坏当成升级。此流程同样适用于已经由
-3.15.0 升级为 schema 3、仍未绑定的旧行；schema 3 在写打开时于同一事务升级为
-schema 4。迁移只规范化 projects.object_identity、workspaces.root_identity 与
+3.15.0 升级为 schema 3、仍未绑定的旧行；schema 2/3 在写打开时先完成身份载荷
+规范化，再与上述登记键变更一起提交为 schema 6。身份载荷迁移只规范化 projects.object_identity、workspaces.root_identity 与
 discovery 中的身份 JSON，移除 legacy birth 字段，保留 ProjectId、WorkspaceId、
 binding、frozen/history 和 execution 状态。迁移前校验全部身份 JSON 与同表唯一性；
 损坏或归一化后冲突使整个事务回滚。升级前必须停止旧版 writer，禁止新旧 schema
