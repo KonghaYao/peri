@@ -148,6 +148,59 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
 
 #[tokio::test]
 #[serial]
+async fn responses_history_rpc_redacts_without_changing_sqlite() {
+    use peri_acp_types::messages::{BaseMessage, ContentBlock, MessageContent};
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeDirGuard::set(tmp.path());
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
+    let cfg = make_server_config(
+        config.clone(),
+        LlmProvider::from_config(&config).unwrap(),
+        &tmp,
+    )
+    .await;
+    let id = old_thread(&cfg, tmp.path()).await;
+    let message = BaseMessage::ai(MessageContent::Blocks(vec![
+        ContentBlock::text("visible answer"),
+        ContentBlock::responses_native_history(json!({
+            "version": 1, "source": {"nonce": "fixture-nonce", "digest": "fixture-digest"},
+            "items": [{"type": "reasoning", "encrypted_content": "fixture-ciphertext"}],
+        })),
+    ]));
+    cfg.thread_store
+        .append_message(&id, message.clone())
+        .await
+        .unwrap();
+    let before = cfg.thread_store.load_messages(&id).await.unwrap();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let response = handle_request(
+        "peri/session_history",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap();
+    let wire = response.to_string();
+    for private in ["encrypted_content", "nonce", "digest", "fixture-ciphertext"] {
+        assert!(!wire.contains(private));
+    }
+    assert!(wire.contains("visible answer"));
+    let after = cfg.thread_store.load_messages(&id).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(&after).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(after.last().unwrap()).unwrap(),
+        serde_json::to_value(&message).unwrap()
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn legacy_history_missing_directory_is_readable_without_adoption() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());

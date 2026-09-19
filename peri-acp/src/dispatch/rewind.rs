@@ -321,7 +321,8 @@ pub async fn rewind_execute(
         "status": "executed",
         // P1：携带截断后的 history，调用方（TUI 进程内 ACP server）回写
         // SessionState.history，保证后续候选/预算查询与事件一致。
-        "history": history,
+        // RPC 是观测出口：只发送脱敏副本，canonical 历史与指纹计算不受影响。
+        "history": peri_acp_types::messages::redacted_messages_for_observability(&history),
     }))
 }
 

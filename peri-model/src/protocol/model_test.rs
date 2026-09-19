@@ -236,6 +236,39 @@ async fn test_complete_preserves_completed_response_fields() {
     assert_eq!(tool_calls[0].id(), "provider_call");
 }
 
+/// 重试失败尝试的真实用量必须计入调用总量，且不与快照/最终用量重复。
+#[tokio::test]
+async fn test_complete_accumulates_failed_attempt_usage_once() {
+    let completed = ModelResponse::new(
+        ModelMessage::assistant_text("final"),
+        StopReason::EndTurn,
+        Some(TokenUsage::new(11, 4)),
+        None,
+    )
+    .unwrap();
+    let model = FakeModel::with_events(vec![
+        ModelStreamEvent::AttemptUsage(TokenUsage::new(30, 2)),
+        ModelStreamEvent::AttemptUsage(TokenUsage::new(5, 1)),
+        ModelStreamEvent::Completed(completed),
+    ]);
+
+    let response = model
+        .complete(request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.usage(),
+        Some(&TokenUsage {
+            input_tokens: 46,
+            output_tokens: 7,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        }),
+        "失败尝试与最终尝试各计一次"
+    );
+}
+
 #[tokio::test]
 async fn test_complete_rejects_invalid_tool_call_arguments() {
     for (arguments_delta, expected_kind) in [

@@ -359,10 +359,12 @@ fn test_observe_llm_call_end_maps_with_usage() {
         step: 7,
         model: "claude-sonnet-4".to_string(),
         output: "test output".to_string(),
-        input_tokens: 500,
-        output_tokens: 200,
-        cache_creation_input_tokens: Some(30),
-        cache_read_input_tokens: Some(400),
+        usage: Some(peri_model::TokenUsage {
+            input_tokens: 500,
+            output_tokens: 200,
+            cache_creation_input_tokens: Some(30),
+            cache_read_input_tokens: Some(400),
+        }),
         request_id: Some("req-abc".to_string()),
     };
     match observe_event_to_executor(o).unwrap() {
@@ -408,10 +410,12 @@ fn test_observe_llm_call_end_maps_with_output() {
         step: 3,
         model: "claude-sonnet-4".to_string(),
         output: "final answer text".to_string(),
-        input_tokens: 100,
-        output_tokens: 50,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: Some(0),
+        usage: Some(peri_model::TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(0),
+        }),
         request_id: None,
     };
     match observe_event_to_executor(o).expect("LlmCallEnd 应映射") {

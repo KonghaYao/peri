@@ -1,3 +1,4 @@
+use peri_acp::provider::config::ApiProtocol;
 use ratatui_kit::ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -88,6 +89,14 @@ pub(super) fn provider_type_label(provider_type: &str) -> &'static str {
     match provider_type {
         "anthropic" => "setup-provider-anthropic",
         _ => "setup-provider-openai",
+    }
+}
+
+/// API 协议 → i18n 标签 key（与 setup wizard 共用文案）
+pub(super) fn api_protocol_label(api: ApiProtocol) -> &'static str {
+    match api {
+        ApiProtocol::ChatCompletions => "api-protocol-chat-completions",
+        ApiProtocol::Responses => "api-protocol-responses",
     }
 }
 

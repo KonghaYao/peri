@@ -394,3 +394,268 @@ fn test_provider_identity_provenance_survives_state_roundtrip() {
     let restored: MigratedProvider = serde_json::from_value(old_provider).unwrap();
     assert!(restored.provider_id_is_editable());
 }
+
+// ─── API 协议选择（typed `api`）─────────────────────────────────────────────
+
+#[test]
+fn test_wizard_api_selection_reaches_provider_factory() {
+    // 端到端：向导选择 → 配置结构 → LlmProvider 工厂选用响应协议（用户可用路径闭环）
+    let mut mp = MigratedProvider::new(ProviderType::OpenAiCompatible);
+    mp.provider_id = "p1".into();
+    mp.api_key = "sk-test".into();
+    mp.base_url = "https://api.example.com/v1".into();
+    mp.api = ApiProtocol::Responses;
+    let cfg = build_wizard_config(&SetupWizardState {
+        step: SetupStep::Form,
+        source: SetupSource::CustomApi,
+        providers: vec![mp],
+        ..Default::default()
+    });
+    let provider = crate::app::agent::LlmProvider::from_config(&cfg)
+        .expect("向导产出的 responses 配置必须可构造 provider");
+    assert_eq!(provider.api_protocol(), Some(ApiProtocol::Responses));
+    assert_eq!(provider.protocol_key(), "responses");
+    assert_eq!(provider.model_name(), "gpt-5.5");
+
+    // 缺省（未选择）：仍走 chat_completions
+    let mut mp = MigratedProvider::new(ProviderType::OpenAiCompatible);
+    mp.provider_id = "p1".into();
+    mp.api_key = "sk-test".into();
+    let cfg = build_wizard_config(&SetupWizardState {
+        step: SetupStep::Form,
+        source: SetupSource::CustomApi,
+        providers: vec![mp],
+        ..Default::default()
+    });
+    assert_eq!(
+        crate::app::agent::LlmProvider::from_config(&cfg)
+            .expect("缺省配置必须可构造 provider")
+            .api_protocol(),
+        Some(ApiProtocol::ChatCompletions)
+    );
+
+    // anthropic 向导配置不携带 api，工厂按原生协议构造
+    let mut mp = MigratedProvider::new(ProviderType::Anthropic);
+    mp.api_key = "sk-ant-test".into();
+    let cfg = build_wizard_config(&SetupWizardState {
+        step: SetupStep::Form,
+        source: SetupSource::CustomApi,
+        providers: vec![mp],
+        ..Default::default()
+    });
+    let provider = crate::app::agent::LlmProvider::from_config(&cfg)
+        .expect("anthropic 向导配置必须可构造 provider");
+    assert_eq!(provider.api_protocol(), None);
+    assert_eq!(provider.protocol_key(), "anthropic");
+}
+
+#[test]
+fn test_migrated_provider_api_serde_compat() {
+    // 旧序列化数据（无 api 键）→ 缺省 chat_completions
+    let legacy = r#"{"provider_type":"OpenAiCompatible","provider_id":"p1","base_url":"https://api.example.com/v1","api_key":"k","aliases":["a","b","c","d"],"selected":true}"#;
+    let mp: MigratedProvider = serde_json::from_str(legacy).unwrap();
+    assert_eq!(mp.api, ApiProtocol::ChatCompletions);
+
+    // 未知协议值拒绝（不静默回退，也不进入未类型化字段）
+    let unknown = r#"{"provider_type":"OpenAiCompatible","provider_id":"p1","base_url":"https://api.example.com/v1","api_key":"k","aliases":["a","b","c","d"],"selected":true,"api":"completions"}"#;
+    let error = serde_json::from_str::<MigratedProvider>(unknown).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown variant"),
+        "未知 api 取值必须拒绝：{error}"
+    );
+
+    // 显式 responses roundtrip
+    let explicit = r#"{"provider_type":"OpenAiCompatible","provider_id":"p1","base_url":"https://api.example.com/v1","api_key":"k","aliases":["a","b","c","d"],"selected":true,"api":"responses"}"#;
+    let mp: MigratedProvider = serde_json::from_str(explicit).unwrap();
+    assert_eq!(mp.api, ApiProtocol::Responses);
+    let back: MigratedProvider =
+        serde_json::from_value(serde_json::to_value(&mp).unwrap()).unwrap();
+    assert_eq!(back.api, ApiProtocol::Responses);
+}
+
+#[test]
+fn test_form_field_order_includes_api_protocol() {
+    assert_eq!(FormField::ProviderType.next(), FormField::ApiProtocol);
+    assert_eq!(FormField::ApiProtocol.next(), FormField::ProviderId);
+    assert_eq!(FormField::ProviderId.prev(), FormField::ApiProtocol);
+    assert_eq!(FormField::ApiProtocol.prev(), FormField::ProviderType);
+    assert_eq!(FormField::Confirm.next(), FormField::ProviderType);
+    assert!(
+        !FormField::ApiProtocol.is_text_input(),
+        "协议是选择器而非文本字段"
+    );
+    assert_eq!(FormField::ApiProtocol.i18n_key(), "setup-field-api");
+}
+
+#[test]
+fn test_api_selection_scope_by_provider_type() {
+    assert!(ProviderType::OpenAiCompatible.supports_api_selection());
+    assert!(!ProviderType::Anthropic.supports_api_selection());
+
+    let mut mp = MigratedProvider::new(ProviderType::OpenAiCompatible);
+    assert_eq!(
+        mp.api,
+        ApiProtocol::ChatCompletions,
+        "缺省协议为 chat_completions"
+    );
+    assert_eq!(mp.effective_api(), Some(ApiProtocol::ChatCompletions));
+
+    mp.api = ApiProtocol::Responses;
+    assert_eq!(mp.effective_api(), Some(ApiProtocol::Responses));
+
+    // anthropic：字段残留也不落盘（非法组合）
+    let mut anthropic = MigratedProvider::new(ProviderType::Anthropic);
+    anthropic.api = ApiProtocol::Responses;
+    assert_eq!(anthropic.effective_api(), None);
+}
+
+#[test]
+fn test_build_wizard_config_writes_api_protocol() {
+    let mut openai = MigratedProvider::new(ProviderType::OpenAiCompatible);
+    openai.api_key = "sk-test".into();
+    openai.api = ApiProtocol::Responses;
+    let mut anthropic = MigratedProvider::new(ProviderType::Anthropic);
+    anthropic.api_key = "sk-ant-test".into();
+
+    let state = SetupWizardState {
+        step: SetupStep::Form,
+        source: SetupSource::CustomApi,
+        providers: vec![openai, anthropic],
+        ..Default::default()
+    };
+    let cfg = build_wizard_config(&state);
+    let by_id = |id: &str| {
+        cfg.config
+            .providers
+            .iter()
+            .find(|p| p.id == id)
+            .unwrap_or_else(|| panic!("provider {id} 必须存在"))
+    };
+    assert_eq!(by_id("openai").api, Some(ApiProtocol::Responses));
+    assert_eq!(by_id("anthropic").api, None, "anthropic 不得写入 api");
+}
+
+#[test]
+fn test_state_from_config_reads_api_protocol() {
+    let cfg = crate::config::PeriConfig {
+        config: crate::config::AppConfig {
+            providers: vec![
+                crate::config::ProviderConfig {
+                    id: "p1".into(),
+                    provider_type: "openai".into(),
+                    api_key: "k".into(),
+                    base_url: "https://api.example.com/v1".into(),
+                    api: Some(ApiProtocol::Responses),
+                    ..Default::default()
+                },
+                crate::config::ProviderConfig {
+                    id: "p2".into(),
+                    provider_type: "openai".into(),
+                    api_key: "k".into(),
+                    ..Default::default()
+                },
+                crate::config::ProviderConfig {
+                    id: "p3".into(),
+                    provider_type: "anthropic".into(),
+                    api_key: "k".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let state = state_from_config(&cfg);
+    assert_eq!(state.providers[0].api, ApiProtocol::Responses);
+    // 旧配置未声明 → 缺省 chat_completions
+    assert_eq!(state.providers[1].api, ApiProtocol::ChatCompletions);
+    assert_eq!(
+        state.providers[1].effective_api(),
+        Some(ApiProtocol::ChatCompletions)
+    );
+    assert_eq!(state.providers[2].effective_api(), None);
+}
+
+#[test]
+fn test_refresh_provider_defaults_clears_api_for_anthropic() {
+    let mut mp = MigratedProvider::new(ProviderType::OpenAiCompatible);
+    mp.api = ApiProtocol::Responses;
+    mp.provider_type.cycle(); // → Anthropic
+    mp.refresh_provider_defaults();
+    assert_eq!(
+        mp.api,
+        ApiProtocol::ChatCompletions,
+        "切到 anthropic 必须清除不适用协议"
+    );
+    assert_eq!(mp.effective_api(), None);
+}
+
+#[test]
+fn test_merge_setup_updates_api_selection() {
+    // 已有 provider（未声明 api）→ wizard 选择 responses → 合并后更新
+    let existing = crate::config::PeriConfig {
+        config: crate::config::AppConfig {
+            providers: vec![crate::config::ProviderConfig {
+                id: "p1".into(),
+                provider_type: "openai".into(),
+                api_key: "k".into(),
+                base_url: "https://api.example.com/v1".into(),
+                api: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut mp = MigratedProvider::new(ProviderType::OpenAiCompatible);
+    mp.provider_id = "p1".into();
+    mp.api_key = "k".into();
+    mp.api = ApiProtocol::Responses;
+    let state = SetupWizardState {
+        step: SetupStep::Form,
+        source: SetupSource::CustomApi,
+        providers: vec![mp],
+        from_command: true,
+        ..Default::default()
+    };
+    let merged = merge_setup(&state, existing);
+    assert_eq!(merged.config.providers[0].api, Some(ApiProtocol::Responses));
+}
+
+#[test]
+fn test_save_reopen_keeps_api_selection_across_profile_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+
+    let mut mp = MigratedProvider::new(ProviderType::OpenAiCompatible);
+    mp.provider_id = "p1".into();
+    mp.api_key = "sk-test".into();
+    mp.api = ApiProtocol::Responses;
+    let state = SetupWizardState {
+        step: SetupStep::Form,
+        source: SetupSource::CustomApi,
+        providers: vec![mp],
+        language: "en".into(),
+        ..Default::default()
+    };
+    let cfg = build_wizard_config(&state);
+    crate::config::save_to(&cfg, &path).unwrap();
+
+    // 重开：协议选择保留，且不落入 extra
+    let reopened = crate::config::load_from(&path).unwrap();
+    assert_eq!(
+        reopened.config.providers[0].api,
+        Some(ApiProtocol::Responses)
+    );
+    assert!(reopened.config.providers[0].extra.get("api").is_none());
+
+    // 重开 setup 表单：选择保留
+    let reopened_state = state_from_config(&reopened);
+    assert_eq!(reopened_state.providers[0].api, ApiProtocol::Responses);
+
+    // profile / quick switch 只改 active_alias，不触碰 providers 的协议选择
+    let mut switched = reopened.clone();
+    switched.config.active_alias = "haiku".into();
+    let switched_state = state_from_config(&switched);
+    assert_eq!(switched_state.providers[0].api, ApiProtocol::Responses);
+}

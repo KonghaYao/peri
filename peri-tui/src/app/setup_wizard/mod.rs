@@ -10,6 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ApiProtocol;
+
 // ── 步骤枚举 ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +131,11 @@ impl ProviderType {
             Self::OpenAiCompatible => ["gpt-5.5", "gpt-5.5", "gpt-4o", "gpt-4o-mini"],
         }
     }
+
+    /// 该类型是否使用 `api` 协议字段（仅 OpenAI 兼容类型可选协议）
+    pub fn supports_api_selection(&self) -> bool {
+        matches!(self, Self::OpenAiCompatible)
+    }
 }
 
 // ── 单 Provider 配置 ──────────────────────────────────────────────────────────
@@ -136,6 +143,10 @@ impl ProviderType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigratedProvider {
     pub provider_type: ProviderType,
+    /// OpenAI 兼容类型的 API 协议（chat_completions / responses）；
+    /// anthropic 不使用该字段，落盘时忽略（不写入 `api`）。
+    #[serde(default)]
+    pub api: ApiProtocol,
     pub provider_id: String,
     #[serde(default)]
     original_provider_id: Option<String>,
@@ -149,6 +160,7 @@ impl MigratedProvider {
     pub fn new(pt: ProviderType) -> Self {
         Self {
             provider_type: pt,
+            api: ApiProtocol::default(),
             provider_id: pt.default_provider_id().to_string(),
             original_provider_id: None,
             base_url: pt.default_base_url().to_string(),
@@ -156,6 +168,13 @@ impl MigratedProvider {
             aliases: pt.default_model_ids().map(|s| s.to_string()),
             selected: true,
         }
+    }
+
+    /// 落盘生效的协议：anthropic 不支持显式 api，返回 None。
+    pub fn effective_api(&self) -> Option<ApiProtocol> {
+        self.provider_type
+            .supports_api_selection()
+            .then_some(self.api)
     }
 
     pub fn provider_id_is_editable(&self) -> bool {
@@ -192,6 +211,10 @@ impl MigratedProvider {
                 *value = new.to_string();
             }
         }
+        // api 只对 openai 类型有意义：切到 anthropic 即清除不适用选择
+        if !self.provider_type.supports_api_selection() {
+            self.api = ApiProtocol::default();
+        }
     }
 }
 
@@ -206,6 +229,8 @@ pub enum FormMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FormField {
     ProviderType,
+    /// API 协议选择器（chat_completions / responses；仅 openai 类型可切换）
+    ApiProtocol,
     ProviderId,
     BaseUrl,
     TestConnectivity,
@@ -220,7 +245,8 @@ pub enum FormField {
 impl FormField {
     pub fn next(&self) -> Self {
         match self {
-            Self::ProviderType => Self::ProviderId,
+            Self::ProviderType => Self::ApiProtocol,
+            Self::ApiProtocol => Self::ProviderId,
             Self::ProviderId => Self::BaseUrl,
             Self::BaseUrl => Self::TestConnectivity,
             Self::TestConnectivity => Self::ApiKey,
@@ -236,7 +262,8 @@ impl FormField {
     pub fn prev(&self) -> Self {
         match self {
             Self::ProviderType => Self::Confirm,
-            Self::ProviderId => Self::ProviderType,
+            Self::ApiProtocol => Self::ProviderType,
+            Self::ProviderId => Self::ApiProtocol,
             Self::BaseUrl => Self::ProviderId,
             Self::TestConnectivity => Self::BaseUrl,
             Self::ApiKey => Self::TestConnectivity,
@@ -264,6 +291,7 @@ impl FormField {
     pub fn i18n_key(&self) -> &'static str {
         match self {
             Self::ProviderType => "setup-field-type",
+            Self::ApiProtocol => "setup-field-api",
             Self::ProviderId => "setup-field-id",
             Self::BaseUrl => "setup-field-base-url",
             Self::ApiKey => "setup-field-api-key",
@@ -424,6 +452,7 @@ pub fn state_from_config(cfg: &crate::config::PeriConfig) -> SetupWizardState {
             let defaults = provider_type.default_model_ids();
             MigratedProvider {
                 provider_type,
+                api: p.api.unwrap_or_default(),
                 provider_id: p.id.clone(),
                 original_provider_id: Some(p.id.clone()),
                 base_url: p.base_url.clone(),
@@ -492,6 +521,7 @@ pub fn build_wizard_config(state: &SetupWizardState) -> crate::config::PeriConfi
         let provider = crate::config::ProviderConfig {
             id: mp.provider_id.clone(),
             provider_type: mp.provider_type.type_str().to_string(),
+            api: mp.effective_api(),
             api_key: mp.api_key.clone(),
             base_url: mp.base_url.clone(),
             models: crate::config::ProviderModels {
@@ -578,6 +608,7 @@ fn merge_setup(
             // The wizard owns these fields. Preserve provider metadata and
             // forward-compatible extension fields from the existing record.
             existing.provider_type = new_provider.provider_type.clone();
+            existing.api = new_provider.api;
             existing.api_key = new_provider.api_key.clone();
             existing.base_url = new_provider.base_url.clone();
             existing.models = new_provider.models.clone();

@@ -174,24 +174,15 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             step,
             model,
             output,
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
+            usage,
             request_id,
             ..
         } => Some(ExecutorEvent::LlmCallEnd {
             step,
             model,
             output,
-            usage: Some(peri_model::TokenUsage {
-                input_tokens: input_tokens as u32,
-                output_tokens: output_tokens as u32,
-                cache_creation_input_tokens: cache_creation_input_tokens
-                    .and_then(|tokens| tokens.try_into().ok()),
-                cache_read_input_tokens: cache_read_input_tokens
-                    .and_then(|tokens| tokens.try_into().ok()),
-            }),
+            // 缺失/显式零必须原样透传：None 表示 provider 未上报整体用量。
+            usage,
             stop_reason: None,
             request_id,
             source_agent_id: None,

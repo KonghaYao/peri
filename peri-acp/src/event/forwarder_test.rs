@@ -115,10 +115,11 @@ async fn test_forwarder_branches_to_bridge_before_mapper() {
         step: 0,
         model: "test-model".to_string(),
         output: "out".to_string(),
-        input_tokens: 10,
-        output_tokens: 5,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
+        usage: Some(peri_model::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        }),
         request_id: None,
     });
 

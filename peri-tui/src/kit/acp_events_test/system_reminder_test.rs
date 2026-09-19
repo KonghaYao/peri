@@ -5,6 +5,25 @@ use peri_acp_types::system_reminder::{
 };
 use serde_json::json;
 
+#[test]
+#[serial]
+fn responses_source_notification_renders_as_warning() {
+    let mut state = make_fold_test_state();
+    dispatch_for_bridge(
+        &mut state,
+        &AcpEventData::SystemNotification(peri_acp_types::event_data::SystemNotification {
+            text: "模型来源已变化：保留通用对话和工具历史，不回放原生推理。".into(),
+            level: "warning".into(),
+        }),
+    );
+    push_view_models(&mut state);
+    let snapshot = VIEW_MODELS.state().read().clone();
+    assert!(snapshot.items.iter().any(|unit| matches!(unit,
+        TuiRenderUnit::TuiSystemNote(note) if note.level == TuiNoteLevel::Warning
+            && note.text.contains("不回放原生推理")
+    )));
+}
+
 fn reminder() -> SystemReminder {
     SystemReminder {
         version: SYSTEM_REMINDER_VERSION,

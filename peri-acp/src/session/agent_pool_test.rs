@@ -1,9 +1,11 @@
 use super::*;
+use crate::provider::ApiProtocol;
 fn make_openai_provider(model: &str) -> LlmProvider {
     LlmProvider::OpenAi {
         api_key: "test-key".to_string(),
         base_url: "https://api.example.com/v1".to_string(),
         model: model.to_string(),
+        api: ApiProtocol::ChatCompletions,
         effort: None,
         max_tokens: 32000,
         context_1m: false,
@@ -208,6 +210,49 @@ fn test_fingerprint_same_effort_stable() {
     assert_eq!(fingerprint(&a), fingerprint(&b));
 }
 
+/// fingerprint 包含 api 协议维度：同 model / base_url / 凭据下切换协议必须
+/// 产生不同身份，旧缓存对象不得复用。
+#[test]
+fn test_fingerprint_includes_api_protocol() {
+    let chat = LlmProvider::OpenAi {
+        api_key: "k".into(),
+        base_url: "https://api.example.com/v1".into(),
+        model: "gpt-5.6".into(),
+        api: ApiProtocol::ChatCompletions,
+        effort: Some("high".into()),
+        max_tokens: 32000,
+        context_1m: false,
+        retry_observer: None,
+    };
+    let responses = LlmProvider::OpenAi {
+        api_key: "k".into(),
+        base_url: "https://api.example.com/v1".into(),
+        model: "gpt-5.6".into(),
+        api: ApiProtocol::Responses,
+        effort: Some("high".into()),
+        max_tokens: 32000,
+        context_1m: false,
+        retry_observer: None,
+    };
+    assert_ne!(fingerprint(&chat), fingerprint(&responses));
+    assert_eq!(fingerprint(&chat), fingerprint(&chat.clone()));
+
+    // 缓存有效性随协议切换失效
+    let mut pool = AgentPool::new();
+    pool.store_llm(CachedLlmInstances {
+        auxiliary_model: Arc::new(mock_model("aux")) as Arc<dyn peri_model::Model>,
+        auto_classifier_model: Arc::new(tokio::sync::Mutex::new(
+            Box::new(mock_model("classifier")) as Box<dyn peri_model::Model>,
+        )),
+        fingerprint: fingerprint(&chat),
+    });
+    assert!(pool.has_valid_cache(&chat));
+    assert!(
+        !pool.has_valid_cache(&responses),
+        "同 model/url 切换 api 后旧缓存必须失效"
+    );
+}
+
 /// 无 effort 等同于不启用 extended thinking
 #[test]
 fn test_fingerprint_no_effort_distinct() {
@@ -384,7 +429,12 @@ fn test_provider_connection_update_does_not_reuse_stale_cache() {
         *max_tokens = 64000;
         *context_1m = true;
     }
-    for replacement in [changed_key, changed_url, changed_options] {
+    // 同 model / base_url / 凭据下切换 api 协议也必须更换缓存身份
+    let mut changed_api = original.clone();
+    if let LlmProvider::OpenAi { api, .. } = &mut changed_api {
+        *api = ApiProtocol::Responses;
+    }
+    for replacement in [changed_key, changed_url, changed_options, changed_api] {
         let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
         let old_fp = fingerprint(&original);
         let new_fp = fingerprint(&replacement);

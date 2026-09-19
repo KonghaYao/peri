@@ -2,6 +2,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::TokenUsage;
+
 /// 传输层失败的安全分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -396,15 +398,33 @@ impl ModelErrorDiagnostic {
 ///
 /// 此错误只保存经过验证的 provider、HTTP status、request id 与受限摘要，绝不保存请求/响应
 /// 正文、headers、cookie 或认证凭据。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelError(ModelErrorInner);
+#[derive(Debug, Clone)]
+pub struct ModelError {
+    inner: ModelErrorInner,
+    /// 该失败调用已确认消耗的真实用量（重试尝试累加后由上层注入）。
+    ///
+    /// 观测性事实，不参与错误身份比较，也不进入诊断投影与任何 wire 表示。
+    usage: Option<TokenUsage>,
+}
+
+/// 用量是观测事实，不是错误身份：比较只依据失败分类与安全上下文。
+impl PartialEq for ModelError {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl Eq for ModelError {}
 
 impl ModelError {
     pub fn transport(kind: TransportErrorKind, provider: Option<impl AsRef<str>>) -> Self {
-        Self(ModelErrorInner::Transport {
-            kind,
-            provider: provider.and_then(|value| SafeErrorContext::new(value)),
-        })
+        Self {
+            inner: ModelErrorInner::Transport {
+                kind,
+                provider: provider.and_then(|value| SafeErrorContext::new(value)),
+            },
+            usage: None,
+        }
     }
 
     pub fn http_status(
@@ -412,43 +432,70 @@ impl ModelError {
         provider: impl AsRef<str>,
         request_id: Option<impl AsRef<str>>,
     ) -> Self {
-        Self(ModelErrorInner::HttpStatus {
-            status,
-            provider: SafeErrorContext::new(provider),
-            request_id: request_id.and_then(|value| SafeErrorContext::new(value)),
-        })
+        Self {
+            inner: ModelErrorInner::HttpStatus {
+                status,
+                provider: SafeErrorContext::new(provider),
+                request_id: request_id.and_then(|value| SafeErrorContext::new(value)),
+            },
+            usage: None,
+        }
     }
 
     pub fn protocol(kind: ProtocolErrorKind) -> Self {
-        Self(ModelErrorInner::Protocol(ProtocolError::new(kind)))
+        Self {
+            inner: ModelErrorInner::Protocol(ProtocolError::new(kind)),
+            usage: None,
+        }
     }
 
     pub fn protocol_with_summary(kind: ProtocolErrorKind, summary: impl AsRef<str>) -> Self {
-        Self(ModelErrorInner::Protocol(ProtocolError::with_summary(
-            kind, summary,
-        )))
+        Self {
+            inner: ModelErrorInner::Protocol(ProtocolError::with_summary(kind, summary)),
+            usage: None,
+        }
     }
 
     pub fn cancelled() -> Self {
-        Self(ModelErrorInner::Cancelled)
+        Self {
+            inner: ModelErrorInner::Cancelled,
+            usage: None,
+        }
     }
 
     pub fn stream_interrupted(
         provider: Option<impl AsRef<str>>,
         request_id: Option<impl AsRef<str>>,
     ) -> Self {
-        Self(ModelErrorInner::StreamInterrupted {
-            provider: provider.and_then(|value| SafeErrorContext::new(value)),
-            request_id: request_id.and_then(|value| SafeErrorContext::new(value)),
-        })
+        Self {
+            inner: ModelErrorInner::StreamInterrupted {
+                provider: provider.and_then(|value| SafeErrorContext::new(value)),
+                request_id: request_id.and_then(|value| SafeErrorContext::new(value)),
+            },
+            usage: None,
+        }
+    }
+
+    /// 已知的失败调用真实用量（`None` = provider 未上报任何用量）。
+    pub fn usage(&self) -> Option<&TokenUsage> {
+        self.usage.as_ref()
+    }
+
+    /// 附加失败调用已确认的真实用量；诊断与错误身份保持不变。
+    pub fn with_usage(mut self, usage: Option<TokenUsage>) -> Self {
+        self.usage = usage;
+        self
     }
 
     pub fn retry_exhausted(attempts: u32, last_error: RetryErrorKind) -> Option<Self> {
-        (attempts > 0).then_some(Self(ModelErrorInner::RetryExhausted {
-            attempts,
-            last_error,
-            diagnostic: None,
-        }))
+        (attempts > 0).then_some(Self {
+            inner: ModelErrorInner::RetryExhausted {
+                attempts,
+                last_error,
+                diagnostic: None,
+            },
+            usage: None,
+        })
     }
 
     pub(crate) fn retry_exhausted_with_context(
@@ -460,23 +507,26 @@ impl ModelError {
             attempts > 0,
             "retry exhaustion requires at least one attempt"
         );
-        Self(ModelErrorInner::RetryExhausted {
-            attempts,
-            last_error,
-            diagnostic: Some(error.diagnostic().with_retry(attempts, last_error)),
-        })
+        Self {
+            inner: ModelErrorInner::RetryExhausted {
+                attempts,
+                last_error,
+                diagnostic: Some(error.diagnostic().with_retry(attempts, last_error)),
+            },
+            usage: error.usage.clone(),
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        matches!(self.0, ModelErrorInner::Cancelled)
+        matches!(self.inner, ModelErrorInner::Cancelled)
     }
 
     pub fn is_stream_interrupted(&self) -> bool {
-        matches!(self.0, ModelErrorInner::StreamInterrupted { .. })
+        matches!(self.inner, ModelErrorInner::StreamInterrupted { .. })
     }
 
     pub fn transport_kind(&self) -> Option<TransportErrorKind> {
-        match &self.0 {
+        match &self.inner {
             ModelErrorInner::Transport { kind, .. } => Some(*kind),
             ModelErrorInner::RetryExhausted { diagnostic, .. } => {
                 diagnostic.as_ref().and_then(|value| value.transport)
@@ -486,7 +536,7 @@ impl ModelError {
     }
 
     pub fn http_status_code(&self) -> Option<u16> {
-        match &self.0 {
+        match &self.inner {
             ModelErrorInner::HttpStatus { status, .. } => Some(*status),
             ModelErrorInner::RetryExhausted { diagnostic, .. } => {
                 diagnostic.as_ref().and_then(|value| value.status)
@@ -496,7 +546,7 @@ impl ModelError {
     }
 
     pub fn protocol_error(&self) -> Option<ProtocolError> {
-        match &self.0 {
+        match &self.inner {
             ModelErrorInner::Protocol(error) => Some(error.clone()),
             ModelErrorInner::RetryExhausted { diagnostic, .. } => diagnostic
                 .as_ref()
@@ -507,14 +557,14 @@ impl ModelError {
     }
 
     pub fn retry_error_kind(&self) -> Option<RetryErrorKind> {
-        match &self.0 {
+        match &self.inner {
             ModelErrorInner::RetryExhausted { last_error, .. } => Some(*last_error),
             _ => None,
         }
     }
 
     pub fn provider(&self) -> Option<&str> {
-        match &self.0 {
+        match &self.inner {
             ModelErrorInner::Transport { provider, .. }
             | ModelErrorInner::StreamInterrupted { provider, .. } => {
                 provider.as_ref().map(SafeErrorContext::as_str)
@@ -530,7 +580,7 @@ impl ModelError {
     }
 
     pub fn request_id(&self) -> Option<&str> {
-        match &self.0 {
+        match &self.inner {
             ModelErrorInner::HttpStatus { request_id, .. }
             | ModelErrorInner::StreamInterrupted { request_id, .. } => {
                 request_id.as_ref().map(SafeErrorContext::as_str)
@@ -545,7 +595,7 @@ impl ModelError {
     /// Return the bounded diagnostic projection. Invalid or absent provider and
     /// request identities are represented as `None`, never as a sentinel.
     pub fn diagnostic(&self) -> ModelErrorDiagnostic {
-        match &self.0 {
+        match &self.inner {
             ModelErrorInner::Transport { kind, provider } => ModelErrorDiagnostic {
                 category: ModelErrorCategory::Transport,
                 status: None,
@@ -623,7 +673,7 @@ impl ModelError {
 
 impl fmt::Display for ModelError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.0 {
+        match &self.inner {
             ModelErrorInner::Transport { kind, provider } => {
                 write!(formatter, "model transport error ({kind})")?;
                 write_provider_suffix(formatter, provider.as_ref())

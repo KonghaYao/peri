@@ -235,7 +235,10 @@ async fn test_budget_recovery_loop_stops_after_two_committed_fulls() {
             .filter(|event| matches!(
                 event,
                 ObserveEvent::LlmCallEnd {
-                    input_tokens: 96_000,
+                    usage: Some(peri_model::TokenUsage {
+                        input_tokens: 96_000,
+                        ..
+                    }),
                     ..
                 }
             ))

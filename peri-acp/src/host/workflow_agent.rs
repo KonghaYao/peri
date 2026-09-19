@@ -270,6 +270,7 @@ mod tests {
             api_key: String::new(),
             base_url: "http://localhost".into(),
             model: "parent-model".into(),
+            api: crate::provider::ApiProtocol::ChatCompletions,
             effort: None,
             max_tokens: 1024,
             context_1m: false,

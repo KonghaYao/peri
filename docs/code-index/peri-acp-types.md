@@ -80,7 +80,7 @@
 
 | 功能 | 入口/关键点 |
 | --- | --- |
-| 载荷与身份 | `types.rs`：RenderEvent（含 TurnCompleted）、StateEvent、ObserveEvent、Event；身份提取保持穷尽匹配 |
+| 载荷与身份 | `types.rs`：RenderEvent（含 TurnCompleted）、StateEvent、ObserveEvent、Event；身份提取保持穷尽匹配；`ObserveEvent::LlmCallEnd.usage: Option<peri_model::TokenUsage>` 承载「未上报 vs 显式零」，`executor_mapping.rs` 原样透传到 `ExecutorEvent::LlmCallEnd.usage` |
 | 通道 owner | `bus.rs`：EventBus / EventBusConfig / EventHandles；有界 mpsc 与 broadcast 保持原容量、丢弃和 lagging 行为，不新增状态 owner |
 | 协议兼容面 | `executor_mapping.rs`：三个 `*_event_to_executor`；只做纯转换，不复制 envelope、取消或消费者生命周期 |
 | 契约测试 | `types_test.rs` / `bus_test.rs` / `executor_mapping_test.rs`：身份、serde、FIFO、饱和和映射；Agent 的 `events_v2_test.rs` 只保护公共路径与 prelude 类型 identity，无双套测试 |
@@ -98,6 +98,7 @@
 | --- | --- |
 | 内容契约 | `MessageContent`（content.rs:330，Text/Blocks/Raw 三变体；`is_empty` :399、`text_content` :356、`content_blocks` :378、`has_tool_use` :408）；`ContentBlock`（content.rs:35）；`strip_system_reminders`（content.rs:469） |
 | 消息契约 | `BaseMessage`（message.rs:67）；`MessageId`（:5）；`ToolCallRequest`（:35）；re-export 在 messages/mod.rs:9-12 |
+| Responses 原生历史载体 | `src/messages/content.rs` + `src/messages/message.rs` | `ContentBlock::{responses_native_history,is_responses_native_history,responses_native_history_payload,redacted_for_observability}`；`RESPONSES_NATIVE_HISTORY_TAG`；`MessageContent::has_provider_native_history`；`BaseMessage::redacted_for_observability`；`redacted_messages_for_observability` | 载体经 `Unknown` 透传 `{"type":"responses_native_history","history":…}`：存储、compact 投影与事件层只作不透明传递，只有 provider adapter 按确定 tag 解码（损坏由 adapter 拒绝）；手写 `Debug` 与可观测投影把载荷替换为占位，密文与来源身份不进入日志/摘要/遥测，持久化与原 block 不受影响 |
 
 ### command（src/command*.rs）
 

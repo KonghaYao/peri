@@ -25,7 +25,7 @@
 | 改 Goal 状态、持久化与客户端投影 | `src/session/goal_state/mod.rs` + `src/session/event_sink/legacy.rs` + `src/event/{mod,mapper}.rs`；契约 DTO 在 `peri-acp-types/src/{goal,event,event_v2}.rs` | `GoalState::snapshot`；`GoalController::increment_continuation`；`StateEvent::GoalSnapshot` → `ExecutorEvent::GoalSnapshot` → `AcpEvent::GoalSnapshot` | continuation 计数归 session Goal 状态持有并随 Goal 持久化；Agent 每轮发只读快照，event sink 按 `agent_event` capability 投递给客户端，TUI 不直读 Agent/Middleware；契约 ARC-BOUNDARY-001 / ARC-EVENT-001 |
 | 改事件发射/forwarder | `src/event/forwarder.rs` | `spawn_eventbus_forwarder(handles, on_event, bridge) -> JoinHandle<()>` | 消费 v2 EventBus 三通道（render/state/observe），**biased select：render 先于 state**（防 partial 污染）；主 executor/workflow 必须在 producer drop 后 await handle，禁止 terminal 越过 final usage；JoinError fail closed；Langfuse 在协议化前分支消费；observe Lagged 容错；映射后经 `on_event(UnstampedEvent, ExecutorEvent)` 送 event_sink |
 | 改 Hub/Web 事件投影 | `src/event/activity.rs` | `map_agent_activity(&ExecutorEvent) -> Option<AgentActivityWire>`（:93）；`AgentActivityKind`（:19）/`AgentActivityStatus`（:36） | `peri.agentActivity` 安全摘要面：allowlist 字段 + `safe_label`/`truncate_utf8`/`hash_correlation` 清洗；禁止携带消息/路径/输出/错误正文；cap 未双向协商不投影 |
-| 改 provider/模型/配置 | `src/provider/mod.rs` + `config.rs` + `store.rs` | `LlmProvider` enum（mod.rs:23，OpenAi/Anthropic）；`from_config`（:118）/`from_config_for_alias`（:125）/`into_model`（:246）；`PeriConfig`（config.rs:13）；`ConfigSource`（store.rs:78，读写路径唯一事实源，`load_at` :92 / `save` :199） | 模型切换走 `session/set_config_option` 的 `configId="model"` 分支（requests/config_options.rs:62，`handle_set_config_option` :44）；`session/update_config` 校验 providers/profile、持久化成功后发布，并更新同配置源会话的 provider 连接及缓存，保留各会话 profile/frozen；`AgentPool::has_valid_cache`（session/agent_pool.rs:64）按 provider 指纹复用 LLM 实例 |
+| 改 provider/模型/配置 | `src/provider/mod.rs` + `config.rs` + `store.rs` | `LlmProvider` enum（mod.rs:29，OpenAi/Anthropic）；OpenAi 的 `api` 字段（`ApiProtocol`）选择 `chat_completions`（缺省）或 `responses`；`from_config`（:130）/`from_config_for_alias`（:137）/`into_model`（:301，按协议分派 `OpenAiModel`/`OpenAiResponsesModel`）；`PeriConfig`（config.rs:13）；`ConfigSource`（store.rs:78，读写路径唯一事实源，`load_at` :90 / `save` :211） | 模型切换走 `session/set_config_option` 的 `configId="model"` 分支（requests/config_options.rs:62，`handle_set_config_option` :44）；`session/update_config` 校验 providers/profile、持久化成功后发布，并更新同配置源会话的 provider 连接及缓存，保留各会话 profile/frozen；`AgentPool::has_valid_cache`（session/agent_pool.rs:64）按 provider 指纹（含协议）复用 LLM 实例 |
 | 改 transport（新增传输） | `src/transport/mod.rs` + `mpsc.rs` + `stdio.rs` + `router.rs` | `AcpTransport` trait；`mpsc_transport_pair()`；`RequestRouter::{register,dispatch,close,wait_closed}`；`PendingRequest`；`StdioTransport::from_reader_writer` | router 以 owned pending handle 统一线性化 response、caller cancellation 与 terminal close，数字 ID 在正数域回绕并以 owner identity 防 stale handle 误删；终止以稳定 `Transport closed` 结算当前/后续请求，连接静默仍无隐式 timeout。MPSC 任一 pump/channel 关闭终止逻辑 pair，并保留已转发 incoming queue；stdio reader EOF/error 与所有 writer 路径汇入同一 terminal 状态。String response id 仍走 unmatched 转发；legacy `{"type":"cancel"}` 仍只在 stdio pump 精确拦截。契约：ARC-TRANSPORT-001；测试：`router_test.rs`、`mpsc_test.rs`、`stdio_test.rs`。 |
 | 改 host 退出 / Langfuse 部署关闭 | `src/host/lifecycle.rs` + `src/host/shutdown.rs` + `src/host/task_scope.rs` + `src/session/mod.rs` | `spawn_acp_server`（lifecycle.rs:37）；`AcpHostHandle::shutdown`（:67）；`HostExitContext::finish`；`SessionManager::take_for_close`（session/mod.rs:249）/`AcpSession::close_resources`（:173） | 真实 host 任务保留至 join，取消等待不取走句柄；Incomplete 把任务和实际待关闭 session 留在退出 context 重试，完整 drain 后才使用 fresh assembly 的 non-Clone Langfuse 关闭权限；共享外部注入不授权（ARC-HOST-SHUTDOWN-001） |
 | 改 prompt 组装（system prompt） | `src/prompt/mod.rs` + `prompts/sections/*.md` | `PromptTemplate::render`；`PromptFeatures::detect`；`PromptEnv::with_frozen_date` | render 按 zone/order 拼接 section，并用 `peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 把 cached/uncached seam 交给 provider；剥离 token 后须保持旧 prompt bytes，empty 不生成 token（ARC-SERIAL-001）；frozen date 在会话创建时注入，禁止中途重读（ARC-FROZEN-001） |
@@ -51,7 +51,7 @@
 | typed stdio sink | session/event_sink/stdio.rs | `StdioEventSink`（:38，根模块 public re-export）；`push_event`（:64）仅发标准更新；`session_notification` 统一 `_meta.peri.sourceAgentId`；不持有 transport 注册表 |
 | sink 回归 | session/event_sink_test.rs | 原 `session::event_sink::tests` 路径保留；覆盖 compact/rewind/retry、caps、来源元数据与 typed SDK roundtrip，以及双 cap 时 safe activity 先于 legacy 且不携带结果正文/原始实例 ID |
 | 内置命令注册 | session/command/ | `register_builtins`（mod.rs:124）；compact（:26）/clear/rewind；compact pipeline 仅 re-export（compact/pipeline.rs:11） |
-| LLM 实例池 | session/agent_pool.rs | `AgentPool`；`has_valid_cache` / `invalidate`；完整 provider 配置（含 connection/key/options）经进程加盐 SHA256 形成内部指纹，阻止在途旧工厂回填后复用旧连接 |
+| LLM 实例池 | session/agent_pool.rs | `AgentPool`；`has_valid_cache` / `invalidate`；完整 provider 配置（含 connection/key/options/api 协议）经进程加盐 SHA256 形成内部指纹，阻止在途旧工厂回填后复用旧连接；同 model/base_url 切换 `api` 同样失效 |
 | 目标状态 | session/goal_state/mod.rs | `GoalState`（:59，`set_goal` :80 / `snapshot` :167） |
 | cron 桥 | session/cron_bridge.rs | `SessionCronBridge`（:14，`start` :29，session 级跨 turn 存活） |
 | 状态构建 | session/state_builders.rs | `parse_permission_mode`（:19）/`apply_profile_effort`（:29）/`build_config_options`（:67） |
@@ -79,8 +79,9 @@
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| Provider 构建 | provider/mod.rs | `LlmProvider`（:23）；`from_config_for_alias`（:125）；`into_model`（:246） |
-| 配置结构 | provider/config.rs | `PeriConfig`（:13）/`AppConfig`（:177，`merge_overrides` :232）/`ProviderConfig`（:456） |
+| Provider 构建 | provider/mod.rs | `LlmProvider`（:29，`OpenAi` 携带强类型 `api` 协议）；`from_config`（:130）/`from_config_for_alias`（:137）/`into_model`（:301）；`protocol_key`（:223）参与缓存指纹 |
+| API 协议 | provider/config.rs | `ApiProtocol`（:462，`chat_completions`/`responses`）；`ProviderConfig::resolve_api_protocol`（:547）：未声明缺省 `chat_completions`，`anthropic` + 显式 `api` 拒绝构造，未知取值由 serde 解析期拒绝（不落入 `extra`）；Responses 的 base URL 经 `strict_endpoint`（mod.rs:448）fail-closed 校验，非法或带凭据即拒绝，不回落默认 endpoint、不记录 URL 本体；Chat 回落路径（`parse_endpoint`，mod.rs:432）同样不记录 URL 本体 |
+| 配置结构 | provider/config.rs | `PeriConfig`（:13）/`AppConfig`（:177，`merge_overrides` :232）/`ProviderConfig`（:515） |
 | 配置加载/保存 | provider/store.rs | `ConfigSource::{load_at,load_lenient,reload_merged,save}`；重读复用固定路径，保存拒绝损坏配置；workspace 的全局分层基准被外部修改时要求重启，避免旧内存凭据落入项目文件 |
 
 ### src/transport/（传输抽象）
@@ -97,7 +98,8 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 方法分发聚合 | dispatch/mod.rs | re-export：`build_initialize_response`、`handle_prompt`、`rewind_execute`、`fork_session`、`replay_session_history` 等 |
-| 命令执行 | dispatch/execute_command.rs | `execute_command`（:75） |
+| 命令执行 | dispatch/execute_command.rs | `execute_command`（:75）；两个消息 JSON 出口均先 `redacted_for_observability`，不改 canonical 历史 |
+| 只读历史 RPC 脱敏 | host/requests/session_lifecycle.rs + dispatch/rewind.rs + session/event_sink/legacy.rs | `handle_metadata` 的 `peri/session_history` 响应在 `serialize_persisted_payload` 前仅投影消息副本；`rewind_execute` 的 response `history` 与 Compact/RewindCompleted 的 `messages_json` 同样在出口投影；SQLite/预览指纹/文件回退口径不变。回归：`requests_legacy_test.rs::responses_history_rpc_redacts_without_changing_sqlite`、`execute_command_test.rs::responses_execute_command_redacts_returned_history`、`rewind_test.rs::test_execute_redacts_native_history_in_rpc_response`、`event_sink_test.rs::push_event_redacts_native_history_in_client_message_payloads` |
 | rewind | dispatch/rewind.rs | `rewind_preview`（:52）/`rewind_execute`（:215） |
 | UI 命令条目 | dispatch/commands.rs | `register_ui_entries`（:73） |
 

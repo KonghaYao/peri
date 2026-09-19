@@ -149,6 +149,39 @@ impl fmt::Debug for PreparedModelRequest {
 }
 
 impl PreparedModelRequest {
+    /// 仅输出稳定布尔诊断，不包含来源身份、历史或 provider URL。
+    pub(crate) fn history_diagnostics(
+        request: &crate::ModelRequest,
+        protocol: ProviderProtocol,
+        endpoint: &Url,
+        model: &str,
+    ) -> BTreeMap<String, Value> {
+        let degraded = request.messages.iter().any(|message| {
+            let crate::ModelMessage::Assistant { content, .. } = message else {
+                return false;
+            };
+            content.iter().any(|block| match block {
+                crate::ContentBlock::ResponsesNativeHistory { history } => {
+                    protocol != ProviderProtocol::OpenAiResponses
+                        || matches!(
+                            history.verify_source(endpoint, model),
+                            Err(crate::HistoryError::SourceMismatch)
+                        )
+                }
+                _ => false,
+            })
+        });
+        if degraded {
+            BTreeMap::from([("responses_history_degraded".into(), Value::Bool(true))])
+        } else {
+            BTreeMap::new()
+        }
+    }
+
+    pub fn responses_history_degraded(&self) -> bool {
+        self.metadata.get("responses_history_degraded") == Some(&Value::Bool(true))
+    }
+
     /// 构造默认受限的安全观测投影。
     pub fn observe(
         protocol: ProviderProtocol,
@@ -283,29 +316,38 @@ fn observe_value(
     truncated_paths: &mut Vec<String>,
 ) -> Value {
     match value {
-        Value::Object(object) => Value::Object(
-            object
-                .into_iter()
-                .filter_map(|(key, value)| {
-                    let child_path = join_path(path, &key);
-                    if is_sensitive_or_non_ascii_key(&key) {
-                        redacted_paths.push(child_path);
-                        None
-                    } else {
-                        Some((
-                            key,
-                            observe_value(
-                                value,
-                                &child_path,
-                                observation,
-                                redacted_paths,
-                                truncated_paths,
-                            ),
-                        ))
-                    }
-                })
-                .collect(),
-        ),
+        Value::Object(object) => {
+            let is_function_call =
+                object.get("type").and_then(Value::as_str) == Some("function_call");
+            Value::Object(
+                object
+                    .into_iter()
+                    .filter_map(|(key, value)| {
+                        let child_path = join_path(path, &key);
+                        if is_sensitive_or_non_ascii_key(&key) {
+                            redacted_paths.push(child_path);
+                            None
+                        } else if is_function_call && key == "arguments" {
+                            // 只隐藏观测副本中的编码参数，wire 与持久化原文不受影响。
+                            // 不递归解码任意 JSON 字符串，避免解析成本与嵌套脱敏旁路。
+                            redacted_paths.push(child_path);
+                            Some((key, Value::String(REDACTED_VALUE.into())))
+                        } else {
+                            Some((
+                                key,
+                                observe_value(
+                                    value,
+                                    &child_path,
+                                    observation,
+                                    redacted_paths,
+                                    truncated_paths,
+                                ),
+                            ))
+                        }
+                    })
+                    .collect(),
+            )
+        }
         Value::Array(values) => Value::Array(
             values
                 .into_iter()
@@ -389,6 +431,8 @@ fn is_sensitive_key(key: &str) -> bool {
         "setcookie",
         "secret",
         "password",
+        // Responses 的不透明推理状态仅用于同源回放，不进入请求观测。
+        "encryptedcontent",
     ]
     .iter()
     .any(|needle| normalized.contains(needle))

@@ -37,6 +37,28 @@ use crate::tools::{BaseTool, DirectToolInvocationResolver, ToolInvocationResolve
 /// 共享工具注册表类型别名（避免 clippy::type_complexity）
 pub type SharedToolMap = Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>;
 
+/// 观察出口的消息快照：剥离 provider 原生历史载荷（reasoning 密文与来源身份）。
+///
+/// 无原生历史时零拷贝共享原快照；有原生历史时为观察构造脱敏副本——LLM 调用与
+/// transcript 必须继续使用原消息，因此不能就地替换。消费方（ACP/TUI 重建、遥测）
+/// 只需要用户可见内容。
+pub(crate) fn observed_message_snapshot(snapshot: &Arc<Vec<BaseMessage>>) -> Arc<Vec<BaseMessage>> {
+    if !snapshot
+        .iter()
+        .any(BaseMessage::has_provider_native_history)
+    {
+        return Arc::clone(snapshot);
+    }
+    Arc::new(crate::messages::redacted_messages_for_observability(
+        snapshot,
+    ))
+}
+
+/// 同 [`observed_message_snapshot`]，用于已持有 owned `Vec` 的观察出口。
+pub(crate) fn observed_messages(messages: &[BaseMessage]) -> Vec<BaseMessage> {
+    crate::messages::redacted_messages_for_observability(messages)
+}
+
 // ─── 循环控制 ───────────────────────────────────────────────────────────────
 
 /// 循环最终结果

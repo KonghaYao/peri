@@ -280,6 +280,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         api_key: "test-key".to_string(),
         base_url: "https://api.example.com/v1".to_string(),
         model: "gpt-4o".to_string(),
+        api: crate::provider::ApiProtocol::ChatCompletions,
         effort: None,
         max_tokens: 32000,
         context_1m: false,

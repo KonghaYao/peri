@@ -142,6 +142,7 @@ fn test_provider_config_models_serde_roundtrip() {
         provider_type: "anthropic".to_string(),
         api_key: "key".to_string(),
         base_url: String::new(),
+        api: None,
         name: Some("Test".to_string()),
         models: ProviderModels {
             opus: "claude-opus-4-7".to_string(),

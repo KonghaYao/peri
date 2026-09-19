@@ -125,10 +125,11 @@ impl Harness {
             step,
             model: "claude-4.7".to_string(),
             output: output.to_string(),
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
+            usage: Some(peri_model::TokenUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                ..Default::default()
+            }),
             request_id: None,
         });
     }
@@ -214,10 +215,11 @@ impl Harness {
             step,
             model: "claude-4.7".to_string(),
             output: output.to_string(),
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
+            usage: Some(peri_model::TokenUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                ..Default::default()
+            }),
             request_id: None,
         });
     }

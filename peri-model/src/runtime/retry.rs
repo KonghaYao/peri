@@ -5,7 +5,7 @@ use rand::RngExt;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::{ModelError, ModelResult, ModelStream, ModelStreamEvent, RetryErrorKind};
+use crate::{ModelError, ModelResult, ModelStream, ModelStreamEvent, RetryErrorKind, TokenUsage};
 
 /// 可配置的 retryable 失败分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,7 +287,7 @@ async fn run_retrying_stream(
             result = attempt(cancellation.clone()) => match result {
                 Ok(stream) => stream,
                 Err(error) => {
-                    if !retry_or_finish(&config, &cancellation, observer.as_ref(), &sender, attempt_number, error).await {
+                    if !retry_or_finish(&config, &cancellation, observer.as_ref(), &sender, attempt_number, error, None).await {
                         return;
                     }
                     continue;
@@ -347,15 +347,21 @@ async fn run_retrying_stream(
                 }
                 Some(Err(error)) if error.is_cancelled() => return,
                 Some(Err(error)) if visible => {
+                    // 可见输出后失败即中断，不重试；provider 已上报的用量随错误保留
+                    // （中断映射会重建错误，因此必须在映射之后附加）。
+                    let attempt_usage = error.usage().cloned();
                     let error = if error.transport_kind().is_some() {
                         interrupted_from(&error)
                     } else {
                         error
                     };
-                    let _ = send_event(&sender, &cancellation, Err(error)).await;
+                    let _ =
+                        send_event(&sender, &cancellation, Err(error.with_usage(attempt_usage)))
+                            .await;
                     return;
                 }
                 Some(Err(error)) => {
+                    let attempt_usage = last_provisional_usage(&provisional_usage);
                     if !retry_or_finish(
                         &config,
                         &cancellation,
@@ -363,6 +369,7 @@ async fn run_retrying_stream(
                         &sender,
                         attempt_number,
                         error,
+                        attempt_usage,
                     )
                     .await
                     {
@@ -371,6 +378,7 @@ async fn run_retrying_stream(
                     break;
                 }
                 None if usage_after_visible => {
+                    // 可见输出 ⇒ 尝试已提交 ⇒ 此前的 usage 快照已按快照转发。
                     let _ = send_event(
                         &sender,
                         &cancellation,
@@ -391,6 +399,7 @@ async fn run_retrying_stream(
                     return;
                 }
                 None => {
+                    let attempt_usage = last_provisional_usage(&provisional_usage);
                     if !retry_or_finish(
                         &config,
                         &cancellation,
@@ -398,6 +407,7 @@ async fn run_retrying_stream(
                         &sender,
                         attempt_number,
                         ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted),
+                        attempt_usage,
                     )
                     .await
                     {
@@ -410,6 +420,14 @@ async fn run_retrying_stream(
     }
 }
 
+/// 尝试内最后一个 usage 快照：同一尝试可能多次上报，只有最新一次代表该尝试。
+fn last_provisional_usage(provisional: &[ModelStreamEvent]) -> Option<TokenUsage> {
+    match provisional.last() {
+        Some(ModelStreamEvent::Usage(usage)) => Some(usage.clone()),
+        _ => None,
+    }
+}
+
 async fn retry_or_finish(
     config: &RetryConfig,
     cancellation: &CancellationToken,
@@ -417,24 +435,41 @@ async fn retry_or_finish(
     sender: &tokio::sync::mpsc::Sender<ModelResult<ModelStreamEvent>>,
     attempt: u32,
     error: ModelError,
+    attempt_usage: Option<TokenUsage>,
 ) -> bool {
+    // 本次尝试已确认的真实用量：provider 随失败终态上报的值优先，其次尝试内最后一个快照。
+    let attempt_usage = error.usage().cloned().or(attempt_usage);
     if error.is_cancelled() || cancellation.is_cancelled() {
         return false;
     }
     let Some(error_kind) = config.retryable.matches(&error) else {
-        let _ = send_event(sender, cancellation, Err(error)).await;
+        let _ = send_event(sender, cancellation, Err(error.with_usage(attempt_usage))).await;
         return false;
     };
     if attempt >= config.max_attempts() {
         let _ = send_event(
             sender,
             cancellation,
-            Err(ModelError::retry_exhausted_with_context(
-                attempt, error_kind, &error,
-            )),
+            Err(
+                ModelError::retry_exhausted_with_context(attempt, error_kind, &error)
+                    .with_usage(attempt_usage),
+            ),
         )
         .await;
         return false;
+    }
+    // 真实用量先作为 AttemptUsage 保留下来，再按策略重试：用量是已发生的消耗，
+    // 不参与「首 delta 才提交尝试」的门禁，因此保留它不会抑制应有的重试。
+    if let Some(usage) = attempt_usage {
+        if !send_event(
+            sender,
+            cancellation,
+            Ok(ModelStreamEvent::AttemptUsage(usage)),
+        )
+        .await
+        {
+            return false;
+        }
     }
     let delay = config.delay_for_retry(attempt);
     if let Some(observer) = observer {

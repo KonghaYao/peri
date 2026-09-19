@@ -139,9 +139,12 @@ pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
         } => (api_key, base_url.as_deref(), max_tokens),
     };
     // JSON tuple framing keeps arbitrary credential/URL strings unambiguous.
+    // `protocol_key` 参与身份：同 model / base_url 下切换 api 协议必须视为不同
+    // provider，不能复用缓存的模型对象。
     digest.update(
         serde_json::to_vec(&(
             provider.display_name(),
+            provider.protocol_key(),
             provider.model_name(),
             provider.effort_key(),
             api_key,

@@ -640,3 +640,98 @@ fn extract_overrides_global_only_roundtrip() {
     };
     assert_eq!(extracted, expected);
 }
+
+// ─── API 协议字段（typed `api`）─────────────────────────────────────────────
+
+#[test]
+fn provider_api_absent_defaults_to_chat_completions() {
+    // 旧配置（无 api 字段）保持 chat_completions 缺省语义
+    let json = r#"{"id":"a","type":"openai","apiKey":"k","baseUrl":"https://api.example.com/v1"}"#;
+    let provider: ProviderConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(provider.api, None);
+    assert_eq!(
+        provider.resolve_api_protocol(),
+        Ok(ApiProtocol::ChatCompletions)
+    );
+    // "未声明即未填写"：不落盘 api 键，旧文件格式保持稳定
+    let back = serde_json::to_value(&provider).unwrap();
+    assert!(back.get("api").is_none());
+}
+
+#[test]
+fn provider_api_explicit_values_roundtrip() {
+    let json = r#"{"id":"a","type":"openai","apiKey":"k","baseUrl":"https://api.example.com/v1","api":"responses"}"#;
+    let provider: ProviderConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(provider.api, Some(ApiProtocol::Responses));
+    assert_eq!(provider.resolve_api_protocol(), Ok(ApiProtocol::Responses));
+
+    let back = serde_json::to_value(&provider).unwrap();
+    assert_eq!(back["api"], serde_json::json!("responses"));
+    let roundtrip: ProviderConfig = serde_json::from_value(back).unwrap();
+    assert_eq!(roundtrip, provider);
+
+    // 显式 chat_completions 同样保留（用户选择可重开）
+    let json = r#"{"id":"a","type":"openai","api":"chat_completions"}"#;
+    let provider: ProviderConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(provider.api, Some(ApiProtocol::ChatCompletions));
+    assert_eq!(
+        serde_json::to_value(&provider).unwrap()["api"],
+        serde_json::json!("chat_completions")
+    );
+}
+
+#[test]
+fn provider_api_unknown_value_rejected_not_absorbed_by_extra() {
+    // 未知枚举拒绝：不得因 `extra` flatten 而静默吸收，整体解析失败
+    let json = r#"{"id":"a","type":"openai","api":"completions"}"#;
+    let error = serde_json::from_str::<ProviderConfig>(json).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown variant"),
+        "未知 api 取值必须由 serde 拒绝，实际错误：{error}"
+    );
+
+    // 类型错误（对象而非字符串）同样拒绝，不会进入 extra
+    let json = r#"{"id":"a","type":"openai","api":{"protocol":"responses"}}"#;
+    assert!(serde_json::from_str::<ProviderConfig>(json).is_err());
+
+    // 合法解析后 extra 不含 api 键：强类型字段是唯一入口
+    let json = r#"{"id":"a","type":"openai","api":"responses","unknownKey":1}"#;
+    let provider: ProviderConfig = serde_json::from_str(json).unwrap();
+    assert!(!provider.extra.contains_key("api"));
+    assert!(provider.extra.contains_key("unknownKey"));
+}
+
+#[test]
+fn provider_api_anthropic_with_explicit_api_rejected() {
+    // 非法组合：anthropic 只有原生 Messages API，显式 api 必须被拒绝
+    let json = r#"{"id":"a","type":"anthropic","apiKey":"k","api":"chat_completions"}"#;
+    let provider: ProviderConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        provider.resolve_api_protocol(),
+        Err(ProviderApiError::AnthropicWithExplicitApi)
+    );
+
+    let json = r#"{"id":"a","type":"anthropic","api":"responses"}"#;
+    let provider: ProviderConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        provider.resolve_api_protocol(),
+        Err(ProviderApiError::AnthropicWithExplicitApi)
+    );
+
+    // anthropic 未声明 api 仍合法
+    let json = r#"{"id":"a","type":"anthropic","apiKey":"k"}"#;
+    let provider: ProviderConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        provider.resolve_api_protocol(),
+        Ok(ApiProtocol::ChatCompletions)
+    );
+}
+
+#[test]
+fn api_protocol_stable_identifiers() {
+    assert_eq!(ApiProtocol::default(), ApiProtocol::ChatCompletions);
+    assert_eq!(ApiProtocol::ChatCompletions.as_str(), "chat_completions");
+    assert_eq!(ApiProtocol::Responses.as_str(), "responses");
+    assert_eq!(ApiProtocol::ChatCompletions.cycle(), ApiProtocol::Responses);
+    assert_eq!(ApiProtocol::Responses.cycle(), ApiProtocol::ChatCompletions);
+}

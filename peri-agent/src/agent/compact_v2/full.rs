@@ -254,6 +254,8 @@ fn replace_images_and_truncate(content: &MessageContent, max_chars: usize) -> St
                 format!("调用 {}({})", name, input)
             }
             ContentBlock::Reasoning { text, .. } => text.clone(),
+            // provider 原生历史含 reasoning 密文与来源身份：摘要输入只留类型占位。
+            block if block.is_responses_native_history() => "[provider-native history]".to_string(),
             _ => format!("{:?}", b),
         })
         .collect();
@@ -303,6 +305,8 @@ fn format_tool_result_summary(
                 format!("调用 {}({})", name, input)
             }
             ContentBlock::Reasoning { text, .. } => text.clone(),
+            // provider 原生历史含 reasoning 密文与来源身份：摘要输入只留类型占位。
+            block if block.is_responses_native_history() => "[provider-native history]".to_string(),
             _ => format!("{:?}", b),
         })
         .collect::<Vec<_>>()

@@ -1,4 +1,17 @@
+use std::fmt;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Provider 原生历史载体的 type tag（OpenAI Responses）。
+///
+/// 载体形状为 `{"type": "responses_native_history", "history": <版本化记录>}`，经
+/// [`ContentBlock::Unknown`] 透传：只有 provider adapter 才解码 `history`，其余层
+/// （存储、投影、事件、遥测）把它当作不透明载荷处理。`history` 含 provider 私有
+/// 状态（reasoning 密文与来源身份），不得出现在 Debug、摘要或遥测中。
+pub const RESPONSES_NATIVE_HISTORY_TAG: &str = "responses_native_history";
+
+/// 原生历史在可观测出口的占位载荷。
+const RESPONSES_NATIVE_HISTORY_REDACTED: &str = "[REDACTED]";
 
 // ─── ImageSource ──────────────────────────────────────────────────────────────
 
@@ -31,7 +44,7 @@ pub enum DocumentSource {
 /// 标准 ContentBlock — 对齐 LangChain JS contentBlocks
 ///
 /// 每个 variant 对应 LangChain 文档中的 Standard content block 类型。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum ContentBlock {
     /// 纯文本
     Text { text: String },
@@ -73,6 +86,63 @@ pub enum ContentBlock {
     /// 存储无法识别的原始 JSON，保证向前兼容。
     /// 携带完整原始数据，可在回传时保留全部字段。
     Unknown(serde_json::Value),
+}
+
+/// 手写 `Debug`：`Unknown` 可能是 provider 原生载荷，其中 Responses 原生历史含
+/// reasoning 密文与来源身份（nonce/digest），`{:?}` 输出（含被 `format!` 拼接进
+/// 日志/摘要/遥测的路径）不得泄漏这些字段。其余变体与 derive 输出保持一致。
+impl fmt::Debug for ContentBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { text } => f.debug_struct("Text").field("text", text).finish(),
+            Self::Image { source } => f.debug_struct("Image").field("source", source).finish(),
+            Self::Document { source, title } => f
+                .debug_struct("Document")
+                .field("source", source)
+                .field("title", title)
+                .finish(),
+            Self::ToolUse { id, name, input } => f
+                .debug_struct("ToolUse")
+                .field("id", id)
+                .field("name", name)
+                .field("input", input)
+                .finish(),
+            Self::ToolResult {
+                id,
+                tool_use_id,
+                content,
+                is_error,
+            } => f
+                .debug_struct("ToolResult")
+                .field("id", id)
+                .field("tool_use_id", tool_use_id)
+                .field("content", content)
+                .field("is_error", is_error)
+                .finish(),
+            Self::Reasoning { text, signature } => f
+                .debug_struct("Reasoning")
+                .field("text", text)
+                .field("signature", signature)
+                .finish(),
+            Self::Unknown(value) => {
+                let redacted = redacted_unknown_view(value);
+                f.debug_tuple("Unknown")
+                    .field(redacted.as_ref().unwrap_or(value))
+                    .finish()
+            }
+        }
+    }
+}
+
+/// 原生历史载体的脱敏视图；非原生历史返回 `None`（调用方原样输出）。
+fn redacted_unknown_view(value: &serde_json::Value) -> Option<serde_json::Value> {
+    if value.get("type").and_then(|t| t.as_str()) != Some(RESPONSES_NATIVE_HISTORY_TAG) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "type": RESPONSES_NATIVE_HISTORY_TAG,
+        "history": RESPONSES_NATIVE_HISTORY_REDACTED,
+    }))
 }
 
 // ─── ContentBlock 手动 Serialize/Deserialize ──────────────────────────────────
@@ -314,6 +384,52 @@ impl ContentBlock {
             _ => None,
         }
     }
+
+    /// 构造 Responses 原生历史载体。
+    ///
+    /// 载荷不解释、不校验：版本与记录合法性由 provider adapter 解码时判定。
+    pub fn responses_native_history(history: serde_json::Value) -> Self {
+        Self::Unknown(serde_json::json!({
+            "type": RESPONSES_NATIVE_HISTORY_TAG,
+            "history": history,
+        }))
+    }
+
+    /// 是否为 Responses 原生历史载体（仅按确定 tag 判定）。
+    pub fn is_responses_native_history(&self) -> bool {
+        matches!(
+            self,
+            Self::Unknown(value)
+                if value.get("type").and_then(|t| t.as_str()) == Some(RESPONSES_NATIVE_HISTORY_TAG)
+        )
+    }
+
+    /// Responses 原生历史的 `history` 载荷；非原生历史或载荷缺失返回 `None`。
+    pub fn responses_native_history_payload(&self) -> Option<&serde_json::Value> {
+        if !self.is_responses_native_history() {
+            return None;
+        }
+        let Self::Unknown(value) = self else {
+            return None;
+        };
+        value.get("history")
+    }
+
+    /// 可观测投影：原生历史载荷替换为固定占位，其余 block 原样保留。
+    ///
+    /// 用于事件、遥测与 LLM 摘要输入等出口——这些出口只需要用户可见内容，不应携带
+    /// provider 私有状态（reasoning 密文与来源身份）。持久化、工具执行与模型回放必须
+    /// 使用原 block，不能以本投影替代。
+    pub fn redacted_for_observability(&self) -> Self {
+        if self.is_responses_native_history() {
+            Self::Unknown(serde_json::json!({
+                "type": RESPONSES_NATIVE_HISTORY_TAG,
+                "history": RESPONSES_NATIVE_HISTORY_REDACTED,
+            }))
+        } else {
+            self.clone()
+        }
+    }
 }
 
 // ─── MessageContent ────────────────────────────────────────────────────────────
@@ -409,6 +525,29 @@ impl MessageContent {
         self.content_blocks()
             .iter()
             .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+    }
+
+    /// 是否携带 Responses 原生历史载体。
+    pub fn has_provider_native_history(&self) -> bool {
+        self.content_blocks()
+            .iter()
+            .any(ContentBlock::is_responses_native_history)
+    }
+
+    /// 可观测投影：逐 block 应用 [`ContentBlock::redacted_for_observability`]。
+    ///
+    /// 文本/图片/工具等用户内容不变，provider 私有状态被剥离；不含原生历史时原样
+    /// 返回，避免改变既有 variant。
+    pub fn redacted_for_observability(&self) -> Self {
+        if !self.has_provider_native_history() {
+            return self.clone();
+        }
+        Self::Blocks(
+            self.content_blocks()
+                .iter()
+                .map(ContentBlock::redacted_for_observability)
+                .collect(),
+        )
     }
 
     /// 提取所有 ToolUse blocks（覆盖 Text/Blocks/Raw 三种变体）

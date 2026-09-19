@@ -108,8 +108,9 @@ pub(super) fn wizard_click(
             FormMode::Edit => {
                 // 布局：空行（header 1）+ ProviderType..ApiKey 各 1 行；
                 // 空行 + model 标题（header 8）+ FableModel..Confirm 各 1 行
-                const FIELDS1: [FormField; 5] = [
+                const FIELDS1: [FormField; 6] = [
                     FormField::ProviderType,
+                    FormField::ApiProtocol,
                     FormField::ProviderId,
                     FormField::BaseUrl,
                     FormField::TestConnectivity,
@@ -363,6 +364,22 @@ fn handle_browse_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
     }
 }
 
+/// 循环切换当前 provider 的 API 协议（chat_completions ↔ responses）。
+///
+/// 仅 openai 类型使用 `api` 字段；anthropic 下按键无效果（不产生不可落盘的值）。
+fn cycle_api_protocol(state: &mut SetupWizardState) {
+    if !state
+        .active_provider_ref()
+        .is_some_and(|mp| mp.provider_type.supports_api_selection())
+    {
+        return;
+    }
+    state.invalidate_connectivity();
+    if let Some(mp) = state.active_provider_mut() {
+        mp.api = mp.api.cycle();
+    }
+}
+
 fn handle_edit_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm::event::KeyEvent) {
     use KeyCode::*;
     let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -397,6 +414,13 @@ fn handle_edit_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm::e
                 mp.provider_type.cycle();
                 mp.refresh_provider_defaults();
             }
+        }
+        // API 协议选择器：仅 openai 类型可切换，anthropic 下按键无效果
+        Left | Right if !is_ctrl && state.form_focus == FormField::ApiProtocol => {
+            cycle_api_protocol(state);
+        }
+        Char(' ') if state.form_focus == FormField::ApiProtocol => {
+            cycle_api_protocol(state);
         }
         Enter => {
             if state.form_focus == FormField::TestConnectivity {

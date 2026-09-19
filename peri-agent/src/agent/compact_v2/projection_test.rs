@@ -914,6 +914,7 @@ fn test_signed_reasoning_not_partially_truncated() {
     let caps = ProviderCapabilities {
         protocol: ProviderProtocol::Anthropic,
         signed_reasoning_must_be_whole: true,
+        native_history_must_be_whole: false,
     };
     let projected = render_llm_view(&transcript, &plan, &caps).expect("render_llm_view 应成功");
 

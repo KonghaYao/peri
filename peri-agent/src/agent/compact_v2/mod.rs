@@ -26,6 +26,10 @@ pub mod planner;
 pub mod projection;
 pub mod smart;
 
+#[cfg(test)]
+#[path = "responses_native_test.rs"]
+mod responses_native_test;
+
 // ─── 公共重导出：保持外部调用路径不变 ─────────────────────────────────────────────
 
 pub use config::{CompactConfig, CONTINUATION_HINT};

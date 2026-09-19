@@ -11,6 +11,15 @@ use crate::agent::events_v2::{ObserveEvent, TurnErrorReason};
 use crate::agent::react::{Reasoning, StreamingContext};
 use crate::error::{AgentError, AgentResult};
 
+/// 失败调用的真实用量：provider 已上报的值随错误一路带回；未上报保持 `None`，
+/// 由消费端与显式零用量区分。
+fn failed_call_usage(error: &AgentError) -> Option<peri_model::TokenUsage> {
+    match error {
+        AgentError::ModelError(error) => error.usage().cloned(),
+        _ => None,
+    }
+}
+
 pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     let ctx = &input.context;
     let step = ctx.session.turn.current_step();
@@ -114,7 +123,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     );
 
     // emit LlmCallStart（携带 messages + tools 快照，对齐 v1 Langfuse Generation input）
-    // messages 为 Arc 浅拷贝，与下方 LLM 调用共享同一份快照
+    // messages 为 Arc 浅拷贝，与下方 LLM 调用共享同一份快照；观察出口额外剥离
+    // provider 原生历史载荷（无原生历史时仍共享原快照，零拷贝）。
     let start_tools: Vec<crate::tools::ToolDefinition> =
         tool_refs.iter().map(|t| t.definition()).collect();
     ctx.runtime
@@ -123,7 +133,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             turn_id,
             agent_id,
             step,
-            messages: messages_snapshot.clone(),
+            messages: super::observed_message_snapshot(&messages_snapshot),
             tools: start_tools,
         });
 
@@ -171,17 +181,16 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                         error = %e,
                         "LLM generate_reasoning 失败"
                     );
-                    // LLM 报错时 emit LlmCallEnd，让消费者可见
+                    // LLM 报错时 emit LlmCallEnd，让消费者可见。
+                    // 失败调用的真实用量随错误带回（provider 未上报时为 None，不得
+                    // 伪造成显式零，否则消费端无法区分「未提供」与「确为零」）。
                     ctx.runtime.event_bus.emit_observe(ObserveEvent::LlmCallEnd {
                         turn_id,
                         agent_id,
                         step,
                         model: ctx.runtime.llm.model_name(),
                         output: format!("ERROR: {}", e),
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        cache_creation_input_tokens: None,
-                        cache_read_input_tokens: None,
+                        usage: failed_call_usage(&e),
                         request_id: None,
                     });
                     // TurnError：通知 TUI 显示错误 SystemNote（v2_bridge → AgentExecutionFailed → 红色消息）
@@ -212,7 +221,9 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     };
 
     // emit LlmRequestPayload（仅发送 Model 的安全 observation body；复用本次
-    // LLM 调用已构建的 request，见 generate_reasoning_with_observed_body）
+    // LLM 调用已构建的 request，见 generate_reasoning_with_observed_body）。
+    // 该 body 是 `PreparedModelRequest` 的观测投影：peri-model 始终脱敏敏感键
+    // （含 reasoning 密文与 function_call.arguments），密文不会经此进入遥测。
     if let Some(body) = observed_body {
         ctx.runtime
             .event_bus
@@ -224,22 +235,12 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             });
     }
 
-    // emit LlmCallEnd（带 usage 完整字段：input/output + cache_creation/cache_read + request_id）
+    // emit LlmCallEnd（usage 为类型化可选值：None = provider 未上报；Some 保留
+    // input/output + cache_creation/cache_read 的缺失/显式零区分；重试调用包含
+    // 失败尝试已确认的真实消耗）
     // [TRAP] cache_read_input_tokens 必须透传，否则 TUI 命中率始终 0%（v2 重做回归）
-    let (in_tok, out_tok, cache_create, cache_read) = reasoning
-        .usage
-        .as_ref()
-        .map(|u| {
-            (
-                u.input_tokens as u64,
-                u.output_tokens as u64,
-                u.cache_creation_input_tokens.map(u64::from),
-                u.cache_read_input_tokens.map(u64::from),
-            )
-        })
-        .unwrap_or((0, 0, None, None));
     // request_id 与 usage 来源独立（provider 可能不返回 usage 但返回 request_id），
-    // 不得随 usage 的 unwrap_or 默认值一起丢弃
+    // 不得随 usage 的缺省一起丢弃。
     let req_id = reasoning.request_id.clone();
     // output 改为结构化 JSON：包含 text、thinking、tool_calls、stop_reason
     // 与 v1 llm_step.rs:92-93 对齐：优先 final_answer，否则回退到 thought 作为 text
@@ -284,10 +285,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             step,
             model: reasoning.model.clone(),
             output: llm_output,
-            input_tokens: in_tok,
-            output_tokens: out_tok,
-            cache_creation_input_tokens: cache_create,
-            cache_read_input_tokens: cache_read,
+            usage: reasoning.usage.clone(),
             request_id: req_id,
         });
 

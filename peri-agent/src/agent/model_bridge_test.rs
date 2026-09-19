@@ -347,6 +347,20 @@ async fn bridge_maps_empty_stream_to_typed_protocol_error() {
     }
 }
 
+/// [回归测试] provider 未上报 usage 时错误保持 `None`（不伪造成显式零）。
+#[tokio::test]
+async fn bridge_keeps_unknown_usage_on_error_without_fabricating_zero() {
+    let bridge = AgentModelBridge::from_arc(Arc::new(EmptyStreamModel));
+    let error = bridge
+        .generate_reasoning(&[BaseMessage::human("hello")], &[], None)
+        .await
+        .expect_err("无 Completed 的流必须失败");
+    let AgentError::ModelError(error) = &error else {
+        panic!("typed model error expected: {error:?}");
+    };
+    assert_eq!(error.usage(), None);
+}
+
 #[tokio::test]
 async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
     let bridge = AgentModelBridge::from_arc(Arc::new(FakeModel));
@@ -526,6 +540,7 @@ fn provider_capabilities_are_mapped_conservatively() {
         ProviderCapabilities {
             protocol: ProviderProtocol::Generic,
             signed_reasoning_must_be_whole: false,
+            native_history_must_be_whole: false,
         }
     );
 }
@@ -572,7 +587,107 @@ fn provider_capabilities_map_anthropic_protocol_faithfully() {
         ProviderCapabilities {
             protocol: ProviderProtocol::Anthropic,
             signed_reasoning_must_be_whole: true,
+            native_history_must_be_whole: false,
         }
+    );
+}
+
+/// 上报 Responses 协议的模型：原生历史必须整体保留，compact 不得拆改。
+struct ResponsesProtocolModel;
+
+#[async_trait]
+impl Model for ResponsesProtocolModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+
+    fn prepare_request(&self, _request: &ModelRequest) -> ModelResult<PreparedModelRequest> {
+        PreparedModelRequest::observe(
+            peri_model::ProviderProtocol::OpenAiResponses,
+            "gpt-5",
+            url::Url::parse("https://api.openai.com/v1/responses").expect("valid URL"),
+            serde_json::json!({}),
+            std::collections::BTreeMap::new(),
+        )
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        Ok(ModelStream::with_parent_cancellation(
+            stream::pending::<ModelResult<ModelStreamEvent>>(),
+            cancellation,
+        ))
+    }
+}
+
+#[test]
+fn provider_capabilities_map_responses_protocol_faithfully() {
+    let bridge = AgentModelBridge::from_arc(Arc::new(ResponsesProtocolModel));
+    assert_eq!(
+        bridge.provider_capabilities(),
+        ProviderCapabilities {
+            protocol: ProviderProtocol::OpenAiResponses,
+            signed_reasoning_must_be_whole: false,
+            native_history_must_be_whole: true,
+        }
+    );
+}
+
+#[test]
+fn responses_native_history_roundtrips_through_agent_content() {
+    let source = peri_model::ResponsesSourceIdentity::capture(
+        &url::Url::parse("https://api.openai.com/v1/responses").expect("valid URL"),
+        "gpt-5",
+    )
+    .expect("source identity");
+    let history = peri_model::ResponsesHistoryV1::new(
+        source,
+        vec![serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "step"}],
+            "encrypted_content": "CIPHERTEXT",
+            "status": "completed",
+        })],
+    )
+    .expect("valid history");
+
+    let message = ModelMessage::assistant(
+        vec![peri_model::ContentBlock::ResponsesNativeHistory {
+            history: Box::new(history),
+        }],
+        Vec::new(),
+    );
+
+    let agent_message = convert_model_message(&message).expect("model content converts to Agent");
+    assert!(agent_message.has_provider_native_history());
+    assert!(serde_json::to_string(&agent_message)
+        .expect("agent content serializes")
+        .contains("CIPHERTEXT"));
+
+    let roundtrip = AgentModelBridge::convert_message(&agent_message)
+        .expect("Agent must preserve responses native history");
+    assert_eq!(roundtrip, message);
+}
+
+#[test]
+fn corrupt_native_history_is_rejected_at_bridge_boundary() {
+    let message = BaseMessage::ai(MessageContent::Blocks(vec![
+        ContentBlock::responses_native_history(serde_json::json!({
+            "version": 9,
+            "source": {"nonce": "00".repeat(16), "digest": "00".repeat(32)},
+            "items": [],
+        })),
+    ]));
+
+    let error = AgentModelBridge::convert_message(&message)
+        .expect_err("unsupported native history version must fail closed");
+    assert!(
+        !error.to_string().contains("CIPHERTEXT"),
+        "错误信息不得回显载荷：{error}"
     );
 }
 
@@ -685,6 +800,56 @@ async fn bridge_maps_precancelled_token_to_interrupted_without_events() {
     assert!(
         handles.render_rx.try_recv().is_err(),
         "取消后不得 emit 任何 RenderEvent"
+    );
+}
+
+/// 先上报 usage 快照、再以传输错误结束的尝试。
+struct UsageThenFailureModel;
+
+#[async_trait]
+impl Model for UsageThenFailureModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        Ok(ModelStream::with_parent_cancellation(
+            stream::iter(vec![
+                Ok(ModelStreamEvent::Usage(TokenUsage::new(17, 3))),
+                Err(peri_model::ModelError::stream_interrupted(
+                    Some("openai"),
+                    None::<&str>,
+                )),
+            ]),
+            cancellation,
+        ))
+    }
+}
+
+/// [回归测试] 失败调用已上报的真实用量必须随错误带回 Agent 层，不得伪造零用量；
+/// provider 未上报时保持 `None`（与显式零区分）。
+#[tokio::test]
+async fn bridge_carries_reported_usage_on_failure_without_fabricating_zero() {
+    let bridge = AgentModelBridge::from_arc(Arc::new(UsageThenFailureModel));
+    let error = bridge
+        .generate_reasoning(&[BaseMessage::human("hello")], &[], None)
+        .await
+        .expect_err("传输错误必须让调用失败");
+    let AgentError::ModelError(error) = &error else {
+        panic!("typed model error expected: {error:?}");
+    };
+    assert_eq!(
+        error.usage(),
+        Some(&TokenUsage {
+            input_tokens: 17,
+            output_tokens: 3,
+            ..Default::default()
+        }),
+        "已上报的用量不得在失败路径丢失"
     );
 }
 

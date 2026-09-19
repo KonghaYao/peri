@@ -27,7 +27,13 @@ pub enum ModelStreamEvent {
         name: Option<String>,
         arguments_delta: String,
     },
+    /// 本尝试（provider 每次上报）的 usage 快照；后到的快照覆盖先到的。
     Usage(TokenUsage),
+    /// 未被采纳的尝试已确认的真实用量（失败后重试，或终态失败）。
+    ///
+    /// 只有 retry 驱动会产生此事件：消费者按**累加**处理，既不能与 [`Self::Usage`]
+    /// 快照去重，也不能用它替换最终尝试的用量。
+    AttemptUsage(TokenUsage),
     Completed(ModelResponse),
 }
 
@@ -180,6 +186,7 @@ pub trait Model: Send + Sync {
         let mut reasoning = String::new();
         let mut tool_calls = BTreeMap::<usize, PendingToolCall>::new();
         let mut usage = None;
+        let mut attempt_usage = None;
 
         loop {
             tokio::select! {
@@ -208,11 +215,16 @@ pub trait Model: Send + Sync {
                         tool_call.arguments.push_str(&arguments_delta);
                     }
                     Some(Ok(ModelStreamEvent::Usage(event_usage))) => usage = Some(event_usage),
+                    Some(Ok(ModelStreamEvent::AttemptUsage(event_usage))) => {
+                        TokenUsage::accumulate(&mut attempt_usage, event_usage)
+                    }
                     Some(Ok(ModelStreamEvent::Completed(mut response))) => {
                         response.set_text_if_empty(text);
                         response.set_reasoning_if_empty(reasoning);
                         response.set_tool_calls_if_empty(complete_tool_calls(tool_calls)?);
                         response.set_usage_if_none(usage);
+                        // 重试失败尝试的真实用量不得因终态去重被删除。
+                        response.accumulate_usage(attempt_usage);
                         return Ok(response);
                     }
                     Some(Err(error)) => return Err(error),

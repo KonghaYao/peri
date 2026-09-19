@@ -1488,3 +1488,48 @@ async fn test_readonly_open_lock_contention_is_bounded() {
     );
     sqlx::query("ROLLBACK").execute(&mut lock).await.unwrap();
 }
+
+/// Responses 原生历史载体必须不透明保真：存储层不解码、不脱敏、不丢字段；
+/// 而 Debug/日志出口必须脱敏（密文与来源身份不得出现在 `{:?}`）。
+#[tokio::test]
+async fn test_responses_native_history_payload_survives_storage_faithfully() {
+    use peri_acp_types::messages::{ContentBlock, MessageContent};
+
+    let (store, _dir) = make_store().await;
+    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+
+    let payload = serde_json::json!({
+        "version": 1,
+        "source": {"nonce": "ab".repeat(16), "digest": "cd".repeat(32)},
+        "items": [{
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "CIPHERTEXT",
+            "status": "completed",
+        }],
+    });
+    let message = BaseMessage::ai(MessageContent::Blocks(vec![
+        ContentBlock::text("答案正文"),
+        ContentBlock::responses_native_history(payload.clone()),
+    ]));
+
+    store.append_messages(&thread_id, &[message]).await.unwrap();
+    let loaded = store.load_messages(&thread_id).await.unwrap();
+    assert_eq!(loaded.len(), 1);
+
+    let blocks = loaded[0].content_blocks();
+    let carrier = blocks
+        .iter()
+        .find(|block| block.is_responses_native_history())
+        .expect("native history carrier survives storage");
+    assert_eq!(
+        carrier.responses_native_history_payload(),
+        Some(&payload),
+        "存储层必须逐字保真，不做解释或脱敏"
+    );
+
+    let debug = format!("{:?}", loaded[0]);
+    assert!(!debug.contains("CIPHERTEXT"), "Debug 不得输出密文");
+    assert!(!debug.contains(&"cd".repeat(32)), "Debug 不得输出来源摘要");
+    assert!(debug.contains("答案正文"), "可见内容仍应输出");
+}
