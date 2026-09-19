@@ -2,7 +2,7 @@
 
 **状态**：Open
 
-**关联 P0**：[文件系统身份与 Git 探测阻断会话](2026-09-17-p0-workspace-validation-blocks-input.md)。首次发送、inode 身份门槛、无 Git 普通目录、`git init` 后登记模式冲突和重关联缺口由该 issue 跟踪整体简化；本文件继续保留独立兼容性待办。
+**关联 P0**：[文件系统身份与 Git 探测阻断会话](2026-09-17-p0-workspace-validation-blocks-input.md)。首次发送、inode 身份门槛、无 Git 普通目录、`git init` 后登记模式冲突和重关联缺口由该 issue 跟踪整体简化；本文件继续保留独立兼容性待办。原「首次发送的准备阶段计入 10 秒回执期限」已修复（P0 修复记录第 6 条：准备与已发出请求的回执各自计时，`PREPARE_TIMEOUT` 独立、慢准备仍被受理），本表不再列出。
 
 **范围**：TUI → ACP 启动与输入、工作区发现和 SQLite、配置保存、Plugin 子进程、PTC / Workflow artifact。依据本地代码及两个独立 subagent 审计交叉核对；这是有界审计，不能代替全部平台验收。
 
@@ -12,7 +12,6 @@
 
 | 项目 | 证据与触发条件 | 影响与待办 |
 | --- | --- | --- |
-| 首次发送的准备阶段计入 10 秒回执期限 | `peri-tui/src/kit/steer_consumer.rs::spawn_steer_consumer` 的 timeout 覆盖整个 `execute`，其中还要 `ensure_session`、等待 operation gate 和 snapshot。代码可确认计时边界；尚未注入慢启动复现 | 慢 host 可能在 enqueue RPC 之前拒绝输入。分开准备阶段与已发送请求的期限，保留取消与入队不确定状态语义；用持 gate 的确定性回归证明没有丢稿或重复入队 |
 | Windows artifact 只读取 HOME | `peri-js-runtime/src/artifact.rs::NpmArtifactProvider` 与 `peri-workflow/src/runner/artifact.rs::workflow_prefix`，原生 Windows 中调用默认 provider / prefix 且未由上层注入 HOME 时，仅设置 USERPROFILE 无法获得安装目录。代码可确认此分支；未运行 Windows | 使用统一的跨平台 home 解析，覆盖未设置 HOME、USERPROFILE 有效的原生 Windows 环境；先确认后续 artifact 安装与执行均成功 |
 | Plugin URL 安装缺少取消与等待上限 | `peri-middlewares/src/plugin/installer/install.rs::install_plugin` 的 `spawn_blocking` 内同步 `git.output()`，没有 timeout 或进程 owner | 网络/认证挂起会让任务及 git 持续存在。按共享进程生命周期管理取消、杀树及 wait，增加隔离假 git 的挂起/取消测试 |
 | Marketplace 超时没有回收子进程 | `peri-middlewares/src/plugin/marketplace/fetch.rs` 对 git/npm `Command::output` 包 timeout，没有 `kill_on_drop` 或 ProcessTree | 超时返回不能证明进程已停止。增加终止与 wait，验收超时后子进程及后代均退出 |
@@ -36,6 +35,7 @@
 - 工作区路径目前要求 UTF-8，ACP 字符串边界也受此约束；这是明确限制。若扩展支持，先设计无损路径契约，不能以有损转换造成身份混淆。
 - SSH / tmux 下 Kitty 图形关闭属于已有降级策略；远程剪贴板、无 DISPLAY/Wayland、Unicode 和终端 resize 仍需组合实测。
 - 当前 schema 的损坏表结构、原生 Windows、旧 Git、慢 host 与真实 A800 尚未完成系统验收。
+- 首次输入的准备期限现为 60 秒常量（P0 修复记录第 6 条），是避免无期限等待的取舍而非测量结果；慢 host 上工作区发现 / 建会话 / operation gate 各段耗时占比与超时发生率仍需实测。
 - 审计已排除一项误报：Workflow preflight 实际设置了 `kill_on_drop(true)`，不能报告为“取消后完全不杀子进程”。是否需要有界执行与整棵进程树契约应另按验证器实际行为评估。
 
 ## 验收原则
