@@ -114,7 +114,7 @@ fn tool_card(tool_name: &str, summary: &str, is_error: bool, is_running: bool) -
         is_error,
         is_running,
         running_duration_ms: None,
-        completed_duration_ms: if is_running { None } else { Some(37) },
+        completed_duration_ms: if is_running { None } else { Some(400) },
         diff: None,
         presentation: TuiToolPresentation::Generic,
         fold: if is_error {
@@ -1335,20 +1335,20 @@ fn test_tool_error_collapsed_hides_output() {
 /// duration 三档：Wide/Standard 右对齐到屏幕右缘 / Compact+Narrow 隐藏。
 #[test]
 fn test_tool_duration_three_tiers() {
-    let card = TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false)); // 37ms
+    let card = TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false)); // 400ms → 0.4s
 
-    // Wide（term=120, content=100）：右对齐 → 行末 = 时长，行宽铺满到右缘（term-1）
+    // Wide（term=120, content=100）：右对齐 → 行末 = 时长，行宽铺满到居中带右缘（line_width）
     let wide = GridSpec::grid_for(120);
     let lines = vm_to_lines(&card, &wide);
     let text = line_text(&lines[0]);
     assert!(
-        text.trim_end().ends_with("37ms"),
+        text.trim_end().ends_with("0.4s"),
         "Wide 时长应右对齐在行尾，实际 {text:?}"
     );
     assert_eq!(
         lines[0].width(),
-        wide.term_width.saturating_sub(1) as usize,
-        "Wide 行应铺满到消息区右缘（跳过滚动条列）"
+        wide.line_width() as usize,
+        "Wide 行应铺满到居中带右缘（跳过滚动条列）"
     );
 
     // Standard（term=80, content=74）：同样右对齐（不紧跟 summary）
@@ -1356,7 +1356,7 @@ fn test_tool_duration_three_tiers() {
     let lines = vm_to_lines(&card, &std);
     let text = line_text(&lines[0]);
     assert!(
-        text.trim_end().ends_with("37ms"),
+        text.trim_end().ends_with("0.4s"),
         "Standard 时长应右对齐在行尾，实际 {text:?}"
     );
 
@@ -1365,10 +1365,65 @@ fn test_tool_duration_three_tiers() {
         let grid = GridSpec::grid_for(term);
         let lines = vm_to_lines(&card, &grid);
         assert!(
-            !line_text(&lines[0]).contains("37ms"),
+            !line_text(&lines[0]).contains("0.4s"),
             "term={term} 应隐藏 duration"
         );
     }
+}
+
+/// 时长格式档位（§6.4）：一位小数秒，UI 不出现 `ms`；四舍五入后即 `0.0s`
+/// 的（< 50ms）不显示（`None`）；≥1min 回落「Nmin Ms」。
+#[test]
+fn test_completed_duration_tiers() {
+    use super::helpers::format_completed_duration;
+
+    assert_eq!(format_completed_duration(0), None, "0ms 不显示");
+    assert_eq!(
+        format_completed_duration(37),
+        None,
+        "37ms 不显示（不是 0.0s）"
+    );
+    assert_eq!(format_completed_duration(49), None, "49ms 仍不足 0.1s");
+    assert_eq!(format_completed_duration(100).as_deref(), Some("0.1s"));
+    assert_eq!(format_completed_duration(420).as_deref(), Some("0.4s"));
+    assert_eq!(format_completed_duration(1_000).as_deref(), Some("1.0s"));
+    assert_eq!(format_completed_duration(12_400).as_deref(), Some("12.4s"));
+    assert_eq!(
+        format_completed_duration(60_000).as_deref(),
+        Some("1min 0s")
+    );
+    assert_eq!(
+        format_completed_duration(125_400).as_deref(),
+        Some("2min 5s")
+    );
+}
+
+/// 亚秒极快（< 50ms）工具行不渲染 duration：行在 summary 处结束，右侧不留
+/// 恒定 `0.0s`；同一路径下 ≥0.1s 的时长仍右对齐（对照）。
+#[test]
+fn test_tool_card_subsecond_duration_omitted() {
+    let grid = GridSpec::grid_for(120);
+
+    let mut fast = tool_card("Read", "src/main.rs", false, false);
+    fast.completed_duration_ms = Some(37);
+    let lines = vm_to_lines(&TuiRenderUnit::TuiToolCard(fast), &grid);
+    let text = line_text(&lines[0]);
+    assert!(
+        !text.contains("0.0s") && !text.contains("ms"),
+        "实际 {text:?}"
+    );
+    assert!(
+        lines[0].width() < grid.line_width() as usize,
+        "无 duration 时不应右对齐补白：宽 {} / line_width {}",
+        lines[0].width(),
+        grid.line_width()
+    );
+
+    // 对照：可见档位仍照常右对齐铺满（fixture 400ms → 0.4s）
+    let normal = tool_card("Read", "src/main.rs", false, false);
+    let lines = vm_to_lines(&TuiRenderUnit::TuiToolCard(normal), &grid);
+    assert!(line_text(&lines[0]).trim_end().ends_with("0.4s"));
+    assert_eq!(lines[0].width(), grid.line_width() as usize);
 }
 
 /// 运行中工具：braille 动画帧 + 活动行（无输出 dump）。
@@ -1569,7 +1624,7 @@ fn test_subagent_running_shows_recent_tool_lines() {
 
     // completed 工具行 duration 右对齐在行尾
     assert!(
-        texts[1].trim_end().ends_with("37ms"),
+        texts[1].trim_end().ends_with("0.4s"),
         "completed 工具行 duration 在行尾，实际 {:?}",
         texts[1]
     );
@@ -1982,10 +2037,10 @@ fn test_collapsed_group_narrow_hides_whole_hint_within_grid_width() {
         "hint 放不下时必须整体隐藏，实际 {text:?}"
     );
     assert!(
-        text.width() <= grid.total_width(),
+        text.width() <= grid.line_width() as usize,
         "display width 不得超过 grid：{} > {}，实际 {text:?}",
         text.width(),
-        grid.total_width()
+        grid.line_width()
     );
 }
 
@@ -2436,8 +2491,8 @@ fn test_subagent_completed_shows_tool_lines_only() {
         !text.contains("general-purpose"),
         "不再渲染单行组头（agent_name），实际 {text:?}"
     );
-    // 行宽 = 消息区右缘（term_width - 1，右对齐铺满）
-    assert_eq!(lines[0].width(), wide.term_width.saturating_sub(1) as usize);
+    // 行宽 = 居中带右缘（line_width，右对齐铺满）
+    assert_eq!(lines[0].width(), wide.line_width() as usize);
 }
 
 // ── Slice 1：空 reasoning 占位渲染（§6.3）+ assistant 时长（§6.2）────────
@@ -2526,7 +2581,7 @@ fn test_assistant_duration_meta_three_breakpoints() {
         vm_to_lines(&vm, &GridSpec::grid_for(term))
     };
 
-    // Wide（120）：正文末行右对齐含 12.4s，行总宽铺满到消息区右缘（term-1）
+    // Wide（120）：正文末行右对齐含 12.4s，行总宽铺满到居中带右缘（line_width）
     let wide = mk(120);
     let last = wide.iter().rev().find(|l| has_body_content(l)).unwrap();
     let text = line_text(last);
@@ -2534,8 +2589,8 @@ fn test_assistant_duration_meta_three_breakpoints() {
     let g = GridSpec::grid_for(120);
     assert_eq!(
         last.width(),
-        g.term_width.saturating_sub(1) as usize,
-        "Wide 右对齐铺满到消息区右缘"
+        g.line_width() as usize,
+        "Wide 右对齐铺满到居中带右缘"
     );
 
     // Standard（80）：duration 也右对齐（不再紧跟正文）
@@ -2770,9 +2825,9 @@ fn test_diff_block_renders_standard_80() {
     for line in &lines {
         let w = line_text(line).width();
         assert!(
-            w <= grid.total_width(),
+            w <= grid.line_width() as usize,
             "diff 行不软换行（硬截断），宽度 {w} > {}，行: {:?}",
-            grid.total_width(),
+            grid.line_width(),
             line_text(line)
         );
     }

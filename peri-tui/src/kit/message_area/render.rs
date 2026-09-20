@@ -253,7 +253,7 @@ pub(super) fn vm_to_lines_cached_with_layout(
                                 (Arc::as_ptr(chunk) as usize, chunk_lines)
                             })
                             .collect();
-                    layout.retain_and_wrap(grid.total_width() as u16, &stable_lines);
+                    layout.retain_and_wrap(grid.line_width(), &stable_lines);
                     for chunk in &layout.stable {
                         lines.resize(
                             lines.len().saturating_add(chunk.lines.len()),
@@ -338,10 +338,10 @@ pub(super) fn vm_to_lines_cached_with_layout(
 
             // §6.2 完成时长 meta（G-Tokens 仅 duration）：冻结值在正文末行尾部
             // 三档放置（Wide 右对齐 / Standard 紧跟 / Compact/Narrow 隐藏），
-            // 不独占一行。空正文（纯 reasoning 块）无放置点 → 跳过。
-            if let Some(duration_ms) = data.duration_ms {
+            // 不独占一行。空正文（纯 reasoning 块）无放置点 → 跳过；亚秒极快
+            // （< 50ms）无值可显示 → 跳过。
+            if let Some(meta) = data.duration_ms.and_then(format_completed_duration) {
                 let sem = THEME_ATOM.state().read().semantic;
-                let meta = format_completed_duration(duration_ms);
                 let meta_style = Style::default().fg(sem.text.dim);
                 if let Some(last_non_empty) = lines.iter_mut().rev().find(|l| !l.spans.is_empty()) {
                     let used: usize = last_non_empty.spans.iter().map(|s| s.content.width()).sum();

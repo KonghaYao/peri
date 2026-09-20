@@ -116,11 +116,13 @@ fn subagent_tool_line(card: &TuiToolCard, grid: &GridSpec) -> Line<'static> {
         name.clone(),
         Style::default().fg(sem.text.primary),
     ));
-    // duration：running 秒 / completed 冻结值（与工具卡片同一口径）。
+    // duration：running 秒 / completed 冻结值（与工具卡片同一口径；亚秒极快
+    // 无值可显示时不占位）。
     let duration_text = if card.is_running {
         card.running_duration_ms.map(format_running_duration)
     } else {
-        card.completed_duration_ms.map(format_completed_duration)
+        card.completed_duration_ms
+            .and_then(format_completed_duration)
     };
     // error 错误词 ` — Failed`（§6.4 主时间线同款，P3 错误不弱化）。
     let error_word = if card.is_error {

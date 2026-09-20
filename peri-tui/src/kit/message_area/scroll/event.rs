@@ -28,6 +28,9 @@ use super::{
 pub(in crate::kit::message_area) fn handle_event(
     event: &Event,
     area_rect: Option<Rect>,
+    // [§3.1] 滚动条矩形 = 收窄前的整幅区域（`ScrollbarHook` 捕获）——滚动条锚在
+    // 窗口最右列，在居中带之外；其余坐标（选区/文本列）仍以带内区域为准。
+    scrollbar_rect: Option<Rect>,
     vis_width: u16,
     scroll_state: &State<ScrollPos>,
     scroll_throttle: &State<ScrollThrottle>,
@@ -84,35 +87,40 @@ pub(in crate::kit::message_area) fn handle_event(
         }
         if let Some(area) = area_rect {
             let in_area = mouse_in_area(mouse.row, mouse.column, area);
+            // 滚动条几何/命中用收窄前的整幅矩形（缺省回退带内区域，保持旧行为）。
+            let sb_area = scrollbar_rect.unwrap_or(area);
 
             // ── 滚动条点击/拖拽（优先于文本选区）──
-            // [Why] 滚动条列（drawer.area 最右 1 列）以前 fallthrough 到文本选区，
+            // [Why] 滚动条列（窗口最右 1 列）以前 fallthrough 到文本选区，
             // 导致点击轨道触发空复制、▲▼ 无反应、拖拽 thumb 无反应。
             // 拖拽中（drag_active）即使鼠标移出滚动条列也继续滚动条逻辑——
             // 否则会 fallthrough 到文本选区，触发误复制。
-            let on_scrollbar_col = in_area && is_scrollbar_column(mouse.column, area);
+            // [§3.1] 滚动条列在居中带之外，命中判定不要求 `in_area`。
+            let on_scrollbar_col = mouse_in_area(mouse.row, mouse.column, sb_area)
+                && is_scrollbar_column(mouse.column, sb_area);
             let drag_active = scrollbar_drag.read().active;
             if drag_active || on_scrollbar_col {
                 let fields = *scrollbar_fields.read();
                 let max_scroll = fields.content_length.saturating_sub(fields.viewport_length);
-                if let Some(geo) = compute_thumb_geometry(&fields, area) {
+                if let Some(geo) = compute_thumb_geometry(&fields, sb_area) {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) if on_scrollbar_col => {
                             // ▲ 端点（area 顶行）—— 直接跳到顶部
-                            if mouse.row == area.y {
+                            if mouse.row == sb_area.y {
                                 scroll_state.write_no_update().set_offset(0);
                                 update_follow_on_scroll(follow_bottom, max_scroll, 0);
                                 return EventResult::Consumed;
                             }
                             // ▼ 端点（area 底行）—— 直接跳到底部
-                            let bottom_row = area.y.saturating_add(area.height).saturating_sub(1);
+                            let bottom_row =
+                                sb_area.y.saturating_add(sb_area.height).saturating_sub(1);
                             if mouse.row == bottom_row {
                                 scroll_state.write_no_update().set_offset(max_scroll);
                                 update_follow_on_scroll(follow_bottom, max_scroll, max_scroll);
                                 return EventResult::Consumed;
                             }
                             // thumb / track
-                            let thumb_start_row = area
+                            let thumb_start_row = sb_area
                                 .y
                                 .saturating_add(1)
                                 .saturating_add(geo.thumb_start as u16);
@@ -129,7 +137,7 @@ pub(in crate::kit::message_area) fn handle_event(
                             };
                             if !on_thumb {
                                 let track_click =
-                                    mouse.row.saturating_sub(area.y).saturating_sub(1) as usize;
+                                    mouse.row.saturating_sub(sb_area.y).saturating_sub(1) as usize;
                                 let target_thumb_start =
                                     track_click.saturating_sub(geo.thumb_length / 2);
                                 let position = thumb_start_to_position(target_thumb_start, &geo);
@@ -164,9 +172,10 @@ pub(in crate::kit::message_area) fn handle_event(
                             // 保持 thumb_offset：new_thumb_start_row = mouse.row - thumb_offset
                             let thumb_offset = scrollbar_drag.read().thumb_offset;
                             let new_thumb_start_row = mouse.row.saturating_sub(thumb_offset);
-                            let target_track_click =
-                                new_thumb_start_row.saturating_sub(area.y).saturating_sub(1)
-                                    as usize;
+                            let target_track_click = new_thumb_start_row
+                                .saturating_sub(sb_area.y)
+                                .saturating_sub(1)
+                                as usize;
                             let position = thumb_start_to_position(target_track_click, &geo);
                             let target =
                                 position_to_scroll_y(position, geo.max_position, max_scroll);

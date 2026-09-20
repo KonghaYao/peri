@@ -6,6 +6,10 @@ use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{AssertSqlSafe, Connection, SqliteConnection};
 use std::collections::HashSet;
 
+/// 本构建写入并接受的 schema 版本；2..5 经升级路径收敛到此值，0 视为待建库。
+/// 版本接受判定、迁移收尾写入与拒绝时的「本构建上限」都由它派生，避免三处各写一份。
+pub(super) const CURRENT_SCHEMA_VERSION: i64 = 6;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SchemaState {
     Empty,
@@ -32,13 +36,20 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .fetch_one(&mut *connection)
         .await?;
     match version {
-        6 => return Ok(SchemaState::Current),
+        v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
         5 => return Ok(SchemaState::Version5),
         4 => return Ok(SchemaState::Version4),
         3 => return Ok(SchemaState::Version3),
         2 => return Ok(SchemaState::Version2),
         0 => {}
-        _ => return Err(WorkspaceError::UnsupportedDatabaseSchema.into()),
+        // 拒绝时复述实际版本：报错要能回答「为什么不支持」，而不是只给结论。
+        other => {
+            return Err(WorkspaceError::UnsupportedSchemaVersion {
+                found: other,
+                supported: CURRENT_SCHEMA_VERSION,
+            }
+            .into());
+        }
     }
     let tables: Vec<(String,)> = sqlx::query_as(
         "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
@@ -221,9 +232,11 @@ impl SqliteThreadStore {
                 .into());
             }
         }
-        sqlx::query("PRAGMA user_version = 6")
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"
+        )))
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }

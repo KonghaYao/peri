@@ -166,7 +166,9 @@ fn render_tool_plan(
     let duration_text = if data.is_running {
         data.running_duration_ms.map(format_running_duration)
     } else {
-        data.completed_duration_ms.map(format_completed_duration)
+        // 亚秒极快（< 50ms）无值可显示 → None，行在 summary 处结束。
+        data.completed_duration_ms
+            .and_then(format_completed_duration)
     };
     let used: usize = spans.iter().map(|span| span.content.width()).sum();
     if let Some(meta) = duration_text

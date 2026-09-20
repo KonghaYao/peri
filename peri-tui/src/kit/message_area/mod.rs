@@ -16,6 +16,7 @@ use crate::kit::atoms::FocusedEntry;
 use crate::kit::atoms::{
     BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, IMAGE_HOVER, LANG_VERSION, LOADING_EPOCH, VIEW_MODELS,
 };
+use crate::kit::layout::CenterBandHook;
 use crate::kit::text_selection::TextSelection;
 use crate::kit::tui_render_unit::TuiRenderUnit;
 #[cfg(test)]
@@ -116,6 +117,26 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [Slice 3] Transcript 统一水平网格（§3.1）——content 列宽来自 SessionColumn。
     let grid = props.grid;
 
+    // [§3.1] 滚动条是窗口级 chrome——锚在窗口最右列，不随居中带内移。
+    // 注册与 fields state 都在 CenterBandHook 之前：hook 在 pre_component_draw
+    // 捕获的是收窄前的整幅区域，渲染与命中测试共用该矩形。
+    let scrollbar_fields = hooks.use_state(ScrollbarFields::default);
+    let scrollbar_area = {
+        let sb = hooks.use_hook(move || ScrollbarHook {
+            fields: scrollbar_fields,
+            outer: None,
+        });
+        sb.outer // 上一帧的收窄前区域（本帧渲染用 hook 内同一字段）
+    };
+
+    // [§3.1] 居中带：本组件区域收进 band（宽终端下左右留白、内容居中）。
+    // 必须在 MsgAreaTracker 之前注册——tracker 记录的 rect 是所有命中区、
+    // 换行宽度与滚动条列的坐标基准。
+    {
+        let band = hooks.use_hook(|| CenterBandHook::new(grid));
+        band.set_grid(grid);
+    }
+
     // [PERI_RENDER_TIMING] 帧计时起点
     let frame_t0 = if render_timing_enabled() {
         Some(Instant::now())
@@ -143,7 +164,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let area_rect = area_hook.rect;
     let vis_width = area_rect
         .map(|r| r.width.saturating_sub(1))
-        .unwrap_or(grid.total_width() as u16)
+        .unwrap_or(grid.line_width())
         .max(1);
     let (footer_lines, keepgoing_layout, footer_has_content) = build_footer_lines(
         &mut hooks,
@@ -191,11 +212,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let gesture = hooks.use_state(|| Option::<scroll::GesturePending>::None);
     let drag_throttle = hooks.use_state(DragThrottle::default);
 
-    // 滚动条 fields state（hook 通过引用读取，避免 borrow 冲突）
-    let scrollbar_fields = hooks.use_state(ScrollbarFields::default);
-    hooks.use_hook(move || ScrollbarHook {
-        fields: scrollbar_fields,
-    });
     // 滚动条 thumb 拖拽状态（点击/拖拽事件处理器读写）
     let scrollbar_drag = hooks.use_state(ScrollbarDragState::default);
     // [Slice 2] §8.1 `↓ New output` 指示器屏幕点击区域 (y, x_start, x_end)，
@@ -442,7 +458,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [S2 单一事实源] FOCUSED_ENTRY 订阅（hook 声明必须在 handler 之前，hook
     // 顺序每次渲染一致）：仲裁/渲染/外部清除共读同一事实源，无收敛窗口期。
     let focused_entry_atom = hooks.use_atom(&FOCUSED_ENTRY);
-    handlers::register_entry_click(&mut hooks, area_rect, gesture, interaction_option, text_sel);
+    handlers::register_entry_click(
+        &mut hooks,
+        area_rect,
+        scrollbar_area,
+        gesture,
+        interaction_option,
+        text_sel,
+    );
 
     // 闭包持 clone，原值继续在 render body 内用。
     // [Why 位置] 必须声明在 follow_bottom 之后（闭包捕获），且所有 hook 每次渲染
@@ -450,6 +473,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     handlers::register_scroll_events(
         &mut hooks,
         area_rect,
+        scrollbar_area,
         vis_width,
         scroll_state,
         scroll_throttle,
@@ -858,16 +882,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         vp_first_offset.min(u16::MAX as usize) as u16
     };
 
-    // [Why] View 必须保持 `Fill(1)`——ScrollbarHook 在 MessageArea 的 drawer.area
-    // 最右 1 列渲染滚动条 thumb。若 View 改为 `Max(vis_width)`，View 自身 area 缩到
-    // vis_width，ScrollbarHook 的 drawer.area 也跟着缩，导致 thumb 渲染在 area.width-2
-    // 处（向左偏 1 列）。
+    // [Why] View 必须保持 `Fill(1)`（占满居中带）——Paragraph 的 wrap 宽度靠右
+    // padding 1 列从 band 宽度推出 vis_width；若 View 改为 `Max(vis_width)`，右 padding
+    // 会把 wrap 宽度再压 1 列，与 `total_visual_rows` / wrap_map / `line_count(vis_width)`
+    // 的估算错位（多算一次折行）。
     //
     // 让 Paragraph 实际 wrap 宽度 = vis_width 的正确做法：给 Paragraph 套
     // `Block::default().padding(Padding::new(0, 1, 0, 0))`（右 padding 1）。Block 占满
-    // View 的 area.width，内部 wrap 宽度 = area.width - 1 = vis_width，与
+    // View 的 area.width（= band 宽），内部 wrap 宽度 = band - 1 = vis_width，与
     // `total_visual_rows` / `wrap_map_cache` / `line_count(vis_width)` 的估算一致；
-    // 右 padding 1 列留给 scrollbar thumb（post_component_draw 时绘制覆盖 padding 空白）。
+    // 带内最右 1 列为正文留白（滚动条另在窗口最右列，见 ScrollbarHook）。
     // [PERI_RENDER_TIMING] 帧总耗时
     trace_phase(
         "frame-total",

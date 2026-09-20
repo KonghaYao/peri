@@ -66,6 +66,7 @@ use crate::kit::atoms::{
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up};
+use crate::kit::layout::CenterBandHook;
 use crate::kit::mention_popup::MentionPopup;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::mouse_router;
@@ -132,6 +133,14 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let slash_commands = hooks.use_atom(&AVAILABLE_SLASH_COMMANDS);
     let _slash_command_count = slash_commands.read().len();
     let _ = slash_commands;
+
+    // [§3.1] 居中带：composer 区域收进 transcript 同一个 band（宽终端下与
+    // 消息区一同居中，prompt 前缀与 transcript content 起点保持同列）。
+    // 必须在 AreaTracker 之前注册——composer_area 是光标与点击列的坐标基准。
+    {
+        let band = hooks.use_hook(|| CenterBandHook::new(props.grid));
+        band.set_grid(props.grid);
+    }
 
     // 追踪 composer 区域 + overlay 高度，用于鼠标点击→光标定位
     // area_tracker: 值拷贝模式（仿 MsgAreaTracker），避免每帧 Arc 重建导致 handler 读到 None

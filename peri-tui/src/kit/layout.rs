@@ -10,8 +10,62 @@ use crate::kit::message_area::grid::GridSpec;
 use crate::kit::panel_overlay::PanelOverlay;
 use ratatui_kit::{
     prelude::*,
-    ratatui::layout::{Constraint, Direction},
+    ratatui::layout::{Constraint, Direction, Rect},
 };
+
+// ── 居中带（§3.1）────────────────────────────────────────────────────────
+
+/// 把组件区域收进 transcript 居中带——左偏移 + 带宽取自 [`GridSpec`]，
+/// 两端余量在该带之外由父级布局留白。
+///
+/// 纯函数（hook 只做 `drawer.area` 替换），越界时向右收缩并至少保留 1 列。
+///
+/// [Why 两条早退] `terminal::size()` 取不到尺寸时 `use_terminal_size` 返回
+/// `(0, 0)`，`grid_for(0)` 的 `band_width` 也是 0——此时网格不可信，保持原区域
+/// （否则整条 UI 会塌成 1 列）。区域本身为 0 宽时同理不放大（越界绘制）。
+pub(crate) fn center_band_area(area: Rect, grid: GridSpec) -> Rect {
+    if grid.band_width == 0 || area.width == 0 {
+        return area;
+    }
+    let pad = grid.left_pad.min(area.width.saturating_sub(1));
+    let width = grid.band_width.min(area.width.saturating_sub(pad)).max(1);
+    Rect {
+        x: area.x.saturating_add(pad),
+        width,
+        ..area
+    }
+}
+
+/// 居中带 hook——把消息区 / 输入区的绘制区域收进居中带（§3.1）。
+///
+/// [Why 收窄区域而非给每行加左填充] 区域收窄后，组件内所有坐标（换行宽度、
+/// 命中列、光标列、滚动条列）仍是带内相对坐标，`AreaTracker` / `MsgAreaTracker`
+/// 记录的也是带矩形；若改为在行首补空格，每个消费点都要各自加偏移。
+///
+/// [机制] `pre_component_draw` 早于组件自身 draw 与子节点区域计算，
+/// 改写 `drawer.area` 与 ScrollView 在 `draw()` 中收成 `block.inner` 同路径。
+/// 因此必须**先于位置 tracker 注册**（否则 tracker 记录未收窄的整幅宽度），
+/// 且在任何条件分支前注册（TUI-HOOK-001）。
+pub(crate) struct CenterBandHook {
+    grid: GridSpec,
+}
+
+impl CenterBandHook {
+    pub(crate) fn new(grid: GridSpec) -> Self {
+        Self { grid }
+    }
+
+    /// 每帧由 render body 写入当前网格（终端 resize 后带宽与左偏移随之变化）。
+    pub(crate) fn set_grid(&mut self, grid: GridSpec) {
+        self.grid = grid;
+    }
+}
+
+impl Hook for CenterBandHook {
+    fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        drawer.area = center_band_area(drawer.area, self.grid);
+    }
+}
 
 // ── 高度降级计划（spec §11）─────────────────────────────────────────────
 
@@ -108,7 +162,8 @@ pub fn SessionColumn(
     let panel_open = active_panel.read().is_some();
 
     // [Slice 3] Transcript 统一水平网格（§3.1）——按终端宽度计算 content 列宽
-    // （content = min(term_w - 6, 100)，余量留右侧），替代旧的 width-4 内边距 hack。
+    // （content = min(term_w - 6, 100)）与居中带；content 触顶后余量左右均分
+    // （grid.left_pad），替代旧的 width-4 内边距 hack。
     let (term_w, term_h) = hooks.use_terminal_size();
     let grid = GridSpec::grid_for(term_w);
     // hook 占位——ratatui-kit 要求 hook 数量恒定不可增减
@@ -195,5 +250,50 @@ mod tests {
         assert!(editor_rows <= 2, "composer 编辑行数应 ≤2");
         // 无 key hints：Row1Only 隐藏 Row2
         assert_ne!(plan.status_bar, StatusBarMode::Full);
+    }
+
+    /// 居中带（§3.1）：content 未触顶时区域逐列不变；触顶后按 `left_pad`
+    /// 左移并收窄到 `band_width`（两端余量均分，奇数余 1 列留右侧）。
+    #[test]
+    fn center_band_area_centers_only_after_content_caps() {
+        // 80 列：带宽 = 终端宽，不居中（与居中前逐列一致）
+        let narrow = center_band_area(Rect::new(0, 0, 80, 24), GridSpec::grid_for(80));
+        assert_eq!(narrow, Rect::new(0, 0, 80, 24));
+
+        // 220 列：带宽 117，余量 103 均分 → 左 51 / 右 52
+        let wide = center_band_area(Rect::new(0, 0, 220, 24), GridSpec::grid_for(220));
+        assert_eq!(wide.width, 117);
+        assert_eq!(wide.x, 51);
+        assert_eq!(wide.x as usize + wide.width as usize + 52, 220);
+    }
+
+    /// 区域比带宽窄（嵌套布局 / 面板挤压）：钳到区域内，不越界、不留 0 宽。
+    #[test]
+    fn center_band_area_clamps_to_narrower_area() {
+        for width in [0u16, 1, 2, 10, 40, 116] {
+            let area = Rect::new(3, 5, width, 10);
+            let band = center_band_area(area, GridSpec::grid_for(220));
+            if width == 0 {
+                assert_eq!(band, area, "0 宽区域不放大");
+                continue;
+            }
+            assert!(band.width >= 1, "width={width}: 至少保留 1 列");
+            assert!(
+                band.x >= area.x
+                    && band.x as usize + band.width as usize <= area.x as usize + width as usize,
+                "width={width}: band {band:?} 应落在 {area:?} 内"
+            );
+            assert_eq!(band.y, area.y, "width={width}: 只改水平轴");
+            assert_eq!(band.height, area.height, "width={width}: 高度不变");
+        }
+    }
+
+    /// 终端尺寸未知（`terminal::size()` 失败 → `grid_for(0)`，带宽 0）：
+    /// 保持原区域，不能把整条 UI 塌成 1 列。
+    #[test]
+    fn center_band_area_keeps_area_when_grid_unavailable() {
+        let area = Rect::new(0, 0, 100, 30);
+        assert_eq!(GridSpec::grid_for(0).band_width, 0);
+        assert_eq!(center_band_area(area, GridSpec::grid_for(0)), area);
     }
 }

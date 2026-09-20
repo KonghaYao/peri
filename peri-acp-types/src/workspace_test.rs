@@ -91,6 +91,27 @@ fn test_needs_relink_message_states_a_reachable_next_step() {
 }
 
 #[test]
+fn test_unsupported_schema_version_message_names_both_versions_and_next_step() {
+    let message = WorkspaceError::UnsupportedSchemaVersion {
+        found: 7,
+        supported: 6,
+    }
+    .to_string();
+    assert!(
+        message.contains("version 7"),
+        "文案必须复述实际版本：{message}"
+    );
+    assert!(
+        message.contains("newest supported: 6"),
+        "文案必须给出本构建上限：{message}"
+    );
+    assert!(
+        message.contains("use the Peri version that wrote it") && message.contains("upgrade Peri"),
+        "文案必须给出可完成的下一步：{message}"
+    );
+}
+
+#[test]
 fn test_workspace_missing_or_malformed_identity_cannot_deserialize() {
     assert!(serde_json::from_value::<SessionBinding>(
         serde_json::json!({"schema_version": 1, "revision": 1})

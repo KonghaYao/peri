@@ -458,9 +458,9 @@ fn sel_env(
     im::Vector<TuiRenderUnit>,
 ) {
     let lines = vm_to_lines(&vm, grid);
-    // 视宽与生产一致：消息区右缘（term_width - 1，跳过滚动条列）——metadata
+    // 视宽与生产一致：居中带右缘（line_width，跳过滚动条列）——metadata
     // 右对齐到该列，宽于此值会在 wrap_map 二次折行。
-    let (_, wm) = build_wrap_map(&lines, grid.term_width.saturating_sub(1));
+    let (_, wm) = build_wrap_map(&lines, grid.line_width());
     let wm: Vec<WrappedLineInfo> = wm
         .into_iter()
         .map(|mut e| {
@@ -500,7 +500,7 @@ fn test_extract_semantic_plain_middle_line() {
         &wm,
         (0, 0),
         (3, 20),
-        grid.total_width() as u16,
+        grid.line_width(),
         Some(&vms),
         Some(grid),
     )
@@ -552,7 +552,7 @@ fn test_extract_semantic_tool_card_header_and_command() {
         &wm,
         (0, 0),
         (3, 40),
-        grid.total_width() as u16,
+        grid.line_width(),
         Some(&vms),
         Some(grid),
     )
@@ -614,7 +614,7 @@ fn test_extract_semantic_diff_strips_gutter_keeps_markers() {
         &wm,
         (0, 0),
         (20, 0),
-        grid.total_width() as u16,
+        grid.line_width(),
         Some(&vms),
         Some(grid),
     )
@@ -658,7 +658,7 @@ fn test_extract_semantic_partial_row_maps_to_semantic() {
         &wm,
         (1, 1),
         (1, 5),
-        grid.total_width() as u16,
+        grid.line_width(),
         Some(&vms),
         Some(grid),
     )
@@ -690,7 +690,7 @@ fn test_extract_without_view_models_keeps_plain() {
         &wm,
         (0, 0),
         (1, 10),
-        grid.total_width() as u16,
+        grid.line_width(),
         None,
         None,
     )

@@ -9,6 +9,8 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms;
+use crate::kit::layout::CenterBandHook;
+use crate::kit::message_area::grid::GridSpec;
 use crate::kit::mouse_router;
 use crate::kit::panel_registry::open_panel;
 use crate::kit::popup_overlay::open_popup;
@@ -371,6 +373,17 @@ pub struct StatusBarProps {
 #[component]
 pub fn StatusBar(props: &StatusBarProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _lang = hooks.use_atom(&atoms::LANG_VERSION);
+
+    // [§3.1] 居中带：状态栏与 transcript / composer 同宽——宽终端下三者的左右
+    // 边缘对齐（状态栏原本满宽，会在 composer 盒子的左右两侧各探出一截）。
+    // 必须在任何条件分支之前注册（TUI-HOOK-001）；Row1 的折行与点击列都以
+    // 收窄后的区域为准（`use_previous_size` / AreaTracker 都在其后）。
+    {
+        let (term_w, _) = hooks.use_terminal_size();
+        let grid = GridSpec::grid_for(term_w);
+        let band = hooks.use_hook(|| CenterBandHook::new(grid));
+        band.set_grid(grid);
+    }
 
     // §11：h<8 完全隐藏；h<12 仅 Row1 + NotifRow（无 key hints / 缓冲行）。
     // Row2 是独立组件，条件渲染不违反 hook 顺序（计划 Slice 1c 裁决）。
