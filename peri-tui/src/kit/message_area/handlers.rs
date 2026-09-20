@@ -403,6 +403,7 @@ pub(super) fn schedule_image_preview_hover(
 pub(super) fn register_entry_click(
     hooks: &mut Hooks,
     area_rect: Option<Rect>,
+    scrollbar_rect: Option<Rect>,
     gesture: State<Option<scroll::GesturePending>>,
     interaction_option: State<usize>,
     text_sel: State<TextSelection>,
@@ -435,11 +436,15 @@ pub(super) fn register_entry_click(
         // 内有效——命中路径的写入（FOCUSED_ENTRY / gesture）发生在判定
         // 返回之后（guard 已 drop），parking_lot 同线程 read+write 冲突
         // 安全。
+        // [§3.1] 滚动条列按窗口级矩形判定（`ScrollbarHook` 捕获的收窄前区域，
+        // 见 scroll/event.rs 同款处理）——带内最右列现在只是正文留白列，不是
+        // 滚动条列。缺省（首帧）回退带内区域，保持旧行为。
+        let sb_area = scrollbar_rect.unwrap_or(area);
         let Some(slot) = entry_click_decision(
             gesture.read().as_ref(),
             mouse.row,
             area,
-            scroll::is_scrollbar_column(mouse.column, area),
+            scroll::is_scrollbar_column(mouse.column, sb_area),
         ) else {
             return EventResult::Ignored;
         };

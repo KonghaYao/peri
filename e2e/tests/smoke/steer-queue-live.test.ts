@@ -197,7 +197,10 @@ describe("smoke: 正式待发送队列", () => {
     const header = lines.findIndex((line) => /待发送\s+1/.test(line));
     const border = lines.slice(header + 1).find((line) => /^\s*[─━]/.test(line));
     expect(border, "队列下方输入框应有实线边框").toBeDefined();
-    expect(border!.startsWith("─".repeat(12)), `输入框边线不得出现间隙：${border}`).toBe(true);
+    // 宽终端下整条 UI 收进居中带（§3.1），行首会有 left_pad 列留白——间隙判定
+    // 只针对边线本身，故先去掉行首空白。
+    const drawnBorder = border!.trimStart();
+    expect(drawnBorder.startsWith("─".repeat(12)), `输入框边线不得出现间隙：${border}`).toBe(true);
     expect(promptBackground(await tester!.getScreen({ stripAnsi: false })), "输入框应保持终端默认背景，不能新增底色").toBe("default");
   });
 

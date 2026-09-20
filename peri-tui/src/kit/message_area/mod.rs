@@ -458,7 +458,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [S2 单一事实源] FOCUSED_ENTRY 订阅（hook 声明必须在 handler 之前，hook
     // 顺序每次渲染一致）：仲裁/渲染/外部清除共读同一事实源，无收敛窗口期。
     let focused_entry_atom = hooks.use_atom(&FOCUSED_ENTRY);
-    handlers::register_entry_click(&mut hooks, area_rect, gesture, interaction_option, text_sel);
+    handlers::register_entry_click(
+        &mut hooks,
+        area_rect,
+        scrollbar_area,
+        gesture,
+        interaction_option,
+        text_sel,
+    );
 
     // 闭包持 clone，原值继续在 render body 内用。
     // [Why 位置] 必须声明在 follow_bottom 之后（闭包捕获），且所有 hook 每次渲染

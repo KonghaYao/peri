@@ -19,7 +19,14 @@ use ratatui_kit::{
 /// 两端余量在该带之外由父级布局留白。
 ///
 /// 纯函数（hook 只做 `drawer.area` 替换），越界时向右收缩并至少保留 1 列。
+///
+/// [Why 两条早退] `terminal::size()` 取不到尺寸时 `use_terminal_size` 返回
+/// `(0, 0)`，`grid_for(0)` 的 `band_width` 也是 0——此时网格不可信，保持原区域
+/// （否则整条 UI 会塌成 1 列）。区域本身为 0 宽时同理不放大（越界绘制）。
 pub(crate) fn center_band_area(area: Rect, grid: GridSpec) -> Rect {
+    if grid.band_width == 0 || area.width == 0 {
+        return area;
+    }
     let pad = grid.left_pad.min(area.width.saturating_sub(1));
     let width = grid.band_width.min(area.width.saturating_sub(pad)).max(1);
     Rect {
@@ -263,9 +270,13 @@ mod tests {
     /// 区域比带宽窄（嵌套布局 / 面板挤压）：钳到区域内，不越界、不留 0 宽。
     #[test]
     fn center_band_area_clamps_to_narrower_area() {
-        for width in [1u16, 2, 10, 40, 116] {
+        for width in [0u16, 1, 2, 10, 40, 116] {
             let area = Rect::new(3, 5, width, 10);
             let band = center_band_area(area, GridSpec::grid_for(220));
+            if width == 0 {
+                assert_eq!(band, area, "0 宽区域不放大");
+                continue;
+            }
             assert!(band.width >= 1, "width={width}: 至少保留 1 列");
             assert!(
                 band.x >= area.x
@@ -275,5 +286,14 @@ mod tests {
             assert_eq!(band.y, area.y, "width={width}: 只改水平轴");
             assert_eq!(band.height, area.height, "width={width}: 高度不变");
         }
+    }
+
+    /// 终端尺寸未知（`terminal::size()` 失败 → `grid_for(0)`，带宽 0）：
+    /// 保持原区域，不能把整条 UI 塌成 1 列。
+    #[test]
+    fn center_band_area_keeps_area_when_grid_unavailable() {
+        let area = Rect::new(0, 0, 100, 30);
+        assert_eq!(GridSpec::grid_for(0).band_width, 0);
+        assert_eq!(center_band_area(area, GridSpec::grid_for(0)), area);
     }
 }
