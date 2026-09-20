@@ -27,14 +27,17 @@ mod macos {
     use super::*;
     use image::ImageEncoder;
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG};
-    use objc2_foundation::NSData;
+    use objc2_foundation::{NSData, NSString};
 
     // 命名剪贴板与用户的 generalPasteboard 隔离；退出时清空测试数据。
     struct TestPasteboard(objc2::rc::Retained<NSPasteboard>);
 
     impl TestPasteboard {
         fn new(bytes: Option<&[u8]>) -> Self {
-            let board = NSPasteboard::pasteboardWithUniqueName();
+            // 显式生成跨线程/进程的名字，不依赖 AppKit 的隐式命名状态。
+            let name = NSString::from_str(&format!("peri.clipboard-test.{}", uuid::Uuid::new_v4()));
+            let board = NSPasteboard::pasteboardWithName(&name);
+            board.clearContents();
             if let Some(bytes) = bytes {
                 let data = NSData::with_bytes(bytes);
                 assert!(unsafe { board.setData_forType(Some(&data), NSPasteboardTypePNG) });
@@ -60,6 +63,58 @@ mod macos {
             let output = save_pasteboard_png(&board.0, dir.path()).unwrap().unwrap();
             assert_eq!(std::fs::read(output).unwrap(), bytes);
         });
+    }
+
+    #[test]
+    fn concurrent_clipboards_keep_independent_names_and_png_bytes() {
+        const WORKERS: usize = 16;
+        let barrier = std::sync::Barrier::new(WORKERS);
+        let names = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..WORKERS)
+                .map(|index| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        objc2::rc::autoreleasepool(|_| {
+                            let dir = tempfile::tempdir().unwrap();
+                            let source = dir.path().join("source.png");
+                            png_encode(&[index as u8, 33, 65, 128], 1, 1, &source).unwrap();
+                            let bytes = std::fs::read(source).unwrap();
+                            barrier.wait();
+                            let board = TestPasteboard::new(None);
+                            let name = board.0.name().to_string();
+                            barrier.wait();
+                            let data = NSData::with_bytes(&bytes);
+                            let written = unsafe {
+                                board.0.setData_forType(Some(&data), NSPasteboardTypePNG)
+                            };
+                            // 所有写入结束后再读取，确保能揭示不同 fixture 共用剪贴板。
+                            barrier.wait();
+                            let output = save_pasteboard_png(&board.0, dir.path());
+                            let saved = output
+                                .as_ref()
+                                .ok()
+                                .and_then(|path| path.as_ref())
+                                .map(std::fs::read);
+                            // 读取全部完成前不 Drop，避免清理干扰其他 worker 的证据。
+                            barrier.wait();
+                            assert!(written);
+                            assert_eq!(saved.unwrap().unwrap(), bytes, "剪贴板 {name}");
+                            name
+                        })
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(
+            unique.len(),
+            WORKERS,
+            "每个 fixture 必须拥有独立剪贴板: {names:?}"
+        );
     }
 
     #[test]
