@@ -9,6 +9,9 @@ pub enum AgentError {
     #[error("Max iterations exceeded ({0})")]
     MaxIterationsExceeded(usize),
 
+    #[error("Model output reached the token limit for {attempts} consecutive responses; the task is incomplete.")]
+    OutputTruncated { attempts: usize },
+
     #[error("Tool not found: {0}")]
     ToolNotFound(String),
 

@@ -32,6 +32,13 @@ impl<'a> GenerationFallbackStatus<'a> {
                 failure: None,
             },
             TurnTelemetryOutcome::Stopped {
+                reason: PromptStopReason::MaxTokens,
+            } => GenerationFallbackStatus {
+                error_class: "max_tokens".to_string(),
+                level: ObservationLevel::Warning,
+                failure: None,
+            },
+            TurnTelemetryOutcome::Stopped {
                 reason: PromptStopReason::MaxTurnRequests,
             } => GenerationFallbackStatus {
                 error_class: "max_iterations".to_string(),

@@ -1282,6 +1282,39 @@ mod loop_result_mapping {
     }
 
     #[test]
+    fn output_truncated_maps_to_max_tokens_without_fatal_failure() {
+        let terminal = classify_loop_terminal(
+            &LoopResult::Error(AgentError::OutputTruncated { attempts: 3 }),
+            false,
+        );
+        assert!(!terminal.ok);
+        assert_eq!(terminal.stop_reason, PromptStopReason::MaxTokens);
+        assert_eq!(terminal.turn_status, TurnStatus::Error);
+        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::LlmFailure));
+        assert!(terminal.failure.is_none());
+        assert_eq!(
+            peri_acp_types::session::TurnTelemetryOutcome::from_result(
+                terminal.stop_reason,
+                terminal.failure,
+            ),
+            peri_acp_types::session::TurnTelemetryOutcome::Stopped {
+                reason: PromptStopReason::MaxTokens,
+            },
+        );
+    }
+
+    #[test]
+    fn cancelled_output_truncation_maps_to_cancelled() {
+        let terminal = classify_loop_terminal(
+            &LoopResult::Error(AgentError::OutputTruncated { attempts: 3 }),
+            true,
+        );
+        assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
+        assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
+        assert!(terminal.failure.is_none());
+    }
+
+    #[test]
     fn cancelled_max_iterations_maps_to_interrupted_terminal() {
         let terminal = classify_loop_terminal(
             &LoopResult::Error(AgentError::MaxIterationsExceeded(500)),

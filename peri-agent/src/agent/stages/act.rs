@@ -2,7 +2,7 @@
 //!
 //! 根据 Reason 结果决定：
 //! - 有 tool_calls → 通过 `tool_dispatch::dispatch_tools` 并发执行 + 写入 transcript
-//! - 无 tool_calls → 产出最终回答，emit TextChunk + StateSnapshot
+//! - 无 tool_calls → 提交响应；截断响应不触发完成 hook，由 loop 决定有界续跑
 
 use super::middleware_runner::run_after_agent;
 use super::tool_dispatch::dispatch_tools;
@@ -141,6 +141,16 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
                 // 与写入 transcript 的消息 ID 对齐（ACP 标准 messageId 语义）
                 message_id: ai_msg_id,
                 chunk: final_answer.clone(),
+            });
+        }
+
+        // 截断的正文/思考仍是事实，但不是最终回答；不能触发 Stop/Goal 完成 hook。
+        if input.reasoning.stop_reason == peri_model::StopReason::MaxTokens {
+            emit_turn_completed(ctx);
+            emit_goal_snapshot(ctx);
+            return Ok(ActOutput {
+                has_tool_calls: false,
+                final_answer: None,
             });
         }
 

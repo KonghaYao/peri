@@ -34,8 +34,8 @@ fn test_print_usage_per_call_and_summary_do_not_overlap_cache() {
     );
     assert_eq!(second["message"]["usage"]["input_tokens"], 150);
     assert_eq!(
-        output.stream_result(),
-        json!({"type": "result", "usage": {
+        output.result(StopReason::EndTurn, None),
+        json!({"type": "result", "stop_reason": "end_turn", "status": "completed", "is_error": false, "usage": {
         "input_tokens": 180, "cache_read_input_tokens": 140,
         "cache_creation_input_tokens": 30, "output_tokens": 16
     }, "total_cost_usd": null})
@@ -55,7 +55,7 @@ fn test_print_usage_missing_invalid_and_replay_are_not_counted() {
         assert!(output.handle_session_update(&update).is_none());
     }
     assert!(
-        output.stream_result()["usage"].is_null(),
+        output.result(StopReason::EndTurn, None)["usage"].is_null(),
         "未知 usage 不能伪装成零"
     );
 }

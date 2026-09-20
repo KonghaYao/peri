@@ -21,6 +21,12 @@
 - **Rule**：cancel 链路为 `Controller →(定位转发) Runtime →(查映射) Agent 句柄`，按 (session_id, turn_id, attempt_id) 三元组定位（canonical 类型 `CancelRequest` 事实源 `peri-acp-types::identity`，含 clear_queue/policy 字段）；幂等判定与 turn 终态唯一（Completed/Interrupted）归 Agent 层（§9：Agent 持有最终执行权），上层只定位与转发、不解释取消语义；`clear_queue` 默认 false（cancel ≠ 清除待办，MQ 未消费消息保留为下轮 attempt 输入）；cancel > 续跑 > promote > retry 优先级由 Agent 判定。目标态接线随 L5 落位；当前 ACP 内部 `SessionManager::cancel_session` 为过渡路径。
 - **Verify**：`cargo test -p peri-controller --lib controller`（cancel 三元组透传 / 未知 session 类型化 `ControllerError::CancelFailed`）；`cargo test -p peri-runtime --lib runtime`（cancel 转发幂等一致、clear_queue/policy 透传）；`cargo test -p peri-acp-types --lib identity`（`CancelRequest` 契约：三元组稳定、默认不清队列、序列化往返）；人工检查 cancel 请求自 TUI 经 ACP → Controller → Runtime → Agent 句柄全链路透传（L5 后复核）。
 
+### ARC-OUTPUT-COMPLETION-001
+
+- **Scope**：`peri-agent`、`peri-acp-types`、`peri-acp`、print CLI。
+- **Rule**：provider 的响应完成不等于 Agent 任务完成。完整协议响应以 `MaxTokens` 停止且无工具调用时，保留原始消息但不运行完成 hook，经现有队列有界续跑；恢复预算耗尽必须返回 `MaxTokens` 未完成终态，仍服从取消与总迭代预算。完整工具调用照常执行，续跑不得重放已执行工具；残缺参数仍由 provider 协议校验拒绝。Agent 终态经标准 ACP `PromptResponse.stopReason` 传递，print 不得将非 `EndTurn` 响应当作成功退出。JSON/stream-json 最终 result 保留停止原因、任务状态及错误标记，在部署清理和通知通道排空后发出；清理失败与任务终态分别表达，不能用队列瞬时为空证明尾事件已交付。
+- **Verify**：`cargo test -p peri-agent --lib truncation_tests`、`cargo test -p peri-agent --lib loop_result_mapping`、`cargo test -p peri-acp --lib prompt_wire_response`、`cargo test -p peri-tui --lib test_prompt_with_response`、`cargo test -p peri-tui --bin peri -- cli_print`、`cargo test -p peri-tui --test print_exit`；真实 CLI 固定响应覆盖截断续跑成功、连续截断未完成及进程退出。
+
 ### ARC-FROZEN-001
 
 - **Scope**：会话、Prompt、SubAgent。

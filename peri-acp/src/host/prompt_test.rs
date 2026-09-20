@@ -248,6 +248,15 @@ mod wire_projection {
         assert!(value.get("error").is_none());
     }
 
+    #[test]
+    fn prompt_wire_response_max_tokens_preserves_incomplete_stop_reason() {
+        let value =
+            prompt_wire_response(None, crate::session::executor::PromptStopReason::MaxTokens)
+                .expect("输出截断是标准停止状态，不是 JSON-RPC 错误");
+        assert_eq!(value["stopReason"], "max_tokens");
+        assert!(value.get("error").is_none());
+    }
+
     /// 正常完成 → 成功 `PromptResponse(EndTurn)`。
     #[test]
     fn prompt_wire_response_end_turn_is_success_prompt_response() {

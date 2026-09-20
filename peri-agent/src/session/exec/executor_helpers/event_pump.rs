@@ -200,6 +200,7 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
             PromptStopReason::EndTurn => "end_turn",
             PromptStopReason::Cancelled => "cancelled",
             PromptStopReason::MaxTurnRequests => "max_turn_requests",
+            PromptStopReason::MaxTokens => "max_tokens",
         };
         sink.push_done(&session_id, stop_reason_str, request_id.as_deref())
             .await;

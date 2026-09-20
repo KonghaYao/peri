@@ -681,6 +681,18 @@ pub(crate) fn classify_loop_terminal(
             turn_error_kind: Some(TurnErrorKind::MaxIterations),
         };
     }
+    if matches!(
+        loop_result,
+        LoopResult::Error(AgentError::OutputTruncated { .. })
+    ) {
+        return LoopTerminal {
+            ok: false,
+            stop_reason: PromptStopReason::MaxTokens,
+            failure: None,
+            turn_status: TurnStatus::Error,
+            turn_error_kind: Some(TurnErrorKind::LlmFailure),
+        };
+    }
     let LoopResult::Error(error) = loop_result else {
         unreachable!("Completed and Interrupted were classified above")
     };
