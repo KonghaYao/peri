@@ -2,6 +2,8 @@
 
 use tempfile::tempdir;
 
+use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
+
 use super::*;
 
 /// [P0] 显式路径打开成功：数据库文件被创建，且同路径二次打开幂等。
@@ -54,6 +56,43 @@ async fn test_open_with_explicit_path_is_directory_errs() {
     assert!(
         err.to_string().contains(&db_path.display().to_string()),
         "错误必须携带路径: {err}"
+    );
+}
+
+/// [P0] 库的 `user_version` 本构建不认识时拒绝打开，用户可见的报错要复述实际版本与
+/// 本构建上限——这正是「进入时只看到不支持」的那条链路。
+#[tokio::test]
+async fn test_open_with_explicit_path_reports_unsupported_schema_version() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("threads.db");
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true),
+    )
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA user_version = 99")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let err = match Resources::open_with(Some(db_path.clone())).await {
+        Ok(_) => panic!("不认识的 schema 版本必须拒绝打开"),
+        Err(e) => e,
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains(&db_path.display().to_string()),
+        "错误必须携带路径: {message}"
+    );
+    assert!(
+        message.contains("version 99"),
+        "错误必须复述实际版本: {message}"
+    );
+    assert!(
+        message.contains("newest supported:"),
+        "错误必须给出本构建上限: {message}"
     );
 }
 

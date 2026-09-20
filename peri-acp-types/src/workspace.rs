@@ -153,6 +153,12 @@ pub enum WorkspaceError {
     ExecutionLeaseRequired,
     #[error("session database schema or version is unsupported")]
     UnsupportedDatabaseSchema,
+    /// 数据库记录的 `user_version` 本构建不认识。带上实际值与本构建上限，
+    /// 让「不支持」这个结论可以追溯到具体版本，而不是停在无原因的描述上。
+    #[error(
+        "session database schema version {found} is not supported by this build (newest supported: {supported}); use the Peri version that wrote it, or upgrade Peri"
+    )]
+    UnsupportedSchemaVersion { found: i64, supported: i64 },
     #[error("workspace execution is unsupported by this store")]
     Unsupported,
 }

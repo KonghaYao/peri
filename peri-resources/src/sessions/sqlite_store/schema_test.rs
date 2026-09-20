@@ -353,8 +353,18 @@ async fn test_single_database_future_version_is_rejected_before_writing() {
     let error = SqliteThreadStore::new(&path).await.err().unwrap();
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::UnsupportedDatabaseSchema)
+        Some(WorkspaceError::UnsupportedSchemaVersion {
+            found: 7,
+            supported: CURRENT_SCHEMA_VERSION,
+        })
     ));
+    // 拒绝理由必须可追溯：报错要复述实际版本与本构建上限，否则用户只知道「不支持」。
+    let message = error.to_string();
+    assert!(message.contains("version 7"), "{message}");
+    assert!(
+        message.contains(&format!("newest supported: {CURRENT_SCHEMA_VERSION}")),
+        "{message}"
+    );
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert!(!path.with_extension("db-wal").exists());
 }

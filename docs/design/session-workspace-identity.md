@@ -379,8 +379,10 @@ writer 混用。
 旧 child 不独立接纳或取得根 lease；其写入沿持久化父链要求接纳后的根 owner。
 新会话在同一个库中强制创建 binding。
 
-未知 schema 或未来版本在配置 WAL、DDL 或业务写入前返回
-`UnsupportedDatabaseSchema`。升级前需停止旧版 Peri 进程，升级后由支持 binding
+不兼容的库 shape 在配置 WAL、DDL 或业务写入前返回
+`UnsupportedDatabaseSchema`；不认识的 `user_version` 返回
+`UnsupportedSchemaVersion`，报错复述实际版本与本构建上限，不把「不支持」停成无原因
+的结论。升级前需停止旧版 Peri 进程，升级后由支持 binding
 和执行 lease 的新版本访问；不支持新旧二进制混用同一库。schema 版本号不是对
 不遵守协议的旧 writer 或任意外部 SQLite writer 的访问控制。
 
