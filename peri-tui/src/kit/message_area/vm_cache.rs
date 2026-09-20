@@ -105,11 +105,11 @@ impl MarkdownLineCache {
                 continue;
             }
             self.stable.truncate(index);
-            let lines = if lines.is_empty() {
-                Arc::clone(&self.stable[index].lines)
-            } else {
-                Arc::new(lines.clone())
-            };
+            // [Fix] 走到这里即该 index 无可用缓存（命中缓存的 chunk 已在上方 continue）。
+            // 空 lines 表示调用方判定该 chunk 无可见内容，按空内容重建即可；旧实现
+            // 试图复用 `self.stable[index]`，但 `truncate(index)` 已保证 len <= index
+            // ——渲染热路径上任何空 lines 都会越界 panic（宽度变化清理 stable 后必现）。
+            let lines = Arc::new(lines.clone());
             let (_, wrap_map) = build_wrap_map(&lines, width);
             let visual_rows = wrap_map.last().map(|entry| entry.visual_end).unwrap_or(0);
             self.stable.push(MarkdownLineChunk {
@@ -243,4 +243,36 @@ fn test_markdown_line_cache_width_invalidates_stable_wrap() {
     let first = Arc::clone(&cache.stable[0].wrap_map);
     cache.retain_and_wrap(8, &[(1, vec![Line::from("long stable line")])]);
     assert!(!Arc::ptr_eq(&first, &cache.stable[0].wrap_map));
+}
+
+/// 回归：宽度变化清理 stable 后，空 lines 的 chunk 不得越界索引。
+///
+/// 旧实现先 `truncate(index)` 再读 `self.stable[index]`（len <= index 恒越界）；
+/// 终端 resize 会清空 stable 并让全部 chunk 重建，该组合必 panic
+/// （`index out of bounds: the len is 0 but the index is 0`）。
+#[test]
+fn test_markdown_line_cache_empty_chunk_after_width_change_does_not_panic() {
+    use ratatui_kit::ratatui::text::Line;
+
+    let mut cache = MarkdownLineCache::default();
+    cache.retain_and_wrap(20, &[(1, vec![Line::from("stable line")])]);
+
+    cache.retain_and_wrap(8, &[(1, Vec::new())]);
+
+    assert_eq!(cache.stable.len(), 1);
+    assert!(cache.stable[0].lines.is_empty());
+}
+
+/// 命中占位（同宽度 + 同 identity + 空 lines）保留缓存内容，不重建为空。
+#[test]
+fn test_markdown_line_cache_hit_with_empty_placeholder_keeps_cached_lines() {
+    use ratatui_kit::ratatui::text::Line;
+
+    let mut cache = MarkdownLineCache::default();
+    cache.retain_and_wrap(20, &[(7, vec![Line::from("stable line")])]);
+
+    cache.retain_and_wrap(20, &[(7, Vec::new())]);
+
+    assert_eq!(cache.stable.len(), 1);
+    assert_eq!(cache.stable[0].lines.len(), 1);
 }

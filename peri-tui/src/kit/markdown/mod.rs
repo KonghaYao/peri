@@ -140,9 +140,19 @@ fn stable_chunk_end(input: &str, start: usize) -> usize {
             .lines()
             .filter(|line| line.trim_start().starts_with("```"))
             .count();
+        // GFM 表格可省略前导竖线（`a | b` + `--- | ---`），仅按 starts_with('|')
+        // 判定会漏检：表格冻结进 stable 后渲染为空（stable 路径只处理 Text 段）
+        // → 内容丢失，且成为宽度变化时空 chunk 越界的触发源。
+        // 分隔行（字符集限于 `| - :` 与空白且含 `|`）是无前导竖线表格的可靠特征；
+        // 误判只损失缓存命中，不损失正确性（tail 路径可渲染全部段类型）。
         let table_like = candidate.lines().any(|line| {
             let trimmed = line.trim();
-            trimmed.starts_with('|') && trimmed.matches('|').count() >= 2
+            (trimmed.starts_with('|') && trimmed.matches('|').count() >= 2)
+                || (trimmed.contains('|')
+                    && trimmed.contains('-')
+                    && trimmed
+                        .chars()
+                        .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t')))
         });
         let list_like = candidate.lines().any(|line| {
             let trimmed = line.trim_start();
