@@ -45,11 +45,21 @@ pub(super) struct ScrollbarFields {
 /// 视口右侧滚动条——post_component_draw 时基于 fields 渲染。
 ///
 /// 替代被移除的 ScrollView 内置滚动条。每帧 render body 更新 ScrollbarFields state。
+///
+/// [§3.1] 滚动条是窗口级 chrome：锚在**窗口最右列**，不随居中带内移（带内的
+/// 最右列是正文的最后一列）。因此本 hook 必须在 `CenterBandHook` **之前**注册——
+/// `pre_component_draw` 捕获的是收窄前的整幅区域；垂直范围与带一致（带只改水平轴）。
 pub(super) struct ScrollbarHook {
     pub(super) fields: State<ScrollbarFields>,
+    /// 收窄前的组件区域；命中测试（`scroll::handle_event`）与渲染共用同一矩形。
+    pub(super) outer: Option<Rect>,
 }
 
 impl Hook for ScrollbarHook {
+    fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        self.outer = Some(drawer.area);
+    }
+
     fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
         let f = *self.fields.read();
         // 仅当内容超出视口时才渲染滚动条
@@ -78,7 +88,8 @@ impl Hook for ScrollbarHook {
         let mut state = ratatui::widgets::ScrollbarState::new(f.content_length)
             .position(f.position)
             .viewport_content_length(f.viewport_length);
-        drawer.render_stateful_widget(scrollbar, drawer.area, &mut state);
+        let area = self.outer.unwrap_or(drawer.area);
+        drawer.render_stateful_widget(scrollbar, area, &mut state);
     }
 }
 

@@ -485,6 +485,9 @@ pub(super) fn register_entry_click(
 pub(super) fn register_scroll_events(
     hooks: &mut Hooks,
     area_rect: Option<Rect>,
+    // [§3.1] 滚动条矩形（收窄前的整幅区域，`ScrollbarHook` 捕获）——滚动条列
+    // 在居中带之外，命中测试不能用带内区域。
+    scrollbar_rect: Option<Rect>,
     vis_width: u16,
     scroll_state: State<scroll::ScrollPos>,
     scroll_throttle: State<ScrollThrottle>,
@@ -509,6 +512,7 @@ pub(super) fn register_scroll_events(
         scroll::handle_event(
             &event,
             area_rect,
+            scrollbar_rect,
             vis_width,
             &scroll_state,
             &scroll_throttle,

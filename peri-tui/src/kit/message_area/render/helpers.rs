@@ -143,8 +143,8 @@ pub(super) fn prefixed_cont_line(
 }
 
 /// duration/metadata 两档放置（§6.4/§11）：
-/// - Wide/Standard（content ≥ 60）：右对齐到消息区右缘（`term_width - 1`，
-///   跳过滚动条列）——整行铺满，不再只对齐到 content 列末端；
+/// - Wide/Standard（content ≥ 60）：右对齐到居中带右缘（`line_width`，跳过滚动条列）——
+///   在该带内整行铺满，不再只对齐到 content 列末端；
 ///   右对齐放不下时回退「紧跟 summary」（保底不丢失，Standard 长 summary 场景）；
 /// - Compact/Narrow（< 60）：隐藏非关键 duration；
 /// - 返回 None 表示该元数据不渲染。
@@ -158,7 +158,7 @@ pub(super) fn place_meta(
     let w = meta.width();
     match grid.bp {
         Breakpoint::Wide | Breakpoint::Standard => {
-            let line_target = grid.term_width.saturating_sub(1) as usize;
+            let line_target = grid.line_width() as usize;
             if used + 2 + w <= line_target {
                 Some(vec![
                     Span::raw(" ".repeat(line_target.saturating_sub(used + w))),

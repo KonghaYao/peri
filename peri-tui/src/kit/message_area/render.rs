@@ -253,7 +253,7 @@ pub(super) fn vm_to_lines_cached_with_layout(
                                 (Arc::as_ptr(chunk) as usize, chunk_lines)
                             })
                             .collect();
-                    layout.retain_and_wrap(grid.total_width() as u16, &stable_lines);
+                    layout.retain_and_wrap(grid.line_width(), &stable_lines);
                     for chunk in &layout.stable {
                         lines.resize(
                             lines.len().saturating_add(chunk.lines.len()),

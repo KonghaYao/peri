@@ -1,6 +1,6 @@
 # peri-tui 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-12（面板配置提交、下载生命周期与内存统计）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-19（transcript 居中带与窗口级滚动条）
 > 依据：peri-tui/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
 
 ## 架构速览
@@ -53,19 +53,19 @@
 
 | 组件 | 文件 | 职责 |
 | --- | --- | --- |
-| MessageArea（消息流 + footer + keepgoing 按钮） | `message_area/mod.rs`（MessageArea :91） | 消息流渲染主组件；滚动/点击/选区事件注册；footer 行与 keepgoing 按钮命中 |
+| MessageArea（消息流 + footer + keepgoing 按钮） | `message_area/mod.rs`（MessageArea :92） | 消息流渲染主组件；滚动/点击/选区事件注册；footer 行与 keepgoing 按钮命中 |
 | footer/spinner 行 | `message_area/footer.rs` | `build_footer_lines`（:100）：loading spinner / summary / todo 行 + `KeepGoingLayout`（:85）；防抖期按钮禁用样式 |
-| GridSpec 网格 | `message_area/grid.rs` | 断点（`Breakpoint` :17）与行首/续行前缀宽度；全部行渲染的对齐基准 |
+| GridSpec 网格 | `message_area/grid.rs`（`grid_for` :75 / `line_width` :132）+ `layout.rs`（`center_band_area` :22 / `CenterBandHook` :42） | 断点（`Breakpoint` :31）与行首/续行前缀宽度；全部行渲染的对齐基准。content 触顶后整条带按 `left_pad` 居中（`band_width` = 前缀 + content + metadata gutter + 滚动条列 = 117），MessageArea / InputArea / StatusBar / BgTaskArea 都经 hook 把 `drawer.area` 收进该带，左右边缘互相对齐。例外：滚动条是窗口级 chrome（`props.rs::ScrollbarHook` :52），必须在 band hook **之前**注册以捕获收窄前的整幅矩形，渲染与命中测试（`scroll/event.rs`）共用它，锚在终端最右列 |
 | scroll 滚动引擎 | `message_area/scroll.rs` | `handle_event`（:516）；滚轮节流、拖拽选中、键盘滚动、吸底跟随（`should_follow_after_user_scroll` :378） |
 | 语义选区 | `message_area/selection.rs` | 拖拽选区与语义复制（`map_slice_to_semantic` :469，复制时剥视觉前缀） |
 | markdown 渲染 | `markdown/`（convert.rs / code_block.rs / table.rs / scan.rs） | 文本 → 带样式的行渲染；代码块、表格、扫描 |
 | subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`（:29）、`subagent_tool_line`（:92，固定 2 格缩进 `SUBAGENT_TOOL_INDENT` :22、label 无 bold）、`subagent_error_reason_line`（:168，错误不弱化） |
 | InputArea（输入区） | `input_area.rs` + `input_area/image.rs` | 编辑、@mention、slash 补全、提交分发（`input_area/submit.rs::dispatch_submit_request` :21）；图片粘贴由 `PasteGate` 限制为单任务；macOS `save_native_clipboard_png` 优先原样保存 ≤20 MiB PNG（只读 IHDR、不解码像素、不套用预览尺寸限制），仅 PNG 缺席回退 arboard owned RGBA + 流式编码；`image_test.rs` 覆盖独立 NSPasteboard 与手动性能对比；多行渲染按显示宽度 |
 | input_history（输入历史） | `input_history.rs` | `push_history`（:23）/`history_up`（:54）；持久化 `~/.peri/input-history.json`（唯一存储，`load_history` :119） |
-| StatusBar（状态栏） | `status_bar.rs` | `StatusBarProps`（:353）/`StatusBar`（:361）：Row1/Row2/NotifRow、模型点击区、权限模式显示、会话建立中的准备提示（`preparing_label`） |
-| BgTaskArea（后台任务栏） | `bg_task_area.rs` | `BgTaskArea`（:46）：bg agent 运行中条目 + 动画 |
+| StatusBar（状态栏） | `status_bar.rs` | `StatusBarProps`（:366）/`StatusBar`（:374）：Row1/Row2/NotifRow、模型点击区、权限模式显示、会话建立中的准备提示（`preparing_label`）；组件顶部应用 `CenterBandHook`，与 transcript / composer 同宽（Row1 折行与点击列随之派生） |
+| BgTaskArea（后台任务栏） | `bg_task_area.rs` | `BgTaskArea`（:48）：bg agent 运行中条目 + 动画；同样收进居中带，行宽取 `grid.line_width()`，耗时列右对齐到带右缘 |
 | Welcome（空态欢迎屏） | `welcome.rs` | `Welcome`（:94）：logo + 会话空态引导 |
-| AppShell / SessionColumn | `app_shell.rs` + `layout.rs` | `AppShell`（app_shell.rs:23）顶层外壳；`SessionColumn`（layout.rs:100）+ `layout_plan`（:75）垂直布局 |
+| AppShell / SessionColumn | `app_shell.rs` + `layout.rs` | `AppShell`（app_shell.rs:23）顶层外壳；`SessionColumn`（layout.rs:147）+ `layout_plan`（:122）垂直布局 |
 | SlashCompletion / MentionPopup | `slash_completion.rs` + `mention_popup.rs` | slash 命令补全弹窗（fuzzy 过滤，仅搜索层）；文件 @mention 弹窗 |
 | PanelOverlay / PopupOverlay | `panel_overlay.rs` + `popup_overlay.rs` | 面板层（`PanelOverlay` :34）与居中弹窗层（`PopupOverlay` :38，`open_popup` :99） |
 | 面板目录 PanelRegistry | `panel_registry.rs` | 面板种类→渲染函数注册表（`render` :438、`open_panel` :475、快捷键 `from_shortcut` :448） |
