@@ -105,9 +105,12 @@ impl Resources {
 
 /// 写打开失败是否允许降级为只读打开。
 ///
-/// 「本构建不认识的 schema」不是可恢复的占用：只读打开只做列形状探测，会绕过版本
-/// 判定把不属于本构建的数据读出来，因此保持原样失败。其余失败——schema 锁被占、
-/// 库文件或 WAL 侧车文件不可写——都只影响写入，历史仍可读。
+/// 这个过滤只在写打开走到版本判定（`schema::inspect`）时生效：不认识的 schema 不是
+/// 可恢复的占用，按类型化错误保持原样失败。写打开在版本判定之前就失败时（schema 锁
+/// 被占、库文件或 WAL 侧车文件不可写），只读打开仅按读取兼容的列形状把关
+/// （`probe_load_meta_shape`），不再复查 `user_version`——由更新构建写入、列形状兼容
+/// 的库因此可能被只读读取；该读取不迁移也不写入，写入仍按 `ReadOnlyStore` 拒绝。
+/// 其余失败都只影响写入，历史仍可读。
 fn degradable_open_failure(error: &anyhow::Error) -> bool {
     !matches!(
         error.downcast_ref::<WorkspaceError>(),

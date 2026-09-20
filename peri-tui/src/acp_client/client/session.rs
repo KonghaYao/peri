@@ -428,13 +428,14 @@ impl AcpTuiClient {
         }
 
         let params = json!({ "sessionId": session_id, "cwd": effective_cwd, "model": model });
-        let mut result = self
+        let first = self
             .transport
             .send_request("session/load", params.clone())
             .await;
         // 准入可能是只读的：历史已可读，但执行所有权不在本节点。它不是失败（不再用
         // 错误挡住进入），只把「本次准入只读」与原因带走。
-        let mut read_only = result.as_ref().ok().and_then(read_only_admission);
+        let mut read_only = first.as_ref().ok().and_then(read_only_admission);
+        let mut result = first;
         if let Some(target) = recovery_target(&result, session_id)
             && self.projection_mode == ClientProjectionMode::Interactive
             && self
@@ -447,7 +448,7 @@ impl AcpTuiClient {
                 target,
                 accept_risk: true,
             };
-            result = match self
+            let recovered = match self
                 .transport
                 .send_request(
                     "peri/session_reset_dirty",
@@ -455,10 +456,50 @@ impl AcpTuiClient {
                 )
                 .await
             {
-                Ok(_) => self.transport.send_request("session/load", params).await,
+                Ok(_) => {
+                    // 第二次 load 会让宿主把整段历史再回放一次：回放边界与回放请求必须
+                    // 一一对应，否则两次回放叠加在同一个 committed 上，消息区整段重复。
+                    // 边界放在 reset 成功之后：reset 失败时视图保持不动，无需重取历史。
+                    crate::kit::session_boundary::project_session_boundary(Some(session_id));
+                    self.transport
+                        .send_request("session/load", params.clone())
+                        .await
+                }
                 Err(error) => Err(error),
             };
-            read_only = result.as_ref().ok().and_then(read_only_admission);
+            match recovered {
+                Ok(response) => {
+                    read_only = read_only_admission(&response);
+                    result = Ok(response);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, session_id, "dirty recovery failed");
+                    if read_only.is_some() {
+                        // 首次准入本身是只读：它仍然有效，会话不因取回失败被丢弃。按只读
+                        // 准入重取历史——成功即恢复渲染，失败就保留空视图与状态栏里的
+                        // 只读原因。
+                        //
+                        // 重取同样会被宿主回放历史，因此先投影一次回放边界：边界与会被
+                        // 回放的 load 一一对应，视图不会叠加两次历史。
+                        crate::kit::session_boundary::project_session_boundary(Some(session_id));
+                        match self.transport.send_request("session/load", params).await {
+                            Ok(response) => {
+                                read_only = read_only_admission(&response);
+                                result = Ok(response);
+                            }
+                            Err(error) => tracing::warn!(
+                                %error,
+                                session_id,
+                                "read-only re-admission after failed recovery failed"
+                            ),
+                        }
+                    } else {
+                        // 首次准入本身就是错误（未协商只读标记，或原因不是执行所有权）：
+                        // 没有可回退的准入，按本次取回失败收敛，让用户看到最新的原因。
+                        result = Err(error);
+                    }
+                }
+            }
         }
         if let Err(error) = result {
             *self.restore_error.lock().unwrap() = Some(error.to_string());
@@ -475,7 +516,12 @@ impl AcpTuiClient {
             .await?;
         self.project_execution_cwd(Some(effective_cwd));
         *self.restore_error.lock().unwrap() = None;
-        crate::kit::atoms::SESSION_READ_ONLY.set(read_only);
+        // 只读标记是交互投影：唯一的清空点是 `project_session_boundary`（交互路径）。
+        // 非交互客户端没有状态栏、不跑 steer consumer，写进去只会留下一个永不清空的
+        // 全局标记，并污染并行的 UI 测试。
+        if self.projection_mode == ClientProjectionMode::Interactive {
+            crate::kit::atoms::SESSION_READ_ONLY.set(read_only);
+        }
         projection.committed = true;
         transition.disarm();
         Ok(session_id.to_string())

@@ -36,6 +36,11 @@ pub(crate) async fn handle_request(
 
 pub(crate) struct InvokeSessionGate {
     pub known: bool,
+    /// 本节点持有该会话的执行所有权、且会话不在关闭中。
+    ///
+    /// invoke 会真的执行工具并向该会话下发 `session/update`，因此它与 prompt 一样属于
+    /// 执行面：只读准入的会话（`execution_owner` 为空）不是可执行对象。
+    pub owned: bool,
     pub prompt_in_flight: bool,
 }
 
@@ -60,6 +65,9 @@ pub(crate) async fn handle_invoke(
     validate_versions(&request.envelope_version, &request.apps_protocol_version)?;
     if !gate.known {
         return Err(outer_error(McpAppsErrorKind::InvalidSession));
+    }
+    if !gate.owned {
+        return Err(outer_error(McpAppsErrorKind::PolicyDenied));
     }
     if gate.prompt_in_flight {
         return Err(outer_error(McpAppsErrorKind::PolicyDenied));

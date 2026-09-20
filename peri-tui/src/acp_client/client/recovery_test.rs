@@ -625,6 +625,7 @@ async fn test_read_only_load_enters_session_and_projects_reason() {
 async fn test_read_only_dirty_load_accept_resets_exact_generation_then_commits_owned() {
     let _guard = UiAtomsGuard::capture();
     let (client, server) = interactive_client();
+    let boundary_before = atoms::BRIDGE_RESET_COUNTER.get();
     let target = RecoveryRequiredDetails {
         thread_id: TARGET.to_string(),
         generation: 3,
@@ -664,6 +665,11 @@ async fn test_read_only_dirty_load_accept_resets_exact_generation_then_commits_o
         None,
         "取回执行所有权后不得残留只读标记"
     );
+    assert_eq!(
+        atoms::BRIDGE_RESET_COUNTER.get(),
+        boundary_before + 2,
+        "两次都会被宿主回放历史的 load 各需要一个回放边界，否则消息区整段重复"
+    );
     assert_no_request(&server, Duration::from_millis(100)).await;
 }
 
@@ -673,6 +679,7 @@ async fn test_read_only_dirty_load_accept_resets_exact_generation_then_commits_o
 async fn test_read_only_dirty_load_cancel_enters_session_without_reset() {
     let _guard = UiAtomsGuard::capture();
     let (client, server) = interactive_client();
+    let boundary_before = atoms::BRIDGE_RESET_COUNTER.get();
     let target = RecoveryRequiredDetails {
         thread_id: TARGET.to_string(),
         generation: 2,
@@ -696,5 +703,180 @@ async fn test_read_only_dirty_load_cancel_enters_session_without_reset() {
         Some(ReadOnlyAdmission::RecoveryRequired(target))
     );
     assert!(CONFIRM_PAYLOAD.state().read().is_none());
+    assert_eq!(
+        atoms::BRIDGE_RESET_COUNTER.get(),
+        boundary_before + 1,
+        "取消不发生第二次回放，也就没有第二个回放边界"
+    );
+    assert_no_request(&server, Duration::from_millis(100)).await;
+}
+
+/// 取回所有权失败不得把已准入的只读会话整体丢掉：首次准入仍然有效。
+///
+/// reset 与第二次 load 都已失败时，会话必须保持可用（历史重新取一次、状态栏保留只读
+/// 原因），而不是清空视图 + 置空会话 + 记一条恢复错误——那比不点「接受」更差。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_read_only_dirty_accept_reload_failure_keeps_read_only_admission() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let boundary_before = atoms::BRIDGE_RESET_COUNTER.get();
+    let target = RecoveryRequiredDetails {
+        thread_id: TARGET.to_string(),
+        generation: 5,
+    };
+    let loader = client.clone();
+    let load = tokio::spawn(async move { loader.load_session(TARGET, "/startup", None).await });
+    reach_load(
+        &server,
+        Ok(read_only_response(&ReadOnlyAdmission::RecoveryRequired(
+            target.clone(),
+        ))),
+    )
+    .await;
+    let owner = wait_for_recovery_owner().await;
+    owner.mark_displayed();
+    owner.answer(true);
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "peri/session_reset_dirty");
+    server.send_response(id, Ok(json!({}))).await.unwrap();
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    server
+        .send_response(
+            id,
+            Err(AcpError::new(
+                -32010,
+                "session is owned by another execution host",
+            )),
+        )
+        .await
+        .unwrap();
+    // 边界已经投影过、视图已清空：按首次的只读准入再取一次历史。
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    server
+        .send_response(
+            id,
+            Ok(read_only_response(&ReadOnlyAdmission::RecoveryRequired(
+                target.clone(),
+            ))),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        load.await.unwrap().unwrap(),
+        TARGET,
+        "取回所有权失败后仍按只读进入，而不是丢回「进不去」"
+    );
+    assert_eq!(client.current_session_id().as_deref(), Some(TARGET));
+    assert_eq!(
+        client.current_execution_cwd().as_deref(),
+        Some(EFFECTIVE_CWD)
+    );
+    assert!(
+        client.check_restore_error().is_ok(),
+        "只读准入不是恢复失败，重取历史失败也不算"
+    );
+    assert_eq!(
+        atoms::SESSION_READ_ONLY.state().read().clone(),
+        Some(ReadOnlyAdmission::RecoveryRequired(target))
+    );
+    assert_eq!(
+        atoms::BRIDGE_RESET_COUNTER.get(),
+        boundary_before + 3,
+        "三次会被宿主回放历史的 load（首次、reset 后、重取）各需要一个回放边界"
+    );
+    assert_no_request(&server, Duration::from_millis(100)).await;
+}
+
+/// 最坏情况：reset 与重新取历史都失败，会话仍按首次只读准入进入。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_read_only_dirty_accept_all_retries_failed_still_enters_read_only() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let boundary_before = atoms::BRIDGE_RESET_COUNTER.get();
+    let target = RecoveryRequiredDetails {
+        thread_id: TARGET.to_string(),
+        generation: 6,
+    };
+    let loader = client.clone();
+    let load = tokio::spawn(async move { loader.load_session(TARGET, "/startup", None).await });
+    reach_load(
+        &server,
+        Ok(read_only_response(&ReadOnlyAdmission::RecoveryRequired(
+            target.clone(),
+        ))),
+    )
+    .await;
+    let owner = wait_for_recovery_owner().await;
+    owner.mark_displayed();
+    owner.answer(true);
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "peri/session_reset_dirty");
+    server
+        .send_response(
+            id,
+            Err(AcpError::new(
+                -32010,
+                "session is owned by another execution host",
+            )),
+        )
+        .await
+        .unwrap();
+    // 首次准入是只读：仍按它重取一次历史，失败也只留空视图。
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    server
+        .send_response(id, Err(AcpError::new(-32603, "reload unavailable")))
+        .await
+        .unwrap();
+
+    assert_eq!(load.await.unwrap().unwrap(), TARGET);
+    assert_eq!(client.current_session_id().as_deref(), Some(TARGET));
+    assert!(
+        client.check_restore_error().is_ok(),
+        "取回所有权被拒不是本次准入的失败：会话已按只读进入"
+    );
+    assert_eq!(
+        atoms::SESSION_READ_ONLY.state().read().clone(),
+        Some(ReadOnlyAdmission::RecoveryRequired(target))
+    );
+    assert_eq!(
+        atoms::BRIDGE_RESET_COUNTER.get(),
+        boundary_before + 2,
+        "首次与重取各需要一个回放边界；reset 失败没有发生回放"
+    );
+    assert_no_request(&server, Duration::from_millis(100)).await;
+}
+
+/// 只读标记是交互投影：非交互客户端没有状态栏，也不该写这个全局 atom——它唯一的
+/// 清空点（`project_session_boundary`）只在交互路径上调用，写进去就再也不清。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_headless_read_only_load_leaves_no_ui_marker() {
+    let _guard = UiAtomsGuard::capture();
+    let (transport, server) = mpsc_transport_pair();
+    let (headless, _, _) = AcpTuiClient::new(transport);
+    headless
+        .session_workspace
+        .store(true, std::sync::atomic::Ordering::Release);
+    let loader = headless.clone();
+    let load = tokio::spawn(async move { loader.load_session(TARGET, "/startup", None).await });
+    reach_load(
+        &server,
+        Ok(read_only_response(&ReadOnlyAdmission::ExecutionBusy)),
+    )
+    .await;
+
+    assert_eq!(load.await.unwrap().unwrap(), TARGET);
+    assert!(
+        atoms::SESSION_READ_ONLY.state().read().is_none(),
+        "非交互客户端不得写交互投影 atom（没有清空点，且会污染并行 UI 测试）"
+    );
     assert_no_request(&server, Duration::from_millis(100)).await;
 }

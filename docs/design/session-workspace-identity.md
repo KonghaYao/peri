@@ -395,9 +395,11 @@ writer 混用。
 
 启动时的写打开失败（schema 锁被占、库文件或 WAL 不可写）降级为只读打开并记
 warning：这种失败不等于历史不可读，进入与历史浏览不受影响。降级不假装可写：
-新会话与目录登记在进入 SQL 前按 `ReadOnlyStore` 失败。本构建不认识的 schema
-不降级（只读打开只探列形状，会绕过版本判定），只读打开也失败时按写打开的原错误
-上报。
+新会话与目录登记在进入 SQL 前按 `ReadOnlyStore` 失败。写打开走到版本判定时，
+本构建不认识的 schema 不降级；写打开在版本判定之前就失败（锁被占、不可写）时，
+降级只按读取兼容的列形状把关，不复查 `user_version`——由更新构建写入且列形状
+兼容的库因此可能被只读读取，该读取不迁移也不写入。只读打开也失败时按写打开的原
+错误上报。
 
 文件对象身份使用 Unix device/inode 或 Windows volume/file index；不依赖 creation
 time，也不降级为 mtime/ctime 或路径等同。Windows shell 在挂起
