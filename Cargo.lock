@@ -4114,6 +4114,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
  "windows-sys 0.61.2",
 ]

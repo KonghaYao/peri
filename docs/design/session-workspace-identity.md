@@ -275,8 +275,11 @@ snapshot，继续满足 `ARC-FROZEN-001`。请求不同 cwd 不得偷偷创建�
 
 取得 lease 后才能装配会产生执行副作用的资源。运行写入通道必须持有对应 owner
 能力；删除、重绑定、rewind、compact、continuation 和子任务写入也不得绕过。
-只读列表/历史访问无需 lease；无法取得时显示“其他进程占用”，不凭 pid 或
-持久化 `agent_status=active` 声称会话正在运行。
+只读列表/历史访问无需 lease；准入取不到 lease 时不把历史一起挡在门外：会话按只读
+准入进入，原因（他处持有 / 待恢复的精确代际 / 本节点不提供所有权）随准入响应下发，
+界面据此说明、进程日志记 warning；不凭 pid 或持久化 `agent_status=active` 声称会话
+正在运行。降级只是不带 owner：写入与执行仍要 owner，`session/fork` 与同一次准入内
+的二次取得不接受降级，独占语义不变。
 
 close 必须停止准入、取消并等待本会话及 owned 子任务/进程收尾后才释放 lease。
 `Incomplete` 保留实际 owner 与锁，不能只因关闭 RPC 返回就交出所有权。
@@ -389,6 +392,12 @@ writer 混用。
 只读 metadata 打开不创建数据库、升级 schema、登记或绑定；缺失的默认库按空
 历史处理，损坏和不兼容 shape 返回错误。只读工具可读取已支持的历史 shape，
 但不授予执行权。未知 binding 版本或损坏 binding 不得当作未绑定会话重建。
+
+启动时的写打开失败（schema 锁被占、库文件或 WAL 不可写）降级为只读打开并记
+warning：这种失败不等于历史不可读，进入与历史浏览不受影响。降级不假装可写：
+新会话与目录登记在进入 SQL 前按 `ReadOnlyStore` 失败。本构建不认识的 schema
+不降级（只读打开只探列形状，会绕过版本判定），只读打开也失败时按写打开的原错误
+上报。
 
 文件对象身份使用 Unix device/inode 或 Windows volume/file index；不依赖 creation
 time，也不降级为 mtime/ctime 或路径等同。Windows shell 在挂起

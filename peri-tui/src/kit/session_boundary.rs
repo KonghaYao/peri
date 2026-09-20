@@ -9,6 +9,9 @@ use crate::kit::{acp_events, atoms, input_history, panel_registry};
 /// the caller across this complete projection.
 pub fn project_session_boundary(target_session_id: Option<&str>) {
     atoms::ACTIVE_SESSION_ID.set(target_session_id.unwrap_or_default().to_string());
+    // 每次会话边界都从「未标记只读」开始：标记由准入方（`session/load` 响应）在本次
+    // 准入落定后写入，边界本身不知道下一条会话是否可写。
+    atoms::SESSION_READ_ONLY.set(None);
     atoms::BRIDGE_RESET_COUNTER.set(atoms::BRIDGE_RESET_COUNTER.get().wrapping_add(1));
     crate::kit::steer_state::session_boundary(
         target_session_id.unwrap_or_default(),

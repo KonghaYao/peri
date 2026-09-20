@@ -11,6 +11,7 @@ use agent_client_protocol::schema::v1::{
 };
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::thread::ThreadMeta;
+use peri_acp_types::workspace::ReadOnlyAdmission;
 use peri_acp_types::PeriCaps;
 use serde_json::Value;
 use tracing::{info, warn};
@@ -85,31 +86,64 @@ async fn load_frozen_data(
     decode_frozen_snapshot(&snapshot).map_err(super::super::workspace::workspace_error)
 }
 
+/// 一次恢复准入的结果。
+pub(super) struct PreparedSession {
+    pub(super) id: String,
+    pub(super) identity: Option<Value>,
+    /// 只读准入原因：`Some` 表示本次没有取得执行所有权，历史可读、执行与写入仍被
+    /// `require_owner` 挡住。
+    pub(super) read_only: Option<ReadOnlyAdmission>,
+}
+
 async fn prepare_existing(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
-) -> Result<(String, Option<Value>), AcpError> {
+) -> Result<PreparedSession, AcpError> {
     let id = params
         .get("sessionId")
         .and_then(Value::as_str)
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
     legacy_session::prepare_for_restore(cfg, id, params.get("cwd").and_then(Value::as_str)).await?;
-    let (workspace, owner) = super::super::workspace::acquire_for_load(
+    let admission = super::super::workspace::acquire_for_load(
         cfg,
         sessions,
         id,
         params.get("cwd").and_then(Value::as_str),
     )
     .await?;
+    let workspace = admission.workspace;
+    let (owner, read_only) = match admission.execution {
+        super::super::workspace::ExecutionAdmission::Owned(owner) => (Some(owner), None),
+        // 执行所有权不可得（他处持有 / 待恢复 / 本节点只读）：不再用错误信息挡住进入，
+        // 改为只读进入并记 warning。独占语义不变——写入与执行仍要所有权。
+        super::super::workspace::ExecutionAdmission::Unavailable(reason) => {
+            if !cfg
+                .session_manager
+                .effective_host_caps()
+                .session_workspace_v1
+            {
+                // 未协商只读标记的客户端无法得知本次准入只读，仍按原语义失败。
+                return Err(super::super::workspace::read_only_error(reason));
+            }
+            warn!(
+                session_id = %id,
+                reason = ?reason,
+                "session admitted read-only: execution ownership is unavailable"
+            );
+            (None, Some(reason))
+        }
+    };
     let identity = match response_identity(cfg, id).await {
         Ok(identity) => identity,
         Err(error) => {
             if !sessions.contains_key(id) {
-                owner
-                    .mark_clean()
-                    .await
-                    .map_err(super::super::workspace::workspace_error)?;
+                if let Some(owner) = owner.as_ref() {
+                    owner
+                        .mark_clean()
+                        .await
+                        .map_err(super::super::workspace::workspace_error)?;
+                }
             }
             return Err(error);
         }
@@ -123,28 +157,46 @@ async fn prepare_existing(
                 .collect();
             state.history_payloads = payloads;
         }
-        return Ok((id.to_owned(), identity));
+        // 只读会话刚取回执行所有权：既有的只读状态没有执行环境，按新会话重建。
+        let upgrading = state.execution_owner.is_none() && read_only.is_none();
+        if !upgrading {
+            return Ok(PreparedSession {
+                id: id.to_owned(),
+                identity,
+                read_only,
+            });
+        }
+        sessions.remove(id);
     }
     let prepared = async {
-        let frozen = load_frozen_data(cfg, id).await?;
         let payloads = dispatch::load_session_payloads(cfg.controller.as_ref(), id).await?;
         let cwd = workspace
             .cwd
             .to_str()
             .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
             .to_owned();
-        let environment =
-            super::super::workspace::SessionEnvironment::assemble(cfg, &cwd, id).await?;
+        // 只读准入不建执行环境：不要求 frozen 快照存在，也不启动 workflow / LSP。
+        let (frozen, environment, workflow_middleware, lsp_pool) = match owner.as_ref() {
+            Some(_) => {
+                let frozen = load_frozen_data(cfg, id).await?;
+                let environment =
+                    super::super::workspace::SessionEnvironment::assemble(cfg, &cwd, id).await?;
+                let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+                let workflow_middleware =
+                    create_session_workflow_middleware(local, &cwd, id, &frozen);
+                let lsp_pool = create_session_lsp_pool(local, &cwd);
+                (Some(frozen), environment, workflow_middleware, lsp_pool)
+            }
+            None => (None, None, None, None),
+        };
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
         local.session_manager.ensure_session(id, &cwd);
         local.session_manager.ensure_session_caps(id);
-        let workflow_middleware = create_session_workflow_middleware(local, &cwd, id, &frozen);
-        let lsp_pool = create_session_lsp_pool(local, &cwd);
         Ok::<_, AcpError>(SessionState {
             session_id: id.to_owned(),
             thread_id: id.to_owned(),
             cwd,
-            execution_owner: Some(owner.clone()),
+            execution_owner: owner.clone(),
             environment,
             closing: false,
             history: payloads
@@ -153,7 +205,7 @@ async fn prepare_existing(
                 .collect(),
             history_payloads: payloads,
             cancel_token: None,
-            frozen: Some(frozen),
+            frozen,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             workflow_middleware,
@@ -176,19 +228,35 @@ async fn prepare_existing(
             sessions.insert(id.to_owned(), state);
         }
         Err(error) => {
-            owner
-                .mark_clean()
-                .await
-                .map_err(super::super::workspace::workspace_error)?;
+            if let Some(owner) = owner {
+                owner
+                    .mark_clean()
+                    .await
+                    .map_err(super::super::workspace::workspace_error)?;
+            }
             return Err(error);
         }
     }
-    Ok((id.to_owned(), identity))
+    Ok(PreparedSession {
+        id: id.to_owned(),
+        identity,
+        read_only,
+    })
 }
 
-fn identity_response(mut response: Value, identity: Option<Value>) -> Result<Value, AcpError> {
+/// 装配准入响应：会话身份载荷 + 本次准入是否只读（只读标记只在协商了
+/// `sessionWorkspaceV1` 的客户端上出现，见 `prepare_existing` 的降级前置条件）。
+fn identity_response(
+    mut response: Value,
+    identity: Option<Value>,
+    read_only: Option<ReadOnlyAdmission>,
+) -> Result<Value, AcpError> {
     if let Some(identity) = identity {
         response["_meta"]["peri.sessionWorkspaceV1"] = identity;
+        if let Some(reason) = read_only {
+            response["_meta"]["peri.sessionWorkspaceV1"]["read_only"] =
+                serde_json::to_value(reason).map_err(|e| AcpError::new(-32603, e.to_string()))?;
+        }
     }
     Ok(response)
 }
@@ -612,6 +680,7 @@ pub(crate) async fn handle_new(
     identity_response(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         identity,
+        None,
     )
 }
 
@@ -667,7 +736,12 @@ pub(crate) async fn handle_load(
     sessions: &mut HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
-    let (id, identity) = prepare_existing(params, cfg, sessions).await?;
+    let prepared = prepare_existing(params, cfg, sessions).await?;
+    let PreparedSession {
+        id,
+        identity,
+        read_only,
+    } = prepared;
     let req_session_id = id.as_str();
     let state = sessions.get(req_session_id).expect("prepared session");
     let environment = state.environment.clone();
@@ -722,6 +796,7 @@ pub(crate) async fn handle_load(
     identity_response(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         identity,
+        read_only,
     )
 }
 
@@ -857,11 +932,17 @@ async fn close_owned_session(
                 ));
             }
         }
-        let owner = state.execution_owner.as_ref().ok_or_else(|| {
-            super::super::workspace::workspace_error(
-                peri_acp_types::workspace::WorkspaceError::ExecutionLeaseRequired,
-            )
-        })?;
+        // 只读会话没有执行所有权：关闭只需释放内存状态，不删除（删除会绕过他处的
+        // 独占锁），也没有本节点持有的代际需要标 clean。
+        let Some(owner) = state.execution_owner.clone() else {
+            if delete {
+                return Err(super::super::workspace::workspace_error(
+                    peri_acp_types::workspace::WorkspaceError::ExecutionLeaseRequired,
+                ));
+            }
+            sessions.remove(session_id);
+            return Ok(());
+        };
         if delete {
             cfg.controller
                 .sessions()
@@ -947,8 +1028,8 @@ pub(crate) async fn handle_resume(
     sessions: &mut HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
-    let (id, identity) = prepare_existing(params, cfg, sessions).await?;
-    let req_session_id = id.as_str();
+    let prepared = prepare_existing(params, cfg, sessions).await?;
+    let req_session_id = prepared.id.as_str();
     let environment = sessions
         .get(req_session_id)
         .and_then(|state| state.environment.clone());
@@ -972,7 +1053,8 @@ pub(crate) async fn handle_resume(
     let resp = ResumeSessionResponse::new();
     identity_response(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
-        identity,
+        prepared.identity,
+        prepared.read_only,
     )
 }
 
@@ -1141,6 +1223,7 @@ pub(crate) async fn handle_fork(
     identity_response(
         serde_json::to_value(resp).map_err(super::super::workspace::workspace_error)?,
         identity,
+        None,
     )
 }
 

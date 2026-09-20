@@ -7,7 +7,7 @@ use peri_acp::transport::{
     mpsc::{MpscServerTransport, mpsc_transport_pair},
     types::{IncomingMessage, RequestId},
 };
-use peri_acp_types::workspace::RecoveryRequiredDetails;
+use peri_acp_types::workspace::{ReadOnlyAdmission, RecoveryRequiredDetails};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -31,6 +31,7 @@ impl UiAtomsGuard {
         }
         save_atom!(atoms::ACTIVE_SESSION_ID);
         save_atom!(atoms::ACTIVE_EXECUTION_CWD);
+        save_atom!(atoms::SESSION_READ_ONLY);
         save_atom!(atoms::SERVICE_SNAPSHOT);
         save_atom!(atoms::BRIDGE_RESET_COUNTER);
         save_atom!(atoms::VIEW_MODELS);
@@ -127,6 +128,11 @@ async fn assert_no_request(server: &MpscServerTransport, window: Duration) {
 
 /// 协商到 `session/load` 首次失败（dirty）为止。
 async fn reach_dirty_load(server: &MpscServerTransport, error: AcpError) -> Value {
+    reach_load(server, Err(error)).await
+}
+
+/// 协商到 `session/load` 请求按其结果回答为止，返回 load 的请求参数。
+async fn reach_load(server: &MpscServerTransport, response: Result<Value, AcpError>) -> Value {
     let (id, method, _) = next_request(server).await;
     assert_eq!(method, "peri/session_context");
     server
@@ -135,8 +141,13 @@ async fn reach_dirty_load(server: &MpscServerTransport, error: AcpError) -> Valu
         .unwrap();
     let (id, method, params) = next_request(server).await;
     assert_eq!(method, "session/load");
-    server.send_response(id, Err(error)).await.unwrap();
+    server.send_response(id, response).await.unwrap();
     params
+}
+
+/// `session/load` 的只读准入响应：历史可读，但本次准入没有执行所有权。
+fn read_only_response(admission: &ReadOnlyAdmission) -> Value {
+    json!({"_meta": {"peri.sessionWorkspaceV1": {"read_only": admission}}})
 }
 
 async fn wait_for_recovery_owner()
@@ -571,4 +582,119 @@ async fn test_dirty_load_confirmation_cancelled_by_shutdown_releases_gate() {
     assert_eq!(params["sessionId"], TARGET);
     server.send_response(id, Ok(json!({}))).await.unwrap();
     assert_eq!(retry.await.unwrap().unwrap(), TARGET);
+}
+
+/// 只读准入不是失败：历史照常进入、状态记下原因，且不发起任何写入尝试。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_read_only_load_enters_session_and_projects_reason() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let loader = client.clone();
+    let load = tokio::spawn(async move { loader.load_session(TARGET, "/startup", None).await });
+    reach_load(
+        &server,
+        Ok(read_only_response(&ReadOnlyAdmission::ExecutionBusy)),
+    )
+    .await;
+
+    assert_eq!(load.await.unwrap().unwrap(), TARGET);
+    assert_eq!(client.current_session_id().as_deref(), Some(TARGET));
+    assert_eq!(
+        client.current_execution_cwd().as_deref(),
+        Some(EFFECTIVE_CWD)
+    );
+    assert!(
+        client.check_restore_error().is_ok(),
+        "只读准入不得被记为恢复失败"
+    );
+    assert_eq!(
+        atoms::SESSION_READ_ONLY.state().read().clone(),
+        Some(ReadOnlyAdmission::ExecutionBusy)
+    );
+    assert!(
+        CONFIRM_PAYLOAD.state().read().is_none(),
+        "执行所有权他处持有不需要风险确认"
+    );
+    assert_no_request(&server, Duration::from_millis(100)).await;
+}
+
+/// 只读的 dirty 准入：接受风险后按精确代际解除，重新 load 取回执行所有权。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_read_only_dirty_load_accept_resets_exact_generation_then_commits_owned() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let target = RecoveryRequiredDetails {
+        thread_id: TARGET.to_string(),
+        generation: 3,
+    };
+    let loader = client.clone();
+    let load = tokio::spawn(async move { loader.load_session(TARGET, "/startup", None).await });
+    reach_load(
+        &server,
+        Ok(read_only_response(&ReadOnlyAdmission::RecoveryRequired(
+            target.clone(),
+        ))),
+    )
+    .await;
+
+    let owner = wait_for_recovery_owner().await;
+    assert_eq!(owner.target, target);
+    owner.mark_displayed();
+    owner.answer(true);
+
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "peri/session_reset_dirty");
+    assert_eq!(
+        params,
+        json!({"target":{"thread_id":TARGET,"generation":3},"accept_risk":true})
+    );
+    server.send_response(id, Ok(json!({}))).await.unwrap();
+
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    assert_eq!(params["sessionId"], TARGET);
+    server.send_response(id, Ok(json!({}))).await.unwrap();
+
+    assert_eq!(load.await.unwrap().unwrap(), TARGET);
+    assert!(client.check_restore_error().is_ok());
+    assert_eq!(
+        *atoms::SESSION_READ_ONLY.state().read(),
+        None,
+        "取回执行所有权后不得残留只读标记"
+    );
+    assert_no_request(&server, Duration::from_millis(100)).await;
+}
+
+/// 只读的 dirty 准入被取消：不写库，但历史仍按只读进入——取消不再是拒绝进入。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_read_only_dirty_load_cancel_enters_session_without_reset() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let target = RecoveryRequiredDetails {
+        thread_id: TARGET.to_string(),
+        generation: 2,
+    };
+    let loader = client.clone();
+    let load = tokio::spawn(async move { loader.load_session(TARGET, "/startup", None).await });
+    reach_load(
+        &server,
+        Ok(read_only_response(&ReadOnlyAdmission::RecoveryRequired(
+            target.clone(),
+        ))),
+    )
+    .await;
+    wait_for_recovery_owner().await.answer(false);
+
+    assert_eq!(load.await.unwrap().unwrap(), TARGET);
+    assert_eq!(client.current_session_id().as_deref(), Some(TARGET));
+    assert!(client.check_restore_error().is_ok());
+    assert_eq!(
+        atoms::SESSION_READ_ONLY.state().read().clone(),
+        Some(ReadOnlyAdmission::RecoveryRequired(target))
+    );
+    assert!(CONFIRM_PAYLOAD.state().read().is_none());
+    assert_no_request(&server, Duration::from_millis(100)).await;
 }

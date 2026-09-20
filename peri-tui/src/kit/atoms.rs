@@ -257,6 +257,13 @@ pub static LOADING_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0u64);
 /// （成功、失败、超时或 future 被丢弃）；状态栏据此显示「正在准备会话」。这段
 /// 窗口里输入既不在待发送队列、也还没有发出请求，没有别的投影能说明正在做什么。
 pub static SESSION_PREPARING: AtomStatic<bool> = AtomStatic::new(|| false);
+/// 当前活跃会话的只读准入原因：`None` 表示本次准入持有执行所有权。
+///
+/// 执行所有权不可得（他处持有 / 待恢复 / 本节点只读）不再是准入错误：会话照常
+/// 进入、历史可读，但写入与执行仍被 host 挡住。状态栏据此说明这条会话说不了话
+/// 的原因——用户在提交时收到的拒绝来自 host 的同一道闸门。
+pub static SESSION_READ_ONLY: AtomStatic<Option<peri_acp_types::workspace::ReadOnlyAdmission>> =
+    AtomStatic::new(|| None);
 pub static VIEW_MODELS: AtomStatic<ViewModelsSnapshot> =
     AtomStatic::new(ViewModelsSnapshot::default);
 pub static MODEL_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);

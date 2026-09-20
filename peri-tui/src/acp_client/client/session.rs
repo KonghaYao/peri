@@ -3,7 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use peri_acp::transport::{AcpTransport, types::AcpError};
-use serde_json::json;
+use peri_acp_types::workspace::{ReadOnlyAdmission, RecoveryRequiredDetails};
+use serde_json::{Value, json};
 #[cfg(test)]
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -431,37 +432,33 @@ impl AcpTuiClient {
             .transport
             .send_request("session/load", params.clone())
             .await;
-        if let Err(error) = &result {
-            let details = error.data.clone().and_then(|data| {
-                serde_json::from_value::<peri_acp_types::workspace::WorkspaceErrorData>(data).ok()
-            });
-            if let Some(peri_acp_types::workspace::WorkspaceErrorData::RecoveryRequired(target)) =
-                details
-                && target.thread_id == session_id
-                && target.generation > 0
-                && self.projection_mode == ClientProjectionMode::Interactive
-                && self
-                    .session_recovery
-                    .load(std::sync::atomic::Ordering::Acquire)
-                && crate::kit::popups::confirm_popup::confirm_dirty_recovery(target.clone()).await
+        // 准入可能是只读的：历史已可读，但执行所有权不在本节点。它不是失败（不再用
+        // 错误挡住进入），只把「本次准入只读」与原因带走。
+        let mut read_only = result.as_ref().ok().and_then(read_only_admission);
+        if let Some(target) = recovery_target(&result, session_id)
+            && self.projection_mode == ClientProjectionMode::Interactive
+            && self
+                .session_recovery
+                .load(std::sync::atomic::Ordering::Acquire)
+            && crate::kit::popups::confirm_popup::confirm_dirty_recovery(target.clone()).await
+        {
+            // operation gate 固定 source/target；确认等待期间不能提交其他 transition。
+            let ack = peri_acp_types::workspace::ResetDirtyRequest {
+                target,
+                accept_risk: true,
+            };
+            result = match self
+                .transport
+                .send_request(
+                    "peri/session_reset_dirty",
+                    serde_json::to_value(ack).expect("recovery request serialize"),
+                )
+                .await
             {
-                // operation gate 固定 source/target；确认等待期间不能提交其他 transition。
-                let ack = peri_acp_types::workspace::ResetDirtyRequest {
-                    target,
-                    accept_risk: true,
-                };
-                result = match self
-                    .transport
-                    .send_request(
-                        "peri/session_reset_dirty",
-                        serde_json::to_value(ack).expect("recovery request serialize"),
-                    )
-                    .await
-                {
-                    Ok(_) => self.transport.send_request("session/load", params).await,
-                    Err(error) => Err(error),
-                };
-            }
+                Ok(_) => self.transport.send_request("session/load", params).await,
+                Err(error) => Err(error),
+            };
+            read_only = result.as_ref().ok().and_then(read_only_admission);
         }
         if let Err(error) = result {
             *self.restore_error.lock().unwrap() = Some(error.to_string());
@@ -478,6 +475,7 @@ impl AcpTuiClient {
             .await?;
         self.project_execution_cwd(Some(effective_cwd));
         *self.restore_error.lock().unwrap() = None;
+        crate::kit::atoms::SESSION_READ_ONLY.set(read_only);
         projection.committed = true;
         transition.disarm();
         Ok(session_id.to_string())
@@ -564,4 +562,40 @@ impl AcpTuiClient {
         }
         result.map(|_| ())
     }
+}
+
+/// 本次准入的只读标记；`None` 表示准入持有执行所有权（或响应没有该字段）。
+///
+/// host 只在协商了 `sessionWorkspaceV1` 的客户端上标注只读准入，未协商的连接仍旧
+/// 收到准入错误。
+fn read_only_admission(response: &Value) -> Option<ReadOnlyAdmission> {
+    serde_json::from_value(
+        response
+            .pointer("/_meta/peri.sessionWorkspaceV1/read_only")?
+            .clone(),
+    )
+    .ok()
+}
+
+/// 本次准入需要用户显式接受风险才能回到可执行，及其精确代际。
+///
+/// 两种携带方式指向同一件事：未协商只读标记的客户端从准入错误里读（`data`），协商过
+/// 的从只读标记里读——后者已经进入只读会话，风险确认流程不变。
+fn recovery_target(
+    result: &Result<Value, AcpError>,
+    session_id: &str,
+) -> Option<RecoveryRequiredDetails> {
+    let target = match result {
+        Err(error) => match error.data.clone().and_then(|data| {
+            serde_json::from_value::<peri_acp_types::workspace::WorkspaceErrorData>(data).ok()
+        }) {
+            Some(peri_acp_types::workspace::WorkspaceErrorData::RecoveryRequired(target)) => target,
+            _ => return None,
+        },
+        Ok(response) => match read_only_admission(response) {
+            Some(ReadOnlyAdmission::RecoveryRequired(target)) => target,
+            _ => return None,
+        },
+    };
+    (target.thread_id == session_id && target.generation > 0).then_some(target)
 }

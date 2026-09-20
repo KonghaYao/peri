@@ -80,7 +80,7 @@ impl SqliteThreadStore {
         .await?;
         let (workspace_id, project_id) = match registered {
             Some((id, project, recorded)) => {
-                if recorded != snapshot {
+                if recorded != snapshot && !self.read_only {
                     // A directory-only observation without Git answering cannot prove
                     // the recorded repository is gone. Keep failing closed instead of
                     // rewriting a repository into a directory.
@@ -96,6 +96,9 @@ impl SqliteThreadStore {
                 (id.parse::<WorkspaceId>()?, project.parse::<ProjectId>()?)
             }
             None => {
+                // 只读节点不能登记新工作区：读请求按「本节点没有这条登记」失败，而不是
+                // 交给 SQLite 在写入时才报只读。
+                self.require_writable()?;
                 // 只有定位与证据同时一致才复用项目：Git linked worktree 换位后
                 // common directory 未变而路径已变，它仍属于原项目，而不相关的
                 // 同名副本各自成项目。
@@ -196,6 +199,7 @@ impl SqliteThreadStore {
         mut meta: ThreadMeta,
         workspace: &ResolvedWorkspace,
     ) -> Result<ThreadId> {
+        self.require_writable()?;
         // 提交前的复核在写事务内进行（`validate_resolved_on`：关系加关键文件对象）。
         // 同一次准入已在解析阶段观测过完整发现，这里再跑一轮 Git 只是把同一次观测
         // 重复一遍，代价是每个创建方都要等 Git（含慢 Git 的固定等待）。

@@ -41,6 +41,10 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
   和全局；普通 `cwd` 字段仍表示精确目录。
 - new/load/resume/fork 的响应扩展投影绑定；请求 cwd 与保存的 binding 不符时拒绝。
   能力未协商不改变旧标准字段解释，也不能允许错误目录执行。
+- `session/load` 的只读准入：执行所有权不可得（他处持有 / 待恢复的精确代际 / 本节点
+  不提供所有权）时仍返回成功，在 `_meta["peri.sessionWorkspaceV1"].read_only` 携带
+  `ReadOnlyAdmission`，进程日志记 warning；未协商该能力的客户端仍按原准入错误失败。
+  只读准入不改变独占：写入与执行仍要 owner，`session/fork` 不接受降级。
 - `session/metadata` 读取轻量标题与当前会话配置投影；不做逐 tick Git 发现。
 
 类型事实源为 `peri-acp-types::workspace`；身份、恢复和执行锁约束见

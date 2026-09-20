@@ -2,6 +2,7 @@
 
 use super::SqliteThreadStore;
 use anyhow::{Context, Result};
+use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     AssertSqlSafe, Connection,
@@ -169,6 +170,18 @@ impl SqliteThreadStore {
         self.pool.close().await;
     }
 
+    /// 只读打开的 store 不能写入：给出可诊断的原因，而不是让 SQL 层在写入时才报
+    /// 「attempt to write a readonly database」。
+    ///
+    /// 与 `ExecutionLeaseRequired` 的分工：那个说的是「某条会话的执行所有权不在本
+    /// 节点」（历史仍可按只读会话进入）；这里连会话都还没有，没有可降级的对象。
+    pub(super) fn require_writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(WorkspaceError::ReadOnlyStore.into());
+        }
+        Ok(())
+    }
+
     /// 以 SQLite read-only capability 打开已存在的数据库。
     ///
     /// 该路径不创建目录、数据库或 schema，也不执行 migration。
@@ -232,10 +245,14 @@ impl SqliteThreadStore {
         Ok(())
     }
 
+    /// 默认数据库位置 `~/.peri/threads/threads.db`；不创建目录、数据库或连接。
+    pub(crate) fn default_database_path() -> Result<PathBuf> {
+        super::super::default_database_path().context("无法获取 home 目录")
+    }
+
     /// 使用默认路径 `~/.peri/threads/threads.db` 创建
     pub async fn default_path() -> Result<Self> {
-        let db_path = super::super::default_database_path().context("无法获取 home 目录")?;
-        Self::new(db_path).await
+        Self::new(Self::default_database_path()?).await
     }
 }
 
