@@ -313,6 +313,83 @@ fn test_failure_notice_distinguishes_preparation_from_admission() {
     );
 }
 
+/// 只读准入的会话上，宿主的 `-32010` 是确定结论，不是「回执不明」。
+///
+/// 判据只是客户端已经持有的准入事实（`SESSION_READ_ONLY`），不是新加的输入闸门：请求
+/// 照发，结论仍由宿主的 `require_owner` 给出；这里只保证呈现口径——原稿按确定拒绝还给
+/// composer，不把只读会话的提交挂成每 5s 重投的待定态。
+#[test]
+#[serial_test::serial]
+fn test_read_only_session_submission_is_a_determined_rejection() {
+    use peri_acp_types::workspace::ReadOnlyAdmission;
+
+    struct RestoreReadOnly(Option<ReadOnlyAdmission>);
+    impl Drop for RestoreReadOnly {
+        fn drop(&mut self) {
+            atoms::SESSION_READ_ONLY.set(self.0.take());
+        }
+    }
+
+    let _restore = RestoreProjection {
+        steers: STEERS.state().read().clone(),
+        session: atoms::ACTIVE_SESSION_ID.state().read().clone(),
+        epoch: atoms::BRIDGE_RESET_COUNTER.get(),
+    };
+    let _read_only = RestoreReadOnly(atoms::SESSION_READ_ONLY.state().read().clone());
+    atoms::ACTIVE_SESSION_ID.set("s".into());
+    atoms::BRIDGE_RESET_COUNTER.set(7);
+    let ownership_denied = AcpError::new(-32010, "session is owned by another execution host");
+    let draft = "  中文草稿\n@image /tmp/a.png\n";
+    let command = SteerCommand {
+        session_id: "s".into(),
+        epoch: 7,
+        command_id: "stable-command".into(),
+        // snapshot 已经成功、入队请求已发出：`-32010` 来自入队本身。
+        generation: Some("g".into()),
+        kind: SteerCommandKind::Enqueue(UserInput {
+            input_id: "input-1".into(),
+            original_draft: draft.into(),
+            content: MessageContent::text(draft),
+        }),
+    };
+
+    atoms::SESSION_READ_ONLY.set(Some(ReadOnlyAdmission::ExecutionBusy));
+    let mut projection = SteerState::default();
+    projection.reset_session("s", 7);
+    projection.begin(command.clone());
+    STEERS.set(projection);
+    let mut read_only_command = command.clone();
+    assert!(
+        reject_command(&mut read_only_command, &ownership_denied),
+        "只读会话的执行所有权拒绝是确定结论"
+    );
+    assert_eq!(
+        STEERS
+            .state()
+            .write()
+            .recover("s", 7, true)
+            .map(|input| input.original_draft),
+        Some(draft.to_string()),
+        "确定拒绝必须把原稿还给 composer"
+    );
+
+    // 对照：没有只读准入事实时，同一错误仍是「回执不明」——占用可能只是瞬时的。
+    atoms::SESSION_READ_ONLY.set(None);
+    let mut projection = SteerState::default();
+    projection.reset_session("s", 7);
+    projection.begin(command.clone());
+    STEERS.set(projection);
+    let mut uncertain_command = command.clone();
+    assert!(
+        !reject_command(&mut uncertain_command, &ownership_denied),
+        "瞬时的执行占用不得被改判为确定拒绝"
+    );
+    assert!(
+        STEERS.state().read().pending_recovery_ids("s").is_empty(),
+        "回执不明不能变成可重复提交草稿"
+    );
+}
+
 #[test]
 fn test_steer_session_unavailable_notice_is_translated_in_both_locales() {
     let error = "session unavailable".to_string();
@@ -323,6 +400,18 @@ fn test_steer_session_unavailable_notice_is_translated_in_both_locales() {
         assert!(
             notice.contains(&error) && !notice.contains("steer-session-unavailable"),
             "{lang} 缺少 steer-session-unavailable 文案：{notice}"
+        );
+    }
+}
+
+#[test]
+fn test_steer_read_only_notice_is_translated_in_both_locales() {
+    for lang in ["en", "zh-CN"] {
+        let registry = crate::i18n::LcRegistry::new(Some(lang));
+        let notice = registry.tr("steer-session-read-only");
+        assert!(
+            !notice.is_empty() && !notice.contains("steer-session-read-only"),
+            "{lang} 缺少 steer-session-read-only 文案：{notice}"
         );
     }
 }

@@ -13,7 +13,7 @@ use agent_client_protocol_schema::v1::{
 use async_trait::async_trait;
 use peri_acp_types::interaction::{
     ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, QuestionAnswer,
-    QuestionItem, UserInteractionBroker,
+    QuestionItem, UnansweredCause, UserInteractionBroker,
 };
 
 use crate::transport::RequestTransport;
@@ -263,6 +263,13 @@ pub(crate) fn parse_elicitation_response(
                 InteractionResponse::Rejected
             }
             ElicitationAction::Cancel => {
+                // 客户端取消了提问：声明了原因（含无法识别的取值）说明它正常
+                // 收到提问但无法作答，如实产出 Unanswered；未声明才按旧语义
+                // 回落空答案（owner 失效、session/prompt 取消等生命周期结算）。
+                if let Some(cause) = UnansweredCause::from_meta(resp.meta.as_ref()) {
+                    tracing::info!(?cause, "Elicitation cancelled by unanswered client");
+                    return InteractionResponse::Unanswered { cause };
+                }
                 tracing::info!("Elicitation cancelled by user");
                 InteractionResponse::Answers(empty_answers(requests))
             }
@@ -343,6 +350,9 @@ fn map_elicitation_answer(
     }
 }
 
+/// 无原因声明的 cancel 兜底（TUI 用户撤销弹窗、owner 过期结算、投递失败等）：
+/// 客户端只取消了本次提问，没有声明「无人可作答」。客户端声明了原因时（含
+/// 未知取值）走 [`UnansweredCause`] → `Unanswered`，不进这里。
 fn empty_answers(requests: Vec<QuestionItem>) -> Vec<QuestionAnswer> {
     requests
         .into_iter()

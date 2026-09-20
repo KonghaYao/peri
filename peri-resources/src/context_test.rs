@@ -2,6 +2,7 @@
 
 use tempfile::tempdir;
 
+use peri_acp_types::thread::ThreadMeta;
 use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
 
 use super::*;
@@ -102,10 +103,52 @@ async fn test_open_with_none_uses_default_store() {
     // 复用生产路径选择逻辑，只注入默认存储位置，禁止测试迁移用户真实数据库。
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("default.db");
-    let resources = Resources::open_with_default(None, SqliteThreadStore::new(db_path.clone()))
+    let default = db_path.clone();
+    let resources = Resources::open_with_default(None, move || Ok(default))
         .await
         .unwrap();
     assert!(db_path.is_file(), "None 分支必须打开注入的默认存储");
     let threads = resources.thread_store().list_threads().await;
     assert!(threads.is_ok(), "默认存储应可查询: {:?}", threads.err());
+}
+
+/// 会话库被占（schema 锁未释放）：写打开失败不再挡住进入，降级为只读打开——
+/// 历史仍可列表读取，写入由只读 store 自己按只读失败。
+#[tokio::test]
+async fn test_open_with_busy_schema_lock_degrades_to_read_only() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("threads.db");
+    let writable = SqliteThreadStore::new(db_path.clone()).await.unwrap();
+    let thread = writable
+        .create_thread(ThreadMeta::new("/tmp/read-only-degradation"))
+        .await
+        .unwrap();
+    writable.close().await;
+
+    // 持住 schema 锁：写打开按「初始化被占」失败，只读打开不受影响。
+    let canonical = db_path.canonicalize().unwrap();
+    let lock_path = canonical.with_file_name(format!(
+        "{}.schema-lock",
+        canonical.file_name().unwrap().to_string_lossy()
+    ));
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    held.lock().unwrap();
+
+    let resources = Resources::open_with(Some(db_path.clone())).await.unwrap();
+    let store = resources.thread_store();
+    let listed = store.list_threads().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, thread);
+    assert!(
+        store.delete_thread(&thread).await.is_err(),
+        "只读降级不得假装可写：写入必须失败"
+    );
+    assert!(store.load_meta(&thread).await.is_ok(), "降级后历史仍可读");
+    drop(held);
 }

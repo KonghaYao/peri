@@ -39,6 +39,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mode_hl = hooks.use_atom(&atoms::MODE_HIGHLIGHT_UNTIL);
     let bg_tasks = hooks.use_atom(&atoms::BG_TASKS);
     let preparing = hooks.use_atom(&atoms::SESSION_PREPARING);
+    let read_only = hooks.use_atom(&atoms::SESSION_READ_ONLY);
     let goal_store = hooks.use_atom(&atoms::GOAL_SNAPSHOT);
 
     let snap = snap.read().clone();
@@ -149,6 +150,17 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         spans.push(Span::styled(
             label,
             Style::default().fg(THEME_ATOM.state().read().semantic.loading),
+        ));
+    }
+
+    // 7. 只读准入
+    //    这条会话历史可读但没有执行所有权：提交会被 host 的同一道闸门拒绝，这里说明
+    //    原因（准入本身不再报错，只在进程日志留 warning）。
+    if let Some(reason) = read_only.read().as_ref() {
+        spans.push(separator());
+        spans.push(Span::styled(
+            read_only_label(reason),
+            Style::default().fg(THEME_ATOM.state().read().semantic.status.warning),
         ));
     }
 
@@ -576,6 +588,21 @@ fn permission_mode_display(mode: &str) -> String {
 /// 只做「事实 → 文案」映射；位置与样式由 `StatusBarRow1` 决定。
 fn preparing_label(preparing: bool) -> Option<String> {
     preparing.then(|| i18n::tr("statusbar-preparing"))
+}
+
+/// 只读准入的原因标签：说明这条会话为什么执行不了，而不是只说「只读」。
+fn read_only_label(reason: &peri_acp_types::workspace::ReadOnlyAdmission) -> String {
+    match reason {
+        peri_acp_types::workspace::ReadOnlyAdmission::ExecutionBusy => {
+            i18n::tr("statusbar-read-only-busy")
+        }
+        peri_acp_types::workspace::ReadOnlyAdmission::RecoveryRequired(_) => {
+            i18n::tr("statusbar-read-only-recovery")
+        }
+        peri_acp_types::workspace::ReadOnlyAdmission::ExecutionLeaseRequired => {
+            i18n::tr("statusbar-read-only-store")
+        }
+    }
 }
 
 fn permission_mode_color(mode: &str) -> ratatui::style::Color {

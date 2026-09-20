@@ -21,7 +21,7 @@ const SUPPORTED_MIME: &[(&str, &str)] = &[
 
 /// ImageMiddleware — 解析用户消息中的 @image <path>，替换为 ContentBlock::Image
 ///
-/// 在 `before_agent` 钩子中扫描本批用户消息，查找 `@image <path>` 标记，
+/// 在 `before_input` 钩子中扫描本批用户消息，查找 `@image <path>` 标记，
 /// 读取对应图片文件，base64 编码后替换为 `ContentBlock::Image`。
 /// 压缩管线为预留切面，MVP 为空——不对图片做任何压缩处理。
 pub struct ImageMiddleware {
@@ -68,7 +68,7 @@ impl Middleware for ImageMiddleware {
         "ImageMiddleware"
     }
 
-    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
+    async fn before_input(&self, state: &mut dyn hook_state::BeforeInputState) -> AgentResult<()> {
         let inputs: Vec<BaseMessage> = match state.input_message_ids() {
             Some(ids) => state
                 .messages()
@@ -101,7 +101,7 @@ impl Middleware for ImageMiddleware {
 impl ImageMiddleware {
     async fn prepare_image_input(
         &self,
-        state: &mut dyn hook_state::BeforeAgentState,
+        state: &mut dyn hook_state::BeforeInputState,
         message: BaseMessage,
         re: &Regex,
     ) -> AgentResult<()> {

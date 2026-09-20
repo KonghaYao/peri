@@ -1,7 +1,7 @@
 //! Hook 按阶段暴露的真实能力；StateView 不携带可变 queue/catalog 句柄。
 //!
 //! 底层适配器实现 MiddlewareState，hook 只能看到对应的窄接口。
-//! 消息替换仅在 before_agent 提供，其余阶段不能修改输入缓存。
+//! 消息替换仅在 before_agent / before_input 提供，其余阶段不能修改输入缓存。
 
 use super::state::MiddlewareState;
 use crate::{
@@ -35,7 +35,7 @@ pub trait MessageAppend: Send + Sync {
     fn add_message(&mut self, message: BaseMessage);
 }
 
-/// 按已有 ID 替换输入消息；before_agent 结束后（包括 Err）统一 reconcile。
+/// 按已有 ID 替换输入消息；输入准备链结束后（包括 Err）统一 reconcile。
 pub trait MessageReplace: Send + Sync {
     #[must_use]
     fn replace_message(&mut self, message: BaseMessage) -> bool;
@@ -60,11 +60,11 @@ pub trait InputBatchState: Send + Sync {
     fn input_message_ids(&self) -> Option<&[MessageId]>;
 }
 
-/// 输入准备：读取本批身份、追加、稳定 ID 替换，以及初始工具目录重绑。
-pub trait BeforeAgentState:
-    StateView + InputBatchState + MessageAppend + MessageReplace + CatalogState
-{
-}
+/// 每批输入准备：读取本批身份并按稳定 ID 替换附件，不暴露工具目录或队列。
+pub trait BeforeInputState: StateView + InputBatchState + MessageReplace {}
+
+/// 首次输入准备与初始化：另提供追加消息及初始工具目录重绑能力。
+pub trait BeforeAgentState: BeforeInputState + MessageAppend + CatalogState {}
 
 /// 工具审批仅观察状态，工具参数修改通过 ToolCall 返回值表达。
 ///
@@ -163,10 +163,8 @@ impl<T: MiddlewareState + ?Sized> InputBatchState for T {
     }
 }
 
-impl<T: StateView + InputBatchState + MessageAppend + MessageReplace + CatalogState + ?Sized>
-    BeforeAgentState for T
-{
-}
+impl<T: StateView + InputBatchState + MessageReplace + ?Sized> BeforeInputState for T {}
+impl<T: BeforeInputState + MessageAppend + CatalogState + ?Sized> BeforeAgentState for T {}
 impl<T: StateView + ?Sized> BeforeToolState for T {}
 impl<T: StateView + QueueState + ?Sized> AfterToolState for T {}
 impl<T: StateView + QueueState + ?Sized> AfterAgentState for T {}

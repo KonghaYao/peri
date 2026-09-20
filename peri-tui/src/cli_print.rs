@@ -10,13 +10,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::cli_args::OutputFormat;
+use agent_client_protocol::schema::v1::StopReason;
 use anyhow::Result;
 use peri_acp::host::assemble::{HostAssemblyInput, assemble_server_config};
 use peri_acp::transport::mpsc::mpsc_transport_pair;
+use peri_acp_types::interaction::UnansweredCause;
 use peri_acp_types::messages::MessageContent;
 use peri_tui::acp_client::{
     AcpDeployment, AcpNotification, AcpTuiClient,
-    interaction_response::{elicitation_cancel_response, permission_selected_allow_once_response},
+    interaction_response::{
+        elicitation_unanswered_response, permission_selected_allow_once_response,
+    },
 };
 use serde_json::{Value, json};
 
@@ -160,59 +164,74 @@ pub async fn run_print(
     acp_client.spawn_pump(notification_tx);
 
     let mut deployment = AcpDeployment::new(acp_client.clone(), host);
+    let mut output = PrintOutput::new(fmt);
+    let mut stop_reason = None;
     let operation = async {
         // ── ephemeral session：new → prompt（流式收集事件）→ close ──
         let session_id = acp_client.new_session(&cwd, None).await?;
 
-        let mut output = PrintOutput::new(fmt);
         {
             // prompt future 借用 acp_client，收敛在块内以便之后 drop(client)
             let content = MessageContent::text(prompt_text);
-            let prompt_fut = acp_client.prompt(&content, None);
+            let prompt_fut = acp_client.prompt_with_response(&content, None);
             tokio::pin!(prompt_fut);
 
-            let mut prompt_returned = false;
             loop {
-                if !prompt_returned {
-                    tokio::select! {
-                        res = &mut prompt_fut => {
-                            res.map_err(|e| anyhow::anyhow!("session/prompt 失败: {e}"))?;
-                            prompt_returned = true;
-                        }
-                        notif = notification_rx.recv() => {
-                            if !consume_print_notification(&acp_client, &mut output, notif).await {
-                                break;
-                            }
+                tokio::select! {
+                    biased;
+                    res = &mut prompt_fut => {
+                        let response = res.map_err(|e| anyhow::anyhow!("session/prompt 失败: {e}"))?;
+                        stop_reason = Some(response.stop_reason);
+                        break;
+                    }
+                    notif = notification_rx.recv() => {
+                        if !consume_print_notification(&acp_client, &mut output, notif).await {
+                            anyhow::bail!("session/prompt notification channel closed before terminal response");
                         }
                     }
-                } else {
-                    // prompt 响应已返回：turn 已结束，drain 尾部事件后退出
-                    match notification_rx.recv().await {
-                        Some(notif) => {
-                            if !consume_print_notification(&acp_client, &mut output, Some(notif))
-                                .await
-                            {
-                                break;
-                            }
-                        }
-                        None => break,
-                    }
-                }
-                if prompt_returned && notification_rx.is_empty() {
-                    break;
                 }
             }
         }
 
-        output.output_final();
-
         // 关闭 ephemeral session（释放 host 侧 history/frozen/agent_pool）
-        let _ = acp_client
+        acp_client
             .send_raw_request("session/close", json!({ "sessionId": session_id }))
-            .await;
+            .await
+            .map_err(|_| anyhow::anyhow!("ACP session cleanup failed"))?;
         Ok(())
     };
-    deployment.run(operation).await
+    let cleanup_result = deployment.run(operation).await;
+    // transport close 会唤醒 pump；它独占 notification sender，recv(None)
+    // 才证明已经消费全部尾帧，某一时刻 is_empty 不能证明通知已结束。
+    drain_print_notifications(&acp_client, &mut output, &mut notification_rx).await;
+    if let Some(stop_reason) = stop_reason {
+        // result 只在 deployment 已结束后发出；任务终态与清理失败分别表达。
+        let cleanup_error = cleanup_result.as_ref().err().map(|_| "ACP cleanup failed");
+        output.output_final(stop_reason, cleanup_error);
+        cleanup_result?;
+        require_completed(stop_reason)
+    } else {
+        cleanup_result?;
+        anyhow::bail!("session/prompt ended without a terminal response")
+    }
+}
+
+fn require_completed(stop_reason: StopReason) -> Result<()> {
+    if stop_reason == StopReason::EndTurn {
+        Ok(())
+    } else {
+        anyhow::bail!("session/prompt incomplete: {}", json!(stop_reason))
+    }
+}
+
+async fn drain_print_notifications(
+    acp_client: &AcpTuiClient,
+    output: &mut PrintOutput,
+    notification_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AcpNotification>,
+) {
+    while let Some(notification) = notification_rx.recv().await {
+        consume_print_notification(acp_client, output, Some(notification)).await;
+    }
 }
 
 /// 消费一条 ACP 通知：流式输出 / 自动批准 / 忽略。返回 `false` 表示通道关闭。
@@ -275,8 +294,9 @@ fn print_permission_response() -> Value {
     permission_selected_allow_once_response()
 }
 
+/// `-p` 无交互界面：声明「无人可作答」而非裸 cancel，工具据此如实转述。
 fn print_elicitation_response() -> Value {
-    elicitation_cancel_response()
+    elicitation_unanswered_response(UnansweredCause::NonInteractiveClient)
 }
 
 /// 事件输出器：消费 ACP 协议化事件（session/update 通知），输出格式与
@@ -449,25 +469,39 @@ impl PrintOutput {
         }
     }
 
-    fn output_final(&self) {
+    fn output_final(&self, stop_reason: StopReason, cleanup_error: Option<&str>) {
         match self.fmt {
-            OutputFormat::Text => {
-                println!("{}", self.text_buffer);
-            }
-            OutputFormat::Json => {
-                let result = serde_json::json!({
-                    "type": "result",
-                    "content": self.text_buffer,
-                });
-                println!("{}", serde_json::to_string_pretty(&result).unwrap());
-            }
-            OutputFormat::StreamJson => println!("{}", self.stream_result()),
+            OutputFormat::Text => println!("{}", self.text_buffer),
+            OutputFormat::Json => println!(
+                "{}",
+                serde_json::to_string_pretty(&self.result(stop_reason, cleanup_error)).unwrap()
+            ),
+            OutputFormat::StreamJson => println!("{}", self.result(stop_reason, cleanup_error)),
         }
     }
 
-    fn stream_result(&self) -> Value {
-        // 没有 provider usage / pricing 时保留未知，不把它伪装成零消耗。
-        json!({"type": "result", "usage": self.total_usage, "total_cost_usd": null})
+    fn result(&self, stop_reason: StopReason, cleanup_error: Option<&str>) -> Value {
+        let completed = stop_reason == StopReason::EndTurn;
+        let mut result = json!({
+            "type": "result",
+            "stop_reason": stop_reason,
+            "status": if completed { "completed" } else { "incomplete" },
+            "is_error": !completed || cleanup_error.is_some(),
+        });
+        match self.fmt {
+            OutputFormat::StreamJson => {
+                // 没有 provider usage / pricing 时保留未知，不伪装成零消耗。
+                result["usage"] = json!(self.total_usage);
+                result["total_cost_usd"] = Value::Null;
+            }
+            OutputFormat::Text | OutputFormat::Json => {
+                result["content"] = json!(self.text_buffer);
+            }
+        }
+        if let Some(error) = cleanup_error {
+            result["cleanup_error"] = json!(error);
+        }
+        result
     }
 }
 
@@ -477,6 +511,77 @@ mod tests {
     use agent_client_protocol_schema::v1::{CreateElicitationResponse, ElicitationAction};
 
     use super::*;
+
+    /// [回归测试] 临时空队列之后才到达的尾帧仍须进入最终输出。
+    #[tokio::test]
+    async fn test_print_drain_waits_for_sender_close_and_keeps_tail_events() {
+        for fmt in [OutputFormat::Json, OutputFormat::StreamJson] {
+            let (transport, _server) = mpsc_transport_pair();
+            let (client, sender, mut receiver) = AcpTuiClient::new(transport);
+            let mut output = PrintOutput::new(fmt);
+            {
+                let drain = drain_print_notifications(&client, &mut output, &mut receiver);
+                tokio::pin!(drain);
+                tokio::select! {
+                    biased;
+                    () = &mut drain => panic!("sender 尚存时不能把暂时空队列当作结束"),
+                    () = std::future::ready(()) => {}
+                }
+                for update in [
+                    json!({"sessionUpdate": "agent_message_chunk", "content": {"text": "tail"}}),
+                    json!({"sessionUpdate": "usage_update", "_meta": {"inputTokens": 42, "outputTokens": 7}}),
+                ] {
+                    sender
+                        .send(AcpNotification::SessionUpdate {
+                            session_id: "s1".into(),
+                            params: json!({"sessionId": "s1", "update": update}),
+                        })
+                        .unwrap();
+                }
+                drop(sender);
+                drain.await;
+            }
+            let result = output.result(StopReason::EndTurn, None);
+            if fmt == OutputFormat::Json {
+                assert_eq!(result["content"], "tail");
+            } else {
+                assert_eq!(result["usage"]["input_tokens"], 42);
+                assert_eq!(result["usage"]["output_tokens"], 7);
+            }
+            client.close();
+        }
+    }
+
+    /// [回归测试] ACP 成功响应中的非成功终态不可投影为成功 result。
+    #[test]
+    fn test_print_result_preserves_incomplete_stop_reasons() {
+        for stop_reason in [
+            StopReason::Cancelled,
+            StopReason::MaxTokens,
+            StopReason::MaxTurnRequests,
+            StopReason::Refusal,
+        ] {
+            for fmt in [OutputFormat::Json, OutputFormat::StreamJson] {
+                let output = PrintOutput::new(fmt);
+                let result = output.result(stop_reason, None);
+                assert_eq!(result["stop_reason"], json!(stop_reason));
+                assert_eq!(result["status"], "incomplete");
+                assert_eq!(result["is_error"], true);
+                assert!(require_completed(stop_reason).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn test_print_result_distinguishes_completed_task_from_cleanup_failure() {
+        let output = PrintOutput::new(OutputFormat::Json);
+        let result = output.result(StopReason::EndTurn, Some("ACP cleanup failed"));
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["is_error"], true);
+        assert_eq!(result["cleanup_error"], "ACP cleanup failed");
+        assert!(require_completed(StopReason::EndTurn).is_ok());
+    }
 
     #[test]
     fn test_print_permission_response_is_selected_allow_once() {
@@ -488,11 +593,17 @@ mod tests {
         assert_eq!(selected.option_id.0.as_ref(), "allow_once");
     }
 
+    /// [回归测试] `-p` 取消 elicitation 时必须声明「无人可作答」，否则 broker
+    /// 只能把它当成裸 cancel → 空答案，模型会把伪造的空回答当真。
     #[test]
-    fn test_print_elicitation_response_is_cancel() {
+    fn test_print_elicitation_response_declares_non_interactive_client() {
         let response: CreateElicitationResponse =
             serde_json::from_value(print_elicitation_response()).unwrap();
         assert!(matches!(response.action, ElicitationAction::Cancel));
+        assert_eq!(
+            UnansweredCause::from_meta(response.meta.as_ref()),
+            Some(UnansweredCause::NonInteractiveClient)
+        );
     }
 }
 

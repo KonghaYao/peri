@@ -129,6 +129,7 @@ fn prompt_wire_response(
     let acp_stop_reason = match stop_reason {
         executor::PromptStopReason::Cancelled => StopReason::Cancelled,
         executor::PromptStopReason::MaxTurnRequests => StopReason::MaxTurnRequests,
+        executor::PromptStopReason::MaxTokens => StopReason::MaxTokens,
         executor::PromptStopReason::EndTurn => StopReason::EndTurn,
     };
     let resp = PromptResponse::new(acp_stop_reason);

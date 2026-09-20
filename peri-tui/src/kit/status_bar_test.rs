@@ -124,6 +124,50 @@ fn test_status_bar_row_renders_without_panic() {
     );
 }
 
+/// 只读准入的三种原因各有一条文案，且两份 locale 都真的翻译过。
+///
+/// 缺键时 i18n 会回落成键名本身——那时状态栏显示的是 `statusbar-read-only-busy`，
+/// 用户看不到原因；三条文案还必须互不相同，否则分不清是别处占用、未干净收尾还是库不可写。
+#[test]
+fn test_read_only_label_maps_each_reason_in_both_locales() {
+    use peri_acp_types::workspace::{ReadOnlyAdmission, RecoveryRequiredDetails};
+
+    let reasons = [
+        (ReadOnlyAdmission::ExecutionBusy, "statusbar-read-only-busy"),
+        (
+            ReadOnlyAdmission::RecoveryRequired(RecoveryRequiredDetails {
+                thread_id: "target-thread".into(),
+                generation: 3,
+            }),
+            "statusbar-read-only-recovery",
+        ),
+        (
+            ReadOnlyAdmission::ExecutionLeaseRequired,
+            "statusbar-read-only-store",
+        ),
+    ];
+    for lang in ["en", "zh-CN"] {
+        let registry = crate::i18n::LcRegistry::new(Some(lang));
+        for (_, key) in &reasons {
+            let label = registry.tr(key);
+            assert!(
+                !label.is_empty() && !label.contains("statusbar-read-only"),
+                "{lang} 缺少 {key} 文案：{label}"
+            );
+        }
+    }
+    let labels: Vec<String> = reasons
+        .iter()
+        .map(|(reason, _)| read_only_label(reason))
+        .collect();
+    let unique: std::collections::HashSet<&String> = labels.iter().collect();
+    assert_eq!(
+        unique.len(),
+        reasons.len(),
+        "只读原因文案不得重复: {labels:?}"
+    );
+}
+
 #[test]
 #[serial]
 fn test_status_bar_handles_empty_provider_model() {

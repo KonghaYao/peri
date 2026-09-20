@@ -28,7 +28,7 @@ pub trait MiddlewareState: Send + Sync {
     /// 按稳定 MessageId 替换已有可见消息，保持消息顺序和数量。
     ///
     /// 返回 false 表示 ID 不在当前视图，不插入新消息。生产 v2 在
-    /// `before_agent` 链结束后（包括 Err）将替换同步至 transcript；
+    /// `before_agent` / `before_input` 链结束后（包括 Err）将替换同步至 transcript；
     /// 该操作用于输入附件转换，不支持 Vec 增删/重排。
     #[must_use]
     fn replace_message(&mut self, message: BaseMessage) -> bool;

@@ -41,6 +41,10 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
   和全局；普通 `cwd` 字段仍表示精确目录。
 - new/load/resume/fork 的响应扩展投影绑定；请求 cwd 与保存的 binding 不符时拒绝。
   能力未协商不改变旧标准字段解释，也不能允许错误目录执行。
+- `session/load` 的只读准入：执行所有权不可得（他处持有 / 待恢复的精确代际 / 本节点
+  不提供所有权）时仍返回成功，在 `_meta["peri.sessionWorkspaceV1"].read_only` 携带
+  `ReadOnlyAdmission`，进程日志记 warning；未协商该能力的客户端仍按原准入错误失败。
+  只读准入不改变独占：写入与执行仍要 owner，`session/fork` 不接受降级。
 - `session/metadata` 读取轻量标题与当前会话配置投影；不做逐 tick Git 发现。
 
 类型事实源为 `peri-acp-types::workspace`；身份、恢复和执行锁约束见
@@ -199,6 +203,7 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 stdio 路径与 TUI/notify（mpsc）共用同一 `AcpTransportBroker`（`broker/transport_broker.rs`）：broker 只依赖最小面 `RequestTransport` 契约（仅 `send_request`），mpsc 经 `AcpTransport` blanket 桥接（`AcpRequestBridge`），stdio 经 `ConnectionTo<Client>` 直连适配（`transport/mod.rs`），协议帧一致（`elicitation/create` + accept/cancel/decline，共享 `build_elicitation_params` / `parse_elicitation_response`）。stdio 装配差异仅由构造参数表达：`with_auto_approve()`（无审批 UI，审批分支无条件批准）+ `with_timeout()`（提问超时兜底）。行为限制：
 
 - **`session/cancel` 不解除挂起提问**：挂起的 elicitation request 由 ACP transport 层管理，`session/cancel` 只中断 agent turn；客户端不响应时提问会一直挂起，直到超时或 transport 关闭。
+- **非交互客户端的 cancel 声明**：客户端取消时可在响应 `_meta` 的 `peri.elicitationUnanswered` 声明「无人可作答」（`-p` 声明 `non_interactive_client`）→ `parse_elicitation_response` 产出 `InteractionResponse::Unanswered`，`AskUserQuestion` 以失败工具结果如实转述原因；取值无法识别收敛为 `Unknown`（只说无人可作答，不转述客户端文本）。缺声明的 cancel（用户撤销弹窗、owner 失效、投递失败等生命周期结算）保持旧语义的空答案，不得伪称非交互客户端（ARC-HITL-001）。
 - **超时兜底**：`PERI_ASK_USER_TIMEOUT_SECS`（秒，缺省 300，`0` 表示不超时）——超时返回 `Rejected`（LLM 侧表现为 `ToolRejected`），不挂死 turn。
 - **断连兜底**：transport 关闭（incoming EOF）时挂起请求自动失败，返回空答案，会话可继续。
 

@@ -198,3 +198,75 @@ async fn test_delete_session_clears_current_and_blacklists() {
         Ok(None) => panic!("pump 意外退出"),
     }
 }
+
+/// [回归测试] prompt 的成功 RPC 响应仍须保留业务终态，不能丢弃 max_tokens。
+#[tokio::test]
+async fn test_prompt_with_response_preserves_stop_reason() {
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
+    client.lifecycle.force_stable("s1", false);
+    client.spawn_pump(notification_tx);
+    let server = tokio::spawn(async move {
+        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.unwrap()
+        else {
+            panic!("应收到 prompt 请求");
+        };
+        assert_eq!(method, "session/prompt");
+        server_transport
+            .send_response(id, Ok(json!({"stopReason": "max_tokens"})))
+            .await
+            .unwrap();
+    });
+    let response = client
+        .prompt_with_response(
+            &peri_acp_types::messages::MessageContent::text("hello"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.stop_reason,
+        agent_client_protocol::schema::v1::StopReason::MaxTokens
+    );
+    server.await.unwrap();
+    client.close();
+}
+
+#[tokio::test]
+async fn test_prompt_with_response_rejects_missing_stop_reason_and_releases_lease() {
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
+    client.lifecycle.force_stable("s1", false);
+    client.spawn_pump(notification_tx);
+    let server = tokio::spawn(async move {
+        for response in [json!({}), json!({"stopReason": "end_turn"})] {
+            let IncomingMessage::Request { id, method, .. } =
+                server_transport.recv().await.unwrap()
+            else {
+                panic!("应收到 prompt 请求");
+            };
+            assert_eq!(method, "session/prompt");
+            server_transport
+                .send_response(id, Ok(response))
+                .await
+                .unwrap();
+        }
+    });
+    let content = peri_acp_types::messages::MessageContent::text("hello");
+    let error = client
+        .prompt_with_response(&content, None)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invalid session/prompt response")
+    );
+    let response = client.prompt_with_response(&content, None).await.unwrap();
+    assert_eq!(
+        response.stop_reason,
+        agent_client_protocol::schema::v1::StopReason::EndTurn
+    );
+    server.await.unwrap();
+    client.close();
+}

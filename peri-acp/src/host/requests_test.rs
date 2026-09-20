@@ -2959,7 +2959,8 @@ async fn worktree_binding_hot_cold_resume_and_owner_are_consistent() {
     .await
     .unwrap();
     let mut cold = HashMap::new();
-    let error = handle_request(
+    // 热会话仍持有执行所有权：冷会话按只读准入进入，历史可读但不取得所有权。
+    let read_only_load = handle_request(
         "session/load",
         &json!({"sessionId": id, "cwd": sub}),
         &second,
@@ -2967,9 +2968,12 @@ async fn worktree_binding_hot_cold_resume_and_owner_are_consistent() {
         &transport,
     )
     .await
-    .unwrap_err();
-    assert!(error.message.contains("owned"), "{}", error.message);
-    assert!(cold.is_empty());
+    .unwrap();
+    assert_eq!(
+        read_only_load["_meta"]["peri.sessionWorkspaceV1"]["read_only"]["kind"],
+        "peri.executionBusyV1"
+    );
+    assert!(cold[&id].execution_owner.is_none());
     handle_request(
         "session/close",
         &json!({"sessionId": id}),

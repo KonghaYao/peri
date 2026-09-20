@@ -120,6 +120,38 @@ pub enum WorkspaceErrorData {
     RecoveryRequired(RecoveryRequiredDetails),
 }
 
+/// 只读准入的原因：会话历史可读，但本次准入没有取得执行所有权。
+///
+/// 客户端据此区分「等待他处释放」与「需要用户显式接受风险解除 dirty」：后者必须
+/// 携带精确代际，才能走与 load 失败时相同的确认流程重新取得执行权。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "details")]
+pub enum ReadOnlyAdmission {
+    /// 执行所有权由其他执行宿主持有。
+    #[serde(rename = "peri.executionBusyV1")]
+    ExecutionBusy,
+    /// 上次执行未干净收尾：需要用户显式接受风险解除该代际。
+    #[serde(rename = "peri.recoveryRequiredV1")]
+    RecoveryRequired(RecoveryRequiredDetails),
+    /// 当前节点不提供执行所有权（例如会话存储只读）。
+    #[serde(rename = "peri.executionLeaseRequiredV1")]
+    ExecutionLeaseRequired,
+}
+
+impl ReadOnlyAdmission {
+    /// 按存储层给出的不可用原因构造；不在本集合内的原因不降级（调用方原样上报）。
+    pub fn from_workspace_error(error: &WorkspaceError) -> Option<Self> {
+        match error {
+            WorkspaceError::ExecutionBusy => Some(Self::ExecutionBusy),
+            WorkspaceError::RecoveryRequired(details) => {
+                Some(Self::RecoveryRequired(details.clone()))
+            }
+            WorkspaceError::ExecutionLeaseRequired => Some(Self::ExecutionLeaseRequired),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResetDirtyRequest {
@@ -151,6 +183,14 @@ pub enum WorkspaceError {
     RecoveryGenerationMismatch,
     #[error("session mutation requires a live execution lease")]
     ExecutionLeaseRequired,
+    /// 会话存储以只读方式打开：历史可读，登记新工作区与新会话不可用。
+    ///
+    /// 与 `ExecutionLeaseRequired` 的区别在降级空间：那个是「这条会话的执行所有权不在
+    /// 本节点」，历史仍可按只读会话进入；这个连「会话」都还没有，没有可降级的对象。
+    #[error(
+        "session store is read-only; history is readable, but sessions cannot be created or registered here"
+    )]
+    ReadOnlyStore,
     #[error("session database schema or version is unsupported")]
     UnsupportedDatabaseSchema,
     /// 数据库记录的 `user_version` 本构建不认识。带上实际值与本构建上限，

@@ -79,6 +79,9 @@ lang-unsupported = Unsupported language: { $lang }
 statusbar-permission-dont-ask = Don't Ask
 statusbar-initializing = Initializing…
 statusbar-preparing = Preparing session…
+statusbar-read-only-busy = Read-only · executed by another instance
+statusbar-read-only-recovery = Read-only · previous run did not close cleanly
+statusbar-read-only-store = Read-only · session store is not writable
 statusbar-permission-accept-edit = Accept Edit
 statusbar-permission-auto = Auto Mode
 statusbar-permission-bypass = Bypass
@@ -1180,6 +1183,7 @@ steer-queue-title = Pending { $count }
 steer-input-rejected = Input was not accepted. Your draft has been kept.
 steer-input-uncertain = Waiting for the input receipt. Retrying with the same input ID.
 steer-session-unavailable = Session could not be established: { $error }. Your draft has been kept.
+steer-session-read-only = This session was entered read-only, so input cannot be submitted. Your draft has been kept.
 
 thread-browser-project = Project
 thread-browser-workspace = Workspace

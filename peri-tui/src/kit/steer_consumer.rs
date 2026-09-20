@@ -13,6 +13,8 @@ use super::steer_state::{STEERS, SteerCommand, SteerCommandKind};
 use crate::acp_client::AcpTuiClient;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+/// 宿主对「本节点没有该会话的执行所有权」的拒绝码（`WorkspaceError` → ACP `-32010`）。
+const EXECUTION_OWNERSHIP_REQUIRED: i64 = -32010;
 /// 受理回执期限：只覆盖已发出请求的等待。
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 准备阶段期限：会话创建包含工作区发现与服务端准入，比回执预算宽松。
@@ -92,8 +94,13 @@ pub(crate) fn spawn_steer_consumer(
                 if !matches!(command.kind, SteerCommandKind::Refresh)
                     && warned.insert(command.command_id.clone())
                 {
+                    let message = match (stage, ownership_denied_for_read_only_session(&error)) {
+                        // 只读会话不是「回执不明」：说清原因，原稿按确定拒绝还回 composer。
+                        (SteerStage::Admit, true) => crate::i18n::tr("steer-session-read-only"),
+                        _ => failure_notice(stage, rejected, &error),
+                    };
                     atoms::NOTIFICATION.set(Some(atoms::Notification {
-                        message: failure_notice(stage, rejected, &error),
+                        message,
                         until: std::time::Instant::now() + FAILURE_NOTICE_DURATION,
                     }));
                 }
@@ -149,9 +156,20 @@ fn reject_command(command: &mut SteerCommand, error: &AcpError) -> bool {
         command.epoch = epoch;
     }
     // 入队请求尚未发送时，会话准备失败是确定未受理；不能把原稿卡在未知回执中。
-    let rejected = not_admitted || matches!(error.code, -32602..=-32600);
+    let rejected = not_admitted
+        || matches!(error.code, -32602..=-32600)
+        || ownership_denied_for_read_only_session(error);
     STEERS.state().write().reject(command, rejected);
     rejected
+}
+
+/// 只读准入的会话上，宿主的 `-32010` 是确定结论（本会话没有执行所有权），不是「回执不明」。
+///
+/// 判据只是客户端已经持有的准入事实，不改分工：请求照发、结论由宿主的 `require_owner`
+/// 给出，这里只决定向上呈现的口径——不把只读会话的提交挂在「等待回执」上无限重投，
+/// 也不让原稿卡在待定态。
+fn ownership_denied_for_read_only_session(error: &AcpError) -> bool {
+    error.code == EXECUTION_OWNERSHIP_REQUIRED && atoms::SESSION_READ_ONLY.state().read().is_some()
 }
 
 /// 一次输入投递：先准备会话，再发送请求并等待受理回执。

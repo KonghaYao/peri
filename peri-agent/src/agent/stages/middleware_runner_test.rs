@@ -193,3 +193,116 @@ async fn before_agent_reconciles_stable_id_replacement() {
 async fn before_agent_reconciles_stable_id_replacement_after_error() {
     assert_before_agent_reconciles_replacement(true).await;
 }
+
+struct PrepareInput {
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::middleware::Middleware for PrepareInput {
+    fn name(&self) -> &str {
+        "PrepareInput"
+    }
+
+    async fn before_input(
+        &self,
+        state: &mut dyn hook_state::BeforeInputState,
+    ) -> crate::error::AgentResult<()> {
+        let id = state.input_message_ids().unwrap()[0];
+        let message = state
+            .messages()
+            .iter()
+            .find(|message| message.id() == id)
+            .unwrap()
+            .clone();
+        assert!(state.replace_message(message.clone_with_content(MessageContent::text("prepared"))));
+        if self.fail {
+            return Err(crate::error::AgentError::MiddlewareError {
+                middleware: self.name().to_owned(),
+                reason: "input preparation failed".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+struct ObservePreparedInput(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait::async_trait]
+impl crate::middleware::Middleware for ObservePreparedInput {
+    fn name(&self) -> &str {
+        "ObservePreparedInput"
+    }
+
+    async fn before_agent(
+        &self,
+        state: &mut dyn hook_state::BeforeAgentState,
+    ) -> crate::error::AgentResult<()> {
+        assert_eq!(
+            state.messages()[0].content(),
+            "prepared",
+            "后续初始化须看见首批转换结果"
+        );
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_before_input_preserves_initial_order_without_reinitializing_later_batches() {
+    let mut ctx = make_context();
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut chain = crate::middleware::MiddlewareChain::new();
+    chain.add(Box::new(PrepareInput { fail: false }));
+    chain.add(Box::new(ObservePreparedInput(Arc::clone(&count))));
+    ctx.runtime.middleware_chain = Arc::new(chain);
+    let first = ctx
+        .session
+        .transcript
+        .write()
+        .append(BaseMessage::human("first"));
+    run_before_agent(&ctx, &[first]).await.unwrap();
+    let later = ctx
+        .session
+        .transcript
+        .write()
+        .append(BaseMessage::human("later"));
+    run_before_input(&ctx, &[later]).await.unwrap();
+    run_before_input(&ctx, &[]).await.unwrap();
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "初始化只执行一次"
+    );
+    let transcript = ctx.session.transcript.read();
+    assert_eq!(transcript.len(), 2, "准备不增删消息");
+    assert_eq!(
+        transcript.get(later).unwrap().message().content(),
+        "prepared"
+    );
+}
+
+#[tokio::test]
+async fn test_before_input_reconciles_replacement_after_error() {
+    let mut ctx = make_context();
+    let mut chain = crate::middleware::MiddlewareChain::new();
+    chain.add(Box::new(PrepareInput { fail: true }));
+    ctx.runtime.middleware_chain = Arc::new(chain);
+    let id = ctx
+        .session
+        .transcript
+        .write()
+        .append(BaseMessage::human("original"));
+    let error = run_before_input(&ctx, &[id]).await.unwrap_err();
+    assert!(
+        matches!(error, crate::error::AgentError::MiddlewareError { middleware, reason }
+        if middleware == "PrepareInput" && reason == "input preparation failed")
+    );
+    let transcript = ctx.session.transcript.read();
+    assert_eq!(transcript.len(), 1);
+    assert_eq!(
+        transcript.get(id).unwrap().message().content(),
+        "prepared",
+        "出错前已完成的转换仍须回写"
+    );
+}

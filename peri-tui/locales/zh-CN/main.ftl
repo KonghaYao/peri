@@ -78,6 +78,9 @@ lang-unsupported = 不支持的语言: { $lang }
 statusbar-permission-dont-ask = Don't Ask
 statusbar-initializing = 初始化中…
 statusbar-preparing = 正在准备会话…
+statusbar-read-only-busy = 只读 · 由其他实例执行
+statusbar-read-only-recovery = 只读 · 上次执行未干净收尾
+statusbar-read-only-store = 只读 · 会话库不可写
 statusbar-permission-accept-edit = Accept Edit
 statusbar-permission-auto = Auto Mode
 statusbar-permission-bypass = Bypass
@@ -1178,6 +1181,7 @@ steer-queue-title = 待发送 { $count }
 steer-input-rejected = 输入未被接收，原稿已保留。
 steer-input-uncertain = 暂未收到输入回执，正在核对并重试。
 steer-session-unavailable = 会话未能建立：{ $error }。原稿已保留。
+steer-session-read-only = 本会话以只读进入，无法提交输入，原稿已保留。
 
 thread-browser-project = 项目
 thread-browser-workspace = 工作区

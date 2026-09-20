@@ -60,6 +60,8 @@ pub enum PromptStopReason {
     Cancelled,
     /// agent 达到最大迭代次数。
     MaxTurnRequests,
+    /// 模型连续输出截断，自动续跑预算已耗尽。
+    MaxTokens,
 }
 
 /// 命令执行上下文（L5 契约化：原 ACP `session::command::CommandContext`）。

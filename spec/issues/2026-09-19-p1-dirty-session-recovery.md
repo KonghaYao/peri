@@ -3,7 +3,7 @@
 **状态**：Implemented — 独立审查通过，待用户验收（未在真实残留进程现场实测；不标记 Fixed）
 **优先级**：P1（用户指定）
 **创建日期**：2026-09-19
-**最后更新**：2026-09-19（记录用户最终裁决与实施证据；同日回填独立核实结论；补记并行失败的第二条根因——执行锁的 fork 窗口误报 busy——及其修复）
+**最后更新**：2026-09-20（记录只读准入策略变更：占用不再挡住进入，TUI 行为随之调整；见「策略变更」）
 
 ## 用户场景与预期
 
@@ -53,7 +53,7 @@
 | 存储 | `peri-resources/src/sessions/sqlite_store/{execution.rs,sqlite_store.rs}` | 抽出 `lock_execution`（复用同一 stable lock 文件、绝不删除）；`reset_dirty_execution_impl` 在同一锁内以 `BEGIN IMMEDIATE` 事务 CAS `generation + clean=0`，错配返回 `RecoveryGenerationMismatch`；`acquire_execution_lease` 的 dirty 错误带上精确代次 |
 | ACP | `peri-acp/src/host/workspace.rs`、`host/requests.rs`、`host/requests/session_lifecycle.rs` | `workspace_error` 保持 -32010 文本不变并附 typed `data`；新增 `peri/session_reset_dirty` handler：要求 `peri.sessionRecoveryV1` 已协商、`accept_risk == true`，直接返回存储错误（例如 `ExecutionBusy`）而不重试 |
 | 能力协商 | `peri-acp-types/src/peri_caps.rs` | `session_recovery_v1`（`peri.sessionRecoveryV1`），默认 false，`all_enabled()` 为 true |
-| TUI | `peri-tui/src/acp_client/client/{session.rs,requests.rs,client.rs}`、`kit/popups/confirm_popup.rs`、`kit/popup_overlay.rs`、`kit/atoms.rs`、两份 `locales/*/main.ftl` | `load_session_under_gate` 解析 typed details 后，在一次 load transition 内（operation gate 与 reservation 已持有、source/target 与有效 cwd 已固定）等待 `confirm_dirty_recovery`；接受才发送 `peri/session_reset_dirty` 并重新 load，取消直接返回原错误 |
+| TUI | `peri-tui/src/acp_client/client/{session.rs,requests.rs,client.rs}`、`kit/popups/confirm_popup.rs`、`kit/popup_overlay.rs`、`kit/atoms.rs`、`kit/status_bar.rs`、两份 `locales/*/main.ftl` | `load_session_under_gate` 从 typed details 与只读标记两处来源解析同一 target，在一次 load transition 内（operation gate 与 reservation 已持有、source/target 与有效 cwd 已固定）等待 `confirm_dirty_recovery`；接受才发送 `peri/session_reset_dirty` 并重新 load，取消按只读准入提交（不再返回错误，见「策略变更」）；`SESSION_READ_ONLY` + `read_only_label` 在状态栏说明本次准入只读的原因 |
 
 ### 确认交互的安全约束
 
@@ -162,6 +162,36 @@ stale generation 拒绝（并保持 dirty，不误放行）；非同会话/无 d
    通过（子进程持锁 250ms 后释放，取得所有权必须发生在等待之后）。影响面不限于测试：生产准入
    同样可能在这个窗口里把一次正常取得所有权上报成「其他进程占用」。
 
+## 策略变更（2026-09-20）：占用不再挡住进入
+
+用户裁决：history 被占、执行所有权不可得或会话库被占时不再向用户报错，而是照常进入、
+只记 warning；进入后的写入与执行仍按原独占语义拒绝。本 issue 的确认交互保留为「取回执行
+所有权」的入口，不再是「能否进入」的闸门。
+
+| 切片 | 位置 | 变更 |
+| --- | --- | --- |
+| A：ACP 准入 | `peri-acp/src/host/{workspace.rs,requests/session_lifecycle.rs}`、`peri-acp-types/src/workspace.rs` | `ReadOnlyAdmission`（他处持有 / 精确 dirty 代际 / 本节点不提供所有权）；`acquire_for_load` 返回 `LoadAdmission`，`session/load` 在协商了 `sessionWorkspaceV1` 时降级为只读准入并在 `_meta.peri.sessionWorkspaceV1.read_only` 下发，进程日志记 warning；未协商的客户端仍按原错误失败；`session/fork` 与同一次准入内的 `reacquire_for_load` 不接受降级 |
+| B：TUI | `peri-tui/src/acp_client/client/session.rs`、`kit/{atoms,session_boundary,status_bar,steer_consumer}.rs`、两份 `locales/*/main.ftl` | 只读标记写入 `SESSION_READ_ONLY`（仅交互客户端写入，每次会话边界清空）；状态栏新增一段只读原因；dirty 只读准入照常弹确认——接受即取回所有权，取消也让会话按只读进入，取回失败仍保留首次只读准入（不再清空视图、置空会话并记恢复错误）；每个可能被宿主回放历史的 `session/load` 之前各投影一次回放边界；不新增客户端输入闸门（提交仍由 host 的 `require_owner` 拒绝），只把只读会话上的执行所有权拒绝（`-32010`）判为确定拒绝，原稿还回 composer |
+| C：启动降级 | `peri-resources/src/context.rs`、`sessions/sqlite_store/{connection,workspace}.rs` | 会话库写打开失败（schema 锁被占、库文件/WAL 不可写）降级为只读打开并记 warning，进入与历史浏览不受影响；`WorkspaceError::ReadOnlyStore` 在进入 SQL 前拒绝新会话与新目录登记；写打开走到版本判定时不认识的 schema 不降级，在版本判定前失败（锁被占、不可写）时降级只按读取兼容的列形状把关、不复查 `user_version` |
+
+不变式（未放宽）：`SessionExecutionLease` 的跨进程独占不变，只读准入不持有 lease；写入与
+执行仍要求 owner；`ExecutionBusy` 仍不提供清除入口，只读进入不等于解除占用；未协商
+`sessionWorkspaceV1` 的客户端契约不变。
+
+本进程只尝试一次写打开（`Resources` 在启动时构造）：一旦降级即保持只读到进程退出，重启
+才重新尝试。降级事件只进进程日志，界面以状态栏只读段说明原因。
+
+证据：`cargo test -p peri-acp --lib` 679 passed、`cargo test -p peri-acp-types --lib` 424 passed、
+`cargo test -p peri-tui --lib` 1658 passed（7 ignored）、`cargo test -p peri-resources --lib` 156
+passed；定向用例 `cargo test -p peri-resources --lib -- open_with`（6 例，含
+`test_open_with_busy_schema_lock_degrades_to_read_only`：持住 schema 锁后降级成功、列表可读、
+写入失败）、`cargo test -p peri-tui --lib -- read_only`（10 例：只读准入进入、只读 dirty 准入
+接受/取消/取回失败回退、非交互客户端不写交互投影、状态栏三条原因各有一份文案、只读会话上的
+`-32010` 判为确定拒绝且不重投）、`cargo test -p peri-tui --lib -- recovery_tests`（25 例，含
+每次回放各有边界：只读 dirty 接受后边界 +3、取消 +1）、`cargo test -p peri-acp --lib -- recovery`
+（13 例，含未协商与已协商两条准入路径）；`cargo clippy --workspace --all-targets -- -D warnings`
+无告警。一次未定因的 `peri-resources` 偶发失败（2026-09-20，批内 2 例失败、无法复现，见「未验证项」）。
+
 ## 未验证项
 
 - 未在真实残留子进程现场复现用户路径（本机未复现用户现场），只用受控进程验证锁语义。
@@ -176,6 +206,30 @@ stale generation 拒绝（并保持 dirty，不误放行）；非同会话/无 d
 - 证据环境隔离声明不成立：见上文「环境隔离范围」——既有 `input_history` 用例会写真实 HOME。
 - 「稳定锁文件从不删除」只有静态证据（存储层无 unlink）加跨进程 busy 测试；`workspace_test.rs:711-713`
   只覆盖只读路径不建目录，缺「删锁后仍互斥」的反向断言。
+- 只读准入的端到端用户现场未实测：未验证「只读准入后提交输入，host 的 `require_owner`
+  按 `ExecutionLeaseRequired` 拒绝、且 TUI 按失败受理回执呈现」这条完整链路；TUI 侧的判定
+  与呈现已由 `test_read_only_session_submission_is_a_determined_rejection`（判定 + 原稿还回）
+  与 `test_steer_read_only_notice_is_translated_in_both_locales`（两份文案）覆盖，host 一段
+  仍只有 `require_owner` 的静态阅读与 `-32010` 实测日志（`2026-09-17-p0-…-blocks-input.md`），
+  缺「真实 host + 只读准入 + 提交」的往返用例。
+- **全量并行跑 `peri-tui --lib` 存在与本次改动无关的偶发失败**（2026-09-20 复现）：5 次运行
+  中 2 次失败，分别是 `kit::acp_bridge::tests::test_hitl_bridge_drops_unowned_events_before_all_side_effects`、
+  `test_bridge_reset_rehydrates_pending_compact_note_for_same_session`、
+  `kit::steer_consumer::tests::test_slow_session_preparation_is_not_capped_by_receipt_deadline`
+  ——每次命中的用例都不同，单跑与定向重跑（`recovery_tests` 连跑 10 次、失败用例单独跑）全绿。
+  这些用例都是「快照/恢复全局 atom + 断言某件事已经发生」，而 `VIEW_MODELS`/`ACP_STATE` 存在
+  大量未标 `#[serial]` 的写入方（如 `acp_events_test/session_events_test.rs` 的
+  `*VIEW_MODELS.state().write() = ViewModelsSnapshot::default()`），本次改动没有新增这类写入方，
+  但新增用例延长了 serial 占用窗口。判为既有测试基建问题，已立
+  `2026-09-20-p2-parallel-lib-test-atom-races.md` 专项收敛，不在本 issue 范围。
+- 已知偏差（用户裁决：保持现状、记录在案）：`ReadOnlyAdmission::ExecutionLeaseRequired`
+  不区分「本节点只读打开会话库」与「该线程是子线程、执行所有权归根 lease」
+  （`acquire_execution_lease_impl` 对 `parent_thread_id.is_some()` 同样返回该错误），而 hidden
+  子线程不进 `session/list`。用户显式 `-r <子线程 id>` 恢复时状态栏会显示「会话库不可写」
+  （`statusbar-read-only-store`），归因不准确；只读准入本身正确（无执行所有权），不影响写入闸门。
+- 启动降级后进程内不会重新尝试写打开：真正可写但瞬时不可用（SQLite busy、锁未释放）时，
+  用户会在本次进程内保持只读直到重启。这是当前取舍下的已知后果，不是缺陷；若要改成
+  「稍后重试取得可写」，需要新的重试与状态迁移契约，尚未设计。
 
 ## 验收要求（状态）
 
@@ -187,4 +241,13 @@ stale generation 拒绝（并保持 dirty，不误放行）；非同会话/无 d
     结束的证明。
 - [x] 取消/失败不提交半成品 session，不串用 cwd 或输入。
 - [x] 隔离临时数据库与受控进程回归通过。
+- [x] 占用不再挡住进入：只读准入（ACP 标记 + TUI 状态）与启动时的只读降级均有定向用例。
+- [ ] 一次未定因的偶发失败（2026-09-20，`cargo test -p peri-resources --lib`）：批内报 2 例失败，
+  其中一例是自带过滤器的子进程（`0 passed; 1 failed; 155 filtered out`，与 `ADMISSION_CHILD` /
+  `HISTORY_CHILD` / lease 子进程的形态一致）。当次日志未留存；此后 26 次串行 + 22 次并发（含 8 路
+  并发，以及只跑 Git 重的 `-- worktree` 一轮）全绿，无法复现、无法定位用例名。同类负载敏感已在本
+  目录的 P0 issue（2026-09-17）有前例：并行负载下 5 秒 Git 预算被击穿，出现 7 例
+  `Git discovery timed out`。本变更不触及 Git 发现、`SqliteThreadStore::new`、lease 取得与子进程
+  测试体（只改 `Resources::open_with` 的降级与只读 store 的写入闸门），但未能证明无关，按未定因
+  保留。
 - [ ] 真实残留进程现场与用户验收（未完成，故不标记 Fixed）。

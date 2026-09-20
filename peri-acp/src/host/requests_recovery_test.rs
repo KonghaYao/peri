@@ -1,6 +1,23 @@
 use super::*;
-use peri_acp_types::workspace::{RecoveryRequiredDetails, ResetDirtyRequest, WorkspaceErrorData};
+use peri_acp_types::workspace::{
+    ReadOnlyAdmission, RecoveryRequiredDetails, ResetDirtyRequest, WorkspaceErrorData,
+};
 use peri_acp_types::PeriCaps;
+
+/// 读取本次准入的只读原因；`None` 表示本次取得了执行所有权。
+fn read_only(response: &Value) -> Option<ReadOnlyAdmission> {
+    response
+        .pointer("/_meta/peri.sessionWorkspaceV1/read_only")
+        .map(|value| serde_json::from_value(value.clone()).expect("read-only marker is typed"))
+}
+
+/// 只读准入必须是 dirty 原因，并复述精确代际。
+fn read_only_dirty(response: &Value) -> RecoveryRequiredDetails {
+    match read_only(response) {
+        Some(ReadOnlyAdmission::RecoveryRequired(target)) => target,
+        other => panic!("expected recovery-required read-only admission, got {other:?}"),
+    }
+}
 
 struct Fixture {
     cfg: AcpServerConfig,
@@ -84,12 +101,12 @@ impl Fixture {
         .await
     }
 
-    /// 通过 load 失败观测当前 dirty 代次（不改动存储）。
+    /// 通过只读准入观测当前 dirty 代次：不改动存储，也不留下内存会话状态。
     async fn observe_dirty(&mut self) -> RecoveryRequiredDetails {
         let params = self.params();
-        let error = self.load(&params).await.unwrap_err();
-        let WorkspaceErrorData::RecoveryRequired(target) =
-            serde_json::from_value(error.data.clone().unwrap()).unwrap();
+        let loaded = self.load(&params).await.unwrap();
+        let target = read_only_dirty(&loaded);
+        self.sessions.clear();
         target
     }
 }
@@ -129,6 +146,8 @@ async fn test_workspace_dirty_recovery_original_load_and_frozen() {
     // 只释放 owner，不伪造正常收尾；夹具不启动外部任务。
     sessions.clear();
     let params = json!({"sessionId":id,"cwd":tmp.path()});
+    // 未协商只读标记的客户端仍按原语义失败：错误载荷必须携带精确代际。
+    cfg.session_manager.set_pending_caps(PeriCaps::default());
     let error = handle_request("session/load", &params, &cfg, &mut sessions, &transport)
         .await
         .unwrap_err();
@@ -137,9 +156,15 @@ async fn test_workspace_dirty_recovery_original_load_and_frozen() {
     assert_eq!(target.thread_id, id);
     assert_eq!(target.generation, 1);
     assert!(sessions.is_empty());
-    // 参数校验先于能力门控需要显式协商；本用例聚焦载荷校验与不写库语义。
+    // 协商只读标记后同一准入降级：历史可读、代际原样复述、执行所有权仍缺位。
     cfg.session_manager
-        .set_pending_caps(peri_acp_types::PeriCaps::all_enabled());
+        .set_pending_caps(PeriCaps::all_enabled());
+    let admitted = handle_request("session/load", &params, &cfg, &mut sessions, &transport)
+        .await
+        .unwrap();
+    assert_eq!(read_only_dirty(&admitted), target);
+    assert!(sessions[&id].execution_owner.is_none());
+    assert!(sessions[&id].frozen.is_none());
     let cancel = ResetDirtyRequest {
         target: target.clone(),
         accept_risk: false,
@@ -157,17 +182,17 @@ async fn test_workspace_dirty_recovery_original_load_and_frozen() {
         .code,
         -32602
     );
+    // 取消确认不触碰存储：可解除的代际仍是同一个。
     let unchanged = handle_request("session/load", &params, &cfg, &mut sessions, &transport)
         .await
-        .unwrap_err();
-    assert_eq!(unchanged.data, error.data);
+        .unwrap();
+    assert_eq!(read_only_dirty(&unchanged), target);
     let ack = serde_json::to_value(ResetDirtyRequest {
         target,
         accept_risk: true,
     })
     .unwrap();
-    cfg.session_manager
-        .set_pending_caps(peri_acp_types::PeriCaps::default());
+    cfg.session_manager.set_pending_caps(PeriCaps::default());
     assert_eq!(
         handle_request(
             "peri/session_reset_dirty",
@@ -182,7 +207,7 @@ async fn test_workspace_dirty_recovery_original_load_and_frozen() {
         -32601
     );
     cfg.session_manager
-        .set_pending_caps(peri_acp_types::PeriCaps::all_enabled());
+        .set_pending_caps(PeriCaps::all_enabled());
     handle_request(
         "peri/session_reset_dirty",
         &ack,
@@ -192,10 +217,14 @@ async fn test_workspace_dirty_recovery_original_load_and_frozen() {
     )
     .await
     .unwrap();
-    handle_request("session/load", &params, &cfg, &mut sessions, &transport)
+    // 解除 dirty 后重新准入取得所有权：上一轮的只读状态必须整体重建。
+    let owned = handle_request("session/load", &params, &cfg, &mut sessions, &transport)
         .await
         .unwrap();
+    assert!(read_only(&owned).is_none());
     assert!(sessions.contains_key(&id));
+    assert!(sessions[&id].execution_owner.is_some());
+    assert!(sessions[&id].frozen.is_some());
     assert_eq!(
         cfg.thread_store.load_session_binding(&id).await.unwrap(),
         binding

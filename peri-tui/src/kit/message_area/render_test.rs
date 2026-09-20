@@ -3715,3 +3715,89 @@ fn test_render_image_hover_line_truncates() {
     );
     assert!(!text.ends_with("a.png"), "超宽时尾部被截断，实际 {text:?}");
 }
+
+// ── 终端 resize（宽度变化）───────────────────────────────────────────────
+
+/// 终端 resize 后同一流式消息的 stable chunk 重建：不得 panic。
+///
+/// 回归背景：宽度变化会清空 `MarkdownLineCache` 并重建全部 stable chunk；
+/// 旧 `retain_and_wrap` 在空 lines 的 chunk 上越界索引 → TUI panic
+/// （`index out of bounds: the len is 0 but the index is 0`）。
+#[test]
+fn test_assistant_bubble_resize_rebuilds_stable_chunks_without_panic() {
+    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+        // 流式路径（started_at 有值）→ parse_markdown_chunks_cached 冻结 stable chunk。
+        started_at: Some(Instant::now()),
+        duration_ms: None,
+        text: "段落甲\n\n段落乙\n\n段落丙".to_string(),
+        reasoning: None,
+        message_id: None,
+        content_hash: 77,
+    });
+
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let mut layout = crate::kit::message_area::vm_cache::MarkdownLineCache::default();
+
+    for term in [80u16, 30, 55, 20] {
+        let grid = GridSpec::grid_for(term);
+        let (lines, ..) = super::vm_to_lines_cached_with_layout(
+            &vm,
+            &grid,
+            &mut md_cache,
+            Some(&mut layout),
+            false,
+        );
+
+        let (_, stable) = layout
+            .stable_overlay()
+            .expect("流式 AssistantBubble 应产生 stable overlay");
+        let stable_text: String = stable
+            .iter()
+            .flat_map(|chunk| chunk.iter().map(line_text))
+            .collect();
+        assert!(
+            stable_text.contains("段落甲"),
+            "term={term}: resize 后 stable chunk 内容不得丢失，实际 {stable_text:?}"
+        );
+        assert!(!lines.is_empty(), "term={term}: 渲染行不得为空");
+    }
+}
+
+/// 无前导竖线的 GFM 表格（合法写法）不得被冻结进 stable chunk。
+///
+/// stable 渲染路径只处理 `MarkdownSegment::Text`；表格段冻结进 stable 后
+/// 既渲染为空（内容丢失），又会在宽度变化时触发空 chunk 越界。
+#[test]
+fn test_streaming_table_without_leading_pipe_stays_visible() {
+    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+        started_at: Some(Instant::now()),
+        duration_ms: None,
+        text: "甲 | 乙\n--- | ---\n丙 | 丁\n\n表格后的段落".to_string(),
+        reasoning: None,
+        message_id: None,
+        content_hash: 78,
+    });
+
+    let grid = GridSpec::grid_for(80);
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let mut layout = crate::kit::message_area::vm_cache::MarkdownLineCache::default();
+    let (lines, ..) =
+        super::vm_to_lines_cached_with_layout(&vm, &grid, &mut md_cache, Some(&mut layout), false);
+
+    let stable_text: String = layout
+        .stable_overlay()
+        .map(|(_, stable)| {
+            stable
+                .iter()
+                .flat_map(|chunk| chunk.iter().map(line_text))
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    let rendered = format!("{}{}", all_text(&lines), stable_text);
+    for cell in ["甲", "乙", "丙", "丁"] {
+        assert!(
+            rendered.contains(cell),
+            "表格单元格 {cell:?} 应可见（stable 冻结判定漏检无前导竖线的表格），实际 {rendered:?}"
+        );
+    }
+}

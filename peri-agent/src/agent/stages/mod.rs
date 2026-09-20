@@ -564,6 +564,29 @@ struct LoopState {
     has_tool_calls: bool,
     /// before_agent hooks 是否已执行（首次 Receive 后执行一次）
     before_agent_has_run: bool,
+    /// 仅无完整工具调用的截断消耗恢复预算；完整工具结果可继续正常循环。
+    consecutive_truncations: usize,
+}
+
+fn enqueue_truncation_continuation(context: &StageContext) {
+    use crate::session::queue::{MessageKind, MessageSource};
+    use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
+
+    let reminder = crate::session::producer_reminders::trusted_reminder(
+        ReminderCategory::Guidance,
+        "model_runtime",
+        "output_truncated",
+        ReminderSeverity::Warning,
+        ReminderDelivery::Required,
+        "Your previous response reached the output token limit before completing the task. Continue from the saved state with a shorter response. Break large changes into smaller tool calls. Do not repeat tool calls that already completed.".into(),
+        Some("Model response was truncated; continuing.".into()),
+        serde_json::json!({"stop_reason": "max_tokens"}),
+    );
+    context.session.queue.push(QueuedMessage::system_reminder(
+        MessageKind::Defer,
+        MessageSource::SystemInjected,
+        reminder,
+    ));
 }
 
 /// 执行单个 ReAct 阶段：emit StageStarted → 调用阶段函数 → emit StageEnded → Ok/Err 分发。
@@ -637,6 +660,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
     // inputs and must not own the receive cursor.
     let mut idle_registry = context.async_ctx.idle_registry.clone();
     const MAX_MQ_STEERING_TAIL_PASSES: usize = 8;
+    const MAX_TRUNCATION_CONTINUATIONS: usize = 2;
 
     'steering_tail: loop {
         'rcra: loop {
@@ -837,6 +861,13 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 {
                     tracing::warn!(error = %e, "[v2] before_agent hook failed");
                 }
+            } else if let Err(error) =
+                middleware_runner::run_before_input(&context, &receive_out.input_message_ids).await
+            {
+                if matches!(error, crate::error::AgentError::Interrupted) {
+                    return LoopResult::Interrupted;
+                }
+                return LoopResult::Error(error);
             }
 
             // ── Compact ──
@@ -868,6 +899,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 Err(e) => return e,
             };
 
+            // 完整工具仍照常执行；无工具截断必须与自然完成区分，不能靠空队列判成功。
+            let truncated_without_tools = reason_out.reasoning.stop_reason
+                == peri_model::StopReason::MaxTokens
+                && !reason_out.reasoning.needs_tool_call();
+
             // ── Act ──
             let act_out = match run_stage(&context, Stage::Act, || async {
                 act::run_act(ActInput {
@@ -884,6 +920,17 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             };
 
             loop_state.has_tool_calls = act_out.has_tool_calls;
+            if truncated_without_tools {
+                loop_state.consecutive_truncations += 1;
+                if loop_state.consecutive_truncations > MAX_TRUNCATION_CONTINUATIONS {
+                    return LoopResult::Error(crate::error::AgentError::OutputTruncated {
+                        attempts: loop_state.consecutive_truncations,
+                    });
+                }
+                enqueue_truncation_continuation(&context);
+            } else {
+                loop_state.consecutive_truncations = 0;
+            }
             // RCRA：无论 has_tool_calls 是 true 或 false，统一回 Receive 开始新一轮迭代
             continue;
         }
@@ -909,6 +956,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 #[cfg(test)]
 #[path = "stages_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "truncation_test.rs"]
+mod truncation_tests;
 
 #[cfg(test)]
 #[path = "budget_recovery_integration_test.rs"]

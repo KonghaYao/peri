@@ -713,6 +713,44 @@ async fn test_worktree_read_only_history_never_creates_execution_sidecar_or_muta
     assert!(!db.path().join("threads.db.execution-locks").exists());
 }
 
+/// 只读节点的工作区解析：命中已登记观测时不需要写入，登记因此仍可被读取（历史可浏
+/// 览的前提）；未登记的目录无法登记，必须给出可诊断的原因而不是 SQL 层的只读报错。
+#[tokio::test]
+async fn test_worktree_read_only_resolves_registered_workspace_and_refuses_registration() {
+    let repo = repository();
+    let (store, db) = store().await;
+    let registered = store.resolve_workspace(repo.path()).await.unwrap();
+    store.close().await;
+
+    let read = SqliteThreadStore::open_existing_read_only(db.path().join("threads.db"))
+        .await
+        .unwrap();
+    assert_eq!(
+        read.resolve_workspace(repo.path()).await.unwrap(),
+        registered
+    );
+    let unregistered = tempfile::tempdir().unwrap();
+    let error = read
+        .resolve_workspace(unregistered.path())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::ReadOnlyStore)
+    ));
+    let error = read
+        .create_bound_thread(
+            ThreadMeta::new(registered.cwd.to_str().unwrap()),
+            &registered,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::ReadOnlyStore)
+    ));
+}
+
 fn lease_process(path: &Path, id: &str, expected: &str) {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([

@@ -4,7 +4,9 @@ use std::{path::Path, sync::Arc};
 
 use super::{assemble, task_scope, AcpServerConfig, SessionState};
 use crate::transport::types::AcpError;
-use peri_acp_types::workspace::{ResolvedWorkspace, SessionExecutionLease, WorkspaceError};
+use peri_acp_types::workspace::{
+    ReadOnlyAdmission, ResolvedWorkspace, SessionExecutionLease, WorkspaceError,
+};
 
 enum SessionEndState {
     Pending,
@@ -310,6 +312,24 @@ pub(crate) async fn expect_directory(
     Ok(())
 }
 
+/// 一次加载准入的结果：绑定与执行目录已复核，执行所有权可能不可得。
+///
+/// 所有权不可得（`ExecutionBusy` / `RecoveryRequired` / `ExecutionLeaseRequired`）时
+/// 仍返回已复核的 `workspace`，由调用方决定是降级为只读会话还是原样上报——绑定复核
+/// 已经跑过一次完整发现，降级路径不能为了拿到同一个 `workspace` 再跑一轮。
+pub(crate) struct LoadAdmission {
+    pub(crate) workspace: ResolvedWorkspace,
+    pub(crate) execution: ExecutionAdmission,
+}
+
+/// 执行所有权判定结果。
+pub(crate) enum ExecutionAdmission {
+    /// 本次准入持有执行所有权。
+    Owned(Arc<dyn SessionExecutionLease>),
+    /// 执行所有权不可得，但会话历史仍可只读访问；携带原因供调用方上报与降级。
+    Unavailable(ReadOnlyAdmission),
+}
+
 /// 加载/恢复/克隆准入的第一步：复核执行目录并取得执行所有权。
 ///
 /// 这是准入入口，因此做完整复核；同一次准入内再取一次（如 `session/fork` 在
@@ -319,18 +339,35 @@ pub(crate) async fn acquire_for_load(
     sessions: &std::collections::HashMap<String, SessionState>,
     session_id: &str,
     expected: Option<&str>,
-) -> Result<(ResolvedWorkspace, Arc<dyn SessionExecutionLease>), AcpError> {
+) -> Result<LoadAdmission, AcpError> {
     acquire_for_load_with(cfg, sessions, session_id, expected, BindingCheck::Full).await
 }
 
 /// 同一次准入内再次取得执行目录与所有权：只复核已记录证据。
+///
+/// 这里不接受只读降级：调用方（`session/fork`）必须有执行所有权才能继续。
 pub(crate) async fn reacquire_for_load(
     cfg: &AcpServerConfig,
     sessions: &std::collections::HashMap<String, SessionState>,
     session_id: &str,
     expected: Option<&str>,
 ) -> Result<(ResolvedWorkspace, Arc<dyn SessionExecutionLease>), AcpError> {
-    acquire_for_load_with(cfg, sessions, session_id, expected, BindingCheck::Recorded).await
+    let admission =
+        acquire_for_load_with(cfg, sessions, session_id, expected, BindingCheck::Recorded).await?;
+    match admission.execution {
+        ExecutionAdmission::Owned(owner) => Ok((admission.workspace, owner)),
+        ExecutionAdmission::Unavailable(reason) => Err(read_only_error(reason)),
+    }
+}
+
+/// 只读降级原因还原为错误：不接受降级的调用方（如 `session/fork`）按原语义上报。
+pub(crate) fn read_only_error(reason: ReadOnlyAdmission) -> AcpError {
+    let error = match reason {
+        ReadOnlyAdmission::ExecutionBusy => WorkspaceError::ExecutionBusy,
+        ReadOnlyAdmission::RecoveryRequired(details) => WorkspaceError::RecoveryRequired(details),
+        ReadOnlyAdmission::ExecutionLeaseRequired => WorkspaceError::ExecutionLeaseRequired,
+    };
+    workspace_error(error)
 }
 
 async fn acquire_for_load_with(
@@ -339,23 +376,44 @@ async fn acquire_for_load_with(
     session_id: &str,
     expected: Option<&str>,
     check: BindingCheck,
-) -> Result<(ResolvedWorkspace, Arc<dyn SessionExecutionLease>), AcpError> {
-    check_expected(cfg, session_id, expected, check).await?;
-    let owner = if let Some(state) = sessions.get(session_id) {
-        require_owner(state)?;
-        state.execution_owner.clone().expect("owner checked")
-    } else {
-        cfg.controller
-            .sessions()
-            .acquire_execution_lease(&session_id.to_owned())
-            .await
-            .map_err(workspace_error)?
+) -> Result<LoadAdmission, AcpError> {
+    // 绑定与执行目录不符直接失败：只读降级只针对执行所有权不可得，不掩盖身份问题。
+    let workspace = check_expected(cfg, session_id, expected, check).await?;
+    // 已持有所有权直接复用；只读会话与冷会话都重新尝试取得——他处释放后再次准入
+    // 才有机会升级回可执行，而不是一次只读就永久只读。
+    let held = match sessions.get(session_id) {
+        Some(state) if state.closing => return Err(AcpError::new(-32010, "Session is closing")),
+        Some(state) => state.execution_owner.clone(),
+        None => None,
+    };
+    let (owner, acquired_here) = match held {
+        Some(owner) => (owner, false),
+        None => {
+            match cfg
+                .controller
+                .sessions()
+                .acquire_execution_lease(&session_id.to_owned())
+                .await
+            {
+                Ok(owner) => (owner, true),
+                Err(error) => match read_only_reason(&error) {
+                    Some(reason) => {
+                        return Ok(LoadAdmission {
+                            workspace,
+                            execution: ExecutionAdmission::Unavailable(reason),
+                        });
+                    }
+                    None => return Err(workspace_error(error)),
+                },
+            }
+        }
     };
     // 取得所有权后复核的是同一件事：重新发现的证据与首次复核相同，这里只复核已记录证据。
     let workspace = match check_expected(cfg, session_id, expected, BindingCheck::Recorded).await {
         Ok(workspace) => workspace,
         Err(error) => {
-            if !sessions.contains_key(session_id) {
+            // 本次准入自己取得的代际必须收尾，否则会留下既无持有者又未标 clean 的运行。
+            if acquired_here {
                 let _ = owner.mark_clean().await;
             }
             return Err(error);
@@ -366,5 +424,18 @@ async fn acquire_for_load_with(
             return Err(workspace_error(WorkspaceError::ExecutionBindingMismatch));
         }
     }
-    Ok((workspace, owner))
+    Ok(LoadAdmission {
+        workspace,
+        execution: ExecutionAdmission::Owned(owner),
+    })
+}
+
+/// 取不到执行所有权的原因是否属于「所有权不可得、历史仍可读」。
+///
+/// 只有存储层明确给出的三类才降级：其他失败（IO、绑定复核、schema 不支持）仍旧
+/// 原样上报，避免把「读不了」伪装成「可以只读进入」。
+fn read_only_reason(error: &anyhow::Error) -> Option<ReadOnlyAdmission> {
+    error
+        .downcast_ref::<WorkspaceError>()
+        .and_then(ReadOnlyAdmission::from_workspace_error)
 }

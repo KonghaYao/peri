@@ -1,5 +1,6 @@
 //! ACP request wrappers for capabilities, prompts, configuration, and cancellation.
 
+use agent_client_protocol::schema::v1::PromptResponse;
 use peri_acp::transport::{AcpTransport, types::AcpError};
 use peri_acp_types::{PeriCaps, command::command_route::UiCommandSpec};
 use serde_json::{Value, json};
@@ -72,6 +73,25 @@ impl AcpTuiClient {
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
     ) -> Result<(), AcpError> {
+        self.send_prompt(content, request_id).await.map(|_| ())
+    }
+
+    /// Submit a prompt and preserve its typed ACP terminal response.
+    pub async fn prompt_with_response(
+        &self,
+        content: &peri_acp_types::messages::MessageContent,
+        request_id: Option<String>,
+    ) -> Result<PromptResponse, AcpError> {
+        let response = self.send_prompt(content, request_id).await?;
+        serde_json::from_value(response)
+            .map_err(|_| AcpError::new(-32603, "invalid session/prompt response"))
+    }
+
+    async fn send_prompt(
+        &self,
+        content: &peri_acp_types::messages::MessageContent,
+        request_id: Option<String>,
+    ) -> Result<Value, AcpError> {
         let (session_id, lease) = self
             .open_prompt_after_session_loads(request_id.clone())
             .await?;
@@ -86,7 +106,7 @@ impl AcpTuiClient {
         let _operation = self.lifecycle.operation_gate().lock().await;
         let claims = lease.finish();
         self.settle_claims_owned(claims).await;
-        result.map(|_| ())
+        result
     }
 
     /// Submit a user message with background task results attached.
