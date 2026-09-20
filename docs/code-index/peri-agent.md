@@ -37,7 +37,7 @@
 | /compact 命令路径 | `src/session/exec/compact_pipeline.rs` | `run_compact(force=true)` → Full + re-inject | 编排：validate_inputs → resolve_auxiliary_model → run_v2_compact_with_cancel → assemble_compact_messages；取消返回 Cancelled |
 | 改 LLM 调用链路 | `src/agent/stages/reason.rs` + `src/agent/model_bridge.rs` | `run_reason`；`AgentModelBridge::build_request`；model_bridge 流式事件 v2 直发 | Reason：snapshot → LlmCallStart → before_model → generate（与 cancel 竞争）→ after_model → LlmCallEnd；bridge 每个 ModelRequest 同步读取一次当前 middleware prompt contribution，与 frozen base request-local 组合且不累加；事件契约 ARC-EVENT-001 |
 | 改工具执行分发 | `src/agent/stages/act.rs` + `src/agent/stages/tool_dispatch.rs` + `tool_dispatch/execution.rs` | `run_act`；`dispatch_tools`；`collect_tool_results`；`ToolResult::execution`；`ToolOutput::projected_text` | 外层一次 staging/commit 后计入含解析失败结果的 tool-growth，再执行 after_tools_batch；typed execution evidence 随统一 bounded projection 进入 live `ToolEnded`、`ToolResult` 与 `BaseMessage::Tool` 持久化；`SubagentFailure` 经 boxed error downcast 保留 child identity 与 SafeSubagentFailure，诊断 facts 同步进入模型可见 tool content；cancel/timeout error 保留 typed status，普通 legacy error 保持 unknown；PTC 内部调用不重复结算；私有执行管线保持审批 → yield → 并发完成即发 ToolEnded → after_tool → 后处理顺序，after_tool 看不到本轮待提交消息；ToolStarted 与实际执行均使用审批后参数，transcript 保留模型原始调用用于配对 |
-| 改 middleware 状态能力 / 消息修改 | `src/middleware/{capabilities,state}.rs` + `src/agent/agent_context.rs` + `src/agent/stages/middleware_runner.rs` | `BeforeAgentState` / `InputBatchState::input_message_ids` / `BeforeToolState` / `AfterToolState` / `AfterAgentState`；`MiddlewareState::replace_message`；`AgentContext::from_stage` / `reconcile_to_transcript`；`run_before_agent` | hook 不再暴露 cwd/step setter、store/thread 或无法回写的 token/context 快照；首次 Receive 的本批用户 ID 只提供给 before_agent，空批次不重读历史；替换按稳定 MessageId 查找，不增删/重排，before_agent 成功或 Err 后均 reconcile；StateView 无可变 queue/catalog；队列和目录分别由 QueueState/CatalogState 提供，before_model 保留消息追加，其他 hook 无输入替换能力 |
+| 改 middleware 状态能力 / 消息修改 | `src/middleware/{capabilities,state}.rs` + `src/agent/agent_context.rs` + `src/agent/stages/middleware_runner.rs` | `BeforeAgentState` / `BeforeInputState` / `InputBatchState::input_message_ids` / `BeforeToolState` / `AfterToolState` / `AfterAgentState`；`MiddlewareState::replace_message`；`AgentContext::from_stage` / `reconcile_to_transcript`；`run_before_agent` / `run_before_input` | hook 不再暴露 cwd/step setter、store/thread 或无法回写的 token/context 快照；首次 Receive 按链序交错执行 before_agent / before_input，后续用户批次只执行 before_input；空批次不重读历史；替换按稳定 MessageId 查找，不增删/重排，输入准备成功或 Err 后均 reconcile；StateView 无可变 queue/catalog；队列和目录分别由 QueueState/CatalogState 提供，before_model 保留消息追加，其他 hook 无输入替换能力 |
 
 ## 子系统
 
@@ -53,7 +53,7 @@
 | 工具批次提交 | stages/tool_dispatch.rs | `dispatch_tools`（:73）；ID/target 解析、原子转录、batch hook 与错误收敛 |
 | 共享调用执行 | stages/tool_dispatch/execution.rs | `collect_tool_results`（:51）；审批/并发/结算，参数复用 `tools::normalize_params` |
 | PTC 有效调用适配 | stages/tool_dispatch/effective_dispatcher.rs | `StageEffectiveToolDispatcher::dispatch`（:34）；同一 pinned catalog，内层事件 ID 关联外层调用 |
-| 阶段中间件 runner | stages/middleware_runner.rs + agent_context.rs | `run_before_agent` 结束后（含 Err）drain recall 并将稳定 ID replacement reconcile；`run_before_model`/`run_after_model` 保留追加消息双写路径 |
+| 阶段中间件 runner | stages/middleware_runner.rs + agent_context.rs | `run_before_agent` 结束后（含 Err）drain recall；它与后续批次的 `run_before_input` 均将稳定 ID replacement reconcile；`run_before_model`/`run_after_model` 保留追加消息双写路径 |
 
 ### Compact v2（src/agent/compact_v2/）
 

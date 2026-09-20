@@ -24,6 +24,7 @@ use crate::{
 ///
 /// ── Agent 生命周期级 ──
 /// 3.  before_agent           - Agent 开始执行前
+///     before_input           - 每批用户输入进入 Compact 前；首批与初始化按链序交错
 ///
 /// ── 每轮 ReAct 迭代 ──
 /// 4.  before_model           - 每轮 LLM 调用前
@@ -65,6 +66,12 @@ pub trait Middleware: Send + Sync {
     /// Agent 执行前调用
     /// 可用于初始化状态、注入上下文等
     async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
+        Ok(())
+    }
+
+    /// 每批 Receive 接纳用户输入后、Compact 前准备附件。
+    /// 首批与 before_agent 按中间件顺序交错执行；后续批次不重复初始化。
+    async fn before_input(&self, _state: &mut dyn hook_state::BeforeInputState) -> AgentResult<()> {
         Ok(())
     }
 

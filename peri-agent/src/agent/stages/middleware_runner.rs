@@ -72,11 +72,27 @@ pub async fn run_before_agent(
     // Sync messages_cache modifications back to transcript.
     // AgentContext::replace_message() updates only existing IDs in the cache;
     // Reason stage reads from the authoritative transcript, so
-    // middleware that modify existing messages (e.g. ImageMiddleware)
+    // middleware that modify existing messages during initial input preparation
     // must have their changes written through.
     if cx.messages_modified() {
         let mut transcript = ctx.session.transcript.write();
         cx.reconcile_to_transcript(&mut transcript);
+    }
+    result
+}
+
+/// 后续 Receive 的用户输入准备；即使链返回错误，也保留已经完成的替换。
+pub async fn run_before_input(
+    ctx: &StageContext,
+    input_message_ids: &[crate::messages::MessageId],
+) -> crate::error::AgentResult<()> {
+    if input_message_ids.is_empty() {
+        return Ok(());
+    }
+    let mut cx = make_context_from_stage(ctx).with_input_message_ids(input_message_ids);
+    let result = ctx.runtime.middleware_chain.run_before_input(&mut cx).await;
+    if cx.messages_modified() {
+        cx.reconcile_to_transcript(&mut ctx.session.transcript.write());
     }
     result
 }

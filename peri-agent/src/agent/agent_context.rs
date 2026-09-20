@@ -1,7 +1,7 @@
 //! 生产 v2 middleware 状态适配。
 //!
 //! messages 是 hook 链开始时的可见消息快照；add_message 双写 transcript
-//! 与缓存，replace_message 按稳定 ID 修改缓存，再由 before_agent runner
+//! 与缓存，replace_message 按稳定 ID 修改缓存，再由输入准备 runner
 //! 在链结束后统一 reconcile（包括错误路径）。recall 由 runner drain。
 //! cwd/step 委托 TurnContext，queue 与 local_tools 委托 session/runtime。
 //! 不暴露无法回写的 token/context 快照或 cwd/step setter。
@@ -19,10 +19,10 @@ pub struct AgentContext<'a> {
     /// 从 transcript.visible_messages() 克隆的消息缓存
     messages_cache: Vec<BaseMessage>,
 
-    /// 首次 Receive 的输入身份，只供本次 before_agent 链读取。
+    /// 本次 Receive 的输入身份，只供本批输入准备链读取。
     input_message_ids: Option<&'a [MessageId]>,
 
-    /// 标记已有消息是否被替换（用于 before_agent runner reconcile）
+    /// 标记已有消息是否被替换（用于输入准备 runner reconcile）
     messages_modified: bool,
 
     /// 内部 recall 缓冲区，每个 hook 执行后 drain 到 ctx.recall_buffer
@@ -62,7 +62,7 @@ impl<'a> AgentContext<'a> {
         &self.messages_cache
     }
 
-    /// 已有消息是否被替换（供 before_agent runner 决定是否需要 reconcile）
+    /// 已有消息是否被替换（供输入准备 runner 决定是否需要 reconcile）
     pub fn messages_modified(&self) -> bool {
         self.messages_modified
     }

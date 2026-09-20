@@ -65,13 +65,25 @@ impl MiddlewareChain {
             .collect()
     }
 
-    /// 顺序执行 before_agent 钩子
+    /// 首批按中间件顺序执行初始化与输入准备，后续初始化可见前面的附件转换。
     pub async fn run_before_agent(
         &self,
         state: &mut dyn hook_state::BeforeAgentState,
     ) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.before_agent(state).await?;
+            middleware.before_input(state).await?;
+        }
+        Ok(())
+    }
+
+    /// 后续输入批次仅执行输入准备，不重复 Agent 初始化。
+    pub async fn run_before_input(
+        &self,
+        state: &mut dyn hook_state::BeforeInputState,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.before_input(state).await?;
         }
         Ok(())
     }

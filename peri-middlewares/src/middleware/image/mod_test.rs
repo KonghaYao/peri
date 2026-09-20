@@ -11,6 +11,145 @@ use peri_agent::{
 
 use super::ImageMiddleware;
 
+/// [回归测试] 同一次运行中追加图片后触发 Micro，模型仍须收到图片载荷。
+/// 历史缺口：图片准备仅挂在一次性的 before_agent，第二批输入只留下 @image 文本。
+#[tokio::test]
+async fn test_image_later_input_reaches_model_after_micro_compact() {
+    use peri_agent::{
+        agent::{
+            compact_v2::CompactConfig,
+            react::{ReactLLM, Reasoning, StreamingContext},
+            stages::{run_react_loop, LoopResult},
+            token::ContextBudget,
+        },
+        messages::ToolCallRequest,
+        session::MessageQueue,
+        tools::BaseTool,
+    };
+    use std::sync::Mutex;
+    struct CapturingLlm {
+        requests: Arc<Mutex<Vec<Vec<BaseMessage>>>>,
+        queue: MessageQueue,
+        next_input: BaseMessage,
+    }
+    #[async_trait::async_trait]
+    impl ReactLLM for CapturingLlm {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(messages.to_vec());
+            if requests.len() == 1 {
+                self.queue.push(QueuedMessage::prompt(
+                    MessageSource::UserInput,
+                    self.next_input.clone(),
+                ));
+            }
+            let mut reasoning = Reasoning::with_answer("", "收到");
+            reasoning.usage = Some(peri_model::TokenUsage::new(160_000, 10));
+            Ok(reasoning)
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("input.png");
+    image::RgbImage::new(1, 1).save(&image_path).unwrap();
+    let session = Session::new(
+        Arc::from(dir.path().to_str().unwrap()),
+        FrozenContext::builder().build(),
+        None,
+    );
+    {
+        let transcript = session.transcript();
+        let mut transcript = transcript.write();
+        for i in 0..5 {
+            transcript.append(BaseMessage::human(format!("旧任务 {i}")));
+            transcript.append(BaseMessage::ai_with_tool_calls(
+                "",
+                vec![ToolCallRequest::new(
+                    format!("call-{i}"),
+                    "Bash",
+                    serde_json::json!({}),
+                )],
+            ));
+            transcript.append(BaseMessage::tool_result(
+                format!("call-{i}"),
+                "x".repeat(4_000),
+            ));
+        }
+    }
+    let first = BaseMessage::human(format!("@image {}\n先看图片", image_path.display()));
+    let later = BaseMessage::human(format!(
+        "@image {}\n按照图中的数据修改",
+        image_path.display()
+    ));
+    session.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        first.clone(),
+    ));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(ImageMiddleware::new()));
+    let ctx = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_middleware_chain(Arc::new(chain))
+    .with_llm(Arc::new(CapturingLlm {
+        requests: Arc::clone(&requests),
+        queue: session.queue().clone(),
+        next_input: later.clone(),
+    }))
+    .with_context_budget(ContextBudget::new(200_000))
+    .with_compact_config(CompactConfig {
+        micro_compact_stale_steps: 1,
+        ..Default::default()
+    })
+    .build();
+    let result = run_react_loop(ctx.clone(), 3).await;
+    assert!(
+        matches!(result, LoopResult::Completed),
+        "循环应正常完成：{result:?}"
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "追加输入驱动第二次模型请求");
+    use base64::Engine;
+    let expected_image = ContentBlock::image_base64(
+        "image/png",
+        base64::engine::general_purpose::STANDARD.encode(std::fs::read(image_path).unwrap()),
+    );
+    for (request, input) in [
+        (&requests[0], &first),
+        (&requests[1], &first),
+        (&requests[1], &later),
+    ] {
+        let message = request
+            .iter()
+            .find(|message| message.id() == input.id())
+            .unwrap();
+        assert!(
+            message.content_blocks().contains(&expected_image),
+            "每批输入都必须向模型传递图片字节"
+        );
+        assert!(!message.content().contains("@image"), "附件引用应完成转换");
+    }
+    let transcript = ctx.session.transcript.read();
+    assert!(
+        transcript
+            .entries()
+            .iter()
+            .any(|entry| transcript.flags(entry.id()).truncated),
+        "必须实际执行 Micro Compact"
+    );
+    assert!(
+        !transcript.flags(later.id()).truncated,
+        "用户图片不参与 Micro 投影"
+    );
+}
+
 #[tokio::test]
 async fn image_replacement_reaches_transcript_with_the_original_message_id() {
     let dir = tempfile::tempdir().unwrap();
