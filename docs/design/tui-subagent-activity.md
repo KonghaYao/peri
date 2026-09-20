@@ -15,8 +15,8 @@ label bold primary，summary muted 暗色，duration 右对齐」）。
 
 ```text
 // 现状：两处视觉无法区分
-   ✓ Read  src/main.rs                              37ms    ← 主时间线工具
-   ✓ Read  src/main.rs                              37ms    ← subagent 工具行（无差异）
+   ✓ Read  src/main.rs                              0.4s    ← 主时间线工具
+   ✓ Read  src/main.rs                              0.4s    ← subagent 工具行（无差异）
 ```
 
 问题：subagent 工具调用是**嵌套过程细节**，不是 transcript 顶层的独立事件。两者同口径导致：
@@ -47,7 +47,7 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 ```text
    ◐ Agent explorer  Inspecting message flow          6 tools   ← subagent 顶层行（现状不变）
    │   ⠋ Read   src/main.rs                             4s      ← 嵌套工具行（新形态）
-   │   ✓ Bash   cargo test -p peri-tui                 37ms
+   │   ✓ Bash   cargo test -p peri-tui                 0.4s
    │   × Edit   render.rs — Failed
    │   - Error: File not found at src/render.rs                ← 失败原因行（缩进对齐工具行）
 ```
@@ -62,7 +62,7 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 | ④ Verb | `format_tool_name` 本地化动词（Read/Bash/Shell/Edit…） | `sem.text.primary`，**无 bold** |
 | ⑤ 摘要 | `input_summary` 截断（预算减去缩进与 duration 列） | `sem.text.muted` |
 | ⑥ 错误词 | error 时 ` — Failed`（i18n `msg-status-failed`，同 §6.4） | `sem.status.error` + bold |
-| ⑦ duration | running 秒数 / completed 冻结值；右对齐 `term_width - 1` | `sem.text.dim` |
+| ⑦ duration | running 整数秒（`4s`）/ completed 冻结值（一位小数秒 `0.4s`，UI 不出现 `ms`）；四舍五入后即 `0.0s` 的（< 50ms）不渲染，行在 summary 处结束；右对齐到居中带右缘（`line_width`，§3.1；窄终端即 `term_width - 1`） | `sem.text.dim` |
 
 要点：
 
@@ -96,7 +96,7 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 | 状态 | 符号 | 符号色 | 其他信号 |
 | --- | --- | --- | --- |
 | running | braille 帧（100ms 推进） | `text.dim` | duration 秒数 `4s`（右对齐） |
-| completed | `✓` | `text.dim` | duration 冻结值 `37ms` |
+| completed | `✓` | `text.dim` | duration 冻结值（一位小数秒，`0.4s`；< 50ms 不显示） |
 | error | `×` | `status.error` | ` — Failed` 错误词 + 原因行（muted 正文） |
 
 - 无工具时（subagent 刚启动、子工具尚未路由）回退单行 activity 摘要——现状行为不变

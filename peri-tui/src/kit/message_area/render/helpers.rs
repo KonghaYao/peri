@@ -37,15 +37,18 @@ pub(super) fn format_running_duration(ms: u64) -> String {
     }
 }
 
-/// 已完成工具的时长格式（§6.4 `37ms` / `4.2s`；≥1min 回落秒/分格式）。
-pub(super) fn format_completed_duration(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        format_running_duration(ms)
+/// 已完成工具 / subagent 工具行的时长（§6.4）：一位小数秒，`1s` 以内不再出现
+/// `ms` 单位；≥1min 回落「Nmin Ms」。
+///
+/// 四舍五入后即 `0.0s` 的（< 50ms）返回 `None`——「极快」不携带信息，右下角
+/// 恒定一个 `0.0s` 只是噪声；该行在 summary 处结束。与格式化同源判断，避免
+/// 精度改动后阈值漂移。
+pub(super) fn format_completed_duration(ms: u64) -> Option<String> {
+    if ms >= 60_000 {
+        return Some(format_running_duration(ms));
     }
+    let text = format!("{:.1}s", ms as f64 / 1000.0);
+    (text != "0.0s").then_some(text)
 }
 
 pub(super) fn diff_change_summary(diff: &TuiDiffBlock) -> Option<String> {
