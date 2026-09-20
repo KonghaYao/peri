@@ -6,7 +6,9 @@
 //! （单选 oneOf / 多选 array+items.anyOf / 自由文本 + option description 注入）
 //! 与响应解析语义（accept/decline/cancel/未知 action/解析失败兜底）。
 
-use peri_acp_types::interaction::{InteractionResponse, QuestionItem, QuestionOption};
+use peri_acp_types::interaction::{
+    InteractionResponse, QuestionItem, QuestionOption, UnansweredCause,
+};
 use serde_json::json;
 
 use super::*;
@@ -196,6 +198,126 @@ fn test_parse_cancel_empty_answers() {
     for a in &answers {
         assert!(a.selected.is_empty());
         assert_eq!(a.text.as_deref(), Some(""), "cancel → 空 Answers");
+    }
+}
+
+/// [回归测试] 非交互客户端（`-p`）的 cancel 用 wire 字面键值声明了原因时，必须
+/// 产出 `Unanswered` —— 若落回空 `Answers`，工具会把伪造的空回答当成用户回答。
+/// 参数化覆盖字面 wire 键/值、未知取值与取值形态畸形的声明：三种都表示「已声明
+/// 无人可作答」，都不得退化为空 `Answers`。
+#[test]
+fn test_parse_cancel_with_unanswered_cause() {
+    for (label, cause_value) in [
+        ("字面 wire 键/值", json!("non_interactive_client")),
+        ("更新的客户端", json!("some_future_client")),
+        ("取值畸形", json!({"nested": "object"})),
+    ] {
+        for wire in [
+            json!({ "action": "cancel", "_meta": { "peri.elicitationUnanswered": cause_value } }),
+            json!({ "action": "cancel", "_meta": { "peri.elicitationUnanswered": cause_value, "other": 1 } }),
+        ] {
+            let response = parse_elicitation_response(wire.clone(), sample_questions());
+            assert!(
+                matches!(response, InteractionResponse::Unanswered { .. }),
+                "{label} 的 cancel 不得退化为空 Answers: {wire} → {response:?}"
+            );
+        }
+    }
+}
+
+/// 已知取值只映射到已知原因；无法识别的取值收敛成封闭的 `Unknown`，不把客户端
+/// 自由文本原样转述给模型。
+#[test]
+fn test_parse_cancel_unanswered_cause_values() {
+    let known = parse_elicitation_response(
+        json!({
+            "action": "cancel",
+            "_meta": { "peri.elicitationUnanswered": "non_interactive_client" }
+        }),
+        sample_questions(),
+    );
+    assert!(
+        matches!(
+            known,
+            InteractionResponse::Unanswered {
+                cause: UnansweredCause::NonInteractiveClient
+            }
+        ),
+        "wire 字面值 non_interactive_client 必须映射到已知原因: {known:?}"
+    );
+
+    let unknown = parse_elicitation_response(
+        json!({
+            "action": "cancel",
+            "_meta": { "peri.elicitationUnanswered": "no_free_text_ever" }
+        }),
+        sample_questions(),
+    );
+    let InteractionResponse::Unanswered { cause } = unknown else {
+        panic!("无法识别的取值仍必须产出 Unanswered: {unknown:?}");
+    };
+    assert_eq!(
+        cause,
+        UnansweredCause::Unknown,
+        "无法识别的取值必须收敛为 Unknown: {cause:?}"
+    );
+    assert!(
+        !cause.reason_text().contains("no_free_text_ever"),
+        "不得转述客户端自由文本: {}",
+        cause.reason_text()
+    );
+}
+
+/// 缺声明、decline、accept、其它 `_meta` 键与 parse 失败都不得被误判成
+/// 「无人可作答」：只有显式声明（`peri.elicitationUnanswered` 键存在）才算。
+#[test]
+fn test_parse_does_not_infer_unanswered_without_declaration() {
+    let cases = [
+        (
+            "无 _meta 的 cancel（旧客户端/生命周期结算）",
+            json!({ "action": "cancel" }),
+        ),
+        (
+            "带无关 _meta 的 cancel",
+            json!({ "action": "cancel", "_meta": { "peri.other": true } }),
+        ),
+        ("decline 不是无人可作答", json!({ "action": "decline" })),
+        (
+            "decline 带声明也不覆盖拒绝语义",
+            json!({ "action": "decline", "_meta": { "peri.elicitationUnanswered": "non_interactive_client" } }),
+        ),
+        (
+            "accept 不是无人可作答",
+            json!({ "action": "accept", "content": { "choice": "生产" } }),
+        ),
+        ("未知 action", json!({ "action": "some_future_action" })),
+        ("响应体畸形", json!({ "action": 7 })),
+    ];
+    for (label, wire) in cases {
+        let response = parse_elicitation_response(wire.clone(), sample_questions());
+        assert!(
+            !matches!(response, InteractionResponse::Unanswered { .. }),
+            "{label} 不得产出 Unanswered: {wire} → {response:?}"
+        );
+    }
+}
+
+/// [回归测试] 无原因声明的 cancel 保持旧兼容语义：带无关 `_meta` 键时仍是完整
+/// 空 `Answers`（每条问题 `text=""`），与 [`test_parse_cancel_empty_answers`]
+/// 的裸 cancel 同形，不得被升级成 `Unanswered`。
+#[test]
+fn test_parse_cancel_without_declaration_keeps_legacy_empty_answers() {
+    let response = parse_elicitation_response(
+        json!({ "action": "cancel", "_meta": { "peri.other": true } }),
+        sample_questions(),
+    );
+    let InteractionResponse::Answers(answers) = response else {
+        panic!("无声明 cancel 应保持空 Answers: {response:?}");
+    };
+    assert_eq!(answers.len(), 3);
+    for a in &answers {
+        assert!(a.selected.is_empty());
+        assert_eq!(a.text.as_deref(), Some(""), "无声明 cancel → 空 Answers");
     }
 }
 

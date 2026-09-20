@@ -14,10 +14,13 @@ use agent_client_protocol::schema::v1::StopReason;
 use anyhow::Result;
 use peri_acp::host::assemble::{HostAssemblyInput, assemble_server_config};
 use peri_acp::transport::mpsc::mpsc_transport_pair;
+use peri_acp_types::interaction::UnansweredCause;
 use peri_acp_types::messages::MessageContent;
 use peri_tui::acp_client::{
     AcpDeployment, AcpNotification, AcpTuiClient,
-    interaction_response::{elicitation_cancel_response, permission_selected_allow_once_response},
+    interaction_response::{
+        elicitation_unanswered_response, permission_selected_allow_once_response,
+    },
 };
 use serde_json::{Value, json};
 
@@ -291,8 +294,9 @@ fn print_permission_response() -> Value {
     permission_selected_allow_once_response()
 }
 
+/// `-p` 无交互界面：声明「无人可作答」而非裸 cancel，工具据此如实转述。
 fn print_elicitation_response() -> Value {
-    elicitation_cancel_response()
+    elicitation_unanswered_response(UnansweredCause::NonInteractiveClient)
 }
 
 /// 事件输出器：消费 ACP 协议化事件（session/update 通知），输出格式与
@@ -589,11 +593,17 @@ mod tests {
         assert_eq!(selected.option_id.0.as_ref(), "allow_once");
     }
 
+    /// [回归测试] `-p` 取消 elicitation 时必须声明「无人可作答」，否则 broker
+    /// 只能把它当成裸 cancel → 空答案，模型会把伪造的空回答当真。
     #[test]
-    fn test_print_elicitation_response_is_cancel() {
+    fn test_print_elicitation_response_declares_non_interactive_client() {
         let response: CreateElicitationResponse =
             serde_json::from_value(print_elicitation_response()).unwrap();
         assert!(matches!(response.action, ElicitationAction::Cancel));
+        assert_eq!(
+            UnansweredCause::from_meta(response.meta.as_ref()),
+            Some(UnansweredCause::NonInteractiveClient)
+        );
     }
 }
 

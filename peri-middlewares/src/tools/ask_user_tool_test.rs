@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::*;
 use peri_agent::interaction::{
-    InteractionContext, InteractionResponse, QuestionAnswer, UserInteractionBroker,
+    InteractionContext, InteractionResponse, QuestionAnswer, UnansweredCause, UserInteractionBroker,
 };
 
 struct MockBroker(InteractionResponse);
@@ -210,6 +210,52 @@ async fn test_unexpected_response_type() {
         )
         .await;
     assert!(result.is_err(), "non-Answers response should return Err");
+}
+
+/// [回归测试] 客户端声明无人可作答时，工具必须如实转述原因，而不是返回伪造的
+/// 空回答文本（旧行为：`[问: H1]\n回答: `）。
+///
+/// 参数化覆盖已知原因与未知原因：前者指明非交互客户端，后者只能说明「无人可
+/// 作答」且不得声称是 `-p`。两者都只能是失败的工具结果（`ToolRejected`）。
+#[tokio::test]
+async fn test_unanswered_reports_declared_reason() {
+    for (cause, expected, forbidden) in [
+        (
+            UnansweredCause::NonInteractiveClient,
+            "非交互",
+            "本次提问无人可作答",
+        ),
+        (UnansweredCause::Unknown, "本次提问无人可作答", "-p"),
+    ] {
+        let tool = make_tool(InteractionResponse::Unanswered { cause });
+        let err = tool
+            .invoke(
+                single_question_input(),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .expect_err("unanswered 必须返回错误，不得伪造空回答");
+        assert!(
+            matches!(
+                err.downcast_ref::<peri_agent::error::AgentError>(),
+                Some(peri_agent::error::AgentError::ToolRejected { .. })
+            ),
+            "应保持 ToolRejected 语义: {err}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains(expected),
+            "{cause:?} 的错误文本必须如实说明: {message}"
+        );
+        assert!(
+            !message.contains(forbidden),
+            "{cause:?} 不得转述未声明的原因: {message}"
+        );
+        assert!(
+            !message.contains("拒绝回答") && !message.contains("回答: "),
+            "{cause:?} 不得声称为用户拒绝，也不得携带伪造的回答: {message}"
+        );
+    }
 }
 
 #[test]

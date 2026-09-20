@@ -2,7 +2,7 @@ pub use peri_acp_types::interaction::{
     short_request_id, ApprovalDecision, ApprovalItem, ChannelNotification,
     ChannelNotificationSender, ChannelState, InteractionContext, InteractionResponse,
     PermissionRequest, PermissionResponse, QuestionAnswer, QuestionItem, QuestionOption,
-    UserInteractionBroker,
+    UnansweredCause, UserInteractionBroker, ELICITATION_UNANSWERED_META_KEY,
 };
 
 pub mod channel_state;

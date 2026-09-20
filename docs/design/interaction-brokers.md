@@ -51,6 +51,7 @@ pub trait UserInteractionBroker: Send + Sync {
 | `Decisions(Vec<ApprovalDecision>)` | 审批决策（Approve / Reject / Edit / Respond） |
 | `Answers(Vec<QuestionAnswer>)` | 问题答案 |
 | `Rejected` | 用户明确拒绝交互 |
+| `Unanswered { cause: UnansweredCause }` | 无人可作答：客户端（如 `-p` 打印模式）声明正常收到提问但无法提供交互界面；`cause` 区分已知原因（`NonInteractiveClient`）与无法识别的声明（`Unknown`）。工具侧以失败结果如实转述，不伪造空答案 |
 
 ### 2.2 Broker 类型
 

@@ -1,12 +1,16 @@
 use std::process::Stdio;
 use std::time::Duration;
 
+use peri_acp_types::interaction::UnansweredCause;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::process::Command;
 
 const ANSWER: &str = "print-exit-regression-answer";
+// AskUserQuestion 场景里问题的选项标签：伪造回答只可能来自它，工具结果不含它
+// 才证明确实没有把空答案当回答转述出去。
+const ASK_USER_OPTION: &str = "print-exit-regression-option";
 
 #[derive(Clone, Copy)]
 enum ProviderScenario {
@@ -15,6 +19,7 @@ enum ProviderScenario {
     ReadFile,
     Truncated,
     RecoverFromTruncation,
+    AskUser,
 }
 
 async fn run_print(format: &str, scenario: ProviderScenario, bare: bool) -> std::process::Output {
@@ -48,7 +53,9 @@ async fn run_print(format: &str, scenario: ProviderScenario, bare: bool) -> std:
     let provider = tokio::spawn(async move {
         let steps = match scenario {
             ProviderScenario::Answer | ProviderScenario::Reject => 1,
-            ProviderScenario::ReadFile | ProviderScenario::RecoverFromTruncation => 2,
+            ProviderScenario::ReadFile
+            | ProviderScenario::RecoverFromTruncation
+            | ProviderScenario::AskUser => 2,
             ProviderScenario::Truncated => 3,
         };
         for step in 0..steps {
@@ -102,6 +109,10 @@ async fn run_print(format: &str, scenario: ProviderScenario, bare: bool) -> std:
                     "后续真实请求包含截断续跑提醒"
                 );
             }
+            if matches!(scenario, ProviderScenario::AskUser) && step == 1 {
+                assert_ask_user_result_is_unanswered(&body);
+            }
+
             let (status, content_type, response) = if matches!(scenario, ProviderScenario::Reject) {
                 (
                     "401 Unauthorized",
@@ -112,18 +123,43 @@ async fn run_print(format: &str, scenario: ProviderScenario, bare: bool) -> std:
                     .to_string(),
                 )
             } else {
-                let call_tool = matches!(scenario, ProviderScenario::ReadFile) && step == 0;
+                // step 0 请求工具，step 1 给出终答（工具结果已在上方断言）。
+                let tool_call = match (scenario, step) {
+                    (ProviderScenario::ReadFile, 0) => {
+                        Some(("read-big", "Read", json!({"file_path": big_file})))
+                    }
+                    (ProviderScenario::AskUser, 0) => Some((
+                        "ask-user-question-1",
+                        "AskUserQuestion",
+                        json!({"questions": [{
+                            "question": "选择部署环境？",
+                            "header": "部署环境",
+                            "multiSelect": false,
+                            "options": [{"label": ASK_USER_OPTION, "description": "fixture 选项"}]
+                        }]}),
+                    )),
+                    _ => None,
+                };
                 let truncate = matches!(scenario, ProviderScenario::Truncated)
                     || (matches!(scenario, ProviderScenario::RecoverFromTruncation) && step == 0);
-                let content = if call_tool {
-                    json!({"type": "tool_use", "id": "read-big", "name": "Read", "input": {}})
-                } else {
-                    json!({"type": "text", "text": ""})
+                let content = match &tool_call {
+                    Some((id, name, _)) => {
+                        json!({"type": "tool_use", "id": id, "name": name, "input": {}})
+                    }
+                    None => json!({"type": "text", "text": ""}),
                 };
-                let delta = if call_tool {
-                    json!({"type": "input_json_delta", "partial_json": json!({"file_path": big_file}).to_string()})
+                let delta = match &tool_call {
+                    Some((_, _, input)) => {
+                        json!({"type": "input_json_delta", "partial_json": input.to_string()})
+                    }
+                    None => json!({"type": "text_delta", "text": ANSWER}),
+                };
+                let stop_reason = if tool_call.is_some() {
+                    "tool_use"
+                } else if truncate {
+                    "max_tokens"
                 } else {
-                    json!({"type": "text_delta", "text": ANSWER})
+                    "end_turn"
                 };
                 let events = [
                     (
@@ -142,7 +178,7 @@ async fn run_print(format: &str, scenario: ProviderScenario, bare: bool) -> std:
                     ("content_block_stop", json!({"index": 0})),
                     (
                         "message_delta",
-                        json!({"delta": {"stop_reason": if call_tool {"tool_use"} else if truncate {"max_tokens"} else {"end_turn"}},
+                        json!({"delta": {"stop_reason": stop_reason},
                     "usage": {"input_tokens": if step == 0 {100} else {500},
                               "cache_read_input_tokens": 20, "cache_creation_input_tokens": 30,
                               "output_tokens": if step == 0 {7} else {11}}}),
@@ -202,6 +238,35 @@ async fn run_print(format: &str, scenario: ProviderScenario, bare: bool) -> std:
         .expect("the CLI must have reached the provider")
         .unwrap();
     output
+}
+
+/// [回归测试] 第二次真实 provider 请求必须带回诚实的失败工具结果：`is_error=true`、
+/// 如实说明客户端无法交互，且不含伪造的空回答（旧行为：`-p` 的 cancel 兜底成空
+/// `Answers`，工具把它转述成「回答: 」空串，模型会当成用户已经回答）。
+fn assert_ask_user_result_is_unanswered(body: &Value) {
+    let tool_result = body["messages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("messages 必须是数组: {body}"))
+        .iter()
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .find(|block| {
+            block["type"] == "tool_result" && block["tool_use_id"] == "ask-user-question-1"
+        })
+        .unwrap_or_else(|| panic!("后续请求必须包含 AskUserQuestion 的 tool_result: {body}"));
+    assert_eq!(
+        tool_result["is_error"], true,
+        "无人可作答必须以失败工具结果上报: {tool_result}"
+    );
+    let content = tool_result["content"].to_string();
+    assert!(
+        content.contains(UnansweredCause::NonInteractiveClient.reason_text()),
+        "工具结果必须如实说明客户端没有交互界面: {content}"
+    );
+    assert!(
+        !content.contains(ASK_USER_OPTION) && !content.contains("回答: "),
+        "工具结果不得携带伪造的回答: {content}"
+    );
 }
 
 #[tokio::test]
@@ -363,4 +428,55 @@ async fn truncated_answer_recovers_and_exits_process_successfully() {
     assert_eq!(result["status"], "completed");
     assert_eq!(result["is_error"], false);
     assert!(result.get("cleanup_error").is_none());
+}
+
+/// [回归测试] 真实 `-p` 收到 elicitation 后必须以失败工具结果如实说明「无人可
+/// 作答」，不得把 `-p` 的 cancel 兜底成空回答，且进程在限时内自行退出。
+///
+/// provider 只在第二次请求断言（见 `assert_ask_user_result_is_unanswered`），
+/// 格式维度覆盖同一链路的三种输出形态。
+#[tokio::test]
+async fn ask_user_unanswered_exits_process_without_fabricated_answer() {
+    for format in ["text", "json", "stream-json"] {
+        let output = run_print(format, ProviderScenario::AskUser, true).await;
+        assert!(
+            output.status.success(),
+            "无人可作答仍须正常结束本轮（{format}）：{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        match format {
+            "stream-json" => {
+                let events: Vec<Value> = text
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                let tool_result = events
+                    .iter()
+                    .find(|event| {
+                        event["type"] == "tool_result" && event["id"] == "ask-user-question-1"
+                    })
+                    .unwrap_or_else(|| panic!("stream-json 必须输出工具结果: {events:?}"));
+                assert!(
+                    tool_result["output"]
+                        .as_str()
+                        .unwrap()
+                        .contains(UnansweredCause::NonInteractiveClient.reason_text()),
+                    "可见工具结果必须如实说明无法交互: {tool_result}"
+                );
+                assert_eq!(
+                    events.last().unwrap(),
+                    &json!({"type": "result", "stop_reason": "end_turn", "status": "completed", "is_error": false, "total_cost_usd": null,
+                    "usage": {"input_tokens": 600, "cache_read_input_tokens": 40, "cache_creation_input_tokens": 60, "output_tokens": 18}})
+                );
+            }
+            "json" => {
+                let result: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(result["type"], "result");
+                assert_eq!(result["content"], ANSWER);
+                assert_eq!(result["status"], "completed");
+            }
+            _ => assert_eq!(text.trim(), ANSWER),
+        }
+    }
 }
