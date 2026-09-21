@@ -40,7 +40,7 @@ pub(crate) fn build_agent(
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     thread_persistence: ThreadPersistence,
     goal_controller: Option<Arc<dyn GoalController>>,
-    task_manager: Option<Arc<TaskManager>>,
+    task_manager: Arc<TaskManager>,
     on_bg_complete: Option<OnBgCompleteFn>,
     cached_llm: Option<&CachedLlmInstances>,
 ) -> (AcpAgentOutput, Option<CachedLlmInstances>) {
@@ -95,14 +95,6 @@ pub(crate) fn build_agent(
     // 其余中间件构造（HITL / AskUser / 父工具集 / SubAgent / 链装配）已随 L2
     // 迁至 peri-middlewares::assembly（链序事实源：Agent 层 session 工厂），
     // 本函数仅构造装配上下文并调用。
-
-    // 后台任务通知通道
-    // 装配注入的 per-session TaskManager（L1：BackgroundTaskRegistry per-session
-    // 实例化，经 Arc<dyn TaskManager> downcast 还原）。无注入时（NoopTaskManager
-    // 降级 / print mode）回退临时实例：AssemblyContext.task_manager 为必填
-    // Arc（装配契约），SubAgentMiddleware 依赖它注册子 agent（行为契约，
-    // 见 ARC-MIDDLEWARE-001 装配面）。
-    let task_manager = task_manager.unwrap_or_else(|| Arc::new(TaskManager::new()));
 
     // 后台任务完成事件的独立通道（不随 executor 生命周期销毁）
     let (bg_event_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();

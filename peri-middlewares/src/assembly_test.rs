@@ -1687,3 +1687,288 @@ fn chain_collected_gated_sections_match_projection() {
         "链收集与投影一致（11_subagent 消失）: {collected_ids:?}"
     );
 }
+
+struct ReminderGoalController(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl GoalController for ReminderGoalController {
+    async fn create_goal(&self, _: String) -> Result<(), String> {
+        Ok(())
+    }
+    async fn complete_goal(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn block_goal(&self, _: String) -> Result<(), String> {
+        Ok(())
+    }
+    async fn clear_goal(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn increment_continuation(&self) -> Result<(), String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn snapshot(&self) -> GoalViewSnapshot {
+        GoalViewSnapshot {
+            objective: Some("核对后台交付".into()),
+            status: Some(peri_agent::goal::GoalStatus::Active),
+            ..Default::default()
+        }
+    }
+}
+
+/// [回归测试] fallback manager 曾仅注入工具，未注入完成提醒 probe 与子任务 host。
+/// 经真实 stage builder 和生产 Todo/Goal 槽位装配，不手工设置 idle_should_wait。
+#[tokio::test]
+async fn test_stage_completion_reminders_share_assembled_task_manager() {
+    use peri_acp_types::session::SessionInbox;
+    use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as _};
+    use peri_agent::{
+        agent::{react::AgentOutput, stages::middleware_runner},
+        session::{
+            exec::{
+                executor::FrozenSessionData,
+                stage_builder::{build_stage_context, StageBuildInput},
+            },
+            factory::{ChainAssembly, MiddlewareChainAssembler},
+            FrozenContext, MessageQueue,
+        },
+    };
+    struct CaptureAssembler(parking_lot::Mutex<Option<Arc<TaskManager>>>);
+    impl MiddlewareChainAssembler for CaptureAssembler {
+        type Context = AssemblyContext;
+        type Output = ChainAssembly;
+        fn assemble(&self, _: &[ChainSlot], ctx: &AssemblyContext) -> ChainAssembly {
+            *self.0.lock() = Some(ctx.task_manager.clone());
+            // 仅保留目标槽位，避免其他中间件读取用户配置或建立外部连接。
+            ProductionChainAssembler.assemble(
+                &[
+                    ChainSlot::Terminal,
+                    ChainSlot::Todo,
+                    ChainSlot::SubAgent,
+                    ChainSlot::Goal,
+                ],
+                ctx,
+            )
+        }
+    }
+    for supplied in [true, false] {
+        for kind in [BgTaskKind::Agent, BgTaskKind::Workflow, BgTaskKind::Shell] {
+            let fixture = tempfile::tempdir().unwrap();
+            let queue = MessageQueue::new();
+            let input = StageBuildInput {
+                cwd: fixture.path().to_string_lossy().into_owned(),
+                session_id: "completion-assembly".into(),
+                cancel: Default::default(),
+                broker: Arc::new(FakeBroker),
+                permission_mode: SharedPermissionMode::new(PermissionMode::Default),
+                plugin_skill_roots: vec![],
+                plugin_loaded: vec![],
+                hook_groups: vec![],
+                session_start_source: None,
+                cron_scheduler: None,
+                mcp_pool: None,
+                dynamic_mcp: None,
+                session_mcp_capability: None,
+                dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
+                channel_state: None,
+                tool_search_index: Arc::new(ToolSearchIndex::new()),
+                shared_tools: Arc::new(RwLock::new(BTreeMap::new())),
+                lsp_servers: vec![],
+                lsp_pool: None,
+                workflow_executor: None,
+                workflow_middleware: None,
+                thread_store: None,
+                thread_id: None,
+                model_name: "test".into(),
+                provider_name: "test".into(),
+                context_window: 128_000,
+                claude_md_excludes: vec![],
+                language: None,
+                compact_config: Default::default(),
+                retry_events: Default::default(),
+                primary_llm_factory: Arc::new(|| Arc::new(FakeModel)),
+                auto_classifier_factory: Arc::new(|| {
+                    Arc::new(tokio::sync::Mutex::new(Box::new(FakeModel)))
+                }),
+                llm_factory: Arc::new(|_| Box::new(FakeLlm)),
+                provider_fp: "test".into(),
+                render_system_prompt: Arc::new(|_, _| String::new()),
+                system_builder: Arc::new(|_, _| String::new()),
+                langfuse_bridge_factory: None,
+                shared_queue: queue.clone(),
+                idle_inbox: Some(Arc::new(SessionInbox::new(Arc::new(queue)))),
+                idle_suspended_flag: None,
+                launch_cron_bridge: None,
+                launch_mcp_subscription: None,
+                mcp_skill_registry: None,
+                command_registry: None,
+                tool_invocation_resolver: Arc::new(peri_agent::tools::DirectToolInvocationResolver),
+                compact_pre_hook: None,
+                compact_post_hook: None,
+                meta_harness_disabled: Default::default(),
+            };
+            let assembler = CaptureAssembler(parking_lot::Mutex::new(None));
+            let manager = supplied.then(|| Arc::new(TaskManager::new()));
+            let controller = Arc::new(ReminderGoalController(Default::default()));
+            let (built, _) = build_stage_context(
+                &input,
+                &assembler,
+                None,
+                FrozenSessionData::from_frozen_parts(FrozenContext::builder().build(), None),
+                Arc::new(FakeEventHandler),
+                None,
+                vec![],
+                None,
+                None,
+                Default::default(),
+                Some(controller.clone()),
+                manager.clone(),
+                None,
+            )
+            .unwrap();
+            let assembled_manager = assembler.0.lock().clone().unwrap();
+            if let Some(manager) = manager {
+                assert!(
+                    Arc::ptr_eq(&manager, &assembled_manager),
+                    "不可替换注入的 session manager"
+                );
+            }
+            let todo = built
+                .context
+                .runtime
+                .tools
+                .read()
+                .get("TodoWrite")
+                .unwrap()
+                .clone();
+            todo.invoke(
+                serde_json::json!({
+                    "requireCompletion": true,
+                    "todos": [{"content": "等待后台交付", "status": "pending"}]
+                }),
+                peri_agent::tools::ToolContext::new(&[], &input.cwd),
+            )
+            .await
+            .unwrap();
+            let real_shell = cfg!(unix) && kind == BgTaskKind::Shell;
+            if real_shell {
+                // 实际执行装配出来的 Bash，验证工具端不是另一个 manager。
+                let bash = built
+                    .context
+                    .runtime
+                    .tools
+                    .read()
+                    .get("Bash")
+                    .unwrap()
+                    .clone();
+                bash.invoke(
+                    serde_json::json!({
+                        "command": "while [ ! -f release ]; do sleep 0.01; done",
+                        "run_in_background": true,
+                        "timeout": 5000
+                    }),
+                    peri_agent::tools::ToolContext::new(&[], &input.cwd),
+                )
+                .await
+                .unwrap();
+                assert_eq!(assembled_manager.active_count(), 1);
+            } else {
+                assembled_manager
+                    .register(BgTaskRegistration {
+                        task_id: "pending".into(),
+                        kind,
+                        summary: "后台替身".into(),
+                        pid: None,
+                        kill: Some(Box::new(|| {})),
+                    })
+                    .unwrap();
+            }
+            let output = AgentOutput::new("等待后台完成", 1);
+            let result = middleware_runner::run_after_agent(&built.context, output.clone())
+                .await
+                .unwrap();
+            assert!(
+                result.block_continue.is_none(),
+                "supplied={supplied}, {kind:?}: 装配后的后台任务必须抑制提醒"
+            );
+            assert!(built.session.queue().is_empty());
+            assert_eq!(controller.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+            let host = built
+                .session
+                .subagent_host()
+                .expect("主 session 应有子任务 host");
+            assert!(Arc::ptr_eq(
+                host.task_manager.as_ref().unwrap(),
+                &assembled_manager
+            ));
+            if real_shell {
+                std::fs::write(fixture.path().join("release"), "go").unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while assembled_manager.active_count() > 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("Bash 应自然结束并移除活跃条目");
+                assert_eq!(
+                    assembled_manager.shutdown().await,
+                    peri_acp_types::tasks::TaskShutdownReport::Complete
+                );
+            } else {
+                assert!(assembled_manager.complete(
+                    "pending",
+                    peri_agent::agent::events::BackgroundTaskResult {
+                        task_id: "pending".into(),
+                        agent_name: "test".into(),
+                        prompt_summary: String::new(),
+                        success: true,
+                        output: String::new(),
+                        tool_calls_count: 0,
+                        duration_ms: 0,
+                        child_thread_id: None,
+                        timed_out: false,
+                        subagent_failure: None,
+                        shell_output: None,
+                    }
+                ));
+            }
+            let result = middleware_runner::run_after_agent(&built.context, output.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                result.block_continue.as_deref(),
+                Some("todo_require_completion")
+            );
+            assert_eq!(
+                built.session.queue().drain_all().len(),
+                1,
+                "双开时 Todo 优先，不重复注入 Goal"
+            );
+            assert_eq!(controller.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+            todo.invoke(
+                serde_json::json!({
+                    "requireCompletion": true,
+                    "todos": [{"content": "等待后台交付", "status": "completed"}]
+                }),
+                peri_agent::tools::ToolContext::new(&[], &input.cwd),
+            )
+            .await
+            .unwrap();
+            let result = middleware_runner::run_after_agent(&built.context, output.clone())
+                .await
+                .unwrap();
+            assert_eq!(result.block_continue.as_deref(), Some("goal_active"));
+            assert_eq!(built.session.queue().drain_all().len(), 1);
+            assert_eq!(controller.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let mut blocked = output;
+            blocked.block_continue = Some("stop_hook_block".into());
+            let result = middleware_runner::run_after_agent(&built.context, blocked)
+                .await
+                .unwrap();
+            assert_eq!(result.block_continue.as_deref(), Some("stop_hook_block"));
+            assert!(built.session.queue().is_empty());
+            assert_eq!(controller.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+}

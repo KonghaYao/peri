@@ -3,7 +3,7 @@
 //! goal active 且无后台任务或既有 stop block 时注入提示并设 block_continue，executor 自动续跑。
 //! agent 必须调 goal(complete) 或 goal(block) 才能终止循环。
 //!
-//! 注入路径：通过 v2 MessageQueue push canonical Defer reminder（Receive 保留 → End 消费唤醒续跑）。
+//! 注入路径：通过 v2 MessageQueue push canonical Defer reminder（下一次 Receive 消费并唤醒续跑）。
 //! 结构化 reminder 在模型投影边界编码为 Human role，不破坏 frozen_system_prompt。
 
 use peri_agent::middleware::capabilities as hook_state;
