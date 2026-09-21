@@ -23,6 +23,7 @@ pub mod agents_md;
 pub mod artifact;
 pub mod assembly;
 pub mod claude_agent_parser;
+mod completion_reminder;
 pub mod git_watch;
 pub mod goal;
 pub mod goal_middleware;
