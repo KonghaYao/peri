@@ -23,7 +23,7 @@ Platform behavior:
 - Windows: uses powershell -NoProfile -NoLogo -NonInteractive -Command to execute commands
 - Unix/macOS: uses bash -c to execute commands
 - On Unix, child processes run in their own process group. When termination is requested, cleanup targets the process group; this does not apply to a foreground timeout that continues in the background.
-- On Windows, termination uses taskkill for the PowerShell process tree; Unix process-group semantics do not apply.
+- On Windows, Bash cleanup commands use taskkill for the PowerShell process tree; Unix process-group semantics do not apply.
 - The command's stdin is redirected to /dev/null: interactive commands (read, prompts, editors, stdio services waiting on stdin) fail fast with an EOF error instead of hanging until timeout. Do not rely on terminal input; provide input via pipes or files instead
 
 Output handling:
@@ -34,6 +34,9 @@ Output handling:
 
 Background mode (run_in_background: true):
 - Returns immediately with a `task_id`, the process `pid` of the background shell, and log file paths for live output
-- To stop the task, run another shell command with `kill <pid>` (use `kill -- -<pid>` to kill the whole process group including child processes)
+- Run the service in the foreground inside this already-backgrounded shell: do not add `&`, use `Start-Job`, or detach it with `Start-Process` without `-Wait`.
+- Linux/macOS: the returned `pgid` identifies this task's independent process group. Use `kill -TERM -- -<pgid>`, then `kill -KILL -- -<pgid>` only if it remains after a grace period. Killing only the shell PID can leave the service and its output pipes alive.
+- Windows: use `taskkill /PID <pid> /T` to target the process tree; add `/F` if needed. If the parent PID has already exited, this cannot reliably find its descendants: use existing task cancellation or identify the remaining child processes. Never apply Unix negative-PID commands on Windows.
+- Preserve cleanup errors and verify actual process exit and the background completion notification. Do not hide a failed kill with `2>/dev/null` or report success merely because a trailing `echo cleaned` succeeded.
 - Read the stdout/stderr log files at any time (they append while the command runs); monitor status and output preview in the Tasks panel
 - The full captured output also arrives via a completion notification when the task finishes

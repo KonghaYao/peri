@@ -18,6 +18,26 @@ use tracing::warn;
 
 use crate::tools::output_persist::persist_truncated_output_with_ref;
 
+// Render only the host platform's cleanup command; Unix PGIDs are not Windows PIDs.
+fn background_cleanup_hint(pid: u32, platform: &str) -> String {
+    let stop = if platform == "windows" {
+        format!(
+            "- Stop the process tree: `taskkill /PID {pid} /T`; add `/F` if forced termination is needed. \
+             If this parent PID has already exited, taskkill cannot be relied on to find its descendants; \
+             use the existing Tasks panel cancellation or identify the remaining child processes."
+        )
+    } else {
+        format!(
+            "pgid: {pid}\n- Stop the whole process group (Linux/macOS): `kill -TERM -- -{pid}`. \
+             Do not kill only the shell PID. If the group remains after a grace period, use `kill -KILL -- -{pid}`."
+        )
+    };
+    format!(
+        "{stop}\n- A successful kill command only sends a termination request. Check errors and verify \
+         process exit and the background completion notification before reporting cleanup complete."
+    )
+}
+
 /// BashTool - 终端命令执行工具，与 TypeScript TerminalMiddleware 对齐
 const BASH_DESCRIPTION: &str = include_str!("descriptions/bash.md");
 pub struct BashTool {
@@ -313,14 +333,12 @@ impl BaseTool for BashTool {
             );
             match handle.pid {
                 Some(pid) => {
+                    let cleanup_hint = background_cleanup_hint(pid, std::env::consts::OS);
                     msg.push_str(&format!(
                         "\npid: {pid}\n\
-                         - Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n\
+                         {cleanup_hint}\n\
                          - Live output: Read the log file {}",
-                        handle
-                            .stdout_log
-                            .as_deref()
-                            .unwrap_or("<unavailable>")
+                        handle.stdout_log.as_deref().unwrap_or("<unavailable>")
                     ));
                     if let Some(stderr_log) = handle.stderr_log.as_deref() {
                         msg.push_str(&format!(" (stderr: {stderr_log})"));
@@ -513,10 +531,12 @@ impl BaseTool for BashTool {
                                     );
                                 }))?;
                                 output_capture.retain_files();
+                                let cleanup_hint =
+                                    background_cleanup_hint(pid, std::env::consts::OS);
                                 if has_output {
                                     // 有部分输出：进程在产生进展，续跑是合理的
                                     return Ok(ToolOutput::with_execution(format!(
-                                        "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.\n- Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
+                                        "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.\n{cleanup_hint}\n{partial_hint}\nCommand that timed out: {command}",
                                         ms as f64 / 1000.0
                                     ), ToolExecutionEvidence {
                                         status: ToolExecutionStatus::RunningAfterTimeout,
@@ -529,7 +549,7 @@ impl BaseTool for BashTool {
                                 // 无输出：进程可能挂起（等输入/资源）而非正常变慢——
                                 // 仍 promote（避免误杀静默启动的慢任务），但如实说明不确定性
                                 return Ok(ToolOutput::with_execution(format!(
-                                    "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).\nIf it does not complete on its own, terminate it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
+                                    "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).\n{cleanup_hint}\n{partial_hint}\nCommand that timed out: {command}",
                                     ms as f64 / 1000.0
                                 ), ToolExecutionEvidence {
                                     status: ToolExecutionStatus::RunningAfterTimeout,
@@ -642,7 +662,8 @@ impl BaseTool for BashTool {
                     }))?;
                     output_capture.retain_files();
                     output.push_str(&format!(
-                        "\nRemaining processes continue as background task {task_id}."
+                        "\nRemaining processes continue as background task {task_id}.\npid: {pid}\n{}",
+                        background_cleanup_hint(pid, std::env::consts::OS)
                     ));
                 } else {
                     execution.release_unmanaged();

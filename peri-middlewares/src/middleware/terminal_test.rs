@@ -1186,3 +1186,94 @@ async fn test_sync_timeout_promote_with_output_notes_progress() {
     tokio::time::sleep(Duration::from_millis(2300)).await;
     assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
 }
+
+#[test]
+fn test_background_cleanup_hints_match_host_platform() {
+    for platform in ["linux", "macos", "windows"] {
+        let hint = background_cleanup_hint(5036, platform);
+        assert!(hint.contains("verify process exit"));
+        assert!(hint.contains("completion notification"));
+        if platform == "windows" {
+            assert!(hint.contains("taskkill /PID 5036 /T"));
+            assert!(hint.contains("add `/F`"));
+            assert!(hint.contains("parent PID has already exited"));
+            assert!(!hint.contains("pgid:"));
+            assert!(!hint.contains("kill -TERM"));
+        } else {
+            assert!(hint.contains("pgid: 5036"));
+            assert!(hint.contains("kill -TERM -- -5036"));
+            assert!(hint.contains("kill -KILL -- -5036"));
+            assert!(!hint.contains("taskkill"));
+        }
+        assert!(!hint.contains("`kill 5036`"));
+    }
+}
+
+/// [回归测试] 父 shell 已退、后代持管道时，既有 Bash 整组停止可使原执行链结算。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bash_group_cleanup_settles_descendant_after_parent_exit() {
+    let fixture = tempfile::tempdir().unwrap();
+    let manager = Arc::new(TaskManager::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tool = BashTool::new(fixture.path().to_str().unwrap())
+        .with_task_manager(manager.clone())
+        .with_on_bg_complete(Arc::new(move |result, _| {
+            let _ = tx.send(result.clone());
+        }));
+    let started = tool
+        .invoke(
+            serde_json::json!({"command": "sleep 60 & echo $! > descendant.pid", "run_in_background": true}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let pgid = started
+        .lines()
+        .find_map(|line| line.strip_prefix("pgid: "))
+        .unwrap();
+    let parent_exited = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let alive = tokio::process::Command::new("kill")
+                .args(["-0", pgid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .unwrap()
+                .success();
+            if fixture.path().join("descendant.pid").exists() && !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let active_before_stop = manager.active_count();
+    let stopped = tool
+        .invoke(
+            serde_json::json!({"command": format!("kill -TERM -- -{pgid}")}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    let completed = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
+    let shutdown = peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await;
+    parent_exited.expect("fixture parent must exit before cleanup");
+    assert_eq!(
+        active_before_stop, 1,
+        "descendant still owns the output pipes"
+    );
+    stopped.expect("group termination through Bash must succeed");
+    let result = completed
+        .expect("existing worker must settle after group exit")
+        .unwrap();
+    assert!(
+        result.shell_output.unwrap().complete,
+        "both output pipes must settle"
+    );
+    assert_eq!(manager.active_count(), 0);
+    assert_eq!(
+        shutdown,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
+}
