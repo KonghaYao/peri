@@ -99,7 +99,7 @@ fn test_bg_tool_sync_preserves_event_order() {
             completed_at: None,
         });
     crate::kit::bg_task_live::seed_live_from_started("task-order", "agent", "bg", None);
-    crate::kit::bg_task_live::init_agent_live_detail("task-order", "bg-order", "coder");
+    crate::kit::bg_task_live::init_agent_live_detail("task-order", "bg-order", "coder", None);
 
     crate::kit::bg_task_live::handle_bg_tool_started(
         "bg-order",
@@ -194,16 +194,18 @@ fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
         }),
     );
 
-    let snap = VIEW_MODELS.state();
-    let snapshot = snap.read();
-    let group = snapshot
-        .items
-        .iter()
-        .find_map(|item| match item {
-            TuiRenderUnit::TuiSubAgentGroup(g) if g.agent_id == "bg-agent" => Some(g.clone()),
-            _ => None,
-        })
-        .expect("归档后 VIEW_MODELS 仍留有 bg 组");
+    let group = {
+        let snap = VIEW_MODELS.state();
+        let snapshot = snap.read();
+        snapshot
+            .items
+            .iter()
+            .find_map(|item| match item {
+                TuiRenderUnit::TuiSubAgentGroup(g) if g.agent_id == "bg-agent" => Some(g.clone()),
+                _ => None,
+            })
+            .expect("归档后 VIEW_MODELS 仍留有 bg 组")
+    };
     let group_texts: Vec<String> = group
         .view_models
         .iter()
@@ -233,6 +235,13 @@ fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
         live_texts,
         vec!["first+second".to_string()],
         "跨边界后的 bg 内容只累积在 BG_LIVE_DETAIL"
+    );
+    // 面板靠这层对应关系把「选中的组」对到「哪一次运行」：agent_id 在 resume 时
+    // 被复用，只有 instance_id 能区分。
+    assert_eq!(
+        detail.subagent_instance_id.as_deref(),
+        Some(group.instance_id.as_str()),
+        "live 明细记录的 occurrence 必须与归档组一致"
     );
 }
 

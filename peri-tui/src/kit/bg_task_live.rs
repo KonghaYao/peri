@@ -84,10 +84,16 @@ fn finalize_nested_reasoning(detail: &mut BgLiveDetail) {
     }
 }
 
-pub fn init_agent_live_detail(task_id: &str, agent_id: &str, agent_name: &str) {
+pub fn init_agent_live_detail(
+    task_id: &str,
+    agent_id: &str,
+    agent_name: &str,
+    subagent_instance_id: Option<&str>,
+) {
     with_live_detail(task_id, |d| {
         d.agent_id = Some(agent_id.to_string());
         d.agent_name = Some(agent_name.to_string());
+        d.subagent_instance_id = subagent_instance_id.map(str::to_string);
         d.status = BgLiveStatus::Running;
     });
 }

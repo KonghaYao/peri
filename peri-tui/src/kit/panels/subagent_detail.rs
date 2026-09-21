@@ -133,26 +133,20 @@ fn scroll_content_height(line_count: usize) -> u16 {
 
 /// 解析选中 subagent 的渲染源。
 ///
-/// 两个候选源：VIEW_MODELS 扫描（同步 subagent 的权威投影）与 `BG_LIVE_DETAIL`
-/// （bg subagent 的权威投影）。bg 的工具事件不进组、组在 turn 边界被归档冻结，
-/// 只有 live detail 持续增长——因此 bg 命中时以 live 为准，冻结的组只作回退。
+/// 两个候选源：VIEW_MODELS 扫描（组的权威投影）与 `BG_LIVE_DETAIL`（某次 bg
+/// 运行的权威投影——bg 的工具事件只进这里，且组在 turn 边界被归档冻结）。选中项
+/// 能对上某次 bg 运行时以 live 为准，冻结的组只作回退。
 fn resolve_selected_subagent(
     vm_snapshot: &crate::kit::atoms::ViewModelsSnapshot,
     live: &std::collections::HashMap<String, crate::kit::atoms::BgLiveDetail>,
     display: &[BgDisplayEntry],
     selected_id: Option<&str>,
 ) -> Option<TuiSubAgentGroup> {
-    let vm_group = find_selected_subagent(vm_snapshot, selected_id);
-    find_live_detail_subagent(
-        live,
-        display,
-        selected_id,
-        vm_group.as_ref().map(|g| g.agent_id.as_str()),
-    )
-    .or(vm_group)
+    find_live_detail_subagent(live, display, selected_id)
+        .or_else(|| find_selected_subagent(vm_snapshot, selected_id))
 }
 
-/// 从 VIEW_MODELS 快照扫描 `TuiSubAgentGroup`，按 agent_id 匹配选中项。
+/// 从 VIEW_MODELS 快照扫描 `TuiSubAgentGroup`，按 instance_id / agent_id 匹配选中项。
 /// 扫描口径与 agent.rs `collect_subagents` 一致（含折叠组内嵌套递归）。
 fn find_selected_subagent(
     snap: &crate::kit::atoms::ViewModelsSnapshot,
@@ -192,10 +186,9 @@ fn find_live_detail_subagent(
     live: &std::collections::HashMap<String, crate::kit::atoms::BgLiveDetail>,
     display: &[BgDisplayEntry],
     selected_id: Option<&str>,
-    vm_agent_id: Option<&str>,
 ) -> Option<TuiSubAgentGroup> {
     let selected_id = selected_id?;
-    let task_id = live_task_id_for(live, display, selected_id, vm_agent_id)?;
+    let task_id = live_task_id_for(live, display, selected_id)?;
     let detail = live.get(&task_id)?;
     let status = if detail.subagent_is_error {
         EntryStatus::Error
@@ -229,26 +222,29 @@ fn find_live_detail_subagent(
 
 /// 解析选中 id 对应的 `BG_LIVE_DETAIL` task_id。
 ///
-/// 三种来源：id 本身就是 task_id（底栏快照恢复后的调用方）；id 是 bg 任务绑定的
-/// agent_id（`BG_DISPLAY.linked_agent_id`，底栏行点击写入）；id 是组 instance_id
-/// （消息区 Enter 写入，需经 `vm_agent_id`——同组内的 agent_id——桥接）。
+/// 三种来源：id 本身就是 task_id（底栏行点击在行尚未绑定 agent 时的兜底，
+/// `bg_task_click.rs` 取 `BgDisplayEntry::id`）；id 是 bg 任务绑定的 agent_id
+/// （`BG_DISPLAY.linked_agent_id`，底栏行点击）；id 是组的 instance_id（消息区
+/// Enter），此时只认 live 明细记录的同一次运行——agent_id 在这一路径不可用，
+/// resume 复用 child_thread_id，按 agent_id 回查会把旧的那次运行当成当前运行。
 fn live_task_id_for(
     live: &std::collections::HashMap<String, crate::kit::atoms::BgLiveDetail>,
     display: &[BgDisplayEntry],
     selected_id: &str,
-    vm_agent_id: Option<&str>,
 ) -> Option<String> {
     if live.contains_key(selected_id) {
         return Some(selected_id.to_string());
     }
-    let linked_task = |agent_id: &str| {
-        display
-            .iter()
-            .rev()
-            .find(|entry| entry.linked_agent_id.as_deref() == Some(agent_id))
-            .map(|entry| entry.id.clone())
-    };
-    linked_task(selected_id).or_else(|| vm_agent_id.and_then(linked_task))
+    if let Some(entry) = display
+        .iter()
+        .rev()
+        .find(|entry| entry.linked_agent_id.as_deref() == Some(selected_id))
+    {
+        return Some(entry.id.clone());
+    }
+    live.iter()
+        .find(|(_, detail)| detail.subagent_instance_id.as_deref() == Some(selected_id))
+        .map(|(task_id, _)| task_id.clone())
 }
 
 fn close_panel() {

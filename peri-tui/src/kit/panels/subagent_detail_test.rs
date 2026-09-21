@@ -172,8 +172,8 @@ fn test_find_live_detail_subagent_prefers_latest_resumed_task() {
         },
     ];
 
-    let found = find_live_detail_subagent(&live, &display, Some("shared-agent"), None)
-        .expect("latest task");
+    let found =
+        find_live_detail_subagent(&live, &display, Some("shared-agent")).expect("latest task");
     assert_eq!(found.instance_id, "task-a-latest");
     assert_eq!(found.agent_name, "Latest");
 }
@@ -209,7 +209,7 @@ fn bg_display_entry(task_id: &str, agent_id: &str) -> BgDisplayEntry {
     }
 }
 
-fn live_detail_with_text(agent_id: &str, text: &str) -> crate::kit::atoms::BgLiveDetail {
+fn text_unit(text: &str) -> TuiRenderUnit {
     let mut bubble = crate::kit::tui_render_unit::TuiAssistantBubble {
         text: text.to_string(),
         reasoning: None,
@@ -219,10 +219,21 @@ fn live_detail_with_text(agent_id: &str, text: &str) -> crate::kit::atoms::BgLiv
         content_hash: 0,
     };
     bubble.recompute_hash();
+    TuiRenderUnit::TuiAssistantBubble(bubble)
+}
+
+/// 某次 bg 运行产生的 live 明细——记录它属于哪一次运行（`SubAgentAccumulator`
+/// 的 instance_id）。
+fn live_detail_for(
+    agent_id: &str,
+    instance_id: &str,
+    text: &str,
+) -> crate::kit::atoms::BgLiveDetail {
     crate::kit::atoms::BgLiveDetail {
         agent_id: Some(agent_id.into()),
         agent_name: Some("coder".into()),
-        nested_units: im::Vector::from(vec![TuiRenderUnit::TuiAssistantBubble(bubble)]),
+        subagent_instance_id: Some(instance_id.into()),
+        nested_units: im::Vector::from(vec![text_unit(text)]),
         ..Default::default()
     }
 }
@@ -240,21 +251,24 @@ fn nested_texts(group: &TuiSubAgentGroup) -> Vec<String> {
 
 /// bg subagent 的工具事件不进组、组在 turn 边界（TurnSuspended/TurnInterrupted）
 /// 被归档冻结，此后内容只进 `BG_LIVE_DETAIL`。面板必须渲染 live detail——冻结的
-/// 组即使先被扫描命中也不能作为渲染源（否则详情面板永久停在下线那一刻的内容）。
+/// 组即使先被扫描命中、且自己仍有内容，也不能作为渲染源（否则详情面板永久停在
+/// 下线那一刻的内容）。
 #[test]
 fn test_resolve_selected_subagent_prefers_live_detail_over_frozen_group() {
-    let frozen = TuiRenderUnit::TuiSubAgentGroup(make_subagent("bg-agent", "coder"));
+    let mut frozen = make_subagent("bg-agent", "coder");
+    frozen.view_models = im::Vector::from(vec![text_unit("first")]);
+    frozen.is_running = true;
     let snap = ViewModelsSnapshot {
-        items: im::Vector::from(vec![frozen]),
+        items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(frozen)]),
         generation: 0,
     };
     let live = std::collections::HashMap::from([(
         "task-1".to_string(),
-        live_detail_with_text("bg-agent", "first+second"),
+        live_detail_for("bg-agent", "instance-bg-agent", "first+second"),
     )]);
     let display = vec![bg_display_entry("task-1", "bg-agent")];
 
-    // 消息区 Enter 写入组 instance_id（组内 agent_id 桥接到 task_id）。
+    // 消息区 Enter 写入组 instance_id。
     let by_instance = resolve_selected_subagent(&snap, &live, &display, Some("instance-bg-agent"))
         .expect("live detail via instance id");
     assert_eq!(
@@ -270,6 +284,66 @@ fn test_resolve_selected_subagent_prefers_live_detail_over_frozen_group() {
     assert_eq!(nested_texts(&by_agent), vec!["first+second".to_string()]);
 }
 
+/// [回归] resume 复用 `agent_id`（child_thread_id），但组是**新** occurrence：
+/// 前台恢复的那次运行必须渲染自己的组，不能被旧的后台明细顶掉——按 agent_id
+/// 回查 live 明细正是这种错配的来源。
+#[test]
+fn test_resolve_selected_subagent_keeps_foreground_resume_group() {
+    let mut resumed = make_subagent("bg-agent", "coder");
+    resumed.instance_id = "subagent-2".into();
+    resumed.is_running = true;
+    resumed.view_models = im::Vector::from(vec![text_unit("resumed in foreground")]);
+    let snap = ViewModelsSnapshot {
+        items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(resumed)]),
+        generation: 0,
+    };
+    // 先前以后台方式跑过的那次：BG_DISPLAY 绑定与 live 明细都还在。
+    let live = std::collections::HashMap::from([(
+        "task-1".to_string(),
+        live_detail_for("bg-agent", "subagent-1", "background run"),
+    )]);
+    let display = vec![bg_display_entry("task-1", "bg-agent")];
+
+    let group = resolve_selected_subagent(&snap, &live, &display, Some("subagent-2"))
+        .expect("foreground resume group");
+    assert_eq!(
+        nested_texts(&group),
+        vec!["resumed in foreground".to_string()],
+        "新 occurrence 不得被同 agent_id 的旧后台明细顶掉"
+    );
+    assert_eq!(group.instance_id, "subagent-2");
+}
+
+/// 同一 agent 的两次后台运行并存时，选中哪一次就解析哪一次——不能都落到最新 task。
+#[test]
+fn test_resolve_selected_subagent_matches_selected_occurrence() {
+    let snap = ViewModelsSnapshot::default();
+    let live = std::collections::HashMap::from([
+        (
+            "task-old".to_string(),
+            live_detail_for("bg-agent", "subagent-1", "old run"),
+        ),
+        (
+            "task-new".to_string(),
+            live_detail_for("bg-agent", "subagent-2", "new run"),
+        ),
+    ]);
+    let display = vec![
+        bg_display_entry("task-old", "bg-agent"),
+        bg_display_entry("task-new", "bg-agent"),
+    ];
+
+    let older = resolve_selected_subagent(&snap, &live, &display, Some("subagent-1"))
+        .expect("older occurrence");
+    assert_eq!(older.instance_id, "task-old");
+    assert_eq!(nested_texts(&older), vec!["old run".to_string()]);
+
+    let newer = resolve_selected_subagent(&snap, &live, &display, Some("subagent-2"))
+        .expect("newer occurrence");
+    assert_eq!(newer.instance_id, "task-new");
+    assert_eq!(nested_texts(&newer), vec!["new run".to_string()]);
+}
+
 /// 同步 subagent 不在 `BG_LIVE_DETAIL` 中——仍走 VIEW_MODELS 扫描（不得回归）。
 #[test]
 fn test_resolve_selected_subagent_falls_back_to_view_models_for_sync_group() {
@@ -280,7 +354,7 @@ fn test_resolve_selected_subagent_falls_back_to_view_models_for_sync_group() {
     };
     let live = std::collections::HashMap::from([(
         "task-1".to_string(),
-        live_detail_with_text("bg-agent", "bg text"),
+        live_detail_for("bg-agent", "subagent-1", "bg text"),
     )]);
     let display = vec![bg_display_entry("task-1", "bg-agent")];
 
