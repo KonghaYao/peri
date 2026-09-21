@@ -172,8 +172,8 @@ fn test_find_live_detail_subagent_prefers_latest_resumed_task() {
         },
     ];
 
-    let found =
-        find_live_detail_subagent(&live, &display, Some("shared-agent")).expect("latest task");
+    let found = find_live_detail_subagent(&live, &display, Some("shared-agent"), None)
+        .expect("latest task");
     assert_eq!(found.instance_id, "task-a-latest");
     assert_eq!(found.agent_name, "Latest");
 }
@@ -190,4 +190,103 @@ fn test_find_selected_subagent_skips_non_subagent_vms() {
         generation: 0,
     };
     assert!(find_selected_subagent(&snap, Some("alpha")).is_none());
+}
+
+// ── 后台 subagent 的权威源解析（回归：跨 turn 边界后组被冻结）─────────────
+
+fn bg_display_entry(task_id: &str, agent_id: &str) -> BgDisplayEntry {
+    BgDisplayEntry {
+        id: task_id.into(),
+        linked_agent_id: Some(agent_id.into()),
+        agent_type: "agent".into(),
+        desc: "bg".into(),
+        current_tool: None,
+        tool_count: 0,
+        is_active: true,
+        is_error: false,
+        created_at: std::time::Instant::now(),
+        completed_at: None,
+    }
+}
+
+fn live_detail_with_text(agent_id: &str, text: &str) -> crate::kit::atoms::BgLiveDetail {
+    let mut bubble = crate::kit::tui_render_unit::TuiAssistantBubble {
+        text: text.to_string(),
+        reasoning: None,
+        message_id: None,
+        started_at: None,
+        duration_ms: None,
+        content_hash: 0,
+    };
+    bubble.recompute_hash();
+    crate::kit::atoms::BgLiveDetail {
+        agent_id: Some(agent_id.into()),
+        agent_name: Some("coder".into()),
+        nested_units: im::Vector::from(vec![TuiRenderUnit::TuiAssistantBubble(bubble)]),
+        ..Default::default()
+    }
+}
+
+fn nested_texts(group: &TuiSubAgentGroup) -> Vec<String> {
+    group
+        .view_models
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiAssistantBubble(b) => Some(b.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// bg subagent 的工具事件不进组、组在 turn 边界（TurnSuspended/TurnInterrupted）
+/// 被归档冻结，此后内容只进 `BG_LIVE_DETAIL`。面板必须渲染 live detail——冻结的
+/// 组即使先被扫描命中也不能作为渲染源（否则详情面板永久停在下线那一刻的内容）。
+#[test]
+fn test_resolve_selected_subagent_prefers_live_detail_over_frozen_group() {
+    let frozen = TuiRenderUnit::TuiSubAgentGroup(make_subagent("bg-agent", "coder"));
+    let snap = ViewModelsSnapshot {
+        items: im::Vector::from(vec![frozen]),
+        generation: 0,
+    };
+    let live = std::collections::HashMap::from([(
+        "task-1".to_string(),
+        live_detail_with_text("bg-agent", "first+second"),
+    )]);
+    let display = vec![bg_display_entry("task-1", "bg-agent")];
+
+    // 消息区 Enter 写入组 instance_id（组内 agent_id 桥接到 task_id）。
+    let by_instance = resolve_selected_subagent(&snap, &live, &display, Some("instance-bg-agent"))
+        .expect("live detail via instance id");
+    assert_eq!(
+        nested_texts(&by_instance),
+        vec!["first+second".to_string()],
+        "instance_id 选中应解析到 live detail 内容"
+    );
+    assert_eq!(by_instance.instance_id, "task-1");
+
+    // 底栏行点击写入绑定的 agent_id。
+    let by_agent = resolve_selected_subagent(&snap, &live, &display, Some("bg-agent"))
+        .expect("live detail via agent id");
+    assert_eq!(nested_texts(&by_agent), vec!["first+second".to_string()]);
+}
+
+/// 同步 subagent 不在 `BG_LIVE_DETAIL` 中——仍走 VIEW_MODELS 扫描（不得回归）。
+#[test]
+fn test_resolve_selected_subagent_falls_back_to_view_models_for_sync_group() {
+    let sync = TuiRenderUnit::TuiSubAgentGroup(make_subagent("sync-agent", "Sync"));
+    let snap = ViewModelsSnapshot {
+        items: im::Vector::from(vec![sync]),
+        generation: 0,
+    };
+    let live = std::collections::HashMap::from([(
+        "task-1".to_string(),
+        live_detail_with_text("bg-agent", "bg text"),
+    )]);
+    let display = vec![bg_display_entry("task-1", "bg-agent")];
+
+    let found = resolve_selected_subagent(&snap, &live, &display, Some("instance-sync-agent"))
+        .expect("sync group from view models");
+    assert_eq!(found.agent_id, "sync-agent");
+    assert_eq!(found.instance_id, "instance-sync-agent");
+    assert!(resolve_selected_subagent(&snap, &live, &display, Some("nope")).is_none());
 }
