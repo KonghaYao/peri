@@ -41,8 +41,13 @@ pub trait MiddlewareState: Send + Sync {
     /// 返回共享的 v2 MessageQueue 引用（用于 goal steering / stop-hook feedback 等异步注入）
     ///
     /// 实现者必须返回**同一个** session 级实例（不能每次新建）。
-    /// middleware push 的消息（Info / Defer）由 Receive / End 阶段统一消费。
+    /// middleware push 的消息（Info / Defer）由 Receive 阶段统一消费。
     fn v2_queue(&self) -> &crate::session::MessageQueue;
+
+    /// 与 Receive 的后台等待事实同源；legacy/test 无后台执行时默认 false。
+    fn has_active_background_tasks(&self) -> bool {
+        false
+    }
 
     /// 会话级 inbox 句柄（middleware 注入 Defer/Prompt 时应经此 wake `await_wake`）。
     fn inbox_handle(&self) -> Option<&peri_acp_types::session::InboxHandle> {

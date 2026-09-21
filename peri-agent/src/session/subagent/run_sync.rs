@@ -3,6 +3,7 @@ use std::sync::Arc;
 use peri_acp_types::identity::AgentId;
 
 use super::factory::ResumeClaim;
+use super::lifecycle::drain_subagent_events;
 use super::types::{SubagentFailure, SubagentLifecycleStart, SubagentLifecycleStop};
 use super::util::extract_last_ai_text;
 use super::v2_bridge::{forward_subagent_start_v1, forward_subagent_stop_v1, V2SubagentContext};
@@ -13,7 +14,7 @@ use super::{
 };
 use crate::agent::events::AgentEventHandler;
 use crate::agent::stages::{run_react_loop, LoopResult};
-use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder;
+use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion;
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use crate::session::Session;
@@ -98,27 +99,27 @@ pub(super) async fn run_sync_subagent(
     );
 
     // v2 事件转发器：子 EventBus → 父事件 handler（TUI 可见子 agent 工具调用/AI 文本）
-    let forwarder_handle = spawn_subagent_event_forwarder(
+    let forwarder_handle = spawn_subagent_event_forwarder_for_completion(
         v2_ctx.event_handles,
         event_handler.clone(),
-        langfuse_bridge,
+        langfuse_bridge.clone(),
         child_thread_id.to_string(),
     );
     let child_agent_id = v2_ctx.agent_id;
-    let event_bus = Arc::clone(&v2_ctx.event_bus);
+    let event_bus = v2_ctx.event_bus;
 
     // 运行 v2 ReAct 循环
     let subagent_turn_id = v2_ctx.context.turn_id();
-    let loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
+    let mut loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
 
     // v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error 三路
-    let stop_failure = match &loop_result {
+    let mut stop_failure = match &loop_result {
         LoopResult::Error(error) => {
             SubagentFailure::safe_failure_from_error(child_thread_id, error)
         }
         _ => None,
     };
-    let (stop_result, stop_is_error) = match &loop_result {
+    let (mut stop_result, mut stop_is_error) = match &loop_result {
         LoopResult::Completed => (
             extract_last_ai_text(&session)
                 .chars()
@@ -157,9 +158,16 @@ pub(super) async fn run_sync_subagent(
     // Close the child producer after the terminal v2 event. Awaiting the
     // forwarder drains queued render/observe events (including visible deltas)
     // before the synchronous v1 stop reaches the parent handler.
-    drop(event_bus);
-    drop(v2_ctx.event_bus);
-    let _ = forwarder_handle.await;
+    if let Err(error) = drain_subagent_events(event_bus, forwarder_handle, langfuse_bridge).await {
+        // Retain cancellation and typed model diagnostics when execution had
+        // already failed; a successful loop cannot hide forwarding failure.
+        if matches!(loop_result, LoopResult::Completed) {
+            stop_result = error.user_facing_message();
+            stop_is_error = true;
+            stop_failure = None;
+            loop_result = LoopResult::Error(error);
+        }
+    }
     // v1 协议化载体直发（SubagentStopped）：与 Started 同源（v2 事件构造 +
     // observe_event_to_executor 同步映射），保证 Stopped 在 turn 收尾前到达
     // 父协议化链路（TUI 容器销毁 / depth 配对）。

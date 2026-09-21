@@ -116,6 +116,7 @@
 | Plugin 面板装配与展示 | kit/panels/plugin.rs + plugin/{data,render,search_handler,panel_handler}.rs | `PluginPanel` 保持公共入口；`data` 管本地目录缓存，`render_discover_list` 保留 loading/error 下的可编辑输入；`handle_search_event` 路由 Discover 与 marketplace 输入，`handle_panel_event` 保留其他 tab 与既有安装操作生命周期 |
 | Plugin 搜索生命周期回归 | kit/panels/plugin/search_request_test.rs | `plugin_search_*`：真实 mpsc 请求/响应及 notifier → bridge → render；覆盖错误重试、同 query 乱序与无身份旧通知、session switch/reset、关闭/Drop、空/无效结果、键鼠提交可达和远端条目身份；回调暂拒收保留结果、可取消延迟重试，接收后只投影一次 |
 | 弹窗（HITL/AskUser/OAuth/Confirm/Rewind/下载进度） | kit/popups/ + kit/popup_overlay.rs + kit/event_handlers.rs | `open_popup`/`close_popup`/`is_popup_active`；Rewind Enter 由根级 Global 模态仲裁发送既有 `REWIND_ACTION_TX`，鼠标与渲染留在 popup |
+| subagent 详情面板内容源 | kit/panels/subagent_detail.rs + kit/bg_task_live.rs | `resolve_selected_subagent`：能对上某次 bg 运行时以 `BG_LIVE_DETAIL` 为准，VIEW_MODELS 扫描只作回退（`find_selected_subagent`）。选中 id 三种来源——task_id（底栏行未绑定时的兜底）、agent_id（底栏行点击，经 `BG_DISPLAY.linked_agent_id`）、组 instance_id（消息区 Enter，按 live 明细记录的 `subagent_instance_id` 精确对应，**不能**按 agent_id：resume 复用 child_thread_id）。bg 的工具事件不进组、组在 turn 边界（`TurnSuspended`/`TurnInterrupted`）被归档冻结，以 VIEW_MODELS 优先会让面板停在下线那一刻；回归见 `subagent_detail_test.rs::test_resolve_selected_subagent_prefers_live_detail_over_frozen_group`（选源）与 `bg_task_live_test.rs::test_bg_group_frozen_in_view_models_after_turn_suspended`（两份投影分叉） |
 
 ### App/配置/启动（src/app/ src/config/ src/acp_client/）
 

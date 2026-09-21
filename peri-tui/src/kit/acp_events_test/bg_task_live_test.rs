@@ -99,7 +99,7 @@ fn test_bg_tool_sync_preserves_event_order() {
             completed_at: None,
         });
     crate::kit::bg_task_live::seed_live_from_started("task-order", "agent", "bg", None);
-    crate::kit::bg_task_live::init_agent_live_detail("task-order", "bg-order", "coder");
+    crate::kit::bg_task_live::init_agent_live_detail("task-order", "bg-order", "coder", None);
 
     crate::kit::bg_task_live::handle_bg_tool_started(
         "bg-order",
@@ -138,6 +138,111 @@ fn test_bg_tool_sync_preserves_event_order() {
         units.get(1),
         Some(TuiRenderUnit::TuiAssistantBubble(_))
     ));
+}
+
+/// [回归] bg subagent 跨 turn 边界后，VIEW_MODELS 中残留的组被冻结、内容只进
+/// `BG_LIVE_DETAIL`——这是 `SubAgentDetailPanel` 必须以 live detail 为准的原因
+/// （面板侧的解析见 `panels/subagent_detail_test.rs`）。
+///
+/// TurnSuspended/TurnInterrupted 归档 current_turn 时不走 flush 的
+/// running-subagent 守卫，仍然运行的 bg 组会以「下线那一刻的内容 + is_running=true」
+/// 落进 committed 并清空 accumulator；此后该组的子事件路由失败，只有 bg 兜底路径
+/// （BG_LIVE_DETAIL）继续累积。面板若按 VIEW_MODELS 扫描结果渲染，就永久停在冻结
+/// 内容上。
+#[test]
+#[serial]
+fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    BG_DISPLAY.state().write().clear();
+    BG_LIVE_DETAIL.state().write().clear();
+    crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
+    let mut state = make_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            task_id: "task-1".into(),
+            kind: "agent".into(),
+            summary: "bg".into(),
+            started_at: String::new(),
+            pid: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "bg-agent".into(),
+            agent_name: "coder".into(),
+            is_background: true,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "first".into(),
+            message_id: None,
+            agent_id: Some("bg-agent".into()),
+        }),
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "+second".into(),
+            message_id: None,
+            agent_id: Some("bg-agent".into()),
+        }),
+    );
+
+    let group = {
+        let snap = VIEW_MODELS.state();
+        let snapshot = snap.read();
+        snapshot
+            .items
+            .iter()
+            .find_map(|item| match item {
+                TuiRenderUnit::TuiSubAgentGroup(g) if g.agent_id == "bg-agent" => Some(g.clone()),
+                _ => None,
+            })
+            .expect("归档后 VIEW_MODELS 仍留有 bg 组")
+    };
+    let group_texts: Vec<String> = group
+        .view_models
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiAssistantBubble(b) => Some(b.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        group_texts,
+        vec!["first".to_string()],
+        "VIEW_MODELS 组应停在 turn 边界那一刻（冻结）"
+    );
+
+    let live_store = BG_LIVE_DETAIL.state();
+    let live_guard = live_store.read();
+    let detail = live_guard.get("task-1").expect("live detail");
+    let live_texts: Vec<String> = detail
+        .nested_units
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiAssistantBubble(b) => Some(b.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        live_texts,
+        vec!["first+second".to_string()],
+        "跨边界后的 bg 内容只累积在 BG_LIVE_DETAIL"
+    );
+    // 面板靠这层对应关系把「选中的组」对到「哪一次运行」：agent_id 在 resume 时
+    // 被复用，只有 instance_id 能区分。
+    assert_eq!(
+        detail.subagent_instance_id.as_deref(),
+        Some(group.instance_id.as_str()),
+        "live 明细记录的 occurrence 必须与归档组一致"
+    );
 }
 
 fn make_state() -> BridgeState {

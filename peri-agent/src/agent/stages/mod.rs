@@ -99,7 +99,7 @@ pub struct CompactContext {
     pub(crate) budget_recovery: Arc<parking_lot::Mutex<compact_progress::CompactBudgetRecovery>>,
 }
 
-/// 异步传输控制（仅 run_react_loop idle 路径）
+/// 异步传输控制（run_react_loop idle 等待及完成提醒的只读后台活动判断）
 #[derive(Clone)]
 pub struct AsyncContext {
     pub idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,

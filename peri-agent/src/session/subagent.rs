@@ -44,8 +44,8 @@ pub use v2_bridge::{
     SubagentV2ContextBuilder, V2SubagentContext,
 };
 pub(crate) use v2_bridge::{
-    build_subagent_start_v2, build_subagent_stop_v2, build_subagent_stop_v2_with_failure,
-    emit_subagent_start_v2, emit_subagent_stop_v2_with_failure, SubagentStopV2Input,
+    build_subagent_start_v2, build_subagent_stop_v2_with_failure, emit_subagent_start_v2,
+    emit_subagent_stop_v2_with_failure, SubagentStopV2Input,
 };
 
 #[cfg(test)]

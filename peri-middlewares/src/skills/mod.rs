@@ -1,4 +1,5 @@
 pub mod builtin;
+pub(crate) mod content;
 pub mod loader;
 pub mod tools;
 

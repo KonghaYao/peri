@@ -24,6 +24,103 @@ async fn make_mw_with_items(
     (mw, state)
 }
 
+/// [回归测试] 旧 requireCompletion 在后台任务活跃时仍注入提醒并强制续跑。
+#[tokio::test]
+async fn test_after_agent_background_tasks_suppress_and_resume_todo() {
+    use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as _};
+    use peri_agent::agent::{
+        agent_context::AgentContext, async_tasks::TaskManager, events::BackgroundTaskResult,
+        stages::StageContext,
+    };
+    use peri_agent::session::{FrozenContext, Session};
+    for kind in [BgTaskKind::Agent, BgTaskKind::Workflow, BgTaskKind::Shell] {
+        for success in [true, false] {
+            let manager = Arc::new(TaskManager::new());
+            manager
+                .register(BgTaskRegistration {
+                    task_id: "background".into(),
+                    kind,
+                    summary: "后台边界替身".into(),
+                    pid: None,
+                    kill: Some(Box::new(|| {})),
+                })
+                .unwrap();
+            let session = Session::new(
+                Arc::from("/tmp/todo-reminder"),
+                FrozenContext::builder().build(),
+                None,
+            );
+            let ctx = StageContext::builder(
+                session.start_turn(),
+                session.transcript(),
+                session.queue().clone(),
+            )
+            .with_idle_should_wait({
+                let manager = manager.clone();
+                Arc::new(move || manager.active_count() > 0)
+            })
+            .build();
+            let mut state = AgentContext::from_stage(&ctx);
+            let (mw, todo) = make_mw_with_items(
+                vec![TodoItem {
+                    content: "等待交付".into(),
+                    active_form: None,
+                    status: TodoStatus::InProgress,
+                }],
+                true,
+            )
+            .await;
+            let output = AgentOutput::new("等待后台完成", 1);
+            for _ in 0..2 {
+                let result = Middleware::after_agent(&mw, &mut state, &output)
+                    .await
+                    .unwrap();
+                assert!(result.block_continue.is_none(), "{kind:?} 活跃时不应续跑");
+                assert!(session.queue().drain_all().is_empty(), "后台期间不应注入");
+                let todo = todo.lock().await;
+                assert!(todo.require_completion);
+                assert_eq!(todo.items[0].status, TodoStatus::InProgress);
+            }
+            assert!(manager.complete(
+                "background",
+                BackgroundTaskResult {
+                    task_id: "background".into(),
+                    agent_name: "边界替身".into(),
+                    prompt_summary: String::new(),
+                    success,
+                    output: "终态".into(),
+                    tool_calls_count: 0,
+                    duration_ms: 0,
+                    child_thread_id: None,
+                    timed_out: false,
+                    subagent_failure: None,
+                    shell_output: None,
+                }
+            ));
+            let result = Middleware::after_agent(&mw, &mut state, &output)
+                .await
+                .unwrap();
+            assert_eq!(
+                result.block_continue.as_deref(),
+                Some("todo_require_completion")
+            );
+            let messages = session.queue().drain_all();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].kind, MessageKind::Defer);
+            assert_eq!(messages[0].source, MessageSource::TodoSteering);
+            let peri_agent::session::QueuedPayload::SystemReminder(reminder) = &messages[0].payload
+            else {
+                panic!("必须使用 canonical reminder");
+            };
+            assert_eq!(reminder.as_reminder().metadata["pending_count"], 1);
+            assert!(reminder
+                .as_reminder()
+                .body
+                .contains("[0] [in_progress] 等待交付"));
+        }
+    }
+}
+
 #[test]
 fn test_render_steering_包含当前todo状态() {
     let items = vec![

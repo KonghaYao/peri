@@ -100,7 +100,18 @@ pub trait AfterToolState: StateView + QueueState {}
 ///     state.replace_message(message);
 /// }
 /// ```
-pub trait AfterAgentState: StateView + QueueState {}
+pub trait AfterAgentState: StateView + QueueState + BackgroundActivity {}
+
+/// 只读后台活动判断，复用 Receive 等待的 session task 事实，不暴露管理器写权限。
+pub trait BackgroundActivity: Send + Sync {
+    fn has_active_background_tasks(&self) -> bool;
+}
+
+impl<T: MiddlewareState + ?Sized> BackgroundActivity for T {
+    fn has_active_background_tasks(&self) -> bool {
+        MiddlewareState::has_active_background_tasks(self)
+    }
+}
 
 /// 模型调用前：可追加消息和投递状态通知，不提供输入替换或目录写访问。
 ///
@@ -167,7 +178,7 @@ impl<T: StateView + InputBatchState + MessageReplace + ?Sized> BeforeInputState 
 impl<T: BeforeInputState + MessageAppend + CatalogState + ?Sized> BeforeAgentState for T {}
 impl<T: StateView + ?Sized> BeforeToolState for T {}
 impl<T: StateView + QueueState + ?Sized> AfterToolState for T {}
-impl<T: StateView + QueueState + ?Sized> AfterAgentState for T {}
+impl<T: StateView + QueueState + BackgroundActivity + ?Sized> AfterAgentState for T {}
 impl<T: StateView + MessageAppend + QueueState + ?Sized> BeforeModelState for T {}
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ use std::sync::Arc;
 pub(super) struct SubagentDependencies<'a> {
     pub(super) frozen_session: &'a FrozenSessionData,
     pub(super) thread_persistence: &'a ThreadPersistence,
-    pub(super) task_manager: &'a Option<Arc<TaskManager>>,
+    pub(super) task_manager: &'a Arc<TaskManager>,
     pub(super) on_bg_complete: &'a Option<OnBgCompleteFn>,
     pub(super) bg_event_tx: BgEventTx,
 }
@@ -47,7 +47,7 @@ pub(super) fn attach_subagent_host(
     {
         let host = SubagentHost {
             thread_store: thread_persistence.store.clone(),
-            task_manager: task_manager.clone(),
+            task_manager: Some(task_manager.clone()),
             bg_event_sender: Some(bg_event_tx),
             on_bg_complete: on_bg_complete.clone(),
             register_runtime: thread_persistence.register_runtime.clone(),

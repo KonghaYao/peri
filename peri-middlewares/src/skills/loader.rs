@@ -99,7 +99,7 @@ pub fn load_skill_metadata(path: &Path) -> Option<SkillMetadata> {
 /// **Builtin 特判**：`SkillSource::Builtin` 的 root 跳过磁盘扫描（path 字段为占位
 /// `PathBuf::new()`），直接从编译期常量 `crate::skills::builtin::BUILTIN_SKILLS`
 /// 加载，构造虚拟路径 `<builtin>/<name>`（不对应真实文件，加载全文需通过
-/// `SkillPreloadMiddleware` 的 Builtin 特判路由）。
+/// skills 内部内容加载入口）。
 pub fn scan_skill_roots(roots: &[SkillRoot]) -> Vec<SkillMetadata> {
     scan_skill_roots_impl(roots, MAX_SCAN_DEPTH, MAX_SKILLS_DIRS_PER_ROOT)
 }
@@ -472,27 +472,7 @@ pub fn find_skill_content(
     let roots = resolve_skill_roots(cwd, plugin_roots, disable_bundled);
     let skills = scan_skill_roots(&roots);
 
-    let name_lower = skill_name.to_lowercase();
-    let found = skills.iter().find(|s| {
-        s.name.eq_ignore_ascii_case(&name_lower)
-            || s.aliases
-                .iter()
-                .any(|alias| alias.eq_ignore_ascii_case(&name_lower))
-    })?;
-
-    let content = if matches!(found.source, SkillSource::Builtin) {
-        crate::skills::builtin::BUILTIN_SKILLS
-            .iter()
-            .find(|bs| {
-                normalize_skill_name(bs.name) == found.name
-                    || found.path == std::path::Path::new(&format!("<builtin>/{}", bs.name))
-            })
-            .map(|bs| bs.content.to_string())?
-    } else {
-        std::fs::read_to_string(&found.path).ok()?
-    };
-
-    Some((found.clone(), content))
+    find_skill_in_list(&skills, skill_name)
 }
 
 /// 在预扫描的 skills 列表中查找并加载 skill 内容（避免重复磁盘扫描）。
@@ -511,17 +491,7 @@ pub fn find_skill_in_list(
                 .any(|alias| alias.eq_ignore_ascii_case(&name_lower))
     })?;
 
-    let content = if matches!(found.source, SkillSource::Builtin) {
-        crate::skills::builtin::BUILTIN_SKILLS
-            .iter()
-            .find(|bs| {
-                normalize_skill_name(bs.name) == found.name
-                    || found.path == std::path::Path::new(&format!("<builtin>/{}", bs.name))
-            })
-            .map(|bs| bs.content.to_string())?
-    } else {
-        std::fs::read_to_string(&found.path).ok()?
-    };
+    let content = super::content::load(found).ok()?;
 
     Some((found.clone(), content))
 }

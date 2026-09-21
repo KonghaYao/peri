@@ -57,6 +57,18 @@ impl CurrentTurn {
         self.subagents.iter().map(|s| s.agent_id.as_str()).collect()
     }
 
+    /// 该 agent 最新 occurrence 的 TUI 本地 instance id。
+    ///
+    /// 供后台 subagent 的 live 明细记录运行身份：`agent_id` 在 resume 时被复用，
+    /// 只有 instance 能把选中组与它所属的那次运行对应起来。
+    pub fn subagent_instance_id(&self, agent_id: &str) -> Option<&str> {
+        self.subagents
+            .iter()
+            .rev()
+            .find(|s| s.agent_id == agent_id)
+            .map(|s| s.instance_id.as_str())
+    }
+
     /// Mark a sub-agent group as done from `"subagent-stopped"`.
     ///
     /// `is_error` 是 parent 终态的唯一事实源（agent 层语义：Completed→false、

@@ -133,6 +133,14 @@ impl MiddlewareState for AgentContext<'_> {
         &self.ctx.session.queue
     }
 
+    fn has_active_background_tasks(&self) -> bool {
+        self.ctx
+            .async_ctx
+            .idle_should_wait
+            .as_ref()
+            .is_some_and(|probe| probe())
+    }
+
     fn inbox_handle(&self) -> Option<&peri_acp_types::session::InboxHandle> {
         self.ctx.async_ctx.inbox_handle.as_ref()
     }

@@ -637,6 +637,11 @@ pub struct BgLiveDetail {
     pub summary: String,
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
+    /// 创建本明细的 subagent occurrence（`SubAgentAccumulator::instance_id`）。
+    ///
+    /// 只有 instance 能区分同一 agent 的多次运行——resume 复用 `agent_id`
+    /// （child_thread_id），按 agent_id 回查会把旧运行当成当前运行。
+    pub subagent_instance_id: Option<String>,
     pub pid: Option<u32>,
     pub duration_ms: Option<u64>,
     pub output_preview: Option<String>,
@@ -655,6 +660,7 @@ impl Default for BgLiveDetail {
             summary: String::new(),
             agent_id: None,
             agent_name: None,
+            subagent_instance_id: None,
             pid: None,
             duration_ms: None,
             output_preview: None,

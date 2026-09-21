@@ -1,9 +1,9 @@
 //! GoalMiddleware — after_agent 钩子注入递增紧迫感 steering。
 //!
-//! goal active 时每轮注入提示 + 设 block_continue，executor 自动续跑。
+//! goal active 且无后台任务或既有 stop block 时注入提示并设 block_continue，executor 自动续跑。
 //! agent 必须调 goal(complete) 或 goal(block) 才能终止循环。
 //!
-//! 注入路径：通过 v2 MessageQueue push canonical Defer reminder（Receive 保留 → End 消费唤醒续跑）。
+//! 注入路径：通过 v2 MessageQueue push canonical Defer reminder（下一次 Receive 消费并唤醒续跑）。
 //! 结构化 reminder 在模型投影边界编码为 Human role，不破坏 frozen_system_prompt。
 
 use peri_agent::middleware::capabilities as hook_state;
@@ -13,15 +13,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    ReminderSource, SystemReminder, SYSTEM_REMINDER_VERSION,
 };
-use peri_agent::{
-    error::{AgentError, AgentResult},
-    middleware::r#trait::Middleware,
-    session::{MessageKind, MessageSource, QueuedMessage},
-};
+use peri_agent::{error::AgentResult, middleware::r#trait::Middleware, session::MessageSource};
 use serde_json::json;
 
+use crate::completion_reminder::CompletionReminder;
 use crate::goal::GoalTool;
 
 /// Goal steering 注入中间件（链最后）
@@ -104,38 +101,31 @@ impl Middleware for GoalMiddleware {
             return Ok(output.clone());
         }
 
-        // 3. goal active → 注入递增紧迫感 steering
+        // 3. 准入先于接续与紧迫感计数；后台期间不制造主动续跑。
+        let Some(admission) = CompletionReminder::admit(state, output) else {
+            return Ok(output.clone());
+        };
         let round = self.pending_rounds.fetch_add(1, Ordering::Relaxed) + 1;
         if let Err(error) = self.controller.increment_continuation().await {
             tracing::warn!(%error, "GoalMiddleware: 主动接续计数更新失败");
         }
         let objective = snap.objective.as_deref().unwrap_or("(unknown)");
         let template = Self::render_steering(objective, round);
-        let reminder = TrustedSystemReminderFactory::for_producer()
-            .construct(SystemReminder {
-                version: SYSTEM_REMINDER_VERSION,
-                category: ReminderCategory::Guidance,
-                source: ReminderSource("goal".into()),
-                kind: "steering".into(),
-                severity: ReminderSeverity::Warning,
-                delivery: ReminderDelivery::Required,
-                audiences: ReminderAudiences(vec![
-                    ReminderAudience::Model,
-                    ReminderAudience::Automation,
-                ]),
-                body: template,
-                summary: Some(format!("Goal 仍未完成（第 {round} 轮提醒）")),
-                metadata: json!({ "round": round }),
-            })
-            .map_err(|error| AgentError::MiddlewareError {
-                middleware: self.name().to_string(),
-                reason: error.to_string(),
-            })?;
-        state.enqueue_v2_message(QueuedMessage::system_reminder(
-            MessageKind::Defer,
-            MessageSource::GoalSteering,
-            reminder,
-        ));
+        let reminder = SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Guidance,
+            source: ReminderSource("goal".into()),
+            kind: "steering".into(),
+            severity: ReminderSeverity::Warning,
+            delivery: ReminderDelivery::Required,
+            audiences: ReminderAudiences(vec![
+                ReminderAudience::Model,
+                ReminderAudience::Automation,
+            ]),
+            body: template,
+            summary: Some(format!("Goal 仍未完成（第 {round} 轮提醒）")),
+            metadata: json!({ "round": round }),
+        };
 
         tracing::debug!(
             objective = %objective,
@@ -143,10 +133,12 @@ impl Middleware for GoalMiddleware {
             "GoalMiddleware: 注入 after_agent steering"
         );
 
-        // 4. 设 block_continue，executor 自动续跑
-        let mut output = output.clone();
-        output.block_continue = Some("goal_active".to_string());
-        Ok(output)
+        admission.enqueue(
+            self.name(),
+            reminder,
+            MessageSource::GoalSteering,
+            "goal_active",
+        )
     }
 }
 

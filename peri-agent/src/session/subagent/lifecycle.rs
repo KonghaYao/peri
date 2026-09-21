@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use peri_acp_types::identity::AgentId;
 
@@ -9,6 +9,38 @@ use crate::agent::events_v2::{observe_event_to_executor, EventBus};
 use crate::session::factory::DeregisterRuntimeFn;
 use crate::session::turn::TurnId;
 use crate::thread::ThreadStore;
+
+// The loop has released its producers before this seam. A cleanup guard must
+// only retain a Weak<EventBus>, otherwise closing the stream would deadlock.
+// Join failure is execution failure, even when the model already finished.
+pub(super) async fn drain_subagent_events(
+    event_bus: Arc<EventBus>,
+    forwarder: tokio_util::task::AbortOnDropHandle<Option<crate::agent::events_v2::ObserveEvent>>,
+    bridge: Option<Arc<dyn crate::agent::LangfuseBridgeLike>>,
+) -> crate::error::AgentResult<()> {
+    drop(event_bus);
+    let stop = forwarder.await.map_err(|error| {
+        tracing::error!(
+            is_panic = error.is_panic(),
+            is_cancelled = error.is_cancelled(),
+            "Subagent event forwarding failed"
+        );
+        crate::error::AgentError::Other(anyhow::anyhow!("Subagent event forwarding failed"))
+    })?;
+    // No await separates successful drain from terminal publication. Forced
+    // abort while waiting leaves telemetry incomplete rather than successful.
+    if let (Some(bridge), Some(stop)) = (bridge, stop) {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.process_observe_event(&stop);
+        }))
+        .map_err(|_| {
+            crate::error::AgentError::Other(anyhow::anyhow!(
+                "Subagent terminal event forwarding failed"
+            ))
+        })?;
+    }
+    Ok(())
+}
 
 // ─── 生命周期工具（自 tool/lifecycle.rs 迁移；hook 触发闭包化） ────────────
 
@@ -29,11 +61,11 @@ impl Drop for DeregisterGuard {
 /// v2 SubagentStop 补发参数（BgCleanupGuard 取消兜底路径使用）。
 ///
 /// 字段与 [`build_subagent_stop_v2`] 参数一一对应（C3 配对契约）：
-/// abort 兜底路径下 v2 Start 已 emit 而 v2 Stop 永不 emit → Langfuse AGENT span
-/// 悬挂，Drop 时经 child EventBus 补发；同时 v1 协议化直发（`sender` 存在时）
-/// 补发 SubagentStopped——两者共用同一 v2 事件构造（发射语义单一事实源）。
+/// Drop 时同步补发可见的 SubagentStopped（`sender` 存在时）；若 producer
+/// 仍存活，也向 child EventBus 发射相同的 v2 事件。强制 abort 不等待异步
+/// 排空，遥测可以保持 incomplete，不能宣称取消后仍能保证 v2 Stop 交付。
 pub(crate) struct BgStopEmitV2 {
-    pub(crate) event_bus: Arc<EventBus>,
+    pub(crate) event_bus: Weak<EventBus>,
     pub(crate) turn_id: TurnId,
     pub(crate) parent_agent_id: Option<AgentId>,
     pub(crate) child_agent_id: AgentId,
@@ -44,12 +76,12 @@ pub(crate) struct BgStopEmitV2 {
 
 /// bg 任务同步收尾 guard（S3.2）：Drop 时（任务被 abort / panic / 正常结束）执行：
 /// - `deregister_runtime`（active_agents 清理，防泄漏）
-/// - 补发 v2 `SubagentStop`（若未显式 emit——正常路径 emit 后需 `disarm_stop`）
-///   + v1 协议化直发 `SubagentStopped`（sender 存在时，同一事件构造）
+/// - 补发可见 `SubagentStopped`，producer 存活时也发射 v2 `SubagentStop`
+///   （正常路径排空并完成可见 Stop 之后调用 `disarm_stop`）
 pub(crate) struct BgCleanupGuard {
     pub(crate) thread_id: String,
     pub(crate) deregister: Option<DeregisterRuntimeFn>,
-    /// 未显式 emit v2 SubagentStop 时补发（取消/abort 兜底路径）
+    /// 尚未完成可见 Stop 时补发（包括等待 forwarder 期间取消/abort）。
     pub(crate) stop: Option<BgStopEmitV2>,
 }
 
@@ -78,7 +110,9 @@ impl Drop for BgCleanupGuard {
                 true,
             );
             if stop.parent_agent_id.is_some() {
-                stop.event_bus.emit_observe(ev.clone());
+                if let Some(event_bus) = stop.event_bus.upgrade() {
+                    event_bus.emit_observe(ev.clone());
+                }
             }
             if let Some(sender) = &stop.sender {
                 if let Some(exec_ev) = observe_event_to_executor(ev) {
@@ -120,3 +154,7 @@ pub(crate) async fn on_subagent_stop_handler(
             .await;
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_test.rs"]
+mod tests;

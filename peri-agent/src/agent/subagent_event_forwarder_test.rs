@@ -626,11 +626,8 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
         observes: Arc::clone(&observes),
     }) as Arc<dyn LangfuseBridgeLike>;
 
-    let _forwarder =
+    let forwarder =
         spawn_subagent_event_forwarder(handles, Some(handler), Some(bridge), "test".to_string());
-
-    // 给 forwarder 一点启动时间
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let (turn_id, agent_id) = ids();
     let child_agent_id = AgentId::from_uuid(uuid::Uuid::now_v7());
@@ -651,8 +648,9 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
         subagent_failure: None,
     });
 
-    // 等待 forwarder 消费（足够时间让过滤逻辑执行）
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Stop 在所有 producer 关闭、缓冲事件排空后才送到 bridge。
+    drop(bus);
+    forwarder.await.unwrap();
 
     // 1. bridge 收到两个事件（Langfuse 链路不丢）
     let bridge_events = observes.lock().clone();

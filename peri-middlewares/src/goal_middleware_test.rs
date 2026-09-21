@@ -53,6 +53,105 @@ fn make_complete_snapshot() -> GoalViewSnapshot {
     }
 }
 
+/// [回归测试] 后台任务尚未终态时，旧 after_agent 会注入提醒并增长接续次数与紧迫感。
+#[tokio::test]
+async fn test_after_agent_background_tasks_suppress_and_resume_goal() {
+    use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as _};
+    use peri_agent::agent::{
+        agent_context::AgentContext, async_tasks::TaskManager, events::BackgroundTaskResult,
+        stages::StageContext,
+    };
+    use peri_agent::session::{FrozenContext, Session};
+    for kind in [BgTaskKind::Agent, BgTaskKind::Workflow, BgTaskKind::Shell] {
+        for success in [true, false] {
+            let manager = Arc::new(TaskManager::new());
+            let session = Session::new(
+                Arc::from("/tmp/goal-reminder"),
+                FrozenContext::builder().build(),
+                None,
+            );
+            let ctx = StageContext::builder(
+                session.start_turn(),
+                session.transcript(),
+                session.queue().clone(),
+            )
+            .with_idle_should_wait({
+                let manager = manager.clone();
+                Arc::new(move || manager.active_count() > 0)
+            })
+            .build();
+            let mut state = AgentContext::from_stage(&ctx);
+            let controller = Arc::new(MockController {
+                snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+                continuation_count: std::sync::atomic::AtomicU64::new(0),
+            });
+            let mw = GoalMiddleware::new(controller.clone(), None);
+            let output = AgentOutput::new("等待后台完成", 1);
+            Middleware::after_agent(&mw, &mut state, &output)
+                .await
+                .unwrap();
+            session.queue().drain_all();
+            manager
+                .register(BgTaskRegistration {
+                    task_id: "background".into(),
+                    kind,
+                    summary: "后台边界替身".into(),
+                    pid: None,
+                    kill: Some(Box::new(|| {})),
+                })
+                .unwrap();
+            for _ in 0..2 {
+                let result = Middleware::after_agent(&mw, &mut state, &output)
+                    .await
+                    .unwrap();
+                assert!(result.block_continue.is_none(), "{kind:?} 活跃时不应续跑");
+                assert!(session.queue().drain_all().is_empty(), "后台期间不应注入");
+                assert_eq!(controller.continuation_count.load(Ordering::Relaxed), 1);
+                assert_eq!(
+                    mw.pending_rounds.load(Ordering::Relaxed),
+                    1,
+                    "紧迫感不应增长"
+                );
+            }
+            assert!(manager.complete(
+                "background",
+                BackgroundTaskResult {
+                    task_id: "background".into(),
+                    agent_name: "边界替身".into(),
+                    prompt_summary: String::new(),
+                    success,
+                    output: "终态".into(),
+                    tool_calls_count: 0,
+                    duration_ms: 0,
+                    child_thread_id: None,
+                    timed_out: false,
+                    subagent_failure: None,
+                    shell_output: None,
+                }
+            ));
+            let result = Middleware::after_agent(&mw, &mut state, &output)
+                .await
+                .unwrap();
+            assert_eq!(result.block_continue.as_deref(), Some("goal_active"));
+            assert_eq!(controller.continuation_count.load(Ordering::Relaxed), 2);
+            assert_eq!(mw.pending_rounds.load(Ordering::Relaxed), 2);
+            let messages = session.queue().drain_all();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].kind, peri_agent::session::MessageKind::Defer);
+            assert_eq!(
+                messages[0].source,
+                peri_agent::session::MessageSource::GoalSteering
+            );
+            let peri_agent::session::QueuedPayload::SystemReminder(reminder) = &messages[0].payload
+            else {
+                panic!("必须使用 canonical reminder");
+            };
+            assert_eq!(reminder.as_reminder().metadata["round"], 2);
+            assert!(reminder.as_reminder().body.contains("must call"));
+        }
+    }
+}
+
 #[test]
 fn test_render_steering_escalates() {
     let r1 = GoalMiddleware::render_steering("目标", 1);
@@ -158,8 +257,8 @@ async fn test_after_agent_existing_block_continue_不干预() {
     let controller = Arc::new(MockController {
         snapshot: parking_lot::Mutex::new(make_active_snapshot()),
         continuation_count: std::sync::atomic::AtomicU64::new(0),
-    }) as Arc<dyn GoalController>;
-    let mw = GoalMiddleware::new(controller, None);
+    });
+    let mw = GoalMiddleware::new(controller.clone(), None);
     let mut state = AgentState::new("/tmp");
     let mut output = AgentOutput::new("hook 拦截", 1);
     output.block_continue = Some("hook_stop".to_string());
@@ -173,6 +272,8 @@ async fn test_after_agent_existing_block_continue_不干预() {
         Some("hook_stop"),
         "已有 block_continue 应保留原值，不被 goal_active 覆盖"
     );
+    assert_eq!(controller.continuation_count.load(Ordering::Relaxed), 0);
+    assert_eq!(mw.pending_rounds.load(Ordering::Relaxed), 0);
     // 不干预时 queue 应为空
     let drained = state.v2_queue().drain_all();
     assert!(

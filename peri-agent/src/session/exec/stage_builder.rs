@@ -347,17 +347,15 @@ pub fn build_stage_context(
     let shared_queue = input.shared_queue.clone();
     let idle_inbox = input.idle_inbox.clone();
 
+    // 无 session manager 时只在此创建一次回退实例，工具、host 与后台 probe 必须同源。
+    let task_manager = task_manager.unwrap_or_else(|| Arc::new(TaskManager::new()));
     let idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>> = {
-        let probe_bg = task_manager.clone();
-        probe_bg.map(|reg| {
-            Arc::new(move || reg.active_count() > 0) as Arc<dyn Fn() -> bool + Send + Sync>
-        })
+        let manager = task_manager.clone();
+        Some(Arc::new(move || manager.active_count() > 0))
     };
     // Subscribe before the Receive loop can probe active_count. The watch
     // version is only a retained wake signal; registry remains the state owner.
-    let idle_registry = task_manager
-        .as_ref()
-        .map(|manager| manager.registry().subscribe_activity());
+    let idle_registry = task_manager.registry().subscribe_activity();
 
     // 调用 build_agent 构造完整 agent（含中间件链 + LLM）
     // L3：build_agent 消费的字段先 clone 一份（host 注入需要在主 session
@@ -487,11 +485,7 @@ pub fn build_stage_context(
         },
     );
 
-    let builder = if let Some(receiver) = idle_registry {
-        builder.with_idle_registry(receiver)
-    } else {
-        builder
-    };
+    let builder = builder.with_idle_registry(idle_registry);
 
     let context = builder.build();
 

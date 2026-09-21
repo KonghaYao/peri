@@ -260,3 +260,149 @@ async fn test_investigation_compact_file_must_not_be_user_bubble() {
         "内部文件上下文被回放成用户消息: {updates:?}"
     );
 }
+
+/// [回归测试] 历史工具的三个入口过去省略 kind，导致恢复后 Bash/Read 变为 Other。
+#[tokio::test]
+async fn test_replay_tool_start_kind_matches_live_across_history_encodings() {
+    use agent_client_protocol_schema::v1::ToolKind;
+    use peri_acp_types::event::ExecutorEvent;
+    use peri_acp_types::messages::{MessageId, ToolCallRequest};
+    for (name, kind) in [
+        ("Bash", ToolKind::Execute),
+        ("Read", ToolKind::Read),
+        ("mcp__server__tool", ToolKind::Other),
+    ] {
+        let input = serde_json::json!({"argument": "value"});
+        let call = ToolCallRequest::new("tc-kind", name, input.clone());
+        let messages = [
+            BaseMessage::ai_with_tool_calls("", vec![call.clone()]),
+            // ai_from_blocks 同时填入 tool_calls；仍只能发射一次。
+            BaseMessage::ai_from_blocks(vec![PeriContentBlock::ToolUse {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                input: call.arguments.clone(),
+            }]),
+            BaseMessage::ai_with_tool_calls(PeriMessageContent::Blocks(vec![]), vec![call]),
+        ];
+        let live = crate::event::map_event(
+            &ExecutorEvent::ToolStart {
+                message_id: MessageId::new(),
+                tool_call_id: "tc-kind".into(),
+                name: name.into(),
+                input: input.clone(),
+                source_agent_id: None,
+            },
+            200_000,
+            &PeriCaps::default(),
+        );
+        let SessionUpdate::ToolCall(live_call) = &live[0].updates[0] else {
+            panic!("预期 live ToolCall");
+        };
+        for message in messages {
+            let updates = collect_replay(vec![message]).await;
+            let calls: Vec<_> = updates
+                .iter()
+                .filter_map(|update| match update {
+                    SessionUpdate::ToolCall(call) => Some(call),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(calls.len(), 1, "历史工具不能重复发射");
+            assert_eq!(calls[0].kind, kind);
+            let mut replay = serde_json::to_value(calls[0]).unwrap();
+            assert_eq!(replay["_meta"]["periReplay"], true);
+            replay.as_object_mut().unwrap().remove("_meta");
+            assert_eq!(replay, serde_json::to_value(live_call).unwrap());
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_replay_tool_completion_keeps_raw_output_compatibility_and_failure_meta() {
+    use peri_acp_types::event::ExecutorEvent;
+    use peri_acp_types::messages::MessageId;
+    let failure = peri_acp_types::error::SafeSubagentFailure::new(
+        "child-1",
+        peri_acp_types::error::SafeModelErrorDiagnostic::from_model(
+            peri_model::ModelError::http_status(429, "provider.example", Some("req-1"))
+                .diagnostic(),
+        ),
+    )
+    .unwrap();
+    for output in ["  ", r#"{"error":"failed"}"#] {
+        let live = crate::event::map_event(
+            &ExecutorEvent::ToolEnd {
+                message_id: MessageId::new(),
+                tool_call_id: "tc-completion".into(),
+                name: "delegate".into(),
+                output: output.into(),
+                is_error: true,
+                source_agent_id: Some("child-source".into()),
+                subagent_failure: Some(failure.clone()),
+            },
+            200_000,
+            &PeriCaps::default(),
+        );
+        assert_eq!(live[0].source_agent_id.as_deref(), Some("child-source"));
+        let SessionUpdate::ToolCallUpdate(live_update) = &live[0].updates[0] else {
+            panic!("预期 live ToolCallUpdate");
+        };
+        for replay_cap in [false, true] {
+            let sender = CollectSender {
+                updates: std::sync::Mutex::new(Vec::new()),
+            };
+            replay_session_history(
+                "s1",
+                &[BaseMessage::tool_result_with_execution_and_failure(
+                    "tc-completion",
+                    output,
+                    true,
+                    None,
+                    Some(failure.clone()),
+                )],
+                &sender,
+                &PeriCaps {
+                    replay: replay_cap,
+                    ..PeriCaps::default()
+                },
+            )
+            .await
+            .unwrap();
+            let updates = sender.updates.into_inner().unwrap();
+            let SessionUpdate::ToolCallUpdate(replay_update) = &updates[0] else {
+                panic!("预期 replay ToolCallUpdate");
+            };
+            assert_eq!(replay_update.fields.status, Some(ToolCallStatus::Failed));
+            let text = tool_call_output_text(&replay_update.fields);
+            assert_eq!(text, tool_call_output_text(&live_update.fields));
+            assert_eq!(
+                text,
+                if output.trim().is_empty() {
+                    "Tool execution failed"
+                } else {
+                    output
+                }
+            );
+            assert_eq!(replay_update.fields.title, None);
+            assert_eq!(live_update.fields.title.as_deref(), Some("delegate"));
+            assert_eq!(
+                replay_update.fields.raw_output,
+                Some(serde_json::json!(output))
+            );
+            assert_eq!(
+                live_update.fields.raw_output,
+                Some(serde_json::from_str(output).unwrap_or_else(|_| serde_json::json!(output)))
+            );
+            let meta = replay_update.meta.as_ref().unwrap();
+            assert_eq!(meta["peri"], live_update.meta.as_ref().unwrap()["peri"]);
+            assert_eq!(
+                meta["peri"]["subagentFailure"]["child_thread_id"],
+                "child-1"
+            );
+            assert_eq!(
+                meta.get("periReplay"),
+                replay_cap.then_some(&serde_json::Value::Bool(true))
+            );
+        }
+    }
+}

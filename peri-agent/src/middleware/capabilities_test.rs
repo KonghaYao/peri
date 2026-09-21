@@ -36,6 +36,81 @@ fn context_with(middleware: impl Middleware + 'static) -> StageContext {
     ctx
 }
 
+struct BackgroundProbe(Arc<AtomicBool>);
+
+#[async_trait]
+impl Middleware for BackgroundProbe {
+    fn name(&self) -> &str {
+        "BackgroundProbe"
+    }
+
+    async fn after_agent(
+        &self,
+        state: &mut dyn hook_state::AfterAgentState,
+        output: &AgentOutput,
+    ) -> AgentResult<AgentOutput> {
+        self.0
+            .store(state.has_active_background_tasks(), Ordering::SeqCst);
+        Ok(output.clone())
+    }
+}
+
+/// [回归测试] 完成回调尚未结算的任务仍应通过生产 runner 暴露为活跃。
+#[tokio::test]
+async fn test_after_agent_background_capability_keeps_completing_active() {
+    use crate::agent::async_tasks::{
+        BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind, TaskManager,
+    };
+    use crate::agent::events::BackgroundTaskResult;
+    let manager = Arc::new(TaskManager::new());
+    manager
+        .register_with_kind(BackgroundTask {
+            id: "completing".into(),
+            agent_name: "边界替身".into(),
+            prompt_summary: String::new(),
+            status: BackgroundTaskStatus::Completing,
+            started_at: std::time::Instant::now(),
+            chrono_started_at: chrono::Utc::now(),
+            kind: BgTaskKind::Agent,
+            cancel_handle: BgCancelHandle::Kill(None),
+            cancel_token: None,
+            pid: None,
+            output_preview: None,
+            agent_inbox: None,
+        })
+        .unwrap();
+    let seen = Arc::new(AtomicBool::new(false));
+    let mut ctx = context_with(BackgroundProbe(seen.clone()));
+    ctx.async_ctx.idle_should_wait = Some({
+        let manager = manager.clone();
+        Arc::new(move || manager.active_count() > 0)
+    });
+    middleware_runner::run_after_agent(&ctx, AgentOutput::new("等待", 1))
+        .await
+        .unwrap();
+    assert!(seen.load(Ordering::SeqCst), "Completing 尚未提交终态");
+    assert!(manager.complete(
+        "completing",
+        BackgroundTaskResult {
+            task_id: "completing".into(),
+            agent_name: "边界替身".into(),
+            prompt_summary: String::new(),
+            success: true,
+            output: String::new(),
+            tool_calls_count: 0,
+            duration_ms: 0,
+            child_thread_id: None,
+            timed_out: false,
+            subagent_failure: None,
+            shell_output: None,
+        }
+    ));
+    middleware_runner::run_after_agent(&ctx, AgentOutput::new("完成", 1))
+        .await
+        .unwrap();
+    assert!(!seen.load(Ordering::SeqCst), "同一适配器应读取实时终态");
+}
+
 struct ModelProbe(Arc<AtomicBool>);
 
 #[async_trait]

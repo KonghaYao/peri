@@ -1,4 +1,7 @@
 use crate::session::event_sink::EventSink;
+use agent_client_protocol_schema::v1::{
+    ToolCallContent, ToolCallStatus, ToolCallUpdateFields, ToolKind,
+};
 use peri_acp_types::command::{CommandFeedback, FeedbackChannel, FeedbackLevel};
 use peri_acp_types::event::{
     BackgroundTaskResult, CompactStrategy, CompactTrigger, ExecutorEvent, TodoEntry, TodoStatus,

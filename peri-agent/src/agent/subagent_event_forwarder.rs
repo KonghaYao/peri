@@ -51,129 +51,166 @@ use crate::agent::events_v2::{
 ///
 /// # 返回
 ///
-/// 转发器 task 的 `JoinHandle`。调用方持有以控制生命周期（通常 `_forwarder_handle`
-/// 解绑即表示 fire-and-forget，task 在通道关闭时自动退出）。
+/// 转发器 task 的 `JoinHandle`。调用方关闭全部 producer 后必须 await，
+/// 再发布可见终态；JoinError 不能当作执行成功。
 pub fn spawn_subagent_event_forwarder(
-    mut handles: EventHandles,
+    handles: EventHandles,
     event_handler: Option<Arc<dyn AgentEventHandler>>,
     bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     child_thread_id: String,
 ) -> JoinHandle<()> {
-    let has_handler = event_handler.is_some();
     tokio::spawn(async move {
-        tracing::info!(
-            target: "agent.subagent_forwarder",
-            child_thread_id = %child_thread_id,
-            has_event_handler = has_handler,
-            "forwarder spawned"
-        );
-        let mut observe_open = true;
-        loop {
-            // biased + observe 优先：确保 StageStarted 先于 ToolStarted 到达 tracer，
-            // 避免 active_stage=None 时工具 parent 错误回落到主 agent。
-            // render 优先于 state：保证同一 ReAct 迭代的 Render 事件在 State 事件
-            // 之前被消费，避免 commit_iteration 与残留 Render 事件乱序导致的 partial 污染。
-            tokio::select! {
-                biased;
-                ev_res = handles.observe_rx.recv(), if observe_open => {
-                    match ev_res {
-                        Ok(ev) => {
-                            // Langfuse bridge 调用必须在 ev 被 observe_event_to_executor move 之前
-                            if let Some(ref b) = bridge {
-                                b.process_observe_event(&ev);
-                            }
-                            // [C2/C3] 过滤 v2 SubagentStart/Stop 的 v1 mapper 转发：
-                            // 发射侧已同步协议化直发（subagent.rs 的
-                            // forward_subagent_start_v1/stop_v1，批 2「v1-retire」），
-                            // 再经 mapper 转发会形成双发，破坏 TUI instance_id 配对。
-                            // bridge 侧已处理。v2 事件本身仍从 child EventBus 送达
-                            // tracer（bridge 调用在上方）。
-                            if matches!(
-                                &ev,
-                                ObserveEvent::SubagentStart { .. } | ObserveEvent::SubagentStop { .. }
-                            ) {
-                                tracing::trace!(
-                                    target: "agent.subagent_forwarder",
-                                    child_thread_id = %child_thread_id,
-                                    "forwarder: filtered v2 SubagentStart/Stop from v1 mapper forwarding"
-                                );
-                                continue;
-                            }
-                            if let Some(mut exec_ev) = observe_event_to_executor(ev) {
-                                set_source_agent_id(&mut exec_ev, &child_thread_id);
-                                if let Some(h) = &event_handler {
-                                    h.on_event(exec_ev);
-                                }
-                            }
+        let stop =
+            forward_subagent_events(handles, event_handler, bridge.clone(), child_thread_id).await;
+        if let (Some(bridge), Some(stop)) = (bridge, stop) {
+            bridge.process_observe_event(&stop);
+        }
+    })
+}
+
+// Session lifecycle owns the final Stop. Returning it through the join prevents
+// a cancelled owner from leaving a detached task that later publishes success.
+pub(crate) fn spawn_subagent_event_forwarder_for_completion(
+    handles: EventHandles,
+    event_handler: Option<Arc<dyn AgentEventHandler>>,
+    bridge: Option<Arc<dyn LangfuseBridgeLike>>,
+    child_thread_id: String,
+) -> tokio_util::task::AbortOnDropHandle<Option<ObserveEvent>> {
+    tokio_util::task::AbortOnDropHandle::new(tokio::spawn(forward_subagent_events(
+        handles,
+        event_handler,
+        bridge,
+        child_thread_id,
+    )))
+}
+
+async fn forward_subagent_events(
+    mut handles: EventHandles,
+    event_handler: Option<Arc<dyn AgentEventHandler>>,
+    bridge: Option<Arc<dyn LangfuseBridgeLike>>,
+    child_thread_id: String,
+) -> Option<ObserveEvent> {
+    let has_handler = event_handler.is_some();
+    tracing::info!(
+        target: "agent.subagent_forwarder",
+        child_thread_id = %child_thread_id,
+        has_event_handler = has_handler,
+        "forwarder spawned"
+    );
+    let mut observe_open = true;
+    let mut pending_stop = None;
+    loop {
+        // biased + observe 优先：确保 StageStarted 先于 ToolStarted 到达 tracer，
+        // 避免 active_stage=None 时工具 parent 错误回落到主 agent。
+        // render 优先于 state：保证同一 ReAct 迭代的 Render 事件在 State 事件
+        // 之前被消费，避免 commit_iteration 与残留 Render 事件乱序导致的 partial 污染。
+        tokio::select! {
+            biased;
+            ev_res = handles.observe_rx.recv(), if observe_open => {
+                match ev_res {
+                    Ok(ev) => {
+                        // Stop belongs after all buffered events, including render.
+                        // A failed forwarder must not have already published success.
+                        if matches!(&ev, ObserveEvent::SubagentStop { .. }) {
+                            pending_stop = Some(ev);
+                            continue;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            // observe 关闭时 render/state 仍可能持有已入队事件。
-                            // 仅停用本分支，保留其他通道的排空与既有优先级。
-                            observe_open = false;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!(
-                                n,
-                                "[subagent-forwarder] observe_rx lagged, events dropped"
-                            );
-                        }
-                    }
-                }
-                Some(ev) = handles.render_rx.recv() => {
-                    // 过滤：子 Agent 的 TurnCommitted / HitlPending 不应转发到父 Agent
-                    // （TurnCompleted 已迁移到 RenderEvent；HitlPending 由父 Agent
-                    //  HITL 中间件独立处理，转发会导致双重审批弹窗）
-                    let should_forward = !matches!(
-                        &ev,
-                        crate::agent::events_v2::RenderEvent::TurnCompleted { .. }
-                        | crate::agent::events_v2::RenderEvent::HitlPending { .. }
-                    );
-                    if should_forward {
-                        // Langfuse bridge 调用必须在 ev 被 render_event_to_executor move 之前
+                        // Langfuse bridge 调用必须在 ev 被 observe_event_to_executor move 之前
                         if let Some(ref b) = bridge {
-                            b.process_render_event(&ev);
+                            b.process_observe_event(&ev);
                         }
-                        if let Some(mut exec_ev) = render_event_to_executor(ev) {
+                        // [C2/C3] 过滤 v2 SubagentStart/Stop 的 v1 mapper 转发：
+                        // 发射侧已同步协议化直发（subagent.rs 的
+                        // forward_subagent_start_v1/stop_v1，批 2「v1-retire」），
+                        // 再经 mapper 转发会形成双发，破坏 TUI instance_id 配对。
+                        // bridge 侧已处理。v2 事件本身仍从 child EventBus 送达
+                        // tracer（bridge 调用在上方）。
+                        if matches!(
+                            &ev,
+                            ObserveEvent::SubagentStart { .. } | ObserveEvent::SubagentStop { .. }
+                        ) {
                             tracing::trace!(
                                 target: "agent.subagent_forwarder",
                                 child_thread_id = %child_thread_id,
-                                ev = ?exec_ev,
-                                "forwarder: received render event, forwarding to parent"
+                                "forwarder: filtered v2 SubagentStart/Stop from v1 mapper forwarding"
                             );
+                            continue;
+                        }
+                        if let Some(mut exec_ev) = observe_event_to_executor(ev) {
                             set_source_agent_id(&mut exec_ev, &child_thread_id);
-                            tracing::debug!(
-                                target: "agent.subagent_forwarder",
-                                child_thread_id = %child_thread_id,
-                                "forwarder: tool event sourced from SubAgent"
-                            );
                             if let Some(h) = &event_handler {
                                 h.on_event(exec_ev);
                             }
                         }
                     }
-                }
-                Some(ev) = handles.state_rx.recv() => {
-                    // 过滤：子 Agent 的 StateSnapshot / TurnSuspended 不应转发到
-                    // 父 Agent（StateSnapshot 不应污染父 transcript；TurnSuspended
-                    // 是子 Agent 自身挂起信号，转发会让父 TUI 错误归档 current_turn
-                    // 并停止 loading——父子并行时父 turn 仍在运行）。
-                    let should_forward = !matches!(
-                        &ev,
-                        crate::agent::events_v2::StateEvent::StateSnapshot { .. }
-                            | crate::agent::events_v2::StateEvent::TurnSuspended { .. }
-                    );
-                    if should_forward {
-                        if let Some(exec_ev) = state_event_to_executor(ev) {
-                            if let Some(h) = &event_handler {
-                                h.on_event(exec_ev);
-                            }
-                        }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // observe 关闭时 render/state 仍可能持有已入队事件。
+                        // 仅停用本分支，保留其他通道的排空与既有优先级。
+                        observe_open = false;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            n,
+                            "[subagent-forwarder] observe_rx lagged, events dropped"
+                        );
                     }
                 }
-                else => break,
             }
+            Some(ev) = handles.render_rx.recv() => {
+                // 过滤：子 Agent 的 TurnCommitted / HitlPending 不应转发到父 Agent
+                // （TurnCompleted 已迁移到 RenderEvent；HitlPending 由父 Agent
+                //  HITL 中间件独立处理，转发会导致双重审批弹窗）
+                let should_forward = !matches!(
+                    &ev,
+                    crate::agent::events_v2::RenderEvent::TurnCompleted { .. }
+                    | crate::agent::events_v2::RenderEvent::HitlPending { .. }
+                );
+                if should_forward {
+                    // Langfuse bridge 调用必须在 ev 被 render_event_to_executor move 之前
+                    if let Some(ref b) = bridge {
+                        b.process_render_event(&ev);
+                    }
+                    if let Some(mut exec_ev) = render_event_to_executor(ev) {
+                        tracing::trace!(
+                            target: "agent.subagent_forwarder",
+                            child_thread_id = %child_thread_id,
+                            ev = ?exec_ev,
+                            "forwarder: received render event, forwarding to parent"
+                        );
+                        set_source_agent_id(&mut exec_ev, &child_thread_id);
+                        tracing::debug!(
+                            target: "agent.subagent_forwarder",
+                            child_thread_id = %child_thread_id,
+                            "forwarder: tool event sourced from SubAgent"
+                        );
+                        if let Some(h) = &event_handler {
+                            h.on_event(exec_ev);
+                        }
+                    }
+                }
+            }
+            Some(ev) = handles.state_rx.recv() => {
+                // 过滤：子 Agent 的 StateSnapshot / TurnSuspended 不应转发到
+                // 父 Agent（StateSnapshot 不应污染父 transcript；TurnSuspended
+                // 是子 Agent 自身挂起信号，转发会让父 TUI 错误归档 current_turn
+                // 并停止 loading——父子并行时父 turn 仍在运行）。
+                let should_forward = !matches!(
+                    &ev,
+                    crate::agent::events_v2::StateEvent::StateSnapshot { .. }
+                        | crate::agent::events_v2::StateEvent::TurnSuspended { .. }
+                );
+                if should_forward {
+                    if let Some(exec_ev) = state_event_to_executor(ev) {
+                        if let Some(h) = &event_handler {
+                            h.on_event(exec_ev);
+                        }
+                    }
+                }
+            }
+            else => break,
         }
-    })
+    }
+    pending_stop
 }
 
 /// 对 ToolStart / ToolEnd / TextChunk / AiReasoning 设置 source_agent_id。

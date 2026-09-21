@@ -433,12 +433,17 @@ async fn test_discover_skills_empty_result() {
     assert_eq!(output.trim(), "[]");
 }
 
-// ─── find_and_load_skill 边界测试 ────────────────────────────────────────────
+// ─── 缓存边界测试 ────────────────────────────────────────────────────────────
 
-#[test]
-fn test_find_and_load_skill_not_found_in_empty_list() {
-    // 空列表应返回错误
-    let result = find_and_load_skill(&[], "any-skill");
+#[tokio::test]
+async fn test_skill_tool_not_found_in_empty_list() {
+    let tool = make_skill_tool_with_entries(vec![]);
+    let result = tool
+        .invoke(
+            json!({"skill_name": "any-skill"}),
+            ToolContext::new(&[], "."),
+        )
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
 }
@@ -487,6 +492,13 @@ async fn test_skill_tool_loads_mcp_skill_from_cache() {
     assert!(result.is_ok(), "MCP skill 按全名加载应成功");
     let content = result.unwrap();
     assert!(content.contains("Body of hello."), "应含缓存正文");
+    assert_eq!(
+        content
+            .matches("This skill is served by MCP server")
+            .count(),
+        1,
+        "来源只标注一次"
+    );
     assert!(
         content.contains("This skill is served by MCP server \"demo\""),
         "应含来源标注 server 名，实际: {content}"
@@ -497,21 +509,50 @@ async fn test_skill_tool_loads_mcp_skill_from_cache() {
     );
 }
 
-/// `load_skill_content` 的 Mcp content-None 防御分支（发现任务写入时 content
+/// [回归测试] MCP content-None 防御分支（发现任务写入时 content
 /// 恒为 Some，理论不可达）：必须走既有 not-found 错误路径，不得 panic /
 /// 误读磁盘。
-#[test]
-fn test_load_skill_content_mcp_content_none_returns_not_found() {
+#[tokio::test]
+async fn test_skill_tool_mcp_content_none_does_not_read_disk() {
+    let (temp, skill_dir, _) = setup_temp_skill_dir();
     let mut skill = fake_mcp_skill("demo", "hello");
     skill.content = None;
-
-    let result = load_skill_content(&skill);
+    skill.path = skill_dir.join("SKILL.md");
+    let tool = make_skill_tool_with_entries(vec![skill]);
+    let result = tool
+        .invoke(
+            json!({"skill_name": "mcp__demo__hello"}),
+            ToolContext::new(&[], temp.path().to_str().unwrap()),
+        )
+        .await;
 
     assert!(result.is_err(), "content 缺失应返回错误");
     assert!(
         result.unwrap_err().to_string().contains("not found"),
         "应走既有 not-found 错误路径"
     );
+}
+
+/// [回归测试] 扫描缓存仍有条目、文件已删除时必须报告目录与磁盘不一致。
+#[tokio::test]
+async fn test_skill_tool_cached_local_file_missing_returns_recoverable_error() {
+    let (temp, skill_dir, _) = setup_temp_skill_dir();
+    let tool = make_skill_tool_with_cache(vec![SkillRoot {
+        path: temp.path().to_path_buf(),
+        source: SkillSource::Project,
+        plugin_name: None,
+    }]);
+    std::fs::remove_file(skill_dir.join("SKILL.md")).unwrap();
+    let error = tool
+        .invoke(
+            json!({"skill_name": "test-skill"}),
+            ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("is in the session catalog but its file cannot be read"));
+    assert!(error.contains("DiscoverSkillsTool"));
 }
 
 #[tokio::test]

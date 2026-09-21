@@ -7,7 +7,7 @@ use peri_agent::{
     middleware::r#trait::Middleware,
 };
 
-use crate::skills::{SkillMetadata, SkillRoot, SkillSource};
+use crate::skills::SkillRoot;
 
 /// 从文本中提取 `/skill-name` 模式的 skill 名称
 ///
@@ -133,94 +133,51 @@ impl Middleware for SkillPreloadMiddleware {
         let cwd = self.cwd.clone();
         let plugin_roots = self.plugin_roots.clone();
         let disable_bundled = self.disable_bundled;
-        let names_lower: Vec<String> = skill_names.iter().map(|s| s.to_lowercase()).collect();
-
-        // DD-3：每名称先查 registry（同步 RwLock 读，无需 spawn_blocking）。
-        // `registry.find` 已实现精确名（mcp__<server>__<skill>）+ `<server>:<skill>`
-        // 别名；命中即用缓存 content，未命中才走既有本地磁盘路径。
-        // 兜底（决策 1 + A3）：`{server}:{skill}` 命令形态 token 再经
-        // `registry.find_by_command` 按「server 名末段小写」匹配——覆盖
-        // plugin 多冒号 server key（`plugin:{plugin}:{server}`）下 `find`
-        // 别名拼原名必 miss 的场景（命令面 fullname 同源取末段）。
-        // OQ1：`mcp__` 前缀 token 是 MCP 身份——registry miss 即静默跳过，
-        // 不回退磁盘（防误注入本地同名内容）；`<x>:<y>` 别名 miss 保持既有
-        // 磁盘回退（对齐 plugin 命名空间语义）。
-        let mut registry_hits: std::collections::HashMap<String, SkillMetadata> =
-            std::collections::HashMap::new();
-        let mut skipped_mcp_miss: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut disk_names: Vec<String> = Vec::new();
-        if let Some(reg) = &self.mcp_registry {
-            for name in &names_lower {
-                match reg.find(name).or_else(|| reg.find_by_command(name)) {
-                    Some(meta) => {
-                        registry_hits.insert(name.clone(), meta);
+        let registry = self.mcp_registry.clone();
+        // 一批预加载共享一次本地扫描。按输入顺序直接产出结果，避免把
+        // registry 命中、磁盘 miss 与磁盘命中拆成多路后再按位置合并。
+        let skill_contents = tokio::task::spawn_blocking(move || {
+            let mut local_skills = None;
+            let mut contents = Vec::with_capacity(skill_names.len());
+            for name in skill_names {
+                let name = name.to_lowercase();
+                if let Some(reg) = &registry {
+                    // registry-first；find_by_command 保留 plugin 多冒号 server
+                    // key 的末段命令别名。命中但缓存缺失仍不得改读本地文件。
+                    if let Some(meta) = reg.find(&name).or_else(|| reg.find_by_command(&name)) {
+                        if let Ok(content) = crate::skills::content::load(&meta) {
+                            contents.push((name, content));
+                        }
+                        continue;
                     }
-                    None if name.starts_with("mcp__") => {
-                        // OQ1：mcp__ 前缀 registry miss → 跳过，不回退磁盘。
-                        skipped_mcp_miss.insert(name.clone());
+                    // mcp__ 表示 MCP 身份；registry miss 不回退磁盘。
+                    if name.starts_with("mcp__") {
+                        continue;
                     }
-                    None => disk_names.push(name.clone()),
+                }
+                let skills = local_skills.get_or_insert_with(|| {
+                    let roots = crate::skills::resolve_skill_roots(
+                        &cwd,
+                        plugin_roots.clone(),
+                        disable_bundled,
+                    );
+                    crate::skills::scan_skill_roots(&roots)
+                });
+                let found = crate::skills::find_skill_in_list(skills, &name).or_else(|| {
+                    name.rsplit_once(':')
+                        .and_then(|(_, suffix)| crate::skills::find_skill_in_list(skills, suffix))
+                });
+                if let Some((_, content)) = found {
+                    contents.push((name, content));
                 }
             }
-        } else {
-            disk_names = names_lower.clone();
-        }
-
-        // 在 blocking 线程中查找并读取本地 skill 内容
-        // 委托给 skills::loader::find_skill_content 公共函数，避免重复实现。
-        // 位置保留（map 而非 filter_map）：Option 与 disk_names 逐位对齐，
-        // 合并循环按名消费，保证输出与用户原始输入顺序一致（miss 夹在命中
-        // 之间也不移位）。
-        let disk_resolved: Vec<Option<(SkillMetadata, String)>> =
-            tokio::task::spawn_blocking(move || {
-                disk_names
-                    .iter()
-                    .map(|name| {
-                        // 精确匹配优先，再用命名空间后缀匹配（/ecc:plan → plan）
-                        crate::skills::loader::find_skill_content(
-                            &cwd,
-                            plugin_roots.clone(),
-                            disable_bundled,
-                            name,
-                        )
-                        .or_else(|| {
-                            name.rsplit_once(':').and_then(|(_, suffix)| {
-                                crate::skills::loader::find_skill_content(
-                                    &cwd,
-                                    plugin_roots.clone(),
-                                    disable_bundled,
-                                    suffix,
-                                )
-                            })
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .await
-            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                middleware: "SkillPreloadMiddleware".to_string(),
-                reason: format!("spawn_blocking 失败: {e}"),
-            })?;
-
-        // 按原始输入顺序合并两路结果（registry 命中与磁盘命中交错保持用户
-        // 输入顺序）；registry 命中但 content 缺失（理论不可能）静默跳过。
-        // disk_iter 与 disk_names 逐位对齐（位置保留），仅在"非 registry 命中、
-        // 非 mcp__ skip"的名称上消费，避免跳过项消耗后续名称的磁盘条目。
-        let mut disk_iter = disk_resolved.into_iter();
-        let mut skill_contents: Vec<(String, SkillMetadata, String)> =
-            Vec::with_capacity(names_lower.len());
-        for name in &names_lower {
-            if let Some(meta) = registry_hits.get(name) {
-                if let Some(content) = meta.content.as_deref() {
-                    skill_contents.push((name.clone(), meta.clone(), content.to_string()));
-                }
-            } else if skipped_mcp_miss.contains(name) {
-                // OQ1：mcp__ 前缀 miss 不回退磁盘——静默跳过（不消费 disk_iter）。
-            } else if let Some(Some((meta, content))) = disk_iter.next() {
-                skill_contents.push((name.clone(), meta, content));
-            }
-        }
+            contents
+        })
+        .await
+        .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+            middleware: "SkillPreloadMiddleware".to_string(),
+            reason: format!("spawn_blocking 失败: {e}"),
+        })?;
 
         if skill_contents.is_empty() {
             return Ok(());
@@ -235,7 +192,7 @@ impl Middleware for SkillPreloadMiddleware {
         let tool_use_blocks: Vec<ContentBlock> = skill_contents
             .iter()
             .zip(call_ids.iter())
-            .map(|((name, _, _), id)| {
+            .map(|((name, _), id)| {
                 ContentBlock::tool_use(
                     id.clone(),
                     "SkillTool",
@@ -247,13 +204,8 @@ impl Middleware for SkillPreloadMiddleware {
         // 追加 Ai 消息（ai_from_blocks 自动双写 tool_calls）
         state.add_message(BaseMessage::ai_from_blocks(tool_use_blocks));
 
-        // 追加 Tool 结果消息；MCP 来源内容包裹来源标注（提示注入防御，验收 12）
-        for (id, (_, meta, content)) in call_ids.iter().zip(skill_contents.iter()) {
-            let content = if matches!(meta.source, SkillSource::Mcp) {
-                crate::skills::annotate_mcp_content(meta, content)
-            } else {
-                content.clone()
-            };
+        // 内容加载入口已完成 MCP 来源标注。
+        for (id, (_, content)) in call_ids.iter().zip(skill_contents) {
             state.add_message(BaseMessage::tool_result(id.clone(), content));
         }
 

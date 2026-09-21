@@ -4,22 +4,20 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    ReminderSource, SystemReminder, SYSTEM_REMINDER_VERSION,
 };
 use peri_agent::{
-    error::{AgentError, AgentResult},
-    middleware::r#trait::Middleware,
-    session::{MessageKind, MessageSource, QueuedMessage},
-    tools::BaseTool,
+    error::AgentResult, middleware::r#trait::Middleware, session::MessageSource, tools::BaseTool,
 };
 use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
 
+use crate::completion_reminder::CompletionReminder;
 use crate::tools::todo::{render_todo_status, TodoItem, TodoState, TodoStatus, TodoWriteTool};
 
 /// TodoMiddleware - 提供 todo_write 工具，与 TypeScript todo_write_tool 对齐；
 /// 当 agent 以 `requireCompletion: true` 创建 todo 后停止轮仍未标记完成时，
-/// 注入当前 todo 状态 + 设 block_continue 续跑（类似 GoalMiddleware）。
+/// 无后台任务或既有 stop block 时，注入当前 todo 状态并设 block_continue 续跑。
 pub struct TodoMiddleware {
     notify_tx: mpsc::Sender<Vec<TodoItem>>,
     /// 共享 todo 状态（工具与 after_agent 同源）
@@ -68,12 +66,10 @@ impl Middleware for TodoMiddleware {
         state: &mut dyn hook_state::AfterAgentState,
         output: &peri_agent::agent::react::AgentOutput,
     ) -> AgentResult<peri_agent::agent::react::AgentOutput> {
-        // 1. 前面已有 block_continue → 不干预，尊重优先级（防御性 guard：
-        // 链序中 Todo 在 Hook/Goal 之前，当前实际看不到它们的 block；
-        // 若未来链序前移出现会设 block_continue 的中间件，此处生效）
-        if output.block_continue.is_some() {
+        // 1. 共用准入：已有 stop block 或仍需等待后台任务时不干预。
+        let Some(admission) = CompletionReminder::admit(state, output) else {
             return Ok(output.clone());
-        }
+        };
 
         // 2. 检查 requireCompletion 标记：未开启 / 空列表 / 已全部完成 → 放行
         let snap = self.state.lock().await;
@@ -92,41 +88,33 @@ impl Middleware for TodoMiddleware {
             .count();
         let template = Self::render_steering(&snap.items);
         drop(snap); // 模板渲染完成，释放状态锁（注入路径不依赖 todo 状态）
-        let reminder = TrustedSystemReminderFactory::for_producer()
-            .construct(SystemReminder {
-                version: SYSTEM_REMINDER_VERSION,
-                category: ReminderCategory::Guidance,
-                source: ReminderSource("todo".into()),
-                kind: "require_completion".into(),
-                severity: ReminderSeverity::Warning,
-                delivery: ReminderDelivery::Required,
-                audiences: ReminderAudiences(vec![
-                    ReminderAudience::Model,
-                    ReminderAudience::Automation,
-                ]),
-                body: template,
-                summary: Some(format!("{pending_count} 个 Todo 尚未完成")),
-                metadata: json!({ "pending_count": pending_count }),
-            })
-            .map_err(|error| AgentError::MiddlewareError {
-                middleware: self.name().to_string(),
-                reason: error.to_string(),
-            })?;
-        state.enqueue_v2_message(QueuedMessage::system_reminder(
-            MessageKind::Defer,
-            MessageSource::TodoSteering,
-            reminder,
-        ));
+        let reminder = SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Guidance,
+            source: ReminderSource("todo".into()),
+            kind: "require_completion".into(),
+            severity: ReminderSeverity::Warning,
+            delivery: ReminderDelivery::Required,
+            audiences: ReminderAudiences(vec![
+                ReminderAudience::Model,
+                ReminderAudience::Automation,
+            ]),
+            body: template,
+            summary: Some(format!("{pending_count} 个 Todo 尚未完成")),
+            metadata: json!({ "pending_count": pending_count }),
+        };
 
         tracing::debug!(
             pending = pending_count,
             "TodoMiddleware: requireCompletion 未完成，注入 after_agent steering"
         );
 
-        // 4. 设 block_continue，executor 自动续跑
-        let mut output = output.clone();
-        output.block_continue = Some("todo_require_completion".to_string());
-        Ok(output)
+        admission.enqueue(
+            self.name(),
+            reminder,
+            MessageSource::TodoSteering,
+            "todo_require_completion",
+        )
     }
 }
 
