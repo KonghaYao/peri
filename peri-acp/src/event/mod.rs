@@ -10,6 +10,7 @@ mod forwarder;
 mod forwarder_test;
 pub mod mapper;
 pub mod oauth;
+pub(crate) mod tool_projection;
 
 pub(crate) use self::forwarder::{forward_eventbus, spawn_eventbus_forwarder};
 pub use mapper::{map_event, MappedEvent};

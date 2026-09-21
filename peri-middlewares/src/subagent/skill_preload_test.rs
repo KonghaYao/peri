@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use peri_acp_types::{
     mcp_skills::{mcp_skill_name, HandleToken, McpSkillRegistry},
-    skills::{SkillMetadata, SkillOrigin},
+    skills::{SkillMetadata, SkillOrigin, SkillSource},
 };
 
 fn write_skill(dir: &std::path::Path, name: &str, desc: &str) {
@@ -562,9 +562,9 @@ async fn test_preload_mcp_skill_unmatched_silently_skipped() {
     );
 }
 
+/// [回归测试] 混合批次的命名空间回退、miss、重复请求均保留输入顺序。
 #[tokio::test]
 async fn test_preload_mixed_registry_and_local_skills() {
-    // Arrange: registry（demo:hello）+ 本地 tempdir skill 并存
     let dir = tempdir().unwrap();
     let skills_dir = dir.path().join(".claude").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
@@ -573,31 +573,47 @@ async fn test_preload_mixed_registry_and_local_skills() {
     let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap())
         .with_mcp_registry(Some(reg));
     let mut state = AgentState::new(dir.path().to_str().unwrap());
-    state.add_message(BaseMessage::human("/local-skill /demo:hello 帮我"));
-
-    // Act
+    state.add_message(BaseMessage::human(
+        "/ns:local-skill /missing-batch-skill /demo:hello /local-skill /mcp__demo__hello",
+    ));
     mw.before_agent(&mut state).await.unwrap();
-
-    // Assert: 1 Human + 1 Ai + 2 Tool = 4 条；两路各自命中
-    assert_eq!(state.messages().len(), 4, "本地与 MCP 应各自注入一条 Tool");
-    let tool_contents: Vec<String> = state
-        .messages()
+    let messages = state.messages();
+    assert_eq!(messages.len(), 6, "Human + Ai + 四个成功加载的 Tool");
+    let calls = messages[1].tool_calls();
+    let names: Vec<_> = calls
         .iter()
-        .skip(1)
-        .map(|m| m.content())
+        .map(|call| call.arguments["skill_name"].as_str().unwrap())
         .collect();
-    assert!(
-        tool_contents
-            .iter()
-            .any(|c| c.contains("Skill content for local-skill")),
-        "本地 skill 应照旧命中"
+    assert_eq!(
+        names,
+        vec![
+            "ns:local-skill",
+            "demo:hello",
+            "local-skill",
+            "mcp__demo__hello"
+        ]
     );
-    assert!(
-        tool_contents
-            .iter()
-            .any(|c| c.contains("This skill is served by MCP server \"demo\"")),
-        "MCP skill 应命中并带来源标注"
-    );
+    for (index, call) in calls.iter().enumerate() {
+        let message = &messages[index + 2];
+        let BaseMessage::Tool { tool_call_id, .. } = message else {
+            panic!("应为 ToolResult");
+        };
+        assert_eq!(tool_call_id, &call.id);
+        let content = message.content();
+        if index % 2 == 0 {
+            assert!(content.contains("Skill content for local-skill"));
+            assert!(!content.contains("This skill is served by MCP server"));
+        } else {
+            assert!(content.contains("Body of hello."));
+            assert_eq!(
+                content
+                    .matches("This skill is served by MCP server")
+                    .count(),
+                1,
+                "来源只标注一次"
+            );
+        }
+    }
 }
 
 /// 磁盘解析位置保留回归（组 D）：miss 夹在命中之间时，注入顺序必须等于

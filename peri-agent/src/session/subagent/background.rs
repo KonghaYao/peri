@@ -3,13 +3,13 @@ use std::sync::Arc;
 use peri_acp_types::identity::AgentId;
 use tokio_util::sync::CancellationToken;
 
+use super::lifecycle::drain_subagent_events;
 use super::types::{SubagentFailure, SubagentLifecycleStart, SubagentLifecycleStop};
 use super::util::{count_tool_calls_from_session, extract_last_ai_text};
 use super::v2_bridge::{forward_subagent_start_v1, forward_subagent_stop_v1, V2SubagentContext};
 use super::{
-    build_subagent_start_v2, build_subagent_stop_v2, build_subagent_stop_v2_with_failure,
-    emit_subagent_start_v2, emit_subagent_stop_v2_with_failure, BgCleanupGuard, BgStopEmitV2,
-    SubagentStopV2Input,
+    build_subagent_start_v2, build_subagent_stop_v2_with_failure, emit_subagent_start_v2,
+    emit_subagent_stop_v2_with_failure, BgCleanupGuard, BgStopEmitV2, SubagentStopV2Input,
 };
 use crate::agent::async_tasks::{
     BackgroundAgentInbox, BackgroundAgentInboxGuard, BackgroundTask, BackgroundTaskStatus,
@@ -17,7 +17,7 @@ use crate::agent::async_tasks::{
 };
 use crate::agent::events::{AgentEventHandler, ExecutorEvent};
 use crate::agent::stages::{run_react_loop, LoopResult};
-use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder;
+use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion;
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use crate::thread::ThreadStore;
@@ -82,7 +82,7 @@ pub(super) async fn spawn_background_subagent(
         let context = v2_ctx.context;
         let session = v2_ctx.session;
         // Start/Stop emit 需要 event_bus（partial move 后仍可用）+ 统一身份键
-        let event_bus_for_emit = v2_ctx.event_bus.clone();
+        let event_bus_for_emit = v2_ctx.event_bus;
         let subagent_agent_id = v2_ctx.agent_id;
 
         // S3.2 同步收尾 guard：abort/panic 时 deregister_runtime + 补发
@@ -92,7 +92,7 @@ pub(super) async fn spawn_background_subagent(
             thread_id: child_thread_id_for_task.clone(),
             deregister: deregister_runtime.clone(),
             stop: Some(BgStopEmitV2 {
-                event_bus: event_bus_for_emit.clone(),
+                event_bus: Arc::downgrade(&event_bus_for_emit),
                 turn_id: subagent_turn_id,
                 parent_agent_id,
                 child_agent_id: subagent_agent_id,
@@ -159,10 +159,10 @@ pub(super) async fn spawn_background_subagent(
         // 后转发到 bg_event_sender（BG pump 独立于主 pump，主 turn 结束后仍存活）。
         // SubagentStart/Stop 不在此转发（发射侧已同步协议化直发，防双发——
         // 见 `forward_subagent_start_v1` / `forward_subagent_stop_v1`）。
-        let _forwarder_handle = spawn_subagent_event_forwarder(
+        let forwarder_handle = spawn_subagent_event_forwarder_for_completion(
             v2_ctx.event_handles,
             bg_forwarder_handler,
-            langfuse_bridge,
+            langfuse_bridge.clone(),
             child_thread_id_for_task.clone(),
         );
 
@@ -170,30 +170,45 @@ pub(super) async fn spawn_background_subagent(
         // Stop accepting messages before any async terminal work or notifications.
         drop(inbox_guard);
 
-        // 补发 v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error。
-        let stop_failure = match &loop_result {
-            LoopResult::Error(error) => {
-                SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, error)
+        // Errors report their terminal result through the callback/TaskManager;
+        // only successful completion and cooperative cancellation emit Completed.
+        let mut publish_completed = !matches!(&loop_result, LoopResult::Error(_));
+        let (output, output_summary, status, success, failure) = match loop_result {
+            LoopResult::Completed => {
+                let text = extract_last_ai_text(&session);
+                let summary = text.chars().take(500).collect::<String>();
+                (text, summary, "done", true, None)
             }
-            _ => None,
-        };
-        let (stop_result, stop_is_error) = match &loop_result {
-            LoopResult::Completed => (
-                extract_last_ai_text(&session)
-                    .chars()
-                    .take(500)
-                    .collect::<String>(),
+            LoopResult::Interrupted => (
+                "Background sub-agent was interrupted".to_string(),
+                "interrupted".to_string(),
+                "cancelled",
                 false,
+                None,
             ),
-            LoopResult::Interrupted => ("interrupted".to_string(), true),
-            LoopResult::Error(e) => (
-                format!("Background sub-agent failed: {}", e.user_facing_message())
-                    .chars()
-                    .take(500)
-                    .collect::<String>(),
-                true,
-            ),
+            LoopResult::Error(error) => {
+                let failure =
+                    SubagentFailure::new(&child_thread_id_for_task, &agent_name_for_task, error);
+                let output = format!("Background sub-agent failed: {}", failure.public_message());
+                let summary = output.chars().take(500).collect::<String>();
+                (output, summary, "error", false, failure.safe_failure())
+            }
         };
+        let mut result = crate::agent::events::BackgroundTaskResult {
+            task_id: task_id_for_task.clone(),
+            agent_name: agent_name_for_task.clone(),
+            prompt_summary: prompt_summary_for_task.clone(),
+            success,
+            output,
+            tool_calls_count: count_tool_calls_from_session(&session),
+            duration_ms: started_at.elapsed().as_millis() as u64,
+            child_thread_id: Some(child_thread_id_for_task.clone()),
+            timed_out: false,
+            subagent_failure: failure.clone(),
+            shell_output: None,
+        };
+        let mut output_summary = output_summary;
+        let mut status = status;
         emit_subagent_stop_v2_with_failure(
             &event_bus_for_emit,
             SubagentStopV2Input {
@@ -201,133 +216,68 @@ pub(super) async fn spawn_background_subagent(
                 parent_agent_id,
                 child_agent_id: subagent_agent_id,
                 agent_name: &agent_name_for_task,
-                result: &stop_result,
-                is_error: stop_is_error,
-                subagent_failure: stop_failure.clone(),
+                result: &output_summary,
+                is_error: !result.success,
+                subagent_failure: failure,
             },
         );
-        // v1 协议化直发（SubagentStopped）在下方各分支显式执行（Error 分支 / 正常
-        // 分支），此处仅闭合 v2 发射：guard drop 时不得重复（P1 防双发）。
-        cleanup_guard.disarm_stop();
-
-        let (final_text, interrupted) = match loop_result {
-            LoopResult::Completed => (extract_last_ai_text(&session), false),
-            LoopResult::Interrupted => (String::new(), true),
-            LoopResult::Error(e) => {
-                let failure =
-                    SubagentFailure::new(&child_thread_id_for_task, &agent_name_for_task, e);
-                let safe_failure = failure.safe_failure();
-                let output = format!("Background sub-agent failed: {}", failure.public_message());
-                // 错误路径：lifecycle hook + thread_store + registry notification
-                if let Some(ref on_stop) = on_subagent_stop {
-                    on_stop(&agent_name_for_task, &cwd_for_task, &output, true);
-                }
-                if let Some(ref store) = thread_store {
-                    let _ = store
-                        .update_thread_status(&child_thread_id_for_task, "error")
-                        .await;
-                }
-                // 错误分支也必须发射 SubagentStopped（is_error=true），保证 depth 配对减 1。
-                // v1 协议化直发从 v2 事件构造同步映射（发射语义单一事实源 = v2；
-                // ObserveEvent 身份透传：child_agent_id → instance_id）。
-                // 必须在 BackgroundTaskResult 构造之前发射——后者会 move output。
-                forward_subagent_stop_v1(
-                    bg_stop_handler.as_ref(),
-                    build_subagent_stop_v2_with_failure(
-                        subagent_turn_id,
-                        parent_agent_id,
-                        subagent_agent_id,
-                        &agent_name_for_task,
-                        &output,
-                        true,
-                        safe_failure.clone(),
-                    ),
+        // The guard retains only a Weak producer and stays armed throughout
+        // drain, so forced abort still pairs Started with exactly one Stopped.
+        if let Err(error) =
+            drain_subagent_events(event_bus_for_emit, forwarder_handle, langfuse_bridge).await
+        {
+            // Cancellation and typed model failure remain authoritative, but
+            // successful model completion cannot hide a broken event stream.
+            if result.success {
+                result.success = false;
+                publish_completed = false;
+                result.output = format!(
+                    "Background sub-agent failed: {}",
+                    error.user_facing_message()
                 );
-                let result = crate::agent::events::BackgroundTaskResult {
-                    task_id: task_id_for_task.clone(),
-                    agent_name: agent_name_for_task.clone(),
-                    prompt_summary: prompt_summary_for_task.clone(),
-                    success: false,
-                    output,
-                    tool_calls_count: count_tool_calls_from_session(&session),
-                    duration_ms: started_at.elapsed().as_millis() as u64,
-                    child_thread_id: Some(child_thread_id_for_task.clone()),
-                    timed_out: false,
-                    subagent_failure: safe_failure,
-                    shell_output: None,
-                };
-                // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
-                if let Some(ref on_complete) = on_bg_complete {
-                    on_complete(&result, BgTaskKind::Agent);
-                }
-                task_manager_spawn.complete(&task_id_for_task, result);
-                // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
-                return;
+                output_summary = result.output.clone();
+                status = "error";
             }
-        };
-
-        let output_summary: String = if interrupted {
-            "interrupted".to_string()
-        } else {
-            final_text.chars().take(500).collect()
-        };
-
-        // SubagentStopped v1 协议化直发 + lifecycle hook（经 bg_event_sender，
-        // 与 spawner 对齐）。v1 从 v2 事件构造同步映射，保证 Stopped 先于
-        // BackgroundTaskCompleted 到达 bg 泵（顺序契约）。
+        }
+        result.duration_ms = started_at.elapsed().as_millis() as u64;
         forward_subagent_stop_v1(
             bg_stop_handler.as_ref(),
-            build_subagent_stop_v2(
+            build_subagent_stop_v2_with_failure(
                 subagent_turn_id,
                 parent_agent_id,
                 subagent_agent_id,
                 &agent_name_for_task,
                 &output_summary,
-                interrupted,
+                !result.success,
+                result.subagent_failure.clone(),
             ),
         );
+        cleanup_guard.disarm_stop();
         if let Some(ref on_stop) = on_subagent_stop {
             on_stop(
                 &agent_name_for_task,
                 &cwd_for_task,
                 &output_summary,
-                interrupted,
+                !result.success,
             );
         }
-
-        // thread_store 状态
         if let Some(ref store) = thread_store {
-            let status = if interrupted { "cancelled" } else { "done" };
             let _ = store
                 .update_thread_status(&child_thread_id_for_task, status)
                 .await;
         }
 
-        // 后台任务完成通知（注入到主 agent 消息流）
-        let result = crate::agent::events::BackgroundTaskResult {
-            task_id: task_id_for_task.clone(),
-            agent_name: agent_name_for_task.clone(),
-            prompt_summary: prompt_summary_for_task.clone(),
-            success: !interrupted,
-            output: if interrupted {
-                "Background sub-agent was interrupted".to_string()
+        // Preserve the error-path protocol: Stopped is the last wire event,
+        // while the typed result still reaches the shared completion callback.
+        if publish_completed {
+            if let Some(ref sender) = bg_event_sender {
+                let _ = sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()));
             } else {
-                final_text
-            },
-            tool_calls_count: count_tool_calls_from_session(&session),
-            duration_ms: started_at.elapsed().as_millis() as u64,
-            child_thread_id: Some(child_thread_id_for_task.clone()),
-            timed_out: false,
-            subagent_failure: None,
-            shell_output: None,
-        };
-        if let Some(ref sender) = bg_event_sender {
-            let _ = sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()));
-        } else {
-            tracing::warn!(
-                task_id = %task_id_for_task,
-                "bg_event_sender unavailable, BackgroundTaskCompleted event dropped"
-            );
+                tracing::warn!(
+                    task_id = %task_id_for_task,
+                    "bg_event_sender unavailable, BackgroundTaskCompleted event dropped"
+                );
+            }
         }
         // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
         // 确保 active_count 归零时 Defer 已在 MQ 中

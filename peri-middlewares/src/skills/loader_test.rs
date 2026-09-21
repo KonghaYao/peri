@@ -4,6 +4,47 @@ use tempfile::tempdir;
 
 use super::*;
 
+/// [回归测试] 预扫描列表也必须使用 MCP 缓存，而不能把 MCP path 当本地文件。
+#[test]
+fn test_find_skill_in_list_mcp_cache_and_missing_content() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("SKILL.md");
+    std::fs::write(&path, "不应读取这份本地内容").unwrap();
+    let mut metadata = SkillMetadata {
+        name: "mcp__demo__hello".into(),
+        aliases: vec!["hello".into()],
+        description: "MCP 内容".into(),
+        path,
+        source: SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(peri_acp_types::skills::SkillOrigin::Mcp {
+            server: "demo".into(),
+            uri: "skill://demo/hello/SKILL.md".into(),
+        }),
+        content: Some("缓存正文".into()),
+        resources: vec![],
+    };
+    let (_, content) = find_skill_in_list(&[metadata.clone()], "HELLO").unwrap();
+    assert!(content.ends_with("缓存正文"));
+    assert_eq!(
+        content
+            .matches("This skill is served by MCP server")
+            .count(),
+        1
+    );
+    metadata.content = None;
+    assert!(find_skill_in_list(&[metadata], "hello").is_none());
+}
+
+#[test]
+fn test_find_skill_in_list_missing_local_file_retains_none_semantics() {
+    let dir = tempdir().unwrap();
+    write_skill(dir.path(), "local", "本地技能");
+    let skills = list_skills(&[dir.path().to_path_buf()]);
+    std::fs::remove_file(&skills[0].path).unwrap();
+    assert!(find_skill_in_list(&skills, "local").is_none());
+}
+
 fn write_skill(dir: &Path, name: &str, desc: &str) {
     let skill_dir = dir.join(name);
     std::fs::create_dir_all(&skill_dir).unwrap();

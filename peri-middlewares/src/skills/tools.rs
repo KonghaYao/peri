@@ -89,18 +89,18 @@ impl BaseTool for SkillTool {
             .as_str()
             .ok_or("SkillTool: missing required parameter 'skill_name'")?;
 
-        // 缓存由 SkillsMiddleware::before_agent 保证填充，不再做懒扫描回退
-        let cached = self.cached_skills.read().unwrap();
-        let skills = match cached.as_ref() {
-            Some(s) => s.clone(),
-            None => {
-                return Err(Box::new(std::io::Error::new(
+        // 只复制命中的 metadata；锁在进入 blocking 线程之前释放。
+        let skill = {
+            let cached = self.cached_skills.read().unwrap();
+            let skills = cached.as_ref().ok_or_else(|| {
+                std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "Skills cache is empty — before_agent may not have run",
-                )));
-            }
+                )
+            })?;
+            find_skill(skills, skill_name)?.clone()
         };
-        let content = find_and_load_skill(&skills, skill_name)?;
+        let content = tokio::task::spawn_blocking(move || super::content::load(&skill)).await??;
         Ok(content)
     }
 }
@@ -210,14 +210,14 @@ impl BaseTool for DiscoverSkillsTool {
 
 // ─── 内部辅助函数 ────────────────────────────────────────────────────────────
 
-/// 在已扫描的 skills 列表中按名称（大小写无关）查找并加载 SKILL.md 全文。
+/// 在已扫描的 skills 列表中按名称（大小写无关）选择 metadata。
 ///
 /// 支持命名空间前缀：`ecc:plan` → 去前缀后匹配 `plan`。
 /// 返回 `Err` 仅当找不到匹配 skill，不 panic。
-fn find_and_load_skill(
-    skills: &[SkillMetadata],
+fn find_skill<'a>(
+    skills: &'a [SkillMetadata],
     skill_name: &str,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<&'a SkillMetadata, Box<dyn std::error::Error + Send + Sync>> {
     let input_lower = skill_name.to_lowercase();
 
     // 名称已在扫描时把 `:` 规范为 `-`；完整名称优先匹配，避免把包含
@@ -228,7 +228,7 @@ fn find_and_load_skill(
                 .iter()
                 .any(|alias| alias.eq_ignore_ascii_case(&input_lower))
     }) {
-        return load_skill_content(skill);
+        return Ok(skill);
     }
 
     // MCP 别名分支（DD-3）：`<server>:<skill>` → `mcp__<server>__<skill>`。
@@ -243,7 +243,7 @@ fn find_and_load_skill(
             let prefix = prefix.to_lowercase();
             let mcp_full = mcp_skill_name(&prefix, suffix).to_lowercase();
             if let Some(skill) = skills.iter().find(|s| s.name.to_lowercase() == mcp_full) {
-                return load_skill_content(skill);
+                return Ok(skill);
             }
             let want_skill = suffix.to_lowercase();
             if let Some(skill) = skills.iter().find(|s| match &s.origin {
@@ -259,7 +259,7 @@ fn find_and_load_skill(
                 }
                 _ => false,
             }) {
-                return load_skill_content(skill);
+                return Ok(skill);
             }
         }
     }
@@ -285,51 +285,7 @@ fn find_and_load_skill(
         .into());
     };
 
-    // Builtin source 从编译期常量加载，其他 source 从磁盘读取
-    let content = load_skill_content(skill)?;
-    Ok(content)
-}
-
-/// 根据 skill 的 source 类型读取完整 SKILL.md 内容
-///
-/// 错误语义（frozen catalog 与磁盘中途变化的边界，见 13_skills.md）：
-/// - 磁盘读取失败说明该 skill 在**当前扫描缓存**中存在但文件不可读——通常是
-///   会话期间被删除/移动，属可恢复错误，可重新 `DiscoverSkillsTool` 确认。
-fn load_skill_content(
-    skill: &SkillMetadata,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    if matches!(skill.source, super::SkillSource::Builtin) {
-        crate::skills::builtin::BUILTIN_SKILLS
-            .iter()
-            .find(|bs| {
-                crate::skills::normalize_skill_name(bs.name) == skill.name
-                    || skill.path == std::path::Path::new(&format!("<builtin>/{}", bs.name))
-            })
-            .map(|bs| bs.content.to_string())
-            .ok_or_else(|| {
-                format!("Builtin skill '{}' not found in BUILTIN_SKILLS", skill.name).into()
-            })
-    } else if matches!(skill.source, super::SkillSource::Mcp) {
-        // MCP 内容已在发现时缓存于 metadata（零 RPC，对齐 Builtin 模式）；
-        // 包裹来源标注（提示注入防御，与 SkillPreload 注入面一致）。
-        match skill.content.as_deref() {
-            Some(content) => Ok(super::annotate_mcp_content(skill, content)),
-            None => Err(format!(
-                "Skill '{}' not found. Use DiscoverSkillsTool to see available skills.",
-                skill.name
-            )
-            .into()),
-        }
-    } else {
-        std::fs::read_to_string(&skill.path).map_err(|_e| {
-            format!(
-                "Skill '{}' is in the session catalog but its file cannot be read ({}). It may have been moved or deleted mid-session — run DiscoverSkillsTool to see the current set.",
-                skill.name,
-                skill.path.display()
-            )
-            .into()
-        })
-    }
+    Ok(skill)
 }
 
 /// 将 SkillMetadata 转为 DiscoverSkillsTool 的 JSON 输出格式

@@ -11,7 +11,7 @@
 
 use agent_client_protocol_schema::v1::{
     ContentBlock, ContentChunk, SessionId, SessionNotification, SessionUpdate, TextContent,
-    ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    ToolCall, ToolCallUpdate,
 };
 use peri_acp_types::messages::{
     BaseMessage, ContentBlock as PeriContentBlock, MessageContent as PeriMessageContent,
@@ -19,6 +19,8 @@ use peri_acp_types::messages::{
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::tools::ToolOutput;
 use peri_acp_types::PeriCaps;
+
+use crate::event::tool_projection::{project_tool_completion, project_tool_start};
 
 pub async fn replay_persisted_session_history(
     session_id: &str,
@@ -103,10 +105,7 @@ pub async fn replay_session_history(
                         sender.send(notif).await?;
                         // 纯文本 AI 消息无 blocks，tool_calls 由下方单独处理
                         for tc in tool_calls {
-                            let tool_call =
-                                ToolCall::new(ToolCallId::new(tc.id.clone()), tc.name.clone())
-                                    .raw_input(Some(tc.arguments.clone()))
-                                    .status(ToolCallStatus::InProgress);
+                            let tool_call = project_tool_start(&tc.id, &tc.name, &tc.arguments);
                             let update = SessionUpdate::ToolCall(replay_tool(tool_call, caps));
                             let notif = SessionNotification::new(
                                 SessionId::new(session_id.to_string()),
@@ -148,9 +147,7 @@ pub async fn replay_session_history(
                         }
                         PeriContentBlock::ToolUse { id, name, input } => {
                             emitted_ids.insert(id.clone());
-                            let tc = ToolCall::new(ToolCallId::new(id.clone()), name.clone())
-                                .raw_input(Some(input.clone()))
-                                .status(ToolCallStatus::InProgress);
+                            let tc = project_tool_start(id, name, input);
                             let update = SessionUpdate::ToolCall(replay_tool(tc, caps));
                             let notif = SessionNotification::new(
                                 SessionId::new(session_id.to_string()),
@@ -166,10 +163,7 @@ pub async fn replay_session_history(
                 // 发射 tool_calls 中未被 ContentBlock::ToolUse 覆盖的条目
                 for tc in tool_calls {
                     if !emitted_ids.contains(&tc.id) {
-                        let tool_call =
-                            ToolCall::new(ToolCallId::new(tc.id.clone()), tc.name.clone())
-                                .raw_input(Some(tc.arguments.clone()))
-                                .status(ToolCallStatus::InProgress);
+                        let tool_call = project_tool_start(&tc.id, &tc.name, &tc.arguments);
                         let update = SessionUpdate::ToolCall(replay_tool(tool_call, caps));
                         let notif = SessionNotification::new(
                             SessionId::new(session_id.to_string()),
@@ -192,29 +186,14 @@ pub async fn replay_session_history(
                     execution: execution.clone(),
                 }
                 .projected_text(None);
-                let fields = ToolCallUpdateFields::new()
-                    .status(Some(if *is_error {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Completed
-                    }))
-                    // 标准 `content` 与 live mapper（`event::mapper::tool_result_content`）
-                    // 共用同一投影规则：失败空文本使用稳定非空 fallback，replay 后
-                    // 错误内容与 live 更新保持同形态。
-                    .content(crate::event::mapper::tool_result_content(
-                        &result_text,
-                        *is_error,
-                    ))
-                    .raw_output(Some(serde_json::Value::String(result_text)));
-                let update = ToolCallUpdate::new(ToolCallId::new(tool_call_id.clone()), fields);
-                let update = if let Some(failure) = subagent_failure {
-                    update.meta(serde_json::Map::from_iter([(
-                        "peri".to_string(),
-                        serde_json::json!({ "subagentFailure": failure }),
-                    )]))
-                } else {
-                    update
-                };
+                let mut update = project_tool_completion(
+                    tool_call_id,
+                    &result_text,
+                    *is_error,
+                    subagent_failure.as_ref(),
+                );
+                // 历史 rawOutput 保持字符串；live adapter 保留 JSON 解析兼容行为。
+                update.fields.raw_output = Some(serde_json::Value::String(result_text));
                 let update = SessionUpdate::ToolCallUpdate(replay_tool_update(update, caps));
                 let notif =
                     SessionNotification::new(SessionId::new(session_id.to_string()), update);
