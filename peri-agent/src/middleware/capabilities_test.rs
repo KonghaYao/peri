@@ -152,6 +152,7 @@ async fn model_append_is_visible_to_the_next_read_only_hook() {
         request_id: None,
         model: String::new(),
         streamed: false,
+        stream_interruption: None,
         stop_reason: peri_model::StopReason::EndTurn,
     };
     middleware_runner::run_after_model(&ctx, &reasoning)

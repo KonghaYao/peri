@@ -29,6 +29,12 @@ pub enum ModelStreamEvent {
     },
     Usage(TokenUsage),
     Completed(ModelResponse),
+    /// 可见增量后中断；消费者保留部分输出并续跑，不得重放同一请求。
+    Interrupted {
+        error: ModelError,
+        attempts: u32,
+        max_attempts: u32,
+    },
 }
 
 #[derive(Default)]
@@ -122,7 +128,9 @@ impl Stream for ModelStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        if this.cancellation_reported {
+        // 终态后不再产出：已完成（Completed/Interrupted）的流若继续被 poll，
+        // 取消分支会在成功终态之后追加一个 `Err(cancelled)`。
+        if this.cancellation_reported || this.completed {
             return Poll::Ready(None);
         }
         if this.child_cancelled.as_mut().poll(cx).is_ready() {
@@ -133,6 +141,10 @@ impl Stream for ModelStream {
             Poll::Ready(Some(Ok(ModelStreamEvent::Completed(response)))) => {
                 this.completed = true;
                 Poll::Ready(Some(Ok(ModelStreamEvent::Completed(response))))
+            }
+            Poll::Ready(Some(Ok(event @ ModelStreamEvent::Interrupted { .. }))) => {
+                this.completed = true;
+                Poll::Ready(Some(Ok(event)))
             }
             result => result,
         }
@@ -215,6 +227,8 @@ pub trait Model: Send + Sync {
                         response.set_usage_if_none(usage);
                         return Ok(response);
                     }
+                    // 聚合接口不能交付部分响应；由流式消费者负责续跑。
+                    Some(Ok(ModelStreamEvent::Interrupted { error, .. })) => return Err(error),
                     Some(Err(error)) => return Err(error),
                     None => {
                         return Err(ModelError::protocol(

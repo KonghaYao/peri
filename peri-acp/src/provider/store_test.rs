@@ -243,6 +243,76 @@ fn test_config_source_save_writes_global_when_no_workspace() {
     );
 }
 
+/// [回归] cwd 与全局配置目录同一（用户在 `~` 下启动 peri）：`{cwd}/.peri/settings.json`
+/// 与 `~/.peri/settings.json` 是同一个文件，不能同时充当「全局」与「工作区」两层。
+///
+/// 此前该场景被判为工作区模式，保存只写「相对全局基准的差异字段」回同一文件，
+/// 未改动的字段（providers/apiKey 等）被整份丢弃。
+#[test]
+fn test_save_in_home_cwd_keeps_global_config_intact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    write_settings(
+        &home,
+        r#"{
+        "config": {
+            "active_alias": "sonnet",
+            "providers": [{"id": "openai-1", "type": "openai", "apiKey": "sk-global"}]
+        }
+    }"#,
+    );
+    let global_path = home.join(".peri").join("settings.json");
+
+    let source = ConfigSource::load_at(&home, global_path.clone()).unwrap();
+    assert!(
+        !source.is_workspace(),
+        "工作区路径与全局路径同一文件时不得判为工作区模式"
+    );
+
+    let mut merged = source.loaded_merged();
+    merged.config.active_alias = "haiku".to_string();
+    source.save(&merged).unwrap();
+
+    let saved = load_from(&global_path).unwrap();
+    assert_eq!(saved.config.active_alias, "haiku", "改动字段应落盘");
+    assert_eq!(
+        saved.config.providers.len(),
+        1,
+        "未改动的 providers 不得被差异回写丢弃"
+    );
+    assert_eq!(saved.config.providers[0].api_key, "sk-global");
+}
+
+/// [回归] 同一文件经符号链接抵达（macOS `$HOME` 为链接、`/var` → `/private/var`
+/// 等）时同样不得判为两层——判定按规范化真实路径，不按字面路径。
+#[cfg(unix)]
+#[test]
+fn test_symlinked_global_path_is_not_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    write_settings(
+        &home,
+        r#"{"config": {"active_alias": "sonnet", "providers": [{"id": "p1", "type": "openai", "apiKey": "sk-global"}]}}"#,
+    );
+    let link = tmp.path().join("home-link");
+    std::os::unix::fs::symlink(&home, &link).unwrap();
+
+    // 全局路径经链接指向 `{cwd}/.peri/settings.json` 本身
+    let source = ConfigSource::load_at(&home, link.join(".peri").join("settings.json")).unwrap();
+    assert!(
+        !source.is_workspace(),
+        "符号链接指向同一文件时不得判为工作区两层"
+    );
+
+    let mut merged = source.loaded_merged();
+    merged.config.active_alias = "haiku".to_string();
+    source.save(&merged).unwrap();
+
+    let saved = load_from(&home.join(".peri").join("settings.json")).unwrap();
+    assert_eq!(saved.config.active_alias, "haiku");
+    assert_eq!(saved.config.providers.len(), 1, "未改动字段不得被丢弃");
+}
+
 /// [Q5 契约] 生产接线等价性：`ConfigSource::load_at` 与 `load()` 的合并语义
 /// 一致——meta_harness 逐 key 合并（全局其余 key 保留、同 key 工作区覆盖）。
 #[test]

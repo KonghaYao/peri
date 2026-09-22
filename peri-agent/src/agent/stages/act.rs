@@ -131,7 +131,12 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
             ))
         });
         let ai_msg_id = ai_msg.id();
-        ctx.session.transcript.write().append(ai_msg);
+        // 空内容不写入规范历史：中断无正文时只保留续跑提醒，不制造空 assistant
+        // 消息——空 text block 会被 provider 拒绝（Anthropic 400），使本可续跑的
+        // 断流变成下一轮硬失败。判空沿用 `MessageContent::is_empty()`（不 trim）。
+        if !ai_msg.message_content().is_empty() {
+            ctx.session.transcript.write().append(ai_msg);
+        }
 
         // 非流式时 emit TextChunk（流式由 LLM 适配器直接 emit）
         if !input.reasoning.streamed && !final_answer.trim().is_empty() {
@@ -145,7 +150,9 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         }
 
         // 截断的正文/思考仍是事实，但不是最终回答；不能触发 Stop/Goal 完成 hook。
-        if input.reasoning.stop_reason == peri_model::StopReason::MaxTokens {
+        if input.reasoning.stop_reason == peri_model::StopReason::MaxTokens
+            || input.reasoning.stream_interruption.is_some()
+        {
             emit_turn_completed(ctx);
             emit_goal_snapshot(ctx);
             return Ok(ActOutput {

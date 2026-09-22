@@ -394,6 +394,161 @@ fn test_load_settings_project_hooks_with_matcher() {
     assert_eq!(hooks[0].matcher.as_deref(), Some(".env|.env.local"));
 }
 
+// ===== 项目级 hooks 与用户级同一文件的排除（回归）=====
+
+/// 改写 `HOME` 的 guard：持有进程环境锁，drop 时还原。
+///
+/// 与 `ptc_test::HomeGuard` 同一模式——`std::env::set_var` 是进程级全局，
+/// 不串行会与并行测试竞态。
+struct HomeGuard {
+    _lock: crate::process_env::EnvLockFile,
+    previous_home: Option<std::ffi::OsString>,
+    previous_userprofile: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    fn set(home: &Path) -> Self {
+        let lock = crate::process_env::lock().expect("process env lock");
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", home);
+        std::env::set_var("USERPROFILE", home);
+        Self {
+            _lock: lock,
+            previous_home,
+            previous_userprofile,
+        }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.previous_home.take() {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        match self.previous_userprofile.take() {
+            Some(home) => std::env::set_var("USERPROFILE", home),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+    }
+}
+
+/// 写入 `dir/.claude/settings.json`，其中 1 条 PreToolUse hook。
+fn write_hooks_settings(dir: &Path) {
+    let claude_dir = dir.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    let settings = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [
+                {"hooks": [{"type": "command", "command": "echo hook"}]}
+            ]
+        }
+    });
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+}
+
+/// [回归] cwd 为用户主目录：`{cwd}/.claude/settings.json` 与
+/// `~/.claude/settings.json` 是同一个文件，项目级加载必须跳过——否则同一份
+/// hooks 会注册成 global 与 project 两组而执行两次。子目录仍按项目级加载。
+///
+/// Windows 跳过：该平台 `dirs_next::home_dir()` 走 Profile known-folder
+/// （`SHGetKnownFolderPath`），不读 `HOME`/`USERPROFILE`，`HomeGuard` 注入的临时
+/// `~` 不生效。路径判定本身由 `test_is_user_settings_path_under_*` 覆盖。
+#[cfg_attr(
+    windows,
+    ignore = "dirs_next::home_dir() 在 Windows 不读 HOME/USERPROFILE，无法注入临时主目录"
+)]
+#[test]
+fn test_project_hooks_skipped_when_cwd_is_home() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    write_hooks_settings(&home);
+    let project_dir = tmp.path().join("proj");
+    write_hooks_settings(&project_dir);
+
+    let _guard = HomeGuard::set(&home);
+
+    // 同一文件：项目级为空，用户级仍加载（hooks 只保留一份）
+    assert!(
+        load_settings_project_hooks(home.to_str().unwrap()).is_empty(),
+        "用户主目录下不得把用户级 hooks 再注册为项目级"
+    );
+    assert_eq!(
+        load_global_settings_hooks().len(),
+        1,
+        "用户级 hooks 应照常加载"
+    );
+
+    // 子目录是真正的项目级，不受影响
+    assert_eq!(
+        load_settings_project_hooks(project_dir.to_str().unwrap()).len(),
+        1,
+        "普通项目目录仍按项目级加载"
+    );
+}
+
+/// [回归] 经符号链接抵达同一文件（macOS `$HOME` 为链接、`/var` → `/private/var`）。
+#[cfg(unix)]
+#[test]
+fn test_project_hooks_skipped_when_home_reached_via_symlink() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    write_hooks_settings(&home);
+    let link = tmp.path().join("home-link");
+    std::os::unix::fs::symlink(&home, &link).unwrap();
+
+    let _guard = HomeGuard::set(&home);
+
+    assert!(
+        load_settings_project_hooks(link.to_str().unwrap()).is_empty(),
+        "符号链接指向用户级文件时不得重复注册"
+    );
+}
+
+/// [回归] 同文件判定逐条核对（显式主目录，不依赖进程主目录，各平台都跑）。
+#[test]
+fn test_is_user_settings_path_under_explicit_home() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    write_hooks_settings(&home);
+    let project_dir = tmp.path().join("proj");
+    write_hooks_settings(&project_dir);
+
+    assert!(
+        is_user_settings_path_under(&home.join(".claude").join("settings.json"), &home),
+        "主目录下的 settings.json 就是用户级文件"
+    );
+    assert!(
+        !is_user_settings_path_under(&project_dir.join(".claude").join("settings.json"), &home),
+        "普通项目目录的 settings.json 不是用户级文件"
+    );
+    assert!(
+        !is_user_settings_path_under(&home.join(".claude").join("settings.local.json"), &home),
+        "同目录的 settings.local.json 不是用户级 settings.json"
+    );
+}
+
+/// [回归] 符号链接抵达同一文件同样判定为同一文件。
+#[cfg(unix)]
+#[test]
+fn test_is_user_settings_path_under_symlinked_home() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    write_hooks_settings(&home);
+    let link = tmp.path().join("home-link");
+    std::os::unix::fs::symlink(&home, &link).unwrap();
+
+    assert!(
+        is_user_settings_path_under(&link.join(".claude").join("settings.json"), &home),
+        "符号链接指向用户级文件时应判为同一文件"
+    );
+}
+
 // ===== 宽松解析测试 (P0-2) =====
 
 #[test]

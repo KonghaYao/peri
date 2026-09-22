@@ -30,6 +30,13 @@ pub enum AgentError {
     #[error("LLM model error: {0}")]
     ModelError(#[source] peri_model::ModelError),
 
+    /// 可见增量后的流中断恢复预算耗尽。
+    #[error("Stream recovery exhausted after {attempts} attempts: {source}")]
+    StreamRecoveryExhausted {
+        attempts: usize,
+        source: peri_model::ModelError,
+    },
+
     #[error("Middleware error: {middleware} - {reason}")]
     MiddlewareError { middleware: String, reason: String },
 
@@ -258,34 +265,38 @@ impl<'de> serde::Deserialize<'de> for SafeSubagentFailure {
 }
 
 impl AgentError {
-    /// 返回用户可见的错误描述（脱敏后的消息）
-    /// 对 Other/LlmError/LlmHttpError/SerializationError 返回通用描述
+    /// 返回用户可见的错误描述（脱敏后的消息）。
+    ///
+    /// LLM 类错误保留 allowlist 诊断事实（HTTP 状态码、传输/协议类别、重试次数、
+    /// request id），使失败可定位——`ModelError` 的状态码缺失时仍给出失败类别，
+    /// 不退化成无法区分的通用文案。自由文本的 `LlmError` 与
+    /// `Other`/`SerializationError` 保持通用描述。
     pub fn user_facing_message(&self) -> String {
         match self {
             Self::Other(_) => "An internal error occurred. Check logs for details.".to_string(),
             Self::LlmError(_) => {
                 "An LLM API error occurred. Please check your API configuration.".to_string()
             }
-            Self::LlmHttpError { .. } => {
-                "An LLM API error occurred. Please check your API configuration.".to_string()
+            Self::LlmHttpError { status, .. } => format!(
+                "An LLM API error occurred (HTTP {status}). Please check your API configuration."
+            ),
+            Self::StreamRecoveryExhausted { attempts, source } => {
+                let mut facts = model_error_facts(&source.diagnostic());
+                facts.push(format!("recovery exhausted after {attempts} attempts"));
+                format!(
+                    "An LLM API error occurred ({}). Please try again.",
+                    facts.join(", ")
+                )
             }
             Self::ModelError(error) => {
-                let diagnostic = error.diagnostic();
-                let status = diagnostic
-                    .status()
-                    .map(|status| format!(" (HTTP {status}"))
-                    .unwrap_or_else(|| " (".to_string());
-                let request_id = diagnostic
-                    .request_id()
-                    .map(|request_id| format!(", request id: {request_id}"))
-                    .unwrap_or_default();
-                if diagnostic.status().is_some() || !request_id.is_empty() {
-                    format!(
-                        "An LLM API error occurred{}{request_id}). Please try again.",
-                        status
-                    )
-                } else {
+                let facts = model_error_facts(&error.diagnostic());
+                if facts.is_empty() {
                     "An LLM API error occurred. Please try again.".to_string()
+                } else {
+                    format!(
+                        "An LLM API error occurred ({}). Please try again.",
+                        facts.join(", ")
+                    )
                 }
             }
             Self::SerializationError(_) => {
@@ -296,9 +307,200 @@ impl AgentError {
     }
 }
 
+/// 从 allowlist 诊断投影抽取用户可读的失败事实。
+///
+/// 只读取已通过 [`peri_model::ModelErrorDiagnostic`] 形状校验的字段，不含 provider
+/// 正文、URL 或凭据；`retry_kind` 单独渲染会与 status/transport/protocol 事实重复
+/// （耗尽原因即最后一次失败类别），故只保留重试次数。
+fn model_error_facts(diagnostic: &peri_model::ModelErrorDiagnostic) -> Vec<String> {
+    use peri_model::ModelErrorCategory;
+
+    let mut facts = Vec::new();
+    match diagnostic.category() {
+        // 这两个类别不携带区分性 kind，分类本身就是唯一的用户可见事实。
+        ModelErrorCategory::Cancelled => facts.push("request cancelled".to_string()),
+        ModelErrorCategory::StreamInterrupted => {
+            facts.push("stream interrupted after partial output".to_string())
+        }
+        ModelErrorCategory::Transport
+        | ModelErrorCategory::HttpStatus
+        | ModelErrorCategory::Protocol
+        | ModelErrorCategory::RetryExhausted => {}
+    }
+    if let Some(status) = diagnostic.status() {
+        facts.push(format!("HTTP {status}"));
+    }
+    if let Some(kind) = diagnostic.transport() {
+        facts.push(format!("transport failure: {kind}"));
+    }
+    if let Some(kind) = diagnostic.protocol() {
+        facts.push(format!("protocol failure: {kind}"));
+    }
+    if let Some(attempts) = diagnostic.retry_attempts() {
+        facts.push(format!("retry exhausted after {attempts} attempts"));
+    }
+    if let Some(request_id) = diagnostic.request_id() {
+        facts.push(format!("request id: {request_id}"));
+    }
+    facts
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SafeModelErrorDiagnostic, SafeSubagentFailure};
+    use super::{AgentError, SafeModelErrorDiagnostic, SafeSubagentFailure};
+
+    /// [回归测试] 恢复耗尽的公开文案与 ACP 分类只保留 allowlist 事实。
+    #[test]
+    fn test_stream_recovery_exhausted_public_projection() {
+        use crate::session::{ExecutionFailure, ExecutionFailureKind};
+        let source = peri_model::ModelError::stream_interrupted(Some("anthropic"), None::<&str>);
+        let error = AgentError::StreamRecoveryExhausted {
+            attempts: 6,
+            source: source.clone(),
+        };
+        assert_eq!(error.user_facing_message(), "An LLM API error occurred (stream interrupted after partial output, recovery exhausted after 6 attempts). Please try again.");
+        let failure = ExecutionFailure::from_agent_error(&error);
+        assert_eq!(failure.kind, ExecutionFailureKind::Llm);
+        assert_eq!(failure.http_status, None);
+        assert_eq!(failure.diagnostic, Some(source.diagnostic()));
+        assert_eq!(failure.public_message, error.user_facing_message());
+        // 动态构造被拒绝的身份形态，不放入任何真实凭据。
+        let rejected = ["Bearer", "invalid identity"].join(" ");
+        let source = peri_model::ModelError::http_status(503, &rejected, Some(&rejected));
+        let error = AgentError::StreamRecoveryExhausted {
+            attempts: 2,
+            source: source.clone(),
+        };
+        let failure = ExecutionFailure::from_agent_error(&error);
+        assert_eq!(failure.kind, ExecutionFailureKind::LlmHttp);
+        assert_eq!(failure.http_status, Some(503));
+        assert_eq!(failure.diagnostic, Some(source.diagnostic()));
+        assert_eq!(failure.public_message, "An LLM API error occurred (HTTP 503, recovery exhausted after 2 attempts). Please try again.");
+        assert!(!failure.public_message.contains(&rejected));
+        assert!(!serde_json::to_string(&failure.diagnostic)
+            .unwrap()
+            .contains(&rejected));
+    }
+
+    #[test]
+    fn model_error_message_reports_http_status_and_request_id() {
+        let error = AgentError::ModelError(peri_model::ModelError::http_status(
+            429,
+            "provider.example",
+            Some("req-429"),
+        ));
+        assert_eq!(
+            error.user_facing_message(),
+            "An LLM API error occurred (HTTP 429, request id: req-429). Please try again."
+        );
+    }
+
+    #[test]
+    fn llm_http_error_message_reports_status() {
+        let error = AgentError::LlmHttpError {
+            status: 401,
+            message: "invalid api key".to_string(),
+        };
+        assert_eq!(
+            error.user_facing_message(),
+            "An LLM API error occurred (HTTP 401). Please check your API configuration."
+        );
+    }
+
+    /// 回归 bug-peri-3.16.5-llm-api-error-abort §4.5：实测文案既无状态码也无
+    /// request id，无法判断失败类别。无状态码的错误必须暴露失败类别。
+    #[test]
+    fn model_error_message_without_status_reports_failure_class() {
+        let interrupted = AgentError::ModelError(peri_model::ModelError::stream_interrupted(
+            Some("provider.example"),
+            None::<&str>,
+        ));
+        assert_eq!(
+            interrupted.user_facing_message(),
+            "An LLM API error occurred (stream interrupted after partial output). Please try again."
+        );
+
+        let transport = AgentError::ModelError(peri_model::ModelError::transport(
+            peri_model::TransportErrorKind::Timeout,
+            Some("provider.example"),
+        ));
+        assert_eq!(
+            transport.user_facing_message(),
+            "An LLM API error occurred (transport failure: timeout). Please try again."
+        );
+
+        let protocol = AgentError::ModelError(peri_model::ModelError::protocol(
+            peri_model::ProtocolErrorKind::StreamEndedWithoutCompleted,
+        ));
+        assert_eq!(
+            protocol.user_facing_message(),
+            "An LLM API error occurred (protocol failure: stream ended without completion). Please try again."
+        );
+    }
+
+    #[test]
+    fn retry_exhausted_message_reports_attempts() {
+        let error = AgentError::ModelError(
+            peri_model::ModelError::retry_exhausted(6, peri_model::RetryErrorKind::HttpStatus)
+                .expect("valid attempts"),
+        );
+        assert_eq!(
+            error.user_facing_message(),
+            "An LLM API error occurred (retry exhausted after 6 attempts). Please try again."
+        );
+    }
+
+    /// 只有 request id、没有状态码时，此前会拼出 `An LLM API error occurred (, request id: …)`。
+    #[test]
+    fn model_error_message_with_only_request_id_stays_well_formed() {
+        let error = AgentError::ModelError(peri_model::ModelError::stream_interrupted(
+            Some("provider.example"),
+            Some("req-1"),
+        ));
+        let message = error.user_facing_message();
+        assert_eq!(
+            message,
+            "An LLM API error occurred (stream interrupted after partial output, request id: req-1). Please try again."
+        );
+    }
+
+    #[test]
+    fn cancelled_model_error_message_names_the_category() {
+        let error = AgentError::ModelError(peri_model::ModelError::cancelled());
+        assert_eq!(
+            error.user_facing_message(),
+            "An LLM API error occurred (request cancelled). Please try again."
+        );
+    }
+
+    #[test]
+    fn free_form_llm_error_message_stays_generic() {
+        let error = AgentError::LlmError("sk-secret raw provider body".to_string());
+        let message = error.user_facing_message();
+        assert_eq!(
+            message,
+            "An LLM API error occurred. Please check your API configuration."
+        );
+        assert!(!message.contains("sk-secret"));
+    }
+
+    /// 用户可见消息只由 allowlist 诊断事实拼装：被拒绝的身份字段（凭据形态的
+    /// provider / request id）不得进入文案。
+    #[test]
+    fn model_error_message_drops_rejected_identity_fields() {
+        let credential = "sk-ant-api03-very-secret";
+        let error = AgentError::ModelError(peri_model::ModelError::http_status(
+            401,
+            credential,
+            Some(credential),
+        ));
+        let message = error.user_facing_message();
+        assert_eq!(
+            message,
+            "An LLM API error occurred (HTTP 401). Please try again."
+        );
+        assert!(!message.contains("sk-"));
+    }
 
     #[test]
     fn safe_subagent_failure_roundtrips_only_allowlisted_facts() {

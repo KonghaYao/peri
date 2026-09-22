@@ -352,7 +352,16 @@ async fn run_retrying_stream(
                     } else {
                         error
                     };
-                    let _ = send_event(&sender, &cancellation, Err(error)).await;
+                    let _ = send_event(
+                        &sender,
+                        &cancellation,
+                        Ok(ModelStreamEvent::Interrupted {
+                            error,
+                            attempts: attempt_number,
+                            max_attempts: config.max_attempts(),
+                        }),
+                    )
+                    .await;
                     return;
                 }
                 Some(Err(error)) => {
@@ -374,9 +383,13 @@ async fn run_retrying_stream(
                     let _ = send_event(
                         &sender,
                         &cancellation,
-                        Err(ModelError::protocol(
-                            crate::ProtocolErrorKind::StreamEndedWithoutCompleted,
-                        )),
+                        Ok(ModelStreamEvent::Interrupted {
+                            error: ModelError::protocol(
+                                crate::ProtocolErrorKind::StreamEndedWithoutCompleted,
+                            ),
+                            attempts: attempt_number,
+                            max_attempts: config.max_attempts(),
+                        }),
                     )
                     .await;
                     return;
@@ -385,7 +398,11 @@ async fn run_retrying_stream(
                     let _ = send_event(
                         &sender,
                         &cancellation,
-                        Err(ModelError::stream_interrupted(None::<&str>, None::<&str>)),
+                        Ok(ModelStreamEvent::Interrupted {
+                            error: ModelError::stream_interrupted(None::<&str>, None::<&str>),
+                            attempts: attempt_number,
+                            max_attempts: config.max_attempts(),
+                        }),
                     )
                     .await;
                     return;
