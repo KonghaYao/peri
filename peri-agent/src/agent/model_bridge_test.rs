@@ -46,6 +46,125 @@ fn bridge_keeps_typed_model_error_context() {
     }
 }
 
+struct InterruptedModel(&'static str);
+
+#[async_trait]
+impl Model for InterruptedModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        Ok(ModelStream::with_parent_cancellation(
+            stream::iter(vec![
+                Ok(ModelStreamEvent::ReasoningDelta {
+                    text: "未签名思考".into(),
+                }),
+                Ok(ModelStreamEvent::TextDelta {
+                    text: self.0.into(),
+                }),
+                Ok(ModelStreamEvent::TextDelta {
+                    text: self.0.into(),
+                }),
+                Ok(ModelStreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("partial-tool".into()),
+                    name: Some("Count".into()),
+                    arguments_delta: "{".into(),
+                }),
+                Ok(ModelStreamEvent::Interrupted {
+                    error: peri_model::ModelError::stream_interrupted(
+                        Some("anthropic"),
+                        Some("req-partial"),
+                    ),
+                    attempts: 2,
+                    max_attempts: 4,
+                }),
+            ]),
+            cancellation,
+        ))
+    }
+}
+
+/// [回归测试] 中断保留文本与消息身份，不回灌思考/半截工具，不重发文本。
+#[tokio::test]
+async fn test_bridge_stream_interruption_preserves_only_partial_text() {
+    for text in ["部分正文", "  ", ""] {
+        let bridge = AgentModelBridge::new(Arc::new(InterruptedModel(text)));
+        let (bus, mut handles) = EventBus::new(EventBusConfig::default());
+        let reasoning = bridge
+            .generate_reasoning(
+                &[BaseMessage::human("继续")],
+                &[],
+                Some(StreamingContext {
+                    event_bus: Arc::new(bus),
+                    turn_id: TurnId::new(),
+                    agent_id: AgentId::new(),
+                    cancel: CancellationToken::new(),
+                }),
+            )
+            .await
+            .unwrap();
+        let expected = text.repeat(2);
+        assert_eq!(reasoning.thought, expected);
+        assert!(reasoning.tool_calls.is_empty());
+        assert!(reasoning.usage.is_none());
+        assert!(reasoning.streamed);
+        let interruption = reasoning.stream_interruption.unwrap();
+        assert_eq!((interruption.attempts, interruption.max_attempts), (2, 4));
+        assert_eq!(interruption.error.request_id(), Some("req-partial"));
+        let mut chunks = Vec::new();
+        while let Ok(event) = handles.render_rx.try_recv() {
+            if let RenderEvent::TextChunk {
+                message_id, chunk, ..
+            } = event
+            {
+                chunks.push((message_id, chunk));
+            }
+        }
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|(_, chunk)| chunk.clone())
+                .collect::<Vec<_>>(),
+            vec![text, text],
+            "只允许原始增量，不可重放"
+        );
+        assert!(
+            chunks.windows(2).all(|pair| pair[0].0 == pair[1].0),
+            "流式 chunk 必须共享同一 message_id"
+        );
+        match reasoning.source_message {
+            Some(source) => {
+                assert!(!expected.is_empty(), "空正文不得制造 assistant 消息");
+                assert_eq!(reasoning.final_answer.as_deref(), Some(expected.as_str()));
+                assert!(
+                    chunks
+                        .iter()
+                        .all(|(message_id, _)| *message_id == source.id()),
+                    "chunk 身份须与定型消息对齐"
+                );
+                assert_eq!(source.content(), expected);
+                assert!(
+                    matches!(&source, BaseMessage::Ai { content: MessageContent::Text(text), tool_calls, .. } if text == &expected && tool_calls.is_empty())
+                );
+            }
+            None => {
+                // 纯空白是非空内容（`MessageContent::is_empty` 不 trim），只有真空正文
+                // 才走该分支：不伪造 assistant 消息，避免下一轮请求出现空 text block。
+                assert_eq!(expected, "", "只有空正文可以不产生 source_message");
+                assert!(
+                    reasoning.final_answer.is_none(),
+                    "无正文中断不能伪造最终回答"
+                );
+            }
+        }
+    }
+}
+
 struct FakeModel;
 
 struct CaptureSystemModel {

@@ -103,8 +103,9 @@ impl ExecutionFailure {
                 None,
                 None,
             ),
-            crate::error::AgentError::ModelError(error) => {
-                let diagnostic = error.diagnostic();
+            crate::error::AgentError::ModelError(source)
+            | crate::error::AgentError::StreamRecoveryExhausted { source, .. } => {
+                let diagnostic = source.diagnostic();
                 let kind = if diagnostic.status().is_some() {
                     ExecutionFailureKind::LlmHttp
                 } else {
@@ -112,7 +113,7 @@ impl ExecutionFailure {
                 };
                 Self::new(
                     kind,
-                    crate::error::AgentError::ModelError(error.clone()).user_facing_message(),
+                    error.user_facing_message(),
                     diagnostic.status(),
                     Some(diagnostic),
                 )

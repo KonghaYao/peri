@@ -257,6 +257,7 @@ impl AgentModelBridge {
         // 由 dispatch 路径同 id 的正式 ToolStarted 经 TUI start_tool 的
         // 重复 id upsert 填充。
         let mut tool_start_emitted = false;
+        let mut partial_text = String::new();
 
         loop {
             let event = tokio::select! {
@@ -269,6 +270,7 @@ impl AgentModelBridge {
             };
             match event {
                 Some(Ok(ModelStreamEvent::TextDelta { text })) => {
+                    partial_text.push_str(&text);
                     if let Some(context) = &streaming {
                         if context.cancel.is_cancelled() {
                             stream.abort();
@@ -341,6 +343,32 @@ impl AgentModelBridge {
                         reasoning.source_message = Some(msg.with_message_id(message_id));
                     }
                     reasoning.model = model_name;
+                    return Ok(reasoning);
+                }
+                Some(Ok(ModelStreamEvent::Interrupted {
+                    error,
+                    attempts,
+                    max_attempts,
+                })) => {
+                    // 正文为空（只收到思考或半截工具）时不制造 assistant 消息：空
+                    // 消息不是规范历史，且会被 provider 拒绝（Anthropic 对空 text
+                    // block 返回 400）。此时仅靠续跑提醒继续。
+                    let content = MessageContent::text(partial_text.clone());
+                    let has_text = !content.is_empty();
+                    let mut reasoning = Reasoning::with_answer(partial_text.clone(), partial_text);
+                    if has_text {
+                        reasoning.source_message =
+                            Some(BaseMessage::ai(content).with_message_id(message_id));
+                    } else {
+                        reasoning.final_answer = None;
+                    }
+                    reasoning.streamed = streaming.is_some();
+                    reasoning.model = model_name;
+                    reasoning.stream_interruption = Some(crate::agent::react::StreamInterruption {
+                        error,
+                        attempts,
+                        max_attempts,
+                    });
                     return Ok(reasoning);
                 }
                 Some(Err(error)) => return Err(map_model_error(error)),

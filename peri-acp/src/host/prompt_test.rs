@@ -74,6 +74,29 @@ mod wire_projection {
         ACP_TURN_EXECUTION_FAILED_CODE,
     };
 
+    /// [回归测试] 恢复耗尽沿用标准 ACP fatal 投影，诊断不能在边界丢失。
+    #[test]
+    fn test_stream_recovery_exhausted_acp_diagnostic() {
+        let error = AgentError::StreamRecoveryExhausted {
+            attempts: 3,
+            source: peri_model::ModelError::stream_interrupted(
+                Some("anthropic"),
+                Some("req-partial"),
+            ),
+        };
+        let failure = ExecutionFailure::from_agent_error(&error);
+        let wire = execution_failure_to_acp_error(&failure);
+        assert_eq!(wire.code, ACP_TURN_EXECUTION_FAILED_CODE);
+        assert_eq!(wire.message, error.user_facing_message());
+        assert_eq!(
+            wire.data.unwrap(),
+            serde_json::json!({
+                "kind": "llm",
+                "diagnostic": {"category": "stream_interrupted", "provider": "anthropic", "request_id": "req-partial"}
+            })
+        );
+    }
+
     /// fatal failure → 唯一 `Internal` 类别穷尽映射到命名 code `-32000`。
     #[test]
     fn execution_failure_kind_exhaustive_mapping_pins_named_code() {

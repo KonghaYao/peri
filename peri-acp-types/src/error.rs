@@ -30,6 +30,13 @@ pub enum AgentError {
     #[error("LLM model error: {0}")]
     ModelError(#[source] peri_model::ModelError),
 
+    /// 可见增量后的流中断恢复预算耗尽。
+    #[error("Stream recovery exhausted after {attempts} attempts: {source}")]
+    StreamRecoveryExhausted {
+        attempts: usize,
+        source: peri_model::ModelError,
+    },
+
     #[error("Middleware error: {middleware} - {reason}")]
     MiddlewareError { middleware: String, reason: String },
 
@@ -273,6 +280,14 @@ impl AgentError {
             Self::LlmHttpError { status, .. } => format!(
                 "An LLM API error occurred (HTTP {status}). Please check your API configuration."
             ),
+            Self::StreamRecoveryExhausted { attempts, source } => {
+                let mut facts = model_error_facts(&source.diagnostic());
+                facts.push(format!("recovery exhausted after {attempts} attempts"));
+                format!(
+                    "An LLM API error occurred ({}). Please try again.",
+                    facts.join(", ")
+                )
+            }
             Self::ModelError(error) => {
                 let facts = model_error_facts(&error.diagnostic());
                 if facts.is_empty() {
@@ -333,6 +348,39 @@ fn model_error_facts(diagnostic: &peri_model::ModelErrorDiagnostic) -> Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::{AgentError, SafeModelErrorDiagnostic, SafeSubagentFailure};
+
+    /// [回归测试] 恢复耗尽的公开文案与 ACP 分类只保留 allowlist 事实。
+    #[test]
+    fn test_stream_recovery_exhausted_public_projection() {
+        use crate::session::{ExecutionFailure, ExecutionFailureKind};
+        let source = peri_model::ModelError::stream_interrupted(Some("anthropic"), None::<&str>);
+        let error = AgentError::StreamRecoveryExhausted {
+            attempts: 6,
+            source: source.clone(),
+        };
+        assert_eq!(error.user_facing_message(), "An LLM API error occurred (stream interrupted after partial output, recovery exhausted after 6 attempts). Please try again.");
+        let failure = ExecutionFailure::from_agent_error(&error);
+        assert_eq!(failure.kind, ExecutionFailureKind::Llm);
+        assert_eq!(failure.http_status, None);
+        assert_eq!(failure.diagnostic, Some(source.diagnostic()));
+        assert_eq!(failure.public_message, error.user_facing_message());
+        // 动态构造被拒绝的身份形态，不放入任何真实凭据。
+        let rejected = ["Bearer", "invalid identity"].join(" ");
+        let source = peri_model::ModelError::http_status(503, &rejected, Some(&rejected));
+        let error = AgentError::StreamRecoveryExhausted {
+            attempts: 2,
+            source: source.clone(),
+        };
+        let failure = ExecutionFailure::from_agent_error(&error);
+        assert_eq!(failure.kind, ExecutionFailureKind::LlmHttp);
+        assert_eq!(failure.http_status, Some(503));
+        assert_eq!(failure.diagnostic, Some(source.diagnostic()));
+        assert_eq!(failure.public_message, "An LLM API error occurred (HTTP 503, recovery exhausted after 2 attempts). Please try again.");
+        assert!(!failure.public_message.contains(&rejected));
+        assert!(!serde_json::to_string(&failure.diagnostic)
+            .unwrap()
+            .contains(&rejected));
+    }
 
     #[test]
     fn model_error_message_reports_http_status_and_request_id() {

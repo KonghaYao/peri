@@ -1266,7 +1266,9 @@ async fn visible_anthropic_delta_then_transport_failure_is_interrupted_without_r
     assert!(events
         .iter()
         .all(|event| !matches!(event, Ok(ModelStreamEvent::Completed(_)))));
-    assert!(matches!(events.last(), Some(Err(error)) if error.is_stream_interrupted()));
+    assert!(
+        matches!(events.last(), Some(Ok(ModelStreamEvent::Interrupted { error, attempts: 1, max_attempts: 2 })) if error.diagnostic().category_name() == "stream_interrupted")
+    );
     assert_eq!(transport.calls(), 1);
 }
 

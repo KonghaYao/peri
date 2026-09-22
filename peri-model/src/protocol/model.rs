@@ -29,6 +29,12 @@ pub enum ModelStreamEvent {
     },
     Usage(TokenUsage),
     Completed(ModelResponse),
+    /// 可见增量后中断；消费者保留部分输出并续跑，不得重放同一请求。
+    Interrupted {
+        error: ModelError,
+        attempts: u32,
+        max_attempts: u32,
+    },
 }
 
 #[derive(Default)]
@@ -134,6 +140,10 @@ impl Stream for ModelStream {
                 this.completed = true;
                 Poll::Ready(Some(Ok(ModelStreamEvent::Completed(response))))
             }
+            Poll::Ready(Some(Ok(event @ ModelStreamEvent::Interrupted { .. }))) => {
+                this.completed = true;
+                Poll::Ready(Some(Ok(event)))
+            }
             result => result,
         }
     }
@@ -215,6 +225,8 @@ pub trait Model: Send + Sync {
                         response.set_usage_if_none(usage);
                         return Ok(response);
                     }
+                    // 聚合接口不能交付部分响应；由流式消费者负责续跑。
+                    Some(Ok(ModelStreamEvent::Interrupted { error, .. })) => return Err(error),
                     Some(Err(error)) => return Err(error),
                     None => {
                         return Err(ModelError::protocol(

@@ -229,7 +229,7 @@ async fn never_retries_after_visible_delta() {
         ));
         assert!(matches!(stream.next().await, Some(Ok(_))));
         assert!(
-            matches!(stream.next().await, Some(Err(error)) if error.provider() == Some("openai"))
+            matches!(stream.next().await, Some(Ok(ModelStreamEvent::Interrupted { error, attempts: 1, max_attempts: 3 })) if error.provider() == Some("openai") && error.diagnostic().category_name() == "stream_interrupted")
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -255,7 +255,7 @@ async fn visible_delta_preserves_protocol_error_without_retry() {
         .collect::<Vec<_>>()
         .await;
     assert!(
-        matches!(events.last(), Some(Err(error)) if error.protocol_error().map(|protocol| protocol.kind()) == Some(crate::ProtocolErrorKind::Provider))
+        matches!(events.last(), Some(Ok(ModelStreamEvent::Interrupted { error, .. })) if error.protocol_error().map(|protocol| protocol.kind()) == Some(crate::ProtocolErrorKind::Provider))
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
@@ -335,7 +335,7 @@ async fn usage_after_visible_event_preserves_protocol_error_without_retry() {
         .collect::<Vec<_>>()
         .await;
     assert!(
-        matches!(events.last(), Some(Err(error)) if error.protocol_error().map(|protocol| protocol.kind()) == Some(crate::ProtocolErrorKind::Provider))
+        matches!(events.last(), Some(Ok(ModelStreamEvent::Interrupted { error, .. })) if error.protocol_error().map(|protocol| protocol.kind()) == Some(crate::ProtocolErrorKind::Provider))
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
@@ -363,7 +363,9 @@ async fn usage_after_visible_event_maps_transport_error_to_stream_interrupted() 
     let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
         .collect::<Vec<_>>()
         .await;
-    assert!(matches!(events.last(), Some(Err(error)) if error.is_stream_interrupted()));
+    assert!(
+        matches!(events.last(), Some(Ok(ModelStreamEvent::Interrupted { error, .. })) if error.is_stream_interrupted())
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 

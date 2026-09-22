@@ -175,6 +175,14 @@ impl ToolResult {
     }
 }
 
+/// 可见输出后的中断事实与同源恢复预算；不包含未完成工具或思考块。
+#[derive(Debug, Clone)]
+pub struct StreamInterruption {
+    pub error: peri_model::ModelError,
+    pub attempts: u32,
+    pub max_attempts: u32,
+}
+
 /// LLM 推理结果（ReAct 单步）
 #[derive(Debug, Clone)]
 pub struct Reasoning {
@@ -193,6 +201,7 @@ pub struct Reasoning {
     pub streamed: bool,
     /// LLM 响应的停止原因（end_turn / tool_use / max_tokens）
     pub stop_reason: StopReason,
+    pub stream_interruption: Option<StreamInterruption>,
 }
 
 impl Reasoning {
@@ -206,6 +215,7 @@ impl Reasoning {
             request_id: None,
             model: String::new(),
             streamed: false,
+            stream_interruption: None,
             stop_reason: StopReason::ToolUse,
         }
     }
@@ -220,6 +230,7 @@ impl Reasoning {
             request_id: None,
             model: String::new(),
             streamed: false,
+            stream_interruption: None,
             stop_reason: StopReason::EndTurn,
         }
     }

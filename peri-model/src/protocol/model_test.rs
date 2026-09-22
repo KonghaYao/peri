@@ -51,6 +51,31 @@ impl Model for FakeModel {
     }
 }
 
+/// [回归测试] complete 不能把中断聚合为成功，也不能尝试解析半截工具参数。
+#[tokio::test]
+async fn test_complete_interrupted_returns_original_error() {
+    let error = crate::ModelError::stream_interrupted(Some("anthropic"), Some("req-partial"));
+    let model = FakeModel::with_events(vec![
+        ModelStreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call-1".into()),
+            name: Some("Count".into()),
+            arguments_delta: "{".into(),
+        },
+        ModelStreamEvent::Interrupted {
+            error: error.clone(),
+            attempts: 1,
+            max_attempts: 2,
+        },
+    ]);
+    let actual = model
+        .complete(request(), CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(actual, error);
+    assert_eq!(model.stream_calls.load(Ordering::SeqCst), 1);
+}
+
 struct PendingModel;
 
 #[async_trait]

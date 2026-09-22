@@ -378,7 +378,7 @@ async fn stream_eof_without_done_after_delta_is_interrupted_without_retry() {
         events.as_slice(),
         [
             Ok(ModelStreamEvent::TextDelta { text }),
-            Err(error),
+            Ok(ModelStreamEvent::Interrupted { error, attempts: 1, .. }),
         ] if text == "partial" && error.provider() == Some("openai-compatible")
     ));
     assert!(events

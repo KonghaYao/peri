@@ -288,7 +288,9 @@ async fn fake_http_sse_chain_returns_midstream_failure_after_delta_without_retry
         stream.next().await,
         Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "partial"
     ));
-    assert!(matches!(stream.next().await, Some(Err(error)) if error.provider() == Some("fake")));
+    assert!(
+        matches!(stream.next().await, Some(Ok(ModelStreamEvent::Interrupted { error, .. })) if error.provider() == Some("fake"))
+    );
     assert_eq!(transport.calls(), 1);
 }
 

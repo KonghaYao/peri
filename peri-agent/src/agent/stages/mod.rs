@@ -566,6 +566,29 @@ struct LoopState {
     before_agent_has_run: bool,
     /// 仅无完整工具调用的截断消耗恢复预算；完整工具结果可继续正常循环。
     consecutive_truncations: usize,
+    /// 本轮累计中断次数，不因工具进展重置。
+    stream_recoveries: usize,
+}
+
+fn enqueue_stream_interruption_continuation(context: &StageContext) {
+    use crate::session::queue::{MessageKind, MessageSource};
+    use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
+
+    let reminder = crate::session::producer_reminders::trusted_reminder(
+        ReminderCategory::Guidance,
+        "model_runtime",
+        "stream_interrupted",
+        ReminderSeverity::Warning,
+        ReminderDelivery::Required,
+        "上一条回复在流式传输中被上游切断，并非你主动结束。从保存的断点继续，不要重复已输出内容或已完成的工具调用；参数被截断的工具调用需要重新发起。".into(),
+        Some("模型流中断，正在继续。".into()),
+        serde_json::json!({"reason": "stream_interrupted"}),
+    );
+    context.session.queue.push(QueuedMessage::system_reminder(
+        MessageKind::Defer,
+        MessageSource::SystemInjected,
+        reminder,
+    ));
 }
 
 fn enqueue_truncation_continuation(context: &StageContext) {
@@ -904,6 +927,12 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 == peri_model::StopReason::MaxTokens
                 && !reason_out.reasoning.needs_tool_call();
 
+            let stream_interruption = reason_out
+                .reasoning
+                .stream_interruption
+                .clone()
+                .filter(|_| !reason_out.reasoning.needs_tool_call());
+
             // ── Act ──
             let act_out = match run_stage(&context, Stage::Act, || async {
                 act::run_act(ActInput {
@@ -920,6 +949,19 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             };
 
             loop_state.has_tool_calls = act_out.has_tool_calls;
+            if let Some(interruption) = stream_interruption {
+                if context.session.turn.is_cancelled() {
+                    return LoopResult::Interrupted;
+                }
+                loop_state.stream_recoveries += 1;
+                if loop_state.stream_recoveries >= interruption.max_attempts as usize {
+                    return LoopResult::Error(crate::error::AgentError::StreamRecoveryExhausted {
+                        attempts: loop_state.stream_recoveries,
+                        source: interruption.error,
+                    });
+                }
+                enqueue_stream_interruption_continuation(&context);
+            }
             if truncated_without_tools {
                 loop_state.consecutive_truncations += 1;
                 if loop_state.consecutive_truncations > MAX_TRUNCATION_CONTINUATIONS {
