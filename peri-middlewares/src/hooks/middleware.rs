@@ -522,6 +522,7 @@ impl Middleware for HookMiddleware {
             AgentError::LlmError(_)
                 | AgentError::LlmHttpError { .. }
                 | AgentError::ModelError(..)
+                | AgentError::StreamRecoveryExhausted { .. }
                 | AgentError::MiddlewareError { .. }
         );
 

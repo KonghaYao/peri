@@ -283,9 +283,10 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
         run_react_loop(context.clone(), 3).await,
         LoopResult::Completed
     ));
-    let expected_requests = if status.is_some_and(|status| status == 400)
-        || matches!(fixture, FailureFixture::VisibleDeltaThenInterruption)
-    {
+    // HTTP 400 不可重试：单次请求即失败。其余场景走满 `RetryConfig::max_attempts`
+    // ——含「可见增量后中断」：该路径不再整轮作废，而是保留部分输出续跑，
+    // 1 次初始请求 + 5 次续跑 = 6 次后耗尽。
+    let expected_requests = if status.is_some_and(|status| status == 400) {
         1
     } else {
         6

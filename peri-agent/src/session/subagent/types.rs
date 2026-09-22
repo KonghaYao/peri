@@ -270,6 +270,11 @@ impl SubagentFailure {
     pub fn diagnostic(&self) -> Option<peri_model::ModelErrorDiagnostic> {
         match &self.error {
             crate::error::AgentError::ModelError(error) => Some(error.diagnostic()),
+            // 可见增量后中断的恢复预算耗尽：底层 ModelError 同样携带 allowlist
+            // 诊断事实，与 `ExecutionFailure::from_agent_error` 的投影保持同源。
+            crate::error::AgentError::StreamRecoveryExhausted { source, .. } => {
+                Some(source.diagnostic())
+            }
             _ => None,
         }
     }
@@ -290,6 +295,7 @@ impl SubagentFailure {
     ) -> Option<peri_acp_types::error::SafeSubagentFailure> {
         let diagnostic = match error {
             crate::error::AgentError::ModelError(error) => error.diagnostic(),
+            crate::error::AgentError::StreamRecoveryExhausted { source, .. } => source.diagnostic(),
             _ => return None,
         };
         peri_acp_types::error::SafeSubagentFailure::new(
