@@ -311,14 +311,21 @@ pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
     hooks
 }
 
-/// `path` 是否就是用户级 `~/.claude/settings.json`：字面相同，或经符号链接指向
-/// 同一文件（macOS `$HOME` 为链接、`/var` → `/private/var` 等）。无法确定主目录
-/// 时视为不是。
+/// `path` 是否就是用户级 `~/.claude/settings.json`。无法确定主目录时视为不是。
+///
+/// 主目录解析须与 `load_global_settings_hooks` 同源，否则排除会认错文件。
 fn is_user_settings_path(path: &Path) -> bool {
-    let Some(user_path) = dirs_next::home_dir().map(|h| h.join(".claude").join("settings.json"))
-    else {
-        return false;
-    };
+    dirs_next::home_dir().is_some_and(|home| is_user_settings_path_under(path, &home))
+}
+
+/// 同上判定，但主目录由调用方给出：字面相同，或经符号链接指向同一文件
+/// （macOS `$HOME` 为链接、`/var` → `/private/var` 等）。
+///
+/// 拆出该入口是为了让排除规则在 Windows 上也可验证——`dirs_next::home_dir()`
+/// 在 Windows 走 Profile known-folder（`SHGetKnownFolderPath`），不读
+/// `HOME`/`USERPROFILE`，测试无法把 `~` 改写成临时目录。
+fn is_user_settings_path_under(path: &Path, home: &Path) -> bool {
+    let user_path = home.join(".claude").join("settings.json");
     if path == user_path {
         return true;
     }

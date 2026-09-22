@@ -455,6 +455,14 @@ fn write_hooks_settings(dir: &Path) {
 /// [回归] cwd 为用户主目录：`{cwd}/.claude/settings.json` 与
 /// `~/.claude/settings.json` 是同一个文件，项目级加载必须跳过——否则同一份
 /// hooks 会注册成 global 与 project 两组而执行两次。子目录仍按项目级加载。
+///
+/// Windows 跳过：该平台 `dirs_next::home_dir()` 走 Profile known-folder
+/// （`SHGetKnownFolderPath`），不读 `HOME`/`USERPROFILE`，`HomeGuard` 注入的临时
+/// `~` 不生效。路径判定本身由 `test_is_user_settings_path_under_*` 覆盖。
+#[cfg_attr(
+    windows,
+    ignore = "dirs_next::home_dir() 在 Windows 不读 HOME/USERPROFILE，无法注入临时主目录"
+)]
 #[test]
 fn test_project_hooks_skipped_when_cwd_is_home() {
     let tmp = tempdir().unwrap();
@@ -484,7 +492,7 @@ fn test_project_hooks_skipped_when_cwd_is_home() {
     );
 }
 
-/// [回归] 经符号链接抵达同一文件（macOS `$HOME` 为链接等）同样跳过。
+/// [回归] 经符号链接抵达同一文件（macOS `$HOME` 为链接、`/var` → `/private/var`）。
 #[cfg(unix)]
 #[test]
 fn test_project_hooks_skipped_when_home_reached_via_symlink() {
@@ -499,6 +507,45 @@ fn test_project_hooks_skipped_when_home_reached_via_symlink() {
     assert!(
         load_settings_project_hooks(link.to_str().unwrap()).is_empty(),
         "符号链接指向用户级文件时不得重复注册"
+    );
+}
+
+/// [回归] 同文件判定逐条核对（显式主目录，不依赖进程主目录，各平台都跑）。
+#[test]
+fn test_is_user_settings_path_under_explicit_home() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    write_hooks_settings(&home);
+    let project_dir = tmp.path().join("proj");
+    write_hooks_settings(&project_dir);
+
+    assert!(
+        is_user_settings_path_under(&home.join(".claude").join("settings.json"), &home),
+        "主目录下的 settings.json 就是用户级文件"
+    );
+    assert!(
+        !is_user_settings_path_under(&project_dir.join(".claude").join("settings.json"), &home),
+        "普通项目目录的 settings.json 不是用户级文件"
+    );
+    assert!(
+        !is_user_settings_path_under(&home.join(".claude").join("settings.local.json"), &home),
+        "同目录的 settings.local.json 不是用户级 settings.json"
+    );
+}
+
+/// [回归] 符号链接抵达同一文件同样判定为同一文件。
+#[cfg(unix)]
+#[test]
+fn test_is_user_settings_path_under_symlinked_home() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    write_hooks_settings(&home);
+    let link = tmp.path().join("home-link");
+    std::os::unix::fs::symlink(&home, &link).unwrap();
+
+    assert!(
+        is_user_settings_path_under(&link.join(".claude").join("settings.json"), &home),
+        "符号链接指向用户级文件时应判为同一文件"
     );
 }
 
