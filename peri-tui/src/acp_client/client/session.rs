@@ -612,8 +612,8 @@ impl AcpTuiClient {
 
 /// 本次准入的只读标记；`None` 表示准入持有执行所有权（或响应没有该字段）。
 ///
-/// host 只在协商了 `sessionWorkspaceV1` 的客户端上标注只读准入，未协商的连接仍旧
-/// 收到准入错误。
+/// host 把只读标记装配在 `sessionWorkspaceV1` 身份载荷里，所以只有协商过该能力的
+/// 客户端看得到它；未协商的连接同样按只读准入进入，标记缺失不等于本次持有所有权。
 fn read_only_admission(response: &Value) -> Option<ReadOnlyAdmission> {
     serde_json::from_value(
         response

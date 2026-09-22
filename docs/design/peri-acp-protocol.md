@@ -43,7 +43,9 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
   能力未协商不改变旧标准字段解释，也不能允许错误目录执行。
 - `session/load` 的只读准入：执行所有权不可得（他处持有 / 待恢复的精确代际 / 本节点
   不提供所有权）时仍返回成功，在 `_meta["peri.sessionWorkspaceV1"].read_only` 携带
-  `ReadOnlyAdmission`，进程日志记 warning；未协商该能力的客户端仍按原准入错误失败。
+  `ReadOnlyAdmission`，进程日志记 warning；未协商该能力的客户端同样进入，只是拿不到这个标记。
+  待恢复的精确代际只在协商了 `peri.sessionRecoveryV1` 的连接上停住（客户端确认后调用
+  `peri/session_reset_dirty`），没有确认交互的连接由宿主直接解除该代际并取得所有权。
   只读准入不改变独占：写入与执行仍要 owner，`session/fork` 不接受降级。
 - `session/metadata` 读取轻量标题与当前会话配置投影；不做逐 tick Git 发现。
 
