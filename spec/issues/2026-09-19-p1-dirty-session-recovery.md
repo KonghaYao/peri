@@ -3,7 +3,7 @@
 **状态**：Implemented — 独立审查通过，待用户验收（未在真实残留进程现场实测；不标记 Fixed）
 **优先级**：P1（用户指定）
 **创建日期**：2026-09-19
-**最后更新**：2026-09-20（记录只读准入策略变更：占用不再挡住进入，TUI 行为随之调整；见「策略变更」）
+**最后更新**：2026-09-22（记录两次策略变更：只读准入不再以能力协商为前置；dirty 代际改由宿主替未协商连接解除，见「策略变更（2026-09-22）」与「策略变更（2026-09-22 之二）」）
 
 ## 用户场景与预期
 
@@ -61,7 +61,8 @@
   通用确认路径（`ConfirmAction::RecoverDirty` 落到 `execute_confirm_action`）按取消处理。
 - 确认必须完整渲染（`RecoveryDisplay::record_area` 登记的矩形不小于内容）才可能接受；
   终端过小、等待方被丢弃、弹窗已被其他交互占用都 fail closed 且不写入。
-- 未协商能力或非交互宿主不展示确认，直接保持原错误。
+- 未协商能力或非交互宿主不展示确认：宿主在准入时直接解除精确代际并取得所有权
+  （2026-09-22 二次变更；此前依次为「直接保持原错误」「按只读准入进入」）。
 - 取消、Esc、`close_popup`、render drop 都不会产生任何 reset 写入。
 
 ## 不做的事
@@ -107,7 +108,9 @@ stale generation 拒绝（并保持 dirty，不误放行）；非同会话/无 d
    `open_popup(OAuth)` → `close_popup()` 下 load 收敛、gate 释放、reservation 释放与不写库。
 2. **P2 未协商也放行 reset（已修）**：handler 原用 `effective_host_caps()`，MPSC 兜底
    `all_enabled` 会让未经 `initialize` 的连接解除 dirty。现改用 `negotiated_caps()`，
-   其他旧 RPC 语义不变；新增“未 initialize 拒绝且不改动存储”回归（再次观测仍为原 dirty 代次）。
+   其他旧 RPC 语义不变；新增“未 initialize 拒绝且不改动存储”回归（该节写作时点以「再次观测仍为
+   原 dirty 代次」判定零副作用；`session/load` 之后会对未协商连接直接解除 dirty，观测因此已改走
+   存储 CAS——见本文件『策略变更（2026-09-22 之二）』）。
 3. **并行失败根因纠正（已修）**：第二轮实测与 reviewer 复现一致——并行失败**不是**
    既有无关缺陷，而是本次新增测试只清理 popup 两个 atom，遗漏 interactive load 经
    `project_session_boundary` / `project_execution_cwd` 写入的 `ACTIVE_SESSION_ID`、
@@ -170,13 +173,14 @@ stale generation 拒绝（并保持 dirty，不误放行）；非同会话/无 d
 
 | 切片 | 位置 | 变更 |
 | --- | --- | --- |
-| A：ACP 准入 | `peri-acp/src/host/{workspace.rs,requests/session_lifecycle.rs}`、`peri-acp-types/src/workspace.rs` | `ReadOnlyAdmission`（他处持有 / 精确 dirty 代际 / 本节点不提供所有权）；`acquire_for_load` 返回 `LoadAdmission`，`session/load` 在协商了 `sessionWorkspaceV1` 时降级为只读准入并在 `_meta.peri.sessionWorkspaceV1.read_only` 下发，进程日志记 warning；未协商的客户端仍按原错误失败；`session/fork` 与同一次准入内的 `reacquire_for_load` 不接受降级 |
+| A：ACP 准入 | `peri-acp/src/host/{workspace.rs,requests/session_lifecycle.rs}`、`peri-acp-types/src/workspace.rs` | `ReadOnlyAdmission`（他处持有 / 精确 dirty 代际 / 本节点不提供所有权）；`acquire_for_load` 返回 `LoadAdmission`，`session/load` 一律降级为只读准入并记进程日志 warning，协商了 `sessionWorkspaceV1` 的客户端另从 `_meta.peri.sessionWorkspaceV1.read_only` 读到原因（**2026-09-22 变更**：未协商的客户端不再按原错误失败，见下节）；`session/fork` 与同一次准入内的 `reacquire_for_load` 不接受降级 |
 | B：TUI | `peri-tui/src/acp_client/client/session.rs`、`kit/{atoms,session_boundary,status_bar,steer_consumer}.rs`、两份 `locales/*/main.ftl` | 只读标记写入 `SESSION_READ_ONLY`（仅交互客户端写入，每次会话边界清空）；状态栏新增一段只读原因；dirty 只读准入照常弹确认——接受即取回所有权，取消也让会话按只读进入，取回失败仍保留首次只读准入（不再清空视图、置空会话并记恢复错误）；每个可能被宿主回放历史的 `session/load` 之前各投影一次回放边界；不新增客户端输入闸门（提交仍由 host 的 `require_owner` 拒绝），只把只读会话上的执行所有权拒绝（`-32010`）判为确定拒绝，原稿还回 composer |
 | C：启动降级 | `peri-resources/src/context.rs`、`sessions/sqlite_store/{connection,workspace}.rs` | 会话库写打开失败（schema 锁被占、库文件/WAL 不可写）降级为只读打开并记 warning，进入与历史浏览不受影响；`WorkspaceError::ReadOnlyStore` 在进入 SQL 前拒绝新会话与新目录登记；写打开走到版本判定时不认识的 schema 不降级，在版本判定前失败（锁被占、不可写）时降级只按读取兼容的列形状把关、不复查 `user_version` |
 
 不变式（未放宽）：`SessionExecutionLease` 的跨进程独占不变，只读准入不持有 lease；写入与
 执行仍要求 owner；`ExecutionBusy` 仍不提供清除入口，只读进入不等于解除占用；未协商
-`sessionWorkspaceV1` 的客户端契约不变。
+`sessionWorkspaceV1` 的客户端拿不到只读标记（**2026-09-22 变更**：它同样只读进入，
+不再按原错误失败；此前写的「契约不变」已作废）。
 
 本进程只尝试一次写打开（`Resources` 在启动时构造）：一旦降级即保持只读到进程退出，重启
 才重新尝试。降级事件只进进程日志，界面以状态栏只读段说明原因。
@@ -191,6 +195,79 @@ passed；定向用例 `cargo test -p peri-resources --lib -- open_with`（6 例�
 每次回放各有边界：只读 dirty 接受后边界 +3、取消 +1）、`cargo test -p peri-acp --lib -- recovery`
 （13 例，含未协商与已协商两条准入路径）；`cargo clippy --workspace --all-targets -- -D warnings`
 无告警。一次未定因的 `peri-resources` 偶发失败（2026-09-20，批内 2 例失败、无法复现，见「未验证项」）。
+
+## 策略变更（2026-09-22）：只读准入不再以能力协商为前置
+
+用户裁决：执行所有权不可得（含 `RecoveryRequired`）是预期条件，不该按错误处理，
+「应该 warning 即可，直接进入」。触发场景是 RCS（`remote-control-server` 的 `acp-link`
+客户端）只声明 `peri.tokenStats/agentEvent/unstableEvent`，未协商 `sessionWorkspaceV1`，
+于是 peri 对它的 `session/load` 返回 `-32010 RecoveryRequired`，客户端把它记成
+`ERROR: [console] session load failed: …`，用户也无法进入该会话。裁决：**任何客户端都只读进入**，
+协商只决定能否看到原因。
+
+**同日之二修正（见下节）**：只读进入只对「他处持有 / 本节点不提供所有权」成立；
+dirty 代际改为由宿主直接解除后取得所有权，未协商的连接不再停在只读——停在只读等于
+dirty 会话在这类客户端上永远不可用。
+
+| 切片 | 位置 | 变更 |
+| --- | --- | --- |
+| ACP 准入 | `peri-acp/src/host/requests/session_lifecycle.rs`（`prepare_existing`） | 删除「未协商 `sessionWorkspaceV1` → `read_only_error(reason)`」分支：`ExecutionAdmission::Unavailable` 一律降级为只读准入并记 warning；`identity_response` 的分工改为「身份载荷与只读标记都随能力协商出现，准入本身不因未协商而失败」 |
+
+不变式（仍未放宽）：未协商的客户端拿不到只读原因（`_meta.peri.sessionWorkspaceV1.read_only`
+随身份载荷省略），它无从得知本次只读，写入与执行的确定拒绝仍来自 `require_owner`
+（`ExecutionLeaseRequired`）；`session/fork` 与同一次准入内的 `reacquire_for_load` 依旧不接受降级，
+`peri/session_reset_dirty` 依旧要求 `peri.sessionRecoveryV1` 显式协商（`negotiated_caps`）。
+
+证据（该节写作时点；下文标出的未协商段落已被本文件『策略变更（2026-09-22 之二）』取代）：
+`cargo test -p peri-acp --lib -- recovery`（14 例，含改写后的
+`test_workspace_dirty_recovery_original_load_and_frozen`：未协商准入返回成功、响应无身份载荷、
+会话无 owner/frozen，随后协商准入仍复述精确代际——这里记录的未协商形态当时是只读进入，2026-09-22
+之二之后改为「解除 dirty 后取得所有权」，该用例此后只覆盖协商侧）、`cargo test -p peri-acp --lib -- workspace`
+（18 例）、`cargo test -p peri-tui --lib -- read_only`（10 例）、
+`cargo clippy -p peri-acp --all-targets -- -D warnings` 无告警。
+
+未验证项：RCS 侧端到端未实测（本机只确认日志来源与 `-32010` 文本一致）；未协商客户端在只读
+会话上发 prompt 的拒绝链路（`require_owner` → `ExecutionLeaseRequired`）在真实 RCS 连接下未跑通，
+与上节「只读准入的端到端用户现场未实测」同一条。
+
+## 策略变更（2026-09-22 之二）：dirty 由宿主替没有确认交互的连接解除
+
+用户裁决：不要求客户端改（RCS 的 `acp-link` 不动），**由 peri 直接解除 dirty 进入**。
+留在只读等于 dirty 会话在这类客户端上永远不可用：它没有确认交互（`peri/session_reset_dirty`
+只对协商了 `peri.sessionRecoveryV1` 的连接开放），也没有解除入口。裁决后两类连接分工明确：
+**协商过恢复能力的客户端自己确认并调用 reset RPC；没协商的连接由宿主在准入时直接解除。**
+
+| 切片 | 位置 | 变更 |
+| --- | --- | --- |
+| ACP 准入 | `peri-acp/src/host/workspace.rs`（`acquire_lease_with_recovery` / `try_acquire_lease` / `clear_dirty_generation`） | 取所有权先直接取一次；失败原因是 `RecoveryRequired` 且 `negotiated_caps().session_recovery_v1 == false` 时，按观测到的精确 `(thread_id, generation)` 调 `reset_dirty_execution` 并重取一次；解除失败（并发 CAS 错配、存储错误）只记 warning，按第一次尝试的只读原因收敛，不升级为准入失败。协商过恢复能力的连接原样停在只读，等它自己确认 |
+
+不变式（仍未放宽）：解除只针对观测到的精确代际，稳定 OS 锁与代次 CAS 语义不变；`ExecutionBusy`
+（他处活持有者）不解除、不删锁、不重建 lock 文件，`ExecutionLeaseRequired`（本节点只读 / 子线程）
+不受影响；解除不构成「上一代已正常收尾」的证明，旧执行的未知副作用与残留子进程风险转移给
+未协商连接的准入承担（此前是用户在弹窗上显式承担）。`session/fork` 与 `reacquire_for_load`
+仍不接受只读降级——它们现在走的是「解除后取得所有权」，不是降级。
+
+影响面：`session/load`、`session/resume`、`session/fork` 共用 `acquire_for_load`，三者对未协商连接
+都改为解除后准入（fork 的源会话前代 dirty 同样被解除）。TUI（`entry.rs:401` 在首个 load 之前
+`register_ui_commands` → 协商 all_enabled）不受影响：确认弹窗与 `SESSION_READ_ONLY` 的 dirty 原因
+照旧，行为与测试未变。
+
+证据：`cargo test -p peri-acp --lib` 692 passed，其中 `-- recovery` 17 例：新增
+`test_unnegotiated_client_load_clears_dirty_generation_and_admits_owned`（RCS 形态 caps：load 成功、
+无身份载荷、持有 owner 与 frozen，close 后原目标 CAS 只能报「dirty generation changed」）、
+`test_dirty_reset_without_initialize_is_rejected_without_store_effect`（reset RPC 仍 -32601；改以存储
+CAS 证明零副作用）、`test_workspace_dirty_recovery_original_load_and_frozen`（协商连接仍停在只读、
+确认语义与 reset 后重建整段保留）、`Fixture::dirty()` 的 dirty 观测改走存储（不再借道 load，避免
+观测本身触发解除）；补审后追加 fork 路径两条（源会话在同一入口被解除并持有 owner，
+及协商连接 fork dirty 源会话时 `-32010` 的类型化载荷与零存储副作用）——`session/fork` 与
+`session/load`、`session/resume` 共用 `acquire_for_load`，此前只有 load 有用例；
+`cargo test -p peri-tui --lib -- recovery`（27 例）与 `-- read_only`（10 例）
+仍全绿；`cargo clippy -p peri-acp --all-targets -- -D warnings` 无告警。
+
+未验证项：RCS 端到端仍未实测（本机只有 peri 侧单测）；「auto 解除 + prompt 正常执行」这条完整
+链路未在真实 ACP 连接上跑过；同机多个未协商客户端同时加载同一 dirty 会话时，CAS 只有一个赢家、
+输家按只读收敛（并发行为未实测）；解除失败后的只读收敛分支（`clear_dirty_generation` 返回 Err）
+没有定向用例——真实存储里它只在并发写者介入时发生，确定性注入需要一个替换 `ThreadStore` 的测试替身。
 
 ## 未验证项
 
@@ -230,6 +307,12 @@ passed；定向用例 `cargo test -p peri-resources --lib -- open_with`（6 例�
 - 启动降级后进程内不会重新尝试写打开：真正可写但瞬时不可用（SQLite busy、锁未释放）时，
   用户会在本次进程内保持只读直到重启。这是当前取舍下的已知后果，不是缺陷；若要改成
   「稍后重试取得可写」，需要新的重试与状态迁移契约，尚未设计。
+- 已知后果（2026-09-22 之二引入，当前无生产客户端命中）：**声明了 `peri.sessionRecoveryV1`
+  却无法展示确认的客户端（headless、或盲目回显 `all_enabled` 的能力声明）会永远停在只读**——
+  它自己放弃了代理解除（宿主只替「没有确认交互」的连接解除），`peri/session_reset_dirty`
+  又要求显式协商加用户确认，两个入口都对它关闭。当前形态不存在：TUI 在首个 load 前协商且能
+  弹窗，`cli_print` 只 `session/new` 不 load。真正的修法是让「是否声明能力」与「是否真能承载
+  确认」分开表达，尚未设计；不是本变更的缺陷，先记录在案。
 
 ## 验收要求（状态）
 
@@ -238,10 +321,13 @@ passed；定向用例 `cargo test -p peri-resources --lib -- open_with`（6 例�
 - [x] 不删除稳定锁、不伪造正常 clean、不自动重放未知结果的工具调用。
   - 限定：「不伪造正常 clean」指不把未知终态当作已收尾。reset 写入的 `clean=1` 在存储中与真实收尾
     不可区分，该保证来自「用户显式授权 + `clean` 列的唯一消费者是准入判断」，不构成旧执行已正常
-    结束的证明。
+    结束的证明。未协商连接上的宿主解除（2026-09-22 之二）把「显式授权」换成「宿主按能力协商
+    代理」：同样不构成旧执行已收尾的证明，风险由该类连接的准入承担。
 - [x] 取消/失败不提交半成品 session，不串用 cwd 或输入。
 - [x] 隔离临时数据库与受控进程回归通过。
 - [x] 占用不再挡住进入：只读准入（ACP 标记 + TUI 状态）与启动时的只读降级均有定向用例。
+- [x] 未协商恢复能力的连接不因 dirty 停住：宿主解除精确代际并取得所有权（2026-09-22 之二，
+  `-- recovery` 新增用例覆盖 RCS 形态 caps + 零残留只读标记 + CAS 证据）。
 - [ ] 一次未定因的偶发失败（2026-09-20，`cargo test -p peri-resources --lib`）：批内报 2 例失败，
   其中一例是自带过滤器的子进程（`0 passed; 1 failed; 155 filtered out`，与 `ADMISSION_CHILD` /
   `HISTORY_CHILD` / lease 子进程的形态一致）。当次日志未留存；此后 26 次串行 + 22 次并发（含 8 路

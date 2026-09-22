@@ -115,17 +115,11 @@ async fn prepare_existing(
     let workspace = admission.workspace;
     let (owner, read_only) = match admission.execution {
         super::super::workspace::ExecutionAdmission::Owned(owner) => (Some(owner), None),
-        // 执行所有权不可得（他处持有 / 待恢复 / 本节点只读）：不再用错误信息挡住进入，
-        // 改为只读进入并记 warning。独占语义不变——写入与执行仍要所有权。
+        // 执行所有权不可得（他处持有 / 待恢复 / 本节点只读）：不用错误信息挡住进入，
+        // 一律改为只读进入并记 warning——未协商 `sessionWorkspaceV1` 的客户端同样进入，
+        // 只是拿不到身份载荷里的只读标记（见 `identity_response`）。独占语义不变：
+        // 写入与执行仍要所有权，`require_owner` 是唯一闸门。
         super::super::workspace::ExecutionAdmission::Unavailable(reason) => {
-            if !cfg
-                .session_manager
-                .effective_host_caps()
-                .session_workspace_v1
-            {
-                // 未协商只读标记的客户端无法得知本次准入只读，仍按原语义失败。
-                return Err(super::super::workspace::read_only_error(reason));
-            }
             warn!(
                 session_id = %id,
                 reason = ?reason,
@@ -244,8 +238,11 @@ async fn prepare_existing(
     })
 }
 
-/// 装配准入响应：会话身份载荷 + 本次准入是否只读（只读标记只在协商了
-/// `sessionWorkspaceV1` 的客户端上出现，见 `prepare_existing` 的降级前置条件）。
+/// 装配准入响应：会话身份载荷 + 本次准入是否只读。
+///
+/// 只读标记挂在身份载荷里，因此只有协商了 `sessionWorkspaceV1` 的客户端才看得到它；
+/// 未协商的连接同样按只读准入进入（见 `prepare_existing`），只是拿不到这个标记——
+/// 它无从得知本次准入只读，`require_owner` 在写入/执行时仍是确定拒绝。
 fn identity_response(
     mut response: Value,
     identity: Option<Value>,
