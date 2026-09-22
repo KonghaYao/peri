@@ -4,7 +4,7 @@
 //! `Error reading the log directory/files: No such file or directory (os error 2)`
 //! （来自 `tracing-appender` 读取日志目录失败），裸文件名会让日志目录解析成空路径。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::resolve_log_target;
 
@@ -56,15 +56,19 @@ fn absolute_log_file_keeps_its_directory_and_stem() {
     assert_eq!(prefix, "peri");
 }
 
-/// 未设置 `RUST_LOG_FILE` 时使用 `~/.peri/logs` 与 service 名（生产默认路径）。
+/// 未设置 `RUST_LOG_FILE` 时使用 `~/.peri/logs`（无 home 时回退临时目录）
+/// 与 service 名（生产默认路径）。
 #[test]
 fn default_log_target_is_the_peri_home_logs_directory() {
     let (directory, prefix) = resolve_log_target(None, "agent-tui");
     assert!(directory.is_absolute(), "默认日志目录应为绝对路径");
-    assert!(
-        directory.ends_with(Path::new(".peri").join("logs")),
-        "默认日志目录应位于 ~/.peri/logs，实际为 {}",
-        directory.display()
-    );
+    match dirs_next::home_dir() {
+        Some(home) => assert_eq!(
+            directory,
+            home.join(".peri").join("logs"),
+            "有 home 时应落在 ~/.peri/logs"
+        ),
+        None => assert_eq!(directory, std::env::temp_dir(), "无 home 时应回退临时目录"),
+    }
     assert_eq!(prefix, "agent-tui");
 }

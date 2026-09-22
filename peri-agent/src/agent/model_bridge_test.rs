@@ -117,12 +117,23 @@ async fn test_bridge_stream_interruption_preserves_only_partial_text() {
         assert_eq!((interruption.attempts, interruption.max_attempts), (2, 4));
         assert_eq!(interruption.error.request_id(), Some("req-partial"));
         let mut chunks = Vec::new();
+        let mut started = Vec::new();
+        let mut ended = Vec::new();
         while let Ok(event) = handles.render_rx.try_recv() {
-            if let RenderEvent::TextChunk {
-                message_id, chunk, ..
-            } = event
-            {
-                chunks.push((message_id, chunk));
+            match event {
+                RenderEvent::TextChunk {
+                    message_id, chunk, ..
+                } => chunks.push((message_id, chunk)),
+                RenderEvent::ToolStarted {
+                    tool_call_id, name, ..
+                } => started.push((tool_call_id, name)),
+                RenderEvent::ToolEnded {
+                    tool_call_id,
+                    name,
+                    is_error,
+                    ..
+                } => ended.push((tool_call_id, name, is_error)),
+                _ => {}
             }
         }
         assert_eq!(
@@ -132,6 +143,18 @@ async fn test_bridge_stream_interruption_preserves_only_partial_text() {
                 .collect::<Vec<_>>(),
             vec![text, text],
             "只允许原始增量，不可重放"
+        );
+        // 首个带 id/name 的 ToolCallDelta 已提前 emit ToolStarted：中断后走续跑、
+        // 不重放该块，缺配对 ToolEnded 会让 TUI 永久停在"进行中"。
+        assert_eq!(
+            started,
+            vec![("partial-tool".to_string(), "Count".to_string())],
+            "半截工具调用应在首个 delta 提前登记"
+        );
+        assert_eq!(
+            ended,
+            vec![("partial-tool".to_string(), "Count".to_string(), true)],
+            "中断须为已 emit 的 ToolStarted 补配对 error ToolEnded"
         );
         assert!(
             chunks.windows(2).all(|pair| pair[0].0 == pair[1].0),

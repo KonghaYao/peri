@@ -128,7 +128,9 @@ impl Stream for ModelStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        if this.cancellation_reported {
+        // 终态后不再产出：已完成（Completed/Interrupted）的流若继续被 poll，
+        // 取消分支会在成功终态之后追加一个 `Err(cancelled)`。
+        if this.cancellation_reported || this.completed {
             return Poll::Ready(None);
         }
         if this.child_cancelled.as_mut().poll(cx).is_ready() {

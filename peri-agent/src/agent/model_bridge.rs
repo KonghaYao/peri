@@ -255,8 +255,10 @@ impl AgentModelBridge {
         // "文本到达"推断永不触发），只能空转到 dispatch_tools 的正式
         // ToolStarted（模型流结束后才发出）。参数尚未生成 → input 置 Null，
         // 由 dispatch 路径同 id 的正式 ToolStarted 经 TUI start_tool 的
-        // 重复 id upsert 填充。
-        let mut tool_start_emitted = false;
+        // 重复 id upsert 填充。记录身份而非 bool：中断时须为已发出的
+        // ToolStarted 补配对 ToolEnded（同 dispatch 路径的补发模式），否则
+        // 续跑不回头重放该块，TUI 会永久停在"进行中"。
+        let mut active_tool: Option<(String, String)> = None;
         let mut partial_text = String::new();
 
         loop {
@@ -315,14 +317,14 @@ impl AgentModelBridge {
                     // [Fix think-end] 工具块开始 = 推理结束：首个带 id/name 的
                     // delta 提前 emit ToolStarted（input 尚未生成 → Null）。
                     // 多工具并行时仅首个 delta 发射，其余工具由 dispatch 正式发。
-                    if !tool_start_emitted {
+                    if active_tool.is_none() {
                         if let Some(context) = &streaming {
                             if let (Some(id), Some(name)) = (id, name) {
                                 if context.cancel.is_cancelled() {
                                     stream.abort();
                                     return Err(AgentError::Interrupted);
                                 }
-                                tool_start_emitted = true;
+                                active_tool = Some((id.clone(), name.clone()));
                                 context.event_bus.emit_render(RenderEvent::ToolStarted {
                                     turn_id: context.turn_id,
                                     agent_id: context.agent_id,
@@ -369,6 +371,20 @@ impl AgentModelBridge {
                         attempts,
                         max_attempts,
                     });
+                    // 已提前 emit 的 ToolStarted 必须补配对终态：中断后走续跑，
+                    // 不会重放该工具块，缺 ToolEnded 会让 TUI 永久停在"进行中"。
+                    if let (Some(context), Some((tool_call_id, name))) = (&streaming, &active_tool)
+                    {
+                        context.event_bus.emit_render(RenderEvent::ToolEnded {
+                            turn_id: context.turn_id,
+                            agent_id: context.agent_id,
+                            tool_call_id: tool_call_id.clone(),
+                            name: name.clone(),
+                            output: "stream interrupted".to_string(),
+                            is_error: true,
+                            subagent_failure: None,
+                        });
+                    }
                     return Ok(reasoning);
                 }
                 Some(Err(error)) => return Err(map_model_error(error)),

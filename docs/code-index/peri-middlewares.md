@@ -148,7 +148,7 @@
 
 | 功能 | 入口/关键点 |
 | --- | --- |
-| 中间件 / 加载 | middleware.rs（HookMiddleware :46 / with_session_start :91）；loader.rs（:84/:176/:241） |
+| 中间件 / 加载 | middleware.rs（HookMiddleware :46 / with_session_start :91）；loader.rs（:84/:176/:245） |
 | 执行 / 匹配 / 护栏 | executor.rs（:19/:151/:211/:318）；matcher.rs（:10/:32）；action_resolver.rs（:20）；once_tracker.rs（:16）；stage_firing.rs（:12/:37）；stop_block_guard.rs（:28）；permission_gate.rs（:21）；types.rs（HookInput :14） |
 
 ### Workflow / Cron / LSP
