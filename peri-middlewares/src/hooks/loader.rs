@@ -238,8 +238,19 @@ pub fn load_settings_local_hooks(cwd: &str) -> Vec<RegisteredHook> {
 /// 从 `{cwd}/.claude/settings.json` 加载项目级 hooks 配置。
 ///
 /// 返回 `RegisteredHook` 列表，`plugin_name = "project-settings.json"`。
+///
+/// cwd 为用户主目录时（在 `~` 下启动 peri），`{cwd}/.claude/settings.json` 就是
+/// 用户级 `~/.claude/settings.json` 本身：该场景不存在「用户级 + 项目级」两层，
+/// 直接跳过——否则同一份 hooks 会注册成 global 与 project 两组而重复执行。
 pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
     let settings_path = Path::new(cwd).join(".claude").join("settings.json");
+    if is_user_settings_path(&settings_path) {
+        tracing::debug!(
+            "Skipping project hooks: {} is the user-level settings file",
+            settings_path.display()
+        );
+        return Vec::new();
+    }
     if !settings_path.exists() {
         tracing::debug!("No settings.json at {}", settings_path.display());
         return Vec::new();
@@ -298,6 +309,23 @@ pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
     );
 
     hooks
+}
+
+/// `path` 是否就是用户级 `~/.claude/settings.json`：字面相同，或经符号链接指向
+/// 同一文件（macOS `$HOME` 为链接、`/var` → `/private/var` 等）。无法确定主目录
+/// 时视为不是。
+fn is_user_settings_path(path: &Path) -> bool {
+    let Some(user_path) = dirs_next::home_dir().map(|h| h.join(".claude").join("settings.json"))
+    else {
+        return false;
+    };
+    if path == user_path {
+        return true;
+    }
+    matches!(
+        (std::fs::canonicalize(path), std::fs::canonicalize(&user_path)),
+        (Ok(path), Ok(user_path)) if path == user_path
+    )
 }
 
 #[cfg(test)]

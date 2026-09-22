@@ -51,14 +51,31 @@ pub fn set_global_config_path(path: Option<PathBuf>) {
         .unwrap_or_else(|e| e.into_inner()) = resolved;
 }
 
-/// 工作区配置路径探测：`{cwd}/.peri/settings.json` 存在时返回，否则 None。
-fn workspace_config_path_at(cwd: &Path) -> Option<PathBuf> {
+/// 工作区配置路径探测：`{cwd}/.peri/settings.json` 存在、且不是全局配置文件
+/// 本身时返回，否则 None。
+///
+/// 「同一文件」必须排除：cwd 为 home（在 `~` 下启动）时 `{cwd}/.peri/settings.json`
+/// 就是 `~/.peri/settings.json`，`--config-file` 指向 cwd 内文件时同理。该场景不
+/// 存在全局 + 工作区两层；若判为工作区模式，保存会按「只写相对全局基准的差异
+/// 字段」回写同一文件，把未改动字段（providers 凭据等）整份丢弃。
+fn workspace_config_path_at(cwd: &Path, global_path: &Path) -> Option<PathBuf> {
     let path = cwd.join(".peri").join("settings.json");
-    if path.exists() {
-        Some(path)
-    } else {
-        None
+    if !path.exists() || is_same_file(&path, global_path) {
+        return None;
     }
+    Some(path)
+}
+
+/// 同一文件判定：先字面比较，再按规范化真实路径比较（覆盖符号链接与相对路径
+/// 差异）。任一侧无法规范化（通常是不存在）时视为不同文件。
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    matches!(
+        (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+        (Ok(a), Ok(b)) if a == b
+    )
 }
 
 /// 基于进程当前目录的工作区配置路径探测（只读场景：main.rs 启动期 env 注入）。
@@ -67,7 +84,7 @@ fn workspace_config_path_at(cwd: &Path) -> Option<PathBuf> {
 /// 保证读写路径决策一致，不会漂移）。
 pub fn workspace_config_path() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    workspace_config_path_at(&cwd)
+    workspace_config_path_at(&cwd, &config_path())
 }
 
 /// 配置源——加载时一次性确定的「全局 + 工作区」布局与分层基准。
@@ -88,7 +105,7 @@ impl ConfigSource {
     /// 确定性构造：显式 cwd + 全局路径。测试直接调用，无需切换进程 cwd
     /// 或依赖进程级重定向。
     pub fn load_at(cwd: &Path, global_path: PathBuf) -> Result<Self> {
-        let workspace_path = workspace_config_path_at(cwd);
+        let workspace_path = workspace_config_path_at(cwd, &global_path);
         let global = load_from(&global_path)?;
         let workspace = workspace_path.as_deref().map(load_from).transpose()?;
         let mut merged = global.clone();
@@ -134,7 +151,7 @@ impl ConfigSource {
 
     /// 容错构造的确定性版本（显式 cwd + 全局路径），测试友好。
     pub fn load_at_lenient(cwd: &Path, global_path: PathBuf) -> Self {
-        let workspace_path = workspace_config_path_at(cwd);
+        let workspace_path = workspace_config_path_at(cwd, &global_path);
         let global = load_from(&global_path).unwrap_or_else(|e| {
             tracing::warn!(path = %global_path.display(), error = %e, "全局配置解析失败，按空配置继续");
             PeriConfig::default()
@@ -167,7 +184,8 @@ impl ConfigSource {
         self.workspace_path.as_deref()
     }
 
-    /// 当前是否为工作区生效模式（存在项目级 `.peri/settings.json`）
+    /// 当前是否为工作区生效模式（存在项目级 `.peri/settings.json`，且该文件
+    /// 不是全局配置文件本身——见 `workspace_config_path_at` 的同一文件排除）
     pub fn is_workspace(&self) -> bool {
         self.workspace_path.is_some()
     }
