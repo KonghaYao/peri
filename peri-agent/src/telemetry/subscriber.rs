@@ -1,6 +1,6 @@
 //! Tracing subscriber 初始化（带日志轮转）
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
@@ -20,6 +20,32 @@ impl Drop for TracingGuard {
     }
 }
 
+/// 解析日志落盘目标 `(目录, 文件名前缀)`。
+///
+/// `RUST_LOG_FILE` 为裸文件名（如 `peri.log`）时 `Path::parent()` 返回**空路径**而非
+/// `None`，直接当目录使用会让 `RollingFileAppender` 读取目录失败，并把
+/// `Error reading the log directory/files` 打进 stderr。目录必须始终保持为可读的
+/// 真实路径：空 parent 与无 parent 一律归一为当前目录。
+fn resolve_log_target(log_file: Option<&str>, service_name: &str) -> (PathBuf, String) {
+    let Some(path) = log_file else {
+        let directory = dirs_next::home_dir()
+            .map(|home| home.join(".peri").join("logs"))
+            .unwrap_or_else(std::env::temp_dir);
+        return (directory, service_name.to_string());
+    };
+
+    let path = Path::new(path);
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let file_prefix = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "agent-tui".to_string());
+    (directory, file_prefix)
+}
+
 /// 初始化 tracing，输出到日志文件（TUI 模式下避免干扰界面）。
 ///
 /// 日志使用 `tracing-appender` 按天轮转，保留最近 5 个轮转文件。
@@ -31,26 +57,7 @@ pub fn init_tracing(service_name: &str) -> TracingGuard {
         EnvFilter::new("info,peri_middlewares::mcp=warn,peri_middlewares::plugin=warn,rmcp=warn")
     });
 
-    let (log_dir, file_prefix) = match &log_file {
-        Some(path) => {
-            let p = Path::new(path);
-            let dir = p
-                .parent()
-                .map(|d| d.to_path_buf())
-                .unwrap_or_else(|| Path::new(".").to_path_buf());
-            let file_name = p
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "agent-tui".to_string());
-            (dir, file_name)
-        }
-        None => (
-            dirs_next::home_dir()
-                .map(|home| home.join(".peri").join("logs"))
-                .unwrap_or_else(std::env::temp_dir),
-            service_name.to_string(),
-        ),
-    };
+    let (log_dir, file_prefix) = resolve_log_target(log_file.as_deref(), service_name);
 
     std::fs::create_dir_all(&log_dir).unwrap_or_else(|error| {
         panic!("cannot create log directory {}: {error}", log_dir.display())
@@ -83,3 +90,7 @@ pub fn init_tracing(service_name: &str) -> TracingGuard {
 
     TracingGuard
 }
+
+#[cfg(test)]
+#[path = "subscriber_test.rs"]
+mod tests;
