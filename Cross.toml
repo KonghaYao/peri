@@ -1,28 +1,3 @@
-# ============================================================================
-# Cross-compilation configuration for ARM32 (arm-unknown-linux-gnueabihf)
-#
-# Toolchain: gcc-linaro-11.3.1-2022.06-x86_64_arm-linux-gnueabihf
-#   Extract to: /opt/gcc-linaro-11.3.1-2022.06-x86_64_arm-linux-gnueabihf/
-#
-# Usage with cross:
-#   cross build --target arm-unknown-linux-gnueabihf --release
-#
-# Or use the build script:
-#   TOOLCHAIN_ROOT=/opt/gcc-linaro-11.3.1-2022.06-x86_64_arm-linux-gnueabihf ./scripts/build-arm32.sh release
-
-[target.arm-unknown-linux-musleabihf]
-pre-build = [
-    # Install musl cross compilation toolchain
-    # On Ubuntu/Debian: apt-get install musl-tools arm-linux-gnueabihf-musl
-    # Or use Docker with: ghcr.io/messense/musl-cross-make:latest
-]
-
-[target.arm-unknown-linux-gnueabihf]
-pre-build = [
-    # For Docker-based cross: install ARM development libraries
-    # "apt-get update && apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf libssl-dev pkg-config",
-]
-
 [target.x86_64-unknown-linux-gnu]
 pre-build = [
     "apt-get update",
