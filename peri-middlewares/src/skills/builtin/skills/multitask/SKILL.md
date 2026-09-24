@@ -33,7 +33,7 @@ A deliverable you hand off — investigate → implement → verify — has exac
 - Verification belongs to the deliverable. Read the evidence your owner reports instead of re-running its verification. When a real gap appears, hand the gap back to that owner (`resume_thread_id`) — a gap that falls outside its original file scope is still the owner's to close, not yours.
 - Do not split one deliverable into roles that wait on each other.
 - Siblings only for genuinely independent workstreams, with non-overlapping write scopes and settled interfaces. You hold no files, and an owner's files are not yours to edit; wait, or hand ownership over explicitly.
-- Delegation is one level deep, so you alone add siblings. At the concurrency limit, wait for completion notifications instead of launching around it.
+- Delegation is one level deep, so you alone add siblings. Independent siblings run concurrently — launch them together and wait for their completion notifications instead of serializing the work or taking it back.
 
 Before handing off: does this work already have an owner, and does the file scope you are about to assign overlap a sibling's? Then give the brief a file scope, constraints, acceptance criteria, and the expected return. A launch acknowledgment is not delivery.
 
