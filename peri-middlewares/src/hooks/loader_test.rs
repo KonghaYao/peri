@@ -54,6 +54,67 @@ fn test_file_priority_over_manifest() {
 }
 
 #[test]
+fn test_wrapped_hooks_file_priority_over_manifest() {
+    let dir = tempdir().unwrap();
+    let hooks_dir = dir.path().join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    std::fs::write(
+        hooks_dir.join("hooks.json"),
+        r#"{
+            "description": "Claude Code 插件 hooks",
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "hooks": [{"type": "command", "command": "python3 recall.py", "timeout": 12}]
+                }]
+            }
+        }"#,
+    )
+    .unwrap();
+    let manifest = make_manifest_with_hooks(Some(HashMap::from([(HookEvent::Stop, vec![])])));
+
+    let result = extract_hooks(&manifest, dir.path()).unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(matches!(
+        &result[&HookEvent::UserPromptSubmit][0].hooks[0],
+        HookType::Command { command, timeout: Some(12), .. } if command == "python3 recall.py"
+    ));
+}
+
+#[test]
+fn test_empty_wrapped_hooks_override_manifest() {
+    let dir = tempdir().unwrap();
+    let hooks_dir = dir.path().join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    std::fs::write(hooks_dir.join("hooks.json"), r#"{"hooks": {}}"#).unwrap();
+    let manifest = make_manifest_with_hooks(Some(HashMap::from([(HookEvent::Stop, vec![])])));
+
+    assert!(extract_hooks(&manifest, dir.path()).unwrap().is_empty());
+}
+
+#[test]
+fn test_invalid_wrapped_hooks_fall_back_to_manifest() {
+    let dir = tempdir().unwrap();
+    let hooks_dir = dir.path().join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    let manifest = make_manifest_with_hooks(Some(HashMap::from([(HookEvent::Stop, vec![])])));
+
+    // 包装字段存在但无效时不能将整个对象当成旧格式，也不能误判为有效空配置。
+    for content in [
+        r#"{"hooks": null}"#,
+        r#"{"hooks": []}"#,
+        r#"{"hooks": {"SessionStart": "invalid"}}"#,
+        r#"{"hooks": {"Stop": [{"hooks": [{"type": "command"}]}]}}"#,
+    ] {
+        std::fs::write(hooks_dir.join("hooks.json"), content).unwrap();
+        let result = extract_hooks(&manifest, dir.path()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&HookEvent::Stop));
+        assert!(result[&HookEvent::Stop].is_empty());
+        assert!(extract_hooks(&make_manifest_with_hooks(None), dir.path()).is_none());
+    }
+}
+
+#[test]
 fn test_fallback_to_manifest_hooks() {
     let dir = tempdir().unwrap();
     // No hooks/hooks.json file

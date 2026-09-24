@@ -66,11 +66,39 @@ fn parse_hooks_value_tolerant(
 pub(crate) fn extract_hooks(manifest: &PluginManifest, install_path: &Path) -> Option<HooksConfig> {
     // Priority 1: hooks/hooks.json file
     let hooks_file = install_path.join("hooks").join("hooks.json");
-    if hooks_file.exists() {
-        if let Ok(content) = fs::read_to_string(&hooks_file) {
-            if let Ok(config) = serde_json::from_str::<HooksConfig>(&content) {
-                return Some(config);
+    let content = match fs::read_to_string(&hooks_file) {
+        Ok(content) => content,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %hooks_file.display(),
+                    error_kind = ?error.kind(),
+                    "无法读取插件 hooks 文件，回退到 manifest hooks"
+                );
             }
+            return manifest.hooks.clone();
+        }
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(&content).and_then(|mut value| {
+        // Claude Code 文件带 hooks 包装；保留旧版直接事件映射格式。
+        // 显式但无效的包装字段必须报错，不能回退为旧格式或空配置。
+        let hooks = value
+            .get_mut("hooks")
+            .map(serde_json::Value::take)
+            .unwrap_or(value);
+        serde_json::from_value::<HooksConfig>(hooks)
+    });
+    match parsed {
+        Ok(config) => return Some(config),
+        Err(error) => {
+            // serde 错误文本可能包含命令、URL 或凭据，只记录错误类别与位置。
+            tracing::warn!(
+                path = %hooks_file.display(),
+                category = ?error.classify(),
+                line = error.line(),
+                column = error.column(),
+                "插件 hooks 文件解析失败，回退到 manifest hooks"
+            );
         }
     }
 

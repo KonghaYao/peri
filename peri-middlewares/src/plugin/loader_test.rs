@@ -948,9 +948,46 @@ fn test_load_enabled_plugins_aggregated() {
     let settings = r#"{"enabledPlugins":["my-plugin@test"]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
+    // Hindsight 使用的包装格式；manifest 不声明 hooks，必须从约定文件加载。
+    std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+    std::fs::write(
+        plugin_dir.join("hooks/hooks.json"),
+        r#"{"hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/session_start.py\"", "timeout": 5}]}],
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/recall.py\"", "timeout": 12}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/retain.py\"", "timeout": 15, "async": true}]}],
+            "SessionEnd": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/session_end.py\"", "timeout": 10}]}]
+        }}"#,
+    )
+    .unwrap();
+
     let result = load_enabled_plugins_aggregated(dir.path(), None);
     assert_eq!(result.plugins.len(), 1);
     assert_eq!(result.plugins[0].name, "my-plugin");
+    assert!(result.plugins[0].hooks_config.is_some());
+    assert_eq!(result.all_hooks.len(), 4);
+    use crate::hooks::types::{HookEvent, HookType};
+    for (event, script, timeout, async_run) in [
+        (HookEvent::SessionStart, "session_start.py", 5, false),
+        (HookEvent::UserPromptSubmit, "recall.py", 12, false),
+        (HookEvent::Stop, "retain.py", 15, true),
+        (HookEvent::SessionEnd, "session_end.py", 10, false),
+    ] {
+        let hook = result
+            .all_hooks
+            .iter()
+            .find(|hook| hook.event == event)
+            .unwrap();
+        assert_eq!(hook.plugin_root, plugin_dir);
+        assert_eq!(hook.plugin_name, "my-plugin");
+        assert_eq!(hook.plugin_data_dir, plugin_dir.join(".claude-plugin/data"));
+        assert!(matches!(
+            &hook.hook,
+            HookType::Command { command, timeout: Some(actual_timeout), async_run: actual_async, .. }
+                if command == &format!("python3 \"${{CLAUDE_PLUGIN_ROOT}}/scripts/{script}\"")
+                    && *actual_timeout == timeout && *actual_async == async_run
+        ));
+    }
 }
 
 #[test]
