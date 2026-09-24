@@ -648,7 +648,7 @@ fn test_bash_description_extended() {
     assert!(desc.len() > 200, "description 应为扩展后的多段落文本");
 }
 
-/// timeout=0 表示不超时（前台/后台通用）；这里验证显式正超时下 echo 正常完成。
+/// `timeout: 0` 在前台被界到前台上限（不再表示不超时）；显式正超时按请求值生效。
 #[tokio::test]
 async fn test_bash_timeout_clamped_to_minimum() {
     let _process_env = crate::process_env::lock().expect("process env lock");
@@ -674,10 +674,18 @@ async fn test_bash_timeout_clamped_to_minimum() {
     );
 }
 
-/// 显式超时 600000 毫秒应被允许（上限）
+/// 显式超时 600000 毫秒被接受，但按前台上限 120000 执行（不再是无界/10 分钟）。
+/// 命令本身瞬时完成，因此这里只验证请求被接受且正常执行。
 #[tokio::test]
-async fn test_bash_timeout_maximum_accepted() {
+async fn test_bash_oversized_timeout_is_capped_by_foreground_maximum() {
     let _process_env = crate::process_env::lock().expect("process env lock");
+    assert_eq!(
+        peri_agent::agent::async_tasks::parse_foreground_timeout(
+            &serde_json::json!({"timeout": 600000})
+        ),
+        (FOREGROUND_MAX_TIMEOUT_MS, Some(600_000)),
+        "超过前台上限的请求必须界到上限"
+    );
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
         .invoke(
@@ -690,6 +698,135 @@ async fn test_bash_timeout_maximum_accepted() {
         .await
         .unwrap();
     assert!(result.contains("ok"));
+}
+
+/// `timeout: 0` 不能禁用同步超时：解析结果恒有界，请求仍走同步路径正常执行。
+#[tokio::test]
+async fn test_bash_sync_timeout_zero_is_bounded_by_foreground_maximum() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    assert_eq!(
+        peri_agent::agent::async_tasks::parse_foreground_timeout(
+            &serde_json::json!({"timeout": 0})
+        ),
+        (FOREGROUND_MAX_TIMEOUT_MS, Some(0)),
+        "timeout: 0 必须界到前台上限，不能表示不超时"
+    );
+    assert_eq!(
+        peri_agent::agent::async_tasks::parse_foreground_timeout(&serde_json::json!({})),
+        (
+            peri_agent::agent::async_tasks::FOREGROUND_DEFAULT_TIMEOUT_MS,
+            None
+        )
+    );
+
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let output = tool
+        .invoke_output(
+            serde_json::json!({"command": "echo bounded", "timeout": 0}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(output.text.contains("bounded"), "{}", output.text);
+    let evidence = output.execution.expect("sync evidence");
+    assert_eq!(evidence.status, ToolExecutionStatus::Completed);
+    assert_eq!(evidence.exit_code, Some(0));
+}
+
+/// 前台 `timeout: 0` 的真实上界（约 120s）：不早于前台上限 promote，
+/// 到上限后转后台并回传 task_id，取消时清理整个进程组。
+/// 需要约 2 分钟真实等待，故默认 `#[ignore]`；取证时用 `cargo test -- --ignored` 手动运行。
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "需要约 120s 真实等待（前台上限），手动运行"]
+async fn test_foreground_timeout_zero_promotes_at_foreground_maximum() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let registry = Arc::new(TaskManager::new());
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
+    let cap_secs = FOREGROUND_MAX_TIMEOUT_MS / 1000;
+
+    let start = Instant::now();
+    let err = tool
+        .invoke(
+            serde_json::json!({"command": "sh -c 'echo alive; sleep 600'", "timeout": 0}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    let elapsed = start.elapsed();
+
+    assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(
+        err.lines().any(|l| l.starts_with("task_id: ")),
+        "promote 应回传 task_id: {err}"
+    );
+    assert!(
+        err.contains("cannot disable the timeout"),
+        "应说明 `timeout: 0` 被界到前台上限: {err}"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(cap_secs - 2),
+        "不应早于前台上限 promote，实际 {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(cap_secs + 30),
+        "不应晚于前台上限太多，实际 {elapsed:?}"
+    );
+    assert_eq!(registry.active_count(), 1, "promote 后应注册为后台任务");
+    assert_eq!(
+        peri_acp_types::tasks::TaskManager::shutdown(registry.as_ref()).await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
+}
+
+/// 前台 timeout 被界到上限时的回执说明（`0` 与超上限两种请求）。
+#[test]
+fn test_foreground_timeout_note_explains_bounded_sync_requests() {
+    assert!(
+        foreground_timeout_note(None).is_empty(),
+        "未改写时不应附加说明"
+    );
+    let zero = foreground_timeout_note(Some(0));
+    assert!(zero.contains("cannot disable the timeout"), "{zero}");
+    assert!(
+        zero.contains(&FOREGROUND_MAX_TIMEOUT_MS.to_string()),
+        "{zero}"
+    );
+    let oversized = foreground_timeout_note(Some(600_000));
+    assert!(oversized.contains("600000"), "{oversized}");
+    assert!(oversized.contains("run_in_background"), "{oversized}");
+}
+
+/// 工具描述与实现一致：默认/上限取自常量，且不得再宣传"0 = 不超时"。
+#[test]
+fn test_bash_timeout_description_matches_implementation() {
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let schema = tool.parameters()["properties"]["timeout"]["description"]
+        .as_str()
+        .expect("timeout 参数描述")
+        .to_string();
+    for text in [tool.description().to_string(), schema] {
+        assert!(
+            text.contains(
+                &peri_agent::agent::async_tasks::FOREGROUND_DEFAULT_TIMEOUT_MS.to_string()
+            ),
+            "描述应写明前台默认超时: {text}"
+        );
+        assert!(
+            text.contains(&FOREGROUND_MAX_TIMEOUT_MS.to_string()),
+            "描述应写明前台上限: {text}"
+        );
+        assert!(
+            !text.contains("0 = no timeout") && !text.contains("disable the timeout entirely"),
+            "同步路径不得宣传 0 可禁用超时: {text}"
+        );
+        assert!(
+            !text.contains("timeout: 300000"),
+            "不得再建议超过前台上限的值: {text}"
+        );
+    }
 }
 
 #[test]
@@ -998,6 +1135,27 @@ async fn test_sync_timeout_promotes_to_background() {
         "Err 应含 pid 行: {err}"
     );
     assert!(err.contains("kill"), "Err 应说明 kill 方式: {err}");
+    assert!(
+        !err.contains("Note:"),
+        "未改写的请求不应附加界上限说明: {err}"
+    );
+    // 超时前已开始落盘的实时日志路径必须回传（promote 后继续追写）
+    let log_line = err
+        .lines()
+        .find(|l| l.contains("peri-foreground-shell-"))
+        .expect("Err 应含实时日志路径行");
+    let stdout_log = log_line
+        .split("Read the log file ")
+        .nth(1)
+        .expect("日志行应含 'Read the log file'")
+        .split(' ')
+        .next()
+        .expect("日志路径后应有空格")
+        .to_string();
+    assert!(
+        std::path::Path::new(&stdout_log).exists(),
+        "Err 回传的日志文件应已创建: {stdout_log}"
+    );
 
     // Err 中的 task_id 应与回调结果一致
     let task_id = err
@@ -1023,6 +1181,12 @@ async fn test_sync_timeout_promotes_to_background() {
     assert!(std::fs::read_to_string(files.stdout_path.as_ref().unwrap())
         .unwrap()
         .contains("done"));
+    assert!(
+        std::fs::read_to_string(&stdout_log)
+            .unwrap()
+            .contains("done"),
+        "promote 续跑的输出应写入回传的同一日志文件: {stdout_log}"
+    );
     assert!(!notif.to_notification().contains("done"));
     assert!(!notif.timed_out, "正常完成不应标记 timed_out");
 

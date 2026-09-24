@@ -4,7 +4,8 @@
 //! - `subagent/background_test.rs`（registry 全量用例，含 Shell pid 取消）
 //! - `process/process_test.rs`（shell_command 包装）
 //! - `tools/output_persist_test.rs` / `tools/output_truncate_test.rs`（落盘/截断）
-//! - `middleware/terminal_test.rs` 的 parse_timeout / bg_shell_task_id 用例
+//! - `middleware/terminal_test.rs` 的 parse_foreground/background_timeout /
+//!   bg_shell_task_id 用例
 //!
 //! 新增：per-session 实例化/销毁用例（`cancel_all` / 多实例隔离）。
 
@@ -46,20 +47,26 @@ async fn test_register_and_active_count() {
     assert_eq!(registry.active_count(), 1);
 }
 
+/// Agent 类后台任务（sub-agent）不设并发上限：第 N>3 个注册必须成功，
+/// 取消任意一个后计数按实际活动任务收敛。
 #[tokio::test]
-async fn test_max_concurrent_limit() {
+async fn test_agent_kind_registration_is_not_capped() {
     let registry = make_registry();
 
-    registry.register_with_kind(make_task("bg-1")).unwrap();
-    registry.register_with_kind(make_task("bg-2")).unwrap();
-    registry.register_with_kind(make_task("bg-3")).unwrap();
+    for i in 0..8 {
+        let mut task = make_task(&format!("bg-{}", i));
+        task.kind = BgTaskKind::Agent;
+        registry
+            .register_with_kind(task)
+            .unwrap_or_else(|e| panic!("第 {} 个 Agent 任务不应被拒绝: {}", i + 1, e));
+    }
+    assert_eq!(registry.active_count(), 8);
+    assert_eq!(registry.count_by_kind(BgTaskKind::Agent), 8);
 
-    let result = registry.register_with_kind(make_task("bg-4"));
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Kind concurrent limit reached"));
+    // 取消路径在无限额下仍逐条生效
+    registry.cancel("bg-3").unwrap();
+    assert_eq!(registry.active_count(), 7);
+    assert_eq!(registry.count_by_kind(BgTaskKind::Agent), 7);
 }
 
 #[tokio::test]
@@ -276,18 +283,28 @@ async fn test_register_with_kind_shell_limit() {
         .contains("Kind concurrent limit reached"));
 }
 
+/// Agent 类不限额：第 4 个及更多注册成功；Workflow 类保留独立上限（3）。
 #[tokio::test]
-async fn test_register_with_kind_agent_limit() {
+async fn test_register_with_kind_agent_unlimited_workflow_capped() {
     let registry = make_registry();
 
-    for i in 0..3 {
+    for i in 0..5 {
         let mut task = make_task(&format!("bg-agent-{}", i));
         task.kind = BgTaskKind::Agent;
+        registry
+            .register_with_kind(task)
+            .unwrap_or_else(|e| panic!("Agent 任务不应有并发上限: {}", e));
+    }
+    assert_eq!(registry.count_by_kind(BgTaskKind::Agent), 5);
+
+    for i in 0..BackgroundTaskRegistry::WORKFLOW_LIMIT {
+        let mut task = make_task(&format!("bg-wf-{}", i));
+        task.kind = BgTaskKind::Workflow;
         registry.register_with_kind(task).unwrap();
     }
 
-    let mut task = make_task("bg-agent-over");
-    task.kind = BgTaskKind::Agent;
+    let mut task = make_task("bg-wf-over");
+    task.kind = BgTaskKind::Workflow;
     let result = registry.register_with_kind(task);
     assert!(result.is_err());
     assert!(result
@@ -853,34 +870,68 @@ fn test_truncate_bytes_zero_max() {
     assert_eq!(truncate_bytes("hello", 0), "");
 }
 
-// ── bg shell 执行链纯函数（parse_timeout / bg_shell_task_id）─────────────────
+// ── bg shell 执行链纯函数（parse_foreground/background_timeout / bg_shell_task_id）──
 
-/// parse_timeout 纯函数语义：
-/// - 后台：未传 → None（不超时）；显式 0 → None；显式 >0 → clamp 到 [min, 600000]
-/// - 同步：未传 → Some(15000)；显式 0 → None；显式 >0 → clamp 到 [min, 600000]
-/// - min：Unix 为 1；Windows 为 5000（进程创建/终止开销大，过短超时不可靠）
+/// 前台 timeout 恒有界（禁止无界同步执行）：
+/// - 未传 → 默认 15000
+/// - 显式 0 → 前台上限 120000（`0` 不能被解释为"不超时"），原始请求值随结果回传
+/// - 显式 >上限 → 上限，原始请求值随结果回传
+/// - 其余 → 请求值，按平台下限兜底（Unix 1；Windows 5000）
 #[test]
-fn test_parse_timeout_semantics() {
+fn test_parse_foreground_timeout_is_always_bounded() {
     let min = if cfg!(target_os = "windows") { 5000 } else { 1 };
-    // 后台
-    assert_eq!(parse_timeout(&serde_json::json!({}), true), None);
     assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 0}), true),
+        parse_foreground_timeout(&serde_json::json!({})),
+        (FOREGROUND_DEFAULT_TIMEOUT_MS, None)
+    );
+    assert_eq!(
+        parse_foreground_timeout(&serde_json::json!({"timeout": 0})),
+        (FOREGROUND_MAX_TIMEOUT_MS, Some(0)),
+        "timeout: 0 必须界到前台上限，不能禁用超时"
+    );
+    assert_eq!(
+        parse_foreground_timeout(&serde_json::json!({"timeout": 600_000})),
+        (FOREGROUND_MAX_TIMEOUT_MS, Some(600_000))
+    );
+    assert_eq!(
+        parse_foreground_timeout(&serde_json::json!({"timeout": 2_000_000})),
+        (FOREGROUND_MAX_TIMEOUT_MS, Some(2_000_000))
+    );
+    assert_eq!(
+        parse_foreground_timeout(&serde_json::json!({"timeout": 2000})),
+        (2000.max(min), None)
+    );
+    // 非法值（字符串/负数/小数/null）按未传处理，同样有界
+    for invalid in [
+        serde_json::json!({"timeout": "1000"}),
+        serde_json::json!({"timeout": -5}),
+        serde_json::json!({"timeout": 1.5}),
+        serde_json::json!({"timeout": null}),
+    ] {
+        assert_eq!(
+            parse_foreground_timeout(&invalid),
+            (FOREGROUND_DEFAULT_TIMEOUT_MS, None)
+        );
+    }
+}
+
+/// 后台 timeout 语义（不阻塞 Agent，允许"不超时"）：
+/// - 未传 / 显式 0 → None；显式 >0 → clamp 到 [min, 600000]
+#[test]
+fn test_parse_background_timeout_semantics() {
+    let min = if cfg!(target_os = "windows") { 5000 } else { 1 };
+    assert_eq!(parse_background_timeout(&serde_json::json!({})), None);
+    assert_eq!(
+        parse_background_timeout(&serde_json::json!({"timeout": 0})),
         None
     );
     assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 2000}), true),
+        parse_background_timeout(&serde_json::json!({"timeout": 2000})),
         Some(2000.max(min))
     );
-    // 同步
-    assert_eq!(parse_timeout(&serde_json::json!({}), false), Some(15_000));
     assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 0}), false),
-        None
-    );
-    assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 2000000}), false),
-        Some(600_000)
+        parse_background_timeout(&serde_json::json!({"timeout": 999_999})),
+        Some(BACKGROUND_MAX_TIMEOUT_MS)
     );
 }
 

@@ -11,6 +11,10 @@
 //! 执行链固定为 `BashTool → TaskRegistry → BashTasks`：三个环节都在**本进程内**，
 //! 任务表直接持有子进程句柄（单进程本机执行，无独立执行进程）。
 //!
+//! 前台（同步）执行**恒有界**：默认 15s、硬上限 120s，`timeout: 0` 与超过上限的请求
+//! 都界到上限（源 `parse_foreground_timeout`，见 [`limits::parse_timeout`]）；到达上限
+//! 不杀进程，而是提升为后台任务并在回执里回传 `task_id` / `pid` / 实时日志路径。
+//!
 //! `structuredContent` 的投影不变量：`ok == !isError`（成功分支 `ok: true`，
 //! 错误分支 `ok: false`，并附 `error` 文本）。`status` 是**调用级**状态
 //! （`completed` = 本次调用拿到终态；`running` = 本次调用返回了一个仍在跑的任务），
@@ -33,9 +37,10 @@ use crate::tasks::registry::{task_resource_uri, BashRun, BashRunArgs, BashRunErr
 use crate::wire::{RequestContext, StructuredOutput, ToolResponse};
 
 pub use limits::{
-    exceeds_limits, host_projection_note, merge_output, parse_timeout, persist_partial_output,
-    truncate_bytes, truncate_output, TruncatedOutput, DEFAULT_FOREGROUND_TIMEOUT_MS,
-    HOST_OUTPUT_CHAR_LIMIT, MAX_OUTPUT_CHARS, MAX_OUTPUT_LINES, MAX_TIMEOUT_MS, MIN_TIMEOUT_MS,
+    exceeds_limits, foreground_timeout_note, host_projection_note, merge_output, parse_timeout,
+    persist_partial_output, truncate_bytes, truncate_output, TruncatedOutput,
+    DEFAULT_FOREGROUND_TIMEOUT_MS, HOST_OUTPUT_CHAR_LIMIT, MAX_BACKGROUND_TIMEOUT_MS,
+    MAX_FOREGROUND_TIMEOUT_MS, MAX_OUTPUT_CHARS, MAX_OUTPUT_LINES, MIN_TIMEOUT_MS,
 };
 
 /// `Bash` 的三字段输入（解析结果）。
@@ -43,7 +48,8 @@ pub use limits::{
 pub struct BashArgs {
     /// 原始命令。
     pub command: String,
-    /// 解析后的 timeout（毫秒）：前台默认 15000，`0` = 不超时；后台缺省不超时。
+    /// 解析后的 timeout（毫秒）：前台恒有界（未传 15000、`0` 与超上限都界到 120000）；
+    /// 后台缺省不超时（`None`）。
     pub timeout_ms: Option<u64>,
     /// 是否显式后台。
     pub background: bool,
@@ -127,7 +133,13 @@ impl BashTool {
                 promoted: true,
             }) => {
                 // 前台超时提升：源以 tool error 返回，进程继续存活。
-                let text = promotion_message(&command, timeout_ms, &state, self.persist().as_ref());
+                let text = promotion_message(
+                    &command,
+                    timeout_ms,
+                    &foreground_timeout_note(arguments),
+                    &state,
+                    self.persist().as_ref(),
+                );
                 error_response(text, Some((*snapshot, *state)))
             }
             Err(BashRunError::ConcurrentLimit { limit }) => error_response(
@@ -138,6 +150,7 @@ impl BashTool {
                 let text = promotion_failure_message(
                     &command,
                     timeout_ms,
+                    &foreground_timeout_note(arguments),
                     &state,
                     &reason,
                     self.persist().as_ref(),
@@ -203,9 +216,11 @@ fn background_message(snapshot: &crate::wire::TaskSnapshot, state: &BashTaskStat
 }
 
 /// 前台超时提升文本（源两版：有输出 / 无输出）。
+/// `timeout_note` 为请求被界到上限时的回执说明（源 `foreground_timeout_note`）。
 fn promotion_message(
     command: &str,
     timeout_ms: Option<u64>,
+    timeout_note: &str,
     state: &BashTaskState,
     persist: &dyn OutputPersist,
 ) -> String {
@@ -223,11 +238,11 @@ fn promotion_message(
 
     if has_output {
         format!(
-            "Command timed out after {seconds:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.\n- Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}"
+            "Command timed out after {seconds:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.\n- Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}"
         )
     } else {
         format!(
-            "Command timed out after {seconds:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).\nIf it does not complete on its own, terminate it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}"
+            "Command timed out after {seconds:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).\nIf it does not complete on its own, terminate it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}"
         )
     }
 }
@@ -236,6 +251,7 @@ fn promotion_message(
 fn promotion_failure_message(
     command: &str,
     timeout_ms: Option<u64>,
+    timeout_note: &str,
     state: &BashTaskState,
     reason: &str,
     persist: &dyn OutputPersist,
@@ -249,7 +265,7 @@ fn promotion_failure_message(
     let partial = merge_output(&state.stdout, &state.stderr, None);
     let partial_hint = persist_partial_output(&partial, persist).hint;
     format!(
-        "Command timed out after {seconds:.1}s and could not be promoted to a background task: {reason}. The process group has been terminated.\n{ps_line}\n{partial_hint}\nCommand that timed out: {command}"
+        "Command timed out after {seconds:.1}s and could not be promoted to a background task: {reason}. The process group has been terminated.\n{ps_line}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}"
     )
 }
 

@@ -383,23 +383,50 @@ pub fn bg_shell_task_id() -> String {
     format!("shell-{}", uuid::Uuid::now_v7())
 }
 
-/// 解析 timeout 参数（None = 不超时）。
+/// 前台（同步）未传 timeout 时的默认超时：偏短，鼓励高效命令。
+pub const FOREGROUND_DEFAULT_TIMEOUT_MS: u64 = 15_000;
+
+/// 前台（同步）最大阻塞时长（硬上限）：显式 timeout 与 `timeout: 0` 都界到此值。
+/// 同步执行恒有界——不存在禁用超时的路径；到达上限后进程不杀，
+/// 而是 promote 为后台任务续跑（见 `BashTool::invoke_output`）。
+pub const FOREGROUND_MAX_TIMEOUT_MS: u64 = 120_000;
+
+/// 后台显式 timeout 的上限（后台不阻塞 Agent，允许更长的显式上限）。
+pub const BACKGROUND_MAX_TIMEOUT_MS: u64 = 600_000;
+
+/// 显式 timeout 的下限：Windows 进程创建/终止开销大，过短超时不可靠。
+fn min_timeout_ms() -> u64 {
+    if cfg!(target_os = "windows") {
+        5_000
+    } else {
+        1
+    }
+}
+
+/// 解析前台（同步）timeout：结果恒为有界值。
 ///
-/// - **后台**：未传 → None（默认不超时，与"后台"语义一致）；显式 0 → None；
-///   显式 >0 → clamp 到 [min, 600_000]
-/// - **同步**：未传 → Some(15_000)；显式 0 → None；显式 >0 → clamp
-pub fn parse_timeout(input: &serde_json::Value, is_background: bool) -> Option<u64> {
-    let min = if cfg!(target_os = "windows") { 5000 } else { 1 };
+/// 返回 `(生效毫秒, 请求值被改写时的原始值)`：
+/// - 未传 → [`FOREGROUND_DEFAULT_TIMEOUT_MS`]，未改写
+/// - 显式 `0` → [`FOREGROUND_MAX_TIMEOUT_MS`]（`0` 不能表示"不超时"），原始值为 `Some(0)`
+/// - 显式 > [`FOREGROUND_MAX_TIMEOUT_MS`] → 上限值，原始值为请求值（供回执说明）
+/// - 其余 → 请求值，并按平台下限兜底（Unix 1ms / Windows 5000ms）
+pub fn parse_foreground_timeout(input: &serde_json::Value) -> (u64, Option<u64>) {
     match input.get("timeout").and_then(|v| v.as_u64()) {
-        None => {
-            if is_background {
-                None
-            } else {
-                Some(15_000)
-            }
-        }
-        Some(0) => None,
-        Some(ms) => Some(ms.clamp(min, 600_000)),
+        None => (FOREGROUND_DEFAULT_TIMEOUT_MS, None),
+        Some(0) => (FOREGROUND_MAX_TIMEOUT_MS, Some(0)),
+        Some(ms) if ms > FOREGROUND_MAX_TIMEOUT_MS => (FOREGROUND_MAX_TIMEOUT_MS, Some(ms)),
+        Some(ms) => (ms.max(min_timeout_ms()), None),
+    }
+}
+
+/// 解析后台 timeout：`None` = 不超时（后台语义：跑完为止，由 Tasks 面板取消）。
+///
+/// - 未传 / 显式 `0` → None
+/// - 显式 >0 → clamp 到 [min, `BACKGROUND_MAX_TIMEOUT_MS`]
+pub fn parse_background_timeout(input: &serde_json::Value) -> Option<u64> {
+    match input.get("timeout").and_then(|v| v.as_u64()) {
+        None | Some(0) => None,
+        Some(ms) => Some(ms.clamp(min_timeout_ms(), BACKGROUND_MAX_TIMEOUT_MS)),
     }
 }
 

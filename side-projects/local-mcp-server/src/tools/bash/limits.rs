@@ -23,8 +23,14 @@ pub const MAX_OUTPUT_LINES: usize = 2_000;
 /// 前台默认 timeout（毫秒）。
 pub const DEFAULT_FOREGROUND_TIMEOUT_MS: u64 = 15_000;
 
-/// timeout 上限（毫秒）。
-pub const MAX_TIMEOUT_MS: u64 = 600_000;
+/// 前台（同步）最大阻塞时长（硬上限）：显式 timeout 与 `timeout: 0` 都界到此值。
+/// 同步执行恒有界——前台不存在禁用超时的路径；到达上限后进程不杀，而是提升
+/// （promote）为后台任务续跑（源 `FOREGROUND_MAX_TIMEOUT_MS`）。
+pub const MAX_FOREGROUND_TIMEOUT_MS: u64 = 120_000;
+
+/// 后台显式 timeout 的上限（毫秒）；后台不阻塞调用方，因此允许更长的显式上限
+/// （源 `BACKGROUND_MAX_TIMEOUT_MS`）。
+pub const MAX_BACKGROUND_TIMEOUT_MS: u64 = 600_000;
 
 /// 宿主（Peri Agent 层）投影的字符上限；本实现只登记不执行。
 pub const HOST_OUTPUT_CHAR_LIMIT: usize = 10_000;
@@ -175,11 +181,38 @@ pub fn persist_partial_output(output: &str, persist: &dyn OutputPersist) -> Pers
     persist.persist_partial(output)
 }
 
-/// 解析 `timeout` 参数（源：`async_tasks::shell::parse_timeout`）。
+/// 前台请求被改写的原始值（`None` = 未改写）；供超时回执说明使用。
+/// 同步执行没有禁用超时的路径：`0` 与超过上限的请求都按上限执行。
+fn foreground_timeout_adjusted_from(input: &Value) -> Option<u64> {
+    match input.get("timeout").and_then(|value| value.as_u64()) {
+        Some(0) => Some(0),
+        Some(ms) if ms > MAX_FOREGROUND_TIMEOUT_MS => Some(ms),
+        _ => None,
+    }
+}
+
+/// 前台 timeout 请求被界到上限时的回执说明（未改写时为空串）。
+/// 源 `terminal.rs::foreground_timeout_note` 逐字迁移。
+pub fn foreground_timeout_note(input: &Value) -> String {
+    match foreground_timeout_adjusted_from(input) {
+        None => String::new(),
+        Some(0) => format!(
+            "\n- Note: `timeout: 0` cannot disable the timeout on the synchronous path; it was treated as the foreground maximum ({MAX_FOREGROUND_TIMEOUT_MS}ms)."
+        ),
+        Some(requested) => format!(
+            "\n- Note: the requested timeout ({requested}ms) exceeds the foreground maximum ({MAX_FOREGROUND_TIMEOUT_MS}ms); synchronous execution is capped there. Use `run_in_background: true` for work that needs longer."
+        ),
+    }
+}
+
+/// 解析 `timeout` 参数（源：`async_tasks::shell` 的 `parse_foreground_timeout` /
+/// `parse_background_timeout`）。
 ///
+/// - 前台（同步）恒有界，返回值恒为 `Some`：未传 → `Some(15000)`；显式 `0` →
+///   `Some(120000)`（`0` 不能表示"不超时"）；显式 `> 120000` → `Some(120000)`；
+///   其余 → 请求值并按平台下限兜底（Unix 1ms / Windows 5000ms）
 /// - 后台：未传或显式 `0` → `None`（不超时）；显式 `>0` → clamp 到
-///   `[MIN_TIMEOUT_MS, MAX_TIMEOUT_MS]`
-/// - 前台：未传 → `Some(15000)`；显式 `0` → `None`；显式 `>0` → clamp
+///   `[MIN_TIMEOUT_MS, MAX_BACKGROUND_TIMEOUT_MS]`
 /// - 非数值/负数按"未传"处理（`as_u64` 语义与源一致：字符串、`null`、负数都取不到值）
 pub fn parse_timeout(input: &Value, is_background: bool) -> Option<u64> {
     match input.get("timeout").and_then(|value| value.as_u64()) {
@@ -190,7 +223,19 @@ pub fn parse_timeout(input: &Value, is_background: bool) -> Option<u64> {
                 Some(DEFAULT_FOREGROUND_TIMEOUT_MS)
             }
         }
-        Some(0) => None,
-        Some(ms) => Some(ms.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)),
+        Some(0) => {
+            if is_background {
+                None
+            } else {
+                Some(MAX_FOREGROUND_TIMEOUT_MS)
+            }
+        }
+        Some(ms) => {
+            if is_background {
+                Some(ms.clamp(MIN_TIMEOUT_MS, MAX_BACKGROUND_TIMEOUT_MS))
+            } else {
+                Some(ms.clamp(MIN_TIMEOUT_MS, MAX_FOREGROUND_TIMEOUT_MS))
+            }
+        }
     }
 }
