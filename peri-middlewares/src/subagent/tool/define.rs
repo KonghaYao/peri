@@ -137,7 +137,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "Set to true to run the sub-agent in the background. The main agent continues immediately and receives a notification when the background task completes. Maximum 3 concurrent background tasks"
+                    "description": "Set to true to run the sub-agent in the background. The main agent continues immediately and receives a notification when the background task completes. No fixed limit on concurrent background tasks"
                 },
                 "cwd": {
                     "type": "string",

@@ -46,10 +46,11 @@ pub(super) fn parent_thread_id_of(parent: Option<&Arc<Session>>) -> Option<Strin
 /// 7. Sync：直接 run_react_loop；Background：tokio::spawn + TaskManager 注册
 /// 8. 收尾：update_thread_status（done/cancelled/error）+ 事件 + hook 闭包
 ///
-/// 并发限制（Background 最多 3 个活跃任务）：不做入口预检，由注册阶段的
-/// `register_with_kind`（per-kind 上限）如实返回注册失败——与迁移前一致，
-/// 预检（若有）位于调用方（llm_factory 之前），保证「预检 → 装配 → 注册」
-/// 的确定性窗口不被重复预检破坏（S3.1 幽灵任务回归测试依赖此结构）。
+/// 并发限制：Agent 类后台任务不设上限（shell/workflow 的 kind 上限无关本路径），
+/// 故不做入口预检，由注册阶段的 `register_with_kind` 如实返回注册失败——失败仅
+/// 剩 session execution scope 关闭一类路径，错误语义与迁移前一致（"Failed to
+/// register"）。预检（若有）位于调用方（llm_factory 之前），保证「预检 → 装配 →
+/// 注册」的确定性窗口不被重复预检破坏（S3.1 幽灵任务回归测试依赖此结构）。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_subagent_impl(
     parent: Option<&Arc<Session>>,
@@ -96,9 +97,9 @@ pub(super) async fn spawn_subagent_impl(
         frozen_date: frozen_date_cfg,
     } = config;
 
-    // 并发限制由注册阶段兜底（register_with_kind per-kind 上限，错误如实返回），
-    // 不在入口预检：middlewares 路径的预检位于 llm_factory 之前（execute_bg.rs），
-    // 保证并发竞态窗口内错误语义与迁移前一致（"Failed to register"，S3.1）。
+    // 注册失败由注册阶段兜底（register_with_kind 如实返回错误——Agent 类无并发
+    // 上限，失败仅剩 scope 关闭一类），不在入口预检：保证并发竞态窗口内错误语义
+    // 与迁移前一致（"Failed to register"，S3.1）。
 
     // 2. 生成标识符
     let child_thread_id = uuid::Uuid::now_v7().to_string();

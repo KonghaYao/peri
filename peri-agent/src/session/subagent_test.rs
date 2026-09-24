@@ -1776,17 +1776,22 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
     .expect("bg 任务应在超时前完成");
 }
 
-/// bg resume 注册失败回滚（review MEDIUM-1，路径 2：register_with_kind 撞
-/// per-kind 上限 AGENT_LIMIT=3）→ Err 携带 thread_id + status 回滚至原值
+/// bg resume 不受 Agent 类并发上限阻挡（原 AGENT_LIMIT=3 已移除）：已有 5 个
+/// Agent 任务在跑时，第 6 个后台恢复仍必须成功、正常收尾 done，且既有条目不被
+/// 丢弃/改写。
 #[tokio::test]
-async fn test_resume_subagent_bg_register_cap_rolls_back() {
+async fn test_resume_subagent_bg_beyond_previous_agent_cap() {
     let store = Arc::new(MockThreadStore::new());
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
+    store
+        .append_messages(&thread_id, &[BaseMessage::human("task")])
+        .await
+        .unwrap();
 
     let task_manager = Arc::new(TaskManager::new());
-    // 预注册 3 个 Agent 占位任务，占满 per-kind 上限
-    for i in 0..3 {
+    // 5 个在跑 Agent 任务（>3，覆盖已取消的上限）
+    for i in 0..5 {
         task_manager
             .register_with_kind(BackgroundTask {
                 id: format!("placeholder-{}", i),
@@ -1802,8 +1807,74 @@ async fn test_resume_subagent_bg_register_cap_rolls_back() {
                 output_preview: None,
                 agent_inbox: None,
             })
-            .expect("占位任务注册应成功");
+            .expect("占位任务注册应成功（Agent 类不限额）");
     }
+    assert_eq!(task_manager.active_count(), 5);
+
+    let config = resume_config_with(
+        store.clone(),
+        thread_id.clone(),
+        Box::new(EchoLLM),
+        SubagentRunMode::Background,
+        Some(Arc::clone(&task_manager)),
+        None,
+    );
+    let spawned = SessionFactory::resume_subagent(None, config)
+        .await
+        .expect("超过 3 个在跑任务时 bg 恢复不得被拒绝");
+    assert_eq!(spawned.child_thread_id, thread_id);
+    let task_id = spawned.task_id.expect("bg 模式必须有 task_id");
+    assert!(task_id.starts_with("bg-"), "task_id 格式 bg-{{uuid}}");
+
+    // 任务完成：status done；registry 收敛回 5 个占位任务（无泄漏/无丢弃）
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if store.statuses.read().last().map(|(_, s)| s.as_str()) == Some("done") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("bg 任务应在超时前完成");
+    assert_eq!(
+        task_manager.active_count(),
+        5,
+        "完成的任务移除后仅剩占位任务"
+    );
+    assert!(
+        task_manager
+            .list_tasks()
+            .iter()
+            .all(|(id, _, _)| id.starts_with("placeholder-")),
+        "既有占位条目不得被改写"
+    );
+}
+
+/// bg resume 执行权前置失败：session execution scope 已关闭时，恢复在 claim
+/// （写 active）之前被拒——不产生执行，也不留下 active 脏状态。
+///
+/// 历史：本用例原以 `register_with_kind` 撞 per-kind 上限（AGENT_LIMIT=3）制造
+/// 注册失败；Agent 类后台任务取消并发上限后（放开并行委派），该类注册失败不复
+/// 存在，改用 scope 关闭作为可确定复现的执行前失败。执行前失败回滚（active →
+/// 原值）的完整契约由 `test_resume_subagent_bg_registration_failure_rolls_back`
+/// 覆盖（task_manager 缺失路径）。
+#[tokio::test]
+async fn test_resume_subagent_bg_scope_closed_rejected_before_claim() {
+    use peri_acp_types::tasks::TaskManager as _;
+    use peri_acp_types::tasks::TaskShutdownReport;
+
+    let store = Arc::new(MockThreadStore::new());
+    let thread_id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(&store, &thread_id, None).await;
+
+    let task_manager = Arc::new(TaskManager::new());
+    // 关闭 session execution scope：恢复侧外部执行权申请被拒
+    assert_eq!(
+        task_manager.shutdown().await,
+        TaskShutdownReport::Complete,
+        "无在跑任务时空闲关闭应为 Complete"
+    );
 
     let config = resume_config_with(
         store.clone(),
@@ -1815,28 +1886,24 @@ async fn test_resume_subagent_bg_register_cap_rolls_back() {
     );
     let err = resume_err(None, config).await;
     assert!(
-        err.contains(&thread_id),
-        "注册失败错误必须携带 thread_id，got: {}",
-        err
-    );
-    assert!(
-        err.contains("Failed to register"),
-        "错误须带注册失败原因，got: {}",
+        err.contains("closing"),
+        "错误须带执行前失败原因，got: {}",
         err
     );
 
-    // status 回滚至原值（done），未被 active 卡死
+    // claim 之前失败：thread 从未被写成 active，状态保持原值
     let meta = store.load_meta(&thread_id).await.unwrap();
     assert_eq!(
         meta.agent_status,
         AgentStatus::Done,
-        "注册失败必须回滚 status 至原值"
+        "执行前被拒不得改写 thread 状态"
     );
     {
         let statuses = store.statuses.read();
         let seq: Vec<&str> = statuses.iter().map(|(_, s)| s.as_str()).collect();
-        assert_eq!(seq, vec!["done", "active", "done"], "active 后回滚原值");
+        assert_eq!(seq, vec!["done"], "claim 之前失败不写 active");
     }
+    assert_eq!(task_manager.active_count(), 0, "不得留下后台任务条目");
 }
 
 #[path = "subagent/provenance_test.rs"]

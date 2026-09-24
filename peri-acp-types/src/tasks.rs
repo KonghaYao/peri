@@ -53,7 +53,7 @@ pub enum BgRegistryEvent {
 pub struct BgTaskRegistration {
     /// 任务标识（uuid7）。
     pub task_id: String,
-    /// 任务类别（按 kind 独立并发上限）。
+    /// 任务类别（Shell / Workflow 按 kind 独立并发上限；Agent 类不限额）。
     pub kind: BgTaskKind,
     /// 任务摘要（prompt_summary / 命令摘要）。
     pub summary: String,
@@ -136,8 +136,8 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     /// 当前活跃任务数（/bg 并发限制预检）。
     fn active_count(&self) -> usize;
 
-    /// 按类型注册任务（kind 独立并发上限；middleware 发起面调用，
-    /// 错误语义经 String 表达——并发上限 / 注册失败）。
+    /// 按类型注册任务（Shell / Workflow 有 kind 独立并发上限；Agent 类不限额；
+    /// middleware 发起面调用，错误语义经 String 表达——并发上限 / 注册失败）。
     fn register(&self, request: BgTaskRegistration) -> Result<(), String>;
 
     /// 标记任务完成（result 注入事件载荷）。

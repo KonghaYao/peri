@@ -36,7 +36,7 @@ Return format:
 
 Background execution (run_in_background: true):
 - Runs the sub-agent asynchronously while the main agent continues immediately.
-- Maximum 3 concurrent background tasks.
+- No fixed limit on concurrent background tasks.
 - The main agent will be notified when the task completes via a system message.
 - **Only use when you genuinely need to continue working while the sub-agent runs** (e.g., offloading a long-running code review while you proceed with other edits). For most cases, run sub-agents synchronously to integrate their results immediately.
 

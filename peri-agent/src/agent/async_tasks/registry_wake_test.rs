@@ -84,7 +84,10 @@ async fn test_registry_completion_claim_wins_cancel_and_duplicate_claim() {
     let registry = BackgroundTaskRegistry::new();
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     registry.set_event_sender(tx, "claim-test".to_string());
-    registry.register_with_kind(make_task("bg-claim")).unwrap();
+    // Agent 类不限额：用仍有独立上限的 Workflow 类验证「Completing 仍占用 kind 槽位」
+    let mut claimed = make_task("bg-claim");
+    claimed.kind = BgTaskKind::Workflow;
+    registry.register_with_kind(claimed).unwrap();
     assert!(matches!(
         events.try_recv().unwrap(),
         BgRegistryEvent::Started { .. }
@@ -107,11 +110,19 @@ async fn test_registry_completion_claim_wins_cancel_and_duplicate_claim() {
     );
 
     // Completing still consumes the per-kind slot until final settlement.
-    registry.register_with_kind(make_task("bg-2")).unwrap();
-    registry.register_with_kind(make_task("bg-3")).unwrap();
-    assert!(registry.register_with_kind(make_task("bg-4")).is_err());
+    for index in 1..BackgroundTaskRegistry::WORKFLOW_LIMIT {
+        let mut task = make_task(&format!("bg-wf-{index}"));
+        task.kind = BgTaskKind::Workflow;
+        registry.register_with_kind(task).unwrap();
+    }
+    let mut over = make_task("bg-wf-over");
+    over.kind = BgTaskKind::Workflow;
+    assert!(registry.register_with_kind(over).is_err());
     assert!(registry.complete("bg-claim", result("bg-claim")));
-    assert_eq!(registry.active_count(), 2);
+    assert_eq!(
+        registry.active_count(),
+        BackgroundTaskRegistry::WORKFLOW_LIMIT - 1
+    );
 }
 
 #[tokio::test]
