@@ -544,7 +544,9 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
 
     assert_eq!(started, 6, "6 个后台任务各 emit 一次 SubagentStarted");
     assert_eq!(stopped, 6, "6 个后台任务各 emit 一次 SubagentStopped");
-    assert_eq!(registry.active_count(), 4, "全部收尾后仅剩 4 占位任务");
+    // 事件到达 ≠ 状态已清理：生产顺序是 SubagentStopped → BackgroundTaskCompleted
+    // → registry.complete()（移除条目）→ cleanup guard 的 deregister。因此收到
+    // 完成通知后必须等清理收敛，才能断言 registry 状态。
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while deregistered.lock().unwrap().len() < 6 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -552,6 +554,14 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
     })
     .await
     .expect("6 个任务收尾都应 deregister active_agents");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while registry.active_count() != 4 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("全部收尾后 registry 应收敛回 4 个占位任务");
+    assert_eq!(registry.active_count(), 4, "全部收尾后仅剩 4 占位任务");
     assert!(
         registry
             .list_tasks()
