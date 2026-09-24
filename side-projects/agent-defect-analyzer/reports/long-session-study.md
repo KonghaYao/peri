@@ -274,13 +274,13 @@ bun run src/long_session_study.ts --min-messages 300   # 换口径重跑
 1. `interrupted by user`（用户取消）
 2. LLM 网络/流式错误（unity2.ai、opencode.ai 端点失败）
 3. `Max iterations exceeded (200)`（子 agent 死循环上限触发）
-4. `Maximum 3 concurrent background tasks reached`（后台并发上限 3）
+4. `Maximum 3 concurrent background tasks reached`（后台并发上限 3；2026-09-24 补注：该上限已移除，后台 subagent 并发不再有固定上限；Shell=5 / Workflow=3 仍保留）
 5. `cannot find agent definition 'code-reviewer'`（agent 定义缺失，配置漂移）
 6. `missing required parameter prompt`（派发参数不完整）
 
 ### 8.5 并行与节奏（时间口径）
 
-- **最大并行度：P50=1.5，max=3**（长会话）；基准 max=8。长会话很少超过 3 个并发——与"后台并发上限 3"一致（metrics 有撞限错误），且长会话以顺序/双路派发为主。
+- **最大并行度：P50=1.5，max=3**（长会话）；基准 max=8。长会话很少超过 3 个并发——与"后台并发上限 3"一致（metrics 有撞限错误；2026-09-24 补注：该上限已移除，后台 subagent 并发不再有固定上限；Shell=5 / Workflow=3 仍保留），且长会话以顺序/双路派发为主。
 - **派发相位（子 agent 创建时间，308 个，不受压缩影响）**：early（前 33% 时间）=193（63%）、mid=36（12%）、late=79（26%）。
   - **修正前的可见消息口径给出 late=0 的错误结论**——被压缩的后期派发全部丢失；时间口径揭示真实模式：**前期为主（探索+并行实现启动），中期稀疏，后期仍有四分之一派发**（收尾审查/验证）。
 - 连续派发间隔：P50=6 分钟、P90=45 分钟（max 903 分钟=隔夜续跑）——派发是"高频脉冲 + 长间隔"节奏。
@@ -295,7 +295,7 @@ bun run src/long_session_study.ts --min-messages 300   # 换口径重跑
 ### 8.7 机制信号（推演，未验证）
 
 1. 派发次数统计需以子 agent 线程表为准（消息压缩吞掉 34% 派发记录）——任何基于可见消息的"派发频率"研究都会系统性低估。
-2. 后台并发上限 3 与长会话并行度 P50=1.5 匹配，撞限错误存在但低频——上限设置与使用形态自洽。
+2. 后台并发上限 3 与长会话并行度 P50=1.5 匹配，撞限错误存在但低频——上限设置与使用形态自洽（2026-09-24 补注：该上限已移除，后台 subagent 并发不再有固定上限；Shell=5 / Workflow=3 仍保留）。
 3. `cannot find agent definition` 错误提示 agent 目录与派发代码存在配置漂移风险（低频，1 类）。
 
 ---

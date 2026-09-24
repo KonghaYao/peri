@@ -1,6 +1,6 @@
 # peri-agent 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-22（可见流中断的保留输出与有界续跑）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-24（Bash 同步执行有界化，前台/后台超时解析分离）
 > 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
 
 ## 架构速览
@@ -83,7 +83,7 @@
 | 子 Agent 创建入口与新 thread 注入 | session/subagent/factory.rs + factory/spawn.rs | `SessionFactory::spawn_subagent` / `spawn_subagent_impl`；公开入口不变，spawn 在新 thread 执行前持久化所选父 canonical payload/flags 快照；identity 和 fork prompt 仍属 child own |
 | 子 Agent 恢复与状态 claim | session/subagent/factory/resume.rs + factory/claim.rs | `resume_subagent_impl` / `ResumeClaim`；同一 worker 顺序完成 active 与终态写入；准备取消恢复旧状态（sync 返回原线程中断结果），sync 执行 Drop 写 cancelled，bg 注册成功后移交；继承快照/own payload/flags 的恢复与交叠校验全部受 claim 保护；保持 thread 身份与 own 尾部 tool-call 截断 |
 | 子 Agent 冻结派生与共享装配 | session/subagent/factory/context.rs | `inherited_frozen_context` / `derive_cancel_token` / `build_subagent_session_v2`；父值优先与 Cascade/Independent 派生一致，按 ancestor → own → flags 装载，再绑定 persistence；消息注入归调用流程 |
-| 后台任务管理（bg shell，易失不持久化） | agent/async_tasks/ | `TaskManager`（manager.rs:28，per-session 聚合）；`BackgroundTaskRegistry`（registry.rs:105）；shell 执行 `shell_command` / `kill_process_group` / `parse_timeout`（shell.rs:109/:25/:201）；根 async_tasks.rs 仅 re-export |
+| 后台任务管理（bg shell，易失不持久化） | agent/async_tasks/ | `TaskManager`（manager.rs:26，per-session 聚合）；`BackgroundTaskRegistry`（registry.rs:121）；shell 执行 `shell_command` / `kill_process_group` / `parse_foreground_timeout` / `parse_background_timeout`（shell.rs:285/:197/:413/:426）；超时常量 `FOREGROUND_DEFAULT_TIMEOUT_MS` / `FOREGROUND_MAX_TIMEOUT_MS`（shell.rs:387/:392）与 `BACKGROUND_MAX_TIMEOUT_MS`（:395）；根 async_tasks.rs 仅 re-export |
 | 改子 Agent typed failure / 后台投影 | `session/subagent/{types,run_sync,background}.rs` + `agent/stages/tool_dispatch/{execution,effective_dispatcher}.rs` | `SubagentFailure`；`run_sync_subagent`；`spawn_background_subagent`；`effective_tool_error_from_boxed`；`StageEffectiveToolDispatcher::dispatch{,_output}` | sync/background 保留 child thread identity；sync 结果经父 dispatch 的 ToolResult/BaseMessage，background 经 BackgroundTaskResult/to_notification；仅 ModelError 生成 safe diagnostic，取消仍单独终态；真实边界 fixture 置于 middleware subagent tool tests |
 | 改子 Agent 事件排空与终态顺序 | `session/subagent/{lifecycle,run_sync,background}.rs` + `agent/subagent_event_forwarder.rs` | `drain_subagent_events`；`spawn_subagent_event_forwarder_for_completion` | sync/background 关闭 producer 后 await owned forwarder，成功排空才提交 bridge Stop，随后按执行与转发结果发布可见 Stopped；JoinError/终态 bridge panic 不得掩盖为成功，已有模型错误和取消保持原分类；后台统一 Stopped → lifecycle hook/状态 → callback → registry complete；成功和协作取消在 callback 前发送 BackgroundTaskCompleted，错误保持仅经 callback/TaskManager 交付的既有契约。取消 drain 会 abort forwarder，不承诺强制 abort 排空，遥测可保持未完成；回归入口 `session::subagent::tests` / `session::subagent::lifecycle::tests` |
 | 中间件链装配 | session/factory.rs | `production_blueprint`（链序事实源，装配实现在 peri-middlewares/src/assembly.rs） |

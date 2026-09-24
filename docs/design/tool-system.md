@@ -70,7 +70,7 @@ graph TB
 
 **输出控制**：工具可声明输出处理偏好，系统在 `post_process_result` 中据此优化资源使用。
 
-- **超时**：`timeout()` 默认 120s，适用于 Read/Edit/Glob 等快速操作。Agent/Bash 等长时间运行工具返回 `None`，由内部自行管理超时。外层 dispatch 以此超时包裹工具执行。
+- **超时**：`timeout()` 默认 120s，适用于 Read/Edit/Glob 等快速操作。Agent/Bash 等长时间运行工具返回 `None`，由内部自行管理超时；Bash 同步路径同样恒有界——默认 15s、硬上限 120s，`timeout: 0` 与超上限请求都界到上限，到达上限后不杀进程而是提升为后台任务（后台路径未传或 `timeout: 0` 表示不超时）。外层 dispatch 以此超时包裹工具执行。
 - **截断**：`output_char_limit()` 声明输出字符数上限（`None` 表示不截断）。超出部分自动截断并标注省略量。避免大体积输出撑爆上下文、淹没其他工具结果。
 - **落盘**：`prefers_persist()` 返回 `true` 时，系统倾向于将结果写入临时文件，Transcript 仅保留引用。产生大输出的工具（如 Bash、WebFetch）适用此能力。Read 工具无需——文件内容本就从磁盘读取。
 
