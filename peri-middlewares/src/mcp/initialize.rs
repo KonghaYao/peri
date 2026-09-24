@@ -155,7 +155,9 @@ impl McpClientPool {
                         .await
                     }
                     Err(e) => {
-                        Self::insert_failed(&pool, name, format!("stdio 启动失败: {e}"));
+                        let err_str = super::client::redact_mcp_error(&e.to_string());
+                        tracing::warn!(server = %name, error = %err_str, "MCP stdio 启动失败");
+                        Self::insert_failed(&pool, name, format!("stdio 启动失败: {err_str}"));
                         continue;
                     }
                 },
@@ -277,6 +279,14 @@ impl McpClientPool {
                     }
                 }
                 Err(_) => {
+                    // 超时是面板上可见、日志里必须可查的失败：首次启动需装依赖的
+                    // stdio 服务器会在连接超时内完不成握手。
+                    tracing::warn!(
+                        server = %name,
+                        transport = if is_http { "http" } else { "stdio" },
+                        timeout_secs = timeout.as_secs(),
+                        "MCP 连接超时"
+                    );
                     Self::insert_failed(&pool, name, "连接超时".to_string());
                 }
             }
