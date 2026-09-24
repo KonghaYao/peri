@@ -138,8 +138,19 @@ impl Default for BackgroundTaskRegistry {
 
 impl BackgroundTaskRegistry {
     pub const SHELL_LIMIT: usize = 5;
-    pub const AGENT_LIMIT: usize = 3;
     pub const WORKFLOW_LIMIT: usize = 3;
+
+    /// per-kind 并发上限：`None` = 不限额。
+    ///
+    /// Agent 类（后台 sub-agent）不设上限——用户要求放开并行委派；取消其上限
+    /// 不改变 Shell / Workflow 的独立上限语义。
+    fn kind_limit(kind: BgTaskKind) -> Option<usize> {
+        match kind {
+            BgTaskKind::Shell => Some(Self::SHELL_LIMIT),
+            BgTaskKind::Workflow => Some(Self::WORKFLOW_LIMIT),
+            BgTaskKind::Agent => None,
+        }
+    }
 
     pub fn new() -> Self {
         let (activity_version, _) = tokio::sync::watch::channel(0_u64);
@@ -238,7 +249,7 @@ impl BackgroundTaskRegistry {
             .transpose()
     }
 
-    /// 按类型注册新任务（独立上限）
+    /// 按类型注册新任务（Shell / Workflow 有独立上限；Agent 不限额）
     pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
         let _admission = self
             .scope
@@ -252,32 +263,30 @@ impl BackgroundTaskRegistry {
         &self,
         task: BackgroundTask,
     ) -> Result<(), BackgroundRegistryError> {
-        let limit = match task.kind {
-            BgTaskKind::Shell => Self::SHELL_LIMIT,
-            BgTaskKind::Agent => Self::AGENT_LIMIT,
-            BgTaskKind::Workflow => Self::WORKFLOW_LIMIT,
-        };
+        let limit = Self::kind_limit(task.kind);
 
         let kind = task.kind;
         let task_id = task.id.clone();
         let summary = task.prompt_summary.clone();
 
         let mut tasks = self.tasks.lock();
-        let current = tasks
-            .values()
-            .filter(|t| is_active_status(&t.status) && t.kind == kind)
-            .count();
-        if current >= limit {
-            let kind_str = match kind {
-                BgTaskKind::Shell => "shell",
-                BgTaskKind::Agent => "agent",
-                BgTaskKind::Workflow => "workflow",
-            };
-            return Err(BackgroundRegistryError::KindConcurrentLimit {
-                kind: kind_str.to_string(),
-                current,
-                limit,
-            });
+        if let Some(limit) = limit {
+            let current = tasks
+                .values()
+                .filter(|t| is_active_status(&t.status) && t.kind == kind)
+                .count();
+            if current >= limit {
+                let kind_str = match kind {
+                    BgTaskKind::Shell => "shell",
+                    BgTaskKind::Agent => "agent",
+                    BgTaskKind::Workflow => "workflow",
+                };
+                return Err(BackgroundRegistryError::KindConcurrentLimit {
+                    kind: kind_str.to_string(),
+                    current,
+                    limit,
+                });
+            }
         }
 
         if !matches!(&task.cancel_handle, BgCancelHandle::Abort(_)) {

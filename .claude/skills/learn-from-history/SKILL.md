@@ -88,8 +88,8 @@ Read `manifest.json`，核对：
 调度规则：
 
 - 1 个 unit：同步执行；
-- 2 个以上独立 unit：可后台并行，最多 3 个；
-- 超过 3 个：分批启动，当前批次全部收到终态后再启动下一批；
+- 2 个以上独立 unit：可后台并行，无固定并发上限；
+- unit 较多时：分批启动，当前批次全部收到终态后再启动下一批；
 - agent 失败时优先 resume 原 child thread，不创建重复任务；
 - background 的 started/completed 通知不是通过证据，不轮询未完成结果。
 

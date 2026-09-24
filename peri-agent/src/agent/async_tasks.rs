@@ -33,9 +33,10 @@ pub use registry::{
 pub use shell::tee_pipe_with_output;
 pub use shell::{
     bg_shell_task_id, drain_pipe, finalize_bg_shell, kill_process_group,
-    kill_process_group_escalating, parse_timeout, persist_truncated_output,
-    persist_truncated_output_with_ref, shell_command, tee_pipe, truncate_bytes,
-    ShellExecutionGuard,
+    kill_process_group_escalating, parse_background_timeout, parse_foreground_timeout,
+    persist_truncated_output, persist_truncated_output_with_ref, shell_command, tee_pipe,
+    truncate_bytes, ShellExecutionGuard, BACKGROUND_MAX_TIMEOUT_MS, FOREGROUND_DEFAULT_TIMEOUT_MS,
+    FOREGROUND_MAX_TIMEOUT_MS,
 };
 pub use shell_output::{ShellOutputCapture, ShellOutputWriter};
 

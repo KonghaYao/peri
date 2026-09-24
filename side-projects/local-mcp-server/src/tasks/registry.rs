@@ -110,7 +110,8 @@ impl TaskRegistryConfig {
 pub struct BashRunArgs {
     /// 原始命令。
     pub command: String,
-    /// 解析后的 timeout（毫秒）：`None` = 不超时。
+    /// 解析后的 timeout（毫秒）：`None` = 不超时。工具入口（`BashTool`）只在
+    /// **后台**分支产生 `None`——前台解析结果恒有界（见 `tools::bash::limits::parse_timeout`）。
     pub timeout_ms: Option<u64>,
     /// 是否显式后台。
     pub background: bool,

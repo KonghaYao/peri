@@ -30,6 +30,10 @@ pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
         content: include_str!("skills/goal/SKILL.md"),
     },
     BuiltinSkill {
+        name: "multitask",
+        content: include_str!("skills/multitask/SKILL.md"),
+    },
+    BuiltinSkill {
         name: "programmatic-tool-calling",
         content: include_str!("skills/programmatic-tool-calling/SKILL.md"),
     },

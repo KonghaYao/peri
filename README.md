@@ -38,7 +38,7 @@ Plan delivery. Coordinate agents. Delegate tasks.
 <code>/ultracode</code>
 </td>
 <td width="33%" valign="top">
-<h3>03 / Multitask <small>(Coming soon)</small></h3>
+<h3>03 / Multitask <small>(Built-in)</small></h3>
 <strong>Delegate and keep talking.</strong>
 <p>Let agents work in the background while you stay in control.</p>
 <code>/multitask</code>

@@ -1,6 +1,6 @@
 # peri-middlewares 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-10（MCP client / Dynamic registry 职责拆分与路径校准）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-24（Bash 同步执行有界化；multitask 下沉为内置技能）
 > 依据：peri-middlewares/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/{mcp-multiplexing,middleware-system,workflow}.md、docs/reference/mcp-ecosystem.md、源码
 
 ## 架构速览
@@ -20,6 +20,7 @@
 | 改静态 MCP 执行目录 | `src/mcp/client.rs` + `src/mcp/client/transport.rs` + `src/mcp/{initialize,reconnect}.rs` | `bind_execution_cwd`、`spawn_stdio_transport` | pool 初始化固定执行 cwd，init/reconnect 都显式传给子进程，不继承宿主目录；不同会话不得重绑同一 pool |
 | 改 Bash 会话所有权 | `src/middleware/terminal.rs` + `peri-agent/src/agent/async_tasks/shell.rs` | `BashTool::execute`、`ShellExecutionGuard` | 前台命令、超时转后台共享一个外部执行 owner；`attach_owned` 将 Child 与 guard 一起移交，取消后显式 wait/reap 并确认进程组退出才释放 owner；回归见 `terminal_test.rs` 与 `peri-agent/src/agent/async_tasks/shutdown_test.rs` |
 | 改后台 Bash 清理提示 | `src/middleware/terminal.rs` + `descriptions/bash.md` | `background_cleanup_hint` | 显式后台、超时提升和残留后代共用平台提示：Linux/macOS 暴露 PGID 并停止整组，Windows 使用 taskkill /T；要求核验终态，不改变执行生命周期 |
+| 改 Bash 同步超时语义 | `src/middleware/terminal.rs` + `descriptions/bash.md` + `peri-agent/src/agent/async_tasks/shell.rs` | `parse_foreground_timeout` / `parse_background_timeout`、`FOREGROUND_DEFAULT_TIMEOUT_MS` / `FOREGROUND_MAX_TIMEOUT_MS` / `BACKGROUND_MAX_TIMEOUT_MS`、`BashTool::invoke_output` | 同步路径恒有界：默认 15000ms、硬上限 120000ms，`timeout: 0` 与超上限请求都界到上限（同步路径不存在禁用超时的表达）；到达上限不杀进程，提升（promotion）为后台任务并回传 task_id / pid / 实时日志路径；后台路径未传或 `timeout: 0` 表示不超时，显式正超时按平台下限（Unix 1ms / Windows 5000ms）与 600000ms 上限 clamp |
 | 改 Bash 超时提升后的输出交付 | `src/middleware/terminal.rs` + `peri-agent/src/agent/async_tasks/shell_output.rs` | `BashTool::invoke_output`、`ShellOutputCapture`、`tee_pipe_with_output` | 从原始 stdout/stderr 持续落盘，promotion 接管相同读任务和文件；内存预览有界，最终通过 typed 文件引用交付；真实 CLI 回归见 `peri-tui/tests/print_background_exit.rs` |
 | 改 hook 能力与上下文 | `peri-agent/src/middleware/{capabilities,trait}.rs` + 各 middleware `impl Middleware` | `BeforeAgentState` / `BeforeInputState` / `BeforeToolState` / `AfterToolState` / `AfterAgentState` / `BeforeModelState` / `CatalogState` / `StateView` | 输入替换只允许 before_agent / before_input；只读视图不泄漏 queue/catalog，MCP 通知/Goal/Stop/GitWatch 使用队列能力，ToolSearch 初始与 Reason 重绑使用 catalog/recall；能力适配不改变装配顺序或工具可见性 |
 | 改中间件链序 | 蓝本 `peri-agent/src/session/factory.rs`（`ChainSlot` :27、`production_blueprint` :95、`build_middleware_chain` :153）；装配 `peri-middlewares/src/assembly.rs` | `ProductionChainAssembler::assemble`（按 `blueprint: &[ChainSlot]` 唯一逐槽位 match，具体构造调用私有模块） | 顺序 = 行为契约禁止重排；增删/重排必须先以 `production_blueprint()` 的完整槽位序列与装配实现为准（ARC-MIDDLEWARE-001）；`MiddlewareChainAssembler` trait 在 factory.rs:139 |
@@ -65,7 +66,7 @@
 | 改 hooks 匹配 / 护栏 | `src/hooks/matcher.rs` + `stop_block_guard.rs` + `once_tracker.rs` + `permission_gate.rs` | `matches_matcher`（matcher.rs:10）/`matches_if_condition`（:32）；`StopBlockGuard`（stop_block_guard.rs:28，`on_block` :40 / `current_count` :69）；`OnceTracker`（once_tracker.rs:16，`was_fired` :44）；`needs_permission_dialog`（permission_gate.rs:21） | matcher + if 条件决定命中；stop block 连续计次并格式化反馈（`format_stop_block_feedback` :89）；once hook 只触发一次（`is_once_hook` :28）；hook 审批与 PermissionMiddleware 判定共用 permission_mode |
 | 改 goal/todo 自动完成提醒 | `src/goal_middleware.rs` + `src/middleware/todo.rs` + `src/completion_reminder.rs` | `GoalMiddleware::after_agent`；`TodoMiddleware::after_agent`；`CompletionReminder::admit/enqueue` | 两类共用准入与 canonical `SystemReminder → Defer → block_continue`；已有 block 优先，后台 Agent/Workflow/Shell 活跃时均不注入或强制续跑，goal 接续次数与紧迫感不增长；`AfterAgentState` 的只读活动能力复用 Receive 的 session `TaskManager::active_count`（Running/Completing），终态后恢复；业务解除条件、文案与 goal 三档紧迫感各自保留。回归见 `goal_middleware_test.rs`、`middleware/todo_test.rs`；goal controller 可用才装配，GoalTool 保持 deferred |
 | 改 AGENTS.md 注入 | `src/agents_md/mod.rs` | `AgentsMdMiddleware`（:22，`with_extra_paths` :45、`with_excludes` :51、`with_frozen_content` :61、`read_frozen_content` :84） | 会话创建时读取冻结（主 + 本地 CLAUDE.md/AGENTS.md，excludes 过滤），SubAgent 复用冻结内容；禁止中途重读（ARC-FROZEN-001，测试 `frozen_claude_md`） |
-| 改文件 / 终端 / Web / Todo / Image 工具 | `src/middleware/` | filesystem.rs（collect_tools :39）；terminal.rs（BashTool :21、TerminalMiddleware :480，collect_tools :534）；web.rs（WebMiddleware :7，WebFetchTool :38 / WebSearchTool :37）；todo.rs（TodoMiddleware :18，`new` 收 notify_tx :25）；image/（ImageMiddleware :26 + compressor.rs :30） | 纯工具提供器：collect_tools 注册 + 透传 is_direct；Bash 通过 `invoke_output` 产生 wait/background/timeout typed evidence，最终 10k projection 前持久化并携带 `output_ref`/`output_truncated`；Arc/Box wrappers 透传 typed output；Todo 带通知通道；Image 按 before_input 本批输入 ID 逐条处理 @image 附件转 ContentBlock::Image，逐张 blocking 读取以释放原始缓冲，保留既有附件块且不重读历史，以 `BeforeInputState` 的 `replace_message` 能力保持原消息 ID，首批和后续批次的 Agent runner 均在链结束后回写；空压缩管线借用原始字节，失败降级也不复制 |
+| 改文件 / 终端 / Web / Todo / Image 工具 | `src/middleware/` | filesystem.rs（collect_tools :39）；terminal.rs（BashTool :75、TerminalMiddleware :772，collect_tools :826）；web.rs（WebMiddleware :7，WebFetchTool :38 / WebSearchTool :37）；todo.rs（TodoMiddleware :18，`new` 收 notify_tx :25）；image/（ImageMiddleware :26 + compressor.rs :30） | 纯工具提供器：collect_tools 注册 + 透传 is_direct；Bash 通过 `invoke_output` 产生 wait/background/timeout typed evidence，最终 10k projection 前持久化并携带 `output_ref`/`output_truncated`；Arc/Box wrappers 透传 typed output；Todo 带通知通道；Image 按 before_input 本批输入 ID 逐条处理 @image 附件转 ContentBlock::Image，逐张 blocking 读取以释放原始缓冲，保留既有附件块且不重读历史，以 `BeforeInputState` 的 `replace_message` 能力保持原消息 ID，首批和后续批次的 Agent runner 均在链结束后回写；空压缩管线借用原始字节，失败降级也不复制 |
 | 改 agent 定义 / 默认 prompt / 归属注入 | `src/agent_define/` + `src/default_system_prompt/` + `src/at_mention/` + `src/attribution/` | `load_overrides`（agent_define/mod.rs:78，`candidate_paths` :45）；`DefaultSystemPromptMiddleware`（default_system_prompt/mod.rs:112，`sections` :127）/`LangMiddleware`（:159）；`AtMentionMiddleware`（at_mention/mod.rs:28）；`GitAttributionMiddleware`（attribution/mod.rs:42，`attribution_text` :62、`current_branch` :118） | 链第一组上下文注入器；agent 定义 overrides 同时供 DefaultSystemPrompt 与 SubAgent fork 复用；Lang 语言指令段持有者；AtMention 只处理本批用户输入的 @path，空批次不重读历史；attribution 按 model_name 生成归属文本，并以 null stdin、1 秒异步等待预算与 direct-child kill-on-drop 做 best-effort 分支漂移观测，等待超时后继续 agent |
 | 改装配输入端口实现 | `src/host_ports.rs` | `PluginManager`（:26，PluginManagerPort）、`SettingsHooksLoader`（:406，SettingsHooksPort）、`SkillsProvider`（:425，SkillsPort） | 3.0 批 2 波 2：插件加载 / 设置 hooks / skills provider 经端口注入 Agent 层装配面，本文件是端口实现方；其余端口（McpPoolPort / ToolSearchPort / WorkflowMiddlewarePort / CronSchedulerPort）实现在 Agent 层 session 工厂 |
 
@@ -96,7 +97,7 @@
 
 | 功能 | 入口/关键点 |
 | --- | --- |
-| 文件 / 终端 | filesystem.rs（collect_tools :39）；terminal.rs（BashTool :21、TerminalMiddleware :480） |
+| 文件 / 终端 | filesystem.rs（collect_tools :39）；terminal.rs（BashTool :75、TerminalMiddleware :772） |
 | Web / Todo / Image | web.rs（WebMiddleware :7）；todo.rs（TodoMiddleware :18）；image/（ImageMiddleware :26 + compressor） |
 
 ### MCP（src/mcp/）
@@ -128,6 +129,7 @@
 | 正文来源加载 | content.rs（`load`）；统一 builtin / 文件 / MCP 缓存读取，MCP 缺失不回退磁盘，来源标注只添加一次 |
 | 中间件 / 摘要 | mod.rs（SkillsMiddleware :104 / build_frozen_summary :267 / format_discovery_protocol :137 / global_config_path :28） |
 | 工具 | tools.rs（SkillTool :29 / DiscoverSkillsTool :114）；builtin/（BuiltinSkill :14 / parse_builtin_frontmatter :50） |
+| multitask（协作模式内置技能） | 正文 src/skills/builtin/skills/multitask/SKILL.md（`BUILTIN_SKILLS` 经 `include_str!` 注册，builtin/mod.rs:33）；原为项目级 `{cwd}/.claude/skills/multitask`，现下沉为编译期内置，仓库不再保留项目副本，来源标签由 project 变为 builtin（项目级同名副本仍会遮蔽 builtin 版本）；契约测试 src/skills/builtin_test.rs（`test_multitask_skill_is_registered_as_builtin` / `test_multitask_skill_discoverable_without_project_copy` / `test_multitask_skill_not_shadowed_by_project_directory`） |
 
 ### SubAgent（src/subagent/）
 

@@ -1,6 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::skills::{scan_skill_roots, SkillRoot, SkillSource, SkillsMiddleware};
+use tempfile::tempdir;
+
+use crate::skills::{
+    find_skill_in_list, scan_skill_roots, SkillRoot, SkillSource, SkillsMiddleware,
+};
 
 use super::{parse_builtin_frontmatter, BUILTIN_SKILLS};
 
@@ -334,6 +338,112 @@ fn test_ultra_task_skill_not_registered_or_discoverable() {
     assert!(
         !summary.contains("ultra-task"),
         "builtin 摘要不应暴露 ultra-task，实际: {summary}"
+    );
+}
+
+#[test]
+fn test_multitask_skill_is_registered_as_builtin() {
+    let skill = BUILTIN_SKILLS
+        .iter()
+        .find(|skill| skill.name == "multitask")
+        .expect("BUILTIN_SKILLS 应含 multitask");
+    let (name, aliases, description) =
+        parse_builtin_frontmatter(skill.content).expect("multitask frontmatter 应有效");
+
+    assert_eq!(name, "multitask");
+    assert!(aliases.is_empty());
+    assert!(description.contains("coordinator"));
+    assert!(description.contains("exactly one owner"));
+}
+
+#[test]
+fn test_multitask_skill_discoverable_without_project_copy() {
+    // 项目根为空目录（无本地 multitask 副本）时，仍须以 Builtin 来源被发现
+    let project = tempdir().unwrap();
+    let skills = scan_skill_roots(&[
+        SkillRoot {
+            path: project.path().to_path_buf(),
+            source: SkillSource::Project,
+            plugin_name: None,
+        },
+        SkillRoot {
+            path: PathBuf::new(),
+            source: SkillSource::Builtin,
+            plugin_name: None,
+        },
+    ]);
+
+    let multitask = skills
+        .iter()
+        .find(|skill| skill.name == "multitask")
+        .expect("项目无本地副本时 multitask 仍应可发现");
+    assert_eq!(multitask.source, SkillSource::Builtin);
+    assert_eq!(multitask.path, PathBuf::from("<builtin>/multitask"));
+    assert!(
+        SkillsMiddleware::build_summary(&skills).contains("- **multitask** [builtin]"),
+        "摘要应以 [builtin] 来源标签列出 multitask"
+    );
+
+    // SkillTool / 预加载走 find_skill_in_list → content::load 的 Builtin 分支
+    let (loaded, content) = find_skill_in_list(&skills, "multitask").expect("应能按名加载正文");
+    assert_eq!(loaded.source, SkillSource::Builtin);
+    assert!(content.contains("# Multitask Mode"));
+    assert!(content.contains("Independent siblings run concurrently"));
+}
+
+#[test]
+fn test_multitask_skill_not_shadowed_by_project_directory() {
+    // 仓库 .claude/skills 不得再保留 multitask 副本：项目来源会遮蔽 builtin 版本
+    let project_skills = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.claude/skills");
+    assert!(
+        !project_skills.join("multitask").exists(),
+        ".claude/skills/multitask 应已移除，避免项目级副本遮蔽 builtin"
+    );
+
+    let skills = scan_skill_roots(&[
+        SkillRoot {
+            path: project_skills,
+            source: SkillSource::Project,
+            plugin_name: None,
+        },
+        SkillRoot {
+            path: PathBuf::new(),
+            source: SkillSource::Builtin,
+            plugin_name: None,
+        },
+    ]);
+    let multitask = skills
+        .iter()
+        .find(|skill| skill.name == "multitask")
+        .expect("multitask 应可发现");
+    assert_eq!(
+        multitask.source,
+        SkillSource::Builtin,
+        "multitask 应统一来自 builtin，实际: {:?}",
+        multitask.source
+    );
+}
+
+#[test]
+fn test_multitask_skill_has_no_concurrency_limit_wording() {
+    // 后台 subagent 并发上限已移除，正文不得再引用上限或据其排队
+    let content = BUILTIN_SKILLS
+        .iter()
+        .find(|skill| skill.name == "multitask")
+        .expect("BUILTIN_SKILLS 应含 multitask")
+        .content;
+
+    assert!(
+        !content.contains("concurrency limit"),
+        "multitask 不得再引用并发上限"
+    );
+    assert!(
+        !content.contains("launching around it"),
+        "上限消失后不再有需要绕开的排队语义"
+    );
+    assert!(
+        content.contains("Independent siblings run concurrently"),
+        "multitask 应显式允许 siblings 同时运行"
     );
 }
 

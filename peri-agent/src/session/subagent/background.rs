@@ -308,9 +308,9 @@ pub(super) async fn spawn_background_subagent(
         agent_inbox: Some(agent_inbox),
     };
     if let Err(e) = task_manager.register_with_kind(bg_task) {
-        // S3.1：注册失败（并发撞 kind 上限）——通知包装任务直接 return（不执行
-        // run_react_loop、不 emit 任何事件），再如实返回错误。任务零事件零注册，
-        // 无幽灵执行 / 无泄漏。
+        // S3.1：注册失败（Agent 类无并发上限，失败仅剩 session execution scope
+        // 关闭一类）——通知包装任务直接 return（不执行 run_react_loop、不 emit
+        // 任何事件），再如实返回错误。任务零事件零注册，无幽灵执行 / 无泄漏。
         let _ = reg_tx.send(Err(e.to_string()));
         return Err(format!("Failed to register background task: {}", e).into());
     }

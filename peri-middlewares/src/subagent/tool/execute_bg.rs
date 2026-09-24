@@ -25,19 +25,14 @@ impl super::SubAgentTool {
         parent_messages: Vec<BaseMessage>,
         model: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // task_manager 必填（后台任务注册）；来自 parent_session 的 host 或 tool host 回退
+        // task_manager 必填（后台任务注册）；来自 parent_session 的 host 或 tool host 回退。
+        // 后台 sub-agent 不设并发上限：无入口预检，注册阶段（register_with_kind）
+        // 如实返回失败。
         let host = self.host();
-        let task_manager = host
-            .task_manager
-            .clone()
-            .ok_or("Background tasks not available: no task manager configured")?;
-        let thread_store = host.thread_store.clone();
-
-        if task_manager.active_count() >= 3 {
-            return Err("Error: maximum 3 concurrent background tasks reached. \
-                 Wait for a running task to complete before starting a new one."
-                .into());
+        if host.task_manager.is_none() {
+            return Err("Background tasks not available: no task manager configured".into());
         }
+        let thread_store = host.thread_store.clone();
 
         let spawned = if is_fork {
             // fork 路径（bg fork）：父消息注入 + fork directive 包装；

@@ -4,8 +4,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use peri_acp_types::tasks::TaskManager;
 use peri_agent::agent::async_tasks::{
-    bg_shell_task_id, kill_process_group, parse_timeout, shell_command, tee_pipe_with_output,
-    truncate_bytes, BgTaskKind, ShellExecutionGuard, ShellOutputCapture,
+    bg_shell_task_id, kill_process_group, parse_background_timeout, parse_foreground_timeout,
+    shell_command, tee_pipe_with_output, truncate_bytes, BgTaskKind, ShellExecutionGuard,
+    ShellOutputCapture, FOREGROUND_MAX_TIMEOUT_MS,
 };
 use peri_agent::{
     agent::events::BackgroundTaskResult,
@@ -35,6 +36,37 @@ fn background_cleanup_hint(pid: u32, platform: &str) -> String {
     format!(
         "{stop}\n- A successful kill command only sends a termination request. Check errors and verify \
          process exit and the background completion notification before reporting cleanup complete."
+    )
+}
+
+/// 前台 timeout 请求被界到上限时的回执说明（未改写时为空串）。
+/// 同步执行没有禁用超时的路径：`0` 与超过上限的请求都按上限执行。
+fn foreground_timeout_note(adjusted_from: Option<u64>) -> String {
+    match adjusted_from {
+        None => String::new(),
+        Some(0) => format!(
+            "\n- Note: `timeout: 0` cannot disable the timeout on the synchronous path; it was \
+             treated as the foreground maximum ({FOREGROUND_MAX_TIMEOUT_MS}ms)."
+        ),
+        Some(requested) => format!(
+            "\n- Note: the requested timeout ({requested}ms) exceeds the foreground maximum \
+             ({FOREGROUND_MAX_TIMEOUT_MS}ms); synchronous execution is capped there. Use \
+             `run_in_background: true` for work that needs longer."
+        ),
+    }
+}
+
+/// 前台超时分支的实时日志路径提示（摘要在超时前已开始落盘）。
+fn foreground_log_hint(capture: &ShellOutputCapture) -> String {
+    let Some(stdout) = capture.stdout_path() else {
+        return String::new();
+    };
+    let stderr = capture
+        .stderr_path()
+        .unwrap_or_else(|| "<unavailable>".to_string());
+    format!(
+        "\n- Live output: Read the log file {stdout} (stderr: {stderr}) — it appends while the \
+         command runs"
     )
 }
 
@@ -277,7 +309,9 @@ impl BaseTool for BashTool {
                 },
                 "timeout": {
                     "type": "number",
-                    "description": "Optional timeout in milliseconds (default 15s for foreground; no default timeout for explicit background tasks; 0 = no timeout; max 600000). Foreground timeout returns an error: if background task registration succeeds, the process continues in the background with a task_id and pid, without a new timeout; otherwise termination is requested. A positive timeout on an explicit background task requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a higher timeout (e.g. 300000 for 5 minutes)."
+                    "description": format!(
+                        "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at {FOREGROUND_MAX_TIMEOUT_MS}ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process continues in the background with a task_id, pid and log file paths, without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a longer `timeout` up to the foreground maximum, or use run_in_background: true for work that needs longer."
+                    )
                 },
                 "run_in_background": {
                     "type": "boolean",
@@ -315,7 +349,7 @@ impl BaseTool for BashTool {
             )?);
 
             // timeout 参数解析：未传/显式 0 → 不超时（后台语义：跑完为止）
-            let timeout_opt = parse_timeout(&input, true);
+            let timeout_opt = parse_background_timeout(&input);
 
             let command = command.to_string();
             let cwd = self.cwd.clone();
@@ -374,7 +408,10 @@ impl BaseTool for BashTool {
         }
 
         // ── 同步执行路径 ──
-        let timeout_opt = parse_timeout(&input, false);
+        // 前台执行恒有界：`timeout: 0` 与超过上限的请求都界到前台上限，
+        // 不存在禁用超时的同步路径（无 Option，结构上无法表达"不超时"）。
+        let (foreground_timeout_ms, adjusted_timeout) = parse_foreground_timeout(&input);
+        let timeout_note = foreground_timeout_note(adjusted_timeout);
         let ownership = self
             .task_manager
             .as_ref()
@@ -441,172 +478,172 @@ impl BaseTool for BashTool {
             "stderr",
         ));
 
-        let wait_result = match timeout_opt {
-            None => child.wait().await,
-            Some(ms) => match timeout(Duration::from_millis(ms), child.wait()).await {
-                Ok(status) => status,
-                Err(_elapsed) => {
-                    // ── 超时分支 ──
-                    // 先捕获当前已产生的部分输出并落盘
-                    let partial_stdout = match stdout_buf.lock() {
-                        Ok(g) => g.clone(),
-                        Err(poisoned) => poisoned.into_inner().clone(),
-                    };
-                    let partial_stderr = match stderr_buf.lock() {
-                        Ok(g) => g.clone(),
-                        Err(poisoned) => poisoned.into_inner().clone(),
-                    };
-                    let partial = merge_output(&partial_stdout, &partial_stderr, None);
-                    let (partial_hint, partial_ref) = persist_partial_output_with_ref(&partial);
-                    // 诊断信号：进程是否产生过任何输出（区分"慢但活跃"与"挂起/无进展"）
-                    let has_output = !partial_stdout.is_empty() || !partial_stderr.is_empty();
-                    let ps_line = process_status_snapshot(pid)
-                        .map(|s| format!("Process state: {s}"))
-                        .unwrap_or_else(|| "Process state: unavailable".to_string());
+        let wait_result = match timeout(Duration::from_millis(foreground_timeout_ms), child.wait())
+            .await
+        {
+            Ok(status) => status,
+            Err(_elapsed) => {
+                // ── 超时分支 ──
+                // 先捕获当前已产生的部分输出并落盘
+                let partial_stdout = match stdout_buf.lock() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                let partial_stderr = match stderr_buf.lock() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                let partial = merge_output(&partial_stdout, &partial_stderr, None);
+                let (partial_hint, partial_ref) = persist_partial_output_with_ref(&partial);
+                // 诊断信号：进程是否产生过任何输出（区分"慢但活跃"与"挂起/无进展"）
+                let has_output = !partial_stdout.is_empty() || !partial_stderr.is_empty();
+                let ps_line = process_status_snapshot(pid)
+                    .map(|s| format!("Process state: {s}"))
+                    .unwrap_or_else(|| "Process state: unavailable".to_string());
 
-                    if let Some(task_manager) = self.task_manager.as_ref() {
-                        // ── 有 TaskManager：不杀进程，promote 为后台任务续跑 ──
-                        let task_id = bg_shell_task_id();
-                        let register_result =
-                            task_manager.register(peri_acp_types::tasks::BgTaskRegistration {
-                                task_id: task_id.clone(),
-                                kind: BgTaskKind::Shell,
-                                summary: command.chars().take(80).collect(),
-                                pid: Some(pid),
-                                kill: execution.cancel_callback(),
-                            });
-                        match register_result {
-                            Ok(()) => {
-                                let task_manager = task_manager.clone();
-                                execution.track_registration(task_manager.clone(), task_id.clone());
-                                let on_bg_complete_cb = self.on_bg_complete.clone();
-                                let command_owned = command.to_string();
-                                let task_id_owned = task_id.clone();
-                                let background_output = Arc::clone(&output_capture);
-                                // 续跑任务：继续读 pipe 至 EOF → wait → finalize → 通知 Agent
-                                let task_owner = task_manager.clone();
-                                task_owner.spawn_owned(Box::pin(async move {
-                                    let started = std::time::Instant::now();
-                                    if let Err(error) = drain_stdout.await {
-                                        background_output.record_task_error("stdout", error);
-                                    }
-                                    if let Err(error) = drain_stderr.await {
-                                        background_output.record_task_error("stderr", error);
-                                    }
-                                    // wait 失败（极罕见）按失败完成，保证 finalize 一定执行
-                                    let (success, exit_code) =
-                                        match execution.child_mut().wait().await {
-                                            Ok(s) => (s.success(), s.code()),
-                                            Err(e) => {
-                                                warn!(
-                                                    error = %e,
-                                                    task_id = %task_id_owned,
-                                                    "promoted bg shell: wait failed"
-                                                );
-                                                kill_process_group(pid, "KILL");
-                                                let _ = execution.child_mut().wait().await;
-                                                (false, None)
-                                            }
-                                        };
-                                    let stdout = match stdout_buf.lock() {
-                                        Ok(g) => g.clone(),
-                                        Err(poisoned) => poisoned.into_inner().clone(),
-                                    };
-                                    let stderr = match stderr_buf.lock() {
-                                        Ok(g) => g.clone(),
-                                        Err(poisoned) => poisoned.into_inner().clone(),
-                                    };
-                                    let combined = merge_output(&stdout, &stderr, exit_code);
-                                    execution.wait_for_exit().await;
-                                    execution.confirm_stopped();
-                                    task_manager.finalize_bg_shell(
-                                        &on_bg_complete_cb,
-                                        task_id_owned,
-                                        command_owned.chars().take(80).collect(),
-                                        success,
-                                        combined,
-                                        started.elapsed().as_millis() as u64,
-                                        false,
-                                        Some(background_output.finish(exit_code)),
-                                    );
-                                }))?;
-                                output_capture.retain_files();
-                                let cleanup_hint =
-                                    background_cleanup_hint(pid, std::env::consts::OS);
-                                if has_output {
-                                    // 有部分输出：进程在产生进展，续跑是合理的
-                                    return Ok(ToolOutput::with_execution(format!(
-                                        "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.\n{cleanup_hint}\n{partial_hint}\nCommand that timed out: {command}",
-                                        ms as f64 / 1000.0
-                                    ), ToolExecutionEvidence {
-                                        status: ToolExecutionStatus::RunningAfterTimeout,
-                                        exit_code: None,
-                                        output_ref: partial_ref.clone(),
-                                        output_truncated: true,
-                                        task_id: Some(task_id),
-                                    }));
+                if let Some(task_manager) = self.task_manager.as_ref() {
+                    // ── 有 TaskManager：不杀进程，promote 为后台任务续跑 ──
+                    let task_id = bg_shell_task_id();
+                    let register_result =
+                        task_manager.register(peri_acp_types::tasks::BgTaskRegistration {
+                            task_id: task_id.clone(),
+                            kind: BgTaskKind::Shell,
+                            summary: command.chars().take(80).collect(),
+                            pid: Some(pid),
+                            kill: execution.cancel_callback(),
+                        });
+                    match register_result {
+                        Ok(()) => {
+                            let task_manager = task_manager.clone();
+                            execution.track_registration(task_manager.clone(), task_id.clone());
+                            let on_bg_complete_cb = self.on_bg_complete.clone();
+                            let command_owned = command.to_string();
+                            let task_id_owned = task_id.clone();
+                            let background_output = Arc::clone(&output_capture);
+                            // 续跑任务：继续读 pipe 至 EOF → wait → finalize → 通知 Agent
+                            let task_owner = task_manager.clone();
+                            task_owner.spawn_owned(Box::pin(async move {
+                                let started = std::time::Instant::now();
+                                if let Err(error) = drain_stdout.await {
+                                    background_output.record_task_error("stdout", error);
                                 }
-                                // 无输出：进程可能挂起（等输入/资源）而非正常变慢——
-                                // 仍 promote（避免误杀静默启动的慢任务），但如实说明不确定性
+                                if let Err(error) = drain_stderr.await {
+                                    background_output.record_task_error("stderr", error);
+                                }
+                                // wait 失败（极罕见）按失败完成，保证 finalize 一定执行
+                                let (success, exit_code) = match execution.child_mut().wait().await
+                                {
+                                    Ok(s) => (s.success(), s.code()),
+                                    Err(e) => {
+                                        warn!(
+                                            error = %e,
+                                            task_id = %task_id_owned,
+                                            "promoted bg shell: wait failed"
+                                        );
+                                        kill_process_group(pid, "KILL");
+                                        let _ = execution.child_mut().wait().await;
+                                        (false, None)
+                                    }
+                                };
+                                let stdout = match stdout_buf.lock() {
+                                    Ok(g) => g.clone(),
+                                    Err(poisoned) => poisoned.into_inner().clone(),
+                                };
+                                let stderr = match stderr_buf.lock() {
+                                    Ok(g) => g.clone(),
+                                    Err(poisoned) => poisoned.into_inner().clone(),
+                                };
+                                let combined = merge_output(&stdout, &stderr, exit_code);
+                                execution.wait_for_exit().await;
+                                execution.confirm_stopped();
+                                task_manager.finalize_bg_shell(
+                                    &on_bg_complete_cb,
+                                    task_id_owned,
+                                    command_owned.chars().take(80).collect(),
+                                    success,
+                                    combined,
+                                    started.elapsed().as_millis() as u64,
+                                    false,
+                                    Some(background_output.finish(exit_code)),
+                                );
+                            }))?;
+                            output_capture.retain_files();
+                            let cleanup_hint = background_cleanup_hint(pid, std::env::consts::OS);
+                            let log_hint = foreground_log_hint(&output_capture);
+                            if has_output {
+                                // 有部分输出：进程在产生进展，续跑是合理的
                                 return Ok(ToolOutput::with_execution(format!(
-                                    "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).\n{cleanup_hint}\n{partial_hint}\nCommand that timed out: {command}",
-                                    ms as f64 / 1000.0
+                                    "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.{log_hint}\n{cleanup_hint}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
+                                    foreground_timeout_ms as f64 / 1000.0
                                 ), ToolExecutionEvidence {
                                     status: ToolExecutionStatus::RunningAfterTimeout,
                                     exit_code: None,
-                                    output_ref: partial_ref,
+                                    output_ref: partial_ref.clone(),
                                     output_truncated: true,
                                     task_id: Some(task_id),
                                 }));
                             }
-                            Err(e) => {
-                                // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
-                                kill_process_group(pid, "KILL");
-                                let _ = execution.child_mut().wait().await;
-                                let _ = drain_stdout.await;
-                                let _ = drain_stderr.await;
-                                execution.confirm_stopped();
-                                output_capture.cleanup().await;
-                                return Ok(ToolOutput::with_execution(format!(
-                                    "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{ps_line}\n{partial_hint}\nCommand that timed out: {command}",
-                                    ms as f64 / 1000.0
-                                ), ToolExecutionEvidence {
-                                    status: ToolExecutionStatus::TimedOut,
-                                    exit_code: None,
-                                    output_ref: partial_ref.clone(),
-                                    output_truncated: true,
-                                    task_id: None,
-                                }));
-                            }
+                            // 无输出：进程可能挂起（等输入/资源）而非正常变慢——
+                            // 仍 promote（避免误杀静默启动的慢任务），但如实说明不确定性
+                            return Ok(ToolOutput::with_execution(format!(
+                                "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).{log_hint}\n{cleanup_hint}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
+                                foreground_timeout_ms as f64 / 1000.0
+                            ), ToolExecutionEvidence {
+                                status: ToolExecutionStatus::RunningAfterTimeout,
+                                exit_code: None,
+                                output_ref: partial_ref,
+                                output_truncated: true,
+                                task_id: Some(task_id),
+                            }));
                         }
-                    } else {
-                        // ── 无 TaskManager：杀进程组 + 部分输出落盘 ──
-                        kill_process_group(pid, "KILL");
-                        let _ = execution.child_mut().wait().await;
-                        let _ = drain_stdout.await;
-                        let _ = drain_stderr.await;
-                        execution.confirm_stopped();
-                        output_capture.cleanup().await;
-                        return Ok(ToolOutput::with_execution(format!(
-                            "Command timed out after {:.1}s. The default timeout is deliberately short (15s) to encourage efficient commands.\n\
-                             {ps_line}\n\
-                             Options:\n\
-                             - Optimize the command: avoid scanning large directories (e.g. use `find . -maxdepth 3` instead of `find /Users/...`), add `| head`, or use fd/rg instead of find/grep.\n\
-                             - Increase timeout: set `timeout` parameter to a larger value (e.g. `timeout: 120000` for 2 minutes).\n\
-                             - Use background mode: set `run_in_background: true` for long-running servers/builds/installs.\n\
-                             {partial_hint}\n\
-                             Command that timed out: {command}",
-                            ms as f64 / 1000.0
-                        ), ToolExecutionEvidence {
-                            status: ToolExecutionStatus::TimedOut,
-                            exit_code: None,
-                            output_ref: partial_ref,
-                            output_truncated: true,
-                            task_id: None,
-                        }));
+                        Err(e) => {
+                            // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
+                            kill_process_group(pid, "KILL");
+                            let _ = execution.child_mut().wait().await;
+                            let _ = drain_stdout.await;
+                            let _ = drain_stderr.await;
+                            execution.confirm_stopped();
+                            output_capture.cleanup().await;
+                            return Ok(ToolOutput::with_execution(format!(
+                                "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{ps_line}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
+                                foreground_timeout_ms as f64 / 1000.0
+                            ), ToolExecutionEvidence {
+                                status: ToolExecutionStatus::TimedOut,
+                                exit_code: None,
+                                output_ref: partial_ref.clone(),
+                                output_truncated: true,
+                                task_id: None,
+                            }));
+                        }
                     }
+                } else {
+                    // ── 无 TaskManager：杀进程组 + 部分输出落盘 ──
+                    kill_process_group(pid, "KILL");
+                    let _ = execution.child_mut().wait().await;
+                    let _ = drain_stdout.await;
+                    let _ = drain_stderr.await;
+                    execution.confirm_stopped();
+                    output_capture.cleanup().await;
+                    return Ok(ToolOutput::with_execution(format!(
+                        "Command timed out after {:.1}s. The synchronous path is always bounded (default 15s, maximum {FOREGROUND_MAX_TIMEOUT_MS}ms) to encourage efficient commands.\n\
+                         {ps_line}\n\
+                         Options:\n\
+                         - Optimize the command: avoid scanning large directories (e.g. use `find . -maxdepth 3` instead of `find /Users/...`), add `| head`, or use fd/rg instead of find/grep.\n\
+                         - Increase timeout: set `timeout` parameter to a larger value (the foreground maximum is `timeout: {FOREGROUND_MAX_TIMEOUT_MS}` for 2 minutes).\n\
+                         - Use background mode: set `run_in_background: true` for long-running servers/builds/installs.\n\
+                         {timeout_note}\n\
+                         {partial_hint}\n\
+                         Command that timed out: {command}",
+                        foreground_timeout_ms as f64 / 1000.0
+                    ), ToolExecutionEvidence {
+                        status: ToolExecutionStatus::TimedOut,
+                        exit_code: None,
+                        output_ref: partial_ref,
+                        output_truncated: true,
+                        task_id: None,
+                    }));
                 }
-            },
+            }
         };
 
         // 正常完成路径：等待管道排空，合并输出，保持既有格式与截断逻辑

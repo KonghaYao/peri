@@ -599,13 +599,14 @@ fn test_required_error_messages_are_recorded_per_tool() {
 
 #[test]
 fn test_fixture_truncation_and_limit_facts_are_present_in_descriptions() {
-    // 截断语义是迁移对等性的核心，描述文本必须保留源实现的上限说明。
+    // 截断语义是迁移对等性的核心，描述文本必须保留源实现的上限说明
+    // （Bash 含前台硬上限 120000 与后台显式上限 600000 两个事实）。
     let cases: &[(&str, &[&str])] = &[
         (READ_RAW, &["2000", "65536", "5000", "32 MB"]),
         (GLOB_RAW, &["1000", "20000"]),
         (GREP_RAW, &["1000", "20000", "250"]),
         (FOLDER_RAW, &["500", "max_depth"]),
-        (BASH_RAW, &["65000", "2000", "600000", "15000"]),
+        (BASH_RAW, &["65000", "2000", "600000", "15000", "120000"]),
     ];
     for (raw, needles) in cases {
         let fixture = parse(raw);

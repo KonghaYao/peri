@@ -9,12 +9,13 @@ Usage:
   - Read files: Use Read (NOT cat/head/tail)
   - Edit files: Use Edit (NOT sed/awk)
   - Write files: Use Write (NOT echo/cat with redirect)
-- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). Foreground commands default to 15000ms (15 seconds) to encourage efficient commands; background tasks (run_in_background: true) run until completion unless timeout is explicitly set. Set `timeout: 0` to disable the timeout entirely
+- You can specify an optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms (15 seconds) and is capped at 120000ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `timeout: 0` leaves a background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached
 - When issuing multiple commands, use && to chain them together rather than using separate tool calls if the commands depend on each other
-- For builds, installs, or tests that may exceed 15s, set a longer `timeout` value (e.g. `timeout: 300000` for 5 minutes). Only use `run_in_background: true` for truly long-running processes like dev servers or watchers that should keep running while you continue work.
+- For builds, installs, or tests that may exceed 15s, set a longer `timeout` value up to the 120000ms foreground maximum. Anything that may need longer, and long-running processes like dev servers or watchers, belongs in `run_in_background: true` — a synchronous command that reaches its timeout is promoted to a background task instead of being killed (see Timeout behavior).
 
 Timeout behavior:
-- Foreground timeout returns a timeout error, but does not always terminate the process. When background task registration is available and succeeds, the process continues as a background task; the result includes its `task_id` and `pid`. The foreground timeout is not a new deadline for that continued task.
+- The synchronous path is always bounded: the effective timeout is clamped to at most 120000ms, and `timeout: 0` is treated as that maximum rather than disabling the timeout. There is no way to disable the timeout on the synchronous path.
+- Foreground timeout returns a timeout error, but does not terminate the process: when background task registration is available and succeeds, the process continues as a background task; the result includes its `task_id`, `pid` and live log file paths. The foreground timeout is not a new deadline for that continued task.
 - If background task registration is unavailable or fails, foreground timeout requests process termination.
 - For commands explicitly started with `run_in_background: true`, a positive `timeout` requests process termination when reached. Omitting `timeout` or setting it to `0` leaves that background command without a timeout.
 - Read the returned process status before retrying. If it says the process is still running, track that task or explicitly stop it before starting a replacement.
