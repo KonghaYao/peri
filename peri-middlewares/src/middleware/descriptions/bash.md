@@ -15,6 +15,7 @@ Usage:
 
 Timeout behavior:
 - The synchronous path is always bounded: the effective timeout is clamped to at most 120000ms, and `timeout: 0` is treated as that maximum rather than disabling the timeout. There is no way to disable the timeout on the synchronous path.
+- The same foreground deadline covers both shell exit and stdout/stderr draining. `nohup ... &` can leave descendants holding the output pipes after the shell exits; that wait also times out and follows the background-promotion behavior below.
 - Foreground timeout returns a timeout error, but does not terminate the process: when background task registration is available and succeeds, the process continues as a background task; the result includes its `task_id`, `pid` and live log file paths. The foreground timeout is not a new deadline for that continued task.
 - If background task registration is unavailable or fails, foreground timeout requests process termination.
 - For commands explicitly started with `run_in_background: true`, a positive `timeout` requests process termination when reached. Omitting `timeout` or setting it to `0` leaves that background command without a timeout.

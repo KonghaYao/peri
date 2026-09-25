@@ -478,8 +478,27 @@ impl BaseTool for BashTool {
             "stderr",
         ));
 
-        let wait_result = match timeout(Duration::from_millis(foreground_timeout_ms), child.wait())
-            .await
+        // 两路 reader 的 join 状态随 future 一起移交，避免一侧已完成后在后台重复 poll。
+        let drain_capture = Arc::clone(&output_capture);
+        let mut drain_output = Box::pin(async move {
+            let (stdout_result, stderr_result) = tokio::join!(drain_stdout, drain_stderr);
+            if let Err(error) = stdout_result {
+                drain_capture.record_task_error("stdout", error);
+            }
+            if let Err(error) = stderr_result {
+                drain_capture.record_task_error("stderr", error);
+            }
+        });
+        let mut leader_status = None;
+        // shell 退出不代表管道 EOF：nohup / `&` 后代仍可能持有写端。
+        // wait 和输出排空必须共享前台期限，超时后保留同一采集 future 供后台继续。
+        let wait_result = match timeout(Duration::from_millis(foreground_timeout_ms), async {
+            let status = child.wait().await?;
+            leader_status = Some(status);
+            drain_output.as_mut().await;
+            Ok::<_, std::io::Error>(status)
+        })
+        .await
         {
             Ok(status) => status,
             Err(_elapsed) => {
@@ -497,9 +516,13 @@ impl BaseTool for BashTool {
                 let (partial_hint, partial_ref) = persist_partial_output_with_ref(&partial);
                 // 诊断信号：进程是否产生过任何输出（区分"慢但活跃"与"挂起/无进展"）
                 let has_output = !partial_stdout.is_empty() || !partial_stderr.is_empty();
-                let ps_line = process_status_snapshot(pid)
-                    .map(|s| format!("Process state: {s}"))
-                    .unwrap_or_else(|| "Process state: unavailable".to_string());
+                let ps_line = if leader_status.is_some() {
+                    "Process state: the shell has exited, but output capture is still pending; descendants may still hold stdout/stderr open.".to_string()
+                } else {
+                    process_status_snapshot(pid)
+                        .map(|s| format!("Process state: {s}"))
+                        .unwrap_or_else(|| "Process state: unavailable".to_string())
+                };
 
                 if let Some(task_manager) = self.task_manager.as_ref() {
                     // ── 有 TaskManager：不杀进程，promote 为后台任务续跑 ──
@@ -524,25 +547,23 @@ impl BaseTool for BashTool {
                             let task_owner = task_manager.clone();
                             task_owner.spawn_owned(Box::pin(async move {
                                 let started = std::time::Instant::now();
-                                if let Err(error) = drain_stdout.await {
-                                    background_output.record_task_error("stdout", error);
-                                }
-                                if let Err(error) = drain_stderr.await {
-                                    background_output.record_task_error("stderr", error);
-                                }
-                                // wait 失败（极罕见）按失败完成，保证 finalize 一定执行
-                                let (success, exit_code) = match execution.child_mut().wait().await
-                                {
-                                    Ok(s) => (s.success(), s.code()),
-                                    Err(e) => {
-                                        warn!(
-                                            error = %e,
-                                            task_id = %task_id_owned,
-                                            "promoted bg shell: wait failed"
-                                        );
-                                        kill_process_group(pid, "KILL");
-                                        let _ = execution.child_mut().wait().await;
-                                        (false, None)
+                                drain_output.await;
+                                // 已在前台回收的 leader 不能提供仍持管道的后代退出码。
+                                let (success, exit_code) = if let Some(status) = leader_status {
+                                    (status.success(), None)
+                                } else {
+                                    match execution.child_mut().wait().await {
+                                        Ok(s) => (s.success(), s.code()),
+                                        Err(e) => {
+                                            warn!(
+                                                error = %e,
+                                                task_id = %task_id_owned,
+                                                "promoted bg shell: wait failed"
+                                            );
+                                            kill_process_group(pid, "KILL");
+                                            let _ = execution.child_mut().wait().await;
+                                            (false, None)
+                                        }
                                     }
                                 };
                                 let stdout = match stdout_buf.lock() {
@@ -600,8 +621,7 @@ impl BaseTool for BashTool {
                             // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
                             kill_process_group(pid, "KILL");
                             let _ = execution.child_mut().wait().await;
-                            let _ = drain_stdout.await;
-                            let _ = drain_stderr.await;
+                            drain_output.await;
                             execution.confirm_stopped();
                             output_capture.cleanup().await;
                             return Ok(ToolOutput::with_execution(format!(
@@ -620,8 +640,7 @@ impl BaseTool for BashTool {
                     // ── 无 TaskManager：杀进程组 + 部分输出落盘 ──
                     kill_process_group(pid, "KILL");
                     let _ = execution.child_mut().wait().await;
-                    let _ = drain_stdout.await;
-                    let _ = drain_stderr.await;
+                    drain_output.await;
                     execution.confirm_stopped();
                     output_capture.cleanup().await;
                     return Ok(ToolOutput::with_execution(format!(
@@ -646,15 +665,9 @@ impl BaseTool for BashTool {
             }
         };
 
-        // 正常完成路径：等待管道排空，合并输出，保持既有格式与截断逻辑
+        // 正常完成时管道已在前台期限内排空，合并输出并保持既有截断逻辑。
         match wait_result {
             Ok(status) => {
-                if let Err(error) = drain_stdout.await {
-                    output_capture.record_task_error("stdout", error);
-                }
-                if let Err(error) = drain_stderr.await {
-                    output_capture.record_task_error("stderr", error);
-                }
                 let stdout = match stdout_buf.lock() {
                     Ok(g) => g.clone(),
                     Err(poisoned) => poisoned.into_inner().clone(),
@@ -734,8 +747,7 @@ impl BaseTool for BashTool {
             Err(e) => {
                 kill_process_group(pid, "KILL");
                 let _ = execution.child_mut().wait().await;
-                let _ = drain_stdout.await;
-                let _ = drain_stderr.await;
+                drain_output.await;
                 execution.confirm_stopped();
                 output_capture.cleanup().await;
                 Err(format!("Error executing command: {e}").into())
