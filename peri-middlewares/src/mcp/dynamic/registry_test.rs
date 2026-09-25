@@ -663,7 +663,7 @@ async fn session_owned_projection_keeps_existing_discover_instance_live_until_cl
 }
 
 #[test]
-fn repeated_catalog_registration_keeps_first_session_baseline() {
+fn repeated_catalog_registration_revalidates_and_replaces_baseline() {
     let (_owner, spawner) = McpTaskOwner::new();
     let registry = DynamicMcpRegistry::new(spawner, FakeConnector::new());
     let initial = vec![DynamicMcpCatalogTool {
@@ -671,24 +671,24 @@ fn repeated_catalog_registration_keeps_first_session_baseline() {
         aliases: vec!["builtin_alias".to_string()],
         static_mcp_server: None,
     }];
+    let updated = vec![DynamicMcpCatalogTool {
+        name: "SubagentOnly".to_string(),
+        aliases: Vec::new(),
+        static_mcp_server: None,
+    }];
 
     registry
         .register_catalog("session-a", initial.clone())
         .unwrap();
+    // 同值重复注册保持幂等。
     registry.register_catalog("session-a", initial).unwrap();
+    // 晚到的静态目录整体替换旧基线，而不是 first-write-wins。
     registry
-        .register_catalog(
-            "session-a",
-            vec![DynamicMcpCatalogTool {
-                name: "SubagentOnly".to_string(),
-                aliases: Vec::new(),
-                static_mcp_server: None,
-            }],
-        )
+        .register_catalog("session-a", updated.clone())
         .unwrap();
 
     let state = registry.state.lock();
-    assert_eq!(state.catalogs["session-a"][0].name, "Builtin");
+    assert_eq!(state.catalogs["session-a"], updated);
 }
 
 #[tokio::test]
@@ -709,12 +709,12 @@ async fn load_and_unload_do_not_change_session_collision_baseline() {
         .await
         .unwrap();
     wait_ready(&registry, "session-a", "example").await;
+    // 已发布动态工具既不改变基线，也不让与自身无重名的目录重注册失败。
     registry
-        .register_catalog(
-            "session-a",
-            registry.capability("session-a").snapshot().dynamic_tools(),
-        )
+        .register_catalog("session-a", baseline.clone())
         .unwrap();
+    assert_eq!(registry.state.lock().catalogs["session-a"], baseline);
+
     registry
         .execute(
             "session-a",
@@ -725,9 +725,134 @@ async fn load_and_unload_do_not_change_session_collision_baseline() {
         )
         .await
         .unwrap();
-    registry.register_catalog("session-a", Vec::new()).unwrap();
 
     assert_eq!(registry.state.lock().catalogs["session-a"], baseline);
+    owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn late_static_catalog_with_live_dynamic_collision_is_rejected_without_partial_replace() {
+    let (mut owner, spawner) = McpTaskOwner::new();
+    let registry = DynamicMcpRegistry::new(spawner, FakeConnector::new());
+    let baseline = vec![DynamicMcpCatalogTool {
+        name: "Builtin".to_string(),
+        aliases: vec!["builtin_alias".to_string()],
+        static_mcp_server: None,
+    }];
+    registry
+        .register_catalog("session-a", baseline.clone())
+        .unwrap();
+
+    // 发现期基线没有该名字，load 因此被放行；晚到的静态条目必须被重验抓住。
+    registry
+        .execute("session-a", load("example", "one"))
+        .await
+        .unwrap();
+    wait_ready(&registry, "session-a", "example").await;
+
+    let error = registry
+        .register_catalog(
+            "session-a",
+            vec![
+                baseline[0].clone(),
+                DynamicMcpCatalogTool {
+                    name: "mcp__Example__lookup".to_string(),
+                    aliases: Vec::new(),
+                    static_mcp_server: Some("Example".to_string()),
+                },
+            ],
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code, DynamicMcpErrorCode::ToolNameConflict);
+    // 大小写不同视为同一碰撞；上报候选条目名而不是已有的动态工具名。
+    assert_eq!(error.safe_summary, "mcp__Example__lookup");
+    // 拒绝必须整体生效：旧基线保留，动态实例与已发布工具不受影响。
+    assert_eq!(registry.state.lock().catalogs["session-a"], baseline);
+    assert!(registry
+        .capability("session-a")
+        .snapshot()
+        .tools
+        .contains_key("mcp__example__lookup"));
+    owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn late_static_catalog_alias_conflict_is_rejected() {
+    let (mut owner, spawner) = McpTaskOwner::new();
+    let registry = DynamicMcpRegistry::new(spawner, FakeConnector::new());
+    registry
+        .execute("session-a", load("example", "one"))
+        .await
+        .unwrap();
+    wait_ready(&registry, "session-a", "example").await;
+
+    let error = registry
+        .register_catalog(
+            "session-a",
+            vec![DynamicMcpCatalogTool {
+                name: "mcp__other__lookup".to_string(),
+                aliases: vec!["MCP__EXAMPLE__LOOKUP".to_string()],
+                static_mcp_server: None,
+            }],
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code, DynamicMcpErrorCode::ToolNameConflict);
+    assert_eq!(error.safe_summary, "mcp__other__lookup");
+    assert!(!registry.state.lock().catalogs.contains_key("session-a"));
+    owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn late_static_catalog_shadows_same_named_live_dynamic_server() {
+    let (mut owner, spawner) = McpTaskOwner::new();
+    let registry = DynamicMcpRegistry::new(spawner, FakeConnector::new());
+    registry
+        .execute("session-a", load("example", "one"))
+        .await
+        .unwrap();
+    wait_ready(&registry, "session-a", "example").await;
+
+    let updated = vec![DynamicMcpCatalogTool {
+        name: "mcp__example__lookup".to_string(),
+        aliases: Vec::new(),
+        static_mcp_server: Some("example".to_string()),
+    }];
+    registry
+        .register_catalog("session-a", updated.clone())
+        .unwrap();
+
+    assert_eq!(registry.state.lock().catalogs["session-a"], updated);
+    owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn catalog_revalidation_is_scoped_to_the_registering_session() {
+    let (mut owner, spawner) = McpTaskOwner::new();
+    let registry = DynamicMcpRegistry::new(spawner, FakeConnector::new());
+    registry
+        .execute("session-a", load("example", "one"))
+        .await
+        .unwrap();
+    wait_ready(&registry, "session-a", "example").await;
+
+    let conflicting = vec![DynamicMcpCatalogTool {
+        name: "mcp__example__lookup".to_string(),
+        aliases: Vec::new(),
+        static_mcp_server: None,
+    }];
+    // 同目录在无动态实例的 session 上合法：碰撞基线不跨 session 共享。
+    registry
+        .register_catalog("session-b", conflicting.clone())
+        .unwrap();
+    assert_eq!(registry.state.lock().catalogs["session-b"], conflicting);
+
+    let error = registry
+        .register_catalog("session-a", conflicting)
+        .unwrap_err();
+    assert_eq!(error.code, DynamicMcpErrorCode::ToolNameConflict);
+    assert!(!registry.state.lock().catalogs.contains_key("session-a"));
     owner.shutdown().await;
 }
 

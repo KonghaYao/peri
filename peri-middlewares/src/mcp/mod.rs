@@ -20,6 +20,7 @@ pub mod reconnect;
 pub mod resource_cache;
 pub mod resource_tool;
 pub(crate) mod skill_discovery;
+pub(crate) mod system_tools;
 pub mod task_scope;
 pub mod tool_bridge;
 pub mod transport;
@@ -54,3 +55,9 @@ pub use task_scope::{
     TaskAdmissionError,
 };
 pub use tool_bridge::{build_tool_bridges, McpToolBridge, ToolCallError};
+
+// D-02：crate 内 seam 测试（主 plan §6 W5）。模块名参与 `cargo test` 过滤，
+// 故不沿用 `mod tests`（过滤 `mcp::mcp_v4_seam` 必须命中本模块）。
+#[cfg(test)]
+#[path = "mcp_v4_seam_test.rs"]
+mod mcp_v4_seam_tests;

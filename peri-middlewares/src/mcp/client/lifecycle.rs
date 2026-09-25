@@ -124,6 +124,8 @@ impl McpClientPool {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
         self.configs.write().remove(server_name);
+        // 句柄与配置同时消失：本代发现证据一律失效，等待方立即重读事实。
+        self.system_readiness.clear_evidence(server_name);
     }
 
     /// 将服务器标记为 Disabled：关闭连接但保留 config 和 handle（用于面板展示）
@@ -161,6 +163,8 @@ impl McpClientPool {
                 channel_capable: false,
             }),
         );
+        // 禁用不是「连接中」：本代证据失效，等待方立即得到 Disabled 事实。
+        self.system_readiness.clear_evidence(server_name);
     }
 
     pub(crate) fn is_open(&self) -> bool {
@@ -174,6 +178,8 @@ impl McpClientPool {
         }
         self.lifecycle
             .store(1, std::sync::atomic::Ordering::Release);
+        // 关闭事务开始：全部发现证据失效并唤醒等待方（它们在重读时看到 PoolClosed）。
+        self.system_readiness.clear_all_evidence();
         self.notifier.write().take();
         self.oauth_event_callback.write().take();
         self.pending_oauth_callbacks.lock().clear();

@@ -458,6 +458,9 @@ fn test_persistent_cache_is_disabled_for_authenticated_servers() {
         disabled: None,
         protocol_version: None,
         subscriptions: None,
+        system_mcp: None,
+        system_mcp_tools: None,
+        system_mcp_timeout: None,
         source: None,
     };
     let pool = McpClientPool::new_empty();
@@ -537,6 +540,9 @@ fn test_tools_cache_eligible_requires_version_and_allowed_policy() {
         disabled: None,
         protocol_version: None,
         subscriptions: None,
+        system_mcp: None,
+        system_mcp_tools: None,
+        system_mcp_timeout: None,
         source: None,
     };
     let pool = McpClientPool::new_empty();

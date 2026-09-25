@@ -1,7 +1,10 @@
 use peri_agent::middleware::capabilities as hook_state;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -13,18 +16,106 @@ use peri_acp_types::system_reminder::{
 };
 use peri_agent::{
     agent::AgentCancellationToken,
+    error::AgentError,
     middleware::r#trait::Middleware,
-    session::{MessageKind, MessageSource as QueueMessageSource, QueuedMessage},
+    session::{
+        tool_catalog::{StartupRequiredTool, StartupToolUpdate},
+        MessageKind, MessageSource as QueueMessageSource, QueuedMessage,
+    },
     tools::BaseTool,
 };
 use serde_json::json;
 
 use super::{
-    client::{ClientStatus, McpClientPool},
+    client::{
+        redact_mcp_error, ClientStatus, McpClientPool, NegotiatedSystemMcp, SystemMcpManifest,
+        SystemReadinessError,
+    },
     discover_tool::DiscoverMCPTool,
     resource_tool::McpResourceTool,
-    tool_bridge::build_tool_bridges,
+    system_tools::{prepare_system_tools, SystemToolError},
+    tool_bridge::{build_tool_bridges, build_typed_tool_bridges, McpToolBridge},
 };
+
+/// 启动准入错误文案的展示上限（字符）。固定模板本身远短于此；该上限只约束
+/// 由 MCP 声明（server / tool 名）撑长的部分。
+const MAX_STARTUP_REASON_CHARS: usize = 512;
+
+/// 用户可见启动错误文本的最后一道清洗：控制字符折叠为空格、URL query 与凭据
+/// 形态遮蔽、限长。
+///
+/// ACP 不会替任意 MCP cause 自动脱敏（`AgentError::user_facing_message` 走
+/// `Display`），因此清洗必须在 MCP 边界完成；只保留阶段与安全类别，不输出
+/// env / headers / URL 认证信息 / 协议 payload / schema 默认值。
+fn safe_startup_reason(raw: &str) -> String {
+    let folded: String = raw
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    redact_mcp_error(&folded)
+        .chars()
+        .take(MAX_STARTUP_REASON_CHARS)
+        .collect()
+}
+
+/// 本次 System MCP 准入的候选快照（冻结签名：IF-M3 / sub-plan B §4.3）。
+///
+/// `bridges` 是**整批**静态 MCP bridge（必需项已提升 direct、其余保持
+/// deferred）。它只在本次 `before_react_start` 内存在并经 `StartupState` 提交，
+/// 不落 middleware 字段、不跨 loop 复用。
+pub(crate) struct SystemReadySnapshot {
+    pub negotiated: Vec<NegotiatedSystemMcp>,
+    pub bridges: Vec<McpToolBridge>,
+}
+
+impl SystemReadySnapshot {
+    /// 无 System 依赖时不产生 startup update（普通 MCP 的 pending/failed 不阻塞）。
+    fn has_system_dependency(&self) -> bool {
+        !self.negotiated.is_empty()
+    }
+
+    /// 必需工具身份（原始名 + effective name），供目录提交后复核「可直达」。
+    ///
+    /// `prepare_system_tools` 成功后每个必需项在整批 bridge 中恰好命中一次；
+    /// 缺失只能来自并发换代，按 fail-closed 返回错误，不发布 ready。
+    fn required_tools(&self) -> Result<Vec<StartupRequiredTool>, SystemToolError> {
+        let mut required: Vec<StartupRequiredTool> = Vec::new();
+        for item in &self.negotiated {
+            for tool in &item.requirement.required_tools {
+                let already = required.iter().any(|entry| {
+                    entry.server_name == item.requirement.server
+                        && entry.original_tool_name == *tool
+                });
+                if already {
+                    // 重复配置幂等：不产生第二份注册。
+                    continue;
+                }
+                let bridge = self.bridges.iter().find(|bridge| {
+                    bridge.mcp_server_name() == Some(item.requirement.server.as_str())
+                        && bridge.original_tool_name() == tool
+                });
+                let Some(bridge) = bridge else {
+                    return Err(SystemToolError::MissingTool {
+                        server: item.requirement.server.clone(),
+                        tool: tool.clone(),
+                    });
+                };
+                required.push(StartupRequiredTool {
+                    server_name: item.requirement.server.clone(),
+                    original_tool_name: tool.clone(),
+                    effective_tool_name: bridge.name().to_string(),
+                });
+            }
+        }
+        Ok(required)
+    }
+}
 
 /// MCP 中间件 —— 将所有已连接 MCP 服务器的工具和资源注入 ReAct 循环，
 /// 并向模型通报 MCP 连接状态（首 turn 概览 + 运行中上下线变化）。
@@ -260,6 +351,162 @@ pub fn attach_connection_notifier(
 }
 
 impl McpMiddleware {
+    /// System MCP 启动闸门（冻结签名：IF-M3 / sub-plan B §4.3）。
+    ///
+    /// 执行顺序：本次入场统一计时 → 等待 transport / initialize / 能力协商 /
+    /// live `tools/list` → 一次 typed 构建整批静态 bridge →
+    /// [`prepare_system_tools`] 逐项解析与校验 → 提交前复核（取消 / pool 开闭 /
+    /// 代际 / deadline）。
+    ///
+    /// 返回**待目录提交的 candidate**：本函数不发布 ready、不改写 catalog。任何
+    /// 失败都返回类型化错误，不 `warn` 后继续、不返回空集合、不产生部分结果。
+    pub(crate) async fn await_system_ready(
+        &self,
+    ) -> Result<SystemReadySnapshot, SystemReadinessError> {
+        // 1R 入场即计时：initialize / list / 必需工具校验之间不重置 deadline，
+        // 多台 server 并发计时，不串行相加。
+        let started_at = tokio::time::Instant::now();
+        let negotiated = self
+            .tool_pool
+            .await_system_connections(&self.cancel, started_at)
+            .await?;
+        if negotiated.is_empty() {
+            // 无 System 依赖：不产生 startup update；普通工具走原收集路径。
+            return Ok(SystemReadySnapshot {
+                negotiated,
+                bridges: Vec::new(),
+            });
+        }
+        // 必需工具来自本次协商的 requirement（含空数组：该 server 只要求 ready）。
+        // 静态 bridge 一律取 deployment `tool_pool`，不用会混入动态投影的 session
+        // projection。
+        let required: BTreeMap<String, Vec<String>> = negotiated
+            .iter()
+            .map(|item| {
+                (
+                    item.requirement.server.clone(),
+                    item.requirement.required_tools.clone(),
+                )
+            })
+            .collect();
+        let typed = build_typed_tool_bridges(&self.tool_pool);
+        let bridges = prepare_system_tools(typed, &required)
+            .map_err(|source| SystemReadinessError::RequiredTools { source })?;
+        // `prepare_system_tools` 是同步校验，不 yield：返回后必须重新核对代际 /
+        // pool 开闭 / 取消 / deadline，避免用旧代快照发布 ready。
+        self.recheck_system_snapshot(&negotiated, started_at)?;
+        Ok(SystemReadySnapshot {
+            negotiated,
+            bridges,
+        })
+    }
+
+    /// 提交前复核：任何一项不成立都不得发布 ready。
+    fn recheck_system_snapshot(
+        &self,
+        negotiated: &[NegotiatedSystemMcp],
+        started_at: tokio::time::Instant,
+    ) -> Result<(), SystemReadinessError> {
+        if self.cancel.is_cancelled() {
+            return Err(SystemReadinessError::Cancelled);
+        }
+        if !self.tool_pool.is_open() {
+            return Err(SystemReadinessError::PoolClosed);
+        }
+        let now = tokio::time::Instant::now();
+        for item in negotiated {
+            let server = item.requirement.server.as_str();
+            let current = self
+                .tool_pool
+                .get_client(server)
+                .map(|handle| self.tool_pool.handle_generation(&handle));
+            if current != Some(item.generation) {
+                return Err(SystemReadinessError::ConnectionChanged {
+                    server: server.to_string(),
+                });
+            }
+            if now >= started_at + item.requirement.timeout {
+                return Err(SystemReadinessError::Timeout {
+                    server: server.to_string(),
+                    timeout_ms: u64::try_from(item.requirement.timeout.as_millis())
+                        .unwrap_or(u64::MAX),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// 候选 → 目录提交 DTO；无 System 依赖时返回 `None`（不产生 startup update）。
+    fn startup_tool_update(
+        &self,
+        snapshot: &SystemReadySnapshot,
+    ) -> Result<Option<StartupToolUpdate>, SystemToolError> {
+        if !snapshot.has_system_dependency() {
+            return Ok(None);
+        }
+        Ok(Some(StartupToolUpdate {
+            tools: snapshot
+                .bridges
+                .iter()
+                .cloned()
+                .map(|bridge| Arc::new(bridge) as Arc<dyn BaseTool>)
+                .collect::<Vec<Arc<dyn BaseTool>>>(),
+            required: snapshot.required_tools()?,
+        }))
+    }
+
+    /// 闸门错误 → Agent 边界错误（IF-M3 两条硬约束 + 安全文案）。
+    ///
+    /// `Cancelled` → `Interrupted`（取消不是失败，不算 fatal）；**timeout 不是
+    /// 取消**，与其它变体一起映射 fatal `MiddlewareError`，reason 为固定安全文案。
+    fn startup_agent_error(&self, error: SystemReadinessError) -> AgentError {
+        match error.into_agent_error(self.name()) {
+            AgentError::MiddlewareError { middleware, reason } => AgentError::MiddlewareError {
+                middleware,
+                reason: safe_startup_reason(&reason),
+            },
+            other => other,
+        }
+    }
+
+    /// 本批收集的静态 MCP bridge 集合。
+    ///
+    /// System 依赖已具备可信配置清单时使用 [`prepare_system_tools`] 的**整批**
+    /// 结果（必需项 direct、普通 deferred）整体替换 deferred 收集，禁止在旧集合上
+    /// 再 append 一份所需工具。准入候选本身不落 middleware 字段（IF-M5）：这里用与
+    /// 闸门同一套纯函数按当次 handle 快照推导，不跨 loop / 跨 session 复用旧代标记。
+    ///
+    /// 校验不通过（缺工具 / schema / 可见性 / 有效名碰撞）时退回既有 deferred
+    /// 收集：该结果不构成 ready，闸门仍会在进入 Compact 前以 fatal 结束本次 loop。
+    fn static_tool_bridges(&self) -> Vec<Box<dyn BaseTool>> {
+        match self.prepared_static_bridges() {
+            Some(prepared) => prepared
+                .into_iter()
+                .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
+                .collect(),
+            None => build_tool_bridges(&self.tool_pool),
+        }
+    }
+
+    /// `Some(整批 prepared bridge)` 仅当配置清单已完整发布且必需工具校验通过。
+    fn prepared_static_bridges(&self) -> Option<Vec<McpToolBridge>> {
+        // 清单未发布（Pending / Failed）时 `configs` 不是可信的 System 依赖事实源。
+        if self.tool_pool.system_manifest() != SystemMcpManifest::Loaded {
+            return None;
+        }
+        let required: BTreeMap<String, Vec<String>> = self
+            .tool_pool
+            .system_requirements()
+            .into_iter()
+            .map(|requirement| (requirement.server, requirement.required_tools))
+            .collect();
+        if required.is_empty() {
+            // 无 System 依赖：prepared 与 deferred 集合等价，保持原路径。
+            return None;
+        }
+        prepare_system_tools(build_typed_tool_bridges(&self.tool_pool), &required).ok()
+    }
+
     /// 首 turn 概览：MCP 基础情况（服务器名 + 状态 + 工具数），失败报名字 + 错误。
     ///
     /// 无任何已配置服务器时返回 `None`（零噪音，不注入）。
@@ -364,7 +611,9 @@ impl Middleware for McpMiddleware {
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        let mut tools = build_tool_bridges(&self.tool_pool);
+        // 整批替换初始 Vec（不是 append）：System 依赖就绪时 prepared 集合已包含
+        // 全部静态 bridge（必需项 direct），再 extend 会重复注册同一工具。
+        let mut tools = self.static_tool_bridges();
 
         tools.push(Box::new(McpResourceTool::new(
             Arc::clone(&self.pool),
@@ -442,6 +691,30 @@ impl Middleware for McpMiddleware {
     ) -> peri_agent::error::AgentResult<()> {
         self.ensure_discovery();
         Ok(())
+    }
+
+    /// 启动闸门：System MCP 未完成 transport / initialize / 能力协商 / 必需工具
+    /// 检查前不得进入 Compact / Reason / Act（契约 2）。
+    ///
+    /// - 无 System 依赖时零动作：普通 MCP 的 pending / failed 永不阻塞启动；
+    /// - 候选经 `StartupState` 暂存，失败或取消时随本次 state 丢弃，不落 middleware
+    ///   字段、不发布 ready、不写宿主共享工具表；
+    /// - 既有 discovery 与状态通知行为不变（仍在 `before_agent` / `before_model`）。
+    async fn before_react_start(
+        &self,
+        state: &mut dyn hook_state::StartupState,
+    ) -> peri_agent::error::AgentResult<()> {
+        let snapshot = self
+            .await_system_ready()
+            .await
+            .map_err(|error| self.startup_agent_error(error))?;
+        match self.startup_tool_update(&snapshot) {
+            Ok(Some(update)) => state.stage_startup_tools(update),
+            Ok(None) => Ok(()),
+            Err(source) => {
+                Err(self.startup_agent_error(SystemReadinessError::RequiredTools { source }))
+            }
+        }
     }
 
     /// 每轮 ReAct 迭代：drain 状态变化缓冲并以 Info 消息推送（不唤醒循环；

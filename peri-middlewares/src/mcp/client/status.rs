@@ -103,6 +103,8 @@ impl McpClientPool {
             pool.clients.write().insert(name.to_string(), handle);
             old_status
         };
+        // 新失败代际取代旧证据：等待方立即重读并得到 ConnectionFailed/ToolDiscoveryFailed。
+        pool.system_readiness.clear_evidence(name);
         pool.record_status_change(name, old_status.as_ref());
         peri_agent::metrics::emit(
             "mcp.error",
@@ -149,6 +151,8 @@ impl McpClientPool {
             pool.clients.write().insert(name.to_string(), handle);
             old_status
         };
+        // 需要授权是确定事实，不是「连接中」：本代证据失效并唤醒等待方。
+        pool.system_readiness.clear_evidence(name);
         pool.record_status_change(name, old_status.as_ref());
     }
 

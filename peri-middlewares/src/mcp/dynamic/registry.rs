@@ -109,6 +109,12 @@ impl DynamicMcpDeploymentPort for DynamicMcpRegistry {
         }
     }
 
+    /// 注册（或替换）本 session 的动态碰撞目录。
+    ///
+    /// 目录会在启动闸门提交后随晚到的静态 MCP 工具重注册，因此同一 session 的
+    /// 重复注册不是 no-op：先在同一把锁内用候选目录重验已发布动态工具，冲突则
+    /// 拒绝且**保留旧目录**（无部分替换），否则整体替换。这样发现期借旧目录
+    /// 放行的 load 不会在静态目录更新后继续以过期基线存在。
     fn register_catalog(
         &self,
         session_id: &str,
@@ -122,13 +128,17 @@ impl DynamicMcpDeploymentPort for DynamicMcpRegistry {
                 "Dynamic MCP task admission is closed",
             ));
         }
-        match state.catalogs.entry(session_id.to_string()) {
-            std::collections::btree_map::Entry::Occupied(_) => Ok(()),
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(tools);
-                Ok(())
-            }
+        if let Some(conflict) = candidate_catalog_conflict(&state, session_id, &tools) {
+            // safe_summary 固定为冲突工具名，调用方（stage_builder/tools.rs 的
+            // 注册回调）据此映射 `StartupRegistrationRejected`。
+            return Err(DynamicMcpFailure::new(
+                DynamicMcpErrorCode::ToolNameConflict,
+                DynamicMcpOperationState::Failed,
+                conflict,
+            ));
         }
+        state.catalogs.insert(session_id.to_string(), tools);
+        Ok(())
     }
 
     fn capability(&self, session_id: &str) -> Arc<dyn SessionMcpCapabilityPort> {
@@ -228,6 +238,49 @@ impl DynamicMcpDeploymentPort for DynamicMcpRegistry {
             }
         }
     }
+}
+
+/// 候选静态目录与已发布动态工具的重名/别名冲突；返回首个冲突的候选条目名。
+///
+/// 判定与 `registry/capability.rs::tools_collide` 的过滤语义对称：大小写不敏感，
+/// 且**同名静态 server** 的条目允许被该动态实例遮蔽，不参与冲突判定。只在
+/// 本 session 内比较：动态工具的碰撞基线不跨 session 共享。
+fn candidate_catalog_conflict(
+    state: &RegistryState,
+    session_id: &str,
+    tools: &[DynamicMcpCatalogTool],
+) -> Option<String> {
+    let snapshot = state.capabilities.get(session_id)?;
+    if snapshot.tools.is_empty() {
+        return None;
+    }
+    let mut candidates: BTreeMap<String, Vec<&DynamicMcpCatalogTool>> = BTreeMap::new();
+    for tool in tools {
+        for name in std::iter::once(&tool.name).chain(tool.aliases.iter()) {
+            candidates
+                .entry(name.to_ascii_lowercase())
+                .or_default()
+                .push(tool);
+        }
+    }
+    for capability in snapshot.tools.values() {
+        let server = capability.instance.logical.server_name.as_str();
+        for name in
+            std::iter::once(capability.tool.name()).chain(capability.tool.aliases().iter().copied())
+        {
+            let conflict = candidates
+                .get(&name.to_ascii_lowercase())
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|entry| entry.static_mcp_server.as_deref() != Some(server))
+                });
+            if let Some(entry) = conflict {
+                return Some(entry.name.clone());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

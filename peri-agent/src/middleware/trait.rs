@@ -25,6 +25,7 @@ use crate::{
 /// ── Agent 生命周期级 ──
 /// 3.  before_agent           - Agent 开始执行前
 ///     before_input           - 每批用户输入进入 Compact 前；首批与初始化按链序交错
+///     before_react_start     - 首批输入准备完成后、Compact 前的启动闸门
 ///
 /// ── 每轮 ReAct 迭代 ──
 /// 4.  before_model           - 每轮 LLM 调用前
@@ -72,6 +73,21 @@ pub trait Middleware: Send + Sync {
     /// 每批 Receive 接纳用户输入后、Compact 前准备附件。
     /// 首批与 before_agent 按中间件顺序交错执行；后续批次不重复初始化。
     async fn before_input(&self, _state: &mut dyn hook_state::BeforeInputState) -> AgentResult<()> {
+        Ok(())
+    }
+
+    /// 首次输入准备完成后、Compact 前的启动闸门。
+    ///
+    /// 默认 no-op；只有声明启动依赖的 middleware 实现。调用点在首批
+    /// `before_agent` / `before_input` 之后、Compact 之前：返回 Err 时本次 loop
+    /// 不进入 Compact / Reason / Act（`Interrupted` 仍按中断分类），已暂存的
+    /// 候选随 state 丢弃。候选经 `StartupState` 传递，不落 middleware 内部字段。
+    ///
+    /// 与既有 `before_agent` 的软失败语义互不影响：初始化钩子的 Err 处理不变。
+    async fn before_react_start(
+        &self,
+        _state: &mut dyn hook_state::StartupState,
+    ) -> AgentResult<()> {
         Ok(())
     }
 

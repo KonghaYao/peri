@@ -88,6 +88,21 @@ impl MiddlewareChain {
         Ok(())
     }
 
+    /// 顺序执行启动闸门钩子（首批输入准备完成后、Compact 前）。
+    ///
+    /// 遇错即停——后续 middleware 不执行，错误向上传播，调用方据此阻止进入
+    /// Compact / Reason / Act。执行前先登记当前 middleware 名称，供候选归属。
+    pub async fn run_before_react_start(
+        &self,
+        state: &mut dyn hook_state::StartupState,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            state.set_active_middleware(middleware.name());
+            middleware.before_react_start(state).await?;
+        }
+        Ok(())
+    }
+
     /// 顺序执行 Reason 工具目录刷新钩子。
     pub async fn run_before_reason_catalog(
         &self,

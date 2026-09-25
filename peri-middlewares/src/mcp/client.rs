@@ -5,6 +5,10 @@ mod cache;
 mod lifecycle;
 mod oauth;
 pub(crate) mod process;
+// System MCP 启动准入 seam：接口先冻结，生产接线归 B-02（W3 证据提交 / 清单发布）
+// 与 B-03（W4 闸门）；本 wave 内已由 crate 内测试覆盖全部路径。
+#[allow(dead_code)]
+mod readiness;
 mod service;
 mod status;
 mod subscription;
@@ -17,11 +21,21 @@ use oauth::{OAuthFlowKey, PendingOAuthCallback};
 use peri_acp_types::{
     mcp::McpSubscriptionPort, ports::McpPoolShutdownReport, session::InboxHandle,
 };
+use readiness::SystemReadinessTracker;
 use rmcp::model::{Resource, Tool};
 use std::{any::Any, collections::HashMap, sync::Arc};
 
 pub(crate) use cache::cache_scope_allows_persistence;
 pub use oauth::OAuthStartDisposition;
+// System MCP 启动准入（IF-M3）：证据、等待与类型化错误；子模块声明留在本文件，
+// 不占 `mcp/mod.rs`（其 owner 为 C-INJ-02 / D-02）。消费方：B-02（证据提交 /
+// 清单发布，已接线）、B-03（闸门与 C 接线，W4 消费 `NegotiatedSystemMcp` /
+// `SystemMcpRequirement` / `SystemReadinessError`）。
+#[allow(unused_imports)]
+pub(crate) use readiness::{
+    DiscoveryEvidence, NegotiatedSystemMcp, SystemMcpManifest, SystemMcpRequirement,
+    SystemReadinessError,
+};
 #[cfg(test)]
 pub(crate) use service::ControlledMcpService;
 pub(crate) use service::{
@@ -97,6 +111,9 @@ pub struct McpClientPool {
     pub(crate) capability_profile: super::apps::McpCapabilityProfile,
     /// 初始模型 MCP tool invocation 签发、`peri/mcp/open` 单次消费的租约。
     pub(crate) app_binding_leases: Arc<super::apps::McpAppBindingLeaseRegistry>,
+    /// System MCP 启动准入事实（IF-M3）：配置清单状态 + 每台 server 的本代发现
+    /// 证据 + 独立 watch revision。所有写入都必须经由成功/失败的生产路径。
+    pub(crate) system_readiness: SystemReadinessTracker,
 }
 
 pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -145,6 +162,7 @@ impl McpClientPool {
             resource_cache: super::resource_cache::McpResourceCache::new(),
             capability_profile,
             app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
+            system_readiness: SystemReadinessTracker::new(),
         }
     }
 

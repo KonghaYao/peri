@@ -30,6 +30,10 @@ pub enum ToolCallError {
 }
 
 /// 将单个 MCP tool 包装为 BaseTool 实现
+///
+/// `Clone` 只复制已有的 String/Value/Arc/gate 字段，不建立新连接、不注册新 lease；
+/// 供准入路径从已验证快照多次产出 Box，避免重复注册同一工具。
+#[derive(Clone)]
 pub struct McpToolBridge {
     server_name: String,
     tool_name: String,
@@ -37,6 +41,8 @@ pub struct McpToolBridge {
     description: String,
     input_schema: serde_json::Value,
     model_visible: bool,
+    /// 是否直接进入模型 tools 参数；缺省 false（deferred）。
+    direct: bool,
     server_generation: u64,
     client: Arc<McpClientHandle>,
     binding_leases: Option<Arc<super::apps::McpAppBindingLeaseRegistry>>,
@@ -112,6 +118,7 @@ impl McpToolBridge {
             description,
             input_schema,
             model_visible: super::apps::tool_visibility(tool).model,
+            direct: false,
             server_generation: 0,
             client,
             binding_leases: None,
@@ -147,6 +154,7 @@ impl McpToolBridge {
             input_schema: serde_json::to_value(&*tool.input_schema)
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
             model_visible: super::apps::tool_visibility(tool).model,
+            direct: false,
             server_generation: 0,
             client,
             binding_leases: None,
@@ -165,6 +173,32 @@ impl McpToolBridge {
     ) -> Self {
         self.binding_leases = Some(registry);
         self
+    }
+
+    /// 将本 bridge 提升为 direct（无需模型先搜索即可出现在 tools 参数中）。
+    ///
+    /// 只改 direct 标记：visibility、名称、client、generation、admission 与
+    /// binding leases 均不变，也不产生副本或新注册。
+    ///
+    /// 调用点归 `system_tools::prepare_system_tools`（同 Wave 落地）；
+    /// 接线前显式豁免未使用告警。
+    #[allow(dead_code)]
+    pub(crate) fn with_direct(mut self) -> Self {
+        self.direct = true;
+        self
+    }
+
+    /// MCP 声明的原始工具名（未净化、未加 server 前缀）。
+    ///
+    /// effective name 的净化不可逆（分隔符与 `__` 都可能出现在分量内），
+    /// 需要按原始名匹配时必须经此访问器，不得反拆 `name()`。
+    /// server identity 用 [`BaseTool::mcp_server_name`]。
+    ///
+    /// 调用点归 `system_tools::prepare_system_tools`（同 Wave 落地）；
+    /// 接线前显式豁免未使用告警。
+    #[allow(dead_code)]
+    pub(crate) fn original_tool_name(&self) -> &str {
+        &self.tool_name
     }
 }
 
@@ -199,6 +233,10 @@ impl BaseTool for McpToolBridge {
 
     fn visible_to_model(&self) -> bool {
         self.model_visible
+    }
+
+    fn is_direct(&self) -> bool {
+        self.direct
     }
 
     async fn invoke(
@@ -366,20 +404,34 @@ fn format_contents(contents: &[ContentBlock]) -> String {
     parts.join("\n")
 }
 
-/// 从 McpClientPool 的所有已连接客户端中批量创建 McpToolBridge
-pub fn build_tool_bridges(pool: &McpClientPool) -> Vec<Box<dyn BaseTool>> {
-    let mut bridges: Vec<Box<dyn BaseTool>> = Vec::new();
+/// 从 McpClientPool 的所有已连接客户端中批量创建 typed McpToolBridge。
+///
+/// `build_tool_bridges` 的 typed 版本：调用方可以在同一批对象上做分类
+/// （如 [`McpToolBridge::with_direct`]）后只装箱一次，避免同一工具被注册两份。
+/// 两种 constructor、generation 与 binding leases 行为与原实现一致。
+pub(crate) fn build_typed_tool_bridges(pool: &McpClientPool) -> Vec<McpToolBridge> {
+    let mut bridges: Vec<McpToolBridge> = Vec::new();
     for client in pool.get_all_clients() {
         let generation = pool.handle_generation(&client);
         for tool in &client.tools {
-            bridges.push(Box::new(
+            bridges.push(
                 McpToolBridge::new(&client.name, tool, Arc::clone(&client))
                     .with_server_generation(generation)
                     .with_binding_leases(Arc::clone(&pool.app_binding_leases)),
-            ));
+            );
         }
     }
     bridges
+}
+
+/// 从 McpClientPool 的所有已连接客户端中批量创建 McpToolBridge
+///
+/// 全部返回值保持 deferred 默认行为（`is_direct() == false`）。
+pub fn build_tool_bridges(pool: &McpClientPool) -> Vec<Box<dyn BaseTool>> {
+    build_typed_tool_bridges(pool)
+        .into_iter()
+        .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
+        .collect()
 }
 
 /// 统一工具池组装：内置工具优先去重
@@ -387,3 +439,91 @@ pub fn build_tool_bridges(pool: &McpClientPool) -> Vec<Box<dyn BaseTool>> {
 #[cfg(test)]
 #[path = "tool_bridge_test.rs"]
 mod tests;
+
+/// C-INJ-01 focused 回归：typed bridge 的 direct 提升不改变 bridge 身份，
+/// 且既有 public `build_tool_bridges` 的 deferred 默认行为不变。
+#[cfg(test)]
+mod direct_flag_tests {
+    use super::*;
+    use crate::mcp::client::ClientStatus;
+
+    fn make_tool(tool_name: &str) -> Tool {
+        serde_json::from_value(serde_json::json!({
+            "name": tool_name,
+            "description": "Read a file",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn make_handle(server: &str, tools: Vec<Tool>, status: ClientStatus) -> Arc<McpClientHandle> {
+        Arc::new(McpClientHandle {
+            name: server.to_string(),
+            version: None,
+            cache_version: None,
+            peer: None,
+            tools,
+            resources: vec![],
+            status,
+            oauth_status: Default::default(),
+            source: None,
+            url: None,
+            skills_capable: false,
+            channel_capable: false,
+        })
+    }
+
+    #[test]
+    fn test_system_direct_flag_preserves_bridge_identity() {
+        let bridge = McpToolBridge::new(
+            "workspace",
+            &make_tool("Read"),
+            make_handle("workspace", vec![], ClientStatus::Disconnected),
+        );
+        assert!(!bridge.is_direct(), "new 缺省必须为 deferred");
+        let name = bridge.name().to_string();
+        let parameters = bridge.parameters();
+        assert!(bridge.visible_to_model());
+
+        let promoted = bridge.with_direct();
+        assert!(promoted.is_direct());
+        assert_eq!(promoted.name(), name);
+        assert_eq!(promoted.original_tool_name(), "Read");
+        assert_eq!(promoted.mcp_server_name(), Some("workspace"));
+        assert_eq!(promoted.parameters(), parameters);
+        assert!(
+            promoted.visible_to_model(),
+            "direct 不等于绕过 model visibility"
+        );
+    }
+
+    #[test]
+    fn test_build_tool_bridges_keeps_deferred_default_and_matches_typed() {
+        let pool = McpClientPool::new_pending();
+        let handle = make_handle(
+            "workspace",
+            vec![make_tool("Read")],
+            ClientStatus::Connected,
+        );
+        pool.clients
+            .write()
+            .insert("workspace".to_string(), Arc::clone(&handle));
+
+        let typed = build_typed_tool_bridges(&pool);
+        let boxed = build_tool_bridges(&pool);
+        assert_eq!(typed.len(), 1);
+        assert_eq!(boxed.len(), typed.len());
+        assert_eq!(boxed[0].name(), typed[0].name());
+        assert!(!typed[0].is_direct(), "typed builder 缺省必须为 deferred");
+        assert!(
+            !boxed[0].is_direct(),
+            "public builder 必须保持 deferred 默认"
+        );
+        // 既有 generation / binding leases 传递行为不得因提取 typed builder 而丢失
+        assert_eq!(typed[0].server_generation, pool.handle_generation(&handle));
+        assert!(typed[0].binding_leases.is_some());
+    }
+}

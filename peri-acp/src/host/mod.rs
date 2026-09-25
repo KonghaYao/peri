@@ -49,6 +49,9 @@ pub mod controller_ports;
 mod executor_flow_tests;
 pub mod lease;
 mod mcp_apps;
+#[cfg(test)]
+#[path = "mcp_v4_startup_test.rs"]
+mod mcp_v4_startup_tests;
 mod notify;
 mod oauth_delivery;
 mod prediction;
