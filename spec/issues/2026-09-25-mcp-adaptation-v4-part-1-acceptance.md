@@ -4,7 +4,7 @@
 **优先级**：高
 **类型**：验收记录 / MCP 启动准入与一等工具注入
 **创建日期**：2026-09-25
-**最后核查**：2026-09-26（task D-05，W6）
+**最后核查**：2026-09-26（task D-05，W6；§5.1 为独立验证阶段的收口复跑）
 **事实源**：`docs/design/mcp-adaptation-v4-part-1.md`（契约语义）、`spec/issues/2026-09-25-mcp-adaptation-v4-part-1-plan.md`（批次与接口冻结）
 **范围**：只记录契约 1–4、7 的落地与契约 5、6 的分级证据；不实现生产代码，不回填设计文档。
 
@@ -99,7 +99,25 @@ D-03 实际覆盖（PARTIAL 的正面部分）：pool entry 分离、`Arc<McpCli
 
 **辅助证据**：`cargo clippy --workspace --all-targets -- -D warnings` exit 0（cargo 复用已缓存 clippy 结果，无新诊断）。此项不属 plan §6 门禁，仅作参考。
 
-**测试模块 wiring 复核**（plan §9 规则 2）：新增测试文件均已挂载——`mcp/v4_seam_test.rs`→`mcp/mod.rs:62`、`mcp/system_tools_test.rs`→`system_tools.rs:386`、`mcp/client/readiness_test.rs`→`readiness.rs:628`、`peri-acp/src/host/mcp_v4_startup_test.rs`→`host/mod.rs:52`；两个 `tests/*.rs` 由 cargo 自动发现。未见未挂载的孤儿测试文件。
+**测试模块 wiring 复核**（plan §9 规则 2）：新增测试文件均已挂载——`mcp/v4_seam_test.rs`→`mcp/mod.rs:62`、`mcp/system_tools_test.rs`→`system_tools.rs:386`、`mcp/client/readiness_test.rs`→`readiness.rs:628`、`peri-acp/src/host/mcp_v4_startup_test.rs`→`host/mod.rs:52`、`stage_builder/tools_test.rs`→`stage_builder/tools.rs:103`；两个 `tests/*.rs` 由 cargo 自动发现。未见未挂载的孤儿测试文件。
+
+### 5.1 独立验证阶段的收口复跑（W6 之后）
+
+以下命令由独立验证方在三个提交冻结后复跑，与前表口径一致（0 tests 视为失败）。
+
+| 命令 | exit | 测试数 | 0 tests? | 结论 |
+| --- | ---: | --- | --- | --- |
+| `cargo test --workspace --lib` | 0 | 1803 passed / 0 failed / 10 ignored | 否 | 全 workspace lib 目标无回归 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 | 非测试命令 | N/A | 无 warning |
+| `cargo test -p peri-acp-types -p peri-agent -p peri-middlewares --lib`（`cargo fmt --all` 之后） | 0 | 3113 passed / 0 failed / 5 ignored | 否 | 格式化未改变行为 |
+
+**关闭的缺口**（W3 gate 报告的两项）：
+
+| 缺口 | 处置 | 承担用例 |
+| --- | --- | --- |
+| `catalog_registration` 接线零覆盖：`DynamicMcpErrorCode::ToolNameConflict → StartupRegistrationRejected` 与其余拒绝 → `InconsistentCapability` 的映射无测试（两端各自有测试，中间接线没有） | **已补**：新增 `peri-agent/src/session/exec/stage_builder/tools_test.rs`（3 例），在实现文件内挂载 | `startup_registration_maps_tool_conflict_to_rejection`、`startup_registration_maps_non_conflict_to_inconsistent_capability`、`startup_registration_forwards_session_and_candidate_tools`（`cargo test -p peri-agent --lib -- stage_builder::tools::tests` exit 0 / 3 passed） |
+| W1 gate H-1：`stage_builder.rs` 认领但未改动，B-05 主张 `replace_static_mcp_tools` + `refresh()` 已足够 | **确认为正确，非缺口**：`replace_static_mcp_tools` 只更新 static base 与 published，Reason 边界仍完整走 `refresh → working map swap → before_reason_catalog → before_model → pin`（`tool_catalog.rs:214-300`）；首个 LLM 请求入参已由 `system_mcp_ready_exposes_required_tools_on_first_model_request` 端到端断言 | 同上 host 用例 |
+| `set_startup_catalog_registration` 上遗留的 `#[allow(dead_code)]` 与「本次提交前尚未接线」注释在接线后已过时 | **已清理**：移除 allow，注释改为「未接线的目录（子 agent 沿用自身 capability）保持 None」；clippy `-D warnings` 仍为 exit 0，反证调用点真实存在 | `peri-agent/src/session/tool_catalog.rs` |
 
 ## 6. IF-M4 回退声明
 
@@ -115,8 +133,10 @@ D-03 实际覆盖（PARTIAL 的正面部分）：pool entry 分离、`Arc<McpCli
   - `docs/design/README.md`（mtime 2026-09-25 21:53）：在 design 索引表登记 `mcp-adaptation-v4-part-1.md`，属设计文档立项步骤，早于 plan（23:29）与实施窗口。
   - `peri-cool` 子模块指针为 dirty 标记（非本次任务文件）。
   - 上述均无 MCP 运行时语义，记录在此以说明「§4 之外存在 diff」这一事实，不作为越界修复对象。
-- **矩阵内但未被改动**：`peri-agent/src/session/exec/stage_builder.rs`、`stage_builder/builder_v2_test.rs`（B-05 认领但无需修改）；`initialize.rs` 的 4 处 `unwrap_or_default()` 已消除（grep 0 命中）。
+- **矩阵内但未被改动**：`peri-agent/src/session/exec/stage_builder.rs`、`stage_builder/builder_v2_test.rs`（B-05 认领但无需修改，§5.1 已核实依据）；`initialize.rs` 的 4 处 `unwrap_or_default()` 已消除（grep 0 命中）。
+- **独立验证阶段新增**：`peri-agent/src/session/exec/stage_builder/tools_test.rs`（关闭 §5.1 的接线覆盖缺口，落在 `stage_builder/` 路径内）；`peri-agent/src/session/tool_catalog.rs`、`peri-acp-types/src/plugin.rs`、`peri-middlewares/src/mcp/mcp_v4_seam_test.rs` 三处经 `cargo fmt --all` 重排（仅格式，无语义变更，§5.1 已复跑）。
 - `docs/design/mcp-adaptation-v4-part-1.md` 未被修改（未回填批次/勾选/耗时）。
+- 提交切分：`ca0265e4`（规划与验收记录）、`10162ec8`（实现）、`041f9cac`（文档同步）；`.github/workflows/ci.yml` 与 `peri-cool` 未纳入提交（与本次任务无关）。
 
 ## 8. 本次未验证 / 非目标
 
