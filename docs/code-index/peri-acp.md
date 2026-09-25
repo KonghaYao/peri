@@ -1,6 +1,6 @@
 # peri-acp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-12（模块职责拆分与 compact/历史恢复修复合并）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-26（System MCP 启动准入 host seam 回归入口；模块职责拆分与 compact/历史恢复修复合并）
 > 依据：peri-acp/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/peri-acp-protocol.md、源码
 
 ## 架构速览
@@ -153,3 +153,4 @@
 - ARC-SECRET-001：日志/错误/遥测不得泄露 secret（provider api_key 仅在 LlmProvider 内部持有）
 
 - 部署关闭回归：`host/stdio/langfuse_shutdown_test.rs` 的真实尾部事件、waiter 取消、共享会话、MCP/session Incomplete 重试与 HTTP 失败终态；`transport/mpsc_test.rs::test_explicit_close_rejects_both_pending_directions_and_delivers_eof` 证明显式 close 结算双向 pending 并让两端 EOF。
+- System MCP 启动准入回归（B-07 宿主 seam，契约 2/3/4）：`host/mcp_v4_startup_test.rs`（模块 `host::mcp_v4_startup_tests`，`host/mod.rs:52-54` 挂载；真实子进程 rmcp stdio + counting model + 临时 HOME，用例 `#[serial]` 且 `#[cfg(not(windows))]`）——命令 `cargo test -p peri-acp --lib -- host::mcp_v4_startup_tests`。它不覆盖 crate 内 seam（归 `peri-middlewares` 的 `mcp::mcp_v4_seam`）与工具调用策略（归 `mcp_host_policy_contract`）。
