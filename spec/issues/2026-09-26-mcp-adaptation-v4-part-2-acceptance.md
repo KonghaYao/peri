@@ -606,7 +606,7 @@ wave 1 提交（`354705e5`）删除了 `WebMiddleware` 链槽位与提供面，�
 | m9 | `docs/design/meta-harness.md` 装配示意里 `let disabled: HashSet<&str>` 与真实签名 `closed_instances(&HashSet<String>)` 不符（按字面不可编译） | **已改为** `HashSet<String>`（`.map(\|(k, _)\| k.clone())`），示例与 `assembly.rs:419` 的实参类型一致 |
 | m10 | `docs/code-index/peri-middlewares.md` 头注把「`middleware/web.rs` 文件删除」归入「收口第二轮」，实际该删除发生在 wave 1 提交 `354705e5`（`git log --diff-filter=D` + 提交信息 + §11 第 7 行三处互证） | **已改**：该短语移入「此前（Builtin MCP 实例…）」段并标注提交号 |
 | m11 | §12.3 第 4 行引 `subagent/mod_test.rs:507` 实为该用例的**文档注释**行（`#[test]` 在 508、`fn` 在 509） | **已改为** `:509` 并注明 507 是文档注释行 |
-| m12 | `example/minimal/README.md` 表头仍为「Middleware controls」，而表中两行现属 builtin 实例策略键 | **接受现状**：表头分组是名义问题；17:01 新增的 Note 已准确声明两键「不再是 middleware 槽位，而是 builtin 实例关闭键（`BUILTIN_INSTANCE_POLICY_KEYS`），旧配置仍被识别」，且 `example/minimal/.peri/settings.json` 的两键行为不变 ⇒ 不触发 DOC-UPDATE-001 的事实错误，本轮不改（避免与本波次无关的示例改动） |
+| m12 | `example/minimal/README.md` 表头仍为「Middleware controls」，而表中两行现属 builtin 实例策略键 | **接受现状**：表头分组是名义问题；17:01 新增的 Note 已准确声明两键「不再是 middleware 槽位，而是 builtin 实例关闭键（`BUILTIN_INSTANCE_POLICY_KEYS`），旧配置仍被识别」，且 `example/minimal/.peri/settings.json` 的两键行为不变 ⇒ 不触发 DOC-UPDATE-001 的事实错误，本轮不改（避免与本波次无关的示例改动）。**（→ 收口提交 `6eb0ca45` 之后按用户口径在 §12.8.7 改为「已更新表头」）** |
 
 #### 12.8.4 复核未覆盖面（与本节声称边界一致，不升级）
 
@@ -648,3 +648,16 @@ wave 1 提交（`354705e5`）删除了 `WebMiddleware` 链槽位与提供面，�
 3. **现象统计（本次会话内，均为同一台机、同一代码树）**：`--workspace` 级全量 lib 共 4 次——§12 第一次**绿**、§12.7 第一次 **2 例红**、§12.7 第二次**绿**、本轮第一次 **红（≥1 例）**、本轮第二次**绿**（即 5 次中 2 红 3 绿）；`-p peri-tui` 单 crate 级共 4 次（§12.7 隔离复跑 1 次 + 本轮 3 次）**全绿**。
 4. **机理收窄（相对 §12.7.3 的新结论）**：失败**只在 workspace 级全量里出现**，单 crate 连跑 3 次复现不出 ⇒ 该 crate 的全局 atom 交错需要 workspace 级运行的上下文（构建 / 运行期差异），单纯「同一 lib target 内 serial 与非 serial 用例交错」不足以解释。§12.7.3 第 3 条已注明「未做：精确定位交错伙伴」——本轮**仍未做**，此处只把现象范围收窄并如实登记，**不作**因果断言。
 5. **判定不变**：本波 20 个改动文件中**无** `peri-tui/` 任何文件；peri-tui 的失败与 wave 1 的改动面无因果路径；§12.4「全量回归 PASS」的判定口径仍按 §12.7.3 第 5 条（**隔离复跑 + 全量复跑双证据**，非「每次全量必绿」）。该缺口属 `peri-tui` owner 面，按 §9 规则 1 不在本波次修复，仅登记。
+
+#### 12.8.7 第五轮：文档面追加更新（编排者，2026-09-26 续四）
+
+> 触发：收口提交 `6eb0ca45` 之后的「更新文档」口径。**只改文档**——不改代码、不改测试、不改任何分级或声称；**文件集合不变**（仍是 §12.8.1 的 **20** 个文件，本节改动落在其中 2 个文件内），随收口批次的**文档追加提交**落盘。
+
+| # | 位置 | 原文 | 改为 | 依据 / 证据 |
+| --- | --- | --- | --- | --- |
+| 1 | `example/minimal/README.md:37` | `### Middleware controls` | `### Middleware and builtin instance controls` | §12.8.3 **m12** 由「接受现状」升级为「已更新表头」：该表内两行（`WebMiddleware: false` / `ArtifactMiddleware: false`）现属 builtin 实例关闭键（`BUILTIN_INSTANCE_POLICY_KEYS`），表头分组与内容不符；17:01 的 Note 与两行含义均不变，示例行为（`example/minimal/.peri/settings.json:26` / `:37`）不变 |
+| 2 | `docs/code-index/peri-middlewares.md:3` | 「更新：2026-09-26（**收口第二轮**：`artifact/mod.rs` 的 `ArtifactMiddleware` 提供面与 … 三处 `is_direct()` 覆写删除，…」 | 「更新：2026-09-26（**收口第二～四轮**：…（提交 `6eb0ca45`），…」 | 与 §12.8.3 **m10** 同型的**归属错误**：`git show 354705e5:peri-middlewares/src/artifact/mod.rs` 仍含 **5** 处 `ArtifactMiddleware`、`354705e5` 的 `middleware/web_search.rs` 仍含 `fn is_direct` ⇒ 两项删除**不在** wave 1 提交内，而发生在收口提交 `6eb0ca45`（= 第二～四轮的产出）。原文只写「收口第二轮」**低估轮次** |
+
+**本节明确排除**：`docs/design/mcp-adaptation-v4-part-1.md` **不动** —— 该文件自述「已批准目标设计」（第 3 行），并在第 234 行明文「本文件只定义必须满足的行为契约，**不保存**某一次执行的勾选状态、耗时或提交号」⇒ v4-part-2 的落地状态由本记录与主计划承担，不写入该文件；其迁移清单表的「迁移状态」列（第 180 行起，含第 190–191 行的 `ArtifactMiddleware` / `WebMiddleware` 两行）是**目标归属**，不是当前实现描述。
+
+**复检（命令 70）**：`git diff --check` 无输出（exit 0）；表头旧名在 `example/**` 内**无残留**（该串在 `example/` 的唯一命中即被改的那一行），其余命中全部落在 `spec/` 内（§12.7.2、§12.8.3 m12、本节与主计划 R41 —— 都是对本次改名的**记述**）⇒ 无悬空指向；本节不改任何 `.rs`，故不触发 `cargo fmt` / `clippy` / 测试的复跑义务（判定口径同 §12.8.5：命令 59–68 的证据对应 12.8.5 落盘时的 `.rs` 内容，本节未触碰）。

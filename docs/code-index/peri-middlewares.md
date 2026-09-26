@@ -1,6 +1,6 @@
 # peri-middlewares 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-26（收口第二轮：`artifact/mod.rs` 的 `ArtifactMiddleware` 提供面与 `web_fetch` / `web_search` / `artifact` 三处 `is_direct()` 覆写删除，Web / Artifact 的 Direct 身份完全由注册表声明表决定。此前：Builtin MCP 实例：`web` / `artifact` 改由同进程实例提供、默认层注入与关闭语义；`WebMiddleware` / `ArtifactMiddleware` 与四个链挂载点删除、死文件 `middleware/web.rs` 删除（提交 `354705e5`）。此前：System MCP 启动准入与一等工具注入；Bash 同步期限覆盖 nohup 后代管道排空；multitask 下沉为内置技能）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-26（收口第二～四轮：`artifact/mod.rs` 的 `ArtifactMiddleware` 提供面与 `web_fetch` / `web_search` / `artifact` 三处 `is_direct()` 覆写删除（提交 `6eb0ca45`），Web / Artifact 的 Direct 身份完全由注册表声明表决定。此前：Builtin MCP 实例：`web` / `artifact` 改由同进程实例提供、默认层注入与关闭语义；`WebMiddleware` / `ArtifactMiddleware` 与四个链挂载点删除、死文件 `middleware/web.rs` 删除（提交 `354705e5`）。此前：System MCP 启动准入与一等工具注入；Bash 同步期限覆盖 nohup 后代管道排空；multitask 下沉为内置技能）
 > 依据：peri-middlewares/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/{mcp-multiplexing,middleware-system,workflow}.md、docs/reference/mcp-ecosystem.md、源码
 
 ## 架构速览
