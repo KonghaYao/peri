@@ -11,7 +11,9 @@ const ALLOWED_EXTENSIONS: &[&str] = &["html", "htm", "md"];
 /// Artifact 上传工具——将本地 HTML / Markdown 文件上传到 CCB Artifacts 服务，返回公开 URL。
 ///
 /// .md 文件会在上传前自动转换为带样式的 HTML 页面。
-/// 直接工具（direct tool）：由独立 `ArtifactMiddleware` 注册到 LLM 工具视图。
+/// 模型面的名字与直连性由 **builtin `artifact` 实例**的声明表决定
+/// （`peri-acp-types/src/builtin_mcp.rs`：原始名 `artifact` → `mcp__artifact__artifact`），
+/// 本结构体只提供工具核心。
 pub struct ArtifactTool {
     cwd: String,
     client: ArtifactClient,
@@ -111,10 +113,6 @@ impl ArtifactTool {
 impl BaseTool for ArtifactTool {
     fn name(&self) -> &str {
         "artifact"
-    }
-
-    fn is_direct(&self) -> bool {
-        true
     }
 
     /// Meta 工具统一分组（design v2 §2.5.1）。

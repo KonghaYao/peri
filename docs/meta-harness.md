@@ -31,8 +31,9 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 - `"01_intro": true`：用 `.peri/meta/01_intro.md` 全文替换内置的 01 段落
   （角色定义）；
 - `"05_using_tools": true`：同理替换工具使用纪律段落；
-- `"WebMiddleware": false`：装配期关闭 Web 工具（WebFetch / WebSearch
-  不进工具列表，其钩子全部失效）。
+- `"WebMiddleware": false`：关闭 builtin `web` 实例（`mcp__web__WebSearch` /
+  `mcp__web__WebFetch` 从 direct tools、deferred 目录与检索、subagent
+  `parent_tools`、workflow agent 工具列表一并消失）。
 
 ## 段落 ID 清单
 
@@ -49,23 +50,36 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 - 覆盖全文**整段替换**内置段落，段落渲染顺序（位置 + 段内序号）不变；
 - 覆盖为**空串**时段落整体消失；空白串原样渲染（不 trim）。
 
-## middleware 名清单
+## 能力关闭键清单
 
-`false` key 使用装配面 middleware 的 `name()` 返回值；权威清单以
-`peri-acp-types/src/meta_harness.rs::MIDDLEWARE_NAMES` 为准。常用可关闭项包括：
+`false` key 有两张表，**已知键集合是两者的并集**（`peri-acp/src/provider/config.rs`
+消费，ARC-CAPABILITY-CLOSURE-001）：
+
+1. **链槽位名**：使用装配面 middleware 的 `name()` 返回值；权威清单以
+   `peri-acp-types/src/meta_harness.rs::MIDDLEWARE_NAMES` 为准。常用项包括：
 
 `DefaultSystemPromptMiddleware`、`LangMiddleware`、`AgentsMdMiddleware`、
 `AgentDefineMiddleware`、`PluginMiddleware`、`SkillsMiddleware`、
 `SkillPreloadMiddleware`、`AtMentionMiddleware`、`ImageMiddleware`、
 `FilesystemMiddleware`、`GitAttributionMiddleware`、`TerminalMiddleware`、
-`WebMiddleware`、`TodoMiddleware`、`CronMiddleware`、`HookMiddleware`、
+`TodoMiddleware`、`CronMiddleware`、`HookMiddleware`、
 `PermissionMiddleware`、`HumanInTheLoopMiddleware`、`SubAgentMiddleware`、
-`McpMiddleware`、`WorkflowMiddleware`、`ToolSearch`、`ArtifactMiddleware`、
+`McpMiddleware`、`WorkflowMiddleware`、`ToolSearch`、
 `LspMiddleware`、`GoalMiddleware`
+
+2. **builtin MCP 实例策略键**：`WebMiddleware` / `ArtifactMiddleware`
+   （`BUILTIN_INSTANCE_POLICY_KEYS`）。v4-part-2 起 Web / Artifact 不再是链槽位
+   ——能力由同进程 builtin 实例（`web` / `artifact`）提供，这两个键改为该实例的
+   关闭键；映射唯一来源是声明表 `peri-acp-types/src/builtin_mcp.rs` 的 `policy_key`，
+   **不按 `mcp__` 前缀或实例名硬编码过滤**。实例的另外两条关闭路径是配置片段
+   `{"<实例>": {"disabled": true}}` 与进程级环境开关（`PERI_MCP_BUILTIN=off`），
+   详见 [MCP 生态参考](reference/mcp-ecosystem.md)。
 
 关闭语义：
 
-- 关闭 = middleware 实例不进链：工具、钩子、提示词贡献一并消失；
+- 关闭 = 该能力提供者退出注入面：链槽位 middleware 不进链（工具、钩子、提示词
+  贡献一并消失）；builtin MCP 实例的策略键关闭实例工具面（实例仍在 MCP 面板可见，
+  按配置路径另见上文第 2 条）；
 - **审批与提问独立**：关闭 `PermissionMiddleware` 会移除审批钩子与
   `10_hitl`；关闭 `HumanInTheLoopMiddleware` 会移除 `AskUserQuestion` 与
   `12_ask_user`；两者互不替代；
@@ -84,7 +98,8 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
   生产入口 `load()` 合并；
 - meta_harness 为**逐 key 合并**专属特例：项目级 key 覆盖全局同 key，
   全局其余 key 保留；
-- 未知 key（非段落 ID 非 middleware 名）：解析期 warn + 忽略，不 fail。
+- 未知 key（非段落 ID、非链槽位名、非 builtin 实例策略键）：解析期 warn + 忽略，
+  不 fail。
 
 ## 生效时机
 

@@ -8,9 +8,10 @@
 //!   `tools/list` 与 `tools/call` 两个方向都经真实 wire。
 //!
 //! 证据边界（不得升级为整体结论）：
-//! - Web 两个工具的**真实后端调用**（Tavily）不在本文件的证据范围内：其 base url 是
-//!   编译期常量，单测内无法指向本地桩，因此成功 / 失败形态由替身工具产生。
-//!   真实网络调用记 **UNVERIFIED**（验收记录口径）。
+//! - Web 两个工具的**真实后端调用**：端点经 `with_endpoint_for_test` 指向本地回环桩
+//!   （生产默认仍是编译期常量 base url），因此「工具体经 builtin 链路真的发出 HTTP 请求」
+//!   有证据（见 `web_handler_tools_call_reaches_real_http_stub_over_wire`）；
+//!   但**真实 Tavily 服务端**（DNS / TLS / 线上协议兼容性）仍记 **UNVERIFIED**。
 
 use std::{path::Path, sync::Arc, sync::Mutex, time::Duration};
 
@@ -23,6 +24,7 @@ use rmcp::{
     ServerHandler, ServiceError,
 };
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{
     builtin_server_handler, invoke_tool_call, rmcp_tool_from_base, BuiltinServerHandler,
@@ -30,6 +32,7 @@ use super::{
 };
 use crate::mcp::apps::McpCapabilityProfile;
 use crate::mcp::client::{serve_client_auto, McpServiceWrapper};
+use crate::middleware::{web_fetch::WebFetchTool, web_search::WebSearchTool};
 
 /// duplex 双向缓冲：单帧 JSON-RPC 行是几百字节级，8 KiB 与既有夹具一致。
 const DUPLEX_BUF: usize = 8 * 1024;
@@ -414,6 +417,127 @@ async fn web_handler_success_and_failure_forms_round_trip_over_wire() {
     assert!(
         !text.contains(LEAK_TOKEN),
         "线路上的错误文本不得含凭据形状串"
+    );
+
+    pair.shutdown().await;
+}
+
+// ─── 真实 HTTP 发包经 builtin 链路（本地回环桩；无网络、无凭据） ───────────────
+
+/// 桩返回的 /search 响应体：只存在于桩里，因此它出现在模型面文本里即证明
+/// 「工具体经 builtin 链路真的收发了 HTTP」。
+const STUB_SEARCH_BODY: &str = r#"{
+    "results": [
+        {
+            "title": "Stub Search Hit",
+            "url": "https://example.test/hit",
+            "content": "stub search content from local loopback stub"
+        }
+    ]
+}"#;
+
+/// 桩返回的非 2xx 响应体：埋入可辨认串，用于证明它**不得**泄漏到模型面文本（§9 规则 7）。
+const STUB_ERROR_BODY: &str = r#"{"detail":"stub extract upstream is down"}"#;
+
+/// 本地回环 HTTP 桩：接受一次连接，读到请求头后回一段固定原文响应；返回 `base_url`。
+async fn spawn_http_stub(status_line: &'static str, body: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("本地桩必须能绑定回环端口");
+    let port = listener.local_addr().expect("本地桩地址可读").port();
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut received = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            match socket.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    received.extend_from_slice(&chunk[..read]);
+                    if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+        let response = format!(
+            "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = socket.flush().await;
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// 验收记录 §7 第 6 条的强化：`tools/call` 经**真实 MCP wire** 到达生产 handler，
+/// 由生产 `WebSearchTool` / `WebFetchTool` 对注入端点真的发出 HTTP 请求，
+/// 结果（成功的正文 / 非 2xx 的固定失败文本）如实回到模型面。
+#[tokio::test]
+async fn web_handler_tools_call_reaches_real_http_stub_over_wire() {
+    let search_base = spawn_http_stub("HTTP/1.1 200 OK", STUB_SEARCH_BODY).await;
+    let fetch_base = spawn_http_stub("HTTP/1.1 500 Internal Server Error", STUB_ERROR_BODY).await;
+    let server = WebMcpServer::with_tools(vec![
+        Arc::new(WebSearchTool::with_endpoint_for_test(&search_base)),
+        Arc::new(WebFetchTool::with_endpoint_for_test(&fetch_base)),
+    ]);
+    let pair = connect(server).await;
+    let peer = pair.peer();
+
+    // 线上暴露的必须是这两个真实工具体（不是替身）
+    let tools = peer
+        .list_all_tools()
+        .await
+        .expect("tools/list 必须成功（覆写 discover 会让它在会话层被拒）");
+    let mut listed: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
+    listed.sort_unstable();
+    assert_eq!(
+        listed,
+        vec!["WebFetch", "WebSearch"],
+        "线上工具集必须是真实工具体"
+    );
+
+    // 成功形态：文本来自本地桩的 HTTP 响应体（经生产 invoke + IF-D14 映射）
+    let success = complete(
+        peer.call_tool_once(call("WebSearch", json!({"query": "rust"})))
+            .await
+            .expect("工具级成功必须是协议成功"),
+    );
+    assert_eq!(success.is_error, Some(false));
+    let search_text = first_text(&success).expect("成功结果必须有文本块");
+    assert!(
+        search_text.contains("Stub Search Hit"),
+        "文本必须来自真实 HTTP 响应（桩内独有串）：{search_text}"
+    );
+    assert!(
+        search_text.contains("stub search content from local loopback stub"),
+        "正文片段必须逐字来自桩响应体：{search_text}"
+    );
+
+    // 失败形态：真实 HTTP 500 ⇒ invoke Err ⇒ IF-D14 固定规则文本（细节被扣留）
+    let failure = complete(
+        peer.call_tool_once(call(
+            "WebFetch",
+            json!({"url": "https://example.test/page"}),
+        ))
+        .await
+        .expect("工具级失败仍走协议成功（is_error 承载语义）"),
+    );
+    assert_eq!(failure.is_error, Some(true));
+    let failure_text = first_text(&failure).expect("错误结果必须有文本块");
+    assert!(
+        failure_text.contains("WebFetch"),
+        "固定失败文本应含工具名：{failure_text}"
+    );
+    assert!(
+        failure_text.contains("withheld by policy"),
+        "失败细节须被策略扣留：{failure_text}"
+    );
+    assert!(
+        !failure_text.contains("stub extract upstream is down"),
+        "非 2xx 的响应体不得泄漏到模型面文本（§9 规则 7）：{failure_text}"
     );
 
     pair.shutdown().await;

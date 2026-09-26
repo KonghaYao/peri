@@ -134,8 +134,10 @@ impl WebMcpServer {
 
     /// 测试构造：注入替身工具（MCP 链路两侧都真实，只有工具结果是受控的）。
     ///
-    /// Web 两个工具的后端地址是编译期常量，无法在单测内指向本地桩，因此成功 / 失败
-    /// 两种形态只能由替身工具产生；生产构造 [`Self::new`] 的工具集另有断言覆盖。
+    /// Web 两个工具的后端地址在生产恒为编译期常量；测试可经工具自身的
+    /// `#[cfg(test)] with_endpoint_for_test` 指向本地回环桩（真实 HTTP），该形态见
+    /// `web_test.rs::web_handler_tools_call_reaches_real_http_stub_over_wire`。
+    /// 本构造器提供的是「测试替身工具」路径；生产构造 [`Self::new`] 的工具集另有断言覆盖。
     #[cfg(test)]
     pub(crate) fn with_tools(tools: Vec<Arc<dyn BaseTool>>) -> Self {
         Self { tools }

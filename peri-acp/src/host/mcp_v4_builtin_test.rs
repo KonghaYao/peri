@@ -20,6 +20,12 @@
 //!    ACP `-32000` + `data.kind = internal`、`TurnEnded(Error)`。
 //! 5. **契约 6 BLOCKED 缺口复证**（A10/R19）：被提升为 direct 的工具走完整审批链，
 //!    批准后 wire 上恰好一条 `tools/call`（`params.name` 为**裸名**），拒绝后 **0** 条。
+//! 6. **关闭态差分**（acceptance §7 第 9 条的运行时证伪面 / §4 关闭面矩阵第 3、4 面）：
+//!    `WebMiddleware=false` 下模型编造的 web 工具调用不触达审批、不触达 wire，以
+//!    「未知工具」结算；同一 turn 内的可用工具是正控制（证明审批面/wire 面已装配）。
+//! 7. **off 的判定面**（§7 第 4 条的运行时证伪面）：`PERI_MCP_BUILTIN=off` 只关注入，
+//!    不改变 effective name ↔ 原始名的判定 parity（`default_requires_approval` /
+//!    `is_edit_tool`；`is_mutation_tool` 是 crate 内私有 fn，由 peri-middlewares 侧覆盖）。
 //!
 //! 边界：本文件不实现生产代码；不修改 `mcp_v4_startup_test.rs` 的既有断言，也不修改
 //! `mcp_v4_wire_fixture_test.rs` 的既有命题（只在那里补充 V-02 需要的 seam 与可见性）。
@@ -33,6 +39,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use peri_acp_types::{
     event::{ExecutorEvent, TurnStatus},
     interaction::{
@@ -42,6 +49,7 @@ use peri_acp_types::{
     session::ExecutionFailureKind,
 };
 use peri_agent::session::FrozenContext;
+use peri_middlewares::permission::{default_requires_approval, is_edit_tool};
 use serial_test::serial;
 
 use super::{
@@ -402,6 +410,144 @@ async fn builtin_instance_closure_changes_only_the_first_model_request_surface()
     }
 }
 
+/// PTC 的**真面**是 `PtcMiddleware::before_agent` 写进提示词的 `RPC-callable tool
+/// catalog` 段（`peri-middlewares/src/ptc/mod.rs:310-338`）：它与 `collect_tools` 恒返回
+/// `[RunPtcCode]`（`:304-308`）无关 —— catalog 由 `state.local_tools()`（session/turn 级
+/// 工具视图）生成，故**必须**随 builtin 关闭集（IF-D10）同步收缩。
+///
+/// 本节是 acceptance §7 第 7 条「Goal / PTC 两个工具面」PTC 一侧的运行时证伪面：四个
+/// 关闭 case 与 [`builtin_instance_closure_changes_only_the_first_model_request_surface`]
+/// 逐位相同，但观察量换成**首个模型请求系统文本里的 catalog**（不是 `ModelRequest.tools`）。
+///
+/// 三条口径：
+///
+/// 1. **存在性守卫**：先证明 catalog 段确实出现在系统文本里、可解析为非空 JSON 数组
+///    —— 否则「不含 `mcp__web__*`」是空断言假绿；
+/// 2. **差分收缩**：以全开 case 的 catalog 长度为基线，关 web 精确 −2、关 artifact
+///    精确 −1、两者同关 −3（用增量而非绝对计数，避免基线工具集漂移造成假红）；
+/// 3. **对照锚点**：用户 MCP 的 `mcp__wire_fixture__echo` 在四个 case 里始终在 catalog
+///    中 —— 反证「catalog 段不是整段消失」。
+#[cfg(not(windows))]
+#[tokio::test]
+#[serial]
+async fn ptc_catalog_section_follows_builtin_instance_closure() {
+    // (disabled_middlewares, Web 两工具可见, artifact 可见)
+    let cases: [(&[&str], bool, bool); 4] = [
+        (&[], true, true),
+        (&["WebMiddleware"], false, true),
+        (&["ArtifactMiddleware"], true, false),
+        (&["WebMiddleware", "ArtifactMiddleware"], false, false),
+    ];
+    let web_tools = ["mcp__web__WebSearch", "mcp__web__WebFetch"];
+    let mut baseline_len: Option<usize> = None;
+
+    for (disabled, web_visible, artifact_visible) in cases {
+        let harness = WireFixtureHarness::initialized().await;
+        harness.await_connected(WIRE_FIXTURE_SERVER_NAME).await;
+        harness.await_connected("web").await;
+        harness.await_connected("artifact").await;
+
+        let sink = Arc::new(MockEventSink::new());
+        let model = Arc::new(WireScriptedModel::new(vec![]));
+        let result = run_wire_prompt_with_frozen(
+            harness.session_context("mcp-v4-builtin-ptc-catalog"),
+            &sink,
+            &model,
+            Some(frozen_with_disabled(disabled)),
+        )
+        .await;
+
+        assert!(
+            result.ok,
+            "[{disabled:?}] 关闭 builtin 实例不得 fatal: {:?}",
+            result.failure
+        );
+        assert_eq!(
+            model.call_count(),
+            1,
+            "[{disabled:?}] 首个 prompt 恰好一次模型调用"
+        );
+
+        let system = model.first_request_system_text();
+        let catalog = ptc_catalog_names(&system).unwrap_or_else(|| {
+            panic!(
+                "[{disabled:?}] 首个模型请求的系统文本必须含可解析的 `RPC-callable tool \
+                 catalog` 段（否则本节全部断言都是空断言）；系统文本前 400 字符: {}",
+                system.chars().take(400).collect::<String>()
+            )
+        });
+        println!(
+            "[{disabled:?}] ptc catalog ({} 项) = {catalog:?}",
+            catalog.len()
+        );
+
+        // 守卫 1：catalog 非空 —— PTC 面不得是空贡献。
+        assert!(
+            !catalog.is_empty(),
+            "[{disabled:?}] catalog 必须非空（PTC 的 local_tools 面必须真的被填过）"
+        );
+        // 守卫 2：对照锚点 —— 用户 MCP 的 direct 提升在任何关闭组合下都在 catalog 内。
+        assert!(
+            catalog
+                .iter()
+                .any(|name| name == WIRE_FIXTURE_ECHO_EFFECTIVE_NAME),
+            "[{disabled:?}] 用户 MCP 的 `{WIRE_FIXTURE_ECHO_EFFECTIVE_NAME}` 必须始终在 catalog \
+             中（否则「web 工具不在 catalog」可能只是整段消失）: {catalog:?}"
+        );
+
+        for tool in web_tools {
+            assert_eq!(
+                catalog.iter().any(|name| name == tool),
+                web_visible,
+                "[{disabled:?}] `{tool}` 在 PTC catalog 中的可见性: {catalog:?}"
+            );
+        }
+        assert_eq!(
+            catalog.iter().any(|name| name == "mcp__artifact__artifact"),
+            artifact_visible,
+            "[{disabled:?}] `mcp__artifact__artifact` 在 PTC catalog 中的可见性: {catalog:?}"
+        );
+
+        // 差分：关闭集在 catalog 上逐条收缩（增量口径，不用绝对计数）。
+        let expected_delta =
+            if web_visible { 0 } else { web_tools.len() } + if artifact_visible { 0 } else { 1 };
+        if web_visible && artifact_visible {
+            baseline_len = Some(catalog.len());
+        } else {
+            let base = baseline_len.expect("全开基线 case 必须先于关闭 case 执行");
+            assert_eq!(
+                base - catalog.len(),
+                expected_delta,
+                "[{disabled:?}] catalog 相对全开基线必须精确收缩 {expected_delta} 项 \
+                 （base={base}，本 case={}）: {catalog:?}",
+                catalog.len()
+            );
+        }
+    }
+}
+
+/// PTC 提示词贡献里 `RPC-callable tool catalog` 段（JSON 数组）的工具名集合。
+///
+/// 返回 `None` 表示该段**缺失或不是合法 JSON 数组** —— 调用方必须把它当失败而不是空集，
+/// 否则「某名字不在 catalog 里」会退化成空断言。
+///
+/// 用 serde_json 的流式入口读第一个 JSON 值：catalog 之后还跟着别的动态贡献段
+/// （`## Deferred Tools` 等），流式读取不依赖段间边界的确切文本。
+fn ptc_catalog_names(system: &str) -> Option<Vec<String>> {
+    const MARKER: &str = "RPC-callable tool catalog: ";
+    let after = &system[system.find(MARKER)? + MARKER.len()..];
+    let catalog: Vec<serde_json::Value> = serde_json::Deserializer::from_str(after)
+        .into_iter::<Vec<serde_json::Value>>()
+        .next()?
+        .ok()?;
+    Some(
+        catalog
+            .iter()
+            .filter_map(|entry| entry["name"].as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
 /// `McpMiddleware=false` 的输入：整个 MCP 工具面（builtin 与用户 server）都不进入
 /// 首个 LLM 请求 —— 关闭键必须有可观察效果，不得「键存在但无效」。
 #[cfg(not(windows))]
@@ -440,18 +586,205 @@ async fn mcp_middleware_closure_removes_every_mcp_tool_from_first_model_request(
     }
 }
 
+/// 关闭态的**差分**证据（acceptance §7 第 9 条运行时证伪面 / §4 关闭面矩阵第 3、4 面）：
+/// `WebMiddleware=false` 时模型**编造**一个 web 工具调用，链路既不触达审批、也不触达
+/// wire，而是以「未知工具」结算；关闭是**调用面的真事实**，不是「事件流里没有该名字」。
+///
+/// 三条口径（避免把本用例读成它不证明的东西）：
+///
+/// 1. **差分形态**：正面对照是同文件 `promoted_direct_tool_approval_calls_wire_exactly_once`
+///    （同一夹具、同一 broker、同一脚本化模型，工具**可用** ⇒ 审批恰 1 次 + wire 恰 1 条）。
+///    本用例在**同一条 turn** 内先调一个可用工具（正控制，证明审批面与 wire 面确实已装配
+///    —— 否则「未触达」是空断言），随后再调被关闭的 `mcp__web__WebSearch`。
+/// 2. 「事件流中不出现该名 `ToolStart`」**不可能成立**，本用例不这样断言：模型编造的调用
+///    经 model bridge 的 `ToolCallDelta` 直接发 `ToolStarted`
+///    （`peri-agent/src/agent/model_bridge.rs:316-337`），解析失败后 tool dispatch 还会补发
+///    成对的 Started/Ended（`peri-agent/src/agent/stages/tool_dispatch.rs:153-157`）。
+///    因此本用例断言的是「不触达审批 / 不触达 wire / 以未知工具结算」。
+/// 3. TUI 侧「关闭后无卡片」**不构成独立证据**：TUI 对任意 `ToolStarted` 都建卡（含本条
+///    的失败结算），卡片面的证据价值来自第 3 条断言（结算为 error）而非「无事件」。
+#[cfg(not(windows))]
+#[tokio::test]
+#[serial]
+async fn closed_web_tool_call_never_reaches_approval_or_wire() {
+    /// 被关闭实例（`WebMiddleware=false`）的一等工具名：模型面里已经不存在的名字。
+    const CLOSED_NAME: &str = "mcp__web__WebSearch";
+
+    let harness = WireFixtureHarness::initialized().await;
+    harness.await_connected(WIRE_FIXTURE_SERVER_NAME).await;
+
+    let broker = Arc::new(RecordingBroker::new(BrokerDecision::Approve));
+    let sink = Arc::new(MockEventSink::new());
+    let model = Arc::new(WireScriptedModel::new(vec![
+        // 正控制：与 `promoted_direct_tool_approval_calls_wire_exactly_once` 同一个可用工具。
+        ScriptedToolCall::new(
+            WIRE_FIXTURE_ECHO_EFFECTIVE_NAME,
+            serde_json::json!({ "query": "v02-host-open-control" }),
+        ),
+        // 关闭名：模型编造的调用（批准决策 ⇒ 若它触达审批，计数必然变化）。
+        ScriptedToolCall::new(CLOSED_NAME, serde_json::json!({ "query": "closed" })),
+    ]));
+    let result = run_wire_prompt_with_frozen(
+        session_context_with_broker(&harness, "mcp-v4-builtin-closed-diff", Arc::clone(&broker)),
+        &sink,
+        &model,
+        Some(frozen_with_disabled(&["WebMiddleware"])),
+    )
+    .await;
+
+    assert!(
+        result.ok,
+        "模型编造未知名只能结算为工具级错误，不得 fatal: {:?}",
+        result.failure
+    );
+    assert_eq!(
+        model.call_count(),
+        3,
+        "两条脚本调用 + 收尾必须都在**同一条 turn** 内跑完（Reason ×3）"
+    );
+
+    // ① 正控制：可用工具确实触达审批恰 1 次 ⇒ 审批面已装配（下面的「未触达」才非空）。
+    assert_eq!(
+        broker.requests(),
+        1,
+        "可用工具必须恰好触发一次审批（正控制；若关闭名也触达审批，这里会是 2）"
+    );
+    let seen: Vec<String> = broker.seen().into_iter().map(|(name, _)| name).collect();
+    assert_eq!(
+        seen,
+        vec![WIRE_FIXTURE_ECHO_EFFECTIVE_NAME.to_string()],
+        "审批面只应看到可用工具"
+    );
+
+    // ② 关闭名：不触达审批（计数仍为 1、且审批项里没有它）。
+    assert!(
+        !seen.iter().any(|name| name == CLOSED_NAME),
+        "被关闭的 `{CLOSED_NAME}` 不得进入审批面: {seen:?}"
+    );
+
+    // ③ 结算面：该名恰有一条模型可见结果，且是「未知工具」（非审批拒绝、非 server 错误）。
+    let all_ends = tool_end_events(&sink);
+    let closed_ends: Vec<(String, String, bool)> = all_ends
+        .iter()
+        .filter(|(name, _, _)| name == CLOSED_NAME)
+        .cloned()
+        .collect();
+    assert_eq!(
+        closed_ends.len(),
+        1,
+        "编造的关闭名调用必须恰有一条结算（说明该调用真的走到了结算面）: {all_ends:?}"
+    );
+    assert!(
+        closed_ends[0].2,
+        "未知工具结算必须是 error 结果: {closed_ends:?}"
+    );
+    assert!(
+        closed_ends[0]
+            .1
+            .contains(&format!("Tool not found: {CLOSED_NAME}")),
+        "结算文案必须是「未知工具」（不是审批拒绝 / 不是 server 侧失败）: {:?}",
+        closed_ends[0].1
+    );
+
+    // ④ wire 面：关闭名 0 次；available 工具恰一条（同一 turn 内的正控制）。
+    let calls = wire_tool_calls(&harness);
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call["params"]["name"] == CLOSED_NAME),
+        "关闭名不得出现在 wire 上: {calls:?}"
+    );
+    assert_eq!(
+        calls.len(),
+        1,
+        "本 turn 的 wire 只应有可用工具那一条: {calls:?}"
+    );
+    assert_eq!(
+        calls[0]["params"]["name"], "echo",
+        "wire 上是可用工具的原始名（正控制）: {calls:?}"
+    );
+
+    // ⑤ 模型面：关闭名不可见（差分的前提），可用工具仍可见。
+    let names = model.first_request_tool_names();
+    assert!(
+        !names.iter().any(|name| name == CLOSED_NAME),
+        "`WebMiddleware=false` 时 `{CLOSED_NAME}` 不得进入首个 LLM 请求: {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| name == WIRE_FIXTURE_ECHO_EFFECTIVE_NAME),
+        "关闭只作用于被关实例，可用工具面必须不受影响: {names:?}"
+    );
+}
+
 // ── `PERI_MCP_BUILTIN=off`（A2）───────────────────────────────────────────────
 
 /// off 语义：两实例根本不被注入（不是「注册成 Disabled」），其工具既不在首个 LLM
 /// 请求、也不在 ToolSearch 摘要；**不是**回退到 middleware 旧实现（提供面已删除）；
 /// 用户 MCP 配置与其它 capability 不受影响。
+///
+/// 追加「判定面」口径（acceptance §7 第 4 条的运行时证伪面：off 只关注入，不得改变
+/// 策略判定）：`default_requires_approval` / `is_edit_tool` 都是**纯查表**、不读 env，
+/// 其 effective name ↔ 原始名的 parity（IF-D6 / A4）也不得随 env 变化。本用例在 env
+/// 生效**之前**取基线、生效期间复算并逐位比较 —— 一旦有人让这两个函数读 env（或让
+/// off 参与判定），本用例立即变红。`is_mutation_tool` 是 `peri-middlewares/src/
+/// subagent/mod.rs` 的私有 fn、本 crate 不可调用，故不在本文件覆盖；它的同名 parity
+/// 由 crate 内 `peri-middlewares/src/subagent/mod_test.rs:507` 覆盖。
 #[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn builtin_injection_off_removes_capabilities_without_fallback() {
+    // 判定面基线：必须在 `PERI_MCP_BUILTIN=off` 生效**之前**取值。
+    let policy_probe = |name: &str| (default_requires_approval(name), is_edit_tool(name));
+    let policy_baseline: Vec<(bool, bool)> = WEB_ARTIFACT_CAPABILITIES
+        .iter()
+        .map(|(_, effective)| policy_probe(effective))
+        .collect();
+
     let _off = BuiltinInjectionOff::set();
     let harness = WireFixtureHarness::initialized().await;
     harness.await_connected(WIRE_FIXTURE_SERVER_NAME).await;
+
+    // off 生效期间复算：这两个函数是纯查表、不读 env；本断言的价值是 —— 一旦有人
+    // 让它们读 env，测试变红。
+    let policy_off: Vec<(bool, bool)> = WEB_ARTIFACT_CAPABILITIES
+        .iter()
+        .map(|(_, effective)| policy_probe(effective))
+        .collect();
+    assert_eq!(
+        policy_off, policy_baseline,
+        "`PERI_MCP_BUILTIN=off` 只关注入，不得改变策略判定面（判定函数纯查表、不读 env）"
+    );
+
+    // 逐名 parity（IF-D6 / A4 判定型）：effective name 的判定必须等于其原始名的判定。
+    for (bare, effective) in WEB_ARTIFACT_CAPABILITIES {
+        assert_eq!(
+            original_tool_name_of_effective(effective),
+            Some(bare),
+            "`{effective}` 必须命中归一表并给出原始名 `{bare}`（IF-D15 唯一归一入口）"
+        );
+        assert_eq!(
+            default_requires_approval(effective),
+            default_requires_approval(bare),
+            "off 下 `{effective}` 的审批判定仍须等于原始名 `{bare}` 的判定"
+        );
+        assert_eq!(
+            is_edit_tool(effective),
+            is_edit_tool(bare),
+            "off 下 `{effective}` 的编辑类判定仍须等于原始名 `{bare}` 的判定"
+        );
+    }
+    // 反证：与冻结名仅差大小写的**未知名**不命中归一表 ⇒ 走既有 `mcp__*` 保守路径。
+    assert_eq!(
+        original_tool_name_of_effective("mcp__web__fetch"),
+        None,
+        "未知名不得被归一（不得含 sanitize / 大小写折叠 / `mcp__` 反拆）"
+    );
+    assert!(
+        default_requires_approval("mcp__web__fetch"),
+        "未知 `mcp__*` 在 off 下仍保守要求审批（保守语义不得被 env 放宽）"
+    );
 
     assert!(
         harness.pool().get_client("web").is_none()

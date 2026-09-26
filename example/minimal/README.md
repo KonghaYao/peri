@@ -36,6 +36,11 @@ The Boolean value has different meanings depending on the field category:
 
 ### Middleware controls
 
+**Note**: `WebMiddleware` / `ArtifactMiddleware` are no longer middleware slots. Web and
+artifact capabilities are provided by the built-in in-process MCP instances (`web` /
+`artifact`); these two keys are their close keys (`BUILTIN_INSTANCE_POLICY_KEYS`), so the
+rows below stay valid, and old configs using them are still recognized.
+
 | Field | Current value | Meaning |
 | --- | ---: | --- |
 | `DefaultSystemPromptMiddleware` | `true` | Enables the middleware that owns the base system prompt sections, including `01_intro` through `07_runtime` and `persona`. |

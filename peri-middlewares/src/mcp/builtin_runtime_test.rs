@@ -202,8 +202,9 @@ fn empty_closures_keep_every_builtin_tool() {
 // `get_info` / `list_tools` / `call_tool` 三个覆写点一致、工具表按**注册表声明**构造、
 // `tools/call` 按**原始名**路由并按 IF-D14 的三形态简化复刻（未知 → `invalid_params`、
 // `Ok` → success、`Err` → error 文本）；因此「名字 / direct / 审批 / 线路」这条链路与
-// 生产同构，**替身只替换工具核心**（Web 两个工具的后端地址是编译期常量，单测无法指向
-// 本地桩）。生产 handler 的协议行为由 `mcp::builtin::web` / `mcp::builtin::artifact` /
+// 生产同构，**替身只替换工具核心**（Web 两个工具的后端地址在生产恒为编译期常量；真工具体
+// 指向本地回环桩的形态由 `mcp::builtin::web` 的
+// `web_handler_tools_call_reaches_real_http_stub_over_wire` 覆盖）。生产 handler 的协议行为由 `mcp::builtin::web` / `mcp::builtin::artifact` /
 // `mcp::builtin::runtime` 覆盖。
 //
 // **不覆盖（UNVERIFIED，A13 强制项）**：capability root 隔离与凭据隔离在 builtin 形态下
@@ -217,7 +218,7 @@ fn empty_closures_keep_every_builtin_tool() {
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -225,13 +226,14 @@ use async_trait::async_trait;
 use peri_acp_types::builtin_mcp::{find, BuiltinMcpInstance, BUILTIN_MCP_INSTANCES};
 use peri_acp_types::plugin::{ConfigSource, McpServerConfig};
 use peri_agent::agent::react::ToolCall;
+use peri_agent::agent::AgentCancellationToken;
 use peri_agent::error::{AgentError, AgentResult};
 use peri_agent::interaction::{
     ApprovalDecision, InteractionContext, InteractionResponse, UserInteractionBroker,
 };
 use peri_agent::middleware::capabilities as hook_state;
 use peri_agent::session::tool_catalog::{StartupRequiredTool, StartupToolUpdate};
-use peri_agent::tools::{BaseTool, ToolContext};
+use peri_agent::tools::{BaseTool, EffectiveToolError, EffectiveToolErrorCode, ToolContext};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode,
     Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
@@ -240,6 +242,7 @@ use rmcp::model::{
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler};
 use serde_json::{json, Value};
+use tokio::sync::Notify;
 
 use crate::assembly::{default_workflow_middleware_factory_with_pool, open_builtin_bridges};
 use crate::mcp::builtin::runtime::{
@@ -247,7 +250,9 @@ use crate::mcp::builtin::runtime::{
     BUILTIN_CONVERGE_TIMEOUT,
 };
 use crate::mcp::builtin::BUILTIN_INJECTION_ENV;
-use crate::mcp::client::{serve_client_auto, McpConnectionKey, McpInitStatus, McpServiceWrapper};
+use crate::mcp::client::{
+    serve_client_auto, McpConnectionKey, McpInitStatus, McpServiceWrapper, SystemMcpManifest,
+};
 use crate::mcp::initialize::list_discovered_tools;
 use crate::mcp::tool_bridge::{build_typed_tool_bridges, McpToolBridge};
 use crate::permission::{default_requires_approval, PermissionMiddleware};
@@ -454,6 +459,75 @@ impl BaseTool for StubTool {
             .expect("stub inputs 未被 poison")
             .push(input);
         Ok(reply)
+    }
+}
+
+/// **闸门**替身工具（acceptance §7 第 5 条：builtin 工具体内在飞取消的观测点）。
+///
+/// `invoke` 进入即 `entered.notify_one()`——这是「server 侧已经在处理这次 `tools/call`」
+/// 的观测点，取消必须发生在这个点**之后**才有「在飞」语义；随后调用停在 `release` 上，
+/// 直到用例显式放行（模拟一个慢工具）。
+///
+/// 两个与「只等一个 `Notify`」不同的设计点，都是为了让断言**确定**而不引入时序假绿/假红：
+/// - `released` 是**粘滞**的：第一次放行之后，后续调用直接通过。否则「取消后同一 pool
+///   仍可服务」的第二次 `invoke` 会再次停在闸门上，观测点退化成「又一次等待」而不是
+///   「服务仍然可用」。
+/// - `finished` 在真正离开闸门后 `notify_one()`：用例据此确认**被弃置**的那次在飞
+///   handler 已经收敛，再去发第二次请求（`Notify` 的许可可暂存，因此早到/晚到都确定）。
+struct GatedTool {
+    name: String,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    finished: Arc<Notify>,
+    released: Arc<AtomicBool>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl GatedTool {
+    fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            finished: Arc::new(Notify::new()),
+            released: Arc::new(AtomicBool::new(false)),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// server 侧「工具真的被执行了」的次数（取消**不得**让它变成 2）。
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl BaseTool for GatedTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "builtin runtime 夹具替身工具（链路 / handler / 映射 / bridge 均为生产实现）"
+    }
+
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    async fn invoke(
+        &self,
+        _input: Value,
+        _ctx: ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        if !self.released.load(Ordering::SeqCst) {
+            self.release.notified().await;
+            self.released.store(true, Ordering::SeqCst);
+        }
+        self.finished.notify_one();
+        Ok("gated".to_string())
     }
 }
 
@@ -697,27 +771,53 @@ impl StartupFixture {
 /// server 半边是真实 `rmcp::serve_server`（handler 为测试替身，见文件头「证据边界 B」）；
 /// client 半边是生产 `serve_client_auto`（Auto lifecycle）。
 ///
-/// 归属口径：句柄写进 `pool.clients`（`build_typed_tool_bridges` 的唯一输入），但
-/// client service 与 server task **都由夹具持有**（不登记 pool 的 task 表），以便显式
+/// 归属口径：句柄写进 `pool.clients`（`build_typed_tool_bridges` 的唯一输入）；
+/// client service 与 server task **默认都由夹具持有**（不登记 pool 的 task 表），以便显式
 /// 断言「关闭 client → server task 靠 EOF 自然收敛（`Quit`，不是 abort）」。
+/// [`Self::hand_service_to_pool`] 可把 client 半边**移交**给 pool 的生产表（`services`），
+/// 使 `pool.reconnect` / `pool.shutdown` 真的会关闭它——「重连只动被点名实例」由此获得
+/// 失败模式（见同 pool 用例）。
 /// 生产归属（task 登记进 pool、随 pool 关闭排空）由 [`StartupFixture::shutdown`] 与
 /// `mcp::builtin::runtime` 覆盖。
 struct TappedLink {
     instance: &'static BuiltinMcpInstance,
     pool: Arc<McpClientPool>,
-    service: McpServiceWrapper,
+    /// 夹具自持的 client 半边；[`Self::hand_service_to_pool`] 之后为 `None`。
+    service: Option<McpServiceWrapper>,
     server_task: BuiltinServerTask,
     wire: Arc<BuiltinWireLog>,
     handler: FixtureBuiltinHandler,
 }
 
 impl TappedLink {
+    /// 单实例链路：自建**独立** pool（既有用例口径逐位不变；本函数只是
+    /// [`Self::connect_into`] 的薄包装）。
     async fn connect(
         instance: &'static BuiltinMcpInstance,
         info_name: &'static str,
         tools: Vec<Arc<dyn BaseTool>>,
     ) -> Self {
-        let pool = Arc::new(McpClientPool::new_empty());
+        Self::connect_into(
+            Arc::new(McpClientPool::new_empty()),
+            instance,
+            info_name,
+            tools,
+        )
+        .await
+    }
+
+    /// 把链路建进**调用方给定的** pool（同一容器内的多实例观测面：A13 ④/⑤ 的
+    /// 「同 pool 不串」与「重连只动被点名实例」需要它）。
+    ///
+    /// 步骤与 [`Self::connect`] 原口径逐字相同（真实握手 → 配置侧 builtin 条目 →
+    /// live `tools/list` → 句柄写进 `pool.clients`），唯一差别是 pool 由参数注入：
+    /// 调用方与返回的链路共享同一个 pool 实例。
+    async fn connect_into(
+        pool: Arc<McpClientPool>,
+        instance: &'static BuiltinMcpInstance,
+        info_name: &'static str,
+        tools: Vec<Arc<dyn BaseTool>>,
+    ) -> Self {
         let handler = FixtureBuiltinHandler::new(info_name, tools);
         let (transport, wire) =
             spawn_builtin_transport_with_tap(instance.instance, handler.clone());
@@ -759,11 +859,38 @@ impl TappedLink {
         Self {
             instance,
             pool,
-            service,
+            service: Some(service),
             server_task,
             wire,
             handler,
         }
+    }
+
+    /// 把 client 半边移交 pool 的**生产表**（`services`）：此后它的关闭只由 pool 的动作
+    /// 驱动（`reconnect` 关被点名实例的旧 service、`shutdown` 关全部）。
+    ///
+    /// 这一步是「重连只动被点名实例」可证伪的前提：未移交时 `reconnect` 的「关旧
+    /// service」对夹具链路是**空操作**，artifact 侧的「逐字不变」在任何实现下都成立。
+    fn hand_service_to_pool(&mut self) {
+        let service = self.service.take().expect("client service 只能移交一次");
+        let previous = self
+            .pool
+            .services
+            .lock()
+            .insert(self.instance.name.to_string(), service);
+        assert!(
+            previous.is_none(),
+            "pool 的 services 表内不得已有同名 client service"
+        );
+    }
+
+    /// 收敛**夹具自持**的 server task，返回退出事实。
+    ///
+    /// 在 [`Self::hand_service_to_pool`] 之后，收敛的触发者是 **pool 的动作**
+    /// （`reconnect` / `shutdown` 关闭 client 半边 ⇒ 本 task 收到 EOF）；调用方据此把
+    /// `Quit` 归因到 pool 的那次动作，而不是夹具自己的收尾。
+    async fn converge_task(&mut self) -> BuiltinServerExit {
+        self.server_task.converge(BUILTIN_CONVERGE_TIMEOUT).await
     }
 
     /// 线路级 method 序列（server 读半观测）。
@@ -801,15 +928,24 @@ impl TappedLink {
     }
 
     /// 夹具收尾：关闭 client → server task 必须靠 EOF 自然收敛（无 orphan）。
+    ///
+    /// 只适用于**夹具自持** client 半边的链路（未调用 [`Self::hand_service_to_pool`]）；
+    /// 已移交的链路由其新归属者（pool）关闭，收敛断言改用 [`Self::converge_task`]。
     async fn shutdown(mut self) {
-        let _ = self.service.close_with_timeout(CLOSE_TIMEOUT).await;
-        let mut task = self.server_task;
-        let exit = task.converge(BUILTIN_CONVERGE_TIMEOUT).await;
+        let mut service = self
+            .service
+            .take()
+            .expect("夹具自持形态才可用 shutdown；已移交 pool 的链路请用 converge_task");
+        let _ = service.close_with_timeout(CLOSE_TIMEOUT).await;
+        let exit = self.converge_task().await;
         assert!(
             matches!(exit, BuiltinServerExit::Quit(_)),
             "正常关闭必须靠 EOF 自然收敛（spike Q2 证据），实际: {exit:?}"
         );
-        assert!(task.is_finished(), "收敛后 server task 必须已结束");
+        assert!(
+            self.server_task.is_finished(),
+            "收敛后 server task 必须已结束"
+        );
     }
 }
 
@@ -1648,4 +1784,569 @@ async fn per_instance_wire_does_not_cross_between_instances() {
 
     web_link.shutdown().await;
     artifact_link.shutdown().await;
+}
+
+/// A13 ④/⑤ 的**同 pool 容器**面：两条 builtin 实例的链路（client 半边都移交进
+/// `pool.services`）建在**同一个** `McpClientPool` 里时，pool 的生命周期动作
+/// （`reconnect` / `shutdown`）**只**作用于被点名的实例。
+///
+/// 与既有 [`per_instance_wire_does_not_cross_between_instances`] 的差别：那条用例的两条
+/// 链路各自 new 一个 pool，且两条 client 半边都留在夹具手里，因此**不覆盖**「同一 pool
+/// 容器内，重连 / 关闭的作用域是否只限于被点名实例」。本用例经
+/// [`TappedLink::connect_into`] 参数化 pool，并由 [`TappedLink::hand_service_to_pool`] 把
+/// 两条 client 半边移交生产表，闭合该缺口。
+///
+/// 断言口径（逐条）：
+/// 1. web 调用一次 ⇒ web 线路 `tools/call == 1`、artifact 线路 `tools/call == 0`；
+/// 2. 取 artifact 的 method 快照后调用 artifact ⇒ web 仍 `1`、artifact `1`；
+/// 3. **method 序列逐字对照**（不是只比长度）：web 动作前后各取快照，artifact 的 log
+///    必须**逐字不变**、web 的 log 必须**只追加一帧 `tools/call`**（前缀逐字相等）；
+///    artifact 侧反向同理；
+/// 4. **移交前提**：两条 client 半边都在 `pool.services` 里；未移交时 `reconnect` 的
+///    「关旧 service」对夹具链路是**空操作**，第 5 条②的「逐字不变」在任何实现下都成立
+///    （没有失败模式）；
+/// 5. **重连隔离**（`pool.reconnect("web", None)`，先 `bind_execution_cwd`）：
+///    ① 被点名的 web：其旧 client 半边由 pool 关闭 ⇒ **夹具自持**的 web server task 靠
+///    EOF **自然**收敛 `Quit`——收敛的触发者是 pool 的动作，不是夹具自己的收尾；
+///    ② 未被点名的 artifact：句柄 `Arc` 同一、server task **未**结束、method 序列**逐字
+///    等于**重连前快照、server 侧计数不变，且 bridge 仍能完成一次完整 `tools/call`
+///    （把无关实例一并关掉的实现会让这一步红）；
+///    ③ 重连新建的 web 链路走**生产** handler（对端名不再是夹具替身）且登记进 pool task 表；
+/// 6. 收尾：pool 关闭时两条 server task 均靠 EOF 自然收敛 `Quit`（web 那条由重连触发、
+///    artifact 那条由 `pool.shutdown()` 关闭其 client 半边触发），
+///    `builtin_task_count() == 0`，不留 orphan。
+///
+/// 证据边界（诚实标注）：
+/// - 第 1–3 条的「不串」在本用例里**不是路由隔离断言**：工具调用不经 pool 转发（每个
+///   bridge 自带 peer），pool 容器只承载「表」与生命周期。它们排除的是 bridge↔实例
+///   **绑定写错**与观测面串台，**增量可证伪力有限**；本用例的实质内容在第 4–6 条
+///   （pool 生命周期动作的作用域）。
+/// - server 半边是 [`FixtureBuiltinHandler`] **替身**（原因见文件头「证据边界 B」）。
+/// - 「生产 handler 在真 loader 下同 pool 的 wire 序列隔离」**无证据面**：生产 transport
+///   没有 per-instance tap，[`StartupFixture`] 系用例只观察握手 / 目录 / 真实往返，不看
+///   线路帧序列。本记录**不宣称**该命题（acceptance §12.5）。
+#[tokio::test]
+async fn same_pool_instances_never_cross_wires_and_reconnect_touches_one_link() {
+    let web = find("web").expect("web 已实现");
+    let artifact = find("artifact").expect("artifact 已实现");
+    let web_stub = Arc::new(StubTool::fixed(web.tools[0].original_name, "web-reply"));
+    let artifact_stub = Arc::new(StubTool::fixed(
+        artifact.tools[0].original_name,
+        "artifact-reply",
+    ));
+    let web_tool: Arc<dyn BaseTool> = Arc::clone(&web_stub) as Arc<dyn BaseTool>;
+    let artifact_tool: Arc<dyn BaseTool> = Arc::clone(&artifact_stub) as Arc<dyn BaseTool>;
+
+    // **同一个** pool 容器里两条链路：本用例与 `per_instance_wire_*` 的唯一结构差别。
+    let pool = Arc::new(McpClientPool::new_empty());
+    let mut web_link = TappedLink::connect_into(
+        Arc::clone(&pool),
+        web,
+        "runtime-fixture-web",
+        vec![web_tool],
+    )
+    .await;
+    let mut artifact_link = TappedLink::connect_into(
+        Arc::clone(&pool),
+        artifact,
+        "runtime-fixture-artifact",
+        vec![artifact_tool],
+    )
+    .await;
+
+    // 移交前提（本用例的实质所在）：两条 client 半边都进 pool 的生产表，此后
+    // `reconnect` 的「关旧 service」不再是被点名实例上的空操作，而 artifact 侧的
+    // 「逐字不变 + 仍可往返」也才有了失败模式（把无关实例一并关掉的实现会红）。
+    web_link.hand_service_to_pool();
+    artifact_link.hand_service_to_pool();
+    assert_eq!(
+        pool.services.lock().len(),
+        2,
+        "两条夹具链路的 client 半边都必须登记进 pool.services"
+    );
+
+    let web_bridge = web_link.bridge(web.tools[0].effective_name);
+    let artifact_bridge = artifact_link.bridge(artifact.tools[0].effective_name);
+    assert_eq!(web_bridge.mcp_server_name(), Some("web"));
+    assert_eq!(artifact_bridge.mcp_server_name(), Some("artifact"));
+
+    // 两条链路各自走完握手 + live `tools/list`；此后各自的 log 只应因**自己**的动作增长。
+    let web_log_0 = web_link.wire_methods();
+    let artifact_log_0 = artifact_link.wire_methods();
+    assert!(
+        !web_log_0.is_empty() && !artifact_log_0.is_empty(),
+        "用例前提：两条链路都已产生握手 / tools/list 帧: web={web_log_0:?} artifact={artifact_log_0:?}"
+    );
+    assert_eq!(
+        web_link.wire_call_tool_count(),
+        0,
+        "用例前提：web 链路尚无 tools/call"
+    );
+    assert_eq!(
+        artifact_link.wire_call_tool_count(),
+        0,
+        "用例前提：artifact 链路尚无 tools/call"
+    );
+    assert_eq!(web_link.served_calls(), Vec::<String>::new());
+    assert_eq!(artifact_link.served_calls(), Vec::<String>::new());
+
+    // ── 动作 1：只碰 web ────────────────────────────────────────────────────────
+    let text = web_bridge
+        .invoke(json!({}), ToolContext::new(&[], "/tmp"))
+        .await
+        .expect("web 调用必须成功");
+    assert_eq!(text, "web-reply");
+    assert_eq!(web_stub.call_count(), 1);
+    assert_eq!(
+        artifact_stub.call_count(),
+        0,
+        "web 的动作不得执行 artifact 的工具"
+    );
+    assert_eq!(web_link.wire_call_tool_count(), 1);
+    assert_eq!(
+        web_link.served_calls(),
+        vec![web.tools[0].original_name.to_string()],
+        "web 的 server 侧只应见过一次自己的原始名 tools/call"
+    );
+    assert_eq!(
+        artifact_link.wire_call_tool_count(),
+        0,
+        "发往 web 的请求不得出现在 artifact 的 wire 上: {:?}",
+        artifact_link.wire_methods()
+    );
+
+    // method 序列逐字对照（不是只比长度）。
+    let web_log_1 = web_link.wire_methods();
+    let artifact_log_1 = artifact_link.wire_methods();
+    assert_eq!(
+        artifact_log_1, artifact_log_0,
+        "web 的动作不得向 artifact 的 log 追加任何帧"
+    );
+    assert_eq!(
+        artifact_link.served_calls(),
+        Vec::<String>::new(),
+        "web 的动作不得让 artifact 的 server 侧看到 tools/call"
+    );
+    assert_eq!(
+        web_log_1.len(),
+        web_log_0.len() + 1,
+        "web 的 log 只应追加一帧: {web_log_1:?}"
+    );
+    assert_eq!(
+        &web_log_1[..web_log_0.len()],
+        web_log_0.as_slice(),
+        "web 的 log 只允许追加，不得重排 / 重写既有帧"
+    );
+    assert_eq!(
+        web_log_1.last().map(String::as_str),
+        Some("tools/call"),
+        "web 追加的帧必须是 tools/call: {web_log_1:?}"
+    );
+
+    // ── 动作 2：artifact 侧对称（快照 A = `artifact_log_1`）─────────────────────
+    let text = artifact_bridge
+        .invoke(json!({}), ToolContext::new(&[], "/tmp"))
+        .await
+        .expect("artifact 调用必须成功");
+    assert_eq!(text, "artifact-reply");
+    assert_eq!(artifact_stub.call_count(), 1);
+    assert_eq!(
+        web_stub.call_count(),
+        1,
+        "artifact 的动作不得执行 web 的工具"
+    );
+    assert_eq!(artifact_link.wire_call_tool_count(), 1);
+    assert_eq!(
+        artifact_link.served_calls(),
+        vec![artifact.tools[0].original_name.to_string()]
+    );
+    assert_eq!(
+        web_link.wire_call_tool_count(),
+        1,
+        "发往 artifact 的请求不得出现在 web 的 wire 上"
+    );
+
+    let web_log_2 = web_link.wire_methods();
+    let artifact_log_2 = artifact_link.wire_methods();
+    assert_eq!(
+        web_log_2, web_log_1,
+        "artifact 的动作不得向 web 的 log 追加任何帧"
+    );
+    assert_eq!(
+        artifact_log_2.len(),
+        artifact_log_1.len() + 1,
+        "artifact 的 log 只应追加一帧: {artifact_log_2:?}"
+    );
+    assert_eq!(
+        &artifact_log_2[..artifact_log_1.len()],
+        artifact_log_1.as_slice(),
+        "artifact 的 log 只允许追加，不得重排 / 重写既有帧"
+    );
+    assert_eq!(
+        artifact_log_2.last().map(String::as_str),
+        Some("tools/call"),
+        "artifact 追加的帧必须是 tools/call: {artifact_log_2:?}"
+    );
+
+    // ── 动作 3：reconnect 只动被点名的 web ─────────────────────────────────────
+    // builtin 重连分支要求 pool 级 `execution_cwd` 已绑定，否则直接
+    // `ConnectionFailed{ "MCP execution directory is not initialized" }`
+    // （`mcp/reconnect.rs:98-104`）。两条 client 半边已移交 `pool.services`（见上文
+    // 「移交前提」），因此重连会真的关闭被点名实例的旧 service；未被点名实例的 service
+    // 留在表里，仍是其后端（下面既断言它仍在表内，也用它完成一次真实往返）。
+    let cwd = tempfile::tempdir().expect("tempdir");
+    pool.bind_execution_cwd(cwd.path())
+        .expect("reconnect 前提：pool 级 execution_cwd 绑定必须成功");
+    assert_eq!(
+        pool.builtin_task_count(),
+        0,
+        "用例前提：两条夹具链路不登记 pool task 表（server 半边归属在夹具手里）"
+    );
+    assert!(
+        !web_link.server_task.is_finished() && !artifact_link.server_task.is_finished(),
+        "用例前提：重连前两条夹具 server task 都在运行"
+    );
+
+    let web_handle_before = pool.get_client("web").expect("web 句柄必须存在");
+    let artifact_handle_before = pool.get_client("artifact").expect("artifact 句柄必须存在");
+    let artifact_log_before_reconnect = artifact_link.wire_methods();
+    let artifact_served_before_reconnect = artifact_link.served_calls();
+    let peer_name_of = |handle: &Arc<McpClientHandle>| -> Option<String> {
+        handle
+            .peer
+            .as_ref()
+            .and_then(|peer| peer.peer_info())
+            .and_then(|info| {
+                info.server_info
+                    .as_ref()
+                    .map(|server| server.name.to_string())
+            })
+    };
+    // 判别基线：重连**前**的 web 对端确实是夹具替身。没有这一条，「重连后不再是替身」
+    // 的断言就可能在任何对端名上碰巧成立（假绿）。
+    assert_eq!(
+        peer_name_of(&web_handle_before).as_deref(),
+        Some("runtime-fixture-web"),
+        "用例前提：重连前的 web 对端是夹具替身"
+    );
+
+    pool.reconnect("web", None)
+        .await
+        .expect("builtin 实例必须能重连");
+
+    // 反证「重连真的发生了」：否则下面「artifact 逐字不变」可能只是整体 no-op 的假绿。
+    let web_handle_after = pool.get_client("web").expect("重连后必须留下新句柄");
+    assert!(
+        !Arc::ptr_eq(&web_handle_before, &web_handle_after),
+        "重连必须换新句柄（旧代证据不得继续有效）"
+    );
+    assert!(
+        matches!(web_handle_after.status, ClientStatus::Connected),
+        "重连后 web 必须重新 Connected，实际: {:?}",
+        web_handle_after.status
+    );
+    assert!(
+        Arc::ptr_eq(
+            &artifact_handle_before,
+            &pool.get_client("artifact").expect("artifact 必须仍在")
+        ),
+        "重连 web 不得触碰 artifact 的句柄"
+    );
+    assert_eq!(
+        pool.builtin_task_count(),
+        1,
+        "重连新建的 web 链路必须登记进 pool task 表（与夹具链路不同）"
+    );
+    // 重连走**生产** handler（`spawn_builtin_transport`），不是夹具替身：这是「重连真的
+    // 重建了链路」的旁证，也说明此后只有 artifact 侧（仍是替身）被断言。
+    let web_peer_name = peer_name_of(&web_handle_after);
+    assert!(
+        web_peer_name
+            .as_deref()
+            .is_some_and(|name| name != "runtime-fixture-web"),
+        "重连后的 web 必须已重新握手到生产 handler（不是夹具替身），实际: {web_peer_name:?}"
+    );
+
+    // 被点名的 web：pool 关闭了它登记的**夹具** client 半边（`reconnect.rs:57-60` 的
+    // remove + `close_with_timeout`）⇒ 夹具自持的 server task 靠 EOF **自然**收敛。
+    // 收敛的触发者是 pool 的动作（本用例在此之前只调用了 `reconnect`），因此这一条是
+    // 「重连真的关掉了旧链路」的因果证据，而不是夹具自己的收尾。
+    let web_exit = web_link.converge_task().await;
+    assert!(
+        matches!(web_exit, BuiltinServerExit::Quit(_)),
+        "重连必须关掉被点名实例的旧 client 半边（其 server task 随之自然收敛），实际: {web_exit:?}"
+    );
+
+    // artifact 侧：service 仍在 pool 表内 + server task 未结束 + method 序列**逐字等于**
+    // 重连前快照 + 仍可完成一次完整往返。（移交之前，「逐字不变」在任何实现下都成立；
+    // 移交之后，若重连把无关实例一并关掉，下面的往返会失败。）
+    assert!(
+        pool.services.lock().contains_key("artifact"),
+        "重连 web 不得把 artifact 的 client 半边移出 pool.services"
+    );
+    assert!(
+        !artifact_link.server_task.is_finished(),
+        "重连 web 不得让 artifact 的 server task 结束"
+    );
+    assert_eq!(
+        artifact_link.wire_methods(),
+        artifact_log_before_reconnect,
+        "重连 web 不得向 artifact 的 log 追加任何帧"
+    );
+    assert_eq!(
+        artifact_link.served_calls(),
+        artifact_served_before_reconnect,
+        "重连 web 不得让 artifact 的 server 侧多一次 tools/call"
+    );
+
+    let text = artifact_bridge
+        .invoke(
+            json!({ "after": "reconnect" }),
+            ToolContext::new(&[], "/tmp"),
+        )
+        .await
+        .expect("重连 web 后 artifact 必须仍可调用");
+    assert_eq!(text, "artifact-reply");
+    assert_eq!(artifact_stub.call_count(), 2);
+    assert_eq!(artifact_link.wire_call_tool_count(), 2);
+    assert_eq!(
+        &artifact_link.wire_methods()[..artifact_log_before_reconnect.len()],
+        artifact_log_before_reconnect.as_slice(),
+        "重连后 artifact 的 log 仍只允许追加"
+    );
+
+    // ── 收尾：两条夹具链路各自 `Quit` 收敛 + pool 归属 task 排空 ────────────────
+    // `TappedLink::shutdown` 内部断言 `BuiltinServerExit::Quit`（不得 `AbortedAfterTimeout`）
+    // 与 `task.is_finished()`。
+    // web 夹具链路的 server task 已在上文断言收敛（触发者 = reconnect）；artifact 夹具
+    // 链路的 client 半边仍在 pool 表里，由 `pool.shutdown()` 关闭，其 server task 随之收敛。
+    pool.begin_shutdown();
+    // 重连新建的 web 链路**登记在 pool 上**（`reconnect.rs:118-122` 的
+    // `register_builtin_task`），与两条夹具链路归属不同：它必须由 pool 侧收敛，且同样
+    // 落在 `Quit`。（它的 client 半边也在 `services` 里，由下面的 `pool.shutdown()` 关闭；
+    // 此处先按 key 取出 task 并断言其收敛事实。）
+    let exit = pool
+        .close_builtin_task("web")
+        .await
+        .expect("重连注册的 builtin task 必须还在 pool task 表里");
+    assert!(
+        matches!(exit, BuiltinServerExit::Quit(_)),
+        "pool 关闭时重连链路也必须靠 EOF 自然收敛，实际: {exit:?}"
+    );
+    let report = pool.shutdown().await;
+    assert!(report.is_complete(), "pool 关闭必须收敛: {report:?}");
+    let artifact_exit = artifact_link.converge_task().await;
+    assert!(
+        matches!(artifact_exit, BuiltinServerExit::Quit(_)),
+        "pool 关闭必须关掉 artifact 的 client 半边（其 server task 随之自然收敛），实际: {artifact_exit:?}"
+    );
+    assert_eq!(
+        pool.builtin_task_count(),
+        0,
+        "pool 关闭后不得残留 builtin server task（含重连新建的那条）"
+    );
+}
+
+/// acceptance §7 第 5 条（builtin 工具体内**在飞取消**）的**降级口径**：外层取消语义
+/// ——无重放、不 panic、pool 仍可服务——**不**断言 IF-D14 的 error 文本。
+///
+/// 降级理由（现状代码事实，不是取舍）：agent loop 的取消是
+/// `tokio::select! { biased; _ = cancel.cancelled() => Err(EffectiveToolError::new(Cancelled,
+/// "interrupted by user")) … }`（`peri-agent/src/agent/stages/tool_dispatch/execution.rs:327-334`）
+/// ——命中即 **drop 掉 `invoke` future**。rmcp 不在 future drop 时自动发
+/// `notifications/cancelled`，builtin server handler 也收不到取消
+/// （`mcp/builtin/web.rs:164-171` / `artifact.rs:81-86` 把 `RequestContext` 丢弃）。
+/// 因此「取消 ⇒ 工具体内的 IF-D14 error 文本」在现状下**无因果**，本用例只断言
+/// 外层可观察事实。
+///
+/// 断言口径（逐条）：
+/// 1. 取消分支命中（`EffectiveToolErrorCode::Cancelled` + 文本 `interrupted by user`）；
+/// 2. **无重放**：wire 上 `tools/call` 恰好 1 条、server 侧恰好见过 1 次、工具体恰好进入 1 次；
+/// 3. 放行被弃置的在飞 handler 后，**同一个** bridge 再走一次完整往返仍成功
+///    （pool / client service 仍可服务，不是「取消一次之后永久坏掉」）；
+/// 4. 收尾 `shutdown()` 收敛 `Quit` + task 排空（断言在 [`TappedLink::shutdown`] 内）。
+///
+/// race 的写法刻意与 `execution.rs:327-334` **同形**（`biased` + 取消分支在前 +
+/// 取消分支产出同一份 `EffectiveToolError`），因此本用例观测的是**这份 race 形状**在真实
+/// builtin 链路（真实 transport / 真实 client service / 真实 handler 路由 / 真实 bridge）
+/// 上的语义。**边界**：它不驱动 `execution.rs` 本身（那是 agent loop 的调用点，本层不可
+/// 命名），也不覆盖「取消通知真的传到工具体内」（现状做不到，见上）。
+#[tokio::test]
+async fn builtin_handler_in_flight_cancel_has_no_replay_and_keeps_pool_serving() {
+    let web = find("web").expect("web 已实现");
+    let declaration = &web.tools[0];
+    let gated = Arc::new(GatedTool::new(declaration.original_name));
+    let gated_tool: Arc<dyn BaseTool> = Arc::clone(&gated) as Arc<dyn BaseTool>;
+    let link = TappedLink::connect(web, "runtime-fixture-web", vec![gated_tool]).await;
+    let bridge = link.bridge(declaration.effective_name);
+    let cancel = AgentCancellationToken::new();
+
+    // 等「server 侧已进入本次 tools/call」再取消：这是「在飞」的定义点。
+    let canceller = {
+        let entered = Arc::clone(&gated.entered);
+        let cancel = cancel.clone();
+        async move {
+            entered.notified().await;
+            cancel.cancel();
+        }
+    };
+    // 复刻 agent loop 的 race（`execution.rs:327-334` 同形）。
+    let racer = async {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(EffectiveToolError::new(
+                EffectiveToolErrorCode::Cancelled,
+                "interrupted by user",
+            )),
+            result = bridge.invoke(
+                json!({ "payload": "in-flight" }),
+                ToolContext::new(&[], "/tmp"),
+            ) => result.map_err(|error| {
+                EffectiveToolError::new(EffectiveToolErrorCode::ToolFailed, error.to_string())
+            }),
+        }
+    };
+
+    let ((), outcome) = tokio::join!(canceller, racer);
+
+    // ① 取消形态。
+    let error = outcome.expect_err("取消必须命中 race 的取消分支（不得让调用跑完）");
+    assert_eq!(
+        error.code,
+        EffectiveToolErrorCode::Cancelled,
+        "取消分支必须是 Cancelled: {error:?}"
+    );
+    assert!(
+        error.message.contains("interrupted by user"),
+        "取消文本必须与 agent loop 同文案: {error:?}"
+    );
+
+    // ② 无重放：取消不得在 wire 上产生第二次 tools/call，也不得让工具体再进入一次。
+    assert_eq!(
+        link.wire_call_tool_count(),
+        1,
+        "取消不得重放：wire 上只应有一次 tools/call，实际 methods={:?}",
+        link.wire_methods()
+    );
+    assert_eq!(
+        link.served_calls(),
+        vec![declaration.original_name.to_string()],
+        "server 侧只应见过一次 tools/call"
+    );
+    assert_eq!(
+        gated.call_count(),
+        1,
+        "工具体只应被进入一次（取消不重放、不重试）"
+    );
+
+    // ③ 放行被弃置的在飞 handler，再确认 pool 仍可服务。
+    gated.release.notify_one();
+    gated.finished.notified().await;
+    assert_eq!(
+        gated.call_count(),
+        1,
+        "放行只收敛那一次在飞调用，不得引出新调用"
+    );
+
+    let text = bridge
+        .invoke(
+            json!({ "payload": "after-cancel" }),
+            ToolContext::new(&[], "/tmp"),
+        )
+        .await
+        .expect("取消后同一条 wire / 同一 client service 必须仍可服务");
+    assert_eq!(text, "gated");
+    assert_eq!(gated.call_count(), 2);
+    assert_eq!(link.wire_call_tool_count(), 2);
+    assert_eq!(link.served_calls().len(), 2);
+
+    // ④ 收尾：`Quit` 收敛 + task 排空（在 `shutdown` 内断言）。
+    link.shutdown().await;
+}
+
+/// acceptance §7 第 8 条（**启动期取消 ⇒ `Interrupted`**）在 middleware 层的证据
+/// （sub-plan H 冻结名口径）。
+///
+/// 构造：一个 `system_mcp = true` 的 builtin 实例、清单已发布（闸门**真的有** System
+/// 依赖可等）、`system_mcp_timeout` 取远大于用例时长的 60s、**不**提交任何连接 /
+/// discovery evidence ⇒ 闸门会停在等待；token **预先**取消。
+///
+/// 断言：`before_react_start` 返回 `Err(AgentError::Interrupted)`（**不是**
+/// `MiddlewareError`）、不暂存候选、耗时远小于 `system_mcp_timeout`（排除 timeout 路径）。
+///
+/// 两条口径必须与断言一起读：
+/// ① 本用例驱动的是**闸门内**取消，命中 `mcp/client/readiness.rs:395-397`（循环入口判
+///    cancel）或 `:619-624`（`wait_for_readiness_change` 的 `tokio::select!`，取消分支
+///    在 `:620`）**之一**；用例**不区分**这两条分支——它只有「返回值 + 未暂存候选」两个
+///    观测点，两条分支产出同一个 `SystemReadinessError::Cancelled`。按预取消 token 的
+///    **静态读法**应先命中 `:395-397`，但这是代码阅读结论，本用例不拿它当断言，也不
+///    声称覆盖另一条。
+/// ② host 层「prompt 启动后、闸门等待中被取消」的路径当前**没有确定性门闩**可断言
+///    （`peri-agent/src/agent/stages/mod.rs:691-695` 会在 Receive 前先早退），因此本用例
+///    是这套语义在 **middleware 层**的证据，不等于 host 层已端到端验证。
+#[tokio::test]
+async fn builtin_instance_cancellation_maps_to_interrupted() {
+    /// 用例前提量：远大于本用例的实测时长，使「耗时远小于它」即排除 timeout 路径。
+    const STARTUP_TIMEOUT_MS: u64 = 60_000;
+
+    let web = find("web").expect("web 已实现");
+    let pool = Arc::new(McpClientPool::new_pending());
+    let mut config = builtin_entry(web);
+    config.system_mcp_timeout = Some(STARTUP_TIMEOUT_MS);
+    pool.configs.write().insert(web.name.to_string(), config);
+    // 清单已发布（requirements 才非空）但**不提交任何连接 / discovery evidence**：
+    // 闸门若无取消就必须一直等到 `system_mcp_timeout`。
+    pool.publish_system_manifest(SystemMcpManifest::Loaded);
+
+    let requirements = pool.system_requirements();
+    assert_eq!(
+        requirements.len(),
+        1,
+        "用例前提：闸门必须真的有 System 依赖可等（否则「取消」无等待可言）"
+    );
+    assert_eq!(requirements[0].server, web.name);
+    assert_eq!(
+        requirements[0].timeout,
+        Duration::from_millis(STARTUP_TIMEOUT_MS),
+        "用例前提：等待上界必须是本用例声明的 60s（timeout 路径的排除基线）"
+    );
+    assert!(
+        !requirements[0].required_tools.is_empty(),
+        "用例前提：builtin 实例必须声明必需工具"
+    );
+
+    let cancel = AgentCancellationToken::new();
+    cancel.cancel();
+    let middleware =
+        McpMiddleware::new(Arc::clone(&pool)).with_skill_discovery(None, cancel.clone());
+    let mut probe = StartupProbe::default();
+
+    let started_at = std::time::Instant::now();
+    let error = Middleware::before_react_start(&middleware, &mut probe)
+        .await
+        .expect_err("取消必须中断本次启动");
+    let elapsed = started_at.elapsed();
+
+    assert!(
+        matches!(error, AgentError::Interrupted),
+        "闸门内取消必须映射 Interrupted（不是 MiddlewareError / 不是 fatal）: {error:?}"
+    );
+    assert!(
+        probe.staged.is_none(),
+        "取消不得暂存启动候选（不发布 ready、不写宿主共享工具表）"
+    );
+    assert_eq!(probe.stage_calls, 0, "取消路径不得调用 stage_startup_tools");
+    assert!(
+        elapsed < Duration::from_millis(STARTUP_TIMEOUT_MS / 10),
+        "启动取消必须立即返回，耗时不得接近 system_mcp_timeout（排除 timeout 路径）: {elapsed:?}"
+    );
+
+    pool.begin_shutdown();
+    let report = pool.shutdown().await;
+    assert!(report.is_complete(), "pool 关闭必须收敛: {report:?}");
+    assert_eq!(
+        pool.builtin_task_count(),
+        0,
+        "本用例不建 builtin 链路，关闭后 task 表必须为空（不留 orphan）"
+    );
 }

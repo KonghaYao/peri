@@ -1,10 +1,10 @@
 # MCP adaptation v4-part-2 — 现场验收记录（wave 1）
 
-**状态**：PARTIAL（V-04 收口完成；**逐面分级见 §10，本文件不给单一总体「通过」**）
+**状态**：§1–§11 为 W5 + V-05 末的现场记录（PARTIAL；逐面分级见 §10，本文件不给单一总体「通过」）；**§12 为第二轮收口、§12.7 为第三轮（独立复核后的修复与最终复跑）、§12.8 为第四轮（第三次独立复核的 12 项发现与处置），§12.8 是全文的现行裁决** —— 本波次可证伪面全部闭合；仍 UNVERIFIED 者仅 capability root / 凭据隔离（A13 口径）与 wave 2/3 范围外项，另有三项按「无独立可证伪面」的设计事实登记（Goal 工具面、取消通知抵达、`PERI_MCP_BUILTIN=off` 运维语义），见 §12.5；另登记 1 项 pre-existing 测试隔离缺口（`peri-tui` 全局 atom 用例偶发失败，见 §12.7.3）
 **优先级**：高
 **类型**：验收记录 / MCP adaptation v4 wave 1（Builtin MCP 运行时 + Web/Artifact MCP）
 **创建日期**：2026-09-26
-**最后核查**：2026-09-26（task V-04，W5 收口；§1/§2 由 V-06 在 W0 写入，本次**未改动**其任何一字）
+**最后核查**：2026-09-26（§12.8：第三次独立只读复核的 **12 项**发现——0 blocker / 2 major / 10 minor——全部处置；含 §12.3 第 3 行悬空指路与 §12.1 文件计数的更正、Goal 同义反复的撤销、`docs/design/middleware-system.md` 槽位表与 `docs/design/meta-harness.md` 语义段的现行化、三处失效注释清理；命令 35/59–68 复跑取证。此前 §12.7：独立复核后的两处修复 + 文档同步 + 命令 35/41–58 复跑，首跑命中的 2 例 `peri-tui` 偶发失败按 §12.7.3 登记。§1–§11 原文保留不改；§1–§11 的核查时点为 task V-04 的 W5 收口：§1/§2 由 V-06 在 W0 写入、未被改动一字）
 **事实源**：`spec/issues/2026-09-26-mcp-adaptation-v4-part-2-plan.md`（主计划，唯一裁决）+ sub-plan E/F/G/H；契约语义仍以 `docs/design/mcp-adaptation-v4-part-1.md` 为准
 **owner 传递**：**V-06（W0：§1/§2）→ V-04（W5：§3–§10 终态与三态列）**。§2 由 V-06 在**迁移前 HEAD** 写入，**V-04 只增不改**（主 plan A12 / §7 W5 闸门；sub-plan H §7 第 3 项）；V-06 留在 §3 位的骨架清单已由本节起的各小节逐项落实或显式分级（原始骨架项：交付判据矩阵 / 关闭面矩阵 / part-1 遗留闭合 / 运行命令 / 未验证项 / 文件所有权与整体裁决）。
 **证据时点**：HEAD = `0e4fe7cf63f396e9c92e04973bdb2703c027fd89`（与 §2 采集时点同一提交）；本波次全部生产代码改动**未提交**，位于 worktree `/Users/konghayao/code/ai/peri-v4p2`（分支 `feat/mcp-adaptation-v4-part-2`）。本文件所有「本次运行时证据」= 2026-09-26 在该 worktree 上的一组顺序执行（**不并发跑 cargo**），命令与计数见 §6。
@@ -423,3 +423,228 @@ capability root 隔离；凭据隔离；`PERI_MCP_BUILTIN=off` 的运维语义�
 - `web_fetch.rs:95` / `web_search.rs:76` / `artifact/tool.rs:116` 的 `is_direct() -> true` 保留（I-01 按 sub-plan F §8 延后、I-03 未接手）。其唯一活构造点是 builtin MCP server 内部与测试，**无 provider 注册** ⇒ 「提供面」事实已消失（由命令 26 的首个请求名单作证）；删除属卫生项。
 - §7 的 10 项未验证清单**逐条不变**。
 - `apply_builtin_overlay` 的签名细化与两处矩阵外文件已登记为主 plan §5 **R34 / R35**，死文件清理登记为 **R36**，wire 夹具文件名后缀（本表第 10 行）登记为 **R37**。
+
+## 12. 第二轮收口：§7 可证伪项补齐（编排者，2026-09-26 续）
+
+> **只增不改**：§1–§11 原文（含其分级与裁决）保留为历史记录，本节的写入**不修改**其任何一字。凡本节与 §3.3 / §4 / §7 / §8.2 / §10 / §11 冲突处，**以本节为准**，被超越的行在 §12.4 逐行登记。
+> 触发：§11 末尾「仍未闭合」的两条 —— ①`is_direct() -> true` 保留；②§7 十项未验证清单逐条不变。
+
+### 12.1 现场与环境
+
+| 项 | 值 |
+| --- | --- |
+| worktree / 分支 | `/Users/konghayao/code/ai/peri-v4p2` / `feat/mcp-adaptation-v4-part-2` |
+| HEAD（本轮改动之前） | `354705e5 feat(mcp): v4-part-2 wave 1 —— Web/Artifact 实迁为 builtin MCP 实例` |
+| 本轮改动面 | **9 个文件**：生产 3（`middleware/web_fetch.rs`、`middleware/web_search.rs`、`artifact/tool.rs`）+ 测试 6；改动性质与「不新增公开 API」的论证见 §12.6 |
+| 新增用例 | **11 条**（peri-acp 2 / peri-middlewares 9）＋ **2 处既有用例追加断言**（`builtin_injection_off_removes_capabilities_without_fallback` 的判定面、`test_collect_tools_returns_goal_tool` 的 Goal 反证） |
+| 执行纪律 | 顺序执行、**不并发跑 cargo**；过滤器沿用主 plan §9 规则 4 的精确清单；命令编号接续 §6.5（30–40），本轮为 **41–58** |
+| 证据时点 | 本节全部「现场结果」= 2026-09-26 在该 worktree 上的一组顺序执行；本轮改动在本节写入后与本节一并提交 |
+
+### 12.2 命令与现场结果（41–58）
+
+| # | 命令 | 现场结果 | exit |
+| ---: | --- | --- | ---: |
+| 41 | `cargo test --workspace --lib --no-fail-fast` | **16 个 lib target 全 `ok`**；**6517 passed / 0 failed / 15 ignored**（= §11 的 6506 + 本轮 11 条新用例） | 0 |
+| 42 | `cargo fmt --all --check` | 无输出 | 0 |
+| 43 | `cargo clippy --workspace --all-targets -- -D warnings` | `Finished dev profile ... in 13.32s`；warning **0** | 0 |
+| 44 | `bash scripts/check-layer-imports.sh` | 18 条规则、**违规边 0** | 0 |
+| 45 | `-p peri-middlewares --lib -- mcp::builtin_runtime` | `ok. 20 passed`（原 17，**+3**） | 0 |
+| 46 | `-p peri-acp --lib -- host::mcp_v4_builtin` | `ok. 9 passed`（原 7，**+2**） | 0 |
+| 47 | `-p peri-middlewares --lib -- middleware::web_search` | `ok. 19 passed`（原 16，**+3**） | 0 |
+| 48 | `-p peri-middlewares --lib -- middleware::web_fetch` | `ok. 6 passed`（原 4，**+2**） | 0 |
+| 49 | `-p peri-middlewares --lib -- mcp::builtin::web` | `ok. 11 passed`（原 10，**+1**） | 0 |
+| 50 | `-p peri-middlewares --lib -- mcp::builtin::runtime` | `ok. 16 passed`（计数不变：回归确认） | 0 |
+| 51 | `-p peri-middlewares --lib -- goal_middleware` | `ok. 8 passed`（计数不变：追加的是既有用例内的反证断言） | 0 |
+| 52 | `-p peri-middlewares --test mcp_isolation_contract -- --test-threads=1` | `ok. 4 passed` | 0 |
+| 53 | `-p peri-middlewares --test mcp_host_policy_contract -- --test-threads=1` | `ok. 5 passed` | 0 |
+| 54 | `-p peri-acp --lib -- provider::config::tests` | `ok. 35 passed` | 0 |
+| 55 | `-p peri-acp --lib -- host::mcp_v4_wire_fixture` | `ok. 3 passed`（A12 夹具未受本轮影响） | 0 |
+| 56 | `-p peri-acp --lib -- host::mcp_v4_startup` | `ok. 12 passed` | 0 |
+| 57 | `-p peri-js-runtime --lib`（隔离复跑） | `ok. 50 passed; 0 failed` | 0 |
+| 58 | `cargo test --workspace --doc --no-fail-fast` | 16 个 Doc-tests target 全 `ok`；**11 passed / 0 failed / 5 ignored**；无 `FAILED` 命中 | 0 |
+
+**无一条命中 `0 tests`**（主 plan §9 规则 3）：上表 18 条中 **15 条为测试命令**，其 `passed` 计数全部 ≥ 3；42 / 43 / 44 三条是门禁命令（fmt / clippy / layer-imports），不产出 `passed` 计数，不适用本判据。
+
+### 12.3 §7 未验证项清单的逐条重判
+
+| # | 未验证项 | 旧分级（§7） | 本轮分级 | 依据（命令 + 用例 + 边界） |
+| ---: | --- | --- | --- | --- |
+| 1 | capability root 隔离 | UNVERIFIED | **UNVERIFIED（不变）** | **未引入** per-instance capability profile（或 `#[cfg(test)]` 读取面）：`McpClientPool::capability_profile` 仍是 pool 级（`client.rs:118`）、`execution_cwd` 仍是 pool 级 `OnceLock`，同一 pool 内两实例共享这两量且无 per-instance observable。主 plan §1.3 明文禁止为 wave 2/3 预建抽象，A13 明文要求按 UNVERIFIED 登记 ⇒ 本轮**不**为消除该行而改生产结构。证伪动作仍为 §7 原表第 4 列 |
+| 2 | 凭据隔离 | UNVERIFIED | **UNVERIFIED（不变）** | `McpClientHandle`（`client/types.rs:85`）字段中无 credential；无 per-instance 凭据**身份**可比较，且本记录与夹具不读取、不比较、不打印任何凭据值（§1 口径 / 主 plan §9 规则 7） |
+| 3 | **同一 pool 内**两实例 wire 不串（H-V-04d 的强度缺口） | PARTIAL（强度受限） | **PASS（按原表给出的动作闭合）** | 命令 45 `same_pool_instances_never_cross_wires_and_reconnect_touches_one_link`：在**同一个** `McpClientPool` 容器内建两条 `TappedLink` ⇒ ① web 调用后 web 计 1 / artifact 计 0；② 调 artifact 后 web 仍 1 / artifact 1；③ method 序列**逐字对照**（artifact 快照逐字不变、web 只追加一帧 `tools/call` 且为前缀），反向同理；④ `pool.reconnect("web")` 后 artifact 序列逐字不变、其 server 侧计数不变、artifact bridge 仍能完成完整往返；⑤ 收尾两条夹具链路收敛 `Quit`、重连新建 task 收敛后 `builtin_task_count() == 0`。**边界（用例内自述）**：server 半边是 `FixtureBuiltinHandler` 替身 ⇒ 证的是「同一 pool 容器内两条独立 wire 互不写入 + 观测面按实例隔离 + 重连只动被点名链路」，**不**等于「生产 handler 在真 loader 下同 pool 不串」——该命题**无证据面**（生产 transport 没有 per-instance tap，`StartupFixture` 系用例只观察握手 / 目录 / 真实往返、**不看线路帧序列**），本记录**不宣称**（§12.5，与用例文档同口径） |
+| 4 | `PERI_MCP_BUILTIN=off` 的运维语义 | 能力面 PASS ＋ 运维语义 UNVERIFIED | **判定面 PASS（新）；运维语义 UNVERIFIED（不变，已声明语义）** | 命令 46 `builtin_injection_off_removes_capabilities_without_fallback` 追加判定面：在 env 生效**之前**取 `(default_requires_approval, is_edit_tool)` 基线、生效**期间**对三个冻结 effective name 复算并**逐位比较** ⇒ 一旦有人让这两个判定读 env（或让 off 参与判定）即变红。`is_mutation_tool` 是 `peri-middlewares` 私有 fn、本 crate 不可命名，其同名 parity 由 `subagent/mod_test.rs:509`（`mutation_tool_matches_original_name_policy_for_builtin_names`；507 是其文档注释行）覆盖。**运维语义**（升级后能力不存在、无回退路径）仍是文档承诺：已落 `docs/reference/mcp-ecosystem.md`（提交 `354705e5`），没有可执行的运行时断言面 |
+| 5 | builtin 工具体内的 cancel 响应 | UNVERIFIED | **PARTIAL：4 项子要求中 3 项已断言，第 4 项经证据判定「现状无因果」** | 命令 45 `builtin_handler_in_flight_cancel_has_no_replay_and_keeps_pool_serving`：等 server 侧已进入 `tools/call`（可控门闩）后取消 ⇒ ① 取消分支命中（`Cancelled` ＋ `interrupted by user` 同文案，race 形状与 `execution.rs:327-334` 同形）；② **无重放**（wire `tools/call` 恰 1、server 侧恰 1、工具体恰进入 1）；③ 放行被弃置的在飞 handler 后**同一条** bridge 仍完成一次往返（pool 未坏）；④ 收尾 `Quit` ＋ task 排空。**未断言的子要求**：§7 原表写的「断言返回 IF-D14 的 error 结果文本」——取消通知**抵达工具体内**在现状下无因果（handler 丢弃 `RequestContext`；rmcp 不在 future drop 时自动发 `notifications/cancelled`）⇒ 本轮把它登记为**设计事实**而非待补缺口；若要真传取消，后续动作是 handler 侧接取消信号或显式发 `notifications/cancelled` |
+| 6 | 真实网络与上传 | UNVERIFIED | **PASS（本地真 HTTP 面 —— §7 原表两条路径之一）；真实外网端点/真实上传仍 UNVERIFIED** | 命令 47 的 `test_websearch_invoke_{round_trips_real_http_200_body,reports_non_2xx_status_and_body,request_timeout_terminates_request}`、命令 48 的 `test_webfetch_invoke_{round_trips_real_http_200_body,reports_non_2xx_status_and_body}`：**本地回环 stub**（真实 TCP 连接，非 mock trait）覆盖 200 正文 / 非 2xx 状态与正文 / 请求超时终止三形态；命令 49 `web_handler_tools_call_reaches_real_http_stub_over_wire`：builtin 实例经**真实 wire**（`tools/call` 往返）打到真 HTTP stub。生产路径行为等价（`new()` 仍用原常量；`trim_end_matches('/')` 对无尾斜杠常量恒等）且**不新增配置项**。真实端点 smoke **未做**：无端点，且主 plan §9 规则 7 禁止把 URL / token 值写进记录 |
+| 7 | Goal / PTC 两个工具面（part-1 §4 遗留） | UNVERIFIED | **PASS（PTC 按原形态、按证据；Goal 面按「无独立可证伪面」的设计事实登记）** | PTC：命令 46 `ptc_catalog_section_follows_builtin_instance_closure` 的观察量是**首个模型请求系统文本**里的 `RPC-callable tool catalog` 段（不是 `ModelRequest.tools`）⇒ 段存在性守卫（可解析、非空）＋ 对照锚点（`mcp__wire_fixture__echo` 四个 case 恒在）＋ **差分收缩**（关 web −2 / 关 artifact −1 / 同关 −3）。Goal：§7 原要求的形态（「关闭后 Goal 工具表收缩」）经核实为**同义反复**——`GoalMiddleware::collect_tools` 恒返回 `[GoalTool]`、不消费 `shared_tools` / bridge / 关闭集 ⇒ Goal 面与关闭集**按构造无关，没有独立的可证伪面**，本记录按**设计事实**登记，**不**声称该面随关闭集收缩。命令 51 `test_collect_tools_returns_goal_tool` 断言该面恒为 `[goal]`（承担可证伪力的是既有的 `len == 1` 与 `name() == "goal"` 两条）；本轮追加的「不含 `mcp__` 前缀名」是**非独立守卫**（前两条成立时恒真），只在前两条被放宽时才起约束作用 ⇒ **不**登记为「可证伪替代」（第四轮复核修正，见 §12.8） |
+| 8 | 启动期取消 ⇒ `Interrupted`（H-V-01d） | PARTIAL（未落地，无命令） | **PASS（middleware 层；host 端到端**不**宣称）** | 命令 45 `builtin_instance_cancellation_maps_to_interrupted`：`system_mcp = true` 的 builtin 实例 + 清单已发布（闸门真的有依赖可等）但**不**提交任何连接 / discovery evidence + `system_mcp_timeout = 60s` 远大于用例时长 + **预取消** token ⇒ 断言 `Err(AgentError::Interrupted)`（**不是** `MiddlewareError`）、不暂存候选、`elapsed` 远小于 timeout（排除 timeout 路径）。**边界（用例内自述）**：驱动的是闸门内取消（`readiness.rs` 循环入口与 `wait_for_readiness_change` 两条等价分支，用例不区分）；host 层「prompt 启动后、闸门等待中被取消」当前**无确定性门闩**（`stages/mod.rs:691-695` 先早退）⇒ 不等于 host 已端到端验证 |
+| 9 | 关闭态的 ACP 事件面 / TUI 卡片面 | 结构性推论，未单独断言 | **PASS（口径修正，取代 §4 面③/面④ 的 PARTIAL）** | 命令 46 `closed_web_tool_call_never_reaches_approval_or_wire`：同一条 turn 内先调**可用**工具（正控制 ⇒ 审批恰 1 次、wire 恰 1 条、审批面只见到该可用工具），随后调模型**编造**的 `mcp__web__WebSearch`（`WebMiddleware=false`）⇒ 审批 0 次、wire 0 条、恰一条 error 结算且文案为 `Tool not found: mcp__web__WebSearch`、该名不在首个 LLM 请求。**口径修正**：§4 面③/面④ 原表述「关闭后无事件 / 无卡片」**不可能成立**（模型编造的调用经 model bridge 直接发 `ToolStarted`，tool dispatch 还会补发成对 Started/Ended），且**不应**成立（失败必须在 UI 可见）；关闭的**可证伪观察量**是「调用面不可路由 + 以未知工具结算」，本节按该形态判定 PASS |
+| 10 | `cron` / `lsp` / `workspace` 三个实例落地 | 未落地 | **不变（wave 2 / wave 3，主 plan §1.2/§1.3）** | 无变化：三者在保留名表与预留语义中存在，`find()` 对未实现名返回 `None`、不进归一表 |
+
+### 12.4 被本节超越的既有裁决行（逐行登记；原文不删）
+
+| 被超越的行 | 原分级 / 原文要点 | 现行裁决 | 依据 |
+| --- | --- | --- | --- |
+| §3.3 `H-V-01d` | **PARTIAL**（启动期取消无命令） | **PASS**（middleware 层；host 端到端不宣称） | §12.3 第 8 行 |
+| §3.3 `H-V-04d` 的强度附注 | 「**同一 pool 内**两实例 wire 序列互不污染未被双向断言」 | 该缺口**闭合** | §12.3 第 3 行 |
+| §3.3 `H-V-07a` | **FAIL**（全量 lib 红：2 target） | **PASS** | 命令 41（16/16 target 全 ok、6517 passed / 0 failed）＋命令 57（§6.6 红点①的隔离复跑直接证据，取代其结构性归因） |
+| §3.3 `H-V-07b` | PASS（clippy 0 warning） | **PASS（复跑）** | 命令 43 |
+| §3.3 `H-V-07c` | **FAIL**（fmt 30 处 diff / 4 文件） | **PASS** | 命令 42 |
+| §4 面③（ACP updates） | **PARTIAL**（「关闭后无事件」未断言） | **PASS（口径修正）** | §12.3 第 9 行 |
+| §4 面④（TUI completion） | **PASS（附结构性推论附注）** | **PASS**（附注由 §12.3 第 9 行的证据形态取代） | 同上 |
+| §8.2 「`cargo test --workspace --doc` 未运行」 | 未运行即不宣称 doc tests 覆盖 | **已运行：16 target / 11 passed / 0 failed** | 命令 58 |
+| §10「代码门禁（本波次新增验收）」 | **FAIL** | **PASS**（fmt / clippy / layer-imports 三门全绿） | 命令 42 / 43 / 44 |
+| §10「全量回归」 | **FAIL（非本波回归）** | **PASS** | 命令 41 / 57 / 58 |
+| §10「sub-plan H §4 的验收要求」 | PARTIAL（17 PASS + 1 PARTIAL + 2 FAIL + 1 UNVERIFIED） | **仅 `H-V-04z` 一项 UNVERIFIED，其余各项 PASS** | §12.4 上述各行 |
+| §10「`ARC-CAPABILITY-CLOSURE-001` 的 11 个关闭面」 | PARTIAL（9 PASS + 2 PARTIAL） | **11 面 PASS**（面③/④ 按修正口径） | §12.3 第 9 行；面①/②/⑤–⑪ 原证据不变 |
+| §10「part-1 遗留项的闭合」 | PARTIAL（Goal / PTC **UNVERIFIED**） | PTC 已闭合（按证据）；Goal 面改为按「**无独立可证伪面**」的设计事实登记（非按证据闭合）；该行**仍为 PARTIAL**，缺口收敛为「3 项无独立可证伪面 + 实例落地 2/5」 | §12.3 第 1、2、7 行 |
+| §10.1「本次明确不宣称」清单 | **9 项**（＋末句「绿色局部单测不升级」caveat） | **收敛为 §12.5** | — |
+| §11 末尾「仍未闭合」两条 | ①`is_direct()` 保留；②§7 十项不变 | **两条均已处理**：①三个 `is_direct()` 覆盖已删除（§12.6）；②逐条重判见 §12.3 | §12.6 / §12.3 |
+
+### 12.5 本节**仍不宣称**（与 §12.3 逐条对应；末尾两项属 §8.1 非目标，无 §12.3 对应行）
+
+capability root 隔离；凭据隔离；真实外网抓取与真实上传端点；builtin 工具体内的取消**通知抵达**（现状无因果，登记为设计事实）；`PERI_MCP_BUILTIN=off` 的**运维语义**（只有能力面与判定面证据）；host 层的启动期取消端到端；`cron` / `lsp` / `workspace` 三实例落地；**「生产 handler 在真 loader 下同 pool 的 wire 序列隔离」**（生产 transport 无 per-instance tap，`StartupFixture` 系用例只看握手 / 目录 / 真实往返、不看线路帧序列 ⇒ **无证据面**，§12.3 第 3 行的边界括注与用例内自述同此口径）；`/artifacts` slash 命令；跨进程 / 跨机器 MCP 隔离与 workspace root 沙箱（§8.1 非目标）。
+**绿色局部单测不升级为整体迁移结论**：本波只证 wave 1 的两个实例（Web / Artifact）。
+
+### 12.6 本轮生产文件改动的性质（不新增公开 API 的论证）
+
+| 文件 | 改动 | 性质与等价性论证 |
+| --- | --- | --- |
+| `middleware/web_search.rs` | 删除 `is_direct()` 覆盖；`WebSearchTool` 字段化（`base_url` / `timeout`）＋两个 `#[cfg(test)] pub(crate)` 构造器 | `new()` 仍用原常量 ⇒ 生产行为逐位不变；URL 拼接 `trim_end_matches('/')` 对无尾斜杠常量恒等；新构造器仅测试可见（`#[cfg(test)]`），**不新增公开 API、不新增配置项** |
+| `middleware/web_fetch.rs` | 同上（一个 `#[cfg(test)]` 构造器） | 同上 |
+| `artifact/tool.rs` | 删除 `is_direct()` 覆盖 | 卫生项：该结构体的活构造点只有 builtin `artifact` server 内部与测试；「提供面」事实由命令 46 的首个请求名单作证（`mcp__artifact__artifact` 在、裸名不在 ⇒ 由声明表的逐工具 `direct` 决定，不再由 middleware 工具结构决定） |
+
+**改动纪律复核**：命令 42 / 43 / 44 三门在本轮改动之后全部为绿；命令 52 / 53 两个集成契约文件在本轮改动之后复跑仍为绿；`git status` 无未跟踪产物（`npm-packages/@peri-ptc/dist` 由 `.gitignore:200` 忽略、不进提交）。
+
+### 12.7 第三轮：独立复核后的修复与最终复跑（编排者，2026-09-26 续二）
+
+> **只增不改**：§12.1–§12.6 保留为第一遍收口的记录。本节**取代** §12.1 的「本轮改动面 / 新增用例」两行、§12.6 的生产文件清单与 §12.2 的现场结果（新计数见 12.7.3）；凡冲突以本节为准。
+> 触发：§12 写入后的一次**独立只读复核**发现两处「声称与实现不一致」，二者都落在 §12 自身声明的可证伪面内 ⇒ 修掉，而不是在记录里保留。
+
+#### 12.7.1 两处修复
+
+| # | 发现 | 性质 | 修复 | 证据 |
+| --- | --- | --- | --- | --- |
+| F1 | 同池隔离用例 `same_pool_instances_never_cross_wires_and_reconnect_touches_one_link` 的两条夹具链路**没有把自己的 client 半边登记进 `pool.services`** ⇒ `reconnect` 的「关闭被点名实例的旧 service」在该用例内是**空操作**，「重连只动被点名链路」因此**没有失败模式**（把无关实例一并关掉的实现也能绿） | 断言强度缺陷（主 plan §9 规则 8/9：不得把无失败模式的断言登记为 PASS） | ① `TappedLink` 新增 `hand_service_to_pool()`：夹具自持的 client 半边登记进 `pool.services`（表内已有同名项即断言失败），此后重连**真的**会关掉它；② 重连段新增**因果断言**：被点名链路的 server task 由 `reconnect` 触发收敛（`converge_task → Quit`），未点名链路的 service 仍在表内、server task 未结束、method 序列逐字不变、且仍能完成一次完整往返；③ 用例文档补「证据边界」段，明示前三条交叉断言（计数 / 逐字序列）**不是**路由隔离的证明，实质证据在移交后的 ④⑤⑥ 三条 | 命令 45（`ok. 20 passed`）；该用例现有 **50 处断言宏调用**（12 `assert!` + 38 `assert_eq!`），夹具新增方法 2 个（`hand_service_to_pool` / `converge_task`） |
+| F2 | `peri-middlewares/src/artifact/mod.rs` 仍持有**活体** `pub struct ArtifactMiddleware`（`Middleware` impl + `Default` + `collect_tools`），与「Web / Artifact 提供面已删除」的既有声明（`docs/code-index/peri-middlewares.md:37`、§11 末、§12.6）**矛盾**；`ArtifactTool` 的 doc 也仍自称「由独立 `ArtifactMiddleware` 注册」且已删的 `is_direct()` 说明留在原位 | doc/代码矛盾（**提供面**事实错误，非风格问题） | 删除该结构体与其 `Middleware` / `BaseTool` 导入；`ArtifactTool` 的 doc 改为「模型面名字与直连性由 builtin `artifact` 实例的声明表决定（`peri-acp-types/src/builtin_mcp.rs`），本结构体只提供工具核心」 | `cargo check --workspace --all-targets` 0 error；命令 41 / 45 / 46 全绿；全仓 `ArtifactMiddleware` 命中**无活体类型引用**：定义侧只有 `builtin_mcp.rs:100`（`policy_key`）与 `meta_harness.rs:143`（`BUILTIN_INSTANCE_POLICY_KEYS`），其余为配置键字符串（`example/minimal/.peri/settings.json:37`、`example/minimal/README.md:39/68`、各测试夹具）与注释（粗查约 31 行 / 10 文件）——第四轮复核修正，见 §12.8 |
+
+#### 12.7.2 文档同步（DOC-UPDATE-001）
+
+wave 1 提交（`354705e5`）删除了 `WebMiddleware` 链槽位与提供面，但四处**现行时态**文档仍按 middleware 描述 Web / Artifact。本轮逐处改正（均为文档，不动生产契约）：
+
+| 文件 | 改动 |
+| --- | --- |
+| `docs/design/meta-harness.md` | key 类型表改为「middleware 名 / builtin 实例策略键」两类；场景 2 的期望改为「builtin `web` 实例的关闭键 ⇒ 四个面一并消失」，并区分「关闭链槽位名」的语义；装配示意代码把 Web 例子换成链槽位例子 + `closed_instances` 一句；「关闭面 = middleware 实例」改为「关闭面 = 能力提供者」 |
+| `docs/meta-harness.md` | 「middleware 名清单」拆为两张表（`MIDDLEWARE_NAMES` / `BUILTIN_INSTANCE_POLICY_KEYS`，**并集 = 已知键**）；示例说明改为四关闭面；「未知 key」判定补第三类；「关闭 = middleware 不进链」补实例键语义 |
+| `docs/design/tool-system.md` | `ArtifactTool` 段落改为「builtin `artifact` 实例的工具核心 + Direct 身份来自注册表逐工具 `direct`」 |
+| `docs/code-index/peri-middlewares.md` | 头注记第二轮改动；条目 72 / 105 的「若文件仍在磁盘上即死文件」改为「已删除」并补「`is_direct()` 覆写已删除」 |
+| `example/minimal/README.md` | 「Middleware controls」表头下补一句说明：`WebMiddleware` / `ArtifactMiddleware` 不再是 middleware 槽位，而是 builtin 实例关闭键（两行效果与旧配置兼容性不变，故表格本身未改） |
+
+#### 12.7.3 最终复跑（命令 35、41–58；顺序执行，不并发）
+
+| # | 现场结果 | exit |
+| ---: | --- | ---: |
+| 35 | `git diff --check` 无输出 | 0 |
+| 42 | `cargo fmt --all --check` 无输出（**首跑 FAILED**：`builtin_runtime_test.rs:941` 一处 `assert!` 未按 rustfmt 折行；`cargo fmt --all` 修复后复跑 0） | 0 |
+| 43 | `cargo clippy --workspace --all-targets -- -D warnings`：`Finished dev profile ... in 4.08s`，warning **0** | 0 |
+| 44 | 18 条规则、**违规边 0** | 0 |
+| 41 | **第二次全量复跑**：16 个 lib target 全 `ok`；**6517 passed / 0 failed / 15 ignored**（与 §12.2 逐位一致） | 0 |
+| 45–57 | 13 条过滤器**逐条计数与 §12.2 一致**：20 / 9 / 19 / 6 / 11 / 16 / 8 / 4 / 5 / 35 / 3 / 12 / 50 | 0 |
+| 58 | 16 个 Doc-tests target 全 ok；**11 passed / 0 failed / 5 ignored** | 0 |
+
+**首次全量复跑不是全绿（诚实登记，§9 规则 8）**：首跑为 **6515 passed / 2 failed / 15 ignored**，两个红点都在 `peri-tui`：
+
+- `kit::acp_bridge::tests::test_bridge_reset_rehydrates_pending_compact_note_for_same_session`（`peri-tui/src/kit/acp_bridge_test.rs:391`，断言读进程级全局 atom `ACP_STATE`）
+- `kit::acp_bridge::tests::test_hitl_bridge_drops_unowned_events_before_all_side_effects`（同文件 `:762`，断言读全局 `VIEW_MODELS`）
+
+判定与依据：
+
+1. **不在本波次改动面**：本波 **17** 个改动文件中**无** `peri-tui/` 任何文件（`git status`；§12.7 写入时为 16 个，此后 `example/minimal/README.md` 进入本批），两个红点所在文件未被本波次触碰。
+2. **非确定性**：隔离复跑 `cargo test -p peri-tui --lib -- kit::acp_bridge --test-threads=1` = `ok. 17 passed`；单独 `cargo test -p peri-tui --lib`（并行）= `ok. 1677 passed`；紧接着的全量复跑（命令 41 第二次）16 target 全绿。即同一测试二进制在同一环境下**三次并行全量里命中一次**。
+3. **机理（有代码依据）**：两条断言读的是**进程级共享 atom**（同一 lib target 内全部用例共享）；`#[serial]` 只在 serial 用例之间互斥，**不排斥非 serial 用例**，该文件 17 条用例中 12 条标了 `#[serial]`、5 条未标，`peri-tui` 内另有多个测试文件写同一批 atom ⇒ 并发交错在构造上可行。**未做**：精确定位交错伙伴（需插桩，属 `peri-tui` owner 面）。
+4. **标准**：`docs/standards/testing.md:271` 要求依赖全局 atom 的测试隔离并串行化 ⇒ 该 crate 存在 pre-existing 测试隔离缺口。
+5. **纪律**：不把该 crate 的偶发失败归因于本波次，也不声称「全量回归恒绿」；本波次的判定证据是「隔离复跑为绿 + 第二次全量复跑 16/16 为绿且计数与 §12.2 逐位一致」。该 pre-existing 缺口**不在本波次修复**（属 `peri-tui` owner 面，主 plan §9 规则 1），仅登记为本节发现项。
+
+#### 12.7.4 本节不改变的结论
+
+§12.3 / §12.4 / §12.5 的逐条分级与「仍不宣称」清单**不变**：F1 / F2 只让既有声称站得住（强度补齐 + 消矛盾），没有新增或扩大任何声称。§12.6 对 `web_search.rs` / `web_fetch.rs` 的「生产行为逐位不变」论证仍成立；`artifact/mod.rs` 的改动性质见 12.7.1 F2。命令 41 的 pre-existing 偶发失败不改变 §12.4「全量回归 PASS」的判定口径——但该行的措辞按本节 12.7.3 第 5 条理解（**判定用隔离复跑 + 全量复跑双证据**，非「每次全量必绿」）。
+
+### 12.8 第四轮：独立复核（第三次）的 12 项发现与逐项处置（编排者，2026-09-26 续三）
+
+> **只增不改**：§12.1–§12.7 保留为历次记录。本节**取代** §12.1 的「本轮改动面」行与 §12.6 的生产文件清单（更正计数见 12.8.1），并**在本节内逐条登记**对 §12.3 第 3 / 4 / 7 行、§12.4、§12.5、§12.7.1、§12.7.3 的就地修正；凡冲突以本节为准。
+> 复核形态：**独立只读复核**（`code-reviewer` subagent；只读、不写文件、不跑 cargo），快照时点 2026-09-26 17:02，且**已知目标树在复核期间被本次收口并发写入**（§12.7 与 `example/minimal/README.md` 在 17:00–17:01 落盘）——复核报告据此把「审计前后快照差异」显式分开，本节沿用其口径。
+> 结果：**12 项（0 blocker / 2 major / 10 minor）**；未发现生产行为回归、秘密泄漏或遗留标记。**全部 12 项在本轮处置完毕**（11 项修复 + 1 项接受现状），无一项挂账。
+
+#### 12.8.1 本批改动面（更正 §12.1「9 个文件 / 生产 3」）
+
+| 轮次 | 改动面 | 构成 |
+| --- | --- | --- |
+| §12.1–§12.7（第二 / 三轮，17:02 复核快照） | **17 个文件** | 代码 **10** = 生产 **4**（`middleware/web_search.rs`、`middleware/web_fetch.rs`、`artifact/tool.rs`、**`artifact/mod.rs`**）+ 测试 **6**（`host/mcp_v4_builtin_test.rs`、`mcp/builtin/web_test.rs`、`mcp/builtin_runtime_test.rs`、`middleware/web_test.rs`、`middleware/web_fetch_test.rs`、`goal_middleware_test.rs`）＋ 文档 **5** ＋记录 **2** |
+| §12.8（第四轮，本节） | **+3 个文件** | **文档 1**：`docs/design/middleware-system.md`（m6）；**注释 2**：`mcp/builtin/web.rs`、`middleware/mod.rs`（m7 / m8，**纯注释 / 文档注释，无可执行语句变化**） |
+| 合计 (`git status --porcelain`) | **20 个文件** | 代码 **12**（含注释-only 2）＋ 文档 **6** ＋ 记录 **2** |
+
+**更正原因**：§12.1 原文「9 个文件：生产 3 + 测试 6」**漏计 `artifact/mod.rs`**（§12.7.1 F2 的删除落点）；§12.7 前言声称取代该行，却**只重述了命令计数、未重述文件计数** ⇒ 由本节补齐并给出轮次分解（第四轮的三项由第三次独立复核触发，见 12.8.2 / 12.8.3）。
+
+#### 12.8.2 两项 major
+
+| # | 发现 | 性质 | 处置 |
+| --- | --- | --- | --- |
+| M1 | §12.3 第 3 行的边界括注称「生产 handler 在真 loader 下同 pool 不串」**由 `StartupFixture` 系用例承担**，而 `mcp/builtin_runtime_test.rs` 的用例自述明写该命题**无证据面**（生产 transport 没有 per-instance tap，`StartupFixture` 系用例只看握手 / 目录 / 真实往返、不看线路帧序列）；且该括注反指 §12.5，而 §12.5 当时**没有**这一条非声称 ⇒ 双向悬空 | 声称与代码互相否定（记录侧）+ 反向悬空引用 | ① §12.3 第 3 行括注改为「该命题**无证据面** ⇒ 本记录**不宣称**」，与用例自述同口径；② §12.5 补入该条非声称（并注明其属 §8.1 非目标、无 §12.3 对应行）；③ **不改用例文本**（其自述本就是正确口径）⇒ 记录与代码三处一致 |
+| M2 | `docs/design/meta-harness.md`（§2.5 语义段）仍写「Artifact 上传由独立 `ArtifactMiddleware` 承载；关闭它仅移除 `artifact`」——与本批删除该结构体、同文件 17 行与 220–222 行、以及 §12.7.2「该文件已同步」的声称**自相矛盾** | 现行文档事实错误（DOC-UPDATE-001 漏网行，不属 12.7.2 列举的四处） | 改为「由 builtin `artifact` MCP 实例（`mcp/builtin/artifact.rs`）承载；策略键 `ArtifactMiddleware: false` 关闭该实例工具面（模型面名字 `mcp__artifact__artifact`），不影响 `ToolSearch` 的元工具」 |
+
+#### 12.8.3 十项 minor（逐项处置）
+
+| # | 发现 | 处置 |
+| --- | --- | --- |
+| m1 | §12.1 文件计数与实测不符（详见 12.8.1） | **已更正**：12.8.1 给出 17 / 10 / 4 / 6 / 5 / 2 的完整分解 |
+| m2 | §12.2 末句「上表 18 条命令的 `passed` 计数全部 ≥ 3」对 42（fmt）/ 43（clippy）/ 44（layer-imports）三条门禁命令不成立 | **已改为**「18 条中 15 条为测试命令，其 `passed` 全部 ≥ 3；42 / 43 / 44 为门禁命令，不产出 `passed` 计数，不适用本判据」 |
+| m3 | §12.3 第 7 行把「Goal 工具集合不含 `mcp__` 前缀名」登记为**可证伪替代**，但该断言被同一用例既有的 `len == 1` 与 `name() == "goal"` **逻辑蕴含** ⇒ 独立失败模式为 0（同义反复残留：本轮已识破原要求是同义反复，替换物又落回同一形态） | **已更正**：§12.3 第 7 行改为「Goal 面与关闭集按构造无关 ⇒ **无独立可证伪面**，按**设计事实**登记，不声称该面随关闭集收缩；追加断言为**非独立守卫**，只在前两条被放宽时才起约束作用」；用例内文档注释同步改写（原「本条立刻变红」的措辞撤销）；§12.4 对应行由「Goal / PTC 已闭合」改为「PTC 按证据闭合；Goal 按设计事实登记」，缺口计数改为 **3 项无独立可证伪面** |
+| m4 | §12.4「§10.1 清单 \| **10 项**」与 §10.1 实际清单（9 项 + 末句 caveat）不符；§12.5 标题「与 §12.3 **一一对应**」对末尾两项（`/artifacts` slash 命令、跨进程沙箱）不成立 | **已改为**「9 项（＋末句 caveat）」；§12.5 标题改为「与 §12.3 **逐条对应**；末尾两项属 §8.1 非目标，无 §12.3 对应行」 |
+| m5 | §12.7.1 F2「证据」列称全仓 `ArtifactMiddleware` 命中「**只剩**两处策略键字符串 + 文档表格」，实测另有 example 配置、README、测试夹具与注释共约 31 行 / 10 文件 | **已改为**「命中**无活体类型引用**：定义侧 2 处（`builtin_mcp.rs:100` / `meta_harness.rs:143`），其余为配置键字符串与注释（约 31 行 / 10 文件）」——实质结论（无活体类型引用）成立，穷尽性声称撤销 |
+| m6 | `docs/design/middleware-system.md` 仍是过期现行描述：自称「生产蓝本包含 **26** 个槽位」，且 §3 表仍列 `#13 web`、`#24 artifact` 两槽位（本批已删 `ChainSlot::Web` / `ChainSlot::Artifact`） | **已修正**：槽位数改 **25**（= `ChainSlot` 25 变体，含 `git_watch`）；删去两行并按链蓝本顺序**重编号 1–24**；同步全部编号引用（脚注 #17/#18→#16/#17、#19→#18、#22/#23→#21/#22、#26→#24；§5 贡献表 ptc → #21、tool_search → #22；§6 的 `HookMiddleware` #16→#15；§4 顺序约束「web」→「mcp」）；新增脚注说明 Web / Artifact 由 `mcp` 槽位（#19）客户端侧的 builtin 实例提供、关闭键为策略键 |
+| m7 | 两处注释称「Web 两个工具的后端地址是编译期常量，**无法在单测内指向本地桩**，成功/失败只能由替身产生」——本批已加 `#[cfg(test)] with_endpoint_for_test` 与 `web_handler_tools_call_reaches_real_http_stub_over_wire`（真工具体 + 本地回环桩 + 真 wire）⇒ 说明失效 | **已改写** `mcp/builtin/web.rs` 的 `with_tools` 文档与 `mcp/builtin_runtime_test.rs` 文件头：生产地址仍恒为编译期常量；测试两条路径并存（真工具体 + 本地桩 / 替身工具），并指名承担用例 |
+| m8 | `middleware/mod.rs` 残留「⚠ 已知跨 task 依赖（S-02）：`tool_search/declaration_test.rs` 仍引用 `crate::middleware::WebMiddleware` ⇒ lib 测试目标会报 E0432」——该文件已改走 `peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES`，全仓 `WebMiddleware` 命中 0 ⇒ 注释所述故障不存在 | **已删除该告警**，改为一行事实说明（依赖已解除） |
+| m9 | `docs/design/meta-harness.md` 装配示意里 `let disabled: HashSet<&str>` 与真实签名 `closed_instances(&HashSet<String>)` 不符（按字面不可编译） | **已改为** `HashSet<String>`（`.map(\|(k, _)\| k.clone())`），示例与 `assembly.rs:419` 的实参类型一致 |
+| m10 | `docs/code-index/peri-middlewares.md` 头注把「`middleware/web.rs` 文件删除」归入「收口第二轮」，实际该删除发生在 wave 1 提交 `354705e5`（`git log --diff-filter=D` + 提交信息 + §11 第 7 行三处互证） | **已改**：该短语移入「此前（Builtin MCP 实例…）」段并标注提交号 |
+| m11 | §12.3 第 4 行引 `subagent/mod_test.rs:507` 实为该用例的**文档注释**行（`#[test]` 在 508、`fn` 在 509） | **已改为** `:509` 并注明 507 是文档注释行 |
+| m12 | `example/minimal/README.md` 表头仍为「Middleware controls」，而表中两行现属 builtin 实例策略键 | **接受现状**：表头分组是名义问题；17:01 新增的 Note 已准确声明两键「不再是 middleware 槽位，而是 builtin 实例关闭键（`BUILTIN_INSTANCE_POLICY_KEYS`），旧配置仍被识别」，且 `example/minimal/.peri/settings.json` 的两键行为不变 ⇒ 不触发 DOC-UPDATE-001 的事实错误，本轮不改（避免与本波次无关的示例改动） |
+
+#### 12.8.4 复核未覆盖面（与本节声称边界一致，不升级）
+
+复核为**只读**形态，以下五项在其报告中列为「未能核实」，本节沿用其口径、**不**把它们读作已证或已误：
+
+1. 命令计数与 exit 由本轮复跑（12.8.5）承担；复核侧只做静态自洽核对（§12.2 的 15 条测试计数与各文件测试属性数逐一相等、16 个 `src/lib.rs`、doc-tests 11 passed / 5 ignored、layer-imports 18 条规则）。
+2. §12.7.3 的 `peri-tui` 偶发失败**不可复现**：其**代码机理**（17 条用例中 12 条 `#[serial]`、失败点 `:391` 读 `ACP_STATE`、`:762` 读 `VIEW_MODELS`）经复核确认为真；「三次并行全量命中一次」的频次仍是单次现场观察。
+3. rmcp「不在 future drop 时自动发 `notifications/cancelled`」只有静态佐证（rmcp 3.1.4 的 `RequestHandle` 无 `Drop`、peri 侧侧内无发送点），**无运行时证据** ⇒ §12.3 第 5 行「设计事实」的定性不变。
+4. 真实外网 Tavily / 真实上传端点、capability root 隔离、凭据隔离 —— 与 §12.3 第 1 / 2 / 6 行的 UNVERIFIED 自称一致（复核确认其「不可证伪」的代码依据存在）。
+5. §12.7.3 中「`builtin_runtime_test.rs:941` 首跑 fmt 失败」的**修复前状态**不可回读（修复已落地）。
+
+#### 12.8.5 第四轮复跑（命令 35、59–68；顺序执行，不并发 cargo）
+
+| # | 命令 | 现场结果 | exit |
+| ---: | --- | --- | ---: |
+| 35 | `git diff --check` | 无输出 | 0 |
+| 59 | `cargo fmt --all --check` | 无输出 | 0 |
+| 60 | `cargo clippy --workspace --all-targets -- -D warnings` | `Finished dev profile ... in 14.92s`；warning **0** | 0 |
+| 61 | `bash scripts/check-layer-imports.sh` | 18 条规则、**违规边 0** | 0 |
+| 62 | `cargo test --workspace --lib --no-fail-fast` | **首跑失败**（`error: 1 target failed: -p peri-tui --lib`）⇒ **复跑 16/16 target 全 `ok`；6517 passed / 0 failed / 15 ignored**（与 §12.2 / §12.7.3 逐位一致） | 首跑 101 / 复跑 0 |
+| 63 | `cargo test --workspace --doc --no-fail-fast` | 16 个 Doc-tests target 全 `ok`；**11 passed / 0 failed / 5 ignored** | 0 |
+| 65 | `-p peri-middlewares --lib -- goal_middleware` | `ok. 8 passed; 0 failed; 1928 filtered out` | 0 |
+| 66 | `-p peri-middlewares --lib -- mcp::builtin::web` | `ok. 11 passed; 0 failed; 1925 filtered out` | 0 |
+| 67 | `-p peri-middlewares --lib -- mcp::builtin::runtime` | `ok. 16 passed; 0 failed; 1920 filtered out` | 0 |
+| 68 | `-p peri-middlewares --lib -- mcp::builtin` | `ok. 100 passed; 0 failed; 1836 filtered out` | 0 |
+
+65–68 四条过滤器覆盖本轮被改的 `.rs` 文件所对应的测试面（`goal_middleware_test.rs` / `mcp/builtin/web.rs` + `web_test.rs` / `mcp/builtin_runtime_test.rs` / 整个 `mcp::builtin` 子树）；计数与 §12.2 的对应命令逐位一致。
+
+**本轮改动的性质**：四处 `.rs` 改动**全部是注释 / 文档注释**（`goal_middleware_test.rs` 用例文档、`builtin_runtime_test.rs` 文件头、`mcp/builtin/web.rs` 的 `with_tools` 文档、`middleware/mod.rs` 模块注释），**无任何可执行语句、断言、类型或签名变化**；其余改动为文档（6 个文件）与记录（2 个）。因此本轮复跑的判定口径是「注释变更后重新取证」，**不**构成行为回归的修复——上一轮 6517 passed 的语义结论不由本轮复跑扩大（沿用 §12.7.4）。
+
+**末次复检（命令 69，本节写入之后）**：`git diff --check` 复跑 —— 首跑命中一条 whitespace 报错（本文件 EOF 多出两个空行，由本节追加时引入），删去后复跑**无输出**（exit 0）。命令 35 的 exit 0 覆盖的是 12.8.1–12.8.4 落盘时的树，本节追加后由命令 69 覆盖末态；两者各自对应当次时点的文件树，**末态以命令 69 为准**（本波次全部检查中唯一一次「检查发现 → 修复 → 复检」发生在该空白行上，其余检查均为首跑即绿或按 12.8.6 登记）。
+
+#### 12.8.6 第四轮再次命中 `peri-tui` 偶发失败（诚实登记 + 新增现场数据）
+
+命令 62 的**首跑**再次出现 `-p peri-tui --lib` 失败（exit 101）。本次登记与 §12.7.3 的差异与补充：
+
+1. **用例名缺失（本记录的方法学缺陷，如实写出）**：命令 62 的输出经脚本 `tail -60` 截断，**只留下目标级证据**（`error: 1 target failed: -p peri-tui --lib`），失败用例名**不可回读**。§12.7.3 里那两例的名字来自当时未截断的输出；本轮无法把两处现象归到同一对用例上，只能记为「同一目标、同类现象」。
+2. **新增数据（隔离连跑 3 次全绿）**：`cargo test -p peri-tui --lib --no-fail-fast` 连跑 **3 次**，每次 `ok. 1677 passed; 0 failed; 7 ignored`（≈15.4s），**3/3 为绿**。
+3. **现象统计（本次会话内，均为同一台机、同一代码树）**：`--workspace` 级全量 lib 共 4 次——§12 第一次**绿**、§12.7 第一次 **2 例红**、§12.7 第二次**绿**、本轮第一次 **红（≥1 例）**、本轮第二次**绿**（即 5 次中 2 红 3 绿）；`-p peri-tui` 单 crate 级共 4 次（§12.7 隔离复跑 1 次 + 本轮 3 次）**全绿**。
+4. **机理收窄（相对 §12.7.3 的新结论）**：失败**只在 workspace 级全量里出现**，单 crate 连跑 3 次复现不出 ⇒ 该 crate 的全局 atom 交错需要 workspace 级运行的上下文（构建 / 运行期差异），单纯「同一 lib target 内 serial 与非 serial 用例交错」不足以解释。§12.7.3 第 3 条已注明「未做：精确定位交错伙伴」——本轮**仍未做**，此处只把现象范围收窄并如实登记，**不作**因果断言。
+5. **判定不变**：本波 20 个改动文件中**无** `peri-tui/` 任何文件；peri-tui 的失败与 wave 1 的改动面无因果路径；§12.4「全量回归 PASS」的判定口径仍按 §12.7.3 第 5 条（**隔离复跑 + 全量复跑双证据**，非「每次全量必绿」）。该缺口属 `peri-tui` owner 面，按 §9 规则 1 不在本波次修复，仅登记。

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
 use serde::Deserialize;
@@ -7,6 +9,9 @@ use super::web_common::WEB_CREDIBILITY_WARNING;
 
 /// Tavily 搜索后端地址
 const TAVILY_BASE_URL: &str = "https://tavily.claude-code-best.win";
+
+/// 请求总超时（生产路径的硬编码值；测试可注入短超时以复现超时分支）
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 单条结果文本截断上限（字符数）
 const MAX_RESULT_TEXT_CHARS: usize = 500;
@@ -34,11 +39,45 @@ pub(crate) struct SearchResult {
 const WEBSEARCH_DESCRIPTION: &str = include_str!("descriptions/web_search.md");
 
 /// WebSearch 工具 — 通过 Tavily 兼容 API 搜索网页
-pub struct WebSearchTool;
+pub struct WebSearchTool {
+    /// Tavily 兼容后端根地址（生产恒为 [`TAVILY_BASE_URL`]；测试可注入本地桩）。
+    base_url: String,
+    /// 请求总超时（生产恒为 [`REQUEST_TIMEOUT`]；测试可注入短超时）。
+    timeout: Duration,
+}
 
 impl WebSearchTool {
     pub fn new() -> Self {
-        Self
+        Self {
+            base_url: TAVILY_BASE_URL.to_string(),
+            timeout: REQUEST_TIMEOUT,
+        }
+    }
+
+    /// 测试构造：注入端点（本地回环桩），使搜索协议的 200 / 非 2xx 形态可在
+    /// 无网络条件下覆盖；生产路径只经 [`Self::new`]。
+    #[cfg(test)]
+    pub(crate) fn with_endpoint_for_test(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            timeout: REQUEST_TIMEOUT,
+        }
+    }
+
+    /// 测试构造：同时注入端点与请求总超时，让超时分支在毫秒级真实时钟内可复现。
+    ///
+    /// 不采用 `tokio::test(start_paused = true)`：虚拟时钟需要 tokio 的 `test-util`
+    /// feature，本 crate 未启用（`peri-agent` / `peri-tui` 在各自 dev-dependencies 里
+    /// 单独启用，本 crate 不加依赖）。生产路径只经 [`Self::new`]。
+    #[cfg(test)]
+    pub(crate) fn with_endpoint_and_timeout_for_test(
+        base_url: impl Into<String>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            timeout,
+        }
     }
 }
 
@@ -71,10 +110,6 @@ pub(crate) fn format_search_results(results: &[SearchResult]) -> String {
 impl BaseTool for WebSearchTool {
     fn name(&self) -> &str {
         "WebSearch"
-    }
-
-    fn is_direct(&self) -> bool {
-        true
     }
 
     /// 网络工具分组（design v2 §2.5.1：同类工具按 namespace 组织声明段）。
@@ -135,7 +170,7 @@ impl BaseTool for WebSearchTool {
             };
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(self.timeout)
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
@@ -145,7 +180,7 @@ impl BaseTool for WebSearchTool {
         });
 
         let resp = client
-            .post(format!("{TAVILY_BASE_URL}/search"))
+            .post(format!("{}/search", self.base_url.trim_end_matches('/')))
             .json(&body)
             .send()
             .await
