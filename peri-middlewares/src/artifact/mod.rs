@@ -1,6 +1,8 @@
 //! Artifact 上传能力及其独立装配 middleware。
 
-mod client;
+// `builtin/artifact.rs` 的 handler 需要构造可注入 base url / token 的客户端
+// （无网络测试）；生产路径仍只经 `ArtifactTool::new`。
+pub(crate) mod client;
 mod tool;
 
 use peri_agent::{middleware::r#trait::Middleware, tools::BaseTool};

@@ -1,7 +1,8 @@
+use peri_agent::tools::BaseTool;
 use serde_json::Value;
 
-use super::*;
-use crate::middleware::web_search::{format_search_results, SearchResult};
+use crate::middleware::web_fetch::WebFetchTool;
+use crate::middleware::web_search::{format_search_results, SearchResult, WebSearchTool};
 
 // --- WebFetchTool tests ---
 

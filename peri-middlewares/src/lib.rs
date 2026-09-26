@@ -111,7 +111,7 @@ pub mod prelude {
         cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger},
         hitl::HumanInTheLoopMiddleware,
         hooks::{HookMiddleware, RegisteredHook},
-        middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
+        middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware},
         permission::{
             default_requires_approval, AutoClassifier, BatchItem, Classification, HitlDecision,
             LlmAutoClassifier, PermissionMiddleware, PermissionMode, SharedPermissionMode,

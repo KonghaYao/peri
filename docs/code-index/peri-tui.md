@@ -1,6 +1,6 @@
 # peri-tui 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-19（transcript 居中带与窗口级滚动条）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-26（builtin 一等工具的工具卡片走生效名归一：`tool_display.rs` / `truncate.rs` 不再按裸名分支。此前：2026-09-19 transcript 居中带与窗口级滚动条）
 > 依据：peri-tui/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
 
 ## 架构速览
@@ -73,7 +73,8 @@
 | AskUserPanel（问答面板） | panels/ask_user.rs + ask_user/{form,typing}.rs | 面板保留主题布局、命中区域与 owner 响应副作用；`FormState` 处理选择/导航/编辑/答案构造，鼠标与 Space 共用操作 |
 | 模型与 Workflow 面板回归 | panels/{model,workflow}_test.rs | 私有 tests 模块挂载；覆盖窄屏列宽、run 选择与 Unicode 截断，生产渲染仍在对应面板 |
 | 模型配置编辑与提交 | panels/model.rs + model/edit.rs + model/commit_test.rs | `switch_active_alias` 保留面板/快捷弹窗共同入口；`edit_field` 修改唯一 PeriConfig，`commit_snapshot` 在释放配置锁后统一保存、通知、按 `ModelChange` 投影并推送 ACP；inactive 编辑不切换展示，alias 切换独有高亮；真实磁盘/MPSC 回归覆盖保存失败仍推送 |
-| tool 展示 | `tool_display.rs` + `tool_semantics.rs` | `format_tool_name`（tool_display.rs:8，本地化动词）；skill/todo 语义展示（tool_semantics.rs:65/:79）、todo diff（:115） |
+| tool 展示 | `tool_display.rs` + `tool_semantics.rs` | `format_tool_name`（tool_display.rs:8，本地化动词）；skill/todo 语义展示（tool_semantics.rs:65/:79）、todo diff（:115）；`format_tool_args` 为**匹配型归一**：先按传入名匹配、未命中再用 `original_tool_name_of_effective` 归一后的原始名重试，因此 builtin 一等工具的 `mcp__web__*` 仍走 WebSearch / WebFetch 的参数摘要；未知名（含外部 `mcp__*`）两次都不命中 ⇒ 通用路径。本模块**不得**硬编码 effective name 字面量或自建反查表（A4 / A8） |
+| 工具字段提取与截断 | `truncate.rs` | 字段提取与折叠同样走上面的匹配型归一（原样优先）；回归 `truncate_test.rs` 覆盖有效名与未知名两态 |
 
 ## 子系统
 

@@ -21,6 +21,11 @@ fn test_v2_context_has_null_llm_by_default() {
 /// 归零。本测试保留"共享表含 middleware 工具名"的人工防御面场景（模拟
 /// 将来注册面变化），其中 AskUserQuestion 现与其他 middleware 工具同
 /// 语义：disabled 链无持有者 → 剔除。
+///
+/// 夹具用名（v4-part-2，A7/IF-D7 B 节）：`SkillTool` 取代原先的 `WebFetch`
+/// ——WebFetch / WebSearch / artifact 已迁为 builtin MCP 实例并从
+/// `MIDDLEWARE_TOOL_NAMES` 删除，不再是剔除面的样例（裸名不再被剔除的
+/// 反向断言见 `tools_test.rs::migrated_naked_names_are_no_longer_excluded`）。
 #[test]
 fn test_build_session_tool_view_isolates_disabled_sessions() {
     use peri_acp_types::meta_harness::MIDDLEWARE_TOOL_NAMES;
@@ -35,21 +40,27 @@ fn test_build_session_tool_view_isolates_disabled_sessions() {
         Arc::new(RwLock::new(BTreeMap::new()));
     {
         let mut map = base.write();
-        map.insert("WebFetch".to_string(), fake_tool("WebFetch"));
-        map.insert("WebSearch".to_string(), fake_tool("WebSearch"));
+        map.insert("SkillTool".to_string(), fake_tool("SkillTool"));
+        map.insert(
+            "DiscoverSkillsTool".to_string(),
+            fake_tool("DiscoverSkillsTool"),
+        );
         map.insert("Bash".to_string(), fake_tool("Bash"));
         map.insert("AskUserQuestion".to_string(), fake_tool("AskUserQuestion"));
     }
-    assert!(MIDDLEWARE_TOOL_NAMES.contains(&"WebFetch"));
+    assert!(MIDDLEWARE_TOOL_NAMES.contains(&"SkillTool"));
     assert!(MIDDLEWARE_TOOL_NAMES.contains(&"Bash"));
     assert!(MIDDLEWARE_TOOL_NAMES.contains(&"AskUserQuestion"));
 
-    // disabled session：当前链无 Web/提问工具 → 视图不得含残留条目
+    // disabled session：当前链无 Skills/提问工具 → 视图不得含残留条目
     let middleware_tools: Vec<Box<dyn BaseTool>> = vec![];
     let view = build_session_tool_view(&base, middleware_tools);
     let view_map = view.read();
-    assert!(!view_map.contains_key("WebFetch"), "残留 WebFetch 泄漏");
-    assert!(!view_map.contains_key("WebSearch"), "残留 WebSearch 泄漏");
+    assert!(!view_map.contains_key("SkillTool"), "残留 SkillTool 泄漏");
+    assert!(
+        !view_map.contains_key("DiscoverSkillsTool"),
+        "残留 DiscoverSkillsTool 泄漏"
+    );
     assert!(!view_map.contains_key("Bash"), "残留 Bash 泄漏");
     assert!(
         !view_map.contains_key("AskUserQuestion"),
@@ -57,17 +68,17 @@ fn test_build_session_tool_view_isolates_disabled_sessions() {
     );
     drop(view_map);
 
-    // enabled session：当前链含 Web/提问工具 → 视图含（覆盖为基础实例或新实例）
+    // enabled session：当前链含 Skills/提问工具 → 视图含（覆盖为基础实例或新实例）
     let middleware_tools: Vec<Box<dyn BaseTool>> = vec![
-        Box::new(NamedTool("WebFetch")),
+        Box::new(NamedTool("SkillTool")),
         Box::new(NamedTool("AskUserQuestion")),
     ];
     let view = build_session_tool_view(&base, middleware_tools);
-    assert!(view.read().contains_key("WebFetch"));
+    assert!(view.read().contains_key("SkillTool"));
     assert!(view.read().contains_key("AskUserQuestion"));
 
     // 基础共享表不受视图构造影响（跨 session 隔离不改写全局表）
-    assert!(base.read().contains_key("WebFetch"));
+    assert!(base.read().contains_key("SkillTool"));
 }
 
 /// 测试桩工具（仅 name 有效）。

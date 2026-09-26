@@ -246,6 +246,69 @@ fn test_hitl_section_rendered_by_holder() {
     );
 }
 
+/// S-04（A19 / R33）：10_hitl 渲染出的敏感清单点名**模型面 effective name**。
+///
+/// 清单是动态生成的（`format_sensitive_tools()` 是渲染面唯一事实源）：Web 工具
+/// 迁移为 builtin 一等工具后，模型面名字是 `mcp__web__WebFetch` /
+/// `mcp__web__WebSearch`，条目名若留裸名就会点名一个已不存在的工具
+/// （A19/IF-G3）。本用例锁定四件事：
+/// ① 渲染结果逐字包含清单（条目表确实进入模型面，同源不漂移）；
+/// ② 两个 web effective name 在清单内，裸名不在——按列表项形态（`- \`名\` — `）
+///    判定，避免被 `mcp__web__WebFetch` 的子串误判为「出现了裸名」；
+/// ③ `artifact` 不在敏感清单（parity：与原始名 `artifact` 的判定一致）；
+/// ④ 条目数 / 前缀条目数不变（14 / 3），与 `permission/mod_test.rs` 的计数断言
+///    互为双锁。
+#[test]
+fn test_hitl_sensitive_list_uses_effective_names() {
+    use peri_middlewares::permission::{format_sensitive_tools, sensitive_tool_entries};
+
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
+
+    let list = format_sensitive_tools();
+    assert!(
+        result.contains(&list),
+        "10_hitl 段落必须逐字包含敏感清单渲染结果（条目表是渲染面单一事实源）"
+    );
+    assert!(
+        list.contains("- `mcp__web__WebFetch` — "),
+        "敏感清单应含 mcp__web__WebFetch（A19：条目名改模型面 effective name）"
+    );
+    assert!(
+        list.contains("- `mcp__web__WebSearch` — "),
+        "敏感清单应含 mcp__web__WebSearch（A19：条目名改模型面 effective name）"
+    );
+    assert!(
+        !list.contains("- `WebFetch` — ") && !list.contains("- `WebSearch` — "),
+        "敏感清单不得再点名裸名 WebFetch / WebSearch（模型面已无此名）"
+    );
+    assert!(
+        !list.contains("artifact"),
+        "artifact 不在敏感清单（parity：与原始名判定一致）"
+    );
+
+    let entries = sensitive_tool_entries();
+    assert_eq!(entries.len(), 14, "条目数不变（A19 只改条目名）");
+    assert_eq!(
+        entries.iter().filter(|e| e.prefix_match).count(),
+        3,
+        "前缀条目数不变（A19 只改条目名）"
+    );
+    assert_eq!(
+        list.lines().count(),
+        entries.len(),
+        "渲染清单项数 == 条目表项数（列表与判定同源）"
+    );
+}
+
 #[test]
 fn test_subagent_section_rendered_by_holder() {
     // 11_subagent 由 SubAgentMiddleware 持有（Builtin，含 {{available_agents}}

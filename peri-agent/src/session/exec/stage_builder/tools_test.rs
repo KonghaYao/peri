@@ -142,3 +142,72 @@ fn startup_registration_forwards_session_and_candidate_tools() {
         "候选工具必须整批透传且顺序不变"
     );
 }
+
+/// 测试桩工具（仅 `name` 有效）。
+struct NamedTool(&'static str);
+
+#[async_trait]
+impl BaseTool for NamedTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn description(&self) -> &str {
+        "stage builder predicate fixture"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: crate::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Err("fixture".into())
+    }
+}
+
+/// v4-part-2（A7/IF-D7 B 节）反向断言：已迁移的三个裸名**不再**被防御谓词剔除。
+///
+/// 迁移后三个裸名不再是 middleware 静态工具（`MIDDLEWARE_TOOL_NAMES` 已删除），
+/// 因此共享表里出现的同名工具只能是**非 middleware 路径**注册的合法工具；
+/// 当前链未注册同名工具时它们必须留在本地视图（而仍在表内的 `Bash` 照旧剔除）。
+#[test]
+fn migrated_naked_names_are_no_longer_excluded() {
+    use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
+    use peri_acp_types::meta_harness::MIDDLEWARE_TOOL_NAMES;
+
+    let base: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
+        Arc::new(RwLock::new(BTreeMap::new()));
+    {
+        let mut map = base.write();
+        for name in ["WebFetch", "WebSearch", "artifact", "Bash"] {
+            map.insert(name.to_string(), Arc::new(NamedTool(name)));
+        }
+    }
+
+    // 前提：三个裸名已不在剔除面内，`Bash` 仍在（否则本测试没有区分力）。
+    for instance in BUILTIN_MCP_INSTANCES {
+        for tool in instance.tools {
+            assert!(
+                !MIDDLEWARE_TOOL_NAMES.contains(&tool.original_name),
+                "已迁移裸名 {} 不应再出现在 MIDDLEWARE_TOOL_NAMES 内",
+                tool.original_name
+            );
+        }
+    }
+    assert!(MIDDLEWARE_TOOL_NAMES.contains(&"Bash"), "Bash 仍在剔除面内");
+
+    // 当前链无任何 middleware 工具：三个裸名保留，Bash 被剔除。
+    let view = build_session_tool_view(&base, vec![]);
+    let view_map = view.read();
+    assert!(
+        view_map.contains_key("WebFetch"),
+        "非 middleware 路径注册的裸名不得被本谓词剔除"
+    );
+    assert!(view_map.contains_key("WebSearch"));
+    assert!(view_map.contains_key("artifact"));
+    assert!(
+        !view_map.contains_key("Bash"),
+        "仍在剔除面内的 middleware 静态工具照旧被剔除"
+    );
+}

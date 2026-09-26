@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use parking_lot::RwLock;
 use peri_acp_types::{
+    builtin_mcp::original_tool_name_of_effective,
     dynamic_mcp::{DynamicMcpCatalogTool, SessionMcpCapabilitySnapshot},
     ports::SessionMcpCapabilityPort,
 };
@@ -116,6 +117,14 @@ pub enum ToolFilterPolicy {
 }
 
 impl ToolFilterPolicy {
+    /// `--disallowed-tools` / agent `tools:` 的 allow/deny 过滤（大小写不敏感精确匹配）。
+    ///
+    /// **A4 ⑦（IF-D6 匹配型归一）**：builtin 一等工具的模型面名字是 effective name
+    /// （如 `mcp__web__WebSearch`），用户配置里既可能写迁移前的裸名，也可能写迁移后的
+    /// effective name。因此两侧都按「**原样优先，未命中再用归一后的原始名**」展开候选：
+    /// 任一侧候选相等即命中——`--disallowed-tools WebSearch` 与
+    /// `--disallowed-tools mcp__web__WebSearch` 都继续生效，且不会新增字面量分支
+    /// （归一表只有 `peri_acp_types::builtin_mcp` 一份，IF-D15）。
     pub fn canonical(
         allowed: Option<Vec<String>>,
         disallowed: Vec<String>,
@@ -126,25 +135,41 @@ impl ToolFilterPolicy {
             Some(allowed) => Self::AllowList(
                 allowed
                     .into_iter()
-                    .map(|name| name.to_lowercase())
+                    .flat_map(|name| name_candidates(&name))
                     .collect(),
             ),
         };
-        let disallowed = disallowed
+        let disallowed: Vec<String> = disallowed
             .into_iter()
-            .map(|name| name.to_lowercase())
-            .collect::<Vec<_>>();
+            .flat_map(|name| name_candidates(&name))
+            .collect();
         Arc::new(move |name| {
-            let name = name.to_lowercase();
+            let candidates = name_candidates(name);
+            let matches =
+                |configured: &str| candidates.iter().any(|candidate| candidate == configured);
             let allowed = match &policy {
                 ToolFilterPolicy::InheritAll => true,
                 ToolFilterPolicy::AllowNone => false,
                 ToolFilterPolicy::AllowList(names) => names
                     .iter()
-                    .any(|candidate| candidate == "*" || candidate == &name),
+                    .any(|candidate| candidate == "*" || matches(candidate)),
             };
-            allowed && !disallowed.iter().any(|candidate| candidate == &name)
+            allowed && !disallowed.iter().any(|candidate| matches(candidate))
         })
+    }
+}
+
+/// 按名过滤的候选集合（A4 ⑦ 匹配型归一）：原样（小写化）恒在其中，命中归一表时
+/// 再补一个原始工具名候选。
+///
+/// 归一表是 [`original_tool_name_of_effective`]（IF-D15 唯一入口）；未命中
+/// （未知 / 外部 `mcp__*`）时只有一个候选 ⇒ 与迁移前的单名比较逐位一致。
+/// 名字字面量只在声明表里声明一份，本模块不得复制或反拆。
+fn name_candidates(name: &str) -> Vec<String> {
+    let lowered = name.to_lowercase();
+    match original_tool_name_of_effective(name) {
+        Some(original) => vec![lowered, original.to_lowercase()],
+        None => vec![lowered],
     }
 }
 
@@ -479,3 +504,96 @@ fn static_mcp_server(name: &str) -> Option<String> {
 #[cfg(test)]
 #[path = "tool_catalog_test.rs"]
 mod tests;
+
+/// A4 ⑦（`ToolFilterPolicy::canonical` 的匹配型归一）专属断言。
+///
+/// 挂载在实现模块内而非 `tool_catalog_test.rs`：`canonical` 的归一改造把断言与
+/// 实现保持同一文件（`--disallowed-tools` / agent `tools:` 是**用户面**行为，
+/// 裸名与 effective name 两种写法都必须继续生效）。
+#[cfg(test)]
+mod filter_policy_parity_tests {
+    use super::*;
+
+    /// 声明表里的 effective name（字面量只在 `peri_acp_types::builtin_mcp` 声明一份）。
+    fn effective_name(instance: &str, original_name: &str) -> &'static str {
+        peri_acp_types::builtin_mcp::find(instance)
+            .and_then(|declared| {
+                declared
+                    .tools
+                    .iter()
+                    .find(|tool| tool.original_name == original_name)
+            })
+            .map(|tool| tool.effective_name)
+            .expect("builtin 声明表应声明该 (实例, 原始工具名)")
+    }
+
+    /// 用户写裸名或写 effective name 都必须继续被 deny（迁移不改变用户面语义）。
+    #[test]
+    fn canonical_disallowed_accepts_naked_and_effective_names() {
+        let effective = effective_name("web", "WebFetch");
+        for entry in ["WebFetch", "webfetch", effective] {
+            let filter = ToolFilterPolicy::canonical(None, vec![entry.to_string()]);
+            assert!(!filter(effective), "deny 条目 {entry} 必须命中 {effective}");
+            assert!(!filter("WebFetch"), "deny 条目 {entry} 必须命中裸名");
+            assert!(filter("Read"), "无关工具不受 deny 影响");
+        }
+        // 大小写边界：全小写的 effective name 条目按大小写不敏感面仍命中 effective name
+        // 本身，但 IF-D15 的归一表是**精确字符串相等**（不折叠大小写），因此不反推裸名
+        // 候选。用户面口径是「写 effective name 或写裸名」，两种写法都在上面的循环里。
+        let lowered = effective.to_lowercase();
+        let filter = ToolFilterPolicy::canonical(None, vec![lowered]);
+        assert!(!filter(effective), "全小写条目仍按大小写不敏感命中");
+        assert!(
+            filter("WebFetch"),
+            "全小写 effective 条目不反推裸名（归一表精确匹配，非用户面口径）"
+        );
+    }
+
+    /// allow 列表同理：两种写法都放行声明表里的 builtin 工具。
+    #[test]
+    fn canonical_allow_list_accepts_naked_and_effective_names() {
+        let search = effective_name("web", "WebSearch");
+        let fetch = effective_name("web", "WebFetch");
+        for entry in ["WebSearch", search] {
+            let filter = ToolFilterPolicy::canonical(Some(vec![entry.to_string()]), vec![]);
+            assert!(filter(search), "allow 条目 {entry} 必须放行 {search}");
+            assert!(filter("WebSearch"), "allow 条目 {entry} 必须放行裸名");
+            assert!(!filter(fetch), "未列入 allow 的工具照旧被过滤");
+        }
+        // 空 allow = 全禁（既有语义不变）
+        let none = ToolFilterPolicy::canonical(Some(vec![]), vec![]);
+        assert!(!none(search));
+    }
+
+    /// 反证：未知 / 外部 `mcp__*` 的过滤行为与迁移前逐位一致（归一未命中 ⇒ 单名比较）。
+    #[test]
+    fn canonical_unknown_names_behave_exactly_as_before() {
+        let filter = ToolFilterPolicy::canonical(None, vec!["mcp__filesystem__read_file".into()]);
+        assert!(
+            !filter("mcp__filesystem__read_file"),
+            "原样精确匹配照旧生效"
+        );
+        // 大小写不匹配的 effective name（非冻结字面量）不命中归一表
+        let lowered = effective_name("web", "WebSearch").to_lowercase();
+        assert!(
+            filter(lowered.as_str()),
+            "未命中归一表的名字不受 builtin 归一影响"
+        );
+        assert!(
+            original_tool_name_of_effective(&lowered).is_none(),
+            "未命中归一表 ⇒ 候选只有原样"
+        );
+        assert!(
+            original_tool_name_of_effective(effective_name("web", "WebSearch")).is_some(),
+            "对照组：冻结字面量必须命中归一表"
+        );
+        // 通配符语义不变：`*` 只对 allow 生效
+        let wildcard = ToolFilterPolicy::canonical(Some(vec!["*".into()]), vec![]);
+        assert!(wildcard("anything"));
+        let deny_wildcard = ToolFilterPolicy::canonical(None, vec!["*".into()]);
+        assert!(
+            deny_wildcard("anything"),
+            "deny 侧的 * 不是通配（既有语义）"
+        );
+    }
+}

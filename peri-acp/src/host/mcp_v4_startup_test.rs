@@ -104,12 +104,23 @@ readline.on('line', line => {
 
 /// HOME 重定向守卫：`load_merged_config_full` 读取 `~/.peri/settings.json`，
 /// 测试必须走临时 HOME，避免启动用户自己的 MCP server。
+///
+/// **A11 / R28（主 plan §5 R28 登记为允许的夹具改动）**：本守卫同时把
+/// `PERI_MCP_BUILTIN=off` 写入进程环境 —— 本文件断言的是**夹具自己声明的** server
+/// 集合与工具面，builtin 默认层注入（`web` / `artifact` 两个 in-process 实例）会在这
+/// 些精确断言之外多出服务器；off 是显式运维开关（A2），使本文件的既有断言在其原
+/// 语义下继续成立。**既有断言一字未改**；off 语义本体的断言在 `host::mcp_v4_builtin`
+/// 与该模块的新增用例中。
 struct HomeRedirect {
     _lock: MutexGuard<'static, ()>,
     previous: Option<OsString>,
+    previous_builtin_injection: Option<OsString>,
 }
 
 impl HomeRedirect {
+    /// builtin 注入开关的 env 名（`peri-middlewares` 的 `BUILTIN_INJECTION_ENV` 同值）。
+    const BUILTIN_INJECTION_ENV: &'static str = "PERI_MCP_BUILTIN";
+
     fn set(home: &Path) -> Self {
         static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         // 一个用例 panic 不得毒化 HOME 重定向，使后续用例连带失败（HOME 由 Drop
@@ -120,9 +131,12 @@ impl HomeRedirect {
             .unwrap_or_else(|poison| poison.into_inner());
         let previous = std::env::var_os("HOME");
         std::env::set_var("HOME", home);
+        let previous_builtin_injection = std::env::var_os(Self::BUILTIN_INJECTION_ENV);
+        std::env::set_var(Self::BUILTIN_INJECTION_ENV, "off");
         Self {
             _lock: lock,
             previous,
+            previous_builtin_injection,
         }
     }
 }
@@ -132,6 +146,10 @@ impl Drop for HomeRedirect {
         match self.previous.take() {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
+        }
+        match self.previous_builtin_injection.take() {
+            Some(value) => std::env::set_var(Self::BUILTIN_INJECTION_ENV, value),
+            None => std::env::remove_var(Self::BUILTIN_INJECTION_ENV),
         }
     }
 }
@@ -815,5 +833,73 @@ async fn system_mcp_gate_runs_after_receive_and_before_reason() {
             .count(),
         1,
         "失败事件恰好一次"
+    );
+}
+
+// ── A11 / R28：夹具守卫的 `PERI_MCP_BUILTIN=off` 必须真的生效 ──────────────────
+
+/// 守卫内的 `PERI_MCP_BUILTIN=off` 的可观察后果（本文件唯一的新增断言，A11/R28）：
+/// 注入面恰为夹具自己声明的 server —— 既没有两个 builtin 实例，也没有它们的能力面
+/// （effective name 与裸名都不出现）。
+///
+/// 这正是 A2 的运维语义：off **不是**回退到 middleware 旧实现（提供面已删除），
+/// 而是「该能力在模型面不存在」。off 语义本体与用户 MCP 共存的证据在
+/// `host::mcp_v4_builtin`。
+#[cfg(not(windows))]
+#[tokio::test]
+#[serial]
+async fn builtin_injection_off_leaves_only_fixture_servers() {
+    let harness = McpStartupHarness::initialized(serde_json::json!({
+        "sys": system_server("tools", "echo", serde_json::json!(["echo"]), 5_000),
+    }))
+    .await;
+    harness.await_connected("sys").await;
+
+    let mut servers: Vec<String> = harness
+        .pool
+        .get_all_clients()
+        .into_iter()
+        .map(|handle| handle.name.clone())
+        .collect();
+    servers.sort();
+    assert_eq!(
+        servers,
+        vec!["sys".to_string()],
+        "off 时 pool 恰为夹具声明的 server（两个 builtin 实例不得被注册）"
+    );
+    for instance in ["web", "artifact"] {
+        assert!(
+            harness.pool.get_client(instance).is_none(),
+            "off 时不得注册 builtin 实例 `{instance}`"
+        );
+    }
+
+    let sink = Arc::new(MockEventSink::new());
+    let model = CountingModel::new();
+    let result = run_prompt(
+        harness.session_context("mcp-v4-builtin-off-guard"),
+        &sink,
+        &model,
+    )
+    .await;
+
+    assert!(result.ok, "off 不得使准入失败: {:?}", result.failure);
+    let tools = model.first_request_tool_names();
+    for name in [
+        "mcp__web__WebSearch",
+        "mcp__web__WebFetch",
+        "mcp__artifact__artifact",
+        "WebSearch",
+        "WebFetch",
+        "artifact",
+    ] {
+        assert!(
+            !tools.iter().any(|tool| tool == name),
+            "off 时不得出现 `{name}`（effective 与裸名都不存在该能力）: {tools:?}"
+        );
+    }
+    assert!(
+        tools.iter().any(|name| name == "mcp__sys__echo"),
+        "off 只关闭 builtin 注入：夹具自身的必需工具仍必须 direct: {tools:?}"
     );
 }

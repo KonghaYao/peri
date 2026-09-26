@@ -19,6 +19,7 @@
 //! `Read (peri-model/src/protocol/mod.rs)`），减少超长绝对路径对头行的占用。
 //! 非 cwd 前缀的路径保持原样。cwd 由 `set_display_cwd` 在启动时设置一次。
 
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use std::sync::OnceLock;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -133,8 +134,12 @@ pub fn wrap_by_width(s: &str, max_width: usize) -> Vec<String> {
 ///
 /// 合并 router.rs 与 view_mapper.rs 的实现：
 /// - 兼具 view_mapper 的 Read `path` 兜底、folder_operations 完整字段
-/// - 兼具 router 的 `_` 分支多级兜底（path/file_path → query/pattern → command → 首个 KV）
+/// - 兼具 router 的通用兜底多级探测（path/file_path → query/pattern → command → 首个 KV）
 /// - `pattern` / `query` 统一为**带引号**格式
+///
+/// builtin 一等工具的 effective name（`mcp__<实例>__<原始名>`）与迁移前的裸名映射到同一
+/// 分支：**匹配型归一**（IF-D6 ④ / A8）先按传入名匹配，未命中再用 IF-D15 的
+/// [`original_tool_name_of_effective`] 取原始工具名重试一次。
 pub fn summarize_input(name: &str, input: &serde_json::Value) -> String {
     // 优先按 Object 提取，非 Object 走 truncate 兜底（与 view_mapper 一致）
     let obj = match input {
@@ -142,6 +147,25 @@ pub fn summarize_input(name: &str, input: &serde_json::Value) -> String {
         other => return truncate_text(&other.to_string(), 120),
     };
 
+    // 原样优先：未知 / 外部 `mcp__*` 两次都不命中 ⇒ 走通用兜底，与迁移前逐位一致。
+    if let Some(summary) = summarize_input_by_name(name, obj) {
+        return summary;
+    }
+    if let Some(original) = original_tool_name_of_effective(name)
+        && let Some(summary) = summarize_input_by_name(original, obj)
+    {
+        return summary;
+    }
+    summarize_input_generic(obj)
+}
+
+/// [`summarize_input`] 的按名分支本体：未命中任何分支返回 `None`，交由调用方用归一
+/// helper 的原始工具名重试。名字字面量只在 `peri-acp-types` 的 builtin 声明表里存一份，
+/// 本模块不得硬编码 effective name，也不得自建第二张反查表（A4 / A8）。
+fn summarize_input_by_name(
+    name: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
     // 字符串字段读取 helper（view_mapper 风格，空值返回 ""）
     let str_val = |key: &str| -> String {
         obj.get(key)
@@ -160,40 +184,44 @@ pub fn summarize_input(name: &str, input: &serde_json::Value) -> String {
             if p.is_empty() {
                 let fallback = shorten_path(&str_val("path"));
                 if fallback.is_empty() {
-                    "(empty input)".to_string()
+                    Some("(empty input)".to_string())
                 } else {
-                    fallback
+                    Some(fallback)
                 }
             } else {
-                p
+                Some(p)
             }
         }
         // ── 无前缀，命令截断 400 ──
-        "Bash" => truncate_text(&str_val("command"), 400),
+        "Bash" => Some(truncate_text(&str_val("command"), 400)),
         // ── 有前缀 pattern:，pattern 截断 200，带引号（统一格式）──
         "Glob" | "Grep" => {
             let p = str_val("pattern");
             let p = if p.is_empty() { str_val("query") } else { p };
-            format!(r#"pattern: "{}""#, truncate_text(&p, 200))
+            Some(format!(r#"pattern: "{}""#, truncate_text(&p, 200)))
         }
         // ── "operation folder_path"，不截断但精简 cwd 前缀 ──
         "folder_operations" => {
             let op = str_val("operation");
             let fp = shorten_path(&str_val("folder_path"));
-            format!("{} {}", op, fp)
+            Some(format!("{} {}", op, fp))
         }
         // ── query: 截断 60，带引号（统一格式）──
-        "WebSearch" => field("query")
-            .map(|s| format!(r#"query: "{}""#, truncate_text(s, 60)))
-            .unwrap_or_else(|| "(empty input)".to_string()),
+        "WebSearch" => Some(
+            field("query")
+                .map(|s| format!(r#"query: "{}""#, truncate_text(s, 60)))
+                .unwrap_or_else(|| "(empty input)".to_string()),
+        ),
         // ── url: 不截断 ──
-        "WebFetch" => field("url")
-            .map(|s| format!("url: {}", s))
-            .unwrap_or_else(|| "(empty input)".to_string()),
+        "WebFetch" => Some(
+            field("url")
+                .map(|s| format!("url: {}", s))
+                .unwrap_or_else(|| "(empty input)".to_string()),
+        ),
         // ── 空字符串（文档无参数）──
-        "TodoWrite" => String::new(),
+        "TodoWrite" => Some(String::new()),
         // ── task_id 截断 12 ──
-        "AgentResult" => truncate_text(&str_val("task_id"), 12),
+        "AgentResult" => Some(truncate_text(&str_val("task_id"), 12)),
         // ── Agent/Task（别名 task）：显示调用模式或 subagent type，再以空格连接
         //    prompt 任务预览（截断 400）；prompt 为空时回退 description ──
         "Agent" | "Task" => {
@@ -216,42 +244,45 @@ pub fn summarize_input(name: &str, input: &serde_json::Value) -> String {
                 truncate_text(&str_val("description"), 400)
             };
 
-            match (label.is_empty(), task.is_empty()) {
+            Some(match (label.is_empty(), task.is_empty()) {
                 (false, false) => format!("{} {}", label, task),
                 (false, true) => label,
                 (true, false) => task,
                 (true, true) => "(empty input)".to_string(),
-            }
+            })
         }
         // ── file_path 不截断但精简 cwd 前缀 ──
-        "artifact" => shorten_path(&str_val("file_path")),
+        "artifact" => Some(shorten_path(&str_val("file_path"))),
         // ── operation 截断 40 ──
-        "LSP" => truncate_text(&str_val("operation"), 40),
+        "LSP" => Some(truncate_text(&str_val("operation"), 40)),
         // ── tool_name 截断 40 ──
-        "ExecuteExtraTool" => truncate_text(&str_val("tool_name"), 40),
+        "ExecuteExtraTool" => Some(truncate_text(&str_val("tool_name"), 40)),
         // ── query 截断 40 ──
-        "SearchExtraTools" => truncate_text(&str_val("query"), 40),
-        // ── 兜底：router 风格的多级探测（path/file_path → query/pattern → command → 首个 KV）──
-        _ => {
-            if let Some(path) = obj.get("path").or_else(|| obj.get("file_path")) {
-                return format!(
-                    "path: {}",
-                    truncate_text(&shorten_path(&path.to_string()), 120)
-                );
-            }
-            if let Some(query) = obj.get("query").or_else(|| obj.get("pattern")) {
-                return format!("query: {}", truncate_text(&query.to_string(), 120));
-            }
-            if let Some(cmd) = obj.get("command") {
-                return format!("cmd: {}", truncate_text(&cmd.to_string(), 120));
-            }
-            if let Some((k, v)) = obj.iter().next() {
-                let raw = v.as_str().unwrap_or("");
-                return format!("{}: {}", k, truncate_text(raw, 100));
-            }
-            "(empty input)".to_string()
-        }
+        "SearchExtraTools" => Some(truncate_text(&str_val("query"), 40)),
+        _ => None,
     }
+}
+
+/// [`summarize_input`] 的通用兜底：router 风格的多级探测
+/// （path/file_path → query/pattern → command → 首个 KV）。
+fn summarize_input_generic(obj: &serde_json::Map<String, serde_json::Value>) -> String {
+    if let Some(path) = obj.get("path").or_else(|| obj.get("file_path")) {
+        return format!(
+            "path: {}",
+            truncate_text(&shorten_path(&path.to_string()), 120)
+        );
+    }
+    if let Some(query) = obj.get("query").or_else(|| obj.get("pattern")) {
+        return format!("query: {}", truncate_text(&query.to_string(), 120));
+    }
+    if let Some(cmd) = obj.get("command") {
+        return format!("cmd: {}", truncate_text(&cmd.to_string(), 120));
+    }
+    if let Some((k, v)) = obj.iter().next() {
+        let raw = v.as_str().unwrap_or("");
+        return format!("{}: {}", k, truncate_text(raw, 100));
+    }
+    "(empty input)".to_string()
 }
 
 /// Produce a one-line summary of a tool's output.
@@ -259,46 +290,66 @@ pub fn summarize_input(name: &str, input: &serde_json::Value) -> String {
 /// 合并 router.rs 与 view_mapper.rs 的实现，保留 view_mapper 更丰富的特殊分支
 /// （WebFetch / TodoWrite / Read / Glob / Grep 折叠态行数），streaming 与 view-commit
 /// 共享同一展示语义。
+///
+/// builtin 一等工具的 effective name（`mcp__<实例>__<原始名>`）与迁移前的裸名映射到同一
+/// 分支：**匹配型归一**（IF-D6 ④ / A8）先按传入名匹配，未命中再用 IF-D15 的
+/// [`original_tool_name_of_effective`] 取原始工具名重试一次。
 pub fn summarize_output(name: &str, output: &str) -> String {
     let trimmed = output.trim();
     if trimmed.is_empty() {
         return String::new();
     }
+    // 原样优先：未知 / 外部 `mcp__*` 两次都不命中 ⇒ 走通用截断，与迁移前逐位一致。
+    if let Some(summary) = summarize_output_by_name(name, output) {
+        return summary;
+    }
+    if let Some(original) = original_tool_name_of_effective(name)
+        && let Some(summary) = summarize_output_by_name(original, output)
+    {
+        return summary;
+    }
+    truncate_text(trimmed, 200)
+}
+
+/// [`summarize_output`] 的按名分支本体：未命中任何分支返回 `None`，交由调用方用归一
+/// helper 的原始工具名重试（名字字面量只在 `peri-acp-types` 的 builtin 声明表里存一份）。
+fn summarize_output_by_name(name: &str, output: &str) -> Option<String> {
+    let trimmed = output.trim();
     match name {
         "Edit" | "Write" => {
             let lines = trimmed.lines().count();
             if lines <= 3 {
-                return truncate_text(trimmed, 200);
+                return Some(truncate_text(trimmed, 200));
             }
-            format!("{} lines changed", lines)
+            Some(format!("{} lines changed", lines))
         }
         "WebFetch" => {
             let lines = trimmed.lines().count();
             let bytes = output.len();
-            format!(
+            Some(format!(
                 "{} lines · {} bytes\n{}",
                 lines,
                 bytes,
                 truncate_text(trimmed, 400)
-            )
+            ))
         }
         // TodoWrite 返回全量内容（显示完整 todo 列表）
-        "TodoWrite" => trimmed.to_string(),
+        "TodoWrite" => Some(trimmed.to_string()),
         // Read / Glob / Grep — 折叠态显示行数；Read 的 canonical result
         // 带截断元数据时必须保留该语义，不能降维成与完整读取相同的摘要。
         "Read" => {
             let lines = trimmed.lines().count();
-            if trimmed.contains("[Output truncated:") {
+            Some(if trimmed.contains("[Output truncated:") {
                 format!("{} lines · truncated", lines)
             } else {
                 format!("{} lines", lines)
-            }
+            })
         }
         "Glob" | "Grep" => {
             let lines = trimmed.lines().count();
-            format!("{} lines", lines)
+            Some(format!("{} lines", lines))
         }
-        _ => truncate_text(trimmed, 200),
+        _ => None,
     }
 }
 

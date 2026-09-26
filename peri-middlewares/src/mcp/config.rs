@@ -52,6 +52,32 @@ pub enum McpConfigError {
         #[source]
         source: crate::plugin::loader::LoaderError,
     },
+    /// builtin 保留实例名被用户配置用 `command` / `url` 接管（A3）。
+    ///
+    /// 必须加载期拒绝：parity 与关闭语义都按名字反查，外部同名 server 一旦接管
+    /// 该名字会继承「按原始名判定」的审批结果，静默移除 `mcp__*` 审批门。
+    /// 错误文本只含实例名，不含路径 / env / 凭据。
+    #[error("builtin 保留实例名不得被 command/url 接管: {name}")]
+    ReservedBuiltinInstanceName { name: String },
+    /// builtin 实例的关闭片段非法（A18）：唯一合法写法是只写 `disabled: true`。
+    ///
+    /// `disabled` 与 `system_mcp` 同时声明在今天会走到 readiness 的
+    /// `Err(SystemReadinessError::Disabled)` fatal，阻断**所有** session，
+    /// 因此必须在加载期拒绝。错误文本只含实例名。
+    #[error("builtin 实例的关闭片段非法（disabled 与 system_mcp 不得同时声明）: {name}")]
+    BuiltinClosureFragmentInvalid { name: String },
+}
+
+/// overlay 的加载期错误 → 配置错误（只搬运实例名，不拼任何路径 / env / 凭据）。
+fn builtin_overlay_error(error: super::builtin::BuiltinOverlayError) -> McpConfigError {
+    match error {
+        super::builtin::BuiltinOverlayError::ReservedBuiltinInstanceName { name } => {
+            McpConfigError::ReservedBuiltinInstanceName { name }
+        }
+        super::builtin::BuiltinOverlayError::DisabledWithSystemMcp { name } => {
+            McpConfigError::BuiltinClosureFragmentInvalid { name }
+        }
+    }
 }
 
 /// 从指定 JSON 文件加载 MCP 配置，文件不存在时返回空配置
@@ -298,6 +324,10 @@ pub(crate) fn expand_server_config(config: &McpServerConfig) -> McpServerConfig 
 ///
 /// 全局路径由 `~/.peri/settings.json` 决定；任何一层非法都返回错误，
 /// 不降级为空配置。
+///
+/// **builtin 注入策略的唯一 env 读取点**（IF-D3 / A1）：本函数读一次
+/// `PERI_MCP_BUILTIN` 并把策略作为显式参数向下传；`_with_paths` 与
+/// `apply_builtin_overlay` 都不读 env（否则「默认注入」与「测试路径」会分叉）。
 pub(crate) fn load_merged_config_full(
     cwd: &Path,
     claude_home: &Path,
@@ -306,7 +336,8 @@ pub(crate) fn load_merged_config_full(
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".peri")
         .join("settings.json");
-    load_merged_config_full_with_paths(cwd, claude_home, &global_path)
+    let policy = super::builtin::builtin_injection_policy_from_env();
+    load_merged_config_full_with_paths(cwd, claude_home, &global_path, &policy)
 }
 
 /// 加载并合并 MCP 配置：全局 + 插件 + 项目级三层合并
@@ -321,10 +352,14 @@ pub(crate) fn load_merged_config_full(
 /// global / plugin / project 输入先验证，再覆盖与去重；缺文件仍是空配置，非法文件不是。
 /// 插件来源走 MCP 专用严格入口（`load_enabled_plugins_for_mcp`），宽容聚合 API
 /// 不作为启动输入。
-fn load_merged_config_full_with_paths(
+///
+/// `policy` 是 builtin 默认层的**显式**注入策略（A1 / IF-D3）：本函数不读 env，
+/// 调用方（`load_merged_config_full` 或测试）负责给出策略。
+pub(crate) fn load_merged_config_full_with_paths(
     cwd: &Path,
     claude_home: &Path,
     global_path: &Path,
+    policy: &super::builtin::BuiltinInjectionPolicy,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let mut plugin_sources: HashMap<String, String> = HashMap::new();
 
@@ -429,6 +464,16 @@ fn load_merged_config_full_with_paths(
         }
     }
 
+    // 6.5 builtin 默认配置层注入（A1 冻结的**唯一**注入点）：在变量展开之后、
+    // step 7 校验之前，使 `run_initialize` 与公开 `load_merged_config` 看到同一份
+    // 有效配置。位置在 step 4 的 hash 去重之后 ⇒ builtin 条目不进 `manual_hashes`，
+    // 不改变既有 server 的去重结果。
+    //
+    // 规则 3（保留名接管）与规则 5（非法关闭片段）在**任何策略下**都生效：
+    // `PERI_MCP_BUILTIN=off` 只抑制注入，不解除这两项加载期保护。
+    super::builtin::apply_builtin_overlay(&mut merged.mcp_servers, policy)
+        .map_err(builtin_overlay_error)?;
+
     // 7. 合并结果再次校验：覆盖与去重之后仍必须是合法配置。
     validate_config(&merged)?;
 
@@ -488,7 +533,7 @@ pub fn remove_server_from_config(cwd: &Path, server_name: &str) -> Result<(), Mc
 /// 写入口语义：**修改前**校验全部相关 server map，**修改后**再次校验待写结果；
 /// 任一步失败都不调用 `atomic_write_json`、不改动任何字节。删除非法条目也拒绝
 /// ——非法配置需先由用户修复，删除不是修复通道。
-fn remove_server_from_config_with_paths(
+pub(crate) fn remove_server_from_config_with_paths(
     cwd: &Path,
     global_path: &Path,
     server_name: &str,
@@ -596,7 +641,7 @@ pub fn set_server_disabled(
 }
 
 /// 内部实现：允许注入全局路径（便于测试）
-fn set_server_disabled_with_paths(
+pub(crate) fn set_server_disabled_with_paths(
     cwd: &Path,
     global_path: &Path,
     server_name: &str,

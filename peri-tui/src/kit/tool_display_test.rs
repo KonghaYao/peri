@@ -85,3 +85,54 @@ fn test_format_webfetch_url_not_truncated() {
     let result = format_tool_args("WebFetch", &args);
     assert_eq!(result, long_url, "WebFetch url 不应被截断");
 }
+
+// ── A4 / A8 匹配型归一：builtin 一等工具的 effective name 走同一分支 ────────────
+
+#[test]
+fn tui_web_tools_still_summarize_after_migration() {
+    // effective name（模型面名字）与迁移前的裸名必须产出**同一**参数摘要：
+    // 归一走 IF-D15 的 original_tool_name_of_effective，本模块不得硬编码名字字面量。
+    let long_query = "q".repeat(80);
+    let args = serde_json::json!({ "query": long_query });
+    let effective = format_tool_args("mcp__web__WebSearch", &args);
+    assert_eq!(effective, format_tool_args("WebSearch", &args));
+    assert!(effective.len() <= 63, "仍按 60 字符截断: {effective:?}");
+
+    let url = "https://example.com/very/long/path/that/exceeds/sixty/characters/total/here.txt";
+    let args = serde_json::json!({ "url": url });
+    assert_eq!(format_tool_args("mcp__web__WebFetch", &args), url);
+
+    // artifact 走 file_path 专用分支（未命中会返回空串，对比 test_format_tool_args_unknown_returns_empty）
+    let args = serde_json::json!({ "file_path": "peri-tui/src/lib.rs" });
+    assert_eq!(
+        format_tool_args("mcp__artifact__artifact", &args),
+        "peri-tui/src/lib.rs"
+    );
+}
+
+#[test]
+fn tui_unknown_mcp_names_fall_back_to_generic() {
+    // 反证：未知 / 外部 `mcp__*` 两次都不命中 ⇒ 与迁移前逐位一致（无摘要）。
+    let args = serde_json::json!({ "file_path": "peri-tui/src/lib.rs" });
+    assert_eq!(format_tool_args("mcp__foo__bar", &args), "");
+    // 归一表是冻结字面量的精确匹配：不做前缀、大小写或 sanitize 反拆
+    assert_eq!(format_tool_args("mcp__web__WebSearchExtra", &args), "");
+    assert_eq!(format_tool_args("mcp__web__websearch", &args), "");
+}
+
+#[test]
+fn tui_has_no_hardcoded_effective_name() {
+    // A4 / A8：名字字面量只在 peri-acp-types 的 builtin 声明表存一份——按名分支
+    // 必须经 IF-D15 归一 helper 进入 builtin 名字空间，不得自建第二张反查表。
+    let src = include_str!("tool_display.rs");
+    assert!(
+        src.contains("original_tool_name_of_effective"),
+        "tool_display.rs 必须经 IF-D15 归一 helper"
+    );
+    for forbidden in ["mcp__web__", "mcp__artifact__"] {
+        assert!(
+            !src.contains(forbidden),
+            "tool_display.rs 不得硬编码 effective name: {forbidden}"
+        );
+    }
+}

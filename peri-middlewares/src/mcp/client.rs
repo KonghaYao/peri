@@ -75,6 +75,13 @@ pub struct McpClientPool {
         parking_lot::Mutex<HashMap<String, Vec<(std::sync::Weak<McpClientHandle>, u64)>>>,
     next_handle_generation: std::sync::atomic::AtomicU64,
     pub(crate) services: parking_lot::Mutex<HashMap<String, McpServiceWrapper>>,
+    /// builtin 实例的同进程 server task 表（键 = server name，与 `services` 同期登记 / 移除）。
+    ///
+    /// builtin 的 server 半边是本进程内的 task：关闭语义必须显式（有界等待 → 未收敛才
+    /// abort），不能假设「client service 关闭后它自己会退出」（spike Q2 才有该结论）。
+    /// 冻结：wave 1 **不**新增 `McpTaskKey` 变体，本表独立于 keyed task 作用域。
+    pub(crate) builtin_server_tasks:
+        parking_lot::Mutex<HashMap<String, super::builtin::runtime::BuiltinServerTask>>,
     pub(crate) configs: parking_lot::RwLock<HashMap<String, McpServerConfig>>,
     pub(crate) cache_versions: parking_lot::RwLock<HashMap<String, String>>,
     /// 插件来源旁路表：key 为 server name（如 `"plugin:p1:srv1"`），value 为 `"name@marketplace"`
@@ -148,6 +155,7 @@ impl McpClientPool {
             handle_generations: parking_lot::Mutex::new(HashMap::new()),
             next_handle_generation: std::sync::atomic::AtomicU64::new(1),
             services: parking_lot::Mutex::new(HashMap::new()),
+            builtin_server_tasks: parking_lot::Mutex::new(HashMap::new()),
             configs: parking_lot::RwLock::new(HashMap::new()),
             cache_versions: parking_lot::RwLock::new(HashMap::new()),
             plugin_sources: parking_lot::RwLock::new(HashMap::new()),

@@ -1,7 +1,12 @@
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::mcp::builtin::BuiltinInjectionPolicy;
 use crate::plugin::PluginOrigin;
+
+// builtin 默认层是**显式策略**（IF-D3 / A1）：本文件每个 loader 调用点都必须给出
+// `BuiltinInjectionPolicy::all()`（生产语义：注入两个 builtin 实例）或 `none()`
+// （断言迁移前行为 / 只验证错误路径：不注入）。测试不得依赖 `PERI_MCP_BUILTIN`。
 
 /// 测试用显式全局路径（不存在 → 空全局配置）：不读真实 `~/.peri/settings.json`。
 fn missing_global_path(dir: &Path) -> PathBuf {
@@ -439,6 +444,8 @@ fn test_load_merged_config_full_no_plugins() {
         dir.path(),
         dir.path(),
         &missing_global_path(dir.path()),
+        // 「空配置 → 空集合」断言的是迁移前行为，故显式零注入。
+        &BuiltinInjectionPolicy::none(),
     )
     .unwrap();
     assert!(config.mcp_servers.is_empty());
@@ -502,9 +509,13 @@ fn test_load_merged_config_full_with_plugin() {
     )
     .unwrap();
 
-    let (config, plugin_sources) =
-        load_merged_config_full_with_paths(&cwd, &claude_home, &missing_global_path(dir.path()))
-            .unwrap();
+    let (config, plugin_sources) = load_merged_config_full_with_paths(
+        &cwd,
+        &claude_home,
+        &missing_global_path(dir.path()),
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
 
     // 验证 env 注入
     let srv_config = config
@@ -616,9 +627,13 @@ fn test_load_merged_config_full_multiple_plugins() {
     )
     .unwrap();
 
-    let (_config, plugin_sources) =
-        load_merged_config_full_with_paths(&cwd, &claude_home, &missing_global_path(dir.path()))
-            .unwrap();
+    let (_config, plugin_sources) = load_merged_config_full_with_paths(
+        &cwd,
+        &claude_home,
+        &missing_global_path(dir.path()),
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
     assert!(
         plugin_sources.contains_key("plugin:pa:srvA"),
         "should contain plugin:pa:srvA, got: {:?}",
@@ -699,9 +714,13 @@ fn test_load_merged_config_full_plugin_env_preserves_existing() {
     )
     .unwrap();
 
-    let (config, _plugin_sources) =
-        load_merged_config_full_with_paths(&cwd, &claude_home, &missing_global_path(dir.path()))
-            .unwrap();
+    let (config, _plugin_sources) = load_merged_config_full_with_paths(
+        &cwd,
+        &claude_home,
+        &missing_global_path(dir.path()),
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
     let srv_config = config
         .mcp_servers
         .get("plugin:p2:srv2")
@@ -809,8 +828,13 @@ fn test_system_mcp_merged_errors_are_not_empty_success() {
         r#"{"mcpServers":{"sys":{"system_mcp_tools":[]}}}"#,
     )
     .unwrap();
-    let error = load_merged_config_full_with_paths(&cwd, &claude_home, &global_path)
-        .expect_err("全局非法配置必须失败");
+    let error = load_merged_config_full_with_paths(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::none(),
+    )
+    .expect_err("全局非法配置必须失败");
     assert_parse_error(error, &global_path);
 
     // 项目非法：同样失败（非法文件不是缺文件）。
@@ -825,9 +849,13 @@ fn test_system_mcp_merged_errors_are_not_empty_success() {
         r#"{"mcpServers":{"sys":{"system_mcp":false,"system_mcp_tools":["a"]}}}"#,
     )
     .unwrap();
-    let error =
-        load_merged_config_full_with_paths(&cwd, &claude_home, &missing_global_path(dir.path()))
-            .expect_err("项目非法配置必须失败");
+    let error = load_merged_config_full_with_paths(
+        &cwd,
+        &claude_home,
+        &missing_global_path(dir.path()),
+        &BuiltinInjectionPolicy::none(),
+    )
+    .expect_err("项目非法配置必须失败");
     assert_parse_error(error, &project_path);
 
     // 非法低优先级配置即便被有效项目同名覆盖也必须拒绝。
@@ -847,8 +875,13 @@ fn test_system_mcp_merged_errors_are_not_empty_success() {
         r#"{"mcpServers":{"sys":{"command":"npx","system_mcp":true}}}"#,
     )
     .unwrap();
-    let error = load_merged_config_full_with_paths(&cwd, &claude_home, &global_path)
-        .expect_err("被覆盖的非法配置也必须拒绝");
+    let error = load_merged_config_full_with_paths(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::none(),
+    )
+    .expect_err("被覆盖的非法配置也必须拒绝");
     assert_parse_error(error, &global_path);
 }
 
@@ -870,9 +903,13 @@ fn test_system_mcp_plugin_strict_error_reaches_merge() {
     )
     .unwrap();
 
-    let error =
-        load_merged_config_full_with_paths(&cwd, &claude_home, &missing_global_path(dir.path()))
-            .expect_err("插件非法 MCP 配置必须失败");
+    let error = load_merged_config_full_with_paths(
+        &cwd,
+        &claude_home,
+        &missing_global_path(dir.path()),
+        &BuiltinInjectionPolicy::none(),
+    )
+    .expect_err("插件非法 MCP 配置必须失败");
 
     let McpConfigError::PluginLoadError { source } = &error else {
         panic!("插件来源非法应返回 PluginLoadError，实际: {error}");
@@ -942,7 +979,13 @@ fn test_system_mcp_empty_tools_survive_config_pipeline() {
     )
     .unwrap();
 
-    let (merged, _) = load_merged_config_full_with_paths(&cwd, &claude_home, &global_path).unwrap();
+    let (merged, _) = load_merged_config_full_with_paths(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
     let sys = merged.mcp_servers.get("sys").expect("应有 sys");
     assert_eq!(sys.system_mcp, Some(true));
     assert_eq!(sys.system_mcp_tools, Some(Vec::new()));
@@ -984,9 +1027,13 @@ fn test_system_mcp_tools_survive_expansion_and_namespace() {
         &format!(r#"{{"srv":{{"command":"node","system_mcp":true,"system_mcp_tools":{tools}}}}}"#),
     );
 
-    let (merged, _) =
-        load_merged_config_full_with_paths(&cwd, &claude_home, &missing_global_path(dir.path()))
-            .unwrap();
+    let (merged, _) = load_merged_config_full_with_paths(
+        &cwd,
+        &claude_home,
+        &missing_global_path(dir.path()),
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
     let srv = merged
         .mcp_servers
         .get("plugin:p1:srv")
@@ -1020,7 +1067,13 @@ fn test_system_mcp_tools_survive_expansion_and_namespace() {
     )
     .unwrap();
 
-    let (merged, _) = load_merged_config_full_with_paths(&cwd, &claude_home, &global_path).unwrap();
+    let (merged, _) = load_merged_config_full_with_paths(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
     let sys = merged.mcp_servers.get("sys").expect("应有 sys");
     assert_eq!(
         sys.system_mcp_tools.as_deref(),
@@ -1062,7 +1115,13 @@ fn test_system_mcp_dedup_preserves_required_namespaces() {
     }});
     std::fs::write(&global_path, serde_json::to_string(&manual).unwrap()).unwrap();
 
-    let (merged, _) = load_merged_config_full_with_paths(&cwd, &claude_home, &global_path).unwrap();
+    let (merged, _) = load_merged_config_full_with_paths(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
     assert!(
         merged.mcp_servers.contains_key("plugin:p1:sys-dup"),
         "System MCP 不得因跨 namespace 内容相同被去重删除，实际 keys: {:?}",
@@ -1073,6 +1132,16 @@ fn test_system_mcp_dedup_preserves_required_namespaces() {
         "普通 MCP 既有内容去重仍必须生效，实际 keys: {:?}",
         merged.mcp_servers.keys().collect::<Vec<_>>()
     );
+    // 同一份 `all()` 策略下 builtin 默认层已注入：上面的去重结论是在**注入发生**
+    // 的前提下得到的（注入点在 step 4 去重之后，builtin 条目不进 manual_hashes）。
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+        assert!(
+            merged.mcp_servers.contains_key(instance.name),
+            "默认层应注入 builtin 实例 {}，实际 keys: {:?}",
+            instance.name,
+            merged.mcp_servers.keys().collect::<Vec<_>>()
+        );
+    }
 
     // hash 必须覆盖 System 字段：变更它们视为不同服务器。
     let base = McpServerConfig {

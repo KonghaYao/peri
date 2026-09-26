@@ -36,11 +36,12 @@ use peri_resources::workflow::runner::AgentExecutor;
 use crate::{
     agent_define::AgentOverrides,
     assembly::{
-        create_session_lsp_pool, default_workflow_middleware_factory, load_merged_lsp_servers,
-        AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
+        create_session_lsp_pool, default_workflow_middleware_factory,
+        default_workflow_middleware_factory_with_pool, load_merged_lsp_servers, AssemblyContext,
+        OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
     },
     hooks::{HookEvent, HookType, RegisteredHook},
-    mcp::McpClientPool,
+    mcp::{McpClientHandle, McpClientPool},
     permission::{PermissionMode, SharedPermissionMode},
     tool_search::ToolSearchIndex,
     tools::TodoItem,
@@ -388,8 +389,12 @@ fn make_lsp_config() -> LspServerConfig {
 
 // ── 契约用例 ─────────────────────────────────────────────────────────────────
 
-/// 蓝本槽位顺序 = 行为契约（7 组 21 槽，禁止重排；波 4 演进 C2 新增
+/// 蓝本槽位顺序 = 行为契约（7 组 25 槽，禁止重排；波 4 演进 C2 新增
 /// DefaultSystemPrompt / Lang 于第一组首位——渲染排序不依赖链序，契约 2）。
+///
+/// v4-part-2 W3（A7/A14）：`Web` / `Artifact` 两槽位随 `WebMiddleware` /
+/// `ArtifactMiddleware` 提供面一并删除（能力改由 builtin MCP 实例提供），
+/// 其余槽位**相对顺序不变**——本断言即「过滤掉被删两项后与上一批次逐项相等」。
 #[test]
 fn blueprint_sequence_is_canonical() {
     let slots = production_blueprint();
@@ -407,12 +412,11 @@ fn blueprint_sequence_is_canonical() {
             "SkillPreload",
             "AtMention",
             "Image",
-            // 第二组：文件/终端/Web 工具提供器
+            // 第二组：文件/终端工具提供器
             "Filesystem",
             "GitAttribution",
             "GitWatch",
             "Terminal",
-            "Web",
             // 第三组：Todo / Cron
             "Todo",
             "Cron",
@@ -427,7 +431,6 @@ fn blueprint_sequence_is_canonical() {
             "Workflow",
             "Ptc",
             "ToolSearch",
-            "Artifact",
             // 第七组：LSP / Goal（Goal 在链最后）
             "Lsp",
             "Goal",
@@ -450,7 +453,6 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::GitAttribution => "GitAttribution",
         ChainSlot::GitWatch => "GitWatch",
         ChainSlot::Terminal => "Terminal",
-        ChainSlot::Web => "Web",
         ChainSlot::Todo => "Todo",
         ChainSlot::Cron => "Cron",
         ChainSlot::Hook => "Hook",
@@ -461,7 +463,6 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Workflow => "Workflow",
         ChainSlot::Ptc => "Ptc",
         ChainSlot::ToolSearch => "ToolSearch",
-        ChainSlot::Artifact => "Artifact",
         ChainSlot::Lsp => "Lsp",
         ChainSlot::Goal => "Goal",
     }
@@ -487,7 +488,6 @@ fn default_config_produces_canonical_chain() {
             "GitAttributionMiddleware",
             "GitWatchMiddleware",
             "TerminalMiddleware",
-            "WebMiddleware",
             "TodoMiddleware",
             "CronMiddleware",
             "PermissionMiddleware",
@@ -495,32 +495,96 @@ fn default_config_produces_canonical_chain() {
             "SubAgentMiddleware",
             "PtcMiddleware",
             "ToolSearch",
-            "ArtifactMiddleware",
         ]
     );
 }
 
-/// Artifact 默认启用；单独关闭后仅移除 artifact，不影响 ToolSearch 元工具。
+/// deployment pool：两个 builtin 实例（`web` / `artifact`）的假「已连接」handle，
+/// 工具清单与注册表一致。用于断言 builtin 能力的三个工具面（A6）。
+fn pool_with_builtin_instances() -> Arc<McpClientPool> {
+    let pool = Arc::new(McpClientPool::new_empty());
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+        let tools: Vec<rmcp::model::Tool> = instance
+            .tools
+            .iter()
+            .map(|tool| {
+                serde_json::from_value(serde_json::json!({
+                    "name": tool.original_name,
+                    "description": "builtin tool",
+                    "inputSchema": { "type": "object", "properties": {} }
+                }))
+                .unwrap()
+            })
+            .collect();
+        pool.clients.write().insert(
+            instance.name.to_string(),
+            make_connected_handle(instance.name, tools),
+        );
+    }
+    pool
+}
+
+fn make_connected_handle(server: &str, tools: Vec<rmcp::model::Tool>) -> Arc<McpClientHandle> {
+    Arc::new(McpClientHandle {
+        name: server.to_string(),
+        version: None,
+        cache_version: None,
+        peer: None,
+        tools,
+        resources: vec![],
+        status: crate::mcp::ClientStatus::Connected,
+        oauth_status: Default::default(),
+        source: None,
+        url: None,
+        skills_capable: false,
+        channel_capable: false,
+    })
+}
+
+/// builtin `artifact` 实例默认可用（`mcp__artifact__artifact` direct）；
+/// 单独关闭 `ArtifactMiddleware` 后仅移除该实例的工具，不影响 ToolSearch 元工具。
 #[test]
-fn artifact_middleware_can_be_disabled_independently() {
-    let enabled = base_context();
+fn builtin_artifact_instance_can_be_closed_independently() {
+    let mut enabled = base_context();
+    enabled.mcp_pool = Some(pool_with_builtin_instances());
     let enabled_tools = assemble_tool_names(&enabled);
-    for expected in ["artifact", "SearchExtraTools", "ExecuteExtraTool"] {
-        assert!(enabled_tools.iter().any(|name| name == expected));
+    for expected in [
+        "mcp__artifact__artifact",
+        "mcp__web__WebSearch",
+        "SearchExtraTools",
+        "ExecuteExtraTool",
+    ] {
+        assert!(
+            enabled_tools.iter().any(|name| name == expected),
+            "未关闭时 {expected} 应可见: {enabled_tools:?}"
+        );
+    }
+    // 裸名 Web / Artifact 提供面已删除：任何装配面都不再出现。
+    for gone in ["WebFetch", "WebSearch", "artifact"] {
+        assert!(
+            !enabled_tools.iter().any(|name| name == gone),
+            "裸名 {gone} 不应出现在链工具集合: {enabled_tools:?}"
+        );
     }
 
     let mut disabled = base_context();
+    disabled.mcp_pool = Some(pool_with_builtin_instances());
     disabled
         .meta_harness_disabled
         .insert("ArtifactMiddleware".to_string());
     let disabled_tools = assemble_tool_names(&disabled);
-    assert!(!disabled_tools.iter().any(|name| name == "artifact"));
+    assert!(!disabled_tools
+        .iter()
+        .any(|name| name == "mcp__artifact__artifact"));
+    assert!(
+        disabled_tools
+            .iter()
+            .any(|name| name == "mcp__web__WebSearch"),
+        "关闭 artifact 不影响 web 实例: {disabled_tools:?}"
+    );
     for expected in ["SearchExtraTools", "ExecuteExtraTool"] {
         assert!(disabled_tools.iter().any(|name| name == expected));
     }
-    assert!(!assemble_names(&disabled)
-        .iter()
-        .any(|name| name == "ArtifactMiddleware"));
 }
 
 /// 权限模式不影响链组成与 Permission/AskUser 位置（四种模式一致）。
@@ -535,14 +599,15 @@ fn permission_mode_keeps_chain_shape() {
         let mut ctx = base_context();
         ctx.permission_mode = SharedPermissionMode::new(mode);
         let names = assemble_names(&ctx);
+        // 位置随 Web / Artifact 两槽位删除各前移 1（A7/A14 期望值同步）。
         assert_eq!(
             names.iter().position(|n| n == "HumanInTheLoopMiddleware"),
-            Some(17),
+            Some(16),
             "mode {mode:?}: AskUser 位置漂移"
         );
         assert_eq!(
             names.iter().position(|n| n == "PermissionMiddleware"),
-            Some(16),
+            Some(15),
             "mode {mode:?}: Permission 位置漂移"
         );
         // 条件中间件（Hook/MCP/Workflow/LSP/Goal）不应出现
@@ -787,7 +852,6 @@ fn full_config_chain_order() {
             "GitAttributionMiddleware",
             "GitWatchMiddleware",
             "TerminalMiddleware",
-            "WebMiddleware",
             "TodoMiddleware",
             "CronMiddleware",
             "HookMiddleware",
@@ -799,7 +863,6 @@ fn full_config_chain_order() {
             "WorkflowMiddleware",
             "PtcMiddleware",
             "ToolSearch",
-            "ArtifactMiddleware",
             "LspMiddleware",
             "GoalMiddleware",
         ]
@@ -1057,6 +1120,173 @@ fn meta_harness_disables_conditional_middleware_despite_conditions() {
     assert!(!names.iter().any(|n| n == "HookMiddleware"), "{names:?}");
 }
 
+/// A6/R23 的关闭矩阵：四种输入 × 四个可观察面。
+///
+/// 输入：`WebMiddleware=false` / `ArtifactMiddleware=false` / 两者都 false /
+/// `McpMiddleware=false`。四个面：① direct 能力面（模型可见的直连工具）、
+/// ② deferred 目录面（ToolSearch 摘要与检索的来源）、③ subagent `parent_tools`、
+/// ④ workflow agent 工具列表。断言全部落在可观察能力面，不依赖中间量。
+#[test]
+fn builtin_capability_closure_matrix_covers_all_faces() {
+    use crate::subagent::SubAgentMiddleware;
+
+    let all_builtin: Vec<&'static str> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+        .iter()
+        .flat_map(|instance| instance.tools.iter())
+        .map(|declaration| declaration.effective_name)
+        .collect();
+    let all_declarations: Vec<_> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+        .iter()
+        .flat_map(|instance| instance.tools.iter())
+        .collect();
+
+    // (关闭的实例名列表, 进入 disabled 的策略键列表)
+    let both_keys: Vec<&str> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+        .iter()
+        .map(|instance| instance.policy_key)
+        .collect();
+    let cases: Vec<(Vec<&'static str>, Vec<&str>)> = {
+        let mut cases = Vec::new();
+        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+            cases.push((
+                instance
+                    .tools
+                    .iter()
+                    .map(|declaration| declaration.effective_name)
+                    .collect::<Vec<_>>(),
+                vec![instance.policy_key],
+            ));
+        }
+        cases.push((all_builtin.clone(), both_keys.clone()));
+        cases
+    };
+
+    for (closed_tools, policy_keys) in &cases {
+        let disabled: std::collections::HashSet<String> =
+            policy_keys.iter().map(|key| key.to_string()).collect();
+        assert!(!disabled.is_empty(), "关闭输入必须映射到至少一个策略键");
+
+        let mut ctx = base_context();
+        ctx.mcp_pool = Some(pool_with_builtin_instances());
+        ctx.meta_harness_disabled = disabled.clone();
+
+        // 面①/②：链工具集合里不得残留该实例的 bridge（direct 与 deferred 都不行）。
+        let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+        let collected: Vec<(String, bool)> = out
+            .chain
+            .collect_tools(&ctx.cwd)
+            .into_iter()
+            .map(|tool| (tool.name().to_string(), tool.is_direct()))
+            .collect();
+        let collected_names: Vec<&str> = collected.iter().map(|(name, _)| name.as_str()).collect();
+        let survivors: Vec<&str> = all_builtin
+            .iter()
+            .copied()
+            .filter(|tool| !closed_tools.contains(tool))
+            .collect();
+        for tool in closed_tools {
+            assert!(
+                !collected.iter().any(|(name, _)| name == tool),
+                "[{policy_keys:?}] 关闭后能力面①/②不得含 {tool}: {collected:?}"
+            );
+        }
+        for tool in &survivors {
+            let entry = collected.iter().find(|(name, _)| name == tool);
+            assert!(
+                entry.is_some(),
+                "[{policy_keys:?}] 未关闭实例的 {tool} 必须仍在能力面①/②: {collected:?}"
+            );
+            assert!(
+                entry.is_some_and(|(_, direct)| *direct),
+                "[{policy_keys:?}] 未关闭实例的 {tool} 必须是 direct（IF-D13）: {collected:?}"
+            );
+        }
+
+        // 面③：subagent parent_tools。
+        let subagent = out
+            .subagent_mw
+            .expect("矩阵需要 SubAgentMiddleware")
+            .downcast_arc::<SubAgentMiddleware>()
+            .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+        let parent_tool = subagent.build_tool("/tmp/contract-test");
+        let parent_names: Vec<&str> = parent_tool.parent_tools.iter().map(|t| t.name()).collect();
+        for tool in closed_tools {
+            assert!(
+                !parent_names.contains(tool),
+                "[{policy_keys:?}] parent_tools（面③）不得含 {tool}: {parent_names:?}"
+            );
+        }
+        for tool in &survivors {
+            assert!(
+                parent_names.contains(tool),
+                "[{policy_keys:?}] parent_tools（面③）应保留 {tool}: {parent_names:?}"
+            );
+        }
+
+        // 面④：workflow agent 工具列表（生产入口的带池工厂）。
+        let workflow_tools =
+            default_workflow_middleware_factory_with_pool(Some(pool_with_builtin_instances()))
+                .build_tools("/tmp/contract-test", &disabled, None);
+        let workflow_names: Vec<&str> = workflow_tools.iter().map(|t| t.name()).collect();
+        for tool in closed_tools {
+            assert!(
+                !workflow_names.contains(tool),
+                "[{policy_keys:?}] workflow agent 工具列表（面④）不得含 {tool}: {workflow_names:?}"
+            );
+        }
+        for tool in &survivors {
+            assert!(
+                workflow_names.contains(tool),
+                "[{policy_keys:?}] workflow agent 工具列表（面④）应保留 {tool}: {workflow_names:?}"
+            );
+        }
+
+        // 三个面都不得残留裸名 Web / Artifact 工具（A6/IF-D8：能力改由 effective
+        // name 的 builtin bridge 提供，不再有 middleware 提供面）。裸名从声明表
+        // 派生，不硬编码。
+        for declaration in &all_declarations {
+            let bare = declaration.original_name;
+            for (face, names) in [
+                ("面①/②链工具", &collected_names),
+                ("面③parent_tools", &parent_names),
+                ("面④workflow", &workflow_names),
+            ] {
+                assert!(
+                    !names.contains(&bare),
+                    "[{policy_keys:?}] {face} 不得含裸名 {bare}: {names:?}"
+                );
+            }
+        }
+    }
+
+    // `McpMiddleware=false`：整个 MCP 槽位不构造 —— 主链与 workflow 面都不该出现
+    // 任何 MCP 工具（builtin 能力随槽位关闭，而不是「天然关闭」）。
+    let mut mcp_off = base_context();
+    mcp_off.mcp_pool = Some(pool_with_builtin_instances());
+    mcp_off
+        .meta_harness_disabled
+        .insert("McpMiddleware".to_string());
+    let collected_off = assemble_tool_names(&mcp_off);
+    assert!(
+        !collected_off.iter().any(|name| name.starts_with("mcp__")),
+        "McpMiddleware 关闭后主链不得含 MCP 工具: {collected_off:?}"
+    );
+    let workflow_off =
+        default_workflow_middleware_factory_with_pool(Some(pool_with_builtin_instances()))
+            .build_tools(
+                "/tmp/contract-test",
+                &["McpMiddleware".to_string()].into_iter().collect(),
+                None,
+            );
+    assert!(
+        !workflow_off
+            .iter()
+            .any(|tool| tool.name().starts_with("mcp__")),
+        "McpMiddleware 关闭后 workflow 面不得含 MCP 工具: {:?}",
+        workflow_off.iter().map(|t| t.name()).collect::<Vec<_>>()
+    );
+}
+
 /// SubAgentMiddleware 关闭 → 关联构造联动置空（parent_tools 不注入、
 /// subagent_mw 槽位 None、链上不注册、SubAgent 工具消失——禁止半开状态）。
 #[test]
@@ -1090,6 +1320,10 @@ fn meta_harness_disables_subagent_middleware_fully() {
 }
 
 /// 工具连坐语义：关闭持有 middleware 后其全部工具从链收集结果消失。
+///
+/// Web / Artifact 已迁移为 builtin 实例（A6/A7）：对应的关闭键走注册表
+/// `policy_key` → `closed_instances` 的**同一份**映射，断言落在可观察能力面
+/// （链工具集合），不再依赖 middleware 连坐。
 #[test]
 fn meta_harness_disabled_tools_removed_from_chain() {
     let cases: &[(&str, &[&str])] = &[
@@ -1098,7 +1332,6 @@ fn meta_harness_disabled_tools_removed_from_chain() {
             &["Read", "Write", "Edit", "Glob", "Grep", "folder_operations"],
         ),
         ("TerminalMiddleware", &["Bash"]),
-        ("WebMiddleware", &["WebFetch", "WebSearch"]),
         ("SkillsMiddleware", &["SkillTool", "DiscoverSkillsTool"]),
         ("SubAgentMiddleware", &["Agent", "AgentResult"]),
     ];
@@ -1112,6 +1345,35 @@ fn meta_harness_disabled_tools_removed_from_chain() {
                 "disabled {mw} 后工具 {tool} 仍可见: {tool_names:?}"
             );
         }
+    }
+
+    // builtin 实例：关闭键按注册表 policy_key 命中，工具面同时归零。
+    for (policy_key, gone) in [
+        (
+            "WebMiddleware",
+            vec!["mcp__web__WebSearch", "mcp__web__WebFetch"],
+        ),
+        ("ArtifactMiddleware", vec!["mcp__artifact__artifact"]),
+    ] {
+        let mut ctx = base_context();
+        ctx.mcp_pool = Some(pool_with_builtin_instances());
+        ctx.meta_harness_disabled.insert(policy_key.to_string());
+        let tool_names = assemble_tool_names(&ctx);
+        for tool in &gone {
+            assert!(
+                !tool_names.iter().any(|n| n == tool),
+                "disabled {policy_key} 后 builtin 工具 {tool} 仍可见: {tool_names:?}"
+            );
+        }
+        // 另一实例不受影响。
+        let survivor = match policy_key {
+            "WebMiddleware" => "mcp__artifact__artifact",
+            _ => "mcp__web__WebSearch",
+        };
+        assert!(
+            tool_names.iter().any(|n| n == survivor),
+            "关闭 {policy_key} 不得影响 {survivor}: {tool_names:?}"
+        );
     }
 }
 
@@ -1159,7 +1421,9 @@ fn meta_harness_ask_user_tool_follows_hitl_disabled() {
 }
 
 /// parent_tools（子 agent 继承工具）按持有 middleware 分支过滤：
-/// 关闭 Filesystem/Terminal/Web 后 SubAgent 继承工具中无对应工具。
+/// 关闭 Filesystem/Terminal 后 SubAgent 继承工具中无对应工具；
+/// builtin 实例按 A6 面② 以 **direct** bridge 保留（迁移后子 agent 仍能用
+/// `mcp__web__*`），关闭后归零。
 #[test]
 fn meta_harness_disabled_parent_tools_filtered() {
     use crate::subagent::SubAgentMiddleware;
@@ -1170,7 +1434,6 @@ fn meta_harness_disabled_parent_tools_filtered() {
             &["Read", "Write", "Edit", "Glob", "Grep", "folder_operations"],
         ),
         ("TerminalMiddleware", &["Bash"]),
-        ("WebMiddleware", &["WebFetch", "WebSearch"]),
     ];
     for (mw, expected_gone) in cases {
         let mut ctx = base_context();
@@ -1191,6 +1454,72 @@ fn meta_harness_disabled_parent_tools_filtered() {
         }
     }
 
+    // 面②：未关闭时 parent_tools 含 builtin 的 effective name 且 `is_direct()`。
+    let mut ctx = base_context();
+    ctx.mcp_pool = Some(pool_with_builtin_instances());
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    let subagent = out
+        .subagent_mw
+        .expect("parent_tools 断言需要 SubAgentMiddleware")
+        .downcast_arc::<SubAgentMiddleware>()
+        .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+    let tool = subagent.build_tool("/tmp/contract-test");
+    let declared: Vec<(&str, bool)> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+        .iter()
+        .flat_map(|instance| instance.tools.iter())
+        .map(|declaration| (declaration.effective_name, declaration.direct))
+        .collect();
+    for (name, direct) in &declared {
+        let entry = tool
+            .parent_tools
+            .iter()
+            .find(|parent| parent.name() == *name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "parent_tools 应含 builtin 工具 {name}: {:?}",
+                    tool.parent_tools
+                        .iter()
+                        .map(|t| t.name())
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            entry.is_direct(),
+            *direct,
+            "parent_tools 中的 {name} 直连性必须等于注册表声明（IF-D13，A6 面②）"
+        );
+    }
+    // 裸名提供面已删除：任何装配面都不再出现。
+    assert!(!tool
+        .parent_tools
+        .iter()
+        .any(|parent| { matches!(parent.name(), "WebFetch" | "WebSearch" | "artifact") }));
+
+    // 关闭 Web 实例：只影响该实例的 bridge（面②的关闭过滤）。
+    let mut closed_ctx = base_context();
+    closed_ctx.mcp_pool = Some(pool_with_builtin_instances());
+    closed_ctx
+        .meta_harness_disabled
+        .insert("WebMiddleware".to_string());
+    let closed_out = build_middleware_chain(&ProductionChainAssembler, &closed_ctx);
+    let closed_subagent = closed_out
+        .subagent_mw
+        .expect("parent_tools 关闭断言需要 SubAgentMiddleware")
+        .downcast_arc::<SubAgentMiddleware>()
+        .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+    let closed_tool = closed_subagent.build_tool("/tmp/contract-test");
+    let closed_names: Vec<&str> = closed_tool.parent_tools.iter().map(|t| t.name()).collect();
+    assert!(
+        !closed_names
+            .iter()
+            .any(|name| name.starts_with("mcp__web__")),
+        "关闭 WebMiddleware 后 parent_tools 不得含 web 实例工具: {closed_names:?}"
+    );
+    assert!(
+        closed_names.contains(&"mcp__artifact__artifact"),
+        "关闭 WebMiddleware 不得影响 artifact 实例: {closed_names:?}"
+    );
+
     // SubAgentMiddleware 关闭 → parent_tools 完全不构造（subagent_mw 槽位 None）
     let mut ctx = base_context();
     ctx.meta_harness_disabled
@@ -1202,17 +1531,47 @@ fn meta_harness_disabled_parent_tools_filtered() {
     );
 }
 
-/// `MIDDLEWARE_NAMES` 常量与 production_blueprint 的 21 个槽位 name 一一对应
-/// （常量集合漂移即装配面缺失/多余条目）。
+/// 「已知键全集」既不缺项也不重复（A7 的三条同时成立）。
+///
+/// 1. 链槽位名 == `MIDDLEWARE_NAMES` 去掉 builtin 实例策略键后的集合；
+/// 2. builtin 策略键集合 == 声明表 `policy_key` 集合（常量或声明表漂移即红）；
+/// 3. 槽位名 ∩ 策略键 == ∅（两表语义不重叠）。
+///
+/// 与 §3 IF-D7 A 节的等价表述一致：`槽位名 ∪ 策略键 == MIDDLEWARE_NAMES ∪
+/// BUILTIN_INSTANCE_POLICY_KEYS`。`BUILTIN_INSTANCE_POLICY_KEYS` 常量由 S-02
+/// （W3，`meta_harness.rs`）引入——本断言用声明表派生同一集合，因此在
+/// 「I-03 → S-02」两个时点都成立且强度不降。
 #[test]
 fn middleware_names_match_production_blueprint() {
     let blueprint = production_blueprint();
     let slot_names: std::collections::HashSet<&str> =
         blueprint.iter().map(slot_middleware_name).collect();
+    let policy_keys: std::collections::HashSet<&str> =
+        peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+            .iter()
+            .map(|instance| instance.policy_key)
+            .collect();
     let const_names: std::collections::HashSet<&str> = MIDDLEWARE_NAMES.iter().copied().collect();
+
+    assert!(
+        !policy_keys.is_empty(),
+        "builtin 实例策略键不得为空（关闭语义的来源）"
+    );
     assert_eq!(
-        slot_names, const_names,
-        "MIDDLEWARE_NAMES 必须与 production_blueprint 槽位完全一致"
+        policy_keys.len(),
+        peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.len(),
+        "policy_key 必须在声明表内唯一"
+    );
+    assert!(
+        slot_names.is_disjoint(&policy_keys),
+        "链槽位名与 builtin 策略键必须语义不重叠: {slot_names:?} / {policy_keys:?}"
+    );
+    // 1：MIDDLEWARE_NAMES 去掉策略键后必须恰为链槽位名。
+    let const_slots: std::collections::HashSet<&str> =
+        const_names.difference(&policy_keys).copied().collect();
+    assert_eq!(
+        slot_names, const_slots,
+        "MIDDLEWARE_NAMES 必须恰为「链槽位名 ∪ builtin 策略键」（不缺项、不重复）"
     );
 }
 
@@ -1232,7 +1591,6 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::GitAttribution => "GitAttributionMiddleware",
         ChainSlot::GitWatch => "GitWatchMiddleware",
         ChainSlot::Terminal => "TerminalMiddleware",
-        ChainSlot::Web => "WebMiddleware",
         ChainSlot::Todo => "TodoMiddleware",
         ChainSlot::Cron => "CronMiddleware",
         ChainSlot::Hook => "HookMiddleware",
@@ -1243,26 +1601,44 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Workflow => "WorkflowMiddleware",
         ChainSlot::Ptc => "PtcMiddleware",
         ChainSlot::ToolSearch => "ToolSearch",
-        ChainSlot::Artifact => "ArtifactMiddleware",
         ChainSlot::Lsp => "LspMiddleware",
         ChainSlot::Goal => "GoalMiddleware",
     }
 }
 
-/// `MIDDLEWARE_TOOL_NAMES` 常量与各 middleware 静态工具名并集一致
-/// （工具名漂移即防御剔除面失真；新增 middleware 工具须同步两处）。
+/// 「常量去掉三个已迁移裸名」== 各 middleware 静态工具名并集。
+///
+/// 工具名漂移即防御剔除面失真（新增 middleware 工具须同步两处）。
+///
+/// v4-part-2 W3（A7/IF-D7 B 节）：`WebFetch` / `WebSearch` / `artifact` 已迁移为
+/// builtin MCP 实例（`mcp__web__*` / `mcp__artifact__artifact`），不再是任何
+/// middleware 的静态工具；`MIDDLEWARE_TOOL_NAMES` 侧的删除归 **S-02**
+/// （`peri-acp-types/src/meta_harness.rs`），本文件归 I-03，故断言写成与
+/// `middleware_names_match_production_blueprint` 同构的**等价形态**：常量去掉
+/// 这三个名字后必须与各 middleware 静态工具名并集相等。S-02 删除前后都成立且
+/// 强度不降（删除后 `difference` 为空集，即严格集合相等）。
+///
+/// 已迁移名从**声明表**派生（不新建第二张反查表，IF-D15 / §9 规则 11）。
 #[test]
 fn middleware_tool_names_match_static_tool_sets() {
     use crate::middleware::{FilesystemMiddleware, TerminalMiddleware};
+
+    let migrated_bare_names: std::collections::HashSet<&str> =
+        peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+            .iter()
+            .flat_map(|instance| instance.tools.iter())
+            .map(|declaration| declaration.original_name)
+            .collect();
+    assert!(
+        !migrated_bare_names.is_empty(),
+        "迁移名集合不得为空（本断言的省略面）"
+    );
 
     let static_tools: std::collections::HashSet<&str> = FilesystemMiddleware::tool_names()
         .into_iter()
         .chain(TerminalMiddleware::tool_names())
         .chain(HumanInTheLoopMiddleware::tool_names())
         .chain([
-            // WebMiddleware
-            "WebFetch",
-            "WebSearch",
             // SkillsMiddleware
             "SkillTool",
             "DiscoverSkillsTool",
@@ -1277,8 +1653,6 @@ fn middleware_tool_names_match_static_tool_sets() {
             "ToolSearch",
             "SearchExtraTools",
             "ExecuteExtraTool",
-            // ArtifactMiddleware
-            "artifact",
             // LspMiddleware
             "LSP",
             // GoalMiddleware
@@ -1288,11 +1662,21 @@ fn middleware_tool_names_match_static_tool_sets() {
             "mcp_read_resource",
         ])
         .collect();
+    // Web / Artifact 能力已不在 middleware 提供面上（迁移为 builtin 实例）。
+    assert!(
+        static_tools.is_disjoint(&migrated_bare_names),
+        "已迁移的 Web / Artifact 工具不得再出现在 middleware 静态工具集中: {static_tools:?}"
+    );
+
     let const_tools: std::collections::HashSet<&str> =
         MIDDLEWARE_TOOL_NAMES.iter().copied().collect();
+    let const_tools_wo_migrated: std::collections::HashSet<&str> = const_tools
+        .difference(&migrated_bare_names)
+        .copied()
+        .collect();
     assert_eq!(
-        static_tools, const_tools,
-        "MIDDLEWARE_TOOL_NAMES 必须与各 middleware 静态工具名并集一致"
+        static_tools, const_tools_wo_migrated,
+        "MIDDLEWARE_TOOL_NAMES（去掉已迁移的三个裸名后）必须与各 middleware 静态工具名并集一致"
     );
 }
 
@@ -1336,27 +1720,67 @@ fn workflow_context_with_disabled(disabled: &[&str]) -> WorkflowAgentContext {
 }
 
 /// Workflow agent 工具列表按 disabled 集合连坐过滤。
+///
+/// A6 面③：迁移后 workflow agent 的 Web / Artifact 能力来自 builtin 实例的
+/// direct bridge，而不是裸名 middleware 工具——因此本用例必须用**带池**的工厂
+/// 才能观察到该能力面（无池构造器的行为与迁移前的非 Web 部分逐位一致）。
 #[test]
 fn workflow_build_tools_filters_disabled() {
     let factory = default_workflow_middleware_factory();
-    // 全开：fs + terminal + web + skills 工具齐全
-    let all = factory.build_tools(
+    // 无池构造器：不产生任何 builtin bridge（既有调用点语义不变）。
+    let without_pool = factory.build_tools(
         "/tmp/contract-test",
         &std::collections::HashSet::new(),
         None,
     );
+    let without_pool_names: Vec<&str> = without_pool.iter().map(|t| t.name()).collect();
+    assert!(
+        !without_pool_names
+            .iter()
+            .any(|name| name.starts_with("mcp__")),
+        "无池工厂不得凭空产生 MCP 工具: {without_pool_names:?}"
+    );
+
+    // 带池工厂：全开时 builtin 工具以 direct 形式进入工具列表。
+    let pool_factory =
+        default_workflow_middleware_factory_with_pool(Some(pool_with_builtin_instances()));
+    let all = pool_factory.build_tools(
+        "/tmp/contract-test",
+        &std::collections::HashSet::new(),
+        None,
+    );
+    for (name, direct) in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+        .iter()
+        .flat_map(|instance| instance.tools.iter())
+        .map(|declaration| (declaration.effective_name, declaration.direct))
+    {
+        let entry = all
+            .iter()
+            .find(|tool| tool.name() == name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "workflow agent 工具列表应含 builtin 工具 {name}: {:?}",
+                    all.iter().map(|t| t.name()).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            entry.is_direct(),
+            direct,
+            "workflow agent 侧的 {name} 必须保持声明的直连性（A6 面③）"
+        );
+    }
     let all_names: Vec<&str> = all.iter().map(|t| t.name()).collect();
-    for expected in [
-        "Read",
-        "Bash",
-        "WebFetch",
-        "WebSearch",
-        "SkillTool",
-        "DiscoverSkillsTool",
-    ] {
+    for expected in ["Read", "Bash", "SkillTool", "DiscoverSkillsTool"] {
         assert!(
             all_names.contains(&expected),
             "全开时工具 {expected} 应存在: {all_names:?}"
+        );
+    }
+    // 裸名提供面已删除。
+    for gone in ["WebFetch", "WebSearch", "artifact"] {
+        assert!(
+            !all_names.contains(&gone),
+            "裸名 {gone} 不得出现在 workflow agent 工具列表: {all_names:?}"
         );
     }
 
@@ -1366,12 +1790,11 @@ fn workflow_build_tools_filters_disabled() {
             &["Read", "Write", "Edit", "Glob", "Grep"],
         ),
         ("TerminalMiddleware", &["Bash"]),
-        ("WebMiddleware", &["WebFetch", "WebSearch"]),
         ("SkillsMiddleware", &["SkillTool", "DiscoverSkillsTool"]),
     ];
     for (mw, expected_gone) in cases {
         let disabled: std::collections::HashSet<String> = std::iter::once(mw.to_string()).collect();
-        let tools = factory.build_tools("/tmp/contract-test", &disabled, None);
+        let tools = pool_factory.build_tools("/tmp/contract-test", &disabled, None);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for tool in *expected_gone {
             assert!(
@@ -1380,6 +1803,45 @@ fn workflow_build_tools_filters_disabled() {
             );
         }
     }
+
+    // builtin 实例关闭：workflow agent 的工具列表同样归零（IF-D10 面③）。
+    for (policy_key, gone, survivor) in [
+        (
+            "WebMiddleware",
+            "mcp__web__WebSearch",
+            "mcp__artifact__artifact",
+        ),
+        (
+            "ArtifactMiddleware",
+            "mcp__artifact__artifact",
+            "mcp__web__WebSearch",
+        ),
+    ] {
+        let disabled: std::collections::HashSet<String> =
+            std::iter::once(policy_key.to_string()).collect();
+        let tools = pool_factory.build_tools("/tmp/contract-test", &disabled, None);
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            !names.contains(&gone),
+            "workflow disabled {policy_key} 后 {gone} 仍存在: {names:?}"
+        );
+        assert!(
+            names.contains(&survivor),
+            "workflow disabled {policy_key} 不得影响 {survivor}: {names:?}"
+        );
+    }
+
+    // 两个实例都关闭：workflow 面 builtin 工具一个不剩。
+    let both: std::collections::HashSet<String> = ["WebMiddleware", "ArtifactMiddleware"]
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    let tools = pool_factory.build_tools("/tmp/contract-test", &both, None);
+    assert!(
+        !tools.iter().any(|tool| tool.name().starts_with("mcp__")),
+        "两个 builtin 实例都关闭后 workflow 面不得残留 MCP 工具: {:?}",
+        tools.iter().map(|t| t.name()).collect::<Vec<_>>()
+    );
 }
 
 /// Workflow agent 中间件链按 disabled 集合过滤，未禁用项保持原相对顺序。
@@ -1403,7 +1865,6 @@ fn workflow_build_middlewares_filters_disabled() {
             "FilesystemMiddleware",
             "GitAttributionMiddleware",
             "TerminalMiddleware",
-            "WebMiddleware",
             "TodoMiddleware",
             "PermissionMiddleware",
         ]
@@ -1417,7 +1878,6 @@ fn workflow_build_middlewares_filters_disabled() {
         "FilesystemMiddleware",
         "GitAttributionMiddleware",
         "TerminalMiddleware",
-        "WebMiddleware",
         "TodoMiddleware",
         "PermissionMiddleware",
     ] {

@@ -1,7 +1,7 @@
 ---
 name: use-artifacts
 description: >
-  Teach the agent when and how to use the artifact tool: what content belongs in artifacts, when to upload/update, and the SearchExtraTools + ExecuteExtraTool invocation flow for the deferred artifact tool.
+  Teach the agent when and how to use the artifact tool: what content belongs in artifacts, when to upload/update, and how to call it directly as `mcp__artifact__artifact`.
 userInvocable: true
 argumentHint: "[optional focus note]"
 ---
@@ -36,22 +36,21 @@ Artifacts are public HTML pages you upload to a hosting service. They have stabl
 - After every tool call (noise)
 - Mid-step with no meaningful change (e.g. fixed a typo)
 
-## How to invoke (deferred tool)
+## How to invoke (direct tool)
 
-`artifact` is a deferred tool. The first call requires two steps; subsequent calls one step.
+`mcp__artifact__artifact` is a direct tool. It is already in your tool list, so no discovery step is needed — every call is a single step.
 
 **First upload (creates a new artifact):**
 ```
 1. Use the Write tool to write HTML (.html) or Markdown (.md) to a local file (location is your choice).
-2. SearchExtraTools({ query: "select:artifact" })   // loads the tool schema
-3. ExecuteExtraTool({ tool_name: "artifact", params: { file_path: "<absolute-path>.html|.md" } })
-4. Save the returned `id` from the tool result — this is the hash.
+2. Call `mcp__artifact__artifact` with `{ file_path: "<absolute-path>.html|.md" }`.
+3. Save the returned `id` from the tool result — this is the hash.
 ```
 
 **Subsequent updates (overwrites in place, URL stays stable):**
 ```
 1. Update the local file.
-2. ExecuteExtraTool({ tool_name: "artifact", params: { file_path: "<absolute-path>.html|.md", hash: "<id-from-first-call>" } })
+2. Call `mcp__artifact__artifact` with `{ file_path: "<absolute-path>.html|.md", hash: "<id-from-first-call>" }`.
 ```
 
 The URL returned on every call is the same when you pass the same `hash`. The user can open it at any time to see the latest version.

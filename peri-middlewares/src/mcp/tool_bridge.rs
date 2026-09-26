@@ -409,16 +409,38 @@ fn format_contents(contents: &[ContentBlock]) -> String {
 /// `build_tool_bridges` 的 typed 版本：调用方可以在同一批对象上做分类
 /// （如 [`McpToolBridge::with_direct`]）后只装箱一次，避免同一工具被注册两份。
 /// 两种 constructor、generation 与 binding leases 行为与原实现一致。
+///
+/// **IF-D13 生效点**：注册表中**声明为 direct** 的 builtin 工具在这里直接
+/// `.with_direct()`（`direct = 声明的 direct || 启动期 system_mcp_tools 提升`，两者由
+/// 「声明 direct 集合 == `system_mcp_tools` 集合」的断言锁死，不得冲突）。其余一律
+/// 保持 deferred。判定只走 `builtin::is_declared_direct`（未实现 / 未知名恒 false），
+/// 不在本文件硬编码任何 `mcp__*` 字面量或实例名。
 pub(crate) fn build_typed_tool_bridges(pool: &McpClientPool) -> Vec<McpToolBridge> {
+    build_bridges(pool, true)
+}
+
+/// 强制 deferred 的 typed 版本：public [`build_tool_bridges`] 专用。
+///
+/// 与 [`build_typed_tool_bridges`] 的唯一差异是不应用声明 direct，因此 public builder
+/// 在 builtin 与外部 server 两种输入下的行为都与提取出 typed builder 之前**逐位一致**。
+pub(crate) fn build_deferred_tool_bridges(pool: &McpClientPool) -> Vec<McpToolBridge> {
+    build_bridges(pool, false)
+}
+
+fn build_bridges(pool: &McpClientPool, apply_declared_direct: bool) -> Vec<McpToolBridge> {
     let mut bridges: Vec<McpToolBridge> = Vec::new();
     for client in pool.get_all_clients() {
         let generation = pool.handle_generation(&client);
         for tool in &client.tools {
-            bridges.push(
-                McpToolBridge::new(&client.name, tool, Arc::clone(&client))
-                    .with_server_generation(generation)
-                    .with_binding_leases(Arc::clone(&pool.app_binding_leases)),
-            );
+            let mut bridge = McpToolBridge::new(&client.name, tool, Arc::clone(&client))
+                .with_server_generation(generation)
+                .with_binding_leases(Arc::clone(&pool.app_binding_leases));
+            if apply_declared_direct
+                && super::builtin::is_declared_direct(&client.name, tool.name.as_ref())
+            {
+                bridge = bridge.with_direct();
+            }
+            bridges.push(bridge);
         }
     }
     bridges
@@ -426,9 +448,10 @@ pub(crate) fn build_typed_tool_bridges(pool: &McpClientPool) -> Vec<McpToolBridg
 
 /// 从 McpClientPool 的所有已连接客户端中批量创建 McpToolBridge
 ///
-/// 全部返回值保持 deferred 默认行为（`is_direct() == false`）。
+/// 全部返回值保持 deferred 默认行为（`is_direct() == false`）——包括 builtin 实例的
+/// 工具：未类型化的 public builder 不参与 direct 提升（IF-D13），保持既有契约不变。
 pub fn build_tool_bridges(pool: &McpClientPool) -> Vec<Box<dyn BaseTool>> {
-    build_typed_tool_bridges(pool)
+    build_deferred_tool_bridges(pool)
         .into_iter()
         .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
         .collect()

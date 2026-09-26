@@ -25,6 +25,13 @@ impl ArtifactTool {
         }
     }
 
+    /// 测试构造：注入客户端（本地 base url + 假 token），使上传协议的成功 / 失败
+    /// 形态可在无网络条件下覆盖；生产路径只经 [`Self::new`]。
+    #[cfg(test)]
+    pub(crate) fn with_client_for_test(cwd: String, client: ArtifactClient) -> Self {
+        Self { cwd, client }
+    }
+
     fn resolve_path(&self, file_path: &str) -> Result<std::path::PathBuf, String> {
         let path = Path::new(file_path);
         let resolved = if path.is_absolute() {

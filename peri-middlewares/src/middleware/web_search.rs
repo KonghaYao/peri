@@ -176,3 +176,10 @@ impl BaseTool for WebSearchTool {
         Ok(format_search_results(&results))
     }
 }
+
+// WebSearch / WebFetch 两个工具的用例（sub-plan F §6.4 第 2 步：挂载点从
+// `middleware/web.rs` 迁到本文件——该文件由 I-03 在 W3 删除；16 个用例，
+// 过滤器 `middleware::web_search::tests`）。
+#[cfg(test)]
+#[path = "web_test.rs"]
+mod tests;

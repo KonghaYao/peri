@@ -2,17 +2,18 @@ use std::sync::Arc;
 
 use super::{
     auth_store::FileCredentialStore,
+    builtin::runtime::{spawn_builtin_transport, BuiltinTransport, BUILTIN_CONVERGE_TIMEOUT},
     client::{
         build_authed_transport, build_http_transport, serve_client_auto, setup_subscription,
         ClientStatus, McpClientHandle, McpClientPool, McpPoolError, OAuthStartDisposition,
-        OAuthStatus, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT, STDIO_CONNECT_TIMEOUT,
+        OAuthStatus, SHUTDOWN_TIMEOUT,
     },
     initialize::{
-        commit_discovery_failure, commit_discovery_success, downgrade_resource_listing,
-        fail_tool_discovery, list_discovered_tools,
+        commit_discovery_failure, commit_discovery_success, connect_timeout,
+        downgrade_resource_listing, fail_tool_discovery, list_discovered_tools,
     },
     oauth_flow::{OAuthFlowEvent, OAuthFlowManager},
-    transport::TransportConfig,
+    transport::{TransportConfig, TransportKind},
 };
 
 impl McpClientPool {
@@ -57,6 +58,9 @@ impl McpClientPool {
         if let Some(mut svc) = previous_service {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
+        // builtin 实例：旧同进程 server task 必须在新链路建立前收敛（旧 client service
+        // 已关闭 → server 读半收到 EOF）。非 builtin server 这里是空操作。
+        self.close_builtin_task(server_name).await;
         // 重连前捕获旧状态：insert 覆盖后由 record_status_change 判定是否
         // 构成上下线变化（Connected→Failed 等）；首次插入（旧状态不存在）
         // 不产生通知（初始化阶段由首 turn 概览覆盖）。
@@ -73,12 +77,10 @@ impl McpClientPool {
                 reason: format!("传输层构建失败: {e}"),
             }
         })?;
-        let is_http = matches!(tc, TransportConfig::StreamableHttp { .. });
-        let timeout = if is_http {
-            HTTP_CONNECT_TIMEOUT
-        } else {
-            STDIO_CONNECT_TIMEOUT
-        };
+        // 三分类（IF-D1）：超时与日志字段同源；`is_http` 仅用于 AuthRequired 判定。
+        let kind = tc.kind();
+        let timeout = connect_timeout(kind);
+        let is_http = matches!(kind, TransportKind::Http);
         // lifecycle 仅由显式 protocolVersion 选择；subscriptions 只负责连接后订阅。
         let protocol_version = server_config.protocol_version.as_ref();
         let subscriptions = server_config
@@ -88,6 +90,50 @@ impl McpClientPool {
 
         let mut used_oauth = false;
         let result = match &tc {
+            // builtin 分支：重建一条**全新的**同进程链路（新 duplex + 新 handler 实例，
+            // 旧 task 已在上方收敛并移除）。与 stdio 路径同构：typed 原因 + 失败证据 +
+            // `ConnectionFailed`，不 panic、不静默降级。
+            TransportConfig::Builtin { instance } => {
+                // cwd 未绑定：措辞与 stdio 路径逐字一致，不 fallback 到进程 cwd。
+                let cwd =
+                    self.execution_cwd
+                        .get()
+                        .ok_or_else(|| McpPoolError::ConnectionFailed {
+                            server: server_name.to_owned(),
+                            reason: "MCP execution directory is not initialized".into(),
+                        })?;
+                let transport = match spawn_builtin_transport(instance, cwd) {
+                    Ok(transport) => transport,
+                    Err(error) => {
+                        let reason = format!("builtin 启动失败: {error}");
+                        McpClientPool::insert_failed(self, server_name, reason.clone());
+                        commit_discovery_failure(self, server_name, false);
+                        return Err(McpPoolError::ConnectionFailed {
+                            server: server_name.to_string(),
+                            reason,
+                        });
+                    }
+                };
+                let BuiltinTransport { io, server_task } = transport;
+                if let Some(mut previous) =
+                    self.register_builtin_task(server_name.to_string(), server_task)
+                {
+                    let _ = previous.converge(BUILTIN_CONVERGE_TIMEOUT).await;
+                }
+                let connected = serve_client_auto(
+                    io,
+                    None,
+                    protocol_version,
+                    &self.capability_profile,
+                    timeout,
+                )
+                .await;
+                // 握手失败 / 超时：新链路当场收口，不留 orphan。
+                if !matches!(connected, Ok(Ok(_))) {
+                    self.close_builtin_task(server_name).await;
+                }
+                connected
+            }
             TransportConfig::Stdio { command, args, env } => {
                 let cwd =
                     self.execution_cwd

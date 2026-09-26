@@ -1,6 +1,6 @@
 # peri-agent 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-26（启动闸门 hook `before_react_start` 与 System MCP 工具 static base 提交；Bash 同步执行有界化）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-26（builtin 一等工具的生效名归一：`TOOL_PARAM_ALIASES` 与 `ToolFilterPolicy::canonical` 改「原样优先、未命中再用原始名」；`stage_builder/tools.rs` 谓词覆盖边界更新；链内删去 Web / Artifact 槽位。此前：启动闸门 hook `before_react_start` 与 System MCP 工具 static base 提交；Bash 同步执行有界化）
 > 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
 
 ## 架构速览
@@ -79,7 +79,7 @@
 | 模型缓存与生产链投影 | session/exec/stage_builder/agent.rs | `build_agent` / `TurnAssembly` / `project_assembly`；retry handler 先于模型工厂更新；生产 chain 包装一次，bridge provider 与 StageContext clone 同一 `Arc<MiddlewareChain>`；空 CLAUDE/skills 保留 `Some("")` 冻结缺席语义 |
 | 主 Session 与后台 owner | session/exec/stage_builder/session_setup.rs | `build_session`；同一 `FrozenSessionData` 构造 `SessionStore.frozen`，激活 persistence；session 级 cron bridge 与 print 级 CronOwner 分支、取消优先级不变 |
 | 父身份与子任务宿主 | session/exec/stage_builder/subagent_setup.rs | `attach_subagent_host` / `SubagentDependencies`；借用原 owner，移动后台事件发送端并注入同一冻结数据；必须早于 middleware `collect_tools` |
-| 工具视图与目录注册 | session/exec/stage_builder/tools.rs | `build_session_tool_view` / `register_tool_catalog`；disabled 剔除后 merge 当前链工具，同名有状态工具覆盖本地条目，不写宿主共享表；动态 catalog 注册失败沿 `StageBuildError` 返回 |
+| 工具视图与目录注册 | session/exec/stage_builder/tools.rs | `build_session_tool_view` / `register_tool_catalog`；disabled 剔除后 merge 当前链工具，同名有状态工具覆盖本地条目，不写宿主共享表；动态 catalog 注册失败沿 `StageBuildError` 返回；剔除面只认仍在 `MIDDLEWARE_TOOL_NAMES` 内的名字——三个已迁移裸名（`WebFetch` / `WebSearch` / `artifact`）不在表内，因此**不再被剔除**（builtin 能力以 `mcp__*` 存在于 MCP 目录，从不进 `shared_tools`；覆盖边界与反向断言见该文件模块注释与 `tools_test.rs::migrated_naked_names_are_no_longer_excluded`） |
 | Stage 可选依赖 | session/exec/stage_builder/dependencies.rs | `configure_stage` / `StageDependencies`；按原顺序注入 goal/error/compact/idle/hook；inbox handle 优先 session 级 inbox，再回退 async owner |
 | 子 Agent 创建入口与新 thread 注入 | session/subagent/factory.rs + factory/spawn.rs | `SessionFactory::spawn_subagent` / `spawn_subagent_impl`；公开入口不变，spawn 在新 thread 执行前持久化所选父 canonical payload/flags 快照；identity 和 fork prompt 仍属 child own |
 | 子 Agent 恢复与状态 claim | session/subagent/factory/resume.rs + factory/claim.rs | `resume_subagent_impl` / `ResumeClaim`；同一 worker 顺序完成 active 与终态写入；准备取消恢复旧状态（sync 返回原线程中断结果），sync 执行 Drop 写 cancelled，bg 注册成功后移交；继承快照/own payload/flags 的恢复与交叠校验全部受 claim 保护；保持 thread 身份与 own 尾部 tool-call 截断 |
@@ -87,7 +87,7 @@
 | 后台任务管理（bg shell，易失不持久化） | agent/async_tasks/ | `TaskManager`（manager.rs:26，per-session 聚合）；`BackgroundTaskRegistry`（registry.rs:121）；shell 执行 `shell_command` / `kill_process_group` / `parse_foreground_timeout` / `parse_background_timeout`（shell.rs:285/:197/:413/:426）；超时常量 `FOREGROUND_DEFAULT_TIMEOUT_MS` / `FOREGROUND_MAX_TIMEOUT_MS`（shell.rs:387/:392）与 `BACKGROUND_MAX_TIMEOUT_MS`（:395）；根 async_tasks.rs 仅 re-export |
 | 改子 Agent typed failure / 后台投影 | `session/subagent/{types,run_sync,background}.rs` + `agent/stages/tool_dispatch/{execution,effective_dispatcher}.rs` | `SubagentFailure`；`run_sync_subagent`；`spawn_background_subagent`；`effective_tool_error_from_boxed`；`StageEffectiveToolDispatcher::dispatch{,_output}` | sync/background 保留 child thread identity；sync 结果经父 dispatch 的 ToolResult/BaseMessage，background 经 BackgroundTaskResult/to_notification；仅 ModelError 生成 safe diagnostic，取消仍单独终态；真实边界 fixture 置于 middleware subagent tool tests |
 | 改子 Agent 事件排空与终态顺序 | `session/subagent/{lifecycle,run_sync,background}.rs` + `agent/subagent_event_forwarder.rs` | `drain_subagent_events`；`spawn_subagent_event_forwarder_for_completion` | sync/background 关闭 producer 后 await owned forwarder，成功排空才提交 bridge Stop，随后按执行与转发结果发布可见 Stopped；JoinError/终态 bridge panic 不得掩盖为成功，已有模型错误和取消保持原分类；后台统一 Stopped → lifecycle hook/状态 → callback → registry complete；成功和协作取消在 callback 前发送 BackgroundTaskCompleted，错误保持仅经 callback/TaskManager 交付的既有契约。取消 drain 会 abort forwarder，不承诺强制 abort 排空，遥测可保持未完成；回归入口 `session::subagent::tests` / `session::subagent::lifecycle::tests` |
-| 中间件链装配 | session/factory.rs | `production_blueprint`（链序事实源，装配实现在 peri-middlewares/src/assembly.rs） |
+| 中间件链装配 | session/factory.rs | `production_blueprint`（链序事实源，装配实现在 peri-middlewares/src/assembly.rs）；链内**没有** Web / Artifact 槽位（v4-part-2 已删除），其能力由 builtin MCP 实例在 Mcp 槽位的客户端侧提供 |
 | 消息队列 | session/queue.rs | MessageQueue 入队/排空 |
 | 向运行中后台子 Agent 发消息 | agent/async_tasks/{agent_inbox,manager,registry}.rs + session/subagent/background.rs | `TaskManager::send_subagent_message` / `BackgroundAgentInbox`；路由随后台任务条目持有，按当前 session + child thread 定位，在 scope/任务/接纳锁内入队 canonical Info；loop 返回与取消、abort/Drop 撤销接纳；Info 不驱动额外模型调用，回执只确认 queued |
 | Transcript 标记与 canonical 历史 | session/transcript.rs + transcript_test.rs | `persisted_payloads` 保留 message/reminder 类型和 ID；`visible_model_messages` 单独生成模型投影，`visible_messages` 跳过 reminder 与 excluded；`test_compaction_reload_preserves_canonical_reminder_once` 经真实 compact 提交与 SQLite 重载验证 reminder 顺序、身份和单次投影 |
@@ -98,7 +98,8 @@
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 调用解析与参数归一化 | `src/tools/invocation.rs` | `DirectToolInvocationResolver::resolve/resolve_target`；同一 Arc 多 key 去重、不同 target 的歧义拒绝；`normalize_params` 是唯一实现，同时声明 alias/canonical 的 schema 不改写字段 |
+| 调用解析与参数归一化 | `src/tools/invocation.rs` | `DirectToolInvocationResolver::resolve/resolve_target`；同一 Arc 多 key 去重、不同 target 的歧义拒绝；`normalize_params` 是唯一实现，同时声明 alias/canonical 的 schema 不改写字段；`TOOL_PARAM_ALIASES`（:133，匹配点 :187）为**匹配型归一**：先按工具名原样查表、未命中再用 `original_tool_name_of_effective` 归一后的原始名查表（builtin 一等工具的 `mcp__web__*` 因此仍命中 `WebSearch` / `WebFetch` 的别名），不得新增 effective name 字面量行 |
+| 工具名过滤（allow/deny） | `src/session/tool_catalog.rs` | `ToolFilterPolicy::canonical`（:128）；`name_candidates`（:168） | `--disallowed-tools` / agent `tools:` 的匹配**原样优先**、未命中再用归一后的原始名：写 `WebFetch` 与写 `mcp__web__WebFetch` 都生效；未知 / 外部 `mcp__*` 行为不变（ARC-TOOLS-001 / ARC-CAPABILITY-CLOSURE-001） |
 | 工具 trait 事实源 | `peri-acp-types/src/tools.rs` | `BaseTool`（:146）；`is_direct()` 默认 false（:199） |
 | 工具注册面 | middleware `collect_tools()`（`peri-agent/src/middleware/trait.rs:60`，13 处实现） | 新工具由中间件提供；包装层透传 is_direct |
 | deferred 搜索/执行代理 | `peri-middlewares/src/tool_search/` | `middleware.rs`（基于 local tool view 构建索引并刷新元工具描述）、`search_tool.rs`、`execute_tool.rs`、`tool_index.rs`、`core_tools.rs`（调用解析与 direct 描述 helper） |
@@ -113,5 +114,6 @@
 - ARC-FROZEN-001：frozen 数据会话内不可漂移，SubAgent 复用
 - ARC-TOOLS-001：`is_direct()` 自声明可见性
 - ARC-KEEPGOING-001：空白 prompt = 继续跑 loop
-- ARC-MIDDLEWARE-001：中间件链序是行为契约，链序蓝本 `production_blueprint`
+- ARC-MIDDLEWARE-001：中间件链序是行为契约，链序蓝本 `production_blueprint`；Web / Artifact 不是链槽位
+- ARC-CAPABILITY-CLOSURE-001：builtin 实例关闭同时作用于首个模型请求 tools、deferred 目录、subagent 继承面与 workflow agent 工具列表；本 crate 的落点为 `ToolFilterPolicy::canonical` 与 `stage_builder/tools.rs` 的谓词边界
 - ARC-MIDDLEWARE-CAPABILITY-001：阶段能力接口 `middleware/capabilities.rs`；执行适配与回写入口 `agent/stages/middleware_runner.rs`

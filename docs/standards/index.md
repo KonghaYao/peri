@@ -17,7 +17,7 @@
 
 | 任务 | 读取 |
 | --- | --- |
-| 跨模块边界、事件、Prompt、工具、中间件、安全 | [architecture-contracts.md](architecture-contracts.md) |
+| 跨模块边界、事件、Prompt、工具、中间件、能力关闭、安全 | [architecture-contracts.md](architecture-contracts.md) |
 | Rust 实现 | [rust.md](rust.md) |
 | `peri-tui` 界面与交互 | [tui.md](tui.md) 与 `peri-tui/CLAUDE.md` |
 | `CLAUDE.md` 维护 | [documentation.md](documentation.md) |

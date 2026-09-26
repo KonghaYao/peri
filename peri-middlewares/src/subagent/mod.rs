@@ -17,6 +17,8 @@ use peri_agent::{
     tools::BaseTool,
 };
 
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
+
 use crate::{
     agent_define::AgentOverrides, claude_agent_parser::ClaudeAgentFrontmatter,
     claude_agent_parser::ToolsValue, parse_agent_file, tools::BoxToolWrapper,
@@ -385,9 +387,16 @@ pub use peri_acp_types::agents::AgentCapability;
 ///   （可定时触发任意 prompt，等价委派执行权）；
 /// - 前缀：`mcp__*`（外部能力，无法静态证明只读）。
 ///
+/// **生效名归一（IF-D6 / A4 判定型）**：builtin 一等工具的 effective name 按其
+/// 原始工具名判定（例如 web 实例 `WebFetch` 的 effective name ⇒ `WebFetch`
+/// ⇒ 非 mutation），否则「按名字判定」的结论会因 `mcp__` 前缀而不等于原始名。命中声明表
+/// （[`original_tool_name_of_effective`]，IF-D15 唯一归一入口）才替换；未命中
+/// （未知 / 外部 `mcp__*`）保持既有保守语义分毫不变。
+///
 /// 匹配大小写不敏感（与 `filter_tools` 一致）。
 fn is_mutation_tool(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let normalized = original_tool_name_of_effective(name).unwrap_or(name);
+    let lower = normalized.to_lowercase();
     matches!(
         lower.as_str(),
         "bash" | "write" | "edit" | "folder_operations" | "cron_register"

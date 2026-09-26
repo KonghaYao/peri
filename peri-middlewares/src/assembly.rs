@@ -19,15 +19,17 @@ mod prompt;
 mod workflow;
 
 pub use lsp::{create_session_lsp_pool, load_merged_lsp_servers};
-pub use workflow::{default_workflow_middleware_factory, WorkflowAgentMiddlewareFactory};
+pub use workflow::{
+    default_workflow_middleware_factory, default_workflow_middleware_factory_with_pool,
+    WorkflowAgentMiddlewareFactory,
+};
 
 use crate::{
-    artifact::ArtifactMiddleware,
     cron::{CronMiddleware, CronScheduler},
     default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware},
     error_suggest,
     hitl::HumanInTheLoopMiddleware,
-    middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
+    middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware},
     permission::{default_requires_approval, PermissionMiddleware},
     plugin::PluginMiddleware,
     ptc::PtcMiddleware,
@@ -43,6 +45,7 @@ use peri_agent::{
     messages::BaseMessage,
     middleware::chain::MiddlewareChain,
     session::factory::{ChainSlot, MiddlewareChainAssembler, SubAgentMiddlewarePort},
+    tools::BaseTool,
 };
 use std::sync::Arc;
 
@@ -269,10 +272,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     }
                     chain.add(Box::new(tm));
                 }
-                ChainSlot::Web if disabled.contains("WebMiddleware") => {}
-                ChainSlot::Web => {
-                    chain.add(Box::new(WebMiddleware::new()));
-                }
                 // ── 第三组：Todo / Cron ──
                 ChainSlot::Todo if disabled.contains("TodoMiddleware") => {}
                 ChainSlot::Todo => {
@@ -358,11 +357,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                         Arc::clone(shared_tools),
                     )));
                 }
-                // Artifact 中间件：独立关闭不影响 ToolSearch 元工具。
-                ChainSlot::Artifact if disabled.contains("ArtifactMiddleware") => {}
-                ChainSlot::Artifact => {
-                    chain.add(Box::new(ArtifactMiddleware::new()));
-                }
                 // ── 第七组：LSP / Goal（辅助诊断；Goal 链最后） ──
                 // MetaHarness：Lsp / Goal 关闭 → 即使运行条件满足也不构造。
                 ChainSlot::Lsp if disabled.contains("LspMiddleware") => {}
@@ -406,6 +400,34 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
 // 装配触发点收敛：不再提供本层便捷入口。装配一律经 Agent 层 session 工厂的
 // `build_middleware_chain`（唯一触发点，ARC-MIDDLEWARE-001）触发，
 // 本模块仅保留 trait 实现（`ProductionChainAssembler`）。
+
+/// builtin 实例的 **direct** bridge 提供面（A6 面②/③；IF-D10 面②/③）。
+///
+/// 迁移后 Web / Artifact 能力不再由链槽位提供，而是以 `mcp__web__*` /
+/// `mcp__artifact__artifact` 的 builtin bridge 形式存在于 MCP 目录：
+/// `build_typed_tool_bridges` 应用注册表声明的 direct（IF-D13），本函数再按
+/// 同一份 frozen policy 去掉关闭实例（`closed_instances` / `is_closed` 是
+/// 唯一判定入口，不硬编码实例名或 `mcp__web__` 前缀）。
+///
+/// 只保留 direct：外部 server 的 deferred bridge 在 workflow agent 与
+/// subagent `parent_tools` 两条链上都没有 ToolSearch 可发现，注入它们只会
+/// 变成模型看不见的注册项。
+pub(crate) fn open_builtin_bridges(
+    pool: &crate::mcp::McpClientPool,
+    disabled: &std::collections::HashSet<String>,
+) -> Vec<Box<dyn BaseTool>> {
+    let closed = crate::mcp::builtin::closed_instances(disabled);
+    crate::mcp::tool_bridge::build_typed_tool_bridges(pool)
+        .into_iter()
+        .filter(|bridge| {
+            !bridge
+                .mcp_server_name()
+                .is_some_and(|server| crate::mcp::builtin::is_closed(server, &closed))
+        })
+        .filter(|bridge| bridge.is_direct())
+        .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
+        .collect()
+}
 
 #[cfg(test)]
 #[path = "assembly_test.rs"]

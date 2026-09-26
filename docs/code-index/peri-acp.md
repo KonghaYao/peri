@@ -1,6 +1,6 @@
 # peri-acp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-26（System MCP 启动准入 host seam 回归入口；模块职责拆分与 compact/历史恢复修复合并）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-26（builtin MCP 宿主 seam：首个模型请求的冻结 effective name、关闭面与审批/wire 计数；`infer_tool_kind` 走生效名归一；workflow agent 工厂注入 MCP 池。此前：System MCP 启动准入 host seam 回归入口；模块职责拆分与 compact/历史恢复修复合并）
 > 依据：peri-acp/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/peri-acp-protocol.md、源码
 
 ## 架构速览
@@ -62,7 +62,7 @@
 | --- | --- | --- |
 | 事件 DTO 与共享兼容转换 | event/mod.rs + peri-acp-types/src/event_v2/executor_mapping.rs | `AcpEvent` 使用 tag+content serde；`*_event_to_executor` 经 types crate 根路径 re-export，ACP 不复制另一套转换；TurnCompleted 来自 Render 层 |
 | v1→协议映射 | event/mapper.rs | `map_event`（:51）；`MappedEvent`（:22，standard/standard_with_src） |
-| 工具 live/replay 投影 | event/tool_projection.rs | `project_tool_start` / `project_tool_completion`；共享 kind/status/content/safe failure，adapter 保留兼容字段差异 |
+| 工具 live/replay 投影 | event/tool_projection.rs | `project_tool_start` / `project_tool_completion`；共享 kind/status/content/safe failure，adapter 保留兼容字段差异；`infer_tool_kind`（:73）先经 `original_tool_name_of_effective` 归一再用既有分支（`mcp__web__WebFetch` → `ToolKind::Fetch`），**不新增** effective name 字面量分支，未知 / 外部 `mcp__*` 仍为 `Other`（ARC-TOOLS-001） |
 | LLM usage 可选字段与来源 | event/mapper.rs + event/mapper_test.rs | `map_event` 的 `LlmCallEnd` 分支；有 usage 才产生 `UsageUpdate`，tokenStats cap 开启才附加计数 `_meta`；cacheReadTokens 缺省省略、显式零保留，sourceAgentId 与计数独立透传；TUI 消费入口见 peri-tui 索引与 ARC-EVENT-001 |
 | 事件泵 | event/forwarder.rs | `spawn_eventbus_forwarder`（:78，biased select render 优先） |
 | 安全活动投影 | event/activity.rs | `map_agent_activity`（:93，allowlist DTO） |
@@ -128,7 +128,7 @@
 | writer lease | host/lease.rs | `WriterLease`（:20，多读者单 writer） |
 | 装配 | host/assemble.rs | `assemble_server_config`；`build_legacy_frozen_data` 仅发现保存目录的配置与插件输入，缺失快照在执行资源装配前构建 |
 | stage 构建 | host/stage_builder.rs | `build_stage_context`：消费单一 `FrozenSessionData`，派生 frozen language/MetaHarness/date 与 Agent 装配输入，禁止从当轮 config 建第二事实源 |
-| workflow 薄壳 | host/workflow_agent.rs | `create_session_workflow_middleware`（:192，装配经 `WorkflowMiddlewareFactory` 端口） |
+| workflow 薄壳 | host/workflow_agent.rs | `create_session_workflow_middleware`（:192，装配经 `WorkflowMiddlewareFactory` 端口）；生产工厂由 `host/assemble.rs` 经 `default_workflow_middleware_factory_with_pool(mcp_pool_concrete.clone())`（:514）注入**带 MCP 池**的实例，使 workflow agent 工具面与主链一样可见 builtin 一等工具（`mcp__web__*`） |
 | stdio 部署 | host/stdio/ | `run_acp_stdio`（mod.rs:39，`StdioInput` → `assemble_stdio_config` → `run_acp_server_with_sessions`，业务处理走统一宿主）；集成测试 `run_server_integration_test.rs`（initialize → session/new → 通知 wire 链路） |
 
 ### src/agent/（装配面薄壳）
@@ -149,8 +149,10 @@
 - ARC-KEEPGOING-001：空白 prompt（`MessageContent::is_empty()`）＝ keepgoing；ACP executor 短路 + `push_done` 退出 loading
 - ARC-TOOLS-001：`BaseTool::is_direct()` 自声明可见性（工具注册在 Agent/middlewares 层，ACP 只持 `shared_tools` 视图）
 - ARC-SERIAL-001：prompt cache 相关序列化顺序确定，禁止 HashMap 迭代序（`shared_tools` 用 BTreeMap）
-- ARC-MIDDLEWARE-001：中间件链序事实源 `production_blueprint`（peri-agent session 工厂），ACP 不重排
+- ARC-MIDDLEWARE-001：中间件链序事实源 `production_blueprint`（peri-agent session 工厂），ACP 不重排；链内已无 Web / Artifact 槽位
+- ARC-CAPABILITY-CLOSURE-001：builtin 实例关闭（策略键 / `disabled: true` / `PERI_MCP_BUILTIN=off`）必须同时从首个模型请求 tools、deferred 目录、subagent 继承面与 workflow agent 工具列表消失；ACP 侧的落点是 host seam 断言与 workflow agent 工厂注池（`host/assemble.rs`）
 - ARC-SECRET-001：日志/错误/遥测不得泄露 secret（provider api_key 仅在 LlmProvider 内部持有）
 
 - 部署关闭回归：`host/stdio/langfuse_shutdown_test.rs` 的真实尾部事件、waiter 取消、共享会话、MCP/session Incomplete 重试与 HTTP 失败终态；`transport/mpsc_test.rs::test_explicit_close_rejects_both_pending_directions_and_delivers_eof` 证明显式 close 结算双向 pending 并让两端 EOF。
 - System MCP 启动准入回归（B-07 宿主 seam，契约 2/3/4）：`host/mcp_v4_startup_test.rs`（模块 `host::mcp_v4_startup_tests`，`host/mod.rs:52-54` 挂载；真实子进程 rmcp stdio + counting model + 临时 HOME，用例 `#[serial]` 且 `#[cfg(not(windows))]`）——命令 `cargo test -p peri-acp --lib -- host::mcp_v4_startup_tests`。它不覆盖 crate 内 seam（归 `peri-middlewares` 的 `mcp::mcp_v4_seam`）与工具调用策略（归 `mcp_host_policy_contract`）。
+- Builtin MCP 宿主 seam（v4-part-2）：`host/mcp_v4_builtin_test.rs`（模块 `host::mcp_v4_builtin`，`host/mod.rs:56-57` 挂载）断言两个 builtin 实例在**首个模型请求**中暴露三个冻结 effective name、关闭面只收缩该请求面、被提升为 direct 的工具走完整审批链（approve ⇒ wire `tools/call` 恰一次；reject ⇒ 0 次）——命令 `cargo test -p peri-acp --lib -- host::mcp_v4_builtin`；`host/mcp_v4_wire_fixture_test.rs`（模块 `host::mcp_v4_wire_fixture`，`host/mod.rs:68-69` 挂载）是带 wire 日志与 `tools/call` 分支的夹具（迁移前基线与迁移后对照共用同一观察量），命令 `cargo test -p peri-acp --lib -- host::mcp_v4_wire_fixture`。文件名必须保留 `_test.rs` 后缀：该夹具引用业务 crate（`peri_middlewares` / `peri_model`），靠 `scripts/check-layer-imports.sh` 的测试文件豁免才不构成越层 import；模块名经 `#[path]` 保持不变。三者均不覆盖真实外网抓取与真实上传。

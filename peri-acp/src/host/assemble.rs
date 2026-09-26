@@ -507,8 +507,13 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         Arc::new(peri_middlewares::host_ports::PluginManager);
     let settings_hooks: Arc<dyn SettingsHooksPort> =
         Arc::new(peri_middlewares::host_ports::SettingsHooksLoader);
+    // A6 面③：workflow agent 的工具面必须同样保留 Web / Artifact 能力（迁移后为
+    // builtin 实例的 direct bridge `mcp__web__*` 等），因此装配点把 deployment pool
+    // 交给工厂；`bare` / 无 pool 时为 None，行为与无池构造器一致。
     let workflow_middleware_factory =
-        peri_middlewares::assembly::default_workflow_middleware_factory();
+        peri_middlewares::assembly::default_workflow_middleware_factory_with_pool(
+            mcp_pool_concrete.clone(),
+        );
 
     // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
     if !bare && !session_resources {

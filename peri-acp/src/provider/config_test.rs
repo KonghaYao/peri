@@ -1,8 +1,20 @@
 use std::collections::HashMap;
 
-use peri_acp_types::meta_harness::MIDDLEWARE_NAMES;
+use peri_acp_types::meta_harness::{BUILTIN_INSTANCE_POLICY_KEYS, MIDDLEWARE_NAMES};
 
 use super::*;
+
+/// 「已知 MetaHarness 键全集」= 链槽位名 ∪ builtin 实例策略键（v4-part-2 A7 的两表并集）。
+///
+/// 测试用它构造「全关」输入：并集本身就承担「两表都被消费」的断言——若实现只读
+/// 其中一张表，全关输入不再成立（保险丝判定面缺项）。
+fn all_known_middleware_keys() -> Vec<&'static str> {
+    MIDDLEWARE_NAMES
+        .iter()
+        .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
+        .copied()
+        .collect()
+}
 
 fn make_global() -> AppConfig {
     AppConfig {
@@ -461,19 +473,19 @@ fn all_middleware_false_is_kept_but_warns() {
     // [回归保险丝] 全部 middleware=false = 功能全关（疑似配置污染，曾真实发生：
     // 项目级配置被写入全 false 后经 load() 合并透传写回全局配置）。
     // 校验语义与设计 §2.1 一致：warn 不 fail、不改变值——但必须显著告警。
-    let entries: Vec<(&str, bool)> = MIDDLEWARE_NAMES.iter().map(|name| (*name, false)).collect();
+    //
+    // v4-part-2 A7：判定面是「链槽位名 ∪ builtin 实例策略键」两表并集，因此夹具
+    // 也按并集构造（否则 builtin 策略键缺失 ⇒ 保险丝不触发，测试名与事实背离）。
+    let keys = all_known_middleware_keys();
+    let entries: Vec<(&str, bool)> = keys.iter().map(|name| (*name, false)).collect();
     let mut cfg = AppConfig {
         meta_harness: Some(mh(&entries)),
         ..Default::default()
     };
     cfg.validate_meta_harness();
     let map = cfg.meta_harness.expect("全 false 保留（warn 不 fail）");
-    assert_eq!(
-        map.len(),
-        MIDDLEWARE_NAMES.len(),
-        "23 个 middleware 全部保留"
-    );
-    assert!(MIDDLEWARE_NAMES.iter().all(|n| map.get(*n) == Some(&false)));
+    assert_eq!(map.len(), keys.len(), "两表并集个键全部保留");
+    assert!(keys.iter().all(|n| map.get(*n) == Some(&false)));
 }
 
 #[test]
@@ -492,8 +504,8 @@ fn partial_middleware_false_does_not_trigger_fuse() {
 #[test]
 fn all_middleware_false_plus_section_keys_still_triggers_fuse() {
     // 全 false + 段落 key 混合：middleware 面仍是全关，保险丝照常触发
-    let mut entries: Vec<(&str, bool)> =
-        MIDDLEWARE_NAMES.iter().map(|name| (*name, false)).collect();
+    let keys = all_known_middleware_keys();
+    let mut entries: Vec<(&str, bool)> = keys.iter().map(|name| (*name, false)).collect();
     entries.push(("01_intro", true));
     let mut cfg = AppConfig {
         meta_harness: Some(mh(&entries)),
@@ -502,6 +514,36 @@ fn all_middleware_false_plus_section_keys_still_triggers_fuse() {
     cfg.validate_meta_harness();
     let map = cfg.meta_harness.unwrap();
     assert_eq!(map.get("01_intro"), Some(&true));
+}
+
+/// v4-part-2 A7：builtin 实例策略键仍是**已知键**（不得被当未知键 warn + 丢弃）。
+///
+/// 若 `validate_meta_harness` 的 known 集合漏掉 `BUILTIN_INSTANCE_POLICY_KEYS`，
+/// `"WebMiddleware": false` 会静默消失 ⇒ 关闭语义降级为「键有效但无效果」。
+#[test]
+fn builtin_instance_policy_keys_are_known_keys() {
+    let entries: Vec<(&str, bool)> = BUILTIN_INSTANCE_POLICY_KEYS
+        .iter()
+        .map(|k| (*k, false))
+        .collect();
+    let mut cfg = AppConfig {
+        meta_harness: Some(mh(&entries)),
+        ..Default::default()
+    };
+    cfg.validate_meta_harness();
+    let map = cfg.meta_harness.unwrap();
+    assert_eq!(
+        map.len(),
+        BUILTIN_INSTANCE_POLICY_KEYS.len(),
+        "策略键全部保留"
+    );
+    for key in BUILTIN_INSTANCE_POLICY_KEYS {
+        assert_eq!(map.get(*key), Some(&false), "{key} 是已知键，必须保留");
+    }
+    // 两表分离（A7）：策略键不再属于链槽位名表，但仍是合法配置键。
+    for key in BUILTIN_INSTANCE_POLICY_KEYS {
+        assert!(!MIDDLEWARE_NAMES.contains(key), "{key} 不应在链槽位名表内");
+    }
 }
 
 // ─── extract_overrides（与 merge_overrides 严格互逆，分层写回契约）─────────

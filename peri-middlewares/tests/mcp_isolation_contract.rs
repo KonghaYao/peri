@@ -134,19 +134,32 @@ fn effective_name(instance: Instance) -> String {
     format!("mcp__{}__{}", instance.server, instance.tool)
 }
 
-/// 临时 HOME：`run_initialize` 走的是生产加载路径，会读真实的 `~/.peri/settings.json`
+/// builtin 默认层注入的紧急闸门（A2）。`peri-middlewares` 内该常量是 `pub(crate)`，
+/// 集成测试侧按字面量使用；语义 = off 时**不注入**任何 builtin 实例。
+const BUILTIN_INJECTION_ENV: &str = "PERI_MCP_BUILTIN";
+
+/// 夹具 env：临时 `HOME` + `PERI_MCP_BUILTIN=off`。
+///
+/// `run_initialize` 走的是生产加载路径，会读真实的 `~/.peri/settings.json`
 /// 与凭证存储；不隔离就会去启动开发者本机配置的 MCP server（可能带真实凭据）。
-/// 进程级互斥沿用仓库既有 `EnvLockFile`（`Drop` 复原 `HOME` 时仍持锁）。
+/// `PERI_MCP_BUILTIN=off` 停用 builtin 默认层注入：本文件测的是两台 fixture stdio
+/// server 之间的隔离，注入 `web` / `artifact` 会让 pool 变成四台（off 语义本身由本文件
+/// 新增的 `builtin_injection_off_*` 用例断言，见 §5 R28）。
+/// 进程级互斥沿用仓库既有 `EnvLockFile`（`Drop` 复原 env 时仍持锁）。
 struct EnvIsolation {
     _lock: EnvLockFile,
-    previous: Option<OsString>,
+    previous: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl EnvIsolation {
     fn set(home: &Path) -> Self {
         let lock = process_env::lock().expect("process env lock");
-        let previous = std::env::var_os("HOME");
+        let previous = ["HOME", BUILTIN_INJECTION_ENV]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect();
         std::env::set_var("HOME", home);
+        std::env::set_var(BUILTIN_INJECTION_ENV, "off");
         Self {
             _lock: lock,
             previous,
@@ -156,9 +169,11 @@ impl EnvIsolation {
 
 impl Drop for EnvIsolation {
     fn drop(&mut self) {
-        match self.previous.take() {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
+        for (key, value) in self.previous.drain(..) {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
     }
 }
@@ -536,6 +551,74 @@ async fn disabling_one_instance_leaves_the_other_transport_intact() {
         "A 已关闭，它的 wire 不该再收到调用:\n{}",
         fixture.wire(INSTANCE_A)
     );
+
+    fixture.shutdown().await;
+}
+
+/// `PERI_MCP_BUILTIN=off`（A2 的紧急闸门）在夹具侧的可观察断言：默认层**零注入**。
+///
+/// 这是 §5 R28 登记的、本文件唯一新增的断言（既有三条用例只复跑、断言一字不改）。
+/// 观察量是三个同源的公开投影：client 目录、宿主投影（面板 / `mcp/list`）与 deferred
+/// 工具目录——off 时它们都**恰为两台 fixture stdio server**，且都不含注册表里的任一
+/// builtin 实例。off 的运维语义是「没有 Web/Artifact 能力」（middleware 提供面已删除，
+/// 不存在回退到旧实现的路径）：本用例只断言能力面为零，不断言「退回到某个实现」。
+#[tokio::test]
+async fn builtin_injection_off_leaves_pool_with_exactly_the_fixture_servers() {
+    let mut fixture = isolation_fixture().await;
+
+    // 非空守卫：注册表为空会让「不含 builtin 实例」退化成永远成立的空断言。
+    let builtin_instances: Vec<&str> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+        .iter()
+        .map(|instance| instance.name)
+        .collect();
+    assert!(
+        !builtin_instances.is_empty(),
+        "builtin 注册表为空，本用例的「零注入」失去可证伪性"
+    );
+
+    let mut client_names: Vec<String> = fixture
+        .pool
+        .get_all_clients()
+        .iter()
+        .map(|handle| handle.name.clone())
+        .collect();
+    client_names.sort();
+    assert_eq!(
+        client_names,
+        vec![INSTANCE_A.server.to_string(), INSTANCE_B.server.to_string()],
+        "off 时 pool 恰有两台夹具 server"
+    );
+
+    let mut info_names: Vec<String> = fixture
+        .pool
+        .all_server_infos()
+        .iter()
+        .map(|info| info.name.clone())
+        .collect();
+    info_names.sort();
+    assert_eq!(
+        info_names, client_names,
+        "宿主投影（面板 / `mcp/list`）必须与 client 目录同源"
+    );
+
+    let mut bridge_names: Vec<String> = build_tool_bridges(&fixture.pool)
+        .iter()
+        .map(|bridge| bridge.name().to_string())
+        .collect();
+    bridge_names.sort();
+    assert_eq!(
+        bridge_names,
+        vec![effective_name(INSTANCE_A), effective_name(INSTANCE_B)],
+        "off 时 deferred 工具目录里不得出现任何 builtin 工具"
+    );
+
+    for instance in builtin_instances {
+        assert!(
+            !client_names.iter().any(|name| name == instance)
+                && !info_names.iter().any(|name| name == instance),
+            "off 时不得注入 builtin 实例 {instance}（零注入，不是回退到旧实现）"
+        );
+    }
 
     fixture.shutdown().await;
 }

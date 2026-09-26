@@ -79,7 +79,7 @@ pub const SECTION_IDS: &[&str] = &[
     "language",
 ];
 
-/// 装配面 middleware 名清单（`Middleware::name()` 返回值）。
+/// 装配面 **链槽位** middleware 名清单（`Middleware::name()` 返回值）。
 ///
 /// 覆盖全部装配入口：顶层链（`assembly.rs` 21 注册点）、Workflow agent 链、
 /// SubAgent 子链。`false` 条目键必须在此集合内，否则解析期校验
@@ -90,6 +90,12 @@ pub const SECTION_IDS: &[&str] = &[
 /// （持有 `AskUserQuestion` 工具 + `12_ask_user` 段落）。配置键
 /// `"HumanInTheLoopMiddleware": false` 语义随之从"关审批"漂移为"关提问"
 /// （纯破坏性改名，见 `spec/issues/2026-08-15-permission-hitl-split.md`）。
+///
+/// **v4-part-2（A7）：本表只含链槽位名**。`WebMiddleware` /
+/// `ArtifactMiddleware` 已不是链槽位（Web / Artifact 迁移为 builtin MCP 实例，
+/// 链槽位与挂载点删除），它们的 MetaHarness 关闭键改由
+/// [`BUILTIN_INSTANCE_POLICY_KEYS`] 承载——两表并集才是「已知 MetaHarness 键
+/// 全集」（`assembly_test.rs` 与 `provider/config.rs` 都按该并集判定）。
 pub const MIDDLEWARE_NAMES: &[&str] = &[
     "DefaultSystemPromptMiddleware",
     "LangMiddleware",
@@ -104,7 +110,6 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "GitAttributionMiddleware",
     "GitWatchMiddleware",
     "TerminalMiddleware",
-    "WebMiddleware",
     "TodoMiddleware",
     "CronMiddleware",
     "HookMiddleware",
@@ -115,10 +120,27 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "WorkflowMiddleware",
     "PtcMiddleware",
     "ToolSearch",
-    "ArtifactMiddleware",
     "LspMiddleware",
     "GoalMiddleware",
 ];
+
+/// builtin MCP 实例的 MetaHarness 关闭键（A7：与 [`MIDDLEWARE_NAMES`] 分离的第二张表）。
+///
+/// 每个键对应 [`crate::builtin_mcp::BUILTIN_MCP_INSTANCES`] 中一个实例的
+/// `policy_key`（`"WebMiddleware": false` / `"ArtifactMiddleware": false` ⇒ 关闭
+/// 对应 builtin 实例的工具面）。这些实例不再是链槽位，但关闭语义**不得因此
+/// 消失**（`docs/standards/architecture-contracts.md` 的 ARC-CAPABILITY-CLOSURE-001：
+/// 键仍存在却不再生效即能力闭合退化），因此：
+///
+/// - 解析期校验（`peri-acp/src/provider/config.rs::validate_meta_harness`）的
+///   「已知键」集合 = [`SECTION_IDS`] ∪ [`MIDDLEWARE_NAMES`] ∪ 本表 ∪
+///   [`BUILT_IN_SUBAGENTS_KEY`]；
+/// - 「全部 middleware 关闭」保险丝的判定面 = [`MIDDLEWARE_NAMES`] ∪ 本表
+///   （否则「只剩两个 builtin 策略键为 false」不再触发全关告警）。
+///
+/// 与声明表的对齐由本文件的 `mod tests` 直接断言集合相等（常量漂移或声明表
+/// 漂移即红）；`assembly_test.rs` 另断言槽位名与本表交集为空。
+pub const BUILTIN_INSTANCE_POLICY_KEYS: &[&str] = &["WebMiddleware", "ArtifactMiddleware"];
 
 /// 段落 → 持有 middleware 名映射表（设计 §3.1.1 拆分持有契约 3）。
 ///
@@ -160,6 +182,17 @@ pub const SECTION_HOLDER_MIDDLEWARE: &[(&str, &str)] = &[
 /// `DiscoverMCP` 同样不进入共享 registry，无需也无法静态枚举；禁用
 /// McpMiddleware 后当前链无 MCP 工具，本地视图天然不含（每 turn 重建），
 /// 无跨 session 残留路径。
+///
+/// **v4-part-2（A7/IF-D7 B 节）：已删除 `WebFetch` / `WebSearch` / `artifact`
+/// 三个裸名。** 三者已迁移为 builtin MCP 实例（模型面名字 `mcp__web__WebFetch` /
+/// `mcp__web__WebSearch` / `mcp__artifact__artifact`，见
+/// [`crate::builtin_mcp::BUILTIN_MCP_INSTANCES`]），以 MCP bridge 形态经
+/// `chain.collect_tools()` 进入本地视图，**从不**进入共享 registry，因此不在本
+/// 清单内是正确状态。后果（必须显式记录，见 `build_session_tool_view` 文档）：
+/// 若非 middleware 路径（plugin / 外部注册）往共享表写入这三个裸名，本防御面
+/// **不再**剔除它们——这正是「剔除面只覆盖 middleware 静态工具」的应有语义。
+/// builtin 能力的关闭由 builtin 关闭集（`BUILTIN_INSTANCE_POLICY_KEYS`）在装配期
+/// 过滤，与本清单无关。
 pub const MIDDLEWARE_TOOL_NAMES: &[&str] = &[
     // FilesystemMiddleware
     "Read",
@@ -170,9 +203,6 @@ pub const MIDDLEWARE_TOOL_NAMES: &[&str] = &[
     "folder_operations",
     // TerminalMiddleware
     "Bash",
-    // WebMiddleware
-    "WebFetch",
-    "WebSearch",
     // SkillsMiddleware
     "SkillTool",
     "DiscoverSkillsTool",
@@ -189,8 +219,6 @@ pub const MIDDLEWARE_TOOL_NAMES: &[&str] = &[
     "ToolSearch",
     "SearchExtraTools",
     "ExecuteExtraTool",
-    // ArtifactMiddleware
-    "artifact",
     // LspMiddleware
     "LSP",
     // GoalMiddleware
@@ -217,6 +245,59 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for name in MIDDLEWARE_NAMES {
             assert!(seen.insert(*name), "duplicate middleware name: {name}");
+        }
+    }
+
+    /// A7 两表形态：`BUILTIN_INSTANCE_POLICY_KEYS` 必须恰为声明表的 `policy_key`
+    /// 集合（常量漂移、声明表漂移、重复键三种情况都在此变红）。
+    #[test]
+    fn builtin_instance_policy_keys_match_declaration_table() {
+        let declared: std::collections::HashSet<&str> = crate::builtin_mcp::BUILTIN_MCP_INSTANCES
+            .iter()
+            .map(|instance| instance.policy_key)
+            .collect();
+        let constant: std::collections::HashSet<&str> =
+            BUILTIN_INSTANCE_POLICY_KEYS.iter().copied().collect();
+        assert_eq!(
+            constant.len(),
+            BUILTIN_INSTANCE_POLICY_KEYS.len(),
+            "builtin 策略键不得重复: {BUILTIN_INSTANCE_POLICY_KEYS:?}"
+        );
+        assert_eq!(
+            constant, declared,
+            "BUILTIN_INSTANCE_POLICY_KEYS 必须等于声明表的 policy_key 集合"
+        );
+    }
+
+    /// A7 两表语义不重叠：槽位名表与 builtin 策略键表交集为空（并集即「已知键全集」）。
+    ///
+    /// 交集非空意味着同一个键有两条语义（既关槽位又关实例），关闭面无法判定。
+    #[test]
+    fn middleware_names_and_builtin_policy_keys_are_disjoint() {
+        for key in BUILTIN_INSTANCE_POLICY_KEYS {
+            assert!(
+                !MIDDLEWARE_NAMES.contains(key),
+                "builtin 策略键 {key} 不得再出现在链槽位名表（A7 的两表分离）"
+            );
+        }
+    }
+
+    /// A7 关闭语义不降级：两表并集必须覆盖 builtin 实例的关闭键，
+    /// 即 `"WebMiddleware": false` 之类的键仍是「已知键」（解析期不被当未知键丢弃）。
+    #[test]
+    fn known_key_union_covers_builtin_policy_keys() {
+        let union: std::collections::HashSet<&str> = MIDDLEWARE_NAMES
+            .iter()
+            .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
+            .copied()
+            .collect();
+        for instance in crate::builtin_mcp::BUILTIN_MCP_INSTANCES {
+            assert!(
+                union.contains(instance.policy_key),
+                "builtin 实例 {} 的关闭键 {} 必须落在「已知键全集」内",
+                instance.name,
+                instance.policy_key
+            );
         }
     }
 

@@ -45,14 +45,14 @@ Perihelion 是终端 AI 编程助手：用户交付任务，Agent 推进工作�
 | Agent loop、Compact、provider、session | `peri-agent/CLAUDE.md` + architecture/rust |
 | ACP host、stdio、prompt、event、caps | `peri-acp/CLAUDE.md` + architecture/rust |
 | Controller/Runtime、cancel、Langfuse | architecture/rust + 对应 code-index |
-| MCP、plugin、skills、subagent、HITL、工具、LSP | `peri-middlewares/CLAUDE.md` + architecture/rust |
+| MCP（含内置实例）、plugin、skills、subagent、HITL、工具、LSP | `peri-middlewares/CLAUDE.md` + architecture/rust |
 | Workflow | middleware guide + `docs/code-index/peri-workflow.md` |
 | TUI | `peri-tui/CLAUDE.md` + tui/rust |
 | E2E | `e2e/CLAUDE.md` + testing |
 | 文档站 | `peri-cool/CLAUDE.md` + documentation |
 | 历史学习 | `.claude/skills/learn-from-history/SKILL.md` |
 
-简称均指 `docs/standards/`：architecture = `architecture-contracts.md`，其余同名。跨层边界、prompt、事件、工具、中间件顺序或安全变更先读 architecture；Git 操作读 `git.md`，指引维护读 `documentation.md`。
+简称均指 `docs/standards/`：architecture = `architecture-contracts.md`，其余同名。跨层边界、prompt、事件、工具、中间件顺序、能力关闭或安全变更先读 architecture；Git 与文档维护读 `git.md`/`documentation.md`。
 
 设计：`docs/design/README.md`；需求：`spec/issues/`；历史：`spec/global/problems.md`。主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`，退出语义见 Agent 指引；workspace 以 `Cargo.toml` 为准。
 
