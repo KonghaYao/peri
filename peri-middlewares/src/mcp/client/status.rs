@@ -1,7 +1,27 @@
 //! 连接状态写入、面板快照与初始化/运行中通知投影。
 
 use super::{ClientStatus, McpClientHandle, McpClientPool, OAuthStatus, ServerInfo};
+use peri_acp_types::plugin::ConfigSource;
 use std::sync::Arc;
+
+/// 传输形态三分类（IF-D11）：builtin 身份来自运行时标记 `source`，其余保持既有推断。
+///
+/// 三处调用点（`server_infos` / `all_server_infos` 的 handle 行与 config-only 行）共用
+/// 本 helper：`Builtin → "builtin"`；非 builtin 时 `url.is_some() → "http"`，否则
+/// `"stdio"`——非 builtin 分支与引入本 helper 前**逐位一致**
+/// （`tests/mcp_isolation_contract.rs` 的 `"stdio"` 断言不因本改动变化）。
+fn transport_type_of(source: Option<&ConfigSource>, url: Option<&str>) -> &'static str {
+    match source {
+        Some(ConfigSource::Builtin { .. }) => "builtin",
+        _ => {
+            if url.is_some() {
+                "http"
+            } else {
+                "stdio"
+            }
+        }
+    }
+}
 
 /// 供状态与日志使用的 MCP 错误文本清洗：移除 URL query，遮蔽常见凭据键值。
 /// 不应将原始底层错误链直接投影到 UI 或日志。
@@ -103,6 +123,8 @@ impl McpClientPool {
             pool.clients.write().insert(name.to_string(), handle);
             old_status
         };
+        // 新失败代际取代旧证据：等待方立即重读并得到 ConnectionFailed/ToolDiscoveryFailed。
+        pool.system_readiness.clear_evidence(name);
         pool.record_status_change(name, old_status.as_ref());
         peri_agent::metrics::emit(
             "mcp.error",
@@ -149,6 +171,8 @@ impl McpClientPool {
             pool.clients.write().insert(name.to_string(), handle);
             old_status
         };
+        // 需要授权是确定事实，不是「连接中」：本代证据失效并唤醒等待方。
+        pool.system_readiness.clear_evidence(name);
         pool.record_status_change(name, old_status.as_ref());
     }
 
@@ -165,7 +189,7 @@ impl McpClientPool {
                 name: h.name.clone(),
                 version: h.version.clone(),
                 cache_version: h.cache_version.clone(),
-                transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
+                transport_type: transport_type_of(h.source.as_ref(), h.url.as_deref()).to_string(),
                 status: h.status.clone(),
                 status_label: mcp_status_label(&h.status).to_string(),
                 error_summary: mcp_error_summary(&h.status),
@@ -196,7 +220,7 @@ impl McpClientPool {
                 name: h.name.clone(),
                 version: h.version.clone(),
                 cache_version: h.cache_version.clone(),
-                transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
+                transport_type: transport_type_of(h.source.as_ref(), h.url.as_deref()).to_string(),
                 status: h.status.clone(),
                 status_label: mcp_status_label(&h.status).to_string(),
                 error_summary: mcp_error_summary(&h.status),
@@ -217,7 +241,8 @@ impl McpClientPool {
                     version: None,
                     cache_version: None,
                     name: name.clone(),
-                    transport_type: if sc.url.is_some() { "http" } else { "stdio" }.to_string(),
+                    transport_type: transport_type_of(sc.source.as_ref(), sc.url.as_deref())
+                        .to_string(),
                     status: ClientStatus::Uninitialized,
                     status_label: "uninitialized".to_string(),
                     error_summary: None,

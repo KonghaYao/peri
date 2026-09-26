@@ -83,7 +83,7 @@ Skills 不是工具——它们通过 System Prompt 注入行为指令，不走�
 | Direct | 当前 session 中直接可见 | 高频工具及桥接元工具 | session-local 工具视图中 `is_direct() = true` |
 | Deferred | 不直接可见 | 低频或动态注册工具 | session-local 工具视图中 `is_direct() = false`，进入 ToolSearch 索引 |
 
-`SearchExtraTools` 与 `ExecuteExtraTool` 由 `ToolSearchMiddleware` 注册，是 Direct 元工具。`ArtifactTool` 则由独立 `ArtifactMiddleware` 注册，当前 `is_direct() = true`；它只使用 `meta` namespace 分组，并不属于 ToolSearchMiddleware 或 Deferred/ToolSearch 执行路径。
+`SearchExtraTools` 与 `ExecuteExtraTool` 由 `ToolSearchMiddleware` 注册，是 Direct 元工具。`ArtifactTool` 则是 builtin `artifact` MCP 实例（`mcp/builtin/artifact.rs`）的**工具核心**，模型面名字为 `mcp__artifact__artifact`，其 Direct 身份来自注册表 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明（`ArtifactMiddleware` 与 `is_direct()` 覆写已删除）；它只使用 `meta` namespace 分组，并不属于 ToolSearchMiddleware 或 Deferred/ToolSearch 执行路径。
 
 工具集合先由 middleware 收集，再应用 disabled middleware 与 agent allowlist/disallowlist 过滤，形成每 turn 的 session-local 工具视图。ToolSearch 的 direct 能力说明、deferred 索引和最终 LLM tools 都必须从该视图派生，不能从静态名称清单推断。
 

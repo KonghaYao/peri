@@ -1,9 +1,9 @@
 //! 生产装配前的端口还原与父工具投影；所有句柄仍由 assemble 持有。
-use super::AssemblyContext;
+use super::{open_builtin_bridges, AssemblyContext};
 use crate::{
     cron::{CronScheduler, CronSchedulerPortHandle},
-    mcp::{build_tool_bridges, McpClientPool, McpResourceTool},
-    middleware::{FilesystemMiddleware, TerminalMiddleware, WebMiddleware},
+    mcp::{McpClientPool, McpResourceTool},
+    middleware::{FilesystemMiddleware, TerminalMiddleware},
     permission::{AutoClassifier, LlmAutoClassifier},
     tool_search::ToolSearchIndex,
     workflow::WorkflowMiddleware,
@@ -121,6 +121,12 @@ pub(super) fn build_parent_tools(
     // 父工具集（供子 agent 继承）。MetaHarness：父工具按持有 middleware
     // 分支构造——关闭的 middleware 连坐，其工具不进入 parent_tools
     // （设计 §2.5"关闭面 = 全部装配入口"）。
+    //
+    // A6 面②：Web / Artifact 能力迁移后由 builtin 实例提供，且子 agent 链**没有**
+    // ToolSearch（唯一实例化点在主链），因此本面必须走类型化构造：注册表声明的
+    // direct（`mcp__web__*`）在 parent_tools 上仍为 direct，否则子 agent 会净失去
+    // Web 能力（IF-D13 / R3）。关闭实例由 `open_builtin_bridges` 按同一份 frozen
+    // policy 过滤（IF-D10 面②），裸名 Web 工具不再出现在任何装配面。
     let mut parent_tools: Vec<Box<dyn BaseTool>> = Vec::new();
     if !disabled.contains("FilesystemMiddleware") {
         parent_tools.extend(FilesystemMiddleware::build_tools(cwd));
@@ -128,15 +134,9 @@ pub(super) fn build_parent_tools(
     if !disabled.contains("TerminalMiddleware") {
         parent_tools.extend(TerminalMiddleware::build_tools(cwd));
     }
-    if !disabled.contains("WebMiddleware") {
-        parent_tools.extend(WebMiddleware::build_tools());
-    }
     if !disabled.contains("McpMiddleware") {
         if let Some(ref pool) = mcp_pool_concrete {
-            let mcp_tools = build_tool_bridges(pool);
-            for tool in mcp_tools {
-                parent_tools.push(tool);
-            }
+            parent_tools.extend(open_builtin_bridges(pool, disabled));
             if pool.has_resources() {
                 parent_tools.push(Box::new(McpResourceTool::new(
                     Arc::clone(pool),

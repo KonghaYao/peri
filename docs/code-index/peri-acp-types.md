@@ -1,6 +1,6 @@
 # peri-acp-types 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-12（模块职责拆分与 compact/历史恢复修复合并）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-26（新增 `builtin_mcp.rs`：builtin 实例声明表 + 生效名归一 helper；`meta_harness.rs` 拆为 `MIDDLEWARE_NAMES` / `BUILTIN_INSTANCE_POLICY_KEYS` 两张名单。此前：`McpServerConfig` 的 system_mcp 字段与三变体校验；模块职责拆分与 compact/历史恢复修复合并）
 > 依据：peri-acp-types/src/lib.rs、docs/standards/architecture-contracts.md、源码（本 crate 无 CLAUDE.md）
 
 ## 架构速览
@@ -110,10 +110,20 @@
 
 | 功能 | 入口/关键点 |
 | --- | --- |
+| MCP server 配置契约 | `plugin.rs`（`McpServerConfig` :46，`system_mcp` / `system_mcp_tools` / `system_mcp_timeout` 三字段与 camelCase 别名；`validate` :220；`McpServerConfigValidationError` :241；`DEFAULT_SYSTEM_MCP_TIMEOUT_MS` :209 / `MIN` :211 / `MAX` :213）——`Deserialize` 为手写实现（`McpServerConfigWire`），解析期即拒绝非法组合与显式 `null`；消费方（`peri-middlewares/src/mcp/config.rs` 的 direct/global/merged 入口、`plugin/loader.rs` 的 MCP 严格路径、`mcp/transport.rs`）各自复检 `validate`；`None` 与 `Some([])` 必须可区分并无损写回 |
 | 线程/存储 | `thread/types.rs`（`CancelPolicy` :17、`AgentStatus` :56、`ThreadMeta` :126）；`store.rs`（ThreadStore/CompactionLifecycle/MessageFlags） |
 | 冻结数据 | `frozen.rs`（`FrozenData` :26、`ThreadPersistence` :39）——会话创建时冻结，SubAgent 复用 |
 | 运行端口 | `runtime.rs`（`RuntimePort`，`cancel` :85）；`ports.rs`（McpPoolPort/ToolSearchPort/WorkflowMiddlewarePort/SkillsPort） |
 | 其他 | `interaction.rs`（HITL）、`goal.rs`、`tasks.rs`、`cron.rs`、`workflow.rs`、`hooks.rs`、`plugin.rs`、`skills.rs`、`mcp.rs`/`mcp_skills.rs`、`lsp.rs`、`meta_harness.rs`、`peri_caps.rs`（`PeriCaps` re-export lib.rs:57）、`projection.rs`、`permission.rs`、`agents.rs`、`error.rs`（`AgentError`）、`summary.rs`/`event_data.rs`（TUI 消费 DTO） |
+
+### builtin MCP 与 MetaHarness 两张名单（src/builtin_mcp.rs + src/meta_harness.rs）
+
+| 功能 | 入口/关键点 |
+| --- | --- |
+| builtin 实例声明表（纯数据） | `builtin_mcp.rs`：`BuiltinMcpTool`（:23：`original_name` / `effective_name` / `direct` / `prompt_declaration`）、`BuiltinMcpInstance`（:41：`name` / `instance` / `policy_key` / `tools`）、`BUILTIN_MCP_INSTANCES`（:90，wave 1 = `web` / `artifact`）、`BUILTIN_RESERVED_INSTANCE_NAMES`（:109 = 已实现 + 预留 `cron`/`lsp`/`workspace`）、`find`（:113）、`is_reserved_instance_name`（:120） |
+| 生效名归一 helper（IF-D15，唯一入口） | `builtin_mcp.rs::original_tool_name_of_effective`（:129）——按冻结字面量查表，命中返回原始名、未命中（未知 / 外部 `mcp__*`）返回 `None`；**禁止**反拆 `mcp__`、**禁止**在本 crate 复刻 sanitize；消费点见 `peri-middlewares/src/permission`、`subagent`、`hooks/matcher.rs`，`peri-agent` 的 `tools/invocation.rs`、`session/tool_catalog.rs`，`peri-acp` 的 `event/tool_projection.rs`，`peri-tui` 的 `kit/tool_display.rs` / `truncate.rs` |
+| 生效名规则与字面量分工 | 名字**计算**（sanitize + 模板）只在 `peri-middlewares/src/mcp/builtin/mod.rs::effective_tool_name` 与 `mcp/tool_bridge.rs::effective_mcp_tool_name`；本 crate 只声明字面量，两者由 `mcp::builtin::tests` 的逐字断言对齐（漂移即红） |
+| MetaHarness 名单 | `meta_harness.rs`：`MIDDLEWARE_NAMES`（:99，只含链槽位名）、`BUILTIN_INSTANCE_POLICY_KEYS`（:143 = `["WebMiddleware", "ArtifactMiddleware"]`，builtin 实例关闭键）、`MIDDLEWARE_TOOL_NAMES`（:196，已不含 `WebFetch` / `WebSearch` / `artifact` 三个裸名）；「已知键」集合 = `SECTION_IDS ∪ MIDDLEWARE_NAMES ∪ BUILTIN_INSTANCE_POLICY_KEYS ∪ BUILT_IN_SUBAGENTS_KEY`，消费点 `peri-acp/src/provider/config.rs`（ARC-CAPABILITY-CLOSURE-001） |
 
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）
 
@@ -122,3 +132,4 @@
 - ARC-CANCEL-001：cancel 按 (session_id, turn_id, attempt_id) 三元组定位（`CancelRequest` 事实源 identity.rs:262）；幂等判定与终态归 Agent 层；`clear_queue` 默认 false
 - ARC-EVENT-001：事件链路单事实源（Agent emit v2 → `*_event_to_executor` 协议序列化面 → ACP 映射 → TUI）；穷尽匹配、禁止 wildcard 兜底、禁止恢复 v2_tx 双轨直连
 - ARC-FROZEN-001：会话创建时冻结日期/项目指引/skills 摘要/system prompt，会话及 SubAgent 复用，禁止中途重读改变 prompt 前缀
+- ARC-CAPABILITY-CLOSURE-001：本 crate 提供关闭判定的事实源（`BUILTIN_MCP_INSTANCES[].policy_key` 与 `BUILTIN_INSTANCE_POLICY_KEYS`）；关闭必须在同一 frozen policy 下同时关闭四个工具面，且「键仍在、语义已死」的中间态判失败（旧键必须仍被识别为已知键）

@@ -345,3 +345,89 @@ fn test_wrap_by_width_empty_returns_single_empty_line() {
     assert_eq!(wrap_by_width("", 10), vec![""]);
     assert_eq!(wrap_by_width("", 1), vec![""]);
 }
+
+// ── A4 / A8 匹配型归一：builtin 一等工具的 effective name 走同一分支 ────────────
+
+#[test]
+fn tui_web_tools_still_summarize_after_migration() {
+    // 输入摘要：effective name（模型面名字）与迁移前的裸名产出**同一**摘要
+    let input = serde_json::json!({ "query": "rust async" });
+    let effective = summarize_input("mcp__web__WebSearch", &input);
+    assert_eq!(effective, summarize_input("WebSearch", &input));
+    assert_eq!(effective, r#"query: "rust async""#);
+
+    // WebSearch query 仍按 60 字符截断（通用兜底是 120）；「只留 query」也未被通用化
+    let long = serde_json::json!({ "query": "q".repeat(80) });
+    assert_eq!(
+        summarize_input("mcp__web__WebSearch", &long),
+        format!(r#"query: "{}...""#, "q".repeat(60))
+    );
+
+    // WebFetch 输入：无 url 时是专用分支的 "(empty input)"——通用兜底会回显首个 KV
+    let no_url = serde_json::json!({ "unexpected": "v" });
+    assert_eq!(
+        summarize_input("mcp__web__WebFetch", &no_url),
+        "(empty input)"
+    );
+    assert_eq!(
+        summarize_input(
+            "mcp__web__WebFetch",
+            &serde_json::json!({ "url": "https://example.com/a" })
+        ),
+        "url: https://example.com/a"
+    );
+
+    // artifact 输入：file_path 专用分支（通用兜底会带 `path: ` 前缀与 JSON 引号）
+    let file = serde_json::json!({ "file_path": "peri-tui/src/lib.rs" });
+    assert_eq!(
+        summarize_input("mcp__artifact__artifact", &file),
+        "peri-tui/src/lib.rs"
+    );
+
+    // 输出折叠：WebFetch 仍走专用折叠（行数 · 字节数 + 保留正文），不走通用 200 字符截断
+    let output = "line1\nline2\nhttps://example.com/page";
+    let folded = summarize_output("mcp__web__WebFetch", output);
+    assert_eq!(folded, summarize_output("WebFetch", output));
+    assert!(folded.contains("3 lines"), "行数折叠: {folded:?}");
+    assert!(
+        folded.contains("https://example.com/page"),
+        "专用折叠必须保留正文（URL）: {folded:?}"
+    );
+    assert!(folded.contains("bytes"), "字节数折叠: {folded:?}");
+}
+
+#[test]
+fn tui_unknown_mcp_names_fall_back_to_generic() {
+    // 反证：未知 / 外部 `mcp__*` 两次都不命中 ⇒ 走通用路径，与迁移前逐位一致。
+    let input = serde_json::json!({ "file_path": "peri-tui/src/lib.rs" });
+    assert_eq!(
+        summarize_input("mcp__foo__bar", &input),
+        r#"path: "peri-tui/src/lib.rs""#
+    );
+    // 精确匹配：前缀相似的名字不被归一
+    assert_eq!(
+        summarize_input("mcp__web__WebSearchExtra", &input),
+        r#"path: "peri-tui/src/lib.rs""#
+    );
+
+    // 输出侧同样走通用截断（不是 Edit/Write 的 "N lines changed"，也不是 WebFetch 折叠）
+    let output = "a\nb\nc\nd";
+    assert_eq!(summarize_output("mcp__foo__bar", output), "a\nb\nc\nd");
+}
+
+#[test]
+fn tui_has_no_hardcoded_effective_name() {
+    // A4 / A8：名字字面量只在 peri-acp-types 的 builtin 声明表存一份——按名分支
+    // 必须经 IF-D15 归一 helper 进入 builtin 名字空间，不得自建第二张反查表。
+    let src = include_str!("truncate.rs");
+    assert!(
+        src.contains("original_tool_name_of_effective"),
+        "truncate.rs 必须经 IF-D15 归一 helper"
+    );
+    for forbidden in ["mcp__web__", "mcp__artifact__"] {
+        assert!(
+            !src.contains(forbidden),
+            "truncate.rs 不得硬编码 effective name: {forbidden}"
+        );
+    }
+}

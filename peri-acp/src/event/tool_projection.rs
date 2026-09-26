@@ -3,6 +3,7 @@ use agent_client_protocol_schema::v1::{
     Content, ContentBlock, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind,
 };
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use peri_acp_types::error::SafeSubagentFailure;
 use serde_json::Value;
 
@@ -58,7 +59,19 @@ pub fn tool_result_content(output: &str, is_error: bool) -> Vec<ToolCallContent>
     )))]
 }
 
+/// 工具名 → `ToolKind` 投影。
+///
+/// **A4 匹配型归一（IF-D7 B 节）**：builtin 一等工具的模型面名字是 effective name
+/// （如 `mcp__web__WebFetch`），入口先经 [`original_tool_name_of_effective`]
+/// （IF-D15 唯一归一入口）换回原始工具名后走既有分支——因此今天裸名命中的
+/// `Fetch` 分类对迁移后的 `mcp__web__*` 仍然成立，且**不新增** effective name 字面量
+/// 分支（`mcp__artifact__artifact` → `artifact` → 仍落 `Other`）。
+///
+/// 归一未命中（未知 / 外部 `mcp__*`，例如 `mcp__foo__bar`、大小写不匹配的
+/// `mcp__web__fetch`）时保持原样 ⇒ 分类结果与迁移前逐位一致（仍为 `Other`）。
+/// 投影真值（`ToolCall` 载荷上的 name）**不**被归一改写：仍是 effective name。
 fn infer_tool_kind(name: &str) -> ToolKind {
+    let name = original_tool_name_of_effective(name).unwrap_or(name);
     match name {
         "Read" => ToolKind::Read,
         "Write" | "Edit" | "folder_operations" => ToolKind::Edit,

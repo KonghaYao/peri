@@ -564,6 +564,8 @@ struct LoopState {
     has_tool_calls: bool,
     /// before_agent hooks 是否已执行（首次 Receive 后执行一次）
     before_agent_has_run: bool,
+    /// 启动闸门 hook 是否已通过（首批 before_agent 后执行一次，成功才置位）
+    react_start_has_run: bool,
     /// 仅无完整工具调用的截断消耗恢复预算；完整工具结果可继续正常循环。
     consecutive_truncations: usize,
     /// 本轮累计中断次数，不因工具进展重置。
@@ -891,6 +893,21 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     return LoopResult::Interrupted;
                 }
                 return LoopResult::Error(error);
+            }
+
+            // ── 启动闸门 hook（首批输入准备完成后、Compact 前执行一次）──
+            // 只有声明启动依赖的 middleware（如 System MCP 准入）在此阻止 loop 启动：
+            // Err 不得降级，本次 loop 不进入 Compact / Reason / Act；Interrupted 仍按
+            // 中断分类，不算 fatal。既有 before_agent 的软失败降级不受影响（见上）。
+            if !loop_state.react_start_has_run {
+                match middleware_runner::run_before_react_start(&context).await {
+                    Ok(()) => loop_state.react_start_has_run = true,
+                    Err(crate::error::AgentError::Interrupted) => return LoopResult::Interrupted,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "[v2] before_react_start hook failed");
+                        return LoopResult::Error(error);
+                    }
+                }
             }
 
             // ── Compact ──

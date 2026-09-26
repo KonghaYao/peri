@@ -205,3 +205,107 @@ fn test_build_tool_bridges_empty_pool() {
     let bridges = build_tool_bridges(&pool);
     assert!(bridges.is_empty());
 }
+
+// ── IF-D13：builtin 直连性声明（E-03）────────────────────────────────────────
+
+fn connected_handle(name: &str, tools: Vec<Tool>) -> Arc<McpClientHandle> {
+    Arc::new(McpClientHandle {
+        name: name.to_string(),
+        version: None,
+        cache_version: None,
+        peer: None,
+        tools,
+        resources: vec![],
+        status: ClientStatus::Connected,
+        oauth_status: Default::default(),
+        source: None,
+        url: None,
+        skills_capable: false,
+        channel_capable: false,
+    })
+}
+
+/// 类型化构造必须对**声明的** builtin 工具应用 direct；未类型化版本逐位保持 deferred。
+///
+/// 三个断言面：
+/// 1. builtin 声明 direct 的工具 → `is_direct()`（三个冻结 effective name 逐字核对）；
+/// 2. 外部 server 用同名工具（保留名接管的等价输入）**不**获得 direct——判定只按
+///    「已实现 builtin 实例的声明表」，不按工具名反查；
+/// 3. public `build_tool_bridges` 在两种输入下都全 deferred，且与 typed 版本同名单、
+///    同 generation / leases（提取 `build_deferred_tool_bridges` 前的不变量）。
+#[test]
+fn typed_bridges_apply_declared_direct_only_for_builtin_instances() {
+    let pool = McpClientPool::new_empty();
+    pool.clients.write().insert(
+        "web".to_string(),
+        connected_handle(
+            "web",
+            vec![make_tool("WebSearch", None), make_tool("WebFetch", None)],
+        ),
+    );
+    pool.clients.write().insert(
+        "artifact".to_string(),
+        connected_handle("artifact", vec![make_tool("artifact", None)]),
+    );
+    // 外部 server 使用与 builtin 相同的工具名：不得被当作 builtin 一等工具放行。
+    pool.clients.write().insert(
+        "external".to_string(),
+        connected_handle(
+            "external",
+            vec![make_tool("WebSearch", None), make_tool("artifact", None)],
+        ),
+    );
+
+    let typed = build_typed_tool_bridges(&pool);
+    let boxed = build_tool_bridges(&pool);
+    assert_eq!(boxed.len(), typed.len());
+
+    let direct_of = |name: &str| {
+        typed
+            .iter()
+            .find(|bridge| bridge.name() == name)
+            .unwrap_or_else(|| panic!("缺少 bridge: {name}"))
+            .is_direct()
+    };
+    // 1. 声明的 builtin direct（名字与 IF-D5 冻结字面量逐字一致）。
+    assert!(direct_of("mcp__web__WebSearch"));
+    assert!(direct_of("mcp__web__WebFetch"));
+    assert!(direct_of("mcp__artifact__artifact"));
+    // 2. 外部 server 的同名工具保持 deferred。
+    assert!(!direct_of("mcp__external__WebSearch"));
+    assert!(!direct_of("mcp__external__artifact"));
+    // 3. 未类型化版本全 deferred（行为逐位不变）。
+    assert!(boxed.iter().all(|bridge| !bridge.is_direct()));
+    assert!(typed.iter().any(|bridge| bridge.is_direct()));
+}
+
+/// typed 构造（应用声明 direct）与 public 构造（强制 deferred）除 direct 外逐项一致。
+#[test]
+fn typed_and_deferred_builders_differ_only_in_direct_flag() {
+    let pool = McpClientPool::new_empty();
+    let handle = connected_handle("web", vec![make_tool("WebSearch", None)]);
+    pool.clients
+        .write()
+        .insert("web".to_string(), Arc::clone(&handle));
+
+    let mut direct = build_typed_tool_bridges(&pool);
+    let mut deferred = build_deferred_tool_bridges(&pool);
+    assert_eq!(direct.len(), 1);
+    assert_eq!(deferred.len(), 1);
+    assert!(direct[0].is_direct());
+    assert!(!deferred[0].is_direct());
+
+    assert_eq!(direct[0].name(), deferred[0].name());
+    assert_eq!(
+        direct[0].original_tool_name(),
+        deferred[0].original_tool_name()
+    );
+    assert_eq!(direct[0].mcp_server_name(), deferred[0].mcp_server_name());
+    assert_eq!(direct[0].parameters(), deferred[0].parameters());
+    assert_eq!(direct[0].visible_to_model(), deferred[0].visible_to_model());
+    // generation 与 binding leases 传递不得因提取 deferred 版本而丢失。
+    for bridge in direct.iter_mut().chain(deferred.iter_mut()) {
+        assert_eq!(bridge.server_generation, pool.handle_generation(&handle));
+        assert!(bridge.binding_leases.is_some());
+    }
+}

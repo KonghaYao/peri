@@ -3,6 +3,8 @@ pub mod apps;
 pub mod apps_invoke;
 pub mod apps_relay;
 pub mod auth_store;
+// builtin MCP 行为层（注册表解析 / 默认层 overlay / 关闭集 / 直连性声明）。
+pub(crate) mod builtin;
 pub mod callback_server;
 pub mod channel_handler;
 pub mod client;
@@ -20,6 +22,7 @@ pub mod reconnect;
 pub mod resource_cache;
 pub mod resource_tool;
 pub(crate) mod skill_discovery;
+pub(crate) mod system_tools;
 pub mod task_scope;
 pub mod tool_bridge;
 pub mod transport;
@@ -54,3 +57,28 @@ pub use task_scope::{
     TaskAdmissionError,
 };
 pub use tool_bridge::{build_tool_bridges, McpToolBridge, ToolCallError};
+
+// D-02：crate 内 seam 测试（主 plan §6 W5）。模块名参与 `cargo test` 过滤，
+// 故不沿用 `mod tests`（过滤 `mcp::mcp_v4_seam` 必须命中本模块）。
+#[cfg(test)]
+#[path = "mcp_v4_seam_test.rs"]
+mod mcp_v4_seam_tests;
+
+// Builtin MCP spike：同进程内存 transport（真实 rmcp server 对端）的可行性验证，
+// 只做实验、不接生产；模块名参与 `cargo test` 过滤（`builtin_spike`）。
+#[cfg(test)]
+#[path = "builtin_spike_test.rs"]
+mod builtin_spike_tests;
+
+// builtin 默认配置层（loader step 6.5 overlay）的 crate 内验收（owner：I-02）。
+// 两个 builtin 测试模块由 I-02 在 W3 一次挂载，避免 builtin_apply / builtin_runtime
+// 出现两个 owner。
+#[cfg(test)]
+#[path = "builtin_apply_test.rs"]
+mod builtin_apply_tests;
+
+// builtin 运行时与关闭面的 crate 内验收（owner：V-01，W4 扩展为启动路径 / 审批 /
+// wire 计数 / 无 orphan / 大 payload；W3 由 I-02 建挂载点并落关闭面断言）。
+#[cfg(test)]
+#[path = "builtin_runtime_test.rs"]
+mod builtin_runtime_tests;

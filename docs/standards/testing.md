@@ -26,6 +26,20 @@ src/foo/mod_test.rs         # 单元测试（≥30行）
 src/foo/bar.rs              # 子模块（末尾可含 #[cfg(test)] mod tests）
 ```
 
+### 测试模块挂载与命名
+
+生产模块内的 `_test.rs` 不会被 cargo 自动发现：必须在实现文件里挂载，否则 `cargo test` 以 0 tests 退出（假绿）。
+
+```rust
+#[cfg(test)]
+#[path = "foo_test.rs"]
+mod tests;        // 或 mod foo_tests;（见下）
+```
+
+模块名参与 `cargo test -- <过滤词>` 匹配，因此当某个测试文件是 canonical 命令的命中目标时，模块名必须让该过滤词成立：过滤 `mcp::mcp_v4_seam` 的文件要挂成 `mod mcp_v4_seam_tests;`，沿用 `mod tests;` 会让过滤词命中不到（`cargo test` 仍以 0 tests 退出 0）。
+
+过滤词同时必须是**精确**模块路径：过宽前缀会连带命中同目录的其他测试模块（例：`mcp::builtin` 会一并命中 `mcp::builtin_spike_tests`、`mcp::builtin_apply_tests`、`mcp::builtin_runtime_tests` 与 `mcp::builtin::tests`），使命令覆盖范围与意图不符；需要单个模块时写完整路径（如 `mcp::builtin::tests`）。
+
 ---
 
 ## 二、测试优先级分层
@@ -294,6 +308,12 @@ cargo test -p peri-theme
 
 # 单测过滤
 cargo test -p <crate> --lib -- <test_name>
+
+# 集成测试目标（crate 根 tests/，只访问 crate 的 pub API）
+cargo test -p <crate> --test <target>
+
+# 改进程级环境变量或起真实子进程/真实 wire 的目标：目标内不保证互斥，需串行
+cargo test -p <crate> --test <target> -- --test-threads=1
 
 # pre-commit（不含测试）
 lefthook run pre-commit    # fmt + check + clippy + typos

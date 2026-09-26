@@ -44,7 +44,7 @@ pub enum ChainSlot {
     AtMention,
     /// Image（@image 附件转 ContentBlock::Image）
     Image,
-    // ── 第二组：文件/终端/Web 工具提供器 ──
+    // ── 第二组：文件/终端工具提供器 ──
     /// Filesystem（文件系统工具）
     Filesystem,
     /// GitAttribution（git 归属注入）
@@ -53,8 +53,6 @@ pub enum ChainSlot {
     GitWatch,
     /// Terminal（终端命令工具）
     Terminal,
-    /// Web（Web 工具）
-    Web,
     // ── 第三组：Todo / Cron ──
     /// Todo（todo 工具）
     Todo,
@@ -79,8 +77,6 @@ pub enum ChainSlot {
     Ptc,
     /// ToolSearch（deferred 工具搜索/执行代理）
     ToolSearch,
-    /// Artifact（公开 Artifact 上传工具）
-    Artifact,
     // ── 第七组：LSP / Goal（辅助诊断，条件注册；Goal 在链最后） ──
     /// Lsp（LSP 诊断工具，servers 非空时注册）
     Lsp,
@@ -104,12 +100,11 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         ChainSlot::SkillPreload,
         ChainSlot::AtMention,
         ChainSlot::Image,
-        // 第二组：文件/终端/Web 工具提供器
+        // 第二组：文件/终端工具提供器
         ChainSlot::Filesystem,
         ChainSlot::GitAttribution,
         ChainSlot::GitWatch,
         ChainSlot::Terminal,
-        ChainSlot::Web,
         // 第三组：Todo / Cron
         ChainSlot::Todo,
         ChainSlot::Cron,
@@ -124,7 +119,6 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         ChainSlot::Workflow,
         ChainSlot::Ptc,
         ChainSlot::ToolSearch,
-        ChainSlot::Artifact,
         // 第七组：LSP / Goal
         ChainSlot::Lsp,
         ChainSlot::Goal,

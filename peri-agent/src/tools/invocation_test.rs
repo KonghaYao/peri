@@ -243,3 +243,110 @@ fn resolver_preserves_shell_and_task_alias_consumers() {
         assert_eq!(invocation.raw_call.name, requested);
     }
 }
+
+// ── A4 ⑤（IF-D6 匹配型归一）：参数别名对 effective name 生效 ──────────────────
+
+/// 声明表里的 effective name（字面量只在 `peri_acp_types::builtin_mcp` 声明一份，
+/// 由该 crate 的 `builtin_mcp_test.rs` 锁定；本文件不复写，以满足「消费点不得硬编码
+/// effective name 字面量」的可 grep 事实）。
+fn effective_name(instance: &str, original_name: &str) -> &'static str {
+    peri_acp_types::builtin_mcp::find(instance)
+        .and_then(|declared| {
+            declared
+                .tools
+                .iter()
+                .find(|tool| tool.original_name == original_name)
+        })
+        .map(|tool| tool.effective_name)
+        .expect("builtin 声明表应声明该 (实例, 原始工具名)")
+}
+
+/// 需要参数别名的 builtin 工具：它的裸名与 effective name 都必须命中同一别名行。
+///
+/// 断言集合直接从声明表派生（IF-G5 第 1 条）：当前只有 `WebSearch` 需要别名，
+/// 因此实际覆盖 {`WebSearch`, `mcp__web__WebSearch`}；将来声明表新增带别名的
+/// 工具时，此处需一并核对（新增工具若无别名行，`normalize_params` 应为恒等）。
+#[test]
+fn builtin_effective_names_hit_parameter_aliases() {
+    let effective = effective_name("web", "WebSearch");
+    for name in ["WebSearch", effective] {
+        let tool = SchemaToolStub {
+            name,
+            properties: vec!["query"],
+        };
+        let output = normalize_params(json!({"search_term": "Rust 2024"}), Some(&tool));
+        assert_eq!(
+            output.get("query"),
+            Some(&json!("Rust 2024")),
+            "{name} 必须经归一命中 search_term → query 别名"
+        );
+        assert!(output.get("search_term").is_none(), "{name}: 别名已被移除");
+    }
+}
+
+/// 反证：归一不改变非声明表工具名的别名行为，也不新增任何 effective name 行。
+#[test]
+fn parameter_alias_matching_is_unchanged_for_other_names() {
+    // 未知 / 外部 mcp__* 不命中任何别名行（输入原样透传）
+    for name in ["mcp__some__tool", "mcp__filesystem__read_file"] {
+        let tool = SchemaToolStub {
+            name,
+            properties: vec!["query"],
+        };
+        let input = json!({"search_term": "Rust"});
+        assert_eq!(
+            normalize_params(input.clone(), Some(&tool)),
+            input,
+            "{name} 不命中别名行，输入必须原样"
+        );
+    }
+    // 大小写不匹配的 effective name 同样不命中：归一表精确匹配，且它与表内工具名
+    // （即使大小写不敏感）也不相等 ⇒ 不可能命中任何别名行。
+    let lowered = effective_name("web", "WebSearch").to_lowercase();
+    assert!(
+        original_tool_name_of_effective(&lowered).is_none(),
+        "归一表是精确匹配：{lowered} 不得命中"
+    );
+    assert!(
+        !lowered.eq_ignore_ascii_case("WebSearch"),
+        "{lowered} 也不是别名行的工具名"
+    );
+    // 声明表内的其他两个工具（WebFetch / artifact）本来就没有别名行：归一后仍是恒等
+    for (instance, original) in [("web", "WebFetch"), ("artifact", "artifact")] {
+        let effective = effective_name(instance, original);
+        let tool = SchemaToolStub {
+            name: effective,
+            properties: vec!["url"],
+        };
+        let input = json!({"search_term": "Rust"});
+        assert_eq!(
+            normalize_params(input.clone(), Some(&tool)),
+            input,
+            "{effective} 无别名行，输入必须原样"
+        );
+    }
+}
+
+/// 别名归一只作用于 **input 字段**：工具名解析面不变（模型发出的名字仍是 effective name）。
+#[test]
+fn parameter_alias_does_not_change_tool_resolution() {
+    let effective = effective_name("web", "WebSearch");
+    let target: Arc<dyn BaseTool> = Arc::new(NamedTool {
+        name: effective,
+        aliases: &[],
+    });
+    let tools = BTreeMap::from([(effective.to_string(), Arc::clone(&target))]);
+    let call = ToolCall::new("call", effective, json!({"search_term": "Rust"}));
+    let invocation = DirectToolInvocationResolver.resolve(&call, &tools).unwrap();
+    assert!(Arc::ptr_eq(&invocation.target, &target));
+    assert_eq!(
+        invocation.raw_call.name, effective,
+        "raw name 仍是 effective name"
+    );
+    assert_eq!(invocation.policy_call.name, effective);
+    // 解析候选数不因别名表增加：裸名 `WebSearch` 未被注册时不可解析
+    assert!(matches!(
+        DirectToolInvocationResolver.resolve(&ToolCall::new("c2", "WebSearch", json!({})), &tools),
+        Err(AgentError::ToolNotFound(name)) if name == "WebSearch"
+    ));
+}

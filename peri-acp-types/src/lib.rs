@@ -29,9 +29,11 @@
 //! - `workflow` — workflow 协议契约（AgentRunParams/ProgressEvent/AgentExecutor/...）
 //! - `hooks` — hook 契约（HookEvent/HookType/RegisteredHook/...）
 //! - `plugin` — 插件契约（PluginManifest/LoadedPlugin/PluginLoadResult/PluginManagerPort）
+//! - `builtin_mcp` — builtin MCP 注册表纯数据（实例 / 原始工具名 / effective name / direct / 声明模板）
 //! - `ports` — 装配注入端口（McpPoolPort/ToolSearchPort/WorkflowMiddlewarePort/SkillsPort）
 
 pub mod agents;
+pub mod builtin_mcp;
 pub mod command;
 // 注册表顶层 re-export（Phase 2 消费方路径 `peri_acp_types::command_registry::*`，
 // 挂载本体在 command.rs 契约子模块区，避免双份模块实例）。

@@ -1,3 +1,7 @@
+use peri_acp_types::builtin_mcp::{
+    is_reserved_instance_name, original_tool_name_of_effective, BuiltinMcpTool,
+    BUILTIN_MCP_INSTANCES,
+};
 use peri_agent::agent::state::AgentState;
 
 use super::*;
@@ -516,5 +520,207 @@ fn hitl_section_declaration_shape() {
     assert!(
         !file_content.contains("- `Bash`"),
         "10_hitl.md 不应再硬编码 sensitive 列表（列表由代码事实生成）"
+    );
+}
+
+// ─── A4 生效名归一（IF-D6 判定型 ①② / IF-D15）─────────────────────────────
+
+/// 声明表里的全部工具（`(实例, 工具)` 的单一事实源）。
+fn declared_builtin_tools() -> Vec<&'static BuiltinMcpTool> {
+    BUILTIN_MCP_INSTANCES
+        .iter()
+        .flat_map(|instance| instance.tools.iter())
+        .collect()
+}
+
+/// IF-D6 判定型归一的等价性：对声明表逐项，effective name 的判定**等于**原始名。
+#[test]
+fn builtin_effective_names_match_original_name_policy() {
+    let tools = declared_builtin_tools();
+    assert_eq!(
+        tools.len(),
+        3,
+        "wave 1 声明表应恰好三行（web×2 + artifact×1）"
+    );
+
+    for tool in tools {
+        let (effective, original) = (tool.effective_name, tool.original_name);
+        assert_eq!(
+            original_tool_name_of_effective(effective),
+            Some(original),
+            "`{effective}` 应命中归一表并返回原始名 `{original}`"
+        );
+        assert_eq!(
+            default_requires_approval(effective),
+            default_requires_approval(original),
+            "`{effective}` 的审批判定必须等于原始名 `{original}`（IF-D6）"
+        );
+        assert_eq!(
+            is_edit_tool(effective),
+            is_edit_tool(original),
+            "`{effective}` 的编辑工具判定必须等于原始名 `{original}`（IF-D6）"
+        );
+    }
+}
+
+/// wave 1 冻结判定结果表（IF-G2）：逐项锁定两名称形态的判定值。
+///
+/// 显式记录的决策（不得靠读者推断）：`mcp__artifact__artifact` 由迁移前的
+/// 「`mcp__` 前缀 ⇒ 需审批」变为「按原始名 `artifact` ⇒ **不需审批**」——这是
+/// 「与迁移前 `artifact` 工具行为等价」的结果，不是新放行；收紧为需审批属独立
+/// 策略变更（登记为可选分支 O1，缺省不启用）。
+#[test]
+fn wave1_frozen_effective_name_policy() {
+    // 原始名侧（迁移前行为）
+    assert!(default_requires_approval("WebSearch"));
+    assert!(default_requires_approval("WebFetch"));
+    assert!(!default_requires_approval("artifact"));
+
+    // effective name 侧（迁移后，必须与原始名相等）
+    assert!(default_requires_approval("mcp__web__WebSearch"));
+    assert!(default_requires_approval("mcp__web__WebFetch"));
+    assert!(
+        !default_requires_approval("mcp__artifact__artifact"),
+        "artifact 按原始名判定 ⇒ 不审批（IF-G2 决策 1，已显式记录）"
+    );
+
+    for name in [
+        "WebSearch",
+        "WebFetch",
+        "artifact",
+        "mcp__web__WebSearch",
+        "mcp__web__WebFetch",
+        "mcp__artifact__artifact",
+    ] {
+        assert!(!is_edit_tool(name), "`{name}` 不是编辑工具（IF-G2）");
+    }
+}
+
+/// 反证（IF-D6 冻结约束 3）：未知 / 外部 `mcp__*` 的保守语义分毫不变。
+#[test]
+fn unknown_mcp_prefix_remains_conservative() {
+    for unknown in [
+        "mcp__filesystem__read_file",
+        "mcp__filesystem__write_file",
+        "mcp__github__create_issue",
+        "mcp__database__query",
+        "mcp__unknown__anything",
+        "mcp__a__b",
+        "mcp__x__y__z",
+    ] {
+        assert_eq!(
+            original_tool_name_of_effective(unknown),
+            None,
+            "`{unknown}` 不在归一表内（未知 / 外部 MCP 工具）"
+        );
+        assert!(
+            default_requires_approval(unknown),
+            "未知 `mcp__*` 必须保守敏感：{unknown}"
+        );
+    }
+    for not_mcp in ["mcp_", "mcp", "mcp_read_resource"] {
+        assert!(!default_requires_approval(not_mcp), "{not_mcp} 不应敏感");
+    }
+
+    // 两条**理由不同**的 true 必须各自成立（IF-G2 反证）：`mcp__web__fetch` 与
+    // `mcp__web__WebFetch` 不是同一个名字——前者未命中归一表，靠 `mcp__` 前缀
+    // （未知 MCP 工具）判定；后者命中归一表，靠原始名 `WebFetch` 判定。
+    assert_eq!(original_tool_name_of_effective("mcp__web__fetch"), None);
+    assert!(default_requires_approval("mcp__web__fetch"));
+    assert_eq!(
+        original_tool_name_of_effective("mcp__web__WebFetch"),
+        Some("WebFetch")
+    );
+    assert!(default_requires_approval("mcp__web__WebFetch"));
+}
+
+/// 保留名反例（A3 / IF-D6 冻结约束 4）：外部 server 若用保留名接管，绝不能靠
+/// 「按名字反查」静默继承 builtin 一等工具的判定（即移除 `mcp__*` 审批门）。
+///
+/// 该风险的落点是**加载期 typed error**（`McpConfigError::ReservedBuiltinInstanceName`，
+/// 断言在配置侧 `mcp::builtin_apply`，owner I-02）。本测试锁定 permission 侧可证的
+/// 两项前提：① 归一表命中的实例名全部是保留名（加载器有据可拦）；
+/// ② 预留但未实现的实例名不进归一表 ⇒ 其 effective name 仍是未知 MCP 工具，保守敏感。
+#[test]
+fn builtin_reserved_name_is_not_parity_hijackable() {
+    for instance in BUILTIN_MCP_INSTANCES {
+        assert!(
+            is_reserved_instance_name(instance.name),
+            "归一表只允许以保留实例名为键（保留名由加载期 typed error 保护，A3）：{}",
+            instance.name
+        );
+    }
+    for reserved in ["web", "artifact", "cron", "lsp", "workspace"] {
+        assert!(
+            is_reserved_instance_name(reserved),
+            "{reserved} 应为保留实例名"
+        );
+    }
+
+    // 预留但未实现（无工具声明）⇒ 不参与归一 ⇒ 名字仍是未知 MCP 工具，敏感
+    assert_eq!(
+        original_tool_name_of_effective("mcp__workspace__Read"),
+        None
+    );
+    assert!(default_requires_approval("mcp__workspace__Read"));
+
+    // 「外部 server 名 `artifact` + 工具 `artifact`」的判定跟原始名走（另一结果
+    // = 加载期 typed error，见配置侧断言）；两者都必须成立其一，不得是第三种。
+    assert_eq!(
+        default_requires_approval("mcp__artifact__artifact"),
+        default_requires_approval("artifact")
+    );
+}
+
+/// A19 / IF-G3：已迁移条目的 `name` 为 effective name；`mcp__` 前缀条目的
+/// description 不再宣称「所有 `mcp__*` 一律敏感」（对 builtin 一等工具已不充分）。
+#[test]
+fn sensitive_entries_use_effective_names_and_parity_description() {
+    let entries = sensitive_tool_entries();
+    let names: Vec<&str> = entries.iter().map(|entry| entry.name).collect();
+
+    // 迁移前的裸名不再作为条目名出现（模型面看到的名字就是 effective name）
+    assert!(
+        !names.contains(&TOOL_WEBFETCH),
+        "条目名不应再是裸名 `{TOOL_WEBFETCH}`（该名字迁移后不存在）"
+    );
+    assert!(
+        !names.contains(&TOOL_WEBSEARCH),
+        "条目名不应再是裸名 `{TOOL_WEBSEARCH}`（该名字迁移后不存在）"
+    );
+
+    // 两个 Web 工具以 effective name 精确条目出现
+    let web = peri_acp_types::builtin_mcp::find("web").expect("web 实例应有声明");
+    for tool in web.tools {
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == tool.effective_name && !entry.prefix_match),
+            "`{}` 应以 effective name 的精确条目出现",
+            tool.effective_name
+        );
+    }
+
+    // artifact 不在敏感清单（IF-G2 决策 1）——条目表与判定同源
+    let artifact = peri_acp_types::builtin_mcp::find("artifact").expect("artifact 实例应有声明");
+    for tool in artifact.tools {
+        assert!(
+            !names.contains(&tool.effective_name),
+            "`{}` 不应在敏感清单（artifact 不审批）",
+            tool.effective_name
+        );
+    }
+
+    // 前缀条目条文与归一后的判定一致
+    let prefix_entry = entries
+        .iter()
+        .find(|entry| entry.prefix_match && entry.name == "mcp__")
+        .expect("`mcp__` 前缀条目应存在");
+    assert!(
+        prefix_entry
+            .description
+            .contains("follow their original tool's rule"),
+        "`mcp__` 条目条文必须说明 builtin 一等工具按原始名规则，实际：{}",
+        prefix_entry.description
     );
 }

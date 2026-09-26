@@ -1,3 +1,4 @@
+use peri_acp_types::builtin_mcp::{original_tool_name_of_effective, BUILTIN_MCP_INSTANCES};
 use peri_agent::{
     agent::{
         react::{ReactLLM, Reasoning, StreamingContext},
@@ -497,6 +498,59 @@ fn test_capability_whitelist_write_disallowed_is_readonly() {
 fn test_capability_whitelist_mcp_prefix_is_writes() {
     let cap = capability_from_yaml("name: a\ndescription: d\ntools: [Read, mcp__files]\n");
     assert!(cap.can_mutate, "mcp__* 无法证明只读，应保守标 writes");
+}
+
+// ─── A4 生效名归一（IF-D6 判定型 ③ / IF-D15）─────────────────────────────
+
+/// IF-D6 ③：builtin 一等工具的 effective name 按原始名判定（判定相等）。
+#[test]
+fn mutation_tool_matches_original_name_policy_for_builtin_names() {
+    let mut declared = 0;
+    for instance in BUILTIN_MCP_INSTANCES {
+        for tool in instance.tools {
+            declared += 1;
+            assert_eq!(
+                is_mutation_tool(tool.effective_name),
+                is_mutation_tool(tool.original_name),
+                "`{}` 的 mutation 判定必须等于原始名 `{}`（IF-D6 ③）",
+                tool.effective_name,
+                tool.original_name
+            );
+        }
+    }
+    assert_eq!(declared, 3, "wave 1 声明表应恰好三行（web×2 + artifact×1）");
+
+    // wave 1 冻结结果（IF-G2 第 2 条）：两个 Web 工具不再因 `mcp__` 前缀被算 mutation；
+    // artifact 迁移前就是裸名且不在 mutation 集合内，判定不变。
+    assert!(!is_mutation_tool("mcp__web__WebSearch"));
+    assert!(!is_mutation_tool("mcp__web__WebFetch"));
+    assert!(!is_mutation_tool("mcp__artifact__artifact"));
+}
+
+/// 反证（IF-D6 冻结约束 3）：未知 / 外部 `mcp__*` 仍保守算 mutation。
+#[test]
+fn unknown_mcp_prefix_still_mutates() {
+    assert!(is_mutation_tool("mcp__filesystem__write_file"));
+    assert!(is_mutation_tool("mcp__anything"));
+    // 与 effective name 仅差大小写 ⇒ 未命中归一表 ⇒ 走既有的 `mcp__` 前缀保守路径
+    assert_eq!(original_tool_name_of_effective("mcp__web__fetch"), None);
+    assert!(is_mutation_tool("mcp__web__fetch"));
+    // 非 builtin 名字的判定逐位不变
+    assert!(is_mutation_tool("Bash"));
+    assert!(!is_mutation_tool("Read"));
+}
+
+/// 归一的可见后果（IF-G2 第 2 条）：白名单只含 builtin Web 工具的 agent 由
+/// `writes` 改为 `readonly`（迁移前 `mcp__*` 前缀一律算写能力）。
+#[test]
+fn builtin_web_tool_whitelist_is_readonly() {
+    let cap = capability_from_yaml(
+        "name: a\ndescription: d\ntools: [mcp__web__WebFetch, mcp__web__WebSearch]\n",
+    );
+    assert!(
+        !cap.can_mutate,
+        "只含 builtin Web 工具（均非写能力）的 agent 应标 readonly"
+    );
 }
 
 // ─── catalog 同源一致性（波 4 演进 C3，设计 §3.5.1 步骤 2）─────────────────

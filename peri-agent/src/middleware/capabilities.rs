@@ -6,8 +6,9 @@
 use super::state::MiddlewareState;
 use crate::{
     agent::stages::SharedToolMap,
+    error::AgentResult,
     messages::{BaseMessage, MessageId},
-    session::{MessageQueue, QueuedMessage},
+    session::{tool_catalog::StartupToolUpdate, MessageQueue, QueuedMessage},
 };
 
 /// 只读消息与 turn 元数据，不暴露队列或工具目录。
@@ -122,6 +123,37 @@ impl<T: MiddlewareState + ?Sized> BackgroundActivity for T {
 /// }
 /// ```
 pub trait BeforeModelState: StateView + MessageAppend + QueueState {}
+
+/// 启动闸门（首批输入准备完成后、Compact 前）真实支持的能力：只暂存与取出本次
+/// 准入的候选工具更新，不暴露 transcript、队列或目录写权限。
+///
+/// 候选经本状态传递，失败或取消时由调用方直接丢弃 state，不需要 middleware
+/// 内部的 commit/discard 状态协议。
+///
+/// ```compile_fail
+/// use peri_agent::{messages::BaseMessage, middleware::capabilities::StartupState};
+/// fn cannot_append_history(state: &mut dyn StartupState, message: BaseMessage) {
+///     state.add_message(message);
+/// }
+/// ```
+/// ```compile_fail
+/// use peri_agent::middleware::capabilities::StartupState;
+/// fn cannot_drain_queue(state: &mut dyn StartupState) {
+///     state.v2_queue().drain_all();
+/// }
+/// ```
+pub trait StartupState: Send + Sync {
+    /// 链序事实：记录当前正在执行闸门的 middleware，用于候选归属与安全错误文案。
+    fn set_active_middleware(&mut self, middleware_name: &str);
+
+    /// 暂存候选：整批静态工具（required 已提升 direct）与其必需工具身份。
+    ///
+    /// 一次准入只允许一个候选；重复暂存返回 Err 而不是静默覆盖。
+    fn stage_startup_tools(&mut self, update: StartupToolUpdate) -> AgentResult<()>;
+
+    /// 取出候选；未暂存返回 `None`。
+    fn take_startup_tools(&mut self) -> Option<StartupToolUpdate>;
+}
 
 impl<T: MiddlewareState + ?Sized> StateView for T {
     fn cwd(&self) -> &str {

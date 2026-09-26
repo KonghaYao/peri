@@ -15,6 +15,7 @@ use peri_agent::{
     },
 };
 
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use peri_agent::tools::RUN_PTC_CODE_TOOL_NAME;
 
 use crate::tool_search::core_tools::{
@@ -35,6 +36,12 @@ pub use shared_mode::{PermissionMode, SharedPermissionMode};
 
 /// 默认敏感工具判断规则
 ///
+/// **生效名归一（IF-D6 / A4 判定型）**：builtin 一等工具的模型面名字是 effective name
+/// （`mcp__<实例>__<原始名>`），其判定必须**等于**同名原始工具的判定。命中声明表
+/// （[`original_tool_name_of_effective`]，IF-D15 唯一归一入口）则改用原始名走下面的
+/// 分支；未命中（未知 / 外部 `mcp__*`）沿用既有的 `mcp__` 前缀保守语义，分毫不变。
+/// 名字字面量只在 `peri_acp_types::builtin_mcp` 声明一份，本模块不得复制。
+///
 /// - `bash`：所有 bash 命令
 /// - `Write`：文件写入
 /// - `Edit`：文件编辑
@@ -42,6 +49,14 @@ pub use shared_mode::{PermissionMode, SharedPermissionMode};
 /// - `Agent`：子 Agent 委派（子 Agent 不含 HITL，可传递绕过审批）
 /// - `cron_register`：定时任务注册（可定时触发任意 prompt，等价于代理执行权）
 pub fn default_requires_approval(tool_name: &str) -> bool {
+    match original_tool_name_of_effective(tool_name) {
+        Some(original_name) => default_requires_approval_without_builtin(original_name),
+        None => default_requires_approval_without_builtin(tool_name),
+    }
+}
+
+/// [`default_requires_approval`] 的分支本体（自迁移前实现逐字位移，含 `mcp__` 前缀行）。
+fn default_requires_approval_without_builtin(tool_name: &str) -> bool {
     tool_name == TOOL_BASH
         || tool_name == TOOL_FOLDER_OPS
         || tool_name == TOOL_AGENT
@@ -62,7 +77,16 @@ pub fn default_requires_approval(tool_name: &str) -> bool {
 ///
 /// `Write`、`Edit`、`folder_operations` 归类为编辑工具，在 AcceptEdits 模式下自动放行。
 /// `Bash`、`Agent`、`delete_*`、`rm_*` 不属于编辑工具，仍需审批。
+/// builtin 一等工具同样经 IF-D6 归一后按原始名判定（与 [`default_requires_approval`] 同规则）。
 pub fn is_edit_tool(tool_name: &str) -> bool {
+    match original_tool_name_of_effective(tool_name) {
+        Some(original_name) => is_edit_tool_without_builtin(original_name),
+        None => is_edit_tool_without_builtin(tool_name),
+    }
+}
+
+/// [`is_edit_tool`] 的分支本体（自迁移前实现逐字位移）。
+fn is_edit_tool_without_builtin(tool_name: &str) -> bool {
     tool_name == TOOL_WRITE || tool_name == TOOL_EDIT || tool_name == TOOL_FOLDER_OPS
 }
 
@@ -84,10 +108,30 @@ pub struct SensitiveToolEntry {
     pub prefix_match: bool,
 }
 
+/// builtin 一等工具的模型面名字（IF-D5 冻结 effective name）查表。
+///
+/// 名字字面量只在 `peri_acp_types::builtin_mcp` 声明一份（A4/IF-D6：禁止在消费点
+/// 硬编码 effective name 字面量或自建第二张反查表）。声明表由 `mcp::builtin::tests`
+/// 与 `builtin_mcp_test.rs` 锁定，因此这里的查表失败只可能是改坏了声明表。
+fn builtin_tool_effective_name(instance: &str, original_name: &str) -> &'static str {
+    peri_acp_types::builtin_mcp::find(instance)
+        .and_then(|declared| {
+            declared
+                .tools
+                .iter()
+                .find(|tool| tool.original_name == original_name)
+        })
+        .map(|tool| tool.effective_name)
+        .expect("builtin 声明表必须声明该 (实例, 原始工具名)：见 peri-acp-types/src/builtin_mcp.rs")
+}
+
 /// 敏感工具规则清单（10_hitl 段落内容来源）。
 ///
 /// 与 [`default_requires_approval`] 的判定分支一一对应——段落不再硬编码
 /// 列表（设计 §3.1.2 重复段处理：修改代码无需同步段落，防失同步）。
+/// 数量与顺序固定为 14 项 / 3 条前缀；已迁移为 builtin 一等工具的两个 Web 工具
+/// 条目名为**模型面 effective name**（A19/IF-G3：模型看到的名字就是 effective name，
+/// 条目名若留裸名会点名一个已不存在的工具）。
 pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 14] {
     [
         SensitiveToolEntry {
@@ -131,18 +175,18 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 14] {
             prefix_match: true,
         },
         SensitiveToolEntry {
-            name: TOOL_WEBFETCH,
+            name: builtin_tool_effective_name("web", TOOL_WEBFETCH),
             description: "fetch a URL",
             prefix_match: false,
         },
         SensitiveToolEntry {
-            name: TOOL_WEBSEARCH,
+            name: builtin_tool_effective_name("web", TOOL_WEBSEARCH),
             description: "web search",
             prefix_match: false,
         },
         SensitiveToolEntry {
             name: "mcp__",
-            description: "any MCP server tool (prefix match)",
+            description: "any MCP server tool (prefix match); builtin first-class capabilities follow their original tool's rule",
             prefix_match: true,
         },
         SensitiveToolEntry {

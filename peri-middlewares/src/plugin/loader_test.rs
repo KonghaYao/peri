@@ -415,12 +415,15 @@ fn test_extract_mcp_servers() {
             disabled: None,
             protocol_version: None,
             subscriptions: None,
+            system_mcp: None,
+            system_mcp_tools: None,
+            system_mcp_timeout: None,
             source: None,
         })),
     );
     manifest.mcp_servers = Some(servers);
 
-    let result = extract_mcp_servers(&manifest, Path::new("/tmp"));
+    let result = extract_mcp_servers(&manifest, Path::new("/tmp")).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key("s1"));
 }
@@ -428,7 +431,7 @@ fn test_extract_mcp_servers() {
 #[test]
 fn test_extract_mcp_servers_none() {
     let manifest = make_manifest_with_commands(vec![]);
-    let result = extract_mcp_servers(&manifest, Path::new("/tmp"));
+    let result = extract_mcp_servers(&manifest, Path::new("/tmp")).unwrap();
     assert!(result.is_empty());
 }
 
@@ -451,7 +454,7 @@ fn test_extract_mcp_servers_file_path_ref() {
     );
     manifest.mcp_servers = Some(servers);
 
-    let result = extract_mcp_servers(&manifest, &plugin_dir);
+    let result = extract_mcp_servers(&manifest, &plugin_dir).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key("db"));
     assert_eq!(result["db"].command.as_deref(), Some("sqlite3"));
@@ -468,7 +471,8 @@ fn test_extract_mcp_servers_file_path_not_found() {
     );
     manifest.mcp_servers = Some(servers);
 
-    let result = extract_mcp_servers(&manifest, dir.path());
+    // 被引用的文件缺失是「未声明」，不是非法配置；非法的 *内容* 才失败。
+    let result = extract_mcp_servers(&manifest, dir.path()).unwrap();
     assert!(result.is_empty());
 }
 
@@ -483,7 +487,7 @@ fn test_extract_mcp_servers_fallback_mcp_json_standard_format() {
     .unwrap();
 
     let manifest = make_manifest_with_commands(vec![]);
-    let result = extract_mcp_servers(&manifest, dir.path());
+    let result = extract_mcp_servers(&manifest, dir.path()).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key("srv"));
     assert_eq!(result["srv"].command.as_deref(), Some("npx"));
@@ -500,7 +504,7 @@ fn test_extract_mcp_servers_fallback_mcp_json_flat_format() {
     .unwrap();
 
     let manifest = make_manifest_with_commands(vec![]);
-    let result = extract_mcp_servers(&manifest, dir.path());
+    let result = extract_mcp_servers(&manifest, dir.path()).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key("context7"));
     assert_eq!(result["context7"].command.as_deref(), Some("npx"));
@@ -534,12 +538,15 @@ fn test_extract_mcp_servers_manifest_has_priority_over_fallback() {
             disabled: None,
             protocol_version: None,
             subscriptions: None,
+            system_mcp: None,
+            system_mcp_tools: None,
+            system_mcp_timeout: None,
             source: None,
         })),
     );
     manifest.mcp_servers = Some(servers);
 
-    let result = extract_mcp_servers(&manifest, dir.path());
+    let result = extract_mcp_servers(&manifest, dir.path()).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key("inline"));
     assert_eq!(result["inline"].command.as_deref(), Some("inline-cmd"));
@@ -555,7 +562,7 @@ fn test_load_mcp_json_file_flat_format_multiple_servers() {
     )
     .unwrap();
 
-    let result = super::load_mcp_json_file(&mcp_json_path).unwrap();
+    let result = super::load_mcp_json_file(&mcp_json_path).unwrap().unwrap();
     assert_eq!(result.len(), 2);
     assert!(result.contains_key("srv1"));
     assert!(result.contains_key("srv2"));
@@ -571,7 +578,7 @@ fn test_load_mcp_json_file_standard_format() {
     )
     .unwrap();
 
-    let result = super::load_mcp_json_file(&mcp_json_path).unwrap();
+    let result = super::load_mcp_json_file(&mcp_json_path).unwrap().unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key("srv"));
 }
@@ -579,7 +586,7 @@ fn test_load_mcp_json_file_standard_format() {
 #[test]
 fn test_load_mcp_json_file_nonexistent() {
     let result = super::load_mcp_json_file(Path::new("/nonexistent/mcp.json"));
-    assert!(result.is_none());
+    assert!(matches!(result, Ok(None)), "缺失文件是未声明，不是错误");
 }
 
 #[test]
@@ -587,8 +594,13 @@ fn test_load_mcp_json_file_invalid_json() {
     let dir = tempdir().unwrap();
     let mcp_json_path = dir.path().join("bad.mcp.json");
     std::fs::write(&mcp_json_path, b"not json").unwrap();
-    let result = super::load_mcp_json_file(&mcp_json_path);
-    assert!(result.is_none());
+    let error =
+        super::load_mcp_json_file(&mcp_json_path).expect_err("非法 JSON 不得被当作可跳过条目");
+    let LoaderError::McpConfigInvalid { path, message } = error else {
+        panic!("非法 MCP 文件应返回 McpConfigInvalid");
+    };
+    assert_eq!(path, mcp_json_path);
+    assert!(message.contains("JSON 语法错误"), "message: {message}");
 }
 
 #[test]
@@ -618,6 +630,9 @@ fn test_merge_plugin_mcp_servers() {
             disabled: None,
             protocol_version: None,
             subscriptions: None,
+            system_mcp: None,
+            system_mcp_tools: None,
+            system_mcp_timeout: None,
             source: None,
         },
     );
@@ -647,6 +662,9 @@ fn test_merge_plugin_mcp_servers() {
             disabled: None,
             protocol_version: None,
             subscriptions: None,
+            system_mcp: None,
+            system_mcp_tools: None,
+            system_mcp_timeout: None,
             source: None,
         },
     );
@@ -1398,4 +1416,230 @@ fn test_load_lsp_servers_aggregated_injects_plugin_root_env() {
             plugin_name: "lsp-plugin".to_string()
         })
     );
+}
+
+// ─── MCP 专用严格插件路径（契约 1 的插件来源入口）─────────────────────────
+
+const SYSTEM_TOOLS_RULE: &str = "system_mcp_tools requires system_mcp = true";
+
+/// 在 `claude_home` 下安装一个插件并启用它；`manifest_mcp` 为 `mcpServers` 字段的
+/// 原始 JSON 文本（`None` 表示 manifest 不声明该字段）。
+fn install_plugin(claude_home: &Path, name: &str, manifest_mcp: Option<&str>) -> PathBuf {
+    let plugin_dir = claude_home
+        .join("plugins")
+        .join("cache")
+        .join("mkt")
+        .join(name)
+        .join("1.0.0");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    let mcp_field = manifest_mcp
+        .map(|raw| format!(r#","mcpServers":{raw}"#))
+        .unwrap_or_default();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        format!(r#"{{"name":"{name}","version":"1.0.0"{mcp_field}}}"#),
+    )
+    .unwrap();
+
+    let installed = InstalledPlugins {
+        version: 2,
+        plugins: vec![InstalledPlugin {
+            id: format!("{name}@mkt"),
+            name: name.to_string(),
+            version: "1.0.0".into(),
+            marketplace: "mkt".into(),
+            install_path: plugin_dir.clone(),
+            scope: InstallScope::User,
+            project_path: None,
+            origin: PluginOrigin::PeriInstalled,
+        }],
+    };
+    std::fs::create_dir_all(claude_home.join("plugins")).unwrap();
+    std::fs::write(
+        claude_home.join("plugins").join("installed_plugins.json"),
+        serde_json::to_string(&installed).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        claude_home.join("settings.json"),
+        format!(r#"{{"enabledPlugins":["{name}@mkt"]}}"#),
+    )
+    .unwrap();
+    plugin_dir
+}
+
+fn assert_mcp_config_invalid(error: LoaderError, expected_path: &Path, rule: &str) {
+    let LoaderError::McpConfigInvalid { path, message } = error else {
+        panic!("严格 MCP 路径应返回 McpConfigInvalid，实际: {error}");
+    };
+    assert_eq!(path, expected_path);
+    assert!(
+        message.contains(rule),
+        "固定规则正文必须保留（message={message}）"
+    );
+}
+
+#[test]
+fn test_system_mcp_plugin_strict_sources_reject_invalid() {
+    // 文件引用（wrapped）：非法内容 → McpConfigInvalid，且不部分接纳合法兄弟条目。
+    let dir = tempdir().unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    let plugin_dir = install_plugin(
+        &claude_home,
+        "wrapped",
+        Some(r#"{"srv":"servers/.mcp.json"}"#),
+    );
+    let servers_dir = plugin_dir.join("servers");
+    std::fs::create_dir_all(&servers_dir).unwrap();
+    let wrapped = servers_dir.join(".mcp.json");
+    std::fs::write(
+        &wrapped,
+        r#"{"mcpServers":{"legal":{"command":"npx"},"bad":{"system_mcp_tools":["t"]}}}"#,
+    )
+    .unwrap();
+    let error =
+        load_enabled_plugins_for_mcp(&claude_home, None).expect_err("非法 wrapped 配置必须失败");
+    assert_mcp_config_invalid(error, &wrapped, SYSTEM_TOOLS_RULE);
+
+    // 文件引用（flat）：同样失败。
+    std::fs::write(
+        &wrapped,
+        r#"{"legal":{"command":"npx"},"bad":{"system_mcp":false,"system_mcp_tools":[]}}"#,
+    )
+    .unwrap();
+    let error =
+        load_enabled_plugins_for_mcp(&claude_home, None).expect_err("非法 flat 配置必须失败");
+    assert_mcp_config_invalid(error, &wrapped, SYSTEM_TOOLS_RULE);
+
+    // 根 .mcp.json 回退：manifest 未声明 mcpServers 时读取，非法同样失败。
+    let dir = tempdir().unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    let plugin_dir = install_plugin(&claude_home, "fallback", None);
+    let root_mcp = plugin_dir.join(".mcp.json");
+    std::fs::write(
+        &root_mcp,
+        r#"{"mcpServers":{"bad":{"system_mcp_tools":["t"]}}}"#,
+    )
+    .unwrap();
+    let error =
+        load_enabled_plugins_for_mcp(&claude_home, None).expect_err("非法根 .mcp.json 必须失败");
+    assert_mcp_config_invalid(error, &root_mcp, SYSTEM_TOOLS_RULE);
+
+    // 内联 manifest：清单解析本身失败（内联 DTO 走契约层 Deserialize），
+    // 错误仍保留路径与固定规则正文，而不是被当作未安装跳过。
+    let dir = tempdir().unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    let plugin_dir = install_plugin(
+        &claude_home,
+        "inline",
+        Some(r#"{"bad":{"system_mcp_tools":["t"]}}"#),
+    );
+    let error =
+        load_enabled_plugins_for_mcp(&claude_home, None).expect_err("非法内联 MCP 配置必须失败");
+    let text = error.to_string();
+    assert!(
+        text.contains(&plugin_manifest_path(&plugin_dir).display().to_string()),
+        "错误必须带清单路径: {text}"
+    );
+    assert!(
+        text.contains(SYSTEM_TOOLS_RULE),
+        "错误必须带固定规则正文: {text}"
+    );
+}
+
+#[test]
+fn test_system_mcp_plugin_invalid_manifest_has_no_fallback() {
+    // 已存在但非法的清单：不得 synthetic overwrite、不得从根配置兜底、文件字节不变。
+    let dir = tempdir().unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    let plugin_dir = install_plugin(&claude_home, "broken-manifest", None);
+    let manifest_path = plugin_manifest_path(&plugin_dir);
+    let broken = r#"{"name":"broken-manifest","version":"1.0.0","mcpServers":{"bad":{"system_mcp_tools":["t"]}}}"#;
+    std::fs::write(&manifest_path, broken).unwrap();
+    // 根配置里放一个合法 server：非法清单不允许借它兜底「修复」。
+    std::fs::write(
+        plugin_dir.join(".mcp.json"),
+        r#"{"mcpServers":{"ok":{"command":"npx"}}}"#,
+    )
+    .unwrap();
+
+    let error = load_enabled_plugins_for_mcp(&claude_home, None).expect_err("非法现存清单必须失败");
+    assert!(
+        error.to_string().contains(SYSTEM_TOOLS_RULE),
+        "必须保留清单解析的明确错误: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&manifest_path).unwrap(),
+        broken,
+        "非法清单不得被覆盖或修复"
+    );
+}
+
+#[test]
+fn test_system_mcp_plugin_empty_manifest_map_has_no_fallback() {
+    // manifest 显式声明空 map：属于「已声明」，不得从根 .mcp.json 加载额外服务器。
+    let dir = tempdir().unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    let plugin_dir = install_plugin(&claude_home, "empty-map", Some("{}"));
+    std::fs::write(
+        plugin_dir.join(".mcp.json"),
+        r#"{"mcpServers":{"root-srv":{"command":"npx"}}}"#,
+    )
+    .unwrap();
+
+    let plugins = load_enabled_plugins_for_mcp(&claude_home, None).unwrap();
+    assert_eq!(plugins.len(), 1);
+    assert!(
+        plugins[0].mcp_servers.is_empty(),
+        "显式空 map 不得触发根配置回退: {:?}",
+        plugins[0].mcp_servers.keys().collect::<Vec<_>>()
+    );
+
+    // 未声明（manifest 无 mcpServers 字段）才允许根回退。
+    let dir = tempdir().unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    let plugin_dir = install_plugin(&claude_home, "no-decl", None);
+    std::fs::write(
+        plugin_dir.join(".mcp.json"),
+        r#"{"mcpServers":{"root-srv":{"command":"npx"}}}"#,
+    )
+    .unwrap();
+    let plugins = load_enabled_plugins_for_mcp(&claude_home, None).unwrap();
+    assert!(plugins[0].mcp_servers.contains_key("root-srv"));
+}
+
+#[test]
+fn test_system_mcp_plugin_lenient_aggregate_keeps_other_capabilities() {
+    // 宽容聚合路径（展示/面板）保持产品行为：坏 MCP 声明不阻止该插件的
+    // hooks 装配，但错误必须被记录而不是静默丢弃。
+    let dir = tempdir().unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    let plugin_dir = install_plugin(
+        &claude_home,
+        "lenient",
+        Some(r#"{"srv":"servers/.mcp.json"}"#),
+    );
+    let servers_dir = plugin_dir.join("servers");
+    std::fs::create_dir_all(&servers_dir).unwrap();
+    std::fs::write(
+        servers_dir.join(".mcp.json"),
+        r#"{"mcpServers":{"bad":{"system_mcp_tools":["t"]}}}"#,
+    )
+    .unwrap();
+    // 插件的其它能力（hooks 约定文件）必须仍然装配。
+    std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+    std::fs::write(
+        plugin_dir.join("hooks").join("hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
+    )
+    .unwrap();
+
+    let aggregated = load_enabled_plugins_aggregated(&claude_home, None);
+    assert_eq!(aggregated.plugins.len(), 1, "坏 MCP 配置不得让插件整体消失");
+    assert!(
+        aggregated.all_mcp_servers.is_empty(),
+        "非法 MCP 声明不得进入聚合目录"
+    );
+    assert!(!aggregated.all_hooks.is_empty(), "插件的其它能力必须保留");
+    assert_eq!(aggregated.all_hooks[0].plugin_name, "lenient");
 }

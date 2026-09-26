@@ -49,6 +49,24 @@ pub mod controller_ports;
 mod executor_flow_tests;
 pub mod lease;
 mod mcp_apps;
+// V-02（W4）的 host seam 断言：首个 LLM 请求的三个冻结 effective name、能力关闭的
+// 首个请求面、`PERI_MCP_BUILTIN=off` 语义、启动 fatal 投影、BLOCKED 缺口复证。
+// 模块名参与 `cargo test` 过滤（`host::mcp_v4_builtin`），故不沿用 `mod tests`。
+#[cfg(test)]
+#[path = "mcp_v4_builtin_test.rs"]
+mod mcp_v4_builtin;
+#[cfg(test)]
+#[path = "mcp_v4_startup_test.rs"]
+mod mcp_v4_startup_tests;
+// wave 1 的 host 侧 wire 夹具（主 plan A10）：node 脚本含 wire 日志与 `tools/call`
+// 分支 + 复刻的工具调用 model 替身。owner 序列 V-06（W0 建 + 录迁移前基线）→
+// V-02（W4 复用）。模块名参与 `cargo test` 过滤（`host::mcp_v4_wire_fixture`），
+// 故不沿用 `mod tests`。文件名必须保留 `_test.rs` 后缀：本夹具经引用业务 crate
+// （`peri_middlewares` / `peri_model`）验证行为，靠 `scripts/check-layer-imports.sh`
+// 的测试文件豁免（`*_test.rs`）才不构成越层 import。
+#[cfg(test)]
+#[path = "mcp_v4_wire_fixture_test.rs"]
+mod mcp_v4_wire_fixture;
 mod notify;
 mod oauth_delivery;
 mod prediction;

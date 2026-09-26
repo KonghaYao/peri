@@ -35,6 +35,8 @@
 
 - **链顺序**：只能在 Agent 层 session 工厂的链序蓝本（`production_blueprint`）与 `src/assembly.rs` 槽位构造中判断与修改生产顺序；不得按名称或局部便利重排。
 - **MCP**：保留三层合并、内容去重和插件命名空间；配置来源或工具注册变更必须同时检查 pool、资源与 bridge 路径。init/OAuth/reconnect/subscription 任务由 deployment-held non-Clone `McpTaskOwner` 持有，并实现契约层 `McpTaskOwnerPort` 供 ACP boxed 注入；pool 只持 weak spawner。正常关闭顺序固定为 pool begin-close → owner abort/join → pool service close。Pool service close 由 pool-held 单一 transaction 持有，waiter 取消/并发/重试必须观察同一 `McpPoolShutdownReport`；cleanup timeout 保持 `Closing`，不得发布 `Closed`（ARC-HOST-SHUTDOWN-001）。
+- **System MCP 启动准入**：`system_mcp = true` 的 server 必须在首个 Reason 前完成 transport / initialize / 能力协商 / 真实 `tools/list`（空数组是成功结果，`Err` 不是发现证据），由启动闸门 hook `before_react_start` 阻断未就绪的 loop；失败或 timeout 返回类型化错误、不发布 ready、不降级为 warn，取消仍按中断分类。`system_mcp_tools` 按所属 server 的原始工具名精确匹配后 all-or-nothing 提升 direct（`[]` 只要求 ready 不注入工具），只跳过 deferred 搜索，不绕过 Permission/HITL/事件/cancel。
+- **插件 MCP 配置严格路径**：`load_enabled_plugins_for_mcp` 对非法 MCP 配置直接失败、不降级为空配置；宽容展示 API（`load_enabled_plugins_aggregated` 等）行为保持不变。
 - **Plugin manifest**：`commands` 条目兼容字符串路径与对象；字符串是相对插件根目录的路径。agents 未声明时仍保留约定目录回退。不要把路径条目当作名称。
 - **Skills**：扫描必须保持根优先级、递归边界、符号链接防环、叶子语义和同名覆盖规则；插件 skill root 通过既有扩展点传入。
 - **SubAgent**：同一会话的子 Agent 复用冻结的项目指引、skills 与 system prompt；同步子任务继承父取消，独立后台任务使用自身取消策略。`Agent(resume_thread_id, prompt)` 优先向当前会话的 live 后台执行投递 Info（非空 prompt），返回 `action: send / status: queued`；无 live 接收者且磁盘仍 active 时拒绝，非 active 才恢复并返回 `action: resume`。Info 不中断或唤醒模型，queued 不代表已读。事件必须按 `source_agent_id` 归属，新增事件同时检查父/子边界、完成和取消路径。
@@ -56,5 +58,6 @@ cargo test -p peri-acp --lib
 
 - 链、工具注册与条件中间件：`../peri-agent/src/session/factory.rs` 与 `src/assembly.rs`；同时遵守 `../docs/standards/architecture-contracts.md` 的 `ARC-MIDDLEWARE-001`、`ARC-TOOLS-001`、`ARC-FROZEN-001`。
 - Plugin/MCP 或 Skills 改动：阅读目标模块的实现与测试后运行对应 `cargo test -p peri-middlewares --lib <过滤词>`。
+- System MCP 准入 / 工具注入改动：`cargo test -p peri-middlewares --lib -- mcp::system_tools`、`-- mcp::client::readiness`、`-- mcp::middleware`；契约测试 `cargo test -p peri-middlewares --test mcp_host_policy_contract -- --test-threads=1` 与 `--test mcp_isolation_contract -- --test-threads=1`。
 - SubAgent 或 HITL 改动：覆盖冻结数据、取消、事件归属及 effective tool name 的相关测试。
 - 所有修改完成后运行 `git diff --check`；不得在日志、错误或测试 fixture 中写入密钥、token、密码或连接串。

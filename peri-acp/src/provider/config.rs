@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 
-use peri_acp_types::meta_harness::{BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS};
+use peri_acp_types::meta_harness::{
+    BUILTIN_INSTANCE_POLICY_KEYS, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -393,6 +395,12 @@ impl AppConfig {
     /// （`build_frozen_data`），避免解析期二次读盘（设计 §2.1/2.3）。
     /// 由 `provider::store::load_from` 在每次 serde 解析成功后调用
     /// （生产路径唯一解析入口）。
+    ///
+    /// **已知键全集（v4-part-2 A7）** = `SECTION_IDS` ∪ `MIDDLEWARE_NAMES`（链槽位名）
+    /// ∪ `BUILTIN_INSTANCE_POLICY_KEYS`（builtin 实例关闭键）∪ `BUILT_IN_SUBAGENTS_KEY`。
+    /// 两表必须并集消费：漏掉 `BUILTIN_INSTANCE_POLICY_KEYS` 会让
+    /// `"WebMiddleware": false` 退化为「未知键 warn + 忽略」，关闭语义被静默丢弃
+    /// （违反 ARC-CAPABILITY-CLOSURE-001）。
     pub(crate) fn validate_meta_harness(&mut self) {
         let Some(map) = self.meta_harness.as_mut() else {
             return;
@@ -400,6 +408,7 @@ impl AppConfig {
         let known: std::collections::HashSet<&str> = SECTION_IDS
             .iter()
             .chain(MIDDLEWARE_NAMES.iter())
+            .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
             .copied()
             .chain(std::iter::once(BUILT_IN_SUBAGENTS_KEY))
             .collect();
@@ -411,17 +420,21 @@ impl AppConfig {
                 false
             }
         });
-        // 高危组合检测（warn 不 fail，不改变值）：全部 middleware 均为 false
-        // = 所有工具/钩子/段落持有者装配期被卸载。正常使用几乎不可能逐一手写
-        // 全部 23 个 key，出现即高度疑似配置污染（曾发生过：项目级配置被写入
-        // 全 false 后经 load() 合并透传写回全局配置，功能全关）。显著告警便于
-        // 用户第一时间定位，而不是等会话静默降级。
+        // 高危组合检测（warn 不 fail，不改变值）：全部 middleware 与 builtin 实例
+        // 策略键均为 false = 所有工具/钩子/段落持有者与 builtin 实例装配期被卸载。
+        // 正常使用几乎不可能逐一手写全部 key，出现即高度疑似配置污染（曾发生过：
+        // 项目级配置被写入全 false 后经 load() 合并透传写回全局配置，功能全关）。
+        // 显著告警便于用户第一时间定位，而不是等会话静默降级。
+        //
+        // 判定面 = 两表并集（A7）：只用 MIDDLEWARE_NAMES 会让「只剩两个 builtin
+        // 策略键为 false」不再触发全关告警。
         let all_middleware_disabled = MIDDLEWARE_NAMES
             .iter()
+            .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
             .all(|name| map.get(*name).copied() == Some(false));
         if all_middleware_disabled {
             tracing::warn!(
-                middleware_count = MIDDLEWARE_NAMES.len(),
+                middleware_count = MIDDLEWARE_NAMES.len() + BUILTIN_INSTANCE_POLICY_KEYS.len(),
                 "meta_harness: ALL middleware disabled — every tool/hook/section holder \
                  will be unavailable; if this was not intentional, remove the meta_harness \
                  keys from settings.json"

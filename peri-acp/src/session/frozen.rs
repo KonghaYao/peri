@@ -164,12 +164,20 @@ pub(crate) fn build_collected_sections(
 /// - section + false → 显式不覆盖；
 /// - middleware + false → `disabled_middlewares`；
 /// - middleware + true → 不放入 disabled（显式恢复）。
+///
+/// **v4-part-2（A7）**：`false` 键的判定面是「链槽位名 ∪ builtin 实例策略键」两表并集
+/// （`MIDDLEWARE_NAMES` 只含链槽位名，`WebMiddleware` / `ArtifactMiddleware` 迁到
+/// `BUILTIN_INSTANCE_POLICY_KEYS`）。只读其中一张表会让 `"WebMiddleware": false`
+/// 退化为「键存在但无效果」——`disabled_middlewares` 既被链装配消费（关闭槽位），
+/// 也被 builtin 关闭集消费（`closed_instances`，IF-D10），漏项即能力闭合退化
+/// （ARC-CAPABILITY-CLOSURE-001）。
 pub(super) fn build_meta_harness_state(
     config: Option<&HashMap<String, bool>>,
     docs: HashMap<String, String>,
 ) -> peri_acp_types::meta_harness::MetaHarnessState {
     use peri_acp_types::meta_harness::{
-        MetaHarnessState, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS,
+        MetaHarnessState, BUILTIN_INSTANCE_POLICY_KEYS, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES,
+        SECTION_IDS,
     };
 
     let mut state = MetaHarnessState::default();
@@ -196,7 +204,10 @@ pub(super) fn build_meta_harness_state(
             // section + false：显式不覆盖，静默
         } else if key == BUILT_IN_SUBAGENTS_KEY {
             state.built_in_subagents_enabled = *enabled;
-        } else if MIDDLEWARE_NAMES.contains(&key.as_str()) && !*enabled {
+        } else if (MIDDLEWARE_NAMES.contains(&key.as_str())
+            || BUILTIN_INSTANCE_POLICY_KEYS.contains(&key.as_str()))
+            && !*enabled
+        {
             state.disabled_middlewares.insert(key.clone());
             // middleware + true：显式恢复装配，静默
         }

@@ -199,16 +199,72 @@ fn test_collect_declarations_empty_returns_none() {
 
 // -- 全量渲染守护（design v2 §2.5.5/2.5.6：全量迁移完成态） ---------------------
 
-/// 真实装配面 direct 工具集：14 Core + 3 Meta。
+/// builtin 实例（web / artifact）的**真实 direct 桥**。
+///
+/// 与生产同源：假 pool（两个 builtin 实例的已连接 client）+ 类型化构造
+/// `build_typed_tool_bridges`（IF-D13 生效点 ⇒ 声明为 direct 的工具带 `direct` 标记）。
+/// 返回的是生产对象 `McpToolBridge`，其 `name()` 即 effective name。
+fn builtin_direct_bridges() -> Vec<Arc<dyn BaseTool>> {
+    /// 已连接的假 MCP client（工具名按注册表声明传入；不含真实连接与凭据）。
+    fn connected_handle(server: &str, tools: &[&str]) -> Arc<crate::mcp::McpClientHandle> {
+        Arc::new(crate::mcp::McpClientHandle {
+            name: server.to_string(),
+            version: None,
+            cache_version: None,
+            peer: None,
+            tools: tools
+                .iter()
+                .map(|tool| {
+                    serde_json::from_value(serde_json::json!({
+                        "name": tool,
+                        "description": "builtin tool",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+            resources: vec![],
+            status: crate::mcp::ClientStatus::Connected,
+            oauth_status: Default::default(),
+            source: None,
+            url: None,
+            skills_capable: false,
+            channel_capable: false,
+        })
+    }
+
+    let pool = Arc::new(crate::mcp::McpClientPool::new_empty());
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+        let tool_names: Vec<&str> = instance
+            .tools
+            .iter()
+            .map(|tool| tool.original_name)
+            .collect();
+        pool.clients.write().insert(
+            instance.name.to_string(),
+            connected_handle(instance.name, &tool_names),
+        );
+    }
+    crate::mcp::tool_bridge::build_typed_tool_bridges(&pool)
+        .into_iter()
+        .map(|bridge| Arc::new(bridge) as Arc<dyn BaseTool>)
+        .collect()
+}
+
+/// 真实装配面 direct 工具集：14 Core + 3 Meta（其中 2 web + 1 artifact 由 builtin
+/// 实例的 MCP 桥提供）。
 ///
 /// 与 ToolSearchMiddleware.before_agent 的声明段数据源同构（shared_tools 中
 /// is_direct() = true 的工具；Meta 三件套与 Core 由同一装配面注册）。各工具
 /// 使用真实构造器，保证声明模板即线上模板。
+///
+/// v4-part-2（A9）：`WebFetch` / `WebSearch` / `artifact` 不再是 middleware 静态工具，
+/// 三者改为 **builtin 实例的真实 direct 桥**（effective name，见
+/// [`builtin_direct_bridges`]）——声明段仍必须为它们产出条目。
 fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
     use std::collections::BTreeMap;
 
-    use crate::artifact::ArtifactTool;
-    use crate::middleware::{FilesystemMiddleware, TerminalMiddleware, WebMiddleware};
+    use crate::middleware::{FilesystemMiddleware, TerminalMiddleware};
     use crate::skills::tools::{DiscoverSkillsTool, SkillTool};
     use crate::skills::SkillMetadata;
     use crate::subagent::SubAgentTool;
@@ -236,10 +292,8 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
     for t in TerminalMiddleware::build_tools("/tmp") {
         tools.push(Arc::from(t));
     }
-    // 2 web：WebFetch/WebSearch
-    for t in WebMiddleware::build_tools() {
-        tools.push(Arc::from(t));
-    }
+    // 2 web + 1 artifact：builtin 实例的真实 direct 桥（effective name，A9）
+    tools.extend(builtin_direct_bridges());
     // 3 interaction：Agent/AskUserQuestion/TodoWrite
     tools.push(Arc::new(SubAgentTool::new(
         Arc::new(vec![]),
@@ -260,14 +314,28 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
         Arc::new(std::sync::RwLock::new(None));
     tools.push(Arc::new(SkillTool::new(Arc::clone(&cached))));
     tools.push(Arc::new(DiscoverSkillsTool::new(cached)));
-    // 3 meta：SearchExtraTools/ExecuteExtraTool/ArtifactTool
+    // 3 meta：SearchExtraTools/ExecuteExtraTool（artifact 由 builtin 桥提供，见上）
     let index = Arc::new(ToolSearchIndex::new());
     let shared: Arc<PLRwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
         Arc::new(PLRwLock::new(BTreeMap::new()));
     tools.push(Arc::new(SearchExtraTools::new(Arc::clone(&index))));
     tools.push(Arc::new(ExecuteExtraTool::new(Arc::clone(&shared))));
-    tools.push(Arc::new(ArtifactTool::new("/tmp".to_string())));
     tools
+}
+
+/// 声明表里某个已迁移工具的 effective name（字面量只在声明表声明一份）。
+fn declared(
+    instance: &str,
+    original_name: &str,
+) -> &'static peri_acp_types::builtin_mcp::BuiltinMcpTool {
+    peri_acp_types::builtin_mcp::find(instance)
+        .and_then(|declared| {
+            declared
+                .tools
+                .iter()
+                .find(|tool| tool.original_name == original_name)
+        })
+        .expect("builtin 声明表应声明该 (实例, 原始工具名)")
 }
 
 /// [2.5.6-全量渲染] 真实 direct 工具集（14 Core + 3 Meta）声明渲染后无
@@ -277,8 +345,12 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
     use crate::tool_search::core_tools::{
         EXECUTE_EXTRA_TOOL_NAME, SEARCH_EXTRA_TOOLS_NAME, TOOL_AGENT, TOOL_ASK_USER, TOOL_BASH,
         TOOL_DISCOVER_SKILLS, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_GLOB, TOOL_GREP, TOOL_READ,
-        TOOL_SKILL, TOOL_TODO, TOOL_WEBFETCH, TOOL_WEBSEARCH, TOOL_WRITE,
+        TOOL_SKILL, TOOL_TODO, TOOL_WRITE,
     };
+    // 三个已迁移工具的模型面名字（迁移前是裸名 `WebFetch`/`WebSearch`/`artifact`）
+    let web_fetch = declared("web", "WebFetch").effective_name;
+    let web_search = declared("web", "WebSearch").effective_name;
+    let artifact = declared("artifact", "artifact").effective_name;
     let tools = build_real_direct_tools();
 
     // 覆盖完整性：CORE_TOOL_NAMES 14 个 + 3 个 Meta 全部就位且全部声明
@@ -290,8 +362,8 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
         TOOL_GREP,
         TOOL_FOLDER_OPS,
         TOOL_BASH,
-        TOOL_WEBFETCH,
-        TOOL_WEBSEARCH,
+        web_fetch,
+        web_search,
         TOOL_AGENT,
         TOOL_ASK_USER,
         TOOL_TODO,
@@ -299,7 +371,7 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
         TOOL_DISCOVER_SKILLS,
         SEARCH_EXTRA_TOOLS_NAME,
         EXECUTE_EXTRA_TOOL_NAME,
-        "artifact",
+        artifact,
     ];
     for name in expected {
         let tool = tools
@@ -307,8 +379,8 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
             .find(|t| t.name() == *name)
             .unwrap_or_else(|| panic!("direct 工具集缺少 {name}"));
         assert!(
-            tool.prompt_declaration().is_some(),
-            "{name} 应实现 prompt_declaration（全量迁移完成）"
+            tool.prompt_declaration().is_some() || builtin_declaration(name).is_some(),
+            "{name} 必须有声明模板（工具实现或 builtin 声明表，全量迁移完成）"
         );
     }
 
@@ -317,6 +389,65 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
         !rendered.contains("{{"),
         "声明段不得残留占位符（含 {{ 未闭合）：\n{rendered}"
     );
+
+    // A9（迁移守护）：三个 builtin 工具的声明条目必须仍在，且渲染出的名字是
+    // effective name —— 裸名不得作为声明条目出现。
+    //
+    // 现场证据（`--nocapture` 可见，供 V-04 抄录）：迁移后声明段里的 builtin 条目。
+    println!("[S-02 A9 现场] 迁移后声明段中的 builtin 条目（effective name）：");
+    for line in rendered.lines().filter(|l| l.contains("mcp__")) {
+        println!("  {line}");
+    }
+    for migrated in [web_fetch, web_search, artifact] {
+        assert!(
+            rendered.contains(&format!("`{migrated}`")),
+            "迁移后声明段必须仍含 {migrated} 的条目：\n{rendered}"
+        );
+    }
+    for migrated_declared in [
+        declared("web", "WebFetch"),
+        declared("web", "WebSearch"),
+        declared("artifact", "artifact"),
+    ] {
+        let bare = migrated_declared.original_name;
+        assert!(
+            !rendered.contains(&format!("`{bare}`")),
+            "声明条目不得再以裸名 {bare} 出现：\n{rendered}"
+        );
+        // 声明文本必须来自声明表模板：模板里最长的**非占位符片段**逐字出现在渲染结果中
+        // （若有人就地硬编码别的文本，这里立刻红）。
+        let template = migrated_declared
+            .prompt_declaration
+            .expect("声明表必须携带迁移工具的声明模板（A9）");
+        let fragment = longest_literal_fragment(template);
+        assert!(
+            rendered.contains(fragment),
+            "{bare} 的声明文本必须来自声明表模板（片段 {fragment:?} 缺失）:\n{rendered}"
+        );
+    }
+}
+
+/// 模板中最长的非 `{{占位符}}` 片段（trim 后），用于断言文本来源。
+fn longest_literal_fragment(template: &str) -> &str {
+    let mut longest = "";
+    let mut rest = template;
+    loop {
+        let Some(start) = rest.find("{{") else {
+            if rest.trim().len() > longest.trim().len() {
+                longest = rest;
+            }
+            break;
+        };
+        let fragment = &rest[..start];
+        if fragment.trim().len() > longest.trim().len() {
+            longest = fragment;
+        }
+        rest = match rest[start..].find("}}") {
+            Some(end) => &rest[start + end + 2..],
+            None => "",
+        };
+    }
+    longest.trim()
 }
 
 /// [2.5.6-全量稳定] 真实工具集两次收集字节级相同（防排序/缓存回归）。

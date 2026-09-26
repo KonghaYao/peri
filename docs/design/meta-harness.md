@@ -14,7 +14,7 @@ MetaHarness 一个 kv 字段承载三项能力，key 类型决定动作：
 | key 类型 | value | 动作 |
 | --- | --- | --- |
 | 段落 ID | `true` | **覆盖系统提示词**（第一能力） |
-| middleware 名 | `false` | **关闭 middleware**（第二能力） |
+| middleware 名 / builtin 实例策略键 | `false` | **关闭能力**（第二能力）：链槽位名 ⇒ 该 middleware 不进链；builtin 实例策略键（`WebMiddleware` / `ArtifactMiddleware`）⇒ 该实例的工具面关闭 |
 | `BuiltInSubagents` | `true` / `false` | 启用 / 屏蔽 compile-time built-in subagent definitions（默认启用） |
 
 `BuiltInSubagents` 只控制 built-in definition provider，不关闭 `SubAgentMiddleware`；
@@ -36,7 +36,7 @@ settings.json:
 期望：`session/new` 渲染系统提示词时，这两个段落内容被 md 全文替换；段落
 渲染顺序（按位置属性 + 段内序号）不变；其余段落保持内置。
 
-### 场景 2：关闭 middleware（卸载工具）
+### 场景 2：关闭能力（卸载工具）
 
 用户要关闭 Web 工具：
 
@@ -45,8 +45,13 @@ settings.json:
 { "meta_harness": { "WebMiddleware": false } }
 ```
 
-期望：装配期 WebMiddleware 不进链，WebFetch / WebSearch 不进入工具列表，
-其钩子全部失效（无需 md 文件）。
+期望：`WebMiddleware` 是 **builtin `web` 实例**的关闭键（v4-part-2 起 Web /
+Artifact 已不是链槽位；键集合 = `MIDDLEWARE_NAMES` ∪
+`BUILTIN_INSTANCE_POLICY_KEYS`，两键仍被识别为已知键），
+`mcp__web__WebSearch` / `mcp__web__WebFetch` 从 direct tools、deferred 目录与
+检索、subagent `parent_tools`、workflow agent 工具列表四个面一并消失。关闭
+**链槽位名**（如 `TodoMiddleware`）则是装配期该 middleware 不进链，其工具与
+钩子全部失效（无需 md 文件）。
 
 ### 场景 3：回退与生效时机
 
@@ -203,14 +208,18 @@ Filesystem/Web/Terminal/Mcp 后子 agent 仍携带这些工具）：
 
 ```rust
 // 每个装配入口内：
-let disabled: HashSet<&str> = meta_harness.iter()
+let disabled: HashSet<String> = meta_harness.iter()
     .filter(|(_, v)| !**v)
-    .map(|(k, _)| k.as_str())
+    .map(|(k, _)| k.clone())
     .collect();
 
-if !disabled.contains("WebMiddleware") {
-    chain.add(Box::new(WebMiddleware::new(...)));   // 关闭 → 不构造、不进链
+if !disabled.contains("TerminalMiddleware") {
+    chain.add(Box::new(TerminalMiddleware::new(...)));   // 关闭 → 不构造、不进链
 }
+
+// builtin MCP 实例（`WebMiddleware` / `ArtifactMiddleware`）不走链构造：
+// 它们由关闭集映射为实例关闭集，再交给工具面过滤（`assembly.rs`）。
+let closed_instances = crate::mcp::builtin::closed_instances(&disabled);
 ```
 
 **联动清理**：关闭 SubAgentMiddleware 时，其关联构造（parent_tools 注入、
@@ -218,8 +227,9 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 
 **语义**：
 
-- **关闭面 = middleware 实例**（key = `name()` 返回值）；同一 middleware 的
-  全部工具随之一并关闭（连坐语义）。
+- **关闭面 = 能力提供者**：链槽位 middleware 以 key = `name()` 返回值关闭；builtin
+  MCP 实例以策略键（`BUILTIN_INSTANCE_POLICY_KEYS`，映射唯一来源是声明表的
+  `policy_key`）关闭。同一提供者的全部工具随之一并关闭（连坐语义）。
 - 关闭后该 middleware 的钩子（before_agent / before_tool /
   prompt_contribution / first_turn_reminder）全部不执行——工具与提示词贡献
   同时消失。
@@ -235,8 +245,9 @@ subagent_mw 槽位）联动置空，禁止半开状态。
   prompt contribution 同时从 session-local 视图消失（见 ARC-CAPABILITY-CLOSURE-001）。
 - 插件无独立 meta_harness 条目：关闭 `PluginMiddleware` 即关闭插件整体注入；
   插件卸载/管理走既有机制。
-- Artifact 上传由独立 `ArtifactMiddleware` 承载；关闭它仅移除 `artifact`，不影响
-  `ToolSearch` 的 `SearchExtraTools` / `ExecuteExtraTool`。
+- Artifact 上传由 builtin `artifact` MCP 实例承载（`peri-middlewares/src/mcp/builtin/artifact.rs`）；
+  策略键 `ArtifactMiddleware: false` 关闭该实例的工具面，仅移除 `artifact`（模型面
+  `mcp__artifact__artifact`），不影响 `ToolSearch` 的 `SearchExtraTools` / `ExecuteExtraTool`。
 
 ### 2.6 生命周期
 

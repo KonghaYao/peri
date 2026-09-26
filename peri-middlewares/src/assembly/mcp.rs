@@ -67,7 +67,13 @@ pub(super) fn add_mcp(
         let mw = McpMiddleware::new(Arc::clone(&effective_pool))
             .with_tool_pool(Arc::clone(pool))
             .with_skill_discovery(ctx.mcp_skill_registry.clone(), ctx.cancel.clone())
-            .with_command_registry(command_registry.clone());
+            .with_command_registry(command_registry.clone())
+            // IF-D10 面①/②：本次 turn 关闭的 builtin 实例（唯一映射源 =
+            // 注册表 `policy_key` ∈ 冻结的 `meta_harness_disabled`）。关闭只影响
+            // 本 turn 的工具投影，不影响 readiness（pool 级事实）。
+            .with_builtin_closures(crate::mcp::builtin::closed_instances(
+                &ctx.meta_harness_disabled,
+            ));
         // 决策 B：装配后立即触发幂等发现（覆盖「装配时连接已
         // 完成」的场景——已连接 server 即刻 spawn 发现，命令
         // 面/元数据面无需等首轮 before_agent；Started 去重 /

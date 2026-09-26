@@ -623,6 +623,22 @@ fn test_tool_start_maps_to_session_update_with_tool_info() {
 #[test]
 fn test_tool_start_infer_tool_kind_variants() {
     // 验证 infer_tool_kind 对不同工具名的推断结果
+    //
+    // v4-part-2（A4 匹配型归一）：builtin 一等工具的 effective name（迁移后模型面
+    // 实际名字）必须仍推断为与原工具相同的 kind；名字字面量只在
+    // `peri_acp_types::builtin_mcp` 声明一份，此处按声明表派生，不复写 `mcp__*`
+    // 字面量（消费点不得硬编码 effective name）。
+    let effective = |instance: &str, original: &str| -> &'static str {
+        peri_acp_types::builtin_mcp::find(instance)
+            .and_then(|declared| {
+                declared
+                    .tools
+                    .iter()
+                    .find(|tool| tool.original_name == original)
+            })
+            .map(|tool| tool.effective_name)
+            .expect("builtin 声明表应声明该 (实例, 原始工具名)")
+    };
     let cases = [
         ("Read", ToolKind::Read),
         ("Write", ToolKind::Edit),
@@ -633,7 +649,14 @@ fn test_tool_start_infer_tool_kind_variants() {
         ("Glob", ToolKind::Search),
         ("WebFetch", ToolKind::Fetch),
         ("WebSearch", ToolKind::Fetch),
+        (effective("web", "WebFetch"), ToolKind::Fetch),
+        (effective("web", "WebSearch"), ToolKind::Fetch),
+        // artifact 不属于任何 Fetch 分支：归一到原始名 `artifact` 后仍是 Other
+        (effective("artifact", "artifact"), ToolKind::Other),
         ("mcp__server__tool", ToolKind::Other),
+        // 反证：未命中归一表（外部 server）不得被误吞
+        ("mcp__foo__bar", ToolKind::Other),
+        ("mcp__filesystem__read_file", ToolKind::Other),
     ];
     for (name, expected_kind) in cases {
         let event = ExecutorEvent::ToolStart {
@@ -654,6 +677,30 @@ fn test_tool_start_infer_tool_kind_variants() {
             }
             other => panic!("{} 预期 ToolCall，实际: {:?}", name, other),
         }
+    }
+
+    // 大小写不匹配的 effective name（非声明表字面量）不命中归一 ⇒ 仍为 Other
+    let lowered = effective("web", "WebFetch").to_lowercase();
+    assert!(
+        peri_acp_types::builtin_mcp::original_tool_name_of_effective(&lowered).is_none(),
+        "归一表是精确匹配：{lowered} 不得命中"
+    );
+    let event = ExecutorEvent::ToolStart {
+        message_id: MessageId::new(),
+        tool_call_id: "tc-lower".to_string(),
+        name: lowered.clone(),
+        input: serde_json::Value::Null,
+        source_agent_id: None,
+    };
+    match &map_event(&event, 200_000, &PeriCaps::default())[0].updates[0] {
+        SessionUpdate::ToolCall(tc) => {
+            assert_eq!(tc.kind, ToolKind::Other, "{lowered} 不得被误分类为 Fetch");
+            assert_eq!(
+                tc.title, lowered,
+                "投影真值仍是模型面名字（归一不改写载荷）"
+            );
+        }
+        other => panic!("{lowered} 预期 ToolCall，实际: {:?}", other),
     }
 }
 
