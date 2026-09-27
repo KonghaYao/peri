@@ -109,14 +109,11 @@ pub(crate) fn extract_hooks(manifest: &PluginManifest, install_path: &Path) -> O
 /// Load hooks from `~/.claude/settings.json` global `hooks` field.
 ///
 /// Returns a list of `RegisteredHook` with `plugin_name = "settings.json"`.
+///
+/// 目录经 [`crate::plugin::claude_home`] 解析（HOME 优先的唯一权威），与
+/// [`is_user_settings_path`] 的排除判定同源。
 pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
-    let claude_dir = match dirs_next::home_dir() {
-        Some(d) => d.join(".claude"),
-        None => {
-            tracing::warn!("Cannot determine home directory for global hooks");
-            return Vec::new();
-        }
-    };
+    let claude_dir = crate::plugin::claude_home();
     let settings_path = claude_dir.join("settings.json");
     if !settings_path.exists() {
         tracing::warn!("No settings.json at {}", settings_path.display());
@@ -341,17 +338,16 @@ pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
 
 /// `path` 是否就是用户级 `~/.claude/settings.json`。无法确定主目录时视为不是。
 ///
-/// 主目录解析须与 `load_global_settings_hooks` 同源，否则排除会认错文件。
+/// 主目录解析须与 `load_global_settings_hooks` 同源（[`crate::plugin::user_home`]，
+/// HOME 优先），否则排除会认错文件。
 fn is_user_settings_path(path: &Path) -> bool {
-    dirs_next::home_dir().is_some_and(|home| is_user_settings_path_under(path, &home))
+    is_user_settings_path_under(path, &crate::plugin::user_home())
 }
 
 /// 同上判定，但主目录由调用方给出：字面相同，或经符号链接指向同一文件
 /// （macOS `$HOME` 为链接、`/var` → `/private/var` 等）。
 ///
-/// 拆出该入口是为了让排除规则在 Windows 上也可验证——`dirs_next::home_dir()`
-/// 在 Windows 走 Profile known-folder（`SHGetKnownFolderPath`），不读
-/// `HOME`/`USERPROFILE`，测试无法把 `~` 改写成临时目录。
+/// 拆出该入口让排除规则能直接以显式主目录验证，不必依赖进程环境。
 fn is_user_settings_path_under(path: &Path, home: &Path) -> bool {
     let user_path = home.join(".claude").join("settings.json");
     if path == user_path {

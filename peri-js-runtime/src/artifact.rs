@@ -68,9 +68,18 @@ impl NpmArtifactProvider {
         Self
     }
 
+    /// PTC artifact 的用户级主目录：`$HOME` 优先（且要求绝对路径），否则
+    /// `dirs_next` 的平台主目录。
+    ///
+    /// Windows 的 `dirs_next::home_dir()` 读 Profile known-folder，而 `HOME`
+    /// 通常不存在；只认 `HOME` 会让本地缓存（`~/.peri/ptc`）在该平台永远不可用。
+    /// 与 `peri_middlewares` 的 `plugin::user_home`、`peri_workflow` 的
+    /// `workflow_prefix` 保持同一语义（HOME 优先，否则平台主目录）。
     fn home(&self) -> Result<PathBuf> {
         std::env::var_os("HOME")
             .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(dirs_next::home_dir)
             .ok_or(JsRuntimeError::ArtifactUnavailable)
     }
 }
@@ -149,15 +158,32 @@ impl Drop for InstallLock {
     }
 }
 
+/// 安装锁文件路径。
+fn lock_path(parent: &Path) -> PathBuf {
+    parent.join(format!(".{PACKAGE_VERSION}.lock"))
+}
+
+/// `try_lock_exclusive` 的失败是否只是「锁已被占用」（可重试），而非致命错误。
+///
+/// 争用的平台表达不同：Unix `flock` 报 `EWOULDBLOCK`（std 映射为
+/// `WouldBlock`），Windows `LockFileEx(LOCKFILE_FAIL_IMMEDIATELY)` 报
+/// `ERROR_LOCK_VIOLATION`(33)，std 不把它映射成 `WouldBlock`。只比较
+/// `ErrorKind` 会把 Windows 的争用当成致命错误，并发安装与取消等待随之失败。
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    match fs2::lock_contended_error().raw_os_error() {
+        Some(expected) => error.raw_os_error() == Some(expected),
+        None => error.kind() == std::io::ErrorKind::WouldBlock,
+    }
+}
+
 async fn acquire_lock(parent: &Path, cancel: &CancellationToken) -> Result<InstallLock> {
     tokio::fs::create_dir_all(parent).await?;
-    let path = parent.join(format!(".{PACKAGE_VERSION}.lock"));
     let file = tokio::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(path)
+        .open(lock_path(parent))
         .await?
         .into_std()
         .await;
@@ -167,7 +193,7 @@ async fn acquire_lock(parent: &Path, cancel: &CancellationToken) -> Result<Insta
         }
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(InstallLock(file)),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) if is_lock_contended(&error) => {}
             Err(error) => return Err(error.into()),
         }
         tokio::select! {
@@ -418,6 +444,30 @@ mod tests {
             metadata: metadata(ENTRY),
             entry: b"#!/usr/bin/env node\n",
         }
+    }
+
+    /// [回归] 锁争用必须判为「可重试」，而非致命错误。
+    ///
+    /// Unix `flock` 报 `EWOULDBLOCK`，Windows `LockFileEx(FAIL_IMMEDIATELY)` 报
+    /// `ERROR_LOCK_VIOLATION`(33)；只看 `ErrorKind::WouldBlock` 会让 Windows 的
+    /// 并发安装与取消等待直接失败。
+    #[tokio::test]
+    async fn contended_file_lock_is_retryable_on_this_platform() {
+        let home = tempfile::tempdir().unwrap();
+        let parent = home.path().join(".peri/ptc");
+        let _owner = acquire_lock(&parent, &CancellationToken::new())
+            .await
+            .unwrap();
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path(&parent))
+            .unwrap();
+        let error = contender.try_lock_exclusive().unwrap_err();
+        assert!(
+            is_lock_contended(&error),
+            "本平台的锁争用必须可重试: {error:?}"
+        );
     }
 
     #[tokio::test]

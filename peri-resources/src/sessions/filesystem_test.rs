@@ -393,7 +393,7 @@ async fn test_commit_compaction_lifecycle_is_explicitly_unsupported_without_muta
         .unwrap();
 
     let summary = BaseMessage::human("文件系统不应追加的摘要");
-    let lifecycle = CompactionLifecycle {
+    let lifecycle = CompactionChange {
         flag_updates: vec![(
             original_messages[0].id(),
             peri_acp_types::store::MessageFlags {

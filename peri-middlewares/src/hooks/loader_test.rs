@@ -517,13 +517,9 @@ fn write_hooks_settings(dir: &Path) {
 /// `~/.claude/settings.json` 是同一个文件，项目级加载必须跳过——否则同一份
 /// hooks 会注册成 global 与 project 两组而执行两次。子目录仍按项目级加载。
 ///
-/// Windows 跳过：该平台 `dirs_next::home_dir()` 走 Profile known-folder
-/// （`SHGetKnownFolderPath`），不读 `HOME`/`USERPROFILE`，`HomeGuard` 注入的临时
-/// `~` 不生效。路径判定本身由 `test_is_user_settings_path_under_*` 覆盖。
-#[cfg_attr(
-    windows,
-    ignore = "dirs_next::home_dir() 在 Windows 不读 HOME/USERPROFILE，无法注入临时主目录"
-)]
+/// 主目录经 `plugin::user_home`（HOME 优先）解析，`HomeGuard` 注入的临时 `~`
+/// 在两个平台都生效（旧实现走 `dirs_next::home_dir()`，Windows 上读 Profile
+/// known-folder 而不读环境变量，该平台只能跳过）。
 #[test]
 fn test_project_hooks_skipped_when_cwd_is_home() {
     let tmp = tempdir().unwrap();

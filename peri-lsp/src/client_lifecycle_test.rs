@@ -1,5 +1,11 @@
 use super::*;
+use crate::uri::test_workspace_uri;
 use std::path::Path;
+
+/// 真实子进程交互的 liveness 预算，与客户端默认启动预算同源。
+/// gate 等待只协调真实 wire 边界，不是计时契约：CI 上首批并发用例
+/// 落在冷启动与构建产物扫描窗口内，固定 5s 会把平台启动成本误报成契约失败。
+const LIVENESS_BUDGET_MS: u64 = DEFAULT_STARTUP_TIMEOUT_MS;
 
 // 文件 gate 只协调真实 wire 边界；watchdog 不作为正确性计时断言。
 const SCRIPT: &str = r#"
@@ -50,17 +56,20 @@ fn make_client(dir: &Path, gate_init: bool) -> Arc<LspClient> {
         ]),
         None,
         3,
-        5_000,
+        LIVENESS_BUDGET_MS,
         Arc::new(DiagnosticsRegistry::new()),
     ))
 }
 
 async fn wait_for_file(path: &Path) {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !path.exists() {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_millis(LIVENESS_BUDGET_MS),
+        async {
+            while !path.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        },
+    )
     .await
     .expect("真实服务器未到达预期协议边界");
 }
@@ -151,7 +160,7 @@ close $marker;
             HashMap::from([("FIXTURE".into(), cwd.to_str().unwrap().into())]),
             None,
             3,
-            5_000,
+            LIVENESS_BUDGET_MS,
             Arc::new(DiagnosticsRegistry::new()),
         );
         let uri = crate::uri::path_to_uri(&cwd);
@@ -159,11 +168,14 @@ close $marker;
         client.try_restart(&uri).await.unwrap();
         client.shutdown().await;
         let starts = std::fs::read_to_string(cwd.join("starts")).unwrap();
-        let expected = std::fs::canonicalize(cwd).unwrap();
-        assert_eq!(
-            starts.lines().collect::<Vec<_>>(),
-            vec![expected.to_str().unwrap(); 2]
-        );
+        // 两侧都 canonicalize 后比较：Windows 的 canonicalize 返回 verbatim（`\\?\`）
+        // 盘符路径并展开 8.3 短名，而 `getcwd` 原样回显传入的 cwd，直接比较必然不等。
+        let expected = std::fs::canonicalize(&cwd).unwrap();
+        let reported: Vec<_> = starts
+            .lines()
+            .map(|line| std::fs::canonicalize(line).unwrap())
+            .collect();
+        assert_eq!(reported, vec![expected; 2]);
     }
 }
 
@@ -174,11 +186,12 @@ async fn test_start_waits_for_initialize_before_publishing_readiness() {
     let client = make_client(dir.path(), true);
     let first = tokio::spawn({
         let client = client.clone();
-        async move { client.start("file:///tmp").await }
+        async move { client.start(&test_workspace_uri()).await }
     });
     wait_for_file(&dir.path().join("initialize")).await;
     let premature_ready = client.is_ready();
-    let second = client.start("file:///tmp");
+    let uri = test_workspace_uri();
+    let second = client.start(&uri);
     tokio::pin!(second);
     let premature_return = tokio::select! {
         biased;
@@ -200,7 +213,7 @@ async fn test_start_waits_for_initialize_before_publishing_readiness() {
 async fn test_cancelled_request_releases_pending_registration() {
     let dir = tempfile::tempdir().unwrap();
     let client = make_client(dir.path(), false);
-    client.start("file:///tmp").await.unwrap();
+    client.start(&test_workspace_uri()).await.unwrap();
     let request = tokio::spawn({
         let client = client.clone();
         async move { client.request("hang", None, 30_000).await }
@@ -217,7 +230,10 @@ async fn test_cancelled_request_releases_pending_registration() {
         .dispatcher
         .dispatch_state()
         .pending_len();
-    let next = client.request("next", None, 5_000).await.unwrap();
+    let next = client
+        .request("next", None, LIVENESS_BUDGET_MS)
+        .await
+        .unwrap();
     client.shutdown().await;
     assert_eq!(pending, 0, "取消请求后不能等待整条连接关闭才移除登记");
     assert_eq!(next, Value::Null, "取消旧请求后连接仍能处理完整的新请求");
@@ -231,7 +247,7 @@ async fn test_cancelled_start_releases_connection_and_child() {
     let client = make_client(dir.path(), true);
     let start = tokio::spawn({
         let client = client.clone();
-        async move { client.start("file:///tmp").await }
+        async move { client.start(&test_workspace_uri()).await }
     });
     wait_for_file(&dir.path().join("initialize")).await;
     let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
@@ -258,7 +274,7 @@ async fn test_cancelled_start_releases_connection_and_child() {
     .await
     .expect("启动取消后子进程应被回收");
     std::fs::write(dir.path().join("release"), b"").unwrap();
-    client.start("file:///tmp").await.unwrap();
+    client.start(&test_workspace_uri()).await.unwrap();
     assert!(client.is_ready(), "取消后的下一次启动可重新完成握手");
     client.shutdown().await;
 }
@@ -272,7 +288,7 @@ async fn test_cancelled_shutdown_rejects_old_requests_and_can_finish_cleanup() {
         .unwrap()
         .env
         .insert("GATE_SHUTDOWN".into(), "1".into());
-    client.start("file:///tmp").await.unwrap();
+    client.start(&test_workspace_uri()).await.unwrap();
     let request = tokio::spawn({
         let client = client.clone();
         async move { client.request("hang", None, 30_000).await }

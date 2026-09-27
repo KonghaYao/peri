@@ -1,11 +1,11 @@
 //! Lifecycle adapters and creation/resume intent for the Agent-owned factory.
 use super::fire_subagent_lifecycle_hooks_static;
 use crate::tool_search::ExecuteExtraToolResolver;
+use peri_acp_types::session_resources::SessionResources;
 use peri_agent::session::subagent::{
     SessionFactory, SubagentLifecycleStart, SubagentLifecycleStop, SubagentResumeConfig,
     SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
 };
-use peri_agent::thread::ThreadStore;
 use peri_agent::{agent::react::ReactLLM, messages::BaseMessage, tools::BaseTool};
 use std::sync::Arc;
 
@@ -101,7 +101,8 @@ impl super::SubAgentTool {
             compact_config: None,
             context_budget: None,
             compact_llm: None,
-            thread_store: host.thread_store.clone(),
+            session_resources: host.session_resources.clone(),
+            execution_owner: host.execution_owner.clone(),
             event_handler: self.event_handler.clone(),
             bg_event_sender: host.bg_event_sender.clone(),
             task_manager: host.task_manager.clone(),
@@ -152,7 +153,7 @@ impl super::SubAgentTool {
         llm: Box<dyn ReactLLM + Send + Sync>,
         tools: Vec<Arc<dyn BaseTool>>,
         tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
-        thread_store: Arc<dyn ThreadStore>,
+        session_resources: Arc<dyn SessionResources>,
         cwd: String,
     ) -> SubagentResumeConfig {
         let host = self.host();
@@ -173,7 +174,7 @@ impl super::SubAgentTool {
             compact_config: None,
             context_budget: None,
             compact_llm: None,
-            thread_store,
+            session_resources,
             event_handler: self.event_handler.clone(),
             bg_event_sender: host.bg_event_sender.clone(),
             task_manager: host.task_manager.clone(),

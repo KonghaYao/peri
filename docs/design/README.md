@@ -35,6 +35,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 用户待发送队列 | [user-input-queue.md](user-input-queue.md) | Mailbox、单条/全部投递、取回与运行身份 |
 | Compact | [micro-compact.md](micro-compact.md) | 压缩计划与 LLM projection |
 | Dynamic MCP | [dynamic-mcp.md](dynamic-mcp.md) | session 动态加载、目录发布与关闭 |
+| MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属 |
 | MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | stdio Apps profile、binding lease 与多路数据隔离 |
 | Meta 数据访问 | [meta-control.md](meta-control.md) | 只读 session metadata CLI 与持久化边界 |
 | Workflow | [workflow.md](workflow.md) | Node RPC、runner、通知、kill 与 resume |

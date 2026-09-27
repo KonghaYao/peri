@@ -49,11 +49,9 @@ use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::skills::SkillRoot;
-use peri_acp_types::{
-    store::ThreadStore,
-    thread::{ThreadId, ThreadMeta},
-};
+use peri_acp_types::thread::ThreadId;
 use tokio_util::sync::CancellationToken;
 
 use peri_acp_types::PeriCaps;
@@ -137,7 +135,8 @@ pub struct AcpSession {
 
 struct SessionManagerInner {
     sessions: Arc<DashMap<String, AcpSession>>,
-    thread_store: Arc<dyn ThreadStore>,
+    /// 会话资源门面（会话行为唯一入口）：SessionManager 只转发句柄，不另持裸存储。
+    session_resources: Arc<dyn SessionResources>,
     provider: LlmProvider,
     peri_config: Arc<PeriConfig>,
     permission_mode: Arc<SharedPermissionMode>,
@@ -213,7 +212,7 @@ impl AcpSession {
 impl SessionManager {
     #[allow(clippy::too_many_arguments)] // 装配注入面：端口/工厂逐项注入，L5 装配迁出后可分组
     pub fn new(
-        thread_store: Arc<dyn ThreadStore>,
+        session_resources: Arc<dyn SessionResources>,
         provider: LlmProvider,
         peri_config: Arc<PeriConfig>,
         permission_mode: Arc<SharedPermissionMode>,
@@ -229,7 +228,7 @@ impl SessionManager {
         Self {
             inner: Arc::new(SessionManagerInner {
                 sessions: Arc::new(DashMap::new()),
-                thread_store,
+                session_resources,
                 provider,
                 peri_config,
                 permission_mode,
@@ -333,8 +332,9 @@ impl SessionManager {
             .collect()
     }
 
-    pub async fn list_sessions(&self) -> anyhow::Result<Vec<ThreadMeta>> {
-        self.inner.thread_store.list_threads().await
+    /// 会话资源门面句柄（AcpSession 之外的会话行为入口）。
+    pub fn session_resources(&self) -> &Arc<dyn SessionResources> {
+        &self.inner.session_resources
     }
 
     pub fn get_session(
@@ -383,10 +383,6 @@ impl SessionManager {
 
     pub fn permission_mode(&self) -> &Arc<SharedPermissionMode> {
         &self.inner.permission_mode
-    }
-
-    pub fn thread_store(&self) -> &Arc<dyn ThreadStore> {
-        &self.inner.thread_store
     }
 
     pub fn agent_overrides(&self) -> Option<&AgentOverrides> {

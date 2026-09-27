@@ -43,6 +43,8 @@ const MAX_MCP_LINES: usize = 2000;
 /// MCP 资源读取工具——统一资源读取入口
 pub struct McpResourceTool {
     client_pool: Arc<McpClientPool>,
+    /// 会话 id：资源读取按 ACP 连接归属过滤，`None` = 不过滤（print 模式）。
+    session_id: Option<String>,
     /// session 级 MCP skill 远端注册表（读面完整性校验；空注册表 = 不校验）。
     /// 架构硬约束（issue C 节）：挂 session 装配链，绝不挂 pool/全局。
     registry: Arc<McpSkillRegistry>,
@@ -63,8 +65,15 @@ impl McpResourceTool {
         Self {
             client_pool,
             registry,
+            session_id: None,
             cached_description,
         }
+    }
+
+    /// 注入会话 id：读不到其他会话声明的 ACP server 的资源。
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
     }
 
     /// 读取面热更新恢复（digest 不匹配 / 未列出时，仅 skill:// 且条目覆盖）：
@@ -190,7 +199,7 @@ impl BaseTool for McpResourceTool {
         // 2. 获取客户端句柄
         let handle = self
             .client_pool
-            .get_client(server_name)
+            .get_client_visible_to(server_name, self.session_id.as_deref())
             .ok_or_else(|| ResourceError::ServerNotFound {
                 server: server_name.to_string(),
             })?

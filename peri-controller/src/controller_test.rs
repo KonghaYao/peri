@@ -16,9 +16,8 @@ use peri_acp_types::identity::{
     SessionSeq,
 };
 use peri_acp_types::messages::MessageContent;
-use peri_acp_types::store::ThreadStore;
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::thread::CancelPolicy;
-use peri_resources::sessions::FilesystemThreadStore;
 use peri_runtime::{Runtime, SessionHandle, UnstampedEvent};
 
 use super::{AgentRef, Controller, LiteParams};
@@ -117,16 +116,20 @@ fn ev(turn_id: &str, agent_id: &str) -> UnstampedEvent {
     }
 }
 
-/// 构造临时 ThreadStore（Filesystem，与 peri-acp 既有测试同模式）。
-fn temp_store() -> Arc<dyn ThreadStore> {
+/// 门面夹具：临时目录里的真实 SQLite 门面（Controller 只转发句柄，不解释存储语义）。
+async fn temp_facade() -> Arc<dyn SessionResources> {
     let tmp = tempfile::tempdir().unwrap();
-    Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")))
+    let facade =
+        peri_resources::sessions::SessionResourcesImpl::open(tmp.path().join("threads.db"))
+            .await
+            .unwrap();
+    Arc::new(facade)
 }
 
 // ─── lite params（§6 控制面第一步） ──────────────────────────────────────────
 
-#[test]
-fn lite_params_construction() {
+#[tokio::test]
+async fn lite_params_construction() {
     let params = LiteParams::new(
         "session-1",
         AgentRef::new("default"),
@@ -160,23 +163,11 @@ fn lite_params_construction() {
     assert_eq!(injected.tools[0].name, "search");
 }
 
-// ─── pick Resources / pick Runtime（§6 控制面第二/三步） ──────────────────────
+// ─── 会话资源句柄 / pick Runtime（§6 控制面第二/三步） ────────────────────────
 
-#[test]
-fn pick_resources_none_until_injected() {
-    let controller = Controller::new(temp_store());
-    assert!(
-        controller.pick_resources().is_none(),
-        "未注入时 Resources 为 None"
-    );
-
-    // 注入后可取（Resources 为 Clone 门面；此处用默认构造会失败——用 None 语义验证）
-    // 实际注入测试见 pick_runtime_and_resources_injection。
-}
-
-#[test]
-fn pick_runtime_injection_replaces_default() {
-    let controller = Controller::new(temp_store());
+#[tokio::test]
+async fn pick_runtime_injection_replaces_default() {
+    let controller = Controller::new(temp_facade().await);
     let injected = Arc::new(Runtime::new());
     let controller = controller.with_runtime(Arc::clone(&injected));
     assert!(
@@ -192,7 +183,7 @@ async fn run_session_forwards_via_runtime_to_handle() {
     let handle = MockHandle::new();
     let runtime = Arc::new(Runtime::new());
     runtime.register("s1", Arc::clone(&handle)).unwrap();
-    let controller = Controller::new(temp_store()).with_runtime(runtime);
+    let controller = Controller::new(temp_facade().await).with_runtime(runtime);
 
     controller.run_session("s1").await.unwrap();
 
@@ -201,7 +192,7 @@ async fn run_session_forwards_via_runtime_to_handle() {
 
 #[tokio::test]
 async fn run_session_unknown_session_typed_error() {
-    let controller = Controller::new(temp_store());
+    let controller = Controller::new(temp_facade().await);
     let err = controller.run_session("missing").await.unwrap_err();
     assert!(
         matches!(&err, super::ControllerError::RunFailed(s, _) if s == "missing"),
@@ -216,7 +207,7 @@ async fn cancel_forwards_triple_to_handle() {
     let handle = MockHandle::new();
     let runtime = Arc::new(Runtime::new());
     runtime.register("s1", Arc::clone(&handle)).unwrap();
-    let controller = Controller::new(temp_store()).with_runtime(runtime);
+    let controller = Controller::new(temp_facade().await).with_runtime(runtime);
 
     let req = CancelRequest::new(
         AttemptIdentity::new("s1", SessionEpoch::initial(), "turn-7", AttemptId::new()),
@@ -235,7 +226,7 @@ async fn cancel_forwards_triple_to_handle() {
 
 #[tokio::test]
 async fn cancel_unknown_session_typed_error() {
-    let controller = Controller::new(temp_store());
+    let controller = Controller::new(temp_facade().await);
     let req = CancelRequest::new(
         AttemptIdentity::new(
             "missing",
@@ -256,7 +247,7 @@ async fn cancel_unknown_session_typed_error() {
 
 #[tokio::test]
 async fn publish_pop_and_subscribe_events() {
-    let controller = Controller::new(temp_store());
+    let controller = Controller::new(temp_facade().await);
     let mut sub = controller.subscribe();
 
     let e1 = EventEnvelope::new(
@@ -296,7 +287,7 @@ async fn publish_pop_and_subscribe_events() {
 
 #[tokio::test]
 async fn bypass_consumer_subscribes_same_branch() {
-    let controller = Controller::new(temp_store());
+    let controller = Controller::new(temp_facade().await);
     // 主订阅（ACP 协议化）+ 旁路订阅（Langfuse bridge 形态：旁路消费者不参与业务链路）
     let mut acp = controller.subscribe();
     let mut observer = controller.subscribe();
@@ -326,13 +317,13 @@ async fn bypass_consumer_subscribes_same_branch() {
 
 // ─── sessions 存储通道（既有访问路径不回归） ───────────────────────────────────
 
-#[test]
-fn sessions_channel_preserved() {
-    let store = temp_store();
-    let controller = Controller::new(Arc::clone(&store));
+#[tokio::test]
+async fn sessions_channel_preserved() {
+    let facade = temp_facade().await;
+    let controller = Controller::new(Arc::clone(&facade));
     assert!(
-        Arc::ptr_eq(&controller.sessions(), &store),
-        "sessions 通道保持同一存储"
+        Arc::ptr_eq(&controller.sessions(), &facade),
+        "sessions 通道保持同一门面句柄"
     );
 }
 
@@ -343,7 +334,7 @@ async fn session_enumeration_reflects_runtime_map() {
     let runtime = Arc::new(Runtime::new());
     runtime.register("s1", MockHandle::new()).unwrap();
     runtime.register("s2", MockHandle::new()).unwrap();
-    let controller = Controller::new(temp_store()).with_runtime(runtime);
+    let controller = Controller::new(temp_facade().await).with_runtime(runtime);
 
     let mut ids = controller.session_ids();
     ids.sort();
@@ -364,7 +355,7 @@ async fn join_session_forwards_deadline_result() {
     let handle = MockHandle::new();
     let runtime = Arc::new(Runtime::new());
     runtime.register("s1", Arc::clone(&handle)).unwrap();
-    let controller = Controller::new(temp_store()).with_runtime(runtime);
+    let controller = Controller::new(temp_facade().await).with_runtime(runtime);
 
     assert!(
         controller
@@ -391,7 +382,7 @@ async fn destroy_session_orchestrates_phases_and_publishes_drained() {
     let handle = MockHandle::with_drained(vec![ev("t1", "a1"), ev("t2", "a1")]);
     let runtime = Arc::new(Runtime::new());
     runtime.register("s1", Arc::clone(&handle)).unwrap();
-    let controller = Controller::new(temp_store()).with_runtime(runtime);
+    let controller = Controller::new(temp_facade().await).with_runtime(runtime);
     let mut sub = controller.subscribe();
 
     let drained = controller
@@ -431,7 +422,7 @@ async fn destroy_session_orchestrates_phases_and_publishes_drained() {
 
 #[tokio::test]
 async fn destroy_session_unknown_typed_error() {
-    let controller = Controller::new(temp_store());
+    let controller = Controller::new(temp_facade().await);
     let err = controller
         .destroy_session("missing", Duration::from_secs(5))
         .await
@@ -444,12 +435,12 @@ async fn destroy_session_unknown_typed_error() {
 
 // ─── 消息/工具注入面（submit_input 经 Runtime 透传） ───────────────────────────
 
-#[test]
-fn submit_input_forwards_via_runtime_to_handle() {
+#[tokio::test]
+async fn submit_input_forwards_via_runtime_to_handle() {
     let handle = MockHandle::new();
     let runtime = Arc::new(Runtime::new());
     runtime.register("s1", Arc::clone(&handle)).unwrap();
-    let controller = Controller::new(temp_store()).with_runtime(runtime);
+    let controller = Controller::new(temp_facade().await).with_runtime(runtime);
 
     controller
         .submit_input("s1", MessageContent::text("hi"))
@@ -474,7 +465,7 @@ fn submit_input_forwards_via_runtime_to_handle() {
 
 #[tokio::test]
 async fn subscription_register_and_unsubscribe() {
-    let controller = Controller::new(temp_store());
+    let controller = Controller::new(temp_facade().await);
     let mut sub = controller.subscribe();
 
     // 注册：收到 publish 事件

@@ -312,6 +312,18 @@ impl CurrentTurn {
                         reasoning_dur,
                         None,
                     );
+                    // 正文先到时已有空 thinking 占位；终态保留 Completed 形态，
+                    // 与此前 snapshot fold 的可见契约一致。
+                    let reasoning = reasoning.or_else(|| {
+                        Some(TuiReasoningBlock {
+                            text: String::new(),
+                            fold: fold_for_status(FoldTarget::Reasoning, EntryStatus::Completed),
+                            status: EntryStatus::Completed,
+                            is_running: false,
+                            started_at: None,
+                            duration_ms: Some(0),
+                        })
+                    });
                     let mut bubble = TuiAssistantBubble {
                         text: text_slice.to_string(),
                         reasoning,

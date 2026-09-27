@@ -18,14 +18,19 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use std::collections::HashMap;
+
 use peri_acp_types::{
     command::{FeedbackChannel, FeedbackLevel},
     event::ExecutorEvent,
-    messages::{BaseMessage, ContentBlock},
-    store::ThreadStore,
-    thread::ThreadMeta,
+    messages::{BaseMessage, ContentBlock, MessageId},
+    session_resources::{
+        FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources, SessionSnapshot,
+    },
+    store::{MessageFlags, PersistedPayload},
+    thread::{CancelPolicy, ThreadId},
+    workspace::{SessionBinding, SessionExecutionLease},
 };
-use peri_agent::thread::{FilesystemThreadStore, SqliteThreadStore};
 
 use super::*;
 use crate::session::command::CommandResult;
@@ -89,22 +94,24 @@ fn make_ctx(
 }
 
 /// 构造带 auxiliary_model 的 CommandContext（contract test 使用真实模型路径）
+///
+/// 返回夹具本体：门面写入要求「本 root 有活 owner」，lease 必须活到测试结束，
+/// 因此由调用方持有（`let (ctx, _session) = make_ctx_with_model(..)`）。
 async fn make_ctx_with_model(
     sink: Arc<dyn crate::session::event_sink::EventSink>,
     history: Vec<BaseMessage>,
-    cwd: String,
     model: Arc<dyn peri_model::Model>,
-) -> super::super::CommandContext {
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(std::path::Path::new(&cwd).join("compact-test.db"))
-            .await
-            .expect("创建 SQLite store 失败"),
+) -> (super::super::CommandContext, BoundSession) {
+    let session = BoundSession::open("compact-test.db").await;
+    let ctx = make_ctx_with_model_and_thread(
+        sink,
+        history,
+        session.cwd.clone(),
+        model,
+        Some(session.resources()),
+        Some(session.thread_id.clone()),
     );
-    let thread_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
-        .await
-        .expect("创建 thread 失败");
-    make_ctx_with_model_and_thread(sink, history, cwd, model, Some(store), Some(thread_id))
+    (ctx, session)
 }
 
 fn make_ctx_with_model_and_thread(
@@ -112,11 +119,11 @@ fn make_ctx_with_model_and_thread(
     history: Vec<BaseMessage>,
     cwd: String,
     model: Arc<dyn peri_model::Model>,
-    thread_store: Option<Arc<dyn ThreadStore>>,
+    session_resources: Option<Arc<dyn SessionResources>>,
     thread_id: Option<String>,
 ) -> super::super::CommandContext {
     // Phase 2 拆层：deps 私有化后构造面封闭，core 5 字段经 new() 就位；
-    // 非默认旧字段显式赋值（auxiliary_model / thread_store / thread_id）。
+    // 非默认旧字段显式赋值（auxiliary_model / session_resources / thread_id）。
     let mut ctx = super::super::CommandContext::new(
         "test-session".to_string(),
         history,
@@ -126,9 +133,121 @@ fn make_ctx_with_model_and_thread(
         peri_acp_types::command::DependencyBag::new(),
     );
     ctx.auxiliary_model = Some(model);
-    ctx.thread_store = thread_store;
+    ctx.session_resources = session_resources;
     ctx.thread_id = thread_id;
     ctx
+}
+
+// ── 门面夹具 ──────────────────────────────────────────────────────────
+//
+// 完整 compact lifecycle 必须绑定会话资源门面；门面的写入门禁要求「本 root 有活
+// owner」，所以夹具真的建立一条已绑定会话并持有它的执行所有权（与生产路径同一前置
+// 条件），不用替身假装可写。断言走同一次一致快照（payload 与 flags 同一次读取）。
+
+/// 临时库上的已绑定会话 + 活跃执行所有权。
+struct BoundSession {
+    resources: Arc<dyn SessionResources>,
+    thread_id: ThreadId,
+    cwd: String,
+    db_path: std::path::PathBuf,
+    /// 持有到测试结束：owner 一旦丢弃，门面的写入按 `LeaseRequired` 真实失败。
+    _lease: Arc<dyn SessionExecutionLease>,
+    _db: tempfile::TempDir,
+}
+
+impl BoundSession {
+    /// 新库 + 一条已绑定会话（cwd 为临时目录解析后的路径）。
+    async fn open(file: &str) -> Self {
+        let db = tempfile::tempdir().expect("创建临时目录失败");
+        let db_path = db.path().join(file);
+        let resources: Arc<dyn SessionResources> = Arc::new(
+            peri_resources::sessions::SessionResourcesImpl::open(&db_path)
+                .await
+                .expect("打开会话库失败"),
+        );
+        let workspace = resources
+            .resolve_workspace(db.path())
+            .await
+            .expect("解析工作区失败");
+        let thread_id: ThreadId = uuid::Uuid::now_v7().to_string();
+        let lease = resources
+            .create_session(&NewSession {
+                thread_id: thread_id.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                meta: NewSessionMeta {
+                    title: None,
+                    cwd: workspace.cwd.to_string_lossy().into_owned(),
+                    parent_thread_id: None,
+                    hidden: false,
+                    cancel_policy: CancelPolicy::default(),
+                    snapshot_at_message_id: None,
+                },
+                binding: SessionBinding::from_workspace(&workspace),
+                frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),
+            })
+            .await
+            .expect("创建会话失败");
+        let cwd = workspace.cwd.to_string_lossy().into_owned();
+        Self {
+            resources,
+            thread_id,
+            cwd,
+            db_path,
+            _lease: lease,
+            _db: db,
+        }
+    }
+
+    /// 门面句柄（交给 CommandContext / 另开只读句柄时用）。
+    fn resources(&self) -> Arc<dyn SessionResources> {
+        Arc::clone(&self.resources)
+    }
+
+    /// 同一库的只读句柄：数据可读、能力面为 `HistoryReadOnly`——完整 lifecycle
+    /// 无法完成（与迁前 FilesystemThreadStore 的能力面一致）。
+    async fn open_read_only(&self) -> Arc<dyn SessionResources> {
+        Arc::new(
+            peri_resources::sessions::SessionResourcesImpl::open_existing_read_only(&self.db_path)
+                .await
+                .expect("只读打开会话库失败"),
+        )
+    }
+
+    /// 把可见 history 存进会话（与生产 append 同一行为）。
+    async fn append(&self, history: &[BaseMessage]) {
+        let payloads: Vec<PersistedPayload> = history
+            .iter()
+            .cloned()
+            .map(PersistedPayload::Message)
+            .collect();
+        self.resources
+            .append_history(&self.thread_id, &payloads)
+            .await
+            .expect("持久化初始 history 失败");
+    }
+
+    /// 一次一致快照。
+    async fn snapshot(&self) -> SessionSnapshot {
+        self.resources
+            .load_session_snapshot(&self.thread_id)
+            .await
+            .expect("加载会话快照失败")
+    }
+
+    /// 已持久化的消息本体（reminder 不进入 compact 输入，与生产同语义）。
+    async fn stored_messages(&self) -> Vec<BaseMessage> {
+        self.snapshot()
+            .await
+            .payloads
+            .iter()
+            .filter_map(|payload| payload.as_message().cloned())
+            .collect()
+    }
+
+    /// 已持久化的投影 flag。
+    async fn stored_flags(&self) -> HashMap<MessageId, MessageFlags> {
+        self.snapshot().await.flags
+    }
 }
 
 // ── extract_file_info 测试 ───────────────────────────────────────────
@@ -461,434 +580,8 @@ fn make_human_with_skill_marker(skill_path: &str) -> BaseMessage {
     BaseMessage::human(format!("用户消息\n[Skill: {}]", skill_path))
 }
 
-#[tokio::test]
-async fn test_compact_pipeline_uses_bound_sqlite_lifecycle() {
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(dir.path().join("compact-pipeline.db"))
-            .await
-            .expect("创建 SQLite store 失败"),
-    );
-    let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
-        .await
-        .expect("创建 thread 失败");
-    let history = vec![
-        BaseMessage::system("pipeline system prompt"),
-        BaseMessage::human("pipeline user question"),
-        BaseMessage::ai("pipeline assistant response"),
-    ];
-    store
-        .append_messages(&thread_id, &history)
-        .await
-        .expect("持久化初始 history 失败");
-
-    let sink = Arc::new(MockEventSink::new());
-    let ctx = make_ctx_with_model_and_thread(
-        sink,
-        history.clone(),
-        dir.path().to_string_lossy().to_string(),
-        Arc::new(MockSummaryModel::new(
-            "<summary>PIPELINE_LIFECYCLE_MARKER</summary>",
-        )),
-        Some(store.clone()),
-        Some(thread_id.clone()),
-    );
-
-    let result = execute_compact(&CompactCommand, ctx).await;
-
-    assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
-    assert!(
-        result
-            .messages
-            .iter()
-            .any(|message| message.content().contains("PIPELINE_LIFECYCLE_MARKER")),
-        "成功结果必须含 summary"
-    );
-    let stored_history = store
-        .load_messages(&thread_id)
-        .await
-        .expect("加载 SQLite history 失败");
-    assert!(
-        stored_history
-            .iter()
-            .any(|message| message.content().contains("PIPELINE_LIFECYCLE_MARKER")),
-        "绑定 store 的 lifecycle 必须持久化 summary"
-    );
-    let flags = store
-        .load_message_flags(&thread_id)
-        .await
-        .expect("加载 SQLite flags 失败");
-    assert!(!flags.contains_key(&history[0].id()), "System 不得被排除");
-    assert!(flags[&history[1].id()].excluded, "Human 必须被排除");
-    assert!(flags[&history[2].id()].excluded, "AI 必须被排除");
-}
-
-#[tokio::test]
-async fn test_compact_pipeline_does_not_append_preexisting_history_to_bound_thread() {
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(dir.path().join("compact-existing-history.db"))
-            .await
-            .expect("创建 SQLite store 失败"),
-    );
-    let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
-        .await
-        .expect("创建 thread 失败");
-    let history = vec![
-        BaseMessage::human("already persisted user question"),
-        BaseMessage::ai("already persisted assistant response"),
-    ];
-    store
-        .append_messages(&thread_id, &history)
-        .await
-        .expect("持久化初始 history 失败");
-
-    let ctx = make_ctx_with_model_and_thread(
-        Arc::new(MockEventSink::new()),
-        history.clone(),
-        dir.path().to_string_lossy().to_string(),
-        Arc::new(MockSummaryModel::new(
-            "<summary>EXISTING_HISTORY_NOT_DUPLICATED</summary>",
-        )),
-        Some(store.clone()),
-        Some(thread_id.clone()),
-    );
-
-    let result = execute_compact(&CompactCommand, ctx).await;
-
-    assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
-    let stored_history = store
-        .load_messages(&thread_id)
-        .await
-        .expect("加载 SQLite history 失败");
-    assert_eq!(
-        stored_history.len(),
-        history.len() + 1,
-        "已持久化的原始 history 不得在 compact 时被重复写入"
-    );
-    for original in &history {
-        assert_eq!(
-            stored_history
-                .iter()
-                .filter(|message| message.id() == original.id())
-                .count(),
-            1,
-            "原始消息 {:?} 在 SQLite thread 中必须仅出现一次",
-            original.id()
-        );
-    }
-    assert!(
-        stored_history.iter().any(|message| message
-            .content()
-            .contains("EXISTING_HISTORY_NOT_DUPLICATED")),
-        "compact 后必须追加 summary"
-    );
-}
-
-#[tokio::test]
-async fn test_compact_pipeline_reuses_visible_result_history_for_second_bound_sqlite_lifecycle() {
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(dir.path().join("compact-second-lifecycle.db"))
-            .await
-            .expect("创建 SQLite store 失败"),
-    );
-    let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
-        .await
-        .expect("创建 thread 失败");
-    let history = vec![
-        BaseMessage::system("persistent system prompt"),
-        BaseMessage::human("first compact request"),
-        BaseMessage::ai("first compact response"),
-    ];
-    store
-        .append_messages(&thread_id, &history)
-        .await
-        .expect("持久化初始 history 失败");
-
-    let first_sink = Arc::new(MockEventSink::new());
-    let first = execute_compact(
-        &CompactCommand,
-        make_ctx_with_model_and_thread(
-            first_sink.clone(),
-            history,
-            dir.path().to_string_lossy().to_string(),
-            Arc::new(MockSummaryModel::new(
-                "<summary>FIRST_COMPACT_LIFECYCLE_SUMMARY</summary>",
-            )),
-            Some(store.clone()),
-            Some(thread_id.clone()),
-        ),
-    )
-    .await;
-    assert_eq!(first.stop_reason, PromptStopReason::EndTurn);
-    assert!(
-        first.messages.iter().any(|message| message
-            .content()
-            .contains("FIRST_COMPACT_LIFECYCLE_SUMMARY")),
-        "首次 compact 必须产生 summary"
-    );
-
-    let second_sink = Arc::new(MockEventSink::new());
-    let second = execute_compact(
-        &CompactCommand,
-        make_ctx_with_model_and_thread(
-            second_sink.clone(),
-            first.messages,
-            dir.path().to_string_lossy().to_string(),
-            Arc::new(MockSummaryModel::new(
-                "<summary>SECOND_COMPACT_LIFECYCLE_SUMMARY</summary>",
-            )),
-            Some(store.clone()),
-            Some(thread_id.clone()),
-        ),
-    )
-    .await;
-
-    assert_eq!(
-        second.stop_reason,
-        PromptStopReason::EndTurn,
-        "第二次 compact 必须完成而非因 physical/visible history 不匹配被拒绝"
-    );
-    assert!(
-        second_sink
-            .events()
-            .iter()
-            .any(|(_, json)| json.contains("compact_completed")),
-        "第二次 compact 必须发出 CompactCompleted，而非只以 EndTurn 返回错误"
-    );
-    assert!(
-        second.messages.iter().any(|message| message
-            .content()
-            .contains("SECOND_COMPACT_LIFECYCLE_SUMMARY")),
-        "第二次 compact 必须返回新的 summary"
-    );
-    let stored = store
-        .load_messages(&thread_id)
-        .await
-        .expect("加载 SQLite history 失败");
-    assert_eq!(
-        stored
-            .iter()
-            .filter(|message| message.content().contains("_COMPACT_LIFECYCLE_SUMMARY"))
-            .count(),
-        2,
-        "同一 thread 的两次 compact 必须各自持久化一个 summary"
-    );
-}
-
-#[tokio::test]
-async fn test_compact_pipeline_filesystem_lifecycle_failure_preserves_durable_message_ids() {
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let store: Arc<dyn ThreadStore> =
-        Arc::new(FilesystemThreadStore::new(dir.path().join("threads")));
-    let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
-        .await
-        .expect("创建 thread 失败");
-    let history = vec![
-        BaseMessage::human("filesystem compact request"),
-        BaseMessage::ai("filesystem compact response"),
-    ];
-    store
-        .append_messages(&thread_id, &history)
-        .await
-        .expect("持久化初始 Filesystem history 失败");
-    let before_ids = store
-        .load_messages(&thread_id)
-        .await
-        .expect("加载初始 Filesystem history 失败")
-        .iter()
-        .map(BaseMessage::id)
-        .collect::<Vec<_>>();
-
-    let result = execute_compact(
-        &CompactCommand,
-        make_ctx_with_model_and_thread(
-            Arc::new(MockEventSink::new()),
-            history.clone(),
-            dir.path().to_string_lossy().to_string(),
-            Arc::new(MockSummaryModel::new(
-                "<summary>FILESYSTEM_LIFECYCLE_MUST_NOT_APPEND</summary>",
-            )),
-            Some(store.clone()),
-            Some(thread_id.clone()),
-        ),
-    )
-    .await;
-
-    assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
-    assert_eq!(
-        result
-            .messages
-            .iter()
-            .map(BaseMessage::id)
-            .collect::<Vec<_>>(),
-        history.iter().map(BaseMessage::id).collect::<Vec<_>>(),
-        "Filesystem lifecycle 不受支持时必须返回原始 history"
-    );
-    assert_eq!(
-        store
-            .load_messages(&thread_id)
-            .await
-            .expect("加载 Filesystem history 失败")
-            .iter()
-            .map(BaseMessage::id)
-            .collect::<Vec<_>>(),
-        before_ids,
-        "pipeline 的 preliminary append 不得向 Filesystem store 写入重复 message IDs"
-    );
-}
-
-#[tokio::test]
-async fn test_compact_pipeline_rejects_incoming_history_that_differs_from_bound_thread() {
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(dir.path().join("compact-history-mismatch.db"))
-            .await
-            .expect("创建 SQLite store 失败"),
-    );
-    let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
-        .await
-        .expect("创建 thread 失败");
-    let stored_history = vec![
-        BaseMessage::human("stored user question"),
-        BaseMessage::ai("stored assistant response"),
-    ];
-    let incoming_history = vec![
-        BaseMessage::human("incoming user question"),
-        BaseMessage::ai("incoming assistant response"),
-    ];
-    assert_ne!(
-        stored_history
-            .iter()
-            .map(BaseMessage::id)
-            .collect::<Vec<_>>(),
-        incoming_history
-            .iter()
-            .map(BaseMessage::id)
-            .collect::<Vec<_>>(),
-        "fixture 的 stored 与 incoming history 必须具有不同 ID"
-    );
-    store
-        .append_messages(&thread_id, &stored_history)
-        .await
-        .expect("持久化 stored history 失败");
-
-    let sink = Arc::new(MockEventSink::new());
-    let ctx = make_ctx_with_model_and_thread(
-        sink.clone(),
-        incoming_history.clone(),
-        dir.path().to_string_lossy().to_string(),
-        Arc::new(MockSummaryModel::new(
-            "<summary>HISTORY_MISMATCH_MUST_NOT_BE_PERSISTED</summary>",
-        )),
-        Some(store.clone()),
-        Some(thread_id.clone()),
-    );
-
-    let result = execute_compact(&CompactCommand, ctx).await;
-
-    assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
-    assert_eq!(
-        result
-            .messages
-            .iter()
-            .map(BaseMessage::id)
-            .collect::<Vec<_>>(),
-        incoming_history
-            .iter()
-            .map(BaseMessage::id)
-            .collect::<Vec<_>>(),
-        "持久化 context 与传入 history ID 不一致时必须原样返回 incoming history"
-    );
-    let fb = result.feedback.as_ref().expect("不匹配时应携带 feedback");
-    assert_eq!(fb.level, FeedbackLevel::Error);
-    assert_eq!(fb.channel, FeedbackChannel::UiOnly);
-    assert_eq!(fb.message, "compact persistence context mismatch");
-    assert!(
-        sink.events().is_empty(),
-        "命令自身不应发射 CompactError 事件（Phase 5 Step 4 收敛为 feedback）"
-    );
-
-    let persisted_history = store
-        .load_messages(&thread_id)
-        .await
-        .expect("加载 SQLite history 失败");
-    assert_eq!(
-        persisted_history
-            .iter()
-            .map(BaseMessage::id)
-            .collect::<Vec<_>>(),
-        stored_history
-            .iter()
-            .map(BaseMessage::id)
-            .collect::<Vec<_>>(),
-        "不匹配时 store 必须保持仅含 stored history"
-    );
-    assert!(
-        !persisted_history.iter().any(|message| message
-            .content()
-            .contains("HISTORY_MISMATCH_MUST_NOT_BE_PERSISTED")),
-        "不匹配时不得持久化 summary"
-    );
-    assert!(
-        store
-            .load_message_flags(&thread_id)
-            .await
-            .expect("加载 SQLite flags 失败")
-            .is_empty(),
-        "不匹配时不得写入 message flags"
-    );
-}
-
-#[tokio::test]
-async fn test_compact_pipeline_without_thread_binding_returns_error_without_mutating_history() {
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let history = vec![
-        BaseMessage::human("unbound user question"),
-        BaseMessage::ai("unbound assistant response"),
-    ];
-    let sink = Arc::new(MockEventSink::new());
-    let ctx = make_ctx_with_model_and_thread(
-        sink.clone(),
-        history.clone(),
-        dir.path().to_string_lossy().to_string(),
-        Arc::new(MockSummaryModel::new(
-            "<summary>UNBOUND_MUST_NOT_COMPACT</summary>",
-        )),
-        None,
-        None,
-    );
-
-    let result = execute_compact(&CompactCommand, ctx).await;
-
-    assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
-    assert_eq!(
-        result
-            .messages
-            .iter()
-            .map(BaseMessage::id)
-            .collect::<Vec<_>>(),
-        history.iter().map(BaseMessage::id).collect::<Vec<_>>(),
-        "缺少 store/thread binding 时必须保留原 history"
-    );
-    let fb = result
-        .feedback
-        .as_ref()
-        .expect("缺少 binding 应携带 feedback");
-    assert_eq!(fb.level, FeedbackLevel::Error);
-    assert_eq!(fb.channel, FeedbackChannel::UiOnly);
-    assert_eq!(fb.message, "compact persistence is unavailable");
-    assert!(
-        sink.events().is_empty(),
-        "命令自身不应发射 CompactError 事件（Phase 5 Step 4 收敛为 feedback）"
-    );
-}
+#[path = "compact_persistence_test.rs"]
+mod persistence_tests;
 
 /// 契约：compact 输出首条消息必须是 Human（摘要+续接指令），
 /// 不得为 System 或其他类型。
@@ -909,13 +602,7 @@ async fn test_contract_compact_output_starts_with_human_summary() {
 
     let sink = Arc::new(MockEventSink::new());
     let model = Arc::new(MockSummaryModel::new("## 摘要\n已完成 main.rs 审查"));
-    let ctx = make_ctx_with_model(
-        sink.clone(),
-        history,
-        dir.path().to_string_lossy().to_string(),
-        model,
-    )
-    .await;
+    let (ctx, _session) = make_ctx_with_model(sink.clone(), history, model).await;
     let cmd = CompactCommand;
 
     // Act
@@ -972,13 +659,7 @@ async fn test_contract_compact_output_structure_human_then_system_only() {
 
     let sink = Arc::new(MockEventSink::new());
     let model = Arc::new(MockSummaryModel::new("## 摘要\n审查 lib.rs 与 tdd skill"));
-    let ctx = make_ctx_with_model(
-        sink.clone(),
-        history,
-        dir.path().to_string_lossy().to_string(),
-        model,
-    )
-    .await;
+    let (ctx, _session) = make_ctx_with_model(sink.clone(), history, model).await;
     let cmd = CompactCommand;
 
     // Act
@@ -1024,8 +705,7 @@ async fn test_contract_compact_output_structure_human_then_system_only() {
 /// 这是一个 "negative contract"：断言没有任何 System 消息的文本包含摘要内容。
 #[tokio::test]
 async fn test_contract_summary_not_in_system_message() {
-    // Arrange: 简单 history
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    // Arrange: 简单 history（会话夹具自带临时工作区）
     let history = vec![
         BaseMessage::system("系统提示词"),
         BaseMessage::human("你好"),
@@ -1035,13 +715,7 @@ async fn test_contract_summary_not_in_system_message() {
     let unique_marker = "UNIQUE_SUMMARY_MARKER_2026";
     let sink = Arc::new(MockEventSink::new());
     let model = Arc::new(MockSummaryModel::new(format!("## 摘要\n{}", unique_marker)));
-    let ctx = make_ctx_with_model(
-        sink.clone(),
-        history,
-        dir.path().to_string_lossy().to_string(),
-        model,
-    )
-    .await;
+    let (ctx, _session) = make_ctx_with_model(sink.clone(), history, model).await;
     let cmd = CompactCommand;
 
     // Act
@@ -1070,7 +744,6 @@ async fn test_contract_summary_not_in_system_message() {
 #[tokio::test]
 async fn test_contract_compact_completed_event_matches_result_messages() {
     // Arrange
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
     let history = vec![
         BaseMessage::system("系统提示词"),
         BaseMessage::human("你好"),
@@ -1079,13 +752,7 @@ async fn test_contract_compact_completed_event_matches_result_messages() {
 
     let sink = Arc::new(MockEventSink::new());
     let model = Arc::new(MockSummaryModel::new("## 摘要\n简单对话"));
-    let ctx = make_ctx_with_model(
-        sink.clone(),
-        history,
-        dir.path().to_string_lossy().to_string(),
-        model,
-    )
-    .await;
+    let (ctx, _session) = make_ctx_with_model(sink.clone(), history, model).await;
     let cmd = CompactCommand;
 
     // Act
@@ -1116,8 +783,7 @@ async fn test_contract_compact_completed_event_matches_result_messages() {
 /// （对应 full.rs: non_system_count == 0 分支）
 #[tokio::test]
 async fn test_contract_all_system_history_still_human_first() {
-    // Arrange: 全 System history
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    // Arrange: 全 System history（会话夹具自带临时工作区）
     let history = vec![
         BaseMessage::system("系统提示词 1"),
         BaseMessage::system("系统提示词 2"),
@@ -1126,13 +792,7 @@ async fn test_contract_all_system_history_still_human_first() {
     let sink = Arc::new(MockEventSink::new());
     // 即使 LLM 被调用返回内容，也不影响首条 Human 契约
     let model = Arc::new(MockSummaryModel::new("## 摘要\n不应到达此处"));
-    let ctx = make_ctx_with_model(
-        sink.clone(),
-        history,
-        dir.path().to_string_lossy().to_string(),
-        model,
-    )
-    .await;
+    let (ctx, _session) = make_ctx_with_model(sink.clone(), history, model).await;
     let cmd = CompactCommand;
 
     // Act

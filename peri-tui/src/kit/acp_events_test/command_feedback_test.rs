@@ -28,6 +28,8 @@ fn test_command_feedback_injects_system_note() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     // Info（UiOnly 通道）

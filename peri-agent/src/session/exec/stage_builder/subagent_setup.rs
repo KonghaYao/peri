@@ -46,7 +46,8 @@ pub(super) fn attach_subagent_host(
     // SubAgentMiddleware 不再逐字段透传（管理权移出）。
     {
         let host = SubagentHost {
-            thread_store: thread_persistence.store.clone(),
+            session_resources: thread_persistence.session_resources.clone(),
+            execution_owner: thread_persistence.execution_owner.clone(),
             task_manager: Some(task_manager.clone()),
             bg_event_sender: Some(bg_event_tx),
             on_bg_complete: on_bg_complete.clone(),

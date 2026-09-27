@@ -2,6 +2,35 @@ use super::*;
 use peri_acp_types::workspace::{ScopedThreadQuery, ThreadScope};
 use sqlx::{Connection, SqliteConnection};
 
+/// 旧版会话保存的调用方路径文本。
+///
+/// macOS 上保持调用方原样：`/var/...` 与登记的 `/private/var/...` 由
+/// `legacy_path_sql` 归一，这里不预先归一，那条规则才有覆盖。
+///
+/// Windows 上不能直接用 `dir.path()`：runner 的 `%TEMP%` 是 8.3 短名
+/// （`C:\Users\RUNNER~1\...`），而登记 root 来自 canonicalize 的长名
+/// （`\\?\C:\Users\runneradmin\...`）。把短名展开成长名只能走文件系统，而这条匹配是
+/// SQL 层的显示关联（`legacy_path_sql` 只归一分隔符、verbatim 前缀与尾部分隔符）。
+/// 真实用户保存的是普通长名路径（`current_dir` 既不带短名也不带 verbatim 前缀），
+/// 用例按这个形状取文本。
+fn legacy_saved_text(dir: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(not(windows))]
+    {
+        dir.to_owned()
+    }
+    #[cfg(windows)]
+    {
+        let canonical = std::fs::canonicalize(dir).unwrap();
+        // 先取出**拥有所有权**的普通形式：借用在这里结束，不匹配时才能把 canonical
+        // 原样返回（match 的 scrutinee 借用活到 match 结束，直接在里面移动会编译失败）。
+        let ordinary = canonical
+            .to_str()
+            .and_then(|text| text.strip_prefix(r"\\?\"))
+            .map(std::path::PathBuf::from);
+        ordinary.unwrap_or(canonical)
+    }
+}
+
 async fn legacy_database(path: &std::path::Path, cwd: &std::path::Path) -> String {
     let mut connection = SqliteConnection::connect_with(
         &SqliteConnectOptions::new()
@@ -36,7 +65,7 @@ async fn legacy_database(path: &std::path::Path, cwd: &std::path::Path) -> Strin
 async fn legacy_history_visible_after_upgrade_and_schema3_reopen() {
     let dir = tempfile::tempdir().unwrap();
     // Old releases saved the caller's ordinary path, not canonical/verbatim Windows paths.
-    let cwd = dir.path().to_owned();
+    let cwd = legacy_saved_text(dir.path());
     let path = dir.path().join("threads.db");
     let id = legacy_database(&path, &cwd).await;
     for _ in 0..2 {
@@ -161,7 +190,7 @@ async fn legacy_adoption_failure_rolls_back_binding_and_snapshot() {
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let workspace = store.resolve_workspace(&cwd).await.unwrap();
     sqlx::raw_sql("CREATE TRIGGER reject_binding BEFORE INSERT ON session_bindings BEGIN SELECT RAISE(FAIL, 'injected binding failure'); END;")
-        .execute(&store.pool).await.unwrap();
+        .execute(&store.database.pool).await.unwrap();
     let error = store
         .adopt_legacy_thread(&id, cwd.to_str().unwrap(), &workspace, "snapshot")
         .await
@@ -170,7 +199,7 @@ async fn legacy_adoption_failure_rolls_back_binding_and_snapshot() {
     assert!(store.load_session_binding(&id).await.unwrap().is_none());
     assert!(store.load_frozen_snapshot(&id).await.unwrap().is_none());
     sqlx::query("DROP TRIGGER reject_binding")
-        .execute(&store.pool)
+        .execute(&store.database.pool)
         .await
         .unwrap();
     store
@@ -223,7 +252,7 @@ async fn legacy_adoption_rejects_changed_cwd_child_and_lost_native_binding() {
     store.update_meta(&id, meta).await.unwrap();
     sqlx::query("INSERT INTO execution_runs VALUES (?, 1, 0)")
         .bind(&id)
-        .execute(&store.pool)
+        .execute(&store.database.pool)
         .await
         .unwrap();
     let error = store

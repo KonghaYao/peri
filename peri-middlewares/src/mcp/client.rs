@@ -5,6 +5,13 @@ mod cache;
 mod lifecycle;
 mod oauth;
 pub(crate) mod process;
+// System MCP 启动准入 seam：清单发布与闸门已接线（`initialize` / `middleware`），
+// 仍有三处冻结但尚无生产读取方的成员——`DiscoveryEvidence::is_complete`（只有测试在问）、
+// `NegotiatedSystemMcp::handle`（协商结果保留句柄，消费方只读 `requirement`/`generation`）、
+// `SystemReadinessError::CatalogPublicationFailed`（清单发布失败分支待接）。三者都由
+// crate 内测试覆盖，接线波次落地后连同本豁免一起删除。
+#[allow(dead_code)]
+mod readiness;
 mod service;
 mod status;
 mod subscription;
@@ -17,11 +24,21 @@ use oauth::{OAuthFlowKey, PendingOAuthCallback};
 use peri_acp_types::{
     mcp::McpSubscriptionPort, ports::McpPoolShutdownReport, session::InboxHandle,
 };
+use readiness::SystemReadinessTracker;
 use rmcp::model::{Resource, Tool};
 use std::{any::Any, collections::HashMap, sync::Arc};
 
 pub(crate) use cache::cache_scope_allows_persistence;
 pub use oauth::OAuthStartDisposition;
+// System MCP 启动准入（IF-M3）：证据、等待与类型化错误；子模块声明留在本文件，
+// 不占 `mcp/mod.rs`（其 owner 为 C-INJ-02 / D-02）。消费方：B-02（证据提交 /
+// 清单发布，已接线）、B-03（闸门与 C 接线，W4 消费 `NegotiatedSystemMcp` /
+// `SystemMcpRequirement` / `SystemReadinessError`）。
+#[allow(unused_imports)]
+pub(crate) use readiness::{
+    DiscoveryEvidence, NegotiatedSystemMcp, SystemMcpManifest, SystemMcpRequirement,
+    SystemReadinessError,
+};
 #[cfg(test)]
 pub(crate) use service::ControlledMcpService;
 pub(crate) use service::{
@@ -97,6 +114,13 @@ pub struct McpClientPool {
     pub(crate) capability_profile: super::apps::McpCapabilityProfile,
     /// 初始模型 MCP tool invocation 签发、`peri/mcp/open` 单次消费的租约。
     pub(crate) app_binding_leases: Arc<super::apps::McpAppBindingLeaseRegistry>,
+    /// System MCP 启动准入事实（IF-M3）：配置清单状态 + 每台 server 的本代发现
+    /// 证据 + 独立 watch revision。所有写入都必须经由成功/失败的生产路径。
+    pub(crate) system_readiness: SystemReadinessTracker,
+    /// 会话级 ACP（MCP over ACP）连接归属：池内 server name → 所属 session id。
+    /// 无条目的 server 对所有会话可见（配置来源与 dynamic 投影的既有语义）；
+    /// 有条目的仅在归属会话内可见（工具桥接与状态面据此过滤）。
+    pub(crate) acp_owners: parking_lot::RwLock<HashMap<String, String>>,
 }
 
 pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -145,6 +169,8 @@ impl McpClientPool {
             resource_cache: super::resource_cache::McpResourceCache::new(),
             capability_profile,
             app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
+            system_readiness: SystemReadinessTracker::new(),
+            acp_owners: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
@@ -195,6 +221,17 @@ impl McpClientPool {
     pub fn get_client(&self, name: &str) -> Option<Arc<McpClientHandle>> {
         self.clients.read().get(name).cloned()
     }
+    /// 会话可见的连接句柄（[`Self::get_client`] 的 ACP 归属过滤版）。
+    pub fn get_client_visible_to(
+        &self,
+        name: &str,
+        session_id: Option<&str>,
+    ) -> Option<Arc<McpClientHandle>> {
+        if session_id.is_some_and(|session_id| !self.is_visible_to_session(name, session_id)) {
+            return None;
+        }
+        self.get_client(name)
+    }
     pub fn get_all_clients(&self) -> Vec<Arc<McpClientHandle>> {
         self.clients
             .read()
@@ -202,6 +239,19 @@ impl McpClientPool {
             .filter(|c| matches!(c.status, ClientStatus::Connected))
             .cloned()
             .collect()
+    }
+    /// 会话可见的连接句柄（[`Self::get_all_clients`] 的 ACP 归属过滤版）。
+    ///
+    /// `session_id` 为 `None` 表示不过滤（部署面视图：面板、命令面、池关闭）。
+    pub fn get_all_clients_visible_to(
+        &self,
+        session_id: Option<&str>,
+    ) -> Vec<Arc<McpClientHandle>> {
+        let mut clients = self.get_all_clients();
+        if let Some(session_id) = session_id {
+            clients.retain(|client| self.is_visible_to_session(&client.name, session_id));
+        }
+        clients
     }
     pub fn has_resources(&self) -> bool {
         self.clients

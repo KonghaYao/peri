@@ -146,6 +146,24 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+/// 测试用工作区根目录：平台临时目录，保证在运行平台上真实存在。
+///
+/// 该目录会成为 LSP 服务子进程的 cwd（`LspTransport::spawn` 的 `current_dir`）。
+/// 测试曾用 `file:///tmp`：Windows 上它解码为 `<当前盘>:\tmp`，这个目录并不存在，
+/// 无效的 cwd 让 spawn 直接失败（`LaunchFailed`），依赖真实握手或子进程探活的
+/// 用例随之失败；`jsonrpc::transport_tests` 因使用 `std::env::temp_dir()` 一直正常。
+#[cfg(test)]
+pub(crate) fn test_workspace_dir() -> std::path::PathBuf {
+    std::env::temp_dir()
+}
+
+/// 测试用工作区根 URI：`test_workspace_dir` 的 `file://` 形式，供
+/// `LspClient::start` / `try_restart` 使用。
+#[cfg(test)]
+pub(crate) fn test_workspace_uri() -> String {
+    path_to_uri(&test_workspace_dir())
+}
+
 #[cfg(test)]
 #[path = "uri_test.rs"]
 mod tests;

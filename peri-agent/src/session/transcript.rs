@@ -17,9 +17,23 @@ use anyhow::anyhow;
 
 use crate::agent::compact_v2::projection::MessageProjectionDirective;
 use crate::messages::{BaseMessage, MessageContent, MessageId};
-use crate::thread::{ThreadId, ThreadStore};
+use crate::thread::ThreadId;
+
+use peri_acp_types::session_resources::{RewindBoundary, SessionResources};
+use peri_acp_types::store::history;
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::{encode_system_reminder, TrustedSystemReminder};
+
+use persistence::{PersistenceBudget, Reservation};
+
+/// 待持久化积压默认上限（条数）。
+///
+/// 覆盖 channel 队列 + writer 待批量 + in-flight 批次三处；阈值是保守上界，
+/// 由 F 阶段按真实后端测量后校准（不得为了跑通而放宽到「等于没有界」）。
+pub const DEFAULT_PENDING_MAX_ITEMS: usize = 1024;
+
+/// 待持久化积压默认上限（字节，按 canonical payload 编码长度估算）。
+pub const DEFAULT_PENDING_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 // The command interceptor retains a clone while its cancellable pipeline owns the
 // transcript, so dropping that future cannot erase the persistence outcome.
@@ -77,6 +91,14 @@ impl TranscriptEntry {
     }
 
     /// Canonical model projection shared by normal Reason and compact rendering.
+    /// 转为 canonical 持久化载荷（与 `persisted_payloads` 同一映射，不另立格式）。
+    pub fn into_payload(self) -> PersistedPayload {
+        match self {
+            Self::Message(message) => PersistedPayload::Message(message),
+            Self::Reminder { id, reminder } => PersistedPayload::SystemReminder { id, reminder },
+        }
+    }
+
     pub fn project_message(&self) -> anyhow::Result<BaseMessage> {
         match self {
             Self::Message(message) => {
@@ -121,17 +143,31 @@ pub struct StagedData {
 // ─── PersistOp ────────────────────────────────────────────────────────────────
 
 /// 持久化操作 — 通过异步通道传递富操作给 writer task
+///
+/// 每个会产生写入的操作携带自己的[预算预留](Reservation)：追加方在持锁时同步预留，
+/// writer 在效果确定后归还。Barrier / Shutdown 不产生写入，也就不占额度。
 #[derive(Debug)]
 pub enum PersistOp {
-    /// 追加新消息
-    Append(TranscriptEntry),
-    /// Rewind 至指定 id（删除该 id 之后的所有记录）
-    RewindTo(MessageId),
-    /// 更新消息标记
-    UpdateFlags(MessageId, MessageFlags),
-    /// 批量应用 compaction（将来实现）
+    /// 追加新消息（canonical payload）
+    Append {
+        payload: PersistedPayload,
+        reserved: Reservation,
+    },
+    /// Transcript rewind 至指定 id（保留目标本身，删除其后记录）
+    RewindTo {
+        id: MessageId,
+        reserved: Reservation,
+    },
+    /// 更新消息标记（投影变更集）
+    UpdateFlags {
+        id: MessageId,
+        flags: MessageFlags,
+        reserved: Reservation,
+    },
+    /// 批量应用 compaction 标记变更（一次完整投影行为，缓存由资源侧维护）
     ApplyCompactionBatch {
         updates: Vec<(MessageId, MessageFlags)>,
+        reserved: Reservation,
     },
     /// 确认此前所有持久化操作均已实际调用 store
     Barrier(tokio::sync::oneshot::Sender<anyhow::Result<()>>),
@@ -170,9 +206,12 @@ pub struct MessageTranscript {
     /// 取消后可能不完整的临时 transcript。
     full_compaction_committed: bool,
     compaction_commit_state: CompactionCommitState,
-    /// 持久化后端引用（保留 Arc 让 store 在 transcript 存活期间不被释放，
-    /// spawned writer task 持有独立 clone）
-    store: Option<Arc<dyn ThreadStore>>,
+    /// 会话资源门面引用（保留 Arc 让资源在 transcript 存活期间不被释放，
+    /// spawned writer task 持有独立 clone）——compact 生命周期等**需要确认结果**的
+    /// 写入直接经它执行，不走普通 PersistOp 队列。
+    session_resources: Option<Arc<dyn SessionResources>>,
+    /// 待持久化预算（与 writer 共享）：条数/字节有界，预留失败即 sticky 失败。
+    budget: Option<Arc<PersistenceBudget>>,
 }
 
 impl std::fmt::Debug for MessageTranscript {
@@ -208,7 +247,8 @@ impl MessageTranscript {
             thread_id: None,
             full_compaction_committed: false,
             compaction_commit_state: CompactionCommitState::default(),
-            store: None,
+            session_resources: None,
+            budget: None,
         }
     }
 
@@ -260,20 +300,61 @@ impl MessageTranscript {
         self
     }
 
-    /// 绑定持久化后端
+    /// 绑定会话资源门面
     ///
-    /// 绑定后 append / rewind / 标记变更自动异步写入 ThreadStore。
-    /// 使用有序通道保证操作按调用顺序执行。
-    pub fn with_persistence(mut self, store: Arc<dyn ThreadStore>, thread_id: ThreadId) -> Self {
+    /// 绑定后 append / rewind / 投影变更自动异步写入门面（FIFO 单一 writer）。
+    /// 积压有界性由 [`PersistenceBudget`] 保证：追加在持锁时同步预留，writer 在
+    /// 效果确定后归还；预留失败即 sticky 失败（[`Self::persistence_failure`]），
+    /// 调用方据此停止后续工作并重载会话。
+    pub fn with_persistence(self, store: Arc<dyn SessionResources>, thread_id: ThreadId) -> Self {
+        let budget = PersistenceBudget::new(DEFAULT_PENDING_MAX_ITEMS, DEFAULT_PENDING_MAX_BYTES);
+        self.bind_persistence(store, thread_id, budget)
+    }
+
+    /// 绑定持久化后端并显式指定待持久化预算（测试与阈值测量入口）。
+    pub fn with_persistence_budget(
+        self,
+        store: Arc<dyn SessionResources>,
+        thread_id: ThreadId,
+        budget: Arc<PersistenceBudget>,
+    ) -> Self {
+        self.bind_persistence(store, thread_id, budget)
+    }
+
+    fn bind_persistence(
+        mut self,
+        store: Arc<dyn SessionResources>,
+        thread_id: ThreadId,
+        budget: Arc<PersistenceBudget>,
+    ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PersistOp>();
         self.persist_tx = Some(Arc::new(tx));
         self.thread_id = Some(thread_id.clone());
-        self.store = Some(store.clone());
+        self.session_resources = Some(store.clone());
+        self.budget = Some(Arc::clone(&budget));
 
-        let handle = tokio::spawn(persistence::run_writer(store, thread_id, rx));
+        let handle = tokio::spawn(persistence::run_writer(store, thread_id, budget, rx));
         self.persist_handle = Some(handle.abort_handle());
 
         self
+    }
+
+    /// 待持久化失败原因（sticky）：预算耗尽、writer 终态失败或写通道关闭。
+    ///
+    /// 非 `None` 表示热态已不可信：数据可能已进内存但未落盘，调用方必须停止后续
+    /// 模型/工具工作并让会话走冷重载，不得把当前快照当作已保存。
+    pub fn persistence_failure(&self) -> Option<String> {
+        self.budget.as_ref().and_then(|budget| budget.failure())
+    }
+
+    /// 是否已进入 sticky 持久化失败。
+    pub fn has_persistence_failure(&self) -> bool {
+        self.persistence_failure().is_some()
+    }
+
+    /// 预算句柄（测试断言积压上界用）。
+    pub fn persistence_budget(&self) -> Option<Arc<PersistenceBudget>> {
+        self.budget.clone()
     }
 
     // ── 查询 ──────────────────────────────────────────────────────────────────
@@ -321,7 +402,7 @@ impl MessageTranscript {
         self.id_index.insert(id, idx);
         self.entries
             .push(TranscriptEntry::Reminder { id, reminder });
-        self.send_persist(PersistOp::Append(self.entries[idx].clone()));
+        self.persist_appended_entry(self.entries[idx].clone());
         id
     }
 
@@ -413,8 +494,8 @@ impl MessageTranscript {
         let idx = self.entries.len();
         self.id_index.insert(id, idx);
         self.entries.push(TranscriptEntry::Message(message));
-        // 异步持久化
-        self.send_persist(PersistOp::Append(self.entries[idx].clone()));
+        // 异步持久化（先同步预留额度；无法预留时只留 sticky 失败，不假装已保存）
+        self.persist_appended_entry(self.entries[idx].clone());
         id
     }
 
@@ -427,7 +508,7 @@ impl MessageTranscript {
             self.id_index.insert(id, idx);
             self.entries.push(TranscriptEntry::Message(msg));
             ids.push(id);
-            self.send_persist(PersistOp::Append(self.entries[idx].clone()));
+            self.persist_appended_entry(self.entries[idx].clone());
         }
         ids
     }
@@ -479,7 +560,7 @@ impl MessageTranscript {
         self.id_index.insert(ai_id, ai_idx);
         self.entries
             .push(TranscriptEntry::Message(staged.ai_message));
-        self.send_persist(PersistOp::Append(self.entries[ai_idx].clone()));
+        self.persist_appended_entry(self.entries[ai_idx].clone());
 
         // 写入 ToolResult 列表
         for tool_result in staged.tool_results {
@@ -487,7 +568,7 @@ impl MessageTranscript {
             let idx = self.entries.len();
             self.id_index.insert(id, idx);
             self.entries.push(TranscriptEntry::Message(tool_result));
-            self.send_persist(PersistOp::Append(self.entries[idx].clone()));
+            self.persist_appended_entry(self.entries[idx].clone());
         }
     }
 
@@ -521,7 +602,7 @@ impl MessageTranscript {
         }
         self.flags.entry(id).or_default().truncated = value;
         let flags = self.flags[&id].clone();
-        self.send_persist(PersistOp::UpdateFlags(id, flags));
+        self.persist_flags(id, flags);
     }
 
     /// 设置 excluded 标记（Full / Smart compact）
@@ -531,7 +612,7 @@ impl MessageTranscript {
         }
         self.flags.entry(id).or_default().excluded = value;
         let flags = self.flags[&id].clone();
-        self.send_persist(PersistOp::UpdateFlags(id, flags));
+        self.persist_flags(id, flags);
     }
 
     /// 设置 projection directive（Micro compact）
@@ -543,11 +624,10 @@ impl MessageTranscript {
         if !self.can_update_own_flags(id) {
             return;
         }
-        let entry = self.flags.entry(id).or_default();
-        entry.truncated = true;
-        entry.projection = Some(directive);
-        let flags = self.flags[&id].clone();
-        self.send_persist(PersistOp::UpdateFlags(id, flags));
+        let existing = self.flags.get(&id).cloned().unwrap_or_default();
+        let flags = history::flags_with_projection(&existing, directive);
+        self.flags.insert(id, flags.clone());
+        self.persist_flags(id, flags);
     }
 
     /// 清除指定消息的所有标记
@@ -556,7 +636,7 @@ impl MessageTranscript {
             return;
         }
         self.flags.remove(&id);
-        self.send_persist(PersistOp::UpdateFlags(id, MessageFlags::default()));
+        self.persist_flags(id, MessageFlags::default());
     }
 
     /// 批量恢复消息标记（用于 session 恢复时从持久化存储加载 flags）
@@ -575,7 +655,7 @@ impl MessageTranscript {
     /// 仅在 store 事务成功后更新内存；事务已经持久化全部变更，不能再排队普通 PersistOp。
     pub async fn commit_compaction_lifecycle(
         &mut self,
-        lifecycle: crate::thread::CompactionLifecycle,
+        lifecycle: crate::thread::CompactionChange,
     ) -> anyhow::Result<()> {
         if self.compaction_commit_state.is_uncertain() {
             return Err(anyhow!(
@@ -583,7 +663,7 @@ impl MessageTranscript {
             ));
         }
 
-        let (store, thread_id) = match (&self.store, &self.thread_id) {
+        let (store, thread_id) = match (&self.session_resources, &self.thread_id) {
             (Some(store), Some(thread_id)) => (store.clone(), thread_id.clone()),
             _ => return Err(anyhow!("compact lifecycle requires persistence")),
         };
@@ -601,23 +681,27 @@ impl MessageTranscript {
             }
         }
 
-        let mut appended_ids = std::collections::HashSet::new();
-        for message in &lifecycle.appended_messages {
-            let id = message.id();
-            if self.id_index.contains_key(&id) || !appended_ids.insert(id) {
-                return Err(anyhow!(
-                    "compact lifecycle appended message id {id:?} already exists in transcript"
-                ));
-            }
-        }
+        // 追加消息的 id 必须与既有历史不冲突：同一 id 已存在或批次内重复都必须在
+        // 产生任何副作用之前失败（规则与 adapter 共用，见 store::history）。
+        history::ensure_distinct_ids(
+            &history::appended_payloads(&lifecycle.appended_messages),
+            |id| self.id_index.contains_key(&id),
+        )
+        .map_err(|error| anyhow!("compact lifecycle rejected: {error}"))?;
 
         // Both awaits can be cancelled, or report an error after durable effects. Only
         // applying the acknowledged lifecycle to memory makes this snapshot safe again.
+        //
+        // 顺序固定：先 flush 既有积压，再提交一次完整 compaction 行为（摘要、flags、
+        // 计数与缓存视图同一事务），成功后才改内存。失败/未证明时保留磁盘事实并让
+        // 热态保持失效（`is_uncertain`），不把内存视图推进到磁盘前面。
         self.compaction_commit_state.mark_pending();
         self.flush_persistence().await?;
-        store
-            .commit_compaction_lifecycle(&thread_id, &lifecycle)
-            .await?;
+        if let Err(error) = store.apply_compaction(&thread_id, &lifecycle).await {
+            return Err(anyhow!(
+                "compact persistence did not commit; reload the session to recover: {error}"
+            ));
+        }
         self.apply_compaction_lifecycle_memory(&lifecycle);
         self.compaction_commit_state.mark_committed();
 
@@ -625,17 +709,8 @@ impl MessageTranscript {
     }
 
     /// 应用已成功持久化的 compaction lifecycle，不发送普通 PersistOp。
-    fn apply_compaction_lifecycle_memory(
-        &mut self,
-        lifecycle: &crate::thread::CompactionLifecycle,
-    ) {
-        for (id, flags) in &lifecycle.flag_updates {
-            if *flags == MessageFlags::default() {
-                self.flags.remove(id);
-            } else {
-                self.flags.insert(*id, flags.clone());
-            }
-        }
+    fn apply_compaction_lifecycle_memory(&mut self, lifecycle: &crate::thread::CompactionChange) {
+        history::apply_flag_updates(&mut self.flags, &lifecycle.flag_updates);
 
         for message in &lifecycle.appended_messages {
             let id = message.id();
@@ -677,7 +752,8 @@ impl MessageTranscript {
             thread_id: self.thread_id.take(),
             full_compaction_committed: self.full_compaction_committed,
             compaction_commit_state: self.compaction_commit_state.clone(),
-            store: self.store.take(),
+            session_resources: self.session_resources.take(),
+            budget: self.budget.take(),
         }
     }
 
@@ -688,11 +764,12 @@ impl MessageTranscript {
     /// 同步收缩索引表、清空 staging。
     /// 若 id 不存在返回错误。
     pub fn rewind_to(&mut self, id: MessageId) -> Result<(), anyhow::Error> {
-        let target_idx = self
-            .id_index
-            .get(&id)
-            .copied()
-            .ok_or_else(|| anyhow!("rewind target id {id:?} not found in transcript"))?;
+        let ids: Vec<MessageId> = self.entries.iter().map(TranscriptEntry::id).collect();
+        // transcript rewind 保留目标本身（KeepThrough）；用户 rewind 的 RemoveFrom
+        // 是另一个边界，两者共用 store::history 的边界规则。
+        let keep_len = history::rewind_keep_len(&ids, RewindBoundary::KeepThrough(id))
+            .map_err(|_| anyhow!("rewind target id {id:?} not found in transcript"))?;
+        let target_idx = keep_len - 1;
 
         // ancestor 边界保护：不能 rewind 到祖先消息内部
         if target_idx < self.ancestor_len {
@@ -707,13 +784,10 @@ impl MessageTranscript {
         self.staged = None;
 
         // 收集要移除的 id（用于清理索引和标记）
-        let remove_ids: Vec<MessageId> = self.entries[target_idx + 1..]
-            .iter()
-            .map(|e| e.id())
-            .collect();
+        let remove_ids: Vec<MessageId> = ids[keep_len..].to_vec();
 
         // 截断 entries
-        self.entries.truncate(target_idx + 1);
+        self.entries.truncate(keep_len);
 
         // 收缩索引表
         for rid in &remove_ids {
@@ -721,8 +795,10 @@ impl MessageTranscript {
             self.flags.remove(rid);
         }
 
-        // 异步持久化 rewind
-        self.send_persist(PersistOp::RewindTo(id));
+        // 异步持久化 rewind（保留目标本身的 KeepThrough 边界）
+        if let Some(reserved) = self.reserve_persistence(Reservation::marker(1)) {
+            self.send_persist(PersistOp::RewindTo { id, reserved });
+        }
 
         Ok(())
     }
@@ -762,10 +838,56 @@ impl MessageTranscript {
             .map_err(|_| anyhow!("transcript persistence writer dropped barrier acknowledgement"))?
     }
 
-    /// 发送持久化操作到 writer task
+    /// 预留一笔待持久化额度：持锁期间同步完成，不 await。
+    ///
+    /// 预算耗尽时**不发送**该操作并留下 sticky 失败——数据已进 canonical 内存但
+    /// 没有落盘名额，调用方只能据 [`Self::persistence_failure`] 停止后续工作。
+    fn reserve_persistence(&self, reservation: Reservation) -> Option<Reservation> {
+        let budget = self.budget.as_ref()?;
+        match budget.try_reserve(reservation) {
+            Ok(()) => Some(reservation),
+            Err(reason) => {
+                tracing::error!(
+                    items = reservation.items,
+                    bytes = reservation.bytes,
+                    "transcript persistence backlog limit reached: {reason}"
+                );
+                None
+            }
+        }
+    }
+
+    /// 追加条目落盘：按 canonical payload 编码长度预留额度后投递。
+    fn persist_appended_entry(&self, entry: TranscriptEntry) {
+        let payload = entry.into_payload();
+        let Some(reserved) = self.reserve_persistence(Reservation::for_payload(&payload)) else {
+            return;
+        };
+        self.send_persist(PersistOp::Append { payload, reserved });
+    }
+
+    /// 投影/flags 变更落盘：队列里只有 id 与标记，按条数预留。
+    fn persist_flags(&self, id: MessageId, flags: MessageFlags) {
+        let Some(reserved) = self.reserve_persistence(Reservation::marker(1)) else {
+            return;
+        };
+        self.send_persist(PersistOp::UpdateFlags {
+            id,
+            flags,
+            reserved,
+        });
+    }
+
+    /// 发送持久化操作到 writer task（额度已在调用点预留）
     fn send_persist(&self, op: PersistOp) {
         if let Some(ref tx) = self.persist_tx {
             if let Err(e) = tx.send(op) {
+                // 通道关闭 = 写入不会发生：与预算耗尽同样是 sticky 失败。
+                if let Some(budget) = self.budget.as_ref() {
+                    budget.mark_failed(&format!(
+                        "transcript persistence writer channel closed: {e}"
+                    ));
+                }
                 tracing::warn!("transcript persist send failed (channel closed): {e}");
             }
         }

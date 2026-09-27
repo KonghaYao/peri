@@ -6,8 +6,16 @@ on:
     pull_request:
         branches: [main]
 
+# 同一 PR 只保留最新运行；main 的每次 push 仍独立验证。
+concurrency:
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
     CARGO_TERM_COLOR: always
+    # 仅关闭 CI 调试信息，减少编译、链接与缓存开销；保留断言和溢出检查。
+    CARGO_PROFILE_DEV_DEBUG: "0"
+    CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
     build:
@@ -31,23 +39,26 @@ jobs:
             - name: Checkout repository
               uses: actions/checkout@v7
 
-            - name: Install Rust toolchain
-              uses: dtolnay/rust-toolchain@master
-              with:
-                  toolchain: ${{ matrix.rust }}
-                  targets: ${{ matrix.target }}
-
-            - name: Cache cargo registry and build
-              uses: Swatinem/rust-cache@v2
-              with:
-                  key: ${{ matrix.target }}
-
+            # 平台无关的源码检查只在 Linux 执行，并在工具链和缓存恢复前快速失败。
             # §0 依赖方向 CI 门（Seam 3 完整版，PRD 决策 2）：八条边（TUI / ACP
             # 业务面 / ACP→model / Controller / Runtime / Resources / Middlewares /
             # Agent）× use 导入 + 全路径引用双模式全校验；豁免清单唯一事实源 =
             # scripts/import-exemptions.conf。
             - name: Check §0 layer imports
+              if: runner.os == 'Linux'
               run: bash scripts/check-layer-imports.sh
+
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@master
+              with:
+                  toolchain: ${{ matrix.rust }}
+                  targets: ${{ matrix.target }}
+                  components: clippy
+
+            - name: Cache cargo registry and build
+              uses: Swatinem/rust-cache@v2
+              with:
+                  key: ${{ matrix.target }}
 
             - name: Build
               run: cargo build --workspace --all-targets
@@ -63,10 +74,13 @@ jobs:
               working-directory: npm-packages/@peri-ptc
               run: bun run build
 
-            - name: Run tests
-              run: |
-                  cargo test --workspace --exclude peri-middlewares
-                  cargo test -p peri-middlewares -- --test-threads=1
+            # 分步记录耗时，也确保 Windows 下第一组失败不会被后续成功覆盖。
+            - name: Run workspace tests (excluding middlewares)
+              run: cargo test --workspace --exclude peri-middlewares
+
+            # 涉及进程级全局状态的测试仍须串行执行。
+            - name: Run middleware tests (serial)
+              run: cargo test -p peri-middlewares -- --test-threads=1
 
             - name: Clippy
               run: cargo clippy --workspace --all-targets -- -D warnings

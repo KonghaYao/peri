@@ -11,6 +11,9 @@ fn test_config() -> McpServerConfig {
         disabled: None,
         protocol_version: None,
         subscriptions: None,
+        system_mcp: None,
+        system_mcp_tools: None,
+        system_mcp_timeout: None,
         source: None,
     }
 }
@@ -151,4 +154,36 @@ fn test_oauth_field_skipped_when_disabled() {
         }
         _ => panic!("Expected StreamableHttp"),
     }
+}
+
+#[test]
+fn test_system_mcp_transport_rejects_invalid_typed_config() {
+    // 公开 struct 可手工构造：Deserialize 不是唯一闸门，建传输前同样要过契约校验。
+    for tools in [Some(Vec::new()), Some(vec!["search".to_string()])] {
+        let config = McpServerConfig {
+            command: Some("npx".to_string()),
+            system_mcp: Some(false),
+            system_mcp_tools: tools,
+            ..test_config()
+        };
+        let result = TransportConfig::try_from(&config);
+        assert!(
+            matches!(
+                result,
+                Err(TransportError::InvalidSystemConfig(
+                    McpServerConfigValidationError::SystemMcpToolsRequiresSystemMcp
+                ))
+            ),
+            "手工构造的非法 System 配置必须被传输层拒绝"
+        );
+    }
+
+    // 合法组合不受影响。
+    let valid = McpServerConfig {
+        command: Some("npx".to_string()),
+        system_mcp: Some(true),
+        system_mcp_tools: Some(Vec::new()),
+        ..test_config()
+    };
+    assert!(TransportConfig::try_from(&valid).is_ok());
 }

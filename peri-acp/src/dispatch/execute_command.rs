@@ -59,8 +59,8 @@ fn check_immediate_level(entry: &RouteEntry) -> Result<(), AcpError> {
 /// 随 `ui:` 域迁移统一处理，不引入 session_manager 依赖), and runs it
 /// synchronously (blocking the caller) and returns the updated message list.
 ///
-/// 存储访问经 `controller.sessions()`（ARC-BOUNDARY-001 方向），不再由调用方
-/// 直传 `thread_store`。
+/// 存储访问经 `controller.sessions()`（ARC-BOUNDARY-001 方向），不再由
+/// 调用方直传存储句柄。
 ///
 /// # Errors
 ///
@@ -195,7 +195,7 @@ pub async fn execute_command(
     ctx.raw_text = command_str.to_string();
     ctx.args = args_string;
     ctx.parsed_args = parsed_args;
-    ctx.thread_store = Some(controller.sessions());
+    ctx.session_resources = Some(controller.sessions());
     ctx.thread_id = thread_id;
     ctx.task_manager = task_manager;
     ctx.frozen_claude_md = frozen_claude_md;

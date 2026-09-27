@@ -110,143 +110,13 @@ fn test_system_reminder_projects_once_as_human() {
     );
 }
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use peri_acp_types::store::CompactionChange;
 
 use crate::messages::MessageContent;
-use crate::thread::{
-    CompactionLifecycle, FilesystemThreadStore, SqliteThreadStore, ThreadId, ThreadMeta,
-    ThreadStore,
-};
-use anyhow::Result;
-use async_trait::async_trait;
-use tempfile::tempdir;
-
-struct FaultInjectingStore {
-    fail_on: Vec<usize>,
-    fail_flag_on: Vec<usize>,
-    fail_invalidation: bool,
-    append_count: Mutex<usize>,
-    flag_count: Mutex<usize>,
-    invalidation_count: Mutex<usize>,
-    messages: Mutex<Vec<BaseMessage>>,
-}
-
-impl FaultInjectingStore {
-    fn new(fail_on: impl IntoIterator<Item = usize>) -> Self {
-        Self::with_failures(fail_on, [], false)
-    }
-
-    fn with_failures(
-        fail_on: impl IntoIterator<Item = usize>,
-        fail_flag_on: impl IntoIterator<Item = usize>,
-        fail_invalidation: bool,
-    ) -> Self {
-        Self {
-            fail_on: fail_on.into_iter().collect(),
-            fail_flag_on: fail_flag_on.into_iter().collect(),
-            fail_invalidation,
-            append_count: Mutex::new(0),
-            flag_count: Mutex::new(0),
-            invalidation_count: Mutex::new(0),
-            messages: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn messages(&self) -> Vec<BaseMessage> {
-        self.messages.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl ThreadStore for FaultInjectingStore {
-    async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId> {
-        Ok(meta.id)
-    }
-
-    async fn append_messages(&self, _id: &ThreadId, msgs: &[BaseMessage]) -> Result<()> {
-        for message in msgs {
-            let mut append_count = self.append_count.lock().unwrap();
-            *append_count += 1;
-            if self.fail_on.contains(&*append_count) {
-                anyhow::bail!("deterministic injected error on append {}", *append_count);
-            }
-            self.messages.lock().unwrap().push(message.clone());
-        }
-        Ok(())
-    }
-
-    async fn load_messages(&self, _id: &ThreadId) -> Result<Vec<BaseMessage>> {
-        Ok(self.messages())
-    }
-
-    async fn load_meta(&self, _id: &ThreadId) -> Result<ThreadMeta> {
-        Ok(ThreadMeta::new("/test"))
-    }
-
-    async fn update_meta(&self, _id: &ThreadId, _meta: ThreadMeta) -> Result<()> {
-        Ok(())
-    }
-
-    async fn list_threads(&self) -> Result<Vec<ThreadMeta>> {
-        Ok(Vec::new())
-    }
-
-    async fn delete_thread(&self, _id: &ThreadId) -> Result<()> {
-        Ok(())
-    }
-
-    async fn load_context(&self, _thread_id: &ThreadId) -> Result<Vec<BaseMessage>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_child_threads(&self, _parent_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_session_threads(&self, _root_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
-        Ok(Vec::new())
-    }
-
-    async fn update_thread_status(&self, _id: &ThreadId, _status: &str) -> Result<()> {
-        Ok(())
-    }
-
-    async fn invalidate_context_cache(&self, _thread_id: &ThreadId) -> Result<()> {
-        let mut invalidation_count = self.invalidation_count.lock().unwrap();
-        *invalidation_count += 1;
-        if self.fail_invalidation {
-            anyhow::bail!(
-                "deterministic injected error on cache invalidation {}",
-                *invalidation_count
-            );
-        }
-        Ok(())
-    }
-
-    async fn update_message_flags(
-        &self,
-        _message_id: &MessageId,
-        _flags: &MessageFlags,
-    ) -> Result<()> {
-        let mut flag_count = self.flag_count.lock().unwrap();
-        *flag_count += 1;
-        if self.fail_flag_on.contains(&*flag_count) {
-            anyhow::bail!(
-                "deterministic injected error on flag update {}",
-                *flag_count
-            );
-        }
-        Ok(())
-    }
-
-    async fn delete_messages(
-        &self,
-        _thread_id: &ThreadId,
-        _message_ids: &[MessageId],
-    ) -> Result<()> {
-        Ok(())
-    }
-}
+use crate::session::test_resources::mock::MockSessionResources;
+use crate::session::test_resources::TestSession;
 
 fn make_human(text: &str) -> BaseMessage {
     BaseMessage::human(MessageContent::text(text.to_string()))
@@ -263,371 +133,220 @@ fn make_tool_result(tool_call_id: &str, text: &str) -> BaseMessage {
     )
 }
 
-// ── Compaction lifecycle 原子提交 ───────────────────────────────────────────
+// ── 持久化行为（内存门面替身 + 真实 SQLite 夹具）──────────────────────────
+//
+// 断言以可观察结果为准：落库内容/顺序、投影与 rewind 的实际效果、失败后的 sticky
+// 状态与「未保存」如实上报、预算耗尽时写入被拒。真实后端路径另有
+// [`TestSession`](crate::session::test_resources::TestSession) 覆盖（真门面 + 真库
+// + 活跃 owner，不靠替身自洽）。
 
+fn mock_store() -> Arc<MockSessionResources> {
+    MockSessionResources::new()
+}
+
+fn persisted_messages(store: &MockSessionResources) -> Vec<BaseMessage> {
+    store
+        .payloads()
+        .iter()
+        .filter_map(|payload| payload.as_message().cloned())
+        .collect()
+}
+
+/// 追加与 flush 之后，真实 SQLite 后端必须逐条可读且顺序不变。
 #[tokio::test]
-async fn test_commit_compaction_lifecycle_sqlite_updates_memory_and_store_atomically() {
-    let dir = tempdir().unwrap();
-    let store = SqliteThreadStore::new(dir.path().join("transcript-lifecycle.db"))
+async fn test_flush_persistence_makes_appends_visible() {
+    let session = TestSession::open().await;
+    let mut transcript =
+        MessageTranscript::new().with_persistence(session.resources(), session.thread_id.clone());
+
+    transcript.append(make_human("persisted message"));
+    transcript.append(make_ai("assistant reply"));
+    transcript.flush_persistence().await.unwrap();
+
+    let snapshot = session
+        .resources()
+        .load_session_snapshot(&session.thread_id)
         .await
         .unwrap();
-    let thread_id = store.create_thread(ThreadMeta::new("/test")).await.unwrap();
-    let store: Arc<dyn ThreadStore> = Arc::new(store);
-    let mut transcript =
-        MessageTranscript::new().with_persistence(store.clone(), thread_id.clone());
+    let contents: Vec<String> = snapshot
+        .payloads
+        .iter()
+        .filter_map(|payload| payload.as_message())
+        .map(|message| message.content())
+        .collect();
+    assert_eq!(contents, vec!["persisted message", "assistant reply"]);
+}
 
-    let first_id = transcript.append(make_human("原始用户消息"));
-    let second_id = transcript.append(make_ai("原始助手回复"));
+/// 写入失败后 flush 如实报错，且错误是 sticky 的：后续 flush 仍报同一原因；
+/// 已经进入内存但未落库的内容不会被说成已保存。
+#[tokio::test]
+async fn test_flush_persistence_failure_is_sticky() {
+    let mut session = TestSession::open().await;
+    let mut transcript =
+        MessageTranscript::new().with_persistence(session.resources(), session.thread_id.clone());
+    transcript.append(make_human("cannot be persisted"));
+    // 丢弃执行所有权：此后写入按 LeaseRequired 真实失败（不是 mock 假装失败）
+    session.release_lease();
+
+    let error = transcript.flush_persistence().await.unwrap_err();
+    let repeated = transcript.flush_persistence().await.unwrap_err();
+    assert_eq!(
+        repeated.to_string(),
+        error.to_string(),
+        "失败必须是 sticky 的"
+    );
+    assert!(transcript.has_persistence_failure());
+
+    let snapshot = session
+        .resources()
+        .load_session_snapshot(&session.thread_id)
+        .await
+        .unwrap();
+    assert!(snapshot.payloads.is_empty(), "写入未成立时不得留下半条");
+}
+
+/// 预算耗尽：追加在持锁时同步预留，无法预留即 sticky 失败，且**不把 payload 交给
+/// 后端**（不接受「先写再说」）。
+#[tokio::test]
+async fn test_persistence_budget_exhaustion_is_sticky_and_rejects_writes() {
+    let store = mock_store();
+    let budget = super::persistence::PersistenceBudget::new(1, 8);
+    let mut transcript = MessageTranscript::new().with_persistence_budget(
+        store.clone(),
+        "budget-exhausted".to_string(),
+        budget,
+    );
+
+    transcript.append(make_human(
+        "this payload is larger than the whole byte budget",
+    ));
+    assert!(
+        transcript.has_persistence_failure(),
+        "无法预留时必须留下 sticky 失败"
+    );
+    let error = transcript.flush_persistence().await.unwrap_err();
+    assert!(
+        error.to_string().contains("budget"),
+        "错误必须指出预算耗尽: {error}"
+    );
+    assert_eq!(store.append_calls(), 0, "被拒的写入不得触达后端");
+    assert!(store.payloads().is_empty());
+}
+
+/// 没有绑定持久化后端时 flush 是不报错的 no-op（不制造失败，也不声称保存）。
+#[tokio::test]
+async fn test_flush_persistence_without_backend_is_ok() {
+    MessageTranscript::new().flush_persistence().await.unwrap();
+}
+
+/// 投影与 rewind 各走一次完整行为：flags 落库、rewind 截断、缓存视图由资源侧维护
+/// （不再由调用方逐条 update + 另行 invalidation）。
+#[tokio::test]
+async fn test_projection_and_rewind_use_single_behaviors() {
+    let store = mock_store();
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), "projection".to_string());
+
+    let first = transcript.append(make_human("first"));
+    let second = transcript.append(make_ai("second"));
+    transcript.flush_persistence().await.unwrap();
+    assert_eq!(
+        store.append_calls(),
+        1,
+        "同一窗口内的追加应合并为一次批量写入"
+    );
+    assert_eq!(store.payloads().len(), 2);
+
+    transcript.set_excluded(first, true);
+    transcript.flush_persistence().await.unwrap();
+    assert!(store.flags(&first).excluded);
+
+    transcript.rewind_to(first).unwrap();
+    transcript.flush_persistence().await.unwrap();
+    let messages = persisted_messages(&store);
+    assert_eq!(messages.len(), 1, "rewind 保留目标本身（KeepThrough）");
+    assert_eq!(messages[0].id(), first);
+    assert!(messages.iter().all(|message| message.id() != second));
+    assert_eq!(store.rewind_calls(), 1);
+}
+
+/// compaction 生命周期：一次完整行为提交（摘要、flags、追加消息），成功才改内存；
+/// 失败时磁盘事实保留、内存视图不前进，热态标记为不确定（必须冷重载）。
+#[tokio::test]
+async fn test_commit_compaction_lifecycle_is_atomic_or_uncertain() {
+    let store = mock_store();
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), "lifecycle".to_string());
+
+    let first = transcript.append(make_human("原始用户消息"));
     transcript.flush_persistence().await.unwrap();
 
     let summary = make_human("压缩摘要");
-    let reinject = make_human("重新注入的用户上下文");
-    let summary_id = summary.id();
-    let reinject_id = reinject.id();
-    transcript
-        .commit_compaction_lifecycle(CompactionLifecycle {
-            flag_updates: vec![
-                (
-                    first_id,
-                    MessageFlags {
-                        excluded: true,
-                        ..Default::default()
-                    },
-                ),
-                (
-                    second_id,
-                    MessageFlags {
-                        excluded: true,
-                        ..Default::default()
-                    },
-                ),
-            ],
-            appended_messages: vec![summary, reinject],
-        })
-        .await
-        .unwrap();
-
-    assert_eq!(transcript.entries().len(), 4);
-    let visible = transcript.visible_messages();
-    assert_eq!(visible.len(), 2);
-    assert_eq!(visible[0].id(), summary_id);
-    assert_eq!(visible[1].id(), reinject_id);
-    assert!(transcript.flags(first_id).excluded);
-    assert!(transcript.flags(second_id).excluded);
-
-    let messages = store.load_messages(&thread_id).await.unwrap();
-    assert_eq!(messages.len(), 4);
-    assert_eq!(messages[0].id(), first_id);
-    assert_eq!(messages[1].id(), second_id);
-    assert_eq!(messages[2].id(), summary_id);
-    assert_eq!(messages[3].id(), reinject_id);
-    let flags = store.load_message_flags(&thread_id).await.unwrap();
-    assert!(flags[&first_id].excluded);
-    assert!(flags[&second_id].excluded);
-}
-
-#[tokio::test]
-async fn test_commit_compaction_lifecycle_waits_for_pending_sqlite_appends_in_fifo_order() {
-    let dir = tempdir().unwrap();
-    let store = SqliteThreadStore::new(dir.path().join("transcript-lifecycle-fifo.db"))
-        .await
-        .unwrap();
-    let thread_id = store.create_thread(ThreadMeta::new("/test")).await.unwrap();
-    let store: Arc<dyn ThreadStore> = Arc::new(store);
-    let mut transcript =
-        MessageTranscript::new().with_persistence(store.clone(), thread_id.clone());
-
-    let first_id = transcript.append(make_human("FIFO 原始用户消息"));
-    let second_id = transcript.append(make_ai("FIFO 原始助手回复"));
-
-    let summary = make_human("FIFO 压缩摘要");
     let summary_id = summary.id();
     transcript
-        .commit_compaction_lifecycle(CompactionLifecycle {
-            flag_updates: vec![
-                (
-                    first_id,
-                    MessageFlags {
-                        excluded: true,
-                        ..Default::default()
-                    },
-                ),
-                (
-                    second_id,
-                    MessageFlags {
-                        excluded: true,
-                        ..Default::default()
-                    },
-                ),
-            ],
+        .commit_compaction_lifecycle(CompactionChange {
+            flag_updates: vec![(
+                first,
+                MessageFlags {
+                    excluded: true,
+                    ..Default::default()
+                },
+            )],
             appended_messages: vec![summary],
         })
         .await
         .unwrap();
+    assert_eq!(store.compaction_calls(), 1, "compaction 必须一次提交");
+    assert!(store.flags(&first).excluded);
+    assert!(persisted_messages(&store)
+        .iter()
+        .any(|message| message.id() == summary_id));
+    assert!(transcript.compaction_commit_state().has_committed());
+    assert!(transcript.get(summary_id).is_some(), "成功后才改内存");
 
-    let messages = store.load_messages(&thread_id).await.unwrap();
-    assert_eq!(messages.len(), 3);
-    assert_eq!(messages[0].id(), first_id);
-    assert_eq!(messages[1].id(), second_id);
-    assert_eq!(messages[2].id(), summary_id);
-    let flags = store.load_message_flags(&thread_id).await.unwrap();
-    assert!(flags[&first_id].excluded);
-    assert!(flags[&second_id].excluded);
-
-    assert_eq!(transcript.entries().len(), 3);
-    assert!(transcript.flags(first_id).excluded);
-    assert!(transcript.flags(second_id).excluded);
-    let visible = transcript.visible_messages();
-    assert_eq!(visible.len(), 1);
-    assert_eq!(visible[0].id(), summary_id);
-}
-
-#[tokio::test]
-async fn test_commit_compaction_lifecycle_filesystem_failure_leaves_memory_and_store_unchanged() {
-    let dir = tempdir().unwrap();
-    let store: Arc<dyn ThreadStore> = Arc::new(FilesystemThreadStore::new(dir.path()));
-    let thread_id = store.create_thread(ThreadMeta::new("/test")).await.unwrap();
-    let mut transcript =
-        MessageTranscript::new().with_persistence(store.clone(), thread_id.clone());
-
-    let first_id = transcript.append(make_human("文件系统原始用户消息"));
-    let second_id = transcript.append(make_ai("文件系统原始助手回复"));
-    transcript.flush_persistence().await.unwrap();
-
-    let summary = make_human("文件系统不应追加的摘要");
-    let summary_id = summary.id();
-    let error = transcript
-        .commit_compaction_lifecycle(CompactionLifecycle {
-            flag_updates: vec![
-                (
-                    first_id,
-                    MessageFlags {
-                        excluded: true,
-                        ..Default::default()
-                    },
-                ),
-                (
-                    second_id,
-                    MessageFlags {
-                        excluded: true,
-                        ..Default::default()
-                    },
-                ),
-            ],
-            appended_messages: vec![summary],
+    let store2 = mock_store();
+    store2.fail_compaction();
+    let mut failing =
+        MessageTranscript::new().with_persistence(store2.clone(), "lifecycle-fail".to_string());
+    let id = failing.append(make_human("keep me"));
+    failing.flush_persistence().await.unwrap();
+    let extra = make_human("never applied");
+    let extra_id = extra.id();
+    let result = failing
+        .commit_compaction_lifecycle(CompactionChange {
+            flag_updates: vec![(
+                id,
+                MessageFlags {
+                    excluded: true,
+                    ..Default::default()
+                },
+            )],
+            appended_messages: vec![extra],
         })
-        .await
-        .unwrap_err();
-    let error_message = error.to_string().to_lowercase();
+        .await;
+    assert!(result.is_err(), "提交失败必须如实返回错误");
+    assert!(!store2.flags(&id).excluded, "失败时磁盘事实不得被改");
+    assert!(persisted_messages(&store2)
+        .iter()
+        .all(|message| message.id() != extra_id));
+    assert!(failing.get(extra_id).is_none(), "失败时内存不得前进");
     assert!(
-        error_message.contains("filesystem") || error_message.contains("sqltiethreadstore"),
-        "文件系统 store 必须明确拒绝 compact lifecycle: {error}"
+        failing.compaction_commit_state().is_uncertain(),
+        "失败后热态必须失效（冷重载才能恢复）"
     );
-
-    assert_eq!(transcript.entries().len(), 2);
-    let visible = transcript.visible_messages();
-    assert_eq!(visible.len(), 2);
-    assert_eq!(visible[0].id(), first_id);
-    assert_eq!(visible[1].id(), second_id);
-    assert_eq!(transcript.flags(first_id), MessageFlags::default());
-    assert_eq!(transcript.flags(second_id), MessageFlags::default());
-
-    let messages = store.load_messages(&thread_id).await.unwrap();
-    assert_eq!(messages.len(), 2);
-    assert!(messages.iter().all(|message| message.id() != summary_id));
-    let flags = store.load_message_flags(&thread_id).await.unwrap();
-    assert!(flags.is_empty());
 }
 
-/// [回归测试] compact 历史必须从 canonical transcript 持久化，而非从模型投影重建。
-/// reminder 在摘要前保留或在摘要后追加，冷重载均保持同一 typed payload 和顺序。
+/// rebuild 保留持久化绑定：写入继续到同一个后端，顺序与既有历史都不丢。
+///
+/// rebuild 只替换内存视图（compact 的 canonical 变更由 `commit_compaction_lifecycle`
+/// 承担），**不删除**后端已保存的历史——因此这里断言的是「旧消息仍在、新消息按顺序
+/// 追加」，而不是「旧 id 消失」。
 #[tokio::test]
-async fn test_compaction_reload_preserves_canonical_reminder_once() {
-    use peri_acp_types::system_reminder::{
-        encode_system_reminder, ReminderAudience, ReminderAudiences, ReminderCategory,
-        ReminderDelivery, ReminderSeverity, ReminderSource, SystemReminder,
-        TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
-    };
-    let dir = tempdir().unwrap();
-    for reminder_after_compact in [false, true] {
-        let db_path = dir
-            .path()
-            .join(format!("reminder-{reminder_after_compact}.db"));
-        let store: Arc<dyn ThreadStore> = Arc::new(SqliteThreadStore::new(&db_path).await.unwrap());
-        let thread_id = store.create_thread(ThreadMeta::new("/test")).await.unwrap();
-        let reminder = TrustedSystemReminderFactory::for_producer()
-            .construct(SystemReminder {
-                version: SYSTEM_REMINDER_VERSION,
-                category: ReminderCategory::Task,
-                source: ReminderSource("compact_reload_test".into()),
-                kind: "notice".into(),
-                severity: ReminderSeverity::Info,
-                delivery: ReminderDelivery::Configurable,
-                audiences: ReminderAudiences(vec![ReminderAudience::Model]),
-                body: "canonical reminder".into(),
-                summary: None,
-                metadata: serde_json::json!({}),
-            })
-            .unwrap();
-        let encoded_reminder = encode_system_reminder(&reminder).unwrap();
-        let mut transcript =
-            MessageTranscript::new().with_persistence(store.clone(), thread_id.clone());
-        let first_id = transcript.append(make_human("旧用户消息"));
-        let existing_reminder =
-            (!reminder_after_compact).then(|| transcript.append_system_reminder(reminder.clone()));
-        let second_id = transcript.append(make_ai("旧助手回答"));
-        let summary = make_human("压缩摘要");
-        let summary_id = summary.id();
-        // 不手工删行：生产 API 先排空 writer，再原子追加摘要与 excluded flags。
-        transcript
-            .commit_compaction_lifecycle(CompactionLifecycle {
-                flag_updates: [first_id, second_id]
-                    .into_iter()
-                    .map(|id| {
-                        (
-                            id,
-                            MessageFlags {
-                                excluded: true,
-                                ..Default::default()
-                            },
-                        )
-                    })
-                    .collect(),
-                appended_messages: vec![summary],
-            })
-            .await
-            .unwrap();
-        let reminder_id =
-            existing_reminder.unwrap_or_else(|| transcript.append_system_reminder(reminder));
-        transcript.flush_persistence().await.unwrap();
-        let canonical = transcript.persisted_payloads();
-        let visible_ids = if reminder_after_compact {
-            vec![summary_id, reminder_id]
-        } else {
-            vec![reminder_id, summary_id]
-        };
-        assert_eq!(
-            transcript
-                .visible_model_messages()
-                .unwrap()
-                .iter()
-                .map(BaseMessage::id)
-                .collect::<Vec<_>>(),
-            visible_ids
-        );
-        transcript.shutdown_persistence();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while transcript.flush_persistence().await.is_ok() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("冷重载前 writer 必须退出");
-        drop(transcript);
-        drop(store);
-        // 新建 SQLite store 和 transcript，从磁盘 payload/flags 恢复。
-        let reopened = SqliteThreadStore::new(&db_path).await.unwrap();
-        let loaded = reopened.load_payloads(&thread_id).await.unwrap();
-        let flags = reopened.load_message_flags(&thread_id).await.unwrap();
-        assert_eq!(
-            loaded.len(),
-            4,
-            "compact 保留旧 canonical 行，以 flags 控制可见性"
-        );
-        let encoded = |payloads: &[PersistedPayload]| {
-            payloads
-                .iter()
-                .map(|payload| {
-                    serde_json::from_str::<serde_json::Value>(
-                        &peri_acp_types::store::serialize_persisted_payload(payload).unwrap(),
-                    )
-                    .unwrap()
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(encoded(&loaded), encoded(&canonical));
-        assert_eq!(
-            loaded
-                .iter()
-                .filter(|payload| payload.id() == reminder_id)
-                .count(),
-            1
-        );
-        assert!(matches!(
-            loaded
-                .iter()
-                .find(|payload| payload.id() == reminder_id)
-                .unwrap(),
-            PersistedPayload::SystemReminder { .. }
-        ));
-        let mut restored = MessageTranscript::new().with_own_payloads(loaded);
-        restored.set_flags_batch(flags);
-        let projected = restored.visible_model_messages().unwrap();
-        assert_eq!(
-            projected.iter().map(BaseMessage::id).collect::<Vec<_>>(),
-            visible_ids
-        );
-        assert_eq!(
-            projected
-                .iter()
-                .find(|message| message.id() == reminder_id)
-                .unwrap()
-                .content(),
-            encoded_reminder
-        );
-        assert_eq!(
-            restored.visible_messages().len(),
-            1,
-            "普通消息视图只含摘要，不将 reminder 反写为普通 human"
-        );
-    }
-}
-
-// ── 持久化 flush/barrier ───────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_message_transcript_flush_persistence_makes_appends_visible() {
-    let store = Arc::new(FaultInjectingStore::new([]));
-    let mut transcript =
-        MessageTranscript::new().with_persistence(store.clone(), "flush-visible".to_string());
-
-    transcript.append(make_human("persisted message"));
-    transcript.flush_persistence().await.unwrap();
-
-    let messages = store.messages();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].content(), "persisted message");
-}
-
-#[tokio::test]
-async fn test_message_transcript_flush_persistence_failure_is_sticky() {
-    let store = Arc::new(FaultInjectingStore::new([2]));
-    let mut transcript =
-        MessageTranscript::new().with_persistence(store.clone(), "flush-error".to_string());
-
-    transcript.append(make_human("first"));
-    transcript.append(make_human("second"));
-
-    let error = transcript.flush_persistence().await.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("deterministic injected error on append 2"),
-        "flush 应返回 barrier 后首个写入错误: {error}"
-    );
-    assert_eq!(store.messages().len(), 1, "失败写入不应伪装为成功");
-
-    let repeated = transcript.flush_persistence().await.unwrap_err();
-    assert_eq!(repeated.to_string(), error.to_string());
-}
-
-#[tokio::test]
-async fn test_message_transcript_rebuild_keeps_persistence_writer_alive() {
-    let store = Arc::new(FaultInjectingStore::new([]));
+async fn test_rebuild_keeps_persistence_writer_alive() {
+    let store = mock_store();
     let mut transcript =
         MessageTranscript::new().with_persistence(store.clone(), "rebuild-writer".to_string());
-
-    transcript.append(make_human("rebuild 前消息"));
+    let id = transcript.append(make_human("before rebuild"));
     transcript.flush_persistence().await.unwrap();
 
     let entries: Vec<(BaseMessage, MessageFlags)> = transcript
@@ -637,164 +356,67 @@ async fn test_message_transcript_rebuild_keeps_persistence_writer_alive() {
         .collect();
     let mut rebuilt = transcript.rebuild(entries);
 
-    rebuilt.append(make_human("rebuild 后消息"));
+    rebuilt.append(make_human("appended after rebuild"));
     rebuilt.flush_persistence().await.unwrap();
 
-    let messages = store.messages();
-    assert_eq!(messages.len(), 2, "rebuild 后追加的消息必须持久化");
-    assert_eq!(messages[1].content(), "rebuild 后消息");
-}
-
-#[tokio::test]
-async fn test_message_transcript_flush_persistence_returns_first_of_multiple_errors() {
-    let store = Arc::new(FaultInjectingStore::new([2, 3]));
-    let mut transcript =
-        MessageTranscript::new().with_persistence(store.clone(), "multiple-errors".to_string());
-
-    transcript.append(make_human("first"));
-    transcript.append(make_human("second"));
-    transcript.append(make_human("third"));
-
-    let error = transcript.flush_persistence().await.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("deterministic injected error on append 2"),
-        "同一 barrier 前的多个写入失败必须返回第一个错误: {error}"
-    );
-    assert_eq!(store.messages().len(), 1, "后续操作不得越过首次失败");
-
-    let repeated = transcript.flush_persistence().await.unwrap_err();
-    assert_eq!(repeated.to_string(), error.to_string());
-}
-
-#[tokio::test]
-async fn test_apply_compaction_batch_returns_first_flag_error_and_invalidates_cache() {
-    let store = Arc::new(FaultInjectingStore::with_failures([], [1, 2], false));
-    let transcript = MessageTranscript::new()
-        .with_persistence(store.clone(), "batch-first-flag-error".to_string());
-
-    transcript.send_persist(PersistOp::ApplyCompactionBatch {
-        updates: vec![
-            (MessageId::new(), MessageFlags::default()),
-            (MessageId::new(), MessageFlags::default()),
-        ],
-    });
-
-    let error = transcript.flush_persistence().await.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("deterministic injected error on flag update 1"),
-        "batch 必须向 barrier 暴露第一个 flag 更新失败: {error}"
-    );
-    assert_eq!(*store.flag_count.lock().unwrap(), 2, "后续更新仍应执行");
+    let messages = persisted_messages(&store);
     assert_eq!(
-        *store.invalidation_count.lock().unwrap(),
-        1,
-        "batch 必须只失效一次缓存"
+        messages.len(),
+        2,
+        "rebuild 不重写后端，追加的消息必须持久化"
     );
+    assert_eq!(messages[0].id(), id, "既有历史必须保留原 id 与顺序");
+    assert_eq!(messages[1].content(), "appended after rebuild");
 }
 
-#[tokio::test]
-async fn test_apply_compaction_batch_returns_cache_invalidation_error() {
-    let store = Arc::new(FaultInjectingStore::with_failures([], [], true));
-    let transcript =
-        MessageTranscript::new().with_persistence(store, "batch-invalidation-error".to_string());
-
-    transcript.send_persist(PersistOp::ApplyCompactionBatch {
-        updates: vec![(MessageId::new(), MessageFlags::default())],
-    });
-
-    let error = transcript.flush_persistence().await.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("deterministic injected error on cache invalidation 1"),
-        "cache invalidation 失败必须向 barrier 暴露: {error}"
-    );
-}
-
-#[tokio::test]
-async fn test_message_transcript_flush_persistence_without_backend_is_ok() {
-    MessageTranscript::new().flush_persistence().await.unwrap();
-}
-
-// ── Drop 优雅关闭（issue 2026-08-05-transcript-drop-loses-final-messages）─────────
-//
-// Drop 不得 abort writer：abort 会立即取消任务，pending_appends 和通道中未处理的
-// 消息被直接丢弃。改为发送 Shutdown 信号，writer flush 剩余积压后自行退出。
-// writer 是 detached task（持有 store 的独立 Arc），测试用轮询验证最终落库。
-
-#[tokio::test]
-async fn test_drop_flushes_pending_appends_to_store() {
-    // 不调用 flush_persistence 直接 drop：模拟 turn 正常结束，最终回答落在
-    // 100ms 批量窗口内未落库的场景。drop 后最后一批必须仍全部落库。
-    let store = Arc::new(FaultInjectingStore::new([]));
-    {
-        let mut transcript =
-            MessageTranscript::new().with_persistence(store.clone(), "drop-flush".to_string());
-        transcript.append(make_human("final-answer-1"));
-        transcript.append(make_human("final-answer-2"));
-    }
-
-    // writer detached：轮询 store 直到最后一批落库（带超时防挂死）
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if store.messages().len() >= 2 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("drop 后 writer 应在超时前 flush 剩余消息");
-
-    let messages = store.messages();
-    assert_eq!(messages.len(), 2, "drop 后最后一批消息必须全部落库");
-    assert_eq!(
-        messages[0].content(),
-        "final-answer-1",
-        "落库顺序必须与 append 顺序一致"
-    );
-    assert_eq!(
-        messages[1].content(),
-        "final-answer-2",
-        "落库顺序必须与 append 顺序一致"
-    );
-}
-
-#[tokio::test]
-async fn test_drop_without_persistence_is_noop() {
-    // 无持久化绑定时 drop 不应 panic / 不应有副作用
-    drop(MessageTranscript::new());
-}
-
+/// 关闭语义：shutdown 先 flush 积压再退出；退出后 flush 报错（通道关闭）。
 #[tokio::test]
 async fn test_shutdown_persistence_flushes_pending_and_writer_exits() {
-    let store = Arc::new(FaultInjectingStore::new([]));
+    let store = mock_store();
     let mut transcript =
         MessageTranscript::new().with_persistence(store.clone(), "shutdown-flush".to_string());
     transcript.append(make_human("last batch before shutdown"));
 
     transcript.shutdown_persistence();
 
-    // writer 收到 Shutdown 后 flush 剩余并退出；退出后通道关闭，
-    // flush_persistence 应返回错误（channel closed）——轮询等待该状态
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while let Ok(()) = transcript.flush_persistence().await {
+        while transcript.flush_persistence().await.is_ok() {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("shutdown 后 writer 应在超时前 flush 并退出");
 
-    let messages = store.messages();
+    let messages = persisted_messages(&store);
     assert_eq!(messages.len(), 1, "shutdown 前积压的消息必须落库");
     assert_eq!(messages[0].content(), "last batch before shutdown");
 }
 
-// ── 基础构造 ──────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn test_drop_flushes_pending_appends_to_store() {
+    let store = mock_store();
+    {
+        let mut transcript =
+            MessageTranscript::new().with_persistence(store.clone(), "drop-flush".to_string());
+        transcript.append(make_human("flush on drop"));
+        // writer 持有独立 Arc；Drop 只发 Shutdown，detached 收尾
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while persisted_messages(&store).is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Drop 后 writer 必须完成收尾写入");
+
+    let messages = persisted_messages(&store);
+    assert_eq!(messages[0].content(), "flush on drop");
+}
+
+#[tokio::test]
+async fn test_drop_without_persistence_is_noop() {
+    drop(MessageTranscript::new());
+}
 
 #[test]
 fn test_new_transcript_is_empty() {
@@ -1315,81 +937,4 @@ fn test_projection_directive_none_when_not_set() {
         !json.contains("projection"),
         "JSON 应不含 projection 字段（skip_serializing_if）"
     );
-}
-/// The terminal failure must disarm batching: pending payloads are retained for
-/// diagnostics, but only a new channel operation may wake the failed writer.
-#[tokio::test(start_paused = true)]
-async fn test_failed_writer_does_not_rearm_expired_batch_deadline() {
-    use std::future::Future;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct WakeCounter(AtomicUsize);
-    impl Wake for WakeCounter {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    let store = Arc::new(FaultInjectingStore::new([1]));
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut writer = Box::pin(super::persistence::run_writer(
-        store.clone(),
-        "failed-writer-idle".into(),
-        rx,
-    ));
-    let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
-    let waker = Waker::from(Arc::clone(&wakes));
-    tx.send(PersistOp::Append(TranscriptEntry::Message(make_human(
-        "not persisted",
-    ))))
-    .unwrap();
-    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-    tx.send(PersistOp::Barrier(ack_tx)).unwrap();
-    // Poll the actual production future through Append -> failed flush -> Barrier.
-    // No executor task is attached to this waker, so an expired timer cannot
-    // automatically repoll the old writer into a hot loop in the test itself.
-    assert!(matches!(
-        writer.as_mut().poll(&mut Context::from_waker(&waker)),
-        Poll::Pending
-    ));
-    let first_error = ack_rx.await.unwrap().unwrap_err().to_string();
-    assert!(first_error.contains("deterministic injected error on append 1"));
-    assert!(store.messages().is_empty());
-    let before = wakes.0.load(Ordering::SeqCst);
-
-    // The production deadline was registered during the first poll (<=100ms).
-    // Its std::Instant bookkeeping need not change: no second writer poll occurs
-    // before this assertion. A subsequent virtual timer ensures the time driver
-    // has processed the earlier deadline before we inspect the counter.
-    tokio::time::advance(std::time::Duration::from_millis(150)).await;
-    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    assert_eq!(
-        wakes.0.load(Ordering::SeqCst),
-        before,
-        "a terminally failed writer must wait for operations, not an expired batching timer"
-    );
-
-    // Failure remains sticky; later Barrier and Shutdown still make progress.
-    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-    tx.send(PersistOp::Barrier(ack_tx)).unwrap();
-    assert!(matches!(
-        writer.as_mut().poll(&mut Context::from_waker(&waker)),
-        Poll::Pending
-    ));
-    assert_eq!(ack_rx.await.unwrap().unwrap_err().to_string(), first_error);
-    assert_eq!(
-        *store.append_count.lock().unwrap(),
-        1,
-        "terminal failure must not retry a possibly partial batch"
-    );
-    tx.send(PersistOp::Shutdown).unwrap();
-    assert!(matches!(
-        writer.as_mut().poll(&mut Context::from_waker(&waker)),
-        Poll::Ready(())
-    ));
-    assert!(tx.is_closed(), "Shutdown must drop the production receiver");
 }

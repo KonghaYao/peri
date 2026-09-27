@@ -8,7 +8,8 @@ use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::{observe_event_to_executor, EventBus};
 use crate::session::factory::DeregisterRuntimeFn;
 use crate::session::turn::TurnId;
-use crate::thread::ThreadStore;
+use peri_acp_types::session_resources::{SessionMetaPatch, SessionResources};
+use peri_acp_types::thread::{AgentStatus, ThreadId};
 
 // The loop has released its producers before this seam. A cleanup guard must
 // only retain a Weak<EventBus>, otherwise closing the stream would deadlock.
@@ -127,7 +128,7 @@ impl Drop for BgCleanupGuard {
 ///
 /// 按顺序执行：
 /// 1. lifecycle hook (SubagentStop，经闭包)
-/// 2. thread_store 状态更新（仅 sync 路径有此步骤）
+/// 2. 会话状态定向更新（仅 sync 路径有此步骤）
 ///
 /// v1 SubagentStopped 协议化直发不在本函数内——由调用方在
 /// `emit_subagent_stop_v2` 之后经 `forward_subagent_stop_v1` 同步映射发出
@@ -135,7 +136,7 @@ impl Drop for BgCleanupGuard {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn on_subagent_stop_handler(
     on_subagent_stop: &Option<SubagentLifecycleStop>,
-    thread_store: &Option<Arc<dyn ThreadStore>>,
+    session_resources: &Option<Arc<dyn SessionResources>>,
     agent_id: &str,
     child_thread_id: &str,
     output_summary: &str,
@@ -146,11 +147,21 @@ pub(crate) async fn on_subagent_stop_handler(
     if let Some(ref on_stop) = on_subagent_stop {
         on_stop(agent_id, cwd, output_summary, is_error);
     }
-    // 3. thread_store（仅 sync 路径有此步骤）
-    if let Some(ref store) = thread_store {
-        let status = if is_error { "error" } else { "done" };
+    // 3. 终态状态（仅 sync 路径有此步骤）：定向 patch 只写状态，不覆盖并发标题/计数。
+    if let Some(ref store) = session_resources {
+        let status = if is_error {
+            AgentStatus::Error
+        } else {
+            AgentStatus::Done
+        };
         let _ = store
-            .update_thread_status(&child_thread_id.to_string(), status)
+            .update_session_meta(
+                &ThreadId::from(child_thread_id),
+                &SessionMetaPatch {
+                    status: Some(status),
+                    ..Default::default()
+                },
+            )
             .await;
     }
 }

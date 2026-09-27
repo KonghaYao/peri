@@ -14,6 +14,7 @@ use std::any::{Any, TypeId};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpServerSpec};
 use crate::agents::AgentCapability;
 use crate::dynamic_mcp::{
     CanonicalDynamicMcpAction, DynamicMcpCatalogTool, DynamicMcpFailure, DynamicMcpInstanceKey,
@@ -112,6 +113,55 @@ impl dyn McpPoolPort {
             }
         }
     }
+}
+
+/// ACP 侧 agent→client 发送网关（MCP over ACP 的传输切片）。
+///
+/// 由 host 按 ACP 连接提供（`AcpTransport` 的请求/通知子集）；middlewares 的
+/// 桥接 transport 经它把内层 MCP 消息投递为 `mcp/message`。实现不得在失败时
+/// 静默吞掉消息：投递失败必须返回错误，由桥接按连接失败处理。
+#[async_trait::async_trait]
+pub trait AcpMcpGatewayPort: Send + Sync {
+    /// 发送 `mcp/message` 请求并等待内层 MCP 结果。
+    async fn request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpMcpError>;
+
+    /// 发送 `mcp/message` 通知（无响应）。
+    async fn notify(&self, method: &str, params: serde_json::Value) -> Result<(), AcpMcpError>;
+}
+
+/// 会话级 MCP over ACP 服务端口（`peri-middlewares` 实现）。
+///
+/// 一个端口服务一个 ACP 连接的多个会话：`attach` 注册 client 在会话 setup 中
+/// 声明的 server 并后台建连（连接就绪后工具经 MCP 池进入 deferred 发现）；
+/// `request` / `notify` 路由 client 反向下发的 `mcp/message`；`close_session`
+/// 在会话结束（close / 删除 / transport 关闭 / 进程退出）时断开该会话全部连接。
+#[async_trait::async_trait]
+pub trait AcpMcpServerPort: Send + Sync {
+    /// 注册并后台连接会话声明的 acp 型 server。
+    ///
+    /// 同会话同 `server_id` 重复声明按幂等处理（已连接或正在连接的跳过）。
+    /// 建连失败不影响调用方：失败在池状态面可见，不阻塞会话建立。
+    fn attach(&self, gateway: Arc<dyn AcpMcpGatewayPort>, servers: Vec<AcpMcpServerSpec>);
+
+    /// 处理 client 下发的 `mcp/message` 请求，返回内层 MCP 结果。
+    async fn request(&self, inbound: AcpMcpInbound) -> Result<serde_json::Value, AcpMcpError>;
+
+    /// 处理 client 下发的 `mcp/message` 通知。
+    async fn notify(&self, inbound: AcpMcpInbound) -> Result<(), AcpMcpError>;
+
+    /// 该服务是否承载指定连接（入站 `mcp/message` 的定位依据）。
+    ///
+    /// 入站消息只带 `connectionId`、不带 `sessionId`，而 MCP 池是会话级的
+    /// （宿主装配每个会话各持一份连接事实），因此宿主需要在各会话服务间
+    /// 定位承载者：只有 `true` 的那个才能路由该消息。
+    fn owns_connection(&self, connection_id: &str) -> bool;
+
+    /// 关闭会话的全部 ACP MCP 连接（发送 `mcp/disconnect`、移除池条目）。幂等。
+    async fn close_session(&self, session_id: &str);
 }
 
 /// 工具检索索引端口（`peri-middlewares::tool_search::ToolSearchIndex` 实现）。

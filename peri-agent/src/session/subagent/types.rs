@@ -14,8 +14,9 @@ use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use crate::session::Session;
-use crate::thread::ThreadStore;
 use crate::tools::{BaseTool, ToolInvocationResolver};
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::workspace::SessionExecutionLease;
 
 // ─── 意图类型 ────────────────────────────────────────────────────────────────
 
@@ -96,8 +97,11 @@ pub trait SubagentChainAssembler: Send + Sync {
 #[derive(Clone, Default)]
 #[allow(clippy::type_complexity)]
 pub struct SubagentHost {
-    /// 线程持久化存储（生产路径非 None；None 仅测试/遗留路径，跳过落库）
-    pub thread_store: Option<Arc<dyn ThreadStore>>,
+    /// 会话资源门面（生产路径非 None；None 仅测试/遗留路径，跳过落库）
+    pub session_resources: Option<Arc<dyn SessionResources>>,
+    /// 本会话 root 的执行所有权：`save_child` 需要调用方证明自己持有这条 owner
+    /// （门面据此拒绝「借别人的所有权写」）。None = 无执行权，子会话不落库。
+    pub execution_owner: Option<Arc<dyn SessionExecutionLease>>,
     /// 后台任务管理器（per-session 聚合）
     pub task_manager: Option<Arc<TaskManager>>,
     /// 后台任务完成事件通道（bg pump，独立于主 event pump）
@@ -179,8 +183,10 @@ pub struct SubagentSpawnConfig {
     /// Full Compact 专用 LLM（None 时 Full Compact 跳过）
     pub compact_llm: Option<Arc<dyn peri_model::Model>>,
     // ── 运行时通道 ──
-    /// 线程持久化存储（None = 不落库，仅测试/遗留路径）
-    pub thread_store: Option<Arc<dyn ThreadStore>>,
+    /// 会话资源门面（None = 不落库，仅测试/遗留路径）
+    pub session_resources: Option<Arc<dyn SessionResources>>,
+    /// 本会话 root 的执行所有权（`save_child` 的前置证明；None = 不落库）
+    pub execution_owner: Option<Arc<dyn SessionExecutionLease>>,
     /// 父 agent 事件 handler（同步路径事件转发 / 重试事件追踪）
     pub event_handler: Option<Arc<dyn AgentEventHandler>>,
     /// bg 任务完成事件发送通道（bg pump）
@@ -344,7 +350,7 @@ impl std::error::Error for SubagentFailure {
 ///   transcript 中，重复注入会重复）；
 /// - 无 `skill_names`（R-H1：SkillPreload 重复注入——旧 transcript 已含首轮注入
 ///   的 skill 内容，恢复时恒传空）；
-/// - `thread_store` 必填（恢复现场的唯一来源是磁盘 thread）。
+/// - `session_resources` 必填（恢复现场的唯一来源是持久化会话快照）。
 ///
 /// 父侧数据（cwd / parent_thread_id / frozen 回退值）在 `parent` 存在时从 parent
 /// Session 读取，config 中对应字段仅作 parent 缺失时的回退（与 spawn 一致）。
@@ -384,8 +390,11 @@ pub struct SubagentResumeConfig {
     /// Full Compact 专用 LLM（None 时 Full Compact 跳过）
     pub compact_llm: Option<Arc<dyn peri_model::Model>>,
     // ── 运行时通道 ──
-    /// 线程持久化存储（必填：恢复现场来源）
-    pub thread_store: Arc<dyn ThreadStore>,
+    /// 会话资源门面（必填：恢复现场来源）
+    ///
+    /// resume 认领不需要调用方另持所有权：`claim_child_resume` 在 root 的写侧门禁内
+    /// 完成「读状态 + 写 active」，调用方只提交领域结果。
+    pub session_resources: Arc<dyn SessionResources>,
     /// 父 agent 事件 handler（同步路径事件转发 / 重试事件追踪）
     pub event_handler: Option<Arc<dyn AgentEventHandler>>,
     /// bg 任务完成事件发送通道（bg pump）

@@ -536,6 +536,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             is_loading,
             total_visual_rows,
             vis_height,
+            loading_epoch,
+            bridge_reset_counter,
         ),
     );
 

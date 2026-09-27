@@ -241,8 +241,10 @@ mod tests {
 
     #[tokio::test]
     async fn captures_bounded_stderr_tail() {
-        let payload = "x".repeat(STDERR_TAIL_BYTES + 1024);
-        let script = format!("process.stderr.write('prefix-' + '{}');", payload);
+        // 载荷在 Node 内生成：Windows 命令行上限 32767 字符，33KB 脚本经 `-e`
+        // 传参会以 os error 206（文件名或扩展名过长）拒绝启动。
+        let payload = STDERR_TAIL_BYTES + 1024;
+        let script = format!("process.stderr.write('prefix-' + 'x'.repeat({payload}));");
         let host =
             JsExecutionHost::spawn(JsProcessSpec::new("node", vec!["-e".into(), script])).unwrap();
 

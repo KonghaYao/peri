@@ -3,8 +3,6 @@
 //! - C1 身份键契约测试（自 peri-middlewares v2_bridge.rs 随迁，断言语义不重写）
 //! - spawn_subagent 用例：thread 父子链落库、frozen copy、agent_status 收尾
 
-use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -17,7 +15,12 @@ use crate::session::subagent::{
     agent_id_from_child_thread, build_v2_subagent_context, ForkDirectiveKind, SessionFactory,
     SubagentCancelPolicy, SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig,
 };
+use crate::session::test_resources::mock::{MockSessionResources, ResumeLoadGate};
 use crate::thread::ThreadId;
+use peri_acp_types::session_resources::{
+    ChildSnapshot, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionMetaPatch,
+};
+use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 
 #[test]
 fn subagent_failure_keeps_child_identity_and_typed_model_diagnostic() {
@@ -209,200 +212,6 @@ impl crate::agent::react::ReactLLM for EchoLLM {
     }
 }
 
-/// 内存 mock ThreadStore（断言 thread 父子链落库 + agent_status 收尾；
-/// 消息存储真实化——resume 测试前置条件：append → load 往返可见）
-struct ResumeLoadGate {
-    entered: tokio::sync::oneshot::Sender<()>,
-    release: tokio::sync::oneshot::Receiver<()>,
-    dropped: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl ResumeLoadGate {
-    async fn wait(self) {
-        struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
-        impl Drop for DropProbe {
-            fn drop(&mut self) {
-                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-        let _probe = DropProbe(self.dropped);
-        let _ = self.entered.send(());
-        let _ = self.release.await;
-    }
-}
-
-struct MockThreadStore {
-    load_gate: std::sync::Mutex<Option<ResumeLoadGate>>,
-    inherited_load_gate: std::sync::Mutex<Option<ResumeLoadGate>>,
-    flags_load_gate: std::sync::Mutex<Option<ResumeLoadGate>>,
-    active_write_gate: std::sync::Mutex<Option<ResumeLoadGate>>,
-    status_changed: tokio::sync::Notify,
-    threads: Arc<RwLock<Vec<ThreadMeta>>>,
-    statuses: Arc<RwLock<Vec<(String, String)>>>,
-    messages: Arc<RwLock<HashMap<String, Vec<BaseMessage>>>>,
-    inherited: RwLock<HashMap<String, peri_acp_types::store::InheritedContext>>,
-    /// 一次性开关：置 true 后下一次 load_messages 返回 Err（重建失败回滚测试用）
-    fail_load_messages: std::sync::atomic::AtomicBool,
-}
-
-impl MockThreadStore {
-    fn new() -> Self {
-        Self {
-            load_gate: std::sync::Mutex::new(None),
-            inherited_load_gate: std::sync::Mutex::new(None),
-            flags_load_gate: std::sync::Mutex::new(None),
-            active_write_gate: std::sync::Mutex::new(None),
-            status_changed: tokio::sync::Notify::new(),
-            threads: Arc::new(RwLock::new(Vec::new())),
-            statuses: Arc::new(RwLock::new(Vec::new())),
-            messages: Arc::new(RwLock::new(HashMap::new())),
-            inherited: RwLock::new(HashMap::new()),
-            fail_load_messages: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::thread::ThreadStore for MockThreadStore {
-    async fn create_thread(&self, meta: ThreadMeta) -> anyhow::Result<ThreadId> {
-        self.threads.write().push(meta.clone());
-        Ok(meta.id)
-    }
-
-    async fn store_inherited_context(
-        &self,
-        id: &ThreadId,
-        context: &peri_acp_types::store::InheritedContext,
-    ) -> anyhow::Result<()> {
-        self.inherited.write().insert(id.clone(), context.clone());
-        Ok(())
-    }
-
-    async fn load_inherited_context(
-        &self,
-        id: &ThreadId,
-    ) -> anyhow::Result<peri_acp_types::store::InheritedContext> {
-        let gate = { self.inherited_load_gate.lock().unwrap().take() };
-        if let Some(gate) = gate {
-            gate.wait().await;
-        }
-        Ok(self.inherited.read().get(id).cloned().unwrap_or_default())
-    }
-
-    async fn load_message_flags(
-        &self,
-        _id: &ThreadId,
-    ) -> anyhow::Result<HashMap<crate::messages::MessageId, peri_acp_types::store::MessageFlags>>
-    {
-        let gate = { self.flags_load_gate.lock().unwrap().take() };
-        if let Some(gate) = gate {
-            gate.wait().await;
-        }
-        Ok(HashMap::new())
-    }
-
-    async fn append_messages(&self, id: &ThreadId, msgs: &[BaseMessage]) -> anyhow::Result<()> {
-        self.messages
-            .write()
-            .entry(id.clone())
-            .or_default()
-            .extend(msgs.iter().cloned());
-        Ok(())
-    }
-
-    async fn load_messages(&self, id: &ThreadId) -> anyhow::Result<Vec<BaseMessage>> {
-        let gate = { self.load_gate.lock().unwrap().take() };
-        if let Some(gate) = gate {
-            gate.wait().await;
-        }
-        // 一次性失败开关：重建失败回滚测试使用（模拟磁盘读取失败）
-        if self
-            .fail_load_messages
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(anyhow::anyhow!("load failed (test injection)"));
-        }
-        Ok(self.messages.read().get(id).cloned().unwrap_or_default())
-    }
-
-    async fn load_meta(&self, id: &ThreadId) -> anyhow::Result<ThreadMeta> {
-        self.threads
-            .read()
-            .iter()
-            .find(|t| &t.id == id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("thread not found"))
-    }
-
-    async fn update_meta(&self, _id: &ThreadId, _meta: ThreadMeta) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn list_threads(&self) -> anyhow::Result<Vec<ThreadMeta>> {
-        Ok(self.threads.read().clone())
-    }
-
-    async fn delete_thread(&self, _id: &ThreadId) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn load_context(&self, _thread_id: &ThreadId) -> anyhow::Result<Vec<BaseMessage>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_child_threads(&self, parent_id: &ThreadId) -> anyhow::Result<Vec<ThreadMeta>> {
-        Ok(self
-            .threads
-            .read()
-            .iter()
-            .filter(|t| t.parent_thread_id.as_deref() == Some(parent_id))
-            .cloned()
-            .collect())
-    }
-
-    async fn list_session_threads(&self, _root_id: &ThreadId) -> anyhow::Result<Vec<ThreadMeta>> {
-        Ok(self.threads.read().clone())
-    }
-
-    async fn update_thread_status(&self, id: &ThreadId, status: &str) -> anyhow::Result<()> {
-        // 与真实 store（filesystem.rs:235 / sqlite_store.rs:605）对齐：
-        // 1) 先 load_meta 存在性检查（不存在返回 Err，不静默 no-op）
-        // 2) 参数字符串必须经 FromStr 解析，非法值返回错误，不静默 fallback
-        // 3) 先 push statuses 列表，再同步更新 threads 中 ThreadMeta 的 agent_status
-        //    （R-L2：resume 校验「非 active」依赖此读回路径）
-        let mut meta = self.load_meta(id).await?;
-        let status = AgentStatus::from_str(status)
-            .map_err(|e| anyhow::anyhow!("非法 agent_status 值: {:?}", e))?;
-        meta.agent_status = status;
-        self.statuses
-            .write()
-            .push((id.clone(), status.as_str().to_string()));
-        if let Some(meta) = self.threads.write().iter_mut().find(|t| &t.id == id) {
-            meta.agent_status = status;
-        }
-        self.status_changed.notify_one();
-        if status == AgentStatus::Active {
-            let gate = { self.active_write_gate.lock().unwrap().take() };
-            if let Some(gate) = gate {
-                gate.wait().await;
-            }
-        }
-        Ok(())
-    }
-
-    async fn invalidate_context_cache(&self, _thread_id: &ThreadId) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn delete_messages(
-        &self,
-        _thread_id: &ThreadId,
-        _message_ids: &[crate::messages::MessageId],
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
 /// 空链装配器（测试用：无中间件）
 struct EmptyChainAssembler;
 
@@ -412,10 +221,10 @@ impl SubagentChainAssembler for EmptyChainAssembler {
     }
 }
 
-/// MockThreadStore：append → load 消息往返（resume 前置条件：磁盘 transcript 可读回）
+/// MockSessionResources：append → load 消息往返（resume 前置条件：磁盘 transcript 可读回）
 #[tokio::test]
 async fn test_mock_store_append_load_roundtrip() {
-    let store = MockThreadStore::new();
+    let store = MockSessionResources::new();
     let id = "thread-1".to_string();
     store
         .append_messages(
@@ -435,10 +244,10 @@ async fn test_mock_store_append_load_roundtrip() {
     assert!(other.is_empty(), "未写入消息的 thread 读回空列表");
 }
 
-/// MockThreadStore：update_thread_status 同步 ThreadMeta.agent_status（R-L2）
+/// MockSessionResources：update_thread_status 同步 ThreadMeta.agent_status（R-L2）
 #[tokio::test]
 async fn test_mock_store_update_status_reads_back() {
-    let store = MockThreadStore::new();
+    let store = MockSessionResources::new();
     let id = "thread-1".to_string();
     let mut meta = ThreadMeta::new("/tmp");
     meta.id = id.clone();
@@ -466,7 +275,9 @@ async fn test_mock_store_update_status_reads_back() {
 /// cancel_policy 与意图一致、thread_id = agent_id）
 #[tokio::test]
 async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
+    // child 落库的前置条件：父会话已绑定（有 binding 与 frozen）+ 本会话 root 的执行所有权。
+    let lease = store.register_bound_session("parent-thread-1", "/tmp/work");
     let parent = Session::new(
         Arc::from("/tmp/work"),
         FrozenContext::builder()
@@ -497,7 +308,10 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         compact_config: None,
         context_budget: None,
         compact_llm: None,
-        thread_store: Some(Arc::clone(&store) as Arc<dyn ThreadStore>),
+        session_resources: Some(
+            Arc::clone(&store) as Arc<dyn peri_acp_types::session_resources::SessionResources>
+        ),
+        execution_owner: Some(lease),
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,
@@ -521,9 +335,21 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         .await
         .expect("spawn ok");
 
-    let threads = store.threads.read();
-    assert_eq!(threads.len(), 1, "必须创建 1 个 child thread");
-    let meta = &threads[0];
+    // 夹具另登记了父会话行：child 必须按 id 定位，不能按登记位置取。
+    let threads = store.threads();
+    let child = threads
+        .iter()
+        .find(|meta| meta.id == spawned.child_thread_id)
+        .expect("必须创建 child thread");
+    assert_eq!(
+        threads
+            .iter()
+            .filter(|meta| meta.parent_thread_id.is_some())
+            .count(),
+        1,
+        "必须创建 1 个 child thread"
+    );
+    let meta = child;
     assert_eq!(meta.id, spawned.child_thread_id, "thread_id = agent_id");
     assert_eq!(
         meta.parent_thread_id.as_deref(),
@@ -543,7 +369,7 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
     );
 
     // agent_status 收尾（NullReactLLM 直接完成 → done）
-    let statuses = store.statuses.read();
+    let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
         Some("done"),
@@ -556,7 +382,8 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
 /// 同源；resume 已不做 parent 链校验，父子链仅作落盘记录）
 #[tokio::test]
 async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
+    let lease = store.register_bound_session("main-context-thread", "/tmp/work");
     // 主 agent 样子：store().thread_id = None + host.parent_thread_id = ctx.thread_id
     let parent = Session::new(
         Arc::from("/tmp/work"),
@@ -588,7 +415,10 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
         compact_config: None,
         context_budget: None,
         compact_llm: None,
-        thread_store: Some(Arc::clone(&store) as Arc<dyn ThreadStore>),
+        session_resources: Some(
+            Arc::clone(&store) as Arc<dyn peri_acp_types::session_resources::SessionResources>
+        ),
+        execution_owner: Some(lease),
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,
@@ -612,10 +442,21 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
         .await
         .expect("spawn ok");
 
-    let threads = store.threads.read();
-    assert_eq!(threads.len(), 1, "必须创建 1 个 child thread");
+    let threads = store.threads();
+    let child = threads
+        .iter()
+        .find(|meta| meta.parent_thread_id.is_some())
+        .expect("必须创建 child thread");
     assert_eq!(
-        threads[0].parent_thread_id.as_deref(),
+        threads
+            .iter()
+            .filter(|meta| meta.parent_thread_id.is_some())
+            .count(),
+        1,
+        "必须创建 1 个 child thread"
+    );
+    assert_eq!(
+        child.parent_thread_id.as_deref(),
         Some("main-context-thread"),
         "parent id 经 host 注入正确落库（store().thread_id 为 None 时）"
     );
@@ -624,7 +465,8 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
 /// spawn_subagent：frozen data 从父 session copy（不重新读取磁盘）
 #[tokio::test]
 async fn test_spawn_subagent_copies_frozen_from_parent() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
+    let lease = store.register_bound_session("parent-thread-2", "/tmp/work");
     let parent = Session::new(
         Arc::from("/tmp/work"),
         FrozenContext::builder()
@@ -655,7 +497,10 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
         compact_config: None,
         context_budget: None,
         compact_llm: None,
-        thread_store: Some(Arc::clone(&store) as Arc<dyn ThreadStore>),
+        session_resources: Some(
+            Arc::clone(&store) as Arc<dyn peri_acp_types::session_resources::SessionResources>
+        ),
+        execution_owner: Some(lease),
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,
@@ -708,7 +553,8 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
 /// spawn_subagent：parent 为 None（/bg 命令等无 session 路径）时用 config 回退值
 #[tokio::test]
 async fn test_spawn_subagent_without_parent_uses_config_fallback() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
+    let lease = store.register_bound_session("bg-parent", "/tmp/bg");
     let config = SubagentSpawnConfig {
         agent_name: "fork".to_string(),
         prompt: "bg task".to_string(),
@@ -729,7 +575,10 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         compact_config: None,
         context_budget: None,
         compact_llm: None,
-        thread_store: Some(Arc::clone(&store) as Arc<dyn ThreadStore>),
+        session_resources: Some(
+            Arc::clone(&store) as Arc<dyn peri_acp_types::session_resources::SessionResources>
+        ),
+        execution_owner: Some(lease),
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,
@@ -753,17 +602,27 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         .await
         .expect("spawn ok");
 
-    let threads = store.threads.read();
-    assert_eq!(threads.len(), 1);
+    let threads = store.threads();
+    let child = threads
+        .iter()
+        .find(|meta| meta.parent_thread_id.is_some())
+        .expect("必须创建 child thread");
     assert_eq!(
-        threads[0].parent_thread_id.as_deref(),
+        threads
+            .iter()
+            .filter(|meta| meta.parent_thread_id.is_some())
+            .count(),
+        1
+    );
+    assert_eq!(
+        child.parent_thread_id.as_deref(),
         Some("bg-parent"),
         "parent 缺失时使用 config.parent_thread_id"
     );
     let child_frozen = &spawned.session.store().frozen;
     assert_eq!(child_frozen.claude_md.as_ref(), "bg-claude");
     assert_eq!(child_frozen.skill_summary.as_ref(), "bg-skills");
-    let statuses = store.statuses.read();
+    let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
         Some("done"),
@@ -774,9 +633,12 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
 // ─── resume_subagent 用例（slice 4/5 重建 + 执行） ─────────────────────────
 
 /// 构造最小 resume config（默认：EchoLLM / Sync / 无 task_manager / 无 cancel_token）
-fn resume_config(thread_store: Arc<MockThreadStore>, thread_id: String) -> SubagentResumeConfig {
+fn resume_config(
+    session_resources: Arc<MockSessionResources>,
+    thread_id: String,
+) -> SubagentResumeConfig {
     resume_config_with(
-        thread_store,
+        session_resources,
         thread_id,
         Box::new(EchoLLM),
         SubagentRunMode::Sync,
@@ -788,7 +650,7 @@ fn resume_config(thread_store: Arc<MockThreadStore>, thread_id: String) -> Subag
 /// 构造带自定义装配/运行参数的 resume config
 #[allow(clippy::too_many_arguments)]
 fn resume_config_with(
-    thread_store: Arc<dyn ThreadStore>,
+    session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
     thread_id: String,
     llm: Box<dyn ReactLLM + Send + Sync>,
     run_mode: SubagentRunMode,
@@ -811,7 +673,8 @@ fn resume_config_with(
         compact_config: None,
         context_budget: None,
         compact_llm: None,
-        thread_store: Arc::clone(&thread_store) as Arc<dyn ThreadStore>,
+        session_resources: Arc::clone(&session_resources)
+            as Arc<dyn peri_acp_types::session_resources::SessionResources>,
         event_handler: None,
         bg_event_sender: None,
         task_manager,
@@ -966,7 +829,7 @@ impl crate::agent::react::ReactLLM for CancelGateLLM {
 /// 预置可恢复 thread：创建 + 置非 active（status "done"）。
 /// 消息由各测试按需 append。
 async fn preset_resumable_thread(
-    store: &MockThreadStore,
+    store: &MockSessionResources,
     thread_id: &str,
     parent_thread_id: Option<&str>,
 ) {
@@ -993,7 +856,7 @@ async fn resume_err(parent: Option<&Arc<Session>>, config: SubagentResumeConfig)
 /// 重建阶段 agent_id_from_child_thread 会对非 UUID panic，入口统一拒绝）
 #[tokio::test]
 async fn test_resume_subagent_invalid_thread_id_rejected() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let config = resume_config(Arc::clone(&store), "not-a-uuid".to_string());
     let err = resume_err(None, config).await;
     assert_eq!(err, "resume_subagent: invalid thread id: not-a-uuid");
@@ -1002,7 +865,7 @@ async fn test_resume_subagent_invalid_thread_id_rejected() {
 /// resume_subagent：校验分支 1——thread 不存在 → Err
 #[tokio::test]
 async fn test_resume_subagent_thread_not_found() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     // 合法 UUID 但未创建（low-1 后非 UUID 会先被格式校验拦截，测不到 not found）
     let id = uuid::Uuid::now_v7().to_string();
     let config = resume_config(Arc::clone(&store), id.clone());
@@ -1015,7 +878,7 @@ async fn test_resume_subagent_thread_not_found() {
 /// 并完整执行
 #[tokio::test]
 async fn test_resume_subagent_active_thread_rejected() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let id = uuid::Uuid::now_v7().to_string();
     let mut meta = ThreadMeta::new("/tmp");
     meta.id = id.clone();
@@ -1047,7 +910,7 @@ async fn test_resume_subagent_active_thread_rejected() {
         .expect("非 active 后可恢复");
     assert_eq!(spawned.child_thread_id, id);
     assert!(!spawned.interrupted);
-    let statuses = store.statuses.read();
+    let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
         Some("done"),
@@ -1060,7 +923,7 @@ async fn test_resume_subagent_active_thread_rejected() {
 /// thread_id 即恢复凭证，不做所有权校验（曾误判拒绝兄弟 subagent 恢复）。
 #[tokio::test]
 async fn test_resume_subagent_parent_mismatch_not_rejected() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let id = uuid::Uuid::now_v7().to_string();
     let mut meta = ThreadMeta::new("/tmp");
     meta.id = id.clone();
@@ -1078,7 +941,7 @@ async fn test_resume_subagent_parent_mismatch_not_rejected() {
         .await
         .expect("parent 链不匹配不再拒绝恢复");
     assert_eq!(spawned.child_thread_id, id, "thread_id 不变");
-    let statuses = store.statuses.read();
+    let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
         Some("done"),
@@ -1091,7 +954,7 @@ async fn test_resume_subagent_parent_mismatch_not_rejected() {
 /// （parent 链校验已移除，本测试保留为主 agent 路径的恢复成功回归）
 #[tokio::test]
 async fn test_resume_subagent_main_agent_via_host_parent_id() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &id, Some("main-context-thread")).await;
 
@@ -1111,7 +974,7 @@ async fn test_resume_subagent_main_agent_via_host_parent_id() {
         .await
         .expect("主 agent 场景恢复应成功");
     assert_eq!(spawned.child_thread_id, id, "thread_id 不变");
-    let statuses = store.statuses.read();
+    let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
         Some("done"),
@@ -1122,7 +985,7 @@ async fn test_resume_subagent_main_agent_via_host_parent_id() {
 /// resume_subagent：校验全部通过 → 重建 + 完整执行（thread_id 不变）
 #[tokio::test]
 async fn test_resume_subagent_validation_passes_and_runs() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let id = uuid::Uuid::now_v7().to_string();
     let mut meta = ThreadMeta::new("/tmp");
     meta.id = id.clone();
@@ -1141,7 +1004,7 @@ async fn test_resume_subagent_validation_passes_and_runs() {
         .expect("校验通过后恢复执行");
     assert_eq!(spawned.child_thread_id, id, "thread_id 不变");
     assert!(!spawned.interrupted);
-    let statuses = store.statuses.read();
+    let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
         Some("done"),
@@ -1153,7 +1016,7 @@ async fn test_resume_subagent_validation_passes_and_runs() {
 /// status 状态机 done → active → done、cwd 取 meta.cwd、frozen 从父 copy
 #[tokio::test]
 async fn test_resume_subagent_replays_transcript_and_preserves_thread_id() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     let parent_id = "parent-thread-r1";
     preset_resumable_thread(&store, &thread_id, Some(parent_id)).await;
@@ -1216,7 +1079,7 @@ async fn test_resume_subagent_replays_transcript_and_preserves_thread_id() {
     assert_eq!(child_frozen.date.as_ref(), "2026-08-05");
 
     // status 状态机：预置 done → 恢复置 active → 完成收尾 done
-    let statuses = store.statuses.read();
+    let statuses = store.statuses();
     let seq: Vec<&str> = statuses.iter().map(|(_, s)| s.as_str()).collect();
     assert_eq!(seq, vec!["done", "active", "done"], "status 状态机完整");
 }
@@ -1225,7 +1088,7 @@ async fn test_resume_subagent_replays_transcript_and_preserves_thread_id() {
 /// 不回放进 transcript、不发给 LLM；已配对轮次保留
 #[tokio::test]
 async fn test_resume_subagent_pops_unpaired_tool_call_ai() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
 
@@ -1313,7 +1176,7 @@ async fn test_resume_subagent_pops_unpaired_tool_call_ai() {
 /// 已完成轮次（含副作用）完整重放，避免 LLM 重复执行工具副作用
 #[tokio::test]
 async fn test_resume_subagent_keeps_complete_tool_round() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
 
@@ -1361,7 +1224,7 @@ async fn test_resume_subagent_keeps_complete_tool_round() {
 /// （不套 fork directive），EchoLLM 消费并回显；不注入隐式 continue
 #[tokio::test]
 async fn test_resume_subagent_new_prompt_appended() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
     store
@@ -1398,7 +1261,7 @@ async fn test_resume_subagent_new_prompt_appended() {
 /// 恢复完成后写 "done"；thread_id 全程不变
 #[tokio::test]
 async fn test_resume_subagent_interrupted_then_resumed_completes() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
     store
@@ -1427,7 +1290,7 @@ async fn test_resume_subagent_interrupted_then_resumed_completes() {
         .expect("resume 1 ok（中断不是 Err）");
     assert!(spawned1.interrupted, "Reason 内 cancel 必须是 Interrupted");
     {
-        let statuses = store.statuses.read();
+        let statuses = store.statuses();
         assert_eq!(
             statuses.last().map(|(_, s)| s.as_str()),
             Some("error"),
@@ -1442,7 +1305,7 @@ async fn test_resume_subagent_interrupted_then_resumed_completes() {
         .expect("resume 2 ok");
     assert!(!spawned2.interrupted);
     assert_eq!(spawned2.child_thread_id, thread_id, "thread_id 不变");
-    let statuses = store.statuses.read();
+    let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
         Some("done"),
@@ -1454,7 +1317,7 @@ async fn test_resume_subagent_interrupted_then_resumed_completes() {
 /// 仅一个成功进入执行（第二个在锁内看到 active 被拒）
 #[tokio::test]
 async fn test_resume_subagent_concurrent_resume_mutex() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
 
@@ -1477,12 +1340,7 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
     // 等待 t1 完成「校验 → 置 active」（锁内置位；随后 t1 进入执行并被 gate 挂起）
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if store
-                .statuses
-                .read()
-                .iter()
-                .any(|(_, s)| s.as_str() == "active")
-            {
+            if store.statuses().iter().any(|(_, s)| s.as_str() == "active") {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1513,7 +1371,7 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
     let spawned = t1.await.expect("t1 task ok").expect("t1 resume ok");
     assert!(!spawned.interrupted);
     assert_eq!(spawned.child_thread_id, thread_id);
-    let statuses = store.statuses.read();
+    let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
         Some("done"),
@@ -1525,14 +1383,13 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
 /// （不被 active 卡死，可再次恢复）
 #[tokio::test]
 async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
 
-    // 注入一次性 load_messages 失败（own history 读取阶段）
-    store
-        .fail_load_messages
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // 注入「认领后 history 装载」失败：第 1 次快照读取是认领前的绑定分类，
+    // 第 2 次才是 own history 装载。
+    store.fail_snapshot_load_at(2);
     let config = resume_config(store.clone(), thread_id.clone());
     let err = resume_err(None, config).await;
     assert!(
@@ -1549,7 +1406,7 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
         "重建失败必须回滚 status 至原值"
     );
     {
-        let statuses = store.statuses.read();
+        let statuses = store.statuses();
         let seq: Vec<&str> = statuses.iter().map(|(_, s)| s.as_str()).collect();
         assert_eq!(seq, vec!["done", "active", "done"], "active 后回滚原值");
     }
@@ -1566,7 +1423,7 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
 /// （/bg 命令等路径）→ 恢复成功（无 parent 链校验，仅存在性 + status 校验）
 #[tokio::test]
 async fn test_resume_subagent_parent_none_skips_chain_check() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     // meta 声明了父链，但调用方无 parent session（/bg 命令等路径）
     preset_resumable_thread(&store, &thread_id, Some("orphan-parent")).await;
@@ -1581,7 +1438,7 @@ async fn test_resume_subagent_parent_none_skips_chain_check() {
         .expect("parent None 时无 parent 链校验，恢复成功");
     assert_eq!(spawned.child_thread_id, thread_id);
     assert!(!spawned.interrupted);
-    let statuses = store.statuses.read();
+    let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
         Some("done"),
@@ -1593,7 +1450,7 @@ async fn test_resume_subagent_parent_none_skips_chain_check() {
 /// TaskManager 注册 Running、放行后完成收尾 done + registry 移除
 #[tokio::test]
 async fn test_resume_subagent_background_mode_done() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
     store
@@ -1642,7 +1499,7 @@ async fn test_resume_subagent_background_mode_done() {
     let _ = release_tx.send(());
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if store.statuses.read().last().map(|(_, s)| s.as_str()) == Some("done") {
+            if store.statuses().last().map(|(_, s)| s.as_str()) == Some("done") {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1660,7 +1517,7 @@ async fn test_resume_subagent_background_mode_done() {
 /// bg resume cancelled 分支：Reason 内取消 → bg 中断收尾写 "cancelled"
 #[tokio::test]
 async fn test_resume_subagent_background_mode_cancelled() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
 
@@ -1700,7 +1557,7 @@ async fn test_resume_subagent_background_mode_cancelled() {
         completed.output
     );
     assert_eq!(
-        store.statuses.read().last().map(|(_, s)| s.as_str()),
+        store.statuses().last().map(|(_, s)| s.as_str()),
         Some("cancelled"),
         "bg 中断收尾必须写 cancelled"
     );
@@ -1711,7 +1568,7 @@ async fn test_resume_subagent_background_mode_cancelled() {
 /// 原值（不被 active 卡死）+ 提供 task_manager 后可再次恢复
 #[tokio::test]
 async fn test_resume_subagent_bg_registration_failure_rolls_back() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
 
@@ -1744,7 +1601,7 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
         "注册失败必须回滚 status 至原值"
     );
     {
-        let statuses = store.statuses.read();
+        let statuses = store.statuses();
         let seq: Vec<&str> = statuses.iter().map(|(_, s)| s.as_str()).collect();
         assert_eq!(seq, vec!["done", "active", "done"], "active 后回滚原值");
     }
@@ -1766,7 +1623,7 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
     assert!(spawned.task_id.is_some(), "bg 模式必须有 task_id");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if store.statuses.read().last().map(|(_, s)| s.as_str()) == Some("done") {
+            if store.statuses().last().map(|(_, s)| s.as_str()) == Some("done") {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1781,7 +1638,7 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
 /// 丢弃/改写。
 #[tokio::test]
 async fn test_resume_subagent_bg_beyond_previous_agent_cap() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
     store
@@ -1829,7 +1686,7 @@ async fn test_resume_subagent_bg_beyond_previous_agent_cap() {
     // 任务完成：status done；registry 收敛回 5 个占位任务（无泄漏/无丢弃）
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if store.statuses.read().last().map(|(_, s)| s.as_str()) == Some("done") {
+            if store.statuses().last().map(|(_, s)| s.as_str()) == Some("done") {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1864,7 +1721,7 @@ async fn test_resume_subagent_bg_scope_closed_rejected_before_claim() {
     use peri_acp_types::tasks::TaskManager as _;
     use peri_acp_types::tasks::TaskShutdownReport;
 
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
 
@@ -1899,7 +1756,7 @@ async fn test_resume_subagent_bg_scope_closed_rejected_before_claim() {
         "执行前被拒不得改写 thread 状态"
     );
     {
-        let statuses = store.statuses.read();
+        let statuses = store.statuses();
         let seq: Vec<&str> = statuses.iter().map(|(_, s)| s.as_str()).collect();
         assert_eq!(seq, vec!["done"], "claim 之前失败不写 active");
     }
@@ -1968,7 +1825,7 @@ async fn cancel_resume_at_gate(
     config: SubagentResumeConfig,
     cancel: &CancellationToken,
     entered_rx: tokio::sync::oneshot::Receiver<()>,
-    store: &MockThreadStore,
+    store: &MockSessionResources,
     thread_id: &ThreadId,
 ) {
     let mut dispatch = Box::pin(dispatch_resume_fixture(config, cancel));
@@ -1994,7 +1851,7 @@ async fn cancel_resume_at_gate(
 }
 
 async fn wait_for_resume_status(
-    store: &MockThreadStore,
+    store: &MockSessionResources,
     thread_id: &ThreadId,
     status: AgentStatus,
 ) {
@@ -2014,7 +1871,7 @@ async fn wait_for_resume_status(
 #[tokio::test]
 async fn test_resume_load_cancelled_by_dispatch_restores_previous_status() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -2056,7 +1913,7 @@ async fn test_resume_load_cancelled_by_dispatch_restores_previous_status() {
 #[tokio::test]
 async fn test_resume_active_write_cancelled_by_dispatch_finishes_before_rollback() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -2096,8 +1953,7 @@ async fn test_resume_active_write_cancelled_by_dispatch_finishes_before_rollback
         "cancelled preparation must never execute after the write resumes"
     );
     let statuses: Vec<_> = store
-        .statuses
-        .read()
+        .statuses()
         .iter()
         .map(|(_, status)| status.clone())
         .collect();
@@ -2129,7 +1985,7 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
             MiddlewareChain::new()
         }
     }
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
     let cancel = CancellationToken::new();
@@ -2213,7 +2069,7 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
             crate::agent::compact_v2::projection::ProviderCapabilities::default()
         }
     }
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -2264,7 +2120,7 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
 
 #[tokio::test]
 async fn test_resume_precancelled_background_still_registers_and_completes() {
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
     let task_manager = Arc::new(TaskManager::new());
@@ -2325,7 +2181,7 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
 async fn test_resume_provenance_read_cancelled_by_dispatch_restores_previous_status() {
     for inherited_read in [true, false] {
         use std::sync::atomic::{AtomicBool, Ordering};
-        let store = Arc::new(MockThreadStore::new());
+        let store = MockSessionResources::new();
         let thread_id = uuid::Uuid::now_v7().to_string();
         preset_resumable_thread(&store, &thread_id, None).await;
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -2382,7 +2238,7 @@ async fn test_resume_provenance_overlap_rolls_back_claim_before_retry() {
     use peri_acp_types::store::{InheritedContext, PersistedPayload};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
     let message = BaseMessage::human("same id must not belong to both regions");
@@ -2418,15 +2274,14 @@ async fn test_resume_provenance_overlap_rolls_back_claim_before_retry() {
     );
     assert_eq!(
         store
-            .statuses
-            .read()
+            .statuses()
             .iter()
             .map(|(_, status)| status.as_str())
             .collect::<Vec<_>>(),
         ["done", "active", "done"]
     );
     // Repair the corrupt fixture and exercise the same thread's real resume.
-    store.inherited.write().remove(&thread_id);
+    store.clear_inherited();
     let resumed =
         SessionFactory::resume_subagent(None, resume_config(store.clone(), thread_id.clone()))
             .await
@@ -2436,44 +2291,38 @@ async fn test_resume_provenance_overlap_rolls_back_claim_before_retry() {
 
 #[tokio::test]
 async fn test_bound_subagent_resume_requires_same_root_but_allows_siblings() {
-    let fixture = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        peri_resources::sessions::SqliteThreadStore::new(fixture.path().join("sessions.db"))
+    // 真门面：绑定、父子链、执行所有权都由真实实现提供（不可用 mock 自证）。
+    let repo = crate::session::test_resources::git_repository();
+    let db = tempfile::tempdir().unwrap();
+    let store: Arc<dyn peri_acp_types::session_resources::SessionResources> = Arc::new(
+        peri_resources::sessions::SessionResourcesImpl::open(db.path().join("sessions.db"))
             .await
             .unwrap(),
     );
-    let workspace = store.resolve_workspace(fixture.path()).await.unwrap();
+    let workspace = store.resolve_workspace(repo.path()).await.unwrap();
     let cwd = workspace.cwd.to_str().unwrap();
-    let root_a = store
-        .create_bound_thread(ThreadMeta::new(cwd), &workspace)
-        .await
-        .unwrap();
-    let root_b = store
-        .create_bound_thread(ThreadMeta::new(cwd), &workspace)
-        .await
-        .unwrap();
-    let owner_a = store.acquire_execution_lease(&root_a).await.unwrap();
-    let owner_b = store.acquire_execution_lease(&root_b).await.unwrap();
-    let mut child = ThreadMeta::new(cwd);
-    child.parent_thread_id = Some(root_a.clone());
-    child.agent_status = AgentStatus::Done;
-    let child_id = store
-        .create_bound_thread(child.clone(), &workspace)
-        .await
-        .unwrap();
-    child.id = uuid::Uuid::now_v7().to_string();
-    let sibling_id = store.create_bound_thread(child, &workspace).await.unwrap();
+    let root_a = workspace.cwd.to_string_lossy().into_owned();
+    let (root_a_id, owner_a) = create_bound_root(&store, &workspace, None).await;
+    let (root_b_id, owner_b) = create_bound_root(&store, &workspace, None).await;
+    // child 的 frozen 必须是 root 已保存快照的逐字节副本（门面在 save_child 内校验）。
+    let frozen = FrozenSnapshotBytes::new("{\"version\":1,\"root\":true}");
+    let child_id = save_bound_child(&store, &workspace, &root_a_id, &frozen, &owner_a).await;
+    let sibling_id = save_bound_child(&store, &workspace, &root_a_id, &frozen, &owner_a).await;
     let caller_b = Session::new(
         Arc::from(cwd),
         FrozenContext::builder().build(),
-        Some(root_b),
+        Some(root_b_id),
     );
-    let mut config = resume_config(Arc::new(MockThreadStore::new()), child_id.clone());
-    config.thread_store = store.clone();
+    let mut config = resume_config(MockSessionResources::new(), child_id.clone());
+    config.session_resources = Arc::clone(&store);
     let error = resume_err(Some(&caller_b), config).await;
     assert!(error.contains("another root session"), "{error}");
     assert_eq!(
-        store.load_meta(&child_id).await.unwrap().agent_status,
+        store
+            .load_session_meta(&child_id)
+            .await
+            .unwrap()
+            .agent_status,
         AgentStatus::Done
     );
     let sibling = Session::new(
@@ -2481,17 +2330,111 @@ async fn test_bound_subagent_resume_requires_same_root_but_allows_siblings() {
         FrozenContext::builder().build(),
         Some(sibling_id),
     );
-    let mut config = resume_config(Arc::new(MockThreadStore::new()), child_id.clone());
-    config.thread_store = store.clone();
+    let mut config = resume_config(MockSessionResources::new(), child_id.clone());
+    config.session_resources = Arc::clone(&store);
     SessionFactory::resume_subagent(Some(&sibling), config)
         .await
         .expect("same-root siblings can resume");
     assert_eq!(
-        store.load_meta(&child_id).await.unwrap().agent_status,
+        store
+            .load_session_meta(&child_id)
+            .await
+            .unwrap()
+            .agent_status,
         AgentStatus::Done
     );
-    owner_a.mark_clean().await.unwrap();
-    owner_b.mark_clean().await.unwrap();
+    // 同根兄弟会话位于同一 root 执行代际（本机只有一条 root owner 事实）。
+    let _ = root_a;
+    owner_a
+        .as_ref()
+        .expect("root A 仍持有执行权")
+        .mark_clean()
+        .await
+        .unwrap();
+    owner_b
+        .as_ref()
+        .expect("root B 仍持有执行权")
+        .mark_clean()
+        .await
+        .unwrap();
+}
+
+/// 真门面：创建一条已绑定的根会话（返回身份与执行所有权）。
+async fn create_bound_root(
+    store: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    workspace: &peri_acp_types::workspace::ResolvedWorkspace,
+    frozen: Option<FrozenSnapshotBytes>,
+) -> (
+    ThreadId,
+    Option<Arc<dyn peri_acp_types::workspace::SessionExecutionLease>>,
+) {
+    let session = bound_session(store, workspace, frozen, None);
+    let thread_id = session.thread_id.clone();
+    let lease = store.create_session(&session).await.unwrap();
+    (thread_id, Some(lease))
+}
+
+/// 真门面：在 root 的执行所有权下保存一条 child 会话（继承区为空）。
+async fn save_bound_child(
+    store: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    workspace: &peri_acp_types::workspace::ResolvedWorkspace,
+    root: &ThreadId,
+    frozen: &FrozenSnapshotBytes,
+    lease: &Option<Arc<dyn peri_acp_types::workspace::SessionExecutionLease>>,
+) -> ThreadId {
+    let target = bound_session(store, workspace, Some(frozen.clone()), Some(root.clone()));
+    let child_id = target.thread_id.clone();
+    store
+        .save_child(
+            &ChildSnapshot {
+                target,
+                parent_id: root.clone(),
+                root_id: root.clone(),
+                inherited: Default::default(),
+            },
+            lease.as_ref().expect("root 执行所有权"),
+        )
+        .await
+        .unwrap();
+    store
+        .update_session_meta(
+            &child_id,
+            &SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    child_id
+}
+
+fn bound_session(
+    _store: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    workspace: &peri_acp_types::workspace::ResolvedWorkspace,
+    frozen: Option<FrozenSnapshotBytes>,
+    parent: Option<ThreadId>,
+) -> NewSession {
+    NewSession {
+        thread_id: uuid::Uuid::now_v7().to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        meta: NewSessionMeta {
+            title: Some("bound fixture".to_owned()),
+            cwd: workspace.cwd.to_string_lossy().into_owned(),
+            parent_thread_id: parent,
+            hidden: false,
+            cancel_policy: Default::default(),
+            snapshot_at_message_id: None,
+        },
+        binding: SessionBinding {
+            schema_version: SESSION_BINDING_VERSION,
+            revision: 1,
+            project_id: workspace.project_id,
+            workspace_id: workspace.workspace_id,
+            cwd_relative_to_workspace: workspace.relative_cwd.clone(),
+        },
+        frozen: frozen.unwrap_or_else(|| FrozenSnapshotBytes::new("{\"version\":1,\"root\":true}")),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2542,7 +2485,13 @@ impl ReactLLM for TailChunkLLM {
     }
 }
 
-fn tail_spawn_config(store: Arc<MockThreadStore>, outcome: TailOutcome) -> SubagentSpawnConfig {
+fn tail_spawn_config(
+    store: Arc<MockSessionResources>,
+    outcome: TailOutcome,
+) -> SubagentSpawnConfig {
+    // child 落库要求父会话已绑定（`save_child` 继承绑定与 frozen），并需要本会话 root 的
+    // 执行所有权；夹具显式构造这两项前置条件，不靠替身默认值。
+    let lease = store.register_bound_session("tail-parent", "/tmp/tail-fixture");
     SubagentSpawnConfig {
         agent_name: "tail-agent".into(),
         prompt: "task".into(),
@@ -2563,7 +2512,8 @@ fn tail_spawn_config(store: Arc<MockThreadStore>, outcome: TailOutcome) -> Subag
         compact_config: None,
         context_budget: None,
         compact_llm: None,
-        thread_store: Some(store),
+        session_resources: Some(store),
+        execution_owner: Some(lease),
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,
@@ -2576,7 +2526,7 @@ fn tail_spawn_config(store: Arc<MockThreadStore>, outcome: TailOutcome) -> Subag
         parent_agent_id: Some(AgentId::new()),
         cancel_token: None,
         cwd: Some("/tmp/tail-fixture".into()),
-        parent_thread_id: None,
+        parent_thread_id: Some("tail-parent".into()),
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
@@ -2607,7 +2557,7 @@ impl crate::agent::LangfuseBridgeLike for TailPanicBridge {
 
 async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder: bool) {
     use crate::agent::events::{BackgroundTaskResult, ExecutorEvent};
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let manager = Arc::new(TaskManager::new());
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_rx = Arc::new(parking_lot::Mutex::new(event_rx));
@@ -2705,11 +2655,7 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
         _ => "error",
     };
     assert_eq!(
-        store
-            .statuses
-            .read()
-            .last()
-            .map(|(_, status)| status.as_str()),
+        store.statuses().last().map(|(_, status)| status.as_str()),
         Some(expected_status)
     );
     if matches!(outcome, TailOutcome::ModelError) {
@@ -2761,7 +2707,7 @@ async fn test_spawn_subagent_background_forwarder_panic_preserves_model_failure(
 #[tokio::test(flavor = "current_thread")]
 async fn test_spawn_subagent_sync_forwarder_panic_is_failure() {
     use crate::agent::events::{ExecutorEvent, FnEventHandler};
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let capture = events.clone();
     let bridge_stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2790,11 +2736,7 @@ async fn test_spawn_subagent_sync_forwarder_panic_is_failure() {
         1
     );
     assert_eq!(
-        store
-            .statuses
-            .read()
-            .last()
-            .map(|(_, status)| status.as_str()),
+        store.statuses().last().map(|(_, status)| status.as_str()),
         Some("error")
     );
 }
@@ -2816,7 +2758,7 @@ impl crate::agent::LangfuseBridgeLike for TerminalPanicBridge {
 #[tokio::test(flavor = "current_thread")]
 async fn test_spawn_subagent_terminal_bridge_panic_is_failure() {
     use crate::agent::events::{ExecutorEvent, FnEventHandler};
-    let store = Arc::new(MockThreadStore::new());
+    let store = MockSessionResources::new();
     let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let capture = events.clone();
     let mut config = tail_spawn_config(store.clone(), TailOutcome::Completed);
@@ -2835,11 +2777,7 @@ async fn test_spawn_subagent_terminal_bridge_panic_is_failure() {
         Some(ExecutorEvent::SubagentStopped { is_error: true, .. })
     ));
     assert_eq!(
-        store
-            .statuses
-            .read()
-            .last()
-            .map(|(_, status)| status.as_str()),
+        store.statuses().last().map(|(_, status)| status.as_str()),
         Some("error")
     );
 }

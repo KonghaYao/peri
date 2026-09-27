@@ -5,7 +5,9 @@
 //! Phase 2 完整实现——main_loop fan-out 后独立消费。
 
 use crate::acp_client::AcpTuiClient;
-use crate::kit::acp_events::{self, BridgeState, PublicationIntent, SessionPhase};
+use crate::kit::acp_events::{
+    self, BridgeState, PublicationIntent, SessionPhase, StreamingMode, current_streaming_mode,
+};
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, CurrentTurn};
 use crate::kit::atoms;
 use tokio::sync::mpsc;
@@ -42,6 +44,9 @@ pub(crate) struct PerfCounters {
     pub group_rebuilt_units: u64,
     /// 折叠 pass 实际写回的条目数（稳态应为 0——[G3] 只读扫描）。
     pub fold_pass_writes: u64,
+    pub history_fold_visits: u64,
+    pub tool_hash_calls: u64,
+    pub tool_hash_bytes: u64,
     /// `push_view_models` 各阶段累计纳秒（组装 / 折叠 pass / todo 摘要 / 分组 / 写快照）
     /// ——长会话下按阶段定位成本归属，配合 `acp_events_test/perf_probe_test.rs`。
     pub stage_assemble_ns: u64,
@@ -72,6 +77,9 @@ pub(crate) enum PerfCounter {
     GroupCopiedUnits,
     GroupRebuiltUnits,
     FoldPassWrites,
+    HistoryFoldVisits,
+    ToolHashCalls,
+    ToolHashBytes,
     StageAssembleNs,
     StageFoldNs,
     StageTodoNs,
@@ -107,6 +115,9 @@ pub(crate) fn observe_perf(counter: PerfCounter, value: u64) {
             PerfCounter::GroupCopiedUnits => counters.group_copied_units += value,
             PerfCounter::GroupRebuiltUnits => counters.group_rebuilt_units += value,
             PerfCounter::FoldPassWrites => counters.fold_pass_writes += value,
+            PerfCounter::HistoryFoldVisits => counters.history_fold_visits += value,
+            PerfCounter::ToolHashCalls => counters.tool_hash_calls += value,
+            PerfCounter::ToolHashBytes => counters.tool_hash_bytes += value,
             PerfCounter::StageAssembleNs => counters.stage_assemble_ns += value,
             PerfCounter::StageFoldNs => counters.stage_fold_ns += value,
             PerfCounter::StageTodoNs => counters.stage_todo_ns += value,
@@ -207,6 +218,8 @@ fn synthetic_scheduler_state() -> BridgeState {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     }
 }
 
@@ -247,12 +260,19 @@ const PUBLICATION_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 struct PublicationScheduler {
     pending_deadline: Option<tokio::time::Instant>,
     token: u64,
+    /// 与 projection cache 无关，记录已接收但尚未发布的 canonical 更新。
+    unpublished: bool,
+    pending_mode: Option<StreamingMode>,
+    last_streaming_mode: Option<StreamingMode>,
 }
 
 impl PublicationScheduler {
     fn invalidate(&mut self) {
         self.pending_deadline = None;
         self.token = self.token.wrapping_add(1);
+        self.unpublished = false;
+        self.pending_mode = None;
+        self.last_streaming_mode = None;
     }
 
     fn accept(&mut self, intent: PublicationIntent, state: &mut BridgeState) {
@@ -265,17 +285,40 @@ impl PublicationScheduler {
         state: &mut BridgeState,
         now: tokio::time::Instant,
     ) {
+        let mode = current_streaming_mode();
+        if self.pending_mode.is_some_and(|scheduled| scheduled != mode) {
+            self.pending_deadline = None;
+            self.pending_mode = None;
+        }
         match intent {
             PublicationIntent::None => {}
+            PublicationIntent::Published => self.invalidate(),
             PublicationIntent::Immediate => {
                 self.invalidate();
-                if state.current_turn.has_unprojected_changes() {
-                    acp_events::push_view_models(state);
-                }
+                acp_events::push_view_models(state);
+                self.last_streaming_mode = Some(mode);
             }
             PublicationIntent::Deferred => {
+                self.unpublished = true;
+                self.pending_mode = None;
                 self.pending_deadline
                     .get_or_insert(now + PUBLICATION_INTERVAL);
+            }
+            PublicationIntent::Streaming => {
+                self.unpublished = true;
+                if self.last_streaming_mode == Some(StreamingMode::None)
+                    && mode != StreamingMode::None
+                {
+                    self.accept_at(PublicationIntent::Immediate, state, now);
+                } else if mode != StreamingMode::None && self.pending_deadline.is_none() {
+                    self.pending_mode = Some(mode);
+                    self.pending_deadline = Some(now + PUBLICATION_INTERVAL);
+                }
+                self.last_streaming_mode = Some(mode);
+            }
+            PublicationIntent::Hidden => {
+                self.unpublished = true;
+                self.last_streaming_mode = Some(mode);
             }
         }
     }
@@ -288,8 +331,17 @@ impl PublicationScheduler {
             return false;
         }
         self.pending_deadline = None;
-        // Deferred 也可能来自只修改 committed 的历史回放，不能仅检查 live turn。
+        if self
+            .pending_mode
+            .take()
+            .is_some_and(|mode| mode != current_streaming_mode())
+        {
+            self.last_streaming_mode = Some(current_streaming_mode());
+            return false;
+        }
+        // 历史回放与明确 projection 读取都不能吞掉待发布事实。
         acp_events::push_view_models(state);
+        self.unpublished = false;
         true
     }
 }
@@ -318,6 +370,8 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     state.active_session_id = active_session_id;
     state.committed = im::Vector::new();
     state.current_turn.reset();
+    state.folded_history = Default::default();
+    state.publication_intent = PublicationIntent::None;
     state.generation = 0;
     state.turn_generation = 0;
     state.last_prompt_generation = 0;
@@ -362,7 +416,7 @@ fn flush_on_receiver_close(
     scheduler: &mut PublicationScheduler,
     last_reset_counter: &mut u64,
 ) {
-    let pending_publication = scheduler.pending_deadline.is_some();
+    let pending_publication = scheduler.unpublished || scheduler.pending_deadline.is_some();
     scheduler.invalidate();
     let counter = atoms::BRIDGE_RESET_COUNTER.get();
     if counter != *last_reset_counter {
@@ -435,6 +489,8 @@ fn spawn_acp_bridge_inner(
             last_prompt_generation: 0,
             current_request_id: None,
             pending_cache_usage: None,
+            publication_intent: Default::default(),
+            folded_history: Default::default(),
         };
 
         // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load
@@ -482,7 +538,7 @@ fn spawn_acp_bridge_inner(
                         let mode_is_none =
                             matches!(current_streaming_mode(), StreamingMode::None);
                         if !mode_is_none {
-                            acp_events::push_view_models(&mut state);
+                            scheduler.accept(PublicationIntent::Immediate, &mut state);
                         }
                     }
                 }
@@ -679,3 +735,7 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         PluginSearchResult(_) => "PluginSearchResult",
     }
 }
+
+#[cfg(test)]
+#[path = "publication_test.rs"]
+mod publication_tests;

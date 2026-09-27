@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # 大文件扫描门：按行数扫描源码，报告超阈值文件（拆分/重构参考，可接 CI 门）。
 #
-# 源码与测试分开设阈值——测试文件天然偏大，默认放宽（对齐
-# check-layer-imports.sh 的测试豁免思路）；rg 尊重 .gitignore，
-# target/node_modules 自动排除。
+# 源码与测试默认均为 1000 行，对齐 docs/standards/index.md 的
+# STD-SIZE-001；可分别设阈值用于排查，验收仍使用标准上限。
+# rg 尊重 .gitignore，target/node_modules 自动排除。
 #
 # 用法：bash scripts/check-file-size.sh [--min N] [--test-min N] [--no-tests] [--top N]
 #   --min N       源码阈值，默认 1000；0 = 不检查源码
-#   --test-min N  测试阈值，默认 4000；0 = 不检查测试
+#   --test-min N  测试阈值，默认 1000；0 = 不检查测试
 #   --no-tests    等价 --test-min 0
 #   --top N       每类最多展示条数，默认 30
 # 退出码：0 无超阈值；1 存在超阈值；2 参数错误
@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 command -v rg >/dev/null 2>&1 || { echo "❌ 需要 ripgrep (rg)"; exit 1; }
 
 MIN=1000
-TEST_MIN=4000
+TEST_MIN=1000
 TOP=30
 
 while [ $# -gt 0 ]; do
@@ -31,7 +31,7 @@ while [ $# -gt 0 ]; do
             cat <<'EOF'
 用法：bash scripts/check-file-size.sh [--min N] [--test-min N] [--no-tests] [--top N]
   --min N       源码阈值，默认 1000；0 = 不检查源码
-  --test-min N  测试阈值，默认 4000；0 = 不检查测试
+  --test-min N  测试阈值，默认 1000；0 = 不检查测试
   --no-tests    等价 --test-min 0
   --top N       每类最多展示条数，默认 30
 退出码：0 无超阈值；1 存在超阈值；2 参数错误

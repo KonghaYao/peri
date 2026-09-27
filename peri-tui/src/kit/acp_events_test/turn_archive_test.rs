@@ -25,6 +25,8 @@ fn test_two_turn_done_accumulates_committed() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     // 第一轮：stream one text → TurnDone
@@ -89,6 +91,8 @@ fn test_turndone_archives_assistant_to_committed() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     // 往 current_turn 写入一条 assistant 文本
@@ -148,6 +152,8 @@ fn test_turn_interrupted_empty_skips_archive() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     dispatch_and_notify(
@@ -198,6 +204,8 @@ fn test_turn_done_clears_last_submitted_text() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     dispatch_and_notify(

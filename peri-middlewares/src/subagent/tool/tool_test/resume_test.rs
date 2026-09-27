@@ -10,13 +10,14 @@ async fn test_resume_thread_id_placeholder_ignored_and_spawns_new() {
     for placeholder in ["", "new", "__omit__"] {
         let dir = tempdir().unwrap();
         write_test_agent(&dir);
-        let t = make_subagent_tool(vec![]).with_thread_store(make_fs_store(&dir));
+        let fixture = SessionFixture::open_in(dir.path()).await;
+        let (t, cwd) = install_parent_session(make_subagent_tool(vec![]), &fixture).await;
         let result = t
             .invoke(
                 serde_json::json!({
                     "resume_thread_id": placeholder,
                     "subagent_type": "test-agent",
-                    "cwd": dir.path().to_str().unwrap(),
+                    "cwd": cwd,
                     "prompt": "do it",
                 }),
                 peri_agent::tools::ToolContext::new(&[], "."),
@@ -47,24 +48,39 @@ async fn test_resume_thread_id_placeholder_ignored_and_spawns_new() {
 async fn test_resume_thread_id_ignores_fork_field() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
         &id,
         "test-agent",
-        None,
+        Some(parent_id.as_str()),
         vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
     )
     .await;
 
-    let t = make_subagent_tool(vec![]).with_thread_store(store);
+    let t = make_subagent_tool(vec![])
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(parent.clone());
     let result = t
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "fork": true,
-                "cwd": dir.path().to_str().unwrap(),
+                "cwd": cwd.clone(),
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
@@ -83,24 +99,39 @@ async fn test_resume_thread_id_ignores_fork_field() {
 async fn test_resume_thread_id_ignores_subagent_type_field() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
         &id,
         "test-agent",
-        None,
+        Some(parent_id.as_str()),
         vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
     )
     .await;
 
-    let t = make_subagent_tool(vec![]).with_thread_store(store);
+    let t = make_subagent_tool(vec![])
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(parent.clone());
     let result = t
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "subagent_type": "test-agent",
-                "cwd": dir.path().to_str().unwrap(),
+                "cwd": cwd.clone(),
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
@@ -117,7 +148,23 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
 #[tokio::test]
 async fn test_resume_thread_id_not_found() {
     let dir = tempdir().unwrap();
-    let t = make_subagent_tool(vec![]).with_thread_store(make_fs_store(&dir));
+    let fixture = SessionFixture::open_in(dir.path()).await;
+    let cwd = fixture.workspace_cwd();
+    let parent_id = fixture
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
+    let t = make_subagent_tool(vec![])
+        .with_session_resources(fixture.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(fixture.execution_owner())
+        .with_parent_session(parent.clone());
     let result = t
         .invoke(
             serde_json::json!({
@@ -139,13 +186,28 @@ async fn test_resume_thread_id_not_found() {
 #[tokio::test]
 async fn test_resume_thread_id_active_rejected() {
     let dir = tempdir().unwrap();
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let id = uuid::Uuid::now_v7().to_string();
     let mut meta = peri_agent::thread::ThreadMeta::new("/tmp");
     meta.id = id.clone();
     meta.title = Some("fork".to_string());
     store.create_thread(meta).await.unwrap(); // ThreadMeta 默认 agent_status = Active
-    let t = make_subagent_tool(vec![]).with_thread_store(store);
+    let t = make_subagent_tool(vec![])
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(parent.clone());
     let result = t
         .invoke(
             serde_json::json!({
@@ -162,54 +224,73 @@ async fn test_resume_thread_id_active_rejected() {
     );
 }
 
-/// parent 链不匹配不再拒绝（parent 链校验已移除）——meta.parent_thread_id 与
-/// 父 session thread_id 不一致时恢复仍成功（thread_id 即恢复凭证）
+/// parent 链归属：child 的 `parent_thread_id` 指向**另一个真实根会话**时，即使持有
+/// child_thread_id 且绑定同一工作区，恢复仍被拒绝
+/// （`bound subagent belongs to another root session execution owner`）。
+///
+/// 本用例的前身断言「parent 链不匹配不再拒绝」，那是在存储替身下成立的行为：
+/// 替身没有执行归属，也允许 `parent_thread_id` 指向不存在的 thread。换成真门面后
+/// 两个方向都必须给出一致结论——指向不存在的父会让祖先链读不出快照
+/// （`load_inherited_context_on` 对链上成员 `fetch_one`），指向另一个真实根则被
+/// 归属校验拒绝。要保护的契约是后者：child_thread_id 不是执行权凭证
+/// （见母 issue §4.1「不得仅持有 child_thread_id 推断新执行权」）。
 #[tokio::test]
-async fn test_resume_thread_id_parent_mismatch_not_rejected() {
+async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    // 另一个真实根会话：child 挂在它下面，祖先链可解析但执行根不同。
+    let other_root = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立另一根会话失败");
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
         &id,
         "test-agent",
-        Some("some-other-parent"),
+        Some(other_root.as_str()),
         vec![BaseMessage::human("旧消息")],
     )
     .await;
 
-    // 父 session：store().thread_id = "parent-uuid" ≠ meta.parent_thread_id
-    let work = dir.path().to_str().unwrap();
+    // 调用方自己的父会话（最后一个建，夹具执行所有权就是它的）
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
     let parent = peri_agent::session::Session::new(
-        Arc::from(work),
+        std::sync::Arc::from(cwd.as_str()),
         peri_agent::session::FrozenContext::builder().build(),
-        Some("parent-uuid".into()),
+        Some(parent_id.clone()),
     );
     let t = make_subagent_tool(vec![])
-        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent);
-    let result = t
+    let error = t
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
-                "cwd": work,
+                "cwd": cwd.clone(),
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("parent 链不匹配不再拒绝恢复");
-    assert!(
-        result.contains(&format!("child_thread_id: {}", id)),
-        "完成文本应带 child_thread_id: {}",
-        result
+        .expect_err("跨根恢复必须被拒绝");
+    assert_eq!(
+        error.to_string(),
+        "bound subagent belongs to another root session execution owner",
+        "拒绝原因应为执行根归属，而不是「不存在」或「仍处于运行态」"
     );
-    // 与 agent 层测试对齐：锁定完成收尾（区别于 bg 启动 / interrupted 文本也带前缀）
+    // 拒绝发生在任何写入之前：thread 保持原收尾状态，不留 active 残留。
     let meta = store.load_meta(&id).await.unwrap();
     assert_eq!(
         meta.agent_status,
         peri_agent::thread::AgentStatus::Done,
-        "恢复完成后收尾 done"
+        "被拒绝的恢复不得改动 thread 状态"
     );
 }
 
@@ -221,14 +302,28 @@ async fn test_resume_thread_id_background_combination() {
     use tokio::sync::mpsc;
 
     let dir = tempdir().unwrap();
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "fork", None, Vec::new()).await;
+    preset_resumable_thread(&store, &id, "fork", Some(parent_id.as_str()), Vec::new()).await;
 
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
     let t = make_subagent_tool(vec![])
-        .with_thread_store(store)
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(parent.clone())
         .with_task_manager(Arc::clone(&registry))
         .with_bg_event_sender(bg_tx);
 
@@ -284,23 +379,38 @@ async fn test_resume_thread_id_background_combination() {
 async fn test_resume_thread_id_success_replays_and_completes() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
         &id,
         "test-agent",
-        None,
+        Some(parent_id.as_str()),
         vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
     )
     .await;
 
-    let t = make_subagent_tool(vec![]).with_thread_store(store);
+    let t = make_subagent_tool(vec![])
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(parent.clone());
     let result = t
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
-                "cwd": dir.path().to_str().unwrap(),
+                "cwd": cwd.clone(),
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
@@ -321,9 +431,27 @@ async fn test_resume_thread_id_success_replays_and_completes() {
 #[tokio::test]
 async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations() {
     let dir = tempdir().unwrap();
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "fork", None, vec![BaseMessage::human("task")]).await;
+    preset_resumable_thread(
+        &store,
+        &id,
+        "fork",
+        Some(parent_id.as_str()),
+        vec![BaseMessage::human("task")],
+    )
+    .await;
 
     // 计数 + 工具捕获 LLM：恒请求调用不存在工具 → 循环持续到迭代上限
     let llm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -368,7 +496,10 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
         }),
         "/tmp".to_string(),
     )
-    .with_thread_store(store);
+    .with_session_resources(store.facade())
+    .with_parent_thread_id(parent_id.clone())
+    .with_execution_owner(store.execution_owner())
+    .with_parent_session(parent.clone());
 
     let result = t
         .invoke(
@@ -413,9 +544,27 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
     )
     .unwrap();
 
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "resume-agent", None, Vec::new()).await;
+    preset_resumable_thread(
+        &store,
+        &id,
+        "resume-agent",
+        Some(parent_id.as_str()),
+        Vec::new(),
+    )
+    .await;
 
     let tools_capture: Arc<std::sync::Mutex<Vec<String>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -447,13 +596,16 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
         }),
         "/tmp".to_string(),
     )
-    .with_thread_store(store);
+    .with_session_resources(store.facade())
+    .with_parent_thread_id(parent_id.clone())
+    .with_execution_owner(store.execution_owner())
+    .with_parent_session(parent.clone());
 
     let result = t
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
-                "cwd": dir.path().to_str().unwrap(),
+                "cwd": cwd.clone(),
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
@@ -483,10 +635,25 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
 async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "test-agent", None, vec![]).await;
-    let tool = make_subagent_tool(vec![]).with_thread_store(store.clone());
+    preset_resumable_thread(&store, &id, "test-agent", Some(parent_id.as_str()), vec![]).await;
+    let tool = make_subagent_tool(vec![])
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(parent.clone());
     let result = tool
         .invoke(
             serde_json::json!({
@@ -495,7 +662,7 @@ async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
                 "fork": true,
                 "model": "invalid-model",
                 "prompt": null,
-                "cwd": dir.path().to_str().unwrap()
+                "cwd": cwd.clone()
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )

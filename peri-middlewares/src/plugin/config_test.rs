@@ -262,6 +262,24 @@ fn test_plugins_dir_uses_claude_home() {
     assert!(path_str.contains("plugins"));
 }
 
+/// `claude_home()` 的 HOME 优先契约：Windows 的 `dirs_next::home_dir()` 走 Profile
+/// known-folder，不读 HOME/USERPROFILE，只有 HOME 维度能重定向 `~/.claude`；插件目录
+/// 解析依赖这一点（各入口各拼一份 home 会在 Windows 上分叉），故在此钉住——
+/// 断言跨平台可复现，不必等到 Windows CI。
+#[test]
+fn test_claude_home_prefers_absolute_home_env() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let home = tempdir().unwrap();
+    let previous = std::env::var_os("HOME");
+    std::env::set_var("HOME", home.path());
+    let resolved = claude_home();
+    match previous {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    assert_eq!(resolved, home.path().join(".claude"));
+}
+
 #[test]
 fn test_ensure_plugin_dirs_creates_missing_dirs() {
     // 模拟无 CC 环境：空临时目录下验证 ensure_plugin_dirs 创建所有子目录

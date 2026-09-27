@@ -40,6 +40,8 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -164,6 +166,8 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -251,6 +255,8 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -336,6 +342,8 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     // turn A：LocalUserBubble + PromptSubmitted(A1)
     dispatch_and_notify(
@@ -457,6 +465,8 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -542,6 +552,8 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     // turn A 运行中
     dispatch_and_notify(
@@ -641,6 +653,8 @@ fn test_turn_interrupted_current_request_id_rollback() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -722,6 +736,8 @@ fn test_turn_interrupted_none_request_id_falls_back() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -791,6 +807,8 @@ fn test_double_cancel_request_id_pairs() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     // A 提交并运行
     dispatch_and_notify(

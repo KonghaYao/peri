@@ -47,6 +47,14 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
   待恢复的精确代际只在协商了 `peri.sessionRecoveryV1` 的连接上停住（客户端确认后调用
   `peri/session_reset_dirty`），没有确认交互的连接由宿主直接解除该代际并取得所有权。
   只读准入不改变独占：写入与执行仍要 owner，`session/fork` 不接受降级。
+- ~~会话存储准入由 initialize 的 `peri.sessionStoreRegistrationV1` 显式协商：
+  `peri/session_store_status` 返回本机对当前存储的接纳裁决，`peri/session_register_store`
+  在用户显式接受风险时登记。~~ **已撤销**（2026-09-27 用户裁决）：不再有本机登记、准入
+  裁决与跨安装来源判定，因此这两条方法与 `peri.sessionStoreRegistrationV1` 都不再存在
+  （原语义、`StoreNotRegistered` / `StoreRegisteredFromDifferentOrigin` 两条拒绝原因见
+  `spec/issues/2026-09-26-session-store-remote-backend.md` 的历史记录）。**现行语义是
+  「配置即用」**：配置里指到哪个会话存储就直接用哪个，不要求先登记；远端库与本地库是
+  同一种存储模式，两者存储模式一致（schema/SQL 统一是后续工作）。
 - `session/metadata` 读取轻量标题与当前会话配置投影；不做逐 tick Git 发现。
 
 类型事实源为 `peri-acp-types::workspace`；身份、恢复和执行锁约束见

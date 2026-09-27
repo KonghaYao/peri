@@ -42,6 +42,15 @@ struct TestCli {
     config_file: Option<PathBuf>,
     #[arg(long = "db-path", visible_alias = "dbPath")]
     db_path: Option<PathBuf>,
+    #[arg(long = "session-store", visible_alias = "sessionStore")]
+    session_store: Option<String>,
+    #[arg(
+        long = "session-store-token-env",
+        visible_alias = "sessionStoreTokenEnv"
+    )]
+    session_store_token_env: Option<String>,
+    #[arg(long = "session-store-engine", visible_alias = "sessionStoreEngine")]
+    session_store_engine: Option<String>,
 }
 
 #[test]
@@ -557,6 +566,65 @@ fn test_real_cli_parses_config_and_db_flags() {
     .unwrap();
     assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
     assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
+}
+
+#[test]
+fn test_session_store_flags_parse() {
+    let cli = TestCli::try_parse_from([
+        "peri",
+        "--session-store",
+        "env:TURSO_URL",
+        "--session-store-token-env",
+        "TURSO_TOEKN",
+        "--session-store-engine",
+        "turso",
+    ])
+    .unwrap();
+    assert_eq!(cli.session_store.as_deref(), Some("env:TURSO_URL"));
+    assert_eq!(cli.session_store_token_env.as_deref(), Some("TURSO_TOEKN"));
+    assert_eq!(cli.session_store_engine.as_deref(), Some("turso"));
+}
+
+#[test]
+fn test_session_store_camel_aliases_parse() {
+    let cli = TestCli::try_parse_from([
+        "peri",
+        "--sessionStore",
+        "/tmp/threads.db",
+        "--sessionStoreTokenEnv",
+        "PERI_TEST_TOKEN",
+        "--sessionStoreEngine",
+        "libsql",
+    ])
+    .unwrap();
+    assert_eq!(cli.session_store.as_deref(), Some("/tmp/threads.db"));
+    assert_eq!(
+        cli.session_store_token_env.as_deref(),
+        Some("PERI_TEST_TOKEN")
+    );
+    assert_eq!(cli.session_store_engine.as_deref(), Some("libsql"));
+}
+
+#[test]
+fn test_session_store_missing_value_errors() {
+    assert!(TestCli::try_parse_from(["peri", "--session-store"]).is_err());
+    assert!(TestCli::try_parse_from(["peri", "--session-store-token-env"]).is_err());
+    assert!(TestCli::try_parse_from(["peri", "--session-store-engine"]).is_err());
+}
+
+#[test]
+fn test_real_cli_parses_session_store_flags() {
+    // 直测真实 Cli（防 TestCli 镜像漂移）
+    let cli = Cli::try_parse_from([
+        "peri",
+        "--session-store=env:TURSO_URL",
+        "--session-store-token-env=TURSO_TOEKN",
+        "--session-store-engine=turso",
+    ])
+    .unwrap();
+    assert_eq!(cli.session_store.as_deref(), Some("env:TURSO_URL"));
+    assert_eq!(cli.session_store_token_env.as_deref(), Some("TURSO_TOEKN"));
+    assert_eq!(cli.session_store_engine.as_deref(), Some("turso"));
 }
 
 /// [回归测试] 退役的审批快捷参数不得再被真实 CLI 接受。

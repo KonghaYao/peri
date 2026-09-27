@@ -132,6 +132,24 @@ struct ExitRound {
 }
 
 impl HostExitContext {
+    /// 会话任务排空之后关闭会话存储：这是唯一持有部署关闭权的时点。
+    ///
+    /// 返回 `Err(())` 表示关闭**未确认**（在途写入未结清、未决持久化仍在，或取消）。
+    /// 事实已在实现内部判定并记录，这里只按未完成上报——不重试、不把未确认当成功；
+    /// 部署保留上下文，重复关闭会重新做一遍真实检查。
+    async fn shutdown_session_store(&self) -> Result<(), ()> {
+        let Some(shutdown) = self.cfg.session_store_shutdown.as_ref() else {
+            // 未注入关闭权（会话级装配或测试宿主）：这里没有部署存储可关闭。
+            return Ok(());
+        };
+        shutdown.shutdown().await.map_err(|error| {
+            tracing::warn!(
+                kind = ?error.kind(),
+                "session store close was not confirmed; deployment retained for retry"
+            );
+        })
+    }
+
     async fn finish(mut self) -> ExitRound {
         let resources = super::shutdown::shutdown_host(
             &mut self.task_owner,
@@ -147,8 +165,11 @@ impl HostExitContext {
         .await;
         let report = match resources {
             HostTerminalShutdownReport::Incomplete { .. } => AcpHostShutdownReport::Incomplete,
+            // 排空完成才轮得到部署关闭：还有任何未完成的任务时保留存储原样。
             HostTerminalShutdownReport::Complete { .. } => {
-                if let Some(owner) = self.cfg.langfuse_shutdown_owner.as_ref() {
+                if self.shutdown_session_store().await.is_err() {
+                    AcpHostShutdownReport::Incomplete
+                } else if let Some(owner) = self.cfg.langfuse_shutdown_owner.as_ref() {
                     match owner.shutdown().await {
                         LangfuseShutdownReport::Complete => AcpHostShutdownReport::Complete,
                         report => AcpHostShutdownReport::TelemetryFailed(report),

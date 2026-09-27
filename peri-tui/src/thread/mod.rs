@@ -2,11 +2,9 @@
 //!
 //! (I16-C) `browser::ThreadBrowser` 已退役——kit 单路径下
 //! 使用 `kit/panels/thread_browser.rs::ThreadBrowserPanel`（独立实现）。
-//! 本模块仅 re-export `peri-resources` 中的 `ThreadStore` trait 与
-//! `SqliteThreadStore` 实现（契约类型位于 peri-acp-types）。
+//! 会话数据一律经 `peri_acp_types::session_resources::SessionResources` 门面；
+//! 打开一律经 Resources 门面的部署入口（typed open request），
+//! 本模块不再转发任何独立只读 seam 或裸存储类型。
 
-pub use peri_acp_types::store::ThreadStore;
+pub use peri_acp_types::session_resources::SessionResources;
 pub use peri_acp_types::thread::{ThreadId, ThreadMeta};
-pub use peri_resources::sessions::{
-    ReadOnlyThreadStoreError, SqliteThreadStore, open_thread_store_read_only,
-};

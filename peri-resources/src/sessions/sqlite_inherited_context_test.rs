@@ -92,7 +92,7 @@ async fn test_inherited_context_rejects_future_corrupt_and_foreign_flags_without
         sqlx::query("UPDATE threads SET inherited_context = ?1 WHERE id = ?2")
             .bind(snapshot)
             .bind(&id)
-            .execute(&store.pool)
+            .execute(&store.database.pool)
             .await
             .unwrap();
         let error = store.load_inherited_context(&id).await.unwrap_err();
@@ -107,7 +107,7 @@ async fn test_inherited_context_rejects_future_corrupt_and_foreign_flags_without
             .is_err());
         let raw: (String,) = sqlx::query_as("SELECT inherited_context FROM threads WHERE id = ?1")
             .bind(&id)
-            .fetch_one(&store.pool)
+            .fetch_one(&store.database.pool)
             .await
             .unwrap();
         assert_eq!(raw.0, snapshot);

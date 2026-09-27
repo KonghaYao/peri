@@ -447,7 +447,19 @@ pub async fn run_kit_fullscreen(
                             session_id
                         );
                     }
-                    Err(e) => tracing::warn!(error = %e, "kit: initial session creation failed"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "kit: initial session creation failed");
+                        // 启动时这次创建此前只有日志：界面既没有会话也没有原因，用户
+                        // 看到的只是「发不出消息」。会话存储未登记这类可修复的原因必须
+                        // 让用户看见（登记确认也可能因为窗口装不下而没能呈现）。
+                        *atoms::NOTIFICATION.state().write() = Some(atoms::Notification {
+                            message: crate::i18n::tr_args(
+                                "session-creation-failed",
+                                &[("error".into(), e.to_string().into())],
+                            ),
+                            until: Instant::now() + std::time::Duration::from_secs(15),
+                        });
+                    }
                 }
             });
         }

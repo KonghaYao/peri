@@ -13,6 +13,10 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true }
+# 远程会话存储（Turso Database 引擎，over-the-wire）。选定依据、精确版本与已知限制见
+# src/sessions/remote/mod.rs 的模块文档（C-01 只读探测 + 官方引擎/驱动对应关系）。
+turso_serverless = "0.1.3"
+url.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
@@ -25,6 +29,10 @@ peri-workflow = { path = "../peri-workflow" }
 
 [dev-dependencies]
 tempfile.workspace = true
+# 显式 cloud 探测（src/sessions/remote/cloud_test.rs，默认 #[ignore]）用只读 HTTP 读取
+# 服务端版本与参数绑定回环；仅测试目标使用，不进生产依赖图。
+reqwest.workspace = true
+url.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

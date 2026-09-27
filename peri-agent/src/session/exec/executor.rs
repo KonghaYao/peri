@@ -484,7 +484,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         cwd: &ctx.cwd,
         session_id: &ctx.session_id,
         cancel: &ctx.cancel,
-        thread_store: ctx.thread_store.clone(),
+        session_resources: ctx.session_resources.clone(),
         thread_id: ctx.thread_id.clone(),
         // L5：冻结数据由调用点投影为字符串字段（原 FrozenSessionData 引用）
         frozen_claude_md: frozen

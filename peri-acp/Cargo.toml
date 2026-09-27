@@ -37,7 +37,10 @@ peri-model = { path = "../peri-model" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-resources = { path = "../peri-resources" }
 agent-client-protocol = { version = "2", features = ["unstable"] }
-agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_elicitation"] }
+# `unstable_mcp_over_acp`：MCP over ACP 的类型（`McpCapabilities` / `McpServer::Acp`
+# / `ConnectMcpRequest`）与 ACP `mcp/*` 方法名。当前由 `agent-client-protocol` 的
+# `unstable` 特性归一化间接开启，此处显式声明，避免上游特性组合变动时静默丢失。
+agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_elicitation", "unstable_mcp_over_acp"] }
 tokio.workspace = true
 async-trait.workspace = true
 serde.workspace = true

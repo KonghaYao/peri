@@ -188,12 +188,36 @@ impl CurrentTurn {
         self.cache_dirty = true;
     }
 
+    /// 结构计数与 projection 一一对应，读取不物化正文或清除 cache_dirty。
+    pub(crate) fn view_model_count(&self) -> usize {
+        self.segments.len()
+            + usize::from(
+                self.text.len() > self.last_text_flush
+                    || self.reasoning.len() > self.last_reasoning_flush,
+            )
+    }
+
+    pub(crate) fn starts_stream_block(&self, message_id: Option<&str>, reasoning: bool) -> bool {
+        let changed_message = self
+            .last_message_id
+            .as_deref()
+            .zip(message_id)
+            .is_some_and(|(old, new)| old != new);
+        changed_message
+            || if reasoning {
+                self.reasoning.len() == self.last_reasoning_flush
+            } else {
+                self.text.len() == self.last_text_flush
+            }
+    }
+
     pub(crate) fn has_unprojected_changes(&self) -> bool {
         self.cache_dirty
     }
 
     /// Mark the turn as no longer active (e.g. on `"turn-interrupted"`).
     pub fn deactivate(&mut self) {
+        self.freeze_trailing();
         self.active = false;
         self.invalidate_cache();
     }
@@ -221,20 +245,26 @@ impl CurrentTurn {
 
     /// [§6.7] 冻结 trailing 流式段（镜像顶层折叠 pass 的翻转点语义）。
     ///
-    /// 顶层 turn 的冻结由 `apply_fold_pass` 在 phase 离开 PromptRunning 时对
-    /// 快照 VM 完成；子 turn（SubAgentAccumulator）不经过快照 pass，`stop_subagent`
-    /// 必须在此把 `text_started_at`/`reasoning_started_at` 一次性换算为冻结
+    /// 顶层在 deactivate/离开 PromptRunning 时冻结，子 turn 在 stop_subagent
+    /// 时冻结；两者都把稳定时长留在 canonical projection，避免历史覆盖变化
+    /// 或下一 turn 重新按墙钟计算。此处把 `text_started_at`/`reasoning_started_at` 一次性换算为冻结
     /// 时长并清除——此后 trailing bubble 以 Completed/Collapsed 形态构建，
     /// elapsed 不再增长（详情面板不再出现永久的 `◐ Thinking… Ns`）。
     /// 无 trailing 内容时为 no-op（幂等：重复 stop 安全）。
     pub(crate) fn freeze_trailing(&mut self) {
-        if self.text.len() > self.last_text_flush
-            || self.reasoning.len() > self.last_reasoning_flush
+        if self.text_started_at.is_none() && self.reasoning_started_at.is_none() {
+            return;
+        }
+        if (self.text.len() > self.last_text_flush
+            || self.reasoning.len() > self.last_reasoning_flush)
+            && (self.text_started_at.is_some() || self.reasoning_started_at.is_some())
         {
             self.trailing_frozen = Some((
                 self.text_started_at.map(|t| t.elapsed().as_millis() as u64),
-                self.reasoning_started_at
-                    .map(|t| t.elapsed().as_millis() as u64),
+                self.trailing_reasoning_frozen_ms.or_else(|| {
+                    self.reasoning_started_at
+                        .map(|t| t.elapsed().as_millis() as u64)
+                }),
             ));
         }
         self.text_started_at = None;

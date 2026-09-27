@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 use super::{
     connection::ConnectionContext, dispatch_prompt_turn, extract_session_id, handle_notification,
@@ -29,6 +30,7 @@ impl ServerLoop<'_> {
             match msg {
                 IncomingMessage::Request { id, method, params } => match method.as_str() {
                     "session/prompt" => self.spawn_prompt(id, params).await,
+                    "mcp/message" => self.spawn_acp_mcp_request(id, params).await,
                     "peri/mcp/open" | "peri/mcp/app" | "peri/mcp/resource" | "peri/mcp/invoke" => {
                         self.spawn_mcp_apps_request(id, method, params).await;
                     }
@@ -277,6 +279,53 @@ impl ServerLoop<'_> {
         }
     }
 
+    /// `mcp/message`：client 宿主的 MCP server 反向下发的请求。
+    ///
+    /// 与 `session/prompt` / `peri/mcp/*` 同列 spawn 路径：内层处理时长由对端
+    /// 决定，不在请求循环里等。定位承载会话只需一次短锁（连接事实分散在各会话
+    /// 的会话级 MCP 池，`mcp/message` 只带 `connectionId`）。
+    async fn spawn_acp_mcp_request(&self, id: RequestId, params: Value) {
+        let transport = Arc::clone(self.transport);
+        let connection_cancellation = self.connection_cancellation.clone();
+        let routed = {
+            let sessions = self.sessions.lock().await;
+            requests::acp_mcp::route_inbound(&sessions, &params)
+        };
+        let spawner = self.cfg.host_task_spawner.clone();
+        let rejected_transport = Arc::clone(&transport);
+        let rejected_id = id.clone();
+        let spawn_result = spawner.spawn(
+            task_scope::HostTaskOwnerKind::Session,
+            task_scope::HostTaskKind::McpOverAcp,
+            async move {
+                let result = match routed {
+                    Ok((port, inbound)) => tokio::select! {
+                        _ = connection_cancellation.cancelled() => Err(
+                            crate::transport::types::AcpError::new(-32800, "request cancelled"),
+                        ),
+                        result = port.request(inbound) => result
+                            .map_err(|error| crate::transport::types::AcpError::new(error.code, error.message)),
+                    },
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = transport.send_response(id, result).await {
+                    tracing::warn!(%error, "MCP over ACP response send failed");
+                }
+            },
+        );
+        if spawn_result.is_err() {
+            let _ = rejected_transport
+                .send_response(
+                    rejected_id,
+                    Err(crate::transport::types::AcpError::new(
+                        -32800,
+                        "request cancelled",
+                    )),
+                )
+                .await;
+        }
+    }
+
     async fn dispatch_request(&self, id: RequestId, method: String, params: Value) {
         let transport = self.transport;
         let cfg = self.cfg;
@@ -377,27 +426,23 @@ impl ServerLoop<'_> {
                 relay.close_session(session_id);
             }
         }
-        let new_session_id = (method == "session/new")
-            .then(|| {
-                result
-                    .as_ref()
-                    .ok()?
-                    .get("sessionId")?
-                    .as_str()
-                    .map(str::to_owned)
-            })
-            .flatten();
+        let setup_session_id = session_setup(&method, &params, result.as_ref().ok());
         let response_sent = transport.send_response(id, result).await.is_ok();
         if response_sent {
-            if let Some(session_id) = new_session_id {
+            if let Some(session_id) = setup_session_id {
                 let environment = sessions
                     .lock()
                     .await
                     .get(&session_id)
                     .and_then(|state| state.environment.clone());
                 let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-                requests::session_lifecycle::after_new_response(local, transport, &session_id)
-                    .await;
+                if method == "session/new" {
+                    requests::session_lifecycle::after_new_response(local, transport, &session_id)
+                        .await;
+                }
+                // 会话 setup 声明的 acp 型 MCP server：响应之后才受理，客户端此时
+                // 已拿到会话结果，`mcp/connect`（只带 serverId）才有确定的归属方。
+                requests::acp_mcp::attach_session_servers(local, transport, &params, &session_id);
             }
         }
     }
@@ -406,6 +451,34 @@ impl ServerLoop<'_> {
         let cfg = self.cfg;
         let sessions = self.sessions;
         let cont_tx = self.cont_tx;
+        if method == "mcp/message" {
+            // client 宿主的 MCP server 反向下发的通知：按 connectionId 路由到承载
+            // 会话的服务。就地 await（不 spawn）以保住与后续请求的相对次序，但只
+            // 在短锁内定位承载者——投递等待由对端决定，不得占着会话锁。
+            let routed = {
+                let sessions = sessions.lock().await;
+                requests::acp_mcp::route_inbound(&sessions, &params)
+            };
+            match routed {
+                Ok((port, inbound)) => {
+                    if let Err(error) = port.notify(inbound).await {
+                        debug!(
+                            code = error.code,
+                            error = %error.message,
+                            "MCP over ACP 通知未能投递"
+                        );
+                    }
+                }
+                Err(error) => {
+                    debug!(
+                        code = error.code,
+                        error = %error.message,
+                        "MCP over ACP 通知未能路由"
+                    );
+                }
+            }
+            return;
+        }
         if method == "session/cancel" {
             let session_id = extract_session_id(&params, "");
             if !session_id.is_empty() {
@@ -432,5 +505,23 @@ impl ServerLoop<'_> {
         if let Some(req) = cont_req {
             let _ = cont_tx.send(req);
         }
+    }
+}
+
+/// 会话 setup 方法涉及的会话 id：`session/new` | `session/fork` 取响应里的新 id，
+/// `session/load` | `session/resume` 取请求里的 `sessionId`；非 setup 方法与失败的
+/// 调用返回 `None`（失败响应不做后置初始化）。
+fn session_setup(method: &str, params: &Value, response: Option<&Value>) -> Option<String> {
+    let response = response?;
+    match method {
+        "session/new" | "session/fork" => response
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        "session/load" | "session/resume" => {
+            let session_id = extract_session_id(params, "");
+            (!session_id.is_empty()).then(|| session_id.to_owned())
+        }
+        _ => None,
     }
 }

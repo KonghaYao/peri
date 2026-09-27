@@ -8,14 +8,14 @@
 //! transport 挂载（含 legacy `type:cancel` 全 session 兜底中断钩子）。
 //!
 //! stdio host 位于 ACP 层（部署装配点，`docs/top-level.md` §7/§19）；外部
-//! 系统通道（thread 存储）由部署单元（cli）打开后经 `thread_store` 注入，
+//! 系统通道（会话资源门面）由部署单元（cli）打开后经 `session_resources` 注入，
 //! ACP 层不直接依赖 Resources（§0 依赖方向）。
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use parking_lot::RwLock;
 use peri_acp_types::permission::SharedPermissionMode;
-use peri_acp_types::store::ThreadStore;
+use peri_acp_types::session_store::SessionStoreDeployment;
 
 use crate::provider::LlmProvider;
 use crate::transport::stdio::StdioTransport;
@@ -26,8 +26,9 @@ use crate::transport::AcpTransport;
 pub struct StdioInput {
     pub cwd: String,
     pub permission_mode: Arc<SharedPermissionMode>,
-    /// 显式指定 SQLite 会话数据库路径；`None` 使用默认路径，打开失败直接返回错误。
-    pub db_path: Option<PathBuf>,
+    /// 会话存储的部署参数（定位 + 凭证来源 + 访问意图）。装配时一次性打开；
+    /// ACP 层不解释 locator、不读凭证值、不选择后端。
+    pub session_store: SessionStoreDeployment,
 }
 
 /// 启动 ACP stdio 宿主（批 3：统一宿主 `run_acp_server` 接管全部业务处理）。
@@ -118,15 +119,18 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
     let StdioInput {
         cwd: input_cwd,
         permission_mode,
-        db_path,
+        session_store,
     } = input;
     let _ = input_cwd;
 
-    // thread 存储经 peri-agent 工厂构造（§0：ACP 层不直接依赖 Resources；
-    // M-res 收口——存储实例化点归 Agent 层声明边）
-    let thread_store: Arc<dyn ThreadStore> = peri_agent::resources::open_thread_store_with(db_path)
-        .await
-        .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
+    // 存储经 peri-agent 工厂构造（§0：ACP 层不直接依赖 Resources；M-res 收口——
+    // 存储实例化点归 Agent 层声明边）。定位参数按部署描述解析一次、打开一次：
+    // 协议面、Agent transcript/subagent 与 Controller 共用同一个库句柄与同一份
+    // owner 登记；后续恢复会话不重新解析存储。
+    let (session_resources, session_store_shutdown) =
+        peri_agent::resources::open_session_resources_deployment(&session_store)
+            .await
+            .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
 
     // 配置源已在 Provider 选择前按 canonical cwd 冻结，后续读写与装配复用
     // 同一实例，保证配置 provenance 一致。
@@ -144,10 +148,14 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
             peri_config: Arc::new(RwLock::new(peri_config)),
             config_source,
             permission_mode,
-            thread_store,
+            session_resources,
+            // 部署关闭权留在宿主装配里：stdio 宿主的任务排空之后由它关闭会话存储。
+            session_store_shutdown: Some(session_store_shutdown),
             cwd: cwd.clone(),
             bare: false,
             drive_cron_tick: false,
+            // host 级装配：无准备路径提供的插件聚合，按既有语义自行加载。
+            prepared_plugins: None,
         },
         apps_enabled,
     )

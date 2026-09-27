@@ -26,6 +26,7 @@
 ## 稳定不变量
 
 - `run_react_loop` 是阶段循环入口；退出判断保留在 Receive。
+- 启动闸门 `before_react_start` 在首批 `before_agent`/`before_input` 之后、Compact 之前只执行一次；它的 Err 不降级（`Interrupted` → `LoopResult::Interrupted`，其它 → `LoopResult::Error`），候选工具只活在本次 gate 的 `StartupState` 里、随 state 丢弃，而既有 `before_agent` 的软失败降级不受影响。
 - `StageContext` 是阶段依赖边界；阶段间通过输入/输出和上下文传递，不绕过为全局状态。
 - `FrozenContext` 的 prompt、指引、skills 与日期在会话内不可漂移；SubAgent 复用上游冻结数据。
 - `BaseTool::is_direct()` 是工具可见性事实源；deferred 工具经搜索/执行代理访问。

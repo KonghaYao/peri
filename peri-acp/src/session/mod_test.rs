@@ -16,7 +16,6 @@ use crate::provider::{
     LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels,
 };
 use crate::session::SessionManager;
-use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::prelude::{PermissionMode, SharedPermissionMode};
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
@@ -35,14 +34,17 @@ fn make_provider_config(id: &str, model: &str) -> ProviderConfig {
 }
 
 /// 构造测试用 SessionManager + 临时 thread store
-fn make_session_manager(tmp: &tempfile::TempDir) -> SessionManager {
-    make_manager_with_cron_option(tmp, None)
+async fn make_session_manager(tmp: &tempfile::TempDir) -> SessionManager {
+    make_manager_with_cron_option(tmp, None).await
 }
 
 /// 构造关闭 `SkillsMiddleware` 的 SessionManager，用于验证 MetaHarness 对
 /// slash 路由的关闭面也生效，避免 `/skill` 绕过 middleware 装配。
-fn make_session_manager_skills_disabled(tmp: &tempfile::TempDir) -> SessionManager {
-    let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+async fn make_session_manager_skills_disabled(tmp: &tempfile::TempDir) -> SessionManager {
+    let session_resources =
+        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+            .await
+            .unwrap();
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
@@ -59,7 +61,7 @@ fn make_session_manager_skills_disabled(tmp: &tempfile::TempDir) -> SessionManag
     )]));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     SessionManager::new(
-        thread_store,
+        session_resources,
         provider,
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
@@ -78,7 +80,7 @@ fn make_session_manager_skills_disabled(tmp: &tempfile::TempDir) -> SessionManag
 ///
 /// scheduler 的 primary tx 直接丢弃（同 TUI `cron_state.rs:13` 模式）——
 /// 本测试路径不消费 primary trigger 通道，只验证 extra_trigger_txs（bridge）路径。
-fn make_session_manager_with_cron(
+async fn make_session_manager_with_cron(
     tmp: &tempfile::TempDir,
 ) -> (
     SessionManager,
@@ -88,35 +90,38 @@ fn make_session_manager_with_cron(
     let scheduler = Arc::new(parking_lot::Mutex::new(
         peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
     ));
-    let manager = make_manager_with_cron_option(tmp, Some(scheduler.clone()));
+    let manager = make_manager_with_cron_option(tmp, Some(scheduler.clone())).await;
     let (continuation_tx, continuation_rx) = tokio::sync::mpsc::unbounded_channel();
     manager.bind_cron_continuation(continuation_tx);
     (manager, scheduler, continuation_rx)
 }
 
 /// 同 make_session_manager，仅 SessionManager::new 末参按需传入 cron scheduler。
-fn make_manager_with_cron_option(
+async fn make_manager_with_cron_option(
     tmp: &tempfile::TempDir,
     cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
 ) -> SessionManager {
-    make_manager_inner(tmp, cron_scheduler, Vec::new())
+    make_manager_inner(tmp, cron_scheduler, Vec::new()).await
 }
 
 /// Phase 6 B2：构造带插件命令静态条目的 SessionManager（cron 无）。
-fn make_manager_with_plugin_entries(
+async fn make_manager_with_plugin_entries(
     tmp: &tempfile::TempDir,
     plugin_entries: Vec<RouteEntry>,
 ) -> SessionManager {
-    make_manager_inner(tmp, None, plugin_entries)
+    make_manager_inner(tmp, None, plugin_entries).await
 }
 
 /// 通用构造：cron scheduler + 插件命令静态条目可组合注入。
-fn make_manager_inner(
+async fn make_manager_inner(
     tmp: &tempfile::TempDir,
     cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
     plugin_entries: Vec<RouteEntry>,
 ) -> SessionManager {
-    let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+    let session_resources =
+        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+            .await
+            .unwrap();
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
@@ -129,7 +134,7 @@ fn make_manager_inner(
     };
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     SessionManager::new(
-        thread_store,
+        session_resources,
         provider,
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
@@ -192,11 +197,14 @@ impl peri_acp_types::mcp::McpSubscriptionPort for FakeMcpSubscriptionPort {
 }
 
 /// 同 make_session_manager，仅 MCP 订阅端口参数按需注入（mcp_subscription_for 测试用）。
-fn make_manager_with_mcp_subscription(
+async fn make_manager_with_mcp_subscription(
     tmp: &tempfile::TempDir,
     mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
 ) -> SessionManager {
-    let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+    let session_resources =
+        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+            .await
+            .unwrap();
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
@@ -209,7 +217,7 @@ fn make_manager_with_mcp_subscription(
     };
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     SessionManager::new(
-        thread_store,
+        session_resources,
         provider,
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
@@ -230,7 +238,7 @@ fn make_manager_with_mcp_subscription(
 #[tokio::test]
 async fn test_ensure_session_幂等不覆盖已有记录() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     let session_id = "test-session-idempotent";
 
     // 第一次插入
@@ -265,7 +273,7 @@ async fn test_ensure_session_幂等不覆盖已有记录() {
 #[tokio::test]
 async fn test_goal_state_for_不存在返回none() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     assert!(
         mgr.goal_state_for("non-existent").is_none(),
         "不存在的 session_id 应返回 None"
@@ -276,7 +284,7 @@ async fn test_goal_state_for_不存在返回none() {
 #[tokio::test]
 async fn test_build_frozen_data_返回非空system_prompt() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
 
     let frozen = mgr.build_frozen_data(tmp.path().to_str().unwrap(), &[], &[]);
     assert!(
@@ -294,7 +302,7 @@ async fn test_build_frozen_data_返回非空system_prompt() {
 #[tokio::test]
 async fn test_cancel_cascade_children_for_不存在不panic() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     // 不应 panic
     mgr.cancel_cascade_children_for("non-existent");
 }
@@ -303,7 +311,7 @@ async fn test_cancel_cascade_children_for_不存在不panic() {
 #[tokio::test]
 async fn test_close_session_移除记录后goal_state返回none() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     let session_id = "test-close-session";
 
     mgr.ensure_session(session_id, "/tmp");
@@ -319,7 +327,7 @@ async fn test_close_session_移除记录后goal_state返回none() {
 #[tokio::test]
 async fn test_pre_close_cancels_but_preserves_record_until_terminal_close() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     let session_id = "pre-close-session";
     mgr.ensure_session(session_id, tmp.path().to_str().unwrap());
     let cancel = mgr
@@ -341,7 +349,7 @@ async fn test_pre_close_cancels_but_preserves_record_until_terminal_close() {
 #[tokio::test]
 async fn test_ensure_session_subscribes_cron_before_first_turn() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp);
+    let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp).await;
     let session_id = "test-cron-before-first-turn";
 
     mgr.ensure_session(session_id, "/tmp");
@@ -371,7 +379,7 @@ async fn test_ensure_session_subscribes_cron_before_first_turn() {
 #[tokio::test]
 async fn test_cron_bridge_survives_turn_error() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp);
+    let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp).await;
     let session_id = "test-cron-turn-error";
     mgr.ensure_session(session_id, "/tmp");
     assert!(mgr.cron_bridge_for(session_id));
@@ -416,7 +424,7 @@ async fn test_cron_bridge_survives_turn_error() {
 #[tokio::test]
 async fn test_cron_bridge_idle_trigger_forwards_continuation_without_early_enqueue() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp);
+    let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp).await;
     let session_id = "test-cron-idle";
     mgr.ensure_session(session_id, "/tmp");
     assert!(mgr.cron_bridge_for(session_id));
@@ -452,7 +460,7 @@ async fn test_cron_bridge_idle_trigger_forwards_continuation_without_early_enque
 #[tokio::test]
 async fn test_pending_caps_consumed_once_second_session_gets_negotiated() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
 
     // initialize 协商：仅部分 cap 开启
     let negotiated = peri_acp_types::PeriCaps {
@@ -489,7 +497,7 @@ async fn test_pending_caps_consumed_once_second_session_gets_negotiated() {
 #[tokio::test]
 async fn test_pending_caps_double_fallback_semantics() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     // 不调用 set_pending_caps（MpscTransport / TUI 内部路径，无 initialize）
 
     let consumed = mgr.consume_pending_caps("t1");
@@ -510,7 +518,7 @@ async fn test_pending_caps_double_fallback_semantics() {
 #[tokio::test]
 async fn test_effective_host_caps_requires_external_negotiation_but_preserves_internal_path() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     assert!(
         mgr.effective_host_caps().oauth,
         "未 initialize 的进程内 TUI 路径保持 all_enabled"
@@ -537,7 +545,8 @@ async fn test_mcp_subscription_for_幂等注册() {
     let mgr = make_manager_with_mcp_subscription(
         &tmp,
         Some(port.clone() as Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>),
-    );
+    )
+    .await;
     let session_id = "test-mcp-sub-idempotent";
     mgr.ensure_session(session_id, "/tmp");
 
@@ -567,7 +576,8 @@ async fn test_mcp_subscription_for_session不存在返回false() {
     let mgr = make_manager_with_mcp_subscription(
         &tmp,
         Some(port.clone() as Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>),
-    );
+    )
+    .await;
     assert!(!mgr.mcp_subscription_for("non-existent"));
     assert_eq!(port.inbox_count(), 0, "session 不存在时不得注册");
 }
@@ -580,7 +590,8 @@ async fn test_mcp_subscription_for_close_session后返回false() {
     let mgr = make_manager_with_mcp_subscription(
         &tmp,
         Some(port.clone() as Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>),
-    );
+    )
+    .await;
     let session_id = "test-mcp-sub-close";
     mgr.ensure_session(session_id, "/tmp");
     assert!(mgr.mcp_subscription_for(session_id));
@@ -605,7 +616,7 @@ async fn test_mcp_subscription_for_close_session后返回false() {
 #[tokio::test]
 async fn test_mcp_subscription_for未注入端口返回false() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     let session_id = "test-mcp-sub-no-port";
     mgr.ensure_session(session_id, "/tmp");
     assert!(
@@ -620,7 +631,7 @@ async fn test_mcp_subscription_for未注入端口返回false() {
 #[tokio::test]
 async fn test_mcp_skill_registry_lifecycle_released_on_close() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     let session_id = "test-registry-lifecycle";
     mgr.ensure_session(session_id, "/tmp");
 
@@ -783,7 +794,10 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
     std::fs::write(meta_dir.join("01_intro.md"), "CUSTOM-INTRO-BODY").unwrap();
     std::fs::write(meta_dir.join("05_using_tools.md"), "CUSTOM-TOOLS-BODY").unwrap();
 
-    let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+    let session_resources =
+        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+            .await
+            .unwrap();
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
@@ -801,7 +815,7 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
     ]));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let mgr = SessionManager::new(
-        thread_store,
+        session_resources,
         provider,
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
@@ -857,7 +871,10 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
     std::fs::create_dir_all(&meta_dir).unwrap();
     std::fs::write(meta_dir.join("01_intro.md"), "V1-BODY").unwrap();
 
-    let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+    let session_resources =
+        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+            .await
+            .unwrap();
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
@@ -871,7 +888,7 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
     peri_config.config.meta_harness = Some(mh_cfg(&[("01_intro", true)]));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let mgr = SessionManager::new(
-        thread_store,
+        session_resources,
         provider,
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
@@ -935,7 +952,7 @@ fn write_local_skill(cwd: &std::path::Path, dir: &str, skill_name: &str) {
 async fn test_session_creation_registers_local_skills_core_domain() {
     let tmp = tempfile::TempDir::new().unwrap();
     write_local_skill(tmp.path(), "hello", "hello");
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     mgr.ensure_session("s1", tmp.path().to_str().unwrap());
 
     let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
@@ -951,7 +968,7 @@ async fn test_session_creation_registers_local_skills_core_domain() {
 #[tokio::test]
 async fn test_session_creation_registers_builtin_skill_alias() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     mgr.ensure_session("s1", tmp.path().to_str().unwrap());
 
     let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
@@ -967,7 +984,7 @@ async fn test_session_creation_registers_builtin_skill_alias() {
 async fn test_session_creation_does_not_register_skills_when_disabled() {
     let tmp = tempfile::TempDir::new().unwrap();
     write_local_skill(tmp.path(), "hello", "hello");
-    let mgr = make_session_manager_skills_disabled(&tmp);
+    let mgr = make_session_manager_skills_disabled(&tmp).await;
     mgr.ensure_session("s1", tmp.path().to_str().unwrap());
 
     let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
@@ -981,7 +998,7 @@ async fn test_session_creation_does_not_register_skills_when_disabled() {
 async fn test_session_creation_core_conflict_keeps_builtin() {
     let tmp = tempfile::TempDir::new().unwrap();
     write_local_skill(tmp.path(), "compact", "compact");
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     mgr.ensure_session("s1", tmp.path().to_str().unwrap());
 
     let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
@@ -1011,7 +1028,7 @@ async fn test_session_creation_core_conflict_keeps_builtin() {
 async fn test_session_creation_normalizes_skill_name_with_colon() {
     let tmp = tempfile::TempDir::new().unwrap();
     write_local_skill(tmp.path(), "namespaced", "foo:bar");
-    let mgr = make_session_manager(&tmp);
+    let mgr = make_session_manager(&tmp).await;
     mgr.ensure_session("s1", tmp.path().to_str().unwrap());
 
     let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
@@ -1042,7 +1059,7 @@ async fn test_session_creation_registers_plugin_commands() {
             lifecycle: CommandLifecycle::Connected,
         },
     };
-    let mgr = make_manager_with_plugin_entries(&tmp, vec![plugin_entry]);
+    let mgr = make_manager_with_plugin_entries(&tmp, vec![plugin_entry]).await;
     mgr.ensure_session("s1", tmp.path().to_str().unwrap());
 
     let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
@@ -1083,7 +1100,8 @@ async fn test_session_creation_register_order_builtin_skill_plugin() {
                 lifecycle: CommandLifecycle::Connected,
             },
         }],
-    );
+    )
+    .await;
     mgr.ensure_session("s1", tmp.path().to_str().unwrap());
 
     let reg = mgr.command_registry_for("s1").expect("session 注册表存在");

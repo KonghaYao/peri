@@ -1,172 +1,198 @@
-//! Ownership of resume status from its initial claim through sync finalization.
+//! Ownership of resume status from its initial claim through terminal reporting.
 //!
-//! A worker owns the active write and its compensating write. Dropping the caller
-//! requests preparation rollback or running cancellation; it never cancels an
-//! in-flight database write.
-//! Cleanup then completes asynchronously, provided the runtime and store remain
-//! available. Explicit rollback awaits the same worker and reports its failure.
+//! A worker owns the claim's active write and its compensating write. Dropping the
+//! caller requests preparation rollback or running cancellation; it never cancels an
+//! in-flight resource write. Explicit rollback / finish await the same worker and
+//! report its failure.
+//!
+//! 认领的状态写入与「恢复到认领前」由资源侧持有（`ChildResumeClaim`），调用方只提交
+//! 领域结果：开始运行 / 移交后台 / 准备失败 / 终止。
 
 use std::sync::Arc;
 
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::thread::{ThreadMeta, ThreadStore};
+use peri_acp_types::session_resources::{SessionMetaPatch, SessionResources};
+use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 
-/// Cross-instance claim serialization; history loading and execution stay outside.
-/// As before, this lock does not coordinate separate processes.
-static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
+/// 调用方提交给认领 worker 的领域结果。
 enum ClaimDecision {
-    Release,
-    Finish(&'static str),
+    /// 成功移交后台执行：终态状态此后由后台执行持有（仍属本次认领）。
+    HandOff,
+    /// 同步收尾：先结清认领，再写领域终态。
+    Finish(AgentStatus),
 }
 
 pub(in crate::session::subagent) struct ResumeClaim {
-    release: Option<oneshot::Sender<ClaimDecision>>,
-    running: bool,
+    /// 决定通道；调用方消失（Drop）时按当前阶段发送取消或直接关闭。
+    decision: Option<oneshot::Sender<ClaimDecision>>,
+    /// worker 的写入不能被调用方取消：只 detach（不 abort）。
     worker: JoinHandle<Result<(), String>>,
+    running: bool,
 }
 
 impl ResumeClaim {
+    /// 校验（只读）后由资源侧串行认领 child；认领在写侧门禁内完成「读状态 + 写 active」。
     pub(super) async fn acquire(
-        store: Arc<dyn ThreadStore>,
+        store: Arc<dyn SessionResources>,
         thread_id: String,
-        mut ownership: Option<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>>,
+        root_id: String,
+        ownership: Option<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>>,
     ) -> Result<(ThreadMeta, Self), Box<dyn std::error::Error + Send + Sync>> {
         let (meta_tx, meta_rx) = oneshot::channel();
-        let (release, decision) = oneshot::channel();
+        let (decision_tx, decision_rx) = oneshot::channel();
         let worker = tokio::spawn(async move {
-            let result = own_claim(&store, &thread_id, meta_tx, decision).await;
+            let result =
+                own_claim(store, thread_id, root_id, meta_tx, decision_rx, ownership).await;
             if let Err(error) = &result {
-                tracing::error!(%thread_id, %error, "resume status finalization failed");
-            } else if let Some(owner) = &mut ownership {
-                owner.confirm_stopped();
+                tracing::error!(%error, "resume claim worker failed");
             }
             result
         });
-        // Created before the first await: even cancellation during the active
-        // write leaves the worker with an unambiguous rollback decision.
-        let owner = Self {
-            release: Some(release),
-            running: false,
+        // 先于第一个 await 建立：调用方在 active 写期间消失也留下明确决定。
+        let claim = Self {
+            decision: Some(decision_tx),
             worker,
+            running: false,
         };
         let meta = meta_rx.await.map_err(|error| {
             format!("resume_subagent: status claim worker ended before reporting: {error}")
         })??;
-        Ok((meta, owner))
+        Ok((meta, claim))
     }
 
-    /// Successful background registration now owns terminal status.
-    pub(super) fn release(mut self) {
-        if let Some(release) = self.release.take() {
-            let _ = release.send(ClaimDecision::Release);
-        }
+    /// 成功移交给后台执行：终态状态此后由后台执行持有。
+    pub(super) async fn release(mut self) {
+        self.decide(ClaimDecision::HandOff);
+        Self::await_worker(&mut self.worker).await;
     }
 
     pub(in crate::session::subagent) fn mark_running(&mut self) {
         self.running = true;
     }
 
-    /// Normal sync Stop has run its hook; serialize the terminal write with the
-    /// original active write. Dropping this await cannot cancel that write.
-    pub(in crate::session::subagent) async fn finish(mut self, status: &'static str) {
-        if let Some(release) = self.release.take() {
-            let _ = release.send(ClaimDecision::Finish(status));
-        }
-        // Preserve the existing best-effort Stop persistence contract. The
-        // worker reports store errors even if this await is cancelled.
-        if let Err(error) = (&mut self.worker).await {
-            tracing::error!(%error, "resume terminal status worker failed");
-        }
+    /// 同步 Stop 已运行 hook：把领域终态交给 worker，由它先结清认领再写入。
+    pub(in crate::session::subagent) async fn finish(mut self, status: AgentStatus) {
+        self.decide(ClaimDecision::Finish(status));
+        Self::await_worker(&mut self.worker).await;
     }
 
+    /// 准备失败：关闭决定通道，worker 恢复到认领前的记录并报告其失败。
     pub(super) async fn rollback(mut self) -> Result<(), String> {
-        drop(self.release.take());
+        self.decision = None;
         (&mut self.worker)
             .await
             .map_err(|error| format!("resume status rollback worker failed: {error}"))?
+    }
+
+    /// 提交领域结果；已提交过（或未及提交即被取消）时不重复。
+    fn decide(&mut self, decision: ClaimDecision) {
+        if let Some(decision_tx) = self.decision.take() {
+            let _ = decision_tx.send(decision);
+        }
+    }
+
+    /// 等待 worker 完成本决定对应的写入。这里被取消只会 detach worker，不会取消写入；
+    /// worker 自身已记录失败原因。
+    async fn await_worker(worker: &mut JoinHandle<Result<(), String>>) {
+        let _ = worker.await;
     }
 }
 
 impl Drop for ResumeClaim {
     fn drop(&mut self) {
-        if self.running {
-            if let Some(release) = self.release.take() {
-                let _ = release.send(ClaimDecision::Finish("cancelled"));
-            }
+        // 运行中被取消 → 领域终态「取消」；准备阶段被取消 → 直接关闭决定通道，
+        // 由 worker 恢复认领前的记录。两者都不取消资源侧正在进行的写入。
+        if !self.running {
+            return;
         }
-        // A preparation drop closes the sender without a decision: restore the
-        // previous status. Dropping JoinHandle detaches, never aborts, the worker.
+        if let Some(decision_tx) = self.decision.take() {
+            let _ = decision_tx.send(ClaimDecision::Finish(AgentStatus::Cancelled));
+        }
     }
 }
 
+/// 认领 worker：active 写入一旦开始，就必须由本任务驱动到完成，与调用方是否仍在无关。
 async fn own_claim(
-    store: &Arc<dyn ThreadStore>,
-    thread_id: &String,
+    store: Arc<dyn SessionResources>,
+    thread_id: ThreadId,
+    root_id: ThreadId,
     mut meta_tx: oneshot::Sender<Result<ThreadMeta, String>>,
     decision: oneshot::Receiver<ClaimDecision>,
+    mut ownership: Option<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>>,
 ) -> Result<(), String> {
-    let guard = tokio::select! {
-        biased;
-        _ = meta_tx.closed() => return Ok(()),
-        guard = RESUME_LOCK.lock() => guard,
-    };
-    // Validation is read-only and may be cancelled without compensation. Once
-    // the active write starts below, the worker must drive it to completion.
+    // 校验只读且可被调用方取消；取消后不再进入写入。
     let validated = tokio::select! {
         biased;
         _ = meta_tx.closed() => return Ok(()),
-        result = validate_thread(store, thread_id) => result,
+        result = validate_thread(store.as_ref(), &thread_id) => result,
     };
     let meta = match validated {
         Ok(meta) => meta,
         Err(error) => {
-            let _ = meta_tx.send(Err(error));
+            let _ = meta_tx.send(Err(error.to_string()));
             return Ok(());
         }
     };
-    if meta_tx.is_closed() {
-        return Ok(());
-    }
-    let previous_status = meta.agent_status;
     // Never select cancellation against this write: the store may commit before
-    // returning Pending. Any rollback must be ordered after its completion.
-    if let Err(error) = store.update_thread_status(thread_id, "active").await {
-        let rollback = restore_status(store, thread_id, previous_status.as_str()).await;
-        let mut message = format!(
-            "resume_subagent: failed to mark thread {} active: {}",
-            thread_id, error
-        );
-        if let Err(error) = &rollback {
-            message.push_str(&format!("; {error}"));
+    // returning. Any rollback must be ordered after its completion.
+    let handle = match store.claim_child_resume(&thread_id, &root_id).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            let _ = meta_tx.send(Err(format!(
+                "resume_subagent: failed to claim thread {thread_id}: {error}"
+            )));
+            return Ok(());
         }
-        let _ = meta_tx.send(Err(message));
-        return rollback;
-    }
-    drop(guard);
-    // If the receiver was dropped, its owner also closed `decision`. A success
-    // arriving after cancellation therefore cannot strand an unowned claim.
-    let _ = meta_tx.send(Ok(meta));
-    let status = match decision.await {
-        Ok(ClaimDecision::Release) => return Ok(()),
-        Ok(ClaimDecision::Finish(status)) => status,
-        Err(_) => previous_status.as_str(),
     };
-    let _guard = RESUME_LOCK.lock().await;
-    restore_status(store, thread_id, status).await
+    // 调用方已消失时发送失败，但认领证据已落库：下面的决定分支会给出补偿。
+    let _ = meta_tx.send(Ok(meta));
+    match decision.await {
+        Ok(ClaimDecision::HandOff) => {
+            handle
+                .hand_off_to_background()
+                .await
+                .map_err(|error| format!("resume claim hand-off failed: {error}"))?;
+        }
+        Ok(ClaimDecision::Finish(status)) => {
+            // 顺序不可反——结清会把记录写回认领前的值，先写终态会被它覆盖。
+            handle
+                .mark_terminated()
+                .await
+                .map_err(|error| format!("resume claim settle failed: {error}"))?;
+            store
+                .update_session_meta(
+                    &thread_id,
+                    &SessionMetaPatch {
+                        status: Some(status),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| format!("resume terminal status write failed: {error}"))?;
+        }
+        // 准备阶段调用方消失：恢复到认领前的状态，不留 active 残留。
+        Err(_) => {
+            handle
+                .mark_failed()
+                .await
+                .map_err(|error| format!("resume status rollback failed: {error}"))?;
+        }
+    }
+    if let Some(owner) = ownership.as_mut() {
+        owner.confirm_stopped();
+    }
+    Ok(())
 }
 
 async fn validate_thread(
-    store: &Arc<dyn ThreadStore>,
-    thread_id: &String,
-) -> Result<ThreadMeta, String> {
-    if uuid::Uuid::parse_str(thread_id).is_err() {
-        return Err(format!("resume_subagent: invalid thread id: {}", thread_id));
-    }
+    store: &dyn SessionResources,
+    thread_id: &str,
+) -> Result<ThreadMeta, Box<dyn std::error::Error + Send + Sync>> {
+    super::validate_thread_id_format(thread_id)?;
     let meta = store
-        .load_meta(thread_id)
+        .load_session_meta(&thread_id.to_owned())
         .await
         .map_err(|_| format!("resume_subagent: thread not found: {}", thread_id))?;
     if meta.agent_status.is_active() {
@@ -175,18 +201,8 @@ async fn validate_thread(
             (thread 仍处于运行态: 可能仍在执行, 或上次异常退出未收尾; \
             若确认无执行中任务, 可改用 Agent(subagent_type: ...) 新建)",
             thread_id
-        ));
+        )
+        .into());
     }
     Ok(meta)
-}
-
-async fn restore_status(
-    store: &Arc<dyn ThreadStore>,
-    thread_id: &String,
-    previous_status: &str,
-) -> Result<(), String> {
-    store
-        .update_thread_status(thread_id, previous_status)
-        .await
-        .map_err(|error| format!("failed to restore thread {thread_id} status: {error}"))
 }

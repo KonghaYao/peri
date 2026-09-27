@@ -235,7 +235,7 @@ pub(super) fn handle_hitl_pending(
             .committed
             .push_back(TuiRenderUnit::TuiAskUserBlock(block));
     }
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_popup_kind(state);
     super::render::push_acp_state(state);
 }
@@ -256,7 +256,7 @@ pub(super) fn handle_ask_user(state: &mut BridgeState, pending: &PendingInteract
             .committed
             .push_back(TuiRenderUnit::TuiAskUserBlock(block));
     }
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }
 
@@ -357,7 +357,7 @@ pub(super) fn handle_interaction_terminal(
     if let Some((i, vm)) = updated {
         state.committed.set(i, vm);
     }
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }
 
@@ -550,7 +550,7 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
         }
     }
     state.phase = SessionPhase::Idle;
-    super::render::push_view_models(state);
+    state.publish_barrier();
 
     // Rewind v2：回填目标 user 消息文本到输入框（复用 TurnInterrupted 的回填通道）。
     // 消费 REWIND_TARGET_TEXT → INPUT_RESTORE_TEXT + 心跳 → InputArea use_effect

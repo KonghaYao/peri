@@ -22,8 +22,7 @@ pub use list_sessions::list_sessions_as_info;
 pub use prompt::{extract_prompt_params, handle_prompt};
 pub use rewind::{rewind_execute, rewind_preview};
 pub use rewind_candidates::rewind_candidates;
-pub(crate) use session_fork::fork_bound_session;
-pub use session_fork::fork_session;
+pub(crate) use session_fork::{fork_bound_session, load_fork_source};
 pub use session_load::load_session_payloads;
 pub use session_replay::{
     replay_persisted_session_history, replay_session_history, ReplayError, ReplaySender,

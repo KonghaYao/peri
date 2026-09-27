@@ -18,7 +18,7 @@ pub(super) fn handle_agent_execution_failed(state: &mut BridgeState, message: &s
     state
         .current_turn
         .push_system_note(text, TuiNoteLevel::Error, content_hash);
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }
 

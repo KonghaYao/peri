@@ -3,9 +3,13 @@ use super::*;
 use crate::agent::stages::StageContext;
 use crate::session::exec::stage_builder::V2AgentOutput;
 use crate::session::{FrozenContext, Session};
-use crate::thread::{SqliteThreadStore, ThreadMeta, ThreadStore};
+use crate::thread::ThreadMeta;
+// 测试夹具直接使用 SQLite 具体实现（显式资源测试入口）：本用例断言的是库内的
+// 继承区与 flags 事实，门面不提供逐条 fixture 构造。
 use peri_acp_types::event_v2::EventBus;
+use peri_acp_types::store::ThreadStore;
 use peri_acp_types::store::{InheritedContext, MessageFlags, PersistedPayload};
+use peri_resources::sessions::SqliteThreadStore;
 
 #[tokio::test]
 async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately() {
@@ -85,7 +89,12 @@ async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately()
     });
     let mut context = make_session_context("hidden-child-provenance");
     context.thread_id = Some(child_id.clone());
-    context.thread_store = Some(store.clone());
+    // 执行侧的读取入口是门面：同一库文件上的真实实现，继承区与 flags 由它回答。
+    context.session_resources = Some(Arc::new(
+        peri_resources::sessions::SessionResourcesImpl::open(dir.path().join("child.db"))
+            .await
+            .unwrap(),
+    ));
     let mut turn = make_turn_input(
         Arc::new(MockEventSink::new()),
         MessageContent::text("continue"),

@@ -19,11 +19,91 @@
 
 use crate::agent::agent_context::AgentContext;
 use crate::agent::stages::StageContext;
+use crate::middleware::capabilities as hook_state;
 use crate::middleware::state::MiddlewareState;
+use crate::session::tool_catalog::StartupToolUpdate;
 
 /// 从 StageContext 构造 AgentContext
 fn make_context_from_stage(ctx: &StageContext) -> AgentContext<'_> {
     AgentContext::from_stage(ctx)
+}
+
+/// 启动闸门状态：暂存本次准入的候选工具更新。
+///
+/// 候选只存在于本次 `run_before_react_start` 的局部 state；middleware 失败、
+/// 取消或闸门结束即随 state 丢弃，不落 middleware 内部字段，也不跨 loop 复用。
+#[derive(Default)]
+struct StartupGateState {
+    active_middleware: Option<String>,
+    candidate: Option<StartupToolUpdate>,
+    candidate_owner: Option<String>,
+}
+
+impl StartupGateState {
+    /// 候选登记者的名称；无登记时按链级归类。
+    fn owner(&self) -> String {
+        self.candidate_owner
+            .clone()
+            .unwrap_or_else(|| "chain".to_string())
+    }
+}
+
+impl hook_state::StartupState for StartupGateState {
+    fn set_active_middleware(&mut self, middleware_name: &str) {
+        self.active_middleware = Some(middleware_name.to_string());
+    }
+
+    fn stage_startup_tools(&mut self, update: StartupToolUpdate) -> crate::error::AgentResult<()> {
+        let owner = self
+            .active_middleware
+            .clone()
+            .unwrap_or_else(|| "chain".to_string());
+        if self.candidate.is_some() {
+            return Err(crate::error::AgentError::MiddlewareError {
+                middleware: owner,
+                reason: "System MCP 启动失败：启动闸门已登记候选工具，拒绝重复登记".to_string(),
+            });
+        }
+        self.candidate = Some(update);
+        self.candidate_owner = Some(owner);
+        Ok(())
+    }
+
+    fn take_startup_tools(&mut self) -> Option<StartupToolUpdate> {
+        self.candidate.take()
+    }
+}
+
+/// 调用 middleware chain 的 `before_react_start` 钩子，并把候选原子提交到
+/// session tool catalog 的 static base。
+///
+/// 提交只更新 static base：Reason 边界仍完整走 ARC-TOOLS-001 的
+/// `refresh → working map swap → before_reason_catalog → before_model → pin`，
+/// 本函数不改写 working map、不替代 Reason boundary。钩子返回 Err 时候选直接
+/// 丢弃，目录不变——调用方据此阻止进入 Compact。
+pub async fn run_before_react_start(ctx: &StageContext) -> crate::error::AgentResult<()> {
+    let mut gate = StartupGateState::default();
+    ctx.runtime
+        .middleware_chain
+        .run_before_react_start(&mut gate)
+        .await?;
+    let Some(update) = hook_state::StartupState::take_startup_tools(&mut gate) else {
+        return Ok(());
+    };
+    let committed = ctx
+        .runtime
+        .tool_catalog
+        .replace_static_mcp_tools(update)
+        .map_err(|error| crate::error::AgentError::MiddlewareError {
+            middleware: gate.owner(),
+            reason: format!("System MCP 启动失败：工具目录发布被拒绝，未发布 ready（{error}）"),
+        })?;
+    tracing::debug!(
+        generation = committed.generation,
+        tools = committed.tools.len(),
+        "startup tool update committed to static base"
+    );
+    Ok(())
 }
 
 // ─── Async 调用辅助 ───────────────────────────────────────────────────────────

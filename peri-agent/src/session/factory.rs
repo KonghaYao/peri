@@ -182,8 +182,8 @@ use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::plugin::LoadedPlugin;
 use peri_acp_types::ports::{LspPoolPort, McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort};
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::skills::SkillRoot;
-use peri_acp_types::store::ThreadStore;
 use peri_acp_types::tools::TodoItem;
 use peri_acp_types::workflow::AgentExecutor;
 use peri_acp_types::{identity::AgentId, permission::SharedPermissionMode};
@@ -320,8 +320,8 @@ pub struct AssemblyContext {
     /// SubAgent Langfuse bridge（由上层构造注入）
     pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     // ── 子 agent 持久化 ──
-    /// 子线程持久化存储
-    pub thread_store: Option<Arc<dyn ThreadStore>>,
+    /// 会话资源门面：child 保存/状态写入的唯一入口
+    pub session_resources: Option<Arc<dyn SessionResources>>,
     /// 父线程 ID（子 agent 层级）
     pub parent_thread_id: Option<String>,
     /// 子 agent 启动注册回调

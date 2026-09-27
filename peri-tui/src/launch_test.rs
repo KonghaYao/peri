@@ -37,7 +37,10 @@ async fn attach_acp_rejects_second_attachment_before_spawning_host() {
     // resolves the system profile independently of the HOME override.
     crate::config::set_global_config_path(Some(temp.path().join("settings.json")));
     let db_path = temp.path().join("threads.db");
-    let mut app = App::new(Some(db_path)).await.expect("app");
+    let mut app =
+        App::new(peri_acp_types::session_store::SessionStoreDeployment::local_path(db_path))
+            .await
+            .expect("app");
     let (client_transport, _server_transport) = mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) =
         AcpTuiClient::new_interactive(client_transport);

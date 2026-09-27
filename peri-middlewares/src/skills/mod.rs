@@ -302,11 +302,10 @@ impl SkillsMiddleware {
         {
             let mut roots = Vec::new();
             // User override
-            let user_dir = self.user_skills_dir.clone().unwrap_or_else(|| {
-                dirs_next::home_dir()
-                    .map(|h| h.join(".claude").join("skills"))
-                    .unwrap_or_default()
-            });
+            let user_dir = self
+                .user_skills_dir
+                .clone()
+                .unwrap_or_else(|| crate::plugin::claude_home().join("skills"));
             roots.push(SkillRoot {
                 path: user_dir,
                 source: SkillSource::User,

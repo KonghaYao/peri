@@ -235,7 +235,8 @@ fn project_assembly(input: &StageBuildInput, turn: TurnAssembly) -> AssemblyCont
         system_prompt_for_sub,
     } = turn;
     let ThreadPersistence {
-        store: thread_store,
+        session_resources,
+        execution_owner: _,
         parent_thread_id,
         register_runtime,
         deregister_runtime,
@@ -283,7 +284,7 @@ fn project_assembly(input: &StageBuildInput, turn: TurnAssembly) -> AssemblyCont
         on_bg_complete,
         // SubAgent Langfuse bridge：注入工厂构造（采样决策继承自父 agent）。
         langfuse_bridge: input.langfuse_bridge_factory.as_ref().map(|f| f()),
-        thread_store,
+        session_resources,
         parent_thread_id,
         register_runtime,
         deregister_runtime,

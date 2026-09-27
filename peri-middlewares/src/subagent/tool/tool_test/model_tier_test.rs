@@ -290,25 +290,40 @@ async fn test_agent_model_ignored_on_fork() {
 async fn test_resume_thread_id_ignores_model_field() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
         &store,
         &id,
         "test-agent",
-        None,
+        Some(parent_id.as_str()),
         vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
     )
     .await;
 
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases)).with_thread_store(store);
+    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases))
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(parent.clone());
     let result = t
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "model": "turbo",
-                "cwd": dir.path().to_str().unwrap(),
+                "cwd": cwd.clone(),
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )

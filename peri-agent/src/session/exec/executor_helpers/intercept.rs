@@ -9,7 +9,8 @@ use peri_acp_types::{
     event::{EventSink, ExecutorEvent},
     messages::{BaseMessage, MessageContent},
     session::{ExecutionFailure, PromptResult},
-    store::{PersistedPayload, ThreadStore},
+    session_resources::SessionResources,
+    store::PersistedPayload,
     tasks::TaskManager,
 };
 use tokio_util::sync::CancellationToken;
@@ -42,7 +43,7 @@ pub struct InterceptRequest<'a> {
     pub cwd: &'a str,
     pub session_id: &'a str,
     pub cancel: &'a CancellationToken,
-    pub thread_store: Option<Arc<dyn ThreadStore>>,
+    pub session_resources: Option<Arc<dyn SessionResources>>,
     pub thread_id: Option<String>,
     // ── 冻结数据投影（原 FrozenSessionData；ACP 调用点投影字符串）──
     pub frozen_claude_md: Option<String>,
@@ -216,7 +217,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
     // 管线（McpSkillReleaser 依此放行，决策 A2；RPC 路径恒 false）。
     ctx.supports_inject = true;
     ctx.parsed_args = parsed_args;
-    ctx.thread_store = req.thread_store.clone();
+    ctx.session_resources = req.session_resources.clone();
     ctx.thread_id = req.thread_id.clone();
     ctx.task_manager = Some(req.task_manager.clone());
     ctx.frozen_claude_md = req.frozen_claude_md.clone().map(Arc::new);
@@ -250,8 +251,11 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
             let mut history_replaced_by_compaction = false;
             let mut committed_payloads = None;
             if !persistence_inconsistent && commit_state.has_committed() {
-                match restore_committed_context(req.thread_store.as_ref(), req.thread_id.as_ref())
-                    .await
+                match restore_committed_context(
+                    req.session_resources.as_ref(),
+                    req.thread_id.as_ref(),
+                )
+                .await
                 {
                     Ok((payloads, messages)) => {
                         committed_payloads = Some(payloads);
@@ -284,7 +288,11 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
             // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
             // 命令 turn 无 request_id（None）——TUI 侧跳过 id 配对、回退代际兜底。
             req.event_sink
-                .push_done(req.session_id, "end_turn", None)
+                .push_done(
+                    req.session_id,
+                    super::done_stop_reason(result.stop_reason),
+                    None,
+                )
                 .await;
             let mut persisted_payloads =
                 committed_payloads.unwrap_or_else(|| req.history_payloads.clone());
@@ -319,14 +327,20 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
 }
 
 async fn restore_committed_context(
-    store: Option<&Arc<dyn ThreadStore>>,
+    store: Option<&Arc<dyn SessionResources>>,
     thread_id: Option<&String>,
 ) -> anyhow::Result<(Vec<PersistedPayload>, Vec<BaseMessage>)> {
     let (store, thread_id) = store
         .zip(thread_id)
         .ok_or_else(|| anyhow::anyhow!("compact persistence is unavailable"))?;
-    let inherited = store.load_inherited_context(thread_id).await?;
-    let own = store.load_payloads(thread_id).await?;
+    // 一次一致快照：inherit 区、自有 payload 与 flags 来自同一次读取，不再分三次
+    // 取（分次读会把「先 payload 后 flags」的跨时刻结果当成一份历史）。
+    let snapshot = store
+        .load_session_snapshot(thread_id)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let own = snapshot.payloads;
+    let inherited = snapshot.inherited;
     let own_ids = own
         .iter()
         .map(PersistedPayload::id)
@@ -338,7 +352,7 @@ async fn restore_committed_context(
     {
         anyhow::bail!("inherited context overlaps command own history");
     }
-    let own_flags = store.load_message_flags(thread_id).await?;
+    let own_flags = snapshot.flags;
     let mut transcript = MessageTranscript::new()
         .with_ancestor_payloads(inherited.payloads)
         .with_own_payloads(own);

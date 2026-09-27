@@ -25,12 +25,11 @@ use peri_acp_types::{
     interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
     messages::{BaseMessage, MessageContent},
     permission::{PermissionMode, SharedPermissionMode},
-    store::ThreadStore,
+    session_resources::SessionResources,
 };
 use peri_agent::session::exec::executor_helpers::{
     ForwarderLauncherFn, StageBuildFn, StageBuildRequest,
 };
-use peri_agent::thread::FilesystemThreadStore;
 use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
@@ -61,7 +60,10 @@ struct HomeGuard {
 #[cfg_attr(windows, allow(dead_code))]
 impl HomeGuard {
     fn set(home: &std::path::Path) -> Self {
-        let lock = HOME_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let lock = HOME_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::var_os("HOME");
         std::env::set_var("HOME", home);
         Self {
@@ -83,7 +85,10 @@ impl Drop for HomeGuard {
 // ── Mock EventSink ─────────────────────────────────────────────────────────
 
 /// Mock EventSink，记录所有 push_done 调用（含 request_id）与事件流。
-struct MockEventSink {
+///
+/// `pub(super)`：`host::mcp_v4_startup_tests`（B-07 的 MCP 启动准入用例）复用同一
+/// 观测面，避免测试各自维护一套事件顺序断言（字段仍私有，只经访问器暴露快照）。
+pub(super) struct MockEventSink {
     push_done_count: Mutex<usize>,
     push_done_stop_reasons: Mutex<Vec<String>>,
     pushed_events: Mutex<Vec<String>>,
@@ -91,7 +96,7 @@ struct MockEventSink {
 }
 
 impl MockEventSink {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             push_done_count: Mutex::new(0),
             push_done_stop_reasons: Mutex::new(Vec::new()),
@@ -100,8 +105,15 @@ impl MockEventSink {
         }
     }
 
-    fn push_done_count(&self) -> usize {
+    pub(super) fn push_done_count(&self) -> usize {
         *self.push_done_count.lock().unwrap()
+    }
+
+    /// 事件流快照（与 `push_done` 交错记录，用于断言 terminal 顺序）。
+    /// 调用方都在 `host::mcp_v4_startup_tests`（unix 用例），Windows 上没有使用者。
+    #[cfg_attr(windows, allow(dead_code))]
+    pub(super) fn operations(&self) -> Vec<String> {
+        self.operations.lock().unwrap().clone()
     }
 }
 
@@ -267,14 +279,21 @@ impl UserInteractionBroker for NoopBroker {
 /// 构造最小 SessionContext（flow 测试走预取消中断路径；stage 装配桥经
 /// 真实 ACP 桥注入——与生产 host/prompt.rs 同模式；LLM 工厂从测试
 /// LlmProvider + AgentPool 烘焙，装配路径实际调用）。
-fn make_session_context(session_id: &str) -> SessionContext {
+///
+/// `pub(super)`：`host::mcp_v4_startup_tests` 复用同一装配面后按需注入 MCP pool。
+pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
     // 事件广播宿主：发射端（EventPublisher 适配）与订阅端（subscribe 工厂）
     // 共享同一 Controller 实例，保持迁移前「publish/subscribe 同一广播」语义。
-    let controller = Arc::new(peri_controller::Controller::new(
-        Arc::new(FilesystemThreadStore::new(
-            std::env::temp_dir().join(format!("peri-exec-flow-{}", uuid::Uuid::new_v4())),
-        )) as Arc<dyn ThreadStore>,
-    ));
+    // Controller 只持会话资源门面：夹具开一个临时真实库（该门面在本用例里不被执行）。
+    let controller: Arc<dyn SessionResources> =
+        peri_agent::resources::open_session_resources_with(Some(
+            std::env::temp_dir()
+                .join(format!("peri-exec-flow-{}", uuid::Uuid::new_v4()))
+                .join("threads.db"),
+        ))
+        .await
+        .unwrap();
+    let controller = Arc::new(peri_controller::Controller::new(controller));
     // 测试 LlmProvider + AgentPool + PeriConfig（与迁移前 executor_test 同源）
     let provider = LlmProvider::OpenAi {
         api_key: "test-key".to_string(),
@@ -400,7 +419,8 @@ fn make_session_context(session_id: &str) -> SessionContext {
         broker: Arc::new(NoopBroker),
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         session_access: None,
-        thread_store: None,
+        session_resources: None,
+        execution_owner: None,
         thread_id: None,
         plugin_skill_roots: vec![],
         plugin_agent_dirs: vec![],
@@ -455,9 +475,11 @@ async fn make_session_context_with_manager(
     session_id: &str,
     tmp: &tempfile::TempDir,
 ) -> (SessionContext, SessionManager) {
-    let mut ctx = make_session_context(session_id);
-    let thread_store =
-        Arc::new(FilesystemThreadStore::new(tmp.path().join("threads"))) as Arc<dyn ThreadStore>;
+    let mut ctx = make_session_context(session_id).await;
+    let session_resources =
+        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+            .await
+            .unwrap();
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![ProviderConfig {
@@ -478,7 +500,7 @@ async fn make_session_context_with_manager(
         ..Default::default()
     };
     let sm = SessionManager::new(
-        thread_store,
+        session_resources,
         LlmProvider::from_config(&peri_config).unwrap(),
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
@@ -502,7 +524,7 @@ async fn make_session_context_with_manager(
 /// 构造 stage 装配桥（真实 ACP 桥，与生产 host/prompt.rs 同模式：ZST
 /// ProductionChainAssembler + build_compact_hooks（测试 ctx hook_groups 为空
 /// → (None, None)）；测试无 Langfuse → bridge factory None）。
-fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
+pub(super) fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
     let ctx_for_stage = ctx.clone();
     Arc::new(move |sbr| {
         let (compact_pre_hook, compact_post_hook) = crate::host::prompt::build_compact_hooks(
@@ -624,7 +646,7 @@ fn make_aborting_forwarder_launcher() -> ForwarderLauncherFn {
     })
 }
 
-fn make_turn_input(
+pub(super) fn make_turn_input(
     event_sink: Arc<dyn EventSink>,
     content: MessageContent,
     continuation: bool,
@@ -738,7 +760,7 @@ async fn test_production_first_reason_sees_after_before_agent_dynamic_contributi
     let model = Arc::new(CapturePromptModel {
         requests: Arc::clone(&requests),
     }) as Arc<dyn Model>;
-    let mut ctx = make_session_context("dynamic-first-reason");
+    let mut ctx = make_session_context("dynamic-first-reason").await;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let frozen = frozen_with_dynamic_prompt_policy("DYNAMIC_BASE_SENTINEL", &[]);
     let (out, _) = make_stage_build(&ctx)(make_stage_request(frozen, None)).unwrap();
@@ -819,7 +841,7 @@ async fn test_production_fresh_stage_rebuild_recomputes_dynamic_contributions_fr
         requests: Arc::clone(&requests),
     }) as Arc<dyn Model>;
     let shared_index = Arc::new(ToolSearchIndex::default());
-    let mut first_ctx = make_session_context("dynamic-fresh-enabled");
+    let mut first_ctx = make_session_context("dynamic-fresh-enabled").await;
     first_ctx.primary_llm_factory = {
         let model = Arc::clone(&model);
         Some(Arc::new(move || Arc::clone(&model)))
@@ -864,7 +886,7 @@ async fn test_production_fresh_stage_rebuild_recomputes_dynamic_contributions_fr
     drop(first.bg_event_rx);
     drop(first_ctx);
 
-    let mut second_ctx = make_session_context("dynamic-fresh-disabled");
+    let mut second_ctx = make_session_context("dynamic-fresh-disabled").await;
     second_ctx.primary_llm_factory = {
         let model = Arc::clone(&model);
         Some(Arc::new(move || Arc::clone(&model)))
@@ -953,7 +975,7 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
         SessionFactory, SubagentCancelPolicy, SubagentRunMode, SubagentSpawnConfig,
     };
 
-    let mut ctx = make_session_context("frozen-production-parent");
+    let mut ctx = make_session_context("frozen-production-parent").await;
     ctx.language = Some("en-US".into());
     let stage_build = make_stage_build(&ctx);
     let sentinel = make_sentinel_frozen();
@@ -999,7 +1021,8 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
             compact_config: None,
             context_budget: None,
             compact_llm: None,
-            thread_store: None,
+            session_resources: None,
+            execution_owner: None,
             event_handler: None,
             bg_event_sender: None,
             task_manager: None,
@@ -1062,7 +1085,7 @@ async fn test_production_stage_uses_frozen_language_and_keeps_override_out_of_ba
     let model = Arc::new(CapturePromptModel {
         requests: Arc::clone(&requests),
     }) as Arc<dyn Model>;
-    let mut ctx = make_session_context("frozen-language-override");
+    let mut ctx = make_session_context("frozen-language-override").await;
     ctx.language = Some("en-US".into());
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let sentinel = make_sentinel_frozen();
@@ -1155,7 +1178,7 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
     let model = Arc::new(CapturePromptModel {
         requests: Arc::clone(&requests),
     }) as Arc<dyn Model>;
-    let mut ctx = make_session_context("late-frozen-files");
+    let mut ctx = make_session_context("late-frozen-files").await;
     ctx.cwd = cwd.to_string_lossy().into_owned();
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let stage_build = make_stage_build(&ctx);
@@ -1216,7 +1239,8 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
             compact_config: None,
             context_budget: None,
             compact_llm: None,
-            thread_store: None,
+            session_resources: None,
+            execution_owner: None,
             event_handler: None,
             bg_event_sender: None,
             task_manager: None,
@@ -1255,7 +1279,7 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
 #[tokio::test]
 async fn test_continuation_bypasses_keepgoing_short_circuit() {
     // Arrange：预取消 token，保证进入管线后快速中断（不触发真实 LLM 调用）
-    let ctx = make_session_context("test-continuation");
+    let ctx = make_session_context("test-continuation").await;
     ctx.cancel.cancel();
     let stage_build = make_stage_build(&ctx);
     let mock_sink = Arc::new(MockEventSink::new());
@@ -1291,7 +1315,7 @@ async fn test_continuation_bypasses_keepgoing_short_circuit() {
 async fn test_turn_terminal_state_unique_and_last() {
     // Arrange：预取消 token，进入管线后立即中断（不触发真实 LLM 调用）
     let mock_sink = Arc::new(MockEventSink::new());
-    let ctx = make_session_context("test-turn-terminal");
+    let ctx = make_session_context("test-turn-terminal").await;
     ctx.cancel.cancel();
     let stage_build = make_stage_build(&ctx);
     let turn = make_turn_input(
@@ -1357,7 +1381,7 @@ async fn test_turn_terminal_state_unique_and_last() {
 #[tokio::test]
 async fn test_forwarder_barrier_orders_final_usage_before_done() {
     let model: Arc<dyn Model> = Arc::new(UsageModel);
-    let mut ctx = make_session_context("test-forwarder-usage-barrier");
+    let mut ctx = make_session_context("test-forwarder-usage-barrier").await;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let stage_build = make_stage_build(&ctx);
     let sink = Arc::new(MockEventSink::new());
@@ -1407,7 +1431,7 @@ async fn test_forwarder_barrier_orders_final_usage_before_done() {
 #[tokio::test]
 async fn test_forwarder_join_error_fails_turn_before_done_without_late_usage() {
     let model: Arc<dyn Model> = Arc::new(UsageModel);
-    let mut ctx = make_session_context("test-forwarder-join-error");
+    let mut ctx = make_session_context("test-forwarder-join-error").await;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let stage_build = make_stage_build(&ctx);
     let sink = Arc::new(MockEventSink::new());
@@ -1500,7 +1524,7 @@ async fn test_cancel_during_reason_has_one_interrupted_terminal() {
     let model: Arc<dyn Model> = Arc::new(CancelGateModel {
         entered: Mutex::new(Some(entered_tx)),
     });
-    let mut ctx = make_session_context("test-cancel-during-reason");
+    let mut ctx = make_session_context("test-cancel-during-reason").await;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let cancel = ctx.cancel.clone();
     let stage_build = make_stage_build(&ctx);
@@ -1566,7 +1590,7 @@ async fn test_cancel_during_reason_has_one_interrupted_terminal() {
 #[tokio::test]
 async fn test_fatal_failure_precedes_turn_end_and_done() {
     let model: Arc<dyn Model> = Arc::new(FatalModel);
-    let mut ctx = make_session_context("test-fatal-terminal-order");
+    let mut ctx = make_session_context("test-fatal-terminal-order").await;
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let stage_build = make_stage_build(&ctx);
     let sink = Arc::new(MockEventSink::new());
@@ -1659,7 +1683,7 @@ async fn test_continuation_skips_empty_prompt_push() {
     );
 
     // Act 2：keepgoing（continuation=false，同为空 content）——对比组
-    let mut ctx2 = make_session_context(session_id);
+    let mut ctx2 = make_session_context(session_id).await;
     ctx2.session_access =
         Some(Arc::new(sm.clone()) as Arc<dyn peri_acp_types::session::SessionAccessPort>);
     ctx2.cancel.cancel();
@@ -1691,8 +1715,11 @@ async fn test_continuation_skips_empty_prompt_push() {
 // ── FrozenSessionData 渲染测试（L5：渲染面留 ACP，经 build_frozen_data）───
 
 /// 构造带 SkillsProvider 的 SessionManager（frozen 渲染输入）。
-fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
-    let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+async fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
+    let session_resources =
+        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+            .await
+            .unwrap();
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![ProviderConfig {
@@ -1713,7 +1740,7 @@ fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
         ..Default::default()
     };
     SessionManager::new(
-        thread_store,
+        session_resources,
         LlmProvider::from_config(&peri_config).unwrap(),
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
@@ -1743,7 +1770,7 @@ fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
 #[serial]
 async fn test_frozen_session_data_build_is_deterministic() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_manager(&tmp);
+    let mgr = make_manager(&tmp).await;
     let cwd = "/tmp";
 
     let a = mgr.build_frozen_data(cwd, &[], &[]);
@@ -1773,7 +1800,7 @@ async fn test_frozen_session_data_build_is_deterministic() {
 #[serial]
 async fn test_frozen_system_prompt_immune_to_disk_changes() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_manager(&tmp);
+    let mgr = make_manager(&tmp).await;
     let cwd = tmp.path().to_str().unwrap();
 
     // 冻结前：cwd 含 skill-a
@@ -1824,7 +1851,7 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
 #[tokio::test]
 async fn test_frozen_prompt_never_claims_workflow() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_manager(&tmp);
+    let mgr = make_manager(&tmp).await;
     let cwd = "/tmp";
 
     let frozen = mgr.build_frozen_data(cwd, &[], &[]);
@@ -1840,7 +1867,7 @@ async fn test_frozen_prompt_never_claims_workflow() {
 #[tokio::test]
 async fn test_frozen_subagent_prompt_identical_to_main() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_manager(&tmp);
+    let mgr = make_manager(&tmp).await;
     let cwd = "/tmp";
 
     let frozen = mgr.build_frozen_data(cwd, &[], &[]);
@@ -1867,7 +1894,7 @@ async fn test_frozen_subagent_prompt_identical_to_main() {
 #[tokio::test]
 async fn test_workflow_prompt_excludes_hitl_section() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_manager(&tmp);
+    let mgr = make_manager(&tmp).await;
     let frozen = mgr.build_frozen_data("/tmp", &[], &[]);
 
     // 主链冻结 prompt 保留 10_hitl（PermissionMiddleware 默认装配）
@@ -2006,7 +2033,7 @@ fn make_parity_context(
         bg_event_tx,
         on_bg_complete: None,
         langfuse_bridge: None,
-        thread_store: None,
+        session_resources: None,
         parent_thread_id: None,
         register_runtime: None,
         deregister_runtime: None,
@@ -2331,7 +2358,7 @@ async fn test_ptc_runs_through_acp_session_agent_production_path() {
         source,
     }) as Arc<dyn Model>;
     let approvals = Arc::new(Mutex::new(Vec::new()));
-    let mut ctx = make_session_context("ptc-production-e2e");
+    let mut ctx = make_session_context("ptc-production-e2e").await;
     ctx.cwd = tmp.path().to_string_lossy().into_owned();
     ctx.permission_mode = SharedPermissionMode::new(PermissionMode::Default);
     ctx.broker = Arc::new(RecordingApproveBroker {

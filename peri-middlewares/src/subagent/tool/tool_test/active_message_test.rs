@@ -31,7 +31,10 @@ impl ReactLLM for GatedMessageLlm {
 
 struct MessageFixture {
     dir: tempfile::TempDir,
-    store: Arc<peri_agent::thread::FilesystemThreadStore>,
+    store: SessionFixture,
+    /// 本夹具父会话 id 与句柄（同库的第二个工具必须用它才不越根）。
+    parent_id: String,
+    parent: Arc<peri_agent::session::Session>,
     tool: SubAgentTool,
     manager: Arc<TaskManager>,
     calls: Arc<AtomicUsize>,
@@ -42,10 +45,21 @@ struct MessageFixture {
 }
 
 impl MessageFixture {
-    fn new(first_answer: Reasoning) -> Self {
+    async fn new(first_answer: Reasoning) -> Self {
         let dir = tempdir().unwrap();
         write_test_agent(&dir);
-        let store = make_fs_store(&dir);
+        let store = SessionFixture::open_in(dir.path()).await;
+        // 会话 cwd 与父子链：child 保存要求父会话存在且 cwd 与调用 cwd 一致。
+        let cwd = store.workspace_cwd();
+        let parent_id = store
+            .create_thread(ThreadMeta::new(cwd.clone()))
+            .await
+            .expect("建立父会话失败");
+        let parent = peri_agent::session::Session::new(
+            std::sync::Arc::from(cwd.as_str()),
+            peri_agent::session::FrozenContext::builder().build(),
+            Some(parent_id.clone()),
+        );
         let manager = Arc::new(TaskManager::new());
         let calls = Arc::new(AtomicUsize::new(0));
         let factories = Arc::new(AtomicUsize::new(0));
@@ -67,9 +81,12 @@ impl MessageFixture {
                     first_answer: first_answer.clone(),
                 })
             }),
-            dir.path().to_str().unwrap().into(),
+            cwd.clone(),
         )
-        .with_thread_store(store.clone())
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(parent.clone())
         .with_task_manager(manager.clone())
         .with_bg_event_sender(events_tx)
         // 冻结空摘要，避免测试读取用户目录中的指引或 skill 列表。
@@ -82,6 +99,8 @@ impl MessageFixture {
         Self {
             dir,
             store,
+            parent_id,
+            parent,
             tool,
             manager,
             calls,
@@ -151,7 +170,8 @@ async fn test_active_message_reaches_next_model_request_without_resume() {
     let mut fixture = MessageFixture::new(Reasoning::with_tools(
         "",
         vec![ToolCall::new("probe", "Probe", serde_json::json!({}))],
-    ));
+    ))
+    .await;
     let id = fixture
         .start(serde_json::json!({"subagent_type": "test-agent"}))
         .await;
@@ -217,7 +237,7 @@ async fn test_active_message_reaches_next_model_request_without_resume() {
 
 #[tokio::test]
 async fn test_active_message_background_fork_info_does_not_extend_final_answer() {
-    let mut fixture = MessageFixture::new(Reasoning::with_answer("", "finished"));
+    let mut fixture = MessageFixture::new(Reasoning::with_answer("", "finished")).await;
     let id = fixture.start(serde_json::json!({"fork": true})).await;
     let receipt = fixture
         .invoke(serde_json::json!({"resume_thread_id": id, "prompt": "supplement-one"}))
@@ -242,9 +262,18 @@ async fn test_active_message_resumed_background_execution_accepts_info() {
     let mut fixture = MessageFixture::new(Reasoning::with_tools(
         "",
         vec![ToolCall::new("probe", "Probe", serde_json::json!({}))],
-    ));
+    ))
+    .await;
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&fixture.store, &id, "fork", None, Vec::new()).await;
+    // 被恢复的 thread 必须属于夹具父会话的同一执行根，否则 resume 会被归属校验拒绝。
+    preset_resumable_thread(
+        &fixture.store,
+        &id,
+        "fork",
+        Some(fixture.parent_id.as_str()),
+        Vec::new(),
+    )
+    .await;
     let resumed_id = fixture
         .start(serde_json::json!({"resume_thread_id": id}))
         .await;
@@ -265,7 +294,7 @@ async fn test_active_message_resumed_background_execution_accepts_info() {
 
 #[tokio::test]
 async fn test_active_message_rejects_empty_prompt_without_resuming() {
-    let mut fixture = MessageFixture::new(Reasoning::with_answer("", "finished"));
+    let mut fixture = MessageFixture::new(Reasoning::with_answer("", "finished")).await;
     let id = fixture.start(serde_json::json!({"fork": true})).await;
     for prompt in [
         serde_json::Value::Null,
@@ -289,10 +318,15 @@ async fn test_active_message_rejects_empty_prompt_without_resuming() {
 
 #[tokio::test]
 async fn test_active_message_cross_session_is_rejected_without_spawning() {
-    let mut fixture = MessageFixture::new(Reasoning::with_answer("", "finished"));
+    let mut fixture = MessageFixture::new(Reasoning::with_answer("", "finished")).await;
     let id = fixture.start(serde_json::json!({"fork": true})).await;
+    // 同库、同父会话的第二个工具实例：被拒绝的原因必须是「无活跃接收者」，
+    // 而不是缺父身份——否则测不到 cross-session 拒绝本身。
     let stranger = make_subagent_tool(Vec::new())
-        .with_thread_store(fixture.store.clone())
+        .with_session_resources(fixture.store.facade())
+        .with_parent_thread_id(fixture.parent_id.clone())
+        .with_execution_owner(fixture.store.execution_owner())
+        .with_parent_session(Arc::clone(&fixture.parent))
         .with_task_manager(Arc::new(TaskManager::new()));
     let error = stranger
         .invoke(

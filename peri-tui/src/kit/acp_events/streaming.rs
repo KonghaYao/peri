@@ -24,7 +24,16 @@ fn is_bg_agent_without_group(agent_id: &str) -> bool {
     is_bg
 }
 
-pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
+pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) -> PublicationIntent {
+    if tc.text.is_empty() {
+        return PublicationIntent::None;
+    }
+    let first = first_chunk(
+        state,
+        tc.agent_id.as_deref(),
+        tc.message_id.as_deref(),
+        false,
+    );
     // 先尝试 SubAgent 组路由；带 agent_id 但无匹配组 = 主 agent 文本
     // （v2 事件身份透传后主 agent chunk 亦携带 agent_id，`append_subagent_text`
     // 找不到组即回退主 agent 分支，不能静默丢弃——否则主 agent 回复不显示）。
@@ -50,11 +59,6 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
         if !is_bg {
             state.phase = SessionPhase::PromptRunning;
         }
-        // SubAgent 文本：Streaming/Block→always push, None→skip
-        // 不做块边界检测——subagent 输出相对短且不是主要闪烁来源。
-        if super::current_streaming_mode() != super::StreamingMode::None {
-            super::render::push_view_models(state);
-        }
     } else if tc
         .agent_id
         .as_deref()
@@ -65,36 +69,31 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
         }
         state.variant = 1;
         super::render::push_acp_state(state);
-        return;
+        return PublicationIntent::None;
     } else {
         state
             .current_turn
             .append_text(&tc.text, tc.message_id.as_deref());
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
-        let should_push = match super::current_streaming_mode() {
-            super::StreamingMode::Streaming => true,
-            super::StreamingMode::Block => {
-                if super::has_md_block_boundary_since(
-                    &state.current_turn.text,
-                    state.last_pushed_text_len,
-                ) {
-                    state.last_pushed_text_len = state.current_turn.text.chars().count();
-                    true
-                } else {
-                    false
-                }
-            }
-            super::StreamingMode::None => false,
-        };
-        if should_push {
-            // bridge-local scheduler consumes the publication intent after canonical ingest.
-        }
     }
     super::render::push_acp_state(state);
+    stream_intent(state, first, routed_to_subagent, false)
 }
 
-pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningChunk) {
+pub(super) fn handle_reasoning_chunk(
+    state: &mut BridgeState,
+    rc: &TuiReasoningChunk,
+) -> PublicationIntent {
+    if rc.text.is_empty() {
+        return PublicationIntent::None;
+    }
+    let first = first_chunk(
+        state,
+        rc.agent_id.as_deref(),
+        rc.message_id.as_deref(),
+        true,
+    );
     // 同 handle_text_chunk：subagent 路由失败时回退主 agent 推理分支
     // （主 agent thinking chunk 亦携带 agent_id，不能静默丢弃）。
     let routed_to_subagent = rc.agent_id.as_deref().is_some_and(|agent_id| {
@@ -115,10 +114,6 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
         if !is_bg {
             state.phase = SessionPhase::PromptRunning;
         }
-        // SubAgent 推理：Streaming/Block→always push, None→skip
-        if super::current_streaming_mode() != super::StreamingMode::None {
-            super::render::push_view_models(state);
-        }
     } else if rc
         .agent_id
         .as_deref()
@@ -129,7 +124,7 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
         }
         state.variant = 1;
         super::render::push_acp_state(state);
-        return;
+        return PublicationIntent::None;
     } else {
         state
             .current_turn
@@ -142,24 +137,72 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
         );
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
-        let should_push = match super::current_streaming_mode() {
-            super::StreamingMode::Streaming => true,
-            super::StreamingMode::Block => {
-                if super::has_md_block_boundary_since(
-                    &state.current_turn.reasoning,
-                    state.last_pushed_reasoning_len,
-                ) {
-                    state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
-                    true
-                } else {
-                    false
-                }
-            }
-            super::StreamingMode::None => false,
-        };
-        if should_push {
-            // bridge-local scheduler consumes the publication intent after canonical ingest.
-        }
     }
     super::render::push_acp_state(state);
+    stream_intent(state, first, routed_to_subagent, true)
+}
+
+/// 子流沿现有 occurrence/segment 路由；不把主 Agent 的空字符串当子流首块。
+fn first_chunk(
+    state: &BridgeState,
+    agent_id: Option<&str>,
+    message_id: Option<&str>,
+    reasoning: bool,
+) -> bool {
+    if let Some(child) = agent_id.and_then(|id| {
+        state
+            .current_turn
+            .subagents
+            .iter()
+            .rev()
+            .find(|s| s.agent_id == id)
+    }) {
+        // 既有子流 API 没有透传 message_id，使用 occurrence 内的 segment 边界。
+        child.child_turn.starts_stream_block(None, reasoning)
+    } else {
+        state
+            .current_turn
+            .starts_stream_block(message_id, reasoning)
+    }
+}
+
+fn stream_intent(
+    state: &mut BridgeState,
+    first: bool,
+    subagent: bool,
+    reasoning: bool,
+) -> PublicationIntent {
+    match current_streaming_mode() {
+        StreamingMode::None => PublicationIntent::Hidden,
+        StreamingMode::Streaming => {
+            if first {
+                PublicationIntent::Immediate
+            } else {
+                PublicationIntent::Streaming
+            }
+        }
+        StreamingMode::Block if subagent => {
+            if first {
+                PublicationIntent::Immediate
+            } else {
+                PublicationIntent::Streaming
+            }
+        }
+        StreamingMode::Block => {
+            let (text, pushed) = if reasoning {
+                (
+                    &state.current_turn.reasoning,
+                    &mut state.last_pushed_reasoning_len,
+                )
+            } else {
+                (&state.current_turn.text, &mut state.last_pushed_text_len)
+            };
+            if has_md_block_boundary_since(text, *pushed) {
+                *pushed = text.chars().count();
+                PublicationIntent::Immediate
+            } else {
+                PublicationIntent::Hidden
+            }
+        }
+    }
 }

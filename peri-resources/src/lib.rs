@@ -15,4 +15,4 @@ pub mod lsp;
 pub mod sessions;
 pub mod workflow;
 
-pub use context::Resources;
+pub use context::{classify_open_failure, Resources, SessionStoreShutdownOwner, StoreOpenFailure};

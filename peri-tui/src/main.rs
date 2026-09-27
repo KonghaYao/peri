@@ -18,6 +18,8 @@ mod cli_workflow;
 // 实现已移至 peri_tui::kit::panic（lib 侧），AppShell mount 后重装 hook，
 // 覆盖 ratatui::init() 的包装 hook——见 kit/panic.rs 模块注释。
 use peri_acp::host::stdio::StdioInput;
+use peri_acp_types::session_resources::AccessMode;
+use peri_acp_types::session_store::SessionStoreDeployment;
 use peri_tui::kit::panic::init_panic_notify;
 
 // ─── CLI 定义 ──────────────────────────────────────────────────────────────
@@ -90,6 +92,18 @@ struct Cli {
     /// SQLite 会话数据库路径（默认 ~/.peri/threads/threads.db）
     #[arg(long = "db-path", visible_alias = "dbPath")]
     db_path: Option<PathBuf>,
+    /// 会话存储定位：本机路径、远程 locator 或 env:<变量名>（与 --db-path 互斥）
+    #[arg(long = "session-store", visible_alias = "sessionStore")]
+    session_store: Option<String>,
+    /// 远程会话存储的凭证来源（环境变量名，不接受 token 字面量）
+    #[arg(
+        long = "session-store-token-env",
+        visible_alias = "sessionStoreTokenEnv"
+    )]
+    session_store_token_env: Option<String>,
+    /// locator 形态无法唯一决定引擎时显式指定（turso / libsql）
+    #[arg(long = "session-store-engine", visible_alias = "sessionStoreEngine")]
+    session_store_engine: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -430,6 +444,10 @@ fn validate_cli(cli: &Cli) -> std::result::Result<(), &'static str> {
     if cli.print.is_some() && cli.command.is_some() {
         return Err("--print cannot be used with a subcommand");
     }
+    if cli.db_path.is_some() && cli.session_store.is_some() {
+        // 两个定位入口没有隐式覆盖顺序：同时出现直接是参数错误（早于任何 I/O）。
+        return Err("--db-path cannot be combined with --session-store");
+    }
     if matches!(cli.command, Some(Commands::Meta { .. }))
         && (cli.print.is_some()
             || cli.output_format.is_some()
@@ -449,9 +467,38 @@ fn validate_cli(cli: &Cli) -> std::result::Result<(), &'static str> {
             || cli.settings.is_some()
             || cli.config_file.is_some())
     {
-        return Err("meta only accepts --db-path and session --json");
+        return Err(
+            "meta only accepts session store options (--db-path / --session-store*) and session --json",
+        );
     }
     Ok(())
+}
+
+/// 部署参数 → 中性定位描述（D-04）。
+///
+/// 这里只做 CLI grammar 归一（本机路径 / locator 原文 / 默认 + 可选引擎与凭证来源），
+/// **不解析 locator、不读环境变量、不判断后端**：那些纯解析与后端选择只发生在资源
+/// 装配层（`Resources::open_deployment`）。两个定位入口同时出现是参数错误，不设
+/// 隐式覆盖顺序。
+fn session_store_deployment(
+    cli: &Cli,
+    access: AccessMode,
+) -> std::result::Result<SessionStoreDeployment, &'static str> {
+    let deployment = match (cli.db_path.as_ref(), cli.session_store.as_deref()) {
+        (Some(_), Some(_)) => return Err("--db-path cannot be combined with --session-store"),
+        (Some(path), None) => SessionStoreDeployment::local_path(path.clone()),
+        (None, Some(raw)) => SessionStoreDeployment::from_locator(raw),
+        (None, None) => SessionStoreDeployment::default_local(),
+    };
+    let deployment = match cli.session_store_engine.as_deref() {
+        Some(engine) => deployment.with_engine(engine),
+        None => deployment,
+    };
+    let deployment = match cli.session_store_token_env.as_deref() {
+        Some(name) => deployment.with_credential_env(name),
+        None => deployment,
+    };
+    Ok(deployment.with_access(access))
 }
 
 #[derive(Clone, Copy)]
@@ -595,6 +642,12 @@ fn try_run_meta_before_configuration(args: &[OsString]) -> Option<Result<()>> {
     if validate_cli(&cli).is_err() {
         return Some(emit_meta_outcome(cli_meta::invalid_argument_outcome(json)));
     }
+    // meta 是显式只读入口：只读意图 + 同一份定位描述，先 UUID/grammar 再打开；
+    // 不加载 provider/MCP/Agent，也不新建本机执行登记。
+    let deployment = match session_store_deployment(&cli, AccessMode::ReadOnly) {
+        Ok(deployment) => deployment,
+        Err(_) => return Some(emit_meta_outcome(cli_meta::invalid_argument_outcome(json))),
+    };
     let Some(Commands::Meta { action }) = cli.command else {
         return Some(emit_meta_outcome(cli_meta::invalid_argument_outcome(json)));
     };
@@ -604,7 +657,7 @@ fn try_run_meta_before_configuration(args: &[OsString]) -> Option<Result<()>> {
     };
     let outcome = match action {
         MetaAction::Session { session_id, json } => {
-            runtime.block_on(cli_meta::run_meta_session(cli.db_path, session_id, json))
+            runtime.block_on(cli_meta::run_meta_session(deployment, session_id, json))
         }
     };
     Some(emit_meta_outcome(outcome))
@@ -646,6 +699,15 @@ fn main() -> Result<()> {
             .exit();
     }
 
+    // 部署参数在这里归一一次（D-04）：之后 TUI / print / ACP stdio 共享同一个定位描述，
+    // 各入口不再各自解释存储位置，恢复会话也不会重新解析出另一个存储。
+    let session_store = match session_store_deployment(&cli, AccessMode::ReadWrite) {
+        Ok(deployment) => deployment,
+        Err(message) => Cli::command()
+            .error(clap::error::ErrorKind::ArgumentConflict, message)
+            .exit(),
+    };
+
     // 以 clap 解析结果为准（幂等；prescan 与 clap 同源 argv，二者一致）
     peri_tui::config::set_global_config_path(cli.config_file.clone());
 
@@ -666,7 +728,7 @@ fn main() -> Result<()> {
             cli.disallowed_tools.unwrap_or_default(),
             cli.settings,
             None,
-            cli.db_path,
+            session_store,
         ));
     }
 
@@ -683,7 +745,7 @@ fn main() -> Result<()> {
             settings: cli.settings,
             allowed_tools: cli.allowed_tools.unwrap_or_default(),
             disallowed_tools: cli.disallowed_tools.unwrap_or_default(),
-            db_path: cli.db_path,
+            session_store,
         }) {
             Ok(()) => Ok(()),
             Err(_) => std::process::exit(1),
@@ -705,7 +767,7 @@ fn main() -> Result<()> {
                     permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
                         peri_acp_types::permission::PermissionMode::Bypass,
                     ),
-                    db_path: cli.db_path,
+                    session_store,
                 })
                 .await
             })
@@ -839,7 +901,8 @@ struct TuiOptions {
     settings: Option<String>,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
-    db_path: Option<PathBuf>,
+    /// 会话存储定位描述（已由入口归一；恢复会话不再重新解析存储）。
+    session_store: SessionStoreDeployment,
 }
 
 fn propagate_tui_result(result: Result<()>) -> Result<()> {
@@ -882,7 +945,7 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
             settings: opts.settings.clone(),
             allowed_tools: opts.allowed_tools.clone(),
             disallowed_tools: opts.disallowed_tools.clone(),
-            db_path: opts.db_path.clone(),
+            session_store: opts.session_store.clone(),
         };
         peri_tui::kit::entry::run_kit_fullscreen(launch_opts, panic_notify_rx).await
     });

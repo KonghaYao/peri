@@ -28,7 +28,7 @@ pub(super) fn build_session(
     );
 
     // 激活 transcript persistence（compact flags 跨 prompt 持久化）
-    if let (Some(store), Some(tid)) = (input.thread_store.as_ref(), input.thread_id.as_ref()) {
+    if let (Some(store), Some(tid)) = (input.session_resources.as_ref(), input.thread_id.as_ref()) {
         let transcript_arc = session.transcript();
         let mut transcript = transcript_arc.write();
         let old = std::mem::take(&mut *transcript);

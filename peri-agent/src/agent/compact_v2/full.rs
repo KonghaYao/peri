@@ -23,7 +23,7 @@ use crate::error::AgentResult;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent};
 use crate::session::transcript::MessageTranscript;
 use crate::session::MessageFlags;
-use crate::thread::CompactionLifecycle;
+use crate::thread::CompactionChange;
 
 // ─── 公共常量 ──────────────────────────────────────────────────────────────────
 
@@ -70,7 +70,7 @@ pub(super) async fn full_compact_inner(
         let fallback_summary = "No conversation history to compact.".to_string();
         let summary_message = build_summary_message(&fallback_summary);
         transcript
-            .commit_compaction_lifecycle(CompactionLifecycle {
+            .commit_compaction_lifecycle(CompactionChange {
                 flag_updates: Vec::new(),
                 appended_messages: vec![summary_message],
             })
@@ -155,7 +155,7 @@ pub(super) async fn full_compact_inner(
     let mut appended_messages = vec![build_summary_message(&summary)];
     appended_messages.extend(re_inject_result.messages);
     transcript
-        .commit_compaction_lifecycle(CompactionLifecycle {
+        .commit_compaction_lifecycle(CompactionChange {
             flag_updates,
             appended_messages,
         })

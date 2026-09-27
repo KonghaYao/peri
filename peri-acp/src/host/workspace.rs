@@ -4,9 +4,11 @@ use std::{path::Path, sync::Arc};
 
 use super::{assemble, task_scope, AcpServerConfig, SessionState};
 use crate::transport::types::AcpError;
+use peri_acp_types::session_resources::{BindingRecheck, SessionResourceError};
+use peri_acp_types::thread::ThreadId;
 use peri_acp_types::workspace::{
     ReadOnlyAdmission, RecoveryRequiredDetails, ResolvedWorkspace, SessionExecutionLease,
-    WorkspaceError,
+    WorkspaceError, WorkspaceErrorData,
 };
 
 enum SessionEndState {
@@ -34,44 +36,45 @@ impl SessionEnvironment {
         cwd: &str,
         session_id: &str,
     ) -> Result<Option<Arc<Self>>, AcpError> {
+        if host.workspace_assembly.is_none() {
+            return Ok(None);
+        }
+        let inputs = super::prepared::PreparedSessionInputs::prepare_new(host, cwd)?;
+        Self::assemble_prepared(host, &inputs, session_id).await
+    }
+
+    /// 使用已定格的准备输入装配会话环境：配置/插件/目录全部来自 `inputs`——
+    /// 装配期不第二次 `ConfigSource::load_at`、不第二次加载插件。
+    ///
+    /// MCP / LSP / hooks 与 OAuth 消费者仍在本函数内创建（顺序不变）；调用方
+    /// 必须已取得执行所有权，准备阶段本身不启动这些资源。
+    pub(crate) async fn assemble_prepared(
+        host: &AcpServerConfig,
+        inputs: &super::prepared::PreparedSessionInputs,
+        session_id: &str,
+    ) -> Result<Option<Arc<Self>>, AcpError> {
         let Some(source) = host.workspace_assembly.as_ref() else {
             return Ok(None);
         };
-        let same_directory =
-            std::fs::canonicalize(&source.startup_cwd).ok().as_deref() == Some(Path::new(cwd));
-        let (config_source, peri_config, provider) = if same_directory {
-            (
-                host.config_source.clone(),
-                Arc::new(parking_lot::RwLock::new(host.peri_config.read().clone())),
-                host.provider.read().clone(),
-            )
-        } else {
-            let source = Arc::new(
-                crate::provider::ConfigSource::load_at(
-                    Path::new(cwd),
-                    host.config_source.global_path().to_owned(),
-                )
-                .map_err(workspace_error)?,
-            );
-            let config = source.loaded_merged();
-            let provider = crate::provider::LlmProvider::from_config(&config)
-                .or_else(crate::provider::LlmProvider::from_env)
-                .ok_or_else(|| {
-                    AcpError::new(-32603, "No provider configured for session workspace")
-                })?;
-            (source, Arc::new(parking_lot::RwLock::new(config)), provider)
-        };
+        let cwd = inputs.cwd.clone();
         let input = assemble::HostAssemblyInput {
-            provider,
-            peri_config,
-            config_source,
+            provider: inputs.provider.clone(),
+            peri_config: Arc::new(parking_lot::RwLock::new((*inputs.config).clone())),
+            config_source: inputs.config_source.clone(),
             permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
                 host.permission_mode.load(),
             ),
-            thread_store: host.thread_store.clone(),
-            cwd: cwd.to_owned(),
+            session_resources: host.session_resources.clone(),
+            // 会话级装配：这里不是部署 owner，拿不到也不持有全局关闭权。
+            session_store_shutdown: None,
+            cwd: cwd.clone(),
             bare: source.bare,
             drive_cron_tick: false,
+            prepared_plugins: Some(assemble::PreparedPlugins {
+                data: inputs.plugin_data.clone(),
+                skill_roots: inputs.skill_roots.clone(),
+                agent_dirs: inputs.agent_dirs.clone(),
+            }),
         };
         let activation = tokio_util::sync::CancellationToken::new();
         let mut cfg = assemble::assemble_server_config_with_mcp_profile(
@@ -115,7 +118,7 @@ impl SessionEnvironment {
             task_owner: tokio::sync::Mutex::new(task_owner),
             mcp_owner: tokio::sync::Mutex::new(mcp_owner),
             session_id: session_id.to_owned(),
-            cwd: cwd.to_owned(),
+            cwd,
             end_hooks: tokio::sync::Mutex::new(SessionEndState::Pending),
             cleanup_tasks: Arc::new(peri_agent::agent::async_tasks::TaskManager::new()),
         })))
@@ -126,6 +129,13 @@ impl SessionEnvironment {
     }
 
     pub(crate) async fn shutdown(&self) -> bool {
+        // 会话终结即断开本会话声明的 MCP-over-ACP 连接：连接由 client 侧的
+        // ACP 通道承载，会话不再存活后既没有归属也不会有入站消息；处置必须在
+        // 池关闭之前完成，否则 `mcp/disconnect` 已无出站通道可用。实现幂等，
+        // 关闭重试重复调用是安全的。
+        if let Some(port) = self.cfg.acp_mcp.as_ref() {
+            port.close_session(&self.session_id).await;
+        }
         if !self.finish_session_end().await {
             return false;
         }
@@ -219,16 +229,22 @@ impl SessionEnvironment {
 pub(crate) fn workspace_error(error: impl Into<anyhow::Error>) -> AcpError {
     let error = error.into();
     let mut response = AcpError::new(-32010, error.to_string());
-    if let Some(WorkspaceError::RecoveryRequired(details)) = error.downcast_ref::<WorkspaceError>()
+    if let Some(data) = error
+        .downcast_ref::<WorkspaceError>()
+        .and_then(WorkspaceErrorData::from_workspace_error)
     {
-        response.data = Some(
-            serde_json::to_value(
-                peri_acp_types::workspace::WorkspaceErrorData::RecoveryRequired(details.clone()),
-            )
-            .expect("recovery details serialize"),
-        );
+        response.data = Some(serde_json::to_value(data).expect("workspace error data serializes"));
     }
     response
+}
+
+/// 门面行为失败 → ACP 错误：本机 workspace 语义保留既有载荷（含恢复确认数据），
+/// 其余按行为失败上报，不把失败伪装成 workspace 问题。
+pub(crate) fn resource_error(error: SessionResourceError) -> AcpError {
+    match error.workspace_error() {
+        Some(workspace) => workspace_error(workspace.clone()),
+        None => AcpError::new(-32010, error.to_string()),
+    }
 }
 
 pub(crate) fn require_owner(state: &SessionState) -> Result<(), AcpError> {
@@ -276,19 +292,24 @@ pub(crate) async fn reassert_expected(
     check_expected(cfg, session_id, expected, BindingCheck::Recorded).await
 }
 
+/// 按会话 identity 复核绑定（门面投影，只读、不改绑、不取执行权）。
 async fn check_expected(
     cfg: &AcpServerConfig,
     session_id: &str,
     expected: Option<&str>,
     check: BindingCheck,
 ) -> Result<ResolvedWorkspace, AcpError> {
-    let store = cfg.controller.sessions();
-    let id = session_id.to_owned();
-    let workspace = match check {
-        BindingCheck::Full => store.validate_session_binding(&id).await,
-        BindingCheck::Recorded => store.reassert_session_binding(&id).await,
-    }
-    .map_err(workspace_error)?;
+    let id = ThreadId::from(session_id.to_owned());
+    let recheck = match check {
+        BindingCheck::Full => BindingRecheck::Full,
+        BindingCheck::Recorded => BindingRecheck::Recorded,
+    };
+    let workspace = cfg
+        .controller
+        .sessions()
+        .validate_bound_workspace(&id, recheck)
+        .await
+        .map_err(resource_error)?;
     if let Some(expected) = expected {
         expect_directory(expected, &workspace).await?;
     }
@@ -311,6 +332,31 @@ pub(crate) async fn expect_directory(
         return Err(workspace_error(WorkspaceError::ExecutionBindingMismatch));
     }
     Ok(())
+}
+
+/// 未加载会话的短时执行准入：按保存的 cwd 解析绑定目录后取得 owner。
+///
+/// 用于 `session/rename`、`session/delete` 这类「会话不在本进程会话表里」的显式
+/// 生命周期行为：所有权是改标题/删除的前提，但不需要装配执行环境（不启动
+/// MCP/LSP/hooks）。他处持有时原样拒绝，不降级、不抢占。
+pub(crate) async fn acquire_transient_owner(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+) -> Result<Arc<dyn SessionExecutionLease>, AcpError> {
+    let resources = &cfg.session_resources;
+    let id = session_id.to_owned();
+    let meta = resources
+        .load_session_meta(&id)
+        .await
+        .map_err(resource_error)?;
+    let workspace = resources
+        .resolve_workspace(Path::new(&meta.cwd))
+        .await
+        .map_err(resource_error)?;
+    resources
+        .acquire_execution(&id, &workspace)
+        .await
+        .map_err(resource_error)
 }
 
 /// 一次加载准入的结果：绑定与执行目录已复核，执行所有权可能不可得。
@@ -370,6 +416,9 @@ pub(crate) async fn reacquire_for_load(
 }
 
 /// 只读降级原因还原为错误：不接受降级的调用方（如 `session/fork`）按原语义上报。
+///
+/// 只有门面明确给出的「所有权不可得」原因才进入这里；其他失败（IO、绑定复核、
+/// schema 不支持）本来就不降级，避免把「读不了」伪装成「可以只读进入」。
 pub(crate) fn read_only_error(reason: ReadOnlyAdmission) -> AcpError {
     let error = match reason {
         ReadOnlyAdmission::ExecutionBusy => WorkspaceError::ExecutionBusy,
@@ -397,7 +446,7 @@ async fn acquire_for_load_with(
     };
     let (owner, acquired_here) = match held {
         Some(owner) => (owner, false),
-        None => match acquire_lease_with_recovery(cfg, session_id).await? {
+        None => match acquire_lease_with_recovery(cfg, session_id, &workspace).await? {
             ExecutionAdmission::Owned(owner) => (owner, true),
             ExecutionAdmission::Unavailable(reason) => {
                 return Ok(LoadAdmission {
@@ -436,8 +485,9 @@ async fn acquire_for_load_with(
 async fn acquire_lease_with_recovery(
     cfg: &AcpServerConfig,
     session_id: &str,
+    workspace: &ResolvedWorkspace,
 ) -> Result<ExecutionAdmission, AcpError> {
-    let first = try_acquire_lease(cfg, session_id).await?;
+    let first = try_acquire_lease(cfg, session_id, workspace).await?;
     let ExecutionAdmission::Unavailable(ReadOnlyAdmission::RecoveryRequired(ref target)) = first
     else {
         return Ok(first);
@@ -457,7 +507,7 @@ async fn acquire_lease_with_recovery(
         );
         return Ok(first);
     }
-    let acquired = try_acquire_lease(cfg, session_id).await;
+    let acquired = try_acquire_lease(cfg, session_id, workspace).await;
     // 重取失败（存储故障等不可降级的原因）此前到不了这里——那时这一步只会只读返回；
     // 判定不变（代际已解除，没有可收敛的只读原因），只补上诊断线索。
     if let Err(error) = &acquired {
@@ -476,17 +526,17 @@ async fn acquire_lease_with_recovery(
 async fn try_acquire_lease(
     cfg: &AcpServerConfig,
     session_id: &str,
+    workspace: &ResolvedWorkspace,
 ) -> Result<ExecutionAdmission, AcpError> {
     match cfg
-        .controller
-        .sessions()
-        .acquire_execution_lease(&session_id.to_owned())
+        .session_resources
+        .acquire_execution(&session_id.to_owned(), workspace)
         .await
     {
         Ok(owner) => Ok(ExecutionAdmission::Owned(owner)),
-        Err(error) => match read_only_reason(&error) {
+        Err(error) => match error.read_only_admission() {
             Some(reason) => Ok(ExecutionAdmission::Unavailable(reason)),
-            None => Err(workspace_error(error)),
+            None => Err(resource_error(error)),
         },
     }
 }
@@ -502,11 +552,14 @@ async fn clear_dirty_generation(
     session_id: &str,
     target: &RecoveryRequiredDetails,
 ) -> Result<(), AcpError> {
-    cfg.controller
-        .sessions()
-        .reset_dirty_execution(target)
+    cfg.session_resources
+        .reset_dirty_execution(&peri_acp_types::workspace::ResetDirtyRequest {
+            target: target.clone(),
+            // host 自动解除是「拿风险换可用」的既有裁决；门面要求调用方显式承担。
+            accept_risk: true,
+        })
         .await
-        .map_err(workspace_error)?;
+        .map_err(resource_error)?;
     tracing::warn!(
         session_id,
         thread_id = %target.thread_id,
@@ -514,14 +567,4 @@ async fn clear_dirty_generation(
         "cleared dirty execution generation for a client without recovery interaction"
     );
     Ok(())
-}
-
-/// 取不到执行所有权的原因是否属于「所有权不可得、历史仍可读」。
-///
-/// 只有存储层明确给出的三类才降级：其他失败（IO、绑定复核、schema 不支持）仍旧
-/// 原样上报，避免把「读不了」伪装成「可以只读进入」。
-fn read_only_reason(error: &anyhow::Error) -> Option<ReadOnlyAdmission> {
-    error
-        .downcast_ref::<WorkspaceError>()
-        .and_then(ReadOnlyAdmission::from_workspace_error)
 }

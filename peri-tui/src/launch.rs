@@ -3,7 +3,6 @@
 //! 把 App 初始化、ACP server/client 配对、插件/Hook 装配等步骤提取为
 //! `build_app_and_acp` / `teardown_app` 公共函数，供 `kit::entry::run_kit_fullscreen` 调用。
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -31,7 +30,8 @@ pub struct TuiLaunchOptions {
     pub settings: Option<String>,
     pub allowed_tools: Vec<String>,
     pub disallowed_tools: Vec<String>,
-    pub db_path: Option<PathBuf>,
+    /// 会话存储定位描述（由入口归一一次；恢复会话不重新解析存储位置）。
+    pub session_store: peri_acp_types::session_store::SessionStoreDeployment,
 }
 
 /// 构建 App + ACP server/client，并把 acp_client 注入 App。
@@ -44,7 +44,7 @@ pub async fn build_app_and_acp(
     App,
     Option<(AcpTuiClient, mpsc::UnboundedReceiver<AcpNotification>)>,
 )> {
-    let mut app = App::new(opts.db_path.clone()).await?;
+    let mut app = App::new(opts.session_store.clone()).await?;
 
     // (I17-D) panic_notify_rx 已退役——ServiceRegistry.panic_notify_rx 字段删除，
     // 该参数仅保留签名以维持调用方兼容；实际 panic 通知走 tracing log。
@@ -180,12 +180,16 @@ pub async fn attach_acp(
                     // ToolSearchIndex / SkillsProvider / PluginManager /
                     // SettingsHooksLoader / 插件聚合数据）由 ACP Host 装配面内部构造
                     // （peri_acp::host::assemble）；TUI 只提供协议面输入（§0 依赖方向）。
-                    thread_store: app.services.thread_store.clone(),
+                    session_resources: app.services.session_resources.clone(),
+                    // 部署关闭权随宿主移交：任务排空之后由宿主关闭会话存储。
+                    session_store_shutdown: app.session_store_shutdown.take(),
                     cwd: app.services.cwd.clone(),
                     bare: false,
                     // TUI=true：复刻迁移前 TUI 每秒 tick 行为（cron 面板直持
                     // cron_state，tick 由 host 侧 scheduler 驱动执行）。
                     drive_cron_tick: true,
+                    // TUI 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。
+                    prepared_plugins: None,
                 },
             )
             .await;

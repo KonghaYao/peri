@@ -15,7 +15,6 @@ use super::context::{build_subagent_session_v2, derive_cancel_token, inherited_f
 use crate::messages::BaseMessage;
 use crate::session::queue::{MessageKind, MessageSource, QueuedMessage};
 use crate::session::Session;
-use crate::thread::ThreadMeta;
 
 /// 父线程 ID 解析——spawn 写盘的**唯一取值点**（挂父子链）：
 /// - 优先 parent session 的 `store().thread_id`：subagent 层 session 构造时以
@@ -77,7 +76,8 @@ pub(super) async fn spawn_subagent_impl(
         compact_config,
         context_budget,
         compact_llm,
-        thread_store,
+        session_resources,
+        execution_owner,
         event_handler,
         bg_event_sender,
         task_manager,
@@ -136,7 +136,41 @@ pub(super) async fn spawn_subagent_impl(
         flags: Default::default(),
     };
     if !inherited.payloads.is_empty() {
-        if let Some(parent) = parent {
+        if let (Some(store), Some(parent_id)) = (&session_resources, &parent_thread_id) {
+            // 继承来源是一次**一致快照**：canonical payload（含 reminder）与 flags 同一次
+            // 读取，不再分 load_inherited_context / load_payloads / load_message_flags 三次。
+            let snapshot = store.load_session_snapshot(parent_id).await?;
+            let mut canonical = snapshot
+                .inherited
+                .payloads
+                .into_iter()
+                .map(|payload| (payload.id(), payload))
+                .collect::<std::collections::HashMap<_, _>>();
+            canonical.extend(
+                snapshot
+                    .payloads
+                    .into_iter()
+                    .map(|payload| (payload.id(), payload)),
+            );
+            for payload in &mut inherited.payloads {
+                if let Some(original) = canonical.get(&payload.id()) {
+                    *payload = original.clone();
+                }
+            }
+            let inherited_ids = inherited
+                .payloads
+                .iter()
+                .map(PersistedPayload::id)
+                .collect::<std::collections::HashSet<_>>();
+            inherited.flags = snapshot.inherited.flags;
+            inherited.flags.extend(
+                snapshot
+                    .flags
+                    .into_iter()
+                    .filter(|(id, _)| inherited_ids.contains(id)),
+            );
+        } else if let Some(parent) = parent {
+            // 无持久化路径（测试/遗留）：只能用父会话内存副本对齐 canonical 与 flags。
             let transcript = parent.transcript();
             let transcript = transcript.read();
             let canonical = transcript
@@ -158,78 +192,65 @@ pub(super) async fn spawn_subagent_impl(
                         .map(|flags| (payload.id(), flags))
                 })
                 .collect();
-        } else if let (Some(store), Some(parent_id)) = (&thread_store, &parent_thread_id) {
-            let parent_context = store.load_inherited_context(parent_id).await?;
-            let mut canonical = parent_context
-                .payloads
-                .into_iter()
-                .map(|payload| (payload.id(), payload))
-                .collect::<std::collections::HashMap<_, _>>();
-            canonical.extend(
-                store
-                    .load_payloads(parent_id)
-                    .await?
-                    .into_iter()
-                    .map(|payload| (payload.id(), payload)),
-            );
-            for payload in &mut inherited.payloads {
-                if let Some(original) = canonical.get(&payload.id()) {
-                    *payload = original.clone();
-                }
-            }
-            inherited.flags = parent_context.flags;
-            inherited
-                .flags
-                .extend(store.load_message_flags(parent_id).await?);
-            let ids = inherited
-                .payloads
-                .iter()
-                .map(PersistedPayload::id)
-                .collect::<std::collections::HashSet<_>>();
-            inherited.flags.retain(|id, _| ids.contains(id));
         }
     }
 
-    // 4. 创建子线程（thread_store Some 时；None 跳过落库——仅测试/遗留路径）
-    if let Some(ref store) = thread_store {
-        let snapshot_id = parent_messages.last().map(|m| m.id().as_uuid().to_string());
-        let mut child_meta = ThreadMeta::new(&cwd);
-        child_meta.id = child_thread_id.clone();
-        child_meta.parent_thread_id = parent_thread_id.clone();
-        child_meta.snapshot_at_message_id = snapshot_id;
-        child_meta.hidden = true;
-        child_meta.cancel_policy = cancel_policy;
-        child_meta.title = Some(agent_name.clone());
-        let binding = match &parent_thread_id {
-            Some(id) => store.load_session_binding(id).await?,
-            None => None,
-        };
-        if binding.is_some() {
-            let workspace = store
-                .validate_session_binding(parent_thread_id.as_ref().expect("bound parent"))
-                .await?;
-            if workspace.cwd != std::path::Path::new(&cwd) {
-                return Err(
-                    peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch.into(),
-                );
+    // 4. 保存 child：一次 `save_child` 落父子关系、绑定继承、frozen 原字节与继承区。
+    //    失败即整体失败——不再有 create + store_inherited + delete_thread 的手工补偿链
+    //    （那正是「部分成功被当成已保存」的来源）。
+    if let Some(ref store) = session_resources {
+        let parent_id = parent_thread_id
+            .clone()
+            .ok_or("spawn_subagent: 持久化 child 需要 parent thread id（无父会话则无继承来源）")?;
+        let snapshot = store.load_session_snapshot(&parent_id).await?;
+        let binding = match &snapshot.binding {
+            peri_acp_types::session_resources::BindingState::Bound(binding) => binding.clone(),
+            other => {
+                return Err(format!(
+                    "spawn_subagent: parent session {parent_id} has no execution binding ({other:?}); child cannot inherit one"
+                )
+                .into())
             }
-            store.create_bound_thread(child_meta, &workspace).await?;
-        } else {
-            store
-                .create_thread(child_meta)
-                .await
-                .map_err(|e| format!("Failed to create child thread: {}", e))?;
+        };
+        // child frozen 取不可变 parent/root 的**已持久化**字节，不重扫目录、不按当前日期重冻；
+        // 门面会再校验它与 root 已保存快照逐字节相同。
+        let frozen = match snapshot.frozen {
+            peri_acp_types::session_resources::FrozenState::Present(bytes) => bytes,
+            other => {
+                return Err(format!(
+                    "spawn_subagent: parent session {parent_id} has no persisted frozen snapshot ({other:?})"
+                )
+                .into())
+            }
+        };
+        if snapshot.meta.cwd != cwd {
+            return Err(peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch.into());
         }
-        if let Err(error) = store
-            .store_inherited_context(&child_thread_id, &inherited)
-            .await
-        {
-            let cleanup = store.delete_thread(&child_thread_id).await;
-            return Err(format!(
-                "Failed to persist child inherited context: {error}; cleanup: {cleanup:?}"
-            )
-            .into());
-        }
+        let root_id = super::execution_root(store.as_ref(), &parent_id).await?;
+        let lease = execution_owner.as_ref().ok_or(
+            "spawn_subagent: child 保存需要本会话 root 的执行所有权（save_child 不接受借来的所有权）",
+        )?;
+        let snapshot_id = parent_messages.last().map(|m| m.id());
+        let child = peri_acp_types::session_resources::ChildSnapshot {
+            target: peri_acp_types::session_resources::NewSession {
+                thread_id: child_thread_id.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                meta: peri_acp_types::session_resources::NewSessionMeta {
+                    title: Some(agent_name.clone()),
+                    cwd: cwd.clone(),
+                    parent_thread_id: Some(parent_id.clone()),
+                    hidden: true,
+                    cancel_policy,
+                    snapshot_at_message_id: snapshot_id,
+                },
+                binding,
+                frozen,
+            },
+            parent_id,
+            root_id,
+            inherited: inherited.clone(),
+        };
+        store.save_child(&child, lease).await?;
     }
 
     // 5. 构造子 session + 链装配 + v2_ctx（共享 helper [build_subagent_session_v2]：
@@ -247,7 +268,7 @@ pub(super) async fn spawn_subagent_impl(
         frozen,
         cancel_token.clone(),
         child_thread_id.clone(),
-        thread_store.clone(),
+        session_resources.clone(),
         inherited,
         Vec::new(), // 新 child 没有 own history
         llm,
@@ -308,7 +329,7 @@ pub(super) async fn spawn_subagent_impl(
                 event_handler,
                 on_subagent_start,
                 on_subagent_stop,
-                thread_store,
+                session_resources,
                 register_runtime,
                 deregister_runtime,
                 langfuse_bridge,
@@ -339,7 +360,7 @@ pub(super) async fn spawn_subagent_impl(
                 task_manager,
                 on_bg_complete,
                 langfuse_bridge,
-                thread_store,
+                session_resources,
                 deregister_runtime,
                 on_subagent_start,
                 on_subagent_stop,

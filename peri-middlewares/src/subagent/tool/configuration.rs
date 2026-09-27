@@ -118,13 +118,29 @@ impl super::SubAgentTool {
         self
     }
 
-    pub fn with_thread_store(mut self, store: Arc<dyn peri_agent::thread::ThreadStore>) -> Self {
-        self.host.thread_store = Some(store);
+    /// 注入会话资源门面（唯一会话行为入口；旧 `with_thread_store` 已随迁移退出）。
+    pub fn with_session_resources(
+        mut self,
+        store: Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    ) -> Self {
+        self.host.session_resources = Some(store);
         self
     }
 
     pub fn with_parent_thread_id(mut self, id: String) -> Self {
         self.host.parent_thread_id = Some(id);
+        self
+    }
+
+    /// 注入本会话 root 的执行所有权（child 保存的前置证明）。
+    ///
+    /// 生产路径经 `parent_session` 的 host 携带；工具自身 host 只在测试/遗留回退里
+    /// 显式注入，且必须与 `session_resources`、`parent_thread_id` 出自同一条会话。
+    pub fn with_execution_owner(
+        mut self,
+        lease: Arc<dyn peri_acp_types::workspace::SessionExecutionLease>,
+    ) -> Self {
+        self.host.execution_owner = Some(lease);
         self
     }
 

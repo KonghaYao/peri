@@ -66,7 +66,9 @@ async fn test_stdio_assembly_uses_input_cwd_workspace() {
         permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
             peri_acp_types::permission::PermissionMode::Bypass,
         ),
-        db_path: Some(tmp.path().join("threads.db")),
+        session_store: peri_acp_types::session_store::SessionStoreDeployment::local_path(
+            tmp.path().join("threads.db"),
+        ),
     })
     .await
     .unwrap();
@@ -125,12 +127,13 @@ async fn make_server_config_with(
 ) -> AcpServerConfig {
     use std::collections::BTreeMap;
 
-    let thread_store = peri_agent::thread::SqliteThreadStore::new(tmp.path().join("threads.db"))
-        .await
-        .unwrap();
-    let arc_thread_store: Arc<dyn peri_acp_types::store::ThreadStore> = Arc::new(thread_store);
+    // 生产同形入口：只注入门面（SessionManager 与 Controller 都只持它）。
+    let session_resources =
+        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+            .await
+            .unwrap();
     let session_manager = crate::session::SessionManager::new(
-        arc_thread_store.clone(),
+        session_resources.clone(),
         provider.clone(),
         Arc::new(peri_config.clone()),
         peri_acp_types::permission::SharedPermissionMode::new(
@@ -165,6 +168,7 @@ async fn make_server_config_with(
         cron_scheduler: None,
         mcp_pool,
         mcp_apps_relay: None,
+        acp_mcp: None,
         dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,
@@ -185,8 +189,10 @@ async fn make_server_config_with(
         workflow_middleware_factory: Arc::new(
             peri_middlewares::assembly::WorkflowAgentMiddlewareFactory,
         ),
-        thread_store: arc_thread_store.clone(),
-        controller: Arc::new(peri_controller::Controller::new(arc_thread_store)),
+        session_resources: session_resources.clone(),
+        // 测试宿主：不注入部署关闭权（没有部署生命周期）。
+        session_store_shutdown: None,
+        controller: Arc::new(peri_controller::Controller::new(session_resources)),
         langfuse_session: None,
         langfuse_shutdown_owner: None,
         config_source: Arc::new(
@@ -478,20 +484,9 @@ async fn await_server_exit(server_task: tokio::task::JoinHandle<()>, input: Dupl
 }
 
 async fn create_bound_thread_fixture(cfg: &AcpServerConfig, session_id: &str, cwd: &str) {
-    let mut meta = peri_acp_types::thread::ThreadMeta::new(cwd);
-    meta.id = session_id.to_string();
     let workspace = cfg
-        .thread_store
+        .session_resources
         .resolve_workspace(std::path::Path::new(cwd))
-        .await
-        .unwrap();
-    cfg.thread_store
-        .create_bound_thread(meta, &workspace)
-        .await
-        .unwrap();
-    let owner = cfg
-        .thread_store
-        .acquire_execution_lease(&session_id.to_owned())
         .await
         .unwrap();
     let frozen = cfg.session_manager.build_frozen_data(
@@ -500,11 +495,26 @@ async fn create_bound_thread_fixture(cfg: &AcpServerConfig, session_id: &str, cw
         &cfg.plugin_agent_dirs,
     );
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
-    cfg.thread_store
-        .store_frozen_snapshot_if_absent(&session_id.to_owned(), &encoded)
+    // 门面一次完成 binding/frozen 保存与执行准入，再按正常收尾标 clean。
+    let lease = cfg
+        .session_resources
+        .create_session(&peri_acp_types::session_resources::NewSession {
+            thread_id: session_id.to_owned(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            meta: peri_acp_types::session_resources::NewSessionMeta {
+                title: None,
+                cwd: workspace.cwd.to_string_lossy().into_owned(),
+                parent_thread_id: None,
+                hidden: false,
+                cancel_policy: peri_acp_types::thread::CancelPolicy::default(),
+                snapshot_at_message_id: None,
+            },
+            binding: peri_acp_types::workspace::SessionBinding::from_workspace(&workspace),
+            frozen: peri_acp_types::session_resources::FrozenSnapshotBytes::new(encoded),
+        })
         .await
         .unwrap();
-    owner.mark_clean().await.unwrap();
+    lease.mark_clean().await.unwrap();
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
@@ -915,7 +925,7 @@ async fn test_resume_creates_session_scoped_lsp_pool() {
 async fn test_fork_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]).await;
-    let thread_store = Arc::clone(&cfg.thread_store);
+    let session_resources = Arc::clone(&cfg.session_resources);
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -925,16 +935,25 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
     let source_payload = peri_acp_types::store::PersistedPayload::Message(source_message.clone());
     let source_thread_id = "fork-source-session".to_string();
     create_bound_thread_fixture(&cfg, &source_thread_id, tmp.path().to_str().unwrap()).await;
-    let owner = thread_store
-        .acquire_execution_lease(&source_thread_id)
+    let workspace = cfg
+        .session_resources
+        .validate_bound_workspace(
+            &source_thread_id,
+            peri_acp_types::session_resources::BindingRecheck::Recorded,
+        )
+        .await
+        .unwrap();
+    let owner = cfg
+        .session_resources
+        .acquire_execution(&source_thread_id, &workspace)
         .await
         .unwrap();
     cfg.session_manager.ensure_session(
         &source_thread_id,
         std::fs::canonicalize(tmp.path()).unwrap().to_str().unwrap(),
     );
-    thread_store
-        .append_payloads(&source_thread_id, std::slice::from_ref(&source_payload))
+    cfg.session_resources
+        .append_history(&source_thread_id, std::slice::from_ref(&source_payload))
         .await
         .unwrap();
     let source_frozen = cfg.session_manager.build_frozen_data(
@@ -1012,7 +1031,11 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
         forked_message_id,
         "fork SessionState 必须采用持久化复制后的新消息 ID"
     );
-    let stored_fork = thread_store.load_payloads(&forked_id).await.unwrap();
+    let stored_fork = session_resources
+        .load_session_snapshot(&forked_id)
+        .await
+        .unwrap()
+        .payloads;
     assert_eq!(stored_fork.len(), 1);
     assert_eq!(stored_fork[0].id(), forked_message_id);
     drop(sessions);
@@ -1099,7 +1122,7 @@ async fn test_new_prewarms_mcp_discovery_smoke() {
 async fn test_rename_over_stdio_transport() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg = test_config(&tmp).await;
-    let thread_store = cfg.thread_store.clone();
+    let session_resources = Arc::clone(&cfg.session_resources);
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let server_task = tokio::spawn(host::run_acp_server(transport, cfg));
@@ -1168,7 +1191,10 @@ async fn test_rename_over_stdio_transport() {
     assert_eq!(resp["result"]["title"], "stdio 命名会话", "响应: {resp}");
 
     // 持久化：thread store 标题已更新
-    let meta = thread_store.load_meta(&session_id).await.unwrap();
+    let meta = session_resources
+        .load_session_meta(&session_id)
+        .await
+        .unwrap();
     assert_eq!(meta.title.as_deref(), Some("stdio 命名会话"));
 
     // ── EOF → 宿主优雅退出 ──
@@ -1181,3 +1207,6 @@ async fn test_rename_over_stdio_transport() {
 
 #[path = "langfuse_shutdown_test.rs"]
 mod langfuse_shutdown_tests;
+
+#[path = "session_store_shutdown_test.rs"]
+mod session_store_shutdown_tests;

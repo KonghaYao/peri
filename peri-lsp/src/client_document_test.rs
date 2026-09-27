@@ -1,7 +1,13 @@
 //! 文档同步跨真实握手、writer 背压、连接更换的契约回归。
 
 use super::*;
+use crate::uri::test_workspace_uri;
 use std::{future::Future, path::Path, pin::Pin, task::Poll, time::Duration};
+
+/// 真实子进程交互的 liveness 预算，与客户端默认启动预算同源。
+/// gate/barrier 等待只协调真实 wire 边界，不是计时契约：CI 上首批并发用例
+/// 落在冷启动与构建产物扫描窗口内，固定 5s 会把平台启动成本误报成契约失败。
+const LIVENESS_BUDGET_MS: u64 = DEFAULT_STARTUP_TIMEOUT_MS;
 
 const SCRIPT: &str = r#"
 binmode STDIN; binmode STDOUT; select STDOUT; $| = 1;
@@ -45,13 +51,13 @@ fn make_client(dir: &Path, gate_init: bool) -> Arc<LspClient> {
         ]),
         None,
         3,
-        5_000,
+        LIVENESS_BUDGET_MS,
         Arc::new(DiagnosticsRegistry::new()),
     ))
 }
 
 async fn wait_until(mut ready: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_millis(LIVENESS_BUDGET_MS), async {
         while !ready() {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
@@ -127,7 +133,7 @@ async fn test_document_sync_not_ready_does_not_hide_the_first_open() {
     let client = make_client(dir.path(), true);
     let start = tokio::spawn({
         let client = client.clone();
-        async move { client.start("file:///tmp").await }
+        async move { client.start(&test_workspace_uri()).await }
     });
     wait_until(|| dir.path().join("initialize").exists()).await;
     let open = client
@@ -146,7 +152,10 @@ async fn test_document_sync_not_ready_does_not_hide_the_first_open() {
         .did_change("file:///tmp/change.rs", "accepted-change")
         .await
         .unwrap();
-    client.request("barrier", None, 5_000).await.unwrap();
+    client
+        .request("barrier", None, LIVENESS_BUDGET_MS)
+        .await
+        .unwrap();
     let records = documents(dir.path());
     client.shutdown().await;
     assert!(matches!(open, Err(LspError::NotReady { .. })));
@@ -169,7 +178,7 @@ async fn test_document_sync_not_ready_does_not_hide_the_first_open() {
 async fn test_document_sync_cancel_before_admission_preserves_cache_and_version() {
     let dir = tempfile::tempdir().unwrap();
     let client = make_client(dir.path(), false);
-    client.start("file:///tmp").await.unwrap();
+    client.start(&test_workspace_uri()).await.unwrap();
     client
         .did_open("file:///tmp/existing.rs", "rust", "initial")
         .await
@@ -185,7 +194,10 @@ async fn test_document_sync_cancel_before_admission_preserves_cache_and_version(
     }
     drop(senders);
     std::fs::write(dir.path().join("release-input"), b"").unwrap();
-    client.request("drained", None, 5_000).await.unwrap();
+    client
+        .request("drained", None, LIVENESS_BUDGET_MS)
+        .await
+        .unwrap();
     client
         .did_open("file:///tmp/new.rs", "rust", "accepted-open")
         .await
@@ -194,7 +206,10 @@ async fn test_document_sync_cancel_before_admission_preserves_cache_and_version(
         .did_change("file:///tmp/existing.rs", "accepted-change")
         .await
         .unwrap();
-    client.request("barrier", None, 5_000).await.unwrap();
+    client
+        .request("barrier", None, LIVENESS_BUDGET_MS)
+        .await
+        .unwrap();
     let records = documents(dir.path());
     client.shutdown().await;
     assert_eq!(
@@ -220,18 +235,21 @@ async fn test_document_sync_cancel_before_admission_preserves_cache_and_version(
 async fn test_document_sync_old_connection_cannot_publish_into_restarted_cache() {
     let dir = tempfile::tempdir().unwrap();
     let client = make_client(dir.path(), false);
-    client.start("file:///tmp").await.unwrap();
+    client.start(&test_workspace_uri()).await.unwrap();
     let senders = fill_writer(&client, dir.path()).await;
     let mut old_open = Box::pin(client.did_open("file:///tmp/restarted.rs", "rust", "old-content"));
     poll_pending(old_open.as_mut()).await;
-    client.try_restart("file:///tmp").await.unwrap();
+    client.try_restart(&test_workspace_uri()).await.unwrap();
     let old_result = old_open.await;
     drop(senders);
     client
         .did_change("file:///tmp/restarted.rs", "new-content")
         .await
         .unwrap();
-    client.request("barrier", None, 5_000).await.unwrap();
+    client
+        .request("barrier", None, LIVENESS_BUDGET_MS)
+        .await
+        .unwrap();
     let records = documents(dir.path());
     client.shutdown().await;
     assert!(matches!(old_result, Err(LspError::TransportClosed)));
@@ -246,7 +264,7 @@ async fn test_document_sync_old_connection_cannot_publish_into_restarted_cache()
 async fn test_document_sync_cancel_after_admission_keeps_the_first_open() {
     let dir = tempfile::tempdir().unwrap();
     let client = make_client(dir.path(), false);
-    client.start("file:///tmp").await.unwrap();
+    client.start(&test_workspace_uri()).await.unwrap();
     let blocked = block_writer(&client, dir.path()).await;
     {
         let mut open =
@@ -263,12 +281,18 @@ async fn test_document_sync_cancel_after_admission_keeps_the_first_open() {
     }
     drop(blocked);
     std::fs::write(dir.path().join("release-input"), b"").unwrap();
-    client.request("drained", None, 5_000).await.unwrap();
+    client
+        .request("drained", None, LIVENESS_BUDGET_MS)
+        .await
+        .unwrap();
     client
         .did_open("file:///tmp/admitted.rs", "rust", "duplicate-content")
         .await
         .unwrap();
-    client.request("barrier", None, 5_000).await.unwrap();
+    client
+        .request("barrier", None, LIVENESS_BUDGET_MS)
+        .await
+        .unwrap();
     let records = documents(dir.path());
     client.shutdown().await;
     assert_eq!(records.len(), 1, "取消确认等待不应撤销已经发送的 didOpen");

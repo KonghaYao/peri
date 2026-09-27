@@ -151,11 +151,11 @@ fn read_only_response(admission: &ReadOnlyAdmission) -> Value {
 }
 
 async fn wait_for_recovery_owner()
--> std::sync::Arc<crate::kit::popups::confirm_popup::RecoveryConfirmation> {
+-> std::sync::Arc<crate::kit::popups::confirm_popup::RiskConfirmation> {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(atoms::ConfirmPayload {
-                pending_action: atoms::ConfirmAction::RecoverDirty(owner),
+                pending_action: atoms::ConfirmAction::RiskChoice(owner),
                 ..
             }) = CONFIRM_PAYLOAD.state().read().as_ref()
             {
@@ -166,6 +166,15 @@ async fn wait_for_recovery_owner()
     })
     .await
     .expect("dirty load must offer an explicit risk decision")
+}
+
+/// 风险选择载荷里的精确 dirty 目标。
+fn dirty_target(
+    owner: &std::sync::Arc<crate::kit::popups::confirm_popup::RiskConfirmation>,
+) -> &RecoveryRequiredDetails {
+    // `RiskPrompt` 目前只有 dirty 解除一种形态：解出目标即证明载荷没有被换成别的风险。
+    let crate::kit::popups::confirm_popup::RiskPrompt::DirtyRecovery(target) = &owner.prompt;
+    target
 }
 
 /// 接受风险后才写库：reset 携带精确 target 与显式字段，随后按原 ID/原目录恢复。
@@ -180,7 +189,7 @@ async fn test_dirty_load_accept_resets_exact_generation_then_loads_original_sess
     reach_dirty_load(&server, recovery_error(TARGET, 4)).await;
     let owner = wait_for_recovery_owner().await;
     assert_eq!(
-        owner.target,
+        dirty_target(&owner).clone(),
         RecoveryRequiredDetails {
             thread_id: TARGET.to_string(),
             generation: 4
@@ -641,7 +650,7 @@ async fn test_read_only_dirty_load_accept_resets_exact_generation_then_commits_o
     .await;
 
     let owner = wait_for_recovery_owner().await;
-    assert_eq!(owner.target, target);
+    assert_eq!(dirty_target(&owner), &target);
     owner.mark_displayed();
     owner.answer(true);
 

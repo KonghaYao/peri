@@ -66,7 +66,7 @@ pub(super) async fn resume_subagent_impl(
         compact_config,
         context_budget,
         compact_llm,
-        thread_store,
+        session_resources,
         event_handler,
         bg_event_sender,
         task_manager,
@@ -85,42 +85,71 @@ pub(super) async fn resume_subagent_impl(
         frozen_date: frozen_date_cfg,
     } = config;
 
-    let workspace = if thread_store
-        .load_session_binding(&thread_id)
-        .await?
-        .is_some()
-    {
-        let child = thread_store.validate_session_binding(&thread_id).await?;
+    // 绑定校验用一次一致快照：child 的绑定必须与 owning parent 完全相同，且两者同根。
+    // 存在性是本函数的第一个校验分支：快照读取报 `NotFound` 即「thread not found」，
+    // 与后续 `ResumeClaim` 的状态校验分开报错（不能把「不存在」说成「仍处于运行态」）。
+    let child_snapshot = match session_resources.load_session_snapshot(&thread_id).await {
+        Ok(snapshot) => snapshot,
+        Err(error)
+            if matches!(
+                error.kind(),
+                peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
+            ) =>
+        {
+            // 先判格式再判存在：非 UUID 不是「不存在」，与 `validate_thread` 同判据。
+            super::validate_thread_id_format(&thread_id)?;
+            return Err(format!("resume_subagent: thread not found: {thread_id}").into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let binding = match &child_snapshot.binding {
+        peri_acp_types::session_resources::BindingState::Bound(binding) => Some(binding.clone()),
+        // 无绑定（legacy / 外来登记 / 缺失）保留旧行为：不当作 bound child 处理。
+        _ => None,
+    };
+    if binding.is_some() {
         let parent_id = super::spawn::parent_thread_id_of(parent)
             .ok_or("bound child resume requires its owning parent session")?;
-        let current = thread_store.validate_session_binding(&parent_id).await?;
-        if child != current {
+        let parent_snapshot = session_resources.load_session_snapshot(&parent_id).await?;
+        let parent_binding = match &parent_snapshot.binding {
+            peri_acp_types::session_resources::BindingState::Bound(binding) => binding.clone(),
+            _ => return Err("bound subagent parent has no execution binding".into()),
+        };
+        if binding.as_ref() != Some(&parent_binding) {
             return Err(peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch.into());
         }
-        if execution_root(thread_store.as_ref(), &thread_id).await?
-            != execution_root(thread_store.as_ref(), &parent_id).await?
+        if super::execution_root(session_resources.as_ref(), &thread_id).await?
+            != super::execution_root(session_resources.as_ref(), &parent_id).await?
         {
             return Err("bound subagent belongs to another root session execution owner".into());
         }
-        Some(child)
-    } else {
-        None
-    };
+    }
     let ownership = task_manager
         .as_ref()
         .map(|manager| {
             peri_acp_types::tasks::TaskManager::begin_external_execution(manager.as_ref())
         })
         .transpose()?;
-    let (meta, claim) =
-        ResumeClaim::acquire(Arc::clone(&thread_store), thread_id.clone(), ownership).await?;
+    let cluster_root = super::execution_root(session_resources.as_ref(), &thread_id).await?;
+    let (meta, claim) = ResumeClaim::acquire(
+        Arc::clone(&session_resources),
+        thread_id.clone(),
+        cluster_root,
+        ownership,
+    )
+    .await?;
 
     // The claim remains owned across history I/O and session construction. A
     // dropped caller closes its decision channel, leaving ordered rollback to
     // the worker that performed the active write.
     let restored = async {
-        let mut inherited = thread_store.load_inherited_context(&thread_id).await?;
-        let own = thread_store.load_payloads(&thread_id).await?;
+        // 一次一致快照：inherit 区与自有 payload/flags 同一次读取（不再分三次）。
+        let snapshot = session_resources
+            .load_session_snapshot(&thread_id)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let mut inherited = snapshot.inherited;
+        let own = snapshot.payloads;
         let ancestor_ids = inherited
             .payloads
             .iter()
@@ -134,9 +163,8 @@ pub(super) async fn resume_subagent_impl(
             anyhow::bail!("inherited context overlaps child own history");
         }
         inherited.flags.extend(
-            thread_store
-                .load_message_flags(&thread_id)
-                .await?
+            snapshot
+                .flags
                 .into_iter()
                 .filter(|(id, _)| own_ids.contains(id)),
         );
@@ -163,15 +191,9 @@ pub(super) async fn resume_subagent_impl(
         loaded.pop();
     }
 
-    // 2. cwd 取 meta.cwd（thread 创建时固化的；进程重启后不得改用父 cwd）
-    let cwd = match workspace {
-        Some(workspace) => workspace
-            .cwd
-            .to_str()
-            .ok_or("session cwd is not UTF-8")?
-            .to_string(),
-        None => meta.cwd.clone(),
-    };
+    // 2. cwd 取 meta.cwd（thread 创建时固化的；进程重启后不得改用父 cwd）。
+    //    绑定身份已在上方与 owning parent 比对相等，工作区一致性随该绑定成立。
+    let cwd = meta.cwd.clone();
 
     // 3. frozen 从父 session copy（ARC-FROZEN-001：不重读磁盘；parent None 用
     //    config 回退，与 spawn 的父侧解析一致）
@@ -210,7 +232,7 @@ pub(super) async fn resume_subagent_impl(
         frozen,
         cancel_token.clone(),
         thread_id.clone(),
-        Some(Arc::clone(&thread_store)),
+        Some(Arc::clone(&session_resources)),
         inherited,
         loaded,
         llm,
@@ -270,7 +292,7 @@ pub(super) async fn resume_subagent_impl(
                 event_handler,
                 on_subagent_start,
                 on_subagent_stop,
-                Some(Arc::clone(&thread_store)),
+                Some(Arc::clone(&session_resources)),
                 register_runtime,
                 deregister_runtime,
                 langfuse_bridge,
@@ -304,7 +326,7 @@ pub(super) async fn resume_subagent_impl(
                 task_manager,
                 on_bg_complete,
                 langfuse_bridge,
-                Some(Arc::clone(&thread_store)),
+                Some(Arc::clone(&session_resources)),
                 deregister_runtime,
                 on_subagent_start,
                 on_subagent_stop,
@@ -315,7 +337,7 @@ pub(super) async fn resume_subagent_impl(
             )
             .await
             {
-                Ok(()) => claim.release(),
+                Ok(()) => claim.release().await,
                 Err(e) => {
                     // review MEDIUM-1 回滚：注册失败（task_manager 缺失 /
                     // register_with_kind 撞 per-kind 上限）时任务未执行——status
@@ -335,23 +357,6 @@ pub(super) async fn resume_subagent_impl(
                 cancel_token,
                 interrupted: false,
             })
-        }
-    }
-}
-
-async fn execution_root(
-    store: &dyn crate::thread::ThreadStore,
-    id: &str,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let mut current = id.to_owned();
-    let mut visited = std::collections::HashSet::new();
-    loop {
-        if visited.len() >= 128 || !visited.insert(current.clone()) {
-            return Err(peri_acp_types::workspace::WorkspaceError::InvalidBinding.into());
-        }
-        match store.load_meta(&current).await?.parent_thread_id {
-            Some(parent) => current = parent,
-            None => return Ok(current),
         }
     }
 }

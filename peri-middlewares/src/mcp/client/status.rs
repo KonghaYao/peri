@@ -103,6 +103,8 @@ impl McpClientPool {
             pool.clients.write().insert(name.to_string(), handle);
             old_status
         };
+        // 新失败代际取代旧证据：等待方立即重读并得到 ConnectionFailed/ToolDiscoveryFailed。
+        pool.system_readiness.clear_evidence(name);
         pool.record_status_change(name, old_status.as_ref());
         peri_agent::metrics::emit(
             "mcp.error",
@@ -149,6 +151,8 @@ impl McpClientPool {
             pool.clients.write().insert(name.to_string(), handle);
             old_status
         };
+        // 需要授权是确定事实，不是「连接中」：本代证据失效并唤醒等待方。
+        pool.system_readiness.clear_evidence(name);
         pool.record_status_change(name, old_status.as_ref());
     }
 
@@ -235,6 +239,18 @@ impl McpClientPool {
         result
     }
 
+    /// 会话可见的服务器清单（[`Self::all_server_infos`] 的 ACP 归属过滤版）。
+    ///
+    /// 会话内概览 / 发现面必须用它：ACP 连接属于声明它的会话，别的会话既不该
+    /// 看见它的工具，也不该看见它的名字与状态。
+    pub fn all_server_infos_visible_to(&self, session_id: Option<&str>) -> Vec<ServerInfo> {
+        let mut infos = self.all_server_infos();
+        if let Some(session_id) = session_id {
+            infos.retain(|info| self.is_visible_to_session(&info.name, session_id));
+        }
+        infos
+    }
+
     // ── 状态变化统一出口（上下线通知） ──────────────────────────────────────
 
     /// 标记初始化完成。此后发生的状态变化才产生上下线通知（初始化期间的
@@ -254,8 +270,16 @@ impl McpClientPool {
     /// （`status_change_text`）写入 `pending_changes` 缓冲（McpMiddleware
     /// 经 before_model drain 后以 Info 消息推送进模型上下文），并调用
     /// notifier 回调（发布 system-notification 给 TUI 通知面）。
+    ///
+    /// 会话级 ACP 连接（[`Self::is_visible_to_session`] 的归属条目）不在此列：
+    /// 缓冲与 notifier 都是**部署级**的（任一会话 drain 一次即清空），而这类
+    /// 连接只属于声明它的会话，名字与状态进入共享面就是跨会话泄漏。其事实由
+    /// 归属会话的首 turn 概览与 deferred 发现面呈现。
     pub(crate) fn record_status_change(&self, name: &str, old: Option<&ClientStatus>) {
         if !self.initialized.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        if self.acp_owners.read().contains_key(name) {
             return;
         }
         let Some(old) = old else { return };

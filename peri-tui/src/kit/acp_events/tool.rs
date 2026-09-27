@@ -26,7 +26,7 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             state.variant = 1;
             // bg 工具事件不触碰 phase（Issue 2026-08-12）：仅更新 BG_DISPLAY，
             // 主 agent 已空闲（TurnSuspended → Idle）时不得拉回 loading。
-            super::render::push_view_models(state);
+            state.publish_barrier();
             // block 模式：ToolStarted 时已推送缓冲文本到视图，
             // 同步追踪变量，确保工具执行完毕后新 TextChunk 的块边界检测从正确位置开始。
             state.last_pushed_text_len = state.current_turn.text.chars().count();
@@ -70,7 +70,7 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             }
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
-            super::render::push_view_models(state);
+            state.publish_barrier();
             state.last_pushed_text_len = state.current_turn.text.chars().count();
             state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
         }
@@ -86,7 +86,7 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             ));
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
-        super::render::push_view_models(state);
+        state.publish_barrier();
         state.last_pushed_text_len = state.current_turn.text.chars().count();
         state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
     }
@@ -104,7 +104,7 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
             handle_bg_tool_ended(agent_id, te);
             state.variant = 1;
             // bg 工具事件不触碰 phase（Issue 2026-08-12，同 ToolStarted）。
-            super::render::push_view_models(state);
+            state.publish_barrier();
             state.last_pushed_text_len = state.current_turn.text.chars().count();
             state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
             state.complete_todo_if_current(&te.tool_id, te.is_error)
@@ -121,7 +121,7 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
             );
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
-            super::render::push_view_models(state);
+            state.publish_barrier();
             state.last_pushed_text_len = state.current_turn.text.chars().count();
             state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
             ended && state.complete_todo_if_current(&te.tool_id, te.is_error)
@@ -133,7 +133,7 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
                 .end_tool(&te.tool_id, te.output_summary.clone(), te.is_error);
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
-        super::render::push_view_models(state);
+        state.publish_barrier();
         state.last_pushed_text_len = state.current_turn.text.chars().count();
         state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
         ended && state.complete_todo_if_current(&te.tool_id, te.is_error)
@@ -240,9 +240,15 @@ fn update_committed_tool_card(
                     Some(card.input_summary.clone()),
                 ),
                 presentation: card.presentation.clone(),
-                // 保留既有折叠状态——折叠统一由 push_view_models 的 pass 按
-                // 新状态（completed/error）重算；用户覆盖由 FOLD_OVERRIDES 表接管。
-                fold: card.fold,
+                // 基础 fold 跟随终态；用户覆盖仍由派生折叠投影接管。
+                fold: fold_for_status(
+                    FoldTarget::Tool,
+                    if is_error {
+                        EntryStatus::Error
+                    } else {
+                        EntryStatus::Completed
+                    },
+                ),
                 user_modified: card.user_modified,
                 tool_calls_count: card.tool_calls_count,
                 content_hash: 0,

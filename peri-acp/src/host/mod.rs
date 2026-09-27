@@ -49,10 +49,17 @@ pub mod controller_ports;
 mod executor_flow_tests;
 pub mod lease;
 mod mcp_apps;
+#[cfg(test)]
+#[path = "mcp_v4_startup_test.rs"]
+mod mcp_v4_startup_tests;
 mod notify;
 mod oauth_delivery;
 mod prediction;
 mod prediction_projection;
+mod prepared;
+#[cfg(test)]
+#[path = "prepared_test.rs"]
+mod prepared_tests;
 mod prompt;
 mod prompt_dispatch;
 pub mod prompt_handle;
@@ -142,6 +149,13 @@ pub struct AcpServerConfig {
     pub permission_mode: Arc<SharedPermissionMode>,
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
+    /// MCP over ACP 服务（会话 setup 声明的 `type: "acp"` server 的连接事实）。
+    ///
+    /// 会话级字段：由会话工作区装配持有（每个会话各有一个 MCP 池），host 级
+    /// 装配（`session_resources == false`）为 `None`——那时没有池可承载连接。
+    /// 会话 setup 经 [`requests::acp_mcp`] 登记声明，入站 `mcp/message` 同样
+    /// 经它在各会话间定位承载者。
+    pub(crate) acp_mcp: Option<Arc<dyn peri_acp_types::ports::AcpMcpServerPort>>,
     /// Optional stdio-only MCP Apps backend. Absence keeps the capability fail closed.
     pub mcp_apps_relay: Option<Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>>,
     pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
@@ -181,7 +195,16 @@ pub struct AcpServerConfig {
     /// 引用 middlewares，见 `host/workflow_agent.rs`）。
     pub workflow_middleware_factory:
         Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory>,
-    pub thread_store: Arc<dyn peri_acp_types::store::ThreadStore>,
+    /// 会话资源门面：协议面、Agent transcript/subagent 与 middleware 的唯一会话行为
+    /// 入口（同一个库句柄、同一份 owner 登记）；协议面与 Controller 都不再持有裸存储。
+    pub session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    /// 部署关闭权（non-Clone，装配点注入）：宿主在任务排空之后用它关闭会话存储。
+    ///
+    /// 只有部署（TUI/print/stdio 装配点）注入；会话级配置与测试为 `None`，业务侧
+    /// （SessionManager/Controller/middleware）拿到的只有 `session_resources` 业务句柄，
+    /// 没有任何关闭全局存储的路径。
+    pub(crate) session_store_shutdown:
+        Option<Box<dyn peri_acp_types::session_resources::SessionStoreShutdownPort>>,
     /// Controller 层宿主：dispatch 存储操作（load/list/fork/execute-command/rewind）
     /// 经此访问持久化存储（ARC-BOUNDARY-001 方向，不再直操 `thread_store`）；
     /// 3.0 批 2：事件发射（`publish_event`）/ 执行发起（`run_session`）亦经此宿主。

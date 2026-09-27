@@ -1132,12 +1132,13 @@ popup-ask-user-hint-single-unsubmitted =   ↑/↓::导航 · Space::选择 · E
 popup-ask-user-title =  用户问答
 
 # ---- Confirm Popup (P2) ----
+# 风险选择的取消项：与具体风险种类无关，各风险说明共用。
+risk-choice-cancel = 取消（默认）
 dirty-recovery-title = 解除 dirty 状态并恢复原会话？
 dirty-recovery-risk = 旧子进程可能仍在运行。
 dirty-recovery-unknown = 之前的副作用未知。
 dirty-recovery-responsibility = 继续表示你接受风险，并承担后续结果。
 dirty-recovery-hint = 上/下：选择 · Enter：执行 · Esc：取消
-dirty-recovery-cancel = 取消（默认）
 dirty-recovery-accept = 接受风险，解除 dirty 并加载
 
 popup-confirm-empty =   暂无待确认项。
@@ -1203,6 +1204,7 @@ thread-history-assistant = 助手
 thread-history-system = 系统上下文
 thread-history-tool = 工具结果
 session-restore-failed = 会话恢复失败：{ $error }。请重试或使用 /clear 创建会话。
+session-creation-failed = 会话创建失败：{ $error }
 
 panel-host-settings = 宿主配置
 

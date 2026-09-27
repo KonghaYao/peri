@@ -217,7 +217,6 @@ pub(crate) fn create_session_workflow_middleware(
         permission_mode: None,
         frozen_date: Some(frozen_data.date().to_string()),
         frozen_language: frozen_data.language().map(|s| s.to_string()),
-        thread_store: None,
         progress_tx: Some(progress_tx),
         subagent_ctx_builder: None,
         agent_prompt_builder: build_workflow_agent_prompt_builder(

@@ -1,192 +1,149 @@
-//! Fork a session: create a new thread and copy messages from source.
+//! Fork 普通会话：一致 source 快照 → 领域纯 ID 映射 → 一次门面保存。
 //!
-//! 存储访问经 [`Controller::sessions`]（ARC-BOUNDARY-001 方向）。
+//! 存储访问经会话资源门面（ARC-BOUNDARY-001 方向）：ACP 不逐条写 flags、不拼
+//! create/append/flags 分步序列，也没有「复制失败再删除新 thread」的存储补偿——
+//! 目标快照由 [`SessionResources::save_fork`] 一次保存并返回目标 root owner。
+//! 未发布创建的撤销由调用方经 `abandon_initialization` 承担。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use peri_acp_types::messages::MessageId;
-use peri_acp_types::store::{MessageFlags, PersistedPayload, ThreadStore};
-use peri_acp_types::thread::{ThreadId, ThreadMeta};
-use peri_controller::Controller;
+use anyhow::{bail, Context, Result};
+use peri_acp_types::messages::{BaseMessage, MessageId};
+use peri_acp_types::session_resources::{
+    BindingState, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta,
+    SessionResources, SessionSnapshot,
+};
+use peri_acp_types::store::history::remap_fork_history;
+use peri_acp_types::store::{MessageFlags, PersistedPayload};
+use peri_acp_types::thread::{CancelPolicy, ThreadId};
+use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, SessionExecutionLease};
 
-/// Clone one logical payload into an independently owned fork row.
+/// fork source 的一致快照：payload/flags/binding/frozen 同一时刻读出。
 ///
-/// SQLite stores `message_id` as a database-wide primary key, so preserving the
-/// source ID would make `INSERT OR IGNORE` silently leave the fork without rows.
-fn clone_payload_for_fork(payload: &PersistedPayload) -> PersistedPayload {
-    let id = MessageId::new();
-    match payload {
-        PersistedPayload::Message(message) => {
-            PersistedPayload::Message(message.clone().with_message_id(id))
-        }
-        PersistedPayload::SystemReminder { reminder, .. } => PersistedPayload::SystemReminder {
-            id,
-            reminder: reminder.clone(),
-        },
-    }
+/// source 原样保留——此处只读，不改动 source 的 flags 或 frozen。
+pub(crate) struct ForkSource {
+    pub(crate) thread_id: ThreadId,
+    /// source 已登记的绑定：普通 fork 沿用同一执行绑定。
+    pub(crate) binding: SessionBinding,
+    /// source 已持久化的精确冻结字节：fork 不按当前目录/日期重冻。
+    pub(crate) frozen: FrozenSnapshotBytes,
+    payloads: Vec<PersistedPayload>,
+    flags: HashMap<MessageId, MessageFlags>,
 }
 
-fn clone_flags_for_fork(
-    mut flags: MessageFlags,
-    source_id: MessageId,
-    forked_id: MessageId,
-) -> MessageFlags {
-    if let Some(projection) = flags.projection.as_mut() {
-        for entry in &mut projection.entries {
-            if entry.message_id == source_id {
-                entry.message_id = forked_id;
-            }
-        }
-    }
-    flags
-}
-
-async fn cleanup_failed_fork(
-    store: &dyn ThreadStore,
-    source_thread_id: &str,
-    new_thread_id: &ThreadId,
-) -> Result<()> {
-    if store.delete_thread(new_thread_id).await.is_err() {
-        tracing::error!(
-            event = "session_fork_persistence_inconsistency",
-            source_thread_id,
-            new_thread_id,
-            copy_failed = true,
-            compensation_failed = true,
-            classification = "persistence_inconsistency",
-            "session fork persistence inconsistency"
-        );
-        anyhow::bail!(
-            "Session fork failed due to a persistence inconsistency; manual recovery may be required"
-        );
-    }
-    Ok(())
-}
-
-/// Fork a session by creating a new thread and copying source messages.
+/// 读取 fork source：一次一致快照，并在领域侧校验可 fork 性。
 ///
-/// Returns `Ok((new_thread_id, copied_messages))` on success.
-/// The caller is responsible for inserting the new session into its session map.
-pub async fn fork_session(
-    controller: &Controller,
+/// source 必须是已绑定、frozen 可读且工具调用已闭合的会话；缺绑定、frozen 缺失或
+/// 本构建读不懂时明确失败，不用当前环境补一份。
+pub(crate) async fn load_fork_source(
+    resources: &Arc<dyn SessionResources>,
     source_thread_id: &str,
-    source_payloads: &[PersistedPayload],
-    cwd: &str,
-) -> Result<(String, Vec<PersistedPayload>)> {
-    let meta = ThreadMeta::new(cwd);
-    let store = controller.sessions();
-    let source_thread_id = ThreadId::from(source_thread_id.to_string());
-    let source_flags = store
-        .load_message_flags(&source_thread_id)
-        .await
-        .context("Failed to load source compact flags")?;
-    let new_thread_id = store
-        .create_thread(meta)
-        .await
-        .context("Thread creation failed")?;
-
-    let copied_payloads = source_payloads
-        .iter()
-        .map(clone_payload_for_fork)
-        .collect::<Vec<_>>();
-    let copied_flags = source_payloads
-        .iter()
-        .zip(&copied_payloads)
-        .filter_map(|(source, copied)| {
-            source_flags.get(&source.id()).cloned().map(|flags| {
-                (
-                    copied.id(),
-                    clone_flags_for_fork(flags, source.id(), copied.id()),
-                )
-            })
-        })
-        .collect::<HashMap<_, _>>();
-
-    if !copied_payloads.is_empty() {
-        if let Err(copy_error) = store
-            .append_payloads(&new_thread_id, &copied_payloads)
-            .await
-        {
-            cleanup_failed_fork(store.as_ref(), source_thread_id.as_str(), &new_thread_id).await?;
-            return Err(copy_error).context("Failed to copy session payloads");
-        }
-    }
-
-    for (message_id, flags) in copied_flags {
-        if let Err(copy_error) = store.update_message_flags(&message_id, &flags).await {
-            cleanup_failed_fork(store.as_ref(), source_thread_id.as_str(), &new_thread_id).await?;
-            return Err(copy_error).context("Failed to copy session compact flags");
-        }
-    }
-
-    tracing::info!(
-        source = %source_thread_id,
-        new = %new_thread_id,
-        msg_count = copied_payloads.len(),
-        "Session forked"
-    );
-
-    Ok((new_thread_id, copied_payloads))
+) -> Result<ForkSource> {
+    let thread_id = source_thread_id.to_owned();
+    let snapshot = resources.load_session_snapshot(&thread_id).await?;
+    let binding = bound_binding(&snapshot)?;
+    let frozen = source_frozen(&snapshot)?;
+    let payloads = ensure_complete_tool_calls(snapshot.payloads)?;
+    Ok(ForkSource {
+        thread_id,
+        binding,
+        frozen,
+        payloads,
+        flags: snapshot.flags,
+    })
 }
 
-/// Fork a bound, idle source while the caller holds its lifecycle gate and owner.
+/// 一次保存 fork 目标：纯 ID 映射在前，门面保存 meta/binding/frozen/payload/flags
+/// 并返回目标 root owner。
+///
+/// 目标复用 source 的 binding 与冻结字节；`created_at` 与目标 identity 由构建层
+/// 生成一次（重试不重建）。
 pub(crate) async fn fork_bound_session(
-    controller: &Controller,
-    source_thread_id: &str,
-    workspace: &peri_acp_types::workspace::ResolvedWorkspace,
+    resources: &Arc<dyn SessionResources>,
+    source: &ForkSource,
+    workspace: &ResolvedWorkspace,
+    created_at: String,
 ) -> Result<(
     String,
     Vec<PersistedPayload>,
-    std::sync::Arc<dyn peri_acp_types::workspace::SessionExecutionLease>,
+    Arc<dyn SessionExecutionLease>,
 )> {
-    let store = controller.sessions();
-    let source_id = source_thread_id.to_owned();
-    let payloads = store.load_payloads(&source_id).await?;
-    // A source snapshot must finish every assistant tool invocation before it can
-    // be copied into an independently executable history.
-    let mut pending = std::collections::HashSet::new();
+    let cwd = workspace
+        .cwd
+        .to_str()
+        .context("Execution directory is not UTF-8")?
+        .to_owned();
+    // SQLite 的 message_id 是库级主键：复用 source ID 会让写入静默丢行，因此复制前
+    // 先做纯 ID 重映射（adapter 不重复执行 fork 算法）。
+    let forked = remap_fork_history(&source.payloads, &source.flags, MessageId::new);
+    let target_id = uuid::Uuid::now_v7().to_string();
+    let owner = resources
+        .save_fork(&ForkSnapshot {
+            target: NewSession {
+                thread_id: target_id.clone(),
+                created_at,
+                meta: NewSessionMeta {
+                    title: None,
+                    cwd,
+                    parent_thread_id: None,
+                    hidden: false,
+                    cancel_policy: CancelPolicy::default(),
+                    snapshot_at_message_id: None,
+                },
+                binding: source.binding.clone(),
+                frozen: source.frozen.clone(),
+            },
+            source_id: source.thread_id.clone(),
+            payloads: forked.payloads.clone(),
+            flags: forked.flags,
+        })
+        .await?;
+    tracing::info!(
+        source = %source.thread_id,
+        new = %target_id,
+        msg_count = forked.payloads.len(),
+        "Session forked"
+    );
+    Ok((target_id, forked.payloads, owner))
+}
+
+/// 已绑定 source 才可 fork：legacy/外来/缺绑定都不是「可复制的执行身份」。
+fn bound_binding(snapshot: &SessionSnapshot) -> Result<SessionBinding> {
+    match &snapshot.binding {
+        BindingState::Bound(binding) => Ok(binding.clone()),
+        BindingState::LegacyConfirmed => bail!("Cannot fork legacy history without a binding"),
+        BindingState::ExternalOrUnregistered => {
+            bail!("Cannot fork a session bound to another workspace")
+        }
+        BindingState::Missing => bail!("Cannot fork a session without a local binding"),
+    }
+}
+
+/// fork 复制的是 source 的精确冻结字节，来源必须已持久化且可读。
+fn source_frozen(snapshot: &SessionSnapshot) -> Result<FrozenSnapshotBytes> {
+    match &snapshot.frozen {
+        FrozenState::Present(bytes) => Ok(bytes.clone()),
+        FrozenState::LegacyAbsent => bail!("Source frozen snapshot is missing"),
+        FrozenState::Unsupported => {
+            bail!("Source frozen snapshot is not readable by this build")
+        }
+    }
+}
+
+/// 工具调用闭合校验：未闭合的调用不能复制进一条独立可执行的历史。
+fn ensure_complete_tool_calls(payloads: Vec<PersistedPayload>) -> Result<Vec<PersistedPayload>> {
+    let mut pending = HashSet::new();
     for message in payloads.iter().filter_map(PersistedPayload::as_message) {
         for call in message.tool_calls() {
             pending.insert(call.id.clone());
         }
-        if let peri_acp_types::messages::BaseMessage::Tool { tool_call_id, .. } = message {
+        if let BaseMessage::Tool { tool_call_id, .. } = message {
             pending.remove(tool_call_id);
         }
     }
-    anyhow::ensure!(
-        pending.is_empty(),
-        "Cannot fork history with incomplete tool calls"
-    );
-    let flags = store.load_message_flags(&source_id).await?;
-    let cwd = workspace
-        .cwd
-        .to_str()
-        .context("Execution directory is not UTF-8")?;
-    let id = store
-        .create_bound_thread(ThreadMeta::new(cwd), workspace)
-        .await?;
-    let lease = store.acquire_execution_lease(&id).await?;
-    let copied: Vec<_> = payloads.iter().map(clone_payload_for_fork).collect();
-    let result = async {
-        store.append_payloads(&id, &copied).await?;
-        for (source, copied) in payloads.iter().zip(&copied) {
-            if let Some(flags) = flags.get(&source.id()) {
-                store
-                    .update_message_flags(
-                        &copied.id(),
-                        &clone_flags_for_fork(flags.clone(), source.id(), copied.id()),
-                    )
-                    .await?;
-            }
-        }
-        Ok::<_, anyhow::Error>(())
+    if !pending.is_empty() {
+        bail!("Cannot fork history with incomplete tool calls");
     }
-    .await;
-    if let Err(error) = result {
-        cleanup_failed_fork(store.as_ref(), source_thread_id, &id).await?;
-        lease.mark_clean().await?;
-        return Err(error);
-    }
-    Ok((id, copied, lease))
+    Ok(payloads)
 }

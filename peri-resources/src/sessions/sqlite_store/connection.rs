@@ -1,6 +1,6 @@
 //! SQLite 连接、只读 schema 探测、单库升级与安全错误分类。
 
-use super::SqliteThreadStore;
+use super::database::SqliteSessionDatabase;
 use anyhow::{Context, Result};
 use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{
@@ -111,9 +111,9 @@ pub(super) fn classify_shape_probe_failure(error: &sqlx::Error) -> ReadOnlyThrea
     }
 }
 
-impl SqliteThreadStore {
+impl SqliteSessionDatabase {
     /// 打开或创建会话数据库，原地升级已知旧 schema 并保留历史数据。
-    pub async fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
+    pub(super) async fn open(db_path: impl Into<PathBuf>) -> Result<Self> {
         let db_path = db_path.into();
         // 确保父目录存在
         if let Some(parent) = db_path.parent() {
@@ -148,17 +148,13 @@ impl SqliteThreadStore {
             .max_connections(5)
             .connect_with(options)
             .await?;
-        let store = Self {
-            pool,
-            read_only: false,
-            db_path: tokio::fs::canonicalize(&db_path).await?,
-            execution_leases: Default::default(),
-        };
-        if let Err(error) = store.init_schema().await {
-            store.close().await;
+        let db_path = tokio::fs::canonicalize(&db_path).await?;
+        let database = Self::new(pool, false, db_path);
+        if let Err(error) = database.init_schema().await {
+            database.close().await;
             return Err(error);
         }
-        Ok(store)
+        Ok(database)
     }
 
     /// 关闭连接池并等待全部连接释放。
@@ -166,7 +162,7 @@ impl SqliteThreadStore {
     /// `Drop` 返回时不等待连接关闭完成，最后一次连接关闭触发的 WAL checkpoint 与
     /// `-wal`/`-shm` 清理因此可能晚于 `Drop` 返回，并与并发只读打开重叠。需要确定性
     /// 收尾时调用本方法：返回后本进程不再持有该数据库的连接，且侧车文件已完成收尾。
-    pub async fn close(&self) {
+    pub(super) async fn close(&self) {
         self.pool.close().await;
     }
 
@@ -185,7 +181,7 @@ impl SqliteThreadStore {
     /// 以 SQLite read-only capability 打开已存在的数据库。
     ///
     /// 该路径不创建目录、数据库或 schema，也不执行 migration。
-    pub async fn open_existing_read_only(
+    pub(super) async fn open_existing_read_only(
         db_path: impl AsRef<Path>,
     ) -> std::result::Result<Self, ReadOnlyThreadStoreError> {
         let db_path = db_path.as_ref();
@@ -214,12 +210,7 @@ impl SqliteThreadStore {
             .map_err(|_| {
                 ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::DatabaseUnreadable)
             })?;
-        let store = Self {
-            pool,
-            read_only: true,
-            db_path: db_path.to_path_buf(),
-            execution_leases: Default::default(),
-        };
+        let store = Self::new(pool, true, db_path.to_path_buf());
         store.probe_load_meta_shape().await?;
         Ok(store)
     }
@@ -248,11 +239,6 @@ impl SqliteThreadStore {
     /// 默认数据库位置 `~/.peri/threads/threads.db`；不创建目录、数据库或连接。
     pub(crate) fn default_database_path() -> Result<PathBuf> {
         super::super::default_database_path().context("无法获取 home 目录")
-    }
-
-    /// 使用默认路径 `~/.peri/threads/threads.db` 创建
-    pub async fn default_path() -> Result<Self> {
-        Self::new(Self::default_database_path()?).await
     }
 }
 

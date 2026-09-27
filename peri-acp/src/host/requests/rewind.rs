@@ -54,11 +54,13 @@ fn apply_canonical_rewind(
     history: &mut Vec<peri_acp_types::messages::BaseMessage>,
     target_id: peri_acp_types::messages::MessageId,
 ) -> Result<(), AcpError> {
-    let target_payload_idx = history_payloads
-        .iter()
-        .position(|payload| payload.id() == target_id)
-        .ok_or_else(|| AcpError::new(-32603, "rewind target missing from canonical history"))?;
-    history_payloads.truncate(target_payload_idx);
+    // 用户 rewind 移除目标本身及以后（与 transcript 的 KeepThrough 语义不同）。
+    let rewound = peri_acp_types::store::history::apply_rewind(
+        history_payloads,
+        peri_acp_types::session_resources::RewindBoundary::RemoveFrom(target_id),
+    )
+    .map_err(|_| AcpError::new(-32603, "rewind target missing from canonical history"))?;
+    *history_payloads = rewound.kept;
     *history = history_payloads
         .iter()
         .filter_map(|payload| payload.as_message().cloned())

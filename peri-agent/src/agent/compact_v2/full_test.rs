@@ -1,6 +1,6 @@
 //! Tests for full
 
-use std::sync::Arc;
+use crate::session::test_resources::mock::MockSessionResources;
 
 use async_trait::async_trait;
 use peri_model::{
@@ -13,7 +13,8 @@ use super::*;
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::messages::{BaseMessage, ContentBlock, ImageSource, MessageContent};
 use crate::session::transcript::MessageTranscript;
-use crate::thread::{FilesystemThreadStore, SqliteThreadStore, ThreadMeta, ThreadStore};
+use crate::thread::ThreadMeta;
+use peri_acp_types::store::PersistedPayload;
 
 fn make_human(text: &str) -> BaseMessage {
     BaseMessage::human(MessageContent::text(text.to_string()))
@@ -109,11 +110,7 @@ impl Model for FullLifecycleModel {
 // 对应 spec/issues/2026-09-10-p0-full-micro-compact-churn.md。
 async fn make_audit_full_history() -> (tempfile::TempDir, MessageTranscript) {
     let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(dir.path().join("compact-audit.db"))
-            .await
-            .unwrap(),
-    );
+    let store = MockSessionResources::new();
     let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
     for turn in 0..4 {
@@ -249,12 +246,7 @@ async fn full_compact_preserves_canonical_reminder_without_flags() {
         ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
         ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
     };
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(dir.path().join("reminder-full.db"))
-            .await
-            .unwrap(),
-    );
+    let store = MockSessionResources::new();
     let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
     transcript.append(make_human("question"));
@@ -296,12 +288,7 @@ async fn full_compact_preserves_canonical_reminder_without_flags() {
 
 #[tokio::test]
 async fn full_excludes_loaded_root_history() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(dir.path().join("loaded-root-history.db"))
-            .await
-            .unwrap(),
-    );
+    let store = MockSessionResources::new();
     let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
     let question = make_human("previous turn question");
     let answer = make_ai("previous turn answer");
@@ -348,12 +335,7 @@ async fn full_excludes_loaded_root_history() {
 
 #[tokio::test]
 async fn full_affected_count_tracks_only_false_to_true_transitions() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(dir.path().join("affected.db"))
-            .await
-            .unwrap(),
-    );
+    let store = MockSessionResources::new();
     let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
     transcript.append(BaseMessage::system("system"));
@@ -386,11 +368,7 @@ async fn consecutive_full_requires_new_visible_read_to_reinject_file() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("current.txt");
     std::fs::write(&file_path, "version one").unwrap();
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(dir.path().join("reinject.db"))
-            .await
-            .unwrap(),
-    );
+    let store = MockSessionResources::new();
     let thread_id = store
         .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
         .await
@@ -464,19 +442,14 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
     std::fs::write(&file_path, "pub const FULL_LIFECYCLE: bool = true;\n")
         .expect("写入重新注入文件失败");
 
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(dir.path().join("full-lifecycle.db"))
-            .await
-            .expect("创建 SQLite store 失败"),
-    );
-    let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
-        .await
-        .expect("创建 thread 失败");
+    // 真门面 + 真 SQLite + 真执行所有权（写入要求本 root 有活 owner）。
+    let session = crate::session::test_resources::TestSession::open().await;
+    let store = session.resources();
+    let thread_id = session.thread_id.clone();
 
     let ancestor = BaseMessage::human("ancestor conversation");
     store
-        .append_message(&thread_id, ancestor.clone())
+        .append_history(&thread_id, &[PersistedPayload::Message(ancestor.clone())])
         .await
         .expect("持久化 ancestor 失败");
 
@@ -532,14 +505,16 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
         .message()
         .clone();
 
-    let stored_messages = store
-        .load_messages(&thread_id)
+    // 一次一致快照：payload 与 flags 同一次读取，不拼跨时刻结果。
+    let stored = store
+        .load_session_snapshot(&thread_id)
         .await
-        .expect("加载 SQLite history 失败");
+        .expect("加载 SQLite 快照失败");
     assert_eq!(
-        stored_messages
+        stored
+            .payloads
             .iter()
-            .map(BaseMessage::id)
+            .map(PersistedPayload::id)
             .collect::<Vec<_>>(),
         transcript
             .entries()
@@ -548,32 +523,31 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
             .collect::<Vec<_>>(),
         "内存与 SQLite history 必须一致"
     );
-    assert!(stored_messages
+    assert!(transcript
+        .entries()
         .iter()
-        .any(|message| message.id() == summary.id()));
-    assert!(stored_messages
+        .any(|entry| entry.id() == summary.id()));
+    assert!(transcript
+        .entries()
         .iter()
-        .any(|message| message.id() == reinject.id()));
-
-    let stored_flags = store
-        .load_message_flags(&thread_id)
-        .await
-        .expect("加载 SQLite flags 失败");
-    assert!(!stored_flags.contains_key(&ancestor.id()));
-    assert!(!stored_flags.contains_key(&own_system));
-    assert!(stored_flags[&own_human].excluded);
-    assert!(stored_flags[&own_ai].excluded);
+        .any(|entry| entry.id() == reinject.id()));
+    assert!(!stored.flags.contains_key(&ancestor.id()));
+    assert!(!stored.flags.contains_key(&own_system));
+    assert!(stored.flags[&own_human].excluded);
+    assert!(stored.flags[&own_ai].excluded);
 }
 
 #[tokio::test]
-async fn test_full_compact_filesystem_unsupported_lifecycle_leaves_memory_and_store_unchanged() {
+async fn test_full_compact_history_read_only_backend_leaves_memory_and_store_unchanged() {
     let dir = tempfile::tempdir().expect("创建临时目录失败");
     let file_path = dir.path().join("full-lifecycle.rs");
     std::fs::write(&file_path, "pub const FULL_LIFECYCLE: bool = true;\n")
         .expect("写入重新注入文件失败");
 
-    let store: Arc<dyn ThreadStore> =
-        Arc::new(FilesystemThreadStore::new(dir.path().join("threads")));
+    // 只读能力面（`HistoryReadOnly`）：能力面可在运行期变化（权限/后端变化），
+    // 此后所有 mutation 必须在副作用前返回 Unsupported。夹具先按可写后端建立历史，
+    // 再切换到只读能力面——历史本身必须由可写句柄产生，只读句柄不接受写入。
+    let store = MockSessionResources::new();
     let thread_id = store
         .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
         .await
@@ -595,15 +569,16 @@ async fn test_full_compact_filesystem_unsupported_lifecycle_leaves_memory_and_st
         .flush_persistence()
         .await
         .expect("Full compact 前应完成持久化");
+    store.restrict_to_history_read_only();
     let before_entries = transcript
         .entries()
         .iter()
         .map(|entry| entry.id())
         .collect::<Vec<_>>();
     let before_store = store
-        .load_messages(&thread_id)
+        .load_payloads(&thread_id)
         .await
-        .expect("加载初始 Filesystem history 失败");
+        .expect("加载初始 history 失败");
 
     let error = full_compact_inner(
         &mut transcript,
@@ -612,13 +587,13 @@ async fn test_full_compact_filesystem_unsupported_lifecycle_leaves_memory_and_st
         &dir.path().to_string_lossy(),
     )
     .await
-    .expect_err("Filesystem lifecycle 必须明确不受支持");
+    .expect_err("只读能力面必须明确拒绝 lifecycle");
 
     assert!(
         error
             .to_string()
-            .contains("Filesystem store does not support compaction lifecycle"),
-        "应返回 lifecycle 不受支持错误，实际: {error}"
+            .contains("compact persistence did not commit"),
+        "应返回 lifecycle 未提交错误，实际: {error}"
     );
     assert_eq!(
         transcript
@@ -635,20 +610,23 @@ async fn test_full_compact_filesystem_unsupported_lifecycle_leaves_memory_and_st
     assert!(!transcript.flags(own_ai).excluded);
     assert_eq!(
         store
-            .load_messages(&thread_id)
+            .load_payloads(&thread_id)
             .await
-            .expect("加载 Filesystem history 失败")
+            .expect("加载 history 失败")
             .iter()
-            .map(BaseMessage::id)
+            .map(PersistedPayload::id)
             .collect::<Vec<_>>(),
-        before_store.iter().map(BaseMessage::id).collect::<Vec<_>>(),
+        before_store
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>(),
         "失败后 store history 必须原样"
     );
     assert!(
         store
             .load_message_flags(&thread_id)
             .await
-            .expect("加载 Filesystem flags 失败")
+            .expect("加载 flags 失败")
             .is_empty(),
         "失败后 store flags 必须原样"
     );

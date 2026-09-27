@@ -32,7 +32,7 @@ impl super::SubAgentTool {
         if host.task_manager.is_none() {
             return Err("Background tasks not available: no task manager configured".into());
         }
-        let thread_store = host.thread_store.clone();
+        let session_resources = host.session_resources.clone();
 
         let spawned = if is_fork {
             // fork 路径（bg fork）：父消息注入 + fork directive 包装；
@@ -120,7 +120,7 @@ impl super::SubAgentTool {
             .task_id
             .clone()
             .unwrap_or_else(|| "bg-unknown".to_string());
-        if thread_store.is_some() {
+        if session_resources.is_some() {
             Ok(format!(
                 "Background task {} started (thread: {}). You will be notified when it completes. \
                  You can continue with other tasks in the meantime.",
