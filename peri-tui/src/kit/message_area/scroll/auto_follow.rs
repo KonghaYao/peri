@@ -78,7 +78,7 @@ pub(super) fn consume_reset_force_bottom(prev_items_len: &mut usize, items_len: 
 }
 
 /// 从 `use_effect` 闭包提取的吸底逻辑。
-/// 注意：use_effect body 不是 render body，所以 `write()` 是正确的（需要 wake 触发后续渲染）。
+/// 内部哨兵只用于下一次 effect，不通知；真实滚动与 follow 状态仍需唤醒渲染。
 pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // [Diagnostic] 记录每次 effect 触发的关键参数——trace 历史/submit 两个滚动问题。
     // [Perf] run_auto_follow 随 vm_generation 每 token 触发，info 级日志在默认
@@ -101,7 +101,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
 
     // [Fix] resize 后 total_visual_rows 变化时，主动钳制 scroll_state.offset 到有效范围。
     let prev_total = *ctx.prev_total_visual_rows.read();
-    *ctx.prev_total_visual_rows.write() = ctx.total_visual_rows;
+    *ctx.prev_total_visual_rows.write_no_update() = ctx.total_visual_rows;
     if prev_total != ctx.total_visual_rows && ctx.total_visual_rows > 0 && ctx.vis_height > 0 {
         let max_scroll = ctx
             .total_visual_rows
@@ -120,7 +120,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // 判定改为 follow_bottom：跟随态（用户没在浏览）resize 后跟随到底；浏览态不打扰。
     // 旧版用 proximity 阈值（视口 1/4）判定，浏览态距底 ≤ 阈值时仍会被误拉。
     let prev_vis = *ctx.prev_vis_height.read();
-    *ctx.prev_vis_height.write() = ctx.vis_height;
+    *ctx.prev_vis_height.write_no_update() = ctx.vis_height;
     if prev_vis != ctx.vis_height
         && *ctx.follow_bottom.read()
         && ctx.total_visual_rows > 0
@@ -133,7 +133,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
             "auto_follow: resize (vis_height changed) → follow bottom",
         );
         ctx.scroll_state.write().scroll_to_bottom();
-        *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+        *ctx.last_scrolled_at.write_no_update() = ctx.total_visual_rows;
     }
 
     // ── [Fix #1] Submit 强制滚底：用户主动发送 prompt 时 LOADING_EPOCH 递增 ──
@@ -141,7 +141,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // 先设 is_loading=true，再 call prompt() RPC）。此时 scroll_to_bottom 定位
     // 到当前的底部位置即可——user bubble 到达后 proximity 自然跟随。
     let prev_epoch = *ctx.prev_loading_epoch.read();
-    *ctx.prev_loading_epoch.write() = ctx.loading_epoch;
+    *ctx.prev_loading_epoch.write_no_update() = ctx.loading_epoch;
     if ctx.loading_epoch != prev_epoch && ctx.total_visual_rows > 0 && ctx.vis_height > 0 {
         tracing::trace!(
             target: "msg_scroll_diag",
@@ -150,7 +150,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
             "auto_follow: submit detected (LOADING_EPOCH changed) → force scroll_to_bottom",
         );
         ctx.scroll_state.write().scroll_to_bottom();
-        *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+        *ctx.last_scrolled_at.write_no_update() = ctx.total_visual_rows;
         *ctx.follow_bottom.write() = true;
         // 不 return——继续走后续逻辑处理 user bubble / 流式增长
     }
@@ -160,7 +160,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // 后续的 prev==0 分支（在所有 proximity guard 之前）强制每批 scroll_to_bottom，
     // 且不消费 prev==0（保持 trigger 活跃至 replay 结束）。
     let prev_ctr = *ctx.prev_reset_counter.read();
-    *ctx.prev_reset_counter.write() = ctx.bridge_reset_counter;
+    *ctx.prev_reset_counter.write_no_update() = ctx.bridge_reset_counter;
     if ctx.bridge_reset_counter != prev_ctr {
         tracing::trace!(
             target: "msg_scroll_diag",
@@ -168,8 +168,8 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
             new_ctr = ctx.bridge_reset_counter,
             "auto_follow: BRIDGE_RESET_COUNTER changed → arming prev==0 force-scroll",
         );
-        *ctx.prev_items_len.write() = 0;
-        *ctx.last_scrolled_at.write() = 0;
+        *ctx.prev_items_len.write_no_update() = 0;
+        *ctx.last_scrolled_at.write_no_update() = 0;
     }
 
     // [TRAP] parking_lot 同 thread 死锁规避：先 read copy 出 owned，guard 在语句末尾 drop，再 write。
@@ -177,7 +177,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
 
     // ── 零内容保护 ──
     if ctx.total_visual_rows == 0 || ctx.vis_height == 0 {
-        *ctx.prev_items_len.write() = ctx.items_len;
+        *ctx.prev_items_len.write_no_update() = ctx.items_len;
         tracing::trace!(target: "msg_scroll_diag", "auto_follow: early return (zero total or vis)");
         return;
     }
@@ -186,7 +186,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // reset 后首个非空快照滚到底；立即记录 items_len，后续 replay 批次遵守
     // follow_bottom。用户若在 replay 中上滚，后续增长不再抢回 viewport。
     let force_bottom = {
-        let mut prev_items_len = ctx.prev_items_len.write();
+        let mut prev_items_len = ctx.prev_items_len.write_no_update();
         consume_reset_force_bottom(&mut prev_items_len, ctx.items_len)
     };
     if force_bottom && !ctx.is_loading {
@@ -196,7 +196,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
             "auto_follow: consuming reset force-scroll sentinel → scroll_to_bottom",
         );
         ctx.scroll_state.write().scroll_to_bottom();
-        *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+        *ctx.last_scrolled_at.write_no_update() = ctx.total_visual_rows;
         *ctx.follow_bottom.write() = true;
         return;
     }
@@ -230,7 +230,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
                 "auto_follow: interaction anchor → align viewport to block bottom",
             );
             ctx.scroll_state.write().set_offset(target);
-            *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+            *ctx.last_scrolled_at.write_no_update() = ctx.total_visual_rows;
         }
         return;
     }
@@ -253,7 +253,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
         if ctx.total_visual_rows > prev_lsa {
             tracing::trace!(target: "msg_scroll_diag", "auto_follow: loading → scroll_to_bottom");
             ctx.scroll_state.write().scroll_to_bottom();
-            *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+            *ctx.last_scrolled_at.write_no_update() = ctx.total_visual_rows;
         } else {
             tracing::trace!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: loading → skip (total_rows not greater than prev_lsa)");
         }
@@ -263,7 +263,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
     if ctx.items_len < prev {
         tracing::trace!(target: "msg_scroll_diag", items_len = ctx.items_len, prev, "auto_follow: shrink → scroll_to_bottom");
         ctx.scroll_state.write().scroll_to_bottom();
-        *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+        *ctx.last_scrolled_at.write_no_update() = ctx.total_visual_rows;
         *ctx.follow_bottom.write() = true;
         return;
     }
@@ -271,7 +271,7 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
     if ctx.total_visual_rows > prev_lsa {
         tracing::trace!(target: "msg_scroll_diag", "auto_follow: non-loading growth → scroll_to_bottom");
         ctx.scroll_state.write().scroll_to_bottom();
-        *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+        *ctx.last_scrolled_at.write_no_update() = ctx.total_visual_rows;
     } else {
         tracing::trace!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: non-loading → skip (total_rows not greater than prev_lsa)");
     }

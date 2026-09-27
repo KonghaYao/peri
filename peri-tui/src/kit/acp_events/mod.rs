@@ -6,6 +6,7 @@
 // ── Sub-modules ──
 mod agent;
 mod compact;
+mod fold;
 pub(crate) mod render;
 mod streaming;
 mod subagent;
@@ -214,9 +215,17 @@ pub struct BridgeState {
     /// observation assigns `None`, preventing a stale earlier sample from
     /// surviving to `TurnDone`.
     pub pending_cache_usage: Option<CacheUsageSample>,
+    pub(crate) publication_intent: PublicationIntent,
+    pub(crate) folded_history: fold::FoldedHistory,
 }
 
 impl BridgeState {
+    /// 显式同步 barrier：保留 terminal 发布先于 drain/replay 等副作用的顺序。
+    fn publish_barrier(&mut self) {
+        render::push_view_models(self);
+        self.publication_intent = PublicationIntent::Published;
+    }
+
     /// 将 current_turn 已产出内容 flush 到 committed，然后 reset。
     ///
     /// 用于 BgCallbackBubble / TurnDone 两个需要保证时序正确性的位置：
@@ -265,7 +274,7 @@ impl BridgeState {
         let content_hash = tui_hash_str(&text);
         self.current_turn
             .push_system_note(text, level, content_hash);
-        render::push_view_models(self);
+        self.publish_barrier();
         render::push_acp_state(self);
     }
 
@@ -297,11 +306,19 @@ impl BridgeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PublicationIntent {
+    #[default]
     None,
     Immediate,
+    /// handler 已完成显式同步 barrier，scheduler 只结算 pending。
+    Published,
+    /// 历史回放等不受 streaming mode 抑制的更新。
     Deferred,
+    /// 普通流式更新；deadline 到期时仍须核对模式。
+    Streaming,
+    /// canonical 已变化，但模式/块边界不允许自动发布。
+    Hidden,
 }
 
 // ---------------------------------------------------------------------------
@@ -316,9 +333,7 @@ pub(crate) fn dispatch_for_bridge(
     state: &mut BridgeState,
     event: &AcpEventData,
 ) -> PublicationIntent {
-    let generation_before = state.generation;
-    let text_was_empty = state.current_turn.text.is_empty();
-    let reasoning_was_empty = state.current_turn.reasoning.is_empty();
+    state.publication_intent = PublicationIntent::None;
     use AcpEventData::*;
     // S4.1 方案 B：CompactCompleted 置 compact_just_completed 后，任何流事件
     // 到达即清除标志——agent 内部 auto-compact 后 ReAct 循环继续产出，流事件
@@ -343,8 +358,8 @@ pub(crate) fn dispatch_for_bridge(
     }
     match event {
         // ── §4.1 Streaming events ──
-        TextChunk(tc) => streaming::handle_text_chunk(state, tc),
-        ReasoningChunk(rc) => streaming::handle_reasoning_chunk(state, rc),
+        TextChunk(tc) => return streaming::handle_text_chunk(state, tc),
+        ReasoningChunk(rc) => return streaming::handle_reasoning_chunk(state, rc),
 
         // ── §4.1 Tools ──
         ToolStarted(ts) => tool::handle_tool_started(state, ts),
@@ -538,40 +553,14 @@ pub(crate) fn dispatch_for_bridge(
         BgTaskCancelled { task_id, reason } => system::handle_bg_task_cancelled(task_id, reason),
     }
 
-    if state.generation != generation_before {
-        PublicationIntent::Immediate
+    let requested = std::mem::take(&mut state.publication_intent);
+    if requested != PublicationIntent::None {
+        requested
     } else if matches!(
         event,
         CommittedAssistantText { .. } | ReplayToolStarted { .. } | ReplayToolEnded { .. }
     ) {
-        // session/load 历史逐条只更新 canonical state，由 bridge 固定 deadline 合帧；
-        // SessionReplayDone 等边界 handler 仍会立即发布最终完整快照。
         PublicationIntent::Deferred
-    } else if state.current_turn.has_unprojected_changes() {
-        match event {
-            TextChunk(_) => match current_streaming_mode() {
-                StreamingMode::Streaming if text_was_empty => PublicationIntent::Immediate,
-                StreamingMode::Streaming => PublicationIntent::Deferred,
-                StreamingMode::Block
-                    if state.last_pushed_text_len == state.current_turn.text.chars().count() =>
-                {
-                    PublicationIntent::Immediate
-                }
-                StreamingMode::Block | StreamingMode::None => PublicationIntent::None,
-            },
-            ReasoningChunk(_) => match current_streaming_mode() {
-                StreamingMode::Streaming if reasoning_was_empty => PublicationIntent::Immediate,
-                StreamingMode::Streaming => PublicationIntent::Deferred,
-                StreamingMode::Block
-                    if state.last_pushed_reasoning_len
-                        == state.current_turn.reasoning.chars().count() =>
-                {
-                    PublicationIntent::Immediate
-                }
-                StreamingMode::Block | StreamingMode::None => PublicationIntent::None,
-            },
-            _ => PublicationIntent::Deferred,
-        }
     } else {
         PublicationIntent::None
     }
@@ -584,7 +573,7 @@ pub(crate) fn dispatch_trusted_structured_for_bridge(
     match event {
         AcpEventData::SystemReminder { reminder, .. } => {
             system::handle_trusted_system_reminder(state, reminder);
-            PublicationIntent::None
+            std::mem::take(&mut state.publication_intent)
         }
         other => dispatch_for_bridge(state, &other),
     }
@@ -594,9 +583,7 @@ pub(crate) fn dispatch_trusted_structured_for_bridge(
 /// 消费 publication intent 并执行合帧。
 #[cfg(test)]
 pub(crate) fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
-    let generation_before = state.generation;
-    let _ = dispatch_for_bridge(state, event);
-    if state.generation == generation_before {
+    if dispatch_for_bridge(state, event) != PublicationIntent::Published {
         render::push_view_models(state);
     }
 }

@@ -34,7 +34,7 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
         "TurnDone: writing ACP_STATE"
     );
 
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 
     // C2: compact 命令完成后触发 session/load 重放。
@@ -161,7 +161,7 @@ pub(super) fn handle_turn_interrupted(
         state.last_pushed_reasoning_len = 0;
         state.variant = 0;
         state.phase = SessionPhase::Idle;
-        super::render::push_view_models(state);
+        state.publish_barrier();
         super::render::push_acp_state(state);
         // Issue 2026-08-05 遗留项（中）：stale 分支复位后主动 drain 排队输入。
         // 旧 turn 已取消、其 TurnDone 永不到达——排队输入（用户 loading 期间
@@ -209,7 +209,7 @@ pub(super) fn handle_turn_interrupted(
         state.last_pushed_reasoning_len = 0;
         state.variant = 0;
         state.phase = SessionPhase::Idle;
-        super::render::push_view_models(state);
+        state.publish_barrier();
         super::render::push_acp_state(state);
         return;
     }
@@ -229,7 +229,7 @@ pub(super) fn handle_turn_interrupted(
     state.last_pushed_reasoning_len = 0;
     state.variant = 0;
     state.phase = SessionPhase::Idle;
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }
 
@@ -248,7 +248,7 @@ pub(super) fn handle_turn_suspended(state: &mut BridgeState) {
     state.last_pushed_reasoning_len = 0;
     state.variant = 0;
     state.phase = SessionPhase::Idle;
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
     // 注意：不调用 drain_input_buffer()——Agent 保持存活，
     // 输入缓冲在 Agent 真正完成（TurnDone）时再处理。
@@ -258,7 +258,7 @@ pub(super) fn handle_turn_committed(state: &mut BridgeState, steps: usize) {
     tracing::info!(steps, "bridge: TurnCommitted ({steps} steps)");
     // 在 goal 自驱场景下 TurnDone 只在最终循环退出时触发，
     // TurnCommitted 作为每次 ReAct 迭代边界的刷新检查点，防止 TUI atom 漂移。
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }
 
@@ -291,7 +291,7 @@ pub(super) fn handle_session_replay_started(state: &mut BridgeState) {
     state.current_turn.reset();
     state.last_pushed_text_len = 0;
     state.last_pushed_reasoning_len = 0;
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }
 
@@ -304,7 +304,7 @@ pub(super) fn handle_session_replay_done(state: &mut BridgeState) {
     state.current_turn.reset();
     state.last_pushed_text_len = 0;
     state.last_pushed_reasoning_len = 0;
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }
 
@@ -319,7 +319,7 @@ pub(super) fn handle_local_user_bubble(state: &mut BridgeState, text: &str) {
         .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
             text.to_string(),
         )));
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }
 
@@ -359,19 +359,20 @@ pub(super) fn handle_user_input_delivered(
         .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
             content.text_content(),
         )));
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }
 
 /// S4.2: 本地 loading 复位请求（cancel / /clear / prompt 失败兜底，由
 /// submit_consumer 注入 LOCAL_EVENT_TX）。幂等：phase 非 PromptRunning 时
 /// no-op（不 push）——命令 compact、replay、正常提交等场景不受影响；phase
-/// 为 PromptRunning 时复位为 Idle 并重推 ACP_STATE，防止后续事件触发
+/// 为 PromptRunning 时复位为 Idle，同步发布最终视图并结算 pending、重推 ACP_STATE，防止后续事件触发
 /// push_acp_state 时用 phase 重算 is_loading=true 造成取消后 loading 闪回
 /// （Issue 2026-08-05 S4.2）。
 pub(super) fn handle_loading_reset(state: &mut BridgeState) {
     if state.phase == SessionPhase::PromptRunning {
         state.phase = SessionPhase::Idle;
+        state.publish_barrier();
         super::render::push_acp_state(state);
     }
 }
@@ -384,7 +385,7 @@ pub(super) fn handle_bg_callback_bubble(state: &mut BridgeState) {
     // ② bg 回调气泡在中间（LocalUserBubble 随后到达）
     // ③ 后续 AI 内容在后（TurnDone 归档）
     state.flush_current_turn();
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }
 

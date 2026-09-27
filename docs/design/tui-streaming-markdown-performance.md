@@ -10,17 +10,27 @@
 
 ACP chunk 必须立即、完整、有序地写入 `BridgeState::current_turn` 的 canonical state。视觉 publication 是派生行为，由 bridge-local scheduler 控制，不能反向限制接收。
 
-默认 `Streaming` 模式采用单 pending、固定 50 ms cadence：每类主 Agent text/reasoning 的首个 chunk 立即发布，后续 chunk 合并到已有 deadline，新的 chunk 不延后该 deadline。明确 Markdown block boundary 可提前形成 publication barrier。`Block` 仅在边界发布，`None` 不发布中间主 Agent 内容。
+默认 `Streaming` 模式采用单 pending、固定 50 ms cadence：主 Agent 与各子流 occurrence/segment 的首个非空 text/reasoning chunk 立即发布，后续 chunk 共用已有 deadline，新的 chunk 不延后该 deadline。主 Agent `Block` 沿用 Markdown boundary 判定（含初始首块），子流 `Block` 不检测 Markdown boundary，按相同 50 ms cadence 合帧。`None` 不因 chunk 发布中间内容。首块、工具/消息边界、交互和终态是即时 barrier，因此 20/s 不是总发布次数上限。
 
 Scheduler 与 `BridgeState` 由同一 bridge task 持有。reset、session transition、terminal、receiver close 和 shutdown 都必须使 pending deadline 失效；receiver close 可发布已接收但尚未投影的最终 canonical state，shutdown 不再写 UI。publication 前必须完成 session/reset 所有权检查，旧 deadline 不得覆盖新 session 或 terminal snapshot。
 
-Tool 与 SubAgent boundary 保持消息顺序和既有可见性。SubAgent 在 `Streaming`/`Block` 下仍可立即发布，在 `None` 下跳过中间 publication；其 canonical mutation 同样使用 lazy projection。
+Tool 与 SubAgent boundary 保持消息顺序和既有可见性。需要在 drain/replay 等副作用之前发布的 handler 使用同步 `publish_barrier` 并显式返回 `Published`；scheduler 结算 pending，不重复发布。同步 session/reset 与 UI 折叠路径保留原有 owner 检查和顺序，不迁移成异步 bridge 请求。
+
+发布状态独立于 projection cache dirty：明确 projection 读取不能吞掉待发布事实；`push_acp_state` 的条目计数不物化 VM。scheduler 区分 replay 的无条件 pending 与受模式约束的 streaming pending。每次 chunk 重读模式，deadline 执行也校验模式：切到 `None` 取消流式 pending，保留 canonical 积累；切回 `Streaming` 在下个非空 chunk 恢复，主 `Block` 仍等既有边界。单独改配置而无新事件不保证即时 publication；replay、terminal、receiver close 等 barrier 不受 `None` 抑制。
 
 ## Lazy ViewModel projection
 
 `CurrentTurn` mutation 只更新 canonical state、rolling hash 和 dirty 标记。Owned ViewModel projection 只在真实 publication、tool/SubAgent/message freeze、terminal correctness barrier 或明确读取时同步。单次 publication 只取得一次 current-turn projection并复用。
 
 Terminal handler 保持各事件既有 archive、reset、note、hash、segment order 和 loading 退出语义。合帧不得伪造 terminal，也不得让旧 pending publication 在 terminal 后再次出现。
+
+## 稳定历史折叠
+
+Replay 工具终态使用 `fold_for_status` 生成基础 fold。`BridgeState::folded_history` 以 committed 结构身份、phase 和折叠覆盖表缓存派生历史；持有 canonical 共享节点使同长度修改也能通过 COW 身份变化失效。im 小向量无共享指针时使用固定容量分支的值比较。覆盖表独立于 canonical，添加/移除覆盖从 canonical 重建，避免残留 `user_modified`。
+
+主回合归档、deactivate 或离开 PromptRunning 时先冻结 canonical 的 trailing 时长，重复冷重建不能重新读取已结束计时器。稳定历史不再遍历折叠或格式化/哈希工具正文；active turn 继续按当前状态折叠。后续 todo/group 与消息区全 slots 扫描仍可能为 O(N)，BG_LIVE_DETAIL 独立的逐 chunk 明细更新不在本 scheduler 范围。
+
+Auto-follow effect 将纯内部记账用无通知写入，真实滚动/follow 变化仍通知；依赖包含 loading epoch 与 bridge reset，不能只靠 generation 变化。
 
 ## 增量 Markdown 与最终 oracle
 

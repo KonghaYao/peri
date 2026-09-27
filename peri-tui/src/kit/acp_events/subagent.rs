@@ -37,7 +37,7 @@ pub(super) fn handle_subagent_started(
     }
     state.variant = 1;
     state.phase = SessionPhase::PromptRunning;
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }
 
@@ -69,6 +69,6 @@ pub(super) fn handle_subagent_stopped(
     state.variant = 1;
     // phase 由 SubagentStarted + 流式事件维护，此处不再无条件覆盖
     // （避免 bg agent 的场景 TurnDone/TurnSuspended 后被重新激活）
-    super::render::push_view_models(state);
+    state.publish_barrier();
     super::render::push_acp_state(state);
 }

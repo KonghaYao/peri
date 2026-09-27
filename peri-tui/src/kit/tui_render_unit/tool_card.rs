@@ -99,7 +99,7 @@ impl TuiToolCard {
     pub fn recompute_hash(&mut self) {
         let duration_secs = self.running_duration_ms.map(|ms| ms / 1000);
         let completed_secs = self.completed_duration_ms.map(|ms| ms / 1000);
-        let mut h = tui_hash_str(&format!(
+        let hash_input = format!(
             "{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}",
             self.tool_id,
             self.tool_name,
@@ -112,7 +112,14 @@ impl TuiToolCard {
             self.presentation,
             self.fold,
             self.user_modified,
-        ));
+        );
+        #[cfg(test)]
+        {
+            use crate::kit::acp_bridge::{PerfCounter, observe_perf};
+            observe_perf(PerfCounter::ToolHashCalls, 1);
+            observe_perf(PerfCounter::ToolHashBytes, hash_input.len() as u64);
+        }
+        let mut h = tui_hash_str(&hash_input);
         // [G-Diff] diff 定型于 tool-ended，此后不变——稳定摘要纳入 hash 保证
         // diff 变更（含路径/计数/截断）触发按 hash 分片的渲染缓存重建。
         h = tui_hash_combine(h, self.diff_code());

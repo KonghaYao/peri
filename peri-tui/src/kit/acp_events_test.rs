@@ -107,6 +107,8 @@ fn make_fold_test_state() -> BridgeState {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     }
 }
 

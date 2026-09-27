@@ -25,6 +25,8 @@ fn test_todo_snapshot_advances_only_after_successful_tool_end() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     let start = |id: &str, status: &str| {
@@ -94,6 +96,8 @@ fn test_duplicate_todo_end_cannot_roll_back_newer_successful_snapshot() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     let start = |id: &str, status: &str| {
         AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
@@ -155,6 +159,8 @@ fn test_replay_skill_card_hides_raw_skill_output() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     dispatch_and_notify(
@@ -213,6 +219,8 @@ fn test_later_started_todo_wins_when_successful_ends_arrive_out_of_order() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     let start = |id: &str, status: &str| {
         AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {

@@ -56,6 +56,7 @@ fn test_boundary_no_boundary_in_tail() {
 
 /// 默认（未设置 streaming_mode 或 PERI_CONFIG_HANDLE 未初始化）应返回 Streaming。
 #[test]
+#[serial]
 fn test_mode_default_is_streaming() {
     // PERI_CONFIG_HANDLE 在测试中未初始化 → get() 返回 None → fallback 到 Streaming
     assert!(

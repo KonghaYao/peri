@@ -21,7 +21,7 @@ fn test_replay_events_defer_publication_until_scheduler_boundary() {
     assert_eq!(state.generation, 0, "逐条 replay 不应完整发布 VIEW_MODELS");
 
     let intent = dispatch_for_bridge(&mut state, &AcpEventData::SessionReplayDone);
-    assert_eq!(intent, PublicationIntent::Immediate);
+    assert_eq!(intent, PublicationIntent::Published);
     assert_eq!(state.generation, 1, "completion 边界必须发布完整历史");
     assert_eq!(VIEW_MODELS.state().read().items.len(), 2);
 }
@@ -60,6 +60,8 @@ fn test_push_view_models_uses_bridge_state() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     // push_view_models: 用 BridgeState 数据（空 committed + 空 current_turn）→ 空 items
@@ -158,6 +160,8 @@ fn test_prediction_writes_prediction_atom() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     use peri_acp_types::event_data::{Prediction, PredictionAction};
@@ -213,6 +217,8 @@ fn test_rewind_completed_replaces_committed() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     let messages_json = serde_json::json!([
@@ -277,6 +283,8 @@ fn test_rewind_completed_rebuild_preview_strips_reminder() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     let messages_json = serde_json::json!([
         {
@@ -341,6 +349,8 @@ fn test_rewind_completed_restores_target_text_to_input() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     let messages_json = serde_json::json!([
         {"role": "user", "id": "msg-1", "content": "历史用户消息"},
@@ -400,6 +410,8 @@ fn test_rewind_completed_without_target_text_no_restore() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
     let messages_json = serde_json::json!([]).to_string();
     dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
@@ -436,6 +448,8 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     // === Turn 1: user bubble, reasoning + text → TurnDone ===
@@ -578,6 +592,8 @@ fn test_auto_compact_completed_injects_detailed_system_note() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     super::super::compact::handle_compact_completed(&mut state, "", "auto", "micro", 7, 2048, 2, 1);
@@ -625,6 +641,8 @@ fn test_full_compact_completed_shows_unmeasured_token_saving() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     super::super::compact::handle_compact_completed(&mut state, "", "auto", "full", 7, 0, 2, 1);
@@ -669,6 +687,8 @@ fn test_unknown_and_empty_compact_strategy_use_full_unmeasured_detail() {
             last_prompt_generation: 0,
             current_request_id: None,
             pending_cache_usage: None,
+            publication_intent: Default::default(),
+            folded_history: Default::default(),
         };
 
         super::super::compact::handle_compact_completed(
@@ -739,6 +759,8 @@ async fn test_compact_turndone_reload() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     // Phase 5 Step 7 补遗（Step 8 回归修复）：manual compact 场景的 UiOnly
@@ -799,6 +821,8 @@ async fn test_compact_turndone_reload() {
         last_prompt_generation: 0,
         current_request_id: None,
         pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
     };
 
     // ① CompactCompleted（auto）：不置标志（S4.1 方案 A——服务端透传 trigger，
