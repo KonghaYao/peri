@@ -586,14 +586,40 @@ enum McpConfigPolicy {
     Strict,
 }
 
-pub fn load_plugins(installed: &InstalledPlugins) -> Result<Vec<LoadedPlugin>, LoaderError> {
-    load_plugins_with_policy(installed, McpConfigPolicy::Lenient)
+/// 插件清单缺失时的处置策略。
+///
+/// 既有聚合路径允许从 marketplace 清单**生成合成 `plugin.json`**（写插件缓存目录）；
+/// 会话准备路径（lease 之前只读）不得产生任何写副作用——缺失即失败并定位插件，
+/// 修复只发生在授权后的插件管理命令/交互路径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestPolicy {
+    /// 既有行为：清单缺失时尝试生成合成清单（写插件缓存）。
+    Repair,
+    /// 严格只读：清单缺失直接失败，不写、不跳过、不缓存。
+    Readonly,
 }
 
-/// 装配已安装插件；`policy` 决定非法 MCP 配置是失败还是降级。
-fn load_plugins_with_policy(
+pub fn load_plugins(installed: &InstalledPlugins) -> Result<Vec<LoadedPlugin>, LoaderError> {
+    load_plugins_with_policies(installed, McpConfigPolicy::Lenient, ManifestPolicy::Repair)
+}
+
+/// 严格只读装配：清单缺失/非法一律以可定位的具体错误失败，不生成合成清单。
+pub(crate) fn load_plugins_readonly(
     installed: &InstalledPlugins,
-    policy: McpConfigPolicy,
+) -> Result<Vec<LoadedPlugin>, LoaderError> {
+    load_plugins_with_policies(
+        installed,
+        McpConfigPolicy::Lenient,
+        ManifestPolicy::Readonly,
+    )
+}
+
+/// 装配已安装插件；`mcp_policy` 决定非法 MCP 配置是失败还是降级，
+/// `manifest_policy` 决定缺失清单是否允许合成修复（写插件缓存）。
+fn load_plugins_with_policies(
+    installed: &InstalledPlugins,
+    mcp_policy: McpConfigPolicy,
+    manifest_policy: ManifestPolicy,
 ) -> Result<Vec<LoadedPlugin>, LoaderError> {
     let mut result = Vec::new();
 
@@ -603,9 +629,11 @@ fn load_plugins_with_policy(
             Err(error) => {
                 let manifest_path = plugin_manifest_path(&plugin.install_path);
                 // 已存在但非法的清单不允许被合成清单覆盖修复，也不当作未安装：
-                // 严格路径直接报错，宽容路径记录诊断后跳过该插件。
+                // 严格路径（MCP 启动 / 只读准备）直接报错，宽容路径记录诊断后跳过该插件。
                 if manifest_path.exists() {
-                    if policy == McpConfigPolicy::Strict {
+                    if mcp_policy == McpConfigPolicy::Strict
+                        || manifest_policy == ManifestPolicy::Readonly
+                    {
                         return Err(error);
                     }
                     warn!(
@@ -615,8 +643,16 @@ fn load_plugins_with_policy(
                     );
                     continue;
                 }
-                // 清单文件缺失：允许从 marketplace manifest 生成合成清单
+                // 清单文件缺失：只读准备路径以可定位的具体错误失败（不写缓存、不静默
+                // 跳过）；既有路径允许从 marketplace manifest 生成合成清单
                 // （兼容修复前安装的 LSP 插件），生成结果同样按严格语义解析。
+                if manifest_policy == ManifestPolicy::Readonly {
+                    return Err(LoaderError::ManifestLoadFailed(format!(
+                        "{}: plugin manifest missing at {}",
+                        plugin.name,
+                        manifest_path.display()
+                    )));
+                }
                 if !try_generate_synthetic_manifest_fallback(
                     &plugin.install_path,
                     &plugin.name,
@@ -631,7 +667,7 @@ fn load_plugins_with_policy(
                 match load_manifest(&plugin.install_path) {
                     Ok(m) => m,
                     Err(error) => {
-                        if policy == McpConfigPolicy::Strict {
+                        if mcp_policy == McpConfigPolicy::Strict {
                             return Err(error);
                         }
                         warn!(
@@ -650,7 +686,7 @@ fn load_plugins_with_policy(
         let agents_dirs = extract_agents_paths(&manifest, &plugin.install_path);
         let mcp_servers = match extract_mcp_servers(&manifest, &plugin.install_path) {
             Ok(servers) => servers,
-            Err(error) => match policy {
+            Err(error) => match mcp_policy {
                 McpConfigPolicy::Strict => return Err(error),
                 McpConfigPolicy::Lenient => {
                     warn!(
@@ -756,10 +792,20 @@ pub(crate) fn load_enabled_plugins_for_mcp(
     claude_dir: &Path,
     cwd: Option<&Path>,
 ) -> Result<Vec<LoadedPlugin>, LoaderError> {
-    load_plugins_with_policy(
+    load_plugins_with_policies(
         &select_enabled_plugins(claude_dir, cwd)?,
         McpConfigPolicy::Strict,
+        ManifestPolicy::Repair,
     )
+}
+
+/// 会话准备专用严格只读入口：启用选择与装配复用同一套规则，但清单缺失/非法
+/// 一律失败并定位插件——不生成合成清单、不写插件缓存、不静默跳过。
+pub(crate) fn load_enabled_plugins_readonly(
+    claude_dir: &Path,
+    cwd: Option<&Path>,
+) -> Result<Vec<LoadedPlugin>, LoaderError> {
+    load_plugins_readonly(&select_enabled_plugins(claude_dir, cwd)?)
 }
 
 pub struct PluginCommandProvider {
@@ -822,6 +868,25 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path, cwd: Option<&Path>) ->
         }
     };
 
+    aggregate_plugin_data(plugins)
+}
+
+/// 会话准备专用只读聚合入口：形状与宽容聚合一致，但失败直接上抛
+/// （清单缺失/非法定位到具体插件），不以空结果伪装成功。
+///
+/// 准备阶段（lease 之前）只允许读——本入口不生成合成清单、不写插件缓存。
+pub fn load_enabled_plugins_aggregated_readonly(
+    claude_dir: &Path,
+    cwd: Option<&Path>,
+) -> Result<PluginLoadResult, LoaderError> {
+    Ok(aggregate_plugin_data(load_enabled_plugins_readonly(
+        claude_dir, cwd,
+    )?))
+}
+
+/// 插件聚合（skills / MCP / agent / 命令 / hooks / LSP）单一实现：
+/// 宽容聚合与只读聚合共用，避免两条路径各自漂移。
+fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
     let all_skill_roots: Vec<SkillRoot> = plugins
         .iter()
         .flat_map(|p| p.skills_roots.clone())

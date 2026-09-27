@@ -7,13 +7,13 @@ use crate::agent::compact_v2::{
 };
 use crate::agent::events::CompactStrategy;
 use crate::messages::{BaseMessage, MessageContent};
+use crate::session::test_resources::mock::MockSessionResources;
 use crate::session::transcript::MessageTranscript;
-use crate::thread::{FilesystemThreadStore, ThreadMeta, ThreadStore};
+use crate::thread::ThreadMeta;
 use peri_model::{
     Model, ModelCapabilities, ModelError, ModelMessage, ModelRequest, ModelResponse, ModelResult,
     ModelStream, StopReason,
 };
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 fn make_human(text: &str) -> BaseMessage {
@@ -223,14 +223,9 @@ async fn test_micro_effective_full_overlay() {
 
 #[tokio::test]
 async fn test_micro_then_full_success_does_not_double_count_affected_messages() {
-    let store_dir = tempfile::tempdir().expect("创建临时目录失败");
-    let store = Arc::new(
-        crate::thread::SqliteThreadStore::new(store_dir.path().join("micro-full.db"))
-            .await
-            .expect("创建 SQLite store 失败"),
-    );
+    let store = MockSessionResources::new();
     let thread_id = store
-        .create_thread(crate::thread::ThreadMeta::new("/tmp"))
+        .create_thread(ThreadMeta::new("/tmp"))
         .await
         .expect("创建 thread 失败");
     let mut t = MessageTranscript::new().with_persistence(store, thread_id);
@@ -263,12 +258,11 @@ async fn test_micro_then_full_success_does_not_double_count_affected_messages() 
 #[tokio::test]
 async fn test_force_full_failure_preserves_persistent_excluded_flags_after_prior_failure() {
     let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let store: std::sync::Arc<dyn ThreadStore> =
-        std::sync::Arc::new(FilesystemThreadStore::new(dir.path().join("threads")));
+    let store = MockSessionResources::new();
     let thread_id = store
         .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
         .await
-        .expect("创建 Filesystem thread 失败");
+        .expect("创建 thread 失败");
 
     let ancestor = make_human("ancestor must remain visible");
     let own_system = BaseMessage::system("own system must remain visible");
@@ -602,15 +596,9 @@ async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
 async fn test_smart_then_full_success_aggregates_metrics() {
     // Full compact 现在需要 persistence（commit_compaction_lifecycle 要求 store）。
     // 使用临时 SQLite store 满足此约束。
-    let store_dir = tempfile::tempdir().expect("创建临时目录失败");
-    let db_path = store_dir.path().join("test_aggregate.db");
-    let store = Arc::new(
-        crate::thread::SqliteThreadStore::new(db_path.to_string_lossy().to_string())
-            .await
-            .expect("创建 SQLite store 失败"),
-    );
+    let store = MockSessionResources::new();
     let thread_id = store
-        .create_thread(crate::thread::ThreadMeta::new("/tmp".to_string()))
+        .create_thread(ThreadMeta::new("/tmp".to_string()))
         .await
         .expect("创建 thread 失败");
 

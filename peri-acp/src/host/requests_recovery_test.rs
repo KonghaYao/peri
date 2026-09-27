@@ -1,9 +1,40 @@
 use super::*;
+use peri_acp_types::session_resources::{BindingRecheck, SessionResourceError};
 use peri_acp_types::workspace::{
     ReadOnlyAdmission, RecoveryRequiredDetails, ResetDirtyRequest, WorkspaceError,
     WorkspaceErrorData,
 };
 use peri_acp_types::PeriCaps;
+
+/// 存储层「精确代际解除」：门面入口要求显式风险接受，夹具按事实给。
+async fn reset_generation(
+    cfg: &AcpServerConfig,
+    target: &RecoveryRequiredDetails,
+) -> Result<(), SessionResourceError> {
+    cfg.session_resources
+        .reset_dirty_execution(&ResetDirtyRequest {
+            target: target.clone(),
+            accept_risk: true,
+        })
+        .await
+}
+
+/// 门面读绑定分类（不改存储）。
+async fn binding_state(cfg: &AcpServerConfig, id: &str) -> BindingState {
+    cfg.session_resources
+        .load_session_binding(&id.to_owned())
+        .await
+        .unwrap()
+}
+
+/// 门面读 frozen 状态（不改存储）。
+async fn frozen_state(cfg: &AcpServerConfig, id: &str) -> FrozenState {
+    cfg.session_resources
+        .load_session_snapshot(&id.to_owned())
+        .await
+        .unwrap()
+        .frozen
+}
 
 /// 读取本次准入的只读原因；`None` 表示本次取得了执行所有权。
 fn read_only(response: &Value) -> Option<ReadOnlyAdmission> {
@@ -108,17 +139,22 @@ impl Fixture {
     /// `test_unnegotiated_client_load_clears_dirty_generation_and_admits_owned`），
     /// 因此观测 dirty 不能借道 load。
     async fn dirty_target(&self) -> RecoveryRequiredDetails {
+        let workspace = self
+            .cfg
+            .session_resources
+            .validate_bound_workspace(&self.id, BindingRecheck::Recorded)
+            .await
+            .unwrap();
         let error = match self
             .cfg
-            .controller
-            .sessions()
-            .acquire_execution_lease(&self.id)
+            .session_resources
+            .acquire_execution(&self.id, &workspace)
             .await
         {
             Err(error) => error,
             Ok(_) => panic!("dirty generation refuses lease acquisition"),
         };
-        match error.downcast_ref::<WorkspaceError>() {
+        match error.workspace_error() {
             Some(WorkspaceError::RecoveryRequired(target)) => target.clone(),
             other => panic!("expected recovery-required lease error, got {other:?}"),
         }
@@ -155,8 +191,8 @@ async fn test_workspace_dirty_recovery_original_load_and_frozen() {
     .await
     .unwrap();
     let id = created["sessionId"].as_str().unwrap().to_owned();
-    let binding = cfg.thread_store.load_session_binding(&id).await.unwrap();
-    let frozen = cfg.thread_store.load_frozen_snapshot(&id).await.unwrap();
+    let binding = binding_state(&cfg, &id).await;
+    let frozen = frozen_state(&cfg, &id).await;
     // 只释放 owner，不伪造正常收尾；夹具不启动外部任务。
     sessions.clear();
     let params = json!({"sessionId":id,"cwd":tmp.path()});
@@ -232,14 +268,8 @@ async fn test_workspace_dirty_recovery_original_load_and_frozen() {
     assert!(sessions.contains_key(&id));
     assert!(sessions[&id].execution_owner.is_some());
     assert!(sessions[&id].frozen.is_some());
-    assert_eq!(
-        cfg.thread_store.load_session_binding(&id).await.unwrap(),
-        binding
-    );
-    assert_eq!(
-        cfg.thread_store.load_frozen_snapshot(&id).await.unwrap(),
-        frozen
-    );
+    assert_eq!(binding_state(&cfg, &id).await, binding);
+    assert_eq!(frozen_state(&cfg, &id).await, frozen);
     assert_eq!(
         Path::new(&sessions[&id].cwd),
         tmp.path().canonicalize().unwrap()
@@ -269,12 +299,7 @@ async fn test_dirty_reset_without_initialize_is_rejected_without_store_effect() 
     assert!(error.data.is_none());
     // 零存储副作用：被拒的这条 RPC 没有解除任何代际——同一精确目标仍能被存储 CAS
     // 命中（存储层解除成功），说明 dirty 记录与代次原样保留。
-    fixture
-        .cfg
-        .thread_store
-        .reset_dirty_execution(&target)
-        .await
-        .unwrap();
+    reset_generation(&fixture.cfg, &target).await.unwrap();
 }
 
 /// 未协商 `peri.sessionRecoveryV1` 的连接没有确认交互：dirty 不再把它挡在只读，
@@ -307,12 +332,7 @@ async fn test_unnegotiated_client_load_clears_dirty_generation_and_admits_owned(
     )
     .await
     .unwrap();
-    let again = fixture
-        .cfg
-        .thread_store
-        .reset_dirty_execution(&target)
-        .await
-        .unwrap_err();
+    let again = reset_generation(&fixture.cfg, &target).await.unwrap_err();
     assert!(
         again.to_string().contains("dirty generation changed"),
         "unexpected error: {again}"
@@ -359,12 +379,7 @@ async fn test_unnegotiated_client_fork_clears_source_dirty_generation_and_admits
     )
     .await
     .unwrap();
-    let again = fixture
-        .cfg
-        .thread_store
-        .reset_dirty_execution(&target)
-        .await
-        .unwrap_err();
+    let again = reset_generation(&fixture.cfg, &target).await.unwrap_err();
     assert!(
         again.to_string().contains("dirty generation changed"),
         "unexpected error: {again}"
@@ -399,18 +414,13 @@ async fn test_negotiated_client_fork_on_dirty_source_reports_typed_recovery_requ
             .expect("recovery rejection carries typed data"),
     )
     .expect("recovery rejection data is typed");
-    match data {
-        WorkspaceErrorData::RecoveryRequired(details) => assert_eq!(details, target),
-    }
+    // 恢复所需是 workspace 错误数据的唯一形态：解出精确目标即证明载荷未被降级。
+    let WorkspaceErrorData::RecoveryRequired(details) = data;
+    assert_eq!(details, target);
     // 未取得所有权：源会话即便已只读进入内存，也没有 owner；被拒的这条 fork 没有解除
     // 任何代际——同一精确目标仍能被存储 CAS 命中。
     assert!(fixture.sessions[&fixture.id].execution_owner.is_none());
-    fixture
-        .cfg
-        .thread_store
-        .reset_dirty_execution(&target)
-        .await
-        .unwrap();
+    reset_generation(&fixture.cfg, &target).await.unwrap();
 }
 
 /// reset 成功但随后的 load 失败：存储保持 clean 且代次不变，原 ID 之后仍可恢复。
@@ -437,41 +447,15 @@ async fn test_dirty_reset_then_failing_reload_keeps_store_state_and_original_id(
     // 存储事实：clean 已置位且代次未推进（同代次再 reset 只能报错配）。
     let again = fixture.reset(&target).await.unwrap_err();
     assert!(again.message.contains("dirty generation changed"));
-    let binding = fixture
-        .cfg
-        .thread_store
-        .load_session_binding(&fixture.id)
-        .await
-        .unwrap();
-    let frozen = fixture
-        .cfg
-        .thread_store
-        .load_frozen_snapshot(&fixture.id)
-        .await
-        .unwrap();
+    let binding = binding_state(&fixture.cfg, &fixture.id).await;
+    let frozen = frozen_state(&fixture.cfg, &fixture.id).await;
 
     // 原 ID 用原目录仍可正常 load，并保持 binding/frozen。
     let params = fixture.params();
     fixture.load(&params).await.unwrap();
     assert!(fixture.sessions.contains_key(&fixture.id));
-    assert_eq!(
-        fixture
-            .cfg
-            .thread_store
-            .load_session_binding(&fixture.id)
-            .await
-            .unwrap(),
-        binding
-    );
-    assert_eq!(
-        fixture
-            .cfg
-            .thread_store
-            .load_frozen_snapshot(&fixture.id)
-            .await
-            .unwrap(),
-        frozen
-    );
+    assert_eq!(binding_state(&fixture.cfg, &fixture.id).await, binding);
+    assert_eq!(frozen_state(&fixture.cfg, &fixture.id).await, frozen);
     let updated = fixture.reset(&target).await.unwrap_err();
     assert!(
         updated.data.is_none(),

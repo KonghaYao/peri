@@ -182,11 +182,13 @@ pub(crate) async fn execute_rewind(
     // Step 4: 验证 ToolUse/ToolResult 配对完整性
     validate_tool_pairing(&retained_messages);
 
-    // Step 5: 从持久化中删除被移除的消息
+    // Step 5: 从持久化中删除被移除的消息（一次门面行为，缓存/计数同事务维护）。
+    // 用户 rewind 的边界是 RemoveFrom：目标消息及其之后全部移除（与 transcript 的
+    // KeepThrough 不同义，两者都经同一门面的显式边界执行）。
     let removed_ids: Vec<MessageId> = removed_messages.iter().map(|m| m.id()).collect();
-    if let (Some(store), Some(tid)) = (&ctx.thread_store, &ctx.thread_id) {
+    if let (Some(store), Some(tid)) = (&ctx.session_resources, &ctx.thread_id) {
         if !removed_ids.is_empty() {
-            match store.delete_messages(tid, &removed_ids).await {
+            match store.remove_history_entries(tid, &removed_ids).await {
                 Ok(()) => debug!(count = removed_ids.len(), "rewind: 持久化消息已删除"),
                 Err(e) => {
                     let msg = format!("rewind: 持久化删除失败: {e}");

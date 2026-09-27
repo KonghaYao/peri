@@ -56,6 +56,10 @@ mod notify;
 mod oauth_delivery;
 mod prediction;
 mod prediction_projection;
+mod prepared;
+#[cfg(test)]
+#[path = "prepared_test.rs"]
+mod prepared_tests;
 mod prompt;
 mod prompt_dispatch;
 pub mod prompt_handle;
@@ -191,7 +195,16 @@ pub struct AcpServerConfig {
     /// 引用 middlewares，见 `host/workflow_agent.rs`）。
     pub workflow_middleware_factory:
         Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory>,
-    pub thread_store: Arc<dyn peri_acp_types::store::ThreadStore>,
+    /// 会话资源门面：协议面、Agent transcript/subagent 与 middleware 的唯一会话行为
+    /// 入口（同一个库句柄、同一份 owner 登记）；协议面与 Controller 都不再持有裸存储。
+    pub session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    /// 部署关闭权（non-Clone，装配点注入）：宿主在任务排空之后用它关闭会话存储。
+    ///
+    /// 只有部署（TUI/print/stdio 装配点）注入；会话级配置与测试为 `None`，业务侧
+    /// （SessionManager/Controller/middleware）拿到的只有 `session_resources` 业务句柄，
+    /// 没有任何关闭全局存储的路径。
+    pub(crate) session_store_shutdown:
+        Option<Box<dyn peri_acp_types::session_resources::SessionStoreShutdownPort>>,
     /// Controller 层宿主：dispatch 存储操作（load/list/fork/execute-command/rewind）
     /// 经此访问持久化存储（ARC-BOUNDARY-001 方向，不再直操 `thread_store`）；
     /// 3.0 批 2：事件发射（`publish_event`）/ 执行发起（`run_session`）亦经此宿主。

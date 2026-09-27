@@ -37,8 +37,8 @@ use peri_acp_types::{
         LspPoolPort, McpPoolPort, SessionMcpCapabilityPort, ToolSearchPort, WorkflowMiddlewarePort,
     },
     session::{MessageQueue, SessionInbox},
+    session_resources::SessionResources,
     skills::SkillRoot,
-    store::ThreadStore,
     tools::TodoItem,
     workflow::AgentExecutor,
 };
@@ -124,8 +124,8 @@ pub struct StageBuildInput {
     pub workflow_executor: Option<Arc<dyn AgentExecutor>>,
     /// 会话级 WorkflowMiddleware 端口
     pub workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
-    /// 持久化存储（transcript persistence 激活）
-    pub thread_store: Option<Arc<dyn ThreadStore>>,
+    /// 会话资源门面（transcript persistence 激活与 child 保存的唯一入口）
+    pub session_resources: Option<Arc<dyn SessionResources>>,
     /// 当前会话 thread ID
     pub thread_id: Option<String>,
     // ── 注入面（原 ACP 特有构造）──

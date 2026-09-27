@@ -12,8 +12,8 @@ use crate::agent::react::ReactLLM;
 use crate::agent::{CompactConfig, ContextBudget};
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::session::{FrozenContext, MessageQueue, Session};
-use crate::thread::ThreadStore;
 use crate::tools::{BaseTool, ToolInvocationResolver};
+use peri_acp_types::session_resources::SessionResources;
 
 // ─── 共享 session 构造（spawn / resume 共用，D1） ───────────────────────────
 
@@ -35,7 +35,7 @@ pub(super) fn build_subagent_session_v2(
     frozen: FrozenContext,
     cancel_token: CancellationToken,
     child_thread_id: String,
-    thread_store: Option<Arc<dyn ThreadStore>>,
+    session_resources: Option<Arc<dyn SessionResources>>,
     inherited: InheritedContext,
     own: Vec<PersistedPayload>,
     llm: Box<dyn ReactLLM + Send + Sync>,
@@ -75,7 +75,7 @@ pub(super) fn build_subagent_session_v2(
             .with_ancestor_payloads(inherited.payloads)
             .with_own_payloads(own);
         with_ancestor.set_flags_batch(inherited.flags);
-        *transcript = match thread_store {
+        *transcript = match session_resources {
             Some(ref store) => {
                 with_ancestor.with_persistence(Arc::clone(store), child_thread_id.clone())
             }

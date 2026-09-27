@@ -34,7 +34,7 @@ fn make_context(args: &str) -> CommandContext {
         args: args.to_string(),
         parsed_args: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),
-        thread_store: None,
+        session_resources: None,
         thread_id: None,
         task_manager: None,
         frozen_claude_md: None,

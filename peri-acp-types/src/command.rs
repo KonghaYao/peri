@@ -12,7 +12,6 @@ use tokio_util::sync::CancellationToken;
 use crate::compact::CompactConfig;
 use crate::event::EventSink;
 use crate::messages::BaseMessage;
-use crate::store::ThreadStore;
 use crate::tasks::TaskManager;
 
 // ─── 命令契约子模块（Phase 1 拆出，经本模块导出，lib.rs 挂载点不变）────────
@@ -107,9 +106,12 @@ pub struct CommandContext {
     pub parsed_args: Option<ParsedArgs>,
     /// 取消令牌，用于 Ctrl+C 打断长时间运行的命令（如 compact 的 LLM 调用）。
     pub cancel_token: CancellationToken,
-    /// 持久化存储，用于 rewind 等需要删除消息的命令。
-    pub thread_store: Option<Arc<dyn ThreadStore>>,
-    /// 当前会话的 thread ID，配合 thread_store 使用。
+    /// 会话资源门面：rewind/compact 等需要读写会话历史的命令经此访问。
+    ///
+    /// `None` = 该上下文没有持久化后端（打印/测试路径）；命令按「无持久化」处理，
+    /// 不另建存储旁路。
+    pub session_resources: Option<Arc<dyn crate::session_resources::SessionResources>>,
+    /// 当前会话的 thread ID，配合 `session_resources` 使用。
     pub thread_id: Option<String>,
     /// 后台任务管理器（Immediate 命令依赖，如 rewind 的异步执行）。
     pub task_manager: Option<Arc<dyn TaskManager>>,
@@ -188,7 +190,7 @@ impl CommandContext {
             supports_inject: false,
             args: String::new(),
             parsed_args: None,
-            thread_store: None,
+            session_resources: None,
             thread_id: None,
             task_manager: None,
             frozen_claude_md: None,
@@ -425,7 +427,7 @@ mod context_deps_tests {
         // 旧字段默认值（消费方迁移前经 `new()` + 逐字段赋值全量预填）。
         assert_eq!(ctx.args, "");
         assert!(ctx.auxiliary_model.is_none());
-        assert!(ctx.thread_store.is_none());
+        assert!(ctx.session_resources.is_none());
         assert!(ctx.thread_id.is_none());
         assert!(ctx.task_manager.is_none());
         assert!(ctx.frozen_claude_md.is_none());

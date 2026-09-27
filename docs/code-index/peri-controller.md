@@ -26,7 +26,7 @@ peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引
 | 订阅与排空事件 | `peri-controller/src/controller.rs` | `subscribe`:465、`pop_events`:472、`Subscription::recv`:131、`try_recv`:142 | 队列有界满丢弃，广播 Lagged 可恢复；退订只 drop receiver，无额外簿记 |
 | 注册与定位会话 | `peri-controller/src/controller.rs` | `register_session`:327、`run_session`:311、`session_ids`:350、`contains_session`:355 | register_or_replace 归 Runtime；Controller 只转发，不解释执行结果 |
 | 等待、销毁或注入会话 | `peri-controller/src/controller.rs` | `join_session`:364、`destroy_session`:385、`submit_input`:406 | 捕获 Runtime Arc 后调用；销毁返回的已补打事件经 publish 按顺序双投递 |
-| 注入部署端口 | `peri-controller/src/controller.rs` | `Controller::new`:198、`with_runtime`:216、`with_resources`:223、`with_mcp_pool`、`with_cron_scheduler`、`with_tool_search`、`with_lsp_servers` | builder 消费 self 后赋值；对应 pick 方法克隆句柄/配置，不引入共享可写配置 |
+| 注入部署端口 | `peri-controller/src/controller.rs` | `Controller::new`、`with_runtime`、`with_mcp_pool`、`with_cron_scheduler`、`with_tool_search`、`with_lsp_servers` | builder 消费 self 后赋值；对应 pick 方法克隆句柄/配置，不引入共享可写配置 |
 | 调整启动参数 | `peri-controller/src/controller.rs` | `AgentRef`:49、`LiteParams`:70 | 仅承载定义引用、cwd、初始消息和工具；消费与执行归 Agent |
 | 配置与创建 Langfuse 批处理 | `peri-controller/src/langfuse/session.rs` + `langfuse-client/src/{config,batcher}.rs` | `LangfuseSession::new`；`Batcher::try_new` | 生产构造在 spawn 前拒绝零容量/零间隔/容量超限，沿既有 Option 路径返回 None 并记录安全诊断；重试参数只归 LangfuseClient，Batcher legacy max_retries 不覆盖；`session_test.rs` 覆盖非法配置 |
 | 关闭部署 Langfuse | `peri-controller/src/langfuse/session.rs` | `LangfuseSession::new_owned`；`LangfuseShutdownOwner::shutdown`；`LangfuseSession::shutdown` | fresh deployment 得到不可克隆的关闭权限；只转发唯一 Batcher join，报告包含已由 turn 观察的累计 HTTP 失败并区分 worker 失败；turn-facing SessionLike 仍只提供 flush（ARC-HOST-SHUTDOWN-001） |

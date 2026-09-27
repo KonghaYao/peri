@@ -160,7 +160,8 @@ pub(super) async fn build_and_execute_agent(
         .and_then(|sa| sa.goal_controller(session_id));
 
     let thread_persistence = ThreadPersistence {
-        store: ctx.thread_store.clone(),
+        session_resources: ctx.session_resources.clone(),
+        execution_owner: ctx.execution_owner.clone(),
         parent_thread_id: ctx.thread_id.clone(),
         register_runtime,
         deregister_runtime,
@@ -219,7 +220,7 @@ pub(super) async fn build_and_execute_agent(
         user_input_mailbox: ctx.user_input_mailbox.clone(),
         cwd: ctx.cwd.clone(),
         cancel: ctx.cancel.clone(),
-        thread_store: ctx.thread_store.clone(),
+        session_resources: ctx.session_resources.clone(),
         thread_id: ctx.thread_id.clone(),
         agent_input,
         history_payloads,

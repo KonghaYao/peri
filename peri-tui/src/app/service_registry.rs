@@ -3,9 +3,10 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::PluginLoadResult;
+use peri_acp_types::session_resources::SessionResources;
 
 use super::cron_state::CronState;
-use crate::{config::PeriConfig, thread::ThreadStore};
+use crate::config::PeriConfig;
 
 /// `ServiceRegistry` 中共享的配置类型：单一来源（Single Source of Truth）。
 ///
@@ -79,7 +80,8 @@ pub struct ServiceRegistry {
     pub cwd: String,
     pub provider_name: String,
     pub permission_mode: Arc<SharedPermissionMode>,
-    pub thread_store: Arc<dyn ThreadStore>,
+    /// 会话资源门面：Agent transcript/subagent、middleware 与协议面的唯一会话行为入口。
+    pub session_resources: Arc<dyn SessionResources>,
     pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
     pub mcp_task_owner: Option<peri_middlewares::mcp::McpTaskOwner>,
     pub mcp_init_rx: Option<tokio::sync::watch::Receiver<peri_middlewares::mcp::McpInitStatus>>,

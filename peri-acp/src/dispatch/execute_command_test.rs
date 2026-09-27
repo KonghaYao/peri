@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_acp_types::{event::ExecutorEvent, messages::BaseMessage};
-use peri_agent::thread::FilesystemThreadStore;
 use peri_controller::Controller;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
@@ -124,9 +123,11 @@ async fn test_execute_command_unknown_command_returns_acp_error() {
             events: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let tmp = tempfile::tempdir().unwrap();
-        let store: Arc<dyn peri_acp_types::store::ThreadStore> =
-            Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
-        let controller = Controller::new(store);
+        let session_resources =
+            peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+                .await
+                .unwrap();
+        let controller = Controller::new(session_resources);
 
         let err = execute_command(
             &params,
@@ -196,9 +197,11 @@ async fn test_execute_command_clear_returns_empty_messages_no_compact_event() {
         events: events.clone(),
     });
     let tmp = tempfile::tempdir().unwrap();
-    let store: Arc<dyn peri_acp_types::store::ThreadStore> =
-        Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
-    let controller = Controller::new(store);
+    let session_resources =
+        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+            .await
+            .unwrap();
+    let controller = Controller::new(session_resources);
 
     let result = execute_command(
         &params,
@@ -257,9 +260,11 @@ async fn test_execute_command_outer_cancel_preserves_history() {
     let peri_config = Arc::new(PeriConfig::default());
     let event_sink: Arc<dyn EventSink> = Arc::new(PendingEventSink);
     let tmp = tempfile::tempdir().unwrap();
-    let store: Arc<dyn peri_acp_types::store::ThreadStore> =
-        Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
-    let controller = Controller::new(store);
+    let session_resources =
+        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+            .await
+            .unwrap();
+    let controller = Controller::new(session_resources);
 
     let result = execute_command(
         &params,
@@ -410,9 +415,11 @@ async fn run_execute_command(
         events: events.clone(),
     });
     let tmp = tempfile::tempdir().unwrap();
-    let store: Arc<dyn peri_acp_types::store::ThreadStore> =
-        Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
-    let controller = Controller::new(store);
+    let session_resources =
+        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
+            .await
+            .unwrap();
+    let controller = Controller::new(session_resources);
     let result = execute_command(
         &params,
         history,

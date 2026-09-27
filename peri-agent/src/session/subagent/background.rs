@@ -20,7 +20,8 @@ use crate::agent::stages::{run_react_loop, LoopResult};
 use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion;
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
-use crate::thread::ThreadStore;
+use peri_acp_types::session_resources::{SessionMetaPatch, SessionResources};
+use peri_acp_types::thread::{AgentStatus, ThreadId};
 
 // ─── 后台运行 ────────────────────────────────────────────────────────────────
 
@@ -39,7 +40,7 @@ pub(super) async fn spawn_background_subagent(
         Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>,
     >,
     langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
-    thread_store: Option<Arc<dyn ThreadStore>>,
+    session_resources: Option<Arc<dyn SessionResources>>,
     deregister_runtime: Option<DeregisterRuntimeFn>,
     on_subagent_start: Option<SubagentLifecycleStart>,
     on_subagent_stop: Option<SubagentLifecycleStop>,
@@ -261,9 +262,20 @@ pub(super) async fn spawn_background_subagent(
                 !result.success,
             );
         }
-        if let Some(ref store) = thread_store {
+        if let Some(ref store) = session_resources {
+            let status = match status {
+                "error" => AgentStatus::Error,
+                "cancelled" => AgentStatus::Cancelled,
+                _ => AgentStatus::Done,
+            };
             let _ = store
-                .update_thread_status(&child_thread_id_for_task, status)
+                .update_session_meta(
+                    &ThreadId::from(child_thread_id_for_task.as_str()),
+                    &SessionMetaPatch {
+                        status: Some(status),
+                        ..Default::default()
+                    },
+                )
                 .await;
         }
 

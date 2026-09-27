@@ -61,7 +61,7 @@ use crate::middleware::chain::MiddlewareChain;
 #[cfg(test)]
 use crate::session::{FrozenContext, Session};
 #[cfg(test)]
-use crate::thread::{ThreadMeta, ThreadStore};
+use crate::thread::ThreadMeta;
 #[cfg(test)]
 use peri_acp_types::identity::AgentId;
 #[cfg(test)]

@@ -1134,12 +1134,13 @@ popup-ask-user-hint-single-unsubmitted =   ↑/↓::navigate · Space::select ·
 popup-ask-user-title =  Ask User 
 
 # ---- Confirm Popup (P2) ----
+# 风险选择的取消项：与具体风险种类无关，各风险说明共用。
+risk-choice-cancel = Cancel (default)
 dirty-recovery-title = Clear dirty state and restore this session?
 dirty-recovery-risk = Old child processes may still be running.
 dirty-recovery-unknown = Previous side effects are unknown.
 dirty-recovery-responsibility = You accept the risk and responsibility for what follows.
 dirty-recovery-hint = Up/Down: select · Enter: apply · Esc: cancel
-dirty-recovery-cancel = Cancel (default)
 dirty-recovery-accept = Accept risk, clear dirty state and load
 
 popup-confirm-empty =   No pending confirmation.
@@ -1205,6 +1206,7 @@ thread-history-assistant = Assistant
 thread-history-system = System context
 thread-history-tool = Tool result
 session-restore-failed = Session restore failed: { $error }. Retry or use /clear to create a session.
+session-creation-failed = Session creation failed: { $error }
 
 panel-host-settings = Host settings
 

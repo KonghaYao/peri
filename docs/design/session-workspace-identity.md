@@ -337,7 +337,9 @@ hooks、插件与 MCP 展示取当前会话环境。TUI 本地配置面板仍编
 ## 8. 单库存储与版本边界
 
 默认读写始终使用 `~/.peri/threads/threads.db`，`--db-path` 仍可选择显式路径。
-schema 版本记录在 `PRAGMA user_version`，当前为 `6`，不另建数据库文件。新 writer
+schema 版本记录在 `PRAGMA user_version`，当前为 `10`（`CURRENT_SCHEMA_VERSION`；
+v10 撤销本机远程痕迹后本机表集合回到 v6 时代，版本号仍只增不减，2..9 的库都经升级
+路径收敛到 10），不另建数据库文件。新 writer
 按必需的 `threads` / `messages` 真实表及其列识别未设置版本号的旧 schema；
 同库额外业务表（例如 `thread_goals`）及其数据保持原样，不能以整库表数量拒绝
 兼容旧库。在单个事务中补齐

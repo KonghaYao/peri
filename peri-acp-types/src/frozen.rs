@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use crate::event::AgentEventHandler;
-use crate::store::ThreadStore;
 
 /// 子 Agent event handler 工厂：child_thread_id → child 专属 handler。
 pub type ChildHandlerFactory = Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>;
@@ -37,8 +36,10 @@ pub struct FrozenData {
 /// 子 Agent 线程持久化分组（零跨依赖）。
 #[derive(Clone, Default)]
 pub struct ThreadPersistence {
-    /// Thread persistence store for child thread creation (None = non-persistent)
-    pub store: Option<Arc<dyn ThreadStore>>,
+    /// 会话资源门面：child 保存/状态/历史写入的唯一入口（None = 不持久化）
+    pub session_resources: Option<Arc<dyn crate::session_resources::SessionResources>>,
+    /// 本会话 root 的执行所有权（child 保存的前置证明；None = 不落库）
+    pub execution_owner: Option<Arc<dyn crate::workspace::SessionExecutionLease>>,
     /// Parent thread ID for child thread hierarchy (None = top-level agent)
     pub parent_thread_id: Option<String>,
     /// Register callback: called when a child agent starts executing.

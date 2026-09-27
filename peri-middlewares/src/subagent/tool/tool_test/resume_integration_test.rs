@@ -102,7 +102,7 @@ async fn wait_for_observe_pairs(
 /// 轮询等待 transcript 异步 writer 落盘（transcript.rs 批量窗口 ≤100ms；
 /// 执行返回后新消息可能仍在 writer 通道中）
 async fn wait_for_messages(
-    store: &Arc<peri_agent::thread::FilesystemThreadStore>,
+    store: &SessionFixture,
     id: &str,
     n: usize,
     timeout_ms: u64,
@@ -141,28 +141,34 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     )
     .unwrap();
 
-    let store = make_fs_store(&dir);
-    // 主 agent 会话 thread_id 固定（进程重启后 session_id 不变，R-L3）
-    let work = dir.path().to_str().unwrap();
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
     let parent = peri_agent::session::Session::new(
-        Arc::from(work),
+        std::sync::Arc::from(cwd.as_str()),
         peri_agent::session::FrozenContext::builder().build(),
-        Some("parent-uuid".into()),
+        Some(parent_id.clone()),
     );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // 实例 A：spawn → LLM 首轮 Interrupted → Ok 可恢复文本带 child_thread_id 前缀
     let t_a = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
     let interrupted = t_a
         .invoke(
             serde_json::json!({
                 "subagent_type": "interrupt-agent",
-                "cwd": dir.path().to_str().unwrap(),
+                "cwd": cwd.clone(),
                 "prompt": "first task"
             }),
-            peri_agent::tools::ToolContext::new(&[], work),
+            peri_agent::tools::ToolContext::new(&[], cwd.as_str()),
         )
         .await
         .expect("首次执行应返回可恢复的 Interrupted 文本");
@@ -177,15 +183,17 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
 
     // 实例 B（同 store dir、同父 session thread_id）：resume → 完成
     let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent);
     let result = t_b
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
-                "cwd": work,
+                "cwd": cwd.clone(),
             }),
-            peri_agent::tools::ToolContext::new(&[], work),
+            peri_agent::tools::ToolContext::new(&[], cwd.as_str()),
         )
         .await
         .expect("resume 应成功完成（thread_id 即恢复凭证）");
@@ -204,7 +212,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     let meta = store.load_meta(&id).await.unwrap();
     assert_eq!(
         meta.parent_thread_id.as_deref(),
-        Some("parent-uuid"),
+        Some(parent_id.as_str()),
         "子线程父链必须指向父 session thread_id（跨实例复用）"
     );
 }
@@ -217,18 +225,32 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
 async fn test_resume_across_instances_replays_transcript_in_order() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let id = {
         // 实例 A：spawn → LLM 首轮 Interrupted（thread 与 transcript 已落盘）
         let t_a = make_interrupt_tool(Arc::clone(&calls), 1)
-            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
+            .with_session_resources(store.facade())
+            .with_parent_thread_id(parent_id.clone())
+            .with_execution_owner(store.execution_owner())
+            .with_parent_session(parent.clone());
         let interrupted = t_a
             .invoke(
                 serde_json::json!({
                     "subagent_type": "test-agent",
-                    "cwd": dir.path().to_str().unwrap(),
+                    "cwd": cwd.clone(),
                     "prompt": "first task"
                 }),
                 peri_agent::tools::ToolContext::new(&[], "."),
@@ -247,12 +269,15 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
 
     // 实例 B：同 store dir → resume（缺省 prompt → 隐式 continue）→ 完成
     let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(parent.clone());
     let result = t_b
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
-                "cwd": dir.path().to_str().unwrap(),
+                "cwd": cwd.clone(),
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
@@ -286,17 +311,34 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
 async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
-    let store = make_fs_store(&dir);
-    let cwd = dir.path().to_str().unwrap().to_string();
-
-    // 构造带「已取消 cancel token」的实例（parent 缺席时注入的 cancel 生效 →
-    // run_react_loop 返回 LoopResult::Interrupted → Ok 中断文本）
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 构造「父会话已取 cancel」的实例：Cascade 策略下子 token 由父 token 派生
+    // （`derive_cancel_token`：parent 优先、config 注入仅作 parent 缺席的回退），
+    // 因此父 session 取消才会让 run_react_loop 返回 LoopResult::Interrupted
+    // → Ok 中断文本。同时父会话句柄是 resume 归属校验的前置。
+    let mk_parent = |cancelled: bool| {
+        let token = Arc::new(AgentCancellationToken::new());
+        if cancelled {
+            token.cancel();
+        }
+        peri_agent::session::Session::new_with_cancel(
+            std::sync::Arc::from(cwd.as_str()),
+            peri_agent::session::FrozenContext::builder().build(),
+            Some(parent_id.clone()),
+            token,
+        )
+    };
     let mk_cancelled = || {
-        let cancel = AgentCancellationToken::new();
-        cancel.cancel();
         make_subagent_tool(vec![])
-            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
-            .with_cancel(cancel)
+            .with_session_resources(store.facade())
+            .with_parent_thread_id(parent_id.clone())
+            .with_execution_owner(store.execution_owner())
+            .with_parent_session(mk_parent(true))
     };
 
     // 1) spawn → 中断 #1（文本含 child_thread_id + resume 提示）
@@ -339,9 +381,12 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     let id2 = extract_child_thread_id(&r2);
     assert_eq!(id1, id2, "多次恢复 thread_id 必须不变");
 
-    // 3) resume → 完成（无 cancel 的新实例）
-    let t3 =
-        make_subagent_tool(vec![]).with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
+    // 3) resume → 完成（新实例：父会话换回未取消的 token，归属不变）
+    let t3 = make_subagent_tool(vec![])
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(mk_parent(false));
     let r3 = t3
         .invoke(
             serde_json::json!({
@@ -373,7 +418,18 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
 async fn test_resume_emits_new_start_stop_pair_per_execution() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let bridge = Arc::new(RecordingBridge {
         observes: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
@@ -392,8 +448,10 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     )
     .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
     .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>)
-    .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
-    let cwd = dir.path().to_str().unwrap().to_string();
+    .with_session_resources(store.facade())
+    .with_parent_thread_id(parent_id.clone())
+    .with_execution_owner(store.execution_owner())
+    .with_parent_session(parent.clone());
 
     // 首次执行 → 中断（第 1 对 Start/Stop；LLM 返回 Interrupted → Ok 可恢复文本）
     let interrupted = t
@@ -498,11 +556,24 @@ async fn test_resume_skill_preload_not_duplicated() {
     )
     .unwrap();
 
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let t = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
-    let cwd = dir.path().to_str().unwrap().to_string();
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(parent.clone());
 
     // 首次执行（agent-def 路径）→ SkillPreload 注入一套 → 中断（LLM 返回 Interrupted）
     let interrupted = t
@@ -555,14 +626,25 @@ async fn test_resume_skill_preload_not_duplicated() {
 async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let id = uuid::Uuid::now_v7().to_string();
     // 完整工具轮次：Ai[ToolUse] + Tool[result] 配对，末条 = Tool → 不 pop
     preset_resumable_thread(
         &store,
         &id,
         "test-agent",
-        None,
+        Some(parent_id.as_str()),
         vec![
             BaseMessage::human("task"),
             BaseMessage::ai_from_blocks(vec![peri_agent::messages::ContentBlock::tool_use(
@@ -606,13 +688,16 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
         }),
         "/tmp".to_string(),
     )
-    .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
+    .with_session_resources(store.facade())
+    .with_parent_thread_id(parent_id.clone())
+    .with_execution_owner(store.execution_owner())
+    .with_parent_session(parent.clone());
 
     let result = t
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
-                "cwd": dir.path().to_str().unwrap(),
+                "cwd": cwd.clone(),
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
@@ -671,11 +756,24 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
     )
     .unwrap();
 
-    let store = make_fs_store(&dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    // 父会话句柄：resume 路径经它校验「owning parent session」
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let t = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
-    let cwd = dir.path().to_str().unwrap().to_string();
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_execution_owner(store.execution_owner())
+        .with_parent_session(parent.clone());
 
     // 首次执行（显式声明 skills）→ 注入一套 → 中断（LLM 返回 Interrupted）
     let interrupted = t

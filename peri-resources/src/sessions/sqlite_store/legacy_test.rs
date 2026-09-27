@@ -161,7 +161,7 @@ async fn legacy_adoption_failure_rolls_back_binding_and_snapshot() {
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let workspace = store.resolve_workspace(&cwd).await.unwrap();
     sqlx::raw_sql("CREATE TRIGGER reject_binding BEFORE INSERT ON session_bindings BEGIN SELECT RAISE(FAIL, 'injected binding failure'); END;")
-        .execute(&store.pool).await.unwrap();
+        .execute(&store.database.pool).await.unwrap();
     let error = store
         .adopt_legacy_thread(&id, cwd.to_str().unwrap(), &workspace, "snapshot")
         .await
@@ -170,7 +170,7 @@ async fn legacy_adoption_failure_rolls_back_binding_and_snapshot() {
     assert!(store.load_session_binding(&id).await.unwrap().is_none());
     assert!(store.load_frozen_snapshot(&id).await.unwrap().is_none());
     sqlx::query("DROP TRIGGER reject_binding")
-        .execute(&store.pool)
+        .execute(&store.database.pool)
         .await
         .unwrap();
     store
@@ -223,7 +223,7 @@ async fn legacy_adoption_rejects_changed_cwd_child_and_lost_native_binding() {
     store.update_meta(&id, meta).await.unwrap();
     sqlx::query("INSERT INTO execution_runs VALUES (?, 1, 0)")
         .bind(&id)
-        .execute(&store.pool)
+        .execute(&store.database.pool)
         .await
         .unwrap();
     let error = store

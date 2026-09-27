@@ -16,7 +16,7 @@ pub(super) fn spawn_prediction(
     let pred_session_id = prompt_session_id.to_string();
     let pred_provider = cfg.provider.clone();
     let pred_sessions = sessions.clone();
-    let pred_thread_store = cfg.thread_store.clone();
+    let pred_resources = cfg.session_resources.clone();
     let pred_caps_registry = cfg.session_manager.caps_registry();
 
     let _ = cfg.host_task_spawner.spawn(
@@ -95,11 +95,17 @@ pub(super) fn spawn_prediction(
                             }
                         }
                     }
-                    // 标题变更：持久化到 thread store，并推送 session/update
-                    // 供标题栏与外部客户端刷新（与 session/rename 行为一致）
+                    // 标题变更：经门面定向持久化 metadata（不整份覆盖），并推送
+                    // session/update 供标题栏与外部客户端刷新（与 session/rename 同行为）
                     if let Some(title) = applied_title {
-                        if let Err(e) = pred_thread_store
-                            .update_title(&pred_session_id, &title)
+                        if let Err(e) = pred_resources
+                            .update_session_meta(
+                                &pred_session_id,
+                                &peri_acp_types::session_resources::SessionMetaPatch {
+                                    title: Some(Some(title.clone())),
+                                    ..Default::default()
+                                },
+                            )
                             .await
                         {
                             tracing::warn!(

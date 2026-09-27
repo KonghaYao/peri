@@ -54,6 +54,22 @@ pub struct SessionBinding {
     pub cwd_relative_to_workspace: PathBuf,
 }
 
+impl SessionBinding {
+    /// 以 workspace 事实构造不可变绑定。
+    ///
+    /// 版本与 revision 由契约固定，调用方只能提供已解析的 workspace——创建入口
+    /// （门面 `create_session`）不接受调用方自行拼装的绑定字段。
+    pub fn from_workspace(workspace: &ResolvedWorkspace) -> Self {
+        Self {
+            schema_version: SESSION_BINDING_VERSION,
+            revision: 1,
+            project_id: workspace.project_id,
+            workspace_id: workspace.workspace_id,
+            cwd_relative_to_workspace: workspace.relative_cwd.clone(),
+        }
+    }
+}
+
 /// A validated execution directory. The store revalidates this before binding a thread.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedWorkspace {
@@ -120,6 +136,21 @@ pub enum WorkspaceErrorData {
     RecoveryRequired(RecoveryRequiredDetails),
 }
 
+impl WorkspaceErrorData {
+    /// 按 workspace 失败构造类型化数据；本集合之外的失败不带数据（调用方只看消息）。
+    ///
+    /// 这里是「哪些失败可以被客户端分派到具体修复动作」的唯一清单：加一条就在
+    /// [`WorkspaceError`] 上多一个可编程分支，因此只收需要客户端采取不同动作的变体。
+    pub fn from_workspace_error(error: &WorkspaceError) -> Option<Self> {
+        match error {
+            WorkspaceError::RecoveryRequired(details) => {
+                Some(Self::RecoveryRequired(details.clone()))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// 只读准入的原因：会话历史可读，但本次准入没有取得执行所有权。
 ///
 /// 客户端据此区分「等待他处释放」与「需要用户显式接受风险解除 dirty」：后者必须
@@ -159,7 +190,11 @@ pub struct ResetDirtyRequest {
     pub accept_risk: bool,
 }
 
-#[derive(Debug, thiserror::Error)]
+/// 本机 workspace/binding/owner 语义的失败分类。
+///
+/// `Clone`：错误在落到 `SessionResourceError` 之前会经过 `anyhow` 链，资源层需要按
+/// 原分类重建同一个错误值（不重新解释、不丢变体）。
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum WorkspaceError {
     #[error("workspace discovery failed: {0}")]
     DiscoveryError(String),

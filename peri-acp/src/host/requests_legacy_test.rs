@@ -1,12 +1,15 @@
 use super::*;
 
-async fn old_thread(cfg: &AcpServerConfig, cwd: &Path) -> String {
-    let id = cfg
-        .thread_store
+/// legacy 原始事实：只有 thread 行与消息，**没有 binding、没有 frozen**。
+///
+/// 用裸句柄按原表构造——门面没有「无 binding 无 frozen」的创建入口；`bridge` 与 `cfg`
+/// 的门面出自同一次打开（同一库句柄），后续经协议/门面读到的是同一份事实。
+async fn old_thread(bridge: &SqliteThreadStore, cwd: &Path) -> String {
+    let id = bridge
         .create_thread(ThreadMeta::new(cwd.to_str().unwrap()))
         .await
         .unwrap();
-    cfg.thread_store
+    bridge
         .append_message(
             &id,
             peri_acp_types::messages::BaseMessage::human("legacy user message"),
@@ -28,13 +31,13 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     std::fs::write(cwd.join("CLAUDE.md"), "LEGACY_PROJECT_INSTRUCTION").unwrap();
     let config =
         make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let cfg = make_server_config(
+    let (cfg, bridge) = make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
     )
     .await;
-    let id = old_thread(&cfg, &cwd).await;
+    let id = old_thread(&bridge, &cwd).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
     let context = handle_request(
@@ -48,18 +51,8 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     .unwrap();
     assert_eq!(context["workspace"]["cwd"], cwd.to_str().unwrap());
     assert!(context["binding"].is_null());
-    assert!(cfg
-        .thread_store
-        .load_session_binding(&id)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(cfg
-        .thread_store
-        .load_frozen_snapshot(&id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(bridge.load_session_binding(&id).await.unwrap().is_none());
+    assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_none());
     handle_request(
         "session/load",
         &json!({"sessionId":id,"cwd":cwd}),
@@ -79,12 +72,7 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
         .claude_md()
         .unwrap()
         .contains("LEGACY_PROJECT_INSTRUCTION"));
-    let frozen = cfg
-        .thread_store
-        .load_frozen_snapshot(&id)
-        .await
-        .unwrap()
-        .unwrap();
+    let frozen = bridge.load_frozen_snapshot(&id).await.unwrap().unwrap();
     handle_request(
         "session/close",
         &json!({"sessionId":id}),
@@ -105,11 +93,7 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     .await
     .unwrap();
     assert_eq!(
-        cfg.thread_store
-            .load_frozen_snapshot(&id)
-            .await
-            .unwrap()
-            .unwrap(),
+        bridge.load_frozen_snapshot(&id).await.unwrap().unwrap(),
         frozen
     );
     let fork = handle_request(
@@ -153,13 +137,13 @@ async fn legacy_history_missing_directory_is_readable_without_adoption() {
     let _home = HomeDirGuard::set(tmp.path());
     let config =
         make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let cfg = make_server_config(
+    let (cfg, bridge) = make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
     )
     .await;
-    let id = old_thread(&cfg, &tmp.path().join("removed")).await;
+    let id = old_thread(&bridge, &tmp.path().join("removed")).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
     let response = handle_request(
@@ -184,18 +168,8 @@ async fn legacy_history_missing_directory_is_readable_without_adoption() {
     .unwrap_err();
     assert!(error.message.contains("unavailable"), "{}", error.message);
     assert!(sessions.is_empty());
-    assert!(cfg
-        .thread_store
-        .load_session_binding(&id)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(cfg
-        .thread_store
-        .load_frozen_snapshot(&id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(bridge.load_session_binding(&id).await.unwrap().is_none());
+    assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -210,13 +184,13 @@ async fn legacy_history_rejects_wrong_directory_and_bad_frozen_without_adoption(
     std::fs::create_dir(&other).unwrap();
     let config =
         make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let cfg = make_server_config(
+    let (cfg, bridge) = make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
     )
     .await;
-    let id = old_thread(&cfg, &saved).await;
+    let id = old_thread(&bridge, &saved).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
     let error = handle_request(
@@ -233,21 +207,11 @@ async fn legacy_history_rejects_wrong_directory_and_bad_frozen_without_adoption(
         "{}",
         error.message
     );
-    assert!(cfg
-        .thread_store
-        .load_session_binding(&id)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(cfg
-        .thread_store
-        .load_frozen_snapshot(&id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(bridge.load_session_binding(&id).await.unwrap().is_none());
+    assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_none());
     for snapshot in ["broken", r#"{"version":999,"data":{}}"#] {
-        let id = old_thread(&cfg, &saved).await;
-        cfg.thread_store
+        let id = old_thread(&bridge, &saved).await;
+        bridge
             .store_frozen_snapshot_if_absent(&id, snapshot)
             .await
             .unwrap();
@@ -265,18 +229,9 @@ async fn legacy_history_rejects_wrong_directory_and_bad_frozen_without_adoption(
             "{}",
             error.message
         );
-        assert!(cfg
-            .thread_store
-            .load_session_binding(&id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(bridge.load_session_binding(&id).await.unwrap().is_none());
         assert_eq!(
-            cfg.thread_store
-                .load_frozen_snapshot(&id)
-                .await
-                .unwrap()
-                .as_deref(),
+            bridge.load_frozen_snapshot(&id).await.unwrap().as_deref(),
             Some(snapshot)
         );
     }
@@ -290,19 +245,15 @@ async fn legacy_history_fix_does_not_rebuild_missing_native_snapshot() {
     let _home = HomeDirGuard::set(tmp.path());
     let config =
         make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
-    let cfg = make_server_config(
+    let (cfg, bridge) = make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
     )
     .await;
-    let workspace = cfg
-        .thread_store
-        .resolve_workspace(tmp.path())
-        .await
-        .unwrap();
-    let id = cfg
-        .thread_store
+    // 已绑定但**缺 frozen**：门面创建要求 frozen 成立，因此夹具按原表构造。
+    let workspace = bridge.resolve_workspace(tmp.path()).await.unwrap();
+    let id = bridge
         .create_bound_thread(ThreadMeta::new(workspace.cwd.to_str().unwrap()), &workspace)
         .await
         .unwrap();
@@ -318,14 +269,9 @@ async fn legacy_history_fix_does_not_rebuild_missing_native_snapshot() {
     .await
     .unwrap_err();
     assert_eq!(error.message, "Bound session has no frozen snapshot");
-    assert!(cfg
-        .thread_store
-        .load_frozen_snapshot(&id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_none());
     assert!(sessions.is_empty());
-    cfg.thread_store
+    bridge
         .acquire_execution_lease(&id)
         .await
         .unwrap()
@@ -360,7 +306,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
     let mut config =
         make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
     config.config.language = Some("en".into());
-    let mut cfg = make_server_config(
+    let (mut cfg, bridge) = make_server_config_with_bridge(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -373,7 +319,7 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
     });
     assert!(cfg.plugin_skill_roots.is_empty());
-    let id = old_thread(&cfg, &target).await;
+    let id = old_thread(&bridge, &target).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
     handle_request(

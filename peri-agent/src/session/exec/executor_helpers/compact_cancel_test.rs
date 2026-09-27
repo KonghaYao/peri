@@ -1,12 +1,21 @@
 //! Manual compact must preserve the SQLite commit outcome when either select drops its future.
 use super::*;
 use crate::session::exec::compact_pipeline::execute_compact;
-use crate::thread::{SqliteThreadStore, ThreadId, ThreadMeta};
+use crate::session::test_resources::git_repository;
+use crate::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::messages::MessageId;
-use peri_acp_types::store::{
-    CompactionLifecycle, InheritedContext, MessageFlags, PersistedPayload, ThreadStore,
+use peri_acp_types::session_resources::{
+    BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, ForkSnapshot,
+    FrozenSnapshotBytes, NewSession, NewSessionMeta, PersistenceRecovery, RewindBoundary,
+    SessionAvailability, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
+    SessionResourceResult, SessionResources, SessionSnapshot,
 };
-use std::collections::HashMap;
+use peri_acp_types::store::{CompactionChange, PersistedPayload};
+use peri_acp_types::workspace::{
+    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, SessionExecutionLease,
+    SESSION_BINDING_VERSION,
+};
+use peri_resources::sessions::SessionResourcesImpl;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Clone, Copy)]
@@ -23,93 +32,234 @@ enum HandlerPause {
     FailReload,
 }
 
+/// 真门面 + 提交点注入：除了 `apply_compaction` 与快照重载，其余行为逐项转发。
+///
+/// 转发而不是重实现：包装层只注入「提交点被取消 / 提交后确认丢失 / 重载失败」三种
+/// 时序，存储语义仍由真实实现提供。
 struct ControlledStore {
-    inner: SqliteThreadStore,
+    inner: Arc<dyn SessionResources>,
     mode: CommitMode,
     cancel: AgentCancellationToken,
     fail_reload: AtomicBool,
     calls: AtomicUsize,
 }
+
 #[async_trait]
-impl ThreadStore for ControlledStore {
-    async fn create_thread(&self, meta: ThreadMeta) -> anyhow::Result<ThreadId> {
-        self.inner.create_thread(meta).await
+impl SessionResources for ControlledStore {
+    async fn inspect_availability(
+        &self,
+        session: Option<&ThreadId>,
+    ) -> SessionResourceResult<SessionAvailability> {
+        self.inner.inspect_availability(session).await
     }
-    async fn append_messages(&self, id: &ThreadId, messages: &[BaseMessage]) -> anyhow::Result<()> {
-        self.inner.append_messages(id, messages).await
+
+    async fn resolve_workspace(
+        &self,
+        cwd: &std::path::Path,
+    ) -> SessionResourceResult<ResolvedWorkspace> {
+        self.inner.resolve_workspace(cwd).await
     }
-    async fn load_messages(&self, id: &ThreadId) -> anyhow::Result<Vec<BaseMessage>> {
-        self.inner.load_messages(id).await
+
+    async fn validate_session(
+        &self,
+        id: &ThreadId,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.inner.validate_session(id, workspace).await
     }
-    async fn load_payloads(&self, id: &ThreadId) -> anyhow::Result<Vec<PersistedPayload>> {
+
+    async fn acquire_execution(
+        &self,
+        id: &ThreadId,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        self.inner.acquire_execution(id, workspace).await
+    }
+
+    async fn reset_dirty_execution(
+        &self,
+        request: &peri_acp_types::workspace::ResetDirtyRequest,
+    ) -> SessionResourceResult<()> {
+        self.inner.reset_dirty_execution(request).await
+    }
+
+    async fn create_session(
+        &self,
+        input: &NewSession,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        self.inner.create_session(input).await
+    }
+
+    async fn abandon_initialization(
+        &self,
+        id: &ThreadId,
+        lease: &Arc<dyn SessionExecutionLease>,
+    ) -> SessionResourceResult<()> {
+        self.inner.abandon_initialization(id, lease).await
+    }
+
+    async fn adopt_legacy_session(
+        &self,
+        id: &ThreadId,
+        saved_cwd: &str,
+        workspace: &ResolvedWorkspace,
+        frozen: &FrozenSnapshotBytes,
+    ) -> SessionResourceResult<()> {
+        self.inner
+            .adopt_legacy_session(id, saved_cwd, workspace, frozen)
+            .await
+    }
+
+    async fn load_session_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot> {
         if self.fail_reload.load(Ordering::SeqCst) {
-            anyhow::bail!("injected canonical reload failure");
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Unavailable {
+                    detail: "injected canonical reload failure".to_owned(),
+                },
+            ));
         }
-        self.inner.load_payloads(id).await
+        self.inner.load_session_snapshot(id).await
     }
-    async fn load_inherited_context(&self, id: &ThreadId) -> anyhow::Result<InheritedContext> {
-        self.inner.load_inherited_context(id).await
+
+    async fn load_session_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState> {
+        self.inner.load_session_binding(id).await
     }
-    async fn load_meta(&self, id: &ThreadId) -> anyhow::Result<ThreadMeta> {
-        self.inner.load_meta(id).await
-    }
-    async fn update_meta(&self, id: &ThreadId, meta: ThreadMeta) -> anyhow::Result<()> {
-        self.inner.update_meta(id, meta).await
-    }
-    async fn list_threads(&self) -> anyhow::Result<Vec<ThreadMeta>> {
-        self.inner.list_threads().await
-    }
-    async fn delete_thread(&self, id: &ThreadId) -> anyhow::Result<()> {
-        self.inner.delete_thread(id).await
-    }
-    async fn load_context(&self, id: &ThreadId) -> anyhow::Result<Vec<BaseMessage>> {
-        self.inner.load_context(id).await
-    }
-    async fn list_child_threads(&self, id: &ThreadId) -> anyhow::Result<Vec<ThreadMeta>> {
-        self.inner.list_child_threads(id).await
-    }
-    async fn list_session_threads(&self, id: &ThreadId) -> anyhow::Result<Vec<ThreadMeta>> {
-        self.inner.list_session_threads(id).await
-    }
-    async fn update_thread_status(&self, id: &ThreadId, status: &str) -> anyhow::Result<()> {
-        self.inner.update_thread_status(id, status).await
-    }
-    async fn invalidate_context_cache(&self, id: &ThreadId) -> anyhow::Result<()> {
-        self.inner.invalidate_context_cache(id).await
-    }
-    async fn delete_messages(&self, id: &ThreadId, ids: &[MessageId]) -> anyhow::Result<()> {
-        self.inner.delete_messages(id, ids).await
-    }
-    async fn load_message_flags(
+
+    async fn validate_bound_workspace(
         &self,
         id: &ThreadId,
-    ) -> anyhow::Result<HashMap<MessageId, MessageFlags>> {
-        self.inner.load_message_flags(id).await
+        check: BindingRecheck,
+    ) -> SessionResourceResult<ResolvedWorkspace> {
+        self.inner.validate_bound_workspace(id, check).await
     }
-    fn supports_compaction_lifecycle(&self) -> bool {
-        true
-    }
-    async fn commit_compaction_lifecycle(
+
+    async fn load_session_history(
         &self,
         id: &ThreadId,
-        lifecycle: &CompactionLifecycle,
-    ) -> anyhow::Result<()> {
+    ) -> SessionResourceResult<Vec<PersistedPayload>> {
+        self.inner.load_session_history(id).await
+    }
+
+    async fn load_session_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
+        self.inner.load_session_meta(id).await
+    }
+
+    async fn list_sessions(
+        &self,
+        query: &ScopedThreadQuery,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        self.inner.list_sessions(query).await
+    }
+
+    async fn list_children(&self, parent: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>> {
+        self.inner.list_children(parent).await
+    }
+
+    async fn list_session_tree(&self, root: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>> {
+        self.inner.list_session_tree(root).await
+    }
+
+    async fn append_history(
+        &self,
+        id: &ThreadId,
+        payloads: &[PersistedPayload],
+    ) -> SessionResourceResult<()> {
+        self.inner.append_history(id, payloads).await
+    }
+
+    async fn save_fork(
+        &self,
+        fork: &ForkSnapshot,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        self.inner.save_fork(fork).await
+    }
+
+    async fn save_child(
+        &self,
+        child: &ChildSnapshot,
+        lease: &Arc<dyn SessionExecutionLease>,
+    ) -> SessionResourceResult<()> {
+        self.inner.save_child(child, lease).await
+    }
+
+    async fn claim_child_resume(
+        &self,
+        child: &ThreadId,
+        root: &ThreadId,
+    ) -> SessionResourceResult<Box<dyn ChildResumeClaim>> {
+        self.inner.claim_child_resume(child, root).await
+    }
+
+    async fn apply_compaction(
+        &self,
+        id: &ThreadId,
+        change: &CompactionChange,
+    ) -> SessionResourceResult<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if matches!(self.mode, CommitMode::CancelBefore) {
             self.cancel.cancel();
             return std::future::pending().await;
         }
-        self.inner
-            .commit_compaction_lifecycle(id, lifecycle)
-            .await?;
+        let result = self.inner.apply_compaction(id, change).await;
         match self.mode {
             CommitMode::CancelAfter => {
                 self.cancel.cancel();
                 std::future::pending().await
             }
-            CommitMode::ErrorAfter => anyhow::bail!("injected lost COMMIT acknowledgment"),
-            _ => Ok(()),
+            CommitMode::ErrorAfter => Err(SessionResourceError::new(
+                SessionResourceErrorKind::Unavailable {
+                    detail: "injected lost COMMIT acknowledgment".to_owned(),
+                },
+            )),
+            _ => result,
         }
+    }
+
+    async fn apply_message_projections(
+        &self,
+        id: &ThreadId,
+        updates: &[(MessageId, peri_acp_types::store::MessageFlags)],
+    ) -> SessionResourceResult<()> {
+        self.inner.apply_message_projections(id, updates).await
+    }
+
+    async fn rewind_history(
+        &self,
+        id: &ThreadId,
+        boundary: RewindBoundary,
+    ) -> SessionResourceResult<()> {
+        self.inner.rewind_history(id, boundary).await
+    }
+
+    async fn remove_history_entries(
+        &self,
+        id: &ThreadId,
+        ids: &[MessageId],
+    ) -> SessionResourceResult<()> {
+        self.inner.remove_history_entries(id, ids).await
+    }
+
+    async fn update_session_meta(
+        &self,
+        id: &ThreadId,
+        patch: &SessionMetaPatch,
+    ) -> SessionResourceResult<()> {
+        self.inner.update_session_meta(id, patch).await
+    }
+
+    async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.delete_session_tree(id).await
+    }
+
+    async fn recover_session_persistence(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<PersistenceRecovery> {
+        self.inner.recover_session_persistence(id).await
+    }
+
+    async fn drain_persistence(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.drain_persistence(id).await
     }
 }
 
@@ -163,6 +313,9 @@ impl CommandHandler for PipelineHandler {
 
 struct Case {
     _dir: tempfile::TempDir,
+    _repo: tempfile::TempDir,
+    /// 持有执行所有权：门面上的写入要求本 root 有活 owner。
+    _lease: Arc<dyn SessionExecutionLease>,
     store: Arc<ControlledStore>,
     thread_id: ThreadId,
     history: Vec<BaseMessage>,
@@ -171,25 +324,59 @@ struct Case {
 }
 async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Case {
     let dir = tempfile::tempdir().unwrap();
+    let repo = git_repository();
     let cancel = AgentCancellationToken::new();
-    let store = Arc::new(ControlledStore {
-        inner: SqliteThreadStore::new(dir.path().join("manual.db"))
+    let inner: Arc<dyn SessionResources> = Arc::new(
+        SessionResourcesImpl::open(dir.path().join("manual.db"))
             .await
             .unwrap(),
+    );
+    let store = Arc::new(ControlledStore {
+        inner: Arc::clone(&inner),
         mode,
         cancel: cancel.clone(),
         fail_reload: AtomicBool::new(false),
         calls: AtomicUsize::new(0),
     });
-    let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_str().unwrap()))
-        .await
-        .unwrap();
+    // 真门面建会话：绑定 + frozen + 执行代际一次落盘，写入门禁才有 owner。
+    let workspace = inner.resolve_workspace(repo.path()).await.unwrap();
+    let thread_id = uuid::Uuid::now_v7().to_string();
+    let session = NewSession {
+        thread_id: thread_id.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        meta: NewSessionMeta {
+            title: Some("manual compact".to_owned()),
+            cwd: workspace.cwd.to_string_lossy().into_owned(),
+            parent_thread_id: None,
+            hidden: false,
+            cancel_policy: Default::default(),
+            snapshot_at_message_id: None,
+        },
+        binding: SessionBinding {
+            schema_version: SESSION_BINDING_VERSION,
+            revision: 1,
+            project_id: workspace.project_id,
+            workspace_id: workspace.workspace_id,
+            cwd_relative_to_workspace: workspace.relative_cwd.clone(),
+        },
+        frozen: FrozenSnapshotBytes::new("{\"version\":1,\"manual\":true}"),
+    };
+    let lease = inner.create_session(&session).await.unwrap();
     let history = vec![
         BaseMessage::human("old manual question"),
         BaseMessage::ai("old manual answer"),
     ];
-    store.append_messages(&thread_id, &history).await.unwrap();
+    inner
+        .append_history(
+            &thread_id,
+            &history
+                .iter()
+                .cloned()
+                .map(PersistedPayload::Message)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
     if pre_cancel {
         cancel.cancel();
     }
@@ -220,8 +407,8 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         &task_manager,
         lookup,
     );
-    req.cwd = dir.path().to_str().unwrap();
-    req.thread_store = Some(store.clone());
+    req.cwd = workspace.cwd.to_str().unwrap();
+    req.session_resources = Some(store.clone());
     req.thread_id = Some(thread_id.clone());
     req.auxiliary_model = &model;
     let outcome = tokio::time::timeout(
@@ -235,6 +422,8 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
     };
     Case {
         _dir: dir,
+        _repo: repo,
+        _lease: lease,
         store,
         thread_id,
         history,
@@ -243,22 +432,24 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
     }
 }
 
-async fn assert_durable_summary(case: &Case) {
-    let payloads = case
-        .store
+/// 磁盘事实（payload/flags 同一次一致快照读取）。
+///
+/// 直读**未被注入**的真实门面：包装层注入的是「调用方看到的读失败」，验证落库事实时
+/// 不能连它一起读，否则断言会被注入本身带偏。
+async fn stored_snapshot(case: &Case) -> SessionSnapshot {
+    case.store
         .inner
-        .load_payloads(&case.thread_id)
+        .load_session_snapshot(&case.thread_id)
         .await
-        .unwrap();
+        .unwrap()
+}
+
+async fn assert_durable_summary(case: &Case) {
+    let payloads = stored_snapshot(case).await.payloads;
     assert!(payloads.iter().any(|payload| payload
         .as_message()
         .is_some_and(|message| message.content().contains("manual committed summary"))));
-    let flags = case
-        .store
-        .inner
-        .load_message_flags(&case.thread_id)
-        .await
-        .unwrap();
+    let flags = stored_snapshot(case).await.flags;
     assert!(case
         .history
         .iter()
@@ -273,21 +464,15 @@ async fn test_manual_compact_cancel_before_commit_requires_reload_without_deleti
     assert!(!case.result.ok);
     assert!(case.result.failure.is_some());
     assert_eq!(
-        case.store
-            .inner
-            .load_messages(&case.thread_id)
+        stored_snapshot(&case)
             .await
-            .unwrap()
-            .len(),
+            .payloads
+            .iter()
+            .filter(|payload| payload.as_message().is_some())
+            .count(),
         2
     );
-    assert!(case
-        .store
-        .inner
-        .load_message_flags(&case.thread_id)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(stored_snapshot(&case).await.flags.is_empty());
     assert_eq!(case.done_count, 1);
 }
 
@@ -319,12 +504,7 @@ async fn test_manual_compact_cancel_after_confirmed_pipeline_restores_canonical_
     assert!(case.result.messages[0]
         .content()
         .contains("manual committed summary"));
-    let stored = case
-        .store
-        .inner
-        .load_payloads(&case.thread_id)
-        .await
-        .unwrap();
+    let stored = stored_snapshot(&case).await.payloads;
     assert_eq!(
         case.result
             .persisted_payloads

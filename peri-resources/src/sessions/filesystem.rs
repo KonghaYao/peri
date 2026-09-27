@@ -10,7 +10,7 @@ use tokio::{fs, io::AsyncWriteExt};
 use peri_acp_types::{
     messages::BaseMessage,
     store::{
-        deserialize_persisted_payload, serialize_persisted_payload, CompactionLifecycle,
+        deserialize_persisted_payload, serialize_persisted_payload, CompactionChange,
         InheritedContext, PersistedPayload, ThreadStore,
     },
     thread::{AgentStatus, ThreadId, ThreadListEntry, ThreadMeta},
@@ -465,7 +465,7 @@ impl ThreadStore for FilesystemThreadStore {
     async fn commit_compaction_lifecycle(
         &self,
         thread_id: &ThreadId,
-        lifecycle: &CompactionLifecycle,
+        lifecycle: &CompactionChange,
     ) -> Result<()> {
         let _ = (thread_id, lifecycle);
         anyhow::bail!(

@@ -534,24 +534,32 @@ async fn test_agent_invoke_mcp_background_rejection_precedes_fork_fallback() {
 async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
     let dir = tempdir().unwrap();
     let fallback_dir = tempdir().unwrap();
-    let store = make_fs_store(&dir);
-    let fallback_store = make_fs_store(&fallback_dir);
+    let store = SessionFixture::open_in(dir.path()).await;
+    let fallback_store = SessionFixture::open_in(fallback_dir.path()).await;
+    // 父 host 必须带完整父事实：门面 + root owner + 父 thread id（child 保存的前置条件）。
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
     let parent = peri_agent::session::Session::new(
-        Arc::from(dir.path().to_str().unwrap()),
+        Arc::from(cwd.as_str()),
         peri_agent::session::FrozenContext::builder().build(),
-        None,
+        Some(parent_id.clone()),
     );
     parent.set_subagent_host(peri_agent::session::subagent::SubagentHost {
-        thread_store: Some(store.clone()),
+        session_resources: Some(store.facade()),
+        execution_owner: Some(store.execution_owner()),
+        parent_thread_id: Some(parent_id.clone()),
         ..Default::default()
     });
     let fallback_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let tool = make_subagent_tool(vec![])
-        .with_thread_store(fallback_store.clone())
+        .with_session_resources(fallback_store.facade())
         .with_task_manager(fallback_manager.clone())
         .with_parent_session(parent);
     let result = tool.invoke(
-        serde_json::json!({"fork": true, "run_in_background": true, "prompt": "sync fallback", "cwd": dir.path().to_str().unwrap()}),
+        serde_json::json!({"fork": true, "run_in_background": true, "prompt": "sync fallback", "cwd": cwd.clone()}),
         peri_agent::tools::ToolContext::new(&[], "."),
     ).await.unwrap();
     let thread_id = result

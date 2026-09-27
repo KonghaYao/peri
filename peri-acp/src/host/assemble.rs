@@ -17,8 +17,8 @@ use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::{PluginLoadResult, PluginManagerPort};
 use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
+use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 use peri_acp_types::skills::SkillRoot;
-use peri_acp_types::store::ThreadStore;
 
 use crate::provider::{LlmProvider, PeriConfig};
 use crate::session::SessionManager;
@@ -33,7 +33,7 @@ use super::AcpServerConfig;
 /// SkillsProvider / PluginManager / SettingsHooksLoader /
 /// WorkflowAgentMiddlewareFactory / 插件聚合数据）全部由本装配面内部构造
 /// ——「ACP Host = 部署单元」，TUI/print/stdio 只提供协议面输入
-/// （provider / config / permission / thread_store / cwd），不再直接触碰
+/// （provider / config / permission / session_resources / cwd），不再直接触碰
 /// 业务 crate（§0 依赖方向，`docs/top-level.md` §7/§8）。
 #[derive(Clone)]
 pub(crate) struct WorkspaceAssembly {
@@ -42,53 +42,18 @@ pub(crate) struct WorkspaceAssembly {
     pub(crate) mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
 }
 
-/// Discover frozen inputs for the saved workspace without starting MCP, hooks or tasks.
-/// Plugin discovery follows normal session assembly (including its manifest cache repair).
-pub(crate) fn build_legacy_frozen_data(
-    host: &AcpServerConfig,
+/// 准备阶段的严格只读插件发现（无合成清单、无插件缓存写）。
+///
+/// 会话准备面（`host/prepared.rs`）经本函数调用：具体实现与插件装配同属宿主
+/// 装配面，准备面不新建越层引用（§0 依赖门边 2）。
+pub(crate) fn discover_enabled_plugins_readonly(
+    claude_dir: &std::path::Path,
     cwd: &str,
-) -> anyhow::Result<crate::session::executor::FrozenSessionData> {
-    let Some(source) = host.workspace_assembly.as_ref() else {
-        return Ok(host.session_manager.build_frozen_data(
-            cwd,
-            &host.plugin_skill_roots,
-            &host.plugin_agent_dirs,
-        ));
-    };
-    let config = if std::fs::canonicalize(&source.startup_cwd).ok().as_deref()
-        == Some(std::path::Path::new(cwd))
-    {
-        host.peri_config.read().clone()
-    } else {
-        crate::provider::ConfigSource::load_at(
-            std::path::Path::new(cwd),
-            host.config_source.global_path().to_owned(),
-        )?
-        .loaded_merged()
-    };
-    let plugins = if source.bare {
-        None
-    } else {
-        let claude_dir = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".claude");
-        Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
-            &claude_dir,
-            Some(std::path::Path::new(cwd)),
-        ))
-    };
-    Ok(host.session_manager.build_frozen_data_with_config(
-        &config,
-        cwd,
-        plugins
-            .as_ref()
-            .map(|plugins| plugins.all_skill_roots.as_slice())
-            .unwrap_or_default(),
-        plugins
-            .as_ref()
-            .map(|plugins| plugins.all_agent_dirs.as_slice())
-            .unwrap_or_default(),
-    ))
+) -> Result<PluginLoadResult, peri_middlewares::plugin::LoaderError> {
+    peri_middlewares::plugin::load_enabled_plugins_aggregated_readonly(
+        claude_dir,
+        Some(std::path::Path::new(cwd)),
+    )
 }
 
 /// Bind session execution identity before static discovery or dynamic load can use the pool.
@@ -113,6 +78,16 @@ fn pending_mcp_pool(
     pool
 }
 
+/// 准备路径一次加载的插件数据：聚合本身 + 由该聚合派生的 roots。
+///
+/// 装配面消费同一对象，不重读插件目录；`data` 为 `None` 表示 host 级/bare。
+#[derive(Clone)]
+pub struct PreparedPlugins {
+    pub data: Option<PluginLoadResult>,
+    pub skill_roots: Vec<SkillRoot>,
+    pub agent_dirs: Vec<std::path::PathBuf>,
+}
+
 pub struct HostAssemblyInput {
     pub provider: LlmProvider,
     pub peri_config: Arc<RwLock<PeriConfig>>,
@@ -120,7 +95,13 @@ pub struct HostAssemblyInput {
     /// 经 [`crate::provider::ConfigSource::load`] 构建一次）。
     pub config_source: Arc<crate::provider::ConfigSource>,
     pub permission_mode: Arc<SharedPermissionMode>,
-    pub thread_store: Arc<dyn ThreadStore>,
+    /// 会话资源门面（消费侧唯一会话行为句柄）：Agent transcript/subagent、middleware、
+    /// 协议面与 Controller 都经它访问会话，装配面不再另开裸存储句柄。
+    pub session_resources: Arc<dyn SessionResources>,
+    /// 部署关闭权（non-Clone）：由部署入口（TUI/print/stdio）从资源工厂取得后注入，
+    /// 宿主在**自己的任务排空之后**消费它关闭会话存储。会话级装配与测试注入 `None`
+    /// ——它们不是部署 owner，没有全局销毁权。
+    pub session_store_shutdown: Option<Box<dyn SessionStoreShutdownPort>>,
     /// 工作目录（用于加载 project/local settings hooks）
     pub cwd: String,
     /// 跳过 settings hooks / LSP / 插件（print --bare 语义）
@@ -128,6 +109,9 @@ pub struct HostAssemblyInput {
     /// 驱动 cron tick（TUI=true，复刻迁移前 TUI 每秒 tick 行为；print/stdio
     /// 保持现状无 tick——行为零变化，L2 遗留登记 M-TUI issue）。
     pub drive_cron_tick: bool,
+    /// 准备路径一次加载的插件聚合：`Some` 时装配面不再重读插件目录
+    /// （`None` = 既有语义，由装配面自行加载；仅 host 级/非准备调用点如此）。
+    pub prepared_plugins: Option<PreparedPlugins>,
 }
 
 /// Construct terminal hook execution; the session environment owns admission and joining.
@@ -194,7 +178,7 @@ pub fn assemble_hook_groups(
 /// peri_config 冻结快照 + cron scheduler（可选）注入。
 #[allow(clippy::too_many_arguments)] // 装配注入面：端口/工厂逐项注入，L5 装配迁出后可分组
 pub fn build_session_manager(
-    thread_store: Arc<dyn ThreadStore>,
+    session_resources: Arc<dyn SessionResources>,
     provider: LlmProvider,
     peri_config: &Arc<RwLock<PeriConfig>>,
     permission_mode: Arc<SharedPermissionMode>,
@@ -207,7 +191,7 @@ pub fn build_session_manager(
 ) -> SessionManager {
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
     SessionManager::new(
-        thread_store,
+        session_resources,
         provider,
         peri_config_snapshot,
         permission_mode,
@@ -266,7 +250,9 @@ pub async fn assemble_server_config_with_mcp_apps(
 pub(crate) async fn assemble_server_config_with_mcp_profile(
     input: HostAssemblyInput,
     mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
-    session_resources: bool,
+    // `true` = 会话级装配（带 workspace 装配与 per-session MCP 池）；`false` = host 级
+    // 装配。与会话资源门面字段 `session_resources` 不同义，故另名 `session_scoped`。
+    session_scoped: bool,
     activation: Option<tokio_util::sync::CancellationToken>,
 ) -> AcpServerConfig {
     let (host_task_owner, host_task_spawner) = HostTaskOwner::new();
@@ -276,19 +262,33 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         peri_config,
         config_source,
         permission_mode,
-        thread_store,
+        session_resources,
+        session_store_shutdown,
         cwd,
         bare,
         drive_cron_tick,
+        prepared_plugins,
     } = input;
 
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
 
-    // ── 插件聚合数据（bare 时跳过；迁移前 TUI launch / cli_print 各自构造）──
-    let plugin_data: Option<PluginLoadResult> = if bare || !session_resources {
+    // ── 插件聚合数据（bare 时跳过；准备路径消费同一聚合，不重读插件目录）──
+    let (prepared_data, prepared_skill_roots, prepared_agent_dirs) = match prepared_plugins {
+        Some(prepared) => (
+            Some(prepared.data),
+            Some(prepared.skill_roots),
+            Some(prepared.agent_dirs),
+        ),
+        None => (None, None, None),
+    };
+    let prepared_supplied = prepared_skill_roots.is_some();
+    let plugin_data: Option<PluginLoadResult> = if bare || !session_scoped {
         None
+    } else if prepared_supplied {
+        // 准备路径已严格只读加载一次：装配面消费同一聚合，不重读插件目录。
+        prepared_data.flatten()
     } else {
         Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
             &claude_dir,
@@ -330,7 +330,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     let (oauth_event_tx, oauth_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::event::oauth::HostOAuthEvent>();
     let mcp_pool_concrete: Option<Arc<peri_middlewares::mcp::McpClientPool>> = if bare
-        || !session_resources
+        || !session_scoped
     {
         None
     } else {
@@ -473,7 +473,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                     pending_mcp_pool(
                         mcp_task_spawner.clone(),
                         mcp_profile.clone(),
-                        session_resources.then_some(std::path::Path::new(&cwd)),
+                        session_scoped.then_some(std::path::Path::new(&cwd)),
                     )
                 }),
             ),
@@ -489,7 +489,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         .clone()
         .map(|p| p as Arc<dyn McpSubscriptionPort>);
     // MCP over ACP 服务：会话 setup 声明的 `type: "acp"` server 经它建连，连接
-    // 进的就是**本装配的池**——会话级装配（`session_resources`）才有池，连接
+    // 进的就是**本装配的池**——会话级装配（`session_scoped`）才有池，连接
     // 因此只能进声明它的会话的工具面。host 级装配无池即无此服务。
     let acp_mcp: Option<Arc<dyn peri_acp_types::ports::AcpMcpServerPort>> =
         mcp_pool_concrete.clone().map(|pool| {
@@ -519,7 +519,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         peri_middlewares::assembly::default_workflow_middleware_factory();
 
     // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
-    if !bare && !session_resources {
+    if !bare && !session_scoped {
         let claude_dir_clone = claude_dir.clone();
         let _ = host_task_spawner.spawn(
             HostTaskOwnerKind::Startup,
@@ -536,20 +536,24 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         );
     }
 
-    let plugin_skill_roots = plugin_data
-        .as_ref()
-        .map(|pd| pd.all_skill_roots.clone())
-        .unwrap_or_default();
+    let plugin_skill_roots = prepared_skill_roots.unwrap_or_else(|| {
+        plugin_data
+            .as_ref()
+            .map(|pd| pd.all_skill_roots.clone())
+            .unwrap_or_default()
+    });
     // Phase 6 B2：插件命令静态条目预转（全路径引用豁免见
     // scripts/import-exemptions.conf 边 2 assemble 路径；bare 时为空）。
     let plugin_command_entries = plugin_data
         .as_ref()
         .map(|pd| peri_middlewares::plugin::plugin_route_entries(&pd.all_commands))
         .unwrap_or_default();
-    let plugin_agent_dirs = plugin_data
-        .as_ref()
-        .map(|pd| pd.all_agent_dirs.clone())
-        .unwrap_or_default();
+    let plugin_agent_dirs = prepared_agent_dirs.unwrap_or_else(|| {
+        plugin_data
+            .as_ref()
+            .map(|pd| pd.all_agent_dirs.clone())
+            .unwrap_or_default()
+    });
     // H5：全局 settings.json（config.lspServers）与插件 LSP 服务器合并
     //（优先级对齐 MCP：global < plugin；无插件时全局配置单独生效）。
     // 读取路径跟随宿主全局配置加载机制（config_path，支持测试重定向）。
@@ -573,7 +577,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         &plugin_hooks,
         settings_hooks.as_ref(),
         &cwd,
-        bare || !session_resources,
+        bare || !session_scoped,
     );
     let flat_hooks: Vec<RegisteredHook> = hook_groups.iter().flatten().cloned().collect();
     tracing::info!(
@@ -585,7 +589,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
 
     let session_manager = build_session_manager(
-        thread_store.clone(),
+        session_resources.clone(),
         provider.clone(),
         &peri_config,
         permission_mode.clone(),
@@ -600,7 +604,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     );
 
     // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）
-    let (langfuse_session, langfuse_shutdown_owner) = if let Some(config) = (!session_resources)
+    let (langfuse_session, langfuse_shutdown_owner) = if let Some(config) = (!session_scoped)
         .then(peri_controller::langfuse::LangfuseConfig::from_env)
         .flatten()
     {
@@ -614,7 +618,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     };
 
     AcpServerConfig {
-        workspace_assembly: (!session_resources).then(|| WorkspaceAssembly {
+        workspace_assembly: (!session_scoped).then(|| WorkspaceAssembly {
             startup_cwd: cwd.clone(),
             bare,
             mcp_profile,
@@ -649,8 +653,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         settings_hooks,
         shared_tools,
         workflow_middleware_factory,
-        thread_store: thread_store.clone(),
-        controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),
+        session_resources: session_resources.clone(),
+        session_store_shutdown,
+        controller: Arc::new(peri_controller::Controller::new(session_resources.clone())),
         langfuse_session,
         langfuse_shutdown_owner,
         // 默认 false（TUI/print 保留全部命令）；stdio 装配点（assemble_stdio_config）

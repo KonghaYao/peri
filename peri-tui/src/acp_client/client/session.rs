@@ -441,7 +441,11 @@ impl AcpTuiClient {
             && self
                 .session_recovery
                 .load(std::sync::atomic::Ordering::Acquire)
-            && crate::kit::popups::confirm_popup::confirm_dirty_recovery(target.clone()).await
+            && crate::kit::popups::confirm_popup::confirm_risk_choice(
+                crate::kit::popups::confirm_popup::RiskPrompt::DirtyRecovery(target.clone()),
+            )
+            .await
+                == crate::kit::popups::confirm_popup::RiskChoice::Accepted
         {
             // operation gate 固定 source/target；确认等待期间不能提交其他 transition。
             let ack = peri_acp_types::workspace::ResetDirtyRequest {

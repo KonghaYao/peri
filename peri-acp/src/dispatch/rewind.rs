@@ -292,7 +292,7 @@ pub async fn rewind_execute(
     ctx.raw_text = String::new();
     // Phase 5 Step 5：不再构造 CommandContext.args JSON（slash 形态解析已迁
     // ArgsSchema）——RPC 前置校验已拿到结构化参数，直接调共享执行体。
-    ctx.thread_store = Some(controller.sessions());
+    ctx.session_resources = Some(controller.sessions());
     ctx.thread_id = thread_id;
     ctx.task_manager = task_manager;
     ctx.frozen_claude_md = frozen_claude_md;

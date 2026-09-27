@@ -99,10 +99,6 @@ pub struct WorkflowAgentContext {
     pub frozen_date: Option<String>,
     pub frozen_language: Option<String>,
 
-    /// ThreadStore（持久化 workflow agent 消息到统一存储）。
-    /// None = 不持久化（内存中运行，当前行为）。
-    pub thread_store: Option<Arc<dyn peri_acp_types::store::ThreadStore>>,
-
     /// 进度事件发送通道（None = 不发送 agent_progress 事件）
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>,
 
@@ -182,7 +178,6 @@ pub fn create_default_executor(
         permission_mode: None,
         frozen_date: None,
         frozen_language: None,
-        thread_store: None,
         progress_tx: None,
         subagent_ctx_builder: None,
         agent_prompt_builder: Arc::new(|_, _, _, _| String::new()),

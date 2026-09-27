@@ -140,7 +140,7 @@ fn make_intercept_request<'a>(
         cwd: "/tmp",
         session_id,
         cancel,
-        thread_store: None,
+        session_resources: None,
         thread_id: None,
         frozen_claude_md: None,
         frozen_claude_local_md: None,

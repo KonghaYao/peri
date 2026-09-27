@@ -3,6 +3,9 @@
 #[cfg(test)]
 use super::*;
 
+#[cfg(test)]
+use peri_acp_types::session_store::SessionStoreLocator;
+
 #[test]
 fn test_propagate_tui_result_preserves_startup_failure() {
     let error = propagate_tui_result(Err(anyhow::anyhow!("database open failed")))
@@ -266,4 +269,119 @@ fn test_prescan_last_occurrence_wins() {
         pre_scan_config_file(args.into_iter()),
         Some(PathBuf::from("b"))
     );
+}
+
+// ─── 会话存储部署参数（D-04）────────────────────────────────────────────────
+
+/// `--db-path` 与 `--session-store` 互斥：同时出现是参数错误，且早于任何 I/O。
+#[test]
+fn test_db_path_conflicts_with_session_store_before_io() {
+    let cli = Cli::try_parse_from([
+        "peri",
+        "--db-path",
+        "/tmp/a.db",
+        "--session-store",
+        "/tmp/b.db",
+    ])
+    .unwrap();
+    assert_eq!(
+        validate_cli(&cli),
+        Err("--db-path cannot be combined with --session-store")
+    );
+    // 部署参数构造同样拒绝，不设隐式覆盖顺序。
+    assert!(session_store_deployment(&cli, AccessMode::ReadWrite).is_err());
+}
+
+/// 定位参数归一：默认 / `--db-path`（含 `--dbPath` 别名）/ `--session-store` + 可选
+/// 引擎与凭证来源；访问意图由入口给出。
+#[test]
+fn test_session_store_deployment_normalizes_locator_options() {
+    let cli = Cli::try_parse_from(["peri"]).unwrap();
+    let deployment = session_store_deployment(&cli, AccessMode::ReadWrite).unwrap();
+    assert_eq!(deployment.locator(), &SessionStoreLocator::Default);
+    assert_eq!(deployment.access(), AccessMode::ReadWrite);
+    assert!(deployment.engine_name().is_none());
+    assert!(deployment.credential_env_name().is_none());
+
+    for flag in ["--db-path", "--dbPath"] {
+        let cli = Cli::try_parse_from(["peri", flag, "/tmp/threads.db"]).unwrap();
+        let deployment = session_store_deployment(&cli, AccessMode::ReadWrite).unwrap();
+        assert_eq!(
+            deployment.locator(),
+            &SessionStoreLocator::LocalPath(std::path::PathBuf::from("/tmp/threads.db"))
+        );
+        assert_eq!(deployment.access(), AccessMode::ReadWrite);
+    }
+
+    let cli = Cli::try_parse_from([
+        "peri",
+        "--session-store",
+        "env:TURSO_URL",
+        "--session-store-token-env",
+        "TURSO_TOEKN",
+        "--session-store-engine",
+        "turso",
+    ])
+    .unwrap();
+    let deployment = session_store_deployment(&cli, AccessMode::ReadOnly).unwrap();
+    assert_eq!(
+        deployment.locator(),
+        &SessionStoreLocator::Locator("env:TURSO_URL".to_owned())
+    );
+    assert_eq!(deployment.engine_name(), Some("turso"));
+    assert_eq!(deployment.credential_env_name(), Some("TURSO_TOEKN"));
+    assert_eq!(deployment.access(), AccessMode::ReadOnly);
+}
+
+/// `Debug` 不回显 locator 原文（远程 locator 含主机与库名）。
+#[test]
+fn test_session_store_deployment_debug_keeps_locator_out() {
+    let cli = Cli::try_parse_from([
+        "peri",
+        "--session-store",
+        "turso://sentinel-db-sentinel.turso.io",
+    ])
+    .unwrap();
+    let deployment = session_store_deployment(&cli, AccessMode::ReadWrite).unwrap();
+    let rendered = format!("{deployment:?}");
+    assert!(!rendered.contains("sentinel-db-sentinel"));
+    assert!(rendered.contains("<configured>"));
+}
+
+/// meta 的受限 grammar 同步：只接受定位参数与 session 自身的 `--json`。
+#[test]
+fn test_meta_grammar_allows_session_store_options() {
+    let session_id = "550e8400-e29b-41d4-a716-446655440000";
+    let cli = Cli::try_parse_from([
+        "peri",
+        "--session-store",
+        "env:TURSO_URL",
+        "--session-store-token-env",
+        "TURSO_TOEKN",
+        "meta",
+        "session",
+        session_id,
+        "--json",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_ok());
+    assert_eq!(
+        session_store_deployment(&cli, AccessMode::ReadOnly)
+            .unwrap()
+            .access(),
+        AccessMode::ReadOnly
+    );
+
+    // 仍拒绝与只读元数据无关的参数。
+    for extra in [
+        vec!["--model", "sonnet"],
+        vec!["--bare"],
+        vec!["--settings", "x.json"],
+    ] {
+        let mut args = vec!["peri"];
+        args.extend(extra.iter().copied());
+        args.extend(["meta", "session", session_id]);
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(validate_cli(&cli).is_err());
+    }
 }

@@ -1,7 +1,7 @@
-use std::path::PathBuf;
-
-use peri_acp_types::thread::ThreadMeta;
-use peri_tui::thread::{ReadOnlyThreadStoreError, open_thread_store_read_only};
+use peri_acp_types::session_resources::{SessionResourceError, SessionResourceErrorKind};
+use peri_acp_types::session_store::SessionStoreDeployment;
+use peri_acp_types::thread::{ThreadId, ThreadMeta};
+use peri_resources::{StoreOpenFailure, classify_open_failure};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -52,6 +52,10 @@ enum MetaErrorKind {
     SchemaIncompatible,
     SessionNotFound,
     CorruptSessionData,
+    /// 存储定位/凭证来源等配置错误（缺配置、互斥、未知引擎）。
+    StoreNotConfigured,
+    /// 存储后端不可用（远程 adapter 未接线、连接失败）。
+    StoreUnavailable,
     InternalError,
 }
 
@@ -65,6 +69,8 @@ impl MetaErrorKind {
             Self::SchemaIncompatible => "schema_incompatible",
             Self::SessionNotFound => "session_not_found",
             Self::CorruptSessionData => "corrupt_session_data",
+            Self::StoreNotConfigured => "store_not_configured",
+            Self::StoreUnavailable => "store_unavailable",
             Self::InternalError => "internal_error",
         }
     }
@@ -78,6 +84,8 @@ impl MetaErrorKind {
             Self::SchemaIncompatible => "thread database schema is incompatible",
             Self::SessionNotFound => "session was not found",
             Self::CorruptSessionData => "stored session metadata is corrupt",
+            Self::StoreNotConfigured => "session store configuration is invalid",
+            Self::StoreUnavailable => "session store is currently unavailable",
             Self::InternalError => "an internal error occurred",
         }
     }
@@ -85,9 +93,12 @@ impl MetaErrorKind {
     fn exit_code(self) -> u8 {
         match self {
             Self::InternalError => 1,
-            Self::InvalidArgument | Self::InvalidSessionId => 2,
+            Self::InvalidArgument | Self::InvalidSessionId | Self::StoreNotConfigured => 2,
             Self::DatabaseNotFound | Self::SessionNotFound => 3,
-            Self::DatabaseUnreadable | Self::SchemaIncompatible | Self::CorruptSessionData => 4,
+            Self::DatabaseUnreadable
+            | Self::SchemaIncompatible
+            | Self::CorruptSessionData
+            | Self::StoreUnavailable => 4,
         }
     }
 }
@@ -114,7 +125,7 @@ pub(crate) fn internal_error_outcome(json: bool) -> MetaCommandOutcome {
 }
 
 pub(crate) async fn run_meta_session(
-    db_path: Option<PathBuf>,
+    deployment: SessionStoreDeployment,
     session_id: String,
     json: bool,
 ) -> MetaCommandOutcome {
@@ -124,32 +135,44 @@ pub(crate) async fn run_meta_session(
         return error_outcome(MetaErrorKind::InvalidSessionId, json);
     }
 
-    let store = match open_thread_store_read_only(db_path).await {
-        Ok(store) => store,
-        Err(error) => return error_outcome(map_storage_error(&error), json),
+    // 统一只读入口：与 TUI/print/stdio 共享同一个 typed open request 与后端选择点，
+    // 访问意图在入口处固定为只读（不写任何本机文件、不登记 owner、不建目录）。
+    let resources = match peri_resources::Resources::open_deployment(&deployment).await {
+        Ok(resources) => resources,
+        Err(error) => return error_outcome(map_open_error(&error), json),
     };
-    let meta = match store.load_meta(&session_id).await {
+    let meta = match resources
+        .session_resources()
+        .load_session_meta(&ThreadId::from(session_id))
+        .await
+    {
         Ok(meta) => meta,
-        Err(error) => {
-            let kind = error
-                .downcast_ref::<ReadOnlyThreadStoreError>()
-                .map(map_storage_error)
-                .unwrap_or(MetaErrorKind::InternalError);
-            return error_outcome(kind, json);
-        }
+        Err(error) => return error_outcome(map_resource_error(&error), json),
     };
 
     success_outcome(SessionMetaDtoV1::from(meta), json)
 }
 
-fn map_storage_error(error: &ReadOnlyThreadStoreError) -> MetaErrorKind {
-    match error {
-        ReadOnlyThreadStoreError::DatabaseNotFound => MetaErrorKind::DatabaseNotFound,
-        ReadOnlyThreadStoreError::DatabaseUnreadable => MetaErrorKind::DatabaseUnreadable,
-        ReadOnlyThreadStoreError::SchemaIncompatible => MetaErrorKind::SchemaIncompatible,
-        ReadOnlyThreadStoreError::SessionNotFound => MetaErrorKind::SessionNotFound,
-        ReadOnlyThreadStoreError::CorruptSessionData => MetaErrorKind::CorruptSessionData,
-        ReadOnlyThreadStoreError::Internal => MetaErrorKind::InternalError,
+/// 门面读取失败按既有只读命令语义分类：只读打开已经成功，因此这里的失败只表达
+/// 「这条会话查不到」「库内容读不懂」或「库此刻读不了」，其余一律归内部错误。
+fn map_resource_error(error: &SessionResourceError) -> MetaErrorKind {
+    match error.kind() {
+        SessionResourceErrorKind::NotFound => MetaErrorKind::SessionNotFound,
+        SessionResourceErrorKind::Corrupt { .. } => MetaErrorKind::CorruptSessionData,
+        SessionResourceErrorKind::Unavailable { .. } => MetaErrorKind::DatabaseUnreadable,
+        _ => MetaErrorKind::InternalError,
+    }
+}
+
+fn map_open_error(error: &anyhow::Error) -> MetaErrorKind {
+    match classify_open_failure(error) {
+        StoreOpenFailure::NotConfigured => MetaErrorKind::StoreNotConfigured,
+        StoreOpenFailure::NotFound => MetaErrorKind::DatabaseNotFound,
+        StoreOpenFailure::Unreadable => MetaErrorKind::DatabaseUnreadable,
+        StoreOpenFailure::SchemaIncompatible => MetaErrorKind::SchemaIncompatible,
+        StoreOpenFailure::Corrupt => MetaErrorKind::CorruptSessionData,
+        StoreOpenFailure::Unavailable => MetaErrorKind::StoreUnavailable,
+        StoreOpenFailure::Internal => MetaErrorKind::InternalError,
     }
 }
 

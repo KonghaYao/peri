@@ -6,8 +6,9 @@ use crate::middleware::{
     Middleware,
 };
 use crate::session::store::FrozenContext;
+use crate::session::test_resources::mock::MockSessionResources;
 use crate::session::{MessageKind, MessageQueue, MessageSource, Session};
-use crate::thread::{SqliteThreadStore, ThreadId, ThreadMeta, ThreadStore};
+use crate::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
@@ -141,7 +142,7 @@ impl peri_model::Model for CountingSummaryModel {
 struct BudgetScenario {
     _dir: tempfile::TempDir,
     context: StageContext,
-    store: Arc<SqliteThreadStore>,
+    store: Arc<MockSessionResources>,
     thread_id: ThreadId,
     reason_calls: Arc<AtomicUsize>,
     compact_calls: Arc<AtomicUsize>,
@@ -151,11 +152,7 @@ struct BudgetScenario {
 
 async fn make_scenario(cancel_on_third: bool) -> BudgetScenario {
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        SqliteThreadStore::new(dir.path().join("budget.db"))
-            .await
-            .unwrap(),
-    );
+    let store = MockSessionResources::new();
     let thread_id = store
         .create_thread(ThreadMeta::new(dir.path().to_string_lossy()))
         .await
@@ -270,11 +267,7 @@ async fn test_budget_recovery_loop_stops_after_two_committed_fulls() {
         .persist_tx_handle()
         .unwrap();
     MessageTranscript::flush_via_tx(&tx).await.unwrap();
-    let payloads = scenario
-        .store
-        .load_payloads(&scenario.thread_id)
-        .await
-        .unwrap();
+    let payloads = scenario.store.payloads();
     let flags = scenario
         .store
         .load_message_flags(&scenario.thread_id)

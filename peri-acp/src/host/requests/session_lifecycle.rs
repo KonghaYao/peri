@@ -10,8 +10,12 @@ use agent_client_protocol::schema::v1::{
     LoadSessionResponse, NewSessionResponse, ResumeSessionResponse, SessionId, SessionNotification,
 };
 use peri_acp_types::ports::WorkflowMiddlewarePort;
-use peri_acp_types::thread::ThreadMeta;
-use peri_acp_types::workspace::ReadOnlyAdmission;
+use peri_acp_types::session_resources::{
+    BindingRecheck, BindingState, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta,
+    SessionMetaPatch,
+};
+use peri_acp_types::thread::{CancelPolicy, ThreadId};
+use peri_acp_types::workspace::{ReadOnlyAdmission, ResolvedWorkspace, SessionBinding};
 use peri_acp_types::PeriCaps;
 use serde_json::Value;
 use tracing::{info, warn};
@@ -21,69 +25,49 @@ use super::super::workspace::BindingCheck;
 use super::super::{build_mode_state, AcpServerConfig, SessionState};
 use crate::dispatch::config_update::make_config_options;
 use crate::dispatch::ReplaySender;
-use crate::session::frozen_snapshot::{decode_frozen_snapshot, encode_frozen_snapshot};
+use crate::session::frozen_snapshot::decode_frozen_snapshot;
 use crate::{dispatch, transport::types::AcpError};
 
 #[path = "legacy_session.rs"]
 mod legacy_session;
 
-async fn store_frozen_snapshot(
-    cfg: &AcpServerConfig,
-    session_id: &str,
-    frozen_data: &crate::session::executor::FrozenSessionData,
-) -> Result<bool, AcpError> {
-    let snapshot = encode_frozen_snapshot(frozen_data).map_err(|error| {
-        AcpError::new(-32603, format!("Frozen snapshot encode failed: {error}"))
-    })?;
-    cfg.thread_store
-        .store_frozen_snapshot_if_absent(&session_id.to_string(), &snapshot)
-        .await
-        .map_err(|error| AcpError::new(-32603, format!("Frozen snapshot store failed: {error}")))
-}
-
-async fn store_new_frozen_snapshot_or_compensate(
-    cfg: &AcpServerConfig,
-    session_id: &str,
-    frozen_data: &crate::session::executor::FrozenSessionData,
-) -> Result<(), AcpError> {
-    let stored = store_frozen_snapshot(cfg, session_id, frozen_data).await;
-    if !matches!(stored, Ok(true)) {
-        let error = match stored {
-            Ok(false) => AcpError::new(
-                -32603,
-                format!("Frozen snapshot already exists for new session: {session_id}"),
-            ),
-            Err(error) => error,
-            Ok(true) => unreachable!(),
-        };
-        if let Err(cleanup_error) = cfg
-            .thread_store
-            .delete_thread(&session_id.to_string())
-            .await
-        {
-            warn!(
-                session_id,
-                error = %cleanup_error,
-                "failed to compensate thread after frozen snapshot store failure"
-            );
-        }
-        return Err(error);
+/// fork source 读取/保存失败 → ACP 错误。
+///
+/// 门面失败保留领域分类（含只读准入与未决持久化载荷）；领域与 IO 失败按
+/// workspace 语义上报，不把门面错误降级成「存储不可用」。
+fn fork_source_error(error: anyhow::Error) -> AcpError {
+    match error.downcast::<peri_acp_types::session_resources::SessionResourceError>() {
+        Ok(error) => super::super::workspace::resource_error(error),
+        Err(error) => super::super::workspace::workspace_error(error),
     }
-    Ok(())
 }
 
+/// 读取并解码 bound 会话的 frozen 数据。
+///
+/// 快照缺 frozen 是错误（bound 会话必须有），本构建读不懂也是错误——两者都不是
+/// 「没有 frozen，可以重建」：重建会把已发布的冻结输入换成当前目录/日期。
 async fn load_frozen_data(
     cfg: &AcpServerConfig,
     session_id: &str,
 ) -> Result<crate::session::executor::FrozenSessionData, AcpError> {
     let snapshot = cfg
-        .controller
-        .sessions()
-        .load_frozen_snapshot(&session_id.to_owned())
+        .session_resources
+        .load_session_snapshot(&session_id.to_owned())
         .await
-        .map_err(super::super::workspace::workspace_error)?
-        .ok_or_else(|| AcpError::new(-32603, "Bound session has no frozen snapshot"))?;
-    decode_frozen_snapshot(&snapshot).map_err(super::super::workspace::workspace_error)
+        .map_err(super::super::workspace::resource_error)?;
+    match snapshot.frozen {
+        FrozenState::Present(bytes) => {
+            decode_frozen_snapshot(bytes.as_str()).map_err(super::super::workspace::workspace_error)
+        }
+        FrozenState::LegacyAbsent => Err(AcpError::new(
+            -32603,
+            "Bound session has no frozen snapshot",
+        )),
+        FrozenState::Unsupported => Err(AcpError::new(
+            -32603,
+            "Session frozen snapshot is not readable by this build",
+        )),
+    }
 }
 
 /// 一次恢复准入的结果。
@@ -104,7 +88,12 @@ async fn prepare_existing(
         .get("sessionId")
         .and_then(Value::as_str)
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-    legacy_session::prepare_for_restore(cfg, id, params.get("cwd").and_then(Value::as_str)).await?;
+    // legacy 无 frozen 的恢复：准备阶段按保存的 cwd 只读定格（严格只读插件、
+    // 不生成合成清单），装配消费同一份输入；其余情况返回 None，装配按既有
+    // 入口准备（下一批统一为单一 prepared 路径）。
+    let legacy_prepared =
+        legacy_session::prepare_for_restore(cfg, id, params.get("cwd").and_then(Value::as_str))
+            .await?;
     let admission = super::super::workspace::acquire_for_load(
         cfg,
         sessions,
@@ -173,8 +162,17 @@ async fn prepare_existing(
         let (frozen, environment, workflow_middleware, lsp_pool) = match owner.as_ref() {
             Some(_) => {
                 let frozen = load_frozen_data(cfg, id).await?;
-                let environment =
-                    super::super::workspace::SessionEnvironment::assemble(cfg, &cwd, id).await?;
+                let environment = match legacy_prepared.as_ref() {
+                    Some(inputs) => {
+                        super::super::workspace::SessionEnvironment::assemble_prepared(
+                            cfg, inputs, id,
+                        )
+                        .await?
+                    }
+                    None => {
+                        super::super::workspace::SessionEnvironment::assemble(cfg, &cwd, id).await?
+                    }
+                };
                 let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
                 let workflow_middleware =
                     create_session_workflow_middleware(local, &cwd, id, &frozen);
@@ -273,43 +271,12 @@ async fn response_identity(
     }
 }
 
-pub(super) fn retain_failed_assembly(
-    sessions: &mut HashMap<String, SessionState>,
-    id: &str,
-    cwd: &str,
-    owner: Arc<dyn peri_acp_types::workspace::SessionExecutionLease>,
-    environment: Arc<super::super::workspace::SessionEnvironment>,
-) {
-    sessions.insert(
-        id.to_owned(),
-        SessionState {
-            session_id: id.to_owned(),
-            thread_id: id.to_owned(),
-            cwd: cwd.to_owned(),
-            execution_owner: Some(owner),
-            environment: Some(environment),
-            closing: true,
-            history: Vec::new(),
-            history_payloads: Vec::new(),
-            cancel_token: None,
-            frozen: None,
-            recall_items: Vec::new(),
-            agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: None,
-            lsp_pool: None,
-            title: None,
-            tags: Vec::new(),
-            continuation_armed: false,
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            continuation_mq_steering_pending: false,
-            lease: super::super::lease::WriterLease::acquired("default"),
-        },
-    );
-}
-
 /// 绑定复核强度见 [`BindingCheck`](super::super::workspace::BindingCheck)：
 /// 协议读请求复核完整发现快照，同一次准入内的身份读取只复核已记录证据。
+///
+/// 绑定分类走门面的轻量投影（不拉全历史）；本机无法验证的绑定
+/// （[`BindingState::ExternalOrUnregistered`]）不冒充「没有绑定」，其执行目录由
+/// 保存路径解析给出，执行准入另经 `check_expected` 复核。
 async fn context_for_session(cfg: &AcpServerConfig, session_id: &str) -> Result<Value, AcpError> {
     session_context_payload(cfg, session_id, BindingCheck::Full).await
 }
@@ -324,22 +291,29 @@ async fn session_context_payload(
     session_id: &str,
     check: BindingCheck,
 ) -> Result<Value, AcpError> {
-    let store = cfg.controller.sessions();
-    let binding = store
-        .load_session_binding(&session_id.to_owned())
+    let resources = cfg.controller.sessions();
+    let id = ThreadId::from(session_id.to_owned());
+    let state = resources
+        .load_session_binding(&id)
         .await
-        .map_err(super::super::workspace::workspace_error)?;
-    let meta = store
-        .load_meta(&session_id.to_owned())
+        .map_err(super::super::workspace::resource_error)?;
+    let meta = resources
+        .load_session_meta(&id)
         .await
-        .map_err(super::super::workspace::workspace_error)?;
+        .map_err(super::super::workspace::resource_error)?;
+    let binding = match &state {
+        BindingState::Bound(binding) => Some(binding.clone()),
+        _ => None,
+    };
     let workspace = if binding.is_some() {
-        let id = session_id.to_owned();
-        match check {
-            BindingCheck::Full => store.validate_session_binding(&id).await,
-            BindingCheck::Recorded => store.reassert_session_binding(&id).await,
-        }
-        .map_err(super::super::workspace::workspace_error)?
+        let recheck = match check {
+            BindingCheck::Full => BindingRecheck::Full,
+            BindingCheck::Recorded => BindingRecheck::Recorded,
+        };
+        resources
+            .validate_bound_workspace(&id, recheck)
+            .await
+            .map_err(super::super::workspace::resource_error)?
     } else {
         // Resolve the saved location for a restore request; context reads never adopt it.
         legacy_session::resolve_saved_workspace(cfg, &meta).await?
@@ -370,11 +344,10 @@ pub(crate) async fn handle_context(
         (Some(id), None) => context_for_session(cfg, id).await,
         (None, Some(cwd)) => {
             let workspace = cfg
-                .controller
-                .sessions()
+                .session_resources
                 .resolve_workspace(std::path::Path::new(cwd))
                 .await
-                .map_err(super::super::workspace::workspace_error)?;
+                .map_err(super::super::workspace::resource_error)?;
             Ok(serde_json::json!({ "version": 1, "workspace": workspace }))
         }
         _ => Err(AcpError::new(
@@ -404,11 +377,13 @@ pub(crate) async fn handle_metadata(
         .and_then(Value::as_str)
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
         .to_owned();
-    let store = cfg.controller.sessions();
-    let meta = store
-        .load_meta(&id)
+    // 轻量 metadata 投影走门面（不拉全历史）；`history=true` 的历史回放经门面的
+    // 完整逻辑上下文读取（继承区 + 自有 payload），不再由协议面拼祖先链。
+    let meta = cfg
+        .session_resources
+        .load_session_meta(&id)
         .await
-        .map_err(super::super::workspace::workspace_error)?;
+        .map_err(super::super::workspace::resource_error)?;
     let mut response = serde_json::json!({ "sessionId": id, "title": meta.title, "cwd": meta.cwd, "permissionMode": build_mode_state(&cfg.permission_mode).current_mode_id.to_string(), "modelAlias": cfg.peri_config.read().config.active_alias });
     {
         let provider = cfg.provider.read();
@@ -426,10 +401,12 @@ pub(crate) async fn handle_metadata(
             .map(|profile| profile.provider.clone()));
     }
     if history {
-        let payloads = store
-            .load_context_payloads(&id)
+        let payloads = cfg
+            .controller
+            .sessions()
+            .load_session_history(&id)
             .await
-            .map_err(super::super::workspace::workspace_error)?;
+            .map_err(super::super::workspace::resource_error)?;
         response["payloads"] = Value::Array(
             payloads
                 .iter()
@@ -440,13 +417,18 @@ pub(crate) async fn handle_metadata(
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(super::super::workspace::workspace_error)?,
         );
-        response["binding"] = serde_json::to_value(
-            store
-                .load_session_binding(&id)
-                .await
-                .map_err(super::super::workspace::workspace_error)?,
-        )
-        .map_err(super::super::workspace::workspace_error)?;
+        let state = cfg
+            .controller
+            .sessions()
+            .load_session_binding(&id)
+            .await
+            .map_err(super::super::workspace::resource_error)?;
+        let binding = match &state {
+            BindingState::Bound(binding) => Some(binding.clone()),
+            _ => None,
+        };
+        response["binding"] =
+            serde_json::to_value(binding).map_err(|e| AcpError::new(-32603, e.to_string()))?;
     }
     Ok(response)
 }
@@ -522,103 +504,105 @@ pub(crate) async fn handle_new(
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
 ) -> Result<Value, AcpError> {
-    let store = cfg.controller.sessions();
     let requested = params.get("cwd").and_then(Value::as_str).unwrap_or(".");
-    let workspace = store
+    let workspace = cfg
+        .session_resources
         .resolve_workspace(std::path::Path::new(requested))
         .await
-        .map_err(super::super::workspace::workspace_error)?;
+        .map_err(super::super::workspace::resource_error)?;
     let cwd = workspace
         .cwd
         .to_str()
         .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
         .to_owned();
-    let thread_id = store
-        .create_bound_thread(ThreadMeta::new(&cwd), &workspace)
+    // 只读准备（lease 之前）：定格配置/插件/frozen，不创建 thread、不占 lease、
+    // 不启动 MCP/LSP/hooks，也不写任何会话数据或本机登记。new 路径只在这里准备
+    // 一次，发布段消费同一个准备对象。
+    let prepared = super::super::prepared::PreparedSessionInputs::prepare_new(cfg, &cwd)?;
+    new_session_from_prepared(cfg, &workspace, &prepared, sessions).await
+}
+
+/// `session/new` 的发布段：消费**已定格**的准备输入，一次写出 meta/binding/frozen
+/// 并取得执行 owner，随后复核准入、装配环境、发布 live 状态。
+///
+/// 本函数不读配置、不加载插件、不重建 frozen：保存字节与 live 状态都取自调用方
+/// 给定的 `prepared`。测试以自己定格的准备对象直接驱动本函数，因此「保存字节 ==
+/// 给定的 frozen 字节」是可断言的；准备之后外部输入若被改写，任何在这里重读或
+/// 重建的实现都会产出不同字节而使断言失败。
+pub(crate) async fn new_session_from_prepared(
+    cfg: &AcpServerConfig,
+    workspace: &ResolvedWorkspace,
+    prepared: &super::super::prepared::PreparedSessionInputs,
+    sessions: &mut HashMap<String, SessionState>,
+) -> Result<Value, AcpError> {
+    let resources = cfg.session_resources.clone();
+    let cwd = prepared.cwd.clone();
+    // 身份一次生成：meta/binding/frozen 保存、执行代际与 owner 由门面在一次创建内
+    // 完成——ACP 不再分步拼 create/lease/frozen，也不做存储补偿。数据已保存但准入
+    // 失败（saved_but_not_admitted）原样上报，不谎称「确定未创建」。
+    let session_id = uuid::Uuid::now_v7().to_string();
+    let owner = resources
+        .create_session(&NewSession {
+            thread_id: session_id.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            meta: NewSessionMeta {
+                title: None,
+                cwd: cwd.clone(),
+                parent_thread_id: None,
+                hidden: false,
+                cancel_policy: CancelPolicy::default(),
+                snapshot_at_message_id: None,
+            },
+            binding: SessionBinding::from_workspace(workspace),
+            frozen: FrozenSnapshotBytes::new(prepared.frozen_encoded.clone()),
+        })
         .await
-        .map_err(super::super::workspace::workspace_error)?;
-    let session_id = thread_id.clone();
-    let owner = store
-        .acquire_execution_lease(&thread_id)
-        .await
-        .map_err(super::super::workspace::workspace_error)?;
-    if let Err(error) =
-        super::super::workspace::reassert_expected(cfg, &thread_id, Some(&cwd)).await
-    {
-        store
-            .delete_thread(&thread_id)
+        .map_err(super::super::workspace::resource_error)?;
+    let thread_id = session_id.clone();
+    // 创建后的同一次准入复核：与创建事务写入的绑定比对已记录证据。
+    if let Err(error) = resources.validate_session(&session_id, workspace).await {
+        resources
+            .abandon_initialization(&session_id, &owner)
             .await
-            .map_err(super::super::workspace::workspace_error)?;
-        owner
-            .mark_clean()
-            .await
-            .map_err(super::super::workspace::workspace_error)?;
-        return Err(error);
+            .map_err(super::super::workspace::resource_error)?;
+        return Err(super::super::workspace::resource_error(error));
     }
     let identity = match response_identity(cfg, &session_id).await {
         Ok(identity) => identity,
         Err(error) => {
-            store
-                .delete_thread(&thread_id)
+            resources
+                .abandon_initialization(&session_id, &owner)
                 .await
-                .map_err(super::super::workspace::workspace_error)?;
-            owner
-                .mark_clean()
-                .await
-                .map_err(super::super::workspace::workspace_error)?;
+                .map_err(super::super::workspace::resource_error)?;
             return Err(error);
         }
     };
-    let environment =
-        match super::super::workspace::SessionEnvironment::assemble(cfg, &cwd, &session_id).await {
-            Ok(environment) => environment,
-            Err(error) => {
-                store
-                    .delete_thread(&thread_id)
-                    .await
-                    .map_err(super::super::workspace::workspace_error)?;
-                owner
-                    .mark_clean()
-                    .await
-                    .map_err(super::super::workspace::workspace_error)?;
-                return Err(error);
-            }
-        };
+    // 装配失败时环境尚未建立（没有对外资源需要排空），撤销未发布的创建即可。
+    let environment = match super::super::workspace::SessionEnvironment::assemble_prepared(
+        cfg,
+        prepared,
+        &session_id,
+    )
+    .await
+    {
+        Ok(environment) => environment,
+        Err(error) => {
+            resources
+                .abandon_initialization(&session_id, &owner)
+                .await
+                .map_err(super::super::workspace::resource_error)?;
+            return Err(error);
+        }
+    };
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
 
     // ── Freeze system prompt data at session creation ──
     // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
     // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
     // GAP-05: frozen data 在 WorkflowMiddleware 创建前构建，注入到 executor。
-    let frozen_data = cfg.session_manager.build_frozen_data(
-        &cwd,
-        &cfg.plugin_skill_roots,
-        &cfg.plugin_agent_dirs,
-    );
-    if let Err(error) =
-        store_new_frozen_snapshot_or_compensate(cfg, &session_id, &frozen_data).await
-    {
-        if let Some(environment) = environment.as_ref() {
-            if !environment.shutdown().await {
-                retain_failed_assembly(
-                    sessions,
-                    &session_id,
-                    &cwd,
-                    owner.clone(),
-                    environment.clone(),
-                );
-                return Err(AcpError::new(
-                    -32010,
-                    "Session assembly cleanup incomplete; resources retained for shutdown retry",
-                ));
-            }
-        }
-        owner
-            .mark_clean()
-            .await
-            .map_err(super::super::workspace::workspace_error)?;
-        return Err(error);
-    }
+    // frozen 与准备阶段同源：内容与字节都来自同一 PreparedSessionInputs
+    // （日期/运行环境/配置/插件 roots 均为准备阶段定格的那一份），不二次构建。
+    let frozen_data = prepared.frozen.clone();
     cfg.session_manager.ensure_session(&session_id, &cwd);
 
     // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
@@ -720,12 +704,18 @@ pub(crate) async fn handle_reset_dirty(
     if !request.accept_risk {
         return Err(AcpError::new(-32602, "explicit risk acceptance required"));
     }
-    cfg.thread_store
-        .reset_dirty_execution(&request.target)
+    // 解除精确代际由门面统一承担：只解除本机 dirty，永不解除未决持久化。
+    cfg.session_resources
+        .reset_dirty_execution(&request)
         .await
-        .map_err(super::super::workspace::workspace_error)?;
+        .map_err(super::super::workspace::resource_error)?;
     Ok(serde_json::json!({}))
 }
+
+// 曾有的「会话存储登记」两条 RPC（`peri/session_store_status` /
+// `peri/session_register_store`）按用户裁决撤销：不再有本机登记、准入裁决与跨安装
+// 来源判定，配置里指到哪个 store 就直接用哪个。历史见
+// `docs/design/peri-acp-protocol.md`。
 
 pub(crate) async fn handle_load(
     params: &Value,
@@ -831,15 +821,14 @@ pub(crate) async fn handle_list(params: &Value, cfg: &AcpServerConfig) -> Result
             .unwrap_or(100)
             .clamp(1, 500) as u32;
         let page = cfg
-            .controller
-            .sessions()
-            .list_scoped_threads(&peri_acp_types::workspace::ScopedThreadQuery {
+            .session_resources
+            .list_sessions(&peri_acp_types::workspace::ScopedThreadQuery {
                 scope,
                 cursor,
                 limit,
             })
             .await
-            .map_err(super::super::workspace::workspace_error)?;
+            .map_err(super::super::workspace::resource_error)?;
         let entries = page
             .entries
             .iter()
@@ -940,53 +929,58 @@ async fn close_owned_session(
             sessions.remove(session_id);
             return Ok(());
         };
+        // 执行资源已排空（环境 shutdown 成功）后，才请求门面结清持久化并按需删除：
+        // 排空确认在前、结清在最后，任一未完成都保持 Closing 与唯一 owner。
+        let resources = &cfg.session_resources;
+        let target = session_id.to_owned();
+        resources
+            .drain_persistence(&target)
+            .await
+            .map_err(super::super::workspace::resource_error)?;
         if delete {
-            cfg.controller
-                .sessions()
-                .delete_thread(&session_id.to_owned())
+            // 删除是完整生命周期行为：数据、本机执行代际与本次持有都被门面在同一步
+            // 结束（删除成功后 owner 已释放），因此这里不再重复收尾。
+            resources
+                .delete_session_tree(&target)
+                .await
+                .map_err(super::super::workspace::resource_error)?;
+        } else {
+            owner
+                .mark_clean()
                 .await
                 .map_err(super::super::workspace::workspace_error)?;
         }
-        owner
-            .mark_clean()
-            .await
-            .map_err(super::super::workspace::workspace_error)?;
         sessions.remove(session_id);
     } else if delete {
-        let store = cfg.controller.sessions();
-        if store
-            .load_session_binding(&session_id.to_owned())
-            .await
-            .map_err(super::super::workspace::workspace_error)?
-            .is_none()
-        {
-            // Missing delete remains idempotent; unresolved rows are never mutated.
-            let exists = store
-                .list_threads()
-                .await
-                .map_err(super::super::workspace::workspace_error)?
-                .iter()
-                .any(|thread| thread.id == session_id);
-            if !exists {
+        // Missing delete remains idempotent；未加载会话不因此变成可删除对象，
+        // 删除仍要求本次取得执行所有权（短时准入，不抢夺活 owner）。
+        let resources = &cfg.session_resources;
+        let target = session_id.to_owned();
+        match resources.load_session_meta(&target).await {
+            Ok(_) => {
+                let owner =
+                    super::super::workspace::acquire_transient_owner(cfg, session_id).await?;
+                let result = resources.delete_session_tree(&target).await;
+                if result.is_err() {
+                    // 删除失败：数据仍在，本次为删除临时取得的所有权按正常收尾放下
+                    // （代际行还在，走 clean CAS）；成功时所有权已随删除结束。
+                    owner
+                        .mark_clean()
+                        .await
+                        .map_err(super::super::workspace::workspace_error)?;
+                }
+                result.map_err(super::super::workspace::resource_error)?;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
+                ) =>
+            {
                 return Ok(());
             }
+            Err(error) => return Err(super::super::workspace::resource_error(error)),
         }
-        let owner = cfg
-            .controller
-            .sessions()
-            .acquire_execution_lease(&session_id.to_owned())
-            .await
-            .map_err(super::super::workspace::workspace_error)?;
-        let result = cfg
-            .controller
-            .sessions()
-            .delete_thread(&session_id.to_owned())
-            .await;
-        owner
-            .mark_clean()
-            .await
-            .map_err(super::super::workspace::workspace_error)?;
-        result.map_err(super::super::workspace::workspace_error)?;
     }
     Ok(())
 }
@@ -1089,81 +1083,68 @@ pub(crate) async fn handle_fork(
             "Cannot fork while source execution is active",
         ));
     }
-    let source_frozen = source
-        .frozen
-        .clone()
-        .ok_or_else(|| AcpError::new(-32603, "Source frozen snapshot is missing"))?;
+    if source.frozen.is_none() {
+        return Err(AcpError::new(-32603, "Source frozen snapshot is missing"));
+    }
     let cwd_owned = workspace
         .cwd
         .to_str()
         .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
         .to_owned();
     let cwd = cwd_owned.as_str();
-    let (new_thread_id, copied_payloads, owner) =
-        dispatch::fork_bound_session(cfg.controller.as_ref(), source_id, &workspace)
-            .await
-            .map_err(super::super::workspace::workspace_error)?;
+    // 一致 source 快照：payload/flags/binding/frozen 一次读出，ID 重映射是领域纯函数，
+    // 目标快照由门面一次保存（不逐条写 flags、不做存储补偿）。
+    let fork_source = dispatch::load_fork_source(&cfg.session_resources, source_id)
+        .await
+        .map_err(fork_source_error)?;
+    // 普通 fork 复用 source 已持久化的精确 frozen 字节（内存对象只是同一次保存的
+    // 解码视图），不按当前日期/目录重冻。frozen 与本次保存同源：字节来自 source
+    // 快照，装配消费 `prepared` 的解码视图，不二次构建。
+    let prepared = super::super::prepared::PreparedSessionInputs::prepare_fork(
+        cfg,
+        cwd,
+        fork_source.frozen.as_str(),
+    )?;
+    let frozen_data = prepared.frozen.clone();
+    let (new_thread_id, copied_payloads, owner) = dispatch::fork_bound_session(
+        &cfg.session_resources,
+        &fork_source,
+        &workspace,
+        chrono::Utc::now().to_rfc3339(),
+    )
+    .await
+    .map_err(fork_source_error)?;
     let identity = match response_identity(cfg, &new_thread_id).await {
         Ok(identity) => identity,
         Err(error) => {
-            cfg.thread_store
-                .delete_thread(&new_thread_id)
+            // identity 装配失败：环境尚未建立，撤销本次未发布的创建即可。
+            cfg.session_resources
+                .abandon_initialization(&new_thread_id, &owner)
                 .await
-                .map_err(super::super::workspace::workspace_error)?;
-            owner
-                .mark_clean()
-                .await
-                .map_err(super::super::workspace::workspace_error)?;
+                .map_err(super::super::workspace::resource_error)?;
             return Err(error);
         }
     };
-    let environment =
-        match super::super::workspace::SessionEnvironment::assemble(cfg, cwd, &new_thread_id).await
-        {
-            Ok(environment) => environment,
-            Err(error) => {
-                cfg.thread_store
-                    .delete_thread(&new_thread_id)
-                    .await
-                    .map_err(super::super::workspace::workspace_error)?;
-                owner
-                    .mark_clean()
-                    .await
-                    .map_err(super::super::workspace::workspace_error)?;
-                return Err(error);
-            }
-        };
+    let environment = match super::super::workspace::SessionEnvironment::assemble_prepared(
+        cfg,
+        &prepared,
+        &new_thread_id,
+    )
+    .await
+    {
+        Ok(environment) => environment,
+        Err(error) => {
+            // 装配失败时环境尚未建立（没有对外资源需要排空）：撤销未发布的创建。
+            cfg.session_resources
+                .abandon_initialization(&new_thread_id, &owner)
+                .await
+                .map_err(super::super::workspace::resource_error)?;
+            return Err(error);
+        }
+    };
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
 
     let new_session_id = new_thread_id.clone();
-
-    // Fork inherits the source session's exact frozen prefix. Rebuilding from the
-    // current environment would invalidate the provider cache on its first turn.
-    let frozen_data = source_frozen;
-    if let Err(error) =
-        store_new_frozen_snapshot_or_compensate(cfg, &new_session_id, &frozen_data).await
-    {
-        if let Some(environment) = environment.as_ref() {
-            if !environment.shutdown().await {
-                retain_failed_assembly(
-                    sessions,
-                    &new_session_id,
-                    cwd,
-                    owner.clone(),
-                    environment.clone(),
-                );
-                return Err(AcpError::new(
-                    -32010,
-                    "Fork cleanup incomplete; resources retained for shutdown retry",
-                ));
-            }
-        }
-        owner
-            .mark_clean()
-            .await
-            .map_err(super::super::workspace::workspace_error)?;
-        return Err(error);
-    }
     cfg.session_manager.ensure_session(&new_session_id, cwd);
     let caps = cfg.session_manager.ensure_session_caps(&new_session_id);
     let workflow_middleware =
@@ -1238,10 +1219,17 @@ pub(super) async fn handle_rename(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AcpError::new(-32602, "missing title"))?;
 
-    cfg.thread_store
-        .update_title(&session_id.to_string(), title)
+    // 定向更新：只改标题，不整份覆盖 metadata（cwd/binding/计数/缓存的持有者是门面）。
+    cfg.session_resources
+        .update_session_meta(
+            &session_id.to_owned(),
+            &SessionMetaPatch {
+                title: Some(Some(title.to_owned())),
+                ..Default::default()
+            },
+        )
         .await
-        .map_err(|e| AcpError::new(-32603, format!("Failed to rename session: {e}")))?;
+        .map_err(super::super::workspace::resource_error)?;
 
     // 通过 session/update 通知推送新的标题给外部客户端
     super::super::notify::send_session_info_update_with_title(

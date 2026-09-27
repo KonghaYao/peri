@@ -216,7 +216,7 @@ pub(crate) async fn run_prompt(
     let skills = deployment.skills.clone();
     let shared_tools = deployment.shared_tools.clone();
     let plugin_lsp_servers = deployment.plugin_lsp_servers.as_slice();
-    let thread_store = &deployment.thread_store;
+    let session_resources = deployment.session_resources.clone();
     let controller = &deployment.controller;
     let langfuse_session = deployment.langfuse_session.clone();
     let session_manager = deployment.session_manager.clone();
@@ -292,6 +292,7 @@ pub(crate) async fn run_prompt(
         incoming_recalls,
         workflow_middleware,
         lsp_pool,
+        execution_owner,
     ) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
@@ -312,6 +313,9 @@ pub(crate) async fn run_prompt(
             take_recall_for_turn(&mut state.recall_items, continuation && !managed_input),
             state.workflow_middleware.clone(),
             state.lsp_pool.clone(),
+            // 执行所有权投影：child 保存（save_child）需要调用方证明自己持有本会话
+            // root 的活 owner；只读准入的会话为 None，那时不落任何 child。
+            state.execution_owner.clone(),
         )
     };
     let broker = build_transport_broker(transport, &session_id);
@@ -368,7 +372,6 @@ pub(crate) async fn run_prompt(
             frozen_language: frozen
                 .as_ref()
                 .and_then(|f| f.language().map(|s| s.to_string())),
-            thread_store: None,
             progress_tx: None,
             subagent_ctx_builder: None,
             agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
@@ -508,7 +511,8 @@ pub(crate) async fn run_prompt(
         session_access: Some(
             Arc::new(session_manager) as Arc<dyn peri_acp_types::session::SessionAccessPort>
         ),
-        thread_store: Some(Arc::clone(thread_store)),
+        session_resources: Some(session_resources.clone()),
+        execution_owner,
         thread_id: Some(thread_id.clone()),
         plugin_skill_roots: plugin_skill_roots.to_vec(),
         plugin_agent_dirs: plugin_agent_dirs.to_vec(),

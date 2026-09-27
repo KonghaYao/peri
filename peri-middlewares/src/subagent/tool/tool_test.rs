@@ -2,6 +2,14 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use peri_acp_types::identity::AgentId;
+use peri_acp_types::session_resources::{
+    FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionMetaPatch, SessionResources,
+};
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::thread::AgentStatus;
+use peri_acp_types::workspace::{
+    ResolvedWorkspace, SessionBinding, SessionExecutionLease, SESSION_BINDING_VERSION,
+};
 use peri_agent::{
     agent::{
         events::ExecutorEvent,
@@ -10,7 +18,7 @@ use peri_agent::{
         AgentCancellationToken,
     },
     messages::BaseMessage,
-    thread::ThreadStore,
+    thread::{ThreadId, ThreadMeta},
     tools::BaseTool,
 };
 use tempfile::tempdir;
@@ -533,17 +541,218 @@ async fn mcp_agent_suggestions_require_activation_and_connection() {
     assert!(!disconnected.contains("Available agent types"));
 }
 
-/// 构造 FilesystemThreadStore（写盘即时刷新，无需 flush）
-fn make_fs_store(dir: &tempfile::TempDir) -> Arc<peri_agent::thread::FilesystemThreadStore> {
-    Arc::new(peri_agent::thread::FilesystemThreadStore::new(
-        dir.path().join("threads"),
-    ))
+/// 真门面 fixture：临时 git 工作区 + 临时 SQLite + 会话执行所有权。
+///
+/// 子 agent 的 resume/spawn 路径要求「根会话有活 owner」这一真实前置条件，因此夹具
+/// 不使用存储替身：会话、消息、状态都落在真实门面上，断言读回的是真实事实。
+pub(crate) struct SessionFixture {
+    pub(crate) resources: Arc<dyn SessionResources>,
+    workspace: ResolvedWorkspace,
+    /// 执行所有权必须存活到会话生命周期结束（drop 即释放 owner）。
+    leases: parking_lot::Mutex<Vec<Arc<dyn SessionExecutionLease>>>,
+}
+
+impl SessionFixture {
+    /// 在给定目录建立真门面：目录本身即工作区（`git init` 提供仓库证据），
+    /// 会话 cwd 与 agent 定义查找路径因此与用例的 fixture 目录一致。
+    pub(crate) async fn open_in(dir: &std::path::Path) -> Self {
+        git_init(dir);
+        let resources: Arc<dyn SessionResources> = Arc::new(
+            peri_resources::sessions::SessionResourcesImpl::open(dir.join("threads.db"))
+                .await
+                .unwrap(),
+        );
+        let workspace = resources.resolve_workspace(dir).await.unwrap();
+        Self {
+            resources,
+            workspace,
+            leases: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 门面句柄（`.with_session_resources(...)` / `SubagentHost` 注入用）。
+    pub(crate) fn facade(&self) -> Arc<dyn SessionResources> {
+        Arc::clone(&self.resources)
+    }
+
+    /// 最近一次建会话的执行所有权（child 保存的前置证明）。
+    ///
+    /// 夹具自己持有 lease 让 owner 保持活跃；调用方拿到的是同一份所有权句柄，
+    /// 用于 `.with_execution_owner(...)`，不产生第二个 owner。
+    pub(crate) fn execution_owner(&self) -> Arc<dyn SessionExecutionLease> {
+        self.leases
+            .lock()
+            .last()
+            .cloned()
+            .expect("夹具尚未建立会话：先 create_thread")
+    }
+
+    /// 夹具工作区的 canonical cwd（会话 cwd 与调用 cwd 必须一致）。
+    pub(crate) fn workspace_cwd(&self) -> String {
+        self.workspace.cwd.to_string_lossy().into_owned()
+    }
+
+    /// 建会话（真门面）：绑定 + frozen + 执行代际一次落盘，owner 由夹具持有。
+    pub(crate) async fn create_thread(
+        &self,
+        meta: peri_agent::thread::ThreadMeta,
+    ) -> Result<ThreadId, anyhow::Error> {
+        let session = NewSession {
+            thread_id: meta.id.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            meta: NewSessionMeta {
+                title: meta.title.clone(),
+                cwd: self.workspace.cwd.to_string_lossy().into_owned(),
+                parent_thread_id: meta.parent_thread_id.clone(),
+                hidden: meta.hidden,
+                cancel_policy: meta.cancel_policy,
+                snapshot_at_message_id: None,
+            },
+            binding: SessionBinding {
+                schema_version: SESSION_BINDING_VERSION,
+                revision: 1,
+                project_id: self.workspace.project_id,
+                workspace_id: self.workspace.workspace_id,
+                cwd_relative_to_workspace: self.workspace.relative_cwd.clone(),
+            },
+            frozen: FrozenSnapshotBytes::new("{\"version\":1,\"fixture\":true}"),
+        };
+        let lease = self
+            .resources
+            .create_session(&session)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        self.leases.lock().push(lease);
+        Ok(meta.id)
+    }
+
+    pub(crate) async fn append_messages(
+        &self,
+        id: &ThreadId,
+        messages: &[BaseMessage],
+    ) -> Result<(), anyhow::Error> {
+        let payloads: Vec<PersistedPayload> = messages
+            .iter()
+            .cloned()
+            .map(PersistedPayload::Message)
+            .collect();
+        self.resources
+            .append_history(id, &payloads)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
+    pub(crate) async fn update_thread_status(
+        &self,
+        id: &ThreadId,
+        status: &str,
+    ) -> Result<(), anyhow::Error> {
+        let status = match status {
+            "done" => AgentStatus::Done,
+            "cancelled" => AgentStatus::Cancelled,
+            "error" => AgentStatus::Error,
+            _ => AgentStatus::Active,
+        };
+        self.resources
+            .update_session_meta(
+                id,
+                &SessionMetaPatch {
+                    status: Some(status),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
+    pub(crate) async fn load_meta(&self, id: &ThreadId) -> Result<ThreadMeta, anyhow::Error> {
+        self.resources
+            .load_session_meta(id)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
+    pub(crate) async fn load_messages(
+        &self,
+        id: &ThreadId,
+    ) -> Result<Vec<BaseMessage>, anyhow::Error> {
+        Ok(self
+            .resources
+            .load_session_snapshot(id)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .payloads
+            .into_iter()
+            .filter_map(|payload| payload.as_message().cloned())
+            .collect())
+    }
+
+    pub(crate) async fn list_session_threads(
+        &self,
+        id: &ThreadId,
+    ) -> Result<Vec<ThreadMeta>, anyhow::Error> {
+        self.resources
+            .list_session_tree(id)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+}
+
+/// 把「门面 + 父会话 id + root owner」一次装到工具上。
+///
+/// child 保存/认领要求父会话真实存在、root owner 存活、调用 cwd 与父会话 cwd 一致；
+/// 三者出自同一夹具。返回 canonical cwd——调用参数必须用它，否则 spawn 会按
+/// 绑定不匹配拒绝（`/var` 与 `/private/var` 之类符号链接差异也算不匹配）。
+pub(crate) async fn install_parent_session(
+    tool: SubAgentTool,
+    fixture: &SessionFixture,
+) -> (SubAgentTool, String) {
+    let cwd = fixture.workspace_cwd();
+    let parent_id = fixture
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    let tool = tool
+        .with_session_resources(fixture.facade())
+        .with_parent_thread_id(parent_id)
+        .with_execution_owner(fixture.execution_owner());
+    (tool, cwd)
+}
+
+/// 让目录成为 git 工作区（工作区发现需要真实仓库证据）。
+pub(crate) fn git_init(directory: &std::path::Path) {
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", directory)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .arg("-C")
+            .arg(directory)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git fixture failed");
+    }
 }
 
 /// 预置可恢复 thread：创建（title 决定工具集恢复路径）+ 写消息 + 置非 active。
-/// FilesystemThreadStore 写盘即时落库（append 后 load_messages 立即可见）。
 async fn preset_resumable_thread(
-    store: &Arc<peri_agent::thread::FilesystemThreadStore>,
+    fixture: &SessionFixture,
     id: &str,
     title: &str,
     parent_thread_id: Option<&str>,
@@ -555,11 +764,11 @@ async fn preset_resumable_thread(
     meta.title = Some(title.to_string());
     meta.parent_thread_id = parent_thread_id.map(|s| s.to_string());
     meta.hidden = true;
-    store.create_thread(meta).await.unwrap();
+    fixture.create_thread(meta).await.unwrap();
     if !msgs.is_empty() {
-        store.append_messages(&id, &msgs).await.unwrap();
+        fixture.append_messages(&id, &msgs).await.unwrap();
     }
-    store.update_thread_status(&id, "done").await.unwrap();
+    fixture.update_thread_status(&id, "done").await.unwrap();
 }
 
 // 本文件经 mod.rs 的 `#[path = "tool_test.rs"]` 挂载；此路径加载方式下，

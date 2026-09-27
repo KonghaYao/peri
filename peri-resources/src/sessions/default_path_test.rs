@@ -1,4 +1,4 @@
-use super::{default_database_path, open_thread_store_read_only, ReadOnlyStoreErrorKind};
+use super::{default_database_path, open_session_resources_read_only, ReadOnlyStoreErrorKind};
 use std::path::PathBuf;
 
 #[tokio::test]
@@ -36,7 +36,7 @@ async fn test_default_database_path_child_process() {
     let expected = home.join(".peri").join("threads").join("threads.db");
     assert_eq!(default_database_path(), Some(expected));
     assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
-    match open_thread_store_read_only(None).await {
+    match open_session_resources_read_only(None).await {
         Ok(_) => panic!("missing default database must not be created by read-only open"),
         Err(error) => assert_eq!(error.kind(), ReadOnlyStoreErrorKind::DatabaseNotFound),
     }

@@ -838,7 +838,7 @@ async fn test_commit_compaction_lifecycle_persists_flags_and_appended_messages_i
 
     let summary = BaseMessage::human("压缩摘要");
     let reinject = BaseMessage::human("重新注入的用户上下文");
-    let lifecycle = CompactionLifecycle {
+    let lifecycle = CompactionChange {
         flag_updates: vec![
             (
                 original_messages[0].id(),
@@ -912,7 +912,7 @@ async fn test_commit_compaction_lifecycle_rolls_back_flags_and_appends_when_mess
         .unwrap();
 
     let summary = BaseMessage::human("不应落库的压缩摘要");
-    let lifecycle = CompactionLifecycle {
+    let lifecycle = CompactionChange {
         flag_updates: vec![
             (
                 original_messages[0].id(),
@@ -1193,7 +1193,7 @@ async fn test_readonly_store_loads_exact_meta_and_distinguishes_missing_session(
     expected.title = Some("title".into());
     expected.agent_status = AgentStatus::Done;
     let id = writer.create_thread(expected.clone()).await.unwrap();
-    writer.pool.close().await;
+    writer.database.pool.close().await;
     let database_before = database_snapshot(&db_path).await;
     let directory_before = directory_snapshot(dir.path());
     let reader = SqliteThreadStore::open_existing_read_only(&db_path)
@@ -1264,10 +1264,10 @@ async fn test_readonly_store_rejects_corrupt_enum_time_type_and_negative_counts_
             "UPDATE threads SET {column} = {value} WHERE id = ?1"
         )))
         .bind(&id)
-        .execute(&writer.pool)
+        .execute(&writer.database.pool)
         .await
         .unwrap();
-        writer.pool.close().await;
+        writer.database.pool.close().await;
         let database_before = database_snapshot(&db_path).await;
         let reader = SqliteThreadStore::open_existing_read_only(&db_path)
             .await
@@ -1299,7 +1299,7 @@ async fn test_readonly_backed_trait_rejects_mutation_and_preserves_row() {
     let writer = SqliteThreadStore::new(&db_path).await.unwrap();
     let expected = ThreadMeta::new("/before");
     let id = writer.create_thread(expected.clone()).await.unwrap();
-    writer.pool.close().await;
+    writer.database.pool.close().await;
     let database_before = database_snapshot(&db_path).await;
     let reader: Arc<dyn ThreadStore> = Arc::new(
         SqliteThreadStore::open_existing_read_only(&db_path)
@@ -1334,7 +1334,7 @@ async fn test_readonly_store_observes_wal_commit_but_not_uncommitted_update() {
         .create_thread(ThreadMeta::new("/baseline"))
         .await
         .unwrap();
-    let mut transaction = writer.pool.begin().await.unwrap();
+    let mut transaction = writer.database.pool.begin().await.unwrap();
     sqlx::query("UPDATE threads SET cwd = '/pending' WHERE id = ?1")
         .bind(&id)
         .execute(&mut *transaction)

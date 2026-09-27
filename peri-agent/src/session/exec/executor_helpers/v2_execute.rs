@@ -14,7 +14,7 @@ use peri_acp_types::{
     messages::BaseMessage,
     runtime::UnstampedEvent,
     session::ExecutionFailure,
-    store::ThreadStore,
+    session_resources::SessionResources,
     tasks::{BgTaskKind, TaskManager},
 };
 use tokio_util::sync::CancellationToken;
@@ -88,7 +88,7 @@ pub struct V2ExecuteRequest {
     pub user_input_mailbox: Option<Arc<crate::session::user_input_mailbox::UserInputMailbox>>,
     pub cwd: String,
     pub cancel: CancellationToken,
-    pub thread_store: Option<Arc<dyn ThreadStore>>,
+    pub session_resources: Option<Arc<dyn SessionResources>>,
     pub thread_id: Option<String>,
     pub agent_input: AgentInput,
     pub history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
@@ -146,15 +146,18 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // Restore the inherited boundary and compact state before spawning forwarders.
     // A failed/corrupt snapshot must not enter Reason with unclassified history.
     let restored_history = async {
-        let Some((store, tid)) = req.thread_store.as_ref().zip(req.thread_id.as_ref()) else {
+        let Some((store, tid)) = req.session_resources.as_ref().zip(req.thread_id.as_ref()) else {
             return Ok::<_, anyhow::Error>((
                 peri_acp_types::store::InheritedContext::default(),
                 Default::default(),
             ));
         };
-        let inherited = store.load_inherited_context(tid).await?;
-        let flags = store.load_message_flags(tid).await?;
-        Ok((inherited, flags))
+        // 一次一致快照：继承区与 flags 同一次读取，避免跨时刻拼接。
+        let snapshot = store
+            .load_session_snapshot(tid)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        Ok((snapshot.inherited, snapshot.flags))
     }
     .await;
 

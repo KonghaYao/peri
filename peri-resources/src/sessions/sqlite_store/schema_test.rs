@@ -1,11 +1,12 @@
 use super::*;
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::{
     messages::BaseMessage,
     store::{serialize_persisted_payload, PersistedPayload, ThreadStore},
     thread::ThreadMeta,
     workspace::{ScopedThreadQuery, ThreadScope},
 };
-use sqlx::{sqlite::SqliteConnectOptions, Connection};
+use sqlx::{sqlite::SqliteConnectOptions, AssertSqlSafe, Connection};
 use std::path::Path;
 
 /// [回归测试] 实际旧库包含 thread_goals，不能因额外业务表而拒绝启动。
@@ -46,10 +47,9 @@ async fn test_legacy_with_goals_upgrades_and_preserves_auxiliary_data() {
     ).fetch_all(&mut connection).await.unwrap();
     connection.close().await.unwrap();
     // 调用应用启动所用的 Resources 门面，复现相同的写打开入口。
-    let resources = crate::Resources::open_with(Some(path.clone()))
+    let (store, _facade) = crate::sessions::open_store_and_facade_for_tests(path.clone())
         .await
         .unwrap();
-    let store = resources.thread_store();
     assert_eq!(
         store
             .load_meta(&"old-session".to_owned())
@@ -228,10 +228,10 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
     );
     assert_eq!(reopened.load_meta(&old_id).await.unwrap().cwd, old.cwd);
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-        .fetch_one(&reopened.pool)
+        .fetch_one(&reopened.database.pool)
         .await
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
     reopened.close().await;
     let reader = SqliteThreadStore::open_existing_read_only(&path)
         .await
@@ -269,7 +269,7 @@ async fn test_single_database_upgrade_preserves_all_existing_columns_and_context
     let before = history_bytes(&mut connection).await;
     connection.close().await.unwrap();
     let store = SqliteThreadStore::new(&path).await.unwrap();
-    let after = history_bytes(&mut store.pool.acquire().await.unwrap()).await;
+    let after = history_bytes(&mut store.database.pool.acquire().await.unwrap()).await;
     assert_eq!(
         after, before,
         "所有原始列值（包括不解码的上下文）必须保持原样"
@@ -344,7 +344,9 @@ async fn test_single_database_future_version_is_rejected_before_writing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = legacy_database(&path).await;
-    sqlx::query("PRAGMA user_version = 7")
+    // 比本构建更新一代：写打开必须拒绝，且不猜列形状、不降级写。
+    let future = CURRENT_SCHEMA_VERSION + 1;
+    sqlx::query(AssertSqlSafe(format!("PRAGMA user_version = {future}")))
         .execute(&mut connection)
         .await
         .unwrap();
@@ -354,13 +356,13 @@ async fn test_single_database_future_version_is_rejected_before_writing() {
     assert!(matches!(
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::UnsupportedSchemaVersion {
-            found: 7,
+            found,
             supported: CURRENT_SCHEMA_VERSION,
-        })
+        }) if *found == future
     ));
     // 拒绝理由必须可追溯：报错要复述实际版本与本构建上限，否则用户只知道「不支持」。
     let message = error.to_string();
-    assert!(message.contains("version 7"), "{message}");
+    assert!(message.contains(&format!("version {future}")), "{message}");
     assert!(
         message.contains(&format!("newest supported: {CURRENT_SCHEMA_VERSION}")),
         "{message}"
@@ -388,7 +390,7 @@ async fn test_single_database_concurrent_upgrade_is_idempotent() {
             1
         );
         let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM session_bindings")
-            .fetch_one(&store.pool)
+            .fetch_one(&store.database.pool)
             .await
             .unwrap();
         assert_eq!(count, 0);
@@ -445,7 +447,7 @@ async fn test_single_database_default_writer_child_process() {
     };
     let store = SqliteThreadStore::default_path().await.unwrap();
     assert_eq!(
-        store.db_path,
+        store.database.db_path,
         std::fs::canonicalize(Path::new(&home).join(".peri/threads/threads.db")).unwrap()
     );
     assert_eq!(
@@ -457,12 +459,13 @@ async fn test_single_database_default_writer_child_process() {
         "/old/worktree"
     );
     store.close().await;
-    let reader = crate::sessions::open_thread_store_read_only(None)
+    // 只读命令面（meta 子命令）的生产入口：只读门面，不创建目录/库/schema。
+    let reader = crate::sessions::open_session_resources_read_only(None)
         .await
         .unwrap();
     assert_eq!(
         reader
-            .load_meta(&"old-session".to_owned())
+            .load_session_meta(&"old-session".to_owned())
             .await
             .unwrap()
             .title
@@ -605,7 +608,7 @@ async fn test_schema3_identity_migration_reuses_binding_and_survives_reopen() {
     let execution: (i64, bool) = sqlx::query_as(
         "SELECT generation, clean FROM execution_runs WHERE thread_id = 'old-session'",
     )
-    .fetch_one(&store.pool)
+    .fetch_one(&store.database.pool)
     .await
     .unwrap();
     assert_eq!(execution, (7, false));
@@ -690,7 +693,7 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_execution
     connection.close().await.unwrap();
 
     let store = SqliteThreadStore::new(&path).await.unwrap();
-    let mut connection = store.pool.acquire().await.unwrap();
+    let mut connection = store.database.pool.acquire().await.unwrap();
     assert_eq!(history_bytes(&mut connection).await, before_history);
     let migrated_identity = identity_and_execution_bytes(&mut connection).await;
     assert!(migrated_identity
@@ -704,7 +707,7 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_execution
         .fetch_one(&mut *connection)
         .await
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
     drop(connection);
 
     let old = store
@@ -918,10 +921,10 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
 
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-        .fetch_one(&store.pool)
+        .fetch_one(&store.database.pool)
         .await
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
     // 原有登记、绑定与历史原样可用。
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
@@ -978,7 +981,7 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
          SELECT '33333333-3333-4333-8333-333333333333', project_id, root, '{\"device\":9,\"inode\":9}', discovery
          FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
     )
-    .execute(&store.pool)
+    .execute(&store.database.pool)
     .await
     .unwrap();
     let duplicate_workspace = sqlx::query(
@@ -986,7 +989,7 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
          SELECT '44444444-4444-4444-8444-444444444444', project_id, root, root_identity, discovery
          FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
     )
-    .execute(&store.pool)
+    .execute(&store.database.pool)
     .await;
     assert!(
         duplicate_workspace.is_err(),
@@ -997,7 +1000,7 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
         "INSERT INTO projects (id, locator, object_identity)
          SELECT '55555555-5555-4555-8555-555555555555', locator, '{\"device\":10,\"inode\":10}' FROM projects",
     )
-    .execute(&store.pool)
+    .execute(&store.database.pool)
     .await
     .unwrap();
     let duplicate_project = sqlx::query(
@@ -1005,7 +1008,7 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
          SELECT '66666666-6666-4666-8666-666666666666', locator, object_identity FROM projects
          WHERE id = '11111111-1111-4111-8111-111111111111'",
     )
-    .execute(&store.pool)
+    .execute(&store.database.pool)
     .await;
     assert!(
         duplicate_project.is_err(),
@@ -1017,7 +1020,7 @@ async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
          SELECT '77777777-7777-4777-8777-777777777777', 'missing-project', root || '-orphan', root_identity, discovery
          FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
     )
-    .execute(&store.pool)
+    .execute(&store.database.pool)
     .await;
     assert!(orphan.is_err(), "工作区必须仍受 projects 外键约束");
     store.close().await;
@@ -1098,7 +1101,7 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
         ),
         "原路径被替换后旧会话必须拒绝执行：{error}"
     );
-    let mut connection = store.pool.acquire().await.unwrap();
+    let mut connection = store.database.pool.acquire().await.unwrap();
     // 精确读取旧会话，不以新增线程的插入顺序推断目标。
     assert_eq!(history_bytes(&mut connection).await, old_history);
     let after = identity_and_execution_bytes(&mut connection).await;
@@ -1116,7 +1119,7 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
         .fetch_one(&mut *connection)
         .await
         .unwrap();
-    assert_eq!(current, 6);
+    assert_eq!(current, CURRENT_SCHEMA_VERSION);
     drop(connection);
     store.close().await;
 }
@@ -1189,14 +1192,14 @@ async fn test_registration_upgrade_preserves_healthy_v5_composite_registrations(
     // 首次开库升级，第二次开库保持同一结果；不访问 fixture 中不存在的旧目录。
     for _ in 0..2 {
         let store = SqliteThreadStore::new(&path).await.unwrap();
-        let mut connection = store.pool.acquire().await.unwrap();
+        let mut connection = store.database.pool.acquire().await.unwrap();
         assert_eq!(identity_and_execution_bytes(&mut connection).await, before);
         assert_eq!(history_bytes(&mut connection).await, history);
         let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
             .fetch_one(&mut *connection)
             .await
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
         drop(connection);
         store.close().await;
     }

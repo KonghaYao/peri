@@ -32,7 +32,7 @@ impl super::SubAgentTool {
     /// 返回文本与 spawn 路径一致：
     /// - Background → 启动确认（task_id 文本，execute_bg.rs 同款；thread 恒存在 → 带 thread）
     /// - interrupted → slice 1 格式（`child_thread_id: {id}` + 恢复提示）
-    /// - 完成 → `child_thread_id: {id}\n{result}`（thread_store 恒存在）
+    /// - 完成 → `child_thread_id: {id}\n{result}`（会话资源门面恒存在）
     /// - 错误 → 原样 Err（agent 层已带 `resume_subagent:` 前缀）
     pub(crate) async fn invoke_resume(
         &self,
@@ -57,8 +57,8 @@ impl super::SubAgentTool {
             }
         }
         // 无 live receiver 时才进入磁盘恢复路径。
-        let thread_store = host.thread_store.clone().ok_or(
-            "resume_subagent: thread store required (resume_thread_id needs a persisted thread)",
+        let session_resources = host.session_resources.clone().ok_or(
+            "resume_subagent: session resources required (resume_thread_id needs a persisted thread)",
         )?;
 
         // 双保险（review MEDIUM-1）：bg resume 在 agent 层注册失败会回滚 status，
@@ -75,8 +75,8 @@ impl super::SubAgentTool {
         }
 
         // 1. load_meta 取 title（决定工具集恢复路径，issue 决策 11）
-        let meta = thread_store
-            .load_meta(&thread_id)
+        let meta = session_resources
+            .load_session_meta(&thread_id)
             .await
             .map_err(|_| format!("resume_subagent: thread not found: {}", thread_id))?;
         if meta.agent_status.is_active() {
@@ -151,7 +151,7 @@ impl super::SubAgentTool {
             llm,
             tools,
             tool_filter,
-            thread_store,
+            session_resources,
             cwd,
         );
 

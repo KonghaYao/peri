@@ -4,6 +4,7 @@ use crate::messages::MessageContent;
 use crate::middleware::capabilities as hook_state;
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
+use crate::session::test_resources::mock::MockSessionResources;
 use crate::session::Session;
 
 /// 构造测试用 StageContext
@@ -1987,23 +1988,19 @@ impl crate::tools::BaseTool for SuccessfulFullReadTool {
 #[tokio::test]
 async fn test_run_react_loop_successful_full_replaces_history_reinjects_read_file_and_resets_usage()
 {
-    use crate::thread::{SqliteThreadStore, ThreadMeta, ThreadStore};
+    use crate::thread::ThreadMeta;
 
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("full-reinject-marker.txt");
     let file_marker = "successful full reinjected file marker";
     std::fs::write(&file_path, file_marker).unwrap();
 
-    let store = Arc::new(
-        SqliteThreadStore::new(dir.path().join("successful-full.db"))
-            .await
-            .unwrap(),
-    );
+    let store = MockSessionResources::new();
     let thread_id = store
         .create_thread(ThreadMeta::new(dir.path().to_string_lossy()))
         .await
         .unwrap();
-    let store_dyn: Arc<dyn ThreadStore> = store.clone();
+    let store_dyn: Arc<dyn peri_acp_types::session_resources::SessionResources> = store.clone();
     let session = Session::new(
         Arc::from(dir.path().to_string_lossy().as_ref()),
         FrozenContext::builder().build(),
@@ -2270,13 +2267,8 @@ impl crate::tools::BaseTool for AuditAlternatingOutputTool {
 #[tokio::test]
 async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history() {
     use crate::agent::compact_v2::{planner::plan_micro, projection, CompactOutcome};
-    use crate::thread::{SqliteThreadStore, ThreadMeta, ThreadStore};
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::new(dir.path().join("audit-full-churn.db"))
-            .await
-            .unwrap(),
-    );
+    use crate::thread::ThreadMeta;
+    let store = MockSessionResources::new();
     let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
     let session = Session::new(
         Arc::from("/tmp"),

@@ -21,9 +21,10 @@ pub use installer::{
     InstallerError, PluginUpdateInfo,
 };
 pub use loader::{
-    load_enabled_plugins, load_enabled_plugins_aggregated, plugin_route_entries, CommandEntry,
-    CommandProvider, CommandSource, LoadedPlugin, LoaderError, PluginCommandHandler,
-    PluginCommandProvider, PluginLoadResult,
+    load_enabled_plugins, load_enabled_plugins_aggregated,
+    load_enabled_plugins_aggregated_readonly, plugin_route_entries, CommandEntry, CommandProvider,
+    CommandSource, LoadedPlugin, LoaderError, PluginCommandHandler, PluginCommandProvider,
+    PluginLoadResult,
 };
 pub use marketplace::{
     parse_marketplace_input, AvailablePlugin, MarketplaceEntry, MarketplaceError,

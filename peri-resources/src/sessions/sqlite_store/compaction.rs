@@ -1,23 +1,25 @@
 //! 消息生命周期持久化：删除、flags、回滚与原子 compaction 事务。
 
-use super::{row_mapping::role_of, SqliteThreadStore};
+use super::failure::commit_failure;
+use super::{database::SqliteSessionDatabase, row_mapping::role_of};
 use anyhow::Result;
 use chrono::Utc;
 use peri_acp_types::{
-    store::{CompactionLifecycle, MessageFlags},
+    store::{CompactionChange, MessageFlags},
     thread::ThreadId,
 };
+use sqlx::SqliteConnection;
 use std::collections::HashMap;
 
 pub(super) async fn delete_messages(
-    store: &SqliteThreadStore,
+    database: &SqliteSessionDatabase,
     thread_id: &ThreadId,
     message_ids: &[peri_acp_types::messages::MessageId],
 ) -> Result<()> {
     if message_ids.is_empty() {
         return Ok(());
     }
-    let mut tx = store.pool.begin().await?;
+    let mut tx = database.pool.begin().await?;
     for mid in message_ids {
         let uuid_str = mid.as_uuid().to_string();
         sqlx::query("DELETE FROM messages WHERE message_id = ?1 AND thread_id = ?2")
@@ -36,13 +38,15 @@ pub(super) async fn delete_messages(
     .bind(thread_id.as_str())
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
-    super::context::invalidate_context_cache(store, thread_id).await?;
+    tx.commit()
+        .await
+        .map_err(|_| commit_failure(Some(thread_id.clone())))?;
+    database.invalidate_context_cache(thread_id).await?;
     Ok(())
 }
 
 pub(super) async fn update_message_flags(
-    store: &SqliteThreadStore,
+    database: &SqliteSessionDatabase,
     message_id: &peri_acp_types::messages::MessageId,
     flags: &MessageFlags,
 ) -> Result<()> {
@@ -59,28 +63,28 @@ pub(super) async fn update_message_flags(
     .bind(flags.excluded)
     .bind(&projection_json)
     .bind(&id_str)
-    .execute(&store.pool)
+    .execute(&database.pool)
     .await?;
 
     // 消息可见性变更（truncation/excluded/projection）影响上下文视图，失效 cached_context
     let thread_id: Option<(String,)> =
         sqlx::query_as("SELECT thread_id FROM messages WHERE message_id = ?1")
             .bind(&id_str)
-            .fetch_optional(&store.pool)
+            .fetch_optional(&database.pool)
             .await?;
     if let Some((tid,)) = thread_id {
-        super::context::invalidate_context_cache(store, &tid).await?;
+        database.invalidate_context_cache(&tid).await?;
     }
 
     Ok(())
 }
 
 pub(super) async fn commit_compaction_lifecycle(
-    store: &SqliteThreadStore,
+    database: &SqliteSessionDatabase,
     thread_id: &ThreadId,
-    lifecycle: &CompactionLifecycle,
+    lifecycle: &CompactionChange,
 ) -> Result<()> {
-    let mut tx = store.pool.begin().await?;
+    let mut tx = database.pool.begin().await?;
 
     for (message_id, flags) in &lifecycle.flag_updates {
         let projection_json = flags
@@ -137,12 +141,26 @@ pub(super) async fn commit_compaction_lifecycle(
     .execute(&mut *tx)
     .await?;
 
-    tx.commit().await?;
+    tx.commit()
+        .await
+        .map_err(|_| commit_failure(Some(thread_id.clone())))?;
     Ok(())
 }
 
 pub(super) async fn load_message_flags(
-    store: &SqliteThreadStore,
+    database: &SqliteSessionDatabase,
+    thread_id: &ThreadId,
+) -> Result<HashMap<peri_acp_types::messages::MessageId, MessageFlags>> {
+    let mut connection = database.pool.acquire().await?;
+    load_flags_on(&mut connection, thread_id).await
+}
+
+/// flags 是派生视图：只返回非默认标记。
+///
+/// 损坏的 `message_id` 或无法解释的 projection 是数据故障，不是「没有标记」：
+/// 这里直接失败，避免调用方把损坏当成空值继续覆盖写入。
+pub(super) async fn load_flags_on(
+    connection: &mut SqliteConnection,
     thread_id: &ThreadId,
 ) -> Result<HashMap<peri_acp_types::messages::MessageId, MessageFlags>> {
     let rows: Vec<(String, bool, bool, Option<String>)> = sqlx::query_as(
@@ -150,28 +168,31 @@ pub(super) async fn load_message_flags(
              WHERE thread_id = ?1 AND (truncated = 1 OR excluded = 1 OR projection IS NOT NULL)",
     )
     .bind(thread_id.as_str())
-    .fetch_all(&store.pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     let mut flags = HashMap::with_capacity(rows.len());
     for (id_str, truncated, excluded, projection_json) in rows {
-        if let Ok(uid) = uuid::Uuid::parse_str(&id_str) {
-            let projection = projection_json.and_then(|json| serde_json::from_str(&json).ok());
-            flags.insert(
-                uid.into(),
-                MessageFlags {
-                    truncated,
-                    excluded,
-                    projection,
-                },
-            );
-        }
+        let id = uuid::Uuid::parse_str(&id_str)
+            .map_err(|_| anyhow::anyhow!("stored message id is not a uuid"))?;
+        let projection = projection_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("stored message projection is not readable"))?;
+        flags.insert(
+            id.into(),
+            MessageFlags {
+                truncated,
+                excluded,
+                projection,
+            },
+        );
     }
     Ok(flags)
 }
 
 pub(super) async fn delete_messages_since(
-    store: &SqliteThreadStore,
+    database: &SqliteSessionDatabase,
     thread_id: &ThreadId,
     message_id: &peri_acp_types::messages::MessageId,
 ) -> Result<()> {
@@ -180,11 +201,11 @@ pub(super) async fn delete_messages_since(
         sqlx::query_as("SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2")
             .bind(thread_id.as_str())
             .bind(message_id.as_uuid().to_string())
-            .fetch_optional(&store.pool)
+            .fetch_optional(&database.pool)
             .await?;
 
     if let Some((rowid,)) = target_rowid {
-        let mut tx = store.pool.begin().await?;
+        let mut tx = database.pool.begin().await?;
         sqlx::query("DELETE FROM messages WHERE thread_id = ?1 AND rowid > ?2")
             .bind(thread_id.as_str())
             .bind(rowid)
@@ -200,8 +221,10 @@ pub(super) async fn delete_messages_since(
         .bind(thread_id.as_str())
         .execute(&mut *tx)
         .await?;
-        tx.commit().await?;
-        super::context::invalidate_context_cache(store, thread_id).await?;
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(thread_id.clone())))?;
+        database.invalidate_context_cache(thread_id).await?;
     }
     Ok(())
 }

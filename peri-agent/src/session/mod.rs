@@ -35,6 +35,10 @@ pub mod store;
 pub mod subagent;
 pub mod tool_catalog;
 pub mod transcript;
+
+#[cfg(test)]
+#[path = "test_resources.rs"]
+pub(crate) mod test_resources;
 pub mod turn;
 pub mod user_input_mailbox;
 pub mod workflow_completion;

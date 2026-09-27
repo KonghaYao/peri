@@ -25,7 +25,7 @@ mod provider;
 
 use crate::acp_client::AcpTuiClient;
 use crate::config::PeriConfig;
-use std::path::PathBuf;
+use peri_acp_types::session_store::SessionStoreDeployment;
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -43,12 +43,17 @@ pub struct App {
     /// Initialized after App construction in run_app(); None until `set_acp_client` is called.
     pub acp_client: Option<AcpTuiClient>,
     pub(crate) acp_deployment: Option<crate::acp_client::AcpDeployment>,
+    /// 部署关闭权（non-Clone）：业务侧只拿 `session_resources`，全局销毁权留在这里，
+    /// 由宿主装配接管（见 `attach_acp` → `HostAssemblyInput`），在任务排空之后关闭。
+    pub(crate) session_store_shutdown:
+        Option<Box<dyn peri_acp_types::session_resources::SessionStoreShutdownPort>>,
 }
 
 impl App {
-    /// `db_path`：显式指定 SQLite 会话数据库路径；`None` 使用默认路径。
-    /// 任一路径打开失败都会直接返回错误。
-    pub async fn new(db_path: Option<PathBuf>) -> anyhow::Result<Self> {
+    /// `session_store`：入口归一的会话存储定位描述（默认本机库 / 显式本机路径 /
+    /// 远程 locator + 凭证来源）。locator 的纯解析与后端选择在资源装配层完成，
+    /// 本函数不重新解释存储位置，打开失败直接返回错误。
+    pub async fn new(session_store: SessionStoreDeployment) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir()
             .unwrap_or_default()
             .to_string_lossy()
@@ -87,12 +92,13 @@ impl App {
             None => lc.tr("app-not-configured"),
         };
 
-        // 初始化 thread 存储（经 Resources 门面）；打开失败直接上抛，
-        // TUI 路径由 run_tui 决定 exit 码。
-        let resources = peri_resources::Resources::open_with(db_path)
+        // 初始化 thread 存储（经 Resources 门面）；定位描述由入口归一，
+        // 纯解析失败与打开失败都直接上抛，TUI 路径由 run_tui 决定 exit 码。
+        let resources = peri_resources::Resources::open_deployment(&session_store)
             .await
             .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
-        let thread_store: std::sync::Arc<dyn crate::thread::ThreadStore> = resources.thread_store();
+        // 业务句柄进服务注册表，部署关闭权留在 App（non-Clone），由宿主装配消费。
+        let (session_resources, session_store_shutdown) = resources.into_parts();
 
         // 初始化 cron state + spawn tick task
         let (cron_state, scheduler_arc) = CronState::new();
@@ -108,7 +114,7 @@ impl App {
             cwd: cwd.clone(),
             provider_name: provider_name.clone(),
             permission_mode: permission_mode.clone(),
-            thread_store: thread_store.clone(),
+            session_resources: session_resources.clone(),
             mcp_pool: None,
             mcp_task_owner: None,
             mcp_init_rx: None,
@@ -126,6 +132,7 @@ impl App {
             config_source,
             acp_client: None,
             acp_deployment: None,
+            session_store_shutdown: Some(Box::new(session_store_shutdown)),
         })
     }
 

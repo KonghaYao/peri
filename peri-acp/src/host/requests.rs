@@ -77,18 +77,13 @@ pub(crate) async fn handle_request(
         super::workspace::validate_expected(cfg, session_id.expect("checked"), None).await?;
     }
     // Renaming an unloaded session is a short mutation lease; never steals a live owner.
-    let transient_owner =
-        if method == "session/rename" && session_id.is_some_and(|id| !sessions.contains_key(id)) {
-            Some(
-                cfg.controller
-                    .sessions()
-                    .acquire_execution_lease(&session_id.expect("checked").to_owned())
-                    .await
-                    .map_err(super::workspace::workspace_error)?,
-            )
-        } else {
-            None
-        };
+    let transient_owner = if method == "session/rename"
+        && session_id.is_some_and(|id| !sessions.contains_key(id))
+    {
+        Some(super::workspace::acquire_transient_owner(cfg, session_id.expect("checked")).await?)
+    } else {
+        None
+    };
     let result = match method {
         "initialize" => session_lifecycle::handle_initialize(params, cfg),
         "session/new" => session_lifecycle::handle_new(params, cfg, sessions).await,

@@ -66,7 +66,7 @@ impl super::SubAgentTool {
             ));
         }
 
-        // 结果格式：thread_store 存在时带 child_thread_id 前缀（与迁移前一致）
+        // 结果格式：会话资源门面存在时带 child_thread_id 前缀（与迁移前一致）
         let text = extract_last_ai_text(&spawned.session);
         let output = peri_agent::agent::react::AgentOutput {
             text,
@@ -76,7 +76,7 @@ impl super::SubAgentTool {
             block_continue: None,
         };
         let result_text = format_subagent_result(&output);
-        if host.thread_store.is_some() {
+        if host.session_resources.is_some() {
             Ok(format!(
                 "child_thread_id: {}\n{}",
                 spawned.child_thread_id, result_text

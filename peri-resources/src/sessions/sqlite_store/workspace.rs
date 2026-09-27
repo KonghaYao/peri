@@ -1,8 +1,8 @@
 //! Registry and session binding transactions; SQL-scoped lightweight history pages.
 
 use super::{
+    database::SqliteSessionDatabase,
     discovery::{self, Discovery, Observation},
-    SqliteThreadStore,
 };
 use anyhow::{Context, Result};
 use peri_acp_types::{
@@ -12,9 +12,9 @@ use peri_acp_types::{
 use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection};
 use std::path::{Component, Path, PathBuf};
 
-type BindingRow = (i64, String, String, String);
+pub(super) type BindingRow = (i64, String, String, String);
 
-fn decode_binding(row: BindingRow) -> Result<SessionBinding> {
+pub(super) fn decode_binding(row: BindingRow) -> Result<SessionBinding> {
     if row.0 != i64::from(SESSION_BINDING_VERSION) {
         return Err(WorkspaceError::InvalidBinding.into());
     }
@@ -29,7 +29,10 @@ fn decode_binding(row: BindingRow) -> Result<SessionBinding> {
     })
 }
 
-fn validate_relative(path: &Path) -> Result<()> {
+/// 相对路径必须是纯普通分量（不含 `..`、根、前缀），且文本可逆。
+///
+/// 绑定写入与绑定解码共用本规则：写入方不能存下无法解码的路径。
+pub(super) fn validate_relative(path: &Path) -> Result<()> {
     if path
         .components()
         .any(|component| !matches!(component, Component::Normal(_)))
@@ -54,7 +57,7 @@ fn binding_cwd(root: &Path, relative: &Path) -> PathBuf {
     }
 }
 
-impl SqliteThreadStore {
+impl SqliteSessionDatabase {
     pub(super) async fn resolve_workspace_impl(&self, cwd: &Path) -> Result<ResolvedWorkspace> {
         let (cwd, observed) = discovery::observe(cwd).await?;
         let Observation {
@@ -204,7 +207,9 @@ impl SqliteThreadStore {
         // 同一次准入已在解析阶段观测过完整发现，这里再跑一轮 Git 只是把同一次观测
         // 重复一遍，代价是每个创建方都要等 Git（含慢 Git 的固定等待）。
         let write_guard = if let Some(parent) = &meta.parent_thread_id {
-            let guard = self.require_execution_lease(parent).await?;
+            // 桥与本机数据面共用同一个库：父线程的事实（含它是谁的子会话）按本机读法取。
+            let facts = self.local_session_facts(parent).await?;
+            let guard = self.require_execution_lease(parent, &facts).await?;
             // 子线程继承父线程的同一工作区：比对的是已记录的绑定身份，不需要重新发现。
             let parent_workspace = self.reassert_session_binding_impl(parent).await;
             match parent_workspace {
@@ -357,6 +362,18 @@ impl SqliteThreadStore {
         let row: Option<BindingRow> = sqlx::query_as("SELECT schema_version, project_id, workspace_id, relative_cwd FROM session_bindings WHERE thread_id = ?")
             .bind(id).fetch_optional(&mut *connection).await?;
         let binding = decode_binding(row.ok_or(WorkspaceError::BindingMissing)?)?;
+        Self::validate_binding_relation_on(connection, &binding).await
+    }
+
+    /// 绑定值的本机复核：登记关系加关键文件对象。
+    ///
+    /// 与 [`Self::validate_session_binding_on`] 的差别只在于事实来源：那个从已保存的
+    /// binding 行读，这个复核调用方手上的 binding 值（新建/fork/child 在写入前用它，
+    /// 避免未登记的 project/workspace 直接落到外键失败上）。
+    pub(super) async fn validate_binding_relation_on(
+        connection: &mut SqliteConnection,
+        binding: &SessionBinding,
+    ) -> Result<ResolvedWorkspace> {
         let row: (String,) =
             sqlx::query_as("SELECT root FROM workspaces WHERE id = ? AND project_id = ?")
                 .bind(binding.workspace_id.to_string())
@@ -369,9 +386,30 @@ impl SqliteThreadStore {
             workspace_id: binding.workspace_id,
             cwd: binding_cwd(&root, &binding.cwd_relative_to_workspace),
             root,
-            relative_cwd: binding.cwd_relative_to_workspace,
+            relative_cwd: binding.cwd_relative_to_workspace.clone(),
         };
         Self::validate_resolved_on(connection, &workspace).await?;
+        Ok(workspace)
+    }
+
+    /// 绑定**值**的本机复核（远程组合：绑定来自远端会话行，不在本机 `session_bindings`）。
+    ///
+    /// 判定与本机绑定完全同一套：登记关系（project/workspace 必须在本机登记过）加关键文件
+    /// 对象身份，`full` 时再叠一次完整发现快照比对。因此「远端 binding 指向的本机对象」与
+    /// 「本机会话的绑定」不会出现两套结论。
+    pub(super) async fn validate_binding_value_impl(
+        &self,
+        binding: &SessionBinding,
+        full: bool,
+    ) -> Result<ResolvedWorkspace> {
+        let mut connection = self.pool.acquire().await?;
+        let workspace = match Self::validate_binding_relation_on(&mut connection, binding).await {
+            Ok(workspace) => workspace,
+            Err(error) => return Err(normalize_binding_lookup(error)),
+        };
+        if full {
+            Self::revalidate_registered_observation_on(&mut connection, &workspace).await?;
+        }
         Ok(workspace)
     }
 
@@ -533,3 +571,12 @@ async fn legacy_windows_path_comparison_accepts_verbatim_drive_and_unc() {
 #[cfg(test)]
 #[path = "workspace_test.rs"]
 mod tests;
+
+/// `workspaces` 里查不到这条绑定引用的工作区：那是「本机不认识这个绑定」，
+/// 不是内部错误。未登记的 project/workspace 因此得到 workspace 语义的失败。
+fn normalize_binding_lookup(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<sqlx::Error>() {
+        Some(sqlx::Error::RowNotFound) => WorkspaceError::InvalidBinding.into(),
+        _ => error,
+    }
+}

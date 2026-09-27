@@ -1643,3 +1643,111 @@ fn test_system_mcp_plugin_lenient_aggregate_keeps_other_capabilities() {
     assert!(!aggregated.all_hooks.is_empty(), "插件的其它能力必须保留");
     assert_eq!(aggregated.all_hooks[0].plugin_name, "lenient");
 }
+
+/// 目录树快照（相对 root 的路径集合），用于证明只读发现没有写副作用。
+fn snapshot_paths(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// 只读准备发现：清单缺失必须失败并定位插件，不得生成合成清单（无写副作用）。
+#[test]
+fn test_readonly_discovery_missing_manifest_fails_without_repair() {
+    let dir = tempdir().unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    let plugin_dir = install_plugin(&claude_home, "ghost", None);
+    let manifest_path = plugin_dir.join(".claude-plugin").join("plugin.json");
+    std::fs::remove_file(&manifest_path).unwrap();
+
+    let before = snapshot_paths(&plugin_dir);
+    let error = load_enabled_plugins_aggregated_readonly(&claude_home, None)
+        .expect_err("readonly discovery must not silently skip a plugin with a missing manifest");
+    let message = error.to_string();
+    assert!(
+        message.contains("ghost") && message.contains(&manifest_path.display().to_string()),
+        "error must locate the offending plugin and manifest path: {message}"
+    );
+    assert!(
+        !manifest_path.exists(),
+        "readonly discovery must not synthesize a manifest"
+    );
+    assert_eq!(
+        before,
+        snapshot_paths(&plugin_dir),
+        "readonly discovery must not write plugin files"
+    );
+}
+
+/// 同一布局下宽容聚合保持既有产品行为（跳过该插件、返回空结果），与只读路径明确分离。
+#[test]
+fn test_lenient_aggregate_still_skips_missing_manifest() {
+    let dir = tempdir().unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    let plugin_dir = install_plugin(&claude_home, "ghost", None);
+    std::fs::remove_file(plugin_dir.join(".claude-plugin").join("plugin.json")).unwrap();
+
+    let aggregated = load_enabled_plugins_aggregated(&claude_home, None);
+    assert!(
+        aggregated.plugins.is_empty(),
+        "宽容聚合仍跳过缺失清单的插件，不因准备路径严格化而改变"
+    );
+}
+
+/// 非法清单在只读路径上以可定位错误失败，不被当作用户未安装而跳过。
+#[test]
+fn test_readonly_discovery_invalid_manifest_fails() {
+    let dir = tempdir().unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    let plugin_dir = install_plugin(&claude_home, "broken", None);
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        "{ not json",
+    )
+    .unwrap();
+
+    let error = load_enabled_plugins_aggregated_readonly(&claude_home, None)
+        .expect_err("readonly discovery must fail on an invalid manifest");
+    let message = error.to_string();
+    assert!(
+        message.contains("broken") && message.contains(&plugin_dir.display().to_string()),
+        "error must locate the offending plugin: {message}"
+    );
+}
+
+/// 有效插件：只读聚合成功、无写副作用，且同输入重复调用结果一致。
+#[test]
+fn test_readonly_discovery_is_side_effect_free_and_repeatable() {
+    let dir = tempdir().unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    install_plugin(&claude_home, "ok", None);
+
+    let before = snapshot_paths(&claude_home);
+    let first = load_enabled_plugins_aggregated_readonly(&claude_home, None).unwrap();
+    let second = load_enabled_plugins_aggregated_readonly(&claude_home, None).unwrap();
+
+    assert_eq!(first.plugins.len(), 1);
+    assert_eq!(first.plugins[0].name, second.plugins[0].name);
+    assert_eq!(first.all_commands.len(), second.all_commands.len());
+    assert_eq!(first.all_skill_roots.len(), second.all_skill_roots.len());
+    assert_eq!(first.all_agent_dirs.len(), second.all_agent_dirs.len());
+    assert_eq!(
+        before,
+        snapshot_paths(&claude_home),
+        "readonly discovery must not write any file under the plugin home"
+    );
+}

@@ -226,7 +226,7 @@ pub(crate) fn build_stage_context(
         lsp_pool: ctx.lsp_pool.clone(),
         workflow_executor: ctx.workflow_executor.clone(),
         workflow_middleware: ctx.workflow_middleware.clone(),
-        thread_store: ctx.thread_store.clone(),
+        session_resources: ctx.session_resources.clone(),
         thread_id: ctx.thread_id.clone(),
         // 注入面
         model_name: ctx.provider_model_name.clone(),

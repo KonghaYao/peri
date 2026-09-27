@@ -34,6 +34,7 @@ use peri_acp_types::command::{
 use peri_acp_types::compact::CompactConfig;
 use peri_acp_types::event::CompactTrigger;
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session_resources::DataCapabilities;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use tracing::{info, warn};
 
@@ -85,7 +86,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         auxiliary_model,
         event_sink,
         cancel_token,
-        thread_store,
+        session_resources,
         thread_id,
         ..
     } = ctx;
@@ -115,8 +116,8 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         }
     };
 
-    // 阶段 4: 手动 compact 必须绑定持久化 transcript，保证 Full lifecycle 可原子提交。
-    let (thread_store, thread_id) = match (thread_store, thread_id) {
+    // 阶段 4: 手动 compact 必须绑定会话资源门面，保证 Full lifecycle 可原子提交。
+    let (session_resources, thread_id) = match (session_resources, thread_id) {
         (Some(store), Some(thread_id)) => (store, thread_id),
         _ => {
             warn!("compact: persistence is unavailable");
@@ -128,19 +129,35 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         }
     };
 
-    if !thread_store.supports_compaction_lifecycle() {
-        warn!("compact: persistence backend does not support lifecycle commits");
-        return PipelineOutcome::EarlyReturn {
-            history,
-            stop_reason: PromptStopReason::EndTurn,
-            message: "compact lifecycle persistence is unavailable".to_string(),
-        };
+    // 能力判定读领域能力面（`Complete` = 全部行为满足完整后置条件），不探测实现细节。
+    match session_resources
+        .inspect_availability(Some(&thread_id))
+        .await
+    {
+        Ok(availability) if availability.capabilities == DataCapabilities::Complete => {}
+        Ok(_) => {
+            warn!("compact: persistence backend does not support complete behavior set");
+            return PipelineOutcome::EarlyReturn {
+                history,
+                stop_reason: PromptStopReason::EndTurn,
+                message: "compact lifecycle persistence is unavailable".to_string(),
+            };
+        }
+        Err(error) => {
+            warn!(%error, "compact: session availability check failed");
+            return PipelineOutcome::EarlyReturn {
+                history,
+                stop_reason: PromptStopReason::EndTurn,
+                message: "compact persistence failed".to_string(),
+            };
+        }
     }
 
-    // 阶段 5: 已存在的 thread 从完整消息和 flags 重建。命令输入是可见视图，
-    // 因此不能将物理存储中的 excluded 原文直接与其比较。
-    let persisted_history = match thread_store.load_messages(&thread_id).await {
-        Ok(messages) => messages,
+    // 阶段 5: 已存在的 thread 从**一次一致快照**重建（payload 与 flags 同一次读取，
+    // 不拼「先 messages 后 flags」的跨时刻结果）。命令输入是可见视图，因此不能将
+    // 物理存储中的 excluded 原文直接与其比较。
+    let snapshot = match session_resources.load_session_snapshot(&thread_id).await {
+        Ok(snapshot) => snapshot,
         Err(_) => {
             warn!("compact: failed to load persisted history");
             return PipelineOutcome::EarlyReturn {
@@ -150,9 +167,15 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             };
         }
     };
+    // 与迁前的 `load_messages` 同语义：只取消息本体，reminder 不进入 compact 输入。
+    let persisted_history: Vec<BaseMessage> = snapshot
+        .payloads
+        .iter()
+        .filter_map(|payload| payload.as_message().cloned())
+        .collect();
     let mut transcript = MessageTranscript::new().with_compaction_commit_state(commit_state);
     if persisted_history.is_empty() {
-        transcript = transcript.with_persistence(thread_store, thread_id);
+        transcript = transcript.with_persistence(session_resources, thread_id);
         for message in &history {
             transcript.append(message.clone());
         }
@@ -165,17 +188,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             };
         }
     } else {
-        let persisted_flags = match thread_store.load_message_flags(&thread_id).await {
-            Ok(flags) => flags,
-            Err(_) => {
-                warn!("compact: failed to load persisted flags");
-                return PipelineOutcome::EarlyReturn {
-                    history,
-                    stop_reason: PromptStopReason::EndTurn,
-                    message: "compact persistence failed".to_string(),
-                };
-            }
-        };
+        let persisted_flags = snapshot.flags.clone();
         for message in &persisted_history {
             transcript.append(message.clone());
         }
@@ -202,7 +215,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
                 message: "compact persistence context mismatch".to_string(),
             };
         }
-        transcript = transcript.with_persistence(thread_store, thread_id);
+        transcript = transcript.with_persistence(session_resources, thread_id);
     }
 
     // 阶段 6: 发出 CompactStarted 事件

@@ -1,10 +1,10 @@
 //! Controller 层控制面宿主（`docs/top-level.md` §6）。
 //!
-//! 控制面五步：lite params → pick Resources → pick Runtime → run Session → pop events。
+//! 控制面五步：lite params → 会话资源句柄 → pick Runtime → run Session → pop events。
 //! - [`LiteParams`]：session 标识 / agent 定义引用 / cwd / 初始输入 / 初始消息与
 //!   工具集装载（§6）
-//! - [`Controller::pick_resources`] / [`Controller::pick_runtime`]：从注入的
-//!   Resources / Runtime 取上下文（其余上下文由 Controller 从 Resources 组装注入）
+//! - [`Controller::sessions`] / [`Controller::pick_runtime`]：取业务侧会话资源句柄
+//!   与 Runtime 编排器（Controller 只消费业务句柄，不持有部署关闭权）
 //! - [`Controller::run_session`]：经 Runtime 查映射拿 [`SessionHandle`] 发起执行
 //!   （Controller → Runtime 边，§6 run Session）
 //! - [`Controller::join_session`] / [`Controller::destroy_session`] / [`Controller::session_ids`]：
@@ -27,9 +27,8 @@ use peri_acp_types::event::{EventMessage, ExecutorEvent};
 use peri_acp_types::identity::{CancelRequest, EventEnvelope};
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::runtime::UnstampedEvent;
-use peri_acp_types::store::ThreadStore;
+use peri_acp_types::session_resources::SessionResources;
 use peri_agent::tools::ToolDefinition;
-use peri_resources::Resources;
 use peri_runtime::Runtime;
 use tokio::sync::{broadcast, mpsc};
 
@@ -161,19 +160,16 @@ impl Subscription {
 ///   （Resources 侧打开后传入）
 /// - Runtime 编排器（pick Runtime 的目标源）：部署装配点经
 ///   [`Controller::with_runtime`] 注入；缺省为空实例（生产接线随 L5 落地）
-/// - Resources 门面（pick Resources 的目标源）：部署装配点经
-///   [`Controller::with_resources`] 注入；缺省未注入（None）
 /// - 装配注入端口（pick 目标源）：mcp 池 / cron 调度器 / 工具检索索引 /
 ///   LSP 服务器配置，宿主装配点构造具体实现后 upcast 注入（3.0 批 2 波 2；
 ///   消费方为执行装配，随 L5 落位）
 /// - 事件协议化前分支（弹出队列 + 订阅广播）
 pub struct Controller {
-    /// 持久化存储通道（等价包装 `ThreadStore`，不改变其 trait 语义）。
-    sessions: Arc<dyn ThreadStore>,
+    /// 会话资源通道（会话行为门面）：业务侧经 [`Controller::sessions`] 取得，Controller
+    /// 只转发句柄，不另存数据或执行注册表。
+    sessions: Arc<dyn SessionResources>,
     /// 多 session 编排器；仅在消费 self 的装配阶段替换，运行时登记状态归 Runtime。
     runtime: Arc<Runtime>,
-    /// 外部系统资源门面（§5；以 context 形式提供给 Controller）。
-    resources: Option<Resources>,
     /// MCP 客户端池端口（pick 目标源；缺省未注入）。
     mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     /// Cron 调度器端口（pick 目标源；缺省未注入）。
@@ -195,13 +191,12 @@ impl Controller {
     ///
     /// Runtime / Resources / 装配注入端口由部署装配点（Resources 打开后、
     /// Runtime 建立后）经对应 `with_*` 注入；本构造函数保持既有调用点兼容。
-    pub fn new(sessions: Arc<dyn ThreadStore>) -> Self {
+    pub fn new(sessions: Arc<dyn SessionResources>) -> Self {
         let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let (subscribers, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             sessions,
             runtime: Arc::new(Runtime::new()),
-            resources: None,
             mcp_pool: None,
             cron_scheduler: None,
             tool_search: None,
@@ -215,13 +210,6 @@ impl Controller {
     /// 注入 Runtime 编排器（pick Runtime 的目标源；部署装配点调用）。
     pub fn with_runtime(mut self, runtime: Arc<Runtime>) -> Self {
         self.runtime = runtime;
-        self
-    }
-
-    /// 注入 Resources 门面（pick Resources 的目标源；部署装配点在
-    /// `Resources::open()` 后调用）。
-    pub fn with_resources(mut self, resources: Resources) -> Self {
-        self.resources = Some(resources);
         self
     }
 
@@ -286,17 +274,10 @@ impl Controller {
 
     /// Controller 侧 sessions 访问通道。
     ///
-    /// 返回存储句柄供业务操作使用；语义与 `ThreadStore` 完全等价，仅改变访问路径。
-    pub fn sessions(&self) -> Arc<dyn ThreadStore> {
+    /// 返回会话资源门面（消费侧唯一的会话行为契约）：Controller 只做转发，不解释
+    /// 存储语义、不暴露事务或执行注册表。
+    pub fn sessions(&self) -> Arc<dyn SessionResources> {
         Arc::clone(&self.sessions)
-    }
-
-    /// pick Resources（控制面第二步）：取注入的 Resources 门面。
-    ///
-    /// 未注入（部署装配点尚未提供）时返回 `None`；组装注入上下文的职责
-    /// 随 L5 装配落位。
-    pub fn pick_resources(&self) -> Option<Resources> {
-        self.resources.clone()
     }
 
     /// pick Runtime（控制面第三步）：取注入的 Runtime 编排器引用。

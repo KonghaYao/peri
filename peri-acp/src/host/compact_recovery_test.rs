@@ -4,10 +4,16 @@ use super::*;
 use crate::host::{prompt::finish_prompt_turn, SessionState, SharedSessions};
 use peri_acp_types::{
     messages::MessageId,
-    store::{CompactionLifecycle, MessageFlags, PersistedPayload},
+    session_resources::{
+        ChildResumeClaim, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
+        PersistenceRecovery, RewindBoundary, SessionAvailability, SessionMetaPatch,
+        SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
+        SessionSnapshot,
+    },
+    store::{CompactionChange, MessageFlags, PersistedPayload, ThreadStore},
     thread::{ThreadId, ThreadMeta},
+    workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionExecutionLease},
 };
-use peri_agent::thread::SqliteThreadStore;
 use std::{collections::HashMap, sync::atomic::AtomicBool};
 
 const SUMMARY: &str = "COMMITTED_COMPACT_RECOVERY_SUMMARY";
@@ -47,9 +53,13 @@ enum AfterCommitAction {
     Error,
 }
 
-// 故障注入均包在真实 SQLite 调用外围，不能用内存替身伪造提交。
+/// 真门面 + 提交点注入：故障包在真实 SQLite 门面调用外围，不能用内存替身伪造提交。
+///
+/// 迁移后 compact/append/删除都走 [`SessionResources`]；本包装只改写「Full 提交点被
+/// 取消 / 提交后确认丢失 / 提交后的追加失败」三种时序，其余行为逐项转发真实门面
+/// （同一库句柄，见 [`make_recovery_context`]）。
 struct RecoveryStore {
-    inner: SqliteThreadStore,
+    inner: Arc<dyn SessionResources>,
     compact_commits: AtomicUsize,
     fail_appends: AtomicBool,
     fail_after_full: bool,
@@ -58,93 +68,165 @@ struct RecoveryStore {
 }
 
 #[async_trait]
-impl ThreadStore for RecoveryStore {
-    async fn create_thread(&self, meta: ThreadMeta) -> anyhow::Result<ThreadId> {
-        self.inner.create_thread(meta).await
+impl SessionResources for RecoveryStore {
+    async fn inspect_availability(
+        &self,
+        session: Option<&ThreadId>,
+    ) -> SessionResourceResult<SessionAvailability> {
+        self.inner.inspect_availability(session).await
     }
-    async fn append_messages(&self, id: &ThreadId, msgs: &[BaseMessage]) -> anyhow::Result<()> {
-        self.append_payloads(
-            id,
-            &msgs
-                .iter()
-                .cloned()
-                .map(PersistedPayload::Message)
-                .collect::<Vec<_>>(),
-        )
-        .await
+
+    async fn resolve_workspace(
+        &self,
+        cwd: &std::path::Path,
+    ) -> SessionResourceResult<ResolvedWorkspace> {
+        self.inner.resolve_workspace(cwd).await
     }
-    async fn append_payloads(
+
+    async fn validate_session(
+        &self,
+        id: &ThreadId,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.inner.validate_session(id, workspace).await
+    }
+
+    async fn acquire_execution(
+        &self,
+        id: &ThreadId,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        self.inner.acquire_execution(id, workspace).await
+    }
+
+    async fn reset_dirty_execution(
+        &self,
+        request: &peri_acp_types::workspace::ResetDirtyRequest,
+    ) -> SessionResourceResult<()> {
+        self.inner.reset_dirty_execution(request).await
+    }
+
+    async fn create_session(
+        &self,
+        input: &NewSession,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        self.inner.create_session(input).await
+    }
+
+    async fn abandon_initialization(
+        &self,
+        id: &ThreadId,
+        lease: &Arc<dyn SessionExecutionLease>,
+    ) -> SessionResourceResult<()> {
+        self.inner.abandon_initialization(id, lease).await
+    }
+
+    async fn adopt_legacy_session(
+        &self,
+        id: &ThreadId,
+        saved_cwd: &str,
+        workspace: &ResolvedWorkspace,
+        frozen: &FrozenSnapshotBytes,
+    ) -> SessionResourceResult<()> {
+        self.inner
+            .adopt_legacy_session(id, saved_cwd, workspace, frozen)
+            .await
+    }
+
+    async fn load_session_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot> {
+        self.inner.load_session_snapshot(id).await
+    }
+
+    async fn load_session_binding(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::BindingState> {
+        self.inner.load_session_binding(id).await
+    }
+
+    async fn validate_bound_workspace(
+        &self,
+        id: &ThreadId,
+        check: peri_acp_types::session_resources::BindingRecheck,
+    ) -> SessionResourceResult<ResolvedWorkspace> {
+        self.inner.validate_bound_workspace(id, check).await
+    }
+
+    async fn load_session_history(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Vec<PersistedPayload>> {
+        self.inner.load_session_history(id).await
+    }
+
+    async fn load_session_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
+        self.inner.load_session_meta(id).await
+    }
+
+    async fn list_sessions(
+        &self,
+        query: &ScopedThreadQuery,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        self.inner.list_sessions(query).await
+    }
+
+    async fn list_children(&self, parent: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>> {
+        self.inner.list_children(parent).await
+    }
+
+    async fn list_session_tree(&self, root: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>> {
+        self.inner.list_session_tree(root).await
+    }
+
+    async fn append_history(
         &self,
         id: &ThreadId,
         payloads: &[PersistedPayload],
-    ) -> anyhow::Result<()> {
+    ) -> SessionResourceResult<()> {
         if self.fail_appends.load(Ordering::SeqCst)
             || (self.fail_after_full && self.compact_commits.load(Ordering::SeqCst) > 0)
         {
-            anyhow::bail!("injected post-compact writer failure");
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Unavailable {
+                    detail: "injected post-compact writer failure".to_owned(),
+                },
+            ));
         }
-        self.inner.append_payloads(id, payloads).await
+        self.inner.append_history(id, payloads).await
     }
-    async fn load_messages(&self, id: &ThreadId) -> anyhow::Result<Vec<BaseMessage>> {
-        self.inner.load_messages(id).await
-    }
-    async fn load_payloads(&self, id: &ThreadId) -> anyhow::Result<Vec<PersistedPayload>> {
-        self.inner.load_payloads(id).await
-    }
-    async fn load_meta(&self, id: &ThreadId) -> anyhow::Result<ThreadMeta> {
-        self.inner.load_meta(id).await
-    }
-    async fn update_meta(&self, id: &ThreadId, meta: ThreadMeta) -> anyhow::Result<()> {
-        self.inner.update_meta(id, meta).await
-    }
-    async fn list_threads(&self) -> anyhow::Result<Vec<ThreadMeta>> {
-        self.inner.list_threads().await
-    }
-    async fn delete_thread(&self, id: &ThreadId) -> anyhow::Result<()> {
-        self.inner.delete_thread(id).await
-    }
-    async fn load_context(&self, id: &ThreadId) -> anyhow::Result<Vec<BaseMessage>> {
-        self.inner.load_context(id).await
-    }
-    async fn load_context_payloads(&self, id: &ThreadId) -> anyhow::Result<Vec<PersistedPayload>> {
-        self.inner.load_context_payloads(id).await
-    }
-    async fn list_child_threads(&self, id: &ThreadId) -> anyhow::Result<Vec<ThreadMeta>> {
-        self.inner.list_child_threads(id).await
-    }
-    async fn list_session_threads(&self, id: &ThreadId) -> anyhow::Result<Vec<ThreadMeta>> {
-        self.inner.list_session_threads(id).await
-    }
-    async fn update_thread_status(&self, id: &ThreadId, status: &str) -> anyhow::Result<()> {
-        self.inner.update_thread_status(id, status).await
-    }
-    async fn invalidate_context_cache(&self, id: &ThreadId) -> anyhow::Result<()> {
-        self.inner.invalidate_context_cache(id).await
-    }
-    async fn delete_messages(&self, id: &ThreadId, ids: &[MessageId]) -> anyhow::Result<()> {
-        self.deletes.fetch_add(1, Ordering::SeqCst);
-        self.inner.delete_messages(id, ids).await
-    }
-    async fn update_message_flags(
+
+    async fn save_fork(
         &self,
-        id: &MessageId,
-        flags: &MessageFlags,
-    ) -> anyhow::Result<()> {
-        self.inner.update_message_flags(id, flags).await
+        fork: &ForkSnapshot,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        self.inner.save_fork(fork).await
     }
-    fn supports_compaction_lifecycle(&self) -> bool {
-        true
+
+    async fn save_child(
+        &self,
+        child: &ChildSnapshot,
+        lease: &Arc<dyn SessionExecutionLease>,
+    ) -> SessionResourceResult<()> {
+        self.inner.save_child(child, lease).await
     }
-    async fn commit_compaction_lifecycle(
+
+    async fn claim_child_resume(
+        &self,
+        child: &ThreadId,
+        root: &ThreadId,
+    ) -> SessionResourceResult<Box<dyn ChildResumeClaim>> {
+        self.inner.claim_child_resume(child, root).await
+    }
+
+    async fn apply_compaction(
         &self,
         id: &ThreadId,
-        lifecycle: &CompactionLifecycle,
-    ) -> anyhow::Result<()> {
-        self.inner
-            .commit_compaction_lifecycle(id, lifecycle)
-            .await?;
-        if !lifecycle.appended_messages.is_empty() {
+        change: &CompactionChange,
+    ) -> SessionResourceResult<()> {
+        self.inner.apply_compaction(id, change).await?;
+        if !change.appended_messages.is_empty() {
             self.compact_commits.fetch_add(1, Ordering::SeqCst);
+            // guard 必须在 await 之前释放（`SessionResources` 的 future 需要 Send）。
             let action = self.after_commit.lock().unwrap().take();
             match action {
                 Some(AfterCommitAction::Cancel(cancel)) => {
@@ -152,18 +234,72 @@ impl ThreadStore for RecoveryStore {
                     std::future::pending::<()>().await;
                 }
                 Some(AfterCommitAction::Error) => {
-                    anyhow::bail!("injected error after durable compact commit");
+                    return Err(SessionResourceError::new(
+                        SessionResourceErrorKind::Unavailable {
+                            detail: "injected error after durable compact commit".to_owned(),
+                        },
+                    ));
                 }
                 None => {}
             }
         }
         Ok(())
     }
-    async fn load_message_flags(
+
+    async fn apply_message_projections(
         &self,
         id: &ThreadId,
-    ) -> anyhow::Result<HashMap<MessageId, MessageFlags>> {
-        self.inner.load_message_flags(id).await
+        updates: &[(MessageId, MessageFlags)],
+    ) -> SessionResourceResult<()> {
+        self.inner.apply_message_projections(id, updates).await
+    }
+
+    async fn rewind_history(
+        &self,
+        id: &ThreadId,
+        boundary: RewindBoundary,
+    ) -> SessionResourceResult<()> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        self.inner.rewind_history(id, boundary).await
+    }
+
+    async fn remove_history_entries(
+        &self,
+        id: &ThreadId,
+        ids: &[MessageId],
+    ) -> SessionResourceResult<()> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        self.inner.remove_history_entries(id, ids).await
+    }
+
+    async fn update_session_meta(
+        &self,
+        id: &ThreadId,
+        patch: &SessionMetaPatch,
+    ) -> SessionResourceResult<()> {
+        self.inner.update_session_meta(id, patch).await
+    }
+
+    async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.delete_session_tree(id).await
+    }
+
+    async fn recover_session_persistence(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<PersistenceRecovery> {
+        self.inner.recover_session_persistence(id).await
+    }
+
+    async fn drain_persistence(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.drain_persistence(id).await
+    }
+}
+
+impl RecoveryStore {
+    /// 夹具侧直接读回持久化历史（走门面的一致快照，不另开连接）。
+    async fn load_payloads(&self, id: &ThreadId) -> anyhow::Result<Vec<PersistedPayload>> {
+        Ok(self.inner.load_session_snapshot(id).await?.payloads)
     }
 }
 
@@ -205,10 +341,15 @@ async fn make_recovery_context(
     model: Arc<dyn Model>,
     fail_after_full: bool,
 ) -> (SessionContext, Arc<RecoveryStore>, SharedSessions) {
-    let store = Arc::new(RecoveryStore {
-        inner: SqliteThreadStore::new(dir.path().join("recovery.db"))
+    // 夹具与生产同构：迁移桥与门面来自**同一次打开**（同一 pool、同一 owner 登记表）。
+    // 桥只用于夹具侧的建会话与直接读断言，生产路径一律走注入的门面包装。
+    let (bridge, facade) =
+        peri_resources::sessions::open_store_and_facade_for_tests(dir.path().join("recovery.db"))
             .await
-            .unwrap(),
+            .unwrap();
+    let bridge = Arc::new(bridge);
+    let store = Arc::new(RecoveryStore {
+        inner: Arc::new(facade),
         compact_commits: AtomicUsize::new(0),
         fail_appends: AtomicBool::new(false),
         fail_after_full,
@@ -216,13 +357,13 @@ async fn make_recovery_context(
         after_commit: Mutex::new(None),
     });
     let cwd = dir.path().to_str().unwrap();
-    let thread_id = store.create_thread(ThreadMeta::new(cwd)).await.unwrap();
+    let thread_id = bridge.create_thread(ThreadMeta::new(cwd)).await.unwrap();
     let history = vec![BaseMessage::human(OLD), BaseMessage::ai("old answer")];
-    store.append_messages(&thread_id, &history).await.unwrap();
-    let mut ctx = make_session_context(&thread_id);
+    bridge.append_messages(&thread_id, &history).await.unwrap();
+    let mut ctx = make_session_context(&thread_id).await;
     ctx.cwd = cwd.into();
     ctx.thread_id = Some(thread_id);
-    ctx.thread_store = Some(store.clone());
+    ctx.session_resources = Some(store.clone());
     ctx.primary_llm_factory = Some(Arc::new(move || model.clone()));
     let sessions = make_host_sessions(
         &ctx,
@@ -401,14 +542,13 @@ async fn test_full_compact_writer_error_evicts_host_and_cold_reload_recovers_sum
         0,
         "不得删除已提交 lifecycle 的消息"
     );
-    // 释放原执行与持久化 owner，再打开全新的 SQLite store。
-    ctx.thread_store = None;
+    // 释放原执行与持久化 owner，再打开全新的 SQLite store（桥与门面重新配对）。
+    ctx.session_resources = None;
     drop(store);
-    let recovered = Arc::new(
-        SqliteThreadStore::new(dir.path().join("recovery.db"))
+    let (recovered, recovered_facade) =
+        peri_resources::sessions::open_store_and_facade_for_tests(dir.path().join("recovery.db"))
             .await
-            .unwrap(),
-    );
+            .unwrap();
     let thread_id = ctx.thread_id.as_ref().unwrap();
     let payloads = recovered.load_payloads(thread_id).await.unwrap();
     let flags = recovered.load_message_flags(thread_id).await.unwrap();
@@ -426,7 +566,7 @@ async fn test_full_compact_writer_error_evicts_host_and_cold_reload_recovers_sum
             .count(),
         1
     );
-    ctx.thread_store = Some(recovered);
+    ctx.session_resources = Some(Arc::new(recovered_facade));
     let cold_sessions = make_host_sessions(&ctx, payloads);
     assert_next_turn_sees_summary(ctx, &cold_sessions).await;
 }
@@ -575,13 +715,12 @@ async fn assert_unconfirmed_commit_requires_cold_recovery(cancel_after_commit: b
     assert!(wire.message.contains("reload"));
     assert!(!sessions.lock().await.contains_key(&ctx.session_id));
     assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
-    ctx.thread_store = None;
+    ctx.session_resources = None;
     drop(store);
-    let recovered = Arc::new(
-        SqliteThreadStore::new(dir.path().join("recovery.db"))
+    let (recovered, recovered_facade) =
+        peri_resources::sessions::open_store_and_facade_for_tests(dir.path().join("recovery.db"))
             .await
-            .unwrap(),
-    );
+            .unwrap();
     let thread_id = ctx.thread_id.as_ref().unwrap();
     let payloads = recovered.load_payloads(thread_id).await.unwrap();
     let flags = recovered.load_message_flags(thread_id).await.unwrap();
@@ -599,7 +738,7 @@ async fn assert_unconfirmed_commit_requires_cold_recovery(cancel_after_commit: b
             .count(),
         1
     );
-    ctx.thread_store = Some(recovered);
+    ctx.session_resources = Some(Arc::new(recovered_facade));
     let cold_sessions = make_host_sessions(&ctx, payloads);
     assert_next_turn_sees_summary(ctx, &cold_sessions).await;
 }

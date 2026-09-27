@@ -76,6 +76,27 @@ fn detect_is_git_repo(cwd: &str) -> bool {
     }
 }
 
+/// 运行环境取值（平台 / OS 版本 / 是否 Git 仓库）。
+///
+/// 会话准备阶段探测一次，随后由冻结输入携带；装配与渲染消费同一份，
+/// 不在调用时各自 `detect`（两处取值不一致即准备结构缺陷）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptRuntimeEnv {
+    pub is_git_repo: bool,
+    pub platform: String,
+    pub os_version: String,
+}
+
+impl PromptRuntimeEnv {
+    pub fn detect(cwd: &str) -> Self {
+        Self {
+            is_git_repo: detect_is_git_repo(cwd),
+            platform: std::env::consts::OS.to_string(),
+            os_version: os_version_string(),
+        }
+    }
+}
+
 pub struct PromptEnv {
     pub cwd: String,
     pub is_git_repo: bool,
@@ -86,32 +107,30 @@ pub struct PromptEnv {
 
 impl PromptEnv {
     pub fn detect(cwd: &str) -> Self {
-        let is_git_repo = detect_is_git_repo(cwd);
-        let platform = std::env::consts::OS.to_string();
-        let os_version = os_version_string();
+        let runtime = PromptRuntimeEnv::detect(cwd);
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        Self::frozen(cwd, &date, &runtime)
+    }
+
+    /// 使用冻结日期与冻结运行环境构造（跳过 `chrono::Local::now()` 与实时探测）。
+    ///
+    /// 会话准备路径经 [`PromptRuntimeEnv`] 一次性定格；`with_frozen_date`
+    /// 保留给既有调用点（其内部等价于对同一 cwd 探测一次）。
+    pub fn frozen(cwd: &str, frozen_date: &str, runtime: &PromptRuntimeEnv) -> Self {
         Self {
             cwd: cwd.to_string(),
-            is_git_repo,
-            platform,
-            os_version,
-            date,
+            is_git_repo: runtime.is_git_repo,
+            platform: runtime.platform.clone(),
+            os_version: runtime.os_version.clone(),
+            date: frozen_date.to_string(),
         }
     }
 
     /// 使用冻结日期构造（跳过 `chrono::Local::now()` 调用）。
-    /// `is_git_repo` 仍基于 cwd 实时检查；调用方若需冻结也应缓存。
+    /// `is_git_repo` / `platform` / `os_version` 仍在调用时探测一次；
+    /// 需要与冻结输入同源的调用方应改用 [`PromptEnv::frozen`]。
     pub fn with_frozen_date(cwd: &str, frozen_date: &str) -> Self {
-        let is_git_repo = detect_is_git_repo(cwd);
-        let platform = std::env::consts::OS.to_string();
-        let os_version = os_version_string();
-        Self {
-            cwd: cwd.to_string(),
-            is_git_repo,
-            platform,
-            os_version,
-            date: frozen_date.to_string(),
-        }
+        Self::frozen(cwd, frozen_date, &PromptRuntimeEnv::detect(cwd))
     }
 }
 

@@ -2,6 +2,19 @@
 //!
 //! 接口契约归 peri-acp-types：`SqliteThreadStore`（peri-resources）实现本 trait，
 //! Agent/ACP/TUI 经本 trait 引用存储，不直接实例化。
+//!
+//! 本 trait 是**迁移桥**：目标契约是 [`crate::session_resources::SessionResources`]
+//! （会话行为门面，数据与本机执行两面分离）。在消费侧迁移完成前保留本 trait 不动
+//! 摇现有调用方；迁移期间遵守两条约束：
+//!
+//! 1. 不为新场景扩展本 trait；新行为加到 `SessionResources`。
+//! 2. 不新增返回 no-op / 空值 / `None` 的默认实现冒充「不支持」——无法完成的行为
+//!    必须显式失败，否则调用方无法区分「不支持」与「确实不存在」。
+//!
+//! 纯历史规则（fork 重映射、投影 flag、compaction 批次、rewind 边界）见
+//! [`history`]，不得在调用方或 adapter 内各写一份。
+
+pub mod history;
 
 use std::collections::HashMap;
 
@@ -173,8 +186,15 @@ impl InheritedContext {
     }
 }
 
+/// 一次 compaction 的领域变更：flags 更新 + 摘要追加。
+///
+/// 名字描述领域事实而不是提交机制：调用方给出「这次 compact 改变了什么」，
+/// 由 adapter 保证整体生效或整体不生效（原名 `CompactionLifecycle` 隐含了
+/// 「调用方管理提交」的机制含义，已废弃）。
+///
+/// 纯应用规则见 [`history::apply_compaction_change`]。
 #[derive(Clone, Debug)]
-pub struct CompactionLifecycle {
+pub struct CompactionChange {
     pub flag_updates: Vec<(MessageId, MessageFlags)>,
     pub appended_messages: Vec<BaseMessage>,
 }
@@ -434,7 +454,7 @@ pub trait ThreadStore: Send + Sync {
     async fn commit_compaction_lifecycle(
         &self,
         thread_id: &ThreadId,
-        lifecycle: &CompactionLifecycle,
+        lifecycle: &CompactionChange,
     ) -> Result<()> {
         let _ = (thread_id, lifecycle);
         anyhow::bail!("unsupported compact lifecycle persistence")

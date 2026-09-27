@@ -18,7 +18,7 @@ use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_c
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use crate::session::Session;
-use crate::thread::ThreadStore;
+use peri_acp_types::session_resources::SessionResources;
 
 // ─── 同步运行 ────────────────────────────────────────────────────────────────
 
@@ -32,7 +32,7 @@ pub(super) async fn run_sync_subagent(
     event_handler: Option<Arc<dyn AgentEventHandler>>,
     on_subagent_start: Option<SubagentLifecycleStart>,
     on_subagent_stop: Option<SubagentLifecycleStop>,
-    thread_store: Option<Arc<dyn ThreadStore>>,
+    session_resources: Option<Arc<dyn SessionResources>>,
     register_runtime: Option<RegisterRuntimeFn>,
     deregister_runtime: Option<DeregisterRuntimeFn>,
     langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
@@ -62,10 +62,10 @@ pub(super) async fn run_sync_subagent(
     if let Some(claim) = &mut resume_claim {
         claim.mark_running();
     }
-    let stop_store = if resume_claim.is_some() {
-        None // The claim worker serializes resumed terminal status writes.
+    let stop_resources = if resume_claim.is_some() {
+        None // 认领持有终态写入（finish 内定向写状态），此处不重复写。
     } else {
-        thread_store
+        session_resources
     };
 
     // lifecycle hook（SubagentStart）
@@ -201,7 +201,7 @@ pub(super) async fn run_sync_subagent(
             // 之后经 forward_subagent_stop_v1 发出）
             on_subagent_stop_handler(
                 &on_subagent_stop,
-                &stop_store,
+                &stop_resources,
                 &agent_name,
                 child_thread_id,
                 &error_result,
@@ -210,7 +210,9 @@ pub(super) async fn run_sync_subagent(
             )
             .await;
             if let Some(claim) = resume_claim.take() {
-                claim.finish("error").await;
+                claim
+                    .finish(peri_acp_types::thread::AgentStatus::Error)
+                    .await;
             }
             return Err(Box::new(failure));
         }
@@ -223,7 +225,7 @@ pub(super) async fn run_sync_subagent(
     };
     on_subagent_stop_handler(
         &on_subagent_stop,
-        &stop_store,
+        &stop_resources,
         &agent_name,
         child_thread_id,
         &output_summary,
@@ -233,7 +235,11 @@ pub(super) async fn run_sync_subagent(
     .await;
     if let Some(claim) = resume_claim.take() {
         claim
-            .finish(if interrupted { "error" } else { "done" })
+            .finish(if interrupted {
+                peri_acp_types::thread::AgentStatus::Error
+            } else {
+                peri_acp_types::thread::AgentStatus::Done
+            })
             .await;
     }
 

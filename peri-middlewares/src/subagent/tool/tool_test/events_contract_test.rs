@@ -61,20 +61,37 @@ fn start_child_agent_id(evs: &[ObserveEvent]) -> peri_acp_types::identity::Agent
         .expect("事件流中应有 SubagentStart")
 }
 
+/// 安装父会话：真实门面 + 已建立会话（父 id 即会话 id）+ root owner + canonical cwd。
+///
+/// child 保存要求父会话存在、调用 cwd 与父会话 cwd 一致、owner 存活；三者一次建好。
+/// 夹具本体随返回值存活（drop 即释放 owner），调用方必须持有到 invoke 结束。
+async fn install_parent_session(dir: &std::path::Path) -> (SessionFixture, String, String) {
+    let fixture = SessionFixture::open_in(dir).await;
+    let cwd = fixture.workspace_cwd();
+    let parent_id = fixture
+        .create_thread(ThreadMeta::new(cwd.clone()))
+        .await
+        .expect("建立父会话失败");
+    (fixture, parent_id, cwd)
+}
+
 /// S1/T1：fork 同步路径（execute_fork.rs）—— Start/Stop 恰好一次，
 /// 且 child_agent_id == child_thread_id（C1 身份统一契约）
 #[tokio::test]
 async fn test_fork_path_emits_v2_start_stop_exactly_once() {
     let dir = tempdir().unwrap();
-    // thread_store 存在时 invoke 返回携带 child_thread_id，用于身份对齐断言
+    let (fixture, parent_id, cwd) = install_parent_session(dir.path()).await;
+    // 会话资源门面存在时 invoke 返回携带 child_thread_id，用于身份对齐断言
     let (t, bridge) = make_tool_with_bridge();
-    let t = t.with_thread_store(Arc::new(peri_agent::thread::FilesystemThreadStore::new(
-        dir.path().join("threads"),
-    )) as Arc<dyn peri_agent::thread::ThreadStore>);
+    let t = t
+        .with_session_resources(fixture.facade())
+        .with_parent_thread_id(parent_id)
+        .with_execution_owner(fixture.execution_owner());
     let result = t
         .invoke(
             serde_json::json!({
                 "fork": true,
+                "cwd": cwd,
                 "prompt": "fork task"
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
@@ -104,15 +121,17 @@ async fn test_fork_path_emits_v2_start_stop_exactly_once() {
 async fn test_define_path_emits_v2_start_stop_exactly_once() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
+    let (fixture, parent_id, cwd) = install_parent_session(dir.path()).await;
     let (t, bridge) = make_tool_with_bridge();
-    let t = t.with_thread_store(Arc::new(peri_agent::thread::FilesystemThreadStore::new(
-        dir.path().join("threads"),
-    )) as Arc<dyn peri_agent::thread::ThreadStore>);
+    let t = t
+        .with_session_resources(fixture.facade())
+        .with_parent_thread_id(parent_id)
+        .with_execution_owner(fixture.execution_owner());
     let result = t
         .invoke(
             serde_json::json!({
                 "subagent_type": "test-agent",
-                "cwd": dir.path().to_str().unwrap(),
+                "cwd": cwd,
                 "prompt": "do it"
             }),
             peri_agent::tools::ToolContext::new(&[], "."),

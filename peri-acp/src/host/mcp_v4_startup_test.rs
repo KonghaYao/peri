@@ -276,8 +276,8 @@ impl McpStartupHarness {
     }
 
     /// 注入 fixture pool 的 session 装配面（真实 assembler 会据此构造 McpMiddleware）。
-    fn session_context(&self, session_id: &str) -> SessionContext {
-        let mut ctx = make_session_context(session_id);
+    async fn session_context(&self, session_id: &str) -> SessionContext {
+        let mut ctx = make_session_context(session_id).await;
         ctx.mcp_pool = Some(Arc::clone(&self.pool) as Arc<dyn McpPoolPort>);
         ctx
     }
@@ -449,7 +449,7 @@ async fn system_mcp_transport_failure_fails_first_prompt_without_model_call() {
     let sink = Arc::new(MockEventSink::new());
     let model = CountingModel::new();
     let result = run_prompt(
-        harness.session_context("mcp-v4-init-failure"),
+        harness.session_context("mcp-v4-init-failure").await,
         &sink,
         &model,
     )
@@ -485,7 +485,7 @@ async fn system_mcp_connected_without_tool_discovery_is_not_ready() {
     let sink = Arc::new(MockEventSink::new());
     let model = CountingModel::new();
     let result = run_prompt(
-        harness.session_context("mcp-v4-no-discovery"),
+        harness.session_context("mcp-v4-no-discovery").await,
         &sink,
         &model,
     )
@@ -509,7 +509,7 @@ async fn system_mcp_tool_discovery_failure_is_not_an_empty_tool_list() {
     let sink = Arc::new(MockEventSink::new());
     let model = CountingModel::new();
     let result = run_prompt(
-        harness.session_context("mcp-v4-list-failure"),
+        harness.session_context("mcp-v4-list-failure").await,
         &sink,
         &model,
     )
@@ -535,7 +535,12 @@ async fn system_mcp_timeout_is_fatal_not_cancelled() {
 
     let sink = Arc::new(MockEventSink::new());
     let model = CountingModel::new();
-    let result = run_prompt(harness.session_context("mcp-v4-timeout"), &sink, &model).await;
+    let result = run_prompt(
+        harness.session_context("mcp-v4-timeout").await,
+        &sink,
+        &model,
+    )
+    .await;
 
     assert_fatal_without_reason(&result, &sink, &model, "启动超时（800ms），未发布 ready");
     assert_ne!(
@@ -567,7 +572,12 @@ async fn system_mcp_disconnected_peer_fails_first_prompt() {
 
     let sink = Arc::new(MockEventSink::new());
     let model = CountingModel::new();
-    let result = run_prompt(harness.session_context("mcp-v4-peer-exit"), &sink, &model).await;
+    let result = run_prompt(
+        harness.session_context("mcp-v4-peer-exit").await,
+        &sink,
+        &model,
+    )
+    .await;
 
     assert_fatal_without_reason(
         &result,
@@ -591,7 +601,7 @@ async fn system_mcp_missing_required_tool_fails_before_reason() {
     let sink = Arc::new(MockEventSink::new());
     let model = CountingModel::new();
     let result = run_prompt(
-        harness.session_context("mcp-v4-missing-tool"),
+        harness.session_context("mcp-v4-missing-tool").await,
         &sink,
         &model,
     )
@@ -618,7 +628,12 @@ async fn system_mcp_ready_exposes_required_tools_on_first_model_request() {
 
     let sink = Arc::new(MockEventSink::new());
     let model = CountingModel::new();
-    let result = run_prompt(harness.session_context("mcp-v4-ready-tools"), &sink, &model).await;
+    let result = run_prompt(
+        harness.session_context("mcp-v4-ready-tools").await,
+        &sink,
+        &model,
+    )
+    .await;
 
     assert!(
         result.ok,
@@ -668,7 +683,7 @@ async fn system_mcp_empty_required_tools_ready_without_injection() {
     let sink = Arc::new(MockEventSink::new());
     let model = CountingModel::new();
     let result = run_prompt(
-        harness.session_context("mcp-v4-empty-required"),
+        harness.session_context("mcp-v4-empty-required").await,
         &sink,
         &model,
     )
@@ -709,7 +724,7 @@ async fn ordinary_mcp_pending_does_not_block_startup() {
     let sink = Arc::new(MockEventSink::new());
     let model = CountingModel::new();
     let result = run_prompt(
-        harness.session_context("mcp-v4-ordinary-pending"),
+        harness.session_context("mcp-v4-ordinary-pending").await,
         &sink,
         &model,
     )
@@ -755,7 +770,7 @@ async fn ordinary_mcp_failure_does_not_block_startup() {
     let sink = Arc::new(MockEventSink::new());
     let model = CountingModel::new();
     let result = run_prompt(
-        harness.session_context("mcp-v4-ordinary-failure"),
+        harness.session_context("mcp-v4-ordinary-failure").await,
         &sink,
         &model,
     )
@@ -784,7 +799,7 @@ async fn system_mcp_gate_runs_after_receive_and_before_reason() {
     let sink = Arc::new(MockEventSink::new());
     let model = CountingModel::new();
     let result = run_prompt(
-        harness.session_context("mcp-v4-receive-order"),
+        harness.session_context("mcp-v4-receive-order").await,
         &sink,
         &model,
     )

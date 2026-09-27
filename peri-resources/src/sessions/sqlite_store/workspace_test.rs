@@ -326,7 +326,7 @@ async fn test_worktree_registration_reuses_exact_object_and_keeps_rows_unique() 
          SELECT 'duplicate', project_id, root, root_identity, discovery FROM workspaces WHERE id = ?",
     )
     .bind(registered.workspace_id.to_string())
-    .execute(&store.pool)
+    .execute(&store.database.pool)
     .await;
     assert!(
         duplicate.is_err(),
@@ -461,7 +461,7 @@ async fn test_worktree_scoped_pages_and_exact_directory_are_lightweight() {
         .unwrap();
     // Deliberately corrupt large owner blobs; listing never decodes or aggregates them.
     sqlx::query("UPDATE threads SET frozen_context = 'broken', cached_context = 'broken'")
-        .execute(&store.pool)
+        .execute(&store.database.pool)
         .await
         .unwrap();
     let first = store
@@ -564,7 +564,7 @@ async fn test_worktree_binding_keeps_wire_revision_without_persisted_column() {
     let (revision_columns,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM pragma_table_info('session_bindings') WHERE name = 'revision'",
     )
-    .fetch_one(&store.pool)
+    .fetch_one(&store.database.pool)
     .await
     .unwrap();
     assert_eq!(revision_columns, 0);
@@ -655,7 +655,7 @@ async fn test_worktree_binding_survives_clean_reopen_and_unknown_versions_fail_c
     );
     sqlx::query("UPDATE session_bindings SET schema_version = 99 WHERE thread_id = ?")
         .bind(&id)
-        .execute(&reopened.pool)
+        .execute(&reopened.database.pool)
         .await
         .unwrap();
     assert!(matches!(
@@ -1014,7 +1014,13 @@ async fn test_worktree_clean_waits_for_admitted_mutation_before_releasing_os_own
     let (store, db) = store().await;
     let (id, _) = bound(&store, repo.path()).await;
     let lease = store.acquire_execution_lease(&id).await.unwrap();
-    let mutation = store.require_execution_lease(&id).await.unwrap().unwrap();
+    let facts = store.database.local_session_facts(&id).await.unwrap();
+    let mutation = store
+        .database
+        .require_execution_lease(&id, &facts)
+        .await
+        .unwrap()
+        .unwrap();
     let mut close = std::pin::pin!(lease.mark_clean());
     // Poll once with an admitted mutation suspended: close must not publish clean.
     assert!(matches!(
@@ -1024,12 +1030,12 @@ async fn test_worktree_clean_waits_for_admitted_mutation_before_releasing_os_own
     lease_process(&db.path().join("threads.db"), &id, "busy");
     sqlx::query("UPDATE threads SET title = 'last owner write' WHERE id = ?")
         .bind(&id)
-        .execute(&store.pool)
+        .execute(&store.database.pool)
         .await
         .unwrap();
     let run: (bool,) = sqlx::query_as("SELECT clean FROM execution_runs WHERE thread_id = ?")
         .bind(&id)
-        .fetch_one(&store.pool)
+        .fetch_one(&store.database.pool)
         .await
         .unwrap();
     assert!(!run.0);
@@ -1048,7 +1054,13 @@ async fn test_worktree_cancelled_mutation_remains_dirty_and_cannot_publish_clean
     let (store, _db) = store().await;
     let (id, _) = bound(&store, repo.path()).await;
     let lease = store.acquire_execution_lease(&id).await.unwrap();
-    let mutation = store.require_execution_lease(&id).await.unwrap().unwrap();
+    let facts = store.database.local_session_facts(&id).await.unwrap();
+    let mutation = store
+        .database
+        .require_execution_lease(&id, &facts)
+        .await
+        .unwrap()
+        .unwrap();
     // Dropping the capability without its completion signal models future cancellation.
     drop(mutation);
     let error = lease.mark_clean().await.unwrap_err();

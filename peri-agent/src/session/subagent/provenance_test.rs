@@ -4,11 +4,14 @@ use crate::agent::compact_v2::{
     micro_compact, run_compact, CompactConfig, CompactOutcome, ContextPressure,
 };
 use crate::messages::MessageId;
-use crate::thread::SqliteThreadStore;
 use peri_acp_types::projection::{
     MessageProjectionDirective, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
 };
+use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::workspace::{
+    ResetDirtyRequest, ResolvedWorkspace, SessionExecutionLease, WorkspaceError,
+};
 
 struct SummaryModel;
 #[async_trait::async_trait]
@@ -58,7 +61,7 @@ fn directive(id: MessageId) -> MessageProjectionDirective {
 }
 
 fn spawn_config(
-    store: Arc<dyn ThreadStore>,
+    store: Arc<dyn SessionResources>,
     messages: Vec<BaseMessage>,
     cwd: &str,
 ) -> SubagentSpawnConfig {
@@ -82,7 +85,8 @@ fn spawn_config(
         compact_config: None,
         context_budget: None,
         compact_llm: None,
-        thread_store: Some(store),
+        session_resources: Some(store),
+        execution_owner: None,
         event_handler: None,
         bg_event_sender: None,
         task_manager: None,
@@ -135,16 +139,47 @@ async fn flush_session(session: &Arc<Session>) {
     *arc.write() = transcript;
 }
 
+/// 冷重开后的所有权回收：崩溃留下的普通 dirty 必须按精确代际显式确认才可继续。
+async fn reacquire_execution(
+    store: &Arc<dyn SessionResources>,
+    workspace: &ResolvedWorkspace,
+    root: &ThreadId,
+) -> Arc<dyn SessionExecutionLease> {
+    let error = match store.acquire_execution(root, workspace).await {
+        Ok(lease) => return lease,
+        Err(error) => error,
+    };
+    let Some(WorkspaceError::RecoveryRequired(details)) = error.workspace_error() else {
+        panic!("冷重开应只要求解除 dirty 代际，实际: {error}");
+    };
+    store
+        .reset_dirty_execution(&ResetDirtyRequest {
+            target: details.clone(),
+            accept_risk: true,
+        })
+        .await
+        .unwrap();
+    store.acquire_execution(root, workspace).await.unwrap()
+}
+
 /// [回归测试] 原 parent ID 不得 append 成 child own；父 Full 之后冷恢复仍使用 spawn 时的父投影。
 #[tokio::test]
 async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance() {
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = dir.path().to_str().unwrap();
-    let path = dir.path().join("subagent.db");
-    let store = Arc::new(SqliteThreadStore::new(&path).await.unwrap());
-    let parent_id = store.create_thread(ThreadMeta::new(cwd)).await.unwrap();
+    let repo = crate::session::test_resources::git_repository();
+    let db = tempfile::tempdir().unwrap();
+    let db_path = db.path().join("provenance.db");
+    // 真门面（真 SQLite）：绑定、frozen 原字节、继承区与执行所有权都来自真实实现，
+    // 冷重开是同一库文件的第二个句柄——不是另一个空替身。
+    let resources = peri_resources::Resources::open_with(Some(db_path.clone()))
+        .await
+        .unwrap();
+    let (store, shutdown) = resources.into_parts();
+    let workspace = store.resolve_workspace(repo.path()).await.unwrap();
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    let (parent_id, parent_lease) = create_bound_root(&store, &workspace, None).await;
+    let parent_lease = parent_lease.expect("root 执行所有权");
     let parent = Session::new(
-        Arc::from(cwd),
+        Arc::from(cwd.as_str()),
         FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
@@ -175,18 +210,18 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         transcript.flush_persistence().await.unwrap();
         *arc.write() = transcript;
     }
-    let spawned = SessionFactory::spawn_subagent(
-        Some(&parent),
-        spawn_config(store.clone(), parent_messages.clone(), cwd),
-    )
-    .await
-    .unwrap();
+    let mut config = spawn_config(store.clone(), parent_messages.clone(), &cwd);
+    // child 落库要求本会话 root 的执行所有权（save_child 不接受借来的所有权）。
+    config.execution_owner = Some(Arc::clone(&parent_lease));
+    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
+        .await
+        .unwrap();
     let child_id = spawned.child_thread_id.clone();
     assert_eq!(
         spawned.session.transcript().read().ancestor_len(),
         parent_messages.len()
     );
-    compact(&spawned.session, cwd).await;
+    compact(&spawned.session, &cwd).await;
     let own_tool = BaseMessage::tool_result("child-bash", "child-output-".repeat(1_000));
     {
         let arc = spawned.session.transcript();
@@ -215,45 +250,57 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         transcript.shutdown_persistence();
         *arc.write() = transcript;
     }
-    let child_flags = store.load_message_flags(&child_id).await.unwrap();
+    let child_flags = store.load_session_snapshot(&child_id).await.unwrap().flags;
     assert!(child_flags.values().any(|flags| flags.excluded));
     assert!(child_flags[&own_tool.id()].truncated);
     assert!(parent_messages
         .iter()
         .all(|message| !child_flags.contains_key(&message.id())));
     let own_ids = store
-        .load_payloads(&child_id)
+        .load_session_snapshot(&child_id)
         .await
         .unwrap()
+        .payloads
         .iter()
         .map(PersistedPayload::id)
         .collect::<Vec<_>>();
     assert!(parent_messages
         .iter()
         .all(|message| !own_ids.contains(&message.id())));
-    let parent_flags_before = store.load_message_flags(&parent_id).await.unwrap();
+    let parent_flags_before = store.load_session_snapshot(&parent_id).await.unwrap().flags;
     assert_eq!(
         parent_flags_before[&parent_tool.id()].projection,
         Some(directive(parent_tool.id()))
     );
-    compact(&parent, cwd).await;
-    assert!(store.load_message_flags(&parent_id).await.unwrap()[&parent_tool.id()].excluded);
+    compact(&parent, &cwd).await;
+    assert!(
+        store.load_session_snapshot(&parent_id).await.unwrap().flags[&parent_tool.id()].excluded
+    );
     parent.transcript().read().shutdown_persistence();
     drop(spawned);
-    drop(parent);
-    store.close().await;
-    let reopened = Arc::new(SqliteThreadStore::new(&path).await.unwrap());
+    // 冷重开：先放弃本进程的 owner（模拟进程退出），再由新句柄按代际确认取回。
+    drop(parent_lease);
+    // 关闭走部署关闭权（业务句柄没有全局关闭；这里与部署装配同形）。
+    shutdown.shutdown().await.unwrap();
+    let reopened_resources = peri_resources::Resources::open_with(Some(db_path.clone()))
+        .await
+        .unwrap();
+    let (reopened, reopened_shutdown) = reopened_resources.into_parts();
+    let reopened_workspace = reopened.resolve_workspace(repo.path()).await.unwrap();
+    let _reopened_lease = reacquire_execution(&reopened, &reopened_workspace, &parent_id).await;
     let recording = RecordingLLM::new();
     let received = recording.received.clone();
     let config = resume_config_with(
-        reopened.clone(),
+        Arc::clone(&reopened),
         child_id.clone(),
         Box::new(recording),
         SubagentRunMode::Sync,
         None,
         None,
     );
-    let resumed = SessionFactory::resume_subagent(None, config).await.unwrap();
+    let resumed = SessionFactory::resume_subagent(Some(&parent), config)
+        .await
+        .unwrap();
     {
         let arc = resumed.session.transcript();
         let transcript = arc.read();
@@ -296,5 +343,5 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     flush_session(&resumed.session).await;
     resumed.session.transcript().read().shutdown_persistence();
     drop(resumed);
-    reopened.close().await;
+    reopened_shutdown.shutdown().await.unwrap();
 }

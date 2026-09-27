@@ -22,7 +22,7 @@ const AGENT_DESCRIPTION: &str = include_str!("descriptions/agent.md");
 ///
 /// 创建（建 thread / 建 session / 运行 / 收尾）统一经
 /// [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)（peri-agent `SessionFactory` 统一入口）。父侧运行时通道
-/// （thread_store / task_manager / bg 事件 / register / deregister / frozen
+/// （session_resources / task_manager / bg 事件 / register / deregister / frozen
 /// 回退值）聚合在 [`SubagentHost`]；生产路径经 `parent_session` 的 host 读取
 /// （builder 在主 session 创建后注入），测试/遗留路径经 `with_*` 直接注入
 /// tool 的 host 回退。
@@ -174,7 +174,7 @@ impl BaseTool for SubAgentTool {
             is_fork,
         } = InvocationArgs::parse(&input, &self.parent_cwd);
 
-        // host 提前获取（resume 校验需要 thread_store；R-M2 分支优先级）
+        // host 提前获取（resume 校验需要会话资源门面；R-M2 分支优先级）
         let host = self.host();
 
         // ── resume 分支（优先于 bg / fork / agent-def，R-M2）──
@@ -281,7 +281,7 @@ impl BaseTool for SubAgentTool {
         let spawned = self.spawn(config).await?;
 
         // Interrupted 语义与迁移前一致；文本携带 child_thread_id——主 agent 凭此
-        // 找回执行现场（thread_store 为 None 的测试路径同样带 id：spawned.child_thread_id 恒可用）
+        // 找回执行现场（会话资源门面为 None 的测试路径同样带 id：spawned.child_thread_id 恒可用）
         if spawned.interrupted {
             return Ok(format!(
                 "child_thread_id: {}\nSub-agent execution was interrupted, resume with Agent(resume_thread_id: {})",
@@ -289,7 +289,7 @@ impl BaseTool for SubAgentTool {
             ));
         }
 
-        if host.thread_store.is_some() {
+        if host.session_resources.is_some() {
             Ok(format!(
                 "child_thread_id: {}
 {}",

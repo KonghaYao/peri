@@ -6,7 +6,6 @@
 //! 同源，不复制），执行路径与 TUI 完全一致（session/new → prompt → 事件收集
 //! → close）。
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::cli_args::OutputFormat;
@@ -16,6 +15,7 @@ use peri_acp::host::assemble::{HostAssemblyInput, assemble_server_config};
 use peri_acp::transport::mpsc::mpsc_transport_pair;
 use peri_acp_types::interaction::UnansweredCause;
 use peri_acp_types::messages::MessageContent;
+use peri_acp_types::session_store::SessionStoreDeployment;
 use peri_tui::acp_client::{
     AcpDeployment, AcpNotification, AcpTuiClient,
     interaction_response::{
@@ -39,7 +39,7 @@ pub async fn run_print(
     disallowed_tools: Vec<String>,
     settings_path: Option<String>,
     cwd: Option<String>,
-    db_path: Option<PathBuf>,
+    session_store: SessionStoreDeployment,
 ) -> Result<()> {
     let fmt: OutputFormat = match output_format.as_deref() {
         Some(s) => s.parse().map_err(|e: String| anyhow::anyhow!(e))?,
@@ -138,11 +138,12 @@ pub async fn run_print(
     // thread 存储（经 Resources 门面）——协议面输入，ACP host 的 ephemeral
     // session 需要；middlewares 具体实现（CronScheduler / McpClientPool / 插件
     // 数据等）由 ACP Host 装配面内部构造（§0 依赖方向）。
-    // 默认或显式 db_path 打开失败都经 `?` 传播 exit 1。
-    let thread_store = peri_resources::Resources::open_with(db_path)
+    // 定位描述由入口归一，本函数不重新解释存储位置；默认或显式定位失败都经 `?` 传播 exit 1。
+    let resources = peri_resources::Resources::open_deployment(&session_store)
         .await
-        .map(|resources| resources.thread_store())
         .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
+    // 业务句柄进宿主配置，部署关闭权留在部署这一侧（随配置交给宿主，排空后关闭）。
+    let (session_resources, session_store_shutdown) = resources.into_parts();
 
     // ── ACP host 装配（与 TUI 同源，见 peri_acp::host::assemble）──
     let host_config = assemble_server_config(HostAssemblyInput {
@@ -150,11 +151,14 @@ pub async fn run_print(
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         config_source: config_source.clone(),
         permission_mode: shared_permission,
-        thread_store: thread_store.clone(),
+        session_resources: session_resources.clone(),
+        session_store_shutdown: Some(Box::new(session_store_shutdown)),
         cwd: cwd.clone(),
         bare,
         // print 无 tick 语义（迁移前 print 路径无每秒 tick，行为零变化）。
         drive_cron_tick: false,
+        // print 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。
+        prepared_plugins: None,
     })
     .await;
     let (client_transport, server_transport) = mpsc_transport_pair();

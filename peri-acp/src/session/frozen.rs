@@ -40,6 +40,26 @@ impl SessionManager {
         plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
     ) -> crate::session::executor::FrozenSessionData {
+        // 调用点未准备运行环境：在此探测一次并委托冻结渲染，装配期不再各自取一份。
+        let runtime_env = crate::prompt::PromptRuntimeEnv::detect(cwd);
+        self.build_frozen_data_with_config_and_runtime(
+            config,
+            cwd,
+            plugin_skill_roots,
+            plugin_agent_dirs,
+            &runtime_env,
+        )
+    }
+
+    /// 会话准备路径入口：日期与运行环境由准备阶段定格，冻结渲染只消费该结果。
+    pub(crate) fn build_frozen_data_with_config_and_runtime(
+        &self,
+        config: &crate::provider::PeriConfig,
+        cwd: &str,
+        plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
+        plugin_agent_dirs: &[std::path::PathBuf],
+        runtime_env: &crate::prompt::PromptRuntimeEnv,
+    ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = config.config.language.clone();
         let (claude_md, claude_local_md) =
@@ -70,7 +90,7 @@ impl SessionManager {
         let collected =
             build_collected_sections(&meta_harness_state, None, frozen_language.as_deref());
         let template = crate::prompt::PromptTemplate::new(&meta_harness_state, &collected);
-        let env = crate::prompt::PromptEnv::with_frozen_date(cwd, &frozen_date);
+        let env = crate::prompt::PromptEnv::frozen(cwd, &frozen_date, runtime_env);
         let system_prompt = template.render(
             &env,
             &features,

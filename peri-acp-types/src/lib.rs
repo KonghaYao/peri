@@ -7,7 +7,9 @@
 //! - `summary` — migrated event DTOs re-exported via peri-acp::event
 //! - `messages` — 消息契约（BaseMessage/MessageContent/...），peri-agent 保留 re-export
 //! - `thread` — Thread 元数据契约（ThreadMeta/ThreadId/CancelPolicy/AgentStatus...）
-//! - `store` — ThreadStore 持久化契约（trait + CompactionLifecycle + MessageFlags）
+//! - `store` — ThreadStore 持久化契约（trait + CompactionChange + MessageFlags）；
+//!   纯历史变换见 `store::history`
+//! - `session_resources` — 会话资源门面契约（SessionResources + 中性领域 I/O、错误与能力枚举）
 //! - `projection` — compact 投影指令纯数据契约
 //! - `identity` — §9 身份标识契约（AgentId/EventEnvelope/CancelRequest/...）
 //! - `event` / `event_v2` — 事件契约（ExecutorEvent + v2 三层事件 + EventBus + v1 兼容映射）
@@ -66,6 +68,8 @@ pub mod projection;
 pub mod runtime;
 pub mod sentinel;
 pub mod session;
+pub mod session_resources;
+pub mod session_store;
 pub mod skills;
 pub mod store;
 pub mod summary;
