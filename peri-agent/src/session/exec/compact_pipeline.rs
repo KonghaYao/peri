@@ -153,9 +153,9 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         }
     }
 
-    // 阶段 5: 已存在的 thread 从**一次一致快照**重建（payload 与 flags 同一次读取，
-    // 不拼「先 messages 后 flags」的跨时刻结果）。命令输入是可见视图，因此不能将
-    // 物理存储中的 excluded 原文直接与其比较。
+    // 阶段 5: 已存在的 thread 从一次一致快照重建。Host 跨 turn 保留 canonical
+    // history（含 excluded 原文），先核对完整消息身份与顺序，再恢复 flags 供 Full
+    // 选择可见内容；不能拿 visible view 与 canonical 输入比较。
     let snapshot = match session_resources.load_session_snapshot(&thread_id).await {
         Ok(snapshot) => snapshot,
         Err(_) => {
@@ -188,33 +188,23 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             };
         }
     } else {
-        let persisted_flags = snapshot.flags.clone();
-        for message in &persisted_history {
-            transcript.append(message.clone());
-        }
-        transcript.set_flags_batch(persisted_flags);
-        let expected_history = if transcript
-            .entries()
-            .iter()
-            .any(|entry| transcript.flags(entry.id()).excluded)
-        {
-            assemble_compact_messages(&transcript, &None).messages
-        } else {
-            transcript.visible_messages().into_iter().cloned().collect()
-        };
-        let visible_matches = expected_history.len() == history.len()
-            && expected_history
+        let history_matches = persisted_history.len() == history.len()
+            && persisted_history
                 .iter()
                 .zip(&history)
                 .all(|(persisted, incoming)| persisted.id() == incoming.id());
-        if !visible_matches {
-            warn!("compact: persisted visible history does not match command history");
+        if !history_matches {
+            warn!("compact: persisted canonical history does not match command history");
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
                 message: "compact persistence context mismatch".to_string(),
             };
         }
+        for message in persisted_history {
+            transcript.append(message);
+        }
+        transcript.set_flags_batch(snapshot.flags);
         transcript = transcript.with_persistence(session_resources, thread_id);
     }
 

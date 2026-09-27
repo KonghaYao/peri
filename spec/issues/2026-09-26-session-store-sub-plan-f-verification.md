@@ -162,6 +162,18 @@ review-3 复核（2026-09-26，本轮，同样未执行云命令）：把 `HOME`
 
 ## 7. 完成审查
 
+2026-09-27 compact / cancel 专项已修复并验证，修复提交 `61315df8`：手动 compact 校验 canonical 历史，命令 done 与实际取消终态保持一致。稳定入口见 [Agent 索引](../../docs/code-index/peri-agent.md) 与 [ACP 索引](../../docs/code-index/peri-acp.md)。专项 issue 按 `DOC-HISTORY-001` 关闭并移出活动列表；完整调查与修复记录可用 `git show 61315df8:spec/issues/2026-09-27-session-adapter-compact-cancel-behavior-audit.md` 查看。
+
+| 专项验证命令 | Exit | 结果 |
+| --- | --- | --- |
+| `cargo test -p peri-agent -p peri-acp --lib -- --test-threads=1`（沙箱外） | 0 | Agent 863 / ACP 725 passed；含新增 4 项 Host 跨轮、冷读与 MPSC wire 回归 |
+| `cargo test -p peri-acp --test compact_command_contract_test -- --test-threads=1` | 0 | 原始 2 项复现由 failed 转为 passed |
+| `cargo test -p peri-tui --lib kit::acp_notifier::tests::test_agent_done -- --test-threads=1` | 0 | 2 passed，cancelled 通知转为 TurnInterrupted |
+| `cargo clippy -p peri-agent -p peri-acp --all-targets -- -D warnings` | 0 | 通过 |
+| `cargo fmt --check` / `git diff --check` / commit pre-commit hooks | 0 | 格式、check、Clippy、typos 与依赖门通过 |
+
+首次沙箱内 ACP 全库运行因本地 HTTP mock server 被禁止监听而有 6 项失败，获准沙箱外重跑后全通过。本次 10 个 Rust 文件均低于 1000 行；全仓 size 扫描仍有 43 个本任务范围外超限文件（exit 1），不宣称全库满足规模限制。真实云、UI 按键 E2E 与跨平台矩阵未执行；冷读场景是新连接读快照后重建 Host，不冒充完整 session/load wire 或跨进程恢复。本专项不替代本计划其余 V 项验收。
+
 - F-01：实施前基线，登记已有测试实际结果和非本任务失败（§6.1 已完成本 crate 基线）。
 - F-02：A/B 的纯逻辑、门面/SQLite/owner 及 schema 回归（含 V-17/18/19）。
 - F-03：C 的确定性故障与 C-01 SDK 前置证据（V-22 的 P1–P7）。

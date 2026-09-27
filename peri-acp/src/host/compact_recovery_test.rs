@@ -16,6 +16,9 @@ use peri_acp_types::{
 };
 use std::{collections::HashMap, sync::atomic::AtomicBool};
 
+#[path = "compact_command_test.rs"]
+mod compact_command_tests;
+
 const SUMMARY: &str = "COMMITTED_COMPACT_RECOVERY_SUMMARY";
 const OLD: &str = "OLD_HISTORY_MUST_STAY_EXCLUDED";
 

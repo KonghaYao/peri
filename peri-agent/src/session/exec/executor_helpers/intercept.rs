@@ -288,7 +288,11 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
             // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
             // 命令 turn 无 request_id（None）——TUI 侧跳过 id 配对、回退代际兜底。
             req.event_sink
-                .push_done(req.session_id, "end_turn", None)
+                .push_done(
+                    req.session_id,
+                    super::done_stop_reason(result.stop_reason),
+                    None,
+                )
                 .await;
             let mut persisted_payloads =
                 committed_payloads.unwrap_or_else(|| req.history_payloads.clone());

@@ -321,6 +321,7 @@ struct Case {
     history: Vec<BaseMessage>,
     result: peri_acp_types::session::PromptResult,
     done_count: usize,
+    done_reasons: Vec<String>,
 }
 async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Case {
     let dir = tempfile::tempdir().unwrap();
@@ -420,6 +421,7 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
     let InterceptOutcome::Handled(result) = outcome else {
         panic!("manual command must be handled");
     };
+    let done_reasons = sink.push_done_stop_reasons.lock().unwrap().clone();
     Case {
         _dir: dir,
         _repo: repo,
@@ -429,6 +431,7 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         history,
         result,
         done_count: sink.push_done_count(),
+        done_reasons,
     }
 }
 
@@ -482,6 +485,12 @@ async fn test_manual_compact_cancel_after_sql_commit_requires_reload_and_keeps_s
     assert!(case.result.persistence_inconsistent);
     assert!(!case.result.ok);
     assert!(case.result.failure.is_some());
+    assert_eq!(case.result.stop_reason, PromptStopReason::EndTurn);
+    assert_eq!(
+        case.done_reasons,
+        ["end_turn"],
+        "未确认提交必须保留 Internal/reload 终态"
+    );
     assert_durable_summary(&case).await;
 }
 
@@ -500,6 +509,7 @@ async fn test_manual_compact_cancel_after_confirmed_pipeline_restores_canonical_
     assert!(case.result.history_replaced_by_compaction);
     assert!(case.result.failure.is_none());
     assert_eq!(case.result.stop_reason, PromptStopReason::Cancelled);
+    assert_eq!(case.done_reasons, ["cancelled"]);
     assert_eq!(case.result.messages.len(), 1);
     assert!(case.result.messages[0]
         .content()
@@ -532,6 +542,7 @@ async fn test_manual_compact_precancel_preserves_verified_history_without_store_
     assert!(!case.result.history_replaced_by_compaction);
     assert!(case.result.failure.is_none());
     assert_eq!(case.result.stop_reason, PromptStopReason::Cancelled);
+    assert_eq!(case.done_reasons, ["cancelled"]);
     assert_eq!(case.store.calls.load(Ordering::SeqCst), 0);
     assert_eq!(case.result.messages.len(), 2);
     assert_eq!(case.done_count, 1);

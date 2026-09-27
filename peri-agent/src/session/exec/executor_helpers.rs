@@ -54,6 +54,16 @@ pub use v2_execute::{
     V2ExecuteRequest,
 };
 
+// 普通执行与 Immediate 命令共用 done 协议投影，避免响应已取消而通知仍正常完成。
+fn done_stop_reason(reason: PromptStopReason) -> &'static str {
+    match reason {
+        PromptStopReason::EndTurn => "end_turn",
+        PromptStopReason::Cancelled => "cancelled",
+        PromptStopReason::MaxTurnRequests => "max_turn_requests",
+        PromptStopReason::MaxTokens => "max_tokens",
+    }
+}
+
 // ── 共享类型（L5：自 ACP executor.rs 迁入）──────────────────────────────────
 
 /// Agent 执行后的最终输出（state + 停止原因）。

@@ -196,12 +196,7 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
             .as_ref()
             .and_then(|f| f(telemetry_outcome));
 
-        let stop_reason_str = match stop_reason {
-            PromptStopReason::EndTurn => "end_turn",
-            PromptStopReason::Cancelled => "cancelled",
-            PromptStopReason::MaxTurnRequests => "max_turn_requests",
-            PromptStopReason::MaxTokens => "max_tokens",
-        };
+        let stop_reason_str = super::done_stop_reason(stop_reason);
         sink.push_done(&session_id, stop_reason_str, request_id.as_deref())
             .await;
 
