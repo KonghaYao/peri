@@ -34,6 +34,9 @@ mod legacy_tests;
 #[path = "requests_update_config_test.rs"]
 mod update_config_tests;
 
+#[path = "requests/acp_mcp_loop_test.rs"]
+mod acp_mcp_loop_tests;
+
 // ── Mock AcpTransport ─────────────────────────────────────────────────────────
 
 /// 记录全部通知的 mock transport（`Mutex<Vec<(method, payload)>>`，Slice 6
@@ -143,6 +146,7 @@ async fn make_server_config(
         cron_scheduler: None,
         mcp_pool: None,
         mcp_apps_relay: None,
+        acp_mcp: None,
         dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,

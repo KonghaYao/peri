@@ -83,7 +83,10 @@ impl Drop for HomeGuard {
 // ── Mock EventSink ─────────────────────────────────────────────────────────
 
 /// Mock EventSink，记录所有 push_done 调用（含 request_id）与事件流。
-struct MockEventSink {
+///
+/// `pub(super)`：`host::mcp_v4_startup_tests`（B-07 的 MCP 启动准入用例）复用同一
+/// 观测面，避免测试各自维护一套事件顺序断言（字段仍私有，只经访问器暴露快照）。
+pub(super) struct MockEventSink {
     push_done_count: Mutex<usize>,
     push_done_stop_reasons: Mutex<Vec<String>>,
     pushed_events: Mutex<Vec<String>>,
@@ -91,7 +94,7 @@ struct MockEventSink {
 }
 
 impl MockEventSink {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             push_done_count: Mutex::new(0),
             push_done_stop_reasons: Mutex::new(Vec::new()),
@@ -100,8 +103,13 @@ impl MockEventSink {
         }
     }
 
-    fn push_done_count(&self) -> usize {
+    pub(super) fn push_done_count(&self) -> usize {
         *self.push_done_count.lock().unwrap()
+    }
+
+    /// 事件流快照（与 `push_done` 交错记录，用于断言 terminal 顺序）。
+    pub(super) fn operations(&self) -> Vec<String> {
+        self.operations.lock().unwrap().clone()
     }
 }
 
@@ -267,7 +275,9 @@ impl UserInteractionBroker for NoopBroker {
 /// 构造最小 SessionContext（flow 测试走预取消中断路径；stage 装配桥经
 /// 真实 ACP 桥注入——与生产 host/prompt.rs 同模式；LLM 工厂从测试
 /// LlmProvider + AgentPool 烘焙，装配路径实际调用）。
-fn make_session_context(session_id: &str) -> SessionContext {
+///
+/// `pub(super)`：`host::mcp_v4_startup_tests` 复用同一装配面后按需注入 MCP pool。
+pub(super) fn make_session_context(session_id: &str) -> SessionContext {
     // 事件广播宿主：发射端（EventPublisher 适配）与订阅端（subscribe 工厂）
     // 共享同一 Controller 实例，保持迁移前「publish/subscribe 同一广播」语义。
     let controller = Arc::new(peri_controller::Controller::new(
@@ -502,7 +512,7 @@ async fn make_session_context_with_manager(
 /// 构造 stage 装配桥（真实 ACP 桥，与生产 host/prompt.rs 同模式：ZST
 /// ProductionChainAssembler + build_compact_hooks（测试 ctx hook_groups 为空
 /// → (None, None)）；测试无 Langfuse → bridge factory None）。
-fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
+pub(super) fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
     let ctx_for_stage = ctx.clone();
     Arc::new(move |sbr| {
         let (compact_pre_hook, compact_post_hook) = crate::host::prompt::build_compact_hooks(
@@ -624,7 +634,7 @@ fn make_aborting_forwarder_launcher() -> ForwarderLauncherFn {
     })
 }
 
-fn make_turn_input(
+pub(super) fn make_turn_input(
     event_sink: Arc<dyn EventSink>,
     content: MessageContent,
     continuation: bool,

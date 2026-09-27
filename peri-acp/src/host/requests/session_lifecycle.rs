@@ -1296,6 +1296,7 @@ fn prewarm_session_mcp_discovery(cfg: &AcpServerConfig, session_id: &str) {
         &pool,
         &registry,
         &command_registry,
+        session_id,
         &cancel,
     );
 }

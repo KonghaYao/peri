@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use peri_acp_types::{
     dynamic_mcp::{
-        CanonicalDynamicMcpAction, DynamicMcpAccepted, DynamicMcpFailure, DynamicMcpOperationId,
-        DynamicMcpOperationState, DynamicMcpResponse, DynamicMcpShutdownReport,
+        CanonicalDynamicMcpAction, DynamicMcpAccepted, DynamicMcpAction, DynamicMcpFailure,
+        DynamicMcpOperationId, DynamicMcpOperationState, DynamicMcpResponse,
+        DynamicMcpShutdownReport,
     },
     ports::DynamicMcpDeploymentPort,
 };
@@ -196,6 +197,82 @@ fn invalid_dynamic_input_fails_before_deployment_or_hitl() {
         }
     }));
     assert!(result.is_err());
+    assert!(deployment.actions.lock().unwrap().is_empty());
+}
+
+/// 边界回归：动态 MCP 路径继续拒绝 System key，不实现 session 中途声明语义。
+///
+/// 三个 canonical key 与三个 camelCase alias 都必须在 wire 反序列化与 canonical bind
+/// 之前失败，不得降级为可执行请求，也不得触达 deployment load。
+#[test]
+fn test_dynamic_mcp_rejects_system_mcp_fields() {
+    let deployment = Arc::new(FakeDeployment::default());
+    let tool = DynamicMcpTool::new(
+        "session-a",
+        Arc::clone(&deployment) as Arc<dyn DynamicMcpDeploymentPort>,
+    );
+
+    let cases = [
+        ("system_mcp", json!(true)),
+        ("systemMcp", json!(true)),
+        ("system_mcp_tools", json!(["Read"])),
+        ("systemMcpTools", json!(["Read"])),
+        ("system_mcp_timeout", json!(1500)),
+        ("systemMcpTimeout", json!(1500)),
+    ];
+
+    // 对照：不含 System key 的同一配置可以正常绑定，拒绝确实由 System key 引起。
+    let bound = tool
+        .bind_invocation(json!({
+            "method": "load",
+            "params": {
+                "name": "example",
+                "config": {"command": "example-mcp", "args": ["stdio"]}
+            }
+        }))
+        .expect("不含 System key 的配置必须可绑定")
+        .expect("load 必须返回可执行绑定");
+    assert_eq!(bound.policy_name, "DynamicMCP.load");
+
+    for (key, value) in cases {
+        let mut config = json!({"command": "example-mcp", "args": ["stdio"]});
+        config[key] = value;
+        let input = json!({
+            "method": "load",
+            "params": {"name": "example", "config": config}
+        });
+
+        assert!(
+            DynamicMcpAction::from_tool_input(input.clone()).is_err(),
+            "{key} 必须在 wire 反序列化阶段被拒绝"
+        );
+        assert!(
+            tool.bind_invocation(input).is_err(),
+            "{key} 必须在 canonical bind 前被拒绝，而不是降级为可执行请求"
+        );
+        assert!(
+            deployment.actions.lock().unwrap().is_empty(),
+            "{key} 被拒绝时不得调用 deployment load"
+        );
+    }
+
+    // 同一 key 换到 params 与顶层同样被拒绝：两处各有独立的未知字段拦截。
+    for input in [
+        json!({
+            "method": "load",
+            "params": {"name": "example", "systemMcp": true, "config": {"command": "example-mcp"}}
+        }),
+        json!({
+            "method": "load",
+            "system_mcp": true,
+            "params": {"name": "example", "config": {"command": "example-mcp"}}
+        }),
+    ] {
+        assert!(
+            tool.bind_invocation(input).is_err(),
+            "System key 出现在 config 之外的位置时必须同样被拒绝"
+        );
+    }
     assert!(deployment.actions.lock().unwrap().is_empty());
 }
 

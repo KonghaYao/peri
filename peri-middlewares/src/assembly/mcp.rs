@@ -66,6 +66,7 @@ pub(super) fn add_mcp(
         };
         let mw = McpMiddleware::new(Arc::clone(&effective_pool))
             .with_tool_pool(Arc::clone(pool))
+            .with_session_id(session_id.clone())
             .with_skill_discovery(ctx.mcp_skill_registry.clone(), ctx.cancel.clone())
             .with_command_registry(command_registry.clone());
         // 决策 B：装配后立即触发幂等发现（覆盖「装配时连接已

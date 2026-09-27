@@ -2,7 +2,8 @@
 use super::AssemblyContext;
 use crate::{
     cron::{CronScheduler, CronSchedulerPortHandle},
-    mcp::{build_tool_bridges, McpClientPool, McpResourceTool},
+    mcp::tool_bridge::build_tool_bridges_visible_to,
+    mcp::{McpClientPool, McpResourceTool},
     middleware::{FilesystemMiddleware, TerminalMiddleware, WebMiddleware},
     permission::{AutoClassifier, LlmAutoClassifier},
     tool_search::ToolSearchIndex,
@@ -133,19 +134,24 @@ pub(super) fn build_parent_tools(
     }
     if !disabled.contains("McpMiddleware") {
         if let Some(ref pool) = mcp_pool_concrete {
-            let mcp_tools = build_tool_bridges(pool);
+            // 子 agent 继承父会话的工具面：按会话过滤，ACP 声明的 server 不会
+            // 经父工具集泄漏到其他会话的子 agent。
+            let mcp_tools = build_tool_bridges_visible_to(pool, Some(&ctx.session_id));
             for tool in mcp_tools {
                 parent_tools.push(tool);
             }
             if pool.has_resources() {
-                parent_tools.push(Box::new(McpResourceTool::new(
-                    Arc::clone(pool),
-                    // 未装配 session 注册表（print 模式）→ 空注册表
-                    //（无条目 = 不校验）
-                    mcp_skill_registry
-                        .clone()
-                        .unwrap_or_else(|| Arc::new(McpSkillRegistry::new())),
-                )));
+                parent_tools.push(Box::new(
+                    McpResourceTool::new(
+                        Arc::clone(pool),
+                        // 未装配 session 注册表（print 模式）→ 空注册表
+                        //（无条目 = 不校验）
+                        mcp_skill_registry
+                            .clone()
+                            .unwrap_or_else(|| Arc::new(McpSkillRegistry::new())),
+                    )
+                    .with_session_id(ctx.session_id.clone()),
+                ));
             }
         }
     }

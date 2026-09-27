@@ -12,6 +12,7 @@ use peri_acp_types::PeriCaps;
 
 use super::{AcpServerConfig, SessionState};
 
+pub(crate) mod acp_mcp;
 pub(crate) mod config_options;
 mod mcp_oauth;
 mod plugin;

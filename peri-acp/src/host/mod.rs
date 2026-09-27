@@ -49,6 +49,9 @@ pub mod controller_ports;
 mod executor_flow_tests;
 pub mod lease;
 mod mcp_apps;
+#[cfg(test)]
+#[path = "mcp_v4_startup_test.rs"]
+mod mcp_v4_startup_tests;
 mod notify;
 mod oauth_delivery;
 mod prediction;
@@ -142,6 +145,13 @@ pub struct AcpServerConfig {
     pub permission_mode: Arc<SharedPermissionMode>,
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
+    /// MCP over ACP 服务（会话 setup 声明的 `type: "acp"` server 的连接事实）。
+    ///
+    /// 会话级字段：由会话工作区装配持有（每个会话各有一个 MCP 池），host 级
+    /// 装配（`session_resources == false`）为 `None`——那时没有池可承载连接。
+    /// 会话 setup 经 [`requests::acp_mcp`] 登记声明，入站 `mcp/message` 同样
+    /// 经它在各会话间定位承载者。
+    pub(crate) acp_mcp: Option<Arc<dyn peri_acp_types::ports::AcpMcpServerPort>>,
     /// Optional stdio-only MCP Apps backend. Absence keeps the capability fail closed.
     pub mcp_apps_relay: Option<Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>>,
     pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,

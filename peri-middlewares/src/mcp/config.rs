@@ -39,6 +39,19 @@ pub enum McpConfigError {
         #[source]
         source: std::io::Error,
     },
+    /// typed 配置不满足契约不变量（含手工构造的 `McpServerConfig`）。
+    #[error("MCP 服务器配置无效: {server_name}: {source}")]
+    InvalidServer {
+        server_name: String,
+        #[source]
+        source: peri_acp_types::plugin::McpServerConfigValidationError,
+    },
+    /// 插件 MCP 配置加载失败（MCP 专用严格插件路径）。
+    #[error("插件 MCP 配置加载失败: {source}")]
+    PluginLoadError {
+        #[source]
+        source: crate::plugin::loader::LoaderError,
+    },
 }
 
 /// 从指定 JSON 文件加载 MCP 配置，文件不存在时返回空配置
@@ -56,7 +69,53 @@ pub(crate) fn load_from_path(path: &Path) -> Result<McpConfigFile, McpConfigErro
     })
 }
 
+/// 把一段无类型的 `mcpServers` JSON 解析为 typed 配置。
+///
+/// 非法组合在此处即失败（`McpServerConfig` 的 Deserialize 会跑契约校验），
+/// 不再 `unwrap_or_default()` 退化成空配置——非法不是「无配置」。
+fn parse_servers_value(
+    value: &serde_json::Value,
+    path: &Path,
+) -> Result<HashMap<String, McpServerConfig>, McpConfigError> {
+    serde_json::from_value::<HashMap<String, McpServerConfig>>(value.clone()).map_err(|source| {
+        McpConfigError::ParseError {
+            path: path.display().to_string(),
+            source,
+        }
+    })
+}
+
+/// 校验一段 `mcpServers` JSON：解析失败或任一 server 不满足契约即 Err。
+fn validate_servers_value(value: &serde_json::Value, path: &Path) -> Result<(), McpConfigError> {
+    let servers = parse_servers_value(value, path)?;
+    validate_config(&McpConfigFile {
+        mcp_servers: servers,
+    })
+}
+
+/// 校验 typed 配置的每个 server：按 server name 排序，首个错误稳定返回。
+///
+/// `disabled = true` 也照常校验——禁用不是绕过配置契约的通道。
+pub(crate) fn validate_config(config: &McpConfigFile) -> Result<(), McpConfigError> {
+    let mut names: Vec<&String> = config.mcp_servers.keys().collect();
+    names.sort();
+    for name in names {
+        if let Some(cfg) = config.mcp_servers.get(name) {
+            cfg.validate()
+                .map_err(|source| McpConfigError::InvalidServer {
+                    server_name: name.clone(),
+                    source,
+                })?;
+        }
+    }
+    Ok(())
+}
+
 /// 从全局 settings.json 的 extra 字段中提取 mcpServers
+///
+/// 两个候选 map（`config.mcpServers` 与顶层 `mcpServers`）都存在时**两者都先校验**：
+/// 写入口可能操作的是备用 map，非法备用 map 不能静默通过；选择仍按既有优先级
+/// （nested > top-level）。
 pub(crate) fn load_global_config(
     settings_json_path: &Path,
 ) -> Result<McpConfigFile, McpConfigError> {
@@ -74,16 +133,19 @@ pub(crate) fn load_global_config(
             source: e,
         })?;
     // 从顶层 value 中提取 "config"."mcpServers" 或 "mcpServers"
-    let mcp_servers = v
-        .get("config")
-        .and_then(|c| c.get("mcpServers"))
-        .or_else(|| v.get("mcpServers"))
-        .cloned()
-        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-    let config = McpConfigFile {
-        mcp_servers: serde_json::from_value(mcp_servers).unwrap_or_default(),
+    let nested = v.get("config").and_then(|c| c.get("mcpServers"));
+    let top_level = v.get("mcpServers");
+    let nested_servers = match nested {
+        Some(map) => Some(parse_servers_value(map, settings_json_path)?),
+        None => None,
     };
-    Ok(config)
+    let top_level_servers = match top_level {
+        Some(map) => Some(parse_servers_value(map, settings_json_path)?),
+        None => None,
+    };
+    Ok(McpConfigFile {
+        mcp_servers: nested_servers.or(top_level_servers).unwrap_or_default(),
+    })
 }
 
 /// 基于 command+args+env 计算服务器配置的内容 hash，用于去重
@@ -110,6 +172,16 @@ pub(crate) fn server_config_hash(cfg: &McpServerConfig) -> u64 {
     }
     if let Some(protocol_version) = &cfg.protocol_version {
         protocol_version.hash(&mut hasher);
+    }
+    // System 启动依赖字段参与 hash：变更它们必须视为不同服务器。
+    if let Some(system_mcp) = &cfg.system_mcp {
+        system_mcp.hash(&mut hasher);
+    }
+    if let Some(system_mcp_tools) = &cfg.system_mcp_tools {
+        system_mcp_tools.hash(&mut hasher);
+    }
+    if let Some(system_mcp_timeout) = &cfg.system_mcp_timeout {
+        system_mcp_timeout.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -209,12 +281,32 @@ pub(crate) fn expand_server_config_with_context(
         protocol_version: config.protocol_version,
         source: config.source.clone(),
         subscriptions: config.subscriptions.clone(),
+        // System key 原样复制：工具名数组是字面量，不得走 `expand`（否则 `${VAR}`
+        // 形态的工具名会被替换），`Some([])` 与 `None` 必须保持可区分。
+        system_mcp: config.system_mcp,
+        system_mcp_tools: config.system_mcp_tools.clone(),
+        system_mcp_timeout: config.system_mcp_timeout,
     }
 }
 
 /// 对 McpServerConfig 中所有字符串字段执行环境变量展开（无插件上下文）
 pub(crate) fn expand_server_config(config: &McpServerConfig) -> McpServerConfig {
     expand_server_config_with_context(config, None, None, None)
+}
+
+/// 加载并合并 MCP 配置：全局 + 插件 + 项目级三层合并（生产入口）。
+///
+/// 全局路径由 `~/.peri/settings.json` 决定；任何一层非法都返回错误，
+/// 不降级为空配置。
+pub(crate) fn load_merged_config_full(
+    cwd: &Path,
+    claude_home: &Path,
+) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
+    let global_path = dirs_next::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".peri")
+        .join("settings.json");
+    load_merged_config_full_with_paths(cwd, claude_home, &global_path)
 }
 
 /// 加载并合并 MCP 配置：全局 + 插件 + 项目级三层合并
@@ -224,36 +316,31 @@ pub(crate) fn expand_server_config(config: &McpServerConfig) -> McpServerConfig 
 /// 返回合并后的配置 + plugin_sources（marketplace 追踪，用于 UI 展示插件来源）
 /// plugin_sources 的 key 格式为 `"plugin:{name}:{server}"`，
 /// 与工具名 `mcp__{plugin_name}__{server_name}` 中的 server 部分一致
-pub(crate) fn load_merged_config_full(
+///
+/// 内部实现：允许注入全局路径（测试 seam）。加载顺序与校验顺序一致——被选择加载的
+/// global / plugin / project 输入先验证，再覆盖与去重；缺文件仍是空配置，非法文件不是。
+/// 插件来源走 MCP 专用严格入口（`load_enabled_plugins_for_mcp`），宽容聚合 API
+/// 不作为启动输入。
+fn load_merged_config_full_with_paths(
     cwd: &Path,
     claude_home: &Path,
-) -> (McpConfigFile, HashMap<String, String>) {
+    global_path: &Path,
+) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
     let mut plugin_sources: HashMap<String, String> = HashMap::new();
 
     // 1. 加载全局配置（~/.peri/settings.json）
-    let global_path = dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".peri")
-        .join("settings.json");
-    let mut global = load_global_config(&global_path).unwrap_or_else(|e| {
-        tracing::warn!(
-            path = %global_path.display(),
-            error = %e,
-            "加载全局 MCP 配置失败，跳过"
-        );
-        McpConfigFile::default()
-    });
+    let mut global = load_global_config(global_path)?;
     for cfg in global.mcp_servers.values_mut() {
-        cfg.source = Some(ConfigSource::Global(global_path.clone()));
+        cfg.source = Some(ConfigSource::Global(global_path.to_path_buf()));
     }
 
-    // 2. 加载插件 MCP 配置（~/.claude/ 目录下的已启用插件）
-    // 每插件独立上下文展开 env 变量，同时构建 plugin_sources（marketing 追踪）
-    let plugin_load_result =
-        crate::plugin::loader::load_enabled_plugins_aggregated(claude_home, None);
+    // 2. 加载插件 MCP 配置（claude_home 目录下的已启用插件）
+    // 每插件独立上下文展开 env 变量，同时构建 plugin_sources（marketplace 追踪）
+    let plugins = crate::plugin::loader::load_enabled_plugins_for_mcp(claude_home, None)
+        .map_err(|source| McpConfigError::PluginLoadError { source })?;
 
     let mut plugin_servers: HashMap<String, McpServerConfig> = HashMap::new();
-    for plugin in &plugin_load_result.plugins {
+    for plugin in &plugins {
         for (name, config) in &plugin.mcp_servers {
             let namespaced = format!("plugin:{}:{}", plugin.name, name);
             let mut cfg = config.clone();
@@ -293,19 +380,13 @@ pub(crate) fn load_merged_config_full(
 
     // 3. 加载项目级配置（{cwd}/.mcp.json）
     let project_path = cwd.join(".mcp.json");
-    let mut project = load_from_path(&project_path).unwrap_or_else(|e| {
-        tracing::warn!(
-            path = %project_path.display(),
-            error = %e,
-            "加载项目级 MCP 配置失败，跳过"
-        );
-        McpConfigFile::default()
-    });
+    let mut project = load_from_path(&project_path)?;
     for cfg in project.mcp_servers.values_mut() {
         cfg.source = Some(ConfigSource::Project(project_path.clone()));
     }
 
     // 4. 内容 hash 去重：移除与手动配置（global/project）内容相同的插件服务器
+    // System MCP 不参与：其 namespace 归属必须保留，不得因跨 namespace 内容相同而消失。
     let manual_hashes: std::collections::HashSet<u64> = global
         .mcp_servers
         .values()
@@ -313,6 +394,9 @@ pub(crate) fn load_merged_config_full(
         .map(server_config_hash)
         .collect();
     plugin_servers.retain(|_, cfg| {
+        if cfg.system_mcp == Some(true) {
+            return true;
+        }
         let hash = server_config_hash(cfg);
         if manual_hashes.contains(&hash) {
             tracing::debug!("插件 MCP 服务器与手动配置内容相同（hash 去重），已跳过");
@@ -345,13 +429,18 @@ pub(crate) fn load_merged_config_full(
         }
     }
 
-    (merged, plugin_sources)
+    // 7. 合并结果再次校验：覆盖与去重之后仍必须是合法配置。
+    validate_config(&merged)?;
+
+    Ok((merged, plugin_sources))
 }
 
-/// 加载并合并 MCP 配置（公开 API，向后兼容）
-/// 等同于 `load_merged_config_full().0`
-pub fn load_merged_config(cwd: &Path, claude_home: &Path) -> McpConfigFile {
-    load_merged_config_full(cwd, claude_home).0
+/// 加载并合并 MCP 配置（公开 API）。
+///
+/// 返回类型从 `McpConfigFile` 变为 `Result`：配置错误必须可传播，不再有
+/// fail-open 的兼容壳（非法配置曾被合并成「成功的空配置」）。
+pub fn load_merged_config(cwd: &Path, claude_home: &Path) -> Result<McpConfigFile, McpConfigError> {
+    Ok(load_merged_config_full(cwd, claude_home)?.0)
 }
 
 /// 原子写入 JSON 文件（先写临时文件，再 rename 替换）
@@ -395,6 +484,10 @@ pub fn remove_server_from_config(cwd: &Path, server_name: &str) -> Result<(), Mc
 }
 
 /// 内部实现：允许注入全局路径（便于测试）
+///
+/// 写入口语义：**修改前**校验全部相关 server map，**修改后**再次校验待写结果；
+/// 任一步失败都不调用 `atomic_write_json`、不改动任何字节。删除非法条目也拒绝
+/// ——非法配置需先由用户修复，删除不是修复通道。
 fn remove_server_from_config_with_paths(
     cwd: &Path,
     global_path: &Path,
@@ -417,6 +510,7 @@ fn remove_server_from_config_with_paths(
 
         if config.mcp_servers.contains_key(server_name) {
             config.mcp_servers.remove(server_name);
+            validate_config(&config)?;
             let value = serde_json::to_value(&config).map_err(|e| McpConfigError::WriteError {
                 path: project_path.display().to_string(),
                 source: e.into(),
@@ -439,6 +533,9 @@ fn remove_server_from_config_with_paths(
                 path: global_path.display().to_string(),
                 source: e,
             })?;
+
+        // 全局支路只操作 Value：写盘前必须走一遍 typed 校验（两个候选 map 都查）。
+        validate_value_servers(&value, global_path)?;
 
         // 尝试 config.mcpServers 路径
         let mut removed = false;
@@ -463,12 +560,24 @@ fn remove_server_from_config_with_paths(
         }
 
         if removed {
+            validate_value_servers(&value, global_path)?;
             atomic_write_json(global_path, &value)?;
             return Ok(());
         }
     }
 
     // 未在任何配置中找到该 server，幂等返回
+    Ok(())
+}
+
+/// 校验全局 settings.json 的 Value 中所有存在的 `mcpServers` map
+/// （nested 与 top-level 都查：写入口可能操作备用 map）。
+fn validate_value_servers(value: &serde_json::Value, path: &Path) -> Result<(), McpConfigError> {
+    let nested = value.get("config").and_then(|c| c.get("mcpServers"));
+    let top_level = value.get("mcpServers");
+    for map in [nested, top_level].into_iter().flatten() {
+        validate_servers_value(map, path)?;
+    }
     Ok(())
 }
 
@@ -508,6 +617,10 @@ fn set_server_disabled_with_paths(
                 source: e,
             })?;
 
+        if let Some(map) = value.get("mcpServers") {
+            validate_servers_value(map, &project_path)?;
+        }
+
         if let Some(server_obj) = value
             .get_mut("mcpServers")
             .and_then(|s| s.get_mut(server_name))
@@ -517,6 +630,9 @@ fn set_server_disabled_with_paths(
                 server_obj.insert("disabled".to_string(), serde_json::Value::Bool(true));
             } else {
                 server_obj.remove("disabled");
+            }
+            if let Some(map) = value.get("mcpServers") {
+                validate_servers_value(map, &project_path)?;
             }
             atomic_write_json(&project_path, &value)?;
             return Ok(());
@@ -536,6 +652,10 @@ fn set_server_disabled_with_paths(
                 path: global_path.display().to_string(),
                 source: e,
             })?;
+
+        // 全局支路只操作 Value：写盘前必须走一遍 typed 校验（两个候选 map 都查），
+        // 且 disabled=true 不能成为绕过配置契约的通道。
+        validate_value_servers(&value, global_path)?;
 
         // 尝试 config.mcpServers 路径
         let mut updated = false;
@@ -572,6 +692,7 @@ fn set_server_disabled_with_paths(
             }
         }
 
+        validate_value_servers(&value, global_path)?;
         atomic_write_json(global_path, &value)?;
         return Ok(());
     }
@@ -591,6 +712,9 @@ fn test_config() -> McpServerConfig {
         disabled: None,
         protocol_version: None,
         subscriptions: None,
+        system_mcp: None,
+        system_mcp_tools: None,
+        system_mcp_timeout: None,
         source: None,
     }
 }

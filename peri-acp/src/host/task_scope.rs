@@ -30,6 +30,8 @@ pub(crate) enum HostTaskKind {
     Prediction,
     LegacyCancelHook,
     McpAppsRelay,
+    /// client 宿主的 MCP server 反向下发的 `mcp/message` 请求。
+    McpOverAcp,
     UserInputEvents,
     CompactHook,
 }

@@ -126,6 +126,13 @@ impl SessionEnvironment {
     }
 
     pub(crate) async fn shutdown(&self) -> bool {
+        // 会话终结即断开本会话声明的 MCP-over-ACP 连接：连接由 client 侧的
+        // ACP 通道承载，会话不再存活后既没有归属也不会有入站消息；处置必须在
+        // 池关闭之前完成，否则 `mcp/disconnect` 已无出站通道可用。实现幂等，
+        // 关闭重试重复调用是安全的。
+        if let Some(port) = self.cfg.acp_mcp.as_ref() {
+            port.close_session(&self.session_id).await;
+        }
         if !self.finish_session_end().await {
             return false;
         }

@@ -7,6 +7,10 @@ use super::{
         McpServiceWrapper, OAuthStartDisposition, OAuthStatus, HTTP_CONNECT_TIMEOUT,
         SHUTDOWN_TIMEOUT,
     },
+    initialize::{
+        commit_discovery_failure, commit_discovery_success, downgrade_resource_listing,
+        fail_tool_discovery, list_discovered_tools,
+    },
     oauth_flow::{OAuthFailureKind, OAuthFlowEvent, OAuthFlowManager},
 };
 
@@ -162,6 +166,8 @@ impl McpClientPool {
                 .get(server_name)
                 .map(|c| c.status.clone());
             self.clients.write().remove(server_name);
+            // 本次发现尝试开始：旧代证据立即作废，等待方按「仍在进行」重新判定。
+            self.clear_discovery_evidence(server_name);
 
             // 使用认证传输层重新连接
             let headers = cfg.headers.clone().unwrap_or_default();
@@ -180,9 +186,16 @@ impl McpClientPool {
                     let rs = &service;
                     let peer = rs.peer().clone();
                     let cache_version = self.install_peer_cache_version(server_name, &peer);
-                    let tools = match self.list_all_tools_cached(server_name, &peer).await {
+                    // 严格发现：`tools/list` 的 `Err` 不是「没有工具」。System MCP 走
+                    // 本次 live round-trip（不用历史缓存代替健康证据），失败即
+                    // ToolDiscoveryFailed，不提交 Connected。
+                    let tools = match list_discovered_tools(self, server_name, &peer, &cfg).await {
                         Ok(tools) => tools,
                         Err(source) => {
+                            // 授权成功但 live `tools/list` 失败：不留下「无句柄」的
+                            // 模糊状态，显式记为 Failed + 本代 tools_list_ok = false，
+                            // System 等待方据此立即判定，而不是等满 deadline。
+                            fail_tool_discovery(self, server_name, &source.to_string());
                             let error = McpPoolError::ToolDiscoveryFailed {
                                 server: server_name.to_string(),
                                 reason: source.to_string(),
@@ -196,10 +209,13 @@ impl McpClientPool {
                             return Err(error);
                         }
                     };
-                    let resources = self
-                        .list_all_resources_cached(server_name, &peer)
-                        .await
-                        .unwrap_or_default();
+                    let resources = match self.list_all_resources_cached(server_name, &peer).await {
+                        Ok(resources) => resources,
+                        Err(error) => {
+                            downgrade_resource_listing(server_name, &error.to_string());
+                            Vec::new()
+                        }
+                    };
                     let skills_capable = super::client::peer_declares_skills(&peer);
                     let handle = Arc::new(McpClientHandle {
                         name: server_name.to_string(),
@@ -217,16 +233,21 @@ impl McpClientPool {
                         channel_capable: false,
                         skills_capable,
                     });
+                    let committed = Arc::clone(&handle);
                     if let Err(mut service) =
                         self.try_commit_connection(server_name.to_string(), handle, service)
                     {
                         let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                        // 提交被拒（pool 关闭）：不留任何可被读成成功的证据。
+                        self.clear_discovery_evidence(server_name);
                         return Err(McpPoolError::ConnectionFailed {
                             server: server_name.to_string(),
                             reason: "MCP pool is closing".to_string(),
                         });
                     }
                     self.record_status_change(server_name, old_status.as_ref());
+                    // 唯一能提交本代发现证据的位置：live `tools/list` 已成功且句柄已登记代际。
+                    commit_discovery_success(self, server_name, &committed);
                     return Ok(());
                 }
                 Ok(Err(e)) => {
@@ -243,6 +264,7 @@ impl McpClientPool {
                     } else {
                         Self::insert_failed(self, server_name, err_str.clone());
                     }
+                    commit_discovery_failure(self, server_name, false);
                     let error = McpPoolError::ConnectionFailed {
                         server: server_name.to_string(),
                         reason: err_str,
@@ -258,6 +280,7 @@ impl McpClientPool {
                 Err(_) => {
                     let msg = "连接超时".to_string();
                     Self::insert_failed(self, server_name, msg.clone());
+                    commit_discovery_failure(self, server_name, false);
                     let error = McpPoolError::ConnectionFailed {
                         server: server_name.to_string(),
                         reason: msg,

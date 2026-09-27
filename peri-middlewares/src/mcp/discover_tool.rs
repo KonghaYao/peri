@@ -34,6 +34,8 @@ pub struct DiscoverMCPTool {
     pool: Arc<McpClientPool>,
     registry: Option<Arc<McpSkillRegistry>>,
     agent_registry: Option<Arc<McpAgentRegistry>>,
+    /// 会话 id：发现面按 ACP 连接归属过滤，`None` = 不过滤（print 模式）。
+    session_id: Option<String>,
 }
 
 impl DiscoverMCPTool {
@@ -42,7 +44,14 @@ impl DiscoverMCPTool {
             pool,
             registry,
             agent_registry: None,
+            session_id: None,
         }
+    }
+
+    /// 注入会话 id：其他会话声明的 ACP server 不出现在搜索 / 清单 / 详情面。
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
     }
 
     pub fn with_agent_registry(mut self, registry: Arc<McpAgentRegistry>) -> Self {
@@ -72,7 +81,10 @@ impl DiscoverMCPTool {
         let mut results: Vec<Value> = Vec::new();
 
         // server：全部已配置/已连接服务器（名称匹配）
-        for info in self.pool.all_server_infos() {
+        for info in self
+            .pool
+            .all_server_infos_visible_to(self.session_id.as_deref())
+        {
             if info.name.to_lowercase().contains(&needle) {
                 results.push(json!({
                     "type": "server",
@@ -88,7 +100,10 @@ impl DiscoverMCPTool {
         }
 
         // tool / resource：已连接 server 的缓存快照（get_all_clients 只返回 Connected）
-        for handle in self.pool.get_all_clients() {
+        for handle in self
+            .pool
+            .get_all_clients_visible_to(self.session_id.as_deref())
+        {
             for tool in &handle.tools {
                 let name_hit = tool.name.to_lowercase().contains(&needle);
                 let desc_hit = tool
@@ -163,7 +178,10 @@ impl DiscoverMCPTool {
         let Some(server) = params.get("server").and_then(Value::as_str) else {
             return err_obj(-32602, "缺少 server 参数（string）");
         };
-        let Some(handle) = self.pool.get_client(server) else {
+        let Some(handle) = self
+            .pool
+            .get_client_visible_to(server, self.session_id.as_deref())
+        else {
             return err_obj(-32000, format!("MCP 服务器 \"{server}\" 不存在"));
         };
         if !matches!(&handle.status, ClientStatus::Connected) {
@@ -217,7 +235,10 @@ impl DiscoverMCPTool {
         let Some(server) = params.get("server").and_then(Value::as_str) else {
             return err_obj(-32602, "缺少 server 参数（string）");
         };
-        let Some(handle) = self.pool.get_client(server) else {
+        let Some(handle) = self
+            .pool
+            .get_client_visible_to(server, self.session_id.as_deref())
+        else {
             return err_obj(-32000, format!("MCP 服务器 \"{server}\" 不存在"));
         };
         // detail 只服务已连接 server（spec 错误表：已配置但未连接 → -32000）
@@ -332,6 +353,7 @@ fn config_source_str(source: &ConfigSource) -> &'static str {
         ConfigSource::Project(_) => "project",
         ConfigSource::Global(_) => "global",
         ConfigSource::Plugin => "plugin",
+        ConfigSource::Acp => "acp",
     }
 }
 

@@ -11,6 +11,7 @@ use peri_acp_types::command::command_route::{
     RouteEntry,
 };
 use peri_acp_types::command::{CommandContext, CommandHandler, CommandOutcome};
+use peri_acp_types::plugin::McpServerConfigValidationError;
 use peri_resources::lsp::config::{lsp_config_from_plugin, LspServerConfig};
 use serde::Deserialize;
 use thiserror::Error;
@@ -18,7 +19,7 @@ use tracing::{debug, warn};
 
 use crate::{
     hooks::types::RegisteredHook,
-    mcp::{config::McpConfigFile, McpServerConfig},
+    mcp::McpServerConfig,
     plugin::{
         config::{
             load_claude_settings, load_installed_plugins, load_plugin_manifest,
@@ -46,6 +47,12 @@ pub enum LoaderError {
     ConfigError(#[from] crate::plugin::PluginConfigError),
     #[error("IO 错误: {0}")]
     Io(#[from] std::io::Error),
+    /// 插件 MCP 配置无效（MCP 专用严格路径）。
+    ///
+    /// `message` 只保留固定规则正文或解析定位（行列/错误类别），不回显原始输入值
+    /// ——env / headers / OAuth 字段的内容不得进入错误文本（ARC-SECRET-001）。
+    #[error("插件 MCP 配置无效: {path}: {message}")]
+    McpConfigInvalid { path: PathBuf, message: String },
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -396,60 +403,143 @@ pub(crate) fn extract_agents_paths(manifest: &PluginManifest, base_dir: &Path) -
     result
 }
 
+/// 插件清单文件路径（`.claude-plugin/plugin.json`）。
+fn plugin_manifest_path(install_path: &Path) -> PathBuf {
+    install_path.join(".claude-plugin").join("plugin.json")
+}
+
+/// 解析错误的可诊断定位：只保留错误类别与行列，不回显原始输入值
+/// （serde 的 `invalid type` 正文会带上值本身，可能把 env / headers 内容写进日志）。
+fn describe_json_error(error: &serde_json::Error) -> String {
+    let kind = match error.classify() {
+        serde_json::error::Category::Io => "I/O 错误",
+        serde_json::error::Category::Syntax => "JSON 语法错误",
+        serde_json::error::Category::Data => "字段类型或取值不符合契约",
+        serde_json::error::Category::Eof => "JSON 提前结束",
+    };
+    format!("{kind}（行 {} 列 {}）", error.line(), error.column())
+}
+
+/// 契约层冻结的 System 规则正文：命中即回显固定规则文本，否则退回解析定位。
+///
+/// 这里匹配的是本仓库自己的冻结错误文案（`McpServerConfigValidationError` 的
+/// Display），不是任意用户输入；命中与否只决定错误文本，不决定跳过或继续。
+fn describe_server_parse_error(error: &serde_json::Error) -> String {
+    let text = error.to_string();
+    let rule = [
+        McpServerConfigValidationError::SystemMcpToolsRequiresSystemMcp,
+        McpServerConfigValidationError::SystemMcpTimeoutRequiresSystemMcp,
+        McpServerConfigValidationError::SystemMcpTimeoutOutOfRange,
+    ]
+    .into_iter()
+    .map(|rule| rule.to_string())
+    .find(|rule| text.contains(rule));
+    rule.unwrap_or_else(|| describe_json_error(error))
+}
+
+/// 解析单个 MCP server 条目：typed 反序列化（含 System 组合校验）后再做纯校验。
+fn parse_mcp_server_entry(
+    value: &serde_json::Value,
+    path: &Path,
+    server_name: &str,
+) -> Result<McpServerConfig, LoaderError> {
+    let config: McpServerConfig =
+        serde_json::from_value(value.clone()).map_err(|error| LoaderError::McpConfigInvalid {
+            path: path.to_path_buf(),
+            message: format!("{server_name}: {}", describe_server_parse_error(&error)),
+        })?;
+    validate_mcp_server_config(&config, path, server_name)?;
+    Ok(config)
+}
+
+/// 单个 server 配置的纯校验（含手工构造的 typed 配置）。
+fn validate_mcp_server_config(
+    config: &McpServerConfig,
+    path: &Path,
+    server_name: &str,
+) -> Result<(), LoaderError> {
+    config
+        .validate()
+        .map_err(|rule| LoaderError::McpConfigInvalid {
+            path: path.to_path_buf(),
+            message: format!("{server_name}: {rule}"),
+        })
+}
+
+/// 解析 `{"serverName": {...}}` 形态的 server map；任一 entry 非法即整体失败。
+fn parse_mcp_servers_object(
+    value: &serde_json::Value,
+    path: &Path,
+) -> Result<HashMap<String, McpServerConfig>, LoaderError> {
+    let Some(object) = value.as_object() else {
+        return Err(LoaderError::McpConfigInvalid {
+            path: path.to_path_buf(),
+            message: "mcpServers 必须是对象".to_string(),
+        });
+    };
+    let mut result = HashMap::new();
+    for (name, entry) in object {
+        result.insert(name.clone(), parse_mcp_server_entry(entry, path, name)?);
+    }
+    Ok(result)
+}
+
 /// Load MCP servers from a .mcp.json file, supporting both formats:
 /// - Standard: `{"mcpServers": {...}}`
 /// - Flat: `{"serverName": {...}}` (no mcpServers wrapper, used by context7/gitlab)
-fn load_mcp_json_file(path: &Path) -> Option<HashMap<String, McpServerConfig>> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+///
+/// 严格语义：缺失文件是「未声明」（`Ok(None)`），存在但读取/解析失败是错误
+/// （`Err`），不当作可跳过的条目。wrapped 形态一旦出现就不再看 flat 形态；
+/// flat 形态任一 entry 非法则整体失败，不保留部分成功。
+fn load_mcp_json_file(
+    path: &Path,
+) -> Result<Option<HashMap<String, McpServerConfig>>, LoaderError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(path).map_err(|error| LoaderError::McpConfigInvalid {
+        path: path.to_path_buf(),
+        message: format!("读取失败: {error}"),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&content).map_err(|error| LoaderError::McpConfigInvalid {
+            path: path.to_path_buf(),
+            message: describe_json_error(&error),
+        })?;
 
-    // Try standard format first: {"mcpServers": {...}}
-    if let Some(_servers) = v.get("mcpServers") {
-        if let Ok(file_config) = serde_json::from_value::<McpConfigFile>(v.clone()) {
-            if !file_config.mcp_servers.is_empty() {
-                return Some(file_config.mcp_servers);
-            }
-        }
+    // Standard format: {"mcpServers": {...}}（空 map 也是「已声明」）
+    if let Some(servers) = value.get("mcpServers") {
+        return Ok(Some(parse_mcp_servers_object(servers, path)?));
     }
 
-    // Fallback: flat format — each key is a server name, value is a McpServerConfig
-    if let Some(obj) = v.as_object() {
-        let mut result = HashMap::new();
-        for (key, val) in obj {
-            // Skip known non-server keys
-            if key == "mcpServers" {
-                continue;
-            }
-            if let Ok(cfg) = serde_json::from_value::<McpServerConfig>(val.clone()) {
-                result.insert(key.clone(), cfg);
-            }
-        }
-        if !result.is_empty() {
-            return Some(result);
-        }
-    }
-
-    None
+    // Flat format — each key is a server name, value is a McpServerConfig
+    Ok(Some(parse_mcp_servers_object(&value, path)?))
 }
 
 /// Extract MCP servers from plugin manifest.
 /// Supports inline config objects and .mcp.json file path references.
 /// Falls back to install_path/.mcp.json when manifest has no mcpServers.
+///
+/// 严格语义：manifest 声明了 `mcpServers`（包括空 map）就不回退根 `.mcp.json`；
+/// 回退只在**未声明**时发生，不因解析失败而触发。内联条目逐项校验；被引用的
+/// 配置文件非法时整个提取失败，不部分接纳合法兄弟条目。
 pub(crate) fn extract_mcp_servers(
     manifest: &PluginManifest,
     install_path: &Path,
-) -> HashMap<String, McpServerConfig> {
+) -> Result<HashMap<String, McpServerConfig>, LoaderError> {
     let mut result = HashMap::new();
 
     if let Some(entries) = &manifest.mcp_servers {
+        let manifest_path = plugin_manifest_path(install_path);
         for (name, entry) in entries {
             match entry {
                 McpServerEntry::Config(cfg) => {
+                    validate_mcp_server_config(cfg, &manifest_path, name)?;
                     result.insert(name.clone(), (**cfg).clone());
                 }
                 McpServerEntry::FilePath(path) => {
                     let resolved = install_path.join(path);
-                    match load_mcp_json_file(&resolved) {
+                    match load_mcp_json_file(&resolved)? {
                         Some(mcp_servers) => {
                             for (srv_name, srv_cfg) in mcp_servers {
                                 // 文件路径引用中的服务器名保留，外层会再加命名空间
@@ -465,48 +555,92 @@ pub(crate) fn extract_mcp_servers(
                         None => {
                             warn!(
                                 path = %resolved.display(),
-                                "插件 MCP 配置文件加载失败，跳过"
+                                "插件 MCP 配置文件不存在，跳过该声明"
                             );
                         }
                     }
                 }
             }
         }
+        return Ok(result);
     }
 
     // Fallback: if manifest has no mcpServers, try install_path/.mcp.json
-    if result.is_empty() {
-        let mcp_json = install_path.join(".mcp.json");
-        if mcp_json.exists() {
-            debug!(path = %mcp_json.display(), "加载插件根目录 .mcp.json 作为 MCP 配置回退");
-            if let Some(mcp_servers) = load_mcp_json_file(&mcp_json) {
-                result = mcp_servers;
-            }
-        }
+    let mcp_json = install_path.join(".mcp.json");
+    if !mcp_json.exists() {
+        return Ok(result);
     }
+    debug!(path = %mcp_json.display(), "加载插件根目录 .mcp.json 作为 MCP 配置回退");
+    Ok(load_mcp_json_file(&mcp_json)?.unwrap_or_default())
+}
 
-    result
+/// 插件装配时对 MCP 配置错误采用的处理策略。
+///
+/// 严格化**只限 MCP 启动路径**：既有宽容 API（`load_enabled_plugins_aggregated`
+/// 等展示/聚合入口）保持「坏插件不阻止宿主启动」的产品行为。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpConfigPolicy {
+    /// 宽容（展示 / 面板 / skills / hooks 聚合）：记录安全诊断，该插件的 MCP 声明按空处理。
+    Lenient,
+    /// 严格（MCP 启动路径）：非法 MCP 配置直接失败，不降级为空配置。
+    Strict,
 }
 
 pub fn load_plugins(installed: &InstalledPlugins) -> Result<Vec<LoadedPlugin>, LoaderError> {
+    load_plugins_with_policy(installed, McpConfigPolicy::Lenient)
+}
+
+/// 装配已安装插件；`policy` 决定非法 MCP 配置是失败还是降级。
+fn load_plugins_with_policy(
+    installed: &InstalledPlugins,
+    policy: McpConfigPolicy,
+) -> Result<Vec<LoadedPlugin>, LoaderError> {
     let mut result = Vec::new();
 
     for plugin in &installed.plugins {
         let manifest = match load_manifest(&plugin.install_path) {
             Ok(m) => m,
-            Err(_) => {
-                // 尝试从 marketplace manifest 生成合成 plugin.json（兼容修复前安装的 LSP 插件）
-                if try_generate_synthetic_manifest_fallback(
+            Err(error) => {
+                let manifest_path = plugin_manifest_path(&plugin.install_path);
+                // 已存在但非法的清单不允许被合成清单覆盖修复，也不当作未安装：
+                // 严格路径直接报错，宽容路径记录诊断后跳过该插件。
+                if manifest_path.exists() {
+                    if policy == McpConfigPolicy::Strict {
+                        return Err(error);
+                    }
+                    warn!(
+                        plugin = %plugin.name,
+                        error = %error,
+                        "插件清单非法，跳过该插件"
+                    );
+                    continue;
+                }
+                // 清单文件缺失：允许从 marketplace manifest 生成合成清单
+                // （兼容修复前安装的 LSP 插件），生成结果同样按严格语义解析。
+                if !try_generate_synthetic_manifest_fallback(
                     &plugin.install_path,
                     &plugin.name,
                     &plugin.marketplace,
                 ) {
-                    match load_manifest(&plugin.install_path) {
-                        Ok(m) => m,
-                        Err(_) => continue,
-                    }
-                } else {
+                    warn!(
+                        plugin = %plugin.name,
+                        "插件清单缺失且无法生成合成清单，跳过该插件"
+                    );
                     continue;
+                }
+                match load_manifest(&plugin.install_path) {
+                    Ok(m) => m,
+                    Err(error) => {
+                        if policy == McpConfigPolicy::Strict {
+                            return Err(error);
+                        }
+                        warn!(
+                            plugin = %plugin.name,
+                            error = %error,
+                            "合成清单解析失败，跳过该插件"
+                        );
+                        continue;
+                    }
                 }
             }
         };
@@ -514,7 +648,20 @@ pub fn load_plugins(installed: &InstalledPlugins) -> Result<Vec<LoadedPlugin>, L
         let commands = extract_commands(&manifest, &plugin.install_path, &plugin.name);
         let skills_roots = extract_skills_paths(&manifest, &plugin.install_path, &plugin.name);
         let agents_dirs = extract_agents_paths(&manifest, &plugin.install_path);
-        let mcp_servers = extract_mcp_servers(&manifest, &plugin.install_path);
+        let mcp_servers = match extract_mcp_servers(&manifest, &plugin.install_path) {
+            Ok(servers) => servers,
+            Err(error) => match policy {
+                McpConfigPolicy::Strict => return Err(error),
+                McpConfigPolicy::Lenient => {
+                    warn!(
+                        plugin = %plugin.name,
+                        error = %error,
+                        "插件 MCP 配置无效，跳过该插件的 MCP 声明"
+                    );
+                    HashMap::new()
+                }
+            },
+        };
         let data_path = plugin.install_path.join(".claude-plugin").join("data");
         let hooks_config = crate::hooks::loader::extract_hooks(&manifest, &plugin.install_path);
 
@@ -560,10 +707,13 @@ fn merge_enabled_plugins(
     project.enabled_plugins.iter().cloned().collect()
 }
 
-pub fn load_enabled_plugins(
+/// 选出已启用插件（installed 记录 ∩ enabledPlugins）。
+///
+/// 严格与宽容入口共用本函数：启用范围规则只有一份，两条路径不复制解析逻辑。
+fn select_enabled_plugins(
     claude_dir: &Path,
     cwd: Option<&Path>,
-) -> Result<Vec<LoadedPlugin>, LoaderError> {
+) -> Result<InstalledPlugins, LoaderError> {
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let settings_path = claude_dir.join("settings.json");
 
@@ -584,12 +734,32 @@ pub fn load_enabled_plugins(
         .filter(|p| enabled_ids.contains(&p.id))
         .collect();
 
-    let filtered_installed = InstalledPlugins {
+    Ok(InstalledPlugins {
         version: installed.version,
         plugins: filtered,
-    };
+    })
+}
 
-    load_plugins(&filtered_installed)
+pub fn load_enabled_plugins(
+    claude_dir: &Path,
+    cwd: Option<&Path>,
+) -> Result<Vec<LoadedPlugin>, LoaderError> {
+    load_plugins(&select_enabled_plugins(claude_dir, cwd)?)
+}
+
+/// MCP 执行专用严格入口：复用启用选择与装配逻辑，但非法 MCP 配置直接失败
+/// ——不降级为空配置、不当作未安装继续。
+///
+/// 只有 MCP 合并（`mcp::config`）使用本入口；`load_enabled_plugins_aggregated`
+/// 等宽容展示 API 的类型与行为保持不变。
+pub(crate) fn load_enabled_plugins_for_mcp(
+    claude_dir: &Path,
+    cwd: Option<&Path>,
+) -> Result<Vec<LoadedPlugin>, LoaderError> {
+    load_plugins_with_policy(
+        &select_enabled_plugins(claude_dir, cwd)?,
+        McpConfigPolicy::Strict,
+    )
 }
 
 pub struct PluginCommandProvider {
@@ -632,8 +802,14 @@ pub fn merge_plugin_mcp_servers(plugins: &[LoadedPlugin]) -> HashMap<String, Mcp
 pub fn load_enabled_plugins_aggregated(claude_dir: &Path, cwd: Option<&Path>) -> PluginLoadResult {
     let plugins = match load_enabled_plugins(claude_dir, cwd) {
         Ok(p) => p,
-        Err(_) => {
-            // 静默失败，避免在 TUI 上打印错误日志
+        Err(error) => {
+            // 宽容展示路径：保留「返回空结果」的产品行为，但错误必须可见
+            // ——不静默丢弃（合法诊断只含路径与固定规则/解析定位）。
+            warn!(
+                claude_dir = %claude_dir.display(),
+                error = %error,
+                "插件聚合加载失败，返回空结果"
+            );
             return PluginLoadResult {
                 plugins: vec![],
                 all_skill_roots: vec![],

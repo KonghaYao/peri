@@ -31,6 +31,7 @@
 //! - `plugin` — 插件契约（PluginManifest/LoadedPlugin/PluginLoadResult/PluginManagerPort）
 //! - `ports` — 装配注入端口（McpPoolPort/ToolSearchPort/WorkflowMiddlewarePort/SkillsPort）
 
+pub mod acp_mcp;
 pub mod agents;
 pub mod command;
 // 注册表顶层 re-export（Phase 2 消费方路径 `peri_acp_types::command_registry::*`，

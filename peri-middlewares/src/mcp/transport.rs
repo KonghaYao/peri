@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use peri_acp_types::plugin::McpServerConfigValidationError;
 use thiserror::Error;
 
 use super::config::McpServerConfig;
@@ -25,12 +26,18 @@ pub enum TransportConfig {
 pub enum TransportError {
     #[error("MCP 服务器配置无效: 缺少 command 或 url 字段")]
     InvalidConfig,
+    /// typed 配置不满足契约不变量。`McpServerConfig` 是公开 struct，可手工构造，
+    /// 因此 Deserialize 不是唯一闸门——建传输前同样要过同一份纯校验。
+    #[error(transparent)]
+    InvalidSystemConfig(#[from] McpServerConfigValidationError),
 }
 
 impl TryFrom<&McpServerConfig> for TransportConfig {
     type Error = TransportError;
 
     fn try_from(config: &McpServerConfig) -> Result<Self, Self::Error> {
+        // System key 组合非法（含显式 `[]` 无 `system_mcp = true`）不得建立传输。
+        config.validate()?;
         match (&config.command, &config.url) {
             (Some(command), _) => Ok(TransportConfig::Stdio {
                 command: command.clone(),

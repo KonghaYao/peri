@@ -272,6 +272,9 @@ fn test_cache_origin_does_not_expose_endpoint() {
         disabled: None,
         protocol_version: None,
         subscriptions: None,
+        system_mcp: None,
+        system_mcp_tools: None,
+        system_mcp_timeout: None,
         source: None,
     };
     let origin = cache_origin("server", Some(&config));
@@ -342,6 +345,9 @@ fn test_stdio_cache_origin_changes_with_config_identity() {
         disabled: None,
         protocol_version: None,
         subscriptions: None,
+        system_mcp: None,
+        system_mcp_tools: None,
+        system_mcp_timeout: None,
         source: None,
     };
     let second = McpServerConfig {

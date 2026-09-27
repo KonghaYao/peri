@@ -102,7 +102,7 @@ impl McpClientPool {
             .unwrap_or(0)
     }
 
-    pub(super) fn advance_handle_generation(&self, handle: &Arc<McpClientHandle>) -> u64 {
+    pub(crate) fn advance_handle_generation(&self, handle: &Arc<McpClientHandle>) -> u64 {
         let generation = self
             .next_handle_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -124,6 +124,108 @@ impl McpClientPool {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
         self.configs.write().remove(server_name);
+        // 句柄与配置同时消失：本代发现证据一律失效，等待方立即重读事实。
+        self.system_readiness.clear_evidence(server_name);
+    }
+
+    /// 会话级 ACP（MCP over ACP）连接的可见性过滤。
+    ///
+    /// 无归属条目的 server（配置来源、dynamic 投影）对所有会话可见；有归属的
+    /// 仅对归属会话可见——同一 ACP 连接下不同会话各自声明 server 时，工具不得
+    /// 跨会话泄漏。
+    pub fn is_visible_to_session(&self, server_name: &str, session_id: &str) -> bool {
+        match self.acp_owners.read().get(server_name) {
+            Some(owner) => owner == session_id,
+            None => true,
+        }
+    }
+
+    /// 提交会话级 ACP 连接：准入锁下分配池内名并登记会话归属。
+    ///
+    /// 池内名优先取 client 声明的 `name`；被其他归属（或本会话的上一代）占用时
+    /// 追加 `_2`、`_3`…，避免覆盖既有条目。返回值是实际使用的池内名。
+    pub(crate) fn commit_acp_connection(
+        self: &Arc<Self>,
+        session_id: &str,
+        preferred_name: &str,
+        mut handle: Arc<McpClientHandle>,
+        service: McpServiceWrapper,
+    ) -> Result<String, McpServiceWrapper> {
+        let _admission = self.lifecycle_registration.lock();
+        if !self.is_open() {
+            return Err(service);
+        }
+        let name = self.allocate_acp_name(preferred_name, session_id);
+        Arc::make_mut(&mut handle).name = name.clone();
+        self.acp_owners
+            .write()
+            .insert(name.clone(), session_id.to_string());
+        self.advance_handle_generation(&handle);
+        self.services.lock().insert(name.clone(), service);
+        self.clients.write().insert(name.clone(), handle);
+        Ok(name)
+    }
+
+    fn allocate_acp_name(&self, preferred: &str, session_id: &str) -> String {
+        let clients = self.clients.read();
+        let same_owner = self
+            .acp_owners
+            .read()
+            .get(preferred)
+            .is_some_and(|owner| owner == session_id);
+        if !clients.contains_key(preferred) || same_owner {
+            return preferred.to_string();
+        }
+        let mut index = 2u32;
+        loop {
+            let candidate = format!("{preferred}_{index}");
+            if !clients.contains_key(&candidate) {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
+    /// 记录会话级 ACP 连接失败：池状态面留一条**归属该会话**的失败条目。
+    ///
+    /// 失败连接从不进 `services`（没有可关闭的 service），但必须有可核对的事实：
+    /// 否则「建连失败」只存在于日志里，面板与模型概览都会把它读成「没有这台
+    /// server」。返回实际使用的池内名。
+    pub(crate) fn record_acp_failure(
+        self: &Arc<Self>,
+        session_id: &str,
+        preferred_name: &str,
+        reason: &str,
+    ) -> String {
+        let name = {
+            let _admission = self.lifecycle_registration.lock();
+            if !self.is_open() {
+                return preferred_name.to_string();
+            }
+            let name = self.allocate_acp_name(preferred_name, session_id);
+            self.acp_owners
+                .write()
+                .insert(name.clone(), session_id.to_string());
+            name
+        };
+        Self::insert_failed(self, &name, reason.to_string());
+        name
+    }
+
+    /// 关闭会话：移除该会话的全部 ACP 连接（关闭 service、清空归属），返回被移除的池内名。
+    pub async fn remove_acp_servers_for_session(self: &Arc<Self>, session_id: &str) -> Vec<String> {
+        let names: Vec<String> = self
+            .acp_owners
+            .read()
+            .iter()
+            .filter(|(_, owner)| owner.as_str() == session_id)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &names {
+            self.acp_owners.write().remove(name);
+            self.remove_server(name).await;
+        }
+        names
     }
 
     /// 将服务器标记为 Disabled：关闭连接但保留 config 和 handle（用于面板展示）
@@ -161,6 +263,8 @@ impl McpClientPool {
                 channel_capable: false,
             }),
         );
+        // 禁用不是「连接中」：本代证据失效，等待方立即得到 Disabled 事实。
+        self.system_readiness.clear_evidence(server_name);
     }
 
     pub(crate) fn is_open(&self) -> bool {
@@ -174,6 +278,8 @@ impl McpClientPool {
         }
         self.lifecycle
             .store(1, std::sync::atomic::Ordering::Release);
+        // 关闭事务开始：全部发现证据失效并唤醒等待方（它们在重读时看到 PoolClosed）。
+        self.system_readiness.clear_all_evidence();
         self.notifier.write().take();
         self.oauth_event_callback.write().take();
         self.pending_oauth_callbacks.lock().clear();

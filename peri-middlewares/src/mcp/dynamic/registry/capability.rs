@@ -239,6 +239,7 @@ impl CheckedSessionMcpProjection {
             &self.pool,
             Some(&self.skill_registry),
             Some(&self.command_registry),
+            Some(&self.session_id),
             &self.cancel,
         );
         true

@@ -33,6 +33,13 @@ pub enum McpTaskKey {
     OAuth(String),
     Reconnect(String),
     Subscription(String),
+    /// 会话级 MCP over ACP 建连（`mcp/connect` + 握手 + 工具发现）。
+    ///
+    /// 会话关闭时按本键终止在建任务，避免连接在会话消失后仍提交进池。
+    Acp {
+        session_id: String,
+        server_id: String,
+    },
     Dynamic {
         kind: DynamicMcpTaskKind,
         session_id: String,

@@ -488,6 +488,14 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     let mcp_subscription: Option<Arc<dyn McpSubscriptionPort>> = mcp_pool_concrete
         .clone()
         .map(|p| p as Arc<dyn McpSubscriptionPort>);
+    // MCP over ACP 服务：会话 setup 声明的 `type: "acp"` server 经它建连，连接
+    // 进的就是**本装配的池**——会话级装配（`session_resources`）才有池，连接
+    // 因此只能进声明它的会话的工具面。host 级装配无池即无此服务。
+    let acp_mcp: Option<Arc<dyn peri_acp_types::ports::AcpMcpServerPort>> =
+        mcp_pool_concrete.clone().map(|pool| {
+            Arc::new(peri_middlewares::mcp::AcpMcpService::new(pool))
+                as Arc<dyn peri_acp_types::ports::AcpMcpServerPort>
+        });
     let mcp_apps_relay: Option<Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>> =
         if mcp_profile.apps_enabled() {
             mcp_pool_concrete.clone().map(|pool| {
@@ -620,6 +628,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         cron_scheduler,
         mcp_pool,
         mcp_apps_relay,
+        acp_mcp,
         dynamic_mcp: Some(dynamic_mcp),
         oauth_event_tx: Some(oauth_event_tx),
         oauth_event_rx: Some(oauth_event_rx),

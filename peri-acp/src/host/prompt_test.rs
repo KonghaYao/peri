@@ -288,4 +288,38 @@ mod wire_projection {
         assert_eq!(value["stopReason"], "end_turn", "{value}");
         assert!(value.get("error").is_none());
     }
+
+    /// System MCP 启动准入失败（`McpMiddleware`）在 ACP 边界的投影契约：
+    /// 类别固定 `Internal` → `-32000`、`data` 只有 `kind=internal`、不携带
+    /// status / diagnostic，message 保留 `Middleware error: {middleware} - {reason}`
+    /// 形态——安全文案由 MCP 边界构造，ACP 不替它脱敏也不额外补内部 cause。
+    ///
+    /// 真实失败文本由 `host::mcp_v4_startup_tests` 的端到端用例断言（真实
+    /// gate 产生的 `ExecutionFailure` 走同一投影函数）。
+    #[test]
+    fn system_mcp_middleware_error_projects_standard_acp_error() {
+        let failure = ExecutionFailure::from_agent_error(&AgentError::MiddlewareError {
+            middleware: "McpMiddleware".to_string(),
+            reason: "System MCP startup rejected".to_string(),
+        });
+        assert_eq!(failure.kind, ExecutionFailureKind::Internal);
+        assert_eq!(failure.http_status, None);
+        assert!(failure.diagnostic.is_none(), "非模型失败不得携带模型诊断");
+
+        let err = prompt_wire_response(
+            Some(&failure),
+            crate::session::executor::PromptStopReason::EndTurn,
+        )
+        .expect_err("启动准入失败必须映射为协议错误，不得返回成功 PromptResponse");
+        assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
+        assert_eq!(
+            err.message,
+            "Middleware error: McpMiddleware - System MCP startup rejected"
+        );
+        assert_eq!(err.data, Some(serde_json::json!({"kind": "internal"})));
+
+        let wire = serde_json::to_value(&err).expect("AcpError 序列化不应失败");
+        assert_eq!(wire["code"], ACP_TURN_EXECUTION_FAILED_CODE);
+        assert_eq!(wire["data"], serde_json::json!({"kind": "internal"}));
+    }
 }

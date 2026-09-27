@@ -1,6 +1,6 @@
 # peri-acp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-12（模块职责拆分与 compact/历史恢复修复合并）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-26（MCP over ACP 宿主接线：setup 声明受理、出站网关与入站路由；System MCP 启动准入 host seam 回归入口；模块职责拆分与 compact/历史恢复修复合并）
 > 依据：peri-acp/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/peri-acp-protocol.md、源码
 
 ## 架构速览
@@ -113,11 +113,12 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 宿主所有权与服务入口 | host/mod.rs | `run_acp_server` / `run_acp_server_inner` 持有 deployment owner；`SessionState` 保持 frozen/agent_pool/continuation/lease 状态 |
-| 消息循环与请求分类 | host/server_loop.rs | `ServerLoop::run`；`spawn_prompt` / `spawn_mcp_apps_request` 经 task owner 准入；`dispatch_request` 保持 response → after_new_response |
+| 消息循环与请求分类 | host/server_loop.rs | `ServerLoop::run`；`spawn_prompt` / `spawn_mcp_apps_request` / `spawn_acp_mcp_request` 经 task owner 准入；`dispatch_request` 保持 response → after_new_response → 会话 setup 声明受理（`session_setup` + `requests::acp_mcp::attach_session_servers`）；`mcp/message` 通知在 `dispatch_notification` 内就地路由 |
 | Prompt 编排 / 预测 | host/prompt_dispatch.rs + host/prediction.rs | `dispatch_prompt_turn` 保留 host 根 re-export；`spawn_prediction` 在原 prompt lock 范围内准入 |
 | OAuth 事件投递 | host/oauth_delivery.rs | `spawn_oauth_consumer` / `deliver_oauth_event`；safe 与 legacy caps 分别裁决 |
 | EOF 收尾 | host/shutdown.rs | `shutdown_host` 借用唯一强 owner；先撤销准入，再取消并 drain 会话，最后关闭 LSP/MCP |
 | 方法注册面（mpsc） | host/requests.rs + host/requests/*.rs | `handle_request`（requests.rs:22，30 个方法分派到子模块；各 handle_* 均为 `pub(super)` 定义在对应子文件） |
+| MCP over ACP（client 声明的 `type: "acp"` server） | host/requests/acp_mcp.rs + host/server_loop.rs + host/workspace.rs | `attach_session_servers`（setup 响应后受理 `mcpServers`）；`AcpTransportGateway`（`AcpMcpGatewayPort` 实现：`mcp/connect` / `mcp/message` / `mcp/disconnect` 出站）；`route_inbound`（按 `connectionId` 定位承载会话服务）；`SessionEnvironment::shutdown` 调 `AcpMcpServerPort::close_session` | 会话 setup 各自解析、会话级服务持有连接；建连在后台（不阻塞会话建立，失败留在 MCP 池状态面），内层 MCP 错误码原样透传；契约 ARC-MCP-ACP-001 |
 | notification 处理 | host/notify.rs | `handle_notification`（:28）/`extract_session_id`（:153）；`host/unify_wire_baseline_test.rs` 锁定发射面 payload 与 schema typed `SessionNotification` 的逐字段一致性；统一 host 入口见 ARC-STDIO-001 与 `docs/design/architecture.md` |
 | prompt 执行编排 | host/prompt.rs | `run_prompt` 借用既有 AcpServerConfig 与当轮参数；`take_recall_for_turn`；保留 session 快照、Controller 执行及 canonical 结果回写顺序 |
 | prompt 模型工厂 | host/prompt/models.rs | `build_model_factories`；闭包复用当轮 provider/config 快照与同一 session AgentPool，缓存按 provider fingerprint 校验 |
@@ -153,3 +154,4 @@
 - ARC-SECRET-001：日志/错误/遥测不得泄露 secret（provider api_key 仅在 LlmProvider 内部持有）
 
 - 部署关闭回归：`host/stdio/langfuse_shutdown_test.rs` 的真实尾部事件、waiter 取消、共享会话、MCP/session Incomplete 重试与 HTTP 失败终态；`transport/mpsc_test.rs::test_explicit_close_rejects_both_pending_directions_and_delivers_eof` 证明显式 close 结算双向 pending 并让两端 EOF。
+- System MCP 启动准入回归（B-07 宿主 seam，契约 2/3/4）：`host/mcp_v4_startup_test.rs`（模块 `host::mcp_v4_startup_tests`，`host/mod.rs:52-54` 挂载；真实子进程 rmcp stdio + counting model + 临时 HOME，用例 `#[serial]` 且 `#[cfg(not(windows))]`）——命令 `cargo test -p peri-acp --lib -- host::mcp_v4_startup_tests`。它不覆盖 crate 内 seam（归 `peri-middlewares` 的 `mcp::mcp_v4_seam`）与工具调用策略（归 `mcp_host_policy_contract`）。

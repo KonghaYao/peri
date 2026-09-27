@@ -1,6 +1,6 @@
 # peri-acp-types 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-12（模块职责拆分与 compact/历史恢复修复合并）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-26（MCP over ACP 契约（`acp_mcp.rs` + 两个端口）；`McpServerConfig` 的 system_mcp 字段与三变体校验；模块职责拆分与 compact/历史恢复修复合并）
 > 依据：peri-acp-types/src/lib.rs、docs/standards/architecture-contracts.md、源码（本 crate 无 CLAUDE.md）
 
 ## 架构速览
@@ -110,9 +110,11 @@
 
 | 功能 | 入口/关键点 |
 | --- | --- |
+| MCP server 配置契约 | `plugin.rs`（`McpServerConfig` :46，`system_mcp` / `system_mcp_tools` / `system_mcp_timeout` 三字段与 camelCase 别名；`validate` :220；`McpServerConfigValidationError` :241；`DEFAULT_SYSTEM_MCP_TIMEOUT_MS` :209 / `MIN` :211 / `MAX` :213）——`Deserialize` 为手写实现（`McpServerConfigWire`），解析期即拒绝非法组合与显式 `null`；消费方（`peri-middlewares/src/mcp/config.rs` 的 direct/global/merged 入口、`plugin/loader.rs` 的 MCP 严格路径、`mcp/transport.rs`）各自复检 `validate`；`None` 与 `Some([])` 必须可区分并无损写回 |
 | 线程/存储 | `thread/types.rs`（`CancelPolicy` :17、`AgentStatus` :56、`ThreadMeta` :126）；`store.rs`（ThreadStore/CompactionLifecycle/MessageFlags） |
 | 冻结数据 | `frozen.rs`（`FrozenData` :26、`ThreadPersistence` :39）——会话创建时冻结，SubAgent 复用 |
-| 运行端口 | `runtime.rs`（`RuntimePort`，`cancel` :85）；`ports.rs`（McpPoolPort/ToolSearchPort/WorkflowMiddlewarePort/SkillsPort） |
+| 运行端口 | `runtime.rs`（`RuntimePort`，`cancel` :85）；`ports.rs`（McpPoolPort/ToolSearchPort/WorkflowMiddlewarePort/SkillsPort/AcpMcpServerPort/AcpMcpGatewayPort） |
+| MCP over ACP 契约 | `acp_mcp.rs`（`AcpMcpServerSpec`、`AcpMcpInbound`、`AcpMcpError`：`CODE_NOT_FOUND` / `CODE_UNAVAILABLE`）；`ports.rs`（`AcpMcpGatewayPort` 出站切片、`AcpMcpServerPort`：`attach` / `request` / `notify` / `owns_connection` / `close_session`）——只描述协议载荷与运行时标识，不依赖 rmcp 或具体 transport；实现在 `peri-middlewares/src/mcp/acp/`，host 接线在 `peri-acp/src/host/requests/acp_mcp.rs`（契约 ARC-MCP-ACP-001） |
 | 其他 | `interaction.rs`（HITL）、`goal.rs`、`tasks.rs`、`cron.rs`、`workflow.rs`、`hooks.rs`、`plugin.rs`、`skills.rs`、`mcp.rs`/`mcp_skills.rs`、`lsp.rs`、`meta_harness.rs`、`peri_caps.rs`（`PeriCaps` re-export lib.rs:57）、`projection.rs`、`permission.rs`、`agents.rs`、`error.rs`（`AgentError`）、`summary.rs`/`event_data.rs`（TUI 消费 DTO） |
 
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）
