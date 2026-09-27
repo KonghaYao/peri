@@ -5,6 +5,8 @@ use chrono::{TimeZone, Utc};
 use peri_acp_types::store::ThreadStore;
 use peri_acp_types::thread::{AgentStatus, ThreadMeta};
 use peri_resources::sessions::SqliteThreadStore;
+// 只被 `default_database_*` 两条 unix 用例使用（见下方平台说明）。
+#[cfg(not(windows))]
 use serial_test::serial;
 use tempfile::TempDir;
 
@@ -294,6 +296,10 @@ fn explicit_database_selection_never_falls_back_to_another_database() {
     assert_eq!(value["cwd"], "/b");
 }
 
+// 默认库位置由 `dirs_next::home_dir()` 派生，而 Windows 上它读 Profile known-folder、
+// 忽略 HOME（同 peri-resources/src/sessions/mod.rs 的默认路径用例）：注入 HOME 无法把
+// 默认库指向沙箱，这条用例在 Windows 上验证不了自己的契约，只在 unix 运行。
+#[cfg(not(windows))]
 #[test]
 #[serial]
 fn default_database_reads_existing_single_store_without_modifying_history() {
@@ -343,6 +349,9 @@ fn explicit_database_selection_returns_each_selected_database_value() {
     }
 }
 
+// 同 `default_database_reads_existing_single_store_without_modifying_history`：注入 HOME
+// 在 Windows 无效，这里观察的沙箱主目录根本不会被默认路径解析读到。
+#[cfg(not(windows))]
 #[test]
 #[serial]
 fn missing_default_database_does_not_create_home_paths() {

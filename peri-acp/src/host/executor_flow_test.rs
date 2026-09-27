@@ -110,6 +110,8 @@ impl MockEventSink {
     }
 
     /// 事件流快照（与 `push_done` 交错记录，用于断言 terminal 顺序）。
+    /// 调用方都在 `host::mcp_v4_startup_tests`（unix 用例），Windows 上没有使用者。
+    #[cfg_attr(windows, allow(dead_code))]
     pub(super) fn operations(&self) -> Vec<String> {
         self.operations.lock().unwrap().clone()
     }

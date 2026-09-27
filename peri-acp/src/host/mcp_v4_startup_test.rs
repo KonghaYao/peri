@@ -14,6 +14,13 @@
 //!
 //! 配置经真实项目级 `.mcp.json` 与真实 `run_initialize` 装载，HOME 重定向到临时
 //! 目录，测试不读取也不启动用户自己的 MCP 配置。
+//!
+//! 平台范围：整组用例只在 unix 运行。隔离靠 `HOME` 重定向（`HomeRedirect`），而全局
+//! `~/.peri/settings.json` 由 `dirs_next::home_dir()` 解析——Windows 上它读 Profile
+//! known-folder 并忽略 `HOME`（见 `host::assemble`），用例会装载运行者自己的 MCP 配置。
+//! 因此平台范围上移到模块级：Windows 上不再留下只被排除用例引用的死代码。
+
+#![cfg(not(windows))]
 
 use std::{
     ffi::OsString,
@@ -436,7 +443,6 @@ fn assert_fatal_without_reason(
 
 /// transport / initialize 失败（`System MCP` 已 Failed）→ 首个 prompt fatal，
 /// 模型 0 次调用。文案只保留阶段类别，不含对端原文。
-#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn system_mcp_transport_failure_fails_first_prompt_without_model_call() {
@@ -474,7 +480,6 @@ async fn system_mcp_transport_failure_fails_first_prompt_without_model_call() {
 /// 连接与协商都好、但 live `tools/list` 未完成 → 仍不得 ready：
 /// 这是「`Connected` + 无工具清单」被读成 ready 的原始风险面，只有真实成功的
 /// `tools/list` 才算发现证据（空数组是成功结果，未回应不是）。
-#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn system_mcp_connected_without_tool_discovery_is_not_ready() {
@@ -496,7 +501,6 @@ async fn system_mcp_connected_without_tool_discovery_is_not_ready() {
 
 /// `tools/list` 失败 → 不得被读成「空工具列表」：即使 `system_mcp_tools = []`
 /// 也必须 fatal（契约 4 的两条分支之一）。
-#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn system_mcp_tool_discovery_failure_is_not_an_empty_tool_list() {
@@ -525,7 +529,6 @@ async fn system_mcp_tool_discovery_failure_is_not_an_empty_tool_list() {
 
 /// 对端不响应 → deadline 到期是**终态失败**，不是取消：模型 0 次调用、
 /// 不是 `Cancelled` stop reason、不是 `Interrupted` 终态。
-#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn system_mcp_timeout_is_fatal_not_cancelled() {
@@ -560,7 +563,6 @@ async fn system_mcp_timeout_is_fatal_not_cancelled() {
 }
 
 /// peer 断开（子进程收到请求即退出）→ 同样在 Reason 之前 fatal。
-#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn system_mcp_disconnected_peer_fails_first_prompt() {
@@ -588,7 +590,6 @@ async fn system_mcp_disconnected_peer_fails_first_prompt() {
 }
 
 /// 连接与 `tools/list` 都成功但缺必需工具 → 仍不得放行（all-or-nothing）。
-#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn system_mcp_missing_required_tool_fails_before_reason() {
@@ -614,7 +615,6 @@ async fn system_mcp_missing_required_tool_fails_before_reason() {
 
 /// 必需工具在第一个真实 LLM 请求中就直接可见（无需 ToolSearch），而普通 MCP 工具
 /// 仍是 deferred（只出现在 deferred 摘要里）。
-#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn system_mcp_ready_exposes_required_tools_on_first_model_request() {
@@ -670,7 +670,6 @@ async fn system_mcp_ready_exposes_required_tools_on_first_model_request() {
 
 /// 契约 4：`system_mcp_tools = []` 只要求 ready，不注入额外工具——
 /// 同一台 server 的工具全部保持 deferred。
-#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn system_mcp_empty_required_tools_ready_without_injection() {
@@ -711,7 +710,6 @@ async fn system_mcp_empty_required_tools_ready_without_injection() {
 
 /// ordinary MCP 永久 pending（对端不响应）时，prompt 仍到达模型；system 依赖满足
 /// 即可放行。断言时 ordinary 仍**在连接中**，证明确实没有被等待。
-#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn ordinary_mcp_pending_does_not_block_startup() {
@@ -755,7 +753,6 @@ async fn ordinary_mcp_pending_does_not_block_startup() {
 /// ordinary MCP 直接初始化失败（未声明 `system_mcp`）同样不得阻塞启动：只有
 /// `system_mcp == Some(true)` 的 server 是启动依赖。与「同一 fixture 声明为 system
 /// 即 fatal」形成对照，固定 fatal 由启动依赖判定产生，而非 fixture 失败本身。
-#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn ordinary_mcp_failure_does_not_block_startup() {
@@ -786,7 +783,6 @@ async fn ordinary_mcp_failure_does_not_block_startup() {
 
 /// 闸门位置固定：输入已被 Receive 接纳（transcript 出现该 human 消息），但既无
 /// assistant 输出也无线工具调用——即「Receive 之后、Compact / Reason 之前」。
-#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn system_mcp_gate_runs_after_receive_and_before_reason() {

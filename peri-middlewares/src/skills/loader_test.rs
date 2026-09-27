@@ -513,6 +513,34 @@ fn test_resolve_skill_roots_returns_standard_paths() {
     );
 }
 
+/// User root 必须跟随 `$HOME`（主目录唯一权威 `plugin::user_home`，HOME 优先）：
+/// Windows 的 `dirs_next::home_dir()` 读 Profile known-folder、不读 HOME，各入口
+/// 各拼一份会让 User 技能目录与插件目录分叉。
+#[test]
+fn test_resolve_skill_roots_user_root_follows_home_env() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let home = tempdir().unwrap();
+    let previous = std::env::var_os("HOME");
+    std::env::set_var("HOME", home.path());
+    let roots = resolve_skill_roots("/tmp/test-project", vec![], false);
+    match previous {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    let expected = home.path().join(".claude").join("skills");
+    assert!(
+        roots
+            .iter()
+            .any(|root| root.source == SkillSource::User && root.path == expected),
+        "User root 应跟随 HOME，实得 {:?}",
+        roots
+            .iter()
+            .filter(|root| root.source == SkillSource::User)
+            .map(|root| root.path.display().to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn test_resolve_skill_roots_includes_plugin_roots() {
     let extra = tempfile::tempdir().unwrap();

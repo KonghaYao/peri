@@ -411,14 +411,12 @@ pub fn resolve_skill_roots(
 ) -> Vec<SkillRoot> {
     let mut roots = Vec::new();
 
-    // 1. User
-    if let Some(h) = dirs_next::home_dir() {
-        roots.push(SkillRoot {
-            path: h.join(".claude").join("skills"),
-            source: SkillSource::User,
-            plugin_name: None,
-        });
-    }
+    // 1. User（主目录经 plugin::claude_home 解析，HOME 优先的唯一权威）
+    roots.push(SkillRoot {
+        path: crate::plugin::claude_home().join("skills"),
+        source: SkillSource::User,
+        plugin_name: None,
+    });
 
     // 2. Global（~/.peri/settings.json::skillsDir）
     if let Some(dir) = crate::skills::load_global_skills_dir() {

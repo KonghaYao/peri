@@ -177,11 +177,11 @@ impl PreparedSessionInputs {
             )),
             Some(source) if source.bare => Ok((None, Vec::new(), Vec::new())),
             Some(_) => {
-                let claude_dir = dirs_next::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".claude");
-                let data = super::assemble::discover_enabled_plugins_readonly(&claude_dir, cwd)
-                    .map_err(|error| {
+                // 严格只读发现：用户级 `.claude` 由装配面解析（HOME 优先的唯一
+                // 权威在 `plugin::claude_home`，见 `assemble` 函数 doc），
+                // 准备面只提供执行目录。
+                let data =
+                    super::assemble::discover_enabled_plugins_readonly(cwd).map_err(|error| {
                         AcpError::new(-32603, format!("Plugin discovery failed: {error}"))
                     })?;
                 let skill_roots = data.all_skill_roots.clone();

@@ -1,4 +1,6 @@
 use super::*;
+// `SessionResources` 的方法只在 unix 子进程用例里调用（Windows 的 home_dir 不读 HOME）。
+#[cfg(unix)]
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::{
     messages::BaseMessage,

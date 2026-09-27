@@ -46,12 +46,16 @@ pub(crate) struct WorkspaceAssembly {
 ///
 /// 会话准备面（`host/prepared.rs`）经本函数调用：具体实现与插件装配同属宿主
 /// 装配面，准备面不新建越层引用（§0 依赖门边 2）。
+///
+/// 用户级 `.claude` 在本装配面解析：`peri_middlewares::plugin::claude_home()`
+/// 是 HOME 优先的唯一权威（Windows 的 `dirs_next::home_dir()` 读 Profile
+/// known-folder、忽略 HOME/USERPROFILE，自带一份解析会与其余插件入口取到
+/// 不同目录）。准备面因此只提供执行目录。
 pub(crate) fn discover_enabled_plugins_readonly(
-    claude_dir: &std::path::Path,
     cwd: &str,
 ) -> Result<PluginLoadResult, peri_middlewares::plugin::LoaderError> {
     peri_middlewares::plugin::load_enabled_plugins_aggregated_readonly(
-        claude_dir,
+        &peri_middlewares::plugin::claude_home(),
         Some(std::path::Path::new(cwd)),
     )
 }
@@ -270,9 +274,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         prepared_plugins,
     } = input;
 
-    let claude_dir = dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".claude");
+    // 用户级 `.claude` 与准备面、插件 RPC 共用同一权威（HOME 优先）：
+    // 见 `peri_middlewares::plugin::claude_home`。
+    let claude_dir = peri_middlewares::plugin::claude_home();
 
     // ── 插件聚合数据（bare 时跳过；准备路径消费同一聚合，不重读插件目录）──
     let (prepared_data, prepared_skill_roots, prepared_agent_dirs) = match prepared_plugins {

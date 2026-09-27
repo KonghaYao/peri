@@ -10,7 +10,7 @@ pub use config::{
     claude_home, claude_settings_path, installed_plugins_path, known_marketplaces_path,
     load_claude_settings, load_installed_plugins, load_known_marketplaces, load_plugin_manifest,
     marketplaces_cache_dir, plugin_cache_dir, plugins_dir, save_claude_settings_enabled_plugins,
-    save_installed_plugins, save_known_marketplaces, ClaudeSettings, PluginConfigError,
+    save_installed_plugins, save_known_marketplaces, user_home, ClaudeSettings, PluginConfigError,
 };
 pub use install_counts::{
     fetch_install_counts, format_install_count, is_install_counts_cache_valid, load_install_counts,

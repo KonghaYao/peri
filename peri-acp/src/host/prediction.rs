@@ -18,6 +18,11 @@ pub(super) fn spawn_prediction(
     let pred_sessions = sessions.clone();
     let pred_resources = cfg.session_resources.clone();
     let pred_caps_registry = cfg.session_manager.caps_registry();
+    // 宿主 scope 的关停信号：关停方（如 `session/close` 经
+    // `SessionEnvironment::shutdown`）会持 sessions 锁等待本会话任务收摊，本任务
+    // 若在关停开始后继续排队等同一把锁即互等，只能耗到协作宽限（5s）被强杀。
+    // 预测动作与通知只对活跃会话有意义，关停开始即放弃本轮。
+    let pred_shutdown = cfg.host_task_spawner.shutdown_token();
 
     let _ = cfg.host_task_spawner.spawn(
         task_scope::HostTaskOwnerKind::Session,
@@ -26,7 +31,10 @@ pub(super) fn spawn_prediction(
             tracing::debug!("Prediction task started");
             // 从 session 获取最新历史与当前标题
             let (history, cwd, current_title) = {
-                let sessions = pred_sessions.lock().await;
+                let Some(sessions) = lock_or_shutdown(&pred_sessions, &pred_shutdown).await else {
+                    tracing::debug!("Prediction: host scope shutting down, dropping prediction");
+                    return;
+                };
                 match sessions.get(&pred_session_id) {
                     Some(s) => (s.history.clone(), s.cwd.clone(), s.title.clone()),
                     None => {
@@ -74,7 +82,14 @@ pub(super) fn spawn_prediction(
                     // 元数据动作写入 session 状态；标题变更待持久化并推送
                     let mut applied_title: Option<String> = None;
                     {
-                        let mut sessions = pred_sessions.lock().await;
+                        let Some(mut sessions) =
+                            lock_or_shutdown(&pred_sessions, &pred_shutdown).await
+                        else {
+                            tracing::debug!(
+                                "Prediction: host scope shutting down, dropping metadata actions"
+                            );
+                            return;
+                        };
                         if let Some(state) = sessions.get_mut(&pred_session_id) {
                             for action in &actions {
                                 match action {
@@ -168,3 +183,25 @@ pub(super) fn spawn_prediction(
         },
     );
 }
+
+/// 获取 sessions 锁，同时观察宿主 scope 的关停信号：关停开始即返回 `None`。
+///
+/// 关停由 `session/close` 等持有 sessions 锁的调用方发起
+/// （`SessionEnvironment::shutdown` → `HostTaskOwner::shutdown`），它们在同一段代码里
+/// 等待本会话任务收摊。任务若在关停开始后继续排队等同一把锁，双方即互等，只能被
+/// 协作宽限后的强杀解开。预测结果只服务于活跃会话，关停后丢弃是正确语义
+/// （`biased` 让关停判定优先于恰好空闲的锁，行为不随调度抖动）。
+async fn lock_or_shutdown<'a, T>(
+    sessions: &'a tokio::sync::Mutex<T>,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Option<tokio::sync::MutexGuard<'a, T>> {
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => None,
+        guard = sessions.lock() => Some(guard),
+    }
+}
+
+#[cfg(test)]
+#[path = "prediction_test.rs"]
+mod tests;

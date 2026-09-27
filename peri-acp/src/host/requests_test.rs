@@ -2395,12 +2395,13 @@ async fn test_safe_oauth_capability_rejects_callback_secrets_over_acp() {
 
 // ── Phase 6 B3：plugin install/uninstall RPC 级投影断言（P2-2）──────────────
 
-/// 测试期重定向 `$HOME`（`handle_request` 内 `claude_dir` 由
-/// `dirs_next::home_dir()` 计算，`refresh_plugin_command_entries` 经真实
+/// 测试期重定向 `$HOME`（插件入口的 `claude_dir` 经
+/// `peri_middlewares::plugin::claude_home()` 计算：HOME 优先且要求绝对路径，
+/// 两个平台都被本重定向覆盖；`refresh_plugin_command_entries` 经真实
 /// `load_enabled_plugins` 重载）；Drop 时还原。进程级 env 态 →
-/// 本组用例全部 `#[serial]`（与 store_test 同组互斥）。
-/// Windows 下 `dirs_next::home_dir()` 读 `USERPROFILE`（`HOME` 仅 Unix 生效），
-/// 两个变量同步设置以保证隔离。
+/// 本组用例全部 `#[serial]`（与 store_test 同组互斥）。Windows 一并设置
+/// `USERPROFILE`（与 `HOME` 同源；`dirs_next::home_dir()` 在该平台走 Profile
+/// known-folder，不读环境变量，故不构成隔离手段）。
 struct HomeDirGuard {
     home: Option<std::ffi::OsString>,
     #[cfg(windows)]

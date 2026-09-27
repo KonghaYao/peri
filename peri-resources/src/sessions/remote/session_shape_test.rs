@@ -214,6 +214,18 @@ fn text(value: &str) -> Value {
     Value::Text(value.to_owned())
 }
 
+/// 平台绝对路径文本，用作「绑定相对路径必须是相对的」这条规则的反例。
+///
+/// 不能写死 `/etc`：Windows 上带根无盘符的路径不是绝对路径，规则不会拒绝它，
+/// 断言就会把「没被拒绝」误报成契约失败。
+fn absolute_cwd() -> &'static str {
+    if cfg!(windows) {
+        r"C:\etc"
+    } else {
+        "/etc"
+    }
+}
+
 /// 一行会话事实（列顺序 = `FACT_PROJECTION`）。
 fn fact_row() -> Vec<Value> {
     vec![
@@ -288,7 +300,7 @@ fn binding_decodes_from_the_appended_columns() {
     ));
 
     let mut absolute = fact_row();
-    absolute[FACT_BINDING_RELATIVE_CWD] = text("/etc");
+    absolute[FACT_BINDING_RELATIVE_CWD] = text(absolute_cwd());
     assert!(matches!(
         codec::decode_binding(&absolute, FACT_BINDING_VERSION),
         Err(error) if matches!(error.kind(), SessionResourceErrorKind::Corrupt { .. })
@@ -536,7 +548,7 @@ fn write_sql_is_static_and_all_values_are_bound() {
 #[test]
 fn binding_cwd_must_be_relative_and_textual() {
     let mut session = new_session("session-a", None);
-    session.binding.cwd_relative_to_workspace = PathBuf::from("/etc");
+    session.binding.cwd_relative_to_workspace = PathBuf::from(absolute_cwd());
     let error =
         session_sql::insert_session_statements(&session_sql::session_insert(&session, 0, None))
             .expect_err("absolute binding cwd is refused");

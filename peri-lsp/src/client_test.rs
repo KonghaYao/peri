@@ -6,6 +6,7 @@ use super::*;
 use crate::diagnostics::DiagnosticsRegistry;
 use crate::error::LspError;
 use crate::protocol::lsp_types::PublishDiagnosticsParams;
+use crate::uri::test_workspace_uri;
 
 /// perl 编写的极简 LSP 服务器：
 /// - 每次 spawn 向 `$PERI_LSP_TEST_COUNT` 文件追加一行 "spawned"（用于断言 spawn 次数）
@@ -226,7 +227,7 @@ async fn test_start_handshake_ok() {
     let count_file = dir.path().join("spawn_count.txt");
     let client = make_fake_client(&count_file);
 
-    let result = client.start("file:///tmp").await;
+    let result = client.start(&test_workspace_uri()).await;
     assert!(result.is_ok(), "start 应完成握手: {:?}", result.err());
     assert_eq!(spawn_count(&count_file), 1);
     assert!(client.is_ready());
@@ -249,7 +250,7 @@ async fn test_start_uses_configured_startup_timeout() {
         Arc::new(DiagnosticsRegistry::new()),
     );
 
-    let err = client.start("file:///tmp").await.unwrap_err();
+    let err = client.start(&test_workspace_uri()).await.unwrap_err();
     assert!(
         matches!(
             err,
@@ -280,7 +281,7 @@ async fn test_request_timeout_cleans_pending() {
     );
 
     // initialize 请求 100ms 超时（慢服务器 3s 才响应）
-    let err = client.start("file:///tmp").await.unwrap_err();
+    let err = client.start(&test_workspace_uri()).await.unwrap_err();
     assert!(
         matches!(err, LspError::RequestTimeout { .. }),
         "慢服务器 + 短超时应触发超时: {err:?}"
@@ -302,7 +303,8 @@ async fn test_concurrent_start_spawns_once() {
     let count_file = dir.path().join("spawn_count.txt");
     let client = make_fake_client(&count_file);
 
-    let (r1, r2) = tokio::join!(client.start("file:///tmp"), client.start("file:///tmp"));
+    let uri = test_workspace_uri();
+    let (r1, r2) = tokio::join!(client.start(&uri), client.start(&uri));
 
     assert!(r1.is_ok(), "第一个 start 失败: {:?}", r1.err());
     assert!(r2.is_ok(), "第二个 start 失败: {:?}", r2.err());
@@ -321,7 +323,7 @@ async fn test_did_open_idempotent_with_first_content() {
     // 同一 uri 重复 did_open 只发送一次通知，且携带首次传入的文本
     let dir = tempfile::tempdir().unwrap();
     let (client, didopen_file) = make_recording_client(dir.path());
-    client.start("file:///tmp").await.unwrap();
+    client.start(&test_workspace_uri()).await.unwrap();
 
     client
         .did_open("file:///tmp/main.rs", "rust", "fn main() {}")
@@ -352,7 +354,7 @@ async fn test_try_restart_resets_open_cache() {
     // try_restart 后 open_files 缓存清空，同一 uri 再次 did_open 应重新发送
     let dir = tempfile::tempdir().unwrap();
     let (client, didopen_file) = make_recording_client(dir.path());
-    client.start("file:///tmp").await.unwrap();
+    client.start(&test_workspace_uri()).await.unwrap();
 
     client
         .did_open("file:///tmp/main.rs", "rust", "v1")
@@ -361,7 +363,7 @@ async fn test_try_restart_resets_open_cache() {
     wait_for_didopen(&didopen_file, 1).await;
     assert_eq!(didopen_count(&didopen_file), 1);
 
-    client.try_restart("file:///tmp").await.unwrap();
+    client.try_restart(&test_workspace_uri()).await.unwrap();
     client
         .did_open("file:///tmp/main.rs", "rust", "v2")
         .await
@@ -386,13 +388,13 @@ async fn test_restart_window_cooldown() {
     let count_file = dir.path().join("spawn_count.txt");
     let client = make_fake_client(&count_file);
 
-    client.start("file:///tmp").await.unwrap();
+    client.start(&test_workspace_uri()).await.unwrap();
     for _ in 0..3 {
-        client.try_restart("file:///tmp").await.unwrap();
+        client.try_restart(&test_workspace_uri()).await.unwrap();
     }
 
     let spawns_before = spawn_count(&count_file);
-    let err = client.try_restart("file:///tmp").await.unwrap_err();
+    let err = client.try_restart(&test_workspace_uri()).await.unwrap_err();
     assert!(
         matches!(
             err,
@@ -423,16 +425,16 @@ async fn test_restart_window_expiry_resets_count() {
     let mut client = make_fake_client(&count_file);
     client.restart_window = std::time::Duration::from_secs(2);
 
-    client.start("file:///tmp").await.unwrap();
+    client.start(&test_workspace_uri()).await.unwrap();
     for _ in 0..3 {
-        client.try_restart("file:///tmp").await.unwrap();
+        client.try_restart(&test_workspace_uri()).await.unwrap();
     }
-    let err = client.try_restart("file:///tmp").await.unwrap_err();
+    let err = client.try_restart(&test_workspace_uri()).await.unwrap_err();
     assert!(matches!(err, LspError::ServerCrashed { .. }));
 
     // 等待窗口过期（窗口 + 100ms 缓冲），冷却解除
     tokio::time::sleep(client.restart_window + std::time::Duration::from_millis(100)).await;
-    client.try_restart("file:///tmp").await.unwrap();
+    client.try_restart(&test_workspace_uri()).await.unwrap();
     assert!(client.is_ready(), "窗口过后冷却解除，应能重启成功");
 
     client.shutdown().await;
@@ -459,7 +461,7 @@ async fn test_try_restart_clears_diagnostics() {
         DEFAULT_STARTUP_TIMEOUT_MS,
         Arc::clone(&diagnostics),
     );
-    client.start("file:///tmp").await.unwrap();
+    client.start(&test_workspace_uri()).await.unwrap();
 
     diagnostics.handle_publish_diagnostics(&PublishDiagnosticsParams {
         uri: "file:///tmp/main.rs".parse().unwrap(),
@@ -483,7 +485,7 @@ async fn test_try_restart_clears_diagnostics() {
     });
     assert!(!diagnostics.get_all().is_empty(), "前置条件：诊断应非空");
 
-    client.try_restart("file:///tmp").await.unwrap();
+    client.try_restart(&test_workspace_uri()).await.unwrap();
     assert!(diagnostics.get_all().is_empty(), "重启后旧诊断应被清空");
 
     client.shutdown().await;
@@ -567,7 +569,7 @@ async fn test_start_failure_initialize_kills_child() {
     let pid_file = dir.path().join("server.pid");
     let client = make_pid_tracking_client(&pid_file, SLOW_LSP_WITH_PID_SCRIPT, 200);
 
-    let err = client.start("file:///tmp").await.unwrap_err();
+    let err = client.start(&test_workspace_uri()).await.unwrap_err();
     assert!(
         matches!(
             err,
@@ -592,9 +594,15 @@ async fn test_start_failure_notify_kills_child() {
     // read task 不会因 EOF 触发清理）——只有失败路径的主动清理能终止它
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("server.pid");
-    let client = make_pid_tracking_client(&pid_file, CLOSE_STDIN_AFTER_INIT_SCRIPT, 5_000);
+    // 握手预算与其余进程型用例同源：断言的是 initialized 通知的 IO 失败，
+    // 不能让 5s 预算把冷启动延迟伪装成 initialize 超时。
+    let client = make_pid_tracking_client(
+        &pid_file,
+        CLOSE_STDIN_AFTER_INIT_SCRIPT,
+        DEFAULT_STARTUP_TIMEOUT_MS,
+    );
 
-    let err = client.start("file:///tmp").await.unwrap_err();
+    let err = client.start(&test_workspace_uri()).await.unwrap_err();
     assert!(
         matches!(err, LspError::Io(_)),
         "stdin 关闭后 initialized 通知应 IO 失败: {err:?}"

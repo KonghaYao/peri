@@ -1451,8 +1451,11 @@ close、path、conn、云实验都不在本批）。
   `CredentialSourceForLocalStore`），在入口转换处失败，不静默忽略；`Debug` 仍只给形态（新增
   `<local-path>`），不回显路径/locator/凭证名。
 - 回归（新增，离线）：`db_path_file_named_like_an_env_reference_opens_as_a_file`（真文件，旧实现报
-  `EnvValueMissing`）、`db_path_keeps_non_utf8_bytes_end_to_end`（字节保真；macOS syscall 拒绝非 UTF-8
-  路径 EILSEQ、Linux 建库，两种平台都不得落到 lossy 变体）、`db_path_windows_shapes_skip_locator_parsing`
+  `EnvValueMissing`）、`db_path_keeps_non_utf8_bytes_end_to_end`（字节保真由同用例前半段的 `resolve_locator`
+  断言覆盖，打开层按平台如实失败；**更正 2026-09-27**：原文「Linux 建库」有误——macOS 的 syscall 直接拒绝非
+  UTF-8 路径（EILSEQ，os error 92），Linux 的 syscall 接受后由打开层 sqlx 拒绝，它要求 SQLite 文件名是合法
+  UTF-8（`EstablishParams::from_options`，无平台分支）；两种平台都不得落到 lossy 变体）、
+  `db_path_windows_shapes_skip_locator_parsing`
   （形状解析，不要求本机是 Windows）、`env_colon_literal_is_a_file_name_for_db_path_but_a_reference_for_session_store`、
   `remote_only_parameters_on_confirmed_local_path_fail_early`。
 - 证据：`cargo test -p peri-acp-types --lib` 468 passed / 0 failed；`cargo test -p peri-resources --lib`
@@ -1521,7 +1524,8 @@ JSON-RPC wire；meta 的 JSON 输出只经 allowlist DTO（`json_success_is_one_
 - 未验证 / 未完成（继续显式记账，不假称整体完成）：首次产品登记仍 FAIL——首次云 `Created` **观测仍未完成**；
   close / conn 仍 FAIL（各自独立成批）。首登产品边界不变：**仅本安装初始化的新库可获首次登记；已初始化但无本机
   registry 只能读**（未加 register/接管，不自动登记，不 seed 真实 registry）。Windows drive/UNC 仅形状断言
-  （未在 Windows 实跑）；macOS 非 UTF-8 路径按平台如实断言 EILSEQ（Linux 建库）。上述失败用例里「stderr 不回显
+  （未在 Windows 实跑）；非 UTF-8 路径按平台如实断言失败原因（macOS syscall EILSEQ，Linux 由打开层 sqlx
+  拒绝——**更正 2026-09-27**：原文「Linux 建库」有误）。上述失败用例里「stderr 不回显
   locator 原文」的断言因其先断言 exit code 而未被执行，该路径脱敏本批未取得证据（脱敏另有
   `url_with_embedded_secret_is_rejected_without_echo`、`request_debug_keeps_host_and_credentials_out` 通过）。
   本轮未跑云、未跑 LLM。

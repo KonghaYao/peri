@@ -631,9 +631,11 @@ async fn db_path_file_named_like_an_env_reference_opens_as_a_file() {
     assert!(db_path.is_file(), "必须是本机文件，而不是环境变量引用");
 }
 
-/// Unix 非 UTF-8 文件名：字节原样到达打开层。macOS 的 syscall 拒绝非 UTF-8 路径
-/// （EILSEQ），Linux 接受并建库——两种结果都必须落在**原始字节**路径上：旧实现经
-/// `to_string_lossy` 改写后会在 U+FFFD 变体上另建一个库，静默打开错误的库。
+/// Unix 非 UTF-8 文件名：字节原样到达打开层，且**如实失败**。两种平台的失败原因都在
+/// 原始字节路径上（实跑）：macOS 的 syscall 直接拒绝（EILSEQ，os error 92）；Linux 的
+/// syscall 接受，由打开层的 sqlx 拒绝——它要求 SQLite 文件名是合法 UTF-8
+/// （`EstablishParams::from_options`，无平台分支）。旧实现经 `to_string_lossy` 改写后会在
+/// U+FFFD 变体上另建一个库，静默打开错误的库，因此失败必须落在原始字节路径上。
 #[cfg(unix)]
 #[tokio::test]
 async fn db_path_keeps_non_utf8_bytes_end_to_end() {
@@ -658,16 +660,18 @@ async fn db_path_keeps_non_utf8_bytes_end_to_end() {
     let opened =
         crate::Resources::open_deployment(&SessionStoreDeployment::local_path(db_path.clone()))
             .await;
-    #[cfg(target_os = "linux")]
-    {
-        drop(opened.expect("open（非 UTF-8 路径）"));
-        assert!(db_path.is_file(), "非 UTF-8 文件必须按原字节建立");
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // 本机（macOS）拒绝该路径：如实失败，不改写成另一个路径后"成功"。
-        drop(opened);
-    }
+    // 如实失败，不改写成另一个路径后"成功"：macOS 在 syscall 层拒绝（EILSEQ，
+    // os error 92），Linux 的 syscall 接受、由打开层 sqlx 的 UTF-8 文件名要求拒绝。
+    let error = match opened {
+        Ok(_) => panic!("非 UTF-8 路径必须如实失败：不得改写成 lossy 路径后成功"),
+        Err(error) => error,
+    };
+    // 具体原因按平台不同，因此只断言失败出在「打开这个库」这一步：不得是部署解析
+    // （locator / 引擎名 / 凭证）之类的另一条路径，也不把某平台的措辞写死。
+    assert!(
+        error.to_string().contains("无法打开指定 SQLite 数据库"),
+        "必须是打开层的失败，得到 {error}"
+    );
 
     let lossy_variant = dir
         .path()

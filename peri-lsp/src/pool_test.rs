@@ -48,9 +48,19 @@ fn make_config() -> LspConfigFile {
     }
 }
 
+/// pool 的 root/cwd：平台临时目录，保证在运行平台上真实存在。
+///
+/// pool 用 `root_uri` 解码出的路径作为 LSP 子进程的 cwd；测试曾用 `"/tmp"`，
+/// Windows 上它解码为 `<当前盘>:\tmp`（通常不存在），spawn 直接失败。
+fn fake_pool_root() -> String {
+    crate::uri::test_workspace_dir()
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[test]
 fn test_extension_routing() {
-    let pool = LspServerPool::new("/tmp", make_config());
+    let pool = LspServerPool::new(&fake_pool_root(), make_config());
     assert!(pool.server_for_file("/test/main.rs").is_some());
     assert!(pool.server_for_file("/test/index.ts").is_some());
     assert!(pool.server_for_file("/test/App.tsx").is_some());
@@ -74,7 +84,7 @@ impl LspPoolPort for StubPool {
 /// 还原为同一 LspServerPool 实例（装配面会话级复用前置条件，H1）。
 #[test]
 fn test_lsp_pool_port_downcast_roundtrip() {
-    let pool: Arc<LspServerPool> = Arc::new(LspServerPool::new("/tmp", make_config()));
+    let pool: Arc<LspServerPool> = Arc::new(LspServerPool::new(&fake_pool_root(), make_config()));
     let port: Arc<dyn LspPoolPort> = pool.clone();
     let restored = match port.downcast_arc::<LspServerPool>() {
         Ok(restored) => restored,
@@ -100,7 +110,7 @@ async fn test_lsp_pool_port_downcast_mismatch_returns_original() {
 
 #[test]
 fn test_case_insensitive_extension() {
-    let pool = LspServerPool::new("/tmp", make_config());
+    let pool = LspServerPool::new(&fake_pool_root(), make_config());
     assert!(pool.server_for_file("/test/main.RS").is_some());
     assert!(pool.server_for_file("/test/main.TS").is_some());
 }
@@ -113,26 +123,26 @@ fn test_disabled_server() {
         .get_mut("rust-analyzer")
         .unwrap()
         .disabled = Some(true);
-    let pool = LspServerPool::new("/tmp", config);
+    let pool = LspServerPool::new(&fake_pool_root(), config);
     assert!(pool.server_for_file("/test/main.rs").is_none());
 }
 
 #[test]
 fn test_has_servers() {
-    let pool = LspServerPool::new("/tmp", make_config());
+    let pool = LspServerPool::new(&fake_pool_root(), make_config());
     assert!(pool.has_servers());
 }
 
 #[test]
 fn test_empty_config() {
-    let pool = LspServerPool::new("/tmp", LspConfigFile::default());
+    let pool = LspServerPool::new(&fake_pool_root(), LspConfigFile::default());
     assert!(!pool.has_servers());
     assert!(pool.server_for_file("/test/main.rs").is_none());
 }
 
 #[tokio::test]
 async fn test_ensure_server_for_file_no_match() {
-    let pool = LspServerPool::new("/tmp", make_config());
+    let pool = LspServerPool::new(&fake_pool_root(), make_config());
     // .md 文件没有匹配的 LSP 服务器
     let result = pool.ensure_server_for_file("/test/readme.md").await;
     assert!(result.is_err());
@@ -219,7 +229,7 @@ fn make_fake_pool(count_file: &std::path::Path) -> LspServerPool {
         },
     );
     LspServerPool::new(
-        "/tmp",
+        &fake_pool_root(),
         LspConfigFile {
             lsp_servers: servers,
         },
@@ -285,7 +295,7 @@ fn make_fake_pool_with_pid(
         },
     );
     LspServerPool::new(
-        "/tmp",
+        &fake_pool_root(),
         LspConfigFile {
             lsp_servers: servers,
         },

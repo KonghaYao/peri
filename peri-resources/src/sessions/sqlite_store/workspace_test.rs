@@ -617,11 +617,15 @@ async fn test_worktree_binding_cwd_text_matches_registration_without_trailing_se
     // 工作区根与子目录各建一个绑定：两者的执行目录文本都必须与解析结果一致。
     // `root.join("")` 会给出 `/a/b/` 这样的形式，与解析给出的 `/a/b` 只差一个
     // 分隔符；Path 比较看不出差别，按字符串比较目录的调用方会据此重跑完整发现。
-    for (cwd, suffix) in [(repo.path().to_path_buf(), ""), (nested.clone(), "/sub")] {
+    // 后缀的分隔符随平台：Windows 的解析文本用 `\`。
+    for (cwd, suffix) in [
+        (repo.path().to_path_buf(), String::new()),
+        (nested.clone(), format!("{}sub", std::path::MAIN_SEPARATOR)),
+    ] {
         let (id, resolved) = bound(&store, &cwd).await;
         let registered = resolved.cwd.to_str().unwrap();
         assert!(
-            registered.ends_with(suffix),
+            registered.ends_with(suffix.as_str()),
             "解析结果不符合预期：{registered}"
         );
         let revalidated = store.validate_session_binding(&id).await.unwrap();

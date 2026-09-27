@@ -23,7 +23,7 @@ async fn test_notification_writes_newline_and_flushes_frame() {
     let mut child = tokio::process::Command::new("node")
         .args([
             "-e",
-            "process.stdin.once('data', data => process.stdout.write(data));",
+            "process.stdout.write('ready\\n'); process.stdin.once('data', data => process.stdout.write(data));",
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -35,6 +35,19 @@ async fn test_notification_writes_newline_and_flushes_frame() {
         4 * 1024 * 1024,
     );
     let stdout = child.stdout.take().expect("stdout 应为 piped");
+    let mut reader = BufReader::new(stdout);
+
+    // 就绪信号与 echo 分开计时：解释器冷启动（Windows CI 高负载下可达数秒）不
+    // 属于「写入即 flush」的语义，却会吃掉同一份预算。行为断言仍是严格的 1s。
+    let mut ready = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        reader.read_line(&mut ready),
+    )
+    .await
+    .expect("node 应在启动预算内就绪")
+    .unwrap();
+    assert_eq!(ready, "ready\n");
 
     channel
         .send_notification("test/event", serde_json::json!({"value": 1}))
@@ -44,7 +57,7 @@ async fn test_notification_writes_newline_and_flushes_frame() {
     let mut line = String::new();
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        BufReader::new(stdout).read_line(&mut line),
+        reader.read_line(&mut line),
     )
     .await
     .expect("完整 NDJSON frame 应被及时 flush")

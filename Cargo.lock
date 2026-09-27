@@ -4003,6 +4003,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "dashmap",
+ "dirs-next",
  "fs2",
  "libc",
  "parking_lot",

@@ -1,10 +1,12 @@
 //! context.rs 单元测试：`Resources::open_with` 显式路径语义。
 
+#[cfg(unix)]
 use std::path::PathBuf;
 
 use tempfile::tempdir;
 
 use peri_acp_types::messages::BaseMessage;
+#[cfg(unix)]
 use peri_acp_types::session_resources::AccessMode;
 use peri_acp_types::store::{PersistedPayload, ThreadStore};
 use peri_acp_types::thread::ThreadMeta;
@@ -297,10 +299,13 @@ async fn test_into_parts_hands_out_business_handle_and_deployment_close_owner() 
 /// 显式不会存在的凭证变量名：表达「来源已给、变量/值确实没有」。
 const ABSENT_CREDENTIAL_ENV: &str = "PERI_CONTEXT_TEST_ABSENT_TOKEN_ENV";
 /// 子进程受控 HOME 的守卫变量：只在父用例拉起时出现。
+#[cfg(unix)]
 const HOME_GUARD_ENV: &str = "PERI_CONTEXT_TEST_REMOTE_CREDENTIAL_HOME";
 /// locator 哨兵：断言错误输出不回显它。
+#[cfg(unix)]
 const LOCATOR_SENTINEL: &str = "turso://sentinel-db-sentinel-org.turso.io";
 /// 子进程跑到断言的标记（父用例据此确认证据真的产生了）。
+#[cfg(unix)]
 const CHILD_REACHED_MARKER: &str = "context-child-verified-no-side-effects";
 
 /// 凭证来源的每一种问题（名字非法、未设置、空值、非 Unicode、注入空值）都按**类型**归

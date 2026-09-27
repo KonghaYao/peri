@@ -133,9 +133,7 @@ impl AgentsMdMiddleware {
             cwd.join(".claude").join("AGENTS.md"),
         ];
 
-        if let Some(home) = dirs_next::home_dir() {
-            candidates.push(home.join(".claude").join("AGENTS.md"));
-        }
+        candidates.push(crate::plugin::claude_home().join("AGENTS.md"));
 
         candidates.extend(self.extra_search_paths.iter().cloned());
 
