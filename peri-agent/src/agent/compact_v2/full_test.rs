@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::agent::compact_v2::config::CompactConfig;
-use crate::messages::{BaseMessage, ContentBlock, ImageSource, MessageContent};
+use crate::messages::{BaseMessage, MessageContent};
 use crate::session::transcript::MessageTranscript;
 use crate::thread::ThreadMeta;
 use peri_acp_types::store::PersistedPayload;
@@ -240,8 +240,9 @@ async fn full_compact_model_input_comes_from_canonical_transcript() {
     );
 }
 
+/// [回归测试] Full 必须摘要并排除 canonical 报告，不能永久保留全文。
 #[tokio::test]
-async fn full_compact_preserves_canonical_reminder_without_flags() {
+async fn test_full_compact_summarizes_and_excludes_canonical_report() {
     use peri_acp_types::system_reminder::{
         ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
         ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
@@ -260,7 +261,7 @@ async fn full_compact_preserves_canonical_reminder_without_flags() {
                 severity: ReminderSeverity::Info,
                 delivery: ReminderDelivery::Configurable,
                 audiences: ReminderAudiences(vec![ReminderAudience::Model]),
-                body: "preserve me".into(),
+                body: format!("{}REPORT_TAIL_FACT", "report detail ".repeat(400)),
                 summary: None,
                 metadata: serde_json::json!({}),
             })
@@ -268,18 +269,28 @@ async fn full_compact_preserves_canonical_reminder_without_flags() {
     );
     transcript.append(make_ai("answer"));
 
+    let model = CapturingFullModel {
+        requests: std::sync::Mutex::new(Vec::new()),
+    };
     full_compact_inner(
         &mut transcript,
-        Some(&FullLifecycleModel),
+        Some(&model),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
     .unwrap();
 
-    assert_eq!(transcript.flags(reminder_id), MessageFlags::default());
+    let requests = model.requests.lock().unwrap();
+    assert!(
+        serde_json::to_string(&requests[0])
+            .unwrap()
+            .contains("REPORT_TAIL_FACT"),
+        "Full 摘要请求必须包含超过旧 2000 字符预览的报告结论"
+    );
+    assert!(transcript.flags(reminder_id).excluded);
     assert!(transcript.get(reminder_id).is_some());
-    assert!(transcript
+    assert!(!transcript
         .visible_model_messages()
         .unwrap()
         .iter()
@@ -645,39 +656,16 @@ async fn test_full_compact_empty_transcript_skips() {
 // ── 辅助函数测试 ───────────────────────────────────────────────────────────
 
 #[test]
-fn test_truncate_str_short() {
-    assert_eq!(truncate_str("hello", 100), "hello");
-}
-
-#[test]
-fn test_truncate_str_exact() {
-    assert_eq!(truncate_str("hello", 5), "hello");
-}
-
-#[test]
-fn test_truncate_str_long() {
-    let result = truncate_str("hello world", 5);
-    assert_eq!(result, "hello...(truncated)");
-}
-
-#[test]
-fn test_truncate_str_cjk() {
-    // CJK 字符级截断不应 panic
-    let result = truncate_str("你好世界测试", 2);
-    assert_eq!(result, "你好...(truncated)");
-}
-
-#[test]
 fn test_postprocess_summary_removes_analysis() {
     let raw = "<analysis>some analysis</analysis><summary>the summary</summary>";
-    let result = postprocess_summary(raw);
+    let result = postprocess_summary(raw).unwrap();
     assert!(!result.contains("<analysis>"));
 }
 
 #[test]
 fn test_postprocess_summary_extracts_summary() {
     let raw = "prefix text <summary>real summary content</summary> suffix";
-    let result = postprocess_summary(raw);
+    let result = postprocess_summary(raw).unwrap();
     assert!(result.contains("real summary content"));
     assert!(!result.contains("<summary>"));
     assert!(!result.contains("prefix text"));
@@ -686,72 +674,15 @@ fn test_postprocess_summary_extracts_summary() {
 #[test]
 fn test_postprocess_summary_no_tags() {
     let raw = "plain summary text";
-    let result = postprocess_summary(raw);
+    let result = postprocess_summary(raw).unwrap();
     assert!(result.contains("plain summary text"));
 }
 
 #[test]
 fn test_postprocess_summary_collapses_newlines() {
     let raw = "line1\n\n\n\n\nline2";
-    let result = postprocess_summary(raw);
+    let result = postprocess_summary(raw).unwrap();
     assert!(!result.contains("\n\n\n"), "应折叠连续空行");
-}
-
-#[test]
-fn test_replace_images_and_truncate() {
-    let blocks = vec![
-        ContentBlock::Text {
-            text: "some text".to_string(),
-        },
-        ContentBlock::Image {
-            source: ImageSource::Url {
-                url: "http://example.com/img.png".to_string(),
-            },
-        },
-    ];
-    let content = MessageContent::blocks(blocks);
-    let result = replace_images_and_truncate(&content, 100);
-    assert!(result.contains("[image]"));
-    assert!(result.contains("some text"));
-}
-
-#[test]
-fn test_format_tool_call_summary() {
-    let tc = crate::messages::ToolCallRequest::new(
-        "id1",
-        "Edit",
-        serde_json::json!({"file_path": "/tmp/test.rs", "old_string": "old"}),
-    );
-    let result = format_tool_call_summary(&tc);
-    assert!(result.contains("Edit"));
-    assert!(result.contains("file_path"));
-    assert!(result.contains("/tmp/test.rs"));
-}
-
-#[test]
-fn test_format_tool_call_summary_no_key_fields() {
-    let tc = crate::messages::ToolCallRequest::new(
-        "id1",
-        "Bash",
-        serde_json::json!({"random_key": "value"}),
-    );
-    let result = format_tool_call_summary(&tc);
-    assert_eq!(result, "Bash");
-}
-
-#[test]
-fn test_format_tool_result_summary_empty() {
-    let content = MessageContent::text("");
-    let result = format_tool_result_summary("call_1", &content, false, 3, 200);
-    assert!(result.contains("[ToolResult:call_1][ok]"));
-}
-
-#[test]
-fn test_format_tool_result_summary_truncates() {
-    let long_text = "a".repeat(500);
-    let content = MessageContent::text(&long_text);
-    let result = format_tool_result_summary("call_1", &content, false, 3, 100);
-    assert!(result.contains("...(truncated)"), "超长输出应被截断");
 }
 
 // ── CompactResult 测试 ─────────────────────────────────────────────────────

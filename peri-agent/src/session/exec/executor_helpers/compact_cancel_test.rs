@@ -319,6 +319,7 @@ struct Case {
     store: Arc<ControlledStore>,
     thread_id: ThreadId,
     history: Vec<BaseMessage>,
+    report_id: MessageId,
     result: peri_acp_types::session::PromptResult,
     done_count: usize,
     done_reasons: Vec<String>,
@@ -367,17 +368,34 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         BaseMessage::human("old manual question"),
         BaseMessage::ai("old manual answer"),
     ];
-    inner
-        .append_history(
-            &thread_id,
-            &history
-                .iter()
-                .cloned()
-                .map(PersistedPayload::Message)
-                .collect::<Vec<_>>(),
-        )
-        .await
-        .unwrap();
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let report_id = MessageId::new();
+    let mut payloads: Vec<_> = history
+        .iter()
+        .cloned()
+        .map(PersistedPayload::Message)
+        .collect();
+    payloads.push(PersistedPayload::SystemReminder {
+        id: report_id,
+        reminder: TrustedSystemReminderFactory::for_producer()
+            .construct(SystemReminder {
+                version: SYSTEM_REMINDER_VERSION,
+                category: ReminderCategory::Task,
+                source: ReminderSource("subagent".into()),
+                kind: "completed".into(),
+                severity: ReminderSeverity::Info,
+                delivery: ReminderDelivery::Configurable,
+                audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+                body: "MANUAL_REPORT_MUST_SURVIVE_CANCEL".to_owned(),
+                summary: None,
+                metadata: serde_json::json!({}),
+            })
+            .unwrap(),
+    });
+    inner.append_history(&thread_id, &payloads).await.unwrap();
     if pre_cancel {
         cancel.cancel();
     }
@@ -408,6 +426,7 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         &task_manager,
         lookup,
     );
+    req.history_payloads = payloads;
     req.cwd = workspace.cwd.to_str().unwrap();
     req.session_resources = Some(store.clone());
     req.thread_id = Some(thread_id.clone());
@@ -429,6 +448,7 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         store,
         thread_id,
         history,
+        report_id,
         result,
         done_count: sink.push_done_count(),
         done_reasons,
@@ -452,7 +472,14 @@ async fn assert_durable_summary(case: &Case) {
     assert!(payloads.iter().any(|payload| payload
         .as_message()
         .is_some_and(|message| message.content().contains("manual committed summary"))));
+    assert!(payloads
+        .iter()
+        .any(|payload| payload.id() == case.report_id));
     let flags = stored_snapshot(case).await.flags;
+    assert!(
+        flags[&case.report_id].excluded,
+        "已确认或磁盘已提交的 Full 必须一并排除旧报告"
+    );
     assert!(case
         .history
         .iter()
@@ -476,6 +503,11 @@ async fn test_manual_compact_cancel_before_commit_requires_reload_without_deleti
         2
     );
     assert!(stored_snapshot(&case).await.flags.is_empty());
+    assert!(stored_snapshot(&case)
+        .await
+        .payloads
+        .iter()
+        .any(|p| p.id() == case.report_id));
     assert_eq!(case.done_count, 1);
 }
 
@@ -544,6 +576,12 @@ async fn test_manual_compact_precancel_preserves_verified_history_without_store_
     assert_eq!(case.result.stop_reason, PromptStopReason::Cancelled);
     assert_eq!(case.done_reasons, ["cancelled"]);
     assert_eq!(case.store.calls.load(Ordering::SeqCst), 0);
+    assert!(stored_snapshot(&case).await.flags.is_empty());
+    assert!(case
+        .result
+        .persisted_payloads
+        .iter()
+        .any(|p| p.id() == case.report_id));
     assert_eq!(case.result.messages.len(), 2);
     assert_eq!(case.done_count, 1);
 }

@@ -234,7 +234,7 @@ impl BoundSession {
             .expect("加载会话快照失败")
     }
 
-    /// 已持久化的消息本体（reminder 不进入 compact 输入，与生产同语义）。
+    /// 命令 history 的普通消息投影；pipeline 另从快照恢复完整 reminder。
     async fn stored_messages(&self) -> Vec<BaseMessage> {
         self.snapshot()
             .await
@@ -810,3 +810,6 @@ async fn test_contract_all_system_history_still_human_first() {
         "stop_reason 必须为 EndTurn"
     );
 }
+
+#[path = "compact_report_test.rs"]
+mod report_tests;

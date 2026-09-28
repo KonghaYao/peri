@@ -36,8 +36,8 @@
 ### ARC-COMPACT-001
 
 - **Scope**：`peri-agent`、`peri-acp`、`peri-acp-types`、`peri-resources`。
-- **Rule**：Micro 计划与收益只计当前模型可见的 own region；Reason 只恢复已提交的 projection，关闭自动 compact 不改变已有投影。工具增长只在 canonical 工具结果提交后记账，新的有效 provider input usage 才结清估算。Full 的摘要与 excluded transitions 按持久化事务提交；随后取消或执行失败不能撤销已提交结果，host 仍须采纳可信快照；writer 失败或 compact 提交结果不确定须停止使用热状态、保留磁盘已提交内容并要求重新加载，禁止仅删除新增消息来伪造回滚。新子会话的继承上下文必须冻结 payload 与 flags，恢复时保持 ancestor/own 边界，祖先标记只可恢复、不可由子会话 compact 改写；ACP 独立 fork 的新 ID 复制仍属于 own region。无新增用户或工具工作时，连续成功 Full 后的真实请求仍未恢复预算须有界失败，不得靠删除 canonical reminder 或重复使用旧 usage 证明进展。
-- **Verify**：`cargo test -p peri-agent --lib test_audit_`、`cargo test -p peri-agent --lib budget_recovery`、`cargo test -p peri-agent --lib provenance`、`cargo test -p peri-acp --lib compact_recovery`、`cargo test -p peri-resources --lib inherited_context`；检查 `planner.rs`、`reason.rs`、`compact_progress.rs`、`subagent/factory.rs`、`v2_execute.rs` 与 `host/prompt.rs::finish_prompt_turn`。
+- **Rule**：Micro 计划与收益只计当前模型可见的 own region；Reason 只恢复已提交的 projection，关闭自动 compact 不改变已有投影。工具增长只在 canonical 工具结果提交后记账，新的有效 provider input usage 才结清估算。Full 从包含 canonical reminder 的已提交模型视图派生结构化摘要请求，不另做逐条有损预览；完整有效摘要与快照内 own region 的非 System 历史（含报告/通知 reminder）excluded transitions 按持久化事务提交，原文保留供历史回查。手动 `/compact` 同样恢复完整 payload 与继承边界；摘要期间新到达的 inbox 结果不属于旧快照；随后取消或执行失败不能撤销已提交结果，host 仍须采纳可信快照；writer 失败或 compact 提交结果不确定须停止使用热状态、保留磁盘已提交内容并要求重新加载，禁止仅删除新增消息来伪造回滚。新子会话的继承上下文必须冻结 payload 与 flags，恢复时保持 ancestor/own 边界，祖先标记只可恢复、不可由子会话 compact 改写；ACP 独立 fork 的新 ID 复制仍属于 own region。无新增用户或工具工作时，连续成功 Full 后的真实请求仍未恢复预算须有界失败，不得在未成功摘要时丢弃 canonical reminder，或重复使用旧 usage 证明进展。
+- **Verify**：`cargo test -p peri-agent --lib full_report`、`cargo test -p peri-acp --lib compact_report`、`cargo test -p peri-agent --lib test_audit_`、`cargo test -p peri-agent --lib budget_recovery`、`cargo test -p peri-agent --lib provenance`、`cargo test -p peri-acp --lib compact_recovery`、`cargo test -p peri-resources --lib inherited_context`；检查 `planner.rs`、`reason.rs`、`compact_progress.rs`、`subagent/factory.rs`、`v2_execute.rs` 与 `host/prompt.rs::finish_prompt_turn`。
 
 ### ARC-SESSION-LOAD-001
 

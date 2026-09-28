@@ -45,53 +45,10 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     let messages_snapshot: std::sync::Arc<Vec<crate::messages::BaseMessage>> =
         std::sync::Arc::new({
             let guard = ctx.session.transcript.read();
-            let visible = guard.visible_model_messages()?;
-
-            // 已提交的投影是会话状态，与是否启用自动 Compact 无关。
-            // Reason 只恢复已有投影；新计划和收益记账仅归 Compact。
-            {
-                let caps = ctx.runtime.llm.provider_capabilities();
-                // 优先使用持久化 directive，避免每 turn 重新规划
-                match crate::agent::compact_v2::projection::plan_from_persisted_directives(
-                    &guard,
-                    crate::agent::compact_v2::PROJECTION_POLICY_VERSION,
-                ) {
-                    crate::agent::compact_v2::projection::PersistedDirectiveRestore::Valid(
-                        plan,
-                    ) => {
-                        // 持久化 directive 有效 → 直接渲染
-                        match crate::agent::compact_v2::projection::render_llm_view(
-                            &guard, &plan, &caps,
-                        ) {
-                            Ok(view) => {
-                                tracing::debug!(
-                                    action_count = plan.actions.len(),
-                                    messages_before = visible.len(),
-                                    messages_after = view.len(),
-                                    "render_llm_view (persisted directives): 投影后消息数"
-                                );
-                                view
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "render_llm_view (persisted) 失败，fallback 到原始可见消息"
-                                );
-                                visible
-                            }
-                        }
-                    }
-                    crate::agent::compact_v2::projection::PersistedDirectiveRestore::Absent => {
-                        visible
-                    }
-                    crate::agent::compact_v2::projection::PersistedDirectiveRestore::Invalid => {
-                        tracing::warn!(
-                            "持久化 directive 无效；本轮使用 canonical messages，不重新规划"
-                        );
-                        visible
-                    }
-                }
-            }
+            crate::agent::compact_v2::projection::render_persisted_llm_view(
+                &guard,
+                &ctx.runtime.llm.provider_capabilities(),
+            )?
         });
 
     let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = catalog

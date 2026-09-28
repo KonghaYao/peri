@@ -93,8 +93,8 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
 
     tracing::debug!(history_len = history.len(), "compact: pipeline started");
 
-    // 阶段 1: 验证 history 非空（边界短路）
-    if history.is_empty() {
+    // 无普通消息不等于无上下文：绑定会话可能只有 canonical reminder。
+    if history.is_empty() && (session_resources.is_none() || thread_id.is_none()) {
         warn!("compact: 无历史消息可压缩");
         return PipelineOutcome::EarlyReturn {
             history,
@@ -167,14 +167,23 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             };
         }
     };
-    // 与迁前的 `load_messages` 同语义：只取消息本体，reminder 不进入 compact 输入。
+    // 仅用普通消息投影校验调用方身份；真正的摘要输入恢复完整 payload。
     let persisted_history: Vec<BaseMessage> = snapshot
+        .inherited
         .payloads
         .iter()
+        .chain(&snapshot.payloads)
         .filter_map(|payload| payload.as_message().cloned())
         .collect();
     let mut transcript = MessageTranscript::new().with_compaction_commit_state(commit_state);
-    if persisted_history.is_empty() {
+    if snapshot.payloads.is_empty() && snapshot.inherited.payloads.is_empty() {
+        if history.is_empty() {
+            return PipelineOutcome::EarlyReturn {
+                history,
+                stop_reason: PromptStopReason::EndTurn,
+                message: "no history to compact".to_string(),
+            };
+        }
         transcript = transcript.with_persistence(session_resources, thread_id);
         for message in &history {
             transcript.append(message.clone());
@@ -201,9 +210,10 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
                 message: "compact persistence context mismatch".to_string(),
             };
         }
-        for message in persisted_history {
-            transcript.append(message);
-        }
+        transcript = transcript
+            .with_ancestor_payloads(snapshot.inherited.payloads)
+            .with_own_payloads(snapshot.payloads);
+        transcript.set_flags_batch(snapshot.inherited.flags);
         transcript.set_flags_batch(snapshot.flags);
         transcript = transcript.with_persistence(session_resources, thread_id);
     }

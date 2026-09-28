@@ -243,12 +243,15 @@ async fn test_budget_recovery_loop_stops_after_two_committed_fulls() {
     {
         let requests = scenario.requests.lock();
         for (index, request) in requests.iter().enumerate() {
-            assert!(request
-                .iter()
-                .any(|message| message.content().contains("initial retained reminder A")));
-            assert!(request
-                .iter()
-                .any(|message| message.content().contains("initial retained reminder B")));
+            for marker in ["initial retained reminder A", "initial retained reminder B"] {
+                assert_eq!(
+                    request
+                        .iter()
+                        .any(|message| message.content().contains(marker)),
+                    index == 0,
+                    "历史提醒仅在 Full 前请求中保留全文；预算判定仍须相信实际 usage"
+                );
+            }
             if index > 0 {
                 assert!(request.iter().any(|message| message
                     .content()
@@ -285,7 +288,9 @@ async fn test_budget_recovery_loop_stops_after_two_committed_fulls() {
         5,
         "初始两条、before_agent一条及两次after_agent提醒都持久保留"
     );
-    assert!(reminder_ids.iter().all(|id| !flags.contains_key(id)));
+    assert!(reminder_ids
+        .iter()
+        .all(|id| flags.get(id).is_some_and(|flag| flag.excluded)));
     let summaries: Vec<_> = payloads
         .iter()
         .filter_map(|payload| match payload {
