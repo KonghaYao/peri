@@ -336,6 +336,47 @@ async fn test_full_report_invalid_summary_preserves_original_history() {
     }
 }
 
+/// [回归测试] 只有继承报告的子会话没有可替换历史，不能为祖先内容调用摘要模型。
+#[tokio::test]
+async fn test_full_report_inherited_only_skips_summary_model() {
+    let bound = TestSession::open().await;
+    let ancestor = MessageId::new();
+    let mut transcript = MessageTranscript::new()
+        .with_ancestor_payloads(vec![PersistedPayload::SystemReminder {
+            id: ancestor,
+            reminder: report("ANCESTOR_REPORT"),
+        }])
+        .with_persistence(bound.resources(), bound.thread_id.clone());
+    let model = ReportModel::new();
+    let result = full_compact_inner(
+        &mut transcript,
+        Some(&model),
+        &CompactConfig::default(),
+        "/tmp",
+    )
+    .await
+    .unwrap();
+    assert!(model.requests.lock().unwrap().is_empty());
+    assert_eq!(result.affected_count, 0);
+    assert_eq!(
+        result.summary.as_deref(),
+        Some("No conversation history to compact.")
+    );
+    assert!(!transcript.flags(ancestor).excluded);
+    let stored = bound
+        .resources
+        .load_session_snapshot(&bound.thread_id)
+        .await
+        .unwrap();
+    assert!(stored.flags.is_empty());
+    assert_eq!(stored.payloads.len(), 1);
+    assert!(stored.payloads[0]
+        .as_message()
+        .unwrap()
+        .content()
+        .contains("No conversation history to compact."));
+}
+
 /// [回归测试] 子会话只排除自己的报告；祖先报告用于摘要但不得改写父会话标记。
 #[tokio::test]
 async fn test_full_report_inherited_context_preserves_ancestor_ownership() {

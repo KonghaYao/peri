@@ -77,9 +77,11 @@ pub(super) async fn full_compact_inner(
         })
         .collect();
     let affected_count = flag_updates.len();
-    let has_history = visible
-        .iter()
-        .any(|message| !matches!(message, BaseMessage::System { .. }));
+    // 只有继承上下文时没有可替换的 own 历史，沿用空历史 fallback，避免无效摘要调用。
+    let has_history = !flag_updates.is_empty()
+        && visible
+            .iter()
+            .any(|message| !matches!(message, BaseMessage::System { .. }));
     let summary = if has_history {
         // 保留历史的角色、工具配对和完整正文；摘要指令只追加到派生请求，
         // 不回写原 transcript，也不提供可执行工具。

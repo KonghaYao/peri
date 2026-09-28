@@ -100,6 +100,10 @@
 
 测试使用临时 SQLite/工作区与模型边界替身，未写入用户的本地会话库。手动冷恢复测试释放旧门面和 lease 后重新打开数据库；没有声称完成真实线上模型或跨进程端到端验收。新摘要请求携带完整可见历史，对辅助模型的上下文窗口/模态支持仍需现场确认；provider 拒绝请求时保留原历史，不回退到无声截断报告。
 
+## PR 审查补充
+
+[PR #174](https://github.com/KonghaYao/peri/pull/174) 的审查发现：子会话只有继承报告、没有可替换 own 历史时，恢复后的模型视图仍会触发摘要调用。已补充 `test_full_report_inherited_only_skips_summary_model`，修复前按预期因模型被调用而失败（exit 101）；Full 增加 own 历史条件后沿用空历史 fallback，保留祖先标记和原有模型可见性检查。Agent 全量单元测试 862 项、ACP compact 测试 53 项及相关 crate 的 all-targets Clippy 均通过（exit 0）。
+
 ## 关联与文档路由
 
 - [Full/Micro churn issue](2026-09-10-p0-full-micro-compact-churn.md) 的 A5 已识别 reminder 基线风险；本 issue 补充本地规模证据及用户确认的 Full 语义，独立承接报告残留修复。
