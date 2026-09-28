@@ -86,16 +86,25 @@ async fn test_micro_applied_then_full_failure_does_not_reset_token_tracker() {
     });
     let token_tracker = ctx.compact.token_tracker.clone();
 
-    let output = run_compact(CompactInput {
-        context: ctx,
+    let error = run_compact(CompactInput {
+        context: ctx.clone(),
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .err()
+    .expect("高压 Full 失败必须结束本轮");
 
+    assert!(matches!(error, crate::error::AgentError::CompactNoLlm));
     assert!(
-        output.compacted,
-        "已应用的 Micro 应使 Compact stage 报告 compacted"
+        ctx.session.transcript.read().entries().iter().any(|entry| {
+            ctx.session
+                .transcript
+                .read()
+                .flags(entry.id())
+                .projection
+                .is_some()
+        }),
+        "Full 失败后必须保留已应用的 Micro/Smart projection"
     );
     assert_eq!(
         token_tracker.read().estimated_context_tokens(),
@@ -105,7 +114,7 @@ async fn test_micro_applied_then_full_failure_does_not_reset_token_tracker() {
 }
 
 #[tokio::test]
-async fn test_compact_stage_smart_applied_then_full_failure_is_compacted_without_tracker_reset() {
+async fn test_compact_stage_smart_applied_then_full_failure_stops_without_tracker_reset() {
     // 高压力下先应用 Smart，随后无 compact LLM 的 Full 失败。
     let mut ctx = make_context();
     let long_output = "x".repeat(2_000);
@@ -141,16 +150,25 @@ async fn test_compact_stage_smart_applied_then_full_failure_is_compacted_without
     });
     let token_tracker = ctx.compact.token_tracker.clone();
 
-    let output = run_compact(CompactInput {
-        context: ctx,
+    let error = run_compact(CompactInput {
+        context: ctx.clone(),
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .err()
+    .expect("高压 Full 失败必须结束本轮");
 
+    assert!(matches!(error, crate::error::AgentError::CompactNoLlm));
     assert!(
-        output.compacted,
-        "已应用的 Smart 应使 Compact stage 报告 compacted"
+        ctx.session.transcript.read().entries().iter().any(|entry| {
+            ctx.session
+                .transcript
+                .read()
+                .flags(entry.id())
+                .projection
+                .is_some()
+        }),
+        "Full 失败后必须保留已应用的 Micro/Smart projection"
     );
     assert_eq!(
         token_tracker.read().estimated_context_tokens(),
@@ -360,16 +378,25 @@ async fn test_compact_stage_applied_mixed_emits_one_messages_compacted_with_snap
         cache_read_input_tokens: None,
     });
 
-    let output = run_compact(CompactInput {
-        context: ctx,
+    let error = run_compact(CompactInput {
+        context: ctx.clone(),
         has_tool_calls: true,
     })
     .await
-    .unwrap();
+    .err()
+    .expect("高压 Full 失败必须结束本轮");
 
+    assert!(matches!(error, crate::error::AgentError::CompactNoLlm));
     assert!(
-        output.compacted,
-        "MicroAppliedThenFullFailed 仍有实际 mutation"
+        ctx.session.transcript.read().entries().iter().any(|entry| {
+            ctx.session
+                .transcript
+                .read()
+                .flags(entry.id())
+                .projection
+                .is_some()
+        }),
+        "Full 失败后必须保留已应用的 Micro/Smart projection"
     );
     let events = observe_events(&mut handles);
     let completions: Vec<_> = events

@@ -685,6 +685,43 @@ fn test_postprocess_summary_collapses_newlines() {
     assert!(!result.contains("\n\n\n"), "应折叠连续空行");
 }
 
+#[test]
+fn test_postprocess_summary_rejects_reasoning_only_and_malformed_blocks() {
+    for raw in [
+        "<analysis><analysis>private</analysis></analysis>",
+        "<analysis>first</analysis> <thinking>second</thinking>",
+        "<thinking><analysis>private</analysis></thinking>",
+        "<analysis><thinking>unfinished",
+        "<think>unfinished",
+        "</analysis>",
+        "<analysis>private</thinking>",
+    ] {
+        assert!(
+            postprocess_summary(raw).is_none(),
+            "思考标签不得变成可提交摘要：{raw}"
+        );
+    }
+}
+
+#[test]
+fn test_postprocess_summary_preserves_body_after_nested_reasoning() {
+    let raw = "<thinking>hidden <analysis>nested hidden</analysis></thinking><summary>保留结论与 analysis 方法。</summary><analysis>unfinished tail";
+    let summary = postprocess_summary(raw).unwrap();
+    assert!(summary.ends_with("保留结论与 analysis 方法。"));
+    assert!(!summary.contains("hidden"));
+    assert!(!summary.contains("unfinished"));
+}
+
+#[test]
+fn test_postprocess_summary_preserves_plain_text_and_similar_tag_names() {
+    let body = "analysis and thinking are ordinary words; <analysis_notes>保留正文</analysis_notes> &lt;analysis&gt;";
+    let summary = postprocess_summary(body).unwrap();
+    assert!(
+        summary.ends_with(body),
+        "只识别精确控制标签，不剥除相近正文"
+    );
+}
+
 // ── CompactResult 测试 ─────────────────────────────────────────────────────
 
 #[test]
@@ -698,6 +735,7 @@ fn test_compact_result_fields() {
         summary: None,
         full_escalation_reason: None,
         outcome: crate::agent::compact_v2::CompactOutcome::MicroApplied,
+        failure: None,
         changed_messages: 0,
         changed_fields: 0,
         no_op_candidates: 0,

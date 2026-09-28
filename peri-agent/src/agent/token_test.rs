@@ -14,6 +14,308 @@ fn make_usage(
     }
 }
 
+/// [回归测试] 冷启动没有 usage 时，当前请求视图仍须提供压力事实。
+#[test]
+fn test_cold_input_estimate_arms_compact_without_usage() {
+    let mut tracker = TokenTracker::default();
+    assert!(tracker.refresh_input_estimate(110_000));
+    assert_eq!(tracker.estimated_context_tokens(), Some(110_000));
+    assert!(
+        tracker.last_usage.is_none(),
+        "估算不能伪装成 provider usage"
+    );
+    assert!(tracker.pressure_sample_key().is_some());
+}
+
+/// [回归测试] assistant/user/reminder 与工具共用请求增长，不能将工具重复累加。
+#[test]
+fn test_request_growth_uses_authoritative_baseline_without_double_counting_tools() {
+    let mut tracker = TokenTracker::default();
+    tracker.begin_request(90_000);
+    tracker.accumulate(&make_usage(91_000, 8_000, None, None));
+    tracker.add_estimated_tool_tokens(&"x".repeat(16_000));
+    tracker.refresh_input_estimate(102_000);
+    assert_eq!(tracker.estimated_context_tokens(), Some(103_000));
+    tracker.begin_request(102_000);
+    tracker.accumulate(&make_usage(103_000, 500, None, None));
+    assert_eq!(tracker.estimated_context_tokens(), Some(103_000));
+    assert_eq!(tracker.estimated_tool_tokens_since_last_llm, 0);
+}
+
+/// [回归测试] 零 usage 不更新基线，后续非工具增长不能被旧样本去重抑制。
+#[test]
+fn test_zero_usage_keeps_baseline_but_new_visible_growth_rearms_sample() {
+    let mut tracker = TokenTracker::default();
+    tracker.begin_request(80_000);
+    tracker.accumulate(&make_usage(90_000, 0, None, None));
+    tracker.refresh_input_estimate(84_000);
+    let first = tracker.pressure_sample_key().unwrap();
+    tracker.consume_pressure_sample(first);
+    tracker.begin_request(84_000);
+    tracker.accumulate(&make_usage(0, 0, None, None));
+    assert_eq!(tracker.pressure_sample_key(), Some(first));
+    tracker.refresh_input_estimate(90_000);
+    assert_eq!(tracker.estimated_context_tokens(), Some(100_000));
+    assert_ne!(tracker.pressure_sample_key(), Some(first));
+}
+
+/// [回归测试] Micro 投影估算减少不能扣除 provider usage 或重新激活同一样本。
+#[test]
+fn test_projection_reduction_preserves_authoritative_pressure_and_consumed_sample() {
+    let mut tracker = TokenTracker::default();
+    tracker.begin_request(100_000);
+    tracker.accumulate(&make_usage(196_000, 0, None, None));
+    let sample = tracker.pressure_sample_key().unwrap();
+    tracker.consume_pressure_sample(sample);
+    assert!(!tracker.refresh_input_estimate(50_000));
+    assert_eq!(tracker.estimated_context_tokens(), Some(196_000));
+    assert_eq!(tracker.pressure_sample_key(), Some(sample));
+    assert!(tracker.is_pressure_sample_consumed(sample));
+}
+
+/// [回归测试] 未确认的 Micro 缩减不得抵销之后 before_model 新增的工作。
+#[test]
+fn test_growth_after_projection_shrink_still_adds_to_authoritative_usage() {
+    let mut tracker = TokenTracker::default();
+    tracker.begin_request(40_000);
+    tracker.accumulate(&make_usage(90_000, 0, None, None));
+    let old = tracker.pressure_sample_key().unwrap();
+    tracker.consume_pressure_sample(old);
+    tracker.refresh_input_estimate(2_000);
+    assert_eq!(tracker.estimated_context_tokens(), Some(90_000));
+    tracker.refresh_input_estimate(14_000);
+    assert_eq!(tracker.estimated_context_tokens(), Some(102_000));
+    assert_ne!(tracker.pressure_sample_key(), Some(old));
+    tracker.begin_request(14_000);
+    tracker.accumulate(&make_usage(50_000, 0, None, None));
+    assert_eq!(tracker.estimated_context_tokens(), Some(50_000));
+}
+
+#[test]
+fn test_request_estimate_counts_tool_arguments_once() {
+    use crate::messages::{BaseMessage, ContentBlock};
+    let message = BaseMessage::ai_from_blocks(vec![ContentBlock::ToolUse {
+        id: "call".into(),
+        name: "Write".into(),
+        input: serde_json::json!({"content": "abcd".repeat(10_000)}),
+    }]);
+    let estimate = estimate_request_tokens(&[message], &[]);
+    assert!(
+        (10_000..10_010).contains(&estimate),
+        "工具参数应参与估算，但不能同时计 block 与 canonical call：{estimate}"
+    );
+}
+
+/// [回归测试] 从serde恢复的AI工具块不一定有canonical镜像，参数仍会进入provider。
+#[test]
+fn test_estimate_boundary_counts_unmirrored_ai_tool_blocks() {
+    use crate::messages::{BaseMessage, ContentBlock, MessageContent};
+    let block = ContentBlock::ToolUse {
+        id: "call".into(),
+        name: "Write".into(),
+        input: serde_json::json!({"content":"text".repeat(12_000)}),
+    };
+    for content in [
+        MessageContent::blocks(vec![block.clone()]),
+        MessageContent::raw(vec![serde_json::to_value(&block).unwrap()]),
+    ] {
+        let original = BaseMessage::ai(content);
+        let restored: BaseMessage =
+            serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
+        let estimate = estimate_request_tokens(&[restored], &[]);
+        assert!(
+            (12_000..12_010).contains(&estimate),
+            "无canonical对应的AI ToolUse不能漏计：{estimate}"
+        );
+    }
+}
+
+/// [回归测试] 只有id/name/arguments完全相同的工具块才是已计算镜像。
+#[test]
+fn test_estimate_boundary_only_skips_exact_tool_call_mirrors() {
+    use crate::messages::{BaseMessage, ContentBlock, MessageContent, ToolCallRequest};
+    let canonical = ToolCallRequest::new("call", "Write", serde_json::json!({"content":"small"}));
+    for (id, name, input) in [
+        ("different", "Write", canonical.arguments.clone()),
+        ("call", "Different", canonical.arguments.clone()),
+        (
+            "call",
+            "Write",
+            serde_json::json!({"content":"text".repeat(12_000)}),
+        ),
+    ] {
+        let extra = ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input: input.clone(),
+        };
+        let mirror = ContentBlock::ToolUse {
+            id: canonical.id.clone(),
+            name: canonical.name.clone(),
+            input: canonical.arguments.clone(),
+        };
+        let message = BaseMessage::ai_with_tool_calls(
+            MessageContent::blocks(vec![mirror, extra]),
+            vec![canonical.clone()],
+        );
+        let expected_chars = canonical.name.chars().count()
+            + canonical.arguments.to_string().chars().count()
+            + name.chars().count()
+            + input.to_string().chars().count();
+        assert_eq!(
+            estimate_request_tokens(&[message], &[]),
+            (expected_chars as u64).div_ceil(4),
+            "部分匹配不能让另一条有效工具块消失"
+        );
+    }
+}
+
+/// [回归测试] URI scheme大小写不敏感，DATA:/DaTa:仍然是二进制媒体。
+#[test]
+fn test_estimate_boundary_data_uri_scheme_is_case_insensitive() {
+    use crate::messages::{BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent};
+    for scheme in ["data:", "DATA:", "DaTa:"] {
+        let url = format!(
+            "{scheme}application/octet-stream;base64,{}",
+            "AAAA".repeat(175_000)
+        );
+        let blocks = vec![
+            ContentBlock::Image {
+                source: ImageSource::Url { url: url.clone() },
+            },
+            ContentBlock::Document {
+                source: DocumentSource::Url { url },
+                title: None,
+            },
+        ];
+        let estimate =
+            estimate_request_tokens(&[BaseMessage::human(MessageContent::blocks(blocks))], &[]);
+        assert!(
+            (2..=8_192).contains(&estimate),
+            "scheme={scheme}不能落回巨量文本估算：{estimate}"
+        );
+    }
+}
+
+/// [回归测试] 二进制媒体使用有界占位，不能把base64编码长度当作文字token。
+#[test]
+fn test_binary_media_estimate_is_independent_of_encoded_size() {
+    use crate::messages::{BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent};
+    for document in [false, true] {
+        let estimate = |data: String| {
+            let block = if document {
+                ContentBlock::Document {
+                    source: DocumentSource::Base64 {
+                        media_type: "application/pdf".into(),
+                        data,
+                    },
+                    title: None,
+                }
+            } else {
+                ContentBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data,
+                    },
+                }
+            };
+            estimate_request_tokens(
+                &[BaseMessage::human(MessageContent::blocks(vec![block]))],
+                &[],
+            )
+        };
+        let small = estimate("AAAA".into());
+        let large = estimate("AAAA".repeat(175_000));
+        assert_eq!(large, small, "同类媒体的占位不能随传输编码长度增长");
+        assert!(
+            (1..=4_096).contains(&large),
+            "没有图像尺寸/PDF页数时只能使用有界启发式：{large}"
+        );
+    }
+}
+
+#[test]
+fn test_document_text_and_remote_urls_keep_text_estimates() {
+    use crate::messages::{BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent};
+    let text = "text".repeat(100_000);
+    let url = "https://example.invalid/file";
+    let blocks = vec![
+        ContentBlock::Document {
+            source: DocumentSource::Text { text: text.clone() },
+            title: Some("title".into()),
+        },
+        ContentBlock::Document {
+            source: DocumentSource::Url { url: url.into() },
+            title: None,
+        },
+        ContentBlock::Image {
+            source: ImageSource::Url { url: url.into() },
+        },
+    ];
+    assert_eq!(
+        estimate_request_tokens(&[BaseMessage::human(MessageContent::blocks(blocks))], &[]),
+        ((text.chars().count() + 5 + 2 * url.chars().count()) as u64).div_ceil(4)
+    );
+}
+
+/// [回归测试] 媒体藏在ToolResult或Raw已知类型里仍须走同一预算规则。
+#[test]
+fn test_nested_and_raw_media_use_bounded_estimates() {
+    use crate::messages::{BaseMessage, ContentBlock, ImageSource, MessageContent};
+    let image = ContentBlock::Image {
+        source: ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "AAAA".repeat(175_000),
+        },
+    };
+    let nested = BaseMessage::human(MessageContent::blocks(vec![ContentBlock::ToolResult {
+        id: None,
+        tool_use_id: "tool".into(),
+        content: vec![image.clone(), ContentBlock::text("caption")],
+        is_error: false,
+    }]));
+    let raw = BaseMessage::human(MessageContent::raw(vec![
+        serde_json::to_value(image).unwrap()
+    ]));
+    let raw_estimate = estimate_request_tokens(&[raw], &[]);
+    assert!((1..=4_096).contains(&raw_estimate));
+    assert_eq!(estimate_request_tokens(&[nested], &[]), raw_estimate + 2);
+}
+
+#[test]
+fn test_unknown_json_text_payload_is_not_treated_as_binary_media() {
+    use crate::messages::{BaseMessage, ContentBlock, MessageContent};
+    let unknown = serde_json::json!({"type":"custom", "data":"text".repeat(10_000)});
+    let message = BaseMessage::human(MessageContent::blocks(vec![ContentBlock::Unknown(unknown)]));
+    assert!(
+        estimate_request_tokens(&[message], &[]) >= 10_000,
+        "未知JSON不能因字段名data就丢失真实文字预算"
+    );
+}
+
+/// 内联媒体URL只是另一种编码载体，不能重新按大段base64文本计量。
+#[test]
+fn test_inline_media_data_urls_use_bounded_estimates() {
+    use crate::messages::{BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent};
+    let image_url = format!("data:image/png;base64,{}", "AAAA".repeat(175_000));
+    let document_url = format!("data:application/pdf;base64,{}", "AAAA".repeat(175_000));
+    let blocks = vec![
+        ContentBlock::Image {
+            source: ImageSource::Url { url: image_url },
+        },
+        ContentBlock::Document {
+            source: DocumentSource::Url { url: document_url },
+            title: None,
+        },
+    ];
+    let estimate =
+        estimate_request_tokens(&[BaseMessage::human(MessageContent::blocks(blocks))], &[]);
+    assert!(
+        (2..=8_192).contains(&estimate),
+        "data URI需要有界媒体占位：{estimate}"
+    );
+}
+
 #[test]
 fn test_accumulate_sums_tokens() {
     let mut tracker = TokenTracker::default();

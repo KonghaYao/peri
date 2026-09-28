@@ -103,6 +103,12 @@ impl ExecutionFailure {
                 None,
                 None,
             ),
+            crate::error::AgentError::CompactIncompleteResponse { .. } => Self::new(
+                ExecutionFailureKind::Llm,
+                error.user_facing_message(),
+                None,
+                None,
+            ),
             crate::error::AgentError::ModelError(source)
             | crate::error::AgentError::StreamRecoveryExhausted { source, .. } => {
                 let diagnostic = source.diagnostic();
@@ -419,3 +425,7 @@ impl Default for PromptResult {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "execution_test.rs"]
+mod tests;

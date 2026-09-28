@@ -1,7 +1,7 @@
 //! Reason 阶段 — LLM 推理
 //!
-//! 流程：snapshot visible_messages → emit LlmCallStart → before_model →
-//!       LLM.generate_reasoning（与 cancel 竞争）→ after_model → emit LlmCallEnd
+//! 流程：catalog → before_model → 最终压力检查 → snapshot → LlmCallStart →
+//!       LLM.generate_reasoning（与 cancel 竞争）→ LlmCallEnd → after_model
 
 use super::middleware_runner::{
     run_after_model, run_before_model, run_before_reason_catalog, run_on_error,
@@ -18,6 +18,9 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     let agent_id = ctx.session.agent_id;
 
     tracing::trace!(step, has_tool_calls = input.has_tool_calls, "Reason 阶段");
+
+    // 固定准备阶段之前的视图；Full reset/Micro 缩减本身不应触发第二次评估。
+    super::compact::context_pressure::refresh(ctx)?;
 
     // Apply a new session capability generation only at the Reason boundary.
     let refreshed = match ctx.runtime.tool_catalog.refresh() {
@@ -40,6 +43,35 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             .map_err(|error| AgentError::Other(anyhow::Error::new(error)))?
     };
 
+    // before_model 和动态工具发布在常规 Compact 之后。只有准备阶段确实新增
+    // 压力且达到 Full 阈值时补检一次；不重复运行模型/compact hooks。
+    let prepared_input_grew = super::compact::context_pressure::refresh(ctx)?;
+    let needs_compact = prepared_input_grew
+        && ctx
+            .compact
+            .compact_config
+            .as_ref()
+            .zip(ctx.compact.context_budget.as_ref())
+            .is_some_and(|(config, budget)| {
+                budget.context_window > 0
+                    && ctx
+                        .compact
+                        .token_tracker
+                        .read()
+                        .estimated_context_tokens()
+                        .is_some_and(|tokens| {
+                            tokens as f64 / f64::from(budget.context_window)
+                                >= config.auto_compact_threshold
+                        })
+            });
+    if needs_compact {
+        super::compact::run_compact_core(super::CompactInput {
+            context: ctx.clone(),
+            has_tool_calls: input.has_tool_calls,
+        })
+        .await?;
+    }
+
     // 取出 messages 快照（避免跨 await 持有 RwLockReadGuard）。
     // 直接构建为 Arc<Vec>：LlmCallStart 与 LLM 调用共享同一份，避免二次深拷贝。
     let messages_snapshot: std::sync::Arc<Vec<crate::messages::BaseMessage>> =
@@ -61,6 +93,15 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         .filter(|t| t.is_direct() && t.visible_to_model())
         .map(|t| t.as_ref())
         .collect();
+    // 绑定最终发送视图，不能使用 Compact 前或 before_model 前的估算来结清增长。
+    let request_estimate = ctx
+        .runtime
+        .llm
+        .estimate_request_tokens(&messages_snapshot, &tool_refs);
+    ctx.compact
+        .token_tracker
+        .write()
+        .begin_request(request_estimate);
     // 工具数量与名称追踪（调试用；默认 filter 下不写盘）
     tracing::debug!(
         step,

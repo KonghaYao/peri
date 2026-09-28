@@ -278,6 +278,12 @@ pub trait ReactLLM: Send + Sync {
         200_000
     }
 
+    /// 纯请求大小估算，用于无 usage 的启动及相邻请求增长；不得调用 provider。
+    /// 实现可计入自身持有的静态 system 前缀，但不得重复读取动态贡献。
+    fn estimate_request_tokens(&self, messages: &[BaseMessage], tools: &[&dyn BaseTool]) -> u64 {
+        crate::agent::token::estimate_request_tokens(messages, tools)
+    }
+
     /// 返回由安全 `PreparedModelRequest` 投影出的 Provider 请求体，用于受控观测。
     ///
     /// 此方法绝不返回 headers 或认证信息。默认实现返回 None。
@@ -342,6 +348,10 @@ impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
 
     fn context_window(&self) -> u32 {
         (**self).context_window()
+    }
+
+    fn estimate_request_tokens(&self, messages: &[BaseMessage], tools: &[&dyn BaseTool]) -> u64 {
+        (**self).estimate_request_tokens(messages, tools)
     }
 
     fn observed_provider_request_body(

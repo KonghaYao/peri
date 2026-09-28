@@ -320,9 +320,12 @@ async fn test_full_report_invalid_summary_preserves_original_history() {
         .unwrap_err();
         match model.stop {
             StopReason::EndTurn => assert!(matches!(error, AgentError::CompactEmptyResponse)),
-            _ => assert!(
-                matches!(error, AgentError::LlmError(ref message) if message.contains("did not complete"))
-            ),
+            _ => assert!(matches!(
+                error,
+                AgentError::CompactIncompleteResponse {
+                    stop_reason: StopReason::MaxTokens
+                }
+            )),
         }
         assert!(!transcript.flags(id).excluded);
         assert_eq!(transcript.visible_model_messages().unwrap().len(), 1);

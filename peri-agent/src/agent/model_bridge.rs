@@ -419,6 +419,17 @@ impl AgentModelBridge {
 
 #[async_trait]
 impl ReactLLM for AgentModelBridge {
+    fn estimate_request_tokens(&self, messages: &[BaseMessage], tools: &[&dyn BaseTool]) -> u64 {
+        // 只读冻结前缀，不构建 provider 请求，也不第二次调用动态贡献 provider。
+        // 冷启动尚未知动态后缀成本；后续有效 usage 会将其纳入权威基线。
+        crate::agent::token::estimate_request_tokens(messages, tools).saturating_add(
+            self.system
+                .as_ref()
+                .map(|system| (system.chars().count() as u64).div_ceil(4))
+                .unwrap_or(0),
+        )
+    }
+
     async fn generate_reasoning(
         &self,
         messages: &[BaseMessage],

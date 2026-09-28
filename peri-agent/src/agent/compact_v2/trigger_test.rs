@@ -643,7 +643,7 @@ async fn test_smart_then_full_success_aggregates_metrics() {
 }
 
 #[tokio::test]
-async fn test_run_compact_failure_limit_returns_explicit_skipped_outcome() {
+async fn test_run_compact_failure_limit_returns_explicit_full_failure() {
     let mut t = MessageTranscript::new();
     let config = CompactConfig {
         max_consecutive_failures: 3,
@@ -663,15 +663,23 @@ async fn test_run_compact_failure_limit_returns_explicit_skipped_outcome() {
 
     assert_eq!(
         result.strategy,
-        CompactStrategy::Skip,
-        "到达失败上限必须明确跳过"
+        CompactStrategy::Full,
+        "需要 Full 且已达失败上限必须明确失败"
     );
     assert_eq!(
         result.outcome(),
-        CompactOutcome::Skipped,
+        CompactOutcome::FullFailed,
         "到达失败上限不得表达为 MicroApplied"
     );
     assert_eq!(result.affected_count, 0, "跳过时不应影响消息");
+    assert!(matches!(
+        result.failure,
+        Some(crate::error::AgentError::CompactRetriesExhausted {
+            attempts: 3,
+            context_tokens: 196_000,
+            context_window: 200_000
+        })
+    ));
     assert_eq!(
         failures, config.max_consecutive_failures,
         "跳过不应改写失败计数"

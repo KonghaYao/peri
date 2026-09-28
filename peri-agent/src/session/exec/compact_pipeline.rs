@@ -322,7 +322,24 @@ async fn run_v2_compact_with_cancel(
         ) => r,
     };
 
-    // 检测失败：affected_count == 0 + summary 为 None 表示 compact 未成功
+    // 模型完成与取消可在同一次 poll 内同时发生；返回反馈前仍以取消为先。
+    if cancel_token.is_cancelled()
+        || matches!(result.failure, Some(crate::error::AgentError::Interrupted))
+    {
+        return Err(CancelOrError::Cancelled);
+    }
+    if let Some(error) = &result.failure {
+        let message = match error {
+            // force 路径没有实际压力样本，不能把占位预算展示为用户用量。
+            crate::error::AgentError::CompactRetriesExhausted { attempts, .. } => format!(
+                "Full Compact failed after {attempts} attempts. Retry or change the compact model."
+            ),
+            error => error.user_facing_message(),
+        };
+        return Err(CancelOrError::Error(message));
+    }
+
+    // 无失败原因的 no-op 不伪装成成功压缩。
     if result.affected_count == 0 && result.summary.is_none() {
         warn!(strategy = ?result.strategy, "compact: v2 run_compact 无效果");
         return Err(CancelOrError::Error(

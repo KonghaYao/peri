@@ -8,7 +8,7 @@
 //!   - 决策指标：estimated_tokens_saved >= reclaim_target
 //! - force=true：直接 Full（跳过 Micro/Smart）
 //!
-//! Full Compact 失败时 `compact_consecutive_failures` 累加，达上限后降级跳过。
+//! 空摘要在本阶段内有界重试；高压下 Full 失败必须终止，不能静默跳过。
 
 use super::{CompactInput, CompactOutput};
 use crate::agent::compact_v2::config::CompactConfig;
@@ -17,7 +17,6 @@ use crate::agent::compact_v2::planner::ContextPressure;
 /// 运行 Compact 阶段
 pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<CompactOutput> {
     let ctx = &input.context;
-    let step = ctx.session.turn.current_step();
 
     // PreCompact 插件 hook 回调（fire-and-forget）
     if let Some(ref hook) = ctx.compact.compact_pre_hook {
@@ -29,6 +28,39 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
         tracing::warn!(error = %e, "before_compact hook 失败，继续 compact");
     }
 
+    let (output, affected_count) = compact_core(CompactInput {
+        context: ctx.clone(),
+        has_tool_calls: input.has_tool_calls,
+    })
+    .await;
+
+    // after_compact hook：无论 compact 是否实际执行，均通知中间件
+    if let Err(e) = super::middleware_runner::run_after_compact(ctx).await {
+        tracing::warn!(error = %e, "after_compact hook 失败");
+    }
+
+    // PostCompact 插件 hook 回调（所有返回路径统一触发）
+    if let Some(ref hook) = ctx.compact.compact_post_hook {
+        let compacted = affected_count > 0 || output.as_ref().map(|o| o.compacted).unwrap_or(false);
+        hook(compacted, affected_count);
+    }
+
+    output
+}
+
+#[path = "context_pressure.rs"]
+pub(super) mod context_pressure;
+
+/// Reason 的末次预算检查复用同一核心，不重复运行可产生新输入的 hooks。
+pub(crate) async fn run_compact_core(
+    input: CompactInput,
+) -> crate::error::AgentResult<CompactOutput> {
+    compact_core(input).await.0
+}
+
+async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<CompactOutput>, usize) {
+    let ctx = &input.context;
+    let step = ctx.session.turn.current_step();
     tracing::trace!(step, has_tool_calls = input.has_tool_calls, "Compact 阶段");
 
     // PostCompact hook 需要 affected_count；在所有 break 路径前声明
@@ -57,6 +89,10 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 "Compact 已禁用（env 或 config.auto_compact_enabled=false）"
             );
             break 'compact_core Ok(CompactOutput { compacted: false });
+        }
+
+        if let Err(error) = context_pressure::refresh(ctx) {
+            break 'compact_core Err(error);
         }
 
         // 构建 ContextPressure（从 token_tracker 和 context_budget 中提取字段）
@@ -173,7 +209,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
 
         // 包在 select! biased 中：cancel 优先，避免 Full Compact 的长 LLM 调用阻塞中断。
         // 注：run_compact 内部不感知 turn cancel_token，必须在此层显式 select。
-        let result = tokio::select! {
+        let mut result = tokio::select! {
             biased;
             _ = ctx.session.turn.cancel_token.cancelled() => {
                 // G6: 检查 compact 是否在 cancel 前已提交变更（通过 flag 计数对比）。
@@ -332,6 +368,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
         // 把 transcript 放回 RwLock
         *ctx.session.transcript.write() = transcript_owned;
 
+        let failure = result.failure.take();
         let compacted = {
             let r = result; // compact_v2::run_compact 直接返回 CompactResult
             affected_count = r.affected_count;
@@ -380,8 +417,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 // 注：token_tracker reset 为只读 token 操作，无需 drain recall
             }
 
-            // `MessagesCompacted` 仅表示确有 Compact mutation；未应用 outcome
-            // 仅保留 `CompactStarted` 作为 begin 观测，完整 outcome transport 留待后续切片。
+            // 每次 Started 都须闭合；失败/无变更不能伪装成 MessagesCompacted。
             if did_compact {
                 ctx.runtime.event_bus.emit_observe(
                     crate::agent::events_v2::ObserveEvent::MessagesCompacted {
@@ -409,25 +445,34 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                         outcome: r.outcome,
                     },
                 );
+            } else {
+                ctx.runtime.event_bus.emit_observe(
+                    crate::agent::events_v2::ObserveEvent::CompactEnded {
+                        turn_id: ctx.turn_id(),
+                        agent_id: ctx.session.agent_id,
+                        step,
+                        strategy: r.strategy,
+                        outcome: r.outcome,
+                    },
+                );
             }
             did_compact
         };
 
+        // 已确认提交和取消已在上方处理；高压 Full 的任何失败都必须阻止 Reason。
+        // Provider 失败直接传播，其自身重试预算不能在 Compact 层重新开始。
+        if let Some(error) = failure {
+            if matches!(error, crate::error::AgentError::Interrupted) {
+                break 'compact_core Err(error);
+            }
+            if pct >= config.auto_compact_threshold {
+                break 'compact_core Err(error);
+            }
+        }
         break 'compact_core Ok(CompactOutput { compacted });
     };
 
-    // after_compact hook：无论 compact 是否实际执行，均通知中间件
-    if let Err(e) = super::middleware_runner::run_after_compact(ctx).await {
-        tracing::warn!(error = %e, "after_compact hook 失败");
-    }
-
-    // PostCompact 插件 hook 回调（所有返回路径统一触发）
-    if let Some(ref hook) = ctx.compact.compact_post_hook {
-        let compacted = output.as_ref().map(|o| o.compacted).unwrap_or(false);
-        hook(compacted, affected_count);
-    }
-
-    output
+    (output, affected_count)
 }
 
 // An unacknowledged durable commit must stop the loop before Reason can consume the
@@ -450,3 +495,7 @@ fn uncertain_compaction_error(ctx: &super::StageContext) -> crate::error::AgentE
 #[cfg(test)]
 #[path = "compact_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "compact_retry_test.rs"]
+mod compact_retry_tests;
