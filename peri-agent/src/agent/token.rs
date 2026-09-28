@@ -201,8 +201,12 @@ impl TokenTracker {
     }
 }
 
-/// 无 tokenizer 时按可见字符估算请求内容。它用于提前压缩，不替代 provider
-/// usage；多模态成本、provider 包装和不同语言的 token 密度仍是近似边界。
+// 编码后的字节数不是媒体 token 成本；缺少尺寸/页数和 provider tokenizer 时，
+// 每个二进制块只放一个固定预算占位。此值不是成本上限，实际 usage 仍为权威。
+const BINARY_MEDIA_ESTIMATED_TOKENS: u64 = 1_024;
+
+/// 无 tokenizer 时按文字和有界媒体占位估算请求内容。它用于提前压缩，
+/// 不替代 provider usage；媒体尺寸/页数、协议开销和语言密度仍是近似边界。
 pub(crate) fn estimate_request_tokens(
     messages: &[crate::messages::BaseMessage],
     tools: &[&dyn crate::tools::BaseTool],
@@ -210,24 +214,25 @@ pub(crate) fn estimate_request_tokens(
     use crate::messages::{BaseMessage, ContentBlock, MessageContent};
     let mut chars = 0u64;
     for message in messages {
+        let canonical_calls = match message {
+            BaseMessage::Ai { tool_calls, .. } => tool_calls.as_slice(),
+            _ => &[],
+        };
         chars = chars.saturating_add(match message.message_content() {
             MessageContent::Text(text) => text.chars().count() as u64,
             MessageContent::Blocks(blocks) => blocks
                 .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } | ContentBlock::Reasoning { text, .. } => {
-                        text.chars().count() as u64
-                    }
-                    // canonical tool_calls 在下方统一计数，不重复计 block 镜像。
-                    ContentBlock::ToolUse { .. } => 0,
-                    other => serde_json::to_string(other)
-                        .map(|s| s.chars().count() as u64)
-                        .unwrap_or(0),
-                })
-                .sum(),
-            MessageContent::Raw(values) => serde_json::to_string(values)
-                .map(|s| s.chars().count() as u64)
-                .unwrap_or(0),
+                .map(|block| estimate_block_chars(block, canonical_calls))
+                .fold(0u64, u64::saturating_add),
+            MessageContent::Raw(values) => values
+                .iter()
+                .map(
+                    |value| match serde_json::from_value::<ContentBlock>(value.clone()) {
+                        Ok(block) => estimate_block_chars(&block, canonical_calls),
+                        Err(_) => value.to_string().chars().count() as u64,
+                    },
+                )
+                .fold(0u64, u64::saturating_add),
         });
         if let BaseMessage::Ai { tool_calls, .. } = message {
             for call in tool_calls {
@@ -243,6 +248,63 @@ pub(crate) fn estimate_request_tokens(
             .saturating_add(tool.parameters().to_string().chars().count() as u64);
     }
     chars.div_ceil(4)
+}
+
+fn estimate_block_chars(
+    block: &crate::messages::ContentBlock,
+    canonical_calls: &[crate::messages::ToolCallRequest],
+) -> u64 {
+    use crate::messages::{ContentBlock, DocumentSource, ImageSource};
+    match block {
+        ContentBlock::Text { text } | ContentBlock::Reasoning { text, .. } => {
+            text.chars().count() as u64
+        }
+        ContentBlock::Image { source } => match source {
+            ImageSource::Base64 { .. } => BINARY_MEDIA_ESTIMATED_TOKENS * 4,
+            ImageSource::Url { url } => estimate_media_url_chars(url),
+        },
+        ContentBlock::Document { source, title } => {
+            let body = match source {
+                DocumentSource::Base64 { .. } => BINARY_MEDIA_ESTIMATED_TOKENS * 4,
+                DocumentSource::Text { text } => text.chars().count() as u64,
+                DocumentSource::Url { url } => estimate_media_url_chars(url),
+            };
+            body.saturating_add(
+                title
+                    .as_ref()
+                    .map_or(0, |title| title.chars().count() as u64),
+            )
+        }
+        // 只有确实对应canonical call的块才是镜像；AI/serde恢复并不保证存在镜像。
+        ContentBlock::ToolUse { id, name, input }
+            if canonical_calls
+                .iter()
+                .any(|call| call.id == *id && call.name == *name && call.arguments == *input) =>
+        {
+            0
+        }
+        ContentBlock::ToolUse { name, input, .. } => {
+            (name.chars().count() as u64).saturating_add(input.to_string().chars().count() as u64)
+        }
+        ContentBlock::ToolResult { content, .. } => content
+            .iter()
+            .map(|block| estimate_block_chars(block, &[]))
+            .fold(0u64, u64::saturating_add),
+        // 未知 JSON 没有可信媒体类型，保持文本预算，不能按 data 字段名删除成本。
+        ContentBlock::Unknown(value) => value.to_string().chars().count() as u64,
+    }
+}
+
+fn estimate_media_url_chars(url: &str) -> u64 {
+    if url
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+    {
+        // 内联媒体也可能经 URL 形式进入；不能让 data URI 重新绕回 base64 文本计量。
+        BINARY_MEDIA_ESTIMATED_TOKENS * 4
+    } else {
+        url.chars().count() as u64
+    }
 }
 
 /// 单次 LLM 请求的 token 用量快照（仅内存，不持久化）

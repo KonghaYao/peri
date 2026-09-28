@@ -179,19 +179,7 @@ fn build_summary_message(summary: &str) -> BaseMessage {
 /// `<analysis>`、`</analysis>`、`<summary>`、`</summary>` 均为纯 ASCII 标签，
 /// `find()` 返回的字节索引即字符边界，不会导致 panic。
 fn postprocess_summary(raw: &str) -> Option<String> {
-    let mut text = strip_reasoning_blocks(raw)?;
-
-    // 提取 <summary>...</summary> 内容
-    if let Some(start) = text.find("<summary>") {
-        let content_start = start + "<summary>".len();
-        if let Some(end) = text[content_start..].find("</summary>") {
-            // Safety: <summary>/</summary> 为纯 ASCII 标签，字节索引即字符边界
-            text = text[content_start..content_start + end].trim().to_string();
-        } else {
-            // Safety: <summary> 为纯 ASCII 标签，字节索引即字符边界
-            text = text[content_start..].trim().to_string();
-        }
-    }
+    let mut text = extract_summary_text(raw)?;
 
     let prefix = "This session continues from a previous conversation. Below is a summary of the prior dialogue.";
 
@@ -207,10 +195,11 @@ fn postprocess_summary(raw: &str) -> Option<String> {
     }
 }
 
-// 精确识别协议思考标签并按栈配对，不能把嵌套块残留的 closing tag 当作摘要。
-// 普通文字与相近的标签名保持原样；未闭合思考块的尾部不属于可提交正文。
-fn strip_reasoning_blocks(raw: &str) -> Option<String> {
-    const TAGS: [(&str, &str, bool); 6] = [
+// 只提取思考块之外的闭合 summary，正文中的标签可能是任务讨论的字面量。
+// 没有闭合 summary 时保留原有回退：剥除配对思考块及未闭合思考尾部。
+fn extract_summary_text(raw: &str) -> Option<String> {
+    const TAGS: [(&str, &str, bool); 7] = [
+        ("<summary>", "summary", true),
         ("<analysis>", "analysis", true),
         ("</analysis>", "analysis", false),
         ("<thinking>", "thinking", true),
@@ -233,6 +222,18 @@ fn strip_reasoning_blocks(raw: &str) -> Option<String> {
         if stack.is_empty() {
             result.push_str(&remaining[..position]);
         }
+        if name == "summary" {
+            let body_start = position + tag.len();
+            if stack.is_empty() {
+                if let Some(body_len) = remaining[body_start..].find("</summary>") {
+                    return Some(remaining[body_start..body_start + body_len].to_owned());
+                }
+                // 未闭合 summary 仍走后续思考块过滤，再沿用正文回退。
+                result.push_str(tag);
+            }
+            remaining = &remaining[body_start..];
+            continue;
+        }
         if opening {
             stack.push(name);
         } else if stack.pop() != Some(name) {
@@ -242,6 +243,10 @@ fn strip_reasoning_blocks(raw: &str) -> Option<String> {
     }
     if stack.is_empty() {
         result.push_str(remaining);
+    }
+    // 到此不存在可提取的闭合 summary；保留既有未闭合 summary 回退。
+    if let Some(start) = result.find("<summary>") {
+        result = result[start + "<summary>".len()..].to_owned();
     }
     Some(result)
 }

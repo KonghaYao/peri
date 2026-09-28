@@ -203,6 +203,8 @@ impl peri_model::Model for SummaryModel {
 
 struct BoundSession {
     session: Arc<Session>,
+    resources: Arc<dyn SessionResources>,
+    thread_id: String,
     _lease: Arc<dyn SessionExecutionLease>,
     _repo: tempfile::TempDir,
     _db: tempfile::TempDir,
@@ -276,10 +278,13 @@ async fn make_bound_session() -> BoundSession {
     {
         let transcript = session.transcript();
         let mut transcript = transcript.write();
-        *transcript = std::mem::take(&mut *transcript).with_persistence(resources, thread_id);
+        *transcript =
+            std::mem::take(&mut *transcript).with_persistence(resources.clone(), thread_id.clone());
     }
     BoundSession {
         session,
+        resources,
+        thread_id,
         _lease: lease,
         _repo: repo,
         _db: db,
@@ -427,6 +432,139 @@ async fn test_plain_text_usable_summary_commits() {
 }
 
 struct ScriptedMarkupSummary(&'static str);
+
+#[derive(Default)]
+struct AttachmentReasoner(parking_lot::Mutex<Vec<Vec<BaseMessage>>>);
+
+#[async_trait::async_trait]
+impl ReactLLM for AttachmentReasoner {
+    async fn generate_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        _: &[&dyn BaseTool],
+        _: Option<StreamingContext>,
+    ) -> AgentResult<Reasoning> {
+        self.0.lock().push(messages.to_vec());
+        Ok(Reasoning::with_answer("", "attachment received"))
+    }
+}
+
+async fn assert_binary_attachment_reaches_first_reason(cold_document: bool) {
+    use peri_agent::messages::{ContentBlock, DocumentSource, ImageSource, MessageContent};
+    let bound = make_bound_session().await;
+    // 固定编码载荷只测试传输和预算边界，脚本模型不解码图片或 PDF。
+    let data = "AAAA".repeat(175_000);
+    let block = if cold_document {
+        ContentBlock::Document {
+            source: DocumentSource::Base64 {
+                media_type: "application/pdf".into(),
+                data,
+            },
+            title: Some("attached report".into()),
+        }
+    } else {
+        ContentBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data,
+            },
+        }
+    };
+    let attachment = BaseMessage::human(MessageContent::blocks(vec![
+        ContentBlock::text("Inspect this attachment."),
+        block,
+    ]));
+    let session = if cold_document {
+        bound
+            .session
+            .transcript()
+            .write()
+            .append(attachment.clone());
+        let old = std::mem::take(&mut *bound.session.transcript().write());
+        old.flush_persistence().await.unwrap();
+        let reopened = SessionResourcesImpl::open(bound._db.path().join("threads.db"))
+            .await
+            .unwrap();
+        let snapshot = reopened
+            .load_session_snapshot(&bound.thread_id)
+            .await
+            .unwrap();
+        let restored = Session::new(
+            Arc::from(bound._repo.path().to_string_lossy().as_ref()),
+            FrozenContext::builder().build(),
+            Some(bound.thread_id.clone()),
+        );
+        let transcript = restored.transcript();
+        let mut guard = transcript.write();
+        *guard = peri_agent::session::MessageTranscript::new()
+            .with_own_payloads(snapshot.payloads)
+            .with_persistence(bound.resources.clone(), bound.thread_id.clone());
+        guard.set_flags_batch(snapshot.flags);
+        drop(guard);
+        restored.queue().push(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("Continue inspecting the attachment."),
+        ));
+        restored
+    } else {
+        bound.session.queue().push(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            attachment.clone(),
+        ));
+        bound.session.clone()
+    };
+    let model = Arc::new(AttachmentReasoner::default());
+    let summary = Arc::new(SummaryModel(AtomicUsize::new(0)));
+    let ctx = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(model.clone())
+    .with_compact_llm(summary.clone())
+    .with_context_budget(ContextBudget::new(100_000))
+    .with_compact_config(CompactConfig::default())
+    .build();
+    let result = run_react_loop(ctx.clone(), 3).await;
+    assert!(matches!(result, LoopResult::Completed), "{result:?}");
+    assert_eq!(
+        summary.0.load(Ordering::SeqCst),
+        0,
+        "二进制base64传输大小不能触发提前Full并排除附件"
+    );
+    {
+        let requests = model.0.lock();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .iter()
+                .any(|message| message.id() == attachment.id()
+                    && message.message_content() == attachment.message_content()),
+            "首个Reason必须收到完整原始附件"
+        );
+    }
+    assert!(
+        !ctx.session
+            .transcript
+            .read()
+            .flags(attachment.id())
+            .excluded
+    );
+    let transcript = std::mem::take(&mut *ctx.session.transcript.write());
+    transcript.flush_persistence().await.unwrap();
+}
+
+/// [回归测试] 约500KB截图不能按base64字符估出175k输入而在首次Reason前被压缩。
+#[tokio::test]
+async fn test_binary_attachment_fresh_image_reaches_first_reason() {
+    assert_binary_attachment_reaches_first_reason(false).await;
+}
+
+/// [回归测试] SQLite冷恢复的大附件也不能因base64长度在首次Reason前被排除。
+#[tokio::test]
+async fn test_binary_attachment_cold_document_reaches_first_reason() {
+    assert_binary_attachment_reaches_first_reason(true).await;
+}
 
 #[async_trait::async_trait]
 impl peri_model::Model for ScriptedMarkupSummary {

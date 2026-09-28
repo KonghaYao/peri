@@ -250,13 +250,13 @@ flowchart TD
 
 压力样本由有效 provider usage、canonical 工具结果增长和可见请求增长的 generation 共同标识；同一样本只自动评估一次，已启动的 Full 内部空摘要重试属于同一次评估。预算使用上次有效 input usage 加上对应请求之后累计的可见内容正增长，包含 assistant 正文、工具参数、用户输入、reminder 和 direct 工具 schema；工具提交估算与完整视图增长取较大值，避免双计。下一次有效 input usage 结清估算，missing/zero usage 不清账，Micro 估算缩减只移动下一次比较的位置，不能抵扣其后的新内容或替代真实 usage 证明恢复。预算中已包含该增长，不能再次扣减 headroom。
 
-新 turn 和冷恢复没有 usage 时，以当前已提交模型视图及静态 system 前缀估算首个请求，不复用旧 turn 的 usage。估算是字符启发式，不能准确覆盖不同语言的 token 密度、多模态成本、provider 包装或尚未求值的动态 system 后缀；后续有效 usage 仍是权威基线。Reason 在 `before_model` 和工具目录发布之后检查新增压力，必要时复用无 hooks 的 Compact 核心补检一次，再绑定最终发送视图；不能重复执行会产生输入的 hooks。
+新 turn 和冷恢复没有 usage 时，以当前已提交模型视图及静态 system 前缀估算首个请求，不复用旧 turn 的 usage。文本采用字符启发式，二进制媒体与 data URI 使用固定占位，不能把 base64 编码长度当正文成本；文本型文档仍按正文计量。估算不能准确覆盖不同语言的 token 密度、媒体尺寸或页数、provider 包装或尚未求值的动态 system 后缀；后续有效 usage 仍是权威基线。Reason 在 `before_model` 和工具目录发布之后检查新增压力，必要时复用无 hooks 的 Compact 核心补检一次，再绑定最终发送视图；不能重复执行会产生输入的 hooks。
 
 ### 6.3 Full 的上下文快照与报告替换
 
 Full 与 Reason 共用 `render_persisted_llm_view` 恢复已提交的模型视图，包括 canonical reminder；派生摘要请求保留消息角色、工具配对与完整可见正文，不再使用每条 2000 字符、工具结果前三行或关键参数预览。已有 Micro 投影仍生效，避免 Full 重新展开已经隐藏的工具输出。摘要请求不开放可执行工具；冻结 prompt 与父会话的继承快照不被改写。
 
-子 Agent 报告与后台任务结果参与摘要，摘要指令要求保留结论、约束与未完成工作并按通知来源归因。只有正常完成且后处理后非空的摘要可以提交；截断或仅含 analysis 的响应保留原历史；嵌套的分析标签与残留结束标签不能充当有效摘要。提交时将快照内 own region 的普通历史与 reminder 一起标 excluded，摘要与标记使用同一持久化事务；System 和 ancestor 不在排除集合。原文留在 canonical 存储供回查，后续模型请求及冷恢复不再发送已排除报告全文。
+子 Agent 报告与后台任务结果参与摘要，摘要指令要求保留结论、约束与未完成工作并按通知来源归因。只有正常完成且后处理后非空的摘要可以提交；截断或仅含 analysis 的响应保留原历史；嵌套的分析标签与残留结束标签不能充当有效摘要；思考块之外已闭合的 `<summary>` 正文按普通文本保留，其中讨论的标签字面量不得再次被剥除。提交时将快照内 own region 的普通历史与 reminder 一起标 excluded，摘要与标记使用同一持久化事务；System 和 ancestor 不在排除集合。原文留在 canonical 存储供回查，后续模型请求及冷恢复不再发送已排除报告全文。
 
 手动 `/compact` 从一次一致快照恢复完整 payload、flags 和 ancestor/own 边界；普通消息 ID 校验仅用于调用方一致性检查，不再决定摘要输入范围。仅有 reminder 的会话也可压缩。摘要期间新到达的 inbox 结果在后续 Receive 处理，不属于旧快照的排除集合。
 
