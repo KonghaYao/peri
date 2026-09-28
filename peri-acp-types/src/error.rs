@@ -56,6 +56,16 @@ pub enum AgentError {
     #[error("Full Compact failed: LLM returned empty summary")]
     CompactEmptyResponse,
 
+    #[error("Full Compact failed: summary response did not complete")]
+    CompactIncompleteResponse { stop_reason: peri_model::StopReason },
+
+    #[error("Full Compact failed after {attempts} attempts while context usage is {context_tokens}/{context_window} tokens. The turn was stopped before another model request; retry or change the compact model.")]
+    CompactRetriesExhausted {
+        attempts: u32,
+        context_tokens: u64,
+        context_window: u32,
+    },
+
     #[error("Full Compact did not restore the context budget after {full_attempts} attempts for the same work ({input_tokens}/{context_window} input tokens). Reduce retained instructions or use a larger context window.")]
     CompactBudgetUnrecovered {
         input_tokens: u32,
@@ -273,6 +283,14 @@ impl AgentError {
     /// `Other`/`SerializationError` 保持通用描述。
     pub fn user_facing_message(&self) -> String {
         match self {
+            Self::CompactIncompleteResponse { stop_reason } => {
+                let reason = match stop_reason {
+                    peri_model::StopReason::MaxTokens => "output token limit",
+                    peri_model::StopReason::ToolUse => "unexpected tool call",
+                    _ => "unexpected stop reason",
+                };
+                format!("Full Compact failed: the summary did not complete ({reason}). Retry or change the compact model.")
+            }
             Self::Other(_) => "An internal error occurred. Check logs for details.".to_string(),
             Self::LlmError(_) => {
                 "An LLM API error occurred. Please check your API configuration.".to_string()
@@ -348,6 +366,24 @@ fn model_error_facts(diagnostic: &peri_model::ModelErrorDiagnostic) -> Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::{AgentError, SafeModelErrorDiagnostic, SafeSubagentFailure};
+
+    #[test]
+    fn test_compact_retries_exhausted_public_projection() {
+        let error = AgentError::CompactRetriesExhausted {
+            attempts: 3,
+            context_tokens: 109_000,
+            context_window: 100_000,
+        };
+        let failure = crate::session::ExecutionFailure::from_agent_error(&error);
+        assert_eq!(failure.public_message, error.user_facing_message());
+        assert!(failure
+            .public_message
+            .contains("Full Compact failed after 3 attempts"));
+        assert!(failure.public_message.contains("109000/100000 tokens"));
+        assert!(failure
+            .public_message
+            .contains("stopped before another model request"));
+    }
 
     /// [回归测试] 恢复耗尽的公开文案与 ACP 分类只保留 allowlist 事实。
     #[test]

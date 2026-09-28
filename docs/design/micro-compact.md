@@ -205,7 +205,7 @@ sequenceDiagram
 `MicroCompactPlan` 包含：
 
 - **actions**：压缩动作列表。每条是 `(消息id, 目标粒度, 做什么动作)` 的三元组，不包含消息内容副本
-- **estimated_tokens_saved**：估算能省多少 token（chars / 4 保守估算）
+- **estimated_tokens_saved**：估算能省多少 token（chars / 4 近似估算）
 - **target_reclaim_tokens**：需要回收的目标量
 
 关键是 `estimated_tokens_saved`——决策流用它替代旧版 `affected_count`（"标记了几条消息"）。一条 10KB 的 Bash 输出估算节省 ~2500 token，一条 10 字节的 Read 输出估算节省 ~2 token，权重天差地别。
@@ -248,15 +248,19 @@ flowchart TD
 
 当 Micro 回收量不足且预算达到 Full 阈值时，先提交有效 Micro，再尝试 Full；Full 失败时保留已经取得的 Micro 收益。planner 与收益估算都跳过 excluded 消息，且只规划 own region，不能把 Full 已排除的历史重复算作可回收量。stale round 也只从当前可见 own history 计算。
 
-压力样本由有效 provider usage generation 与 canonical 工具结果增长 generation 共同标识；同一样本只自动尝试一次。Act 提交工具结果后计入估算，下一次有效 input usage 结清估算；missing/zero usage 不清账。预算中已包含该增长，不能再次扣减 headroom。
+压力样本由有效 provider usage、canonical 工具结果增长和可见请求增长的 generation 共同标识；同一样本只自动评估一次，已启动的 Full 内部空摘要重试属于同一次评估。预算使用上次有效 input usage 加上对应请求之后累计的可见内容正增长，包含 assistant 正文、工具参数、用户输入、reminder 和 direct 工具 schema；工具提交估算与完整视图增长取较大值，避免双计。下一次有效 input usage 结清估算，missing/zero usage 不清账，Micro 估算缩减只移动下一次比较的位置，不能抵扣其后的新内容或替代真实 usage 证明恢复。预算中已包含该增长，不能再次扣减 headroom。
+
+新 turn 和冷恢复没有 usage 时，以当前已提交模型视图及静态 system 前缀估算首个请求，不复用旧 turn 的 usage。估算是字符启发式，不能准确覆盖不同语言的 token 密度、多模态成本、provider 包装或尚未求值的动态 system 后缀；后续有效 usage 仍是权威基线。Reason 在 `before_model` 和工具目录发布之后检查新增压力，必要时复用无 hooks 的 Compact 核心补检一次，再绑定最终发送视图；不能重复执行会产生输入的 hooks。
 
 ### 6.3 Full 的上下文快照与报告替换
 
 Full 与 Reason 共用 `render_persisted_llm_view` 恢复已提交的模型视图，包括 canonical reminder；派生摘要请求保留消息角色、工具配对与完整可见正文，不再使用每条 2000 字符、工具结果前三行或关键参数预览。已有 Micro 投影仍生效，避免 Full 重新展开已经隐藏的工具输出。摘要请求不开放可执行工具；冻结 prompt 与父会话的继承快照不被改写。
 
-子 Agent 报告与后台任务结果参与摘要，摘要指令要求保留结论、约束与未完成工作并按通知来源归因。只有正常完成且后处理后非空的摘要可以提交；截断或仅含 analysis 的响应保留原历史。提交时将快照内 own region 的普通历史与 reminder 一起标 excluded，摘要与标记使用同一持久化事务；System 和 ancestor 不在排除集合。原文留在 canonical 存储供回查，后续模型请求及冷恢复不再发送已排除报告全文。
+子 Agent 报告与后台任务结果参与摘要，摘要指令要求保留结论、约束与未完成工作并按通知来源归因。只有正常完成且后处理后非空的摘要可以提交；截断或仅含 analysis 的响应保留原历史；嵌套的分析标签与残留结束标签不能充当有效摘要。提交时将快照内 own region 的普通历史与 reminder 一起标 excluded，摘要与标记使用同一持久化事务；System 和 ancestor 不在排除集合。原文留在 canonical 存储供回查，后续模型请求及冷恢复不再发送已排除报告全文。
 
 手动 `/compact` 从一次一致快照恢复完整 payload、flags 和 ancestor/own 边界；普通消息 ID 校验仅用于调用方一致性检查，不再决定摘要输入范围。仅有 reminder 的会话也可压缩。摘要期间新到达的 inbox 结果在后续 Receive 处理，不属于旧快照的排除集合。
+
+空摘要在当前 Full 调用内重试，总连续失败次数受 `max_consecutive_failures` 限制；重试前不进入 Reason，不重复应用 Micro，并保留取消边界。传输错误的重试归 provider，持久化错误不在这里重试。自动 Compact 达到 Full 阈值时，必要的 Full 失败会阻止后续 Reason：空摘要耗尽预算返回 `CompactRetriesExhausted`，缺失模型、非正常完成的摘要及 provider 错误保留各自类型。已提交的 Micro 仍保留。手动 `/compact` 通过同一结果携带安全诊断，并在错误映射前检查取消。未产生变更的尝试以 `CompactEnded` 闭合观测，只有实际变更才发出 `MessagesCompacted`。
 
 ### 6.4 Full 后预算验证
 
@@ -270,7 +274,7 @@ Full 与 Reason 共用 `render_persisted_llm_view` 恢复已提交的模型视�
 
 ### 6.6 Shadow Mode
 
-当 `shadow_mode_enabled = true` 时，只跑 `plan_micro()` 估算，不应用任何标记。日志输出估算值。用于校准 chars→tokens 估算模型——对比估算值与下一次真实 LLM 请求的 `input_tokens`。
+自动 Compact 在 `shadow_mode_enabled = true` 时只跑 `plan_micro()` 估算，不应用任何标记；空计划且高压也不能绕过 shadow 执行 Full。手动 force 仍直接执行 Full。日志输出估算值。用于校准 chars→tokens 估算模型——对比估算值与下一次真实 LLM 请求的 `input_tokens`。
 
 ---
 

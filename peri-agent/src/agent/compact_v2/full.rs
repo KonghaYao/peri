@@ -94,12 +94,20 @@ pub(super) async fn full_compact_inner(
             .await
             .map_err(map_model_error)?;
         if !matches!(response.stop_reason(), peri_model::StopReason::EndTurn) {
-            return Err(crate::error::AgentError::LlmError(
-                "Full Compact failed: summary response did not complete".into(),
-            ));
+            return Err(crate::error::AgentError::CompactIncompleteResponse {
+                stop_reason: response.stop_reason().clone(),
+            });
         }
-        postprocess_summary(&response.assistant_text().unwrap_or_default())
-            .ok_or(crate::error::AgentError::CompactEmptyResponse)?
+        let text = response.assistant_text().unwrap_or_default();
+        postprocess_summary(&text).ok_or_else(|| {
+            // 仅记录形状与 usage，区分无正文和 analysis-only，不输出历史或摘要正文。
+            warn!(
+                response_chars = text.chars().count(),
+                output_tokens = response.usage().map(|usage| usage.output_tokens),
+                "Full Compact response has no usable summary"
+            );
+            crate::error::AgentError::CompactEmptyResponse
+        })?
     } else {
         // 全 System / 空历史仍保持命令输出 Human-first 的既有契约。
         "No conversation history to compact.".to_owned()
@@ -147,6 +155,7 @@ pub(super) async fn full_compact_inner(
         summary: Some(summary),
         full_escalation_reason: None,
         outcome: CompactOutcome::FullApplied,
+        failure: None,
         changed_messages: 0,
         changed_fields: 0,
         no_op_candidates: 0,
@@ -170,26 +179,7 @@ fn build_summary_message(summary: &str) -> BaseMessage {
 /// `<analysis>`、`</analysis>`、`<summary>`、`</summary>` 均为纯 ASCII 标签，
 /// `find()` 返回的字节索引即字符边界，不会导致 panic。
 fn postprocess_summary(raw: &str) -> Option<String> {
-    let mut text = raw.to_string();
-
-    // 移除 <analysis>...</analysis> 块
-    loop {
-        let start_tag = "<analysis>";
-        let end_tag = "</analysis>";
-        if let Some(start) = text.find(start_tag) {
-            if let Some(end) = text[start..].find(end_tag) {
-                let remove_end = start + end + end_tag.len();
-                // Safety: <analysis> 为纯 ASCII 标签，字节索引即字符边界
-                text = format!("{}{}", &text[..start], &text[remove_end..]);
-            } else {
-                // Safety: <analysis> 为纯 ASCII 标签，字节索引即字符边界
-                text = text[..start].to_string();
-                break;
-            }
-        } else {
-            break;
-        }
-    }
+    let mut text = strip_reasoning_blocks(raw)?;
 
     // 提取 <summary>...</summary> 内容
     if let Some(start) = text.find("<summary>") {
@@ -215,6 +205,45 @@ fn postprocess_summary(raw: &str) -> Option<String> {
     } else {
         Some(format!("{}\n\n{}", prefix, text))
     }
+}
+
+// 精确识别协议思考标签并按栈配对，不能把嵌套块残留的 closing tag 当作摘要。
+// 普通文字与相近的标签名保持原样；未闭合思考块的尾部不属于可提交正文。
+fn strip_reasoning_blocks(raw: &str) -> Option<String> {
+    const TAGS: [(&str, &str, bool); 6] = [
+        ("<analysis>", "analysis", true),
+        ("</analysis>", "analysis", false),
+        ("<thinking>", "thinking", true),
+        ("</thinking>", "thinking", false),
+        ("<think>", "think", true),
+        ("</think>", "think", false),
+    ];
+    let mut remaining = raw;
+    let mut result = String::new();
+    let mut stack = Vec::new();
+    while let Some((position, tag, name, opening)) = TAGS
+        .iter()
+        .filter_map(|(tag, name, opening)| {
+            remaining
+                .find(tag)
+                .map(|position| (position, *tag, *name, *opening))
+        })
+        .min_by_key(|(position, ..)| *position)
+    {
+        if stack.is_empty() {
+            result.push_str(&remaining[..position]);
+        }
+        if opening {
+            stack.push(name);
+        } else if stack.pop() != Some(name) {
+            return None;
+        }
+        remaining = &remaining[position + tag.len()..];
+    }
+    if stack.is_empty() {
+        result.push_str(remaining);
+    }
+    Some(result)
 }
 
 // ─── Re-inject ──────────────────────────────────────────────────────────────────

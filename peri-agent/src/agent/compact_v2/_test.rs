@@ -201,7 +201,15 @@ async fn test_run_compact_rerun_clears_stale_excluded_flags() {
     )
     .await;
 
-    assert_eq!(result.strategy, CompactStrategy::Skip, "连续失败超限应跳过");
+    assert_eq!(
+        result.strategy,
+        CompactStrategy::Full,
+        "手动 Full 失败预算耗尽应明确失败"
+    );
+    assert!(matches!(
+        result.failure,
+        Some(crate::error::AgentError::CompactRetriesExhausted { attempts: 3, .. })
+    ));
     assert!(t.flags(id1).excluded, "excluded 标记不再在 skip 时自动清除");
     assert!(t.flags(id2).excluded, "excluded 标记不再在 skip 时自动清除");
 }

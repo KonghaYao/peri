@@ -5,6 +5,7 @@ use peri_model::TokenUsage;
 pub(crate) struct PressureSampleKey {
     usage_generation: u64,
     tool_growth_generation: u64,
+    view_growth_generation: u64,
 }
 
 /// 会话级 token 用量追踪器
@@ -41,10 +42,21 @@ pub struct TokenTracker {
     /// 最近一次已消费的自动 Compact 压力样本。
     #[serde(skip)]
     consumed_pressure_sample: Option<PressureSampleKey>,
+    /// 当前请求视图的近似大小；不伪装成 provider usage，也不跨恢复复用。
+    #[serde(skip)]
+    current_input_estimate: Option<u64>,
+    /// 自最近有效 usage 后累计的正增长。Micro 缩减不抵扣后续新增工作。
+    #[serde(skip)]
+    unconfirmed_input_growth: u64,
+    #[serde(skip)]
+    pending_input_estimate: Option<u64>,
+    #[serde(skip)]
+    view_growth_generation: u64,
 }
 
 impl TokenTracker {
     pub fn accumulate(&mut self, usage: &TokenUsage) {
+        let request_estimate = self.pending_input_estimate.take();
         self.request_history.push(RequestRecord::from_usage(usage));
         // 防止长时间会话中 request_history 无限增长
         if self.request_history.len() > 1000 {
@@ -64,6 +76,11 @@ impl TokenTracker {
         if usage.input_tokens > 0 {
             self.last_usage = Some(usage.clone());
             self.usage_generation = self.usage_generation.saturating_add(1);
+            self.unconfirmed_input_growth = self
+                .current_input_estimate
+                .zip(request_estimate)
+                .map(|(current, sent)| current.saturating_sub(sent))
+                .unwrap_or(0);
             // 只有新权威 input usage 已包含工具结果，才能清除本地预测。
             self.estimated_tool_tokens_since_last_llm = 0;
         }
@@ -75,7 +92,7 @@ impl TokenTracker {
     /// 在 `dispatch_tools` 写入 tool_result 后调用，用 `chars().count() / 4` 近似估算。
     /// 不能与 LLM usage 混用——这是字符级估算，仅用于预算预警。
     pub fn add_estimated_tool_tokens(&mut self, tool_output: &str) {
-        // 经验估算：英文 ~4 字符/token，CJK 略多但保守取 4
+        // 字符启发式：不同语言和多模态成本可能偏差，不能当作真实 tokenizer。
         let estimated = (tool_output.chars().count() / 4) as u64;
         if tool_output.is_empty() {
             return;
@@ -87,14 +104,45 @@ impl TokenTracker {
     }
 
     pub fn estimated_context_tokens(&self) -> Option<u64> {
-        // input_tokens 已在 adapter 层规范化为总输入（含缓存 token），
-        // 即当前 prompt 的实际大小，直接反映上下文窗口占用。
-        // 不加 output_tokens：output 会在下一轮 API 调用中包含进 input_tokens，
-        // 相加会导致双重计算，使显示用量约为实际的 2 倍。
-        // 加上 estimated_tool_tokens_since_last_llm：本轮已写入但尚未被 LLM 感知的工具结果（P0-5）
-        self.last_usage.as_ref().map(|u| {
-            (u.input_tokens as u64).saturating_add(self.estimated_tool_tokens_since_last_llm)
-        })
+        let Some(usage) = &self.last_usage else {
+            return self.current_input_estimate;
+        };
+        // 权威 usage 只与产生它的请求视图比较：新增 assistant/user/reminder/
+        // tool 内容都是增长；Micro 的估算减少不能证明真实预算已经恢复。
+        // 工具提交后的即时预警和完整视图包含同一批工具，取 max 避免双计。
+        Some(
+            u64::from(usage.input_tokens).saturating_add(
+                self.unconfirmed_input_growth
+                    .max(self.estimated_tool_tokens_since_last_llm),
+            ),
+        )
+    }
+
+    /// 更新已提交模型视图；只有正增长重新激活压力样本，投影缩减不激活。
+    pub(crate) fn refresh_input_estimate(&mut self, estimate: u64) -> bool {
+        let grew = self
+            .current_input_estimate
+            .is_none_or(|previous| estimate > previous);
+        if grew {
+            self.view_growth_generation = self.view_growth_generation.saturating_add(1);
+        }
+        if self.last_usage.is_some() {
+            // 有效 usage 只证明已发送快照的大小。投影缩减没有新 usage 确认，
+            // 故只移动比较位置；随后新增内容仍必须加到权威压力上。
+            if let Some(previous) = self.current_input_estimate {
+                self.unconfirmed_input_growth = self
+                    .unconfirmed_input_growth
+                    .saturating_add(estimate.saturating_sub(previous));
+            }
+        }
+        self.current_input_estimate = Some(estimate);
+        grew
+    }
+
+    /// 在最终请求发出前绑定估算；零/缺失 usage 不会替换上一个有效基线。
+    pub(crate) fn begin_request(&mut self, estimate: u64) {
+        self.refresh_input_estimate(estimate);
+        self.pending_input_estimate = Some(estimate);
     }
 
     pub fn context_usage_percent(&self, context_window: u32) -> Option<f64> {
@@ -119,10 +167,13 @@ impl TokenTracker {
     }
 
     pub(crate) fn pressure_sample_key(&self) -> Option<PressureSampleKey> {
-        self.last_usage.as_ref()?;
+        if self.last_usage.is_none() && self.current_input_estimate.is_none() {
+            return None;
+        }
         Some(PressureSampleKey {
             usage_generation: self.usage_generation,
             tool_growth_generation: self.tool_growth_generation,
+            view_growth_generation: self.view_growth_generation,
         })
     }
 
@@ -139,13 +190,59 @@ impl TokenTracker {
         let usage_generation = self.usage_generation;
         let tool_growth_generation = self.tool_growth_generation;
         let consumed_pressure_sample = self.consumed_pressure_sample;
+        let view_growth_generation = self.view_growth_generation;
         *self = Self {
             usage_generation,
             tool_growth_generation,
             consumed_pressure_sample,
+            view_growth_generation,
             ..Self::default()
         };
     }
+}
+
+/// 无 tokenizer 时按可见字符估算请求内容。它用于提前压缩，不替代 provider
+/// usage；多模态成本、provider 包装和不同语言的 token 密度仍是近似边界。
+pub(crate) fn estimate_request_tokens(
+    messages: &[crate::messages::BaseMessage],
+    tools: &[&dyn crate::tools::BaseTool],
+) -> u64 {
+    use crate::messages::{BaseMessage, ContentBlock, MessageContent};
+    let mut chars = 0u64;
+    for message in messages {
+        chars = chars.saturating_add(match message.message_content() {
+            MessageContent::Text(text) => text.chars().count() as u64,
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } | ContentBlock::Reasoning { text, .. } => {
+                        text.chars().count() as u64
+                    }
+                    // canonical tool_calls 在下方统一计数，不重复计 block 镜像。
+                    ContentBlock::ToolUse { .. } => 0,
+                    other => serde_json::to_string(other)
+                        .map(|s| s.chars().count() as u64)
+                        .unwrap_or(0),
+                })
+                .sum(),
+            MessageContent::Raw(values) => serde_json::to_string(values)
+                .map(|s| s.chars().count() as u64)
+                .unwrap_or(0),
+        });
+        if let BaseMessage::Ai { tool_calls, .. } = message {
+            for call in tool_calls {
+                chars = chars.saturating_add(call.name.chars().count() as u64);
+                chars = chars.saturating_add(call.arguments.to_string().chars().count() as u64);
+            }
+        }
+    }
+    for tool in tools {
+        chars = chars
+            .saturating_add(tool.name().chars().count() as u64)
+            .saturating_add(tool.description().chars().count() as u64)
+            .saturating_add(tool.parameters().to_string().chars().count() as u64);
+    }
+    chars.div_ceil(4)
 }
 
 /// 单次 LLM 请求的 token 用量快照（仅内存，不持久化）

@@ -14,6 +14,98 @@ fn make_usage(
     }
 }
 
+/// [回归测试] 冷启动没有 usage 时，当前请求视图仍须提供压力事实。
+#[test]
+fn test_cold_input_estimate_arms_compact_without_usage() {
+    let mut tracker = TokenTracker::default();
+    assert!(tracker.refresh_input_estimate(110_000));
+    assert_eq!(tracker.estimated_context_tokens(), Some(110_000));
+    assert!(
+        tracker.last_usage.is_none(),
+        "估算不能伪装成 provider usage"
+    );
+    assert!(tracker.pressure_sample_key().is_some());
+}
+
+/// [回归测试] assistant/user/reminder 与工具共用请求增长，不能将工具重复累加。
+#[test]
+fn test_request_growth_uses_authoritative_baseline_without_double_counting_tools() {
+    let mut tracker = TokenTracker::default();
+    tracker.begin_request(90_000);
+    tracker.accumulate(&make_usage(91_000, 8_000, None, None));
+    tracker.add_estimated_tool_tokens(&"x".repeat(16_000));
+    tracker.refresh_input_estimate(102_000);
+    assert_eq!(tracker.estimated_context_tokens(), Some(103_000));
+    tracker.begin_request(102_000);
+    tracker.accumulate(&make_usage(103_000, 500, None, None));
+    assert_eq!(tracker.estimated_context_tokens(), Some(103_000));
+    assert_eq!(tracker.estimated_tool_tokens_since_last_llm, 0);
+}
+
+/// [回归测试] 零 usage 不更新基线，后续非工具增长不能被旧样本去重抑制。
+#[test]
+fn test_zero_usage_keeps_baseline_but_new_visible_growth_rearms_sample() {
+    let mut tracker = TokenTracker::default();
+    tracker.begin_request(80_000);
+    tracker.accumulate(&make_usage(90_000, 0, None, None));
+    tracker.refresh_input_estimate(84_000);
+    let first = tracker.pressure_sample_key().unwrap();
+    tracker.consume_pressure_sample(first);
+    tracker.begin_request(84_000);
+    tracker.accumulate(&make_usage(0, 0, None, None));
+    assert_eq!(tracker.pressure_sample_key(), Some(first));
+    tracker.refresh_input_estimate(90_000);
+    assert_eq!(tracker.estimated_context_tokens(), Some(100_000));
+    assert_ne!(tracker.pressure_sample_key(), Some(first));
+}
+
+/// [回归测试] Micro 投影估算减少不能扣除 provider usage 或重新激活同一样本。
+#[test]
+fn test_projection_reduction_preserves_authoritative_pressure_and_consumed_sample() {
+    let mut tracker = TokenTracker::default();
+    tracker.begin_request(100_000);
+    tracker.accumulate(&make_usage(196_000, 0, None, None));
+    let sample = tracker.pressure_sample_key().unwrap();
+    tracker.consume_pressure_sample(sample);
+    assert!(!tracker.refresh_input_estimate(50_000));
+    assert_eq!(tracker.estimated_context_tokens(), Some(196_000));
+    assert_eq!(tracker.pressure_sample_key(), Some(sample));
+    assert!(tracker.is_pressure_sample_consumed(sample));
+}
+
+/// [回归测试] 未确认的 Micro 缩减不得抵销之后 before_model 新增的工作。
+#[test]
+fn test_growth_after_projection_shrink_still_adds_to_authoritative_usage() {
+    let mut tracker = TokenTracker::default();
+    tracker.begin_request(40_000);
+    tracker.accumulate(&make_usage(90_000, 0, None, None));
+    let old = tracker.pressure_sample_key().unwrap();
+    tracker.consume_pressure_sample(old);
+    tracker.refresh_input_estimate(2_000);
+    assert_eq!(tracker.estimated_context_tokens(), Some(90_000));
+    tracker.refresh_input_estimate(14_000);
+    assert_eq!(tracker.estimated_context_tokens(), Some(102_000));
+    assert_ne!(tracker.pressure_sample_key(), Some(old));
+    tracker.begin_request(14_000);
+    tracker.accumulate(&make_usage(50_000, 0, None, None));
+    assert_eq!(tracker.estimated_context_tokens(), Some(50_000));
+}
+
+#[test]
+fn test_request_estimate_counts_tool_arguments_once() {
+    use crate::messages::{BaseMessage, ContentBlock};
+    let message = BaseMessage::ai_from_blocks(vec![ContentBlock::ToolUse {
+        id: "call".into(),
+        name: "Write".into(),
+        input: serde_json::json!({"content": "abcd".repeat(10_000)}),
+    }]);
+    let estimate = estimate_request_tokens(&[message], &[]);
+    assert!(
+        (10_000..10_010).contains(&estimate),
+        "工具参数应参与估算，但不能同时计 block 与 canonical call：{estimate}"
+    );
+}
+
 #[test]
 fn test_accumulate_sums_tokens() {
     let mut tracker = TokenTracker::default();

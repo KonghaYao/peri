@@ -42,7 +42,7 @@ pub use projection::{
 // ─── CompactResult ───────────────────────────────────────────────────────────────
 
 /// Compact 执行结果
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CompactResult {
     /// 使用的策略
     pub strategy: CompactStrategy,
@@ -60,6 +60,8 @@ pub struct CompactResult {
     pub full_escalation_reason: Option<FullEscalationReason>,
     /// 本轮 Compact 的实际语义结果。
     pub outcome: CompactOutcome,
+    /// Full 未完成的结构化原因；已应用的 Micro 仍由 outcome 与统计保留。
+    pub failure: Option<crate::error::AgentError>,
     /// 去重 message_id 数量（Micro 投影变更计数）
     pub changed_messages: usize,
     /// CompactToolInput 中的所有字段总数
@@ -114,7 +116,7 @@ pub fn determine_compact_action(budget: f64, config: &CompactConfig) -> CompactA
 /// 根据 ContextPressure 选择策略并执行 Compact
 ///
 /// 触发流程（新）：
-/// - 防死循环：连续失败超限则跳过
+/// - Full 重试预算在实际需要 Full 时统一检查，耗尽返回结构化失败
 /// - force=true：直接 Full
 /// - 计算 budget_pct，判定 Micro/Smart/Skip
 /// - Micro：dry-run plan_micro → 检查 estimated_tokens_saved →
@@ -133,9 +135,8 @@ pub async fn run_compact(
 ) -> CompactResult {
     let before_visible_len = transcript.visible_messages().len();
 
-    // 防死循环：连续失败超限则跳过
-    if *consecutive_failures >= config.max_consecutive_failures {
-        debug!(consecutive_failures, "Compact 降级：连续失败超限，跳过本轮");
+    // 自动关闭不影响显式手动 force。
+    if !force && !config.auto_compact_enabled {
         return CompactResult {
             strategy: CompactStrategy::Skip,
             affected_count: 0,
@@ -145,6 +146,7 @@ pub async fn run_compact(
             summary: None,
             full_escalation_reason: None,
             outcome: CompactOutcome::Skipped,
+            failure: None,
             changed_messages: 0,
             changed_fields: 0,
             no_op_candidates: 0,
@@ -157,7 +159,7 @@ pub async fn run_compact(
             transcript,
             llm,
             config,
-            before_visible_len,
+            pressure,
             consecutive_failures,
             cwd,
             FullEscalationReason::ManualForce,
@@ -186,6 +188,7 @@ pub async fn run_compact(
             summary: None,
             full_escalation_reason: None,
             outcome: CompactOutcome::Skipped,
+            failure: None,
             changed_messages: 0,
             changed_fields: 0,
             no_op_candidates: 0,
@@ -211,6 +214,7 @@ pub async fn run_compact(
                         summary: None,
                         full_escalation_reason: None,
                         outcome: CompactOutcome::Skipped,
+                        failure: None,
                         changed_messages: 0,
                         changed_fields: 0,
                         no_op_candidates: 0,
@@ -221,37 +225,37 @@ pub async fn run_compact(
             // Dry-run：先用 plan_micro 估算效果（无副作用）
             let plan = plan_micro(transcript, config, true);
 
+            // Shadow mode：只估算不应用
+            if config.shadow_mode_enabled {
+                info!(
+                    estimated_saved = plan.estimated_tokens_saved,
+                    actions_count = plan.actions.len(),
+                    shadow = true,
+                    "Shadow mode: 估算 compact 收益（未应用）"
+                );
+                return CompactResult {
+                    strategy: CompactStrategy::Skip,
+                    affected_count: 0,
+                    estimated_tokens_saved: plan.estimated_tokens_saved,
+                    before_visible_len,
+                    after_visible_len: before_visible_len,
+                    summary: None,
+                    full_escalation_reason: None,
+                    outcome: CompactOutcome::Shadowed,
+                    failure: None,
+                    changed_messages: 0,
+                    changed_fields: 0,
+                    no_op_candidates: plan.no_op_candidates,
+                };
+            }
+
             // 空 plan → 无可 compact 消息
             // 但如果 budget 已超过 Full 阈值，直接尝试 Full Compact
             // 否则纯对话场景下 context 会持续膨胀到远超 100% 而永远不 compact
             //
-            // 安全性：Full Compact 依赖 compact_llm 生成摘要；若 llm 为 None，
-            // Full 必然失败（CompactNoLlm），不应在此路径触发——否则每轮都
-            // consecutive_failures++ 最终达到 max_consecutive_failures 上限，
-            // 导致 compact 被永久静默禁用。
+            // 模型缺失同样属于 Full 失败，由 stage 显式终止高压请求。
             if plan.actions.is_empty() {
                 if budget_pct >= config.auto_compact_threshold {
-                    if llm.is_none() {
-                        warn!(
-                            "Micro Compact: plan 为空且 budget 高位({:.1}%)，但 compact_llm 未配置，无法执行 Full Compact。请配置 compact_llm 或启用 Micro Compact 可用工具。",
-                            budget_pct * 100.0
-                        );
-                        return CompactResult {
-                            strategy: CompactStrategy::Skip,
-                            affected_count: 0,
-                            estimated_tokens_saved: 0,
-                            before_visible_len,
-                            after_visible_len: before_visible_len,
-                            summary: None,
-                            full_escalation_reason: Some(
-                                FullEscalationReason::ForceThresholdExceeded,
-                            ),
-                            outcome: CompactOutcome::Skipped,
-                            changed_messages: 0,
-                            changed_fields: 0,
-                            no_op_candidates: 0,
-                        };
-                    }
                     debug!(
                         "Micro Compact: plan 为空但 budget 高位({:.1}%)，直接尝试 Full",
                         budget_pct * 100.0
@@ -260,7 +264,7 @@ pub async fn run_compact(
                         transcript,
                         llm,
                         config,
-                        before_visible_len,
+                        pressure,
                         consecutive_failures,
                         cwd,
                         FullEscalationReason::ForceThresholdExceeded,
@@ -280,32 +284,10 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                     outcome: CompactOutcome::Skipped,
+                    failure: None,
                     changed_messages: 0,
                     changed_fields: 0,
                     no_op_candidates: 0,
-                };
-            }
-
-            // Shadow mode：只估算不应用
-            if config.shadow_mode_enabled {
-                info!(
-                    estimated_saved = plan.estimated_tokens_saved,
-                    actions_count = plan.actions.len(),
-                    shadow = true,
-                    "Shadow mode: 估算 compact 收益（未应用）"
-                );
-                return CompactResult {
-                    strategy: CompactStrategy::Skip,
-                    affected_count: 0,
-                    estimated_tokens_saved: plan.estimated_tokens_saved,
-                    before_visible_len,
-                    after_visible_len: before_visible_len,
-                    summary: None,
-                    full_escalation_reason: None,
-                    outcome: CompactOutcome::Shadowed,
-                    changed_messages: 0,
-                    changed_fields: 0,
-                    no_op_candidates: plan.no_op_candidates,
                 };
             }
 
@@ -328,6 +310,7 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                     outcome: CompactOutcome::MicroApplied,
+                    failure: None,
                     changed_messages: plan.changed_messages,
                     changed_fields: plan.changed_fields,
                     no_op_candidates: plan.no_op_candidates,
@@ -351,7 +334,7 @@ pub async fn run_compact(
                     transcript,
                     llm,
                     config,
-                    before_visible_len,
+                    pressure,
                     consecutive_failures,
                     cwd,
                     FullEscalationReason::InsufficientReclaim,
@@ -393,6 +376,7 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                     outcome: CompactOutcome::MicroApplied,
+                    failure: None,
                     changed_messages: plan.changed_messages,
                     changed_fields: plan.changed_fields,
                     no_op_candidates: plan.no_op_candidates,
@@ -417,6 +401,7 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                     outcome: CompactOutcome::Shadowed,
+                    failure: None,
                     changed_messages: 0,
                     changed_fields: 0,
                     no_op_candidates: plan.no_op_candidates,
@@ -432,31 +417,9 @@ pub async fn run_compact(
             // 空结果 → 无可 compact 消息
             // 但如果 budget 已超过 Full 阈值，直接尝试 Full Compact
             //
-            // 安全性：Full Compact 依赖 compact_llm；若 llm 为 None，不应在此路径
-            // 触发，避免 consecutive_failures 无意义增长到上限。
+            // 模型缺失由 Full 返回结构化失败，不能静默放行高压请求。
             if affected == 0 {
                 if budget_pct >= config.auto_compact_threshold {
-                    if llm.is_none() {
-                        warn!(
-                            "Smart Compact: 无消息可 compact 且 budget 高位({:.1}%)，但 compact_llm 未配置，无法执行 Full Compact。",
-                            budget_pct * 100.0
-                        );
-                        return CompactResult {
-                            strategy: CompactStrategy::Skip,
-                            affected_count: 0,
-                            estimated_tokens_saved: 0,
-                            before_visible_len,
-                            after_visible_len: before_visible_len,
-                            summary: None,
-                            full_escalation_reason: Some(
-                                FullEscalationReason::ForceThresholdExceeded,
-                            ),
-                            outcome: CompactOutcome::Skipped,
-                            changed_messages: 0,
-                            changed_fields: 0,
-                            no_op_candidates: 0,
-                        };
-                    }
                     debug!(
                         "Smart Compact: 无消息可 compact 但 budget 高位({:.1}%)，直接尝试 Full",
                         budget_pct * 100.0
@@ -465,7 +428,7 @@ pub async fn run_compact(
                         transcript,
                         llm,
                         config,
-                        before_visible_len,
+                        pressure,
                         consecutive_failures,
                         cwd,
                         FullEscalationReason::ForceThresholdExceeded,
@@ -483,6 +446,7 @@ pub async fn run_compact(
                     summary: None,
                     full_escalation_reason: None,
                     outcome: CompactOutcome::Skipped,
+                    failure: None,
                     changed_messages: 0,
                     changed_fields: 0,
                     no_op_candidates: 0,
@@ -497,7 +461,7 @@ pub async fn run_compact(
                         transcript,
                         llm,
                         config,
-                        before_visible_len,
+                        pressure,
                         consecutive_failures,
                         cwd,
                         FullEscalationReason::ForceThresholdExceeded,
@@ -530,6 +494,7 @@ pub async fn run_compact(
                         summary: None,
                         full_escalation_reason: None,
                         outcome: CompactOutcome::SmartApplied,
+                        failure: None,
                         changed_messages: plan.changed_messages,
                         changed_fields: plan.changed_fields,
                         no_op_candidates: plan.no_op_candidates,
@@ -542,7 +507,7 @@ pub async fn run_compact(
                     transcript,
                     llm,
                     config,
-                    before_visible_len,
+                    pressure,
                     consecutive_failures,
                     cwd,
                     FullEscalationReason::InsufficientReclaim,
@@ -565,39 +530,59 @@ pub async fn run_compact(
     }
 }
 
-/// 运行 Full Compact（含失败降级逻辑）
+/// 运行 Full Compact；在同一边界管理摘要重试预算并保留失败原因。
 async fn run_full_or_degrade(
     transcript: &mut MessageTranscript,
     llm: Option<&dyn peri_model::Model>,
     config: &CompactConfig,
-    before_visible_len: usize,
+    pressure: &ContextPressure,
     consecutive_failures: &mut u32,
     cwd: &str,
     escalation_reason: FullEscalationReason,
 ) -> CompactResult {
-    match full::full_compact_inner(transcript, llm, config, cwd).await {
-        Ok(mut result) => {
-            *consecutive_failures = 0;
-            result.full_escalation_reason = Some(escalation_reason);
-            result
+    let before_visible_len = transcript.visible_messages().len();
+    let error = loop {
+        if *consecutive_failures >= config.max_consecutive_failures {
+            break crate::error::AgentError::CompactRetriesExhausted {
+                attempts: *consecutive_failures,
+                context_tokens: pressure.estimated_tokens,
+                context_window: pressure.context_window,
+            };
         }
-        Err(e) => {
-            warn!(error = %e, "Full Compact 失败");
-            *consecutive_failures += 1;
-            CompactResult {
-                strategy: CompactStrategy::Full,
-                affected_count: 0,
-                estimated_tokens_saved: 0,
-                before_visible_len,
-                after_visible_len: transcript.visible_messages().len(),
-                summary: None,
-                full_escalation_reason: Some(escalation_reason),
-                outcome: CompactOutcome::FullFailed,
-                changed_messages: 0,
-                changed_fields: 0,
-                no_op_candidates: 0,
+        match full::full_compact_inner(transcript, llm, config, cwd).await {
+            Ok(mut result) => {
+                *consecutive_failures = 0;
+                result.full_escalation_reason = Some(escalation_reason);
+                return result;
+            }
+            Err(error) => {
+                *consecutive_failures = consecutive_failures.saturating_add(1);
+                warn!(%error, attempts = *consecutive_failures, "Full Compact 失败");
+                // 空摘要没有提交历史替换，在当前 Compact 内恢复并共享同一预算。
+                // Provider 自己负责传输重试；持久化错误与提交不确定不得在这里重试。
+                if matches!(error, crate::error::AgentError::CompactEmptyResponse)
+                    && !transcript.compaction_commit_state().is_uncertain()
+                {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                break error;
             }
         }
+    };
+    CompactResult {
+        strategy: CompactStrategy::Full,
+        affected_count: 0,
+        estimated_tokens_saved: 0,
+        before_visible_len,
+        after_visible_len: transcript.visible_messages().len(),
+        summary: None,
+        full_escalation_reason: Some(escalation_reason),
+        outcome: CompactOutcome::FullFailed,
+        failure: Some(error),
+        changed_messages: 0,
+        changed_fields: 0,
+        no_op_candidates: 0,
     }
 }
 

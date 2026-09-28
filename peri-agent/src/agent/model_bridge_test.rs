@@ -194,6 +194,27 @@ struct CaptureSystemModel {
     streamed_requests: Arc<Mutex<Vec<ModelRequest>>>,
 }
 
+/// [回归测试] 压力估算包含 frozen system，却不得再次读取动态贡献或构造请求。
+#[test]
+fn test_bridge_pressure_estimate_is_pure_and_includes_frozen_system() {
+    let streamed_requests = Arc::new(Mutex::new(Vec::new()));
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let calls = provider_calls.clone();
+    let bridge = AgentModelBridge::from_arc(Arc::new(CaptureSystemModel {
+        streamed_requests: streamed_requests.clone(),
+    }))
+    .with_system("base".repeat(90_000))
+    .with_system_contribution_provider(Arc::new(move || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        "dynamic".into()
+    }));
+    let messages = [BaseMessage::human("more".repeat(6_000))];
+    assert_eq!(bridge.estimate_request_tokens(&messages, &[]), 96_000);
+    assert_eq!(bridge.estimate_request_tokens(&messages, &[]), 96_000);
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+    assert!(streamed_requests.lock().unwrap().is_empty());
+}
+
 #[async_trait]
 impl Model for CaptureSystemModel {
     fn capabilities(&self) -> ModelCapabilities {
