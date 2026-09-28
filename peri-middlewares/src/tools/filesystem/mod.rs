@@ -75,3 +75,11 @@ pub(crate) fn should_skip_dir(name: &str) -> bool {
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+/// A dropped RPC must also stop blocking searches at their next checkpoint.
+pub(crate) struct SearchCancellation(pub std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for SearchCancellation {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}

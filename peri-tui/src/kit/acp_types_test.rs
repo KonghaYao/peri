@@ -767,3 +767,107 @@ fn test_flush_segment_rebuilds_cached_reasoning_status() {
     assert!(!reasoning.is_running, "冻结段不可处于 running");
     assert_eq!(bubble.text, "", "思考→工具（无正文）场景正文为空");
 }
+
+// ── wave 3（workspace）：effective name 与裸名的按名判定同口径 ────────────────
+
+/// workspace Edit / Write（effective name）与裸名同口径：完成态解析出 diff，
+/// 且 path hint 取自原始输入的 `file_path`（**不是**输出摘要里的路径文本）；
+/// error 态恒 `None`。归一入口失效 ⇒ effective name 走不到 Edit/Write 分支。
+#[test]
+fn workspace_edit_builds_diff() {
+    for (tool_name, is_error) in [
+        ("mcp__workspace__Edit", false),
+        ("Edit", false),
+        ("mcp__workspace__Write", false),
+        ("mcp__workspace__Edit", true),
+    ] {
+        let mut ct = CurrentTurn::new();
+        ct.start_tool(ToolCardAccumulator::with_input(
+            "tc-1".into(),
+            tool_name.into(),
+            "peri-tui/src/render.rs".into(),
+            serde_json::json!({ "file_path": "peri-tui/src/render.rs" }),
+            None,
+        ));
+        assert!(ct.end_tool("tc-1", "Added 3 lines to render.rs".into(), is_error));
+        let vm = ct.view_models();
+        let TuiRenderUnit::TuiToolCard(card) = &vm[0] else {
+            panic!("expected tool card for {tool_name}");
+        };
+        if is_error {
+            assert!(card.diff.is_none(), "{tool_name} error 态恒无 diff");
+            continue;
+        }
+        let diff = card
+            .diff
+            .as_ref()
+            .unwrap_or_else(|| panic!("{tool_name} 完成态必须解析出 diff"));
+        assert_eq!(
+            diff.path, "peri-tui/src/render.rs",
+            "{tool_name} path hint 必须取原始输入的 file_path"
+        );
+        assert_eq!((diff.adds, diff.dels), (3, 0), "{tool_name} 摘要行数计数");
+    }
+
+    // 未命中归一表（外部 / 未知 `mcp__*`）：保持保守语义，不得被当作 Edit/Write。
+    let mut ct = CurrentTurn::new();
+    ct.start_tool(ToolCardAccumulator::with_input(
+        "tc-2".into(),
+        "mcp__foo__Edit".into(),
+        "peri-tui/src/render.rs".into(),
+        serde_json::json!({ "file_path": "peri-tui/src/render.rs" }),
+        None,
+    ));
+    assert!(ct.end_tool("tc-2", "Added 3 lines to render.rs".into(), false));
+    let vm = ct.view_models();
+    let TuiRenderUnit::TuiToolCard(card) = &vm[0] else {
+        panic!("expected tool card for mcp__foo__Edit");
+    };
+    assert!(
+        card.diff.is_none(),
+        "未命中归一表的名字不得被当作 Edit/Write 解析 diff"
+    );
+}
+
+/// workspace Bash（effective name）同样被识别为「运行中的 Bash」——acp_bridge 的
+/// 1s tick 依赖此谓词；子 turn 递归分支沿用同一实现。
+#[test]
+fn has_running_bash_tool_matches_workspace_effective_name() {
+    for tool_name in ["mcp__workspace__Bash", "Bash"] {
+        let mut ct = CurrentTurn::new();
+        assert!(!ct.has_running_bash_tool(), "空 turn 不得命中");
+        ct.start_tool(ToolCardAccumulator::new(
+            "tc-1".into(),
+            tool_name.into(),
+            "cargo test".into(),
+        ));
+        assert!(ct.has_running_bash_tool(), "{tool_name} 运行中必须命中");
+        assert!(ct.end_tool("tc-1", "test result: ok".into(), false));
+        assert!(!ct.has_running_bash_tool(), "{tool_name} 完成后不得命中");
+    }
+
+    // 子 turn 递归分支：嵌套的 workspace Bash 同样命中。
+    let mut ct = CurrentTurn::new();
+    ct.start_subagent("agent-1".into(), "coder".into());
+    assert!(ct.start_subagent_tool(
+        "agent-1",
+        ToolCardAccumulator::new(
+            "child-1".into(),
+            "mcp__workspace__Bash".into(),
+            "cargo test".into(),
+        ),
+    ));
+    assert!(
+        ct.has_running_bash_tool(),
+        "子 turn 的 workspace Bash 必须命中（递归分支同一实现）"
+    );
+
+    // 未命中归一表：外部 `mcp__*` 不参与判定（保守语义，与迁移前逐位一致）。
+    let mut ct = CurrentTurn::new();
+    ct.start_tool(ToolCardAccumulator::new(
+        "tc-2".into(),
+        "mcp__foo__Bash".into(),
+        "cargo test".into(),
+    ));
+    assert!(!ct.has_running_bash_tool());
+}

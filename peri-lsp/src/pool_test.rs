@@ -1,9 +1,13 @@
 //! Tests for pool
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use peri_acp_types::ports::LspPoolPort;
+use parking_lot::Mutex;
+use peri_acp_types::ports::{LspPoolPort, LspSyncError};
+use serde_json::Value;
 
 use super::*;
 use crate::config::{LspConfigFile, LspServerConfig};
@@ -68,8 +72,71 @@ fn test_extension_routing() {
     assert!(pool.server_for_file("/test/no_ext").is_none());
 }
 
-/// 类型不匹配的端口实现（downcast 失败路径用）
-struct StubPool;
+/// 端口替身调用记录（顺序断言用）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncCall {
+    ReadyFor,
+    DidChange,
+    DidSave,
+}
+
+/// 端口替身：`ready_for` / `did_change` / `did_save` **显式实现**（A30 冻结端口
+/// 无默认实现，替身不得依赖 no-op 兜底），以 `AtomicUsize` 计数并记录调用顺序与
+/// 参数——「替身被调用」必须可由计数证明，否则同步链路假绿。
+/// 同时充当 downcast 类型不匹配路径的替身。host 侧两个同形替身（H-04）须按本
+/// 形状补齐。
+#[derive(Default)]
+struct StubPool {
+    ready: AtomicBool,
+    ready_for_calls: AtomicUsize,
+    did_change_calls: AtomicUsize,
+    did_save_calls: AtomicUsize,
+    calls: Mutex<Vec<SyncCall>>,
+    changed: Mutex<Vec<(PathBuf, String)>>,
+    saved: Mutex<Vec<PathBuf>>,
+}
+
+impl StubPool {
+    fn with_ready(ready: bool) -> Self {
+        Self {
+            ready: AtomicBool::new(ready),
+            ..Self::default()
+        }
+    }
+
+    fn ready_for_count(&self) -> usize {
+        self.ready_for_calls.load(Ordering::SeqCst)
+    }
+
+    fn did_change_count(&self) -> usize {
+        self.did_change_calls.load(Ordering::SeqCst)
+    }
+
+    fn did_save_count(&self) -> usize {
+        self.did_save_calls.load(Ordering::SeqCst)
+    }
+
+    fn calls(&self) -> Vec<SyncCall> {
+        self.calls.lock().clone()
+    }
+
+    fn changed(&self) -> Vec<(PathBuf, String)> {
+        self.changed.lock().clone()
+    }
+
+    fn saved(&self) -> Vec<PathBuf> {
+        self.saved.lock().clone()
+    }
+
+    /// 替身按契约回应：ready 才有 Ok，否则 `NoServer`（与真实端口一致）
+    fn sync_result(&self) -> Result<(), LspSyncError> {
+        if self.ready.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(LspSyncError::NoServer)
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl LspPoolPort for StubPool {
@@ -78,6 +145,28 @@ impl LspPoolPort for StubPool {
     }
 
     async fn shutdown(&self) {}
+
+    fn ready_for(&self, _path: &std::path::Path) -> bool {
+        self.ready_for_calls.fetch_add(1, Ordering::SeqCst);
+        self.calls.lock().push(SyncCall::ReadyFor);
+        self.ready.load(Ordering::SeqCst)
+    }
+
+    async fn did_change(&self, path: &std::path::Path, text: &str) -> Result<(), LspSyncError> {
+        self.did_change_calls.fetch_add(1, Ordering::SeqCst);
+        self.calls.lock().push(SyncCall::DidChange);
+        self.changed
+            .lock()
+            .push((path.to_path_buf(), text.to_string()));
+        self.sync_result()
+    }
+
+    async fn did_save(&self, path: &std::path::Path) -> Result<(), LspSyncError> {
+        self.did_save_calls.fetch_add(1, Ordering::SeqCst);
+        self.calls.lock().push(SyncCall::DidSave);
+        self.saved.lock().push(path.to_path_buf());
+        self.sync_result()
+    }
 }
 
 /// 端口 downcast 往返：upcast 为 Arc<dyn LspPoolPort> 后经 downcast_arc
@@ -100,12 +189,200 @@ fn test_lsp_pool_port_downcast_roundtrip() {
 /// 类型不匹配：downcast 失败返回原端口句柄（仍可调用 shutdown）。
 #[tokio::test]
 async fn test_lsp_pool_port_downcast_mismatch_returns_original() {
-    let port: Arc<dyn LspPoolPort> = Arc::new(StubPool);
+    let port: Arc<dyn LspPoolPort> = Arc::new(StubPool::default());
     let err = match port.downcast_arc::<LspServerPool>() {
         Ok(_) => panic!("类型不匹配时应还原失败"),
         Err(p) => p,
     };
     err.shutdown().await;
+}
+
+/// L-02 门禁用例（A30）：`ready_for` 反映**路由 server 的真实就绪状态**——
+/// 无路由 / 未 ready ⇒ `false` 且 `did_change` / `did_save` 返回 `Err(NoServer)`；
+/// 有路由且 ready ⇒ `true`。同时证明 ready 判定与失败的同步调用都不启动
+/// language server（无副作用）。
+#[tokio::test]
+async fn port_ready_for_reflects_routed_server_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let count_file = dir.path().join("spawns");
+    let pool: Arc<LspServerPool> = Arc::new(make_fake_pool(&count_file));
+    let port: Arc<dyn LspPoolPort> = pool.clone();
+
+    let routed = dir.path().join("main.rs");
+    let unrouted = dir.path().join("readme.md");
+
+    // ① 无路由：没有可路由的 server
+    assert!(
+        !port.ready_for(&unrouted),
+        "无路由文件 ready_for 必须为 false"
+    );
+    assert_eq!(
+        port.did_change(&unrouted, "let x = 1;\n")
+            .await
+            .unwrap_err(),
+        LspSyncError::NoServer
+    );
+    assert_eq!(
+        port.did_save(&unrouted).await.unwrap_err(),
+        LspSyncError::NoServer
+    );
+
+    // ② 有路由但 client 未就绪（尚未启动）
+    assert!(
+        !port.ready_for(&routed),
+        "服务器未就绪时 ready_for 必须为 false"
+    );
+    let error = port.did_change(&routed, "let x = 1;\n").await.unwrap_err();
+    assert_eq!(error, LspSyncError::NoServer);
+    assert_eq!(
+        port.did_save(&routed).await.unwrap_err(),
+        LspSyncError::NoServer
+    );
+    // 错误文本只进 debug 日志，不进模型面：不得携带路径 / env / 凭据
+    let rendered = format!("{error}|{error:?}");
+    assert!(
+        !rendered.contains("main.rs"),
+        "错误文本不得泄露路径: {rendered}"
+    );
+
+    // ③ ready 判定与失败的同步调用都不得拉起 language server
+    assert!(
+        !count_file.exists(),
+        "ready_for / 失败的 did_change / did_save 不得启动任何 language server"
+    );
+
+    // ④ 有路由且 ready
+    pool.ensure_server_for_file(&routed.to_string_lossy())
+        .await
+        .unwrap();
+    assert!(
+        port.ready_for(&routed),
+        "路由 server 就绪后 ready_for 必须为 true"
+    );
+
+    // ⑤ 同一路由文件在 pool 关闭后重新变为未 ready
+    pool.shutdown().await;
+    assert!(
+        !port.ready_for(&routed),
+        "pool 关闭后 ready_for 必须为 false"
+    );
+}
+
+/// 端口路由与参数（A30）：`did_change` / `did_save` 做 path → `file://` URI 转换、
+/// `text` 原样透传，且同一调用内 change 通知先于 save 通知到达服务器；端口替身
+/// 以**调用计数与顺序**断言（不以「未报错」替代），确保替身不是静默 no-op。
+#[tokio::test]
+async fn port_did_change_and_did_save_route_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let count_file = dir.path().join("spawns");
+    let documents_file = dir.path().join("documents");
+    let pool: Arc<LspServerPool> = Arc::new(make_recording_pool(&count_file, &documents_file));
+    let port: Arc<dyn LspPoolPort> = pool.clone();
+
+    let path = dir.path().join("main.rs");
+    let text = "fn main() { let x = 1; }\n";
+
+    pool.ensure_server_for_file(&path.to_string_lossy())
+        .await
+        .unwrap();
+    assert!(
+        port.ready_for(&path),
+        "已就绪的路由文件 ready_for 必须为 true"
+    );
+
+    // 首次同步按既有语义转 didOpen（`peri-lsp/src/client/documents.rs` did_change
+    // 的首次分支，本波不改协议行为）：先让它落盘并清空记录，使被断言的窗口恰好是
+    // 「一次 change + 一次 save」。
+    port.did_change(&path, "fn main() {}\n")
+        .await
+        .expect("首次同步必须成功");
+    wait_recorded_documents(&documents_file, 1).await;
+    std::fs::write(&documents_file, "").unwrap();
+
+    port.did_change(&path, text)
+        .await
+        .expect("did_change 必须成功");
+    port.did_save(&path).await.expect("did_save 必须成功");
+
+    // ① 真实端口：服务器收到的通知序列 = change 后 save，URI 与文本正确
+    let documents = wait_recorded_documents(&documents_file, 2).await;
+    let methods: Vec<&str> = documents
+        .iter()
+        .map(|d| d["method"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        methods,
+        vec!["textDocument/didChange", "textDocument/didSave"],
+        "同一调用内必须 change 先于 save"
+    );
+    assert_eq!(
+        documents
+            .iter()
+            .filter(|d| d["method"] == "textDocument/didChange")
+            .count(),
+        1,
+        "did_change 必须恰好发出一条 change 通知"
+    );
+    assert_eq!(
+        documents
+            .iter()
+            .filter(|d| d["method"] == "textDocument/didSave")
+            .count(),
+        1,
+        "did_save 必须恰好发出一条 save 通知"
+    );
+
+    let expected_uri = path_to_uri(&path);
+    assert!(expected_uri.starts_with("file://"));
+    assert!(expected_uri.ends_with("/main.rs"));
+    for document in &documents {
+        assert_eq!(
+            document["params"]["textDocument"]["uri"].as_str().unwrap(),
+            expected_uri,
+            "端口必须把文件系统 path 转成 file:// URI（不是把裸 path 当 URI）"
+        );
+    }
+    assert_eq!(
+        documents[0]["params"]["contentChanges"][0]["text"]
+            .as_str()
+            .unwrap(),
+        text,
+        "text 必须原样透传"
+    );
+
+    // ② 端口替身：调用计数、顺序与参数
+    let stub = Arc::new(StubPool::with_ready(true));
+    let stub_port: Arc<dyn LspPoolPort> = stub.clone();
+    assert!(stub_port.ready_for(&path));
+    stub_port
+        .did_change(&path, text)
+        .await
+        .expect("ready 替身的 did_change 必须成功");
+    stub_port
+        .did_save(&path)
+        .await
+        .expect("ready 替身的 did_save 必须成功");
+
+    assert_eq!(stub.ready_for_count(), 1, "ready_for 必须被调用恰 1 次");
+    assert_eq!(stub.did_change_count(), 1, "did_change 必须被调用恰 1 次");
+    assert_eq!(stub.did_save_count(), 1, "did_save 必须被调用恰 1 次");
+    assert_eq!(
+        stub.calls(),
+        vec![SyncCall::ReadyFor, SyncCall::DidChange, SyncCall::DidSave],
+        "调用顺序必须是 ready_for → did_change → did_save"
+    );
+    assert_eq!(
+        stub.changed(),
+        vec![(path.clone(), text.to_string())],
+        "did_change 必须收到原样 path 与 text"
+    );
+    assert_eq!(
+        stub.saved(),
+        vec![path.clone()],
+        "did_save 必须收到原样 path"
+    );
+
+    pool.shutdown().await;
 }
 
 #[test]
@@ -234,6 +511,108 @@ fn make_fake_pool(count_file: &std::path::Path) -> LspServerPool {
             lsp_servers: servers,
         },
     )
+}
+
+/// 同 `FAKE_LSP_SCRIPT`，另将收到的 `textDocument/*` 通知逐行落盘到
+/// `$ENV{PERI_LSP_TEST_DOCUMENTS}`（端口同步的 uri / 顺序 / 文本断言用）。
+const FAKE_LSP_SCRIPT_RECORDING_DOCUMENTS: &str = r#"open my $c, '>>', $ENV{PERI_LSP_TEST_COUNT} or exit 1;
+print $c "spawned\n";
+close $c;
+binmode STDIN;
+select STDOUT;
+$| = 1;
+while (1) {
+    my $h = '';
+    while (1) {
+        my $l = <STDIN>;
+        last unless defined $l;
+        last if $l =~ /^\r?\n$/;
+        $h .= $l;
+    }
+    my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
+    last unless defined $len;
+    my $b = '';
+    while (length($b) < $len) {
+        my $n = read(STDIN, my $part, $len - length($b));
+        exit 1 unless $n;
+        $b .= $part;
+    }
+    if ($b =~ /"method":"textDocument\//) {
+        open my $d, '>>', $ENV{PERI_LSP_TEST_DOCUMENTS} or exit 1;
+        print $d $b . "\n";
+        close $d;
+    }
+    if ($b =~ /"id"\s*:\s*(\d+)/) {
+        my $r = '{"jsonrpc":"2.0","id":' . $1 . ',"result":null}';
+        print "Content-Length: " . length($r) . "\r\n\r\n" . $r;
+    }
+}"#;
+
+/// 构造记录 `textDocument/*` 通知的 fake pool（仅 .rs 路由）
+fn make_recording_pool(
+    count_file: &std::path::Path,
+    documents_file: &std::path::Path,
+) -> LspServerPool {
+    let mut env = HashMap::new();
+    env.insert(
+        "PERI_LSP_TEST_COUNT".to_string(),
+        count_file.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "PERI_LSP_TEST_DOCUMENTS".to_string(),
+        documents_file.to_string_lossy().into_owned(),
+    );
+    let mut servers = HashMap::new();
+    servers.insert(
+        "fake-lsp".to_string(),
+        LspServerConfig {
+            name: "fake-lsp".to_string(),
+            command: "perl".to_string(),
+            args: vec![
+                "-e".to_string(),
+                FAKE_LSP_SCRIPT_RECORDING_DOCUMENTS.to_string(),
+            ],
+            env: Some(env),
+            extension_to_language: HashMap::from([(".rs".to_string(), "rust".to_string())]),
+            initialization_options: None,
+            disabled: None,
+            max_restarts: None,
+            startup_timeout: None,
+            source: None,
+        },
+    );
+    LspServerPool::new(
+        "/tmp",
+        LspConfigFile {
+            lsp_servers: servers,
+        },
+    )
+}
+
+/// 已落盘的 `textDocument/*` 通知（半行/未完成写入直接跳过）
+fn recorded_documents(documents_file: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(documents_file)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect()
+}
+
+/// 等待 fake server 落盘至少 `expected` 条通知：客户端写完成 ≠ 服务器已处理
+async fn wait_recorded_documents(documents_file: &std::path::Path, expected: usize) -> Vec<Value> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let documents = recorded_documents(documents_file);
+        if documents.len() >= expected {
+            return documents;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fake server 未在超时内落盘 {expected} 条 textDocument 通知（实收 {}）",
+            documents.len()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 }
 
 /// 同 FAKE_LSP_SCRIPT，另将子进程 PID 写入 `$ENV{PERI_LSP_TEST_PID}`（生命周期断言用）

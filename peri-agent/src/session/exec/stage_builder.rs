@@ -118,7 +118,8 @@ pub struct StageBuildInput {
     pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
     /// LSP 服务器配置
     pub lsp_servers: Vec<LspServerConfig>,
-    /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例）
+    /// **host 共享** LSP pool 句柄（由宿主装配单次构造并注入，session 不创建也不
+    /// 销毁）；None = 无 host pool ⇒ 链上不装 `LspSyncMiddleware`。
     pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
     /// Workflow executor（Some 时注册 Workflow 中间件）
     pub workflow_executor: Option<Arc<dyn AgentExecutor>>,

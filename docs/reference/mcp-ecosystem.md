@@ -18,7 +18,7 @@
 - [6. MCP Apps：交互式 UI 扩展（SEP-1865）](#6-mcp-apps交互式-ui-扩展sep-1865)
 - [7. skills：技能发现与加载](#7-skills技能发现与加载)
 - [8. 外部接入指引](#8-外部接入指引)
-- [9. peri 内部落地现状与路径](#9-peri-内部落地现状与路径)
+- [9. peri 内部落地现状与路径](#9-peri-内部落地现状与目标路径)
 - [10. 参考](#10-参考)
 
 ## 1. 背景与术语
@@ -131,11 +131,15 @@ tools 原语在两个协议版本中基本兼容。2026-07-28 的新增与调整
 
 **例外**：声明为启动依赖的 server 用 `system_mcp_tools` 指名必需工具（配置语义见 §9.2）；这些工具的目标行为是不经 tool search、直接进入 RCRA 工具列表，契约见 `docs/design/mcp-adaptation-v4-part-1.md`。其余 MCP 工具仍全部落在 deferred 面。
 
+**内置实例（builtin）**：peri 自带的 Web / Artifact / Cron / LSP / Workspace 能力同样以 MCP 实例形态提供，只是 server 与 client 同进程——五个实例 `web`（`WebSearch` / `WebFetch`）、`artifact`（`artifact`）、`cron`（`cron_register` / `cron_list` / `cron_remove`）、`lsp`（`LSP`）、`workspace`（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）由本地默认配置层自动注入。`web` / `artifact` / `workspace` 的十个工具逐工具声明为 **direct**，其模型面名字直接进入 LLM tools 参数，不经 tool search；`cron` 与 `lsp` 的四个工具一律声明为 **deferred**（`direct: false` 且无提示词声明模板），只经 `SearchExtraTools` 发现、`ExecuteExtraTool` 执行，`system_mcp_tools` 为空数组 ⇒ 不被提升为 direct。名字、关闭语义、保留名与环境开关见 §9.8。
+
 ### 3.3 桥接与命名
 
 MCP 工具经 `McpToolBridge`（`peri-middlewares/src/mcp/tool_bridge.rs`）包装为 `BaseTool`：
 
-- **命名**：`mcp__<server>__<tool>`，server / tool 名经 sanitize（非 `[a-zA-Z0-9_-]` 字符替换为 `_`），与 skills 命名（`mcp__<server>__<skill>`）同规则，避免前缀冲突。
+- **命名**：普通 MCP 工具与 deferred MCP 工具使用 `mcp__<server>__<tool>`，server / tool 名经 sanitize（非 `[a-zA-Z0-9_-]` 字符替换为 `_`），与 skills 命名（`mcp__<server>__<skill>`）同规则。被 `system_mcp_tools` 选中的工具以 wire 原始工具名注入模型面。
+- **内置实例工具名**：builtin `web`、`artifact`、`workspace` 的 direct 工具以原始名出现在模型面（`WebSearch`、`WebFetch`、`artifact`、`Read`、`Write`、`Edit`、`Glob`、`Grep`、`folder_operations`、`Bash`）；builtin `cron` / `lsp` 保持 deferred，分别使用 `mcp__cron__<tool>` 与 `mcp__lsp__LSP`。普通 system MCP 的选中工具同样使用原始名，其余工具仍带前缀。MCP wire `tools/call.name` 始终使用原始工具名，原名注入不创建前缀别名。
+- **按绑定来源判定与匹配**：权限按工具来源和原始工具身份处理；未知或外部 MCP 工具不能因名称恰为 `Read`、`Write` 或 `Bash` 获得 builtin 权限。工具名匹配按实际模型可见名进行，不合成额外可调用别名。
 - **描述**：加 `[MCP:<server>]` 前缀，指明来源 server。
 - **参数**：透传 MCP 工具的 `inputSchema`。
 - **调用**：`invoke` 走 MCP client 的 `tools/call`，超时 120s；输出超过 2000 行时截断落盘（`persist_truncated_output`，见 4.5）。
@@ -246,7 +250,7 @@ peri 侧现状：资源读取已由 `McpResourceTool`（`mcp_read_resource`，`p
 
 - **`https://` 直拉**：协议允许 client 绕过 server 直接下载（协议特性），server 只负责给出 URI；下载由 host 完成，不占模型上下文。
 - **二进制 blob 落盘 / 直渲**：`McpResourceTool` 对 blob 内容只返回 `<N bytes of binary data>` 占位——原始字节不进上下文；`user` audience 的图片 / 图表由 view 层直接渲染（4.3 场景 5）。
-- **超长文本落盘**：超过 2000 行的文本输出走 `persist_truncated_output`（`peri_agent::agent::async_tasks`）→ 落盘 `$TMPDIR/peri-tool-output-<uuid>.txt`，模型拿到文件路径，按需用 Read 工具读取。
+- **超长文本落盘**：超过 2000 行的文本输出走 `persist_truncated_output`（`peri_agent::agent::async_tasks`）→ 落盘 `$TMPDIR/peri-tool-output-<uuid>.txt`，模型拿到文件路径，指引文案按**模型面名字**（builtin `workspace` 实例的原名 `Read`，由绑定来源解析目标）引导读取。
 - **MCP Apps HTML**：`ui://` 由 host 拉取后本地渲染（第 6 章），HTML 本身不进模型。
 
 一句话：**大内容 / 二进制走「落盘 + 路径引用」，小文本走「上下文注入」，渲染类走「view 直拉」**——三条通道都不需要 model 中转。
@@ -572,6 +576,9 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 ### 9.1 当前代码事实
 
 - MCP client 已进入 peri 主代码（`peri-middlewares/src/mcp/`，基于 rmcp）：tools 桥接、资源读取（`mcp_read_resource`）、OAuth、重连，以及由 `PERI_MCP_APPS` 启用的 stdio Apps relay 均已落地；Web Host、iframe 与 TUI Apps 渲染不属于 relay。
+- **Web / Artifact 已迁为 builtin 实例（2026-09-26，wave 1）**：`web` / `artifact` 不再由 middleware 提供，改为 peri 自身的两个**同进程** MCP 实例（`TransportConfig::Builtin`：`tokio::io::duplex` + `rmcp::serve_server`），由默认配置层注入为 `system_mcp = true` 条目；`WebMiddleware` / `ArtifactMiddleware` 与四个链挂载点已删除，middleware 链不再有 Web / Artifact 槽位。名字、关闭语义、保留名与环境开关见 §9.8。
+- **Cron / LSP 已迁为 builtin 实例（2026-09-26，wave 2）**：`cron` 与 `lsp` 同样改为同进程 MCP 实例。`ChainSlot::Cron` 与 `peri-middlewares/src/cron/middleware.rs` 已删除，`CronMiddleware` 由链槽位名改为 `cron` 实例的策略键；`ChainSlot::Lsp` **保留**，但只挂薄同步中间件 `LspSyncMiddleware`（落盘后经 `LspPoolPort` 发 `didChange` → `didSave`，`collect_tools` 为空），LSP 工具面由 `lsp` 实例提供，`LspMiddleware` 成为实例策略键、`LspSyncMiddleware` 成为新的链槽位名。四个工具（`cron` 三个 + `LSP`）一律 deferred，不进入 LLM tools 参数；配置、关闭语义与多 cwd 退化见 §9.8。
+- **Workspace 已迁为 builtin 实例（2026-09-27，wave 3）**：7 个本地工具（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）改由同进程 `workspace` 实例提供（模型面使用原始工具名，全部 direct）。`FilesystemMiddleware` / `TerminalMiddleware`、`peri-middlewares/src/middleware/filesystem.rs` 与 `ChainSlot::Filesystem` / `ChainSlot::Terminal` 已删除，`FilesystemMiddleware` / `TerminalMiddleware` 由链槽位名改为实例策略键 `WorkspaceMiddleware`。工具实现本身保留复用（6 个文件工具在 `peri-middlewares/src/tools/filesystem/`、`BashTool` 在 `peri-middlewares/src/middleware/terminal.rs`），实例 handler 只做包装。session 级输入（per-session `TaskManager` + session 级 `on_bg_complete`）经 `WorkspaceInstanceInput` 直达 `BashTool`：会话环境装配（`SessionEnvironment::assemble`，`peri-acp/src/host/workspace.rs`）在构造 `HostAssemblyInput` **之前**产生这两名成员并传 `Some`——TUI / print / stdio 三路径的每个会话都经此，会话内的 `Bash` 因此保有后台能力（运行时证据：print 路径 `sleep 150` 在无 `timeout` 字段下被提升为后台任务）。`None` 只出现在**没有单一会话可归属**的装配层级：把 `session_resources=true` 的配置直接当 server root 的 1:N 形态（root 调用方传 `None`，N 个会话共享一份无 session 输入的上下文），此时 `Bash` 可见但退化（无 `run_in_background`、前台超时不提升为后台任务；登记见 `peri-middlewares/src/mcp/builtin/workspace.rs:35-46`）。另：该实例是这 7 个工具的**唯一提供面**（链槽位已删），故 `--bare` 等不建 MCP 池的装配里 7 个工具整体缺席——`peri-acp/src/host/assemble.rs` 在 `bare || !session_resources` 时不建池，`peri-middlewares/src/assembly/mcp.rs` 与 `assembly/preparation.rs` 的 builtin 桥均以 `Some(pool)` 为前提（W3 前由链上 `FilesystemMiddleware` / `TerminalMiddleware` 提供，与池无关）。
 - **MCP 域查询与技能分发已落地（2026-08-13）**：DiscoverMCP 只读工具（deferred / `meta`，search / list / detail）+ MCP `skill://` 异步发现与命令注入（McpSkillRegistry，session 级，分源合并），形态见 §7.4。
 - **MCP Apps relay**：实际行为与安全边界以 `docs/design/mcp-multiplexing.md`、对应代码和契约测试为准。
 - **MCP 通知（server → client）已实现**：2026-07-28 `subscriptions/listen` 全链路在 peri 主代码落地——`McpClientPool` 按 `McpSubscriptionsConfig`（`resources` URI 列表 + tools / prompts / resources 三个 list_changed 开关）协商协议并建立长流（`setup_subscription`），消费循环（`spawn_subscription_loop`）把 `notifications/resources/updated` 以 `<system-reminder><mcp-subscription …/>` Defer 消息注入会话 inbox 并唤醒 agent（字段经 XML 转义防注入）；list_changed 系列由 rmcp peer 内部失效缓存，不进 agent。订阅通知默认进 agent，不进 view。
@@ -616,6 +623,8 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 
 非法配置一律向上传播，不降级为空配置、不当作「未安装」跳过；`disabled = true` 也不绕过校验。三层合并仍是 global < plugin < project，System MCP 不参与跨来源内容 hash 去重（namespace 归属不得因内容相同而消失）。三个 key 只表达启动依赖等级与必需工具清单，不改变 MCP 实例隔离（见「MCP 运行形态」与「最小 MCP 隔离设计」）。
 
+**builtin 实例是本节 key 的自动使用者**：五个实例由默认配置层补上 `system_mcp = true` 与 `system_mcp_tools`——`web` / `artifact` / `workspace` 的值为该实例声明为 direct 的原始工具名（`WebSearch` / `WebFetch` / `artifact` / `Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`），`cron` / `lsp` 的值为**空数组** `[]`（该实例的工具全部 deferred，零提升，只保留 1R readiness 要求）。用户不需要（也不应）手写这三个 key；如要关闭或覆盖，写法与拒绝规则见 §9.8。
+
 ### 9.3 信道划分（已定稿）
 
 传输层为纯 JSON-RPC 2.0（Request / Notification / Response）。MCP Apps 数据到达下游的 contract 见 `docs/design/mcp-multiplexing.md`：外层 ACP envelope、Apps payload id 与 ACP id 分离、connection-owned App session、错误分层和 lifecycle。
@@ -654,7 +663,7 @@ peri 作为 MCP client，对照 2026-07-28 协议能力面的支持度与路线�
 | Resources（list / read + `skill://`） | ✅ 完整 | — | 含技能注入（§7.4） |
 | Subscriptions（2026-07-28 `listen`） | ✅ 完整 | — | 通知进 agent 不进 view |
 | 自定义通知（双向） | ✅ 完整 | — | `on_custom_notification` + `send_custom_notification` |
-| 连接 / 传输 / OAuth / 重连 | ✅ 完整 | — | stdio + Streamable HTTP |
+| 连接 / 传输 / OAuth / 重连 | ✅ 完整 | — | stdio + Streamable HTTP + builtin（同进程实例，§9.8） |
 | Prompts（list / get） | ❌ 未实现 | **不做（永远）** | server 的 prompt 不可达 |
 | Sampling | ❌ 未实现（显式拒绝 `-32601`） | **不做（永远）** | server 请求 LLM 直接失败 |
 | Roots | ❌ 未实现 | **不做（永远）** | 不向 server 暴露工作目录 |
@@ -668,6 +677,73 @@ peri 作为 MCP client，对照 2026-07-28 协议能力面的支持度与路线�
 
 **决策记录**：Prompts / Sampling / Roots / Tasks 明确不做（2026-08-14）；MCP Apps 当前仅设计 Peri stdio relay，Web Host/iframe 永久留给下游；WebSocket transport 维持隔离。
 
+### 9.8 Builtin MCP 实例：名字、关闭语义与保留名（2026-09-26 wave 1 + wave 2；2026-09-27 wave 3）
+
+peri 自带的 Web / Artifact / Cron / LSP / Workspace 能力不是 middleware 提供面，而是 peri 自身的五个**同进程** MCP 实例：`web`（`WebSearch` / `WebFetch`）、`artifact`（`artifact`）、`cron`（`cron_register` / `cron_list` / `cron_remove`）、`lsp`（`LSP`）与 `workspace`（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）。它们经 `TransportConfig::Builtin`（进程内 `duplex` + `rmcp::serve_server`）接入与外部 server **完全相同**的连接、发现与提升链路：真实 `tools/list` 才提交 ready，工具仍经 `McpToolBridge` 包装，并沿用审批、事件投影与 cancel。
+
+| 实例（配置 key / server name） | 原始工具名（wire · 配置 · 审批判定） | 模型面名字（LLM tools · 事件 · transcript） | 直连性 | 关闭策略键 |
+| --- | --- | --- | --- | --- |
+| `web` | `WebSearch` | `WebSearch` | direct | `WebMiddleware` |
+| `web` | `WebFetch` | `WebFetch` | direct | `WebMiddleware` |
+| `artifact` | `artifact` | `artifact` | direct | `ArtifactMiddleware` |
+| `cron` | `cron_register` | `mcp__cron__cron_register` | deferred | `CronMiddleware` |
+| `cron` | `cron_list` | `mcp__cron__cron_list` | deferred | `CronMiddleware` |
+| `cron` | `cron_remove` | `mcp__cron__cron_remove` | deferred | `CronMiddleware` |
+| `lsp` | `LSP` | `mcp__lsp__LSP` | deferred | `LspMiddleware` |
+| `workspace` | `Read` | `Read` | direct | `WorkspaceMiddleware` |
+| `workspace` | `Write` | `Write` | direct | `WorkspaceMiddleware` |
+| `workspace` | `Edit` | `Edit` | direct | `WorkspaceMiddleware` |
+| `workspace` | `Glob` | `Glob` | direct | `WorkspaceMiddleware` |
+| `workspace` | `Grep` | `Grep` | direct | `WorkspaceMiddleware` |
+| `workspace` | `folder_operations` | `folder_operations` | direct | `WorkspaceMiddleware` |
+| `workspace` | `Bash` | `Bash` | direct | `WorkspaceMiddleware` |
+
+`web` / `artifact` / `workspace` 的十个工具是 **direct**（直接进 LLM tools 参数，不经 tool search，§3.2），模型面使用原始名；`cron` / `lsp` 的四个工具是 **deferred**——只经 `SearchExtraTools` 发现、`ExecuteExtraTool` 执行，且 `system_mcp_tools` 为空数组，不会被提升成 direct。普通 MCP 的工具名仍使用 `mcp__<server>__<tool>`。MCP wire 上的 `tools/call.name` 始终是原始工具名。
+
+模型可见名发生冲突时，启动继续运行并记录 warning；按确定的准入顺序保留先准入者，后续冲突项不覆盖。连接完成先后不参与胜者选择。真实缺失的必需工具和无效 schema 仍使启动失败。`system_mcp_tools: []` 只要求 ready，cron / lsp 的 deferred 行为保持不变。
+
+`lsp` 实例的工具列表按**生效配置**快照：`has_servers()`（合并后的 `lspServers` 非空）为假时工具列表为空，为真即出现，与 language server 进程是否就绪无关；handler 在配置合并之后构造，配置热更新是显式非目标。
+
+**默认注入与用户覆盖**：五个实例由**本地默认配置层**注入，`.mcp.json` 与 `~/.peri/settings.json` 里不需要写任何东西；注入后它们就是普通的 `system_mcp = true` 实例（三 key 语义见 §9.2）。用户仍可为任一实例写配置条目：
+
+- `{"web": {}}`（任何不带 `command` / `url` 的条目）：仍是 builtin 实例，并自动写入 `system_mcp = true` 与 `system_mcp_tools`（`web` / `artifact` / `workspace` 为该实例声明为 direct 的工具名，`cron` / `lsp` 为 `[]`，均不做字段级深合并）。效果是沿用声明表的直连性、**不会**被配置改写：`web` / `artifact` / `workspace` 不会从 direct 静默降级为 deferred，`cron` / `lsp` 也不会因为没有工具名而被提升为 direct。
+- `{"web": {"disabled": true}}`：**唯一合法的关闭写法**。实例仍在 pool 中，状态为 `Disabled`（`ClientStatus`），不构成 system 启动依赖；其它实例与其它 capability 不受影响。
+- `{"web": {"disabled": true, "system_mcp": true}}`：**加载期拒绝**（typed error），不会启动。禁用与「声明为 system 依赖」互斥——若不拒绝，该组合会走到 readiness 的 fatal 并阻断**所有** session。
+- 给保留名声明 `command` / `url`（试图用外部进程接管这个名字）：**加载期拒绝**（typed error，错误文本只含实例名）。
+
+**保留实例名**：`web` / `artifact` / `cron` / `lsp` / `workspace` 均已实现（wave 3 后无「预留但未实现」的保留名，`BUILTIN_RESERVED_INSTANCE_NAMES` 恰为这五个）。任一保留名都不得被配置用 `command` / `url` 接管：这些名字参与「按原始名判定」的审批与关闭语义，外部同名 server 一旦接管就会继承 builtin 一等工具的判定结果（静默移除 `mcp__*` 审批门），因此加载期即拒绝。该拒绝与非法关闭片段的拒绝都是**与 `PERI_MCP_BUILTIN` 无关**的加载期校验：即使把 env 置为 off，两类非法输入仍报 typed error。
+
+**关闭的三条路径**：关闭必须在同一 turn 的同一份 frozen policy 下**同时**从四个用户可观察面移除该实例的工具——首个 LLM 请求的 `tools`、tool search（`SearchExtraTools`）的 deferred 目录与检索结果、子 agent 继承面（`parent_tools`）、workflow agent 的工具列表。五个实例里 `web` / `artifact` / `workspace` 的 direct 工具会真实出现在后两面（`workspace` 的 7 项全部 direct）；`cron` / `lsp` 的工具是 deferred，而后两面只收 direct bridge，对这两个实例后两面**平凡成立**——不是被过滤掉，而是本来就不在那里。
+
+1. **MetaHarness 策略键**（会话级）：`"WebMiddleware": false` / `"ArtifactMiddleware": false` / `"CronMiddleware": false` / `"LspMiddleware": false` / `"WorkspaceMiddleware": false`。五键不再是链槽位名（`MIDDLEWARE_NAMES` 只含链槽位名），而是 builtin 实例关闭键（`BUILTIN_INSTANCE_POLICY_KEYS`）；两表并集才是「已知键」集合，因此旧配置里的这五键**不会**被当成未知键忽略（未知键才是 warn + 忽略；`FilesystemMiddleware` / `TerminalMiddleware` 这两个旧键在 wave 3 后已是未知键，写它们只 warn 不生效）。LSP 另有一个**同名易混但语义不同**的键：`"LspSyncMiddleware": false` 是链槽位名（文档同步中间件），只关同步、不关 LSP 工具面；`"LspMiddleware": false` 是实例策略键，关工具面**且**关同步目标（见下表）。
+2. **用户配置**（实例级）：`{"web": {"disabled": true}}` 等，任一实例同理。
+3. **环境开关**（进程级紧急闸门）：`PERI_MCP_BUILTIN`。
+
+**关闭语义矩阵（五个维度分开看）**：可见性 / LSP 同步 / cron tick / readiness / 物理生命周期各自独立——策略键关闭**不是**物理销毁，「保留 handler / pool / readiness」只对策略键成立。
+
+| 操作 | 工具可见性 | LSP 同步目标 | cron tick | readiness | 物理生命周期 |
+| --- | --- | --- | --- | --- | --- |
+| `CronMiddleware: false` | cron 三工具关闭 | 不适用 | 保持运行 | 保持 1R ready | 不销毁实例 / scheduler / supervisor |
+| `LspMiddleware: false` | LSP 工具关闭 | **关闭**（不再读文件、不发通知） | 不适用 | 保持 1R ready | 不销毁 host LSP pool |
+| `LspSyncMiddleware: false` | LSP 工具仍可见 | 仅同步关闭 | 不适用 | 不变 | 不关闭 host LSP pool |
+| `WorkspaceMiddleware: false` | 该实例的 7 个文件/终端工具从模型面消失（不覆盖 PTC 的 direct Node API、外部 MCP server 与 subagent 的 `WriteSandbox`） | 不适用 | 不适用 | 保持 1R ready | 不销毁实例 / handler |
+| `FilesystemMiddleware` / `TerminalMiddleware` | **无效**（wave 3 后不是已知键 ⇒ warn 后丢弃） | 不适用 | 不适用 | 不变 | 不变 |
+| MCP 配置 `{"<实例>": {"disabled": true}}` | 该实例不连接 | 不适用 | 不 spawn | 不参与 readiness | 注册为 `Disabled` |
+| `PERI_MCP_BUILTIN=off` | 五实例零注入 | 不适用 | 不 spawn | 无 builtin ready 要求 | 无 builtin 对象 |
+| 物理 close / host shutdown | 全部关闭 | 全部停止 | tick cancel + join | host 结束 | transport / supervisor / language server 有界关闭 |
+
+`PERI_MCP_BUILTIN`：缺省或任何非 `off` / `0` 的值 → 注入五个实例；`off` / `0` → **零注入**。它是显式**运维开关**，不是静默降级：off 时 Web / Artifact / Cron / LSP / Workspace 能力**不存在**（middleware 提供面已删除，**不存在**「回退到旧实现」这条路径——文件与终端工具同样没有 middleware 回退面），模型看不到这十四个工具，tool search 里也没有；该变量只影响实例注入，**不**改变策略判定面（审批仍按原始名 parity）。未知取值 warn 后按缺省语义注入全部实例。
+
+**cron 的 tick 归属**：1s tick 在建立该代 builtin transport 时 spawn 一次，并绑定到**该代监督者**（`BuiltinInstanceSupervisor` 持有 `TickGuard`）；`CronMcpServer` 本身不持 tick、`Drop` 只是兜底。关闭走显式 cancel + 有界 join（顺序固定为 tick 先于 server task），reconnect 先停旧代再建新代（每代至多一个驱动）。它由宿主注入的 `tick_enabled`（`drive_cron_tick` 字段的投影）决定是否挂上：`peri-tui/src/launch.rs` 为 `true`，`cli_print` 与 ACP 的 stdio / workspace 宿主为 `false`；TUI 私有 tick（`peri-tui/src/app/cron_state.rs::CronState::spawn_tick_task`）不在该验收范围内。
+
+**LSP pool 作用域与多 cwd 退化（已裁决）**：LSP pool 收为 **host 级唯一**实例——工厂 `peri_middlewares::assembly::create_host_lsp_pool` 已落地，同一个 `Arc` 同时喂给 `lsp` builtin 实例与链上的 `LspSyncMiddleware`。pool 的 `root_uri` 取 host cwd，因此单 cwd 与迁移前**逐字等价**；多 cwd 或一个 host 下多个不同 cwd 的 session **共享同一 host root**，这是**已裁决的功能退化**（原 per-session root 语义不保留）。恢复路径归 wave 3：经 `ToolContext` → MCP 调用上下文恢复 per-session cwd。宿主侧接线已收口：`create_session_lsp_pool` 过渡入口随 H-04 删除，`add_lsp` 只消费 `AssemblyContext::lsp_pool` 投影的端口，不建第二份 pool；host shutdown 对这支唯一句柄 `await` 一次 `shutdown()` 即有界关闭全部 language server，不遍历 session 逐个关。
+
+**权限与匹配按绑定来源处理**。内置工具的审批、编辑与 mutation 规则来自已绑定的 builtin 声明和原始工具身份；相同裸名的外部 MCP 工具不能继承 builtin 规则，未知或外部 MCP 仍走保守审批。hooks matcher、`--disallowed-tools` 与 agent `tools:` 匹配实际模型可见名，不通过前缀/裸名别名扩大匹配面。策略不改写 MCP wire 的 `tools/call.name`，也不创建第二个可调用工具名。 既有 builtin 前缀名只为旧 transcript 显示和配置/过滤输入归一保留，不会注册为执行别名。
+
+**关闭态下仍成立的事实（有意分层）**：用策略键或全局开关关闭时，MCP 面板（`all_server_infos()` / `snapshot()`）仍显示该实例为 connected、`transport_type` 为 `"builtin"`——面板是 pool 级事实，「本 turn 是否注入」是 turn 级策略（用户配置 `disabled: true` 则另按其显式语义注册为 `Disabled`）；关闭不影响就绪判定，也不把有意的关闭报成启动失败。`cron` 的 tick 与 `lsp` 的文档同步同属这一分层：策略键只关本 turn 的可见面（与 LSP 的同步面），实例、handler、scheduler / pool 与 readiness 都保留。
+
+**未验证声明**：capability root 隔离与凭据隔离在 builtin 形态下不可证伪（五个实例同属一个 pool，`capability_profile` 与 execution cwd 都是 pool 级），本文件**不**声称两者已验证。`workspace` 实例同样**未**引入独立 capability root（wave 3 的登记缺口）：7 个文件工具仍可访问 cwd 之外的绝对路径（`resolve_path` 不做包含性检查）、`Bash` 无沙箱。`cron` / `lsp` 的工具错误文本相对迁移前的 `CronError` / `LspToolError` 有已知退化（统一走 MCP `call_tool` 的结果映射），`workspace` 的 7 个工具经桥内 `TOOL_CALL_TIMEOUT` 与 IF-D14 结果映射后，超时错误文本与取消归属也相对迁移前不同（S7）；这些都属已登记的语义变更，不在本文件重复清单。
+
 ## 10. 参考
 
 - MCP 规范（2026-07-28 现行）：https://modelcontextprotocol.io/specification/2026-07-28/
@@ -678,3 +754,5 @@ peri 作为 MCP client，对照 2026-07-28 协议能力面的支持度与路线�
 - 构建教程：https://modelcontextprotocol.io/extensions/apps/build
 - Goose 教程：https://goose-docs.ai/docs/tutorials/building-mcp-apps（draft-spec 手写 client 写法，可见其演进前形态）
 - 2026-07-28 发布说明：https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate（Extensions 框架、Tasks、MCP Apps、授权总览）
+
+2026-09-28 合并安全修订：上述迁移记录中的 workspace 错误退化和统一桥超时已被取代。当前实现保留类型化安全原因与任务/日志/草稿恢复引用；仅 workspace builtin 使用原工具期限，其他 builtin 与外部 MCP 发送与响应共用 120 秒期限。调用取消通知传至 builtin handler，Bash 按会话 owner 收尾；blocking 文件扫描仅协作取消。事实源为 `peri-middlewares/CLAUDE.md` 与 IF-D14，历史探针结果不代表当前行为。

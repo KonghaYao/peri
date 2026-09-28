@@ -229,7 +229,7 @@ pub fn build_v2_subagent_context(
     llm: Box<dyn ReactLLM + Send + Sync>,
     chain: MiddlewareChain,
     tools: Vec<Arc<dyn BaseTool>>,
-    tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    tool_filter: crate::session::tool_catalog::ToolFilter,
     session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
     cwd: &str,
     cancel_token: CancellationToken,

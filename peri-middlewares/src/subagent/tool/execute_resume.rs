@@ -100,7 +100,7 @@ impl super::SubAgentTool {
             (
                 llm,
                 tools,
-                Arc::new(|name: &str| name != "Agent") as Arc<dyn Fn(&str) -> bool + Send + Sync>,
+                Arc::new(|_: &dyn BaseTool| true) as peri_agent::session::tool_catalog::ToolFilter,
                 200,
             )
         } else {

@@ -50,7 +50,7 @@ impl super::SubAgentTool {
             SubagentRunMode::Sync,
             llm,
             tools,
-            Arc::new(|name| name != "Agent"),
+            Arc::new(|_: &dyn BaseTool| true),
             system_prompt,
             Vec::new(),
             cwd.to_string(),

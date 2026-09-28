@@ -5,7 +5,8 @@
 //! 缺省时 revert_files=true（现状 serde default_true 语义保持）。
 //! 定位目标消息后：
 //! 1. 截断 history 到目标消息之前
-//! 2. 从被移除的消息中提取 Write/Edit 工具调用，逆向恢复文件
+//! 2. 从被移除的消息中提取 Write/Edit 工具调用（含 builtin `workspace` 实例的
+//!    effective name，如 `mcp__workspace__Write`），逆向恢复文件
 //! 3. 验证保留消息的 ToolUse/ToolResult 配对完整性
 //! 4. 从 SQLite 持久化中删除被移除的消息
 //! 5. 发送 RewindCompleted 事件通知 TUI 刷新（重建信号，保留原样）
@@ -17,6 +18,7 @@ mod events;
 
 use std::path::Path;
 
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use peri_acp_types::command::{ArgKind, ArgSpec, ArgsSchema, FlagSpec};
 use peri_acp_types::messages::{BaseMessage, ContentBlock, MessageId};
 use tracing::{debug, warn};
@@ -247,9 +249,16 @@ pub(crate) fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> 
         {
             // OpenAI 格式: tool_calls 字段
             for tc in tool_calls {
+                // 归一（[`original_tool_name_of_effective`]，IF-D15 唯一入口）：模型面
+                // 名字可能是 builtin 实例的 effective name（`mcp__workspace__Write` 等），
+                // 不归一则裸名比较静默失效。**归一只在调用点做一次**：判定与
+                // `parse_tool_call` 都消费归一后的名字——后者是纯函数、内部按原始名
+                // match 且自身不归一，故不存在双重归一。
+                // 未命中（未知 / 外部 `mcp__*`）沿用既有保守语义：不收集。
+                let name = original_tool_name_of_effective(&tc.name).unwrap_or(&tc.name);
                 // 短路求值：仅 Write/Edit 才插入 id（副作用只在首次出现时发生）
-                if (tc.name == "Write" || tc.name == "Edit") && seen_ids.insert(tc.id.clone()) {
-                    if let Some(change) = parse_tool_call(&tc.name, &tc.arguments) {
+                if (name == "Write" || name == "Edit") && seen_ids.insert(tc.id.clone()) {
+                    if let Some(change) = parse_tool_call(name, &tc.arguments) {
                         changes.push(change);
                     }
                 }
@@ -264,6 +273,9 @@ pub(crate) fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> 
                     ..
                 } = block
                 {
+                    // 与上方 OpenAI 路径同批归一（两格式行为不得分裂）：单点归一后
+                    // 判定与 `parse_tool_call` 共用同一个名字。
+                    let name = original_tool_name_of_effective(name).unwrap_or(name);
                     // 短路求值：仅 Write/Edit 才插入 id（副作用只在首次出现时发生）
                     if (name == "Write" || name == "Edit") && seen_ids.insert(id.clone()) {
                         if let Some(change) = parse_tool_call(name, input) {

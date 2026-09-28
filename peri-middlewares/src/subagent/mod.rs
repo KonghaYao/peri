@@ -17,6 +17,8 @@ use peri_agent::{
     tools::BaseTool,
 };
 
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
+
 use crate::{
     agent_define::AgentOverrides, claude_agent_parser::ClaudeAgentFrontmatter,
     claude_agent_parser::ToolsValue, parse_agent_file, tools::BoxToolWrapper,
@@ -378,6 +380,33 @@ pub fn scan_agents_with_extra_dirs(
 // 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::agents::AgentCapability`）。
 pub use peri_acp_types::agents::AgentCapability;
 
+/// 按名匹配的候选集合（A4 ⑦ 匹配型归一）：原样（小写化）恒在其中，命中归一表
+/// （[`original_tool_name_of_effective`]，IF-D15 唯一入口）时再补一个原始工具名候选。
+///
+/// 未命中（未知 / 外部 `mcp__*`）时只有一个候选 ⇒ 与迁移前的单名比较逐位一致。
+/// `tools` / `disallowedTools` 声明写裸名（agent.md）而模型面工具名是 effective
+/// name（builtin 一等工具），双侧展开才能命中；名字字面量只在声明表声明一份，
+/// 本模块不复制、不反拆（与 `peri_agent::session::tool_catalog` 的同名函数同语义）。
+pub(crate) fn name_candidates(name: &str) -> Vec<String> {
+    let lowered = name.to_lowercase();
+    match original_tool_name_of_effective(name) {
+        Some(original) => vec![lowered, original.to_lowercase()],
+        None => vec![lowered],
+    }
+}
+
+/// 声明列表（`tools` / `disallowedTools`）是否覆盖名字 `name`——双侧归一候选展开。
+///
+/// 迁移前是两侧 `to_lowercase()` 的直接相等比较；未命中归一表的名字候选集合只有
+/// 一个元素 ⇒ 未命中路径与迁移前逐位一致。`*` 通配由调用方单独处理。
+pub(crate) fn declared_names_cover(declared: &[String], name: &str) -> bool {
+    let candidates = name_candidates(name);
+    declared
+        .iter()
+        .flat_map(|declared_name| name_candidates(declared_name))
+        .any(|declared_candidate| candidates.contains(&declared_candidate))
+}
+
 /// 工具名是否为项目写能力（保守集合，D5）。
 ///
 /// - 显式工具名：`Bash`（echo > file / rm / git commit）、`Write`、`Edit`、
@@ -385,9 +414,16 @@ pub use peri_acp_types::agents::AgentCapability;
 ///   （可定时触发任意 prompt，等价委派执行权）；
 /// - 前缀：`mcp__*`（外部能力，无法静态证明只读）。
 ///
+/// **生效名归一（IF-D6 / A4 判定型）**：builtin 一等工具的 effective name 按其
+/// 原始工具名判定（例如 web 实例 `WebFetch` 的 effective name ⇒ `WebFetch`
+/// ⇒ 非 mutation），否则「按名字判定」的结论会因 `mcp__` 前缀而不等于原始名。命中声明表
+/// （[`original_tool_name_of_effective`]，IF-D15 唯一归一入口）才替换；未命中
+/// （未知 / 外部 `mcp__*`）保持既有保守语义分毫不变。
+///
 /// 匹配大小写不敏感（与 `filter_tools` 一致）。
 fn is_mutation_tool(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let normalized = original_tool_name_of_effective(name).unwrap_or(name);
+    let lower = normalized.to_lowercase();
     matches!(
         lower.as_str(),
         "bash" | "write" | "edit" | "folder_operations" | "cron_register"
@@ -399,6 +435,10 @@ fn is_mutation_tool(name: &str) -> bool {
 /// `mcp__*` 无法用精确 disallowed 排除（`filter_tools` 为精确匹配），
 /// 因此本函数只覆盖可精确排除的核心集合；这是已知局限——readonly 标签
 /// 仅是调度提示，不构成安全边界，最终能力由 filter_tools 真裁剪。
+///
+/// disallowed 侧经 [`declared_names_cover`] 归一候选展开：写裸名
+/// （`disallowedTools: [Bash, Write, …]`）与写 effective name
+/// （`mcp__workspace__Bash` …）都命中 `MUTATION_CORE`。
 fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
     const MUTATION_CORE: [&str; 5] = [
         "bash",
@@ -407,10 +447,9 @@ fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
         "folder_operations",
         "cron_register",
     ];
-    let dis_lower: Vec<String> = disallowed.iter().map(|s| s.to_lowercase()).collect();
     MUTATION_CORE
         .iter()
-        .all(|t| dis_lower.iter().any(|d| d == t))
+        .all(|tool| declared_names_cover(disallowed, tool))
 }
 
 /// 从 Agent frontmatter 推断运行时能力画像（D5：保守 readonly）。
@@ -434,12 +473,9 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
         ToolsValue::List(list) if list.len() == 1 && list[0] == "*" => {
             !core_mutation_tools_fully_disallowed(&disallowed)
         }
-        ToolsValue::List(tools) => {
-            let dis_lower: Vec<String> = disallowed.iter().map(|s| s.to_lowercase()).collect();
-            tools
-                .iter()
-                .any(|t| is_mutation_tool(t) && !dis_lower.iter().any(|d| d == &t.to_lowercase()))
-        }
+        ToolsValue::List(tools) => tools
+            .iter()
+            .any(|tool| is_mutation_tool(tool) && !declared_names_cover(&disallowed, tool)),
     };
 
     AgentCapability {

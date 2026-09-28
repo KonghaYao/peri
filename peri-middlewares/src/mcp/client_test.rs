@@ -1,6 +1,10 @@
 //! Tests for client
 
 use super::*;
+use crate::mcp::builtin::{
+    context::{BuiltinContextError, BuiltinInstanceContext},
+    runtime::BuiltinSpawnError,
+};
 use crate::mcp::oauth_flow::OAuthFailureKind;
 use peri_acp_types::{
     dynamic_mcp::{DynamicMcpIncarnationId, DynamicMcpInstanceKey, DynamicMcpLogicalKey},
@@ -1023,4 +1027,98 @@ async fn test_concurrent_terminal_shutdown_settles_pending_task_subscription_and
     assert_eq!(second_report, repeated_report);
     assert_eq!(close_count.load(Ordering::SeqCst), 1);
     assert!(pool.active_oauth_flow("docs").is_none());
+}
+
+// ─── A33：builtin 实例上下文的一次性注入 / 晚注入 / 缺失 ───────────────────────
+
+/// A33 一次性注入：首次生效；第二次（含传入**同一** `Arc`）typed 拒绝且**不覆盖**首个；
+/// `initialize` 已开始（seal）后的注入一律 `InitializationStarted`。
+///
+/// 「同一 `Arc` 再注入」是明文要求：注入是宿主组合根的单一动作，重复的一律是双装配 bug，
+/// 必须可见——不得因为「对象没变」而静默放行。
+#[test]
+fn builtin_context_injection_is_single_shot() {
+    let pool = McpClientPool::new_pending();
+    assert!(pool.builtin_instance_context().is_none(), "前置：尚未注入");
+
+    let first = Arc::new(BuiltinInstanceContext::new("ctx-one"));
+    assert_eq!(
+        pool.set_builtin_instance_context(Arc::clone(&first)),
+        Ok(()),
+        "首次注入必须成功"
+    );
+    assert_eq!(
+        pool.set_builtin_instance_context(Arc::clone(&first)),
+        Err(BuiltinContextError::AlreadyInjected),
+        "同一 Arc 再注入也是重复注入"
+    );
+    assert_eq!(
+        pool.set_builtin_instance_context(Arc::new(BuiltinInstanceContext::new("ctx-two"))),
+        Err(BuiltinContextError::AlreadyInjected),
+        "换一个上下文对象同样是重复注入"
+    );
+
+    let kept = pool
+        .builtin_instance_context()
+        .expect("首个上下文必须继续生效");
+    assert!(Arc::ptr_eq(&kept, &first), "重复注入不得覆盖首个上下文");
+    assert_eq!(kept.cwd, "ctx-one", "保真的必须是首个上下文的字段");
+
+    // seal 之后的注入：既有上下文不被覆盖。
+    pool.seal_builtin_context();
+    assert_eq!(
+        pool.set_builtin_instance_context(Arc::new(BuiltinInstanceContext::new("ctx-three"))),
+        Err(BuiltinContextError::InitializationStarted),
+        "initialize 已开始后的注入必须被拒绝"
+    );
+    let still = pool
+        .builtin_instance_context()
+        .expect("首个上下文仍必须生效");
+    assert!(Arc::ptr_eq(&still, &first));
+
+    // 未被注入就被封口：拒绝原因是「晚」，不是「重复」（判定顺序冻结）。
+    let sealed_without_context = McpClientPool::new_pending();
+    sealed_without_context.seal_builtin_context();
+    sealed_without_context.seal_builtin_context(); // seal 幂等
+    assert_eq!(
+        sealed_without_context
+            .set_builtin_instance_context(Arc::new(BuiltinInstanceContext::new("ctx-late"))),
+        Err(BuiltinContextError::InitializationStarted),
+        "seal 后的首次注入也必须是晚注入拒绝"
+    );
+    assert!(
+        sealed_without_context.builtin_instance_context().is_none(),
+        "被拒绝的注入不得写入任何上下文"
+    );
+}
+
+/// 上下文缺失时 `spawn_builtin_transport` 必须 typed 收口：不 panic、不降级成别的传输
+/// 形态，错误文本只含实例名（不含路径 / env / 凭据）。
+#[test]
+fn builtin_context_missing_is_typed_error() {
+    let pool = McpClientPool::new_pending();
+    assert!(
+        pool.builtin_instance_context().is_none(),
+        "前置：未注入上下文"
+    );
+
+    let error = pool
+        .spawn_builtin_transport("web")
+        .err()
+        .unwrap_or_else(|| panic!("未注入上下文时不得建立 builtin 链路"));
+    match error {
+        BuiltinSpawnError::ContextMissing { instance } => assert_eq!(instance, "web"),
+        other => panic!("必须是 typed ContextMissing（不得是别的形态），实际: {other:?}"),
+    }
+
+    let text = BuiltinSpawnError::ContextMissing {
+        instance: "web".to_string(),
+    }
+    .to_string();
+    assert!(text.contains("builtin 实例上下文未注入"), "实际: {text}");
+    assert!(text.contains("web"), "错误文本必须含实例名，实际: {text}");
+    assert!(
+        !text.contains('/') && !text.contains('\\'),
+        "错误文本不得含路径，实际: {text}"
+    );
 }

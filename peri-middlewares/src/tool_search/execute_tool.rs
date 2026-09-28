@@ -47,7 +47,10 @@ impl ToolInvocationResolver for ExecuteExtraToolResolver {
         tools: &BTreeMap<String, Arc<dyn BaseTool>>,
     ) -> AgentResult<CanonicalToolInvocation> {
         let outer = self.direct.resolve(raw_call, tools)?;
-        if outer.target.name() != EXECUTE_EXTRA_TOOL_NAME {
+        if outer.target.name() != EXECUTE_EXTRA_TOOL_NAME
+            || outer.target.mcp_server_name().is_some()
+            || outer.target.namespace() != Some("meta")
+        {
             return Ok(outer);
         }
 

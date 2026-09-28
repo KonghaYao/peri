@@ -226,17 +226,53 @@ pub async fn run_before_tools_batch(
     ctx: &StageContext,
     calls: &[crate::agent::react::ToolCall],
 ) -> Vec<crate::error::AgentResult<crate::agent::react::ToolCall>> {
-    let mut cx = make_context_from_stage(ctx);
-    let result = ctx
-        .runtime
+    run_before_bound_tools_batch(ctx, calls, &std::collections::HashMap::new()).await
+}
+
+/// Production approval receives the exact targets already bound by dispatch.
+pub async fn run_before_bound_tools_batch(
+    ctx: &StageContext,
+    calls: &[crate::agent::react::ToolCall],
+    targets: &std::collections::HashMap<String, std::sync::Arc<dyn crate::tools::BaseTool>>,
+) -> Vec<crate::error::AgentResult<crate::agent::react::ToolCall>> {
+    let cx = make_context_from_stage(ctx);
+    let mut state = BoundApprovalState {
+        context: &cx,
+        targets,
+    };
+    ctx.runtime
         .middleware_chain
-        .run_before_tools_batch(&mut cx, calls.to_vec())
-        .await;
-    let rec = cx.drain_recall();
-    if !rec.is_empty() {
-        ctx.recall_buffer.write().extend(rec);
+        .run_before_tools_batch(&mut state, calls.to_vec())
+        .await
+}
+
+struct BoundApprovalState<'a, 'b> {
+    context: &'a AgentContext<'b>,
+    targets: &'a std::collections::HashMap<String, std::sync::Arc<dyn crate::tools::BaseTool>>,
+}
+
+impl hook_state::StateView for BoundApprovalState<'_, '_> {
+    fn cwd(&self) -> &str {
+        MiddlewareState::cwd(self.context)
     }
-    result
+    fn messages(&self) -> &[crate::messages::BaseMessage] {
+        MiddlewareState::messages(self.context)
+    }
+    fn current_step(&self) -> usize {
+        MiddlewareState::current_step(self.context)
+    }
+}
+
+impl hook_state::BeforeToolState for BoundApprovalState<'_, '_> {
+    fn tool_origin(&self, call_id: &str) -> Option<hook_state::BoundToolOrigin> {
+        self.targets
+            .get(call_id)
+            .map(|tool| hook_state::BoundToolOrigin {
+                mcp_server_name: tool.mcp_server_name().map(str::to_owned),
+                mcp_tool_name: tool.mcp_tool_name().map(str::to_owned),
+                builtin_mcp_instance: tool.builtin_mcp_instance().map(str::to_owned),
+            })
+    }
 }
 
 /// 调用 middleware chain 的 `after_tool` 钩子

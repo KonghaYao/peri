@@ -24,6 +24,7 @@
 //! `set_async_owners` 仅 print fallback 使用。
 
 pub mod async_router;
+pub mod bg_complete;
 pub mod config;
 pub mod exec;
 pub mod factory;

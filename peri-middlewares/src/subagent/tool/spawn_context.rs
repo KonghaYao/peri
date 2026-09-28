@@ -74,7 +74,7 @@ impl super::SubAgentTool {
         run_mode: peri_agent::session::subagent::SubagentRunMode,
         llm: Box<dyn ReactLLM + Send + Sync>,
         tools: Vec<Arc<dyn BaseTool>>,
-        tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+        tool_filter: peri_agent::session::tool_catalog::ToolFilter,
         system_prompt: Option<String>,
         skill_names: Vec<String>,
         cwd: String,
@@ -152,7 +152,7 @@ impl super::SubAgentTool {
         max_iterations: usize,
         llm: Box<dyn ReactLLM + Send + Sync>,
         tools: Vec<Arc<dyn BaseTool>>,
-        tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+        tool_filter: peri_agent::session::tool_catalog::ToolFilter,
         session_resources: Arc<dyn SessionResources>,
         cwd: String,
     ) -> SubagentResumeConfig {

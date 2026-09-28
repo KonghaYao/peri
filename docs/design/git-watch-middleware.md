@@ -123,7 +123,7 @@ Sampled after a tool run or turn start. Run `git status` and `git log -1` before
 
 ## 6. 链装配
 
-- `ChainSlot::GitWatch` 位于 `GitAttribution` 与 `Terminal` 之间。
+- `ChainSlot::GitWatch` 位于 `GitAttribution`（#10）与 `Todo`（#11）之间（原 `Terminal` 槽位已随 v4-part-4 wave 3 删除）。
 - `name()`：`GitWatchMiddleware`。
 - Hooks：`before_agent` + `after_tool`（无 `prompt_contribution`）。
 - Workflow agent 路径：与主链一致（与 `GitAttribution` 同路径装配）。

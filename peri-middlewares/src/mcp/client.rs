@@ -18,11 +18,18 @@ mod subscription;
 mod transport;
 mod types;
 
-use super::{config::McpServerConfig, oauth_flow::OAuthFlowEvent};
+use super::{
+    builtin::{
+        context::{BuiltinContextError, BuiltinInstanceContext},
+        runtime::{BuiltinSpawnError, BuiltinTransport, TickGuard, BUILTIN_TICK_INTERVAL},
+    },
+    config::McpServerConfig,
+    oauth_flow::OAuthFlowEvent,
+};
 use lifecycle::ServiceShutdownState;
 use oauth::{OAuthFlowKey, PendingOAuthCallback};
 use peri_acp_types::{
-    mcp::McpSubscriptionPort, ports::McpPoolShutdownReport, session::InboxHandle,
+    builtin_mcp::find, mcp::McpSubscriptionPort, ports::McpPoolShutdownReport, session::InboxHandle,
 };
 use readiness::SystemReadinessTracker;
 use rmcp::model::{Resource, Tool};
@@ -78,6 +85,22 @@ pub struct McpClientPool {
         parking_lot::Mutex<HashMap<String, Vec<(std::sync::Weak<McpClientHandle>, u64)>>>,
     next_handle_generation: std::sync::atomic::AtomicU64,
     pub(crate) services: parking_lot::Mutex<HashMap<String, McpServiceWrapper>>,
+    /// builtin 实例的**代监督者**表（键 = server name，与 `services` 同期登记 / 移除）。
+    ///
+    /// 值是关闭所有权而不是裸 server task：builtin 的 server 半边是本进程内的 task，
+    /// 关闭语义必须显式（有界等待 → 未收敛才 abort），且顺序固定（先停 tick 再收敛
+    /// server task）。不能假设「client service 关闭后它自己会退出」（spike Q2 才有该结论）。
+    /// 冻结：wave 1 **不**新增 `McpTaskKey` 变体，本表独立于 keyed task 作用域。
+    pub(crate) builtin_server_tasks:
+        parking_lot::Mutex<HashMap<String, super::builtin::runtime::BuiltinInstanceSupervisor>>,
+    /// builtin 实例上下文槽（IF-P3-04 / A33）。
+    ///
+    /// 语义是**一次性注入**：宿主装配（`peri-acp`）在 `run_initialize` 之前注入，首次生效；
+    /// 重复注入（含同一 `Arc` 再注入）与「initialize 已开始」后的晚注入都返回 typed 错误。
+    /// 上下文与「initialize 已开始」标志由**同一把短锁**保护——锁内只做读判定与写入、
+    /// 禁止 await，因此两个竞争注入恰好一个成功，且晚注入的判定与 `initialize` 封口
+    /// 之间不存在窗口（`OnceLock::set` 表达不了后半条）。
+    pub(crate) builtin_context: parking_lot::Mutex<BuiltinContextSlot>,
     pub(crate) configs: parking_lot::RwLock<HashMap<String, McpServerConfig>>,
     pub(crate) cache_versions: parking_lot::RwLock<HashMap<String, String>>,
     /// 插件来源旁路表：key 为 server name（如 `"plugin:p1:srv1"`），value 为 `"name@marketplace"`
@@ -123,6 +146,20 @@ pub struct McpClientPool {
     pub(crate) acp_owners: parking_lot::RwLock<HashMap<String, String>>,
 }
 
+/// builtin 实例上下文槽（A33）：上下文与「initialize 已开始」标志由**同一短锁**保护
+/// （锁内禁 await）。
+///
+/// 两件事必须同锁：否则「判重复 → 写上下文」与「封口 → 判晚注入」之间存在竞态，晚注入
+/// 可能挤进已经开始的 initialize。`initialize_started` 一旦置真即不可回退（seal 幂等，
+/// 本类型不提供解封口入口）。
+pub(crate) struct BuiltinContextSlot {
+    /// 已注入的上下文；`None` = 尚未注入（**不是**「不需要上下文」）。
+    context: Option<Arc<BuiltinInstanceContext>>,
+    /// `initialize` 是否已开始（seal 点见 `initialize::run_initialize` /
+    /// `initialize::initialize_config` 的函数体首行）。
+    initialize_started: bool,
+}
+
 pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub(crate) const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -155,6 +192,11 @@ impl McpClientPool {
             handle_generations: parking_lot::Mutex::new(HashMap::new()),
             next_handle_generation: std::sync::atomic::AtomicU64::new(1),
             services: parking_lot::Mutex::new(HashMap::new()),
+            builtin_server_tasks: parking_lot::Mutex::new(HashMap::new()),
+            builtin_context: parking_lot::Mutex::new(BuiltinContextSlot {
+                context: None,
+                initialize_started: false,
+            }),
             configs: parking_lot::RwLock::new(HashMap::new()),
             cache_versions: parking_lot::RwLock::new(HashMap::new()),
             plugin_sources: parking_lot::RwLock::new(HashMap::new()),
@@ -196,6 +238,85 @@ impl McpClientPool {
         let mut pool = Self::new_pending();
         pool.resource_cache = super::resource_cache::McpResourceCache::isolated_for_test();
         pool
+    }
+
+    /// 一次性注入 builtin 实例上下文（IF-P3-04 / A33）：首次生效，失败**不覆盖**既有
+    /// 上下文（错误只报「为什么这一次没生效」）。
+    ///
+    /// 拒绝语义（同一短锁内判定，锁内不 await）：
+    /// - `initialize` 已开始（[`Self::seal_builtin_context`] 已调用）→
+    ///   [`BuiltinContextError::InitializationStarted`]：晚于配置加载窗口的注入无法影响
+    ///   本轮实例装配，接受它只会制造「上下文在，但实例是按旧上下文建的」的假象；
+    /// - 已有上下文（含传入**同一** `Arc` 的再注入）→
+    ///   [`BuiltinContextError::AlreadyInjected`]：注入是宿主组合根的单一动作，重复注入
+    ///   只可能是双装配 bug，必须可见而不是静默覆盖。
+    pub fn set_builtin_instance_context(
+        &self,
+        context: Arc<BuiltinInstanceContext>,
+    ) -> Result<(), BuiltinContextError> {
+        let mut slot = self.builtin_context.lock();
+        if slot.initialize_started {
+            return Err(BuiltinContextError::InitializationStarted);
+        }
+        if slot.context.is_some() {
+            return Err(BuiltinContextError::AlreadyInjected);
+        }
+        slot.context = Some(context);
+        Ok(())
+    }
+
+    /// 封口：标记「`initialize` 已开始」，此后首次注入一律被拒绝（幂等）。
+    ///
+    /// 调用点只有两个（`initialize` 的形状约束），见 `initialize::run_initialize` 与
+    /// `initialize::initialize_config` 的函数体首行。
+    pub(crate) fn seal_builtin_context(&self) {
+        self.builtin_context.lock().initialize_started = true;
+    }
+
+    /// 已注入的上下文（锁内 clone `Arc`；未注入为 `None`）。
+    pub(crate) fn builtin_instance_context(&self) -> Option<Arc<BuiltinInstanceContext>> {
+        self.builtin_context.lock().context.clone()
+    }
+
+    /// builtin 实例的**唯一** spawn 点（IF-P3-04 / A32）：实例解析 → 上下文 → 链路
+    /// 装配 → tick。`initialize` 与 `reconnect` 都只调它，不各自读 cwd / 上下文。
+    ///
+    /// 顺序固定，每一步的错误都不得被后一步掩盖：
+    /// 1. **先解析实例**：未注册实例一律 typed `UnknownInstance`（与 stdio / http 路径的
+    ///    拒绝语义同源），即使此刻上下文缺失也不改报 `ContextMissing`；
+    /// 2. 取上下文：未注入 ⇒ `ContextMissing`（不 panic、不降级成别的传输形态）；
+    /// 3. [`super::builtin::runtime::spawn_builtin_transport_with_context`] 装配：
+    ///    「已注册但缺该类输入」与「handler 尚未接线」是两个不同的 typed 原因；
+    /// 4. tick：仅当注册表名是 `cron`、上下文带 `cron` 输入**且** `tick_enabled` 为真时，
+    ///    为**本代** transport spawn 一个 tick（每 `BUILTIN_TICK_INTERVAL` 一次
+    ///    `scheduler.lock().tick()`，语义与既有宿主 `HostTaskKind::CronTick` 一致）。
+    ///    这是全仓唯一的 tick spawn 点：handler 不持有 tick，tick 随本代监督者一起关闭。
+    pub(crate) fn spawn_builtin_transport(
+        &self,
+        instance: &str,
+    ) -> Result<BuiltinTransport, BuiltinSpawnError> {
+        super::transport::require_known_builtin_instance(instance).map_err(|_| {
+            BuiltinSpawnError::UnknownInstance {
+                instance: instance.to_string(),
+            }
+        })?;
+        let context =
+            self.builtin_instance_context()
+                .ok_or_else(|| BuiltinSpawnError::ContextMissing {
+                    instance: instance.to_string(),
+                })?;
+        let mut transport =
+            super::builtin::runtime::spawn_builtin_transport_with_context(instance, &context)?;
+        // 注册表名判定（不写第二张实例名字表）：只有 `cron` 有 tick 驱动语义。
+        if find(instance).is_some_and(|registered| registered.name == "cron") {
+            if let Some(cron) = context.cron.as_ref().filter(|cron| cron.tick_enabled) {
+                let scheduler = Arc::clone(&cron.scheduler);
+                transport.tick = Some(TickGuard::spawn(BUILTIN_TICK_INTERVAL, move || {
+                    scheduler.lock().tick();
+                }));
+            }
+        }
+        Ok(transport)
     }
 
     /// 查询指定 server 的插件来源标识，非插件 server 返回 None

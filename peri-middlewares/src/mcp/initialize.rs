@@ -7,6 +7,7 @@ use rmcp::{
 
 use super::{
     auth_store::FileCredentialStore,
+    builtin::runtime::BUILTIN_CONVERGE_TIMEOUT,
     channel_handler::ChannelHandler,
     client::{
         build_http_transport, serve_client_auto, setup_subscription, ClientStatus,
@@ -15,12 +16,31 @@ use super::{
     },
     config::{McpServerConfig, OAuthConfig},
     oauth_flow::OAuthFlowEvent,
-    transport::TransportConfig,
+    transport::{TransportConfig, TransportKind},
 };
 
 #[cfg(test)]
 #[path = "initialize_test.rs"]
 mod tests;
+
+/// 三分类超时选择（IF-D1）：由传输形态决定，**禁止**再写成「http / 否则 stdio」的二元
+/// 判定——那会让 builtin 复用 stdio 超时，并把失败日志的 `transport` 字段写成事实错误。
+pub(super) fn connect_timeout(kind: TransportKind) -> std::time::Duration {
+    match kind {
+        TransportKind::Stdio => STDIO_CONNECT_TIMEOUT,
+        TransportKind::Http => HTTP_CONNECT_TIMEOUT,
+        TransportKind::Builtin => super::transport::BUILTIN_CONNECT_TIMEOUT,
+    }
+}
+
+/// 与 [`connect_timeout`] 同源的日志字段（三分类三取值："stdio" | "http" | "builtin"）。
+pub(super) fn transport_label(kind: TransportKind) -> &'static str {
+    match kind {
+        TransportKind::Stdio => "stdio",
+        TransportKind::Http => "http",
+        TransportKind::Builtin => "builtin",
+    }
+}
 
 /// 启动发现的 `tools/list` 来源：System MCP 必须走本次 live round-trip。
 ///
@@ -114,6 +134,24 @@ fn publish_config_failure(
 }
 
 impl McpClientPool {
+    /// Initialize only builtin workspace tools, without loading user integrations.
+    /// Uses the normal discovery, readiness and owned shutdown lifecycle.
+    pub async fn run_initialize_bare(
+        pool: Arc<Self>,
+        cwd: &Path,
+        status_tx: tokio::sync::watch::Sender<McpInitStatus>,
+    ) {
+        pool.seal_builtin_context();
+        let config = match super::config::load_bare_config() {
+            Ok(config) => config,
+            Err(error) => {
+                publish_config_failure(&pool, &status_tx, &error.to_string());
+                return;
+            }
+        };
+        Self::initialize_config(pool, cwd, config, Default::default(), status_tx, None, None).await;
+    }
+
     pub async fn run_initialize(
         pool: Arc<Self>,
         cwd: &Path,
@@ -122,6 +160,10 @@ impl McpClientPool {
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
         channel_handler: Option<Arc<ChannelHandler>>,
     ) {
+        // 封口（A33 晚注入拒绝）①：本函数是 `run_initialize` 里**配置加载窗口**的起点——
+        // 一旦配置加载开始，宿主就不再有机会在「initialize 尚未开始」的语义下注入上下文，
+        // 因此在这里置真，覆盖 `load_merged_config_full` 失败等提前返回路径。
+        pool.seal_builtin_context();
         // 配置加载失败必须是可见的 Failed：不发布 Ready、不标记 initialized、
         // 不注册任何 server（因而也不会开始 transport）。B 在 1R 消费该失败。
         let (config, plugin_sources) = match super::load_merged_config_full(cwd, claude_home) {
@@ -152,6 +194,10 @@ impl McpClientPool {
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
         channel_handler: Option<Arc<ChannelHandler>>,
     ) {
+        // 封口（A33 晚注入拒绝）②：`initialize_config` 也接受直接调用（不经
+        // `run_initialize`），配置校验与目录绑定都已越过「注入窗口」的边界；两处封口都是
+        // 幂等的，任一路径进入都会让此后的首次注入被 typed 拒绝。
+        pool.seal_builtin_context();
         // typed 配置（含手工构造）在任何 empty / disabled / ready 分支之前校验：
         // 非法组合必须暴露为 Failed，不能因为「空配置」或「全部 disabled」被跳过。
         if let Err(error) = super::config::validate_config(&config) {
@@ -259,12 +305,11 @@ impl McpClientPool {
                     continue;
                 }
             };
-            let is_http = matches!(transport_config, TransportConfig::StreamableHttp { .. });
-            let timeout = if is_http {
-                HTTP_CONNECT_TIMEOUT
-            } else {
-                STDIO_CONNECT_TIMEOUT
-            };
+            // 三分类（IF-D1）：超时与日志字段来自同一结果；`is_http` 仅用于
+            // 「是否 AuthRequired」判定（HTTP 专属，builtin 无 URL / 无凭据恒 false）。
+            let kind = transport_config.kind();
+            let timeout = connect_timeout(kind);
+            let is_http = matches!(kind, TransportKind::Http);
             // lifecycle 仅由显式 protocolVersion 选择；subscriptions 只负责连接后订阅。
             let protocol_version = server_config.protocol_version.as_ref();
             let subscriptions = server_config
@@ -273,6 +318,44 @@ impl McpClientPool {
                 .filter(|s| !s.is_empty());
 
             let connect_result = match transport_config {
+                // builtin 分支：同进程链路（duplex + 真实 `rmcp::serve_server`）。它与 stdio
+                // 分支走**同一条**处理链（同参的 `serve_client_auto` → 发现 → 句柄 → 提交），
+                // 不为 builtin 另起一套 spawn / readiness / 面板语义。
+                TransportConfig::Builtin { ref instance } => {
+                    // 实例解析与上下文读取都在 pool 方法内统一收口：未注册 / 上下文缺失 /
+                    // 输入缺失 / handler 未接线各得 typed 原因 + 失败证据 + continue。
+                    let transport = match pool.spawn_builtin_transport(instance) {
+                        Ok(transport) => transport,
+                        Err(error) => {
+                            let reason = format!("builtin 启动失败: {error}");
+                            tracing::warn!(server = %name, error = %reason, "MCP builtin 启动失败");
+                            Self::insert_failed(&pool, name, reason);
+                            commit_discovery_failure(&pool, name, false);
+                            continue;
+                        }
+                    };
+                    let (io, supervisor) = transport.into_parts();
+                    // task 归属：server 半边是同进程 task，必须与 `services` 同期登记，
+                    // 否则重连 / 关闭会留下 orphan（IF-D12）。同名旧代监督者先按冻结顺序
+                    // 有界收敛（先停 tick 再收敛 server task）。
+                    if let Some(previous) = pool.register_builtin_task(name.clone(), supervisor) {
+                        let _ = previous.close(BUILTIN_CONVERGE_TIMEOUT).await;
+                    }
+                    let connected = serve_client_auto(
+                        io,
+                        channel_handler.as_ref(),
+                        protocol_version,
+                        &pool.capability_profile,
+                        timeout,
+                    )
+                    .await;
+                    // 握手失败 / 超时：本实例的 server task 当场收口（不含糊到 pool 关闭）；
+                    // 成功则由重连 / 关闭 / 移除时的有界关闭负责。
+                    if !matches!(connected, Ok(Ok(_))) {
+                        pool.close_builtin_task(name).await;
+                    }
+                    connected
+                }
                 TransportConfig::Stdio {
                     ref command,
                     ref args,
@@ -440,7 +523,7 @@ impl McpClientPool {
                     // stdio 服务器会在连接超时内完不成握手。
                     tracing::warn!(
                         server = %name,
-                        transport = if is_http { "http" } else { "stdio" },
+                        transport = transport_label(kind),
                         timeout_secs = timeout.as_secs(),
                         "MCP 连接超时"
                     );

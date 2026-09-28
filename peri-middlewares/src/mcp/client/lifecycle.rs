@@ -3,6 +3,10 @@
 use super::{
     ClientStatus, McpClientHandle, McpClientPool, McpServiceWrapper, OAuthStatus, SHUTDOWN_TIMEOUT,
 };
+use crate::mcp::builtin::runtime::{
+    BuiltinCloseOutcome, BuiltinInstanceSupervisor, BuiltinServerExit, TickCloseOutcome,
+    BUILTIN_CONVERGE_TIMEOUT,
+};
 use peri_acp_types::ports::McpPoolShutdownReport;
 use std::sync::Arc;
 
@@ -123,6 +127,8 @@ impl McpClientPool {
         if let Some(mut svc) = service {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
+        // builtin 实例的 server 半边是本进程 task：随 `services` 一并收口，不留 orphan。
+        self.close_builtin_task(server_name).await;
         self.configs.write().remove(server_name);
         // 句柄与配置同时消失：本代发现证据一律失效，等待方立即重读事实。
         self.system_readiness.clear_evidence(server_name);
@@ -239,6 +245,8 @@ impl McpClientPool {
         if let Some(mut svc) = service {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
+        // builtin 实例：server 半边 task 必须随连接一起收口（Disabled 不保留半开链路）。
+        self.close_builtin_task(server_name).await;
         // 更新 handle 为 Disabled 状态（保留 config 引用）
         let (source, url) = self
             .configs
@@ -404,6 +412,9 @@ impl McpClientPool {
                 services: remaining,
             }
         };
+        // builtin 实例：client service 已关闭（上面的 transaction），server 半边 task
+        // 随之按「有界等待 → 未收敛才 abort」收口。非 builtin pool 这里是空操作。
+        self.close_builtin_tasks().await;
         let unfinished_shared = self.close_shared_services().await;
         let unfinished_processes = self.close_processes().await + unfinished_shared;
         let report = match (report, unfinished_processes) {
@@ -437,5 +448,70 @@ impl McpClientPool {
                 .store(2, std::sync::atomic::Ordering::Release);
         }
         report
+    }
+
+    /// 登记一个 builtin 实例的代监督者（与 `services` 同期登记）。
+    ///
+    /// 返回被替换的旧监督者：调用方负责按 [`Self::close_builtin_task`] 的语义有界收敛它
+    /// （生产路径在重连时已先移除旧项，因此这里通常返回 `None`）。
+    pub(crate) fn register_builtin_task(
+        &self,
+        server_name: String,
+        supervisor: BuiltinInstanceSupervisor,
+    ) -> Option<BuiltinInstanceSupervisor> {
+        self.builtin_server_tasks
+            .lock()
+            .insert(server_name, supervisor)
+    }
+
+    /// 取出并移除某 server 的代监督者，按冻结顺序有界收敛：①tick ②server task。
+    ///
+    /// 无该条目时为无操作（非 builtin server 走这条调用不会产生第二条关闭路径）。
+    /// 任一侧未在 [`BUILTIN_CONVERGE_TIMEOUT`] 内收敛时由
+    /// [`BuiltinInstanceSupervisor::close`] 告警——正常关闭必须落在 `Joined` + `Quit`。
+    pub(crate) async fn close_builtin_task(
+        &self,
+        server_name: &str,
+    ) -> Option<BuiltinCloseOutcome> {
+        let supervisor = { self.builtin_server_tasks.lock().remove(server_name) }?;
+        Some(supervisor.close(BUILTIN_CONVERGE_TIMEOUT).await)
+    }
+
+    /// pool 关闭：排空 builtin 表并逐项有界收敛。
+    ///
+    /// 返回「需要 abort 才结束」的实例名（升序）：tick 或 server task **任一侧**落到
+    /// `AbortedAfterTimeout` 都计入。这是异常信号，也是「无 orphan」的可观察证据
+    /// （返回值非空说明该实例没走自然收敛路径；告警由 `close` 侧给出，此处不重复）。
+    pub(crate) async fn close_builtin_tasks(&self) -> Vec<String> {
+        let supervisors: Vec<(String, BuiltinInstanceSupervisor)> =
+            self.builtin_server_tasks.lock().drain().collect();
+        let mut aborted = Vec::new();
+        for (server_name, supervisor) in supervisors {
+            let outcome = supervisor.close(BUILTIN_CONVERGE_TIMEOUT).await;
+            if matches!(outcome.tick, TickCloseOutcome::AbortedAfterTimeout)
+                || matches!(outcome.server, BuiltinServerExit::AbortedAfterTimeout)
+            {
+                aborted.push(server_name);
+            }
+        }
+        aborted.sort();
+        aborted
+    }
+
+    /// 某 server 当代是否已无运行中的 tick：无该条目 ⇒ `None`（而不是 `false`）。
+    ///
+    /// 「无条目」与「有条目但没有 tick」是两件事，本方法只回答后者。
+    #[cfg(test)]
+    pub(crate) fn builtin_tick_is_finished(&self, server_name: &str) -> Option<bool> {
+        self.builtin_server_tasks
+            .lock()
+            .get(server_name)
+            .map(BuiltinInstanceSupervisor::tick_is_finished)
+    }
+
+    /// builtin 代监督者表当前登记数（「无 orphan」断言的可观察量；仅测试可见）。
+    #[cfg(test)]
+    pub(crate) fn builtin_task_count(&self) -> usize {
+        self.builtin_server_tasks.lock().len()
     }
 }

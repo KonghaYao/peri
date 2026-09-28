@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use peri_model::{ModelMessage, ModelRequest};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -278,7 +279,12 @@ fn extract_recent_files(messages: &[BaseMessage], max_files: usize) -> Vec<Strin
 
     for msg in messages.iter().rev() {
         for tc in msg.tool_calls() {
-            if tc.name == "Read" {
+            // 归一（`original_tool_name_of_effective`，IF-D15 唯一入口）：模型面名字
+            // 可能是 builtin `workspace` 实例的 effective name（`mcp__workspace__Read`），
+            // 不归一则裸名比较静默失效。未命中（未知 / 外部 `mcp__*`）保持既有保守
+            // 语义：不视为 Read。
+            let name = original_tool_name_of_effective(&tc.name).unwrap_or(&tc.name);
+            if name == "Read" {
                 let path = tc
                     .arguments
                     .get("file_path")
@@ -309,7 +315,10 @@ fn extract_skills_paths(messages: &[BaseMessage]) -> Vec<String> {
 
     for msg in messages.iter() {
         for tc in msg.tool_calls() {
-            if tc.name == "Read" {
+            // 与 `extract_recent_files` 同规则：调用点单点归一后按原始名比较；
+            // 未命中（未知 / 外部 `mcp__*`）保守不视为 Read。
+            let name = original_tool_name_of_effective(&tc.name).unwrap_or(&tc.name);
+            if name == "Read" {
                 let path = tc
                     .arguments
                     .get("file_path")

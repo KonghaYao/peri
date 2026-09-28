@@ -1,0 +1,158 @@
+//! builtin handler 的**名字分派**层（owner H-01）。
+//!
+//! 职责：把实例名（server name / 配置 key / `TransportConfig::Builtin.instance`）解析成
+//! 具体的 `ServerHandler`，并以枚举擦除类型差异交给 `mcp::builtin::runtime` 装配。
+//! 本模块**只**做分派与转发，不持有实例语义：
+//! - 实例的业务面（工具清单、`tools/call` 的结果映射）在 `web.rs` / `artifact.rs` /
+//!   `cron.rs` / `lsp.rs`；
+//! - 实例所需状态（cron scheduler / LSP pool / cwd / workspace 的 session 级输入）统一经
+//!   [`BuiltinInstanceContext`] 传入——`cwd` 不再是独立参数，输入是否齐备由
+//!   `context::instance_input_ready` 在 dispatch **之前**判定，因此本工厂的 `None` 只
+//!   表示「handler 未接线」，不表示「输入没给全」（`workspace` 例外：它的输入缺失是
+//!   「可见但退化」，输入齐备判定不为它增加 arm，见 AW3-11）；
+//! - 名字到模块的映射是**代码**事实（模块不能由数据构造）；实例名 / 工具名 / `direct` /
+//!   保留名的唯一事实源仍是注册表（`peri_acp_types::builtin_mcp`）。
+
+use std::path::Path;
+use std::sync::Arc;
+
+use peri_acp_types::builtin_mcp::find;
+use rmcp::{
+    model::{
+        CallToolRequestParams, CallToolResponse, ListToolsResult, PaginatedRequestParams,
+        ServerInfo,
+    },
+    service::{RequestContext, RoleServer},
+    ErrorData as McpError, ServerHandler,
+};
+
+use super::artifact::ArtifactMcpServer;
+use super::context::BuiltinInstanceContext;
+use super::cron::CronMcpServer;
+use super::lsp::LspMcpServer;
+use super::web::WebMcpServer;
+use super::workspace::WorkspaceMcpServer;
+
+/// 实例的 handler 类型擦除：`runtime` 需要在运行时按实例名选择 handler，
+/// 而 `rmcp::serve_server` 要求泛型 `S: ServerHandler`（`Arc<dyn ServerHandler>`
+/// 不满足该约束），因此用枚举分派。
+///
+/// 枚举成员与注册表 [`peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES`] 的已实现
+/// 实例**逐项对应**：遗漏任一实例都会在装配点落成 typed `HandlerNotWired`，
+/// 不会静默回退到别的实例。
+pub(crate) enum BuiltinServerHandler {
+    Web(WebMcpServer),
+    Artifact(ArtifactMcpServer),
+    Cron(CronMcpServer),
+    Lsp(LspMcpServer),
+    Workspace(WorkspaceMcpServer),
+}
+
+impl ServerHandler for BuiltinServerHandler {
+    // 不覆写 `discover`（§10 R2）。
+
+    fn get_info(&self) -> ServerInfo {
+        match self {
+            Self::Web(server) => server.get_info(),
+            Self::Artifact(server) => server.get_info(),
+            Self::Cron(server) => server.get_info(),
+            Self::Lsp(server) => server.get_info(),
+            Self::Workspace(server) => server.get_info(),
+        }
+    }
+
+    async fn list_tools(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        match self {
+            Self::Web(server) => server.list_tools(request, context).await,
+            Self::Artifact(server) => server.list_tools(request, context).await,
+            Self::Cron(server) => server.list_tools(request, context).await,
+            Self::Lsp(server) => server.list_tools(request, context).await,
+            Self::Workspace(server) => server.list_tools(request, context).await,
+        }
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        match self {
+            Self::Web(server) => server.call_tool(request, context).await,
+            Self::Artifact(server) => server.call_tool(request, context).await,
+            Self::Cron(server) => server.call_tool(request, context).await,
+            Self::Lsp(server) => server.call_tool(request, context).await,
+            Self::Workspace(server) => server.call_tool(request, context).await,
+        }
+    }
+}
+
+/// 实例名 → handler 工厂（`mcp::builtin::runtime::spawn_builtin_transport_with_context`
+/// 的唯一入口；`None` = 已注册但 handler 未接线，调用方按 `HandlerNotWired` 收口）。
+///
+/// `runtime.rs` 的接线形如：
+///
+/// ```ignore
+/// let handler = super::dispatch::builtin_server_handler(instance, ctx)
+///     .ok_or_else(|| BuiltinSpawnError::HandlerNotWired { instance: instance.to_string() })?;
+/// spawn_builtin_transport_with_handler(instance, handler)
+/// ```
+///
+/// 名字到模块的分派是**代码**事实（模块不能由数据构造）；实例名 / 工具名 /
+/// `direct` / 保留名的唯一事实源仍是注册表（`peri_acp_types::builtin_mcp`）。
+///
+/// 各实例的状态来源（全部取自同一 `ctx`，不经 `cwd` 推导）：
+/// - `web`：无额外状态；`ctx.cwd` 被忽略；
+/// - `artifact`：`ctx.cwd` 是相对路径解析根（不是安全沙箱）；
+/// - `cron`：`ctx.cron` 的 scheduler 以 `Arc` 克隆进 handler（A1：组合根同一份，
+///   本工厂不新建第二份，也不挂 tick——tick 归 pool 的唯一 spawn 点 A32）；
+/// - `lsp`：`ctx.lsp` 的 pool 以 `Arc` 克隆进 handler（工具面在 handler 构造时按
+///   `has_servers()` 快照，本工厂不做任何配置读取）；
+/// - `workspace`：`ctx.cwd` 是 7 个工具共享的 host cwd（相对路径解析根 + `Bash` 的
+///   `current_dir`），`ctx.workspace` 的 session 级输入以 `Clone` 克隆进 handler
+///   （`Arc` 克隆，不复制状态：`task_manager` / `on_bg_complete` 各只被搬进 `BashTool`
+///   的对应字段）。
+///
+/// **与 `cron` / `lsp` 的差别（AW3-11）**：`workspace` 的 arm 是**无条件**构造的——
+/// `ctx.workspace` 为 `None` 时同样返回 `Some`（「可见但退化」：实例照常装配，只有 `Bash`
+/// 失去后台任务那一路），因此 `None` 在这一支上**不是** `HandlerNotWired`。
+///
+/// **`None` 的诚实口径**：对 `cron` / `lsp`，缺对应输入的上下文同样返回 `None`
+/// （`ctx.cron` / `ctx.lsp` 为 `None` 时无状态可注入）。但这条路径经冻结 seam
+/// **不可达**：`runtime::spawn_builtin_transport_with_context` 在调本工厂**之前**已用
+/// `BuiltinInstanceContext::instance_input_ready` 给出 typed
+/// `BuiltinSpawnError::InstanceInputMissing`，因此本工厂的 `None` 只在
+/// 「handler 未接线」这一种语义上到达调用方——本工厂**不**、也不能区分
+/// 「输入缺失」与「未接线」（`Option` 承载不了两个原因，拆开写会与 seam 的顺序约定
+/// 重复判定）。**直接调用本工厂的代码（如 `dispatch` 的测试）必须自行保证输入齐备**；
+/// `workspace` 是唯一不适用本条的名字（缺输入仍返回 `Some`）。
+pub(crate) fn builtin_server_handler(
+    instance: &str,
+    ctx: &BuiltinInstanceContext,
+) -> Option<BuiltinServerHandler> {
+    match find(instance)?.name {
+        "web" => Some(BuiltinServerHandler::Web(WebMcpServer::new())),
+        "artifact" => Some(BuiltinServerHandler::Artifact(ArtifactMcpServer::new(
+            Path::new(&ctx.cwd),
+        ))),
+        "cron" => ctx.cron.as_ref().map(|cron| {
+            BuiltinServerHandler::Cron(CronMcpServer::new(Arc::clone(&cron.scheduler)))
+        }),
+        "lsp" => ctx
+            .lsp
+            .as_ref()
+            .map(|lsp| BuiltinServerHandler::Lsp(LspMcpServer::new(Arc::clone(&lsp.pool)))),
+        "workspace" => Some(BuiltinServerHandler::Workspace(WorkspaceMcpServer::new(
+            ctx.cwd.clone(),
+            ctx.workspace.clone(),
+        ))),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "dispatch_test.rs"]
+mod tests;

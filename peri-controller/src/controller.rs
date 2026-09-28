@@ -420,14 +420,18 @@ impl Controller {
         let runtime = Arc::clone(&self.runtime);
         let envelope = match runtime.stamp(session_id, source) {
             Ok(stamped) => stamped,
-            Err(_) => EventEnvelope::new(
-                session_id.to_string(),
-                peri_acp_types::identity::SessionEpoch::initial(),
-                source.turn_id.clone(),
-                source.agent_id.clone(),
-                peri_acp_types::identity::SessionSeq::initial(),
-                source.delivery_class,
-            ),
+            Err(_) => {
+                let mut envelope = EventEnvelope::new(
+                    session_id.to_string(),
+                    peri_acp_types::identity::SessionEpoch::initial(),
+                    source.turn_id.clone(),
+                    source.agent_id.clone(),
+                    peri_acp_types::identity::SessionSeq::initial(),
+                    source.delivery_class,
+                );
+                envelope.message_id = source.message_id.clone();
+                envelope
+            }
         };
         self.publish_message(EventMessage::new(envelope, Some(event)));
     }

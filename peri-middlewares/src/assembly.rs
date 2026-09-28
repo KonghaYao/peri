@@ -18,16 +18,25 @@ mod preparation;
 mod prompt;
 mod workflow;
 
-pub use lsp::{create_session_lsp_pool, load_merged_lsp_servers};
-pub use workflow::{default_workflow_middleware_factory, WorkflowAgentMiddlewareFactory};
+// builtin 实例上下文（IF-P3-04 / A33）：宿主装配（`peri-acp`）经这里拿到构造与注入所需
+// 的全部公开类型；`crate::mcp::builtin` 仍是 `pub(crate)`，宿主不得 import 它。
+// `WorkspaceInstanceInput` 是 **session 级**输入（AW3-11：per-session `TaskManager` +
+// bg 完成回调），宿主在 `McpClientPool::run_initialize` 之前经 `with_workspace` 送进上下文。
+pub use crate::mcp::builtin::context::{
+    BuiltinContextError, BuiltinInstanceContext, CronInstanceInput, LspInstanceInput,
+    WorkspaceInstanceInput,
+};
+pub use lsp::{create_host_lsp_pool, load_merged_lsp_servers};
+pub use workflow::{
+    default_workflow_middleware_factory, default_workflow_middleware_factory_with_pool,
+    WorkflowAgentMiddlewareFactory,
+};
 
 use crate::{
-    artifact::ArtifactMiddleware,
-    cron::{CronMiddleware, CronScheduler},
     default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware},
     error_suggest,
     hitl::HumanInTheLoopMiddleware,
-    middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
+    middleware::TodoMiddleware,
     permission::{default_requires_approval, PermissionMiddleware},
     plugin::PluginMiddleware,
     ptc::PtcMiddleware,
@@ -43,6 +52,7 @@ use peri_agent::{
     messages::BaseMessage,
     middleware::chain::MiddlewareChain,
     session::factory::{ChainSlot, MiddlewareChainAssembler, SubAgentMiddlewarePort},
+    tools::BaseTool,
 };
 use std::sync::Arc;
 
@@ -60,6 +70,17 @@ pub use peri_agent::session::factory::AssemblyContext;
 
 /// 链装配产物（事实源 peri-agent::session::factory，L5 迁入）。
 pub use peri_agent::session::factory::ChainAssembly;
+
+/// A24 关闭集：`policy_key ∈ disabled_middlewares` 的实例名（BTreeSet，稳定顺序）。
+///
+/// **只委托、不复制逻辑**：唯一实现是 `crate::mcp::builtin::closed_instances`，本函数让
+/// 宿主装配经公开面派生关闭集（随 [`BuiltinInstanceContext`] 一起注入），不必 import
+/// `peri_middlewares::mcp::builtin`。
+pub fn builtin_closed_instances(
+    disabled_middlewares: &std::collections::HashSet<String>,
+) -> std::collections::BTreeSet<String> {
+    crate::mcp::builtin::closed_instances(disabled_middlewares)
+}
 
 /// 生产链装配器（当前唯一装配实现，见模块文档）。
 pub struct ProductionChainAssembler;
@@ -85,8 +106,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             plugin_loaded,
             workflow_executor,
             event_handler,
-            task_manager,
-            on_bg_complete,
             child_handler_factory,
             llm_factory,
             system_builder,
@@ -105,7 +124,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         let disabled: &std::collections::HashSet<String> = meta_harness_disabled;
 
         let preparation::ResolvedPorts {
-            cron_scheduler_concrete,
             mcp_pool_concrete,
             mcp_agent_registry,
             tool_search_index_concrete,
@@ -245,11 +263,11 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 ChainSlot::Image => {
                     chain.add(Box::new(ImageMiddleware::new()));
                 }
-                // ── 第二组：文件/终端/Web 工具提供器 ──
-                ChainSlot::Filesystem if disabled.contains("FilesystemMiddleware") => {}
-                ChainSlot::Filesystem => {
-                    chain.add(Box::new(FilesystemMiddleware::new()));
-                }
+                // ── 第二组：工作区观察类注入器 ──
+                // v4-part-4 W3-C1：原 Filesystem / Terminal 槽位已删除——7 个文件/终端
+                // 工具的唯一提供面是 builtin `workspace` 实例的 bridge（模型面使用原名，
+                // 经 McpMiddleware 槽位的 `open_builtin_bridges` 进入链）。槽位位置保留，
+                // GitAttribution / GitWatch 的相对顺序不变（ARC-MIDDLEWARE-001）。
                 ChainSlot::GitAttribution if disabled.contains("GitAttributionMiddleware") => {}
                 ChainSlot::GitAttribution => {
                     chain.add(Box::new(GitAttributionMiddleware::new(model_name)));
@@ -258,35 +276,10 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 ChainSlot::GitWatch => {
                     chain.add(Box::new(GitWatchMiddleware::new()));
                 }
-                ChainSlot::Terminal if disabled.contains("TerminalMiddleware") => {}
-                ChainSlot::Terminal => {
-                    let mut tm = TerminalMiddleware::new();
-                    tm = tm.with_task_manager(
-                        Arc::clone(task_manager) as Arc<dyn peri_acp_types::tasks::TaskManager>
-                    );
-                    if let Some(ref cb) = on_bg_complete {
-                        tm = tm.with_on_bg_complete(Arc::clone(cb));
-                    }
-                    chain.add(Box::new(tm));
-                }
-                ChainSlot::Web if disabled.contains("WebMiddleware") => {}
-                ChainSlot::Web => {
-                    chain.add(Box::new(WebMiddleware::new()));
-                }
-                // ── 第三组：Todo / Cron ──
+                // ── 第三组：Todo ──
                 ChainSlot::Todo if disabled.contains("TodoMiddleware") => {}
                 ChainSlot::Todo => {
                     chain.add(Box::new(TodoMiddleware::new(todo_tx.clone())));
-                }
-                ChainSlot::Cron if disabled.contains("CronMiddleware") => {}
-                ChainSlot::Cron => {
-                    chain.add(Box::new(CronMiddleware::new(
-                        cron_scheduler_concrete.clone().unwrap_or_else(|| {
-                            Arc::new(parking_lot::Mutex::new(CronScheduler::new(
-                                tokio::sync::mpsc::unbounded_channel().0,
-                            )))
-                        }),
-                    )));
                 }
                 // ── 第四组：Hook 中间件（插件 hooks + 自定义 hooks） ──
                 // MetaHarness：Hook 关闭 → 全部 hook group 都不构造。
@@ -358,14 +351,19 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                         Arc::clone(shared_tools),
                     )));
                 }
-                // Artifact 中间件：独立关闭不影响 ToolSearch 元工具。
-                ChainSlot::Artifact if disabled.contains("ArtifactMiddleware") => {}
-                ChainSlot::Artifact => {
-                    chain.add(Box::new(ArtifactMiddleware::new()));
-                }
                 // ── 第七组：LSP / Goal（辅助诊断；Goal 链最后） ──
                 // MetaHarness：Lsp / Goal 关闭 → 即使运行条件满足也不构造。
-                ChainSlot::Lsp if disabled.contains("LspMiddleware") => {}
+                //
+                // LSP 两个关闭键语义不重叠（A7/A8/A24）：
+                // - `LspMiddleware`（builtin `lsp` 实例的 policy key）= 关闭实例
+                //   **工具面**（`mcp__lsp__LSP` 不可见/不可调用）**且**关闭同步目标
+                //   （不再读文件、不发通知）；
+                // - `LspSyncMiddleware`（本链槽位的 middleware 名）= 只关同步。
+                // 交叉矩阵：任一键命中 ⇒ 不装同步中间件（都不装即无同步发起方）。
+                // 两者都是**非物理**关闭：pool / handler / readiness 保留。
+                ChainSlot::Lsp
+                    if disabled.contains("LspMiddleware")
+                        || disabled.contains("LspSyncMiddleware") => {}
                 ChainSlot::Lsp => {
                     lsp::add_lsp(ctx, &mut chain);
                 }
@@ -406,6 +404,33 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
 // 装配触发点收敛：不再提供本层便捷入口。装配一律经 Agent 层 session 工厂的
 // `build_middleware_chain`（唯一触发点，ARC-MIDDLEWARE-001）触发，
 // 本模块仅保留 trait 实现（`ProductionChainAssembler`）。
+
+/// builtin 实例的 **direct** bridge 提供面（A6 面②/③；IF-D10 面②/③）。
+///
+/// Web / Artifact 能力由 builtin bridge 以原名存在于 MCP 目录：
+/// `build_typed_tool_bridges` 应用注册表声明的 direct（IF-D13），本函数再按
+/// 同一份 frozen policy 去掉关闭实例（`closed_instances` / `is_closed` 是
+/// 唯一判定入口，不硬编码实例名或工具名前缀）。
+///
+/// 只保留 direct：外部 server 的 deferred bridge 在 workflow agent 与
+/// subagent `parent_tools` 两条链上都没有 ToolSearch 可发现，注入它们只会
+/// 变成模型看不见的注册项。
+pub(crate) fn open_builtin_bridges(
+    pool: &crate::mcp::McpClientPool,
+    disabled: &std::collections::HashSet<String>,
+) -> Vec<Box<dyn BaseTool>> {
+    let closed = crate::mcp::builtin::closed_instances(disabled);
+    crate::mcp::tool_bridge::build_typed_tool_bridges(pool)
+        .into_iter()
+        .filter(|bridge| {
+            !bridge
+                .mcp_server_name()
+                .is_some_and(|server| crate::mcp::builtin::is_closed(server, &closed))
+        })
+        .filter(|bridge| bridge.is_direct())
+        .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
+        .collect()
+}
 
 #[cfg(test)]
 #[path = "assembly_test.rs"]

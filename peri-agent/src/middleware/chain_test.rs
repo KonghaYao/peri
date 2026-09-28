@@ -452,6 +452,132 @@ async fn test_before_tools_batch_equivalent_to_individual() {
     assert_eq!(batch_results[1].as_ref().unwrap().name, "t2_x");
 }
 
+#[tokio::test]
+async fn test_before_tools_batch_short_result_fails_closed() {
+    struct ShortBatch;
+    #[async_trait]
+    impl Middleware for ShortBatch {
+        fn name(&self) -> &str {
+            "ShortBatch"
+        }
+        async fn before_tools_batch(
+            &self,
+            _state: &mut dyn hook_state::BeforeToolState,
+            calls: &[ToolCall],
+        ) -> Vec<AgentResult<ToolCall>> {
+            calls.iter().take(1).cloned().map(Ok).collect()
+        }
+    }
+
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(ShortBatch));
+    let mut state = AgentState::new("/tmp");
+    let calls = vec![
+        ToolCall::new("id1", "tool1", serde_json::json!({})),
+        ToolCall::new("id2", "tool2", serde_json::json!({})),
+    ];
+
+    let results = chain.run_before_tools_batch(&mut state, calls).await;
+
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|result| matches!(
+        result,
+        Err(AgentError::MiddlewareError { middleware, reason })
+            if middleware == "ShortBatch"
+                && reason == "before_tools_batch returned 1 results for 2 calls"
+    )));
+}
+
+#[tokio::test]
+async fn test_before_tools_batch_long_result_preserves_rejection_and_stops_chain() {
+    struct RejectFirst;
+    #[async_trait]
+    impl Middleware for RejectFirst {
+        fn name(&self) -> &str {
+            "RejectFirst"
+        }
+        async fn before_tools_batch(
+            &self,
+            _state: &mut dyn hook_state::BeforeToolState,
+            calls: &[ToolCall],
+        ) -> Vec<AgentResult<ToolCall>> {
+            calls
+                .iter()
+                .enumerate()
+                .map(|(index, call)| {
+                    if index == 0 {
+                        Err(AgentError::ToolRejected {
+                            tool: call.name.clone(),
+                            reason: "denied".to_string(),
+                        })
+                    } else {
+                        Ok(call.clone())
+                    }
+                })
+                .collect()
+        }
+    }
+
+    struct ExtraResult;
+    #[async_trait]
+    impl Middleware for ExtraResult {
+        fn name(&self) -> &str {
+            "ExtraResult"
+        }
+        async fn before_tools_batch(
+            &self,
+            _state: &mut dyn hook_state::BeforeToolState,
+            calls: &[ToolCall],
+        ) -> Vec<AgentResult<ToolCall>> {
+            let mut results: Vec<_> = calls.iter().cloned().map(Ok).collect();
+            results.push(Ok(calls[0].clone()));
+            results
+        }
+    }
+
+    struct LaterApprover(Arc<Mutex<Vec<String>>>);
+    #[async_trait]
+    impl Middleware for LaterApprover {
+        fn name(&self) -> &str {
+            "LaterApprover"
+        }
+        async fn before_tool(
+            &self,
+            _state: &mut dyn hook_state::BeforeToolState,
+            call: &ToolCall,
+        ) -> AgentResult<ToolCall> {
+            self.0.lock().unwrap().push(call.id.clone());
+            Ok(call.clone())
+        }
+    }
+
+    let later_calls = Arc::new(Mutex::new(Vec::new()));
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(RejectFirst));
+    chain.add(Box::new(ExtraResult));
+    chain.add(Box::new(LaterApprover(Arc::clone(&later_calls))));
+    let mut state = AgentState::new("/tmp");
+    let calls = vec![
+        ToolCall::new("id1", "tool1", serde_json::json!({})),
+        ToolCall::new("id2", "tool2", serde_json::json!({})),
+    ];
+
+    let results = chain.run_before_tools_batch(&mut state, calls).await;
+
+    assert!(matches!(
+        &results[0],
+        Err(AgentError::ToolRejected { tool, reason })
+            if tool == "tool1" && reason == "denied"
+    ));
+    assert!(matches!(
+        &results[1],
+        Err(AgentError::MiddlewareError { middleware, reason })
+            if middleware == "ExtraResult"
+                && reason == "before_tools_batch returned 2 results for 1 calls"
+    ));
+    assert!(later_calls.lock().unwrap().is_empty());
+}
+
 // ── before_model / after_model 测试 ──
 
 #[tokio::test]

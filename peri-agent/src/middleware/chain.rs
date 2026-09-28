@@ -1,7 +1,7 @@
 use crate::middleware::capabilities as hook_state;
 use crate::{
     agent::react::{AgentOutput, Reasoning, ToolCall, ToolResult},
-    error::AgentResult,
+    error::{AgentError, AgentResult},
     middleware::{prompt_sections::PromptSection, r#trait::Middleware},
     tools::BaseTool,
 };
@@ -133,8 +133,9 @@ impl MiddlewareChain {
     /// 中间件的 batch 实现可将多个 tool call 合并处理（如 HITL 批量审批）。
     /// 当所有中间件都使用默认逐条实现时，效果等同于逐个调用 `run_before_tool`。
     ///
-    /// 返回结果按输入顺序一一对应。若某个中间件返回非 `ToolRejected` 错误，
-    /// 链式处理中断，后续中间件不再执行，其余位置填充相同错误。
+    /// 每个结果按顺序对应一个尚未拒绝的调用。若返回数量不符，本轮所有尚未拒绝
+    /// 的调用都变为 `MiddlewareError`，且后续中间件不再执行；此前的拒绝或错误保留。
+    /// 对数量匹配的返回，错误仍按单个调用传播，后续中间件只处理保持成功的调用。
     pub async fn run_before_tools_batch(
         &self,
         state: &mut dyn hook_state::BeforeToolState,
@@ -153,13 +154,34 @@ impl MiddlewareChain {
 
             let batch_results = middleware.before_tools_batch(state, &current_calls).await;
 
+            if batch_results.len() != current_calls.len() {
+                let reason = format!(
+                    "before_tools_batch returned {} results for {} calls",
+                    batch_results.len(),
+                    current_calls.len()
+                );
+                tracing::error!(
+                    middleware = middleware.name(),
+                    expected = current_calls.len(),
+                    actual = batch_results.len(),
+                    "middleware returned an invalid batch result count"
+                );
+                for result in results.iter_mut().filter(|result| result.is_ok()) {
+                    *result = Err(AgentError::MiddlewareError {
+                        middleware: middleware.name().to_string(),
+                        reason: reason.clone(),
+                    });
+                }
+                break;
+            }
+
             // 将 batch 结果按位置回写（消费结果，避免 AgentError::Clone 要求）
             let mut batch_iter = batch_results.into_iter();
             for result in results.iter_mut() {
                 if result.is_ok() {
-                    if let Some(batch_result) = batch_iter.next() {
-                        *result = batch_result;
-                    }
+                    *result = batch_iter
+                        .next()
+                        .expect("batch result count was validated above");
                 }
             }
         }

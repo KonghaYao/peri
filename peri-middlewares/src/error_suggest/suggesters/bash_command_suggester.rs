@@ -1,6 +1,7 @@
 use crate::error_suggest::context::ErrorContext;
 use crate::error_suggest::format::did_you_mean_summary;
 use crate::error_suggest::matcher::fuzzy_filter_min;
+use crate::error_suggest::normalized_tool_name;
 use crate::error_suggest::registry::{ErrorSuggester, Suggestion};
 
 /// C1：Bash 命令不存在建议
@@ -13,7 +14,8 @@ const MIN_FUZZY_SCORE: i64 = 60;
 
 impl ErrorSuggester for BashCommandSuggester {
     fn suggest(&self, ctx: &ErrorContext) -> Option<Suggestion> {
-        if ctx.tool_name != "Bash" {
+        // 归一：`mcp__workspace__Bash` 与 `Bash` 同门槛（未命中归一表的名字原样比较）
+        if normalized_tool_name(ctx.tool_name) != "Bash" {
             return None;
         }
 

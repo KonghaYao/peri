@@ -1,3 +1,4 @@
+use crate::tools::failure::ToolFailure;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -263,20 +264,22 @@ fn run_glob(
             .join("\n");
         let truncated = &results[..MAX_RESULTS];
         let persist_hint = persist_truncated_output(&full);
-        let stop_note = if early_stopped {
-            " (collection stopped at the result limit)"
+        let count_note = if early_stopped {
+            format!(
+                "{} files collected; total unknown (collection stopped at the result limit)",
+                results.len()
+            )
         } else {
-            ""
+            format!("{} files total", results.len())
         };
         format!(
-            "{}\n\n[Output truncated: {} files total{}, showing first {}]{}",
+            "{}\n\n[Output truncated: {}, showing first {}]{}",
             truncated
                 .iter()
                 .map(|(_, p)| p.as_str())
                 .collect::<Vec<_>>()
                 .join("\n"),
-            results.len(),
-            stop_note,
+            count_note,
             MAX_RESULTS,
             persist_hint
         )
@@ -360,14 +363,21 @@ impl BaseTool for GlobFilesTool {
         input: Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let pattern = input["pattern"]
-            .as_str()
-            .ok_or("The 'pattern' parameter is required for the Glob tool.")?;
+        let pattern = input["pattern"].as_str().ok_or_else(|| {
+            ToolFailure::new(
+                "The 'pattern' parameter is required for the Glob tool.",
+                "The 'pattern' parameter is required for the Glob tool.",
+            )
+        })?;
 
         // Pattern 语法预校验 + 只编译一次：collect_files 复用编译结果，
         // 不再在逐文件热循环里重复 glob::Pattern::new。
-        let compiled = glob::Pattern::new(pattern)
-            .map_err(|e| format!("Error: Pattern syntax error in {pattern:?}: {e}"))?;
+        let compiled = glob::Pattern::new(pattern).map_err(|e| {
+            ToolFailure::new(
+                "Pattern syntax error. Provide a valid glob pattern.",
+                format!("Error: Pattern syntax error in {pattern:?}: {e}"),
+            )
+        })?;
 
         // Pattern soft-warn — record the hint; we still execute so the LLM can see the output size and self-correct.
         let pattern_warn = soft_warn_pattern(pattern);
@@ -379,11 +389,16 @@ impl BaseTool for GlobFilesTool {
         };
 
         if !search_root.exists() {
-            return Err(format!("Error: Directory not found: {}", search_root.display()).into());
+            return Err(ToolFailure::new(
+                "Directory not found. Verify the search path.",
+                format!("Error: Directory not found: {}", search_root.display()),
+            )
+            .into());
         }
 
         let plan = plan_walk(pattern);
         let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel_on_drop = super::SearchCancellation(Arc::clone(&cancelled));
 
         // 扫描是同步阻塞链（遍历 + 排序 + 落盘），必须移入 blocking pool，不能占用
         // async runtime worker。超时后置位 cancelled，线程在下一个检查点协作退出
@@ -398,10 +413,11 @@ impl BaseTool for GlobFilesTool {
                 // 注意：超时与协作取消路径无法在确定性测试中覆盖（SCAN_TIMEOUT 为 15s，
                 // 测试中不可触发），该路径仅由代码审查保障，未经自动化验证。
                 cancelled.store(true, Ordering::Relaxed);
-                return Err(
-                    "Error: Search timed out after 15 seconds. Please use a more specific pattern."
-                        .into(),
-                );
+                return Err(ToolFailure::new(
+                    "Search timed out. Please use a more specific pattern.",
+                    "Error: Search timed out after 15 seconds. Please use a more specific pattern.",
+                )
+                .into());
             }
             Ok(Err(e)) => return Err(format!("Error: {e}").into()),
             Ok(Ok(body)) => body,

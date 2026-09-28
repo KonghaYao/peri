@@ -60,15 +60,17 @@ v4 MCP 配置定义 `system_mcp` 标识，用于声明该 MCP 是 react loop 的
 - `system_mcp_tools` 只能与 `system_mcp = true` 配合使用；没有 `system_mcp` 时配置非法。
 - MCP 完成协议初始化、能力协商和 `tools/list` 后，`McpMiddleware` 必须逐项确认数组中的工具存在；具体协商版本遵循当前 transport 配置和客户端 lifecycle 契约。
 - 所有必需工具确认 ready 后，直接把对应 tool declaration/bridge 注入 RCRA loop 的工具列表；这些工具不是 deferred tool，不经过 `ToolSearchMiddleware`，也不需要模型先搜索。
-- 工具名应在所属 MCP 的命名空间内匹配；对 Agent 暴露时继续使用现有 MCP effective tool name，避免不同 MCP 的同名工具冲突。
+- 工具名仍在所属 MCP 的命名空间内匹配；入选 `system_mcp_tools` 的工具以 wire 原名作为模型可见名，调用目标仍绑定所属 server 与原始工具名。未入选工具和普通 MCP 工具保留 `mcp__<server>__<tool>` 前缀。
+- 模型可见名冲突不阻断启动：按确定的准入顺序保留先准入工具，跳过后续冲突项并记录 warning；不得依赖连接完成顺序或 HashMap 遍历顺序决定胜者。
 - 任一必需工具缺失、工具 schema 无法解析、initialize 失败或等待超时，都必须在 1R 返回明确错误并阻止 react loop 启动。
 - `system_mcp_tools` 为空数组表示该 System MCP 只要求连接 ready，不向 RCRA 直接注入工具。
+- 原名注入不改变 `system_mcp_tools` 的选择语义；未列入数组的工具继续走 deferred 发现与执行路径。缺失必需工具、schema 无效与启动失败仍 fail closed。
 
 ## 最小 MCP 隔离设计
 
 **最小合理数量：5 个相互隔离的 MCP 实例**，而不是让每个 middleware 各自实现一套 MCP 协议：
 
-1. **Workspace MCP**：复用现有 `side-projects/local-mcp-server`，提供本地 workspace/process 能力。
+1. **Workspace MCP**：由主项目 `peri-middlewares/src/mcp/builtin/workspace.rs` 提供，复用 `peri-middlewares/src/tools/filesystem/` 与 `peri-middlewares/src/middleware/terminal.rs` 的文件和进程工具实现；schema 与描述从这些工具实现生成，不维护独立服务器或第二份工具实现。
 2. **Artifact MCP**：单独提供 HTML/Markdown 内容发布、转换、TTL 和公开 URL 能力。
 3. **Web MCP**：将 `WebSearch` 与 `WebFetch` 合并，提供外部网页搜索和抓取能力。
 4. **Cron MCP**：提供定时任务注册、查询、删除和触发事件能力。

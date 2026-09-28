@@ -1,7 +1,6 @@
 Performs exact string replacements in files.
 
 Usage:
-- You must use your Read tool at least once in the conversation before editing. This tool will fail if you attempt an edit without reading the file
 - When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix
 - ALWAYS prefer editing existing files in the codebase. DO NOT create new files unless explicitly required
 - The file_path parameter must be an absolute path, not a relative path

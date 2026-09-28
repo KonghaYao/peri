@@ -335,7 +335,7 @@ fn test_config_source_load_merges_meta_harness_per_key() {
         "config": {
             "meta_harness": {
                 "01_intro": false,
-                "TerminalMiddleware": false
+                "WorkspaceMiddleware": false
             }
         }
     }"#,
@@ -349,7 +349,7 @@ fn test_config_source_load_merges_meta_harness_per_key() {
         .expect("merged 后存在");
     assert_eq!(map.get("01_intro"), Some(&false), "同 key：工作区覆盖全局");
     assert_eq!(
-        map.get("TerminalMiddleware"),
+        map.get("WorkspaceMiddleware"),
         Some(&false),
         "新 key：追加保留"
     );

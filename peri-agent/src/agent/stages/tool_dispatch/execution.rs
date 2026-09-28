@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::super::middleware_runner::{run_after_tool, run_before_tools_batch, run_on_error};
+use super::super::middleware_runner::{run_after_tool, run_before_bound_tools_batch, run_on_error};
 use super::effective_dispatcher::StageEffectiveToolDispatcher;
 use super::StageContext;
 use crate::agent::events_v2::RenderEvent;
@@ -94,7 +94,8 @@ pub(super) async fn collect_tool_results(
     let _ = ai_msg_id;
 
     // 阶段一：批量 before_tool 审批
-    let approval = run_before_tool_approvals(ctx, original_calls, event_calls, cancel).await?;
+    let approval =
+        run_before_tool_approvals(ctx, original_calls, event_calls, all_tools, cancel).await?;
 
     // yield 使 EventBus forwarder task 排空 render_tx 中由阶段一 emit 的
     // ToolStarted 事件（转发到 event_tx），保证在 SubAgent 工具 invoke 内部
@@ -139,6 +140,7 @@ async fn run_before_tool_approvals(
     ctx: &StageContext,
     original_calls: Vec<ToolCall>,
     event_calls: &HashMap<String, ToolCall>,
+    targets: &HashMap<String, Arc<dyn BaseTool>>,
     cancel: &CancellationToken,
 ) -> AgentResult<ApprovalOutcome> {
     let turn_id = ctx.turn_id();
@@ -147,7 +149,7 @@ async fn run_before_tool_approvals(
     let mut ready_calls: Vec<ToolCall> = Vec::with_capacity(original_calls.len());
     let mut settled_results: Vec<(ToolCall, ToolResult)> = Vec::new();
 
-    let before_results = run_before_tools_batch(ctx, &original_calls).await;
+    let before_results = run_before_bound_tools_batch(ctx, &original_calls, targets).await;
 
     for (tool_call, before_result) in original_calls.iter().zip(before_results) {
         if cancel.is_cancelled() {

@@ -1,4 +1,5 @@
 use crate::error_suggest::context::ErrorContext;
+use crate::error_suggest::normalized_tool_name;
 use crate::error_suggest::registry::{ErrorSuggester, Suggestion};
 use regex::Regex;
 use std::sync::OnceLock;
@@ -8,7 +9,8 @@ pub struct RangeSuggester;
 
 impl ErrorSuggester for RangeSuggester {
     fn suggest(&self, ctx: &ErrorContext) -> Option<Suggestion> {
-        if ctx.tool_name != "Read" {
+        // 归一：`mcp__workspace__Read` 与 `Read` 同门槛
+        if normalized_tool_name(ctx.tool_name) != "Read" {
             return None;
         }
 

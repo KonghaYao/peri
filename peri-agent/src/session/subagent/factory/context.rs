@@ -41,7 +41,7 @@ pub(super) fn build_subagent_session_v2(
     llm: Box<dyn ReactLLM + Send + Sync>,
     chain_assembler: Arc<dyn SubagentChainAssembler>,
     tools: Vec<Arc<dyn BaseTool>>,
-    tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    tool_filter: crate::session::tool_catalog::ToolFilter,
     session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
     skill_names: Vec<String>,
     frozen_claude_md: Option<String>,

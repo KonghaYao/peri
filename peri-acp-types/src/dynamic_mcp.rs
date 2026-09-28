@@ -197,6 +197,7 @@ pub enum DynamicMcpConfigSummary {
 impl CanonicalDynamicMcpConfig {
     pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
+    /// Returns a display/policy summary without URL credentials or request-specific data.
     pub fn safe_summary(&self) -> DynamicMcpConfigSummary {
         match &self.transport {
             CanonicalDynamicMcpTransport::Stdio {
@@ -217,11 +218,8 @@ impl CanonicalDynamicMcpConfig {
                 subscriptions: self.subscriptions.clone(),
             },
             CanonicalDynamicMcpTransport::StreamableHttp { url, headers } => {
-                let mut parsed = url::Url::parse(url).expect("canonical Dynamic MCP URL is valid");
-                parsed.set_query(None);
-                parsed.set_fragment(None);
                 DynamicMcpConfigSummary::StreamableHttp {
-                    url: parsed.to_string(),
+                    url: safe_http_url_summary(url),
                     headers: headers
                         .iter()
                         .map(|(name, value)| {
@@ -262,6 +260,22 @@ impl CanonicalDynamicMcpConfig {
                 .collect(),
         }
     }
+}
+
+fn safe_http_url_summary(value: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(value) else {
+        return "[invalid URL]".to_string();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return "[invalid URL]".to_string();
+    }
+    if parsed.set_password(None).is_err() || parsed.set_username("").is_err() {
+        return "[invalid URL]".to_string();
+    }
+    // set_query / set_fragment 返回 ()，不会失败。
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -339,8 +339,14 @@ pub fn persist_truncated_output_with_ref(full_content: &str) -> (String, Option<
     match std::fs::write(&file_path, full_content) {
         Ok(_) => (
             format!(
-                "\n\n[Full output saved to {} — use Read tool to view complete content]",
-                file_path.display()
+                // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
+                // 查表未命中的兜底不含工具名，不得回落到裸名。
+                "\n\n[Full output saved to {} — {}]",
+                file_path.display(),
+                peri_acp_types::builtin_mcp::effective_name_of("workspace", "Read").map_or(
+                    "read the file to view complete content".to_string(),
+                    |name| format!("use `{name}` to view complete content"),
+                ),
             ),
             Some(file_path.to_string_lossy().into_owned()),
         ),

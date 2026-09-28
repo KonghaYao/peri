@@ -223,7 +223,8 @@ pub struct SessionContext {
         parking_lot::RwLock<std::collections::BTreeMap<String, Arc<dyn crate::tools::BaseTool>>>,
     >,
     pub lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
-    /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例）。
+    /// **host 共享** LSP pool 句柄（宿主装配单次构造，不按 session / turn 重建）；
+    /// None = 无 host pool ⇒ 链上不装 `LspSyncMiddleware`。
     pub lsp_pool: Option<Arc<dyn peri_acp_types::ports::LspPoolPort>>,
 
     // ── workflow: workflow agents ──────────────────────────────────────────
@@ -271,24 +272,6 @@ pub struct SessionContext {
     /// 构造——生产不可达，print mode 已走 session/new 构建，None 时回落
     /// 最小 FrozenSessionData）。
     pub frozen_fallback_builder: Option<FrozenFallbackBuilder>,
-}
-
-/// Per-turn computed configuration derived from [`SessionContext`].
-///
-/// Built once at the top of [`run_session_loop`], passed by reference to
-/// [`build_and_execute_agent`] to avoid recomputing and to keep the agent
-/// builder function signature manageable.
-#[allow(dead_code)]
-struct TurnConfig<'a> {
-    cwd: &'a str,
-    frozen: Option<&'a FrozenSessionData>,
-    language: Option<String>,
-    cancel: &'a AgentCancellationToken,
-    permission_mode: &'a Arc<peri_acp_types::permission::SharedPermissionMode>,
-    broker: &'a Arc<dyn UserInteractionBroker>,
-    session_start_source: Option<String>,
-    auxiliary_model: Option<Arc<dyn peri_model::Model>>,
-    effective_context_window: u32,
 }
 
 /// Per-turn data passed alongside [`SessionContext`] to [`run_session_loop`].

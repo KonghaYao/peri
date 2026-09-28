@@ -791,14 +791,15 @@ fn test_persist_writes_file_and_returns_hint() {
         hint.contains("peri-tool-output-"),
         "hint should contain filename: {hint}"
     );
-    // 提示应引导用户使用 Read 工具
+    // 提示应引导读取落盘文件——必须用**模型面名字**（裸名已无提供面）。名字逐字
+    // 断言注册表的冻结字面量：不用查表派生期望值，否则「查询改坏」会自洽通过。
     assert!(
-        hint.contains("Read"),
-        "hint should guide to use Read tool: {hint}"
+        hint.contains("use `Read` to view complete content"),
+        "hint should guide to the effective read tool: {hint}"
     );
     // 从提示中提取文件路径并验证内容
     let prefix = "saved to ";
-    let suffix = " — use Read";
+    let suffix = " — use `Read`";
     let path_start = hint.find(prefix).unwrap() + prefix.len();
     let path_end = hint[path_start..]
         .find(suffix)
@@ -813,14 +814,14 @@ fn test_persist_writes_file_and_returns_hint() {
 #[test]
 fn test_persist_empty_string() {
     let hint = persist_truncated_output("");
-    // 空内容也应生成包含路径的提示
+    // 空内容也应生成包含路径的提示，且同样用模型面名字引导读取（逐字断言冻结字面量）
     assert!(
-        hint.contains("Read"),
-        "empty content should also produce hint: {hint}"
+        hint.contains("use `Read` to view complete content"),
+        "empty content should also produce the effective-name hint: {hint}"
     );
     // 验证空文件确实被写入，并清理
     let prefix = "saved to ";
-    let suffix = " — use Read";
+    let suffix = " — use `Read`";
     let path_start = hint.find(prefix).unwrap() + prefix.len();
     let path_end = hint[path_start..]
         .find(suffix)

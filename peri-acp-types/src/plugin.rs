@@ -31,6 +31,13 @@ pub enum ConfigSource {
     /// 会话级声明：client 在 ACP 会话 setup 中以 `McpServer::Acp` 声明的
     /// MCP over ACP 服务器（无配置文件条目，归属绑定声明它的会话）。
     Acp,
+    /// builtin 实例（同进程 `ServerHandler`）：由构建期注册表决定的运行时来源，
+    /// **不可能**来自用户配置 —— `McpServerConfig::source` 是 `#[serde(skip)]`，
+    /// 只有代码能构造该变体（`TransportConfig::Builtin` 的判定唯一来源）。
+    Builtin {
+        /// 实例身份（`peri_acp_types::builtin_mcp` 注册表中的 `instance`）。
+        instance: String,
+    },
 }
 
 /// 显式 MCP 协议版本。

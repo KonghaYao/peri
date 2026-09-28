@@ -253,7 +253,8 @@ impl SessionManager {
         inner.caps_registry = Arc::clone(&host.inner.caps_registry);
         *inner.pending_caps.lock() = host.inner.pending_caps.lock().clone();
         *inner.cron_continuation_tx.lock() = host.inner.cron_continuation_tx.lock().clone();
-        inner.cron_scheduler = host.inner.cron_scheduler.clone();
+        // The bridge keeps this environment's scheduler: sharing the host scheduler
+        // would disconnect MCP registrations and broadcast across sessions.
     }
 
     /// 使用指定 session_id 创建会话（用于 session/load 和 session/resume）
@@ -396,9 +397,26 @@ impl SessionManager {
     /// TUI/stdio 调用方仍自行维护 history/frozen/agent_pool 等字段，
     /// SessionManager 只负责 active_agents / goal_state 维度。
     pub fn ensure_session(&self, session_id: &str, cwd: &str) {
+        self.ensure_session_with_task_manager(session_id, cwd, None)
+    }
+
+    /// [`Self::ensure_session`] 的携带外部 `TaskManager` 变体（AW3-11）。
+    ///
+    /// 会话环境装配（`SessionEnvironment::assemble`）先产出 per-session manager 并
+    /// 经 builtin 上下文送进 pool 的 `workspace` 实例，登记 `AcpSession` 时传入**同一
+    /// 份** `Arc`，使「送进 builtin 的 == 会话持有的」可观察（`Arc::ptr_eq`）。
+    /// `None` 与 [`Self::ensure_session`] 完全同语义：走装配注入的工厂，未注入则
+    /// fallback `NoopTaskManager`。
+    pub fn ensure_session_with_task_manager(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+    ) {
         if !self.inner.sessions.contains_key(session_id) {
             let thread_id = ThreadId::from(session_id.to_string());
-            let session = self.build_session(session_id, thread_id, cwd);
+            let session =
+                self.build_session_with_task_manager(session_id, thread_id, cwd, task_manager);
             self.inner.sessions.insert(session_id.to_string(), session);
         }
         // 在 session 发布边界立即订阅，避免首个 turn 前到点的 trigger 丢失。

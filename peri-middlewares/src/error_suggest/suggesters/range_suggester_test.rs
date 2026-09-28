@@ -86,3 +86,45 @@ fn test_range_suggester_skips_non_range_errors() {
     let ctx = holder.ctx("Read", "Error: File not found", cwd);
     assert!(RangeSuggester.suggest(&ctx).is_none());
 }
+
+/// N3 归一：`mcp__workspace__Read` 必须与裸名同门槛（且给出一致的恢复动作）。
+#[test]
+fn test_range_matches_workspace_effective_name() {
+    let holder = CtxHolder::new(serde_json::json!({
+        "file_path": "/tmp/foo.rs",
+        "offset": 100,
+        "limit": 10,
+    }));
+    let cwd = std::path::Path::new(".");
+    let ctx = holder.ctx(
+        "mcp__workspace__Read",
+        "Error: offset 100 exceeds file length (50 lines)",
+        cwd,
+    );
+    let sug = RangeSuggester
+        .suggest(&ctx)
+        .expect("effective name `mcp__workspace__Read` 必须命中 Read 门槛");
+    assert_eq!(
+        sug.summary,
+        "Omit offset to read from the beginning. If targeting a known location, use only an observed line number in 1..=50; do not guess."
+    );
+}
+
+/// 反例（保守语义）：未注册实例的 `mcp__foo__Read` 未命中归一表 ⇒ 门槛不命中。
+#[test]
+fn test_range_skips_unregistered_mcp_instance() {
+    let holder = CtxHolder::new(serde_json::json!({
+        "file_path": "/tmp/foo.rs",
+        "offset": 100,
+    }));
+    let cwd = std::path::Path::new(".");
+    let ctx = holder.ctx(
+        "mcp__foo__Read",
+        "Error: offset 100 exceeds file length (50 lines)",
+        cwd,
+    );
+    assert!(
+        RangeSuggester.suggest(&ctx).is_none(),
+        "未注册实例的名字不得命中 Read 门槛"
+    );
+}

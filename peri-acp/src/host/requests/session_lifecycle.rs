@@ -159,7 +159,7 @@ async fn prepare_existing(
             .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
             .to_owned();
         // 只读准入不建执行环境：不要求 frozen 快照存在，也不启动 workflow / LSP。
-        let (frozen, environment, workflow_middleware, lsp_pool) = match owner.as_ref() {
+        let (frozen, environment, workflow_middleware) = match owner.as_ref() {
             Some(_) => {
                 let frozen = load_frozen_data(cfg, id).await?;
                 let environment = match legacy_prepared.as_ref() {
@@ -176,13 +176,22 @@ async fn prepare_existing(
                 let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
                 let workflow_middleware =
                     create_session_workflow_middleware(local, &cwd, id, &frozen);
-                let lsp_pool = create_session_lsp_pool(local, &cwd);
-                (Some(frozen), environment, workflow_middleware, lsp_pool)
+                (Some(frozen), environment, workflow_middleware)
             }
-            None => (None, None, None, None),
+            None => (None, None, None),
         };
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-        local.session_manager.ensure_session(id, &cwd);
+        // A11/A22：session **不再**建池，只投影所属部署单元（有环境时即该环境的
+        // 装配结果，否则宿主）的 host pool 同一 `Arc`；`prompt_dispatch` 用的
+        // 正是同一个 `local`，故投影与执行面同源。
+        let lsp_pool = local.lsp_pool.clone();
+        // AW3-11：登记会话时交出**装配时已送进 builtin 上下文的那一份** manager
+        // （`environment` 为 `None` 时传 `None`，走工厂 / Noop fallback）。
+        local.session_manager.ensure_session_with_task_manager(
+            id,
+            &cwd,
+            environment.as_ref().map(|env| env.task_manager()),
+        );
         local.session_manager.ensure_session_caps(id);
         Ok::<_, AcpError>(SessionState {
             session_id: id.to_owned(),
@@ -465,18 +474,6 @@ fn create_session_workflow_middleware(
     middleware
 }
 
-/// 创建 session 级 LSP 服务器池（session/new / load / resume / fork 共用，H1）。
-///
-/// 会话级实例跨 turn 复用（服务器进程 / initialized / 诊断状态不丢），
-/// 宿主退出（`run_acp_server` 返回）时经端口 `shutdown` 优雅关闭。
-/// 无 LSP 配置时返回 None（不注册 LSP 中间件）。
-fn create_session_lsp_pool(
-    cfg: &AcpServerConfig,
-    cwd: &str,
-) -> Option<Arc<dyn peri_acp_types::ports::LspPoolPort>> {
-    peri_middlewares::assembly::create_session_lsp_pool(cwd, &cfg.plugin_lsp_servers)
-}
-
 pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
     let version = params
         .get("protocolVersion")
@@ -601,15 +598,27 @@ pub(crate) async fn new_session_from_prepared(
     // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
     // GAP-05: frozen data 在 WorkflowMiddleware 创建前构建，注入到 executor。
     // frozen 与准备阶段同源：内容与字节都来自同一 PreparedSessionInputs
-    // （日期/运行环境/配置/插件 roots 均为准备阶段定格的那一份），不二次构建。
+    // （日期/运行环境/配置/插件 roots 均为准备阶段定格的那一份），不二次构建；
+    // 保存字节已在创建事务内一次写出（上文 create_session 的 frozen 字段），
+    // 因此这里不存在「保存失败需补偿环境」的中间态。
     let frozen_data = prepared.frozen.clone();
-    cfg.session_manager.ensure_session(&session_id, &cwd);
+    cfg.session_manager.ensure_session_with_task_manager(
+        &session_id,
+        &cwd,
+        environment.as_ref().map(|env| env.task_manager()),
+    );
 
     // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
     let workflow_middleware =
         create_session_workflow_middleware(cfg, &cwd, &session_id, &frozen_data);
-    // Create session-scoped LspServerPool at session/new（H1：跨 turn 复用）
-    let lsp_pool = create_session_lsp_pool(cfg, &cwd);
+    // A11/A22：session 只投影部署单元（有环境时即该环境）的 host pool，不再按
+    // session cwd 建池；`prompt` 每 turn 只 clone 同一 `Arc`。
+    let lsp_pool = environment
+        .as_ref()
+        .map(|env| &env.cfg)
+        .unwrap_or(cfg)
+        .lsp_pool
+        .clone();
 
     sessions.insert(
         session_id.clone(),
@@ -907,9 +916,9 @@ async fn close_owned_session(
             .close_session(session_id)
             .await
             .map_err(super::super::workspace::workspace_error)?;
-        if let Some(pool) = state.lsp_pool.as_ref() {
-            pool.shutdown().await;
-        }
+        // A11/A22：`session/delete` **不**关闭 LSP pool——pool 归 host（同一 `Arc`
+        // 被多 session 共享），关闭只发生在 host shutdown。此处若关闭，会把其它
+        // 仍活跃 session 的 language server 一起掐掉。
         if let Some(environment) = environment.as_ref() {
             if !environment.shutdown().await {
                 return Err(AcpError::new(
@@ -1145,11 +1154,17 @@ pub(crate) async fn handle_fork(
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
 
     let new_session_id = new_thread_id.clone();
-    cfg.session_manager.ensure_session(&new_session_id, cwd);
+    cfg.session_manager.ensure_session_with_task_manager(
+        &new_session_id,
+        cwd,
+        environment.as_ref().map(|env| env.task_manager()),
+    );
     let caps = cfg.session_manager.ensure_session_caps(&new_session_id);
     let workflow_middleware =
         create_session_workflow_middleware(cfg, cwd, &new_session_id, &frozen_data);
-    let lsp_pool = create_session_lsp_pool(cfg, cwd);
+    // 同上：fork 出的 session 也只投影所属部署单元的 host pool（此处 `cfg` 已
+    // 收敛为 environment-or-host）。
+    let lsp_pool = cfg.lsp_pool.clone();
 
     sessions.insert(
         new_session_id.clone(),

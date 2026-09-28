@@ -1,3 +1,4 @@
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
@@ -117,6 +118,11 @@ impl ToolInvocationResolver for DirectToolInvocationResolver {
     }
 }
 
+/// 工具名 → 输入字段别名表（`(工具名, 别名, 规范名)`）。
+///
+/// builtin direct 工具按原名匹配；deferred 工具通过 builtin 声明表归一。
+/// 只修正模型常见的字段别名，且必须符合实际目标 schema。
+/// 外部 MCP 工具保留 wire 参数，不能因同名而套用 builtin 规则。
 const TOOL_PARAM_ALIASES: &[(&str, &str, &str)] = &[
     ("Write", "contents", "content"),
     ("Glob", "glob_pattern", "pattern"),
@@ -144,6 +150,8 @@ fn apply_param_alias(
 ///
 /// `path → file_path` 是文件工具的通用兼容；其余 alias 同时受目标工具名和
 /// schema 约束，避免把字段名相似但语义不同的 API 强行兼容。
+///
+/// 按实际绑定目标的名字和 builtin 声明匹配，不根据外部工具的名字推断身份。
 pub fn normalize_params(
     input: serde_json::Value,
     target: Option<&dyn BaseTool>,
@@ -155,6 +163,10 @@ pub fn normalize_params(
     let Some(target) = target else {
         return serde_json::Value::Object(obj);
     };
+    // External MCP names can equal builtin names; their wire schema is authoritative.
+    if target.mcp_server_name().is_some() && target.builtin_mcp_instance().is_none() {
+        return serde_json::Value::Object(obj);
+    }
     let parameters = target.parameters();
     let Some(declared_params) = parameters
         .get("properties")
@@ -164,8 +176,12 @@ pub fn normalize_params(
     };
 
     apply_param_alias(&mut obj, declared_params, "path", "file_path");
+    let effective_name = target.name();
+    let original_name = original_tool_name_of_effective(effective_name);
     for (tool_name, alias, canonical) in TOOL_PARAM_ALIASES {
-        if target.name().eq_ignore_ascii_case(tool_name) {
+        if effective_name.eq_ignore_ascii_case(tool_name)
+            || original_name.is_some_and(|original| original.eq_ignore_ascii_case(tool_name))
+        {
             apply_param_alias(&mut obj, declared_params, alias, canonical);
         }
     }

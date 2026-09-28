@@ -476,7 +476,11 @@ impl WorkflowTaskResult {
             escape_reminder_text(&self.run_id)
         );
         let artifact_lines = if self.state_artifact_exists {
-            format!("Results saved to {state_path}\nUse Read tool to view full results.\n")
+            // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
+            // 查表未命中的兜底不含工具名，不得回落到裸名。
+            let read_lead = crate::builtin_mcp::effective_name_of("workspace", "Read")
+                .map_or("Read it".to_string(), |name| format!("Use `{name}`"));
+            format!("Results saved to {state_path}\n{read_lead} to view full results.\n")
         } else {
             "Result state file was not generated.\n".to_string()
         };

@@ -49,9 +49,40 @@ pub mod controller_ports;
 mod executor_flow_tests;
 pub mod lease;
 mod mcp_apps;
+// V-02（W4）的 host seam 断言：首个 LLM 请求的三个冻结 effective name、能力关闭的
+// 首个请求面、`PERI_MCP_BUILTIN=off` 语义、启动 fatal 投影、BLOCKED 缺口复证。
+// 模块名参与 `cargo test` 过滤（`host::mcp_v4_builtin`），故不沿用 `mod tests`。
+#[cfg(test)]
+#[path = "mcp_v4_builtin_test.rs"]
+mod mcp_v4_builtin;
 #[cfg(test)]
 #[path = "mcp_v4_startup_test.rs"]
 mod mcp_v4_startup_tests;
+// wave 1 的 host 侧 wire 夹具（主 plan A10）：node 脚本含 wire 日志与 `tools/call`
+// 分支 + 复刻的工具调用 model 替身。owner 序列 V-06（W0 建 + 录迁移前基线）→
+// V-02（W4 复用）。模块名参与 `cargo test` 过滤（`host::mcp_v4_wire_fixture`），
+// 故不沿用 `mod tests`。文件名必须保留 `_test.rs` 后缀：本夹具经引用业务 crate
+// （`peri_middlewares` / `peri_model`）验证行为，靠 `scripts/check-layer-imports.sh`
+// 的测试文件豁免（`*_test.rs`）才不构成越层 import。
+#[cfg(test)]
+#[path = "mcp_v4_wire_fixture_test.rs"]
+mod mcp_v4_wire_fixture;
+// wave 2（cron / lsp 两个 builtin MCP 实例）的 W0 基线观察量 #2：复用上面同一宿主与
+// model 替身，录「首个 LLM 请求的 deferred 摘要里 cron / lsp 裸名行」。只加观察量、
+// 不改行为；模块名同样参与 `cargo test` 过滤（`host::mcp_v4_wave2_baseline`）。
+#[cfg(test)]
+#[path = "mcp_v4_wave2_baseline_test.rs"]
+mod mcp_v4_wave2_baseline;
+// wave 2 的**终态**用例（H-04 / V-03）：自带「生产同构的 builtin host」夹具 —— pool →
+// `BuiltinInstanceContext` 注入 → `run_initialize`（A33 的顺序），并驱动真实装配面
+// （`assemble_server_config`）验证配置合并早于 handler 构造、host 级唯一 LSP pool、
+// 多 cwd 退化登记与 host shutdown 有界关闭。
+//
+// **过滤名警告**：Rust 测试过滤器是**子串**匹配，`host::mcp_v4_wave2` 会同时命中上面的
+// `host::mcp_v4_wave2_baseline`。终态验收必须用具名函数 + `--exact`（见 sub-plan V §6）。
+#[cfg(test)]
+#[path = "mcp_v4_wave2_test.rs"]
+mod mcp_v4_wave2;
 mod notify;
 mod oauth_delivery;
 mod prediction;
@@ -74,6 +105,13 @@ mod task_scope;
 mod unify_wire_baseline_tests;
 mod user_input;
 pub mod workflow_agent;
+// wave 3（AW3-11 session 级 seam）**发送端**用例：会话环境装配产出的 per-session
+// `TaskManager` + session 级 `on_bg_complete` 送进 builtin `workspace` 实例上下文，
+// 并在会话登记处保持同一 `Arc`；回调经 inbox 把 Shell 完成投为 `Defer` 并唤醒。
+// 模块名参与 `cargo test` 过滤（`host::workspace_seam`），故不沿用 `mod tests`。
+#[cfg(test)]
+#[path = "workspace_seam_test.rs"]
+mod workspace_seam;
 
 pub(crate) use continuation::{
     run_continuation_scheduler, run_cron_continuation_scheduler, CronContinuationContext,
@@ -180,7 +218,19 @@ pub struct AcpServerConfig {
     pub plugin_hooks_only: Vec<peri_acp_types::hooks::RegisteredHook>,
     pub plugin_loaded: Vec<peri_acp_types::plugin::LoadedPlugin>,
     pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
+    /// 生效的 LSP 服务器配置快照（global < plugin 合并结果；装配点单次快照，
+    /// 不支持热更新）。仍是链上 `add_lsp` 的门控输入：为空即不装同步中间件。
     pub plugin_lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
+    /// **host 级唯一** LSP pool 句柄（A11/A21/A22）：
+    /// - 与喂给 builtin `lsp` 实例的 `LspInstanceInput` 同一份 `Arc`（A33：宿主装配
+    ///   在 `run_initialize` 之前一次注入）；空配置也构造（`has_servers()` 为假 ⇒
+    ///   handler 工具面空表但仍 ready），不用 `None` 表达「无配置」；
+    /// - session 只投影它的 `Arc`（`SessionState::lsp_pool`），`session/delete`
+    ///   **不**关闭它；唯一关闭点是 host shutdown（`shutdown.rs`，有界一次）。
+    ///
+    /// 空配置路径（`bare` / 无 LSP server）只表示「无 server 可路由」，不改变
+    /// 上述生命周期：pool 存在但无子进程。
+    pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// Skills 扫描端口（available-commands / agents 扫描经此访问）。
     pub skills: Arc<dyn SkillsPort>,

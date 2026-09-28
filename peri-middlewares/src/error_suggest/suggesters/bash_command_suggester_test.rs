@@ -73,6 +73,36 @@ fn test_bash_skips_non_bash_tools() {
     assert!(BashCommandSuggester.suggest(&ctx).is_none());
 }
 
+/// N3 归一：workspace 迁移后模型面名字是 `mcp__workspace__Bash`，必须与裸名同门槛。
+#[test]
+fn test_bash_matches_workspace_effective_name() {
+    let holder = CtxHolder::new(serde_json::json!({
+        "command": "xx_q1w2e3_not_a_real_cmd_xx",
+    }));
+    let err = "zsh:1: command not found: xx_q1w2e3_not_a_real_cmd_xx\n[Exit code: 127]";
+    let ctx = holder.ctx("mcp__workspace__Bash", err);
+    let sug = BashCommandSuggester
+        .suggest(&ctx)
+        .expect("effective name `mcp__workspace__Bash` 必须命中 Bash 门槛");
+    assert!(
+        sug.summary.contains("not found in PATH"),
+        "实际：{}",
+        sug.summary
+    );
+}
+
+/// 反例（保守语义）：未注册实例的 `mcp__foo__Bash` 未命中归一表 ⇒ 门槛不命中。
+#[test]
+fn test_bash_skips_unregistered_mcp_instance() {
+    let holder = CtxHolder::new(serde_json::json!({ "command": "gti status" }));
+    let err = "zsh:1: command not found: gti\n[Exit code: 127]";
+    let ctx = holder.ctx("mcp__foo__Bash", err);
+    assert!(
+        BashCommandSuggester.suggest(&ctx).is_none(),
+        "未注册实例的名字不得命中 Bash 门槛"
+    );
+}
+
 /// 无相似候选时：不得硬凑 "Did you mean"（如 xy → xylophone），
 /// 应回退到环境类兜底诊断。
 #[test]

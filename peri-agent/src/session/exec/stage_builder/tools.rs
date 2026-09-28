@@ -25,6 +25,14 @@ use std::{
 /// 的本地视图不得看到残留的 middleware 工具，enabled session 视图不受
 /// 影响。动态 MCP bridge 工具（`mcp__{server}__{tool}`）不进入共享
 /// registry，无需剔除。
+///
+/// 已迁移的 web、artifact、cron、LSP 和 workspace 能力由 MCP 链收集，
+/// 不属于 `MIDDLEWARE_TOOL_NAMES`。system direct 工具使用原名，deferred
+/// 工具保留 MCP 前缀；关闭能力由 builtin 关闭集过滤（IF-D10）。
+/// 非 middleware 路径注册的同名工具不能因 builtin 关闭而被误删。
+/// 合并当前链时按名称、大小写和别名保留先入者，并记录冲突 warning。
+///
+/// 反向断言见 `tools_test.rs::migrated_naked_names_are_no_longer_excluded`。
 pub(super) fn build_session_tool_view(
     shared_tools: &RwLock<BTreeMap<String, Arc<dyn BaseTool>>>,
     middleware_tools: Vec<Box<dyn BaseTool>>,
@@ -38,6 +46,10 @@ pub(super) fn build_session_tool_view(
             // 同名工具（如 plugin/外部注册的 "Bash"）在对应 middleware 关闭
             // 时也会被剔出本地视图——保守方向（宁可误伤不可泄漏），
             // `live_names` 保护当前链注册的同名工具。
+            //
+            // 剔除面只认「当前仍在 `MIDDLEWARE_TOOL_NAMES` 内」的名字：已迁移裸名
+            // （web / artifact / cron / LSP / workspace 共 14 枚）不在表内 ⇒ 非 middleware
+            // 路径注册的同名工具不再被剔除（见函数文档的覆盖边界说明）。
             !peri_acp_types::meta_harness::MIDDLEWARE_TOOL_NAMES.contains(&name.as_str())
                 || live_names.contains(name.as_str())
         })
@@ -45,7 +57,13 @@ pub(super) fn build_session_tool_view(
         .collect();
     for tool in middleware_tools {
         let arc: Arc<dyn BaseTool> = Arc::from(tool);
-        // 使用 insert：有状态工具（如 SubAgentTool）需每 turn 更新。
+        // The view is rebuilt each turn. Existing bindings win within this view.
+        if let Some(winner) = local.values().find(|existing| {
+            crate::session::tool_catalog::tool_names_conflict(existing.as_ref(), arc.as_ref())
+        }) {
+            crate::session::tool_catalog::warn_tool_collision(winner.as_ref(), arc.as_ref());
+            continue;
+        }
         local.insert(arc.name().to_string(), arc);
     }
     Arc::new(RwLock::new(local))

@@ -354,6 +354,7 @@ fn config_source_str(source: &ConfigSource) -> &'static str {
         ConfigSource::Global(_) => "global",
         ConfigSource::Plugin => "plugin",
         ConfigSource::Acp => "acp",
+        ConfigSource::Builtin { .. } => "builtin",
     }
 }
 

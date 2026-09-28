@@ -300,7 +300,7 @@ impl Middleware for HookMiddleware {
 
     async fn before_tool(
         &self,
-        _state: &mut dyn hook_state::BeforeToolState,
+        state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         let permission_mode_str = format!("{:?}", self.permission_mode.load());
@@ -348,10 +348,12 @@ impl Middleware for HookMiddleware {
         //
         // 使用 hitl::default_requires_approval 判断工具是否需要审批（Bash/Write/Edit/Agent/
         // mcp__*/WebFetch/WebSearch 等）。非敏感工具（Read/Glob/Grep 等）不触发。
-        let should_fire = permission_gate::should_fire_permission_request(
+        let origin = state.tool_origin(&tool_call.id);
+        let should_fire = permission_gate::should_fire_permission_request_for_origin(
             self.permission_mode.load(),
             &tool_call.name,
             self.requires_approval,
+            origin.as_ref(),
         );
 
         if should_fire {

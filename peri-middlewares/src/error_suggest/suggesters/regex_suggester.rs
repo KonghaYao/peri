@@ -1,4 +1,5 @@
 use crate::error_suggest::context::ErrorContext;
+use crate::error_suggest::normalized_tool_name;
 use crate::error_suggest::registry::{ErrorSuggester, Suggestion};
 
 /// B4：Grep 工具 regex 语法错误建议
@@ -6,7 +7,8 @@ pub struct RegexSuggester;
 
 impl ErrorSuggester for RegexSuggester {
     fn suggest(&self, ctx: &ErrorContext) -> Option<Suggestion> {
-        if ctx.tool_name != "Grep" {
+        // 归一：`mcp__workspace__Grep` 与 `Grep` 同门槛
+        if normalized_tool_name(ctx.tool_name) != "Grep" {
             return None;
         }
         let lower = ctx.error_message.to_lowercase();

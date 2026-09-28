@@ -1,5 +1,7 @@
 # MCP adaptation v4-part-1 — 现场验收记录
 
+> 2026-09-28 范围更新：`local-mcp-server` 已按用户裁决退役，代码与独立构建入口已删除。本文涉及旧项目的路径、命令、比较和后续复用建议仅作为历史记录，不再作为实施或验收要求；当前 Workspace MCP 入口与验证见 [主项目代码索引](../../docs/code-index/peri-middlewares.md)。
+
 **状态**：PARTIAL（契约 1–4、7 通过；契约 5、6 按能力分级的降级证据，见 §3、§4）
 **优先级**：高
 **类型**：验收记录 / MCP 启动准入与一等工具注入
@@ -99,7 +101,7 @@ D-03 实际覆盖（PARTIAL 的正面部分）：pool entry 分离、`Arc<McpCli
 
 **辅助证据**：`cargo clippy --workspace --all-targets -- -D warnings` exit 0（cargo 复用已缓存 clippy 结果，无新诊断）。此项不属 plan §6 门禁，仅作参考。
 
-**测试模块 wiring 复核**（plan §9 规则 2）：新增测试文件均已挂载——`mcp/v4_seam_test.rs`→`mcp/mod.rs:62`、`mcp/system_tools_test.rs`→`system_tools.rs:386`、`mcp/client/readiness_test.rs`→`readiness.rs:628`、`peri-acp/src/host/mcp_v4_startup_test.rs`→`host/mod.rs:52`、`stage_builder/tools_test.rs`→`stage_builder/tools.rs:103`；两个 `tests/*.rs` 由 cargo 自动发现。未见未挂载的孤儿测试文件。
+**测试模块 wiring 复核**（plan §9 规则 2）：新增测试文件均已挂载——`mcp/v4_seam_test.rs`→`mcp/mod.rs:62`、`mcp/system_tools_test.rs`→`system_tools.rs:385`、`mcp/client/readiness_test.rs`→`readiness.rs:628`、`peri-acp/src/host/mcp_v4_startup_test.rs`→`host/mod.rs:52`、`stage_builder/tools_test.rs`→`stage_builder/tools.rs:103`；两个 `tests/*.rs` 由 cargo 自动发现。未见未挂载的孤儿测试文件。
 
 ### 5.1 独立验证阶段的收口复跑（W6 之后）
 

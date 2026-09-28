@@ -793,3 +793,93 @@ fn test_excluded_not_visible() {
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].id(), id1);
 }
+
+// ── N10：re-inject 路径提取的 builtin effective name 归一 ───────────────────
+
+/// 构造携带指定工具名 Read 调用的 AI 消息（`file_path` 参数）。
+fn make_ai_with_named_read_tool(tool_name: &str, file_path: &str) -> BaseMessage {
+    BaseMessage::ai_with_tool_calls(
+        MessageContent::text("read the file"),
+        vec![crate::messages::ToolCallRequest::new(
+            "named-read-id",
+            tool_name,
+            serde_json::json!({ "file_path": file_path }),
+        )],
+    )
+}
+
+/// 正向：历史名字 `mcp__workspace__Read` 经归一后必须命中，与当前原名 `Read`
+/// 共用同一「逆序扫描（最新优先）+ 去重」语义。
+#[test]
+fn extract_recent_files_matches_workspace_effective_read() {
+    // 消息顺序：旧 → 新（extract_recent_files 逆序遍历）
+    let msgs = vec![
+        make_human("请读取文件"),
+        make_ai_with_named_read_tool("mcp__workspace__Read", "/tmp/ws-older.rs"),
+        make_ai_with_named_read_tool("Read", "/tmp/ws-newest.rs"),
+        make_ai_with_named_read_tool("mcp__workspace__Read", "/tmp/ws-newest.rs"),
+    ];
+
+    let paths = extract_recent_files(&msgs, 10);
+
+    assert_eq!(
+        paths,
+        vec![
+            "/tmp/ws-newest.rs".to_string(),
+            "/tmp/ws-older.rs".to_string()
+        ],
+        "effective name 与裸名都必须命中，且保持「逆序扫描（最新优先）+ 去重」语义"
+    );
+}
+
+/// 反例：未注册实例的 `mcp__foo__Read` 不得被归一命中 ⇒ 不提取（保守语义：
+/// 未知 / 外部 `mcp__*` 不按 Read 处理）。
+#[test]
+fn extract_recent_files_ignores_unknown_effective_names() {
+    for name in ["mcp__foo__Read", "mcp__workspace__read"] {
+        let msgs = vec![make_ai_with_named_read_tool(
+            name,
+            "/tmp/should-not-appear.rs",
+        )];
+        let paths = extract_recent_files(&msgs, 10);
+        assert!(
+            paths.is_empty(),
+            "`{name}` 未命中归一表（纯查表 + 区分大小写），不得被当作 Read 提取"
+        );
+    }
+}
+
+/// 正向：`extract_skills_paths` 同样要识别 effective name 读取的 SKILL.md。
+#[test]
+fn extract_skills_paths_matches_workspace_effective_read() {
+    let skill = "/home/u/.claude/skills/demo/SKILL.md";
+    let msgs = vec![
+        make_ai_with_named_read_tool("mcp__workspace__Read", skill),
+        make_ai_with_named_read_tool("Read", skill),
+        make_human("普通消息"),
+    ];
+
+    let paths = extract_skills_paths(&msgs);
+
+    assert_eq!(
+        paths,
+        vec![skill.to_string()],
+        "当前原名与历史 builtin 名读取的同一 SKILL.md 必须去重后进入 Skills 路径"
+    );
+}
+
+/// 反例：`extract_skills_paths` 对未注册实例名保守不提取。
+#[test]
+fn extract_skills_paths_ignores_unknown_effective_names() {
+    for name in ["mcp__foo__Read", "mcp__workspace__read"] {
+        let msgs = vec![make_ai_with_named_read_tool(
+            name,
+            "/home/u/.claude/skills/demo/SKILL.md",
+        )];
+        let paths = extract_skills_paths(&msgs);
+        assert!(
+            paths.is_empty(),
+            "`{name}` 未命中归一表，不得被当作 Read 提取 Skills 路径"
+        );
+    }
+}

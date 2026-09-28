@@ -1,5 +1,7 @@
 # MCP adaptation v4-part-1：Sub-plan D 跨层验证与文档一致性
 
+> 2026-09-28 范围更新：`local-mcp-server` 已按用户裁决退役，代码与独立构建入口已删除。本文涉及旧项目的路径、命令、比较和后续复用建议仅作为历史记录，不再作为实施或验收要求；当前 Workspace MCP 入口与验证见 [主项目代码索引](../../docs/code-index/peri-middlewares.md)。
+
 > **主 plan v2 覆盖（优先于本文）**：见 [`2026-09-25-mcp-adaptation-v4-part-1-plan.md`](2026-09-25-mcp-adaptation-v4-part-1-plan.md) §5。本文与主 plan 冲突处一律以主 plan 为准，涉及本文件的具体覆盖：**R3**（`docs/code-index/**` 唯一 owner 是 D-06）、**R9**（本文 D-01 行作废：`peri-middlewares/tests/` 外部集成测试触达不到 readiness 内部 seam；其跨层职责由 B-07 host seam 与 D-02 crate 内 seam 承接）、**R10**（`peri-agent/src/session/exec/stage_builder.rs` 归 B-05 所有）、**R13**（D-06 依赖 D-05，排在 D-05 之后的独立 Wave）。
 
 ## 1. 元信息
@@ -42,7 +44,7 @@
 - 根 `CLAUDE.md` 要求先读 `docs/standards/index.md`、按意图查 `docs/code-index/`，变更时同步索引（`CLAUDE.md:37-42`）；MCP/工具/中间件任务还应读 `peri-middlewares/CLAUDE.md`，E2E 任务读 `e2e/CLAUDE.md`（`CLAUDE.md:43-55`）。
 - `DOC-UPDATE-001` 要求实现变更检查受影响 standards、模块 CLAUDE、测试 canonical 路由和命令，只更新单一事实源（`docs/standards/documentation.md:27-31`）；`DOC-LINK-001` 要求移动/合并/删除时同步 CLAUDE、standards、code-index、active spec 和引用，并做链接检查（`:51-55`）。
 - `docs/standards/index.md:1-40` 是 standards 路由和优先级索引，不复制测试规则；若本次只新增 MCP 验证，不应无理由改 standards，但如新增 canonical 命令或测试边界，必须更新 `docs/standards/testing.md` 并同步其索引路由。
-- 当前 MCP 代码索引把 transport、static MCP execution directory、`McpClientPool`、`McpMiddleware` 和真实 client process/service test 作为入口，见 `docs/code-index/peri-middlewares.md:15-23`；`local-mcp-server` 的独立边界、入口和验证命令见 `docs/code-index/local-mcp-server.md:1-34`。代码变更后这两个 index 是必查对象，只有入口/命令/职责事实改变时才实际改动。
+- 当前 MCP 代码索引把 transport、执行目录、`McpClientPool`、`McpMiddleware` 与 Workspace builtin 作为入口，见 `docs/code-index/peri-middlewares.md`。独立项目退役后，只维护这份主项目索引；入口、命令或职责变化时同步更新。
 - 近期 issue 采用“状态/优先级/类型/日期 → 目标/事实 → 已验证/已证伪/未验证 → 待办/验收标准/相关文件”的证据结构：`spec/issues/2026-09-01-workflow-delivery-git-postcondition.md:1-11`、`:42-56`；flake 记录明确区分本地证据、未复现、未验证平台和 PARTIAL 判定（`spec/issues/2026-09-10-meta-session-readonly-flake-unproven.md:53-90`）。
 - **决策**：本次现场命令、实际执行用例数、transport/assembly/RCRA 证据和限制不回填 `docs/design/mcp-adaptation-v4-part-1.md`，也不把本 sub-plan 当最终验收勾选表；在实施完成后新建 `spec/issues/2026-09-25-mcp-adaptation-v4-part-1-acceptance.md`。该记录复用上述 issue 结构，增加“契约矩阵（1–7）/运行命令与 exit status/实际用例数/证据强度/blocked 与 skipped/目标归属≠已落地能力/非目标”章节，并以 `PARTIAL` 或 `PASS` 明确整体裁决。契约 5/6 若只有降级断言，必须保持 `PARTIAL`，不能由契约 1–4 的绿色推导整体完成。
 
@@ -61,7 +63,7 @@
 ### 3.2 只能降级断言的部分
 
 - **凭据不共享**：当前 `McpClientHandle` 的可见字段是 `peer/tools/status/oauth_status/source/url/...`（`peri-middlewares/src/mcp/client/types.rs:83-104`），pool 的共享字段包括 services/processes/configs 和一个 pool-wide `capability_profile`（`peri-middlewares/src/mcp/client.rs:44-100`）；实际 token/credential store 在 initialize 中由 `FileCredentialStore::new()` 创建（`peri-middlewares/src/mcp/initialize.rs:74-85`），没有可安全读取的 per-instance credential identity public API。不能通过比较秘密、日志或 debug 输出来证明“不共享”。降级为：不同配置项分别触发独立 authorization/headers 注入路径，服务端 fixture 记录各自收到的非秘密 sentinel header 名/opaque credential fingerprint（测试不得输出原值）；若 B 未提供可观察 hook，则只能断言 `McpConnectionKey`/配置归属不混淆，并在 acceptance 记录标注“凭据隔离未完整可测”。
-- **capability root**：当前 `McpClientPool` 明确暴露的是 deployment-level `capability_profile`，而 `McpClientHandle` 没有 capability root 字段（`peri-middlewares/src/mcp/client.rs:94-99`、`peri-middlewares/src/mcp/client/types.rs:83-104`）。`local-mcp-server` 的 `RootDir` 是独立项目内部的工作区根能力边界，索引明确说明它不是安全沙箱，且 Bash 不受文件 root 限制（`docs/code-index/local-mcp-server.md:6-10`、`:23-26`）。因此不能声称已完成五个 MCP 的 capability-root 隔离。若 B/C 提供 root identity/URI public view，断言两个 fixture 各自只能读写自己的 temp root；否则只做“配置 cwd/root 参数不共享、工具请求不跨 fixture root”的降级断言，并将其证据强度记为 partial。
+- **capability root**：当前 `McpClientPool` 明确暴露的是 deployment-level `capability_profile`，而 `McpClientHandle` 没有 capability root 字段（`peri-middlewares/src/mcp/client.rs:94-99`、`peri-middlewares/src/mcp/client/types.rs:83-104`）。退役项目的 `RootDir` 仅属历史比较，不能作为主项目 capability root 的实现证据；主项目的边界见 `peri-middlewares/src/mcp/builtin/workspace.rs`。因此不能声称已完成五个 MCP 的 capability-root 隔离。若 B/C 提供 root identity/URI public view，断言两个 fixture 各自只能读写自己的 temp root；否则只做“配置 cwd/root 参数不共享、工具请求不跨 fixture root”的降级断言，并将其证据强度记为 partial。
 - **五个目标 MCP 真实归属**：当前 pool/handle 结构只能观察已配置 server，不存在能枚举 Workspace/Artifact/Web/Cron/LSP 五个已迁移实例的事实接口。测试只验证两个最小隔离 fixture 和“没有隐式调用”，不能替代五实例迁移验收；契约 7 记录必须写“目标归属仍来自设计，实例落地未完成”。
 
 ### 3.3 运行位置与命令
@@ -131,7 +133,6 @@
 - **`spec/issues/2026-09-25-mcp-adaptation-v4-part-1-acceptance.md`（新增验收记录）**：记录契约 1–7 的实际结果、命令、exit status、执行用例数、fixture、证据强度和 blocked/unsupported。契约 5/6 使用“完整运行时证据/降级证据/未验证”三态；契约 7 明确“目标归属”来自设计表，“已落地能力”只由本次运行时证据决定。
 - **`docs/code-index/peri-middlewares.md`**：若 A/B/C 改变 MCP config、ready、assembly 或 tool bridge 入口，更新 MCP 速查表中对应主文件/入口/验证入口；补充跨层测试文件和命令，但不把目标五实例写成当前实现。当前索引的 MCP 入口在 `docs/code-index/peri-middlewares.md:15-23`。
 - **`docs/code-index/peri-acp-types.md`**：若 A 把 `McpServerConfig` 的字段事实源或插件契约入口改变，更新对应 protocol/config 行；只写当前入口，不复制设计目标。
-- **`docs/code-index/local-mcp-server.md`**：只有当 fixture/验证命令或 capability-root 语义改变才更新；目前必须保留“独立项目、不属于根 workspace”和“root 不是安全沙箱”的口径（`docs/code-index/local-mcp-server.md:1-10`）。
 - **`docs/standards/testing.md`**：仅在本次确认了新的 canonical 跨层测试命令、根 workspace 与独立 project 的边界，或新增“System MCP seam 测试”稳定规则时更新；应放在测试目录/生命周期/命令相关章节，不把一次验收结果写入标准。索引 `docs/standards/index.md:20-26` 只需在标准文件新增/移动时核对，不重复规则。
 - **`CLAUDE.md` / `peri-middlewares/CLAUDE.md`**：只在任务路由、MCP 稳定不变量或 canonical command 发生变化时更新；不能为了本次 issue 添加动态 inventory 或“迁移已完成”清单。DOC-UPDATE-001 要求只改受影响事实源（`docs/standards/documentation.md:27-31`）。
 

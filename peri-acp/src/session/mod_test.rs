@@ -15,7 +15,7 @@ use peri_acp_types::command::{CommandHandler, CommandOutcome};
 use crate::provider::{
     LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels,
 };
-use crate::session::SessionManager;
+use crate::session::{SessionManager, TaskManagerFactory};
 use peri_middlewares::prelude::{PermissionMode, SharedPermissionMode};
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
@@ -101,7 +101,7 @@ async fn make_manager_with_cron_option(
     tmp: &tempfile::TempDir,
     cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
 ) -> SessionManager {
-    make_manager_inner(tmp, cron_scheduler, Vec::new()).await
+    make_manager_inner(tmp, cron_scheduler, Vec::new(), None).await
 }
 
 /// Phase 6 B2：构造带插件命令静态条目的 SessionManager（cron 无）。
@@ -109,14 +109,30 @@ async fn make_manager_with_plugin_entries(
     tmp: &tempfile::TempDir,
     plugin_entries: Vec<RouteEntry>,
 ) -> SessionManager {
-    make_manager_inner(tmp, None, plugin_entries).await
+    make_manager_inner(tmp, None, plugin_entries, None).await
 }
 
-/// 通用构造：cron scheduler + 插件命令静态条目可组合注入。
+/// AW3-11：注入**真实** per-session `TaskManager` 工厂，使「工厂产出」与
+/// 「外部携带」两条 manager 来源在用例里可辨识（`Arc::ptr_eq` / 判型）。
+async fn make_manager_with_task_manager_factory(tmp: &tempfile::TempDir) -> SessionManager {
+    make_manager_inner(
+        tmp,
+        None,
+        Vec::new(),
+        Some(Arc::new(|| {
+            Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
+                as Arc<dyn peri_acp_types::tasks::TaskManager>
+        })),
+    )
+    .await
+}
+
+/// 通用构造：cron scheduler + 插件命令静态条目 + per-session TaskManager 工厂可组合注入。
 async fn make_manager_inner(
     tmp: &tempfile::TempDir,
     cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
     plugin_entries: Vec<RouteEntry>,
+    task_manager_factory: Option<TaskManagerFactory>,
 ) -> SessionManager {
     let session_resources =
         peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
@@ -145,7 +161,7 @@ async fn make_manager_inner(
         }),
         None, // MCP 订阅端口（测试无）
         None, // Dynamic MCP（测试无）
-        None, // 无 bg 场景：fallback NoopTaskManager
+        task_manager_factory,
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
         plugin_entries,
         Vec::new(), // plugin skill roots（C1；测试无）
@@ -770,7 +786,7 @@ fn build_meta_harness_state_mixed_entries() {
             ("01_intro", true),
             ("05_using_tools", false),
             ("WebMiddleware", false),
-            ("FilesystemMiddleware", true),
+            ("WorkspaceMiddleware", true),
         ])),
         docs,
     );
@@ -779,7 +795,7 @@ fn build_meta_harness_state_mixed_entries() {
     assert!(!state.section_overrides.contains_key("05_using_tools"));
     assert_eq!(state.disabled_middlewares.len(), 1);
     assert!(state.disabled_middlewares.contains("WebMiddleware"));
-    assert!(!state.disabled_middlewares.contains("FilesystemMiddleware"));
+    assert!(!state.disabled_middlewares.contains("WorkspaceMiddleware"));
 }
 
 /// 集成：build_frozen_data 应用段落覆盖 + middleware 关闭集合到冻结载体；
@@ -1118,4 +1134,58 @@ async fn test_session_creation_register_order_builtin_skill_plugin() {
         reg.resolve("/plugin:ecc:deploy").unwrap().entry.kind,
         CommandEntryKind::Command
     );
+}
+
+// ── AW3-11：per-session TaskManager 的携带路径 ────────────────────────────────
+
+/// `ensure_session_with_task_manager` 携带的 manager 必须**原样**成为会话持有的
+/// `AcpSession::task_manager`（同一 `Arc`，不是复制、不是重新工厂化）；`None` 路径
+/// 仍走装配注入的工厂——两条来源在同一个 manager 上可辨识。
+#[tokio::test]
+async fn ensure_session_with_task_manager_keeps_the_same_arc() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_manager_with_task_manager_factory(&tmp).await;
+    let carried: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+
+    mgr.ensure_session_with_task_manager("aw3-11-carried", "/tmp", Some(Arc::clone(&carried)));
+    let stored = Arc::clone(&mgr.get_session("aw3-11-carried").unwrap().task_manager);
+    assert!(
+        Arc::ptr_eq(&stored, &carried),
+        "会话持有的必须是送进来的同一份 Arc"
+    );
+    assert!(
+        !stored
+            .as_any()
+            .is::<peri_acp_types::tasks::NoopTaskManager>(),
+        "携带路径不得退化成 Noop"
+    );
+
+    // 既有签名（delegate 到 `None`）不变：走工厂，与携带的那份非同一实例。
+    mgr.ensure_session("aw3-11-factory", "/tmp");
+    let from_factory = Arc::clone(&mgr.get_session("aw3-11-factory").unwrap().task_manager);
+    assert!(
+        !Arc::ptr_eq(&from_factory, &carried),
+        "None 路径必须走工厂，不得复用外部携带的 manager"
+    );
+    assert!(
+        !from_factory
+            .as_any()
+            .is::<peri_acp_types::tasks::NoopTaskManager>(),
+        "工厂已注入 ⇒ 不得 fallback NoopTaskManager"
+    );
+}
+
+/// 未注入工厂时 `None` 路径仍是既有的 `NoopTaskManager` fallback（行为不变）。
+#[tokio::test]
+async fn ensure_session_without_factory_still_falls_back_to_noop() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp).await;
+    mgr.ensure_session("aw3-11-noop", "/tmp");
+    assert!(mgr
+        .get_session("aw3-11-noop")
+        .unwrap()
+        .task_manager
+        .as_any()
+        .is::<peri_acp_types::tasks::NoopTaskManager>());
 }

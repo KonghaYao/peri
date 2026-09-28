@@ -1,4 +1,5 @@
 pub mod ask_user_tool;
+pub(crate) mod failure;
 pub mod filesystem;
 pub mod output_persist;
 pub mod output_truncate;
@@ -28,11 +29,18 @@ pub(crate) fn parse_optional_u64(
     if value.is_null() {
         return Ok(None);
     }
-    let n = value
-        .as_f64()
-        .ok_or_else(|| format!("Error: '{name}' must be a non-negative integer, got {value}"))?;
+    let n = value.as_f64().ok_or_else(|| {
+        failure::ToolFailure::new(
+            "Numeric parameters must be non-negative integers.",
+            format!("Error: '{name}' must be a non-negative integer, got {value}"),
+        )
+    })?;
     if n.fract() != 0.0 || n < 0.0 {
-        return Err(format!("Error: '{name}' must be a non-negative integer, got {n}").into());
+        return Err(failure::ToolFailure::new(
+            "Numeric parameters must be non-negative integers.",
+            format!("Error: '{name}' must be a non-negative integer, got {n}"),
+        )
+        .into());
     }
     Ok(Some(n as u64))
 }
@@ -97,6 +105,14 @@ impl BaseTool for BoxToolWrapper {
         self.0.mcp_server_name()
     }
 
+    fn mcp_tool_name(&self) -> Option<&str> {
+        self.0.mcp_tool_name()
+    }
+
+    fn builtin_mcp_instance(&self) -> Option<&str> {
+        self.0.builtin_mcp_instance()
+    }
+
     fn timeout(&self) -> Option<std::time::Duration> {
         self.0.timeout()
     }
@@ -152,6 +168,14 @@ impl BaseTool for ArcToolWrapper {
 
     fn mcp_server_name(&self) -> Option<&str> {
         self.0.mcp_server_name()
+    }
+
+    fn mcp_tool_name(&self) -> Option<&str> {
+        self.0.mcp_tool_name()
+    }
+
+    fn builtin_mcp_instance(&self) -> Option<&str> {
+        self.0.builtin_mcp_instance()
     }
 
     fn timeout(&self) -> Option<std::time::Duration> {

@@ -11,7 +11,7 @@ Usage:
 - Results exceeding 5000 bytes are truncated at a line boundary with the original byte count; continue reading the rest with the suggested offset (Read never persists output to a file)
 - Results are returned using cat -n format, with line numbers starting at 1
 - This tool reads files from the local filesystem; it cannot handle URLs
-- You can call multiple tools in a single response. It is always better to speculatively read multiple files before making edits
+- You can call multiple tools in a single response.
 - You should prefer using the Read tool over the Bash tool with commands like cat, head, tail, or sed to read files. This provides better output formatting and filtering
 - For open-ended searches that may require multiple rounds of globbing and grepping, use the Agent tool instead
 

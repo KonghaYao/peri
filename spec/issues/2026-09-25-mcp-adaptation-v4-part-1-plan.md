@@ -1,6 +1,7 @@
 # MCP adaptation v4-part-1 — 主实施计划（master plan）
 
 > 日期：2026-09-25。状态：**v2 已修订**（v1 经独立 check 后修订）。代码未实施。
+> **实施回填（2026-09-28）**：本波代码已实施并验收（契约 1–4、7 PASS；契约 5、6 PARTIAL）；现场证据见 `spec/issues/2026-09-25-mcp-adaptation-v4-part-1-acceptance.md` §9 整体裁决（交付提交 `48ea61cb`；分支 `feat/mcp-adaptation-v4-part-3`）。
 >
 > 目标事实源：`docs/design/mcp-adaptation-v4-part-1.md`（下称「设计文档」）。本文件是**实施批次、任务编排与接口冻结**的唯一事实源；设计文档是**契约语义**的唯一事实源。二者冲突时以设计文档为准，并回到本文件修订任务。
 >

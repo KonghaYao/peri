@@ -25,7 +25,7 @@ pub(crate) struct AgentBuildResult {
     /// 过滤后的工具集（按 agent_def.tools/disallowed_tools）
     pub tools: Vec<Box<dyn BaseTool>>,
     /// Canonical allow/disallow policy retained for every generation refresh.
-    pub tool_filter: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    pub tool_filter: peri_agent::session::tool_catalog::ToolFilter,
     /// SubAgent system prompt
     pub system_prompt: Option<String>,
     /// agent 定义声明的 skills（SkillPreload 装配输入）

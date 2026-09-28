@@ -49,7 +49,11 @@ pub struct McpToolBridge {
     admission: Option<super::dynamic::admission::DynamicMcpAdmissionGate>,
 }
 
-const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// External MCP requests share a 120-second deadline across send and response.
+/// Only the workspace builtin retains its native file/shell deadlines. Identity
+/// comes from ConfigSource; other builtins retain the bounded MCP call contract.
+/// In particular Bash must finish promotion and return its receipt at the 120s boundary.
+pub(crate) const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const MAX_MCP_LINES: usize = 2000;
 
 /// Sanitize name components to match API tool name pattern: ^[a-zA-Z0-9_-]+$
@@ -71,11 +75,6 @@ fn app_allowed_tools(
     tools: &[Tool],
     dispatcher: &dyn peri_acp_types::tools::EffectiveToolDispatcher,
 ) -> std::collections::HashMap<String, String> {
-    let dispatcher_tools = dispatcher
-        .tools()
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect::<std::collections::HashSet<_>>();
     tools
         .iter()
         .filter(|tool| {
@@ -84,10 +83,9 @@ fn app_allowed_tools(
         })
         .filter_map(|tool| {
             let name = tool.name.to_string();
-            let effective = effective_mcp_tool_name(server_name, &name);
-            dispatcher_tools
-                .contains(&effective)
-                .then_some((name, effective))
+            dispatcher
+                .admitted_mcp_tool_name(server_name, &name)
+                .map(|effective| (name, effective))
         })
         .collect()
 }
@@ -175,14 +173,10 @@ impl McpToolBridge {
         self
     }
 
-    /// 将本 bridge 提升为 direct（无需模型先搜索即可出现在 tools 参数中）。
-    ///
-    /// 只改 direct 标记：visibility、名称、client、generation、admission 与
-    /// binding leases 均不变，也不产生副本或新注册。
-    ///
-    /// 调用点归 `system_tools::prepare_system_tools`（同 Wave 落地）。
-    pub(crate) fn with_direct(mut self) -> Self {
+    /// 仅启动清单选中的 system 工具使用原始模型名；wire 身份始终保存在 tool_name。
+    pub(crate) fn with_system_direct(mut self) -> Self {
         self.direct = true;
+        self.full_name = self.tool_name.clone();
         self
     }
 
@@ -221,6 +215,17 @@ impl BaseTool for McpToolBridge {
 
     fn mcp_server_name(&self) -> Option<&str> {
         Some(&self.server_name)
+    }
+
+    fn mcp_tool_name(&self) -> Option<&str> {
+        Some(&self.tool_name)
+    }
+
+    fn builtin_mcp_instance(&self) -> Option<&str> {
+        match &self.client.source {
+            Some(super::config::ConfigSource::Builtin { instance }) => Some(instance),
+            _ => None,
+        }
     }
 
     fn timeout(&self) -> Option<std::time::Duration> {
@@ -266,18 +271,29 @@ impl BaseTool for McpToolBridge {
         let request = rmcp::model::CallToolRequestParams::new(self.tool_name.clone())
             .with_arguments(arguments);
 
-        // 3. 带超时调用 peer.call_tool()
-        let result = tokio::time::timeout(TOOL_CALL_TIMEOUT, peer.call_tool(request))
+        // Workspace tools retain their own deadlines (Bash promotes at <=120s).
+        // Source identity, not a spoofable server name, grants this behavior.
+        let timeout = (!matches!(
+            self.client.source.as_ref(),
+            Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace"
+        ))
+        .then_some(TOOL_CALL_TIMEOUT);
+        let result = super::tool_request::call_tool(peer, request, timeout)
             .await
-            .map_err(|_| ToolCallError::Timeout {
-                server: self.server_name.clone(),
-                tool: self.tool_name.clone(),
-                timeout_secs: TOOL_CALL_TIMEOUT.as_secs(),
-            })?
-            .map_err(|e| ToolCallError::CallFailed {
-                server: self.server_name.clone(),
-                tool: self.tool_name.clone(),
-                reason: e.to_string(),
+            .map_err(|e| {
+                if let rmcp::ServiceError::Timeout { timeout } = e {
+                    ToolCallError::Timeout {
+                        server: self.server_name.clone(),
+                        tool: self.tool_name.clone(),
+                        timeout_secs: timeout.as_secs(),
+                    }
+                } else {
+                    ToolCallError::CallFailed {
+                        server: self.server_name.clone(),
+                        tool: self.tool_name.clone(),
+                        reason: e.to_string(),
+                    }
+                }
             })?;
 
         // 4. 处理 is_error 标志。失败的实例化调用不得签发 App lease。
@@ -402,26 +418,61 @@ fn format_contents(contents: &[ContentBlock]) -> String {
 
 /// 会话可见的 typed bridge 集合（唯一 typed 构造入口）。
 ///
-/// `build_tool_bridges` / [`McpToolBridge::with_direct`] 的 typed 版本：调用方
-/// 可以在同一批对象上做分类（如 [`McpToolBridge::with_direct`]）后只装箱一次，
+/// `build_tool_bridges` / [`McpToolBridge::with_system_direct`] 的 typed 版本：调用方
+/// 可以在同一批对象上做分类后只装箱一次，
 /// 避免同一工具被注册两份。两种 constructor、generation 与 binding leases 行为
 /// 与原实现一致。
 ///
 /// `session_id` 为 `None` 表示不过滤（部署面视图）；`Some` 时排除其他会话的
 /// ACP 连接（`McpClientPool::is_visible_to_session`），避免会话间工具泄漏。
+///
+/// **IF-D13 生效点**：注册表中**声明为 direct** 的 builtin 工具在这里直接
+/// `.with_system_direct()`（`direct = 声明的 direct || 启动期 system_mcp_tools 提升`，两者由
+/// 「声明 direct 集合 == `system_mcp_tools` 集合」的断言锁死，不得冲突）。其余一律
+/// 保持 deferred。判定只走 `builtin::is_declared_direct`（未实现 / 未知名恒 false），
+/// 不在本文件硬编码任何 `mcp__*` 字面量或实例名。
 pub(crate) fn build_typed_tool_bridges_visible_to(
     pool: &McpClientPool,
     session_id: Option<&str>,
 ) -> Vec<McpToolBridge> {
+    build_bridges(pool, true, session_id)
+}
+
+/// 部署面视图的 typed 版本（无会话归属过滤）。
+pub(crate) fn build_typed_tool_bridges(pool: &McpClientPool) -> Vec<McpToolBridge> {
+    build_bridges(pool, true, None)
+}
+
+/// 强制 deferred 的 typed 版本：public [`build_tool_bridges`] 专用。
+///
+/// 与 [`build_typed_tool_bridges_visible_to`] 的唯一差异是不应用声明 direct，因此
+/// public builder 在 builtin 与外部 server 两种输入下的行为都与提取出 typed
+/// builder 之前**逐位一致**。
+pub(crate) fn build_deferred_tool_bridges(pool: &McpClientPool) -> Vec<McpToolBridge> {
+    build_bridges(pool, false, None)
+}
+
+fn build_bridges(
+    pool: &McpClientPool,
+    apply_declared_direct: bool,
+    session_id: Option<&str>,
+) -> Vec<McpToolBridge> {
     let mut bridges: Vec<McpToolBridge> = Vec::new();
-    for client in pool.get_all_clients_visible_to(session_id) {
+    let mut clients = pool.get_all_clients_visible_to(session_id);
+    clients.sort_by(|left, right| left.name.cmp(&right.name));
+    for client in clients {
         let generation = pool.handle_generation(&client);
         for tool in &client.tools {
-            bridges.push(
-                McpToolBridge::new(&client.name, tool, Arc::clone(&client))
-                    .with_server_generation(generation)
-                    .with_binding_leases(Arc::clone(&pool.app_binding_leases)),
-            );
+            let mut bridge = McpToolBridge::new(&client.name, tool, Arc::clone(&client))
+                .with_server_generation(generation)
+                .with_binding_leases(Arc::clone(&pool.app_binding_leases));
+            if apply_declared_direct
+                && matches!(&client.source, Some(super::config::ConfigSource::Builtin { instance }) if instance == &client.name)
+                && super::builtin::is_declared_direct(&client.name, tool.name.as_ref())
+            {
+                bridge = bridge.with_system_direct();
+            }
+            bridges.push(bridge);
         }
     }
     bridges
@@ -429,12 +480,16 @@ pub(crate) fn build_typed_tool_bridges_visible_to(
 
 /// 从 McpClientPool 的所有已连接客户端中批量创建 McpToolBridge
 ///
-/// 全部返回值保持 deferred 默认行为（`is_direct() == false`）。
+/// 全部返回值保持 deferred 默认行为（`is_direct() == false`）——包括 builtin 实例的
+/// 工具：未类型化的 public builder 不参与 direct 提升（IF-D13），保持既有契约不变。
 ///
 /// 不过滤会话归属（部署面视图）：会话内装配必须走
 /// [`build_tool_bridges_visible_to`]，否则会拿到其他会话声明的 ACP 工具。
 pub fn build_tool_bridges(pool: &McpClientPool) -> Vec<Box<dyn BaseTool>> {
-    build_tool_bridges_visible_to(pool, None)
+    build_deferred_tool_bridges(pool)
+        .into_iter()
+        .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
+        .collect()
 }
 
 /// 会话可见的 bridge 集合（[`build_tool_bridges`] 的 ACP 归属过滤版）。
@@ -442,12 +497,11 @@ pub fn build_tool_bridges_visible_to(
     pool: &McpClientPool,
     session_id: Option<&str>,
 ) -> Vec<Box<dyn BaseTool>> {
-    build_typed_tool_bridges_visible_to(pool, session_id)
+    build_bridges(pool, false, session_id)
         .into_iter()
         .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
         .collect()
 }
-
 /// 统一工具池组装：内置工具优先去重
 
 #[cfg(test)]
@@ -502,9 +556,10 @@ mod direct_flag_tests {
         let parameters = bridge.parameters();
         assert!(bridge.visible_to_model());
 
-        let promoted = bridge.with_direct();
+        let promoted = bridge.with_system_direct();
         assert!(promoted.is_direct());
-        assert_eq!(promoted.name(), name);
+        assert_eq!(promoted.name(), "Read");
+        assert_ne!(promoted.name(), name);
         assert_eq!(promoted.original_tool_name(), "Read");
         assert_eq!(promoted.mcp_server_name(), Some("workspace"));
         assert_eq!(promoted.parameters(), parameters);
@@ -514,24 +569,43 @@ mod direct_flag_tests {
         );
     }
 
+    /// typed builder 的输入取注册表中**声明 deferred** 的 builtin 工具。
+    ///
+    /// 只有输入确实声明为 deferred，「不提升」才是有信息的断言：wave 3 起 `workspace`
+    /// 的 7 个工具全部 `direct: true`（注册表第五项），继续拿它当输入会变成「提升」的
+    /// 反面 —— 断言会红，而修法绝不是放宽断言。名字从注册表派生，不新增第二份名单。
     #[test]
     fn test_build_tool_bridges_keeps_deferred_default_and_matches_typed() {
+        let (instance, tool) = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+            .iter()
+            .find_map(|instance| {
+                instance
+                    .tools
+                    .iter()
+                    .find(|tool| !tool.direct)
+                    .map(|tool| (instance, tool))
+            })
+            .expect("注册表必须至少保留一个 deferred 声明的 builtin 工具");
         let pool = McpClientPool::new_pending();
         let handle = make_handle(
-            "workspace",
-            vec![make_tool("Read")],
+            instance.name,
+            vec![make_tool(tool.original_name)],
             ClientStatus::Connected,
         );
         pool.clients
             .write()
-            .insert("workspace".to_string(), Arc::clone(&handle));
+            .insert(instance.name.to_string(), Arc::clone(&handle));
 
-        let typed = build_typed_tool_bridges_visible_to(&pool, None);
+        let typed = build_typed_tool_bridges(&pool);
         let boxed = build_tool_bridges(&pool);
         assert_eq!(typed.len(), 1);
         assert_eq!(boxed.len(), typed.len());
         assert_eq!(boxed[0].name(), typed[0].name());
-        assert!(!typed[0].is_direct(), "typed builder 缺省必须为 deferred");
+        assert!(
+            !typed[0].is_direct(),
+            "注册表声明 deferred 的 builtin 工具（{}）在 typed builder 中必须保持 deferred",
+            tool.effective_name
+        );
         assert!(
             !boxed[0].is_direct(),
             "public builder 必须保持 deferred 默认"

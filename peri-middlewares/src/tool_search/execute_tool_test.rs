@@ -6,6 +6,8 @@ struct MockTool {
     name_str: String,
     desc_str: String,
     should_fail: bool,
+    mcp_source: Option<&'static str>,
+    namespace: Option<&'static str>,
 }
 
 impl MockTool {
@@ -14,6 +16,8 @@ impl MockTool {
             name_str: name.to_string(),
             desc_str: desc.to_string(),
             should_fail: false,
+            mcp_source: None,
+            namespace: None,
         }
     }
 
@@ -22,7 +26,19 @@ impl MockTool {
             name_str: name.to_string(),
             desc_str: desc.to_string(),
             should_fail: true,
+            mcp_source: None,
+            namespace: None,
         }
+    }
+
+    fn with_mcp_source(mut self, server: &'static str) -> Self {
+        self.mcp_source = Some(server);
+        self
+    }
+
+    fn with_namespace(mut self, namespace: &'static str) -> Self {
+        self.namespace = Some(namespace);
+        self
     }
 }
 
@@ -36,6 +52,12 @@ impl BaseTool for MockTool {
     }
     fn parameters(&self) -> Value {
         json!({"type": "object", "properties": {}})
+    }
+    fn mcp_server_name(&self) -> Option<&str> {
+        self.mcp_source
+    }
+    fn namespace(&self) -> Option<&str> {
+        self.namespace
     }
     fn aliases(&self) -> &[&str] {
         if self.name_str == "CronRegister" {
@@ -173,6 +195,36 @@ fn test_resolver_projects_wrapper_to_canonical_target() {
         invocation.wrapper_name.as_deref(),
         Some(EXECUTE_EXTRA_TOOL_NAME)
     );
+}
+
+#[test]
+fn external_mcp_execute_extra_tool_is_not_unwrapped() {
+    use peri_agent::{agent::react::ToolCall, tools::ToolInvocationResolver};
+
+    let external: Arc<dyn BaseTool> = Arc::new(
+        MockTool::new(EXECUTE_EXTRA_TOOL_NAME, "external system tool")
+            .with_mcp_source("system-server")
+            .with_namespace("meta"),
+    );
+    let tools = BTreeMap::from([
+        (EXECUTE_EXTRA_TOOL_NAME.to_string(), Arc::clone(&external)),
+        (
+            "CronRegister".to_string(),
+            Arc::new(MockTool::new("CronRegister", "internal target")) as Arc<dyn BaseTool>,
+        ),
+    ]);
+    let input = json!({"tool_name": "CronRegister", "params": {"value": 1}});
+    let invocation = ExecuteExtraToolResolver::default()
+        .resolve(
+            &ToolCall::new("external_call", EXECUTE_EXTRA_TOOL_NAME, input.clone()),
+            &tools,
+        )
+        .unwrap();
+
+    assert!(Arc::ptr_eq(&invocation.target, &external));
+    assert_eq!(invocation.policy_call.name, EXECUTE_EXTRA_TOOL_NAME);
+    assert_eq!(invocation.policy_call.input, input);
+    assert_eq!(invocation.wrapper_name, None);
 }
 #[tokio::test]
 async fn test_invoke_resolves_case_and_alias() {

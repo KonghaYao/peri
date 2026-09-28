@@ -1,4 +1,5 @@
 use super::*;
+use peri_acp_types::builtin_mcp::{find, original_tool_name_of_effective};
 
 #[test]
 fn test_truncate_text_short() {
@@ -344,4 +345,169 @@ fn test_wrap_by_width_empty_returns_single_empty_line() {
     // 后过滤 trim 空行——wrap 自身对空串产出单空行，不 panic。
     assert_eq!(wrap_by_width("", 10), vec![""]);
     assert_eq!(wrap_by_width("", 1), vec![""]);
+}
+
+// ── A4 / A8 匹配型归一：builtin 一等工具的 effective name 走同一分支 ────────────
+
+#[test]
+fn tui_web_tools_still_summarize_after_migration() {
+    // 输入摘要：effective name（模型面名字）与迁移前的裸名产出**同一**摘要
+    let input = serde_json::json!({ "query": "rust async" });
+    let effective = summarize_input("mcp__web__WebSearch", &input);
+    assert_eq!(effective, summarize_input("WebSearch", &input));
+    assert_eq!(effective, r#"query: "rust async""#);
+
+    // WebSearch query 仍按 60 字符截断（通用兜底是 120）；「只留 query」也未被通用化
+    let long = serde_json::json!({ "query": "q".repeat(80) });
+    assert_eq!(
+        summarize_input("mcp__web__WebSearch", &long),
+        format!(r#"query: "{}...""#, "q".repeat(60))
+    );
+
+    // WebFetch 输入：无 url 时是专用分支的 "(empty input)"——通用兜底会回显首个 KV
+    let no_url = serde_json::json!({ "unexpected": "v" });
+    assert_eq!(
+        summarize_input("mcp__web__WebFetch", &no_url),
+        "(empty input)"
+    );
+    assert_eq!(
+        summarize_input(
+            "mcp__web__WebFetch",
+            &serde_json::json!({ "url": "https://example.com/a" })
+        ),
+        "url: https://example.com/a"
+    );
+
+    // artifact 输入：file_path 专用分支（通用兜底会带 `path: ` 前缀与 JSON 引号）
+    let file = serde_json::json!({ "file_path": "peri-tui/src/lib.rs" });
+    assert_eq!(
+        summarize_input("mcp__artifact__artifact", &file),
+        "peri-tui/src/lib.rs"
+    );
+
+    // 输出折叠：WebFetch 仍走专用折叠（行数 · 字节数 + 保留正文），不走通用 200 字符截断
+    let output = "line1\nline2\nhttps://example.com/page";
+    let folded = summarize_output("mcp__web__WebFetch", output);
+    assert_eq!(folded, summarize_output("WebFetch", output));
+    assert!(folded.contains("3 lines"), "行数折叠: {folded:?}");
+    assert!(
+        folded.contains("https://example.com/page"),
+        "专用折叠必须保留正文（URL）: {folded:?}"
+    );
+    assert!(folded.contains("bytes"), "字节数折叠: {folded:?}");
+}
+
+// ── wave 2（cron / lsp）注册表新增：新 effective name 必须复用**既有**摘要分支 ──────
+
+/// wave 2 新增的 builtin 实例在注册表中的**实例键**（不是 effective name 副本）。
+const WAVE2_INSTANCE_KEYS: [&str; 2] = ["cron", "lsp"];
+
+/// 按原始工具名给出代表性参数：键名取自 `peri-middlewares` 各自 `BaseTool::parameters()`。
+/// 未登记的名字直接 panic —— 注册表条目变动时必须回来复核本回归。
+fn wave2_args_by_original_name(original_name: &str) -> serde_json::Value {
+    match original_name {
+        "cron_register" => {
+            serde_json::json!({ "expression": "*/5 * * * *", "prompt": "check status" })
+        }
+        "cron_list" => serde_json::json!({}),
+        "cron_remove" => serde_json::json!({ "id": "task-1" }),
+        // 只用 operation（不带 file_path）：通用兜底对 file_path 会回显 path，而 path
+        // 会被全局 DISPLAY_CWD 精简，掺入与本回归无关的进程级状态。
+        "LSP" => serde_json::json!({ "operation": "documentSymbol" }),
+        other => panic!("wave 2 有未登记的工具，需复核本回归: {other}"),
+    }
+}
+
+#[test]
+fn cron_lsp_effective_names_reuse_existing_summaries() {
+    // S-03：summarize_input / summarize_output 的既有归一入口（原样优先 → IF-D15
+    // 归一后重试）对新注册表条目必须同样生效，**不新增第二份归一实现**；
+    // 等价值用可观察输出（返回值）比较。
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    for key in WAVE2_INSTANCE_KEYS {
+        let instance = find(key).unwrap_or_else(|| panic!("wave 2 实例必须在注册表中: {key}"));
+        for tool in instance.tools {
+            pairs.push((tool.effective_name, tool.original_name));
+        }
+    }
+    // 从注册表取数（不在此复制 effective name 字面量）：cron 三项 + lsp 一项。
+    assert_eq!(pairs.len(), 4, "wave 2 新增条目数: {pairs:?}");
+
+    for (effective, original) in pairs {
+        // 归一入口的前置条件：新 effective name 必须能被 IF-D15 反查命中；命中不了
+        // ⇒ 重试分支拿不到原始名，归一入口对新名字失效。
+        assert_eq!(
+            original_tool_name_of_effective(effective),
+            Some(original),
+            "IF-D15 必须命中 wave 2 新条目: {effective}"
+        );
+        let input = wave2_args_by_original_name(original);
+        assert_eq!(
+            summarize_input(effective, &input),
+            summarize_input(original, &input),
+            "effective name 必须复用 {original} 的既有输入摘要分支: {effective}"
+        );
+        // 输出摘要同分支：4 个新条目都没有专有输出分支，两侧都走通用 200 字符截断。
+        let output = "line1\nline2\nhttps://example.com/page";
+        assert_eq!(
+            summarize_output(effective, output),
+            summarize_output(original, output),
+            "effective name 必须复用 {original} 的既有输出摘要分支: {effective}"
+        );
+    }
+
+    // 判别点：LSP 是 4 个新条目中唯一命中**专有输入摘要分支**的（operation 截断 40）。
+    // 归一入口失效 ⇒ 落到通用兜底（首个 KV 回显 `operation: documentSymbol`），
+    // 下面两条断言随之变红。
+    let lsp_effective = find("lsp")
+        .expect("lsp 实例必须在注册表中")
+        .tools
+        .iter()
+        .find(|tool| tool.original_name == "LSP")
+        .expect("lsp 实例必须声明 LSP 工具")
+        .effective_name;
+    let lsp_args = wave2_args_by_original_name("LSP");
+    let lsp = summarize_input(lsp_effective, &lsp_args);
+    assert_eq!(lsp, "documentSymbol", "LSP 专有分支未被复用: {lsp:?}");
+    assert_ne!(
+        lsp,
+        summarize_input("mcp__unknown__LSP", &lsp_args),
+        "专有分支必须与通用兜底在输出上可区分"
+    );
+}
+
+#[test]
+fn tui_unknown_mcp_names_fall_back_to_generic() {
+    // 反证：未知 / 外部 `mcp__*` 两次都不命中 ⇒ 走通用路径，与迁移前逐位一致。
+    let input = serde_json::json!({ "file_path": "peri-tui/src/lib.rs" });
+    assert_eq!(
+        summarize_input("mcp__foo__bar", &input),
+        r#"path: "peri-tui/src/lib.rs""#
+    );
+    // 精确匹配：前缀相似的名字不被归一
+    assert_eq!(
+        summarize_input("mcp__web__WebSearchExtra", &input),
+        r#"path: "peri-tui/src/lib.rs""#
+    );
+
+    // 输出侧同样走通用截断（不是 Edit/Write 的 "N lines changed"，也不是 WebFetch 折叠）
+    let output = "a\nb\nc\nd";
+    assert_eq!(summarize_output("mcp__foo__bar", output), "a\nb\nc\nd");
+}
+
+#[test]
+fn tui_has_no_hardcoded_effective_name() {
+    // A4 / A8：名字字面量只在 peri-acp-types 的 builtin 声明表存一份——按名分支
+    // 必须经 IF-D15 归一 helper 进入 builtin 名字空间，不得自建第二张反查表。
+    let src = include_str!("truncate.rs");
+    assert!(
+        src.contains("original_tool_name_of_effective"),
+        "truncate.rs 必须经 IF-D15 归一 helper"
+    );
+    for forbidden in ["mcp__web__", "mcp__artifact__"] {
+        assert!(
+            !src.contains(forbidden),
+            "truncate.rs 不得硬编码 effective name: {forbidden}"
+        );
+    }
 }

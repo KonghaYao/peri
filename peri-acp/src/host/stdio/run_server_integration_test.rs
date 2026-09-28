@@ -155,6 +155,13 @@ async fn make_server_config_with(
     );
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
+    // H-04（A11/A22）：host 级唯一 pool。测试装配与生产同构——**空配置也构造**
+    // （`has_servers()` 假 ⇒ 工具面空表但仍 ready），session 只投影它的 `Arc`。
+    let lsp_pool: Arc<dyn peri_acp_types::ports::LspPoolPort> =
+        peri_middlewares::assembly::create_host_lsp_pool(
+            tmp.path().to_str().unwrap(),
+            &lsp_servers,
+        );
     AcpServerConfig {
         workspace_assembly: None,
         host_task_owner: Some(host_task_owner),
@@ -181,6 +188,7 @@ async fn make_server_config_with(
         plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
         plugin_lsp_servers: lsp_servers,
+        lsp_pool: Some(lsp_pool),
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
         skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
         plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
@@ -403,6 +411,31 @@ impl peri_acp_types::ports::LspPoolPort for RecordingLspPool {
             let _ = entered.send(());
         }
         self.release.notified().await;
+    }
+
+    /// A30：`ready_for` 无默认实现，替身必须显式实现。本替身不承载就绪语义，
+    /// 恒 false —— 必须为 false 而不是「恰好为 true」：`ready_for` 是「读文件前的
+    /// 唯一前置判定」，恒 false 表示「无可用 server」，调用方不得读文件、不得发通知。
+    /// 若将来有调用方在此路径上依赖 true，会立刻暴露成「同步未发生」而不是假绿。
+    fn ready_for(&self, _path: &std::path::Path) -> bool {
+        false
+    }
+
+    /// A30：显式实现（无默认 no-op）。本替身不记录同步事实，但**返回 typed Err**
+    /// 而不是假成功 `Ok`：本替身代表「无 server」的池，同步失败是诚实的结论。
+    async fn did_change(
+        &self,
+        _path: &std::path::Path,
+        _text: &str,
+    ) -> Result<(), peri_acp_types::ports::LspSyncError> {
+        Err(peri_acp_types::ports::LspSyncError::NoServer)
+    }
+
+    async fn did_save(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<(), peri_acp_types::ports::LspSyncError> {
+        Err(peri_acp_types::ports::LspSyncError::NoServer)
     }
 }
 
@@ -662,7 +695,7 @@ async fn test_transport_eof_closes_sessions_and_drains_host_tasks() {
         let task_manager = Arc::clone(&task_manager);
         Arc::new(move || Arc::clone(&task_manager) as Arc<dyn peri_acp_types::tasks::TaskManager>)
     };
-    let cfg = make_server_config_with(
+    let mut cfg = make_server_config_with(
         peri_config,
         provider,
         &tmp,
@@ -701,6 +734,10 @@ async fn test_transport_eof_closes_sessions_and_drains_host_tasks() {
         release: Arc::clone(&lsp_release),
         shutdown_calls: std::sync::atomic::AtomicUsize::new(0),
     });
+    // H-04（A11/A22）：EOF 关的是**宿主唯一 pool**（`cfg.lsp_pool`），不再从
+    // session 收集——session state 只是同一 `Arc` 的投影。
+    let host_pool = Arc::clone(&lsp) as Arc<dyn peri_acp_types::ports::LspPoolPort>;
+    cfg.lsp_pool = Some(Arc::clone(&host_pool));
     let (transport, mut input, mut output) = duplex_transport();
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::from([
         (
@@ -719,7 +756,8 @@ async fn test_transport_eof_closes_sessions_and_drains_host_tasks() {
                 recall_items: Vec::new(),
                 agent_pool: crate::session::agent_pool::AgentPool::new(),
                 workflow_middleware: None,
-                lsp_pool: Some(Arc::clone(&lsp) as Arc<dyn peri_acp_types::ports::LspPoolPort>),
+                // session 只投影 host pool 的同一 `Arc`（A11）
+                lsp_pool: Some(Arc::clone(&host_pool)),
                 title: None,
                 tags: Vec::new(),
                 continuation_armed: false,
@@ -834,19 +872,28 @@ async fn test_prompt_wire_shape_unknown_session_returns_error() {
     await_server_exit(server_task, input_write).await;
 }
 
-// ── 批 3 Step 5 迁移：会话级 LSP 池（H1）与 MCP 发现预热（原 create_test.rs）──
+// ── 批 3 Step 5 迁移：host 级 LSP 池投影（H1 → H-04 A11/A22）与 MCP 发现预热 ──
 //
 // 原断言经 `run_acp_server_with_sessions`（外部注入共享 session map）驱动
 // 统一路径：wire 请求 + map 内窥，语义与迁移前（handler 直调 + StdioContext
 // 内窥）等价。`test_delete_removes_thread_*` 与 prewarm smoke 的 load 变体
 // 已在 `host/requests_test.rs` 有等价覆盖，不重复迁移。
+//
+// H-04 改写（A11/A22 单 pool）：函数名保留（`spec/issues/2026-09-10-p0-full-micro-compact-churn.md:175`
+// 引用 `test_fork_creates_session_scoped_lsp_pool`），但语义从「分支**创建**会话级池」
+// 改为「分支注册的 session **投影宿主唯一 pool 的同一 `Arc`**」——断言相应收紧为
+// `Arc::ptr_eq`（仅 `is_some()` 不足以证伪「又建了一份池」）。
 
-/// session/load 分支创建会话级 LSP 池（H1：跨 turn 复用；此前置 None 走临时
-/// 实例路径，LSP 服务器子进程跨 turn 泄漏）。
+/// session/load 分支注册的 session 必须投影宿主唯一 LSP 池（同一 `Arc`）。
 #[tokio::test]
 async fn test_load_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]).await;
+    // 断言用的宿主句柄：`cfg` 随后被 move 进 server task。
+    let host_pool = cfg
+        .lsp_pool
+        .clone()
+        .expect("生产同构：空配置也构造 host pool");
     create_bound_thread_fixture(&cfg, "load-test-session", tmp.path().to_str().unwrap()).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
@@ -875,19 +922,24 @@ async fn test_load_creates_session_scoped_lsp_pool() {
     let info = sessions
         .get("load-test-session")
         .expect("load 应注册 session");
+    let pool = info.lsp_pool.as_ref().expect("session 必须投影 host pool");
     assert!(
-        info.lsp_pool.is_some(),
-        "load 分支应创建会话级 LSP 池（H1 跨 turn 复用）"
+        Arc::ptr_eq(pool, &host_pool),
+        "load 分支的 session 必须投影宿主唯一 pool（同一 `Arc`），不得另建 pool"
     );
     drop(sessions);
     await_server_exit(server_task, input_write).await;
 }
 
-/// session/resume 分支（新 session）同样创建会话级 LSP 池。
+/// session/resume 分支（新 session）同上：投影宿主唯一 pool。
 #[tokio::test]
 async fn test_resume_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]).await;
+    let host_pool = cfg
+        .lsp_pool
+        .clone()
+        .expect("生产同构：空配置也构造 host pool");
     create_bound_thread_fixture(&cfg, "resume-test-session", tmp.path().to_str().unwrap()).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
@@ -912,19 +964,24 @@ async fn test_resume_creates_session_scoped_lsp_pool() {
     let info = sessions
         .get("resume-test-session")
         .expect("resume 应注册 session");
+    let pool = info.lsp_pool.as_ref().expect("session 必须投影 host pool");
     assert!(
-        info.lsp_pool.is_some(),
-        "resume 分支应创建会话级 LSP 池（H1 跨 turn 复用）"
+        Arc::ptr_eq(pool, &host_pool),
+        "resume 分支的 session 必须投影宿主唯一 pool（同一 `Arc`），不得另建 pool"
     );
     drop(sessions);
     await_server_exit(server_task, input_write).await;
 }
 
-/// session/fork 分支创建的新 session 同样携带会话级 LSP 池。
+/// session/fork 分支创建的新 session 同样投影宿主唯一 pool（同一 `Arc`）。
 #[tokio::test]
 async fn test_fork_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]).await;
+    let host_pool = cfg
+        .lsp_pool
+        .clone()
+        .expect("生产同构：空配置也构造 host pool");
     let session_resources = Arc::clone(&cfg.session_resources);
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
@@ -1015,9 +1072,13 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
 
     let sessions = sessions.lock().await;
     let forked = sessions.get(&forked_id).expect("fork 应注册新 session");
+    let pool = forked
+        .lsp_pool
+        .as_ref()
+        .expect("session 必须投影 host pool");
     assert!(
-        forked.lsp_pool.is_some(),
-        "fork 分支应创建会话级 LSP 池（H1 跨 turn 复用）"
+        Arc::ptr_eq(pool, &host_pool),
+        "fork 分支的 session 必须投影宿主唯一 pool（同一 `Arc`），不得另建 pool"
     );
     assert_eq!(forked.history_payloads.len(), 1);
     let forked_message_id = forked.history_payloads[0].id();
@@ -1042,12 +1103,26 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
     await_server_exit(server_task, input_write).await;
 }
 
-/// 无 LSP 配置时 load 分支不创建池（与 create_session_lsp_pool 的 None 语义
-/// 一致，装配面不注册 LSP 中间件）。
+/// 无 LSP 配置（`plugin_lsp_servers = []`）时：host pool **仍然存在**（空配置池，
+/// A6/A21：可见但空——`has_servers()` 为假 ⇒ `lsp` 实例工具面为空表、链上不装
+/// 同步中间件），session 投影同一 `Arc`。
+///
+/// H-04 改写：原断言为「无配置时 `lsp_pool.is_none()`（不创建池）」，与新契约正面
+/// 冲突——「不构造 pool」会让 `lsp` builtin 实例退化成「上下文缺失」而不是
+/// 「可见但空」。函数名随之改为投影语义（原名 `test_load_without_lsp_config_has_no_pool`
+/// 不再成立；该名未被任何文档引用）。
 #[tokio::test]
-async fn test_load_without_lsp_config_has_no_pool() {
+async fn test_load_without_lsp_config_projects_empty_host_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg = test_config(&tmp).await; // plugin_lsp_servers = []
+    let host_pool = cfg.lsp_pool.clone().expect("空配置也必须构造 host pool");
+    assert!(
+        !peri_acp_types::ports::LspPoolPort::ready_for(
+            host_pool.as_ref(),
+            &tmp.path().join("probe.rs")
+        ),
+        "空配置 pool 对任意文件都不得报 ready（无 server 可路由）"
+    );
     create_bound_thread_fixture(&cfg, "no-lsp-session", tmp.path().to_str().unwrap()).await;
     let (transport, mut input_write, mut output_read) = duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
@@ -1070,9 +1145,10 @@ async fn test_load_without_lsp_config_has_no_pool() {
 
     let sessions = sessions.lock().await;
     let info = sessions.get("no-lsp-session").expect("load 应注册 session");
+    let pool = info.lsp_pool.as_ref().expect("session 必须投影 host pool");
     assert!(
-        info.lsp_pool.is_none(),
-        "无 LSP 配置时不应创建池（与 new 分支一致）"
+        Arc::ptr_eq(pool, &host_pool),
+        "无 LSP 配置时 session 仍必须投影宿主唯一 pool（同一 `Arc`）"
     );
     drop(sessions);
     await_server_exit(server_task, input_write).await;

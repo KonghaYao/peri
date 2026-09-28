@@ -1,6 +1,6 @@
 use peri_agent::middleware::capabilities as hook_state;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -34,14 +34,13 @@ use super::{
     discover_tool::DiscoverMCPTool,
     resource_tool::McpResourceTool,
     system_tools::{prepare_system_tools, SystemToolError},
-    tool_bridge::{
-        build_tool_bridges_visible_to, build_typed_tool_bridges_visible_to, McpToolBridge,
-    },
+    tool_bridge::{build_typed_tool_bridges_visible_to, McpToolBridge},
 };
 
 /// 启动准入错误文案的展示上限（字符）。固定模板本身远短于此；该上限只约束
 /// 由 MCP 声明（server / tool 名）撑长的部分。
 const MAX_STARTUP_REASON_CHARS: usize = 512;
+const MCP_TOOL_USAGE_HINT: &str = "已直接注入的 system MCP 工具按原始名称调用；其余 MCP 工具经 tool search 发现，名称格式为 mcp__<server>__<tool>。";
 
 /// 用户可见启动错误文本的最后一道清洗：控制字符折叠为空格、URL query 与凭据
 /// 形态遮蔽、限长。
@@ -74,6 +73,13 @@ fn safe_startup_reason(raw: &str) -> String {
 pub(crate) struct SystemReadySnapshot {
     pub negotiated: Vec<NegotiatedSystemMcp>,
     pub bridges: Vec<McpToolBridge>,
+    /// 本次准入时关闭的 builtin 实例（IF-D10 面①）。
+    ///
+    /// 关闭必须在**同一次 turn 的同一份 frozen policy** 下过滤：`bridges` 已按它
+    /// 过滤，`required_tools` 也必须按它过滤——否则被有意关闭的实例会被目录提交
+    /// 判定为 `RequiredToolUnavailable`（有意的关闭被误报成启动失败）。
+    /// `negotiated` 保持原样：readiness 仍是 pool 级事实（第 3 条语义分层）。
+    pub closed_instances: BTreeSet<String>,
 }
 
 impl SystemReadySnapshot {
@@ -86,9 +92,13 @@ impl SystemReadySnapshot {
     ///
     /// `prepare_system_tools` 成功后每个必需项在整批 bridge 中恰好命中一次；
     /// 缺失只能来自并发换代，按 fail-closed 返回错误，不发布 ready。
+    /// 关闭实例的必需项**不进入** required（与 `bridges` 的过滤同源）。
     fn required_tools(&self) -> Result<Vec<StartupRequiredTool>, SystemToolError> {
         let mut required: Vec<StartupRequiredTool> = Vec::new();
         for item in &self.negotiated {
+            if super::builtin::is_closed(&item.requirement.server, &self.closed_instances) {
+                continue;
+            }
             for tool in &item.requirement.required_tools {
                 let already = required.iter().any(|entry| {
                     entry.server_name == item.requirement.server
@@ -143,6 +153,13 @@ pub struct McpMiddleware {
     cancel: AgentCancellationToken,
     /// 是否已向模型提示过 tool search 用法（每个会话实例恰好一次）
     hint_sent: AtomicBool,
+    /// 本 turn 关闭的 builtin 实例名集合（IF-D10 面①/②）。
+    ///
+    /// 来源 = 通话装配面按冻结的 `meta_harness_disabled` 求出的
+    /// `builtin::closed_instances`；空集合 = 不关闭任何实例（既有测试与
+    /// print 模式语义逐位不变）。判定只走 `builtin::is_closed`，
+    /// 本文件不硬编码实例名或 `mcp__web__` 前缀。
+    builtin_closures: BTreeSet<String>,
 }
 
 impl McpMiddleware {
@@ -155,6 +172,7 @@ impl McpMiddleware {
             session_id: None,
             cancel: AgentCancellationToken::new(),
             hint_sent: AtomicBool::new(false),
+            builtin_closures: BTreeSet::new(),
         }
     }
 
@@ -208,6 +226,25 @@ impl McpMiddleware {
             self.session_id.as_deref(),
             &self.cancel,
         );
+    }
+
+    /// 注入本次 turn 的 builtin 关闭集（IF-D10 面①/②；装配面按冻结的
+    /// `meta_harness_disabled` 用 `builtin::closed_instances` 求出）。
+    ///
+    /// 语义分层（IF-D10 第 3 条）：关闭集**只**决定本 turn 是否投影该实例的工具，
+    /// 不影响 readiness——`await_system_connections` 仍按 pool 级配置判定实例
+    /// 是否 ready（「实例必须健康」与「本 turn 是否注入」是两件事），
+    /// 因此有意的关闭不会被误报成启动失败。
+    pub(crate) fn with_builtin_closures(mut self, closed: BTreeSet<String>) -> Self {
+        self.builtin_closures = closed;
+        self
+    }
+
+    /// 该 bridge 所属实例是否在本 turn 被关闭（唯一判定入口 `builtin::is_closed`）。
+    fn is_bridge_closed(&self, bridge: &McpToolBridge) -> bool {
+        bridge
+            .mcp_server_name()
+            .is_some_and(|server| super::builtin::is_closed(server, &self.builtin_closures))
     }
 }
 
@@ -404,13 +441,21 @@ impl McpMiddleware {
             return Ok(SystemReadySnapshot {
                 negotiated,
                 bridges: Vec::new(),
+                closed_instances: self.builtin_closures.clone(),
             });
         }
         // 必需工具来自本次协商的 requirement（含空数组：该 server 只要求 ready）。
         // 静态 bridge 一律取 deployment `tool_pool`，不用会混入动态投影的 session
         // projection。
+        //
+        // 关闭实例（IF-D10 面①）既不进 required、也不进 bridges：有意的关闭不得
+        // 变成 `RequiredToolUnavailable` fatal，同时其工具不得被提升为 direct。
+        // readiness 判定（`await_system_connections`）不受影响——它走 pool 级配置。
         let required: BTreeMap<String, Vec<String>> = negotiated
             .iter()
+            .filter(|item| {
+                !super::builtin::is_closed(&item.requirement.server, &self.builtin_closures)
+            })
             .map(|item| {
                 (
                     item.requirement.server.clone(),
@@ -418,8 +463,7 @@ impl McpMiddleware {
                 )
             })
             .collect();
-        let typed =
-            build_typed_tool_bridges_visible_to(&self.tool_pool, self.session_id.as_deref());
+        let typed = self.open_typed_bridges();
         let bridges = prepare_system_tools(typed, &required)
             .map_err(|source| SystemReadinessError::RequiredTools { source })?;
         // `prepare_system_tools` 是同步校验，不 yield：返回后必须重新核对代际 /
@@ -428,7 +472,20 @@ impl McpMiddleware {
         Ok(SystemReadySnapshot {
             negotiated,
             bridges,
+            closed_instances: self.builtin_closures.clone(),
         })
+    }
+
+    /// 本次 turn 的 typed bridge 集合：类型化构造（声明的 direct 生效，IF-D13）
+    /// + **关闭集过滤**（IF-D10 面①/②）。
+    ///
+    /// 关闭实例的 bridge 既不得进入 deferred 目录（面②），也不得被提升为
+    /// direct（面①）；过滤只走 `closed_instances` / `is_closed`，不硬编码实例名。
+    fn open_typed_bridges(&self) -> Vec<McpToolBridge> {
+        build_typed_tool_bridges_visible_to(&self.tool_pool, self.session_id.as_deref())
+            .into_iter()
+            .filter(|bridge| !self.is_bridge_closed(bridge))
+            .collect()
     }
 
     /// 提交前复核：任何一项不成立都不得发布 ready。
@@ -506,15 +563,40 @@ impl McpMiddleware {
     /// 再 append 一份所需工具。准入候选本身不落 middleware 字段（IF-M5）：这里用与
     /// 闸门同一套纯函数按当次 handle 快照推导，不跨 loop / 跨 session 复用旧代标记。
     ///
-    /// 校验不通过（缺工具 / schema / 可见性 / 有效名碰撞）时退回既有 deferred
-    /// 收集：该结果不构成 ready，闸门仍会在进入 Compact 前以 fatal 结束本次 loop。
+    /// 两条路径都走**类型化构造 + 关闭集过滤**（IF-D10 面①/②，A6/R22）：
+    /// 关闭实例的 bridge 不进入目录，声明的 direct（IF-D13）对未关闭实例生效。
+    ///
+    /// 校验不通过（缺工具 / schema / 可见性 / 原始名非法）时仅收集非 system
+    /// 工具：该结果不构成 ready，闸门仍会在进入 Compact 前以 fatal 结束本次 loop。
     fn static_tool_bridges(&self) -> Vec<Box<dyn BaseTool>> {
         match self.prepared_static_bridges() {
             Some(prepared) => prepared
                 .into_iter()
                 .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
                 .collect(),
-            None => build_tool_bridges_visible_to(&self.tool_pool, self.session_id.as_deref()),
+            None => {
+                // 部分 system server 已连接时不得先抢占同名目录项；等整批
+                // required 工具验证完成后统一按稳定顺序提交。
+                let pending_system: std::collections::BTreeSet<String> =
+                    if self.tool_pool.system_manifest() == SystemMcpManifest::Loaded {
+                        self.tool_pool
+                            .system_requirements()
+                            .into_iter()
+                            .map(|item| item.server)
+                            .collect()
+                    } else {
+                        std::collections::BTreeSet::new()
+                    };
+                self.open_typed_bridges()
+                    .into_iter()
+                    .filter(|bridge| {
+                        !bridge
+                            .mcp_server_name()
+                            .is_some_and(|server| pending_system.contains(server))
+                    })
+                    .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
+                    .collect()
+            }
         }
     }
 
@@ -528,17 +610,35 @@ impl McpMiddleware {
             .tool_pool
             .system_requirements()
             .into_iter()
+            // 关闭实例不参与必需工具校验（与 `await_system_ready` 同一份关闭集）。
+            .filter(|requirement| {
+                !super::builtin::is_closed(&requirement.server, &self.builtin_closures)
+            })
             .map(|requirement| (requirement.server, requirement.required_tools))
             .collect();
         if required.is_empty() {
-            // 无 System 依赖：prepared 与 deferred 集合等价，保持原路径。
+            // 无 System 依赖（含「全部 system 实例被关闭」）：prepared 与 deferred
+            // 集合等价，保持原路径。
             return None;
         }
-        prepare_system_tools(
-            build_typed_tool_bridges_visible_to(&self.tool_pool, self.session_id.as_deref()),
-            &required,
-        )
-        .ok()
+        // 空 required 数组无法用工具名证明 server 已发现。整批 system server
+        // 均具备本代 tools/list 证据后才允许初始目录注入，避免先连接者抢占名字。
+        if required.keys().any(|server| {
+            let Some(handle) = self.tool_pool.get_client(server) else {
+                return true;
+            };
+            !matches!(handle.status, super::client::ClientStatus::Connected)
+                || !self
+                    .tool_pool
+                    .discovery_evidence(server)
+                    .is_some_and(|evidence| {
+                        evidence.is_complete()
+                            && evidence.generation == self.tool_pool.handle_generation(&handle)
+                    })
+        }) {
+            return None;
+        }
+        prepare_system_tools(self.open_typed_bridges(), &required).ok()
     }
 
     /// 首 turn 概览：MCP 基础情况（服务器名 + 状态 + 工具数），失败报名字 + 错误。
@@ -585,9 +685,10 @@ impl McpMiddleware {
             lines.push(format!("- {} 台未连接", other));
         }
         Some(format!(
-            "{}\n{}\n\nMCP 工具经 tool search 发现并调用（格式 mcp__<server>__<tool>）。",
+            "{}\n{}\n\n{}",
             summary,
-            lines.join("\n")
+            lines.join("\n"),
+            MCP_TOOL_USAGE_HINT,
         ))
     }
 
@@ -602,10 +703,7 @@ impl McpMiddleware {
         let queue = state.v2_queue();
         let mut texts = Vec::with_capacity(changes.len() + 1);
         if !self.hint_sent.swap(true, Ordering::SeqCst) {
-            texts.push(
-                "MCP 连接状态变化：MCP 工具经 tool search 发现并调用（格式 mcp__<server>__<tool>）。"
-                    .to_string(),
-            );
+            texts.push(format!("MCP 连接状态变化：{MCP_TOOL_USAGE_HINT}"));
         }
         texts.extend(changes);
         for text in texts {

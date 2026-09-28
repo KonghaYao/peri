@@ -138,6 +138,14 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
         })
     }
 
+    fn admitted_mcp_tool_name(&self, server: &str, wire_name: &str) -> Option<String> {
+        self.catalog.tools.iter().find_map(|(name, entry)| {
+            (entry.tool.mcp_server_name() == Some(server)
+                && entry.tool.mcp_tool_name() == Some(wire_name))
+            .then(|| name.clone())
+        })
+    }
+
     fn tools(&self) -> Vec<EffectiveToolDefinition> {
         self.catalog
             .tools

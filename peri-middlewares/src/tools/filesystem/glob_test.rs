@@ -125,9 +125,11 @@ async fn test_glob_truncation_persists_collected_output() {
         result.contains("Output truncated"),
         "应显示截断信息: {result}"
     );
+    // 落盘提示必须用**模型面名字**引导读取（裸名已无提供面）：逐字断言注册表的冻
+    // 结字面量，不用查表派生期望值（同源派生会让「查询改坏」自洽通过）。
     assert!(
-        result.contains("Read tool"),
-        "应包含 Read tool 提示: {result}"
+        result.contains("use `Read` to view complete content"),
+        "应包含模型面名字的读取提示: {result}"
     );
     assert!(
         result.contains("peri-tool-output-"),

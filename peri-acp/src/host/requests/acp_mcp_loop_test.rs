@@ -10,7 +10,7 @@
 //! attach 调用点与 `ServerLoop` 在 setup 响应之后的调用同款（`mcp/connect` 只带
 //! `serverId`，必须在客户端拿到会话结果之后才发得出去）。
 //!
-//! 池与服务的注入理由：非 bare 工作区装配面才会构造 MCP 池（`host/assemble.rs`），
+//! 池与服务的注入理由：非 bare 工作区装配面才会构造 ACP MCP 服务（bare 池仅含 workspace）（`host/assemble.rs`），
 //! 而拉起真实外部 server 不适合测试——这里注入同一份装配产物，装配面自身由
 //! `host/assemble.rs` 的既有测试覆盖。
 
@@ -133,6 +133,7 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_disconnects_on_cl
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: cwd.to_str().unwrap().to_owned(),
         bare: true,
+        drive_cron_tick: false,
         mcp_profile: McpCapabilityProfile::disabled(),
     });
 

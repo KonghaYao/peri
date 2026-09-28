@@ -170,6 +170,21 @@ fn test_render_steering_contains_objective() {
     assert!(r.contains("完成重构"));
 }
 
+/// **防漂移不变量**：Goal 面与 MCP 能力面**按构造解耦**，故它**不是** builtin 关闭集
+/// （IF-D10）的一个面。
+///
+/// 事实：`GoalMiddleware::collect_tools` 恒返回 `vec![GoalTool]`
+/// （`peri-middlewares/src/goal_middleware.rs:77-84`），既不消费 `shared_tools`、也不消费
+/// bridge 列表或装配期的关闭集（`assembly.rs:366-371` 的 `ChainSlot::Goal` 只看
+/// `"GoalMiddleware"` 这个策略键）。
+///
+/// 因此**不能**断言「关闭 web/artifact 后 Goal 工具表收缩」——那是必然同义反复：Goal 面的
+/// 工具集合与关闭集按构造无关，**没有**独立的可证伪面，本用例不假装有。
+///
+/// 下面第三条断言（工具集合不含 `mcp__` 前缀名）**与前面两条不独立**：在
+/// `len == 1` 且 `name() == "goal"` 成立的前提下它恒真。它**不是**「关闭集收缩」的
+/// 可证伪替代，保留它的价值只有一个：一旦将来有人放宽前两条（例如允许 Goal 合并外部
+/// 工具进列表），本条仍把「Goal 面不得承载 MCP 能力」钉住。
 #[test]
 fn test_collect_tools_returns_goal_tool() {
     let controller = Arc::new(MockController {
@@ -181,6 +196,11 @@ fn test_collect_tools_returns_goal_tool() {
     let tools = Middleware::collect_tools(&mw, "/tmp");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name(), "goal");
+    assert!(
+        !tools.iter().any(|tool| tool.name().starts_with("mcp__")),
+        "Goal 面不得承载任何 MCP 工具（`mcp__` 前缀）：它与 builtin 关闭集按构造无关: {:?}",
+        tools.iter().map(|tool| tool.name()).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

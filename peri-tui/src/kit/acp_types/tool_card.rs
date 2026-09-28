@@ -3,6 +3,7 @@ use crate::kit::tool_semantics::{TodoSnapshot, presentation_for};
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, TuiToolPresentation, fold_for_status,
 };
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -61,8 +62,11 @@ pub(crate) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> Tui
 }
 
 /// [G-Diff] 从工具原始输入提取 path hint（Edit/Write 的 `file_path`）。
+///
+/// 按名门控先经 IF-D15 归一 helper（effective name → 原始名），未命中回落原样。
 fn tool_path_hint(tool_name: &str, raw_input: &serde_json::Value) -> Option<String> {
-    if !matches!(tool_name, "Edit" | "Write") {
+    let name = original_tool_name_of_effective(tool_name).unwrap_or(tool_name);
+    if !matches!(name, "Edit" | "Write") {
         return None;
     }
     raw_input
@@ -74,13 +78,17 @@ fn tool_path_hint(tool_name: &str, raw_input: &serde_json::Value) -> Option<Stri
 
 /// [G-Diff] 生产路径的 diff 解析入口：仅 Edit/Write 完成态（非 running、
 /// 非 error）尝试解析；其余场景恒 `None`（数据不可达省略，G-Tokens 同口径）。
+///
+/// 按名门控先经 IF-D15 归一 helper（effective name → 原始名），未命中回落原样：
+/// 未命中（未知 / 外部 `mcp__*`）仍恒 `None`，与迁移前逐位一致。
 pub(crate) fn parse_tool_diff(
     tool_name: &str,
     output: &str,
     skip: bool,
     path_hint: Option<String>,
 ) -> Option<crate::kit::tui_render_unit::TuiDiffBlock> {
-    if skip || !matches!(tool_name, "Edit" | "Write") {
+    let name = original_tool_name_of_effective(tool_name).unwrap_or(tool_name);
+    if skip || !matches!(name, "Edit" | "Write") {
         return None;
     }
     // [Slice 5] 两段式：优先 unified diff（协议未来携带 diff 文本时自动接管），

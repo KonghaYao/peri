@@ -44,22 +44,18 @@ pub enum ChainSlot {
     AtMention,
     /// Image（@image 附件转 ContentBlock::Image）
     Image,
-    // ── 第二组：文件/终端/Web 工具提供器 ──
-    /// Filesystem（文件系统工具）
-    Filesystem,
+    // ── 第二组：工作区观察类注入器 ──
+    // v4-part-4 W3-C1：原 `Filesystem` / `Terminal` 两槽位已删除——7 个文件/终端工具
+    // （Read / Write / Edit / Glob / Grep / folder_operations / Bash）的唯一提供面是
+    // builtin `workspace` 实例的 bridge（模型面名字 `mcp__workspace__*`）。
+    // 本组槽位位置保留（`GitAttribution` / `GitWatch` 的相对顺序不变）。
     /// GitAttribution（git 归属注入）
     GitAttribution,
     /// GitWatch（分支 / HEAD 变化 Info 注入）
     GitWatch,
-    /// Terminal（终端命令工具）
-    Terminal,
-    /// Web（Web 工具）
-    Web,
-    // ── 第三组：Todo / Cron ──
+    // ── 第三组：Todo ──
     /// Todo（todo 工具）
     Todo,
-    /// Cron（cron 工具）
-    Cron,
     // ── 第四组：Hook 中间件（插件 hooks + 自定义 hooks） ──
     /// Hook 哨兵：每个非空 hook group 展开一个 HookMiddleware 实例
     Hook,
@@ -79,10 +75,10 @@ pub enum ChainSlot {
     Ptc,
     /// ToolSearch（deferred 工具搜索/执行代理）
     ToolSearch,
-    /// Artifact（公开 Artifact 上传工具）
-    Artifact,
     // ── 第七组：LSP / Goal（辅助诊断，条件注册；Goal 在链最后） ──
-    /// Lsp（LSP 诊断工具，servers 非空时注册）
+    /// Lsp（LSP **文档同步**槽位，装载 `LspSyncMiddleware`；servers 配置非空
+    /// 且 host pool 可用时注册）。LSP 工具面已迁 `lsp` builtin MCP 实例
+    /// （`mcp__lsp__LSP`），本槽位不再提供任何工具。
     Lsp,
     /// Goal（goal 紧迫感 steering，controller 可用时注册）
     Goal,
@@ -104,15 +100,11 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         ChainSlot::SkillPreload,
         ChainSlot::AtMention,
         ChainSlot::Image,
-        // 第二组：文件/终端/Web 工具提供器
-        ChainSlot::Filesystem,
+        // 第二组：工作区观察类注入器（文件/终端工具已迁 builtin `workspace` 实例）
         ChainSlot::GitAttribution,
         ChainSlot::GitWatch,
-        ChainSlot::Terminal,
-        ChainSlot::Web,
-        // 第三组：Todo / Cron
+        // 第三组：Todo
         ChainSlot::Todo,
-        ChainSlot::Cron,
         // 第四组：Hook 中间件
         ChainSlot::Hook,
         // 第五组：Permission + AskUser + SubAgent
@@ -124,7 +116,6 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         ChainSlot::Workflow,
         ChainSlot::Ptc,
         ChainSlot::ToolSearch,
-        ChainSlot::Artifact,
         // 第七组：LSP / Goal
         ChainSlot::Lsp,
         ChainSlot::Goal,
@@ -302,7 +293,10 @@ pub struct AssemblyContext {
     /// 共享工具注册表（deferred tools；AskUserTool 插入、snapshot 构造）
     pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
     pub lsp_servers: Vec<LspServerConfig>,
-    /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例；装配方 downcast 还原）
+    /// **host 共享** LSP pool 句柄：由宿主装配单次构造（不按 session / turn 重建，
+    /// session 不创建也不销毁），同时喂给 builtin `lsp` 实例与链上的
+    /// `LspSyncMiddleware`。None = 无 host pool ⇒ 不装同步中间件（配置非空
+    /// 仍是前置条件）。
     pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
     /// Workflow executor（Some 时注册 Workflow 中间件）
     pub workflow_executor: Option<Arc<dyn AgentExecutor>>,

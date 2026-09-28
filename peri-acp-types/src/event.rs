@@ -169,7 +169,15 @@ impl BackgroundTaskResult {
                 text.push_str(&format!("\nstderr 输出文件：{path}"));
             }
             if shell.complete {
-                text.push_str("\n完整输出已保存到文件系统。需要检查结果时，请使用 Read 工具按需读取；大文件分段读取。");
+                // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
+                // 查表未命中的兜底不含工具名，不得回落到裸名。
+                let read_lead = crate::builtin_mcp::effective_name_of("workspace", "Read")
+                    .map_or("请按需读取输出文件".to_string(), |name| {
+                        format!("请使用 `{name}` 工具按需读取")
+                    });
+                text.push_str(&format!(
+                    "\n完整输出已保存到文件系统。需要检查结果时，{read_lead}；大文件分段读取。"
+                ));
             } else {
                 text.push_str("\n输出文件不完整或不可用，请检查文件路径和错误信息后再读取。");
             }
@@ -274,6 +282,12 @@ mod tests {
         assert!(notification.len() < 2_000);
         assert!(!notification.contains("secret"));
         assert!(!notification.contains(&"x".repeat(1_000)));
+        // 读取指引必须指**模型面名字**（裸名已无提供面）：逐字断言冻结字面量，
+        // 不用查表派生期望值（与实现同源派生会在「归一改坏」时自洽通过）。
+        assert!(
+            notification.contains("请使用 `Read` 工具按需读取"),
+            "通知必须用模型面名字引导读取: {notification}"
+        );
         let mut legacy = serde_json::to_value(&result).expect("serialize");
         legacy
             .as_object_mut()

@@ -54,7 +54,7 @@ impl super::SubAgentTool {
                 SubagentRunMode::Background,
                 llm,
                 tools,
-                Arc::new(|name| name != "Agent"),
+                Arc::new(|_: &dyn BaseTool| true),
                 system_prompt,
                 Vec::new(),
                 cwd.clone(),

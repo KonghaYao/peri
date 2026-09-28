@@ -451,6 +451,12 @@ pub trait EffectiveToolDispatcher: Send + Sync {
     }
 
     fn tools(&self) -> Vec<EffectiveToolDefinition>;
+
+    /// Resolve an admitted MCP target by its source and original wire name.
+    /// A colliding tool from another source must never authorize an App call.
+    fn admitted_mcp_tool_name(&self, _server: &str, _wire_name: &str) -> Option<String> {
+        None
+    }
 }
 
 /// 工具只读上下文（借用 state，零 clone）
@@ -572,6 +578,16 @@ pub trait BaseTool: Send + Sync {
     /// Static MCP source identity used by session catalog shadowing and collision
     /// checks. Non-MCP tools return `None`; wrappers must forward this value.
     fn mcp_server_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Original MCP wire name, independent of model-facing naming.
+    fn mcp_tool_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Trusted builtin transport identity. Never inferred from a tool/server name.
+    fn builtin_mcp_instance(&self) -> Option<&str> {
         None
     }
 

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use peri_acp_types::ports::{LspPoolPort, McpTaskOwnerPort};
+use peri_acp_types::ports::McpTaskOwnerPort;
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -40,20 +40,16 @@ pub(super) async fn shutdown_host(
     }
     mcp_task_owner.begin_shutdown();
     cont_tx.take();
-    let (local_ids, lsp_pools) = {
+    let local_ids = {
         let sessions = sessions.lock().await;
         let mut ids = Vec::with_capacity(sessions.len());
-        let mut pools = Vec::new();
         for (session_id, state) in sessions.iter() {
             ids.push(session_id.clone());
             if let Some(token) = state.cancel_token.as_ref() {
                 token.cancel();
             }
-            if let Some(pool) = state.lsp_pool.as_ref() {
-                pools.push(Arc::clone(pool));
-            }
         }
-        (ids, pools)
+        ids
     };
     let mut all_ids: BTreeSet<String> = local_ids.into_iter().collect();
     all_ids.extend(cfg.session_manager.session_ids());
@@ -122,13 +118,10 @@ pub(super) async fn shutdown_host(
             environment_failures += 1;
         }
     }
-    let mut unique_lsp = Vec::<Arc<dyn LspPoolPort>>::new();
-    for pool in lsp_pools {
-        if !unique_lsp.iter().any(|known| Arc::ptr_eq(known, &pool)) {
-            unique_lsp.push(pool);
-        }
-    }
-    for pool in unique_lsp {
+    // A11/A22：host 级**唯一** pool（空配置也在）在此有界关闭——不再从 session
+    // 收集去重（session 只投影同一 `Arc`，`session/delete` 不关）。`shutdown()`
+    // 必须被 await（幂等）；它收敛全部 language server，不靠 `Arc` drop。
+    if let Some(pool) = cfg.lsp_pool.as_ref() {
         pool.shutdown().await;
     }
     let pool_report = if let Some(pool) = cfg.mcp_pool.as_ref() {

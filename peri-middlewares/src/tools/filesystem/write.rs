@@ -1,3 +1,4 @@
+use crate::tools::failure::ToolFailure;
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -93,13 +94,19 @@ impl WriteFileTool {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         match self.commit(target, content, append) {
             Ok(total_lines) => Ok(self.success_message(target, content, append, total_lines)),
-            Err(CommitError::Sentinel) => Err(SENTINEL_REJECTION.into()),
+            Err(CommitError::Sentinel) => {
+                Err(ToolFailure::new(SENTINEL_REJECTION, SENTINEL_REJECTION).into())
+            }
             Err(CommitError::Io) => {
                 let hint = self
                     .save_draft(target_id, content, append)
                     .map(|id| draft_hint_en(&id, content))
                     .unwrap_or_default();
-                Err(format!("{WRITE_IO_ERROR}{hint}").into())
+                Err(ToolFailure::new(
+                    format!("{WRITE_IO_ERROR}{hint}"),
+                    format!("{WRITE_IO_ERROR}{hint}"),
+                )
+                .into())
             }
         }
     }
@@ -111,7 +118,7 @@ impl WriteFileTool {
         draft_id: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let Some(store) = &self.drafts else {
-            return Err(DRAFT_UNKNOWN.into());
+            return Err(ToolFailure::new(DRAFT_UNKNOWN, DRAFT_UNKNOWN).into());
         };
         let mut store = store.lock().unwrap();
         match store.with_exact_entry(draft_id, target_id, |content, append| {
@@ -119,12 +126,18 @@ impl WriteFileTool {
                 .map(|total_lines| self.success_message(target, content, append, total_lines))
         }) {
             Ok(message) => Ok(message),
-            Err(DraftAccessError::Unknown) => Err(DRAFT_UNKNOWN.into()),
-            Err(DraftAccessError::WrongTarget) => Err(DRAFT_TARGET_MISMATCH.into()),
-            Err(DraftAccessError::Operation(CommitError::Sentinel)) => {
-                Err(SENTINEL_REJECTION.into())
+            Err(DraftAccessError::Unknown) => {
+                Err(ToolFailure::new(DRAFT_UNKNOWN, DRAFT_UNKNOWN).into())
             }
-            Err(DraftAccessError::Operation(CommitError::Io)) => Err(WRITE_IO_ERROR.into()),
+            Err(DraftAccessError::WrongTarget) => {
+                Err(ToolFailure::new(DRAFT_TARGET_MISMATCH, DRAFT_TARGET_MISMATCH).into())
+            }
+            Err(DraftAccessError::Operation(CommitError::Sentinel)) => {
+                Err(ToolFailure::new(SENTINEL_REJECTION, SENTINEL_REJECTION).into())
+            }
+            Err(DraftAccessError::Operation(CommitError::Io)) => {
+                Err(ToolFailure::new(WRITE_IO_ERROR, WRITE_IO_ERROR).into())
+            }
         }
     }
 }
@@ -189,9 +202,12 @@ impl BaseTool for WriteFileTool {
         input: Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let file_path = input["file_path"]
-            .as_str()
-            .ok_or("The 'file_path' parameter is required for the Write tool.")?;
+        let file_path = input["file_path"].as_str().ok_or_else(|| {
+            ToolFailure::new(
+                "The 'file_path' parameter is required for the Write tool.",
+                "The 'file_path' parameter is required for the Write tool.",
+            )
+        })?;
         let target = target_key(&self.cwd, file_path);
         let target_id = target.to_string_lossy().to_string();
         let content = input["content"]
@@ -212,7 +228,11 @@ impl BaseTool for WriteFileTool {
         if let Some(draft_id) = from_draft {
             return self.restore_write(&target, &target_id, draft_id);
         }
-        Err("Either 'content' or 'from_draft' must be provided for the Write tool.".into())
+        Err(ToolFailure::new(
+            "Either content or from_draft must be provided for Write.",
+            "Either 'content' or 'from_draft' must be provided for the Write tool.",
+        )
+        .into())
     }
 }
 

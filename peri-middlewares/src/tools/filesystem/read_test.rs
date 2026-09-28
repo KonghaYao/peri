@@ -390,6 +390,12 @@ async fn test_pdf_with_pages_returns_placeholder() {
         result.contains("PDF READING NOT YET SUPPORTED"),
         "should return placeholder: {result}"
     );
+    // 指引必须用**模型面名字**（裸名已无提供面）：逐字断言注册表的冻结字面量，
+    // 不用查表派生期望值（同源派生会让「查询改坏」自洽通过）。
+    assert!(
+        result.contains("Use the `Bash` tool with a PDF reader command"),
+        "PDF 占位提示必须以模型面名字指引 Bash: {result}"
+    );
 }
 
 #[tokio::test]

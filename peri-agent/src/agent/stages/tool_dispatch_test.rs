@@ -283,6 +283,75 @@ async fn test_dispatch_rejects_duplicate_and_empty_ids_before_policy_or_invoke()
     );
 }
 
+#[tokio::test]
+async fn test_dispatch_batch_cardinality_error_stops_before_tool_execution() {
+    struct CountingTool(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl BaseTool for CountingTool {
+        fn name(&self) -> &str {
+            "Read"
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({})
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok("unexpected execution".to_string())
+        }
+    }
+
+    struct MissingBatchResult;
+    #[async_trait::async_trait]
+    impl Middleware for MissingBatchResult {
+        fn name(&self) -> &str {
+            "MissingBatchResult"
+        }
+        async fn before_tools_batch(
+            &self,
+            _state: &mut dyn hook_state::BeforeToolState,
+            _calls: &[ToolCall],
+        ) -> Vec<crate::error::AgentResult<ToolCall>> {
+            Vec::new()
+        }
+    }
+
+    let invoked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut ctx = make_test_ctx();
+    ctx.runtime.tools.write().insert(
+        "Read".to_string(),
+        Arc::new(CountingTool(Arc::clone(&invoked))),
+    );
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(MissingBatchResult));
+    ctx.runtime.middleware_chain = Arc::new(chain);
+    let reasoning = Reasoning::with_tools("", vec![ToolCall::new("call_1", "Read", json!({}))]);
+    let catalog = ctx
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&ctx.runtime.tools.read())
+        .unwrap();
+
+    let error = match dispatch_tools(&ctx, &reasoning, &catalog, &CancellationToken::new()).await {
+        Ok(_) => panic!("批量规模错配必须让 dispatch 失败，而不是继续执行工具"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        AgentError::MiddlewareError { middleware, reason }
+            if middleware == "MissingBatchResult"
+                && reason == "before_tools_batch returned 0 results for 1 calls"
+    ));
+    assert_eq!(invoked.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
 fn make_test_ctx() -> StageContext {
     let turn = TurnContext::new(
         std::sync::Arc::from("/tmp"),

@@ -78,6 +78,7 @@ async fn prepared_test_host(
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         cron_scheduler: None,
+        lsp_pool: None,
         mcp_pool: None,
         mcp_apps_relay: None,
         acp_mcp: None,
@@ -210,6 +211,7 @@ async fn prepare_new_reuses_host_configuration_for_startup_directory() {
         Some(WorkspaceAssembly {
             startup_cwd: cwd.clone(),
             bare: true,
+            drive_cron_tick: false,
             mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
         }),
     )

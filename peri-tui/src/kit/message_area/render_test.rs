@@ -10,11 +10,11 @@ use super::helpers::sym;
 use super::*;
 use crate::kit::message_area::selection::build_wrap_map;
 use crate::kit::tui_render_unit::{
-    EntryStatus, FoldState, TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider,
-    TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiSkillPresentation, TuiSubAgentGroup,
-    TuiSystemNote, TuiSystemReminder, TuiTodoChange, TuiTodoChangeKind, TuiTodoItem,
-    TuiTodoPresentation, TuiTodoStatus, TuiTodoSummary, TuiToolCard, TuiToolPresentation,
-    TuiUserBubble,
+    EntryStatus, FoldState, TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDiffBlock,
+    TuiDivider, TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiSkillPresentation,
+    TuiSubAgentGroup, TuiSystemNote, TuiSystemReminder, TuiTodoChange, TuiTodoChangeKind,
+    TuiTodoItem, TuiTodoPresentation, TuiTodoStatus, TuiTodoSummary, TuiToolCard,
+    TuiToolPresentation, TuiUserBubble,
 };
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
@@ -3798,6 +3798,79 @@ fn test_streaming_table_without_leading_pipe_stays_visible() {
         assert!(
             rendered.contains(cell),
             "表格单元格 {cell:?} 应可见（stable 冻结判定漏检无前导竖线的表格），实际 {rendered:?}"
+        );
+    }
+}
+
+// ── wave 3（workspace）：effective name 与裸名渲染逐位一致 ────────────────────
+
+/// workspace Bash（effective name）展开态仍显示 `$ command` 行 + 分隔线，
+/// 且渲染文本与裸名卡片**逐位一致**。
+#[test]
+fn workspace_bash_card_keeps_dollar_prefix() {
+    let grid = GridSpec::grid_for(80);
+    let render = |tool_name: &str| {
+        let card = TuiToolCard {
+            fold: FoldState::Expanded,
+            output_summary: "test result: ok".into(),
+            ..tool_card(tool_name, "cargo test", false, false)
+        };
+        all_text(&vm_to_lines(&TuiRenderUnit::TuiToolCard(card), &grid))
+    };
+
+    let text = render("mcp__workspace__Bash");
+    assert!(
+        text.contains("$ cargo test"),
+        "workspace Bash 展开态应有 `$ command` 行，实际: {text:?}"
+    );
+    assert!(
+        text.contains("\u{2500}"),
+        "workspace Bash 展开态应有分隔线，实际: {text:?}"
+    );
+    assert_eq!(
+        text,
+        render("Bash"),
+        "effective name 与裸名的渲染文本必须逐位一致"
+    );
+}
+
+/// workspace Read / Edit（effective name）完成态头行后缀与裸名一致：
+/// Read `— N lines`、Edit `· +N · -M`。
+#[test]
+fn workspace_read_and_edit_cards_keep_header_suffix() {
+    let grid = GridSpec::grid_for(120);
+
+    for tool_name in ["mcp__workspace__Read", "Read"] {
+        let card = TuiToolCard {
+            output_summary: "first\nsecond\nthird".into(),
+            ..tool_card(tool_name, "src/main.rs", false, false)
+        };
+        let header = header_of(&vm_to_lines(&TuiRenderUnit::TuiToolCard(card), &grid));
+        assert!(
+            header.contains("\u{2014} 3 lines"),
+            "{tool_name} 完成态头行应包含 '— 3 lines'，实际: {header:?}"
+        );
+    }
+
+    for tool_name in ["mcp__workspace__Edit", "Edit"] {
+        let card = TuiToolCard {
+            output_summary: "Added 3 lines to render.rs".into(),
+            diff: Some(TuiDiffBlock {
+                path: "render.rs".into(),
+                hunks: Vec::new(),
+                is_binary: false,
+                is_too_large: false,
+                is_new_file: false,
+                more_change_lines: 0,
+                adds: 3,
+                dels: 1,
+            }),
+            ..tool_card(tool_name, "render.rs", false, false)
+        };
+        let header = header_of(&vm_to_lines(&TuiRenderUnit::TuiToolCard(card), &grid));
+        assert!(
+            header.contains("\u{b7} +3 \u{b7} -1"),
+            "{tool_name} 完成态头行应包含 '· +3 · -1'，实际: {header:?}"
         );
     }
 }

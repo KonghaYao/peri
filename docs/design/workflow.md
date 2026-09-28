@@ -360,7 +360,7 @@ pub struct AgentProgress {
 - AgentPool（LLM 实例缓存池）
 - Langfuse session / tracer
 - ThreadStore（持久化）
-- 根会话 TaskManager（Workflow Agent 的 Bash 工具和终端中间件共用执行 owner）
+- 根会话 TaskManager（Workflow Agent 的 `Bash` 与 builtin `workspace` 实例经 `WorkspaceInstanceInput` 共用同一执行 owner）
 
 **条件注册**：
 - `CompactMiddleware`：**已移除**。Workflow agent 的自动 compact 由 v2 `stages/compact.rs` 统一接管（`run_react_loop` 在每轮开头调 `compact_v2::run_compact`）

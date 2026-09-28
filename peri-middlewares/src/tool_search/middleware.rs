@@ -75,7 +75,12 @@ impl ToolSearchMiddleware {
                 .map(|(_, tool)| Arc::clone(tool))
                 .collect();
             request_index.build(deferred_arcs.clone());
-            if guard.contains_key(super::core_tools::SEARCH_EXTRA_TOOLS_NAME) {
+            if guard
+                .get(super::core_tools::SEARCH_EXTRA_TOOLS_NAME)
+                .is_some_and(|tool| {
+                    tool.mcp_server_name().is_none() && tool.namespace() == Some("meta")
+                })
+            {
                 guard.insert(
                     super::core_tools::SEARCH_EXTRA_TOOLS_NAME.to_string(),
                     Arc::new(SearchExtraTools::with_direct_tools(
@@ -85,7 +90,12 @@ impl ToolSearchMiddleware {
                 );
             }
             let request_resolver = Arc::new(RwLock::new(guard.clone()));
-            if guard.contains_key(super::core_tools::EXECUTE_EXTRA_TOOL_NAME) {
+            if guard
+                .get(super::core_tools::EXECUTE_EXTRA_TOOL_NAME)
+                .is_some_and(|tool| {
+                    tool.mcp_server_name().is_none() && tool.namespace() == Some("meta")
+                })
+            {
                 guard.insert(
                     super::core_tools::EXECUTE_EXTRA_TOOL_NAME.to_string(),
                     Arc::new(ExecuteExtraTool::with_direct_tools(

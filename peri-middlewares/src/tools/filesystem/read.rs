@@ -1,3 +1,4 @@
+use crate::tools::failure::ToolFailure;
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
 
@@ -40,12 +41,16 @@ fn parse_line_number(
     if value.is_null() {
         return Ok(default);
     }
-    let n = value
-        .as_f64()
-        .ok_or_else(|| format!("Error: '{name}' must be a positive integer, got {value}"))?;
+    let n = value.as_f64().ok_or_else(|| {
+        ToolFailure::new(
+            "offset and limit must be positive integers (1-based line numbers).",
+            format!("Error: '{name}' must be a positive integer, got {value}"),
+        )
+    })?;
     if n.fract() != 0.0 || n < 1.0 {
-        return Err(format!(
-            "Error: '{name}' must be a positive integer (1-based line number), got {n}"
+        return Err(ToolFailure::new(
+            "offset and limit must be positive integers (1-based line numbers).",
+            format!("Error: '{name}' must be a positive integer (1-based line number), got {n}"),
         )
         .into());
     }
@@ -162,7 +167,7 @@ impl BaseTool for ReadFileTool {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let file_path = input["file_path"]
             .as_str()
-            .ok_or("The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file.")?;
+            .ok_or_else(|| ToolFailure::new("The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file.", "The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file."))?;
 
         // offset 语义为 1-based 行号（1 = 首行），与 schema 描述、输出行号一致；
         // 缺省 offset=1（读全文起点）、limit=2000。
@@ -177,8 +182,14 @@ impl BaseTool for ReadFileTool {
         if let Some(ext) = resolved.extension().and_then(|e| e.to_str()) {
             if ext.eq_ignore_ascii_case("pdf") && pages.is_some() {
                 return Ok(format!(
-                    "[PDF READING NOT YET SUPPORTED]\n\nFile path: {}\nPDF reading with page selection is not yet implemented. Use the Bash tool with a PDF reader command as a workaround.",
-                    resolved.display()
+                    "[PDF READING NOT YET SUPPORTED]\n\nFile path: {}\nPDF reading with page selection is not yet implemented. {} as a workaround.",
+                    resolved.display(),
+                    // 指引指代 builtin 终端工具时必须用**模型面名字**（裸名已无提供面）；
+                    // 查表未命中的兜底不含工具名，不得回落到裸名。
+                    peri_acp_types::builtin_mcp::effective_name_of("workspace", "Bash").map_or(
+                        "Use a shell command with a PDF reader".to_string(),
+                        |name| format!("Use the `{name}` tool with a PDF reader command"),
+                    ),
                 ));
             }
             // PDF 但未提供 pages → 继续走到下面的二进制检测，返回 BINARY FILE DETECTED
@@ -195,14 +206,18 @@ impl BaseTool for ReadFileTool {
 
         let content = match std::fs::metadata(&resolved) {
             Ok(meta) if meta.len() > MAX_FILE_SIZE => {
-                return Err(format!(
+                return Err(ToolFailure::new("File too large. offset/limit cannot bypass the file-size limit; use Grep or another file-processing tool.", format!(
                     "Error: File too large ({} bytes, max {} bytes). offset/limit cannot bypass the file-size limit; use Grep to locate content or another suitable file-processing tool.",
                     meta.len(),
                     MAX_FILE_SIZE
-                ).into());
+                )).into());
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(format!("Error: File not found at {file_path}").into());
+                return Err(ToolFailure::new(
+                    "File not found. Verify file_path or locate the file with Glob.",
+                    format!("Error: File not found at {file_path}"),
+                )
+                .into());
             }
             Err(e) => return Err(e.into()),
             Ok(meta) if meta.is_dir() => {
@@ -222,7 +237,11 @@ impl BaseTool for ReadFileTool {
             _ => match std::fs::read_to_string(&resolved) {
                 Ok(c) => c,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(format!("Error: File not found at {file_path}").into());
+                    return Err(ToolFailure::new(
+                        "File not found. Verify file_path or locate the file with Glob.",
+                        format!("Error: File not found at {file_path}"),
+                    )
+                    .into());
                 }
                 Err(e) => return Err(e.into()),
             },
@@ -232,11 +251,11 @@ impl BaseTool for ReadFileTool {
         // 1-based 行号 → 0-based 切片索引
         let start = offset - 1;
         if start >= lines.len() {
-            return Err(format!(
+            return Err(ToolFailure::new("offset exceeds file length. Omit offset to read from the beginning.", format!(
                 "Error: offset {offset} exceeds file length ({} lines). Valid offsets are 1..={}; omit offset to read from the beginning. Do not guess another offset or use offset to probe the file end.",
                 lines.len(),
                 lines.len()
-            )
+            ))
             .into());
         }
         let end = (start + limit).min(lines.len());

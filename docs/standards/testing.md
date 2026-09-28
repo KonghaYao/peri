@@ -38,6 +38,8 @@ mod tests;        // 或 mod foo_tests;（见下）
 
 模块名参与 `cargo test -- <过滤词>` 匹配，因此当某个测试文件是 canonical 命令的命中目标时，模块名必须让该过滤词成立：过滤 `mcp::mcp_v4_seam` 的文件要挂成 `mod mcp_v4_seam_tests;`，沿用 `mod tests;` 会让过滤词命中不到（`cargo test` 仍以 0 tests 退出 0）。
 
+过滤词同时必须是**精确**模块路径：过宽前缀会连带命中同目录的其他测试模块（例：`mcp::builtin` 会一并命中 `mcp::builtin_spike_tests`、`mcp::builtin_apply_tests`、`mcp::builtin_runtime_tests` 与 `mcp::builtin::tests`），使命令覆盖范围与意图不符；需要单个模块时写完整路径（如 `mcp::builtin::tests`）。
+
 ---
 
 ## 二、测试优先级分层

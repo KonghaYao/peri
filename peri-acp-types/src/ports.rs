@@ -377,22 +377,66 @@ impl dyn WorkflowMiddlewarePort {
     }
 }
 
+/// LSP 文档同步端口错误（A30 / IF-P3-09 冻结变体集）。
+///
+/// 变体最小集即够用：`NoServer`（无路由 server，或路由到的 server 未就绪）
+/// 与 `Protocol`（协议 / JSON-RPC / 传输失败）。`reason` 由实现方写入**已脱敏**
+/// 的固定规则文本：不得包含文件路径、文件内容、env 值、凭据或 token。
+/// `Debug` / `Display` 只进 debug 日志，不进模型面工具文本。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LspSyncError {
+    /// 无路由 server，或路由到的 server 未就绪（调用方不得补拉进程）。
+    #[error("无可用 LSP 服务器")]
+    NoServer,
+
+    /// 协议 / JSON-RPC / 传输失败；`reason` 为已脱敏原因。
+    #[error("LSP 文档同步失败: {reason}")]
+    Protocol { reason: String },
+}
+
 /// LSP 服务器池端口（`peri-lsp::pool::LspServerPool` 实现）。
 ///
-/// per-session 实例；构造点（装配面宿主 `host/requests.rs` /
-/// `host/stdio/session/create.rs` 经 `peri_middlewares::assembly::create_session_lsp_pool`
-/// 创建）持有具体实现，协议面只持端口句柄。装配面（`assembly.rs`
-/// `ChainSlot::Lsp`）经 `downcast_arc` 还原具体类型复用同一 pool——
-/// 服务器进程、initialized 状态与诊断注册表跨 turn 存活（H1：
-/// 每 turn 重建 pool 导致冷启动与状态丢失）。宿主退出（`run_acp_server` /
-/// `run_acp_stdio` 返回）经 `shutdown` 优雅关闭全部服务器子进程。
+/// **host 级唯一实例**（A11/A21/A22）：构造点在宿主装配
+/// （`peri-acp/src/host/assemble.rs` 经 `peri_middlewares::assembly::create_host_lsp_pool`），
+/// 同一 `Arc` 分两路消费——builtin `lsp` 实例的工具面（handler 构造时按
+/// `has_servers()` 快照）与装配面 `AssemblyContext::lsp_pool` 投影
+/// （`ChainSlot::Lsp` 只装 `LspSyncMiddleware`），**session 不创建也不销毁**。
+/// 代价是已裁决的功能退化：多 cwd / 多 session 共享 host `root_uri`
+/// （per-session 恢复见 wave 3 的 `ToolContext` 计划）。宿主退出
+/// （`run_acp_server` / `run_acp_stdio` 返回）经 `shutdown` 优雅关闭全部服务器子进程。
+///
+/// [`as_any`](LspPoolPort::as_any) / [`downcast_arc`](dyn LspPoolPort::downcast_arc)
+/// 是端口通用还原点（装配面已不再使用，保留给替身与诊断）；协议面只持端口句柄。
+///
+/// 文档同步能力（A23/A30）合流到本端口，不新增第二 LSP 端口：`ready_for` /
+/// `did_change` / `did_save` 一律**不提供默认实现**——默认 no-op 会让端口替身
+/// 静默通过，制造「同步已生效」的假绿；所有实现者必须显式实现。
 #[async_trait::async_trait]
 pub trait LspPoolPort: Send + Sync {
-    /// 还原具体实现（downcast 还原点，供 middlewares 装配面使用）。
+    /// 还原具体实现（downcast 还原点，供端口替身与诊断使用）。
     fn as_any(&self) -> &dyn Any;
 
     /// 优雅关闭全部服务器（发送 shutdown/exit 并终止子进程；幂等）。
     async fn shutdown(&self);
+
+    /// 该路径当前是否有**可用且就绪**的 LSP 服务器（同步、廉价、只读）。
+    ///
+    /// 这是调用方**读文件之前的唯一前置判定**：返回 `false` ⇒ 调用方不得读取
+    /// 文件、不得发送任何通知。实现只做扩展名路由与就绪查询（`server_for_file`
+    /// + `is_ready`），**不启动 / 不拉起任何 language server**，无副作用。
+    fn ready_for(&self, path: &std::path::Path) -> bool;
+
+    /// 通知文件内容变更（`textDocument/didChange`）。
+    ///
+    /// `path` 是**文件系统绝对 path，不是 URI**；`path → file:// URI` 的转换
+    /// 留在实现内部。端口只做协议工作：**不读文件**（内容由调用方读取后经
+    /// `text` 传入）、不新增 capability root、不解析工具输入。
+    /// 失败返回 typed [`LspSyncError`]，调用方只做 debug 降级。
+    async fn did_change(&self, path: &std::path::Path, text: &str) -> Result<(), LspSyncError>;
+
+    /// 通知文件已保存（`textDocument/didSave`）。path 与失败语义同
+    /// [`LspPoolPort::did_change`]。
+    async fn did_save(&self, path: &std::path::Path) -> Result<(), LspSyncError>;
 }
 
 impl dyn LspPoolPort {

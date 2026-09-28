@@ -13,13 +13,22 @@ use crate::{agent_define::AgentOverrides, claude_agent_parser::ToolsValue, tools
 pub fn canonical_tool_filter(
     allowed: &ToolsValue,
     disallowed: &ToolsValue,
-) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
+) -> peri_agent::session::tool_catalog::ToolFilter {
     let allowed = match allowed {
         ToolsValue::Empty => None,
         ToolsValue::NoTools => Some(Vec::new()),
-        ToolsValue::List(names) => Some(names.clone()),
+        // A lone `*` inherits all. In a mixed list it was never a wildcard:
+        // preserve the explicit names without widening the child tool set.
+        ToolsValue::List(names) if names.len() == 1 && names[0] == "*" => Some(names.clone()),
+        ToolsValue::List(names) => {
+            Some(names.iter().filter(|name| *name != "*").cloned().collect())
+        }
     };
-    peri_agent::session::tool_catalog::ToolFilterPolicy::canonical(allowed, disallowed.to_vec())
+    let policy = peri_agent::session::tool_catalog::ToolFilterPolicy::canonical(
+        allowed,
+        disallowed.to_vec(),
+    );
+    Arc::new(move |tool| tool.name() != TOOL_AGENT && policy(tool))
 }
 
 /// Filter tools from parent set based on agent definition's tools/disallowedTools fields.
@@ -28,43 +37,21 @@ pub fn canonical_tool_filter(
 /// - `tools` is omitted -> inherit all parent tools (but always exclude `Agent` itself to prevent recursion)
 /// - `tools: []` -> inherit no parent tools
 /// - `tools` has value -> only keep tools in the list (also exclude `Agent`)
+/// - `tools: ["*"]` alone inherits all; `*` in a mixed list adds no permissions
 /// - then remove tools listed in `disallowed_tools` from the result
 ///
-/// Matching is case-insensitive (users often write PascalCase in agent.md).
+/// Matching is case-insensitive. Explicit builtin allowlists also check the bound
+/// tool source, so an external MCP tool named `Read` cannot enter a read-only agent.
 pub fn filter_tools(
     parent_tools: &[Arc<dyn BaseTool>],
     allowed: &ToolsValue,
     disallowed: &ToolsValue,
 ) -> Vec<Box<dyn BaseTool>> {
-    let disallowed_list = disallowed.to_vec();
+    let filter = canonical_tool_filter(allowed, disallowed);
 
     parent_tools
         .iter()
-        .filter(|tool| {
-            let name = tool.name();
-            let name_lower = name.to_lowercase();
-            if name == TOOL_AGENT {
-                return false;
-            }
-            let is_allowed = match allowed {
-                ToolsValue::Empty => true,
-                ToolsValue::NoTools => false,
-                ToolsValue::List(allowed_list) => {
-                    allowed_list.len() == 1 && allowed_list[0] == "*"
-                        || allowed_list.iter().any(|n| n.to_lowercase() == name_lower)
-                }
-            };
-            if !is_allowed {
-                return false;
-            }
-            if disallowed_list
-                .iter()
-                .any(|n| n.to_lowercase() == name_lower)
-            {
-                return false;
-            }
-            true
-        })
+        .filter(|tool| filter(tool.as_ref()))
         .map(|tool| Box::new(ArcToolWrapper(Arc::clone(tool))) as Box<dyn BaseTool>)
         .collect()
 }

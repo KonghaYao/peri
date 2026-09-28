@@ -1,67 +1,63 @@
+//! LSP 文档同步薄中间件（`ChainSlot::Lsp` 唯一占用者）。
+//!
+//! A7/A23/A30：LSP **工具面**已迁移到 builtin MCP 实例（
+//! `peri-middlewares/src/mcp/builtin/lsp.rs` 的 `LspMcpServer`），本中间件不再
+//! 实现 `collect_tools`、不构造 `LspTool`、不持有第二份 pool、不启动
+//! language server，只把 `Write` / `Edit` 落盘后的文件内容经
+//! [`LspPoolPort`] 同步给路由到的服务器。
+//!
+//! 会话 cwd 来自 `AfterToolState` 继承的 `StateView::cwd()`：`after_tool` hook
+//! 没有 `ToolContext`，相对 `file_path` 只能按该值解析，不假定能拿到工具侧 cwd。
+//!
+//! 已知限界（A30 / IF-P3-09，按现状登记）：单次 hook 内严格
+//! `didChange` → `didSave` 且前者失败仍尝试后者；**跨并发调用不承诺**
+//! 全局 FIFO 或 change/save 原子对，本波不新增同步队列 / 版本协议。
+
 use peri_agent::middleware::capabilities as hook_state;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use peri_acp_types::ports::LspPoolPort;
 use peri_agent::{
     agent::react::{ToolCall, ToolResult},
     error::AgentResult,
     middleware::r#trait::Middleware,
-    tools::BaseTool,
-};
-use peri_resources::lsp::uri::path_to_uri;
-use peri_resources::lsp::{
-    config::{LspConfigFile, LspServerConfig},
-    pool::LspServerPool,
 };
 
-use super::tool::LspTool;
 use crate::tool_search::core_tools::{TOOL_EDIT, TOOL_WRITE};
 
-pub struct LspMiddleware {
-    pool: Arc<LspServerPool>,
+/// `Write` / `Edit` 落盘后的 LSP 文档同步。
+pub struct LspSyncMiddleware {
+    port: Arc<dyn LspPoolPort>,
 }
 
-impl LspMiddleware {
-    pub fn new(root_uri: String, config: LspConfigFile) -> Self {
-        let pool = Arc::new(LspServerPool::new(&root_uri, config));
-        Self { pool }
+impl LspSyncMiddleware {
+    pub fn new(port: Arc<dyn LspPoolPort>) -> Self {
+        Self { port }
     }
+}
 
-    /// 复用既有 pool 构造（会话级共享：H1 下服务器进程/initialized/诊断状态
-    /// 跨 turn 存活；由装配面从 `LspPoolPort` downcast 还原后注入）。
-    pub fn from_pool(pool: Arc<LspServerPool>) -> Self {
-        Self { pool }
-    }
-
-    pub fn from_configs(root_uri: String, configs: Vec<LspServerConfig>) -> Self {
-        let config = LspConfigFile {
-            lsp_servers: configs.into_iter().map(|c| (c.name.clone(), c)).collect(),
-        };
-        Self::new(root_uri, config)
-    }
-
-    pub fn shared_pool(&self) -> Arc<LspServerPool> {
-        Arc::clone(&self.pool)
+/// 绝对路径原样使用；相对路径以会话 cwd（`AfterToolState::cwd()`）解析为绝对路径。
+fn resolve_path(cwd: &str, file_path: &str) -> PathBuf {
+    let path = Path::new(file_path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        Path::new(cwd).join(path)
     }
 }
 
 #[async_trait]
-impl Middleware for LspMiddleware {
+impl Middleware for LspSyncMiddleware {
     fn name(&self) -> &str {
-        "LspMiddleware"
+        "LspSyncMiddleware"
     }
 
-    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        if !self.pool.has_servers() {
-            return Vec::new();
-        }
-        vec![Box::new(LspTool::new(Arc::clone(&self.pool)))]
-    }
-
+    // `collect_tools` 保持默认空集：LSP 工具面只由 `mcp::builtin::lsp` 暴露。
     async fn after_tool(
         &self,
-        _state: &mut dyn hook_state::AfterToolState,
+        state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         _result: &ToolResult,
     ) -> AgentResult<()> {
@@ -69,30 +65,34 @@ impl Middleware for LspMiddleware {
             return Ok(());
         }
 
-        let file_path = match tool_call.input.get("file_path").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return Ok(()),
+        let Some(file_path) = tool_call.input.get("file_path").and_then(|v| v.as_str()) else {
+            tracing::debug!(target: "lsp", tool = %tool_call.name, "LSP 同步跳过：tool_call 无 file_path");
+            return Ok(());
         };
+        let path = resolve_path(state.cwd(), file_path);
 
-        let server = match self.pool.server_for_file(&file_path) {
-            Some(s) if s.is_ready() => s,
-            _ => return Ok(()),
-        };
+        // `ready_for` 是读文件之前的唯一前置判定：不就绪 ⇒ 不读磁盘、不发任何
+        // 通知，也不补拉 language server（A30）。
+        if !self.port.ready_for(&path) {
+            tracing::debug!(target: "lsp", file = %path.display(), "LSP 同步跳过：无可用且就绪的服务器");
+            return Ok(());
+        }
 
-        let uri = path_to_uri(Path::new(&file_path));
-        let text = match tokio::fs::read_to_string(&file_path).await {
-            Ok(t) => t,
+        let text = match tokio::fs::read_to_string(&path).await {
+            Ok(text) => text,
             Err(e) => {
-                tracing::debug!(target: "lsp", file = %file_path, error = %e, "LSP 同步文件时读取失败");
+                tracing::debug!(target: "lsp", file = %path.display(), error = %e, "LSP 同步文件时读取失败");
                 return Ok(());
             }
         };
 
-        if let Err(e) = server.did_change(&uri, &text).await {
-            tracing::debug!(target: "lsp", file = %file_path, error = %e, "LSP didChange 失败");
+        // 内容来自磁盘（不用工具结果文本代替）；两个错误分别 debug 降级，
+        // 恒 `Ok(())`，不改写工具结果、不阻断后续工具。
+        if let Err(e) = self.port.did_change(&path, &text).await {
+            tracing::debug!(target: "lsp", file = %path.display(), error = %e, "LSP didChange 失败");
         }
-        if let Err(e) = server.did_save(&uri).await {
-            tracing::debug!(target: "lsp", file = %file_path, error = %e, "LSP didSave 失败");
+        if let Err(e) = self.port.did_save(&path).await {
+            tracing::debug!(target: "lsp", file = %path.display(), error = %e, "LSP didSave 失败");
         }
         Ok(())
     }

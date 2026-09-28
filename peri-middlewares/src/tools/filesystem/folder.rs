@@ -1,3 +1,4 @@
+use crate::tools::failure::ToolFailure;
 use std::path::Path;
 
 use chrono::{TimeZone, Utc};
@@ -26,12 +27,14 @@ const MAX_LIST_ENTRIES: usize = 500;
 const FOLDER_OPERATIONS_DESCRIPTION: &str = include_str!("descriptions/folder.md");
 
 pub fn list_folder(resolved: &Path) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let entries = std::fs::read_dir(resolved)?;
+    // A complete enumeration is required before reporting a total count.
+    let mut entries = std::fs::read_dir(resolved)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
 
     let mut folders: Vec<String> = Vec::new();
     let mut files: Vec<String> = Vec::new();
 
-    for entry in entries.flatten() {
+    for entry in entries {
         let metadata = entry.metadata()?;
         let name = entry.file_name().to_string_lossy().to_string();
         let size = metadata.len();
@@ -76,9 +79,9 @@ pub fn list_folder(resolved: &Path) -> Result<String, Box<dyn std::error::Error 
         let full_text = format!("{}\n{}", full_list, total_summary);
         persist_hint = persist_truncated_output(&full_text);
 
-        // 公平分配截断
+        // 两组均有机会展示；较少的一组用不完配额时交给另一组。
         let half = MAX_LIST_ENTRIES / 2;
-        folders.truncate(half.min(folders.len()));
+        folders.truncate(half.max(MAX_LIST_ENTRIES.saturating_sub(files.len())));
         files.truncate((MAX_LIST_ENTRIES - folders.len()).min(files.len()));
     }
 
@@ -103,8 +106,10 @@ pub fn list_folder(resolved: &Path) -> Result<String, Box<dyn std::error::Error 
 
     if truncated {
         result.push_str(&format!(
-            "\n[Output truncated: {} total entries, showing first {}]{}",
-            total, MAX_LIST_ENTRIES, persist_hint
+            "\n[Output truncated: {} total entries, showing {}]{}",
+            total,
+            folders.len() + files.len(),
+            persist_hint
         ));
     }
 
@@ -139,6 +144,7 @@ fn deep_scan_folder(
         path: std::path::PathBuf,
         name: String,
         is_dir: bool,
+        is_symlink: bool,
         depth: usize,
         size: u64,
         modified: String,
@@ -146,11 +152,13 @@ fn deep_scan_folder(
     }
 
     let mut entries: Vec<Entry> = Vec::new();
+    let mut complete = true;
 
     for item in walker {
         let item = match item {
             Ok(e) => e,
             Err(e) => {
+                complete = false;
                 debug!(error = %e, "deep_scan walk error (skipped)");
                 continue;
             }
@@ -161,6 +169,7 @@ fn deep_scan_folder(
         let metadata = match item.metadata() {
             Ok(m) => m,
             Err(e) => {
+                complete = false;
                 debug!(error = %e, "deep_scan metadata error (skipped): {}", item.path().display());
                 continue;
             }
@@ -183,6 +192,7 @@ fn deep_scan_folder(
             path: item.path().to_path_buf(),
             name: item.file_name().to_string_lossy().to_string(),
             is_dir: item.file_type().is_dir(),
+            is_symlink: item.file_type().is_symlink(),
             depth: item.depth(),
             size,
             modified,
@@ -193,11 +203,13 @@ fn deep_scan_folder(
     // 按路径排序保证确定性输出
     entries.sort_by(|a, b| a.path.cmp(&b.path));
 
-    // 计算 is_last：若下一个条目的父目录与当前条目不同，则当前为 last
-    for i in 0..entries.len() {
-        let current_parent = entries[i].path.parent();
-        let next_parent = entries.get(i + 1).and_then(|e| e.path.parent());
-        entries[i].is_last = current_parent != next_parent;
+    // 子树夹在兄弟节点之间；按共同父目录找最后一项，不能比较相邻行。
+    let mut last_children = std::collections::HashMap::new();
+    for (index, entry) in entries.iter().enumerate() {
+        last_children.insert(entry.path.parent().unwrap().to_path_buf(), index);
+    }
+    for index in last_children.into_values() {
+        entries[index].is_last = true;
     }
 
     // 构建 tree 输出
@@ -234,12 +246,20 @@ fn deep_scan_folder(
             ancestor_last[entry.depth - 1] = entry.is_last;
         }
 
-        let icon = if entry.is_dir {
+        let icon = if entry.is_symlink {
+            "🔗"
+        } else if entry.is_dir {
             "\u{1F4C1}"
         } else {
             "\u{1F4C4}"
         };
-        let trailing = if entry.is_dir { "/" } else { "" };
+        let trailing = if entry.is_symlink {
+            " [symlink; not followed]"
+        } else if entry.is_dir {
+            "/"
+        } else {
+            ""
+        };
         output.push_str(&format!(
             "{}{} {}{} ({} bytes, {})\n",
             prefix, icon, entry.name, trailing, entry.size, entry.modified
@@ -256,7 +276,7 @@ fn deep_scan_folder(
         persist_hint = persist_truncated_output(&full_text);
         // 保留头部 + 前 MAX_LIST_ENTRIES 个条目行
         let lines: Vec<&str> = output.lines().collect();
-        let header_lines = 3; // root 行 + 空行 + (无额外 header)
+        let header_lines = 2; // root 行 + 空行
         let max_lines = header_lines + MAX_LIST_ENTRIES;
         if lines.len() > max_lines {
             output = lines[..max_lines].join("\n");
@@ -264,13 +284,24 @@ fn deep_scan_folder(
     }
 
     if truncated {
+        let count = if complete {
+            format!("{total} total entries")
+        } else {
+            format!("{total} entries collected; total unknown")
+        };
         output.push_str(&format!(
-            "\n[Output truncated: {} total entries, showing first {}]{}",
-            total, MAX_LIST_ENTRIES, persist_hint
+            "\n[Output truncated: {count}, showing {}]{}",
+            MAX_LIST_ENTRIES, persist_hint
         ));
     }
 
-    output.push_str(&format!("\nTotal: {} entries", total));
+    if complete {
+        output.push_str(&format!("\nTotal: {} entries", total));
+    } else {
+        output.push_str(&format!(
+            "\nCollected: {total} entries; total unknown (some entries could not be read)"
+        ));
+    }
 
     Ok(output)
 }
@@ -337,12 +368,15 @@ impl BaseTool for FolderOperationsTool {
         input: Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let operation = input["operation"]
-            .as_str()
-            .ok_or("Missing operation parameter")?;
-        let folder_path = input["folder_path"]
-            .as_str()
-            .ok_or("Missing folder_path parameter")?;
+        let operation = input["operation"].as_str().ok_or_else(|| {
+            ToolFailure::new("Missing operation parameter", "Missing operation parameter")
+        })?;
+        let folder_path = input["folder_path"].as_str().ok_or_else(|| {
+            ToolFailure::new(
+                "Missing folder_path parameter",
+                "Missing folder_path parameter",
+            )
+        })?;
         let recursive = input["recursive"].as_bool().unwrap_or(true);
 
         let resolved = resolve_path(&self.cwd, folder_path);
@@ -352,7 +386,16 @@ impl BaseTool for FolderOperationsTool {
                 if recursive {
                     std::fs::create_dir_all(&resolved)?;
                 } else {
-                    std::fs::create_dir(&resolved)?;
+                    std::fs::create_dir(&resolved).map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::NotFound {
+                            Box::new(ToolFailure::new(
+                                "Parent directory does not exist. Create it first or set recursive=true.",
+                                error.to_string(),
+                            )) as Box<dyn std::error::Error + Send + Sync>
+                        } else {
+                            Box::new(error) as Box<dyn std::error::Error + Send + Sync>
+                        }
+                    })?;
                 }
                 Ok(format!(
                     "\u{2713} Folder created successfully at: {}",
@@ -381,24 +424,36 @@ impl BaseTool for FolderOperationsTool {
 
             "list" => {
                 if !resolved.exists() {
-                    return Err(format!("Folder not found: {}", resolved.display()).into());
+                    return Err(ToolFailure::new(
+                        "Folder not found. Verify folder_path.",
+                        format!("Folder not found: {}", resolved.display()),
+                    )
+                    .into());
                 }
                 if !resolved.is_dir() {
-                    return Err(
-                        format!("Path exists but is not a folder: {}", resolved.display()).into(),
-                    );
+                    return Err(ToolFailure::new(
+                        "Path exists but is not a folder. Supply a directory path.",
+                        format!("Path exists but is not a folder: {}", resolved.display()),
+                    )
+                    .into());
                 }
                 list_folder(&resolved)
             }
 
             "deep_scan" => {
                 if !resolved.exists() {
-                    return Err(format!("Folder not found: {}", resolved.display()).into());
+                    return Err(ToolFailure::new(
+                        "Folder not found. Verify folder_path.",
+                        format!("Folder not found: {}", resolved.display()),
+                    )
+                    .into());
                 }
                 if !resolved.is_dir() {
-                    return Err(
-                        format!("Path exists but is not a folder: {}", resolved.display()).into(),
-                    );
+                    return Err(ToolFailure::new(
+                        "Path exists but is not a folder. Supply a directory path.",
+                        format!("Path exists but is not a folder: {}", resolved.display()),
+                    )
+                    .into());
                 }
                 // 非法类型（浮点/字符串/负数）显式报错，不再静默回退默认值；
                 // 合法整数越界按描述 clamp 到 [1, 10]
@@ -410,7 +465,11 @@ impl BaseTool for FolderOperationsTool {
                 deep_scan_folder(&resolved, max_depth)
             }
 
-            other => Err(format!("Unknown operation: {other}").into()),
+            other => Err(ToolFailure::new(
+                "Unknown operation. Use create, exists, list, or deep_scan.",
+                format!("Unknown operation: {other}"),
+            )
+            .into()),
         }
     }
 }

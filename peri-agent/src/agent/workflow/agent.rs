@@ -331,12 +331,18 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // 3. agent definition 工具边界优先，再叠加 workflow allowedTools。
         if let Some(definition) = agent_definition.as_ref() {
-            if let Some(allowed) = definition.allowed_tools.as_ref() {
-                tools.retain(|tool| tool_name_in(allowed, tool.name()));
-            }
-            if !definition.disallowed_tools.is_empty() {
-                tools.retain(|tool| !tool_name_in(&definition.disallowed_tools, tool.name()));
-            }
+            let filter = crate::session::tool_catalog::ToolFilterPolicy::canonical(
+                definition.allowed_tools.clone(),
+                Vec::new(),
+            );
+            tools.retain(|tool| {
+                filter(tool.as_ref())
+                    && definition
+                        .allowed_tools
+                        .as_ref()
+                        .is_none_or(|allowed| tool_name_in(allowed, tool.name()))
+                    && !tool_name_in(&definition.disallowed_tools, tool.name())
+            });
             if !definition.allowed_write_dirs.is_empty()
                 && definition
                     .allowed_tools
@@ -358,7 +364,11 @@ impl AgentExecutor for WorkflowAgentExecutor {
             .as_ref()
             .filter(|allowed| !allowed.is_empty())
         {
-            tools.retain(|tool| tool_name_in(allowed, tool.name()));
+            let filter = crate::session::tool_catalog::ToolFilterPolicy::canonical(
+                Some(allowed.clone()),
+                Vec::new(),
+            );
+            tools.retain(|tool| tool_name_in(allowed, tool.name()) && filter(tool.as_ref()));
         }
 
         // 4. 指定 agent type 时按相同的 subagent overrides 渲染 prompt；否则
@@ -537,10 +547,18 @@ async fn await_workflow_forwarder(
 /// 工作流与 agent.md 的工具名匹配沿用 subagent 的大小写无关语义。
 /// 单独的 `*` 表示保留全部候选工具；随后仍由 disallowedTools 过滤。
 fn tool_name_in(names: &[String], tool_name: &str) -> bool {
+    use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
+
+    // 只按注册表归一 builtin，外部 MCP 工具保留完整身份。两侧都归一，
+    // 让旧 agent.md 声明与模型面的 effective name 表达同一能力边界。
+    let original = original_tool_name_of_effective(tool_name).unwrap_or(tool_name);
     matches!(names, [wildcard] if wildcard == "*")
-        || names
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(tool_name))
+        || names.iter().any(|name| {
+            name.eq_ignore_ascii_case(tool_name)
+                || original_tool_name_of_effective(name)
+                    .unwrap_or(name)
+                    .eq_ignore_ascii_case(original)
+        })
 }
 
 #[cfg(test)]

@@ -81,7 +81,20 @@ pub trait BeforeAgentState: BeforeInputState + MessageAppend + CatalogState {}
 ///     state.set_current_step(99);
 /// }
 /// ```
-pub trait BeforeToolState: StateView {}
+pub trait BeforeToolState: StateView {
+    /// Identity of the pinned execution target, indexed by immutable call ID.
+    fn tool_origin(&self, _call_id: &str) -> Option<BoundToolOrigin> {
+        None
+    }
+}
+
+/// Read-only source facts for approval; no callable tool or mutable catalog handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundToolOrigin {
+    pub mcp_server_name: Option<String>,
+    pub mcp_tool_name: Option<String>,
+    pub builtin_mcp_instance: Option<String>,
+}
 
 /// 工具完成：观察状态并调度队列通知，不修改 transcript。
 ///
@@ -208,7 +221,7 @@ impl<T: MiddlewareState + ?Sized> InputBatchState for T {
 
 impl<T: StateView + InputBatchState + MessageReplace + ?Sized> BeforeInputState for T {}
 impl<T: BeforeInputState + MessageAppend + CatalogState + ?Sized> BeforeAgentState for T {}
-impl<T: StateView + ?Sized> BeforeToolState for T {}
+impl<T: MiddlewareState + ?Sized> BeforeToolState for T {}
 impl<T: StateView + QueueState + ?Sized> AfterToolState for T {}
 impl<T: StateView + QueueState + BackgroundActivity + ?Sized> AfterAgentState for T {}
 impl<T: StateView + MessageAppend + QueueState + ?Sized> BeforeModelState for T {}

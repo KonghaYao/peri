@@ -1,3 +1,4 @@
+use crate::tools::failure::ToolFailure;
 use std::{
     cell::Cell,
     path::{Path, PathBuf},
@@ -35,7 +36,7 @@ const GREP_DESCRIPTION: &str = include_str!("descriptions/grep.md");
 pub(crate) const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 输出字节预算：与 Glob 对齐（glob.rs `MAX_OUTPUT_BYTES`）。
-/// 超过后停止收集并把完整输出落盘（persist_truncated_output），内联只保留头部。
+/// 超过后停止收集并把已收集输出落盘（persist_truncated_output），内联只保留头部。
 pub(crate) const MAX_OUTPUT_BYTES: usize = 20_000;
 
 /// 单行输出字节上限：minified/生成文件单行可达 MB 级，超出按 UTF-8 字符边界
@@ -80,7 +81,11 @@ fn execute_search(
     };
 
     if !search_path.exists() {
-        return Err(format!("Search path does not exist: {}", search_path.display()).into());
+        return Err(ToolFailure::new(
+            "Search path does not exist. Verify path or search from the workspace directory.",
+            format!("Search path does not exist: {}", search_path.display()),
+        )
+        .into());
     }
 
     // 构建 RegexMatcher
@@ -94,7 +99,12 @@ fn execute_search(
     if parsed.fixed_strings {
         matcher_builder.fixed_strings(true);
     }
-    let matcher = matcher_builder.build(&parsed.pattern)?;
+    let matcher = matcher_builder.build(&parsed.pattern).map_err(|e| {
+        ToolFailure::new(
+            "Invalid regex pattern. Correct the syntax or set fixed_strings=true.",
+            e.to_string(),
+        )
+    })?;
 
     // 构建 WalkBuilder
     let mut builder = WalkBuilder::new(&search_path);
@@ -284,6 +294,11 @@ fn execute_search(
     drop(guard);
 
     let joined = lines.join("\n");
+    let count_note = if stopped.load(Ordering::Relaxed) {
+        format!("{} output lines collected; total unknown", lines.len())
+    } else {
+        format!("{} output lines total", lines.len())
+    };
 
     // 行数精确截断：恰好 head_limit 行不标 truncated，超过才截断标记
     // （收集阶段预算 head_limit+1，多收 1 行使"恰好 N"与"N+1"可区分）
@@ -292,15 +307,15 @@ fn execute_search(
     if head_limit > 0 && lines.len() > head_limit {
         let persist_hint = persist_truncated_output(&joined);
         output = lines[..head_limit].join("\n");
-        line_note = format!("\n... (truncated at {} lines)", head_limit);
+        line_note = format!("\n... (truncated at {} lines; {})", head_limit, count_note);
         line_note.push_str(&persist_hint);
     }
 
     // 字节预算兜底：行数截断后仍可能超限（head_limit=0 或超长行累积）。
-    // 保留头部行（动态累计到字节预算），完整输出落盘供 Read 查看。
+    // 保留头部行（动态累计到字节预算），已收集输出落盘供 Read 查看。
     if output.len() > MAX_OUTPUT_BYTES {
         // 落盘全量 joined 而非行数截断版 output：行数/字节双截断触发时也不丢行
-        // （用户 Read 落盘文件能看全部匹配行；与 glob.rs 字节分支落盘全量一致）
+        // （落盘包含全部已收集行；早停后未扫描的匹配不在其中）
         let persist_hint = persist_truncated_output(&joined);
         let mut head: Vec<&str> = Vec::new();
         let mut head_bytes = 0usize;
@@ -311,11 +326,11 @@ fn execute_search(
             head.push(line);
             head_bytes += line.len() + 1;
         }
-        // 字节数显示全量 joined 的长度（总量），非头部累计值
+        // 字节数是已收集 joined 的长度，不推断未扫描内容的总量。
         output = format!(
-            "{}\n\n[Output truncated: {} lines total, {} bytes; showing first {} — exceeds {} byte limit]{}",
+            "{}\n\n[Output truncated: {}, {} collected bytes; showing first {} — exceeds {} byte limit]{}",
             head.join("\n"),
-            lines.len(),
+            count_note,
             joined.len(),
             head.len(),
             MAX_OUTPUT_BYTES,
@@ -469,7 +484,13 @@ impl BaseTool for GrepTool {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let pattern = match input.get("pattern").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),
-            None => return Err("Error: Missing required parameter 'pattern'".into()),
+            None => {
+                return Err(ToolFailure::new(
+                    "Missing required parameter pattern.",
+                    "Error: Missing required parameter 'pattern'",
+                )
+                .into())
+            }
         };
 
         let grep_input = GrepInput {
@@ -553,7 +574,7 @@ impl BaseTool for GrepTool {
 
         let parsed = match grep_input.to_parsed_args() {
             Ok(p) => p,
-            Err(e) => return Err(format!("Error: {e}").into()),
+            Err(e) => return Err(ToolFailure::new("Invalid output_mode. Use content, files_with_matches, count, or files_without_matches.", format!("Error: {e}")).into()),
         };
 
         let head_limit = grep_input.head_limit;
@@ -562,6 +583,7 @@ impl BaseTool for GrepTool {
         // 协作取消标志：超时置位后，spawn_blocking 内的 walker 在检查点尽快退出
         // （与 glob.rs 超时分支对齐；spawn_blocking 无法强制 kill）
         let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel_on_drop = super::SearchCancellation(Arc::clone(&cancelled));
         let result = timeout(
             SEARCH_TIMEOUT,
             tokio::task::spawn_blocking({
@@ -575,15 +597,18 @@ impl BaseTool for GrepTool {
         let output = match result {
             Err(_) => {
                 cancelled.store(true, Ordering::Relaxed);
-                return Err(format!(
+                return Err(ToolFailure::new(
+                    "Search timed out. Please use a more specific pattern.",
+                    format!(
                     "Error: Search timed out after {} seconds. Please use a more specific pattern.",
                     SEARCH_TIMEOUT.as_secs()
+                ),
                 )
                 .into());
             }
             Ok(Err(e)) => return Err(format!("Error: {e}").into()),
             Ok(Ok(Ok(output))) => output,
-            Ok(Ok(Err(e))) => return Err(format!("Error: {e}").into()),
+            Ok(Ok(Err(e))) => return Err(e),
         };
 
         // 应用 offset：跳过前 N 行
@@ -606,3 +631,7 @@ impl BaseTool for GrepTool {
 #[cfg(test)]
 #[path = "grep_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "search_reporting_test.rs"]
+mod search_reporting_tests;

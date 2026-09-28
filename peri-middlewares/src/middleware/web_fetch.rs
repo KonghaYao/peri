@@ -35,13 +35,27 @@ struct TavilyExtractFailure {
 }
 
 /// WebFetch 工具 — 通过 Tavily 兼容 API 抓取 URL 内容
-pub struct WebFetchTool;
+pub struct WebFetchTool {
+    /// Tavily 兼容后端根地址（生产恒为 [`TAVILY_BASE_URL`]；测试可注入本地桩）。
+    base_url: String,
+}
 
 const WEB_FETCH_DESCRIPTION: &str = include_str!("descriptions/web_fetch.md");
 
 impl WebFetchTool {
     pub fn new() -> Self {
-        Self
+        Self {
+            base_url: TAVILY_BASE_URL.to_string(),
+        }
+    }
+
+    /// 测试构造：注入端点（本地回环桩），使抓取协议的 200 / 非 2xx 形态可在
+    /// 无网络条件下覆盖；生产路径只经 [`Self::new`]。
+    #[cfg(test)]
+    pub(crate) fn with_endpoint_for_test(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+        }
     }
 }
 
@@ -90,10 +104,6 @@ fn truncate_content(content: &str, max_lines: usize) -> String {
 impl BaseTool for WebFetchTool {
     fn name(&self) -> &str {
         "WebFetch"
-    }
-
-    fn is_direct(&self) -> bool {
-        true
     }
 
     /// 网络工具分组（design v2 §2.5.1：同类工具按 namespace 组织声明段）。
@@ -153,7 +163,7 @@ impl BaseTool for WebFetchTool {
         });
 
         let resp = client
-            .post(format!("{TAVILY_BASE_URL}/extract"))
+            .post(format!("{}/extract", self.base_url.trim_end_matches('/')))
             .json(&body)
             .send()
             .await

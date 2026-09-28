@@ -4,10 +4,11 @@ Usage:
 - Use this tool when you need to find files by name patterns
 - Returns file paths sorted by modification time (most recently modified first)
 - Maximum 1000 results returned; collection stops once the limit is exceeded and results are truncated with a notice. The shown 1000 are the newest among the collected matches (walk order), not necessarily the globally newest files in the tree
-- Output exceeding 20000 bytes is persisted to a temp file; only the first 100 paths are returned inline with a path hint
+- If collection stays within 1000 matches but the paths exceed 20000 bytes, they are persisted to a temp file; only the first 100 paths are returned inline with a path hint. The result-count limit takes priority when both limits are exceeded.
 - Common directories like node_modules, .git, target, dist, build are automatically excluded from results
+- Unlike Grep directory search, this tool does not read `.gitignore` or `.ignore`. Hidden files and directories are included unless their directory name is on the exclusion list.
 - The path parameter is optional; defaults to the current working directory
-- Symbolic links are not followed during the walk: symlinked files and directories are skipped, so globbing a project root won't pull in trees linked from outside the workspace
+- An explicitly supplied `path` is canonicalized when possible: a symlink used as the search root is resolved and its target is searched, with canonical paths returned. Symbolic links encountered inside the walk are skipped, including links pointing outside that resolved root.
 - Searches taking longer than 15 seconds time out with an error; use a more specific pattern or an explicit path
 - For searching file contents, use Grep instead
 

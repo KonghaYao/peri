@@ -1,6 +1,7 @@
 use crate::error_suggest::context::ErrorContext;
 use crate::error_suggest::format::did_you_mean_summary;
 use crate::error_suggest::matcher::fuzzy_filter;
+use crate::error_suggest::normalized_tool_name;
 use crate::error_suggest::registry::{ErrorSuggester, Suggestion};
 use std::path::{Path, PathBuf};
 
@@ -26,13 +27,17 @@ const ERROR_KEYWORDS: &[&str] = &[
 
 impl ErrorSuggester for PathSuggester {
     fn suggest(&self, ctx: &ErrorContext) -> Option<Suggestion> {
-        // 1. 工具白名单
-        if !PATH_TOOLS.contains(&ctx.tool_name) {
+        // 1. 工具白名单（归一：`mcp__workspace__Read` 等 effective name 与裸名同门槛）
+        if !PATH_TOOLS.contains(&normalized_tool_name(ctx.tool_name)) {
             return None;
         }
 
         // 2. 关键词识别
         let lower = ctx.error_message.to_lowercase();
+        // Edit 的片段不存在不是文件路径不存在；真实的文件缺失仍走路径建议。
+        if normalized_tool_name(ctx.tool_name) == "Edit" && lower.contains("old_string not found") {
+            return None;
+        }
         if !ERROR_KEYWORDS.iter().any(|k| lower.contains(k)) {
             return None;
         }
@@ -74,8 +79,10 @@ impl ErrorSuggester for PathSuggester {
     }
 }
 
+/// 参数键从**归一后**的工具名派生：Glob 的路径参数是 `path`，其余文件工具是
+/// `file_path`。不归一（例如 `mcp__workspace__Glob` 落到 `_` 分支）会取错字段。
 fn extract_target_path(tool_name: &str, input: &serde_json::Value) -> Option<String> {
-    let key = match tool_name {
+    let key = match normalized_tool_name(tool_name) {
         "Glob" => "path",
         _ => "file_path",
     };

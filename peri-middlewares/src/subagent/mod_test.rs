@@ -1,3 +1,4 @@
+use peri_acp_types::builtin_mcp::{original_tool_name_of_effective, BUILTIN_MCP_INSTANCES};
 use peri_agent::{
     agent::{
         react::{ReactLLM, Reasoning, StreamingContext},
@@ -497,6 +498,196 @@ fn test_capability_whitelist_write_disallowed_is_readonly() {
 fn test_capability_whitelist_mcp_prefix_is_writes() {
     let cap = capability_from_yaml("name: a\ndescription: d\ntools: [Read, mcp__files]\n");
     assert!(cap.can_mutate, "mcp__* 无法证明只读，应保守标 writes");
+}
+
+// ─── A4 生效名归一（IF-D6 判定型 ③ / IF-D15）─────────────────────────────
+
+/// 从注册表解析 effective name（测试不得硬编码 `mcp__*` 字面量）。
+fn effective_name_of(instance: &str, original: &str) -> &'static str {
+    peri_acp_types::builtin_mcp::find(instance)
+        .unwrap_or_else(|| panic!("声明表应含实例 `{instance}`"))
+        .tools
+        .iter()
+        .find(|tool| tool.original_name == original)
+        .unwrap_or_else(|| panic!("声明表应含 `{instance}` 的原始工具名 `{original}`"))
+        .effective_name
+}
+
+/// IF-D6 ③：builtin 一等工具的 effective name 按原始名判定（判定相等）。
+#[test]
+fn mutation_tool_matches_original_name_policy_for_builtin_names() {
+    let mut declared = 0;
+    for instance in BUILTIN_MCP_INSTANCES {
+        for tool in instance.tools {
+            declared += 1;
+            assert_eq!(
+                is_mutation_tool(tool.effective_name),
+                is_mutation_tool(tool.original_name),
+                "`{}` 的 mutation 判定必须等于原始名 `{}`（IF-D6 ③）",
+                tool.effective_name,
+                tool.original_name
+            );
+        }
+    }
+    // 行数从注册表派生（不再硬编码：wave 3 的 `== 7` 是漏记 workspace 7 行之后
+    // 的中间态红灯，AW3-08）。遍历必须覆盖注册表全部行；注册表自身的逐实例内容
+    // 由 `peri-acp-types/src/builtin_mcp_test.rs` 的字面量测试锁定。
+    let expected: usize = BUILTIN_MCP_INSTANCES.iter().map(|i| i.tools.len()).sum();
+    assert_eq!(declared, expected, "遍历必须覆盖注册表全部行");
+    for instance in BUILTIN_MCP_INSTANCES {
+        assert!(
+            !instance.tools.is_empty(),
+            "实例 `{}` 不得声明零工具（实例被清空会使派生期望值同步退化）",
+            instance.name
+        );
+    }
+
+    // wave 1 冻结结果（IF-G2 第 2 条）：两个 Web 工具不再因 `mcp__` 前缀被算 mutation；
+    // artifact 迁移前就是裸名且不在 mutation 集合内，判定不变。
+    assert!(!is_mutation_tool("mcp__web__WebSearch"));
+    assert!(!is_mutation_tool("mcp__web__WebFetch"));
+    assert!(!is_mutation_tool("mcp__artifact__artifact"));
+
+    // wave 2 冻结结果（IF-P3-11）：`cron_register` 两种名字形态都必须判 mutation
+    // （可定时触发任意 prompt，等价委派执行权）；`cron_list` / `cron_remove` / `LSP`
+    // 两种形态都必须判非 mutation（`mcp__lsp__LSP` 不再因 `mcp__` 前缀算写能力）。
+    // 期望值逐项写死，等价断言不能替代：归一与集合同时改错时等价仍成立。
+    let frozen: [(&str, &str, bool); 4] = [
+        ("cron", "cron_register", true),
+        ("cron", "cron_list", false),
+        ("cron", "cron_remove", false),
+        ("lsp", "LSP", false),
+    ];
+    for (instance, original, mutation) in frozen {
+        let declared = peri_acp_types::builtin_mcp::find(instance).expect("实例应有声明");
+        let tool = declared
+            .tools
+            .iter()
+            .find(|tool| tool.original_name == original)
+            .unwrap_or_else(|| panic!("声明表应含 `{instance}` 的原始工具名 `{original}`"));
+        for name in [original, tool.effective_name] {
+            assert_eq!(
+                is_mutation_tool(name),
+                mutation,
+                "`{name}` 的 mutation 判定应为 {mutation}（wave 2 冻结）"
+            );
+        }
+    }
+
+    // wave 3 冻结结果：workspace 七工具（Write/Edit/folder_operations/Bash 是写能力，
+    // Read/Glob/Grep 不是），两种名字形态逐项绝对判定——等价断言之外再锁方向。
+    let workspace_frozen: [(&str, bool); 7] = [
+        ("Read", false),
+        ("Write", true),
+        ("Edit", true),
+        ("Glob", false),
+        ("Grep", false),
+        ("folder_operations", true),
+        ("Bash", true),
+    ];
+    let workspace = peri_acp_types::builtin_mcp::find("workspace").expect("workspace 实例应有声明");
+    for (original, mutation) in workspace_frozen {
+        let tool = workspace
+            .tools
+            .iter()
+            .find(|tool| tool.original_name == original)
+            .unwrap_or_else(|| panic!("声明表应含 workspace 的原始工具名 `{original}`"));
+        for name in [original, tool.effective_name] {
+            assert_eq!(
+                is_mutation_tool(name),
+                mutation,
+                "`{name}` 的 mutation 判定应为 {mutation}（wave 3 冻结）"
+            );
+        }
+    }
+}
+
+/// 反证（IF-D6 冻结约束 3）：未知 / 外部 `mcp__*` 仍保守算 mutation。
+#[test]
+fn unknown_mcp_prefix_still_mutates() {
+    assert!(is_mutation_tool("mcp__filesystem__write_file"));
+    assert!(is_mutation_tool("mcp__anything"));
+    // 与 effective name 仅差大小写 ⇒ 未命中归一表 ⇒ 走既有的 `mcp__` 前缀保守路径
+    assert_eq!(original_tool_name_of_effective("mcp__web__fetch"), None);
+    assert!(is_mutation_tool("mcp__web__fetch"));
+    // 非 builtin 名字的判定逐位不变
+    assert!(is_mutation_tool("Bash"));
+    assert!(!is_mutation_tool("Read"));
+}
+
+/// 归一的可见后果（IF-G2 第 2 条）：白名单只含 builtin Web 工具的 agent 由
+/// `writes` 改为 `readonly`（迁移前 `mcp__*` 前缀一律算写能力）。
+#[test]
+fn builtin_web_tool_whitelist_is_readonly() {
+    let cap = capability_from_yaml(
+        "name: a\ndescription: d\ntools: [mcp__web__WebFetch, mcp__web__WebSearch]\n",
+    );
+    assert!(
+        !cap.can_mutate,
+        "只含 builtin Web 工具（均非写能力）的 agent 应标 readonly"
+    );
+}
+
+/// [安全回归] 用户用**模型面 effective name** 写 `disallowedTools`
+/// （`mcp__workspace__Bash` …）时，必须与写裸名一样命中 `MUTATION_CORE` 判定；
+/// 否则「核心写能力已被完全 disallow」的 readonly 结论失效，模块被误判为仍可写。
+/// 名字从注册表派生（测试不硬编码 `mcp__*` 字面量）。
+#[test]
+fn fully_disallowed_with_workspace_effective_names_is_readonly() {
+    let disallow = |names: &[(&str, &str)]| {
+        names
+            .iter()
+            .map(|(instance, original)| format!("  - {}", effective_name_of(instance, original)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let cap = capability_from_yaml(&format!(
+        "name: a\ndescription: d\ndisallowedTools:\n{}\n",
+        disallow(&[
+            ("workspace", "Bash"),
+            ("workspace", "Write"),
+            ("workspace", "Edit"),
+            ("workspace", "folder_operations"),
+            ("cron", "cron_register"),
+        ])
+    ));
+    assert!(
+        !cap.can_mutate,
+        "effective name 写全五个核心写能力工具后应标 readonly（omitted tools 路径）"
+    );
+
+    // 对照：少覆盖一个（Write）⇒ 必须仍标 writes（证明上面的 readonly 来自归一
+    // 命中，而不是「任何名字都被算作覆盖」）。
+    let partial = capability_from_yaml(&format!(
+        "name: a\ndescription: d\ndisallowedTools:\n{}\n",
+        disallow(&[
+            ("workspace", "Bash"),
+            ("workspace", "Edit"),
+            ("workspace", "folder_operations"),
+            ("cron", "cron_register"),
+        ])
+    ));
+    assert!(
+        partial.can_mutate,
+        "未覆盖 Write 时必须保守标 writes（对照组）"
+    );
+}
+
+/// [安全回归] 白名单写 effective name、disallowed 写裸名（N2 的
+/// `ToolsValue::List` 分支）也必须互相命中——否则「白名单里的写工具被 disallowed
+/// 覆盖」这一判定失效，agent 被误标 writes（保守方向安全，但白名单 + 覆盖的
+/// readonly 结论反转）。
+#[test]
+fn capability_whitelist_effective_name_disallowed_by_bare_name_is_readonly() {
+    let cap = capability_from_yaml(&format!(
+        "name: a\ndescription: d\ntools: [{}, Read]\ndisallowedTools: [Write]\n",
+        effective_name_of("workspace", "Write")
+    ));
+    assert!(
+        !cap.can_mutate,
+        "白名单里的 `mcp__workspace__Write` 被裸名 `Write` 覆盖后应标 readonly"
+    );
 }
 
 // ─── catalog 同源一致性（波 4 演进 C3，设计 §3.5.1 步骤 2）─────────────────

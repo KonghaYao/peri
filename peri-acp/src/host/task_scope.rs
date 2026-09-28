@@ -19,9 +19,14 @@ pub(crate) enum HostTaskOwnerKind {
     Connection,
 }
 
+/// 宿主 task 分类（admission / drain 与诊断用）。
+///
+/// **不含 cron tick**（A32）：1s tick 归 builtin `cron` 实例的**代监督者**，
+/// 由 MCP pool 建立该代 transport 时 spawn 一次（`cron.tick_enabled` 门控），
+/// 随该代 supervisor 有界收敛。宿主不再持有 tick task——同一 scheduler 任一
+/// 时刻至多一个驱动，此处也不再有第二个 tick 变体。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostTaskKind {
-    CronTick,
     PluginCleanup,
     OAuthConsumer,
     ContinuationScheduler,

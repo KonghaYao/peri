@@ -18,7 +18,12 @@ use super::{AcpSession, SessionManager};
 impl SessionManager {
     /// 构造 per-session 后台任务管理器（装配注入的工厂调用一次；未注入时
     /// fallback `NoopTaskManager`——print 等无 bg 场景）。
-    fn make_task_manager(&self) -> Arc<dyn peri_acp_types::tasks::TaskManager> {
+    ///
+    /// 这是**唯一**的工厂调用点：会话创建路径（[`Self::build_session`]）与会话环境
+    /// 装配（`peri-acp/src/host/workspace.rs` 的 `SessionEnvironment::assemble`，
+    /// AW3-11：产生点必须在池的 `run_initialize` 之前）都经它取 manager，避免
+    /// 「工厂语义」出现两份。
+    pub(crate) fn new_session_task_manager(&self) -> Arc<dyn peri_acp_types::tasks::TaskManager> {
         self.inner
             .task_manager_factory
             .as_ref()
@@ -100,7 +105,20 @@ impl SessionManager {
         thread_id: ThreadId,
         cwd: &str,
     ) -> AcpSession {
-        let task_manager = self.make_task_manager();
+        self.build_session_with_task_manager(session_id, thread_id, cwd, None)
+    }
+
+    /// 同 [`Self::build_session`]，但允许调用方**携带外部** `TaskManager`（AW3-11：
+    /// 会话环境装配先产出 manager 并送进 builtin 上下文，登记会话时用同一份
+    /// `Arc`；`None` 走工厂 / `NoopTaskManager` fallback）。
+    pub(super) fn build_session_with_task_manager(
+        &self,
+        session_id: &str,
+        thread_id: ThreadId,
+        cwd: &str,
+        task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+    ) -> AcpSession {
+        let task_manager = task_manager.unwrap_or_else(|| self.new_session_task_manager());
 
         AcpSession {
             session_id: session_id.to_string(),

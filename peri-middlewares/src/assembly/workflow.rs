@@ -1,7 +1,15 @@
 //! Workflow agent 的独立装配端口；保留既有工具集与链序。
+//!
+//! v4-part-4 W3-C1：**无池侧不再有文件/终端工具**（原 `FilesystemMiddleware` /
+//! `TerminalMiddleware` 两段已删）。7 个 workspace 工具的唯一提供面是
+//! [`BuiltinWorkflowAgentFactory::builtin_tools`]（`open_builtin_bridges`，走注册表
+//! `direct` 声明与 `policy_key` 关闭集）——因此本模块在无池/无 McpMiddleware 时
+//! 不提供 `Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`
+//! （与 Web/Artifact 的 A6 面③语义同构，见 [`WorkflowAgentMiddlewareFactory`]）。
 use crate::{
     hitl::HumanInTheLoopMiddleware,
-    middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
+    mcp::McpClientPool,
+    middleware::TodoMiddleware,
     permission::{default_requires_approval, PermissionMiddleware},
     skills::SkillsMiddleware,
     subagent::SkillPreloadMiddleware,
@@ -20,8 +28,24 @@ use peri_agent::{
 };
 use std::sync::Arc;
 
-/// workflow agent 装配工厂（ZST：无状态装配器）。
+/// workflow agent 装配工厂（无池 ZST；既有调用点语义逐位不变）。
+///
+/// 生产装配要走 builtin 提供面（A6 面③）时用
+/// [`default_workflow_middleware_factory_with_pool`]；本 ZST 保留为「无池」构造，
+/// 保持既有调用点（宿主注入点 / 装配测试的单元值构造）签名与行为不变。
 pub struct WorkflowAgentMiddlewareFactory;
+
+/// 持有 builtin pool 的装配器（A6 面③）。
+///
+/// 只覆写 [`WorkflowMiddlewareFactory::build_tools`]：在既有工具集之后追加 builtin
+/// 实例声明的 direct bridge（WebSearch / WebFetch / artifact），并按同一份
+/// frozen policy 过滤关闭实例；其余方法与无池工厂逐位一致（delegate）。
+///
+/// **非 public**：宿主只经 [`default_workflow_middleware_factory_with_pool`] 拿到
+/// upcast 后的端口对象（不新增 public 类型）。
+struct BuiltinWorkflowAgentFactory {
+    builtin: Option<Arc<McpClientPool>>,
+}
 
 /// 构造 workflow agent 装配端口并 upcast（部署装配点调用；返回类型已锚定
 /// 端口 trait，调用方无需引用 peri-agent 类型路径——TUI 等消费方只写
@@ -29,6 +53,157 @@ pub struct WorkflowAgentMiddlewareFactory;
 pub fn default_workflow_middleware_factory(
 ) -> Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory> {
     Arc::new(WorkflowAgentMiddlewareFactory)
+}
+
+/// 生产装配入口（A6 面③）：把 deployment MCP pool 交给 workflow agent 的装配器，
+/// 使它的工具列表仍含 Web / Artifact 能力（原名 direct bridge）。
+///
+/// Bare 传入仅含 workspace 的池；`None`（无 pool）时的行为与
+/// [`default_workflow_middleware_factory`] 一致。
+pub fn default_workflow_middleware_factory_with_pool(
+    pool: Option<Arc<McpClientPool>>,
+) -> Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory> {
+    Arc::new(BuiltinWorkflowAgentFactory { builtin: pool })
+}
+
+impl BuiltinWorkflowAgentFactory {
+    /// builtin 提供面：`build_tools` 的追加段（关闭集过滤见
+    /// [`crate::assembly::open_builtin_bridges`]）。
+    ///
+    /// `McpMiddleware` 关闭时整个 MCP 提供面连坐（与主链「槽位不构造」等价），
+    /// 其余 builtin 实例关闭走注册表 `policy_key`。
+    fn builtin_tools(
+        &self,
+        disabled: &std::collections::HashSet<String>,
+    ) -> Vec<Box<dyn BaseTool>> {
+        if disabled.contains("McpMiddleware") {
+            return Vec::new();
+        }
+        match self.builtin.as_ref() {
+            Some(pool) => crate::assembly::open_builtin_bridges(pool, disabled),
+            None => Vec::new(),
+        }
+    }
+}
+
+impl WorkflowMiddlewareFactory for BuiltinWorkflowAgentFactory {
+    fn resolve_agent_definition(
+        &self,
+        agent_type: &str,
+        cwd: &str,
+    ) -> Result<WorkflowAgentDefinition, String> {
+        WorkflowAgentMiddlewareFactory.resolve_agent_definition(agent_type, cwd)
+    }
+
+    fn build_tools(
+        &self,
+        cwd: &str,
+        disabled: &std::collections::HashSet<String>,
+        execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+    ) -> Vec<Box<dyn BaseTool>> {
+        let mut tools =
+            WorkflowAgentMiddlewareFactory::workflow_tools(cwd, disabled, execution_manager);
+        tools.extend(self.builtin_tools(disabled));
+        tools
+    }
+
+    fn build_sandbox_write_tool(
+        &self,
+        cwd: &str,
+        allowed_dirs: &[String],
+    ) -> Option<Box<dyn BaseTool>> {
+        WorkflowAgentMiddlewareFactory.build_sandbox_write_tool(cwd, allowed_dirs)
+    }
+
+    fn build_middlewares(
+        &self,
+        ctx: &WorkflowAgentContext,
+        model_name: &str,
+        skill_names: &[String],
+        execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+    ) -> Vec<Box<dyn Middleware>> {
+        WorkflowAgentMiddlewareFactory.build_middlewares(
+            ctx,
+            model_name,
+            skill_names,
+            execution_manager,
+        )
+    }
+
+    fn build_tool_resolver(&self) -> Arc<dyn ToolInvocationResolver> {
+        WorkflowAgentMiddlewareFactory.build_tool_resolver()
+    }
+
+    fn build_error_suggest(
+        &self,
+        cwd: &str,
+        tool_names: &[String],
+    ) -> (Arc<ErrorSuggestRegistry>, ToolRegistrySnapshot) {
+        WorkflowAgentMiddlewareFactory.build_error_suggest(cwd, tool_names)
+    }
+
+    fn build_workflow_middleware(
+        &self,
+        executor: Arc<dyn AgentExecutor>,
+        cwd: &str,
+        notification_tx: tokio::sync::broadcast::Sender<WorkflowTaskResult>,
+        progress_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>>,
+    ) -> Arc<dyn WorkflowMiddlewarePort> {
+        WorkflowAgentMiddlewareFactory.build_workflow_middleware(
+            executor,
+            cwd,
+            notification_tx,
+            progress_rx,
+        )
+    }
+}
+
+impl WorkflowAgentMiddlewareFactory {
+    /// workflow agent 的基础工具集（无 builtin 提供面）。
+    ///
+    /// 迁移后**不含**裸名 Web 工具：Web / Artifact 能力由 builtin 实例以
+    /// 原名 direct bridge 的形式提供（A6 面③，见
+    /// [`BuiltinWorkflowAgentFactory`] 与 [`crate::assembly::open_builtin_bridges`]）。
+    ///
+    /// v4-part-4 W3-C1：**同样不含** 7 个 workspace 裸名（`Read` / `Write` / `Edit` /
+    /// `Glob` / `Grep` / `folder_operations` / `Bash`）——它们的提供面已迁 builtin
+    /// `workspace` 实例，经 `BuiltinWorkflowAgentFactory::builtin_tools`（即
+    /// `open_builtin_bridges`）以原名提供，关闭键为该实例的
+    /// `policy_key`（`WorkspaceMiddleware`）。因此 `execution_manager` 在本函数内
+    /// 已无消费点（原 `TerminalMiddleware::build_tools_with_registry` 是唯一消费者）；
+    /// 形参保留以维持端口签名（`WorkflowMiddlewareFactory::build_tools`）不变。
+    fn workflow_tools(
+        cwd: &str,
+        disabled: &std::collections::HashSet<String>,
+        _execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+    ) -> Vec<Box<dyn BaseTool>> {
+        let mut tools: Vec<Box<dyn BaseTool>> = Vec::new();
+        // MetaHarness（设计 §2.5）：关闭的 middleware 连坐，其工具不进列表。
+        // Workflow agent 无 plugin_skill_roots，仅 project-level skill 可用。
+        // 在注册工具前扫描 project skills，预填充缓存（SkillTool 无懒扫描回退）。
+        // D3：统一模型可见协议为 SkillTool(skill_name) + DiscoverSkillsTool，
+        // 与主 agent / subagent 链一致，不再注册旧 Skill(skill, args)。
+        if !disabled.contains("SkillsMiddleware") {
+            let project_skills_root = std::path::PathBuf::from(cwd).join(".claude").join("skills");
+            let skills = crate::skills::loader::scan_skill_roots(&[crate::skills::SkillRoot {
+                path: project_skills_root,
+                source: crate::skills::SkillSource::Project,
+                plugin_name: None,
+            }]);
+            let cached = std::sync::Arc::new(std::sync::RwLock::new(if skills.is_empty() {
+                None
+            } else {
+                Some(skills)
+            }));
+            tools.push(Box::new(crate::skills::tools::SkillTool::new(Arc::clone(
+                &cached,
+            ))));
+            tools.push(Box::new(crate::skills::tools::DiscoverSkillsTool::new(
+                cached,
+            )));
+        }
+        tools
+    }
 }
 
 impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
@@ -90,44 +265,7 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         disabled: &std::collections::HashSet<String>,
         execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
     ) -> Vec<Box<dyn BaseTool>> {
-        let mut tools: Vec<Box<dyn BaseTool>> = Vec::new();
-        // MetaHarness（设计 §2.5）：关闭的 middleware 连坐，其工具不进列表。
-        if !disabled.contains("FilesystemMiddleware") {
-            tools.extend(FilesystemMiddleware::build_tools(cwd));
-        }
-        if !disabled.contains("TerminalMiddleware") {
-            tools.extend(TerminalMiddleware::build_tools_with_registry(
-                cwd,
-                execution_manager,
-            ));
-        }
-        if !disabled.contains("WebMiddleware") {
-            tools.extend(WebMiddleware::build_tools());
-        }
-        // Workflow agent 无 plugin_skill_roots，仅 project-level skill 可用。
-        // 在注册工具前扫描 project skills，预填充缓存（SkillTool 无懒扫描回退）。
-        // D3：统一模型可见协议为 SkillTool(skill_name) + DiscoverSkillsTool，
-        // 与主 agent / subagent 链一致，不再注册旧 Skill(skill, args)。
-        if !disabled.contains("SkillsMiddleware") {
-            let project_skills_root = std::path::PathBuf::from(cwd).join(".claude").join("skills");
-            let skills = crate::skills::loader::scan_skill_roots(&[crate::skills::SkillRoot {
-                path: project_skills_root,
-                source: crate::skills::SkillSource::Project,
-                plugin_name: None,
-            }]);
-            let cached = std::sync::Arc::new(std::sync::RwLock::new(if skills.is_empty() {
-                None
-            } else {
-                Some(skills)
-            }));
-            tools.push(Box::new(crate::skills::tools::SkillTool::new(Arc::clone(
-                &cached,
-            ))));
-            tools.push(Box::new(crate::skills::tools::DiscoverSkillsTool::new(
-                cached,
-            )));
-        }
-        tools
+        Self::workflow_tools(cwd, disabled, execution_manager)
     }
 
     fn build_sandbox_write_tool(
@@ -153,7 +291,7 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         ctx: &WorkflowAgentContext,
         model_name: &str,
         skill_names: &[String],
-        execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+        _execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
     ) -> Vec<Box<dyn Middleware>> {
         let mut middlewares: Vec<Box<dyn Middleware>> = Vec::new();
 
@@ -186,27 +324,21 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
             )));
         }
 
-        if !disabled.contains("FilesystemMiddleware") {
-            middlewares.push(Box::new(FilesystemMiddleware::new()));
-        }
-
-        // 3a. GitAttributionMiddleware（在 FilesystemMiddleware 之后）
+        // 3a. GitAttributionMiddleware
+        // v4-part-4 W3-C1：原 FilesystemMiddleware 段（此处之前）已删除，本槽位不再有
+        // 「在 Filesystem 之后」的位置语义；workspace 工具面改由 `build_tools` 的
+        // builtin direct bridge 提供，链上不再有文件工具提供器。
         if !disabled.contains("GitAttributionMiddleware") {
             middlewares.push(Box::new(GitAttributionMiddleware::new(model_name)));
         }
 
-        if !disabled.contains("TerminalMiddleware") {
-            let mut terminal = TerminalMiddleware::new();
-            if let Some(manager) = execution_manager {
-                terminal = terminal.with_task_manager(manager);
-            }
-            middlewares.push(Box::new(terminal));
-        }
-        if !disabled.contains("WebMiddleware") {
-            middlewares.push(Box::new(WebMiddleware::new()));
-        }
-
-        // 3b. TodoMiddleware（在 WebMiddleware 之后）
+        // 3b. TodoMiddleware
+        // v4-part-4 W3-C1：原 TerminalMiddleware 段（此处之前）已删除，本槽位不再有
+        // 「在 Terminal 之后」的位置语义；`_execution_manager` 形参因此在本函数内没有
+        // 消费点，保留以维持端口签名不变。
+        // A6 面③：Web 槽位已随 `WebMiddleware` 提供面删除，且此处**不**补 MCP
+        // middleware（workflow 链不引入 deferred / ToolSearch 语义）；Web / Artifact
+        // 与 workspace 7 工具的能力改由 `build_tools` 的 builtin direct bridge 提供。
         if !disabled.contains("TodoMiddleware") {
             let (todo_tx, _todo_rx) = tokio::sync::mpsc::channel::<Vec<crate::tools::TodoItem>>(8);
             middlewares.push(Box::new(TodoMiddleware::new(todo_tx)));

@@ -166,7 +166,7 @@ pub struct SubagentSpawnConfig {
     /// 过滤后的工具集（agent 定义路径按 tools/disallowed_tools 过滤）
     pub tools: Vec<Arc<dyn BaseTool>>,
     /// Canonical child policy, reapplied after every capability generation refresh.
-    pub tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    pub tool_filter: crate::session::tool_catalog::ToolFilter,
     /// SubAgent system prompt（注入 transcript 起始处）
     pub system_prompt: Option<String>,
     /// 错误感知建议注册表（可选）
@@ -375,7 +375,7 @@ pub struct SubagentResumeConfig {
     /// 过滤后的工具集（恢复路径由 tool 层按 title 重新应用过滤）
     pub tools: Vec<Arc<dyn BaseTool>>,
     /// Canonical child policy, reapplied after every capability generation refresh.
-    pub tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    pub tool_filter: crate::session::tool_catalog::ToolFilter,
     /// deferred 工具解析器（None = DirectToolInvocationResolver；middlewares 传
     /// ExecuteExtraToolResolver 保持包装层语义）
     pub tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,

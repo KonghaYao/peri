@@ -51,7 +51,7 @@ v4 目标是存算分离：持久状态、Agent 计算与工具执行环境独�
 | Agent loop、Compact、provider、session | `peri-agent/CLAUDE.md` + architecture/rust |
 | ACP host、stdio、prompt、event、caps | `peri-acp/CLAUDE.md` + architecture/rust |
 | Controller/Runtime、cancel、Langfuse | architecture/rust + 对应 code-index |
-| MCP、plugin、skills、subagent、HITL、工具、LSP | `peri-middlewares/CLAUDE.md` + architecture/rust |
+| MCP（含内置实例）、plugin、skills、subagent、HITL、工具、LSP | `peri-middlewares/CLAUDE.md` + architecture/rust |
 | Workflow | middleware guide + `docs/code-index/peri-workflow.md` |
 | TUI | `peri-tui/CLAUDE.md` + tui/rust |
 | E2E | `e2e/CLAUDE.md` + testing |

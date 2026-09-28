@@ -27,6 +27,7 @@ async fn test_update_config_refreshes_existing_owner_environments() {
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: startup.to_str().unwrap().to_owned(),
         bare: true,
+        drive_cron_tick: false,
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
     });
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());

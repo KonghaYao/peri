@@ -99,7 +99,7 @@ fn output_files(directory: &Path) -> Vec<std::path::PathBuf> {
     files
 }
 
-async fn assert_background_output_exits(explicit_background: bool) {
+async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
     let fixture = tempfile::tempdir().unwrap();
     let fixture_path = fixture.path().canonicalize().unwrap();
     let output_dir = fixture_path.join("output-artifacts");
@@ -133,6 +133,8 @@ async fn assert_background_output_exits(explicit_background: bool) {
                     } else {
                         input["timeout"] = json!(1);
                     }
+                    // v4：文件/终端工具的模型面名字是 builtin `workspace` 实例的
+                    // effective name（裸名 `Bash` 的提供面已删除）。
                     respond(&mut socket, Some(("produce-output", "Bash", input)), "").await;
                 }
                 1 => {
@@ -148,9 +150,24 @@ async fn assert_background_output_exits(explicit_background: bool) {
                         })
                         .expect("必须收到指定 Bash 调用的真实工具结果");
                     if !explicit_background {
+                        // Timeout retains a safe background receipt, while command/output
+                        // text stays out of the failure projection.
+                        let rendered = tool_result.to_string();
+                        assert_eq!(
+                            tool_result["is_error"], true,
+                            "前台超时必须如实以失败工具结果收口: {tool_result}"
+                        );
                         assert!(
-                            tool_result.to_string().contains("promoted"),
-                            "门控进程必须确实走 timeout promotion"
+                            rendered.contains("task_id: shell-")
+                                && rendered.contains("pid: ")
+                                && rendered.contains("background task"),
+                            "超时必须保留可恢复的后台回执: {tool_result}"
+                        );
+                        assert!(
+                            !rendered.contains(OUTPUT_MARKER)
+                                && !rendered.contains(TAIL)
+                                && !rendered.contains(STDERR),
+                            "工具结果不得携带任何输出正文: {tool_result}"
                         );
                     }
                     respond(&mut socket, None, "Waiting for the background result.").await;
@@ -180,7 +197,13 @@ async fn assert_background_output_exits(explicit_background: bool) {
                             "通知必须携带可读取的绝对路径"
                         );
                     }
-                    assert!(messages.contains("Read"), "通知必须明确说明如何读取文件");
+                    // 通知必须用**模型面名字**说明如何读取（裸名已无提供面，模型照裸名
+                    // 调用只会得到 `Tool not found`）：逐字断言注册表的冻结字面量，不用
+                    // 查表派生期望值（同源派生会让「查询改坏」自洽通过）。
+                    assert!(
+                        messages.contains("请使用 `Read` 工具按需读取"),
+                        "通知必须明确说明如何读取文件: {messages}"
+                    );
                     assert!(
                         messages.contains("执行失败") && messages.contains("退出码 1"),
                         "通知必须保留真实失败状态与退出码"
@@ -223,7 +246,6 @@ async fn assert_background_output_exits(explicit_background: bool) {
         .args([
             "--print",
             "Run the task and inspect its output tail.",
-            "--bare",
             "--output-format",
             "stream-json",
         ])
@@ -235,6 +257,9 @@ async fn assert_background_output_exits(explicit_background: bool) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if bare {
+        command.arg("--bare");
+    }
     let child = command.spawn().unwrap();
     let result = tokio::time::timeout(Duration::from_secs(25), child.wait_with_output()).await;
     if result.is_err() {
@@ -268,11 +293,17 @@ async fn assert_background_output_exits(explicit_background: bool) {
 /// [回归测试] timeout promotion 曾因大输出 reminder panic 遗留 Running，最终回答后挂起。
 #[tokio::test]
 async fn promoted_background_output_is_readable_and_print_exits() {
-    assert_background_output_exits(false).await;
+    assert_background_output_exits(false, false).await;
 }
 
 /// [回归测试] 显式后台路径也应只发送文件引用，并保留完整输出供实际 Read 消费。
 #[tokio::test]
 async fn explicit_background_output_is_readable_and_print_exits() {
-    assert_background_output_exits(true).await;
+    assert_background_output_exits(true, false).await;
+}
+
+/// [回归测试] bare 也必须保留后台执行、完成通知、输出读取和正常退出。
+#[tokio::test]
+async fn bare_background_output_is_readable_and_print_exits() {
+    assert_background_output_exits(true, true).await;
 }

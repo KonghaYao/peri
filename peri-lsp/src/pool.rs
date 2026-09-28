@@ -9,7 +9,7 @@ use std::{
 
 use parking_lot::RwLock;
 
-use peri_acp_types::ports::LspPoolPort;
+use peri_acp_types::ports::{LspPoolPort, LspSyncError};
 
 use crate::{
     client::{LspClient, ServerState, DEFAULT_STARTUP_TIMEOUT_MS},
@@ -306,9 +306,62 @@ impl LspServerPool {
     }
 }
 
-/// 会话级端口实现：装配面（`peri-middlewares::assembly` ChainSlot::Lsp）
-/// 经 `downcast_arc` 还原后复用同一 pool（跨 turn 共享服务器进程与
-/// 就绪/诊断状态）；宿主退出时经 `shutdown` 优雅关闭子进程。
+/// 同步路由判定：无匹配 server，或匹配到的 client 未就绪 ⇒ `NoServer`。
+/// 只读判定，不启动 / 不拉起服务器（A30：`ready_for` 为读文件之前的唯一前置
+/// 判定，此处独立复算，避免 ready 窗口内掉线仍按就绪处理）。
+fn sync_client_for(client: Option<Arc<LspClient>>) -> Result<Arc<LspClient>, LspSyncError> {
+    match client {
+        Some(client) if client.is_ready() => Ok(client),
+        _ => Err(LspSyncError::NoServer),
+    }
+}
+
+/// 底层 `LspError` → typed `LspSyncError`（无路由 / 未就绪归 `NoServer`，其余
+/// 协议 / 传输失败归 `Protocol`）。`reason` 一律为**固定规则文本**：不携带
+/// 底层错误消息，因而不会外泄路径、env 值、凭据或 token。
+fn map_sync_error(error: LspError) -> LspSyncError {
+    match error {
+        LspError::NoServerForFile { .. } | LspError::NotReady { .. } => LspSyncError::NoServer,
+        LspError::LaunchFailed { .. } => LspSyncError::Protocol {
+            reason: "launch_failed".to_string(),
+        },
+        LspError::InitFailed { .. } => LspSyncError::Protocol {
+            reason: "init_failed".to_string(),
+        },
+        LspError::RequestTimeout { .. } => LspSyncError::Protocol {
+            reason: "request_timeout".to_string(),
+        },
+        LspError::RequestFailed { .. } => LspSyncError::Protocol {
+            reason: "request_failed".to_string(),
+        },
+        LspError::ContentModified => LspSyncError::Protocol {
+            reason: "content_modified".to_string(),
+        },
+        LspError::ServerCrashed { .. } => LspSyncError::Protocol {
+            reason: "server_crashed".to_string(),
+        },
+        LspError::TransportClosed => LspSyncError::Protocol {
+            reason: "transport_closed".to_string(),
+        },
+        LspError::JsonRpcError { .. } => LspSyncError::Protocol {
+            reason: "jsonrpc_error".to_string(),
+        },
+        LspError::Io(_) => LspSyncError::Protocol {
+            reason: "io_error".to_string(),
+        },
+        LspError::Json(_) => LspSyncError::Protocol {
+            reason: "json_error".to_string(),
+        },
+    }
+}
+
+/// host 级唯一端口实现（A11/A21/A22）：宿主装配经
+/// `create_host_lsp_pool` 单次构造，同一 `Arc` 供 builtin `lsp` 实例与
+/// `ChainSlot::Lsp` 的 `LspSyncMiddleware` 消费（server 进程与就绪/诊断
+/// 状态跨 turn 存活）；宿主退出时经 `shutdown` 优雅关闭子进程。
+///
+/// `ready_for` / `did_change` / `did_save`（A30）为文档同步 seam：只做路由、
+/// path → URI 转换与既有 `LspClient` 通知委派，不读文件、不启动服务器。
 #[async_trait::async_trait]
 impl LspPoolPort for LspServerPool {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -318,6 +371,23 @@ impl LspPoolPort for LspServerPool {
     async fn shutdown(&self) {
         // 显式固有方法调用，避免与 trait 方法同名解析歧义
         LspServerPool::shutdown(self).await;
+    }
+
+    fn ready_for(&self, path: &std::path::Path) -> bool {
+        sync_client_for(self.server_for_file(&path.to_string_lossy())).is_ok()
+    }
+
+    async fn did_change(&self, path: &std::path::Path, text: &str) -> Result<(), LspSyncError> {
+        // 内容由调用方（薄中间件）读取后传入：端口只做协议
+        let client = sync_client_for(self.server_for_file(&path.to_string_lossy()))?;
+        let uri = path_to_uri(path);
+        client.did_change(&uri, text).await.map_err(map_sync_error)
+    }
+
+    async fn did_save(&self, path: &std::path::Path) -> Result<(), LspSyncError> {
+        let client = sync_client_for(self.server_for_file(&path.to_string_lossy()))?;
+        let uri = path_to_uri(path);
+        client.did_save(&uri).await.map_err(map_sync_error)
     }
 }
 

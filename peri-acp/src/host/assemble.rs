@@ -16,7 +16,7 @@ use peri_acp_types::hooks::{RegisteredHook, SettingsHooksPort};
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::{PluginLoadResult, PluginManagerPort};
-use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
+use peri_acp_types::ports::{LspPoolPort, McpPoolPort, SkillsPort, ToolSearchPort};
 use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 use peri_acp_types::skills::SkillRoot;
 
@@ -39,6 +39,7 @@ use super::AcpServerConfig;
 pub(crate) struct WorkspaceAssembly {
     pub(crate) startup_cwd: String,
     pub(crate) bare: bool,
+    pub(crate) drive_cron_tick: bool,
     pub(crate) mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
 }
 
@@ -113,6 +114,17 @@ pub struct HostAssemblyInput {
     /// 驱动 cron tick（TUI=true，复刻迁移前 TUI 每秒 tick 行为；print/stdio
     /// 保持现状无 tick——行为零变化，L2 遗留登记 M-TUI issue）。
     pub drive_cron_tick: bool,
+    /// builtin `workspace` 实例的**session 级**输入（AW3-11 的两名成员：
+    /// per-session `TaskManager` + session 级 `on_bg_complete`）。
+    ///
+    /// 只有会话环境装配（[`super::workspace::SessionEnvironment::assemble`]）传
+    /// `Some`——该形态是唯一构造 builtin 上下文的形态（`session_resources = true`，
+    /// 每 session 一个 pool）。顶层三路径与测试夹具传 `None`：那层不构造 builtin
+    /// 上下文（`mcp_pool` 为 `None`），`None` 不改变任何既有行为。
+    ///
+    /// 注入必须**早于** pool 的 `McpClientPool::run_initialize`（A33：上下文一次性
+    /// 注入，第二次必得 `AlreadyInjected`），见本模块的 `.with_workspace(...)` 调用点。
+    pub workspace_input: Option<peri_middlewares::assembly::WorkspaceInstanceInput>,
     /// 准备路径一次加载的插件聚合：`Some` 时装配面不再重读插件目录
     /// （`None` = 既有语义，由装配面自行加载；仅 host 级/非准备调用点如此）。
     pub prepared_plugins: Option<PreparedPlugins>,
@@ -271,6 +283,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         cwd,
         bare,
         drive_cron_tick,
+        workspace_input,
         prepared_plugins,
     } = input;
 
@@ -300,42 +313,58 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         ))
     };
 
-    // ── cron 调度器（迁移前 TUI launch / cli_print 各自构造；tick 驱动仅
-    //    TUI 复刻——drive_cron_tick flag，L2 遗留登记 M-TUI issue）──
-    let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = {
-        let scheduler = Arc::new(parking_lot::Mutex::new(
-            peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
-        ));
-        if drive_cron_tick {
-            let tick_scheduler = scheduler.clone();
-            let shutdown = host_task_spawner.shutdown_token();
-            let _ = host_task_spawner.spawn(
-                HostTaskOwnerKind::Startup,
-                HostTaskKind::CronTick,
-                async move {
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-                    loop {
-                        tokio::select! {
-                            _ = shutdown.cancelled() => break,
-                            _ = interval.tick() => tick_scheduler.lock().tick(),
-                        }
-                    }
-                },
-            );
-        }
-        Some(Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(
-            scheduler,
-        )))
-    };
+    // ── cron 调度器（迁移前 TUI launch / cli_print 各自构造）──
+    //
+    // A1/A32：每个会话环境构造一份 scheduler，并以同一 `Arc` 同时喂给
+    // `CronSchedulerPort`（宿主事件面）与 builtin `cron` 实例的
+    // `CronInstanceInput`（工具面）。1s tick 的唯一 spawn 点是 pool 建立本代
+    // builtin transport 处（`McpClientPool::spawn_builtin_transport`，由
+    // `cron.tick_enabled` 决定）；宿主不再 spawn `HostTaskKind::CronTick`
+    // ——同一 scheduler 任一时刻至多一个驱动，tick 随该代 supervisor 关闭。
+    // 部署层不建 MCP 池；其 tick 策略经 WorkspaceAssembly 原样传入会话。
+    let cron_scheduler_concrete = Arc::new(parking_lot::Mutex::new(
+        peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
+    ));
+    let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = Some(Arc::new(
+        peri_middlewares::cron::CronSchedulerPortHandle(Arc::clone(&cron_scheduler_concrete)),
+    ));
 
-    // ── MCP 连接池（bare 时跳过；后台初始化不阻塞，迁移前 cli_print 语义）──
+    // ── LSP：配置合并 + host 级唯一 pool（A11/A21/A22，顺序冻结见 sub-plan H §5.1）──
+    //
+    // ① 配置合并必须**早于** builtin `lsp` handler 构造：handler 在
+    //    `run_initialize` 内按生效配置非空（`has_servers()`）快照工具面，
+    //    不支持热更新（A21）；
+    // ② host pool 必须**早于** MCP 池的 `run_initialize` 构造，才能随
+    //    `BuiltinInstanceContext` 一次注入（A33）；
+    // ③ 空配置也构造 pool（`has_servers()` 假 ⇒ 工具面空表但仍 ready，A6）——
+    //    不得用「不构造」表达「无配置」。
+    //
+    // H5：全局 settings.json（config.lspServers）与插件 LSP 服务器合并
+    //（优先级对齐 MCP：global < plugin；无插件时全局配置单独生效）。
+    // 读取路径跟随宿主全局配置加载机制（config_path，支持测试重定向）。
+    let plugin_lsp_servers = if bare {
+        Default::default()
+    } else {
+        peri_middlewares::assembly::load_merged_lsp_servers(
+            &crate::provider::config_path(),
+            plugin_data
+                .as_ref()
+                .map(|pd| pd.all_lsp_servers.clone())
+                .unwrap_or_default(),
+        )
+    };
+    let host_lsp_pool_concrete =
+        peri_middlewares::assembly::create_host_lsp_pool(&cwd, &plugin_lsp_servers);
+    // 宿主侧投影：端口即消费面（A23/A30），链上同步中间件与 host shutdown 都只经它。
+    let lsp_pool: Arc<dyn LspPoolPort> =
+        Arc::clone(&host_lsp_pool_concrete) as Arc<dyn LspPoolPort>;
+
+    // ── 会话 MCP 池（bare 仅装配 workspace；后台初始化不阻塞）──
     // OAuth 授权事件通道：MCP 授权回调（AuthorizationNeeded/Completed/Failed）
     // 经 tx 转发 AcpEvent，run_acp_server 侧消费者以 peri/agent_event 送达 TUI。
     let (oauth_event_tx, oauth_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::event::oauth::HostOAuthEvent>();
-    let mcp_pool_concrete: Option<Arc<peri_middlewares::mcp::McpClientPool>> = if bare
-        || !session_scoped
-    {
+    let mcp_pool_concrete: Option<Arc<peri_middlewares::mcp::McpClientPool>> = if !session_scoped {
         None
     } else {
         let pool = pending_mcp_pool(
@@ -343,6 +372,42 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             mcp_profile.clone(),
             Some(std::path::Path::new(&cwd)),
         );
+        // ── A33：builtin 实例上下文由**宿主装配**构造并注入，必须早于下面的
+        //    `run_initialize` 及其后台 spawn ──
+        //
+        // 同一批 `Arc`（A1）：cron 用组合根唯一 scheduler，lsp 用上面那份 host
+        // pool（同一 `Arc` 同时喂端口投影）。`closed` 由 `new` 默认为空集：
+        // A24 的策略关闭是**会话级**（frozen `meta_harness.disabled_middlewares`），
+        // 宿主装配点没有会话上下文，投影由链装配（`McpMiddleware` /
+        // `open_builtin_bridges`）按会话完成；本字段在装配面不被消费。
+        //
+        // `tick_enabled` 是 `HostAssemblyInput::drive_cron_tick` 的投影（TUI=true；
+        // print/stdio=false；会话继承所属部署的开关）。
+        //
+        // `workspace` 输入是**唯一 session 级**的一项（AW3-11：per-session
+        // `TaskManager` + session 级 `on_bg_complete`），由会话环境装配原样转交，
+        // 本层不包装、不派生；`None` = 可见但退化（handler 照常构造，只是 `Bash`
+        // 失去后台任务那一路），不是「实例不可装配」——无 `instance_input_ready` arm。
+        let mut builtin_context =
+            peri_middlewares::assembly::BuiltinInstanceContext::new(cwd.clone())
+                .with_cron(peri_middlewares::assembly::CronInstanceInput {
+                    scheduler: Arc::clone(&cron_scheduler_concrete),
+                    tick_enabled: drive_cron_tick,
+                })
+                .with_lsp(peri_middlewares::assembly::LspInstanceInput {
+                    pool: Arc::clone(&host_lsp_pool_concrete),
+                });
+        if let Some(workspace_input) = workspace_input {
+            builtin_context = builtin_context.with_workspace(workspace_input);
+        }
+        let builtin_context = Arc::new(builtin_context);
+        if let Err(error) = pool.set_builtin_instance_context(builtin_context) {
+            // 本池是上一行刚构造的（从未 initialize）⇒ 两个 typed 拒绝都不可能出现：
+            // 出现即装配顺序 bug。不在此处伪造 ready —— 缺上下文的 builtin 实例会在
+            // `run_initialize` 里以 typed 原因走 `insert_failed` +
+            // `commit_discovery_failure` 收口，`system_mcp` 闸门 fatal（A33）。
+            tracing::error!(%error, "builtin 实例上下文注入失败");
+        }
         let pool_clone = pool.clone();
         let cwd_clone = cwd.clone();
         let claude_home_clone = claude_dir.clone();
@@ -456,15 +521,24 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             if let Some(activation) = activation {
                 activation.cancelled().await;
             }
-            peri_middlewares::mcp::McpClientPool::run_initialize(
-                pool_clone,
-                std::path::Path::new(&cwd_clone),
-                &claude_home_clone,
-                init_tx,
-                oauth_event_callback,
-                None,
-            )
-            .await;
+            if bare {
+                peri_middlewares::mcp::McpClientPool::run_initialize_bare(
+                    pool_clone,
+                    std::path::Path::new(&cwd_clone),
+                    init_tx,
+                )
+                .await;
+            } else {
+                peri_middlewares::mcp::McpClientPool::run_initialize(
+                    pool_clone,
+                    std::path::Path::new(&cwd_clone),
+                    &claude_home_clone,
+                    init_tx,
+                    oauth_event_callback,
+                    None,
+                )
+                .await;
+            }
         });
         Some(pool)
     };
@@ -496,7 +570,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // 进的就是**本装配的池**——会话级装配（`session_scoped`）才有池，连接
     // 因此只能进声明它的会话的工具面。host 级装配无池即无此服务。
     let acp_mcp: Option<Arc<dyn peri_acp_types::ports::AcpMcpServerPort>> =
-        mcp_pool_concrete.clone().map(|pool| {
+        mcp_pool_concrete.clone().filter(|_| !bare).map(|pool| {
             Arc::new(peri_middlewares::mcp::AcpMcpService::new(pool))
                 as Arc<dyn peri_acp_types::ports::AcpMcpServerPort>
         });
@@ -519,8 +593,13 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         Arc::new(peri_middlewares::host_ports::PluginManager);
     let settings_hooks: Arc<dyn SettingsHooksPort> =
         Arc::new(peri_middlewares::host_ports::SettingsHooksLoader);
+    // A6 面③：workflow agent 的工具面必须同样保留 Web / Artifact 能力（迁移后为
+    // builtin 实例的 direct bridge `mcp__web__*` 等），因此装配点把 deployment pool
+    // 交给工厂；bare 池同样保留 workspace，无 pool 时为 None。
     let workflow_middleware_factory =
-        peri_middlewares::assembly::default_workflow_middleware_factory();
+        peri_middlewares::assembly::default_workflow_middleware_factory_with_pool(
+            mcp_pool_concrete.clone(),
+        );
 
     // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
     if !bare && !session_scoped {
@@ -558,16 +637,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             .map(|pd| pd.all_agent_dirs.clone())
             .unwrap_or_default()
     });
-    // H5：全局 settings.json（config.lspServers）与插件 LSP 服务器合并
-    //（优先级对齐 MCP：global < plugin；无插件时全局配置单独生效）。
-    // 读取路径跟随宿主全局配置加载机制（config_path，支持测试重定向）。
-    let plugin_lsp_servers = peri_middlewares::assembly::load_merged_lsp_servers(
-        &crate::provider::config_path(),
-        plugin_data
-            .as_ref()
-            .map(|pd| pd.all_lsp_servers.clone())
-            .unwrap_or_default(),
-    );
+    // `plugin_lsp_servers` / host pool 已在 MCP 池初始化之前构造（见上方
+    // 「LSP：配置合并 + host 级唯一 pool」块）：配置合并必须在 builtin `lsp`
+    // handler 构造之前完成（A21）。
     let plugin_hooks = plugin_data
         .as_ref()
         .map(|pd| pd.all_hooks.clone())
@@ -625,6 +697,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         workspace_assembly: (!session_scoped).then(|| WorkspaceAssembly {
             startup_cwd: cwd.clone(),
             bare,
+            drive_cron_tick,
             mcp_profile,
         }),
         host_task_owner: Some(host_task_owner),
@@ -651,6 +724,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         plugin_loaded,
         hook_groups,
         plugin_lsp_servers,
+        lsp_pool: Some(lsp_pool),
         tool_search_index,
         skills,
         plugin_manager,

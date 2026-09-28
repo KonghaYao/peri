@@ -14,13 +14,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use peri_acp_types::{
     event::ExecutorEvent,
-    messages::{BaseMessage, ContentBlock, ToolCallRequest},
+    messages::{BaseMessage, ContentBlock, MessageContent, ToolCallRequest},
 };
 
 use super::super::{
     CommandContext, CommandHandler, CommandOutcome, CommandResult, FeedbackChannel, FeedbackLevel,
 };
-use super::{extract_file_changes, revert_files, validate_tool_pairing, RewindCommand};
+use super::{extract_file_changes, revert_files, validate_tool_pairing, FileChange, RewindCommand};
 use crate::session::executor::PromptStopReason;
 
 // ── Mock EventSink ────────────────────────────────────────────────────────
@@ -283,6 +283,111 @@ fn test_extract_file_changes_deduplicates_by_id() {
     ];
     let changes = extract_file_changes(&msgs);
     assert_eq!(changes.len(), 2, "两个不同 id 的调用各计一次");
+}
+
+// ── N9：builtin `workspace` effective name 归一 ────────────────────────────
+
+/// 正向：模型面名字 `mcp__workspace__Write` / `mcp__workspace__Edit` 经归一后
+/// 必须被收集（两种消息格式各一条断言），且内容与裸名路径一致。
+#[test]
+fn rewind_collects_workspace_effective_write_and_edit() {
+    // Arrange: OpenAI 格式（仅 tool_calls 路径）的 effective Write
+    let write_args = serde_json::json!({
+        "file_path": "src/ws_write.rs",
+        "content": "hello",
+    });
+    let openai_msg = BaseMessage::ai_with_tool_calls(
+        "推理中...",
+        vec![ToolCallRequest::new(
+            "call_ws_write",
+            "mcp__workspace__Write",
+            write_args,
+        )],
+    );
+
+    // Act
+    let openai_changes = extract_file_changes(&[openai_msg]);
+
+    // Assert: 归一命中 ⇒ 收集为 Write，file_path 逐字保留
+    assert_eq!(
+        openai_changes.len(),
+        1,
+        "`mcp__workspace__Write` 应被归一为 Write 并收集"
+    );
+    assert!(
+        matches!(
+            &openai_changes[0],
+            FileChange::Write { path } if path.as_str() == "src/ws_write.rs"
+        ),
+        "应为 Write 变体且 path == src/ws_write.rs"
+    );
+
+    // Arrange: Anthropic 格式的 effective Edit——只填 content blocks（tool_calls 留空），
+    // 让 ToolUse 路径独立承载断言：`ai_from_blocks` 会把 ToolUse 同步进 tool_calls，
+    // tool_calls 路径会先收集，从而掩盖 ToolUse 路径的归一失效（破坏实验已验证）。
+    let edit_input = serde_json::json!({
+        "file_path": "src/ws_edit.rs",
+        "old_string": "old text",
+        "new_string": "new text",
+    });
+    let anthropic_msg = BaseMessage::ai(MessageContent::Blocks(vec![ContentBlock::tool_use(
+        "toolu_ws_edit",
+        "mcp__workspace__Edit",
+        edit_input,
+    )]));
+
+    // Act
+    let anthropic_changes = extract_file_changes(&[anthropic_msg]);
+
+    // Assert: 归一命中 ⇒ 收集为 Edit（仅 ToolUse 路径，产出 1 条），old/new 保留
+    assert_eq!(
+        anthropic_changes.len(),
+        1,
+        "`mcp__workspace__Edit` 应被归一为 Edit 并收集（仅 ToolUse 路径）"
+    );
+    assert!(
+        matches!(
+            &anthropic_changes[0],
+            FileChange::Edit { path, old_string, new_string }
+                if path.as_str() == "src/ws_edit.rs"
+                    && old_string == "old text"
+                    && new_string == "new text"
+        ),
+        "应为 Edit 变体且 path/old_string/new_string 逐字来自 arguments"
+    );
+}
+
+/// 反例：未注册实例的 `mcp__foo__Write` 不得被归一命中 ⇒ 不收集（保守语义：
+/// 未知 / 外部 `mcp__*` 不按 Write/Edit 处理）。
+#[test]
+fn rewind_ignores_unknown_effective_names() {
+    let args = serde_json::json!({"file_path": "a.txt", "content": "hello"});
+
+    // OpenAI 格式：未注册实例名 + 大小写近似名（纯查表区分大小写）
+    for name in ["mcp__foo__Write", "mcp__workspace__write"] {
+        let openai_msg = BaseMessage::ai_with_tool_calls(
+            "推理中...",
+            vec![ToolCallRequest::new("call_unknown", name, args.clone())],
+        );
+        let changes = extract_file_changes(&[openai_msg]);
+        assert!(
+            changes.is_empty(),
+            "`{name}` 未命中归一表，不得被收集（保守语义）"
+        );
+
+        // Anthropic 格式：同批断言，两格式行为不得分裂（只填 content blocks，
+        // 让 ToolUse 路径独立承载断言，不被 tool_calls 路径掩盖）
+        let anthropic_msg = BaseMessage::ai(MessageContent::Blocks(vec![ContentBlock::tool_use(
+            "toolu_unknown",
+            name,
+            args.clone(),
+        )]));
+        let changes = extract_file_changes(&[anthropic_msg]);
+        assert!(
+            changes.is_empty(),
+            "`{name}`（ToolUse 路径）未命中归一表，不得被收集"
+        );
+    }
 }
 
 // ── revert_files 测试：Write 分支 ──────────────────────────────────────────

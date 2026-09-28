@@ -6,6 +6,7 @@ mod subagents;
 
 use super::tool_card::{SubAgentAccumulator, ToolCardAccumulator};
 use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit};
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------
@@ -287,12 +288,13 @@ impl CurrentTurn {
     }
 
     pub fn has_running_bash_tool(&self) -> bool {
-        self.tool_cards
+        // 按名判定先经 IF-D15 归一 helper（effective name → 原始名），未命中回落原样。
+        self.tool_cards.iter().any(|t| {
+            original_tool_name_of_effective(&t.tool_name).unwrap_or(t.tool_name.as_str()) == "Bash"
+                && t.output_summary.is_none()
+        }) || self
+            .subagents
             .iter()
-            .any(|t| t.tool_name == "Bash" && t.output_summary.is_none())
-            || self
-                .subagents
-                .iter()
-                .any(|s| s.child_turn.has_running_bash_tool())
+            .any(|s| s.child_turn.has_running_bash_tool())
     }
 }

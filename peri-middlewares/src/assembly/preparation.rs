@@ -1,10 +1,7 @@
 //! 生产装配前的端口还原与父工具投影；所有句柄仍由 assemble 持有。
-use super::AssemblyContext;
+use super::{open_builtin_bridges, AssemblyContext};
 use crate::{
-    cron::{CronScheduler, CronSchedulerPortHandle},
-    mcp::tool_bridge::build_tool_bridges_visible_to,
     mcp::{McpClientPool, McpResourceTool},
-    middleware::{FilesystemMiddleware, TerminalMiddleware, WebMiddleware},
     permission::{AutoClassifier, LlmAutoClassifier},
     tool_search::ToolSearchIndex,
     workflow::WorkflowMiddleware,
@@ -17,7 +14,6 @@ use peri_agent::{
 use std::sync::Arc;
 
 pub(super) struct ResolvedPorts {
-    pub(super) cron_scheduler_concrete: Option<Arc<parking_lot::Mutex<CronScheduler>>>,
     pub(super) mcp_pool_concrete: Option<Arc<McpClientPool>>,
     pub(super) mcp_agent_registry: Option<Arc<crate::mcp::McpAgentRegistry>>,
     pub(super) tool_search_index_concrete: Arc<ToolSearchIndex>,
@@ -28,7 +24,6 @@ pub(super) struct ResolvedPorts {
 
 pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
     let AssemblyContext {
-        cron_scheduler,
         mcp_pool,
         tool_search_index,
         workflow_middleware,
@@ -40,20 +35,6 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
     // L5：middlewares 具体类型经 peri-acp-types 端口接入，此处 downcast
     // 还原（端口实现方为本 crate，生产路径必成功；失败回退与原上层
     // 回退逻辑一致——临时实例 / None 降级）。
-
-    // Cron 调度器：端口 → Arc<Mutex<CronScheduler>>（CronMiddleware 消费）。
-    // downcast 失败或无注入时构造临时实例（行为与迁移前一致）。
-    let cron_scheduler_concrete: Option<Arc<parking_lot::Mutex<CronScheduler>>> =
-        cron_scheduler.as_ref().map(|p| {
-            Arc::clone(p)
-                .downcast_arc::<CronSchedulerPortHandle>()
-                .map(|h| h.0.clone())
-                .unwrap_or_else(|_| {
-                    Arc::new(parking_lot::Mutex::new(CronScheduler::new(
-                        tokio::sync::mpsc::unbounded_channel().0,
-                    )))
-                })
-        });
 
     // MCP 连接池：端口 → Arc<McpClientPool>。downcast 失败按未注入处理
     //（不注册 MCP 中间件/工具）。
@@ -99,7 +80,6 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
         };
 
     ResolvedPorts {
-        cron_scheduler_concrete,
         mcp_pool_concrete,
         mcp_agent_registry,
         tool_search_index_concrete,
@@ -114,7 +94,6 @@ pub(super) fn build_parent_tools(
     mcp_pool_concrete: &Option<Arc<McpClientPool>>,
 ) -> Vec<Box<dyn BaseTool>> {
     let AssemblyContext {
-        cwd,
         mcp_skill_registry,
         meta_harness_disabled: disabled,
         ..
@@ -122,24 +101,23 @@ pub(super) fn build_parent_tools(
     // 父工具集（供子 agent 继承）。MetaHarness：父工具按持有 middleware
     // 分支构造——关闭的 middleware 连坐，其工具不进入 parent_tools
     // （设计 §2.5"关闭面 = 全部装配入口"）。
+    //
+    // A6 面②/A7 面②：Web / Artifact 能力迁移后由 builtin 实例提供，且子 agent 链**没有**
+    // ToolSearch（唯一实例化点在主链），因此本面必须走类型化构造：注册表声明的
+    // direct（WebSearch / WebFetch）在 parent_tools 上仍为 direct，否则子 agent 会净失去
+    // Web 能力（IF-D13 / R3）。关闭实例由 `open_builtin_bridges` 按同一份 frozen
+    // policy 过滤（IF-D10 面②），裸名 Web 工具不再出现在任何装配面。
+    //
+    // v4-part-4 W3-C1：7 个文件/终端裸名（`Read` / `Write` / `Edit` / `Glob` / `Grep` /
+    // `folder_operations` / `Bash`）的**裸名来源已从本面摘除**（原 `FilesystemMiddleware`
+    // / `TerminalMiddleware` 两段 `build_tools` 连坐块已删）。它们的唯一来源是下一段的
+    // builtin direct bridge——`open_builtin_bridges` 按注册表遍历**全部**实例，`workspace`
+    // 实例的 7 项（声明 `direct: true`）因此自动进入 parent_tools，关闭键为
+    // `WorkspaceMiddleware`（注册表 `policy_key`，与 Web/Artifact 同一条路径）。
     let mut parent_tools: Vec<Box<dyn BaseTool>> = Vec::new();
-    if !disabled.contains("FilesystemMiddleware") {
-        parent_tools.extend(FilesystemMiddleware::build_tools(cwd));
-    }
-    if !disabled.contains("TerminalMiddleware") {
-        parent_tools.extend(TerminalMiddleware::build_tools(cwd));
-    }
-    if !disabled.contains("WebMiddleware") {
-        parent_tools.extend(WebMiddleware::build_tools());
-    }
     if !disabled.contains("McpMiddleware") {
         if let Some(ref pool) = mcp_pool_concrete {
-            // 子 agent 继承父会话的工具面：按会话过滤，ACP 声明的 server 不会
-            // 经父工具集泄漏到其他会话的子 agent。
-            let mcp_tools = build_tool_bridges_visible_to(pool, Some(&ctx.session_id));
-            for tool in mcp_tools {
-                parent_tools.push(tool);
-            }
+            parent_tools.extend(open_builtin_bridges(pool, disabled));
             if pool.has_resources() {
                 parent_tools.push(Box::new(
                     McpResourceTool::new(

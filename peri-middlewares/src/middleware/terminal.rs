@@ -1,7 +1,6 @@
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use peri_acp_types::tasks::TaskManager;
 use peri_agent::agent::async_tasks::{
     bg_shell_task_id, kill_process_group, parse_background_timeout, parse_foreground_timeout,
@@ -10,7 +9,6 @@ use peri_agent::agent::async_tasks::{
 };
 use peri_agent::{
     agent::events::BackgroundTaskResult,
-    middleware::r#trait::Middleware,
     tools::{BaseTool, ToolExecutionEvidence, ToolExecutionStatus, ToolOutput},
 };
 use serde_json::Value;
@@ -229,8 +227,14 @@ fn persist_partial_output_with_ref(output: &str) -> (String, Option<String>) {
     match std::fs::write(&file_path, output) {
         Ok(_) => (
             format!(
-                "\n\n[Partial output saved to {} — use Read tool to view captured output so far]",
-                file_path.display()
+                // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
+                // 查表未命中的兜底不含工具名，不得回落到裸名。
+                "\n\n[Partial output saved to {} — {}]",
+                file_path.display(),
+                peri_acp_types::builtin_mcp::effective_name_of("workspace", "Read").map_or(
+                    "read the file to view captured output so far".to_string(),
+                    |name| format!("use `{name}` to view captured output so far"),
+                ),
             ),
             Some(file_path.to_string_lossy().into_owned()),
         ),
@@ -333,11 +337,49 @@ impl BaseTool for BashTool {
     async fn invoke_output(
         &self,
         input: Value,
-        _ctx: peri_agent::tools::ToolContext<'_>,
+        ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
-        let command = input["command"]
-            .as_str()
-            .ok_or("Missing command parameter")?;
+        Ok(self.execute(input, ctx).await?.output)
+    }
+
+    async fn invoke(
+        &self,
+        input: Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let result = self.execute(input, ctx).await?;
+        if let Some(recovery) = result.recovery {
+            Err(crate::tools::failure::ToolFailure::new(recovery, result.output.text).into())
+        } else {
+            Ok(result.output.text)
+        }
+    }
+
+    fn output_char_limit(&self) -> Option<usize> {
+        Some(10000)
+    }
+}
+
+// `TerminalMiddleware` 已随 v4-part-4 W3-C1 删除：`Bash` 的唯一提供面是 builtin
+// `workspace` 实例的 bridge（模型面名字 `Bash`），本文件只保留
+// `BashTool` 实现（由 `mcp::builtin::workspace` 的 handler 复用；AW3-02）。
+
+#[cfg(test)]
+#[path = "terminal_test.rs"]
+mod tests;
+
+impl BashTool {
+    async fn execute(
+        &self,
+        input: Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<BashOutput, Box<dyn std::error::Error + Send + Sync>> {
+        let command = input["command"].as_str().ok_or_else(|| {
+            crate::tools::failure::ToolFailure::new(
+                "Missing command parameter.",
+                "Missing command parameter",
+            )
+        })?;
 
         // ── 后台执行路径 ──
         let run_in_background = input["run_in_background"].as_bool().unwrap_or(false);
@@ -378,9 +420,16 @@ impl BaseTool for BashTool {
                         msg.push_str(&format!(" (stderr: {stderr_log})"));
                     }
                     if handle.stdout_log.is_some() {
-                        msg.push_str(
-                            " — it appends while the command runs (use the Read tool to view)",
-                        );
+                        // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
+                        // 查表未命中的兜底不含工具名，不得回落到裸名。
+                        let read_lead =
+                            peri_acp_types::builtin_mcp::effective_name_of("workspace", "Read")
+                                .map_or("open it to view".to_string(), |name| {
+                                    format!("use `{name}` to view")
+                                });
+                        msg.push_str(&format!(
+                            " — it appends while the command runs ({read_lead})"
+                        ));
                     }
                     msg.push_str(
                         "\n- Monitor: check the Tasks panel for status and output preview; \
@@ -391,7 +440,7 @@ impl BaseTool for BashTool {
                     "\n(process failed to spawn — a failure notification will arrive shortly)",
                 ),
             }
-            return Ok(ToolOutput::with_execution(
+            return Ok(BashOutput::with_execution(
                 msg,
                 ToolExecutionEvidence {
                     status: if handle.pid.is_some() {
@@ -591,9 +640,10 @@ impl BaseTool for BashTool {
                             output_capture.retain_files();
                             let cleanup_hint = background_cleanup_hint(pid, std::env::consts::OS);
                             let log_hint = foreground_log_hint(&output_capture);
+                            let recovery = format!("Command timed out. The process is still running and has been promoted to a background task.\ntask_id: {task_id}\npid: {pid}{log_hint}\n{cleanup_hint}{timeout_note}\nDo not rerun the command while it is active; check the Tasks panel or read its live logs.");
                             if has_output {
                                 // 有部分输出：进程在产生进展，续跑是合理的
-                                return Ok(ToolOutput::with_execution(format!(
+                                return Ok(BashOutput::with_execution(format!(
                                     "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.{log_hint}\n{cleanup_hint}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
                                     foreground_timeout_ms as f64 / 1000.0
                                 ), ToolExecutionEvidence {
@@ -602,11 +652,11 @@ impl BaseTool for BashTool {
                                     output_ref: partial_ref.clone(),
                                     output_truncated: true,
                                     task_id: Some(task_id),
-                                }));
+                                }).with_recovery(recovery));
                             }
                             // 无输出：进程可能挂起（等输入/资源）而非正常变慢——
                             // 仍 promote（避免误杀静默启动的慢任务），但如实说明不确定性
-                            return Ok(ToolOutput::with_execution(format!(
+                            return Ok(BashOutput::with_execution(format!(
                                 "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).{log_hint}\n{cleanup_hint}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
                                 foreground_timeout_ms as f64 / 1000.0
                             ), ToolExecutionEvidence {
@@ -615,7 +665,7 @@ impl BaseTool for BashTool {
                                 output_ref: partial_ref,
                                 output_truncated: true,
                                 task_id: Some(task_id),
-                            }));
+                            }).with_recovery(recovery));
                         }
                         Err(e) => {
                             // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
@@ -624,7 +674,7 @@ impl BaseTool for BashTool {
                             drain_output.await;
                             execution.confirm_stopped();
                             output_capture.cleanup().await;
-                            return Ok(ToolOutput::with_execution(format!(
+                            return Ok(BashOutput::with_execution(format!(
                                 "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{ps_line}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
                                 foreground_timeout_ms as f64 / 1000.0
                             ), ToolExecutionEvidence {
@@ -643,7 +693,7 @@ impl BaseTool for BashTool {
                     drain_output.await;
                     execution.confirm_stopped();
                     output_capture.cleanup().await;
-                    return Ok(ToolOutput::with_execution(format!(
+                    return Ok(BashOutput::with_execution(format!(
                         "Command timed out after {:.1}s. The synchronous path is always bounded (default 15s, maximum {FOREGROUND_MAX_TIMEOUT_MS}ms) to encourage efficient commands.\n\
                          {ps_line}\n\
                          Options:\n\
@@ -733,7 +783,7 @@ impl BaseTool for BashTool {
                 };
                 let output_truncated =
                     output_ref.is_some() || text.chars().count() < output.chars().count();
-                Ok(ToolOutput::with_execution(
+                Ok(BashOutput::with_execution(
                     text,
                     ToolExecutionEvidence {
                         status: execution_status,
@@ -754,100 +804,24 @@ impl BaseTool for BashTool {
             }
         }
     }
-
-    async fn invoke(
-        &self,
-        input: Value,
-        ctx: peri_agent::tools::ToolContext<'_>,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        match self.invoke_output(input, ctx).await? {
-            ToolOutput {
-                text,
-                execution: Some(evidence),
-            } if matches!(
-                evidence.status,
-                ToolExecutionStatus::TimedOut | ToolExecutionStatus::RunningAfterTimeout
-            ) =>
-            {
-                Err(text.into())
-            }
-            output => Ok(output.text),
-        }
-    }
-
-    fn output_char_limit(&self) -> Option<usize> {
-        Some(10000)
-    }
 }
 
-/// TerminalMiddleware - 与 TypeScript TerminalMiddleware 对齐
-pub struct TerminalMiddleware {
-    task_manager: Option<Arc<dyn TaskManager>>,
-    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+/// Private execution result keeps recovery references separate from command output.
+struct BashOutput {
+    output: ToolOutput,
+    recovery: Option<String>,
 }
-
-impl TerminalMiddleware {
-    pub fn new() -> Self {
+impl BashOutput {
+    fn with_execution(text: impl Into<String>, evidence: ToolExecutionEvidence) -> Self {
+        let recovery = (evidence.status == ToolExecutionStatus::TimedOut).then(||
+            "Command timed out. The process group has been terminated. Use a more focused command or background execution when a task manager is available.".to_string());
         Self {
-            task_manager: None,
-            on_bg_complete: None,
+            output: ToolOutput::with_execution(text, evidence),
+            recovery,
         }
     }
-
-    pub fn with_task_manager(mut self, task_manager: Arc<dyn TaskManager>) -> Self {
-        self.task_manager = Some(task_manager);
+    fn with_recovery(mut self, recovery: String) -> Self {
+        self.recovery = Some(recovery);
         self
     }
-
-    pub fn with_on_bg_complete(
-        mut self,
-        cb: Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>,
-    ) -> Self {
-        self.on_bg_complete = Some(cb);
-        self
-    }
-
-    pub fn build_tools(cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        vec![Box::new(BashTool::new(cwd))]
-    }
-
-    pub fn build_tools_with_registry(
-        cwd: &str,
-        task_manager: Option<Arc<dyn TaskManager>>,
-    ) -> Vec<Box<dyn BaseTool>> {
-        vec![Box::new(BashTool {
-            cwd: cwd.to_string(),
-            task_manager,
-            on_bg_complete: None,
-        })]
-    }
-
-    pub fn tool_names() -> Vec<&'static str> {
-        vec!["Bash"]
-    }
 }
-
-impl Default for TerminalMiddleware {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl Middleware for TerminalMiddleware {
-    fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        vec![Box::new(BashTool {
-            cwd: cwd.to_string(),
-            task_manager: self.task_manager.clone(),
-            on_bg_complete: self.on_bg_complete.clone(),
-        })]
-    }
-
-    fn name(&self) -> &str {
-        "TerminalMiddleware"
-    }
-}
-
-#[cfg(test)]
-#[path = "terminal_test.rs"]
-mod tests;

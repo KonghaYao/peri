@@ -2,16 +2,18 @@
 //!
 //! Rust middleware implementations aligned with `@langgraph-js/agent-middlewares` (TypeScript).
 //!
-//! ## 文件系统与终端（原 peri-middlewares）
+//! ## 文件系统与终端
+//!
+//! 不再有 middleware 提供面（v4-part-4 W3-C1）：7 个文件/终端工具
+//! （`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）
+//! 由 builtin `workspace` MCP 实例提供，模型面使用原始工具名。
+//! 工具实现保留在 [`tools`]（6 个文件工具）与 [`middleware::terminal::BashTool`]。
 
 #![allow(
     clippy::type_complexity,
     clippy::empty_line_after_doc_comments,
     clippy::useless_conversion
 )]
-//! - [`middleware::FilesystemMiddleware`]：文件系统操作
-//! - [`middleware::TerminalMiddleware`]：终端命令执行
-//!
 //! ## 认知增强与安全（原 rust-standard-middlewares）
 //! - [`AgentsMdMiddleware`]：注入 AGENTS.md / CLAUDE.md 项目指引
 //! - [`SkillsMiddleware`]：渐进式 Skills 摘要注入
@@ -63,6 +65,12 @@ pub mod tool_search;
 pub mod tools;
 pub mod workflow;
 
+/// v4 引名约定锁定：prompt 文本引用的 builtin 工具名必须与注册表一致（跨 crate 的
+/// prompt 文本扫描，见 [`prompt_tool_name_lock_tests`] 的边界说明）。
+#[cfg(test)]
+#[path = "prompt_tool_name_lock_test.rs"]
+mod prompt_tool_name_lock_tests;
+
 pub use agent_define::{AgentDefineMiddleware, AgentOverrides};
 pub use agents_md::AgentsMdMiddleware;
 pub use ask_user::{
@@ -70,12 +78,12 @@ pub use ask_user::{
 };
 pub use at_mention::AtMentionMiddleware;
 pub use attribution::GitAttributionMiddleware;
-pub use cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger};
+pub use cron::{CronScheduler, CronTask, CronTrigger};
 pub use default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
 pub use git_watch::GitWatchMiddleware;
 pub use goal_middleware::GoalMiddleware;
 pub use hitl::HumanInTheLoopMiddleware;
-pub use lsp::{LspMiddleware, LspTool};
+pub use lsp::{LspSyncMiddleware, LspTool};
 pub use middleware::image::ImageMiddleware;
 pub use permission::{
     default_requires_approval, effective_tool_name, AutoClassifier, BatchItem, Classification,
@@ -108,10 +116,10 @@ pub mod prelude {
             QuestionOption,
         },
         attribution::GitAttributionMiddleware,
-        cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger},
+        cron::{CronScheduler, CronTask, CronTrigger},
         hitl::HumanInTheLoopMiddleware,
         hooks::{HookMiddleware, RegisteredHook},
-        middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
+        middleware::TodoMiddleware,
         permission::{
             default_requires_approval, AutoClassifier, BatchItem, Classification, HitlDecision,
             LlmAutoClassifier, PermissionMiddleware, PermissionMode, SharedPermissionMode,

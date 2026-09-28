@@ -22,8 +22,8 @@ peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
 | 转发取消三元组 | `peri-controller/src/controller.rs` | `Controller::cancel`:339 | 原样交给 Runtime；未知 session 包装为 CancelFailed，策略和幂等判定归句柄实现（ARC-CANCEL-001） |
-| 发布业务事件 | `peri-controller/src/controller.rs` | `publish_event`:438、`publish`:426、`publish_message` | Runtime 补打身份后先投弹出队列再广播；无法补打时使用发射方身份，不 panic |
-| 订阅与排空事件 | `peri-controller/src/controller.rs` | `subscribe`:465、`pop_events`:472、`Subscription::recv`:131、`try_recv`:142 | 队列有界满丢弃，广播 Lagged 可恢复；退订只 drop receiver，无额外簿记 |
+| 发布业务事件 | `peri-controller/src/controller.rs` | `publish_event`:438、`publish`:426、`publish_message` | Runtime 补打身份后先投弹出队列再广播；无法补打时保留发射方身份（包括 message_id），不 panic |
+| 订阅与排空事件 | `peri-controller/src/controller.rs` | `subscribe`:469、`pop_events`:476、`Subscription::recv`:131、`try_recv`:142 | 队列有界满丢弃，广播 Lagged 可恢复；退订只 drop receiver，无额外簿记 |
 | 注册与定位会话 | `peri-controller/src/controller.rs` | `register_session`:327、`run_session`:311、`session_ids`:350、`contains_session`:355 | register_or_replace 归 Runtime；Controller 只转发，不解释执行结果 |
 | 等待、销毁或注入会话 | `peri-controller/src/controller.rs` | `join_session`:364、`destroy_session`:385、`submit_input`:406 | 捕获 Runtime Arc 后调用；销毁返回的已补打事件经 publish 按顺序双投递 |
 | 注入部署端口 | `peri-controller/src/controller.rs` | `Controller::new`、`with_runtime`、`with_mcp_pool`、`with_cron_scheduler`、`with_tool_search`、`with_lsp_servers` | builder 消费 self 后赋值；对应 pick 方法克隆句柄/配置，不引入共享可写配置 |

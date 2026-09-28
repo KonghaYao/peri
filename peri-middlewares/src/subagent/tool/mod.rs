@@ -25,8 +25,12 @@ use crate::{
 /// | `AtMentionMiddleware` | @path 解析仅在主 Agent 用户交互中生效 |
 /// | `AgentDefineMiddleware` | SubAgent 定义由调用方单独注入 system_prompt |
 /// | `PluginMiddleware` | 插件仅在主 Agent 中加载 |
-/// | `CronMiddleware` | SubAgent 独立生命周期，不参与调度 |
 /// | `HITLMiddleware` | SubAgent 工具执行沿用父 Agent 的审批模式 |
+///
+/// `CronMiddleware` 不在此表：v4 起 cron 不再是链槽位，能力由 builtin `cron`
+/// 实例提供，`CronMiddleware` 只作为该实例的策略键（`BUILTIN_INSTANCE_POLICY_KEYS`）；
+/// SubAgent 链不含 MCP 提供面，cron 工具（注册表声明 deferred）也不会经
+/// `parent_tools` 继承——那是 direct-only 面。
 ///
 /// 以下中间件通过**参数注入**方式支持 SubAgent：
 ///

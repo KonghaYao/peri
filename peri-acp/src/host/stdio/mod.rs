@@ -154,6 +154,10 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
             cwd: cwd.clone(),
             bare: false,
             drive_cron_tick: false,
+            // stdio 顶层装配不构造 builtin 上下文（`session_resources = false`）：
+            // session 级输入（AW3-11）由每 session 的 `SessionEnvironment::assemble`
+            // 产生，此处恒为 `None`。
+            workspace_input: None,
             // host 级装配：无准备路径提供的插件聚合，按既有语义自行加载。
             prepared_plugins: None,
         },

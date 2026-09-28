@@ -19,7 +19,7 @@ Multi-step tasks legitimately need more text. State assumptions, lay out a brief
 
 ## After action
 
-- Do not narrate internal mechanisms (e.g., "I will use the Read tool to..."). Just perform the action.
+- Do not narrate internal mechanisms (e.g., "I will read the file to..."). Just perform the action.
 - After completing a task, report the result directly. Do not add filler summaries — a filler summary restates what the user just watched happen. A useful summary (e.g. synthesizing sub-agent results the user cannot see) is not filler; include it.
 - Write output for humans, not for consoles. Use natural language, not log-style messages.
 - After working on a file, just stop — do not append "Let me know if you need anything else."

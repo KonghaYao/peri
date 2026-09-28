@@ -14,6 +14,8 @@ struct MockTool {
     desc_str: String,
     direct: bool,
     decl: Option<String>,
+    mcp_source: Option<&'static str>,
+    namespace: Option<&'static str>,
 }
 
 impl MockTool {
@@ -23,6 +25,8 @@ impl MockTool {
             desc_str: desc.to_string(),
             direct: false,
             decl: None,
+            mcp_source: None,
+            namespace: None,
         }
     }
 
@@ -35,6 +39,16 @@ impl MockTool {
     /// 声明提示词层模板（design v2 §2.5.1 prompt_declaration）。
     fn with_prompt_declaration(mut self, declaration: &str) -> Self {
         self.decl = Some(declaration.to_string());
+        self
+    }
+
+    fn with_mcp_source(mut self, server: &'static str) -> Self {
+        self.mcp_source = Some(server);
+        self
+    }
+
+    fn with_namespace(mut self, namespace: &'static str) -> Self {
+        self.namespace = Some(namespace);
         self
     }
 }
@@ -52,6 +66,12 @@ impl BaseTool for MockTool {
     }
     fn is_direct(&self) -> bool {
         self.direct
+    }
+    fn mcp_server_name(&self) -> Option<&str> {
+        self.mcp_source
+    }
+    fn namespace(&self) -> Option<&str> {
+        self.namespace
     }
     fn prompt_declaration(&self) -> Option<String> {
         self.decl.clone()
@@ -224,6 +244,45 @@ impl peri_agent::middleware::state::MiddlewareState for LocalToolsState {
     }
     fn local_tools(&self) -> Option<&peri_agent::agent::stages::SharedToolMap> {
         Some(&self.local)
+    }
+}
+
+#[tokio::test]
+async fn external_mcp_meta_name_winners_survive_catalog_rebinds() {
+    let index = Arc::new(ToolSearchIndex::new());
+    let shared = Arc::new(RwLock::new(BTreeMap::new()));
+    let middleware = ToolSearchMiddleware::new(index, shared);
+    let external = ["SearchExtraTools", "ExecuteExtraTool"]
+        .into_iter()
+        .map(|name| {
+            let tool: Arc<dyn BaseTool> = Arc::new(
+                MockTool::new(name, "external system tool")
+                    .with_direct()
+                    .with_mcp_source("system-server")
+                    .with_namespace("meta"),
+            );
+            (name.to_string(), tool)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let local: peri_agent::agent::stages::SharedToolMap = Arc::new(RwLock::new(external.clone()));
+
+    middleware
+        .before_agent(&mut LocalToolsState::new(Arc::clone(&local)))
+        .await
+        .unwrap();
+    middleware
+        .before_reason_catalog(&mut LocalToolsState::new(Arc::clone(&local)))
+        .await
+        .unwrap();
+
+    let current = local.read();
+    for (name, original) in external {
+        let winner = current.get(&name).unwrap();
+        assert!(
+            Arc::ptr_eq(winner, &original),
+            "{name} must keep the first winner"
+        );
+        assert_eq!(winner.mcp_server_name(), Some("system-server"));
     }
 }
 

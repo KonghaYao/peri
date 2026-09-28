@@ -25,12 +25,13 @@ Platform behavior:
 - Windows: uses powershell -NoProfile -NoLogo -NonInteractive -Command to execute commands
 - Unix/macOS: uses bash -c to execute commands
 - On Unix, child processes run in their own process group. When termination is requested, cleanup targets the process group; this does not apply to a foreground timeout that continues in the background.
-- On Windows, Bash cleanup commands use taskkill for the PowerShell process tree; Unix process-group semantics do not apply.
+- On Windows, shell cleanup commands use taskkill for the PowerShell process tree; Unix process-group semantics do not apply.
 - The command's stdin is redirected to /dev/null: interactive commands (read, prompts, editors, stdio services waiting on stdin) fail fast with an EOF error instead of hanging until timeout. Do not rely on terminal input; provide input via pipes or files instead
 
 Output handling:
-- Output exceeding 2000 lines is truncated (head + tail preserved)
-- Output exceeding 65000 bytes is truncated
+- Inline model output has a 10000-character budget, including truncation notices and space reserved for execution status. Output above 9488 characters takes a head-only preview path, even when it is below 65000 bytes; do not assume the tail is included. The retained head is cut at a UTF-8-safe byte boundary, so multibyte text may retain fewer characters.
+- When that character-budget path is not triggered, the internal formatter initially selects the first and last 1000 lines from output over 2000 lines. It also has a 65000-byte cap. A later MCP projection keeps only the first 2000 rendered lines, including formatting notices, and adds an `[MCP output truncated: ...]` marker. This can remove the tail selected by the internal formatter even for short-line output below the character budget; no inline preview guarantees the final output lines are present.
+- Each truncation layer attempts to save its own input to a temporary file. An MCP `[Full output saved to ...]` path can therefore contain an already shortened Bash result, not the original command output. Use Read with offset/limit to inspect that file; if it contains another saved-output path, follow that inner reference to read the original captured output and its tail. Persistence failures are reported in the result.
 - Non-zero exit codes are reported
 - Both stdout and stderr are captured
 
@@ -41,4 +42,4 @@ Background mode (run_in_background: true):
 - Windows: use `taskkill /PID <pid> /T` to target the process tree; add `/F` if needed. If the parent PID has already exited, this cannot reliably find its descendants: use existing task cancellation or identify the remaining child processes. Never apply Unix negative-PID commands on Windows.
 - Preserve cleanup errors and verify actual process exit and the background completion notification. Do not hide a failed kill with `2>/dev/null` or report success merely because a trailing `echo cleaned` succeeded.
 - Read the stdout/stderr log files at any time (they append while the command runs); monitor status and output preview in the Tasks panel
-- The full captured output also arrives via a completion notification when the task finishes
+- Completion notifications provide output file paths; use Read to inspect the captured output

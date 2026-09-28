@@ -1,3 +1,4 @@
+use crate::tools::failure::ToolFailure;
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
 
@@ -140,19 +141,32 @@ impl BaseTool for EditFileTool {
         input: Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let file_path = input["file_path"]
-            .as_str()
-            .ok_or("The 'file_path' parameter is required for the Edit tool.")?;
-        let old_string = input["old_string"]
-            .as_str()
-            .ok_or("The 'old_string' parameter is required for the Edit tool.")?;
-        let new_string = input["new_string"]
-            .as_str()
-            .ok_or("The 'new_string' parameter is required for the Edit tool.")?;
+        let file_path = input["file_path"].as_str().ok_or_else(|| {
+            ToolFailure::new(
+                "The 'file_path' parameter is required for the Edit tool.",
+                "The 'file_path' parameter is required for the Edit tool.",
+            )
+        })?;
+        let old_string = input["old_string"].as_str().ok_or_else(|| {
+            ToolFailure::new(
+                "The 'old_string' parameter is required for the Edit tool.",
+                "The 'old_string' parameter is required for the Edit tool.",
+            )
+        })?;
+        let new_string = input["new_string"].as_str().ok_or_else(|| {
+            ToolFailure::new(
+                "The 'new_string' parameter is required for the Edit tool.",
+                "The 'new_string' parameter is required for the Edit tool.",
+            )
+        })?;
         let replace_all = input["replace_all"].as_bool().unwrap_or(false);
 
         if old_string.is_empty() {
-            return Err("Error: old_string cannot be empty".into());
+            return Err(ToolFailure::new(
+                "old_string cannot be empty. Read the file and supply the exact text to replace.",
+                "Error: old_string cannot be empty",
+            )
+            .into());
         }
 
         let resolved = target_key(&self.cwd, file_path);
@@ -160,12 +174,12 @@ impl BaseTool for EditFileTool {
         with_target_lock(&resolved, |locked| {
             let pre = match locked.read_pre() {
                 Ok(Some(content)) => content,
-                Ok(None) => return Err("Error: File not found".into()),
-                Err(_) => return Err("Edit failed while reading the file.".into()),
+                Ok(None) => return Err(ToolFailure::new("File not found. Verify file_path or locate the file with Glob.", "Error: File not found").into()),
+                Err(_) => return Err(ToolFailure::new("Edit failed while reading the file. Verify access permissions and UTF-8 encoding.", "Edit failed while reading the file.").into()),
             };
             let content = match String::from_utf8(pre.clone()) {
                 Ok(content) => content,
-                Err(_) => return Err("Edit failed while reading the file.".into()),
+                Err(_) => return Err(ToolFailure::new("Edit failed while reading the file. Verify access permissions and UTF-8 encoding.", "Edit failed while reading the file.").into()),
             };
 
             let old_lines = old_string.lines().count();
@@ -202,10 +216,10 @@ impl BaseTool for EditFileTool {
             if replace_all {
                 if !content.contains(old_string) {
                     let hint = build_not_found_hint(&content, old_string);
-                    return Err(format!(
+                    return Err(ToolFailure::new("old_string not found. Read the file and copy the exact text, including whitespace.", format!(
                         "Error: old_string not found in {}\n{hint}",
                         resolved.display()
-                    )
+                    ))
                     .into());
                 }
                 let new_content = content.replace(old_string, new_string);
@@ -218,17 +232,17 @@ impl BaseTool for EditFileTool {
                         occurrences,
                         if occurrences == 1 { "" } else { "s" }
                     )),
-                    Err(CommitError::Sentinel) => Err(SENTINEL_REJECTION.into()),
-                    Err(CommitError::Io) => Err("Edit failed while committing the file.".into()),
+                    Err(CommitError::Sentinel) => Err(ToolFailure::new(SENTINEL_REJECTION, SENTINEL_REJECTION).into()),
+                    Err(CommitError::Io) => Err(ToolFailure::new("Edit failed while committing the file. Check write permissions and available disk space; Read before retrying.", "Edit failed while committing the file.").into()),
                 }
             } else {
                 let occurrences = content.matches(old_string).count();
                 if occurrences == 0 {
                     let hint = build_not_found_hint(&content, old_string);
-                    return Err(format!(
+                    return Err(ToolFailure::new("old_string not found. Read the file and copy the exact text, including whitespace.", format!(
                         "Error: old_string not found in {}\n{hint}",
                         resolved.display()
-                    )
+                    ))
                     .into());
                 }
                 if occurrences > 1 {
@@ -254,20 +268,20 @@ impl BaseTool for EditFileTool {
                     } else {
                         locations.join(", ")
                     };
-                    return Err(format!(
+                    return Err(ToolFailure::new("old_string is not unique. Supply more context or set replace_all=true.", format!(
                     "Error: old_string is not unique in {} (found {} occurrences).\n\
                      Match locations: {location_text}.\n\
                      Please provide more context to make old_string unique, or set replace_all=true.",
                     resolved.display(),
                     occurrences
-                )
+                ))
                 .into());
                 }
                 let new_content = content.replacen(old_string, new_string, 1);
                 match locked.guard_and_commit(&pre, new_content.as_bytes()) {
                     Ok(()) => Ok(format!("{} to {}", diff_desc, rel)),
-                    Err(CommitError::Sentinel) => Err(SENTINEL_REJECTION.into()),
-                    Err(CommitError::Io) => Err("Edit failed while committing the file.".into()),
+                    Err(CommitError::Sentinel) => Err(ToolFailure::new(SENTINEL_REJECTION, SENTINEL_REJECTION).into()),
+                    Err(CommitError::Io) => Err(ToolFailure::new("Edit failed while committing the file. Check write permissions and available disk space; Read before retrying.", "Edit failed while committing the file.").into()),
                 }
             }
         })

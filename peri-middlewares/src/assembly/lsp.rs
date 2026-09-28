@@ -1,7 +1,11 @@
-//! LSP 配置合并、会话池构造与生产槽位挂载。
+//! LSP 配置合并与 host 级 pool 构造、生产槽位挂载。
+//!
+//! 单 pool 原则（A11/A22）：host 级 pool 由 [`create_host_lsp_pool`] 单次构造，
+//! 同时承载 `lsp` builtin 实例的工具面与链上同步中间件；[`add_lsp`] 只消费
+//! `AssemblyContext::lsp_pool` 投影进来的端口，不建第二份 pool，也不提供
+//! session 级构造入口（H-04 已删除过渡 helper `create_session_lsp_pool`）。
 use super::AssemblyContext;
-use crate::LspMiddleware;
-use peri_acp_types::ports::LspPoolPort;
+use crate::LspSyncMiddleware;
 use peri_agent::middleware::chain::MiddlewareChain;
 use peri_resources::lsp::{config::LspConfigFile, pool::LspServerPool};
 use std::{collections::HashMap, path::Path, sync::Arc};
@@ -31,60 +35,56 @@ pub fn load_merged_lsp_servers(
     merged.into_values().collect()
 }
 
-/// 构造会话级 LSP 服务器池并 upcast 端口（装配面宿主 session/new /
-/// load / resume / fork 调用；返回类型已锚定端口 trait，调用方无需引用
-/// peri-lsp 类型路径）。
+/// 构造 **host 级唯一** LSP 服务器池（A11/A22 单 pool 原则，H-03）。
 ///
-/// 无服务器配置时返回 None（不注册 LSP 中间件，与装配面
-/// `lsp_servers.is_empty()` 条件注册语义一致）。H1：会话级实例跨 turn
-/// 复用（服务器进程 / initialized / 诊断状态不丢），宿主退出时经端口
-/// `shutdown` 优雅关闭。
-pub fn create_session_lsp_pool(
+/// 宿主装配（`peri-acp`）经 `peri_middlewares::assembly` 的再导出调用本函数
+/// 构造一份 pool，同时以同一 `Arc` 喂给 builtin `lsp` 实例的
+/// `LspInstanceInput`（`BuiltinInstanceContext`）与 `AssemblyContext::lsp_pool`
+/// 投影——A33：宿主不得 import `crate::mcp::builtin`，故工厂放在本模块。
+///
+/// 三条冻结事实：
+/// - **单次构造、root = host cwd**：`LspServerPool::new` 的 `root_uri` 取自
+///   传入的 host cwd；多 cwd / 多 session 共享同一 host root 是**已裁决的
+///   功能退化**（A11/A22），wave 3 经 `ToolContext` 恢复 per-session cwd 后再按
+///   session 区分。
+/// - **惰性**：`LspServerPool::new` 只登记配置表（构造 `LspClient` 不拉起
+///   language server 进程），任何进程都由首个按需请求触发。
+/// - **无条件返回**：空配置也返回 pool（`has_servers()` 为假 ⇒ `lsp` 实例
+///   工具面为空表但仍 ready，A6/A21）。不得用「返回 None / 不构造」表达
+///   「无配置」——那会让实例退化成「上下文缺失」而不是「可见但空」。
+pub fn create_host_lsp_pool(
     cwd: &str,
     configs: &[peri_acp_types::lsp::LspServerConfig],
-) -> Option<Arc<dyn LspPoolPort>> {
-    if configs.is_empty() {
-        return None;
-    }
+) -> Arc<LspServerPool> {
     let lsp_config = LspConfigFile {
         lsp_servers: configs
             .iter()
             .map(|s| (s.name.clone(), s.clone()))
             .collect(),
     };
-    Some(Arc::new(LspServerPool::new(cwd, lsp_config)) as Arc<dyn LspPoolPort>)
+    Arc::new(LspServerPool::new(cwd, lsp_config))
 }
 
 pub(super) fn add_lsp(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
     let AssemblyContext {
         lsp_servers,
         lsp_pool,
-        cwd,
         ..
     } = ctx;
-    if !lsp_servers.is_empty() {
-        // 会话级 pool 复用（workflow_middleware 同构模式，H1）：
-        // Some → 复用跨 turn 存活的 pool（服务器进程/initialized/
-        // 诊断状态不丢）；None → 临时实例（print 模式等无 session 路径）。
-        let lsp_mw = if let Some(pool) = lsp_pool
-            .as_ref()
-            .and_then(|p| Arc::clone(p).downcast_arc::<LspServerPool>().ok())
-        {
-            LspMiddleware::from_pool(pool)
-        } else {
-            let lsp_config = LspConfigFile {
-                lsp_servers: lsp_servers
-                    .iter()
-                    .map(|s| (s.name.clone(), s.clone()))
-                    .collect(),
-            };
-            tracing::info!(
-                target: "lsp",
-                servers = lsp_config.lsp_servers.len(),
-                "LSP 中间件已注册（临时 pool）"
-            );
-            LspMiddleware::new(cwd.clone(), lsp_config)
-        };
-        chain.add(Box::new(lsp_mw));
+    if lsp_servers.is_empty() {
+        return;
     }
+    // 单 pool 原则（A11/A22）：pool 由宿主装配经 [`create_host_lsp_pool`] 单次构造，
+    // 经 `AssemblyContext::lsp_pool` 投影进链。本函数只把该端口交给
+    // `LspSyncMiddleware`——不建第二份 pool、不 downcast 还原具体类型
+    // （端口即消费面，A23/A30）。
+    let Some(port) = lsp_pool else {
+        tracing::debug!(
+            target: "lsp",
+            servers = lsp_servers.len(),
+            "无 host pool ⇒ 不装同步中间件"
+        );
+        return;
+    };
+    chain.add(Box::new(LspSyncMiddleware::new(Arc::clone(port))));
 }

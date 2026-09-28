@@ -2,7 +2,7 @@
 
 ## Scope
 
-`peri-tui` 是基于 ratatui-kit 的终端客户端。用户交互主路径经 ACP transport；crate 当前仍直接依赖 `peri-agent`、`peri-middlewares` 等 crate 的类型、配置和桥接代码。TUI 不得直接驱动 agent loop，Agent 执行入口保持在 ACP 会话执行路径。
+`peri-tui` 是基于 ratatui-kit 的终端客户端。用户交互主路径经 ACP transport；crate 仍直接依赖 `peri-middlewares` 和 `peri-resources` 做宿主装配与部分面板数据访问，并依赖 ACP、主题等 crate 的协议和展示类型。TUI 不直接依赖 `peri-agent`，也不得直接驱动 agent loop；Agent 执行入口保持在 ACP 会话执行路径。
 
 ## 数据流/架构
 
