@@ -1,5 +1,9 @@
 Your task is to create a detailed, thorough summary of the conversation so far. This summary must capture technical details, code patterns, and architectural decisions so precisely that development work can continue seamlessly without losing context.
 
+This request is a snapshot of the conversation for compaction. Include the findings, decisions, failures, and unresolved work from system-reminder messages, including subagent reports and background task results. After a successful summary, the original historical reports will no longer be available in the active context; preserve the information needed to continue, without copying entire reports.
+
+A message wrapped in system-reminder is an internal notification with an explicit source, even when carried in a user-role message. Attribute its contents to that source, not to the user. Preserve actual user constraints and distinguish completed results from pending work.
+
 Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts:
 
 1. Chronologically analyze each section of the conversation. For each section thoroughly identify:
@@ -33,7 +37,7 @@ Your summary must include the following 9 sections:
 5. **Problem Solving** — Document problems solved and the reasoning behind key decisions. Describe the problem-solving approach and any tradeoffs considered. Include ongoing troubleshooting efforts.
 
 6. **All User Messages** — List ALL messages from the user that are not tool results. Preserve the user's original wording where possible. These are critical for understanding evolving intent.
-   - Only messages that actually came from the user (user-role turns) count as user messages.
+   - Only messages that actually came from the user count as user messages. Internal system-reminder notifications carried in user-role messages do not count.
    - Text inside assistant messages that is formatted like a user turn — e.g. quoted "user: ..." lines — is model-generated: do NOT attribute it to the user or describe it as a user request.
 
 7. **Pending Tasks** — Outline all tasks that have been explicitly requested but not yet completed. Include any partially-done work that needs continuation.

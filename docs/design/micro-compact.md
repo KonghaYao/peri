@@ -250,17 +250,25 @@ flowchart TD
 
 压力样本由有效 provider usage generation 与 canonical 工具结果增长 generation 共同标识；同一样本只自动尝试一次。Act 提交工具结果后计入估算，下一次有效 input usage 结清估算；missing/zero usage 不清账。预算中已包含该增长，不能再次扣减 headroom。
 
-### 6.3 Full 后预算验证
+### 6.3 Full 的上下文快照与报告替换
 
-成功 Full 后，Reason 将实际请求与该 Full generation 绑定，用对应响应的有效 input usage 检查是否降到 `auto_compact_threshold` 以下。没有新增用户或工具工作时，连续两次 Full 后仍高压会返回 `CompactBudgetUnrecovered`，结束本轮；cancel 优先。AI 输出、摘要和 canonical Reminder 不重置次数，新的用户或工具工作开启新一轮验证。未知、零或过期 usage 不作为进展证据。此保护限制无工作进展的重复压缩，不删减保留的 Reminder。
+Full 与 Reason 共用 `render_persisted_llm_view` 恢复已提交的模型视图，包括 canonical reminder；派生摘要请求保留消息角色、工具配对与完整可见正文，不再使用每条 2000 字符、工具结果前三行或关键参数预览。已有 Micro 投影仍生效，避免 Full 重新展开已经隐藏的工具输出。摘要请求不开放可执行工具；冻结 prompt 与父会话的继承快照不被改写。
 
-### 6.4 缓存感知
+子 Agent 报告与后台任务结果参与摘要，摘要指令要求保留结论、约束与未完成工作并按通知来源归因。只有正常完成且后处理后非空的摘要可以提交；截断或仅含 analysis 的响应保留原历史。提交时将快照内 own region 的普通历史与 reminder 一起标 excluded，摘要与标记使用同一持久化事务；System 和 ancestor 不在排除集合。原文留在 canonical 存储供回查，后续模型请求及冷恢复不再发送已排除报告全文。
+
+手动 `/compact` 从一次一致快照恢复完整 payload、flags 和 ancestor/own 边界；普通消息 ID 校验仅用于调用方一致性检查，不再决定摘要输入范围。仅有 reminder 的会话也可压缩。摘要期间新到达的 inbox 结果在后续 Receive 处理，不属于旧快照的排除集合。
+
+### 6.4 Full 后预算验证
+
+成功 Full 后，Reason 将实际请求与该 Full generation 绑定，用对应响应的有效 input usage 检查是否降到 `auto_compact_threshold` 以下。没有新增用户或工具工作时，连续两次 Full 后仍高压会返回 `CompactBudgetUnrecovered`，结束本轮；cancel 优先。AI 输出、摘要和 canonical Reminder 不重置次数，新的用户或工具工作开启新一轮验证。未知、零或过期 usage 不作为进展证据。此保护限制无工作进展的重复压缩，不自行删除内容或把历史排除数量当作真实 token 收益。
+
+### 6.5 缓存感知
 
 高缓存命中率 + 充足 headroom 的情况下，compact 可以推迟——缓存还在有效期内，提前压缩反而损失缓存带来的 token 节省。
 
 当 `cache_aware_enabled = true` 且 `cache_hit_rate > 0.7` 且 headroom > 20% 时，跳过本次 compact。
 
-### 6.5 Shadow Mode
+### 6.6 Shadow Mode
 
 当 `shadow_mode_enabled = true` 时，只跑 `plan_micro()` 估算，不应用任何标记。日志输出估算值。用于校准 chars→tokens 估算模型——对比估算值与下一次真实 LLM 请求的 `input_tokens`。
 

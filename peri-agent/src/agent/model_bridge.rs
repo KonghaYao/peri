@@ -76,7 +76,26 @@ impl AgentModelBridge {
         Self::convert_messages(std::slice::from_ref(message)).map(|mut messages| messages.remove(0))
     }
 
-    fn convert_messages(messages: &[BaseMessage]) -> AgentResult<Vec<ModelMessage>> {
+    pub(crate) fn projection_capabilities(model: &dyn Model) -> ProviderCapabilities {
+        // 协议身份来自 prepared request 观测投影；prepare_request 失败时保守回退 Generic。
+        // Anthropic 带签名 reasoning 必须整体保留（compact 投影依赖此判定），不能对
+        // 所有 provider 一律报告 Generic——否则 Anthropic 的 signed reasoning 会被
+        // projection 当成可截断内容处理。
+        let protocol = model
+            .prepare_request(&ModelRequest::default())
+            .map(|request| match request.protocol() {
+                peri_model::ProviderProtocol::OpenAiCompatible => ProviderProtocol::OpenAI,
+                peri_model::ProviderProtocol::Anthropic => ProviderProtocol::Anthropic,
+                peri_model::ProviderProtocol::Other { .. } => ProviderProtocol::Generic,
+            })
+            .unwrap_or(ProviderProtocol::Generic);
+        ProviderCapabilities {
+            signed_reasoning_must_be_whole: protocol == ProviderProtocol::Anthropic,
+            protocol,
+        }
+    }
+
+    pub(crate) fn convert_messages(messages: &[BaseMessage]) -> AgentResult<Vec<ModelMessage>> {
         let mut tool_names = BTreeMap::new();
         for message in messages {
             if let BaseMessage::Ai { tool_calls, .. } = message {
@@ -446,23 +465,7 @@ impl ReactLLM for AgentModelBridge {
     }
 
     fn provider_capabilities(&self) -> ProviderCapabilities {
-        // 协议身份来自 prepared request 观测投影；prepare_request 失败时保守回退 Generic。
-        // Anthropic 带签名 reasoning 必须整体保留（compact 投影依赖此判定），不能对
-        // 所有 provider 一律报告 Generic——否则 Anthropic 的 signed reasoning 会被
-        // projection 当成可截断内容处理。
-        let protocol = self
-            .model
-            .prepare_request(&ModelRequest::default())
-            .map(|request| match request.protocol() {
-                peri_model::ProviderProtocol::OpenAiCompatible => ProviderProtocol::OpenAI,
-                peri_model::ProviderProtocol::Anthropic => ProviderProtocol::Anthropic,
-                peri_model::ProviderProtocol::Other { .. } => ProviderProtocol::Generic,
-            })
-            .unwrap_or(ProviderProtocol::Generic);
-        ProviderCapabilities {
-            signed_reasoning_must_be_whole: protocol == ProviderProtocol::Anthropic,
-            protocol,
-        }
+        Self::projection_capabilities(self.model.as_ref())
     }
 }
 

@@ -1,10 +1,10 @@
 //! Full Compact + Re-inject 实现
 //!
 //! 完整流程：
-//! 1. 预处理可见消息为文本
+//! 1. 从包含 canonical reminder 的可见模型上下文派生摘要请求
 //! 2. LLM 生成结构化摘要
 //! 3. 后处理摘要
-//! 4. 所有旧消息标 excluded
+//! 4. 快照内自有的普通历史和 reminder 标 excluded（保留 System / ancestor）
 //! 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中）
 //! 6. Re-inject 关键文件 + Skills（如果 cwd 提供）
 
@@ -17,10 +17,10 @@ use tracing::{debug, warn};
 use crate::agent::{
     compact_v2::{config::CompactConfig, CompactOutcome},
     events::CompactStrategy,
-    model_bridge::map_model_error,
+    model_bridge::{map_model_error, AgentModelBridge},
 };
 use crate::error::AgentResult;
-use crate::messages::{BaseMessage, ContentBlock, MessageContent};
+use crate::messages::BaseMessage;
 use crate::session::transcript::MessageTranscript;
 use crate::session::MessageFlags;
 use crate::thread::CompactionChange;
@@ -38,10 +38,10 @@ const SUMMARY_USER_PROMPT: &str = include_str!("descriptions/summary_user_prompt
 /// Full Compact 内部实现
 ///
 /// 步骤：
-/// 1. 预处理可见消息为文本
+/// 1. 从包含 canonical reminder 的可见模型上下文派生摘要请求
 /// 2. LLM 生成结构化摘要
 /// 3. 后处理摘要
-/// 4. 所有旧消息标 excluded
+/// 4. 快照内自有的普通历史和 reminder 标 excluded（保留 System / ancestor）
 /// 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中）
 /// 6. Re-inject 关键文件（如果 cwd 提供）
 pub(super) async fn full_compact_inner(
@@ -50,88 +50,22 @@ pub(super) async fn full_compact_inner(
     config: &CompactConfig,
     cwd: &str,
 ) -> AgentResult<super::CompactResult> {
-    let before_visible_len = transcript.visible_messages().len();
-
-    // 无 LLM 时降级为 Micro
     let llm = llm.ok_or(crate::error::AgentError::CompactNoLlm)?;
-
-    // 收集可见消息用于预处理
-    let visible: Vec<&BaseMessage> = transcript.visible_messages();
-    let non_system_count = visible
-        .iter()
-        .filter(|m| !matches!(m, BaseMessage::System { .. }))
-        .count();
-
-    if non_system_count == 0 {
-        // 无有效对话历史——生成 fallback 摘要（保证 compact 后首条仍为 Human）
-        // 这是 v1 build_summary_human_message + re_inject 的不变量：
-        //   即使全 System history，compact 输出仍以 Human(fallback 摘要) 开头
-        // 详见 peri-acp/src/session/command/compact_test.rs::test_contract_all_system_history_still_human_first
-        let fallback_summary = "No conversation history to compact.".to_string();
-        let summary_message = build_summary_message(&fallback_summary);
-        transcript
-            .commit_compaction_lifecycle(CompactionChange {
-                flag_updates: Vec::new(),
-                appended_messages: vec![summary_message],
-            })
-            .await?;
-        transcript.mark_full_compaction_committed();
-        let after_visible = transcript.visible_messages().len();
-
-        return Ok(super::CompactResult {
-            strategy: CompactStrategy::Full,
-            affected_count: 0,
-            estimated_tokens_saved: 0,
-            before_visible_len,
-            after_visible_len: after_visible,
-            summary: Some(fallback_summary),
-            full_escalation_reason: None,
-            outcome: CompactOutcome::FullApplied,
-            changed_messages: 0,
-            changed_fields: 0,
-            no_op_candidates: 0,
-        });
-    }
-
-    // 1. 预处理消息为文本序列
-    let lines = preprocess_messages_for_summary(&visible, 2000);
-    let conversation_text = lines.join("\n");
-
-    // 2. 构造 LLM 请求
-    let user_content = format!(
-        "Compress the following conversation history:\n<conversation>\n{}\n</conversation>\n\n{}",
-        conversation_text, SUMMARY_USER_PROMPT
-    );
-
-    let request = ModelRequest::new(vec![
-        ModelMessage::system_text(SUMMARY_SYSTEM_PROMPT),
-        ModelMessage::user_text(user_content),
-    ])
-    .with_max_tokens(config.summary_max_tokens);
-
-    // 3. 调用 LLM（走标准链路）
-    let response = llm
-        .complete(request, CancellationToken::new())
-        .await
-        .map_err(map_model_error)?;
-    let raw_summary = response.assistant_text().unwrap_or_default();
-
-    if raw_summary.trim().is_empty() {
-        return Err(crate::error::AgentError::CompactEmptyResponse);
-    }
-
-    // 4. 后处理摘要
-    let summary = postprocess_summary(&raw_summary);
-
-    // 5. 构造原子生命周期：仅排除 own region 中当前可见的非 System 原消息。
+    // Full 和 Reason 读取同一已提交视图。按摘要 provider 的协议保护 reasoning；恢复器只接受
+    // 与工具输入/思考独立的 ToolResult 投影，不为摘要另做有损预览。
+    let visible = super::projection::render_persisted_llm_view(
+        transcript,
+        &AgentModelBridge::projection_capabilities(llm),
+    )?;
+    let before_visible_len = visible.len();
+    // 先固定本次快照的 own IDs；await 期间到达 inbox 的新结果不属于本次摘要。
+    // ancestor 与 System 仍由各自 owner 管理；canonical reminder 不是豁免历史。
     let flag_updates: Vec<_> = transcript
         .entries()
         .iter()
         .skip(transcript.ancestor_len())
         .filter(|entry| !transcript.flags(entry.id()).excluded)
-        .filter(|entry| {
-            matches!(entry.as_message(), Some(message) if !matches!(message, BaseMessage::System { .. }))
-        })
+        .filter(|entry| !matches!(entry.as_message(), Some(BaseMessage::System { .. })))
         .map(|entry| {
             (
                 entry.id(),
@@ -143,9 +77,40 @@ pub(super) async fn full_compact_inner(
         })
         .collect();
     let affected_count = flag_updates.len();
+    // 只有继承上下文时没有可替换的 own 历史，沿用空历史 fallback，避免无效摘要调用。
+    let has_history = !flag_updates.is_empty()
+        && visible
+            .iter()
+            .any(|message| !matches!(message, BaseMessage::System { .. }));
+    let summary = if has_history {
+        // 保留历史的角色、工具配对和完整正文；摘要指令只追加到派生请求，
+        // 不回写原 transcript，也不提供可执行工具。
+        let mut messages = AgentModelBridge::convert_messages(&visible)?;
+        messages.insert(0, ModelMessage::system_text(SUMMARY_SYSTEM_PROMPT));
+        messages.push(ModelMessage::user_text(SUMMARY_USER_PROMPT));
+        let request = ModelRequest::new(messages).with_max_tokens(config.summary_max_tokens);
+        let response = llm
+            .complete(request, CancellationToken::new())
+            .await
+            .map_err(map_model_error)?;
+        if !matches!(response.stop_reason(), peri_model::StopReason::EndTurn) {
+            return Err(crate::error::AgentError::LlmError(
+                "Full Compact failed: summary response did not complete".into(),
+            ));
+        }
+        postprocess_summary(&response.assistant_text().unwrap_or_default())
+            .ok_or(crate::error::AgentError::CompactEmptyResponse)?
+    } else {
+        // 全 System / 空历史仍保持命令输出 Human-first 的既有契约。
+        "No conversation history to compact.".to_owned()
+    };
 
     // 6. 先收集 re-inject 消息，随后和摘要一次性提交。
-    let re_inject_result = collect_reinject_v2(transcript, config, cwd).await;
+    let re_inject_result = if has_history {
+        collect_reinject_v2(transcript, config, cwd).await
+    } else {
+        ReInjectResult::default()
+    };
     debug!(
         files_injected = re_inject_result.files_injected,
         skills_injected = re_inject_result.skills_injected,
@@ -162,7 +127,11 @@ pub(super) async fn full_compact_inner(
         .await?;
     transcript.mark_full_compaction_committed();
 
-    let after_visible = transcript.visible_messages().len();
+    let after_visible = transcript
+        .entries()
+        .iter()
+        .filter(|entry| !transcript.flags(entry.id()).excluded)
+        .count();
 
     debug!(
         before_visible_len,
@@ -193,147 +162,6 @@ fn build_summary_message(summary: &str) -> BaseMessage {
     ))
 }
 
-/// 预处理消息为文本行（供 LLM 摘要使用）
-///
-/// 跳过 System 消息；Image/Document 替换为占位符；按字符级截断。
-fn preprocess_messages_for_summary(messages: &[&BaseMessage], max_chars: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    for msg in messages {
-        match msg {
-            BaseMessage::System { .. } => continue,
-            BaseMessage::Human { .. } => {
-                let content = replace_images_and_truncate(msg.message_content(), max_chars);
-                lines.push(format!("[User] {}", content));
-            }
-            BaseMessage::Ai { tool_calls, .. } => {
-                let text = replace_images_and_truncate(msg.message_content(), max_chars);
-                let line = if tool_calls.is_empty() {
-                    format!("[Assistant] {}", text)
-                } else {
-                    let tool_summaries: Vec<String> =
-                        tool_calls.iter().map(format_tool_call_summary).collect();
-                    format!(
-                        "[Assistant] {}（tools: {}）",
-                        text,
-                        tool_summaries.join(", ")
-                    )
-                };
-                lines.push(line);
-            }
-            BaseMessage::Tool {
-                tool_call_id,
-                is_error,
-                ..
-            } => {
-                let content = msg.message_content();
-                lines.push(format_tool_result_summary(
-                    tool_call_id,
-                    content,
-                    *is_error,
-                    3,
-                    max_chars,
-                ));
-            }
-        }
-    }
-
-    lines
-}
-
-/// 将 content 中的 Image/Document 替换为占位符文本，并按字符级截断
-fn replace_images_and_truncate(content: &MessageContent, max_chars: usize) -> String {
-    let blocks = content.content_blocks();
-    let parts: Vec<String> = blocks
-        .iter()
-        .map(|b| match b {
-            ContentBlock::Image { .. } => "[image]".to_string(),
-            ContentBlock::Document { .. } => "[document]".to_string(),
-            ContentBlock::Text { text } => text.clone(),
-            ContentBlock::ToolUse { name, input, .. } => {
-                format!("调用 {}({})", name, input)
-            }
-            ContentBlock::Reasoning { text, .. } => text.clone(),
-            _ => format!("{:?}", b),
-        })
-        .collect();
-    let full = parts.join("\n");
-    truncate_str(&full, max_chars)
-}
-
-/// 工具调用摘要：保留名称和关键参数
-fn format_tool_call_summary(tc: &crate::messages::ToolCallRequest) -> String {
-    let args = &tc.arguments;
-    let key_fields = ["file_path", "path", "folder_path", "command", "pattern"];
-    let mut parts = Vec::new();
-    for field in &key_fields {
-        if let Some(val) = args.get(*field).and_then(|v| v.as_str()) {
-            // 字符级截断，避免 CJK panic
-            let truncated: String = val.chars().take(200).collect();
-            let display = if truncated.chars().count() < val.chars().count() {
-                format!("{}...", truncated)
-            } else {
-                truncated
-            };
-            parts.push(format!("{}=\"{}\"", field, display));
-        }
-    }
-    if parts.is_empty() {
-        tc.name.clone()
-    } else {
-        format!("{}({})", tc.name, parts.join(", "))
-    }
-}
-
-/// 工具结果摘要：保留状态 + 首行 + 关键路径
-fn format_tool_result_summary(
-    tool_call_id: &str,
-    content: &MessageContent,
-    is_error: bool,
-    first_lines: usize,
-    max_chars: usize,
-) -> String {
-    let status = if is_error { "error" } else { "ok" };
-    let raw = match content
-        .content_blocks()
-        .iter()
-        .map(|b| match b {
-            ContentBlock::Text { text } => text.clone(),
-            ContentBlock::ToolUse { name, input, .. } => {
-                format!("调用 {}({})", name, input)
-            }
-            ContentBlock::Reasoning { text, .. } => text.clone(),
-            _ => format!("{:?}", b),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-    {
-        s if !s.is_empty() => s,
-        _ => return format!("[ToolResult:{}][{}]", tool_call_id, status),
-    };
-
-    // 取前 N 行
-    let head: String = raw
-        .lines()
-        .take(first_lines)
-        .collect::<Vec<&str>>()
-        .join(" | ");
-
-    let mut out = format!("[ToolResult:{}][{}]", tool_call_id, status);
-    out.push_str(&format!(" {}", head));
-    truncate_str(&out, max_chars)
-}
-
-/// 按字符数截断，超出时添加 "...(truncated)" 后缀
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let end: String = s.chars().take(max).collect();
-        format!("{}...(truncated)", end)
-    } else {
-        s.to_string()
-    }
-}
-
 /// 后处理 LLM 摘要输出：移除 analysis 块，提取 summary 块，添加前缀
 ///
 /// # Safety
@@ -341,7 +169,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 /// 本函数内部使用 `str::find` 返回的字节索引进行切片（`&text[..start]` 等）。
 /// `<analysis>`、`</analysis>`、`<summary>`、`</summary>` 均为纯 ASCII 标签，
 /// `find()` 返回的字节索引即字符边界，不会导致 panic。
-fn postprocess_summary(raw: &str) -> String {
+fn postprocess_summary(raw: &str) -> Option<String> {
     let mut text = raw.to_string();
 
     // 移除 <analysis>...</analysis> 块
@@ -382,7 +210,11 @@ fn postprocess_summary(raw: &str) -> String {
         text = text.replace("\n\n\n", "\n\n");
     }
 
-    format!("{}\n\n{}", prefix, text)
+    if text.is_empty() {
+        None
+    } else {
+        Some(format!("{}\n\n{}", prefix, text))
+    }
 }
 
 // ─── Re-inject ──────────────────────────────────────────────────────────────────
@@ -652,3 +484,7 @@ pub use peri_acp_types::compact::{extract_file_info, extract_skill_names};
 #[cfg(test)]
 #[path = "full_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "full_report_test.rs"]
+mod report_tests;

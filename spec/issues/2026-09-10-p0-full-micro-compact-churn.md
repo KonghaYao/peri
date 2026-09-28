@@ -293,6 +293,8 @@ FullApplied → MicroApplied → FullApplied → MicroApplied
 
 ### A5：Full 不能降低 canonical Reminder 本身的累积基线
 
+后续工作：[Full Compact 报告残留](2026-09-28-full-compact-retains-subagent-reports.md) 补充了 2026-09-28 本地只读观测及用户确认的目标：报告参与上下文摘要，成功后原报告退出活跃模型视图。该修复及回归验证已完成，真实 provider usage 降幅仍待现场验收；以下描述保留原审计时点的旧行为。
+
 **证据：静态路径与已有 `full_compact_preserves_canonical_reminder_without_flags` 测试。现场影响未量化。**
 
 `MessageTranscript::visible_messages` 不包含 canonical Reminder；Full 的摘要输入和排除集合都基于普通消息。Reason 的 `visible_model_messages` 则包含 canonical Reminder（其中包括 model audience）。现有契约测试明确要求 Full 保留 Reminder，Goal steering 等生产者又可持续追加。

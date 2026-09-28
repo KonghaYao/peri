@@ -285,6 +285,24 @@ fn effective_tool_result_action<'a>(
     effective
 }
 
+/// Reason 与 Full 共用的已提交模型视图；无效投影保留 canonical 内容。
+pub(crate) fn render_persisted_llm_view(
+    transcript: &MessageTranscript,
+    caps: &ProviderCapabilities,
+) -> AgentResult<Vec<BaseMessage>> {
+    match plan_from_persisted_directives(transcript, PROJECTION_POLICY_VERSION) {
+        PersistedDirectiveRestore::Valid(plan) => match render_llm_view(transcript, &plan, caps) {
+            Ok(view) => return Ok(view),
+            Err(error) => tracing::warn!(%error, "已提交投影渲染失败，保留 canonical 内容"),
+        },
+        PersistedDirectiveRestore::Invalid => {
+            tracing::warn!("持久化 directive 无效；保留 canonical 内容，不重新规划");
+        }
+        PersistedDirectiveRestore::Absent => {}
+    }
+    Ok(transcript.visible_model_messages()?)
+}
+
 // ─── render_llm_view ──────────────────────────────────────────────────────────
 
 /// 根据 plan 和 provider 能力渲染 LLM 可见消息列表。
