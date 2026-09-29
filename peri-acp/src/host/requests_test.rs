@@ -576,6 +576,9 @@ mod plugins_cases;
 #[path = "requests_workspace_cases_test.rs"]
 mod workspace_cases;
 
+#[path = "requests_meta_resources_test.rs"]
+mod meta_resources;
+
 #[path = "requests_cron_test.rs"]
 mod cron_tests;
 

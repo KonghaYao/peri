@@ -27,7 +27,7 @@ use peri_mcp_lsp::pool::LspServerPool;
 use thiserror::Error;
 
 use peri_mcp_cron::CronScheduler;
-use peri_mcp_workspace::WorkspaceInstanceInput;
+use peri_mcp_workspace::{WorkspaceInstanceInput, WorkspaceResourcesInput};
 
 /// 实例上下文注入的 typed 语义错误（A33）。
 ///
@@ -86,6 +86,17 @@ pub struct BuiltinInstanceContext {
     /// 顶层三路径与 1:N 形态（`session_resources = true` 当 server root）不产生 session，
     /// 因此传 `None`（该退化形态进验收记录）。
     pub workspace: Option<WorkspaceInstanceInput>,
+    /// `workspace` 实例的**资源面**输入（`WorkspaceMcpServer::with_resources` 的装配输入）。
+    ///
+    /// `None` = **资源面未接线**（本槽位之前的既有行为）：`workspace` 实例照常装配，
+    /// 但 `resources/list` 只有 git ref，`skills/*` 返回 `-32601`、新 scheme 的
+    /// `resources/read` 返回 `-32602`——与「空目录集」不同，不得混同。
+    ///
+    /// 与 [`Self::workspace`] 同一节奏的**一次性装配输入**：宿主装配（会话环境）在
+    /// `McpClientPool::run_initialize` 之前随本上下文一次注入，dispatch 只读不改、
+    /// 不读配置、不派生根（AW3-11 模式）。资源根列表（skills / agents / builtin
+    /// 关闭位）的事实源是装配期输入（F11 插件 manifest / F12 配置读取已在该层完成）。
+    pub workspace_resources: Option<WorkspaceResourcesInput>,
     /// A24 关闭集：`policy_key ∈ disabled_middlewares` 的实例名（唯一实现
     /// `mcp::builtin::closed_instances`，宿主经 `peri_middlewares::assembly` 的薄委托派生）。
     ///
@@ -102,6 +113,7 @@ impl BuiltinInstanceContext {
             cron: None,
             lsp: None,
             workspace: None,
+            workspace_resources: None,
             closed: BTreeSet::new(),
         }
     }
@@ -124,6 +136,16 @@ impl BuiltinInstanceContext {
     /// 与 `with_cron` / `with_lsp` 的「不调用 ⇒ 实例不可装配」不是同一件事。
     pub fn with_workspace(mut self, input: WorkspaceInstanceInput) -> Self {
         self.workspace = Some(input);
+        self
+    }
+
+    /// 提供 `workspace` 实例的**资源面**输入（资源根 / builtin 关闭位 / 预算）。
+    ///
+    /// 未调用 = 资源面未接线（[`Self::workspace_resources`] 的诚实口径）；本 builder
+    /// 只表达「装配期已产出该输入」，不改变 `instance_input_ready`——资源面缺失是
+    /// 「未支持」而不是「实例不可装配」（`workspace` 落 `Some(_) => true` 分支）。
+    pub fn with_workspace_resources(mut self, input: WorkspaceResourcesInput) -> Self {
+        self.workspace_resources = Some(input);
         self
     }
 

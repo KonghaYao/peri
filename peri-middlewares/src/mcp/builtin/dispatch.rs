@@ -196,7 +196,9 @@ impl ServerHandler for BuiltinServerHandler {
 /// - `workspace`：`ctx.cwd` 是 7 个工具共享的 host cwd（相对路径解析根 + `Bash` 的
 ///   `current_dir`），`ctx.workspace` 的 session 级输入以 `Clone` 克隆进 handler
 ///   （`Arc` 克隆，不复制状态：`task_manager` / `on_bg_complete` 各只被搬进 `BashTool`
-///   的对应字段）。
+///   的对应字段）；`ctx.workspace_resources` 的**资源面**输入同样以 `Clone` 转交给
+///   `WorkspaceMcpServer::with_resources`（`None` = 资源面未接线）。两个槽位各自独立：
+///   资源面不因 session 级输入缺失而消失，反之亦然。
 ///
 /// **与 `cron` / `lsp` 的差别（AW3-11）**：`workspace` 的 arm 是**无条件**构造的——
 /// `ctx.workspace` 为 `None` 时同样返回 `Some`（「可见但退化」：实例照常装配，只有 `Bash`
@@ -227,10 +229,17 @@ pub(crate) fn builtin_server_handler(
             .lsp
             .as_ref()
             .map(|lsp| BuiltinServerHandler::Lsp(LspMcpServer::new(Arc::clone(&lsp.pool)))),
-        "workspace" => Some(BuiltinServerHandler::Workspace(WorkspaceMcpServer::new(
-            ctx.cwd.clone(),
-            ctx.workspace.clone(),
-        ))),
+        "workspace" => {
+            let server = WorkspaceMcpServer::new(ctx.cwd.clone(), ctx.workspace.clone());
+            // 资源面输入（装配期一次注入的槽位）：`None` = 资源面未接线（既有行为），
+            // `Some` = 装载 provider（W4a：会话装配只装 meta 面，见
+            // `peri-acp/src/host/workspace.rs` 的构造点）。本工厂不读配置、不派生根。
+            let server = match ctx.workspace_resources.as_ref() {
+                Some(resources) => server.with_resources(resources.clone()),
+                None => server,
+            };
+            Some(BuiltinServerHandler::Workspace(server))
+        }
         _ => None,
     }
 }

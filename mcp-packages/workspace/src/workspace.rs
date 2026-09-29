@@ -21,8 +21,10 @@
 //! 合并 `resources` provider 的公开批（skills / agents / instructions）与
 //! `skills/list|get` custom requests；未装配时这些方法分别表现为
 //! 「未知资源」（`-32602`）与「方法不支持」（`-32601`）——**不**把缺输入伪装成
-//! 「技能不存在且已 ready」。本波不启用宿主侧投递（registry/消费端切换属 W2+），
-//! 生产装配点（`peri-middlewares` dispatch）不调用 `with_resources`。
+//! 「技能不存在且已 ready」。生产装配点（`peri-middlewares` dispatch 的 `workspace`
+//! arm）自 W4a（2026-09-29）起对**会话装配**调用 `with_resources`，当前只装载
+//! meta 面（J6；skill / agent 根与真实关闭位属 W4b）；顶层三路径不调用（资源面未接线）。
+//! 宿主侧投递（registry/消费端切换）除外。
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -128,7 +130,9 @@ impl WorkspaceMcpServer {
     /// 装配 W1 资源面（独立于 `WorkspaceInstanceInput` 的 session 级 Bash 输入）。
     ///
     /// 输入由宿主装配构造（根列表 / plugin 标签 / `disable_bundled` 关闭位 / 预算）；
-    /// 不调用本方法时资源面保持未接线（模块头语义）。本波生产装配点不调用它。
+    /// 不调用本方法时资源面保持未接线（模块头语义）。生产装配点自 W4a 起对会话装配
+    /// 调用它（经 `BuiltinInstanceContext::workspace_resources`，见 `peri-middlewares`
+    /// dispatch 的 `workspace` arm）。
     pub fn with_resources(mut self, input: WorkspaceResourcesInput) -> Self {
         self.resources = Some(Arc::new(WorkspaceResourceProvider::new(
             self.cwd.clone(),

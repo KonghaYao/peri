@@ -86,6 +86,8 @@ async fn seam_fixture() -> SeamFixture {
         bare: true,
         drive_cron_tick: false,
         workspace_input: None,
+        // 本夹具直接构造顶层装配：资源面输入同样保持未接线（会话路径才装载）。
+        workspace_resources: None,
         // 无会话上下文（测试夹具）：A24 关闭集为空集。
         builtin_closed: Default::default(),
         prepared_plugins: None,

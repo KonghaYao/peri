@@ -191,6 +191,9 @@ pub async fn attach_acp(
                     // 顶层装配不构造 builtin 上下文：session 级 workspace 输入由每
                     // session 的会话环境装配产生（AW3-11）。
                     workspace_input: None,
+                    // 资源面输入与 session 级输入同源（见上）：顶层装配无会话消费者，
+                    // 保持未接线（`resources/list` 只有 git ref）。
+                    workspace_resources: None,
                     // 顶层装配无会话上下文：A24 关闭集恒为空集（会话装配才从 frozen 派生）。
                     builtin_closed: Default::default(),
                     // TUI 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。

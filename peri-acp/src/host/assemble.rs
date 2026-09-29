@@ -125,6 +125,14 @@ pub struct HostAssemblyInput {
     /// 注入必须**早于** pool 的 `McpClientPool::run_initialize`（A33：上下文一次性
     /// 注入，第二次必得 `AlreadyInjected`），见本模块的 `.with_workspace(...)` 调用点。
     pub workspace_input: Option<peri_mcp_workspace::WorkspaceInstanceInput>,
+    /// builtin `workspace` 实例的**资源面**输入（资源根 / builtin 关闭位 / 预算），
+    /// 与 `workspace_input` 同一注入节奏：随 builtin 实例上下文一次注入 pool，早于
+    /// `McpClientPool::run_initialize`（A33）。
+    ///
+    /// `None` = 资源面未接线（`resources/list` 只有 git ref）：顶层三路径保持 `None`
+    /// ——它们不产生会话，资源面没有消费者；会话环境装配传 `Some`，其内容由装配期
+    /// 已有事实源构造（本层不第二次读配置）。
+    pub workspace_resources: Option<peri_mcp_workspace::WorkspaceResourcesInput>,
     /// 准备路径一次加载的插件聚合：`Some` 时装配面不再重读插件目录
     /// （`None` = 既有语义，由装配面自行加载；仅 host 级/非准备调用点如此）。
     pub prepared_plugins: Option<PreparedPlugins>,
@@ -294,6 +302,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         bare,
         drive_cron_tick,
         workspace_input,
+        workspace_resources,
         prepared_plugins,
         builtin_closed,
     } = input;
@@ -413,6 +422,11 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                 });
         if let Some(workspace_input) = workspace_input {
             builtin_context = builtin_context.with_workspace(workspace_input);
+        }
+        // 资源面输入与 session 级输入同批（同一上下文、同一次注入）：`None` 保持
+        // 「资源面未接线」的既有行为。
+        if let Some(workspace_resources) = workspace_resources {
+            builtin_context = builtin_context.with_workspace_resources(workspace_resources);
         }
         let builtin_context = builtin_context.with_closed(builtin_closed);
         let builtin_context = Arc::new(builtin_context);

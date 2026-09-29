@@ -152,6 +152,23 @@ impl SessionEnvironment {
             task_manager: Some(Arc::clone(&task_manager)),
             on_bg_complete: Some(on_bg_complete),
         };
+        // ── W4a：builtin `workspace` 实例的**资源面**输入（与上面同一注入节奏） ──
+        //
+        // 本波只接元数据段落覆盖面（J6 的 `peri-meta://workspace/{section_id}`）：
+        // 该面只依赖 cwd（provider 自行扫描 `{cwd}/.peri/meta/*.md`），所以这里**没有**
+        // 任何配置读取——输入由装配期既有的 cwd 事实派生（构造点不第二次读配置）。
+        // 其余面按下述口径保持关闭：
+        // - 不装 skill / agent 根：技能与代理来源（本地三根 / 插件 / builtin 静态资产）
+        //   的接线与消费切换同批归 W4b；先装会让同一批技能同时来自宿主扫描与 MCP
+        //   资源（双源同名）。
+        // - `disable_bundled = true` 是**波次域隔离**，不是宿主配置投影：provider 没有
+        //   域掩码，这是唯一能关掉 builtin 技能面的开关。W4b 必须以宿主配置解析出的
+        //   真实值替换本行，不得沿用本常量。
+        // - 指令面（`peri-instruction://workspace/{index,main,local}`）随 provider 装配被动
+        //   上线（provider 的 `list_resources` 按 cwd 无条件列出）：宿主消费仍走既有链路，
+        //   行为不变（消费切换归 W4b/W5）。
+        let workspace_resources =
+            peri_mcp_workspace::WorkspaceResourcesInput::new().with_disable_bundled(true);
         // A24 关闭集：从**同一份 frozen snapshot** 派生（设计 §2.5：禁止回退当轮 config；
         // fork 复用 source 的 frozen 字节时两者可能不同）。它是订阅建立门的唯一输入，
         // 不改变 pool 级就绪与面板连接状态（ARC-CAPABILITY-CLOSURE-001）。
@@ -183,6 +200,7 @@ impl SessionEnvironment {
             bare: source.bare,
             drive_cron_tick: source.drive_cron_tick,
             workspace_input: Some(workspace_input.clone()),
+            workspace_resources: Some(workspace_resources),
             builtin_closed,
             prepared_plugins: Some(plugins.clone()),
         };

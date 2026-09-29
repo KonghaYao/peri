@@ -158,6 +158,9 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
             // session 级输入（AW3-11）由每 session 的 `SessionEnvironment::assemble`
             // 产生，此处恒为 `None`。
             workspace_input: None,
+            // 资源面输入与 session 级输入同源（见上）：顶层装配无会话消费者，恒为
+            // `None`（资源面未接线），不改变任何既有行为。
+            workspace_resources: None,
             // 同理：A24 关闭集是**会话级** frozen policy 的投影，顶层装配无会话上下文，
             // 恒为空集（订阅建立门在本层无对象——顶层不建 MCP 池）。
             builtin_closed: Default::default(),

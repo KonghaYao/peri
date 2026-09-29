@@ -254,8 +254,8 @@ async fn connect_via_dispatch(instance: &str, ctx: &BuiltinInstanceContext) -> P
 
 /// 以**调用方给出的** handler 装配真实同进程链路并由生产 `serve_client_auto` 握手。
 ///
-/// W1 资源面证据需要绕过工厂取 handler：资源输入只能由夹具经 `with_resources` 装配
-/// （W1 不启用宿主投递，生产工厂 arm 不接线资源面）。
+/// W1 资源面证据用本入口绕过工厂（那时夹具直接把 handler 交给链路）；W4a 起生产工厂 arm
+/// 已按 `ctx.workspace_resources` 装载资源面，装资源输入的用例走 [`connect_via_dispatch`]。
 async fn connect_handler(instance: &str, handler: BuiltinServerHandler) -> Pair {
     let transport = spawn_builtin_transport_with_handler(instance, handler);
     let (io, supervisor) = transport.into_parts();
