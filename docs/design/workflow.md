@@ -623,7 +623,7 @@ tool view，并经 `SearchExtraTools → ExecuteExtraTool` 发现和调用。关
 消失。
 
 面向模型的操作手册是 builtin skill
-`peri-middlewares/src/skills/builtin/skills/ultracode/SKILL.md`，按需加载；系统提示词不
+`mcp-packages/workspace/src/resources/builtin/skills/ultracode/SKILL.md`（W1 迁移后唯一副本；宿主注册表经 `include_str!` 引用），按需加载；系统提示词不
 常驻复制完整 workflow 教程。复杂、全生命周期交付另由 `ultra-adlc` skill 与
 [Ultra-ADLC 设计](ultra-adlc.md)约束。
 

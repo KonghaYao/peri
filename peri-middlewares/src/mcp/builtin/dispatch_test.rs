@@ -42,7 +42,10 @@ use peri_agent::tools::{BaseTool, ToolContext};
 use peri_mcp_lsp::config::{LspConfigFile, LspServerConfig};
 use peri_mcp_lsp::pool::LspServerPool;
 use rmcp::{
-    model::{CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode},
+    model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ClientRequest, CustomRequest,
+        ErrorCode, ServerResult,
+    },
     service::{Peer, RoleClient, ServiceError},
     ServerHandler,
 };
@@ -67,7 +70,10 @@ use crate::mcp::ToolCallError;
 use peri_mcp_common::invoke_tool_call;
 use peri_mcp_cron::{CronScheduler, CronTrigger, MAX_CRON_TASKS};
 use peri_mcp_lsp::LspTool;
-use peri_mcp_workspace::WorkspaceInstanceInput;
+use peri_mcp_workspace::{
+    ResourceRoot, ResourceScope, WorkspaceInstanceInput, WorkspaceMcpServer,
+    WorkspaceResourcesInput,
+};
 
 // ══════════════════════════════════════════════════════════════════════════════
 // V 矩阵第 20 行：注册表 → 工厂映射；builtin 身份经 discover / status 传播
@@ -243,6 +249,14 @@ impl Pair {
 async fn connect_via_dispatch(instance: &str, ctx: &BuiltinInstanceContext) -> Pair {
     let handler = builtin_server_handler(instance, ctx)
         .unwrap_or_else(|| panic!("{instance}: 工厂必须给出 handler（本夹具输入齐备）"));
+    connect_handler(instance, handler).await
+}
+
+/// 以**调用方给出的** handler 装配真实同进程链路并由生产 `serve_client_auto` 握手。
+///
+/// W1 资源面证据需要绕过工厂取 handler：资源输入只能由夹具经 `with_resources` 装配
+/// （W1 不启用宿主投递，生产工厂 arm 不接线资源面）。
+async fn connect_handler(instance: &str, handler: BuiltinServerHandler) -> Pair {
     let transport = spawn_builtin_transport_with_handler(instance, handler);
     let (io, supervisor) = transport.into_parts();
     let service = serve_client_auto(
@@ -796,6 +810,9 @@ async fn call_tool_error_text_is_fixed_and_redacted() {
     assert_eq!(matched, 7, "8 类中 7 类可在 handler 路径稳定触发");
     assert_eq!(leaks.len(), 0, "业务细节不得进入模型面文本：{leaks:?}");
 }
+
+#[path = "dispatch_resource_wire_test.rs"]
+mod dispatch_resource_wire_tests;
 
 #[path = "dispatch_factory_test.rs"]
 mod dispatch_factory_tests;

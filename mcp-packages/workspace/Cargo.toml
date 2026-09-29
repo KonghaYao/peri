@@ -10,6 +10,7 @@ peri-agent = { path = "../../peri-agent" }
 peri-acp-types = { path = "../../peri-acp-types" }
 peri-mcp-common = { path = "../common" }
 async-trait.workspace = true
+base64 = { version = "0.22", features = ["alloc"] }
 chrono.workspace = true
 fuzzy-matcher = "0.3"
 grep = "0.4"
@@ -17,7 +18,11 @@ glob = "0.3"
 ignore = "0.4"
 parking_lot.workspace = true
 rmcp.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["process"] }
 tracing.workspace = true
 uuid.workspace = true
@@ -27,6 +32,7 @@ walkdir = "2.5"
 filetime = "0.2"
 futures.workspace = true
 regex = "1"
+rmcp = { workspace = true, features = ["client"] }
 serial_test.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

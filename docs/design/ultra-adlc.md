@@ -2,7 +2,7 @@
 
 > 状态：现行设计（builtin skill v1）
 > 范围：Ultra-ADLC 的产品语义、项目级文件协议与编排不变量
-> 执行协议：[`ultra-adlc/SKILL.md`](../../peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md)
+> 执行协议：[`ultra-adlc/SKILL.md`](../../mcp-packages/workspace/src/resources/builtin/skills/ultra-adlc/SKILL.md)
 
 Ultra-ADLC 把一个自然语言目标编译为完整、可审计的超大规模交付。它是 Main Agent、
 builtin skill、现有 `Workflow` deferred tool、受限的 `AskUserQuestion` 和文件系统之上的
@@ -246,7 +246,7 @@ provenance 和 ADLC record 路径。不得把内部 Agent transcript、完整 jo
 
 稳定路由：
 
-- 可执行编排：[`ultra-adlc/SKILL.md`](../../peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md)
+- 可执行编排：[`ultra-adlc/SKILL.md`](../../mcp-packages/workspace/src/resources/builtin/skills/ultra-adlc/SKILL.md)
 - Workflow runtime：[workflow.md](workflow.md)
 - Workflow 代码入口：[peri-workflow 代码索引](../code-index/peri-workflow.md)
 - Skills/Workflow middleware：[peri-middlewares 代码索引](../code-index/peri-middlewares.md)

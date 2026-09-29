@@ -18,9 +18,9 @@ use std::sync::Arc;
 use peri_acp_types::builtin_mcp::find;
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResponse, ListResourcesResult, ListToolsResult,
-        PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ServerInfo,
-        SubscriptionFilter,
+        CallToolRequestParams, CallToolResponse, CustomRequest, CustomResult, ErrorCode,
+        ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+        ReadResourceRequestParams, ReadResourceResponse, ServerInfo, SubscriptionFilter,
     },
     service::{RequestContext, RoleServer, SubscriptionContext},
     ErrorData as McpError, ServerHandler,
@@ -89,13 +89,14 @@ impl ServerHandler for BuiltinServerHandler {
         }
     }
 
-    // ── 资源与订阅面（Git Watch 下沉，D-5）────────────────────────────────────
+    // ── 资源与订阅面（Git Watch 下沉，D-5；W1 资源面扩展）─────────────────────
     //
-    // **必须转发**：`resources/*` 与 `subscriptions/listen` 都由 rmcp 按 handler trait
-    // 方法分派，枚举不转发就等于这些能力在 builtin 链路上不存在（客户端会收到
-    // `-32601` / 空 filter）。当前只有 `workspace` 声明资源与订阅；其余实例保持
-    // 各实例自身的既有退化语义（无资源 ⇒ 默认空表 / `-32601`，无订阅 ⇒ `None`），
-    // 不新造第三种形态。
+    // **必须转发**：`resources/*`、`resources/templates/list`、`subscriptions/listen`
+    // 与 `skills/*`（custom request）都由 rmcp 按 handler trait 方法分派，枚举不转发
+    // 就等于这些能力在 builtin 链路上不存在（客户端会收到 `-32601` / 空 filter）。
+    // 当前只有 `workspace` 声明资源、订阅与 skills；其余实例保持各实例自身的既有
+    // 退化语义（无资源 ⇒ 默认空表 / `-32601`，无订阅 ⇒ `None`，无 custom ⇒
+    // `-32601`），不新造第三种形态。
 
     async fn list_resources(
         &self,
@@ -105,6 +106,17 @@ impl ServerHandler for BuiltinServerHandler {
         match self {
             Self::Workspace(server) => server.list_resources(request, context).await,
             _ => Ok(ListResourcesResult::default()),
+        }
+    }
+
+    async fn list_resource_templates(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        match self {
+            Self::Workspace(server) => server.list_resource_templates(request, context).await,
+            _ => Ok(ListResourceTemplatesResult::default()),
         }
     }
 
@@ -118,6 +130,24 @@ impl ServerHandler for BuiltinServerHandler {
             _ => Err(McpError::method_not_found::<
                 rmcp::model::ReadResourceRequestMethod,
             >()),
+        }
+    }
+
+    /// custom request 转发（W1：`skills/list|get` 到 workspace handler）。
+    ///
+    /// 未覆盖的 method 与未声明 custom 面的实例都落到 trait 的默认语义
+    /// （`-32601`）；本枚举不解释 method 语义、不缓存响应。
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, McpError> {
+        match self {
+            Self::Workspace(server) => server.on_custom_request(request, context).await,
+            _ => {
+                let CustomRequest { method, .. } = request;
+                Err(McpError::new(ErrorCode::METHOD_NOT_FOUND, method, None))
+            }
         }
     }
 

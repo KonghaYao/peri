@@ -11,20 +11,30 @@
 //! while Bash rejects explicit background execution, kills a timed-out foreground process group,
 //! and cannot register shell descendants left behind by `command &`.
 //!
-//! The handler does not override `discover`; besides the seven tools it exposes exactly one
-//! resource (`workspace://git/ref`, Git ref 快照) and the 2026-07-28 subscription surface
+//! The handler does not override `discover`; besides the seven tools it exposes the git ref
+//! resource (`workspace://git/ref`) and the 2026-07-28 subscription surface
 //! (`accepted_subscription_filter` + `listen`) that carries git ref changes to the host.
 //! Tool failures use shared allowlisted recovery text; request cancellation drops the tool
 //! future.
+//!
+//! **W1 resource surface（2026-09-29）**：经 [`Self::with_resources`] 装配时，handler
+//! 合并 `resources` provider 的公开批（skills / agents / instructions）与
+//! `skills/list|get` custom requests；未装配时这些方法分别表现为
+//! 「未知资源」（`-32602`）与「方法不支持」（`-32601`）——**不**把缺输入伪装成
+//! 「技能不存在且已 ready」。本波不启用宿主侧投递（registry/消费端切换属 W2+），
+//! 生产装配点（`peri-middlewares` dispatch）不调用 `with_resources`。
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use base64::Engine as _;
 use peri_agent::tools::BaseTool;
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResponse, Implementation, ListResourcesResult,
-        ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-        RequestId, Resource, ResourceContents, ServerCapabilities, ServerInfo, SubscriptionFilter,
+        CallToolRequestParams, CallToolResponse, CustomRequest, CustomResult, ErrorCode,
+        Implementation, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
+        MetaObject, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
+        RequestId, Resource, ResourceContents, ResourceTemplate, ServerCapabilities, ServerInfo,
+        SubscriptionFilter,
     },
     service::{RequestContext, RoleServer, SubscriptionContext, SubscriptionSink},
     ErrorData as McpError, ServerHandler,
@@ -36,6 +46,9 @@ use crate::filesystem::{
     EditFileTool, FolderOperationsTool, GlobFilesTool, GrepTool, ReadFileTool, WriteFileTool,
 };
 use crate::git_watch::{run_git_sample, GitWatchState, SampleOutcome, GIT_REF_RESOURCE_URI};
+use crate::resources::{
+    ResourceBody, ResourceError, WorkspaceResourceProvider, WorkspaceResourcesInput,
+};
 use crate::terminal::BashTool;
 use crate::WorkspaceInstanceInput;
 
@@ -63,6 +76,11 @@ pub struct WorkspaceMcpServer {
     /// 通知在 `tokio::spawn` 的采样收口里逐 sink 发送；`SubscriptionClosed` 的 sink
     /// 就地移除（客户端已 drop 订阅）。
     sinks: Arc<parking_lot::Mutex<HashMap<RequestId, SubscriptionSink>>>,
+    /// W1 资源 provider（`with_resources` 装配；`None` = 资源面未接线）。
+    ///
+    /// `None` 是**未支持**而不是「空目录集」：`skills/*` 返回 `-32601`、
+    /// 新 scheme 的 `resources/read` 返回 `-32602`（见模块头）。
+    resources: Option<Arc<WorkspaceResourceProvider>>,
 }
 
 impl WorkspaceMcpServer {
@@ -103,7 +121,25 @@ impl WorkspaceMcpServer {
             cwd,
             git: Arc::new(GitWatchState::new()),
             sinks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            resources: None,
         }
+    }
+
+    /// 装配 W1 资源面（独立于 `WorkspaceInstanceInput` 的 session 级 Bash 输入）。
+    ///
+    /// 输入由宿主装配构造（根列表 / plugin 标签 / `disable_bundled` 关闭位 / 预算）；
+    /// 不调用本方法时资源面保持未接线（模块头语义）。本波生产装配点不调用它。
+    pub fn with_resources(mut self, input: WorkspaceResourcesInput) -> Self {
+        self.resources = Some(Arc::new(WorkspaceResourceProvider::new(
+            self.cwd.clone(),
+            input,
+        )));
+        self
+    }
+
+    /// 资源 provider 句柄（`spawn_blocking` 需要 move 进阻塞线程）。
+    fn resource_provider(&self) -> Option<Arc<WorkspaceResourceProvider>> {
+        self.resources.clone()
     }
 
     /// 覆盖 git 采样节流窗口（**测试 seam**：生产恒为 `GIT_THROTTLE`，60s）。
@@ -215,37 +251,134 @@ impl ServerHandler for WorkspaceMcpServer {
         Ok(list_tools_of(self.tools()))
     }
 
-    /// 单条资源：`workspace://git/ref`（正文 = 最近一次采样结论，见 `git_watch`）。
+    /// 资源发现批：git ref 单条（恒在） + 资源 provider 的公开批（装配时）。
+    ///
+    /// provider 的扫描在 `spawn_blocking` 中执行（RUST-ASYNC-001：扫描/读取是阻塞
+    /// I/O，不直接堵塞 async runtime）。未装配时行为与本波之前一致（仅 git ref）。
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(ListResourcesResult::with_all_items(vec![Resource::new(
-            GIT_REF_RESOURCE_URI,
-            GIT_REF_RESOURCE_NAME,
-        )
-        .with_mime_type("text/plain")]))
+        let mut items =
+            vec![Resource::new(GIT_REF_RESOURCE_URI, GIT_REF_RESOURCE_NAME)
+                .with_mime_type("text/plain")];
+        if let Some(provider) = self.resource_provider() {
+            let scanned = tokio::task::spawn_blocking(move || provider.list_resources())
+                .await
+                .map_err(|_| McpError::internal_error("resource scan failed", None))?;
+            items.extend(scanned);
+        }
+        Ok(ListResourcesResult::with_all_items(items))
     }
 
-    /// 读取资源正文；未命中的 URI 按协议回 `-32602`（`invalid_params`）。
+    /// 资源模板（skills / agents 的可读 URI 形状；只描述范围，不构成读取授权）。
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        let templates: Vec<ResourceTemplate> = match self.resource_provider() {
+            Some(provider) => {
+                tokio::task::spawn_blocking(move || provider.list_resource_templates())
+                    .await
+                    .map_err(|_| McpError::internal_error("resource scan failed", None))?
+            }
+            None => Vec::new(),
+        };
+        Ok(ListResourceTemplatesResult::with_all_items(templates))
+    }
+
+    /// 读取资源正文：
+    /// - git ref：既有单条路径（未命中仍按协议回 `-32602`）；
+    /// - 其余 URI：资源 provider 按 scheme 分派（未装配 = 未知资源 `-32602`）。
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
-        if request.uri != GIT_REF_RESOURCE_URI {
+        if request.uri == GIT_REF_RESOURCE_URI {
+            return Ok(ReadResourceResponse::Complete(
+                rmcp::model::ReadResourceResult::new(vec![ResourceContents::text(
+                    self.git.resource_text(),
+                    GIT_REF_RESOURCE_URI,
+                )]),
+            ));
+        }
+        let Some(provider) = self.resource_provider() else {
             return Err(McpError::invalid_params(
                 format!("unknown resource: {}", request.uri),
                 None,
             ));
-        }
+        };
+        let uri = request.uri.clone();
+        let payload = tokio::task::spawn_blocking(move || provider.read(&uri))
+            .await
+            .map_err(|_| McpError::internal_error("resource read failed", None))?
+            .map_err(map_resource_read_error)?;
+        let contents = project_resource(payload);
         Ok(ReadResourceResponse::Complete(
-            rmcp::model::ReadResourceResult::new(vec![ResourceContents::text(
-                self.git.resource_text(),
-                GIT_REF_RESOURCE_URI,
-            )]),
+            rmcp::model::ReadResourceResult::new(vec![contents]),
         ))
+    }
+
+    /// `skills/list` / `skills/get`（MCPP custom requests；未装配 → `-32601`）。
+    ///
+    /// 未知 method 与未装配都按 method_not_found 收口：这是「该实例不提供该方法」
+    /// 的诚实表达，与「技能不存在」（`-32602`）区分。
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, McpError> {
+        let method = request.method.clone();
+        let supported = matches!(method.as_str(), "skills/list" | "skills/get");
+        let provider = if supported {
+            self.resource_provider()
+        } else {
+            None
+        };
+        let Some(provider) = provider else {
+            return Err(McpError::new(ErrorCode::METHOD_NOT_FOUND, method, None));
+        };
+
+        match method.as_str() {
+            "skills/list" => {
+                let cursor = request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("cursor"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                let response = tokio::task::spawn_blocking(move || provider.skills_list(cursor))
+                    .await
+                    .map_err(|_| McpError::internal_error("skill scan failed", None))?
+                    .map_err(map_skills_error)?;
+                let value = serde_json::to_value(&response).map_err(|_| {
+                    McpError::internal_error("skill response encoding failed", None)
+                })?;
+                Ok(CustomResult::new(value))
+            }
+            _ => {
+                let uri = request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("uri"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        McpError::invalid_params("skills/get requires a uri parameter", None)
+                    })?;
+                let response = tokio::task::spawn_blocking(move || provider.skills_get(&uri))
+                    .await
+                    .map_err(|_| McpError::internal_error("skill scan failed", None))?
+                    .map_err(map_skills_error)?;
+                let value = serde_json::to_value(&response).map_err(|_| {
+                    McpError::internal_error("skill response encoding failed", None)
+                })?;
+                Ok(CustomResult::new(value))
+            }
+        }
     }
 
     /// 只接受 git ref 资源 URI（与请求 filter 求交；其余类别不声明 ⇒ 请求它们不会被 ack）。
@@ -293,4 +426,71 @@ impl ServerHandler for WorkspaceMcpServer {
         }
         response
     }
+}
+
+// ─── 资源面投影（W1）─────────────────────────────────────────────────────────
+
+/// `resources/read` 的错误映射（新资源面；文案不含绝对路径）。
+///
+/// - `InvalidUri` / `Denied`：URI 非法 / 未知 scheme / 越界 → `-32602`（未知资源）；
+/// - `NotFound`：合法 URI 但目标不存在或未公开 → `-32002`（MCP core 的
+///   resource not found）；
+/// - `Budget` / `Io`：服务器侧拒绝或失败 → `-32603`。
+fn map_resource_read_error(error: ResourceError) -> McpError {
+    match error {
+        ResourceError::InvalidUri | ResourceError::Denied => {
+            McpError::invalid_params("unknown resource", None)
+        }
+        ResourceError::NotFound => McpError::resource_not_found("resource not found", None),
+        ResourceError::Budget | ResourceError::Io => {
+            McpError::internal_error("resource unavailable", None)
+        }
+    }
+}
+
+/// `skills/*` 的错误映射（MCPP 约定：未知 `skills/get` URI 一律 `-32602`）。
+fn map_skills_error(error: ResourceError) -> McpError {
+    match error {
+        ResourceError::InvalidUri | ResourceError::NotFound | ResourceError::Denied => {
+            McpError::invalid_params("unknown skill", None)
+        }
+        ResourceError::Budget | ResourceError::Io => {
+            McpError::internal_error("skill unavailable", None)
+        }
+    }
+}
+
+/// 读取产物 → `ResourceContents`（text/blob + mime + `_meta`）。
+///
+/// `_meta` 的 digest 以 payload 的 `digest` 覆盖写（两者同源；即使 provider 内部
+/// 组装与投影之间被改动，投影面仍以本次读取的 digest 为准）。
+fn project_resource(payload: crate::resources::ResourcePayload) -> ResourceContents {
+    use peri_acp_types::workspace_resources::META_KEY_DIGEST;
+    let crate::resources::ResourcePayload {
+        uri,
+        mime,
+        digest,
+        meta,
+        body,
+    } = payload;
+    let mut meta_map = meta.0;
+    meta_map.insert(
+        META_KEY_DIGEST.to_string(),
+        serde_json::Value::String(digest),
+    );
+    let mut contents = match body {
+        ResourceBody::Text(text) => ResourceContents::text(text, uri).with_mime_type(mime),
+        ResourceBody::Blob(bytes) => {
+            ResourceContents::blob(base64::engine::general_purpose::STANDARD.encode(bytes), uri)
+                .with_mime_type(mime)
+        }
+    };
+    let projected_meta = MetaObject(meta_map);
+    match &mut contents {
+        ResourceContents::TextResourceContents { meta: slot, .. } => *slot = Some(projected_meta),
+        ResourceContents::BlobResourceContents { meta: slot, .. } => *slot = Some(projected_meta),
+        // `ResourceContents` 是 non_exhaustive：未来新增变体时保持编译（不投影 meta）。
+        _ => {}
+    }
+    contents
 }

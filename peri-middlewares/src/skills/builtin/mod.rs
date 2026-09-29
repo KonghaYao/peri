@@ -3,9 +3,17 @@
 //! 复用 `built_in_agents.rs` 的 `include_str!` + `&'static str` 模式：
 //! 零运行时 I/O，最低优先级（被 User/Global/Project/Plugin 同名覆盖）。
 //!
+//! **资产归属（W1 迁移，J5/F7）**：SKILL.md 文件的唯一副本已迁至
+//! `mcp-packages/workspace/src/resources/builtin/skills/`（provider 侧经
+//! `resources` 面公开）；本注册表以仓库相对路径 `include_str!` 引用同一批
+//! 文件（不复制内容、不引入 re-export）。本模块与引用它的宿主流均在 W4
+//! 技能源切换完成时删除，届时 provider 成为唯一读取方。
+//!
 //! 新增 Builtin skill 步骤：
-//! 1. 把 SKILL.md 放到 `skills/<name>/SKILL.md`（相对本文件）
-//! 2. 在 `BUILTIN_SKILLS` 数组追加 entry
+//! 1. 把 SKILL.md 放到 provider 侧
+//!    `mcp-packages/workspace/src/resources/builtin/skills/<name>/SKILL.md`
+//! 2. 在 `mcp-packages/workspace/src/resources/builtin.rs` 的 `BUILTIN_SKILLS`
+//!    与本文件数组同时追加 entry（两份注册表在 W4 前必须同名单）
 //! 3. `builtin_test.rs::test_builtin_skills_frontmatter_valid` 自动覆盖
 
 use gray_matter::{engine::YAML, Matter};
@@ -20,34 +28,53 @@ pub struct BuiltinSkill {
 /// 所有 builtin skills 的注册表（编译期常量数组）
 ///
 /// 顺序不影响功能（scan_skill_roots_impl 按 name 去重），但建议按字母排序便于维护。
+///
+/// **路径说明（W1）**：资产文件位于 `mcp-packages/workspace/src/resources/builtin/skills/`
+/// （provider 侧唯一副本）；本表以 4 级 `..` 指向仓库根再进入该目录。provider 侧
+/// 注册表 `peri_mcp_workspace::resources::builtin::BUILTIN_SKILLS` 与下表同名单，
+/// 本表随 W4 删除。
 pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
     BuiltinSkill {
         name: "use-artifacts",
-        content: include_str!("skills/use-artifacts/SKILL.md"),
+        content: include_str!(
+            "../../../../mcp-packages/workspace/src/resources/builtin/skills/use-artifacts/SKILL.md"
+        ),
     },
     BuiltinSkill {
         name: "goal",
-        content: include_str!("skills/goal/SKILL.md"),
+        content: include_str!(
+            "../../../../mcp-packages/workspace/src/resources/builtin/skills/goal/SKILL.md"
+        ),
     },
     BuiltinSkill {
         name: "multitask",
-        content: include_str!("skills/multitask/SKILL.md"),
+        content: include_str!(
+            "../../../../mcp-packages/workspace/src/resources/builtin/skills/multitask/SKILL.md"
+        ),
     },
     BuiltinSkill {
         name: "programmatic-tool-calling",
-        content: include_str!("skills/programmatic-tool-calling/SKILL.md"),
+        content: include_str!(
+            "../../../../mcp-packages/workspace/src/resources/builtin/skills/programmatic-tool-calling/SKILL.md"
+        ),
     },
     BuiltinSkill {
         name: "ultra-adlc",
-        content: include_str!("skills/ultra-adlc/SKILL.md"),
+        content: include_str!(
+            "../../../../mcp-packages/workspace/src/resources/builtin/skills/ultra-adlc/SKILL.md"
+        ),
     },
     BuiltinSkill {
         name: "ultracode",
-        content: include_str!("skills/ultracode/SKILL.md"),
+        content: include_str!(
+            "../../../../mcp-packages/workspace/src/resources/builtin/skills/ultracode/SKILL.md"
+        ),
     },
     BuiltinSkill {
         name: "cron",
-        content: include_str!("skills/cron/SKILL.md"),
+        content: include_str!(
+            "../../../../mcp-packages/workspace/src/resources/builtin/skills/cron/SKILL.md"
+        ),
     },
 ];
 

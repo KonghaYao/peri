@@ -82,3 +82,4 @@ pub mod tools;
 pub mod workflow;
 
 pub mod workspace;
+pub mod workspace_resources;

@@ -13,7 +13,8 @@ Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate �
 | Artifact | `peri-mcp-artifact`：`mcp-packages/artifact/src/lib.rs` | `ArtifactMcpServer`、`ArtifactTool`、`ArtifactClient` | 上传协议与 Markdown 转 HTML 归该 crate；模板位于 `src/descriptions/md_to_html_template.html`。 |
 | Cron | `peri-mcp-cron`：`mcp-packages/cron/src/lib.rs` | `CronMcpServer`、`scheduler.rs`、`tools.rs` | `CronScheduler`、`CronSchedulerPortHandle`、scheduler types 与三种工具由该 crate 导出。宿主 tick task 的 spawn、join 与 reconnect 仍归 `peri-middlewares` runtime。 |
 | LSP | `peri-mcp-lsp`：`mcp-packages/lsp/src/lib.rs` | `LspMcpServer`、`LspTool`、`LspClient`、`LspServerPool`、`tool.rs`、`formatters.rs`、`config.rs` | MCP 工具、客户端、协议格式化、配置合并与 host 级唯一 pool 归该 crate；host 装配经 `create_host_lsp_pool` 注入同一 `Arc`，`LspSyncMiddleware` 只消费端口，host shutdown 负责调用有界关闭。 |
-| Workspace | `peri-mcp-workspace`：`mcp-packages/workspace/src/lib.rs` | `WorkspaceMcpServer`、`workspace.rs`、`git_watch.rs`、`filesystem/`、`terminal.rs`、`fuzzy.rs`、`shell_hints.rs`、`filesystem/path_hints.rs` | 文件、目录、搜索和 Bash 工具的 handler 与实现归该 crate；`git_watch.rs` 持有 `workspace://git/ref` 资源的采样状态机与正文（原宿主 `GitWatchMiddleware` 的逐字搬迁，v4 wave 4 下沉），订阅面（`list_resources` / `read_resource` / `accepted_subscription_filter` / `listen`）在 `workspace.rs`，只在成功的 `tools/call` 后采样且**无订阅者不采样**；输出持久化 / 截断复用 `peri-agent::agent::async_tasks` 的 canonical helper。失败点的可行动诊断（路径 did-you-mean、命令未找到的 PATH 候选）也归该 crate，见下节。 |
+| Workspace | `peri-mcp-workspace`：`mcp-packages/workspace/src/lib.rs` | `WorkspaceMcpServer`、`workspace.rs`、`git_watch.rs`、`resources/`、`filesystem/`、`terminal.rs`、`fuzzy.rs`、`shell_hints.rs`、`filesystem/path_hints.rs` | 文件、目录、搜索和 Bash 工具的 handler 与实现归该 crate；`git_watch.rs` 持有 `workspace://git/ref` 资源的采样状态机与正文（原宿主 `GitWatchMiddleware` 的逐字搬迁，v4 wave 4 下沉），订阅面（`list_resources` / `read_resource` / `accepted_subscription_filter` / `listen`）在 `workspace.rs`，只在成功的 `tools/call` 后采样且**无订阅者不采样**；输出持久化 / 截断复用 `peri-agent::agent::async_tasks` 的 canonical helper。失败点的可行动诊断（路径 did-you-mean、命令未找到的 PATH 候选）也归该 crate，见下节。 |
+| Workspace 资源面（W1，2026-09-29） | `peri-mcp-workspace`：`mcp-packages/workspace/src/resources/mod.rs` | `resources/{mod,skills,agents,instructions,builtin,scan,path,frontmatter}.rs`；契约在 `peri-acp-types/src/workspace_resources.rs`（URI/`_meta`/skills DTO 的唯一事实源） | skills / agents / 项目指令三类**来源**的扫描、manifest 与只读提供（`resources/list|read|templates/list`、`skills/list|get`）：本地三根 + 插件根 + builtin 静态资产（`resources/builtin/skills/`，**唯一副本**，宿主注册表经 `include_str!` 引用至 W4）；输入由宿主经 `WorkspaceResourcesInput` 构造期注入（`with_resources`），生产装配点尚未接线（W1 不启用宿主投递）；未知 URI 按 MCPP 约定 `-32602`、目标不存在 `-32002`；**不注册任何技能工具**（`SkillTool`/`DiscoverSkillsTool` 留宿主，J3）。 |
 
 ## 宿主与插件边界
 
@@ -33,6 +34,8 @@ cargo test -p peri-mcp-cron --lib
 cargo test -p peri-mcp-lsp --lib
 cargo test -p peri-mcp-workspace --lib
 cargo test -p peri-mcp-workspace --lib -- git_watch
+cargo test -p peri-mcp-workspace --lib -- resources
+cargo test -p peri-middlewares --lib -- mcp::builtin::dispatch
 cargo check -p peri-mcp-common
 cargo clippy -p peri-mcp-common -p peri-mcp-web -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-lsp -p peri-mcp-workspace --all-targets -- -D warnings
 ```

@@ -4108,6 +4108,7 @@ name = "peri-mcp-workspace"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "filetime",
  "futures",
@@ -4121,9 +4122,13 @@ dependencies = [
  "peri-mcp-common",
  "regex",
  "rmcp",
+ "serde",
  "serde_json",
+ "serde_yaml",
  "serial_test",
+ "sha2 0.10.9",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",
