@@ -174,7 +174,7 @@ fn test_render_steering_contains_objective() {
 /// （IF-D10）的一个面。
 ///
 /// 事实：`GoalMiddleware::collect_tools` 恒返回 `vec![GoalTool]`
-/// （`peri-middlewares/src/goal_middleware.rs:77-84`），既不消费 `shared_tools`、也不消费
+/// （`peri-middlewares/src/goal/middleware.rs:77-84`），既不消费 `shared_tools`、也不消费
 /// bridge 列表或装配期的关闭集（`assembly.rs:366-371` 的 `ChainSlot::Goal` 只看
 /// `"GoalMiddleware"` 这个策略键）。
 ///

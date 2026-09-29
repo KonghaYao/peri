@@ -143,5 +143,5 @@ impl Middleware for GoalMiddleware {
 }
 
 #[cfg(test)]
-#[path = "goal_middleware_test.rs"]
+#[path = "middleware_test.rs"]
 mod tests;

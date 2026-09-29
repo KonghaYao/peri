@@ -210,7 +210,7 @@ flowchart LR
 | 25 | `McpMiddleware` | `peri-middlewares/src/mcp/middleware.rs` | 独立 Middleware | 它是统一 MCP 对接核心，并在 1R 阶段等待 `system_mcp` 完成 ready；超时必须报错并阻止 react loop 启动。 |
 | 26 | `DynamicMcpMiddleware` | `peri-middlewares/src/mcp/dynamic/tool.rs` | 独立 Middleware | session-scoped registry、动态工具目录、取消、权限和 projection lease 属于 MCP 对接宿主。 |
 | 27 | `SubAgentMiddleware` | `peri-middlewares/src/subagent/mod.rs` | 独立 Middleware | parent/child session、fork/resume、取消、事件、frozen context、hooks、skills、tools 和 MCP activation 属于 Runtime，不下放到 MCP。 |
-| 28 | `GoalMiddleware` | `peri-middlewares/src/goal_middleware.rs` | 独立 Middleware | controller、Goal tool、system prompt steering 和 session 生命周期属于 Agent/Runtime，不下放到 MCP。 |
+| 28 | `GoalMiddleware` | `peri-middlewares/src/goal/middleware.rs` | 独立 Middleware | controller、Goal tool、system prompt steering 和 session 生命周期属于 Agent/Runtime，不下放到 MCP。 |
 
 ## 不属于实际 Middleware 实现、但迁移时会受影响的类型
 
