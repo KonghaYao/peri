@@ -59,8 +59,8 @@ use peri_agent::interaction::{
 use peri_agent::middleware::capabilities as hook_state;
 use peri_agent::session::tool_catalog::{StartupRequiredTool, StartupToolUpdate};
 use peri_agent::tools::{BaseTool, EffectiveToolError, EffectiveToolErrorCode, ToolContext};
-use peri_resources::lsp::config::{LspConfigFile, LspServerConfig};
-use peri_resources::lsp::pool::LspServerPool;
+use peri_mcp_lsp::config::{LspConfigFile, LspServerConfig};
+use peri_mcp_lsp::pool::LspServerPool;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode,
     Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,

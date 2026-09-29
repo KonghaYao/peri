@@ -87,7 +87,7 @@
 | 冻结 prompt / skills | `assembly/prompt.rs`：`add_agents_md` / `add_skills` / `add_skill_preload`；仅在相应启用槽位调用，使用冻结数据和 session 注册表 |
 | Hook 组展开 | `assembly/hooks.rs::add_hooks`；保留组序、空组跳过及按槽位展开行为 |
 | MCP 构造副作用 | `assembly/mcp.rs::add_mcp`；checked projection lease 复用/绑定、ensure_discovery、notifier 注入按原顺序，仅从启用 Mcp 槽位调用 |
-| LSP 配置与池 | `assembly/lsp.rs`：`load_merged_lsp_servers` / `create_host_lsp_pool`（host 级唯一 pool）/ `add_lsp`；前两项由根公开，槽位只消费 `AssemblyContext::lsp_pool` 投影的端口，不建第二份 pool（session 级构造入口 `create_session_lsp_pool` 已随 H-04 删除） |
+| LSP 同步槽位 | `assembly/lsp.rs`：`add_lsp` | 只消费 `AssemblyContext::lsp_pool` 投影的 `LspPoolPort` 并挂载 `LspSyncMiddleware`；配置加载与 host 级唯一 pool 构造由 `peri_mcp_lsp::{load_merged_lsp_servers,create_host_lsp_pool}` 提供，不建第二份 pool。 |
 | Workflow agent 工厂 | `assembly/workflow.rs`：`WorkflowAgentMiddlewareFactory` / `default_workflow_middleware_factory`（根 re-export）；`resolve_agent_definition` / `build_tools` / `build_middlewares` / `build_tool_resolver` / `build_workflow_middleware`；独立链序、disabled 与 sandbox 契约不变 |
 
 ### deferred 工具（src/tool_search/）

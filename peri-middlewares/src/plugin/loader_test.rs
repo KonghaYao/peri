@@ -1,6 +1,6 @@
 use tempfile::tempdir;
 
-use peri_resources::lsp::config::LspConfigSource;
+use peri_mcp_lsp::config::LspConfigSource;
 
 use super::*;
 use crate::plugin::types::{

@@ -48,7 +48,7 @@
 //!
 //! 这**不构成缺口**：生产装配面本来就只经公开面注入 builtin 状态，因此真实 builtin
 //! cron / lsp 在本文件里可完整驱动 —— `peri_middlewares::assembly::{BuiltinInstanceContext,
-//! CronInstanceInput, LspInstanceInput, create_host_lsp_pool}` +
+//! CronInstanceInput, LspInstanceInput}` +
 //! `McpClientPool::{set_builtin_instance_context, run_initialize, reconnect, set_disabled,
 //! remove_server, shutdown}` 全部是 `pub`。本文件**未**为测试放宽任何生产符号可见性。
 

@@ -23,7 +23,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use parking_lot::Mutex;
 use peri_acp_types::builtin_mcp::find;
-use peri_resources::lsp::pool::LspServerPool;
+use peri_mcp_lsp::pool::LspServerPool;
 use thiserror::Error;
 
 use peri_mcp_cron::CronScheduler;
@@ -61,7 +61,7 @@ pub struct CronInstanceInput {
 /// ⇒ handler 工具面为空表），不得用「不注入」表达「无配置」——那会让实例退化成
 /// 「上下文缺失」而不是「可见但空」。
 pub struct LspInstanceInput {
-    /// host 级 LSP pool（经 `peri_resources::lsp` 门面构造）。
+    /// host 级 LSP pool（经 `peri_mcp_lsp` 门面构造）。
     pub pool: Arc<LspServerPool>,
 }
 

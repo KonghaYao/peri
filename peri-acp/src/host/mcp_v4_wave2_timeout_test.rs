@@ -227,7 +227,7 @@ async fn lsp_bridge_timeout_cancels_and_converges() {
         .map(|info| info.state.clone())
         .expect("host pool 必须登记延迟夹具 server");
     assert!(
-        matches!(state, peri_resources::lsp::client::ServerState::Running),
+        matches!(state, peri_mcp_lsp::client::ServerState::Running),
         "到期时 LSP 连接必须仍在（超时只 drop 客户端等待，不得重置 LSP 层）: {state:?}"
     );
     assert!(
@@ -262,8 +262,8 @@ async fn lsp_bridge_timeout_cancels_and_converges() {
     assert!(
         closed_state.iter().all(|info| !matches!(
             info.state,
-            peri_resources::lsp::client::ServerState::Starting
-                | peri_resources::lsp::client::ServerState::Running
+            peri_mcp_lsp::client::ServerState::Starting
+                | peri_mcp_lsp::client::ServerState::Running
         )),
         "收敛后 host LSP pool 必须处于终态（不得残留 Starting/Running）: {closed_state:?}"
     );

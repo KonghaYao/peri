@@ -5,7 +5,7 @@
 
 ## 架构速览
 
-- 定位：契约类型层（type contract layer between layers）——被 peri-agent、peri-acp、peri-middlewares、peri-runtime、peri-tui、peri-workflow、peri-lsp、peri-controller、peri-resources 共同依赖（各 Cargo.toml 均声明 `peri-acp-types`）；定义共享类型/枚举/trait；session 契约还包含共享队列、inbox 唤醒、cron task owner 与 cancel 判定，执行编排由 Agent 层负责
+- 定位：契约类型层（type contract layer between layers）——被 peri-agent、peri-acp、peri-middlewares、peri-runtime、peri-tui、peri-workflow、peri-controller、peri-resources 共同依赖（各 Cargo.toml 均声明 `peri-acp-types`）；定义共享类型/枚举/trait；session 契约还包含共享队列、inbox 唤醒、cron task owner 与 cancel 判定，执行编排由 Agent 层负责
 - 事实源矩阵（本层定义、他层 re-export 或消费）：`identity`（AgentId/EventEnvelope/CancelRequest）、`event_v2`（三层事件 + `*_event_to_executor`）、`compact`（CompactConfig/CompactOutcome）、`tools`（BaseTool）、`session`（TurnId/MessageQueue/AgentRuntime）、`messages`（BaseMessage/MessageContent）
 - 消费方式：peri-agent 大量 re-export（`src/agent/events_v2.rs:9`、`src/tools/mod.rs:8`、`src/agent/compact_v2/config.rs:8`、`src/session/turn.rs:17`、`src/messages/mod.rs:7`、`src/error.rs:6`）；peri-acp 消费事件映射与 cancel（`src/event/mod.rs:31`、`src/host/prompt_handle.rs:20`）；controller/runtime 直连 identity（`peri-controller/src/controller.rs:27`、`peri-runtime/src/runtime.rs:17`）
 - 稳定不变量：身份三元组 + epoch/attempt 不可复用（防迟到消息命中新实例）；`SessionSeq` 单调且**不实现 Default**（缺失必须显式 `Option`）；v2 事件强制携带 `turn_id` + `agent_id`；v1 `ExecutorEvent` 仅作协议序列化面载体，发射统一 v2（ARC-EVENT-001）

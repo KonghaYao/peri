@@ -21,10 +21,7 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 peri-acp-types = { path = "../peri-acp-types" }
-# 资源实现（PRD 决策 20）：peri-lsp / peri-workflow 作为 resource 实现接入，
-# 门面见 src/lsp.rs / src/workflow.rs。workflow 依赖环已解除
-# （peri-workflow → peri-agent 边切断，仅依赖契约层），接入后成环风险消除。
-peri-lsp = { path = "../peri-lsp" }
+# workflow 作为 resource 实现接入；LSP 已下沉至 peri-mcp-lsp，不再由 Resources 持有。
 peri-workflow = { path = "../peri-workflow" }
 
 [dev-dependencies]

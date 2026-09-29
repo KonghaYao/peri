@@ -26,20 +26,19 @@ use peri_agent::{
     session::factory::{build_middleware_chain, production_blueprint, ChainSlot},
     tools::BaseTool,
 };
+use peri_mcp_lsp::config::{LspConfigSource, LspServerConfig};
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     ModelStreamEvent, StopReason,
 };
-use peri_resources::lsp::config::{LspConfigSource, LspServerConfig};
 use peri_resources::workflow::protocol::{AgentRunParams, AgentRunResult};
 use peri_resources::workflow::runner::AgentExecutor;
 
 use crate::{
     agent_define::AgentOverrides,
     assembly::{
-        create_host_lsp_pool, default_workflow_middleware_factory,
-        default_workflow_middleware_factory_with_pool, load_merged_lsp_servers, AssemblyContext,
-        OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
+        default_workflow_middleware_factory, default_workflow_middleware_factory_with_pool,
+        AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
     },
     hooks::{HookEvent, HookType, RegisteredHook},
     mcp::{McpClientHandle, McpClientPool},

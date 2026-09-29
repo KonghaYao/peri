@@ -5,8 +5,8 @@
 
 ## 架构速览
 
-- 定位：外部系统数据访问通道（§0），以 context 形式提供给 Agent / Middleware / Controller；消费方不直接依赖底层 crate（peri-lsp / peri-workflow / peri-sessions），统一经本 crate 门面
-- 结构：`config`（peri-config：直操配置文件）、`sessions`（peri-sessions：直操 sqlite，自 peri-agent/src/thread 迁入）、`lsp` / `workflow`（资源实现门面，仅类型/能力出口）、`context`（`Resources` 唯一实例化入口）
+- 定位：外部系统数据访问通道（§0），以 context 形式提供给 Agent / Middleware / Controller；LSP 已不属于 Resources，直接由 `peri-mcp-lsp` 持有客户端与 pool
+- 结构：`config`（配置文件）、`sessions`（sqlite）、`workflow`（workflow 资源实现门面）、`context`（`Resources` 唯一实例化入口）；不再提供 `lsp` 门面
 - 稳定不变量：`ThreadStore` trait / `ThreadMeta` / `BaseMessage` / `MessageFlags` 事实源在 `peri-acp-types`（sessions/mod.rs 注释）；本 crate 只实现、不解释业务语义
 
 ## 速查表
@@ -33,7 +33,7 @@
 | 改失败分类映射 | `src/sessions/sqlite_store/failure.rs` | `read_failure` / `write_failure` / `execution_failure` / `binding_relation_failure` / `map_sqlx` / `not_found` / `read_only_store` / `lease_required` | 数据面、执行面与门面共用同一套映射：会话行缺失是 `NotFound`，本机 workspace 语义原样保留变体，唯一键冲突是「identity 已存在」，外键/未登记是 `InvalidBinding`，解码失败是「记录读不懂」，其余 SQL 失败是「后端暂不可用」 |
 | 改 SQLite 库的所有权/连接 | `src/sessions/sqlite_store/database.rs` + `connection.rs` | `SqliteSessionDatabase`（pool / read_only / db_path / execution_leases）；`open`、`open_existing_read_only`、`close`、`require_writable`、`probe_load_meta_shape`、`default_database_path`；`lock_schema_open` | 同一库只有一条连接真相：数据面与执行面各自持有同一 `Arc<SqliteSessionDatabase>`，不重建第二份 pool 或第二个库文件；`SqliteThreadStore` 仅为消费侧迁移桥（转发到共享句柄），E 阶段随 `ThreadStore` 一起退出 |
 | 改全局配置路径 | `src/config/mod.rs` | `peri_dir`（:9，`~/.peri`）；`settings_path`（:14，`~/.peri/settings.json`） | 仅路径入口，配置读取语义之外的逻辑不迁入本 crate |
-| 引用 LSP 能力 | `src/lsp.rs` | 门面：`pub use peri_lsp::{client, config, diagnostics, error, jsonrpc, pool, protocol, uri}` | 唯一引用入口；实例化/持有（池生命周期）收口至 Resources context 后，本模块仅类型/能力出口 |
+| 引用 LSP 能力 | `mcp-packages/lsp/src/{client,pool,config}.rs` | 由 `peri-mcp-lsp` 直接提供；Resources 不再 re-export LSP 类型或能力 |
 | 引用 Workflow 能力 | `src/workflow.rs` | 门面：`pub use peri_workflow::{error, journal, progress, protocol, registry, rpc, runner, tool}` | 同上；消费方（Middleware 等）不直接依赖 peri-workflow |
 
 ## 子系统
@@ -50,7 +50,7 @@
 | 测试文件存储 | src/sessions/filesystem.rs | `FilesystemThreadStore`（:25） |
 | SQLite 行写入原语 | src/sessions/sqlite_store/session_rows.rs | `ThreadRowInsert` / `insert_thread_row` / `insert_binding_row`（数据面与迁移桥共用同一份列清单与绑定形状校验） |
 | 会话存储 re-export / 只读入口 | src/sessions/mod.rs | `SqliteThreadStore` / `FilesystemThreadStore` / `SessionResourcesImpl`；`open_session_resources_read_only`（crate 内）；`default_database_path`（读写共用的纯路径解析） |
-| LSP 门面 | src/lsp.rs | 全量 re-export peri_lsp 模块 |
+| LSP 门面 | 已删除 | LSP 客户端、pool、配置与 MCP handler 归 `peri-mcp-lsp`；Resources 不保留兼容 shim |
 | Workflow 门面 | src/workflow.rs | 全量 re-export peri_workflow 模块 |
 
 ## 跨模块契约
@@ -59,4 +59,4 @@
 
 - 消费方：`peri-tui/src/app/mod.rs:88` 与 `peri-tui/src/cli_print.rs:136`（`Resources::open_with`，默认或显式路径失败均直接传播）；`peri-controller/src/controller.rs:222`（`Resources::open()` 后调用）；`peri-middlewares/src/`（lsp/middleware.rs:11-12、lsp/tool.rs:6-7、plugin/loader.rs:14、workflow/mod.rs、assembly.rs）
 - 契约类型：`ThreadStore` trait / `ThreadMeta` / `BaseMessage` / `MessageFlags` 事实源在 `peri-acp-types/src/store/mod.rs`（sessions/mod.rs 明确「接口契约归 peri-acp-types」）
-- 门面依赖：Cargo.toml 依赖 `peri-lsp`、`peri-workflow`（决策 20：既有 crate 归位），门面仅 re-export 不解释业务语义
+- 门面依赖：Cargo.toml 仅保留 `peri-workflow` 等实际 Resources 实现；LSP 不再进入 Resources 依赖图，也不保留 re-export shim

@@ -2,7 +2,7 @@
 
 ## Scope
 
-`mcp-packages/` contains the builtin MCP server implementations split by capability: shared behavior, web, artifact, cron, LSP, and workspace. Each package owns its capability's tools and server handler. The packages do not own host configuration, MCP client connections, readiness, process supervision, or shutdown.
+`mcp-packages/` contains the builtin MCP server implementations split by capability: shared behavior, web, artifact, cron, LSP, and workspace. Each package owns its capability's tools and server handler. The LSP package also owns the LSP client and host-shared pool implementation; the host retains configuration injection, readiness admission, process supervision, and shutdown authority.
 
 The dependency direction is inward: packages may use `peri-agent`, `peri-acp-types`, `peri-resources`, and `peri-mcp-common` as needed. They must not depend on `peri-middlewares` or ACP host implementation. `peri-middlewares` remains the composition and lifecycle host and depends on these packages.
 
@@ -10,7 +10,7 @@ Before changing code, explicitly read the relevant standards. Peri does not inhe
 
 ## Data flow and boundaries
 
-The ACP host creates the builtin instance context, selects the handler, and owns MCP transport and client lifecycle. A capability package constructs its handler and tools; `peri-mcp-common` supplies shared tool-schema conversion, tool-call result mapping, numeric parameter parsing, and process-environment locking. The host connects the handler to the client and retains readiness, cancellation, bridge, and shutdown ownership.
+The ACP host creates the builtin instance context, selects the handler, and owns MCP transport and client lifecycle. A capability package constructs its handler and tools; `peri-mcp-common` supplies shared tool-schema conversion, tool-call result mapping, numeric parameter parsing, and process-environment locking. For LSP, the package constructs the host-scoped pool and the handler owns the same injected `Arc`; the host still retains the shutdown handle and invokes bounded shutdown. The host connects the handler to the client and retains readiness, cancellation, bridge, and shutdown ownership.
 
 Workspace's `WorkspaceInstanceInput` carries the session's task manager and background completion callback into `WorkspaceMcpServer`. The host supplies it before builtin initialization. Missing input is a supported degraded mode; it does not hide the workspace tools. The input does not transfer lifecycle ownership to the package.
 
@@ -35,7 +35,7 @@ Host wire, pool, bridge, readiness, and shutdown tests belong in `peri-middlewar
 - Shared behavior has one implementation in `peri-mcp-common`. Keep safe error projection, argument defaults, schema conversion, and declared tool ordering consistent across packages.
 - `server_info(name, version)` receives the capability package's version; the common package version must not appear as the server implementation version.
 - Output persistence and byte truncation use the canonical `peri_agent::agent::async_tasks` functions. Do not recreate aliases or copy their rules here.
-- A package owns its handler and tools, while the host owns connections, pool visibility, readiness, task supervision, cancellation delivery, and orderly shutdown. Preserve those boundaries when changing call behavior.
+- A package owns its handler and tools. The LSP package additionally owns its client/pool implementation and the builtin handler holds the injected host-scoped pool; the host owns pool visibility, shutdown invocation, readiness admission, task supervision, cancellation delivery, and orderly shutdown. Preserve these shared-pool boundaries when changing call behavior.
 - Workspace tools retain their existing schema, names, declaration order, cwd binding, timeout and cancellation behavior. `WorkspaceInstanceInput` is session-scoped; the host remains its source and lifecycle owner.
 - Preserve direct/deferred visibility and approval behavior. Follow `ARC-MIDDLEWARE-001`, `ARC-CAPABILITY-CLOSURE-001`, `ARC-TOOLS-001`, `ARC-CANCEL-001`, and `ARC-HOST-SHUTDOWN-001` where applicable; the standards are authoritative.
 

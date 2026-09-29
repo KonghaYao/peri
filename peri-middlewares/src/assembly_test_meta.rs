@@ -52,7 +52,10 @@ fn meta_harness_disables_conditional_middleware_despite_conditions() {
     // `lsp_slot_omitted_when_instance_or_sync_closed`，此处只锁「条件满足但关闭后不装」。
     let mut ctx = base_context();
     ctx.lsp_servers = vec![make_lsp_config()];
-    ctx.lsp_pool = Some(create_host_lsp_pool("/tmp/contract-test", &ctx.lsp_servers));
+    ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
+        "/tmp/contract-test",
+        &ctx.lsp_servers,
+    ));
     ctx.meta_harness_disabled
         .insert("LspMiddleware".to_string());
     let names = assemble_names(&ctx);

@@ -48,7 +48,10 @@ async fn off_has_zero_builtin_injection() {
                     tick_enabled: true,
                 })
                 .with_lsp(LspInstanceInput {
-                    pool: create_host_lsp_pool(&cwd, &[lsp_server_config("off_probe")]),
+                    pool: peri_mcp_lsp::create_host_lsp_pool(
+                        &cwd,
+                        &[lsp_server_config("off_probe")],
+                    ),
                 }),
         )
         .await;
@@ -169,7 +172,7 @@ async fn off_has_zero_builtin_injection() {
                 tick_enabled: true,
             })
             .with_lsp(LspInstanceInput {
-                pool: create_host_lsp_pool(&cwd, &[]),
+                pool: peri_mcp_lsp::create_host_lsp_pool(&cwd, &[]),
             }),
     )
     .await;

@@ -59,9 +59,7 @@ use std::{
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use peri_acp_types::{messages::MessageContent, ports::McpPoolPort};
-use peri_middlewares::assembly::{
-    create_host_lsp_pool, BuiltinInstanceContext, CronInstanceInput, LspInstanceInput,
-};
+use peri_middlewares::assembly::{BuiltinInstanceContext, CronInstanceInput, LspInstanceInput};
 use peri_middlewares::mcp::{ClientStatus, McpClientPool, McpInitStatus, McpTaskOwner};
 use peri_model::{
     JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
@@ -231,7 +229,7 @@ impl WireFixtureHarness {
     ///
     /// `home_settings_json` 非空时，在**池构造之前**把它写进夹具临时 HOME 的
     /// `~/.peri/settings.json`，并用生产加载函数
-    /// （`peri_middlewares::assembly::load_merged_lsp_servers`）从该文件解析 LSP 配置，
+    /// （`peri_mcp_lsp::load_merged_lsp_servers`）从该文件解析 LSP 配置，
     /// 喂给 builtin `lsp` 实例的 host pool —— 即生产装配的同一条链
     /// （`peri-acp/src/host/assemble.rs`：settings → `load_merged_lsp_servers` →
     /// `create_host_lsp_pool` → 注入 → `run_initialize`）。`None` ⇒ 空配置 host pool
@@ -307,7 +305,7 @@ impl WireFixtureHarness {
                 std::fs::create_dir_all(settings_path.parent().expect("settings.json 必有父目录"))
                     .expect("创建临时 HOME 下的 ~/.peri");
                 std::fs::write(&settings_path, json).expect("写入 LSP settings.json");
-                peri_middlewares::assembly::load_merged_lsp_servers(&settings_path, Vec::new())
+                peri_mcp_lsp::load_merged_lsp_servers(&settings_path, Vec::new())
             }
             None => Vec::new(),
         };
@@ -395,7 +393,7 @@ impl WireFixtureHarness {
                     tick_enabled: false,
                 })
                 .with_lsp(LspInstanceInput {
-                    pool: create_host_lsp_pool(&cwd, lsp_servers),
+                    pool: peri_mcp_lsp::create_host_lsp_pool(&cwd, lsp_servers),
                 }),
         ))
         .expect("夹具池首次注入必须成功（不存在二次注入）");

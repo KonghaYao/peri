@@ -14,11 +14,11 @@ use peri_acp_types::{
     ports::{McpPoolPort, McpPoolShutdownReport},
 };
 use peri_mcp_cron::{CronScheduler, CronTrigger};
-use peri_middlewares::{
-    assembly::{create_host_lsp_pool, BuiltinInstanceContext, CronInstanceInput, LspInstanceInput},
-    mcp::{ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, McpTaskOwner},
+use peri_mcp_lsp::{client::ServerState, pool::LspServerPool};
+use peri_middlewares::assembly::{BuiltinInstanceContext, CronInstanceInput, LspInstanceInput};
+use peri_middlewares::mcp::{
+    ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, McpTaskOwner,
 };
-use peri_resources::lsp::{client::ServerState, pool::LspServerPool};
 use rmcp::model::{CallToolRequestParams, ContentBlock};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -421,7 +421,8 @@ async fn builtin_isolation_fixture() -> BuiltinIsolationFixture {
 
     let (cron_trigger_tx, triggers) = mpsc::unbounded_channel();
     let scheduler = Arc::new(Mutex::new(CronScheduler::new(cron_trigger_tx)));
-    let lsp_pool = create_host_lsp_pool(&cwd.to_string_lossy(), &[lsp.config(dir.path())]);
+    let lsp_pool =
+        peri_mcp_lsp::create_host_lsp_pool(&cwd.to_string_lossy(), &[lsp.config(dir.path())]);
     let context = BuiltinInstanceContext::new(cwd.to_string_lossy().into_owned())
         .with_cron(CronInstanceInput {
             scheduler: Arc::clone(&scheduler),

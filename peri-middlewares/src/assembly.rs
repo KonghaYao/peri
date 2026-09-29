@@ -24,7 +24,6 @@ mod workflow;
 pub use crate::mcp::builtin::context::{
     BuiltinContextError, BuiltinInstanceContext, CronInstanceInput, LspInstanceInput,
 };
-pub use lsp::{create_host_lsp_pool, load_merged_lsp_servers};
 pub use workflow::{
     default_workflow_middleware_factory, default_workflow_middleware_factory_with_pool,
     WorkflowAgentMiddlewareFactory,

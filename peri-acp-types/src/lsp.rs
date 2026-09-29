@@ -1,7 +1,7 @@
 //! LSP 服务器配置契约。
 //!
-//! 自 `peri-lsp/src/config.rs` 迁入（3.0 批 2 波 1：协议类型归契约层；
-//! peri-lsp 保留 re-export 保兼容）。加载/展开逻辑留在 peri-lsp。
+//! 类型定义随 3.0 批 2 波 1 由 LSP 实现迁入契约层；LSP 客户端、pool 与
+//! 配置加载/合并现归 `mcp-packages/lsp`（crate `peri-mcp-lsp`）。
 
 use std::{collections::HashMap, path::PathBuf};
 

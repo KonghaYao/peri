@@ -1,6 +1,6 @@
+use crate::protocol::lsp_types;
+use crate::uri::uri_to_path as lsp_uri_to_path;
 use lsp_types::{Location, LocationLink, SymbolKind};
-use peri_resources::lsp::protocol::lsp_types;
-use peri_resources::lsp::uri::uri_to_path as lsp_uri_to_path;
 
 struct CallHierarchyEntry<'a> {
     name: &'a str,
@@ -450,7 +450,7 @@ pub fn format_outgoing_calls(calls: &[lsp_types::CallHierarchyOutgoingCall]) -> 
 }
 
 /// 格式化诊断结果
-pub fn format_diagnostics(entries: &[peri_resources::lsp::diagnostics::DiagnosticEntry]) -> String {
+pub fn format_diagnostics(entries: &[crate::diagnostics::DiagnosticEntry]) -> String {
     if entries.is_empty() {
         return "No diagnostics found.".to_string();
     }
@@ -458,7 +458,7 @@ pub fn format_diagnostics(entries: &[peri_resources::lsp::diagnostics::Diagnosti
     // 按文件分组
     let mut file_groups: std::collections::HashMap<
         String,
-        Vec<&peri_resources::lsp::diagnostics::DiagnosticEntry>,
+        Vec<&crate::diagnostics::DiagnosticEntry>,
     > = std::collections::HashMap::new();
     for entry in entries {
         file_groups
@@ -473,10 +473,10 @@ pub fn format_diagnostics(entries: &[peri_resources::lsp::diagnostics::Diagnosti
         lines.push(format!("{path}:"));
         for entry in entries {
             let severity = match entry.severity {
-                peri_resources::lsp::diagnostics::DiagnosticSeverity::Error => "Error",
-                peri_resources::lsp::diagnostics::DiagnosticSeverity::Warning => "Warning",
-                peri_resources::lsp::diagnostics::DiagnosticSeverity::Information => "Info",
-                peri_resources::lsp::diagnostics::DiagnosticSeverity::Hint => "Hint",
+                crate::diagnostics::DiagnosticSeverity::Error => "Error",
+                crate::diagnostics::DiagnosticSeverity::Warning => "Warning",
+                crate::diagnostics::DiagnosticSeverity::Information => "Info",
+                crate::diagnostics::DiagnosticSeverity::Hint => "Hint",
             };
             lines.push(format!(
                 "  {}:{}: [{}] {}",

@@ -1,6 +1,6 @@
 # MCP package 代码索引
 
-Builtin MCP 的工具与 server handler 由独立 crate 持有；MCP 实例注册、配置、transport、宿主 context、policy 与生命周期仍由 `peri-middlewares` 装配。每个 crate 的依赖方向面向 `peri-mcp-common`、`peri-agent` / `peri-resources` 等稳定能力接口，不依赖 `peri-middlewares`。
+Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate 持有；MCP 实例注册、配置、transport、宿主 context、policy 与生命周期仍由 `peri-middlewares` 装配。每个 crate 的依赖方向面向 `peri-mcp-common`、`peri-agent` / `peri-acp-types` / `peri-resources` 等稳定能力接口，不依赖 `peri-middlewares`。
 
 宿主侧入口见 [`peri-middlewares` 代码索引](peri-middlewares.md)。本文是插件包的当前路径索引；设计契约见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 与 [`MCP 适配设计`](../design/mcp-adaptation-v4-part-1.md)。
 
@@ -12,7 +12,7 @@ Builtin MCP 的工具与 server handler 由独立 crate 持有；MCP 实例注�
 | Web | `peri-mcp-web`：`mcp-packages/web/src/lib.rs` | `WebMcpServer`、`web_fetch.rs`、`web_search.rs`、`web_common.rs` | 公共工具面为 `WebMcpServer`、`WebFetchTool`、`WebSearchTool`；工具描述位于 `src/descriptions/`。 |
 | Artifact | `peri-mcp-artifact`：`mcp-packages/artifact/src/lib.rs` | `ArtifactMcpServer`、`ArtifactTool`、`ArtifactClient` | 上传协议与 Markdown 转 HTML 归该 crate；模板位于 `src/descriptions/md_to_html_template.html`。 |
 | Cron | `peri-mcp-cron`：`mcp-packages/cron/src/lib.rs` | `CronMcpServer`、`scheduler.rs`、`tools.rs` | `CronScheduler`、`CronSchedulerPortHandle`、scheduler types 与三种工具由该 crate 导出。宿主 tick task 的 spawn、join 与 reconnect 仍归 `peri-middlewares` runtime。 |
-| LSP | `peri-mcp-lsp`：`mcp-packages/lsp/src/lib.rs` | `LspMcpServer`、`LspTool`、`tool.rs`、`formatters.rs` | MCP 工具、协议格式化与配置快照归该 crate。写入后的文档同步中间件 `LspSyncMiddleware` 仍在 `peri-middlewares/src/lsp/middleware.rs`。 |
+| LSP | `peri-mcp-lsp`：`mcp-packages/lsp/src/lib.rs` | `LspMcpServer`、`LspTool`、`LspClient`、`LspServerPool`、`tool.rs`、`formatters.rs`、`config.rs` | MCP 工具、客户端、协议格式化、配置合并与 host 级唯一 pool 归该 crate；host 装配经 `create_host_lsp_pool` 注入同一 `Arc`，`LspSyncMiddleware` 只消费端口，host shutdown 负责调用有界关闭。 |
 | Workspace | `peri-mcp-workspace`：`mcp-packages/workspace/src/lib.rs` | `WorkspaceMcpServer`、`workspace.rs`、`filesystem/`、`terminal.rs`、`fuzzy.rs`、`shell_hints.rs`、`filesystem/path_hints.rs` | 文件、目录、搜索和 Bash 工具的 handler 与实现归该 crate；输出持久化 / 截断复用 `peri-agent::agent::async_tasks` 的 canonical helper。失败点的可行动诊断（路径 did-you-mean、命令未找到的 PATH 候选）也归该 crate，见下节。 |
 
 ## 宿主与插件边界
@@ -20,7 +20,7 @@ Builtin MCP 的工具与 server handler 由独立 crate 持有；MCP 实例注�
 - `peri-middlewares/src/mcp/builtin/mod.rs` 持有 builtin 配置 overlay、实例关闭策略与名称映射；`dispatch.rs` 构造新 crate 导出的 handler。
 - `context.rs` 持有注入给 server 的宿主上下文，`runtime.rs` 持有内存 transport、server task 与有界关闭；Cron tick 监督也在这里。
 - `peri-acp-types` 持有 builtin 实例与工具声明、名称及 direct/deferred 策略。插件 crate 不复制这些策略表。
-- `LspSyncMiddleware` 保留在 `peri-middlewares/src/lsp/`，只消费 host LSP pool 端口同步 `Write` / `Edit`；它不提供 `LspTool`。
+- `LspSyncMiddleware` 保留在 `peri-middlewares/src/lsp/`，只消费 host 装配从 `peri_mcp_lsp::create_host_lsp_pool` 投影出的 `LspPoolPort`，与 builtin `lsp` handler 共用同一 pool；它不提供 `LspTool`，也不构造 pool。
 - 各插件 crate 内测试覆盖工具行为、handler 路由和 RMCP wire；host transport、dispatch、bridge、policy、tick 与 pool lifecycle 测试留在对应宿主 crate。
 - 失败恢复指引由工具在失败点生成（`ToolFailure { recovery, detail }`），宿主不做事后文本匹配：路径候选在 `workspace/src/filesystem/path_hints.rs`（Read / Edit / Glob / Grep / folder_operations 的"目标不存在"分支；Edit 的 `old_string not found` 文本失败除外），命令候选在 `workspace/src/shell_hints.rs`（仅 exit 127 + command-not-found 文案），两者共用 `workspace/src/fuzzy.rs` 的 Skim 排序。原 `peri-agent` / `peri-middlewares` 的 error_suggest 框架已删除。
 

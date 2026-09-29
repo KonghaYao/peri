@@ -1,4 +1,4 @@
-//! LSP MCP handler; host runtime and builtin lifecycle remain in `peri-middlewares`.
+//! LSP MCP handler；host runtime 与 builtin lifecycle 仍由 `peri-middlewares` 管理。
 //!
 //! 复用既有 [`LspTool`] ——**不重写** schema、不复制
 //! formatter 与 `invoke` 语义，handler 只做 `tools/list` 声明、`tools/call` 路由与
@@ -15,8 +15,8 @@
 //! 运行期变更配置**不会**改变已构造实例的工具面——配置热更新是**显式非目标**（同一
 //! 进程内配置变更的生效路径是重建 handler / 重连，不是本 handler 重读 pool）。
 //!
-//! 类型边界：`LspServerPool` 经 `peri_resources::lsp::pool` 引入（层级门禁：
-//! `peri-middlewares` 不直接依赖 `peri_lsp` crate）。
+//! 类型边界：`LspServerPool` 经 `crate::pool` 引入；本 crate 自包含 LSP 客户端、配置、协议与 pool，
+//! `peri-middlewares` 只依赖其公开构造和 handler。
 //!
 //! 边界：
 //! - **不覆写 `discover`**（§10 R2）：覆写会让同一连接上的 `tools/list` 被会话层以
@@ -27,8 +27,8 @@
 
 use std::sync::Arc;
 
+use crate::pool::LspServerPool;
 use peri_agent::tools::BaseTool;
-use peri_resources::lsp::pool::LspServerPool;
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, ListToolsResult, PaginatedRequestParams,

@@ -282,7 +282,7 @@ fn conditional_registration_matrix() {
     // 只有配置没有 pool 不再装中间件）。
     let mut with_lsp = base_context();
     with_lsp.lsp_servers = vec![make_lsp_config()];
-    with_lsp.lsp_pool = Some(create_host_lsp_pool(
+    with_lsp.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
         "/tmp/contract-test",
         &with_lsp.lsp_servers,
     ));
@@ -309,7 +309,10 @@ fn conditional_registration_matrix() {
 fn lsp_pool_port_injected_registers_middleware() {
     let mut ctx = base_context();
     ctx.lsp_servers = vec![make_lsp_config()];
-    ctx.lsp_pool = Some(create_host_lsp_pool("/tmp/contract-test", &ctx.lsp_servers));
+    ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
+        "/tmp/contract-test",
+        &ctx.lsp_servers,
+    ));
 
     let names = assemble_names(&ctx);
     let pos_lsp = names.iter().position(|n| n == "LspSyncMiddleware").unwrap();
@@ -343,7 +346,10 @@ fn production_chain_has_only_lsp_sync_slot() {
     // 有配置 + host pool：槽位装同步中间件，旧名不回流。
     let mut ctx = base_context();
     ctx.lsp_servers = vec![make_lsp_config()];
-    ctx.lsp_pool = Some(create_host_lsp_pool("/tmp/contract-test", &ctx.lsp_servers));
+    ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
+        "/tmp/contract-test",
+        &ctx.lsp_servers,
+    ));
     let names = assemble_names(&ctx);
     assert!(
         names.iter().any(|n| n == "LspSyncMiddleware"),
@@ -356,7 +362,10 @@ fn production_chain_has_only_lsp_sync_slot() {
 
     // 无配置：即使 pool 存在也不装（配置非空前置条件保留）。
     let mut no_config = base_context();
-    no_config.lsp_pool = Some(create_host_lsp_pool("/tmp/contract-test", &[]));
+    no_config.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
+        "/tmp/contract-test",
+        &[],
+    ));
     let names_no_config = assemble_names(&no_config);
     assert!(
         !names_no_config.iter().any(|n| n == "LspSyncMiddleware"),
@@ -382,7 +391,10 @@ fn lsp_slot_omitted_when_instance_or_sync_closed() {
     {
         let mut ctx = base_context();
         ctx.lsp_servers = vec![make_lsp_config()];
-        ctx.lsp_pool = Some(create_host_lsp_pool("/tmp/contract-test", &ctx.lsp_servers));
+        ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
+            "/tmp/contract-test",
+            &ctx.lsp_servers,
+        ));
         if instance_closed {
             ctx.meta_harness_disabled
                 .insert("LspMiddleware".to_string());
@@ -414,13 +426,14 @@ fn lsp_slot_omitted_when_instance_or_sync_closed() {
 /// 进程，构造/断言就会失败。
 #[test]
 fn host_lsp_pool_factory_allows_empty_config() {
-    let empty = create_host_lsp_pool("/tmp/contract-test", &[]);
+    let empty = peri_mcp_lsp::create_host_lsp_pool("/tmp/contract-test", &[]);
     assert!(
         !empty.has_servers(),
         "空配置的 host pool 不得声称有可用 server"
     );
 
-    let with_server = create_host_lsp_pool("/tmp/contract-test", &[make_lsp_config()]);
+    let with_server =
+        peri_mcp_lsp::create_host_lsp_pool("/tmp/contract-test", &[make_lsp_config()]);
     assert!(
         with_server.has_servers(),
         "有配置时 host pool 应登记 server（只登记配置表，不拉进程）"
@@ -440,7 +453,7 @@ fn merged_lsp_servers_global_without_plugins_registers_middleware() {
     )
     .unwrap();
 
-    let merged = load_merged_lsp_servers(&settings, Vec::new());
+    let merged = peri_mcp_lsp::load_merged_lsp_servers(&settings, Vec::new());
     assert_eq!(merged.len(), 1, "全局配置应单独生效");
     let server = &merged[0];
     assert_eq!(server.name, "rust-analyzer");
@@ -453,7 +466,10 @@ fn merged_lsp_servers_global_without_plugins_registers_middleware() {
     // 装配级：合并结果 → host 级 pool → 链上注册 LspSyncMiddleware
     let mut ctx = base_context();
     ctx.lsp_servers = merged.clone();
-    ctx.lsp_pool = Some(create_host_lsp_pool("/tmp/contract-test", &ctx.lsp_servers));
+    ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
+        "/tmp/contract-test",
+        &ctx.lsp_servers,
+    ));
     let names = assemble_names(&ctx);
     assert!(
         names.iter().any(|n| n == "LspSyncMiddleware"),
@@ -477,7 +493,7 @@ fn merged_lsp_servers_plugin_overrides_global() {
         command: "plugin-bin".to_string(),
         ..make_lsp_config()
     };
-    let merged = load_merged_lsp_servers(&settings, vec![plugin]);
+    let merged = peri_mcp_lsp::load_merged_lsp_servers(&settings, vec![plugin]);
     assert_eq!(merged.len(), 1, "同名 key 应合并为一条");
     assert_eq!(merged[0].command, "plugin-bin", "插件应覆盖全局");
 }
@@ -488,11 +504,11 @@ fn merged_lsp_servers_plugin_overrides_global() {
 fn merged_lsp_servers_empty_without_global_config() {
     let temp = tempfile::tempdir().unwrap();
     let missing = temp.path().join("missing.json");
-    assert!(load_merged_lsp_servers(&missing, Vec::new()).is_empty());
+    assert!(peri_mcp_lsp::load_merged_lsp_servers(&missing, Vec::new()).is_empty());
 
     let no_lsp = temp.path().join("settings.json");
     std::fs::write(&no_lsp, r#"{"config":{"mcpServers":{}}}"#).unwrap();
-    assert!(load_merged_lsp_servers(&no_lsp, Vec::new()).is_empty());
+    assert!(peri_mcp_lsp::load_merged_lsp_servers(&no_lsp, Vec::new()).is_empty());
 }
 
 /// 全开组合：完整序列精确断言（Hook 2 组 + MCP + Workflow + LSP + Goal）。
@@ -504,7 +520,10 @@ fn full_config_chain_order() {
     ctx.workflow_executor = Some(Arc::new(FakeAgentExecutor));
     ctx.lsp_servers = vec![make_lsp_config()];
     // H-03 单 pool 门控：同步槽位需要 host pool（只有配置不够）。
-    ctx.lsp_pool = Some(create_host_lsp_pool("/tmp/contract-test", &ctx.lsp_servers));
+    ctx.lsp_pool = Some(peri_mcp_lsp::create_host_lsp_pool(
+        "/tmp/contract-test",
+        &ctx.lsp_servers,
+    ));
     ctx.goal_controller = Some(Arc::new(FakeGoalController));
 
     let names = assemble_names(&ctx);

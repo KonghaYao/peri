@@ -21,7 +21,7 @@ use peri_acp_types::{
     tasks::{BgTaskKind, TaskManager},
 };
 use peri_agent::agent::async_tasks::TaskManager as ConcreteTaskManager;
-use peri_resources::lsp::{config::LspConfigFile, pool::LspServerPool};
+use peri_mcp_lsp::{config::LspConfigFile, pool::LspServerPool};
 
 use super::{BuiltinInstanceContext, CronInstanceInput, LspInstanceInput};
 use crate::mcp::builtin::closed_instances;

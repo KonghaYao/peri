@@ -30,11 +30,12 @@ peri-acp-types = { path = "../peri-acp-types" }
 #   dispatch/* + session/agent_pool.rs 执行上下文签名、event/mapper.rs
 #   StopReason 协议映射（随 v1 退役收敛）。
 # - check-layer-imports.sh 为验收门：非测试、非豁免路径代码禁止引用
-#   peri-middlewares / peri-lsp / peri-workflow（豁免见 scripts/import-exemptions.conf）。
+#   peri-middlewares / peri-workflow（豁免见 scripts/import-exemptions.conf）。
 peri-agent = { path = "../peri-agent" }
 peri-controller = { path = "../peri-controller" }
 peri-model = { path = "../peri-model" }
 peri-middlewares = { path = "../peri-middlewares" }
+peri-mcp-lsp.workspace = true
 peri-resources = { path = "../peri-resources" }
 peri-mcp-cron.workspace = true
 peri-mcp-workspace.workspace = true

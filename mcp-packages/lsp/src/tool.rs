@@ -1,10 +1,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::pool::LspServerPool;
+use crate::uri::path_to_uri;
 use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
-use peri_resources::lsp::pool::LspServerPool;
-use peri_resources::lsp::uri::path_to_uri;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -105,11 +105,7 @@ impl LspTool {
     /// client 侧维护 open_files 缓存，did_open 幂等（重复调用不再发通知，
     /// 服务器 try_restart 后缓存清空）。文件读取失败或通知发送失败仅记
     /// debug 日志，不阻塞后续查询。
-    async fn ensure_file_open(
-        &self,
-        server: &Arc<peri_resources::lsp::client::LspClient>,
-        file_path: &str,
-    ) {
+    async fn ensure_file_open(&self, server: &Arc<crate::client::LspClient>, file_path: &str) {
         let uri = Self::file_to_uri(file_path);
         let text = match tokio::fs::read_to_string(file_path).await {
             Ok(t) => t,
@@ -123,7 +119,7 @@ impl LspTool {
                 return;
             }
         };
-        let language_id = peri_resources::lsp::client::LspClient::infer_language_id(&uri);
+        let language_id = crate::client::LspClient::infer_language_id(&uri);
         if let Err(e) = server.did_open(&uri, &language_id, &text).await {
             tracing::debug!(target: "lsp", file = %file_path, error = %e, "LSP didOpen 失败");
         }
@@ -134,7 +130,7 @@ impl LspTool {
     async fn get_initialized_server(
         &self,
         file_path: &str,
-    ) -> Result<Arc<peri_resources::lsp::client::LspClient>, LspToolError> {
+    ) -> Result<Arc<crate::client::LspClient>, LspToolError> {
         match self.pool.server_for_file(file_path) {
             Some(s) if s.is_ready() => Ok(s),
             Some(s) => {
@@ -142,8 +138,7 @@ impl LspTool {
                 let state = s.state();
                 if matches!(
                     state,
-                    peri_resources::lsp::client::ServerState::Error(_)
-                        | peri_resources::lsp::client::ServerState::Stopped
+                    crate::client::ServerState::Error(_) | crate::client::ServerState::Stopped
                 ) {
                     // 服务器崩溃或停止，尝试重启
                     tracing::warn!(
@@ -200,9 +195,7 @@ impl LspTool {
     }
 
     /// 获取任意一个已就绪的服务器，尝试重启崩溃的服务器
-    async fn get_any_ready_server(
-        &self,
-    ) -> Result<Arc<peri_resources::lsp::client::LspClient>, LspToolError> {
+    async fn get_any_ready_server(&self) -> Result<Arc<crate::client::LspClient>, LspToolError> {
         if let Some(s) = self.pool.any_server() {
             return Ok(s);
         }
@@ -214,8 +207,7 @@ impl LspTool {
             let state = s.state();
             if matches!(
                 state,
-                peri_resources::lsp::client::ServerState::Error(_)
-                    | peri_resources::lsp::client::ServerState::Stopped
+                crate::client::ServerState::Error(_) | crate::client::ServerState::Stopped
             ) {
                 tracing::warn!(
                     target: "lsp",

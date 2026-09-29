@@ -195,7 +195,7 @@ flowchart LR
 | 10 | `WebMiddleware` | 现行工具与 handler：`mcp-packages/web/src/`；历史 middleware 类型 `peri-middlewares/src/middleware/web.rs` 已删除 | 目标：完全下放 → Web MCP | `WebSearch` 与 `WebFetch` 统一进入 Web MCP，Agent 侧只保留 MCP 对接。 |
 | 11 | `TodoMiddleware` | `peri-middlewares/src/middleware/todo.rs` | 部分下放 | Todo 文件/工具操作可由 Workspace MCP 执行，但 todo channel 与 session/UI 状态回写仍由宿主注入。 |
 | 12 | `CronMiddleware` | 现行 scheduler、工具与 handler：`mcp-packages/cron/src/`；宿主 tick supervision：`peri-middlewares/src/mcp/builtin/runtime.rs`；历史 middleware 类型 `peri-middlewares/src/cron/middleware.rs` 已删除 | 目标：完全下放 → Cron MCP | scheduler、注册/查询/删除和触发事件进入 Cron MCP；当前 tick task 的 spawn、reconnect 与 join 由宿主 runtime 监督。Agent 侧通过 MCP 对接和宿主事件端口接收触发。 |
-| 13 | `LspMiddleware` | 现行工具与 handler：`mcp-packages/lsp/src/`；文档同步中间件：`peri-middlewares/src/lsp/middleware.rs`（`LspSyncMiddleware`）；历史工具中间件路径已不再存在 | 目标：完全下放 → LSP MCP | LSP 工具、格式化与配置快照由独立 MCP crate 提供；宿主保留 pool 生命周期与写入后的文档同步中间件。 |
+| 13 | `LspMiddleware` | LSP 客户端、pool、配置加载、工具与 handler：`mcp-packages/lsp/src/`；文档同步中间件：`peri-middlewares/src/lsp/middleware.rs`（`LspSyncMiddleware`） | 已完成：完全下放 → LSP MCP | LSP MCP 拥有客户端与 host 级唯一 pool；host 装配经 `peri_mcp_lsp::create_host_lsp_pool` 注入同一 `Arc`，`LspSyncMiddleware` 只消费端口，host shutdown 保留有界关闭。 |
 | 14 | `WorkflowMiddlewareAdaptor` | `peri-middlewares/src/workflow/mod.rs` | 独立 Middleware | Workflow executor、progress、通知、kill/resume 和 session 生命周期属于 Runtime，不下放到 MCP。 |
 | 15 | `FilesystemMiddleware` | 现行文件工具：`mcp-packages/workspace/src/filesystem/`；历史 middleware 类型 `peri-middlewares/src/middleware/filesystem.rs` 已删除 | 目标：完全下放 → Workspace MCP | filesystem 工具、workspace path 解析、读写和目录操作统一由 Workspace MCP 提供，宿主保留 MCP 对接。 |
 | 16 | `TerminalMiddleware` | 现行 Bash 工具：`mcp-packages/workspace/src/terminal.rs`；历史 middleware 类型 `peri-middlewares/src/middleware/terminal.rs` 已删除 | 目标：完全下放 → Workspace MCP | terminal/Bash 工具、进程执行和任务输出统一由 Workspace MCP 提供，宿主保留 MCP 对接。 |
@@ -218,7 +218,7 @@ flowchart LR
 
 - `WorkflowMiddleware`：`peri-middlewares/src/workflow/mod.rs`，由 `WorkflowMiddlewareAdaptor` 接入链。
 - `CronScheduler`：现位于 `mcp-packages/cron/src/scheduler.rs`；宿主消费 `CronSchedulerPort` 并负责该代 tick task 的监督。
-- `LspServerPool`：由 `peri-resources` 提供，迁移后应成为 LSP MCP 内部状态，Agent/Runtime 通过 MCP 请求与文件变更同步端口接入。
+- `LspServerPool`：由 `peri-mcp-lsp` 提供，已成为 LSP MCP 内部实现；host 装配通过公开 seam 注入同一 `Arc`，Agent/Runtime 只经 MCP 请求与文件变更同步端口接入。
 - `McpClientPool`、`McpTaskOwner`、`DynamicMcpRegistry`：`peri-middlewares/src/mcp/`，由 `McpMiddleware` 和 `DynamicMcpMiddleware` 使用。
 - `SkillTool`、`DiscoverSkillsTool`、`SubAgentTool`、各类 filesystem/web/terminal 工具：由对应 middleware 的 `collect_tools` 提供，不是单独的 middleware。
 - `ProductionChainAssembler`：`peri-middlewares/src/assembly.rs`，是所有 middleware 的组合根，不是 middleware；迁移时应保留为装配层。

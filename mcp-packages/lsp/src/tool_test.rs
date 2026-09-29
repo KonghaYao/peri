@@ -4,11 +4,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::*;
+use crate::config::{LspConfigFile, LspServerConfig};
+use crate::pool::LspServerPool;
 use peri_agent::tools::ToolContext;
-use peri_resources::lsp::config::{LspConfigFile, LspServerConfig};
-use peri_resources::lsp::pool::LspServerPool;
 
-/// perl 编写的极简 LSP 服务器（同 peri-lsp client_test.rs）：
+/// perl 编写的极简 LSP 服务器（同 client_test.rs）：
 /// - 每次 spawn 向 `$PERI_LSP_TEST_COUNT` 追加一行 "spawned"
 /// - didOpen 通知的完整 JSON body 追加到 `$PERI_LSP_TEST_DIDOPEN`
 /// - 对任何带 id 的请求回 `{"result":null}`（满足 initialize 握手与查询请求）

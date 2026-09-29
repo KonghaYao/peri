@@ -158,10 +158,7 @@ async fn make_server_config_with(
     // H-04（A11/A22）：host 级唯一 pool。测试装配与生产同构——**空配置也构造**
     // （`has_servers()` 假 ⇒ 工具面空表但仍 ready），session 只投影它的 `Arc`。
     let lsp_pool: Arc<dyn peri_acp_types::ports::LspPoolPort> =
-        peri_middlewares::assembly::create_host_lsp_pool(
-            tmp.path().to_str().unwrap(),
-            &lsp_servers,
-        );
+        peri_mcp_lsp::create_host_lsp_pool(tmp.path().to_str().unwrap(), &lsp_servers);
     AcpServerConfig {
         workspace_assembly: None,
         host_task_owner: Some(host_task_owner),

@@ -152,19 +152,19 @@ fn test_format_diagnostics_empty() {
 #[test]
 fn test_format_diagnostics_with_entries() {
     let entries = vec![
-        peri_resources::lsp::diagnostics::DiagnosticEntry {
+        crate::diagnostics::DiagnosticEntry {
             file_uri: "file:///src/main.rs".to_string(),
             line: 10,
             character: 5,
-            severity: peri_resources::lsp::diagnostics::DiagnosticSeverity::Error,
+            severity: crate::diagnostics::DiagnosticSeverity::Error,
             message: "expected `;`".to_string(),
             source: Some("rustc".to_string()),
         },
-        peri_resources::lsp::diagnostics::DiagnosticEntry {
+        crate::diagnostics::DiagnosticEntry {
             file_uri: "file:///src/main.rs".to_string(),
             line: 15,
             character: 1,
-            severity: peri_resources::lsp::diagnostics::DiagnosticSeverity::Warning,
+            severity: crate::diagnostics::DiagnosticSeverity::Warning,
             message: "unused variable".to_string(),
             source: None,
         },

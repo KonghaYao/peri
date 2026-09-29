@@ -198,7 +198,7 @@ async fn start_workspace_pool(cwd: &std::path::Path) -> (Arc<McpClientPool>, Mcp
             tick_enabled: false,
         })
         .with_lsp(LspInstanceInput {
-            pool: create_host_lsp_pool(&cwd_str, &[]),
+            pool: peri_mcp_lsp::create_host_lsp_pool(&cwd_str, &[]),
         });
 
     let (owner, spawner) = McpTaskOwner::new();

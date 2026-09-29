@@ -394,10 +394,10 @@ pub enum LspSyncError {
     Protocol { reason: String },
 }
 
-/// LSP 服务器池端口（`peri-lsp::pool::LspServerPool` 实现）。
+/// LSP 服务器池端口（由 `peri-mcp-lsp::pool::LspServerPool` 实现）。
 ///
 /// **host 级唯一实例**（A11/A21/A22）：构造点在宿主装配
-/// （`peri-acp/src/host/assemble.rs` 经 `peri_middlewares::assembly::create_host_lsp_pool`），
+/// （`peri-acp/src/host/assemble.rs` 经 `peri_mcp_lsp::create_host_lsp_pool`），
 /// 同一 `Arc` 分两路消费——builtin `lsp` 实例的工具面（handler 构造时按
 /// `has_servers()` 快照）与装配面 `AssemblyContext::lsp_pool` 投影
 /// （`ChainSlot::Lsp` 只装 `LspSyncMiddleware`），**session 不创建也不销毁**。

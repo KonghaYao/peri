@@ -12,7 +12,7 @@ use peri_acp_types::command::command_route::{
 };
 use peri_acp_types::command::{CommandContext, CommandHandler, CommandOutcome};
 use peri_acp_types::plugin::McpServerConfigValidationError;
-use peri_resources::lsp::config::{lsp_config_from_plugin, LspServerConfig};
+use peri_mcp_lsp::config::{lsp_config_from_plugin, LspServerConfig};
 use serde::Deserialize;
 use thiserror::Error;
 use tracing::{debug, warn};

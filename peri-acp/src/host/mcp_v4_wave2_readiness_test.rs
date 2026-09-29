@@ -98,7 +98,10 @@ async fn wave2_ready_gate_matrix() {
         let context = BuiltinInstanceContext::new(cwd.clone());
         let context = if fault == "cron" {
             context.with_lsp(LspInstanceInput {
-                pool: create_host_lsp_pool(&cwd, &[lsp_server_config("wave2_ready_fault")]),
+                pool: peri_mcp_lsp::create_host_lsp_pool(
+                    &cwd,
+                    &[lsp_server_config("wave2_ready_fault")],
+                ),
             })
         } else {
             context.with_cron(CronInstanceInput {
@@ -216,7 +219,7 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
             tick_enabled: false,
         })
         .with_lsp(LspInstanceInput {
-            pool: create_host_lsp_pool(&cwd, &[lsp_server_config("wave2_inject")]),
+            pool: peri_mcp_lsp::create_host_lsp_pool(&cwd, &[lsp_server_config("wave2_inject")]),
         });
     let (_owner, spawner) = McpTaskOwner::new();
     let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
@@ -344,7 +347,7 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
                     tick_enabled: false,
                 })
                 .with_lsp(LspInstanceInput {
-                    pool: create_host_lsp_pool(
+                    pool: peri_mcp_lsp::create_host_lsp_pool(
                         &late_cwd,
                         &[lsp_server_config("wave2_inject_late")],
                     ),

@@ -26,10 +26,10 @@ use std::{
     time::Duration,
 };
 
+use crate::config::{LspConfigFile, LspServerConfig};
+use crate::pool::LspServerPool;
 use async_trait::async_trait;
 use peri_agent::tools::{BaseTool, ToolContext};
-use peri_resources::lsp::config::{LspConfigFile, LspServerConfig};
-use peri_resources::lsp::pool::LspServerPool;
 use rmcp::{
     model::{CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode},
     service::{ClientLifecycleMode, Peer, QuitReason, RoleClient, RunningService},

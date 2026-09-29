@@ -331,6 +331,10 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
 
     // ── LSP：配置合并 + host 级唯一 pool（A11/A21/A22，顺序冻结见 sub-plan H §5.1）──
     //
+    // 构造归属（2026-09-29 裁决）：配置合并与 pool 工厂归 `peri_mcp_lsp`，本层只调用
+    // `peri_mcp_lsp::{load_merged_lsp_servers, create_host_lsp_pool}` 并注入同一 `Arc`；
+    // A11/A21/A22 的单 pool / 空配置 / root_uri 行为约束不变。
+    //
     // ① 配置合并必须**早于** builtin `lsp` handler 构造：handler 在
     //    `run_initialize` 内按生效配置非空（`has_servers()`）快照工具面，
     //    不支持热更新（A21）；
@@ -345,7 +349,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     let plugin_lsp_servers = if bare {
         Default::default()
     } else {
-        peri_middlewares::assembly::load_merged_lsp_servers(
+        peri_mcp_lsp::load_merged_lsp_servers(
             &crate::provider::config_path(),
             plugin_data
                 .as_ref()
@@ -353,8 +357,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                 .unwrap_or_default(),
         )
     };
-    let host_lsp_pool_concrete =
-        peri_middlewares::assembly::create_host_lsp_pool(&cwd, &plugin_lsp_servers);
+    let host_lsp_pool_concrete = peri_mcp_lsp::create_host_lsp_pool(&cwd, &plugin_lsp_servers);
     // 宿主侧投影：端口即消费面（A23/A30），链上同步中间件与 host shutdown 都只经它。
     let lsp_pool: Arc<dyn LspPoolPort> =
         Arc::clone(&host_lsp_pool_concrete) as Arc<dyn LspPoolPort>;

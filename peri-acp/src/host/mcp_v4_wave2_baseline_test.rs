@@ -52,8 +52,8 @@
 //! **配置来源与注入路径（全部走生产同一函数 / 同一字段，无生产改动）**：
 //!
 //! 1. 配置源 = 夹具临时 HOME 下 `~/.peri/settings.json` 的 `config.lspServers`
-//!    （解析器 `load_global_lsp_config`，`peri-lsp/src/config.rs:71`）；
-//! 2. 加载 = 生产函数 `peri_middlewares::assembly::load_merged_lsp_servers`
+//!    （解析器 `load_global_lsp_config`，`mcp-packages/lsp/src/config.rs:69`）；
+//! 2. 加载 = 生产函数 `peri_mcp_lsp::load_merged_lsp_servers`
 //!    （宿主调用点 `peri-acp/src/host/assemble.rs`，配置路径取
 //!    `crate::provider::config_path()`）；
 //! 3. 注入 = **wave 2 起为宿主 pool**：`load_merged_lsp_servers` 的结果喂
@@ -137,7 +137,7 @@
 use std::sync::Arc;
 
 use peri_acp_types::messages::BaseMessage;
-use peri_middlewares::assembly::load_merged_lsp_servers;
+use peri_mcp_lsp::load_merged_lsp_servers;
 use peri_middlewares::tool_search::SEARCH_EXTRA_TOOLS_NAME;
 use serial_test::serial;
 
@@ -503,12 +503,12 @@ async fn wave2_baseline_first_request_and_deferred_summary() {
 
 /// 最小 LSP server 配置（用例 2 写入夹具临时 HOME 的 `~/.peri/settings.json`）。
 ///
-/// 形状对齐生产解析器 `load_global_lsp_config`（`peri-lsp/src/config.rs:71`）：顶层
+/// 形状对齐生产解析器 `load_global_lsp_config`（`mcp-packages/lsp/src/config.rs:69`）：顶层
 /// `config.lspServers` 为 `{ <server 名>: LspServerConfig }`；`name` 以 **key** 为准
-/// （`peri-lsp/src/config.rs:97`），故此处不写 `name` 字段。`command` 故意指向**不存在的
-/// 可执行文件**：注册面只读配置表 —— `LspServerPool::new`（`peri-lsp/src/pool.rs:47`）
+/// （`mcp-packages/lsp/src/config.rs:95`），故此处不写 `name` 字段。`command` 故意指向**不存在的
+/// 可执行文件**：注册面只读配置表 —— `LspServerPool::new`（`mcp-packages/lsp/src/pool.rs:47`）
 /// 是**惰性构造**（只建 `LspClient` 结构体，不 spawn），`has_servers()`
-/// （`peri-lsp/src/pool.rs:223`）= `!servers.is_empty()`；即便某条路径真的尝试拉起，
+/// （`mcp-packages/lsp/src/pool.rs:223`）= `!servers.is_empty()`；即便某条路径真的尝试拉起，
 /// 也会 ENOENT 立即失败，不会把用例挂在启动超时上。扩展名映射用探针后缀，
 /// 不覆盖任何真实文件类型（不干扰 Write/Edit 的诊断路由）。
 const W2_LSP_SETTINGS_JSON: &str = r#"{

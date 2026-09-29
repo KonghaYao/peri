@@ -290,7 +290,7 @@ async fn port_did_change_and_did_save_route_paths() {
         "已就绪的路由文件 ready_for 必须为 true"
     );
 
-    // 首次同步按既有语义转 didOpen（`peri-lsp/src/client/documents.rs` did_change
+    // 首次同步按既有语义转 didOpen（`src/client/documents.rs` did_change
     // 的首次分支，本波不改协议行为）：先让它落盘并清空记录，使被断言的窗口恰好是
     // 「一次 change + 一次 save」。
     port.did_change(&path, "fn main() {}\n")

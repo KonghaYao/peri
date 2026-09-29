@@ -39,8 +39,8 @@ use peri_acp_types::plugin::{ConfigSource, McpServerConfig};
 use peri_acp_types::tasks::{BgTaskKind, TaskManager};
 use peri_agent::agent::async_tasks::TaskManager as ConcreteTaskManager;
 use peri_agent::tools::{BaseTool, ToolContext};
-use peri_resources::lsp::config::{LspConfigFile, LspServerConfig};
-use peri_resources::lsp::pool::LspServerPool;
+use peri_mcp_lsp::config::{LspConfigFile, LspServerConfig};
+use peri_mcp_lsp::pool::LspServerPool;
 use rmcp::{
     model::{CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode},
     service::{Peer, RoleClient, ServiceError},
@@ -605,7 +605,7 @@ fn bridge_of<'a>(bridges: &'a [McpToolBridge], effective_name: &str) -> &'a McpT
 ///
 /// **UNVERIFIED（不写 flaky 断言）**：`LspToolError::NotReady` 需要
 /// `ensure_server_for_file` / `ensure_initialized` 返回 `Ok` 而没有任何 server `Running`；
-/// 而 `LspClient::start` 成功即以 `ServerState::Running` 收尾（`peri-lsp/src/client/lifecycle.rs`
+/// 而 `LspClient::start` 成功即以 `ServerState::Running` 收尾（`mcp-packages/lsp/src/client/lifecycle.rs`
 /// 的 `do_start`），`is_ready()` 与 `any_server()` 用同一谓词，唯一剩余路径是「ensure 与
 /// ready 复查之间服务器转 `Error`」的竞态，无法由输入稳定构造，因此本用例只断言可稳定
 /// 触发的 7 类（2 + 5），`NotReady` 记 UNVERIFIED。

@@ -2,9 +2,7 @@ use std::{collections::HashMap, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-// 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::lsp`）。
-// `LspConfigSource` / `LspServerConfig` 自本文件迁出；本模块保留
-// re-export 保兼容（消费方经 `peri_lsp::config` 或 Resources 门面引用）。
+// 配置类型归契约层；LSP MCP 在本 crate 内负责加载与合并。
 pub use peri_acp_types::lsp::{LspConfigSource, LspServerConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -152,3 +150,19 @@ pub fn lsp_config_from_plugin(
 #[cfg(test)]
 #[path = "config_test.rs"]
 mod tests;
+
+/// 合并全局 settings.json 与插件提供的 LSP 服务器配置。
+///
+/// 全局配置先载入，插件配置按服务器名覆盖全局配置；合并结果供 host
+/// 装配构造唯一的 LSP pool。
+pub fn load_merged_lsp_servers(
+    settings_json_path: &Path,
+    plugin_servers: Vec<LspServerConfig>,
+) -> Vec<LspServerConfig> {
+    let global = load_global_lsp_config(settings_json_path);
+    let mut merged = global.lsp_servers;
+    for server in plugin_servers {
+        merged.insert(server.name.clone(), server);
+    }
+    merged.into_values().collect()
+}

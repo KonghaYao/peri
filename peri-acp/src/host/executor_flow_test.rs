@@ -45,7 +45,7 @@ use crate::{
 use peri_acp_types::ports::McpPoolPort;
 #[cfg(not(windows))]
 use peri_middlewares::{
-    assembly::{create_host_lsp_pool, BuiltinInstanceContext, CronInstanceInput, LspInstanceInput},
+    assembly::{BuiltinInstanceContext, CronInstanceInput, LspInstanceInput},
     mcp::{McpClientPool, McpInitStatus, McpTaskOwner},
 };
 use peri_middlewares::{host_ports::SkillsProvider, tool_search::ToolSearchIndex};

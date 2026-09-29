@@ -70,15 +70,12 @@ use peri_acp_types::{
     permission::{PermissionMode, SharedPermissionMode},
     ports::{LspPoolPort, McpPoolPort},
 };
+use peri_mcp_lsp::pool::LspServerPool;
 use peri_middlewares::{
-    assembly::{
-        create_host_lsp_pool, BuiltinContextError, BuiltinInstanceContext, CronInstanceInput,
-        LspInstanceInput,
-    },
+    assembly::{BuiltinContextError, BuiltinInstanceContext, CronInstanceInput, LspInstanceInput},
     mcp::{ClientStatus, McpClientPool, McpInitStatus, McpTaskOwner},
     tool_search::{core_tools, SEARCH_EXTRA_TOOLS_NAME},
 };
-use peri_resources::lsp::pool::LspServerPool;
 use serial_test::serial;
 
 use super::{
@@ -282,7 +279,7 @@ impl BuiltinHostFixture {
                 tick_enabled,
             })
             .with_lsp(LspInstanceInput {
-                pool: create_host_lsp_pool(&cwd, lsp_servers),
+                pool: peri_mcp_lsp::create_host_lsp_pool(&cwd, lsp_servers),
             });
         Self::start_with_context(dirs, context).await
     }
@@ -747,7 +744,7 @@ fn wave2_tools(instance: &str) -> &'static [&'static str] {
         .unwrap_or_else(|| panic!("{instance} 必须在 WAVE2_INSTANCES 内"))
         .1
 }
-/// 进程是否存活（`kill -0`：与 `peri-lsp` 既有用例同款探针）。
+/// 进程是否存活（`kill -0`：与 `peri-mcp-lsp` 既有用例同款探针）。
 fn process_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
         .arg("-0")
