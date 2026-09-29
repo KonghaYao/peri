@@ -256,11 +256,11 @@ flowchart TD
 
 Full 与 Reason 共用 `render_persisted_llm_view` 恢复已提交的模型视图，包括 canonical reminder；派生摘要请求保留消息角色、工具配对与完整可见正文，不再使用每条 2000 字符、工具结果前三行或关键参数预览。已有 Micro 投影仍生效，避免 Full 重新展开已经隐藏的工具输出。摘要请求不开放可执行工具；冻结 prompt 与父会话的继承快照不被改写。
 
-子 Agent 报告与后台任务结果参与摘要，摘要指令要求保留结论、约束与未完成工作并按通知来源归因。只有正常完成且后处理后非空的摘要可以提交；截断或仅含 analysis 的响应保留原历史；嵌套的分析标签与残留结束标签不能充当有效摘要；思考块之外已闭合的 `<summary>` 正文按普通文本保留，其中讨论的标签字面量不得再次被剥除。提交时将快照内 own region 的普通历史与 reminder 一起标 excluded，摘要与标记使用同一持久化事务；System 和 ancestor 不在排除集合。原文留在 canonical 存储供回查，后续模型请求及冷恢复不再发送已排除报告全文。
+子 Agent 报告与后台任务结果参与摘要，摘要指令要求保留结论、约束与未完成工作并按通知来源归因。摘要只输出交接正文，长度目标为 `summary_max_tokens` 的一半，给模型输出留余量；不要求分析块、所有消息清单或完整代码副本。MaxTokens 且有正文时保留片段，在同次 Full 内最多续写两次，沿用原上下文和单次输出上限，按原顺序拼接后再提取摘要；仅回灌正文，不重放隐藏思考或工具。只有正常完成且后处理后非空的摘要可以提交，续写还须闭合 summary；没有可续接正文、预算耗尽、续写失败或仅含 analysis 时保留原历史；嵌套的分析标签与残留结束标签不能充当有效摘要；思考块之外已闭合的 `<summary>` 正文按普通文本保留，其中讨论的标签字面量不得再次被剥除。提交时将快照内 own region 的普通历史与 reminder 一起标 excluded，摘要与标记使用同一持久化事务；System 和 ancestor 不在排除集合。原文留在 canonical 存储供回查，后续模型请求及冷恢复不再发送已排除报告全文。
 
 手动 `/compact` 从一次一致快照恢复完整 payload、flags 和 ancestor/own 边界；普通消息 ID 校验仅用于调用方一致性检查，不再决定摘要输入范围。仅有 reminder 的会话也可压缩。摘要期间新到达的 inbox 结果在后续 Receive 处理，不属于旧快照的排除集合。
 
-空摘要在当前 Full 调用内重试，总连续失败次数受 `max_consecutive_failures` 限制；重试前不进入 Reason，不重复应用 Micro，并保留取消边界。传输错误的重试归 provider，持久化错误不在这里重试。自动 Compact 达到 Full 阈值时，必要的 Full 失败会阻止后续 Reason：空摘要耗尽预算返回 `CompactRetriesExhausted`，缺失模型、非正常完成的摘要及 provider 错误保留各自类型。已提交的 Micro 仍保留。手动 `/compact` 通过同一结果携带安全诊断，并在错误映射前检查取消。未产生变更的尝试以 `CompactEnded` 闭合观测，只有实际变更才发出 `MessagesCompacted`。
+空摘要在当前 Full 调用内重试，总连续失败次数受 `max_consecutive_failures` 限制；重试前不进入 Reason，不重复应用 Micro，并保留取消边界。截断后的续写不从头生成摘要；续写后仍为空或未完成时返回 `CompactIncompleteResponse`，不能重启外层空摘要重试预算。传输错误的重试归 provider，持久化错误不在这里重试。自动 Compact 达到 Full 阈值时，必要的 Full 失败会阻止后续 Reason：空摘要耗尽预算返回 `CompactRetriesExhausted`，缺失模型、非正常完成的摘要及 provider 错误保留各自类型。已提交的 Micro 仍保留。手动 `/compact` 通过同一结果携带安全诊断，并在错误映射前检查取消。未产生变更的尝试以 `CompactEnded` 闭合观测，只有实际变更才发出 `MessagesCompacted`。
 
 ### 6.4 Full 后预算验证
 
