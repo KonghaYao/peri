@@ -225,3 +225,28 @@ async fn test_stream_interruption_http_recovery_exhausts_budget() {
     assert_eq!(evidence.chunks, ["partial", "partial"]);
     assert_eq!(evidence.completions, 0, "预算耗尽不能当作任务完成");
 }
+
+/// [回归测试] 空白结束原因不能让 Agent 提前退出，必须保存断点并请求续跑。
+#[tokio::test]
+async fn test_stream_interruption_blank_finish_reason_resumes_over_http() {
+    let body = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({"choices": [{"delta": {"content": "partial"}, "finish_reason": "  "}]})
+    );
+    let evidence = run_script(vec![body.into_bytes(), COMPLETE.as_bytes().to_vec()]).await;
+    assert!(
+        matches!(evidence.result, LoopResult::Completed),
+        "{:?}",
+        evidence.result
+    );
+    assert_eq!(evidence.requests.len(), 2, "空白结束原因必须触发续跑");
+    let messages = evidence.requests[1]["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message["role"] == "assistant" && message["content"] == "partial" }),
+        "续跑必须携带断点正文"
+    );
+    assert_eq!(evidence.chunks, ["partial", "continued"]);
+    assert_eq!(evidence.completions, 1);
+}

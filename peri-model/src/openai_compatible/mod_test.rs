@@ -464,6 +464,18 @@ async fn test_stream_interruption_done_without_finish_reason() {
     .await;
 }
 
+/// [回归测试] 空白 finish_reason 不能作为完成证据，也不能绕过中断续跑。
+#[tokio::test]
+async fn test_stream_interruption_done_with_blank_finish_reason() {
+    for reason in ["  ", "", "\t\n"] {
+        let first = format!(
+            "data: {}\n\n",
+            json!({"choices": [{"delta": {"content": "partial"}, "finish_reason": reason}]})
+        );
+        assert_partial_stream_interrupted(first.as_bytes(), b"data: [DONE]\n\n").await;
+    }
+}
+
 /// [回归测试] 流内 error 不能当成无 choices 的空帧忽略，即使此前已收到 finish_reason。
 #[tokio::test]
 async fn test_stream_interruption_in_band_error() {

@@ -143,7 +143,7 @@ fn complete_stream(state: &Mutex<StreamState>) -> ModelResult<Vec<ModelStreamEve
     let finish_reason = state
         .finish_reason
         .as_deref()
-        .filter(|reason| !reason.is_empty())
+        .filter(|reason| !reason.trim().is_empty())
         .ok_or_else(provider_protocol_error)?;
     Ok(vec![ModelStreamEvent::Completed(completed_response(
         &state,
