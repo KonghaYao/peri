@@ -19,6 +19,8 @@
 - MCP 配置与协议行为：`peri-middlewares/src/mcp/config.rs`、`peri-middlewares/src/mcp/client/transport.rs` 及其契约测试。
 - 当前实现验证优先级：代码与契约测试 > `docs/standards/` > 本设计文档 > 对应 active issue。本文作为 v4 目标架构文档，不替代当前实现的事实记录。
 
+当前路径导航（2026-09-29）：Builtin MCP 的 handler 与工具已拆为 `mcp-packages/{common,web,artifact,cron,lsp,workspace}` 独立 crate；`peri-middlewares` 继续持有实例装配、context、dispatch、transport 与生命周期。具体入口、边界及测试命令见 [MCP packages 代码索引](../code-index/mcp-packages.md) 与 [`peri-middlewares` 代码索引](../code-index/peri-middlewares.md)。下文保留批准时的目标语义和历史类型分类，不将旧 middleware 路径当作现行源码路径。
+
 ## MCP 运行形态
 
 v4 允许两种运行形态，但不改变 MCP 实例的隔离契约：
@@ -70,7 +72,7 @@ v4 MCP 配置定义 `system_mcp` 标识，用于声明该 MCP 是 react loop 的
 
 **最小合理数量：5 个相互隔离的 MCP 实例**，而不是让每个 middleware 各自实现一套 MCP 协议：
 
-1. **Workspace MCP**：由主项目 `peri-middlewares/src/mcp/builtin/workspace.rs` 提供，复用 `peri-middlewares/src/tools/filesystem/` 与 `peri-middlewares/src/middleware/terminal.rs` 的文件和进程工具实现；schema 与描述从这些工具实现生成，不维护独立服务器或第二份工具实现。
+1. **Workspace MCP**：现由 `peri-mcp-workspace` 提供 handler、文件与进程工具实现（`mcp-packages/workspace/src/`）；宿主在 `peri-middlewares/src/mcp/builtin/` 持有实例 context 与 runtime。schema 与描述从工具实现生成，不维护独立服务器或第二份工具实现。
 2. **Artifact MCP**：单独提供 HTML/Markdown 内容发布、转换、TTL 和公开 URL 能力。
 3. **Web MCP**：将 `WebSearch` 与 `WebFetch` 合并，提供外部网页搜索和抓取能力。
 4. **Cron MCP**：提供定时任务注册、查询、删除和触发事件能力。
@@ -189,14 +191,14 @@ flowchart LR
 | 6 | `AtMentionMiddleware` | `peri-middlewares/src/at_mention/mod.rs` | 宿主保留 | `@mention` 输入转换依赖 Agent 消息内容和工具上下文，不是 Workspace MCP 工具。 |
 | 7 | `GitWatchMiddleware` | `peri-middlewares/src/git_watch/mod.rs` | 目标：完全下放 → Workspace MCP | Git 状态观察、分支变化检测、采样和工作区 watcher 统一进入 Workspace MCP，Agent 侧不再保留 GitWatch middleware。 |
 | 8 | `GitAttributionMiddleware` | `peri-middlewares/src/attribution/mod.rs` | 部分下放 | Git/file 查询由 Workspace MCP 提供，但 before/after tool hook 和归属注入仍由 Agent 持有。 |
-| 9 | `ArtifactMiddleware` | `peri-middlewares/src/artifact/mod.rs` | 目标：完全下放 → Artifact MCP | Artifact 的读取输入、格式转换、上传、TTL 和 URL 统一进入 Artifact MCP，Agent 侧只保留 MCP 对接。 |
-| 10 | `WebMiddleware` | `peri-middlewares/src/middleware/web.rs` | 目标：完全下放 → Web MCP | `WebSearch` 与 `WebFetch` 统一进入 Web MCP，Agent 侧只保留 MCP 对接。 |
+| 9 | `ArtifactMiddleware` | 现行工具与 handler：`mcp-packages/artifact/src/`；历史 middleware 类型 `peri-middlewares/src/artifact/mod.rs` 已删除 | 目标：完全下放 → Artifact MCP | Artifact 的读取输入、格式转换、上传、TTL 和 URL 统一进入 Artifact MCP，Agent 侧只保留 MCP 对接。 |
+| 10 | `WebMiddleware` | 现行工具与 handler：`mcp-packages/web/src/`；历史 middleware 类型 `peri-middlewares/src/middleware/web.rs` 已删除 | 目标：完全下放 → Web MCP | `WebSearch` 与 `WebFetch` 统一进入 Web MCP，Agent 侧只保留 MCP 对接。 |
 | 11 | `TodoMiddleware` | `peri-middlewares/src/middleware/todo.rs` | 部分下放 | Todo 文件/工具操作可由 Workspace MCP 执行，但 todo channel 与 session/UI 状态回写仍由宿主注入。 |
-| 12 | `CronMiddleware` | `peri-middlewares/src/cron/middleware.rs` | 目标：完全下放 → Cron MCP | scheduler、后台 tick、取消、注册/查询/删除和触发事件统一进入 Cron MCP，Agent 侧只保留 MCP 对接和事件接收。 |
-| 13 | `LspMiddleware` | `peri-middlewares/src/lsp/middleware.rs` | 目标：完全下放 → LSP MCP | LSP server pool、诊断状态、符号/引用查询和文件变更同步统一进入 LSP MCP，Agent 侧只保留 MCP 对接。 |
+| 12 | `CronMiddleware` | 现行 scheduler、工具与 handler：`mcp-packages/cron/src/`；宿主 tick supervision：`peri-middlewares/src/mcp/builtin/runtime.rs`；历史 middleware 类型 `peri-middlewares/src/cron/middleware.rs` 已删除 | 目标：完全下放 → Cron MCP | scheduler、注册/查询/删除和触发事件进入 Cron MCP；当前 tick task 的 spawn、reconnect 与 join 由宿主 runtime 监督。Agent 侧通过 MCP 对接和宿主事件端口接收触发。 |
+| 13 | `LspMiddleware` | 现行工具与 handler：`mcp-packages/lsp/src/`；文档同步中间件：`peri-middlewares/src/lsp/middleware.rs`（`LspSyncMiddleware`）；历史工具中间件路径已不再存在 | 目标：完全下放 → LSP MCP | LSP 工具、格式化与配置快照由独立 MCP crate 提供；宿主保留 pool 生命周期与写入后的文档同步中间件。 |
 | 14 | `WorkflowMiddlewareAdaptor` | `peri-middlewares/src/workflow/mod.rs` | 独立 Middleware | Workflow executor、progress、通知、kill/resume 和 session 生命周期属于 Runtime，不下放到 MCP。 |
-| 15 | `FilesystemMiddleware` | `peri-middlewares/src/middleware/filesystem.rs` | 目标：完全下放 → Workspace MCP | filesystem 工具、workspace path 解析、读写和目录操作统一进入 Workspace MCP，Agent 侧只保留 MCP 对接。 |
-| 16 | `TerminalMiddleware` | `peri-middlewares/src/middleware/terminal.rs` | 目标：完全下放 → Workspace MCP | terminal/Bash 工具、进程执行和任务输出统一进入 Workspace MCP，Agent 侧只保留 MCP 对接。 |
+| 15 | `FilesystemMiddleware` | 现行文件工具：`mcp-packages/workspace/src/filesystem/`；历史 middleware 类型 `peri-middlewares/src/middleware/filesystem.rs` 已删除 | 目标：完全下放 → Workspace MCP | filesystem 工具、workspace path 解析、读写和目录操作统一由 Workspace MCP 提供，宿主保留 MCP 对接。 |
+| 16 | `TerminalMiddleware` | 现行 Bash 工具：`mcp-packages/workspace/src/terminal.rs`；历史 middleware 类型 `peri-middlewares/src/middleware/terminal.rs` 已删除 | 目标：完全下放 → Workspace MCP | terminal/Bash 工具、进程执行和任务输出统一由 Workspace MCP 提供，宿主保留 MCP 对接。 |
 | 17 | `PtcMiddleware` | `peri-middlewares/src/ptc/mod.rs` | 独立 Middleware | JS runtime、session-local tool bridge、权限和 effective tool dispatch 必须由 Agent/Runtime 持有，不下放到 MCP。 |
 | 18 | `HumanInTheLoopMiddleware` | `peri-middlewares/src/hitl/mod.rs` | 独立 Middleware | Question broker、工具注册、取消和 ACP/TUI 交互通道属于宿主交互生命周期，不下放到 MCP。 |
 | 19 | `PermissionMiddleware` | `peri-middlewares/src/permission/mod.rs` | 独立 Middleware | Permission mode、effective tool name、ToolSearch、Hook 和 broker 构成宿主安全边界，不下放到 MCP。 |
@@ -215,7 +217,7 @@ flowchart LR
 以下类型没有自己的 `impl Middleware for ...`，因此不计入上表，但会影响对应 middleware 的拆包：
 
 - `WorkflowMiddleware`：`peri-middlewares/src/workflow/mod.rs`，由 `WorkflowMiddlewareAdaptor` 接入链。
-- `CronScheduler`：`peri-middlewares/src/cron/`，迁移后应成为 Cron MCP 内部状态，Agent 只通过 MCP 工具和宿主事件端口接入。
+- `CronScheduler`：现位于 `mcp-packages/cron/src/scheduler.rs`；宿主消费 `CronSchedulerPort` 并负责该代 tick task 的监督。
 - `LspServerPool`：由 `peri-resources` 提供，迁移后应成为 LSP MCP 内部状态，Agent/Runtime 通过 MCP 请求与文件变更同步端口接入。
 - `McpClientPool`、`McpTaskOwner`、`DynamicMcpRegistry`：`peri-middlewares/src/mcp/`，由 `McpMiddleware` 和 `DynamicMcpMiddleware` 使用。
 - `SkillTool`、`DiscoverSkillsTool`、`SubAgentTool`、各类 filesystem/web/terminal 工具：由对应 middleware 的 `collect_tools` 提供，不是单独的 middleware。

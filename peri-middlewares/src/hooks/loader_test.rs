@@ -462,14 +462,14 @@ fn test_load_settings_project_hooks_with_matcher() {
 /// 与 `ptc_test::HomeGuard` 同一模式——`std::env::set_var` 是进程级全局，
 /// 不串行会与并行测试竞态。
 struct HomeGuard {
-    _lock: crate::process_env::EnvLockFile,
+    _lock: peri_mcp_common::process_env::EnvLockFile,
     previous_home: Option<std::ffi::OsString>,
     previous_userprofile: Option<std::ffi::OsString>,
 }
 
 impl HomeGuard {
     fn set(home: &Path) -> Self {
-        let lock = crate::process_env::lock().expect("process env lock");
+        let lock = peri_mcp_common::process_env::lock().expect("process env lock");
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
         std::env::set_var("HOME", home);

@@ -11,10 +11,8 @@
 //! 本模块（含 `apply_builtin_overlay`）**禁止**读 env——env 只在
 //! [`builtin_injection_policy_from_env`] 读一次，由配置加载入口调用。
 //!
-//! W2 起本模块追加 `mod web;` / `mod artifact;`（两个真实 `ServerHandler`，owner I-01）。
+//! Builtin handler 行为由 `mcp-packages/*` 提供，本模块保留策略和宿主生命周期。
 
-// 生产接线归 E-03 / I-02 / I-03 / S-01 / S-02（W2/W3）：W1 先落地冻结接口与 crate 内
-// 测试覆盖；接线完成后应删除本属性（避免留下长期死代码豁免）。
 #![allow(dead_code)]
 
 // context：宿主装配注入的实例上下文载体（`BuiltinInstanceContext` / 两份输入 /
@@ -26,16 +24,6 @@ pub(crate) mod context;
 // runtime：builtin 同进程链路（duplex + `rmcp::serve_server`）、server task 归属与
 // 有界关闭（owner E-03，W2）。与两个 handler 一样是「行为」子模块，由本模块统一挂载。
 pub(crate) mod runtime;
-
-// cron：`cron` builtin 实例的 handler（owner C-02，W2）——只持工具面（三个既有 cron 工具
-// 打到同一份 `Arc<Mutex<CronScheduler>>`），**不持** tick 驱动（A32：tick 归 W2 的 pool
-// 单 spawn 点）；与其余 handler 一样是「行为」子模块，由本模块统一挂载。
-pub(crate) mod cron;
-
-// lsp：`lsp` builtin 实例的 handler（owner L-01，W2）——按**生效配置快照**工具面：生效
-// LSP 配置非空（`LspServerPool::has_servers()`，只反映配置表、与进程 ready 无关）时恰好
-// 声明一个既有 `LspTool`，否则为空表；与其余 handler 一样是「行为」子模块，由本模块统一挂载。
-pub(crate) mod lsp;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
@@ -381,19 +369,5 @@ fn direct_tools_table() -> &'static HashMap<&'static str, Box<[&'static str]>> {
 #[path = "builtin_test.rs"]
 mod tests;
 
-// 两个真实 `ServerHandler`（W2，owner I-01）：`web`（WebSearch / WebFetch）与
-// `artifact`（artifact）。实例名 → handler 的工厂在 `dispatch`（H-01 的搬迁落点），
-// 是 `runtime`（E-03 的 `spawn_builtin_transport`）的唯一入口；名字分派不散落在实例文件里。
-mod artifact;
+// 实例名 → 独立插件 handler 的工厂；runtime 是宿主 task 的唯一入口。
 mod dispatch;
-mod result_mapping;
-mod web;
-
-// workspace：`workspace` builtin 实例的 handler（owner A2，W3）——按**构造期冻结的 host
-// cwd** 实例化 7 个既有工具（`Read` / `Write` / `Edit` / `Glob` / `Grep` /
-// `folder_operations` / `Bash`），**包装**既有 `BaseTool` 实现（AW3-02），不重写 schema
-// 与 `invoke` 语义、不引入 capability root（AW3-04，登记为已知缺口）。接线已进 `dispatch`
-// （W3-B B1）；`Bash` 的 session 级输入（AW3-11：per-session `TaskManager` + bg 完成回调）
-// 经 `context::WorkspaceInstanceInput` 送达——缺输入时实例仍装配（**可见但退化**，退化分支
-// 见 `workspace.rs` 模块头，登记进验收记录 D3）。
-pub(crate) mod workspace;

@@ -14,7 +14,7 @@ use super::skill_discovery::{
     is_skill_scheme, refresh_entry_and_content, uri_eq_ignore_scheme_case, verify_digest,
     verify_digest_bytes,
 };
-use crate::tools::output_persist::persist_truncated_output;
+use peri_agent::agent::async_tasks::persist_truncated_output;
 
 /// 资源读取工具错误
 #[derive(Debug, Error)]

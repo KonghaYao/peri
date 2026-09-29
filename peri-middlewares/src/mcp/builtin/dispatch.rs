@@ -3,8 +3,7 @@
 //! 职责：把实例名（server name / 配置 key / `TransportConfig::Builtin.instance`）解析成
 //! 具体的 `ServerHandler`，并以枚举擦除类型差异交给 `mcp::builtin::runtime` 装配。
 //! 本模块**只**做分派与转发，不持有实例语义：
-//! - 实例的业务面（工具清单、`tools/call` 的结果映射）在 `web.rs` / `artifact.rs` /
-//!   `cron.rs` / `lsp.rs`；
+//! - 实例的业务面（工具清单、`tools/call` 的结果映射）在独立的 `peri-mcp-*` crates；
 //! - 实例所需状态（cron scheduler / LSP pool / cwd / workspace 的 session 级输入）统一经
 //!   [`BuiltinInstanceContext`] 传入——`cwd` 不再是独立参数，输入是否齐备由
 //!   `context::instance_input_ready` 在 dispatch **之前**判定，因此本工厂的 `None` 只
@@ -26,12 +25,12 @@ use rmcp::{
     ErrorData as McpError, ServerHandler,
 };
 
-use super::artifact::ArtifactMcpServer;
 use super::context::BuiltinInstanceContext;
-use super::cron::CronMcpServer;
-use super::lsp::LspMcpServer;
-use super::web::WebMcpServer;
-use super::workspace::WorkspaceMcpServer;
+use peri_mcp_artifact::ArtifactMcpServer;
+use peri_mcp_cron::CronMcpServer;
+use peri_mcp_lsp::LspMcpServer;
+use peri_mcp_web::WebMcpServer;
+use peri_mcp_workspace::WorkspaceMcpServer;
 
 /// 实例的 handler 类型擦除：`runtime` 需要在运行时按实例名选择 handler，
 /// 而 `rmcp::serve_server` 要求泛型 `S: ServerHandler`（`Arc<dyn ServerHandler>`

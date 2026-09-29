@@ -3,7 +3,7 @@
 //! 职责边界（IF-D12 / sub-plan E §4.3）：
 //! - 本模块**只**负责把 handler 交给 `rmcp::serve_server`、持有 server task，并给出
 //!   有界关闭语义。handler 的业务语义（工具清单、`tools/list`、`call_tool` 的结果映射）
-//!   归 I-01 的 `mcp/builtin/web.rs` / `artifact.rs`。
+//!   归独立的 `peri-mcp-*` capability crates。
 //! - builtin **恒为同进程对象**：不引入子进程、不读 env、不写磁盘、不接触任何凭据。
 //! - 三分类超时（IF-D1）的事实源是 [`crate::mcp::transport::TransportKind`]；本模块不
 //!   复制判定（映射在 `mcp/initialize.rs` 的 `connect_timeout` / `transport_label`）。
@@ -69,9 +69,7 @@ pub(crate) enum BuiltinSpawnError {
     /// 已注册实例尚无 handler 模块（`dispatch::builtin_server_handler` 未覆盖该实例）。
     ///
     /// 该状态**不**降级：不 panic、不静默改造为 stdio / http，也不产生任何 ready 证据。
-    /// wave 1 的两个已实现实例（web / artifact）均已接线，因此本变体服务于「注册表新增
-    /// 已实现实例、且 handler 尚未落地」的中间态（后续波次的 workspace）；wave 2 里
-    /// cron / lsp 在 H-05 接线前仍会落到本分支——那正是它要表达的中间态，**不是**缺陷。
+    /// 当前注册表内实例均由 dispatch 显式接线；该分支保护未来新增实现避免静默回退。
     #[error("builtin 实例 handler 尚未接线: {instance}")]
     HandlerNotWired { instance: String },
 }

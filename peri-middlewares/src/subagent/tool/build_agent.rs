@@ -74,7 +74,7 @@ impl super::SubAgentTool {
                     "SandboxWrite 被 disallowedTools 否决，跳过注入"
                 );
             } else {
-                match crate::tools::filesystem::WriteSandboxTool::new(
+                match peri_mcp_workspace::filesystem::WriteSandboxTool::new(
                     cwd.to_string(),
                     allowed_write_dirs.clone(),
                 ) {

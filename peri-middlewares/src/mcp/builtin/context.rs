@@ -1,7 +1,8 @@
 //! builtin 实例上下文（IF-P3-04 / A33，owner H-02）：宿主装配注入的实例状态载体。
 //!
 //! 边界：
-//! - **唯一可见面**是 `peri_middlewares::assembly` 的再导出；`crate::mcp::builtin` 仍是
+//! - 宿主上下文类型与 cron/LSP 输入经 `peri_middlewares::assembly` 再导出；
+//!   `WorkspaceInstanceInput` 由 `peri-mcp-workspace` 直接公开。`crate::mcp::builtin` 仍是
 //!   `pub(crate)`，宿主（`peri-acp`）不得 import 本模块路径（A33）。
 //! - 字段承载的是**实例构造所需状态**（cron scheduler / LSP pool / cwd / 关闭集 /
 //!   workspace 的 session 级输入），**不是**工具执行上下文：7 个 workspace 工具当前都不读
@@ -22,12 +23,11 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use parking_lot::Mutex;
 use peri_acp_types::builtin_mcp::find;
-use peri_acp_types::tasks::TaskManager;
 use peri_resources::lsp::pool::LspServerPool;
 use thiserror::Error;
 
-use crate::assembly::OnBgCompleteFn;
-use crate::cron::CronScheduler;
+use peri_mcp_cron::CronScheduler;
+use peri_mcp_workspace::WorkspaceInstanceInput;
 
 /// 实例上下文注入的 typed 语义错误（A33）。
 ///
@@ -63,39 +63,6 @@ pub struct CronInstanceInput {
 pub struct LspInstanceInput {
     /// host 级 LSP pool（经 `peri_resources::lsp` 门面构造）。
     pub pool: Arc<LspServerPool>,
-}
-
-/// `workspace` 实例的上下文输入（AW3-11 的 **session 级** seam）。
-///
-/// 两名成员各恢复 `BashTool` 的一条能力源——它们与 `crate::middleware::terminal` 的
-/// `BashTool::with_task_manager` / `BashTool::with_on_bg_complete` 入参**同型**
-/// （`OnBgCompleteFn` 见下），因此 handler 只是把接到的值原样转交，不做包装或适配。
-///
-/// 与 `cron` / `lsp` 的 host 级输入不同，本输入的**来源是会话环境装配**（每 session 一份：
-/// per-session `TaskManager` 诞生于 `ensure_session`，见主 plan §3.4.1 Q1/Q2 的「不通达」
-/// 结论与 §2 AW3-11 的 seam 冻结），因此装配面必须在 `McpClientPool::run_initialize` **之前**
-/// 把它送进 [`BuiltinInstanceContext`]。
-///
-/// `None`（整个字段为 `None`，或成员为 `None`）的语义是**可见但退化**——handler 照常构造、
-/// 7 个工具照常声明，只有 `Bash` 失去「后台任务」那一路（逐条退化见
-/// `crate::mcp::builtin::workspace` 的模块头），**不是**「实例不可用」：因此
-/// [`BuiltinInstanceContext::instance_input_ready`] 不为 `workspace` 增加 arm（AW3-11 明文）。
-#[derive(Clone)]
-pub struct WorkspaceInstanceInput {
-    /// per-session 的后台任务管理器（`run_in_background` 发起、前台超时提升、`command &`
-    /// 进程组登记与外部执行所有权跟踪都由它承载）。
-    ///
-    /// 类型与 `BashTool::task_manager` 字段逐字同型（`peri_acp_types::tasks::TaskManager`）。
-    pub task_manager: Option<Arc<dyn TaskManager>>,
-    /// bg shell 完成回调（在 `registry.complete()` 之前调用）。
-    ///
-    /// 类型即 [`OnBgCompleteFn`]（`crate::assembly` 的再导出）——它与
-    /// `peri_acp_types::tasks::OnBgCompleteFn` 是**同一底层类型**
-    /// （`Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>`，type alias 透明），
-    /// 也与 `BashTool::with_on_bg_complete` 的入参同型；这里取 assembly 的再导出是因为宿主
-    /// （A33：不得 import `peri_middlewares::mcp::builtin`）经 `peri_middlewares::assembly`
-    /// 构造本输入，同一个名字在两侧指同一类型。
-    pub on_bg_complete: Option<OnBgCompleteFn>,
 }
 
 /// 宿主装配构造并注入 pool 的 builtin 实例上下文（IF-P3-04）。

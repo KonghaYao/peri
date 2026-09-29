@@ -75,12 +75,18 @@ jobs:
               run: bun run build
 
             # 分步记录耗时，也确保 Windows 下第一组失败不会被后续成功覆盖。
-            - name: Run workspace tests (excluding middlewares)
-              run: cargo test --workspace --exclude peri-middlewares
+            - name: Run workspace tests (excluding middleware and MCP capabilities)
+              run: >-
+                  cargo test --workspace --exclude peri-middlewares
+                  --exclude peri-mcp-common --exclude peri-mcp-web --exclude peri-mcp-artifact
+                  --exclude peri-mcp-cron --exclude peri-mcp-lsp --exclude peri-mcp-workspace
 
             # 涉及进程级全局状态的测试仍须串行执行。
-            - name: Run middleware tests (serial)
-              run: cargo test -p peri-middlewares -- --test-threads=1
+            - name: Run middleware and MCP capability tests (serial)
+              run: >-
+                  cargo test -p peri-middlewares -p peri-mcp-common -p peri-mcp-web
+                  -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-lsp -p peri-mcp-workspace
+                  -- --test-threads=1
 
             - name: Clippy
               run: cargo clippy --workspace --all-targets -- -D warnings

@@ -44,7 +44,7 @@ pub(crate) struct SessionEnvironment {
     /// 因此本字段在非测试构建里无人读 ⇒ 收窄到 `cfg(test)`，而不是加 `#[allow(dead_code)]`
     /// （本 crate 禁放宽 lint）。
     #[cfg(test)]
-    workspace_input: peri_middlewares::assembly::WorkspaceInstanceInput,
+    workspace_input: peri_mcp_workspace::WorkspaceInstanceInput,
 }
 
 impl SessionEnvironment {
@@ -92,7 +92,7 @@ impl SessionEnvironment {
             Arc::new(host.session_manager.clone()),
             session_id.to_owned(),
         );
-        let workspace_input = peri_middlewares::assembly::WorkspaceInstanceInput {
+        let workspace_input = peri_mcp_workspace::WorkspaceInstanceInput {
             task_manager: Some(Arc::clone(&task_manager)),
             on_bg_complete: Some(on_bg_complete),
         };
@@ -188,9 +188,7 @@ impl SessionEnvironment {
     /// `cfg(test)`：这是**测试观察面**（验证「送进上下文的那份 == 环境持有的那份 ==
     /// 会话持有的那份」），生产代码只经 [`Self::task_manager`] 取 manager。
     #[cfg(test)]
-    pub(crate) fn workspace_input(
-        &self,
-    ) -> Option<&peri_middlewares::assembly::WorkspaceInstanceInput> {
+    pub(crate) fn workspace_input(&self) -> Option<&peri_mcp_workspace::WorkspaceInstanceInput> {
         Some(&self.workspace_input)
     }
 

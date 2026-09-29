@@ -189,7 +189,7 @@ fn render_hit_line(line: &str) -> String {
 /// （`peri-middlewares/src/tool_search/tool_index.rs:322`）把 `tool.description()`
 /// **原样**拼进条目行 ⇒ 描述里的内嵌换行会在**列 0** 产生新的 `- <名字>: …` 物理行，
 /// 与真条目行同形。实例：`LSP` 的描述内嵌 `Operations:` 列表
-/// （`peri-middlewares/src/lsp/tool.rs:37-47`），10 个操作名会被本函数误判为条目名。
+/// （`mcp-packages/lsp/src/tool.rs`），10 个操作名会被本函数误判为条目名。
 /// 现场可自证：条目列表在真条目上按名字**字典序**（`:313` 的 `sort_by_key`），
 /// 被误判的行按**描述内的物理顺序**出现 —— 顺序不一致即说明它们属于同一工具的文本。
 fn deferred_entry_name(line: &str) -> Option<&str> {

@@ -273,9 +273,9 @@ impl BuiltinHostFixture {
     ) -> Self {
         let cwd = dirs.workspace_str();
         let (cron_trigger_tx, _cron_triggers) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = Arc::new(parking_lot::Mutex::new(
-            peri_middlewares::cron::CronScheduler::new(cron_trigger_tx),
-        ));
+        let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+            cron_trigger_tx,
+        )));
         let context = BuiltinInstanceContext::new(cwd.clone())
             .with_cron(CronInstanceInput {
                 scheduler,
@@ -428,7 +428,7 @@ async fn assemble_host_with_tick(dirs: &FixtureDirs, drive_cron_tick: bool) -> A
 async fn assemble_host_with_workspace_input(
     dirs: &FixtureDirs,
     drive_cron_tick: bool,
-    workspace_input: Option<peri_middlewares::assembly::WorkspaceInstanceInput>,
+    workspace_input: Option<peri_mcp_workspace::WorkspaceInstanceInput>,
 ) -> AcpServerConfig {
     let peri_config = peri_config_with_provider();
     let provider = LlmProvider::from_config(&peri_config).expect("夹具 provider");

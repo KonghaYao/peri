@@ -84,12 +84,12 @@ async fn make_session_manager_with_cron(
     tmp: &tempfile::TempDir,
 ) -> (
     SessionManager,
-    Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,
+    Arc<parking_lot::Mutex<peri_mcp_cron::CronScheduler>>,
     tokio::sync::mpsc::UnboundedReceiver<peri_acp_types::cron::CronContinuationRequest>,
 ) {
-    let scheduler = Arc::new(parking_lot::Mutex::new(
-        peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
-    ));
+    let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+        tokio::sync::mpsc::unbounded_channel().0,
+    )));
     let manager = make_manager_with_cron_option(tmp, Some(scheduler.clone())).await;
     let (continuation_tx, continuation_rx) = tokio::sync::mpsc::unbounded_channel();
     manager.bind_cron_continuation(continuation_tx);
@@ -99,7 +99,7 @@ async fn make_session_manager_with_cron(
 /// 同 make_session_manager，仅 SessionManager::new 末参按需传入 cron scheduler。
 async fn make_manager_with_cron_option(
     tmp: &tempfile::TempDir,
-    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
+    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_mcp_cron::CronScheduler>>>,
 ) -> SessionManager {
     make_manager_inner(tmp, cron_scheduler, Vec::new(), None).await
 }
@@ -130,7 +130,7 @@ async fn make_manager_with_task_manager_factory(tmp: &tempfile::TempDir) -> Sess
 /// 通用构造：cron scheduler + 插件命令静态条目 + per-session TaskManager 工厂可组合注入。
 async fn make_manager_inner(
     tmp: &tempfile::TempDir,
-    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
+    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_mcp_cron::CronScheduler>>>,
     plugin_entries: Vec<RouteEntry>,
     task_manager_factory: Option<TaskManagerFactory>,
 ) -> SessionManager {
@@ -156,7 +156,7 @@ async fn make_manager_inner(
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         cron_scheduler.map(|s| {
-            Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(s))
+            Arc::new(peri_mcp_cron::CronSchedulerPortHandle(s))
                 as Arc<dyn peri_acp_types::cron::CronSchedulerPort>
         }),
         None, // MCP 订阅端口（测试无）
@@ -689,254 +689,8 @@ async fn test_mcp_skill_registry_lifecycle_released_on_close() {
     );
 }
 
-// ─── MetaHarness 冻结状态（设计 §2.3）───────────────────────────────────────
-
-use std::collections::HashMap;
-
-fn mh_cfg(entries: &[(&str, bool)]) -> HashMap<String, bool> {
-    entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
-}
-
-fn default_state() -> peri_acp_types::meta_harness::MetaHarnessState {
-    peri_acp_types::meta_harness::MetaHarnessState::default()
-}
-
-#[test]
-fn build_meta_harness_state_empty_config_is_default() {
-    let state = super::frozen::build_meta_harness_state(None, HashMap::new());
-    assert_eq!(state, default_state());
-    let state = super::frozen::build_meta_harness_state(Some(&HashMap::new()), HashMap::new());
-    assert_eq!(state, default_state());
-}
-
-#[test]
-fn build_meta_harness_state_can_disable_built_in_subagents() {
-    let state = super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("BuiltInSubagents", false)])),
-        HashMap::new(),
-    );
-    assert!(!state.built_in_subagents_enabled);
-}
-
-#[test]
-fn build_meta_harness_state_section_true_with_doc_enters_overrides() {
-    let mut docs = HashMap::new();
-    docs.insert("01_intro".to_string(), "custom intro".to_string());
-    let state = super::frozen::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", true)])), docs);
-    assert_eq!(
-        state.section_overrides.get("01_intro").map(|s| s.as_ref()),
-        Some("custom intro")
-    );
-    assert!(state.disabled_middlewares.is_empty());
-}
-
-#[test]
-fn build_meta_harness_state_section_true_without_doc_warns_and_ignores() {
-    let state = super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("01_intro", true)])),
-        HashMap::new(),
-    );
-    assert!(
-        state.section_overrides.is_empty(),
-        "文档缺失时忽略覆盖（保持内置段落）"
-    );
-}
-
-#[test]
-fn build_meta_harness_state_section_false_does_not_override() {
-    let mut docs = HashMap::new();
-    docs.insert("01_intro".to_string(), "custom intro".to_string());
-    let state =
-        super::frozen::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", false)])), docs);
-    assert!(
-        state.section_overrides.is_empty(),
-        "section + false = 显式不覆盖，即使文档存在"
-    );
-}
-
-#[test]
-fn build_meta_harness_state_middleware_false_enters_disabled() {
-    let state = super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("WebMiddleware", false)])),
-        HashMap::new(),
-    );
-    assert!(state.disabled_middlewares.contains("WebMiddleware"));
-    assert!(state.section_overrides.is_empty());
-}
-
-#[test]
-fn build_meta_harness_state_middleware_true_not_disabled() {
-    let state = super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("WebMiddleware", true)])),
-        HashMap::new(),
-    );
-    assert!(
-        state.disabled_middlewares.is_empty(),
-        "middleware + true = 显式恢复装配"
-    );
-}
-
-#[test]
-fn build_meta_harness_state_mixed_entries() {
-    let mut docs = HashMap::new();
-    docs.insert("01_intro".to_string(), "intro".to_string());
-    docs.insert("05_using_tools".to_string(), "tools".to_string());
-    let state = super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[
-            ("01_intro", true),
-            ("05_using_tools", false),
-            ("WebMiddleware", false),
-            ("WorkspaceMiddleware", true),
-        ])),
-        docs,
-    );
-    assert_eq!(state.section_overrides.len(), 1, "仅 true+文档存在 进入");
-    assert!(state.section_overrides.contains_key("01_intro"));
-    assert!(!state.section_overrides.contains_key("05_using_tools"));
-    assert_eq!(state.disabled_middlewares.len(), 1);
-    assert!(state.disabled_middlewares.contains("WebMiddleware"));
-    assert!(!state.disabled_middlewares.contains("WorkspaceMiddleware"));
-}
-
-/// 集成：build_frozen_data 应用段落覆盖 + middleware 关闭集合到冻结载体；
-/// 主 prompt 与 SubAgent 无 workflow prompt 共用同一覆盖。
-#[tokio::test]
-async fn test_build_frozen_data_applies_meta_harness_state() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap().to_string();
-    // .peri/meta/01_intro.md 与 .peri/meta/05_using_tools.md
-    let meta_dir = std::path::Path::new(&cwd).join(".peri").join("meta");
-    std::fs::create_dir_all(&meta_dir).unwrap();
-    std::fs::write(meta_dir.join("01_intro.md"), "CUSTOM-INTRO-BODY").unwrap();
-    std::fs::write(meta_dir.join("05_using_tools.md"), "CUSTOM-TOOLS-BODY").unwrap();
-
-    let session_resources =
-        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
-            .await
-            .unwrap();
-    let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
-    peri_config.config.profiles = Profiles {
-        sonnet: ProfileConfig {
-            provider: "a".to_string(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    peri_config.config.meta_harness = Some(mh_cfg(&[
-        ("01_intro", true),
-        ("05_using_tools", true),
-        ("WebMiddleware", false),
-    ]));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mgr = SessionManager::new(
-        session_resources,
-        provider,
-        Arc::new(peri_config),
-        SharedPermissionMode::new(PermissionMode::Bypass),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
-        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
-    );
-
-    let frozen = mgr.build_frozen_data(&cwd, &[], &[]);
-    let state = frozen.meta_harness();
-    assert_eq!(
-        state.section_overrides.get("01_intro").map(|s| s.as_ref()),
-        Some("CUSTOM-INTRO-BODY"),
-        "冻结状态包含段落覆盖"
-    );
-    assert_eq!(
-        state
-            .section_overrides
-            .get("05_using_tools")
-            .map(|s| s.as_ref()),
-        Some("CUSTOM-TOOLS-BODY")
-    );
-    assert!(
-        state.disabled_middlewares.contains("WebMiddleware"),
-        "冻结状态包含关闭集合"
-    );
-    // 主 prompt 应用覆盖（SubAgent / fork / workflow agent 直接复用主
-    // prompt——子面向字段已随 C5 移除，无独立断言对象）
-    assert!(
-        frozen.system_prompt().contains("CUSTOM-INTRO-BODY"),
-        "主 prompt 应用覆盖"
-    );
-    // accessor 与 v2_frozen 返回同一状态（单事实源）
-    assert_eq!(
-        frozen.meta_harness(),
-        &frozen.v2_frozen().meta_harness,
-        "accessor 与 FrozenContext 字段一致"
-    );
-}
-
-/// 冻结语义：构造后修改/删除 .peri/meta 文件，已构造的 frozen data 不变；
-/// 新建（重新 build_frozen_data）才看到新内容。
-#[tokio::test]
-async fn test_frozen_data_does_not_reread_meta_docs() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap().to_string();
-    let meta_dir = std::path::Path::new(&cwd).join(".peri").join("meta");
-    std::fs::create_dir_all(&meta_dir).unwrap();
-    std::fs::write(meta_dir.join("01_intro.md"), "V1-BODY").unwrap();
-
-    let session_resources =
-        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
-            .await
-            .unwrap();
-    let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
-    peri_config.config.profiles = Profiles {
-        sonnet: ProfileConfig {
-            provider: "a".to_string(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    peri_config.config.meta_harness = Some(mh_cfg(&[("01_intro", true)]));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mgr = SessionManager::new(
-        session_resources,
-        provider,
-        Arc::new(peri_config),
-        SharedPermissionMode::new(PermissionMode::Bypass),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
-        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
-    );
-
-    let frozen = mgr.build_frozen_data(&cwd, &[], &[]);
-    assert!(frozen.system_prompt().contains("V1-BODY"));
-
-    // 删除文件并重建：已构造的 frozen 不变；新 build 才看到变化（无覆盖）
-    std::fs::remove_file(meta_dir.join("01_intro.md")).unwrap();
-    assert!(
-        frozen.system_prompt().contains("V1-BODY"),
-        "已冻结的 prompt 不因磁盘变化而变（ARC-FROZEN-001）"
-    );
-    let frozen2 = mgr.build_frozen_data(&cwd, &[], &[]);
-    assert!(
-        !frozen2.system_prompt().contains("V1-BODY"),
-        "新会话（新 build）才反映变更"
-    );
-    assert!(
-        frozen2.meta_harness().section_overrides.is_empty(),
-        "文档删除后新冻结状态无覆盖"
-    );
-}
+#[path = "mod_meta_harness_test.rs"]
+mod meta_harness_tests;
 
 /// 占位 handler：测试只断言路由层（注册 / 解析 / 投影），不触发执行。
 struct TestHandler;

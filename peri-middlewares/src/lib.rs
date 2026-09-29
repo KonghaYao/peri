@@ -7,7 +7,7 @@
 //! 不再有 middleware 提供面（v4-part-4 W3-C1）：7 个文件/终端工具
 //! （`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）
 //! 由 builtin `workspace` MCP 实例提供，模型面使用原始工具名。
-//! 工具实现保留在 [`tools`]（6 个文件工具）与 [`middleware::terminal::BashTool`]。
+//! 工具实现位于 `peri-mcp-workspace` 包的 `filesystem` 与 `terminal` 模块。
 
 #![allow(
     clippy::type_complexity,
@@ -22,7 +22,6 @@
 
 pub mod agent_define;
 pub mod agents_md;
-pub mod artifact;
 pub mod assembly;
 pub mod claude_agent_parser;
 mod completion_reminder;
@@ -37,7 +36,6 @@ pub use claude_agent_parser::{
 };
 pub mod ask_user;
 pub mod attribution;
-pub mod cron;
 pub mod default_system_prompt;
 pub mod error_suggest;
 pub mod hitl;
@@ -48,8 +46,6 @@ pub mod meta_harness;
 pub mod middleware;
 pub mod permission;
 pub mod plugin;
-#[doc(hidden)]
-pub mod process_env;
 pub mod ptc;
 pub use plugin::{
     AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource, InstallScope,
@@ -78,12 +74,11 @@ pub use ask_user::{
 };
 pub use at_mention::AtMentionMiddleware;
 pub use attribution::GitAttributionMiddleware;
-pub use cron::{CronScheduler, CronTask, CronTrigger};
 pub use default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
 pub use git_watch::GitWatchMiddleware;
 pub use goal_middleware::GoalMiddleware;
 pub use hitl::HumanInTheLoopMiddleware;
-pub use lsp::{LspSyncMiddleware, LspTool};
+pub use lsp::LspSyncMiddleware;
 pub use middleware::image::ImageMiddleware;
 pub use permission::{
     default_requires_approval, effective_tool_name, AutoClassifier, BatchItem, Classification,
@@ -116,7 +111,6 @@ pub mod prelude {
             QuestionOption,
         },
         attribution::GitAttributionMiddleware,
-        cron::{CronScheduler, CronTask, CronTrigger},
         hitl::HumanInTheLoopMiddleware,
         hooks::{HookMiddleware, RegisteredHook},
         middleware::TodoMiddleware,
@@ -134,10 +128,6 @@ pub mod prelude {
         },
         skills::{SkillMetadata, SkillsMiddleware},
         subagent::{SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool},
-        tools::{
-            ArcToolWrapper, AskUserTool, BoxToolWrapper, EditFileTool, FolderOperationsTool,
-            GlobFilesTool, GrepTool, ReadFileTool, TodoItem, TodoStatus, TodoWriteTool,
-            WriteFileTool,
-        },
+        tools::{ArcToolWrapper, AskUserTool, BoxToolWrapper, TodoItem, TodoStatus, TodoWriteTool},
     };
 }

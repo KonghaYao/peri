@@ -51,14 +51,14 @@ v4 目标是存算分离：持久状态、Agent 计算与工具执行环境独�
 | Agent loop、Compact、provider、session | `peri-agent/CLAUDE.md` + architecture/rust |
 | ACP host、stdio、prompt、event、caps | `peri-acp/CLAUDE.md` + architecture/rust |
 | Controller/Runtime、cancel、Langfuse | architecture/rust + 对应 code-index |
-| MCP（含内置实例）、plugin、skills、subagent、HITL、工具、LSP | `peri-middlewares/CLAUDE.md` + architecture/rust |
+| MCP（含内置实例）、plugin、skills、subagent、HITL、工具、LSP | middlewares 与 `mcp-packages/CLAUDE.md` + architecture/rust |
 | Workflow | middleware guide + `docs/code-index/peri-workflow.md` |
 | TUI | `peri-tui/CLAUDE.md` + tui/rust |
 | E2E | `e2e/CLAUDE.md` + testing |
 | 文档站 | `peri-cool/CLAUDE.md` + documentation |
 | 历史学习 | `.claude/skills/learn-from-history/SKILL.md` |
 
-简称指 `docs/standards/` 同名文件，architecture 指 `architecture-contracts.md`；跨层、prompt、事件、工具、链序或安全变更读 architecture，Git 操作读 `git.md`，指引维护读 `documentation.md`。
+简称指同名标准文件，architecture 指 `architecture-contracts.md`；跨层、prompt、事件、工具、链序或安全变更读 architecture，Git 操作读 `git.md`，指引维护读 `documentation.md`。
 
 设计：`docs/design/README.md`；需求：`spec/issues/`；历史：`spec/global/problems.md`。主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`；退出语义查 Agent 指引，workspace 查 `Cargo.toml`。
 

@@ -189,9 +189,9 @@ rl.on('line', async line => {
 async fn start_workspace_pool(cwd: &std::path::Path) -> (Arc<McpClientPool>, McpTaskOwner) {
     let cwd_str = cwd.to_string_lossy().into_owned();
     let (cron_trigger_tx, _cron_triggers) = tokio::sync::mpsc::unbounded_channel();
-    let scheduler = Arc::new(parking_lot::Mutex::new(
-        peri_middlewares::cron::CronScheduler::new(cron_trigger_tx),
-    ));
+    let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+        cron_trigger_tx,
+    )));
     let context = BuiltinInstanceContext::new(cwd_str.clone())
         .with_cron(CronInstanceInput {
             scheduler,

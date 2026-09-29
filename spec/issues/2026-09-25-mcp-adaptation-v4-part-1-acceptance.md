@@ -2,6 +2,8 @@
 
 > 2026-09-28 范围更新：`local-mcp-server` 已按用户裁决退役，代码与独立构建入口已删除。本文涉及旧项目的路径、命令、比较和后续复用建议仅作为历史记录，不再作为实施或验收要求；当前 Workspace MCP 入口与验证见 [主项目代码索引](../../docs/code-index/peri-middlewares.md)。
 
+> 当前代码导航（2026-09-29）：Builtin MCP handler 与工具已迁入独立 crate；当前插件路径及测试命令见 [MCP packages 代码索引](../../docs/code-index/mcp-packages.md)，宿主 runtime 与装配见 [peri-middlewares 代码索引](../../docs/code-index/peri-middlewares.md)。下文的旧路径和测试命令是本验收记录采集时的历史证据，不作为当前源码导航。
+
 **状态**：PARTIAL（契约 1–4、7 通过；契约 5、6 按能力分级的降级证据，见 §3、§4）
 **优先级**：高
 **类型**：验收记录 / MCP 启动准入与一等工具注入

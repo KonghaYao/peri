@@ -1,5 +1,7 @@
 # MCP adaptation v4-part-3 验收记录（wave 2：Cron / LSP 实迁为 builtin MCP 实例）
 
+> 当前代码导航（2026-09-29）：Cron 与 LSP 的 handler/tool 测试已迁入独立 crates；当前入口和非零验证命令见 [MCP packages 代码索引](../../docs/code-index/mcp-packages.md)。宿主 Cron tick 与 MCP lifecycle/runtime 仍在 `peri-middlewares/src/mcp/`；下文旧路径和 cargo 结果是 wave 2 采集时的历史证据，不作当前源码导航。
+
 > 2026-09-28 合并安全修订：本文 IF-D14 固定错误退化为迁移时点记录；workspace 已按当前 IF-D14 改为类型化安全原因及任务/日志/草稿恢复引用。真实边界与安全负例见 `peri-middlewares/src/mcp/builtin/workspace_recovery_test.rs`。
 
 
@@ -495,4 +497,3 @@ tool `{tool}` failed to execute; the failure detail is withheld by policy (no pa
 ### 8.3 本节证据的边界
 
 以上证据全部来自 `ANTHROPIC_API_KEY=test` + 本地假 model server / 本地假 LSP 的受控环境：**未接触任何真实凭据**、**未验证真实 Anthropic API 兼容性**（含流式事件形状、错误码、限流与重试行为）、**未跑 e2e 套件**。因此 §8 只支持「首版可用」层面的正向结论（真实二进制内，cron/lsp 两个 builtin 实例的工具面、检索/执行往返、门控与写后同步按设计工作），不构成对真实服务端行为或全量回归的结论——后者以 §6.1 的四段门禁与 §6.2 的台账为准。
-

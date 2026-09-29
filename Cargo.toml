@@ -5,6 +5,12 @@ members = [
     "peri-agent",
     "peri-controller",
     "peri-middlewares",
+    "mcp-packages/common",
+    "mcp-packages/web",
+    "mcp-packages/artifact",
+    "mcp-packages/cron",
+    "mcp-packages/lsp",
+    "mcp-packages/workspace",
     "peri-model",
     "peri-process",
     "peri-resources",
@@ -82,6 +88,15 @@ sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 sysinfo = "0.39"
 lsp-types = "0.97"
 lru = "0.18"
+
+# --- MCP capability packages ---
+peri-mcp-common = { path = "mcp-packages/common" }
+peri-mcp-web = { path = "mcp-packages/web" }
+peri-mcp-artifact = { path = "mcp-packages/artifact" }
+peri-mcp-cron = { path = "mcp-packages/cron" }
+peri-mcp-lsp = { path = "mcp-packages/lsp" }
+peri-mcp-workspace = { path = "mcp-packages/workspace" }
+rmcp = "3.1.4"
 
 # --- Build ---
 tempfile = "3"

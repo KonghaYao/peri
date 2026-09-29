@@ -28,12 +28,11 @@
 //!   防「注册表与 handler 一起漂移」）。声明**顺序**另按注册表逐项比对
 //!   （`list_tools_of` 的契约是「声明顺序 = tools 顺序」）。
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+use crate::mcp::apps::McpCapabilityProfile;
+use crate::mcp::builtin::runtime::{
+    spawn_builtin_transport_with_handler, BuiltinInstanceSupervisor, BUILTIN_CONVERGE_TIMEOUT,
 };
-use std::time::Duration;
-
+use crate::mcp::client::{serve_client_auto, McpServiceWrapper};
 use peri_acp_types::builtin_mcp::find;
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::tasks::{BgTaskKind, TaskManager};
@@ -44,21 +43,14 @@ use rmcp::{
     ServiceError,
 };
 use serde_json::{json, Value};
-
-use super::WorkspaceMcpServer;
-use crate::mcp::apps::McpCapabilityProfile;
-use crate::mcp::builtin::context::WorkspaceInstanceInput;
-use crate::mcp::builtin::runtime::{
-    spawn_builtin_transport_with_handler, BuiltinInstanceSupervisor, BUILTIN_CONVERGE_TIMEOUT,
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
 };
-use crate::mcp::client::{serve_client_auto, McpServiceWrapper};
-use crate::middleware::terminal::BashTool;
-use peri_agent::tools::{BaseTool, ToolContext, ToolExecutionStatus};
+use std::time::Duration;
 
-/// client 侧握手上界（`serve_client_auto` 内建）。
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
-/// client 侧关闭上界（夹具收尾）。
-const CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
+use peri_agent::tools::{BaseTool, ToolContext, ToolExecutionStatus};
+use peri_mcp_workspace::{terminal::BashTool, WorkspaceInstanceInput, WorkspaceMcpServer};
 
 /// 期望工具集（**冻结字面量**，AW3-03 的 7 项）。
 ///
@@ -81,83 +73,6 @@ const FILE_CONTENT: &str = "peri-workspace-wire-marker";
 const LEAK_PATH: &str = "/tmp/secret-marker/private.txt";
 
 // ─── 夹具 ─────────────────────────────────────────────────────────────────────
-
-/// 一条已握手的 builtin 链路（client service + 本代关闭所有权）。
-struct Pair {
-    service: McpServiceWrapper,
-    supervisor: BuiltinInstanceSupervisor,
-}
-
-impl Pair {
-    fn peer(&self) -> Peer<RoleClient> {
-        self.service.peer().clone()
-    }
-
-    /// 夹具收尾：关闭 client（释放 duplex 写半边）→ 本代监督者按冻结顺序有界收敛。
-    async fn shutdown(mut self) {
-        let _ = self.service.close_with_timeout(CLOSE_TIMEOUT).await;
-        let _ = self.supervisor.close(BUILTIN_CONVERGE_TIMEOUT).await;
-    }
-}
-
-/// 经**生产**装配函数握手一条 `workspace` 链路（handler 是真 handler，工具是真工具）。
-///
-/// `input` 即 AW3-11 的 session 级输入：`None` 是顶层三路径 / 1:N 形态的形态（可见但退化），
-/// 既有五条线路用例都走该形态；后台任务两条用例显式传 `Some` / `None` 各一遍。
-async fn connect(cwd: &str, input: Option<WorkspaceInstanceInput>) -> Pair {
-    let transport =
-        spawn_builtin_transport_with_handler("workspace", WorkspaceMcpServer::new(cwd, input));
-    let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(
-        io,
-        None,
-        None,
-        &McpCapabilityProfile::disabled(),
-        HANDSHAKE_TIMEOUT,
-    )
-    .await
-    .expect("builtin 握手不得超时（同进程链路）")
-    .expect("builtin 握手不得失败");
-    Pair {
-        service,
-        supervisor,
-    }
-}
-
-/// 临时工作目录（**已 canonicalize**）。
-///
-/// macOS 的 `/var` 是 `/private/var` 的符号链接：不规范化时工具内部的
-/// `resolve_path`（`tools/filesystem/mod.rs:27-44` 会 canonicalize）与夹具的
-/// `strip_prefix(cwd)` 口径不一致，写回文本会变成绝对路径。规范化后夹具与工具同源。
-fn workspace_dir() -> (tempfile::TempDir, String) {
-    let dir = tempfile::tempdir().expect("临时目录夹具必须可创建");
-    let cwd = dir.path().canonicalize().expect("夹具目录必须可规范化");
-    (dir, cwd.to_string_lossy().to_string())
-}
-
-/// `tools/call` 请求（`arguments` 必须是 JSON object；缺省 = 空对象）。
-fn call(name: &str, arguments: Value) -> CallToolRequestParams {
-    CallToolRequestParams::new(name.to_string())
-        .with_arguments(arguments.as_object().cloned().unwrap_or_default())
-}
-
-/// 结果里的首个文本块。
-fn first_text(result: &CallToolResult) -> Option<String> {
-    result.content.iter().find_map(|block| match block {
-        rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
-        _ => None,
-    })
-}
-
-/// 断言响应是 `Complete` 并取出结果（IF-D14 的失败形态**不是** `Err`）。
-fn complete(response: CallToolResponse) -> CallToolResult {
-    match response {
-        CallToolResponse::Complete(result) => result,
-        other => panic!("期望 Complete 结果，实际：{other:?}"),
-    }
-}
-
-// ─── 线路：握手 + tools/list ───────────────────────────────────────────────────
 
 #[tokio::test]
 async fn workspace_handler_handshakes_and_lists_seven_tools_over_wire() {
@@ -941,5 +856,84 @@ async fn workspace_handler_lingering_child_is_registered_only_with_injected_task
     );
 }
 
-#[path = "workspace_recovery_test.rs"]
-mod recovery;
+/// client 侧握手上界（`serve_client_auto` 内建）。
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// client 侧关闭上界（夹具收尾）。
+const CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// 一条已握手的 builtin 链路（client service + 本代关闭所有权）。
+struct Pair {
+    service: McpServiceWrapper,
+    supervisor: BuiltinInstanceSupervisor,
+}
+
+impl Pair {
+    fn peer(&self) -> Peer<RoleClient> {
+        self.service.peer().clone()
+    }
+
+    /// 夹具收尾：关闭 client（释放 duplex 写半边）→ 本代监督者按冻结顺序有界收敛。
+    async fn shutdown(mut self) {
+        let _ = self.service.close_with_timeout(CLOSE_TIMEOUT).await;
+        let _ = self.supervisor.close(BUILTIN_CONVERGE_TIMEOUT).await;
+    }
+}
+
+/// 经**生产**装配函数握手一条 `workspace` 链路（handler 是真 handler，工具是真工具）。
+///
+/// `input` 即 AW3-11 的 session 级输入：`None` 是顶层三路径 / 1:N 形态的形态（可见但退化），
+/// 既有五条线路用例都走该形态；后台任务两条用例显式传 `Some` / `None` 各一遍。
+async fn connect(cwd: &str, input: Option<WorkspaceInstanceInput>) -> Pair {
+    let transport =
+        spawn_builtin_transport_with_handler("workspace", WorkspaceMcpServer::new(cwd, input));
+    let (io, supervisor) = transport.into_parts();
+    let service = serve_client_auto(
+        io,
+        None,
+        None,
+        &McpCapabilityProfile::disabled(),
+        HANDSHAKE_TIMEOUT,
+    )
+    .await
+    .expect("builtin 握手不得超时（同进程链路）")
+    .expect("builtin 握手不得失败");
+    Pair {
+        service,
+        supervisor,
+    }
+}
+
+/// 临时工作目录（**已 canonicalize**）。
+///
+/// macOS 的 `/var` 是 `/private/var` 的符号链接：不规范化时工具内部的
+/// `resolve_path`（`tools/filesystem/mod.rs:27-44` 会 canonicalize）与夹具的
+/// `strip_prefix(cwd)` 口径不一致，写回文本会变成绝对路径。规范化后夹具与工具同源。
+fn workspace_dir() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("临时目录夹具必须可创建");
+    let cwd = dir.path().canonicalize().expect("夹具目录必须可规范化");
+    (dir, cwd.to_string_lossy().to_string())
+}
+
+/// `tools/call` 请求（`arguments` 必须是 JSON object；缺省 = 空对象）。
+fn call(name: &str, arguments: Value) -> CallToolRequestParams {
+    CallToolRequestParams::new(name.to_string())
+        .with_arguments(arguments.as_object().cloned().unwrap_or_default())
+}
+
+/// 结果里的首个文本块。
+fn first_text(result: &CallToolResult) -> Option<String> {
+    result.content.iter().find_map(|block| match block {
+        rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
+        _ => None,
+    })
+}
+
+/// 断言响应是 `Complete` 并取出结果（IF-D14 的失败形态**不是** `Err`）。
+fn complete(response: CallToolResponse) -> CallToolResult {
+    match response {
+        CallToolResponse::Complete(result) => result,
+        other => panic!("期望 Complete 结果，实际：{other:?}"),
+    }
+}
+
+// ─── 线路：握手 + tools/list ───────────────────────────────────────────────────

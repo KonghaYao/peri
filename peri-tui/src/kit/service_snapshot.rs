@@ -51,7 +51,7 @@ pub struct SnapshotSource {
     pub peri_config: SharedPeriConfig,
     pub permission_mode: Arc<SharedPermissionMode>,
     /// Cron/MCP 资源句柄直读（C 类豁免至 M-TUI，见批 3 tui-deps 未做项）
-    pub cron_scheduler: Arc<Mutex<peri_middlewares::cron::CronScheduler>>,
+    pub cron_scheduler: Arc<Mutex<peri_mcp_cron::CronScheduler>>,
     pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
     /// MCP 初始化状态 watch receiver——`.borrow()` 即可读当前状态。
     /// 用 `tokio::sync::watch::Receiver` 而非 `Arc<watch::Sender<...>>` 因为

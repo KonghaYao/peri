@@ -1,7 +1,8 @@
 //! Deployment → session/new → MCP → session scheduler → continuation regression.
 use super::*;
 use peri_agent::tools::{BaseTool, ToolContext};
-use peri_middlewares::{cron::CronSchedulerPortHandle, mcp::McpClientPool};
+use peri_mcp_cron::CronSchedulerPortHandle;
+use peri_middlewares::mcp::McpClientPool;
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     ModelStreamEvent, StopReason,
@@ -111,7 +112,7 @@ async fn cron_tool(
 
 fn scheduler(
     env: &crate::host::workspace::SessionEnvironment,
-) -> Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>> {
+) -> Arc<parking_lot::Mutex<peri_mcp_cron::CronScheduler>> {
     env.cfg
         .cron_scheduler
         .clone()

@@ -246,7 +246,7 @@ subagent_mw 槽位）联动置空，禁止半开状态。
   prompt contribution 同时从 session-local 视图消失（见 ARC-CAPABILITY-CLOSURE-001）。
 - 插件无独立 meta_harness 条目：关闭 `PluginMiddleware` 即关闭插件整体注入；
   插件卸载/管理走既有机制。
-- Artifact 上传由 builtin `artifact` MCP 实例承载（`peri-middlewares/src/mcp/builtin/artifact.rs`）；
+- Artifact 上传由 builtin `artifact` MCP 实例承载（`mcp-packages/artifact/src/{server,tool}.rs`；宿主实例注册与 dispatch 仍在 `peri-middlewares/src/mcp/builtin/`）；
   策略键 `ArtifactMiddleware: false` 关闭该实例的工具面，仅移除 `artifact`（模型面
   `artifact`），不影响 `ToolSearch` 的 `SearchExtraTools` / `ExecuteExtraTool`。
 - `CronMiddleware` / `LspMiddleware` 是 `cron` / `lsp` 实例的策略键，语义与

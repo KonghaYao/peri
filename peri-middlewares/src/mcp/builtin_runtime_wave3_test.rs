@@ -34,7 +34,6 @@ use peri_agent::middleware::state::MiddlewareState;
 use peri_agent::session::MessageQueue;
 
 use crate::lsp::middleware::LspSyncMiddleware;
-use crate::mcp::builtin::lsp::LspMcpServer;
 
 /// 本节全部等待的**显式上界**（真 perl 子进程 + 同进程链路，远小于各内层超时）。
 const MW_BOUND: Duration = Duration::from_secs(5);

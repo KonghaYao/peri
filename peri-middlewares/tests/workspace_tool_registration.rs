@@ -10,8 +10,7 @@
 //! 两侧都从公开面取证，缺任意一侧断言都退化为空转：
 //!
 //! - 注册表侧（`peri-acp-types`）：`workspace` 实例的工具表非空；
-//! - 实现侧（本 crate 公开路径 `peri_middlewares::tools` /
-//!   `peri_middlewares::middleware::terminal`）：逐项构造，断言
+//! - 实现侧（`peri_mcp_workspace` 的公开 `filesystem` / `terminal` 模块）：逐项构造，断言
 //!   `BaseTool::name()` / `is_direct()` / `prompt_declaration()` 与注册表声明**逐字相等**。
 //!
 //! 三项各自的失效方式不同，因此分开断言：
@@ -25,9 +24,11 @@
 
 use peri_acp_types::builtin_mcp::find as find_builtin_instance;
 use peri_agent::tools::BaseTool;
-use peri_middlewares::middleware::terminal::BashTool;
-use peri_middlewares::tools::{
-    EditFileTool, FolderOperationsTool, GlobFilesTool, GrepTool, ReadFileTool, WriteFileTool,
+use peri_mcp_workspace::{
+    filesystem::{
+        EditFileTool, FolderOperationsTool, GlobFilesTool, GrepTool, ReadFileTool, WriteFileTool,
+    },
+    terminal::BashTool,
 };
 
 /// 按注册表**原始工具名**从公开路径构造实现。

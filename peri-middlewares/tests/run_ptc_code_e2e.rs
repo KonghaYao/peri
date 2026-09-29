@@ -5,7 +5,7 @@ use peri_agent::tools::{
     BaseTool, EffectiveToolCall, EffectiveToolDefinition, EffectiveToolDispatcher,
     EffectiveToolError, ToolContext,
 };
-use peri_middlewares::process_env::{self, EnvLockFile};
+use peri_mcp_common::process_env::{self, EnvLockFile};
 use peri_middlewares::ptc::RunPtcCodeTool;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;

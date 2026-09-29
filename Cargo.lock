@@ -3904,6 +3904,8 @@ dependencies = [
  "peri-acp-types",
  "peri-agent",
  "peri-controller",
+ "peri-mcp-cron",
+ "peri-mcp-workspace",
  "peri-middlewares",
  "peri-model",
  "peri-resources",
@@ -4035,6 +4037,115 @@ dependencies = [
 ]
 
 [[package]]
+name = "peri-mcp-artifact"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "peri-acp-types",
+ "peri-agent",
+ "peri-mcp-common",
+ "pulldown-cmark 0.13.4",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "peri-mcp-common"
+version = "0.2.0"
+dependencies = [
+ "fs2",
+ "peri-agent",
+ "rmcp",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "peri-mcp-cron"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "croner",
+ "parking_lot",
+ "peri-acp-types",
+ "peri-agent",
+ "peri-mcp-common",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "peri-mcp-lsp"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "lsp-types",
+ "peri-acp-types",
+ "peri-agent",
+ "peri-mcp-common",
+ "peri-resources",
+ "rmcp",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "peri-mcp-web"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "peri-acp-types",
+ "peri-agent",
+ "peri-mcp-common",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "peri-mcp-workspace"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "filetime",
+ "futures",
+ "glob",
+ "grep",
+ "ignore",
+ "parking_lot",
+ "peri-acp-types",
+ "peri-agent",
+ "peri-mcp-common",
+ "regex",
+ "rmcp",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "peri-middlewares"
 version = "0.2.0"
 dependencies = [
@@ -4043,7 +4154,6 @@ dependencies = [
  "base64 0.23.1",
  "cacache",
  "chrono",
- "croner",
  "dirs-next",
  "filetime",
  "flate2",
@@ -4051,8 +4161,6 @@ dependencies = [
  "futures",
  "glob",
  "gray_matter",
- "grep",
- "ignore",
  "image",
  "ipnet",
  "lsp-types",
@@ -4060,10 +4168,15 @@ dependencies = [
  "peri-acp-types",
  "peri-agent",
  "peri-js-runtime",
+ "peri-mcp-artifact",
+ "peri-mcp-common",
+ "peri-mcp-cron",
+ "peri-mcp-lsp",
+ "peri-mcp-web",
+ "peri-mcp-workspace",
  "peri-model",
  "peri-process",
  "peri-resources",
- "pulldown-cmark 0.13.4",
  "regex",
  "reqwest",
  "rmcp",
@@ -4081,7 +4194,6 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "walkdir",
 ]
 
 [[package]]
@@ -4187,6 +4299,7 @@ dependencies = [
  "parking_lot",
  "peri-acp",
  "peri-acp-types",
+ "peri-mcp-cron",
  "peri-middlewares",
  "peri-resources",
  "peri-theme",

@@ -36,6 +36,8 @@ peri-controller = { path = "../peri-controller" }
 peri-model = { path = "../peri-model" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-resources = { path = "../peri-resources" }
+peri-mcp-cron.workspace = true
+peri-mcp-workspace.workspace = true
 agent-client-protocol = { version = "2", features = ["unstable"] }
 # `unstable_mcp_over_acp`：MCP over ACP 的类型（`McpCapabilities` / `McpServer::Acp`
 # / `ConnectMcpRequest`）与 ACP `mcp/*` 方法名。当前由 `agent-client-protocol` 的

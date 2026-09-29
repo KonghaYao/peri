@@ -1,4 +1,5 @@
 use super::*;
+use peri_mcp_lsp::LspMcpServer;
 
 // ─── 用例 3：builtin LSP 的调用与取消收敛（R29）───────────────────────
 

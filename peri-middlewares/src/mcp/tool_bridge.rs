@@ -6,7 +6,7 @@ use rmcp::model::{ContentBlock, Tool};
 use thiserror::Error;
 
 use super::client::{McpClientHandle, McpClientPool};
-use crate::tools::output_persist::persist_truncated_output;
+use peri_agent::agent::async_tasks::persist_truncated_output;
 
 /// MCP 工具调用错误
 #[derive(Debug, Error)]

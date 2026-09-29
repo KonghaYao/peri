@@ -390,7 +390,7 @@ impl WireFixtureHarness {
             BuiltinInstanceContext::new(cwd.clone())
                 .with_cron(CronInstanceInput {
                     scheduler: Arc::new(parking_lot::Mutex::new(
-                        peri_middlewares::cron::CronScheduler::new(cron_trigger_tx),
+                        peri_mcp_cron::CronScheduler::new(cron_trigger_tx),
                     )),
                     tick_enabled: false,
                 })

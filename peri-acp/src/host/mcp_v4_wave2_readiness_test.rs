@@ -92,9 +92,9 @@ async fn wave2_ready_gate_matrix() {
         let cwd = dirs.workspace_str();
         // 只给**健康那个**实例的输入：被观察实例的输入缺失 ⇒ 装配期 typed 失败。
         let (cron_tx, _cron_triggers) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = Arc::new(parking_lot::Mutex::new(
-            peri_middlewares::cron::CronScheduler::new(cron_tx),
-        ));
+        let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+            cron_tx,
+        )));
         let context = BuiltinInstanceContext::new(cwd.clone());
         let context = if fault == "cron" {
             context.with_lsp(LspInstanceInput {
@@ -206,9 +206,9 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
     let dirs = FixtureDirs::new();
     let cwd = dirs.workspace_str();
     let (cron_tx, _cron_triggers) = tokio::sync::mpsc::unbounded_channel();
-    let scheduler = Arc::new(parking_lot::Mutex::new(
-        peri_middlewares::cron::CronScheduler::new(cron_tx),
-    ));
+    let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+        cron_tx,
+    )));
     // 宿主组合根的**唯一**一份上下文：cron 输入齐备 + 生效 LSP 配置非空。
     let first = BuiltinInstanceContext::new(cwd.clone())
         .with_cron(CronInstanceInput {
@@ -333,9 +333,9 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
     // 晚注入（**首次**注入，但封口已置真）⇒ typed 拒绝，且不救活任何实例。
     let late_cwd = late_dirs.workspace_str();
     let (cron_tx, _cron_triggers) = tokio::sync::mpsc::unbounded_channel();
-    let scheduler = Arc::new(parking_lot::Mutex::new(
-        peri_middlewares::cron::CronScheduler::new(cron_tx),
-    ));
+    let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+        cron_tx,
+    )));
     let first_late_err = pool
         .set_builtin_instance_context(Arc::new(
             BuiltinInstanceContext::new(late_cwd.clone())

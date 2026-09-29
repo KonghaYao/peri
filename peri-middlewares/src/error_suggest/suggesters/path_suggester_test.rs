@@ -190,8 +190,8 @@ fn test_path_suggester_perf_under_50ms_in_large_dir() {
 /// [回归测试] 真实 Edit 的文本匹配失败不应给已存在的文件添加路径纠错。
 #[tokio::test]
 async fn test_edit_missing_text_has_no_path_suggestion_but_missing_file_does() {
-    use crate::tools::filesystem::EditFileTool;
     use peri_agent::tools::{BaseTool, ToolContext};
+    use peri_mcp_workspace::filesystem::EditFileTool;
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("dup.txt"), "actual text\n").unwrap();
     let tool = EditFileTool::new(dir.path().to_str().unwrap());
@@ -204,7 +204,7 @@ async fn test_edit_missing_text_has_no_path_suggestion_but_missing_file_does() {
             .await
             .unwrap_err();
         let projected = &error
-            .downcast_ref::<crate::tools::failure::ToolFailure>()
+            .downcast_ref::<peri_mcp_common::failure::ToolFailure>()
             .unwrap()
             .recovery;
         for name in ["Edit", "mcp__workspace__Edit"] {

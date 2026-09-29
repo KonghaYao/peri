@@ -18,13 +18,11 @@ mod preparation;
 mod prompt;
 mod workflow;
 
-// builtin 实例上下文（IF-P3-04 / A33）：宿主装配（`peri-acp`）经这里拿到构造与注入所需
-// 的全部公开类型；`crate::mcp::builtin` 仍是 `pub(crate)`，宿主不得 import 它。
-// `WorkspaceInstanceInput` 是 **session 级**输入（AW3-11：per-session `TaskManager` +
-// bg 完成回调），宿主在 `McpClientPool::run_initialize` 之前经 `with_workspace` 送进上下文。
+// builtin 实例上下文（IF-P3-04 / A33）：宿主装配（`peri-acp`）经这里拿到宿主构造的上下文
+// 和 cron/LSP 输入；`WorkspaceInstanceInput` 由 `peri-mcp-workspace` 直接公开，宿主直接依赖
+// 该能力包，并在 `McpClientPool::run_initialize` 之前经 `with_workspace` 注入。
 pub use crate::mcp::builtin::context::{
     BuiltinContextError, BuiltinInstanceContext, CronInstanceInput, LspInstanceInput,
-    WorkspaceInstanceInput,
 };
 pub use lsp::{create_host_lsp_pool, load_merged_lsp_servers};
 pub use workflow::{

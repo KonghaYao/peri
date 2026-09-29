@@ -2,6 +2,8 @@
 
 > 2026-09-28 范围更新：`local-mcp-server` 已按用户裁决退役，代码与独立构建入口已删除。本文涉及旧项目的路径、命令、比较和后续复用建议仅作为历史记录，不再作为实施或验收要求；当前 Workspace MCP 入口与验证见 [主项目代码索引](../../docs/code-index/peri-middlewares.md)。
 
+> 当前代码导航（2026-09-29）：Artifact、Web、Cron、LSP 与 Workspace handler/tool 实现现位于各自的 `mcp-packages/` crate；路径与当前非零测试命令见 [MCP packages 代码索引](../../docs/code-index/mcp-packages.md)。本验收中的历史源码路径、命令与结果保留其采集时事实，不作为当前源码导航。
+
 **状态**：§1–§11 为 W5 + V-05 末的现场记录（PARTIAL；逐面分级见 §10，本文件不给单一总体「通过」）；**§12 为第二轮收口、§12.7 为第三轮（独立复核后的修复与最终复跑）、§12.8 为第四轮（第三次独立复核的 12 项发现与处置）、§12.9 为第六轮（第四次独立复核对第四轮处置的验证与 4 项遗留处置），§12.9 是全文的现行裁决** —— 本波次可证伪面全部闭合；仍 UNVERIFIED 者仅 capability root / 凭据隔离（A13 口径）与 wave 2/3 范围外项，另有三项按「无独立可证伪面」的设计事实登记（Goal 工具面、取消通知抵达、`PERI_MCP_BUILTIN=off` 运维语义），见 §12.5；另登记 1 项 pre-existing 测试隔离缺口（`peri-tui` 全局 atom 用例偶发失败，见 §12.7.3）
 **优先级**：高
 **类型**：验收记录 / MCP adaptation v4 wave 1（Builtin MCP 运行时 + Web/Artifact MCP）

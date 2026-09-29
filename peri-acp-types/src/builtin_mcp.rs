@@ -87,7 +87,7 @@ const ARTIFACT_TOOLS: &[BuiltinMcpTool] = &[BuiltinMcpTool {
 ///
 /// 三个工具一律 deferred（`direct: false`）且无提示词声明模板（A4：声明段零变化）；
 /// `cron_register` / `cron_list` / `cron_remove` 的在用执行实现是
-/// `peri-middlewares/src/cron/tools.rs` 的同名 `BaseTool`，由 `CronMcpServer` 映射。
+/// `mcp-packages/cron/src/tools.rs` 的同名 `BaseTool`，由 `CronMcpServer` 映射。
 const CRON_TOOLS: &[BuiltinMcpTool] = &[
     BuiltinMcpTool {
         original_name: "cron_register",
@@ -126,8 +126,8 @@ const LSP_TOOLS: &[BuiltinMcpTool] = &[BuiltinMcpTool {
 /// `BaseTool` 实现（AW3-02），因此 `is_direct()` 恒真的 7 项一律 `direct: true`
 /// （AW3-03：迁移前即在首个 LLM 请求的直连工具表内）。
 /// `prompt_declaration` 逐字搬运各工具实现的 `BaseTool::prompt_declaration()`
-/// （6 个文件工具在 `peri-middlewares/src/tools/filesystem/{read,write,edit,glob,grep,folder}.rs`，
-/// `Bash` 在 `peri-middlewares/src/middleware/terminal.rs`）；`{{name}}` / `{{title}}`
+/// （6 个文件工具在 `mcp-packages/workspace/src/filesystem/{read,write,edit,glob,grep,folder}.rs`，
+/// `Bash` 在 `mcp-packages/workspace/src/terminal.rs`）；`{{name}}` / `{{title}}`
 /// 的渲染仍归 `tool_search/declaration.rs`，本表不得改写模板文本。
 const WORKSPACE_TOOLS: &[BuiltinMcpTool] = &[
     BuiltinMcpTool {

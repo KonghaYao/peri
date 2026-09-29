@@ -23,11 +23,10 @@ use peri_acp_types::{
 use peri_agent::agent::async_tasks::TaskManager as ConcreteTaskManager;
 use peri_resources::lsp::{config::LspConfigFile, pool::LspServerPool};
 
-use super::{BuiltinInstanceContext, CronInstanceInput, LspInstanceInput, WorkspaceInstanceInput};
-use crate::{
-    cron::{CronScheduler, CronTrigger},
-    mcp::builtin::closed_instances,
-};
+use super::{BuiltinInstanceContext, CronInstanceInput, LspInstanceInput};
+use crate::mcp::builtin::closed_instances;
+use peri_mcp_cron::{CronScheduler, CronTrigger};
+use peri_mcp_workspace::WorkspaceInstanceInput;
 
 /// `cron` 输入夹具：真实 scheduler（`unbounded_channel` 不需要 runtime；receiver 直接
 /// 丢弃——本文件不驱动 tick）。

@@ -518,7 +518,7 @@ fn test_resolve_skill_roots_returns_standard_paths() {
 /// 各拼一份会让 User 技能目录与插件目录分叉。
 #[test]
 fn test_resolve_skill_roots_user_root_follows_home_env() {
-    let _process_env = crate::process_env::lock().expect("process env lock");
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let home = tempdir().unwrap();
     let previous = std::env::var_os("HOME");
     std::env::set_var("HOME", home.path());

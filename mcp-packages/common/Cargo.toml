@@ -1,0 +1,13 @@
+[package]
+name = "peri-mcp-common"
+version.workspace = true
+edition.workspace = true
+description = "Shared behavior for Peri builtin MCP instances"
+license = "Apache-2.0"
+
+[dependencies]
+peri-agent = { path = "../../peri-agent" }
+fs2 = "0.4"
+rmcp.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

@@ -72,7 +72,6 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 
 use crate::assembly::{default_workflow_middleware_factory_with_pool, open_builtin_bridges};
-use crate::cron::CronScheduler;
 use crate::mcp::builtin::context::{CronInstanceInput, LspInstanceInput};
 use crate::mcp::builtin::runtime::{
     spawn_builtin_transport_with_tap, BuiltinServerExit, BuiltinServerTask, BuiltinWireLog,
@@ -85,6 +84,7 @@ use crate::mcp::client::{
 use crate::mcp::initialize::list_discovered_tools;
 use crate::mcp::tool_bridge::{build_typed_tool_bridges, McpToolBridge};
 use crate::permission::{default_requires_approval, PermissionMiddleware};
+use peri_mcp_cron::CronScheduler;
 
 /// 握手/关闭上界：同进程链路，取值远大于实测（spike 与 `runtime_test` 同口径）。
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -108,7 +108,7 @@ const LARGE_INPUT_BYTES: usize = 200 * 1024;
 /// 与 `mcp::builtin::tests` 的 `BuiltinEnvGuard` / `hooks::loader_test::HomeGuard` 同一
 /// 模式（进程级 env + 文件排他锁）。断言消息**不得**回显 env 取值（§9 规则 7）。
 struct LoaderEnvGuard {
-    _lock: crate::process_env::EnvLockFile,
+    _lock: peri_mcp_common::process_env::EnvLockFile,
     previous: Vec<(&'static str, Option<OsString>)>,
 }
 
@@ -122,7 +122,7 @@ impl LoaderEnvGuard {
     /// 既有 `redirect` 逐位不变（委托到本函数、`builtin_env = None`）；WP-MW 的
     /// `PERI_MCP_BUILTIN=off` 零注入用例需要这一份取值。
     fn redirect_with_builtin_env(home: &Path, builtin_env: Option<&str>) -> Self {
-        let lock = crate::process_env::lock().expect("进程环境锁");
+        let lock = peri_mcp_common::process_env::lock().expect("进程环境锁");
         let home = home.to_string_lossy().into_owned();
         let mut previous = Vec::new();
         for (key, value) in [

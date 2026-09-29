@@ -9,7 +9,7 @@ use peri_acp_types::{
     },
     ports::McpTaskOwnerPort,
 };
-use peri_middlewares::cron::{CronScheduler, CronSchedulerPortHandle, CronTrigger};
+use peri_mcp_cron::{CronScheduler, CronSchedulerPortHandle, CronTrigger};
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     ModelStreamEvent, StopReason,
@@ -17,7 +17,7 @@ use peri_model::{
 use serde_json::json;
 
 pub(super) async fn collect_triggers(
-    triggers: &mut tokio::sync::mpsc::UnboundedReceiver<peri_middlewares::cron::CronTrigger>,
+    triggers: &mut tokio::sync::mpsc::UnboundedReceiver<peri_mcp_cron::CronTrigger>,
     window: std::time::Duration,
 ) -> Vec<String> {
     let deadline = tokio::time::Instant::now() + window;

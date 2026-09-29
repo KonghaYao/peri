@@ -19,14 +19,14 @@ use super::{
 };
 
 struct HomeGuard {
-    _lock: crate::process_env::EnvLockFile,
+    _lock: peri_mcp_common::process_env::EnvLockFile,
     previous: Option<OsString>,
     _home: tempfile::TempDir,
 }
 
 impl HomeGuard {
     fn with_ptc_fixture() -> Self {
-        let lock = crate::process_env::lock().expect("process env lock");
+        let lock = peri_mcp_common::process_env::lock().expect("process env lock");
         let home = tempfile::tempdir().unwrap();
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../npm-packages/@peri-ptc");
         let package = home

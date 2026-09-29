@@ -29,9 +29,9 @@ async fn off_has_zero_builtin_injection() {
         let dirs = FixtureDirs::new();
         let cwd = dirs.workspace_str();
         let (cron_tx, mut triggers) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = Arc::new(parking_lot::Mutex::new(
-            peri_middlewares::cron::CronScheduler::new(cron_tx),
-        ));
+        let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+            cron_tx,
+        )));
         let task_id = scheduler
             .lock()
             .register("* * * * *", "off 观测用任务（必须永不被触发）")
@@ -150,9 +150,9 @@ async fn off_has_zero_builtin_injection() {
     let dirs = FixtureDirs::new();
     let cwd = dirs.workspace_str();
     let (cron_tx, mut triggers) = tokio::sync::mpsc::unbounded_channel();
-    let scheduler = Arc::new(parking_lot::Mutex::new(
-        peri_middlewares::cron::CronScheduler::new(cron_tx),
-    ));
+    let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+        cron_tx,
+    )));
     let task_id = scheduler
         .lock()
         .register("* * * * *", "on 控制任务")

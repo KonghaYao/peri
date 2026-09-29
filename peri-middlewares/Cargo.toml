@@ -22,20 +22,16 @@ tokio = { workspace = true, features = ["process"] }
 # 与 peri-agent 共享同一 tokio-util 依赖（feature unification 自动合并 sync feature）。
 tokio-util = { workspace = true }
 glob = "0.3"
-walkdir = "2.5"
-ignore = "0.4"
 gray_matter = "0.3"
 dirs-next.workspace = true
 serde_yaml.workspace = true
 chrono.workspace = true
 uuid.workspace = true
-croner = "3"
 tracing.workspace = true
 parking_lot.workspace = true
 fs2 = "0.4"
 tempfile.workspace = true
-grep = "0.4"
-rmcp = { version = "3.1.4", features = [
+rmcp = { workspace = true, features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
@@ -52,8 +48,13 @@ sha2.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 base64 = { version = "0.23.1", features = ["alloc"] }
 ipnet = "2.10"
-pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 peri-resources = { path = "../peri-resources" }
+peri-mcp-common.workspace = true
+peri-mcp-web.workspace = true
+peri-mcp-artifact.workspace = true
+peri-mcp-cron.workspace = true
+peri-mcp-lsp.workspace = true
+peri-mcp-workspace.workspace = true
 lsp-types.workspace = true
 cacache = { version = "13.1.0", default-features = false, features = ["tokio-runtime"] }
 

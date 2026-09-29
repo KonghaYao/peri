@@ -438,7 +438,7 @@ pub static PERMISSION_MODE_HANDLE: OnceLock<
     std::sync::Arc<peri_acp_types::permission::SharedPermissionMode>,
 > = OnceLock::new();
 pub static CRON_SCHEDULER_HANDLE: OnceLock<
-    std::sync::Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,
+    std::sync::Arc<parking_lot::Mutex<peri_mcp_cron::CronScheduler>>,
 > = OnceLock::new();
 /// ACP 客户端全局句柄——供 Plugin Panel 等面板调用 send_raw_request。
 /// 在 entry.rs 中 acp_client 就绪后 set。

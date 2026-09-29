@@ -30,6 +30,7 @@ serde.workspace = true
 #   初始化 thread store）+ thread/mod.rs 的 SqliteThreadStore re-export；
 #   M-TUI / L5 收紧后移除
 peri-middlewares = { path = "../peri-middlewares" }
+peri-mcp-cron.workspace = true
 peri-resources = { path = "../peri-resources" }
 # ratatui-widgets（reflow.rs WordWrapper）由 ratatui 0.30 传递引入；
 # status_bar.rs `model_click_areas` 复刻了该内部算法——升级本依赖或 ratatui 版本时

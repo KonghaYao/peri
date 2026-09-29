@@ -84,3 +84,19 @@ mod builtin_apply_tests;
 #[cfg(test)]
 #[path = "builtin_runtime_test.rs"]
 mod builtin_runtime_tests;
+
+// Workspace handler integration tests remain host-side because they also exercise the host
+// transport, client bridge, and recovery lifecycle. The handler and tools themselves live in
+// `peri-mcp-workspace`.
+#[cfg(test)]
+#[path = "builtin/workspace_test.rs"]
+mod workspace_builtin_tests;
+#[cfg(test)]
+#[path = "builtin/workspace_recovery_test.rs"]
+mod workspace_recovery_tests;
+
+// Scheduler tick ownership is a host lifecycle concern; cron server/tool wire behavior lives in
+// `peri-mcp-cron`.
+#[cfg(test)]
+#[path = "builtin_cron_runtime_test.rs"]
+mod builtin_cron_runtime_tests;

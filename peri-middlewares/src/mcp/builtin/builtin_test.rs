@@ -337,13 +337,13 @@ fn is_closed_reads_the_closed_set() {
 /// 与 `hooks::loader_test::HomeGuard` 同一模式——`std::env::set_var` 是进程级全局，
 /// 不串行会与并行测试竞态。断言消息**不得**回显 env 取值。
 struct BuiltinEnvGuard {
-    _lock: crate::process_env::EnvLockFile,
+    _lock: peri_mcp_common::process_env::EnvLockFile,
     previous: Option<std::ffi::OsString>,
 }
 
 impl BuiltinEnvGuard {
     fn set(value: Option<&str>) -> Self {
-        let lock = crate::process_env::lock().expect("process env lock");
+        let lock = peri_mcp_common::process_env::lock().expect("process env lock");
         let previous = std::env::var_os(BUILTIN_INJECTION_ENV);
         match value {
             Some(value) => std::env::set_var(BUILTIN_INJECTION_ENV, value),

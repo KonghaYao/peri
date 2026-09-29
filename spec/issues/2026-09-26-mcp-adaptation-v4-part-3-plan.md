@@ -2,6 +2,8 @@
 
 > 2026-09-28 范围更新：`local-mcp-server` 已按用户裁决退役，代码与独立构建入口已删除。本文涉及旧项目的路径、命令、比较和后续复用建议仅作为历史记录，不再作为实施或验收要求；当前 Workspace MCP 入口与验证见 [主项目代码索引](../../docs/code-index/peri-middlewares.md)。
 
+> 当前代码导航（2026-09-29）：Builtin 插件当前路径及有效测试命令见 [MCP packages 代码索引](../../docs/code-index/mcp-packages.md)。Cron scheduler/tool/server 与 LSP tool/formatters 已由 `peri-mcp-cron` / `peri-mcp-lsp` 持有；Cron tick supervision、LSP pool 和 `LspSyncMiddleware` 仍归宿主。本文以下施工路径和命令描述 wave 2 规划/验收时点，不是当前路径清单。
+
 > 日期：2026-09-26。状态：**v3.1（事实源核查 A 台账已整合；A30–A33 收口已整合；采信 HEAD `a81e0ba6`）**（对抗核查 B「设计可行性」裁决 A20–A29、A30–A33 与事实源核查 A 已整合；裁决索引见 §0）。本文件是裁决唯一事实源；本状态只表示计划裁决已修订，不表示生产迁移或验收已完成。代码未实施，W0 基线已落地（`b1651aee`）。行号漂移时以**符号名 + repository-relative 完整路径**为唯一索引，行号仅作采信 HEAD `a81e0ba6` 的辅助标注。
 > **实施回填（2026-09-28）**：本波（wave 2）代码已实施并验收；现场证据见 `spec/issues/2026-09-26-mcp-adaptation-v4-part-3-acceptance.md`（状态「就绪」；未闭合项与未落地 gap 逐条登记在 §7）（交付提交 `48ea61cb`；分支 `feat/mcp-adaptation-v4-part-3`）。
 >

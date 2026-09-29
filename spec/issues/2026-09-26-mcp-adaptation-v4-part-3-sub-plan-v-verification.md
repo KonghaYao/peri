@@ -1,5 +1,7 @@
 # MCP adaptation v4-part-3 — sub-plan V：验证与收口
 
+> 当前代码导航（2026-09-29）：Cron/LSP plugin handler 与纯工具测试已拆入独立 crates；当前入口及非零 package 验证命令见 [MCP packages 代码索引](../../docs/code-index/mcp-packages.md)。宿主 tick、pool 与运行时生命周期回归仍由 `peri-middlewares` 承载。下方命令清单记录 wave 2 计划时的落点，作为历史计划保留。
+
 ## 覆盖范围表
 
 | 范围 | 责任 / 本文落点 | 收口要求 |

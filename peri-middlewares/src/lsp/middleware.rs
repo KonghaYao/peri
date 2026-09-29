@@ -1,7 +1,7 @@
 //! LSP 文档同步薄中间件（`ChainSlot::Lsp` 唯一占用者）。
 //!
 //! A7/A23/A30：LSP **工具面**已迁移到 builtin MCP 实例（
-//! `peri-middlewares/src/mcp/builtin/lsp.rs` 的 `LspMcpServer`），本中间件不再
+//! `mcp-packages/lsp/src/server.rs` 的 `LspMcpServer`），本中间件不再
 //! 实现 `collect_tools`、不构造 `LspTool`、不持有第二份 pool、不启动
 //! language server，只把 `Write` / `Edit` 落盘后的文件内容经
 //! [`LspPoolPort`] 同步给路由到的服务器。

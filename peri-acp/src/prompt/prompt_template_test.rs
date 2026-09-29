@@ -877,8 +877,8 @@ async fn test_declaration_segment_is_single_source_and_05_has_no_tool_entries() 
     use parking_lot::RwLock;
     use peri_agent::middleware::r#trait::Middleware;
     use peri_agent::tools::BaseTool;
+    use peri_mcp_workspace::filesystem::ReadFileTool;
     use peri_middlewares::tool_search::{ToolSearchIndex, ToolSearchMiddleware};
-    use peri_middlewares::tools::ReadFileTool;
 
     let section_05 = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

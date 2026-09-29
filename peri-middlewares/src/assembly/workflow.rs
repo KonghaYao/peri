@@ -273,7 +273,7 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         cwd: &str,
         allowed_dirs: &[String],
     ) -> Option<Box<dyn BaseTool>> {
-        match crate::tools::filesystem::WriteSandboxTool::new(cwd, allowed_dirs.to_vec()) {
+        match peri_mcp_workspace::filesystem::WriteSandboxTool::new(cwd, allowed_dirs.to_vec()) {
             Ok(tool) => Some(Box::new(tool)),
             Err(error) => {
                 tracing::warn!(

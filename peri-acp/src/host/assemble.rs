@@ -124,7 +124,7 @@ pub struct HostAssemblyInput {
     ///
     /// 注入必须**早于** pool 的 `McpClientPool::run_initialize`（A33：上下文一次性
     /// 注入，第二次必得 `AlreadyInjected`），见本模块的 `.with_workspace(...)` 调用点。
-    pub workspace_input: Option<peri_middlewares::assembly::WorkspaceInstanceInput>,
+    pub workspace_input: Option<peri_mcp_workspace::WorkspaceInstanceInput>,
     /// 准备路径一次加载的插件聚合：`Some` 时装配面不再重读插件目录
     /// （`None` = 既有语义，由装配面自行加载；仅 host 级/非准备调用点如此）。
     pub prepared_plugins: Option<PreparedPlugins>,
@@ -323,10 +323,10 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // ——同一 scheduler 任一时刻至多一个驱动，tick 随该代 supervisor 关闭。
     // 部署层不建 MCP 池；其 tick 策略经 WorkspaceAssembly 原样传入会话。
     let cron_scheduler_concrete = Arc::new(parking_lot::Mutex::new(
-        peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
+        peri_mcp_cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
     ));
     let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = Some(Arc::new(
-        peri_middlewares::cron::CronSchedulerPortHandle(Arc::clone(&cron_scheduler_concrete)),
+        peri_mcp_cron::CronSchedulerPortHandle(Arc::clone(&cron_scheduler_concrete)),
     ));
 
     // ── LSP：配置合并 + host 级唯一 pool（A11/A21/A22，顺序冻结见 sub-plan H §5.1）──

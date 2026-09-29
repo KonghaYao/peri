@@ -5,7 +5,7 @@ use super::*;
 use crate::app::service_registry::ProcessResourceMonitor;
 use chrono::Utc;
 use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::IncomingMessage};
-use peri_middlewares::cron::CronScheduler;
+use peri_mcp_cron::CronScheduler;
 use serde_json::{Value, json};
 use serial_test::serial;
 
