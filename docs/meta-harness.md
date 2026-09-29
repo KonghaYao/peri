@@ -84,6 +84,12 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 > `FilesystemMiddleware` / `TerminalMiddleware` 已不是链槽位名（v4-part-4 wave 3）：
 > 7 个文件/终端工具迁为由 builtin `workspace` 实例提供，这两个键不再是**已知键**，
 > 配置里继续写它们会按未知键 warn 后丢弃。关闭该能力请用下面的 `WorkspaceMiddleware`。
+>
+> `GitWatchMiddleware` 同样已不是已知键（v4 wave 4）：git ref 变化改由 builtin
+> `workspace` 实例的 `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传，链上不再有
+> 该槽位。关闭办法 = `WorkspaceMiddleware: false`（关实例，同时跳过订阅建立）或实例配置
+> 的 `subscriptions` 覆盖（显式空配置 ⇒ 不订阅）。见
+> [design/git-watch-middleware.md](design/git-watch-middleware.md) §0.1。
 
 2. **builtin MCP 实例策略键**：`WebMiddleware` / `ArtifactMiddleware` /
    `CronMiddleware` / `LspMiddleware` / `WorkspaceMiddleware`

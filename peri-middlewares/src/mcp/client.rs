@@ -278,6 +278,23 @@ impl McpClientPool {
         self.builtin_context.lock().context.clone()
     }
 
+    /// 订阅建立门（A24 关闭集；判定只走 `builtin::is_closed`）。
+    ///
+    /// `closed` 取自宿主经 [`BuiltinInstanceContext`] 注入的 A24 关闭集（会话装配从
+    /// frozen meta-harness 派生）：命中的 builtin 实例**不建立** `subscriptions/listen`
+    /// 长流。订阅是能力的外部副作用（服务端据此才采样 git），关闭语义必须覆盖它
+    /// （ARC-CAPABILITY-CLOSURE-001；粗粒度关闭 = `WorkspaceMiddleware: false`）。
+    ///
+    /// 未注入上下文 / 非 builtin 名字（关闭集只含 builtin 实例名）⇒ 恒允许，既有外部
+    /// server 的订阅行为逐位不变。
+    pub(crate) fn subscription_allowed(&self, server: &str) -> bool {
+        let closed = self
+            .builtin_instance_context()
+            .map(|context| context.closed.clone())
+            .unwrap_or_default();
+        !super::builtin::is_closed(server, &closed)
+    }
+
     /// builtin 实例的**唯一** spawn 点（IF-P3-04 / A32）：实例解析 → 上下文 → 链路
     /// 装配 → tick。`initialize` 与 `reconnect` 都只调它，不各自读 cwd / 上下文。
     ///

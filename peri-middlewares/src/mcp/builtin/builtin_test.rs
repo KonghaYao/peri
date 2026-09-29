@@ -440,7 +440,20 @@ fn overlay_inserts_complete_default_entries() {
         assert!(entry.command.is_none() && entry.url.is_none());
         assert!(entry.args.is_none() && entry.env.is_none());
         assert!(entry.headers.is_none() && entry.oauth.is_none());
-        assert!(entry.subscriptions.is_none());
+        // 规则 7：默认订阅只挂在 `workspace`（git ref 资源）；其余实例不订阅。
+        if instance.name == "workspace" {
+            assert_eq!(
+                entry.subscriptions,
+                Some(super::workspace_subscription::workspace_default_subscriptions()),
+                "规则 7：workspace 默认订阅 git ref 资源"
+            );
+        } else {
+            assert!(
+                entry.subscriptions.is_none(),
+                "{} 不应有默认订阅",
+                instance.name
+            );
+        }
         assert_eq!(
             entry.protocol_version, None,
             "protocol_version 必须为 None，否则 Auto 不探测 server/discover"

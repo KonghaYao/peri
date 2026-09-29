@@ -220,7 +220,12 @@ describe("慢 Git 的工作区发现", () => {
     return content.slice(offset).split("\n").filter((line) => line.trim() !== "");
   }
 
-  /** 等到 Git 调用安静下来：启动期的发现与 git_watch 轮询都可能还在进行。 */
+  /**
+   * 等到 Git 调用安静下来：启动期的发现可能还在进行。
+   *
+   * Git Watch 自 v4 wave 4 起不再是轮询/周期采样——git ref 只在**成功的 workspace 工具
+   * 调用后**被采样（且无订阅者时不采样），因此本用例的「git 安静」前提仍然成立。
+   */
   async function waitForQuietGit(quietMs = 1_200, timeoutMs = 30_000): Promise<void> {
     const started = Date.now();
     let last = await logOffset();

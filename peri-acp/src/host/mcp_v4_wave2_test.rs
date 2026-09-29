@@ -452,6 +452,8 @@ async fn assemble_host_with_workspace_input(
             // session 级 `workspace` 输入（AW3-11）由调用方给定：默认 `None` ⇒
             // 可见但退化，本文件断言面（cron / lsp）不含它。
             workspace_input,
+            // 无会话上下文（测试夹具）：A24 关闭集为空集。
+            builtin_closed: Default::default(),
             prepared_plugins: None,
         },
         peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),

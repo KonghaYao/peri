@@ -108,6 +108,12 @@ pub const SECTION_IDS: &[&str] = &[
 /// `ChainSlot::Terminal`）与其 middleware 类型一并删除，关闭键改由
 /// `"WorkspaceMiddleware"`（落 [`BUILTIN_INSTANCE_POLICY_KEYS`]）承载——与
 /// Web / Artifact / cron / lsp 的既有形态一致。
+///
+/// **v4 wave 4（Git Watch 下沉）：`GitWatchMiddleware` 摘除**。git ref 变化改由
+/// builtin `workspace` 实例的 `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传
+/// （宿主的提醒映射内置，无配置面）。本键因此成为**未知键**：解析期 warn + 忽略
+/// （既有判例，同 `FilesystemMiddleware` / `TerminalMiddleware`）；关闭该能力的办法是
+/// `"WorkspaceMiddleware": false`（关实例）或实例配置的 `subscriptions` 覆盖（关订阅）。
 pub const MIDDLEWARE_NAMES: &[&str] = &[
     "DefaultSystemPromptMiddleware",
     "LangMiddleware",
@@ -119,7 +125,6 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "AtMentionMiddleware",
     "ImageMiddleware",
     "GitAttributionMiddleware",
-    "GitWatchMiddleware",
     "TodoMiddleware",
     "HookMiddleware",
     "PermissionMiddleware",

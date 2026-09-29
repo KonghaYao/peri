@@ -73,6 +73,8 @@ async fn deployment(tmp: &tempfile::TempDir, drive_cron_tick: bool) -> AcpServer
         bare: false,
         drive_cron_tick,
         workspace_input: None,
+        // 无会话上下文（测试夹具）：A24 关闭集为空集。
+        builtin_closed: Default::default(),
         prepared_plugins: None,
     })
     .await

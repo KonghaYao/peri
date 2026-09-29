@@ -39,8 +39,8 @@ use crate::{
     subagent::SubAgentMiddleware,
     tool_search::ToolSearchMiddleware,
     workflow::{WorkflowMiddleware, WorkflowMiddlewareAdaptor},
-    AgentDefineMiddleware, AtMentionMiddleware, GitAttributionMiddleware, GitWatchMiddleware,
-    GoalMiddleware, ImageMiddleware,
+    AgentDefineMiddleware, AtMentionMiddleware, GitAttributionMiddleware, GoalMiddleware,
+    ImageMiddleware,
 };
 use parking_lot::RwLock;
 use peri_agent::{
@@ -262,15 +262,13 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // ── 第二组：工作区观察类注入器 ──
                 // v4-part-4 W3-C1：原 Filesystem / Terminal 槽位已删除——7 个文件/终端
                 // 工具的唯一提供面是 builtin `workspace` 实例的 bridge（模型面使用原名，
-                // 经 McpMiddleware 槽位的 `open_builtin_bridges` 进入链）。槽位位置保留，
-                // GitAttribution / GitWatch 的相对顺序不变（ARC-MIDDLEWARE-001）。
+                // 经 McpMiddleware 槽位的 `open_builtin_bridges` 进入链）。
+                // v4 wave 4：原 GitWatch 槽位已删除——git ref 变化改由 builtin `workspace`
+                // 实例的 `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传（提醒映射
+                // 内置在宿主订阅消费侧），本组只剩留名中间件（ARC-MIDDLEWARE-001）。
                 ChainSlot::GitAttribution if disabled.contains("GitAttributionMiddleware") => {}
                 ChainSlot::GitAttribution => {
                     chain.add(Box::new(GitAttributionMiddleware::new(model_name)));
-                }
-                ChainSlot::GitWatch if disabled.contains("GitWatchMiddleware") => {}
-                ChainSlot::GitWatch => {
-                    chain.add(Box::new(GitWatchMiddleware::new()));
                 }
                 // ── 第三组：Todo ──
                 ChainSlot::Todo if disabled.contains("TodoMiddleware") => {}

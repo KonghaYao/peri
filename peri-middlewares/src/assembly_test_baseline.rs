@@ -2,7 +2,7 @@ use super::*;
 
 // ── 契约用例 ─────────────────────────────────────────────────────────────────
 
-/// 蓝本槽位顺序 = 行为契约（7 组 25 槽，禁止重排；波 4 演进 C2 新增
+/// 蓝本槽位顺序 = 行为契约（7 组 21 槽，禁止重排；波 4 演进 C2 新增
 /// DefaultSystemPrompt / Lang 于第一组首位——渲染排序不依赖链序，契约 2）。
 ///
 /// v4-part-2 W3（A7/A14）：`Web` / `Artifact` 两槽位随 `WebMiddleware` /
@@ -14,6 +14,10 @@ use super::*;
 ///
 /// v4-part-4 W3-C1：`Filesystem` / `Terminal` 两槽位同样删除（7 个文件/终端工具改由
 /// builtin `workspace` 实例提供），其余槽位相对顺序不变。
+///
+/// v4 wave 4（Git Watch 下沉）：`GitWatch` 槽位删除（git ref 变化改由 builtin
+/// `workspace` 实例的 `workspace://git/ref` 资源 + 2026-07-28 订阅回传），
+/// 其余槽位相对顺序不变；槽位总数随之 22 → 21。
 #[test]
 fn blueprint_sequence_is_canonical() {
     let slots = production_blueprint();
@@ -31,9 +35,9 @@ fn blueprint_sequence_is_canonical() {
             "SkillPreload",
             "AtMention",
             "Image",
-            // 第二组：工作区观察类注入器（W3-C1 后不含文件/终端工具提供器）
+            // 第二组：工作区观察类注入器（W3-C1 后不含文件/终端工具提供器；
+            // wave 4 后不含 GitWatch——git ref 变化走 builtin 实例订阅回传）
             "GitAttribution",
-            "GitWatch",
             // 第三组：Todo
             "Todo",
             // 第四组：Hook 哨兵
@@ -52,6 +56,11 @@ fn blueprint_sequence_is_canonical() {
             "Goal",
         ]
     );
+    assert_eq!(
+        slots.len(),
+        21,
+        "wave 4 后蓝本槽位恰 21 个（GitWatch 删除；改动槽位数量必须同时改本断言与文档）"
+    );
 }
 
 fn slot_name(slot: &ChainSlot) -> &'static str {
@@ -66,7 +75,6 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::AtMention => "AtMention",
         ChainSlot::Image => "Image",
         ChainSlot::GitAttribution => "GitAttribution",
-        ChainSlot::GitWatch => "GitWatch",
         ChainSlot::Todo => "Todo",
         ChainSlot::Hook => "Hook",
         ChainSlot::Permission => "Permission",
@@ -98,7 +106,6 @@ fn default_config_produces_canonical_chain() {
             "AtMentionMiddleware",
             "ImageMiddleware",
             "GitAttributionMiddleware",
-            "GitWatchMiddleware",
             "TodoMiddleware",
             "PermissionMiddleware",
             "HumanInTheLoopMiddleware",
@@ -158,15 +165,16 @@ fn permission_mode_keeps_chain_shape() {
         let names = assemble_names(&ctx);
         // 位置随 Web / Artifact 两槽位删除各前移 1（A7/A14 期望值同步），
         // 随 v4-part-3 C-04 的 Cron 槽位删除再前移 1，
-        // 随 v4-part-4 W3-C1 的 Filesystem / Terminal 两槽位删除再各前移 1。
+        // 随 v4-part-4 W3-C1 的 Filesystem / Terminal 两槽位删除再各前移 1，
+        // 随 v4 wave 4 的 GitWatch 槽位删除再前移 1。
         assert_eq!(
             names.iter().position(|n| n == "HumanInTheLoopMiddleware"),
-            Some(13),
+            Some(12),
             "mode {mode:?}: AskUser 位置漂移"
         );
         assert_eq!(
             names.iter().position(|n| n == "PermissionMiddleware"),
-            Some(12),
+            Some(11),
             "mode {mode:?}: Permission 位置漂移"
         );
         // 条件中间件（Hook/MCP/Workflow/LSP/Goal）不应出现
@@ -540,7 +548,6 @@ fn full_config_chain_order() {
             "AtMentionMiddleware",
             "ImageMiddleware",
             "GitAttributionMiddleware",
-            "GitWatchMiddleware",
             "TodoMiddleware",
             "HookMiddleware",
             "HookMiddleware",

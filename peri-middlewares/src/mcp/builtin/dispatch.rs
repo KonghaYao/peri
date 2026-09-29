@@ -18,10 +18,11 @@ use std::sync::Arc;
 use peri_acp_types::builtin_mcp::find;
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResponse, ListToolsResult, PaginatedRequestParams,
-        ServerInfo,
+        CallToolRequestParams, CallToolResponse, ListResourcesResult, ListToolsResult,
+        PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ServerInfo,
+        SubscriptionFilter,
     },
-    service::{RequestContext, RoleServer},
+    service::{RequestContext, RoleServer, SubscriptionContext},
     ErrorData as McpError, ServerHandler,
 };
 
@@ -85,6 +86,58 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Cron(server) => server.call_tool(request, context).await,
             Self::Lsp(server) => server.call_tool(request, context).await,
             Self::Workspace(server) => server.call_tool(request, context).await,
+        }
+    }
+
+    // ── 资源与订阅面（Git Watch 下沉，D-5）────────────────────────────────────
+    //
+    // **必须转发**：`resources/*` 与 `subscriptions/listen` 都由 rmcp 按 handler trait
+    // 方法分派，枚举不转发就等于这些能力在 builtin 链路上不存在（客户端会收到
+    // `-32601` / 空 filter）。当前只有 `workspace` 声明资源与订阅；其余实例保持
+    // 各实例自身的既有退化语义（无资源 ⇒ 默认空表 / `-32601`，无订阅 ⇒ `None`），
+    // 不新造第三种形态。
+
+    async fn list_resources(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        match self {
+            Self::Workspace(server) => server.list_resources(request, context).await,
+            _ => Ok(ListResourcesResult::default()),
+        }
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
+        match self {
+            Self::Workspace(server) => server.read_resource(request, context).await,
+            _ => Err(McpError::method_not_found::<
+                rmcp::model::ReadResourceRequestMethod,
+            >()),
+        }
+    }
+
+    fn accepted_subscription_filter(
+        &self,
+        requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        match self {
+            Self::Workspace(server) => server.accepted_subscription_filter(requested),
+            _ => None,
+        }
+    }
+
+    async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
+        match self {
+            Self::Workspace(server) => server.listen(context).await,
+            _ => {
+                context.cancelled().await;
+                Ok(())
+            }
         }
     }
 }

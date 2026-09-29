@@ -86,6 +86,8 @@ async fn seam_fixture() -> SeamFixture {
         bare: true,
         drive_cron_tick: false,
         workspace_input: None,
+        // 无会话上下文（测试夹具）：A24 关闭集为空集。
+        builtin_closed: Default::default(),
         prepared_plugins: None,
     })
     .await;

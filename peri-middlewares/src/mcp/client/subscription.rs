@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use peri_acp_types::plugin::McpSubscriptionsConfig;
 use peri_acp_types::session::{InboxHandle, MessageKind, MessageSource};
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-    ReminderSource as CanonicalReminderSource, SystemReminder, TrustedSystemReminderFactory,
-    SYSTEM_REMINDER_VERSION,
+    ReminderSource as CanonicalReminderSource, SystemReminder, TrustedSystemReminder,
+    TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
 use rmcp::{
     model::{ServerNotification, SubscriptionFilter},
@@ -68,6 +68,77 @@ impl McpClientPool {
     /// 订阅流异常中断后的退避基准秒数（指数递增：1s/2s/4s）。
     const SUBSCRIPTION_RETRY_BASE_DELAY_SECS: u64 = 1;
 
+    /// git ref 资源通知的 `resources/read` 上界。
+    ///
+    /// 通知只说明「资源已更新」，正文要回读；上界保证「读了但读不回来」不会挂住消费
+    /// 循环——超时按失败走通用提醒回退（事件不丢）。
+    const GIT_REF_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// 通知分派（Git Watch 下沉的宿主消费入口）。
+    ///
+    /// - 命中内置 `workspace` 的 git ref 资源 ⇒ 回读资源正文，组装**宿主内置**的
+    ///   canonical `git_watch` 提醒（D-5：元数据不从 server 取），`Info` 不唤醒；
+    /// - 回读失败 / 超时 ⇒ 回退既有通用订阅提醒（事件不丢，只是语义降级）；
+    /// - 其余资源 ⇒ 既有路径逐位不变。
+    async fn dispatch_resource_updated(&self, server: &str, uri: &str, subscription_id: &str) {
+        if !is_git_watch_resource(server, uri) {
+            self.broadcast_subscription_notification(server, uri, subscription_id);
+            return;
+        }
+        match self.read_git_ref_body(server, uri).await {
+            Some(body) => self.broadcast_git_watch_notification(server, uri, &body),
+            None => {
+                tracing::warn!(
+                    server = %server,
+                    uri = %uri,
+                    "git ref 资源回读失败/超时，回退通用订阅提醒"
+                );
+                self.broadcast_subscription_notification(server, uri, subscription_id);
+            }
+        }
+    }
+
+    /// 回读 git ref 资源正文：`resources/read`（带超时）→ 首个文本内容。
+    async fn read_git_ref_body(&self, server: &str, uri: &str) -> Option<String> {
+        let peer = self
+            .get_client(server)
+            .and_then(|handle| handle.peer.clone())?;
+        match tokio::time::timeout(
+            Self::GIT_REF_READ_TIMEOUT,
+            self.read_resource_cached(server, uri, &peer),
+        )
+        .await
+        {
+            Ok(Ok((result, _ticket))) => first_text_body(&result),
+            Ok(Err(error)) => {
+                tracing::warn!(server = %server, uri = %uri, error = %error, "git ref 资源读取失败");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(server = %server, uri = %uri, "git ref 资源读取超时");
+                None
+            }
+        }
+    }
+
+    /// 把宿主内置的 `git_watch` 提醒推到所有注册会话 inbox（`Info`，不唤醒）。
+    fn broadcast_git_watch_notification(&self, server: &str, uri: &str, body: &str) {
+        let handles: Vec<InboxHandle> = self.session_inboxes.read().values().cloned().collect();
+        if handles.is_empty() {
+            tracing::debug!(server = %server, uri = %uri, "git ref 变化到达但无注册会话 inbox");
+            return;
+        }
+        let (kind, reminder) = git_watch_reminder_from_resource(uri, body);
+        for handle in handles {
+            handle.push_system_reminder(
+                kind,
+                MessageSource::DynamicMcpNotification,
+                reminder.clone(),
+            );
+        }
+        tracing::info!(server = %server, uri = %uri, sessions = %self.session_inboxes.read().len(), "git ref 变化已注入会话");
+    }
+
     /// 启动订阅消费循环：读取 `subscriptions/listen` 流上的通知并广播。
     ///
     /// 循环持有 `Subscription`（drop 即取消订阅）；transport 关闭或流结束
@@ -105,11 +176,8 @@ impl McpClientPool {
                             .unwrap_or_default();
                         pool.invalidate_resource_cache(&task_server, Some(&notif.params.uri))
                             .await;
-                        pool.broadcast_subscription_notification(
-                            &task_server,
-                            &notif.params.uri,
-                            &sid,
-                        );
+                        pool.dispatch_resource_updated(&task_server, &notif.params.uri, &sid)
+                            .await;
                     }
                     Ok(Some(ServerNotification::ResourceListChangedNotification(_))) => {
                         retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
@@ -255,6 +323,79 @@ pub(crate) fn build_subscription_filter(sub: &McpSubscriptionsConfig) -> Subscri
     b.build()
 }
 
+/// 该通知是否属于**宿主内置**的 git ref 资源（D-5 的绑定面）。
+///
+/// 判定不写第二份实例名字面量：以「实例有默认订阅且默认订阅覆盖该 URI」为准
+/// （默认订阅的唯一声明在 `mcp::builtin::workspace_subscription`）。
+pub(crate) fn is_git_watch_resource(server: &str, uri: &str) -> bool {
+    uri == peri_mcp_workspace::GIT_REF_RESOURCE_URI
+        && crate::mcp::builtin::default_subscriptions_for(server)
+            .is_some_and(|sub| sub.resources.iter().any(|resource| resource == uri))
+}
+
+/// 读回正文的信任边界（§6 风险 6：读回的 payload 不可信，限长、不进控制状态）。
+const GIT_REF_BODY_MAX_BYTES: usize = 8 * 1024;
+
+/// 资源正文 → canonical `git_watch` 提醒（**纯函数**，便于单测）。
+///
+/// 元数据逐字段 = 旧 `GitWatchMiddleware` 的契约（计划 §1 逐字保持项）：category /
+/// source / kind / severity / delivery / audiences / summary / metadata 全部写死，
+/// `body` = 资源正文逐字（仅超长时按 UTF-8 边界截断）。
+///
+/// 返回 `MessageKind::Info`（**不唤醒**）：git ref 变化是诊断信息，不是需要 agent 立即
+/// 响应的外部事件（旧实现的 `MessageKind::Info` 语义逐字保持）。
+pub(crate) fn git_watch_reminder_from_resource(
+    uri: &str,
+    body: &str,
+) -> (MessageKind, TrustedSystemReminder) {
+    debug_assert_eq!(
+        uri,
+        peri_mcp_workspace::GIT_REF_RESOURCE_URI,
+        "git_watch 映射只对 git ref 资源生效"
+    );
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Diagnostic,
+            source: CanonicalReminderSource("git_watch".into()),
+            kind: "repository_ref_changed".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![
+                ReminderAudience::Model,
+                ReminderAudience::Tui,
+                ReminderAudience::Diagnostics,
+            ]),
+            body: truncate_body(body),
+            summary: Some("Git branch 或 HEAD 已变化".into()),
+            metadata: json!({}),
+        })
+        .expect("git watch reminder mapping must be valid");
+    (MessageKind::Info, reminder)
+}
+
+/// 超长正文按 UTF-8 边界截断（截断处追加标记，避免把截断伪装成完整正文）。
+fn truncate_body(body: &str) -> String {
+    if body.len() <= GIT_REF_BODY_MAX_BYTES {
+        return body.to_string();
+    }
+    let mut end = GIT_REF_BODY_MAX_BYTES;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…（资源正文超长，已截断）", &body[..end])
+}
+
+/// `resources/read` 结果里的首个文本内容（Blob / 空内容返回 `None`）。
+fn first_text_body(result: &rmcp::model::ReadResourceResult) -> Option<String> {
+    result.contents.iter().find_map(|content| match content {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
+        rmcp::model::ResourceContents::BlobResourceContents { .. } => None,
+        // `ResourceContents` 是 non_exhaustive（未来新增形态安全退化，不 panic）。
+        _ => None,
+    })
+}
+
 /// 连接成功后建立 `subscriptions/listen` 长流并启动消费循环（2026-07-28 协议）。
 ///
 /// 失败仅告警——server 可能不支持，连接本身仍可用。initialize / reconnect 共用。
@@ -282,3 +423,7 @@ pub(crate) async fn setup_subscription(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "subscription_test.rs"]
+mod tests;

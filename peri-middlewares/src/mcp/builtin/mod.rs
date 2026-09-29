@@ -25,6 +25,14 @@ pub(crate) mod context;
 // 有界关闭（owner E-03，W2）。与两个 handler 一样是「行为」子模块，由本模块统一挂载。
 pub(crate) mod runtime;
 
+// workspace_subscription：`workspace` 实例的默认订阅（git ref 资源；Git Watch 下沉的
+// 宿主落点，D-5）。默认层注入只在本模块的 `builtin_default_entry` / 规则 2 消费它；
+// 客户端消费侧（`mcp::client::subscription`）经下面的再导出判定「哪些实例的哪些 URI
+// 有宿主内置提醒映射」，避免第二份实例名字面量。
+mod workspace_subscription;
+
+pub(crate) use workspace_subscription::default_subscriptions_for;
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
 
@@ -208,7 +216,7 @@ pub(crate) fn is_closed(server_name: &str, closed: &BTreeSet<String>) -> bool {
 
 /// 默认配置层 overlay（A1：loader step 6.5 的唯一注入点）。
 ///
-/// 六条冻结规则（IF-D3）：
+/// 七条冻结规则（IF-D3；规则 7 为 Git Watch 下沉新增）：
 /// 1. 实例名缺失 → 插入完整 builtin 条目（`protocol_version = None` 必须，否则 Auto
 ///    不探测 `server/discover`）；
 /// 2. 实例名存在且未声明 `command`/`url` → 填 `source`，`disabled != Some(true)` 时
@@ -225,7 +233,12 @@ pub(crate) fn is_closed(server_name: &str, closed: &BTreeSet<String>) -> bool {
 ///    非保留名照旧不受影响；
 /// 4. 结果必须通过 loader step 7 的 `validate_config`（本函数只保证自身产出合法）；
 /// 5. 关闭片段形状（A18）：`disabled + system_mcp: true` 组合必须在加载期拒绝；
-/// 6. direct 一致性：`system_mcp_tools` 恒等于声明为 direct 的原始工具名集合。
+/// 6. direct 一致性：`system_mcp_tools` 恒等于声明为 direct 的原始工具名集合；
+/// 7. 默认订阅（Git Watch 下沉，D-5）：`workspace` 实例的 `subscriptions` 在**缺失**
+///    时补默认（git ref 资源）；规则 1 随默认条目一并注入。用户显式写 `subscriptions`
+///    （含空配置）时**不覆盖**——空配置 ⇒ 退化为「不订阅」（`!is_empty()` 过滤）。
+///    与规则 2 的 `system_mcp` 不同，规则 7 对 `disabled == Some(true)` 的条目也照写：
+///    它只是配置物料，实例不连接时该字段无效果，回读一致比省一个字段更重要。
 ///
 /// 错误语义：**先检查、后注入**——任一类非法输入都在任何写入之前返回（合法输入
 /// 不受影响；非法输入不产生部分注入）。
@@ -263,6 +276,10 @@ pub(crate) fn apply_builtin_overlay(
         entry.source = Some(ConfigSource::Builtin {
             instance: instance.instance.to_string(),
         });
+        // 规则 7：默认订阅（用户显式配置优先；空配置也是显式配置 ⇒ 不订阅）。
+        if entry.subscriptions.is_none() {
+            entry.subscriptions = workspace_subscription::default_subscriptions_for(instance.name);
+        }
         if disabled != Some(true) {
             entry.system_mcp = Some(true);
             entry.system_mcp_tools = Some(direct_tool_name_strings(instance));
@@ -323,7 +340,8 @@ fn builtin_default_entry(instance: &BuiltinMcpInstance) -> McpServerConfig {
         disabled: None,
         // 必须为 None：显式版本会跳过 Auto 的 `server/discover` 探测。
         protocol_version: None,
-        subscriptions: None,
+        // 规则 7：`workspace` 的默认订阅（其余实例为 None）。
+        subscriptions: workspace_subscription::default_subscriptions_for(instance.name),
         system_mcp: Some(true),
         system_mcp_tools: Some(direct_tool_name_strings(instance)),
         system_mcp_timeout: None,

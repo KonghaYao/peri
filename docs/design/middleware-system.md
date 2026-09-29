@@ -104,7 +104,8 @@ for aspect in chain:
 
 ## 3. 切面注册表
 
-生产蓝本包含 22 个槽位（`ChainSlot` 22 个变体，含 `git_watch`）；Hook 槽位可按非空 hook group 展开为多个实例，
+生产蓝本包含 21 个槽位（`ChainSlot` 21 个变体；原 `git_watch` 槽位已随 Git Watch 下沉到
+builtin `workspace` 实例删除）；Hook 槽位可按非空 hook group 展开为多个实例，
 MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实源是
 `peri-agent/src/session/factory.rs::production_blueprint`：
 
@@ -122,7 +123,7 @@ MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实�
 | 8 | at_mention | before_agent | — | — | — |
 | 9 | image | before_agent | — | — | — |
 | 10 | git_attribution | before_agent, before_tool, after_tool | — | Git Attribution contribution | — |
-| — | git_watch | before_agent, after_tool | — | — | 链上位于 #10 与 #11 之间；[git-watch-middleware.md](git-watch-middleware.md) |
+| — | ~~git_watch~~ | — | — | — | **已删除（v4 wave 4）**：git ref 变化改由 builtin `workspace` 实例的 `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传；见 [git-watch-middleware.md](git-watch-middleware.md) |
 | 11 | todo | — | TodoWrite | — | — |
 | 12 | hook | 配置声明的 hooks | — | — | 非空 hook groups；可展开多实例 |
 | 13 | permission | before_tools_batch, before_tool | — | 10_hitl section | — |

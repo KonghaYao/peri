@@ -25,7 +25,6 @@ pub mod agents_md;
 pub mod assembly;
 pub mod claude_agent_parser;
 mod completion_reminder;
-pub mod git_watch;
 pub mod goal;
 /// 装配注入端口实现（3.0 批 2 波 2：`PluginManager` / `SkillsProvider`）。
 pub mod host_ports;
@@ -73,7 +72,6 @@ pub use ask_user::{
 pub use at_mention::AtMentionMiddleware;
 pub use attribution::GitAttributionMiddleware;
 pub use default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
-pub use git_watch::GitWatchMiddleware;
 pub use goal::GoalMiddleware;
 pub use hitl::HumanInTheLoopMiddleware;
 pub use lsp::LspSyncMiddleware;

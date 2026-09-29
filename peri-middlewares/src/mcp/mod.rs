@@ -72,6 +72,12 @@ mod mcp_v4_seam_tests;
 #[path = "builtin_spike_test.rs"]
 mod builtin_spike_tests;
 
+// Git Watch 下沉（builtin workspace 订阅回传）的线路级验收：Step 0 先证伪 rmcp 推送面，
+// 通过后承载 T4–T6。模块名参与 `cargo test` 过滤（`builtin_subscription_wire`）。
+#[cfg(test)]
+#[path = "builtin_subscription_wire_test.rs"]
+mod builtin_subscription_wire_tests;
+
 // builtin 默认配置层（loader step 6.5 overlay）的 crate 内验收（owner：I-02）。
 // 两个 builtin 测试模块由 I-02 在 W3 一次挂载，避免 builtin_apply / builtin_runtime
 // 出现两个 owner。

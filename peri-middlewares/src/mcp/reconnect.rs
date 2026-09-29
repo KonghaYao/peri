@@ -254,8 +254,16 @@ impl McpClientPool {
                 let rs = self.retain_service(rs);
                 // 订阅配置存在：按 server 配置重建 subscriptions/listen 长流
                 // （2026-07-28）。失败仅告警——server 可能不支持，连接本身仍可用。
+                // A24 关闭门与 initialize 同源（`pool.subscription_allowed` 唯一判定）。
                 if let Some(sub) = subscriptions {
-                    setup_subscription(self, &rs, server_name, sub).await;
+                    if self.subscription_allowed(server_name) {
+                        setup_subscription(self, &rs, server_name, sub).await;
+                    } else {
+                        tracing::info!(
+                            server = %server_name,
+                            "builtin 实例在关闭集内，跳过 subscriptions/listen"
+                        );
+                    }
                 }
                 let peer = rs.peer().clone();
                 let cache_version = self.install_peer_cache_version(server_name, &peer);

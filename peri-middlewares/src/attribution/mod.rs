@@ -37,9 +37,9 @@ const GIT_BRANCH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Git 留名中间件
 ///
-/// 注册在 `ChainSlot::GitAttribution`（第二组，`GitWatchMiddleware` 之前——
-/// v4-part-4 W3-C1 后本组已不含文件/终端工具提供器，二者由 builtin `workspace`
-/// 实例提供），hook 其 Write/Edit 工具调用。
+/// 注册在 `ChainSlot::GitAttribution`（第二组；v4-part-4 W3-C1 后本组已不含文件/终端
+/// 工具提供器，二者由 builtin `workspace` 实例提供；v4 wave 4 后 GitWatch 已从链上删除，
+/// 本中间件是组内唯一成员），hook 其 Write/Edit 工具调用。
 /// `before_tool` 暂存旧文件内容，`after_tool` 计算贡献字符数。
 /// Co-Authored-By 指令由 `build_bare_agent` 在 system prompt 中注入。
 pub struct GitAttributionMiddleware {

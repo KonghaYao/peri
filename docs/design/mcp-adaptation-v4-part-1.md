@@ -189,7 +189,7 @@ flowchart LR
 | 4 | `AgentsMdMiddleware` | `peri-middlewares/src/agents_md/mod.rs` | 部分下放 | 文件读取可由 Workspace MCP 完成，但文档优先级、session 冻结和 prompt contribution 仍由 Agent 持有。 |
 | 5 | `AgentDefineMiddleware` | `peri-middlewares/src/agent_define/mod.rs` | 部分下放 | 定义文件可由 Workspace MCP 读取，但 Agent 定义解析和 SubAgent/Plugin 语义仍由宿主持有。 |
 | 6 | `AtMentionMiddleware` | `peri-middlewares/src/at_mention/mod.rs` | 宿主保留 | `@mention` 输入转换依赖 Agent 消息内容和工具上下文，不是 Workspace MCP 工具。 |
-| 7 | `GitWatchMiddleware` | `peri-middlewares/src/git_watch/mod.rs` | 目标：完全下放 → Workspace MCP | Git 状态观察、分支变化检测、采样和工作区 watcher 统一进入 Workspace MCP，Agent 侧不再保留 GitWatch middleware。 |
+| 7 | `GitWatchMiddleware` | `mcp-packages/workspace/src/git_watch.rs` | **已下放（v4 wave 4）** → Workspace MCP | Git ref 采样与变化判定进入 Workspace MCP，经 `workspace://git/ref` 资源 + MCP 2026-07-28 订阅（`notifications/resources/updated`）回传会话；Agent 侧 middleware 已删除，提醒映射内置在宿主订阅消费侧（`peri-middlewares/src/mcp/client/subscription.rs`）。 |
 | 8 | `GitAttributionMiddleware` | `peri-middlewares/src/attribution/mod.rs` | 部分下放 | Git/file 查询由 Workspace MCP 提供，但 before/after tool hook 和归属注入仍由 Agent 持有。 |
 | 9 | `ArtifactMiddleware` | 现行工具与 handler：`mcp-packages/artifact/src/`；历史 middleware 类型 `peri-middlewares/src/artifact/mod.rs` 已删除 | 目标：完全下放 → Artifact MCP | Artifact 的读取输入、格式转换、上传、TTL 和 URL 统一进入 Artifact MCP，Agent 侧只保留 MCP 对接。 |
 | 10 | `WebMiddleware` | 现行工具与 handler：`mcp-packages/web/src/`；历史 middleware 类型 `peri-middlewares/src/middleware/web.rs` 已删除 | 目标：完全下放 → Web MCP | `WebSearch` 与 `WebFetch` 统一进入 Web MCP，Agent 侧只保留 MCP 对接。 |

@@ -128,6 +128,16 @@ pub struct HostAssemblyInput {
     /// 准备路径一次加载的插件聚合：`Some` 时装配面不再重读插件目录
     /// （`None` = 既有语义，由装配面自行加载；仅 host 级/非准备调用点如此）。
     pub prepared_plugins: Option<PreparedPlugins>,
+    /// A24 关闭集（builtin 实例名）：本会话环境**冻结** policy 的投影
+    /// （`frozen.meta_harness.disabled_middlewares` → `builtin_closed_instances`），
+    /// 随 builtin 实例上下文一次注入 pool。
+    ///
+    /// 消费面只有订阅建立门（`McpClientPool::subscription_allowed`）：关闭的 builtin
+    /// 实例不建立 `subscriptions/listen` 长流（订阅是能力的外部副作用，关闭语义必须
+    /// 覆盖它，ARC-CAPABILITY-CLOSURE-001）。它**不**改变 pool 级就绪判定与实例在 MCP
+    /// 面板上的连接状态（契约明文）。顶层三路径（`session_resources = false`，无会话
+    /// 上下文）传空集；会话装配从 frozen snapshot 派生（禁止回退当轮 config，设计 §2.5）。
+    pub builtin_closed: std::collections::BTreeSet<String>,
 }
 
 /// Construct terminal hook execution; the session environment owns admission and joining.
@@ -285,6 +295,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         drive_cron_tick,
         workspace_input,
         prepared_plugins,
+        builtin_closed,
     } = input;
 
     // 用户级 `.claude` 与准备面、插件 RPC 共用同一权威（HOME 优先）：
@@ -379,10 +390,10 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         //    `run_initialize` 及其后台 spawn ──
         //
         // 同一批 `Arc`（A1）：cron 用组合根唯一 scheduler，lsp 用上面那份 host
-        // pool（同一 `Arc` 同时喂端口投影）。`closed` 由 `new` 默认为空集：
-        // A24 的策略关闭是**会话级**（frozen `meta_harness.disabled_middlewares`），
-        // 宿主装配点没有会话上下文，投影由链装配（`McpMiddleware` /
-        // `open_builtin_bridges`）按会话完成；本字段在装配面不被消费。
+        // pool（同一 `Arc` 同时喂端口投影）。`closed` 的**来源**分两处：
+        // `HostAssemblyInput::builtin_closed`（会话装配从 frozen 派生）随本上下文注入
+        // pool，只被订阅建立门消费；链装配（`McpMiddleware` / `open_builtin_bridges`）
+        // 仍从同一 frozen policy 派生本 turn 的工具投影关闭集。
         //
         // `tick_enabled` 是 `HostAssemblyInput::drive_cron_tick` 的投影（TUI=true；
         // print/stdio=false；会话继承所属部署的开关）。
@@ -403,6 +414,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         if let Some(workspace_input) = workspace_input {
             builtin_context = builtin_context.with_workspace(workspace_input);
         }
+        let builtin_context = builtin_context.with_closed(builtin_closed);
         let builtin_context = Arc::new(builtin_context);
         if let Err(error) = pool.set_builtin_instance_context(builtin_context) {
             // 本池是上一行刚构造的（从未 initialize）⇒ 两个 typed 拒绝都不可能出现：

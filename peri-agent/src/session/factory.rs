@@ -48,11 +48,11 @@ pub enum ChainSlot {
     // v4-part-4 W3-C1：原 `Filesystem` / `Terminal` 两槽位已删除——7 个文件/终端工具
     // （Read / Write / Edit / Glob / Grep / folder_operations / Bash）的唯一提供面是
     // builtin `workspace` 实例的 bridge（模型面名字 `mcp__workspace__*`）。
-    // 本组槽位位置保留（`GitAttribution` / `GitWatch` 的相对顺序不变）。
+    // v4 wave 4：原 `GitWatch` 槽位已删除——git ref 变化改由 builtin `workspace` 实例的
+    // `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传（提醒映射内置在宿主侧），
+    // 本组只剩 `GitAttribution`。
     /// GitAttribution（git 归属注入）
     GitAttribution,
-    /// GitWatch（分支 / HEAD 变化 Info 注入）
-    GitWatch,
     // ── 第三组：Todo ──
     /// Todo（todo 工具）
     Todo,
@@ -100,9 +100,9 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         ChainSlot::SkillPreload,
         ChainSlot::AtMention,
         ChainSlot::Image,
-        // 第二组：工作区观察类注入器（文件/终端工具已迁 builtin `workspace` 实例）
+        // 第二组：工作区观察类注入器（文件/终端/GitWatch 均已离开链：
+        // 文件/终端工具迁 builtin `workspace` 实例，git ref 变化迁该实例的订阅回传）
         ChainSlot::GitAttribution,
-        ChainSlot::GitWatch,
         // 第三组：Todo
         ChainSlot::Todo,
         // 第四组：Hook 中间件

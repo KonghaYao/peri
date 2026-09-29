@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use peri_acp_types::builtin_mcp::{BUILTIN_MCP_INSTANCES, BUILTIN_RESERVED_INSTANCE_NAMES};
 use peri_acp_types::plugin::ConfigSource;
 
-use crate::mcp::builtin::BuiltinInjectionPolicy;
+use crate::mcp::builtin::{apply_builtin_overlay, BuiltinInjectionPolicy};
 use crate::mcp::config::{
     load_merged_config_full_with_paths, remove_server_from_config_with_paths,
     set_server_disabled_with_paths, McpConfigError, McpConfigFile,
@@ -126,7 +126,20 @@ fn builtin_default_layer_inserts_complete_entries() {
         assert_eq!(entry.env, None);
         assert_eq!(entry.headers, None);
         assert!(entry.oauth.is_none());
-        assert_eq!(entry.subscriptions, None);
+        // 规则 7：默认订阅只挂在 `workspace`（git ref 资源）；其余实例不订阅。
+        if instance.name == "workspace" {
+            assert_eq!(
+                entry.subscriptions,
+                crate::mcp::builtin::default_subscriptions_for("workspace"),
+                "规则 7：workspace 默认订阅 git ref 资源"
+            );
+        } else {
+            assert_eq!(
+                entry.subscriptions, None,
+                "{} 不应有默认订阅",
+                instance.name
+            );
+        }
     }
 }
 
@@ -195,6 +208,86 @@ fn empty_user_entry_still_becomes_system_direct_instance() {
         assert_eq!(entry.command, None);
         assert_eq!(entry.disabled, None);
     }
+}
+
+/// 规则 7（Git Watch 下沉，D-5）：`workspace` 的默认订阅随默认条目注入；
+/// 其余实例不注入订阅。
+#[test]
+fn workspace_default_subscription_is_injected_by_overlay() {
+    let mut map: std::collections::HashMap<String, peri_acp_types::plugin::McpServerConfig> =
+        std::collections::HashMap::new();
+    apply_builtin_overlay(&mut map, &BuiltinInjectionPolicy::all()).expect("空配置必须可注入");
+
+    let workspace = map.get("workspace").expect("workspace 条目必须存在");
+    assert_eq!(
+        workspace.subscriptions,
+        crate::mcp::builtin::default_subscriptions_for("workspace"),
+        "workspace 必须带默认订阅（git ref 资源）"
+    );
+    for instance in BUILTIN_MCP_INSTANCES {
+        if instance.name == "workspace" {
+            continue;
+        }
+        assert!(
+            map.get(instance.name)
+                .expect("实例条目必须存在")
+                .subscriptions
+                .is_none(),
+            "{} 不应有默认订阅",
+            instance.name
+        );
+    }
+}
+
+/// 规则 7：用户显式写 `subscriptions`（含空配置）优先于默认注入——空配置在连接期经
+/// `!is_empty()` 过滤后等价于「不订阅」，是用户关闭 git 提醒的细粒度开关。
+#[test]
+fn user_subscriptions_win_over_default_injection() {
+    // 显式空配置：保持为空（不回落默认订阅）。
+    let (_dir, cwd, claude_home, global_path) =
+        project_with_servers(r#"{"workspace":{"subscriptions":{}}}"#);
+    let merged = load(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
+    let workspace = merged
+        .mcp_servers
+        .get("workspace")
+        .expect("workspace 条目应保留");
+    let subscriptions = workspace
+        .subscriptions
+        .as_ref()
+        .expect("空配置也是显式配置（Some(empty)），不得被替换为默认订阅");
+    assert!(
+        subscriptions.is_empty(),
+        "空覆盖必须保持为空（连接期视为不订阅）"
+    );
+
+    // 显式非空配置：逐字保留用户值。
+    let (_dir, cwd, claude_home, global_path) =
+        project_with_servers(r#"{"workspace":{"subscriptions":{"resources":["custom://uri"]}}}"#);
+    let merged = load(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
+    let workspace = merged
+        .mcp_servers
+        .get("workspace")
+        .expect("workspace 条目应保留");
+    assert_eq!(
+        workspace
+            .subscriptions
+            .as_ref()
+            .map(|s| s.resources.clone()),
+        Some(vec!["custom://uri".to_string()]),
+        "用户显式订阅优先于默认注入"
+    );
 }
 
 #[test]

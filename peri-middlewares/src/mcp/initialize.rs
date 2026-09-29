@@ -428,8 +428,17 @@ impl McpClientPool {
                     let rs = pool.retain_service(rs);
                     // 订阅配置存在：建立 subscriptions/listen 长流（2026-07-28）。
                     // 失败仅告警——server 可能不支持，连接本身仍可用。
+                    // A24 关闭门：关闭集命中的 builtin 实例不建立订阅（订阅是能力的外部
+                    // 副作用；`WorkspaceMiddleware: false` ⇒ 零 git 调用）。
                     if let Some(sub) = subscriptions {
-                        setup_subscription(&pool, &rs, name, sub).await;
+                        if pool.subscription_allowed(name) {
+                            setup_subscription(&pool, &rs, name, sub).await;
+                        } else {
+                            tracing::info!(
+                                server = %name,
+                                "builtin 实例在关闭集内，跳过 subscriptions/listen"
+                            );
+                        }
                     }
                     let peer = rs.peer().clone();
                     let cache_version = pool.install_peer_cache_version(name, &peer);

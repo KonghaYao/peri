@@ -101,6 +101,11 @@ pub struct SystemReminder {
 `workflow`、`compact`、`permission`、`cron`、`channel`、`git_watch`。来源集合必须允许
 向前兼容，不能因未知来源导致整个消息反序列化失败。
 
+`git_watch` 的 producer 自 v4 wave 4 起是**宿主订阅消费侧**
+（`peri-middlewares/src/mcp/client/subscription.rs`）：builtin `workspace` 实例推送
+`notifications/resources/updated`（`workspace://git/ref`）→ 宿主回读资源正文 →
+组装 canonical reminder；原来产出它的链上 middleware 已删除（来源名与 `kind` 逐字不变）。
+
 `kind` 在来源命名空间内定义精确事件，例如：
 
 ```text
@@ -267,13 +272,14 @@ provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等�
 | MCP 首轮连接概览 | `Capability` | `mcp` | `connection_summary` | `Info` | `Info` |
 | MCP server 状态变化 | `Lifecycle` | `mcp` | `connection_changed` | 状态决定 | `Info` |
 | MCP subscription 更新 | `ExternalEvent` | `mcp` | `subscription_updated` | `Info` | `Defer` |
+| Git ref 变化（订阅回传） | `Diagnostic` | `git_watch` | `repository_ref_changed` | `Info` | `Info`（**不唤醒**） |
 | Goal 主动接续 | `Guidance` | `goal` | `continuation_required` | `Info` | `Defer` |
 | Stop hook 阻止结束 | `Guidance` | `hook` | `stop_blocked` | `Warning` | `Defer` |
 | SubAgent 完成 | `Task` | `subagent` | `completed` | `Info` | `Defer` |
 | Workflow 失败 | `Task` | `workflow` | `failed` | `Error` | `Defer` |
 | Compact 完成 | `Lifecycle` | `compact` | `completed` | `Info` | 由执行阶段决定 |
 | PermissionMode 变化 | `Security` | `permission` | `mode_changed` | `Info` | `Info` |
-| Git HEAD/ref 变化 | `Diagnostic` | `git_watch` | `repository_ref_changed` | `Warning` | `Info` |
+| Git HEAD/ref 变化 | `Diagnostic` | `git_watch` | `repository_ref_changed` | `Info` | `Info`（不唤醒） |
 
 该表说明稳定映射原则，不是完整 producer inventory。新增 producer 应按字段语义选择映射，
 不应为方便展示创建新的一级类别。

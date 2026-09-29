@@ -490,7 +490,6 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::AtMention => "AtMentionMiddleware",
         ChainSlot::Image => "ImageMiddleware",
         ChainSlot::GitAttribution => "GitAttributionMiddleware",
-        ChainSlot::GitWatch => "GitWatchMiddleware",
         ChainSlot::Todo => "TodoMiddleware",
         ChainSlot::Hook => "HookMiddleware",
         ChainSlot::Permission => "PermissionMiddleware",

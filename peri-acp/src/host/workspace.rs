@@ -96,6 +96,12 @@ impl SessionEnvironment {
             task_manager: Some(Arc::clone(&task_manager)),
             on_bg_complete: Some(on_bg_complete),
         };
+        // A24 关闭集：从**同一份 frozen snapshot** 派生（设计 §2.5：禁止回退当轮 config；
+        // fork 复用 source 的 frozen 字节时两者可能不同）。它是订阅建立门的唯一输入，
+        // 不改变 pool 级就绪与面板连接状态（ARC-CAPABILITY-CLOSURE-001）。
+        let builtin_closed = peri_middlewares::assembly::builtin_closed_instances(
+            &inputs.frozen.meta_harness().disabled_middlewares,
+        );
         let input = assemble::HostAssemblyInput {
             provider: inputs.provider.clone(),
             peri_config: Arc::new(parking_lot::RwLock::new((*inputs.config).clone())),
@@ -110,6 +116,7 @@ impl SessionEnvironment {
             bare: source.bare,
             drive_cron_tick: source.drive_cron_tick,
             workspace_input: Some(workspace_input.clone()),
+            builtin_closed,
             prepared_plugins: Some(assemble::PreparedPlugins {
                 data: inputs.plugin_data.clone(),
                 skill_roots: inputs.skill_roots.clone(),
