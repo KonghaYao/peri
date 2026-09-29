@@ -69,6 +69,12 @@ pub struct SkillMetadata {
     pub content: Option<String>,
     /// 技能资源绑定（仅 Mcp source 填——entry.resources 完整清单；本地为空）
     pub resources: Vec<SkillResource>,
+    /// 发现条目的 frontmatter 全文（verbatim JSON map；仅 Mcp 发现面填写）。
+    ///
+    /// W2：激活时以它与读到的正文 frontmatter **逐字段全量**比对（任何差异，
+    /// 含附加字段，MUST NOT load），因此条目必须持有发现时的原始 map——不是
+    /// 精选子集、不从 name/description 重建。本地来源为 None。
+    pub frontmatter: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl Default for SkillMetadata {
@@ -83,6 +89,7 @@ impl Default for SkillMetadata {
             origin: None,
             content: None,
             resources: Vec::new(),
+            frontmatter: None,
         }
     }
 }

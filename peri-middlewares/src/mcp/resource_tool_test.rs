@@ -379,6 +379,7 @@ fn mcp_entry(uri: &str, resources: Vec<SkillResource>) -> SkillMetadata {
         }),
         content: None,
         resources,
+        frontmatter: None,
     }
 }
 

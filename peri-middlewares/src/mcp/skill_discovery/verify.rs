@@ -14,7 +14,7 @@ use super::legacy_scan::is_skill_scheme;
 /// 纯函数：gray_matter 解析 frontmatter 为 verbatim JSON map（loader.rs
 /// 同款；YAML→JSON 值渲染由 serde_yaml 完成——数字 42 → Number、字符串
 /// "42" → String）。YAML 非法 / 无 frontmatter → None。
-pub(super) fn parse_skill_frontmatter_map(
+pub(crate) fn parse_skill_frontmatter_map(
     content: &str,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     let matter = Matter::<YAML>::new();
@@ -27,7 +27,7 @@ pub(super) fn parse_skill_frontmatter_map(
 /// 与条目 frontmatter 逐字段比对，**任何**差异——含附加字段如
 /// license/metadata——验证失败、MUST NOT load）。键集合须完全一致，值经
 /// [`frontmatter_values_equal`] 宽松归一（容忍 YAML→JSON 渲染差异）。
-pub(super) fn frontmatter_maps_equal(
+pub(crate) fn frontmatter_maps_equal(
     a: &serde_json::Map<String, serde_json::Value>,
     b: &serde_json::Map<String, serde_json::Value>,
 ) -> bool {
@@ -178,7 +178,8 @@ pub(crate) fn verify_digest(content: &str, expected: &str) -> bool {
 /// 注册名 = `mcp__<server>__<name>`（name = frontmatter `name`，经与 URI
 /// 最终段一致性校验——frontmatter 是不可信内容，提示注入防御）；URI 最终段
 /// 与 name（sanitize 后）不一致 → 拒绝。origin 保留完整 SKILL.md URI；
-/// resources 存条目完整资源清单（读取面按它做内容绑定校验）。
+/// resources 存条目完整资源清单（读取面按它做内容绑定校验）；
+/// `frontmatter` 存发现时的 verbatim map（W2：激活时全量比对）。
 pub(super) fn build_metadata(
     server: &str,
     uri: &str,
@@ -186,6 +187,7 @@ pub(super) fn build_metadata(
     description: &str,
     content: &str,
     resources: Vec<SkillResource>,
+    frontmatter: serde_json::Map<String, serde_json::Value>,
 ) -> Option<SkillMetadata> {
     let final_segment = uri_final_segment(uri)?;
     if sanitize_name(&final_segment) != sanitize_name(name) {
@@ -210,6 +212,7 @@ pub(super) fn build_metadata(
         content: Some(content.to_string()),
         // MCP 来源：完整 resources 集（读取面按它做内容绑定校验）
         resources,
+        frontmatter: Some(frontmatter),
     })
 }
 
@@ -217,9 +220,9 @@ pub(super) fn build_metadata(
 /// 构建（兼容既有测试/调用面）。legacy 无 resources 清单 → 空 vec。
 pub(crate) fn parse_mcp_skill_md(content: &str, server: &str, uri: &str) -> Option<SkillMetadata> {
     let fm = parse_skill_frontmatter_map(content)?;
-    let name = fm.get("name")?.as_str()?;
-    let description = fm.get("description")?.as_str()?;
-    build_metadata(server, uri, name, description, content, vec![])
+    let name = fm.get("name")?.as_str()?.to_string();
+    let description = fm.get("description")?.as_str()?.to_string();
+    build_metadata(server, uri, &name, &description, content, vec![], fm)
 }
 
 /// 纯函数：同一 server 内注册名冲突消歧。同名组 >1 时组内全部改用完整路径

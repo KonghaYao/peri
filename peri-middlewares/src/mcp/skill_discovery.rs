@@ -48,7 +48,12 @@ pub(crate) use legacy_scan::{
     collect_skill_entries, is_skill_scheme, select_skill_resources, uri_eq_ignore_scheme_case,
 };
 pub(crate) use skills_list::refresh_entry_and_content;
-pub(crate) use verify::{parse_mcp_skill_md, verify_digest, verify_digest_bytes};
+/// W2 激活面复用（skill_activation）：正文读取、stale 恢复、frontmatter 校验。
+pub(crate) use skills_list::{read_skill_resource_text, recover_via_skills_get, SkillResourceRead};
+pub(crate) use verify::{
+    frontmatter_maps_equal, parse_mcp_skill_md, parse_skill_frontmatter_map, verify_digest,
+    verify_digest_bytes,
+};
 
 #[cfg(test)]
 use legacy_scan::filter_nested_skills;
@@ -69,7 +74,7 @@ use skills_list::{
 #[cfg(test)]
 use std::path::PathBuf;
 #[cfg(test)]
-use verify::{disambiguate_names, frontmatter_maps_equal, frontmatter_values_equal};
+use verify::{disambiguate_names, frontmatter_values_equal};
 
 /// 单条资源读取超时。cancel 后悬挂窗口上界 = (N/8)×30s + 恢复条目×60s：
 /// 恢复路径（skills/get + 重读）无 cancel 检查，仅外层两处检查——每个进入
@@ -327,25 +332,40 @@ impl CommandHandler for McpSkillReleaser {
             .split_whitespace()
             .next()
             .unwrap_or_default();
-        let hit = self
-            .registry
-            .find_by_command(name)
-            .and_then(|meta| meta.content.clone().map(|content| (meta, content)));
+        let hit = self.registry.find_by_command(name);
         let (messages, feedback) = match hit {
-            Some((meta, content)) => {
-                let annotated = crate::skills::annotate_mcp_content(&meta, &content);
-                let mut messages = ctx.history;
-                // 全文追加为 human 消息，随 RPC 响应 messages 回传（Content-only）。
-                messages.push(BaseMessage::human(annotated.clone()));
-                let feedback = CommandFeedback {
-                    level: FeedbackLevel::Info,
-                    message: format!(
-                        "MCP skill `{name}` 内容已返回（语义差异：交互式输入 `/{}` 走 preload 注入，RPC 直返全文）",
-                        name
-                    ),
-                    channel: FeedbackChannel::UiOnly,
-                };
-                (messages, feedback)
+            Some(meta) => {
+                // W2：正文一律经统一 activation（resources/read + digest/frontmatter
+                // 校验；stale 经 skills/get 刷新一次）；失败不注入，不回落缓存。
+                match crate::mcp::skill_activation::activate(&self.registry, &meta, None).await {
+                    Ok(content) => {
+                        let annotated = crate::skills::annotate_mcp_content(&meta, &content);
+                        let mut messages = ctx.history;
+                        // 全文追加为 human 消息，随 RPC 响应 messages 回传（Content-only）。
+                        messages.push(BaseMessage::human(annotated.clone()));
+                        let feedback = CommandFeedback {
+                            level: FeedbackLevel::Info,
+                            message: format!(
+                                "MCP skill `{name}` 内容已返回（语义差异：交互式输入 `/{}` 走 preload 注入，RPC 直返全文）",
+                                name
+                            ),
+                            channel: FeedbackChannel::UiOnly,
+                        };
+                        (messages, feedback)
+                    }
+                    Err(error) => {
+                        let feedback = CommandFeedback {
+                            level: FeedbackLevel::Info,
+                            message: format!(
+                                "MCP skill `{name}` 激活失败（{}）；交互式输入 `/{}` 走 preload 注入",
+                                error.reason(),
+                                name
+                            ),
+                            channel: FeedbackChannel::UiOnly,
+                        };
+                        (ctx.history, feedback)
+                    }
+                }
             }
             None => {
                 let feedback = CommandFeedback {

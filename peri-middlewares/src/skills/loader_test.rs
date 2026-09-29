@@ -23,6 +23,7 @@ fn test_find_skill_in_list_mcp_cache_and_missing_content() {
         }),
         content: Some("缓存正文".into()),
         resources: vec![],
+        frontmatter: None,
     };
     let (_, content) = find_skill_in_list(&[metadata.clone()], "HELLO").unwrap();
     assert!(content.ends_with("缓存正文"));

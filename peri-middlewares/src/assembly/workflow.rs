@@ -186,9 +186,12 @@ impl WorkflowAgentMiddlewareFactory {
             } else {
                 Some(skills)
             }));
-            tools.push(Box::new(crate::skills::tools::SkillTool::new(Arc::clone(
-                &cached,
-            ))));
+            // F4（W4 迁到 MCP registry 投影）：workflow agent 面当前只有本地
+            // 扫描结果，MCP 来源条目不经此路径 → 不注入 registry。
+            tools.push(Box::new(crate::skills::tools::SkillTool::new(
+                Arc::clone(&cached),
+                None,
+            )));
             tools.push(Box::new(crate::skills::tools::DiscoverSkillsTool::new(
                 cached,
             )));

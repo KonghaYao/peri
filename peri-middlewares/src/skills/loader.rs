@@ -86,6 +86,7 @@ pub fn load_skill_metadata(path: &Path) -> Option<SkillMetadata> {
         content: None,
         // 本地技能无 resources 绑定（仅 MCP 来源条目填写）
         resources: Vec::new(),
+        frontmatter: None,
     })
 }
 
@@ -156,6 +157,7 @@ fn scan_skill_roots_impl(
                     content: None,
                     // 内置技能无 resources 绑定（仅 MCP 来源条目填写）
                     resources: Vec::new(),
+                    frontmatter: None,
                 };
                 // 高优先级 canonical 可覆盖 builtin canonical；builtin 启用时仍将
                 // 保留 token /ptc 附着到获胜 metadata，使 catalog 保持单一 canonical，

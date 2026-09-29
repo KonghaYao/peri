@@ -394,7 +394,10 @@ impl Middleware for SkillsMiddleware {
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
         vec![
-            Box::new(tools::SkillTool::new(Arc::clone(&self.cached_skills))),
+            Box::new(tools::SkillTool::new(
+                Arc::clone(&self.cached_skills),
+                self.mcp_registry.clone(),
+            )),
             Box::new(tools::DiscoverSkillsTool::new(Arc::clone(
                 &self.cached_skills,
             ))),

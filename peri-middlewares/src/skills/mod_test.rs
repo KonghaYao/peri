@@ -365,7 +365,7 @@ async fn test_skill_tool_error_is_recoverable_when_file_deleted_mid_session() {
     // 会话中途删除磁盘文件
     std::fs::remove_dir_all(&skills_dir).unwrap();
 
-    let tool = tools::SkillTool::new(cache);
+    let tool = tools::SkillTool::new(cache, None);
     let result = tool
         .invoke(
             serde_json::json!({"skill_name": "gone-skill"}),

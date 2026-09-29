@@ -204,6 +204,7 @@ fn disambiguate_names_on_collision_uses_path_segments() {
         content: None,
         // 消歧只依赖 name/origin，resources 不参与
         resources: Vec::new(),
+        frontmatter: None,
     };
     let entries = vec![
         mk("mcp__srv__refunds", "skill://acme/billing/refunds/SKILL.md"),
@@ -1584,6 +1585,7 @@ fn mcp_route_entries_converts_skills() {
             }),
             content: None,
             resources: vec![],
+            frontmatter: None,
         },
         // 同名消歧后形态：路径段作为 skill 名
         SkillMetadata {
@@ -1596,6 +1598,7 @@ fn mcp_route_entries_converts_skills() {
             origin: None,
             content: None,
             resources: vec![],
+            frontmatter: None,
         },
     ];
     let entries = mcp_route_entries(&registry, "demo", &skills);
@@ -1635,6 +1638,7 @@ fn mcp_route_entries_plugin_server_takes_last_segment() {
         origin: None,
         content: None,
         resources: vec![],
+        frontmatter: None,
     }];
     let entries = mcp_route_entries(&registry, "plugin:p1:demosrv", &skills);
     assert_eq!(entries.len(), 1);
@@ -1753,6 +1757,7 @@ fn mcp_route_entries_skips_unprefixed_name() {
         origin: None,
         content: None,
         resources: vec![],
+        frontmatter: None,
     }];
     let entries = mcp_route_entries(&registry, "demo", &skills);
     assert!(entries.is_empty(), "缺前缀条目跳过");
@@ -1920,6 +1925,7 @@ fn seed_discovered(reg: &Arc<McpSkillRegistry>, server: &str, skill: &str, conte
         }),
         content: Some(content.to_string()),
         resources: vec![],
+        frontmatter: None,
     };
     reg.mark_discovery_started(server, token.clone());
     reg.mark_discovery_completed(server, token, vec![meta]);

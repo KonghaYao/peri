@@ -27,7 +27,7 @@ fn make_discover_tool_with_cache(roots: &[SkillRoot]) -> DiscoverSkillsTool {
 fn make_skill_tool_with_cache(plugin_roots: Vec<SkillRoot>) -> SkillTool {
     let skills = scan_skill_roots(&plugin_roots);
     let cached = Arc::new(RwLock::new(Some(skills)));
-    SkillTool::new(cached)
+    SkillTool::new(cached, None)
 }
 
 #[tokio::test]
@@ -37,7 +37,7 @@ async fn test_skill_tool_loads_skill_by_alias() {
         source: SkillSource::Builtin,
         plugin_name: None,
     }]))));
-    let tool = SkillTool::new(cached);
+    let tool = SkillTool::new(cached, None);
 
     let content = tool
         .invoke(json!({"skill_name": "ptc"}), ToolContext::new(&[], "."))
@@ -244,7 +244,7 @@ async fn test_skill_tool_loads_normalized_colon_name_case_insensitively() {
 #[tokio::test]
 async fn test_skill_tool_empty_cache_returns_error() {
     // 构造一个缓存为 None 的工具，模拟 before_agent 未运行的场景
-    let tool = SkillTool::new(Arc::new(RwLock::new(None)));
+    let tool = SkillTool::new(Arc::new(RwLock::new(None)), None);
     let result = tool
         .invoke(
             json!({"skill_name": "any-skill"}),
@@ -471,16 +471,19 @@ fn fake_mcp_skill(server: &str, skill: &str) -> SkillMetadata {
         content: Some(format!("# Hello\n\nBody of {skill}.\n")),
         // 测试 fixture：无 resources 绑定
         resources: Vec::new(),
+        frontmatter: None,
     }
 }
 
 fn make_skill_tool_with_entries(entries: Vec<SkillMetadata>) -> SkillTool {
     let cached = Arc::new(RwLock::new(Some(entries)));
-    SkillTool::new(cached)
+    SkillTool::new(cached, None)
 }
 
+/// W2：MCP 条目的正文只能来自统一 activation——未接线 registry 时显式失败
+/// （不读缓存正文、不读磁盘）。
 #[tokio::test]
-async fn test_skill_tool_loads_mcp_skill_from_cache() {
+async fn test_skill_tool_mcp_skill_requires_wired_registry() {
     // Arrange: cached_skills 含 MCP 条目（content Some）
     let tool = make_skill_tool_with_entries(vec![fake_mcp_skill("demo", "hello")]);
     let input = json!({"skill_name": "mcp__demo__hello"});
@@ -488,24 +491,18 @@ async fn test_skill_tool_loads_mcp_skill_from_cache() {
     // Act
     let result = tool.invoke(input, ToolContext::new(&[], "/tmp")).await;
 
-    // Assert: 零 RPC 取缓存全文 + 来源标注（server 名 + uri）
-    assert!(result.is_ok(), "MCP skill 按全名加载应成功");
-    let content = result.unwrap();
-    assert!(content.contains("Body of hello."), "应含缓存正文");
-    assert_eq!(
-        content
-            .matches("This skill is served by MCP server")
-            .count(),
-        1,
-        "来源只标注一次"
+    // Assert（W2）：MCP 来源正文一律经统一 activation；本夹具未接线 registry，
+    // 因此显式失败——不回落发现期缓存、不读磁盘，且错误指明解析到的注册名。
+    let error = result
+        .expect_err("未接线 registry 的 MCP 条目必须显式失败")
+        .to_string();
+    assert!(
+        error.contains("mcp__demo__hello"),
+        "错误须指明解析到的注册名：{error}"
     );
     assert!(
-        content.contains("This skill is served by MCP server \"demo\""),
-        "应含来源标注 server 名，实际: {content}"
-    );
-    assert!(
-        content.contains("uri: skill://demo/hello/SKILL.md"),
-        "应含来源标注 uri，实际: {content}"
+        error.contains("registry is not wired"),
+        "须报告装配缺口而不是伪装成未找到：{error}"
     );
 }
 
@@ -526,10 +523,14 @@ async fn test_skill_tool_mcp_content_none_does_not_read_disk() {
         )
         .await;
 
-    assert!(result.is_err(), "content 缺失应返回错误");
+    let error = result.expect_err("content 缺失应返回错误").to_string();
     assert!(
-        result.unwrap_err().to_string().contains("not found"),
-        "应走既有 not-found 错误路径"
+        error.contains("mcp__demo__hello"),
+        "解析到条目后才失败，错误须含注册名：{error}"
+    );
+    assert!(
+        !error.contains("Test Skill") && !error.contains("session catalog"),
+        "不得回落磁盘读取本地技能：{error}"
     );
 }
 
@@ -564,11 +565,15 @@ async fn test_skill_tool_loads_mcp_skill_by_alias() {
     // Act
     let result = tool.invoke(input, ToolContext::new(&[], "/tmp")).await;
 
-    // Assert: 同命中
-    assert!(result.is_ok(), "demo:hello 别名应命中 MCP 条目");
-    let content = result.unwrap();
-    assert!(content.contains("Body of hello."));
-    assert!(content.contains("This skill is served by MCP server \"demo\""));
+    // Assert（W2）：别名解析仍须命中该 MCP 条目（错误里给出注册名即证据）；
+    // 正文取用一律经 activation（本夹具未接线 registry）。
+    let error = result
+        .expect_err("别名解析到 MCP 条目后按 activation 失败")
+        .to_string();
+    assert!(
+        error.contains("mcp__demo__hello"),
+        "demo:hello 别名应解析到 mcp__demo__hello：{error}"
+    );
 }
 
 /// 决策 1 + A3：plugin 多冒号 server key（`plugin:p1:demosrv`）下命令形态
@@ -582,18 +587,22 @@ async fn test_skill_tool_loads_mcp_skill_plugin_server_by_last_segment() {
 
     let result = tool.invoke(input, ToolContext::new(&[], "/tmp")).await;
 
-    assert!(result.is_ok(), "demosrv:beta 应按末段兜底命中 MCP 条目");
-    let content = result.unwrap();
-    assert!(content.contains("Body of beta."));
+    let error = result
+        .expect_err("末段兜底解析到条目后按 activation 失败")
+        .to_string();
     assert!(
-        content.contains("MCP server \"plugin:p1:demosrv\""),
-        "标注应含完整 server key，实际: {content}"
+        error.contains("mcp__plugin:p1:demosrv__beta"),
+        "demosrv:beta 应按末段兜底解析到完整注册名：{error}"
     );
 
-    // 完整 server key 前缀同样命中（用户直接输入全名形态）
+    // 完整 server key 前缀同样命中（用户直接输入全名形态）。
     let input_full = json!({"skill_name": "plugin:p1:demosrv:beta"});
-    let result_full = tool.invoke(input_full, ToolContext::new(&[], "/tmp")).await;
-    assert!(result_full.is_ok(), "完整 server key 形态应命中");
+    let error_full = tool
+        .invoke(input_full, ToolContext::new(&[], "/tmp"))
+        .await
+        .expect_err("完整 server key 形态同样按 activation 失败")
+        .to_string();
+    assert!(error_full.contains("mcp__plugin:p1:demosrv__beta"));
 }
 
 #[tokio::test]
@@ -610,17 +619,20 @@ async fn test_skill_tool_mixed_cache_mcp_alias_and_local_namespace() {
     let tool = make_skill_tool_with_entries(entries);
     let cwd = skill_dir.parent().unwrap().to_str().unwrap();
 
-    // Act 1: 别名命中 MCP（在剥前缀之前）
-    let mcp_result = tool
+    // Act 1: 别名命中 MCP（在剥前缀之前）→ W2 下经 activation 取正文；
+    // 本夹具未接线 registry，错误里应给出解析到的 MCP 注册名（分源未被破坏）。
+    let mcp_error = tool
         .invoke(
             json!({"skill_name": "demo:hello"}),
             ToolContext::new(&[], cwd),
         )
-        .await;
-    assert!(mcp_result.is_ok());
-    assert!(mcp_result
-        .unwrap()
-        .contains("This skill is served by MCP server"));
+        .await
+        .expect_err("MCP 别名命中后按 activation 失败（registry 未接线）")
+        .to_string();
+    assert!(
+        mcp_error.contains("mcp__demo__hello"),
+        "分源命中 MCP 条目：{mcp_error}"
+    );
 
     // Act 2: 本地 plugin 命名空间不受别名分支影响（mcp__ns__test-skill 未命中
     // → 继续走既有磁盘剥前缀路径）

@@ -40,6 +40,7 @@ fn seed_registry_with_skill(server: &str, skill: &str) -> Arc<McpSkillRegistry> 
         content: Some(format!("# Hello\n\nBody of {skill}.\n")),
         // 测试 fixture：无 resources 绑定
         resources: Vec::new(),
+        frontmatter: None,
     };
     reg.mark_discovery_started(server, handle.clone());
     reg.mark_discovery_completed(server, handle, vec![meta]);

@@ -102,6 +102,20 @@ impl SkillPreloadMiddleware {
     }
 }
 
+/// 预加载槽位：本地命中携带已读正文；MCP 命中携带条目（正文在闭包外经
+/// 统一 activation 读取——资源读取是异步的，不能在 blocking 闭包里做）。
+enum PreloadSlot {
+    Ready {
+        name: String,
+        content: String,
+    },
+    Mcp {
+        name: String,
+        /// 盒装：SkillMetadata 远大于本地正文槽位（clippy large_enum_variant）。
+        meta: Box<peri_acp_types::skills::SkillMetadata>,
+    },
+}
+
 #[async_trait]
 impl Middleware for SkillPreloadMiddleware {
     fn name(&self) -> &str {
@@ -134,20 +148,22 @@ impl Middleware for SkillPreloadMiddleware {
         let plugin_roots = self.plugin_roots.clone();
         let disable_bundled = self.disable_bundled;
         let registry = self.mcp_registry.clone();
-        // 一批预加载共享一次本地扫描。按输入顺序直接产出结果，避免把
-        // registry 命中、磁盘 miss 与磁盘命中拆成多路后再按位置合并。
-        let skill_contents = tokio::task::spawn_blocking(move || {
+        // 一批预加载共享一次本地扫描。按输入顺序产出槽位，避免把 registry
+        // 命中、磁盘 miss 与磁盘命中拆成多路后再按位置合并。
+        let slots = tokio::task::spawn_blocking(move || {
             let mut local_skills = None;
-            let mut contents = Vec::with_capacity(skill_names.len());
+            let mut slots = Vec::with_capacity(skill_names.len());
             for name in skill_names {
                 let name = name.to_lowercase();
                 if let Some(reg) = &registry {
                     // registry-first；find_by_command 保留 plugin 多冒号 server
-                    // key 的末段命令别名。命中但缓存缺失仍不得改读本地文件。
+                    // key 的末段命令别名。命中后正文一律经统一 activation（W2），
+                    // 读取在闭包外异步进行；激活失败不回落磁盘、不静默注入旧缓存。
                     if let Some(meta) = reg.find(&name).or_else(|| reg.find_by_command(&name)) {
-                        if let Ok(content) = crate::skills::content::load(&meta) {
-                            contents.push((name, content));
-                        }
+                        slots.push(PreloadSlot::Mcp {
+                            name,
+                            meta: Box::new(meta),
+                        });
                         continue;
                     }
                     // mcp__ 表示 MCP 身份；registry miss 不回退磁盘。
@@ -168,16 +184,42 @@ impl Middleware for SkillPreloadMiddleware {
                         .and_then(|(_, suffix)| crate::skills::find_skill_in_list(skills, suffix))
                 });
                 if let Some((_, content)) = found {
-                    contents.push((name, content));
+                    slots.push(PreloadSlot::Ready { name, content });
                 }
             }
-            contents
+            slots
         })
         .await
         .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
             middleware: "SkillPreloadMiddleware".to_string(),
             reason: format!("spawn_blocking 失败: {e}"),
         })?;
+
+        // MCP 槽位：统一 activation（resources/read + digest/frontmatter 校验；
+        // stale 经 skills/get 刷新一次）。失败静默跳过（与 miss 语义一致），
+        // 不回退磁盘或发现期缓存。
+        let mut skill_contents: Vec<(String, String)> = Vec::with_capacity(slots.len());
+        for slot in slots {
+            match slot {
+                PreloadSlot::Ready { name, content } => skill_contents.push((name, content)),
+                PreloadSlot::Mcp { name, meta } => {
+                    let Some(reg) = self.mcp_registry.as_ref() else {
+                        continue;
+                    };
+                    match crate::mcp::skill_activation::activate(reg, meta.as_ref(), None).await {
+                        Ok(content) => skill_contents.push((
+                            name,
+                            crate::skills::annotate_mcp_content(meta.as_ref(), &content),
+                        )),
+                        Err(error) => tracing::debug!(
+                            skill = %name,
+                            reason = error.reason(),
+                            "MCP skill 预加载激活失败，跳过注入"
+                        ),
+                    }
+                }
+            }
+        }
 
         if skill_contents.is_empty() {
             return Ok(());

@@ -315,7 +315,7 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
     // 2 skills：SkillTool/DiscoverSkillsTool
     let cached: Arc<std::sync::RwLock<Option<Vec<SkillMetadata>>>> =
         Arc::new(std::sync::RwLock::new(None));
-    tools.push(Arc::new(SkillTool::new(Arc::clone(&cached))));
+    tools.push(Arc::new(SkillTool::new(Arc::clone(&cached), None)));
     tools.push(Arc::new(DiscoverSkillsTool::new(cached)));
     // 3 meta：SearchExtraTools/ExecuteExtraTool（artifact 由 builtin 桥提供，见上）
     let index = Arc::new(ToolSearchIndex::new());

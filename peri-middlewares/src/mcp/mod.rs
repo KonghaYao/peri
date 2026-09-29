@@ -22,6 +22,7 @@ pub mod oauth_flow;
 pub mod reconnect;
 pub mod resource_cache;
 pub mod resource_tool;
+pub(crate) mod skill_activation;
 pub(crate) mod skill_discovery;
 pub(crate) mod system_tools;
 pub mod task_scope;

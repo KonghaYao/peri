@@ -583,3 +583,184 @@ fn mcp_skill_name_format() {
         "mcp__github__code-review"
     );
 }
+
+// ─── lookup / lookup_by_command：origin 感知 + 歧义候选（W2） ───────────────
+
+use crate::skills::SkillOrigin;
+
+/// 带 MCP origin 的条目（生产路径上 Mcp 条目恒有 origin；server 段参与消歧）。
+fn mcp_skill(server: &str, full_name: &str) -> SkillMetadata {
+    SkillMetadata {
+        name: full_name.to_string(),
+        description: format!("desc of {full_name}"),
+        origin: Some(SkillOrigin::Mcp {
+            server: server.to_string(),
+            uri: format!("{}://demo/SKILL.md", full_name.replace("mcp__", "skill://")),
+        }),
+        ..SkillMetadata::default()
+    }
+}
+
+fn found_name(lookup: SkillLookup) -> String {
+    match lookup {
+        SkillLookup::Found(meta) => meta.name,
+        other => panic!("期望唯一命中，实际 {other:?}"),
+    }
+}
+
+fn ambiguous_names(lookup: SkillLookup) -> Vec<String> {
+    match lookup {
+        SkillLookup::Ambiguous(hits) => hits.into_iter().map(|m| m.name).collect(),
+        other => panic!("期望歧义候选，实际 {other:?}"),
+    }
+}
+
+#[test]
+fn lookup_full_name_resolves_within_its_origin() {
+    let reg = McpSkillRegistry::new();
+    complete(
+        &reg,
+        "a",
+        token(1),
+        vec![
+            mcp_skill("a", "mcp__a__alpha"),
+            mcp_skill("a", "mcp__a__beta"),
+        ],
+    );
+    assert_eq!(found_name(reg.lookup("mcp__a__beta")), "mcp__a__beta");
+    // 大小写不敏感（注册名恒小写存储）。
+    assert_eq!(found_name(reg.lookup("MCP__A__BETA")), "mcp__a__beta");
+}
+
+#[test]
+fn lookup_alias_targets_the_named_server_only() {
+    let reg = McpSkillRegistry::new();
+    complete(&reg, "a", token(1), vec![mcp_skill("a", "mcp__a__alpha")]);
+    complete(&reg, "b", token(2), vec![mcp_skill("b", "mcp__b__alpha")]);
+    assert_eq!(found_name(reg.lookup("a:alpha")), "mcp__a__alpha");
+    assert_eq!(found_name(reg.lookup("b:alpha")), "mcp__b__alpha");
+}
+
+#[test]
+fn lookup_bare_name_across_origins_is_ambiguous() {
+    let reg = McpSkillRegistry::new();
+    complete(
+        &reg,
+        "external",
+        token(1),
+        vec![mcp_skill("external", "mcp__external__alpha")],
+    );
+    complete(
+        &reg,
+        "workspace",
+        token(2),
+        vec![mcp_skill("workspace", "mcp__workspace__alpha")],
+    );
+    // 裸名跨 origin：不得静默偏爱首中；候选按 (server, name) 稳定排序。
+    assert_eq!(
+        ambiguous_names(reg.lookup("alpha")),
+        vec!["mcp__external__alpha", "mcp__workspace__alpha"],
+        "两个 origin 都持有 alpha ⇒ Ambiguous 且顺序稳定"
+    );
+    // 同名不同 skill 段不互相命中。
+    assert!(matches!(reg.lookup("beta"), SkillLookup::Missing));
+}
+
+#[test]
+fn lookup_bare_name_single_origin_is_found() {
+    let reg = McpSkillRegistry::new();
+    complete(
+        &reg,
+        "workspace",
+        token(1),
+        vec![mcp_skill("workspace", "mcp__workspace__alpha")],
+    );
+    assert_eq!(found_name(reg.lookup("alpha")), "mcp__workspace__alpha");
+    // 全名形态优先于裸名扫描。
+    assert_eq!(
+        found_name(reg.lookup("mcp__workspace__alpha")),
+        "mcp__workspace__alpha"
+    );
+}
+
+#[test]
+fn lookup_skips_started_servers_and_missing_is_explicit() {
+    let reg = McpSkillRegistry::new();
+    reg.mark_discovery_started("pending", token(1));
+    assert!(matches!(reg.lookup("anything"), SkillLookup::Missing));
+    assert!(matches!(reg.lookup("pending:skill"), SkillLookup::Missing));
+
+    let reg2 = McpSkillRegistry::new();
+    complete(
+        &reg2,
+        "demo",
+        token(1),
+        vec![mcp_skill("demo", "mcp__demo__hello")],
+    );
+    assert!(matches!(reg2.lookup("other:hello"), SkillLookup::Missing));
+    assert!(matches!(reg2.lookup("demo:"), SkillLookup::Missing));
+}
+
+#[test]
+fn lookup_by_command_is_ambiguity_aware_on_trailing_segment_clash() {
+    let reg = McpSkillRegistry::new();
+    complete(
+        &reg,
+        "plugin:p1:demosrv",
+        token(1),
+        vec![mcp_skill(
+            "plugin:p1:demosrv",
+            "mcp__plugin:p1:demosrv__beta",
+        )],
+    );
+    complete(
+        &reg,
+        "p2",
+        token(2),
+        vec![mcp_skill("p2", "mcp__p2__demosrv__beta")],
+    );
+    // 末段 `demosrv` 只命中 plugin 多冒号 server（p2 的注册名不等于 mcp__p2__beta，
+    // 其 skill 段虽含 demosrv 也不构成命令形态命中）。
+    assert_eq!(
+        found_name(reg.lookup_by_command("demosrv:beta")),
+        "mcp__plugin:p1:demosrv__beta"
+    );
+    // 完整 server key 前缀仍唯一命中。
+    assert_eq!(
+        found_name(reg.lookup_by_command("plugin:p1:demosrv:beta")),
+        "mcp__plugin:p1:demosrv__beta"
+    );
+    // 真正的同末段歧义：两个 server 名末段相同（`a:srv` / `b:srv` 末段都是 srv）。
+    let reg2 = McpSkillRegistry::new();
+    complete(
+        &reg2,
+        "a:srv",
+        token(1),
+        vec![mcp_skill("a:srv", "mcp__a:srv__beta")],
+    );
+    complete(
+        &reg2,
+        "b:srv",
+        token(2),
+        vec![mcp_skill("b:srv", "mcp__b:srv__beta")],
+    );
+    assert_eq!(
+        ambiguous_names(reg2.lookup_by_command("srv:beta")),
+        vec!["mcp__a:srv__beta", "mcp__b:srv__beta"],
+        "同末段 server 同名 skill ⇒ Ambiguous（不静默偏爱首中）"
+    );
+    // 显式完整 server 前缀消歧。
+    assert_eq!(
+        found_name(reg2.lookup_by_command("a:srv:beta")),
+        "mcp__a:srv__beta"
+    );
+}
+
+#[test]
+fn bare_skill_segment_units() {
+    assert_eq!(bare_skill_segment("mcp__server__skill"), Some("skill"));
+    assert_eq!(bare_skill_segment("mcp__plugin:p1:srv__a-b"), Some("a-b"));
+    assert_eq!(bare_skill_segment("mcp__srv__a__b"), Some("b"));
+    assert_eq!(bare_skill_segment("plain-name"), None);
+    assert_eq!(bare_skill_segment("mcp__srv__"), None);
+}

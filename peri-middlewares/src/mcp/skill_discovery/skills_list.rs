@@ -373,7 +373,7 @@ async fn fetch_and_verify_one(
 /// （resource_tool 热更新恢复）共用。
 ///
 /// 恢复失败均记录日志（真实拒绝）；成功仅 debug（恢复是自愈路径，不告警）。
-async fn recover_via_skills_get(
+pub(crate) async fn recover_via_skills_get(
     peer: &Peer<RoleClient>,
     server: &str,
     uri: &str,
@@ -507,7 +507,7 @@ pub(crate) async fn refresh_entry_and_content(
 /// 单次 `resources/read` 的读取结果三态：成功 Text（携带文本与 mime）、
 /// RPC 失败/超时、响应成功但无 Text 内容（Blob 资源）。区分后两者供恢复
 /// 路径给出准确文案（NotText 不是传输层错误）。
-enum SkillResourceRead {
+pub(crate) enum SkillResourceRead {
     /// Text 内容（文本 + mime + 响应缓存元数据）
     Text(String, Option<String>, Option<u64>, Option<CacheScope>),
     /// RPC 失败/超时
@@ -518,7 +518,7 @@ enum SkillResourceRead {
 
 /// 单次 `resources/read`：读 SKILL.md 文本（30s 超时；失败/超时 →
 /// [`SkillResourceRead::Failed`] + debug；响应无 Text → [`SkillResourceRead::NotText`]）。
-async fn read_skill_resource_text(
+pub(crate) async fn read_skill_resource_text(
     peer: &Peer<RoleClient>,
     server: &str,
     uri: &str,
@@ -698,6 +698,7 @@ pub(super) fn verify_and_build(
         description,
         content,
         entry.resources.clone().unwrap_or_default(),
+        entry.frontmatter.clone(),
     ) {
         Some(meta) => VerifyOutcome::Built(Box::new(meta)),
         None => VerifyOutcome::Rejected,

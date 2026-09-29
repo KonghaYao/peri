@@ -10,8 +10,8 @@
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use peri_acp_types::mcp_skills::mcp_skill_name;
-use peri_acp_types::skills::SkillOrigin;
+use peri_acp_types::mcp_skills::{mcp_skill_name, McpSkillRegistry};
+use peri_acp_types::skills::{SkillOrigin, SkillSource};
 use peri_agent::tools::{BaseTool, ToolContext};
 use serde_json::{json, Value};
 
@@ -29,11 +29,20 @@ const DISCOVER_SKILLS_TOOL_NAME: &str = "DiscoverSkillsTool";
 pub struct SkillTool {
     /// SkillsMiddleware 在 before_agent 时预扫描的 skills 列表缓存。
     cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
+    /// 会话级 MCP skill 注册表（W2：MCP 来源条目经统一 activation 读取正文；
+    /// None = 未装配 → MCP 条目报装配缺口，不回落磁盘）。
+    mcp_registry: Option<Arc<McpSkillRegistry>>,
 }
 
 impl SkillTool {
-    pub fn new(cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>) -> Self {
-        Self { cached_skills }
+    pub fn new(
+        cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
+        mcp_registry: Option<Arc<McpSkillRegistry>>,
+    ) -> Self {
+        Self {
+            cached_skills,
+            mcp_registry,
+        }
     }
 }
 
@@ -100,6 +109,28 @@ impl BaseTool for SkillTool {
             })?;
             find_skill(skills, skill_name)?.clone()
         };
+        // W2：MCP 来源的正文一律经统一 activation（resources/read + digest/
+        // frontmatter 校验，stale 经 skills/get 刷新一次）；激活失败不注入、
+        // 不回落发现期缓存。本地/内置来源仍走各自内容加载路径（W4 迁到 MCP 侧）。
+        if matches!(skill.source, SkillSource::Mcp) {
+            let Some(registry) = self.mcp_registry.as_ref() else {
+                return Err(format!(
+                    "SkillTool: MCP skill registry is not wired; cannot activate '{}'",
+                    skill.name
+                )
+                .into());
+            };
+            return match crate::mcp::skill_activation::activate(registry, &skill, None).await {
+                // 与 content::load 的 MCP 分支同源：返回内容带来源标注。
+                Ok(content) => Ok(super::annotate_mcp_content(&skill, &content)),
+                Err(error) => Err(format!(
+                    "SkillTool: cannot activate '{}' ({})",
+                    skill.name,
+                    error.reason()
+                )
+                .into()),
+            };
+        }
         let content = tokio::task::spawn_blocking(move || super::content::load(&skill)).await??;
         Ok(content)
     }
