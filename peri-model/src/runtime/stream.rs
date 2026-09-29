@@ -105,7 +105,7 @@ fn response_to_sse_stream(
             async move {
                 loop {
                     if let Some(event) = state.pending.pop_front() {
-                        return Some((Ok(event), state));
+                        return Some((event, state));
                     }
                     if state.done {
                         return None;
@@ -117,20 +117,34 @@ fn response_to_sse_stream(
                     };
                     match chunk {
                         Some(Ok(bytes)) => {
-                            let parsed = match state.parser.push(&bytes) {
-                                Ok(events) => events,
-                                Err(error) => return Some((Err(error), state)),
-                            };
-                            for event in parsed {
-                                match (state.decoder)(event, state.request_id.clone()) {
-                                    Ok(events) => state.pending.extend(events),
-                                    Err(error) => return Some((Err(error), state)),
+                            for event in state.parser.push(&bytes) {
+                                match event.and_then(|event| {
+                                    (state.decoder)(event, state.request_id.clone())
+                                }) {
+                                    Ok(events) => {
+                                        for event in events {
+                                            state.done =
+                                                matches!(event, ModelStreamEvent::Completed(_));
+                                            state.pending.push_back(Ok(event));
+                                            if state.done {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        // 已解码的 delta 先交付，retry 才能识别为中断并保留断点。
+                                        state.pending.push_back(Err(error));
+                                        state.done = true;
+                                    }
+                                }
+                                if state.done {
+                                    break;
                                 }
                             }
-                            if state.parser.is_done() {
+                            if !state.done && state.parser.is_done() {
                                 match (state.completion_decoder)() {
-                                    Ok(events) => state.pending.extend(events),
-                                    Err(error) => return Some((Err(error), state)),
+                                    Ok(events) => state.pending.extend(events.into_iter().map(Ok)),
+                                    Err(error) => state.pending.push_back(Err(error)),
                                 }
                                 state.done = true;
                             }
@@ -159,7 +173,7 @@ fn response_to_sse_stream(
 struct SseReadState {
     body: crate::transport::HttpBody,
     parser: SseParser,
-    pending: VecDeque<ModelStreamEvent>,
+    pending: VecDeque<ModelResult<ModelStreamEvent>>,
     cancellation: CancellationToken,
     decoder: SseDecoder,
     completion_decoder: SseCompletionDecoder,

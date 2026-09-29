@@ -1,6 +1,6 @@
-/// 已完成的 SSE event。`data` 保持 provider 原文，JSON 解码由 adapter 负责。use crate::{ModelError, ModelResult};
 use crate::{ModelError, ModelResult};
 
+/// 已完成的 SSE event。`data` 保持 provider 原文，JSON 解码由 adapter 负责。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SseEvent {
     pub(crate) event: Option<String>,
@@ -27,9 +27,9 @@ impl SseParser {
         }
     }
 
-    pub(crate) fn push(&mut self, bytes: &[u8]) -> ModelResult<Vec<SseEvent>> {
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<ModelResult<SseEvent>> {
         if self.done {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         self.pending_bytes.extend_from_slice(bytes);
         let Some(complete_end) = self
@@ -38,16 +38,23 @@ impl SseParser {
             .rposition(|byte| *byte == b'\n')
             .map(|index| index + 1)
         else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
 
         let remaining = self.pending_bytes.split_off(complete_end);
         let complete = std::mem::replace(&mut self.pending_bytes, remaining);
-        let complete = std::str::from_utf8(&complete)
-            .map_err(|_| ModelError::protocol(crate::ProtocolErrorKind::Provider))?;
-
         let mut events = Vec::new();
-        for raw_line in complete.split_inclusive('\n') {
+        // 按行解码，后续坏字节不能撤销已经收齐的事件；HTTP 分块不改变事件顺序。
+        for raw_line in complete.split_inclusive(|byte| *byte == b'\n') {
+            let raw_line = match std::str::from_utf8(raw_line) {
+                Ok(line) => line,
+                Err(_) => {
+                    events.push(Err(ModelError::protocol(
+                        crate::ProtocolErrorKind::Provider,
+                    )));
+                    break;
+                }
+            };
             let line = raw_line
                 .strip_suffix('\n')
                 .expect("split_inclusive always includes newline")
@@ -55,10 +62,10 @@ impl SseParser {
                 .unwrap_or(raw_line.strip_suffix('\n').expect("newline removed"));
             if line.is_empty() {
                 if self.saw_data_field {
-                    events.push(SseEvent {
+                    events.push(Ok(SseEvent {
                         event: self.event.take(),
                         data: std::mem::take(&mut self.data_lines).join("\n"),
-                    });
+                    }));
                     self.saw_data_field = false;
                 } else {
                     self.event = None;
@@ -77,7 +84,7 @@ impl SseParser {
                 self.event = Some(value.strip_prefix(' ').unwrap_or(value).to_owned());
             }
         }
-        Ok(events)
+        events
     }
 
     pub(crate) fn is_done(&self) -> bool {

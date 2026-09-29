@@ -418,6 +418,81 @@ async fn stream_invalid_utf8_is_provider_protocol_error_without_completed() {
     assert_eq!(transport.bodies().len(), 1);
 }
 
+async fn assert_partial_stream_interrupted(first: &[u8], tail: &[u8]) {
+    // 同一 wire 内容的恢复行为不得取决于 HTTP chunk 是否合并。
+    for chunks in [
+        vec![[first, tail].concat()],
+        vec![first.to_vec(), tail.to_vec()],
+    ] {
+        let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+            status: 200,
+            request_id: None,
+            chunks: chunks.into_iter().map(Ok).collect(),
+        }));
+        let model = OpenAiModel::with_transport(config("test-model"), transport.clone());
+        let events = model
+            .stream(
+                ModelRequest::new(vec![ModelMessage::user_text("go")]),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("stream")
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Ok(ModelStreamEvent::TextDelta { text }),
+                    Ok(ModelStreamEvent::Interrupted { error, attempts: 1, max_attempts: 1 }),
+                ] if text == "partial"
+                    && error.protocol_error().map(|error| error.kind()) == Some(crate::ProtocolErrorKind::Provider)
+            ),
+            "部分正文必须先交付，再以可续跑的中断终止：{events:?}"
+        );
+        assert_eq!(transport.bodies().len(), 1, "已产生正文的请求不得重放");
+    }
+}
+
+/// [回归测试] DONE 只结束 SSE，缺少 finish_reason 的部分回复不得判为正常完成。
+#[tokio::test]
+async fn test_stream_interruption_done_without_finish_reason() {
+    assert_partial_stream_interrupted(
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+        b"data: [DONE]\n\n",
+    )
+    .await;
+}
+
+/// [回归测试] 流内 error 不能当成无 choices 的空帧忽略，即使此前已收到 finish_reason。
+#[tokio::test]
+async fn test_stream_interruption_in_band_error() {
+    assert_partial_stream_interrupted(
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"stop\"}]}\n\n",
+        b"data: {\"error\":{\"message\":\"upstream failed\"}}\n\ndata: [DONE]\n\n",
+    ).await;
+}
+
+/// [回归测试] 同一 HTTP chunk 后续 JSON 解码失败不得丢弃前面已解码的正文。
+#[tokio::test]
+async fn test_stream_interruption_preserves_text_before_malformed_frame() {
+    assert_partial_stream_interrupted(
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        b"data: {invalid\n\n",
+    )
+    .await;
+}
+
+/// [回归测试] 同一 HTTP chunk 后续 UTF-8 损坏不得撤销前面的完整 SSE 事件。
+#[tokio::test]
+async fn test_stream_interruption_preserves_text_before_invalid_utf8() {
+    assert_partial_stream_interrupted(
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        b"data: \xff\n\n",
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn test_stream_done_completes_once_and_ignores_following_frames() {
     let transport = Arc::new(FakeTransport::with_response(FakeResponse {

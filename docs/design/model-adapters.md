@@ -29,12 +29,12 @@ Agent 侧 `AgentModelBridge` 是 `peri-model` 与 ReAct 的边界：它把
 
 - `ModelMessage`、`ContentBlock`、`ToolCall`、`ToolResult` 描述输入输出内容；
 - `ModelRequest` 与 `ModelResponse` 描述一次调用；
-- `ModelStreamEvent` 只包含 TextDelta、ReasoningDelta、ToolCallDelta、Usage、
-  Completed；
+- `ModelStreamEvent` 包含 TextDelta、ReasoningDelta、ToolCallDelta、Usage、
+  Completed、Interrupted；
 - `Model` trait 的唯一 provider 调用入口是 `stream()`；`complete()` 只是聚合同一
   stream，不是第二条非流式 transport；
-- 流必须以且只以一个 `Completed(ModelResponse)` 收尾。EOF、协议错误或取消不能伪造
-  Completed。
+- 成功流以单个 `Completed(ModelResponse)` 收尾；可见增量后的失败以 `Interrupted`
+  交付。EOF、协议错误或取消不能伪造 Completed。
 
 新增公共协议类型必须经 `protocol/mod.rs` 与 `lib.rs` 统一 re-export。Provider 私有
 字段留在 adapter 内，不能泄漏给 Agent 迫使上层按 provider 分支。
@@ -64,9 +64,12 @@ breakpoint 的 adapter 消费该 seam；其他 adapter 只做字节守恒剥离�
 
 重试由 `peri-model/src/runtime/retry.rs` 统一执行：
 
-- 仅配置声明为可重试的传输/HTTP 类错误进入退避；认证、权限和协议错误直接失败；
-- 一旦已经发出用户可见 delta，后续传输失败视为 interrupted，不得重新调用并重复
-  输出；
+- 首个可见增量前，按 `RetryableErrorClasses` 判定传输、HTTP 和协议错误是否进入退避；
+- 已发出可见 delta 后，失败以 `Interrupted` 交付，不重放同一请求；Agent 保存部分正文，
+  经队列有界续跑，预算与取消遵循 ARC-OUTPUT-COMPLETION-001；
+- SSE parser 与 decoder 保持事件顺序：后续坏帧不能丢弃此前完整增量，完成后的尾帧
+  不再消费。OpenAI-compatible 的 `[DONE]` 还须有有效 `finish_reason`，流内 error
+  不得忽略或转为正常完成；
 - retry observer 只接收安全摘要与时序字段，不得携带请求正文、响应正文或凭据；
 - jitter、最大尝试次数与错误分类由 `ModelRuntimeConfig` 提供，Agent 不复制重试器。
 

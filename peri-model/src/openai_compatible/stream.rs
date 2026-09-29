@@ -46,6 +46,9 @@ fn decode_event(state: &Mutex<StreamState>, event: SseEvent) -> ModelResult<Vec<
         return Ok(Vec::new());
     }
     let value: Value = serde_json::from_str(&event.data).map_err(|_| provider_protocol_error())?;
+    if value.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(provider_protocol_error());
+    }
     let mut state = state.lock().map_err(|_| provider_protocol_error())?;
     if state.request_id.is_none() {
         state.request_id = value.get("id").and_then(Value::as_str).map(str::to_owned);
@@ -136,10 +139,15 @@ fn decode_event(state: &Mutex<StreamState>, event: SseEvent) -> ModelResult<Vec<
 
 fn complete_stream(state: &Mutex<StreamState>) -> ModelResult<Vec<ModelStreamEvent>> {
     let state = state.lock().map_err(|_| provider_protocol_error())?;
-    let finish_reason = state.finish_reason.as_deref();
+    // DONE 只代表传输结束；缺失 provider 结束原因时不能把部分响应当作 EndTurn。
+    let finish_reason = state
+        .finish_reason
+        .as_deref()
+        .filter(|reason| !reason.is_empty())
+        .ok_or_else(provider_protocol_error)?;
     Ok(vec![ModelStreamEvent::Completed(completed_response(
         &state,
-        finish_reason,
+        Some(finish_reason),
     )?)])
 }
 
