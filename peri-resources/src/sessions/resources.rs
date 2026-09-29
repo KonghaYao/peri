@@ -122,8 +122,9 @@ impl SessionInitialization for DraftInitialization {
     async fn abandon(self: Arc<Self>) -> SessionResourceResult<()> {
         let id = self.id.clone();
         let data = Arc::clone(&self.data);
+        // 两阶段草稿的撤销判据（`frozen IS NULL`）只在这里生效：已提交的草稿必须被拒。
         let revoke: RevokeEffect<'_> =
-            Box::pin(async move { data.revoke_unpublished_session(&id).await });
+            Box::pin(async move { data.revoke_unpublished_draft(&id).await });
         self.local
             .abandon_initialization(&self.id, &self.lease, revoke)
             .await

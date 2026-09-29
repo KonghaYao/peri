@@ -579,6 +579,10 @@ impl SessionDataPort for RemoteSessionData {
         self.revoke_unpublished(id).await
     }
 
+    async fn revoke_unpublished_draft(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.revoke_unpublished_draft(id).await
+    }
+
     async fn adopt_legacy_session(
         &self,
         id: &ThreadId,

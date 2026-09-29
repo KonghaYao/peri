@@ -71,11 +71,21 @@ pub(crate) trait SessionDataPort: Send + Sync {
         frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()>;
 
-    /// 撤销本次未发布的创建：只针对本次初始化，不修改既有 source 会话。
+    /// 撤销未发布的创建：只针对本次初始化，不修改既有 source 会话。
     ///
-    /// **已提交 frozen 的草稿不是「未发布创建」**：实现必须在删除前以 `frozen IS NULL`
-    /// 为判据拒绝（typed 冲突），否则会把一个已定稿、未发布的合法中间态销毁掉。
+    /// 语义由**入口**决定，不由数据判据决定：本方法是 write-once 完整创建（fork/一次创建）
+    /// 的失败补偿入口——目标创建即带 frozen，撤销就是把它整条删掉（与 source 无关，可由
+    /// source 重生成）。两阶段草稿的撤销走 [`Self::revoke_unpublished_draft`]。
     async fn revoke_unpublished_session(&self, id: &ThreadId) -> SessionResourceResult<()>;
+
+    /// 撤销**两阶段草稿**（`frozen` 尚未提交的未发布创建）：
+    /// [`SessionInitialization`](peri_acp_types::session_resources::SessionInitialization::abandon)
+    /// 驱动的补偿入口。
+    ///
+    /// 与 [`Self::revoke_unpublished_session`] 的差别是唯一的一条判据：`frozen IS NULL`。
+    /// 已提交 frozen 的草稿是「已定稿、未发布」的合法中间态，删除它会销毁内容准入的成果
+    /// （它只该走既有 dirty 恢复），因此必须返回 typed 冲突且一条行都不删。
+    async fn revoke_unpublished_draft(&self, id: &ThreadId) -> SessionResourceResult<()>;
 
     /// 接纳 legacy 会话：binding 与缺失的 frozen 一次成立，已有值不变。
     async fn adopt_legacy_session(

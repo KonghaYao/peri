@@ -567,6 +567,11 @@ pub trait SessionResources: Send + Sync {
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>>;
 
     /// 撤销本次尚未发布的创建（不是通用 rollback，不修改既有 source 会话）。
+    ///
+    /// 语义由**入口**决定：本方法是 write-once 完整创建（fork 等一次性创建）的失败补偿
+    /// ——目标创建即带 frozen、可由 source 重生成，撤销就是把它整条删掉，不叠加「未提交
+    /// frozen」判据。两阶段草稿的撤销走
+    /// [`SessionInitialization::abandon`]（那里的 `frozen IS NULL` 判据约束已定稿草稿）。
     async fn abandon_initialization(
         &self,
         id: &ThreadId,

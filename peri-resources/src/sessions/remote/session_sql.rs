@@ -23,6 +23,7 @@ use turso_serverless::Value;
 
 use super::session_codec::{int_value, optional_text, payload_params};
 use super::sql::StatementSpec;
+use crate::sessions::canonical;
 
 /// 会话行投影的公共前缀：一列一行，顺序即解码下标。
 macro_rules! meta_columns {
@@ -257,6 +258,30 @@ const INSERT_THREAD_DRAFT_SQL: &str =
 /// 一次性提交 frozen（write-once CAS）：只对尚未提交的草稿生效。
 const COMMIT_FROZEN_SQL: &str =
     "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL";
+
+/// 删除整段会话历史的全部条目（与 `canonical::THREAD_CHILD_DELETES` 同一份语句）。
+pub(super) const DELETE_SESSION_MESSAGES_SQL: &str = canonical::DELETE_MESSAGES_BY_THREAD_SQL;
+
+/// 删除会话的不可变绑定行（统一后绑定住在 `session_bindings`，不再是会话行上的扁平列）。
+pub(super) const DELETE_SESSION_BINDINGS_SQL: &str = canonical::DELETE_BINDINGS_BY_THREAD_SQL;
+
+/// 删除会话行（与 `canonical::DELETE_THREAD_ROW_SQL` 同一份语句）。
+pub(super) const DELETE_SESSION_SQL: &str = canonical::DELETE_THREAD_ROW_SQL;
+
+/// write-once 未发布创建的撤销语句集（fork 等失败补偿）：三条删除**不带** frozen 判据。
+///
+/// 与 [`revoke_draft_statements`] 的唯一差别就是判据：那一条按调用方语义分档
+/// （两阶段草稿要求 `frozen IS NULL`），不由本函数推断。
+pub(super) fn revoke_session_statements(id: &str) -> Vec<StatementSpec> {
+    [
+        DELETE_SESSION_MESSAGES_SQL,
+        DELETE_SESSION_BINDINGS_SQL,
+        DELETE_SESSION_SQL,
+    ]
+    .into_iter()
+    .map(|sql| StatementSpec::new(sql, vec![Value::Text(id.to_owned())]))
+    .collect()
+}
 
 /// 未发布创建的撤销：三条删除都带同一判据（`frozen_context IS NULL`），因此同一批里
 /// 「会话行还在不在」与「历史/绑定删没删」不会分叉——已提交 frozen 的会话一条都不删。
@@ -529,4 +554,41 @@ pub(super) fn binding_relative_text(binding: &SessionBinding) -> SessionResource
             detail: "session binding cwd is not valid UTF-8".to_owned(),
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 远端两条撤销入口的判据点：write-once（fork 补偿）不叠加 frozen 判据，
+    /// 两阶段草稿的三条删除全部带 `frozen_context IS NULL`。
+    #[test]
+    fn revocation_statements_split_by_entry_point() {
+        // 两阶段草稿：判据在每一条删除上（同一批内不会出现「历史删了、会话行还在」）。
+        let draft = revoke_draft_statements("s");
+        assert_eq!(draft.len(), 3);
+        for statement in &draft {
+            assert!(
+                statement.sql.contains("frozen_context IS NULL"),
+                "草稿撤销的每条删除都必须带未提交判据: {}",
+                statement.sql
+            );
+            assert!(
+                statement.sql.starts_with("DELETE"),
+                "只允许删除语句: {}",
+                statement.sql
+            );
+        }
+        // write-once：撤销未发布创建（fork 等）不叠加 frozen 判据——目标创建即带 frozen，
+        // 补偿就是把它整条删掉。
+        let write_once = revoke_session_statements("s");
+        assert_eq!(write_once.len(), 3);
+        for statement in &write_once {
+            assert!(
+                !statement.sql.contains("frozen_context"),
+                "write-once 撤销不得叠加 frozen 判据: {}",
+                statement.sql
+            );
+        }
+    }
 }

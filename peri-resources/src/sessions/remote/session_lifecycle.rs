@@ -28,9 +28,11 @@ use turso_serverless::Value;
 use super::mutation::incomplete_reply;
 use super::session_codec as codec;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
-use super::session_sql::{self, binding_relative_text};
+use super::session_sql::{
+    self, binding_relative_text, DELETE_SESSION_BINDINGS_SQL, DELETE_SESSION_MESSAGES_SQL,
+    DELETE_SESSION_SQL,
+};
 use super::sql::{int_at, text_at, StatementSpec};
-use crate::sessions::canonical;
 use crate::sessions::data::ChildResumeRecord;
 
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
@@ -52,15 +54,6 @@ const COUNT_CHILDREN_SQL: &str = "SELECT COUNT(*) FROM threads WHERE parent_thre
 
 /// 接纳依据：保存的绝对 cwd 与父关系。
 const SELECT_ADOPT_FACTS_SQL: &str = "SELECT cwd, parent_thread_id FROM threads WHERE id = ?1";
-
-/// 删除整段会话历史的全部条目（与 `canonical::THREAD_CHILD_DELETES` 同一份语句）。
-const DELETE_SESSION_MESSAGES_SQL: &str = canonical::DELETE_MESSAGES_BY_THREAD_SQL;
-
-/// 删除会话的不可变绑定行（统一后绑定住在 `session_bindings`，不再是会话行上的扁平列）。
-const DELETE_SESSION_BINDINGS_SQL: &str = canonical::DELETE_BINDINGS_BY_THREAD_SQL;
-
-/// 删除会话行（与 `canonical::DELETE_THREAD_ROW_SQL` 同一份语句）。
-const DELETE_SESSION_SQL: &str = canonical::DELETE_THREAD_ROW_SQL;
 
 /// 补 frozen：已有值不变（`IS NULL` 谓词即本机「已有值不变」的同一语义）。
 const ADOPT_FROZEN_SQL: &str = "UPDATE threads SET frozen_context = ?2
@@ -154,33 +147,34 @@ impl RemoteSessionData {
             .map(|_| ())
     }
 
-    /// 撤销本次未发布的创建：有子会话就拒绝，否则删除该会话的历史与会话行。
+    /// 撤销未发布的创建（write-once 完整创建的失败补偿：fork 等）。
+    ///
+    /// 语义由**入口**决定：这里的目标创建即带 frozen（可由 source 重生成），撤销就是把它
+    /// 整条删掉——不叠加「未提交 frozen」判据。两阶段草稿的撤销走
+    /// [`Self::revoke_unpublished_draft`]。
     ///
     /// 与本机同一判据（`parent_thread_id` 计数 > 0 → `InvalidInput`）；会话行本来就不在时
     /// 是幂等删除（本机同一语义：补偿路径把「已经不在了」当成目标已达成）。
-    /// **已提交 frozen 的草稿不是「未发布创建」**：三条删除共用 `frozen_context IS NULL`
-    /// 判据，一条都不删并返回 typed 冲突（那是已定稿、未发布的会话，走 dirty 恢复）。
     /// 远端不留 `creation_intent` 锚点：那本机事实用于判定「同一 identity 不被复活」，
     /// 远端没有第二个副本，也就没有需要锚定的复活路径。
     pub(super) async fn revoke_unpublished(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        let store = self.store().await?;
-        let children = store
-            .fetch_row(&StatementSpec::new(
-                COUNT_CHILDREN_SQL,
-                vec![Value::Text(id.as_str().to_owned())],
-            ))
-            .await?;
-        // 子会话数与后面的写入各取一次连接：借用不跨过去（见上）。
-        drop(store);
-        revocation_gate(children.as_ref().and_then(|values| int_at(values, 0)))?;
+        let effects = session_sql::revoke_session_statements(id.as_str());
+        self.commit_revocation("revoke_unpublished_session", id, effects)
+            .await
+    }
+
+    /// 撤销**两阶段草稿**（`SessionInitialization::abandon` 驱动的补偿）。
+    ///
+    /// 与 [`Self::revoke_unpublished`] 的唯一差别是判据：三条删除共用
+    /// `frozen_context IS NULL`，已提交 frozen 的草稿一条都不删并返回 typed 冲突
+    /// （那是「已定稿、未发布」的合法中间态，走 dirty 恢复）。
+    pub(super) async fn revoke_unpublished_draft(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<()> {
         let effects = session_sql::revoke_draft_statements(id.as_str());
         let counts = self
-            .commit_effects(
-                "revoke_unpublished_session",
-                &[format!("id:{}", id.as_str())],
-                effects,
-                id,
-            )
+            .commit_revocation_counts("revoke_unpublished_draft", id, effects)
             .await?;
         match counts.last() {
             // 重放：原操作已生效（行已经不在）。
@@ -196,6 +190,38 @@ impl RemoteSessionData {
             }
             Some(_) => Ok(()),
         }
+    }
+
+    /// 撤销的公共编排：子会话守卫（计数必须可证明为 0）+ 一次托管删除批。
+    async fn commit_revocation(
+        &self,
+        behavior: &str,
+        id: &ThreadId,
+        effects: Vec<StatementSpec>,
+    ) -> SessionResourceResult<()> {
+        self.commit_revocation_counts(behavior, id, effects)
+            .await
+            .map(|_| ())
+    }
+
+    async fn commit_revocation_counts(
+        &self,
+        behavior: &str,
+        id: &ThreadId,
+        effects: Vec<StatementSpec>,
+    ) -> SessionResourceResult<Vec<u64>> {
+        let store = self.store().await?;
+        let children = store
+            .fetch_row(&StatementSpec::new(
+                COUNT_CHILDREN_SQL,
+                vec![Value::Text(id.as_str().to_owned())],
+            ))
+            .await?;
+        // 子会话数与后面的写入各取一次连接：借用不跨过去（见上）。
+        drop(store);
+        revocation_gate(children.as_ref().and_then(|values| int_at(values, 0)))?;
+        self.commit_effects(behavior, &[format!("id:{}", id.as_str())], effects, id)
+            .await
     }
 
     /// 删除会话树：子树（含根）的历史与会话行在同一批里消失。
