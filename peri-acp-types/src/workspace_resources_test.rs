@@ -197,6 +197,80 @@ fn instruction_parser_rejects_foreign_shapes() {
     }
 }
 
+// ─── meta URI（`peri-meta://workspace/{section_id}`，J6）──────────────────────
+
+#[test]
+fn meta_uri_round_trips_and_keeps_section_id_verbatim() {
+    let uri = meta_uri("01_intro").expect("合法段落 ID 必须可构造");
+    assert_eq!(uri, "peri-meta://workspace/01_intro");
+    let parsed = parse_meta_uri(&uri).expect("必须可解析");
+    assert_eq!(parsed.section_id, "01_intro");
+
+    // 不在 SECTION_IDS 中的 stem 仍是合法 URI（provider 逐字保留 scanner 的列出
+    // 语义；是否消费由宿主按配置与 SECTION_IDS 决定）。
+    let unknown = meta_uri("not_a_section").expect("未知段落 ID 仍可构造");
+    assert_eq!(
+        parse_meta_uri(&unknown).expect("必须可解析").section_id,
+        "not_a_section"
+    );
+
+    // `:` 合法（与 skill 名称同口径：wire 不改写文件 stem）。
+    let colon = meta_uri("team:intro").expect("含 `:` 的段落 ID 必须可构造");
+    assert_eq!(colon, "peri-meta://workspace/team:intro");
+    assert_eq!(
+        parse_meta_uri(&colon).expect("必须可解析").section_id,
+        "team:intro"
+    );
+}
+
+#[test]
+fn meta_uri_rejects_illegal_sections_and_foreign_shapes() {
+    for section in [
+        "../escape",
+        ".",
+        "..",
+        "",
+        "a/b",
+        "a\\b",
+        "a%2e%2e",
+        "a?x",
+        "a#x",
+        "a\0b",
+        "a\u{7}b",
+    ] {
+        assert!(
+            meta_uri(section).is_none(),
+            "非法段落 ID 必须拒绝构造: {section:?}"
+        );
+    }
+
+    for uri in [
+        "",
+        "peri-meta:",
+        "peri-meta://",
+        "peri-meta://workspace",
+        "peri-meta://workspace/",
+        "peri-meta://other/01_intro",
+        "peri-meta://workspace/01_intro/extra",
+        "peri-meta://workspace/%2e%2e",
+        "peri-meta://workspace/..",
+        "peri-meta://workspace/01_intro?x=1",
+        "peri-meta://workspace/01_intro#frag",
+        "peri-instruction://workspace/01_intro",
+        "skill://workspace/01_intro",
+    ] {
+        assert!(parse_meta_uri(uri).is_none(), "必须拒绝: {uri}");
+    }
+}
+
+#[test]
+fn meta_uri_parser_is_scheme_case_insensitive() {
+    let parsed = parse_meta_uri("PERI-META://workspace/01_intro").expect("scheme 大小写不敏感");
+    assert_eq!(parsed.section_id, "01_intro");
+    // authority 不做大小写宽松（`workspace` 是固定字面值）。
+    assert!(parse_meta_uri("PERI-META://WorkSpace/01_intro").is_none());
+}
+
 // ─── digest ──────────────────────────────────────────────────────────────────
 
 #[test]

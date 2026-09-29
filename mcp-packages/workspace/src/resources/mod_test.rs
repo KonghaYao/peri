@@ -5,7 +5,7 @@ use std::path::Path;
 
 use peri_acp_types::workspace_resources::{
     ResourceScope, INSTRUCTION_INDEX_URI, INSTRUCTION_MAIN_URI, META_KEY_DIGEST, META_KEY_PLUGIN,
-    META_KEY_SCOPE,
+    META_KEY_SCOPE, MIME_MARKDOWN,
 };
 
 use super::*;
@@ -250,6 +250,71 @@ fn empty_input_still_lists_builtin_skills_and_instruction_index() {
         !uris.contains(&INSTRUCTION_MAIN_URI),
         "无主文档时不列出 main"
     );
+}
+
+#[test]
+fn meta_sections_are_listed_with_digest_meta_and_readable() {
+    // J6：段落覆盖文档与技能/agent/指令并列进入同一公开批；list 只列实际存在的
+    // `.peri/meta/*.md` stem（含不在 SECTION_IDS 的项），正文不预取。
+    let cwd = tempdir();
+    write(
+        &cwd.path().join(".peri").join("meta").join("01_intro.md"),
+        "override 段落：中文\n".as_bytes(),
+    );
+    write(
+        &cwd.path().join(".peri").join("meta").join("custom.md"),
+        b"unknown stem\n",
+    );
+    let provider = WorkspaceResourceProvider::new(cwd.path(), WorkspaceResourcesInput::new());
+
+    let resources = provider.list_resources();
+    let meta_uris: Vec<&str> = resources
+        .iter()
+        .map(|resource| resource.uri.as_str())
+        .filter(|uri| uri.starts_with("peri-meta://"))
+        .collect();
+    assert_eq!(
+        meta_uris,
+        vec![
+            "peri-meta://workspace/01_intro",
+            "peri-meta://workspace/custom"
+        ]
+    );
+
+    // 「list 每项可读」对段落覆盖同样成立。
+    for resource in &resources {
+        provider
+            .read(&resource.uri)
+            .unwrap_or_else(|error| panic!("list 项必须可读：{}（{error}）", resource.uri));
+    }
+
+    let entry = resources
+        .iter()
+        .find(|resource| resource.uri == "peri-meta://workspace/01_intro")
+        .expect("段落覆盖条目");
+    assert_eq!(entry.mime_type.as_deref(), Some(MIME_MARKDOWN));
+    assert_eq!(entry.name, "01_intro");
+    let meta = entry.meta.as_ref().expect("meta 必填").0.clone();
+    assert_eq!(
+        meta.get(META_KEY_SCOPE).and_then(|value| value.as_str()),
+        Some("project"),
+        "workspace 绑定资源（与 peri-instruction 同口径）"
+    );
+    assert_eq!(
+        meta.get(META_KEY_DIGEST).and_then(|value| value.as_str()),
+        Some(
+            peri_acp_types::workspace_resources::digest_bytes("override 段落：中文\n".as_bytes())
+                .as_str()
+        )
+    );
+
+    // 目录不存在（未配置覆盖的工作区）：公开批不含 peri-meta，且不是错误。
+    let empty = tempdir();
+    let provider = WorkspaceResourceProvider::new(empty.path(), WorkspaceResourcesInput::new());
+    assert!(provider
+        .list_resources()
+        .iter()
+        .all(|resource| !resource.uri.starts_with("peri-meta://")));
 }
 
 #[test]

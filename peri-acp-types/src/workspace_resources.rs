@@ -6,8 +6,11 @@
 //! provider 实现在 `peri-mcp-workspace`（`resources` 模块）；宿主消费面
 //! （registry 投影 / activation / 投递策略）属 W2+，不在本模块冻结范围内。
 //!
-//! - `peri-meta://`（J6）只在此留位：scheme 与 authority 常量冻结，wire 形状与
-//!   provider 归 W3，宿主 `frozen` 消费面不得据本模块推断其已完成。
+//! - `peri-meta://workspace/{section_id}`（J6，W3 冻结）：段落覆盖文档的资源
+//!   形状在此冻结（构造 / 解析见 [`meta_uri`] / [`parse_meta_uri`]）；扫描语义
+//!   （一级 `{cwd}/.peri/meta/*.md`、stem = section_id、读取失败跳过）与 provider
+//!   在 `peri-mcp-workspace`（`resources::meta`）。宿主 `frozen` 消费面仍归后续
+//!   消费波，不得据本模块推断其已完成。
 //! - 受限 Peri profile（X5 裁决）：首期不声明 `directoryRead`、不消费
 //!   `depends_on` / `tools` / `context_budget` 编排字段。provider 对 frontmatter
 //!   **逐字透传**（不改写、不解释编排字段）；带依赖声明的技能是否可激活由宿主
@@ -25,7 +28,10 @@
 //! - `agent://{scope}/{name}/agent.md`（`{name}` = agent 定义标识，即文件
 //!   stem / 目录名，不是 frontmatter display name；agents 不发明
 //!   `agents/list|get`，只走标准 resources）；
-//! - `peri-instruction://workspace/{main|local|index}`（Peri 私有 profile）。
+//! - `peri-instruction://workspace/{main|local|index}`（Peri 私有 profile）；
+//! - `peri-meta://workspace/{section_id}`（`{section_id}` = `.peri/meta/{id}.md` 的
+//!   文件 stem **逐字**值；不要求 ∈ `SECTION_IDS`——是否消费由宿主按配置决定，
+//!   provider 只列出扫描到的 stem）。
 //!
 //! 编码口径：本模块**不实现 percent-decoding**；合法公开 URI 不含 `%`、`?`、
 //! `#`、`\`、NUL 与控制字符（构造与解析都拒绝），因此「编码穿越 / 二次解码」
@@ -81,6 +87,10 @@ pub const MIME_OCTET_STREAM: &str = "application/octet-stream";
 //
 // 只占用 `io.peri/` 前缀；不得挤占 `io.mcpp/` 未登记项。值都是公开的
 // 来源/完整性标识，不含主机绝对路径。
+//
+// `peri-instruction://` 与 `peri-meta://` 的 authority 段是 `workspace`（不是
+// scope）：这两类 workspace 绑定资源的 `io.peri/scope` 取 `project`（provider
+// 侧 [`crate::workspace_resources::ResourceScope::Project`] 的投影口径）。
 
 /// 资源来源 scope（值为 [`ResourceScope`] 的 `as_str()`）。
 pub const META_KEY_SCOPE: &str = "io.peri/scope";
@@ -204,6 +214,13 @@ pub struct AgentUri {
     pub name: String,
 }
 
+/// MetaHarness 段落覆盖文档选择器（`peri-meta://workspace/{section_id}`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetaUri {
+    /// 段落 ID（= 文档文件 stem 的逐字值；无需 ∈ `SECTION_IDS`）。
+    pub section_id: String,
+}
+
 /// 项目指令文档选择器。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstructionDocument {
@@ -284,6 +301,17 @@ pub fn agent_uri(scope: ResourceScope, plugin_name: Option<&str>, name: &str) ->
     uri.push('/');
     uri.push_str(AGENT_ENTRY_FILE);
     Some(uri)
+}
+
+/// 构造段落覆盖文档 URI（`peri-meta://workspace/{section_id}`）；`section_id`
+/// 不满足 URI 段约束时返回 `None`（provider 侧即「该 stem 不公开」）。
+pub fn meta_uri(section_id: &str) -> Option<String> {
+    if !is_valid_uri_segment(section_id) {
+        return None;
+    }
+    Some(format!(
+        "{META_RESOURCE_SCHEME}://{WORKSPACE_AUTHORITY}/{section_id}"
+    ))
 }
 
 // ─── URI 解析 ─────────────────────────────────────────────────────────────────
@@ -383,6 +411,21 @@ pub fn parse_instruction_uri(uri: &str) -> Option<InstructionDocument> {
         "index" => Some(InstructionDocument::Index),
         _ => None,
     }
+}
+
+/// 解析段落覆盖文档 URI；authority 必须是 [`WORKSPACE_AUTHORITY`]，path 恰为
+/// 一段合法段落 ID；语法非法返回 `None`。
+///
+/// 返回的 URI **不保证文档存在**，也不要求 `section_id ∈ SECTION_IDS`：列出与
+/// 读取的授权面由 provider 的扫描结果决定（provider 只服务扫描得到的 stem）。
+pub fn parse_meta_uri(uri: &str) -> Option<MetaUri> {
+    let (authority, path) = split_authority_path(uri, META_RESOURCE_SCHEME)?;
+    if authority != WORKSPACE_AUTHORITY || path.contains('/') || !is_valid_uri_segment(path) {
+        return None;
+    }
+    Some(MetaUri {
+        section_id: path.to_string(),
+    })
 }
 
 // ─── wire 形状（skills/list、skills/get）─────────────────────────────────────

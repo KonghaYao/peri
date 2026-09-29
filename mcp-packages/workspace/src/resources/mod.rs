@@ -1,8 +1,9 @@
 //! Workspace 资源 provider（W1：资源提供与 wire，不启用宿主投递）。
 //!
-//! 职责：把宿主输入的资源根（本地三根 / 插件根 / builtin 关闭位）扫描为
-//! 只读资源面，经 `resources/list|read|templates/list` 与 MCPP 的
-//! `skills/list|get` custom requests 暴露。
+//! 职责：把宿主输入的资源根（本地三根 / 插件根 / builtin 关闭位）与工作区
+//! 绑定文档（项目指令、`.peri/meta` 段落覆盖）扫描为只读资源面，经
+//! `resources/list|read|templates/list` 与 MCPP 的 `skills/list|get` custom
+//! requests 暴露。
 //!
 //! 边界（与 plan §5.1/§8.1 W1 一致）：
 //! - server 侧只做已授权文件/嵌入资产的解析、manifest 与只读提供；不持模型
@@ -13,6 +14,10 @@
 //!   「技能不存在且已 ready」；
 //! - 每次请求实时扫描（W1 无跨请求缓存）：`skills/list` 的 manifest 与
 //!   `resources/read` 各自自洽；revision/TTL 缓存属 W2+；
+//! - `.peri/meta` 段落覆盖（J6，W3）随 provider 装配在 `list_resources` / `read`
+//!   内提供，不需要新的输入字段；「list 空」与「read 错误」可区分（目录缺失 /
+//!   不可读 → 空批而不是错误；read 未知 stem → `NotFound`），扫描语义见
+//!   `resources::meta`；
 //! - 错误分类：URI 非法 → `InvalidUri`；合法 URI 但目标不存在/未公开 →
 //!   `NotFound`；根外/越界 → `Denied`；超预算 → `Budget`；其他 IO → `Io`。
 //!   handler 侧的 MCP 错误码映射见 `workspace.rs`（skills/get 的未知 URI
@@ -21,10 +26,10 @@
 use std::path::PathBuf;
 
 use peri_acp_types::workspace_resources::{
-    parse_agent_uri, parse_instruction_uri, parse_skill_uri, skill_uri, ResourceScope,
-    SkillGetResponse, SkillsListResponse, INSTRUCTION_INDEX_URI, INSTRUCTION_LOCAL_URI,
-    INSTRUCTION_MAIN_URI, META_KEY_DIGEST, META_KEY_PLUGIN, META_KEY_SCOPE, MIME_JSON,
-    MIME_MARKDOWN, SKILL_ENTRY_FILE,
+    meta_uri, parse_agent_uri, parse_instruction_uri, parse_meta_uri, parse_skill_uri, skill_uri,
+    ResourceScope, SkillGetResponse, SkillsListResponse, INSTRUCTION_INDEX_URI,
+    INSTRUCTION_LOCAL_URI, INSTRUCTION_MAIN_URI, META_KEY_DIGEST, META_KEY_PLUGIN, META_KEY_SCOPE,
+    MIME_JSON, MIME_MARKDOWN, SKILL_ENTRY_FILE,
 };
 use rmcp::model::{MetaObject, Resource, ResourceTemplate};
 use thiserror::Error;
@@ -33,6 +38,7 @@ pub(crate) mod agents;
 pub(crate) mod builtin;
 pub(crate) mod frontmatter;
 pub(crate) mod instructions;
+pub(crate) mod meta;
 pub(crate) mod path;
 pub(crate) mod scan;
 pub(crate) mod skills;
@@ -271,6 +277,29 @@ impl WorkspaceResourceProvider {
         }
         resources.push(Resource::new(INSTRUCTION_INDEX_URI, "index").with_mime_type(MIME_JSON));
 
+        // 段落覆盖文档（J6）：list 只列 `.peri/meta/*.md` 实际存在的 stem（含不在
+        // SECTION_IDS 的项）；正文不在此预取，宿主仅对启用 section 走 read。
+        for section in meta::scan_sections(&self.cwd) {
+            let Some(uri) = meta_uri(&section.section_id) else {
+                // 扫描期已按 URI 段约束过滤；此处保持诚实映射。
+                continue;
+            };
+            resources.push(
+                Resource::new(uri, section.section_id.clone())
+                    .with_description(format!(
+                        "{}/{}.md",
+                        meta::META_DIR_RELATIVE,
+                        section.section_id
+                    ))
+                    .with_mime_type(MIME_MARKDOWN)
+                    .with_meta(resource_meta(
+                        ResourceScope::Project,
+                        None,
+                        Some(&section.digest),
+                    )),
+            );
+        }
+
         resources
     }
 
@@ -339,6 +368,17 @@ impl WorkspaceResourceProvider {
             return Ok(ResourcePayload {
                 uri: uri.to_string(),
                 mime: read.mime.to_string(),
+                digest: read.digest.clone(),
+                meta: resource_meta(ResourceScope::Project, None, Some(&read.digest)),
+                body: ResourceBody::Text(read.text),
+            });
+        }
+        if let Some(section) = parse_meta_uri(uri) {
+            // 只服务扫描得到的 stem（不做任意路径 join）；未知 / 不可得 → NotFound。
+            let read = meta::read(&self.cwd, &section.section_id)?;
+            return Ok(ResourcePayload {
+                uri: uri.to_string(),
+                mime: MIME_MARKDOWN.to_string(),
                 digest: read.digest.clone(),
                 meta: resource_meta(ResourceScope::Project, None, Some(&read.digest)),
                 body: ResourceBody::Text(read.text),

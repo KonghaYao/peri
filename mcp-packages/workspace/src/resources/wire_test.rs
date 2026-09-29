@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use peri_acp_types::workspace_resources::{
-    ResourceScope, SkillsListResponse, META_KEY_DIGEST, META_KEY_SCOPE, SKILL_ENTRY_FILE,
+    digest_bytes, ResourceScope, SkillsListResponse, META_KEY_DIGEST, META_KEY_SCOPE,
+    SKILL_ENTRY_FILE,
 };
 use rmcp::{
     model::{
@@ -311,6 +312,114 @@ async fn wire_blob_and_meta_projection() {
     }
 
     pair.shutdown().await;
+}
+
+// ─── 段落覆盖（J6）的 wire 证据 ───────────────────────────────────────────────
+
+/// `.peri/meta/*.md` 经真实 handler 的 `resources/list` + `resources/read`
+/// 暴露：list 列实际存在的 stem（含未知 section）、read 字节精确、未知 section
+/// 在 legacy 协商下保留 `-32002`。
+#[tokio::test]
+async fn wire_meta_sections_list_and_read_verbatim() {
+    let cwd = tempdir();
+    let skills = tempdir();
+    let verbatim = "override 段落：中文\n保留尾部空白  \n";
+    let meta_dir = cwd.path().join(".peri").join("meta");
+    std::fs::create_dir_all(&meta_dir).expect("建覆盖目录");
+    std::fs::write(meta_dir.join("01_intro.md"), verbatim).expect("写覆盖文档");
+    std::fs::write(meta_dir.join("custom.md"), "未知 section\n").expect("写覆盖文档");
+
+    let pair = connect(server_with_resources(cwd.path(), skills.path())).await;
+    let resources = pair
+        .peer()
+        .list_resources(None)
+        .await
+        .expect("resources/list");
+    let uris: Vec<&str> = resources
+        .resources
+        .iter()
+        .map(|resource| resource.uri.as_str())
+        .collect();
+    assert!(
+        uris.contains(&"peri-meta://workspace/01_intro"),
+        "启用 section 的文档可发现；实际：{uris:?}"
+    );
+    assert!(
+        uris.contains(&"peri-meta://workspace/custom"),
+        "不在 SECTION_IDS 的 stem 仍列出（宿主按配置过滤）"
+    );
+
+    let result = pair
+        .peer()
+        .read_resource(ReadResourceRequestParams::new(
+            "peri-meta://workspace/01_intro",
+        ))
+        .await
+        .expect("段落覆盖可读");
+    match single_contents(result) {
+        ResourceContents::TextResourceContents {
+            text,
+            mime_type,
+            meta,
+            ..
+        } => {
+            assert_eq!(
+                text, verbatim,
+                "read 逐字返回（不 trim、不解析 frontmatter）"
+            );
+            assert_eq!(mime_type.as_deref(), Some("text/markdown"));
+            let meta = meta.expect("_meta 必填").0;
+            assert_eq!(
+                meta.get(META_KEY_SCOPE).and_then(|value| value.as_str()),
+                Some("project")
+            );
+            assert_eq!(
+                meta.get(META_KEY_DIGEST).and_then(|value| value.as_str()),
+                Some(digest_bytes(verbatim.as_bytes()).as_str())
+            );
+        }
+        other => panic!("段落覆盖必须是文本内容：{other:?}"),
+    }
+
+    // 未知 section：新协议下 SDK 按 SEP-2164 升级为 -32602（message 可区分）。
+    let failure = pair
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("peri-meta://workspace/nope"))
+        .await
+        .expect_err("未知 section 必须报错");
+    let error = mcp_error(failure);
+    assert_eq!(error.code.0, ErrorCode::INVALID_PARAMS.0);
+    assert_eq!(error.message.as_ref(), "resource not found");
+
+    pair.shutdown().await;
+
+    // legacy 协商（2025-11-25）：同一缺失保留 -32002。
+    let cwd = tempdir();
+    let skills = tempdir();
+    let meta_dir = cwd.path().join(".peri").join("meta");
+    std::fs::create_dir_all(&meta_dir).expect("建覆盖目录");
+    std::fs::write(meta_dir.join("01_intro.md"), "intro\n").expect("写覆盖文档");
+    let legacy = connect_legacy(server_with_resources(cwd.path(), skills.path())).await;
+    let failure = legacy
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("peri-meta://workspace/nope"))
+        .await
+        .expect_err("未知 section 必须报错");
+    assert_eq!(
+        mcp_error(failure).code.0,
+        ErrorCode::RESOURCE_NOT_FOUND.0,
+        "legacy 下未知 section 保持 -32002"
+    );
+    // 穿越面在 URI 语法层拒绝（handler 直接给 -32602）。
+    let failure = legacy
+        .peer()
+        .read_resource(ReadResourceRequestParams::new(
+            "peri-meta://workspace/../../etc/passwd",
+        ))
+        .await
+        .expect_err("穿越 URI 必须报错");
+    assert_eq!(mcp_error(failure).code.0, ErrorCode::INVALID_PARAMS.0);
+    legacy.shutdown().await;
 }
 
 // ─── skills/list|get 与错误码 ────────────────────────────────────────────────
