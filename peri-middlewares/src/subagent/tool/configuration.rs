@@ -1,7 +1,8 @@
 //! Public builders and parent-host fallback access for the single tool owner.
 use super::SubagentChainAssemblerImpl;
-use crate::{agent_define::AgentOverrides, hooks::types::RegisteredHook, mcp::McpAgentRegistry};
+use crate::{hooks::types::RegisteredHook, mcp::McpAgentRegistry};
 use parking_lot::RwLock;
+use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::identity::AgentId;
 use peri_agent::session::subagent::SubagentHost;
 use peri_agent::{
@@ -33,16 +34,10 @@ impl super::SubAgentTool {
             parent_agent_id: Arc::new(RwLock::new(None)),
             parent_session: Arc::new(RwLock::new(None)),
             host: SubagentHost::default(),
-            plugin_agent_dirs: Arc::new(Vec::new()),
             mcp_agent_registry: None,
             broker: None,
             chain_assembler: Arc::new(SubagentChainAssemblerImpl::new()),
         }
-    }
-
-    pub(crate) fn with_plugin_agent_dirs(mut self, dirs: Arc<Vec<std::path::PathBuf>>) -> Self {
-        self.plugin_agent_dirs = dirs;
-        self
     }
 
     pub(crate) fn with_mcp_agents(

@@ -74,7 +74,13 @@ pub(super) fn add_mcp(
             // 本 turn 的工具投影，不影响 readiness（pool 级事实）。
             .with_builtin_closures(crate::mcp::builtin::closed_instances(
                 &ctx.meta_harness_disabled,
-            ));
+            ))
+            // F11：Agent 工具面关闭位（链槽关闭键常量，**同一份**
+            // `meta_harness_disabled` 派生；DiscoverMCP 的 agent 投影据此不列本地来源）。
+            .with_sub_agent_face_closed(
+                ctx.meta_harness_disabled
+                    .contains(crate::assembly::SUB_AGENT_FACE_CLOSED_KEY),
+            );
         // 决策 B：装配后立即触发幂等发现（覆盖「装配时连接已
         // 完成」的场景——已连接 server 即刻 spawn 发现，命令
         // 面/元数据面无需等首轮 before_agent；Started 去重 /

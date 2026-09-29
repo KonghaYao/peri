@@ -30,7 +30,8 @@ use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::PluginManagerPort;
 use peri_acp_types::ports::{
-    LspPoolPort, McpPoolPort, McpTaskOwnerPort, SkillsPort, ToolSearchPort, WorkflowMiddlewarePort,
+    AgentCatalogPort, LspPoolPort, McpPoolPort, McpTaskOwnerPort, ToolSearchPort,
+    WorkflowMiddlewarePort,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -41,6 +42,7 @@ pub(crate) mod compact_config;
 mod connection;
 mod lifecycle;
 mod workspace;
+mod workspace_resources;
 pub use lifecycle::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport};
 mod continuation;
 pub mod controller_ports;
@@ -211,7 +213,6 @@ pub struct AcpServerConfig {
     /// `plugin_route_entries` 预转；会话创建时 register_all，注册顺序 =
     /// 内置 → 本地 skills（C1）→ 插件（本字段）→ 动态注入（发现管线异步））。
     pub plugin_command_entries: Vec<RouteEntry>,
-    pub plugin_agent_dirs: Vec<std::path::PathBuf>,
     pub plugin_hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
     /// 仅插件 hooks（不含 settings hooks；`plugin/list` 命令面数据源——
     /// TUI hooks 面板经 ACP 拿数据，M-TUI 收口）。
@@ -233,7 +234,7 @@ pub struct AcpServerConfig {
     pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// Skills 扫描端口（available-commands / agents 扫描经此访问）。
-    pub skills: Arc<dyn SkillsPort>,
+    pub agent_catalog: Arc<dyn AgentCatalogPort>,
     /// 插件管理端口（plugin/* 命令面经此访问）。
     pub plugin_manager: Arc<dyn PluginManagerPort>,
     /// Settings hooks 加载端口（hook 组装配经此访问）。

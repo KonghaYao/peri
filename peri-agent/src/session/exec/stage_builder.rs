@@ -92,6 +92,10 @@ pub struct StageBuildInput {
     pub permission_mode: Arc<peri_acp_types::permission::SharedPermissionMode>,
     /// 插件技能根目录
     pub plugin_skill_roots: Vec<SkillRoot>,
+    /// Agent 候选目录端口（W5）：链装配点用它绑定会话级 MCP Agent registry
+    /// （`resolve_ports`），prompt 渲染经它取 `{{available_agents}}` 候选；
+    /// 唯一来源，不回落磁盘。
+    pub agent_catalog: Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
     /// 已加载插件
     pub plugin_loaded: Vec<LoadedPlugin>,
     /// Hook 组（每组一个 HookMiddleware 实例）
@@ -135,8 +139,6 @@ pub struct StageBuildInput {
     pub provider_name: String,
     /// 上下文窗口（已含 context_1m 调整；token 监控）
     pub context_window: u32,
-    /// CLAUDE.md 排除项
-    pub claude_md_excludes: Vec<String>,
     /// 会话语言（frozen，sub prompt 渲染用）
     pub language: Option<String>,
     /// Compact 配置（ACP 装配点按 `load_compact_config` 语义预填，含 env overrides）

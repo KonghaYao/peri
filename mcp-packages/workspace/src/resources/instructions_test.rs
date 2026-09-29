@@ -25,20 +25,20 @@ fn main_candidate_uses_first_existing_file() {
     let dir = tempdir();
     write(&dir.path().join("CLAUDE.md"), "claude content");
     // AGENTS.md 不存在：选 CLAUDE.md。
-    let bundle = scan(dir.path(), &budget());
+    let bundle = scan(dir.path(), &budget(), &[]);
     assert_eq!(bundle.main.as_ref().expect("main").text, "claude content");
     assert_eq!(bundle.index.selected.as_deref(), Some("CLAUDE.md"));
 
     // AGENTS.md 存在时优先。
     write(&dir.path().join("AGENTS.md"), "agents content");
-    let bundle = scan(dir.path(), &budget());
+    let bundle = scan(dir.path(), &budget(), &[]);
     assert_eq!(bundle.main.as_ref().expect("main").text, "agents content");
     assert_eq!(bundle.index.selected.as_deref(), Some("AGENTS.md"));
 
     // 前两者都不在时选 .claude/AGENTS.md。
     let dir2 = tempdir();
     write(&dir2.path().join(".claude").join("AGENTS.md"), "nested");
-    let bundle = scan(dir2.path(), &budget());
+    let bundle = scan(dir2.path(), &budget(), &[]);
     assert_eq!(bundle.main.as_ref().expect("main").text, "nested");
     assert_eq!(bundle.index.selected.as_deref(), Some(".claude/AGENTS.md"));
 }
@@ -48,7 +48,7 @@ fn first_existing_empty_document_short_circuits_without_fallback() {
     let dir = tempdir();
     write(&dir.path().join("AGENTS.md"), "   \n");
     write(&dir.path().join("CLAUDE.md"), "later candidate");
-    let bundle = scan(dir.path(), &budget());
+    let bundle = scan(dir.path(), &budget(), &[]);
     assert!(bundle.main.is_none(), "首个存在但为空 → main 不存在");
     assert_eq!(
         bundle.index.selected.as_deref(),
@@ -62,7 +62,7 @@ fn local_document_is_independent_resource() {
     let dir = tempdir();
     write(&dir.path().join("CLAUDE.md"), "main");
     write(&dir.path().join("CLAUDE.local.md"), "local overlay");
-    let bundle = scan(dir.path(), &budget());
+    let bundle = scan(dir.path(), &budget(), &[]);
     assert_eq!(bundle.main.as_ref().expect("main").text, "main");
     assert_eq!(bundle.local.as_ref().expect("local").text, "local overlay");
     assert_eq!(
@@ -74,7 +74,7 @@ fn local_document_is_independent_resource() {
     let dir2 = tempdir();
     write(&dir2.path().join("CLAUDE.md"), "main");
     write(&dir2.path().join("CLAUDE.local.md"), "\n");
-    let bundle = scan(dir2.path(), &budget());
+    let bundle = scan(dir2.path(), &budget(), &[]);
     assert!(bundle.local.is_none());
 }
 
@@ -90,7 +90,7 @@ fn imports_expand_for_claude_docs_with_depth_and_cycle_guard() {
         "A\n<!-- @import b.md -->\n",
     );
     write(&dir.path().join("docs").join("b.md"), "B\n");
-    let bundle = scan(dir.path(), &budget());
+    let bundle = scan(dir.path(), &budget(), &[]);
     let main = bundle.main.as_ref().expect("main");
     assert_eq!(
         main.text, "top\nA\nB\n\n\nbottom\n",
@@ -111,7 +111,7 @@ fn imports_expand_for_claude_docs_with_depth_and_cycle_guard() {
         &dir2.path().join("loop.md"),
         "L\n<!-- @import CLAUDE.md -->\n",
     );
-    let bundle = scan(dir2.path(), &budget());
+    let bundle = scan(dir2.path(), &budget(), &[]);
     let text = &bundle.main.as_ref().expect("main").text;
     assert_eq!(
         text, "L\n<!-- @import CLAUDE.md -->\n\n",
@@ -127,7 +127,7 @@ fn import_depth_is_bounded_to_three_levels() {
     write(&dir.path().join("d2.md"), "2<!-- @import d3.md -->\n");
     write(&dir.path().join("d3.md"), "3<!-- @import d4.md -->\n");
     write(&dir.path().join("d4.md"), "4\n");
-    let bundle = scan(dir.path(), &budget());
+    let bundle = scan(dir.path(), &budget(), &[]);
     let text = bundle.main.as_ref().expect("main").text.clone();
     assert!(text.contains('3'), "第 3 层展开：{text}");
     assert!(
@@ -141,7 +141,7 @@ fn agents_md_does_not_resolve_imports() {
     let dir = tempdir();
     write(&dir.path().join("AGENTS.md"), "<!-- @import other.md -->\n");
     write(&dir.path().join("other.md"), "other");
-    let bundle = scan(dir.path(), &budget());
+    let bundle = scan(dir.path(), &budget(), &[]);
     assert_eq!(
         bundle.main.as_ref().expect("main").text,
         "<!-- @import other.md -->\n",
@@ -160,7 +160,7 @@ fn out_of_workspace_import_keeps_placeholder() {
         &dir.path().join("CLAUDE.md"),
         &format!("<!-- @import {}/secret.md -->\n", outside_path.display()),
     );
-    let bundle = scan(dir.path(), &budget());
+    let bundle = scan(dir.path(), &budget(), &[]);
     let text = bundle.main.as_ref().expect("main").text.clone();
     assert!(
         text.contains("<!-- @import "),
@@ -177,7 +177,7 @@ fn missing_import_keeps_placeholder() {
         &dir.path().join("CLAUDE.md"),
         "<!-- @import missing.md -->\n",
     );
-    let bundle = scan(dir.path(), &budget());
+    let bundle = scan(dir.path(), &budget(), &[]);
     assert_eq!(
         bundle.main.as_ref().expect("main").text,
         "<!-- @import missing.md -->\n"
@@ -192,10 +192,10 @@ fn oversized_main_is_treated_as_absent() {
         max_file_bytes: 16,
         ..ResourceBudget::default()
     };
-    let bundle = scan(dir.path(), &tiny);
+    let bundle = scan(dir.path(), &tiny, &[]);
     assert!(bundle.main.is_none());
     assert_eq!(
-        read(dir.path(), &tiny, InstructionDocument::Main).unwrap_err(),
+        read(dir.path(), &tiny, InstructionDocument::Main, &[]).unwrap_err(),
         ResourceError::NotFound,
         "超预算文档对读取面等同找不到（list 与 read 一致）"
     );
@@ -210,7 +210,7 @@ fn index_manifest_reports_documents_and_imports() {
     );
     write(&dir.path().join("part.md"), "part\n");
     write(&dir.path().join("CLAUDE.local.md"), "local\n");
-    let bundle = scan(dir.path(), &budget());
+    let bundle = scan(dir.path(), &budget(), &[]);
     let index = &bundle.index;
     assert_eq!(index.scope, "workspace");
     assert_eq!(index.candidates, MAIN_CANDIDATES.to_vec());
@@ -240,29 +240,29 @@ fn reads_project_expected_mime_and_digest() {
     write(&dir.path().join("CLAUDE.md"), "main\n");
     write(&dir.path().join("CLAUDE.local.md"), "local\n");
 
-    let main = read(dir.path(), &budget(), InstructionDocument::Main).expect("main");
+    let main = read(dir.path(), &budget(), InstructionDocument::Main, &[]).expect("main");
     assert_eq!(main.mime, MIME_MARKDOWN);
     assert_eq!(main.digest, digest_bytes(b"main\n"));
-    let local = read(dir.path(), &budget(), InstructionDocument::Local).expect("local");
+    let local = read(dir.path(), &budget(), InstructionDocument::Local, &[]).expect("local");
     assert_eq!(local.mime, MIME_TEXT);
-    let index = read(dir.path(), &budget(), InstructionDocument::Index).expect("index");
+    let index = read(dir.path(), &budget(), InstructionDocument::Index, &[]).expect("index");
     assert_eq!(index.mime, MIME_JSON);
     let parsed: serde_json::Value = serde_json::from_str(&index.text).expect("index 是 JSON");
     assert_eq!(parsed["selected"], "CLAUDE.md");
 
     assert_eq!(
-        read(dir.path(), &budget(), InstructionDocument::Local).map(|r| r.text),
+        read(dir.path(), &budget(), InstructionDocument::Local, &[]).map(|r| r.text),
         Ok("local\n".to_string())
     );
 
     // 无 main 时 read(main) = NotFound。
     let empty = tempdir();
     assert_eq!(
-        read(empty.path(), &budget(), InstructionDocument::Main).unwrap_err(),
+        read(empty.path(), &budget(), InstructionDocument::Main, &[]).unwrap_err(),
         ResourceError::NotFound
     );
     // index 恒可读（空工作区也是合法 manifest）。
-    assert!(read(empty.path(), &budget(), InstructionDocument::Index).is_ok());
+    assert!(read(empty.path(), &budget(), InstructionDocument::Index, &[]).is_ok());
 }
 
 #[test]
@@ -282,14 +282,47 @@ fn claude_symlink_target_is_read() {
             dir.path().join("CLAUDE.md"),
         )
         .expect("建 symlink");
-        let bundle = scan(dir.path(), &budget());
+        let bundle = scan(dir.path(), &budget(), &[]);
         assert_eq!(bundle.main.as_ref().expect("main").text, "shared body\n");
     }
     // 非 Unix 平台的对照：直接写文件（symlink 语义不适用）。
     #[cfg(not(unix))]
     {
         write(&dir.path().join("CLAUDE.md"), "shared body\n");
-        let bundle = scan(dir.path(), &budget());
+        let bundle = scan(dir.path(), &budget(), &[]);
         assert_eq!(bundle.main.as_ref().expect("main").text, "shared body\n");
     }
+}
+
+#[test]
+fn instruction_excludes_skip_the_matching_main_candidate() {
+    // W5：excludes 语义随宿主设置迁入 provider 输入（候选绝对路径 glob 匹配，
+    // 与迁移前 `find_file` 同口径）：命中即跳过该候选，并回退到下一个存在的候选。
+    let dir = tempdir();
+    std::fs::write(dir.path().join("AGENTS.md"), "agents body").unwrap();
+    std::fs::write(dir.path().join("CLAUDE.md"), "claude body").unwrap();
+    let budget = budget();
+    let excludes = vec![format!("{}/AGENTS.md", dir.path().display())];
+
+    let bundle = scan(dir.path(), &budget, &excludes);
+    let main = bundle.main.expect("回退到 CLAUDE.md");
+    assert_eq!(main.source_label, "CLAUDE.md");
+    assert_eq!(main.text, "claude body");
+
+    // 无 excludes 时仍取首个候选（优先级不因本用例改变）。
+    let bundle = scan(dir.path(), &budget, &[]);
+    assert_eq!(bundle.main.expect("AGENTS.md").source_label, "AGENTS.md");
+}
+
+#[test]
+fn unknown_frontmatter_fields_are_ignored_and_definition_still_loads() {
+    // W5 验收：未知字段默认忽略（不因未知字段拒载、不改写投影）。
+    let dir = tempdir();
+    std::fs::write(
+        dir.path().join("AGENTS.md"),
+        "---\nunknownField: kept-as-is\n---\nbody\n",
+    )
+    .unwrap();
+    let bundle = scan(dir.path(), &budget(), &[]);
+    assert!(bundle.main.is_some(), "未知 frontmatter 字段不得导致拒载");
 }

@@ -659,3 +659,118 @@ fn middleware_tool_names_match_static_tool_sets() {
         "MIDDLEWARE_TOOL_NAMES（去掉已迁移裸名后）必须与各 middleware 静态工具名并集一致"
     );
 }
+
+// ─── F11/W5：Mcp 槽位把链槽关闭键派生给 DiscoverMCP 的 agent 面（装配级差分） ──
+
+/// 经生产装配路径（蓝本 → `assembly::mcp::add_mcp`）取 Mcp 槽位产出的
+/// DiscoverMCP，调用 `list(domain=agents)` 并返回 agents 域。
+async fn assembled_discover_agents(ctx: &crate::assembly::AssemblyContext) -> Vec<String> {
+    use peri_agent::tools::ToolContext;
+
+    let out = peri_agent::session::factory::build_middleware_chain(
+        &crate::assembly::ProductionChainAssembler,
+        ctx,
+    );
+    let tools = out.chain.collect_tools(&ctx.cwd);
+    let tool = tools
+        .into_iter()
+        .find(|tool| tool.name() == "DiscoverMCP")
+        .unwrap_or_else(|| {
+            panic!(
+                "Mcp 槽位必须提供 DiscoverMCP（链: {:?}）",
+                out.chain.names()
+            )
+        });
+    let raw = tool
+        .invoke(
+            serde_json::json!({
+                "method": "list",
+                "params": { "server": "workspace", "domain": "agents" },
+            }),
+            ToolContext::new(&[], &ctx.cwd),
+        )
+        .await
+        .expect("invoke 恒 Ok");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("invoke 输出应为合法 JSON");
+    value
+        .as_array()
+        .expect("list 应返回数组")
+        .iter()
+        .filter_map(|entry| entry.as_str().map(str::to_string))
+        .collect()
+}
+
+/// 装配级差分（F11/W5）：`meta_harness_disabled` 含 `SUB_AGENT_FACE_CLOSED_KEY`
+/// ⇒ Mcp 槽位的 DiscoverMCP 不列本地 agent；不含 ⇒ 同一池的本地 agent 命中。
+///
+/// 两例共用同一份含宿主绑定 builtin `workspace` 句柄（带 project agent 资源）的
+/// 池，只差 `ctx.meta_harness_disabled`——因此差异只能来自 `add_mcp` 的派生
+/// （`with_sub_agent_face_closed` → `McpAgentRegistry::with_local_face_closed`）。
+#[tokio::test]
+async fn mcp_slot_derives_discover_agent_face_from_sub_agent_closed_key() {
+    use peri_acp_types::plugin::ConfigSource;
+    use peri_acp_types::workspace_resources::{
+        agent_uri, ResourceScope, META_KEY_FRONTMATTER, META_KEY_SCOPE,
+    };
+    use rmcp::model::{MetaObject, Resource};
+
+    /// 本地 agent 标识（provider 投影形状：裸名 id + scope/frontmatter `_meta`）。
+    const LOCAL_AGENT: &str = "assembly-probe-agent";
+
+    let uri = agent_uri(ResourceScope::Project, None, LOCAL_AGENT).expect("agent uri");
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        META_KEY_SCOPE.to_string(),
+        serde_json::json!(ResourceScope::Project.as_str()),
+    );
+    meta.insert(
+        META_KEY_FRONTMATTER.to_string(),
+        serde_json::json!({ "name": LOCAL_AGENT, "description": "Assembly probe" }),
+    );
+    let pool = Arc::new(McpClientPool::new_pending());
+    pool.clients.write().insert(
+        "workspace".to_string(),
+        Arc::new(McpClientHandle {
+            name: "workspace".to_string(),
+            version: None,
+            cache_version: None,
+            peer: None,
+            tools: Vec::new(),
+            resources: vec![Resource::new(uri, LOCAL_AGENT)
+                .with_mime_type("text/markdown")
+                .with_meta(MetaObject(meta))],
+            status: crate::mcp::ClientStatus::Connected,
+            oauth_status: Default::default(),
+            source: Some(ConfigSource::Builtin {
+                instance: "workspace".to_string(),
+            }),
+            url: None,
+            skills_capable: false,
+            channel_capable: false,
+        }),
+    );
+
+    // 正对照：未关闭 ⇒ 本地来源经生产装配可见。
+    let open_port: Arc<dyn peri_acp_types::ports::McpPoolPort> = pool.clone();
+    let mut open_ctx = base_context();
+    open_ctx.mcp_pool = Some(open_port);
+    assert!(
+        assembled_discover_agents(&open_ctx)
+            .await
+            .iter()
+            .any(|id| id == LOCAL_AGENT),
+        "未关闭：DiscoverMCP 必须列出本地 agent（否则关闭用例是假绿）"
+    );
+
+    // 关闭键（链槽关闭键常量，非第二份字面量）⇒ 同一池不可见。
+    let closed_port: Arc<dyn peri_acp_types::ports::McpPoolPort> = pool.clone();
+    let mut closed_ctx = base_context();
+    closed_ctx.mcp_pool = Some(closed_port);
+    closed_ctx
+        .meta_harness_disabled
+        .insert(crate::assembly::SUB_AGENT_FACE_CLOSED_KEY.to_string());
+    assert!(
+        assembled_discover_agents(&closed_ctx).await.is_empty(),
+        "关闭键命中：DiscoverMCP 不得列出任何本地 agent"
+    );
+}

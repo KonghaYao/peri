@@ -43,9 +43,29 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
             .downcast_arc::<McpClientPool>()
             .unwrap_or_else(|_| Arc::new(McpClientPool::new_pending()))
     });
-    let mcp_agent_registry = mcp_pool_concrete
-        .as_ref()
-        .map(|pool| Arc::new(crate::mcp::McpAgentRegistry::new(Arc::clone(pool))));
+    // W5：Agent registry 的会话/关闭集过滤与链槽关闭位（`SubAgentMiddleware`，
+    // 与 A24 关闭集同一份 `disabled_middlewares` 派生——不得第二事实源）。
+    let local_agent_face_closed = ctx
+        .meta_harness_disabled
+        .contains(crate::assembly::SUB_AGENT_FACE_CLOSED_KEY);
+    let mcp_agent_registry = mcp_pool_concrete.as_ref().map(|pool| {
+        Arc::new(
+            crate::mcp::McpAgentRegistry::new(Arc::clone(pool))
+                .with_session(Some(ctx.session_id.clone()))
+                .with_local_face_closed(local_agent_face_closed),
+        )
+    });
+    // 候选目录端口绑定（W5）：ACP 只持 `Arc<dyn AgentCatalogPort>`，具体实现的
+    // 绑定在装配点单次完成——registry 与 SubAgent 消费面是**同一份**（`Arc::ptr_eq`
+    // 可观察），不再有第二个来源或第二个缓存。
+    if let (Some(registry), Some(port)) = (
+        mcp_agent_registry.as_ref(),
+        Arc::clone(&ctx.agent_catalog)
+            .downcast_arc::<crate::host_ports::AgentCatalogProvider>()
+            .ok(),
+    ) {
+        port.bind(Arc::clone(registry));
+    }
 
     // 工具搜索索引：端口 → Arc<ToolSearchIndex>（失败回退默认实例）。
     let tool_search_index_concrete: Arc<ToolSearchIndex> = Arc::clone(tool_search_index)

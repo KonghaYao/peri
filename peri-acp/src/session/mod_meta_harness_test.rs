@@ -153,7 +153,7 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
         None,
         None,
         None,
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
     );
 
@@ -167,11 +167,12 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
     let frozen = mgr.build_frozen_data_with_config_and_runtime_and_docs(
         &config,
         &cwd,
-        &[],
         &crate::prompt::PromptRuntimeEnv::detect(&cwd),
         docs,
         // W4b（F3）：技能快照由内容准入期给定；本用例只覆盖段落覆盖面。
         &[],
+        // W5：项目指令同样由内容准入期给定（本用例只覆盖段落覆盖面）。
+        &Default::default(),
     );
     let state = frozen.meta_harness();
     assert_eq!(
@@ -242,7 +243,7 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
         None,
         None,
         None,
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
     );
 
@@ -250,11 +251,11 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
     let frozen = mgr.build_frozen_data_with_config_and_runtime_and_docs(
         &config,
         &cwd,
-        &[],
         &crate::prompt::PromptRuntimeEnv::detect(&cwd),
         v1,
         // W4b（F3）：技能快照由内容准入期给定；本用例只覆盖段落覆盖面。
         &[],
+        &Default::default(),
     );
     assert!(frozen.system_prompt().contains("V1-BODY"));
     assert!(
@@ -272,11 +273,11 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
     let frozen2 = mgr.build_frozen_data_with_config_and_runtime_and_docs(
         &config,
         &cwd,
-        &[],
         &crate::prompt::PromptRuntimeEnv::detect(&cwd),
         v2,
         // W4b（F3）：技能快照由内容准入期给定；本用例只覆盖段落覆盖面。
         &[],
+        &Default::default(),
     );
     assert!(
         frozen2.system_prompt().contains("V2-BODY"),

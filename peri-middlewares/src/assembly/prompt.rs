@@ -5,12 +5,14 @@ use peri_agent::middleware::chain::MiddlewareChain;
 
 pub(super) fn add_agents_md(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
     let AssemblyContext {
-        claude_md_excludes,
         frozen_claude_md,
         frozen_claude_local_md,
         ..
     } = ctx;
-    let mut mw = AgentsMdMiddleware::new().with_excludes(claude_md_excludes.clone());
+    // W5（plan §6.3）：纯贡献 adapter——正文只来自会话冻结快照（P4 内容准入期
+    // 经 builtin `workspace` 实例的 `peri-instruction://` 读取）；excludes 与
+    // 候选选择归 provider 输入，本中间件无读盘/搜索路径。
+    let mut mw = AgentsMdMiddleware::new();
     if let Some(main) = frozen_claude_md {
         mw = mw.with_frozen_content(main.clone(), frozen_claude_local_md.clone());
     }

@@ -26,6 +26,7 @@ fn meta_provider(cwd: &Path) -> WorkspaceResourceProvider {
     WorkspaceResourceProvider::new(
         cwd,
         WorkspaceResourcesInput {
+            instruction_excludes: Vec::new(),
             disable_bundled: true,
             budget: ResourceBudget::default(),
             ..Default::default()

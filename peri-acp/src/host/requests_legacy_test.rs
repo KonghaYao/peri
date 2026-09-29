@@ -65,13 +65,19 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     assert_eq!(Path::new(&sessions[&id].cwd), cwd);
     assert_eq!(sessions[&id].history[0].content(), "legacy user message");
     assert!(sessions[&id].execution_owner.is_some());
-    assert!(sessions[&id]
-        .frozen
-        .as_ref()
-        .unwrap()
-        .claude_md()
-        .unwrap()
-        .contains("LEGACY_PROJECT_INSTRUCTION"));
+    // W5（J2 §3.1）：legacy 首次接纳发生在内容准入之前，没有执行环境 ⇒ 没有
+    // workspace 资源面 ⇒ 项目指令不可得（`claude_md` 为空），且**不回落磁盘**
+    // （同样的 X4/J5 口径见 W4b 的 legacy 空技能摘要先例）。后半段
+    // 「load 恢复已保存 frozen 快照」的断言不受影响。
+    assert!(
+        sessions[&id].frozen.as_ref().unwrap().claude_md().is_none(),
+        "legacy 首次接纳：无资源面 ⇒ 指令不可得（零磁盘兜底）"
+    );
+    assert!(
+        std::path::Path::new(&cwd).join("CLAUDE.md").is_file()
+            || std::path::Path::new(&cwd).join("AGENTS.md").is_file(),
+        "零兜底前提：磁盘上的指令文件仍在"
+    );
     let frozen = bridge.load_frozen_snapshot(&id).await.unwrap().unwrap();
     handle_request(
         "session/close",

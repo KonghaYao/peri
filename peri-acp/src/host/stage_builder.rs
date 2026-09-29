@@ -150,8 +150,7 @@ pub(crate) fn build_stage_context(
 
     // ── 注入面：主 prompt 覆盖渲染（agent overrides 非空时调用）──
     let render_system_prompt: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync> = {
-        let skills = Arc::clone(&ctx.skills);
-        let plugin_agent_dirs = ctx.plugin_agent_dirs.clone();
+        let agent_catalog = Arc::clone(&ctx.agent_catalog);
         // 冻结期 MetaHarness 状态（同源注入：重渲染与冻结渲染同一覆盖源，
         // 禁止双轨不一致——设计 §2.4）。
         let meta_harness = frozen.meta_harness.clone();
@@ -169,7 +168,7 @@ pub(crate) fn build_stage_context(
             let collected = build_collected_sections(&meta_harness, ov, language.as_deref());
             let template = PromptTemplate::new(&meta_harness, &collected);
             let env = PromptEnv::with_frozen_date(cwd, &frozen_date);
-            template.render(&env, &features, skills.as_ref(), &plugin_agent_dirs)
+            template.render(&env, &features, agent_catalog.as_ref())
         })
     };
 
@@ -178,7 +177,7 @@ pub(crate) fn build_stage_context(
     let system_builder: SystemPromptBuilder = {
         let frozen_date_for_sub = frozen.date.to_string();
         let frozen_language_for_sub = frozen.language.as_ref().map(|s| s.to_string());
-        let skills_for_sub = Arc::clone(&ctx.skills);
+        let agent_catalog_for_sub = Arc::clone(&ctx.agent_catalog);
         // C3：detect 无参（子链渲染继承主链冻结 disabled 集合驱动的收集
         // 结果，11_subagent 段存在性不变——设计 §3.5.1 步骤 4 子链语义）
         let features_for_sub = PromptFeatures::detect();
@@ -194,7 +193,7 @@ pub(crate) fn build_stage_context(
             );
             let t = PromptTemplate::new(&meta_harness_for_sub, &collected);
             let env = PromptEnv::with_frozen_date(cwd_dir, &frozen_date_for_sub);
-            t.render(&env, &features_for_sub, skills_for_sub.as_ref(), &[])
+            t.render(&env, &features_for_sub, agent_catalog_for_sub.as_ref())
         })
     };
 
@@ -211,6 +210,7 @@ pub(crate) fn build_stage_context(
         broker: Arc::clone(&ctx.broker),
         permission_mode: Arc::clone(&ctx.permission_mode),
         plugin_skill_roots: ctx.plugin_skill_roots.clone(),
+        agent_catalog: Arc::clone(&ctx.agent_catalog),
         plugin_loaded: ctx.plugin_loaded.clone(),
         hook_groups: ctx.hook_groups.clone(),
         session_start_source: ctx.session_start_source.clone(),
@@ -232,7 +232,6 @@ pub(crate) fn build_stage_context(
         model_name: ctx.provider_model_name.clone(),
         provider_name: ctx.provider_name.clone(),
         context_window: ctx.effective_context_window,
-        claude_md_excludes: ctx.claude_md_excludes.clone().unwrap_or_default(),
         language: frozen.language.as_ref().map(|s| s.to_string()),
         compact_config: ctx.compact_config.clone(),
         retry_events: ctx

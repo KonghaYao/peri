@@ -11,11 +11,10 @@
 //! 还原具体类型调用业务方法（与 `TaskManager` downcast 先例一致）。
 
 use std::any::{Any, TypeId};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpServerSpec};
-use crate::agents::AgentCapability;
+use crate::agents::AgentCatalogEntry;
 use crate::dynamic_mcp::{
     CanonicalDynamicMcpAction, DynamicMcpCatalogTool, DynamicMcpFailure, DynamicMcpInstanceKey,
     DynamicMcpNotification, DynamicMcpResponse, DynamicMcpShutdownReport, ResolvedSecret,
@@ -458,21 +457,39 @@ impl dyn LspPoolPort {
     }
 }
 
-/// Agents 扫描端口：协议命令面（available-commands / agent 列表）经此访问 agents
-/// 扫描业务，具体扫描逻辑留在 `peri-middlewares`（`scan_agents_detailed`）。
+/// Agent 候选目录端口：主提示词 `{{available_agents}}` 渲染经此取候选
+/// （W5：唯一来源是会话级 MCP Agent registry 对 builtin `workspace` 实例
+/// `resources/list` 的投影）。
 ///
-/// W4b（F6/J5）：原 `available_skills`（同步扫盘投影 `core:{skill}` 命令）已删除
-/// ——技能目录的唯一来源是会话级 MCP skill registry，命令面投影随 MCP 发现异步
-/// 产生（`peri-middlewares/src/mcp/skill_discovery.rs`），端口不再承担任何技能
-/// 内容读取。
-pub trait SkillsPort: Send + Sync {
-    /// 扫描可调度 agent 目录，返回 `(agent_id, name, description, capability)`。
-    fn agents(
-        &self,
-        cwd: &str,
-        extra_dirs: &[PathBuf],
-        include_built_ins: bool,
-    ) -> Vec<(String, String, String, AgentCapability)>;
+/// 历史沿革：W4b 删除 `available_skills`（技能命令面改由 MCP 发现异步投影）；
+/// W5 把本端口从「本地扫盘（`scan_agents_detailed`）」改为「registry 投影」，
+/// 端口实现留在 `peri-middlewares`（`host_ports::AgentCatalogProvider`），
+/// ACP 侧不直调业务 crate（§0 依赖方向）。
+pub trait AgentCatalogPort: Send + Sync {
+    /// 还原具体实现（downcast 还原点，供 middlewares 装配面绑定会话级 registry）。
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// 本地来源候选（E13 优先级去重）。
+    ///
+    /// `include_builtin=false`（父会话冻结的 built-in policy 关闭）时返回的列表
+    /// 不含 builtin 来源项；面未装配 / 实例被关闭 ⇒ 空列表（X4：不回落磁盘）。
+    fn catalog(&self, include_builtin: bool) -> Vec<AgentCatalogEntry>;
+}
+
+impl dyn AgentCatalogPort {
+    /// 将 `Arc<dyn AgentCatalogPort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
+    pub fn downcast_arc<T: AgentCatalogPort + 'static>(
+        self: Arc<Self>,
+    ) -> Result<Arc<T>, Arc<Self>> {
+        let ptr = Arc::into_raw(self);
+        unsafe {
+            if (*ptr).as_any().type_id() == TypeId::of::<T>() {
+                Ok(Arc::from_raw(ptr as *const T))
+            } else {
+                Err(Arc::from_raw(ptr))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

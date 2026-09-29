@@ -161,6 +161,9 @@ pub struct McpMiddleware {
     /// print 模式语义逐位不变）。判定只走 `builtin::is_closed`，
     /// 本文件不硬编码实例名或 `mcp__web__` 前缀。
     builtin_closures: BTreeSet<String>,
+    ///  链槽关闭位（F11）：DiscoverMCP 的 agent 投影与
+    /// SubAgent 工具面同源——关闭后不得再列本地 agent 来源。
+    sub_agent_face_closed: bool,
 }
 
 impl McpMiddleware {
@@ -174,6 +177,7 @@ impl McpMiddleware {
             cancel: AgentCancellationToken::new(),
             hint_sent: AtomicBool::new(false),
             builtin_closures: BTreeSet::new(),
+            sub_agent_face_closed: false,
         }
     }
 
@@ -238,6 +242,12 @@ impl McpMiddleware {
     /// 因此有意的关闭不会被误报成启动失败。
     pub(crate) fn with_builtin_closures(mut self, closed: BTreeSet<String>) -> Self {
         self.builtin_closures = closed;
+        self
+    }
+
+    /// 注入 Agent 工具面关闭位（F11；装配点从同一份 `meta_harness_disabled` 派生）。
+    pub(crate) fn with_sub_agent_face_closed(mut self, closed: bool) -> Self {
+        self.sub_agent_face_closed = closed;
         self
     }
 
@@ -791,10 +801,16 @@ impl Middleware for McpMiddleware {
             None => resource_tool,
         }));
 
+        // F11（安全面/关闭语义）：DiscoverMCP 的 Agent 投影必须与 SubAgent 工具面
+        // 同源——绑定会话（ACP 归属过滤）与**同一份**关闭位（链槽关闭键常量，
+        // 不写第二份字面量判定）。否则关闭  后 DiscoverMCP
+        // 仍会列出本地 agent（W5 新增的本地来源）。
+        let sub_agent_face_closed = self.sub_agent_face_closed;
+        let agent_registry = super::agent_registry::McpAgentRegistry::new(Arc::clone(&self.pool))
+            .with_session(self.session_id.clone())
+            .with_local_face_closed(sub_agent_face_closed);
         let discover_tool = DiscoverMCPTool::new(Arc::clone(&self.pool), self.registry.clone())
-            .with_agent_registry(Arc::new(super::agent_registry::McpAgentRegistry::new(
-                Arc::clone(&self.pool),
-            )));
+            .with_agent_registry(Arc::new(agent_registry));
         tools.push(Box::new(match self.session_id.clone() {
             Some(session_id) => discover_tool.with_session_id(session_id),
             None => discover_tool,

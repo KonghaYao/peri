@@ -22,7 +22,7 @@ use peri_acp_types::{
     agents::AgentOverrides,
     compact::CompactConfig,
     mcp_skills::McpSkillRegistry,
-    ports::{SkillsPort, WorkflowMiddlewarePort},
+    ports::{AgentCatalogPort, WorkflowMiddlewarePort},
     workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult},
 };
 use peri_agent::agent::workflow::{
@@ -103,13 +103,13 @@ pub(crate) fn build_workflow_forwarder_launcher() -> ForwarderLauncherFn {
 }
 
 /// system prompt fallback 渲染闭包构造（`PromptTemplate` 渲染面；skills 经
-/// 注入的 [`SkillsPort`] 访问——与宿主装配点注入的端口实现同一类型）。
+/// 注入的 [`AgentCatalogPort`] 访问——与宿主装配点注入的端口实现同一类型）。
 ///
 /// 16_workflow 已删除（C2），workflow agent 渲染与主链共用同一段落来源；
 /// `meta_harness` 为冻结期 MetaHarnessState（随调用点从 `FrozenSessionData`
 /// 注入，段落覆盖与主会话同源——禁止重读配置，设计 §2.4）。
 pub(crate) fn build_workflow_system_prompt_fallback(
-    skills: Arc<dyn SkillsPort>,
+    agent_catalog: Arc<dyn AgentCatalogPort>,
     meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
 ) -> WorkflowSystemPromptFallback {
     Arc::new(
@@ -137,7 +137,7 @@ pub(crate) fn build_workflow_system_prompt_fallback(
             } else {
                 crate::prompt::PromptEnv::detect(cwd)
             };
-            template.render(&env, &features, skills.as_ref(), &[])
+            template.render(&env, &features, agent_catalog.as_ref())
         },
     )
 }
@@ -150,7 +150,7 @@ pub(crate) fn build_workflow_system_prompt_fallback(
 /// `meta_harness` 为冻结期 MetaHarnessState（同源注入，见
 /// `build_workflow_system_prompt_fallback`）。
 pub(crate) fn build_workflow_agent_prompt_builder(
-    skills: Arc<dyn SkillsPort>,
+    agent_catalog: Arc<dyn AgentCatalogPort>,
     meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
 ) -> WorkflowAgentPromptBuilder {
     Arc::new(
@@ -171,7 +171,7 @@ pub(crate) fn build_workflow_agent_prompt_builder(
                 || crate::prompt::PromptEnv::detect(cwd),
                 |date| crate::prompt::PromptEnv::with_frozen_date(cwd, date),
             );
-            template.render(&env, &features, skills.as_ref(), &[])
+            template.render(&env, &features, agent_catalog.as_ref())
         },
     )
 }
@@ -198,7 +198,7 @@ pub(crate) fn create_session_workflow_middleware(
     frozen_data: &FrozenSessionData,
     middleware_factory: Arc<dyn WorkflowMiddlewareFactory>,
     publish_hook: Option<WorkflowPublishHook>,
-    skills: Arc<dyn SkillsPort>,
+    agent_catalog: Arc<dyn AgentCatalogPort>,
     mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
 ) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
     let mut compact_config = CompactConfig::default();
@@ -225,13 +225,13 @@ pub(crate) fn create_session_workflow_middleware(
         progress_tx: Some(progress_tx),
         subagent_ctx_builder: None,
         agent_prompt_builder: build_workflow_agent_prompt_builder(
-            Arc::clone(&skills),
+            Arc::clone(&agent_catalog),
             frozen_data.meta_harness().clone(),
         ),
         model_factory: build_model_factory(&provider, peri_config),
         middleware_factory: Arc::clone(&middleware_factory),
         system_prompt_fallback: build_workflow_system_prompt_fallback(
-            skills,
+            agent_catalog,
             frozen_data.meta_harness().clone(),
         ),
         forwarder_launcher: build_workflow_forwarder_launcher(),

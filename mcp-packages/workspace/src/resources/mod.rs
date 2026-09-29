@@ -112,6 +112,10 @@ pub struct WorkspaceResourcesInput {
     pub skill_roots: Vec<ResourceRoot>,
     pub agent_roots: Vec<ResourceRoot>,
     pub disable_bundled: bool,
+    /// 项目指令 main 候选的排除 glob（W5 自宿主设置迁入；语义 = 与候选的绝对
+    /// 路径字符串做 `glob::Pattern` 匹配，命中则该候选不参与选择——迁移前
+    /// `AgentsMdMiddleware::find_file` 的同一口径）。
+    pub instruction_excludes: Vec<String>,
     pub budget: ResourceBudget,
 }
 
@@ -128,6 +132,11 @@ impl WorkspaceResourcesInput {
 
     pub fn with_agent_root(mut self, root: ResourceRoot) -> Self {
         self.agent_roots.push(root);
+        self
+    }
+
+    pub fn with_instruction_excludes(mut self, excludes: Vec<String>) -> Self {
+        self.instruction_excludes = excludes;
         self
     }
 
@@ -235,13 +244,19 @@ impl WorkspaceResourceProvider {
             let Some(uri) = record.uri() else {
                 continue;
             };
+            let mut meta = resource_meta(
+                record.scope,
+                record.plugin_name.as_deref(),
+                Some(&record.digest),
+            );
+            // W5：frontmatter JSON 逐字投影（宿主目录渲染的 capability 推断输入；
+            // 正文不在这里公开）。
+            for (key, value) in record.meta() {
+                meta.0.insert(key, value);
+            }
             let mut resource = Resource::new(uri, record.agent_id.clone())
                 .with_mime_type(MIME_MARKDOWN)
-                .with_meta(resource_meta(
-                    record.scope,
-                    record.plugin_name.as_deref(),
-                    Some(&record.digest),
-                ));
+                .with_meta(meta);
             if record.display_name != record.agent_id {
                 resource = resource.with_title(record.display_name.clone());
             }
@@ -251,7 +266,7 @@ impl WorkspaceResourceProvider {
             resources.push(resource);
         }
 
-        let bundle = instructions::scan(&self.cwd, &budget);
+        let bundle = instructions::scan(&self.cwd, &budget, &self.input.instruction_excludes);
         if let Some(main) = &bundle.main {
             resources.push(
                 Resource::new(INSTRUCTION_MAIN_URI, "main")
@@ -334,6 +349,8 @@ impl WorkspaceResourceProvider {
             ResourceScope::User,
             ResourceScope::Global,
             ResourceScope::Project,
+            // W5：builtin 静态 Agent 定义（`agent://builtin/{name}/agent.md`）。
+            ResourceScope::Builtin,
         ] {
             templates.push(
                 ResourceTemplate::new(
@@ -364,7 +381,12 @@ impl WorkspaceResourceProvider {
             return self.read_agent(uri, &parsed);
         }
         if let Some(document) = parse_instruction_uri(uri) {
-            let read = instructions::read(&self.cwd, &self.budget(), document)?;
+            let read = instructions::read(
+                &self.cwd,
+                &self.budget(),
+                document,
+                &self.input.instruction_excludes,
+            )?;
             return Ok(ResourcePayload {
                 uri: uri.to_string(),
                 mime: read.mime.to_string(),
@@ -433,15 +455,21 @@ impl WorkspaceResourceProvider {
             parsed.plugin_name.as_deref(),
             &parsed.name,
         )?;
-        let bytes = agents::read_definition(&record.root, &record.relative_path, &budget)
-            .ok_or(ResourceError::NotFound)?;
+        let bytes =
+            agents::read_record_definition(&record, &budget).ok_or(ResourceError::NotFound)?;
         let digest = peri_acp_types::workspace_resources::digest_bytes(&bytes);
         let text = String::from_utf8(bytes).map_err(|_| ResourceError::Io)?;
+        let mut meta = resource_meta(parsed.scope, parsed.plugin_name.as_deref(), Some(&digest));
+        // 读取面同样投影 frontmatter（与 list 面同键同值，来源是本次读取的字节
+        // 所携带的定义文本；scope/plugin 以 URI 解析结果为准）。
+        for (key, value) in record.meta() {
+            meta.0.insert(key, value);
+        }
         Ok(ResourcePayload {
             uri: uri.to_string(),
             mime: MIME_MARKDOWN.to_string(),
             digest: digest.clone(),
-            meta: resource_meta(parsed.scope, parsed.plugin_name.as_deref(), Some(&digest)),
+            meta,
             body: ResourceBody::Text(text),
         })
     }

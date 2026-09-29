@@ -50,7 +50,7 @@ async fn test_agent_prompt_missing_returns_error() {
     )
     .unwrap();
 
-    let t = make_subagent_tool(vec![]);
+    let t = with_agent_face(make_subagent_tool(vec![]), dir.path()).await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -122,7 +122,9 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
 
 #[tokio::test]
 async fn test_tool_agent_not_found() {
-    let t = make_subagent_tool(vec![]);
+    // W5：未命中判定来自资源面（空 agent 根 ⇒ 无候选），不依赖磁盘兜底。
+    let dir = tempdir().unwrap();
+    let t = with_agent_face(make_subagent_tool(vec![]), dir.path()).await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -151,7 +153,7 @@ async fn test_tool_executes_with_valid_agent_file() {
     )
     .unwrap();
 
-    let t = make_subagent_tool(vec![]);
+    let t = with_agent_face(make_subagent_tool(vec![]), dir.path()).await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -183,7 +185,7 @@ async fn test_agent_reserved_fields_parsed() {
     )
     .unwrap();
 
-    let t = make_subagent_tool(vec![]);
+    let t = with_agent_face(make_subagent_tool(vec![]), dir.path()).await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -258,6 +260,7 @@ async fn test_system_builder_injects_system_message() {
         dir.path().to_str().unwrap().to_string(),
     )
     .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()));
+    let t = with_agent_face(t, dir.path()).await;
 
     let result = t
         .invoke(
@@ -348,6 +351,7 @@ async fn test_skill_preload_registered() {
         "workspace",
         &[("test-skill", "This is the test skill content.\n")],
     );
+    let t = with_agent_face(t, dir.path()).await;
 
     let result = t
         .invoke(
@@ -480,6 +484,7 @@ async fn test_cancel_token_interrupts_subagent() {
         dir.path().to_str().unwrap().to_string(),
     )
     .with_cancel(cancel);
+    let t = with_agent_face(t, dir.path()).await;
 
     let result = t
         .invoke(

@@ -8,7 +8,8 @@ use std::sync::Arc;
 use peri_agent::tools::BaseTool;
 
 use crate::tool_search::core_tools::TOOL_AGENT;
-use crate::{agent_define::AgentOverrides, claude_agent_parser::ToolsValue, tools::ArcToolWrapper};
+use crate::{claude_agent_parser::ToolsValue, tools::ArcToolWrapper};
+use peri_acp_types::agents::AgentOverrides;
 
 pub fn canonical_tool_filter(
     allowed: &ToolsValue,

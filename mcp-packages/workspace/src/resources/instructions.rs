@@ -91,11 +91,14 @@ pub(crate) struct InstructionBundle {
 }
 
 /// 扫描工作区指令（`cwd` 为工作区绑定根；每次读取实时扫描，无跨请求缓存）。
-pub(crate) fn scan(cwd: &Path, budget: &ResourceBudget) -> InstructionBundle {
+///
+/// `excludes` = main 候选的排除 glob（宿主设置投影；与候选绝对路径字符串匹配，
+/// 命中即跳过该候选——迁移前 `AgentsMdMiddleware::find_file` 的同一口径）。
+pub(crate) fn scan(cwd: &Path, budget: &ResourceBudget, excludes: &[String]) -> InstructionBundle {
     let scope_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
 
     let mut imports: Vec<ImportRecord> = Vec::new();
-    let (main, selected) = scan_main(cwd, &scope_canonical, budget, &mut imports);
+    let (main, selected) = scan_main(cwd, &scope_canonical, budget, &mut imports, excludes);
     let local = scan_local(cwd, &scope_canonical, budget);
 
     let index = InstructionIndex {
@@ -122,16 +125,31 @@ pub(crate) fn scan(cwd: &Path, budget: &ResourceBudget) -> InstructionBundle {
     InstructionBundle { main, local, index }
 }
 
+/// main 候选排除判定（与迁移前宿主 `find_file` 的 glob 口径逐字一致：对候选的
+/// 绝对路径字符串应用 `glob::Pattern`；非法 pattern 视为不匹配）。
+fn is_excluded(path: &Path, excludes: &[String]) -> bool {
+    if excludes.is_empty() {
+        return false;
+    }
+    let path_str = path.to_string_lossy();
+    excludes.iter().any(|pattern| {
+        glob::Pattern::new(pattern)
+            .map(|glob| glob.matches(&path_str))
+            .unwrap_or(false)
+    })
+}
+
 /// 主文档：首个存在的候选 + `@import` 展开。
 fn scan_main(
     cwd: &Path,
     scope_canonical: &Path,
     budget: &ResourceBudget,
     imports: &mut Vec<ImportRecord>,
+    excludes: &[String],
 ) -> (Option<InstructionDoc>, Option<String>) {
     for relative in MAIN_CANDIDATES {
         let path = cwd.join(relative);
-        if !path.is_file() {
+        if !path.is_file() || is_excluded(&path, excludes) {
             continue;
         }
         let Some(raw) = read_bounded_text(&path, budget.max_file_bytes) else {
@@ -324,8 +342,9 @@ pub(crate) fn read(
     cwd: &Path,
     budget: &ResourceBudget,
     document: InstructionDocument,
+    excludes: &[String],
 ) -> Result<InstructionRead, ResourceError> {
-    let bundle = scan(cwd, budget);
+    let bundle = scan(cwd, budget, excludes);
     match document {
         InstructionDocument::Main => {
             let doc = bundle.main.ok_or(ResourceError::NotFound)?;

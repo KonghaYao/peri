@@ -13,8 +13,7 @@ fn test_overrides_after_boundary_marker() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -38,6 +37,19 @@ fn test_overrides_after_boundary_marker() {
 
 // ─── available_agents tests ──────────────────────────────────────────────
 
+/// W5 夹具：把合成 registry（真实 provider 的 `resources/list` 投影形状）绑到端口上。
+fn bound_catalog(
+    entries: &[(
+        peri_acp_types::workspace_resources::ResourceScope,
+        &str,
+        &str,
+    )],
+) -> AgentCatalogProvider {
+    let provider = AgentCatalogProvider::new();
+    provider.bind(Arc::new(synthetic_agent_registry(entries)));
+    provider
+}
+
 /// Helper: create a unique temp directory under /tmp
 fn tmp_dir(prefix: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("{}_{}", prefix, std::process::id()));
@@ -48,23 +60,20 @@ fn tmp_dir(prefix: &str) -> std::path::PathBuf {
 
 #[test]
 fn test_available_agents_placeholder_replaced() {
+    // W5：候选目录来自会话级 MCP Agent registry 的资源面投影（不再扫盘）。
     let dir = tmp_dir("prompt_test_agent_replaced");
-    let agents_dir = dir.join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("tester.md"),
-        "---\nname: tester\ndescription: A test agent\n---\n\nYou are a test agent.\n",
-    )
-    .unwrap();
-
     let features = PromptFeatures::none();
+    let catalog = bound_catalog(&[(
+        peri_acp_types::workspace_resources::ResourceScope::Project,
+        "tester",
+        r#"{"name":"tester","description":"A test agent"}"#,
+    )]);
     let result = build_system_prompt(
         &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
         features,
-        &SkillsProvider,
-        &[],
+        &catalog,
         None,
         None,
     );
@@ -88,16 +97,20 @@ fn test_available_agents_placeholder_replaced() {
 
 #[test]
 fn test_available_agents_placeholder_empty_dir() {
+    // W5：无 project agent 定义时，builtin 静态表仍经资源面进目录。
     let dir = tmp_dir("prompt_test_agent_empty");
-    // No .claude/agents/ directory at all
     let features = PromptFeatures::none();
+    let catalog = bound_catalog(&[(
+        peri_acp_types::workspace_resources::ResourceScope::Builtin,
+        "explorer",
+        r#"{"name":"explorer","description":"Explores","model":"haiku","disallowedTools":["Write","Edit","Bash","folder_operations","cron_register"]}"#,
+    )]);
     let result = build_system_prompt(
         &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
         features,
-        &SkillsProvider,
-        &[],
+        &catalog,
         None,
         None,
     );
@@ -125,8 +138,7 @@ fn test_available_agents_replaced_when_subagent_holder_enabled() {
         None,
         dir.to_str().unwrap(),
         features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -165,66 +177,54 @@ fn meta_harness_disabling_holder_removes_section() {
 }
 
 #[test]
-fn test_format_available_agents_with_agents() {
-    let dir = tmp_dir("prompt_test_format_agents");
-    let agents_dir = dir.join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("reviewer.md"),
-        "---\nname: code-reviewer\ndescription: Reviews code\n---\n\nReview code.\n",
-    )
-    .unwrap();
-    std::fs::write(
-        agents_dir.join("analyst.md"),
-        "---\nname: data-analyst\ndescription: Analyzes data\n---\n\nAnalyze data.\n",
-    )
-    .unwrap();
+fn format_available_agents_renders_registry_catalog_entries() {
+    // W5：catalog 只来自会话级 MCP Agent registry 的投影（不再扫盘）。
+    let provider = AgentCatalogProvider::new();
+    provider.bind(Arc::new(synthetic_agent_registry(&[
+        (
+            peri_acp_types::workspace_resources::ResourceScope::Project,
+            "reviewer",
+            r#"{"name":"reviewer","description":"Reviews code","model":"opus"}"#,
+        ),
+        (
+            peri_acp_types::workspace_resources::ResourceScope::Builtin,
+            "explorer",
+            r#"{"name":"explorer","description":"Explores","model":"haiku","disallowedTools":["Write","Edit","Bash","folder_operations","cron_register"]}"#,
+        ),
+    ])));
 
-    let result = format_available_agents(&SkillsProvider, dir.to_str().unwrap(), &[], true);
-    // D4：不注入 description
-    assert!(
-        result.contains("- reviewer [inherit] [writes]"),
-        "Should contain reviewer entry"
-    );
-    assert!(
-        result.contains("- analyst [inherit] [writes]"),
-        "Should contain analyst entry"
-    );
-    assert!(
-        !result.contains("Reviews code") && !result.contains("Analyzes data"),
-        "D4: agent description 不应出现在 catalog"
-    );
-    // Should also contain built-in agents (coder, explorer, general-purpose, plan, verification, web-researcher)
-    assert!(
-        result.contains("- explorer [haiku] [readonly]"),
-        "Should contain built-in explorer agent"
-    );
-    // Verify project agents + built-in agents
-    let lines: Vec<&str> = result.lines().filter(|l| l.starts_with("- ")).collect();
-    assert_eq!(
-        lines.len(),
-        8,
-        "Should have 2 project + 6 built-in agent entries"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
+    let result = format_available_agents(&provider, true);
+    assert!(result.contains("- reviewer [opus] [writes]"), "{result}");
+    assert!(result.contains("- explorer [haiku] [readonly]"), "{result}");
+    // D4：不注入自由 description（只投递调度标签）。
+    assert!(!result.contains("Reviews code"), "{result}");
+    assert!(!result.contains("Explores"), "{result}");
+}
+
+/// 合成 registry（peri-middlewares 的测试夹具；无 peer，仅目录投影）。
+fn synthetic_agent_registry(
+    entries: &[(
+        peri_acp_types::workspace_resources::ResourceScope,
+        &str,
+        &str,
+    )],
+) -> peri_middlewares::mcp::McpAgentRegistry {
+    let entries: Vec<_> = entries
+        .iter()
+        .map(|(scope, id, frontmatter)| (*scope, id.to_string(), frontmatter.to_string()))
+        .collect();
+    peri_middlewares::mcp::McpAgentRegistry::from_local_catalog_for_test(&entries)
 }
 
 #[test]
-fn test_format_available_agents_empty_dir() {
-    let result = format_available_agents(
-        &SkillsProvider,
-        "/nonexistent/path/that/does/not/exist",
-        &[],
-        true,
-    );
-    // Built-in agents are always available
+fn format_available_agents_without_a_face_reports_no_agents() {
+    // W5：未绑定 registry（面未装配/被关闭）⇒ 空目录 + 提示；**不扫盘**
+    // （X4/J5：任何组件不得回落磁盘）。
+    let provider = AgentCatalogProvider::new();
+    let result = format_available_agents(&provider, true);
     assert!(
-        result.contains("- explorer [haiku] [readonly]"),
-        "Should contain built-in agents even without .claude/agents/ directory"
-    );
-    assert!(
-        !result.contains("No agents currently configured"),
-        "Should NOT show no-agents message when built-in agents exist"
+        result.contains("No agents currently configured"),
+        "无资源面必须报告空目录：{result}"
     );
 }
 
@@ -237,8 +237,7 @@ fn test_language_simplified_chinese_injected() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         Some("zh-CN"),
     );
@@ -264,8 +263,7 @@ fn test_language_none_no_injection() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -282,8 +280,7 @@ fn test_language_section_after_dynamic_content() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         Some("zh-CN"),
     );
@@ -308,8 +305,7 @@ fn test_language_zh_maps_to_simplified_chinese() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         Some("zh"),
     );
@@ -326,8 +322,7 @@ fn test_language_custom_code_passthrough() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         Some("fr"),
     );
@@ -380,8 +375,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                     no_overrides,
                     cwd,
                     *features,
-                    &SkillsProvider,
-                    &[],
+                    &AgentCatalogProvider::new(),
                     Some(frozen_date),
                     *language,
                 );
@@ -394,8 +388,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                 let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
                     &env,
                     features,
-                    &SkillsProvider,
-                    &[],
+                    &AgentCatalogProvider::new(),
                 );
                 assert_eq!(
                     old, new,
@@ -410,8 +403,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                     Some(&with_overrides),
                     cwd,
                     *features,
-                    &SkillsProvider,
-                    &[],
+                    &AgentCatalogProvider::new(),
                     Some(frozen_date),
                     *language,
                 );
@@ -424,8 +416,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                 let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
                     &env,
                     features,
-                    &SkillsProvider,
-                    &[],
+                    &AgentCatalogProvider::new(),
                 );
                 assert_eq!(
                     old, new,
@@ -440,8 +431,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                     Some(&empty_overrides),
                     cwd,
                     *features,
-                    &SkillsProvider,
-                    &[],
+                    &AgentCatalogProvider::new(),
                     Some(frozen_date),
                     *language,
                 );
@@ -454,8 +444,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                 let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
                     &env,
                     features,
-                    &SkillsProvider,
-                    &[],
+                    &AgentCatalogProvider::new(),
                 );
                 assert_eq!(
                     old, new,
@@ -477,8 +466,7 @@ fn test_template_byte_identical_and_one_boundary_marker() {
         None,
         "/tmp",
         PromptFeatures::detect(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -488,8 +476,7 @@ fn test_template_byte_identical_and_one_boundary_marker() {
     let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
         &env,
         &PromptFeatures::detect(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
     );
     assert_eq!(old, new, "两条渲染路径字节一致");
     assert_eq!(
@@ -520,8 +507,7 @@ fn test_render_full_mode_preserves_immutable_layers() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -562,8 +548,7 @@ fn test_render_full_mode_preserves_secret_policy() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -590,8 +575,7 @@ fn test_render_full_mode_preserves_git_guardrails() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -618,8 +602,7 @@ fn test_render_full_mode_preserves_tool_discipline() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -663,8 +646,7 @@ fn test_render_full_mode_prefix_aligned_with_extend() {
         Some(&full_overrides),
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -673,8 +655,7 @@ fn test_render_full_mode_prefix_aligned_with_extend() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -706,8 +687,7 @@ fn test_render_immutable_layer_order() {
         None,
         "/tmp",
         features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -743,8 +723,7 @@ fn test_render_full_mode_keeps_env() {
         Some(&overrides),
         "/custom/project",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -779,8 +758,7 @@ fn test_render_extend_mode_unchanged() {
         Some(&overrides_none),
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -789,8 +767,7 @@ fn test_render_extend_mode_unchanged() {
         Some(&overrides_extend),
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -922,4 +899,30 @@ async fn test_declaration_segment_is_single_source_and_05_has_no_tool_entries() 
         !section_05.contains(decl_line),
         "05 不得与声明段渲染行逐字重复"
     );
+}
+
+#[test]
+fn unbound_catalog_still_replaces_the_placeholder_without_leaking_it() {
+    // W5 防回归：面未装配（未绑定 registry）时占位符也必须被替换（空目录提示），
+    // 且**不得**把 `{{available_agents}}` 原文泄漏进 prompt。
+    let dir = tmp_dir("prompt_test_agent_unbound");
+    let features = PromptFeatures::none();
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        dir.to_str().unwrap(),
+        features,
+        &AgentCatalogProvider::new(),
+        None,
+        None,
+    );
+    assert!(
+        !result.contains("{{available_agents}}"),
+        "占位符必须被替换（清零泄漏）: {result}"
+    );
+    assert!(
+        result.contains("No agents currently configured"),
+        "面未装配 ⇒ 空目录提示: {result}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

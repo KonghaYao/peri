@@ -1,8 +1,5 @@
 use peri_agent::middleware::capabilities as hook_state;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::{
@@ -20,19 +17,16 @@ use peri_agent::{
 use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 
 use crate::{
-    agent_define::AgentOverrides, claude_agent_parser::ClaudeAgentFrontmatter,
-    claude_agent_parser::ToolsValue, parse_agent_file, tools::BoxToolWrapper,
+    claude_agent_parser::ClaudeAgentFrontmatter, claude_agent_parser::ToolsValue,
+    tools::BoxToolWrapper,
 };
+use peri_acp_types::agents::AgentOverrides;
 
 mod agent_result;
-mod built_in_agents;
 mod fork;
 mod skill_preload;
 mod tool;
 pub use agent_result::AgentResultTool;
-pub use built_in_agents::{
-    built_in_agent_types, get_built_in_agent, list_built_in_agents, BuiltInAgent,
-};
 pub use fork::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
 use parking_lot::RwLock;
 pub use skill_preload::SkillPreloadMiddleware;
@@ -184,8 +178,6 @@ pub struct SubAgentMiddleware {
     /// 运行时通道（[`SubagentHost`]）与 frozen 数据经它读取，Middleware 不再
     /// 逐字段透传（L3 管理权移出）。
     parent_session: Arc<RwLock<Option<Arc<Session>>>>,
-    /// 已启用插件提供的 agent definition 目录。
-    plugin_agent_dirs: Arc<Vec<PathBuf>>,
     /// 会话级 MCP Agents registry（远端定义晚读、晚批准）。
     mcp_agent_registry: Option<Arc<crate::mcp::McpAgentRegistry>>,
     /// 会话级 MCP skill registry（W4b：子链的技能目录与正文来源；None = 未装配，
@@ -220,18 +212,11 @@ impl SubAgentMiddleware {
             child_handler_factory: None,
             parent_agent_id: Arc::new(RwLock::new(None)),
             parent_session: Arc::new(RwLock::new(None)),
-            plugin_agent_dirs: Arc::new(Vec::new()),
             mcp_agent_registry: None,
             mcp_skill_registry: None,
             broker: None,
             task_manager_available: false,
         }
-    }
-
-    /// 注入已启用插件提供的 agent definition 目录。
-    pub fn with_plugin_agent_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
-        self.plugin_agent_dirs = Arc::new(dirs);
-        self
     }
 
     pub fn with_mcp_agents(
@@ -360,7 +345,6 @@ impl SubAgentMiddleware {
         if let Some(ref factory) = self.child_handler_factory {
             tool = tool.with_child_handler_factory(Arc::clone(factory));
         }
-        tool = tool.with_plugin_agent_dirs(Arc::clone(&self.plugin_agent_dirs));
         tool = tool.with_mcp_agents(self.mcp_agent_registry.clone(), self.broker.clone());
         // W4b（F5/J5）：把会话级 MCP skill registry 交给子链装配器——子代理
         // `skills:` 预载只按名查该 registry（未命中=缺口，不回落磁盘）。
@@ -375,39 +359,11 @@ impl SubAgentMiddleware {
     }
 }
 
-/// Scan `{cwd}/.claude/agents/` directory, return `(agent_id, name, description)` list.
-/// Built-in agents are included as fallback — project-level agents with the same ID take precedence.
-///
-/// 波 4 演进（C3，设计 §3.5.1 步骤 2）：catalog 同源收敛——本函数委托
-/// [`scan_agents_detailed`]（共享实现，丢弃能力画像字段），与渲染面
-/// catalog（`SkillsPort::agents` → `scan_agents_detailed`）同一事实源，
-/// 防止提示词 catalog 与子链实际可用 agent 不一致。
-pub fn scan_agents(cwd: &str) -> Vec<(String, String, String)> {
-    scan_agents_detailed(cwd, &[], true)
-        .into_iter()
-        .map(|(id, name, description, _)| (id, name, description))
-        .collect()
-}
-
-/// 扫描 agent 目录，支持额外的插件 agent 搜索路径
-/// 项目级 agent 优先，同名 agent_id 去重时保留先出现的
-///
-/// 波 4 演进（C3）：委托 [`scan_agents_detailed`]（共享实现，见
-/// [`scan_agents`] 注释）。
-pub fn scan_agents_with_extra_dirs(
-    cwd: &str,
-    extra_dirs: &[PathBuf],
-) -> Vec<(String, String, String)> {
-    scan_agents_detailed(cwd, extra_dirs, true)
-        .into_iter()
-        .map(|(id, name, description, _)| (id, name, description))
-        .collect()
-}
-
 /// Agent 运行时能力画像，用于主 Agent 调度决策。
 ///
-/// 主 Agent 在 Prompt 中看到此信息后可以判断：
-// 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::agents::AgentCapability`）。
+/// 主 Agent 在 Prompt 中看到此信息后可以判断能否并行调度（readonly/writes）与
+/// 期望档位；3.0 批 2 波 1 起协议类型归契约层（定义见
+/// `peri_acp_types::agents::AgentCapability`）。
 pub use peri_acp_types::agents::AgentCapability;
 
 /// 按名匹配的候选集合（A4 ⑦ 匹配型归一）：原样（小写化）恒在其中，命中归一表
@@ -512,104 +468,6 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
         model_tier,
         can_mutate,
     }
-}
-
-/// 扫描 agent 目录并返回完整信息（含能力画像）。
-///
-/// 项目级 agent 优先，同名 agent_id 去重。返回 `(agent_id, name, description, capability)`。
-pub fn scan_agents_detailed(
-    cwd: &str,
-    extra_dirs: &[PathBuf],
-    include_built_ins: bool,
-) -> Vec<(String, String, String, AgentCapability)> {
-    let mut result = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
-
-    // 辅助闭包：扫描单个目录
-    let scan_dir =
-        |dir: &Path, result: &mut Vec<_>, seen_ids: &mut std::collections::HashSet<_>| {
-            if !dir.is_dir() {
-                return;
-            }
-            let entries = match std::fs::read_dir(dir) {
-                Ok(e) => e,
-                Err(_) => return,
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let (agent_id, file_path): (String, PathBuf) = if path.is_file() {
-                    if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                        continue;
-                    }
-                    let id = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    (id, path)
-                } else if path.is_dir() {
-                    let nested = path.join("agent.md");
-                    if !nested.is_file() {
-                        continue;
-                    }
-                    let id = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    (id, nested)
-                } else {
-                    continue;
-                };
-                if !seen_ids.insert(agent_id.clone()) {
-                    continue;
-                }
-                let content = match std::fs::read_to_string(&file_path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                if let Some(agent) = parse_agent_file(&content) {
-                    let name = if agent.frontmatter.name.is_empty() {
-                        agent_id.clone()
-                    } else {
-                        agent.frontmatter.name.clone()
-                    };
-                    let desc = agent.frontmatter.description.clone();
-                    let cap = infer_agent_capability(&agent.frontmatter);
-                    result.push((agent_id, name, desc, cap));
-                }
-            }
-        };
-
-    // 1. 项目级 agent（最高优先级，先添加则占住 seen_ids）
-    let agents_dir = Path::new(cwd).join(".claude").join("agents");
-    scan_dir(&agents_dir, &mut result, &mut seen_ids);
-
-    // 2. 内置 agent（IFF 启用且同 ID 未被项目级覆盖）
-    if include_built_ins {
-        for built_in in list_built_in_agents() {
-            if seen_ids.insert(built_in.agent_id.to_string()) {
-                if let Some(agent) = parse_agent_file(built_in.content) {
-                    let name = if agent.frontmatter.name.is_empty() {
-                        built_in.agent_id.to_string()
-                    } else {
-                        agent.frontmatter.name.clone()
-                    };
-                    let desc = agent.frontmatter.description.clone();
-                    let cap = infer_agent_capability(&agent.frontmatter);
-                    result.push((built_in.agent_id.to_string(), name, desc, cap));
-                }
-            }
-        }
-    }
-
-    // 3. 插件 agent（最低优先级）
-    for dir in extra_dirs {
-        scan_dir(dir, &mut result, &mut seen_ids);
-    }
-
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
 }
 
 // L5：SubAgent 中间件端口实现（stage 装配经端口注入主 agent 身份，

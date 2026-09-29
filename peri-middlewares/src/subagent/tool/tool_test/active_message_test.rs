@@ -96,6 +96,7 @@ impl MessageFixture {
             Some(Arc::new(String::new())),
         )
         .with_frozen_system_prompt(Arc::new("Frozen test system".into()));
+        let tool = with_agent_face(tool, dir.path()).await;
         Self {
             dir,
             store,

@@ -195,6 +195,24 @@ fn write_test_agent(dir: &tempfile::TempDir) {
     .unwrap();
 }
 
+thread_local! {
+    /// 夹具持有槽：`AgentFaceFixture` 自带 runtime 与线路，随测试线程存活
+    /// （测试线程结束时按序关闭 service/supervisor）。
+    static AGENT_FACE_FIXTURES: std::cell::RefCell<Vec<crate::mcp::agent_face_fixture::AgentFaceFixture>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// W5 夹具：为 `dir` 的真实 agent 资源面接线（**必须在写入定义文件之后调用**）。
+///
+/// 目录投影（`resources/list`）与正文激活（`resources/read`）都走生产链路
+/// （`AgentFaceFixture`：真实 handler + 生产池句柄），不使用测试替身。
+pub(crate) async fn with_agent_face(tool: SubAgentTool, dir: &std::path::Path) -> SubAgentTool {
+    let fixture = crate::mcp::agent_face_fixture::AgentFaceFixture::connect(dir).await;
+    let registry = std::sync::Arc::clone(&fixture.registry);
+    AGENT_FACE_FIXTURES.with(|fixtures| fixtures.borrow_mut().push(fixture));
+    tool.with_mcp_agents(Some(registry), None)
+}
+
 fn tool_with_built_ins_disabled(cwd: &str) -> SubAgentTool {
     let state = peri_acp_types::meta_harness::MetaHarnessState {
         built_in_subagents_enabled: false,
@@ -210,306 +228,255 @@ fn tool_with_built_ins_disabled(cwd: &str) -> SubAgentTool {
     make_subagent_tool(Vec::new()).with_parent_session(parent)
 }
 
-#[test]
-fn built_in_policy_rejects_new_built_in_definition() {
+/// W5 测试夹具：把会话级 MCP Agent registry 接到 SubAgentTool 上。
+///
+/// 用合成句柄（builtin `workspace` 实例的 `resources/list` 投影形状），不需要
+/// 真实 wire——目录/来源/开关判定不读正文；正文激活由 provider 与 ACP 端到端
+/// 用例覆盖。
+pub(crate) fn with_agent_catalog(
+    tool: SubAgentTool,
+    entries: &[(
+        peri_acp_types::workspace_resources::ResourceScope,
+        &str,
+        &str,
+    )],
+) -> SubAgentTool {
+    use peri_acp_types::plugin::ConfigSource;
+    use peri_acp_types::workspace_resources::{agent_uri, META_KEY_FRONTMATTER, META_KEY_SCOPE};
+    use rmcp::model::{MetaObject, Resource};
+
+    let mut resources = Vec::new();
+    for (scope, id, frontmatter) in entries {
+        let uri = agent_uri(*scope, None, id).expect("agent uri");
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            META_KEY_SCOPE.to_string(),
+            serde_json::Value::String(scope.as_str().to_string()),
+        );
+        meta.insert(
+            META_KEY_FRONTMATTER.to_string(),
+            serde_json::from_str(frontmatter).expect("frontmatter json"),
+        );
+        resources.push(
+            Resource::new(uri, *id)
+                .with_mime_type("text/markdown")
+                .with_meta(MetaObject(meta)),
+        );
+    }
+    let pool = Arc::new(crate::mcp::McpClientPool::new_pending());
+    pool.clients.write().insert(
+        "workspace".to_string(),
+        Arc::new(crate::mcp::McpClientHandle {
+            name: "workspace".to_string(),
+            version: None,
+            cache_version: None,
+            peer: None,
+            tools: Vec::new(),
+            resources,
+            status: crate::mcp::ClientStatus::Connected,
+            oauth_status: Default::default(),
+            source: Some(ConfigSource::Builtin {
+                instance: "workspace".to_string(),
+            }),
+            url: None,
+            skills_capable: false,
+            channel_capable: false,
+        }),
+    );
+    let registry = Arc::new(crate::mcp::McpAgentRegistry::new(pool));
+    tool.with_mcp_agents(Some(registry), None)
+}
+
+const LOCAL_AGENT_FM: &str =
+    r#"{"name":"local-agent","description":"Local agent","model":"sonnet"}"#;
+const BUILTIN_AGENT_FM: &str =
+    r#"{"name":"explorer","description":"Builtin explorer","model":"haiku"}"#;
+
+#[tokio::test]
+async fn agent_definition_without_a_resource_face_reports_a_gap() {
+    // W5：Agent 定义只从 MCP 资源面读取；面未装配 ⇒ 明确缺口报告，
+    // **不回落磁盘**（X4/J5）。
     let tool = tool_with_built_ins_disabled("/nonexistent");
-    let error = tool.load_agent_def("coder", "/nonexistent").unwrap_err();
-    assert!(error.contains("cannot find agent definition 'coder'"));
+    let error = tool.load_agent_def("coder").await.unwrap_err();
+    assert!(
+        error.contains("unavailable"),
+        "必须报告面不可用而不是读盘：{error}"
+    );
 }
 
-#[test]
-fn built_in_policy_keeps_project_override_callable() {
+#[tokio::test]
+async fn built_in_policy_is_enforced_by_the_registry_catalog() {
+    use peri_acp_types::workspace_resources::ResourceScope;
+    // 只有 builtin 来源的定义：关闭 built-in policy 时不可加载；resume 放开。
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("coder.md"),
-        "---\nname: project-coder\ndescription: Project override\n---\n\nProject agent.\n",
-    )
-    .unwrap();
     let cwd = dir.path().to_str().unwrap();
-    let agent = tool_with_built_ins_disabled(cwd)
-        .load_agent_def("coder", cwd)
-        .unwrap();
-    assert_eq!(agent.frontmatter.name, "project-coder");
+    let tool = with_agent_catalog(
+        tool_with_built_ins_disabled(cwd),
+        &[(ResourceScope::Builtin, "coder", BUILTIN_AGENT_FM)],
+    );
+    let error = tool.load_agent_def_for_resume("coder").await.unwrap_err();
+    assert!(
+        error.contains("cannot find agent definition 'coder'") || error.contains("not connected"),
+        "resume 允许 builtin 来源参与解析（正文激活需真实 peer）：{error}"
+    );
+    // 目录层：关闭位下 builtin 不进候选（建议列表不含 explorer）。
+    let suggestions = tool.agent_error_with_suggestions("Error", Some("explor"));
+    assert!(!suggestions.contains("explorer"), "{suggestions}");
 }
 
 #[test]
-fn built_in_policy_keeps_plugin_definition_callable() {
-    let dir = tempdir().unwrap();
-    let plugin_dir = dir.path().join("plugin-agents");
-    std::fs::create_dir_all(&plugin_dir).unwrap();
-    std::fs::write(
-        plugin_dir.join("plugin-reviewer.md"),
-        "---\nname: plugin-reviewer\ndescription: Plugin agent\n---\n\nReview.\n",
-    )
-    .unwrap();
-    let tool = tool_with_built_ins_disabled(dir.path().to_str().unwrap())
-        .with_plugin_agent_dirs(Arc::new(vec![plugin_dir]));
-    let agent = tool
-        .load_agent_def("plugin-reviewer", dir.path().to_str().unwrap())
-        .unwrap();
-    assert_eq!(agent.frontmatter.name, "plugin-reviewer");
-}
-
-#[test]
-fn plugin_definition_loader_rejects_traversal_agent_id() {
-    let dir = tempdir().unwrap();
-    let plugin_dir = dir.path().join("plugin-agents");
-    std::fs::create_dir_all(&plugin_dir).unwrap();
-    std::fs::write(
-        dir.path().join("outside.md"),
-        "---\nname: outside\ndescription: Must not load\n---\n\nOutside.\n",
-    )
-    .unwrap();
-    let tool = make_subagent_tool(Vec::new()).with_plugin_agent_dirs(Arc::new(vec![plugin_dir]));
-    let error = tool
-        .load_agent_def("../outside", dir.path().to_str().unwrap())
-        .unwrap_err();
-    assert!(error.contains("invalid agent definition ID"));
-}
-
-#[test]
-fn agent_suggestions_follow_the_invocation_cwd() {
-    let a = tempdir().unwrap();
-    let b = tempdir().unwrap();
-    let agents = a.path().join(".claude/agents");
-    std::fs::create_dir_all(&agents).unwrap();
-    std::fs::write(
-        agents.join("local-agent.md"),
-        "---\nname: local-agent\ndescription: Local agent\n---\n\nLocal.\n",
-    )
-    .unwrap();
-    let tool = make_subagent_tool(Vec::new());
+fn agent_suggestions_come_from_the_registry_catalog() {
+    use peri_acp_types::workspace_resources::ResourceScope;
+    let tool = with_agent_catalog(
+        make_subagent_tool(Vec::new()),
+        &[(ResourceScope::Project, "local-agent", LOCAL_AGENT_FM)],
+    );
     let error = "Error: cannot find agent definition 'local'";
+    let with_suggestion = tool.agent_error_with_suggestions(error, Some("local"));
+    assert!(with_suggestion.contains("local-agent"), "{with_suggestion}");
 
-    let from_b =
-        tool.agent_error_with_suggestions(error, Some("local"), b.path().to_str().unwrap());
-    assert!(!from_b.contains("local-agent"));
-    let from_a =
-        tool.agent_error_with_suggestions(error, Some("local"), a.path().to_str().unwrap());
-    assert!(from_a.contains("local-agent"));
-}
-
-#[test]
-fn agent_suggestions_track_files_added_and_removed_mid_session() {
-    let dir = tempdir().unwrap();
-    let agents = dir.path().join("agents");
-    std::fs::create_dir_all(&agents).unwrap();
-    let path = agents.join("changing-agent.md");
-    std::fs::write(
-        &path,
-        "---\nname: changing-agent\ndescription: Changing agent\n---\n\nChanging.\n",
-    )
-    .unwrap();
-    let tool = make_subagent_tool(Vec::new());
-    let error = "Error: cannot find agent definition 'changing'";
-    let cwd = dir.path().to_str().unwrap();
-
-    assert!(tool
-        .agent_error_with_suggestions(error, Some("changing"), cwd)
-        .contains("changing-agent"));
-    std::fs::remove_file(path).unwrap();
-    assert!(!tool
-        .agent_error_with_suggestions(error, Some("changing"), cwd)
-        .contains("changing-agent"));
-}
-
-#[test]
-fn agent_suggestions_validate_flat_nested_plugin_and_builtin_sources() {
-    let dir = tempdir().unwrap();
-    let agents = dir.path().join("agents");
-    std::fs::create_dir_all(agents.join("nested")).unwrap();
-    std::fs::write(
-        agents.join("flat.md"),
-        "---\nname: flat\ndescription: Flat agent\n---\n\nFlat.\n",
-    )
-    .unwrap();
-    std::fs::write(
-        agents.join("nested/agent.md"),
-        "---\nname: nested\ndescription: Nested agent\n---\n\nNested.\n",
-    )
-    .unwrap();
-    let cwd = dir.path().to_str().unwrap();
-    let tool = make_subagent_tool(Vec::new());
-    let error = "Error: cannot find agent definition";
-    assert!(tool
-        .agent_error_with_suggestions(error, Some("neste"), cwd)
-        .contains("nested"));
-    assert!(tool
-        .agent_error_with_suggestions(error, Some("fla"), cwd)
-        .contains("flat"));
-
-    let plugin = tempdir().unwrap();
-    std::fs::write(
-        plugin.path().join("plugin-only.md"),
-        "---\nname: plugin-only\ndescription: Plugin agent\n---\n\nPlugin.\n",
-    )
-    .unwrap();
-    let plugin_tool = tool_with_built_ins_disabled(cwd)
-        .with_plugin_agent_dirs(Arc::new(vec![plugin.path().to_path_buf()]));
-    assert!(plugin_tool
-        .agent_error_with_suggestions(error, Some("plugin"), cwd)
-        .contains("plugin-only"));
-    assert!(!plugin_tool
-        .agent_error_with_suggestions(error, Some("explor"), cwd)
-        .contains("explorer"));
-
-    assert!(tool
-        .agent_error_with_suggestions(error, Some("explor"), cwd)
-        .contains("explorer"));
-}
-
-#[test]
-fn agent_suggestions_skip_invalid_and_shadowed_definitions() {
-    let dir = tempdir().unwrap();
-    let agents = dir.path().join(".claude/agents");
-    std::fs::create_dir_all(&agents).unwrap();
-    std::fs::write(agents.join("broken.md"), "not valid frontmatter").unwrap();
-    std::fs::write(agents.join("coder.md"), "not valid frontmatter").unwrap();
-    let tool = make_subagent_tool(Vec::new());
-    let cwd = dir.path().to_str().unwrap();
-    let error = "Error: cannot find agent definition";
-
-    assert!(!tool
-        .agent_error_with_suggestions(error, Some("broke"), cwd)
-        .contains("broken"));
-    assert!(!tool
-        .agent_error_with_suggestions(error, Some("code"), cwd)
-        .contains("coder"));
+    // 无资源面 ⇒ 无候选，错误原文返回（不猜、不读盘）。
+    let bare = make_subagent_tool(Vec::new());
+    assert_eq!(
+        bare.agent_error_with_suggestions(error, Some("local")),
+        error
+    );
 }
 
 #[tokio::test]
 async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let a = tempdir().unwrap();
-    let b = tempdir().unwrap();
-    let agents = b.path().join(".claude/agents");
-    std::fs::create_dir_all(&agents).unwrap();
+    // W5：Agent 定义来源是**会话绑定的资源面**（builtin `workspace` 实例），
+    // 调用参数 `cwd` 只影响子代理的执行目录，**不影响定义来源**。本用例保留
+    // 原有「失败不启动 factory」断言（锁 failed-before-spawn 顺序）。
+    let dir = tempdir().unwrap();
+    let agents_dir = dir.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
-        agents.join("actual-agent.md"),
+        agents_dir.join("actual-agent.md"),
         "---\nname: actual-agent\ndescription: Actual agent\n---\n\nActual.\n",
     )
     .unwrap();
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let factory_calls_clone = Arc::clone(&factory_calls);
-    let tool = SubAgentTool::new(
-        Arc::new(Vec::new()),
-        None,
-        Arc::new(move |_| {
-            factory_calls_clone.fetch_add(1, Ordering::SeqCst);
-            Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        a.path().to_str().unwrap().to_string(),
-    );
-    let a_cwd = a.path().to_str().unwrap();
-    let b_cwd = b.path().to_str().unwrap();
+    let tool = with_agent_face(
+        SubAgentTool::new(
+            Arc::new(Vec::new()),
+            None,
+            Arc::new(move |_| {
+                factory_calls_clone.fetch_add(1, Ordering::SeqCst);
+                Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            dir.path().to_str().unwrap().to_string(),
+        ),
+        dir.path(),
+    )
+    .await;
+    let cwd = dir.path().to_str().unwrap();
 
+    // 1) 资源面命中的定义：即使 `cwd` 参数指向别处也能解析（来源由会话绑定）。
     let result = tool
         .invoke(
             serde_json::json!({
                 "subagent_type": "actual-agent",
-                "prompt": "from B",
-                "cwd": b_cwd,
+                "prompt": "from bound face",
+                "cwd": cwd,
             }),
-            peri_agent::tools::ToolContext::new(&[], a_cwd),
+            peri_agent::tools::ToolContext::new(&[], cwd),
         )
         .await
         .unwrap();
-    assert!(result.contains("echo: from B"));
+    assert!(result.contains("echo: from bound face"));
     assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
 
-    let typo = tool
+    // 2) 未命中：失败且**不启动 factory**（顺序契约不变）。
+    let error = tool
         .invoke(
             serde_json::json!({
                 "subagent_type": "actual",
                 "prompt": "typo",
-                "cwd": b_cwd,
+                "cwd": cwd,
             }),
-            peri_agent::tools::ToolContext::new(&[], a_cwd),
+            peri_agent::tools::ToolContext::new(&[], cwd),
         )
         .await
         .unwrap_err()
         .to_string();
-    assert!(typo.contains("actual-agent"));
-    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
-
-    let stale = tool
-        .invoke(
-            serde_json::json!({
-                "subagent_type": "actual",
-                "prompt": "stale cwd",
-                "cwd": a_cwd,
-            }),
-            peri_agent::tools::ToolContext::new(&[], a_cwd),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(!stale.contains("actual-agent"));
-    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+    assert!(error.contains("cannot find"), "{error}");
+    assert_eq!(
+        factory_calls.load(Ordering::SeqCst),
+        1,
+        "定义不可得时不得启动 factory"
+    );
 }
 
 #[tokio::test]
 async fn background_invoke_uses_argument_cwd_for_loader_failure() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let a = tempdir().unwrap();
-    let b = tempdir().unwrap();
-    let agents = b.path().join("agents");
-    std::fs::create_dir_all(&agents).unwrap();
+    // W5：Agent 定义来源是**会话绑定的资源面**（builtin `workspace` 实例的
+    // project agent 根 = 会话 cwd 的 `.claude/agents`）；`cwd` 参数不再决定
+    // 定义来源。本用例锁「定义不可得时后台路径报错且不启动 factory」。
+    let dir = tempdir().unwrap();
+    let agents_dir = dir.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
-        agents.join("background-agent.md"),
+        agents_dir.join("background-agent.md"),
         "---\nname: background-agent\ndescription: Background agent\n---\n\nBackground.\n",
     )
     .unwrap();
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let factory_calls_clone = Arc::clone(&factory_calls);
-    let tool = SubAgentTool::new(
-        Arc::new(Vec::new()),
-        None,
-        Arc::new(move |_| {
-            factory_calls_clone.fetch_add(1, Ordering::SeqCst);
-            Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        a.path().to_str().unwrap().to_string(),
+    let tool = with_agent_face(
+        SubAgentTool::new(
+            Arc::new(Vec::new()),
+            None,
+            Arc::new(move |_| {
+                factory_calls_clone.fetch_add(1, Ordering::SeqCst);
+                Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            dir.path().to_str().unwrap().to_string(),
+        ),
+        dir.path(),
     )
-    .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()));
-    let a_cwd = a.path().to_str().unwrap();
-    let b_cwd = b.path().to_str().unwrap();
+    .await;
 
-    let typo = tool
+    let result = tool
         .invoke(
             serde_json::json!({
-                "subagent_type": "background",
+                "subagent_type": "background-agent",
+                "prompt": "bg",
                 "run_in_background": true,
-                "prompt": "typo",
-                "cwd": b_cwd,
+                "cwd": dir.path().to_str().unwrap(),
             }),
-            peri_agent::tools::ToolContext::new(&[], a_cwd),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.contains("Background") || result.contains("task_id") || result.contains("echo: bg"),
+        "资源面命中的定义必须可执行（无 task_manager 时同步回退）: {result}"
+    );
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+
+    // 未知 id：失败且不启动 factory（原有断言保留）。
+    let calls_before = factory_calls.load(Ordering::SeqCst);
+    let error = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "does-not-exist",
+                "prompt": "bg",
+                "run_in_background": true,
+                "cwd": dir.path().to_str().unwrap(),
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
         .unwrap_err()
         .to_string();
-    assert!(typo.contains("background-agent"));
-    assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
-
-    let stale = tool
-        .invoke(
-            serde_json::json!({
-                "subagent_type": "background",
-                "run_in_background": true,
-                "prompt": "stale cwd",
-                "cwd": a_cwd,
-            }),
-            peri_agent::tools::ToolContext::new(&[], a_cwd),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(!stale.contains("background-agent"));
-    assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+    assert!(error.contains("cannot find"), "{error}");
+    assert_eq!(factory_calls.load(Ordering::SeqCst), calls_before);
 }
 
 #[tokio::test]
@@ -748,6 +715,9 @@ pub(crate) async fn install_parent_session(
     fixture: &SessionFixture,
 ) -> (SubAgentTool, String) {
     let cwd = fixture.workspace_cwd();
+    // W5：Agent 定义只从会话绑定的资源面读取——夹具把真实 workspace 实例
+    // （project agent 根 = 会话 cwd 的 `.claude/agents`）接到工具上。
+    let tool = with_agent_face(tool, std::path::Path::new(&cwd)).await;
     let parent_id = fixture
         .create_thread(ThreadMeta::new(cwd.clone()))
         .await
@@ -837,3 +807,50 @@ mod resume_integration_test;
 mod resume_test;
 #[path = "tool_test/tool_filter_test.rs"]
 mod tool_filter_test;
+
+/// W5 关闭矩阵 E2E（生产链路）：agent 面关闭（`SubAgentMiddleware` 链槽关闭位 =
+/// `SUB_AGENT_FACE_CLOSED_KEY`）⇒ 本地来源**不可发现、不可激活**，且**零磁盘兜底**
+/// （定义文件仍在磁盘上也不得被读取）。
+#[tokio::test]
+async fn closed_agent_face_hides_and_blocks_activation_without_disk_fallback() {
+    use peri_acp_types::workspace_resources::ResourceScope;
+
+    let dir = tempdir().unwrap();
+    let agents_dir = dir.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("matrix-agent.md"),
+        "---\nname: matrix-agent\ndescription: Matrix agent\n---\n\nMatrix.\n",
+    )
+    .unwrap();
+
+    // 默认（面开启）：资源面可见、可解析（定义文件存在即命中）。
+    let open_fixture = crate::mcp::agent_face_fixture::AgentFaceFixture::connect(dir.path()).await;
+    let open = open_fixture.registry.local_catalog(true);
+    assert!(
+        open.iter().any(|entry| entry.id == "matrix-agent"),
+        "面开启时候选可见: {open:?}"
+    );
+    drop(open_fixture);
+
+    // 关闭位（与 A24 关闭集同一份 `disabled_middlewares` 派生）：同一磁盘内容不可见。
+    let closed_fixture =
+        crate::mcp::agent_face_fixture::AgentFaceFixture::connect(dir.path()).await;
+    let closed_registry =
+        crate::mcp::McpAgentRegistry::new(std::sync::Arc::clone(&closed_fixture.pool))
+            .with_local_face_closed(true);
+    assert!(
+        closed_registry.local_catalog(true).is_empty(),
+        "关闭位下本地来源不可发现"
+    );
+    assert!(
+        closed_registry.resolve_local("matrix-agent", true).is_err(),
+        "关闭位下不可激活（零磁盘兜底）"
+    );
+    // 链槽关闭键是唯一事实源常量（不是散落字面量）。
+    assert_eq!(
+        crate::assembly::SUB_AGENT_FACE_CLOSED_KEY,
+        "SubAgentMiddleware"
+    );
+    let _ = ResourceScope::Project;
+}

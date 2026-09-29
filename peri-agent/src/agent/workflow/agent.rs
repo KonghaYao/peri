@@ -253,6 +253,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 .ctx
                 .middleware_factory
                 .resolve_agent_definition(agent_type, &self.ctx.cwd)
+                .await
             {
                 Ok(definition) => Some(definition),
                 Err(detail) => {

@@ -31,6 +31,7 @@ fn write_skill(root: &Path, dir_name: &str, name: &str) {
 /// 完整输入：project 技能根、plugin 技能根、agent 根 + 工作区指令文档。
 fn full_input(skill_root: &Path, plugin_root: &Path, agent_root: &Path) -> WorkspaceResourcesInput {
     WorkspaceResourcesInput {
+        instruction_excludes: Vec::new(),
         skill_roots: vec![
             ResourceRoot::new(skill_root, ResourceScope::Project),
             ResourceRoot::plugin(plugin_root, "plug"),
@@ -161,6 +162,7 @@ fn scan_read_replacement_does_not_leak() {
         let provider = WorkspaceResourceProvider::new(
             skills.path(),
             WorkspaceResourcesInput {
+                instruction_excludes: Vec::new(),
                 skill_roots: vec![ResourceRoot::new(skills.path(), ResourceScope::Project)],
                 agent_roots: Vec::new(),
                 disable_bundled: true,
@@ -209,8 +211,9 @@ fn templates_cover_skill_and_agent_shapes_without_duplicates() {
         .iter()
         .map(|template| template.uri_template.as_str())
         .collect();
-    // 每个 scope 一条入口 + 一条附件；agent 四条。
-    assert_eq!(templates.len(), ResourceScope::ALL.len() * 2 + 4);
+    // 每个 scope 一条入口 + 一条附件；agent 五条（user/global/project/plugin/
+    // builtin——W5 迁入 builtin 静态表）。
+    assert_eq!(templates.len(), ResourceScope::ALL.len() * 2 + 5);
     let mut sorted = uri_templates.clone();
     sorted.sort();
     sorted.dedup();
@@ -220,6 +223,7 @@ fn templates_cover_skill_and_agent_shapes_without_duplicates() {
     assert!(uri_templates.contains(&"skill://user/{name}/{+path}"));
     assert!(uri_templates.contains(&"agent://project/{name}/agent.md"));
     assert!(uri_templates.contains(&"agent://plugin/{plugin_name}/{name}/agent.md"));
+    assert!(uri_templates.contains(&"agent://builtin/{name}/agent.md"));
     // 模板的 MIME 与描述存在（供宿主发现面展示）。
     let entry = templates
         .iter()
@@ -325,6 +329,7 @@ fn skills_endpoints_delegate_to_catalog() {
     let provider = WorkspaceResourceProvider::new(
         cwd.path(),
         WorkspaceResourcesInput {
+            instruction_excludes: Vec::new(),
             skill_roots: vec![ResourceRoot::new(skills.path(), ResourceScope::Project)],
             agent_roots: Vec::new(),
             disable_bundled: true,

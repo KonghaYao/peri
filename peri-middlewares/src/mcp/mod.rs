@@ -79,6 +79,11 @@ mod builtin_spike_tests;
 #[path = "builtin_subscription_wire_test.rs"]
 mod builtin_subscription_wire_tests;
 
+// W5：Agent 资源面真实线路夹具（供 subagent/tool 与 catalog 用例使用）。
+#[cfg(test)]
+#[path = "agent_face_fixture.rs"]
+pub(crate) mod agent_face_fixture;
+
 // builtin 默认配置层（loader step 6.5 overlay）的 crate 内验收（owner：I-02）。
 // 两个 builtin 测试模块由 I-02 在 W3 一次挂载，避免 builtin_apply / builtin_runtime
 // 出现两个 owner。

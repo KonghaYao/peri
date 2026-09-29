@@ -33,6 +33,23 @@ impl AgentOverrides {
 /// 此常量，避免跨 crate 硬编码漂移。顺序（弱 → 强）用于展示，无调度语义。
 pub const MODEL_TIERS: [&str; 4] = ["haiku", "sonnet", "opus", "fable"];
 
+/// 主提示词 `{{available_agents}}` 候选目录的一条（W5：由资源面投影派生）。
+///
+/// 迁移前该目录来自宿主本地扫盘（`SkillsPort::agents` → `scan_agents_detailed`）；
+/// W5 起唯一来源是会话级 MCP Agent registry 对 builtin `workspace` 实例
+/// `resources/list` 的投影（本地三来源 + E13 优先级去重 + builtin 开关过滤）。
+/// 结构只承载渲染所需字段：`id`、`model_tier`、`can_mutate`（描述不注入，
+/// 见 `format_available_agents` 的既有口径）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCatalogEntry {
+    /// `subagent_type` 参数值（本地来源恒为裸 agent 标识）。
+    pub id: String,
+    /// 模型档位（`haiku` / `sonnet` / `opus` / `fable` / `inherit`）。
+    pub model_tier: String,
+    /// 保守写能力标签（调度提示，不是授权）。
+    pub can_mutate: bool,
+}
+
 /// agent 能力标签（subagent catalog 检索依据；由 agent.md 推断）。
 ///
 /// - 能否并行执行（readonly agent 可安全并发）

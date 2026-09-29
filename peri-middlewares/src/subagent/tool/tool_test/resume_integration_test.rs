@@ -161,6 +161,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
         .with_parent_thread_id(parent_id.clone())
         .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
+    let t_a = with_agent_face(t_a, dir.path()).await;
     let interrupted = t_a
         .invoke(
             serde_json::json!({
@@ -187,6 +188,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
         .with_parent_thread_id(parent_id.clone())
         .with_execution_owner(store.execution_owner())
         .with_parent_session(parent);
+    let t_b = with_agent_face(t_b, dir.path()).await;
     let result = t_b
         .invoke(
             serde_json::json!({
@@ -246,6 +248,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
             .with_parent_thread_id(parent_id.clone())
             .with_execution_owner(store.execution_owner())
             .with_parent_session(parent.clone());
+        let t_a = with_agent_face(t_a, dir.path()).await;
         let interrupted = t_a
             .invoke(
                 serde_json::json!({
@@ -273,6 +276,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
         .with_parent_thread_id(parent_id.clone())
         .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
+    let t_b = with_agent_face(t_b, dir.path()).await;
     let result = t_b
         .invoke(
             serde_json::json!({
@@ -333,16 +337,20 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
             token,
         )
     };
-    let mk_cancelled = || {
-        make_subagent_tool(vec![])
-            .with_session_resources(store.facade())
-            .with_parent_thread_id(parent_id.clone())
-            .with_execution_owner(store.execution_owner())
-            .with_parent_session(mk_parent(true))
+    let mk_cancelled = || async {
+        with_agent_face(
+            make_subagent_tool(vec![])
+                .with_session_resources(store.facade())
+                .with_parent_thread_id(parent_id.clone())
+                .with_execution_owner(store.execution_owner())
+                .with_parent_session(mk_parent(true)),
+            dir.path(),
+        )
+        .await
     };
 
     // 1) spawn → 中断 #1（文本含 child_thread_id + resume 提示）
-    let t1 = mk_cancelled();
+    let t1 = mk_cancelled().await;
     let r1 = t1
         .invoke(
             serde_json::json!({
@@ -362,7 +370,7 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     let id1 = extract_child_thread_id(&r1);
 
     // 2) resume → 中断 #2（同一 thread_id）
-    let t2 = mk_cancelled();
+    let t2 = mk_cancelled().await;
     let r2 = t2
         .invoke(
             serde_json::json!({
@@ -387,6 +395,7 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
         .with_parent_thread_id(parent_id.clone())
         .with_execution_owner(store.execution_owner())
         .with_parent_session(mk_parent(false));
+    let t3 = with_agent_face(t3, dir.path()).await;
     let r3 = t3
         .invoke(
             serde_json::json!({
@@ -452,6 +461,8 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     .with_parent_thread_id(parent_id.clone())
     .with_execution_owner(store.execution_owner())
     .with_parent_session(parent.clone());
+    let t = with_agent_face(t, dir.path()).await;
+    let t = with_agent_face(t, dir.path()).await;
 
     // 首次执行 → 中断（第 1 对 Start/Stop；LLM 返回 Interrupted → Ok 可恢复文本）
     let interrupted = t
@@ -579,6 +590,7 @@ async fn test_resume_skill_preload_not_duplicated() {
         "workspace",
         &[("test-skill", "This is the test skill content.\n")],
     );
+    let t = with_agent_face(t, dir.path()).await;
 
     // 首次执行（agent-def 路径）→ SkillPreload 注入一套 → 中断（LLM 返回 Interrupted）
     let interrupted = t
@@ -697,6 +709,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
     .with_parent_thread_id(parent_id.clone())
     .with_execution_owner(store.execution_owner())
     .with_parent_session(parent.clone());
+    let t = with_agent_face(t, dir.path()).await;
 
     let result = t
         .invoke(
@@ -784,6 +797,7 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
         "workspace",
         &[("test-skill", "This is the test skill content.\n")],
     );
+    let t = with_agent_face(t, dir.path()).await;
 
     // 首次执行（显式声明 skills）→ 注入一套 → 中断（LLM 返回 Interrupted）
     let interrupted = t

@@ -20,6 +20,8 @@ use super::*;
 
 /// 项目级技能名（`{cwd}/.claude/skills/<name>/SKILL.md`）。
 const PROJECT_SKILL: &str = "e2e-project-skill";
+/// W5：项目指令（`AGENTS.md`）哨兵——用于证明指令经资源面获得、关闭后零磁盘兜底。
+const PROJECT_INSTRUCTION_SENTINEL: &str = "W5-PROJECT-INSTRUCTION-SENTINEL";
 /// 项目级技能描述：同时作为摘要哨兵（D4 摘要只放 name + 来源标签，
 /// 因此本字段不应出现——出现即说明走的是别的路径）。
 const PROJECT_SKILL_DESC: &str = "W4B-E2E-PROJECT-SKILL-DESC";
@@ -56,6 +58,12 @@ impl SkillFixture {
         std::fs::write(
             skill_dir.join("SKILL.md"),
             format!("---\nname: {PROJECT_SKILL}\ndescription: {PROJECT_SKILL_DESC}\n---\n\n# Project skill body\n"),
+        )
+        .unwrap();
+        // W5：项目指令（资源面 `peri-instruction://workspace/main` 的来源文件）。
+        std::fs::write(
+            target.join("AGENTS.md"),
+            format!("# Project rules\n\n{PROJECT_INSTRUCTION_SENTINEL}\n"),
         )
         .unwrap();
         // 全局配置（HOME）：`disableBundledSkills` 是全局位（F12 语义）。
@@ -448,4 +456,216 @@ async fn skills_middleware_disabled_hides_core_commands_but_keeps_mcp_face() {
         "冻结技能摘要不得进入 system prompt: {}",
         frozen.system_prompt()
     );
+}
+
+/// W5 关闭矩阵（指令面，差分对照）：同一夹具只差
+/// `meta_harness.WorkspaceMiddleware=false`。
+///
+/// - 默认会话：冻结 system prompt **含**项目指令正文（经 P4 的
+///   `peri-instruction://workspace/main` 资源读取，E15）；
+/// - 实例关闭会话：冻结 prompt **不含**该哨兵——磁盘上的 `AGENTS.md` 仍在，
+///   证明零磁盘兜底（X4/J5）。
+#[tokio::test]
+#[serial]
+async fn closed_workspace_instance_makes_instructions_unavailable_without_disk_fallback() {
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+
+    // ── 默认（指令面开启） ──
+    let open = SkillFixture::new(r#""01_intro":true"#, false);
+    let open_cfg = skill_server_config(&open._tmp, open.startup.clone()).await;
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": open.target.clone()}),
+        &open_cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new（指令面开启）必须成功");
+    let id = created["sessionId"].as_str().unwrap().to_owned();
+    let frozen = sessions[&id].frozen.as_ref().expect("frozen");
+    assert!(
+        frozen
+            .claude_md()
+            .unwrap_or_default()
+            .contains(PROJECT_INSTRUCTION_SENTINEL),
+        "默认会话的冻结指令正文必须含哨兵（经 P4 的 peri-instruction 资源读取）"
+    );
+    assert!(
+        workspace_resource_uris(&sessions, &id)
+            .contains(&"peri-instruction://workspace/main".to_string()),
+        "指令资源必须经 workspace 实例暴露"
+    );
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &open_cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+
+    // ── 关闭实例（同一夹具，只差关闭位） ──
+    let closed = SkillFixture::new(r#""01_intro":true,"WorkspaceMiddleware":false"#, false);
+    let closed_cfg = skill_server_config(&closed._tmp, closed.startup.clone()).await;
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": closed.target.clone()}),
+        &closed_cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new（实例关闭）必须成功——关闭不阻塞创建");
+    let id = created["sessionId"].as_str().unwrap().to_owned();
+    let frozen = sessions[&id].frozen.as_ref().expect("frozen");
+    assert!(
+        std::path::Path::new(&closed.target)
+            .join("AGENTS.md")
+            .is_file(),
+        "零磁盘兜底的前提：哨兵文件仍在磁盘上"
+    );
+    assert!(
+        !frozen
+            .claude_md()
+            .unwrap_or_default()
+            .contains(PROJECT_INSTRUCTION_SENTINEL),
+        "关闭 workspace ⇒ 指令不可得，且不得回落磁盘"
+    );
+    assert!(
+        !frozen
+            .system_prompt()
+            .contains(PROJECT_INSTRUCTION_SENTINEL),
+        "关闭会话的冻结 prompt 同样不得携带旧指令正文"
+    );
+    // 不误伤其他面：关闭位只摘指令/技能面，会话自身仍可创建并关闭。
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &closed_cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+}
+
+/// 写一个 project agent 定义（`{cwd}/<root>/<id>.md`）。
+///
+/// frontmatter 的 description 作为哨兵：provider 把它逐字投影进资源
+/// `description`，因此「清单里剩哪一版」可观察（URI 只含文件名 id，区分不出根）。
+fn write_project_agent(cwd: &str, root: &str, id: &str, description: &str) {
+    let dir = std::path::Path::new(cwd).join(root);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{id}.md")),
+        format!("---\nname: {id}\ndescription: {description}\n---\n\nSentinel {description}.\n"),
+    )
+    .unwrap();
+}
+
+/// 失败诊断：按 URI 取会话池里 builtin `workspace` 资源的 description。
+fn workspace_resource_description(
+    sessions: &HashMap<String, SessionState>,
+    id: &str,
+    uri: &str,
+) -> Option<String> {
+    let environment = sessions[id].environment.as_ref()?;
+    let pool = environment.cfg.mcp_pool.as_ref()?;
+    let pool = pool
+        .as_any()
+        .downcast_ref::<peri_middlewares::mcp::McpClientPool>()?;
+    pool.get_resources("workspace")
+        .iter()
+        .find(|resource| resource.uri == uri)
+        .and_then(|resource| resource.description.clone())
+}
+
+/// W5 第二个 project agent 根（`{cwd}/agents`）的**宿主接线**证据 + 同 id 冲突
+/// 的先到先得（生产装配：`session/new` → 资源清单）。
+///
+/// provider 侧只覆盖了「给两个 project 根时谁先到先得」的排序（`agents_test.rs`
+/// 的 `two_project_roots_prefer_the_first_one_for_same_id`），宿主是否真的把
+/// `{cwd}/agents` 接进输入没有任何断言——本例补这一条：
+/// 1. 只存在于 `{cwd}/agents` 的 agent ⇒ 资源清单含
+///    `agent://project/<id>/agent.md`（裸根真的进了链路）；
+/// 2. 同 id 两处并存 ⇒ 该 id 只公开一次，且胜出者的 description 来自
+///    `.claude/agents` 版——`scan_catalog` 对同 (scope, plugin, id) 先到先得，
+///    宿主按 `.claude/agents` 先、`{cwd}/agents` 后的顺序给根。
+#[tokio::test]
+#[serial]
+async fn bare_agents_root_is_wired_and_loses_same_id_to_the_claude_root() {
+    /// 只存在于裸根（`{cwd}/agents`）的 agent。
+    const BARE_ONLY: &str = "e2e-bare-root-only-agent";
+    /// 只存在于 `.claude/agents` 的 agent（既有根的对照）。
+    const CLAUDE_ONLY: &str = "e2e-claude-root-only-agent";
+    /// 两个根同名的 agent（冲突探针）。
+    const CONFLICT: &str = "e2e-conflict-agent";
+    const CONFLICT_CLAUDE_DESC: &str = "E2E-CONFLICT-CLAUDE-ROOT-WINS";
+    const CONFLICT_BARE_DESC: &str = "E2E-CONFLICT-BARE-ROOT-LOSES";
+
+    let fixture = SkillFixture::new(r#""01_intro":true"#, false);
+    write_project_agent(&fixture.target, "agents", BARE_ONLY, "E2E-BARE-ROOT-ONLY");
+    write_project_agent(
+        &fixture.target,
+        ".claude/agents",
+        CLAUDE_ONLY,
+        "E2E-CLAUDE-ROOT-ONLY",
+    );
+    write_project_agent(
+        &fixture.target,
+        ".claude/agents",
+        CONFLICT,
+        CONFLICT_CLAUDE_DESC,
+    );
+    write_project_agent(&fixture.target, "agents", CONFLICT, CONFLICT_BARE_DESC);
+
+    let cfg = skill_server_config(&fixture._tmp, fixture.startup.clone()).await;
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": fixture.target.clone()}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new（agent 根已接线）必须成功");
+    let id = created["sessionId"].as_str().unwrap().to_owned();
+
+    let uris = workspace_resource_uris(&sessions, &id);
+    assert!(
+        uris.contains(&format!("agent://project/{BARE_ONLY}/agent.md")),
+        "宿主必须接线 `{{cwd}}/agents`（仅存在于裸根的 agent 应进资源清单）: {uris:?}"
+    );
+    assert!(
+        uris.contains(&format!("agent://project/{CLAUDE_ONLY}/agent.md")),
+        "`.claude/agents` 根必须照常接线（对照）: {uris:?}"
+    );
+
+    let conflict_uri = format!("agent://project/{CONFLICT}/agent.md");
+    assert_eq!(
+        uris.iter().filter(|uri| **uri == conflict_uri).count(),
+        1,
+        "同 (scope, plugin, id) 先到先得：该 id 只公开一次: {uris:?}"
+    );
+    assert_eq!(
+        workspace_resource_description(&sessions, &id, &conflict_uri).as_deref(),
+        Some(CONFLICT_CLAUDE_DESC),
+        "胜出者是先到的 `.claude/agents` 版（description = frontmatter 逐字投影）"
+    );
+
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
 }

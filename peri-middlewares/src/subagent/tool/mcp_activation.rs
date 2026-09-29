@@ -14,7 +14,7 @@ impl super::SubAgentTool {
             .mcp_agent_registry
             .as_ref()
             .ok_or("MCP Agents are not available in this session")?;
-        let activated = registry.activate(agent_id).await?;
+        let activated = registry.activate(agent_id, true).await?;
         let effective_tools: Vec<String> = self
             .filter_tools(
                 &activated.definition.frontmatter.tools,

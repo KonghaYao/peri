@@ -474,7 +474,7 @@ fn create_session_workflow_middleware(
         // session 级路径与迁移前一致，不启用事件发布（workflow 事件仅由
         // 内部 handler 消费：usage/progress）；统一发射接线留待单独裁定。
         None,
-        Arc::clone(&cfg.skills),
+        Arc::clone(&cfg.agent_catalog),
         // W4b（F4）：workflow agent 与主链共用会话级 MCP skill registry
         // （会话已登记时取到；未登记/print 模式为 None → 技能工具为空面）。
         cfg.session_manager.mcp_skill_registry_for(session_id),
@@ -670,11 +670,24 @@ pub(crate) async fn new_session_from_prepared(
         },
         None => Vec::new(),
     };
+    // W5（E15）：项目指令（AGENTS.md / CLAUDE.md / CLAUDE.local.md）同样在内容
+    // 准入期从 system 来源读取——宿主本地读盘与 `@import` 解析已归 provider。
+    let instructions = match environment.as_ref() {
+        Some(env) => match env.read_workspace_instructions().await {
+            Ok(instructions) => instructions,
+            Err(error) => {
+                drain_and_abandon(environment.as_ref(), &initialization).await?;
+                return Err(error);
+            }
+        },
+        None => Default::default(),
+    };
     if let Err(error) = prepared.build_frozen_after_activation(
         cfg,
         &crate::prompt::PromptRuntimeEnv::detect(&prepared.cwd),
         docs,
         &skill_catalog,
+        &instructions,
     ) {
         drain_and_abandon(environment.as_ref(), &initialization).await?;
         return Err(error);

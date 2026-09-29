@@ -162,7 +162,7 @@ async fn build_server_config(
             Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
                 as Arc<dyn peri_acp_types::tasks::TaskManager>
         })),
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
     );
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
@@ -185,7 +185,6 @@ async fn build_server_config(
         channel_state: None,
         plugin_skill_roots: Vec::new(),
         plugin_command_entries: Vec::new(),
-        plugin_agent_dirs: Vec::new(),
         plugin_hooks: Vec::new(),
         plugin_hooks_only: Vec::new(),
         plugin_loaded: Vec::new(),
@@ -195,7 +194,7 @@ async fn build_server_config(
         // 需要断言 pool 生命周期的用例自行注入（见 delete 用例）。
         lsp_pool: None,
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
-        skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        agent_catalog: Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
         settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
         shared_tools: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
@@ -234,7 +233,7 @@ async fn create_bound_fixture(cfg: &AcpServerConfig, cwd: &str, id: Option<&str>
     let thread_id = id.map(str::to_owned).unwrap_or_else(new_session_id);
     let frozen = cfg
         .session_manager
-        .build_frozen_data(workspace.cwd.to_str().unwrap(), &cfg.plugin_agent_dirs);
+        .build_frozen_data(workspace.cwd.to_str().unwrap());
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
     let lease = cfg
         .session_resources
@@ -351,7 +350,7 @@ async fn register_session_with_history(
         .unwrap();
     let frozen = cfg
         .session_manager
-        .build_frozen_data(workspace.cwd.to_str().unwrap(), &cfg.plugin_agent_dirs);
+        .build_frozen_data(workspace.cwd.to_str().unwrap());
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
     let lease = cfg
         .session_resources

@@ -25,7 +25,6 @@ use crate::{
 /// |--------|----------|
 /// | `GitAttributionMiddleware` | SubAgent 工具调用无需 git 贡献追踪 |
 /// | `AtMentionMiddleware` | @path 解析仅在主 Agent 用户交互中生效 |
-/// | `AgentDefineMiddleware` | SubAgent 定义由调用方单独注入 system_prompt |
 /// | `PluginMiddleware` | 插件仅在主 Agent 中加载 |
 /// | `HITLMiddleware` | SubAgent 工具执行沿用父 Agent 的审批模式 |
 ///

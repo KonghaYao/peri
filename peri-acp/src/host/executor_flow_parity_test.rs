@@ -65,6 +65,7 @@ fn make_parity_context(
     });
 
     peri_agent::session::factory::AssemblyContext {
+        agent_catalog: Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         cwd: "/tmp/parity-test".to_string(),
         cancel: AgentCancellationToken::new(),
         broker: Arc::new(NoopBroker),
@@ -75,7 +76,6 @@ fn make_parity_context(
         auto_classifier_model: Arc::new(tokio::sync::Mutex::new(
             Box::new(ParityFakeModel) as Box<dyn peri_model::Model>
         )),
-        claude_md_excludes: Vec::new(),
         preload_skills: Vec::new(),
         plugin_skill_roots: Vec::new(),
         plugin_loaded: Vec::new(),

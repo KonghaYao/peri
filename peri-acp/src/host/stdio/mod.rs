@@ -136,7 +136,7 @@ async fn assemble_stdio_config(input: StdioInput) -> anyhow::Result<super::AcpSe
     // 同一实例，保证配置 provenance 一致。
 
     // ── M-TUI 收口：middlewares 具体实现（CronScheduler / McpClientPool /
-    //    ToolSearchIndex / SkillsProvider / PluginManager / SettingsHooksLoader /
+    //    ToolSearchIndex / AgentCatalogProvider / PluginManager / SettingsHooksLoader /
     //    插件聚合数据 / Langfuse / SessionManager）由 host 装配面统一构造
     //    （与 TUI/print 的 `assemble_server_config` 同源）；stdio 无 bare
     //    语义、无 cron tick。MCP 初始化（run_initialize）、孤儿插件清理即

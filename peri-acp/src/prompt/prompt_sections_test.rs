@@ -7,8 +7,7 @@ fn test_no_overrides_contains_all_sections() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -39,8 +38,7 @@ fn test_no_overrides_no_duplicate_tone_proactiveness() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -71,8 +69,7 @@ fn test_no_overrides_no_leading_newlines() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -95,8 +92,7 @@ fn test_with_overrides_uses_override_block() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -120,8 +116,7 @@ fn test_placeholders_replaced() {
         None,
         "/custom/path",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -136,8 +131,7 @@ fn test_env_contains_cwd() {
         None,
         "/custom/path",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -151,8 +145,7 @@ fn test_features_none_excludes_only_unheld_channel_section() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -188,8 +181,7 @@ fn test_hitl_section_rendered_by_holder() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -233,8 +225,7 @@ fn test_hitl_sensitive_list_uses_system_mcp_raw_names() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -284,8 +275,7 @@ fn test_subagent_section_rendered_by_holder() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -306,8 +296,7 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -335,8 +324,7 @@ fn test_skills_section_rendered_by_holder() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -372,8 +360,7 @@ fn test_subagent_selection_guide_has_no_specific_mapping() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -413,8 +400,7 @@ fn test_gated_sections_render_in_position_order() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         Some("zh"),
     );
@@ -449,8 +435,7 @@ fn test_workflow_section_deleted_entirely() {
             None,
             "/tmp",
             features,
-            &SkillsProvider,
-            &[],
+            &AgentCatalogProvider::new(),
             None,
             None,
         );
@@ -473,8 +458,7 @@ fn test_all_features_enabled_includes_all() {
         None,
         "/tmp",
         features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -513,8 +497,7 @@ fn test_detect_channel_gate_never_enabled() {
         None,
         "/tmp",
         features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -570,8 +553,7 @@ fn test_boundary_marker_before_dynamic_content() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -599,8 +581,7 @@ fn test_boundary_marker_with_all_features() {
         None,
         "/tmp",
         features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         None,
         None,
     );
@@ -623,8 +604,7 @@ fn test_default_production_template_emits_one_cache_boundary() {
         None,
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -634,8 +614,7 @@ fn test_default_production_template_emits_one_cache_boundary() {
             .render(
                 &PromptEnv::with_frozen_date("/tmp", "2026-01-01"),
                 &PromptFeatures::none(),
-                &SkillsProvider,
-                &[],
+                &AgentCatalogProvider::new(),
             )
             .matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
             .count(),

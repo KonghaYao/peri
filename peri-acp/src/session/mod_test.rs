@@ -124,7 +124,7 @@ async fn make_manager_inner(
         None, // MCP 订阅端口（测试无）
         None, // Dynamic MCP（测试无）
         task_manager_factory,
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         plugin_entries,
     )
 }
@@ -203,7 +203,7 @@ async fn make_manager_with_mcp_subscription(
         mcp_subscription,
         None, // Dynamic MCP（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
     )
 }
@@ -262,7 +262,7 @@ async fn test_build_frozen_data_返回非空system_prompt() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_session_manager(&tmp).await;
 
-    let frozen = mgr.build_frozen_data(tmp.path().to_str().unwrap(), &[]);
+    let frozen = mgr.build_frozen_data(tmp.path().to_str().unwrap());
     assert!(
         !frozen.system_prompt().is_empty(),
         "frozen system_prompt 不应为空"

@@ -215,6 +215,10 @@ struct SyncFixture {
 async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncFixture {
     let dir = tempfile::tempdir().expect("fixture directory");
     write_agent(&dir);
+    // W5：Agent 定义只从会话绑定的资源面读取（真实 workspace 实例夹具）。
+    let fixture_face = crate::mcp::agent_face_fixture::AgentFaceFixture::connect(dir.path()).await;
+    let agent_registry = std::sync::Arc::clone(&fixture_face.registry);
+    let _face_guard = fixture_face;
     let cwd = dir.path().to_string_lossy().into_owned();
 
     let child_events = Arc::new(Mutex::new(Vec::new()));
@@ -228,22 +232,20 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
     let bridge = Arc::new(RecordingBridge {
         observes: Arc::new(Mutex::new(Vec::new())),
     });
-    let child_tool: Arc<dyn BaseTool> =
-        Arc::new(
-            SubAgentTool::new(
-                Arc::new(Vec::new()),
-                Some(child_handler),
-                Arc::new(move |_| {
-                    Box::new(AgentModelBridge::from_arc(Arc::clone(&model_for_factory)))
-                        as Box<dyn ReactLLM + Send + Sync>
-                }),
-                cwd.clone(),
-            )
-            .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
-            .with_langfuse_bridge(
-                Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>
-            ),
-        );
+    let child_tool: Arc<dyn BaseTool> = Arc::new(
+        SubAgentTool::new(
+            Arc::new(Vec::new()),
+            Some(child_handler),
+            Arc::new(move |_| {
+                Box::new(AgentModelBridge::from_arc(Arc::clone(&model_for_factory)))
+                    as Box<dyn ReactLLM + Send + Sync>
+            }),
+            cwd.clone(),
+        )
+        .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
+        .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>)
+        .with_mcp_agents(Some(std::sync::Arc::clone(&agent_registry)), None),
+    );
 
     let input = serde_json::json!({
         "subagent_type": "fixture-agent",
@@ -496,6 +498,10 @@ async fn visible_delta_then_interruption_reaches_parent_and_forwards_delta() {
 async fn background_http_429_consumes_typed_result_and_safe_notification() {
     let dir = tempfile::tempdir().expect("fixture directory");
     write_agent(&dir);
+    // W5：Agent 定义来自会话绑定的资源面（真实 workspace 实例夹具）。
+    let bg_face = crate::mcp::agent_face_fixture::AgentFaceFixture::connect(dir.path()).await;
+    let bg_agent_registry = std::sync::Arc::clone(&bg_face.registry);
+    let _bg_face_guard = bg_face;
     let cwd = dir.path().to_string_lossy().into_owned();
     let (runtime_model, provider) = RuntimeFailureModel::new(FailureFixture::Http(429)).await;
     let model: Arc<dyn Model> = Arc::new(runtime_model);
@@ -515,6 +521,7 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
     )
     .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
     .with_bg_event_sender(bg_event_tx)
+    .with_mcp_agents(Some(Arc::clone(&bg_agent_registry)), None)
     .with_on_bg_complete(Arc::new(move |result, _kind| {
         if let Some(sender) = completed_tx_for_callback.lock().unwrap().take() {
             let _ = sender.send(result.clone());

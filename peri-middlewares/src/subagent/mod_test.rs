@@ -10,6 +10,7 @@ use peri_agent::{
 };
 
 use super::*;
+use crate::claude_agent_parser::parse_agent_file;
 
 struct EchoLLM;
 
@@ -61,68 +62,6 @@ fn test_build_tool_returns_subagent_tool() {
     );
     let tool = m.build_tool("/tmp");
     assert_eq!(tool.name(), "Agent");
-}
-
-#[test]
-fn test_scan_agents_no_dir() {
-    let result = scan_agents("/nonexistent/path");
-    // No project-level agents, but built-in agents should still appear
-    assert!(
-        !result.is_empty(),
-        "Built-in agents should always be present"
-    );
-    assert!(
-        result.iter().any(|(id, _, _)| id == "explorer"),
-        "Built-in explorer agent should be present"
-    );
-}
-
-#[test]
-fn test_scan_agents_flat_md() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("code-reviewer.md"),
-        "---\nname: code-reviewer\ndescription: Reviews code quality\n---\n\nYou are a reviewer.\n",
-    )
-    .unwrap();
-
-    let result = scan_agents(dir.path().to_str().unwrap());
-    // Should contain the project agent + built-in agents
-    assert!(
-        result.len() > 1,
-        "Should contain project agent + built-in agents"
-    );
-    let reviewer = result.iter().find(|(id, _, _)| id == "code-reviewer");
-    assert!(reviewer.is_some(), "Project agent should be present");
-    assert_eq!(reviewer.unwrap().1, "code-reviewer");
-    assert_eq!(reviewer.unwrap().2, "Reviews code quality");
-}
-
-#[test]
-fn test_scan_agents_nested_dir() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let agent_dir = dir.path().join(".claude").join("agents").join("analyst");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(
-        agent_dir.join("agent.md"),
-        "---\nname: data-analyst\ndescription: Analyzes data\n---\n\nYou are an analyst.\n",
-    )
-    .unwrap();
-
-    let result = scan_agents(dir.path().to_str().unwrap());
-    // Should contain the project agent + built-in agents
-    assert!(
-        result.len() > 1,
-        "Should contain project agent + built-in agents"
-    );
-    let analyst = result.iter().find(|(id, _, _)| id == "analyst");
-    assert!(analyst.is_some(), "Project agent should be present");
-    assert_eq!(analyst.unwrap().1, "data-analyst");
-    assert_eq!(analyst.unwrap().2, "Analyzes data");
 }
 
 #[tokio::test]
@@ -258,81 +197,6 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
         host.task_manager.is_some(),
         "tool.host().task_manager 应为 Some（parent_session 注入后构建工具）"
     );
-}
-
-#[test]
-fn test_scan_agents_can_exclude_built_ins_without_removing_project_override() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("coder.md"),
-        "---\nname: project-coder\ndescription: Project override\n---\n\nProject agent.\n",
-    )
-    .unwrap();
-
-    let result = scan_agents_detailed(dir.path().to_str().unwrap(), &[], false);
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].0, "coder");
-    assert_eq!(result[0].1, "project-coder");
-}
-
-#[test]
-fn test_scan_agents_with_extra_dirs() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let extra_dir = dir.path().join("extra_agents");
-    std::fs::create_dir_all(&extra_dir).unwrap();
-    std::fs::write(
-        extra_dir.join("plugin-agent.md"),
-        "---\nname: plugin-agent\ndescription: From plugin\n---\n\nPlugin agent.\n",
-    )
-    .unwrap();
-
-    let result = scan_agents_with_extra_dirs(
-        dir.path().to_str().unwrap(),
-        std::slice::from_ref(&extra_dir),
-    );
-    // Should contain plugin-agent + built-in agents
-    let plugin = result.iter().find(|(id, _, _)| id == "plugin-agent");
-    assert!(plugin.is_some(), "Plugin agent should be present");
-    assert_eq!(plugin.unwrap().2, "From plugin");
-}
-
-#[test]
-fn test_scan_agents_with_extra_dirs_dedup() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let cwd_agents = dir.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&cwd_agents).unwrap();
-    std::fs::write(
-        cwd_agents.join("reviewer.md"),
-        "---\nname: reviewer\ndescription: CWD reviewer\n---\n\nReview.\n",
-    )
-    .unwrap();
-
-    let extra_dir = dir.path().join("extra");
-    std::fs::create_dir_all(&extra_dir).unwrap();
-    std::fs::write(
-        extra_dir.join("reviewer.md"),
-        "---\nname: reviewer\ndescription: Plugin reviewer\n---\n\nReview.\n",
-    )
-    .unwrap();
-
-    let result = scan_agents_with_extra_dirs(dir.path().to_str().unwrap(), &[extra_dir]);
-    // Duplicate "reviewer" should be deduped (CWD takes precedence)
-    let reviewer_count = result.iter().filter(|(id, _, _)| id == "reviewer").count();
-    assert_eq!(reviewer_count, 1, "duplicate agent_id should be deduped");
-    // Total: CWD reviewer (1) + built-in agents (6, none named "reviewer") + extra reviewer (deduped) = 7
-    assert_eq!(result.len(), 7);
-}
-
-#[test]
-fn test_scan_agents_with_extra_dirs_empty() {
-    let result = scan_agents_with_extra_dirs("/nonexistent", &[]);
-    let expected = scan_agents("/nonexistent");
-    assert_eq!(result.len(), expected.len());
 }
 
 // ── count_tool_calls_from_session 单元测试 ──────────────
@@ -691,57 +555,6 @@ fn capability_whitelist_effective_name_disallowed_by_bare_name_is_readonly() {
 }
 
 // ─── catalog 同源一致性（波 4 演进 C3，设计 §3.5.1 步骤 2）─────────────────
-
-/// 同源收敛：`scan_agents` / `scan_agents_with_extra_dirs` 与渲染面 catalog
-/// （`SkillsPort::agents` → `scan_agents_detailed`）同一实现——投影（丢弃
-/// capability）必须逐项一致，防止提示词 catalog 与子链实际可用 agent 不一致。
-#[test]
-fn scan_agents_matches_scan_agents_detailed_projection() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("code-reviewer.md"),
-        "---\nname: code-reviewer\ndescription: Reviews code quality\n---\n\nYou are a reviewer.\n",
-    )
-    .unwrap();
-    let nested = agents_dir.join("analyst").join("agent.md");
-    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
-    std::fs::write(
-        nested,
-        "---\nname: data-analyst\ndescription: Analyzes data\n---\n\nYou are an analyst.\n",
-    )
-    .unwrap();
-
-    let cwd = dir.path().to_str().unwrap();
-    let plain = scan_agents(cwd);
-    let detailed: Vec<(String, String, String)> = scan_agents_detailed(cwd, &[], true)
-        .into_iter()
-        .map(|(id, name, desc, _)| (id, name, desc))
-        .collect();
-    assert_eq!(
-        plain, detailed,
-        "scan_agents 应为 scan_agents_detailed 的投影（同源共享实现）"
-    );
-    // 额外目录路径同样一致
-    let extra = tempdir().unwrap();
-    std::fs::write(
-        extra.path().join("plugin-agent.md"),
-        "---\nname: plugin-a\ndescription: Plugin agent\n---\n\nPlugin.\n",
-    )
-    .unwrap();
-    let plain_extra = scan_agents_with_extra_dirs(cwd, &[extra.path().to_path_buf()]);
-    let detailed_extra: Vec<(String, String, String)> =
-        scan_agents_detailed(cwd, &[extra.path().to_path_buf()], true)
-            .into_iter()
-            .map(|(id, name, desc, _)| (id, name, desc))
-            .collect();
-    assert_eq!(
-        plain_extra, detailed_extra,
-        "scan_agents_with_extra_dirs 应为 scan_agents_detailed 的投影"
-    );
-}
 
 /// 11_subagent 段落声明：位置属性（Uncached order=4）+ 含占位符的 Builtin
 /// 内容（catalog 替换留在渲染层，设计 §3.5.1 步骤 2）。

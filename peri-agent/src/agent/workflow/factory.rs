@@ -48,9 +48,15 @@ pub struct WorkflowAgentDefinition {
 /// `peri-middlewares` 实现（`assembly::WorkflowAgentMiddlewareFactory`）；
 /// 方法面 = workflow agent 执行体所需的全部中间件/工具装配，返回类型一律为
 /// Agent 层/契约层类型（实现方经 re-export 构造，不产生 ACP/Middleware 依赖）。
+///
+/// W5：`resolve_agent_definition` 改为异步——Agent 定义的唯一来源是 MCP
+/// `resources/read`（builtin `workspace` 实例的 `agent://…/agent.md`），正文
+/// 读取是异步 I/O，不允许 `block_on`（ARC-MIDDLEWARE-CAPABILITY-001）。
+#[async_trait::async_trait]
 pub trait WorkflowMiddlewareFactory: Send + Sync {
-    /// 按普通 subagent 的同一优先级解析 `agentType`。
-    fn resolve_agent_definition(
+    /// 按普通 subagent 的同一优先级（E13 project → builtin → plugin）解析
+    /// `agentType`（本地来源经 builtin `workspace` 实例的资源面读取）。
+    async fn resolve_agent_definition(
         &self,
         agent_type: &str,
         cwd: &str,

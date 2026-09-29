@@ -277,6 +277,7 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
             let fixture = tempfile::tempdir().unwrap();
             let queue = MessageQueue::new();
             let input = StageBuildInput {
+                agent_catalog: Arc::new(crate::host_ports::NoopAgentCatalog),
                 cwd: fixture.path().to_string_lossy().into_owned(),
                 session_id: "completion-assembly".into(),
                 cancel: Default::default(),
@@ -303,7 +304,6 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 model_name: "test".into(),
                 provider_name: "test".into(),
                 context_window: 128_000,
-                claude_md_excludes: vec![],
                 language: None,
                 compact_config: Default::default(),
                 retry_events: Default::default(),

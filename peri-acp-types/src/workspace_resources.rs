@@ -98,6 +98,12 @@ pub const META_KEY_SCOPE: &str = "io.peri/scope";
 pub const META_KEY_PLUGIN: &str = "io.peri/plugin";
 /// 内容 digest（`sha256:{64 位小写 hex}`，对**原始字节**计算）。
 pub const META_KEY_DIGEST: &str = "io.peri/digest";
+/// Agent 定义的 frontmatter JSON 对象（W5 冻结；逐字不改写，仅供宿主目录
+/// 投影推断 model tier / 写能力标签——**正文不随 metadata 公开**）。
+///
+/// 只在 `agent://` 资源的 `resources/list` 投影中出现；无合法 frontmatter 的
+/// 条目不带该键（宿主据此把不可解析条目排除在候选目录之外，与旧扫描一致）。
+pub const META_KEY_FRONTMATTER: &str = "io.peri/frontmatter";
 
 // ─── scope ────────────────────────────────────────────────────────────────────
 

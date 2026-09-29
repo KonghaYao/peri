@@ -160,7 +160,7 @@ struct SessionManagerInner {
     /// Deployment-level Dynamic MCP state machine port.
     pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     /// Skills 扫描端口（装配注入；frozen 数据构建的 agents/skills 扫描经此访问）。
-    pub skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
+    pub agent_catalog: Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
     /// 插件命令静态条目（Phase 6 B2 预转；会话创建时按
     /// 内置 → 本地 skills（C1）→ 插件 顺序 register_all）。
     pub plugin_command_entries: Vec<RouteEntry>,
@@ -218,7 +218,7 @@ impl SessionManager {
         mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
         dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
         task_manager_factory: Option<TaskManagerFactory>,
-        skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
+        agent_catalog: Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
         plugin_command_entries: Vec<RouteEntry>,
     ) -> Self {
         Self {
@@ -235,7 +235,7 @@ impl SessionManager {
                 cron_continuation_tx: parking_lot::Mutex::new(None),
                 mcp_subscription,
                 dynamic_mcp,
-                skills,
+                agent_catalog,
                 plugin_command_entries,
                 task_manager_factory,
             }),

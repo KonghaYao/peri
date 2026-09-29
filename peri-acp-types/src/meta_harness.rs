@@ -118,7 +118,6 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "DefaultSystemPromptMiddleware",
     "LangMiddleware",
     "AgentsMdMiddleware",
-    "AgentDefineMiddleware",
     "PluginMiddleware",
     "SkillsMiddleware",
     "SkillPreloadMiddleware",

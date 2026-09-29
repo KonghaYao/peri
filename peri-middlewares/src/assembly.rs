@@ -39,8 +39,7 @@ use crate::{
     subagent::SubAgentMiddleware,
     tool_search::ToolSearchMiddleware,
     workflow::{WorkflowMiddleware, WorkflowMiddlewareAdaptor},
-    AgentDefineMiddleware, AtMentionMiddleware, GitAttributionMiddleware, GoalMiddleware,
-    ImageMiddleware,
+    AtMentionMiddleware, GitAttributionMiddleware, GoalMiddleware, ImageMiddleware,
 };
 use parking_lot::RwLock;
 use peri_agent::{
@@ -66,6 +65,13 @@ pub use peri_agent::session::factory::AssemblyContext;
 
 /// 链装配产物（事实源 peri-agent::session::factory，L5 迁入）。
 pub use peri_agent::session::factory::ChainAssembly;
+
+/// `SubAgentMiddleware` 链槽关闭键（A24 关闭集的 MetaHarness 键之一）。
+///
+/// **单一事实源**（W5）：链装配的跳过判据、Agent registry 的本地面关闭位
+/// （`McpAgentRegistry::with_local_face_closed`）与宿主装配的派生都引用本常量，
+/// 不在别处第三次写字面量。
+pub const SUB_AGENT_FACE_CLOSED_KEY: &str = "SubAgentMiddleware";
 
 /// A24 关闭集：`policy_key ∈ disabled_middlewares` 的实例名（BTreeSet，稳定顺序）。
 ///
@@ -172,29 +178,24 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         // MetaHarness：SubAgentMiddleware 关闭 → 关联构造联动置空
         // （parent_tools 不注入、subagent_mw 槽位 None、链上不注册——禁止半开
         // 状态，设计 §2.5"联动清理"）。
-        let mut subagent: Option<SubAgentMiddleware> = if disabled.contains("SubAgentMiddleware") {
-            None
-        } else {
-            Some(
-                SubAgentMiddleware::new(
-                    parent_tools,
-                    Some(Arc::clone(event_handler) as Arc<dyn AgentEventHandler>),
-                    llm_factory.clone(),
+        let mut subagent: Option<SubAgentMiddleware> =
+            if disabled.contains(SUB_AGENT_FACE_CLOSED_KEY) {
+                None
+            } else {
+                Some(
+                    SubAgentMiddleware::new(
+                        parent_tools,
+                        Some(Arc::clone(event_handler) as Arc<dyn AgentEventHandler>),
+                        llm_factory.clone(),
+                    )
+                    .with_mcp_agents(mcp_agent_registry.clone(), Arc::clone(broker))
+                    .with_mcp_skills(ctx.mcp_skill_registry.clone())
+                    .with_system_builder(system_builder.clone())
+                    .with_cancel(cancel.clone())
+                    .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))
+                    .with_registered_hooks(vec![]),
                 )
-                .with_plugin_agent_dirs(
-                    plugin_loaded
-                        .iter()
-                        .flat_map(|plugin| plugin.agents_dirs.clone())
-                        .collect(),
-                )
-                .with_mcp_agents(mcp_agent_registry.clone(), Arc::clone(broker))
-                .with_mcp_skills(ctx.mcp_skill_registry.clone())
-                .with_system_builder(system_builder.clone())
-                .with_cancel(cancel.clone())
-                .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))
-                .with_registered_hooks(vec![]),
-            )
-        };
+            };
         if let Some(ref mut mw) = subagent {
             if let Some(factory) = child_handler_factory {
                 *mw = mw.clone().with_child_handler_factory(Arc::clone(factory));
@@ -231,10 +232,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 ChainSlot::AgentsMd if disabled.contains("AgentsMdMiddleware") => {}
                 ChainSlot::AgentsMd => {
                     prompt::add_agents_md(ctx, &mut chain);
-                }
-                ChainSlot::AgentDefine if disabled.contains("AgentDefineMiddleware") => {}
-                ChainSlot::AgentDefine => {
-                    chain.add(Box::new(AgentDefineMiddleware::new()));
                 }
                 ChainSlot::Plugin if disabled.contains("PluginMiddleware") => {}
                 ChainSlot::Plugin => {
@@ -309,7 +306,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // 注入主 agent 身份（共享 cell，见 set_parent_agent_id）。
                 // MetaHarness：SubAgentMiddleware 关闭 → 链上不注册（subagent_mw
                 // 槽位在下方联动置 None）。
-                ChainSlot::SubAgent if disabled.contains("SubAgentMiddleware") => {}
+                ChainSlot::SubAgent if disabled.contains(SUB_AGENT_FACE_CLOSED_KEY) => {}
                 ChainSlot::SubAgent => {
                     if let Some(mw) = subagent.as_ref() {
                         let subagent_for_chain = mw.clone();

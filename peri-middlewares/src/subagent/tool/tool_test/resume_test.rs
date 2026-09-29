@@ -11,7 +11,11 @@ async fn test_resume_thread_id_placeholder_ignored_and_spawns_new() {
         let dir = tempdir().unwrap();
         write_test_agent(&dir);
         let fixture = SessionFixture::open_in(dir.path()).await;
-        let (t, cwd) = install_parent_session(make_subagent_tool(vec![]), &fixture).await;
+        let (t, cwd) = install_parent_session(
+            with_agent_face(make_subagent_tool(vec![]), dir.path()).await,
+            &fixture,
+        )
+        .await;
         let result = t
             .invoke(
                 serde_json::json!({
@@ -70,7 +74,8 @@ async fn test_resume_thread_id_ignores_fork_field() {
     )
     .await;
 
-    let t = make_subagent_tool(vec![])
+    let t = with_agent_face(make_subagent_tool(vec![]), dir.path())
+        .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_execution_owner(store.execution_owner())
@@ -121,7 +126,8 @@ async fn test_resume_thread_id_ignores_subagent_type_field() {
     )
     .await;
 
-    let t = make_subagent_tool(vec![])
+    let t = with_agent_face(make_subagent_tool(vec![]), dir.path())
+        .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_execution_owner(store.execution_owner())
@@ -265,7 +271,8 @@ async fn test_resume_thread_id_parent_mismatch_is_rejected_by_root_ownership() {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    let t = make_subagent_tool(vec![])
+    let t = with_agent_face(make_subagent_tool(vec![]), dir.path())
+        .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_execution_owner(store.execution_owner())
@@ -401,7 +408,8 @@ async fn test_resume_thread_id_success_replays_and_completes() {
     )
     .await;
 
-    let t = make_subagent_tool(vec![])
+    let t = with_agent_face(make_subagent_tool(vec![]), dir.path())
+        .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_execution_owner(store.execution_owner())
@@ -600,6 +608,7 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
     .with_parent_thread_id(parent_id.clone())
     .with_execution_owner(store.execution_owner())
     .with_parent_session(parent.clone());
+    let t = with_agent_face(t, dir.path()).await;
 
     let result = t
         .invoke(
@@ -649,7 +658,8 @@ async fn test_resume_trimmed_id_wins_over_mcp_fork_and_invalid_model() {
     );
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &id, "test-agent", Some(parent_id.as_str()), vec![]).await;
-    let tool = make_subagent_tool(vec![])
+    let tool = with_agent_face(make_subagent_tool(vec![]), dir.path())
+        .await
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
         .with_execution_owner(store.execution_owner())

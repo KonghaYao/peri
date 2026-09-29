@@ -83,6 +83,7 @@ async fn test_fork_path_emits_v2_start_stop_exactly_once() {
     let (fixture, parent_id, cwd) = install_parent_session(dir.path()).await;
     // 会话资源门面存在时 invoke 返回携带 child_thread_id，用于身份对齐断言
     let (t, bridge) = make_tool_with_bridge();
+    let t = with_agent_face(t, dir.path()).await;
     let t = t
         .with_session_resources(fixture.facade())
         .with_parent_thread_id(parent_id)
@@ -123,6 +124,7 @@ async fn test_define_path_emits_v2_start_stop_exactly_once() {
     write_test_agent(&dir);
     let (fixture, parent_id, cwd) = install_parent_session(dir.path()).await;
     let (t, bridge) = make_tool_with_bridge();
+    let t = with_agent_face(t, dir.path()).await;
     let t = t
         .with_session_resources(fixture.facade())
         .with_parent_thread_id(parent_id)
@@ -164,6 +166,7 @@ async fn test_background_path_emits_v2_start_stop_exactly_once() {
     let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (t, bridge) = make_tool_with_bridge();
+    let t = with_agent_face(t, dir.path()).await;
     let t = t
         .with_task_manager(Arc::clone(&registry))
         .with_bg_event_sender(bg_tx);

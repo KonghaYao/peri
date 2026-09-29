@@ -2,7 +2,7 @@ use super::*;
 
 // ── FrozenSessionData 渲染测试（L5：渲染面留 ACP，经 build_frozen_data）───
 
-/// 构造带 SkillsProvider 的 SessionManager（frozen 渲染输入）。
+/// 构造带 AgentCatalogProvider 的 SessionManager（frozen 渲染输入）。
 async fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
     let session_resources =
         peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
@@ -37,7 +37,7 @@ async fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
         None,
         None,
         None,
-        Arc::new(SkillsProvider),
+        Arc::new(AgentCatalogProvider::new()),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
     )
 }
@@ -60,8 +60,8 @@ async fn test_frozen_session_data_build_is_deterministic() {
     let mgr = make_manager(&tmp).await;
     let cwd = "/tmp";
 
-    let a = mgr.build_frozen_data(cwd, &[]);
-    let b = mgr.build_frozen_data(cwd, &[]);
+    let a = mgr.build_frozen_data(cwd);
+    let b = mgr.build_frozen_data(cwd);
 
     assert_eq!(
         a.system_prompt(),
@@ -118,10 +118,10 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
     let frozen = mgr.build_frozen_data_with_config_and_runtime_and_docs(
         mgr.peri_config(),
         cwd,
-        &[],
         &crate::prompt::PromptRuntimeEnv::detect(cwd),
         std::collections::HashMap::new(),
         &snapshot,
+        &Default::default(),
     );
 
     let frozen_prompt = frozen.system_prompt().to_string();
@@ -169,7 +169,7 @@ async fn test_frozen_prompt_never_claims_workflow() {
     let mgr = make_manager(&tmp).await;
     let cwd = "/tmp";
 
-    let frozen = mgr.build_frozen_data(cwd, &[]);
+    let frozen = mgr.build_frozen_data(cwd);
 
     assert!(
         !frozen.system_prompt().contains("Workflow Orchestration"),
@@ -185,7 +185,7 @@ async fn test_frozen_subagent_prompt_identical_to_main() {
     let mgr = make_manager(&tmp).await;
     let cwd = "/tmp";
 
-    let frozen = mgr.build_frozen_data(cwd, &[]);
+    let frozen = mgr.build_frozen_data(cwd);
 
     assert!(
         !frozen.system_prompt().contains("Workflow Orchestration"),
@@ -210,7 +210,7 @@ async fn test_frozen_subagent_prompt_identical_to_main() {
 async fn test_workflow_prompt_excludes_hitl_section() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_manager(&tmp).await;
-    let frozen = mgr.build_frozen_data("/tmp", &[]);
+    let frozen = mgr.build_frozen_data("/tmp");
 
     // 主链冻结 prompt 保留 10_hitl（PermissionMiddleware 默认装配）
     assert!(
@@ -218,7 +218,8 @@ async fn test_workflow_prompt_excludes_hitl_section() {
         "主链冻结 prompt 应保留 10_hitl（PermissionMiddleware 默认装配）"
     );
 
-    let skills: Arc<dyn peri_acp_types::ports::SkillsPort> = Arc::new(SkillsProvider);
+    let skills: Arc<dyn peri_acp_types::ports::AgentCatalogPort> =
+        Arc::new(AgentCatalogProvider::new());
     let fallback = crate::host::workflow_agent::build_workflow_system_prompt_fallback(
         Arc::clone(&skills),
         frozen.meta_harness().clone(),

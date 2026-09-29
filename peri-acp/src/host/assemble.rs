@@ -16,7 +16,7 @@ use peri_acp_types::hooks::{RegisteredHook, SettingsHooksPort};
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::{PluginLoadResult, PluginManagerPort};
-use peri_acp_types::ports::{LspPoolPort, McpPoolPort, SkillsPort, ToolSearchPort};
+use peri_acp_types::ports::{AgentCatalogPort, LspPoolPort, McpPoolPort, ToolSearchPort};
 use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 use peri_acp_types::skills::SkillRoot;
 
@@ -30,7 +30,7 @@ use super::AcpServerConfig;
 ///
 /// M-TUI 收口（`spec/issues/2026-08-05-3.0-m-tui-acp-client-path.md`）：
 /// middlewares 具体实现（CronScheduler / McpClientPool / ToolSearchIndex /
-/// SkillsProvider / PluginManager / SettingsHooksLoader /
+/// AgentCatalogProvider / PluginManager / SettingsHooksLoader /
 /// WorkflowAgentMiddlewareFactory / 插件聚合数据）全部由本装配面内部构造
 /// ——「ACP Host = 部署单元」，TUI/print/stdio 只提供协议面输入
 /// （provider / config / permission / session_resources / cwd），不再直接触碰
@@ -90,7 +90,6 @@ fn pending_mcp_pool(
 pub struct PreparedPlugins {
     pub data: Option<PluginLoadResult>,
     pub skill_roots: Vec<SkillRoot>,
-    pub agent_dirs: Vec<std::path::PathBuf>,
 }
 
 pub struct HostAssemblyInput {
@@ -229,7 +228,7 @@ pub fn build_session_manager(
     cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     mcp_subscription: Option<Arc<dyn McpSubscriptionPort>>,
     dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
-    skills: Arc<dyn SkillsPort>,
+    agent_catalog: Arc<dyn AgentCatalogPort>,
     plugin_command_entries: Vec<RouteEntry>,
 ) -> SessionManager {
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
@@ -249,7 +248,7 @@ pub fn build_session_manager(
             Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
                 as Arc<dyn peri_acp_types::tasks::TaskManager>
         })),
-        skills,
+        agent_catalog,
         plugin_command_entries,
     )
 }
@@ -321,13 +320,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     let claude_dir = peri_middlewares::plugin::claude_home();
 
     // ── 插件聚合数据（bare 时跳过；准备路径消费同一聚合，不重读插件目录）──
-    let (prepared_data, prepared_skill_roots, prepared_agent_dirs) = match prepared_plugins {
-        Some(prepared) => (
-            Some(prepared.data),
-            Some(prepared.skill_roots),
-            Some(prepared.agent_dirs),
-        ),
-        None => (None, None, None),
+    let (prepared_data, prepared_skill_roots) = match prepared_plugins {
+        Some(prepared) => (Some(prepared.data), Some(prepared.skill_roots)),
+        None => (None, None),
     };
     let prepared_supplied = prepared_skill_roots.is_some();
     let plugin_data: Option<PluginLoadResult> = if bare || !session_scoped {
@@ -630,7 +625,8 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // ── 资源类/业务面端口默认实现（构造下沉：ACP Host = 部署单元）──
     let tool_search_index: Arc<dyn ToolSearchPort> =
         Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
-    let skills: Arc<dyn SkillsPort> = Arc::new(peri_middlewares::host_ports::SkillsProvider);
+    let agent_catalog: Arc<dyn AgentCatalogPort> =
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new());
     let plugin_manager: Arc<dyn PluginManagerPort> =
         Arc::new(peri_middlewares::host_ports::PluginManager);
     let settings_hooks: Arc<dyn SettingsHooksPort> =
@@ -677,12 +673,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         .as_ref()
         .map(|pd| peri_middlewares::plugin::plugin_route_entries(&pd.all_commands))
         .unwrap_or_default();
-    let plugin_agent_dirs = prepared_agent_dirs.unwrap_or_else(|| {
-        plugin_data
-            .as_ref()
-            .map(|pd| pd.all_agent_dirs.clone())
-            .unwrap_or_default()
-    });
     // `plugin_lsp_servers` / host pool 已在 MCP 池初始化之前构造（见上方
     // 「LSP：配置合并 + host 级唯一 pool」块）：配置合并必须在 builtin `lsp`
     // handler 构造之前完成（A21）。
@@ -718,7 +708,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         cron_scheduler.clone(),
         mcp_subscription,
         Some(Arc::clone(&dynamic_mcp)),
-        skills.clone(),
+        agent_catalog.clone(),
         // Phase 6 B2：插件静态命令条目注入 session 管理器（会话创建时注册；
         // 技能命令面已改由 MCP 发现异步投影，不再经此处）。
         plugin_command_entries.clone(),
@@ -761,7 +751,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         channel_state: None, // ServiceRegistry.channel_state 已删除
         plugin_skill_roots,
         plugin_command_entries,
-        plugin_agent_dirs,
         plugin_hooks: flat_hooks,
         // 仅插件 hooks（hooks 面板数据源；plugin/list 命令面返回，TUI 不再
         // 直读 plugin_data）
@@ -771,7 +760,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         plugin_lsp_servers,
         lsp_pool: Some(lsp_pool),
         tool_search_index,
-        skills,
+        agent_catalog,
         plugin_manager,
         settings_hooks,
         shared_tools,

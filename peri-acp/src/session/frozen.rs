@@ -18,12 +18,8 @@ impl SessionManager {
     /// L5：渲染面（CLAUDE.md 解析 / skills 摘要 / prompt 模板）随
     /// `FrozenSessionData::build` 留在 ACP（§0 渲染是 ACP 协议面职责），
     /// 类型经 `from_frozen_parts` 装配（peri-agent 侧不可变数据存储）。
-    pub fn build_frozen_data(
-        &self,
-        cwd: &str,
-        plugin_agent_dirs: &[std::path::PathBuf],
-    ) -> crate::session::executor::FrozenSessionData {
-        self.build_frozen_data_with_config(&self.inner.peri_config, cwd, plugin_agent_dirs)
+    pub fn build_frozen_data(&self, cwd: &str) -> crate::session::executor::FrozenSessionData {
+        self.build_frozen_data_with_config(&self.inner.peri_config, cwd)
     }
 
     /// Legacy restoration discovers configuration before admitting execution resources.
@@ -31,29 +27,28 @@ impl SessionManager {
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        plugin_agent_dirs: &[std::path::PathBuf],
     ) -> crate::session::executor::FrozenSessionData {
         // 调用点未准备运行环境：在此探测一次并委托冻结渲染，装配期不再各自取一份。
         let runtime_env = crate::prompt::PromptRuntimeEnv::detect(cwd);
-        self.build_frozen_data_with_config_and_runtime(config, cwd, plugin_agent_dirs, &runtime_env)
+        self.build_frozen_data_with_config_and_runtime(config, cwd, &runtime_env)
     }
 
     pub(crate) fn build_frozen_data_with_config_and_runtime(
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        plugin_agent_dirs: &[std::path::PathBuf],
         runtime_env: &crate::prompt::PromptRuntimeEnv,
     ) -> crate::session::executor::FrozenSessionData {
         self.build_frozen_data_with_config_and_runtime_and_docs(
             config,
             cwd,
-            plugin_agent_dirs,
             runtime_env,
             HashMap::new(),
             // 无内容准入期的构造点（legacy 首次接纳 / 测试夹具）：没有资源面 ⇒
             // 没有 system 技能摘要（J5：不回落磁盘）。
             &[],
+            // 同样没有项目指令面（X4：不回落磁盘）。
+            &Default::default(),
         )
     }
 
@@ -63,15 +58,17 @@ impl SessionManager {
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        plugin_agent_dirs: &[std::path::PathBuf],
         runtime_env: &crate::prompt::PromptRuntimeEnv,
         docs: HashMap<String, String>,
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
+        instructions: &crate::session::executor::FrozenInstructions,
     ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = config.config.language.clone();
-        let (claude_md, claude_local_md) =
-            peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
+        // W5（E15/J5）：项目指令正文来自内容准入期读取的 MCP 资源快照
+        // （`peri-instruction://workspace/{main|local}`）——宿主本地读盘点与
+        // `@import` 解析已整体删除，任何构造点都**不回落磁盘**（X4）。
+        let (claude_md, claude_local_md) = (instructions.main.clone(), instructions.local.clone());
         // W4b（F3/J1/J5）：技能摘要只从**传入的 MCP 侧元数据快照**渲染——本地
         // 扫描（原 `build_frozen_summary`）已删除，宿主不再有技能文件系统读取点。
         // 快照由调用方在内容准入期（P4）从 system 来源（builtin `workspace`
@@ -94,12 +91,7 @@ impl SessionManager {
             build_collected_sections(&meta_harness_state, None, frozen_language.as_deref());
         let template = crate::prompt::PromptTemplate::new(&meta_harness_state, &collected);
         let env = crate::prompt::PromptEnv::frozen(cwd, &frozen_date, runtime_env);
-        let system_prompt = template.render(
-            &env,
-            &features,
-            self.inner.skills.as_ref(),
-            plugin_agent_dirs,
-        );
+        let system_prompt = template.render(&env, &features, self.inner.agent_catalog.as_ref());
 
         // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同，
         // 不再二次渲染——`FrozenSessionData` 无子面向字段（C5 移除），

@@ -403,6 +403,89 @@ impl McpClientPool {
         Ok(docs)
     }
 
+    /// 冻结期项目指令读取（W5/E15）：只认真实 builtin `workspace` 实例。
+    ///
+    /// 身份与关闭口径与 [`Self::read_builtin_workspace_meta`] 同源（实例绑定 +
+    /// Connected + A24 关闭集）；`disableBundledSkills` 等 skill 面开关不适用于
+    /// 指令面。
+    ///
+    /// 失败语义（X5，受限 Peri profile）：
+    /// - 未装配 / 实例被关闭 / 未连接 / 非本机 builtin 实例 ⇒ `Ok((None, None))`
+    ///   ：指令面不适用，**不是失败**，也不回落磁盘（X4/J5）；
+    /// - 实例健康但 `resources/list` / `resources/read` 失败 ⇒ `Err`：system
+    ///   已声明且被选中的投递失败，调用方按 J2 补偿 fail-closed；
+    /// - 文档不存在（`resources/list` 未列 main/local）⇒ `Ok(None)`，不是错误。
+    ///
+    /// 返回 `(main, local)`：main 为 import 展开后的正文（provider 侧解析），
+    /// local 为原文；两者都可为 `None`。
+    pub async fn read_builtin_workspace_instructions(
+        &self,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        use peri_acp_types::workspace_resources::{
+            parse_instruction_uri, INSTRUCTION_LOCAL_URI, INSTRUCTION_MAIN_URI,
+        };
+        let closed = self
+            .builtin_instance_context()
+            .map(|context| context.closed.clone())
+            .unwrap_or_default();
+        if super::builtin::is_closed("workspace", &closed) {
+            tracing::debug!(
+                "instructions: builtin workspace is closed; instruction face stays unavailable"
+            );
+            return Ok((None, None));
+        }
+        let Some(handle) = self.get_client("workspace") else {
+            return Ok((None, None));
+        };
+        if !matches!(handle.status, ClientStatus::Connected)
+            || !matches!(handle.source.as_ref(), Some(crate::mcp::config::ConfigSource::Builtin { instance }) if instance == "workspace")
+        {
+            return Ok((None, None));
+        }
+        let Some(peer) = handle.peer.clone() else {
+            return Err(
+                "builtin workspace instruction face is connected but the peer is unavailable"
+                    .to_string(),
+            );
+        };
+        let resources = self
+            .list_all_resources_cached("workspace", &peer)
+            .await
+            .map_err(|error| format!("resources/list failed: {error}"))?;
+        let mut main: Option<String> = None;
+        let mut local: Option<String> = None;
+        for resource in resources {
+            // 只读固定的两条指令 URI（不按 scheme 泛化：其余 scheme 不在此面）。
+            let uri = resource.uri.as_str();
+            let is_main = uri == INSTRUCTION_MAIN_URI;
+            let is_local = uri == INSTRUCTION_LOCAL_URI;
+            if !is_main && !is_local {
+                continue;
+            }
+            if parse_instruction_uri(uri).is_none() {
+                continue;
+            }
+            let (result, ticket) = self
+                .read_resource_cached("workspace", uri, &peer)
+                .await
+                .map_err(|error| format!("resources/read failed: {error}"))?;
+            self.cache_verified_resource("workspace", ticket, &result)
+                .await;
+            let Some(text) = result.contents.iter().find_map(|content| match content {
+                ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            match (is_main, is_local) {
+                (true, _) => main = Some(text),
+                (_, true) => local = Some(text),
+                _ => {}
+            }
+        }
+        Ok((main, local))
+    }
+
     /// 冻结期技能清单快照（F3，J1/§5.4）：只认真实 builtin `workspace` 实例。
     ///
     /// 身份与关闭口径与 [`Self::read_builtin_workspace_meta`] 同源（X6/X7：

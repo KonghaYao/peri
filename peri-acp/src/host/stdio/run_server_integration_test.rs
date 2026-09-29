@@ -149,7 +149,7 @@ async fn make_server_config_with(
                     as Arc<dyn peri_acp_types::tasks::TaskManager>
             }))
         }),
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         Vec::new(),
     );
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
@@ -178,7 +178,6 @@ async fn make_server_config_with(
         channel_state: None,
         plugin_skill_roots: Vec::new(),
         plugin_command_entries: Vec::new(),
-        plugin_agent_dirs: Vec::new(),
         plugin_hooks: Vec::new(),
         plugin_hooks_only: Vec::new(),
         plugin_loaded: Vec::new(),
@@ -186,7 +185,7 @@ async fn make_server_config_with(
         plugin_lsp_servers: lsp_servers,
         lsp_pool: Some(lsp_pool),
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
-        skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        agent_catalog: Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
         settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
         shared_tools: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
@@ -520,7 +519,7 @@ async fn create_bound_thread_fixture(cfg: &AcpServerConfig, session_id: &str, cw
         .unwrap();
     let frozen = cfg
         .session_manager
-        .build_frozen_data(workspace.cwd.to_str().unwrap(), &cfg.plugin_agent_dirs);
+        .build_frozen_data(workspace.cwd.to_str().unwrap());
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
     // 门面一次完成 binding/frozen 保存与执行准入，再按正常收尾标 clean。
     let lease = cfg
@@ -1009,7 +1008,7 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
         .unwrap();
     let source_frozen = cfg
         .session_manager
-        .build_frozen_data(tmp.path().to_str().unwrap(), &cfg.plugin_agent_dirs);
+        .build_frozen_data(tmp.path().to_str().unwrap());
     sessions.lock().await.insert(
         "fork-source-session".to_string(),
         crate::host::SessionState {

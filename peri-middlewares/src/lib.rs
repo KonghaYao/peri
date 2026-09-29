@@ -20,13 +20,12 @@
 //! - [`PermissionMiddleware`]：敏感工具调用前需用户确认
 //! - [`HumanInTheLoopMiddleware`]：向用户提问的通道（AskUserQuestion 工具）
 
-pub mod agent_define;
 pub mod agents_md;
 pub mod assembly;
 pub mod claude_agent_parser;
 mod completion_reminder;
 pub mod goal;
-/// 装配注入端口实现（3.0 批 2 波 2：`PluginManager` / `SkillsProvider`）。
+/// 装配注入端口实现（3.0 批 2 波 2：`PluginManager` / `AgentCatalogProvider`）。
 pub mod host_ports;
 pub mod subagent;
 pub use claude_agent_parser::{
@@ -63,7 +62,6 @@ pub mod workflow;
 #[path = "prompt_tool_name_lock_test.rs"]
 mod prompt_tool_name_lock_tests;
 
-pub use agent_define::{AgentDefineMiddleware, AgentOverrides};
 pub use agents_md::AgentsMdMiddleware;
 pub use ask_user::{
     ask_user_tool_definition, parse_ask_user, InteractionContext, QuestionItem, QuestionOption,
@@ -75,6 +73,7 @@ pub use goal::GoalMiddleware;
 pub use hitl::HumanInTheLoopMiddleware;
 pub use lsp::LspSyncMiddleware;
 pub use middleware::image::ImageMiddleware;
+pub use peri_acp_types::agents::AgentOverrides;
 pub use permission::{
     default_requires_approval, effective_tool_name, AutoClassifier, BatchItem, Classification,
     HitlDecision, LlmAutoClassifier, PermissionMiddleware, PermissionMode, SharedPermissionMode,
@@ -84,8 +83,8 @@ pub mod settings;
 pub use settings::{load_disable_bundled_skills, load_global_skills_dir};
 pub use skills::{resolve_skill_roots, SkillMetadata, SkillRoot, SkillsMiddleware};
 pub use subagent::{
-    infer_agent_capability, scan_agents, scan_agents_detailed, scan_agents_with_extra_dirs,
-    AgentCapability, SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool,
+    infer_agent_capability, AgentCapability, SkillPreloadMiddleware, SubAgentMiddleware,
+    SubAgentTool,
 };
 pub use tool_search::{
     resolve_effective_tool_name, ExecuteExtraToolResolver, ToolSearchMiddleware,
@@ -100,7 +99,6 @@ pub mod prelude {
     pub use peri_agent::prelude::*;
 
     pub use crate::{
-        agent_define::AgentDefineMiddleware,
         agents_md::AgentsMdMiddleware,
         ask_user::{
             ask_user_tool_definition, parse_ask_user, InteractionContext, QuestionItem,

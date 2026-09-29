@@ -55,7 +55,6 @@ pub(crate) struct PreparedSessionInputs {
     /// 一次加载的插件聚合（roots/commands/hooks/lsp/mcp）。
     pub(crate) plugin_data: Option<PluginLoadResult>,
     pub(crate) skill_roots: Vec<SkillRoot>,
-    pub(crate) agent_dirs: Vec<PathBuf>,
     /// frozen 事实源：new/legacy 是本次构建产物，恢复路径是持久 blob 的注入结果。
     pub(crate) frozen: Option<FrozenSessionData>,
     /// 版本化 snapshot 字节；与 `frozen` 始终同源。
@@ -65,7 +64,7 @@ pub(crate) struct PreparedSessionInputs {
 }
 
 /// 插件发现结果：一次加载的聚合、技能根与 agent 目录。
-type DiscoveredPlugins = (Option<PluginLoadResult>, Vec<SkillRoot>, Vec<PathBuf>);
+type DiscoveredPlugins = (Option<PluginLoadResult>, Vec<SkillRoot>);
 
 /// frozen 的来源：新建/legacy 构建一次，fork 直接复用 source 的精确字节。
 enum FrozenSource<'a> {
@@ -86,6 +85,7 @@ impl PreparedSessionInputs {
             &PromptRuntimeEnv::detect(cwd),
             HashMap::new(),
             &[],
+            &Default::default(),
         )?;
         Ok(inputs)
     }
@@ -112,11 +112,19 @@ impl PreparedSessionInputs {
         inputs.legacy = Some(LegacyAdoptionInputs {
             saved_cwd: PathBuf::from(saved_cwd),
         });
+        // legacy 首次接纳发生在内容准入之前：没有执行环境 ⇒ 没有 workspace 资源面
+        // ⇒ 技能摘要与项目指令都不可得（J2 §3.1；X4/J5：零磁盘兜底）。这里显式
+        // warn，避免「永久为空且无任何信号」。
+        tracing::warn!(
+            cwd = %workspace_cwd,
+            "legacy 首次接纳无执行环境：项目指令与技能摘要不可得（不回落磁盘）"
+        );
         inputs.build_frozen_after_activation(
             host,
             &PromptRuntimeEnv::detect(workspace_cwd),
             HashMap::new(),
             &[],
+            &Default::default(),
         )?;
         Ok(inputs)
     }
@@ -176,6 +184,7 @@ impl PreparedSessionInputs {
         runtime_env: &PromptRuntimeEnv,
         docs: HashMap<String, String>,
         skill_catalog: &[peri_acp_types::skills::SkillMetadata],
+        instructions: &crate::session::executor::FrozenInstructions,
     ) -> Result<(), AcpError> {
         if self.frozen.is_some() {
             return Ok(());
@@ -185,10 +194,10 @@ impl PreparedSessionInputs {
             .build_frozen_data_with_config_and_runtime_and_docs(
                 &self.configuration.config,
                 &self.cwd,
-                &self.agent_dirs,
                 runtime_env,
                 docs,
                 skill_catalog,
+                instructions,
             );
         let encoded = encode_frozen_snapshot(&frozen).map_err(|error| {
             AcpError::new(-32603, format!("Frozen snapshot encode failed: {error}"))
@@ -203,7 +212,6 @@ impl PreparedSessionInputs {
         PreparedPlugins {
             data: self.plugin_data.clone(),
             skill_roots: self.skill_roots.clone(),
-            agent_dirs: self.agent_dirs.clone(),
         }
     }
 
@@ -212,7 +220,7 @@ impl PreparedSessionInputs {
         cwd: &str,
         frozen_source: FrozenSource<'_>,
     ) -> Result<Self, AcpError> {
-        let (configuration, (plugin_data, skill_roots, agent_dirs)) =
+        let (configuration, (plugin_data, skill_roots)) =
             Self::prepare_configuration_and_plugins(host, cwd)?;
         let (frozen, frozen_encoded) = match frozen_source {
             FrozenSource::Build => (None, None),
@@ -226,7 +234,6 @@ impl PreparedSessionInputs {
             configuration,
             plugin_data,
             skill_roots,
-            agent_dirs,
             frozen,
             frozen_encoded,
             legacy: None,
@@ -240,8 +247,8 @@ impl PreparedSessionInputs {
         cwd: &str,
     ) -> Result<(PreparedConfiguration, DiscoveredPlugins), AcpError> {
         let configuration = Self::resolve_configuration(host, cwd)?;
-        let (plugin_data, skill_roots, agent_dirs) = Self::discover_plugins(host, cwd)?;
-        Ok((configuration, (plugin_data, skill_roots, agent_dirs)))
+        let (plugin_data, skill_roots) = Self::discover_plugins(host, cwd)?;
+        Ok((configuration, (plugin_data, skill_roots)))
     }
 
     fn resolve_configuration(
@@ -278,12 +285,8 @@ impl PreparedSessionInputs {
     /// host 级与 bare 沿用既有形状（无插件聚合）。
     fn discover_plugins(host: &AcpServerConfig, cwd: &str) -> Result<DiscoveredPlugins, AcpError> {
         match host.workspace_assembly.as_ref() {
-            None => Ok((
-                None,
-                host.plugin_skill_roots.clone(),
-                host.plugin_agent_dirs.clone(),
-            )),
-            Some(source) if source.bare => Ok((None, Vec::new(), Vec::new())),
+            None => Ok((None, host.plugin_skill_roots.clone())),
+            Some(source) if source.bare => Ok((None, Vec::new())),
             Some(_) => {
                 // 严格只读发现：用户级 `.claude` 由装配面解析（HOME 优先的唯一
                 // 权威在 `plugin::claude_home`，见 `assemble` 函数 doc），
@@ -293,8 +296,7 @@ impl PreparedSessionInputs {
                         AcpError::new(-32603, format!("Plugin discovery failed: {error}"))
                     })?;
                 let skill_roots = data.all_skill_roots.clone();
-                let agent_dirs = data.all_agent_dirs.clone();
-                Ok((Some(data), skill_roots, agent_dirs))
+                Ok((Some(data), skill_roots))
             }
         }
     }

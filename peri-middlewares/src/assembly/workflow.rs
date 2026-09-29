@@ -14,7 +14,7 @@ use crate::{
     skills::SkillsMiddleware,
     subagent::SkillPreloadMiddleware,
     workflow::WorkflowMiddleware,
-    AgentDefineMiddleware, AgentsMdMiddleware, GitAttributionMiddleware,
+    AgentsMdMiddleware, GitAttributionMiddleware,
 };
 use peri_acp_types::{
     ports::WorkflowMiddlewarePort,
@@ -44,6 +44,11 @@ pub struct WorkflowAgentMiddlewareFactory;
 /// upcast 后的端口对象（不新增 public 类型）。
 struct BuiltinWorkflowAgentFactory {
     builtin: Option<Arc<McpClientPool>>,
+    /// 会话级 MCP Agent registry（W5）：workflow agent 定义**只服务本地受信来源**
+    /// （project / plugin / builtin）。远端 `mcp__*` 需要内容绑定批准 seam，本面
+    /// 没有 broker ⇒ 显式拒绝（见 `resolve_agent_definition_via_registry`）。
+    /// 关闭面由 `WorkflowMiddleware` 承担（Agent 工具面关闭位不影响本路径）。
+    agent_registry: Option<Arc<crate::mcp::McpAgentRegistry>>,
 }
 
 /// 构造 workflow agent 装配端口并 upcast（部署装配点调用；返回类型已锚定
@@ -62,7 +67,13 @@ pub fn default_workflow_middleware_factory(
 pub fn default_workflow_middleware_factory_with_pool(
     pool: Option<Arc<McpClientPool>>,
 ) -> Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory> {
-    Arc::new(BuiltinWorkflowAgentFactory { builtin: pool })
+    let agent_registry = pool
+        .as_ref()
+        .map(|pool| Arc::new(crate::mcp::McpAgentRegistry::new(Arc::clone(pool))));
+    Arc::new(BuiltinWorkflowAgentFactory {
+        builtin: pool,
+        agent_registry,
+    })
 }
 
 impl BuiltinWorkflowAgentFactory {
@@ -85,13 +96,14 @@ impl BuiltinWorkflowAgentFactory {
     }
 }
 
+#[async_trait::async_trait]
 impl WorkflowMiddlewareFactory for BuiltinWorkflowAgentFactory {
-    fn resolve_agent_definition(
+    async fn resolve_agent_definition(
         &self,
         agent_type: &str,
         cwd: &str,
     ) -> Result<WorkflowAgentDefinition, String> {
-        WorkflowAgentMiddlewareFactory.resolve_agent_definition(agent_type, cwd)
+        resolve_agent_definition_via_registry(self.agent_registry.as_ref(), agent_type, cwd).await
     }
 
     fn build_tools(
@@ -214,57 +226,73 @@ impl WorkflowAgentMiddlewareFactory {
     }
 }
 
+/// Workflow agent 定义解析（W5）：与 SubAgent 同一来源与同一优先级。
+///
+/// 本地三来源经会话级 [`crate::mcp::McpAgentRegistry`]（builtin `workspace`
+/// 实例的 `agent://{scope}/{id}/agent.md`）读取，优先级 project → builtin →
+/// plugin（E13）；远端 `mcp__{server}__{id}` 走同一 registry 的远端条目。
+/// registry 缺席（无池装配 / 测试 ZST）⇒ 明确错误，不回落磁盘。
+async fn resolve_agent_definition_via_registry(
+    registry: Option<&Arc<crate::mcp::McpAgentRegistry>>,
+    agent_type: &str,
+    _cwd: &str,
+) -> Result<WorkflowAgentDefinition, String> {
+    // F2（安全）：本面**没有**批准 seam（唯一的远端激活批准门在
+    // `subagent/tool/mcp_activation.rs` 与 `execute_resume.rs`，都需要 broker）。
+    // workflow 路径在 W5 之前只支持本地盘 + builtin，因此这里显式拒绝远端 id，
+    // 不把「无批准即可读远端正文」的能力开出去。
+    if agent_type.starts_with("mcp__") {
+        return Err(format!(
+            "remote agent definitions are not available on the workflow path \
+             (no approval seam); use a local agent definition instead of '{agent_type}'"
+        ));
+    }
+    let Some(registry) = registry else {
+        return Err(format!(
+            "agent definitions are unavailable (MCP workspace face is not assembled); cannot resolve '{agent_type}'"
+        ));
+    };
+    let agent = registry
+        .activate(agent_type, true)
+        .await
+        .map_err(|error| format!("cannot find agent definition '{agent_type}': {error}"))?
+        .definition;
+    let frontmatter = agent.frontmatter;
+    let prompt_overrides = {
+        let overrides = crate::AgentOverrides {
+            persona: (!agent.system_prompt.is_empty()).then_some(agent.system_prompt),
+            tone: frontmatter.tone.clone(),
+            proactiveness: frontmatter.proactiveness.clone(),
+            mode: frontmatter.prompt_mode.clone(),
+        };
+        (!overrides.is_empty()).then_some(overrides)
+    };
+    let model = frontmatter
+        .model
+        .filter(|model| !model.is_empty() && model != "inherit");
+    let allowed_tools = match frontmatter.tools {
+        crate::ToolsValue::Empty => None,
+        tools => Some(tools.to_vec()),
+    };
+    Ok(WorkflowAgentDefinition {
+        model,
+        allowed_tools,
+        disallowed_tools: frontmatter.disallowed_tools.to_vec(),
+        skill_names: frontmatter.skills,
+        allowed_write_dirs: frontmatter.allowed_write_dirs,
+        max_iterations: frontmatter.max_turns.unwrap_or(200) as usize,
+        prompt_overrides,
+    })
+}
+
+#[async_trait::async_trait]
 impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
-    fn resolve_agent_definition(
+    async fn resolve_agent_definition(
         &self,
         agent_type: &str,
         cwd: &str,
     ) -> Result<WorkflowAgentDefinition, String> {
-        let project_path = AgentDefineMiddleware::candidate_paths(cwd, agent_type)
-            .into_iter()
-            .find(|path| path.is_file());
-        let agent = if let Some(path) = project_path {
-            let content = std::fs::read_to_string(&path).map_err(|error| {
-                format!(
-                    "failed to read agent definition '{}': {error}",
-                    path.display()
-                )
-            })?;
-            crate::parse_agent_file(&content)
-                .ok_or_else(|| format!("failed to parse agent definition '{}'", path.display()))?
-        } else {
-            let built_in = crate::subagent::get_built_in_agent(agent_type)
-                .ok_or_else(|| format!("cannot find agent definition '{agent_type}'"))?;
-            crate::parse_agent_file(built_in.content).ok_or_else(|| {
-                format!("failed to parse built-in agent definition '{agent_type}'")
-            })?
-        };
-        let frontmatter = agent.frontmatter;
-        let prompt_overrides = {
-            let overrides = crate::AgentOverrides {
-                persona: (!agent.system_prompt.is_empty()).then_some(agent.system_prompt),
-                tone: frontmatter.tone.clone(),
-                proactiveness: frontmatter.proactiveness.clone(),
-                mode: frontmatter.prompt_mode.clone(),
-            };
-            (!overrides.is_empty()).then_some(overrides)
-        };
-        let model = frontmatter
-            .model
-            .filter(|model| !model.is_empty() && model != "inherit");
-        let allowed_tools = match frontmatter.tools {
-            crate::ToolsValue::Empty => None,
-            tools => Some(tools.to_vec()),
-        };
-        Ok(WorkflowAgentDefinition {
-            model,
-            allowed_tools,
-            disallowed_tools: frontmatter.disallowed_tools.to_vec(),
-            skill_names: frontmatter.skills,
-            allowed_write_dirs: frontmatter.allowed_write_dirs,
-            max_iterations: frontmatter.max_turns.unwrap_or(200) as usize,
-            prompt_overrides,
-        })
+        resolve_agent_definition_via_registry(None, agent_type, cwd).await
     }
 
     fn build_tools(

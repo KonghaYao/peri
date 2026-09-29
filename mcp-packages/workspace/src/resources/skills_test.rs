@@ -29,6 +29,7 @@ fn root(path: &Path, scope: ResourceScope) -> ResourceRoot {
 
 fn input(roots: Vec<ResourceRoot>) -> WorkspaceResourcesInput {
     WorkspaceResourcesInput {
+        instruction_excludes: Vec::new(),
         skill_roots: roots,
         agent_roots: Vec::new(),
         // 测本地根时关掉 builtin，避免 7 个内置技能干扰计数。
@@ -234,6 +235,7 @@ fn builtin_catalog_appends_lowest_priority_and_respects_disable_flag() {
     skill_dir(base.path(), "use-artifacts", "use-artifacts");
 
     let enabled = WorkspaceResourcesInput {
+        instruction_excludes: Vec::new(),
         skill_roots: vec![root(base.path(), ResourceScope::Project)],
         agent_roots: Vec::new(),
         disable_bundled: false,
@@ -262,6 +264,7 @@ fn builtin_catalog_appends_lowest_priority_and_respects_disable_flag() {
     );
 
     let disabled = WorkspaceResourcesInput {
+        instruction_excludes: Vec::new(),
         disable_bundled: true,
         ..enabled
     };

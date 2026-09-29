@@ -9,6 +9,7 @@ use std::{
 };
 
 use peri_middlewares::permission::shared_mode::{PermissionMode, SharedPermissionMode};
+use serial_test::serial;
 use tempfile::TempDir;
 
 use super::assemble::WorkspaceAssembly;
@@ -17,10 +18,32 @@ use super::AcpServerConfig;
 use crate::provider::{LlmProvider, ProviderConfig, ProviderModels};
 use crate::session::frozen_snapshot::{decode_frozen_snapshot, encode_frozen_snapshot};
 
-/// 准备期冻结的外部输入（cwd/CLAUDE.md 内容）。准备之后改写它，用来证明发布段
-/// 不再读盘；两次内容不同使「二次构建」与「原样消费」的字节可区分。
+/// 外部输入（cwd/CLAUDE.md 内容）的三个取样：创建期读到的那份，与它前后各一次改写。
+///
+/// **捕获点（W5/J2 §7.0 已裁决）**：项目指令的唯一来源是 builtin `workspace`
+/// 资源面，读取发生在**创建步**（`new_session_from_prepared` 的 P4）；`prepare_new`
+/// 不读盘。两个改写内容用于证明「捕获一次」：创建前改写只影响创建期采集，
+/// 创建后改写不得再进入任何状态。
 const FROZEN_INPUT_AT_PREPARATION: &str = "frozen-seam: content frozen at preparation\n";
 const FROZEN_INPUT_AFTER_PREPARATION: &str = "frozen-seam: rewritten after preparation\n";
+const FROZEN_INPUT_AFTER_CREATION: &str = "frozen-seam: rewritten after creation\n";
+
+/// 生产形态的 workspace 装配（bare：只建 workspace 池，不加载插件聚合）。
+///
+/// W5 后项目指令（CLAUDE.md）经 builtin `workspace` 实例的资源面采集：宿主没有
+/// 本装配就没有 workspace 环境，指令面按 X4/J5 整体缺席（零磁盘兜底）。
+///
+/// `startup_cwd` 取会话 cwd 的**规范化**形态：与准备面的「同目录复用配置」判据同
+/// 口径（`resolve_configuration` 对 startup_cwd 做 `canonicalize` 后与会话 cwd
+/// 比较），命中复用路径即不触发第二次只读配置加载。
+fn workspace_assembly(cwd: &str) -> WorkspaceAssembly {
+    WorkspaceAssembly {
+        startup_cwd: cwd.to_owned(),
+        bare: true,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+    }
+}
 
 fn make_provider() -> LlmProvider {
     let mut config = crate::provider::PeriConfig::default();
@@ -63,7 +86,7 @@ async fn prepared_test_host(
             Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
                 as Arc<dyn peri_acp_types::tasks::TaskManager>
         })),
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         Vec::new(),
     );
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
@@ -87,14 +110,13 @@ async fn prepared_test_host(
         channel_state: None,
         plugin_skill_roots: Vec::new(),
         plugin_command_entries: Vec::new(),
-        plugin_agent_dirs: Vec::new(),
         plugin_hooks: Vec::new(),
         plugin_hooks_only: Vec::new(),
         plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
         plugin_lsp_servers: Vec::new(),
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
-        skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        agent_catalog: Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
         settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
         shared_tools: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
@@ -187,7 +209,6 @@ async fn prepare_new_is_repeatable_and_frozen_bytes_are_single_source() {
         first.frozen.as_ref().unwrap().system_prompt()
     );
     assert_eq!(first.skill_roots.len(), second.skill_roots.len());
-    assert_eq!(first.agent_dirs.len(), second.agent_dirs.len());
 }
 
 /// 准备阶段不写会话数据/登记：整个数据目录逐字节不变。
@@ -298,11 +319,20 @@ async fn prepare_legacy_records_saved_cwd_and_builds_from_workspace() {
 ///
 /// 端到端只走生产入口（resolve → 准备一次 → 发布段），不拿第二次准备比字节：断言
 /// 的是同一次创建内部的自洽——持久化字节、live frozen 与本次工作区输入同源。
+/// 项目指令的捕获点在创建步（P4，经 builtin `workspace` 资源面）：因此本用例的
+/// `claude_md()` 断言的是**创建期**读到的 CLAUDE.md，而非准备期（准备期不读盘）。
+/// 创建期经 builtin `workspace` 资源面采集指令 ⇒ 依赖注入**默认态**
+/// （`PERI_MCP_BUILTIN` 非 `off`）。该 env 是进程级全局，由同进程的开关组用例在
+/// `#[serial]` 临界区内改写（TEST-HERMETIC-001）⇒ 读侧必须同键互斥，否则并行窗口
+/// 内读到 `off` 态：池里没有 `workspace` 句柄且 `initPhase` 已收口，资源面按 X4
+/// 整体缺席、创建期指令快照退化为 `None`（不是被测语义）。
 #[tokio::test]
+#[serial]
 async fn new_session_persists_frozen_bytes_from_its_single_preparation() {
     let tmp = TempDir::new().unwrap();
-    let host = prepared_test_host(&tmp, None).await;
     let cwd = canonical_workspace_dir(&tmp, "workspace");
+    // 生产形态宿主：指令面经 builtin `workspace` 实例（W5 后宿主本地无扫描点）。
+    let host = prepared_test_host(&tmp, Some(workspace_assembly(&cwd))).await;
     std::fs::write(
         Path::new(&cwd).join("CLAUDE.md"),
         FROZEN_INPUT_AT_PREPARATION,
@@ -339,7 +369,7 @@ async fn new_session_persists_frozen_bytes_from_its_single_preparation() {
     assert_eq!(
         decoded.claude_md(),
         Some(FROZEN_INPUT_AT_PREPARATION),
-        "持久化字节必须来自本次工作区输入（准备期读到的 CLAUDE.md）"
+        "持久化字节必须来自本次工作区输入（创建期经 workspace 资源面读到的 CLAUDE.md）"
     );
     let live = sessions[&id]
         .frozen
@@ -359,40 +389,54 @@ async fn new_session_persists_frozen_bytes_from_its_single_preparation() {
     );
 }
 
-/// 发布段只消费给定的准备对象：准备定格后改写外部输入，保存字节与 live 状态仍精确
-/// 等于准备时的字节。
+/// 外部输入只在**创建期**被读一次：准备不读盘，创建读到的内容被定格，之后改写磁盘
+/// 不再影响 live 或持久化状态。
 ///
-/// `new_session_from_prepared` 就是 `handle_new` 准备之后的同一条生产路径。若将来有人
-/// 在这里再准备一次（重读配置/重建 frozen），`rebuilt` 哨兵与 `persisted` 断言都会
-/// 失败——本用例不靠「两次准备相等」证明同源。
+/// 捕获点（W5/J2 §7.0 裁决）：项目指令经 builtin `workspace` 资源面在
+/// `new_session_from_prepared` 的 P4 采集；准备阶段不读盘。本用例取两处证据：
+/// 1. 测试夹具 `prepare_new` **立刻**构建 frozen，但指令恒为空——同一夹具、同一份
+///    磁盘文件在 pre-W5 会在这里读到内容（旧断言即 `Some(FROZEN_INPUT_AT_PREPARATION)`），
+///    现在宿主本地已无扫描点，指令只经创建步的资源面进入；
+/// 2. 生产 new 路径的准备形态 `prepare_new_deferred` 连 frozen 都不建（结构证据：
+///    准备阶段没有构建动作），构建整体让给创建步的 P4（`handle_new` 即此形状）。
+///
+/// no-reread 的主体落在**创建之后**：捕获只发生一次，创建后改写磁盘不得进入任何
+/// 重读路径。（`new_session_from_prepared` 就是 `handle_new` 准备之后的同一条生产
+/// 路径；准备与创建之间改写文件，按新语义创建期读到的就是改写后的内容。）
+/// 与 [`new_session_persists_frozen_bytes_from_its_single_preparation`] 同一读侧依赖
+/// （创建期指令快照 ⇒ builtin `workspace` 资源面 ⇒ `PERI_MCP_BUILTIN` 默认态），
+/// 故同样与进程级开关组用例同键互斥（TEST-HERMETIC-001）。
 #[tokio::test]
+#[serial]
 async fn new_session_from_prepared_does_not_reread_external_frozen_inputs() {
     let tmp = TempDir::new().unwrap();
-    let host = prepared_test_host(&tmp, None).await;
     let cwd = canonical_workspace_dir(&tmp, "workspace");
+    let host = prepared_test_host(&tmp, Some(workspace_assembly(&cwd))).await;
     let claude_md = Path::new(&cwd).join("CLAUDE.md");
     std::fs::write(&claude_md, FROZEN_INPUT_AT_PREPARATION).unwrap();
 
-    let prepared = PreparedSessionInputs::prepare_new(&host, &cwd).unwrap();
+    // ① 准备阶段不读盘：frozen 已构建（snapshot 非空），但指令面为空。
+    let probe = PreparedSessionInputs::prepare_new(&host, &cwd).unwrap();
     assert_eq!(
-        prepared.frozen.as_ref().unwrap().claude_md(),
-        Some(FROZEN_INPUT_AT_PREPARATION),
-        "准备必须定格当时的外部输入"
+        probe.frozen.as_ref().unwrap().claude_md(),
+        None,
+        "准备阶段不得读盘采集项目指令（捕获点已移到创建步）"
     );
+    assert!(
+        !probe.frozen_encoded.as_ref().unwrap().is_empty(),
+        "准备产物仍是完整 frozen snapshot（只是不含指令面内容）"
+    );
+    drop(probe);
 
-    // 准备之后改写外部输入：任何重读/重建都会给出不同字节。
+    // 准备之后改写外部输入：创建期读到的就是这份改写后的内容。
     std::fs::write(&claude_md, FROZEN_INPUT_AFTER_PREPARATION).unwrap();
-    let rebuilt = PreparedSessionInputs::prepare_new(&host, &cwd).unwrap();
-    assert_eq!(
-        rebuilt.frozen.as_ref().unwrap().claude_md(),
-        Some(FROZEN_INPUT_AFTER_PREPARATION)
+
+    // ② 生产 new 路径的准备形态：frozen 延后到创建步构建（本步不抢跑冻结）。
+    let prepared = PreparedSessionInputs::prepare_new_deferred(&host, &cwd).unwrap();
+    assert!(
+        prepared.frozen.is_none() && prepared.frozen_encoded.is_none(),
+        "deferred 准备不得提前构建 frozen——构建归创建步 P4（含指令面采集）"
     );
-    assert_ne!(
-        rebuilt.frozen_encoded.as_ref().unwrap(),
-        prepared.frozen_encoded.as_ref().unwrap(),
-        "哨兵：外部输入已变，二次准备必须产出不同字节——否则本用例无法证明未重读"
-    );
-    let prepared_bytes = prepared.frozen_encoded.clone().unwrap();
 
     let workspace = host
         .session_resources
@@ -426,22 +470,48 @@ async fn new_session_from_prepared_does_not_reread_external_frozen_inputs() {
         peri_acp_types::session_resources::FrozenState::Present(bytes) => bytes.into_string(),
         other => panic!("frozen must be present after create_session: {other:?}"),
     };
-    assert_eq!(
-        persisted, prepared_bytes,
-        "保存字节必须精确等于给定准备输入的字节"
-    );
     let live = sessions[&id]
         .frozen
         .clone()
         .expect("创建必须发布 live frozen");
+    let live_bytes_at_create = encode_frozen_snapshot(&live).unwrap();
     assert_eq!(
-        encode_frozen_snapshot(&live).unwrap(),
-        prepared_bytes,
-        "live frozen 必须与准备输入逐字节同源"
+        live_bytes_at_create, persisted,
+        "发布到 live state 的 frozen 与持久化字节必须逐字节同源"
     );
     assert_eq!(
         live.claude_md(),
-        Some(FROZEN_INPUT_AT_PREPARATION),
-        "准备之后写入的外部内容不得进入发布的冻结状态"
+        Some(FROZEN_INPUT_AFTER_PREPARATION),
+        "创建期采集的是创建时的磁盘内容（准备之后改写的那份），不是准备期的"
+    );
+
+    // ③ 创建完成后再改写磁盘：捕获只发生一次，live 与持久化快照都不变。
+    std::fs::write(&claude_md, FROZEN_INPUT_AFTER_CREATION).unwrap();
+    let live_after = sessions[&id]
+        .frozen
+        .clone()
+        .expect("live frozen 仍在（创建后改写磁盘不得撤销会话状态）");
+    assert_eq!(
+        encode_frozen_snapshot(&live_after).unwrap(),
+        live_bytes_at_create,
+        "创建后改写外部输入不得改变 live frozen"
+    );
+    assert_eq!(
+        live_after.claude_md(),
+        Some(FROZEN_INPUT_AFTER_PREPARATION),
+        "创建期捕获一次后不再重读（创建后改写不进冻结状态）"
+    );
+    let snapshot_after = host
+        .session_resources
+        .load_session_snapshot(&id)
+        .await
+        .expect("created session must stay readable through the facade");
+    let persisted_after = match snapshot_after.frozen {
+        peri_acp_types::session_resources::FrozenState::Present(bytes) => bytes.into_string(),
+        other => panic!("frozen must stay present after create_session: {other:?}"),
+    };
+    assert_eq!(
+        persisted_after, persisted,
+        "创建后改写外部输入不得改变持久化快照"
     );
 }

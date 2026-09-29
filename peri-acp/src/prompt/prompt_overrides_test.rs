@@ -155,8 +155,7 @@ fn meta_harness_persona_full_keeps_overridden_immutable_sections() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     );
@@ -186,15 +185,17 @@ fn meta_harness_build_and_template_byte_identical() {
         Some(&overrides),
         "/tmp",
         features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         Some("zh"),
     );
     let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
     let collected = crate::session::build_collected_sections(&state, Some(&overrides), Some("zh"));
-    let via_template =
-        PromptTemplate::new(&state, &collected).render(&env, &features, &SkillsProvider, &[]);
+    let via_template = PromptTemplate::new(&state, &collected).render(
+        &env,
+        &features,
+        &AgentCatalogProvider::new(),
+    );
     assert_eq!(via_build, via_template, "两条渲染路径字节一致");
 }
 
@@ -363,8 +364,7 @@ fn collected_sections_render_in_position_order() {
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
         &env,
         &features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
     );
     let pos_runtime = result.find("## System Reminders").unwrap();
     let pos_lang = result.find("# Language").unwrap();
@@ -403,8 +403,7 @@ fn collected_section_overrides_builtin_by_id() {
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
         &env,
         &features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
     );
     assert!(result.contains("COLLECTED-INTRO"), "收集段落内容渲染");
     assert!(
@@ -436,8 +435,7 @@ fn collected_empty_content_skipped() {
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
         &env,
         &features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
     );
     assert!(!result.contains("zz_empty"), "空内容段落不渲染");
     assert!(result.contains("Following conventions"), "其他段落不受影响");
@@ -459,8 +457,7 @@ fn collected_dynamic_content_rendered() {
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
         &env,
         &features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
     );
     assert!(result.contains("DYNAMIC-COLLECTED"), "动态内容段落渲染");
 }
@@ -481,8 +478,11 @@ fn collected_content_merged_with_meta_harness_override() {
     let state = override_state("05_using_tools", "OVERRIDE-TOOLS");
     let features = PromptFeatures::none();
     let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
-    let result =
-        PromptTemplate::new(&state, &collected).render(&env, &features, &SkillsProvider, &[]);
+    let result = PromptTemplate::new(&state, &collected).render(
+        &env,
+        &features,
+        &AgentCatalogProvider::new(),
+    );
     assert!(result.contains("OVERRIDE-TOOLS"), "覆盖全文替换持有者段落");
     assert!(
         !result.contains("COLLECTED-TOOLS"),
@@ -507,8 +507,7 @@ fn collected_sections_render_regardless_of_feature_gates() {
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
         &env,
         &features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
     );
     assert!(result.contains("GATE-FREE-COLLECTED"), "收集段恒渲染");
     // 对照：未迁移内置 gated 段落（15_channel）仍按硬编码 gate 关闭
@@ -575,8 +574,7 @@ fn collected_duplicate_id_last_wins() {
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
         &env,
         &features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
     );
     assert!(
         result.contains("DUP-SECOND") && !result.contains("DUP-FIRST"),
@@ -612,8 +610,7 @@ fn collected_same_zone_order_stable() {
     let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
         &env,
         &features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
     );
     let pos_first = result.find("STABLE-FIRST").unwrap();
     let pos_second = result.find("STABLE-SECOND").unwrap();

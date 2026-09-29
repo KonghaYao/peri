@@ -2,7 +2,7 @@ use super::*;
 use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::meta_harness::MetaHarnessState;
 use peri_middlewares::default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
-use peri_middlewares::host_ports::SkillsProvider;
+use peri_middlewares::host_ports::AgentCatalogProvider;
 use peri_middlewares::subagent::SubAgentMiddleware;
 use peri_model::prompt_cache::{
     strip_system_prompt_dynamic_boundaries, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
@@ -29,8 +29,7 @@ fn build_system_prompt(
     overrides: Option<&AgentOverrides>,
     cwd: &str,
     features: PromptFeatures,
-    skills: &dyn SkillsPort,
-    extra_agent_dirs: &[std::path::PathBuf],
+    agent_catalog: &dyn AgentCatalogPort,
     frozen_date: Option<&str>,
     language: Option<&str>,
 ) -> String {
@@ -41,7 +40,7 @@ fn build_system_prompt(
     } else {
         PromptEnv::detect(cwd)
     };
-    template.render(&env, &features, skills, extra_agent_dirs)
+    template.render(&env, &features, agent_catalog)
 }
 
 fn render_cache_zones(cached: Option<&'static str>, uncached: Option<&'static str>) -> String {
@@ -65,8 +64,7 @@ fn render_cache_zones(cached: Option<&'static str>, uncached: Option<&'static st
     PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
         &PromptEnv::with_frozen_date("/tmp", "2026-01-01"),
         &PromptFeatures::none(),
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
     )
 }
 
@@ -93,8 +91,7 @@ fn render_with_state(state: &MetaHarnessState, features: PromptFeatures) -> Stri
         None,
         "/tmp",
         features,
-        &SkillsProvider,
-        &[],
+        &AgentCatalogProvider::new(),
         Some("2026-01-01"),
         None,
     )

@@ -206,14 +206,13 @@ pub(crate) async fn run_prompt(
     let permission_mode = &deployment.permission_mode;
     let cron_scheduler = deployment.cron_scheduler.clone();
     let plugin_skill_roots = deployment.plugin_skill_roots.as_slice();
-    let plugin_agent_dirs = deployment.plugin_agent_dirs.as_slice();
     let plugin_loaded = deployment.plugin_loaded.as_slice();
     let hook_groups = deployment.hook_groups.as_slice();
     let mcp_pool = deployment.mcp_pool.clone();
     let dynamic_mcp = deployment.dynamic_mcp.clone();
     let channel_state = deployment.channel_state.clone();
     let tool_search_index = deployment.tool_search_index.clone();
-    let skills = deployment.skills.clone();
+    let agent_catalog = deployment.agent_catalog.clone();
     let shared_tools = deployment.shared_tools.clone();
     let plugin_lsp_servers = deployment.plugin_lsp_servers.as_slice();
     let session_resources = deployment.session_resources.clone();
@@ -381,14 +380,14 @@ pub(crate) async fn run_prompt(
             progress_tx: None,
             subagent_ctx_builder: None,
             agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
-                Arc::clone(&skills),
+                Arc::clone(&agent_catalog),
                 meta_harness.clone(),
             ),
             model_factory: crate::host::workflow_agent::build_model_factory(provider, peri_config),
             middleware_factory: Arc::clone(workflow_middleware_factory),
             system_prompt_fallback:
                 crate::host::workflow_agent::build_workflow_system_prompt_fallback(
-                    Arc::clone(&skills),
+                    Arc::clone(&agent_catalog),
                     meta_harness.clone(),
                 ),
             forwarder_launcher: crate::host::workflow_agent::build_workflow_forwarder_launcher(),
@@ -412,7 +411,6 @@ pub(crate) async fn run_prompt(
     } else {
         provider_snapshot.context_window()
     };
-    let claude_md_excludes = peri_config_snapshot.config.claude_md_excludes.clone();
     let language = peri_config_snapshot.config.language.clone();
     let mut compact_config = peri_config_snapshot
         .config
@@ -496,7 +494,6 @@ pub(crate) async fn run_prompt(
         provider_model_name,
         provider_fp,
         effective_context_window,
-        claude_md_excludes,
         language,
         compact_config,
         get_cached_llm,
@@ -517,7 +514,6 @@ pub(crate) async fn run_prompt(
         execution_owner,
         thread_id: Some(thread_id.clone()),
         plugin_skill_roots: plugin_skill_roots.to_vec(),
-        plugin_agent_dirs: plugin_agent_dirs.to_vec(),
         plugin_loaded: plugin_loaded.to_vec(),
         hook_groups: hook_groups.to_vec(),
         cron_scheduler,
@@ -527,7 +523,7 @@ pub(crate) async fn run_prompt(
         dynamic_mcp_projection,
         channel_state,
         tool_search_index,
-        skills,
+        agent_catalog,
         shared_tools,
         lsp_servers: plugin_lsp_servers.to_vec(),
         lsp_pool,

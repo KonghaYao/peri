@@ -4,12 +4,11 @@
 //! 业务函数）归实现方本模块。宿主装配点构造本模块实现后 upcast 注入。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use peri_acp_types::agents::AgentCapability;
 use peri_acp_types::event_data::PluginSnapshotEntry;
 use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort};
-use peri_acp_types::ports::SkillsPort;
 
 use crate::plugin::{
     cleanup_orphaned_plugins, install_plugin, load_installed_plugins, load_known_marketplaces,
@@ -418,22 +417,64 @@ impl SettingsHooksPort for SettingsHooksLoader {
     }
 }
 
-/// Agents 目录扫描端口实现：包装 `scan_agents_detailed`。
+/// Agent 候选目录端口实现（W5）：对会话级 MCP Agent registry 的只读投影。
 ///
-/// W4b（F6/J5）：原 `available_skills`（同步扫盘）已删除——技能目录的唯一来源是
-/// 会话级 MCP skill registry，命令面的 `core:{skill}` 裸名投影随发现异步产生
-/// （`mcp::skill_discovery` 的投影，见 `project_core_skill_commands`），端口不再
-/// 承担任何技能内容读取。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SkillsProvider;
+/// 唯一数据源是 builtin `workspace` 实例的 `resources/list`（本地三来源
+/// project / plugin / builtin；E13 优先级去重；builtin 开关由调用方传入）。
+/// 未绑定 registry（面未装配 / 实例被关闭）⇒ 空目录：**不回落磁盘**
+/// （X4/J5）。
+///
+/// 绑定（[`AgentCatalogProvider::bind`]）由本 crate 的装配点（
+/// `assembly/preparation.rs`）在构造 registry 后单次完成——ACP 侧只持有
+/// `Arc<dyn AgentCatalogPort>` 句柄，不感知 registry 类型（§0 依赖方向）。
+#[derive(Default)]
+pub struct AgentCatalogProvider {
+    registry: parking_lot::RwLock<Option<Arc<crate::mcp::McpAgentRegistry>>>,
+}
 
-impl SkillsPort for SkillsProvider {
-    fn agents(
-        &self,
-        cwd: &str,
-        extra_dirs: &[PathBuf],
-        include_built_ins: bool,
-    ) -> Vec<(String, String, String, AgentCapability)> {
-        crate::scan_agents_detailed(cwd, extra_dirs, include_built_ins)
+impl AgentCatalogProvider {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 绑定会话级 Agent registry（装配点调用；覆盖式，最后一次生效）。
+    pub fn bind(&self, registry: Arc<crate::mcp::McpAgentRegistry>) {
+        *self.registry.write() = Some(registry);
+    }
+}
+
+impl peri_acp_types::ports::AgentCatalogPort for AgentCatalogProvider {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn catalog(&self, include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
+        self.registry
+            .read()
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .local_catalog(include_builtin)
+                    .into_iter()
+                    .map(|entry| entry.catalog_entry())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+/// 测试用空候选目录端口（无 registry 绑定 ⇒ 空目录，不触碰文件系统）。
+#[derive(Default)]
+pub struct NoopAgentCatalog;
+
+#[cfg(test)]
+impl peri_acp_types::ports::AgentCatalogPort for NoopAgentCatalog {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn catalog(&self, _include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
+        Vec::new()
     }
 }

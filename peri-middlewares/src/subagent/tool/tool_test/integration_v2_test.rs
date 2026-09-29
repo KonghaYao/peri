@@ -584,6 +584,7 @@ async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
         dir.path().to_str().unwrap().to_string(),
     )
     .with_cancel(cancel);
+    let t = with_agent_face(t, dir.path()).await;
 
     let result = t
         .invoke(
@@ -686,6 +687,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
     .with_cancel(parent_cancel.clone())
     .with_task_manager(registry)
     .with_bg_event_sender(bg_tx);
+    let tool = with_agent_face(tool, dir.path()).await;
     let tool = super::with_skill_registry(
         tool,
         "workspace",

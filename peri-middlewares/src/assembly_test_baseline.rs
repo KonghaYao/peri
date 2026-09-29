@@ -29,7 +29,6 @@ fn blueprint_sequence_is_canonical() {
             "DefaultSystemPrompt",
             "Lang",
             "AgentsMd",
-            "AgentDefine",
             "Plugin",
             "Skills",
             "SkillPreload",
@@ -58,8 +57,8 @@ fn blueprint_sequence_is_canonical() {
     );
     assert_eq!(
         slots.len(),
-        21,
-        "wave 4 后蓝本槽位恰 21 个（GitWatch 删除；改动槽位数量必须同时改本断言与文档）"
+        20,
+        "W5 后蓝本槽位恰 20 个（GitWatch 删除 + AgentDefine 摘除，plan §6.3；改动槽位数量必须同时改本断言与文档）"
     );
 }
 
@@ -68,7 +67,6 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::DefaultSystemPrompt => "DefaultSystemPrompt",
         ChainSlot::Lang => "Lang",
         ChainSlot::AgentsMd => "AgentsMd",
-        ChainSlot::AgentDefine => "AgentDefine",
         ChainSlot::Plugin => "Plugin",
         ChainSlot::Skills => "Skills",
         ChainSlot::SkillPreload => "SkillPreload",
@@ -99,7 +97,6 @@ fn default_config_produces_canonical_chain() {
             "DefaultSystemPromptMiddleware",
             "LangMiddleware",
             "AgentsMdMiddleware",
-            "AgentDefineMiddleware",
             "PluginMiddleware",
             "SkillsMiddleware",
             "SkillPreloadMiddleware",
@@ -166,15 +163,16 @@ fn permission_mode_keeps_chain_shape() {
         // 位置随 Web / Artifact 两槽位删除各前移 1（A7/A14 期望值同步），
         // 随 v4-part-3 C-04 的 Cron 槽位删除再前移 1，
         // 随 v4-part-4 W3-C1 的 Filesystem / Terminal 两槽位删除再各前移 1，
-        // 随 v4 wave 4 的 GitWatch 槽位删除再前移 1。
+        // 随 v4 wave 4 的 GitWatch 槽位删除再前移 1，
+        // 随 W5 的 AgentDefine 槽位摘除（plan §6.3）再前移 1。
         assert_eq!(
             names.iter().position(|n| n == "HumanInTheLoopMiddleware"),
-            Some(12),
+            Some(11),
             "mode {mode:?}: AskUser 位置漂移"
         );
         assert_eq!(
             names.iter().position(|n| n == "PermissionMiddleware"),
-            Some(11),
+            Some(10),
             "mode {mode:?}: Permission 位置漂移"
         );
         // 条件中间件（Hook/MCP/Workflow/LSP/Goal）不应出现
@@ -541,7 +539,6 @@ fn full_config_chain_order() {
             "DefaultSystemPromptMiddleware",
             "LangMiddleware",
             "AgentsMdMiddleware",
-            "AgentDefineMiddleware",
             "PluginMiddleware",
             "SkillsMiddleware",
             "SkillPreloadMiddleware",
@@ -564,62 +561,40 @@ fn full_config_chain_order() {
     );
 }
 
-#[test]
-fn workflow_agent_type_uses_project_definition_before_built_in() {
+#[tokio::test]
+async fn workflow_agent_definition_requires_the_resource_face() {
+    // W5：workflow agent 定义与 SubAgent 同源——本地三来源经 builtin `workspace`
+    // 实例的 `agent://{scope}/{id}/agent.md` 读取；无池 ZST 工厂没有资源面 ⇒
+    // 明确报错，**不回落磁盘**（X4/J5）。
     let temp = tempfile::tempdir().unwrap();
     let agents_dir = temp.path().join(".claude/agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("explorer.md"),
-        "---\nname: explorer\ndescription: Project override\ntools: Read, Grep\ndisallowedTools: Grep\nmodel: opus\nmaxTurns: 7\nskills: [research]\n---\n\nProject explorer persona.",
+        "---\nname: explorer\ndescription: Project override\nmodel: opus\n---\n\nProject explorer persona.",
     )
     .unwrap();
 
-    let factory = default_workflow_middleware_factory();
-    let definition = factory
+    let error = default_workflow_middleware_factory()
         .resolve_agent_definition("explorer", temp.path().to_str().unwrap())
-        .unwrap();
-
-    assert_eq!(definition.model.as_deref(), Some("opus"));
-    assert_eq!(
-        definition.allowed_tools,
-        Some(vec!["Read".into(), "Grep".into()])
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("unavailable"),
+        "无资源面必须报「面不可用」而不是读盘：{error}"
     );
-    assert_eq!(definition.disallowed_tools, vec!["Grep"]);
-    assert_eq!(definition.skill_names, vec!["research"]);
-    assert_eq!(definition.max_iterations, 7);
-    assert_eq!(
-        definition
-            .prompt_overrides
-            .as_ref()
-            .and_then(|overrides| overrides.persona.as_deref()),
-        Some("Project explorer persona.")
-    );
-}
 
-#[test]
-fn workflow_plan_definition_inherits_model_and_preserves_sandbox_write_dirs() {
-    let temp = tempfile::tempdir().unwrap();
-    let definition = default_workflow_middleware_factory()
+    let error = default_workflow_middleware_factory()
         .resolve_agent_definition("plan", temp.path().to_str().unwrap())
-        .unwrap();
+        .await
+        .unwrap_err();
+    assert!(error.contains("unavailable"), "{error}");
 
-    assert_eq!(definition.model, None);
-    assert_eq!(definition.allowed_write_dirs, vec![".peri/plans/"]);
-    assert!(definition
-        .disallowed_tools
-        .iter()
-        .any(|tool| tool.eq_ignore_ascii_case("Write")));
-}
-
-#[test]
-fn workflow_agent_type_rejects_unknown_definition() {
-    let temp = tempfile::tempdir().unwrap();
     let error = default_workflow_middleware_factory()
         .resolve_agent_definition("does-not-exist", temp.path().to_str().unwrap())
+        .await
         .unwrap_err();
-
-    assert!(error.contains("cannot find agent definition 'does-not-exist'"));
+    assert!(error.contains("unavailable"), "{error}");
 }
 
 /// [回归测试] workflow 真实 executor 在 Reason 流中取消时，
@@ -732,4 +707,23 @@ async fn test_workflow_executor_forwarder_join_error_is_dead_and_failed_telemetr
         peri_acp_types::session::TurnTelemetryOutcome::Failed { failure }
             if failure.kind == peri_acp_types::session::ExecutionFailureKind::Internal
     ));
+}
+
+#[tokio::test]
+async fn workflow_face_rejects_remote_agent_ids_without_an_approval_seam() {
+    // F2（安全）：workflow 面没有批准 broker ⇒ 远端 id 必须显式拒绝；本地 id 的
+    // 行为不受影响（本用例只锁拒绝分支，本地分支由上面的资源面用例覆盖）。
+    let temp = tempfile::tempdir().unwrap();
+    let error = default_workflow_middleware_factory()
+        .resolve_agent_definition("mcp__external__reviewer", temp.path().to_str().unwrap())
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("remote agent definitions are not available"),
+        "远端 id 必须被拒绝（无批准面）：{error}"
+    );
+    assert!(
+        !error.contains("unavailable (MCP workspace face is not assembled)"),
+        "拒绝发生在读取之前（不是面缺席的错误）：{error}"
+    );
 }

@@ -596,3 +596,135 @@ mod command_tests {
 mod system_tests {
     include!("middleware_system_test.rs");
 }
+
+// ─── F11/W5：DiscoverMCP 的 agent 投影随链槽关闭位（真实线路，管道级差分） ──────
+
+/// 经生产管道入口取 DiscoverMCP 工具（`McpMiddleware::collect_tools`，不是直接
+/// 构造工具）：关闭位只有经这条路径才会落到 `DiscoverMCPTool` 的 agent registry。
+fn discover_tool_from(mw: &McpMiddleware, cwd: &str) -> Box<dyn peri_agent::tools::BaseTool> {
+    let mut tools = <McpMiddleware as Middleware>::collect_tools(mw, cwd);
+    let index = match tools.iter().position(|tool| tool.name() == "DiscoverMCP") {
+        Some(index) => index,
+        None => panic!(
+            "collect_tools 必须提供 DiscoverMCP: {:?}",
+            tools.iter().map(|tool| tool.name()).collect::<Vec<_>>()
+        ),
+    };
+    tools.remove(index)
+}
+
+/// 调用 DiscoverMCP 的 JSON-RPC 风格接口（与 `discover_tool_test.rs` 的 invoke 同口径）。
+async fn discover_invoke(
+    tool: &dyn peri_agent::tools::BaseTool,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    use peri_agent::tools::ToolContext;
+    let raw = tool
+        .invoke(
+            serde_json::json!({ "method": method, "params": params }),
+            ToolContext::new(&[], "/tmp"),
+        )
+        .await
+        .expect("invoke 恒 Ok");
+    serde_json::from_str(&raw).expect("invoke 输出应为合法 JSON")
+}
+
+/// F11/W5 管道级差分：`McpMiddleware::collect_tools` 产出的 DiscoverMCP 的 agent
+/// 投影必须与 `SubAgentMiddleware` 链槽关闭位同源（装配面把同一份
+/// `meta_harness_disabled` 派生进 `with_sub_agent_face_closed`）。
+///
+/// - 关闭 ⇒ 本地 agent **不出现**：`list` 的 agents 域为空（无裸名 id），且
+///   `search` 不产生 `type: "agent"` 条目、无 `mcp__workspace__*` 远端投影
+///   （F8：宿主绑定的 builtin workspace 句柄不得被投影成远端来源）；
+/// - 正对照（同一池、同一份磁盘定义，只差关闭位）⇒ 裸名 id 出现——证明真实
+///   `workspace` 资源面确实搭上了线路，关闭用例不是「夹具根本没接线」的假绿。
+#[tokio::test]
+async fn discover_mcp_agent_face_follows_sub_agent_face_closed_bit() {
+    use crate::mcp::agent_face_fixture::AgentFaceFixture;
+
+    /// 本地 agent 标识（`.claude/agents/<id>.md` 的 id 段 = 裸名）。
+    const LOCAL_AGENT: &str = "pipeline-probe-agent";
+    /// 会话标识：绑定后按 ACP 归属过滤（夹具句柄无归属 ⇒ 本会话可见）。
+    const SESSION: &str = "pipeline-face-closed";
+
+    let dir = tempfile::tempdir().unwrap();
+    let agents_dir = dir.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join(format!("{LOCAL_AGENT}.md")),
+        format!("---\nname: {LOCAL_AGENT}\ndescription: Pipeline face probe\n---\n\nProbe.\n"),
+    )
+    .unwrap();
+    // 夹具在 `connect` 时快照 `resources/list`，定义必须先落盘。
+    let fixture = AgentFaceFixture::connect(dir.path()).await;
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let list_agents = serde_json::json!({ "server": "workspace", "domain": "agents" });
+
+    // ── 关闭位（= `meta_harness_disabled` 含 `SUB_AGENT_FACE_CLOSED_KEY`） ──
+    let closed = McpMiddleware::new(Arc::clone(&fixture.pool))
+        .with_session_id(SESSION)
+        .with_sub_agent_face_closed(true);
+    let closed_tool = discover_tool_from(&closed, &cwd);
+    assert_eq!(
+        discover_invoke(&*closed_tool, "list", list_agents.clone()).await,
+        serde_json::json!([]),
+        "关闭位 ⇒ DiscoverMCP 不得列出任何本地 agent"
+    );
+    let closed_hits = discover_invoke(
+        &*closed_tool,
+        "search",
+        serde_json::json!({ "query": LOCAL_AGENT }),
+    )
+    .await;
+    assert!(
+        !closed_hits
+            .as_array()
+            .expect("search 应返回数组")
+            .iter()
+            .any(|entry| entry["type"] == "agent"),
+        "关闭位 ⇒ search 不得命中本地 agent（裸名/远端投影皆无）: {closed_hits}"
+    );
+    assert!(
+        !closed_hits.to_string().contains("mcp__workspace__"),
+        "关闭位 ⇒ 不得把本地来源投影成远端 agent（F8）: {closed_hits}"
+    );
+
+    // ── 正对照：同一个池、同一份磁盘定义，只差关闭位 ──
+    let open = McpMiddleware::new(Arc::clone(&fixture.pool))
+        .with_session_id(SESSION)
+        .with_sub_agent_face_closed(false);
+    let open_tool = discover_tool_from(&open, &cwd);
+    let open_agents = discover_invoke(&*open_tool, "list", list_agents).await;
+    let open_ids: Vec<&str> = open_agents
+        .as_array()
+        .expect("list 应返回数组")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(
+        open_ids.contains(&LOCAL_AGENT),
+        "正对照：不关闭时必须命中本地 agent（否则关闭用例是假绿）: {open_ids:?}"
+    );
+    assert!(
+        !open_ids.contains(&format!("mcp__workspace__{LOCAL_AGENT}").as_str()),
+        "本地来源的 id 保持裸名（F8：builtin workspace 不投影为远端）: {open_ids:?}"
+    );
+    let open_hits = discover_invoke(
+        &*open_tool,
+        "search",
+        serde_json::json!({ "query": LOCAL_AGENT }),
+    )
+    .await;
+    let open_agent = open_hits
+        .as_array()
+        .expect("search 应返回数组")
+        .iter()
+        .find(|entry| entry["type"] == "agent")
+        .unwrap_or_else(|| panic!("正对照：search 必须命中 agent 条目: {open_hits}"));
+    assert_eq!(open_agent["id"], LOCAL_AGENT, "本地 id 保持裸名");
+    assert_eq!(
+        open_agent["server"], "workspace",
+        "origin = 宿主绑定的实例名"
+    );
+}

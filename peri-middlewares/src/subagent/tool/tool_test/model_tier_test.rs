@@ -61,7 +61,11 @@ async fn test_agent_model_override_replaces_frontmatter() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
+    let t = with_agent_face(
+        make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+        dir.path(),
+    )
+    .await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -89,7 +93,11 @@ async fn test_agent_model_inherit_uses_parent_model() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
+    let t = with_agent_face(
+        make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+        dir.path(),
+    )
+    .await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -113,7 +121,11 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
+    let t = with_agent_face(
+        make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+        dir.path(),
+    )
+    .await;
     for model in [None, Some(""), Some("   ")] {
         let mut input = serde_json::json!({
             "subagent_type": "test-agent",
@@ -148,7 +160,11 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
     for fm in ["inherit", ""] {
         let dir = tempdir().unwrap();
         write_test_agent_with_model(&dir, fm);
-        let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
+        let t = with_agent_face(
+            make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+            dir.path(),
+        )
+        .await;
         let result = t
             .invoke(
                 serde_json::json!({
@@ -176,7 +192,11 @@ async fn test_agent_model_case_insensitive() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
+    let t = with_agent_face(
+        make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+        dir.path(),
+    )
+    .await;
     for model in ["HAIKU", "InHerit"] {
         let result = t
             .invoke(
@@ -230,7 +250,11 @@ async fn test_agent_model_unknown_rejected() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
+    let t = with_agent_face(
+        make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+        dir.path(),
+    )
+    .await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -318,6 +342,7 @@ async fn test_resume_thread_id_ignores_model_field() {
         .with_parent_thread_id(parent_id.clone())
         .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
+    let t = with_agent_face(t, dir.path()).await;
     let result = t
         .invoke(
             serde_json::json!({
@@ -357,6 +382,7 @@ async fn test_agent_model_override_applies_to_background() {
     let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases))
         .with_task_manager(Arc::clone(&registry))
         .with_bg_event_sender(bg_tx);
+    let t = with_agent_face(t, dir.path()).await;
 
     let invoke_msg = t
         .invoke(
@@ -407,7 +433,11 @@ async fn test_agent_invoke_wrong_optional_types_keep_definition_and_parent_cwd()
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases = Arc::default();
-    let mut tool = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
+    let mut tool = with_agent_face(
+        make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+        dir.path(),
+    )
+    .await;
     tool.parent_cwd = dir.path().to_str().unwrap().to_string();
     let result = tool
         .invoke(

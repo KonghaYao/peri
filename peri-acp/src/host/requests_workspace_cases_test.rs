@@ -237,7 +237,11 @@ async fn worktree_missing_directory_history_is_read_only_and_load_is_rejected() 
     assert!(sessions.is_empty());
 }
 
+/// 断言「资源取自 linked worktree 目标目录」⇒ 读的是 builtin `workspace` 资源面，
+/// 依赖注入**默认态**（`PERI_MCP_BUILTIN` 非 `off`）。该 env 是进程级全局且由同进程
+/// 开关组用例在 `#[serial]` 临界区内改写（TEST-HERMETIC-001）⇒ 读侧必须同键互斥。
 #[tokio::test]
+#[serial]
 async fn worktree_new_resources_use_the_target_directory() {
     let tmp = tempfile::TempDir::new().unwrap();
     let startup = tmp.path().join("startup");

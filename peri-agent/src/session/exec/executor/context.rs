@@ -164,8 +164,6 @@ pub struct SessionContext {
     pub provider_fp: String,
     /// 生效上下文窗口（原 `provider.context_window()` / `context_1m()` 计算）。
     pub effective_context_window: u32,
-    /// CLAUDE.md excludes（原 `peri_config.config.claude_md_excludes`）。
-    pub claude_md_excludes: Option<Vec<String>>,
     /// `turn.frozen=None` 时构造最小 snapshot 的语言回退。
     /// production stage/render/subagent 必须从 `FrozenSessionData` 派生语言。
     pub language: Option<String>,
@@ -206,7 +204,6 @@ pub struct SessionContext {
 
     // ── middleware: middleware chain resources ─────────────────────────────
     pub plugin_skill_roots: Vec<peri_acp_types::skills::SkillRoot>,
-    pub plugin_agent_dirs: Vec<std::path::PathBuf>,
     pub plugin_loaded: Vec<peri_acp_types::plugin::LoadedPlugin>,
     pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
     pub cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
@@ -217,8 +214,9 @@ pub struct SessionContext {
         Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
     pub channel_state: Option<Arc<ChannelState>>,
     pub tool_search_index: Arc<dyn peri_acp_types::ports::ToolSearchPort>,
-    /// Skills 扫描端口（prompt 渲染 available_agents / frozen 构造经此访问）。
-    pub skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
+    /// Agent 候选目录端口（prompt 渲染 `{{available_agents}}` 经此访问；
+    /// W5：实现是会话级 MCP Agent registry 的只读投影，不再扫盘）。
+    pub agent_catalog: Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
     pub shared_tools: Arc<
         parking_lot::RwLock<std::collections::BTreeMap<String, Arc<dyn crate::tools::BaseTool>>>,
     >,

@@ -125,6 +125,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
     .with_bg_event_sender(bg_tx)
     .with_register_runtime(register_cb)
     .with_deregister_runtime(deregister_cb);
+    let tool = with_agent_face(tool, dir.path()).await;
 
     // 4 个并发 invoke——必须各自 tokio::spawn（llm_factory 内的 Barrier::wait()
     // 是同步阻塞：若在 join_all 单任务内逐个 poll，第一个 future 会卡死当前
@@ -294,6 +295,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
     .with_task_manager(Arc::clone(&registry))
     .with_bg_event_sender(bg_tx)
     .with_deregister_runtime(deregister_cb);
+    let tool = with_agent_face(tool, dir.path()).await;
 
     let msg = tool
         .invoke(
@@ -458,6 +460,7 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
     .with_task_manager(Arc::clone(&registry))
     .with_bg_event_sender(bg_tx)
     .with_deregister_runtime(deregister_cb);
+    let tool = with_agent_face(tool, dir.path()).await;
 
     // 启动 6 个后台任务：全部必须成功返回（不再有并发上限拦截）
     let mut task_ids = Vec::new();

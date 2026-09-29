@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::invocation::InvocationArgs;
 use crate::tool_search::core_tools::TOOL_AGENT;
-use crate::{agent_define::AgentOverrides, hooks::types::RegisteredHook, mcp::McpAgentRegistry};
+use crate::{hooks::types::RegisteredHook, mcp::McpAgentRegistry};
 
 /// SubAgentTool - implements the `Agent` tool, allowing LLM to delegate sub-tasks to specialized sub-agents
 const AGENT_DESCRIPTION: &str = include_str!("descriptions/agent.md");
@@ -60,8 +60,6 @@ pub struct SubAgentTool {
     /// 运行时通道回退值（测试/遗留路径经 with_* 注入；生产路径为默认空，
     /// 由 parent_session 的 host 覆盖）
     pub(crate) host: SubagentHost,
-    /// 已启用插件提供的 agent definition 目录。
-    pub(crate) plugin_agent_dirs: Arc<Vec<std::path::PathBuf>>,
     /// 会话级 MCP Agent registry。远端定义只在显式选择后读取和批准。
     pub(crate) mcp_agent_registry: Option<Arc<McpAgentRegistry>>,
     /// 用户交互 broker，用于远端 Agent 内容绑定批准。
@@ -227,18 +225,18 @@ impl BaseTool for SubAgentTool {
             Some(id) => id.clone(),
             None => {
                 let error = "Error: please provide subagent_type parameter to specify the agent type, or use fork: true for fork mode";
-                return Err(self.agent_error_with_suggestions(error, None, &cwd).into());
+                return Err(self.agent_error_with_suggestions(error, None).into());
             }
         };
 
         let agent_def = if is_mcp_agent {
             self.load_and_approve_mcp_agent(&agent_id).await?
         } else {
-            match self.load_agent_def(&agent_id, &cwd) {
+            match self.load_agent_def(&agent_id).await {
                 Ok(agent) => agent,
                 Err(error) => {
                     return Err(self
-                        .agent_error_with_suggestions(&error, Some(&agent_id), &cwd)
+                        .agent_error_with_suggestions(&error, Some(&agent_id))
                         .into());
                 }
             }
@@ -316,5 +314,6 @@ impl BaseTool for SubAgentTool {
     }
 }
 
+use peri_acp_types::agents::AgentOverrides;
 /// 复用 peri-agent 的 subagent 结果格式与文本提取
 use peri_agent::session::subagent::{extract_last_ai_text, format_subagent_result};

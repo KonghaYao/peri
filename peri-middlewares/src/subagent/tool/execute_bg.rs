@@ -67,15 +67,15 @@ impl super::SubAgentTool {
                 None => {
                     let error =
                         "Error: background mode requires subagent_type parameter (or use fork: true)";
-                    return Err(self.agent_error_with_suggestions(error, None, &cwd).into());
+                    return Err(self.agent_error_with_suggestions(error, None).into());
                 }
             };
 
-            let agent_def = match self.load_agent_def(&agent_id, &cwd) {
+            let agent_def = match self.load_agent_def(&agent_id).await {
                 Ok(a) => a,
                 Err(e) => {
                     return Err(self
-                        .agent_error_with_suggestions(&e, Some(&agent_id), &cwd)
+                        .agent_error_with_suggestions(&e, Some(&agent_id))
                         .into());
                 }
             };

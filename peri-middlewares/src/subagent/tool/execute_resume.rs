@@ -109,7 +109,8 @@ impl super::SubAgentTool {
                     .await
                     .map_err(|error| format!("resume_subagent: {error}"))?
             } else {
-                self.load_agent_def_for_resume(&title, &cwd)
+                self.load_agent_def_for_resume(&title)
+                    .await
                     .map_err(|error| format!("resume_subagent: {error}"))?
             };
             let build_result = self

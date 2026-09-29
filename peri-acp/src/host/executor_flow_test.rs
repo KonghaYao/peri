@@ -48,7 +48,7 @@ use peri_middlewares::{
     assembly::{BuiltinInstanceContext, CronInstanceInput, LspInstanceInput},
     mcp::{McpClientPool, McpInitStatus, McpTaskOwner},
 };
-use peri_middlewares::{host_ports::SkillsProvider, tool_search::ToolSearchIndex};
+use peri_middlewares::{host_ports::AgentCatalogProvider, tool_search::ToolSearchIndex};
 #[cfg(not(windows))]
 use peri_model::{
     JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
@@ -411,7 +411,6 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         provider_model_name: "gpt-4o".to_string(),
         provider_fp: "openai:gpt-4o".to_string(),
         effective_context_window: 200_000,
-        claude_md_excludes: None,
         language: None,
         compact_config: Default::default(),
         get_cached_llm: None,
@@ -430,7 +429,6 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         execution_owner: None,
         thread_id: None,
         plugin_skill_roots: vec![],
-        plugin_agent_dirs: vec![],
         plugin_loaded: vec![],
         hook_groups: vec![],
         cron_scheduler: None,
@@ -444,7 +442,7 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         lsp_servers: vec![],
         lsp_pool: None,
         workflow_executor: None,
-        skills: Arc::new(SkillsProvider),
+        agent_catalog: Arc::new(AgentCatalogProvider::new()),
         workflow_middleware: None,
         event_publisher: Arc::new(crate::host::controller_ports::ControllerEventPublisher(
             controller.clone(),
@@ -516,7 +514,7 @@ async fn make_session_context_with_manager(
         None, // MCP 订阅端口（测试无）
         None, // Dynamic MCP（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
-        Arc::new(SkillsProvider),
+        Arc::new(AgentCatalogProvider::new()),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
     );
     sm.new_session_with_id(session_id, "/tmp")

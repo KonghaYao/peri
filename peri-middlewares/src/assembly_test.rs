@@ -35,7 +35,6 @@ use peri_resources::workflow::protocol::{AgentRunParams, AgentRunResult};
 use peri_resources::workflow::runner::AgentExecutor;
 
 use crate::{
-    agent_define::AgentOverrides,
     assembly::{
         default_workflow_middleware_factory, default_workflow_middleware_factory_with_pool,
         AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
@@ -46,6 +45,7 @@ use crate::{
     tool_search::ToolSearchIndex,
     tools::TodoItem,
 };
+use peri_acp_types::agents::AgentOverrides;
 
 // ── fakes ─────────────────────────────────────────────────────────────────────
 
@@ -289,6 +289,7 @@ fn base_context() -> AssemblyContext {
     let on_bg_complete: Option<OnBgCompleteFn> = None;
 
     AssemblyContext {
+        agent_catalog: Arc::new(crate::host_ports::NoopAgentCatalog),
         cwd: "/tmp/contract-test".to_string(),
         cancel: AgentCancellationToken::new(),
         broker: Arc::new(FakeBroker),
@@ -299,7 +300,6 @@ fn base_context() -> AssemblyContext {
         auto_classifier_model: Arc::new(tokio::sync::Mutex::new(
             Box::new(FakeModel) as Box<dyn Model>
         )),
-        claude_md_excludes: Vec::new(),
         preload_skills: Vec::new(),
         plugin_skill_roots: Vec::new(),
         plugin_loaded: Vec::new(),
@@ -484,7 +484,6 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::DefaultSystemPrompt => "DefaultSystemPromptMiddleware",
         ChainSlot::Lang => "LangMiddleware",
         ChainSlot::AgentsMd => "AgentsMdMiddleware",
-        ChainSlot::AgentDefine => "AgentDefineMiddleware",
         ChainSlot::Plugin => "PluginMiddleware",
         ChainSlot::Skills => "SkillsMiddleware",
         ChainSlot::SkillPreload => "SkillPreloadMiddleware",

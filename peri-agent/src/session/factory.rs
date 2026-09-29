@@ -32,8 +32,6 @@ pub enum ChainSlot {
     Lang,
     /// AgentsMd（CLAUDE.md 指引注入）
     AgentsMd,
-    /// AgentDefine（agent 定义注入）
-    AgentDefine,
     /// Plugin（插件加载结果注入）
     Plugin,
     /// Skills（技能摘要注入）
@@ -94,7 +92,6 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         ChainSlot::DefaultSystemPrompt,
         ChainSlot::Lang,
         ChainSlot::AgentsMd,
-        ChainSlot::AgentDefine,
         ChainSlot::Plugin,
         ChainSlot::Skills,
         ChainSlot::SkillPreload,
@@ -256,12 +253,14 @@ pub struct AssemblyContext {
     /// 自动分类模型（HITL auto-classifier）
     pub auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>>,
     // ── 配置 / 插件 / 技能 ──
-    /// CLAUDE.md 排除项
-    pub claude_md_excludes: Vec<String>,
     /// 预加载技能名
     pub preload_skills: Vec<String>,
     /// 插件技能根目录
     pub plugin_skill_roots: Vec<SkillRoot>,
+    /// Agent 候选目录端口（W5）：链装配点用它绑定会话级 MCP Agent registry
+    /// （`resolve_ports`），prompt 渲染经它取 `{{available_agents}}` 候选；
+    /// 唯一来源，不回落磁盘。
+    pub agent_catalog: Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
     /// 已加载插件
     pub plugin_loaded: Vec<LoadedPlugin>,
     /// Hook 组（每组一个 HookMiddleware 实例）

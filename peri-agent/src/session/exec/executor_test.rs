@@ -15,17 +15,15 @@ use std::sync::{
 
 use async_trait::async_trait;
 use peri_acp_types::{
-    agents::AgentCapability,
     event::{
         EventMessage, EventPublisher, EventSink, EventSubscriber, ExecutorEvent, SubscriptionError,
     },
     interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
     messages::{BaseMessage, ContentBlock, ImageSource, MessageContent},
     permission::{PermissionMode, SharedPermissionMode},
-    ports::{SkillsPort, ToolSearchPort},
+    ports::{AgentCatalogPort, ToolSearchPort},
     runtime::UnstampedEvent,
 };
-use std::path::PathBuf;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::{
@@ -131,13 +129,12 @@ impl EventSubscriber for NoopSubscriber {
 
 struct NoopSkills;
 
-impl SkillsPort for NoopSkills {
-    fn agents(
-        &self,
-        _cwd: &str,
-        _extra_dirs: &[PathBuf],
-        _include_built_ins: bool,
-    ) -> Vec<(String, String, String, AgentCapability)> {
+impl AgentCatalogPort for NoopSkills {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn catalog(&self, _include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
         Vec::new()
     }
 }
@@ -210,7 +207,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         provider_model_name: "test-model".to_string(),
         provider_fp: "test:model".to_string(),
         effective_context_window: 200_000,
-        claude_md_excludes: None,
         language: None,
         compact_config: Default::default(),
         get_cached_llm: None,
@@ -230,7 +226,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         execution_owner: None,
         thread_id: None,
         plugin_skill_roots: vec![],
-        plugin_agent_dirs: vec![],
         plugin_loaded: vec![],
         hook_groups: vec![],
         cron_scheduler: None,
@@ -244,7 +239,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         lsp_servers: vec![],
         lsp_pool: None,
         workflow_executor: None,
-        skills: Arc::new(NoopSkills),
+        agent_catalog: Arc::new(NoopSkills),
         workflow_middleware: None,
         event_publisher: Arc::new(NoopEventPublisher),
         subscribe: Arc::new(|| Box::new(NoopSubscriber)),

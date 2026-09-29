@@ -52,6 +52,7 @@ fn server_with_resources(cwd: &std::path::Path, skills: &std::path::Path) -> Wor
         .expect("写二进制附件");
     WorkspaceMcpServer::new(cwd.to_string_lossy().to_string(), None).with_resources(
         WorkspaceResourcesInput {
+            instruction_excludes: Vec::new(),
             skill_roots: vec![ResourceRoot::new(skills, ResourceScope::Project)],
             agent_roots: Vec::new(),
             disable_bundled: true,
@@ -439,6 +440,7 @@ async fn wire_skills_list_and_get_semantics() {
 
     let server = WorkspaceMcpServer::new(cwd.path().to_string_lossy().to_string(), None)
         .with_resources(WorkspaceResourcesInput {
+            instruction_excludes: Vec::new(),
             skill_roots: vec![
                 ResourceRoot::new(skills.path(), ResourceScope::Project),
                 ResourceRoot::new(shadow.path(), ResourceScope::User),
