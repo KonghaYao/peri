@@ -334,9 +334,11 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
     .unwrap();
     let frozen = sessions[&id].frozen.as_ref().unwrap().v2_frozen();
     assert_eq!(frozen.language.as_deref(), Some("zh-CN"));
-    assert_eq!(
-        frozen.meta_harness.section_overrides["01_intro"].as_ref(),
-        "SAVED_META_HARNESS"
+    // J6/X8：legacy 首次接纳发生在执行环境（与 MCP 资源面）建立之前，覆盖文档不可得
+    // ⇒ 保持内置段落、不回落磁盘读 `.peri/meta`（该目录仍在，但不得被宿主读取）。
+    assert!(
+        frozen.meta_harness.section_overrides.is_empty(),
+        "legacy 接纳不得从磁盘读取段落覆盖"
     );
     assert!(frozen
         .meta_harness

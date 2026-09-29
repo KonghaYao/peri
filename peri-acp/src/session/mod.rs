@@ -29,7 +29,7 @@ pub mod state_builders;
 pub use peri_agent::session::async_router::AsyncRouter;
 
 pub use dynamic_mcp::SessionDynamicMcpNotificationSink;
-pub(crate) use frozen::build_collected_sections;
+pub(crate) use frozen::{build_collected_sections, build_meta_harness_state};
 pub use retry_events::RetryEventForwarder;
 
 #[cfg(test)]

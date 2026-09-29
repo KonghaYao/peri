@@ -74,7 +74,22 @@ impl SessionEnvironment {
         Self::assemble_prepared(host, &inputs, session_id).await
     }
 
-    /// 使用已定格的准备输入装配会话环境：配置/插件/目录全部来自 `inputs`——
+    pub(crate) async fn assemble_prepared_without_frozen(
+        host: &AcpServerConfig,
+        inputs: &super::prepared::PreparedSessionInputs,
+        session_id: &str,
+    ) -> Result<Option<Arc<Self>>, AcpError> {
+        Self::assemble_with_frozen(
+            host,
+            &inputs.cwd,
+            session_id,
+            None,
+            &inputs.plugins(),
+            &inputs.configuration,
+        )
+        .await
+    }
+
     /// 装配期不第二次 `ConfigSource::load_at`、不第二次加载插件、不构建第二份 frozen。
     ///
     /// MCP / LSP / hooks 与 OAuth 消费者仍在本函数内创建（顺序不变）；调用方
@@ -90,7 +105,7 @@ impl SessionEnvironment {
             host,
             &inputs.cwd,
             session_id,
-            &inputs.frozen,
+            inputs.frozen.as_ref(),
             &inputs.plugins(),
             &inputs.configuration,
         )
@@ -107,7 +122,7 @@ impl SessionEnvironment {
         host: &AcpServerConfig,
         cwd: &str,
         session_id: &str,
-        frozen: &crate::session::executor::FrozenSessionData,
+        frozen: Option<&crate::session::executor::FrozenSessionData>,
         plugins: &super::assemble::PreparedPlugins,
         configuration: &super::prepared::PreparedConfiguration,
     ) -> Result<Option<Arc<Self>>, AcpError> {
@@ -140,9 +155,18 @@ impl SessionEnvironment {
         // A24 关闭集：从**同一份 frozen snapshot** 派生（设计 §2.5：禁止回退当轮 config；
         // fork 复用 source 的 frozen 字节时两者可能不同）。它是订阅建立门的唯一输入，
         // 不改变 pool 级就绪与面板连接状态（ARC-CAPABILITY-CLOSURE-001）。
-        let builtin_closed = peri_middlewares::assembly::builtin_closed_instances(
-            &frozen.meta_harness().disabled_middlewares,
-        );
+        let builtin_closed = match frozen {
+            Some(frozen) => peri_middlewares::assembly::builtin_closed_instances(
+                &frozen.meta_harness().disabled_middlewares,
+            ),
+            None => {
+                let state = crate::session::build_meta_harness_state(
+                    configuration.config.config.meta_harness.as_ref(),
+                    std::collections::HashMap::new(),
+                );
+                peri_middlewares::assembly::builtin_closed_instances(&state.disabled_middlewares)
+            }
+        };
         #[cfg(test)]
         let closed_for_test = builtin_closed.clone();
         let input = assemble::HostAssemblyInput {
@@ -216,6 +240,56 @@ impl SessionEnvironment {
 
     pub(crate) fn activate(&self) {
         self.activation.cancel();
+    }
+    /// 冻结前读取 MetaHarness 覆盖文档（J6/X7/X8）：只经**本会话环境**的真实
+    /// builtin `workspace` 实例，等其连接收口后一次性读启用 section。
+    ///
+    /// - 无池 / 无句柄且池初始化已收口（ready/failed）/ 句柄非 Connected ⇒ 空批，
+    ///   由宿主按 X8「覆盖不可得 ⇒ 保持内置」处理（不回落磁盘）；
+    /// - 等待上界 10s：builtin 实例是同进程链路，握手很快；失败会以 Failed 句柄出现
+    ///   而立即短路，这里的上界只兜底「句柄始终不出现」的异常装配。
+    pub(crate) async fn read_meta_docs(
+        &self,
+        enabled_sections: &std::collections::HashSet<String>,
+    ) -> Result<std::collections::HashMap<String, String>, AcpError> {
+        use peri_acp_types::ports::McpPoolPort as _;
+        let Some(pool) = self.cfg.mcp_pool.as_ref() else {
+            return Ok(Default::default());
+        };
+        let Some(pool) = pool
+            .as_any()
+            .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
+        else {
+            return Ok(Default::default());
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(handle) = pool.get_client("workspace") {
+                if !matches!(
+                    handle.status,
+                    peri_middlewares::mcp::ClientStatus::Connected
+                ) {
+                    return Ok(Default::default());
+                }
+                return pool
+                    .read_builtin_workspace_meta(enabled_sections)
+                    .await
+                    .map_err(|error| AcpError::new(-32603, error));
+            }
+            // 池初始化已收口而 workspace 句柄仍不存在（实例未装配 / 被关闭 / 非 bare
+            // 配置类另有故障）：不再等待，按覆盖不可得处理。
+            let phase = pool.snapshot()["initPhase"]
+                .as_str()
+                .unwrap_or("pending")
+                .to_owned();
+            if !matches!(phase.as_str(), "pending" | "initializing") {
+                return Ok(Default::default());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(Default::default());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     /// 本会话环境的 per-session 后台任务管理器（AW3-11 第一成员）。

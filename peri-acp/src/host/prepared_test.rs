@@ -169,17 +169,24 @@ async fn prepare_new_is_repeatable_and_frozen_bytes_are_single_source() {
 
     assert_eq!(first.cwd, cwd);
     assert_eq!(
-        first.frozen_encoded, second.frozen_encoded,
+        first.frozen_encoded.as_ref().unwrap(),
+        second.frozen_encoded.as_ref().unwrap(),
         "同一准备输入必须产出同一 snapshot 字节"
     );
-    assert_eq!(first.frozen.date(), second.frozen.date());
-    let decoded = decode_frozen_snapshot(&first.frozen_encoded).unwrap();
+    assert_eq!(
+        first.frozen.as_ref().unwrap().date(),
+        second.frozen.as_ref().unwrap().date()
+    );
+    let decoded = decode_frozen_snapshot(first.frozen_encoded.as_ref().unwrap()).unwrap();
     assert_eq!(
         decoded.date(),
-        first.frozen.date(),
+        first.frozen.as_ref().unwrap().date(),
         "snapshot 字节与内存冻结数据必须同源（日期不各取一份）"
     );
-    assert_eq!(decoded.system_prompt(), first.frozen.system_prompt());
+    assert_eq!(
+        decoded.system_prompt(),
+        first.frozen.as_ref().unwrap().system_prompt()
+    );
     assert_eq!(first.skill_roots.len(), second.skill_roots.len());
     assert_eq!(first.agent_dirs.len(), second.agent_dirs.len());
 }
@@ -193,7 +200,7 @@ async fn prepare_new_writes_no_session_state() {
 
     let before = snapshot_tree(tmp.path());
     let prepared = PreparedSessionInputs::prepare_new(&host, &cwd).unwrap();
-    assert!(!prepared.frozen_encoded.is_empty());
+    assert!(!prepared.frozen_encoded.as_ref().unwrap().is_empty());
     assert_eq!(
         before,
         snapshot_tree(tmp.path()),
@@ -237,15 +244,26 @@ async fn prepare_fork_reuses_source_snapshot_bytes() {
     let host = prepared_test_host(&tmp, None).await;
 
     let source = PreparedSessionInputs::prepare_new(&host, &cwd).unwrap();
-    let forked =
-        PreparedSessionInputs::prepare_fork(&host, &fork_cwd, &source.frozen_encoded).unwrap();
+    let forked = PreparedSessionInputs::prepare_fork(
+        &host,
+        &fork_cwd,
+        source.frozen_encoded.as_ref().unwrap(),
+    )
+    .unwrap();
 
     assert_eq!(
-        forked.frozen_encoded, source.frozen_encoded,
+        forked.frozen_encoded.as_ref().unwrap(),
+        source.frozen_encoded.as_ref().unwrap(),
         "fork 必须保留 source 的精确 frozen 字节"
     );
-    assert_eq!(forked.frozen.date(), source.frozen.date());
-    assert_eq!(forked.frozen.system_prompt(), source.frozen.system_prompt());
+    assert_eq!(
+        forked.frozen.as_ref().unwrap().date(),
+        source.frozen.as_ref().unwrap().date()
+    );
+    assert_eq!(
+        forked.frozen.as_ref().unwrap().system_prompt(),
+        source.frozen.as_ref().unwrap().system_prompt()
+    );
     assert_eq!(forked.cwd, fork_cwd);
 
     assert!(
@@ -273,7 +291,7 @@ async fn prepare_legacy_records_saved_cwd_and_builds_from_workspace() {
         PathBuf::from(&registered_raw),
         "legacy 必须记录保存的绝对 cwd（不是调用方终端的 cwd）"
     );
-    assert!(decode_frozen_snapshot(&legacy.frozen_encoded).is_ok());
+    assert!(decode_frozen_snapshot(legacy.frozen_encoded.as_ref().unwrap()).is_ok());
 }
 
 /// new 路径的持久化属性：frozen 字节与发布到 live state 的冻结状态同源（一次写入），
@@ -358,7 +376,7 @@ async fn new_session_from_prepared_does_not_reread_external_frozen_inputs() {
 
     let prepared = PreparedSessionInputs::prepare_new(&host, &cwd).unwrap();
     assert_eq!(
-        prepared.frozen.claude_md(),
+        prepared.frozen.as_ref().unwrap().claude_md(),
         Some(FROZEN_INPUT_AT_PREPARATION),
         "准备必须定格当时的外部输入"
     );
@@ -367,13 +385,15 @@ async fn new_session_from_prepared_does_not_reread_external_frozen_inputs() {
     std::fs::write(&claude_md, FROZEN_INPUT_AFTER_PREPARATION).unwrap();
     let rebuilt = PreparedSessionInputs::prepare_new(&host, &cwd).unwrap();
     assert_eq!(
-        rebuilt.frozen.claude_md(),
+        rebuilt.frozen.as_ref().unwrap().claude_md(),
         Some(FROZEN_INPUT_AFTER_PREPARATION)
     );
     assert_ne!(
-        rebuilt.frozen_encoded, prepared.frozen_encoded,
+        rebuilt.frozen_encoded.as_ref().unwrap(),
+        prepared.frozen_encoded.as_ref().unwrap(),
         "哨兵：外部输入已变，二次准备必须产出不同字节——否则本用例无法证明未重读"
     );
+    let prepared_bytes = prepared.frozen_encoded.clone().unwrap();
 
     let workspace = host
         .session_resources
@@ -384,7 +404,7 @@ async fn new_session_from_prepared_does_not_reread_external_frozen_inputs() {
     let response = super::requests::session_lifecycle::new_session_from_prepared(
         &host,
         &workspace,
-        &prepared,
+        prepared,
         &mut sessions,
     )
     .await
@@ -408,7 +428,7 @@ async fn new_session_from_prepared_does_not_reread_external_frozen_inputs() {
         other => panic!("frozen must be present after create_session: {other:?}"),
     };
     assert_eq!(
-        persisted, prepared.frozen_encoded,
+        persisted, prepared_bytes,
         "保存字节必须精确等于给定准备输入的字节"
     );
     let live = sessions[&id]
@@ -417,7 +437,7 @@ async fn new_session_from_prepared_does_not_reread_external_frozen_inputs() {
         .expect("创建必须发布 live frozen");
     assert_eq!(
         encode_frozen_snapshot(&live).unwrap(),
-        prepared.frozen_encoded,
+        prepared_bytes,
         "live frozen 必须与准备输入逐字节同源"
     );
     assert_eq!(

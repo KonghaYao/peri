@@ -217,7 +217,7 @@ pub struct PromptTemplate {
 enum SectionContent {
     /// 内置段落（`include_str!` 静态文本，零拷贝）
     Builtin(&'static str),
-    /// MetaHarness 覆盖全文（冻结期扫描 `.peri/meta/<id>.md`）
+    /// MetaHarness 覆盖全文（冻结期经 builtin `workspace` 资源读取，J6）
     Override(Arc<str>),
     /// middleware 动态生成的段落全文（装配期收集，`PromptSectionContent::Dynamic`）
     Dynamic(String),

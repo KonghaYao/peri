@@ -115,15 +115,12 @@ fn build_meta_harness_state_mixed_entries() {
 
 /// 集成：build_frozen_data 应用段落覆盖 + middleware 关闭集合到冻结载体；
 /// 主 prompt 与 SubAgent 无 workflow prompt 共用同一覆盖。
+///
+/// J6：覆盖正文是**输入**（MCP 资源读取结果），不再由宿主扫描 `.peri/meta`。
 #[tokio::test]
 async fn test_build_frozen_data_applies_meta_harness_state() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap().to_string();
-    // .peri/meta/01_intro.md 与 .peri/meta/05_using_tools.md
-    let meta_dir = std::path::Path::new(&cwd).join(".peri").join("meta");
-    std::fs::create_dir_all(&meta_dir).unwrap();
-    std::fs::write(meta_dir.join("01_intro.md"), "CUSTOM-INTRO-BODY").unwrap();
-    std::fs::write(meta_dir.join("05_using_tools.md"), "CUSTOM-TOOLS-BODY").unwrap();
 
     let session_resources =
         peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
@@ -145,10 +142,11 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
         ("WebMiddleware", false),
     ]));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let config = Arc::new(peri_config);
     let mgr = SessionManager::new(
         session_resources,
         provider,
-        Arc::new(peri_config),
+        Arc::clone(&config),
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         None,
@@ -160,7 +158,21 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
         Vec::new(), // plugin skill roots（C1；测试无）
     );
 
-    let frozen = mgr.build_frozen_data(&cwd, &[], &[]);
+    let docs = HashMap::from([
+        ("01_intro".to_string(), "CUSTOM-INTRO-BODY".to_string()),
+        (
+            "05_using_tools".to_string(),
+            "CUSTOM-TOOLS-BODY".to_string(),
+        ),
+    ]);
+    let frozen = mgr.build_frozen_data_with_config_and_runtime_and_docs(
+        &config,
+        &cwd,
+        &[],
+        &[],
+        &crate::prompt::PromptRuntimeEnv::detect(&cwd),
+        docs,
+    );
     let state = frozen.meta_harness();
     assert_eq!(
         state.section_overrides.get("01_intro").map(|s| s.as_ref()),
@@ -192,15 +204,16 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
     );
 }
 
-/// 冻结语义：构造后修改/删除 .peri/meta 文件，已构造的 frozen data 不变；
-/// 新建（重新 build_frozen_data）才看到新内容。
+/// 冻结语义（ARC-FROZEN-001 + J6 零 FS）：已构造的 frozen data 不随磁盘变化；
+/// 覆盖正文只来自调用方给定的 docs，宿主从不读取 `.peri/meta`。
 #[tokio::test]
 async fn test_frozen_data_does_not_reread_meta_docs() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap().to_string();
+    // 磁盘上放一份不同的正文：它不是事实源，宿主冻结不得读取它（X8 零 FS 兜底）。
     let meta_dir = std::path::Path::new(&cwd).join(".peri").join("meta");
     std::fs::create_dir_all(&meta_dir).unwrap();
-    std::fs::write(meta_dir.join("01_intro.md"), "V1-BODY").unwrap();
+    std::fs::write(meta_dir.join("01_intro.md"), "DISK-BODY").unwrap();
 
     let session_resources =
         peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
@@ -218,10 +231,11 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
     };
     peri_config.config.meta_harness = Some(mh_cfg(&[("01_intro", true)]));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let config = Arc::new(peri_config);
     let mgr = SessionManager::new(
         session_resources,
         provider,
-        Arc::new(peri_config),
+        Arc::clone(&config),
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         None,
@@ -233,22 +247,46 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
         Vec::new(), // plugin skill roots（C1；测试无）
     );
 
-    let frozen = mgr.build_frozen_data(&cwd, &[], &[]);
+    let v1 = HashMap::from([("01_intro".to_string(), "V1-BODY".to_string())]);
+    let frozen = mgr.build_frozen_data_with_config_and_runtime_and_docs(
+        &config,
+        &cwd,
+        &[],
+        &[],
+        &crate::prompt::PromptRuntimeEnv::detect(&cwd),
+        v1,
+    );
     assert!(frozen.system_prompt().contains("V1-BODY"));
+    assert!(
+        !frozen.system_prompt().contains("DISK-BODY"),
+        "宿主冻结不得读取 .peri/meta 磁盘文件"
+    );
 
-    // 删除文件并重建：已构造的 frozen 不变；新 build 才看到变化（无覆盖）
+    // 已构造的 frozen 不因新一轮输入或磁盘变化而变（ARC-FROZEN-001）。
     std::fs::remove_file(meta_dir.join("01_intro.md")).unwrap();
     assert!(
         frozen.system_prompt().contains("V1-BODY"),
         "已冻结的 prompt 不因磁盘变化而变（ARC-FROZEN-001）"
     );
-    let frozen2 = mgr.build_frozen_data(&cwd, &[], &[]);
-    assert!(
-        !frozen2.system_prompt().contains("V1-BODY"),
-        "新会话（新 build）才反映变更"
+    let v2 = HashMap::from([("01_intro".to_string(), "V2-BODY".to_string())]);
+    let frozen2 = mgr.build_frozen_data_with_config_and_runtime_and_docs(
+        &config,
+        &cwd,
+        &[],
+        &[],
+        &crate::prompt::PromptRuntimeEnv::detect(&cwd),
+        v2,
     );
     assert!(
-        frozen2.meta_harness().section_overrides.is_empty(),
-        "文档删除后新冻结状态无覆盖"
+        frozen2.system_prompt().contains("V2-BODY"),
+        "新会话（新 build）消费新给定的覆盖正文"
+    );
+    assert_eq!(
+        frozen2
+            .meta_harness()
+            .section_overrides
+            .get("01_intro")
+            .map(|s| s.as_ref()),
+        Some("V2-BODY")
     );
 }

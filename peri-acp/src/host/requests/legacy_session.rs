@@ -71,6 +71,9 @@ pub(super) async fn prepare_for_restore(
         // 与绑定比对的是「同一目录」，不需要为此再解析登记（那会多跑一轮完整发现）。
         crate::host::workspace::expect_directory(expected, &workspace).await?;
     }
+    // frozen 呈现两条事实源：持久字节（Present）当场接纳；LegacyAbsent 在接纳事务前
+    // 构建一次候选（J2 §3.1：legacy 不走两阶段——存储要求绑定先于执行所有权，接纳
+    // 之前无法取得执行环境，因此这里没有 MCP 资源面可用；覆盖不可得按 X8 保持内置）。
     let (frozen, prepared) = match snapshot.frozen {
         FrozenState::Present(bytes) => {
             decode_frozen_snapshot(bytes.as_str()).map_err(workspace_error)?;
@@ -81,10 +84,10 @@ pub(super) async fn prepare_for_restore(
             // as the pre-3.15 compatibility path did; never use the caller's terminal cwd.
             let workspace_cwd = workspace.cwd.to_string_lossy().into_owned();
             let prepared = PreparedSessionInputs::prepare_legacy(cfg, &meta.cwd, &workspace_cwd)?;
-            (
-                FrozenSnapshotBytes::new(prepared.frozen_encoded.clone()),
-                Some(prepared),
-            )
+            let bytes = prepared.frozen_encoded.clone().ok_or_else(|| {
+                AcpError::new(-32603, "Legacy frozen candidate bytes are missing")
+            })?;
+            (FrozenSnapshotBytes::new(bytes), Some(prepared))
         }
         // 有快照但本构建读不懂：不是「缺失」，不能按 legacy 规则重冻覆盖既有字节。
         FrozenState::Unsupported => {

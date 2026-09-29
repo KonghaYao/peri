@@ -27,7 +27,7 @@
 | J3 | 「Skill Tool 还需要根据其他 mcp 的 skill 从而把控」 | SkillTool / DiscoverSkillsTool 保留宿主，跨 MCP 聚合；只下沉来源。W4。 | **明确覆盖 part-1 `:168` 的“两工具下放 Workspace MCP”目标句**，该句未来须按 J3+J5 修订。part-1 `:81,178` 实例互不调用不冲突：host 是 MCP client。保留 `:176` 的审批/子代理/生命周期宿主边界、ARC-TOOLS-001 与 ARC-MIDDLEWARE-001（架构契约 `:118-122`）；AW3-01 进程内独立实例、AW3-03 七工具表不扩大。 |
 | J4 | plan 原记录为「Skill 来源盘点（用户提问的调查回答，非产品裁决）」；结论「不是全部来自 MCP」 | 四类来源、4 个生产调用点；内容通道可收敛，插件 manifest / 第三方目录保留宿主适配；范围由 J5 关闭。 | §7.0 **未提供可摘录的用户提问逐字原话**，不补造。此项是已接受调查记录，不新增覆盖 part-1/AW3/架构契约；与 part-1 `:175` 插件来源合并归宿主一致。该数量是 plan 当时盘点口径，不扩称当前全仓重新审计计数。 |
 | J5 | 「Skill Tool 的能力收敛为只有读取 MCP 侧提供的源，Skill Tool 本身要解除对文件系统的依赖」 | 本地三根、插件技能与 builtin 内容归 MCP 侧；工具仅消费 MCP。保留配置/插件 manifest/命令投影等不读取技能内容的 host adapter。W2/W4。 | 与 J3 一起覆盖 part-1 `:168`；具体化 `:167,175` 内容读取与宿主适配边界。**原 X2 已关闭**，不再提供双源/磁盘 fallback 选项。ARC-CAPABILITY-CLOSURE-001（架构契约 `:60-64`）须覆盖资源与聚合来源；ARC-HITL-001 的适用策略留 X6。AW3-04 七工具任意路径行为不改，资源公开根不能冒充原工具沙箱。 |
-| J6 | 「metaharness 也是可以挂入 workspace 里面的 resources 里面的，这个就比较简单了，扫描 resources list 即可」 | `.peri/meta/*.md` 来源资源化；host 冻结期 list 后仅 read 启用 section，保持组合规则/契约类型；W3，硬依赖 J2。 | 具体化 part-1 `:170,186` 文件载体下放、prompt 合并/冻结留 host；保留 ARC-FROZEN-001、ARC-MIDDLEWARE-001、AW3-11。扩展 ARC-CAPABILITY-CLOSURE-001 的覆盖来源关闭面；高敏来源白名单与降级留 X7/X8。关闭 workspace 不回落磁盘。 |
+| J6 | 「metaharness 也是可以挂入 workspace 里面的 resources 里面的，这个就比较简单了，扫描 resources list 即可」 | `.peri/meta/*.md` 来源资源化；host 冻结期 list 后仅 read 启用 section，保持组合规则/契约类型；W3，硬依赖 J2。 | 具体化 part-1 `:170,186` 文件载体下放、prompt 合并/冻结留 host；保留 ARC-FROZEN-001、ARC-MIDDLEWARE-001、AW3-11。扩展 ARC-CAPABILITY-CLOSURE-001 的覆盖来源关闭面；高敏来源白名单与降级留 X7/X8。关闭 workspace 不回落磁盘。**交付事实（2026-09-29，W3b）**：provider 已交付 `peri-meta://workspace/{section_id}`（URI 形状冻结于 `MetaUri`/`meta_uri`/`parse_meta_uri`；`_meta` scope=project；symlink 按 W1 更严口径跳过；不设模板；空文件列出且 read 返回 `""`）；宿主消费切换已交付（`read_builtin_workspace_meta` + `build_frozen_data_with_config_and_runtime_and_docs`），new 路径冻结构建后移至 P3 activate 之后、`commit_frozen` 之前，读取失败按 J2 补偿；legacy 首次接纳保持接纳前构建（J2 §3.1：无执行环境⇒无资源面，覆盖不可得按 X8 保持内置）；`peri-middlewares/src/meta_harness/`（scanner）已删除。**未接线项**：生产 dispatch（`peri-middlewares/src/mcp/builtin/dispatch.rs`）尚未对 builtin `workspace` 实例调用 `with_resources`，真实会话池的 `resources/list` 暂无 `peri-meta://` 条目 ⇒ 覆盖正文的端到端在接线前不可达（宿主按 X8 保持内置，已用例锚定）；接线归属待协调者裁定。 |
 
 统一保留：part-4 裁决出处 `spec/issues/2026-09-27-mcp-adaptation-v4-part-4-plan.md:43-47`（AW3-01）、`:62-69`（AW3-04/05）、`:95-118`（AW3-10/11）。AW3-10 不回填 part-1 施工进度；未来只同步获批目标变化。DOC-DESIGN-001 / DOC-UPDATE-001 见 `docs/standards/documentation.md:27-31,39-43`。ARC-MIDDLEWARE-CAPABILITY-001（架构契约 `:124-128`）仍禁止给 StartupState 偷加完整状态权限；ARC-SECRET-001（`:130-134`）贯穿资源 metadata、错误与日志。
 
@@ -90,6 +90,7 @@
 - **影响面**：W3、prompt 信任边界、ARC-HITL-001 和 MetaHarness 说明；C 与 J6 相悖。
 - **若不定（照录）**：默认按 A 执行（外部 origin 的 `peri-meta://` 资源不被消费；scheme 名待 W1 冻结）。
 - **已裁决（2026-09-29，用户按推荐 A 拍板）**：只消费来自真实 workspace（本机受信）实例的 `peri-meta://` 资源；外部 origin 的同 scheme 资源一律拒绝并记录（不静默），不进入覆盖扫描；判定依据是 host 绑定的实例身份，不是资源文本自称；scheme 名在 W1 冻结。
+- **交付事实（2026-09-29，W3b-consumer）**：宿主实现按实例身份过滤——只取 `ConfigSource::Builtin { instance: "workspace" }` 且 `Connected` 的句柄（`peri-middlewares/src/mcp/client.rs::read_builtin_workspace_meta`），外部 server 即使占用同名 `workspace` 也不被消费；无线级「外部同 scheme」用例（crate 内单测锚定身份判定），W3b 报告登记为未验证项。
 
 ### X8：MetaHarness 关闭与失败（J6）
 
@@ -99,6 +100,7 @@
 - **影响面**：W3、关闭矩阵、DOC-LOADER-001、MetaHarness 用户说明。provider list 空与 read 错误应可区分，不把静默空成功当告警降级。
 - **若不定（照录）**：默认按 A 执行。
 - **已裁决（2026-09-29，用户按推荐 A 拍板）**：覆盖不可得（workspace 关闭 / 文档缺失 / 读取失败）一律 warn 并保持内置段落、不阻塞会话创建、不回落磁盘读 `.peri/meta`；「关闭 workspace ⇒ 无法覆盖系统提示词段落」进入关闭矩阵（ARC-CAPABILITY-CLOSURE-001 面）并与 J5「本地技能不可用」并列登记；与 X5 的交叉优先关系已在 X5 生效结论中确立。
+- **交付事实（2026-09-29，W3b-consumer）**：缺失文档 warn + 保持内置（`build_meta_harness_state` 逐字保留）；关闭集命中直接返回空批（`read_builtin_workspace_meta`）；读取失败在 new 路径按发布前失败走 J2 补偿（排空环境 + 撤销未发布创建，不进入 `commit_frozen`）；宿主 `.peri/meta` FS 读取点与 `peri-middlewares/src/meta_harness/` 一并删除（零 FS 兜底）。legacy 首次接纳无执行环境 ⇒ 覆盖不可得（保持内置），已由 `requests_legacy_test` 用例锚定「不得从磁盘读取段落覆盖」。
 
 ## 4. 规范锁定与协议口径
 

@@ -32,7 +32,7 @@ use peri_acp_types::{
     builtin_mcp::find, mcp::McpSubscriptionPort, ports::McpPoolShutdownReport, session::InboxHandle,
 };
 use readiness::SystemReadinessTracker;
-use rmcp::model::{Resource, Tool};
+use rmcp::model::{Resource, ResourceContents, Tool};
 use std::{any::Any, collections::HashMap, sync::Arc};
 
 pub(crate) use cache::cache_scope_allows_persistence;
@@ -340,6 +340,67 @@ impl McpClientPool {
     /// key 格式为 `"plugin_name__server_name"`，返回 `"name@marketplace"`
     pub fn plugin_source_of(&self, name: &str) -> Option<String> {
         self.plugin_sources.read().get(name).cloned()
+    }
+
+    /// MetaHarness 段落覆盖读取（J6）：只认真实 builtin `workspace` 实例。
+    ///
+    /// - X7：来源白名单按实例身份（`ConfigSource::Builtin { instance: "workspace" }`），
+    ///   外部 server 的同 scheme 资源一律不进入扫描（不按 scheme 信任）；
+    /// - X8：关闭集命中的实例直接返回空批（覆盖不可用 ⇒ 宿主保持内置段落；
+    ///   无磁盘兜底，宿主已无 FS 扫描点）；
+    /// - 未连接 / 未注入上下文同样返回空批，由宿主 X8 语义处理。
+    pub async fn read_builtin_workspace_meta(
+        &self,
+        enabled_sections: &std::collections::HashSet<String>,
+    ) -> Result<HashMap<String, String>, String> {
+        let closed = self
+            .builtin_instance_context()
+            .map(|context| context.closed.clone())
+            .unwrap_or_default();
+        if super::builtin::is_closed("workspace", &closed) {
+            tracing::warn!("meta_harness: builtin workspace is closed; keeping builtin sections");
+            return Ok(HashMap::new());
+        }
+        let Some(handle) = self.get_client("workspace") else {
+            return Ok(HashMap::new());
+        };
+        if !matches!(handle.status, ClientStatus::Connected)
+            || !matches!(handle.source.as_ref(), Some(crate::mcp::config::ConfigSource::Builtin { instance }) if instance == "workspace")
+        {
+            return Ok(HashMap::new());
+        }
+        let Some(peer) = handle.peer.as_ref() else {
+            return Ok(HashMap::new());
+        };
+        let resources = self
+            .list_all_resources_cached("workspace", peer)
+            .await
+            .map_err(|error| format!("resources/list failed: {error}"))?;
+        let mut docs = HashMap::new();
+        for resource in resources {
+            let Some(meta) = peri_acp_types::workspace_resources::parse_meta_uri(&resource.uri)
+            else {
+                continue;
+            };
+            if !enabled_sections.contains(&meta.section_id)
+                || !peri_acp_types::meta_harness::SECTION_IDS.contains(&meta.section_id.as_str())
+            {
+                continue;
+            }
+            let (result, ticket) = self
+                .read_resource_cached("workspace", &resource.uri, peer)
+                .await
+                .map_err(|error| format!("resources/read failed: {error}"))?;
+            self.cache_verified_resource("workspace", ticket, &result)
+                .await;
+            if let Some(text) = result.contents.iter().find_map(|content| match content {
+                ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
+                _ => None,
+            }) {
+                docs.insert(meta.section_id, text);
+            }
+        }
+        Ok(docs)
     }
 
     pub fn get_tools(&self, name: &str) -> Vec<Tool> {

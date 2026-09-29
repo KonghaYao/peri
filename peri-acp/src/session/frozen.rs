@@ -51,7 +51,6 @@ impl SessionManager {
         )
     }
 
-    /// 会话准备路径入口：日期与运行环境由准备阶段定格，冻结渲染只消费该结果。
     pub(crate) fn build_frozen_data_with_config_and_runtime(
         &self,
         config: &crate::provider::PeriConfig,
@@ -59,6 +58,25 @@ impl SessionManager {
         plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
         runtime_env: &crate::prompt::PromptRuntimeEnv,
+    ) -> crate::session::executor::FrozenSessionData {
+        self.build_frozen_data_with_config_and_runtime_and_docs(
+            config,
+            cwd,
+            plugin_skill_roots,
+            plugin_agent_dirs,
+            runtime_env,
+            HashMap::new(),
+        )
+    }
+
+    pub(crate) fn build_frozen_data_with_config_and_runtime_and_docs(
+        &self,
+        config: &crate::provider::PeriConfig,
+        cwd: &str,
+        plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
+        plugin_agent_dirs: &[std::path::PathBuf],
+        runtime_env: &crate::prompt::PromptRuntimeEnv,
+        docs: HashMap<String, String>,
     ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = config.config.language.clone();
@@ -73,13 +91,8 @@ impl SessionManager {
             disable_bundled,
         );
 
-        // MetaHarness（设计 §2.3）：冻结期一次读取合并后的 settings + 扫描
-        // `.peri/meta/*.md`，构建状态后随冻结载体传播；主 prompt 与 SubAgent
-        // 无 workflow 版共用同一状态（同源一致性，防双轨不一致）。
-        let meta_harness_state = build_meta_harness_state(
-            config.config.meta_harness.as_ref(),
-            peri_middlewares::meta_harness::scan_harness_docs(cwd),
-        );
+        let meta_harness_state =
+            build_meta_harness_state(config.config.meta_harness.as_ref(), docs);
 
         let features = crate::prompt::PromptFeatures::detect();
         // 波 4 演进（C2）：收集结果 = 渲染面静态声明（冻结 disabled 集合 +
@@ -135,8 +148,8 @@ impl SessionManager {
 ///
 /// 落点说明（layer-imports 依赖门）：函数体直接引用 `peri_middlewares`
 /// 各持有者的段声明——本模块为 §0 边 2 豁免的 ACP 宿主装配面
-/// （`scripts/import-exemptions.conf`，与 `scan_harness_docs` 同模式），
-/// 渲染核心 `prompt/mod.rs` 不持有 middlewares 引用。
+/// （`scripts/import-exemptions.conf`），渲染核心 `prompt/mod.rs` 不持有
+/// middlewares 引用。
 pub(crate) fn build_collected_sections(
     state: &peri_acp_types::meta_harness::MetaHarnessState,
     overrides: Option<&AgentOverrides>,
@@ -191,7 +204,7 @@ pub(crate) fn build_collected_sections(
 /// 退化为「键存在但无效果」——`disabled_middlewares` 既被链装配消费（关闭槽位），
 /// 也被 builtin 关闭集消费（`closed_instances`，IF-D10），漏项即能力闭合退化
 /// （ARC-CAPABILITY-CLOSURE-001）。
-pub(super) fn build_meta_harness_state(
+pub(crate) fn build_meta_harness_state(
     config: Option<&HashMap<String, bool>>,
     docs: HashMap<String, String>,
 ) -> peri_acp_types::meta_harness::MetaHarnessState {
@@ -216,7 +229,8 @@ pub(super) fn build_meta_harness_state(
                     None => {
                         tracing::warn!(
                             section = %key,
-                            "meta_harness: section enabled but no .peri/meta/{key}.md, keeping builtin"
+                            "meta_harness: section enabled but the workspace resource list \
+                             has no entry for it, keeping builtin"
                         );
                     }
                 }

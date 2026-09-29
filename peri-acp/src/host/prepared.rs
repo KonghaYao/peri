@@ -6,6 +6,7 @@
 //! 数据或本机登记；装配期不再重读配置/插件，也不再各取一份日期与环境探测。
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -56,9 +57,9 @@ pub(crate) struct PreparedSessionInputs {
     pub(crate) skill_roots: Vec<SkillRoot>,
     pub(crate) agent_dirs: Vec<PathBuf>,
     /// frozen 事实源：new/legacy 是本次构建产物，恢复路径是持久 blob 的注入结果。
-    pub(crate) frozen: FrozenSessionData,
-    /// 版本化 snapshot 字节（数据端口只存不渲染）；与 `frozen` 始终同源。
-    pub(crate) frozen_encoded: String,
+    pub(crate) frozen: Option<FrozenSessionData>,
+    /// 版本化 snapshot 字节；与 `frozen` 始终同源。
+    pub(crate) frozen_encoded: Option<String>,
     /// 仅 legacy：取自保存的绝对 cwd。
     pub(crate) legacy: Option<LegacyAdoptionInputs>,
 }
@@ -73,13 +74,34 @@ enum FrozenSource<'a> {
 }
 
 impl PreparedSessionInputs {
-    /// 新建会话准备：只读，不创建 thread、不占 lease、不启动执行资源。
+    /// 新建会话准备（测试夹具）：无覆盖来源，冻结立即构建。
+    ///
+    /// 生产 new 路径必须走 [`Self::prepare_new_deferred`]——覆盖文档只能在 workspace
+    /// activate 之后经 MCP 资源读取（J6/X8），这里不构成第二条静默重冻路径。
+    #[cfg(test)]
     pub(crate) fn prepare_new(host: &AcpServerConfig, cwd: &str) -> Result<Self, AcpError> {
+        let mut inputs = Self::prepare_scope(host, cwd, FrozenSource::Build)?;
+        inputs.build_frozen_after_activation(
+            host,
+            &PromptRuntimeEnv::detect(cwd),
+            HashMap::new(),
+        )?;
+        Ok(inputs)
+    }
+
+    pub(crate) fn prepare_new_deferred(
+        host: &AcpServerConfig,
+        cwd: &str,
+    ) -> Result<Self, AcpError> {
         Self::prepare_scope(host, cwd, FrozenSource::Build)
     }
 
-    /// legacy 恢复准备：`saved_cwd` 是登记事实（保存的绝对 cwd），配置/插件/
     /// frozen 按本次解析出的执行目录 `workspace_cwd` 构建（现有兼容语义）。
+    /// legacy 恢复准备：`saved_cwd` 是登记事实（保存的绝对 cwd），配置/插件/
+    /// frozen 按本次解析出的执行目录 `workspace_cwd` 构建（既有兼容语义）。
+    ///
+    /// 该构建发生在接纳事务之前，彼时没有执行环境与 MCP 资源面，覆盖文档不可得
+    /// （X8：保持内置并 warn，不回落磁盘）。
     pub(crate) fn prepare_legacy(
         host: &AcpServerConfig,
         saved_cwd: &str,
@@ -89,6 +111,11 @@ impl PreparedSessionInputs {
         inputs.legacy = Some(LegacyAdoptionInputs {
             saved_cwd: PathBuf::from(saved_cwd),
         });
+        inputs.build_frozen_after_activation(
+            host,
+            &PromptRuntimeEnv::detect(workspace_cwd),
+            HashMap::new(),
+        )?;
         Ok(inputs)
     }
 
@@ -133,8 +160,35 @@ impl PreparedSessionInputs {
             frozen.date(),
             "injected frozen view and bytes must decode consistently"
         );
-        self.frozen = frozen;
-        self.frozen_encoded = encoded;
+        self.frozen = Some(frozen);
+        self.frozen_encoded = Some(encoded);
+        Ok(())
+    }
+
+    pub(crate) fn build_frozen_after_activation(
+        &mut self,
+        host: &AcpServerConfig,
+        runtime_env: &PromptRuntimeEnv,
+        docs: HashMap<String, String>,
+    ) -> Result<(), AcpError> {
+        if self.frozen.is_some() {
+            return Ok(());
+        }
+        let frozen = host
+            .session_manager
+            .build_frozen_data_with_config_and_runtime_and_docs(
+                &self.configuration.config,
+                &self.cwd,
+                &self.skill_roots,
+                &self.agent_dirs,
+                runtime_env,
+                docs,
+            );
+        let encoded = encode_frozen_snapshot(&frozen).map_err(|error| {
+            AcpError::new(-32603, format!("Frozen snapshot encode failed: {error}"))
+        })?;
+        self.frozen = Some(frozen);
+        self.frozen_encoded = Some(encoded);
         Ok(())
     }
 
@@ -154,29 +208,11 @@ impl PreparedSessionInputs {
     ) -> Result<Self, AcpError> {
         let (configuration, (plugin_data, skill_roots, agent_dirs)) =
             Self::prepare_configuration_and_plugins(host, cwd)?;
-        // 运行环境（平台 / OS / Git）在准备阶段探测一次，随冻结渲染定格；日期由
-        // `frozen.date` 固化。装配期不得重新 `detect`/`with_frozen_date` 各取一份
-        // ——需要这些事实的下一批消费者应从这里提升字段，而不是各自探测。
-        let runtime_env = PromptRuntimeEnv::detect(cwd);
         let (frozen, frozen_encoded) = match frozen_source {
-            FrozenSource::Build => {
-                let frozen = host
-                    .session_manager
-                    .build_frozen_data_with_config_and_runtime(
-                        &configuration.config,
-                        cwd,
-                        &skill_roots,
-                        &agent_dirs,
-                        &runtime_env,
-                    );
-                let encoded = encode_frozen_snapshot(&frozen).map_err(|error| {
-                    AcpError::new(-32603, format!("Frozen snapshot encode failed: {error}"))
-                })?;
-                (frozen, encoded)
-            }
+            FrozenSource::Build => (None, None),
             FrozenSource::Reuse(snapshot) => {
                 let frozen = decode_frozen_snapshot(snapshot).map_err(workspace_error)?;
-                (frozen, snapshot.to_owned())
+                (Some(frozen), Some(snapshot.to_owned()))
             }
         };
         Ok(Self {

@@ -990,3 +990,66 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
         "必须是 fail-closed 的内部错误，而不是静默重冻: {error:?}"
     );
 }
+
+/// J6/W3b：new 会话启用段落覆盖但**覆盖不可得**时，冻结保持内置段落、且不回落磁盘。
+///
+/// 当前生产装配的 builtin `workspace` 实例尚未接资源 provider（provider 包文档明示
+/// 「生产装配点不调用 `with_resources`」，属尚未接线的波次），因此 resources/list 无
+/// `peri-meta://` 条目：宿主必须按 X8 保持内置并**不读** `.peri/meta`（scanner 已删）。
+/// 覆盖正文本就存在的端到端（资源直接可得）证据见 provider 包 wire 用例。
+#[tokio::test]
+async fn new_session_meta_override_unavailable_keeps_builtin_and_never_reads_disk() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let startup = tmp.path().join("startup");
+    let target = tmp.path().join("target");
+    std::fs::create_dir(&startup).unwrap();
+    std::fs::create_dir_all(target.join(".peri/meta")).unwrap();
+    std::fs::write(target.join(".peri/meta/01_intro.md"), "DISK-META-OVERRIDE").unwrap();
+    std::fs::write(
+        target.join(".peri/settings.json"),
+        r#"{"config":{"meta_harness":{"01_intro":true}}}"#,
+    )
+    .unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let mut cfg = make_server_config(config.clone(), provider, &tmp).await;
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: startup.to_str().unwrap().to_owned(),
+        bare: true,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+    });
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": target}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new（覆盖不可得）必须成功——X8 不阻塞创建");
+
+    let id = created["sessionId"].as_str().unwrap();
+    let frozen = sessions[id].frozen.as_ref().expect("创建必须发布 frozen");
+    assert!(
+        frozen.meta_harness().section_overrides.is_empty(),
+        "覆盖不可得时必须保持内置（X8）"
+    );
+    assert!(
+        !frozen.system_prompt().contains("DISK-META-OVERRIDE"),
+        "宿主不得回落到磁盘读 `.peri/meta`（X8 零 FS 兜底）"
+    );
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+}

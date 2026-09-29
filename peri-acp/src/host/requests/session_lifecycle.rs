@@ -158,12 +158,11 @@ async fn prepare_existing(
         let (frozen, environment, workflow_middleware) = match owner.as_ref() {
             Some(_) => {
                 // 持久 blob 是唯一事实源：恢复路径不再按当前目录/配置构建第二份 frozen
-                // （ARC-FROZEN-001 的同源收口）。
+                // （ARC-FROZEN-001 的同源收口）。legacy 首次接纳走既有兼容路径：候选在
+                // 接纳事务前构建（该时点无执行环境，MCP 资源面不可得），winner 由 adopt
+                // 后的重读定格（J2 §6.3）——装配消费的永远是 winner。
                 let persisted = load_frozen_bytes(cfg, id).await?;
                 let prepared = match legacy_prepared {
-                    // legacy 竞争：adopt 是 write-once，本进程可能被竞争落下——装配必须
-                    // 按**adopt 后重读的 winner**，候选只当过写入尝试；`legacy_prepared`
-                    // 至此只剩非 frozen 事实（配置/插件/cwd）。
                     Some(mut inputs) => {
                         let winner = decode_frozen_snapshot(&persisted).map_err(workspace_error)?;
                         inputs.inject_frozen(winner, persisted)?;
@@ -171,7 +170,10 @@ async fn prepare_existing(
                     }
                     None => PreparedSessionInputs::prepare_restore(cfg, &cwd, &persisted)?,
                 };
-                let frozen = prepared.frozen.clone();
+                let frozen = prepared
+                    .frozen
+                    .clone()
+                    .ok_or_else(|| AcpError::new(-32603, "Restored frozen snapshot is missing"))?;
                 let environment = super::super::workspace::SessionEnvironment::assemble_prepared(
                     cfg, &prepared, id,
                 )
@@ -499,6 +501,25 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
+fn enabled_meta_sections(cfg: &AcpServerConfig) -> std::collections::HashSet<String> {
+    cfg.peri_config
+        .read()
+        .config
+        .meta_harness
+        .as_ref()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|(section, enabled)| {
+                    **enabled
+                        && peri_acp_types::meta_harness::SECTION_IDS.contains(&section.as_str())
+                })
+                .map(|(section, _)| section.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) async fn handle_new(
     params: &Value,
     cfg: &AcpServerConfig,
@@ -518,8 +539,8 @@ pub(crate) async fn handle_new(
     // 只读准备（lease 之前）：定格配置/插件/frozen，不创建 thread、不占 lease、
     // 不启动 MCP/LSP/hooks，也不写任何会话数据或本机登记。new 路径只在这里准备
     // 一次，发布段消费同一个准备对象。
-    let prepared = super::super::prepared::PreparedSessionInputs::prepare_new(cfg, &cwd)?;
-    new_session_from_prepared(cfg, &workspace, &prepared, sessions).await
+    let prepared = super::super::prepared::PreparedSessionInputs::prepare_new_deferred(cfg, &cwd)?;
+    new_session_from_prepared(cfg, &workspace, prepared, sessions).await
 }
 
 /// `session/new` 的发布段：消费**已定格**的准备输入，一次写出 meta/binding/frozen
@@ -532,7 +553,7 @@ pub(crate) async fn handle_new(
 pub(crate) async fn new_session_from_prepared(
     cfg: &AcpServerConfig,
     workspace: &ResolvedWorkspace,
-    prepared: &super::super::prepared::PreparedSessionInputs,
+    mut prepared: super::super::prepared::PreparedSessionInputs,
     sessions: &mut HashMap<String, SessionState>,
 ) -> Result<Value, AcpError> {
     let resources = cfg.session_resources.clone();
@@ -581,23 +602,24 @@ pub(crate) async fn new_session_from_prepared(
     };
     // ── P2：装配（MCP pool 挂起；frozen 消费准备产物，不重建）──
     // 装配失败时环境尚未建立（没有对外资源需要排空），撤销未发布的创建即可。
-    let environment = match super::super::workspace::SessionEnvironment::assemble_prepared(
-        cfg,
-        prepared,
-        &session_id,
-    )
-    .await
-    {
-        Ok(environment) => environment,
-        Err(error) => {
-            initialization
-                .clone()
-                .abandon()
-                .await
-                .map_err(super::super::workspace::resource_error)?;
-            return Err(error);
-        }
-    };
+    let environment =
+        match super::super::workspace::SessionEnvironment::assemble_prepared_without_frozen(
+            cfg,
+            &prepared,
+            &session_id,
+        )
+        .await
+        {
+            Ok(environment) => environment,
+            Err(error) => {
+                initialization
+                    .clone()
+                    .abandon()
+                    .await
+                    .map_err(super::super::workspace::resource_error)?;
+                return Err(error);
+            }
+        };
     // ── P3：activate（资源准入开始）──
     // B3 口径写死为「P0–P5 发布前」：发布点（P6 的 `sessions.insert`）之前可以发生
     // 准备、装配、activate 与资源读取，**不含**工具执行、模型请求与 hook；此处提前
@@ -607,12 +629,44 @@ pub(crate) async fn new_session_from_prepared(
     }
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
 
-    // ── P4：frozen 字节（本次准备的唯一产物；W3a 无资源读取，内容仍在准备期定格）──
-    let frozen_data = prepared.frozen.clone();
+    // ── P4：activate 后扫描 builtin workspace resources，再构建 frozen ──
+    // 读取/构建失败按发布前失败处理（X8 的 read 失败走 J2 补偿）：先排空本次已起的
+    // 环境，再撤销未发布的创建——不进入 commit，也不留任何半提交。
+    // 无启用 section 时不去等 workspace 连接（覆盖不可得即内置，X8；不扩大请求时延）。
+    let enabled_sections = enabled_meta_sections(cfg);
+    let docs = match environment.as_ref() {
+        Some(env) if !enabled_sections.is_empty() => {
+            match env.read_meta_docs(&enabled_sections).await {
+                Ok(docs) => docs,
+                Err(error) => {
+                    drain_and_abandon(environment.as_ref(), &initialization).await?;
+                    return Err(error);
+                }
+            }
+        }
+        _ => HashMap::new(),
+    };
+    if let Err(error) = prepared.build_frozen_after_activation(
+        cfg,
+        &crate::prompt::PromptRuntimeEnv::detect(&prepared.cwd),
+        docs,
+    ) {
+        drain_and_abandon(environment.as_ref(), &initialization).await?;
+        return Err(error);
+    }
+    let frozen_data = prepared
+        .frozen
+        .clone()
+        .ok_or_else(|| AcpError::new(-32603, "Frozen snapshot was not built"))?;
+    let frozen_encoded = prepared
+        .frozen_encoded
+        .clone()
+        .ok_or_else(|| AcpError::new(-32603, "Frozen snapshot bytes were not built"))?;
     // ── P5：commit_frozen（一次性 CAS）──
+
     // 失败时按效果结清纪律处理：先重读单条判据，只有确证未生效才撤销；判据不可得
     // 时保留草稿与 dirty 代际（由 `RecoveryRequired` 显式恢复），绝不删除。
-    let frozen_bytes = FrozenSnapshotBytes::new(prepared.frozen_encoded.clone());
+    let frozen_bytes = FrozenSnapshotBytes::new(frozen_encoded);
     if let Err(error) = initialization.commit_frozen(&frozen_bytes).await {
         match committed_frozen_state(&resources, &session_id).await {
             Ok(true) => {
@@ -1207,7 +1261,10 @@ pub(crate) async fn handle_fork(
         cwd,
         fork_source.frozen.as_str(),
     )?;
-    let frozen_data = prepared.frozen.clone();
+    let frozen_data = prepared
+        .frozen
+        .clone()
+        .ok_or_else(|| AcpError::new(-32603, "Fork frozen snapshot is missing"))?;
     let (new_thread_id, copied_payloads, owner) = dispatch::fork_bound_session(
         &cfg.session_resources,
         &fork_source,

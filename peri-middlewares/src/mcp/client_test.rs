@@ -1122,3 +1122,53 @@ fn builtin_context_missing_is_typed_error() {
         "错误文本不得含路径，实际: {text}"
     );
 }
+
+/// X7/X8（J6/W3b）：MetaHarness 覆盖读取只认真实 builtin `workspace` 实例。
+///
+/// - 外部 server 抢占同名 `workspace` 且已连接 ⇒ 空批（不按 scheme/名字信任）；
+/// - 关闭集命中 ⇒ 空批（覆盖不可用，宿主保持内置，无磁盘兜底）；
+/// - 无句柄 / 未连接 ⇒ 空批（X8：覆盖不可得不是错误，由宿主按内置处理）。
+#[tokio::test]
+async fn meta_harness_reads_only_identity_verified_builtin_workspace() {
+    let enabled: std::collections::HashSet<String> = ["01_intro".to_string()].into_iter().collect();
+
+    // 无句柄：空批（不是错误）。
+    let pool = McpClientPool::new_pending();
+    assert!(pool
+        .read_builtin_workspace_meta(&enabled)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // 外部 server 占用 "workspace" 名字（source = None）且已连接：X7 拒绝。
+    pool.clients
+        .write()
+        .insert("workspace".to_string(), connected_test_handle("workspace"));
+    assert!(
+        pool.read_builtin_workspace_meta(&enabled)
+            .await
+            .unwrap()
+            .is_empty(),
+        "外部同 scheme 来源不得进入覆盖扫描（X7）"
+    );
+
+    // 身份正确（ConfigSource::Builtin）但实例在关闭集内：X8 直接空批。
+    let pool = McpClientPool::new_pending();
+    let mut handle = connected_test_handle("workspace");
+    Arc::get_mut(&mut handle).unwrap().source = Some(crate::mcp::config::ConfigSource::Builtin {
+        instance: "workspace".to_string(),
+    });
+    pool.clients.write().insert("workspace".to_string(), handle);
+    pool.set_builtin_instance_context(Arc::new(
+        BuiltinInstanceContext::new("test-cwd")
+            .with_closed(std::collections::BTreeSet::from(["workspace".to_string()])),
+    ))
+    .unwrap();
+    assert!(
+        pool.read_builtin_workspace_meta(&enabled)
+            .await
+            .unwrap()
+            .is_empty(),
+        "关闭的 workspace 实例不得提供覆盖（X8）"
+    );
+}

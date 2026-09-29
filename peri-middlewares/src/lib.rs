@@ -39,7 +39,6 @@ pub mod hitl;
 pub mod hooks;
 pub mod lsp;
 pub mod mcp;
-pub mod meta_harness;
 pub mod middleware;
 pub mod permission;
 pub mod plugin;
