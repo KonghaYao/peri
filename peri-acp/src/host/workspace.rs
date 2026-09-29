@@ -45,9 +45,23 @@ pub(crate) struct SessionEnvironment {
     /// （本 crate 禁放宽 lint）。
     #[cfg(test)]
     workspace_input: peri_mcp_workspace::WorkspaceInstanceInput,
+    /// 送进 builtin 实例上下文的那份 A24 关闭集（订阅建立门的唯一输入）。
+    ///
+    /// 与 `workspace_input` 同一处置：生产运行不读它（关闭集已随上下文一次注入 pool），
+    /// 保留副本只为让「装配派生自哪份 frozen」**可断言**——冷恢复的装配必须等于持久
+    /// blob 的投影，而不是当轮配置/目录状态的投影（ARC-FROZEN-001）。
+    #[cfg(test)]
+    builtin_closed: std::collections::BTreeSet<String>,
 }
 
 impl SessionEnvironment {
+    /// 测试夹具入口：按当前目录状态**新构建**一份准备输入再装配。
+    ///
+    /// 生产不可达：恢复路径必须显式消费持久 blob（[`Self::assemble_prepared`] +
+    /// `PreparedSessionInputs::prepare_restore`），new/legacy 走 `handle_new` /
+    /// `prepare_for_restore` 的已定格输入。保留它只为测试可以省去准备步骤；
+    /// `cfg(test)` 让「装配期第二次构建 frozen」这条路径在发布构建里不存在。
+    #[cfg(test)]
     pub(crate) async fn assemble(
         host: &AcpServerConfig,
         cwd: &str,
@@ -61,7 +75,7 @@ impl SessionEnvironment {
     }
 
     /// 使用已定格的准备输入装配会话环境：配置/插件/目录全部来自 `inputs`——
-    /// 装配期不第二次 `ConfigSource::load_at`、不第二次加载插件。
+    /// 装配期不第二次 `ConfigSource::load_at`、不第二次加载插件、不构建第二份 frozen。
     ///
     /// MCP / LSP / hooks 与 OAuth 消费者仍在本函数内创建（顺序不变）；调用方
     /// 必须已取得执行所有权，准备阶段本身不启动这些资源。
@@ -70,13 +84,40 @@ impl SessionEnvironment {
         inputs: &super::prepared::PreparedSessionInputs,
         session_id: &str,
     ) -> Result<Option<Arc<Self>>, AcpError> {
+        // 装配是消费者：frozen / 插件 / 配置全部取自同一份准备输入（ARC-FROZEN-001 的
+        // 同源收口）；恢复路径的输入由 `prepare_restore` / winner 注入定格，不在这里重建。
+        Self::assemble_with_frozen(
+            host,
+            &inputs.cwd,
+            session_id,
+            &inputs.frozen,
+            &inputs.plugins(),
+            &inputs.configuration,
+        )
+        .await
+    }
+
+    /// 同源装配：frozen 与插件由调用方**显式给定**，装配期不构建 frozen。
+    ///
+    /// `frozen` 是唯一事实源：new/legacy 是本次准备产物，恢复路径是持久 blob 的解码视图
+    /// （winner）；`plugins` 是同一份准备输入的插件聚合；`configuration` 是同一份配置
+    /// 视图。MCP / LSP / hooks 与 OAuth 消费者仍在本函数内创建（顺序不变）；调用方必须
+    /// 已取得执行所有权，准备阶段本身不启动这些资源。
+    pub(crate) async fn assemble_with_frozen(
+        host: &AcpServerConfig,
+        cwd: &str,
+        session_id: &str,
+        frozen: &crate::session::executor::FrozenSessionData,
+        plugins: &super::assemble::PreparedPlugins,
+        configuration: &super::prepared::PreparedConfiguration,
+    ) -> Result<Option<Arc<Self>>, AcpError> {
         let Some(source) = host.workspace_assembly.as_ref() else {
             return Ok(None);
         };
         // 配置视图与执行目录来自准备阶段定格的同一份输入：本函数不第二次
         // `ConfigSource::load_at`、不第二次解析 provider（`prepare_new` 的
         // `resolve_configuration` 已按「同目录复用 host 视图 / 异目录只读一次」定过格）。
-        let cwd = inputs.cwd.clone();
+        let cwd = cwd.to_owned();
         // ── AW3-11：session 级 seam 的两名成员在**构造 `HostAssemblyInput` 之前**
         //    产生 ──
         //
@@ -100,12 +141,14 @@ impl SessionEnvironment {
         // fork 复用 source 的 frozen 字节时两者可能不同）。它是订阅建立门的唯一输入，
         // 不改变 pool 级就绪与面板连接状态（ARC-CAPABILITY-CLOSURE-001）。
         let builtin_closed = peri_middlewares::assembly::builtin_closed_instances(
-            &inputs.frozen.meta_harness().disabled_middlewares,
+            &frozen.meta_harness().disabled_middlewares,
         );
+        #[cfg(test)]
+        let closed_for_test = builtin_closed.clone();
         let input = assemble::HostAssemblyInput {
-            provider: inputs.provider.clone(),
-            peri_config: Arc::new(parking_lot::RwLock::new((*inputs.config).clone())),
-            config_source: inputs.config_source.clone(),
+            provider: configuration.provider.clone(),
+            peri_config: Arc::new(parking_lot::RwLock::new((*configuration.config).clone())),
+            config_source: configuration.config_source.clone(),
             permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
                 host.permission_mode.load(),
             ),
@@ -117,11 +160,7 @@ impl SessionEnvironment {
             drive_cron_tick: source.drive_cron_tick,
             workspace_input: Some(workspace_input.clone()),
             builtin_closed,
-            prepared_plugins: Some(assemble::PreparedPlugins {
-                data: inputs.plugin_data.clone(),
-                skill_roots: inputs.skill_roots.clone(),
-                agent_dirs: inputs.agent_dirs.clone(),
-            }),
+            prepared_plugins: Some(plugins.clone()),
         };
         let activation = tokio_util::sync::CancellationToken::new();
         let mut cfg = assemble::assemble_server_config_with_mcp_profile(
@@ -170,6 +209,8 @@ impl SessionEnvironment {
             task_manager,
             #[cfg(test)]
             workspace_input,
+            #[cfg(test)]
+            builtin_closed: closed_for_test,
         })))
     }
 
@@ -197,6 +238,14 @@ impl SessionEnvironment {
     #[cfg(test)]
     pub(crate) fn workspace_input(&self) -> Option<&peri_mcp_workspace::WorkspaceInstanceInput> {
         Some(&self.workspace_input)
+    }
+
+    /// 本环境装配时派生的 A24 关闭集（订阅建立门的唯一输入）。
+    ///
+    /// `cfg(test)`：这是**测试观察面**——验证关闭集来自哪份 frozen（而不是当轮配置）。
+    #[cfg(test)]
+    pub(crate) fn builtin_closed(&self) -> &std::collections::BTreeSet<String> {
+        &self.builtin_closed
     }
 
     pub(crate) async fn shutdown(&self) -> bool {

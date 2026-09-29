@@ -560,6 +560,21 @@ impl SessionDataPort for RemoteSessionData {
         self.write_new_session(input).await
     }
 
+    async fn save_new_session_draft(
+        &self,
+        draft: &peri_acp_types::session_resources::NewSessionDraft,
+    ) -> SessionResourceResult<()> {
+        self.write_new_session_draft(draft).await
+    }
+
+    async fn commit_frozen(
+        &self,
+        id: &ThreadId,
+        frozen: &FrozenSnapshotBytes,
+    ) -> SessionResourceResult<()> {
+        self.write_commit_frozen(id, frozen).await
+    }
+
     async fn revoke_unpublished_session(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.revoke_unpublished(id).await
     }

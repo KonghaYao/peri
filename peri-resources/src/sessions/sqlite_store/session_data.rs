@@ -25,7 +25,7 @@ use chrono::Utc;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession,
-    PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceError,
+    NewSessionDraft, PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceError,
     SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{
@@ -244,6 +244,30 @@ pub(super) fn new_session_row<'a>(
     }
 }
 
+/// `NewSessionDraft` 的 `threads` 行插入参数：与 [`new_session_row`] 同一列形状，
+/// 只有 `frozen_context` 固定为 `NULL`（内容准入在取得所有权之后定稿）。
+pub(super) fn new_session_draft_row<'a>(
+    draft: &'a NewSessionDraft,
+    snapshot_at_message_id: Option<&'a str>,
+    message_count: i64,
+) -> ThreadRowInsert<'a> {
+    ThreadRowInsert {
+        id: &draft.thread_id,
+        title: draft.meta.title.as_deref(),
+        cwd: &draft.meta.cwd,
+        created_at: &draft.created_at,
+        updated_at: &draft.created_at,
+        message_count,
+        parent_thread_id: draft.meta.parent_thread_id.as_deref(),
+        snapshot_at_message_id,
+        hidden: draft.meta.hidden,
+        cancel_policy: draft.meta.cancel_policy.as_str(),
+        config: None,
+        agent_status: AgentStatus::Active.as_str(),
+        frozen_context: None,
+    }
+}
+
 /// 会话是否存在（用于 fork 来源、child 父行等关系检查）。
 async fn thread_exists_on(
     connection: &mut SqliteConnection,
@@ -292,6 +316,46 @@ impl SessionDataPort for SqliteSessionData {
         Ok(())
     }
 
+    async fn save_new_session_draft(&self, draft: &NewSessionDraft) -> SessionResourceResult<()> {
+        self.writable()?;
+        let snapshot_at = draft
+            .meta
+            .snapshot_at_message_id
+            .map(|id| id.as_uuid().to_string());
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        insert_thread_row(
+            &mut tx,
+            &new_session_draft_row(draft, snapshot_at.as_deref(), 0),
+        )
+        .await
+        .map_err(write_failure)?;
+        insert_binding_row(&mut tx, &draft.thread_id, &draft.binding)
+            .await
+            .map_err(write_failure)?;
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(draft.thread_id.clone())))?;
+        Ok(())
+    }
+
+    /// 本机组合不经过这条路径：frozen 的提交必须与「本进程仍是活 owner」「代际未结清」
+    /// 在同一事务内成立（[`super::local::LocalExecution::commit_frozen`]）。这里如实报告
+    /// 不支持，而不是提供一个缺少 owner 校验的第二条写入路径。
+    async fn commit_frozen(
+        &self,
+        _id: &ThreadId,
+        _frozen: &FrozenSnapshotBytes,
+    ) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
     async fn revoke_unpublished_session(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.writable()?;
         let mut tx = self
@@ -311,6 +375,19 @@ impl SessionDataPort for SqliteSessionData {
         if children.0 > 0 {
             return Err(invalid_input(
                 "session has published children and cannot be revoked",
+            ));
+        }
+        // 撤销只针对**未提交**的创建：已定稿 frozen 的会话是一个「已提交、未发布」的
+        // 合法中间态，删除它会销毁内容准入的成果（它该走 dirty 恢复，而不是被补偿掉）。
+        let committed: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
+                .bind(id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        if matches!(committed, Some((Some(_),))) {
+            return Err(SessionResourceError::conflict(
+                "session has a committed frozen snapshot and cannot be revoked",
             ));
         }
         // 撤销即撤销：数据行与执行代际在同一次提交里消失，本机不再留「这个 identity 的

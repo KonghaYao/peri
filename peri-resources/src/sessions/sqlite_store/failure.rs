@@ -38,6 +38,12 @@ pub(in crate::sessions) fn not_found() -> SessionResourceError {
     SessionResourceError::new(SessionResourceErrorKind::NotFound)
 }
 
+/// 现有存储事实与本次请求冲突：一次性提交的重复调用、对已定稿草稿的撤销、
+/// 清理判据不成立。语义是「不要重试，先重读」，与输入非法分开。
+pub(in crate::sessions) fn conflict(detail: &str) -> SessionResourceError {
+    SessionResourceError::conflict(detail)
+}
+
 pub(in crate::sessions) fn read_only_store() -> SessionResourceError {
     SessionResourceError::new(SessionResourceErrorKind::ReadOnlyStore)
 }

@@ -721,3 +721,272 @@ async fn worktree_invalid_session_end_binding_skips_hook_but_drains_existing_res
         .await
         .unwrap();
 }
+
+/// frozen 同源（ARC-FROZEN-001 / J2 §6）：冷 load 的会话环境关闭集来自**持久 blob**
+/// 的投影，而不是当轮配置的投影。
+///
+/// 构造方式是把配置改成相反取值：创建时 `WorkspaceMiddleware=false`（冻结记录关闭），
+/// 重启时配置为 `true`（当轮投影不再关闭）。若装配仍在本地重建 frozen，冷 load 的关闭
+/// 集就会跟着当轮配置变空，本用例的相等断言会失败。
+#[tokio::test]
+async fn cold_load_derives_builtin_closed_set_from_persisted_frozen() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = std::fs::canonicalize(tmp.path()).unwrap();
+    let cwd = cwd.to_str().unwrap().to_owned();
+    let provider_config = make_provider_config("test", "openai", "key", "model");
+    let mut frozen_off = make_peri_config_with_provider(provider_config.clone());
+    frozen_off.config.meta_harness =
+        Some(HashMap::from([("WorkspaceMiddleware".to_string(), false)]));
+    let provider = LlmProvider::from_config(&frozen_off).unwrap();
+    let mut cfg = make_server_config(frozen_off, provider.clone(), &tmp).await;
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: cwd.clone(),
+        bare: true,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+    });
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": cwd}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let id = created["sessionId"].as_str().unwrap().to_owned();
+    let persisted = match cfg
+        .session_resources
+        .load_session_snapshot(&id)
+        .await
+        .unwrap()
+        .frozen
+    {
+        peri_acp_types::session_resources::FrozenState::Present(bytes) => bytes.into_string(),
+        other => panic!("created session must carry a frozen snapshot: {other:?}"),
+    };
+    let persisted_frozen =
+        crate::session::frozen_snapshot::decode_frozen_snapshot(&persisted).unwrap();
+    assert!(
+        persisted_frozen
+            .meta_harness()
+            .disabled_middlewares
+            .contains("WorkspaceMiddleware"),
+        "前提：冻结快照必须记录创建时的关闭项"
+    );
+    append_human_message(&cfg, &id, "existing history").await;
+    handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    drop(cfg);
+    drop(sessions);
+
+    // 重启时把同一个键改成相反取值。当轮配置投影为空，持久 blob 投影仍含该关闭项。
+    let mut frozen_on = make_peri_config_with_provider(provider_config);
+    frozen_on.config.meta_harness =
+        Some(HashMap::from([("WorkspaceMiddleware".to_string(), true)]));
+    let mut restarted = make_server_config(frozen_on, provider, &tmp).await;
+    restarted.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: cwd.clone(),
+        bare: true,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+    });
+    let mut restored = HashMap::new();
+    handle_request(
+        "session/load",
+        &json!({"sessionId": id, "cwd": cwd}),
+        &restarted,
+        &mut restored,
+        &transport,
+    )
+    .await
+    .unwrap();
+
+    let environment = restored[&id]
+        .environment
+        .as_ref()
+        .expect("冷恢复必须重新装配会话环境");
+    let expected = peri_middlewares::assembly::builtin_closed_instances(
+        &persisted_frozen.meta_harness().disabled_middlewares,
+    );
+    assert_eq!(
+        environment.builtin_closed(),
+        &expected,
+        "冷恢复的关闭集必须等于持久 blob 的投影（而不是当轮配置）"
+    );
+    assert!(
+        !environment.builtin_closed().is_empty(),
+        "哨兵：当轮配置为 true，若装配按当前状态重冻，这里会是空集"
+    );
+}
+
+/// 补偿顺序（J2 §5.1）：`abandon` 只在环境排空**确认之后**发生。
+///
+/// 排空未确认时草稿必须原样保留（否则资源持有的是已删除会话的 lease/handle），
+/// 重试排空成功后才撤销。
+#[tokio::test]
+async fn unpublished_draft_is_abandoned_only_after_confirmed_drain() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let mut cfg = make_server_config(config, provider, &tmp).await;
+    let cwd = tmp.path().canonicalize().unwrap();
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: cwd.to_str().unwrap().to_owned(),
+        bare: true,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+    });
+    // 草稿：身份/绑定/执行代际成立，frozen 未提交。
+    let workspace = cfg.session_resources.resolve_workspace(&cwd).await.unwrap();
+    let id = new_session_id();
+    let draft = bound_draft(&id, &workspace);
+    let initialization = cfg
+        .session_resources
+        .begin_initialization(&draft)
+        .await
+        .unwrap();
+
+    let mut environment =
+        crate::host::workspace::SessionEnvironment::assemble(&cfg, cwd.to_str().unwrap(), &id)
+            .await
+            .unwrap()
+            .unwrap();
+    let pool = Arc::new(RetryShutdownPool {
+        settled: AtomicBool::new(false),
+        called: AtomicBool::new(false),
+    });
+    Arc::get_mut(&mut environment).unwrap().cfg.mcp_pool = Some(pool.clone());
+
+    // 排空未确认：不撤销（草稿与执行代际保持原样）。
+    let error =
+        super::super::session_lifecycle::drain_and_abandon(Some(&environment), &initialization)
+            .await
+            .unwrap_err();
+    assert!(error.message.contains("did not confirm shutdown"));
+    assert!(pool.called.load(Ordering::Acquire), "必须真的尝试过排空");
+    let snapshot = cfg
+        .session_resources
+        .load_session_snapshot(&id)
+        .await
+        .expect("草稿必须保留（判据未结清）");
+    assert_eq!(
+        snapshot.frozen,
+        peri_acp_types::session_resources::FrozenState::LegacyAbsent,
+        "未提交的草稿仍是 frozen 空"
+    );
+
+    // 排空确认之后才撤销。
+    pool.settled.store(true, Ordering::Release);
+    super::super::session_lifecycle::drain_and_abandon(Some(&environment), &initialization)
+        .await
+        .unwrap();
+    assert!(
+        cfg.session_resources
+            .load_session_snapshot(&id)
+            .await
+            .is_err(),
+        "撤销之后草稿行必须消失"
+    );
+}
+
+/// 未发布创建（J2 第一阶段）的输入。
+fn bound_draft(
+    thread_id: &str,
+    workspace: &peri_acp_types::workspace::ResolvedWorkspace,
+) -> peri_acp_types::session_resources::NewSessionDraft {
+    peri_acp_types::session_resources::NewSessionDraft {
+        thread_id: thread_id.to_owned(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        meta: peri_acp_types::session_resources::NewSessionMeta {
+            title: None,
+            cwd: workspace.cwd.to_string_lossy().into_owned(),
+            parent_thread_id: None,
+            hidden: false,
+            cancel_policy: peri_acp_types::thread::CancelPolicy::default(),
+            snapshot_at_message_id: None,
+        },
+        binding: SessionBinding::from_workspace(workspace),
+    }
+}
+
+/// 同源收口（J2 §6.4）：无 frozen 的可执行会话 **fail-closed**，不按当前目录重冻。
+///
+/// 构造态：会话有执行所有权（`require_owner` 放行）但没有冻结快照。宿主必须拒绝本轮
+/// 执行并报内部错误——任何「用当前状态补一份 frozen」的实现都会让本用例失败。
+#[tokio::test]
+async fn prompt_without_frozen_snapshot_fails_closed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let cfg = make_server_config(config, provider, &tmp).await;
+    let cwd = tmp.path().canonicalize().unwrap();
+    let id = create_bound_fixture(&cfg, cwd.to_str().unwrap(), None).await;
+    let owner = acquire_bound_owner(&cfg, &id).await;
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    sessions.insert(
+        id.clone(),
+        SessionState {
+            session_id: id.clone(),
+            thread_id: id.clone(),
+            cwd: cwd.to_str().unwrap().to_owned(),
+            execution_owner: Some(owner),
+            environment: None,
+            closing: false,
+            history: Vec::new(),
+            history_payloads: Vec::new(),
+            cancel_token: None,
+            frozen: None,
+            recall_items: Vec::new(),
+            agent_pool: crate::session::agent_pool::AgentPool::new(),
+            workflow_middleware: None,
+            lsp_pool: None,
+            title: None,
+            tags: Vec::new(),
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
+            lease: crate::host::lease::WriterLease::acquired("default"),
+        },
+    );
+
+    // 执行入口需要 AcpSession 登记（user input mailbox 解析）：先按生产路径登记，
+    // 但不给它 frozen —— 这正是本用例要触发的状态。
+    cfg.session_manager
+        .ensure_session_with_task_manager(&id, cwd.to_str().unwrap(), None);
+    // 生产入口（`session/prompt` 的执行体）：同源守卫在这里，早于任何模型/工具路径。
+    let error = crate::host::prompt::run_prompt(
+        json!({
+            "sessionId": id,
+            "prompt": [{"type": "text", "text": "hello"}],
+        }),
+        &Arc::new(tokio::sync::Mutex::new(sessions)),
+        &cfg,
+        &transport,
+        Arc::new(parking_lot::Mutex::new(
+            crate::session::agent_pool::AgentPool::new(),
+        )),
+        None,
+        false,
+        None,
+    )
+    .await
+    .expect_err("没有 frozen 的可执行会话不得进入执行");
+    assert!(
+        error.message.contains("no frozen snapshot"),
+        "必须是 fail-closed 的内部错误，而不是静默重冻: {error:?}"
+    );
+}

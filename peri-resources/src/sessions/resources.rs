@@ -32,9 +32,10 @@ use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     AccessMode, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, DataCapabilities,
-    ExecutionAvailability, ForkSnapshot, FrozenSnapshotBytes, NewSession, PersistenceRecovery,
-    RewindBoundary, SessionAvailability, SessionMetaPatch, SessionResourceError,
-    SessionResourceErrorKind, SessionResourceResult, SessionResources, SessionSnapshot,
+    ExecutionAvailability, ForkSnapshot, FrozenSnapshotBytes, NewSession, NewSessionDraft,
+    PersistenceRecovery, RewindBoundary, SessionAvailability, SessionInitialization,
+    SessionMetaPatch, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
+    SessionResources, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
@@ -44,7 +45,7 @@ use peri_acp_types::workspace::{
 };
 
 use super::data::{ensure_child_relation, ChildResumeRecord, SessionDataPort};
-use super::local_port::LocalExecutionPort;
+use super::local_port::{LocalExecutionPort, RevokeEffect};
 use super::sqlite_store::{
     execution_failure, invalid_input, lease_required, not_found, same_lease, LocalExecution,
     ReadOnlyThreadStoreError,
@@ -72,6 +73,61 @@ const SETTLE_WAIT: Duration = Duration::from_secs(10);
 pub(in crate::sessions) enum SessionDataHome {
     LocalLibrary,
     RemoteStore,
+}
+
+/// 未发布创建的句柄（两阶段的第二阶段）：提交 frozen 或撤销整条草稿。
+///
+/// 句柄持有本次创建的租约与两个端口，因此两个终局动作都不需要调用方再拼补偿：
+///
+/// - [`SessionInitialization::commit_frozen`]：本机组合同一事务内复核 owner/代际后 CAS；
+///   远端组合先本机复核（代际未结清、owner 仍是本次租约），再走数据端口的 write-once 提交；
+/// - [`SessionInitialization::abandon`]：复用执行面的撤销顺序（关准入 → 补偿 → 放锁），
+///   补偿即数据端的「撤销未发布创建」，而它自己会拒绝删除**已提交 frozen** 的草稿。
+struct DraftInitialization {
+    id: ThreadId,
+    lease: Arc<dyn SessionExecutionLease>,
+    local: Arc<dyn LocalExecutionPort>,
+    data: Arc<dyn SessionDataPort>,
+    home: SessionDataHome,
+}
+
+#[async_trait]
+impl SessionInitialization for DraftInitialization {
+    fn thread_id(&self) -> &ThreadId {
+        &self.id
+    }
+
+    fn execution_lease(&self) -> Arc<dyn SessionExecutionLease> {
+        Arc::clone(&self.lease)
+    }
+
+    async fn commit_frozen(&self, frozen: &FrozenSnapshotBytes) -> SessionResourceResult<()> {
+        match self.home {
+            SessionDataHome::LocalLibrary => {
+                self.local
+                    .commit_frozen(&self.id, &self.lease, frozen)
+                    .await
+            }
+            SessionDataHome::RemoteStore => {
+                // 本机事实（仍是活 owner、代际未结清）先行：远端 CAS 之后没有第二次
+                // 本机判定机会，反过来则不成立。
+                self.local
+                    .verify_initialization_owner(&self.id, &self.lease)
+                    .await?;
+                self.data.commit_frozen(&self.id, frozen).await
+            }
+        }
+    }
+
+    async fn abandon(self: Arc<Self>) -> SessionResourceResult<()> {
+        let id = self.id.clone();
+        let data = Arc::clone(&self.data);
+        let revoke: RevokeEffect<'_> =
+            Box::pin(async move { data.revoke_unpublished_session(&id).await });
+        self.local
+            .abandon_initialization(&self.id, &self.lease, revoke)
+            .await
+    }
 }
 
 /// 会话资源门面（生产实现）。
@@ -431,6 +487,46 @@ impl SessionResources for SessionResourcesImpl {
                 lease,
                 Box::pin(async move { data.revoke_unpublished_session(id).await }),
             )
+            .await
+    }
+
+    async fn begin_initialization(
+        &self,
+        draft: &NewSessionDraft,
+    ) -> SessionResourceResult<Arc<dyn SessionInitialization>> {
+        self.gate.ensure_registration_write()?;
+        let local = self.gate.local();
+        // 提交次数由数据位置决定（与 `create_session` 同一规则）：同一个本机库时草稿与
+        // 执行代际一次提交；数据在别处时先由数据端口保存草稿，再取本机执行准入。
+        let lease = match self.home {
+            SessionDataHome::LocalLibrary => local.begin_initialization(draft).await?,
+            SessionDataHome::RemoteStore => {
+                self.gate.data().save_new_session_draft(draft).await?;
+                match local.admit_existing(&draft.thread_id, &draft.binding).await {
+                    Ok(lease) => lease,
+                    Err(error) if error.is_persistence_uncertain() => return Err(error),
+                    Err(_) => {
+                        return Err(SessionResourceError::saved_but_not_admitted(
+                            draft.thread_id.clone(),
+                        ))
+                    }
+                }
+            }
+        };
+        Ok(Arc::new(DraftInitialization {
+            id: draft.thread_id.clone(),
+            lease,
+            local: Arc::clone(local),
+            data: Arc::clone(self.gate.data()),
+            home: self.home,
+        }))
+    }
+
+    async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.gate.ensure_session_write()?;
+        self.gate
+            .local()
+            .discard_incomplete_initialization(id)
             .await
     }
 

@@ -31,7 +31,7 @@ use super::failure::{
     binding_relation_failure, commit_failure, execution_failure, lease_required, map_sqlx,
 };
 use super::session_data::SqliteSessionData;
-use super::session_rows::{insert_binding_row, insert_thread_row};
+use super::session_rows::{delete_thread_child_rows, insert_binding_row, insert_thread_row};
 use crate::sessions::local_port::{LocalExecutionPort, RevokeEffect, SessionFacts};
 
 /// 本机执行面的句柄：与数据面共用同一个库（同一条连接真相）。
@@ -350,6 +350,241 @@ impl LocalExecution {
         self.register_lease(input.thread_id.clone(), 1, Some(file))
     }
 
+    /// 未发布创建的第一阶段：OS 预留 → 草稿数据与执行代际同一事务 → 返回 owner。
+    ///
+    /// 与 [`Self::create_with_lease`] 逐字同形状，唯一差别是 `frozen_context` 写 `NULL`：
+    /// 内容准入（资源读取后定稿）需要所有权先成立，因此身份/绑定/代际先在此成立，
+    /// frozen 由 [`Self::commit_frozen`] 一次性补上。草稿不可执行：它不在任何会话表里，
+    /// 也没有 frozen 可被冷恢复解释（半写草稿按 typed 错误 fail-closed）。
+    pub(in crate::sessions) async fn begin_initialization(
+        &self,
+        draft: &peri_acp_types::session_resources::NewSessionDraft,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        if self.database.is_read_only() {
+            return Err(super::failure::read_only_store());
+        }
+        let file = self
+            .database
+            .lock_execution(&local_lock_name(&draft.thread_id))
+            .await
+            .map_err(execution_failure)?;
+        let snapshot_at = draft
+            .meta
+            .snapshot_at_message_id
+            .map(|id| id.as_uuid().to_string());
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        let resolved = SqliteSessionDatabase::validate_binding_relation_on(&mut tx, &draft.binding)
+            .await
+            .map_err(binding_relation_failure)?;
+        let binding_cwd =
+            super::discovery::path_text(&resolved.cwd).map_err(super::failure::write_failure)?;
+        let mut row = super::session_data::new_session_draft_row(draft, snapshot_at.as_deref(), 0);
+        row.cwd = binding_cwd;
+        insert_thread_row(&mut tx, &row)
+            .await
+            .map_err(super::failure::write_failure)?;
+        insert_binding_row(&mut tx, &draft.thread_id, &draft.binding)
+            .await
+            .map_err(super::failure::write_failure)?;
+        sqlx::query("INSERT INTO execution_runs (thread_id, generation, clean) VALUES (?1, 1, 0)")
+            .bind(draft.thread_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(draft.thread_id.clone())))?;
+        self.register_lease(draft.thread_id.clone(), 1, Some(file))
+    }
+
+    /// 一次性提交 frozen：owner/代际校验与 write-once CAS 在同一 `BEGIN IMMEDIATE` 内。
+    ///
+    /// 三条判据都必须成立，否则 typed 冲突且**不写入**：
+    ///
+    /// 1. `lease` 是本进程这条 identity 的**活 owner**（撤销/提交只能由 owner 发起）；
+    /// 2. 这条 identity 的执行代际仍是 `clean = 0`（已结清的草稿不允许再定稿内容）；
+    /// 3. `UPDATE ... WHERE id = ? AND frozen_context IS NULL` 恰好命中一行（write-once）。
+    pub(in crate::sessions) async fn commit_frozen(
+        &self,
+        id: &ThreadId,
+        lease: &Arc<dyn SessionExecutionLease>,
+        frozen: &peri_acp_types::session_resources::FrozenSnapshotBytes,
+    ) -> SessionResourceResult<()> {
+        if self.database.is_read_only() {
+            return Err(super::failure::read_only_store());
+        }
+        // 活 owner 判定取活跃弱引用表（崩溃即失效），与撤销同一条判据。
+        let owned = self
+            .database
+            .registered_lease(id)
+            .map_err(execution_failure)?
+            .filter(|owned| owned.is_active())
+            .ok_or_else(lease_required)?;
+        if !same_lease(&owned, lease) {
+            return Err(lease_required());
+        }
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        let execution: Option<(i64, bool)> =
+            sqlx::query_as("SELECT generation, clean FROM execution_runs WHERE thread_id = ?1")
+                .bind(id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        match execution {
+            Some((_, false)) => {}
+            Some((_, true)) => {
+                return Err(super::failure::conflict(
+                    "execution generation is already settled",
+                ))
+            }
+            None => {
+                return Err(super::failure::conflict(
+                    "draft has no execution generation",
+                ))
+            }
+        }
+        let updated = sqlx::query(
+            "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL",
+        )
+        .bind(frozen.as_str())
+        .bind(id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| map_sqlx(&error))?
+        .rows_affected();
+        if updated != 1 {
+            return Err(super::failure::conflict(
+                "session frozen snapshot was already committed",
+            ));
+        }
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(id.clone())))?;
+        Ok(())
+    }
+
+    /// 提交前后的本机资格复核：活 owner 是这一条 identity 的本次租约，且代际未结清。
+    pub(in crate::sessions) async fn verify_initialization_owner(
+        &self,
+        id: &ThreadId,
+        lease: &Arc<dyn SessionExecutionLease>,
+    ) -> SessionResourceResult<()> {
+        let owned = self
+            .database
+            .registered_lease(id)
+            .map_err(execution_failure)?
+            .filter(|owned| owned.is_active())
+            .ok_or_else(lease_required)?;
+        if !same_lease(&owned, lease) {
+            return Err(lease_required());
+        }
+        match self
+            .database
+            .load_execution_state(id)
+            .await
+            .map_err(execution_failure)?
+        {
+            Some((_, false)) => Ok(()),
+            _ => Err(super::failure::conflict(
+                "draft execution generation is not open",
+            )),
+        }
+    }
+
+    /// 半写草稿的清理：判据成立、无活 owner、拿到 OS 锁之后，删除草稿的全部行。
+    ///
+    /// 判据（§5.3，与 legacy「无绑定且无代际行」互斥）：
+    ///
+    /// - 有绑定行（`session_bindings` 命中）**且** `threads.frozen_context IS NULL`；
+    /// - 已提交 frozen 的会话**不是**半写草稿：返回 typed 冲突，交给既有 dirty 恢复；
+    /// - 本进程有活 owner、或 OS 锁被其他进程持有 ⇒ 拒绝（那不是崩溃残留）。
+    ///
+    /// 删除在一条 `BEGIN IMMEDIATE` 里完成（执行代际 + 子表 + threads 行），与
+    /// [`super::session_data`] 的撤销同一顺序、同一判据。
+    pub(in crate::sessions) async fn discard_incomplete_initialization(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<()> {
+        if self.database.is_read_only() {
+            return Err(super::failure::read_only_store());
+        }
+        let frozen: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
+                .bind(id.as_str())
+                .fetch_optional(&self.database.pool)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        let Some((frozen,)) = frozen else {
+            // 行已不在：目标已达成（清理幂等），不把「已经不存在」当成失败。
+            return Ok(());
+        };
+        if frozen.is_some() {
+            return Err(super::failure::conflict(
+                "session already has a committed frozen snapshot",
+            ));
+        }
+        if self
+            .database
+            .load_session_binding_impl(id)
+            .await
+            .map_err(execution_failure)?
+            .is_none()
+        {
+            return Err(super::failure::conflict(
+                "session has no binding and is not an incomplete draft",
+            ));
+        }
+        if let Some(lease) = self
+            .database
+            .registered_lease(id)
+            .map_err(execution_failure)?
+        {
+            if lease.is_active() {
+                return Err(super::failure::conflict(
+                    "session is still owned by a live initialization",
+                ));
+            }
+        }
+        let _file = self
+            .database
+            .lock_execution(&local_lock_name(id))
+            .await
+            .map_err(execution_failure)?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        sqlx::query("DELETE FROM execution_runs WHERE thread_id = ?1")
+            .bind(id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        delete_thread_child_rows(&mut tx, id.as_str())
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        sqlx::query(super::session_rows::DELETE_THREAD_SQL)
+            .bind(id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(id.clone())))?;
+        Ok(())
+    }
+
     /// 为一个已保存完整数据、但还没有执行代际的会话建立准入（收敛，不是重建）。
     ///
     /// 只用于 [`Self::create_with_lease`] 之外留下的 `data_saved` 状态：数据面已确认
@@ -536,6 +771,34 @@ impl LocalExecutionPort for LocalExecution {
         input: &NewSession,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
         self.create_with_lease(input).await
+    }
+
+    async fn begin_initialization(
+        &self,
+        draft: &peri_acp_types::session_resources::NewSessionDraft,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        self.begin_initialization(draft).await
+    }
+
+    async fn commit_frozen(
+        &self,
+        id: &ThreadId,
+        lease: &Arc<dyn SessionExecutionLease>,
+        frozen: &peri_acp_types::session_resources::FrozenSnapshotBytes,
+    ) -> SessionResourceResult<()> {
+        self.commit_frozen(id, lease, frozen).await
+    }
+
+    async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.discard_incomplete_initialization(id).await
+    }
+
+    async fn verify_initialization_owner(
+        &self,
+        id: &ThreadId,
+        lease: &Arc<dyn SessionExecutionLease>,
+    ) -> SessionResourceResult<()> {
+        self.verify_initialization_owner(id, lease).await
     }
 
     async fn admit_existing(

@@ -52,7 +52,29 @@ pub(crate) trait SessionDataPort: Send + Sync {
     /// 「数据已保存、执行代际未写」的收敛状态。
     async fn save_new_session(&self, input: &NewSession) -> SessionResourceResult<()>;
 
+    /// 保存未发布创建（J2 第一阶段）：身份/绑定落库，frozen 暂空。
+    ///
+    /// 本地塌缩把「草稿 + 执行代际」并成一次提交（不经过本方法）；远程组合先由本方法
+    /// 保存草稿、再取本机执行准入，与 [`Self::save_new_session`] 同一节奏。
+    async fn save_new_session_draft(
+        &self,
+        draft: &peri_acp_types::session_resources::NewSessionDraft,
+    ) -> SessionResourceResult<()>;
+
+    /// 一次性提交 frozen（write-once CAS）：仅当该 identity 从未提交过时生效。
+    ///
+    /// 本地塌缩在 [`super::local_port::LocalExecutionPort`] 内完成（与 owner/代际校验同一
+    /// 事务）；远程组合经由本方法提交，重复提交返回 typed 冲突而不是覆盖。
+    async fn commit_frozen(
+        &self,
+        id: &ThreadId,
+        frozen: &FrozenSnapshotBytes,
+    ) -> SessionResourceResult<()>;
+
     /// 撤销本次未发布的创建：只针对本次初始化，不修改既有 source 会话。
+    ///
+    /// **已提交 frozen 的草稿不是「未发布创建」**：实现必须在删除前以 `frozen IS NULL`
+    /// 为判据拒绝（typed 冲突），否则会把一个已定稿、未发布的合法中间态销毁掉。
     async fn revoke_unpublished_session(&self, id: &ThreadId) -> SessionResourceResult<()>;
 
     /// 接纳 legacy 会话：binding 与缺失的 frozen 一次成立，已有值不变。

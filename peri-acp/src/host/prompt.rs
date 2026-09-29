@@ -331,13 +331,20 @@ pub(crate) async fn run_prompt(
     let provider_snapshot = provider.read().clone();
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
 
+    // 同源收口（ARC-FROZEN-001）：可执行会话（`require_owner` 已保证有执行所有权）必然
+    // 带有创建/恢复时定格的 frozen。缺失时 **fail-closed** —— 既不按当前配置/目录重冻
+    // （那会把本轮的目录状态冒充成历史冻结输入），也不带着空冻结继续跑；宿主必须显式
+    // 修复这条会话（重新 load 或删除），而不是让一次静默降级改掉系统提示词。
+    let Some(frozen) = frozen else {
+        return Err(AcpError::new(
+            -32603,
+            "Session has no frozen snapshot; refusing to rebuild it from the current state",
+        ));
+    };
+
     // MetaHarness：从会话冻结数据投影（ARC-FROZEN-001——禁止从每 turn 的
-    // 当前配置重建；frozen None（print mode 等防御路径）回落默认空状态）。
-    // 设计 §2.5-2.6：装配与 workflow 渲染统一消费冻结状态。
-    let meta_harness = frozen
-        .as_ref()
-        .map(|f| f.meta_harness().clone())
-        .unwrap_or_default();
+    // 当前配置重建）。设计 §2.5-2.6：装配与 workflow 渲染统一消费冻结状态。
+    let meta_harness = frozen.meta_harness().clone();
 
     // Create workflow executor (enables Workflow tool for multi-agent orchestration)
     // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
@@ -346,15 +353,9 @@ pub(crate) async fn run_prompt(
     let workflow_executor = peri_agent::agent::workflow::create_executor(
         peri_agent::agent::workflow::WorkflowAgentContext {
             cwd: cwd.clone(),
-            frozen_claude_md: frozen
-                .as_ref()
-                .and_then(|f| f.claude_md().map(|s| s.to_string())),
-            frozen_claude_local_md: frozen
-                .as_ref()
-                .and_then(|f| f.claude_local_md().map(|s| s.to_string())),
-            frozen_skill_summary: frozen
-                .as_ref()
-                .and_then(|f| f.skill_summary().map(|s| s.to_string())),
+            frozen_claude_md: frozen.claude_md().map(|s| s.to_string()),
+            frozen_claude_local_md: frozen.claude_local_md().map(|s| s.to_string()),
+            frozen_skill_summary: frozen.skill_summary().map(|s| s.to_string()),
             session_id: Some(session_id.clone()),
             compact_config: {
                 let mut cc = peri_config_snapshot
@@ -369,13 +370,11 @@ pub(crate) async fn run_prompt(
             // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
             // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
             // （16_workflow 已删除（C2），主 prompt 即子面向唯一版本。）
-            system_prompt: frozen.as_ref().map(|f| f.system_prompt().to_string()),
+            system_prompt: Some(frozen.system_prompt().to_string()),
             broker: None,
             permission_mode: None,
-            frozen_date: frozen.as_ref().map(|f| f.date().to_string()),
-            frozen_language: frozen
-                .as_ref()
-                .and_then(|f| f.language().map(|s| s.to_string())),
+            frozen_date: Some(frozen.date().to_string()),
+            frozen_language: frozen.language().map(|s| s.to_string()),
             progress_tx: None,
             subagent_ctx_builder: None,
             agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
@@ -474,15 +473,11 @@ pub(crate) async fn run_prompt(
     let tool_invocation_resolver: Arc<dyn peri_agent::tools::ToolInvocationResolver> =
         Arc::new(peri_middlewares::tool_search::ExecuteExtraToolResolver::default());
 
-    // 防御性 frozen 构建器（turn.frozen=None 回落；生产不可达）
-    let frozen_fallback_builder: Option<executor::FrozenFallbackBuilder> = {
-        let sm = session_manager.clone();
-        let roots = plugin_skill_roots.to_vec();
-        let dirs = plugin_agent_dirs.to_vec();
-        Some(Arc::new(move |cwd, _language| {
-            sm.build_frozen_data(cwd, &roots, &dirs)
-        }))
-    };
+    // 同源收口（§6.4）：宿主**不**注入 frozen 构建器。曾经的 `FrozenFallbackBuilder`
+    // 会在 `turn.frozen=None` 时按当前目录/配置重冻一份，那是同源规则的第三入口；
+    // 现在本入口在此前已对缺 frozen 的会话 fail-closed（见上文 `let Some(frozen)`），
+    // 因此不存在「静默重冻」这条路径。
+    let frozen_fallback_builder: Option<executor::FrozenFallbackBuilder> = None;
 
     let session_mcp_capability = dynamic_mcp
         .as_ref()
@@ -574,7 +569,7 @@ pub(crate) async fn run_prompt(
         event_sink,
         content,
         continuation,
-        frozen,
+        frozen: Some(frozen),
         history,
         history_payloads: history_payloads.clone(),
         incoming_recalls,

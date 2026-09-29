@@ -28,7 +28,7 @@ use turso_serverless::Value;
 use super::mutation::incomplete_reply;
 use super::session_codec as codec;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
-use super::session_sql::binding_relative_text;
+use super::session_sql::{self, binding_relative_text};
 use super::sql::{int_at, text_at, StatementSpec};
 use crate::sessions::canonical;
 use crate::sessions::data::ChildResumeRecord;
@@ -158,6 +158,8 @@ impl RemoteSessionData {
     ///
     /// 与本机同一判据（`parent_thread_id` 计数 > 0 → `InvalidInput`）；会话行本来就不在时
     /// 是幂等删除（本机同一语义：补偿路径把「已经不在了」当成目标已达成）。
+    /// **已提交 frozen 的草稿不是「未发布创建」**：三条删除共用 `frozen_context IS NULL`
+    /// 判据，一条都不删并返回 typed 冲突（那是已定稿、未发布的会话，走 dirty 恢复）。
     /// 远端不留 `creation_intent` 锚点：那本机事实用于判定「同一 identity 不被复活」，
     /// 远端没有第二个副本，也就没有需要锚定的复活路径。
     pub(super) async fn revoke_unpublished(&self, id: &ThreadId) -> SessionResourceResult<()> {
@@ -171,28 +173,29 @@ impl RemoteSessionData {
         // 子会话数与后面的写入各取一次连接：借用不跨过去（见上）。
         drop(store);
         revocation_gate(children.as_ref().and_then(|values| int_at(values, 0)))?;
-        let effects = vec![
-            StatementSpec::new(
-                DELETE_SESSION_MESSAGES_SQL,
-                vec![Value::Text(id.as_str().to_owned())],
-            ),
-            StatementSpec::new(
-                DELETE_SESSION_BINDINGS_SQL,
-                vec![Value::Text(id.as_str().to_owned())],
-            ),
-            StatementSpec::new(
-                DELETE_SESSION_SQL,
-                vec![Value::Text(id.as_str().to_owned())],
-            ),
-        ];
-        self.commit_effects(
-            "revoke_unpublished_session",
-            &[format!("id:{}", id.as_str())],
-            effects,
-            id,
-        )
-        .await
-        .map(|_| ())
+        let effects = session_sql::revoke_draft_statements(id.as_str());
+        let counts = self
+            .commit_effects(
+                "revoke_unpublished_session",
+                &[format!("id:{}", id.as_str())],
+                effects,
+                id,
+            )
+            .await?;
+        match counts.last() {
+            // 重放：原操作已生效（行已经不在）。
+            None => Ok(()),
+            Some(0) => {
+                // 判据不成立：要么已提交 frozen，要么行本来就不在（幂等删除）。
+                match self.frozen_of(id).await? {
+                    Some(_) => Err(SessionResourceError::conflict(
+                        "session has a committed frozen snapshot and cannot be revoked",
+                    )),
+                    None => Ok(()),
+                }
+            }
+            Some(_) => Ok(()),
+        }
     }
 
     /// 删除会话树：子树（含根）的历史与会话行在同一批里消失。

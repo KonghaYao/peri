@@ -219,7 +219,7 @@ async fn prepare_new_reuses_host_configuration_for_startup_directory() {
 
     let prepared = PreparedSessionInputs::prepare_new(&host, &cwd).unwrap();
     assert!(
-        Arc::ptr_eq(&prepared.config_source, &host.config_source),
+        Arc::ptr_eq(&prepared.configuration.config_source, &host.config_source),
         "同一启动目录必须复用已装配配置源，不第二次 load_at"
     );
     assert!(

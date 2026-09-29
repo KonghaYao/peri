@@ -147,6 +147,42 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
         input: &NewSession,
     ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>>;
 
+    /// 未发布创建的第一阶段（本地塌缩：草稿行 + 执行代际一次提交）。
+    ///
+    /// 与 [`Self::create_session`] 同一形状，只把 frozen 值改为 `NULL`；返回的租约就是
+    /// 本条 identity 的活 owner，frozen 提交（[`Self::commit_frozen`]）在同一事务内复核它。
+    async fn begin_initialization(
+        &self,
+        draft: &peri_acp_types::session_resources::NewSessionDraft,
+    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>>;
+
+    /// 一次性提交 frozen（本地塌缩：owner/代际校验与 CAS 同一事务）。
+    ///
+    /// `lease` 必须是本进程这条 identity 的活 owner；执行代际必须仍未结清（`clean = 0`）；
+    /// `UPDATE ... WHERE frozen_context IS NULL` 必须恰好命中一行，否则 typed 冲突且不写入。
+    async fn commit_frozen(
+        &self,
+        id: &ThreadId,
+        lease: &Arc<dyn SessionExecutionLease>,
+        frozen: &peri_acp_types::session_resources::FrozenSnapshotBytes,
+    ) -> SessionResourceResult<()>;
+
+    /// 提交前的本机资格复核：本进程仍是这条 identity 的活 owner，且代际未结清。
+    ///
+    /// 数据在远端的组合用它把「本机执行事实」叠在远端 CAS 之前（远端组合没有同一个事务
+    /// 可以承载本机 owner 判定）。
+    async fn verify_initialization_owner(
+        &self,
+        id: &ThreadId,
+        lease: &Arc<dyn SessionExecutionLease>,
+    ) -> SessionResourceResult<()>;
+
+    /// 半写草稿（`bound && frozen IS NULL`）的检测与清理。
+    ///
+    /// 判据不成立（无绑定行、或已提交 frozen）时返回 typed 冲突且不删除；本进程存在活
+    /// owner 或 OS 锁被别的进程持有时同样拒绝（那不是崩溃残留）。
+    async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()>;
+
     /// 为「数据已完整保存、还没有执行代际」的会话建立准入（收敛，不是重建）。
     ///
     /// `binding` 是**数据面给出的绑定字节**（本机组合来自本机 `session_bindings`，远程组合

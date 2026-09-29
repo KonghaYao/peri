@@ -247,11 +247,20 @@ async fn test_data_delete_tree_leaves_no_orphans_without_cascade() {
 }
 
 /// 数据面 `revoke_unpublished_session`（单条未发布会话）。
+///
+/// 撤销的对象是**未提交 frozen** 的草稿：已提交快照的会话不是「未发布创建」，撤销必须
+/// 拒绝（见 `test_revoke_refuses_a_committed_session`），所以这里先删掉种子写入的 frozen
+/// 值，让判据回到草稿态。
 #[tokio::test]
 async fn test_revoke_unpublished_session_leaves_no_orphans_without_cascade() {
     let fixture = without_cascade().await;
     let id = "s-revoked";
     seed(&fixture, id, None).await;
+    sqlx::query("UPDATE threads SET frozen_context = NULL WHERE id = ?1")
+        .bind(id)
+        .execute(&fixture.store.database.pool)
+        .await
+        .unwrap();
     let pool = fixture.store.database.pool.clone();
     let tables = schema_child_tables(&pool).await;
     assert_child_rows_present(&pool, &tables, &[id]).await;

@@ -85,6 +85,18 @@ impl SessionResources for MockSessionResources {
         Err(unsupported("abandon_initialization"))
     }
 
+    async fn begin_initialization(
+        &self,
+        _draft: &peri_acp_types::session_resources::NewSessionDraft,
+    ) -> SessionResourceResult<Arc<dyn peri_acp_types::session_resources::SessionInitialization>>
+    {
+        Err(unsupported("begin_initialization"))
+    }
+
+    async fn discard_incomplete_initialization(&self, _id: &ThreadId) -> SessionResourceResult<()> {
+        Err(unsupported("discard_incomplete_initialization"))
+    }
+
     async fn adopt_legacy_session(
         &self,
         _id: &ThreadId,

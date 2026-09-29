@@ -9,7 +9,8 @@ use crate::sessions::local_port::SessionFacts;
 use crate::sessions::sqlite_store::{commit_failure, write_failure};
 use crate::SessionStoreShutdownOwner;
 use peri_acp_types::session_resources::{
-    FrozenState, NewSessionMeta, SessionResourceResult, SessionResources, SessionStoreShutdownPort,
+    FrozenState, NewSessionDraft, NewSessionMeta, SessionInitialization, SessionResourceResult,
+    SessionResources, SessionStoreShutdownPort,
 };
 use peri_acp_types::workspace::{ResetDirtyRequest, SESSION_BINDING_VERSION};
 use tempfile::TempDir;
@@ -122,6 +123,25 @@ impl Fixture {
         let workspace = self.workspace().await;
         let input = self.session(id, &workspace, &format!(r#"{{"v":1,"id":"{id}"}}"#));
         self.facade.create_session(&input).await.unwrap()
+    }
+
+    /// 未发布创建（J2 第一阶段）：草稿 + lease，frozen 尚未提交。
+    async fn begin(&self, id: &str) -> Arc<dyn SessionInitialization> {
+        let workspace = self.workspace().await;
+        let draft = NewSessionDraft {
+            thread_id: id.to_owned(),
+            created_at: "2026-09-26T00:00:00Z".to_owned(),
+            meta: NewSessionMeta {
+                title: Some(format!("session {id}")),
+                cwd: workspace.cwd.to_string_lossy().into_owned(),
+                parent_thread_id: None,
+                hidden: false,
+                cancel_policy: Default::default(),
+                snapshot_at_message_id: None,
+            },
+            binding: Self::binding(&workspace),
+        };
+        self.facade.begin_initialization(&draft).await.unwrap()
     }
 
     /// 直接经数据面落一份「数据已保存、执行代际未写」的会话（远程保存或崩溃留下的状态）。
@@ -653,7 +673,10 @@ async fn test_cancelled_mutation_leaves_uncertain_lease_and_blocks_clean() {
 #[tokio::test]
 async fn test_abandon_initialization_revokes_data_and_allows_a_fresh_retry() {
     let fixture = Fixture::new().await;
-    let lease = fixture.create("s-abandon").await;
+    // 撤销的对象是**未提交 frozen** 的草稿（两阶段的第一阶段）；已提交的会话不是
+    // 「未发布创建」，见 `test_abandon_refuses_a_draft_whose_frozen_was_committed`。
+    let initialization = fixture.begin("s-abandon").await;
+    let lease = initialization.execution_lease();
     let other = fixture.create("s-other").await;
     let id = "s-abandon".to_owned();
 
@@ -669,11 +692,7 @@ async fn test_abandon_initialization_revokes_data_and_allows_a_fresh_retry() {
     ));
     assert_eq!(fixture.count_threads(&id).await, 1);
 
-    fixture
-        .facade
-        .abandon_initialization(&id, &lease)
-        .await
-        .unwrap();
+    initialization.clone().abandon().await.unwrap();
     // 数据与执行代际行一起撤销，本机不留第二份痕迹：撤销判定只依据现有数据事实
     // （v10 删掉了「初始化被放弃」的终态锚点表）。
     assert_eq!(fixture.count_threads(&id).await, 0);
@@ -703,6 +722,244 @@ async fn test_abandon_initialization_revokes_data_and_allows_a_fresh_retry() {
         "重试建出的是全新会话：代际从 1 开始且未结清"
     );
     drop(other);
+}
+
+// ─── J2 两阶段：草稿 → commit_frozen / abandon ────────────────────────────────
+
+impl Fixture {
+    /// `threads.frozen_context` 原值（`None` = 从未提交/半写草稿）。
+    async fn frozen_of(&self, id: &str) -> Option<String> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(self.facade.local_pool())
+                .await
+                .unwrap();
+        row.and_then(|(frozen,)| frozen)
+    }
+
+    /// 同一库的第二个宿主句柄（另一条连接、另一套进程内登记）。
+    async fn second_host(&self) -> Arc<SessionResourcesImpl> {
+        Arc::new(
+            SessionResourcesImpl::open(self._db.path().join("threads.db"))
+                .await
+                .unwrap(),
+        )
+    }
+
+    async fn visible_ids(&self) -> Vec<String> {
+        self.facade
+            .list_sessions(&peri_acp_types::workspace::ScopedThreadQuery {
+                scope: peri_acp_types::workspace::ThreadScope::All,
+                cursor: None,
+                limit: 50,
+            })
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .map(|entry| entry.thread.id.clone())
+            .collect()
+    }
+}
+
+/// 第一阶段：草稿行成立（frozen 暂空、代际未结清）、不出现在列表、同 identity 只有一个 owner。
+#[tokio::test]
+async fn test_begin_initialization_writes_draft_without_frozen() {
+    let fixture = Fixture::new().await;
+    let initialization = fixture.begin("s-draft").await;
+    let id = "s-draft".to_owned();
+
+    assert_eq!(initialization.thread_id(), &id);
+    assert_eq!(fixture.count_threads(&id).await, 1);
+    assert_eq!(fixture.count_bindings(&id).await, 1);
+    assert_eq!(fixture.execution_row(&id).await, Some((1, false)));
+    assert_eq!(fixture.frozen_of(&id).await, None, "草稿不得带 frozen");
+    assert!(
+        !fixture.visible_ids().await.contains(&id),
+        "未发布草稿不得出现在会话列表"
+    );
+
+    // 第二个宿主不能同时取得这条 identity 的执行所有权（sidecar OS 锁）。
+    let second = fixture.second_host().await;
+    let workspace = fixture.workspace().await;
+    let error = match second.acquire_execution(&id, &workspace).await {
+        Ok(_) => panic!("second host must not own the same identity"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBusy)
+    ));
+}
+
+/// 第二阶段：commit 后 frozen 可读；重复 commit / 已提交后 abandon 都是 typed 冲突且不覆盖。
+#[tokio::test]
+async fn test_commit_frozen_is_write_once_and_blocks_abandon() {
+    let fixture = Fixture::new().await;
+    let initialization = fixture.begin("s-commit").await;
+    let id = "s-commit".to_owned();
+    let frozen = FrozenSnapshotBytes::new(r#"{"v":1,"id":"s-commit"}"#);
+
+    initialization.commit_frozen(&frozen).await.unwrap();
+    assert_eq!(
+        fixture.frozen_of(&id).await.as_deref(),
+        Some(frozen.as_str())
+    );
+    let snapshot = fixture.facade.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(snapshot.frozen, FrozenState::Present(frozen.clone()));
+    assert_eq!(fixture.execution_row(&id).await, Some((1, false)));
+
+    // 重复提交：typed 冲突，且不覆盖已提交字节。
+    let other = FrozenSnapshotBytes::new(r#"{"v":1,"id":"second-write"}"#);
+    let error = initialization.commit_frozen(&other).await.unwrap_err();
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Conflict { .. }
+    ));
+    assert_eq!(
+        fixture.frozen_of(&id).await.as_deref(),
+        Some(frozen.as_str())
+    );
+
+    // 已提交的草稿不是「未发布创建」：撤销必须拒绝，且一条行都不删。
+    let error = initialization.clone().abandon().await.unwrap_err();
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Conflict { .. }
+    ));
+    assert_eq!(fixture.count_threads(&id).await, 1);
+    assert_eq!(fixture.count_bindings(&id).await, 1);
+    assert_eq!(fixture.count_execution_runs(&id).await, 1);
+}
+
+/// abandon 幂等：先成功后重复调用仍成功（行已不在，目标已达成）。
+#[tokio::test]
+async fn test_abandon_is_idempotent_after_success() {
+    let fixture = Fixture::new().await;
+    let initialization = fixture.begin("s-idem").await;
+    let id = "s-idem".to_owned();
+
+    initialization.clone().abandon().await.unwrap();
+    assert_eq!(fixture.count_threads(&id).await, 0);
+    initialization.clone().abandon().await.unwrap();
+    assert_eq!(fixture.count_threads(&id).await, 0);
+    assert_eq!(fixture.count_execution_runs(&id).await, 0);
+}
+
+/// 崩溃矩阵（未提交）：重开之后草稿仍不可见、cold load 得到「bound 但无 frozen」，
+/// 清理判据成立时删除全部行；已提交的会话不走清理（交给 dirty 恢复）。
+#[tokio::test]
+async fn test_crash_before_commit_leaves_removable_draft() {
+    let fixture = Fixture::new().await;
+    let initialization = fixture.begin("s-crash").await;
+    let id = "s-crash".to_owned();
+    // 崩溃等价：进程内的 owner 随句柄一起消失（sidecar 锁由内核释放）。
+    drop(initialization);
+
+    let reopened = fixture.second_host().await;
+    assert!(
+        !fixture.visible_ids().await.contains(&id),
+        "半写草稿不得出现在会话列表"
+    );
+    let snapshot = reopened.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(
+        snapshot.binding,
+        BindingState::Bound(Fixture::binding(&fixture.workspace().await)),
+        "绑定已成立"
+    );
+    assert_eq!(
+        snapshot.frozen,
+        FrozenState::LegacyAbsent,
+        "bound 且无 frozen 是半写判据（ACP 侧按 typed 错误 fail-closed）"
+    );
+
+    reopened
+        .discard_incomplete_initialization(&id)
+        .await
+        .unwrap();
+    assert_eq!(fixture.count_threads(&id).await, 0);
+    assert_eq!(fixture.count_bindings(&id).await, 0);
+    assert_eq!(fixture.count_execution_runs(&id).await, 0);
+}
+
+/// 崩溃矩阵（已提交）：cold load 可读，下一次准入是精确代际的 dirty，显式接受风险后可用。
+#[tokio::test]
+async fn test_crash_after_commit_is_readable_and_needs_dirty_recovery() {
+    let fixture = Fixture::new().await;
+    let initialization = fixture.begin("s-post").await;
+    let frozen = FrozenSnapshotBytes::new(r#"{"v":1,"id":"s-post"}"#);
+    initialization.commit_frozen(&frozen).await.unwrap();
+    let id = "s-post".to_owned();
+    drop(initialization);
+
+    let reopened = fixture.second_host().await;
+    let snapshot = reopened.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(snapshot.frozen, FrozenState::Present(frozen.clone()));
+
+    let workspace = fixture.workspace().await;
+    let error = match reopened.acquire_execution(&id, &workspace).await {
+        Ok(_) => panic!("a crashed generation must not be acquireable without recovery"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Workspace(WorkspaceError::RecoveryRequired(_))
+    ));
+    // 「已提交未发布」不得被自动清理。
+    let error = reopened
+        .discard_incomplete_initialization(&id)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Conflict { .. }
+    ));
+    assert_eq!(fixture.count_threads(&id).await, 1);
+
+    // 既有 dirty 恢复（显式接受风险）之后可以继续执行。
+    reopened
+        .reset_dirty_execution(&ResetDirtyRequest {
+            target: RecoveryRequiredDetails {
+                thread_id: id.clone(),
+                generation: 1,
+            },
+            accept_risk: true,
+        })
+        .await
+        .unwrap();
+    let lease = reopened.acquire_execution(&id, &workspace).await.unwrap();
+    assert_eq!(lease.thread_id(), &id);
+}
+
+/// 清理判据与 legacy 互斥：无绑定行的会话不被清理（它不是半写草稿）。
+#[tokio::test]
+async fn test_discard_refuses_a_session_without_binding() {
+    let fixture = Fixture::new().await;
+    let workspace = fixture.workspace().await;
+    // legacy 形态：有行、有 cwd、无绑定、无执行代际。
+    sqlx::query(
+        "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
+            parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
+            cached_context, frozen_context, agent_status, context_cache_epoch)
+         VALUES ('s-legacy', NULL, ?1, '2026-09-26T00:00:00Z', '2026-09-26T00:00:00Z', 0,
+            NULL, NULL, 0, '{}', NULL, NULL, NULL, 'active', 0)",
+    )
+    .bind(workspace.cwd.to_string_lossy().into_owned())
+    .execute(fixture.facade.local_pool())
+    .await
+    .unwrap();
+
+    let error = fixture
+        .facade
+        .discard_incomplete_initialization(&"s-legacy".to_owned())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error_kind(&error),
+        SessionResourceErrorKind::Conflict { .. }
+    ));
+    assert_eq!(fixture.count_threads("s-legacy").await, 1);
 }
 
 // ─── child：沿用 root owner ───────────────────────────────────────────────────

@@ -11,8 +11,8 @@ use agent_client_protocol::schema::v1::{
 };
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::session_resources::{
-    BindingRecheck, BindingState, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta,
-    SessionMetaPatch,
+    BindingRecheck, BindingState, FrozenSnapshotBytes, FrozenState, NewSessionDraft,
+    NewSessionMeta, SessionInitialization, SessionMetaPatch,
 };
 use peri_acp_types::thread::{CancelPolicy, ThreadId};
 use peri_acp_types::workspace::{ReadOnlyAdmission, ResolvedWorkspace, SessionBinding};
@@ -21,7 +21,8 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use super::super::notify::{send_available_commands_update, send_config_option_update};
-use super::super::workspace::BindingCheck;
+use super::super::prepared::PreparedSessionInputs;
+use super::super::workspace::{workspace_error, BindingCheck};
 use super::super::{build_mode_state, AcpServerConfig, SessionState};
 use crate::dispatch::config_update::make_config_options;
 use crate::dispatch::ReplaySender;
@@ -42,23 +43,18 @@ fn fork_source_error(error: anyhow::Error) -> AcpError {
     }
 }
 
-/// 读取并解码 bound 会话的 frozen 数据。
+/// 读取 bound 会话的持久 frozen **字节**（唯一事实源）：恢复路径的装配输入由它定格。
 ///
 /// 快照缺 frozen 是错误（bound 会话必须有），本构建读不懂也是错误——两者都不是
 /// 「没有 frozen，可以重建」：重建会把已发布的冻结输入换成当前目录/日期。
-async fn load_frozen_data(
-    cfg: &AcpServerConfig,
-    session_id: &str,
-) -> Result<crate::session::executor::FrozenSessionData, AcpError> {
+async fn load_frozen_bytes(cfg: &AcpServerConfig, session_id: &str) -> Result<String, AcpError> {
     let snapshot = cfg
         .session_resources
         .load_session_snapshot(&session_id.to_owned())
         .await
         .map_err(super::super::workspace::resource_error)?;
     match snapshot.frozen {
-        FrozenState::Present(bytes) => {
-            decode_frozen_snapshot(bytes.as_str()).map_err(super::super::workspace::workspace_error)
-        }
+        FrozenState::Present(bytes) => Ok(bytes.into_string()),
         FrozenState::LegacyAbsent => Err(AcpError::new(
             -32603,
             "Bound session has no frozen snapshot",
@@ -161,18 +157,25 @@ async fn prepare_existing(
         // 只读准入不建执行环境：不要求 frozen 快照存在，也不启动 workflow / LSP。
         let (frozen, environment, workflow_middleware) = match owner.as_ref() {
             Some(_) => {
-                let frozen = load_frozen_data(cfg, id).await?;
-                let environment = match legacy_prepared.as_ref() {
-                    Some(inputs) => {
-                        super::super::workspace::SessionEnvironment::assemble_prepared(
-                            cfg, inputs, id,
-                        )
-                        .await?
+                // 持久 blob 是唯一事实源：恢复路径不再按当前目录/配置构建第二份 frozen
+                // （ARC-FROZEN-001 的同源收口）。
+                let persisted = load_frozen_bytes(cfg, id).await?;
+                let prepared = match legacy_prepared {
+                    // legacy 竞争：adopt 是 write-once，本进程可能被竞争落下——装配必须
+                    // 按**adopt 后重读的 winner**，候选只当过写入尝试；`legacy_prepared`
+                    // 至此只剩非 frozen 事实（配置/插件/cwd）。
+                    Some(mut inputs) => {
+                        let winner = decode_frozen_snapshot(&persisted).map_err(workspace_error)?;
+                        inputs.inject_frozen(winner, persisted)?;
+                        inputs
                     }
-                    None => {
-                        super::super::workspace::SessionEnvironment::assemble(cfg, &cwd, id).await?
-                    }
+                    None => PreparedSessionInputs::prepare_restore(cfg, &cwd, &persisted)?,
                 };
+                let frozen = prepared.frozen.clone();
+                let environment = super::super::workspace::SessionEnvironment::assemble_prepared(
+                    cfg, &prepared, id,
+                )
+                .await?;
                 let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
                 let workflow_middleware =
                     create_session_workflow_middleware(local, &cwd, id, &frozen);
@@ -534,12 +537,13 @@ pub(crate) async fn new_session_from_prepared(
 ) -> Result<Value, AcpError> {
     let resources = cfg.session_resources.clone();
     let cwd = prepared.cwd.clone();
-    // 身份一次生成：meta/binding/frozen 保存、执行代际与 owner 由门面在一次创建内
-    // 完成——ACP 不再分步拼 create/lease/frozen，也不做存储补偿。数据已保存但准入
-    // 失败（saved_but_not_admitted）原样上报，不谎称「确定未创建」。
+    // ── P1：草稿 + lease（frozen 暂空）──
+    // 身份一次生成；「未发布创建」的 frozen 由 P5 一次性提交，因此内容准入（本次的
+    // 准备产物）与发布之间不存在「保存了半份」的中间态。数据已保存但准入失败
+    // （saved_but_not_admitted）原样上报，不谎称「确定未创建」。
     let session_id = uuid::Uuid::now_v7().to_string();
-    let owner = resources
-        .create_session(&NewSession {
+    let initialization = resources
+        .begin_initialization(&NewSessionDraft {
             thread_id: session_id.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
             meta: NewSessionMeta {
@@ -551,15 +555,15 @@ pub(crate) async fn new_session_from_prepared(
                 snapshot_at_message_id: None,
             },
             binding: SessionBinding::from_workspace(workspace),
-            frozen: FrozenSnapshotBytes::new(prepared.frozen_encoded.clone()),
         })
         .await
         .map_err(super::super::workspace::resource_error)?;
     let thread_id = session_id.clone();
-    // 创建后的同一次准入复核：与创建事务写入的绑定比对已记录证据。
+    // 创建后的同一次准入复核：与草稿事务写入的绑定比对已记录证据。
     if let Err(error) = resources.validate_session(&session_id, workspace).await {
-        resources
-            .abandon_initialization(&session_id, &owner)
+        initialization
+            .clone()
+            .abandon()
             .await
             .map_err(super::super::workspace::resource_error)?;
         return Err(super::super::workspace::resource_error(error));
@@ -567,13 +571,15 @@ pub(crate) async fn new_session_from_prepared(
     let identity = match response_identity(cfg, &session_id).await {
         Ok(identity) => identity,
         Err(error) => {
-            resources
-                .abandon_initialization(&session_id, &owner)
+            initialization
+                .clone()
+                .abandon()
                 .await
                 .map_err(super::super::workspace::resource_error)?;
             return Err(error);
         }
     };
+    // ── P2：装配（MCP pool 挂起；frozen 消费准备产物，不重建）──
     // 装配失败时环境尚未建立（没有对外资源需要排空），撤销未发布的创建即可。
     let environment = match super::super::workspace::SessionEnvironment::assemble_prepared(
         cfg,
@@ -584,24 +590,65 @@ pub(crate) async fn new_session_from_prepared(
     {
         Ok(environment) => environment,
         Err(error) => {
-            resources
-                .abandon_initialization(&session_id, &owner)
+            initialization
+                .clone()
+                .abandon()
                 .await
                 .map_err(super::super::workspace::resource_error)?;
             return Err(error);
         }
     };
+    // ── P3：activate（资源准入开始）──
+    // B3 口径写死为「P0–P5 发布前」：发布点（P6 的 `sessions.insert`）之前可以发生
+    // 准备、装配、activate 与资源读取，**不含**工具执行、模型请求与 hook；此处提前
+    // activate 后会话仍不在 `sessions` 表里，`require_owner` 因此挡住任何执行。
+    if let Some(environment) = &environment {
+        environment.activate();
+    }
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
 
-    // ── Freeze system prompt data at session creation ──
+    // ── P4：frozen 字节（本次准备的唯一产物；W3a 无资源读取，内容仍在准备期定格）──
+    let frozen_data = prepared.frozen.clone();
+    // ── P5：commit_frozen（一次性 CAS）──
+    // 失败时按效果结清纪律处理：先重读单条判据，只有确证未生效才撤销；判据不可得
+    // 时保留草稿与 dirty 代际（由 `RecoveryRequired` 显式恢复），绝不删除。
+    let frozen_bytes = FrozenSnapshotBytes::new(prepared.frozen_encoded.clone());
+    if let Err(error) = initialization.commit_frozen(&frozen_bytes).await {
+        match committed_frozen_state(&resources, &session_id).await {
+            Ok(true) => {
+                warn!(
+                    session_id = %session_id,
+                    "frozen commit reported an error but the snapshot is present; publishing"
+                );
+            }
+            Ok(false) => {
+                drain_and_abandon(environment.as_ref(), &initialization).await?;
+                return Err(super::super::workspace::resource_error(error));
+            }
+            Err(criterion) => {
+                // 判据不可得：不得删除。环境仍按「未发布」排空（尽力），草稿连同
+                // 未结清的执行代际留给显式恢复。
+                if let Some(environment) = &environment {
+                    let _ = environment.shutdown().await;
+                }
+                return Err(AcpError::new(
+                    -32603,
+                    format!(
+                        "frozen commit failed and its outcome cannot be proven ({}); \
+                         the unpublished session was kept for explicit recovery",
+                        criterion.message
+                    ),
+                ));
+            }
+        }
+    }
+
+    // ── P6 之前的同一任务内登记（非对外可见点）──
     // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
     // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
-    // GAP-05: frozen data 在 WorkflowMiddleware 创建前构建，注入到 executor。
     // frozen 与准备阶段同源：内容与字节都来自同一 PreparedSessionInputs
     // （日期/运行环境/配置/插件 roots 均为准备阶段定格的那一份），不二次构建；
-    // 保存字节已在创建事务内一次写出（上文 create_session 的 frozen 字段），
-    // 因此这里不存在「保存失败需补偿环境」的中间态。
-    let frozen_data = prepared.frozen.clone();
+    // 保存字节已由 P5 的 commit 一次写出，因此这里不存在「发布后需补偿」的中间态。
     cfg.session_manager.ensure_session_with_task_manager(
         &session_id,
         &cwd,
@@ -620,13 +667,16 @@ pub(crate) async fn new_session_from_prepared(
         .lsp_pool
         .clone();
 
+    // ── P6：发布（`sessions.insert` 是唯一对外可见点）──
+    // 发布之后才可能有 prompt/执行（`require_owner` 只查这张表）；activate 已在 P3
+    // 完成，因此这里的两次动作之间没有 await，不存在「已可见但资源未起」的窗口。
     sessions.insert(
         session_id.clone(),
         SessionState {
             session_id: session_id.clone(),
             thread_id: thread_id.clone(),
             cwd: cwd.clone(),
-            execution_owner: Some(owner),
+            execution_owner: Some(initialization.execution_lease()),
             environment: environment.clone(),
             closing: false,
             history: Vec::new(),
@@ -647,9 +697,6 @@ pub(crate) async fn new_session_from_prepared(
         },
     );
 
-    if let Some(environment) = &environment {
-        environment.activate();
-    }
     info!(session_id = %session_id, "ACP session created with ThreadStore");
     let modes = build_mode_state(&cfg.permission_mode);
     let config_options = {
@@ -674,8 +721,54 @@ pub(crate) async fn new_session_from_prepared(
     )
 }
 
-/// `session/new` response 成功写入 transport 后执行的初始化通知。
+/// P5 失败后的效果结清：单条判据 `threads.frozen_context`。
 ///
+/// `Ok(true)` = 非 NULL ⇒ 提交实际生效（转发布）；`Ok(false)` = NULL 且读得到
+/// ⇒ 确证未提交（可撤销）；`Err` = 判据不可得 ⇒ 不得删除。
+async fn committed_frozen_state(
+    resources: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    session_id: &str,
+) -> Result<bool, AcpError> {
+    let snapshot = resources
+        .load_session_snapshot(&session_id.to_owned())
+        .await
+        .map_err(super::super::workspace::resource_error)?;
+    match snapshot.frozen {
+        FrozenState::Present(_) => Ok(true),
+        FrozenState::LegacyAbsent => Ok(false),
+        // 有字节但本构建读不懂：判据存在但不能证明「已提交的是本次内容」，
+        // 按不可得处理（不删除、不冒充发布）。
+        FrozenState::Unsupported => Err(AcpError::new(
+            -32603,
+            "session frozen snapshot is present but not readable by this build",
+        )),
+    }
+}
+
+/// 发布前失败的补偿：环境先排空，**排空确认之后**才撤销未发布的创建。
+///
+/// 顺序不变量（§5.1）：`abandon` 必须在环境 drain 完成之后——否则资源持有的是已删除
+/// 会话的 lease/handle；排空未确认时不撤销（草稿与 dirty 代际保留，由显式恢复收敛）。
+pub(super) async fn drain_and_abandon(
+    environment: Option<&Arc<super::super::workspace::SessionEnvironment>>,
+    initialization: &Arc<dyn SessionInitialization>,
+) -> Result<(), AcpError> {
+    if let Some(environment) = environment {
+        if !environment.shutdown().await {
+            return Err(AcpError::new(
+                -32603,
+                "session resources did not confirm shutdown; the unpublished session was kept",
+            ));
+        }
+    }
+    initialization
+        .clone()
+        .abandon()
+        .await
+        .map_err(super::super::workspace::resource_error)
+}
+
+/// `session/new` response 成功写入 transport 后执行的初始化通知。///
 /// commands 首发与 MCP 预热必须保持此顺序：先挂载命令注册表的 on_change
 /// 回调并发送 snapshot，再启动 MCP 发现，避免发现结果抢在首次 snapshot 前推送。
 pub(crate) async fn after_new_response(

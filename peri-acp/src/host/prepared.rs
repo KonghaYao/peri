@@ -19,17 +19,30 @@ use crate::session::executor::FrozenSessionData;
 use crate::session::frozen_snapshot::{decode_frozen_snapshot, encode_frozen_snapshot};
 use crate::transport::types::AcpError;
 
+use super::assemble::PreparedPlugins;
 use super::workspace::workspace_error;
 use super::AcpServerConfig;
 
 /// legacy 接纳输入：新建与 fork 没有这一项。
 ///
-/// 顶层字段（`config` / `plugin_data` / `frozen` / `frozen_encoded`）就是按
-/// `saved_cwd` 构建的结果——不重复存第二份，避免同源双写。
+/// 顶层字段（`configuration` / `plugin_data` / `frozen` / `frozen_encoded`）就是按
+/// `saved_cwd` 构建的结果——不重复存第二份，避免同源双写；接纳竞争后 `frozen` 由
+/// winner 的持久字节注入（[`PreparedSessionInputs::inject_frozen`]），其余字段不变。
 #[derive(Debug, Clone)]
 pub(crate) struct LegacyAdoptionInputs {
     /// 保存的绝对执行目录（不是调用方终端的 cwd）。
     pub(crate) saved_cwd: PathBuf,
+}
+
+/// 一次准备定格的配置事实：同一 cwd 复用 host 已装配视图，异目录只读一次
+/// `ConfigSource::load_at`；provider 由该视图解析。
+///
+/// 装配（[`super::workspace::SessionEnvironment::assemble_with_frozen`]）显式消费它，
+/// 因此装配期不会第二次读配置——「配置/插件/frozen 各一份」在类型上成立。
+pub(crate) struct PreparedConfiguration {
+    pub(crate) config_source: Arc<ConfigSource>,
+    pub(crate) config: Arc<PeriConfig>,
+    pub(crate) provider: LlmProvider,
 }
 
 /// 会话准备输入（一次准备、后续只读消费）。
@@ -37,17 +50,14 @@ pub(crate) struct PreparedSessionInputs {
     /// 规范化后的执行目录。
     pub(crate) cwd: String,
     /// 从同一 `ConfigSource` 读出并合并一次的配置视图。
-    pub(crate) config: Arc<PeriConfig>,
-    /// 路径决策事实源（后续持久化沿用，不再判定）。
-    pub(crate) config_source: Arc<ConfigSource>,
-    /// 由同一 config 解析（或环境变量）的 provider；失败即准备失败。
-    pub(crate) provider: LlmProvider,
+    pub(crate) configuration: PreparedConfiguration,
     /// 一次加载的插件聚合（roots/commands/hooks/lsp/mcp）。
     pub(crate) plugin_data: Option<PluginLoadResult>,
     pub(crate) skill_roots: Vec<SkillRoot>,
     pub(crate) agent_dirs: Vec<PathBuf>,
+    /// frozen 事实源：new/legacy 是本次构建产物，恢复路径是持久 blob 的注入结果。
     pub(crate) frozen: FrozenSessionData,
-    /// 版本化 snapshot 字节（数据端口只存不渲染）。
+    /// 版本化 snapshot 字节（数据端口只存不渲染）；与 `frozen` 始终同源。
     pub(crate) frozen_encoded: String,
     /// 仅 legacy：取自保存的绝对 cwd。
     pub(crate) legacy: Option<LegacyAdoptionInputs>,
@@ -92,13 +102,58 @@ impl PreparedSessionInputs {
         Self::prepare_scope(host, cwd, FrozenSource::Reuse(source_snapshot))
     }
 
+    /// 恢复路径的准备（冷 load/resume/legacy 竞争后）：frozen **只接受持久 blob**。
+    ///
+    /// 与 [`Self::prepare_new`] 的唯一区别是事实源：这里解码已保存的字节（winner），
+    /// 绝不按当前配置/日期重建——重建会把已发布的冻结输入换成当前目录状态
+    /// （ARC-FROZEN-001）。配置与插件仍按同一条只读规则定格一次。
+    pub(crate) fn prepare_restore(
+        host: &AcpServerConfig,
+        cwd: &str,
+        persisted_snapshot: &str,
+    ) -> Result<Self, AcpError> {
+        Self::prepare_scope(host, cwd, FrozenSource::Reuse(persisted_snapshot))
+    }
+
+    /// 把 winner 的持久字节注入为唯一 frozen 事实源（legacy 接纳竞争后重读的判据）。
+    ///
+    /// 本方法与 `frozen_encoded` 一起替换，保证「解码视图」与「字节」不出现两个真相；
+    /// 只用于恢复路径（装配是消费者，不再构建第二份候选）。
+    pub(crate) fn inject_frozen(
+        &mut self,
+        frozen: FrozenSessionData,
+        encoded: String,
+    ) -> Result<(), AcpError> {
+        // 注入的视图与字节必须互相解码一致：两者只能有一个真相，不一致是内部错误。
+        let decoded_date = decode_frozen_snapshot(&encoded)
+            .map(|decoded| decoded.date().to_owned())
+            .unwrap_or_default();
+        debug_assert_eq!(
+            decoded_date,
+            frozen.date(),
+            "injected frozen view and bytes must decode consistently"
+        );
+        self.frozen = frozen;
+        self.frozen_encoded = encoded;
+        Ok(())
+    }
+
+    /// 装配消费的插件事实（与准备输入同源，不第二次发现）。
+    pub(crate) fn plugins(&self) -> PreparedPlugins {
+        PreparedPlugins {
+            data: self.plugin_data.clone(),
+            skill_roots: self.skill_roots.clone(),
+            agent_dirs: self.agent_dirs.clone(),
+        }
+    }
+
     fn prepare_scope(
         host: &AcpServerConfig,
         cwd: &str,
         frozen_source: FrozenSource<'_>,
     ) -> Result<Self, AcpError> {
-        let (config_source, config, provider) = Self::resolve_configuration(host, cwd)?;
-        let (plugin_data, skill_roots, agent_dirs) = Self::discover_plugins(host, cwd)?;
+        let (configuration, (plugin_data, skill_roots, agent_dirs)) =
+            Self::prepare_configuration_and_plugins(host, cwd)?;
         // 运行环境（平台 / OS / Git）在准备阶段探测一次，随冻结渲染定格；日期由
         // `frozen.date` 固化。装配期不得重新 `detect`/`with_frozen_date` 各取一份
         // ——需要这些事实的下一批消费者应从这里提升字段，而不是各自探测。
@@ -108,7 +163,7 @@ impl PreparedSessionInputs {
                 let frozen = host
                     .session_manager
                     .build_frozen_data_with_config_and_runtime(
-                        &config,
+                        &configuration.config,
                         cwd,
                         &skill_roots,
                         &agent_dirs,
@@ -126,9 +181,7 @@ impl PreparedSessionInputs {
         };
         Ok(Self {
             cwd: cwd.to_owned(),
-            config,
-            config_source,
-            provider,
+            configuration,
             plugin_data,
             skill_roots,
             agent_dirs,
@@ -138,21 +191,30 @@ impl PreparedSessionInputs {
         })
     }
 
-    /// 配置一次读出：同一 cwd 复用 host 已装配视图，不同 cwd 只读一次
-    /// `ConfigSource::load_at`；provider 由该视图解析，失败即准备失败。
+    /// 一次读出配置与插件（准备面唯一的只读入口）：同一 cwd 复用 host 已装配视图，
+    /// 不同 cwd 只读一次 `ConfigSource::load_at`；provider 由该视图解析，失败即准备失败。
+    fn prepare_configuration_and_plugins(
+        host: &AcpServerConfig,
+        cwd: &str,
+    ) -> Result<(PreparedConfiguration, DiscoveredPlugins), AcpError> {
+        let configuration = Self::resolve_configuration(host, cwd)?;
+        let (plugin_data, skill_roots, agent_dirs) = Self::discover_plugins(host, cwd)?;
+        Ok((configuration, (plugin_data, skill_roots, agent_dirs)))
+    }
+
     fn resolve_configuration(
         host: &AcpServerConfig,
         cwd: &str,
-    ) -> Result<(Arc<ConfigSource>, Arc<PeriConfig>, LlmProvider), AcpError> {
+    ) -> Result<PreparedConfiguration, AcpError> {
         let same_directory = host.workspace_assembly.as_ref().is_none_or(|source| {
             std::fs::canonicalize(&source.startup_cwd).ok().as_deref() == Some(Path::new(cwd))
         });
         if same_directory {
-            return Ok((
-                host.config_source.clone(),
-                Arc::new(host.peri_config.read().clone()),
-                host.provider.read().clone(),
-            ));
+            return Ok(PreparedConfiguration {
+                config_source: host.config_source.clone(),
+                config: Arc::new(host.peri_config.read().clone()),
+                provider: host.provider.read().clone(),
+            });
         }
         let source = Arc::new(
             ConfigSource::load_at(Path::new(cwd), host.config_source.global_path().to_owned())
@@ -162,7 +224,11 @@ impl PreparedSessionInputs {
         let provider = LlmProvider::from_config(&config)
             .or_else(LlmProvider::from_env)
             .ok_or_else(|| AcpError::new(-32603, "No provider configured for session workspace"))?;
-        Ok((source, Arc::new(config), provider))
+        Ok(PreparedConfiguration {
+            config_source: source,
+            config: Arc::new(config),
+            provider,
+        })
     }
 
     /// 插件发现：session 级装配经**严格只读**入口一次加载，失败即准备失败

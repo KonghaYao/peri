@@ -98,6 +98,18 @@ impl SessionResources for ControlledStore {
         self.inner.abandon_initialization(id, lease).await
     }
 
+    async fn begin_initialization(
+        &self,
+        draft: &peri_acp_types::session_resources::NewSessionDraft,
+    ) -> SessionResourceResult<Arc<dyn peri_acp_types::session_resources::SessionInitialization>>
+    {
+        self.inner.begin_initialization(draft).await
+    }
+
+    async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.discard_incomplete_initialization(id).await
+    }
+
     async fn adopt_legacy_session(
         &self,
         id: &ThreadId,

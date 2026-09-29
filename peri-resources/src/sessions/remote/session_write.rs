@@ -15,8 +15,8 @@
 
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    ChildSnapshot, ForkSnapshot, NewSession, SessionMetaPatch, SessionResourceError,
-    SessionResourceErrorKind, SessionResourceResult,
+    ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession, NewSessionDraft,
+    SessionMetaPatch, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
 use peri_acp_types::store::MessageFlags;
 use peri_acp_types::thread::ThreadId;
@@ -56,6 +56,61 @@ impl RemoteSessionData {
         self.commit_effects("create_session", &inputs, statements, &input.thread_id)
             .await
             .map(|_| ())
+    }
+
+    /// 保存未发布创建（J2 第一阶段）：身份/绑定落库，frozen 暂空。
+    ///
+    /// 与新会话同一条规则（远程只接受 root）；frozen 由
+    /// [`Self::write_commit_frozen`] 在取得本机执行所有权之后一次性提交。
+    pub(super) async fn write_new_session_draft(
+        &self,
+        draft: &NewSessionDraft,
+    ) -> SessionResourceResult<()> {
+        if draft.meta.parent_thread_id.is_some() {
+            return Err(invalid_input(
+                "child sessions must be saved through the child path",
+            ));
+        }
+        let statements = session_sql::insert_session_draft_statements(draft)?;
+        let inputs = draft_inputs(draft);
+        self.commit_effects(
+            "begin_initialization",
+            &inputs,
+            statements,
+            &draft.thread_id,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// 一次性提交 frozen（write-once CAS）：受影响行数必须恰为 1。
+    pub(super) async fn write_commit_frozen(
+        &self,
+        id: &ThreadId,
+        frozen: &FrozenSnapshotBytes,
+    ) -> SessionResourceResult<()> {
+        let statements = vec![session_sql::commit_frozen_statement(
+            id.as_str(),
+            frozen.as_str(),
+        )];
+        let inputs = vec![
+            format!("id:{}", id.as_str()),
+            format!("frozen:{}", frozen.as_str()),
+        ];
+        let counts = self
+            .commit_effects("commit_frozen", &inputs, statements, id)
+            .await?;
+        match counts.first() {
+            // 重放：原操作已生效，效果落在第一次提交里。
+            None => Ok(()),
+            Some(1) => Ok(()),
+            Some(0) => Err(SessionResourceError::conflict(
+                "session frozen snapshot was already committed",
+            )),
+            Some(_) => Err(corrupt(
+                "frozen snapshot commit did not apply to exactly one row",
+            )),
+        }
     }
 
     /// 保存 fork：source 不变，目标带映射后的 payload 与 flags。
@@ -259,6 +314,32 @@ fn patch_input(slot: &Option<Option<String>>) -> String {
 /// 身份不由内容派生（id 每次唯一），摘要只用于事后一致性校验；但校验要成立，摘要就必须
 /// 覆盖领域输入的全部字段：漏掉 binding/metadata 时，两次「内容摘要相同、实际写入不同」
 /// 的操作会被判成同一次，那正是身份模型出错的表现，不能靠事后补字段掩盖。
+/// 未发布创建的摘要输入：与 [`session_inputs`] 同一组领域事实，只是**没有** frozen
+/// （frozen 尚未成立，不能进摘要；提交是另一次操作）。
+fn draft_inputs(draft: &NewSessionDraft) -> Vec<String> {
+    let meta = &draft.meta;
+    vec![
+        format!("thread:{}", draft.thread_id.as_str()),
+        format!("created_at:{}", draft.created_at),
+        format!("title:{}", meta.title.as_deref().unwrap_or("<none>")),
+        format!("cwd:{}", meta.cwd),
+        format!(
+            "parent:{}",
+            meta.parent_thread_id.as_deref().unwrap_or("<none>")
+        ),
+        format!("hidden:{}", u8::from(meta.hidden)),
+        format!("cancel_policy:{}", meta.cancel_policy.as_str()),
+        format!(
+            "snapshot_at:{}",
+            meta.snapshot_at_message_id
+                .as_ref()
+                .map(|id| id.as_uuid().to_string())
+                .unwrap_or_else(|| "<none>".to_owned())
+        ),
+        binding_input(&draft.binding),
+    ]
+}
+
 fn session_inputs(input: &NewSession) -> Vec<String> {
     let meta = &input.meta;
     vec![

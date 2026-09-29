@@ -13,7 +13,7 @@
 //! 列文本核对前缀关系。
 
 use peri_acp_types::session_resources::{
-    NewSession, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
+    NewSession, NewSessionDraft, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
     SessionResourceResult,
 };
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
@@ -244,6 +244,33 @@ const INSERT_THREAD_SQL: &str =
         frozen_context, agent_status, context_cache_epoch)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13, 0)";
 
+/// 未发布创建（J2 第一阶段）：与整份创建同一列形状，只有 `frozen_context` 写 NULL。
+///
+/// 远端写的是**草稿**，内容准入在取得本机执行所有权之后由
+/// [`super::session_write::RemoteSessionData::write_commit_frozen`] 一次性补上。
+const INSERT_THREAD_DRAFT_SQL: &str =
+    "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
+        parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context,
+        frozen_context, agent_status, context_cache_epoch)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL, ?12, 0)";
+
+/// 一次性提交 frozen（write-once CAS）：只对尚未提交的草稿生效。
+const COMMIT_FROZEN_SQL: &str =
+    "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL";
+
+/// 未发布创建的撤销：三条删除都带同一判据（`frozen_context IS NULL`），因此同一批里
+/// 「会话行还在不在」与「历史/绑定删没删」不会分叉——已提交 frozen 的会话一条都不删。
+const DELETE_DRAFT_MESSAGES_SQL: &str = concat!(
+    "DELETE FROM messages WHERE thread_id = ?1",
+    " AND EXISTS (SELECT 1 FROM threads WHERE id = ?1 AND frozen_context IS NULL)"
+);
+const DELETE_DRAFT_BINDINGS_SQL: &str = concat!(
+    "DELETE FROM session_bindings WHERE thread_id = ?1",
+    " AND EXISTS (SELECT 1 FROM threads WHERE id = ?1 AND frozen_context IS NULL)"
+);
+const DELETE_DRAFT_SESSION_SQL: &str =
+    "DELETE FROM threads WHERE id = ?1 AND frozen_context IS NULL";
+
 /// 不可变绑定行插入：与本机 `session_rows.rs::insert_binding_row` 同一份语句，绑定住在
 /// `session_bindings` 表里（不再是会话行上的四个扁平列）。
 const INSERT_BINDING_SQL: &str =
@@ -368,6 +395,69 @@ pub(super) fn insert_session_statements(
         ));
     }
     Ok(statements)
+}
+
+/// 未发布创建（草稿）的落库语句集：`threads` 行（frozen NULL）+ 绑定行。
+///
+/// 与 [`insert_session_statements`] 同一列形状与同一顺序，唯一差别是 frozen 写 NULL；
+/// 内容准入由 [`commit_frozen_statement`] 一次性补上。
+pub(super) fn insert_session_draft_statements(
+    draft: &NewSessionDraft,
+) -> SessionResourceResult<Vec<StatementSpec>> {
+    let relative = binding_relative_text(&draft.binding)?;
+    let snapshot_at = draft
+        .meta
+        .snapshot_at_message_id
+        .map(|id| id.as_uuid().to_string());
+    Ok(vec![
+        StatementSpec::new(
+            INSERT_THREAD_DRAFT_SQL,
+            vec![
+                Value::Text(draft.thread_id.as_str().to_owned()),
+                optional_text(draft.meta.title.as_deref()),
+                Value::Text(draft.meta.cwd.clone()),
+                Value::Text(draft.created_at.clone()),
+                Value::Text(draft.created_at.clone()),
+                int_value(0),
+                optional_text(draft.meta.parent_thread_id.as_deref()),
+                optional_text(snapshot_at.as_deref()),
+                int_value(i64::from(draft.meta.hidden)),
+                Value::Text(draft.meta.cancel_policy.as_str().to_owned()),
+                Value::Null,
+                Value::Text(AgentStatus::Active.as_str().to_owned()),
+            ],
+        ),
+        StatementSpec::new(
+            INSERT_BINDING_SQL,
+            vec![
+                Value::Text(draft.thread_id.as_str().to_owned()),
+                int_value(i64::from(draft.binding.schema_version)),
+                Value::Text(draft.binding.project_id.to_string()),
+                Value::Text(draft.binding.workspace_id.to_string()),
+                Value::Text(relative),
+            ],
+        ),
+    ])
+}
+
+/// 一次性提交 frozen 的语句（write-once CAS；受影响行数由调用方按 1 核对）。
+pub(super) fn commit_frozen_statement(id: &str, frozen: &str) -> StatementSpec {
+    StatementSpec::new(
+        COMMIT_FROZEN_SQL,
+        vec![Value::Text(frozen.to_owned()), Value::Text(id.to_owned())],
+    )
+}
+
+/// 撤销未发布创建的语句集：三条删除共用 `frozen_context IS NULL` 判据（先子后父）。
+pub(super) fn revoke_draft_statements(id: &str) -> Vec<StatementSpec> {
+    [
+        DELETE_DRAFT_MESSAGES_SQL,
+        DELETE_DRAFT_BINDINGS_SQL,
+        DELETE_DRAFT_SESSION_SQL,
+    ]
+    .into_iter()
+    .map(|sql| StatementSpec::new(sql, vec![Value::Text(id.to_owned())]))
+    .collect()
 }
 
 /// 历史行的插入语句：flags 与内容一次写入（fork 目标由门面完成 ID 重映射，本层不重跑算法）。

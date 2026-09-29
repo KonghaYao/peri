@@ -558,6 +558,36 @@ async fn test_adopt_legacy_session_publishes_binding_and_frozen_once() {
     assert_eq!(after.meta.cwd, cwd);
 }
 
+/// legacy 竞争（write-once）：先提交的候选是 winner；后提交者不带覆盖，读回仍是最先那份字节。
+///
+/// ACP 侧据此把「adopt 后重读的 winner」传给装配（§6.3），因此这里的读回值就是装配事实源。
+#[tokio::test]
+async fn test_adopt_legacy_session_keeps_the_first_winner_bytes() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    let id = store
+        .create_thread(ThreadMeta::new(cwd.as_str()))
+        .await
+        .unwrap();
+    // 第二个句柄：同一份库事实上的另一次接纳（两宿主共享同一个 store 的等价形态）。
+    let second = SqliteSessionData::new(Arc::clone(&store.database));
+
+    data.adopt_legacy_session(&id, &cwd, &workspace, &frozen("winner"))
+        .await
+        .unwrap();
+    second
+        .adopt_legacy_session(&id, &cwd, &workspace, &frozen("candidate"))
+        .await
+        .expect("绑定一致时接纳幂等：候选不写入，也不报冲突");
+
+    let snapshot = second.load_snapshot(&id).await.unwrap();
+    match snapshot.frozen {
+        FrozenState::Present(bytes) => assert_eq!(bytes.as_str(), frozen("winner").as_str()),
+        other => panic!("winner bytes must stay persisted: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn test_adopt_legacy_session_refuses_to_bypass_dirty_execution() {
     let (store, data, directory) = database().await;
