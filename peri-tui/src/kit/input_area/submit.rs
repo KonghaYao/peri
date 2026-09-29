@@ -5,32 +5,47 @@ use crate::kit::input_history::{push_history, reset_history_cursor};
 use crate::kit::panel_registry::open_panel;
 use crate::kit::submit_request::{SessionControlRequest, SubmitRequest, parse_submit_request};
 
+/// 取出待发送附件。附件只在「确定要提交 agent 文本」时消费——控制类请求
+/// （`/clear` 等）不碰 `PENDING_ATTACHMENTS`，图片保留在 composer 供下次提交。
+fn take_pending_attachments() -> Vec<crate::kit::atoms::PendingAttachment> {
+    std::mem::take(&mut *crate::kit::atoms::PENDING_ATTACHMENTS.state().write())
+}
+
 pub(super) fn submit_text(submitted: String) {
-    if crate::kit::steer_state::is_enabled()
-        && submitted.trim().is_empty()
+    // 图片-only 提交（空文本 + 有附件）：不走 slash 解析。仅在对端支持用户输入
+    // 队列时可用；旧服务端下附件原样留在 composer（不静默丢弃，用户补文本即可）。
+    let attachment_only = submitted.trim().is_empty()
+        && crate::kit::steer_state::is_enabled()
         && !crate::kit::atoms::PENDING_ATTACHMENTS
             .state()
             .read()
-            .is_empty()
-    {
-        let attachments =
-            std::mem::take(&mut *crate::kit::atoms::PENDING_ATTACHMENTS.state().write());
-        let _ = crate::kit::steer_state::enqueue(submitted, attachments);
-        return;
-    }
-    let Some(request) = parse_submit_request(&submitted) else {
+            .is_empty();
+
+    let request = if attachment_only {
+        Some(SubmitRequest::AgentText {
+            text: submitted.clone(),
+            attachments: take_pending_attachments(),
+        })
+    } else {
+        parse_submit_request(&submitted).map(|request| match request {
+            SubmitRequest::AgentText { text, .. } => SubmitRequest::AgentText {
+                text,
+                attachments: take_pending_attachments(),
+            },
+            other => other,
+        })
+    };
+    let Some(request) = request else {
         return;
     };
 
     if crate::kit::steer_state::is_enabled()
-        && matches!(request, SubmitRequest::AgentText(_))
         && !is_remote_command(&submitted)
+        && let SubmitRequest::AgentText { text, attachments } = request
     {
         push_history(&submitted);
         reset_history_cursor();
-        let attachments =
-            std::mem::take(&mut *crate::kit::atoms::PENDING_ATTACHMENTS.state().write());
-        if let Err(error) = crate::kit::steer_state::enqueue(submitted, attachments) {
+        if let Err(error) = crate::kit::steer_state::enqueue(text, attachments) {
             tracing::warn!(error = %error, "user input queue submission rejected locally");
         }
         return;
@@ -55,9 +70,9 @@ pub(super) fn dispatch_submit_request<F>(
         SubmitRequest::SessionControl(SessionControlRequest::ToggleSetup) => {
             *WIZARD_ACTIVE.state().write() = true;
         }
-        SubmitRequest::AgentText(text) => {
+        SubmitRequest::AgentText { text, attachments } => {
             if crate::kit::steer_state::is_enabled() && !is_remote_command(&text) {
-                let _ = crate::kit::steer_state::enqueue(text, Vec::new());
+                let _ = crate::kit::steer_state::enqueue(text, attachments);
                 return;
             }
             push_history(&text);
@@ -65,9 +80,13 @@ pub(super) fn dispatch_submit_request<F>(
             if is_loading {
                 // 旧服务端兼容队列：运行期间延后提交，出队时再加入聊天记录。
                 // 支持用户输入队列的服务端在上方分支处理普通输入。
+                // 附件随排队项一起存——只存文本会在 drain 时静默丢弃图片。
                 let input_buffer = INPUT_BUFFER.state();
                 let mut guard = input_buffer.write();
-                guard.push_back(text);
+                guard.push_back(crate::kit::atoms::BufferedInput::with_attachments(
+                    text,
+                    attachments,
+                ));
                 while guard.len() > 32 {
                     guard.pop_front();
                 }
@@ -75,7 +94,7 @@ pub(super) fn dispatch_submit_request<F>(
                 // 通过 LOCAL_EVENT_TX 发送 LocalUserBubble 事件到 acp_bridge，
                 // 统一走 dispatch_and_notify → push_view_models 写入路径。
                 send_local_user_bubble(&text);
-                send_request(SubmitRequest::AgentText(text));
+                send_request(SubmitRequest::AgentText { text, attachments });
             }
         }
         request @ (SubmitRequest::SessionControl(_)
@@ -94,7 +113,7 @@ pub(super) fn show_submit_blocked_notification(request: &SubmitRequest) {
     let message = match request {
         SubmitRequest::SessionControl(_)
         | SubmitRequest::ViewAction(_)
-        | SubmitRequest::AgentText(_) => i18n::tr("submit-blocked"),
+        | SubmitRequest::AgentText { .. } => i18n::tr("submit-blocked"),
         _ => return,
     };
     *crate::kit::atoms::NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
@@ -151,3 +170,7 @@ pub(super) fn exit_history_mode_if_active() {
         reset_history_cursor();
     }
 }
+
+#[cfg(test)]
+#[path = "submit_test.rs"]
+mod tests;

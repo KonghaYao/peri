@@ -773,6 +773,7 @@ pub(crate) fn push_popup_kind(state: &BridgeState) {
 }
 
 /// 将 `INPUT_BUFFER` atom 中所有排队输入按入队顺序 drain，逐条发送到 SUBMIT_TX。
+/// 排队项含附件（`BufferedInput`）——文本与附件一起出队，附件不得在排队路径丢失。
 ///
 /// 调用时机：`TurnDone` 事件与取消复位（stale / 非 stale）——agent 结束本轮或
 /// 复位，从队列里取出用户在 loading 期间缓存的 agent text 继续提交。若 buffer
@@ -796,12 +797,17 @@ pub(crate) fn drain_input_buffer() {
         return;
     }
 
-    let drained: Vec<String> = INPUT_BUFFER.state().write().drain(..).collect();
+    let drained: Vec<crate::kit::atoms::BufferedInput> =
+        INPUT_BUFFER.state().write().drain(..).collect();
     if let Some(tx) = tx {
-        for text in drained {
+        for input in drained {
             // [Slice 3 D4] 本地气泡 + 提交（镜像非 loading 路径）。
-            crate::kit::input_area::send_local_user_bubble(&text);
-            let _ = tx.send(SubmitRequest::AgentText(text));
+            // 附件随排队项一起出队——排队不得成为图片的丢弃点。
+            crate::kit::input_area::send_local_user_bubble(&input.text);
+            let _ = tx.send(SubmitRequest::AgentText {
+                text: input.text,
+                attachments: input.attachments,
+            });
         }
     }
 }

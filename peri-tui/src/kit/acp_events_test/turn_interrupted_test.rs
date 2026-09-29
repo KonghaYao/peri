@@ -58,7 +58,10 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
         &mut state,
         &AcpEventData::LocalUserBubble { text: "B".into() },
     );
-    INPUT_BUFFER.state().write().push_back("queued".into());
+    INPUT_BUFFER
+        .state()
+        .write()
+        .push_back(BufferedInput::text("queued"));
     state.pending_cache_usage = Some(CacheUsageSample {
         input_tokens: 100,
         cached_tokens: 90,
@@ -95,7 +98,7 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
     );
     if let Some(mut rx) = drain_rx.take() {
         match rx.try_recv() {
-            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(SubmitRequest::AgentText { text: t, .. }) => assert_eq!(t, "queued"),
             Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
             Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
         }
@@ -182,7 +185,10 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
         cached_tokens: 50,
         request_id: None,
     });
-    INPUT_BUFFER.state().write().push_back("queued".into());
+    INPUT_BUFFER
+        .state()
+        .write()
+        .push_back(BufferedInput::text("queued"));
     assert_eq!(state.committed.len(), 1);
 
     // 无新提交 → 非 stale → 正常回滚
@@ -212,7 +218,7 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
     );
     if let Some(mut rx) = drain_rx.take() {
         match rx.try_recv() {
-            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(SubmitRequest::AgentText { text: t, .. }) => assert_eq!(t, "queued"),
             Ok(other) => panic!("取消后 drain 应提交 AgentText, got {other:?}"),
             Err(e) => panic!("取消后 drain 应发出排队输入, got {e:?}"),
         }
@@ -275,7 +281,10 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
             agent_id: None,
         }),
     );
-    INPUT_BUFFER.state().write().push_back("queued".into());
+    INPUT_BUFFER
+        .state()
+        .write()
+        .push_back(BufferedInput::text("queued"));
 
     dispatch_and_notify(
         &mut state,
@@ -296,7 +305,7 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
     );
     if let Some(mut rx) = drain_rx.take() {
         match rx.try_recv() {
-            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(SubmitRequest::AgentText { text: t, .. }) => assert_eq!(t, "queued"),
             Ok(other) => panic!("归档分支 drain 应提交 AgentText, got {other:?}"),
             Err(e) => panic!("归档分支 drain 应发出排队输入, got {e:?}"),
         }
@@ -368,7 +377,10 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
         },
     );
     // 排队输入（B 提交之后用户又输入的排队请求）——stale 复位后立即 drain 提交
-    INPUT_BUFFER.state().write().push_back("queued".into());
+    INPUT_BUFFER
+        .state()
+        .write()
+        .push_back(BufferedInput::text("queued"));
     assert_eq!(state.current_request_id.as_deref(), Some("B1"));
     assert_eq!(state.turn_generation, 2);
     assert_eq!(
@@ -409,7 +421,7 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
     );
     if let Some(mut rx) = drain_rx.take() {
         match rx.try_recv() {
-            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(SubmitRequest::AgentText { text: t, .. }) => assert_eq!(t, "queued"),
             Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
             Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
         }
@@ -483,7 +495,10 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
         &mut state,
         &AcpEventData::LocalUserBubble { text: "B".into() },
     );
-    INPUT_BUFFER.state().write().push_back("B".into());
+    INPUT_BUFFER
+        .state()
+        .write()
+        .push_back(BufferedInput::text("B"));
     assert_eq!(
         state.current_request_id.as_deref(),
         Some("A1"),
@@ -513,7 +528,7 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
     );
     if let Some(mut rx) = drain_rx.take() {
         match rx.try_recv() {
-            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "B"),
+            Ok(SubmitRequest::AgentText { text: t, .. }) => assert_eq!(t, "B"),
             Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
             Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
         }
@@ -571,7 +586,10 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
         &mut state,
         &AcpEventData::LocalUserBubble { text: "B".into() },
     );
-    INPUT_BUFFER.state().write().push_back("B".into());
+    INPUT_BUFFER
+        .state()
+        .write()
+        .push_back(BufferedInput::text("B"));
 
     // 第一个 stale 事件（A 的取消晚到）→ 复位 + drain
     dispatch_and_notify(
@@ -608,7 +626,7 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
     if let Some(mut rx) = drain_rx {
         // 只应提交 1 条（第一次 stale 的 drain）
         match rx.try_recv() {
-            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "B"),
+            Ok(SubmitRequest::AgentText { text: t, .. }) => assert_eq!(t, "B"),
             Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
             Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
         }
@@ -666,7 +684,10 @@ fn test_turn_interrupted_current_request_id_rollback() {
             request_id: Some("A1".into()),
         },
     );
-    INPUT_BUFFER.state().write().push_back("queued".into());
+    INPUT_BUFFER
+        .state()
+        .write()
+        .push_back(BufferedInput::text("queued"));
     assert_eq!(state.committed.len(), 1);
 
     dispatch_and_notify(
@@ -696,7 +717,7 @@ fn test_turn_interrupted_current_request_id_rollback() {
     );
     if let Some(mut rx) = drain_rx.take() {
         match rx.try_recv() {
-            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(SubmitRequest::AgentText { text: t, .. }) => assert_eq!(t, "queued"),
             Ok(other) => panic!("回滚后 drain 应提交 AgentText, got {other:?}"),
             Err(e) => panic!("回滚后 drain 应发出排队输入, got {e:?}"),
         }

@@ -783,7 +783,7 @@ setup-welcome = Welcome to Peri TUI
 # ---- Notifications (P0) ----
 paste-truncated = Paste truncated to { $max } characters
 paste-in-progress = Clipboard paste in progress, please wait
-paste-image-failed = Could not paste image: invalid PNG, over 20 MiB, or unable to save
+paste-image-failed = Could not paste image: invalid PNG or over 20 MiB
 submit-blocked = Request in progress, try again later
 export-success = Exported messages to: { $path }
 export-fail = Failed to export messages: { $error }

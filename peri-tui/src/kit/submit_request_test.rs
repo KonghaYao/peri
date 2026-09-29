@@ -12,7 +12,10 @@ fn test_parse_submit_request_returns_none_for_empty_input() {
 fn test_parse_submit_request_treats_plain_text_as_agent_text() {
     assert_eq!(
         parse_submit_request("hello world"),
-        Some(SubmitRequest::AgentText("hello world".to_string()))
+        Some(SubmitRequest::AgentText {
+            text: "hello world".to_string(),
+            attachments: Vec::new(),
+        })
     );
 }
 
@@ -20,7 +23,10 @@ fn test_parse_submit_request_treats_plain_text_as_agent_text() {
 fn test_parse_submit_request_treats_compact_as_agent_text() {
     assert_eq!(
         parse_submit_request("/compact now"),
-        Some(SubmitRequest::AgentText("/compact now".to_string()))
+        Some(SubmitRequest::AgentText {
+            text: "/compact now".to_string(),
+            attachments: Vec::new(),
+        })
     );
 }
 
@@ -28,7 +34,10 @@ fn test_parse_submit_request_treats_compact_as_agent_text() {
 fn test_parse_submit_request_treats_unknown_slash_as_agent_text() {
     assert_eq!(
         parse_submit_request("/unknown"),
-        Some(SubmitRequest::AgentText("/unknown".to_string()))
+        Some(SubmitRequest::AgentText {
+            text: "/unknown".to_string(),
+            attachments: Vec::new(),
+        })
     );
 }
 

@@ -3,6 +3,7 @@
 use super::*;
 use crate::acp_client::AcpTuiClient;
 use crate::kit::acp_types::{CacheUsageSample, FeedbackChannel, FeedbackLevel};
+use crate::kit::atoms::BufferedInput;
 use crate::kit::slash_completion::SlashActionKind;
 use crate::kit::slash_projection::ArgKind;
 use peri_acp::event::AcpEvent;
@@ -714,7 +715,8 @@ async fn test_channel_close_resets_loading_and_input_buffer() {
         let mut acp = ref_guard.write();
         acp.is_loading = true;
     }
-    INPUT_BUFFER.state().write().push_back("queued".into());
+    let queued = BufferedInput::text("queued");
+    INPUT_BUFFER.state().write().push_back(queued);
     *NOTIFICATION.state().write() = None;
     let hb_before = *RENDER_HEARTBEAT.state().read();
 
@@ -755,7 +757,8 @@ async fn test_real_wiring_transport_death_resets_loading() {
     crate::kit::atoms::init_atoms();
     // 模拟卡死状态：is_loading=true + 排队输入
     ACP_STATE.state().write().is_loading = true;
-    INPUT_BUFFER.state().write().push_back("queued".into());
+    let queued = BufferedInput::text("queued");
+    INPUT_BUFFER.state().write().push_back(queued);
     *NOTIFICATION.state().write() = None;
     let hb_before = *RENDER_HEARTBEAT.state().read();
 

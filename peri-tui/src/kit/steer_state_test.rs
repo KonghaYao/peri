@@ -255,7 +255,7 @@ fn test_steer_attachment_content_survives_roundtrip() {
         media_type: "image/png".to_owned(),
         base64_data: "AQID".to_owned(),
     }];
-    let content = content_for_draft("  image\n", &attachments);
+    let content = content_with_attachments("  image\n", &attachments);
     let recovered = attachments_from_content(&content);
     assert_eq!(
         content.text_content(),
@@ -484,4 +484,28 @@ fn test_steer_idle_submission_reload_exposes_unconfirmed_input() {
         state.rows("s").iter().any(|row| row.id == "b"),
         "重载后未知输入应可见"
     );
+}
+
+/// 图片-only 提交（空文本 + 附件）不得产出空 text 块——provider 会拒收空
+/// text block；此时 content 只应含 image 块。
+#[test]
+fn test_attachment_only_content_has_no_empty_text_block() {
+    let attachments = vec![PendingAttachment::image("image/png", "AQID")];
+    let content = content_with_attachments("", &attachments);
+
+    let blocks = content.content_blocks();
+    assert_eq!(blocks.len(), 1, "空文本不得产出 text 块: {blocks:?}");
+    assert!(matches!(blocks[0], ContentBlock::Image { .. }));
+    assert_eq!(
+        attachments_from_content(&content)[0].base64_data,
+        "AQID",
+        "附件数据须完整可恢复"
+    );
+}
+
+/// 无附件时 content 形态与旧路径逐字一致（纯文本，不是单元素 block 数组）。
+#[test]
+fn test_content_without_attachments_stays_plain_text() {
+    let content = content_with_attachments("hello", &[]);
+    assert_eq!(content, MessageContent::text("hello"));
 }

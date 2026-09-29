@@ -400,7 +400,7 @@ pub(crate) fn enqueue(
     let epoch = atoms::BRIDGE_RESET_COUNTER.get();
     let input = UserInput {
         input_id: uuid::Uuid::now_v7().to_string(),
-        content: content_for_draft(&original_draft, &attachments),
+        content: content_with_attachments(&original_draft, &attachments),
         original_draft,
     };
     let command = SteerCommand {
@@ -466,11 +466,22 @@ fn send(command: SteerCommand) -> Result<(), String> {
         .map_err(|_| "user input consumer closed".to_owned())
 }
 
-fn content_for_draft(text: &str, attachments: &[PendingAttachment]) -> MessageContent {
+/// 由草稿文本 + 待发送附件构造提交内容：首个 text 块（非空时）+ 逐张 image 块。
+///
+/// 单一事实源：steer 入队（`enqueue`）与主提交路径（`submit_consumer`）共用，
+/// 避免两条提交路径的 content 形状漂移。空文本 + 有附件（图片-only 提交）不
+/// 产出空 text 块——provider 会拒收空 text block。
+pub(crate) fn content_with_attachments(
+    text: &str,
+    attachments: &[PendingAttachment],
+) -> MessageContent {
     if attachments.is_empty() {
         return MessageContent::text(text);
     }
-    let mut blocks = vec![ContentBlock::text(text)];
+    let mut blocks = Vec::with_capacity(attachments.len() + 1);
+    if !text.is_empty() {
+        blocks.push(ContentBlock::text(text));
+    }
     blocks.extend(attachments.iter().map(|attachment| {
         ContentBlock::image_base64(
             attachment.media_type.clone(),

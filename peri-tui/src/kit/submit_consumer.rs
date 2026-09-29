@@ -93,7 +93,9 @@ async fn handle_submit(
     request: SubmitRequest,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match request {
-        SubmitRequest::AgentText(text) => handle_agent_text_submit(acp_client, cwd, text).await,
+        SubmitRequest::AgentText { text, attachments } => {
+            handle_agent_text_submit(acp_client, cwd, text, attachments).await
+        }
         SubmitRequest::KeepGoing => handle_keepgoing_submit(acp_client, cwd).await,
         SubmitRequest::SessionControl(SessionControlRequest::Clear) => {
             handle_clear_submit(acp_client, cwd).await
@@ -146,15 +148,16 @@ async fn handle_agent_text_submit(
     acp_client: &AcpTuiClient,
     cwd: &str,
     text: String,
+    attachments: Vec<crate::kit::atoms::PendingAttachment>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if acp_client.supports_user_input_queue() && !crate::kit::input_area::is_remote_command(&text) {
-        if let Err(error) = crate::kit::steer_state::enqueue(text, Vec::new()) {
+        if let Err(error) = crate::kit::steer_state::enqueue(text, attachments) {
             warn!(error = %error, "user input enqueue failed; draft retained for recovery");
         }
         return Ok(());
     }
     let trimmed = text.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() && attachments.is_empty() {
         return Ok(());
     }
 
@@ -192,7 +195,9 @@ async fn handle_agent_text_submit(
         "submit_consumer: emitted PromptSubmitted event, LOADING_EPOCH incremented, about to call prompt()",
     );
 
-    let content = MessageContent::text(trimmed.to_string());
+    // 上传式附件（图片 base64）与文本同一 content 上行；无附件时逐字等价于
+    // 原有的 MessageContent::text（不改变无附件提交的在线形态）。
+    let content = crate::kit::steer_state::content_with_attachments(trimmed, &attachments);
     acp_client.prompt(&content, request_id).await.map_err(|e| {
         warn!(error = %e, "kit submit_consumer: prompt RPC failed");
         Box::new(e) as Box<dyn std::error::Error + Send + Sync>

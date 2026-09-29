@@ -18,9 +18,9 @@ async fn test_drain_input_buffer_preserves_order() {
     {
         let state = INPUT_BUFFER.state();
         let mut buf = state.write();
-        buf.push_back("first".into());
-        buf.push_back("second".into());
-        buf.push_back("third".into());
+        buf.push_back(BufferedInput::text("first"));
+        buf.push_back(BufferedInput::text("second"));
+        buf.push_back(BufferedInput::text("third"));
     }
 
     drain_input_buffer();
@@ -59,7 +59,10 @@ async fn test_drain_input_buffer_empty_is_noop() {
 fn test_drain_input_buffer_no_submit_tx_safe() {
     crate::kit::atoms::init_atoms();
     // 不论 SUBMIT_TX 是否 set，都不应 panic
-    INPUT_BUFFER.state().write().push_back("x".into());
+    INPUT_BUFFER
+        .state()
+        .write()
+        .push_back(BufferedInput::text("x"));
     drain_input_buffer();
     // SUBMIT_TX 已被前面测试 set 过，所以 drain 成功 → buffer 被清空
     // 即使 SUBMIT_TX 未 set，drain 早退，buffer 仍有 "x"——两种情况都不算 panic
@@ -87,8 +90,8 @@ fn test_drain_input_buffer_sends_local_user_bubble_once() {
     {
         let state = INPUT_BUFFER.state();
         let mut buf = state.write();
-        buf.push_back("first".into());
-        buf.push_back("second".into());
+        buf.push_back(BufferedInput::text("first"));
+        buf.push_back(BufferedInput::text("second"));
     }
 
     drain_input_buffer();
@@ -123,7 +126,7 @@ fn test_drain_input_buffer_sends_local_user_bubble_once() {
     }
     if let Some(mut rx) = submit_rx.take() {
         match rx.try_recv() {
-            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "first"),
+            Ok(SubmitRequest::AgentText { text: t, .. }) => assert_eq!(t, "first"),
             Ok(other) => panic!("drain 应提交 AgentText, got {other:?}"),
             Err(e) => panic!("drain 应提交排队输入, got {e:?}"),
         }
@@ -145,11 +148,11 @@ fn test_bridge_reset_clears_input_buffer() {
     INPUT_BUFFER
         .state()
         .write()
-        .push_back("leaked input".into());
+        .push_back(BufferedInput::text("leaked input"));
     INPUT_BUFFER
         .state()
         .write()
-        .push_back("another leaked input".into());
+        .push_back(BufferedInput::text("another leaked input"));
     assert!(!INPUT_BUFFER.state().read().is_empty(), "buffer 应有数据");
 
     // 模拟 acp_bridge 的 counter 检测分支：

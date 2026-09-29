@@ -13,12 +13,11 @@
 
 mod hooks;
 mod image;
+mod paste;
 mod popup;
 mod render;
 mod submit;
 
-use image::insert_image_reference;
-pub(crate) use image::png_encode;
 pub(crate) use popup::{get_cached_slash_items, refresh_slash_items};
 pub(crate) use submit::is_remote_command;
 pub(crate) use submit::send_local_user_bubble;
@@ -39,8 +38,6 @@ use submit::{exit_history_mode_if_active, submit_text};
 use popup::{apply_slash_selection, build_slash_items, detect_slash_token};
 #[cfg(test)]
 use render::{build_session_title_line, readable_fg, stable_hash, truncate_title_to_width};
-#[cfg(test)]
-use submit::dispatch_submit_request;
 
 use crate::components::textarea::{TextAreaState, wrap_text};
 
@@ -75,7 +72,7 @@ use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
 #[cfg(test)]
-use crate::kit::atoms::{ACP_STATE, FILE_LIST, WIZARD_ACTIVE};
+use crate::kit::atoms::{ACP_STATE, FILE_LIST, VIEW_MODELS, ViewModelsSnapshot, WIZARD_ACTIVE};
 #[cfg(test)]
 use crate::kit::slash_completion::SlashActionKind;
 #[cfg(test)]
@@ -119,7 +116,7 @@ pub struct InputAreaProps {
 pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 单一编辑状态——闭包编辑 + 渲染读取共享同一实例
     let state = hooks.use_state(TextAreaState::default);
-    let paste_gate = hooks.use_state(image::PasteGate::default);
+    let paste_gate = hooks.use_state(paste::PasteGate::default);
     let paste_gate = paste_gate.read().clone();
     let steer_height = hooks.use_state(|| 0u16);
     let steers = hooks.use_atom(&crate::kit::steer_state::STEERS);
@@ -209,9 +206,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                             && is_remote_command(&s.text)
                         {
                             submit::show_submit_blocked_notification(
-                                &crate::kit::submit_request::SubmitRequest::AgentText(
-                                    s.text.clone(),
-                                ),
+                                &crate::kit::submit_request::SubmitRequest::AgentText {
+                                    text: s.text.clone(),
+                                    attachments: Vec::new(),
+                                },
                             );
                             return EventResult::Consumed;
                         }
@@ -439,116 +437,13 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     }
 
                     // ── Ctrl+V 粘贴剪贴板（M6）──
-                    // 在独立线程读 arboard（阻塞系统 I/O 不卡 UI），通过 state clone 回写 editor。
+                    // 上传式：图片以 base64 附件进 PENDING_ATTACHMENTS，不落盘、
+                    // 不插入 `@image <path>` 文本。阻塞 I/O 在 paste 模块的独立线程内。
                     // 粘贴不应触发 slash/mention 弹窗（与 Event::Paste 分支一致）。
                     KeyCode::Char('v')
                         if is_ctrl && !is_alt && !is_shift && !mention_active && !slash_active =>
                     {
-                        let Some(permit) = paste_gate.try_acquire() else {
-                            *crate::kit::atoms::NOTIFICATION.state().write() =
-                                Some(crate::kit::atoms::Notification {
-                                    message: i18n::tr("paste-in-progress"),
-                                    until: std::time::Instant::now()
-                                        + std::time::Duration::from_secs(2),
-                                });
-                            return EventResult::Consumed;
-                        };
-                        exit_history_mode_if_active();
-                        exit_entry_focus_on_edit();
-                        let state_clone = state;
-                        std::thread::spawn(move || {
-                            let _permit = permit;
-                            #[cfg(target_os = "macos")]
-                            match image::save_native_clipboard_png() {
-                                Ok(Some(path)) => {
-                                    insert_image_reference(&mut state_clone.write(), &path);
-                                    return;
-                                }
-                                Ok(None) => {}
-                                Err(_) => {
-                                    *crate::kit::atoms::NOTIFICATION.state().write() =
-                                        Some(crate::kit::atoms::Notification {
-                                            message: i18n::tr("paste-image-failed"),
-                                            until: std::time::Instant::now()
-                                                + std::time::Duration::from_secs(4),
-                                        });
-                                    return;
-                                }
-                            }
-                            let Ok(mut cb) = arboard::Clipboard::new() else {
-                                return;
-                            };
-                            // ── 图片粘贴分支 ──
-                            // arboard 的 get_image() 需要新的 Clipboard 实例（之前的 cb 可能已被消费）
-                            if let Some(arboard::ImageData {
-                                bytes: image_bytes,
-                                width,
-                                height,
-                            }) = arboard::Clipboard::new()
-                                .ok()
-                                .and_then(|mut cb2| cb2.get_image().ok())
-                            {
-                                // arboard may already own the clipboard allocation.  Move it
-                                // out instead of cloning every RGBA byte before encoding.
-                                let img_bytes = image_bytes.into_owned();
-                                if !img_bytes.is_empty() {
-                                    use std::hash::{DefaultHasher, Hash, Hasher};
-                                    let mut hasher = DefaultHasher::new();
-                                    img_bytes.hash(&mut hasher);
-                                    let hash = format!("{:016x}", hasher.finish());
-                                    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-
-                                    let img_dir = dirs_next::home_dir()
-                                        .unwrap_or_else(|| std::path::PathBuf::from("."))
-                                        .join(".peri")
-                                        .join("images");
-                                    let _ = std::fs::create_dir_all(&img_dir);
-
-                                    let file_name = format!("{}_{}.png", timestamp, &hash[..8]);
-                                    let file_path = img_dir.join(&file_name);
-
-                                    match png_encode(&img_bytes, width, height, &file_path) {
-                                        Ok(()) => {
-                                            insert_image_reference(
-                                                &mut state_clone.write(),
-                                                &file_path,
-                                            );
-                                            return;
-                                        }
-                                        Err(_) => {
-                                            // PNG 编码失败，静默回退到文本粘贴
-                                        }
-                                    }
-                                }
-                            }
-
-                            // ── 文本粘贴分支（原有逻辑）──
-                            let Ok(text) = cb.get_text() else {
-                                return;
-                            };
-                            if text.is_empty() {
-                                return;
-                            }
-                            const MAX: usize = 10_000;
-                            let total = text.chars().count();
-                            if total > MAX {
-                                *crate::kit::atoms::NOTIFICATION.state().write() =
-                                    Some(crate::kit::atoms::Notification {
-                                        message: i18n::tr_args(
-                                            "paste-truncated",
-                                            &[("max".into(), FluentValue::from(MAX as i64))],
-                                        ),
-                                        until: std::time::Instant::now()
-                                            + std::time::Duration::from_secs(2),
-                                    });
-                                let trunc: String = text.chars().take(MAX).collect();
-                                state_clone.write().insert_str(&trunc);
-                            } else {
-                                state_clone.write().insert_str(&text);
-                            }
-                        });
-                        *PREDICTION.state().write() = PredictionState::default();
-                        EventResult::Consumed
+                        paste::handle_clipboard_paste(state, &paste_gate)
                     }
 
                     // ── 预测文本接受（Tab）──
@@ -575,31 +470,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 }
                 result
             }
-            Event::Paste(paste_text) => {
-                // I22-A：paste 大小上限——防止用户误粘 10MB 日志冻结终端。
-                // 10_000 chars 足够覆盖正常长 paste（代码片段、命令输出）；
-                // 超出截断并 log warn 提示（用户可改用文件追加方式）。
-                const MAX_PASTE_CHARS: usize = 10_000;
-                // 部分终端（VSCode、iTerm2）在 Bracketed Paste 中使用 \r 作为
-                // 换行分隔符；render_multiline_with_cursor 只按 \n 拆分行，
-                // 未归一化的 \r 会导致换行在渲染时不可见。
-                let normalized = paste_text.replace("\r\n", "\n").replace('\r', "\n");
-                let char_count = normalized.chars().count();
-                let truncated: String = normalized.chars().take(MAX_PASTE_CHARS).collect();
-                if char_count > MAX_PASTE_CHARS {
-                    tracing::warn!(
-                        original_chars = char_count,
-                        capped_at = MAX_PASTE_CHARS,
-                        "InputArea: paste 截断——超出 10K char 上限"
-                    );
-                }
-                exit_entry_focus_on_edit();
-                let mut s = state.write();
-                s.insert_str(&truncated);
-                update_popup_prefix(&s);
-                *PREDICTION.state().write() = PredictionState::default();
-                EventResult::Consumed
-            }
+            Event::Paste(paste_text) => paste::handle_bracketed_paste(state, &paste_text),
             _ => EventResult::Ignored,
         },
     );
@@ -819,11 +690,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     // 不足时**队列最先让位**——保证 transcript ≥3 行（40×8 + 排队场景不再
     // 把 transcript 挤到 2 行）；剩余排队项在 drain 时仍会发送，只是不可见。
     let input_buffer_handle = hooks.use_atom(&INPUT_BUFFER);
+    // 队列行只展示文本；附件随排队项保留并在 drain 时随请求一起提交。
     let queue_items: Vec<String> = input_buffer_handle
         .read()
         .iter()
         .take(QUEUE_VISIBLE_MAX)
-        .cloned()
+        .map(|input| input.text.clone())
         .collect();
     let queue_has_more = input_buffer_handle.read().len() > QUEUE_VISIBLE_MAX;
     let queue_lines = build_queue_lines(&queue_items, queue_has_more, text_width);
@@ -1054,6 +926,30 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             } }
         }
     )
+}
+
+/// 测试夹具：重置提交/面板相关的全局 atom。
+///
+/// `input_area_test` 与 `submit_test` 共用这一份（`init_atoms()` 是 no-op，
+/// 真正的重置在这里），避免两个测试模块各自复制后漂移。
+#[cfg(test)]
+pub(super) fn reset_submit_side_effect_state() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    INPUT_BUFFER.state().write().clear();
+    crate::kit::atoms::INPUT_HISTORY.state().write().clear();
+    crate::kit::atoms::INPUT_HISTORY_INDEX
+        .state()
+        .write()
+        .take();
+    crate::kit::atoms::OPEN_PANELS.state().write().clear();
+    crate::kit::atoms::ACTIVE_PANEL.state().write().take();
+    *crate::kit::atoms::NOTIFICATION.state().write() = None;
+    crate::kit::atoms::PENDING_ATTACHMENTS
+        .state()
+        .write()
+        .clear();
+    ACP_STATE.state().write().is_loading = false;
 }
 
 #[cfg(test)]

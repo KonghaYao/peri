@@ -210,11 +210,67 @@ pub struct PredictionState {
     pub received_at: Option<Instant>,
 }
 
-#[derive(Debug, Clone, Default)]
+/// 待发送附件（图片）：base64 载荷 + MIME 类型。
+///
+/// [上传式] 剪贴板字节经 base64 直接随消息上行（`MessageContent::Blocks` 的 image
+/// block），不再落盘、不再插入 `@image <path>` 文本。
+///
+/// Debug 为手写实现：`base64_data` 是整张图的载荷，derive 会让任何 `{:?}`
+/// 打印出全量图片（日志 / tracing / panic 消息）。故只暴露长度。
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct PendingAttachment {
     pub label: String,
     pub media_type: String,
     pub base64_data: String,
+}
+
+impl PendingAttachment {
+    /// 以图片 MIME 与标准 base64 载荷构造待发送附件。
+    pub fn image(media_type: impl Into<String>, base64_data: impl Into<String>) -> Self {
+        let media_type = media_type.into();
+        Self {
+            label: media_type.clone(),
+            media_type,
+            base64_data: base64_data.into(),
+        }
+    }
+}
+
+impl std::fmt::Debug for PendingAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingAttachment")
+            .field("label", &self.label)
+            .field("media_type", &self.media_type)
+            .field("base64_bytes", &self.base64_data.len())
+            .finish()
+    }
+}
+
+/// `INPUT_BUFFER` 排队项：loading 期间缓存的待提交输入。
+///
+/// 文本与附件必须一起出队——只存文本会在 drain 时静默丢弃用户已提交的图片。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BufferedInput {
+    pub text: String,
+    pub attachments: Vec<PendingAttachment>,
+}
+
+impl BufferedInput {
+    /// 纯文本排队项（无附件）。
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// 带附件的排队项。
+    pub fn with_attachments(text: impl Into<String>, attachments: Vec<PendingAttachment>) -> Self {
+        Self {
+            text: text.into(),
+            attachments,
+        }
+    }
 }
 
 /// 待发送附件（§10 composer footer `@ N files` 消费）。
@@ -347,7 +403,8 @@ pub static INPUT_HISTORY: AtomStatic<VecDeque<String>> = AtomStatic::new(VecDequ
 pub static INPUT_HISTORY_INDEX: AtomStatic<Option<usize>> = AtomStatic::new(|| None);
 /// 进入历史模式时保存的用户当前输入文本草稿。
 pub static DRAFT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
-pub static INPUT_BUFFER: AtomStatic<VecDeque<String>> = AtomStatic::new(VecDeque::new);
+/// loading 期间缓存的待提交输入（文本 + 附件，见 [`BufferedInput`]）。
+pub static INPUT_BUFFER: AtomStatic<VecDeque<BufferedInput>> = AtomStatic::new(VecDeque::new);
 /// 取消时需恢复到输入框的文本。TurnInterrupted 零产出时写入，input_area 消费后清空。
 /// 使用非 atom 存储（OnceLock + Mutex）避免 render body 中写 atom 产生自激回路。
 /// TurnInterrupted 写入后递增 RENDER_HEARTBEAT 触发重渲染，input_area 消费文本并清空。

@@ -31,7 +31,10 @@ async fn test_empty_agent_text_skipped() {
     let result = handle_submit(
         &client,
         &cwd,
-        SubmitRequest::AgentText("   \n\t ".to_string()),
+        SubmitRequest::AgentText {
+            text: "   \n\t ".to_string(),
+            attachments: Vec::new(),
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -47,7 +50,14 @@ async fn test_creates_session_when_missing() {
     // 启动一个简短超时，确保 handle_submit 进入 new_session 分支
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        handle_submit(&client, &cwd, SubmitRequest::AgentText("hello".to_string())),
+        handle_submit(
+            &client,
+            &cwd,
+            SubmitRequest::AgentText {
+                text: "hello".to_string(),
+                attachments: Vec::new(),
+            },
+        ),
     )
     .await;
 
