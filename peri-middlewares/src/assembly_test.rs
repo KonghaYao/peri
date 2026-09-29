@@ -455,6 +455,7 @@ fn workflow_context_with_disabled(disabled: &[&str]) -> WorkflowAgentContext {
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
+        mcp_skill_registry: None,
         session_id: None,
         compact_config: None,
         cancel: None,

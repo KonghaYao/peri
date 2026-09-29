@@ -79,9 +79,10 @@ pub use permission::{
     default_requires_approval, effective_tool_name, AutoClassifier, BatchItem, Classification,
     HitlDecision, LlmAutoClassifier, PermissionMiddleware, PermissionMode, SharedPermissionMode,
 };
-pub use skills::{
-    list_skills, load_global_skills_dir, load_skill_metadata, SkillMetadata, SkillsMiddleware,
-};
+pub mod settings;
+
+pub use settings::{load_disable_bundled_skills, load_global_skills_dir};
+pub use skills::{resolve_skill_roots, SkillMetadata, SkillRoot, SkillsMiddleware};
 pub use subagent::{
     infer_agent_capability, scan_agents, scan_agents_detailed, scan_agents_with_extra_dirs,
     AgentCapability, SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool,

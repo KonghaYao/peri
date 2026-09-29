@@ -90,6 +90,8 @@ async fn seam_fixture() -> SeamFixture {
         workspace_resources: None,
         // 无会话上下文（测试夹具）：A24 关闭集为空集。
         builtin_closed: Default::default(),
+        // 宿主技能面关闭位与关闭集同源：本夹具无会话上下文，恒为假。
+        skills_face_closed: false,
         prepared_plugins: None,
     })
     .await;

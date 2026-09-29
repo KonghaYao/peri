@@ -188,6 +188,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                         .collect(),
                 )
                 .with_mcp_agents(mcp_agent_registry.clone(), Arc::clone(broker))
+                .with_mcp_skills(ctx.mcp_skill_registry.clone())
                 .with_system_builder(system_builder.clone())
                 .with_cancel(cancel.clone())
                 .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))

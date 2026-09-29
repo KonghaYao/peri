@@ -79,6 +79,10 @@ pub struct WorkflowAgentContext {
     pub frozen_claude_local_md: Option<String>,
     /// Frozen skills summary，None = 无 skills。
     pub frozen_skill_summary: Option<String>,
+    /// 会话级 MCP skill registry（W4b/F4：workflow agent 的技能目录与正文来源，
+    /// 与主链同一份；None = 未装配技能面 → 两个技能工具为空、预载报缺口，
+    /// 不回落磁盘，J5）。
+    pub mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
 
     /// Session ID（用于 compact 事件和日志）
     pub session_id: Option<String>,
@@ -170,6 +174,7 @@ pub fn create_default_executor(
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
+        mcp_skill_registry: None,
         session_id: None,
         compact_config: None,
         cancel: None,
@@ -327,6 +332,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             &self.ctx.cwd,
             &self.ctx.meta_harness_disabled,
             self.execution_manager.get().cloned(),
+            self.ctx.mcp_skill_registry.clone(),
         );
 
         // 3. agent definition 工具边界优先，再叠加 workflow allowedTools。

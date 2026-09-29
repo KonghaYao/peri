@@ -80,6 +80,46 @@ fn make_subagent_tool(parent_tools: Vec<Arc<dyn BaseTool>>) -> SubAgentTool {
     )
 }
 
+/// W4b（J5）测试夹具：把会话级 MCP skill registry 接到子链装配器上
+/// （子代理 `skills:` 预载的唯一来源；未接线 ⇒ 缺口，不回落磁盘）。
+///
+/// 条目用 legacy 形状（`content: Some(..)`、无 `resources[]` 绑定）：统一
+/// activation 在该形状下使用发现期正文——本夹具因此不需要真实 peer。
+pub(crate) fn with_skill_registry(
+    tool: SubAgentTool,
+    server: &str,
+    skills: &[(&str, &str)],
+) -> SubAgentTool {
+    use peri_acp_types::mcp_skills::{HandleToken, McpSkillRegistry};
+    use peri_acp_types::skills::{SkillMetadata, SkillOrigin, SkillSource};
+    let reg = std::sync::Arc::new(McpSkillRegistry::new());
+    let handle: HandleToken = std::sync::Arc::new(server.to_string());
+    reg.mark_discovery_started(server, handle.clone());
+    reg.mark_discovery_completed(
+        server,
+        handle,
+        skills
+            .iter()
+            .map(|(name, body)| SkillMetadata {
+                name: peri_acp_types::mcp_skills::mcp_skill_name(server, name),
+                aliases: Vec::new(),
+                description: format!("MCP skill {name}"),
+                path: std::path::PathBuf::new(),
+                source: SkillSource::Mcp,
+                plugin_name: None,
+                origin: Some(SkillOrigin::Mcp {
+                    server: server.to_string(),
+                    uri: format!("skill://{server}/{name}/SKILL.md"),
+                }),
+                content: Some((*body).to_string()),
+                resources: Vec::new(),
+                frontmatter: None,
+            })
+            .collect(),
+    );
+    tool.with_mcp_skills(Some(reg))
+}
+
 /// mock LangfuseBridgeLike：记录 forwarder 转发的全部 ObserveEvent
 struct RecordingBridge {
     observes: Arc<std::sync::Mutex<Vec<ObserveEvent>>>,

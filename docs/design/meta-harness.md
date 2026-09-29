@@ -115,7 +115,7 @@ for (key, v) in meta_harness {
 
 ```rust
 /// 扫描 {cwd}/.peri/meta/*.md，返回 文件名(去 .md) → 全文
-pub fn scan_harness_docs(cwd: &str) -> HashMap<String, String>
+// 已删除（W3b/J6）：段落覆盖改由 workspace `peri-meta://` 资源提供，宿主无 scanner。
 // 规则：
 //  - 仅扫描一级目录 *.md（不递归）；非 .md 文件忽略
 //  - 文件名即 key（"01_intro.md" → "01_intro"）
@@ -135,7 +135,7 @@ pub struct MetaHarnessState {
 ```
 
 - **构建时点**：`build_frozen_data` 冻结期、渲染 system prompt 之前——一次
-  读取 settings + `scan_harness_docs`。
+  读取 settings +（J6 后）workspace `peri-meta://` 资源读取（宿主 scanner 已删除）。
 - **文档存在性校验在此处**：开关 `true` 但扫描无对应文件 → warn + 忽略该
   条目（保持内置段落），不二次读盘。
 - **挂载要求**：`FrozenContext` 单份存储 `meta_harness`
@@ -276,7 +276,7 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 | 组件 | 落点 | 说明 |
 | --- | --- | --- |
 | `MetaHarnessState` 类型 | `peri-acp-types/src/meta_harness.rs` | 跨层冻结载体，简单类型 |
-| `scan_harness_docs` 加载器 | `peri-middlewares/src/meta_harness/` | 与 skills/agents_md 同构 |
+| ~~`scan_harness_docs` 加载器~~ | ~~`peri-middlewares/src/meta_harness/`~~ | **已删除（W3b/J6）**：读取改由 workspace 实例的 `peri-meta://` resources 承担（`read_builtin_workspace_meta`） |
 | settings 字段解析/合并 | `peri-acp/src/provider/config.rs` | `AppConfig.meta_harness` + merge 特例 + 校验 |
 | 冻结组装 | `peri-acp/src/session/mod.rs` | build_frozen_data + 冻结载体三结构加字段 |
 | 段落覆盖合并 | `peri-acp/src/prompt/mod.rs` | 数组加 ID（二元组/三元组，Layer 已去除）+ `PromptTemplate::new` 构造期合并（`SectionContent` 零拷贝双态） |

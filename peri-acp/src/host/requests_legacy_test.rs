@@ -344,9 +344,12 @@ async fn legacy_history_freezes_saved_workspace_configuration_and_plugins() {
         .meta_harness
         .disabled_middlewares
         .contains("WebMiddleware"));
+    // W4b（F3/J5）：技能摘要同样只在内容准入期（P4）从 system 来源取；
+    // legacy 首次接纳先于执行环境 ⇒ 无资源面 ⇒ 摘要为空。插件技能根在盘上
+    // 存在也不得被宿主读取（宿主已无技能扫描点）。
     assert!(
-        frozen.skill_summary.contains("**legacy-skill** [plugin]"),
-        "{}",
+        frozen.skill_summary.is_empty(),
+        "legacy 接纳不得从磁盘/插件根读技能目录：{}",
         frozen.skill_summary
     );
     handle_request(

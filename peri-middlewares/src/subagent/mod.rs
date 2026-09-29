@@ -56,6 +56,9 @@ pub struct SubAgentMiddlewareConfig {
     pub frozen_claude_local_md: Option<String>,
     /// Frozen skills summary。None 时从磁盘读取。
     pub frozen_skill_summary: Option<String>,
+    /// 会话级 MCP skill registry（W4b：子链技能目录与正文的唯一来源；
+    /// None = 未装配技能面，miss 即缺口报告，不回落磁盘）。
+    pub mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     /// 装配期关闭的 middleware 名集合（父会话冻结状态投影；
     /// 子链独立装配，必须同样过滤——设计 §2.5）。
     pub meta_harness_disabled: std::collections::HashSet<String>,
@@ -70,6 +73,7 @@ impl SubAgentMiddlewareConfig {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            mcp_skill_registry: None,
             meta_harness_disabled: std::collections::HashSet::new(),
         }
     }
@@ -83,6 +87,7 @@ impl SubAgentMiddlewareConfig {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            mcp_skill_registry: None,
             meta_harness_disabled: std::collections::HashSet::new(),
         }
     }
@@ -111,6 +116,15 @@ impl SubAgentMiddlewareConfig {
         self.frozen_claude_md = claude_md;
         self.frozen_claude_local_md = claude_local_md;
         self.frozen_skill_summary = skill_summary;
+        self
+    }
+
+    /// 注入会话级 MCP skill registry（W4b：子链技能的目录与正文来源）。
+    pub fn with_mcp_registry(
+        mut self,
+        registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
+    ) -> Self {
+        self.mcp_skill_registry = registry;
         self
     }
 }
@@ -174,6 +188,9 @@ pub struct SubAgentMiddleware {
     plugin_agent_dirs: Arc<Vec<PathBuf>>,
     /// 会话级 MCP Agents registry（远端定义晚读、晚批准）。
     mcp_agent_registry: Option<Arc<crate::mcp::McpAgentRegistry>>,
+    /// 会话级 MCP skill registry（W4b：子链的技能目录与正文来源；None = 未装配，
+    /// 子链无技能面——不回退磁盘，J5）。
+    mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     /// MCP Agent 激活使用的用户交互 broker。
     broker: Option<Arc<dyn peri_agent::interaction::UserInteractionBroker>>,
     /// 后台任务管理器是否可用（能力声明，非持有；collect_tools 时决定是否
@@ -205,6 +222,7 @@ impl SubAgentMiddleware {
             parent_session: Arc::new(RwLock::new(None)),
             plugin_agent_dirs: Arc::new(Vec::new()),
             mcp_agent_registry: None,
+            mcp_skill_registry: None,
             broker: None,
             task_manager_available: false,
         }
@@ -223,6 +241,15 @@ impl SubAgentMiddleware {
     ) -> Self {
         self.mcp_agent_registry = registry;
         self.broker = Some(broker);
+        self
+    }
+
+    /// 注入会话级 MCP skill registry（W4b：子链技能目录/正文的唯一来源）。
+    pub fn with_mcp_skills(
+        mut self,
+        registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
+    ) -> Self {
+        self.mcp_skill_registry = registry;
         self
     }
 
@@ -335,6 +362,9 @@ impl SubAgentMiddleware {
         }
         tool = tool.with_plugin_agent_dirs(Arc::clone(&self.plugin_agent_dirs));
         tool = tool.with_mcp_agents(self.mcp_agent_registry.clone(), self.broker.clone());
+        // W4b（F5/J5）：把会话级 MCP skill registry 交给子链装配器——子代理
+        // `skills:` 预载只按名查该 registry（未命中=缺口，不回落磁盘）。
+        tool = tool.with_mcp_skills(self.mcp_skill_registry.clone());
         // 共享父 agent 身份 cell（C2：Start/Stop 事件的 agent_id 字段）
         tool = tool.with_parent_agent_id(Arc::clone(&self.parent_agent_id));
         // L3：父 v2 session（运行时通道 + frozen 数据经 host 读取）

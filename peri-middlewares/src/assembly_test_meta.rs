@@ -218,7 +218,7 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
         // 面④：workflow agent 工具列表（生产入口的带池工厂）。
         let workflow_tools =
             default_workflow_middleware_factory_with_pool(Some(pool_with_builtin_instances()))
-                .build_tools("/tmp/contract-test", &disabled, None);
+                .build_tools("/tmp/contract-test", &disabled, None, None);
         let workflow_names: Vec<&str> = workflow_tools.iter().map(|t| t.name()).collect();
         for tool in closed_tools {
             assert!(
@@ -260,6 +260,7 @@ fn builtin_capability_closure_matrix_covers_all_faces() {
             .build_tools(
                 "/tmp/contract-test",
                 &["McpMiddleware".to_string()].into_iter().collect(),
+                None,
                 None,
             );
     assert!(

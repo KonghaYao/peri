@@ -518,7 +518,6 @@ async fn make_session_context_with_manager(
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(SkillsProvider),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
     );
     sm.new_session_with_id(session_id, "/tmp")
         .await

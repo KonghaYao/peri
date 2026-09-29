@@ -1976,6 +1976,7 @@ async fn cached_skill_discovery_reads_no_bodies() {
         first_token,
         AgentCancellationToken::new(),
         Some((cache.clone(), origin.clone())),
+        false,
     )
     .await;
     assert_eq!(first.all_skills().len(), 1);
@@ -2001,6 +2002,7 @@ async fn cached_skill_discovery_reads_no_bodies() {
         second_token,
         AgentCancellationToken::new(),
         Some((cache, origin)),
+        false,
     )
     .await;
 

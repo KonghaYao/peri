@@ -57,6 +57,11 @@ pub enum SkillLookup {
 struct RegistryInner {
     servers: BTreeMap<String, ServerDiscoveryState>,
     on_change: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// 系统来源 origin 的 server 键（`ConfigSource::Builtin` 等本机受信实例）。
+    ///
+    /// W4b：由宿主装配/发现面按**连接事实**标注（不是名字自称，也不是资源文本
+    /// 自称——X6/X7），投递面据它区分「system 摘要」与「非 system 延迟发现」。
+    system_origins: std::collections::BTreeSet<String>,
 }
 
 /// Session 级 MCP skill 远端注册表。
@@ -70,8 +75,35 @@ impl McpSkillRegistry {
             inner: parking_lot::RwLock::new(RegistryInner {
                 servers: BTreeMap::new(),
                 on_change: None,
+                system_origins: std::collections::BTreeSet::new(),
             }),
         }
+    }
+
+    /// 标注系统来源 origin 的 server 键集合（宿主装配/发现面调用；幂等）。
+    ///
+    /// 只记录**键**：调用方据连接事实（`ConfigSource::Builtin { .. }` /
+    /// session 系统的实例）判定，不得按 server 自报名或资源 scheme 判定。
+    /// 传入的键会整体替换旧集合（关闭/卸载来源在下次调用时自然消失）。
+    pub fn mark_system_origins(&self, names: &[String]) {
+        let mut guard = self.inner.write();
+        guard.system_origins = names.iter().cloned().collect();
+    }
+
+    /// 该 server 键是否为系统来源（见 [`Self::mark_system_origins`]）。
+    pub fn is_system_origin(&self, server: &str) -> bool {
+        self.inner.read().system_origins.contains(server)
+    }
+
+    /// 系统来源的当前技能（system 摘要投递面；`Started`/空来源不产出）。
+    pub fn system_skills(&self) -> Vec<SkillMetadata> {
+        let guard = self.inner.read();
+        guard
+            .servers
+            .iter()
+            .filter(|(server, _)| guard.system_origins.contains(*server))
+            .flat_map(|(_, state)| entries_of(state))
+            .collect()
     }
 
     /// before_agent 投影：比对 connected（name, handle）列表。

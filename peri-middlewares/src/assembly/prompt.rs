@@ -19,13 +19,13 @@ pub(super) fn add_agents_md(ctx: &AssemblyContext, chain: &mut MiddlewareChain) 
 
 pub(super) fn add_skills(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
     let AssemblyContext {
-        plugin_skill_roots,
         frozen_skill_summary,
         ..
     } = ctx;
-    let mut skills_mw = SkillsMiddleware::new()
-        .with_plugin_roots(plugin_skill_roots.clone())
-        .with_mcp_registry(ctx.mcp_skill_registry.clone());
+    // W4b（F2/J5）：技能目录只由 MCP registry 投影——`plugin_skill_roots` /
+    // `disable_bundled` 等本地扫描参数已从本中间件删除（它们现在只作为
+    // workspace 实例的资源根/关闭位输入，见 `peri-acp/src/host/workspace.rs`）。
+    let mut skills_mw = SkillsMiddleware::new().with_mcp_registry(ctx.mcp_skill_registry.clone());
     if let Some(summary) = frozen_skill_summary {
         skills_mw = skills_mw.with_frozen_summary(summary.clone());
     }
@@ -33,15 +33,9 @@ pub(super) fn add_skills(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
 }
 
 pub(super) fn add_skill_preload(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
-    let AssemblyContext {
-        preload_skills,
-        cwd,
-        plugin_skill_roots,
-        ..
-    } = ctx;
+    let AssemblyContext { preload_skills, .. } = ctx;
     chain.add(Box::new(
-        SkillPreloadMiddleware::new(preload_skills.clone(), cwd)
-            .with_plugin_roots(plugin_skill_roots.clone())
+        SkillPreloadMiddleware::new(preload_skills.clone())
             .with_mcp_registry(ctx.mcp_skill_registry.clone()),
     ));
 }

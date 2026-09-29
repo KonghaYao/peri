@@ -1,8 +1,10 @@
+use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_agent::{
     middleware::chain::MiddlewareChain,
     middleware::r#trait::Middleware,
     session::subagent::{SubagentChainAssembler, SubagentChainContext},
 };
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -55,8 +57,11 @@ pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<d
     }
 
     // [TRAP] 同上：SubAgent 复用 frozen skill summary。
+    // W4b（F5/J5）：子链的目录与正文都只来自 MCP registry（`config.mcp_skill_registry`
+    // 由装配面注入父会话的会话级 registry），无本地扫描、无磁盘回落。
     if !disabled.contains("SkillsMiddleware") {
-        let mut skills = SkillsMiddleware::new().with_global_config();
+        let mut skills =
+            SkillsMiddleware::new().with_mcp_registry(config.mcp_skill_registry.clone());
         if let Some(summary) = config.frozen_skill_summary {
             skills = skills.with_frozen_summary(summary);
         }
@@ -64,10 +69,10 @@ pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<d
     }
 
     if !config.skill_names.is_empty() && !disabled.contains("SkillPreloadMiddleware") {
-        middlewares.push(Box::new(SkillPreloadMiddleware::new(
-            config.skill_names,
-            &config.cwd,
-        )));
+        middlewares.push(Box::new(
+            SkillPreloadMiddleware::new(config.skill_names)
+                .with_mcp_registry(config.mcp_skill_registry.clone()),
+        ));
     }
     if !disabled.contains("TodoMiddleware") {
         middlewares.push(Box::new(TodoMiddleware::new({
@@ -138,7 +143,34 @@ pub use define::SubAgentTool;
 /// 由 middlewares 提供实现——Agent 层 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent) 从父 session copy frozen
 /// 数据后调用本实现构建子链，链序保持 [`build_subagent_middlewares`] 不变
 /// （AgentsMd→Skills→[SkillPreload]→Todo，ARC-MIDDLEWARE-001）。
-pub struct SubagentChainAssemblerImpl;
+///
+/// W4b（F5/J5）：装配器持有会话级 MCP skill registry（父链装配面注入），子链的
+/// 技能目录/正文因此只有 MCP 一个来源；未装配时子链无技能面，不回落磁盘。
+pub struct SubagentChainAssemblerImpl {
+    mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
+}
+
+impl SubagentChainAssemblerImpl {
+    /// 无技能面装配器（registry 未注入：子链只报缺口）。
+    pub fn new() -> Self {
+        Self {
+            mcp_skill_registry: None,
+        }
+    }
+
+    /// 注入会话级 MCP skill registry（父链装配面调用）。
+    pub fn with_registry(registry: Option<Arc<McpSkillRegistry>>) -> Self {
+        Self {
+            mcp_skill_registry: registry,
+        }
+    }
+}
+
+impl Default for SubagentChainAssemblerImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SubagentChainAssembler for SubagentChainAssemblerImpl {
     fn assemble(&self, ctx: &SubagentChainContext) -> MiddlewareChain {
@@ -149,6 +181,7 @@ impl SubagentChainAssembler for SubagentChainAssemblerImpl {
                     ctx.frozen_claude_local_md.clone(),
                     ctx.frozen_skill_summary.clone(),
                 )
+                .with_mcp_registry(self.mcp_skill_registry.clone())
                 .with_meta_harness_disabled(ctx.meta_harness_disabled.clone());
         let mut chain = MiddlewareChain::new();
         for mw in build_subagent_middlewares(config) {

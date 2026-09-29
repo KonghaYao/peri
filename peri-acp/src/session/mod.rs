@@ -50,7 +50,6 @@ use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::session_resources::SessionResources;
-use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::thread::ThreadId;
 use tokio_util::sync::CancellationToken;
 
@@ -165,8 +164,6 @@ struct SessionManagerInner {
     /// 插件命令静态条目（Phase 6 B2 预转；会话创建时按
     /// 内置 → 本地 skills（C1）→ 插件 顺序 register_all）。
     pub plugin_command_entries: Vec<RouteEntry>,
-    /// 插件 skill roots（C1 本地 skills 扫描参数；与 host cfg 同源）。
-    pub plugin_skill_roots: Vec<SkillRoot>,
     /// 后台任务管理器工厂（装配注入面）：每次 session 创建时调用一次，产出
     /// per-session 的 `Arc<dyn TaskManager>`（Agent 层 per-session 聚合）。
     /// None = 未注入时 fallback `NoopTaskManager`（print 等无 bg 场景）。
@@ -223,7 +220,6 @@ impl SessionManager {
         task_manager_factory: Option<TaskManagerFactory>,
         skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
         plugin_command_entries: Vec<RouteEntry>,
-        plugin_skill_roots: Vec<SkillRoot>,
     ) -> Self {
         Self {
             inner: Arc::new(SessionManagerInner {
@@ -241,7 +237,6 @@ impl SessionManager {
                 dynamic_mcp,
                 skills,
                 plugin_command_entries,
-                plugin_skill_roots,
                 task_manager_factory,
             }),
         }

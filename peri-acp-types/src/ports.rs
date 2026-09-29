@@ -22,7 +22,6 @@ use crate::dynamic_mcp::{
     SecretRef, SessionMcpCapabilitySnapshot,
 };
 use crate::mcp_skills::HandleToken;
-use crate::skills::{SkillMetadata, SkillRoot};
 
 /// Terminal evidence for one MCP pool service-close transaction.
 ///
@@ -459,14 +458,14 @@ impl dyn LspPoolPort {
     }
 }
 
-/// Skills 扫描端口：协议命令面（available-commands / skill 列表 / agent 列表）
-/// 经此访问 skills/agents 扫描业务，具体扫描逻辑留在 `peri-middlewares`
-/// （`SkillsMiddleware::resolve_roots_static` / `scan_skill_roots` /
-/// `scan_agents_detailed`）。
+/// Agents 扫描端口：协议命令面（available-commands / agent 列表）经此访问 agents
+/// 扫描业务，具体扫描逻辑留在 `peri-middlewares`（`scan_agents_detailed`）。
+///
+/// W4b（F6/J5）：原 `available_skills`（同步扫盘投影 `core:{skill}` 命令）已删除
+/// ——技能目录的唯一来源是会话级 MCP skill registry，命令面投影随 MCP 发现异步
+/// 产生（`peri-middlewares/src/mcp/skill_discovery.rs`），端口不再承担任何技能
+/// 内容读取。
 pub trait SkillsPort: Send + Sync {
-    /// 解析 skill 根目录并扫描全部 skill 元数据（含 bundled 禁用判定）。
-    fn available_skills(&self, cwd: &str, plugin_roots: &[SkillRoot]) -> Vec<SkillMetadata>;
-
     /// 扫描可调度 agent 目录，返回 `(agent_id, name, description, capability)`。
     fn agents(
         &self,

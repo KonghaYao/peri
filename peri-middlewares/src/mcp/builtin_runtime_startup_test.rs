@@ -387,7 +387,7 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
 
         // 面④：生产 workflow 工厂。
         let workflow = default_workflow_middleware_factory_with_pool(Some(Arc::clone(&pool)))
-            .build_tools(&cwd, &disabled, None);
+            .build_tools(&cwd, &disabled, None, None);
         let workflow_names = tool_names(&workflow);
         for name in &expected_open_direct {
             assert!(
@@ -421,7 +421,7 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
         "McpMiddleware 是链槽位键，不是 builtin 实例策略键（两表语义不重叠，A7）"
     );
     let workflow_off = default_workflow_middleware_factory_with_pool(Some(Arc::clone(&pool)))
-        .build_tools(&cwd, &chain_off, None);
+        .build_tools(&cwd, &chain_off, None, None);
     let workflow_off_names = tool_names(&workflow_off);
     assert!(
         !workflow_off_names

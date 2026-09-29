@@ -403,6 +403,53 @@ impl McpClientPool {
         Ok(docs)
     }
 
+    /// 冻结期技能清单快照（F3，J1/§5.4）：只认真实 builtin `workspace` 实例。
+    ///
+    /// 身份与关闭口径与 [`Self::read_builtin_workspace_meta`] 同源（X6/X7：
+    /// `ConfigSource::Builtin { instance: "workspace" }` + Connected；X4/A24：
+    /// 关闭集命中直接返回空，不发现、不回落磁盘）。
+    ///
+    /// 失败语义（X5，受限 Peri profile）：
+    /// - 实例未装配 / 未连接 / 未声明 skills 能力 → `Ok(空)`：**未声明不是失败**
+    ///   （不凭空要求每台 server 支持 skills）；
+    /// - 能力已声明且实例健康，但 `skills/list` 读取失败（超时 / RPC 错误 /
+    ///   响应不合法）→ `Err`：system 已声明且被选中的投递失败 ⇒ 调用方
+    ///   fail-closed（拒绝创建会话，不谎称「无技能」）。
+    ///
+    /// 返回的是**元数据快照**（发现面同构条目，正文不读）：正文由激活面
+    /// （`resources/read` + digest 校验）按需读取。
+    pub async fn read_builtin_workspace_skills(
+        &self,
+    ) -> Result<Vec<peri_acp_types::skills::SkillMetadata>, String> {
+        let closed = self
+            .builtin_instance_context()
+            .map(|context| context.closed.clone())
+            .unwrap_or_default();
+        if super::builtin::is_closed("workspace", &closed) {
+            tracing::debug!("skills: builtin workspace is closed; skill face stays unavailable");
+            return Ok(Vec::new());
+        }
+        let Some(handle) = self.get_client("workspace") else {
+            return Ok(Vec::new());
+        };
+        if !matches!(handle.status, ClientStatus::Connected)
+            || !matches!(handle.source.as_ref(), Some(crate::mcp::config::ConfigSource::Builtin { instance }) if instance == "workspace")
+        {
+            return Ok(Vec::new());
+        }
+        if !handle.skills_capable {
+            // 能力未声明 ⇒ 技能面不适用（X5）；不调用未声明的方法。
+            return Ok(Vec::new());
+        }
+        let Some(peer) = handle.peer.clone() else {
+            return Err(
+                "builtin workspace skills face declared but the peer is unavailable".to_string(),
+            );
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        super::skill_discovery::snapshot_via_skills_list(peer, &handle.name, cancel).await
+    }
+
     pub fn get_tools(&self, name: &str) -> Vec<Tool> {
         self.clients
             .read()

@@ -196,9 +196,10 @@ async fn new_session_meta_override_flows_through_builtin_workspace_resources() {
         uris.contains(&"workspace://git/ref".to_string()),
         "既有 git ref 资源面必须保留：{uris:?}"
     );
+    // W4b：技能面随资源输入接线（J5）——meta 面不再与技能面互斥。
     assert!(
-        !uris.iter().any(|uri| uri.starts_with("skill://")),
-        "W4a 只接 meta 面：技能面必须保持关闭：{uris:?}"
+        uris.iter().any(|uri| uri.starts_with("skill://")),
+        "W4b 起技能面与 meta 面同批接线：{uris:?}"
     );
 
     handle_request(

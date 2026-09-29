@@ -1,17 +1,20 @@
 //! SkillTool + DiscoverSkillsTool — 让 LLM 在推理过程中动态发现和加载 skill
 //!
 //! 参考 Claude Code 的同名工具实现。SkillTool 按名称加载 skill 全文，
-//! DiscoverSkillsTool 搜索可用 skills 列表。两者均通过 SkillsMiddleware
-//! 注入的 plugin_roots / disable_bundled 访问完整的 skill 搜索路径。
+//! DiscoverSkillsTool 搜索可用 skills 列表。两者都只消费 SkillsMiddleware
+//! 从会话级 MCP skill registry 投影出的目录（`cached_skills`），正文经统一
+//! activation（`resources/read` + digest 校验）读取——**两个工具都不触碰文件
+//! 系统**（J5：技能来源只有 MCP 侧；本地三根 / 插件根 / builtin 资产由
+//! builtin `workspace` 实例的资源面承担）。
 //!
 //! 版本 2：工具不再自行扫描磁盘，改用 SkillsMiddleware 在 before_agent 时
-//! 预先扫描并缓存的 skills 列表（`cached_skills`）。
+//! 投影缓存的 skills 列表（`cached_skills`）。
 
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use peri_acp_types::mcp_skills::{mcp_skill_name, McpSkillRegistry};
-use peri_acp_types::skills::{SkillOrigin, SkillSource};
+use peri_acp_types::skills::SkillOrigin;
 use peri_agent::tools::{BaseTool, ToolContext};
 use serde_json::{json, Value};
 
@@ -109,30 +112,28 @@ impl BaseTool for SkillTool {
             })?;
             find_skill(skills, skill_name)?.clone()
         };
-        // W2：MCP 来源的正文一律经统一 activation（resources/read + digest/
-        // frontmatter 校验，stale 经 skills/get 刷新一次）；激活失败不注入、
-        // 不回落发现期缓存。本地/内置来源仍走各自内容加载路径（W4 迁到 MCP 侧）。
-        if matches!(skill.source, SkillSource::Mcp) {
-            let Some(registry) = self.mcp_registry.as_ref() else {
-                return Err(format!(
-                    "SkillTool: MCP skill registry is not wired; cannot activate '{}'",
-                    skill.name
-                )
-                .into());
-            };
-            return match crate::mcp::skill_activation::activate(registry, &skill, None).await {
-                // 与 content::load 的 MCP 分支同源：返回内容带来源标注。
-                Ok(content) => Ok(super::annotate_mcp_content(&skill, &content)),
-                Err(error) => Err(format!(
-                    "SkillTool: cannot activate '{}' ({})",
-                    skill.name,
-                    error.reason()
-                )
-                .into()),
-            };
+        // W4b（F1/F8）：正文**只有**一条读取路径——统一 activation 经
+        // `resources/read`（+ digest/frontmatter 校验，stale 经 `skills/get`
+        // 刷新一次）。本地磁盘分支与 builtin 嵌入分支已删除（J5）：所有条目的
+        // origin 都是 MCP 实例（builtin `workspace` 承担本地三根 / 插件 / 内置
+        // 资产），未装配 registry 时显式报装配缺口，不回落任何本地来源。
+        let Some(registry) = self.mcp_registry.as_ref() else {
+            return Err(format!(
+                "SkillTool: MCP skill registry is not wired; cannot activate '{}'",
+                skill.name
+            )
+            .into());
+        };
+        match crate::mcp::skill_activation::activate(registry, &skill, None).await {
+            // 内容带来源标注（与 preload / 命令面同源）。
+            Ok(content) => Ok(super::annotate_mcp_content(&skill, &content)),
+            Err(error) => Err(format!(
+                "SkillTool: cannot activate '{}' ({})",
+                skill.name,
+                error.reason()
+            )
+            .into()),
         }
-        let content = tokio::task::spawn_blocking(move || super::content::load(&skill)).await??;
-        Ok(content)
     }
 }
 
@@ -341,10 +342,17 @@ fn find_skill<'a>(
         .map(|(_, n)| n)
         .unwrap_or(&input_lower);
 
+    // W4b（风险 d：裸名规范化层打通）：registry 条目名是宿主注册名
+    // `mcp__{server}__{skill}`（`mcp_skill_name`），而用户/模型输入裸名
+    // （`/skill-name`、`SkillTool("skill-name")`）只带 `<skill>` 段——因此裸名
+    // 匹配必须同时看**末段**，与 preload 的 `McpSkillRegistry::lookup`、
+    // 命令面 `core:{skill}` 投影同一口径（跨 origin 同名仍走歧义拒绝）。
     let bare: Vec<&SkillMetadata> = skills
         .iter()
         .filter(|s| {
             s.name.eq_ignore_ascii_case(bare_name)
+                || peri_acp_types::mcp_skills::bare_skill_segment(&s.name)
+                    .is_some_and(|segment| segment.eq_ignore_ascii_case(bare_name))
                 || s.aliases
                     .iter()
                     .any(|alias| alias.eq_ignore_ascii_case(bare_name))
@@ -361,19 +369,11 @@ fn find_skill<'a>(
 
 /// 将 SkillMetadata 转为 DiscoverSkillsTool 的 JSON 输出格式
 fn skill_to_json(skill: &SkillMetadata) -> serde_json::Value {
-    let source_str = match skill.source {
-        super::SkillSource::User => "user",
-        super::SkillSource::Global => "global",
-        super::SkillSource::Project => "project",
-        super::SkillSource::Plugin => "plugin",
-        super::SkillSource::Builtin => "builtin",
-        super::SkillSource::Mcp => "mcp",
-    };
     json!({
         "name": skill.name,
         "aliases": skill.aliases,
         "description": skill.description,
-        "source": source_str,
+        "source": super::SkillsMiddleware::source_label(skill),
     })
 }
 

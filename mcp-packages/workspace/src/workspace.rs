@@ -33,10 +33,10 @@ use peri_agent::tools::BaseTool;
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CustomRequest, CustomResult, ErrorCode,
-        Implementation, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
-        MetaObject, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-        RequestId, Resource, ResourceContents, ResourceTemplate, ServerCapabilities, ServerInfo,
-        SubscriptionFilter,
+        ExtensionCapabilities, Implementation, JsonObject, ListResourceTemplatesResult,
+        ListResourcesResult, ListToolsResult, MetaObject, PaginatedRequestParams,
+        ReadResourceRequestParams, ReadResourceResponse, RequestId, Resource, ResourceContents,
+        ResourceTemplate, ServerCapabilities, ServerInfo, SubscriptionFilter,
     },
     service::{RequestContext, RoleServer, SubscriptionContext, SubscriptionSink},
     ErrorData as McpError, ServerHandler,
@@ -233,15 +233,30 @@ impl ServerHandler for WorkspaceMcpServer {
     /// 条件（SDK 把 handler filter 与 capabilities 求交，未声明时 filter 收窄为空）。
     ///
     /// **不复用** `peri_mcp_common::server_info`：它的固定形状是 tools-only。
+    ///
+    /// **W4b（plan §5.1）：技能能力位与资源面同生共死。** 资源 provider 装配时在
+    /// 本地组合 `resources` + SEP-2640 skills extension（`skills/list` / `skills/get`
+    /// custom requests 由同一 provider 提供）；未装配 provider 的实例（`with_resources`
+    /// 未被调用，例如顶层三路径 / 未接线测试）**不声明**该扩展——「声明即实现」，
+    /// 客户端不会对未支持的方法盲调，也不会把「未支持」误认成「空技能集」
+    /// （`peri-acp-types::skills::SKILLS_EXTENSION_ID` 是两侧共用的键）。
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .enable_resources()
-                .enable_resources_subscribe()
-                .build(),
-        )
-        .with_server_info(Implementation::new(
+        let mut caps = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_resources_subscribe()
+            .build();
+        if self.resources.is_some() {
+            let mut extensions = ExtensionCapabilities::new();
+            extensions.insert(
+                peri_acp_types::skills::SKILLS_EXTENSION_ID.to_string(),
+                JsonObject::new(),
+            );
+            // 未装配 provider 时不写 `extensions` 字段（`Some(空表)` 会序列化成
+            // `"extensions": {}`，与「不声明」在语义上不同，但多一份噪声）。
+            caps.extensions = Some(extensions);
+        }
+        ServerInfo::new(caps).with_server_info(Implementation::new(
             WORKSPACE_SERVER_NAME,
             env!("CARGO_PKG_VERSION"),
         ))

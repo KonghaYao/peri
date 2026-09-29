@@ -155,7 +155,7 @@ async fn prepare_existing(
             .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
             .to_owned();
         // 只读准入不建执行环境：不要求 frozen 快照存在，也不启动 workflow / LSP。
-        let (frozen, environment, workflow_middleware) = match owner.as_ref() {
+        let (frozen, environment) = match owner.as_ref() {
             Some(_) => {
                 // 持久 blob 是唯一事实源：恢复路径不再按当前目录/配置构建第二份 frozen
                 // （ARC-FROZEN-001 的同源收口）。legacy 首次接纳走既有兼容路径：候选在
@@ -178,12 +178,9 @@ async fn prepare_existing(
                     cfg, &prepared, id,
                 )
                 .await?;
-                let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-                let workflow_middleware =
-                    create_session_workflow_middleware(local, &cwd, id, &frozen);
-                (Some(frozen), environment, workflow_middleware)
+                (Some(frozen), environment)
             }
-            None => (None, None, None),
+            None => (None, None),
         };
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
         // A11/A22：session **不再**建池，只投影所属部署单元（有环境时即该环境的
@@ -198,6 +195,14 @@ async fn prepare_existing(
             environment.as_ref().map(|env| env.task_manager()),
         );
         local.session_manager.ensure_session_caps(id);
+        // W4b（F4）：workflow middleware 的构造点后移到**会话登记之后**——
+        // workflow agent 与主链共用会话级 MCP skill registry，而该 registry 在
+        // 会话构造（`ensure_session_with_task_manager` → `build_session`）时才
+        // 产生；先构造会让 workflow 链永久拿不到技能面（J5：不回退磁盘）。
+        let workflow_middleware = match frozen.as_ref() {
+            Some(frozen) => create_session_workflow_middleware(local, &cwd, id, frozen),
+            None => None,
+        };
         Ok::<_, AcpError>(SessionState {
             session_id: id.to_owned(),
             thread_id: id.to_owned(),
@@ -470,6 +475,9 @@ fn create_session_workflow_middleware(
         // 内部 handler 消费：usage/progress）；统一发射接线留待单独裁定。
         None,
         Arc::clone(&cfg.skills),
+        // W4b（F4）：workflow agent 与主链共用会话级 MCP skill registry
+        // （会话已登记时取到；未登记/print 模式为 None → 技能工具为空面）。
+        cfg.session_manager.mcp_skill_registry_for(session_id),
     );
     if let (Some(middleware), Some(session)) =
         (&middleware, cfg.session_manager.get_session(session_id))
@@ -629,9 +637,11 @@ pub(crate) async fn new_session_from_prepared(
     }
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
 
-    // ── P4：activate 后扫描 builtin workspace resources，再构建 frozen ──
-    // 读取/构建失败按发布前失败处理（X8 的 read 失败走 J2 补偿）：先排空本次已起的
-    // 环境，再撤销未发布的创建——不进入 commit，也不留任何半提交。
+    // ── P4：activate 后读取 builtin workspace resources（覆盖文档 + 技能快照），
+    //    再构建 frozen ──
+    // 读取/构建失败按发布前失败处理（X8 的覆盖不可得走降级；X5 的 system 技能面
+    // 读取失败走 J2 补偿 fail-closed）：先排空本次已起的环境，再撤销未发布的创建
+    // ——不进入 commit，也不留任何半提交。
     // 无启用 section 时不去等 workspace 连接（覆盖不可得即内置，X8；不扩大请求时延）。
     let enabled_sections = enabled_meta_sections(cfg);
     let docs = match environment.as_ref() {
@@ -646,10 +656,25 @@ pub(crate) async fn new_session_from_prepared(
         }
         _ => HashMap::new(),
     };
+    // W4b（F3/J1）：system 来源（builtin `workspace` 实例）的技能元数据快照——
+    // 冻结 system prompt 的技能摘要由它渲染（非 system 来源不进冻结面）。
+    // X5 失败语义：技能面不适用（未装配/未连接/未声明/被关闭）⇒ 空快照不是失败；
+    // 已声明且被选中却读取失败 ⇒ fail-closed（下面按 J2 补偿后返回错误）。
+    let skill_catalog = match environment.as_ref() {
+        Some(env) => match env.read_workspace_skill_catalog().await {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                drain_and_abandon(environment.as_ref(), &initialization).await?;
+                return Err(error);
+            }
+        },
+        None => Vec::new(),
+    };
     if let Err(error) = prepared.build_frozen_after_activation(
         cfg,
         &crate::prompt::PromptRuntimeEnv::detect(&prepared.cwd),
         docs,
+        &skill_catalog,
     ) {
         drain_and_abandon(environment.as_ref(), &initialization).await?;
         return Err(error);

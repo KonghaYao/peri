@@ -146,6 +146,16 @@ pub struct HostAssemblyInput {
     /// 面板上的连接状态（契约明文）。顶层三路径（`session_resources = false`，无会话
     /// 上下文）传空集；会话装配从 frozen snapshot 派生（禁止回退当轮 config，设计 §2.5）。
     pub builtin_closed: std::collections::BTreeSet<String>,
+    /// 宿主技能面关闭位：`"SkillsMiddleware" ∈ disabled_middlewares`（与
+    /// [`Self::builtin_closed`] **同一份** disabled 集合的投影，装配期一次派生）。
+    ///
+    /// 语义 = 关闭宿主技能面（`core:{skill}` 裸名命令投影）：链槽关闭
+    /// （`SkillsMiddleware` 不构造 ⇒ 13_skills 段落 + SkillTool/DiscoverSkillsTool
+    /// 消失）时命令面不得留下幽灵路由。**不是**实例关闭——workspace 实例、7 个
+    /// 工具与 `{server}:{skill}` MCP 发现面均不受影响（两个位的派生事实源相同，
+    /// 判据不同）。随 builtin 实例上下文注入 pool（发现管线的唯一消费点）。
+    /// 顶层三路径（无会话上下文）恒为 `false`；会话装配从 frozen snapshot 派生。
+    pub skills_face_closed: bool,
 }
 
 /// Construct terminal hook execution; the session environment owns admission and joining.
@@ -221,7 +231,6 @@ pub fn build_session_manager(
     dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     skills: Arc<dyn SkillsPort>,
     plugin_command_entries: Vec<RouteEntry>,
-    plugin_skill_roots: Vec<SkillRoot>,
 ) -> SessionManager {
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
     SessionManager::new(
@@ -242,7 +251,6 @@ pub fn build_session_manager(
         })),
         skills,
         plugin_command_entries,
-        plugin_skill_roots,
     )
 }
 
@@ -305,6 +313,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         workspace_resources,
         prepared_plugins,
         builtin_closed,
+        skills_face_closed,
     } = input;
 
     // 用户级 `.claude` 与准备面、插件 RPC 共用同一权威（HOME 优先）：
@@ -428,7 +437,11 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         if let Some(workspace_resources) = workspace_resources {
             builtin_context = builtin_context.with_workspace_resources(workspace_resources);
         }
-        let builtin_context = builtin_context.with_closed(builtin_closed);
+        let builtin_context = builtin_context
+            .with_closed(builtin_closed)
+            // W4b 收口：宿主技能面关闭位与关闭集同源（同一份 disabled 集合），
+            // 由发现管线的 core 投影消费（`core:{skill}` 裸名命令撤下）。
+            .with_skills_face_closed(skills_face_closed);
         let builtin_context = Arc::new(builtin_context);
         if let Err(error) = pool.set_builtin_instance_context(builtin_context) {
             // 本池是上一行刚构造的（从未 initialize）⇒ 两个 typed 拒绝都不可能出现：
@@ -648,6 +661,10 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         );
     }
 
+    // W4b（F6/J5）：`prepared_skill_roots` 不再经 session 管理器注入命令面
+    // （技能命令改由 MCP 发现投影）；它仍是**技能资源根**的事实源，由会话环境
+    // 装配（`SessionEnvironment::assemble_with_frozen` 的 provider 输入）与
+    // `AcpServerConfig.plugin_skill_roots` 消费。
     let plugin_skill_roots = prepared_skill_roots.unwrap_or_else(|| {
         plugin_data
             .as_ref()
@@ -702,10 +719,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         mcp_subscription,
         Some(Arc::clone(&dynamic_mcp)),
         skills.clone(),
-        // Phase 6 B2/C1：插件静态条目 + 插件 skill roots 注入 session
-        // 管理器（会话创建时按 内置 → skills → 插件 顺序注册）。
+        // Phase 6 B2：插件静态命令条目注入 session 管理器（会话创建时注册；
+        // 技能命令面已改由 MCP 发现异步投影，不再经此处）。
         plugin_command_entries.clone(),
-        plugin_skill_roots.clone(),
     );
 
     // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）

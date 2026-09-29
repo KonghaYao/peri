@@ -356,6 +356,9 @@ pub(crate) async fn run_prompt(
             frozen_claude_md: frozen.claude_md().map(|s| s.to_string()),
             frozen_claude_local_md: frozen.claude_local_md().map(|s| s.to_string()),
             frozen_skill_summary: frozen.skill_summary().map(|s| s.to_string()),
+            // W4b（F4/J5）：workflow agent 的技能来源 = 会话级 MCP registry
+            // （与主链同一份）；会话未登记时为 None（技能面为空，不回落磁盘）。
+            mcp_skill_registry: session_manager.mcp_skill_registry_for(&session_id),
             session_id: Some(session_id.clone()),
             compact_config: {
                 let mut cc = peri_config_snapshot

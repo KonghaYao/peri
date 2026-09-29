@@ -338,7 +338,7 @@ fn test_extract_skills_paths_fallback_returns_container_root() {
     std::fs::write(skill_dir.join("SKILL.md"), "---\nname: my-skill\n---\nbody").unwrap();
 
     // manifest has no skills field → fallback returns base_dir/skills/ as a single root;
-    // scan_skill_roots will recursively find my-skill inside.
+    // provider 会递归发现其中的 my-skill（宿主侧扫描已删除）。
     let manifest = make_manifest_with_commands(vec![]);
     let paths = extract_skills_paths(&manifest, dir.path(), "test-plugin");
     assert_eq!(paths.len(), 1);
@@ -352,14 +352,14 @@ fn test_extract_skills_paths_fallback_returns_root_even_without_skill_md() {
     let skill_dir = dir.path().join("skills").join("incomplete");
     std::fs::create_dir_all(&skill_dir).unwrap();
     // no SKILL.md inside, but fallback still returns the container root;
-    // scan_skill_roots will simply find no skills inside.
+    // provider 在其中不会发现任何 skill（宿主侧扫描已删除）。
 
     let manifest = make_manifest_with_commands(vec![]);
     let paths = extract_skills_paths(&manifest, dir.path(), "test-plugin");
     assert_eq!(
         paths.len(),
         1,
-        "fallback 仍返回容器根，由 scan_skill_roots 决定是否含 skill"
+        "fallback 仍返回容器根，是否含 skill 由 provider 扫描决定"
     );
     assert!(paths[0].path.ends_with("skills"));
 }

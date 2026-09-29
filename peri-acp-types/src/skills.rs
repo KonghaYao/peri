@@ -1,10 +1,23 @@
 //! Skill 契约（来源标签 / 根目录 / 元数据）。
 //!
 //! 自 `peri-middlewares/src/skills/loader.rs` 迁入（3.0 批 2 波 1：协议类型
-//! 归契约层；middlewares 保留 re-export 保兼容）。扫描/加载逻辑留在
-//! middlewares（`scan_skill_roots` / `load_skill_metadata` 等）。
+//! 归契约层；middlewares 保留 re-export 保兼容）。
+//!
+//! W4b（J5）：技能**内容**的扫描与读取整体归 MCP 侧（builtin `workspace`
+//! 实例的资源 provider），宿主侧只剩根解析适配器（
+//! `peri_middlewares::resolve_skill_roots`）与配置读取
+//! （`peri_middlewares::settings`）；本模块因此只承载类型契约。
 
 use std::path::PathBuf;
+
+/// SEP-2640 Skills 扩展标识（`capabilities.extensions` 键；server 声明即支持
+/// `skills/list` / `skills/get`）。
+///
+/// 单一事实源：provider 侧在 `ServerCapabilities.extensions` 写入该键
+/// （`mcp-packages/workspace`），客户端侧据其判定 `skills_capable`（规范路径
+/// 的唯一门闩，`peri-middlewares/src/mcp/client/service.rs`）；两侧各自硬编码
+/// 会静默漂移成「声明了但客户端不认」。
+pub const SKILLS_EXTENSION_ID: &str = "io.modelcontextprotocol/skills";
 
 /// Skill 来源 scope，用于 metadata 标签与日志诊断
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

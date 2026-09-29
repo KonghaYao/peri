@@ -294,10 +294,11 @@ async fn test_skill_preload_registered() {
         )
         .unwrap();
 
-    // SKILL.md content
+    // 磁盘上的 SKILL.md 是**反例**：W4b 后子链预载只查 MCP registry，
+    // 宿主不再读这个文件（内容差异即证明未回落磁盘）。
     std::fs::write(
             skills_dir.join("SKILL.md"),
-            "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nThis is the test skill content.\n",
+            "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nDISK CONTENT MUST NOT BE READ.\n",
         )
         .unwrap();
 
@@ -333,15 +334,19 @@ async fn test_skill_preload_registered() {
         }
     }
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(SkillPreloadCheckLLM {
-                preload_count: Arc::clone(&preload_count_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        dir.path().to_str().unwrap().to_string(),
+    let t = super::with_skill_registry(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(SkillPreloadCheckLLM {
+                    preload_count: Arc::clone(&preload_count_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            dir.path().to_str().unwrap().to_string(),
+        ),
+        "workspace",
+        &[("test-skill", "This is the test skill content.\n")],
     );
 
     let result = t

@@ -99,9 +99,14 @@ impl WorkflowMiddlewareFactory for BuiltinWorkflowAgentFactory {
         cwd: &str,
         disabled: &std::collections::HashSet<String>,
         execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+        mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     ) -> Vec<Box<dyn BaseTool>> {
-        let mut tools =
-            WorkflowAgentMiddlewareFactory::workflow_tools(cwd, disabled, execution_manager);
+        let mut tools = WorkflowAgentMiddlewareFactory::workflow_tools(
+            cwd,
+            disabled,
+            execution_manager,
+            mcp_skill_registry,
+        );
         tools.extend(self.builtin_tools(disabled));
         tools
     }
@@ -163,34 +168,43 @@ impl WorkflowAgentMiddlewareFactory {
     /// `policy_key`（`WorkspaceMiddleware`）。因此 `execution_manager` 在本函数内
     /// 已无消费点（原 `TerminalMiddleware::build_tools_with_registry` 是唯一消费者）；
     /// 形参保留以维持端口签名（`WorkflowMiddlewareFactory::build_tools`）不变。
+    /// workflow agent 的基础工具集（无 builtin 提供面）。
+    ///
+    /// 迁移后**不含**裸名 Web 工具：Web / Artifact 能力由 builtin 实例以
+    /// 原名 direct bridge 的形式提供（A6 面③，见
+    /// [`BuiltinWorkflowAgentFactory`] 与 [`crate::assembly::open_builtin_bridges`]）。
+    ///
+    /// v4-part-4 W3-C1：**同样不含** 7 个 workspace 裸名（`Read` / `Write` / `Edit` /
+    /// `Glob` / `Grep` / `folder_operations` / `Bash`）——它们的提供面已迁 builtin
+    /// `workspace` 实例，经 `BuiltinWorkflowAgentFactory::builtin_tools`（即
+    /// `open_builtin_bridges`）以原名提供，关闭键为该实例的
+    /// `policy_key`（`WorkspaceMiddleware`）。因此 `execution_manager` 在本函数内
+    /// 已无消费点（原 `TerminalMiddleware::build_tools_with_registry` 是唯一消费者）；
+    /// 形参保留以维持端口签名（`WorkflowMiddlewareFactory::build_tools`）不变。
+    ///
+    /// W4b（F4/J5）：**本地扫描已删除**——两个技能工具共享的 `cached_skills`
+    /// 改由会话级 MCP skill registry 投影填充（`registry` 形参；workflow agent
+    /// 与主链消费同一份目录，不再只看 project-level）。
     fn workflow_tools(
-        cwd: &str,
+        _cwd: &str,
         disabled: &std::collections::HashSet<String>,
         _execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+        mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     ) -> Vec<Box<dyn BaseTool>> {
         let mut tools: Vec<Box<dyn BaseTool>> = Vec::new();
         // MetaHarness（设计 §2.5）：关闭的 middleware 连坐，其工具不进列表。
-        // Workflow agent 无 plugin_skill_roots，仅 project-level skill 可用。
-        // 在注册工具前扫描 project skills，预填充缓存（SkillTool 无懒扫描回退）。
         // D3：统一模型可见协议为 SkillTool(skill_name) + DiscoverSkillsTool，
         // 与主 agent / subagent 链一致，不再注册旧 Skill(skill, args)。
         if !disabled.contains("SkillsMiddleware") {
-            let project_skills_root = std::path::PathBuf::from(cwd).join(".claude").join("skills");
-            let skills = crate::skills::loader::scan_skill_roots(&[crate::skills::SkillRoot {
-                path: project_skills_root,
-                source: crate::skills::SkillSource::Project,
-                plugin_name: None,
-            }]);
-            let cached = std::sync::Arc::new(std::sync::RwLock::new(if skills.is_empty() {
-                None
-            } else {
-                Some(skills)
-            }));
-            // F4（W4 迁到 MCP registry 投影）：workflow agent 面当前只有本地
-            // 扫描结果，MCP 来源条目不经此路径 → 不注入 registry。
+            let cached = std::sync::Arc::new(std::sync::RwLock::new(
+                mcp_skill_registry
+                    .as_ref()
+                    .map(|registry| registry.all_skills())
+                    .filter(|skills| !skills.is_empty()),
+            ));
             tools.push(Box::new(crate::skills::tools::SkillTool::new(
                 Arc::clone(&cached),
-                None,
+                mcp_skill_registry,
             )));
             tools.push(Box::new(crate::skills::tools::DiscoverSkillsTool::new(
                 cached,
@@ -258,8 +272,9 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         cwd: &str,
         disabled: &std::collections::HashSet<String>,
         execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+        mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     ) -> Vec<Box<dyn BaseTool>> {
-        Self::workflow_tools(cwd, disabled, execution_manager)
+        Self::workflow_tools(cwd, disabled, execution_manager, mcp_skill_registry)
     }
 
     fn build_sandbox_write_tool(
@@ -303,7 +318,8 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         }
 
         if !disabled.contains("SkillsMiddleware") {
-            let mut skills_mw = SkillsMiddleware::new();
+            let mut skills_mw =
+                SkillsMiddleware::new().with_mcp_registry(ctx.mcp_skill_registry.clone());
             if let Some(ref summary) = ctx.frozen_skill_summary {
                 skills_mw = skills_mw.with_frozen_summary(summary.clone());
             }
@@ -311,11 +327,12 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         }
 
         // 与普通 subagent 一致：agent.md 声明的 skills 在启动时预加载。
+        // W4b（F5/J5）：预载只查会话级 MCP registry（与主链同一份）。
         if !disabled.contains("SkillPreloadMiddleware") {
-            middlewares.push(Box::new(SkillPreloadMiddleware::new(
-                skill_names.to_vec(),
-                &ctx.cwd,
-            )));
+            middlewares.push(Box::new(
+                SkillPreloadMiddleware::new(skill_names.to_vec())
+                    .with_mcp_registry(ctx.mcp_skill_registry.clone()),
+            ));
         }
 
         // 3a. GitAttributionMiddleware

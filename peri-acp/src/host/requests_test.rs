@@ -164,7 +164,6 @@ async fn build_server_config(
         })),
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
     );
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
@@ -233,11 +232,9 @@ async fn create_bound_fixture(cfg: &AcpServerConfig, cwd: &str, id: Option<&str>
         .await
         .unwrap();
     let thread_id = id.map(str::to_owned).unwrap_or_else(new_session_id);
-    let frozen = cfg.session_manager.build_frozen_data(
-        workspace.cwd.to_str().unwrap(),
-        &cfg.plugin_skill_roots,
-        &cfg.plugin_agent_dirs,
-    );
+    let frozen = cfg
+        .session_manager
+        .build_frozen_data(workspace.cwd.to_str().unwrap(), &cfg.plugin_agent_dirs);
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
     let lease = cfg
         .session_resources
@@ -352,11 +349,9 @@ async fn register_session_with_history(
         .resolve_workspace(Path::new(cwd))
         .await
         .unwrap();
-    let frozen = cfg.session_manager.build_frozen_data(
-        workspace.cwd.to_str().unwrap(),
-        &cfg.plugin_skill_roots,
-        &cfg.plugin_agent_dirs,
-    );
+    let frozen = cfg
+        .session_manager
+        .build_frozen_data(workspace.cwd.to_str().unwrap(), &cfg.plugin_agent_dirs);
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
     let lease = cfg
         .session_resources
@@ -578,6 +573,9 @@ mod workspace_cases;
 
 #[path = "requests_meta_resources_test.rs"]
 mod meta_resources;
+
+#[path = "requests_skill_resources_test.rs"]
+mod skill_resources;
 
 #[path = "requests_cron_test.rs"]
 mod cron_tests;

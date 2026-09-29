@@ -224,7 +224,10 @@ pub(crate) fn peer_cache_version(peer: &Peer<RoleClient>) -> Option<String> {
 }
 
 /// SEP-2640 Skills 扩展标识（capabilities.extensions 键）。
-pub(crate) const SKILLS_EXTENSION_ID: &str = "io.modelcontextprotocol/skills";
+///
+/// W4b：常量的单一事实源在契约层（provider 侧在同一键上声明能力），本处只做
+/// 别名，避免两侧各写一份字符串而静默漂移。
+pub(crate) const SKILLS_EXTENSION_ID: &str = peri_acp_types::skills::SKILLS_EXTENSION_ID;
 
 /// 检测 peer 的 server capabilities 是否声明 Skills 扩展（SEP-2640）。
 ///

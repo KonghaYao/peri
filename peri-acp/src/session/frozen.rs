@@ -21,15 +21,9 @@ impl SessionManager {
     pub fn build_frozen_data(
         &self,
         cwd: &str,
-        plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
     ) -> crate::session::executor::FrozenSessionData {
-        self.build_frozen_data_with_config(
-            &self.inner.peri_config,
-            cwd,
-            plugin_skill_roots,
-            plugin_agent_dirs,
-        )
+        self.build_frozen_data_with_config(&self.inner.peri_config, cwd, plugin_agent_dirs)
     }
 
     /// Legacy restoration discovers configuration before admitting execution resources.
@@ -37,59 +31,55 @@ impl SessionManager {
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
     ) -> crate::session::executor::FrozenSessionData {
         // 调用点未准备运行环境：在此探测一次并委托冻结渲染，装配期不再各自取一份。
         let runtime_env = crate::prompt::PromptRuntimeEnv::detect(cwd);
-        self.build_frozen_data_with_config_and_runtime(
-            config,
-            cwd,
-            plugin_skill_roots,
-            plugin_agent_dirs,
-            &runtime_env,
-        )
+        self.build_frozen_data_with_config_and_runtime(config, cwd, plugin_agent_dirs, &runtime_env)
     }
 
     pub(crate) fn build_frozen_data_with_config_and_runtime(
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
         runtime_env: &crate::prompt::PromptRuntimeEnv,
     ) -> crate::session::executor::FrozenSessionData {
         self.build_frozen_data_with_config_and_runtime_and_docs(
             config,
             cwd,
-            plugin_skill_roots,
             plugin_agent_dirs,
             runtime_env,
             HashMap::new(),
+            // 无内容准入期的构造点（legacy 首次接纳 / 测试夹具）：没有资源面 ⇒
+            // 没有 system 技能摘要（J5：不回落磁盘）。
+            &[],
         )
     }
 
+    /// `skill_catalog` = 内容准入期从 system 来源（builtin `workspace` 实例）取到
+    /// 的技能元数据快照（W4b/F3）；空快照 = 技能面为空（不是错误，X5），摘要随之为空。
     pub(crate) fn build_frozen_data_with_config_and_runtime_and_docs(
         &self,
         config: &crate::provider::PeriConfig,
         cwd: &str,
-        plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
         runtime_env: &crate::prompt::PromptRuntimeEnv,
         docs: HashMap<String, String>,
+        skill_catalog: &[peri_acp_types::skills::SkillMetadata],
     ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = config.config.language.clone();
         let (claude_md, claude_local_md) =
             peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
-        // 一次性读取 disableBundledSkills 并冻结到 frozen_skill_summary
-        // （保持系统提示词稳定性：会话内不重读）
-        let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
-        let skill_summary = peri_middlewares::SkillsMiddleware::build_frozen_summary(
-            cwd,
-            plugin_skill_roots.to_vec(),
-            disable_bundled,
-        );
+        // W4b（F3/J1/J5）：技能摘要只从**传入的 MCP 侧元数据快照**渲染——本地
+        // 扫描（原 `build_frozen_summary`）已删除，宿主不再有技能文件系统读取点。
+        // 快照由调用方在内容准入期（P4）从 system 来源（builtin `workspace`
+        // 实例）读取：新会话是当轮读取；legacy 首次接纳发生在准入事务之前
+        // （无执行环境 ⇒ 无资源面，按 J2 §3.1 保持为空——技能仍在首轮经 MCP
+        // 发现可得，只是不进冻结摘要）；恢复路径复用持久 blob，不重读。
+        let skill_summary =
+            peri_middlewares::SkillsMiddleware::render_frozen_summary(skill_catalog);
 
         let meta_harness_state =
             build_meta_harness_state(config.config.meta_harness.as_ref(), docs);

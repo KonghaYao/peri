@@ -191,28 +191,40 @@ async fn collect_via_skills_list_inner(
     entries_to_metadata(server, entries)
 }
 
-async fn fetch_skill_list_page(
+/// 保留错误的 `skills/list` 单页读取（F3 冻结快照用）。
+///
+/// 与 [`fetch_skill_list_page`] 是**同一实现**：发现路径把错误吞成
+/// `None`（best-effort，不进首轮阻塞），而冻结期快照按 X5 需要区分「空技能集」
+/// 与「读取失败」（后者 fail-closed），因此错误在这里以 `Err(String)` 上抛，
+/// 文案不含主机路径与正文。
+async fn fetch_skill_list_page_checked(
     peer: &Peer<RoleClient>,
     server: &str,
     params: Option<serde_json::Value>,
-) -> Option<SkillListResponse> {
+) -> Result<SkillListResponse, String> {
+    fetch_skill_list_page_inner(peer, server, params).await
+}
+
+/// 单页读取（供 checked 与 best-effort 两条路径共用）。
+async fn fetch_skill_list_page_inner(
+    peer: &Peer<RoleClient>,
+    server: &str,
+    params: Option<serde_json::Value>,
+) -> Result<SkillListResponse, String> {
     let request = ClientRequest::CustomRequest(CustomRequest::new("skills/list", params));
     let response = tokio::time::timeout(SKILLS_LIST_TIMEOUT, peer.send_request(request)).await;
     match response {
-        Ok(Ok(ServerResult::CustomResult(custom))) => match custom.result_as() {
-            Ok(page) => Some(page),
-            Err(err) => {
-                tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 响应解析失败");
-                None
-            }
-        },
+        Ok(Ok(ServerResult::CustomResult(custom))) => custom.result_as().map_err(|err| {
+            tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 响应解析失败");
+            format!("skills/list 响应解析失败: {err}")
+        }),
         Ok(Ok(_)) => {
             tracing::warn!(server, "MCP skill 发现：skills/list 返回非预期响应类型");
-            None
+            Err("skills/list 返回非预期响应类型".to_string())
         }
         Ok(Err(err)) => {
             tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 调用失败");
-            None
+            Err(format!("skills/list 调用失败: {err}"))
         }
         Err(_) => {
             tracing::warn!(
@@ -220,9 +232,65 @@ async fn fetch_skill_list_page(
                 "MCP skill 发现：skills/list 超时 ({}s)",
                 SKILLS_LIST_TIMEOUT.as_secs()
             );
-            None
+            Err(format!(
+                "skills/list 超时 ({}s)",
+                SKILLS_LIST_TIMEOUT.as_secs()
+            ))
         }
     }
+}
+
+/// 发现路径的单页读取（best-effort：错误记日志后吞成 `None`，既有语义不变）。
+async fn fetch_skill_list_page(
+    peer: &Peer<RoleClient>,
+    server: &str,
+    params: Option<serde_json::Value>,
+) -> Option<SkillListResponse> {
+    fetch_skill_list_page_inner(peer, server, params).await.ok()
+}
+
+/// 冻结期技能清单快照（F3）：分页读完 `skills/list`，**不读正文**、不写注册表、
+/// 不落任何缓存，错误原样上抛（调用方按 X5 决定 fail-closed 或降级）。
+///
+/// 与 [`collect_via_skills_list`] 的差别只有失败语义：发现是 best-effort
+/// （空结果 + 日志），冻结快照必须能区分「技能集为空」（正常）与「读取失败」
+/// （system 已声明且被选中的投递失败 ⇒ fail-closed）。
+pub(crate) async fn snapshot_via_skills_list(
+    peer: Peer<RoleClient>,
+    server: &str,
+    cancel: AgentCancellationToken,
+) -> Result<Vec<SkillMetadata>, String> {
+    let mut dto_entries: Vec<SkillListEntryDto> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _page in 0..MAX_LIST_PAGES {
+        if cancel.is_cancelled() {
+            return Err("skills/list 读取被取消".to_string());
+        }
+        let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
+        let page = fetch_skill_list_page_checked(&peer, server, params).await?;
+        dto_entries.extend(page.skills);
+        let next = page.next_cursor;
+        if next.as_ref().is_some() && next.as_ref() == cursor.as_ref() {
+            tracing::warn!(server, "MCP skill 快照：skills/list 游标不前进，终止分页");
+            break;
+        }
+        match next {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    if dto_entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let entries: Vec<SkillListEntry> = dto_entries.into_iter().filter_map(entry_from_dto).collect();
+    if entries.is_empty() {
+        tracing::warn!(
+            server,
+            "MCP skill 快照：skills/list 条目全部缺 frontmatter name/description"
+        );
+        return Ok(Vec::new());
+    }
+    Ok(entries_to_metadata(server, entries).1)
 }
 
 /// 共享恢复流程：`skills/get` 拉取当前条目快照（W2：**不读正文**）。

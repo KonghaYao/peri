@@ -631,9 +631,10 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
         "---\nname: p0-2-bg\ndescription: P0-2 background agent\nskills:\n  - p0-2-skill\n---\n\nRun the task.\n",
     )
     .unwrap();
+    // 磁盘文件是**反例**（W4b：子链预载只查 MCP registry，不读盘）。
     std::fs::write(
         skills_dir.join("SKILL.md"),
-        "---\nname: p0-2-skill\ndescription: P0-2 skill\n---\n\nP0-2 BACKGROUND SKILL MARKER\n",
+        "---\nname: p0-2-skill\ndescription: P0-2 skill\n---\n\nDISK CONTENT MUST NOT BE READ\n",
     )
     .unwrap();
 
@@ -685,6 +686,11 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
     .with_cancel(parent_cancel.clone())
     .with_task_manager(registry)
     .with_bg_event_sender(bg_tx);
+    let tool = super::with_skill_registry(
+        tool,
+        "workspace",
+        &[("p0-2-skill", "P0-2 BACKGROUND SKILL MARKER\n")],
+    );
 
     let started = tool
         .invoke(

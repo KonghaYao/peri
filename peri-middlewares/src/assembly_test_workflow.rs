@@ -15,6 +15,7 @@ fn workflow_build_tools_filters_disabled() {
         "/tmp/contract-test",
         &std::collections::HashSet::new(),
         None,
+        None,
     );
     let without_pool_names: Vec<&str> = without_pool.iter().map(|t| t.name()).collect();
     assert!(
@@ -32,6 +33,7 @@ fn workflow_build_tools_filters_disabled() {
     let all = pool_factory.build_tools(
         "/tmp/contract-test",
         &std::collections::HashSet::new(),
+        None,
         None,
     );
     let all_names: Vec<&str> = all.iter().map(|t| t.name()).collect();
@@ -79,7 +81,7 @@ fn workflow_build_tools_filters_disabled() {
     let cases: &[(&str, &[&str])] = &[("SkillsMiddleware", &["SkillTool", "DiscoverSkillsTool"])];
     for (mw, expected_gone) in cases {
         let disabled: std::collections::HashSet<String> = std::iter::once(mw.to_string()).collect();
-        let tools = pool_factory.build_tools("/tmp/contract-test", &disabled, None);
+        let tools = pool_factory.build_tools("/tmp/contract-test", &disabled, None, None);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for tool in *expected_gone {
             assert!(
@@ -94,7 +96,7 @@ fn workflow_build_tools_filters_disabled() {
     {
         let disabled: std::collections::HashSet<String> =
             std::iter::once("WorkspaceMiddleware".to_string()).collect();
-        let tools = pool_factory.build_tools("/tmp/contract-test", &disabled, None);
+        let tools = pool_factory.build_tools("/tmp/contract-test", &disabled, None, None);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for declaration in workspace.tools {
             assert!(
@@ -116,7 +118,7 @@ fn workflow_build_tools_filters_disabled() {
     ] {
         let disabled: std::collections::HashSet<String> =
             std::iter::once(policy_key.to_string()).collect();
-        let tools = pool_factory.build_tools("/tmp/contract-test", &disabled, None);
+        let tools = pool_factory.build_tools("/tmp/contract-test", &disabled, None, None);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(
             !names.contains(&gone),
@@ -136,7 +138,7 @@ fn workflow_build_tools_filters_disabled() {
             .iter()
             .map(|instance| instance.policy_key.to_string())
             .collect();
-    let tools = pool_factory.build_tools("/tmp/contract-test", &all_keys, None);
+    let tools = pool_factory.build_tools("/tmp/contract-test", &all_keys, None, None);
     assert!(
         !tools.iter().any(|tool| tool.name().starts_with("mcp__")),
         "全部 builtin 实例都关闭后 workflow 面不得残留 MCP 工具: {:?}",
@@ -223,6 +225,7 @@ async fn workflow_shell_tool_face_is_the_workspace_bridge() {
         cwd,
         &std::collections::HashSet::new(),
         None,
+        None,
     );
     assert_eq!(
         no_pool.iter().filter(|tool| tool.name() == "Bash").count(),
@@ -234,7 +237,7 @@ async fn workflow_shell_tool_face_is_the_workspace_bridge() {
     // 带池侧：唯一形态是 builtin `workspace` 实例的桥，直连性 = 注册表声明。
     let with_pool =
         default_workflow_middleware_factory_with_pool(Some(pool_with_builtin_instances()))
-            .build_tools(cwd, &std::collections::HashSet::new(), None);
+            .build_tools(cwd, &std::collections::HashSet::new(), None, None);
     let declared = peri_acp_types::builtin_mcp::find("workspace")
         .expect("workspace 必须是已实现实例")
         .tools

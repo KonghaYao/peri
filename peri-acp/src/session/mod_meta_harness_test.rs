@@ -155,7 +155,6 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
         None,
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
     );
 
     let docs = HashMap::from([
@@ -169,9 +168,10 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
         &config,
         &cwd,
         &[],
-        &[],
         &crate::prompt::PromptRuntimeEnv::detect(&cwd),
         docs,
+        // W4b（F3）：技能快照由内容准入期给定；本用例只覆盖段落覆盖面。
+        &[],
     );
     let state = frozen.meta_harness();
     assert_eq!(
@@ -244,7 +244,6 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
         None,
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
     );
 
     let v1 = HashMap::from([("01_intro".to_string(), "V1-BODY".to_string())]);
@@ -252,9 +251,10 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
         &config,
         &cwd,
         &[],
-        &[],
         &crate::prompt::PromptRuntimeEnv::detect(&cwd),
         v1,
+        // W4b（F3）：技能快照由内容准入期给定；本用例只覆盖段落覆盖面。
+        &[],
     );
     assert!(frozen.system_prompt().contains("V1-BODY"));
     assert!(
@@ -273,9 +273,10 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
         &config,
         &cwd,
         &[],
-        &[],
         &crate::prompt::PromptRuntimeEnv::detect(&cwd),
         v2,
+        // W4b（F3）：技能快照由内容准入期给定；本用例只覆盖段落覆盖面。
+        &[],
     );
     assert!(
         frozen2.system_prompt().contains("V2-BODY"),

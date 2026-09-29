@@ -4,9 +4,6 @@ use std::collections::HashMap;
 use std::sync::{atomic::AtomicBool, Arc};
 
 use chrono::Utc;
-use peri_acp_types::command::command_route::{
-    CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource, RouteEntry,
-};
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
@@ -35,66 +32,26 @@ impl SessionManager {
     ///
     /// 1. 内置命令（[`register_builtins`]，先注册者占键——内置永远优先，
     ///    设计 §64 冲突纯拒绝 + 装配顺序裁决）；
-    /// 2. 本地 skills（C1：`core:{name}` 第一等级显式形态，kind = Skill，
-    ///    provenance = Core + Connected；同名冲突 / 名含冒号 → 注册表
-    ///    `register_all` 内部逐条 warn + 跳过，注册表保持既有条目）；
-    /// 3. 插件静态命令（B2：`plugin:{plugin}:{cmd}` 三层形态，kind =
+    /// 2. 插件静态命令（B2：`plugin:{plugin}:{cmd}` 三层形态，kind =
     ///    Command，provenance = Plugin{name} + Connected）。
+    ///
+    /// W4b（F6/J5）：原「本地 skills 同步扫盘注册 `core:{name}`」已删除——技能
+    /// 目录的唯一来源是会话级 MCP skill registry。`core:{skill}` 裸名命令由 MCP
+    /// 发现管线**异步投影**（peri-middlewares 的 `mcp::skill_discovery` 中的
+    /// `project_core_skill_commands`，随 `/server:skill` 同批写入；实例关闭或断连
+    /// 时同批撤下），因此这里不再需要技能扫描，也不再需要在构造期读取
+    /// `SkillsMiddleware` 关闭位（关闭位由发现面按 A24 关闭集 +
+    /// `SkillsMiddleware` 关闭位（`BuiltinInstanceContext.skills_face_closed`，
+    /// 与关闭集同一份 `disabled_middlewares` 派生）消费）。
     ///
     /// 动态注入（MCP / 插件运行时注册注销）由发现管线异步驱动（A3 已接，
     /// 不在此处）。skill 注入语义（`AgentPassthrough`）与插件命令执行语义
     /// 均为占位（Phase 5+ 补齐执行体）。
-    fn build_command_registry(&self, cwd: &str) -> Arc<CommandRegistry> {
+    fn build_command_registry(&self) -> Arc<CommandRegistry> {
         let reg = Arc::new(CommandRegistry::new());
         // 1) 内置（先注册者占键，后续同键一律 Conflict 拒绝）。
         crate::session::command::register_builtins(&reg);
-        // 2) 本地 skills 归 core 域（C1；扫描调用点收敛为本处——发送侧
-        // 旧扫描路径由 Phase 6 C2 收尾清理）。MetaHarness 关闭
-        // SkillsMiddleware 时，不得注册 slash 路由，否则 `/skill` 会绕过
-        // middleware 装配开关，经 AgentPassthrough 进入 agent 管线。
-        let skills_enabled = self
-            .inner
-            .peri_config
-            .config
-            .meta_harness
-            .as_ref()
-            .and_then(|config| config.get("SkillsMiddleware"))
-            .copied()
-            != Some(false);
-        let skills = if skills_enabled {
-            self.inner
-                .skills
-                .available_skills(cwd, &self.inner.plugin_skill_roots)
-        } else {
-            Vec::new()
-        };
-        let skill_entries: Vec<RouteEntry> = skills
-            .iter()
-            .map(|s| RouteEntry {
-                // 第一等级显式形态；裸名 = 解析层快捷匹配（alias_index 登记）。
-                fullname: format!("core:{}", s.name.to_lowercase()),
-                aliases: s.aliases.clone(),
-                description: s.description.clone(),
-                kind: CommandEntryKind::Skill, // core 域本地 skill（设计 §85）
-                category: None,
-                args_schema: None,
-                handler: Arc::new(crate::session::command::AgentPassthrough), // Phase 1 handler
-                provenance: CommandProvenance {
-                    source: CommandSource::Core,
-                    lifecycle: CommandLifecycle::Connected,
-                },
-            })
-            .collect();
-        let (added, errors) = reg.register_all(skill_entries);
-        if added < skills.len() {
-            tracing::warn!(
-                total = skills.len(),
-                added,
-                errors = ?errors,
-                "本地 skills 注册部分失败（同名冲突 / 词法非法，已告警跳过）"
-            );
-        }
-        // 3) 插件静态命令（B2；bare 时为空 Vec，注册零条目无副作用）。
+        // 2) 插件静态命令（B2；bare 时为空 Vec，注册零条目无副作用）。
         reg.register_all(self.inner.plugin_command_entries.clone());
         reg
     }
@@ -150,7 +107,7 @@ impl SessionManager {
             task_manager,
             idle_suspended: Arc::new(AtomicBool::new(false)),
             mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
-            command_registry: self.build_command_registry(cwd),
+            command_registry: self.build_command_registry(),
             mcp_subscription: self.inner.mcp_subscription.clone(),
             dynamic_mcp_deployment: self.inner.dynamic_mcp.clone(),
             dynamic_mcp_close: self

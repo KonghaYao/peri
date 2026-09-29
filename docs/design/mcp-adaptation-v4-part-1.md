@@ -165,7 +165,7 @@ flowchart LR
 | 能力 | 目标 MCP | 说明 |
 | --- | --- | --- |
 | 文件读取、目录扫描、文件写入 | Workspace MCP | `AgentsMd`、`AgentDefine`、Filesystem、Terminal、GitWatch 等文件/进程/工作区观察能力的 v4 目标归入 Workspace MCP；每个 MCP 实例拥有独立的 capability root 和状态。 |
-| Skills 工具 | Workspace MCP | `SkillTool` / `DiscoverSkillsTool` 下放到 Workspace MCP 工具包；`SkillsMiddleware` / `SkillPreloadMiddleware` 只保留宿主侧 prompt/context、冻结摘要和预加载语义，不再直接提供 Skill 工具。 |
+| Skills 工具 | Workspace MCP（**仅来源**） | **已修订（2026-09-29，J3 + J5）**：`SkillTool` / `DiscoverSkillsTool` **保留在宿主**（`peri-middlewares`），跨多个 MCP server 聚合与把控——不下放到 Workspace MCP 工具包，包内不注册同名工具。下沉的只是 **skill 来源**：本地三根 / 插件根 / builtin 静态资产由 Workspace MCP 的资源面（`skills/list` + `resources/read`）提供，宿主技能文件系统读取点为零；`SkillsMiddleware` / `SkillPreloadMiddleware` 只做 registry 投影、摘要与预载语义。 |
 | 本地命令与 Git 查询 | Workspace MCP | `FilesystemMiddleware`、`TerminalMiddleware`、`GitWatchMiddleware` 的工具/工作区观察能力目标归入 Workspace MCP；`GitAttribution` 只复用 Workspace MCP 的查询能力，hook、notification 和归属注入仍由宿主持有。 |
 | Default system prompt | 部分复用 Workspace MCP | 当前基础段通过 `include_str!` 在编译期嵌入，不能简单改成 MCP `Read`；只有运行时 persona、language、项目指引等文件读取适合调用 Workspace MCP，prompt 合并、优先级、冻结和缓存仍属于 middleware/Agent。 |
 | Artifact 发布 | Artifact MCP | Agent/Runtime 显式准备内容后调用 Artifact MCP；Artifact MCP 只处理显式传入的内容，不能访问 Workspace MCP 的文件系统，也不能共享 Workspace MCP 的 capability root。 |

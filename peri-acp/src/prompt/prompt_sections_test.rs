@@ -344,16 +344,17 @@ fn test_skills_section_rendered_by_holder() {
         result.contains("# Skills"),
         "13_skills 段落标题应由持有者装配渲染"
     );
-    // discovery 协议按代码事实生成（loader 常量格式化注入，防手写漂移）
+    // W4b（J5）：discovery 协议不再声明本地路径与扫描参数——技能目录由
+    // MCP 侧（builtin `workspace` 实例）提供，宿主零 FS 读取。
     assert!(
-        result.contains(
-            "Each skill root is scanned recursively up to 6 levels deep (max 1000 directories per root)"
-        ),
-        "discovery 扫描参数应来自 loader 常量（MAX_SCAN_DEPTH / MAX_SKILLS_DIRS_PER_ROOT）"
+        result.contains("Skill catalog is served by MCP servers"),
+        "discovery 协议应说明 MCP 来源"
     );
     assert!(
-        result.contains("1. `~/.claude/skills/` — user-level skills (highest priority)"),
-        "discovery roots 优先级应动态生成（User 最高）"
+        !result.contains("~/.claude/skills")
+            && !result.contains("scanned recursively")
+            && !result.contains("levels deep"),
+        "13_skills 段落不得残留本地扫描/路径事实"
     );
 }
 

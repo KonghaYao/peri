@@ -50,7 +50,7 @@ pub(crate) use legacy_scan::{
 /// W2 激活面复用（skill_activation）：正文读取、stale 恢复、frontmatter 校验。
 pub(crate) use skills_list::{
     read_skill_resource_text, recover_entry_via_skills_get, refresh_entry_and_content,
-    SkillResourceRead,
+    snapshot_via_skills_list, SkillResourceRead,
 };
 pub(crate) use verify::{
     frontmatter_maps_equal, parse_mcp_skill_md, parse_skill_frontmatter_map, verify_digest,
@@ -116,6 +116,8 @@ pub(crate) async fn run_discovery(
         handle_token,
         cancel,
         None,
+        // `#[cfg(test)]` 便捷入口：不承载宿主技能面关闭位（既有测试语义不变）。
+        false,
     )
     .await;
 }
@@ -154,6 +156,10 @@ pub(crate) async fn run_discovery_with_cache(
     handle_token: HandleToken,
     cancel: AgentCancellationToken,
     cache: Option<(crate::mcp::resource_cache::McpResourceCache, String)>,
+    // 宿主技能面关闭位（`BuiltinInstanceContext.skills_face_closed`，与 A24 关闭集
+    // 同源）：真 ⇒ `core:{skill}` 裸名投影整体撤下（链槽关闭的配套半边）。
+    // 由调用方从 pool 上下文读出经参数透传——发现任务不持有 pool。
+    skills_face_closed: bool,
 ) {
     // legacy 兜底：resources 里无 skill:// 候选 → 直接完成（规范模式不受
     // resources 影响——skills/list 是独立原语）。cancel 已触发时与下方
@@ -173,6 +179,9 @@ pub(crate) async fn run_discovery_with_cache(
             probe_skill_templates(&peer, &handle.name).await;
         }
         registry.mark_discovery_completed(&handle.name, handle_token.clone(), vec![]);
+        // W4b（F6）：元数据面完成后同批刷新 `core:{skill}` 裸名投影
+        //（空条目 ⇒ 撤下既有 core 技能命令；宿主技能面关闭 ⇒ 同批撤下）。
+        project_core_skill_commands(&command_registry, &registry, skills_face_closed);
         finish_command_source(
             &command_registry,
             &registry,
@@ -185,6 +194,9 @@ pub(crate) async fn run_discovery_with_cache(
     let Some(peer) = handle.peer.clone() else {
         tracing::warn!(server = %handle.name, "MCP skill 发现：peer 缺失，跳过");
         registry.mark_discovery_completed(&handle.name, handle_token.clone(), vec![]);
+        // W4b（F6）：元数据面完成后同批刷新 `core:{skill}` 裸名投影
+        //（空条目 ⇒ 撤下既有 core 技能命令；宿主技能面关闭 ⇒ 同批撤下）。
+        project_core_skill_commands(&command_registry, &registry, skills_face_closed);
         finish_command_source(
             &command_registry,
             &registry,
@@ -232,6 +244,9 @@ pub(crate) async fn run_discovery_with_cache(
         &skills,
     );
     registry.mark_discovery_completed(&handle.name, handle_token, skills);
+    // W4b（F6）：元数据面写回**之后**再投影 core 裸名命令——投影读的是 registry
+    // 当前状态，顺序反了会用上一代条目（首轮发现会得到空 core 面）。
+    project_core_skill_commands(&command_registry, &registry, skills_face_closed);
 }
 
 /// 命令面完成回写（决策 1 + A2）：来源键 = [`mcp_source_key`] 置 Discovered
@@ -506,6 +521,160 @@ pub(crate) fn mcp_route_entries(
         .collect()
 }
 
+// ─── core 域裸名命令投影（W4b / F6）────────────────────────────────────────
+
+/// `core:{skill}` 裸名命令的 handler：与 `AgentPassthrough` 同语义——
+/// 交互式把用户原文（含 `/skill-name` token）整段交还 agent 管线，由
+/// `SkillPreloadMiddleware` 检测并注入全文；RPC 路径（execute-command，
+/// 无 agent 管线）由调用方显式报错，不在这里自行返回内容。
+///
+/// 正文读取不在 handler 内进行：`/skill` 的正文一律走统一 activation
+/// （J1/X1：用户显式 token 触发 → 全文，但读取路径与 SkillTool 同源）。
+#[derive(Clone)]
+pub(crate) struct CoreSkillPassthrough;
+
+#[async_trait]
+impl CommandHandler for CoreSkillPassthrough {
+    async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
+        CommandOutcome::Inject(ctx.raw_text)
+    }
+}
+
+/// SkillMetadata → `core:{skill}` 裸名 RouteEntry（W4b/F6）。
+///
+/// 裸名 = `mcp__{server}__{skill}` 的末段（[`bare_skill_segment`]），
+/// 与 `/skill-name` 的用户输入口径一致；kind = `Skill`、provenance =
+/// `Core` + Connected（UX 与既有的本地 skill 命令面逐位相同，只是来源
+/// 改成 MCP 侧投影）。
+///
+/// frontmatter `aliases`（wire 不改写，X3）派生为命令别名——宿主从 metadata
+/// 派生 CLI 别名，不依赖任何本地扫描。
+pub(crate) fn core_route_entries(skills: &[SkillMetadata]) -> Vec<RouteEntry> {
+    skills
+        .iter()
+        .filter_map(|meta| {
+            let bare = peri_acp_types::mcp_skills::bare_skill_segment(&meta.name)
+                .unwrap_or(meta.name.as_str())
+                .to_lowercase();
+            if bare.is_empty() {
+                return None;
+            }
+            Some(RouteEntry {
+                fullname: format!("core:{bare}"),
+                aliases: frontmatter_aliases(meta),
+                description: meta.description.clone(),
+                kind: CommandEntryKind::Skill,
+                category: None,
+                args_schema: None,
+                handler: Arc::new(CoreSkillPassthrough),
+                provenance: CommandProvenance {
+                    source: CommandSource::Core,
+                    lifecycle: CommandLifecycle::Connected,
+                },
+            })
+        })
+        .collect()
+}
+
+/// 发现条目 frontmatter 的 `aliases`（verbatim map；非字符串项忽略）。
+fn frontmatter_aliases(meta: &SkillMetadata) -> Vec<String> {
+    meta.frontmatter
+        .as_ref()
+        .and_then(|fm| fm.get("aliases"))
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .filter(|alias| !alias.is_empty() && !alias.contains(':'))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 当前已投影的 `core:` 技能命令全名（reconcile 的 stale 集）。
+///
+/// 只取 `kind = Skill` + `source = Core` 的条目：内置命令（compact/clear/…）
+/// 与插件命令的 kind 不同，因此不会被本投影误撤。
+fn registered_core_skill_commands(command_registry: &CommandRegistry) -> Vec<String> {
+    command_registry
+        .snapshot()
+        .iter()
+        .filter(|entry| {
+            entry.kind == CommandEntryKind::Skill
+                && matches!(entry.provenance.source, CommandSource::Core)
+        })
+        .map(|entry| entry.fullname.clone())
+        .collect()
+}
+
+/// 把系统来源（builtin `workspace` 等本机受信实例）的技能投影为 `core:{skill}`
+/// 裸名命令（W4b/F6；只读 registry metadata，不读正文）。
+///
+/// 语义：
+/// - 幂等——`reconcile(stale, new)` 单次写锁内完成「撤旧 + 注册新」，内容无变化
+///   时不触发 on_change（不会造成命令面板抖动）；
+/// - 来源集合 = `registry.system_skills()`（由 [`run_ensure_discovery`] 按连接事实
+///   标注；实例关闭/断连 ⇒ 集合自然为空 ⇒ 命令同批撤下，X4）；
+/// - `skills_face_closed`（宿主技能面关闭位，与 A24 关闭集同源）= 真 ⇒ 目标集合为
+///   空：**仍执行** `reconcile` 以撤下既有条目（链槽关闭不留幽灵路由），但不再
+///   注册；`{server}:{skill}` MCP 发现面不归本位治理（见 [`mcp_route_entries`]）；
+/// - 冲突（同名内置命令 / 已存在的 core 条目）按注册表既有纯拒绝语义跳过并告警。
+pub(crate) fn project_core_skill_commands(
+    command_registry: &Option<Arc<CommandRegistry>>,
+    registry: &Arc<McpSkillRegistry>,
+    skills_face_closed: bool,
+) {
+    let Some(command_registry) = command_registry.as_ref() else {
+        return;
+    };
+    let stale = registered_core_skill_commands(command_registry);
+    let entries = if skills_face_closed {
+        Vec::new()
+    } else {
+        core_route_entries(&registry.system_skills())
+    };
+    let (removed, added) = command_registry.reconcile(&stale, entries);
+    if removed + added > 0 {
+        tracing::debug!(
+            removed,
+            added,
+            "core 域技能命令投影已刷新（MCP registry → /skill-name）"
+        );
+    }
+}
+
+/// 发现任务 spawn 前的来源标注：把**系统来源**（host 绑定的 builtin 实例，
+/// `ConfigSource::Builtin`；不含被 A24 关闭集关闭的实例）的 server 键记入
+/// registry，供摘要投递（J1）与 `core:` 命令投影（F6）判定。
+///
+/// 身份来自连接事实而不是名字自称（X6/X7）：外部 server 即使叫 `workspace`
+/// 也不满足 `ConfigSource::Builtin`。
+pub(crate) fn mark_system_origins(
+    registry: &Arc<McpSkillRegistry>,
+    handles: &[Arc<McpClientHandle>],
+    closed: &std::collections::BTreeSet<String>,
+) {
+    let names: Vec<String> = handles
+        .iter()
+        .filter(|handle| {
+            matches!(
+                handle.source.as_ref(),
+                Some(crate::mcp::config::ConfigSource::Builtin { .. })
+            ) && !super::builtin::is_closed(&handle.name, closed)
+        })
+        .map(|handle| handle.name.clone())
+        .collect();
+    registry.mark_system_origins(&names);
+}
+
 #[cfg(test)]
 #[path = "skill_discovery_test.rs"]
 mod tests;
+
+// W4b/F6 收口：`core:{skill}` 投影的「宿主技能面关闭位」差分（投影函数级 +
+// 管道级）。存量 `skill_discovery_test.rs` 已超 STD-SIZE-001 上限，新用例
+// 落在本文件，由本模块统一挂载。
+#[cfg(test)]
+#[path = "skill_core_face_test.rs"]
+mod core_face_tests;

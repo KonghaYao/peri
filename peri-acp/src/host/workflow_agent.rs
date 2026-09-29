@@ -21,6 +21,7 @@ use parking_lot::RwLock;
 use peri_acp_types::{
     agents::AgentOverrides,
     compact::CompactConfig,
+    mcp_skills::McpSkillRegistry,
     ports::{SkillsPort, WorkflowMiddlewarePort},
     workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult},
 };
@@ -198,6 +199,7 @@ pub(crate) fn create_session_workflow_middleware(
     middleware_factory: Arc<dyn WorkflowMiddlewareFactory>,
     publish_hook: Option<WorkflowPublishHook>,
     skills: Arc<dyn SkillsPort>,
+    mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
 ) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
     let mut compact_config = CompactConfig::default();
     compact_config.apply_env_overrides();
@@ -207,6 +209,9 @@ pub(crate) fn create_session_workflow_middleware(
         frozen_claude_md: frozen_data.claude_md().map(|s| s.to_string()),
         frozen_claude_local_md: frozen_data.claude_local_md().map(|s| s.to_string()),
         frozen_skill_summary: frozen_data.skill_summary().map(|s| s.to_string()),
+        // W4b（F4/J5）：workflow agent 的技能来源 = 会话级 MCP registry（与主链
+        // 同一份）；None = 未装配技能面（如 print/无会话 registry）。
+        mcp_skill_registry,
         session_id: Some(session_id.to_string()),
         compact_config: Some(compact_config),
         cancel: None,

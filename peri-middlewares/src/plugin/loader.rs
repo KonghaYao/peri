@@ -319,7 +319,8 @@ pub fn plugin_route_entries(entries: &[CommandEntry]) -> Vec<RouteEntry> {
 /// (matching Claude Code convention: `skills: ["./skills/"]` or `skills: ["skills/tdd"]`).
 /// Each entry becomes a `SkillRoot` (`source=Plugin`, `plugin_name=plugin_name`),
 /// regardless of whether it directly contains `SKILL.md` or is a container——
-/// `scan_skill_roots` handles both cases via leaf semantics.
+/// 两条形态都交给 provider 的扫描语义处理（W4b：宿主侧扫描已删除，
+/// 目录叶子语义见 `mcp-packages/workspace/src/resources/skills.rs`）。
 ///
 /// Falls back to `base_dir/skills/` as a single root when no manifest skills are declared.
 pub(crate) fn extract_skills_paths(
@@ -348,7 +349,7 @@ pub(crate) fn extract_skills_paths(
         }
     }
 
-    // 2. fallback：base_dir/skills/ 作为一个 root（由 scan_skill_roots 递归扫描）
+    // 2. fallback：base_dir/skills/ 作为一个 root（由 provider 递归扫描）
     let skills_dir = base_dir.join("skills");
     if skills_dir.is_dir() {
         result.push(SkillRoot {

@@ -55,6 +55,61 @@ pub(crate) struct SessionEnvironment {
 }
 
 impl SessionEnvironment {
+    /// 冻结期技能清单快照（W4b / F3，J1）：内容准入期从 **system 来源**
+    /// （builtin `workspace` 实例）取一次技能元数据，供冻结 system prompt 的
+    /// 技能摘要渲染。
+    ///
+    /// 与 [`Self::read_meta_docs`] 同一节奏与同一判定链（P4，activate 之后、
+    /// `commit_frozen` 之前）：
+    /// - 池未装配 / 句柄未出现且池初始化已收口 / 实例被 A24 关闭集关闭 /
+    ///   未声明 skills 能力 ⇒ `Ok(空)`：技能面不适用，**不是失败**（X5/X4），
+    ///   也不回落磁盘（J5 后宿主已无技能 FS 读取点）；
+    /// - 句柄已连接但读取失败 ⇒ `Err`：system 已声明且被选中的投递失败
+    ///   fail-closed（J2 补偿：调用方排空环境并撤销未发布的创建）；
+    /// - 有界等待（同 `read_meta_docs` 的 10s 上界，同进程 builtin 握手毫秒级）：
+    ///   全程 `await`，不 `block_on`（ARC-MIDDLEWARE-CAPABILITY-001 的
+    ///   「异步工作在明示生命周期阶段完成」）。
+    pub(crate) async fn read_workspace_skill_catalog(
+        &self,
+    ) -> Result<Vec<peri_acp_types::skills::SkillMetadata>, AcpError> {
+        use peri_acp_types::ports::McpPoolPort as _;
+        let Some(pool) = self.cfg.mcp_pool.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let Some(pool) = pool
+            .as_any()
+            .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
+        else {
+            return Ok(Vec::new());
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(handle) = pool.get_client("workspace") {
+                if !matches!(
+                    handle.status,
+                    peri_middlewares::mcp::ClientStatus::Connected
+                ) {
+                    return Ok(Vec::new());
+                }
+                return pool
+                    .read_builtin_workspace_skills()
+                    .await
+                    .map_err(|error| AcpError::new(-32603, error));
+            }
+            let phase = pool.snapshot()["initPhase"]
+                .as_str()
+                .unwrap_or("pending")
+                .to_owned();
+            if !matches!(phase.as_str(), "pending" | "initializing") {
+                return Ok(Vec::new());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(Vec::new());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
     /// 测试夹具入口：按当前目录状态**新构建**一份准备输入再装配。
     ///
     /// 生产不可达：恢复路径必须显式消费持久 blob（[`Self::assemble_prepared`] +
@@ -152,38 +207,46 @@ impl SessionEnvironment {
             task_manager: Some(Arc::clone(&task_manager)),
             on_bg_complete: Some(on_bg_complete),
         };
-        // ── W4a：builtin `workspace` 实例的**资源面**输入（与上面同一注入节奏） ──
+        // ── W4b：builtin `workspace` 实例的**真实资源面**输入 ──
         //
-        // 本波只接元数据段落覆盖面（J6 的 `peri-meta://workspace/{section_id}`）：
-        // 该面只依赖 cwd（provider 自行扫描 `{cwd}/.peri/meta/*.md`），所以这里**没有**
-        // 任何配置读取——输入由装配期既有的 cwd 事实派生（构造点不第二次读配置）。
-        // 其余面按下述口径保持关闭：
-        // - 不装 skill / agent 根：技能与代理来源（本地三根 / 插件 / builtin 静态资产）
-        //   的接线与消费切换同批归 W4b；先装会让同一批技能同时来自宿主扫描与 MCP
-        //   资源（双源同名）。
-        // - `disable_bundled = true` 是**波次域隔离**，不是宿主配置投影：provider 没有
-        //   域掩码，这是唯一能关掉 builtin 技能面的开关。W4b 必须以宿主配置解析出的
-        //   真实值替换本行，不得沿用本常量。
-        // - 指令面（`peri-instruction://workspace/{index,main,local}`）随 provider 装配被动
-        //   上线（provider 的 `list_resources` 按 cwd 无条件列出）：宿主消费仍走既有链路，
-        //   行为不变（消费切换归 W4b/W5）。
-        let workspace_resources =
-            peri_mcp_workspace::WorkspaceResourcesInput::new().with_disable_bundled(true);
+        // 技能来源（J5）整体归位 MCP 侧：本地三根（user / global `skillsDir` /
+        // project）+ 插件根 + builtin 静态资产由该实例的 provider 读取，宿主侧不再
+        // 有任何技能文件系统读取点。输入在 `run_initialize` **之前**随上下文一次
+        // 注入（AW3-11 / W4a 已建立的节奏），装配期不第二次读配置：
+        //
+        // - `skill_roots`：F11（插件 manifest → 根 + 插件标签）与 F12（settings 的
+        //   `skillsDir`）适配器的产物，只产出「路径 + scope/标签」，**不读技能
+        //   内容**；Builtin 占位根不映射为资源根（资产是 provider 的内置静态面，
+        //   由 `disable_bundled` 位控制）。
+        // - `disable_bundled`：宿主配置的真实值（F12 的
+        //   `load_disable_bundled_skills` 语义来源），不再是波次域隔离常量。
+        // - 缺根（目录不存在）交给 provider 既有语义处理（缺失目录 = 空批）。
+        // - agents 面不装（W5）；指令面（`peri-instruction://`）随 provider 装配
+        //   被动上线（W4a 已记录，消费切换归 W5）。
+        let workspace_resources = workspace_resources_input(&cwd, plugins);
         // A24 关闭集：从**同一份 frozen snapshot** 派生（设计 §2.5：禁止回退当轮 config；
         // fork 复用 source 的 frozen 字节时两者可能不同）。它是订阅建立门的唯一输入，
         // 不改变 pool 级就绪与面板连接状态（ARC-CAPABILITY-CLOSURE-001）。
-        let builtin_closed = match frozen {
-            Some(frozen) => peri_middlewares::assembly::builtin_closed_instances(
-                &frozen.meta_harness().disabled_middlewares,
-            ),
+        //
+        // W4b 收口：同一份 disabled 集合同批派生**宿主技能面关闭位**
+        //（`"SkillsMiddleware" ∈ disabled`，与链槽装配的跳过判据同一字面量，见
+        // `peri_middlewares/src/assembly.rs` 的 `ChainSlot::Skills` 分支）——链槽关闭
+        // 时发现管线的 `core:{skill}` 裸名投影同批撤下（不得留幽灵路由）；workspace
+        // 实例本身与 `{server}:{skill}` 面不受影响。两个位一次派生、随 builtin 实例
+        // 上下文注入 pool，不在别处第三次读配置。
+        let disabled_middlewares: std::collections::HashSet<String> = match frozen {
+            Some(frozen) => frozen.meta_harness().disabled_middlewares.clone(),
             None => {
-                let state = crate::session::build_meta_harness_state(
+                crate::session::build_meta_harness_state(
                     configuration.config.config.meta_harness.as_ref(),
                     std::collections::HashMap::new(),
-                );
-                peri_middlewares::assembly::builtin_closed_instances(&state.disabled_middlewares)
+                )
+                .disabled_middlewares
             }
         };
+        let builtin_closed =
+            peri_middlewares::assembly::builtin_closed_instances(&disabled_middlewares);
+        let skills_face_closed = disabled_middlewares.contains("SkillsMiddleware");
         #[cfg(test)]
         let closed_for_test = builtin_closed.clone();
         let input = assemble::HostAssemblyInput {
@@ -202,6 +265,7 @@ impl SessionEnvironment {
             workspace_input: Some(workspace_input.clone()),
             workspace_resources: Some(workspace_resources),
             builtin_closed,
+            skills_face_closed,
             prepared_plugins: Some(plugins.clone()),
         };
         let activation = tokio_util::sync::CancellationToken::new();
@@ -436,6 +500,57 @@ impl SessionEnvironment {
         let cleanup = self.cleanup_tasks.shutdown().await;
         joined && cleanup == peri_acp_types::tasks::TaskShutdownReport::Complete
     }
+}
+
+/// W4b 技能资源输入装配（F11/F12 适配器 → provider 输入位）。
+///
+/// 只做「根解析 + scope 映射 + 关闭位投影」：不读技能内容、不扫描目录
+/// （扫描与正文读取在 provider 侧，`mcp-packages/workspace/src/resources/`）。
+///
+/// - `resolve_skill_roots`：User（`~/.claude/skills`）→ Global（settings
+///   `skillsDir`）→ Project（`{cwd}/.claude/skills`）→ 插件根（带
+///   `plugin_name` 标签，来自准备阶段的插件加载结果）→ Builtin 占位；
+/// - Builtin 占位根**不映射**为资源根（其 path 是 `PathBuf::new()` 占位，静态
+///   资产由 provider 内置提供），启用位只经 `disable_bundled` 传递；
+/// - 缺失目录不在这里过滤：由 provider 按既有「缺失 = 空批」语义处理。
+fn workspace_resources_input(
+    cwd: &str,
+    plugins: &super::assemble::PreparedPlugins,
+) -> peri_mcp_workspace::WorkspaceResourcesInput {
+    use peri_acp_types::skills::SkillSource;
+    use peri_mcp_workspace::{ResourceRoot, ResourceScope};
+
+    let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
+    let mut input =
+        peri_mcp_workspace::WorkspaceResourcesInput::new().with_disable_bundled(disable_bundled);
+    for root in
+        peri_middlewares::resolve_skill_roots(cwd, plugins.skill_roots.clone(), disable_bundled)
+    {
+        let scope = match root.source {
+            SkillSource::User => ResourceScope::User,
+            SkillSource::Global => ResourceScope::Global,
+            SkillSource::Project => ResourceScope::Project,
+            SkillSource::Plugin => ResourceScope::Plugin,
+            // Builtin 资产不是磁盘根：启用位已由 `disable_bundled` 表达。
+            SkillSource::Builtin => continue,
+            // `SkillSource::Mcp` 只在旧的 SkillMetadata 面使用；根解析不产出它，
+            // 出现即内部错误（不静默当成某个 scope）。
+            SkillSource::Mcp => {
+                tracing::warn!(
+                    path = %root.path.display(),
+                    "skill 根解析产出 MCP scope，跳过（不是磁盘根）"
+                );
+                continue;
+            }
+        };
+        input = match (scope, root.plugin_name.clone()) {
+            (ResourceScope::Plugin, Some(plugin_name)) => {
+                input.with_skill_root(ResourceRoot::plugin(root.path.clone(), plugin_name))
+            }
+            _ => input.with_skill_root(ResourceRoot::new(root.path.clone(), scope)),
+        };
+    }
+    input
 }
 
 pub(crate) fn workspace_error(error: impl Into<anyhow::Error>) -> AcpError {

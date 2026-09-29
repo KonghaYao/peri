@@ -62,11 +62,15 @@ pub trait WorkflowMiddlewareFactory: Send + Sync {
     /// `disabled` 为装配期关闭的 middleware 名集合（源自父会话冻结状态
     /// `WorkflowAgentContext::meta_harness_disabled`，设计 §2.5）——关闭的
     /// middleware 连坐，其工具不进入列表。
+    /// `mcp_skill_registry` = 会话级 MCP skill registry（W4b/F4）：workflow agent
+    /// 的技能目录与正文只来自它（本地扫描已删除，J5）；None = 未装配技能面，
+    /// 技能工具为空，不回落磁盘。
     fn build_tools(
         &self,
         cwd: &str,
         disabled: &std::collections::HashSet<String>,
         execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+        mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     ) -> Vec<Box<dyn BaseTool>>;
 
     /// 为 agent.md 的 `allowedWriteDirs` 创建最小权限的 SandboxWrite 工具。

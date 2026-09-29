@@ -13,7 +13,7 @@
 
 - 插件提供 skill roots、agent dirs、hook groups 与 MCP 配置，由对应中间件消费。
 - MCP 配置按全局 `~/.peri/settings.json`、插件、项目 `{cwd}/.mcp.json` 合并；工具与资源仅在 pool 可用时注册。
-- Skills 按用户目录、配置的 `skillsDir`、项目目录、插件和内置来源的优先级搜索；目录含 `SKILL.md` 即为叶子，不再下钻。同名按来源顺序优先。
+- Skills 的**来源**（用户目录、配置的 `skillsDir`、项目目录、插件根、内置静态资产）由 builtin `workspace` 实例的资源面（`skills/list` + `resources/read`）提供；宿主零文件系统读取（J5），只做根解析适配器（`src/skills/loader.rs::resolve_skill_roots`：路径 + scope/标签）与配置读取（`src/settings.rs`）。扫描语义（叶子、深度/目录预算、symlink 口径、同名先到先得）在 provider（`mcp-packages/workspace/src/resources/skills.rs`）。
 - SubAgent 从父工具、冻结上下文、取消策略与事件处理器派生执行上下文；具体 agent 定义和内置 agent 请直接查 `src/subagent/` 与项目 `.claude/agents/`，如需举例只使用 `explorer`。
 
 ## 任务路由
@@ -25,7 +25,7 @@
 | MCP 合并、server/tool bridge | `src/mcp/` |
 | Plugin manifest、commands、agents、MCP 回退 | `src/plugin/` |
 | Hook 事件与执行器 | `src/hooks/` |
-| Skills 扫描、预加载、工具 | `src/skills/`、`src/skills/tools.rs` |
+| Skills 根解析、registry 投影、预载、工具（零 FS） | `src/skills/`（`loader.rs` 根解析 / `mod.rs` 投影与摘要 / `tools.rs` 两工具）、`src/settings.rs`、`src/subagent/skill_preload.rs` |
 | SubAgent、后台任务、取消和事件 | `src/subagent/` |
 | HITL 权限与审批 | `src/hitl/` |
 | Workflow、工具搜索、LSP 文档同步 | `src/workflow/`、`src/tool_search/`、`src/lsp/middleware.rs`（`LspSyncMiddleware`，无工具） |
@@ -41,7 +41,7 @@
 - **System MCP 启动准入**：`system_mcp=true` 的 server 须在首个 Reason 前完成 transport、initialize、能力协商与真实 `tools/list`（空数组成功，Err 不是发现证据），由 `before_react_start` 闸门阻断未就绪 loop。失败/timeout 返回类型化错误，不发布 ready；取消按中断分类。`system_mcp_tools` 按所属 server 原始工具名精确匹配；仅选中项 direct，未选中项维持原发现路径，`[]` 仅要求 ready。选中项以原始工具名进入模型面，普通 MCP 与 deferred 工具仍使用 `mcp__<server>__<tool>`。模型名冲突按确定准入顺序 first-wins，记录 warning 并跳过后续项；真实必需工具缺失仍失败。权限使用绑定来源身份，不凭裸名授予 builtin 权限。readiness 不绕过 Permission/HITL/事件/cancel。builtin 同构：web/artifact/workspace 选中各自 direct 集，cron/lsp 零提升。默认层注入，加载期拒绝 `disabled + system_mcp`。
 - **插件 MCP 配置严格路径**：`load_enabled_plugins_for_mcp` 对非法 MCP 配置直接失败、不降级为空配置；宽容展示 API（`load_enabled_plugins_aggregated` 等）行为保持不变。
 - **Plugin manifest**：`commands` 条目兼容字符串路径与对象；字符串是相对插件根目录的路径。agents 未声明时仍保留约定目录回退。不要把路径条目当作名称。
-- **Skills**：扫描必须保持根优先级、递归边界、符号链接防环、叶子语义和同名覆盖规则；插件 skill root 通过既有扩展点传入。
+- **Skills（J5）**：宿主不做任何技能目录扫描或正文读取——目录来自会话级 `McpSkillRegistry` 投影（`before_agent`），正文只经统一 activation（`resources/read` + digest/frontmatter），命令面 `core:{skill}` 由 MCP 发现投影（`project_core_skill_commands`，关闭位 = `BuiltinInstanceContext.skills_face_closed`：与 A24 关闭集同一份 `disabled_middlewares` 派生，为真 ⇒ 既有 `core:` 条目同批撤下、不再注册；`{server}:{skill}` 面不归该位）。根优先级/递归边界/叶子语义/同名覆盖是 **provider** 的契约；宿主只解析根列表（`resolve_skill_roots`）并与配置位一起作为 `WorkspaceResourcesInput` 注入。缺失即缺口（warn/空），**不回落磁盘**。
 - **SubAgent**：同一会话的子 Agent 复用冻结指引、skills 与 prompt；同步子任务继承父取消，独立后台任务自管取消。`Agent(resume_thread_id, prompt)` 优先把非空 Info 投递给 live 执行（`action: send / status: queued`）；无接收者但磁盘仍 active 时拒绝，非 active 才 resume。Info 不打断模型，queued 不代表已读；事件按 `source_agent_id` 归属，改动需覆盖完成与取消路径。
 - **HITL**：审批以解析后的 effective tool name 为准，包装、搜索或代理工具不得绕过审批；权限模式与 broker 的选择必须保持一致。
 - **工具可见性**：direct/deferred 语义由工具声明和工具搜索路径共同保证，包装层不得改变其可见性。

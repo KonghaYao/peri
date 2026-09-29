@@ -39,7 +39,6 @@ async fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
         None,
         Arc::new(SkillsProvider),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
     )
 }
 
@@ -61,8 +60,8 @@ async fn test_frozen_session_data_build_is_deterministic() {
     let mgr = make_manager(&tmp).await;
     let cwd = "/tmp";
 
-    let a = mgr.build_frozen_data(cwd, &[], &[]);
-    let b = mgr.build_frozen_data(cwd, &[], &[]);
+    let a = mgr.build_frozen_data(cwd, &[]);
+    let b = mgr.build_frozen_data(cwd, &[]);
 
     assert_eq!(
         a.system_prompt(),
@@ -83,7 +82,7 @@ async fn test_frozen_session_data_build_is_deterministic() {
 /// 已冻结产物（冻结是前缀缓存稳定性的有意权衡，不能按需重扫）。
 ///
 /// `#[serial]`：与 requests_test 的 `#[serial]` 组（B3 用例重定向 HOME）
-/// 互斥，防止冻结前后两次扫描读到不同用户级 skills 快照。
+/// 互斥，防止冻结前后两次读取读到不同用户级 skills 快照。
 #[tokio::test]
 #[serial]
 async fn test_frozen_system_prompt_immune_to_disk_changes() {
@@ -91,22 +90,50 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
     let mgr = make_manager(&tmp).await;
     let cwd = tmp.path().to_str().unwrap();
 
-    // 冻结前：cwd 含 skill-a
+    // 冻结输入：**给定的**技能快照（W4b/F3：快照来自内容准入期的 MCP 侧读取，
+    // 构建期不扫盘）。磁盘上的同名技能是反例：内容不同，冻结摘要只认快照。
     let skills_dir_a = tmp.path().join(".claude").join("skills").join("skill-a");
     std::fs::create_dir_all(&skills_dir_a).unwrap();
     std::fs::write(
         skills_dir_a.join("SKILL.md"),
-        "---\nname: 'skill-a'\ndescription: 'A test skill'\n---\n\nbody",
+        "---\nname: 'skill-a'\ndescription: 'DISK DESCRIPTION MUST NOT BE USED'\n---\n\nbody",
     )
     .unwrap();
+    let snapshot = vec![peri_acp_types::skills::SkillMetadata {
+        name: "mcp__workspace__skill-a".to_string(),
+        aliases: Vec::new(),
+        description: "A test skill".to_string(),
+        path: std::path::PathBuf::new(),
+        source: peri_acp_types::skills::SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(peri_acp_types::skills::SkillOrigin::Mcp {
+            server: "workspace".to_string(),
+            uri: "skill://project/skill-a/SKILL.md".to_string(),
+        }),
+        content: None,
+        resources: Vec::new(),
+        frontmatter: None,
+    }];
 
-    let frozen = mgr.build_frozen_data(cwd, &[], &[]);
+    let frozen = mgr.build_frozen_data_with_config_and_runtime_and_docs(
+        mgr.peri_config(),
+        cwd,
+        &[],
+        &crate::prompt::PromptRuntimeEnv::detect(cwd),
+        std::collections::HashMap::new(),
+        &snapshot,
+    );
 
     let frozen_prompt = frozen.system_prompt().to_string();
     let frozen_summary = frozen.skill_summary().map(|s| s.to_string());
+    let summary = frozen_summary.as_deref().unwrap_or_default();
     assert!(
-        frozen_summary.as_deref().unwrap_or("").contains("skill-a"),
-        "冻结摘要应包含冻结时的 skill-a"
+        summary.contains("mcp__workspace__skill-a"),
+        "冻结摘要应来自给定快照：{summary}"
+    );
+    assert!(
+        !summary.contains("DISK DESCRIPTION MUST NOT BE USED"),
+        "冻结构建不得读盘取 description：{summary}"
     );
 
     // 会话中途：删除 skill-a，新增 skill-b 与 CLAUDE.md
@@ -129,7 +156,7 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
     assert_eq!(
         frozen.skill_summary().map(|s| s.to_string()),
         frozen_summary,
-        "已冻结 skill 摘要不应随磁盘重扫"
+        "已冻结 skill 摘要不应随磁盘变化"
     );
 }
 
@@ -142,7 +169,7 @@ async fn test_frozen_prompt_never_claims_workflow() {
     let mgr = make_manager(&tmp).await;
     let cwd = "/tmp";
 
-    let frozen = mgr.build_frozen_data(cwd, &[], &[]);
+    let frozen = mgr.build_frozen_data(cwd, &[]);
 
     assert!(
         !frozen.system_prompt().contains("Workflow Orchestration"),
@@ -158,7 +185,7 @@ async fn test_frozen_subagent_prompt_identical_to_main() {
     let mgr = make_manager(&tmp).await;
     let cwd = "/tmp";
 
-    let frozen = mgr.build_frozen_data(cwd, &[], &[]);
+    let frozen = mgr.build_frozen_data(cwd, &[]);
 
     assert!(
         !frozen.system_prompt().contains("Workflow Orchestration"),
@@ -183,7 +210,7 @@ async fn test_frozen_subagent_prompt_identical_to_main() {
 async fn test_workflow_prompt_excludes_hitl_section() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_manager(&tmp).await;
-    let frozen = mgr.build_frozen_data("/tmp", &[], &[]);
+    let frozen = mgr.build_frozen_data("/tmp", &[]);
 
     // 主链冻结 prompt 保留 10_hitl（PermissionMiddleware 默认装配）
     assert!(

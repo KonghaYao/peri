@@ -1,4 +1,13 @@
-//! Tests for mod_skills
+//! `SkillsMiddleware` 测试（W4b 后：零文件系统依赖，目录只来自 MCP registry）。
+//!
+//! 覆盖：配置位读取（F12）、摘要渲染与来源标签（J1/D4）、系统来源投递规则
+//! （冻结优先 / 未冻结只用 system）、registry 投影进 `cached_skills`、
+//! 工具面形状、13_skills 段落声明。
+//!
+//! **已删除**（对应的本地扫描机制在 W4b 移除）：临时 skills 目录/插件根的
+//! 扫描聚合、`resolve_roots` 覆盖参数、builtin 嵌入摘要、磁盘删除后的可恢复
+//! 错误——技能内容与目录现在都经 MCP 侧，见 `crate::mcp::skill_discovery_test`
+//! 与 `peri-acp` 的会话端到端用例。
 
 use peri_agent::{agent::state::AgentState, middleware::r#trait::Middleware};
 use tempfile::tempdir;
@@ -10,309 +19,180 @@ fn contribution(mw: &SkillsMiddleware) -> Option<String> {
     Middleware::prompt_contribution(mw)
 }
 
-fn write_skill(dir: &std::path::Path, name: &str, desc: &str) {
-    let skill_dir = dir.join(name);
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    let content = format!(
-        "---\nname: '{}'\ndescription: '{}'\n---\n\n# {}\n",
-        name, desc, name
-    );
-    std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
-}
-
-#[tokio::test]
-async fn test_no_skills_no_op() {
-    // 使用临时目录作为所有 skills 目录来源，确保测试隔离
-    let empty_dir = tempdir().unwrap();
-    let empty_path = empty_dir.path().to_path_buf();
-
-    let mw = SkillsMiddleware::new()
-        .with_user_dir(empty_path.clone())
-        .with_project_dir(empty_path);
-    let mut state = AgentState::new("/nonexistent/path");
-    let result = mw.before_agent(&mut state).await;
-    assert!(result.is_ok());
-    assert!(contribution(&mw).is_none());
-    assert_eq!(state.messages().len(), 0);
-}
-
-#[tokio::test]
-async fn test_injects_summary() {
-    let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
-    std::fs::create_dir_all(&skills_dir).unwrap();
-    write_skill(&skills_dir, "tui-dev", "构建 TUI 应用");
-    write_skill(&skills_dir, "codebase-exploration", "深度代码搜索");
-
-    let mw = SkillsMiddleware::new();
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    mw.before_agent(&mut state).await.unwrap();
-
-    assert_eq!(
-        state.messages().len(),
-        0,
-        "before_agent 不应再 prepend 消息"
-    );
-    let content = contribution(&mw).unwrap();
-    assert!(content.contains("tui-dev"));
-    assert!(content.contains("codebase-exploration"));
-    assert!(content.contains("Skills"));
-}
-
-#[tokio::test]
-async fn test_custom_project_dir() {
-    let dir = tempdir().unwrap();
-    write_skill(dir.path(), "custom-skill", "自定义技能");
-
-    let mw = SkillsMiddleware::new().with_project_dir(dir.path().to_path_buf());
-    let mut state = AgentState::new("/any/cwd");
-    mw.before_agent(&mut state).await.unwrap();
-
-    let content = contribution(&mw).unwrap();
-    assert!(content.contains("custom-skill"));
-}
-
-#[tokio::test]
-async fn test_build_summary_contains_slash_prefix() {
-    let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
-    std::fs::create_dir_all(&skills_dir).unwrap();
-    write_skill(&skills_dir, "test-skill", "test description");
-
-    let mw = SkillsMiddleware::new();
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    mw.before_agent(&mut state).await.unwrap();
-
-    let content = contribution(&mw).unwrap();
-    assert!(
-        content.contains("'/skill-name'"),
-        "提示词应包含 '/skill-name' 格式，实际: {}",
-        content
-    );
-}
-
-#[tokio::test]
-async fn test_build_summary_does_not_contain_hash_prefix() {
-    let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
-    std::fs::create_dir_all(&skills_dir).unwrap();
-    write_skill(&skills_dir, "test-skill", "test description");
-
-    let mw = SkillsMiddleware::new();
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    mw.before_agent(&mut state).await.unwrap();
-
-    let content = contribution(&mw).unwrap();
-    assert!(
-        !content.contains("#skill_name"),
-        "提示词不应包含旧 #skill_name 格式，实际: {}",
-        content
-    );
-}
-
-#[tokio::test]
-async fn test_extra_dirs_injected() {
-    let dir = tempdir().unwrap();
-    let extra1 = dir.path().join("extra1");
-    let extra2 = dir.path().join("extra2");
-    std::fs::create_dir_all(&extra1).unwrap();
-    std::fs::create_dir_all(&extra2).unwrap();
-    write_skill(&extra1, "extra-skill-1", "from extra 1");
-    write_skill(&extra2, "extra-skill-2", "from extra 2");
-
-    let mw = SkillsMiddleware::new()
-        .with_user_dir(dir.path().to_path_buf())
-        .with_project_dir(dir.path().to_path_buf())
-        .with_plugin_roots(vec![
-            SkillRoot {
-                path: extra1.clone(),
-                source: SkillSource::Plugin,
-                plugin_name: None,
-            },
-            SkillRoot {
-                path: extra2.clone(),
-                source: SkillSource::Plugin,
-                plugin_name: None,
-            },
-        ]);
-
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    mw.before_agent(&mut state).await.unwrap();
-
-    let content = contribution(&mw).unwrap();
-    assert!(
-        content.contains("extra-skill-1"),
-        "Should include skill from extra dir 1"
-    );
-    assert!(
-        content.contains("extra-skill-2"),
-        "Should include skill from extra dir 2"
-    );
-}
-
-#[tokio::test]
-async fn test_extra_dirs_nonexistent_skipped() {
-    let dir = tempdir().unwrap();
-    let mw = SkillsMiddleware::new()
-        .with_user_dir(dir.path().to_path_buf())
-        .with_project_dir(dir.path().to_path_buf())
-        .with_plugin_roots(vec![SkillRoot {
-            path: dir.path().join("nonexistent"),
-            source: SkillSource::Plugin,
-            plugin_name: None,
-        }]);
-
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-    let result = mw.before_agent(&mut state).await;
-    assert!(result.is_ok());
-    assert!(contribution(&mw).is_none(), "No skills should be injected");
-}
-
-#[tokio::test]
-async fn test_extra_dirs_priority_after_project() {
-    let dir = tempdir().unwrap();
-    // project skills directory (acts as cwd/.claude/skills)
-    let project_skills = dir.path().join("project-skills");
-    std::fs::create_dir_all(&project_skills).unwrap();
-    write_skill(&project_skills, "project-skill", "from project");
-
-    let extra_dir = dir.path().join("extra");
-    std::fs::create_dir_all(&extra_dir).unwrap();
-    write_skill(&extra_dir, "extra-skill", "from extra");
-
-    let mw = SkillsMiddleware::new()
-        .with_user_dir(dir.path().to_path_buf())
-        .with_project_dir(project_skills)
-        .with_plugin_roots(vec![SkillRoot {
-            path: extra_dir,
-            source: SkillSource::Plugin,
-            plugin_name: None,
-        }]);
-
-    let mut state = AgentState::new("/nonexistent");
-    mw.before_agent(&mut state).await.unwrap();
-
-    let content = contribution(&mw).unwrap();
-    assert!(content.contains("project-skill"));
-    assert!(content.contains("extra-skill"));
-}
-
-#[test]
-fn test_load_disable_bundled_skills_defaults_false_when_missing() {
-    // settings.json 无 disableBundledSkills 字段时返回 false
-    let tmp = tempdir().unwrap();
-    let settings_path = tmp.path().join("settings.json");
-    std::fs::write(&settings_path, r#"{"config": {}}"#).unwrap();
-
-    let value = super::load_disable_bundled_skills_from_path(&settings_path);
-    assert!(!value, "缺字段时应默认 false");
-}
-
-#[test]
-fn test_load_disable_bundled_skills_reads_true() {
-    let tmp = tempdir().unwrap();
-    let settings_path = tmp.path().join("settings.json");
-    std::fs::write(
-        &settings_path,
-        r#"{"config": {"disableBundledSkills": true}}"#,
-    )
-    .unwrap();
-
-    let value = super::load_disable_bundled_skills_from_path(&settings_path);
-    assert!(value, "disableBundledSkills=true 时应返回 true");
-}
-
-#[test]
-fn test_load_disable_bundled_skills_reads_false_explicit() {
-    let tmp = tempdir().unwrap();
-    let settings_path = tmp.path().join("settings.json");
-    std::fs::write(
-        &settings_path,
-        r#"{"config": {"disableBundledSkills": false}}"#,
-    )
-    .unwrap();
-
-    let value = super::load_disable_bundled_skills_from_path(&settings_path);
-    assert!(!value);
-}
-
-#[test]
-fn test_load_disable_bundled_skills_handles_missing_file() {
-    // 文件不存在时返回 false
-    let value =
-        super::load_disable_bundled_skills_from_path(std::path::Path::new("/nonexistent.json"));
-    assert!(!value);
-}
-
-#[test]
-fn test_load_disable_bundled_skills_reads_flat_true() {
-    // 扁平 JSON（无 config 包裹）也应支持
-    let tmp = tempdir().unwrap();
-    let settings_path = tmp.path().join("settings.json");
-    std::fs::write(&settings_path, r#"{"disableBundledSkills": true}"#).unwrap();
-
-    let value = super::load_disable_bundled_skills_from_path(&settings_path);
-    assert!(value, "扁平 JSON disableBundledSkills=true 时应返回 true");
-}
-
-#[test]
-fn test_load_disable_bundled_skills_handles_malformed_json() {
-    // 畸形 JSON（如崩溃留下的半截文件）应默认 false
-    let tmp = tempdir().unwrap();
-    let settings_path = tmp.path().join("settings.json");
-    std::fs::write(
-        &settings_path,
-        r#"{"config": {"disableBundledSkills": broken}"#,
-    )
-    .unwrap();
-
-    let value = super::load_disable_bundled_skills_from_path(&settings_path);
-    assert!(!value, "畸形 JSON 应默认 false");
-}
-
-// ===== E2E: Builtin skills 全链路验证（Task 7） =====
-
-#[test]
-fn test_e2e_frozen_summary_contains_builtin_use_artifacts() {
-    // 验证：disable_bundled=false 时 frozen summary 含 builtin use-artifacts
-    let summary = SkillsMiddleware::build_frozen_summary("/tmp", vec![], false);
-    let summary = summary.expect("非空时应返回 Some");
-    assert!(
-        summary.contains("use-artifacts"),
-        "frozen summary 应含 builtin use-artifacts，实际: {}",
-        summary
-    );
-    // D4：catalog 用 [builtin] 来源标签（不再暴露虚拟路径/description）
-    assert!(
-        summary.contains("- **use-artifacts** [builtin]"),
-        "frozen summary 应以 [builtin] 来源标签列出 use-artifacts，实际: {}",
-        summary
-    );
-}
-
-#[test]
-fn test_e2e_frozen_summary_excludes_builtin_when_disabled() {
-    // 验证：disable_bundled=true 时 Builtin root 不被追加，
-    // frozen summary 不含 builtin use-artifacts
-    let summary = SkillsMiddleware::build_frozen_summary("/tmp", vec![], true);
-    // 可能返回 None（无任何 skill）或 Some（仅含磁盘 skill）
-    if let Some(s) = summary {
-        assert!(
-            !s.contains("use-artifacts"),
-            "disable_bundled=true 时不应含 Builtin use-artifacts，实际: {}",
-            s
-        );
+fn fake_skill(server: &str, scope: &str, name: &str) -> SkillMetadata {
+    SkillMetadata {
+        name: peri_acp_types::mcp_skills::mcp_skill_name(server, name),
+        aliases: Vec::new(),
+        description: format!("{name} description"),
+        path: std::path::PathBuf::new(),
+        source: SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(SkillOrigin::Mcp {
+            server: server.to_string(),
+            uri: format!("skill://{scope}/{name}/SKILL.md"),
+        }),
+        content: None,
+        resources: Vec::new(),
+        frontmatter: None,
     }
 }
 
-/// [回归测试] D3：模型可见 skill 协议唯一——SkillTool(skill_name) +
-/// DiscoverSkillsTool，旧 Skill(skill, args) 已移除。
-///
-/// 历史背景（审计 prompt-sections-audit.md P1-6）：主 agent 链曾同时注册
-/// `SkillTool`（skills/tools.rs）与 `Skill`（tools/skill.rs，参数 skill+args），
-/// 模型面对一对"同名职责、参数冲突"的工具。D3 收敛后 SkillsMiddleware 是
-/// 主链与 subagent 链共用的 skill 工具源，collect_tools 必须恰好返回两个
-/// 工具且不含 "Skill"。
+/// 造一个已发现若干 skill 的 registry。
+fn registry_with(server: &str, skills: Vec<SkillMetadata>) -> Arc<McpSkillRegistry> {
+    use peri_acp_types::mcp_skills::{HandleToken, McpSkillRegistry};
+    let reg = Arc::new(McpSkillRegistry::new());
+    let handle: HandleToken = Arc::new(server.to_string());
+    reg.mark_discovery_started(server, handle.clone());
+    reg.mark_discovery_completed(server, handle, skills);
+    reg
+}
+
+// ─── 摘要渲染与来源标签（D4 / J1）─────────────────────────────────────────
+
+#[test]
+fn build_summary_exposes_names_and_scope_labels() {
+    let skills = vec![
+        fake_skill("workspace", "project", "brainstorming"),
+        fake_skill("workspace", "builtin", "ptc"),
+    ];
+    let summary = SkillsMiddleware::build_summary(&skills);
+    assert!(summary.contains("mcp__workspace__brainstorming"));
+    assert!(
+        summary.contains("[project]"),
+        "scope 标签来自 URI: {summary}"
+    );
+    assert!(
+        summary.contains("[builtin]"),
+        "scope 标签来自 URI: {summary}"
+    );
+}
+
+#[test]
+fn build_summary_does_not_inject_descriptions() {
+    // description 是检索元数据而非可信指令：不进摘要正文（D4）
+    let skills = vec![fake_skill("workspace", "project", "brainstorming")];
+    let summary = SkillsMiddleware::build_summary(&skills);
+    assert!(
+        !summary.contains("#brainstorming"),
+        "不得使用旧 #skill_name 形态: {summary}"
+    );
+    assert!(
+        summary.contains("'/skill-name'"),
+        "摘要应提示 slash 触发口径: {summary}"
+    );
+}
+
+#[test]
+fn render_frozen_summary_is_none_for_empty_catalog() {
+    // 技能根不存在/无技能 ⇒ 空属正常（X5），不是错误
+    assert!(SkillsMiddleware::render_frozen_summary(&[]).is_none());
+    assert!(SkillsMiddleware::render_frozen_summary(&[fake_skill(
+        "workspace",
+        "project",
+        "brain"
+    )])
+    .is_some());
+}
+
+#[test]
+fn source_label_falls_back_to_mcp_for_foreign_uri_shapes() {
+    let mut skill = fake_skill("remote", "user", "brain");
+    skill.origin = Some(SkillOrigin::Mcp {
+        server: "remote".to_string(),
+        uri: "skill://hello/SKILL.md".to_string(),
+    });
+    assert_eq!(SkillsMiddleware::source_label(&skill), "mcp");
+}
+
+// ─── registry 投影与投递规则（F2 / J1）───────────────────────────────────
+
+#[tokio::test]
+async fn without_registry_cache_and_contribution_stay_empty() {
+    // 未装配技能面：没有投影、没有摘要，也不回落任何本地来源（J5）
+    let dir = tempdir().unwrap();
+    let mw = SkillsMiddleware::new();
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert!(mw.skills_cache().read().unwrap().is_none());
+    assert!(contribution(&mw).is_none());
+}
+
+#[tokio::test]
+async fn registry_projection_fills_cache_every_turn() {
+    let dir = tempdir().unwrap();
+    let reg = registry_with("demo", vec![fake_skill("demo", "user", "hello")]);
+    let mw = SkillsMiddleware::new().with_mcp_registry(Some(Arc::clone(&reg)));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    for _ in 0..2 {
+        mw.before_agent(&mut state).await.unwrap();
+    }
+
+    let cache = mw.skills_cache();
+    let skills = cache.read().unwrap();
+    let names: Vec<&str> = skills
+        .as_ref()
+        .expect("投影后缓存非空")
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["mcp__demo__hello"], "条目逐轮重建: {names:?}");
+}
+
+/// 未冻结（legacy/无冻结面）时：只有**系统来源**进 contribution，
+/// 外部 origin 保持既有延迟发现语义（不进 prompt）。
+#[tokio::test]
+async fn unfrozen_contribution_uses_system_origins_only() {
+    let dir = tempdir().unwrap();
+    let reg = registry_with(
+        "workspace",
+        vec![fake_skill("workspace", "project", "local-skill")],
+    );
+    let handle: peri_acp_types::mcp_skills::HandleToken = Arc::new("workspace".to_string());
+    reg.mark_discovery_started("remote", handle.clone());
+    reg.mark_discovery_completed(
+        "remote",
+        handle,
+        vec![fake_skill("remote", "user", "remote-skill")],
+    );
+    reg.mark_system_origins(&["workspace".to_string()]);
+
+    let mw = SkillsMiddleware::new().with_mcp_registry(Some(Arc::clone(&reg)));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    mw.before_agent(&mut state).await.unwrap();
+
+    let content = contribution(&mw).unwrap();
+    assert!(
+        content.contains("mcp__workspace__local-skill"),
+        "系统来源进摘要: {content}"
+    );
+    assert!(
+        !content.contains("mcp__remote__remote-skill"),
+        "非 system 来源不进 prompt contribution: {content}"
+    );
+}
+
+/// 冻结摘要优先：会话内不再按当轮投影重渲染（ARC-FROZEN-001 的投递面）。
+#[tokio::test]
+async fn frozen_summary_wins_over_current_projection() {
+    let dir = tempdir().unwrap();
+    let reg = registry_with(
+        "workspace",
+        vec![fake_skill("workspace", "project", "appeared-later")],
+    );
+    reg.mark_system_origins(&["workspace".to_string()]);
+    let mw = SkillsMiddleware::new()
+        .with_mcp_registry(Some(reg))
+        .with_frozen_summary("FROZEN CATALOG".to_string());
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    mw.before_agent(&mut state).await.unwrap();
+
+    let content = contribution(&mw).unwrap();
+    assert_eq!(content, "FROZEN CATALOG");
+}
+
+// ─── 工具面与段落声明 ────────────────────────────────────────────────────
+
 #[test]
 fn test_collect_tools_exposes_only_unified_skill_protocol() {
     let mw = SkillsMiddleware::new();
@@ -338,169 +218,6 @@ fn test_collect_tools_exposes_only_unified_skill_protocol() {
     );
 }
 
-/// [回归测试] D3：SkillTool 对"catalog 有但磁盘已删除"的 skill 返回可恢复错误，
-/// 不破坏 frozen prefix（冻结摘要不变，错误只发生在加载时刻）。
-#[tokio::test]
-async fn test_skill_tool_error_is_recoverable_when_file_deleted_mid_session() {
-    let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills").join("gone-skill");
-    std::fs::create_dir_all(&skills_dir).unwrap();
-    std::fs::write(
-        skills_dir.join("SKILL.md"),
-        "---\nname: 'gone-skill'\ndescription: 'd'\n---\n\nbody",
-    )
-    .unwrap();
-
-    let mw = SkillsMiddleware::new();
-    let cache = mw.skills_cache();
-    // 模拟 before_agent 已扫描（缓存含 gone-skill）
-    let roots = vec![SkillRoot {
-        path: dir.path().join(".claude").join("skills"),
-        source: SkillSource::Project,
-        plugin_name: None,
-    }];
-    let skills = scan_skill_roots(&roots);
-    *cache.write().unwrap() = Some(skills);
-
-    // 会话中途删除磁盘文件
-    std::fs::remove_dir_all(&skills_dir).unwrap();
-
-    let tool = tools::SkillTool::new(cache, None);
-    let result = tool
-        .invoke(
-            serde_json::json!({"skill_name": "gone-skill"}),
-            peri_agent::tools::ToolContext::new(&[], "/tmp"),
-        )
-        .await;
-    let err = result.unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("session catalog") && msg.contains("DiscoverSkillsTool"),
-        "错误应说明 catalog/磁盘边界并提供可恢复路径，实际: {msg}"
-    );
-}
-
-/// 分源合并（验收 8/9）：本地 + MCP 合并进 cached_skills、两轮不被本地扫描
-/// 覆盖；MCP 条目不进 prompt contribution；DiscoverSkillsTool 视角可见 mcp。
-#[tokio::test]
-async fn test_mcp_registry_merged_into_cache_and_kept_out_of_contribution() {
-    use peri_acp_types::mcp_skills::{HandleToken, McpSkillRegistry};
-    use peri_acp_types::skills::SkillOrigin;
-
-    // 本地 skill：tempdir 项目级目录
-    let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
-    std::fs::create_dir_all(&skills_dir).unwrap();
-    write_skill(&skills_dir, "local-skill", "本地技能");
-
-    // 手工 seed registry（Started → Completed 造 Discovered 条目）
-    let reg = Arc::new(McpSkillRegistry::new());
-    let h: HandleToken = Arc::new(1u32);
-    let mcp_skill = peri_acp_types::skills::SkillMetadata {
-        name: "mcp__demo__hello".to_string(),
-        aliases: Vec::new(),
-        description: "远端 hello 技能".to_string(),
-        source: SkillSource::Mcp,
-        origin: Some(SkillOrigin::Mcp {
-            server: "demo".to_string(),
-            uri: "skill://hello/SKILL.md".to_string(),
-        }),
-        ..Default::default()
-    };
-    reg.mark_discovery_started("demo", h.clone());
-    reg.mark_discovery_completed("demo", h, vec![mcp_skill]);
-
-    let mw = SkillsMiddleware::new().with_mcp_registry(Some(reg));
-    let mut state = AgentState::new(dir.path().to_str().unwrap());
-
-    // 两轮 before_agent：第二轮 MCP 条目仍在（不被本地扫描覆盖）
-    for _ in 0..2 {
-        mw.before_agent(&mut state).await.unwrap();
-    }
-
-    // cached_skills 含本地 + mcp 条目
-    let cache = mw.skills_cache();
-    {
-        let skills = cache.read().unwrap();
-        let skills = skills.as_ref().expect("合并后缓存非空");
-        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"local-skill"), "本地条目在缓存: {names:?}");
-        assert!(
-            names.contains(&"mcp__demo__hello"),
-            "MCP 条目在缓存（第二轮不被本地扫描覆盖）: {names:?}"
-        );
-    }
-
-    // non-frozen contribution 不含 mcp name/description（验收 9）
-    let content = contribution(&mw).unwrap();
-    assert!(content.contains("local-skill"), "本地条目进摘要: {content}");
-    assert!(
-        !content.contains("mcp__demo__hello"),
-        "MCP name 不进 contribution: {content}"
-    );
-    assert!(
-        !content.contains("远端 hello"),
-        "MCP description 不进 contribution: {content}"
-    );
-
-    // DiscoverSkillsTool 视角缓存含 mcp 条目（source: "mcp"）
-    let discover = tools::DiscoverSkillsTool::new(cache);
-    let out = discover
-        .invoke(
-            serde_json::json!({}),
-            peri_agent::tools::ToolContext::new(&[], "/tmp"),
-        )
-        .await
-        .unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    let arr = parsed.as_array().expect("DiscoverSkillsTool 返回数组");
-    assert!(
-        arr.iter()
-            .any(|e| e["name"] == "mcp__demo__hello" && e["source"] == "mcp"),
-        "DiscoverSkillsTool 视角含 mcp 条目（source 标注）: {parsed}"
-    );
-}
-
-// ─── 13_skills 段落持有（波 4 演进 C3）────────────────────────────────────
-
-/// discovery 协议与 loader 常量同源（防手写硬编码漂移）：输出包含
-/// `MAX_SCAN_DEPTH` / `MAX_SKILLS_DIRS_PER_ROOT` 的格式化值。
-#[test]
-fn discovery_protocol_uses_loader_constants() {
-    let text = format_discovery_protocol();
-    assert!(
-        text.contains(&format!(
-            "scanned recursively up to {MAX_SCAN_DEPTH} levels deep (max {MAX_SKILLS_DIRS_PER_ROOT} directories per root)"
-        )),
-        "扫描参数应来自 loader 常量: {text}"
-    );
-    // 常量变更时本测试自动失效（而不是段落文本悄悄漂移）
-    assert_eq!(MAX_SCAN_DEPTH, 6);
-    assert_eq!(MAX_SKILLS_DIRS_PER_ROOT, 1000);
-}
-
-/// discovery roots 优先级顺序与 `resolve_skill_roots` 一致
-/// （User → Global → Project → Plugin → Builtin，先到先得）。
-#[test]
-fn discovery_protocol_root_order_matches_resolve_skill_roots() {
-    let text = format_discovery_protocol();
-    let user = text.find("user-level skills (highest priority)").unwrap();
-    let global = text.find("Global `skillsDir`").unwrap();
-    let project = text
-        .find("`{cwd}/.claude/skills/` — project-level skills")
-        .unwrap();
-    let plugin = text
-        .find("Plugin skills declared in plugin manifests")
-        .unwrap();
-    let builtin = text.find("**Builtin**").unwrap();
-    assert!(
-        user < global && global < project && project < plugin && plugin < builtin,
-        "roots 优先级顺序应匹配 resolve_skill_roots: {user} < {global} < {project} < {plugin} < {builtin}"
-    );
-}
-
-/// 13_skills 段落声明：位置属性（Uncached order=6，2026-08-15 拆分后
-/// 12_ask_user=5 插入，13 顺延）+ 机制说明保留 + 动态 discovery 后缀。
 #[test]
 fn skills_section_declaration_shape() {
     let sections = SkillsMiddleware::sections();
@@ -519,18 +236,44 @@ fn skills_section_declaration_shape() {
         "loading 协议机制说明保留"
     );
     assert!(
-        content.contains(
-            "Skills are loaded from the following roots in priority order (first match wins):"
-        ),
+        content.contains("Skill roots are resolved by the provider in priority order"),
         "discovery 小节引导保留（动态内容后缀拼接）"
     );
-    // 段落文件不再硬编码协议细节（失同步防线）
+    // 段落文件不再硬编码任何本地路径/扫描参数（J5 失同步防线）
     let file_content = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../peri-acp/prompts/sections/13_skills.md"
     ));
     assert!(
         !file_content.contains("Each skill root is scanned recursively"),
-        "13_skills.md 不应再硬编码扫描参数（由 loader 常量生成）"
+        "13_skills.md 不应再硬编码扫描参数"
     );
+    assert!(
+        !file_content.contains("mid-session are NOT reflected") || file_content.contains("MCP"),
+        "13_skills.md 目录语义应描述 MCP 来源"
+    );
+}
+
+#[test]
+fn discovery_protocol_describes_mcp_sources_without_local_paths() {
+    let text = format_discovery_protocol();
+    assert!(
+        text.contains("MCP"),
+        "协议文本应说明技能经 MCP 提供: {text}"
+    );
+    assert!(
+        text.contains("DiscoverSkillsTool") && text.contains("SkillTool"),
+        "协议文本应给出两个工具: {text}"
+    );
+    for stale in [
+        "~/.claude/skills",
+        "scanned recursively",
+        "levels deep",
+        "directories per root",
+    ] {
+        assert!(
+            !text.contains(stale),
+            "协议文本不得残留本地扫描/路径事实（{stale}）: {text}"
+        );
+    }
 }

@@ -36,7 +36,7 @@ impl super::SubAgentTool {
             plugin_agent_dirs: Arc::new(Vec::new()),
             mcp_agent_registry: None,
             broker: None,
-            chain_assembler: Arc::new(SubagentChainAssemblerImpl),
+            chain_assembler: Arc::new(SubagentChainAssemblerImpl::new()),
         }
     }
 
@@ -52,6 +52,17 @@ impl super::SubAgentTool {
     ) -> Self {
         self.mcp_agent_registry = registry;
         self.broker = broker;
+        self
+    }
+
+    /// 注入会话级 MCP skill registry（W4b/F5）：子链的技能目录与正文只来自该
+    /// registry（`skills:` 预载按名查它；未命中=缺口，不回落磁盘）。装配器随之
+    /// 携带同一份 Arc。
+    pub(crate) fn with_mcp_skills(
+        mut self,
+        registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
+    ) -> Self {
+        self.chain_assembler = Arc::new(super::SubagentChainAssemblerImpl::with_registry(registry));
         self
     }
 

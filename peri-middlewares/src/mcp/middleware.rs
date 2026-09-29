@@ -7,6 +7,7 @@ use std::{
     },
 };
 
+use super::client::McpClientHandle;
 use async_trait::async_trait;
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::mcp_skills::{HandleToken, McpSkillRegistry};
@@ -264,14 +265,34 @@ pub(crate) fn run_ensure_discovery(
     if cancel.is_cancelled() {
         return;
     }
-    let connected: Vec<(String, HandleToken)> = pool
+    // A24 关闭集：关闭的 builtin 实例既不可发现也不可激活（X4）——技能/命令面
+    // 在**来源投影**处整体剔除，因此关闭实例不会留下 registry 条目、命令路由
+    // 或可激活句柄（无 FS fallback 的说法在这里落地：关闭后无任何本地来源）。
+    //
+    // W4b 收口：同一份上下文对象一次读出「宿主技能面关闭位」
+    //（`skills_face_closed`，与关闭集同源 = `"SkillsMiddleware" ∈ disabled`）——
+    // 真 ⇒ `core:{skill}` 裸名投影整体撤下（链槽关闭的配套半边），而
+    // `{server}:{skill}` 发现面与实例本身（`closed` 判定）不受影响。
+    let builtin_context = pool.builtin_instance_context();
+    let closed = builtin_context
+        .as_ref()
+        .map(|context| context.closed.clone())
+        .unwrap_or_default();
+    let skills_face_closed = builtin_context
+        .as_ref()
+        .is_some_and(|context| context.skills_face_closed);
+    let connected_handles: Vec<Arc<McpClientHandle>> = pool
         .get_all_clients_visible_to(session_id)
         .into_iter()
-        .map(|h| {
-            let t: HandleToken = h.clone();
-            (h.name.clone(), t)
-        })
+        .filter(|handle| !super::builtin::is_closed(&handle.name, &closed))
         .collect();
+    let connected: Vec<(String, HandleToken)> = connected_handles
+        .iter()
+        .map(|h| (h.name.clone(), h.clone() as HandleToken))
+        .collect();
+    // W4b（F6/J1）：标注系统来源（host 绑定的 builtin 实例）——system 摘要投递
+    // 与 `core:{skill}` 裸名命令投影都按该标注判定，且只认连接事实（X6/X7）。
+    crate::mcp::skill_discovery::mark_system_origins(registry, &connected_handles, &closed);
     // 命令面投影（决策 1）：同 connected 列表，来源键 =
     // `mcp_source_key(server)`（plugin server key 取末段，与
     // mcp_route_entries 的 fullname 词法首段同构——断连批量注销
@@ -298,6 +319,13 @@ pub(crate) fn run_ensure_discovery(
         }
     }
     let projection = registry.project_connected(&connected);
+    // W4b（F6）：`core:{skill}` 裸名命令随来源集合重算（关闭/断连 ⇒ 同批撤下；
+    // 幂等，无变化不触发 on_change）。放在 runtime 判定之前：纯投影不需要 runtime。
+    crate::mcp::skill_discovery::project_core_skill_commands(
+        &command_registry.cloned(),
+        registry,
+        skills_face_closed,
+    );
     let Some(runtime) = tokio::runtime::Handle::try_current().ok() else {
         // 无 tokio runtime（装配期/纯函数测试）：跳过 spawn，before_agent
         // 幂等兜底（生产路径恒在 runtime 内，不触发本分支）。
@@ -337,6 +365,7 @@ pub(crate) fn run_ensure_discovery(
                 handle_token,
                 cancel,
                 cache,
+                skills_face_closed,
             )
             .await;
         });

@@ -164,6 +164,8 @@ pub async fn run_print(
         workspace_resources: None,
         // 顶层装配无会话上下文：A24 关闭集恒为空集（会话装配才从 frozen 派生）。
         builtin_closed: Default::default(),
+        // 宿主技能面关闭位与关闭集同源（会话级派生）：顶层装配恒为假。
+        skills_face_closed: false,
         // print 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。
         prepared_plugins: None,
     })

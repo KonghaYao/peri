@@ -10,7 +10,6 @@ use peri_acp_types::event_data::PluginSnapshotEntry;
 use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort};
 use peri_acp_types::ports::SkillsPort;
-use peri_acp_types::skills::{SkillMetadata, SkillRoot};
 
 use crate::plugin::{
     cleanup_orphaned_plugins, install_plugin, load_installed_plugins, load_known_marketplaces,
@@ -419,22 +418,16 @@ impl SettingsHooksPort for SettingsHooksLoader {
     }
 }
 
-/// Skills 扫描端口实现：包装 `SkillsMiddleware::resolve_roots_static` /
-/// `scan_skill_roots` / `scan_agents_detailed`。
+/// Agents 目录扫描端口实现：包装 `scan_agents_detailed`。
+///
+/// W4b（F6/J5）：原 `available_skills`（同步扫盘）已删除——技能目录的唯一来源是
+/// 会话级 MCP skill registry，命令面的 `core:{skill}` 裸名投影随发现异步产生
+/// （`mcp::skill_discovery` 的投影，见 `project_core_skill_commands`），端口不再
+/// 承担任何技能内容读取。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SkillsProvider;
 
 impl SkillsPort for SkillsProvider {
-    fn available_skills(&self, cwd: &str, plugin_roots: &[SkillRoot]) -> Vec<SkillMetadata> {
-        let disable_bundled = crate::skills::load_disable_bundled_skills();
-        let skill_roots = crate::SkillsMiddleware::resolve_roots_static(
-            cwd,
-            plugin_roots.to_vec(),
-            disable_bundled,
-        );
-        crate::skills::scan_skill_roots(&skill_roots)
-    }
-
     fn agents(
         &self,
         cwd: &str,

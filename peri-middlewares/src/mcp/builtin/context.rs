@@ -103,10 +103,19 @@ pub struct BuiltinInstanceContext {
     /// 语义是**非物理**关闭（只关本 turn 的工具投影与同步目标），因此本类型只承载它、
     /// 不据此拒绝装配：装配面（`dispatch` / `runtime`）不消费 `closed`。
     pub closed: BTreeSet<String>,
+    /// 宿主技能面关闭位：与 [`Self::closed`] **同源**——同一份 `disabled_middlewares`
+    /// 的投影（`"SkillsMiddleware" ∈ disabled`，宿主装配一次派生、两处承载），
+    /// 语义 = 宿主技能面（`core:{skill}` 裸名命令投影）关闭。
+    ///
+    /// **不是**实例关闭：workspace 实例照常装配，7 个工具、资源面与
+    /// `{server}:{skill}` MCP 发现面均不受影响（链槽关闭 = `SkillsMiddleware`
+    /// 不构造，13_skills 段落与两个技能工具随槽位消失；命令面不得留下幽灵路由）。
+    /// 唯一消费点是发现管线的 core 投影（`skill_discovery::project_core_skill_commands`）。
+    pub skills_face_closed: bool,
 }
 
 impl BuiltinInstanceContext {
-    /// 最小构造：给定 cwd，无实例输入、关闭集为空。
+    /// 最小构造：给定 cwd，无实例输入、关闭集为空、技能面关闭位为假。
     pub fn new(cwd: impl Into<String>) -> Self {
         Self {
             cwd: cwd.into(),
@@ -115,6 +124,7 @@ impl BuiltinInstanceContext {
             workspace: None,
             workspace_resources: None,
             closed: BTreeSet::new(),
+            skills_face_closed: false,
         }
     }
 
@@ -152,6 +162,13 @@ impl BuiltinInstanceContext {
     /// 设置 A24 关闭集（`closed_instances(...)` 的产物，原样承载）。
     pub fn with_closed(mut self, closed: BTreeSet<String>) -> Self {
         self.closed = closed;
+        self
+    }
+
+    /// 设置宿主技能面关闭位（宿主装配从**同一份** `disabled_middlewares` 派生，
+    /// 见 [`Self::skills_face_closed`]；不在此处推导，避免第二份判定）。
+    pub fn with_skills_face_closed(mut self, closed: bool) -> Self {
+        self.skills_face_closed = closed;
         self
     }
 

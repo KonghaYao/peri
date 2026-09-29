@@ -85,6 +85,7 @@ impl PreparedSessionInputs {
             host,
             &PromptRuntimeEnv::detect(cwd),
             HashMap::new(),
+            &[],
         )?;
         Ok(inputs)
     }
@@ -115,6 +116,7 @@ impl PreparedSessionInputs {
             host,
             &PromptRuntimeEnv::detect(workspace_cwd),
             HashMap::new(),
+            &[],
         )?;
         Ok(inputs)
     }
@@ -165,11 +167,15 @@ impl PreparedSessionInputs {
         Ok(())
     }
 
+    /// `skill_catalog` = P4 内容准入期从 system 来源（builtin `workspace` 实例）
+    /// 取到的技能元数据快照（W4b/F3）：空快照 = 技能面为空/不适用，不是错误。
+    /// legacy 首次接纳等无执行环境的构造点传空快照（J5：不回落磁盘）。
     pub(crate) fn build_frozen_after_activation(
         &mut self,
         host: &AcpServerConfig,
         runtime_env: &PromptRuntimeEnv,
         docs: HashMap<String, String>,
+        skill_catalog: &[peri_acp_types::skills::SkillMetadata],
     ) -> Result<(), AcpError> {
         if self.frozen.is_some() {
             return Ok(());
@@ -179,10 +185,10 @@ impl PreparedSessionInputs {
             .build_frozen_data_with_config_and_runtime_and_docs(
                 &self.configuration.config,
                 &self.cwd,
-                &self.skill_roots,
                 &self.agent_dirs,
                 runtime_env,
                 docs,
+                skill_catalog,
             );
         let encoded = encode_frozen_snapshot(&frozen).map_err(|error| {
             AcpError::new(-32603, format!("Frozen snapshot encode failed: {error}"))

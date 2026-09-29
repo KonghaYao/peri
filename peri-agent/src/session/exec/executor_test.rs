@@ -24,7 +24,6 @@ use peri_acp_types::{
     permission::{PermissionMode, SharedPermissionMode},
     ports::{SkillsPort, ToolSearchPort},
     runtime::UnstampedEvent,
-    skills::{SkillMetadata, SkillRoot},
 };
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
@@ -133,10 +132,6 @@ impl EventSubscriber for NoopSubscriber {
 struct NoopSkills;
 
 impl SkillsPort for NoopSkills {
-    fn available_skills(&self, _cwd: &str, _plugin_roots: &[SkillRoot]) -> Vec<SkillMetadata> {
-        Vec::new()
-    }
-
     fn agents(
         &self,
         _cwd: &str,

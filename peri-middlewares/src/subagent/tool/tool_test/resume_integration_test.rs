@@ -550,9 +550,10 @@ async fn test_resume_skill_preload_not_duplicated() {
         "---\nname: skill-user\ndescription: Uses skills\nskills:\n  - test-skill\n---\n\nYou use skills.\n",
     )
     .unwrap();
+    // 磁盘文件是**反例**（W4b：子链预载只查 MCP registry，不读盘）。
     std::fs::write(
         skills_dir.join("SKILL.md"),
-        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nThis is the test skill content.\n",
+        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nDISK CONTENT MUST NOT BE READ.\n",
     )
     .unwrap();
 
@@ -569,11 +570,15 @@ async fn test_resume_skill_preload_not_duplicated() {
         Some(parent_id.clone()),
     );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let t = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_session_resources(store.facade())
-        .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
-        .with_parent_session(parent.clone());
+    let t = super::with_skill_registry(
+        make_interrupt_tool(Arc::clone(&calls), 1)
+            .with_session_resources(store.facade())
+            .with_parent_thread_id(parent_id.clone())
+            .with_execution_owner(store.execution_owner())
+            .with_parent_session(parent.clone()),
+        "workspace",
+        &[("test-skill", "This is the test skill content.\n")],
+    );
 
     // 首次执行（agent-def 路径）→ SkillPreload 注入一套 → 中断（LLM 返回 Interrupted）
     let interrupted = t
@@ -750,9 +755,10 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
         "---\nname: skill-user\ndescription: Uses skills\nskills:\n  - test-skill\n---\n\nYou use skills.\n",
     )
     .unwrap();
+    // 磁盘文件是**反例**（W4b：子链预载只查 MCP registry，不读盘）。
     std::fs::write(
         skills_dir.join("SKILL.md"),
-        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nThis is the test skill content.\n",
+        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nDISK CONTENT MUST NOT BE READ.\n",
     )
     .unwrap();
 
@@ -769,11 +775,15 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
         Some(parent_id.clone()),
     );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let t = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_session_resources(store.facade())
-        .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
-        .with_parent_session(parent.clone());
+    let t = super::with_skill_registry(
+        make_interrupt_tool(Arc::clone(&calls), 1)
+            .with_session_resources(store.facade())
+            .with_parent_thread_id(parent_id.clone())
+            .with_execution_owner(store.execution_owner())
+            .with_parent_session(parent.clone()),
+        "workspace",
+        &[("test-skill", "This is the test skill content.\n")],
+    );
 
     // 首次执行（显式声明 skills）→ 注入一套 → 中断（LLM 返回 Interrupted）
     let interrupted = t

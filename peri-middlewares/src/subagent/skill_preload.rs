@@ -7,8 +7,6 @@ use peri_agent::{
     middleware::r#trait::Middleware,
 };
 
-use crate::skills::SkillRoot;
-
 /// 从文本中提取 `/skill-name` 模式的 skill 名称
 ///
 /// 支持格式：
@@ -61,59 +59,39 @@ pub fn extract_skill_names_from_text(text: &str) -> Vec<String> {
 /// ...
 /// ```
 ///
-/// 找不到的 skill 名称静默跳过，不报错。
+/// 找不到的 skill 名称静默跳过，不报错（report 为 warn 缺口日志，不注入）。
 pub struct SkillPreloadMiddleware {
     skill_names: Vec<String>,
-    cwd: String,
-    plugin_roots: Vec<SkillRoot>,
-    disable_bundled: bool,
-    /// 会话级 MCP skill 远端注册表（None = 仅本地磁盘路径；默认 None，
-    /// `new()` 签名与既有测试/构造点不变）。
+    /// 会话级 MCP skill 远端注册表（W4b：技能的**唯一**来源；None = 未装配
+    /// 技能面 → 预载不可用，缺口报告，不回落磁盘）。
     mcp_registry: Option<std::sync::Arc<McpSkillRegistry>>,
 }
 
 impl SkillPreloadMiddleware {
-    pub fn new(skill_names: Vec<String>, cwd: &str) -> Self {
+    /// W4b（J5）：`cwd` 形参随本地扫描一并删除——技能根解析归 workspace 实例的
+    /// provider，宿主预载不再需要任何路径。
+    pub fn new(skill_names: Vec<String>) -> Self {
         Self {
             skill_names,
-            cwd: cwd.to_string(),
-            plugin_roots: Vec::new(),
-            disable_bundled: false,
             mcp_registry: None,
         }
     }
 
-    /// 追加插件 skills 搜索根（每个 root 携带 source 与 plugin_name）
-    pub fn with_plugin_roots(mut self, roots: Vec<SkillRoot>) -> Self {
-        self.plugin_roots = roots;
-        self
-    }
-
-    /// 设置是否禁用 builtin skill（默认 false）
-    pub fn with_disable_bundled(mut self, disable: bool) -> Self {
-        self.disable_bundled = disable;
-        self
-    }
-
-    /// 注入 MCP 远端技能注册表（None = 仅本地磁盘路径；默认 None）。
+    /// 注入 MCP 远端技能注册表。
     pub fn with_mcp_registry(mut self, reg: Option<std::sync::Arc<McpSkillRegistry>>) -> Self {
         self.mcp_registry = reg;
         self
     }
 }
 
-/// 预加载槽位：本地命中携带已读正文；MCP 命中携带条目（正文在闭包外经
-/// 统一 activation 读取——资源读取是异步的，不能在 blocking 闭包里做）。
-enum PreloadSlot {
-    Ready {
-        name: String,
-        content: String,
-    },
-    Mcp {
-        name: String,
-        /// 盒装：SkillMetadata 远大于本地正文槽位（clippy large_enum_variant）。
-        meta: Box<peri_acp_types::skills::SkillMetadata>,
-    },
+/// 预加载槽位：MCP registry 命中携带条目（正文在闭包外经统一 activation
+/// 读取——资源读取是异步的，不能在 blocking 闭包里做）。
+///
+/// W4b（F5/J5）：本地磁盘命中槽位已删除——技能没有非 MCP 来源。
+struct PreloadSlot {
+    name: String,
+    /// 盒装：SkillMetadata 远大于本地正文槽位（clippy large_enum_variant）。
+    meta: Box<peri_acp_types::skills::SkillMetadata>,
 }
 
 #[async_trait]
@@ -144,73 +122,65 @@ impl Middleware for SkillPreloadMiddleware {
             return Ok(());
         }
 
-        let cwd = self.cwd.clone();
-        let plugin_roots = self.plugin_roots.clone();
-        let disable_bundled = self.disable_bundled;
-        let registry = self.mcp_registry.clone();
-        // 一批预加载共享一次本地扫描。按输入顺序产出槽位，避免把 registry
-        // 命中、磁盘 miss 与磁盘命中拆成多路后再按位置合并。
-        let (slots, ambiguous) = tokio::task::spawn_blocking(move || {
-            let mut local_skills = None;
+        // W4b（F5/J5）：预载只按名查 MCP registry——本地磁盘兜底扫描已删除。
+        // 未装配 registry（print/遗留装配）或未命中 → 缺口报告（warn），
+        // 不注入、不回落磁盘、不静默假装成功。
+        let Some(registry) = self.mcp_registry.clone() else {
+            if !skill_names.is_empty() {
+                tracing::warn!(
+                    skills = ?skill_names,
+                    "SkillPreloadMiddleware: MCP skill registry 未装配，技能预载不可用（缺口，不回落磁盘）"
+                );
+            }
+            return Ok(());
+        };
+
+        // 一批预载共享一次 registry 读取（registry 内部锁内取快照）。按输入
+        // 顺序产出槽位；命中集与歧义在闭包外统一处理。
+        // 闭包只借一份 registry 快照；激活阶段继续用外层句柄（Arc 克隆廉价）。
+        let lookup_registry = std::sync::Arc::clone(&registry);
+        let (slots, ambiguous, missing) = tokio::task::spawn_blocking(move || {
             let mut slots = Vec::with_capacity(skill_names.len());
             let mut ambiguous: Vec<(String, Vec<peri_acp_types::skills::SkillMetadata>)> =
                 Vec::new();
+            let mut missing: Vec<String> = Vec::new();
             for name in skill_names {
                 let name = name.to_lowercase();
-                if let Some(reg) = &registry {
-                    // registry-first：全名/别名（lookup_exact）→ 命令形态
-                    // （lookup_by_command，保留 plugin 多冒号 server 的末段别名）。
-                    // 命中后正文一律经统一 activation（W2），读取在闭包外异步进行；
-                    // 激活失败不回落磁盘、不静默注入旧缓存。
-                    //
-                    // 歧义（同一形态命中多个 origin）→ 显式拒绝并列出候选：
-                    // 不静默取首个，也不改走本地兜底（同名跨源必须消歧）。
-                    let lookup = match reg.lookup_exact(&name) {
-                        SkillLookup::Missing => reg.lookup_by_command(&name),
+                // 三形态与命令面同源：全名/别名（`lookup_exact`）→
+                // `{server}:{skill}` 命令形态（`lookup_by_command`，覆盖 plugin
+                // 多冒号 server 的末段匹配）→ 裸名 `{skill}`（`lookup`，跨 origin
+                // 命中返回 Ambiguous，由调用方显式拒绝而不是静默取首个）。
+                let lookup = match lookup_registry.lookup_exact(&name) {
+                    SkillLookup::Missing => match lookup_registry.lookup_by_command(&name) {
+                        SkillLookup::Missing => lookup_registry.lookup(&name),
                         other => other,
-                    };
-                    match lookup {
-                        SkillLookup::Found(meta) => {
-                            slots.push(PreloadSlot::Mcp {
-                                name,
-                                meta: Box::new(*meta),
-                            });
-                            continue;
-                        }
-                        SkillLookup::Ambiguous(candidates) => {
-                            ambiguous.push((name, candidates));
-                            continue;
-                        }
-                        SkillLookup::Missing => {}
-                    }
-                    // mcp__ 表示 MCP 身份；registry miss 不回退磁盘。
-                    if name.starts_with("mcp__") {
-                        continue;
-                    }
-                }
-                let skills = local_skills.get_or_insert_with(|| {
-                    let roots = crate::skills::resolve_skill_roots(
-                        &cwd,
-                        plugin_roots.clone(),
-                        disable_bundled,
-                    );
-                    crate::skills::scan_skill_roots(&roots)
-                });
-                let found = crate::skills::find_skill_in_list(skills, &name).or_else(|| {
-                    name.rsplit_once(':')
-                        .and_then(|(_, suffix)| crate::skills::find_skill_in_list(skills, suffix))
-                });
-                if let Some((_, content)) = found {
-                    slots.push(PreloadSlot::Ready { name, content });
+                    },
+                    other => other,
+                };
+                match lookup {
+                    SkillLookup::Found(meta) => slots.push(PreloadSlot {
+                        name,
+                        meta: Box::new(*meta),
+                    }),
+                    SkillLookup::Ambiguous(candidates) => ambiguous.push((name, candidates)),
+                    SkillLookup::Missing => missing.push(name),
                 }
             }
-            (slots, ambiguous)
+            (slots, ambiguous, missing)
         })
         .await
         .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
             middleware: "SkillPreloadMiddleware".to_string(),
             reason: format!("spawn_blocking 失败: {e}"),
         })?;
+
+        // 未命中：缺口报告（不进上下文；不回落磁盘）。
+        for name in &missing {
+            tracing::warn!(
+                skill = %name,
+                "SkillPreloadMiddleware: skill 未在 MCP registry 中命中，跳过预载（缺口）"
+            );
+        }
 
         // 歧义命中：显式拒绝（不注入、不回落本地），候选写入日志供消歧。
         for (name, candidates) in &ambiguous {
@@ -221,29 +191,22 @@ impl Middleware for SkillPreloadMiddleware {
             );
         }
 
-        // MCP 槽位：统一 activation（resources/read + digest/frontmatter 校验；
+        // 槽位：统一 activation（resources/read + digest/frontmatter 校验；
         // stale 经 skills/get 刷新一次）。失败静默跳过（与 miss 语义一致），
         // 不回退磁盘或发现期缓存。
         let mut skill_contents: Vec<(String, String)> = Vec::with_capacity(slots.len());
         for slot in slots {
-            match slot {
-                PreloadSlot::Ready { name, content } => skill_contents.push((name, content)),
-                PreloadSlot::Mcp { name, meta } => {
-                    let Some(reg) = self.mcp_registry.as_ref() else {
-                        continue;
-                    };
-                    match crate::mcp::skill_activation::activate(reg, meta.as_ref(), None).await {
-                        Ok(content) => skill_contents.push((
-                            name,
-                            crate::skills::annotate_mcp_content(meta.as_ref(), &content),
-                        )),
-                        Err(error) => tracing::debug!(
-                            skill = %name,
-                            reason = error.reason(),
-                            "MCP skill 预加载激活失败，跳过注入"
-                        ),
-                    }
-                }
+            let PreloadSlot { name, meta } = slot;
+            match crate::mcp::skill_activation::activate(&registry, meta.as_ref(), None).await {
+                Ok(content) => skill_contents.push((
+                    name,
+                    crate::skills::annotate_mcp_content(meta.as_ref(), &content),
+                )),
+                Err(error) => tracing::debug!(
+                    skill = %name,
+                    reason = error.reason(),
+                    "MCP skill 预加载激活失败，跳过注入"
+                ),
             }
         }
 
