@@ -32,7 +32,6 @@ pub use workflow::{
 
 use crate::{
     default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware},
-    error_suggest,
     hitl::HumanInTheLoopMiddleware,
     middleware::TodoMiddleware,
     permission::{default_requires_approval, PermissionMiddleware},
@@ -377,24 +376,10 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             }
         }
 
-        // 错误感知建议：从 shared_tools 构造 snapshot（所有工具都已注册）
-        let all_tool_names: Vec<String> = shared_tools.read().keys().cloned().collect();
-        let agents_dir = std::path::Path::new(cwd).join(".claude").join("agents");
-        let agents_dir_opt = if agents_dir.exists() {
-            Some(agents_dir)
-        } else {
-            None
-        };
-        let snapshot =
-            error_suggest::build_tool_registry_snapshot(all_tool_names, agents_dir_opt.as_deref());
-        let registry = error_suggest::build_default_registry();
-
         ChainAssembly {
             chain,
             // MetaHarness：SubAgentMiddleware 关闭 → 槽位联动置空（禁止半开状态）。
             subagent_mw: subagent.map(|mw| Arc::new(mw) as Arc<dyn SubAgentMiddlewarePort>),
-            error_suggest_registry: Some(registry),
-            tool_registry_snapshot: Arc::new(snapshot),
         }
     }
 }

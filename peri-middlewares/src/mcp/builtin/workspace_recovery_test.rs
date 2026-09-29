@@ -318,37 +318,20 @@ async fn request_timeout_stops_server_shell() {
 }
 
 #[tokio::test]
-async fn safe_missing_path_diagnostic_still_drives_path_suggestions() {
-    use crate::error_suggest::{
-        context::{ErrorContext, ToolRegistrySnapshot},
-        registry::ErrorSuggester,
-        suggesters::path_suggester::PathSuggester,
-    };
+async fn safe_missing_path_diagnostic_carries_path_suggestion() {
     let (dir, cwd) = workspace_dir();
     std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
     let pair = connect(&cwd, None).await;
     let input = json!({"file_path":"maiin.rs"});
     let failure = bridge(&pair, "Read", true)
         .await
-        .invoke(input.clone(), ToolContext::new(&[], &cwd))
+        .invoke(input, ToolContext::new(&[], &cwd))
         .await
         .unwrap_err()
         .to_string();
-    let snapshot = ToolRegistrySnapshot {
-        all_tool_names: Default::default(),
-        subagent_types: Default::default(),
-    };
-    let ctx = ErrorContext::new(
-        "mcp__workspace__Read",
-        &input,
-        &failure,
-        dir.path(),
-        &snapshot,
-    );
-    let suggestion = PathSuggester
-        .suggest(&ctx)
-        .expect("safe reason must still permit correction");
-    assert!(suggestion.summary.contains("main.rs"));
+    // 候选由工具在失败点生成（mcp-packages/workspace path_hints），peri 侧仅
+    // 透传 recovery：安全诊断不得抑制可纠错的 did-you-mean。
+    assert!(failure.contains("main.rs"), "{failure}");
     pair.shutdown().await;
 }
 

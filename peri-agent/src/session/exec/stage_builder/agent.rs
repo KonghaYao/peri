@@ -116,12 +116,7 @@ pub(crate) fn build_agent(
     // - 装配实现：`peri-middlewares::assembly::ProductionChainAssembler`
     //   （含 SubAgentMiddleware 构造点；经 `MiddlewareChainAssembler` trait
     //   注入，本模块不引用装配实现）
-    let ChainAssembly {
-        chain,
-        subagent_mw,
-        error_suggest_registry: registry,
-        tool_registry_snapshot: snapshot,
-    } = assembler.assemble(
+    let ChainAssembly { chain, subagent_mw } = assembler.assemble(
         &crate::session::factory::production_blueprint(),
         &project_assembly(
             input,
@@ -177,8 +172,6 @@ pub(crate) fn build_agent(
         llm: model,
         chain,
         shared_tools: Some(Arc::clone(&shared_tools)),
-        error_suggest_registry: registry,
-        tool_registry_snapshot: snapshot,
         context_budget: Some(context_budget),
         compact_config: Some(compact_config),
         subagent_mw,

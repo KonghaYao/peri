@@ -364,8 +364,4 @@ pub struct ChainAssembly {
     pub chain: MiddlewareChain,
     /// SubAgent 中间件端口（链中已有一份 clone；供上层注入主 agent 身份）
     pub subagent_mw: Option<Arc<dyn SubAgentMiddlewarePort>>,
-    /// 错误感知建议注册表
-    pub error_suggest_registry: Option<Arc<crate::error_suggest::ErrorSuggestRegistry>>,
-    /// 工具注册表快照（工具名 + subagent 类型）
-    pub tool_registry_snapshot: Arc<crate::error_suggest::ToolRegistrySnapshot>,
 }

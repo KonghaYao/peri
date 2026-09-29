@@ -220,15 +220,23 @@ fn make_ids() -> (TurnId, AgentId) {
     (TurnId::new(), AgentId::new())
 }
 
-// 中等 mock：手写 trait impl（具体 suggester）
-struct MockBashCommandSuggester;
-impl ErrorSuggester for MockBashCommandSuggester {
-    fn suggest(&self, _ctx: &ErrorContext) -> Option<Suggestion> {
-        Some(Suggestion { summary: "来自 MockBashCommandSuggester".into(), details: None })
+// 中等 mock：手写 trait impl（具体工具）
+struct StubTool;
+#[async_trait::async_trait]
+impl BaseTool for StubTool {
+    fn name(&self) -> &str { "Stub" }
+    fn description(&self) -> &str { "返回固定输出" }
+    fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok("fixed".into())
     }
 }
-// 注：实际 suggester 共 7 个（BashCommand / GlobPattern / Path / Range / Subagent / Regex / JsonSchema），
-// 测试时按需 mock 具体类型即可。
+// 需要锁某个契约方法时再单独覆盖即可（如 execution_test.rs 的 `LimitedTool`
+// 只覆盖 `output_char_limit()` 来锁截断行为）。
 
 // 复杂 mock（如 LLM）：手写 trait impl + 返回固定/echo 数据
 struct EchoLLM;

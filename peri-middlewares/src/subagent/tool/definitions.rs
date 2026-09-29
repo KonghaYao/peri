@@ -4,6 +4,7 @@ use crate::{
     claude_agent_parser::{parse_agent_file, ClaudeAgent, ToolsValue},
     subagent::built_in_agents::get_built_in_agent,
 };
+use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use peri_agent::tools::BaseTool;
 use std::{collections::BTreeSet, path::Path};
 
@@ -100,10 +101,9 @@ impl super::SubAgentTool {
 
     /// Build retry hints from the same loader and invocation context as the failed call.
     ///
-    /// The error-suggestion registry intentionally does not know about agent sources: its
-    /// snapshot is prompt metadata and may belong to another cwd or policy. Agent hints are
-    /// therefore resolved here, after the real load failed, and every enumerated id is passed
-    /// through `load_agent_def` before it can be shown to the caller.
+    /// Hints are resolved here, at the failure point, after the real load failed: agent
+    /// sources are only known to this tool, and every enumerated id is passed through
+    /// `load_agent_def` before it can be shown to the caller.
     pub(crate) fn agent_error_with_suggestions(
         &self,
         error: &str,
@@ -124,7 +124,7 @@ impl super::SubAgentTool {
             return format!("{error}\nAvailable agent types: {available}");
         };
 
-        let matches = peri_agent::error_suggest::matcher::fuzzy_filter(&candidates, requested)
+        let matches = fuzzy_rank(&candidates, requested)
             .into_iter()
             .take(3)
             .collect::<Vec<_>>();
@@ -173,6 +173,17 @@ impl super::SubAgentTool {
     ) -> Vec<Box<dyn BaseTool>> {
         crate::subagent::fork::filter_tools(&self.parent_tools, allowed, disallowed)
     }
+}
+
+/// Skim 子序列匹配排序：返回所有可匹配候选项（score 降序）。
+fn fuzzy_rank(candidates: &[String], query: &str) -> Vec<String> {
+    let matcher = SkimMatcherV2::default();
+    let mut scored: Vec<(String, i64)> = candidates
+        .iter()
+        .filter_map(|c| matcher.fuzzy_match(c, query).map(|s| (c.clone(), s)))
+        .collect();
+    scored.sort_by_key(|(_, s)| std::cmp::Reverse(*s));
+    scored.into_iter().map(|(c, _)| c).collect()
 }
 
 fn collect_agent_ids(dir: &Path, ids: &mut BTreeSet<String>) {

@@ -26,7 +26,6 @@ use crate::agent::events::{Stage, StageStatus};
 use crate::agent::events_v2::{EventBus, ObserveEvent};
 use crate::agent::react::ReactLLM;
 use crate::agent::token::ContextBudget;
-use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::tool_catalog::{SessionToolCatalog, SessionToolCatalogSnapshot};
@@ -78,8 +77,6 @@ pub struct RuntimeServices {
     pub event_bus: Arc<EventBus>,
     /// Deferred tools 外部注册表（ExecuteExtraTool 代理执行用）
     pub shared_tools: Option<SharedToolMap>,
-    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    pub tool_registry_snapshot: Arc<ToolRegistrySnapshot>,
 }
 
 /// Compact 系统上下文（含跨阶段计数器）
@@ -162,7 +159,6 @@ impl StageContext {
         let compact_fail = Arc::new(AtomicU32::new(0));
         let sctx = Arc::new(RwLock::new(std::collections::HashMap::new()));
         let rbuf = Arc::new(RwLock::new(Vec::new()));
-        let tool_snapshot = Arc::new(ToolRegistrySnapshot::default());
         Self {
             session: SessionHandle {
                 turn: turn_arc,
@@ -180,8 +176,6 @@ impl StageContext {
                 middleware_chain: mw_chain,
                 event_bus: ebus,
                 shared_tools: None,
-                error_suggest_registry: None,
-                tool_registry_snapshot: tool_snapshot,
             },
             compact: CompactContext {
                 context_budget: None,
@@ -229,8 +223,6 @@ impl StageContext {
                 middleware_chain: Arc::new(MiddlewareChain::new()),
                 event_bus: Arc::new(EventBus::new(Default::default()).0),
                 shared_tools: None,
-                error_suggest_registry: None,
-                tool_registry_snapshot: Arc::new(ToolRegistrySnapshot::default()),
             },
             compact: CompactContext {
                 context_budget: None,
@@ -375,16 +367,6 @@ impl StageContextBuilder {
 
     pub fn with_shared_tools(mut self, shared: SharedToolMap) -> Self {
         self.runtime.shared_tools = Some(shared);
-        self
-    }
-
-    pub fn with_error_suggest_registry(mut self, registry: Arc<ErrorSuggestRegistry>) -> Self {
-        self.runtime.error_suggest_registry = Some(registry);
-        self
-    }
-
-    pub fn with_tool_registry_snapshot(mut self, snapshot: ToolRegistrySnapshot) -> Self {
-        self.runtime.tool_registry_snapshot = Arc::new(snapshot);
         self
     }
 

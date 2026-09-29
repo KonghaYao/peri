@@ -10,7 +10,6 @@ use super::super::types::{SubagentChainAssembler, SubagentChainContext};
 use super::super::v2_bridge::{build_v2_subagent_context, V2SubagentContext};
 use crate::agent::react::ReactLLM;
 use crate::agent::{CompactConfig, ContextBudget};
-use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::session::{FrozenContext, MessageQueue, Session};
 use crate::tools::{BaseTool, ToolInvocationResolver};
 use peri_acp_types::session_resources::SessionResources;
@@ -48,8 +47,6 @@ pub(super) fn build_subagent_session_v2(
     frozen_claude_local_md: Option<String>,
     frozen_skill_summary: Option<String>,
     tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
-    error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    tool_registry_snapshot: Option<ToolRegistrySnapshot>,
     compact_config: Option<CompactConfig>,
     context_budget: Option<ContextBudget>,
     compact_llm: Option<Arc<dyn peri_model::Model>>,
@@ -112,8 +109,6 @@ pub(super) fn build_subagent_session_v2(
         &cwd,
         cancel_token,
         tool_invocation_resolver,
-        error_suggest_registry,
-        tool_registry_snapshot,
         compact_config,
         context_budget,
         compact_llm,

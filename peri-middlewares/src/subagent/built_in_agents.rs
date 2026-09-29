@@ -26,7 +26,7 @@ pub fn get_built_in_agent(agent_id: &str) -> Option<&'static BuiltInAgent> {
     BUILT_IN_AGENTS.iter().find(|a| a.agent_id == agent_id)
 }
 
-/// 返回所有内置 subagent type 名（agent_id），用于 ToolRegistrySnapshot 构造
+/// 返回所有内置 subagent type 名（agent_id），用于 SubAgent 工具的候选提示。
 pub fn built_in_agent_types() -> Vec<&'static str> {
     BUILT_IN_AGENTS.iter().map(|a| a.agent_id).collect()
 }

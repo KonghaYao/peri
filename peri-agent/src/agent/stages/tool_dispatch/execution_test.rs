@@ -216,23 +216,52 @@ async fn test_settle_results_mixed_ready_settled() {
 }
 
 #[test]
-fn test_post_process_result_no_registry() {
-    let ctx = make_test_ctx();
+fn test_post_process_result_truncates_by_tool_output_limit() {
+    struct LimitedTool;
+    #[async_trait::async_trait]
+    impl BaseTool for LimitedTool {
+        fn name(&self) -> &str {
+            "Limited"
+        }
+        fn description(&self) -> &str {
+            "test output limit"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(String::new())
+        }
+        fn output_char_limit(&self) -> Option<usize> {
+            Some(60)
+        }
+    }
     let call = ToolCall {
         id: "call_1".to_string(),
-        name: "Read".to_string(),
-        input: serde_json::json!({"file_path": "/tmp/x"}),
+        name: "Limited".to_string(),
+        input: serde_json::json!({}),
     };
-    let mut result = ToolResult::error("call_1", "Read", "ENOENT: file not found");
-    let all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
-    let output_before = result.output.clone();
-    // error_suggest_registry 为 None（默认），不应修改 output
-    post_process_result(&ctx, &call, &mut result, &all_tools);
-    assert_eq!(
-        result.output, output_before,
-        "无 registry 时 output 不应变化，实际: {}",
+    let mut result = ToolResult::error("call_1", "Limited", "x".repeat(200));
+    let mut all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
+    all_tools.insert("call_1".to_string(), std::sync::Arc::new(LimitedTool));
+    post_process_result(&call, &mut result, &all_tools);
+    assert_eq!(result.output.chars().count(), 60, "{}", result.output);
+    assert!(
+        result.output.ends_with("[Output truncated at 60 chars]"),
+        "{}",
         result.output
     );
+    assert!(result.output.starts_with('x'));
+
+    // 未登记 output 上限的工具：输出保持不变
+    let mut untouched = ToolResult::error("call_2", "Other", "kept as-is");
+    let empty_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
+    post_process_result(&call, &mut untouched, &empty_tools);
+    assert_eq!(untouched.output, "kept as-is");
 }
 
 #[test]

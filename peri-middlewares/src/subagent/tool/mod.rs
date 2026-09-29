@@ -36,7 +36,6 @@ use crate::{
 ///
 /// | 中间件 | 注入方式 |
 /// |--------|----------|
-/// | `ErrorSuggest` | 通过 `build_v2_subagent_context(error_suggest_registry)` 注入 |
 /// | `Hook` (生命周期) | 通过 `fire_subagent_lifecycle_hooks_static()` 独立触发 |
 pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<dyn Middleware>> {
     let mut middlewares: Vec<Box<dyn Middleware>> = Vec::new();

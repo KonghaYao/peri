@@ -37,7 +37,6 @@ pub use claude_agent_parser::{
 pub mod ask_user;
 pub mod attribution;
 pub mod default_system_prompt;
-pub mod error_suggest;
 pub mod hitl;
 pub mod hooks;
 pub mod lsp;

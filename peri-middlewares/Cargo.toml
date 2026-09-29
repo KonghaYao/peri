@@ -30,6 +30,7 @@ uuid.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 fs2 = "0.4"
+fuzzy-matcher = "0.3"
 tempfile.workspace = true
 rmcp = { workspace = true, features = [
     "client",

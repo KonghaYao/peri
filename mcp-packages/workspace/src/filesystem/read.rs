@@ -214,7 +214,11 @@ impl BaseTool for ReadFileTool {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(ToolFailure::new(
-                    "File not found. Verify file_path or locate the file with Glob.",
+                    super::path_hints::with_path_hint(
+                        "File not found. Verify file_path or locate the file with Glob.",
+                        &self.cwd,
+                        &resolved,
+                    ),
                     format!("Error: File not found at {file_path}"),
                 )
                 .into());
@@ -238,7 +242,11 @@ impl BaseTool for ReadFileTool {
                 Ok(c) => c,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(ToolFailure::new(
-                        "File not found. Verify file_path or locate the file with Glob.",
+                        super::path_hints::with_path_hint(
+                            "File not found. Verify file_path or locate the file with Glob.",
+                            &self.cwd,
+                            &resolved,
+                        ),
                         format!("Error: File not found at {file_path}"),
                     )
                     .into());

@@ -2,7 +2,7 @@
 
 > 2026-09-28 范围更新：`local-mcp-server` 已按用户裁决退役，代码与独立构建入口已删除。本文涉及旧项目的路径、命令、比较和后续复用建议仅作为历史记录，不再作为实施或验收要求；当前 Workspace MCP 入口与验证见 [主项目代码索引](../../docs/code-index/peri-middlewares.md)。
 
-> 当前代码导航（2026-09-29）：Workspace handler、filesystem/Bash tools、descriptions 与行为测试现位于 `peri-mcp-workspace`；当前源码和有测试命中的验证命令见 [MCP packages 代码索引](../../docs/code-index/mcp-packages.md)。宿主 context、transport/client bridge 与 recovery integration tests 仍在 `peri-middlewares/src/mcp/`。下文旧 middleware 路径、计划命令和实测记录保留其历史含义，不作为当前路径清单。
+> 当前代码导航（2026-09-29）：Workspace handler、filesystem/Bash tools、descriptions 与行为测试现位于 `peri-mcp-workspace`；当前源码和有测试命中的验证命令见 [MCP packages 代码索引](../../docs/code-index/mcp-packages.md)。宿主 context、transport/client bridge 与 recovery integration tests 仍在 `peri-middlewares/src/mcp/`。下文旧 middleware 路径、计划命令和实测记录保留其历史含义，不作为当前路径清单。**另：`peri-agent` / `peri-middlewares` 的 `error_suggest` 框架已整体删除（2026-09-29），本文 N3/C2 涉及的 suggester 调用点不再存在，恢复指引现归 `mcp-packages/workspace`（`shell_hints.rs` / `filesystem/path_hints.rs`）。**
 
 > 日期：2026-09-27。状态：**v1 已冻结裁决，待施工**。本文是 wave 3 的裁决与施工唯一事实源。
 > **实施回填（2026-09-28）**：本波（wave 3）代码已实施并验收；现场证据见 `spec/issues/2026-09-27-mcp-adaptation-v4-part-4-acceptance.md` §3.10 交付终态与 §8 门禁核对表（交付提交 `48ea61cb`；分支 `feat/mcp-adaptation-v4-part-3`）。

@@ -1,6 +1,6 @@
 # MCP 适配 v4-part-4 验收记录（wave 3：Workspace MCP 实例）
 
-> 当前代码导航（2026-09-29）：Workspace handler、filesystem/Bash tools、descriptions 与行为测试现位于 `peri-mcp-workspace`；当前入口和有测试命中的验证命令见 [MCP packages 代码索引](../../docs/code-index/mcp-packages.md)。宿主 workspace context、client bridge 与 recovery lifecycle 测试仍在 `peri-middlewares/src/mcp/`。本记录内旧源码路径和命令保留为 wave 3 验收时点证据，不作为当前路径清单。
+> 当前代码导航（2026-09-29）：Workspace handler、filesystem/Bash tools、descriptions 与行为测试现位于 `peri-mcp-workspace`；当前入口和有测试命中的验证命令见 [MCP packages 代码索引](../../docs/code-index/mcp-packages.md)。宿主 workspace context、client bridge 与 recovery lifecycle 测试仍在 `peri-middlewares/src/mcp/`。本记录内旧源码路径和命令保留为 wave 3 验收时点证据，不作为当前路径清单。**另：`peri-agent` / `peri-middlewares` 的 `error_suggest` 框架已整体删除（2026-09-29），本记录中相关 suggester 测试命令与覆盖清单不再可执行。**
 
 ## §0 元信息与证据纪律
 

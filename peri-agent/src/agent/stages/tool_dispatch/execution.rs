@@ -406,7 +406,7 @@ async fn dispatch_concurrent(
 }
 
 /// 阶段三：串行处理结果（ToolEnd 已在 dispatch_concurrent 中 emit）
-/// + after_tool + error_suggest + 截断 + 聚合。
+/// + after_tool + 截断 + 聚合。
 ///
 /// 不变量：deferred_error 取首个 after_tool 错误，后续错误不覆盖。
 async fn settle_results(
@@ -479,15 +479,15 @@ async fn settle_results(
         }
 
         // ToolEnd 已在 dispatch_concurrent 中 emit（工具完成即刻发射）
-        // 此处仅处理 after_tool + error_suggest 等后处理逻辑
+        // 此处仅处理 after_tool + 截断等后处理逻辑
 
         if let Err(e) = run_after_tool(ctx, &modified_call, &result).await {
             let _ = run_on_error(ctx, &e).await;
             deferred_error = deferred_error.or(Some(e.to_string()));
         }
 
-        // error_suggest 注入 + output_char_limit 截断
-        post_process_result(ctx, &modified_call, &mut result, all_tools_ref);
+        // output_char_limit 截断
+        post_process_result(&modified_call, &mut result, all_tools_ref);
 
         exec_results.push((modified_call, result));
     }
@@ -501,32 +501,12 @@ async fn settle_results(
     }
 }
 
-/// 单条结果的后处理：error_suggest 注入（仅 error 分支）+ output_char_limit 截断。
-///
-/// 顺序：先注入建议文本，再按工具声明的 `output_char_limit` 截断。
+/// 单条结果的后处理：按工具声明的 `output_char_limit` 截断。
 fn post_process_result(
-    ctx: &StageContext,
     modified_call: &ToolCall,
     result: &mut ToolResult,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
 ) {
-    // error_suggest 注入：仅修改 output 文本
-    if result.is_error {
-        if let Some(registry) = &ctx.runtime.error_suggest_registry {
-            let ec = crate::error_suggest::ErrorContext::new(
-                &modified_call.name,
-                &modified_call.input,
-                &result.output,
-                std::path::Path::new(ctx.cwd()),
-                &ctx.runtime.tool_registry_snapshot,
-            );
-            if let Some(sug) = registry.suggest(&ec) {
-                result.output =
-                    crate::error_suggest::format::format_suggestion(&result.output, &sug);
-            }
-        }
-    }
-
     // output_char_limit 截断：已经解析完成的 target 工具声明输出上限时按字符截断
     if let Some(tool) = all_tools.get(&modified_call.id) {
         let limit = tool.output_char_limit();

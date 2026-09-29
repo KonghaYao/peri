@@ -9,7 +9,6 @@ use crate::agent::async_tasks::{BgTaskKind, TaskManager};
 use crate::agent::events::{AgentEventHandler, ExecutorEvent};
 use crate::agent::react::ReactLLM;
 use crate::agent::{CompactConfig, ContextBudget, LangfuseBridgeLike};
-use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
@@ -169,10 +168,6 @@ pub struct SubagentSpawnConfig {
     pub tool_filter: crate::session::tool_catalog::ToolFilter,
     /// SubAgent system prompt（注入 transcript 起始处）
     pub system_prompt: Option<String>,
-    /// 错误感知建议注册表（可选）
-    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    /// 工具注册表快照（None 用 default）
-    pub tool_registry_snapshot: Option<ToolRegistrySnapshot>,
     /// deferred 工具解析器（None = DirectToolInvocationResolver；middlewares 传
     /// ExecuteExtraToolResolver 保持包装层语义）
     pub tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
@@ -379,10 +374,6 @@ pub struct SubagentResumeConfig {
     /// deferred 工具解析器（None = DirectToolInvocationResolver；middlewares 传
     /// ExecuteExtraToolResolver 保持包装层语义）
     pub tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
-    /// 错误感知建议注册表（可选）
-    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    /// 工具注册表快照（None 用 default）
-    pub tool_registry_snapshot: Option<ToolRegistrySnapshot>,
     /// auto-compact 阈值配置（None = 不启用）
     pub compact_config: Option<CompactConfig>,
     /// 上下文预算（None = 不追踪 token 使用率）

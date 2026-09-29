@@ -13,7 +13,7 @@ Builtin MCP 的工具与 server handler 由独立 crate 持有；MCP 实例注�
 | Artifact | `peri-mcp-artifact`：`mcp-packages/artifact/src/lib.rs` | `ArtifactMcpServer`、`ArtifactTool`、`ArtifactClient` | 上传协议与 Markdown 转 HTML 归该 crate；模板位于 `src/descriptions/md_to_html_template.html`。 |
 | Cron | `peri-mcp-cron`：`mcp-packages/cron/src/lib.rs` | `CronMcpServer`、`scheduler.rs`、`tools.rs` | `CronScheduler`、`CronSchedulerPortHandle`、scheduler types 与三种工具由该 crate 导出。宿主 tick task 的 spawn、join 与 reconnect 仍归 `peri-middlewares` runtime。 |
 | LSP | `peri-mcp-lsp`：`mcp-packages/lsp/src/lib.rs` | `LspMcpServer`、`LspTool`、`tool.rs`、`formatters.rs` | MCP 工具、协议格式化与配置快照归该 crate。写入后的文档同步中间件 `LspSyncMiddleware` 仍在 `peri-middlewares/src/lsp/middleware.rs`。 |
-| Workspace | `peri-mcp-workspace`：`mcp-packages/workspace/src/lib.rs` | `WorkspaceMcpServer`、`workspace.rs`、`filesystem/`、`terminal.rs` | 文件、目录、搜索和 Bash 工具的 handler 与实现归该 crate；输出持久化 / 截断复用 `peri-agent::agent::async_tasks` 的 canonical helper。 |
+| Workspace | `peri-mcp-workspace`：`mcp-packages/workspace/src/lib.rs` | `WorkspaceMcpServer`、`workspace.rs`、`filesystem/`、`terminal.rs`、`fuzzy.rs`、`shell_hints.rs`、`filesystem/path_hints.rs` | 文件、目录、搜索和 Bash 工具的 handler 与实现归该 crate；输出持久化 / 截断复用 `peri-agent::agent::async_tasks` 的 canonical helper。失败点的可行动诊断（路径 did-you-mean、命令未找到的 PATH 候选）也归该 crate，见下节。 |
 
 ## 宿主与插件边界
 
@@ -22,6 +22,7 @@ Builtin MCP 的工具与 server handler 由独立 crate 持有；MCP 实例注�
 - `peri-acp-types` 持有 builtin 实例与工具声明、名称及 direct/deferred 策略。插件 crate 不复制这些策略表。
 - `LspSyncMiddleware` 保留在 `peri-middlewares/src/lsp/`，只消费 host LSP pool 端口同步 `Write` / `Edit`；它不提供 `LspTool`。
 - 各插件 crate 内测试覆盖工具行为、handler 路由和 RMCP wire；host transport、dispatch、bridge、policy、tick 与 pool lifecycle 测试留在对应宿主 crate。
+- 失败恢复指引由工具在失败点生成（`ToolFailure { recovery, detail }`），宿主不做事后文本匹配：路径候选在 `workspace/src/filesystem/path_hints.rs`（Read / Edit / Glob / Grep / folder_operations 的"目标不存在"分支；Edit 的 `old_string not found` 文本失败除外），命令候选在 `workspace/src/shell_hints.rs`（仅 exit 127 + command-not-found 文案），两者共用 `workspace/src/fuzzy.rs` 的 Skim 排序。原 `peri-agent` / `peri-middlewares` 的 error_suggest 框架已删除。
 
 ## 验证
 

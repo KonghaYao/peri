@@ -35,7 +35,7 @@
 ### 3. Edit 的 `old_string not found` 错误附带路径建议，语义不搭
 
 - 实测错误尾部：`Did you mean one of these path? • dup.txt`。
-- 该候选机制来自 `peri-agent/src/error_suggest`（`format_test.rs` 有断言），面向"路径拼写纠错"场景；Edit 的失败对象是**文本片段**，给出文件路径候选会让模型困惑。
+- 该候选机制来自 peri 侧 error_suggest（`format_test.rs` 有断言），面向"路径拼写纠错"场景；Edit 的失败对象是**文本片段**，给出文件路径候选会让模型困惑。（2026-09-29 更新：该机制已迁入工具侧 `mcp-packages/workspace/src/filesystem/path_hints.rs`，peri 侧框架整体删除；Edit 文本失败不给路径候选的裁决由 `path_hints_test.rs::test_read_gets_path_hint_and_edit_text_failure_does_not` 锁定。）
 - 建议：Edit 场景抑制该建议，或替换为 `build_not_found_hint`（`edit.rs:25-83`）已提供的行号级提示。
 
 ### 4. Write 可覆盖只读文件（chmod 444）
@@ -70,7 +70,7 @@
 - `peri-middlewares/src/tools/filesystem/folder.rs`（第 2、6、7 项）
 - `peri-middlewares/src/tools/filesystem/descriptions/glob.md`（第 5 项）
 - `peri-middlewares/src/tools/filesystem/descriptions/write.md`（第 4 项）
-- `peri-agent/src/error_suggest/`（第 3 项，路径建议机制）
+- 路径建议机制（第 3 项）：2026-09-29 起为 `mcp-packages/workspace/src/filesystem/path_hints.rs`（原 `peri-agent/src/error_suggest/` 与 `peri-middlewares/src/error_suggest/` 已整体删除）
 - 截断计数（第 1 项）：`glob.rs`、`grep.rs`、`folder.rs` 各自的三处提示文本
 
 ## 状态记录
@@ -79,3 +79,4 @@
 | --- | --- | --- |
 | 2026-09-28 | Open | 由 workspace 工具深度测试创建；各项可独立处理，建议随相关文件改动顺带修复 |
 | 2026-09-28 | 已修复，待用户验收 | 本轮修复、用户裁决与验证见文首；原 Open 记录为历史输入 |
+| 2026-09-29 | 已修复，待用户验收 | 路径建议机制迁入工具侧（`mcp-packages/workspace/src/filesystem/path_hints.rs`），peri 侧 error_suggest 框架整体删除；裁决语义不变，锁测位置更新 |

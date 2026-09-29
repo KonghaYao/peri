@@ -5,7 +5,7 @@
 //! `run_react_loop` 执行并返回结果。
 //!
 //! 复用 SubAgent v2 基础设施：workflow agent 携带 frozen CLAUDE.md / skills
-//! 并经过完整中间件链（Filesystem/Terminal/Web），+ error_suggest wiring。
+//! 并经过完整中间件链（Filesystem/Terminal/Web）。
 //!
 //! # 依赖反转（p1-wa 收口）
 //!
@@ -14,7 +14,7 @@
 //!
 //! - 模型构造（provider alias 解析 / AgentPool 缓存 / retry observer 烘焙）
 //!   → [`WorkflowModelFactory`]（ACP 宿主构造）
-//! - 中间件链 / 工具 / error_suggest / tool resolver 装配
+//! - 中间件链 / 工具 / tool resolver 装配
 //!   → [`WorkflowMiddlewareFactory`]（peri-middlewares 实现，ACP 宿主注入）
 //! - system prompt fallback 渲染 → [`WorkflowSystemPromptFallback`]（ACP 宿主）
 //! - EventBus forwarder 启动（v2 → v1 映射 + biased select 不变量单点）
@@ -434,14 +434,6 @@ impl AgentExecutor for WorkflowAgentExecutor {
         }
         let llm: Box<dyn crate::agent::react::ReactLLM + Send + Sync> = Box::new(base_llm);
 
-        // error_suggest wiring（与 SubAgentBuilder.with_error_suggest() 等价；
-        // .claude/agents/ 目录存在性检查在端口实现内）
-        let all_tool_names: Vec<String> = tools_arc.iter().map(|t| t.name().to_string()).collect();
-        let (error_suggest_registry, snapshot) = self
-            .ctx
-            .middleware_factory
-            .build_error_suggest(&self.ctx.cwd, &all_tool_names);
-
         // 构造 v2 StageContext（workflow agent 无 parent_messages）
         // agent_id=None：workflow 无 child_thread_id，内部 AgentId::new() 兜底（C1）
         let ctx_builder = self
@@ -457,8 +449,6 @@ impl AgentExecutor for WorkflowAgentExecutor {
             &self.ctx.cwd,
             cancel_token.clone(),
             Some(self.ctx.middleware_factory.build_tool_resolver()),
-            Some(error_suggest_registry),
-            Some(snapshot),
             compact_config,
             context_budget,
             compact_llm,

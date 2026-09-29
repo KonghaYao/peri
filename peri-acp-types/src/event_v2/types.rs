@@ -89,8 +89,6 @@ pub enum RenderEvent {
     ///
     /// `output` 携带工具输出文本（成功）或错误信息（失败）。与 v1
     /// `ExecutorEvent::ToolEnd` 字段对齐，便于 共享协议映射 透传到 TUI。
-    /// 注意：emit 时机在 error_suggest 注入之前，故 TUI 看到的是原始输出
-    /// （不含建议文本），与 v1 行为一致。
     ToolEnded {
         turn_id: TurnId,
         agent_id: AgentId,

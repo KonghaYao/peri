@@ -5,6 +5,7 @@ pub mod glob;
 pub mod grep;
 pub(crate) mod grep_args;
 pub(crate) mod grep_format;
+pub(crate) mod path_hints;
 pub mod read;
 pub(crate) mod transaction;
 pub mod write;

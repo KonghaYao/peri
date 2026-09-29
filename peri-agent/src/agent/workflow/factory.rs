@@ -1,7 +1,7 @@
 //! Workflow agent 装配注入端口（p1-wa 收口）。
 //!
 //! §0 边 8（Agent 禁入 Middleware）：workflow agent 执行体（`agent.rs`）所需的
-//! 中间件链 / 工具列表 / error_suggest / tool resolver 装配全部经本端口参数化，
+//! 中间件链 / 工具列表 / tool resolver 装配全部经本端口参数化，
 //! 由实现方（`peri-middlewares`，§0 Middleware → Agent 声明边）构造具体实例，
 //! ACP 宿主装配点（`assemble.rs` / `stdio/init.rs`，经 TUI 部署装配点注入）
 //! 负责把实现 upcast 为端口后注入 [`crate::agent::workflow::WorkflowAgentContext`]。
@@ -15,7 +15,6 @@ use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult};
 
-use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::middleware::r#trait::Middleware;
 use crate::tools::{BaseTool, ToolInvocationResolver};
 
@@ -92,14 +91,6 @@ pub trait WorkflowMiddlewareFactory: Send + Sync {
     /// 构造 tool invocation resolver（迁移前语义 =
     /// `ExecuteExtraToolResolver::default()`）。
     fn build_tool_resolver(&self) -> Arc<dyn ToolInvocationResolver>;
-
-    /// 构造 error_suggest registry + tool registry snapshot（迁移前语义 =
-    /// `build_default_registry()` + `build_tool_registry_snapshot()`）。
-    fn build_error_suggest(
-        &self,
-        cwd: &str,
-        tool_names: &[String],
-    ) -> (Arc<ErrorSuggestRegistry>, ToolRegistrySnapshot);
 
     /// 构造 session 级 workflow 中间件实例（`WorkflowMiddleware` upcast 为端口；
     /// 创建点仍在宿主装配面，本方法只做实例化）。

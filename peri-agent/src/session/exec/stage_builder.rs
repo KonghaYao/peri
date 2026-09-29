@@ -50,7 +50,6 @@ use crate::agent::{
     token::ContextBudget,
     LangfuseBridgeLike,
 };
-use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::exec::executor::FrozenSessionData;
 use crate::session::factory::{
@@ -241,10 +240,6 @@ pub struct AgentComponents {
     /// 共享工具注册表（deferred tools，供 ExecuteExtraTool 代理）
     #[allow(clippy::type_complexity)]
     pub shared_tools: Option<Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>>,
-    /// 错误感知建议注册表
-    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    /// 工具注册表快照（工具名 + subagent 类型）
-    pub tool_registry_snapshot: Arc<ToolRegistrySnapshot>,
     /// 上下文预算（token 监控）
     pub context_budget: Option<ContextBudget>,
     /// Compact 配置
@@ -382,8 +377,6 @@ pub fn build_stage_context(
         llm,
         chain,
         shared_tools: shared_tools_opt,
-        error_suggest_registry,
-        tool_registry_snapshot,
         context_budget,
         compact_config,
         subagent_mw,
@@ -468,8 +461,7 @@ pub fn build_stage_context(
         .with_tool_invocation_resolver(Arc::clone(&input.tool_invocation_resolver))
         .with_middleware_chain(Arc::clone(&chain))
         .with_event_bus(Arc::new(event_bus))
-        .with_session_context(session_context)
-        .with_tool_registry_snapshot((*tool_registry_snapshot).clone());
+        .with_session_context(session_context);
 
     let builder = dependencies::configure_stage(
         builder,
@@ -477,7 +469,6 @@ pub fn build_stage_context(
         &session,
         dependencies::StageDependencies {
             goal_controller,
-            error_suggest_registry,
             context_budget,
             compact_config,
             compact_llm_for_v2,

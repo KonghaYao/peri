@@ -40,11 +40,10 @@ graph TB
         direction TB
         APPROVE["审批"]
         EXEC["并发执行"]
-        SUGGEST["建议注入"]
         COMMIT["原子提交"]
     end
 
-    APPROVE --> EXEC --> SUGGEST --> COMMIT
+    APPROVE --> EXEC --> COMMIT
 
     COMMIT --> TRANSCRIPT["MessageTranscript"]
 ```
@@ -96,17 +95,9 @@ Skills 不是工具——它们通过 System Prompt 注入行为指令，不走�
   - **权限模式**：Default（逐个审批）、AcceptEdit（自动批准编辑类）、AutoMode（LLM 自动分类审批）、Bypass（全部跳过）。模式通过 `SharedPermissionMode`（`Arc<AtomicU8>` 封装）跨线程共享，支持运行时动态切换（`cycle()` 按 Default → AcceptEdit → AutoMode → Bypass 循环）。
 - **并发执行**：全部工具同时启动，互不等待。
 - **AskUserQuestion**：阻断自身等待用户输入，其他工具照常并发。用户回答作为 ToolResult 一同提交。
-- **建议注入**：工具执行失败后、写入 Transcript 前，系统通过 `post_process_result` 注入建议。已在 `ToolEnd` 事件 emit 之后执行。
-  - **注入时机**：仅当 `is_error = true` 时触发。建议文本追加到错误输出末尾，不改变 `is_error` 标记——LLM 看到增强后文本自行判断，错误事实不被掩盖。
-  - **已实现的建议器注册表**：`build_default_registry()` 按短路顺序注册 7 个 suggester——参数语法类（廉价）在前、IO/查询类在后：
-    1. `JsonSchemaSuggester`：参数 JSON Schema 校验错误
-    2. `GlobPatternSuggester`：Glob 模式语法错误
-    3. `RegexSuggester`：正则表达式语法错误
-    4. `RangeSuggester`：数值/索引越界错误
-    5. `PathSuggester`：文件路径不存在或模糊匹配建议（需 IO）
-    6. `BashCommandSuggester`：Bash 命令拼写错误建议（需 PATH 扫描）
-    7. `SubagentSuggester`：SubAgent 名称拼写错误建议（需 registry 查询）
-  - **扩展点**：`ErrorSuggester` trait 可独立增删，按短路匹配顺序——首个返回 `Some(Suggestion)` 的 suggester 生效。
+- **失败诊断归属工具**：工具失败时的恢复指引（recovery）由工具在失败点自行生成，`ToolFailure { recovery, detail }` 经投影后成为模型可见文本；宿主不再对任意错误文本事后匹配建议（MCP 迁移范式：能力随工具走）。
+  - **可行动指引**：工具理解自身失败原因，直接产出可行动文本——路径不存在时给出同目录 did-you-mean 候选（`mcp-packages/workspace` 的 `path_hints`）、命令未找到（exit 127）时给出 PATH 候选或环境类兜底（`shell_hints`）、Glob/正则语法错误时给出模式写法教学、SubAgent 名称拼错时给出模糊匹配候选。
+  - **安全边界**：无法归类的失败只暴露受限的通用 recovery 文本，不泄露路径、环境变量或凭据（`mcp-packages/common/src/result_mapping.rs`）。
 - **原子提交**：一轮工具调用的提交是不可分割的整体。
   - **事务范围**：本轮 AI 消息 + 全部 ToolResult。
   - **异常保证**：cancel、超时、审批拒绝——所有路径下，每个 ToolUse 都有配对的 ToolResult。

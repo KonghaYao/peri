@@ -425,7 +425,11 @@ impl BaseTool for FolderOperationsTool {
             "list" => {
                 if !resolved.exists() {
                     return Err(ToolFailure::new(
-                        "Folder not found. Verify folder_path.",
+                        super::path_hints::with_path_hint(
+                            "Folder not found. Verify folder_path.",
+                            &self.cwd,
+                            &resolved,
+                        ),
                         format!("Folder not found: {}", resolved.display()),
                     )
                     .into());
@@ -443,7 +447,11 @@ impl BaseTool for FolderOperationsTool {
             "deep_scan" => {
                 if !resolved.exists() {
                     return Err(ToolFailure::new(
-                        "Folder not found. Verify folder_path.",
+                        super::path_hints::with_path_hint(
+                            "Folder not found. Verify folder_path.",
+                            &self.cwd,
+                            &resolved,
+                        ),
                         format!("Folder not found: {}", resolved.display()),
                     )
                     .into());

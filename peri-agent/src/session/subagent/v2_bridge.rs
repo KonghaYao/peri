@@ -11,7 +11,6 @@ use crate::agent::events_v2::{
 use crate::agent::react::ReactLLM;
 use crate::agent::stages::{SharedToolMap, StageContext};
 use crate::agent::{CompactConfig, ContextBudget};
-use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::tool_catalog::SessionToolCatalog;
 use crate::session::turn::TurnId;
@@ -234,8 +233,6 @@ pub fn build_v2_subagent_context(
     cwd: &str,
     cancel_token: CancellationToken,
     tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
-    error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    tool_registry_snapshot: Option<ToolRegistrySnapshot>,
     compact_config: Option<CompactConfig>,
     context_budget: Option<ContextBudget>,
     compact_llm: Option<Arc<dyn peri_model::Model>>,
@@ -279,8 +276,6 @@ pub fn build_v2_subagent_context(
     let session_context = Arc::new(RwLock::new(std::collections::HashMap::new()));
     let v2_llm: Arc<dyn ReactLLM + Send + Sync> = Arc::from(llm);
 
-    let snapshot = tool_registry_snapshot.unwrap_or_default();
-
     let mut builder = StageContext::builder(turn, transcript, queue_clone)
         .with_agent_id(resolved_agent_id)
         .with_llm(v2_llm)
@@ -291,12 +286,8 @@ pub fn build_v2_subagent_context(
         }))
         .with_middleware_chain(Arc::new(chain))
         .with_event_bus(Arc::clone(&event_bus_arc))
-        .with_session_context(session_context)
-        .with_tool_registry_snapshot(snapshot);
+        .with_session_context(session_context);
 
-    if let Some(reg) = error_suggest_registry {
-        builder = builder.with_error_suggest_registry(reg);
-    }
     if let Some(budget) = context_budget {
         builder = builder.with_context_budget(budget);
     }
@@ -337,8 +328,6 @@ pub trait SubagentV2ContextBuilder: Send + Sync {
         cwd: &str,
         cancel_token: CancellationToken,
         tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
-        error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-        tool_registry_snapshot: Option<ToolRegistrySnapshot>,
         compact_config: Option<CompactConfig>,
         context_budget: Option<ContextBudget>,
         compact_llm: Option<Arc<dyn peri_model::Model>>,
@@ -360,8 +349,6 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
         cwd: &str,
         cancel_token: CancellationToken,
         tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
-        error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-        tool_registry_snapshot: Option<ToolRegistrySnapshot>,
         compact_config: Option<CompactConfig>,
         context_budget: Option<ContextBudget>,
         compact_llm: Option<Arc<dyn peri_model::Model>>,
@@ -377,8 +364,6 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
             cwd,
             cancel_token,
             tool_invocation_resolver,
-            error_suggest_registry,
-            tool_registry_snapshot,
             compact_config,
             context_budget,
             compact_llm,

@@ -82,7 +82,11 @@ fn execute_search(
 
     if !search_path.exists() {
         return Err(ToolFailure::new(
-            "Search path does not exist. Verify path or search from the workspace directory.",
+            super::path_hints::with_path_hint(
+                "Search path does not exist. Verify path or search from the workspace directory.",
+                cwd,
+                &search_path,
+            ),
             format!("Search path does not exist: {}", search_path.display()),
         )
         .into());
@@ -101,7 +105,7 @@ fn execute_search(
     }
     let matcher = matcher_builder.build(&parsed.pattern).map_err(|e| {
         ToolFailure::new(
-            "Invalid regex pattern. Correct the syntax or set fixed_strings=true.",
+            "Invalid regex pattern. Check for unclosed brackets () [] {} and escape special characters (\\ . \\* \\+); set fixed_strings=true for literal matching.",
             e.to_string(),
         )
     })?;

@@ -201,3 +201,39 @@ async fn test_bash_group_cleanup_settles_descendant_after_parent_exit() {
         peri_acp_types::tasks::TaskShutdownReport::Complete
     );
 }
+
+// ── command not found 诊断（issue: bash 错误原因定位）────────────────────────
+
+/// 命令不存在（exit 127）：输出尾部附带 PATH 候选或环境类兜底诊断，
+/// 供模型直接采取行动（换命令名 / 检查 PATH 与虚拟环境）。
+#[tokio::test]
+async fn test_bash_command_not_found_appends_hint() {
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"command": "xx_q1w2e3_not_a_real_cmd_xx"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("[Exit code: 127]"), "{result}");
+    assert!(result.contains("not found in PATH"), "{result}");
+    assert!(
+        result.contains("xx_q1w2e3_not_a_real_cmd_xx"),
+        "诊断应点名缺失的命令: {result}"
+    );
+}
+
+/// 非 127 的非零退出码（命令存在但失败）不追加 command-not-found 诊断。
+#[tokio::test]
+async fn test_bash_non_127_failure_has_no_command_hint() {
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"command": "ls /definitely-not-a-real-dir-xx"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(!result.contains("not found in PATH"), "{result}");
+}

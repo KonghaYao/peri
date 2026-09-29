@@ -2,7 +2,7 @@
 //!
 //! 执行体已随 p1-wa 物理迁入 `peri_agent::agent::workflow`（`agent.rs` /
 //! `factory.rs`——session 运行单元归 Agent 层，§2）；中间件链 / 工具 /
-//! error_suggest / tool resolver / session 级 WorkflowMiddleware 装配经
+//! tool resolver / session 级 WorkflowMiddleware 装配经
 //! [`WorkflowMiddlewareFactory`] 端口注入（peri-middlewares 实现，ACP 宿主
 //! 装配点注入）。
 //!

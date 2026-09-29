@@ -22,7 +22,6 @@ use peri_acp_types::{
 };
 use peri_agent::{
     agent::workflow::{WorkflowAgentContext, WorkflowAgentDefinition, WorkflowMiddlewareFactory},
-    error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot},
     middleware::r#trait::Middleware,
     tools::{BaseTool, ToolInvocationResolver},
 };
@@ -132,14 +131,6 @@ impl WorkflowMiddlewareFactory for BuiltinWorkflowAgentFactory {
 
     fn build_tool_resolver(&self) -> Arc<dyn ToolInvocationResolver> {
         WorkflowAgentMiddlewareFactory.build_tool_resolver()
-    }
-
-    fn build_error_suggest(
-        &self,
-        cwd: &str,
-        tool_names: &[String],
-    ) -> (Arc<ErrorSuggestRegistry>, ToolRegistrySnapshot) {
-        WorkflowAgentMiddlewareFactory.build_error_suggest(cwd, tool_names)
     }
 
     fn build_workflow_middleware(
@@ -379,24 +370,6 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
 
     fn build_tool_resolver(&self) -> Arc<dyn ToolInvocationResolver> {
         Arc::new(crate::tool_search::ExecuteExtraToolResolver::default())
-    }
-
-    fn build_error_suggest(
-        &self,
-        cwd: &str,
-        tool_names: &[String],
-    ) -> (Arc<ErrorSuggestRegistry>, ToolRegistrySnapshot) {
-        let agents_dir = std::path::Path::new(cwd).join(".claude").join("agents");
-        let agents_dir_opt = if agents_dir.exists() {
-            Some(agents_dir.as_path())
-        } else {
-            None
-        };
-        let snapshot = crate::error_suggest::build_tool_registry_snapshot(
-            tool_names.iter().cloned(),
-            agents_dir_opt,
-        );
-        (crate::error_suggest::build_default_registry(), snapshot)
     }
 
     fn build_workflow_middleware(

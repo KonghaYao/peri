@@ -9,8 +9,7 @@
 //! 不变量（与 v1 一致）：
 //! - **延迟写入**：before_tool / after_tool 期间 transcript 不含本轮 AI 消息
 //! - **deferred_error**：多工具并发循环不在中途返回，先收集所有错误
-//! - **error_suggest 注入**：在 run_after_tool 之后、写 transcript 之前；只修改 output 文本
-//! - **ToolEnd emit 时机**：在 error_suggest 注入之前 emit
+//! - **ToolEnd emit 时机**：工具完成即刻 emit，早于 after_tool 后处理
 
 use std::collections::HashMap;
 use std::sync::Arc;

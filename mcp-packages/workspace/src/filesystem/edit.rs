@@ -174,7 +174,7 @@ impl BaseTool for EditFileTool {
         with_target_lock(&resolved, |locked| {
             let pre = match locked.read_pre() {
                 Ok(Some(content)) => content,
-                Ok(None) => return Err(ToolFailure::new("File not found. Verify file_path or locate the file with Glob.", "Error: File not found").into()),
+                Ok(None) => return Err(ToolFailure::new(super::path_hints::with_path_hint("File not found. Verify file_path or locate the file with Glob.", &self.cwd, &resolved), "Error: File not found").into()),
                 Err(_) => return Err(ToolFailure::new("Edit failed while reading the file. Verify access permissions and UTF-8 encoding.", "Edit failed while reading the file.").into()),
             };
             let content = match String::from_utf8(pre.clone()) {

@@ -95,8 +95,6 @@ impl super::SubAgentTool {
             tools,
             tool_filter,
             system_prompt,
-            error_suggest_registry: None,
-            tool_registry_snapshot: None,
             tool_invocation_resolver: Some(Arc::new(ExecuteExtraToolResolver::default())),
             compact_config: None,
             context_budget: None,
@@ -136,8 +134,7 @@ impl super::SubAgentTool {
         SessionFactory::spawn_subagent(parent.as_ref(), config).await
     }
     /// 组装 [`SubagentResumeConfig`](peri_agent::session::subagent::SubagentResumeConfig) 公共部分（通道段逐字段对照
-    /// [`Self::spawn_config_base`]：error_suggest_registry / tool_registry_snapshot /
-    /// compact_config / context_budget / compact_llm 恒 None 与 spawn 一致；
+    /// [`Self::spawn_config_base`]：compact_config / context_budget / compact_llm 恒 None 与 spawn 一致；
     /// `tool_invocation_resolver: Some(ExecuteExtraToolResolver::default())`
     /// 显式设置保持包装层语义，R2 补充）。
     ///
@@ -169,8 +166,6 @@ impl super::SubAgentTool {
             tools,
             tool_filter,
             tool_invocation_resolver: Some(Arc::new(ExecuteExtraToolResolver::default())),
-            error_suggest_registry: None,
-            tool_registry_snapshot: None,
             compact_config: None,
             context_budget: None,
             compact_llm: None,

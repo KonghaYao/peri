@@ -374,7 +374,7 @@ impl BaseTool for GlobFilesTool {
         // 不再在逐文件热循环里重复 glob::Pattern::new。
         let compiled = glob::Pattern::new(pattern).map_err(|e| {
             ToolFailure::new(
-                "Pattern syntax error. Provide a valid glob pattern.",
+                "Pattern syntax error. Use a valid glob pattern, e.g. *.rs (current dir), **/*.rs (recursive), src/**/*.rs, or {foo,bar}.rs (enumeration); brackets like [abc] must be closed.",
                 format!("Error: Pattern syntax error in {pattern:?}: {e}"),
             )
         })?;
@@ -390,7 +390,11 @@ impl BaseTool for GlobFilesTool {
 
         if !search_root.exists() {
             return Err(ToolFailure::new(
-                "Directory not found. Verify the search path.",
+                super::path_hints::with_path_hint(
+                    "Directory not found. Verify the search path.",
+                    &self.cwd,
+                    &search_root,
+                ),
                 format!("Error: Directory not found: {}", search_root.display()),
             )
             .into());

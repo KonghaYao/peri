@@ -28,7 +28,6 @@ peri-acp-types = { path = "../peri-acp-types" }
 peri-resources = { path = "../peri-resources" }
 sysinfo.workspace = true
 libc = "0.2"
-fuzzy-matcher = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

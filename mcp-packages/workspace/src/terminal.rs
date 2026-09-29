@@ -763,7 +763,15 @@ impl BashTool {
                     execution.release_unmanaged();
                     output_capture.cleanup().await;
                 }
-                let (text, output_ref) = bounded_bash_output(&output);
+                let (mut text, output_ref) = bounded_bash_output(&output);
+                // command not found（exit 127）的模型可行动诊断：在输出尾部追加
+                // PATH 候选或环境类兜底；该场景输出通常极短，不挤占输出预算。
+                if let Some(hint) =
+                    crate::shell_hints::command_not_found_hint(command, &output, status.code())
+                {
+                    text.push_str("\n\n");
+                    text.push_str(&hint);
+                }
                 let execution_status = if background_task_id.is_some() {
                     ToolExecutionStatus::Running
                 } else if command.contains('&') && status.success() {

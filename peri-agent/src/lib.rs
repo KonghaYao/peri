@@ -22,7 +22,6 @@
 
 pub mod agent;
 pub mod error;
-pub mod error_suggest;
 pub mod goal;
 pub mod hitl;
 pub mod interaction;

@@ -79,8 +79,6 @@ fn spawn_config(
         tools: vec![],
         tool_filter: Arc::new(|_| true),
         system_prompt: None,
-        error_suggest_registry: None,
-        tool_registry_snapshot: None,
         tool_invocation_resolver: None,
         compact_config: None,
         context_budget: None,
