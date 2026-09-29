@@ -605,6 +605,29 @@ async fn test_skill_tool_loads_mcp_skill_plugin_server_by_last_segment() {
     assert!(error_full.contains("mcp__plugin:p1:demosrv__beta"));
 }
 
+/// W2：同一别名形态命中多个 origin（同末段 server 名）→ 显式歧义错误并列出
+/// 可输入的完整名候选；不静默取首个。
+#[tokio::test]
+async fn test_skill_tool_ambiguous_alias_lists_candidates() {
+    let tool = make_skill_tool_with_entries(vec![
+        fake_mcp_skill("a:srv", "beta"),
+        fake_mcp_skill("b:srv", "beta"),
+    ]);
+    let error = tool
+        .invoke(
+            json!({"skill_name": "srv:beta"}),
+            ToolContext::new(&[], "/tmp"),
+        )
+        .await
+        .expect_err("跨 origin 同名必须显式歧义失败")
+        .to_string();
+    assert!(error.contains("ambiguous"), "实际: {error}");
+    assert!(
+        error.contains("a:srv:beta") && error.contains("b:srv:beta"),
+        "候选必须列全且为可输入的完整名: {error}"
+    );
+}
+
 #[tokio::test]
 async fn test_skill_tool_mixed_cache_mcp_alias_and_local_namespace() {
     // Arrange: 混合缓存——MCP 条目 + 本地 skill（磁盘）

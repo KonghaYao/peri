@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_acp_types::mcp_skills::{McpSkillRegistry, SkillLookup};
 use peri_agent::middleware::capabilities as hook_state;
 use peri_agent::{
     error::AgentResult,
@@ -150,21 +150,38 @@ impl Middleware for SkillPreloadMiddleware {
         let registry = self.mcp_registry.clone();
         // 一批预加载共享一次本地扫描。按输入顺序产出槽位，避免把 registry
         // 命中、磁盘 miss 与磁盘命中拆成多路后再按位置合并。
-        let slots = tokio::task::spawn_blocking(move || {
+        let (slots, ambiguous) = tokio::task::spawn_blocking(move || {
             let mut local_skills = None;
             let mut slots = Vec::with_capacity(skill_names.len());
+            let mut ambiguous: Vec<(String, Vec<peri_acp_types::skills::SkillMetadata>)> =
+                Vec::new();
             for name in skill_names {
                 let name = name.to_lowercase();
                 if let Some(reg) = &registry {
-                    // registry-first；find_by_command 保留 plugin 多冒号 server
-                    // key 的末段命令别名。命中后正文一律经统一 activation（W2），
-                    // 读取在闭包外异步进行；激活失败不回落磁盘、不静默注入旧缓存。
-                    if let Some(meta) = reg.find(&name).or_else(|| reg.find_by_command(&name)) {
-                        slots.push(PreloadSlot::Mcp {
-                            name,
-                            meta: Box::new(meta),
-                        });
-                        continue;
+                    // registry-first：全名/别名（lookup_exact）→ 命令形态
+                    // （lookup_by_command，保留 plugin 多冒号 server 的末段别名）。
+                    // 命中后正文一律经统一 activation（W2），读取在闭包外异步进行；
+                    // 激活失败不回落磁盘、不静默注入旧缓存。
+                    //
+                    // 歧义（同一形态命中多个 origin）→ 显式拒绝并列出候选：
+                    // 不静默取首个，也不改走本地兜底（同名跨源必须消歧）。
+                    let lookup = match reg.lookup_exact(&name) {
+                        SkillLookup::Missing => reg.lookup_by_command(&name),
+                        other => other,
+                    };
+                    match lookup {
+                        SkillLookup::Found(meta) => {
+                            slots.push(PreloadSlot::Mcp {
+                                name,
+                                meta: Box::new(*meta),
+                            });
+                            continue;
+                        }
+                        SkillLookup::Ambiguous(candidates) => {
+                            ambiguous.push((name, candidates));
+                            continue;
+                        }
+                        SkillLookup::Missing => {}
                     }
                     // mcp__ 表示 MCP 身份；registry miss 不回退磁盘。
                     if name.starts_with("mcp__") {
@@ -187,13 +204,22 @@ impl Middleware for SkillPreloadMiddleware {
                     slots.push(PreloadSlot::Ready { name, content });
                 }
             }
-            slots
+            (slots, ambiguous)
         })
         .await
         .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
             middleware: "SkillPreloadMiddleware".to_string(),
             reason: format!("spawn_blocking 失败: {e}"),
         })?;
+
+        // 歧义命中：显式拒绝（不注入、不回落本地），候选写入日志供消歧。
+        for (name, candidates) in &ambiguous {
+            tracing::warn!(
+                skill = %name,
+                candidates = %crate::mcp::skill_discovery::candidate_list(candidates),
+                "MCP skill 预加载命中多个 origin，显式拒绝注入（请用完整名消歧）"
+            );
+        }
 
         // MCP 槽位：统一 activation（resources/read + digest/frontmatter 校验；
         // stale 经 skills/get 刷新一次）。失败静默跳过（与 miss 语义一致），

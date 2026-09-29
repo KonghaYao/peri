@@ -563,6 +563,46 @@ async fn test_preload_mcp_skill_unmatched_silently_skipped() {
     );
 }
 
+/// W2：同名跨 origin（同末段 server 名）→ 显式拒绝注入（不静默取首个、
+/// 不回落本地磁盘），候选写入日志（本用例断言未注入 + 其余批次不受影响）。
+#[tokio::test]
+async fn test_preload_ambiguous_origin_rejects_injection() {
+    let dir = tempdir().unwrap();
+    let reg = Arc::new(McpSkillRegistry::new());
+    for server in ["a:srv", "b:srv"] {
+        let handle: HandleToken = Arc::new(1u32);
+        let meta = SkillMetadata {
+            name: mcp_skill_name(server, "beta"),
+            aliases: Vec::new(),
+            description: "Beta skill".to_string(),
+            path: std::path::PathBuf::new(),
+            source: SkillSource::Mcp,
+            plugin_name: None,
+            origin: Some(SkillOrigin::Mcp {
+                server: server.to_string(),
+                uri: format!("skill://{server}/beta/SKILL.md"),
+            }),
+            content: Some("# Beta\n\nBody\n".to_string()),
+            resources: Vec::new(),
+            frontmatter: None,
+        };
+        reg.mark_discovery_started(server, handle.clone());
+        reg.mark_discovery_completed(server, handle, vec![meta]);
+    }
+    let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap())
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("/srv:beta 歧义命令"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert_eq!(
+        state.messages().len(),
+        1,
+        "歧义命中必须显式拒绝：不注入任何消息（仅原始 Human）"
+    );
+}
+
 /// [回归测试] 混合批次的命名空间回退、miss、重复请求均保留输入顺序。
 #[tokio::test]
 async fn test_preload_mixed_registry_and_local_skills() {

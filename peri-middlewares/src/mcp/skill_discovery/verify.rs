@@ -180,12 +180,16 @@ pub(crate) fn verify_digest(content: &str, expected: &str) -> bool {
 /// 与 name（sanitize 后）不一致 → 拒绝。origin 保留完整 SKILL.md URI；
 /// resources 存条目完整资源清单（读取面按它做内容绑定校验）；
 /// `frontmatter` 存发现时的 verbatim map（W2：激活时全量比对）。
+///
+/// `content` 是**入口差异**：legacy 路径在发现期已读正文（名字只能从正文
+/// frontmatter 得到）→ `Some`；规范路径（skills/list）发现期不读正文 →
+/// `None`，正文由统一 activation 在激活时读取并校验。
 pub(super) fn build_metadata(
     server: &str,
     uri: &str,
     name: &str,
     description: &str,
-    content: &str,
+    content: Option<&str>,
     resources: Vec<SkillResource>,
     frontmatter: serde_json::Map<String, serde_json::Value>,
 ) -> Option<SkillMetadata> {
@@ -209,7 +213,7 @@ pub(super) fn build_metadata(
             server: server.to_string(),
             uri: uri.to_string(),
         }),
-        content: Some(content.to_string()),
+        content: content.map(str::to_string),
         // MCP 来源：完整 resources 集（读取面按它做内容绑定校验）
         resources,
         frontmatter: Some(frontmatter),
@@ -222,7 +226,7 @@ pub(crate) fn parse_mcp_skill_md(content: &str, server: &str, uri: &str) -> Opti
     let fm = parse_skill_frontmatter_map(content)?;
     let name = fm.get("name")?.as_str()?.to_string();
     let description = fm.get("description")?.as_str()?.to_string();
-    build_metadata(server, uri, &name, &description, content, vec![], fm)
+    build_metadata(server, uri, &name, &description, Some(content), vec![], fm)
 }
 
 /// 纯函数：同一 server 内注册名冲突消歧。同名组 >1 时组内全部改用完整路径

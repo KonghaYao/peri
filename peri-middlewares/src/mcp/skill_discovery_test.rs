@@ -356,7 +356,7 @@ fn skill_list_response_parses_pagination_and_defaults() {
     assert_eq!(e1.resources.as_ref().unwrap().len(), 1);
 }
 
-// ─── verify_and_build（digest / frontmatter / uri 段校验）──────────────────
+// ─── entry_to_metadata（W2：发现期只做结构校验，不读正文）─────────────────
 
 const SPEC_MD: &str = "---\nname: a\ndescription: A skill\n---\n\n# A\n";
 
@@ -379,11 +379,8 @@ fn spec_entry(digest: Option<&str>) -> SkillListEntry {
 }
 
 #[test]
-fn verify_and_build_ok() {
-    let outcome = verify_and_build("srv", &spec_entry(None), SPEC_MD);
-    let VerifyOutcome::Built(meta) = outcome else {
-        panic!("digest+frontmatter 一致应构建，实际: {outcome:?}");
-    };
+fn entry_to_metadata_builds_metadata_without_content() {
+    let meta = entry_to_metadata("srv", &spec_entry(None)).expect("结构合法应构建");
     assert_eq!(meta.name, "mcp__srv__a");
     assert_eq!(meta.description, "A skill");
     assert_eq!(
@@ -393,178 +390,91 @@ fn verify_and_build_ok() {
             uri: "skill://a/SKILL.md".to_string(),
         })
     );
-}
-
-#[test]
-fn verify_and_build_digest_mismatch_rejected() {
-    let entry = spec_entry(Some(&format!("sha256:{}", "0".repeat(64))));
+    // W2：发现只发布 metadata——正文与 frontmatter 快照留给 activation。
+    assert!(meta.content.is_none(), "发现期不得携带正文");
     assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::DigestMismatch
-        ),
-        "digest 不匹配（内容被替换/陈旧）→ DigestMismatch（stale 信号）"
+        meta.frontmatter.is_some(),
+        "必须携带 frontmatter 快照供激活比对"
     );
+    assert_eq!(meta.resources.len(), 1, "resources 清单保留供内容绑定");
 }
 
 #[test]
-fn verify_and_build_frontmatter_mismatch_rejected() {
+fn entry_to_metadata_rejects_uri_name_mismatch() {
     let mut entry = spec_entry(None);
-    entry
-        .frontmatter
-        .insert("description".to_string(), "Stale description".into());
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::Rejected
-        ),
-        "读到的 frontmatter 与条目不一致 → 拒绝"
-    );
-}
-
-#[test]
-fn verify_and_build_uri_name_mismatch_rejected() {
-    let mut entry = spec_entry(None);
-    entry.uri = "skill://b/SKILL.md".to_string();
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::Rejected
-        ),
-        "uri 最终段 != frontmatter name → 拒绝"
-    );
-}
-
-#[test]
-fn verify_and_build_without_resources_accepted() {
-    let mut entry = spec_entry(None);
-    entry.resources = None;
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::Built(_)
-        ),
-        "省略 resources（None，动态生成技能）：接受但不可内容绑定（规范 MAY 省略）"
-    );
-}
-
-/// resources present 但为显式空数组 → 完整性违规（present 时必须完整，
-/// 含 SKILL.md 自身条目）→ 拒绝。
-#[test]
-fn verify_and_build_empty_resources_rejected() {
-    let mut entry = spec_entry(None);
-    entry.resources = Some(vec![]);
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::Rejected
-        ),
-        "显式空 resources → 完整性违规拒绝"
-    );
-}
-
-/// resources present 但未含 SKILL.md 自身条目（只列了附属资源）→ 拒绝。
-#[test]
-fn verify_and_build_resources_missing_self_rejected() {
-    let mut entry = spec_entry(None);
+    entry.uri = "skill://other/SKILL.md".to_string();
     entry.resources = Some(vec![SkillResource {
-        uri: "skill://a/notes.md".to_string(),
+        uri: "skill://other/SKILL.md".to_string(),
         digest: format!("sha256:{}", "0".repeat(64)),
     }]);
     assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::Rejected
-        ),
-        "resources 未含 SKILL.md 自身条目 → 完整性违规拒绝"
+        entry_to_metadata("srv", &entry).is_none(),
+        "URI 最终段与 frontmatter name 不一致（身份失败）→ 拒绝"
     );
 }
 
-// ─── frontmatter 逐字段全量比对（任务：附加字段/值类型归一）────────────────
-
-/// entry frontmatter 含附加字段 license；内容侧 license 被改 → 拒绝
-/// （附加字段差异也是验证失败，规范 MUST NOT load）。
 #[test]
-fn verify_and_build_extra_field_mismatch_rejected() {
-    let content = "---\nname: a\ndescription: A skill\nlicense: Apache-2.0\n---\n\n# A\n";
-    // content 与 entry frontmatter 的 name/description 一致、digest 也匹配，
-    // 但 license 不同 → 全量比对失败
-    let mut entry = spec_entry(Some(&spec_entry_digest_for(content)));
-    entry
-        .frontmatter
-        .insert("license".to_string(), "MIT".into());
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, content),
-            VerifyOutcome::Rejected
-        ),
-        "附加字段 license 不一致 → 拒绝"
-    );
+fn entry_to_metadata_without_resources_is_accepted_but_unbound() {
+    let mut entry = spec_entry(None);
+    entry.resources = None;
+    let meta = entry_to_metadata("srv", &entry).expect("省略 resources（动态技能）条目仍可发现");
+    assert!(meta.resources.is_empty(), "无内容绑定：激活按保守策略拒绝");
 }
 
-/// 附加字段全等（含嵌套 metadata 对象）→ 接受。
 #[test]
-fn verify_and_build_extra_fields_equal_accepted() {
-    let content = "---\nname: a\ndescription: A skill\nlicense: MIT\nmetadata:\n  author: x\n  tags: [t1, t2]\n---\n\n# A\n";
-    let mut entry = spec_entry(Some(&spec_entry_digest_for(content)));
-    entry.frontmatter = serde_json::json!({
-        "name": "a",
-        "description": "A skill",
-        "license": "MIT",
-        "metadata": { "author": "x", "tags": ["t1", "t2"] },
-    })
-    .as_object()
-    .unwrap()
-    .clone();
+fn entry_to_metadata_empty_resources_rejected() {
+    let mut entry = spec_entry(None);
+    entry.resources = Some(Vec::new());
     assert!(
-        matches!(
-            verify_and_build("srv", &entry, content),
-            VerifyOutcome::Built(_)
-        ),
-        "附加字段全等（含嵌套对象/数组）→ 接受"
+        entry_to_metadata("srv", &entry).is_none(),
+        "显式空数组（present 但不完整）→ 完整性违规，拒绝"
     );
 }
 
-/// YAML 值类型严格比较（2026-08-15 定案）：数字 ↔ 字符串**跨类型不相等**
-/// （42 ≠ "42"，规范 "identical in content" 字面；两侧类型不一致即内容
-/// 差异）→ 拒绝。
 #[test]
-fn verify_and_build_yaml_value_type_cross_type_rejected() {
-    let content = "---\nname: a\ndescription: A skill\nversion: 42\n---\n\n# A\n";
-    let mut entry = spec_entry(Some(&spec_entry_digest_for(content)));
-    entry.frontmatter.insert("version".to_string(), "42".into());
+fn entry_to_metadata_resources_missing_self_rejected() {
+    let mut entry = spec_entry(None);
+    entry.resources = Some(vec![SkillResource {
+        uri: "skill://a/other.md".to_string(),
+        digest: format!("sha256:{}", "0".repeat(64)),
+    }]);
     assert!(
-        matches!(
-            verify_and_build("srv", &entry, content),
-            VerifyOutcome::Rejected
-        ),
-        "YAML 数字 42 与字符串 \"42\" 跨类型 → 拒绝"
+        entry_to_metadata("srv", &entry).is_none(),
+        "resources 未含 SKILL.md 自身条目 → 完整性违规，拒绝"
     );
 }
 
-/// YAML 尾随空白归一：String vs String 比较前两侧 trim_end（block scalar
-/// 渲染差异容忍）→ 接受。
 #[test]
-fn verify_and_build_yaml_trailing_whitespace_normalized() {
-    let content = "---\nname: a\ndescription: A skill\nversion: |\n  1.0\n---\n\n# A\n";
-    let mut entry = spec_entry(Some(&spec_entry_digest_for(content)));
-    // 条目侧 version 为 "1.0\n"（渲染差异），内容侧为 "1.0\n"（block scalar
-    // 自带换行）——trim_end 后相等。
-    entry
-        .frontmatter
-        .insert("version".to_string(), "1.0".into());
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, content),
-            VerifyOutcome::Built(_)
-        ),
-        "字符串尾随空白归一（trim_end）→ 接受"
+fn entries_to_metadata_sorts_and_reports_all_rejected() {
+    let entries = vec![
+        SkillListEntry {
+            uri: "skill://z/SKILL.md".to_string(),
+            frontmatter: serde_json::json!({ "name": "z", "description": "Z" })
+                .as_object()
+                .unwrap()
+                .clone(),
+            resources: Some(vec![SkillResource {
+                uri: "skill://z/SKILL.md".to_string(),
+                digest: format!("sha256:{}", "1".repeat(64)),
+            }]),
+        },
+        spec_entry(None),
+    ];
+    let (all_rejected, metas) = entries_to_metadata("srv", entries);
+    assert!(!all_rejected);
+    assert_eq!(
+        metas.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+        vec!["mcp__srv__a", "mcp__srv__z"],
+        "输出按注册名排序（完成序无关）"
     );
-}
 
-/// 计算 content 的 sha256 digest（spec_entry 用）。
-fn spec_entry_digest_for(content: &str) -> String {
-    format!("sha256:{}", sha256_hex(content))
+    let mut broken = spec_entry(None);
+    broken.uri = "skill://mismatch/SKILL.md".to_string();
+    let (all_rejected, metas) = entries_to_metadata("srv", vec![broken]);
+    assert!(
+        all_rejected && metas.is_empty(),
+        "候选非空但全部结构非法 → 上报汇总 warn 信号"
+    );
 }
 
 /// frontmatter_maps_equal 纯函数单测：键集合/值类型归一/嵌套递归。
@@ -1355,8 +1265,8 @@ fn make_spec_handle(
     })
 }
 
-/// 规范模式端到端：skills/list 发现 → digest 校验通过的条目注册，
-/// digest 不匹配的条目经 skills/get 恢复仍失败 → 被拒绝。
+/// 规范模式端到端（W2）：skills/list 发现**只发布 metadata**（不读正文）——
+/// digest 不一致的条目同样注册（其完整性由 activation 在激活时判定）。
 #[tokio::test]
 async fn run_discovery_spec_mode_via_skills_list() {
     let ok_text = "---\nname: alpha\ndescription: Alpha skill\n---\n\n# Alpha\n";
@@ -1408,13 +1318,22 @@ async fn run_discovery_spec_mode_via_skills_list() {
     let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["mcp__srv__alpha"],
-        "digest 校验失败的条目被拒绝，仅注册通过校验的条目"
+        vec!["mcp__srv__alpha", "mcp__srv__beta"],
+        "W2：发现期只发布 metadata——结构合法的条目全部注册；beta 的 digest 不一致\
+         属正文完整性，延迟到 activation 判定（不再于发现期过滤）"
+    );
+    assert!(
+        skills.iter().all(|s| s.content.is_none()),
+        "发现期不得携带正文（正文只在 activation 读取）"
+    );
+    assert!(
+        skills.iter().all(|s| s.frontmatter.is_some()),
+        "条目必须携带 frontmatter 快照供激活时全量比对"
     );
     assert_eq!(
-        skills[0].content.as_deref(),
-        Some(ok_text),
-        "content 存经校验的 SKILL.md 全文"
+        skills[0].resources.len(),
+        1,
+        "manifest 保留（内容绑定依据）"
     );
     assert_eq!(
         skills[0].origin,
@@ -1425,12 +1344,11 @@ async fn run_discovery_spec_mode_via_skills_list() {
     );
 }
 
-/// 规范模式端到端（skills/get 恢复）：digest 校验失败（stale）→
-/// `skills/get` 拉取当前条目快照 → 按新内容重新校验注册；`skills/get`
-/// 失败（-32602）→ 条目拒绝；frontmatter 比对失败不是 stale 信号 →
-/// 不触发 skills/get。
+/// 规范模式端到端（W2）：发现期**零正文读取、零 `skills/get` 恢复**——stale
+/// digest、get 失败、frontmatter 不一致三类条目一律只发布 metadata；完整性
+/// 判定与 stale 恢复归统一 activation（见 `mcp::skill_activation::tests`）。
 #[tokio::test]
-async fn run_discovery_spec_mode_recovers_via_skills_get() {
+async fn run_discovery_spec_mode_publishes_entries_without_reads() {
     let old_text = "---\nname: gamma\ndescription: Gamma skill\n---\n\n# Gamma v1\n";
     let new_text = "---\nname: gamma\ndescription: Gamma skill\n---\n\n# Gamma v2\n";
     let bad_text = "---\nname: delta\ndescription: Delta skill\n---\n\n# Delta\n";
@@ -1440,8 +1358,7 @@ async fn run_discovery_spec_mode_recovers_via_skills_get() {
     tokio::spawn(spec_skill_server(
         server_io,
         vec![
-            // gamma：list 给新 digest + 旧内容（stale）→ get 给新快照
-            // （新内容 + 同 digest）→ 恢复成功，按新内容注册
+            // gamma：list 给新 digest + 旧内容（stale）→ 发现期不再恢复
             SpecSkill {
                 uri: "skill://gamma/SKILL.md",
                 name: "gamma",
@@ -1452,7 +1369,7 @@ async fn run_discovery_spec_mode_recovers_via_skills_get() {
                 get_error: false,
                 get_wrong_uri: false,
             },
-            // delta：get 返回 -32602 → 恢复失败 → 拒绝
+            // delta：get 会失败——发现期不再调用 get
             SpecSkill {
                 uri: "skill://delta/SKILL.md",
                 name: "delta",
@@ -1463,8 +1380,7 @@ async fn run_discovery_spec_mode_recovers_via_skills_get() {
                 get_error: true,
                 get_wrong_uri: false,
             },
-            // epsilon：digest 匹配但 frontmatter 比对失败（非 stale 信号）→
-            // 不触发 skills/get，直接拒绝
+            // epsilon：frontmatter 与条目快照不一致——同样只发布 metadata
             SpecSkill {
                 uri: "skill://epsilon/SKILL.md",
                 name: "epsilon",
@@ -1492,74 +1408,25 @@ async fn run_discovery_spec_mode_recovers_via_skills_get() {
     let cancel = AgentCancellationToken::new();
     run_discovery(reg.clone(), None, handle, token.clone(), cancel).await;
 
-    let skills = reg.all_skills();
-    let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+    let names: Vec<String> = reg.all_skills().iter().map(|s| s.name.clone()).collect();
     assert_eq!(
         names,
-        vec!["mcp__srv__gamma"],
-        "仅经 skills/get 恢复成功的条目注册（delta get 失败拒绝、epsilon frontmatter 失败拒绝）"
+        vec!["mcp__srv__delta", "mcp__srv__epsilon", "mcp__srv__gamma"],
+        "三类条目（stale / get 失败 / frontmatter 不一致）都只发布 metadata"
     );
-    assert_eq!(
-        skills[0].content.as_deref(),
-        Some(new_text),
-        "content 为恢复后的新全文（按新条目重新读取校验）"
+    assert!(
+        reg.all_skills().iter().all(|s| s.content.is_none()),
+        "发现期不携带正文"
     );
 
     let log = request_log.lock().unwrap();
     assert!(
-        log.iter().any(|e| e == "skills/get skill://gamma/SKILL.md"),
-        "gamma digest 失败应触发 skills/get，实际: {log:?}"
+        !log.iter().any(|e| e.starts_with("resources/read")),
+        "发现期必须零 resources/read（正文只在 activation 读取），实际: {log:?}"
     );
     assert!(
-        log.iter().any(|e| e == "skills/get skill://delta/SKILL.md"),
-        "delta digest 失败应触发 skills/get，实际: {log:?}"
-    );
-    assert!(
-        !log.iter()
-            .any(|e| e.starts_with("skills/get") && e.contains("epsilon")),
-        "frontmatter 比对失败不是 stale 信号，不应触发 skills/get，实际: {log:?}"
-    );
-}
-
-/// skills/get 响应 uri 核对（2026-08-15 review）：get 返回的条目 uri 与
-/// 请求不一致（server 违规）→ 拒绝恢复（不按新 uri 重读），条目拒绝。
-#[tokio::test]
-async fn run_discovery_spec_mode_get_wrong_uri_rejects_recovery() {
-    let zeta_text = "---\nname: zeta\ndescription: Zeta skill\n---\n\n# Zeta\n";
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
-        server_io,
-        vec![SpecSkill {
-            uri: "skill://zeta/SKILL.md",
-            name: "zeta",
-            description: "Zeta skill",
-            text: zeta_text,
-            // list 给错误 digest → 触发恢复
-            digest_override: Some(format!("sha256:{}", "0".repeat(64))),
-            get_text: None,
-            get_error: false,
-            // get 返回错误 uri（与请求不一致）→ 恢复被拒
-            get_wrong_uri: true,
-        }],
-        None,
-        None,
-        false,
-    ));
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let handle = make_spec_handle(&running);
-    let reg = Arc::new(McpSkillRegistry::new());
-    let token: HandleToken = Arc::new(8u32);
-    reg.mark_discovery_started("srv", token.clone());
-    let cancel = AgentCancellationToken::new();
-    run_discovery(reg.clone(), None, handle, token.clone(), cancel).await;
-
-    assert!(
-        reg.all_skills().is_empty(),
-        "get 返回错误 uri → 拒绝恢复，条目不注册"
+        !log.iter().any(|e| e.starts_with("skills/get")),
+        "发现期不做 stale 恢复（skills/get 归 activation），实际: {log:?}"
     );
 }
 
@@ -1931,6 +1798,34 @@ fn seed_discovered(reg: &Arc<McpSkillRegistry>, server: &str, skill: &str, conte
     reg.mark_discovery_completed(server, token, vec![meta]);
 }
 
+/// W2：命令形态命中多个 origin（同末段 server 名）→ 显式拒绝 + 列出**可输入的
+/// 完整名**候选；不注入任何内容、不静默取首个。
+#[tokio::test]
+async fn releaser_ambiguous_command_lists_candidates_without_injection() {
+    let reg = Arc::new(McpSkillRegistry::new());
+    seed_discovered(&reg, "a:srv", "beta", "Body A");
+    seed_discovered(&reg, "b:srv", "beta", "Body B");
+    let releaser = McpSkillReleaser {
+        registry: Arc::clone(&reg),
+    };
+    let outcome = releaser
+        .execute(make_releaser_ctx("/srv:beta", false))
+        .await;
+    match outcome {
+        CommandOutcome::Done(result) => {
+            assert!(result.messages.is_empty(), "歧义不得注入任何内容");
+            let fb = result.feedback.expect("歧义应有 Info 反馈");
+            assert!(fb.message.contains("多个来源"), "实际: {}", fb.message);
+            assert!(
+                fb.message.contains("a:srv:beta") && fb.message.contains("b:srv:beta"),
+                "候选必须列全且为可输入的完整名: {}",
+                fb.message
+            );
+        }
+        _other => panic!("歧义应回 Done + Info"),
+    }
+}
+
 /// 交互式（supports_inject）：Inject(原文)——命令含 `/` 前缀与 args 整段
 /// 放行进 agent 管线，由 SkillPreload 完成注入（决策 A2 核心语义）。
 #[tokio::test]
@@ -2042,7 +1937,7 @@ async fn releaser_rpc_miss_falls_back_done_info() {
 }
 
 #[tokio::test]
-async fn cached_skill_discovery_avoids_list_and_skill_reads() {
+async fn cached_skill_discovery_reads_no_bodies() {
     let text = "---\nname: cached\ndescription: Cached skill\n---\n\n# Cached\n";
     let request_log = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (client_io, server_io) = tokio::io::duplex(8192);
@@ -2084,11 +1979,17 @@ async fn cached_skill_discovery_avoids_list_and_skill_reads() {
     )
     .await;
     assert_eq!(first.all_skills().len(), 1);
+    assert!(first.all_skills()[0].content.is_none(), "发现期不携带正文");
+    {
+        let log = request_log.lock().unwrap();
+        assert_eq!(
+            log.len(),
+            1,
+            "首次发现只允许 skills/list 一个请求（W2：不读正文），实际: {log:?}"
+        );
+        assert!(log[0].starts_with("skills/list"), "实际: {log:?}");
+    }
     let first_requests = request_log.lock().unwrap().len();
-    assert!(
-        first_requests >= 2,
-        "首次发现应请求 skills/list 与 resources/read"
-    );
 
     let second = Arc::new(McpSkillRegistry::new());
     let second_token: HandleToken = Arc::new(42u32);
@@ -2107,77 +2008,14 @@ async fn cached_skill_discovery_avoids_list_and_skill_reads() {
     assert_eq!(
         request_log.lock().unwrap().len(),
         first_requests,
-        "skills/list 与通过校验的 SKILL.md 应均从持久化缓存读取"
-    );
-}
-
-/// skills/read 缓存内容与当前 skills/list digest 不一致时，应失效缓存并重读，
-/// 而非静默丢弃技能。
-#[tokio::test]
-async fn cached_skill_read_digest_mismatch_refetches_once() {
-    let stale_text = "---\nname: refreshed\ndescription: Refreshed skill\n---\n\n# Stale\n";
-    let fresh_text = "---\nname: refreshed\ndescription: Refreshed skill\n---\n\n# Fresh\n";
-    let request_log = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
-        server_io,
-        vec![SpecSkill {
-            uri: "skill://refreshed/SKILL.md",
-            name: "refreshed",
-            description: "Refreshed skill",
-            text: fresh_text,
-            digest_override: None,
-            get_text: None,
-            get_error: false,
-            get_wrong_uri: false,
-        }],
-        None,
-        Some(Arc::clone(&request_log)),
-        false,
-    ));
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let cache_dir = tempfile::tempdir().unwrap();
-    let cache = crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
-    let origin = "test-skill-origin".to_string();
-    let uri = "skill://refreshed/SKILL.md";
-    let ticket = cache.ticket(&origin, "skills/read", uri).await.unwrap();
-    cache
-        .put_ticket(&ticket, std::time::Duration::from_secs(60), &stale_text)
-        .await;
-
-    let registry = Arc::new(McpSkillRegistry::new());
-    let token: HandleToken = Arc::new(43u32);
-    registry.mark_discovery_started("srv", token.clone());
-    run_discovery_with_cache(
-        registry.clone(),
-        None,
-        make_spec_handle(&running),
-        token,
-        AgentCancellationToken::new(),
-        Some((cache, origin)),
-    )
-    .await;
-
-    let skills = registry.all_skills();
-    assert_eq!(skills.len(), 1, "陈旧缓存应重读后仍发现技能");
-    assert_eq!(skills[0].content.as_deref(), Some(fresh_text));
-    let requests = request_log.lock().unwrap();
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| request.starts_with("resources/read"))
-            .count(),
-        1,
-        "陈旧 skills/read 缓存应只失效并实时重读一次"
+        "skills/list 分页应从持久化缓存读取（发现期无正文读取）"
     );
     assert!(
-        !requests
+        request_log
+            .lock()
+            .unwrap()
             .iter()
-            .any(|request| request.starts_with("skills/get")),
-        "实时重读已满足当前 digest，不应额外请求 skills/get"
+            .all(|request| !request.starts_with("resources/read")),
+        "两次发现都不得产生 resources/read"
     );
 }

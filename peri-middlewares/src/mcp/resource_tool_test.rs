@@ -984,10 +984,9 @@ async fn read_skill_digest_mismatch_recovers_via_skills_get() {
     // registry 条目已回写（digest/内容为新）
     let skills = reg.skills_of("srv");
     assert_eq!(skills.len(), 1);
-    assert_eq!(
-        skills[0].content.as_deref(),
-        Some(new_text),
-        "registry 条目内容应为新全文"
+    assert!(
+        skills[0].content.is_none(),
+        "W2：条目只发布 metadata，不落正文"
     );
     let new_digest = format!("sha256:{}", sha256_hex(new_text));
     assert_eq!(
@@ -1609,9 +1608,13 @@ async fn read_skill_recovery_writeback_keeps_original_name() {
         skills[0].name, "mcp__srv__acme_billing_refunds",
         "回写必须保留原条目 name（消歧名），不得漂移为未消歧名"
     );
+    assert!(
+        skills[0].content.is_none(),
+        "W2：条目只发布 metadata，不落正文"
+    );
     assert_eq!(
-        skills[0].content.as_deref(),
-        Some(new_text),
-        "description/content 刷新为新值"
+        skills[0].resources[0].digest,
+        format!("sha256:{}", sha256_hex(new_text)),
+        "刷新后的 manifest digest 必须回写"
     );
 }

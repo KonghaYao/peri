@@ -243,22 +243,54 @@ impl BaseTool for DiscoverSkillsTool {
 
 /// 在已扫描的 skills 列表中按名称（大小写无关）选择 metadata。
 ///
-/// 支持命名空间前缀：`ecc:plan` → 去前缀后匹配 `plan`。
-/// 返回 `Err` 仅当找不到匹配 skill，不 panic。
+/// 解析顺序（每步命中即返回；每步内多命中 → **显式歧义错误**，不静默取首个）：
+/// 1. 完整名称 / 别名；
+/// 2. MCP 别名 `<server>:<skill>`（先按原拼名 `mcp__<server>__<skill>`，再按
+///    server 名末段/完整名匹配 origin——plugin 多冒号 server key 的兜底）；
+/// 3. 去掉命名空间前缀后的裸名。
+///
+/// 同名跨 origin（workspace 与外部 server 同名 skill）必须由调用方以完整名
+/// 消歧：歧义错误里给出候选清单（`{server}:{skill}` 排序）。
+/// 返回 `Err` 仅当找不到匹配或命中歧义，不 panic。
 fn find_skill<'a>(
     skills: &'a [SkillMetadata],
     skill_name: &str,
 ) -> Result<&'a SkillMetadata, Box<dyn std::error::Error + Send + Sync>> {
     let input_lower = skill_name.to_lowercase();
 
+    /// 候选裁决：0 → 未命中（继续下一步）；1 → 命中；多 → 歧义错误。
+    fn resolve<'a>(
+        skill_name: &str,
+        mut hits: Vec<&'a SkillMetadata>,
+    ) -> Result<Option<&'a SkillMetadata>, Box<dyn std::error::Error + Send + Sync>> {
+        match hits.len() {
+            0 => Ok(None),
+            1 => Ok(Some(hits.remove(0))),
+            _ => {
+                let owned: Vec<SkillMetadata> = hits.into_iter().cloned().collect();
+                let list = crate::mcp::skill_discovery::candidate_list(&owned);
+                Err(format!(
+                    "Skill '{skill_name}' is ambiguous across {} origins: {list}. \
+                     Use the full name ('<server>:<skill>' or 'mcp__<server>__<skill>') to disambiguate.",
+                    owned.len()
+                )
+                .into())
+            }
+        }
+    }
+
     // 名称已在扫描时把 `:` 规范为 `-`；完整名称优先匹配，避免把包含
     // 命名空间前缀的输入过早降级为最后一段。
-    if let Some(skill) = skills.iter().find(|s| {
-        s.name.eq_ignore_ascii_case(&input_lower)
-            || s.aliases
-                .iter()
-                .any(|alias| alias.eq_ignore_ascii_case(&input_lower))
-    }) {
+    let exact: Vec<&SkillMetadata> = skills
+        .iter()
+        .filter(|s| {
+            s.name.eq_ignore_ascii_case(&input_lower)
+                || s.aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(&input_lower))
+        })
+        .collect();
+    if let Some(skill) = resolve(skill_name, exact)? {
         return Ok(skill);
     }
 
@@ -268,28 +300,36 @@ fn find_skill<'a>(
     // 兜底（决策 1 + A3）：plugin 多冒号 server key（`plugin:{plugin}:{server}`）
     // 下别名按原名拼名必 miss——按「server 名末段小写 / 完整名」匹配
     // SkillOrigin::Mcp 的 server（与命令面 fullname 首段派生、SkillPreload
-    // 的 registry find_by_command 同构）。
+    // 的 registry lookup_by_command 同构）。
     if let Some((prefix, suffix)) = skill_name.rsplit_once(':') {
         if !suffix.is_empty() {
             let prefix = prefix.to_lowercase();
             let mcp_full = mcp_skill_name(&prefix, suffix).to_lowercase();
-            if let Some(skill) = skills.iter().find(|s| s.name.to_lowercase() == mcp_full) {
+            let by_full_name: Vec<&SkillMetadata> = skills
+                .iter()
+                .filter(|s| s.name.to_lowercase() == mcp_full)
+                .collect();
+            if let Some(skill) = resolve(skill_name, by_full_name)? {
                 return Ok(skill);
             }
             let want_skill = suffix.to_lowercase();
-            if let Some(skill) = skills.iter().find(|s| match &s.origin {
-                Some(SkillOrigin::Mcp { server, .. }) => {
-                    let trail = server
-                        .rsplit(':')
-                        .next()
-                        .unwrap_or(server.as_str())
-                        .to_lowercase();
-                    (trail == prefix || server.to_lowercase() == prefix)
-                        && s.name.to_lowercase()
-                            == mcp_skill_name(server, &want_skill).to_lowercase()
-                }
-                _ => false,
-            }) {
+            let by_server_trail: Vec<&SkillMetadata> = skills
+                .iter()
+                .filter(|s| match &s.origin {
+                    Some(SkillOrigin::Mcp { server, .. }) => {
+                        let trail = server
+                            .rsplit(':')
+                            .next()
+                            .unwrap_or(server.as_str())
+                            .to_lowercase();
+                        (trail == prefix || server.to_lowercase() == prefix)
+                            && s.name.to_lowercase()
+                                == mcp_skill_name(server, &want_skill).to_lowercase()
+                    }
+                    _ => false,
+                })
+                .collect();
+            if let Some(skill) = resolve(skill_name, by_server_trail)? {
                 return Ok(skill);
             }
         }
@@ -301,22 +341,22 @@ fn find_skill<'a>(
         .map(|(_, n)| n)
         .unwrap_or(&input_lower);
 
-    // 大小写无关精确匹配
-    let matched = skills.iter().find(|s| {
-        s.name.eq_ignore_ascii_case(bare_name)
-            || s.aliases
-                .iter()
-                .any(|alias| alias.eq_ignore_ascii_case(bare_name))
-    });
-
-    let Some(skill) = matched else {
-        return Err(format!(
+    let bare: Vec<&SkillMetadata> = skills
+        .iter()
+        .filter(|s| {
+            s.name.eq_ignore_ascii_case(bare_name)
+                || s.aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(bare_name))
+        })
+        .collect();
+    match resolve(skill_name, bare)? {
+        Some(skill) => Ok(skill),
+        None => Err(format!(
             "Skill '{skill_name}' not found. Use DiscoverSkillsTool to see available skills."
         )
-        .into());
-    };
-
-    Ok(skill)
+        .into()),
+    }
 }
 
 /// 将 SkillMetadata 转为 DiscoverSkillsTool 的 JSON 输出格式

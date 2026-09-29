@@ -35,7 +35,7 @@ use peri_acp_types::{
         PromptStopReason,
     },
     command_registry::CommandRegistry,
-    mcp_skills::{HandleToken, McpSkillRegistry},
+    mcp_skills::{HandleToken, McpSkillRegistry, SkillLookup},
     messages::BaseMessage,
     skills::SkillMetadata,
 };
@@ -47,9 +47,11 @@ use skills_list::collect_via_skills_list;
 pub(crate) use legacy_scan::{
     collect_skill_entries, is_skill_scheme, select_skill_resources, uri_eq_ignore_scheme_case,
 };
-pub(crate) use skills_list::refresh_entry_and_content;
 /// W2 激活面复用（skill_activation）：正文读取、stale 恢复、frontmatter 校验。
-pub(crate) use skills_list::{read_skill_resource_text, recover_via_skills_get, SkillResourceRead};
+pub(crate) use skills_list::{
+    read_skill_resource_text, recover_entry_via_skills_get, refresh_entry_and_content,
+    SkillResourceRead,
+};
 pub(crate) use verify::{
     frontmatter_maps_equal, parse_mcp_skill_md, parse_skill_frontmatter_map, verify_digest,
     verify_digest_bytes,
@@ -68,8 +70,8 @@ use rmcp::{model::Resource, RoleClient};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use skills_list::{
-    entry_from_dto, verify_and_build, SkillListEntry, SkillListEntryDto, SkillListResponse,
-    VerifyOutcome,
+    entries_to_metadata, entry_from_dto, entry_to_metadata, SkillListEntry, SkillListEntryDto,
+    SkillListResponse,
 };
 #[cfg(test)]
 use std::path::PathBuf;
@@ -118,6 +120,33 @@ pub(crate) async fn run_discovery(
     .await;
 }
 
+/// legacy 边界探测（W2）：`resources/templates/list` 里是否存在 skill 形态的
+/// 模板（`skill://…/SKILL.md`）。**只记录信号**：模板是模式、不能展开成条目，
+/// 因此不注册候选；显式 URI 仍走 `skills/get` 与读取面的完整性校验路径。
+/// 失败/超时按无模板处理（发现不因此失败）。
+async fn probe_skill_templates(peer: &rmcp::service::Peer<rmcp::RoleClient>, server: &str) {
+    let result =
+        tokio::time::timeout(SKILLS_LIST_TIMEOUT, peer.list_resource_templates(None)).await;
+    let Ok(Ok(templates)) = result else {
+        tracing::debug!(
+            server,
+            "MCP skill 发现：resources/templates/list 不可用，按无模板处理"
+        );
+        return;
+    };
+    let hit = templates.resource_templates.iter().find(|template| {
+        let uri = template.uri_template.as_str();
+        uri.len() >= 8 && uri[..8].eq_ignore_ascii_case("skill://") && uri.contains("SKILL.md")
+    });
+    if let Some(template) = hit {
+        tracing::debug!(
+            server,
+            template = %template.uri_template,
+            "MCP skill 发现：server 仅经模板暴露 skill 面（模板不可展开，显式 URI 仍可解析）"
+        );
+    }
+}
+
 pub(crate) async fn run_discovery_with_cache(
     registry: Arc<McpSkillRegistry>,
     command_registry: Option<Arc<CommandRegistry>>,
@@ -129,11 +158,19 @@ pub(crate) async fn run_discovery_with_cache(
     // legacy 兜底：resources 里无 skill:// 候选 → 直接完成（规范模式不受
     // resources 影响——skills/list 是独立原语）。cancel 已触发时与下方
     // cancel 分支同构：回退 Started 状态（不触发 on_change），下轮可重试。
+    //
+    // 边界（W2）：候选空时查一次 `resources/templates/list`——server 可能只
+    // 经模板暴露技能面（模板是模式不是具体资源，无法展开成条目）。有 skill
+    // 形态模板时记录可发现性信号（显式 URI 仍可经 skills/get 或读取面
+    // 完整性路径解析），**空列表本身是合法结果**，不报错、不重试。
     if !handle.skills_capable && select_skill_resources(&handle.resources).is_empty() {
         if cancel.is_cancelled() {
             registry.clear_discovery_started(&handle.name, handle_token.clone());
             clear_command_source(&command_registry, &handle.name, handle_token);
             return;
+        }
+        if let Some(peer) = handle.peer.clone() {
+            probe_skill_templates(&peer, &handle.name).await;
         }
         registry.mark_discovery_completed(&handle.name, handle_token.clone(), vec![]);
         finish_command_source(
@@ -283,6 +320,28 @@ fn mcp_namespace(server: &str) -> String {
         .to_lowercase()
 }
 
+/// 歧义候选的稳定渲染（`{server}:{skill}` 列表；消费面共用，禁止各自拼字符串）。
+pub(crate) fn candidate_list(candidates: &[SkillMetadata]) -> String {
+    let mut items: Vec<String> = candidates
+        .iter()
+        .map(|meta| match &meta.origin {
+            // 用**完整 server key**（不是词法域末段）：候选本身必须是可输入、
+            // 可唯一解析的完整名（`{server}:{skill}`；lookup_by_command 接受
+            // 完整 server 名或末段，完整名消歧无歧义）。
+            Some(peri_acp_types::skills::SkillOrigin::Mcp { server, .. }) => {
+                let bare = peri_acp_types::mcp_skills::bare_skill_segment(&meta.name)
+                    .unwrap_or(meta.name.as_str())
+                    .to_string();
+                format!("{server}:{bare}")
+            }
+            _ => meta.name.clone(),
+        })
+        .collect();
+    items.sort();
+    items.dedup();
+    items.join(", ")
+}
+
 /// mcp 域 RouteEntry 执行体（决策 A2/D：放行跳板，替代 Phase 6 A3 占位）。
 ///
 /// - 交互式（拦截层，`ctx.supports_inject == true`）：`Inject(原文)` 放行
@@ -332,9 +391,19 @@ impl CommandHandler for McpSkillReleaser {
             .split_whitespace()
             .next()
             .unwrap_or_default();
-        let hit = self.registry.find_by_command(name);
-        let (messages, feedback) = match hit {
-            Some(meta) => {
+        let (messages, feedback) = match self.registry.lookup_by_command(name) {
+            SkillLookup::Ambiguous(candidates) => {
+                // 多 origin 命中同一命令形态：显式拒绝并列出候选（不静默取首个）。
+                let list = candidate_list(&candidates);
+                tracing::warn!(command = %name, candidates = %list, "MCP skill 命令命中多个 origin，拒绝并列出候选");
+                let feedback = CommandFeedback {
+                    level: FeedbackLevel::Info,
+                    message: format!("MCP skill `{name}` 命中多个来源，请用完整名消歧：{list}"),
+                    channel: FeedbackChannel::UiOnly,
+                };
+                (ctx.history, feedback)
+            }
+            SkillLookup::Found(meta) => {
                 // W2：正文一律经统一 activation（resources/read + digest/frontmatter
                 // 校验；stale 经 skills/get 刷新一次）；失败不注入，不回落缓存。
                 match crate::mcp::skill_activation::activate(&self.registry, &meta, None).await {
@@ -367,7 +436,7 @@ impl CommandHandler for McpSkillReleaser {
                     }
                 }
             }
-            None => {
+            SkillLookup::Missing => {
                 let feedback = CommandFeedback {
                     level: FeedbackLevel::Info,
                     message: format!(

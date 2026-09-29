@@ -757,6 +757,29 @@ fn lookup_by_command_is_ambiguity_aware_on_trailing_segment_clash() {
 }
 
 #[test]
+fn lookup_exact_does_not_fall_back_to_bare_name() {
+    let reg = McpSkillRegistry::new();
+    complete(
+        &reg,
+        "workspace",
+        token(1),
+        vec![mcp_skill("workspace", "mcp__workspace__alpha")],
+    );
+    // 裸名：exact 面不解析（消费面若保持既有口径可显式选择），lookup 才做裸名回退。
+    assert!(matches!(reg.lookup_exact("alpha"), SkillLookup::Missing));
+    assert_eq!(found_name(reg.lookup("alpha")), "mcp__workspace__alpha");
+    // 全名与别名两形态都解析。
+    assert_eq!(
+        found_name(reg.lookup_exact("mcp__workspace__alpha")),
+        "mcp__workspace__alpha"
+    );
+    assert_eq!(
+        found_name(reg.lookup_exact("workspace:alpha")),
+        "mcp__workspace__alpha"
+    );
+}
+
+#[test]
 fn bare_skill_segment_units() {
     assert_eq!(bare_skill_segment("mcp__server__skill"), Some("skill"));
     assert_eq!(bare_skill_segment("mcp__plugin:p1:srv__a-b"), Some("a-b"));

@@ -290,6 +290,25 @@ impl McpSkillRegistry {
         resolve_hits(hits)
     }
 
+    /// 全名 / `<server>:<skill>` 别名的歧义感知版（**不含**裸名回退）。
+    ///
+    /// 消费面在需要保持既有解析口径（不做跨 origin 裸名兜底）时用它；
+    /// 裸名跨 origin 消歧由 [`lookup`](Self::lookup) 提供。
+    pub fn lookup_exact(&self, name: &str) -> SkillLookup {
+        let guard = self.inner.read();
+        let needle = name.to_lowercase();
+        let mut hits = collect_exact(&guard.servers, &needle);
+        if hits.is_empty() {
+            if let Some((prefix, suffix)) = name.rsplit_once(':') {
+                if !suffix.is_empty() {
+                    let full = mcp_skill_name(prefix, suffix).to_lowercase();
+                    hits = collect_exact(&guard.servers, &full);
+                }
+            }
+        }
+        resolve_hits(hits)
+    }
+
     /// 命令形态查找的歧义感知版（`{server}:{skill}`；覆盖 plugin 多冒号 server
     /// 的末段匹配，语义与 [`find_by_command`](Self::find_by_command) 同源）。
     ///

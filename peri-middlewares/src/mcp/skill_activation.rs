@@ -16,6 +16,16 @@
 //!
 //! legacy 兜底：server 未声明 Skills 扩展时条目无 `resources[]` 绑定，激活
 //! 退化为「使用发现阶段已校验的正文」（该路径的正文读取仍在发现期完成）。
+//!
+//! 批准面（X6 核实结论，2026-09-29 W2b）：**skill 级批准面当前不存在**——
+//! 既有批准只落在两处：(a) 工具粒度 `permission::sensitive_tool_entries()`
+//! （14 项 + 3 前缀，含 `mcp__` 前缀「按绑定来源审批」；`SkillTool` 不在表内，
+//! 属免批准 direct 工具）；(b) agent 粒度 `McpAgentRegistry::approvals`
+//! （内容 + 有效能力绑定，变更重批）。因此 X6 的「本地受信来源免逐技能批准」
+//! 在 W2 无面可删（本来就不逐技能弹窗），「远端维持既有批准面」= 沿用上述
+//! 工具/agent 两处；**受信来源的完整性校验不可豁免**（免批准 ≠ 免校验），
+//! 由本模块的统一 activation 保证（见 `trusted_origin_still_verifies_content_binding` 用例）。
+//! skill 级内容绑定批准属 W3/W4 范围（需先有面），本波不新造批准面。
 
 use peri_acp_types::{
     mcp_skills::{HandleToken, McpSkillRegistry, ServerDiscoveryState},
@@ -27,7 +37,7 @@ use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use super::client::McpClientHandle;
 use super::skill_discovery::{
     frontmatter_maps_equal, parse_skill_frontmatter_map, read_skill_resource_text,
-    recover_via_skills_get, uri_eq_ignore_scheme_case, verify_digest, SkillResourceRead,
+    recover_entry_via_skills_get, uri_eq_ignore_scheme_case, verify_digest, SkillResourceRead,
 };
 
 /// 激活失败原因（调用方据此决定文案/降级；不含主机绝对路径与正文）。
@@ -134,34 +144,27 @@ async fn refresh_after_digest_mismatch(
     handle: &HandleToken,
     cancel: Option<&AgentCancellationToken>,
 ) -> Result<String, ActivationError> {
-    let Some(refreshed) = recover_via_skills_get(peer, server, uri).await else {
+    let Some(refreshed) = recover_entry_via_skills_get(peer, server, uri).await else {
         return Err(ActivationError::DigestMismatch);
     };
     if cancel.is_some_and(|token| token.is_cancelled()) {
         return Err(ActivationError::Cancelled);
     }
-    // 恢复路径已按刷新后的条目重读并做 digest/frontmatter 全量校验：正文随条目
-    // 返回时直接采用；正文不随条目存储时（发现只发布 metadata 后）按刷新条目
-    // 重读一次并校验，失败即拒绝（不写半成品、不回退旧内容）。
-    let content = match refreshed.content.as_ref() {
-        Some(content) => content.clone(),
-        None => {
-            let binding = refreshed
-                .resources
-                .iter()
-                .find(|resource| uri_eq_ignore_scheme_case(&resource.uri, uri))
-                .ok_or(ActivationError::MissingBinding)?;
-            let expected_fm = refreshed
-                .frontmatter
-                .as_ref()
-                .ok_or(ActivationError::MissingBinding)?;
-            let text = read_text(peer, server, uri).await?;
-            verify_body(&text, &binding.digest, expected_fm)?;
-            text
-        }
-    };
+    // 按刷新后的条目快照**读一次**正文并做 digest/frontmatter 全量校验；失败即
+    // 拒绝（不写半成品、不回退旧内容、不再额外重读）。
+    let binding = refreshed
+        .resources
+        .iter()
+        .find(|resource| uri_eq_ignore_scheme_case(&resource.uri, uri))
+        .ok_or(ActivationError::MissingBinding)?;
+    let expected_fm = refreshed
+        .frontmatter
+        .as_ref()
+        .ok_or(ActivationError::MissingBinding)?;
+    let text = read_text(peer, server, uri).await?;
+    verify_body(&text, &binding.digest, expected_fm)?;
     write_back(registry, server, handle, refreshed);
-    Ok(content)
+    Ok(text)
 }
 
 /// 单次 `resources/read` → 文本；Blob / 失败 / 超时分别映射为错误。
