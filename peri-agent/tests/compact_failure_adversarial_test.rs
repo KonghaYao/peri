@@ -162,7 +162,8 @@ impl peri_model::Model for SummaryModel {
                     ModelError::retry_exhausted(3, peri_model::RetryErrorKind::HttpStatus).unwrap(),
                 )
             }
-            Failure::MaxTokens => ("<summary>incomplete task", StopReason::MaxTokens),
+            Failure::MaxTokens if call == 1 => ("<summary>incomplete task", StopReason::MaxTokens),
+            Failure::MaxTokens => (" still pending", StopReason::MaxTokens),
             Failure::ToolUse => (
                 "<summary>untrusted tool pause</summary>",
                 StopReason::ToolUse,
@@ -171,6 +172,9 @@ impl peri_model::Model for SummaryModel {
                 "<analysis>no usable summary</analysis>",
                 StopReason::EndTurn,
             ),
+            Failure::Success if matches!(self.failure, Failure::MaxTokens) => {
+                (" RECOVERED task</summary>", StopReason::EndTurn)
+            }
             Failure::Success => ("<summary>RECOVERED task</summary>", StopReason::EndTurn),
         };
         ModelResponse::new(ModelMessage::assistant_text(text), reason, None, None)
@@ -364,12 +368,12 @@ async fn assert_unusable_summary_blocks_reason(failure: Failure) {
     }
     assert_eq!(
         summary.calls.load(Ordering::SeqCst),
-        if matches!(failure, Failure::AnalysisOnly) {
+        if matches!(failure, Failure::AnalysisOnly | Failure::MaxTokens) {
             3
         } else {
             1
         },
-        "Provider 预算不能在 Compact 层重启"
+        "空摘要重试和 MaxTokens 续写有界；Provider 失败不能在 Compact 层重启"
     );
 }
 
@@ -395,6 +399,43 @@ async fn test_provider_retry_exhaustion_blocks_reason() {
 #[tokio::test]
 async fn test_max_tokens_summary_blocks_reason() {
     assert_unusable_summary_blocks_reason(Failure::MaxTokens).await;
+}
+
+/// [回归测试] 最后一次续写成功后，下一次 Reason 必须看到所有摘要片段而不是原历史。
+#[tokio::test]
+async fn test_max_tokens_summary_continuation_resumes_reason_with_complete_summary() {
+    let (_bound, ctx, reason, summary, _) = make_case(Failure::MaxTokens, 2, false, None).await;
+    let result = run_react_loop(ctx, 4).await;
+    assert!(matches!(result, LoopResult::Completed), "{result:?}");
+    assert_eq!(summary.calls.load(Ordering::SeqCst), 3);
+    let requests = reason.requests.lock();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].iter().any(|message| message
+        .content()
+        .contains("incomplete task still pending RECOVERED task")));
+    assert!(!requests[0]
+        .iter()
+        .any(|message| message.content() == "original task"));
+}
+
+/// [回归测试] 摘要截断后的续写必须服从外层取消，不得继续消耗请求或提交半截摘要。
+#[tokio::test]
+async fn test_cancel_before_summary_continuation_preserves_history() {
+    let (bound, ctx, reason, summary, _) =
+        make_case(Failure::MaxTokens, usize::MAX, false, Some(1)).await;
+    let result = run_react_loop(ctx.clone(), 4).await;
+    assert!(matches!(result, LoopResult::Interrupted), "{result:?}");
+    assert_eq!(summary.calls.load(Ordering::SeqCst), 1);
+    assert!(reason.requests.lock().is_empty());
+    let transcript = std::mem::take(&mut *ctx.session.transcript.write());
+    transcript.flush_persistence().await.unwrap();
+    let stored = bound
+        .resources
+        .load_session_snapshot(&bound.thread_id)
+        .await
+        .unwrap();
+    assert!(stored.flags.values().all(|flags| !flags.excluded));
+    assert_eq!(stored.payloads.len(), 2, "只有原始 task 和本轮输入");
 }
 
 /// [回归测试] 工具调用停止不能伪装成成功摘要。
