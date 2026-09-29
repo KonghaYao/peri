@@ -336,6 +336,44 @@ async fn runtime_config_forwards_safe_retry_observations_to_registered_observer(
     assert_eq!(observed[0].error_kind(), crate::RetryErrorKind::HttpStatus);
 }
 
+/// [回归测试] provider 已完成后，同 chunk 的坏帧不能把成功响应改成中断或重试。
+#[tokio::test]
+async fn test_sse_completed_response_ignores_malformed_tail() {
+    let transport = Arc::new(FakeTransport::new(vec![Response::Ready {
+        status: 200,
+        chunks: vec![Ok(b"data: complete\n\ndata: \xff\n\n".to_vec())],
+    }]));
+    let decoders: SseDecoderFactory = Arc::new(|| {
+        let decoder: SseDecoder = Arc::new(|event, _| {
+            assert_eq!(event.data, "complete", "完成后的事件不得再交给 decoder");
+            Ok(vec![ModelStreamEvent::Completed(
+                crate::ModelResponse::new(
+                    crate::ModelMessage::assistant_text("done"),
+                    crate::StopReason::EndTurn,
+                    None,
+                    None,
+                )?,
+            )])
+        });
+        (decoder, completion_decoder())
+    });
+    let events = retrying_http_sse_stream(
+        config(),
+        CancellationToken::new(),
+        None,
+        transport.clone(),
+        Arc::new(request),
+        Arc::from("fake"),
+        decoders,
+    )
+    .collect::<Vec<_>>()
+    .await;
+    assert!(
+        matches!(events.as_slice(), [Ok(ModelStreamEvent::Completed(response))] if response.stop_reason() == &crate::StopReason::EndTurn)
+    );
+    assert_eq!(transport.calls(), 1);
+}
+
 #[tokio::test]
 async fn external_cancellation_stops_fake_transport_connect() {
     let transport = Arc::new(FakeTransport::new(vec![Response::PendingConnect {
