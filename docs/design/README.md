@@ -49,6 +49,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
+| Session ID 恢复与机器 env 分区 | [session-id-environment.md](session-id-environment.md) | `spec/issues/2026-09-30-session-id-environment-core-change.md`；取代旧文件锁/dirty 恢复准入 |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |

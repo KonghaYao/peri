@@ -2,6 +2,8 @@
 
 状态：2026-09-30 源码级实施可行性调研，未实施；不是已批准的完整设计或工期承诺。
 
+后续裁决：已批准 [Session ID 恢复与机器 env 分区](../../docs/design/session-id-environment.md)，移除 session 文件锁与恢复弹窗；下文关于 binding 准入、全局 owner/lease 和全面 URI 的会前建议不再作为实施目标。核心实施以 [新清单](2026-09-30-session-id-environment-core-change.md) 为准，源码观察与暂缓缓存/插件的难度仍作参考。
+
 范围来自 [文件系统依赖清单](2026-09-30-filesystem-dependencies-inventory.md)：统一地址、MCP 凭据/响应缓存和宿主插件缓存扫描。落盘日志免除；SQLite 后端无需整改；TUI 本地状态免除。本轮只改文档，未运行原型、跨进程实验或远端 E2E。
 
 最新裁决：插件系统与 MCP 缓存均推迟，保留现有落盘实现及权限、认证与缓存准入；后端注入、插件扫描收口与远端迁移都不进入当前实施队列，不作为核心问题整改的前置条件。下文相关方案仅保留为后续调研参考。
@@ -68,7 +70,7 @@ Config MCP 可复用独立启动/部署注入的组织方式，但 `peri-acp-typ
 
 TUI 本地存储免除。先完成执行环境/工作区映射；确需跨设备恢复项目绑定时，再单独扩展 payload 身份与版本验收，不先重写加密传输。写入验收仍要保留 `writer.rs::validate_and_resolve` 与 `channel_flow/staging.rs` 的路径防护、暂存及回滚。此建议未做混合版本 E2E。
 
-## 当前核心实施顺序与验收
+## 会前实施建议（已由后续裁决取代）
 
 1. 执行环境 locator 与持久 binding：同 workspace 在不同环境、旧会话加载、相对路径与显示路径分离；明确环境不可达的处理。
 2. Workspace provider 路由与受信准入：关闭/换代/重连、取消与旧 lease、子任务继承、断连不回落本机；不允许用户配置冒充受信 builtin。

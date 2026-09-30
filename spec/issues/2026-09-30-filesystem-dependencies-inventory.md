@@ -8,7 +8,7 @@
 ## 一、用户裁决（本文方向锚点）
 
 1. **范围与落点**：文件系统耦合的清单覆盖全仓库；`mcp-packages` 除外，且**是未来耦合的移动目标**（工具执行环境）。
-2. **cwd / 统一地址（P2）**：cwd 与多设备统一寻址（URI 化，第四节）列为 **P2**；仍是大工程（此前「单独立项」表述以本次定级为准）。
+2. **机器 env 分区（P2，核心改动）**：execution_environment_id 标记机器位置，在数据库中区分 env；采用 Session ID 恢复，路径仅作过滤/展示/工具定位，不推进全面 URI 化。目标见 [核心改动清单](2026-09-30-session-id-environment-core-change.md)。
 3. **存储（无需整改）**：SQLite 与 turso 后端及 `--session-store env:<VAR>` 已支持，属**安全依赖**，不列入待办等级表。
 4. **配置数据面（P3，已完成本清单范围）**：ACP settings、MCP 配置与 hooks/开关来源 I/O 统一到独立配置 MCP；宿主保留类型校验、来源优先级与业务投影，插件体系整体迁移另列。
 5. **插件体系（P3，推迟）**：保留现有落盘安装、缓存与扫描；Plugin MCP 迁移暂不推进，不作为核心存算分离工作的前置条件。
@@ -18,6 +18,7 @@
 9. **遥测**：落盘日志**免除，不整改**；Langfuse 服务端上报效果仍需端到端验证。
 10. **compact**：不应读取 skill 文件——保留历史工具调用记录即可；同机制的文件回读（recent files）一并评估。`compact_v2/full.rs` 的文件读取应移除。
 11. **MCP 缓存（P2，推迟）**：凭据与响应缓存保留现有落盘实现及安全准入，不推进后端注入或远端迁移；插件缓存同样推迟，不阻塞核心问题整改。
+12. **恢复机制（核心改动，待实施）**：移除 session 文件锁及前端 dirty 恢复弹窗；root session 以 ID 恢复，不按目录或 owner 认领，父子关系保持。不用分布式锁替代。
 
 ## 二、全仓库总览
 
@@ -100,7 +101,7 @@
 
 `peri-model`、`peri-controller`、`peri-runtime`、`langfuse-client`、`peri-process`（进程树/Job Object，OS 非 fs）；`peri-acp-types` 无 fs I/O，仅有 `PathBuf` 类型（skills / hooks / workspace / plugin / session_store / lsp）。
 
-## 四、cwd 与多设备寻址：URI 化（统一地址，P2）
+## 四、Session ID 与机器 env 分区（P2 / 核心改动）
 
 ### 4.1 现状与问题
 
@@ -110,33 +111,19 @@
 - 设备间同步（`peri-tui/src/sync`）以本地路径定位内容：`~/.claude/...` 固定路径之外，项目级 MCP 配置用 **`{cwd}/.mcp.json`**（同步的输入本身依赖本地 cwd）；会话执行绑定（workspace/cwd）跨设备同步后同样无法直接解析。
 - 多设备交织（本地 / 远端 SSH / 云 worker）下，"cwd = 本机路径"不成立：路径在不同设备上可能有、可能无、可能语义不同。
 
-### 4.2 已有基础（URI 化的落点）
+### 4.2 可复用基础与待删除门槛
 
-- `WorkspaceId` / `ProjectId` 身份层与 `cwd_relative_to_workspace` 相对路径已存在，可复用，但统一地址还需执行环境绑定、provider 解析、持久元数据与恢复准入，不能只替换路径类型。
-- `SessionStoreLocator`（`peri-acp-types/src/session_store.rs:39`）已区分 `LocalPath(PathBuf)` 与 `Locator(String)`（`turso://` scheme）——**存储寻址已有 scheme 先例**，工作区寻址可复用同一模式。
-- 执行所有权/代际（execution lease、read-only admission）已按"宿主"建模；增加执行环境后仍需明确旧 lease、重连换代与不可达环境的准入语义，不视为现有远端能力。
+- `WorkspaceId` / `ProjectId` 与相对 cwd 可保留为工作区记录，不作为 root session 归属权或 ID 恢复门槛。
+- `SessionStoreLocator` 已支持本机/远端存储，不要求统一改成文件 URI；本次演进 env 元数据，不更换 SQLite 后端。
+- session 文件锁、lease/dirty 恢复认领与前端确认仍存在，获批目标要求移除；不能把机器 env 分区重新解释成全局执行 owner。
 
-### 4.3 VS Code 的 URI 设计（参考）
+### 4.3 已批准目标（待实施）
 
-VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri` 寻址，而不是平台路径：
-
-- **三段结构**：`scheme://authority/path`。`file:` 只是其中一个 scheme；远端 workspace 用 `vscode-remote` 寻址，如 `vscode://vscode-remote/ssh-remote+<host>/<path>`、`vscode://vscode-remote/attached-container+<hex(container-id)>/<path>`（官方未成文，社区 issue `microsoft/vscode-remote-release#8764`）。
-- **FileSystemProvider**：扩展按 scheme 注册文件系统 provider；核心（`vscode.workspace.fs`）只按 URI 路由读写，不感知资源在本地还是远端。
-- **执行位置由扩展种类决定**：UI Extensions 常驻本地，Workspace Extensions 运行在 workspace 所在机器（远端 VS Code Server）；命令调用自动路由到正确一侧。
-- **存储也用 URI**：`context.storageUri` / `globalStorageUri` 替代 `~/.vscode` 之类的固定路径。
-
-来源：`code.visualstudio.com/api/advanced-topics/remote-extensions`；`microsoft/vscode-remote-release#8764`。
-
-### 4.4 映射建议（提案，未实施）
-
-- **契约先行**：为"工作区/执行目录"引入 URI 形态的标识（如 `WorkspaceUri { scheme, authority, path }`，与 `SessionStoreLocator` 同族）：
-  - 本机：`file:///Users/…/project`
-  - 远端设备：`remote+ssh://build-host/srv/project`
-  - 云执行环境：`sandbox://worker-abc/workspace/project`
-- **执行环境解析归宿主**：URI 到具体设备/进程的解析属 Host/Deployment 装配；Agent 核心只见 URI 与相对路径（`workspace_id` + `cwd_relative_to_workspace` 已是身份锚点）。
-- **canonicalize 语义改造**：仅在同一 `scheme+authority` 内做路径规范化比较；跨环境用 `workspace_id` 重解析并对齐，不在本地直接 canonicalize 远端路径。
-- **设备间同步**：同步"身份 + 相对路径 + 内容"，绝对路径由各设备解析（当前同步协议以文件布局为中心，这是关键差异点）。
-- 渐进落点：1）契约类型与序列化先行；2）`host/workspace.rs::expect_directory` 与 `host/prepared.rs` 改造；3）`Session::cwd` 与子会话继承切换到 URI 语义；4）设备同步协议演进。
+- root session 按唯一 ID 查找和恢复，父子关系保持；路径匹配和持锁 owner 不决定会话身份。
+- 持久机器 env ID 提供数据库分区及列表 scope；同一路径在不同 env 中不混淆，显式 ID 查询不隐式限制为当前机器。
+- 移除 session sidecar 锁、dirty 恢复门槛及相关前端弹窗，不以新的分布式 owner/lease 替代。
+- 会话恢复与实际工具执行分开：历史恢复不要求目录可用，工具仍需明确可用环境，不偷偷在当前机器执行同名路径。
+- 权威目标见 [Session ID 恢复与机器环境分区](../../docs/design/session-id-environment.md)，迁移与验收见 [核心改动清单](2026-09-30-session-id-environment-core-change.md)。
 
 ## 五、用户等级表
 
@@ -144,7 +131,7 @@ VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri`
 
 | 等级 | 项 | 现状位置 | 处置 |
 | --- | --- | --- | --- |
-| **P2** | cwd / 多设备统一地址（URI 化） | 第四节 | 统一地址方案；大工程，按 P2 推进 |
+| **P2 / 核心改动** | Session ID 恢复、机器 env 分区、移除 session 文件锁与恢复弹窗 | 第四节与核心改动清单 | 已批准目标、待实施；不推进全面 URI 化 |
 
 P2 的实现方式与难度见 [实施可行性调研](2026-09-30-p2-filesystem-implementation-assessment.md)；调研不代表已实施。MCP 缓存与插件体系已移至暂缓项，不作为当前核心工作的前置条件。
 
@@ -202,5 +189,5 @@ P2 的实现方式与难度见 [实施可行性调研](2026-09-30-p2-filesystem-
 - 未核对 `peri-tui/src/sync` 协议全量字段（仅扫描 fs 触点与 staging 语义）
 - 未跑全库/E2E、Windows 原生执行或 120 秒 ignored 用例
 - P2 已开展源码级方案/难度调研，未做原型、端到端远端部署或工期实验；P3 Plugin MCP 尚未实施拆解
-- cwd / 统一地址（P2）仅到方向层面；未形成 spec 契约
+- Session ID 恢复与机器 env 分区已有获批目标设计及核心改动清单，运行时代码和契约测试尚未迁移
 - metrics → Langfuse 未做端到端上报验证（本地无 Langfuse 凭据，未观察 Langfuse 服务端落库；含指标归属到活跃 turn trace 的服务端表现）
