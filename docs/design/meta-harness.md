@@ -108,19 +108,27 @@ for (key, v) in meta_harness {
 `SECTION_IDS` / `MIDDLEWARE_NAMES` 为编译期常量：段落文件名清单 +
 装配面 middleware name 清单。
 
-### 2.2 加载器：`.peri/meta/`
+### 2.2 段落覆盖来源：workspace `peri-meta://`（原宿主加载器已删除）
 
-新模块 `peri-middlewares/src/meta_harness/`（与 `skills/`、`agents_md/`
-同构：加载逻辑在 middlewares，类型归契约层）：
+原 `peri-middlewares/src/meta_harness/` 加载器（`scan_harness_docs`）**已删除（W3b/J6）**：
+段落覆盖文档改由 builtin `workspace` 实例的 `peri-meta://workspace/{section_id}` 资源提供
+（provider 侧扫描，见 `mcp-packages/workspace/src/resources/meta.rs`；URI 形状与解析契约在
+`peri-acp-types/src/workspace_resources.rs`；宿主消费在
+`peri-middlewares/src/mcp/client.rs::read_builtin_workspace_meta`）：
 
-```rust
-/// 扫描 {cwd}/.peri/meta/*.md，返回 文件名(去 .md) → 全文
-// 已删除（W3b/J6）：段落覆盖改由 workspace `peri-meta://` 资源提供，宿主无 scanner。
-// 规则：
-//  - 仅扫描一级目录 *.md（不递归）；非 .md 文件忽略
-//  - 文件名即 key（"01_intro.md" → "01_intro"）
-//  - 读取失败（IO/权限）→ warn + 跳过该文件，不 fail 扫描
-```
+- **来源白名单（X7）**：只消费 host 绑定为真实 builtin `workspace` 实例的句柄
+  （`ConfigSource::Builtin { instance: "workspace" }` 且 `Connected`）；外部 origin 的同 scheme
+  资源一律拒绝并记录，判定依据是实例身份而非资源文本自称。
+- **关闭与失败（X8）**：覆盖不可得（实例关闭 / 文档缺失 / 读取失败）⇒ warn 并保持内置段落、
+  不阻塞会话创建、**不回落磁盘**；new 路径的读取失败按 J2 走发布前失败补偿，legacy 首次接纳
+  无执行环境 ⇒ 覆盖不可得（保持内置）。
+- **既有扫描语义**（今在 provider 侧）：仅一级目录 `{cwd}/.peri/meta/*.md`（不递归）；非 `.md`
+  文件忽略；文件 stem 即 section_id（`"01_intro.md"` → `"01_intro"`）；读取失败跳过该文件、
+  不 fail 扫描。
+- **排查指引（scanner 删除后）**：配置了 `"<section>": true` 而覆盖未生效时，依次检查
+  ① `.peri/meta/<section>.md` 是否在 workspace 根下且可读；② `workspace` 实例是否被关闭
+  （`"WorkspaceMiddleware": false` / 实例 `disabled` / 进程级开关）——关闭即无覆盖来源；
+  ③ 进程日志中 provider 的缺失/读取失败 warn 与宿主身份过滤记录。
 
 ### 2.3 冻结状态：MetaHarnessState
 
@@ -136,8 +144,8 @@ pub struct MetaHarnessState {
 
 - **构建时点**：`build_frozen_data` 冻结期、渲染 system prompt 之前——一次
   读取 settings +（J6 后）workspace `peri-meta://` 资源读取（宿主 scanner 已删除）。
-- **文档存在性校验在此处**：开关 `true` 但扫描无对应文件 → warn + 忽略该
-  条目（保持内置段落），不二次读盘。
+- **文档存在性校验在此处**：开关 `true` 但资源面无对应文档 → warn + 忽略该
+  条目（保持内置段落），不二次读取、也不回落磁盘。
 - **挂载要求**：`FrozenContext` 单份存储 `meta_harness`
   字段，`FrozenSessionData` 经委托字段提供 accessor，`from_frozen_parts`
   不加重复参数，避免双事实源。

@@ -41,6 +41,37 @@ pub fn annotate_mcp_content(meta: &SkillMetadata, content: &str) -> String {
     }
 }
 
+// ─── SkillTool 失败文案（单一派生点）─────────────────────────────────────────
+//
+// `SkillTool` 执行失败串同时是**预载缺口回执**的文案（`subagent::skill_preload`
+// 注入假 `SkillTool` 调用 + 失败回执，模型无法也不应区分二者）：四处 find /
+// activation 失败必须与工具面逐字一致，故在唯一位置构造。
+
+/// 装配缺口：MCP skill registry 未注入。
+pub(crate) fn skill_registry_unwired_message(name: &str) -> String {
+    format!("SkillTool: MCP skill registry is not wired; cannot activate '{name}'")
+}
+
+/// 名称未命中（含别名/全名/裸名全部形态）。
+pub(crate) fn skill_not_found_message(name: &str) -> String {
+    format!("Skill '{name}' not found. Use DiscoverSkillsTool to see available skills.")
+}
+
+/// 跨 origin 同名：给出候选清单（`candidate_list` 同源排序），要求完整名消歧。
+pub(crate) fn skill_ambiguous_message(name: &str, candidates: &[SkillMetadata]) -> String {
+    let list = crate::mcp::skill_discovery::candidate_list(candidates);
+    format!(
+        "Skill '{name}' is ambiguous across {} origins: {list}. \
+         Use the full name ('<server>:<skill>' or 'mcp__<server>__<skill>') to disambiguate.",
+        candidates.len()
+    )
+}
+
+/// 命中但激活失败（digest/frontmatter/内容绑定校验不通过）。
+pub(crate) fn skill_activation_failed_message(name: &str, reason: &str) -> String {
+    format!("SkillTool: cannot activate '{name}' ({reason})")
+}
+
 /// SkillsMiddleware — 渐进式 Skills 摘要注入（J5：零文件系统依赖）。
 ///
 /// 数据源只有一个：会话级 [`McpSkillRegistry`]（workspace 实例承担本地三根 /

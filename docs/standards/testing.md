@@ -317,6 +317,15 @@ cargo test -p peri-theme
 # 单测过滤
 cargo test -p <crate> --lib -- <test_name>
 
+# 资源面重点路由（workspace resources W1/W4b/W5；只列实际可执行入口，见各 crate 索引）
+cargo test -p peri-acp-types --lib -- workspace_resources
+cargo test -p peri-mcp-workspace --lib -- resources
+cargo test -p peri-middlewares --lib -- mcp::skill_activation
+cargo test -p peri-middlewares --lib -- mcp::skill_discovery::core_face_tests
+cargo test -p peri-middlewares --lib -- mcp::agent_registry
+cargo test -p peri-acp --lib -- host::requests::tests::skill_resources
+cargo test -p peri-acp --lib -- host::requests::tests::meta_resources
+
 # 集成测试目标（crate 根 tests/，只访问 crate 的 pub API）
 cargo test -p <crate> --test <target>
 

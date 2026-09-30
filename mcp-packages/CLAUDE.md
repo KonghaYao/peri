@@ -26,7 +26,7 @@ Host wire, pool, bridge, readiness, and shutdown tests belong in `peri-middlewar
 | Cron scheduling and tools/handler | `cron/src/{scheduler,tools,server}.rs` |
 | LSP tool and result formatting | `lsp/src/{tool,formatters,server}.rs` |
 | Workspace handler and session input | `workspace/src/{workspace,input}.rs` |
-| Workspace resource provider (skills / agents / project instructions), resource input, URI/`_meta` contract | `workspace/src/resources/`; contract types in `peri-acp-types/src/workspace_resources.rs` (skills extension key: `peri-acp-types/src/skills.rs::SKILLS_EXTENSION_ID`) |
+| Workspace resource provider (skills / agents / project instructions), resource input, URI/`_meta` contract | `workspace/src/resources/`; contract types in `peri-acp-types/src/workspace_resources.rs` (skills extension key: `peri-acp-types/src/skills.rs::SKILLS_EXTENSION_ID`). Owns the local skill reads plus the `skills/list` / `skills/get` manifest and per-file digest (J5); the package registers **no skill tools** — `SkillTool` / `DiscoverSkillsTool` stay in the host and aggregate across origins (J3) |
 | Workspace filesystem behavior | `workspace/src/filesystem/` |
 | Bash execution and description | `workspace/src/terminal.rs`, `workspace/src/descriptions/bash.md` |
 | Builtin selection, host context, MCP pool/client/transport, ACP adapter, readiness, bridge, shutdown | `peri-middlewares/src/mcp/` and `peri-middlewares/src/assembly.rs` |

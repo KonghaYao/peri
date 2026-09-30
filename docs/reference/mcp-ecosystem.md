@@ -534,14 +534,14 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 
 ### 7.4 peri 落点：统一 discover 工具 + 远端技能注入（已落地 2026-08-13）
 
-- **本地技能**：项目 `.claude/skills/` 目录（`SKILL.md` 格式）+ `DiscoverSkillsTool` / `SkillTool` 加载；`skills-lock.json` 管理版本。
+- **本地技能**：项目 `.claude/skills/` 目录（`SKILL.md` 格式）等本地来源由 builtin `workspace` 实例的**资源面**提供（`resources/list|read`、`skills/list|get` + digest/frontmatter 校验）；`DiscoverSkillsTool` / `SkillTool` **保留在宿主**跨来源聚合，只消费 MCP 来源、自身零文件系统读取（W4b/J3/J5），本地技能与远端技能走同一条读取与校验规则。
 - **远端技能发现入口约定**：MCP server 以 `skill://` 资源暴露技能（`resources/list` + `resources/read` 读取，`skill://<name>/SKILL.md` 即一个技能），依赖声明 `capabilities.resources`——零协议扩展成本。
 - **统一 discover 工具（DiscoverMCP）**：peri 提供**唯一的 MCP 域只读查询工具**（deferred 面、namespace `meta`，`peri-middlewares/src/mcp/discover_tool.rs`）：`search`（全域子串匹配 server / tool / resource / skill，工具类结果带完整 JSON Schema 供 `ExecuteExtraTool` 衔接）/ `list`（按 server + domain 清单）/ `detail`（server 全量状态）。**不代理任何执行**——MCP 工具执行仍只走 `ExecuteExtraTool`。错误契约为轻量 JSON-RPC（`-32601` 未知 method / `-32602` 参数错 / `-32000` server 不可用 / `0` 空结果）。
-- **远端技能注入（McpSkillRegistry，session 级）**：连接成功后异步发现——过滤 `skill://` 前缀 + `SKILL.md` 条目 → 并发 `resources/read` → 解析 frontmatter → 注册为 `mcp__<server>__<skill>`；断连移除、重连重扫。**分源合并**：`cached_skills` = 本地扫描 + 远端注册表（本地优先去重），远端技能不进 prompt contribution / frozen summary / system-reminder（被动可见）。
+- **远端技能注入（McpSkillRegistry，session 级）**：连接成功后异步发现——过滤 `skill://` 前缀 + `SKILL.md` 条目 → 并发 `resources/read` → 解析 frontmatter → 注册为 `mcp__<server>__<skill>`；断连移除、重连重扫。**分源合并**：`cached_skills` = `McpSkillRegistry` 当前投影（本地技能经 builtin `workspace` origin 的 `skills/list` 进入，宿主本地扫描已随 W4b 删除；同名按 origin 消歧），**系统来源技能进冻结摘要（J1/W3c，W4b 交付）**，外部远端技能仍不进 prompt contribution / frozen summary / system-reminder（被动可见）。
 - **命令列表注入**：MCP 技能进用户 commands 列表（`mcp__<server>__<skill>`，TUI 以 `McpSkill` 分类 + 约定色标记）；用户触发后 SKILL.md 内容注入当前会话，**带来源标注**（server 名 + uri，提示注入防御）。
 - **安全分层**：来源标记（`source: mcp`）贯穿缓存 / `DiscoverSkillsTool` 结果 / 注入标注；权限类 frontmatter 对 MCP 来源默认不生效；内容仅存内存缓存不写盘；加载零 RPC。
 - **session 边界（2026-08-13 定案）**：MCP 连接池不下沉 session（维持 app 级共享）；新增派生数据（远端注册表、发现任务、commands 数据源）**严格 session 级**——注册表挂 session middleware 实例、发现由首轮 `before_agent` 投影连接池触发（持 session 取消令牌）、commands 走 per-session `available_commands_update` 通知，不新增全局通道。
-- **阶段二（未做）**：SEP-2640 `skills/list` 原语、digest 校验、`list_changed` 订阅热更新（随 SEP-2640 正式化）。
+- **阶段二进展**：SEP-2640 `skills/list`（+ `skills/get`）原语与 digest 校验**已交付**（W1/W4b：provider 的 `skills/list|get` custom requests + `resources/read` 的 digest/frontmatter 校验）；仍未做的是 `list_changed` 订阅热更新（随 SEP-2640 正式化）。
 
 **规范出处**：
 

@@ -89,7 +89,7 @@ flowchart LR
     end
 
     subgraph ADAPTERS[仍保留在 Agent / Runtime 的 Middleware]
-        CONTEXT[DefaultSystemPrompt<br/>Lang / AgentsMd / AgentDefine]
+        CONTEXT[DefaultSystemPrompt<br/>Lang / AgentsMd / AgentDefine（已删除，W5）]
         WORKSPACE[GitAttribution<br/>宿主 hook / notification]
         EXT[Plugin<br/>Skills / SkillPreload context only]
         MCP_MW[McpMiddleware<br/>统一 MCP 对接核心<br/>1R 等待 system_mcp ready]
@@ -164,7 +164,7 @@ flowchart LR
 
 | 能力 | 目标 MCP | 说明 |
 | --- | --- | --- |
-| 文件读取、目录扫描、文件写入 | Workspace MCP | `AgentsMd`、`AgentDefine`、Filesystem、Terminal、GitWatch 等文件/进程/工作区观察能力的 v4 目标归入 Workspace MCP；每个 MCP 实例拥有独立的 capability root 和状态。 |
+| 文件读取、目录扫描、文件写入 | Workspace MCP | `AgentsMd`、`AgentDefine`（现经 `agent://` 资源，W5 起无 middleware 槽位）、Filesystem、Terminal、GitWatch 等文件/进程/工作区观察能力的 v4 目标归入 Workspace MCP；每个 MCP 实例拥有独立的 capability root 和状态。 |
 | Skills 工具 | Workspace MCP（**仅来源**） | **已修订（2026-09-29，J3 + J5）**：`SkillTool` / `DiscoverSkillsTool` **保留在宿主**（`peri-middlewares`），跨多个 MCP server 聚合与把控——不下放到 Workspace MCP 工具包，包内不注册同名工具。下沉的只是 **skill 来源**：本地三根 / 插件根 / builtin 静态资产由 Workspace MCP 的资源面（`skills/list` + `resources/read`）提供，宿主技能文件系统读取点为零；`SkillsMiddleware` / `SkillPreloadMiddleware` 只做 registry 投影、摘要与预载语义。 |
 | 本地命令与 Git 查询 | Workspace MCP | `FilesystemMiddleware`、`TerminalMiddleware`、`GitWatchMiddleware` 的工具/工作区观察能力目标归入 Workspace MCP；`GitAttribution` 只复用 Workspace MCP 的查询能力，hook、notification 和归属注入仍由宿主持有。 |
 | Default system prompt | 部分复用 Workspace MCP | 当前基础段通过 `include_str!` 在编译期嵌入，不能简单改成 MCP `Read`；只有运行时 persona、language、项目指引等文件读取适合调用 Workspace MCP，prompt 合并、优先级、冻结和缓存仍属于 middleware/Agent。 |
@@ -186,8 +186,8 @@ flowchart LR
 | 1 | `DefaultSystemPromptMiddleware` | `peri-middlewares/src/default_system_prompt/mod.rs` | 部分下放 | 文件载体可由 Workspace MCP 读取，但 prompt contribution、合并、优先级、冻结和缓存仍由 Agent 持有。 |
 | 2 | `LangMiddleware` | `peri-middlewares/src/default_system_prompt/mod.rs` | 宿主保留 | 语言段落属于 Agent prompt 装配语义，不应下放为 Workspace MCP 工具。 |
 | 3 | `ImageMiddleware` | `peri-middlewares/src/middleware/image/mod.rs` | 宿主保留 | 图片输入解析直接依赖 Agent message/content 类型，属于消息处理而非 Workspace MCP 能力。 |
-| 4 | `AgentsMdMiddleware` | `peri-middlewares/src/agents_md/mod.rs` | 部分下放 | 文件读取可由 Workspace MCP 完成，但文档优先级、session 冻结和 prompt contribution 仍由 Agent 持有。 |
-| 5 | `AgentDefineMiddleware` | `peri-middlewares/src/agent_define/mod.rs` | 部分下放 | 定义文件可由 Workspace MCP 读取，但 Agent 定义解析和 SubAgent/Plugin 语义仍由宿主持有。 |
+| 4 | `AgentsMdMiddleware` | `peri-middlewares/src/agents_md/mod.rs` | **已落地（2026-09-29，W5）**：文件读取归 Workspace MCP | 正文由 builtin `workspace` 实例的 `peri-instruction://workspace/{main\|local}` 资源在会话内容准入期（P4）读取并随冻结数据注入（provider 负责候选优先级、`@import` 展开与越界拒绝）；middleware 是纯 adapter（无 `std::fs`），只持有与注入贡献文本；`excludes` 迁 provider 输入 `instruction_excludes`；不可得时**不回落磁盘**（X4）。 |
+| 5 | `AgentDefineMiddleware` | `peri-middlewares/src/agent_define/mod.rs`（已删除） | **已删除（2026-09-29，W5）** | 模块与 `ChainSlot::AgentDefine` 一并删除（蓝本槽位 21→20）；agent 定义（builtin / project / plugin 三来源）改由 `McpAgentRegistry` 的 `agent://` 资源按会话可见性与关闭集过滤后加载（宿主持有解析、批准与 SubAgent/Plugin 语义），本地扫盘路径 `scan_agents*` 已删除。 |
 | 6 | `AtMentionMiddleware` | `peri-middlewares/src/at_mention/mod.rs` | 宿主保留 | `@mention` 输入转换依赖 Agent 消息内容和工具上下文，不是 Workspace MCP 工具。 |
 | 7 | `GitWatchMiddleware` | `mcp-packages/workspace/src/git_watch.rs` | **已下放（v4 wave 4）** → Workspace MCP | Git ref 采样与变化判定进入 Workspace MCP，经 `workspace://git/ref` 资源 + MCP 2026-07-28 订阅（`notifications/resources/updated`）回传会话；Agent 侧 middleware 已删除，提醒映射内置在宿主订阅消费侧（`peri-middlewares/src/mcp/client/subscription.rs`）。 |
 | 8 | `GitAttributionMiddleware` | `peri-middlewares/src/attribution/mod.rs` | 部分下放 | Git/file 查询由 Workspace MCP 提供，但 before/after tool hook 和归属注入仍由 Agent 持有。 |
@@ -203,8 +203,8 @@ flowchart LR
 | 18 | `HumanInTheLoopMiddleware` | `peri-middlewares/src/hitl/mod.rs` | 独立 Middleware | Question broker、工具注册、取消和 ACP/TUI 交互通道属于宿主交互生命周期，不下放到 MCP。 |
 | 19 | `PermissionMiddleware` | `peri-middlewares/src/permission/mod.rs` | 独立 Middleware | Permission mode、effective tool name、ToolSearch、Hook 和 broker 构成宿主安全边界，不下放到 MCP。 |
 | 20 | `HookMiddleware` | `peri-middlewares/src/hooks/middleware.rs` | 独立 Middleware | Claude Plugin Hook 暂时继续作为 Middleware 执行，不定义为 MCP；hook loader、executor、Permission、Plugin、Agent event/state 和 command 执行端口属于宿主。 |
-| 21 | `SkillsMiddleware` | `peri-middlewares/src/skills/mod.rs` | 部分下放 | Skill 文件发现和读取进入 Workspace MCP，但 skill roots、Plugin 来源、冻结摘要和 MCP registry 仍由宿主持有。 |
-| 22 | `SkillPreloadMiddleware` | `peri-middlewares/src/subagent/skill_preload.rs` | 部分下放 | Skill 文件读取进入 Workspace MCP，但 SubAgent 输入、预加载顺序和取消生命周期仍由宿主持有。 |
+| 21 | `SkillsMiddleware` | `peri-middlewares/src/skills/mod.rs` | **已落地（2026-09-29，W4b）**：来源下放 Workspace MCP | 技能发现与正文读取全部归 provider（`resources/list\|read`、`skills/list\|get` + digest/frontmatter 校验）；宿主**零技能文件系统读取**（`skills/` 无 `std::fs`），宿主只 `resolve_skill_roots` 构造 provider 输入，`before_agent` 只做 `McpSkillRegistry` 投影；冻结摘要经 P4 内容准入的 `read_workspace_skill_catalog` 读取，`core:{skill}` 命令改由发现管线投影（F6）。 |
+| 22 | `SkillPreloadMiddleware` | `peri-middlewares/src/subagent/skill_preload.rs` | **已落地（2026-09-29，W4b/W6）**：来源下放 Workspace MCP | 只在会话级 `McpSkillRegistry` 中按名查找并注入已激活正文；未命中 ⇒ 缺口，**不回落磁盘**（J5）；**W6**：缺口按路径分流——宿主显式名单路径（子代理 / workflow agent 声明的 `skills`）注入假 `SkillTool` 调用 + `is_error` 回执（文案与 SkillTool 失败串同源，单一派生点 `skills/mod.rs`），主 Agent 路径（启发式 `/token` 提取）缺口零注入；SubAgent 输入、预加载顺序和取消生命周期仍由宿主持有。 |
 | 23 | `PluginMiddleware` | `peri-middlewares/src/plugin/middleware.rs` | 部分下放 | Plugin manifest 文件可由 Workspace MCP 读取，但来源合并、命名空间、hooks、agents、commands 和生命周期仍由宿主持有。 |
 | 24 | `ToolSearchMiddleware` | `peri-middlewares/src/tool_search/middleware.rs` | 独立 Middleware | deferred tool、MCP、Permission、PTC 和 SubAgent 的工具目录属于 Agent 工具编排，不下放到 MCP。 |
 | 25 | `McpMiddleware` | `peri-middlewares/src/mcp/middleware.rs` | 独立 Middleware | 它是统一 MCP 对接核心，并在 1R 阶段等待 `system_mcp` 完成 ready；超时必须报错并阻止 react loop 启动。 |
@@ -220,7 +220,7 @@ flowchart LR
 - `CronScheduler`：现位于 `mcp-packages/cron/src/scheduler.rs`；宿主消费 `CronSchedulerPort` 并负责该代 tick task 的监督。
 - `LspServerPool`：由 `peri-mcp-lsp` 提供，已成为 LSP MCP 内部实现；host 装配通过公开 seam 注入同一 `Arc`，Agent/Runtime 只经 MCP 请求与文件变更同步端口接入。
 - `McpClientPool`、`McpTaskOwner`、`DynamicMcpRegistry`：`peri-middlewares/src/mcp/`，由 `McpMiddleware` 和 `DynamicMcpMiddleware` 使用。
-- `SkillTool`、`DiscoverSkillsTool`、`SubAgentTool`、各类 filesystem/web/terminal 工具：由对应 middleware 的 `collect_tools` 提供，不是单独的 middleware。
+- `SkillTool`、`DiscoverSkillsTool`、`SubAgentTool`、各类 filesystem/web/terminal 工具：由对应 middleware 的 `collect_tools` 提供，不是单独的 middleware。**两个技能工具保留在宿主**（J3，workspace 不注册同名工具）；W4b 起只消费 MCP 来源（`resources/read` + digest/frontmatter 校验，本地技能同规则），宿主不再有本地技能读取通路。
 - `ProductionChainAssembler`：`peri-middlewares/src/assembly.rs`，是所有 middleware 的组合根，不是 middleware；迁移时应保留为装配层。
 
 ## v4-part-1 验收契约

@@ -8,7 +8,9 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 `meta_harness`）同时承载两项能力，bool 值决定动作：
 
 - `true` key = **段落 ID** → 覆盖系统提示词段落（用 `.peri/meta/<ID>.md`
-  全文替换内置段落）；
+  全文替换内置段落；宿主经 workspace 实例的 `peri-meta://workspace/<ID>`
+  资源读取——workspace 关闭、文档缺失或读取失败时 warn 并保持内置段落，
+  不回落磁盘）；
 - `false` key = **middleware 名** → 装配期关闭该 middleware（卸载其工具与
   钩子，无需 md 文件）。
 
@@ -29,7 +31,7 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 ```
 
 - `"01_intro": true`：用 `.peri/meta/01_intro.md` 全文替换内置的 01 段落
-  （角色定义）；
+  （角色定义）；读取经 `peri-meta://workspace/01_intro` 资源（见上）；
 - `"05_using_tools": true`：同理替换工具使用纪律段落；
 - `"WebMiddleware": false`：关闭 builtin `web` 实例（`WebSearch` /
   `WebFetch` 从 direct tools、deferred 目录与检索、subagent
@@ -58,7 +60,7 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 `13_skills`、`15_channel`、`persona`、`language`
 
 - `persona` / `language` 是渲染生成段，可经 `.peri/meta/persona.md` /
-  `.peri/meta/language.md` 覆盖；
+  `.peri/meta/language.md` 覆盖（同样经 workspace 资源面读取）；
 - `15_channel` 无持有 middleware（gate 恒关闭），覆盖也仅在能力装配后
   生效；
 - 覆盖全文**整段替换**内置段落，段落渲染顺序（位置 + 段内序号）不变；
@@ -73,7 +75,7 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
    `peri-acp-types/src/meta_harness.rs::MIDDLEWARE_NAMES` 为准。常用项包括：
 
 `DefaultSystemPromptMiddleware`、`LangMiddleware`、`AgentsMdMiddleware`、
-`AgentDefineMiddleware`、`PluginMiddleware`、`SkillsMiddleware`、
+`PluginMiddleware`、`SkillsMiddleware`、
 `SkillPreloadMiddleware`、`AtMentionMiddleware`、`ImageMiddleware`、
 `GitAttributionMiddleware`、
 `TodoMiddleware`、`HookMiddleware`、

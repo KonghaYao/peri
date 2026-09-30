@@ -118,21 +118,14 @@ impl BaseTool for SkillTool {
         // origin 都是 MCP 实例（builtin `workspace` 承担本地三根 / 插件 / 内置
         // 资产），未装配 registry 时显式报装配缺口，不回落任何本地来源。
         let Some(registry) = self.mcp_registry.as_ref() else {
-            return Err(format!(
-                "SkillTool: MCP skill registry is not wired; cannot activate '{}'",
-                skill.name
-            )
-            .into());
+            return Err(super::skill_registry_unwired_message(&skill.name).into());
         };
         match crate::mcp::skill_activation::activate(registry, &skill, None).await {
             // 内容带来源标注（与 preload / 命令面同源）。
             Ok(content) => Ok(super::annotate_mcp_content(&skill, &content)),
-            Err(error) => Err(format!(
-                "SkillTool: cannot activate '{}' ({})",
-                skill.name,
-                error.reason()
-            )
-            .into()),
+            Err(error) => {
+                Err(super::skill_activation_failed_message(&skill.name, error.reason()).into())
+            }
         }
     }
 }
@@ -269,13 +262,7 @@ fn find_skill<'a>(
             1 => Ok(Some(hits.remove(0))),
             _ => {
                 let owned: Vec<SkillMetadata> = hits.into_iter().cloned().collect();
-                let list = crate::mcp::skill_discovery::candidate_list(&owned);
-                Err(format!(
-                    "Skill '{skill_name}' is ambiguous across {} origins: {list}. \
-                     Use the full name ('<server>:<skill>' or 'mcp__<server>__<skill>') to disambiguate.",
-                    owned.len()
-                )
-                .into())
+                Err(super::skill_ambiguous_message(skill_name, &owned).into())
             }
         }
     }
@@ -360,10 +347,7 @@ fn find_skill<'a>(
         .collect();
     match resolve(skill_name, bare)? {
         Some(skill) => Ok(skill),
-        None => Err(format!(
-            "Skill '{skill_name}' not found. Use DiscoverSkillsTool to see available skills."
-        )
-        .into()),
+        None => Err(super::skill_not_found_message(skill_name).into()),
     }
 }
 

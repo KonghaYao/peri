@@ -21,29 +21,38 @@ use peri_acp_types::{
     skills::{SkillMetadata, SkillOrigin, SkillSource},
 };
 
-/// seed registry：Started + Completed 造 Discovered 条目（模拟发现任务完成态）。
-fn seed_registry_with_skill(server: &str, skill: &str) -> Arc<McpSkillRegistry> {
+/// seed registry：同一 server 下多个技能（Started + Completed 造 Discovered 条目，
+/// 模拟发现任务完成态）。条目无 resources 绑定 ⇒ activation 走 legacy 正文路径。
+fn seed_registry_with_skills(server: &str, skills: &[&str]) -> Arc<McpSkillRegistry> {
     let reg = Arc::new(McpSkillRegistry::new());
     let handle: HandleToken = Arc::new(1u32);
-    let meta = SkillMetadata {
-        name: mcp_skill_name(server, skill),
-        aliases: Vec::new(),
-        description: format!("MCP skill {skill}"),
-        path: std::path::PathBuf::new(),
-        source: SkillSource::Mcp,
-        plugin_name: None,
-        origin: Some(SkillOrigin::Mcp {
-            server: server.to_string(),
-            uri: format!("skill://{server}/{skill}/SKILL.md"),
-        }),
-        content: Some(format!("# Hello\n\nBody of {skill}.\n")),
-        // 测试 fixture：无 resources 绑定
-        resources: Vec::new(),
-        frontmatter: None,
-    };
+    let metas = skills
+        .iter()
+        .map(|skill| SkillMetadata {
+            name: mcp_skill_name(server, skill),
+            aliases: Vec::new(),
+            description: format!("MCP skill {skill}"),
+            path: std::path::PathBuf::new(),
+            source: SkillSource::Mcp,
+            plugin_name: None,
+            origin: Some(SkillOrigin::Mcp {
+                server: server.to_string(),
+                uri: format!("skill://{server}/{skill}/SKILL.md"),
+            }),
+            content: Some(format!("# Hello\n\nBody of {skill}.\n")),
+            // 测试 fixture：无 resources 绑定
+            resources: Vec::new(),
+            frontmatter: None,
+        })
+        .collect();
     reg.mark_discovery_started(server, handle.clone());
-    reg.mark_discovery_completed(server, handle, vec![meta]);
+    reg.mark_discovery_completed(server, handle, metas);
     reg
+}
+
+/// seed registry：单个技能（见 [`seed_registry_with_skills`]）。
+fn seed_registry_with_skill(server: &str, skill: &str) -> Arc<McpSkillRegistry> {
+    seed_registry_with_skills(server, &[skill])
 }
 
 fn middleware(reg: Arc<McpSkillRegistry>) -> SkillPreloadMiddleware {
@@ -322,7 +331,7 @@ async fn test_preload_ambiguous_origin_rejects_injection() {
     );
 }
 
-/// SubAgent 路径（显式 `skill_names`）：与主链同一条 registry 查找路径。
+/// 宿主显式名单路径（显式 `skill_names`）：与主链同一条 registry 查找路径。
 #[tokio::test]
 async fn test_explicit_skill_names_path_uses_registry() {
     let dir = tempdir().unwrap();
@@ -337,4 +346,207 @@ async fn test_explicit_skill_names_path_uses_registry() {
     assert!(state.messages()[2]
         .content()
         .contains("Body of brainstorming."));
+}
+
+// ─── 宿主显式名单路径的缺口注入（W6：子代理 / workflow）───────────────────
+
+/// Tool 消息回执 `(tool_call_id, 正文, is_error)`（按消息顺序）。
+fn tool_receipts(state: &AgentState) -> Vec<(String, String, bool)> {
+    state
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            BaseMessage::Tool {
+                tool_call_id,
+                is_error,
+                ..
+            } => Some((tool_call_id.clone(), message.content(), *is_error)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 显式名单路径（子代理 / workflow）+ registry 未装配：每个声明名各一对
+/// ToolUse/tool_error（按声明顺序）。
+#[tokio::test]
+async fn test_explicit_list_path_unwired_registry_injects_gap_receipts() {
+    let dir = tempdir().unwrap();
+    let mw = SkillPreloadMiddleware::new(vec!["alpha".to_string(), "beta".to_string()]);
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("普通消息（无 token）"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert_eq!(state.messages().len(), 4, "1 Human + Ai + 2 缺口回执");
+    let calls = state.messages()[1].tool_calls();
+    let names: Vec<_> = calls
+        .iter()
+        .map(|call| call.arguments["skill_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["alpha", "beta"], "ToolUse 顺序 = 声明顺序");
+
+    let receipts = tool_receipts(&state);
+    assert_eq!(receipts.len(), 2);
+    let call_ids: Vec<_> = calls.iter().map(|call| call.id.clone()).collect();
+    let receipt_ids: Vec<_> = receipts.iter().map(|(id, _, _)| id.clone()).collect();
+    assert_eq!(receipt_ids, call_ids, "ToolUse 与回执一一配对");
+    for (_, text, is_error) in &receipts {
+        assert!(*is_error, "缺口回执必须 is_error = true");
+        assert!(
+            text.contains("MCP skill registry is not wired"),
+            "复用 SkillTool 装配缺口产品串，实际: {text}"
+        );
+    }
+    assert!(receipts[0].1.contains("cannot activate 'alpha'"));
+    assert!(receipts[1].1.contains("cannot activate 'beta'"));
+}
+
+/// 显式名单路径 + registry 未命中：tool_error 携带 not found 产品串。
+#[tokio::test]
+async fn test_explicit_list_path_miss_injects_not_found_receipt() {
+    let dir = tempdir().unwrap();
+    let mw = SkillPreloadMiddleware::new(vec!["missing-skill-x".to_string()])
+        .with_mcp_registry(Some(seed_registry_with_skill("demo", "hello")));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("普通消息（无 token）"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert_eq!(state.messages().len(), 3, "1 Human + Ai + 1 缺口回执");
+    let receipts = tool_receipts(&state);
+    assert_eq!(receipts.len(), 1);
+    assert!(receipts[0].2, "未命中回执必须 is_error = true");
+    assert!(
+        receipts[0].1.contains(
+            "Skill 'missing-skill-x' not found. Use DiscoverSkillsTool to see available skills."
+        ),
+        "复用 SkillTool 未命中产品串，实际: {}",
+        receipts[0].1
+    );
+}
+
+/// 显式名单路径 + 跨 origin 歧义：回执与 `SkillTool` 歧义文案同构（含候选清单）。
+#[tokio::test]
+async fn test_explicit_list_path_ambiguous_receipt_lists_candidates() {
+    let dir = tempdir().unwrap();
+    let reg = Arc::new(McpSkillRegistry::new());
+    for server in ["a:srv", "b:srv"] {
+        let handle: HandleToken = Arc::new(1u32);
+        let meta = SkillMetadata {
+            name: mcp_skill_name(server, "beta"),
+            aliases: Vec::new(),
+            description: "Beta skill".to_string(),
+            path: std::path::PathBuf::new(),
+            source: SkillSource::Mcp,
+            plugin_name: None,
+            origin: Some(SkillOrigin::Mcp {
+                server: server.to_string(),
+                uri: format!("skill://{server}/beta/SKILL.md"),
+            }),
+            content: Some("# Beta\n\nBody\n".to_string()),
+            resources: Vec::new(),
+            frontmatter: None,
+        };
+        reg.mark_discovery_started(server, handle.clone());
+        reg.mark_discovery_completed(server, handle, vec![meta]);
+    }
+    let mw = SkillPreloadMiddleware::new(vec!["beta".to_string()]).with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("普通消息（无 token）"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert_eq!(state.messages().len(), 3, "歧义 ⇒ 缺口回执，不注入任何正文");
+    let receipts = tool_receipts(&state);
+    assert_eq!(receipts.len(), 1);
+    assert!(receipts[0].2, "歧义回执必须 is_error = true");
+    let text = &receipts[0].1;
+    assert!(
+        text.contains("is ambiguous across 2 origins"),
+        "实际: {text}"
+    );
+    assert!(
+        text.contains("a:srv:beta") && text.contains("b:srv:beta"),
+        "实际: {text}"
+    );
+    assert!(text.contains("disambiguate"), "实际: {text}");
+}
+
+/// 显式名单路径命中与缺口混合：顺序 = 声明顺序，配对与 is_error 分类正确。
+#[tokio::test]
+async fn test_explicit_list_path_mixed_hits_and_gaps_keep_declaration_order() {
+    let dir = tempdir().unwrap();
+    let mw = SkillPreloadMiddleware::new(vec![
+        "beta".to_string(),
+        "missing-x".to_string(),
+        "alpha".to_string(),
+    ])
+    .with_mcp_registry(Some(seed_registry_with_skills("demo", &["alpha", "beta"])));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("普通消息（无 token）"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert_eq!(
+        state.messages().len(),
+        5,
+        "1 Human + Ai + 3 结果（命中/缺口/命中）"
+    );
+    let calls = state.messages()[1].tool_calls();
+    let names: Vec<_> = calls
+        .iter()
+        .map(|call| call.arguments["skill_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["beta", "missing-x", "alpha"], "顺序 = 声明顺序");
+
+    let receipts = tool_receipts(&state);
+    let call_ids: Vec<_> = calls.iter().map(|call| call.id.clone()).collect();
+    let receipt_ids: Vec<_> = receipts.iter().map(|(id, _, _)| id.clone()).collect();
+    assert_eq!(receipt_ids, call_ids, "ToolUse 与结果一一配对");
+    let errors: Vec<_> = receipts.iter().map(|(_, _, is_error)| *is_error).collect();
+    assert_eq!(errors, vec![false, true, false], "仅缺口项 is_error = true");
+    assert!(receipts[0].1.contains("Body of beta."));
+    assert!(receipts[1].1.contains("'missing-x' not found"));
+    assert!(receipts[2].1.contains("Body of alpha."));
+}
+
+/// 显式名单路径 + activation 失败（条目无内容绑定）：回执携带原因文本。
+#[tokio::test]
+async fn test_explicit_list_path_activation_failure_receipt_carries_reason() {
+    let dir = tempdir().unwrap();
+    let reg = Arc::new(McpSkillRegistry::new());
+    let handle: HandleToken = Arc::new(1u32);
+    let meta = SkillMetadata {
+        name: mcp_skill_name("demo", "detached"),
+        aliases: Vec::new(),
+        description: "Detached skill".to_string(),
+        path: std::path::PathBuf::new(),
+        source: SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(SkillOrigin::Mcp {
+            server: "demo".to_string(),
+            uri: "skill://demo/detached/SKILL.md".to_string(),
+        }),
+        // 无正文 = 无内容绑定 ⇒ activation 失败（MissingBinding），且不回落任何来源
+        content: None,
+        resources: Vec::new(),
+        frontmatter: None,
+    };
+    reg.mark_discovery_started("demo", handle.clone());
+    reg.mark_discovery_completed("demo", handle, vec![meta]);
+    let mw = SkillPreloadMiddleware::new(vec!["detached".to_string()]).with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("普通消息（无 token）"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert_eq!(state.messages().len(), 3, "激活失败 ⇒ 缺口回执，不注入正文");
+    let receipts = tool_receipts(&state);
+    assert_eq!(receipts.len(), 1);
+    assert!(receipts[0].2, "激活失败回执必须 is_error = true");
+    // 回执正文 = `SkillTool` activation 失败产品串（`crate::skills` 单一派生点）。
+    assert_eq!(
+        receipts[0].1,
+        "SkillTool: cannot activate 'detached' (skill entry has no content binding)"
+    );
 }

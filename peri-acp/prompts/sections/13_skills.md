@@ -30,4 +30,4 @@ Many skills go unused because the user does not know they exist. When the user's
 
 ## Skill discovery
 
-Skill roots are resolved by the provider in priority order (first match wins):
+Skill roots are resolved by the provider in priority order (first match wins); the host no longer reads skill files from disk.

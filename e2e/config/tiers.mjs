@@ -22,6 +22,7 @@ export const TIERS = {
       "tests/scenarios/workspace-no-git.test.ts",
       "tests/scenarios/workspace-slow-git.test.ts",
       "tests/scenarios/workspace-directory-moved.test.ts",
+      "tests/scenarios/workspace-mcp-resources.test.ts",
       "tests/smoke/viewport-40x8.test.ts",
       "tests/panels/plugin-uninstall-no-freeze.test.ts",
       "tests/tool-cards/first-tool-stuck-running.test.ts",
