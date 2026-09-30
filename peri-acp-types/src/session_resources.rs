@@ -521,6 +521,11 @@ pub trait ChildResumeClaim: Send + Sync {
 /// - 结果不确定时返回 [`SessionResourceError::persistence_uncertain`]，不得重试后伪装成功。
 #[async_trait]
 pub trait SessionResources: Send + Sync {
+    fn oauth_credentials(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::oauth_credentials::OAuthCredentialPort>> {
+        None
+    }
     // ── 能力与准入 ──
 
     /// 本次打开的权限、后端能力面；给定 `session` 时附带该会话的执行资格。

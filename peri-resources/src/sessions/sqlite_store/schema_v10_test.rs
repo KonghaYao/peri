@@ -1,9 +1,9 @@
 //! schema v10 回退迁移：删除 v7..v9 写下的本机远程痕迹。
 //!
 //! 用户裁决撤销「远程存储在本机留有痕迹」的整套能力，本机表结构回到 remote 工作之前：
-//! 不加表、不加列、没有 store 维度。覆盖：
+//! 不保留远程痕迹表或 store 维度；当前初始化补建环境表与 OAuth 凭据表。覆盖：
 //!
-//! - v7 / v8 / v9 三种来源库都收敛到同一形状（本机表集合与 v6 时代一致）；
+//! - v7 / v8 / v9 三种来源库都收敛到同一形状（既有业务表与两张初始化表）；
 //! - 表数据连同表一起消失，**业务表逐行不动**；
 //! - `execution_runs` 的行全部保留，包括远程会话遗留的孤儿行（按裁决它们是有效事实）；
 //! - 同名但形状不符的表 → fail-closed 拒绝并整体回滚，不删不认识的数据；
@@ -13,6 +13,7 @@
 
 use super::schema::CURRENT_SCHEMA_VERSION;
 use super::*;
+use crate::sessions::canonical::{OAUTH_CREDENTIALS_TABLE, SESSION_ENVIRONMENTS_TABLE};
 use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
 use std::path::Path;
@@ -174,13 +175,29 @@ async fn table_names(connection: &mut SqliteConnection) -> Vec<String> {
     rows.into_iter().map(|(name,)| name).collect()
 }
 
+async fn preserved_table_definitions(connection: &mut SqliteConnection) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         ORDER BY name",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .unwrap();
+    rows.retain(|(name, _)| {
+        !DROPPED_TABLES.contains(&name.as_str())
+            && name != OAUTH_CREDENTIALS_TABLE
+            && name != SESSION_ENVIRONMENTS_TABLE
+    });
+    rows
+}
+
 async fn read_only(path: &Path) -> SqliteConnection {
     SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
         .await
         .unwrap()
 }
 
-/// v7 / v8 / v9 三种来源库都收敛到同一形状：本机表集合回到 v6 时代，业务数据一行不动。
+/// v7 / v8 / v9 收敛并补齐初始化表，既有业务表结构与数据保持不变。
 #[tokio::test]
 async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
     for source_version in [7, 8, 9] {
@@ -189,6 +206,7 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
         let mut connection = v9_database(&path, source_version).await;
         populate(&mut connection).await;
         let tables_before = table_names(&mut connection).await;
+        let definitions_before = preserved_table_definitions(&mut connection).await;
         connection.close().await.unwrap();
 
         let store = SqliteThreadStore::new(&path).await.unwrap();
@@ -199,7 +217,6 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
             .unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION, "来源版本 {source_version}");
 
-        // 五张本机远程表消失，且没有留下其它新增结构。
         let tables_after = table_names(&mut connection).await;
         for table in DROPPED_TABLES {
             assert!(
@@ -208,12 +225,21 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
             );
             assert!(tables_before.iter().any(|name| name == table));
         }
-        let expected: Vec<String> = tables_before
+        let mut expected: Vec<String> = tables_before
             .iter()
             .filter(|name| !DROPPED_TABLES.contains(&name.as_str()))
             .cloned()
             .collect();
+        expected.extend([
+            OAUTH_CREDENTIALS_TABLE.to_owned(),
+            SESSION_ENVIRONMENTS_TABLE.to_owned(),
+        ]);
+        expected.sort();
         assert_eq!(tables_after, expected, "来源版本 {source_version}");
+        assert_eq!(
+            preserved_table_definitions(&mut connection).await,
+            definitions_before
+        );
 
         // 业务表逐行保留。
         let (title,): (String,) =
@@ -265,7 +291,7 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
     }
 }
 
-/// 没有那 5 张表的库是幂等的：不报错、不加表、不改业务数据。
+/// 没有远程痕迹表时仅补齐初始化表，既有业务表结构与数据保持不变。
 #[tokio::test]
 async fn test_database_without_remote_tables_is_idempotent() {
     let directory = tempfile::tempdir().unwrap();
@@ -295,6 +321,7 @@ async fn test_database_without_remote_tables_is_idempotent() {
     // 这些库从来只有业务表，所以只填业务数据（远程痕迹表不存在，无从填写）。
     populate_business(&mut connection).await;
     let tables_before = table_names(&mut connection).await;
+    let definitions_before = preserved_table_definitions(&mut connection).await;
     connection.close().await.unwrap();
 
     let store = SqliteThreadStore::new(&path).await.unwrap();
@@ -304,7 +331,17 @@ async fn test_database_without_remote_tables_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(version, CURRENT_SCHEMA_VERSION);
-    assert_eq!(table_names(&mut connection).await, tables_before);
+    let mut expected = tables_before;
+    expected.extend([
+        OAUTH_CREDENTIALS_TABLE.to_owned(),
+        SESSION_ENVIRONMENTS_TABLE.to_owned(),
+    ]);
+    expected.sort();
+    assert_eq!(table_names(&mut connection).await, expected);
+    assert_eq!(
+        preserved_table_definitions(&mut connection).await,
+        definitions_before
+    );
     // 业务数据一行不动：本机会话与两条（含远程遗留的）代际行都还在。
     let runs: Vec<(String, i64, bool)> = sqlx::query_as(
         "SELECT thread_id, generation, clean FROM execution_runs ORDER BY thread_id",

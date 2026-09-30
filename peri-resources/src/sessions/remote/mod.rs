@@ -115,6 +115,7 @@ mod failure;
 mod generation;
 mod ledger;
 mod mutation;
+mod oauth_credentials;
 mod schema;
 mod session_codec;
 mod session_data;

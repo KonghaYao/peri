@@ -24,6 +24,31 @@ pub enum OAuthStartDisposition {
 }
 
 impl McpClientPool {
+    pub fn inject_oauth_credentials(
+        &self,
+        client: crate::mcp::auth_store::OAuthCredentialClient,
+    ) -> std::io::Result<()> {
+        let _admission = self.lifecycle_registration.lock();
+        let slot = self.builtin_context.lock();
+        if slot.initialize_started || !self.is_open() {
+            return Err(std::io::Error::other(
+                "OAuth credential injection window is closed",
+            ));
+        }
+        self.credential_client
+            .set(client)
+            .map_err(|_| std::io::Error::other("OAuth credentials already injected"))
+    }
+
+    pub(crate) fn oauth_credentials(
+        &self,
+    ) -> std::io::Result<crate::mcp::auth_store::OAuthCredentialClient> {
+        self.credential_client
+            .get()
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("OAuth credentials were not injected"))
+    }
+
     /// 注入 OAuth 流程事件回调（host 装配面在 `run_initialize` 前调用；
     /// 回调负责把 `AuthorizationNeeded` 的 `callback_tx` 注册进
     /// `pending_oauth_callbacks`，并将事件转发为 ACP 通知）。

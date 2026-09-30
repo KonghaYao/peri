@@ -144,10 +144,16 @@ impl App {
         let pool = std::sync::Arc::new(
             peri_middlewares::mcp::McpClientPool::new_pending_with_spawner(spawner),
         );
+        if let Some(credentials) = self.services.session_resources.oauth_credentials() {
+            if peri_middlewares::mcp::OAuthCredentialClient::new(credentials)
+                .and_then(|client| pool.inject_oauth_credentials(client))
+                .is_err()
+            {
+                tracing::error!("OAuth credential MCP initialization failed");
+            }
+        }
         self.services.mcp_pool = Some(pool.clone());
         self.services.mcp_task_owner = Some(owner);
-        // 面板直读句柄：OAuth 授权完成后（kit 层 OauthCompleted 事件）据此
-        // reconnect，从共享凭证文件恢复连接。
         let _ = crate::kit::atoms::MCP_PANEL_POOL.set(pool.clone());
 
         let (init_tx, init_rx) =

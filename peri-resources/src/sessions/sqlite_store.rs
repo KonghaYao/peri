@@ -14,6 +14,7 @@ mod discovery;
 mod execution;
 mod failure;
 mod local;
+mod oauth_credentials;
 pub(crate) mod row_mapping;
 mod schema;
 mod session_data;

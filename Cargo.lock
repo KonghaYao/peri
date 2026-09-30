@@ -3906,6 +3906,7 @@ dependencies = [
  "peri-controller",
  "peri-mcp-common",
  "peri-mcp-config",
+ "peri-mcp-credentials",
  "peri-mcp-cron",
  "peri-mcp-lsp",
  "peri-mcp-workspace",
@@ -4073,6 +4074,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "peri-mcp-credentials"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "peri-acp-types",
+ "peri-resources",
+ "rmcp",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "peri-mcp-cron"
 version = "0.2.0"
 dependencies = [
@@ -4189,6 +4204,7 @@ dependencies = [
  "peri-mcp-artifact",
  "peri-mcp-common",
  "peri-mcp-config",
+ "peri-mcp-credentials",
  "peri-mcp-cron",
  "peri-mcp-lsp",
  "peri-mcp-web",

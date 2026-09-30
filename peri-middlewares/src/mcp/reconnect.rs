@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{
-    auth_store::FileCredentialStore,
+    auth_store::static_credential_key,
     builtin::runtime::BUILTIN_CONVERGE_TIMEOUT,
     client::{
         build_authed_transport, build_http_transport, serve_client_auto, setup_subscription,
@@ -163,20 +163,26 @@ impl McpClientPool {
                 headers,
                 oauth,
             } => {
-                // 与 run_initialize 一致：检查磁盘是否有已保存的 OAuth 凭证
-                let oauth_cfg = oauth.as_ref().cloned().or_else(|| {
-                    let token_store = Arc::new(FileCredentialStore::new());
-                    match tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current()
-                            .block_on(token_store.load_server(server_name))
-                    }) {
-                        Ok(Some(_)) => {
-                            tracing::info!(server = %server_name, "发现已保存的 OAuth 凭证，使用默认配置恢复");
-                            Some(super::config::OAuthConfig::default())
-                        }
-                        _ => None,
-                    }
-                });
+                let token_store =
+                    self.oauth_credentials()
+                        .map_err(|error| McpPoolError::ConnectionFailed {
+                            server: server_name.to_string(),
+                            reason: error.to_string(),
+                        })?;
+                let oauth_cfg = if let Some(config) = oauth.as_ref() {
+                    Some(config.clone())
+                } else {
+                    let default_oauth = super::config::OAuthConfig::default();
+                    let key = static_credential_key(server_name, url, &default_oauth);
+                    token_store
+                        .load_server(&key)
+                        .await
+                        .map_err(|error| McpPoolError::ConnectionFailed {
+                            server: server_name.to_string(),
+                            reason: error.to_string(),
+                        })?
+                        .map(|_| default_oauth)
+                };
                 if let Some(cfg) = oauth_cfg {
                     let flow_id = uuid::Uuid::now_v7().to_string();
                     match self.reserve_oauth_flow(server_name, &flow_id) {
@@ -195,8 +201,7 @@ impl McpClientPool {
                         .map(Arc::from)
                         .or_else(|| self.oauth_event_callback())
                         .unwrap_or_else(|| Arc::new(|_| {}));
-                    let ts = Arc::new(FileCredentialStore::new());
-                    let mut mgr = OAuthFlowManager::new_with_arc(ts, cb);
+                    let mut mgr = OAuthFlowManager::new_with_arc(token_store, cb);
                     let oauth_result = mgr
                         .run_oauth_flow_with_id(&flow_id, server_name, url, &cfg)
                         .await;

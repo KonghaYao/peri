@@ -67,12 +67,21 @@ fn pending_mcp_pool(
     spawner: peri_middlewares::mcp::McpTaskSpawner,
     profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
     session_cwd: Option<&std::path::Path>,
+    resources: &Arc<dyn SessionResources>,
 ) -> Arc<peri_middlewares::mcp::McpClientPool> {
     let pool = Arc::new(
         peri_middlewares::mcp::McpClientPool::new_pending_with_spawner_and_profile(
             spawner, profile,
         ),
     );
+    if let Some(credentials) = resources.oauth_credentials() {
+        match peri_mcp_credentials::OAuthCredentialClient::new(credentials)
+            .and_then(|client| pool.inject_oauth_credentials(client))
+        {
+            Ok(()) => {}
+            Err(_) => tracing::error!("OAuth credential MCP initialization failed"),
+        }
+    }
     if let Some(cwd) = session_cwd {
         if let Err(error) = pool.bind_execution_cwd(cwd) {
             // The pool records initialization failure and remains unusable for
@@ -397,6 +406,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             mcp_task_spawner.clone(),
             mcp_profile.clone(),
             Some(std::path::Path::new(&cwd)),
+            &session_resources,
         );
         // ── A33：builtin 实例上下文由**宿主装配**构造并注入，必须早于下面的
         //    `run_initialize` 及其后台 spawn ──
@@ -588,6 +598,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                         mcp_task_spawner.clone(),
                         mcp_profile.clone(),
                         session_scoped.then_some(std::path::Path::new(&cwd)),
+                        &session_resources,
                     )
                 }),
             ),
@@ -791,15 +802,21 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
 mod tests {
     use super::*;
 
-    #[test]
-    fn worktree_mcp_pool_is_bound_before_deferred_initialization() {
+    #[tokio::test]
+    async fn worktree_mcp_pool_is_bound_before_deferred_initialization() {
         let target = tempfile::TempDir::new().unwrap();
         let sibling = tempfile::TempDir::new().unwrap();
+        let (resources, shutdown) =
+            peri_resources::Resources::open_with(Some(target.path().join("configured.db")))
+                .await
+                .unwrap()
+                .into_parts();
         let (_owner, spawner) = peri_middlewares::mcp::McpTaskOwner::new();
         let pool = pending_mcp_pool(
             spawner,
             peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
             Some(target.path()),
+            &resources,
         );
         assert_eq!(pool.snapshot()["initPhase"], "pending");
         assert!(pool.bind_execution_cwd(sibling.path()).is_err());
@@ -807,5 +824,8 @@ mod tests {
             pool.bind_execution_cwd(target.path()).unwrap(),
             target.path()
         );
+        peri_acp_types::session_resources::SessionStoreShutdownPort::shutdown(&shutdown)
+            .await
+            .unwrap();
     }
 }

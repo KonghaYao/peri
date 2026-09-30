@@ -153,6 +153,14 @@ pub(super) use helpers::{new_session_draft_row, new_session_row};
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
+    fn oauth_credentials(
+        self: Arc<Self>,
+    ) -> Option<Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
+        Some(Arc::new(
+            super::oauth_credentials::SqliteOAuthCredentialStore::new(self.database.clone()),
+        ))
+    }
+
     async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         machine_id_on(&self.database.pool, id).await
     }

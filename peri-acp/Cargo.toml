@@ -38,6 +38,7 @@ peri-middlewares = { path = "../peri-middlewares" }
 peri-mcp-lsp.workspace = true
 peri-mcp-common.workspace = true
 peri-mcp-config.workspace = true
+peri-mcp-credentials.workspace = true
 peri-resources = { path = "../peri-resources" }
 peri-mcp-cron.workspace = true
 peri-mcp-workspace.workspace = true

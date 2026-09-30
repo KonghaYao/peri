@@ -68,6 +68,7 @@ pub use types::{
 
 /// MCP 客户端连接池
 pub struct McpClientPool {
+    credential_client: std::sync::OnceLock<super::auth_store::OAuthCredentialClient>,
     shared_services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
     /// Includes failed handshakes until their actual process tree and stderr have drained.
     processes: parking_lot::Mutex<Vec<Arc<process::McpProcessOwner>>>,
@@ -182,6 +183,7 @@ impl McpClientPool {
         capability_profile: super::apps::McpCapabilityProfile,
     ) -> Self {
         Self {
+            credential_client: std::sync::OnceLock::new(),
             shared_services: parking_lot::Mutex::new(Vec::new()),
             processes: parking_lot::Mutex::new(Vec::new()),
             execution_cwd: std::sync::OnceLock::new(),

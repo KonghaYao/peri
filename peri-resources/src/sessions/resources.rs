@@ -23,6 +23,7 @@
 mod claim;
 mod gate;
 mod lifecycle;
+mod oauth_credentials;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -145,6 +146,7 @@ pub struct SessionResourcesImpl {
     /// 串行化关闭确认：并发关闭必须依次看到真实结论，不能两个都「从头开始」而重复关闭
     /// 同一个连接，也不能把另一个调用的未确认状态当成成功。
     close_confirm: tokio::sync::Mutex<()>,
+    credential_operations: Arc<tokio::sync::RwLock<()>>,
     /// 会话数据的存放位置：决定 `create_session` 是几次提交（见 [`SessionDataHome`]）。
     home: SessionDataHome,
 }
@@ -193,6 +195,7 @@ impl SessionResourcesImpl {
             gate,
             lifecycle,
             close_confirm: tokio::sync::Mutex::new(()),
+            credential_operations: Arc::new(tokio::sync::RwLock::new(())),
             home,
         }
     }
@@ -346,6 +349,17 @@ impl SessionResourcesImpl {
 
 #[async_trait]
 impl SessionResources for SessionResourcesImpl {
+    fn oauth_credentials(
+        &self,
+    ) -> Option<Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
+        self.gate.data().clone().oauth_credentials().map(|inner| {
+            Arc::new(oauth_credentials::LifecycleCredentials::new(
+                inner,
+                self.lifecycle.clone(),
+                self.credential_operations.clone(),
+            )) as Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>
+        })
+    }
     // ── 能力与准入 ──
 
     async fn inspect_availability(
@@ -887,6 +901,9 @@ impl SessionResourcesImpl {
         // 停止新写入不可逆；`Closing` 不是 `Closed`：未结清事实仍可收敛（恢复/排空在
         // `Closing` 下继续可用，见 `gate::ensure_recovery_permitted`）。
         self.lifecycle.begin_closing();
+        let _credentials = tokio::time::timeout(SETTLE_WAIT, self.credential_operations.write())
+            .await
+            .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
 
         // 每次调用都重新做真实检查，不复用上一次的失败结论。
         //

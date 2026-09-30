@@ -13,11 +13,11 @@
 4. **配置数据面（P3，已完成本清单范围）**：ACP settings、MCP 配置与 hooks/开关来源 I/O 统一到独立配置 MCP；宿主保留类型校验、来源优先级与业务投影，插件体系整体迁移另列。
 5. **插件体系（P3，推迟）**：保留现有落盘安装、缓存与扫描；Plugin MCP 迁移暂不推进，不作为核心存算分离工作的前置条件。
 6. **shell（P1）**：执行与输出持久化归工具执行环境；**workflow 与 PTC 是特例**（本地 JS 执行环境自管理，另行处置）。
-7. **工具 fs（P1）**：本清单中的工具执行依赖已下沉，不代表 OAuth 凭据、MCP 缓存及 P3 插件体系也已迁移。
+7. **工具 fs（P1）**：本清单中的工具执行依赖已下沉；OAuth 凭据另已完成数据库实现，MCP 缓存及 P3 插件体系仍暂缓。
 8. **TUI 免除**：TUI 相关（客户端本地状态、主题、web-pty 等）**免除定级**。
 9. **遥测**：落盘日志**免除，不整改**；Langfuse 服务端上报效果仍需端到端验证。
 10. **compact**：不应读取 skill 文件——保留历史工具调用记录即可；同机制的文件回读（recent files）一并评估。`compact_v2/full.rs` 的文件读取应移除。
-11. **OAuth 与缓存分开**：MCP OAuth 凭据采用 SQLite 新表方向，不迁移旧 JSON、不兼容或回退旧存储，需重新授权；response cache 与插件缓存仍推迟，保留落盘，不扩大本轮改动。
+11. **OAuth 与缓存分开**：OAuth 已完成独立受信 credentials MCP → Resources 既有数据库新表实现，完成项仅在 5.3 保留一行，契约与证据见 [实施评估](2026-09-30-p2-filesystem-implementation-assessment.md)；无私有库/HOME/新锁/schema 升版/迁移/兼容/文件回退，旧凭据需重授权。response cache 与插件缓存保持落盘、不改生命周期；实现完成不等于真实部署、网络授权或多实例 refresh 已验证。
 12. **恢复机制（核心改动，已实施）**：移除 session 文件锁及前端 dirty 恢复弹窗；root session 以 ID 恢复，不按目录或 owner 认领，父子关系保持。不用分布式锁替代。
 
 ## 二、全仓库总览
@@ -61,7 +61,7 @@
 | --- | --- | --- |
 | `peri-middlewares/src/plugin/{config,loader,install_counts}.rs`、`installer/*`、`marketplace/fetch.rs`、`host_ports.rs`（插件端口） | 插件安装 / 卸载 / marketplace / 计数（当前重型依赖） | **P3** Plugin MCP 方向：单独设计（可能落 Workspace 内） |
 | `peri-acp/src/host/requests/plugin.rs:512-526` | 插件缓存目录扫描（`read_dir` + manifest 读取） | **P2**：暂不在考虑范围 |
-| `peri-middlewares/src/mcp/auth_store.rs` | OAuth 凭证文件存储与动态清理 | **P2**：评估 SQLite 新表；凭据主体与 machine 分区须分开 |
+| `peri-middlewares/src/mcp/auth_store.rs` | OAuth credential adapter 与动态清理 | 实现完成，定向回归通过；真实部署/授权/refresh 风险见实施评估；`local + machineID` 是逻辑 scope，不是安全多租户 |
 | `peri-middlewares/src/mcp/resource_cache.rs` | 跨进程资源缓存（advisory file lock） | **P2 / 推迟**：继续落盘，本轮不处理 |
 | `peri-tui/src/cli_plugin.rs`、`kit/panels/plugin/data.rs` | 插件 CLI 与面板 | **免除**（TUI 相关） |
 | `peri-agent/src/resources.rs` | 存储装配桥（`Option<PathBuf>` → `peri-resources`）；默认 `~/.peri/threads/threads.db` | 安全依赖，无需整改 |
@@ -112,9 +112,9 @@
 
 | 等级 | 项 | 现状位置 | 处置 |
 | --- | --- | --- | --- |
-| **P2** | MCP OAuth 凭据 SQLite 新表 | `peri-middlewares/src/mcp/auth_store.rs` 及 OAuth 构造/动态清理入口 | 尚未实施；直接替换文件存储，不做旧数据迁移或兼容；主体与环境分区不等同于共享 token |
+| **P2** | MCP OAuth 实际部署与授权风险验收 | credentials MCP、既有共享数据库与 OAuth 网络授权/refresh | 实现及定向验证已完成，完成项见 5.3；实际云端、真实 OAuth 网络授权、多实例 refresh 与共享库访问授权仍未验收，不宣称安全多租户或 CAS |
 
-P2 的实现方式与难度见 [实施可行性调研](2026-09-30-p2-filesystem-implementation-assessment.md)；调研不代表已实施。MCP 缓存与插件体系已移至暂缓项，不作为当前核心工作的前置条件。
+P2 已落地实现、主代理反馈的编译/测试证据与待验收风险见 [实施评估与验收](2026-09-30-p2-filesystem-implementation-assessment.md)。既有共享数据库的访问授权、secret 保护、刷新/重授权竞争与动态 incarnation 清理仍需核对，本轮不新增用户认证或 CAS。MCP 缓存与插件体系已移至暂缓项，不作为当前核心工作的前置条件。
 
 #### 暂缓项（保留落盘，不列入当前实施队列）
 
@@ -135,6 +135,7 @@ P2 的实现方式与难度见 [实施可行性调研](2026-09-30-p2-filesystem-
 
 ### 5.3 已处理（每项一行）
 
+- **OAuth 凭据**：公共契约、Resources local/remote 既有数据库 `mcp_oauth_credentials` provider、独立受信 credentials MCP 与 host→OAuth pool 注入已完成，复用缓存 machineID、不升 schema，删除 `FileCredentialStore`、用户重授权，无迁移/兼容/文件回退；bootstrap 编译/集成、remote 与 middleware 定向验证通过，SDK 载荷日志隔离及未验收风险见实施评估。
 - **配置数据面**：ACP settings、MCP 配置、hooks 与 builtin 开关统一经独立 `peri-mcp-config` MCP 通道读写/探测，共享全局路径与原子保存，无宿主文件回落，保留类型校验、分层与来源优先级。
 - **MCP 截断输出**：bridge/resource 成功、错误及恢复输出均经 Workspace `output/store` 持久化，返回实例绑定 `peri-output://` 资源 URI 与工具环境 Read 路径，不可得时明确未保存且不回落宿主。
 - **归因分支探测**：`before_agent` 改走 Workspace `workspace/gitBranch`，git 执行、超时与进程树清理下沉工具环境，宿主仅消费分支值。
@@ -169,6 +170,6 @@ P2 的实现方式与难度见 [实施可行性调研](2026-09-30-p2-filesystem-
 - 未做编译期 feature 拆分实验
 - 未核对 `peri-tui/src/sync` 协议全量字段（仅扫描 fs 触点与 staging 语义）
 - 未跑全库/E2E、Windows 原生执行或 120 秒 ignored 用例
-- OAuth SQLite 新表已做源码级可行性评估，尚未实现；旧数据迁移明确不做，MCP cache 与 Plugin MCP 继续暂缓
+- OAuth 实际云端、真实网络授权与多实例 refresh 未验证，共享库授权风险保留；expanded remote 的无关故障 `session_child_guard_test`（未初始化 machine）与 ignored 用例仍未闭环，不将定向通过写成全套件通过，验证明细见实施评估
 - Session ID / env 核心实现与定向契约测试已迁移；未做远端多机器端到端部署验证
 - metrics → Langfuse 未做端到端上报验证（本地无 Langfuse 凭据，未观察 Langfuse 服务端落库；含指标归属到活跃 turn trace 的服务端表现）

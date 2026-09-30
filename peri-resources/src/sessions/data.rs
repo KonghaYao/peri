@@ -45,6 +45,11 @@ pub struct ChildResumeRecord {
 /// 「未生效」报告成成功，也不得在失败后遗留部分写入。
 #[async_trait]
 pub(crate) trait SessionDataPort: Send + Sync {
+    fn oauth_credentials(
+        self: std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
+        None
+    }
     async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>>;
     /// 保存新会话：meta/binding/frozen 完整落库（本机准入由执行面另行完成）。
     ///

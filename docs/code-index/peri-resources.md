@@ -11,8 +11,17 @@
 
 ## 速查表
 
+### OAuth 凭证路由（实现完成）
+
+- 契约类型归 `peri-acp-types/src/oauth_credentials.rs`，本地/远端 provider 已在 Resources 落地；复用已配置的数据库连接与缓存 machine ID，表为 `mcp_oauth_credentials`，不增加 schema version；生命周期适配见 `src/sessions/resources/oauth_credentials.rs`。编译/测试证据与待验收项统一记录在 active assessment。
+- 已完成数据流：部署注入 Resources provider → `mcp-packages/credentials/src/{lib,server,client}.rs` 受信 bootstrap MCP `CustomRequest` → `peri-acp/src/host/assemble.rs` 注入 `credentialsClient` → OAuth pool；凭证通道独立于等待授权的 tool pool，避免授权依赖自身。bootstrap 集成与 middleware 定向回归通过；实际云端、真实 OAuth 网络授权及多实例 refresh 未验证，结果统一见 active assessment。
+- 不引入私有数据库、HOME 路径、额外开库、文件锁、迁移、兼容层、旧 JSON 或文件 fallback；删除 `FileCredentialStore`，旧凭证不导入，用户重新授权。MCP 缓存与插件持久化不在本次范围，日志文件豁免不等于允许记录 secret。
+- 默认逻辑 scope 为 principal `local` + machine ID；server key 绑定 endpoint/授权配置，动态连接还须绑定 incarnation。共享库中该 scope 不是用户身份或访问控制；受信 bootstrap 授权、共享数据库凭证暴露与 refresh 并发风险仍待验收，不宣称安全多租户或 CAS refresh。
+- 任务与验收事实源：[active assessment](../../spec/issues/2026-09-30-p2-filesystem-implementation-assessment.md)；宿主调用侧见 [middlewares 索引](peri-middlewares.md)。
+
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
+| 查 MCP OAuth 凭证存储 | `peri-acp-types/src/oauth_credentials.rs` + `src/sessions/canonical.rs` + `src/sessions/sqlite_store/oauth_credentials.rs` + `src/sessions/remote/oauth_credentials.rs` + `src/sessions/resources/oauth_credentials.rs` | `OAuthCredentialPort`、请求/响应/错误类型、`SqliteOAuthCredentialStore`、`RemoteOAuthCredentials`、`LifecycleCredentials` 与 canonical 凭证 SQL；部署接入见「OAuth 凭证路由」 | 本地 provider 复用 `SqliteSessionDatabase`，远端 provider 复用 `RemoteSessionData`；`mcp_oauth_credentials` 按 principal、machine ID、server key 隔离逻辑记录，不代表用户认证或安全多租户 |
 | 改 Session ID 恢复、机器 env 与列表 | `src/sessions/machine.rs` + `canonical.rs` + `sqlite_store/{workspace,session_rows,schema}.rs` + `remote/{session_data,session_sql}.rs` | `machine::{initialize,current}`、`INSERT_ENVIRONMENT_SQL`、`BACKFILL_ENVIRONMENTS_SQL`、`migrate_environments`、`list_scoped_threads` | 持久 UUIDv4 / UUID override；root 当前机器、child 继承父 env；本机旧库幂等回填，旧远端未知为 `legacy:{store_id}`，schema 仍为 10；`ThreadScope::Environment` 显式过滤，不改 ID 查询与归属；创建目录仍走 discovery，按 ID 恢复不以路径/文件对象证据认领 |
 | 验证机器身份与恢复分区 | `src/sessions/machine_test.rs` + `sqlite_store/session_id_environment_test.rs` | 持久读取/竞争发布/损坏值拒绝；schema 与历史保留；缺路径/dirty/多实例恢复；env scope 与 child 继承 | 验证结果及来源见 active spec；真实远端、权限/崩溃、跨层副作用与并发续写仍需验收 |
 | 打开全部资源（会话存储） | `src/context.rs` | `Resources::open`；`Resources::open_with`；`open_with_default`（注入默认路径的 seam）；`open_read_only` / `degradable_open_failure`；`Resources::{session_resources,into_parts,into_session_resources}`；`SessionStoreShutdownOwner::take`（仅 crate 内装配可见） | 默认路径 `~/.peri/threads/threads.db`（`SqliteThreadStore::default_path` 与只读入口共用 `sessions::default_database_path`）；先写打开，写打开失败且属于可恢复占用（schema 锁被占、库文件/WAL 不可写）时降级为只读打开并记 `tracing::warn!`——「写打不开」不等于「历史读不了」，不再挡住进入；不认识的 schema（`UnsupportedSchemaVersion`/`UnsupportedDatabaseSchema`）在写打开走到版本判定时不降级；写打开在版本判定前失败（锁被占、库或目录不可写）时降级只按读取兼容的列形状把关、不复查 `user_version`，由更新构建写入且列形状兼容的库可被只读读取；只读打开也失败时返回写打开的原错误；不使用共享临时数据库 fallback；`Resources` **不可克隆**：业务句柄（`Arc<dyn SessionResources>`，可克隆）经 `session_resources`/`into_parts` 交给 Agent/Controller/middleware，全局关闭权只由 non-Clone 的 `SessionStoreShutdownOwner`（`impl SessionStoreShutdownPort`）承载，随部署装配在任务排空之后消费；`into_session_resources` 只给没有部署生命周期的调用点（只读命令/测试夹具） |

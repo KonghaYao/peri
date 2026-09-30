@@ -14,6 +14,14 @@
 
 ## 速查表
 
+### OAuth 凭证接入（实现完成）
+
+- `src/mcp/auth_store.rs` 已接入 `peri_mcp_credentials::OAuthCredentialClient`；独立服务与客户端入口为 `mcp-packages/credentials/src/{lib,server,client}.rs`，host 装配入口为 `peri-acp/src/host/assemble.rs`，pool 注入端口为 `src/mcp/client/oauth.rs`。bootstrap 集成及 auth_store、OAuth、dynamic 定向回归通过，证据统一见 active assessment，不等同于真实部署或网络授权验收。
+- SDK 原始凭据载荷日志隔离位于 `mcp-packages/credentials/src/client.rs`：credentials 独立 worker runtime 在 `NoSubscriber` 的 `with_default` 作用域内执行，避免 rmcp service debug 打印 `CustomRequest`/Result；production main runtime 日志不受影响。
+- 已落地数据流由部署注入 Resources provider，经 `mcp-packages/credentials/` 受信 bootstrap MCP `CustomRequest` 消费；host assembly 把 `credentialsClient` 注入 OAuth pool，独立于尚未授权的 tool pool。契约归 `peri-acp-types/src/oauth_credentials.rs`，数据库 provider 与 scope 规则见 [Resources 索引](peri-resources.md)。
+- 删除 `FileCredentialStore`，用户重新授权；不保留旧 JSON/文件 fallback、兼容层或迁移，不新增私有 DB、HOME 路径、额外开库或锁；复用已配置 DB 与缓存 machine ID，`mcp_oauth_credentials` 不增加 schema version。MCP cache/plugins 不变，日志文件豁免仍须遵守 secret 脱敏要求。
+- principal `local` + machine ID 是逻辑 scope，不是用户认证；server key 须绑定 endpoint/授权配置，动态连接还绑定 incarnation。bootstrap 授权、共享库暴露与 refresh 风险仍需验收，不宣称安全多租户或 CAS refresh。验收状态见 [active assessment](../../spec/issues/2026-09-30-p2-filesystem-implementation-assessment.md)。
+
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
 | 改 MCP 版本协商 | `src/mcp/client/transport.rs` | `serve_client_auto` | 缺省直接使用 rmcp Auto；显式版本使用 Discover；探测、回退和版本选择均由 SDK 负责。initialize/reconnect/Dynamic 共用入口，保留外层总超时；wire 回归见 `transport_test.rs` |
@@ -51,7 +59,7 @@
 | 改 MCP skill 发现 | `src/mcp/skill_discovery.rs` + `skill_discovery/{skills_list,legacy_scan,verify}.rs` | `run_discovery_with_cache`（末参 = 宿主技能面关闭位，透传投影）；`mcp_route_entries`；`finish_command_source`；`project_core_skill_commands`（**W4b/F6**：系统来源技能 → `core:{skill}` 裸名命令，`reconcile` 撤旧注册新；关闭位为真 ⇒ 目标集置空、同批撤下既有 core 条目，`{server}:{skill}` 面不受影响）；`mark_system_origins`（按 `ConfigSource::Builtin` + 未关闭标注系统来源）；`snapshot_via_skills_list`（**W4b/F3**：冻结快照读，错误上抛以支持 fail-closed） | 经 `McpSkillRegistry`（peri-acp-types）注册；`skill://` scheme 资源拉取 + digest 校验后入注册表；命令面 `McpSkillReleaser`（放行跳板：交互式 Inject 原文 / RPC 直返全文） |
 | 改 MCP Agent 发现 / 激活 | `src/mcp/agent_registry.rs` + `src/subagent/tool/mcp_activation.rs` + `src/assembly.rs` | `McpAgentRegistry::entries` / `activate`；`SubAgentTool::load_and_approve_mcp_agent` | 从 `resources/list` 快照只发现 `agent://.../agent.md` 元数据；`Agent(subagent_type="mcp__<origin>__<name>")` 激活时才 read/校验/digest/批准，远端危险本地字段默认忽略，执行复用父工具交集与现有 subagent runtime，不落盘、不覆盖本地定义 |
 | 改 MCP 多路复用 / Apps relay | `src/mcp/{channel_handler,apps,apps_relay}.rs` + ACP host 装配 | `ChannelHandler::new`；`PoolMcpAppsRelay`；Apps deployment profile 与 binding lease registry | Channel broker 只参与 Approval，AskUser 使用原始 broker；`PERI_MCP_APPS` 启用 stdio relay，App `tools/call` 必须经 connection-owned lease 和 canonical Permission/HITL dispatcher；现行契约见 `docs/design/mcp-multiplexing.md` |
-| 改 MCP OAuth / 凭证 | `src/mcp/client/oauth.rs`（flow 准入与回调）+ `src/mcp/oauth_flow.rs` + `auth_store.rs` + `callback_server.rs` + `client_oauth.rs`（授权执行与连接） | `OAuthCallbackServer::bind`（callback_server.rs:31）/`wait_for_code`（:43）/`parse_code_from_url`（:144）；`FileCredentialStore`（auth_store.rs）；OAuth 流程 `spawn_oauth_flow`（client_oauth.rs:25）/ `start_oauth_flow`（client_oauth.rs:63） | 每个 scoped connection 最多一个活跃 flow（`reserve_oauth_flow_scoped`，client/oauth.rs:266）；授权码经 ACP RPC → `register_oauth_callback`（:46）/`deliver_dynamic_oauth_callback`（:130）按完整 identity 投递，回调表仍由 pool 持有；token 只落本机权限保护文件，跨进程文件锁内 read-modify-write，并经同目录唯一临时文件原子替换（ARC-SECRET-001） |
+| 改 MCP OAuth / 凭证 | `src/mcp/client/oauth.rs`（flow 准入、凭证注入与回调）+ `src/mcp/oauth_flow.rs` + `auth_store.rs` + `callback_server.rs` + `client_oauth.rs`（授权执行与连接）；契约 `peri-acp-types/src/oauth_credentials.rs`；provider 见 [Resources 索引](peri-resources.md) | `OAuthCallbackServer::bind` / `wait_for_code` / `parse_code_from_url`；`spawn_oauth_flow` / `start_oauth_flow`；`OAuthCredentialClient` 由 `peri-acp/src/host/assemble.rs` 经 `inject_oauth_credentials` 接入 pool | 每个 scoped connection 最多一个活跃 flow（`reserve_oauth_flow_scoped`）；授权码经 ACP RPC 按完整 identity 投递，回调表仍由 pool 持有；凭证经独立受信 bootstrap MCP → Resources 配置数据库，生命周期验证状态见 active assessment |
 | 改 plugin manifest / 加载 | `src/plugin/loader.rs`；类型事实源 `peri-acp-types/src/plugin.rs`（`PluginManifest` :269，`src/plugin/types.rs` 仅 re-export） | `load_manifest`（loader.rs:77）；`load_plugins`（:491）；`load_enabled_plugins_aggregated`（:632）；`PluginCommandProvider`（:595，`new` :600） | manifest 字段类型以 peri-acp-types 为事实源（McpServerConfig :35、PluginCommand :175、PluginAgent :211、PluginLspServer :217、PluginManifest :269）；`PluginMiddleware`（middleware.rs:7）只持有 LoadedPlugin 列表 |
 | 改 plugin 命令 / agents / MCP 回退 | `src/plugin/loader.rs` | `parse_command_md`（:66）；`plugin_route_entries`（:276）；`merge_plugin_mcp_servers`（:612）；`CommandFrontmatter`（:53） | `commands` 兼容字符串路径与对象（字符串 = 相对插件根路径，不是名称，勿当名称解析）；agents 未声明仍保留 `.claude/agents` 约定目录回退；插件 MCP 配置命名空间 `plugin:{name}:{server}` |
 | 改 plugin 安装 / 市场 | `src/plugin/installer/` + `src/plugin/marketplace/` + `src/plugin/config.rs` | `install_plugin`（installer/install.rs:12）/`update_plugin`（:168）/`uninstall_plugin`（uninstall.rs:15）/`check_updates`（:109）/`cleanup_orphaned_plugins`（:150）；`MarketplaceManager`（marketplace/manager.rs:20，`init` :129 / `spawn_refresh` :199）；路径 `user_home`（用户主目录唯一权威，HOME 优先）/ `claude_home` / `installed_plugins_path` 等（config.rs:105-157） | 安装状态持久化 `installed_plugins.json`（load/save config.rs:175/:325）；启用名单在 `~/.claude/settings.json`（save/load :428/:465）；marketplace 缓存与刷新（manager.rs:57/:199） |
@@ -124,7 +132,7 @@
 | 配置合并 / 校验 | config.rs（load_merged_config_full :331 / load_merged_config_full_with_paths :358（step 6.5 :467）/ load_merged_config :487 / remove_server_from_config :523 / set_server_disabled :631；validate_config :125、server_config_hash :178、expand_server_config_with_context :276）——direct / global / merged 三入口在本文件内统一按 `McpServerConfig::validate` 复检，插件 MCP 走 `plugin/loader.rs` 的严格入口；builtin overlay 的两类加载期 typed error = `ReservedBuiltinInstanceName` / `BuiltinClosureFragmentInvalid`（:55-68） |
 | 工具 / 资源 / skill | tool_bridge.rs（build_typed_tool_bridges :422 / build_deferred_tool_bridges :430 / build_tool_bridges :457）；resource_tool.rs（McpResourceTool :44）；discover_tool.rs（DiscoverMCPTool :33）；skill_discovery.rs + skill_discovery/（run_discovery :97、verify_and_build skills_list.rs:499） |
 | 中间件 | middleware.rs（McpMiddleware :133，ensure_discovery :210 / with_builtin_closures :226 / attach_connection_notifier :355 / collect_tools :684 / first_turn_reminder :710 / before_react_start :774 / before_model :793 / await_system_ready :401 / static_tool_bridges :543 / prepared_static_bridges :558） |
-| OAuth / 凭证 / 信道 | oauth_flow.rs、client_oauth.rs、auth_store.rs（FileCredentialStore）、callback_server.rs（OAuthCallbackServer :26）、channel_handler.rs（ChannelHandler :17）、mcp_notify.rs |
+| OAuth / 凭证 / 信道 | oauth_flow.rs、client_oauth.rs、auth_store.rs（MCP 凭证客户端已接入）、callback_server.rs（OAuthCallbackServer :26）、channel_handler.rs（ChannelHandler :17）、mcp_notify.rs；provider 与数据流路由见 [Resources 索引](peri-resources.md) |
 
 ### 插件（src/plugin/）
 
@@ -205,7 +213,7 @@
 - ARC-FROZEN-001：frozen 数据（frozen_claude_md / skills 冻结摘要 / system prompt）会话内不可漂移，SubAgent 复用（`with_frozen_data` / `with_frozen_summary`）
 - ARC-SERIAL-001：工具注册 / 序列化顺序确定（BTreeMap 工具表、稳定排序），不得依赖 HashMap 迭代序（prompt cache 前缀）
 - ARC-PTC-ARTIFACT-001：`@peri-code/ptc@0.2.3` 受控安装、缓存 identity、private temp、`node <entry>` 和 source 前 handshake 必须保持同步；session目录入口拒绝npx fallback，不能为切换cwd扩大npm项目配置读取范围。
-- ARC-SECRET-001：MCP 凭证（FileCredentialStore / auth_store）、OAuth token 只落本机权限保护存储，不写日志/错误/fixture
+- ARC-SECRET-001：secret 不写日志/错误/fixture；凭证已转入既有数据库，其 secret 保护与授权仍需验收，不能据此宣称共享数据库暴露、授权或 refresh 并发风险已解决（本页不修改 standards）
 - ARC-CANCEL-001：cancel 按 (session_id, turn_id, attempt_id) 三元组；SubAgent 同步子任务继承父取消（`with_cancel`），独立后台任务自身取消策略
 - ARC-EVENT-001：事件链路单事实源 Agent 发射 → ACP 映射 → TUI 消费；SubAgent / Hook 事件须按 `source_agent_id` 归属
 - ARC-BOUNDARY-001：TUI 不得直驱 Agent 运行时；MCP pool / 初始化由 Agent 层会话路径持有（装配端口注入），TUI 仅经 ACP 命令面读取快照

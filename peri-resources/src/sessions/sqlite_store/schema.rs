@@ -139,6 +139,9 @@ impl SqliteSessionDatabase {
         let mut connection = self.pool.acquire().await?;
         let state = inspect(&mut connection).await?;
         if state == SchemaState::Current {
+            sqlx::query(AssertSqlSafe(canonical::CREATE_OAUTH_CREDENTIALS_TABLE_SQL))
+                .execute(&mut *connection)
+                .await?;
             return Self::migrate_environments(&mut connection).await;
         }
         // 登记表重建要对被引用的父表执行 DROP TABLE：SQLite 对父表做隐式删除时会
@@ -271,6 +274,9 @@ impl SqliteSessionDatabase {
         // v10 回退：删除 v7..v9 写下的本机远程痕迹（本机登记、未决锚点、远端操作日志、
         // 按 store 分区的执行域）。对没有这些表的库是幂等的。
         drop_remote_local_state(&mut tx).await?;
+        sqlx::query(AssertSqlSafe(canonical::CREATE_OAUTH_CREDENTIALS_TABLE_SQL))
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(AssertSqlSafe(format!(
             "PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"
         )))

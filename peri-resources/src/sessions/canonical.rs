@@ -45,6 +45,22 @@ pub(super) const WORKSPACES_TABLE: &str = "workspaces";
 /// 不可变执行绑定。
 pub(super) const SESSION_BINDINGS_TABLE: &str = "session_bindings";
 pub(super) const SESSION_ENVIRONMENTS_TABLE: &str = "session_environments";
+pub(super) const OAUTH_CREDENTIALS_TABLE: &str = "mcp_oauth_credentials";
+pub(super) const CREATE_OAUTH_CREDENTIALS_TABLE_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
+    principal_id TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    server_key TEXT NOT NULL,
+    credentials_blob TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (principal_id, machine_id, server_key)
+)";
+pub(super) const SELECT_OAUTH_CREDENTIAL_SQL: &str = "SELECT credentials_blob FROM mcp_oauth_credentials WHERE principal_id = ?1 AND machine_id = ?2 AND server_key = ?3";
+pub(super) const UPSERT_OAUTH_CREDENTIAL_SQL: &str = "INSERT INTO mcp_oauth_credentials(principal_id, machine_id, server_key, credentials_blob, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(principal_id, machine_id, server_key) DO UPDATE SET credentials_blob = excluded.credentials_blob, updated_at = excluded.updated_at";
+pub(super) const DELETE_OAUTH_CREDENTIAL_SQL: &str = "DELETE FROM mcp_oauth_credentials WHERE principal_id = ?1 AND machine_id = ?2 AND server_key = ?3";
+pub(super) const DELETE_ALL_OAUTH_CREDENTIALS_SQL: &str =
+    "DELETE FROM mcp_oauth_credentials WHERE principal_id = ?1 AND machine_id = ?2";
+pub(super) const LIST_OAUTH_CREDENTIALS_SQL: &str = "SELECT server_key FROM mcp_oauth_credentials WHERE principal_id = ?1 AND machine_id = ?2 ORDER BY server_key";
 pub(super) const INSERT_ENVIRONMENT_SQL: &str = "INSERT INTO session_environments(thread_id, machine_id) VALUES (?1, COALESCE((SELECT machine_id FROM session_environments WHERE thread_id = ?2), ?3))";
 pub(super) const BACKFILL_ENVIRONMENTS_SQL: &str = "WITH RECURSIVE tree(thread_id, machine_id) AS (
     SELECT t.id, COALESCE(env.machine_id, ?1) FROM threads t
@@ -60,6 +76,7 @@ pub(super) const CANONICAL_TABLES: &[&str] = &[
     WORKSPACES_TABLE,
     SESSION_BINDINGS_TABLE,
     SESSION_ENVIRONMENTS_TABLE,
+    OAUTH_CREDENTIALS_TABLE,
 ];
 
 /// 建表语句：本机新库与远端初始化下发的**同一份清单**，一条语句一个元素。
@@ -108,6 +125,7 @@ pub(super) const CREATE_TABLES: &[&str] = &[
     FOREIGN KEY(workspace_id, project_id) REFERENCES workspaces(id, project_id)
 )",
     CREATE_ENVIRONMENTS_TABLE_SQL,
+    CREATE_OAUTH_CREDENTIALS_TABLE_SQL,
 ];
 
 /// canonical 索引名（与 [`CREATE_INDEXES`] 的顺序一一对应）：形状核对按名字断言索引齐全。

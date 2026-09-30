@@ -15,7 +15,7 @@ use crate::mcp::client::McpServiceWrapper;
 
 use super::{
     super::{
-        auth_store::FileCredentialStore,
+        auth_store::OAuthCredentialClient,
         client::{
             build_authed_transport, serve_client_auto, ClientStatus, McpClientHandle,
             McpClientPool, McpServiceOwner, OAuthStatus, SHUTDOWN_TIMEOUT,
@@ -53,15 +53,16 @@ impl SecretResolverPort for RejectingSecretResolver {
 pub struct DynamicOAuthCredentialGuard {
     pool: Arc<McpClientPool>,
     connection: crate::mcp::client::McpConnectionKey,
-    store: Arc<FileCredentialStore>,
+    store: OAuthCredentialClient,
     credential_key: String,
+    clear_on_drop: std::sync::atomic::AtomicBool,
 }
 
 impl DynamicOAuthCredentialGuard {
     fn new(
         pool: Arc<McpClientPool>,
         connection: crate::mcp::client::McpConnectionKey,
-        store: Arc<FileCredentialStore>,
+        store: OAuthCredentialClient,
         credential_key: String,
     ) -> Self {
         Self {
@@ -69,26 +70,37 @@ impl DynamicOAuthCredentialGuard {
             connection,
             store,
             credential_key,
+            clear_on_drop: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
-    fn cleanup(&self) -> Result<(), DynamicMcpFailure> {
+    async fn cleanup(&self) -> Result<(), DynamicMcpFailure> {
         self.pool.revoke_oauth_connection(&self.connection);
         self.store
-            .clear_server_blocking(&self.credential_key)
+            .clear_server(&self.credential_key)
+            .await
             .map_err(|_| {
                 DynamicMcpFailure::new(
                     DynamicMcpErrorCode::ShutdownIncomplete,
                     DynamicMcpOperationState::Draining,
                     "Dynamic MCP OAuth credential cleanup did not complete",
                 )
-            })
+            })?;
+        self.clear_on_drop
+            .store(false, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 }
 
 impl Drop for DynamicOAuthCredentialGuard {
     fn drop(&mut self) {
         self.pool.revoke_oauth_connection(&self.connection);
+        if !self
+            .clear_on_drop
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
         if self
             .store
             .clear_server_blocking(&self.credential_key)
@@ -173,7 +185,16 @@ impl StagedMcpConnection {
     }
 
     pub async fn cleanup(mut self) -> Result<(), DynamicMcpFailure> {
-        let oauth_failure = self.oauth.take().and_then(|oauth| oauth.cleanup().err());
+        let oauth_failure = match self.oauth.take() {
+            Some(oauth) => {
+                let failure = oauth.cleanup().await.err();
+                oauth
+                    .clear_on_drop
+                    .store(false, std::sync::atomic::Ordering::Release);
+                failure
+            }
+            None => None,
+        };
         let service_failure = close_service(&mut self.service).await.err();
         let process_failure = close_process(self.process.as_ref()).await.err();
         shutdown_result(oauth_failure, service_failure.or(process_failure))
@@ -216,7 +237,10 @@ pub struct ActiveMcpConnection {
 
 impl ActiveMcpConnection {
     pub async fn close(&self) -> Result<(), DynamicMcpFailure> {
-        let oauth_failure = self.oauth.as_ref().and_then(|oauth| oauth.cleanup().err());
+        let oauth_failure = match &self.oauth {
+            Some(oauth) => oauth.cleanup().await.err(),
+            None => None,
+        };
         let service_failure = close_service(&mut *self.service.lock().await).await.err();
         let process_failure = close_process(self.process.as_ref()).await.err();
         shutdown_result(oauth_failure, service_failure.or(process_failure))
@@ -458,6 +482,13 @@ pub async fn prepare_single_server(
                 instance_key.incarnation_id.as_str(),
                 server_name
             );
+            let store = oauth_pool.oauth_credentials().map_err(|_| {
+                DynamicMcpFailure::new(
+                    DynamicMcpErrorCode::AuthFailed,
+                    DynamicMcpOperationState::Authorizing,
+                    "Dynamic MCP OAuth credentials were not injected",
+                )
+            })?;
             match oauth_pool.reserve_oauth_flow_scoped(connection.clone(), &flow_id) {
                 crate::mcp::client::OAuthStartDisposition::Started => {}
                 _ => {
@@ -468,11 +499,10 @@ pub async fn prepare_single_server(
                     ));
                 }
             }
-            let store = Arc::new(FileCredentialStore::new());
             let guard = DynamicOAuthCredentialGuard::new(
                 Arc::clone(&oauth_pool),
                 connection.clone(),
-                Arc::clone(&store),
+                store.clone(),
                 credential_key.clone(),
             );
             progress(DynamicMcpOperationState::Authorizing);
@@ -501,9 +531,15 @@ pub async fn prepare_single_server(
                     OAuthFlowEvent::AuthorizationFailed { .. } => {}
                     _ => {}
                 });
-            let mut manager = OAuthFlowManager::new_with_arc(Arc::clone(&store), callback);
+            let mut manager = OAuthFlowManager::new_with_arc(store, callback);
             let auth_result = manager
-                .run_oauth_flow_with_id(&flow_id, &credential_key, url, &OAuthConfig::default())
+                .run_oauth_flow_with_key(
+                    &flow_id,
+                    &server_name,
+                    &credential_key,
+                    url,
+                    &OAuthConfig::default(),
+                )
                 .await;
             oauth_pool.release_oauth_flow_scoped(&connection, &flow_id);
             auth_result.map_err(|_| {
@@ -513,15 +549,16 @@ pub async fn prepare_single_server(
                     "Dynamic MCP OAuth authorization failed",
                 )
             })?;
-            let auth_manager = manager
-                .get_authorization_manager(&credential_key)
-                .ok_or_else(|| {
-                    DynamicMcpFailure::new(
-                        DynamicMcpErrorCode::AuthFailed,
-                        DynamicMcpOperationState::Authorizing,
-                        "Dynamic MCP OAuth authorization did not complete",
-                    )
-                })?;
+            let auth_manager =
+                manager
+                    .get_authorization_manager(&server_name)
+                    .ok_or_else(|| {
+                        DynamicMcpFailure::new(
+                            DynamicMcpErrorCode::AuthFailed,
+                            DynamicMcpOperationState::Authorizing,
+                            "Dynamic MCP OAuth authorization did not complete",
+                        )
+                    })?;
             progress(DynamicMcpOperationState::Connecting);
             oauth_lease = Some(guard);
             serve_client_auto(

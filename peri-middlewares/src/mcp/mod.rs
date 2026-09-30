@@ -38,7 +38,7 @@ pub use apps::{
     RawCallToolResult, RawMcpResource, RawMcpTool, ToolVisibility, MCP_APPS_VERSION,
     MCP_APP_MIME_TYPE, MCP_UI_EXTENSION,
 };
-pub use auth_store::{AuthStoreError, FileCredentialStore, PerServerCredentialStore};
+pub use auth_store::{OAuthCredentialClient, PerServerCredentialStore};
 pub use callback_server::{parse_code_from_url, CallbackError, OAuthCallbackServer};
 pub use channel_handler::ChannelHandler;
 pub use client::{

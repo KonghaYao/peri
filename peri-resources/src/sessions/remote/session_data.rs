@@ -565,6 +565,14 @@ fn unsupported_behavior(behavior: &'static str) -> SessionResourceError {
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
+    fn oauth_credentials(
+        self: Arc<Self>,
+    ) -> Option<Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
+        Some(Arc::new(super::oauth_credentials::RemoteOAuthCredentials(
+            self,
+        )))
+    }
+
     async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         let store = self.store().await?;
         if store.fetch_row(&StatementSpec::bare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'session_environments'")).await?.is_none() {

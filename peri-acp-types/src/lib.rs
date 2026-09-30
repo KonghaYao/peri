@@ -62,6 +62,7 @@ pub mod mcp_skills;
 pub mod messages;
 pub mod meta_harness;
 pub mod model;
+pub mod oauth_credentials;
 pub mod peri_caps;
 pub use peri_caps::PeriCaps;
 pub mod permission;

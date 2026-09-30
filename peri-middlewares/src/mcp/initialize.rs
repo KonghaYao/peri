@@ -6,7 +6,7 @@ use rmcp::{
 };
 
 use super::{
-    auth_store::FileCredentialStore,
+    auth_store::static_credential_key,
     builtin::runtime::BUILTIN_CONVERGE_TIMEOUT,
     channel_handler::ChannelHandler,
     client::{
@@ -22,6 +22,10 @@ use super::{
 #[cfg(test)]
 #[path = "initialize_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "initialize_oauth_test.rs"]
+mod oauth_tests;
 
 /// 三分类超时选择（IF-D1）：由传输形态决定，**禁止**再写成「http / 否则 stdio」的二元
 /// 判定——那会让 builtin 复用 stdio 超时，并把失败日志的 `transport` 字段写成事实错误。
@@ -234,11 +238,10 @@ impl McpClientPool {
 
         // OAuth 事件回调注入 pool（spawn_oauth_flow / start_oauth_flow 读取；
         // 无回调时授权不自动触发——由 host pool 统一执行，本 pool 仅标记
-        // NeedsAuthorization，授权完成后经共享凭证文件恢复）。
+        // NeedsAuthorization，授权完成后经共享凭据服务恢复）。
         if let Some(cb) = oauth_event_callback {
             pool.set_oauth_event_callback(cb);
         }
-        let token_store = Arc::new(FileCredentialStore::new());
 
         for (name, server_config) in &config.mcp_servers {
             pool.configs
@@ -384,17 +387,29 @@ impl McpClientPool {
                     ref headers,
                     ref oauth,
                 } => {
-                    let oauth_cfg = oauth.as_ref().cloned().or_else(|| {
-                        // 无显式 OAuth 配置时：若凭证文件已有该 server 的 token，
-                        // 用默认配置走恢复路径（run_oauth_flow 快速路径跳过浏览器）。
-                        match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(token_store.load_server(name))) {
-                            Ok(Some(_)) => {
-                                tracing::info!(server = %name, "发现已保存的 OAuth 凭证，使用默认配置恢复");
-                                Some(OAuthConfig::default())
-                            }
-                            _ => None,
+                    let token_store = match pool.oauth_credentials() {
+                        Ok(client) => client,
+                        Err(error) => {
+                            Self::insert_failed(&pool, name, error.to_string());
+                            commit_discovery_failure(&pool, name, false);
+                            continue;
                         }
-                    });
+                    };
+                    let oauth_cfg = if let Some(config) = oauth.as_ref() {
+                        Some(config.clone())
+                    } else {
+                        let default_oauth = OAuthConfig::default();
+                        let key = static_credential_key(name, url, &default_oauth);
+                        match token_store.load_server(&key).await {
+                            Ok(Some(_)) => Some(default_oauth),
+                            Ok(None) => None,
+                            Err(error) => {
+                                Self::insert_failed(&pool, name, error.to_string());
+                                commit_discovery_failure(&pool, name, false);
+                                continue;
+                            }
+                        }
+                    };
                     if oauth_cfg.is_some() {
                         if pool.oauth_event_callback().is_some() {
                             // host pool：不主动触发授权（避免启动即弹 popup
@@ -405,8 +420,8 @@ impl McpClientPool {
                             continue;
                         }
                         // TUI 面板池：无 UI 交互通道，走快速路径——尝试恢复
-                        // 磁盘凭证直接连接（不弹窗）；凭据缺失/失效时保持
-                        // NeedsAuthorization，由 host pool 授权后共享凭证文件
+                        // 存储凭证直接连接（不弹窗）；凭据缺失/失效时保持
+                        // NeedsAuthorization，由 host pool 授权后共享凭据服务
                         // 恢复。异步执行不阻塞初始化。
                         pool.spawn_oauth_flow(name);
                         continue;
