@@ -9,6 +9,7 @@ use langfuse_client::{
 use super::config::LangfuseConfig;
 use super::drop_telemetry::LangfuseDropRegistry;
 use super::session_like::LangfuseSessionLike;
+use super::turn_traces::TurnTraceRegistry;
 
 /// Langfuse 进程级共享连接状态。
 ///
@@ -22,6 +23,8 @@ pub struct LangfuseSession {
     pub drop_registry: LangfuseDropRegistry,
     pub session_id: String,
     pub config: LangfuseConfig,
+    /// sid → 活跃 turn trace；tracer 登记/清理，指标出口查表归属。
+    pub turn_traces: TurnTraceRegistry,
 }
 
 /// 部署退出结果；HTTP 失败和 worker 异常均不等同于成功发送。
@@ -106,6 +109,7 @@ impl LangfuseSession {
             drop_registry: LangfuseDropRegistry::default(),
             session_id,
             config,
+            turn_traces: TurnTraceRegistry::default(),
         })
     }
 }
@@ -125,6 +129,10 @@ impl LangfuseSessionLike for LangfuseSession {
 
     fn drop_registry(&self) -> &LangfuseDropRegistry {
         &self.drop_registry
+    }
+
+    fn turn_traces(&self) -> &TurnTraceRegistry {
+        &self.turn_traces
     }
 }
 

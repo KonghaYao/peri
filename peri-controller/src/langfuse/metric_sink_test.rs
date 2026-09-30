@@ -100,9 +100,106 @@ fn non_error_metric_keeps_default_level() {
     assert!(body.metadata.as_ref().unwrap()["sid"].is_null());
 }
 
+fn event_trace_id(event: &IngestionEvent) -> String {
+    let IngestionEvent::EventCreate { body, .. } = event else {
+        panic!("metrics must be reported as EventCreate");
+    };
+    body.trace_id.clone().expect("event must carry a trace id")
+}
+
+#[test]
+fn metric_follows_active_turn_trace() {
+    let session = FakeLangfuseSession::new("sess_metrics_active");
+    session.turn_traces().register("sid-1", "turn-trace-1");
+    let sink = sink_with(&session);
+
+    sink.record(metric(
+        "tool.error",
+        serde_json::json!({}),
+        Some("sid-1"),
+        None,
+    ));
+
+    let events = session.events_snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        event_trace_id(&events[0]),
+        "turn-trace-1",
+        "metric must attach to the active turn trace, not open its own"
+    );
+}
+
+#[test]
+fn metric_without_active_trace_opens_own_root_trace() {
+    let session = FakeLangfuseSession::new("sess_metrics_fallback");
+    session
+        .turn_traces()
+        .register("sid-other", "turn-trace-other");
+    let sink = sink_with(&session);
+
+    // sid 未登记（或无 sid）→ 回退独立 root trace，事件不丢
+    sink.record(metric(
+        "mcp.error",
+        serde_json::json!({}),
+        Some("sid-1"),
+        None,
+    ));
+
+    let events = session.events_snapshot();
+    assert_eq!(events.len(), 1);
+    let trace_id = event_trace_id(&events[0]);
+    assert_ne!(trace_id, "turn-trace-other");
+    assert!(!trace_id.is_empty());
+}
+
+#[test]
+fn metric_after_turn_clear_falls_back_to_own_trace() {
+    let session = FakeLangfuseSession::new("sess_metrics_closed");
+    session.turn_traces().register("sid-1", "turn-trace-1");
+    session.turn_traces().clear("sid-1", "turn-trace-1");
+    let sink = sink_with(&session);
+
+    sink.record(metric(
+        "tool.error",
+        serde_json::json!({}),
+        Some("sid-1"),
+        None,
+    ));
+
+    let events = session.events_snapshot();
+    assert_eq!(events.len(), 1);
+    assert_ne!(event_trace_id(&events[0]), "turn-trace-1");
+}
+
+#[test]
+fn metrics_of_different_sids_follow_their_own_trace() {
+    let session = FakeLangfuseSession::new("sess_metrics_isolated");
+    session.turn_traces().register("sid-a", "turn-trace-a");
+    session.turn_traces().register("sid-b", "turn-trace-b");
+    let sink = sink_with(&session);
+
+    sink.record(metric(
+        "tool.error",
+        serde_json::json!({}),
+        Some("sid-a"),
+        None,
+    ));
+    sink.record(metric(
+        "tool.error",
+        serde_json::json!({}),
+        Some("sid-b"),
+        None,
+    ));
+
+    let events = session.events_snapshot();
+    assert_eq!(event_trace_id(&events[0]), "turn-trace-a");
+    assert_eq!(event_trace_id(&events[1]), "turn-trace-b");
+}
+
 /// 入队被背压拒绝的出口：指标不 panic、不丢证据（丢弃记入 drop registry）。
 struct QueueFullSession {
     drop_registry: LangfuseDropRegistry,
+    turn_traces: crate::langfuse::TurnTraceRegistry,
     last_trace_id: LazyLock<parking_lot::Mutex<Option<String>>>,
 }
 
@@ -128,12 +225,17 @@ impl LangfuseSessionLike for QueueFullSession {
     fn drop_registry(&self) -> &LangfuseDropRegistry {
         &self.drop_registry
     }
+
+    fn turn_traces(&self) -> &crate::langfuse::TurnTraceRegistry {
+        &self.turn_traces
+    }
 }
 
 #[test]
 fn rejected_metric_is_recorded_in_drop_registry() {
     let session = Arc::new(QueueFullSession {
         drop_registry: LangfuseDropRegistry::default(),
+        turn_traces: crate::langfuse::TurnTraceRegistry::default(),
         last_trace_id: LazyLock::new(|| parking_lot::Mutex::new(None)),
     });
     let sink = LangfuseMetricsSink::new(Arc::clone(&session) as Arc<dyn LangfuseSessionLike>);

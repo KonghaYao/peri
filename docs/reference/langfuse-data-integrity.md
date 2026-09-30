@@ -55,7 +55,7 @@ id 前缀即类型签名：`gen_*`=GENERATION、`span_*`=SPAN、`obs_*`=TOOL、`
 | SPAN(compact) | `compact` / `micro-compact` | id(`span_*`)、input、output | metadata | **name 即类型**：Micro 策略记录 `micro-compact`，Full/Smart/Skip 记录 `compact`（2026-08-15 起）；input=执行前状态（strategy/trigger/estimated_tokens_before/cache_hit_rate_before），output=执行结果（summary/files_count/skills_count/micro_cleared/duration_ms/estimated_tokens_saved/estimated_tokens_after/full_escalation_reason/outcome）；失败时 output=`{"error_class":"compact_failure","message":...}` |
 | TOOL | 工具名（Bash/Read/Edit…） | id(`obs_*`)、input（工具入参）、output | level | 失败时 output 为 `{"error_class": "tool_failure"}` |
 | AGENT | `agent-run` / `subagent-*` | id、output、input | — | input = on_turn_start 的对话输入（2026-08-15 已恢复上报） |
-| EVENT | `cache-hit-rate-low` | id、input（告警指标）、level | output | 告警类；指标事件（`tool.error` / `mcp.error` 等）同属 EVENT，来源见 `peri-controller/src/langfuse/metric_sink.rs` |
+| EVENT | `cache-hit-rate-low` | id、input（告警指标）、level | output | 告警类；指标事件（`tool.error` / `mcp.error` 等）同属 EVENT，来源见 `peri-controller/src/langfuse/metric_sink.rs`。归属：按指标自带 `sid` 挂到该会话活跃 turn 的 trace（`turn_traces.rs` 注册表，turn 开始登记/结束清理）；无活跃 trace 或无 `sid` 时回退独立 root trace，事件不丢 |
 
 ### 字段来源规则（OTLP attribute 映射）
 
@@ -63,7 +63,7 @@ id 前缀即类型签名：`gen_*`=GENERATION、`span_*`=SPAN、`obs_*`=TOOL、`
 - `model`：`langfuse.observation.model.name`；参数：`...model.parameters`
 - `usage`：`langfuse.observation.usage_details`（含 cache_read/cache_creation_input_tokens）
 - `metadata`：`langfuse.observation.metadata`
-- 上传侧按事件职责构造：`peri-controller/src/langfuse/tracer/llm_events.rs` 构造 `GenerationBody`，`span_events.rs` 构造阶段/Compact/Workflow 的 `SpanBody`，`tool_events.rs::emit_tools_flush` 构造工具批次 `SpanBody` 与工具 `ObservationBody`，`turn.rs` 构造 Trace/Session/agent-run，`metric_sink.rs` 构造指标 `EventBody`（`peri-agent::metrics` 出口；无 Langfuse 出口时指标不落盘）。共同入队入口是 `event_builder.rs::try_add_or_warn_via_session`；`tracer/mod.rs` 保留门面与共享状态。
+- 上传侧按事件职责构造：`peri-controller/src/langfuse/tracer/llm_events.rs` 构造 `GenerationBody`，`span_events.rs` 构造阶段/Compact/Workflow 的 `SpanBody`，`tool_events.rs::emit_tools_flush` 构造工具批次 `SpanBody` 与工具 `ObservationBody`，`turn.rs` 构造 Trace/Session/agent-run，`metric_sink.rs` 构造指标 `EventBody`（`peri-agent::metrics` 出口；无 Langfuse 出口时指标不落盘；归属查 `turn_traces.rs` 的 sid→活跃 trace 注册表，缺登记则独立 root trace）。共同入队入口是 `event_builder.rs::try_add_or_warn_via_session`；`tracer/mod.rs` 保留门面与共享状态。
 
 ---
 

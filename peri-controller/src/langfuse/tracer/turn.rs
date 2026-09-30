@@ -13,6 +13,12 @@ impl LangfuseTracer {
     /// 对话轮次开始：创建 Trace 根 span + Session + 推迟 agent-run Observation。
     /// 如有 user_id 配置，在 TraceCreate/SessionCreate 中设置 user 维度。
     pub fn on_turn_start(&mut self, input: &str) {
+        // 先登记 sid → 本 turn trace（不受采样影响）：指标出口据此把指标挂到
+        // 当前 turn 的 trace 下；未采样 turn 的指标本就会自行产生观测。
+        self.session
+            .turn_traces()
+            .register(&self.session_id, &self.trace_id);
+
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
@@ -83,6 +89,12 @@ impl LangfuseTracer {
     /// 工作区间，故用 Event 类型（无 end_time 语义），不产生误导性的 0ms span。
     pub fn on_turn_end(&mut self, outcome: TurnTelemetryOutcome) -> tokio::task::JoinHandle<()> {
         use std::sync::Arc;
+
+        // 先清理活跃 turn 登记（compare-and-remove：不误删后一 turn），
+        // 之后发出的指标回退独立 root trace。
+        self.session
+            .turn_traces()
+            .clear(&self.session_id, &self.trace_id);
 
         let fallback_status = GenerationFallbackStatus::for_outcome(&outcome);
         let failure = fallback_status.failure;

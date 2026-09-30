@@ -960,3 +960,24 @@ async fn test_tool_observation_error_marks_error_class() {
         "错误工具 output 应保留 error_class 与 error_message 标记"
     );
 }
+
+// ── 活跃 turn trace 登记（指标出口归属） ──────────────────────────────────────
+
+#[tokio::test]
+async fn turn_lifecycle_registers_and_clears_active_trace_for_metrics() {
+    let (mut t, session) = make_tracer(1.0);
+    let trace_id = t.trace_id.clone();
+
+    t.on_turn_start("turn_metrics");
+    assert_eq!(
+        session.turn_traces().resolve("sess_smoke").as_deref(),
+        Some(trace_id.as_str()),
+        "turn 开始后指标出口应能取到本 turn 的 trace"
+    );
+
+    let _flush = t.on_turn_end(TurnTelemetryOutcome::Completed);
+    assert!(
+        session.turn_traces().resolve("sess_smoke").is_none(),
+        "turn 结束后应清理活跃登记，后续指标回退独立 root trace"
+    );
+}

@@ -35,7 +35,8 @@ peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引
 | 修改 v2 事件转换 | `peri-controller/src/langfuse/bridge/v2_conversion.rs` | `from_render_event`、`from_observe_event` | 保留 agent identity、request_id、usage 和 compact 语义数据，不修改事件来源 |
 | 维护 bridge stage/middleware 配对 | `peri-controller/src/langfuse/bridge/lifecycle.rs` | `start_stage`、`finish_stage`、`finish_middleware` | stage 按 agent 匹配，找不到时领取 tracer 重放句柄；保留 tracer 锁释放/重取边界 |
 | 查看 bridge 收到的子 agent 事件 | `peri-controller/src/langfuse/bridge/lifecycle.rs` | `SubagentTelemetry::on_start`、`on_stop` | 单锁集合与计数只描述此 bridge 收到的事件，不决定观测 parent 或关闭 |
-| 调整 turn 开始与终止 | `peri-controller/src/langfuse/tracer/turn.rs` | `on_turn_start`:15、`on_turn_end`:84 | stage → generation → 主工具批次 → 子 agent → error → agent-run 同步入队，最后返回 spawn 的 flush 句柄 |
+| 调整 turn 开始与终止 | `peri-controller/src/langfuse/tracer/turn.rs` | `on_turn_start`:15、`on_turn_end`:84 | stage → generation → 主工具批次 → 子 agent → error → agent-run 同步入队，最后返回 spawn 的 flush 句柄；`on_turn_start` 首步登记 sid→本 turn trace（不受采样影响），`on_turn_end` 首步 compare-and-remove 清理，供指标出口归属 |
+| 改指标事件归属（metrics → Langfuse） | `peri-controller/src/langfuse/{metric_sink,turn_traces}.rs` | `LangfuseMetricsSink::record`；`TurnTraceRegistry::{register,clear,resolve}` | 指标按自带 `sid` 取该会话活跃 turn 的 trace 归属（不再各开 root trace）；无活跃登记（未开始/已结束/无 sid）时回退独立 root trace，事件不丢；`clear` 只移除仍指向本 tracer trace 的登记；出口由 ACP host 在 Langfuse 可用时安装（无 Langfuse 不落盘、不发电） |
 | 修复遗留 stage/generation | `peri-controller/src/langfuse/tracer/turn_fallback.rs` | `close_stage_parents`、`close_abandoned_generations`、`GenerationFallbackStatus::for_outcome` | 先补 parent，再按终态或稳定失败分类补 child；保留未解析 owner 的诊断元数据 |
 | 修改错误遥测 | `peri-controller/src/langfuse/tracer/turn_error.rs` | `emit_error_turn`、`failure_error_class`、`failure_output` | 未采样 fatal 先创建合成 parent，再发 ErrorTurn；只写稳定错误分类和允许的 HTTP 状态 |
 | 修改边界错误 | `peri-controller/src/error.rs` | `ControllerError`、`SubscriptionError` | Controller 错误保留 Runtime 来源；广播错误区分 Lagged 和 Closed |

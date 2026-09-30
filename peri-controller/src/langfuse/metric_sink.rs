@@ -1,8 +1,11 @@
 //! 指标事件的 Langfuse 出口。
 //!
 //! `peri-agent::metrics` 事件在此投影为 Langfuse **event** 观测（`EventCreate`），
-//! 不占用 span / generation / trace 类型。指标事件不隶属某个 turn，因此每条事件
-//! 以自有 trace id 作为 root event 上报；`sid` / `rid` 保留在 metadata 中供关联。
+//! 不占用 span / generation / trace 类型。
+//!
+//! 归属：指标自带 `sid`（会话 = thread id）时，优先挂到该 sid 当前活跃 turn 的
+//! trace（见 [`TurnTraceRegistry`](crate::langfuse::TurnTraceRegistry)）；没有活跃
+//! trace（未登记 / turn 已结束 / 指标无 sid）时回退为独立 root trace，事件不丢。
 
 use std::sync::Arc;
 
@@ -26,7 +29,12 @@ impl LangfuseMetricsSink {
 
 impl MetricsSink for LangfuseMetricsSink {
     fn record(&self, event: MetricEvent) {
-        let trace_id = new_uuid();
+        // 有活跃 turn trace 时归属该 trace（不再新开）；否则回退独立 root trace。
+        let trace_id = event
+            .sid
+            .as_deref()
+            .and_then(|sid| self.session.turn_traces().resolve(sid))
+            .unwrap_or_else(new_uuid);
         let body = EventBody {
             id: Some(new_uuid()),
             trace_id: Some(trace_id.clone()),

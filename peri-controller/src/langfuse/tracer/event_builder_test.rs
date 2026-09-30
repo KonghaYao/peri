@@ -11,6 +11,7 @@ use crate::langfuse::drop_telemetry::{
 
 struct FailingSession {
     drops: LangfuseDropRegistry,
+    turn_traces: crate::langfuse::TurnTraceRegistry,
 }
 
 impl LangfuseSessionLike for FailingSession {
@@ -29,12 +30,17 @@ impl LangfuseSessionLike for FailingSession {
     fn drop_registry(&self) -> &LangfuseDropRegistry {
         &self.drops
     }
+
+    fn turn_traces(&self) -> &crate::langfuse::TurnTraceRegistry {
+        &self.turn_traces
+    }
 }
 
 #[test]
 fn test_try_add_failure_records_safe_trace_drop_snapshot() {
     let session = FailingSession {
         drops: LangfuseDropRegistry::new(1),
+        turn_traces: crate::langfuse::TurnTraceRegistry::default(),
     };
     let event = IngestionEvent::TraceCreate {
         id: "event-id".to_string(),
