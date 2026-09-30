@@ -13,7 +13,7 @@
 //! 场景下 stage span 父子关系错乱（span 挂错、成对丢失）的问题。
 
 use peri_agent::agent::events::{Stage, StageStatus};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// 无 agent 标识的 v1 事件（ExecutorEvent 路径 / tracer 直调）使用的固定 slot key。
 /// v2 ObserveEvent 路径使用事件自带的 agent_id 字符串。
@@ -28,31 +28,41 @@ pub struct StageHandle {
     pub parent_observation_id: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct WorkflowStartRecord {
+    pub workflow_id: String,
     pub span_id: String,
+    pub stage_span_id: String,
+    pub trace_id: String,
+    pub start_time: String,
+    pub plan: String,
+    pub parent_observation_id: String,
 }
 
 pub(crate) struct WorkflowEndRecord {
-    pub span_id: String,
+    pub start: WorkflowStartRecord,
     pub agents_spawned: usize,
     pub tool_calls: usize,
 }
 
 struct ActiveStage {
     handle: StageHandle,
-    workflow_spans: HashMap<String, String>,
     mq_counts: Option<(usize, usize, usize)>,
 }
 
 pub(crate) struct StageSpans {
     /// 各 agent 的活跃 stage（key = agent_id）。并行 subagent 各自独立 slot。
     active: HashMap<String, ActiveStage>,
+    workflows: HashMap<String, WorkflowStartRecord>,
+    closed_stage_spans: HashSet<String>,
 }
 
 impl StageSpans {
     pub(crate) fn new() -> Self {
         Self {
             active: HashMap::new(),
+            workflows: HashMap::new(),
+            closed_stage_spans: HashSet::new(),
         }
     }
 
@@ -86,14 +96,8 @@ impl StageSpans {
         } else {
             None
         };
-        self.active.insert(
-            agent_id.to_string(),
-            ActiveStage {
-                handle,
-                workflow_spans: HashMap::new(),
-                mq_counts,
-            },
-        );
+        self.active
+            .insert(agent_id.to_string(), ActiveStage { handle, mq_counts });
         (
             StageHandle {
                 span_id,
@@ -111,7 +115,7 @@ impl StageSpans {
         agent_id: &str,
         handle: &StageHandle,
         _status: StageStatus,
-    ) {
+    ) -> bool {
         // 仅当 handle 匹配该 agent 当前活跃 stage 时才清理。
         // 不匹配说明该 span 已被同一 agent 的新 stage 覆盖（或事件乱序），
         // 不误清其他 agent 的活跃 slot。
@@ -126,9 +130,10 @@ impl StageSpans {
                 span_id = %handle.span_id,
                 "StageEnded handle 与活跃 stage 不匹配，跳过清理"
             );
-            return;
+            return false;
         }
         self.active.remove(agent_id);
+        true
     }
 
     /// 取出全部活跃 stage handle 并清空（turn 结束 / subagent 关闭兜底用）。
@@ -175,22 +180,29 @@ impl StageSpans {
     pub(crate) fn on_workflow_start(
         &mut self,
         workflow_id: &str,
-        _plan: &str,
-    ) -> WorkflowStartRecord {
+        plan: &str,
+    ) -> Option<&WorkflowStartRecord> {
         // Workflow 是 v1 主 agent 概念，无 agent_id 事件来源。固定使用
         // MAIN_AGENT_KEY slot：并行 subagent 的 Act stage 与主 agent 同时
         // 活跃时，workflow span 不再可能挂到任意 Act slot（此前可能存错或
         // 在 on_workflow_end 时因选到 subagent 的 slot 而无法关闭）。
-        let span_id = match self.active.get_mut(MAIN_AGENT_KEY) {
-            Some(a) if a.handle.stage == Stage::Act => {
-                let span_id = format!("span_{}", uuid::Uuid::now_v7());
-                a.workflow_spans
-                    .insert(workflow_id.to_string(), span_id.clone());
-                span_id
-            }
-            _ => String::new(),
-        };
-        WorkflowStartRecord { span_id }
+        let active = self.active.get(MAIN_AGENT_KEY)?;
+        if active.handle.stage != Stage::Act {
+            return None;
+        }
+        Some(
+            self.workflows
+                .entry(workflow_id.to_string())
+                .or_insert_with(|| WorkflowStartRecord {
+                    workflow_id: workflow_id.to_string(),
+                    span_id: format!("span_{}", uuid::Uuid::now_v7()),
+                    stage_span_id: active.handle.span_id.clone(),
+                    trace_id: active.handle.trace_id.clone(),
+                    start_time: super::event_builder::now_rfc3339(),
+                    plan: plan.to_string(),
+                    parent_observation_id: active.handle.parent_observation_id.clone(),
+                }),
+        )
     }
 
     pub(crate) fn on_workflow_end(
@@ -199,16 +211,32 @@ impl StageSpans {
         agents_spawned: usize,
         tool_calls: usize,
     ) -> Option<WorkflowEndRecord> {
-        let a = self.active.get_mut(MAIN_AGENT_KEY)?;
-        if a.handle.stage != Stage::Act {
-            return None;
-        }
-        let span_id = a.workflow_spans.get(workflow_id)?.clone();
+        let start = self.workflows.remove(workflow_id)?;
         Some(WorkflowEndRecord {
-            span_id,
+            start,
             agents_spawned,
             tool_calls,
         })
+    }
+
+    pub(crate) fn take_workflows_for_stage(
+        &mut self,
+        stage_span_id: &str,
+    ) -> Vec<WorkflowStartRecord> {
+        let workflow_ids: Vec<String> = self
+            .workflows
+            .iter()
+            .filter(|(_, record)| record.stage_span_id == stage_span_id)
+            .map(|(workflow_id, _)| workflow_id.clone())
+            .collect();
+        workflow_ids
+            .into_iter()
+            .filter_map(|workflow_id| self.workflows.remove(&workflow_id))
+            .collect()
+    }
+
+    pub(crate) fn close_stage_once(&mut self, span_id: &str) -> bool {
+        self.closed_stage_spans.insert(span_id.to_string())
     }
 }
 

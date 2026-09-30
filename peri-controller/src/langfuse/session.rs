@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::{sync::Arc, time::Duration};
 
+use langfuse_client::client::ExportConfig;
 use langfuse_client::{
     BackpressurePolicy, Batcher, BatcherConfig, IngestionEvent, LangfuseClient, LangfuseError,
 };
@@ -82,15 +83,31 @@ impl LangfuseSession {
         let public_key = config.public_key.as_deref()?;
         let secret_key = config.secret_key.as_deref()?;
 
-        let client = Arc::new(LangfuseClient::new(
+        let client = LangfuseClient::new(
             public_key,
             secret_key,
             &config.host,
             3, // max_retries
-        ));
+        )
+        .with_export_config(ExportConfig {
+            max_request_bytes: config.batch_max_bytes,
+            ..Default::default()
+        });
+        let client = match client {
+            Ok(client) => Arc::new(client),
+            Err(error) => {
+                tracing::warn!(%error, "Langfuse export configuration rejected");
+                return None;
+            }
+        };
 
         let batcher_config = BatcherConfig {
             max_events: config.batch_max_events,
+            queue_capacity: config.batch_queue_capacity,
+            max_in_flight: config.batch_max_in_flight,
+            max_event_bytes: config.batch_max_event_bytes,
+            max_batch_bytes: config.batch_max_bytes,
+            max_queue_bytes: config.batch_max_queue_bytes,
             flush_interval: Duration::from_secs(config.batch_flush_interval_secs),
             backpressure: BackpressurePolicy::DropNew,
             max_retries: 3,

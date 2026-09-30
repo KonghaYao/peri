@@ -1,56 +1,51 @@
 # langfuse-client 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-11
-> 依据：langfuse-client/src 源码、Doc.md（x-langfuse-ingestion-version: 4）
+> 依据：源码、契约测试与 Langfuse OTLP v4。现行入口以代码为准。
 
-## 架构速览
+## 数据流与边界
 
-- 数据流：`调用方构造 IngestionEvent → Batcher（有界命令队列 + 单个后台 task）→ LangfuseClient::ingest（OTLP 转换 + HTTP 重试）→ Langfuse API`
-- 入口：`LangfuseClient::new`（client.rs:31）；`Batcher::{new,try_new}`（batcher.rs，先验证配置再启动后台 task）；`ClientConfig::from_env`（config.rs:25，读 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL）
-- 稳定不变量：发送走 OTLP 端点 `POST /api/public/otel/v1/traces`，必带 `x-langfuse-ingestion-version: 4` 头与 Basic auth（base64(public_key:secret_key)，client.rs:32-34）；4xx 不重试，网络错误/5xx 按 max_retries 指数退避（1s, 2s, 4s…）
+`生产观测完成 → IngestionEvent → 有界准入 → FIFO 聚合/屏障 owner → 有界并发 HTTP → Langfuse`
 
-## 速查表
+- `Batcher` 独占 worker/join 所有权；worker 的 `JoinSet` 持有全部发送任务。生产者不等待网络。
+- 队列命令槽、排队 JSON 字节、单事件 JSON 字节、单批事件数及 HTTP 并发分别约束；HTTP 编码及响应另外限额。
+- 生产者尚未提交的事件、原始对象的 allocator capacity 和进程 RSS 不属于这些序列化字节预算。
+- flush 在 FIFO 位置提交当前 buffer，等待前缀全部发送任务再确认；后缀在确认之后才消费，不误等待后续请求。
+- 完整成功不等于服务端已持久落库。HTTP 200 中的部分拒收、无效/截断响应及发送失败会进入失败账本。
+- shutdown 关闭准入、排空已提交命令并 join 全部发送；取消等待保留原 worker handle，重复观察同一终态。
 
-| 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
-| --- | --- | --- | --- |
-| 改 HTTP 发送/重试 | `src/client.rs` | `LangfuseClient::new`（:31）；`from_config`（:52）；`ingest`（:73） | 空事件直接 Ok；4xx 返回 `LangfuseError::IngestionApi`；5xx/网络错误重试 `max_retries` 次指数退避；reqwest 连接超时 5s / 请求超时 30s（:37-40） |
-| 改批量/背压策略 | `src/batcher.rs` + `src/batcher/{admission,worker}.rs` + `src/config.rs` | `Batcher::{add,try_add}`；`Admission::{try_add,send}`；`BatchWorker::run` | 容量 = max_events 个命令槽（含 Flush），Semaphore 等容量，短锁提交/关闭；DropOldest 只替换最后一个已准入 Flush 后的最旧 Add，新事件追加队尾，无可驱逐事件则 QueueFull；在途 HTTP 不变，Block 取消准入前不产生事件 |
-| 改 flush 错误确认 | `src/batcher.rs` + `src/batcher/failure.rs` | `Batcher::flush`；`FailureLedger::{record_failure,snapshot,observe}` | 已准入 Flush 及其前缀不可驱逐，准入前已替换事件不在屏障集合；FIFO barrier 返回尚未确认的失败水位，实际收到 Err 才确认，取消/worker ack 不清错，旧确认不影响后续失败，也不清除 shutdown 的累计失败 |
-| 改 shutdown 所有权 | `src/batcher.rs` + `src/batcher/{admission,shutdown,worker}.rs` | `Batcher::shutdown`；`Admission::close`；`CommandReceiver::drop`；`WorkerOwner::join` | 独立 watch 关闭准入/semaphore，只排空已提交命令，不等待持有 permit 的未提交生产者；receiver drop 唤醒发送者并释放 ack；保留原 JoinHandle 跨取消/重试；最终快照覆盖部署全部发送失败（含已观察失败），区分 HTTP 与任务失败 |
-| 改遥测事件类型 | `src/types/mod.rs` | `IngestionEvent`（:330，12 变体）；`ObservationType`（:35）；`event_timestamp`（:14） | 所有变体必带 `id` + `timestamp` + `body`；body 结构 `deny_unknown_fields`；`SessionCreate/Update` 用 `session::SessionBody`（session.rs:6） |
-| 改 Ingestion→OTLP 映射 | `src/types/conversion.rs` + `src/types/conversion/` | `ingestion_events_to_otel`（:31，`pub(crate)`）；`trace_create` / `span_create` / `generation_create` / `observation_create` / `score_create` 等私有纯函数 | 唯一穷尽 dispatch 按输入顺序逐事件产生 span，不合并 Create/Update；事件族保留各自属性差异；共享 ID 去 dash（`build_span_id` :17）与 RFC3339→nano（:130） |
-| 改 OTLP 载荷结构 | `src/types/otlp.rs` | `OtelTraceExportRequest`（:10）；`OtelSpan`（:56）；`OtelAttributeValue::string/int/bool`（:118/127/136） | 直接对应 OTLP JSON wire 格式；属性值支持 string/int/double/bool；Score 数值优先转 double |
-| 改错误类型 | `src/error.rs` | `LangfuseError`（Http / JsonSerialize / IngestionApi / QueueFull / ChannelClosed / WorkerJoinFailed / Config） | 队列满 → QueueFull（add）；通道关闭 → ChannelClosed（try_add）；WorkerJoinFailed 的 cancelled 字段区分取消/panic，不暴露 payload |
-| 改配置读取/验证 | `src/config.rs` + `src/batcher.rs` | `ClientConfig::from_env`；`BatcherConfig::{from_client,validate}`；`Batcher::{new,try_new}` | 默认 max_events=50 / interval=10s / DropNew；容量须在 1..=Semaphore::MAX_PERMITS 且间隔非零；try_new 在 spawn 前返回 Config，new 同步 panic；legacy BatcherConfig.max_retries 保留但不生效，真实重试仅由传入 LangfuseClient 决定 |
+## 入口速查
 
-## 子系统
-
-| 功能 | 文件 | 入口/关键点 |
+| 需求 | 文件与入口 | 现行行为 |
 | --- | --- | --- |
-| HTTP 客户端 | src/client.rs | `LangfuseClient`（:17，持 reqwest::Client + auth_header + max_retries） |
-| 批量聚合公开面 | src/batcher.rs | `Batcher`；`BatcherCommand`（Add/Flush）；构造验证、add/flush/shutdown 只协调准入、确认与 owner |
-| 队列准入 | src/batcher/admission.rs | `Admission` / `CommandReceiver`；同一有界 VecDeque owner，Semaphore 管容量等待，Notify 唤醒唯一接收者；queued permit 取出即释放，驱逐时复用 |
-| 后台发送 | src/batcher/worker.rs | `BatchWorker::{run,process}`；单 worker 持 HTTP 与 buffer，定量/定时/FIFO flush；buffer 随实际事件增长，不按配置上限预分配；背压驱逐只归 Admission |
-| 关闭任务 owner | src/batcher/shutdown.rs | `WorkerOwner::join`；等待时借用句柄，完成后缓存累计失败的安全终态；无 worker→owner 引用环 |
-| 背压与 shutdown 生命周期回归 | src/batcher_shutdown_test.rs + src/batcher/admission_test.rs | 真实 HTTP 门控验证 add/try_add DropOldest 身份、flush 前缀保护/取消/不等后批请求、client retry 唯一入口；保留 shutdown join/取消/并发终态，已观察与未观察 HTTP 失败仅各计一次；Admission 覆盖未提交 permit、receiver Drop 与取消等待 |
-| flush 失败水位 | src/batcher/failure.rs | `FailureLedger`、`FlushSnapshot`、`ShutdownSnapshot`；唯一账本记录累计失败，flush 接收方只推进增量确认水位，重叠确认幂等；worker 排空后从累计水位生成不可变关闭快照 |
-| flush 契约回归 | src/batcher_test.rs | `test_flush_barrier_*`：自动失败后空 flush、ack 后取消、旧确认保留新失败、并发观察顺序与安全摘要 |
-| 配置 | src/config.rs + src/config_test.rs | `ClientConfig`、`BatcherConfig`、`BackpressurePolicy`；零值/上限错误在无 runtime 场景也先拒绝，new 明确同步 panic |
-| 事件/载荷类型 | src/types/mod.rs | `TraceBody`（:95）/`ObservationBody`（:128）/`SpanBody`（:172）/`GenerationBody`（:207）/`EventBody`（:260）/`ScoreBody`（:291）/`SdkLogBody`（:322） |
-| OTLP dispatch / 通用属性 | src/types/conversion.rs | `ingestion_events_to_otel`（:31）；12 分支顺序与 resource/scope 包装；`append_common_obs_attrs`（:82）、`build_status`（:116） |
-| Trace 映射 | src/types/conversion/trace.rs | `trace_create`（:4）；root 身份与 trace 属性，envelope timestamp 用作 start |
-| Span / Observation / Event 映射 | src/types/conversion/observation.rs | `span_create`（:6）/`span_update`（:43）；`event_create`（:75）；`observation_create`（:103）/`observation_update`（:153），保留 Create/Update 属性差异 |
-| Generation 映射 | src/types/conversion/generation.rs | `generation_create`（:7）/`generation_update`（:91）；Create 的 model parameters/legacy usage/cost/prompt 属性不补到 Update |
-| Score / SDK / Session 映射 | src/types/conversion/metadata.rs | `score_create`（:4）、`sdk_log`（:52）、`session_create`（:71）/`session_update`（:103） |
-| 转换契约测试 | src/types/conversion_test.rs | `mixed_event_families_keep_create_update_and_parent_order`；12 种混合事件、字段差异、状态/时间/ID 边界与导出包装 |
-| OTLP 类型 | src/types/otlp.rs | `OtelScopeSpan`（:35）/`OtelResource`（:27）/`OtelStatus`（:88）等 |
-| 会话类型 | src/types/session.rs | `SessionBody`（:6） |
-| 错误 | src/error.rs | `LangfuseError`（thiserror） |
+| HTTP/auth | `src/client.rs`：`LangfuseClient::{new,from_config,ingest,with_export_config}` | 连接池复用；Basic auth；`POST /api/public/otel/v1/traces`；`x-langfuse-ingestion-version: 4`；禁用 redirect 和 reqwest 内部 retry |
+| 编码与预算 | `src/client_export.rs`：`ExportConfig`、`preflight`、`encode` | 转换前零分配计量输入；有界 writer 编码一次，重试共享 body；默认请求 4 MiB、响应 64 KiB、累计期限 60s |
+| 接受结果 | `src/client_response.rs`：`read_success`、`parse` | 限额读取、JSON object 校验；rejectedSpans 支持数字/字符串，非零返回 PartialSuccess 且不整批重试；错误/日志不含原文 |
+| 重试 | `src/client_retry.rs`：`parse_retry_after`、`jittered_backoff` | 429/502/503/504 与可恢复网络错误；Retry-After 秒/date；有界指数退避 + jitter；永久响应不重试 |
+| 准入及背压 | `src/batcher/admission.rs`：`Admission::{try_add,send,close}` | 命令槽及 JSON 字节两维准入；DropOldest 仅回收最后一个 Flush 之后的 Add，必要时回收多个，不破坏前缀 |
+| 事件计量 | `src/batcher/budget.rs`：`event_bytes` | 有界零分配 JSON writer；超大事件返回 PayloadTooLarge，不截断 |
+| 聚合及并发 | `src/batcher/worker.rs`：`BatchWorker::{run,process}` | 定量/定时提交；全部 HTTP task 由唯一 owner 的 JoinSet 管理，并发上限可配置；flush/关闭等待发送终态 |
+| 结果与关闭 | `src/batcher/failure.rs`、`src/batcher/shutdown.rs` | 增量确认水位与部署累计失败分离；worker join 错误不同于 HTTP 失败，摘要不含 payload |
+| 安全计数 | `src/batcher/stats.rs`、`Batcher::stats` | 累计接受/拒绝/驱逐事件、提交/完成/失败批次、部分拒收批次及 span 数；在途数在发送 future 销毁时释放，取消不遗留；各字段非事务快照 |
+| 参数 | `src/config.rs`：`BatcherConfig` | 默认 batch=50、queue=1024、in-flight=2、event=512 KiB、batch=4 MiB、queue bytes=16 MiB；构造前验证 |
+| OTLP dispatch | `src/types/conversion.rs`：`ingestion_events_to_otel` | 完整 Create 产生 span；Update 和 Score 显式失败；Session/SDK record 不是 span，不导出 |
+| 身份与时间 | `src/types/conversion/validation.rs`：`build_span` | trace=32hex、span/parent=16hex 非零；标准 ID 正常化保留，领域 ID 确定性 SHA-256 映射；父引用共用 span 映射；校验时间顺序 |
+| 字段映射 | `src/types/conversion/{trace,observation,generation,metadata}.rs` | 各族字段独立；JSON input/output 不截断；metadata 保留 blob 并补充可过滤的具名属性 |
+| 错误 | `src/error.rs`：`LangfuseError` | PayloadTooLarge、PartialSuccess、QueueFull、ChannelClosed、IngestionApi、WorkerJoinFailed 等边界结果 |
 
-## 跨模块契约
+## 回归入口
 
-- 部署生命周期：Controller `LangfuseSession::new_owned` 授予 non-Clone shutdown 权限；ACP `host/lifecycle.rs::AcpHostHandle` 在资源 drain 完整后关闭，TUI/print `acp_client/deployment.rs` 显式 close transport 并 await host；turn 继续只 flush，其错误确认不抹去部署关闭报告（ARC-HOST-SHUTDOWN-001）。
-- 消费方（唯一生产消费方）：`peri-controller/src/langfuse/session.rs`（实例化 `LangfuseClient` + `Batcher::try_new`，非法批处理配置沿 None 降级，组合进 `LangfuseSession`）；`peri-controller/src/langfuse/tracer/event_builder.rs`（经 `LangfuseSessionLike::try_add` 同步上报事件）；`peri-controller/src/langfuse/drop_telemetry.rs`（`LangfuseError::ChannelClosed` → BatcherClosed 丢弃原因映射）。Langfuse bridge/tracer 的实现已归 `peri-controller/src/langfuse/`；`peri-acp/src/event/forwarder.rs` 仍只是把协议化前事件分支接到可选 `LangfuseBridge` 的接线点，不是 bridge 实现或遥测状态宿主。
-- **新增 trace 阶段/span 的改动点在消费侧而非本 crate**：`peri-controller/src/langfuse/tracer/`（`span_events.rs` 的 `on_stage_start` :117 / `on_stage_end` :138，SpanCreate 延迟到 end 且仅 duration>0 才发送）、`tracer/stages.rs`（`StageSpans` 生命周期）、`peri-acp-types/src/event.rs:207` 的 `Stage` 枚举（阶段事实源）；本 crate 只在类型/OTLP 映射变化时才动（`types/mod.rs`、`types/conversion.rs`）
-- `peri-agent/src/session/transcript.rs:254/:763` 仅注释引用 batcher 的 Shutdown 模式（flush 后退出），无代码依赖
-- lib.rs re-export（:8-12）：`Batcher`、`LangfuseClient`、`BackpressurePolicy`/`BatcherConfig`/`ClientConfig`、`LangfuseError`、`GenerationBody`/`IngestionEvent`/`ObservationBody`/`ObservationType`/`SpanBody`
+- `src/client_{test,export_test,response_test,retry_test}.rs`：认证、响应、限额、重试预算、请求 body 复用。
+- `src/batcher_concurrency_test.rs`：慢第一批下第二批可发送、并发上限、乱序完成、flush 前缀、部分拒收计数及 shutdown/worker 取消。
+- `src/batcher/{admission_test,byte_budget_test}.rs`：关闭、未提交 permit、取消、字节释放与驱逐前缀保护。
+- `src/batcher_{test,shutdown_test}.rs`：失败确认、shutdown 所有权、panic/cancel、DropOldest 与客户端 retry 唯一权威。
+- `src/types/conversion_test.rs`：标准及领域 ID、父引用、完整时间、过滤/拒绝不支持事件与 metadata。
+- `tests/otel_contract.rs`：真实 HTTP mock 验证认证、OTLP 载荷、身份映射、父关系与 Session record 过滤，不代表真实服务端验收。
+- 命令：`cargo test -p langfuse-client --lib`、`cargo test -p langfuse-client --doc`、`cargo clippy -p langfuse-client --all-targets -- -D warnings`。
+
+## 生产接线
+
+- `peri-controller/src/langfuse/config.rs` 接受 settings 与环境变量；队列容量、并发及字节预算分别配置，环境变量优先。
+- `peri-controller/src/langfuse/session.rs` 验证并装配 client/batcher，失败沿既有 Option 降级；部署关闭权与 turn-facing flush 分离。
+- `peri-controller/src/langfuse/tracer/` 在观测结束后导出完整 Create；子 agent 及 Workflow 不依赖服务端 update/dedup。
+- `peri-controller/src/langfuse/drop_telemetry.rs` 保存有界的 trace/事件类别/拒绝原因计数；拥塞以周期汇总诊断为主。
+- 跨层所有权以 `docs/standards/architecture-contracts.md` 的 ARC-HOST-SHUTDOWN-001 为准；代码索引不承诺负载 SLO 或真实服务端验收。

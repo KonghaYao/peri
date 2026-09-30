@@ -29,6 +29,7 @@ fn make_tracer(
         batch_max_events: 50,
         batch_flush_interval_secs: 10,
         user_id: None,
+        ..Default::default()
     };
     let t = LangfuseTracer::new(session.clone(), "sess_smoke".to_string(), config);
     (t, session)
@@ -240,8 +241,12 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
     let (mut t, session) = make_tracer(1.0);
     t.set_main_agent_id("main".to_string());
     t.on_turn_start("turn_1");
-    t.generation
-        .on_llm_start("unregistered-child", 0, vec![], vec![]);
+    t.generation.on_llm_start(
+        "unregistered-child",
+        0,
+        Default::default(),
+        Default::default(),
+    );
 
     t.on_llm_end(
         "unregistered-child",

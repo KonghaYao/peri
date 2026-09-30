@@ -64,6 +64,7 @@ impl LangfuseTracer {
                 end_time: Some(parent_time.clone()),
                 output: Some(error_out.clone()),
                 parent_observation_id: Some(turn_id.clone()),
+                session_id: Some(self.session_id.clone()),
                 version: Some(VERSION.to_string()),
                 ..Default::default()
             };

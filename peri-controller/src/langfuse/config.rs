@@ -10,6 +10,11 @@ pub struct LangfuseConfig {
     pub error_span_always: bool,
     /// Batcher 单次批量最大事件数
     pub batch_max_events: usize,
+    pub batch_queue_capacity: usize,
+    pub batch_max_in_flight: usize,
+    pub batch_max_event_bytes: usize,
+    pub batch_max_bytes: usize,
+    pub batch_max_queue_bytes: usize,
     /// Batcher 自动 flush 间隔（秒）
     pub batch_flush_interval_secs: u64,
     /// 自定义 user 维度（LANGFUSE_USER_ID 环境变量），None 表示不设置
@@ -25,6 +30,11 @@ impl Default for LangfuseConfig {
             trace_sampling: 1.0,
             error_span_always: true,
             batch_max_events: 50,
+            batch_queue_capacity: 1024,
+            batch_max_in_flight: 2,
+            batch_max_event_bytes: 512 * 1024,
+            batch_max_bytes: 4 * 1024 * 1024,
+            batch_max_queue_bytes: 16 * 1024 * 1024,
             batch_flush_interval_secs: 10,
             user_id: None,
         }
@@ -41,6 +51,11 @@ impl LangfuseConfig {
     ///   LANGFUSE_TRACE_SAMPLING      - 可选，默认 1.0
     ///   LANGFUSE_ERROR_SPAN_ALWAYS   - 可选，默认 true
     ///   LANGFUSE_BATCH_MAX_EVENTS    - 可选，默认 50
+    ///   LANGFUSE_BATCH_QUEUE_CAPACITY - 可选，默认 1024
+    ///   LANGFUSE_BATCH_MAX_IN_FLIGHT - 可选，默认 2
+    ///   LANGFUSE_BATCH_MAX_EVENT_BYTES - 可选，默认 512 KiB
+    ///   LANGFUSE_BATCH_MAX_BYTES     - 可选，默认 4 MiB
+    ///   LANGFUSE_BATCH_MAX_QUEUE_BYTES - 可选，默认 16 MiB
     ///   LANGFUSE_BATCH_FLUSH_INTERVAL - 可选，默认 10
     ///   LANGFUSE_USER_ID             - 可选，自定义 user 维度标识
     pub fn from_env() -> Option<Self> {
@@ -66,7 +81,7 @@ impl LangfuseConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(10);
         let user_id = std::env::var("LANGFUSE_USER_ID").ok();
-        Some(Self {
+        let mut config = Self {
             public_key: Some(public_key),
             secret_key: Some(secret_key),
             host,
@@ -75,7 +90,10 @@ impl LangfuseConfig {
             batch_max_events,
             batch_flush_interval_secs,
             user_id,
-        })
+            ..Default::default()
+        };
+        config.apply_batch_budgets(None);
+        Some(config)
     }
 
     /// 从 settings.json 加载配置，环境变量优先于 settings.json。
@@ -141,7 +159,52 @@ impl LangfuseConfig {
             cfg.user_id = Some(v);
         }
 
+        cfg.apply_batch_budgets(settings_json.get("langfuse"));
         cfg
+    }
+
+    fn apply_batch_budgets(&mut self, settings: Option<&serde_json::Value>) {
+        for (setting, environment, target) in [
+            (
+                "batch_queue_capacity",
+                "LANGFUSE_BATCH_QUEUE_CAPACITY",
+                &mut self.batch_queue_capacity,
+            ),
+            (
+                "batch_max_in_flight",
+                "LANGFUSE_BATCH_MAX_IN_FLIGHT",
+                &mut self.batch_max_in_flight,
+            ),
+            (
+                "batch_max_event_bytes",
+                "LANGFUSE_BATCH_MAX_EVENT_BYTES",
+                &mut self.batch_max_event_bytes,
+            ),
+            (
+                "batch_max_bytes",
+                "LANGFUSE_BATCH_MAX_BYTES",
+                &mut self.batch_max_bytes,
+            ),
+            (
+                "batch_max_queue_bytes",
+                "LANGFUSE_BATCH_MAX_QUEUE_BYTES",
+                &mut self.batch_max_queue_bytes,
+            ),
+        ] {
+            if let Some(value) = settings
+                .and_then(|settings| settings.get(setting))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+            {
+                *target = value;
+            }
+            if let Some(value) = std::env::var(environment)
+                .ok()
+                .and_then(|value| value.parse().ok())
+            {
+                *target = value;
+            }
+        }
     }
 }
 

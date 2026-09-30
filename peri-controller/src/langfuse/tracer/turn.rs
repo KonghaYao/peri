@@ -4,14 +4,13 @@ use super::event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, V
 use super::turn_error::{failure_error_class, failure_output};
 use super::turn_fallback::GenerationFallbackStatus;
 use super::LangfuseTracer;
-use langfuse_client::types::session::SessionBody;
 use langfuse_client::types::TraceBody;
 use langfuse_client::{IngestionEvent, ObservationBody, ObservationType};
 use peri_acp_types::session::TurnTelemetryOutcome;
 
 impl LangfuseTracer {
-    /// 对话轮次开始：创建 Trace 根 span + Session + 推迟 agent-run Observation。
-    /// 如有 user_id 配置，在 TraceCreate/SessionCreate 中设置 user 维度。
+    /// 对话轮次开始：创建 Trace 根 span 并推迟 agent-run Observation。
+    /// Session 分组由观测的 session_id 属性承载。
     pub fn on_turn_start(&mut self, input: &str) {
         // 先登记 sid → 本 turn trace（不受采样影响）：指标出口据此把指标挂到
         // 当前 turn 的 trace 下；未采样 turn 的指标本就会自行产生观测。
@@ -52,33 +51,13 @@ impl LangfuseTracer {
             "turn TraceCreate",
         );
 
-        // 显式创建 session（Langfuse UI 按 session 分组）
-        let session_body = SessionBody {
-            id: self.session_id.clone(),
-            user_id: self.user_id.clone(),
-            version: Some(VERSION.to_string()),
-            ..Default::default()
-        };
-        let session_event = IngestionEvent::SessionCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
-            body: session_body,
-            metadata: None,
-        };
-        try_add_or_warn_via_session(
-            &*self.session,
-            session_event,
-            &self.trace_id,
-            "SessionCreate",
-        );
-
         // 推迟 agent-run ObservationCreate 到 on_turn_end，
         // 避免 OTEL span 不可变导致 end_time 无法更新 → 0s latency
         self.agent_start_time = Some(start_time);
         self.agent_input = Some(input.to_string());
     }
 
-    /// 对话轮次结束：更新 agent-run Observation 输出和结束时间，并强制 flush。
+    /// 对话轮次结束：导出完整 agent-run Observation，并强制 flush。
     ///
     /// [不变量] 这是 Tracer 唯一的 async 路径（最终 flush）。所有其他事件
     /// 均通过 session.try_add() 同步入队，保证顺序。tokio::spawn 使 flush 异步化，
@@ -180,6 +159,7 @@ impl LangfuseTracer {
             input: agent_input.map(|s| serde_json::json!(s)),
             output,
             parent_observation_id: Some(trace_id.clone()),
+            session_id: Some(self.session_id.clone()),
             version: Some(VERSION.to_string()),
             ..Default::default()
         };

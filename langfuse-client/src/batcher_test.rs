@@ -40,6 +40,9 @@ async fn test_batcher_add_and_manual_flush() {
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
         max_retries: 0,
+        queue_capacity: 10,
+        max_in_flight: 1,
+        ..Default::default()
     };
     let batcher = Batcher::new(client, config);
 
@@ -69,6 +72,9 @@ async fn test_batcher_auto_flush_on_max_events() {
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
         max_retries: 0,
+        queue_capacity: 3,
+        max_in_flight: 1,
+        ..Default::default()
     };
     let batcher = Batcher::new(client, config);
 
@@ -100,6 +106,9 @@ async fn test_batcher_periodic_flush() {
         flush_interval: Duration::from_millis(10),
         backpressure: BackpressurePolicy::DropNew,
         max_retries: 0,
+        queue_capacity: 100,
+        max_in_flight: 1,
+        ..Default::default()
     };
     let batcher = Batcher::new(client, config);
 
@@ -119,6 +128,9 @@ async fn test_batcher_flush_empty_buffer() {
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
         max_retries: 0,
+        queue_capacity: 10,
+        max_in_flight: 1,
+        ..Default::default()
     };
     let batcher = Batcher::new(client, config);
     let result = batcher.flush().await;
@@ -144,6 +156,9 @@ async fn test_batcher_backpressure_block() {
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::Block,
         max_retries: 0,
+        queue_capacity: 5,
+        max_in_flight: 1,
+        ..Default::default()
     };
     let batcher = Batcher::new(client, config);
 
@@ -177,6 +192,9 @@ async fn test_batcher_graceful_shutdown_on_drop() {
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
         max_retries: 0,
+        queue_capacity: 10,
+        max_in_flight: 1,
+        ..Default::default()
     };
     {
         let batcher = Batcher::new(client, config);
@@ -205,6 +223,9 @@ async fn test_batcher_multiple_flush_cycles() {
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
         max_retries: 0,
+        queue_capacity: 2,
+        max_in_flight: 1,
+        ..Default::default()
     };
     let batcher = Batcher::new(client, config);
 
@@ -237,6 +258,9 @@ async fn test_batcher_handles_ingest_error() {
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
         max_retries: 0,
+        queue_capacity: 2,
+        max_in_flight: 1,
+        ..Default::default()
     };
     let batcher = Batcher::new(client, config);
 
@@ -291,6 +315,9 @@ async fn test_batcher_with_large_batch() {
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
         max_retries: 0,
+        queue_capacity: 50,
+        max_in_flight: 1,
+        ..Default::default()
     };
     let batcher = Batcher::new(client, config);
 
@@ -324,6 +351,9 @@ async fn test_batcher_backpressure_drop_oldest() {
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropOldest,
         max_retries: 0,
+        queue_capacity: 5,
+        max_in_flight: 1,
+        ..Default::default()
     };
     let batcher = Batcher::new(client, config);
 
@@ -356,6 +386,9 @@ async fn test_batcher_backpressure_drop_new() {
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
         max_retries: 0,
+        queue_capacity: 2,
+        max_in_flight: 1,
+        ..Default::default()
     };
     let batcher = Batcher::new(client, config);
 
@@ -432,6 +465,9 @@ async fn test_batcher_drop_new_increments_dropped_counter_during_slow_flush() {
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
         max_retries: 0,
+        queue_capacity: 2,
+        max_in_flight: 1,
+        ..Default::default()
     };
     let batcher = Batcher::new(client, config);
 
@@ -527,6 +563,9 @@ fn failure_barrier_batcher(server_url: &str) -> Batcher {
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::DropNew,
             max_retries: 0,
+            queue_capacity: 1,
+            max_in_flight: 1,
+            ..Default::default()
         },
     )
 }

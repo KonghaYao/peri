@@ -11,8 +11,14 @@ pub enum LangfuseError {
     #[error("Ingestion API returned errors: {0}")]
     IngestionApi(String),
 
+    #[error("OTLP export partially rejected {rejected_spans} spans")]
+    PartialSuccess { rejected_spans: u64 },
+
     #[error("batch queue is full")]
     QueueFull,
+
+    #[error("telemetry payload exceeds the {limit_bytes}-byte budget")]
+    PayloadTooLarge { limit_bytes: usize },
 
     #[error("Batch sender dropped, batcher is shut down")]
     ChannelClosed,

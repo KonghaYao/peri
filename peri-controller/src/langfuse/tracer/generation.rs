@@ -17,9 +17,21 @@ use peri_model::TokenUsage;
 pub(crate) struct GenerationCached {
     pub gen_id: String,
     pub start_time: String,
-    pub messages_json: serde_json::Value,
-    pub tools_json: serde_json::Value,
+    pub messages: Arc<Vec<BaseMessage>>,
+    pub tools: Arc<Vec<ToolDefinition>>,
     pub raw_body: Option<Arc<serde_json::Value>>,
+}
+
+impl GenerationCached {
+    fn into_input(self) -> serde_json::Value {
+        match self.raw_body {
+            Some(body) => Arc::unwrap_or_clone(body),
+            None => serde_json::json!({
+                "messages": self.messages.as_ref(),
+                "tools": self.tools.as_ref(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -86,8 +98,8 @@ impl GenerationTracker {
         &mut self,
         agent_id: &str,
         step: usize,
-        messages: Vec<BaseMessage>,
-        tools: Vec<ToolDefinition>,
+        messages: Arc<Vec<BaseMessage>>,
+        tools: Arc<Vec<ToolDefinition>>,
     ) -> GenerationStart {
         // 新 generation 的 retry 记录按 key 隔离，天然为空，无需清空全局 vec
         let gen_id = format!("gen_{}", uuid::Uuid::now_v7());
@@ -95,8 +107,8 @@ impl GenerationTracker {
         let cached = GenerationCached {
             gen_id: gen_id.clone(),
             start_time: start_time.clone(),
-            messages_json: serde_json::to_value(&messages).unwrap_or_default(),
-            tools_json: serde_json::to_value(&tools).unwrap_or_default(),
+            messages,
+            tools,
             raw_body: None,
         };
         self.generation_data
@@ -113,6 +125,8 @@ impl GenerationTracker {
     ) {
         if let Some(cached) = self.generation_data.get_mut(&(agent_id.to_string(), step)) {
             cached.raw_body = Some(body);
+            cached.messages = Arc::default();
+            cached.tools = Arc::default();
         }
         // 未找到时静默 no-op（保留现有行为）
     }
@@ -160,14 +174,13 @@ impl GenerationTracker {
             .filter(|r| !r.is_empty())
             .map(|r| build_retry_metadata(&r));
 
-        let input_json = cached
-            .raw_body
-            .map(|b| (*b).clone())
-            .unwrap_or(cached.messages_json);
+        let gen_id = cached.gen_id.clone();
+        let start_time = cached.start_time.clone();
+        let input_json = cached.into_input();
 
         Some(GenerationEnd {
-            gen_id: cached.gen_id,
-            start_time: cached.start_time,
+            gen_id,
+            start_time,
             input_json,
             retry_metadata,
         })
@@ -183,16 +196,15 @@ impl GenerationTracker {
                     .remove(&(agent_id.clone(), step))
                     .filter(|retries| !retries.is_empty())
                     .map(|retries| build_retry_metadata(&retries));
-                let input_json = cached
-                    .raw_body
-                    .map(|body| (*body).clone())
-                    .unwrap_or(cached.messages_json);
+                let gen_id = cached.gen_id.clone();
+                let start_time = cached.start_time.clone();
+                let input_json = cached.into_input();
                 let terminal = self.pending_terminal.remove(&(agent_id.clone(), step));
                 AbandonedGeneration {
                     agent_id,
                     step,
-                    gen_id: cached.gen_id,
-                    start_time: cached.start_time,
+                    gen_id,
+                    start_time,
                     input_json,
                     retry_metadata,
                     terminal,

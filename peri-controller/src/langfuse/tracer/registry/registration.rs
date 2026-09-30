@@ -104,7 +104,7 @@ impl SubagentRegistry {
         SubagentStartOutcome::Pending
     }
 
-    /// 尝试 join 指定 child 的 pending Start。成功 → 冻结父 span、创建 obs 字段、
+    /// 尝试 join 指定 child 的 pending Start。成功 → 冻结父 span、缓存开始快照、
     /// 取出 gate 事件;若 Stop 与父 ToolEnded 均已到 → 立即关闭。
     pub(super) fn try_join(&mut self, child_agent_id: &str) -> Option<SubagentStartOutcome> {
         // 已被标记 incomplete(如缓存溢出)的 child 不再 join

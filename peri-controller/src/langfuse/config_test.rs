@@ -3,6 +3,31 @@
 use super::*;
 use serial_test::serial;
 
+#[test]
+#[serial]
+fn test_batch_budgets_load_from_settings_with_environment_precedence() {
+    clear_langfuse_env();
+    let settings = serde_json::json!({"langfuse": {
+        "batch_queue_capacity": 200,
+        "batch_max_in_flight": 4,
+        "batch_max_event_bytes": 1000,
+        "batch_max_bytes": 4000,
+        "batch_max_queue_bytes": 16000
+    }});
+    let configured = LangfuseConfig::load_with_settings(&settings);
+    assert_eq!(configured.batch_queue_capacity, 200);
+    assert_eq!(configured.batch_max_in_flight, 4);
+    assert_eq!(configured.batch_max_event_bytes, 1000);
+    assert_eq!(configured.batch_max_bytes, 4000);
+    assert_eq!(configured.batch_max_queue_bytes, 16000);
+    std::env::set_var("LANGFUSE_BATCH_QUEUE_CAPACITY", "300");
+    std::env::set_var("LANGFUSE_BATCH_MAX_IN_FLIGHT", "3");
+    let overridden = LangfuseConfig::load_with_settings(&settings);
+    assert_eq!(overridden.batch_queue_capacity, 300);
+    assert_eq!(overridden.batch_max_in_flight, 3);
+    clear_langfuse_env();
+}
+
 fn clear_langfuse_env() {
     std::env::remove_var("LANGFUSE_PUBLIC_KEY");
     std::env::remove_var("LANGFUSE_SECRET_KEY");
@@ -10,6 +35,11 @@ fn clear_langfuse_env() {
     std::env::remove_var("LANGFUSE_TRACE_SAMPLING");
     std::env::remove_var("LANGFUSE_ERROR_SPAN_ALWAYS");
     std::env::remove_var("LANGFUSE_BATCH_MAX_EVENTS");
+    std::env::remove_var("LANGFUSE_BATCH_QUEUE_CAPACITY");
+    std::env::remove_var("LANGFUSE_BATCH_MAX_IN_FLIGHT");
+    std::env::remove_var("LANGFUSE_BATCH_MAX_EVENT_BYTES");
+    std::env::remove_var("LANGFUSE_BATCH_MAX_BYTES");
+    std::env::remove_var("LANGFUSE_BATCH_MAX_QUEUE_BYTES");
     std::env::remove_var("LANGFUSE_BATCH_FLUSH_INTERVAL");
     std::env::remove_var("LANGFUSE_USER_ID");
 }
@@ -23,6 +53,8 @@ fn test_default_config() {
     assert!((cfg.trace_sampling - 1.0).abs() < 1e-10);
     assert!(cfg.error_span_always);
     assert_eq!(cfg.batch_max_events, 50);
+    assert_eq!(cfg.batch_queue_capacity, 1024);
+    assert_eq!(cfg.batch_max_in_flight, 2);
     assert_eq!(cfg.batch_flush_interval_secs, 10);
 }
 

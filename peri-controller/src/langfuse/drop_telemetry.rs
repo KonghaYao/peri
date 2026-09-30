@@ -20,6 +20,7 @@ pub enum LangfuseEventKind {
 pub enum LangfuseDropReason {
     DropNewQueueFull,
     BatcherClosed,
+    OversizedEvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -56,6 +57,7 @@ impl LangfuseDropReason {
         match error {
             LangfuseError::QueueFull => Some(Self::DropNewQueueFull),
             LangfuseError::ChannelClosed => Some(Self::BatcherClosed),
+            LangfuseError::PayloadTooLarge { .. } => Some(Self::OversizedEvent),
             _ => None,
         }
     }

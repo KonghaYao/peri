@@ -56,7 +56,7 @@ fn test_on_mq_drained_outside_receive_no_op() {
 fn test_on_workflow_start_creates_child_span() {
     let mut s = StageSpans::new();
     let (_h, _replaced) = s.on_stage_start("main", Stage::Act, "turn_1", "trace_1", "agent_obs");
-    let w = s.on_workflow_start("wf_1", "plan summary");
+    let w = s.on_workflow_start("wf_1", "plan summary").unwrap();
     assert!(w.span_id.starts_with("span_"));
 }
 
@@ -65,7 +65,7 @@ fn test_on_workflow_start_outside_act_no_op() {
     let mut s = StageSpans::new();
     let (_h, _replaced) = s.on_stage_start("main", Stage::Reason, "turn_1", "trace_1", "agent_obs");
     let w = s.on_workflow_start("wf_1", "plan");
-    assert!(w.span_id.is_empty(), "Reason 阶段不应创建 workflow span");
+    assert!(w.is_none(), "Reason 阶段不应创建 workflow span");
 }
 
 #[test]
@@ -78,4 +78,36 @@ fn test_on_workflow_end_returns_stats() {
         .expect("should return Some");
     assert_eq!(end.agents_spawned, 3);
     assert_eq!(end.tool_calls, 10);
+}
+
+#[test]
+fn workflow_duplicate_start_keeps_original_identity_time_plan_and_parent() {
+    let mut stages = StageSpans::new();
+    stages.on_stage_start("main", Stage::Act, "trace", "turn", "parent");
+    let first = stages
+        .on_workflow_start("wf", "original plan")
+        .unwrap()
+        .clone();
+    let second = stages.on_workflow_start("wf", "replacement plan").unwrap();
+    assert_eq!(second.span_id, first.span_id);
+    assert_eq!(second.start_time, first.start_time);
+    assert_eq!(second.plan, "original plan");
+    assert_eq!(second.parent_observation_id, "parent");
+    let ended = stages.on_workflow_end("wf", 2, 3).unwrap();
+    assert_eq!(ended.start.span_id, first.span_id);
+    assert!(stages.on_workflow_end("wf", 4, 5).is_none());
+}
+
+#[test]
+fn workflow_closure_is_scoped_to_original_main_stage() {
+    let mut stages = StageSpans::new();
+    let (main, _) = stages.on_stage_start("main", Stage::Act, "trace", "turn", "parent");
+    let (child, _) = stages.on_stage_start("child", Stage::Act, "trace", "turn", "child-parent");
+    stages.on_workflow_start("wf", "plan");
+    assert!(stages.take_workflows_for_stage(&child.span_id).is_empty());
+    let records = stages.take_workflows_for_stage(&main.span_id);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].plan, "plan");
+    assert!(stages.on_workflow_end("wf", 2, 3).is_none());
+    assert!(stages.take_workflows_for_stage(&main.span_id).is_empty());
 }

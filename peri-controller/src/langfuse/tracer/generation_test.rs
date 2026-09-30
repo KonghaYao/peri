@@ -3,14 +3,14 @@ use super::*;
 #[test]
 fn test_on_llm_start_sets_active_step() {
     let mut t = GenerationTracker::new();
-    let start = t.on_llm_start("main", 0, vec![], vec![]);
+    let start = t.on_llm_start("main", 0, Arc::default(), Arc::default());
     assert!(start.gen_id.starts_with("gen_"));
 }
 
 #[test]
 fn test_on_llm_end_returns_generation_end_and_clears_state() {
     let mut t = GenerationTracker::new();
-    t.on_llm_start("main", 0, vec![], vec![]);
+    t.on_llm_start("main", 0, Arc::default(), Arc::default());
     let end = t.on_llm_end("main", 0).expect("should return Some");
     assert!(end.gen_id.starts_with("gen_"));
     // 再次 on_llm_end 应返回 None
@@ -20,7 +20,7 @@ fn test_on_llm_end_returns_generation_end_and_clears_state() {
 #[test]
 fn test_on_llm_retrying_accumulates_attempts() {
     let mut t = GenerationTracker::new();
-    t.on_llm_start("main", 0, vec![], vec![]);
+    t.on_llm_start("main", 0, Arc::default(), Arc::default());
     t.on_llm_retrying("main", 0, 1, 3, 1000, "timeout");
     t.on_llm_retrying("main", 0, 2, 3, 2000, "timeout");
     let end = t.on_llm_end("main", 0).expect("should return Some");
@@ -35,9 +35,9 @@ fn test_on_llm_retrying_accumulates_attempts() {
 fn test_on_llm_start_clears_previous_retry_attempts() {
     // 第二次 on_llm_start 应清空 retry_attempts（按 generation key 隔离）
     let mut t = GenerationTracker::new();
-    t.on_llm_start("main", 0, vec![], vec![]);
+    t.on_llm_start("main", 0, Arc::default(), Arc::default());
     t.on_llm_retrying("main", 0, 1, 3, 1000, "err");
-    t.on_llm_start("main", 1, vec![], vec![]); // 新 step
+    t.on_llm_start("main", 1, Arc::default(), Arc::default()); // 新 step
     let end = t.on_llm_end("main", 1).expect("should return Some");
     assert!(end.retry_metadata.is_none(), "新 step 不应携带旧 retry");
 }
@@ -47,8 +47,8 @@ fn test_interleaved_agents_keep_their_own_retries() {
     // 并行 agent 交错：A start → B start → A retry → A end → B retry → B end
     // 每个 end 只能消费自己 generation 的 retry 历史
     let mut t = GenerationTracker::new();
-    t.on_llm_start("agent_a", 5, vec![], vec![]);
-    t.on_llm_start("agent_b", 1, vec![], vec![]);
+    t.on_llm_start("agent_a", 5, Arc::default(), Arc::default());
+    t.on_llm_start("agent_b", 1, Arc::default(), Arc::default());
     t.on_llm_retrying("agent_a", 5, 1, 3, 500, "a-timeout");
     t.on_llm_retrying("agent_a", 5, 2, 3, 1000, "a-timeout");
     // A 先 end：只应携带 A 自己的 retry，不能消费到 B 的
@@ -79,7 +79,7 @@ fn test_on_llm_end_unknown_step_returns_none() {
 #[test]
 fn test_on_llm_request_payload_supplements_body() {
     let mut t = GenerationTracker::new();
-    t.on_llm_start("main", 0, vec![], vec![]);
+    t.on_llm_start("main", 0, Arc::default(), Arc::default());
     t.on_llm_request_payload(
         "main",
         0,
@@ -87,4 +87,63 @@ fn test_on_llm_request_payload_supplements_body() {
     );
     let end = t.on_llm_end("main", 0).expect("should return Some");
     assert_eq!(end.input_json["model"], "claude-4.7");
+}
+
+fn snapshot() -> (Arc<Vec<BaseMessage>>, Arc<Vec<ToolDefinition>>) {
+    let messages = Arc::new(vec![BaseMessage::human("完整上下文🙂".repeat(4096))]);
+    let tools = Arc::new(vec![ToolDefinition {
+        name: "lookup".to_string(),
+        description: "lookup description".to_string(),
+        parameters: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+    }]);
+    (messages, tools)
+}
+
+#[test]
+fn fallback_serializes_the_complete_borrowed_snapshot_with_tools_at_end() {
+    let mut tracker = GenerationTracker::new();
+    let (messages, tools) = snapshot();
+    let expected = serde_json::json!({"messages": messages.as_ref(), "tools": tools.as_ref()});
+    tracker.on_llm_start("main", 0, Arc::clone(&messages), Arc::clone(&tools));
+    assert_eq!(Arc::strong_count(&messages), 2);
+    assert_eq!(Arc::strong_count(&tools), 2);
+    let end = tracker.on_llm_end("main", 0).unwrap();
+    assert_eq!(end.input_json, expected);
+    assert_eq!(Arc::strong_count(&messages), 1);
+    assert_eq!(Arc::strong_count(&tools), 1);
+}
+
+#[test]
+fn raw_payload_releases_fallback_and_is_preserved_without_serializing_it() {
+    let mut tracker = GenerationTracker::new();
+    let (messages, tools) = snapshot();
+    tracker.on_llm_start("main", 0, Arc::clone(&messages), Arc::clone(&tools));
+    let raw = serde_json::json!({
+        "model": "provider-model",
+        "messages": [{"role": "user", "content": "raw🙂".repeat(4096)}],
+        "tools": [{"name": "lookup", "parameters": {"type": "object"}}],
+        "provider_extra": {"enabled": true},
+    });
+    tracker.on_llm_request_payload("main", 0, Arc::new(raw.clone()));
+    assert_eq!(Arc::strong_count(&messages), 1);
+    assert_eq!(Arc::strong_count(&tools), 1);
+    let end = tracker.on_llm_end("main", 0).unwrap();
+    assert_eq!(end.input_json, raw);
+}
+
+#[test]
+fn abandoned_generation_preserves_snapshot_and_retry_metadata_once() {
+    let mut tracker = GenerationTracker::new();
+    let (messages, tools) = snapshot();
+    let expected = serde_json::json!({"messages": messages.as_ref(), "tools": tools.as_ref()});
+    tracker.on_llm_start("child", 3, messages, tools);
+    tracker.on_llm_retrying("child", 3, 1, 2, 20, "private provider body");
+    let abandoned = tracker.take_all_active();
+    assert_eq!(abandoned.len(), 1);
+    assert_eq!(abandoned[0].input_json, expected);
+    assert_eq!(
+        abandoned[0].retry_metadata.as_ref().unwrap()["retry_count"],
+        1
+    );
+    assert!(tracker.take_all_active().is_empty());
 }

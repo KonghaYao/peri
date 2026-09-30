@@ -28,7 +28,7 @@ peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引
 | 等待、销毁或注入会话 | `peri-controller/src/controller.rs` | `join_session`:364、`destroy_session`:385、`submit_input`:406 | 捕获 Runtime Arc 后调用；销毁返回的已补打事件经 publish 按顺序双投递 |
 | 注入部署端口 | `peri-controller/src/controller.rs` | `Controller::new`、`with_runtime`、`with_mcp_pool`、`with_cron_scheduler`、`with_tool_search`、`with_lsp_servers` | builder 消费 self 后赋值；对应 pick 方法克隆句柄/配置，不引入共享可写配置 |
 | 调整启动参数 | `peri-controller/src/controller.rs` | `AgentRef`:49、`LiteParams`:70 | 仅承载定义引用、cwd、初始消息和工具；消费与执行归 Agent |
-| 配置与创建 Langfuse 批处理 | `peri-controller/src/langfuse/session.rs` + `langfuse-client/src/{config,batcher}.rs` | `LangfuseSession::new`；`Batcher::try_new` | 生产构造在 spawn 前拒绝零容量/零间隔/容量超限，沿既有 Option 路径返回 None 并记录安全诊断；重试参数只归 LangfuseClient，Batcher legacy max_retries 不覆盖；`session_test.rs` 覆盖非法配置 |
+| 配置与创建 Langfuse 批处理 | `peri-controller/src/langfuse/{config,session}.rs` + `langfuse-client/src/{config,batcher}.rs` | `LangfuseSession::new`；`Batcher::try_new` | settings/env 分别配置队列容量、并发、单事件/批次/队列字节预算；构造前校验，沿既有 Option 降级；客户端独占重试语义，见 langfuse-client 索引 |
 | 关闭部署 Langfuse | `peri-controller/src/langfuse/session.rs` | `LangfuseSession::new_owned`；`LangfuseShutdownOwner::shutdown`；`LangfuseSession::shutdown` | fresh deployment 得到不可克隆的关闭权限；只转发唯一 Batcher join，报告包含已由 turn 观察的累计 HTTP 失败并区分 worker 失败；turn-facing SessionLike 仍只提供 flush（ARC-HOST-SHUTDOWN-001） |
 | 修改 Langfuse 事件入口 | `peri-controller/src/langfuse/bridge.rs` | `LangfuseBridge`:34、`process_event`:92 | 保留统一事件分发与 tracer 锁，trait 入口先持有该 bridge 的 stage 表锁 |
 | 修改 v1 事件转换 | `peri-controller/src/langfuse/bridge/v1_conversion.rs` | `UnifiedLangfuseEvent::from_executor_event` | 无映射事件返回 None；v1 LLM 使用 MAIN_AGENT_KEY，工具优先保留 source_agent_id |
@@ -73,7 +73,7 @@ peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引
 - ARC-CANCEL-001：Controller → Runtime → SessionHandle 原样定位转发；见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 和 [`peri-runtime` 索引](peri-runtime.md)。
 - ARC-EVENT-001：`publish_event` / `publish` 是协议化前双投递出口；Langfuse 旁路不参与业务执行，不建立第二条事件投递链。
 - 控制面测试：`peri-controller/src/controller_test.rs` 覆盖取消、事件双投递、会话销毁与端口注入。
-- 异常关闭回归：`peri-controller/src/langfuse/tracer/registry_lifecycle_test.rs` 的重复 Start/Stop、已 Closed 后重复 Stop；`registry_test.rs` 还验证异常 turn-end 实际发送一次 observation update。
+- 异常关闭回归：`peri-controller/src/langfuse/tracer/registry_lifecycle_test.rs` 的重复 Start/Stop、已 Closed 后重复 Stop；子 agent 终态与 Workflow 在内存闭合后发送一次完整 Create，不重发同 ID 更新。
 - 观测顺序回归：`peri-controller/src/langfuse/bridge_test.rs` 的双 producer/乱序矩阵，以及 `tracer/tracer_test.rs` 的缺少 LlmCallEnd、未采样错误 parent-first 和错误脱敏。
 - bridge 原有内联测试入口迁到 `peri-controller/src/langfuse/bridge/lifecycle_test.rs`，保留 `bridge::tests` 模块路径。
 - 验证：`cargo test -p peri-controller`、`cargo test -p peri-controller --doc`、`cargo clippy -p peri-controller --all-targets -- -D warnings`；集成测试使用 `FakeLangfuseSession`，不向真实服务发请求。
