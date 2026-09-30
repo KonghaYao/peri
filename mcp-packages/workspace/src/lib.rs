@@ -1,8 +1,10 @@
 //! Workspace tools and their builtin MCP handler.
 
+mod file_observation;
 pub mod filesystem;
 mod fuzzy;
 mod git_watch;
+pub mod image;
 mod input;
 pub mod resources;
 mod shell_hints;

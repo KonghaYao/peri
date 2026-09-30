@@ -26,7 +26,6 @@ use crate::mcp::client::{serve_client_auto, McpServiceWrapper};
 use peri_acp_types::builtin_mcp::find;
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::tasks::{BgTaskKind, TaskManager};
-use peri_agent::agent::async_tasks::TaskManager as ConcreteTaskManager;
 use rmcp::{
     model::{CallToolRequestParams, CallToolResponse, CallToolResult},
     service::{Peer, RoleClient},
@@ -124,7 +123,7 @@ async fn workspace_handler_handshakes_and_lists_seven_tools_over_wire() {
 #[tokio::test]
 async fn workspace_handler_bash_run_in_background_uses_injected_task_manager_over_wire() {
     let (_dir, cwd) = workspace_dir();
-    let manager: Arc<dyn TaskManager> = Arc::new(ConcreteTaskManager::new());
+    let manager: Arc<dyn TaskManager> = Arc::new(peri_mcp_common::create_local_task_manager());
     let completions = Arc::new(AtomicUsize::new(0));
     let on_bg_complete = {
         let completions = Arc::clone(&completions);
@@ -251,7 +250,7 @@ async fn workspace_handler_lingering_child_is_registered_only_with_injected_task
     pair.shutdown().await;
 
     // ② `Some(真 TaskManager)`：同一形态的命令 ⇒ 残留进程组在返回前登记，回执带 task id。
-    let manager: Arc<dyn TaskManager> = Arc::new(ConcreteTaskManager::new());
+    let manager: Arc<dyn TaskManager> = Arc::new(peri_mcp_common::create_local_task_manager());
     let pair = connect(
         &cwd,
         Some(WorkspaceInstanceInput {

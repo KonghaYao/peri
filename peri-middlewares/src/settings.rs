@@ -1,14 +1,11 @@
 //! 宿主配置读取适配器（F12；不读任何技能内容）。
 //!
-//! 语义与迁移前 `skills::load_global_skills_dir` / `skills::load_disable_bundled_skills`
-//! **逐字保留**（只换归属模块）：它们是 workspace 实例资源 provider 的**输入位**
-//! （技能根列表 + builtin 关闭位），不是技能来源——W4b（J5）后宿主侧技能文件系统
-//! 读取点为零，本模块因此独立于 `skills` 模块存在，便于静态断言
-//! （`peri-middlewares/src/skills/` 不含任何 `std::fs` 调用）。
+//! 只读取 workspace 实例资源 provider 的 builtin 关闭位，不提供技能根。
+//! 技能内容由 MCP 侧读取，`skills/` 不含任何 `std::fs` 调用。
 //!
 //! 读取位置是**全局** `~/.peri/settings.json`（`HOME` 优先，与迁移前一致）；
-//! `skillsDir` 支持嵌套 `{"config":{"skillsDir":…}}` 与扁平两种形态，
-//! `disableBundledSkills` 同理。
+//! `disableBundledSkills` 支持嵌套 `{"config":{"disableBundledSkills":…}}`
+//! 与扁平两种形态。
 
 use std::path::PathBuf;
 
@@ -18,30 +15,6 @@ pub fn global_config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".peri")
         .join("settings.json")
-}
-
-/// 从全局配置中加载 skills_dir 路径。
-///
-/// F12（保留为宿主适配器）：只读**配置**（`skillsDir`），不读任何技能内容；
-/// 产出的路径作为 workspace 实例的资源根输入（J5：技能内容的读取归 MCP 侧）。
-pub fn load_global_skills_dir() -> Option<PathBuf> {
-    let path = global_config_path();
-    if !path.exists() {
-        return None;
-    }
-
-    let content = std::fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    // 支持嵌套 { "config": { "skillsDir": "..." } } 或扁平 { "skillsDir": "..." }
-    let skills_dir = json
-        .get("config")
-        .and_then(|c| c.get("skillsDir"))
-        .or_else(|| json.get("skillsDir"))
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from);
-
-    skills_dir.filter(|p| !p.as_os_str().is_empty())
 }
 
 /// 从 `~/.peri/settings.json` 读取 `disableBundledSkills` 配置（默认 false）。

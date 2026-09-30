@@ -14,7 +14,6 @@ use crate::mcp::client::{ClientStatus, McpClientHandle};
 use crate::mcp::config::ConfigSource;
 use crate::mcp::tool_bridge::McpToolBridge;
 use peri_acp_types::tasks::TaskManager;
-use peri_agent::agent::async_tasks::TaskManager as ConcreteTaskManager;
 use peri_agent::tools::{BaseTool, ToolContext};
 use peri_mcp_workspace::{WorkspaceInstanceInput, WorkspaceMcpServer};
 use rmcp::{
@@ -98,7 +97,7 @@ async fn assert_process_gone(pid: i32) {
 #[tokio::test]
 async fn cancelled_bridge_stops_process_and_drains_session_ownership() {
     let (dir, cwd) = workspace_dir();
-    let manager: Arc<dyn TaskManager> = Arc::new(ConcreteTaskManager::new());
+    let manager: Arc<dyn TaskManager> = Arc::new(peri_mcp_common::create_local_task_manager());
     let pair = connect(
         &cwd,
         Some(WorkspaceInstanceInput {
@@ -154,7 +153,7 @@ async fn cancelled_bridge_stops_process_and_drains_session_ownership() {
 #[tokio::test]
 async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
     let (_dir, cwd) = workspace_dir();
-    let manager: Arc<dyn TaskManager> = Arc::new(ConcreteTaskManager::new());
+    let manager: Arc<dyn TaskManager> = Arc::new(peri_mcp_common::create_local_task_manager());
     let pair = connect(
         &cwd,
         Some(WorkspaceInstanceInput {
@@ -220,7 +219,7 @@ async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
 #[tokio::test]
 async fn request_timeout_stops_server_shell() {
     let (dir, cwd) = workspace_dir();
-    let manager: Arc<dyn TaskManager> = Arc::new(ConcreteTaskManager::new());
+    let manager: Arc<dyn TaskManager> = Arc::new(peri_mcp_common::create_local_task_manager());
     let pair = connect(
         &cwd,
         Some(WorkspaceInstanceInput {
@@ -258,7 +257,7 @@ async fn request_timeout_stops_server_shell() {
 #[tokio::test]
 async fn external_source_keeps_120_second_deadline_and_cancels_execution() {
     let (dir, cwd) = workspace_dir();
-    let manager: Arc<dyn TaskManager> = Arc::new(ConcreteTaskManager::new());
+    let manager: Arc<dyn TaskManager> = Arc::new(peri_mcp_common::create_local_task_manager());
     let pair = connect(
         &cwd,
         Some(WorkspaceInstanceInput {

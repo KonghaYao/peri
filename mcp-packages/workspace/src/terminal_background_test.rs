@@ -10,7 +10,7 @@ use super::*;
 #[cfg(unix)]
 #[tokio::test]
 async fn test_bg_explicit_timeout_kills_process_group() {
-    let registry = Arc::new(TaskManager::new());
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
     let marker = std::env::temp_dir().join(format!(
         "peri-bg-timeout-kill-{}.marker",
         uuid::Uuid::new_v4()
@@ -64,7 +64,7 @@ async fn test_bg_explicit_timeout_kills_process_group() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_bg_shell_registered_while_running() {
-    let registry = Arc::new(TaskManager::new());
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
@@ -117,7 +117,7 @@ async fn test_bg_shell_registered_while_running() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_bg_shell_log_file_tee() {
-    let registry = Arc::new(TaskManager::new());
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
@@ -203,7 +203,7 @@ async fn test_bg_shell_log_file_tee() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_sync_timeout_promotes_to_background() {
-    let registry = Arc::new(TaskManager::new());
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
@@ -385,7 +385,8 @@ async fn test_sync_timeout_with_rejected_promotion_falls_back_to_killing_the_gro
     use peri_agent::agent::async_tasks::BackgroundTaskRegistry;
 
     let cwd = std::env::temp_dir();
-    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> = Arc::new(TaskManager::new());
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_mcp_common::create_local_task_manager());
     // 占满 Shell 类并发位（纯登记表条目，不产生真进程）⇒ 提升时 `register` 必被拒。
     for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
         manager

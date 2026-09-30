@@ -1,8 +1,8 @@
 use std::{collections::HashSet, process::Stdio, sync::Arc, time::Duration};
 
 use peri_acp_types::tasks::TaskManager;
-use peri_agent::agent::async_tasks::ShellExecutionGuard;
 use peri_agent::{agent::react::ReactLLM, messages::BaseMessage};
+use peri_mcp_common::shell::ShellExecutionGuard;
 use tokio::io::AsyncWriteExt;
 
 use crate::hooks::{
@@ -84,7 +84,7 @@ pub async fn execute_command_hook_owned(
         }
     };
     let run = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-        let mut cmd = peri_agent::agent::async_tasks::shell_command(&command, &[]);
+        let mut cmd = peri_mcp_common::shell::shell_command(&command, &[]);
         cmd.current_dir(&input.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -11,6 +11,17 @@ const FIXTURE_READY_ENV: &str = "PERI_ATTRIBUTION_FIXTURE_READY";
 const FIXTURE_RELEASE_ENV: &str = "PERI_ATTRIBUTION_FIXTURE_RELEASE";
 const FIXTURE_SENTINEL_ENV: &str = "PERI_ATTRIBUTION_FIXTURE_SENTINEL";
 
+fn test_middleware() -> GitAttributionMiddleware {
+    GitAttributionMiddleware::new(
+        "test-model",
+        Arc::new(crate::workspace_io::McpWorkspaceFileReader::new(
+            None,
+            None,
+            &std::collections::HashSet::new(),
+        )),
+    )
+}
+
 #[cfg(unix)]
 fn successful_branch_command() -> tokio::process::Command {
     let mut command = tokio::process::Command::new("sh");
@@ -55,7 +66,7 @@ async fn assert_sentinel_remains_absent(sentinel: &Path) {
 
 #[test]
 fn test_git_attribution_reset_clears_pending() {
-    let mw = GitAttributionMiddleware::new("test-model");
+    let mw = test_middleware();
     // 插入一些待处理内容
     mw.pending_old_content
         .lock()
@@ -74,7 +85,7 @@ fn test_git_attribution_reset_clears_pending() {
 
 #[test]
 fn test_branch_drift_reports_each_change_once() {
-    let mw = GitAttributionMiddleware::new("test-model");
+    let mw = test_middleware();
 
     assert_eq!(mw.observe_branch("main".to_string()), None);
     assert_eq!(mw.observe_branch("main".to_string()), None);

@@ -9,6 +9,7 @@ use peri_agent::{
     session::{FrozenContext, MessageSource, QueuedMessage, Session},
 };
 
+use super::test_support::ImageFixture;
 use super::ImageMiddleware;
 
 /// [回归测试] 同一次运行中追加图片后触发 Micro，模型仍须收到图片载荷。
@@ -90,8 +91,9 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         first.clone(),
     ));
     let requests = Arc::new(Mutex::new(Vec::new()));
+    let fixture = ImageFixture::new(dir.path()).await;
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(ImageMiddleware::new()));
+    chain.add(Box::new(fixture.middleware()));
     let ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
@@ -148,6 +150,9 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         !transcript.flags(later.id()).truncated,
         "用户图片不参与 Micro 投影"
     );
+    drop(transcript);
+    drop(requests);
+    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -167,7 +172,8 @@ async fn image_replacement_reaches_transcript_with_the_original_message_id() {
         session.queue().clone(),
     );
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(ImageMiddleware::new()));
+    let fixture = ImageFixture::new(dir.path()).await;
+    chain.add(Box::new(fixture.middleware()));
     ctx.runtime.middleware_chain = Arc::new(chain);
 
     run_before_agent(&ctx, &[original.id()]).await.unwrap();
@@ -180,6 +186,8 @@ async fn image_replacement_reaches_transcript_with_the_original_message_id() {
     assert!(updated.content().contains("inspect"));
     assert!(updated.content().contains("Image not found:"));
     assert!(!updated.content().contains("@image"));
+    drop(transcript);
+    fixture.shutdown().await;
 }
 
 /// [回归测试] 一次 Receive 接收多条用户输入时，附件不能只处理最后一条。
@@ -223,7 +231,8 @@ async fn test_image_batch_prepares_first_input_and_never_reloads_history() {
         session.queue().clone(),
     );
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(ImageMiddleware::new()));
+    let fixture = ImageFixture::new(dir.path()).await;
+    chain.add(Box::new(fixture.middleware()));
     ctx.runtime.middleware_chain = Arc::new(chain);
     let received = run_receive(ReceiveInput {
         context: ctx.clone(),
@@ -272,6 +281,8 @@ async fn test_image_batch_prepares_first_input_and_never_reloads_history() {
         serde_json::to_value(&old).unwrap(),
         "旧历史的附件引用不能重读或改写"
     );
+    drop(transcript);
+    fixture.shutdown().await;
 }
 
 #[tokio::test]

@@ -31,7 +31,7 @@ const BUILTIN_SKILL: &str = "use-artifacts";
 /// 夹具：隔离 `$HOME` + `startup`（装配起点）+ `target`（会话 cwd）。
 ///
 /// **HOME 隔离（TEST-HERMETIC-001）**：W4b 后技能面覆盖 User 根
-/// （`~/.claude/skills`）与全局配置（`~/.peri/settings.json` 的 `skillsDir` /
+/// （`~/.claude/skills`）与全局配置（`~/.peri/settings.json` 的
 /// `disableBundledSkills`）。不重定向 HOME 会读到运行机器的真实技能目录
 /// （非确定），也无法构造 `disableBundledSkills=true`——该位按 F12 语义只读
 /// 全局配置。`HomeDirGuard` 复用父模块的进程级重定向（本文件用例因此全部
@@ -127,6 +127,70 @@ fn workspace_resource_uris(sessions: &HashMap<String, SessionState>, id: &str) -
         .iter()
         .map(|resource| resource.uri.clone())
         .collect()
+}
+
+#[tokio::test]
+#[serial]
+async fn removed_skills_dir_settings_do_not_change_resource_discovery() {
+    for nested in [false, true] {
+        let fixture = SkillFixture::new(r#""01_intro":true"#, nested);
+        let home = fixture._tmp.path().join("home");
+        let obsolete = fixture._tmp.path().join("obsolete-skills");
+        for (root, name) in [
+            (home.join(".claude/skills"), "retained-user-skill"),
+            (obsolete.clone(), "obsolete-global-skill"),
+        ] {
+            let skill_dir = root.join(name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: sentinel\n---\n\n# Skill\n"),
+            )
+            .unwrap();
+        }
+        let settings = json!({"skillsDir": obsolete, "disableBundledSkills": nested});
+        let settings = if nested {
+            json!({"config": settings})
+        } else {
+            settings
+        };
+        std::fs::write(
+            home.join(".peri/settings.json"),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+        let cfg = skill_server_config(&fixture._tmp, fixture.startup.clone()).await;
+        let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+        let mut sessions = HashMap::new();
+        let created = handle_request(
+            "session/new",
+            &json!({"cwd": fixture.target}),
+            &cfg,
+            &mut sessions,
+            &transport,
+        )
+        .await
+        .unwrap();
+        let id = created["sessionId"].as_str().unwrap();
+        let uris = workspace_resource_uris(&sessions, id);
+        assert!(uris.contains(&"skill://user/retained-user-skill/SKILL.md".to_owned()));
+        assert!(uris.contains(&format!("skill://project/{PROJECT_SKILL}/SKILL.md")));
+        assert!(!uris.iter().any(|uri| uri.contains("obsolete-global-skill")));
+        assert_eq!(
+            uris.contains(&format!("skill://builtin/{BUILTIN_SKILL}/SKILL.md")),
+            !nested,
+            "disableBundledSkills must retain its meaning: {uris:?}"
+        );
+        let summary = sessions[id]
+            .frozen
+            .as_ref()
+            .unwrap()
+            .skill_summary()
+            .unwrap();
+        assert!(summary.contains("retained-user-skill"));
+        assert!(summary.contains(PROJECT_SKILL));
+        assert!(!summary.contains("obsolete-global-skill"));
+    }
 }
 
 /// W4b 主链：项目技能经 workspace 实例进入**冻结技能摘要**（J1 / F3）。

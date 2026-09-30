@@ -543,6 +543,38 @@ fn test_is_user_settings_path_under_symlinked_home() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_project_settings_file_alias_is_user_source() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    write_hooks_settings(&home);
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    std::os::unix::fs::symlink(
+        home.join(".claude/settings.json"),
+        project.join(".claude/settings.json"),
+    )
+    .unwrap();
+    let _guard = HomeGuard::set(&home);
+    assert!(load_settings_project_hooks(project.to_str().unwrap()).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_symlink_with_same_lexical_prefix_is_distinct_source() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let other = tmp.path().join("other");
+    write_hooks_settings(&home);
+    write_hooks_settings(&other);
+    std::os::unix::fs::symlink(&other, home.join("alias")).unwrap();
+    assert!(!is_user_settings_path_under(
+        &home.join("alias/.claude/settings.json"),
+        &home,
+    ));
+}
+
 // ===== 宽松解析测试 (P0-2) =====
 
 #[test]

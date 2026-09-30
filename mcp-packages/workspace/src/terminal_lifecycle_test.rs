@@ -5,7 +5,7 @@ use super::*;
 async fn test_cancelled_foreground_shell_retains_owner_until_process_exit() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let fixture = tempfile::tempdir().unwrap();
-    let manager = Arc::new(TaskManager::new());
+    let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let tool = BashTool::new(fixture.path().to_str().unwrap()).with_task_manager(manager.clone());
     let command = tokio::spawn(async move {
         tool.invoke(
@@ -37,7 +37,7 @@ async fn test_cancelled_foreground_shell_retains_owner_until_process_exit() {
 async fn test_successful_shell_keeps_redirected_background_process_owned() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let fixture = tempfile::tempdir().unwrap();
-    let manager = Arc::new(TaskManager::new());
+    let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let tool = BashTool::new(fixture.path().to_str().unwrap()).with_task_manager(manager.clone());
     let output = tool.invoke(serde_json::json!({
         "command": "(while [ ! -f release ]; do sleep 0.01; done; printf done > survived) >/dev/null 2>&1 &",
@@ -65,7 +65,7 @@ async fn test_successful_shell_keeps_redirected_background_process_owned() {
 async fn test_redirected_background_process_reports_unknown_exit_code() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let fixture = tempfile::tempdir().unwrap();
-    let manager = Arc::new(TaskManager::new());
+    let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(fixture.path().to_str().unwrap())
         .with_task_manager(manager.clone())
@@ -103,7 +103,7 @@ async fn test_redirected_background_process_reports_unknown_exit_code() {
 async fn assert_nohup_pipe_timeout_promotes(redirect: &str) {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let fixture = tempfile::tempdir().unwrap();
-    let manager = Arc::new(TaskManager::new());
+    let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(fixture.path().to_str().unwrap())
         .with_task_manager(manager.clone())
@@ -216,7 +216,7 @@ async fn test_nohup_pipe_timeout_without_manager_stops_descendant() {
 async fn test_nohup_pipe_timeout_promotion_remains_cancellable() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let fixture = tempfile::tempdir().unwrap();
-    let manager = Arc::new(TaskManager::new());
+    let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let tool = BashTool::new(fixture.path().to_str().unwrap()).with_task_manager(manager.clone());
     let output = timeout(
         Duration::from_secs(3),

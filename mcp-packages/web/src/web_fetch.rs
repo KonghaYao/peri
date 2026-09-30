@@ -4,7 +4,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::web_common::WEB_CREDIBILITY_WARNING;
-use peri_agent::agent::async_tasks::{persist_truncated_output, truncate_bytes};
+use peri_agent::agent::async_tasks::truncate_bytes;
+use peri_mcp_common::shell::persist_truncated_output;
 
 /// Tavily 抓取后端地址
 const TAVILY_BASE_URL: &str = "https://tavily.claude-code-best.win";

@@ -43,6 +43,7 @@ const GIT_BRANCH_TIMEOUT: Duration = Duration::from_secs(1);
 /// `before_tool` 暂存旧文件内容，`after_tool` 计算贡献字符数。
 /// Co-Authored-By 指令由 `build_bare_agent` 在 system prompt 中注入。
 pub struct GitAttributionMiddleware {
+    reader: Arc<dyn crate::workspace_io::WorkspaceFileReader>,
     state: Arc<Mutex<AttributionState>>,
     pending_old_content: Arc<Mutex<HashMap<String, String>>>,
     branch_baseline: Arc<Mutex<Option<String>>>,
@@ -51,9 +52,13 @@ pub struct GitAttributionMiddleware {
 }
 
 impl GitAttributionMiddleware {
-    pub fn new(model_name: &str) -> Self {
+    pub fn new(
+        model_name: &str,
+        reader: Arc<dyn crate::workspace_io::WorkspaceFileReader>,
+    ) -> Self {
         let attribution_text = Self::attribution_text(model_name);
         Self {
+            reader,
             state: Arc::new(Mutex::new(AttributionState::new(model_name.to_string()))),
             pending_old_content: Arc::new(Mutex::new(HashMap::new())),
             branch_baseline: Arc::new(Mutex::new(None)),
@@ -143,7 +148,7 @@ impl Middleware for GitAttributionMiddleware {
 
     async fn before_tool(
         &self,
-        _state: &mut dyn hook_state::BeforeToolState,
+        state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         // 仅处理 Write 和 Edit
@@ -152,11 +157,16 @@ impl Middleware for GitAttributionMiddleware {
         }
         // 读取当前文件内容，暂存到 pending
         if let Some(file_path) = tool_call.input.get("file_path").and_then(|v| v.as_str()) {
-            if let Ok(old_content) = tokio::fs::read_to_string(file_path).await {
+            let path = std::path::Path::new(state.cwd()).join(file_path);
+            self.pending_old_content
+                .lock()
+                .unwrap()
+                .remove(&tool_call.id);
+            if let Ok(old_content) = self.reader.read_text(&path).await {
                 self.pending_old_content
                     .lock()
                     .unwrap()
-                    .insert(file_path.to_string(), old_content);
+                    .insert(tool_call.id.clone(), old_content);
             }
         }
         Ok(tool_call.clone())
@@ -164,7 +174,7 @@ impl Middleware for GitAttributionMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut dyn hook_state::AfterToolState,
+        state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         _result: &ToolResult,
     ) -> AgentResult<()> {
@@ -180,9 +190,10 @@ impl Middleware for GitAttributionMiddleware {
             .pending_old_content
             .lock()
             .unwrap()
-            .remove(file_path)
+            .remove(&tool_call.id)
             .unwrap_or_default();
-        let new_content = match tokio::fs::read_to_string(file_path).await {
+        let path = std::path::Path::new(state.cwd()).join(file_path);
+        let new_content = match self.reader.read_text(&path).await {
             Ok(c) => c,
             Err(_) => return Ok(()),
         };
@@ -212,3 +223,7 @@ impl Middleware for GitAttributionMiddleware {
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "io_test.rs"]
+mod io_tests;

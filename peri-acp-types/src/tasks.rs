@@ -91,7 +91,7 @@ pub struct BgShellHandle {
     /// 任务标识（`shell-{uuid v7}`）。
     pub task_id: String,
     /// OS 进程 PID（Unix 下为进程组组长：`kill -- -{pid}` 可杀整组含子进程，
-    /// 与 Agent 层 `kill_process_group_escalating` 语义一致）。
+    /// 本地执行环境取消会先 TERM，再有界等待并升级 KILL）。
     /// `None` = 进程 spawn 失败（任务注册后立即按失败收尾，失败通知仍会到达）。
     pub pid: Option<u32>,
     /// stdout 实时输出日志文件路径（运行期间持续追加，agent 可用 Read 读取；
@@ -104,8 +104,8 @@ pub struct BgShellHandle {
 /// 后台任务管理接口（跨层面：ACP session 生命周期、/bg 并发预检、
 /// middleware 的 shell 发起与完成收尾使用）。
 ///
-/// 实现与完整方法面（registry 簿记、进程 spawn 等）留在 peri-agent
-/// `TaskManager`（per-session 聚合根）；本 trait 只承载跨层需要的操作，
+/// 生命周期实现（registry 簿记、准入、完成与关闭证据）留在 peri-agent
+/// `TaskManager`；shell 执行与输出由注入的执行环境承担。本 trait 只承载跨层操作，
 /// `Arc<dyn TaskManager>` 由 Agent 层实现、经装配注入到 ACP / middlewares。
 pub trait TaskManager: std::any::Any + Send + Sync {
     /// Record actual external drain without changing notification delivery or UI state.
@@ -171,8 +171,8 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         Box::pin(async { TaskShutdownReport::Incomplete })
     }
 
-    /// 启动后台 shell 任务（run_in_background 路径；进程 spawn / 进程组 /
-    /// 超时 / 输出收集 / 完成收尾全部在 Agent 层完成）。
+    /// 启动后台 shell 任务（run_in_background 路径；Agent 管理准入和生命周期，
+    /// 注入的执行环境管理进程 spawn / 进程组 / 超时 / 输出收集）。
     ///
     /// 返回 [`BgShellHandle`]（task_id + 进程 PID）：工具层回显给 LLM，
     /// 使 LLM 能经另一个 shell 杀进程组（`kill -- -{pid}`）或凭 task_id 监控。

@@ -5,7 +5,7 @@
 //!
 //! 1. 契约类型的 re-export（`SkillMetadata` / `SkillRoot` / `SkillSource`，定义在
 //!    `peri_acp_types::skills`）；
-//! 2. [`resolve_skill_roots`]——按优先级把「用户级 / 全局配置 / 项目级 / 插件
+//! 2. [`resolve_skill_roots`]——按优先级把「用户级 / 项目级 / 插件
 //!    manifest」解析为一组带 scope 标签的根，交给 provider 当输入
 //!    （`WorkspaceResourcesInput::skill_roots`）。
 //!
@@ -23,7 +23,7 @@ pub use peri_acp_types::skills::{SkillMetadata, SkillRoot, SkillSource};
 
 /// 统一解析 skill 根列表，按优先级返回 `SkillRoot`。
 ///
-/// 顺序即去重优先级：User → Global → Project → Plugin → Builtin（先到先得）。
+/// 顺序即去重优先级：User → Project → Plugin → Builtin（先到先得）。
 /// 这是 skill **根解析**的 single source of truth（[`crate::skills::SkillsMiddleware`]
 /// 与 provider 输入装配共用）；扫描语义不在宿主侧实现。
 ///
@@ -44,30 +44,17 @@ pub fn resolve_skill_roots(
         plugin_name: None,
     });
 
-    // 2. Global（~/.peri/settings.json::skillsDir）
-    if let Some(dir) = crate::skills::load_global_skills_dir() {
-        roots.push(SkillRoot {
-            path: dir,
-            source: SkillSource::Global,
-            plugin_name: None,
-        });
-    }
-
-    // 3. Project
+    // 2. Project
     roots.push(SkillRoot {
         path: PathBuf::from(cwd).join(".claude").join("skills"),
         source: SkillSource::Project,
         plugin_name: None,
     });
 
-    // 4. Plugin（来自参数，已带 source/plugin_name）
-    for r in plugin_roots {
-        if r.path.is_dir() {
-            roots.push(r);
-        }
-    }
+    // 3. Plugin（来自参数，已带 source/plugin_name）
+    roots.extend(plugin_roots);
 
-    // 5. Builtin（最低优先级；path 为占位——静态资产由 provider 内置提供，
+    // 4. Builtin（最低优先级；path 为占位——静态资产由 provider 内置提供，
     //    本 root 只表达「builtin 面是否启用」这一位，映射时不产生资源根）
     if !disable_bundled {
         roots.push(SkillRoot {
@@ -79,3 +66,7 @@ pub fn resolve_skill_roots(
 
     roots
 }
+
+#[cfg(test)]
+#[path = "loader_test.rs"]
+mod tests;

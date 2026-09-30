@@ -185,9 +185,6 @@ pub struct AppConfig {
     /// 四档 Profile（请求参数唯一事实源）
     #[serde(default)]
     pub profiles: Profiles,
-    /// 全局 skills 目录路径
-    #[serde(default, alias = "skillsDir")]
-    pub skills_dir: Option<String>,
     /// 环境变量注入
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
@@ -252,9 +249,6 @@ impl AppConfig {
             }
         }
         // Option<T> 字段 — is_some() 则覆盖
-        if workspace.skills_dir.is_some() {
-            self.skills_dir = workspace.skills_dir;
-        }
         // meta_harness 专属特例：逐 key 合并（项目级同 key 覆盖全局，全局其余
         // key 保留）。这是与 env 等整体覆盖字段刻意的行为差异（设计 §2.1）；
         // 不提供 null/删除语义。
@@ -333,9 +327,6 @@ impl AppConfig {
             }
         }
         // Option 字段 — 与全局不同则收录（含全局未声明）
-        if self.skills_dir != global.skills_dir {
-            ws.skills_dir = self.skills_dir.clone();
-        }
         if self.env != global.env {
             ws.env = self.env.clone();
         }
@@ -449,7 +440,6 @@ impl Default for AppConfig {
             active_alias: String::new(),
             providers: Vec::new(),
             profiles: Profiles::default(),
-            skills_dir: None,
             env: None,
             compact: None,
             language: None,

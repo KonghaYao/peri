@@ -61,7 +61,7 @@ async fn await_pid(path: &Path) -> u32 {
     .expect("hook writes its process identity")
 }
 async fn assert_group_stopped(pid: u32) {
-    let status = peri_agent::agent::async_tasks::shell_command(&format!("kill -0 -- -{pid}"), &[])
+    let status = peri_mcp_common::shell::shell_command(&format!("kill -0 -- -{pid}"), &[])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

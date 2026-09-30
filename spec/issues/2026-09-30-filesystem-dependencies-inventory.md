@@ -185,7 +185,7 @@ VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri`
 | --- | --- | --- |
 | Shell 执行与输出 | 计算层保留任务生命周期与 `ShellExecutor` 注入契约；进程、tee、完整输出持久化归 `peri-mcp-common::{shell,shell_executor,shell_output}`。本地装配使用 `create_local_task_manager()`，无执行环境的 `TaskManager::new()` 不静默执行本机 shell。 | 本地执行边界完成；远端输出存储另见限界 |
 | 图片附件 | `ImageMiddleware` 通过当前会话可见的 builtin workspace `image/read` 读取；格式/大小校验归 provider。不新增模型工具，保留消息身份、原内容块、压缩与附件失败反馈；关闭/断连/换代不回落宿主 fs。 | 完成；provider 8、middleware 15 条定向测试通过 |
-| Attribution / LSP / hook 路径 | 逐处分类与迁移。归因保留写前/写后内容；LSP 保留 ready gate 与 change/save 顺序；hook 用户来源排除保留 symlink 同文件语义，不降级为字面路径比较。配置正文读取仍属 P3。 | 实施中 |
+| Attribution / LSP / hook 路径 | 归因/LSP 经 `WorkspaceFileReader` 请求 builtin workspace `workspace/readText`，保留写前/写后、ready gate 与 change/save 顺序。取消、句柄代际、session ownership 和关闭位均核对；hook 用户来源排除保留 symlink 同文件语义。 | 工具正文读取迁移完成；hook 经审计归 P3 |
 | `skillsDir` | 删除配置字段、别名、读取与全局自定义根装配；保留 user/project/plugin/builtin 来源及 `disableBundledSkills`，插件路径不再由宿主预过滤。F12 旧方案已更新。 | 完成；ACP 2、根解析 1、开关 6 条定向测试通过 |
 
 验收以定向契约/回归测试、受影响 crate 编译与依赖门为主，不以全库测试数量或静态函数搬移证明完成。完成后在此登记实际命令和仍未验证的部署场景。
@@ -194,11 +194,14 @@ VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri`
 
 - Shell 的本地执行实现已从计算层移出，Agent 不再依赖 `peri-process`，`libc` 仅留测试。宿主 MCP bridge/resource 的截断仍调用 common helper 在**宿主进程**落盘；本轮没有实现远端输出存储、跨机器 Read 寻址，也不宣称计算/工具可直接跨设备部署。
 - hook loader 的 canonicalize 实际用于配置来源去重，避免用户 settings 经 symlink 被项目级再次加载，不是工具正文读取。按逐处审计结果归 P3 配置控制面保留，补 alias 回归；不能为了消除调用点降级为字面路径比较。
+- attribution 的文件快照已走工具环境，但原有 `before_agent` 的宿主 `git rev-parse` 分支探测仍保留；不宣称 attribution 的所有进程依赖已迁移。
 - `AppConfig::extra` 原有未知字段透传规则不变：旧 `skillsDir` / `skills_dir` 可能作为不被消费的 opaque JSON 保留，但不再是配置字段、没有 loader 或资源根效果；新默认序列化不生成这些键。不增加旧键清洗 shim。
 - Workspace 路径仍是本地工具环境路径，不构成 cwd 沙箱；绝对路径/symlink 沿用既有行为。图片沿用 MIME 签名判断，不做完整解码；取消请求不保证 blocking I/O 立即结束。
 - 未跑全库/E2E、Windows 原生执行或 120 秒 ignored 用例；无 Langfuse 凭据的其他并行任务验证不作为本轮 P1 证据。
 
-Shell 定向证据：Agent 49、common 24、terminal 53（另 1 ignored）、MCP wire 3、Web 截断 4 条通过；相关 doc tests 11 条通过（另 2 ignored）。图片 doc-test 筛选命中 0，不计行为覆盖。`git diff --check` 与依赖门通过（20 条规则，0 违规）。
+Shell 定向证据：Agent 49、common 24、terminal 53（另 1 ignored）、MCP wire 3、Web 截断 4 条通过；真实 session callback 的取消/自然完成两条回归从 Agent 迁入 common，修复前分别复现缺少执行环境，迁移后各 1 条通过。相关 doc tests 11 条通过（另 2 ignored）。图片 doc-test 筛选命中 0，不计行为覆盖。`git diff --check` 与依赖门通过（20 条规则，0 违规）。
+
+工具 fs 定向证据：workspace `file_observation` 2、宿主 `workspace_io` 8、attribution 29（另 1 ignored 夹具）、LSP 11、hooks loader 28、builtin 五维策略 1、workflow 装配 1 条通过。集成 `cargo check --locked -p peri-agent -p peri-mcp-common -p peri-mcp-workspace -p peri-mcp-web -p peri-middlewares -p peri-acp --all-targets` 通过；其唯一 unused-import 告警（terminal test 的旧 `TaskManager` 导入）已删除。
 
 ## 六、Cargo 依赖与清理
 
@@ -226,7 +229,7 @@ Shell 定向证据：Agent 49、common 24、terminal 53（另 1 ignored）、MCP
 
 - 未做编译期 feature 拆分实验
 - 未核对 `peri-tui/src/sync` 协议全量字段（仅扫描 fs 触点与 staging 语义）
-- 未评估"shell 输出落盘迁往 mcp-packages"的具体接口形态（属后续设计）
-- 各等级项（P1 shell / 工具 fs 严查 / `skillsDir`、P2 统一地址、P3 配置数据面与 Plugin MCP、P4 切换）未做实施拆解与工作量评估；等级表是方向记录
+- P1 的本地执行边界与工具正文读取已实施，验证及限界见 5.3；远端输出寻址尚未实现
+- P2 统一地址、P3 配置数据面与 Plugin MCP、P4 切换未做本轮实施拆解与工作量评估
 - cwd / 统一地址（P2）仅到方向层面；未形成 spec 契约
 - metrics → Langfuse 未做端到端上报验证（本地无 Langfuse 凭据，未观察 Langfuse 服务端落库；含指标归属到活跃 turn trace 的服务端表现）

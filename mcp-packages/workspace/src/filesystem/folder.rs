@@ -8,7 +8,7 @@ use tracing::debug;
 
 use super::resolve_path;
 use super::should_skip_dir;
-use peri_agent::agent::async_tasks::persist_truncated_output;
+use peri_mcp_common::shell::persist_truncated_output;
 
 /// folder_operations tool - 与 TypeScript folder_tool 对齐
 pub struct FolderOperationsTool {

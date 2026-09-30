@@ -114,7 +114,24 @@ impl LspPoolPort for StubPort {
 
 /// 用替身端口（保持具体类型以便断言）构造被测中间件。
 fn make_middleware(port: &Arc<StubPort>) -> LspSyncMiddleware {
-    LspSyncMiddleware::new(Arc::clone(port) as Arc<dyn LspPoolPort>)
+    LspSyncMiddleware::new(
+        Arc::clone(port) as Arc<dyn LspPoolPort>,
+        Arc::new(TestReader),
+    )
+}
+
+struct TestReader;
+
+#[async_trait]
+impl crate::workspace_io::WorkspaceFileReader for TestReader {
+    async fn read_text(
+        &self,
+        path: &Path,
+    ) -> Result<String, crate::workspace_io::WorkspaceReadError> {
+        tokio::fs::read_to_string(path)
+            .await
+            .map_err(|_| crate::workspace_io::WorkspaceReadError::ReadFailed)
+    }
 }
 
 /// 最小 hook 态：`after_tool` 只用 `StateView::cwd()`。
@@ -454,4 +471,100 @@ async fn read_failure_degrades_to_ok() {
         vec![SyncStep::Ready(missing.clone())],
         "读失败后不得发送通知"
     );
+}
+
+struct RemoteReader {
+    reads: AtomicUsize,
+    fail: bool,
+}
+
+#[async_trait]
+impl crate::workspace_io::WorkspaceFileReader for RemoteReader {
+    async fn read_text(
+        &self,
+        _path: &Path,
+    ) -> Result<String, crate::workspace_io::WorkspaceReadError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.fail {
+            Err(crate::workspace_io::WorkspaceReadError::ReadFailed)
+        } else {
+            Ok("remote text".to_string())
+        }
+    }
+}
+
+#[tokio::test]
+async fn execution_environment_content_drives_change_and_save_even_if_change_fails() {
+    let port = Arc::new(StubPort::with_change_error());
+    let reader = Arc::new(RemoteReader {
+        reads: AtomicUsize::new(0),
+        fail: false,
+    });
+    let middleware = LspSyncMiddleware::new(port.clone(), reader.clone());
+    let mut state = TestState::new("/execution-only/workspace");
+    run_after_tool(
+        &middleware,
+        &mut state,
+        TOOL_WRITE,
+        serde_json::json!({"file_path": "remote.rs"}),
+    )
+    .await
+    .unwrap();
+    let path = PathBuf::from("/execution-only/workspace/remote.rs");
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        port.steps(),
+        vec![
+            SyncStep::Ready(path.clone()),
+            SyncStep::Change {
+                path: path.clone(),
+                text: "remote text".to_string(),
+            },
+            SyncStep::Save(path)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn not_ready_never_reads_execution_environment() {
+    let port = Arc::new(StubPort::new(false));
+    let reader = Arc::new(RemoteReader {
+        reads: AtomicUsize::new(0),
+        fail: false,
+    });
+    let middleware = LspSyncMiddleware::new(port.clone(), reader.clone());
+    let mut state = TestState::new("/execution-only/workspace");
+    run_after_tool(
+        &middleware,
+        &mut state,
+        TOOL_EDIT,
+        serde_json::json!({"file_path": "remote.rs"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 0);
+    assert_eq!(port.counts(), (1, 0, 0));
+}
+
+#[tokio::test]
+async fn remote_read_failure_does_not_fallback_to_existing_host_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("local.rs"), "host text").unwrap();
+    let port = Arc::new(StubPort::new(true));
+    let reader = Arc::new(RemoteReader {
+        reads: AtomicUsize::new(0),
+        fail: true,
+    });
+    let middleware = LspSyncMiddleware::new(port.clone(), reader.clone());
+    let mut state = TestState::new(dir.path().to_str().unwrap());
+    run_after_tool(
+        &middleware,
+        &mut state,
+        TOOL_WRITE,
+        serde_json::json!({"file_path": "local.rs"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(port.counts(), (1, 0, 0));
 }

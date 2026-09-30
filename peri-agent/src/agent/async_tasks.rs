@@ -1,13 +1,8 @@
 //! async tasks manager（Agent 层，per-session 实例化）。
 //!
-//! 3.0 归位（L1）：`BackgroundTaskRegistry` 定义与 bg shell 实际执行
-//! （进程 spawn/进程组/超时/输出收集）自 `peri-middlewares` 迁入本模块。
-//! `TaskManager` 是 per-session 聚合：registry + shell 执行 + 事件桥接
-//! （`set_event_sender`/`clear_event_sender` 保留为过渡态，供 ACP executor
-//! 注入 `BgRegistryEvent` 泵，暂不依赖 M-event-chain）。
-//!
-//! Middleware 只做任务定义与启动发起（经 `TaskManager` 接口），不持有管理权；
-//! 任务生命周期（取消/超时/事件）跟随 session（随 session 创建/销毁）。
+//! Agent owns admission, registration, completion and session shutdown evidence.
+//! Shell spawning, process-tree cleanup, tee and durable output belong to the
+//! injected execution environment (`ShellExecutor`); no concrete MCP dependency.
 //!
 //! Task 保持易失投影语义：不持久化，重启不复活。
 
@@ -16,7 +11,7 @@ mod manager;
 mod registry;
 mod scope;
 mod shell;
-mod shell_output;
+mod shell_executor;
 
 #[cfg(test)]
 use crate::agent::events::BackgroundTaskResult;
@@ -30,15 +25,12 @@ pub use registry::{
     BackgroundRegistryError, BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus,
     BgCancelHandle, BgTaskInfo,
 };
-pub use shell::tee_pipe_with_output;
 pub use shell::{
-    bg_shell_task_id, drain_pipe, finalize_bg_shell, kill_process_group,
-    kill_process_group_escalating, parse_background_timeout, parse_foreground_timeout,
-    persist_truncated_output, persist_truncated_output_with_ref, shell_command, tee_pipe,
-    truncate_bytes, ShellExecutionGuard, BACKGROUND_MAX_TIMEOUT_MS, FOREGROUND_DEFAULT_TIMEOUT_MS,
+    bg_shell_task_id, finalize_bg_shell, parse_background_timeout, parse_foreground_timeout,
+    truncate_bytes, BACKGROUND_MAX_TIMEOUT_MS, FOREGROUND_DEFAULT_TIMEOUT_MS,
     FOREGROUND_MAX_TIMEOUT_MS,
 };
-pub use shell_output::{ShellOutputCapture, ShellOutputWriter};
+pub use shell_executor::ShellExecutor;
 
 /// 后台任务类别（事实源 peri-acp-types::tasks）
 pub use peri_acp_types::tasks::{BgShellHandle, BgTaskKind, BgTaskRegistration};

@@ -39,6 +39,7 @@ pub mod middleware;
 pub mod permission;
 pub mod plugin;
 pub mod ptc;
+pub mod workspace_io;
 pub use plugin::{
     AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource, InstallScope,
     InstalledPlugin, InstalledPlugins, KnownMarketplace, LoadedPlugin, LoaderError,
@@ -77,7 +78,7 @@ pub use permission::{
 };
 pub mod settings;
 
-pub use settings::{load_disable_bundled_skills, load_global_skills_dir};
+pub use settings::load_disable_bundled_skills;
 pub use skills::{resolve_skill_roots, SkillMetadata, SkillRoot, SkillsMiddleware};
 pub use subagent::{
     infer_agent_capability, AgentCapability, SkillPreloadMiddleware, SubAgentMiddleware,

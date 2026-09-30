@@ -21,6 +21,7 @@ Host wire, pool, bridge, readiness, and shutdown tests belong in `peri-middlewar
 | Task | Package entry points |
 | --- | --- |
 | Shared MCP tool schema, server info, call mapping, failure projection, strict numeric parsing, process env lock | `common/src/{helpers,numeric,failure,result_mapping,process_env}.rs` |
+| Local shell execution, process-tree ownership, tee and persisted output | `common/src/{shell,shell_executor,shell_output}.rs`; `create_local_task_manager()` injects the concrete executor into Agent's lifecycle manager |
 | Shared Agent definition types and pure Markdown/YAML parsing | `common/src/agent_definition/`; local discovery stays in workspace resources, while source trust, approval and execution policy stay in the host |
 | Web search and fetch tools and handler | `web/src/{server,web_search,web_fetch}.rs` |
 | Artifact conversion/upload tool and handler | `artifact/src/{server,tool,client}.rs` |
@@ -29,6 +30,7 @@ Host wire, pool, bridge, readiness, and shutdown tests belong in `peri-middlewar
 | Workspace handler and session input | `workspace/src/{workspace,input}.rs` |
 | Workspace resource provider (skills / agents / project instructions), resource input, URI/`_meta` contract | `workspace/src/resources/`; contract types in `peri-acp-types/src/workspace_resources.rs` (skills extension key: `peri-acp-types/src/skills.rs::SKILLS_EXTENSION_ID`). Owns the local skill reads plus the `skills/list` / `skills/get` manifest and per-file digest (J5); the package registers **no skill tools** — `SkillTool` / `DiscoverSkillsTool` stay in the host and aggregate across origins (J3) |
 | Workspace filesystem behavior | `workspace/src/filesystem/` |
+| Image attachments and full text reads for host observers | `workspace/src/{image,file_observation}.rs`; `image/read` and `workspace/readText` custom requests, not model tools |
 | Bash execution and description | `workspace/src/terminal.rs`, `workspace/src/descriptions/bash.md` |
 | Builtin selection, host context, MCP pool/client/transport, ACP adapter, readiness, bridge, shutdown | `peri-middlewares/src/mcp/` and `peri-middlewares/src/assembly.rs` |
 
@@ -36,7 +38,7 @@ Host wire, pool, bridge, readiness, and shutdown tests belong in `peri-middlewar
 
 - Shared behavior has one implementation in `peri-mcp-common`. Keep safe error projection, argument defaults, schema conversion, and declared tool ordering consistent across packages.
 - `server_info(name, version)` receives the capability package's version; the common package version must not appear as the server implementation version.
-- Output persistence and byte truncation use the canonical `peri_agent::agent::async_tasks` functions. Do not recreate aliases or copy their rules here.
+- Output persistence uses `peri_mcp_common::shell`; pure byte truncation and timeout policy remain in `peri_agent::agent::async_tasks`. Agent's `TaskManager::new()` has no shell execution environment; local hosts use `peri_mcp_common::create_local_task_manager()`. Session admission and cleanup evidence remain Agent-owned. Host MCP bridge/resource truncation still invokes common persistence in the host process; this seam does not provide remote output storage or cross-machine Read addressing.
 - A package owns its handler and tools. The LSP package additionally owns its client/pool implementation and the builtin handler holds the injected host-scoped pool; the host owns pool visibility, shutdown invocation, readiness admission, task supervision, cancellation delivery, and orderly shutdown. Preserve these shared-pool boundaries when changing call behavior.
 - Workspace tools retain their existing schema, names, declaration order, cwd binding, timeout and cancellation behavior. `WorkspaceInstanceInput` is session-scoped; the host remains its source and lifecycle owner.
 - Preserve direct/deferred visibility and approval behavior. Follow `ARC-MIDDLEWARE-001`, `ARC-CAPABILITY-CLOSURE-001`, `ARC-TOOLS-001`, `ARC-CANCEL-001`, and `ARC-HOST-SHUTDOWN-001` where applicable; the standards are authoritative.

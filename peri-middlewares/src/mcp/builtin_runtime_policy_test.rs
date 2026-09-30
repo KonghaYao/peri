@@ -146,7 +146,7 @@ async fn policy_close_five_dimensions() {
             let mut hook = MwHookState::new(&sync_dir.path().to_string_lossy());
             let mounted = mw_sync_slot_mounted(&disabled);
             if mounted {
-                mw_run_write_sync(&port, &mut hook, &sync_file)
+                mw_run_write_sync(&pool, &port, &mut hook, &sync_file)
                     .await
                     .unwrap_or_else(|error| panic!("[{label}] 同步不得改变工具结果: {error}"));
             }
@@ -322,7 +322,7 @@ async fn policy_close_five_dimensions() {
     std::fs::write(&gate_file, sync_body).expect("门控观测文件可写");
     let not_ready = Arc::new(MwSyncPort::new(false));
     let mut hook = MwHookState::new(&gate_dir.path().to_string_lossy());
-    mw_run_write_sync(&not_ready, &mut hook, &gate_file)
+    mw_run_write_sync(&pool, &not_ready, &mut hook, &gate_file)
         .await
         .expect("不就绪也只是跳过，不得改变工具结果");
     assert_eq!(

@@ -10,7 +10,7 @@ use tokio::time::{timeout, Duration};
 
 use super::resolve_path;
 use super::should_skip_dir;
-use peri_agent::agent::async_tasks::persist_truncated_output;
+use peri_mcp_common::shell::persist_truncated_output;
 
 /// Glob tool — aligned with the TypeScript glob_tool.
 pub struct GlobFilesTool {

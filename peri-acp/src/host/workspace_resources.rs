@@ -14,8 +14,8 @@
 /// 只做「根解析 + scope 映射 + 关闭位投影」：不读技能/Agent 内容、不扫描目录
 /// （扫描与正文读取在 provider 侧，`mcp-packages/workspace/src/resources/`）。
 ///
-/// - `resolve_skill_roots`：User（`~/.claude/skills`）→ Global（settings
-///   `skillsDir`）→ Project（`{cwd}/.claude/skills`）→ 插件根（带
+/// - `resolve_skill_roots`：User（`~/.claude/skills`）→ Project
+///   （`{cwd}/.claude/skills`）→ 插件根（带
 ///   `plugin_name` 标签，来自准备阶段的插件加载结果）→ Builtin 占位；
 /// - Builtin 占位根**不映射**为资源根（其 path 是 `PathBuf::new()` 占位，静态
 ///   资产由 provider 内置提供），启用位只经 `disable_bundled` 传递；
@@ -41,17 +41,15 @@ pub(crate) fn workspace_resources_input(
     {
         let scope = match root.source {
             SkillSource::User => ResourceScope::User,
-            SkillSource::Global => ResourceScope::Global,
             SkillSource::Project => ResourceScope::Project,
             SkillSource::Plugin => ResourceScope::Plugin,
             // Builtin 资产不是磁盘根：启用位已由 `disable_bundled` 表达。
             SkillSource::Builtin => continue,
-            // `SkillSource::Mcp` 只在旧的 SkillMetadata 面使用；根解析不产出它，
-            // 出现即内部错误（不静默当成某个 scope）。
-            SkillSource::Mcp => {
+            // 根解析不产出 Global / Mcp；出现即内部错误（不静默映射 scope）。
+            SkillSource::Global | SkillSource::Mcp => {
                 tracing::warn!(
                     path = %root.path.display(),
-                    "skill 根解析产出 MCP scope，跳过（不是磁盘根）"
+                    "skill 根解析产出不支持的 scope，跳过"
                 );
                 continue;
             }

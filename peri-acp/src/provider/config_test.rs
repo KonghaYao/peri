@@ -4,6 +4,28 @@ use peri_acp_types::meta_harness::{BUILTIN_INSTANCE_POLICY_KEYS, MIDDLEWARE_NAME
 
 use super::*;
 
+#[test]
+fn removed_skills_dir_keys_are_only_opaque_unknown_fields() {
+    let baseline: AppConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+    let serialized = serde_json::to_value(&baseline).unwrap();
+    assert!(serialized.get("skills_dir").is_none());
+    assert!(serialized.get("skillsDir").is_none());
+    for key in ["skills_dir", "skillsDir"] {
+        let parsed: AppConfig =
+            serde_json::from_value(serde_json::json!({key: "/obsolete/skills"})).unwrap();
+        assert_eq!(parsed.extra[key], "/obsolete/skills");
+        let mut known_fields = parsed.clone();
+        known_fields.extra.clear();
+        assert_eq!(known_fields, baseline);
+        let mut merged = baseline.clone();
+        merged.merge_overrides(parsed);
+        let extracted = merged.extract_overrides(&baseline);
+        assert_eq!(extracted.extra[key], "/obsolete/skills");
+        merged.extra.clear();
+        assert_eq!(merged, baseline);
+    }
+}
+
 /// 「已知 MetaHarness 键全集」= 链槽位名 ∪ builtin 实例策略键（v4-part-2 A7 的两表并集）。
 ///
 /// 测试用它构造「全关」输入：并集本身就承担「两表都被消费」的断言——若实现只读

@@ -52,7 +52,7 @@ use super::{
     grep_args::{GrepInput, OutputMode, ParsedArgs},
     grep_format::SearchSink,
 };
-use peri_agent::agent::async_tasks::persist_truncated_output;
+use peri_mcp_common::shell::persist_truncated_output;
 
 /// 核心搜索函数（同步，在 spawn_blocking 中运行）。
 ///
@@ -493,7 +493,7 @@ impl BaseTool for GrepTool {
                     "Missing required parameter pattern.",
                     "Error: Missing required parameter 'pattern'",
                 )
-                .into())
+                .into());
             }
         };
 

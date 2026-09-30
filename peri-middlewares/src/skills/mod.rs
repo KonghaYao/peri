@@ -16,13 +16,12 @@ use peri_agent::{
     tools::BaseTool,
 };
 
-// 配置读取（F12 宿主适配器：skillsDir / disableBundledSkills）归
+// 配置读取（F12 宿主适配器：disableBundledSkills）归
 // `crate::settings`——本模块（`peri-middlewares/src/skills/`）W4b 后**不含任何
 // 文件系统调用**（静态断言：本目录 grep 无 fs 读取路径），J5：技能来源只有
 // MCP 侧（builtin `workspace` 实例的资源面）。
 pub use crate::settings::{
     global_config_path, load_disable_bundled_skills, load_disable_bundled_skills_from_path,
-    load_global_skills_dir,
 };
 
 /// MCP 来源内容包装来源标注（提示注入防御：声明内容边界；文档 3.1：
@@ -100,14 +99,14 @@ pub struct SkillsMiddleware {
 /// discovery 协议 markdown 文本（13_skills 段落动态部分）。
 ///
 /// W4b（J5）后的代码事实：技能目录由 **MCP 侧**提供——builtin `workspace`
-/// 实例按宿主装配的资源根（user / global / project / plugin / builtin 静态资产）
+/// 实例按宿主装配的资源根（user / project / plugin / builtin 静态资产）
 /// 经 `skills/list` 提供 manifest、经 `resources/read` 提供正文；外部 MCP server
 /// 经同一通道提供。宿主侧不再有磁盘扫描路径，因此本段只描述发现/加载协议，
 /// 不再声明任何本地路径或扫描深度。
 pub fn format_discovery_protocol() -> String {
     [
         "Skill catalog is served by MCP servers; the builtin `workspace` instance serves \
-         this machine's skill roots (user / global `skillsDir` / project `.claude/skills` / \
+         this machine's skill roots (user / project `.claude/skills` / \
          plugin manifests / builtin assets). No local path is read by the agent.",
         "Use `DiscoverSkillsTool` to list the catalog (name + source) and `SkillTool(skill_name)` \
          to load a skill's full text by name. Cross-origin name collisions are rejected as \

@@ -55,7 +55,7 @@ async fn test_bash_typed_evidence_persists_10k_to_65k_projection() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_bash_typed_evidence_marks_explicit_background_running() {
-    let manager = Arc::new(TaskManager::new());
+    let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let tool =
         BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(manager.clone());
     let output = tool
@@ -85,7 +85,7 @@ async fn test_bash_rejects_new_execution_after_session_owner_closes() {
     // 落在 `BashTool` 本层：它对链上消费面与 builtin 桥消费面逐字等价。
     let fixture = tempfile::tempdir().unwrap();
     let cwd = fixture.path().to_str().unwrap();
-    let manager = Arc::new(TaskManager::new());
+    let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     assert_eq!(
         peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
         peri_acp_types::tasks::TaskShutdownReport::Complete
@@ -105,7 +105,7 @@ async fn test_bash_rejects_new_execution_after_session_owner_closes() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_bash_typed_evidence_marks_promoted_timeout_still_running() {
-    let manager = Arc::new(TaskManager::new());
+    let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let tool =
         BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(manager.clone());
     let output = tool
@@ -267,7 +267,7 @@ async fn test_production_dispatch_near_limit_output_persists_before_metadata_pro
 #[tokio::test]
 async fn test_production_dispatch_persists_promoted_timeout_lifecycle() {
     let fixture = tempfile::tempdir().unwrap();
-    let manager = Arc::new(TaskManager::new());
+    let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let context = dispatch_context(
         fixture.path(),
         BashTool::new(fixture.path().to_string_lossy()).with_task_manager(manager.clone()),

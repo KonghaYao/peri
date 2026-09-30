@@ -350,7 +350,21 @@ impl ServerHandler for WorkspaceMcpServer {
         request: CustomRequest,
         _context: RequestContext<RoleServer>,
     ) -> Result<CustomResult, McpError> {
+        if request.method == crate::image::READ_IMAGE_METHOD {
+            return tokio::select! {
+                biased;
+                _ = _context.ct.cancelled() => Err(McpError::internal_error("image read cancelled", None)),
+                result = crate::image::handle_read_image(&self.cwd, request) => result,
+            };
+        }
         let method = request.method.clone();
+        if method == "workspace/readText" {
+            return tokio::select! {
+                biased;
+                _ = _context.ct.cancelled() => Err(McpError::internal_error("workspace read cancelled", None)),
+                result = crate::file_observation::read_text(&self.cwd, request) => result,
+            };
+        }
         let supported = matches!(method.as_str(), "skills/list" | "skills/get");
         let provider = if supported {
             self.resource_provider()

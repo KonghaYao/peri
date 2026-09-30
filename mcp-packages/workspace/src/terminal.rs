@@ -3,16 +3,19 @@ use std::sync::{Arc, Mutex};
 
 use peri_acp_types::tasks::{OnBgCompleteFn, TaskManager};
 use peri_agent::agent::async_tasks::{
-    bg_shell_task_id, kill_process_group, parse_background_timeout, parse_foreground_timeout,
-    shell_command, tee_pipe_with_output, truncate_bytes, BgTaskKind, ShellExecutionGuard,
-    ShellOutputCapture, FOREGROUND_MAX_TIMEOUT_MS,
+    bg_shell_task_id, parse_background_timeout, parse_foreground_timeout, truncate_bytes,
+    BgTaskKind, FOREGROUND_MAX_TIMEOUT_MS,
 };
 use peri_agent::tools::{BaseTool, ToolExecutionEvidence, ToolExecutionStatus, ToolOutput};
+use peri_mcp_common::shell::{
+    kill_process_group, shell_command, tee_pipe_with_output, ShellExecutionGuard,
+};
+use peri_mcp_common::shell_output::ShellOutputCapture;
 use serde_json::Value;
 use tokio::time::{timeout, Duration};
 use tracing::warn;
 
-use peri_agent::agent::async_tasks::persist_truncated_output_with_ref;
+use peri_mcp_common::shell::persist_truncated_output_with_ref;
 
 // Render only the host platform's cleanup command; Unix PGIDs are not Windows PIDs.
 fn background_cleanup_hint(pid: u32, platform: &str) -> String {
@@ -378,8 +381,8 @@ impl BashTool {
         // ── 后台执行路径 ──
         let run_in_background = input["run_in_background"].as_bool().unwrap_or(false);
         if run_in_background {
-            // 任务发起（Agent 层 TaskManager::spawn_shell 承载实际执行：
-            // 进程 spawn/进程组/超时/输出收集/注册/完成收尾全部在 Agent 层完成）。
+            // 任务发起（TaskManager::spawn_shell 委托注入的工具执行环境：
+            // 执行环境负责进程/超时/输出，Agent 保留注册与完成生命周期）。
             let task_manager = Arc::clone(self.task_manager.as_ref().ok_or(
                 "run_in_background is not available: no background task manager configured",
             )?);
@@ -634,7 +637,9 @@ impl BashTool {
                             output_capture.retain_files();
                             let cleanup_hint = background_cleanup_hint(pid, std::env::consts::OS);
                             let log_hint = foreground_log_hint(&output_capture);
-                            let recovery = format!("Command timed out. The process is still running and has been promoted to a background task.\ntask_id: {task_id}\npid: {pid}{log_hint}\n{cleanup_hint}{timeout_note}\nDo not rerun the command while it is active; check the Tasks panel or read its live logs.");
+                            let recovery = format!(
+                                "Command timed out. The process is still running and has been promoted to a background task.\ntask_id: {task_id}\npid: {pid}{log_hint}\n{cleanup_hint}{timeout_note}\nDo not rerun the command while it is active; check the Tasks panel or read its live logs."
+                            );
                             if has_output {
                                 // 有部分输出：进程在产生进展，续跑是合理的
                                 return Ok(BashOutput::with_execution(format!(
@@ -668,16 +673,19 @@ impl BashTool {
                             drain_output.await;
                             execution.confirm_stopped();
                             output_capture.cleanup().await;
-                            return Ok(BashOutput::with_execution(format!(
-                                "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{ps_line}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
-                                foreground_timeout_ms as f64 / 1000.0
-                            ), ToolExecutionEvidence {
-                                status: ToolExecutionStatus::TimedOut,
-                                exit_code: None,
-                                output_ref: partial_ref.clone(),
-                                output_truncated: true,
-                                task_id: None,
-                            }));
+                            return Ok(BashOutput::with_execution(
+                                format!(
+                                    "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{ps_line}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
+                                    foreground_timeout_ms as f64 / 1000.0
+                                ),
+                                ToolExecutionEvidence {
+                                    status: ToolExecutionStatus::TimedOut,
+                                    exit_code: None,
+                                    output_ref: partial_ref.clone(),
+                                    output_truncated: true,
+                                    task_id: None,
+                                },
+                            ));
                         }
                     }
                 } else {
@@ -687,8 +695,9 @@ impl BashTool {
                     drain_output.await;
                     execution.confirm_stopped();
                     output_capture.cleanup().await;
-                    return Ok(BashOutput::with_execution(format!(
-                        "Command timed out after {:.1}s. The synchronous path is always bounded (default 15s, maximum {FOREGROUND_MAX_TIMEOUT_MS}ms) to encourage efficient commands.\n\
+                    return Ok(BashOutput::with_execution(
+                        format!(
+                            "Command timed out after {:.1}s. The synchronous path is always bounded (default 15s, maximum {FOREGROUND_MAX_TIMEOUT_MS}ms) to encourage efficient commands.\n\
                          {ps_line}\n\
                          Options:\n\
                          - Optimize the command: avoid scanning large directories (e.g. use `find . -maxdepth 3` instead of `find /Users/...`), add `| head`, or use fd/rg instead of find/grep.\n\
@@ -697,14 +706,16 @@ impl BashTool {
                          {timeout_note}\n\
                          {partial_hint}\n\
                          Command that timed out: {command}",
-                        foreground_timeout_ms as f64 / 1000.0
-                    ), ToolExecutionEvidence {
-                        status: ToolExecutionStatus::TimedOut,
-                        exit_code: None,
-                        output_ref: partial_ref,
-                        output_truncated: true,
-                        task_id: None,
-                    }));
+                            foreground_timeout_ms as f64 / 1000.0
+                        ),
+                        ToolExecutionEvidence {
+                            status: ToolExecutionStatus::TimedOut,
+                            exit_code: None,
+                            output_ref: partial_ref,
+                            output_truncated: true,
+                            task_id: None,
+                        },
+                    ));
                 }
             }
         };

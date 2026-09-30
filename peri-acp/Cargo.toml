@@ -36,6 +36,7 @@ peri-controller = { path = "../peri-controller" }
 peri-model = { path = "../peri-model" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-mcp-lsp.workspace = true
+peri-mcp-common.workspace = true
 peri-resources = { path = "../peri-resources" }
 peri-mcp-cron.workspace = true
 peri-mcp-workspace.workspace = true

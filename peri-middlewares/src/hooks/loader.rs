@@ -344,7 +344,7 @@ fn is_user_settings_path(path: &Path) -> bool {
     is_user_settings_path_under(path, &crate::plugin::user_home())
 }
 
-/// 同上判定，但主目录由调用方给出：字面相同，或经符号链接指向同一文件
+/// P3 配置来源身份判定（不是工具执行环境文件读取）：字面相同，或经符号链接指向同一文件
 /// （macOS `$HOME` 为链接、`/var` → `/private/var` 等）。
 ///
 /// 拆出该入口让排除规则能直接以显式主目录验证，不必依赖进程环境。

@@ -535,11 +535,17 @@ fn mw_sync_slot_mounted(disabled: &HashSet<String>) -> bool {
 
 /// 跑一次 `after_tool`（`Write` 工具、工具结果固定为成功——同步恒不得改写它）。
 async fn mw_run_write_sync(
+    pool: &Arc<McpClientPool>,
     port: &Arc<MwSyncPort>,
     state: &mut MwHookState,
     file_path: &Path,
 ) -> peri_agent::error::AgentResult<()> {
-    let middleware = LspSyncMiddleware::new(Arc::clone(port) as Arc<dyn LspPoolPort>);
+    let reader = Arc::new(crate::workspace_io::McpWorkspaceFileReader::new(
+        Some(Arc::clone(pool)),
+        None,
+        &std::collections::HashSet::new(),
+    ));
+    let middleware = LspSyncMiddleware::new(Arc::clone(port) as Arc<dyn LspPoolPort>, reader);
     let tool_call = ToolCall::new(
         "call-mw-sync",
         crate::tool_search::core_tools::TOOL_WRITE,

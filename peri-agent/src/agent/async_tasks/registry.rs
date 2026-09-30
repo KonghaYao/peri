@@ -47,8 +47,6 @@ pub enum BgCancelHandle {
     /// `None` 表示 kill 通道不可用（如 spawn 失败），此时 `cancel()` 返回明确错误
     /// 而非假装成功（issue 2026-08-05：Workflow 取消无效）。
     Kill(Option<Box<dyn FnOnce() + Send + Sync>>),
-    /// bg shell：OS 进程 kill
-    Pid(u32),
 }
 
 impl std::fmt::Debug for BgCancelHandle {
@@ -56,7 +54,6 @@ impl std::fmt::Debug for BgCancelHandle {
         match self {
             BgCancelHandle::Abort(_) => f.write_str("Abort(_)"),
             BgCancelHandle::Kill(_) => f.write_str("Kill(_)"),
-            BgCancelHandle::Pid(pid) => f.debug_tuple("Pid").field(pid).finish(),
         }
     }
 }
@@ -255,11 +252,11 @@ impl BackgroundTaskRegistry {
             .scope
             .admit()
             .map_err(|_| BackgroundRegistryError::Closing)?;
-        self.register_admitted(task)
+        self.register_external_admitted(task)
     }
 
     /// Caller holds scope admission across external process creation and registration.
-    pub(super) fn register_admitted(
+    pub fn register_external_admitted(
         &self,
         task: BackgroundTask,
     ) -> Result<(), BackgroundRegistryError> {
@@ -487,19 +484,6 @@ impl BackgroundTaskRegistry {
                     // 上方已校验，理论不可达；防御性保留
                     unreachable!("Kill(None) checked before task removal");
                 }
-                BgCancelHandle::Pid(pid) => {
-                    if pid == 0 {
-                        // 防御性守卫：Pid(0) 会导致 kill -TERM 0 波及当前进程组
-                        warn!(
-                            task_id = %task_id,
-                            "bg task cancel: pid is 0 (spawn likely failed), skipping kill"
-                        );
-                    } else {
-                        // 杀整个进程组（bash 为组长），避免子进程孤儿存活
-                        self.scope
-                            .spawn_admitted(super::shell::terminate_process_group(pid));
-                    }
-                }
             }
             drop(tasks);
 
@@ -525,7 +509,14 @@ impl BackgroundTaskRegistry {
         self.unsettled_external.lock().is_empty()
     }
 
-    pub(super) fn confirm_external_stopped(&self, task_id: &str) {
+    pub fn spawn_execution_cleanup(
+        &self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        self.scope.spawn_admitted(task)
+    }
+
+    pub fn confirm_external_stopped(&self, task_id: &str) {
         self.unsettled_external.lock().remove(task_id);
     }
 }

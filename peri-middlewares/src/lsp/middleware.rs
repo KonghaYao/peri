@@ -4,6 +4,7 @@
 //! `mcp-packages/lsp/src/server.rs` 的 `LspMcpServer`），本中间件不再
 //! 实现 `collect_tools`、不构造 `LspTool`、不持有第二份 pool、不启动
 //! language server，只把 `Write` / `Edit` 落盘后的文件内容经
+//! 注入的 WorkspaceFileReader 从工具执行环境读取，再经
 //! [`LspPoolPort`] 同步给路由到的服务器。
 //!
 //! 会话 cwd 来自 `AfterToolState` 继承的 `StateView::cwd()`：`after_tool` hook
@@ -30,11 +31,15 @@ use crate::tool_search::core_tools::{TOOL_EDIT, TOOL_WRITE};
 /// `Write` / `Edit` 落盘后的 LSP 文档同步。
 pub struct LspSyncMiddleware {
     port: Arc<dyn LspPoolPort>,
+    reader: Arc<dyn crate::workspace_io::WorkspaceFileReader>,
 }
 
 impl LspSyncMiddleware {
-    pub fn new(port: Arc<dyn LspPoolPort>) -> Self {
-        Self { port }
+    pub fn new(
+        port: Arc<dyn LspPoolPort>,
+        reader: Arc<dyn crate::workspace_io::WorkspaceFileReader>,
+    ) -> Self {
+        Self { port, reader }
     }
 }
 
@@ -78,7 +83,7 @@ impl Middleware for LspSyncMiddleware {
             return Ok(());
         }
 
-        let text = match tokio::fs::read_to_string(&path).await {
+        let text = match self.reader.read_text(&path).await {
             Ok(text) => text,
             Err(e) => {
                 tracing::debug!(target: "lsp", file = %path.display(), error = %e, "LSP 同步文件时读取失败");

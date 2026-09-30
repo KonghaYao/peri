@@ -264,20 +264,19 @@ impl SessionEnvironment {
         };
         // ── W4b：builtin `workspace` 实例的**真实资源面**输入 ──
         //
-        // 技能来源（J5）整体归位 MCP 侧：本地三根（user / global `skillsDir` /
-        // project）+ 插件根 + builtin 静态资产由该实例的 provider 读取，宿主侧不再
+        // 技能来源（J5）整体归位 MCP 侧：user/project 根 + 插件根 + builtin
+        // 静态资产由该实例的 provider 读取，宿主侧不再
         // 有任何技能文件系统读取点。输入在 `run_initialize` **之前**随上下文一次
         // 注入（AW3-11 / W4a 已建立的节奏），装配期不第二次读配置：
         //
-        // - `skill_roots`：F11（插件 manifest → 根 + 插件标签）与 F12（settings 的
-        //   `skillsDir`）适配器的产物，只产出「路径 + scope/标签」，**不读技能
+        // - `skill_roots`：用户、项目与 F11（插件 manifest → 根 + 插件标签）
+        //   适配器的产物，只产出「路径 + scope/标签」，**不读技能
         //   内容**；Builtin 占位根不映射为资源根（资产是 provider 的内置静态面，
         //   由 `disable_bundled` 位控制）。
         // - `disable_bundled`：宿主配置的真实值（F12 的
         //   `load_disable_bundled_skills` 语义来源），不再是波次域隔离常量。
         // - 缺根（目录不存在）交给 provider 既有语义处理（缺失目录 = 空批）。
-        // - agents 面不装（W5）；指令面（`peri-instruction://`）随 provider 装配
-        //   被动上线（W4a 已记录，消费切换归 W5）。
+        // - Agent 项目/插件根与指令面（`peri-instruction://`）由同一 provider 装配。
         let workspace_resources = super::workspace_resources::workspace_resources_input(
             &cwd,
             plugins,

@@ -28,5 +28,15 @@ pub(super) fn add_lsp(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
         );
         return;
     };
-    chain.add(Box::new(LspSyncMiddleware::new(Arc::clone(port))));
+    let pool = ctx.mcp_pool.as_ref().and_then(|pool| {
+        Arc::clone(pool)
+            .downcast_arc::<crate::mcp::McpClientPool>()
+            .ok()
+    });
+    let reader = Arc::new(crate::workspace_io::McpWorkspaceFileReader::new(
+        pool,
+        Some(ctx.session_id.clone()),
+        &ctx.meta_harness_disabled,
+    ));
+    chain.add(Box::new(LspSyncMiddleware::new(Arc::clone(port), reader)));
 }

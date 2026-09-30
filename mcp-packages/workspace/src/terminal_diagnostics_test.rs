@@ -34,7 +34,7 @@ async fn test_bash_stdin_null_read_fails_fast() {
 #[tokio::test]
 async fn test_sync_timeout_promote_no_output_diagnoses_stall() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
-    let registry = Arc::new(TaskManager::new());
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
     let tool =
         BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
 
@@ -82,7 +82,7 @@ async fn test_sync_timeout_promote_no_output_diagnoses_stall() {
 #[tokio::test]
 async fn test_sync_timeout_promote_with_output_notes_progress() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
-    let registry = Arc::new(TaskManager::new());
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
     let tool =
         BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
 
@@ -138,7 +138,7 @@ fn test_background_cleanup_hints_match_host_platform() {
 #[tokio::test]
 async fn test_bash_group_cleanup_settles_descendant_after_parent_exit() {
     let fixture = tempfile::tempdir().unwrap();
-    let manager = Arc::new(TaskManager::new());
+    let manager = Arc::new(peri_mcp_common::create_local_task_manager());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let tool = BashTool::new(fixture.path().to_str().unwrap())
         .with_task_manager(manager.clone())

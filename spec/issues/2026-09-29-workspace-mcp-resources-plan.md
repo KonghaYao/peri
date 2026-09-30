@@ -85,7 +85,7 @@
 | F9 | 正文读取分支：本地磁盘读 | `peri-middlewares/src/skills/content.rs:33-38` | **搬到 MCP 侧**：workspace 实例读盘；宿主删除该分支 |
 | F10 | 查找 helper：`find_skill_in_list` / `find_skill_content`（内部调 `content::load`） | `peri-middlewares/src/skills/loader.rs:480-495`、`:464-473` | **删除**：`find_skill_content` 生产调用方为零；`find_skill_in_list` 仅剩 preload 兜底（F5 改造后无消费者） |
 | F11 | 插件 manifest → 技能根列表（不读技能正文） | `peri-middlewares/src/plugin/loader.rs:325,685,710` → `peri-acp-types/src/plugin.rs:577` | **保留为宿主适配器**：插件安装目录与 manifest 属插件生命周期；只产出「根路径 + `plugin_name` 标签」交给 provider，**不读 SKILL.md**，故不属于 SkillTool 的 FS 依赖 |
-| F12 | 配置读取：`settings.json` 的 `skillsDir` / `disableBundledSkills` | `peri-middlewares/src/skills/mod.rs:29-73` | **保留为宿主适配器**：读配置（非技能内容）并作为 provider 输入位（根列表 + 关闭位）；文档与测试需锁定 |
+| F12 | 配置读取：`settings.json` 的 `disableBundledSkills` | `peri-middlewares/src/settings.rs` | **仅保留 builtin 关闭位适配器**：2026-09-30 用户 P1 裁决取代原 `skillsDir` 保留方案；已删除 provider config 字段/别名、settings loader 与根装配链路，不做兼容 shim。旧扁平/嵌套 `skillsDir` 不影响发现，User → Project → Plugin → Builtin 来源保留；插件根不在宿主做目录预过滤，缺失根由 provider 按空批处理。聚焦回归见 `provider::config::tests::removed_skills_dir_keys_are_ignored_and_not_serialized`、`host::requests::tests::skill_resources::removed_skills_dir_settings_do_not_change_resource_discovery`、`skills::loader::tests::roots_forward_missing_plugin_path_and_preserve_priority_and_bundled_switch` |
 
 **结论（J5 后）**：
 

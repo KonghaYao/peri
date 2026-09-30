@@ -255,7 +255,15 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // 新增：图片附件处理（在 @mention 之后，将 @image <path> 转换为 ContentBlock::Image）
                 ChainSlot::Image if disabled.contains("ImageMiddleware") => {}
                 ChainSlot::Image => {
-                    chain.add(Box::new(ImageMiddleware::new()));
+                    let image = match mcp_pool_concrete.as_ref() {
+                        Some(pool) => ImageMiddleware::new().with_mcp_pool(
+                            Arc::clone(pool),
+                            ctx.session_id.clone(),
+                            disabled,
+                        ),
+                        None => ImageMiddleware::new(),
+                    };
+                    chain.add(Box::new(image));
                 }
                 // ── 第二组：工作区观察类注入器 ──
                 // v4-part-4 W3-C1：原 Filesystem / Terminal 槽位已删除——7 个文件/终端
@@ -266,7 +274,12 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // 内置在宿主订阅消费侧），本组只剩留名中间件（ARC-MIDDLEWARE-001）。
                 ChainSlot::GitAttribution if disabled.contains("GitAttributionMiddleware") => {}
                 ChainSlot::GitAttribution => {
-                    chain.add(Box::new(GitAttributionMiddleware::new(model_name)));
+                    let reader = Arc::new(crate::workspace_io::McpWorkspaceFileReader::new(
+                        mcp_pool_concrete.clone(),
+                        Some(ctx.session_id.clone()),
+                        disabled,
+                    ));
+                    chain.add(Box::new(GitAttributionMiddleware::new(model_name, reader)));
                 }
                 // ── 第三组：Todo ──
                 ChainSlot::Todo if disabled.contains("TodoMiddleware") => {}

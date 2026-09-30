@@ -242,7 +242,7 @@ async fn test_bash_sync_timeout_zero_is_bounded_by_foreground_maximum() {
 #[ignore = "需要约 120s 真实等待（前台上限），手动运行"]
 async fn test_foreground_timeout_zero_promotes_at_foreground_maximum() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
-    let registry = Arc::new(TaskManager::new());
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
     let tool =
         BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
     let cap_secs = FOREGROUND_MAX_TIMEOUT_MS / 1000;

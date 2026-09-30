@@ -2,8 +2,6 @@ use std::time::Instant;
 use std::{path::Path, sync::Arc};
 
 use peri_acp_types::event::BackgroundTaskResult;
-#[cfg(unix)]
-use peri_agent::agent::async_tasks::TaskManager;
 use peri_agent::agent::events_v2::EventBus;
 use peri_agent::agent::stages::StageContext;
 use peri_agent::messages::BaseMessage;

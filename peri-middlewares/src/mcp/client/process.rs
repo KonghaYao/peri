@@ -113,7 +113,7 @@ impl super::McpClientPool {
         cwd: &Path,
     ) -> io::Result<McpStdioTransport> {
         let arg_strs: Vec<_> = args.iter().map(String::as_str).collect();
-        let mut cmd = peri_agent::agent::async_tasks::shell_command(command, &arg_strs);
+        let mut cmd = peri_mcp_common::shell::shell_command(command, &arg_strs);
         cmd.envs(env).current_dir(cwd);
         self.spawn_process_command(cmd, Some(command))
     }
