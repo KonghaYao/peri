@@ -1,53 +1,67 @@
 # P2 文件系统依赖：实现方式与难度评估
 
-状态：2026-09-30 源码级实施可行性调研，未实施；不是已批准的完整设计或工期承诺。
+状态：2026-09-30 源码级可行性评估；OAuth SQLite 方案尚未实施，不是工期承诺。
 
-后续裁决：已批准 [Session ID 恢复与机器 env 分区](../../docs/design/session-id-environment.md)，移除 session 文件锁与恢复弹窗；下文关于 binding 准入、全局 owner/lease 和全面 URI 的会前建议不再作为实施目标。核心实施以 [新清单](2026-09-30-session-id-environment-core-change.md) 为准，源码观察与暂缓缓存/插件的难度仍作参考。
+当前裁决：统一地址需求废弃，相关 URI/VFS、地址 resolver、跨环境输出 locator 与同步改造建议已删除。Session ID 恢复与机器 env 分区已实施，见 [核心改动清单](2026-09-30-session-id-environment-core-change.md)，不再列为待建地址体系。
 
-范围来自 [文件系统依赖清单](2026-09-30-filesystem-dependencies-inventory.md)：统一地址、MCP 凭据/响应缓存和宿主插件缓存扫描。落盘日志免除；SQLite 后端无需整改；TUI 本地状态免除。本轮只改文档，未运行原型、跨进程实验或远端 E2E。
+范围来自 [文件系统依赖清单](2026-09-30-filesystem-dependencies-inventory.md)：本轮评估 MCP OAuth 凭据迁至 SQLite 新表。MCP response cache、插件缓存与插件体系继续暂缓、保持落盘，不修改其准入、失效或生命周期。落盘日志、SQLite 后端与 TUI 本地状态免除整改。
 
-最新裁决：插件系统与 MCP 缓存均推迟，保留现有落盘实现及权限、认证与缓存准入；后端注入、插件扫描收口与远端迁移都不进入当前实施队列，不作为核心问题整改的前置条件。下文相关方案仅保留为后续调研参考。
+## 当前结论
 
-## 结论与难度
+**可以用 SQLite 新表保存 OAuth 凭据。建议先落本机权限保护的 credential adapter，不把 token 当作 session 数据或 response cache，也不把共享数据库自动等同于共享授权。** 当前 rmcp credential 接口已提供替换入口；困难主要在依赖注入、多用户身份、刷新竞争及动态连接清理，而非建表。
 
-以下难度是基于现有调用边界、状态与安全约束的定性判断，不是实测工时。
-
-| 方向 | 推荐最小实现 | 难度 | 不能省略的部分 |
+| 方向 | 最小切片 | 难度 | 状态 / 边界 |
 | --- | --- | --- | --- |
-| 工作区/执行环境定位契约 | 工作区身份 + 执行环境定位 + 相对 cwd，由 provider 解析实际路径 | 中 | 持久元数据、旧会话处理、显示路径与执行路径分离 |
-| 跨机器执行与恢复 | 按执行环境路由 Workspace MCP，环境不可达时明确失败 | 高 | 受信准入、绑定校验、代际/lease、取消与恢复，不回落本机 |
-| 输出引用跨实例恢复 | 稳定环境/制品身份与 provider 的持久索引 | 中高 | 生命周期、授权、过期/删除、环境消失后的行为 |
-| 全面 URI/VFS 化 | 文件/目录/shell/LSP/缓存/同步统一 resolver/provider | 很高 | 触及大量既有契约；URI 本身不提供隔离与权限 |
-| MCP response cache | 先支持 disabled/memory/local 后端注入 | 仅禁用低；完整注入中 | version、TTL、epoch、digest 与认证准入单一维护 |
-| OAuth credential | 独立 credential store 注入，动态实例可先用 memory | 中；远端持久恢复高 | 命名空间、失效/重授权、刷新竞争、旧代清理 |
-| ACP 插件搜索扫描 | 收回 PluginManagerPort，ACP 只消费类型化结果 | 低；远端接入中 | 结果与错误语义、取消、插件来源身份 |
-| 插件制品跨环境驻留 | 安装/搜索/GC 与 artifact provider 一起驻留执行环境 | 高 | 制品被执行资源引用，不能按响应缓存任意驱逐 |
+| 本机 OAuth SQLite 存储 | 新建凭据表，credential port 注入，替换全部文件构造点及清理入口 | 中 | 本轮评估；保持授权流程语义，不新增 schema 版本号 |
+| 旧 JSON 导入 | 事务导入、明确所属安装/用户、一次性迁移完成标记 | 低到中 | 不能覆盖较新凭据或把已清除的 token 重新导入 |
+| 共享数据库中的个人凭据 | principal 隔离、受控访问或客户端加密、明确刷新协调 | 中高 | 当前没有可复用的用户身份授权模型，不作为单纯建表已解决的问题 |
+| MCP response cache、插件缓存与体系 | 保持现有实现 | 暂缓 | 不进入本轮迁移 |
 
-**当前推荐：先推进执行环境绑定与 Workspace provider 路由，不先做全面 VFS；插件与 MCP 缓存继续落盘，不参与本轮迁移。** 三类缓存的独立边界仅作为将来重新启动迁移时的参考。
+## OAuth：现状与可替换边界
 
-## 统一地址：建议从执行绑定切入
+- `peri-middlewares/src/mcp/auth_store.rs::FileCredentialStore` 使用 `$HOME/.peri/oauth_tokens.json`，保存可序列化的 rmcp `StoredCredentials`；读写带进程内 mutex 与文件锁，替换使用临时文件、同步及 Unix `0600` 权限。
+- `PerServerCredentialStore` 已实现 rmcp `CredentialStore::{load,save,clear}`，但内部硬编码 `Arc<FileCredentialStore>`；`OAuthFlowManager` 同样绑定该实现。这是可替换 seam，不是已完成的 adapter 注入。
+- `initialize.rs`、`reconnect.rs`、`client_oauth.rs` 与 `dynamic/staged_connection.rs` 均有文件存储构造/使用点，必须统一走部署时注入的凭据能力，不能只改授权成功后的写入。
+- 静态凭据按 server name 索引；同名配置更换 endpoint 或授权配置可能复用旧键。动态连接使用 session/incarnation/server 的隔离键，`DynamicOAuthCredentialGuard` 在 rollback、close 与同步 Drop 中调用 `clear_server_blocking`。SQLite 异步接口不能直接塞进现有同步 Drop。
 
-已确认的基础：`peri-acp-types/src/workspace.rs::ResolvedWorkspace` 已有 project/workspace 身份、`cwd/root: PathBuf` 和相对 cwd；`SessionBinding::from_workspace` 固化 workspace 身份与相对目录。它们可作为迁移起点，但不等于已有跨机器地址解析。`peri-acp-types/src/session_store.rs::SessionStoreLocator` 是存储 locator 的既有先例，不应因此要求更换 SQLite 后端。
+## SQLite 表建议（待实施）
 
-候选最小契约应区分：逻辑 workspace、执行环境、相对 cwd、显示路径、环境内实际路径。地址由部署/provider 解析；计算核心只持身份和相对地址。现有 Read/Write 等文件参数可先保持其工具环境语义，不要求第一批把每个工具参数全部改成 URI。这是实施建议，不是已实现契约。
+候选表名 `mcp_oauth_credentials`，不改 `threads` 或 session 父子关系：
 
-执行环境身份须能跨实例持久保存，不能直接使用 workspace ID 或活跃实例的 generation 替代。`peri-acp/src/host/workspace.rs::expect_directory` 当前在宿主 canonicalize，`host/prepared.rs::PreparedSessionInputs::resolve_configuration` 按本地目录解析配置，`peri-agent/src/session/exec/executor_helpers/v2_execute.rs::V2ExecuteRequest` 仍传递 `cwd: String`；最小类型切片为中等难度，贯通这些入口与恢复链路的定位方案整体为高难度。
+| 字段 | 语义 |
+| --- | --- |
+| `principal_id` | 凭据使用主体，由可信部署/登录上下文提供；不能由 session ID 或 machine ID 推导成用户授权 |
+| `machine_id` | 本轮默认限定凭据所在安装环境，复用已有持久机器 ID；不是用户身份 |
+| `server_key` | 配置来源与服务器/授权配置的稳定身份；不能只用展示名称。动态键还要含 session/incarnation/connection 身份 |
+| `credentials_blob` | 完整 `StoredCredentials` 序列化载荷；保留 client registration、token 等原有字段，不只保存 access token |
+| `updated_at` | 诊断及更新时间，不是跨实例 refresh 互斥保证 |
 
-现有 builtin 并不是现成远端 provider：`peri-middlewares/src/mcp/builtin/runtime.rs::spawn_builtin_link` 使用本地 duplex，`builtin/dispatch.rs::builtin_server_handler` 构造本地 Workspace；`builtin/mod.rs::reserved_name_takeover` 禁止同名 command/url 接管，`workspace_io.rs::McpWorkspaceFileReader::request` 要求 builtin 来源。远端部署须建立明确获批的 provider 与信任入口，不能仅把保留的 workspace 配置改成 URL。
+建议唯一键为 `(principal_id, machine_id, server_key)`。所有 load/save/clear 都绑定同一完整键，clear-all 仅清当前主体与环境；server URL 在这里仅参与已有 OAuth 服务身份，不引入统一地址体系。
 
-不能仅把 `cwd: PathBuf/String` 改为 URI 字符串：宿主目录检查、session 创建/恢复、子任务继承和工具实例选择仍需对应的环境解析与准入。跨环境不可达时应错误或只读恢复，不能拿旧绝对路径在宿主尝试执行。路径规范化也必须在对应环境内完成，不能对远端 URI 调用本地 canonicalize。
+本机安装尚无用户主体模型时，可以由部署提供私有 credential namespace，但必须明确它只是本机单用户前提，不能宣称支持共享库中的个人权限隔离。以后确需同一用户跨机器共享凭据，单独调整环境 scope 与授权规则，不自动取消 machine 分区。
 
-输出引用是独立的小切片：`mcp-packages/workspace/src/output_store.rs::OutputStore` 当前生成实例 UUID，URI→文件映射驻内存，文件虽然保留于工具环境，实例重建后仍不能凭旧 URI 恢复映射。稳定环境/制品 locator、持久索引与授权须一起设计；只增加 URI scheme 不解决此问题。
+表由独立 credential adapter 幂等 `CREATE TABLE IF NOT EXISTS`，保持当前 schema 10 与会话序列化契约，不添加新的 schema 版本号。adapter 应由 Resources 层或专用能力持有，OAuth 消费侧只接收行为接口；不公开 session 私有 pool，不把 token 写进通用 Config MCP，也不新增 middleware 直接执行 SQL 的依赖。
 
-全面 VFS 只在第二个真实跨环境用例确有统一文件操作需求时评估。URI 不等于 cwd 沙箱；当前绝对路径与 symlink 行为不能在迁移中被悄悄改成另一套权限规则。
+按内部能力经 MCP 消费的边界，凭据能力应在部署装配时经独立、受信的 bootstrap 通道注入，不依赖尚待 OAuth 授权的目标工具池，否则会形成“取 token 先连目标、连目标先取 token”的循环。可由独立 MCP adapter 封装 Resources 的窄凭据端口，部署继续持有关闭权；这不要求独立进程，也不引入统一地址设计。
 
-## 缓存：分成授权、响应复用、执行资源三类
+SQLite 的事务可替代凭据文件 read-modify-write 的文件锁；保留需要的运行时生命周期管理。它只能保证持久写入原子性，不能保证多个实例对同一 refresh token 发起的网络刷新自动串行，也不能防止旧请求覆盖重授权后的凭据。多实例刷新/注销协同仍需独立契约与条件提交验证。
 
-### OAuth credential
+## 旧数据迁移与动态生命周期
 
-- `peri-middlewares/src/mcp/auth_store.rs::FileCredentialStore` 使用全文件锁、版本检查、临时文件/同步/原子替换，Unix 文件权限为 0600；`PerServerCredentialStore` 已对接 rmcp credential 端口，但仍绑定具体文件实现。构造方包括 `initialize.rs`、`reconnect.rs`、`client_oauth.rs`，不能只换一个入口。
-- 静态 key 当前按 server name；远端共享时应明确用户/租户、endpoint 与授权主体，不可直接把同名 server 的凭据混在一起。动态连接的 `dynamic/staged_connection.rs::DynamicOAuthCredentialGuard` 使用 session/incarnation/server key，关闭与回滚在同步 Drop 清理；跨网络删除、崩溃残留与过期回收必须重新定生命周期。
-- 推荐先注入 credential store，保留本地实现；动态实例若不要求崩溃后恢复，可先用 memory。确需持久恢复时，再建设带 owner/lease 与安全通道的专用 capability。正常关闭清除不等于崩溃后必然无残留。
+1. 只导入本次明确归属的本机旧文件，校验现有文件格式与版本；未知来源的 JSON 不猜用户或机器归属。
+2. 旧静态 key 只有 server name，缺 endpoint/授权来源。仅在当前配置唯一匹配且归属明确时映射新键；同名歧义、配置已消失或身份改变时要求重新授权，不盲目复用。
+3. 在事务内一次性导入，不覆盖已有较新记录；提交并确认后记录持久迁移完成事实，再清理旧文件及不再需要的锁。不能每次启动按缺行重新导入，否则注销删除后会从旧 JSON 复活 token。
+4. 迁移完成后只有 SQLite 一份写入权威，不双写、不在失败时隐式回退 JSON；失败应可诊断且不输出凭据正文。
+5. 动态凭据仍只服务对应连接 incarnation。优先沿现有 MCP owner 的显式 rollback/close 生命周期等待清理；同步 Drop 只作为有定义的兜底，异步删除完成前不能报告已清理。崩溃残留的回收策略另外验收，不改成永久跨 session 授权。
+
+## 密钥保护与验收边界
+
+- **SQLite 并不自动提供 secret 隔离。** 原文件的权限保护不能在迁移后丢失，数据库、WAL/SHM、备份及故障输出都要纳入权限与泄露检查。
+- 如果同一 session 数据库可被多个人直接读取，不建议把个人 OAuth 明文 token 直接并入；仅添加 `principal_id` 查询条件不足以阻止直接读表。可选本机私有凭据库，或经独立授权服务访问，或在已有密钥管理前提下存客户端加密载荷；不要自创加密协议。
+- 本轮建议默认先采用本机权限保护边界。共享后端、主体验证、密钥管理尚未实施，不据此宣称多用户凭据安全；遵守 `ARC-SECRET-001`，日志、错误、遥测与测试不得出现真实 token。
+- 后续最小验收：load/save/clear 及重启恢复，用户/机器/同名服务器隔离，旧 JSON 一次性导入与注销不复活，refresh/重授权竞争，动态关闭/回滚/崩溃残留，只读/数据库失败及 secret 脱敏。
+
+## 暂缓参考：MCP cache 与插件（本轮不改）
 
 ### MCP response cache
 
@@ -64,23 +78,9 @@
 
 Config MCP 可复用独立启动/部署注入的组织方式，但 `peri-acp-types/src/configuration.rs::ConfigurationRequest` 没有 credential、目录搜索、锁/CAS、artifact 生命周期语义。不要把 token JSON 硬塞进通用 Config MCP；其 TCP adapter 也没有认证/TLS，只适用于受信部署通道，见 `mcp-packages/config/CLAUDE.md`。
 
-## 设备同步：不作为第一批前置改造
-
-`peri-tui/src/sync/protocol.rs::SyncPackage/FileEntry/McpItem` 当前表达版本、相对路径/内容和全局/项目配置，项目条目没有 workspace 身份。`scanner.rs::scan_mcp` 从发送方 cwd 读取，`writer.rs::write_sync_items` 向接收方 cwd 写入；这不是跨设备 workspace 身份映射。
-
-TUI 本地存储免除。先完成执行环境/工作区映射；确需跨设备恢复项目绑定时，再单独扩展 payload 身份与版本验收，不先重写加密传输。写入验收仍要保留 `writer.rs::validate_and_resolve` 与 `channel_flow/staging.rs` 的路径防护、暂存及回滚。此建议未做混合版本 E2E。
-
-## 会前实施建议（已由后续裁决取代）
-
-1. 执行环境 locator 与持久 binding：同 workspace 在不同环境、旧会话加载、相对路径与显示路径分离；明确环境不可达的处理。
-2. Workspace provider 路由与受信准入：关闭/换代/重连、取消与旧 lease、子任务继承、断连不回落本机；不允许用户配置冒充受信 builtin。
-3. 输出 locator/索引的小型恢复切片：provider 重建、文件过期、环境不存在、无权读取及同 ID 错环境。
-
-缓存后端注入、插件扫描收口与 artifact 外置全部暂缓；设备同步仍不作为第一批前置改造。缓存认证准入的疑点只是未验证风险，不是已确认漏洞，也不据此扩大当前迁移范围。
-
 ## 限制与当前未完成项
 
-- 难度来自静态调用链与契约评估，未做工期、性能或生产数据测量，不给人日承诺。
-- 未执行跨进程锁、崩溃恢复、远端断连、Windows 权限或混合设备版本验证；同进程新实例缓存复用测试不能视为独立 OS 进程实验。
-- compact 回读尚未移除：`peri-agent/src/agent/compact_v2/full.rs::full_compact_inner → collect_reinject_v2 → read_file_with_budget` 仍从宿主读取 skills/recent files。应删除回读而不是下沉为 MCP 回读；历史工具调用记录及纯摘要元数据应保留，本轮没有修改 compact 代码。
-- 落盘日志明确免除，无需整改；P2 本轮只有调研，无运行时代码改动。
+- 难度为静态调用链与契约判断，未运行 OAuth SQLite 原型、真实授权、并发刷新或生产数据迁移，不给工期承诺。
+- 未进行远端多用户、跨进程崩溃、Windows 权限或数据库备份泄露验证。
+- compact 文件回读尚未移除；仍应删除回读而不是改为 MCP 回读，历史工具调用记录及纯摘要元数据保留，见文件系统依赖清单。
+- 本轮仅更新评估与范围清单，未修改 OAuth、MCP cache 或插件运行时代码。
