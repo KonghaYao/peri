@@ -15,7 +15,7 @@
 6. **shell（P1）**：执行与输出持久化归工具执行环境；**workflow 与 PTC 是特例**（本地 JS 执行环境自管理，另行处置）。
 7. **工具 fs（P1）**：本清单中的工具执行依赖已下沉，不代表 P2 地址/缓存及 P3 插件体系也已迁移。
 8. **TUI 免除**：TUI 相关（客户端本地状态、主题、web-pty 等）**免除定级**。
-9. **遥测**：落盘日志是**特例**；Langfuse 服务端上报效果仍需端到端验证。
+9. **遥测**：落盘日志**免除，不整改**；Langfuse 服务端上报效果仍需端到端验证。
 10. **compact**：不应读取 skill 文件——保留历史工具调用记录即可；同机制的文件回读（recent files）一并评估。`compact_v2/full.rs` 的文件读取应移除。
 
 ## 二、全仓库总览
@@ -26,7 +26,7 @@
 | --- | --- | --- | --- |
 | `peri-acp` | 未重统计 | rewind 文件回退、工作区 canonicalize、插件缓存（P2）、`/etc/os-release` | 配置 I/O 已下沉；canonicalize 见第四节（统一地址 P2） |
 | `peri-acp-types` | 0 | 仅 `PathBuf` 类型（契约数据） | 保持；路径类型不是 feature 边界 |
-| `peri-agent` | 未重统计 | 存储桥、compact 文件回读、日志 | compact 回读移除；存储无需整改；日志特例 |
+| `peri-agent` | 未重统计 | 存储桥、compact 文件回读、日志 | compact 回读待移除；存储无需整改；落盘日志免除 |
 | `peri-controller` | 0 | — | — |
 | `peri-middlewares` | 未重统计 | 插件/MCP 管理、MCP 执行环境适配 | P2 缓存 + P3 Plugin MCP |
 | `peri-model` | 0 | — | — |
@@ -47,9 +47,9 @@
 | 位置 | 用途 | 具体行为 | 处置 |
 | --- | --- | --- | --- |
 | `mcp-packages/common/src/shell_executor.rs` | 后台 shell 执行目录 | 执行环境仍用本地 cwd 字符串 | 随统一地址（P2，第四节） |
-| `agent/compact_v2/full.rs:418-434` `read_file_with_budget` | Full compact 时把 skills 与 recent files 内容读回上下文 | `std::fs::read_to_string` | **移除**（用户裁决）：保留历史工具调用记录即可 |
-| `agent/compact_v2/full.rs:455-461` `resolve_path` | 相对路径按 cwd 转绝对 | `Path::join` | 随回读移除 |
-| `telemetry/subscriber.rs:29-92` | 运行日志滚动落盘 `~/.peri/logs` | `dirs_next`、滚动文件 | **特例**：落盘日志按特例处理 |
+| `peri-agent/src/agent/compact_v2/full.rs` `read_file_with_budget` / `collect_reinject_v2` | Full compact 时把 skills 与 recent files 内容读回上下文 | `spawn_blocking` 内调用 `std::fs::read_to_string`，仍在主路径使用 | **未完成、待移除**（用户裁决）：保留历史工具调用记录，不应改成 MCP 回读 |
+| `peri-agent/src/agent/compact_v2/full.rs` `resolve_path` | 相对路径按 cwd 转绝对 | `Path::join` | 随回读移除 |
+| `peri-agent/src/telemetry/subscriber.rs` | 运行日志滚动落盘 `~/.peri/logs` | `dirs_next`、滚动文件 | **免除，不整改** |
 
 ### 3.2 剩余宿主控制面（Plugin MCP P3 / 缓存 P2）
 
@@ -111,9 +111,9 @@
 
 ### 4.2 已有基础（URI 化的落点）
 
-- `WorkspaceId` / `ProjectId` 身份层与 `cwd_relative_to_workspace` 相对路径已存在——URI 化只需为"路径"补上"执行环境"维度。
+- `WorkspaceId` / `ProjectId` 身份层与 `cwd_relative_to_workspace` 相对路径已存在，可复用，但统一地址还需执行环境绑定、provider 解析、持久元数据与恢复准入，不能只替换路径类型。
 - `SessionStoreLocator`（`peri-acp-types/src/session_store.rs:39`）已区分 `LocalPath(PathBuf)` 与 `Locator(String)`（`turso://` scheme）——**存储寻址已有 scheme 先例**，工作区寻址可复用同一模式。
-- 执行所有权/代际（execution lease、read-only admission）已按"宿主"建模，与"执行环境"维度天然兼容。
+- 执行所有权/代际（execution lease、read-only admission）已按"宿主"建模；增加执行环境后仍需明确旧 lease、重连换代与不可达环境的准入语义，不视为现有远端能力。
 
 ### 4.3 VS Code 的 URI 设计（参考）
 
@@ -147,6 +147,8 @@ VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri`
 | **P2** | MCP / 插件缓存 | `peri-middlewares/src/mcp/{auth_store,resource_cache}.rs`、`peri-acp/src/host/requests/plugin.rs:512-526`（另：3.4 同步扫描的 `~/.claude/plugins/cache/` 项） | 暂时标记 P2，**不在考虑范围内**（TUI 侧插件 CLI / 面板归 TUI 免除） |
 | **P3** | 插件体系 → **Plugin MCP** | `peri-middlewares/src/plugin/*`、`installer/*`、`marketplace/fetch.rs`、`host_ports.rs` | 单独设计为 Plugin MCP（可能落 Workspace 内），替代当前重型依赖 |
 
+P2 的实现方式与难度见 [实施可行性调研](2026-09-30-p2-filesystem-implementation-assessment.md)；调研不代表已实施，也不改变缓存当前暂缓实施的裁决。
+
 ### 5.2 等级外裁决
 
 | 裁决 | 项 | 处置 |
@@ -154,8 +156,8 @@ VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri`
 | 无需整改 | 存储后端（本机 SQLite / turso） | 既有后端切换能力满足本清单要求，安全依赖，不列入待办等级表 |
 | 免除 | TUI 相关（`peri-tui` 本地状态与插件 CLI / 面板、`peri-theme`、`peri-web-pty` 已标记可能删除） | 本地客户端，**免除定级**；同步协议随统一地址（P2）演进 |
 | 特例 | workflow / PTC artifact 管理 | 本地 JS 执行环境自管理，另行处置（宜随工具执行环境整体迁移） |
-| 特例 | 落盘日志（`~/.peri/logs` 滚动日志） | 按特例处理，不列为改造项（`telemetry/subscriber.rs`） |
-| 移除 | compact 文件回读（skills / recent files） | 移除，保留历史工具调用记录（`compact_v2/full.rs`） |
+| 免除 | 落盘日志（`~/.peri/logs` 滚动日志） | 不整改、不纳入迁移范围（`peri-agent/src/telemetry/subscriber.rs`） |
+| 待移除 | compact 文件回读（skills / recent files） | 尚未移除；删除文件回读，保留历史工具调用记录（`peri-agent/src/agent/compact_v2/full.rs`） |
 
 ### 5.3 已处理（每项一行）
 
@@ -173,6 +175,7 @@ VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri`
 
 ### 5.4 未完成边界
 
+- compact 的 `full_compact_inner → collect_reinject_v2 → read_file_with_budget` 仍执行宿主文件回读；本轮仅核对状态，未修改 compact 代码。
 - 配置 MCP 的远端部署认证/TLS 与跨设备 locator 属部署/P2 后续工作；插件 manifest、安装与 marketplace 生命周期仍在 Plugin MCP P3，未扩为本轮范围。
 - 输出资源 URI 绑定当前 Workspace 实例，实例关闭/重建后不保证旧 URI 可读；输出文件保留于工具环境，跨实例恢复与统一地址仍属 P2。
 - Workspace 仍使用本地路径，不构成 cwd 沙箱；跨设备 URI 方案未实施，绝对路径/symlink 行为保持现状。
@@ -192,6 +195,6 @@ VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri`
 - 未做编译期 feature 拆分实验
 - 未核对 `peri-tui/src/sync` 协议全量字段（仅扫描 fs 触点与 staging 语义）
 - 未跑全库/E2E、Windows 原生执行或 120 秒 ignored 用例
-- P2 统一地址与 P3 Plugin MCP 未做本轮实施拆解与工作量评估
+- P2 已开展源码级方案/难度调研，未做原型、端到端远端部署或工期实验；P3 Plugin MCP 尚未实施拆解
 - cwd / 统一地址（P2）仅到方向层面；未形成 spec 契约
 - metrics → Langfuse 未做端到端上报验证（本地无 Langfuse 凭据，未观察 Langfuse 服务端落库；含指标归属到活跃 turn trace 的服务端表现）
