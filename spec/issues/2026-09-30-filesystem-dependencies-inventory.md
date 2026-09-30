@@ -9,7 +9,7 @@
 
 1. **范围与落点**：文件系统耦合的清单覆盖全仓库；`mcp-packages` 除外，且**是未来耦合的移动目标**（工具执行环境）。
 2. **cwd / 统一地址（P2）**：cwd 与多设备统一寻址（URI 化，第四节）列为 **P2**；仍是大工程（此前「单独立项」表述以本次定级为准）。
-3. **存储（P4）**：SQLite 可通过环境变量切换为 turso 解除本地依赖（`--session-store env:<VAR>` 的 `env:` 解引用已支持），属**安全依赖**。
+3. **存储（无需整改）**：SQLite 与 turso 后端及 `--session-store env:<VAR>` 已支持，属**安全依赖**，不列入待办等级表。
 4. **配置数据面（P3）**：配置文件下沉为一个**配置数据面**——所有外部来源汇总于此，再被其他方消费；数据面自身依赖文件系统，依赖也可以来自 workspace；最小化迁移。
 5. **插件体系（P3）**：插件相关单独设计为 **Plugin MCP**（可能落 Workspace 内），替代当前重型依赖。
 6. **shell（P1）**：执行与输出持久化归工具执行环境；**workflow 与 PTC 是特例**（本地 JS 执行环境自管理，另行处置）。
@@ -26,12 +26,12 @@
 | --- | --- | --- | --- |
 | `peri-acp` | 未重统计 | 全局配置路径（P3）、rewind 文件回退、工作区 canonicalize、插件缓存（P2）、`/etc/os-release` | 宿主控制面收口；canonicalize 见第四节（统一地址 P2） |
 | `peri-acp-types` | 0 | 仅 `PathBuf` 类型（契约数据） | 保持；路径类型不是 feature 边界 |
-| `peri-agent` | 未重统计 | 存储桥、compact 文件回读、日志 | compact 回读移除；存储 P4；日志特例 |
+| `peri-agent` | 未重统计 | 存储桥、compact 文件回读、日志 | compact 回读移除；存储无需整改；日志特例 |
 | `peri-controller` | 0 | — | — |
 | `peri-middlewares` | 未重统计 | 插件/MCP 管理、settings、MCP 执行环境适配 | P2 缓存 + P3 配置数据面与 Plugin MCP |
 | `peri-model` | 0 | — | — |
 | `peri-process` | 0 | 进程树所有权（OS 依赖，非 fs） | 随 shell feature 处置 |
-| `peri-resources` | 32 | SQLite 存储、Filesystem 测试后端、`~/.peri` 配置路径、turso 远端 | **P4** 安全依赖：环境变量切换 turso 即解除本地依赖 |
+| `peri-resources` | 32 | SQLite 存储、Filesystem 测试后端、`~/.peri` 配置路径、turso 远端 | 存储安全依赖无需整改；配置路径随 P3 配置数据面处置 |
 | `peri-runtime` | 0 | — | — |
 | `peri-theme` | 2 | 主题文件读取 | TUI 相关，**免除** |
 | `peri-tui` | 85 | 设备间同步、keystore、输入历史、插件 CLI、更新、主题下载 | TUI 相关，**免除**；同步协议随统一地址（P2）演进 |
@@ -65,7 +65,7 @@
 | `peri-acp/src/host/requests/plugin.rs:512-526` | 插件缓存目录扫描（`read_dir` + manifest 读取） | **P2**：暂不在考虑范围 |
 | `peri-middlewares/src/mcp/{auth_store,resource_cache}.rs` | OAuth 凭证落盘、跨进程资源缓存（advisory file lock） | **P2**：暂不在考虑范围 |
 | `peri-tui/src/cli_plugin.rs`、`kit/panels/plugin/data.rs` | 插件 CLI 与面板 | **免除**（TUI 相关） |
-| `peri-agent/src/resources.rs` | 存储装配桥（`Option<PathBuf>` → `peri-resources`）；默认 `~/.peri/threads/threads.db` | 随存储（P4）与宿主装配收敛 |
+| `peri-agent/src/resources.rs` | 存储装配桥（`Option<PathBuf>` → `peri-resources`）；默认 `~/.peri/threads/threads.db` | 安全依赖，无需整改 |
 
 ### 3.3 剩余工具环境依赖
 
@@ -93,10 +93,9 @@
 
 这两者是"本地 node 执行环境"的自管理（安装/发布/隔离/进程 spawn），其 fs 依赖与 JS 运行时绑定。按用户裁决列为**特例**：不进入本轮定级处理序列，处置方式另行决定（宜随工具执行环境整体迁移）。
 
-### 3.6 存储后端（peri-resources，P4 安全依赖）
+### 3.6 存储后端（peri-resources，安全依赖，无需整改）
 
-- **P4 定级**：本机存储为单文件 SQLite（WAL，默认 `~/.peri/threads/threads.db`），同时已支持 turso 远端后端（`turso://` locator，`sessions/remote/*`）；`--session-store env:<VAR>` 的 `env:` 解引用已支持——把 locator 指向环境变量即可**经环境变量切换**为远端，解除本地文件系统依赖。属**安全依赖**：默认本地可用，只需提及，不列为改造项。
-- 远端与本地 schema 逐列一致（canonical 单一事实源）。
+- **无需整改**：本机 SQLite 与 turso 远端及 `--session-store env:<VAR>` 已支持，存储属于安全依赖，不列为改造项。
 - `sessions/filesystem.rs`：`FilesystemThreadStore`——非默认后端，测试用途。
 - `config/mod.rs`：`~/.peri`、`~/.peri/settings.json` 路径入口（与配置数据面 P3 相接）。
 
@@ -144,21 +143,20 @@ VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri`
 
 ## 五、用户等级表
 
-### 5.1 等级表（P1–P4，按用户裁决）
+### 5.1 待办等级表（仅保留未完成且需要整改的项）
 
 | 等级 | 项 | 现状位置 | 处置 |
 | --- | --- | --- | --- |
-| **P1** | Shell 输出与工具执行边界 | 第 5.3 节 | 已完成本清单迁移；P2/P3/P4 与等级外裁决保留 |
 | **P2** | cwd / 多设备统一地址（URI 化） | 第四节 | 统一地址方案；大工程，按 P2 推进 |
 | **P2** | MCP / 插件缓存 | `peri-middlewares/src/mcp/{auth_store,resource_cache}.rs`、`peri-acp/src/host/requests/plugin.rs:512-526`（另：3.4 同步扫描的 `~/.claude/plugins/cache/` 项） | 暂时标记 P2，**不在考虑范围内**（TUI 侧插件 CLI / 面板归 TUI 免除） |
-| **P3** | 配置数据面 | `peri-acp/src/provider/{store,config}.rs`、`peri-middlewares/src/settings.rs`、`mcp/config.rs`、`hooks/loader.rs` 等配置外部来源 | 下沉为**配置数据面**：所有外部来源汇总于此、被其他地方消费；数据面自身依赖文件系统，依赖也可以来自 workspace；**最小化迁移** |
+| **P3** | 配置数据面 | `peri-acp/src/provider/{store,config}.rs`、`peri-middlewares/src/settings.rs`、`mcp/config.rs`、`hooks/loader.rs` 等配置外部来源 | **未完成**：配置仍在宿主多处读写；需汇总为配置数据面供其他方消费，数据面自身可依赖文件系统或 workspace，最小化迁移 |
 | **P3** | 插件体系 → **Plugin MCP** | `peri-middlewares/src/plugin/*`、`installer/*`、`marketplace/fetch.rs`、`host_ports.rs` | 单独设计为 Plugin MCP（可能落 Workspace 内），替代当前重型依赖 |
-| **P4** | 存储后端（本机 SQLite 文件） | `peri-resources/src/sessions/sqlite_store.rs`（默认 `~/.peri/threads/threads.db`）等 | **安全依赖**：经环境变量切换 turso 即解除本地依赖（`--session-store env:<VAR>` 已支持）；只需提及 |
 
 ### 5.2 等级外裁决
 
 | 裁决 | 项 | 处置 |
 | --- | --- | --- |
+| 无需整改 | 存储后端（本机 SQLite / turso） | 既有后端切换能力满足本清单要求，安全依赖，不列入待办等级表 |
 | 免除 | TUI 相关（`peri-tui` 本地状态与插件 CLI / 面板、`peri-theme`、`peri-web-pty` 已标记可能删除） | 本地客户端，**免除定级**；同步协议随统一地址（P2）演进 |
 | 特例 | workflow / PTC artifact 管理 | 本地 JS 执行环境自管理，另行处置（宜随工具执行环境整体迁移） |
 | 特例 | 落盘日志（`~/.peri/logs` 滚动日志） | 按特例处理，不列为改造项（`telemetry/subscriber.rs`） |
@@ -197,6 +195,6 @@ VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri`
 - 未做编译期 feature 拆分实验
 - 未核对 `peri-tui/src/sync` 协议全量字段（仅扫描 fs 触点与 staging 语义）
 - 未跑全库/E2E、Windows 原生执行或 120 秒 ignored 用例
-- P2 统一地址、P3 配置数据面与 Plugin MCP、P4 切换未做本轮实施拆解与工作量评估
+- P2 统一地址、P3 配置数据面与 Plugin MCP 未做本轮实施拆解与工作量评估
 - cwd / 统一地址（P2）仅到方向层面；未形成 spec 契约
 - metrics → Langfuse 未做端到端上报验证（本地无 Langfuse 凭据，未观察 Langfuse 服务端落库；含指标归属到活跃 turn trace 的服务端表现）
