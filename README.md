@@ -116,6 +116,27 @@ peri update                  # Update Peri
 
 Tool calls are auto-approved by default. For approval prompts, use `--permission-mode default`.
 
+### Next-major beta
+
+Available for macOS / Linux (x86_64 and ARM64) after the first successful
+`pre-release/main` build publishes the `peri-beta` prerelease.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/konghayao/peri/pre-release/main/scripts/install-beta.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+peri-beta --version
+peri-beta                    # Start beta in your project
+```
+
+Installs `peri-beta` in `~/.local/bin` without replacing `peri`. Add the PATH export
+to `~/.zshrc` or `~/.bashrc` to make it permanent. Rerun the installer to update
+beta; do not use `peri-beta update`, which uses the stable installer.
+Set `PERI_BETA_INSTALL_DIR` to use a different installation directory.
+
+Beta and stable share `~/.peri` configuration and sessions by default. Use
+`--config-file` and `--db-path` for data isolation.
+See [beta installation notes](.github/README.md#安装与更新-beta) for details.
+
 <details>
 <summary><strong>Configuration & runtime notes</strong></summary>
 

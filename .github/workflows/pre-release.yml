@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: true
+    cancel-in-progress: false
 
 env:
     CARGO_TERM_COLOR: always
@@ -61,33 +61,81 @@ jobs:
               run: cargo build --locked -p peri-tui --bin peri --release --target ${{ matrix.target }}
 
             - name: Smoke test binary
-              run: target/${{ matrix.target }}/release/peri --version
+              run: |
+                  mkdir -p dist/package
+                  cp target/${{ matrix.target }}/release/peri dist/package/peri-beta
+                  dist/package/peri-beta --version
 
             - name: Package binary
               env:
                   PLATFORM: ${{ matrix.platform }}
                   TARGET: ${{ matrix.target }}
               run: |
-                  mkdir -p dist
-                  tar -czf "dist/peri-${PLATFORM}.tar.gz" -C "target/${TARGET}/release" peri
+                  tar -czf "dist/peri-beta-${PLATFORM}.tar.gz" -C dist/package peri-beta
                   (
                       cd dist
-                      shasum -a 256 "peri-${PLATFORM}.tar.gz" > checksums.txt
+                      shasum -a 256 "peri-beta-${PLATFORM}.tar.gz" > "peri-beta-${PLATFORM}.tar.gz.sha256"
                   )
                   {
                       echo "Branch: $GITHUB_REF_NAME"
                       echo "Commit: $GITHUB_SHA"
                       echo "Run: $GITHUB_RUN_ID (attempt $GITHUB_RUN_ATTEMPT)"
                       echo "Target: $TARGET"
-                      "target/${TARGET}/release/peri" --version
+                      dist/package/peri-beta --version
                       rustc --version
-                  } > dist/build-info.txt
+                  } > "dist/build-info-${PLATFORM}.txt"
+                  rm -rf dist/package
 
             - name: Upload artifact
               uses: actions/upload-artifact@v4
               with:
-                  name: peri-next-major-${{ matrix.platform }}-${{ github.sha }}
-                  path: dist/
+                  name: peri-beta-${{ matrix.platform }}-${{ github.sha }}
+                  path: |
+                      dist/*.tar.gz
+                      dist/*.sha256
+                      dist/build-info-*.txt
                   if-no-files-found: error
                   compression-level: 0
                   retention-days: 14
+
+    publish:
+        name: Publish peri-beta
+        needs: build
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: write
+        defaults:
+            run:
+                shell: bash
+        steps:
+            - name: Download beta artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: peri-beta-*-${{ github.sha }}
+                  path: dist
+                  merge-multiple: true
+
+            - name: Verify all packages
+              run: |
+                  for platform in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64; do
+                      (cd dist && sha256sum --check "peri-beta-${platform}.tar.gz.sha256")
+                      test "$(tar -tzf "dist/peri-beta-${platform}.tar.gz")" = peri-beta
+                  done
+
+            - name: Publish rolling beta prerelease
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  GH_REPO: ${{ github.repository }}
+              run: |
+                  printf 'Development build from pre-release/main.\n\nCommit: %s\nRun: %s/actions/runs/%s\n' \
+                    "$GITHUB_SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > notes.md
+                  if gh release view peri-beta --json isPrerelease --jq '.isPrerelease' > prerelease.txt; then
+                      test "$(cat prerelease.txt)" = true
+                      gh release upload peri-beta dist/* --clobber
+                      gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/peri-beta" \
+                        -f sha="$GITHUB_SHA" -F force=true
+                      gh release edit peri-beta --title 'Peri Beta' --prerelease --latest=false --notes-file notes.md
+                  else
+                      gh release create peri-beta dist/* --target "$GITHUB_SHA" \
+                        --title 'Peri Beta' --prerelease --latest=false --notes-file notes.md
+                  fi

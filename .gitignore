@@ -164,6 +164,7 @@ claude-blog-cn
 *.py
 !scripts/test-i386.py
 !scripts/test-loongarch64.py
+!scripts/test-install-beta.py
 build
 .tmp
 tmp/
