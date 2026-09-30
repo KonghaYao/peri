@@ -111,7 +111,6 @@ fn render_empty() -> AnyElement<'static> {
 /// 替换边界必须精确结清被覆盖的风险选择：新 popup 保留，旧的等待方按
 /// 取消收敛，否则 load 会永久占住 operation gate（首帧之前没有 render Drop）。
 pub fn open_popup(kind: PopupKind) {
-    if kind != PopupKind::Confirm {}
     *atoms::POPUP_KIND.state().write() = Some(kind);
 }
 

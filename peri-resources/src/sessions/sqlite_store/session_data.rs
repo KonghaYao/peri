@@ -270,12 +270,12 @@ impl SessionDataPort for SqliteSessionData {
             "INSERT OR IGNORE INTO projects(id, locator, object_identity) VALUES (?1, ?2, ?1)",
         )
         .bind(binding.project_id.to_string())
-        .bind(&workspace.root.to_string_lossy().into_owned())
+        .bind(workspace.root.to_string_lossy().into_owned())
         .execute(&mut *tx)
         .await
         .map_err(|error| write_failure(error.into()))?;
         sqlx::query("INSERT OR IGNORE INTO workspaces(id, project_id, root, root_identity, discovery) VALUES (?1, ?2, ?3, ?1, 'null')")
-            .bind(binding.workspace_id.to_string()).bind(binding.project_id.to_string()).bind(&workspace.root.to_string_lossy().into_owned())
+        .bind(binding.workspace_id.to_string()).bind(binding.project_id.to_string()).bind(workspace.root.to_string_lossy().into_owned())
             .execute(&mut *tx).await.map_err(|error| write_failure(error.into()))?;
         match binding_row_state_on(&mut tx, id).await? {
             BindingRowState::Bound(existing) => {
