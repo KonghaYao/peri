@@ -1,6 +1,6 @@
 # Workspace MCP resources 验收记录（W1–W6）
 
-> 日期：2026-09-30（W6 收口）。仓库 `/Users/konghayao/code/ai/peri-v4p3`，分支 `feat/mcp-adaptation-v4-part-3`，基线 HEAD `<待填：W6 提交哈希>`。
+> 日期：2026-09-30（W6 收口）。仓库 `/Users/konghayao/code/ai/peri-v4p3`，分支 `feat/mcp-adaptation-v4-part-3`，基线 HEAD `0c5ecb40`（W6 提交）。
 > 口径：只记录**实际执行过**的命令与结果（命令 + EXIT + 关键计数）；静态证据给 `file:line`；没有运行证据的事项单列「未完成 / 未验证」，不写成已具备能力（遵循 `docs/standards/testing.md` TEST-EVIDENCE-001 与计划 §8.3）。
 > 计划与裁决：`2026-09-29-workspace-mcp-resources-plan.md`（下称 plan）、`2026-09-29-workspace-mcp-resources-decisions.md`（下称 decisions）；本记录不重复两者全文，只写验收事实。
 
@@ -19,7 +19,7 @@
 | W4a | `711bf1d0` | 资源面输入经 `BuiltinInstanceContext.workspace_resources` 在 `run_initialize` 前注入，dispatch `workspace` arm 调 `WorkspaceMcpServer::with_resources` |
 | W4b | `8c3d975a` | SkillTool 零 FS 切源：宿主三根扫描/正文读取全部删除，技能来源唯一为 MCP registry；`core:{skill}` 命令改发现管线投影；P4 冻结技能摘要 |
 | W5 | `f66bd251` | Agent 定义与项目指令消费切换：`AgentSource::{Local,Remote}`、builtin agent 资产迁 provider、`peri-instruction://workspace/{main\|local}`、`AgentDefineMiddleware` 与 `ChainSlot::AgentDefine` 删除（蓝本 21→20） |
-| W6 | `<待填>` | 真实二进制链路验收（print/stdio + TUI）、preload 缺口报告强度收口、文档事实源收口与过程文档退役 |
+| W6 | `0c5ecb40` | 真实二进制链路验收（print/stdio + TUI）、preload 缺口报告强度收口、文档事实源收口与过程文档退役 |
 
 ---
 
