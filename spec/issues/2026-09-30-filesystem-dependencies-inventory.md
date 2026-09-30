@@ -17,7 +17,7 @@
 8. **TUI 免除**：TUI 相关（客户端本地状态、主题、web-pty 等）**免除定级**。
 9. **遥测**：落盘日志**免除，不整改**；Langfuse 服务端上报效果仍需端到端验证。
 10. **compact**：不应读取 skill 文件——保留历史工具调用记录即可；同机制的文件回读（recent files）一并评估。`compact_v2/full.rs` 的文件读取应移除。
-11. **OAuth 与缓存分开**：MCP OAuth 凭据恢复为当前 P2 SQLite 新表可行性评估项；response cache 与插件缓存仍推迟，保留落盘，不扩大本轮改动。
+11. **OAuth 与缓存分开**：MCP OAuth 凭据采用 SQLite 新表方向，不迁移旧 JSON、不兼容或回退旧存储，需重新授权；response cache 与插件缓存仍推迟，保留落盘，不扩大本轮改动。
 12. **恢复机制（核心改动，已实施）**：移除 session 文件锁及前端 dirty 恢复弹窗；root session 以 ID 恢复，不按目录或 owner 认领，父子关系保持。不用分布式锁替代。
 
 ## 二、全仓库总览
@@ -112,7 +112,7 @@
 
 | 等级 | 项 | 现状位置 | 处置 |
 | --- | --- | --- | --- |
-| **P2** | MCP OAuth 凭据 SQLite 新表 | `peri-middlewares/src/mcp/auth_store.rs` 及 OAuth 构造/动态清理入口 | 可行性已评估，尚未实施；明确个人主体与机器环境分区，不等同于共享 token |
+| **P2** | MCP OAuth 凭据 SQLite 新表 | `peri-middlewares/src/mcp/auth_store.rs` 及 OAuth 构造/动态清理入口 | 尚未实施；直接替换文件存储，不做旧数据迁移或兼容；主体与环境分区不等同于共享 token |
 
 P2 的实现方式与难度见 [实施可行性调研](2026-09-30-p2-filesystem-implementation-assessment.md)；调研不代表已实施。MCP 缓存与插件体系已移至暂缓项，不作为当前核心工作的前置条件。
 
@@ -169,6 +169,6 @@ P2 的实现方式与难度见 [实施可行性调研](2026-09-30-p2-filesystem-
 - 未做编译期 feature 拆分实验
 - 未核对 `peri-tui/src/sync` 协议全量字段（仅扫描 fs 触点与 staging 语义）
 - 未跑全库/E2E、Windows 原生执行或 120 秒 ignored 用例
-- OAuth SQLite 新表已做源码级可行性评估，未实现或验证迁移；MCP cache 与 Plugin MCP 继续暂缓
+- OAuth SQLite 新表已做源码级可行性评估，尚未实现；旧数据迁移明确不做，MCP cache 与 Plugin MCP 继续暂缓
 - Session ID / env 核心实现与定向契约测试已迁移；未做远端多机器端到端部署验证
 - metrics → Langfuse 未做端到端上报验证（本地无 Langfuse 凭据，未观察 Langfuse 服务端落库；含指标归属到活跃 turn trace 的服务端表现）

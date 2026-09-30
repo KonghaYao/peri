@@ -6,6 +6,8 @@
 
 范围来自 [文件系统依赖清单](2026-09-30-filesystem-dependencies-inventory.md)：本轮评估 MCP OAuth 凭据迁至 SQLite 新表。MCP response cache、插件缓存与插件体系继续暂缓、保持落盘，不修改其准入、失效或生命周期。落盘日志、SQLite 后端与 TUI 本地状态免除整改。
 
+实施裁决：直接切换 SQLite 新表，不迁移旧 JSON、不做旧存储兼容或回退，也不双写。旧 token 不读取，用户需要重新授权；旧文件不自动删除。
+
 ## 当前结论
 
 **可以用 SQLite 新表保存 OAuth 凭据。建议先落本机权限保护的 credential adapter，不把 token 当作 session 数据或 response cache，也不把共享数据库自动等同于共享授权。** 当前 rmcp credential 接口已提供替换入口；困难主要在依赖注入、多用户身份、刷新竞争及动态连接清理，而非建表。
@@ -13,13 +15,12 @@
 | 方向 | 最小切片 | 难度 | 状态 / 边界 |
 | --- | --- | --- | --- |
 | 本机 OAuth SQLite 存储 | 新建凭据表，credential port 注入，替换全部文件构造点及清理入口 | 中 | 本轮评估；保持授权流程语义，不新增 schema 版本号 |
-| 旧 JSON 导入 | 事务导入、明确所属安装/用户、一次性迁移完成标记 | 低到中 | 不能覆盖较新凭据或把已清除的 token 重新导入 |
 | 共享数据库中的个人凭据 | principal 隔离、受控访问或客户端加密、明确刷新协调 | 中高 | 当前没有可复用的用户身份授权模型，不作为单纯建表已解决的问题 |
 | MCP response cache、插件缓存与体系 | 保持现有实现 | 暂缓 | 不进入本轮迁移 |
 
 ## OAuth：现状与可替换边界
 
-- `peri-middlewares/src/mcp/auth_store.rs::FileCredentialStore` 使用 `$HOME/.peri/oauth_tokens.json`，保存可序列化的 rmcp `StoredCredentials`；读写带进程内 mutex 与文件锁，替换使用临时文件、同步及 Unix `0600` 权限。
+- `peri-middlewares/src/mcp/auth_store.rs::FileCredentialStore` 是待删除的文件实现；新表直接保存完整 rmcp `StoredCredentials`，不复刻文件格式、锁或旧版本检查。
 - `PerServerCredentialStore` 已实现 rmcp `CredentialStore::{load,save,clear}`，但内部硬编码 `Arc<FileCredentialStore>`；`OAuthFlowManager` 同样绑定该实现。这是可替换 seam，不是已完成的 adapter 注入。
 - `initialize.rs`、`reconnect.rs`、`client_oauth.rs` 与 `dynamic/staged_connection.rs` 均有文件存储构造/使用点，必须统一走部署时注入的凭据能力，不能只改授权成功后的写入。
 - 静态凭据按 server name 索引；同名配置更换 endpoint 或授权配置可能复用旧键。动态连接使用 session/incarnation/server 的隔离键，`DynamicOAuthCredentialGuard` 在 rollback、close 与同步 Drop 中调用 `clear_server_blocking`。SQLite 异步接口不能直接塞进现有同步 Drop。
@@ -46,20 +47,18 @@
 
 SQLite 的事务可替代凭据文件 read-modify-write 的文件锁；保留需要的运行时生命周期管理。它只能保证持久写入原子性，不能保证多个实例对同一 refresh token 发起的网络刷新自动串行，也不能防止旧请求覆盖重授权后的凭据。多实例刷新/注销协同仍需独立契约与条件提交验证。
 
-## 旧数据迁移与动态生命周期
+## 新实现与动态生命周期
 
-1. 只导入本次明确归属的本机旧文件，校验现有文件格式与版本；未知来源的 JSON 不猜用户或机器归属。
-2. 旧静态 key 只有 server name，缺 endpoint/授权来源。仅在当前配置唯一匹配且归属明确时映射新键；同名歧义、配置已消失或身份改变时要求重新授权，不盲目复用。
-3. 在事务内一次性导入，不覆盖已有较新记录；提交并确认后记录持久迁移完成事实，再清理旧文件及不再需要的锁。不能每次启动按缺行重新导入，否则注销删除后会从旧 JSON 复活 token。
-4. 迁移完成后只有 SQLite 一份写入权威，不双写、不在失败时隐式回退 JSON；失败应可诊断且不输出凭据正文。
-5. 动态凭据仍只服务对应连接 incarnation。优先沿现有 MCP owner 的显式 rollback/close 生命周期等待清理；同步 Drop 只作为有定义的兜底，异步删除完成前不能报告已清理。崩溃残留的回收策略另外验收，不改成永久跨 session 授权。
+SQLite 是唯一凭据读写权威，删除旧文件存储实现及构造点，不保留导入器、迁移标记、兼容层或 JSON 回退。数据库失败如实上报，不输出凭据正文。
+
+动态凭据仍只服务对应连接 incarnation。沿现有 MCP owner 的显式 rollback/close 生命周期等待清理；同步 Drop 只作为有定义的兜底，异步删除完成前不能报告已清理。崩溃残留的回收策略另外验收，不改成永久跨 session 授权。
 
 ## 密钥保护与验收边界
 
 - **SQLite 并不自动提供 secret 隔离。** 原文件的权限保护不能在迁移后丢失，数据库、WAL/SHM、备份及故障输出都要纳入权限与泄露检查。
 - 如果同一 session 数据库可被多个人直接读取，不建议把个人 OAuth 明文 token 直接并入；仅添加 `principal_id` 查询条件不足以阻止直接读表。可选本机私有凭据库，或经独立授权服务访问，或在已有密钥管理前提下存客户端加密载荷；不要自创加密协议。
 - 本轮建议默认先采用本机权限保护边界。共享后端、主体验证、密钥管理尚未实施，不据此宣称多用户凭据安全；遵守 `ARC-SECRET-001`，日志、错误、遥测与测试不得出现真实 token。
-- 后续最小验收：load/save/clear 及重启恢复，用户/机器/同名服务器隔离，旧 JSON 一次性导入与注销不复活，refresh/重授权竞争，动态关闭/回滚/崩溃残留，只读/数据库失败及 secret 脱敏。
+- 后续最小验收：load/save/clear 及重启恢复，用户/机器/同名服务器隔离，refresh/重授权竞争，动态关闭/回滚/崩溃残留，只读/数据库失败及 secret 脱敏；不新增旧 JSON 迁移或兼容用例。
 
 ## 暂缓参考：MCP cache 与插件（本轮不改）
 
@@ -80,7 +79,7 @@ Config MCP 可复用独立启动/部署注入的组织方式，但 `peri-acp-typ
 
 ## 限制与当前未完成项
 
-- 难度为静态调用链与契约判断，未运行 OAuth SQLite 原型、真实授权、并发刷新或生产数据迁移，不给工期承诺。
+- 难度为静态调用链与契约判断，未运行 OAuth SQLite 原型、真实授权或并发刷新，不给工期承诺；旧数据迁移不在范围内。
 - 未进行远端多用户、跨进程崩溃、Windows 权限或数据库备份泄露验证。
 - compact 文件回读尚未移除；仍应删除回读而不是改为 MCP 回读，历史工具调用记录及纯摘要元数据保留，见文件系统依赖清单。
 - 本轮仅更新评估与范围清单，未修改 OAuth、MCP cache 或插件运行时代码。
