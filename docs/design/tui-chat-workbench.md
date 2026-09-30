@@ -1,7 +1,7 @@
 # TUI Chat 与 Tool Activity Workbench 目标设计
 
-> 状态：已批准目标设计；实施进度见
-> [`spec/issues/2026-08-10-chat-redesign-slice2-onwards.md`](../../spec/issues/2026-08-10-chat-redesign-slice2-onwards.md)
+> 状态：已批准目标设计；历史实施进度记录见
+> [2026-08 历史日志](../../spec/history/2026-08.md)（2026-08-10 条目）
 > 范围：`peri-tui` 的 transcript、tool activity、Inspector、阻塞交互、焦点、鼠标与滚动
 > 边界：新增事件、详情请求或终态语义必须遵守 `ARC-EVENT-001` 与 `ARC-BOUNDARY-001`
 

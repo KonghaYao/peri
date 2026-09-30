@@ -68,7 +68,7 @@ TUI 侧现状（两条分支，均回落为「写文件 + 插文本」）：
 - 文本清理：移除标记后为空则丢弃该 text 块，保留非文本块 —— `:138-149`；替换经 `state.replace_message` 回写 —— `:158-164`。
 - 上限常量：`max_size = 20 * 1024 * 1024` —— `:35`（与 TUI `MAX_IMAGE_BYTES` 相同 —— `peri-tui/src/kit/image_safety.rs:28-29`）。
 
-**已知回归背景**：本条通路曾在「同一 run 后续批次只留 `@image` 文本、图片未转换」上出过缺陷并修复（`spec/issues/2026-09-20-micro-compact-user-image-unavailable.md`，对应 `before_input` 逐批能力）。**该缺陷类别在 P1 迁移后仍然存在**（见 §5.2 回归项 R1）。
+**已知回归背景**：本条通路曾在「同一 run 后续批次只留 `@image` 文本、图片未转换」上出过缺陷并修复（`2026-09-20-micro-compact-user-image-unavailable.md` 已压缩至 `../history/2026-09.md` 2026-09-20 条目，对应 `before_input` 逐批能力）。**该缺陷类别在 P1 迁移后仍然存在**（见 §5.2 回归项 R1）。
 
 ### 1.3 通路 ③ TUI user input queue（steer）：**已具备上传式，但 `Ctrl+V` 未接入**
 
@@ -304,7 +304,7 @@ TUI 侧现状（两条分支，均回落为「写文件 + 插文本」）：
 
 ### 5.2 回归项（必须显式覆盖）
 
-1. **逐批转换不回归**：`test_image_later_input_reaches_model_after_micro_compact`（`peri-middlewares/src/middleware/image/mod_test.rs:17`）必须在 P1 后仍然通过——「同一 run 后续批次输入仍向模型传图片字节」。这是 `spec/issues/2026-09-20-micro-compact-user-image-unavailable.md` 关闭过的缺陷。
+1. **逐批转换不回归**：`test_image_later_input_reaches_model_after_micro_compact`（`peri-middlewares/src/middleware/image/mod_test.rs:17`）必须在 P1 后仍然通过——「同一 run 后续批次输入仍向模型传图片字节」。这是 `2026-09-20-micro-compact-user-image-unavailable.md`（已压缩至 `../history/2026-09.md` 2026-09-20 条目）关闭过的缺陷。
 2. **不上传内容不得被当成图片**：P0 后，若消息**只含文本**且无附件，`session/prompt` 的 content 必须与今天逐字等价（防止 content 形态整体改写）。
 3. **关闭面**：`WorkspaceMiddleware: false` 时 `@image` 降级且无磁盘读取（§4.2）。
 4. **手输兼容**：`@image <path>` 手输路径在 workspace 可用时仍能被模型看到图片（P1 的核心验收）。
@@ -418,7 +418,7 @@ git diff --check
 | `spec/issues/2026-09-29-workspace-mcp-resources-plan.md:170-183` | URI 命名表新增图片资源 | 由 Q3 裁决后并入（跨文件唯一事实源） |
 | `mcp-packages/workspace/src/workspace.rs:1-18` 模块文档 | 「exposes exactly one resource」失效 | W4 同步 |
 | `docs/standards/architecture-contracts.md:124-128`（ARC-MIDDLEWARE-CAPABILITY-001） | 若 M2/M3 改变了 `ImageMiddleware` 的构造契约，需在 Verify 段补充「注入 Reader 的构造」检查项 | 实施时判断是否需要（**不改链序**，预计无需改 ARC-MIDDLEWARE-001） |
-| `spec/issues/2026-09-20-micro-compact-user-image-unavailable.md` | 其回归用例在 P1 被重新绑定到 MCP 路径 | 用例改造后同步该 issue 的「涉及文件」 |
+| `2026-09-20-micro-compact-user-image-unavailable.md`（已压缩至 `../history/2026-09.md` 2026-09-20 条目） | 其回归用例在 P1 被重新绑定到 MCP 路径 | 用例改造后同步该 issue 的「涉及文件」 |
 | 模块 CLAUDE 文件 | `peri-tui/src/kit/`、`peri-middlewares/src/middleware/image/`、`mcp-packages/workspace/` 若有模块级说明需同步 | 实施时按目录检查 |
 
 ---

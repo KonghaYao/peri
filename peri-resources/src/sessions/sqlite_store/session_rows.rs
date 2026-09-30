@@ -90,7 +90,7 @@ pub(super) async fn insert_binding_row(
 /// **为什么两端都显式删**：远端执行器提供不了级联——远端 schema 不声明任何
 /// `REFERENCES`，`PRAGMA foreign_keys` 默认读数为 0、且是跨连接共享的可变状态，远端
 /// 也没有 `pragma_foreign_key_check` 等价物（传输面实测结论见母 issue
-/// `spec/issues/2026-09-26-session-store-remote-backend.md` §9.28 的例外 2/3/4）。
+/// `spec/history/2026-09.md` 2026-09-26 session-store 条目；原文 §9.28 的例外 2/3/4 见 Git 历史）。
 /// 一份删除逻辑要跑在两种执行器上，唯一能共用的表达就是显式
 /// 删除，因此本机侧也按同一份语句、同一顺序（先子后父）删。
 ///

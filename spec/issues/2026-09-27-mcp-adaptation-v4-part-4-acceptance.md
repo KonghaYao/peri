@@ -336,7 +336,7 @@ runner 原文（每条命令记录 `### CMD:` 横幅 + `### EXIT:` + 命中名�
 | 6 | `d1aae671` | fix(controller): 补打身份失败时保留发射方 `message_id` | `peri-controller/src/controller.rs` + 测试 + code-index 行号锚点 | fallback envelope 只复制 turn/agent/delivery，丢 `source.message_id` ⇒ 未登记 session 的迟到事件丢失消息级身份 ⇒ 构造后回填 | `publish_event_preserves_source_message_id_when_session_is_unregistered` |
 | 7 | `d1807a4d` | docs(tui): 修正 `peri-tui/CLAUDE.md` 的 Scope 依赖描述 | `peri-tui/CLAUDE.md` | 原称直接依赖 `peri-agent`（manifest 无此依赖、`src/` 零引用）⇒ 按事实改写 | — |
 | 8 | `c032bafa` | docs: 补全 `problems.md` 任务路由并登记全仓清理台账 | `spec/global/problems.md`、`spec/issues/2026-09-27-repository-cleanup.md` | Workflow 行指向已删除的 `spec/archive-issues/workflow/` ⇒ 拆行改指现行索引；新增清理台账（WP-01…WP-18 互斥划分） | — |
-| 9 | `1547b840` | docs(mcp): 修正 part-3 验收记录 R29 回填与 §7.3/§7.6 判定不一致 | `spec/issues/2026-09-26-mcp-adaptation-v4-part-3-acceptance.md` | 同一文件自相矛盾（回填声称已更新，§7.3/§7.6 仍写「属真实缺口」）⇒ 只改仍为旧判定的行 | — |
+| 9 | `1547b840` | docs(mcp): 修正 part-3 验收记录 R29 回填与 §7.3/§7.6 判定不一致 | `spec/issues/2026-09-26-mcp-adaptation-v4-part-3-acceptance.md`（已压缩至 `spec/history/2026-09.md`，原文见 Git 历史） | 同一文件自相矛盾（回填声称已更新，§7.3/§7.6 仍写「属真实缺口」）⇒ 只改仍为旧判定的行 | — |
 
 **9 个提交逐个过了 `lefthook` pre-commit（`check`/`clippy`/`layer-imports`/`typos`/`fmt`；纯文档提交按文件过滤只跑后两段），日志 `/tmp/v4p3_commit_verify/commit{1..9}.log`。**
 

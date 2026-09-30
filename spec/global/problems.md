@@ -2,6 +2,18 @@
 
 本文件只提供历史检索路由，不保存逐 issue 摘要、实施日志或事故副本。当前行为始终以代码、契约测试、`docs/standards/`、模块 `CLAUDE.md` 和 `docs/design/` 为准；未关闭工作见 `spec/issues/`。
 
+## 压缩日志（2026-09-26 及以前）
+
+2026-09-26 及以前的 issue 已压缩为 [spec/history/](../history/) 月志（[2026-07](../history/2026-07.md)、[2026-08](../history/2026-08.md)、[2026-09](../history/2026-09.md)）：普通条目为一行式摘要，定级事故（P0/P1/P2）附少量描述。月志只用于检索与回顾，不构成现行事实；另注：2026-09-27 起的新 issue 仍保留在 `spec/issues/`。
+
+```bash
+# 定位某份原文的删除提交（文件名见月志条目）
+git log --diff-filter=D -- spec/issues/2026-09-17-p0-workspace-validation-blocks-input.md
+
+# 读取删除前的完整原文
+git show <删除提交>^:spec/issues/2026-09-17-p0-workspace-validation-blocks-input.md
+```
+
 ## 按主题查当前事实
 
 | 主题 | 当前事实源 | Git 中的旧归档路径 |

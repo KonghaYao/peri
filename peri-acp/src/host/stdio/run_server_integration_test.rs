@@ -872,7 +872,7 @@ async fn test_prompt_wire_shape_unknown_session_returns_error() {
 // 内窥）等价。`test_delete_removes_thread_*` 与 prewarm smoke 的 load 变体
 // 已在 `host/requests_test.rs` 有等价覆盖，不重复迁移。
 //
-// H-04 改写（A11/A22 单 pool）：函数名保留（`spec/issues/2026-09-10-p0-full-micro-compact-churn.md:175`
+// H-04 改写（A11/A22 单 pool）：函数名保留（`spec/history/2026-09.md` 2026-09-10 条目:175
 // 引用 `test_fork_creates_session_scoped_lsp_pool`），但语义从「分支**创建**会话级池」
 // 改为「分支注册的 session **投影宿主唯一 pool 的同一 `Arc`**」——断言相应收紧为
 // `Arc::ptr_eq`（仅 `is_some()` 不足以证伪「又建了一份池」）。

@@ -57,7 +57,7 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
     assert_eq!(user_state_recall, vec!["本轮新 recall".to_string()]);
 }
 
-// ── ACP 结果投影 seam（spec/issues/2026-08-18-acp-error-handler.md D2）────────
+// ── ACP 结果投影 seam（spec/history/2026-08.md 2026-08-18 条目 D2）────────
 //
 // 测外部协议行为（`run_prompt` 尾部的 wire 形态决定），不断言内部局部变量：
 // fatal → `Err(AcpError)`（code/message/data 契约）；cancel / max-iterations /

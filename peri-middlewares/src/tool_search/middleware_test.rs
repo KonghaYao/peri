@@ -288,7 +288,8 @@ async fn external_mcp_meta_name_winners_survive_catalog_rebinds() {
 
 /// [回归测试] 生产路径：宿主级 shared_tools 恒为空（写入点归零），deferred
 /// 工具经 `MiddlewareState::local_tools`（每 turn 本地视图）注入，before_agent
-/// 必须据此构建索引（issue 2026-08-15-workflow-deferred-tool-missing）。
+/// 必须据此构建索引（issue 2026-08-15-workflow-deferred-tool-missing，已归档至
+/// `spec/history/2026-08.md`）。
 #[tokio::test]
 async fn test_before_agent_builds_index_from_local_tools_when_shared_empty() {
     let index = Arc::new(ToolSearchIndex::new());

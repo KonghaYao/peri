@@ -107,7 +107,7 @@ impl Model for FullLifecycleModel {
 // ── Full Compact 测试 ──────────────────────────────────────────────────────
 
 // 审计中确认的失败反例，修复后作为默认执行的回归测试。
-// 对应 spec/issues/2026-09-10-p0-full-micro-compact-churn.md。
+// 对应 spec/history/2026-09.md 2026-09-10 条目。
 async fn make_audit_full_history() -> (tempfile::TempDir, MessageTranscript) {
     let dir = tempfile::tempdir().unwrap();
     let store = MockSessionResources::new();

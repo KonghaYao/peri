@@ -22,10 +22,10 @@ host shutdown 仍持有同一 pool 的端口句柄，并在会话/任务收敛�
 
 本裁决覆盖/取代：
 
-- `spec/issues/2026-09-26-mcp-adaptation-v4-part-3-plan.md` 中 A11、A21、A22 的
+- `spec/issues/2026-09-26-mcp-adaptation-v4-part-3-plan.md`（已压缩至 `../history/2026-09.md` 2026-09-26 条目，原文见 Git 历史）中 A11、A21、A22 的
   host 工厂归属与装配条目：保留“host 级唯一 pool、同一 pool、host shutdown、root_uri
   退化”等行为约束，但将构造/配置实现从 `peri-middlewares` 移至 `peri-mcp-lsp`。
-- `spec/issues/2026-09-26-mcp-adaptation-v4-part-3-sub-plan-l-lsp-instance.md`
+- `spec/issues/2026-09-26-mcp-adaptation-v4-part-3-sub-plan-l-lsp-instance.md`（已压缩至 `../history/2026-09.md` 2026-09-26 条目，原文见 Git 历史）
   中依赖上层/Resources 门面持有 LSP 实现的对应条目：保留 builtin context 注入 seam，
   改为注入 `peri-mcp-lsp` 的具体 pool。
 - `docs/design/mcp-adaptation-v4-part-1.md:198` 的“LSP MCP 负责工具、格式化与配置快照，

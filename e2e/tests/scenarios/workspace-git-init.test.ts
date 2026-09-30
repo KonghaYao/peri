@@ -2,7 +2,7 @@
  * 普通目录登记 → 目录内出现 `.git` → 真实 TUI 仍能新建会话并发送输入，重启亦然。
  *
  * 只使用本地 SSE 模型端点，无真实凭据、无外部 API。回归
- * `spec/issues/2026-09-17-p0-workspace-validation-blocks-input.md`：
+ * `spec/history/2026-09.md`（2026-09-17 条目）：
  * 修复前 `session/new` 在 `resolve_workspace` 处返回 `NeedsRelink`（-32010），
  * TUI 停在 `Input was not accepted. Your draft has been kept.`，该目录永久不可用。
  */

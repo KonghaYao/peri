@@ -191,8 +191,8 @@ subagent 每个 chunk 在 handler 内直接发布
 
 ## 关联与文档路由
 
-- [前序长会话 CPU issue](2026-09-18-p1-long-session-pins-one-cpu-core.md)：同一 push_view_models 热点；其实时生命周期基准未覆盖回放失配。
-- `2026-09-04-tui-long-markdown-streaming-cpu.md`：较早的合帧建议；scheduler 存在不等于当前完整生产链路正确。
+- [前序长会话 CPU issue](../history/2026-09.md)（2026-09-18 条目）：同一 push_view_models 热点；其实时生命周期基准未覆盖回放失配。
+- `2026-09-04-tui-long-markdown-streaming-cpu.md`（已压缩至 `../history/2026-09.md` 2026-09-04 条目）：较早的合帧建议；scheduler 存在不等于当前完整生产链路正确。
 - 工作区另有 `2026-09-27-long-thread-history-window.md` 有界历史窗口提案：处理驻留和可见窗口，不能替代本 issue 的发布状态、重复折叠和 cadence 修复。
 - 已同步 `docs/design/tui-streaming-markdown-performance.md` 与 `docs/code-index/peri-tui.md` 的实际发布、历史缓存和测试入口。
 

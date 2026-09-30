@@ -25,7 +25,7 @@
 //! [`baseline_first_model_request_reports_web_and_artifact_capabilities`] 在**迁移前
 //! HEAD** 上录下「首个 LLM 请求里模型实际看到的工具名集合」。同一夹具、同一命令由
 //! V-02（W4）与 V-04（W5）**对照重跑**，现场输出逐字记录在
-//! `spec/issues/2026-09-26-mcp-adaptation-v4-part-2-acceptance.md` §2（该小节只增不改）。
+//! `spec/history/2026-09.md`（2026-09-26 part-2 验收条目；原文 §2 只增不改，完整文本见 Git 历史）。
 //!
 //! 因此该断言写成「两种命名**恰有其一**」：迁移前命中裸名（`WebSearch` / `WebFetch` /
 //! `artifact`，三者迁移前均 direct：`web_fetch.rs:95`、`web_search.rs:76`、

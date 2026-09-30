@@ -148,7 +148,7 @@
 
 - ARC-BOUNDARY-001：TUI 交互主路径经 ACP transport；不得从 TUI 直驱 Agent/Middleware 运行时
 - ARC-EVENT-001：事件链路单事实源 Agent →(ACP 映射) → TUI；新增事件须覆盖发射、映射与消费；终止事件必须使客户端离开 loading
-- Cache coverage 用户现场验收仍在 [#114 active issue](../../spec/issues/2026-09-01-long-context-cache-evicted-each-round-114.md)；当前 wire 与逐样本提示契约见 ARC-EVENT-001。
+- Cache coverage 用户现场验收仍在进行（对应用户报告的 GitHub #114；历史记录见 [2026-09 月志](../../spec/history/2026-09.md)）；当前 wire 与逐样本提示契约见 ARC-EVENT-001。
 - ARC-KEEPGOING-001：空白 user prompt（`MessageContent::is_empty()` 判空）是「继续跑 loop」指令，唯一生产者是 TUI keepgoing 按钮；空历史 + 空白 prompt 时服务端短路且必须 push_done
 - ARC-CANCEL-001：cancel 按 (session_id, turn_id, attempt_id) 三元组定位；TUI 只经 ACP 发送 cancel，幂等判定与终态归 Agent 层
 - ARC-HITL-001：Permission 与 AskUser 独立能力；TUI reverse interaction 由 semantic owner registry、operation gate、prompt/transition leases 与 token-aware UI terminalization 共同 first-claim

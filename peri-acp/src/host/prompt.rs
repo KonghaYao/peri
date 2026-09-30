@@ -28,7 +28,7 @@ use super::SharedSessions;
 
 // ── Prompt execution (spawned into background task) ──────────────────────────
 
-// ── ACP 结果投影（spec/issues/2026-08-18-acp-error-handler.md D2）─────────────
+// ── ACP 结果投影（spec/history/2026-08.md 2026-08-18 条目 D2）─────────────
 
 /// fatal turn failure 的稳定 JSON-RPC server error code。
 ///

@@ -522,7 +522,7 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 ### 7.2 生态现状：Claude Code 实践 + 官方工作组
 
 - **Claude Code 已实现 `skill://`**（`src/skills/mcpSkills.ts`）：对每个 server 调 `resources/list` → 过滤 `skill://` 前缀资源 → `resources/read` → 解析 markdown frontmatter → 注册为 `mcp__<server>__<skill>` 技能。依赖 server 声明 `capabilities.resources`，**零协议扩展成本**——纯用现有 resources 原语 + 自定义 URI 前缀。
-- **peri 已实现（2026-08-13）**：DiscoverMCP 只读工具 + MCP `skill://` 异步发现（`peri-middlewares/src/mcp/discover_tool.rs`、`skill_discovery.rs`；契约 `peri-acp-types/src/mcp_skills.rs`）。发现/注入/命令列表形态见 §7.4，验收见 `spec/issues/2026-08-13-discover-mcp-tool-and-mcp-skills-v2.md`。
+- **peri 已实现（2026-08-13）**：DiscoverMCP 只读工具 + MCP `skill://` 异步发现（`peri-middlewares/src/mcp/discover_tool.rs`、`skill_discovery.rs`；契约 `peri-acp-types/src/mcp_skills.rs`）。发现/注入/命令列表形态见 §7.4，验收见 `spec/history/2026-08.md`（2026-08-13 条目）。
 - **安全约束**：MCP 来源的技能默认受限（Claude Code 禁内联 shell 执行），与本地技能权限区分。
 - **官方正在标准化**：MCP 官方 **Skills Over MCP 工作组**（2026 年 4 月成立）当前方向为 **SEP-2640 Skills Extension**（Extensions Track，**基于 Resources 原语**，与 Claude Code 实践同向），并协调 Agent Skills 规范（agentskills.io 的 well-known URI 发现）与 registry `skills.json`。**尚未进入 2026-07-28 规范正式扩展**（当前正式扩展：Apps / Tasks / Authorization）。
 

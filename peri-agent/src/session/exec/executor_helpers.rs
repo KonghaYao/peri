@@ -72,7 +72,7 @@ pub struct ExecOutcome {
     pub stop_reason: PromptStopReason,
     /// 致命执行失败（None = 正常终止 / 用户取消 / 最大轮数；Some = 真正
     /// fatal 的 `LoopResult::Error`，见
-    /// spec/issues/2026-08-18-acp-error-handler.md Commit 1）。
+    /// spec/history/2026-08.md 2026-08-18 条目 Commit 1）。
     pub failure: Option<ExecutionFailure>,
     /// A Full Compact committed during this turn and replaced prior visible history.
     pub history_replaced_by_compaction: bool,

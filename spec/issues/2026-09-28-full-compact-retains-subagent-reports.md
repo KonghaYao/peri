@@ -106,6 +106,6 @@
 
 ## 关联与文档路由
 
-- [Full/Micro churn issue](2026-09-10-p0-full-micro-compact-churn.md) 的 A5 已识别 reminder 基线风险；本 issue 补充本地规模证据及用户确认的 Full 语义，独立承接报告残留修复。
+- [Full/Micro churn issue（2026-09-10 条目）](../history/2026-09.md) 的 A5 已识别 reminder 基线风险；本 issue 补充本地规模证据及用户确认的 Full 语义，独立承接报告残留修复。
 - 已同步 [ARC-COMPACT-001](../../docs/standards/architecture-contracts.md)、[Micro Compact 设计](../../docs/design/micro-compact.md) 中相关说明、[Agent code-index](../../docs/code-index/peri-agent.md) 与旧 reminder 保留测试。既有“不能靠删 reminder 伪造预算进展”仍不等于“成功摘要后必须永久保留报告”；须明确区分。
 - 初次记录仅进行了代码阅读与本地数据库只读观测；后续实施验证结果在本 issue 更新。

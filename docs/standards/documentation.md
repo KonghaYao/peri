@@ -33,8 +33,8 @@
 ### DOC-HISTORY-001
 
 - **Scope**：已关闭 issue、调查报告、实施记录与复盘。
-- **Rule**：`spec/issues/` 只保留仍需实施或验收的工作；关闭前把稳定规则、设计或代码入口更新到对应事实源，随后删除过程文档。完整历史由 Git 保留；`spec/global/problems.md` 只做主题检索路由，不复制逐 issue 摘要。
-- **Verify**：检查 active issue 状态与对应事实源；确认 `spec/archive-issues/`、`spec/reviews/` 和逐 issue 历史副本未重新进入当前文档集。
+- **Rule**：`spec/issues/` 只保留仍需实施或验收的工作；关闭前把稳定规则、设计或代码入口更新到对应事实源，随后删除过程文档。完整历史由 Git 保留；`spec/global/problems.md` 只做主题检索路由，不复制逐 issue 摘要。历史 issue 可按月压缩为 `spec/history/` 月志：普通条目一行式摘要，定级事故（P0/P1/P2）可附少量描述；月志只作检索与回顾，不构成现行事实。
+- **Verify**：检查 active issue 状态与对应事实源；确认 `spec/archive-issues/`、`spec/reviews/` 未重新进入当前文档集；`spec/history/` 只含压缩月志（不复制逐 issue 全文），每条可经 Git 历史定位原文。
 
 ### DOC-DESIGN-001
 

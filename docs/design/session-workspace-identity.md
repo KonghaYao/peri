@@ -4,7 +4,7 @@
 >
 > Scope：本机同一 Peri 存储中的会话归属、执行绑定、恢复与执行所有权。
 > 本文定义新会话的身份与执行契约；平台运行验收见
-> [验收 issue](../../spec/issues/2026-09-12-worktree-session-identity.md)。
+> [验收历史记录（月志）](../../spec/history/2026-09.md)。
 > 术语见 [领域语言](../../CONTEXT.md)。现有冻结与生命周期约束仍遵循
 > [架构契约](../standards/architecture-contracts.md)。
 

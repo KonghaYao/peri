@@ -52,7 +52,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
   在用户显式接受风险时登记。~~ **已撤销**（2026-09-27 用户裁决）：不再有本机登记、准入
   裁决与跨安装来源判定，因此这两条方法与 `peri.sessionStoreRegistrationV1` 都不再存在
   （原语义、`StoreNotRegistered` / `StoreRegisteredFromDifferentOrigin` 两条拒绝原因见
-  `spec/issues/2026-09-26-session-store-remote-backend.md` 的历史记录）。**现行语义是
+  `spec/history/2026-09.md` 的 2026-09-26 session-store 条目）。**现行语义是
   「配置即用」**：配置里指到哪个会话存储就直接用哪个，不要求先登记；远端库与本地库是
   同一种存储模式，两者存储模式一致（schema/SQL 统一是后续工作）。
 - `session/metadata` 读取轻量标题与当前会话配置投影；不做逐 tick Git 发现。

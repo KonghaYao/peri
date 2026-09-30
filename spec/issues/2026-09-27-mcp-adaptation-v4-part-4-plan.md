@@ -34,7 +34,7 @@
 | `TodoMiddleware` | 「部分下放」`:192` | 1 个工具 `TodoWrite`；**不存在 todo 文件**——`TodoState` 纯内存（`tools/todo.rs:20-24`），`invoke` 的 `_ctx` 未用；真正耦合是 `mpsc::Sender<Vec<TodoItem>>`（`peri-agent/src/session/exec/stage_builder/agent.rs:89`）与 `after_agent` steering（`middleware/todo.rs:64-118`） | **不在本波**（设计措辞中的「Todo 文件」在代码里无对应物） |
 | `SkillsMiddleware` / `SkillPreloadMiddleware` | 「部分下放」`:202`/`:203` + Skill 工具下放 `:164` | skill roots 含 `~/.claude/skills`、`~/.peri/settings.json::skillsDir`、插件安装目录，**均在 workspace cwd 之外**（`skills/loader.rs:414-444`）；`SkillSource::Builtin` 内容是 `include_str!` 编译期常量、路径为虚拟 `<builtin>/<name>`（`skills/content.rs:20-27`）；`SkillSource::Mcp` 内容来自 `McpSkillRegistry` 缓存且**明确不读磁盘**（`skills/content.rs:15-16,28-32`） | **不在本波**。三处与「capability root = workspace」直接冲突，需独立裁决 |
 | `PluginMiddleware` | 「部分下放」`:204` | 自身**不读任何文件**（`plugin/middleware.rs:30-112` 只校验内存中 `Arc<Vec<LoadedPlugin>>` 并写日志）；真实读取全在 loader，且多数指向 `~/.claude/**` | **不在本波** |
-| `side-projects/local-mcp-server` | 「复用现有」`:71` | 见 §2 裁决 AW3-02 | **不在本波改动**（沿用 `2026-09-26-mcp-adaptation-v4-part-2-plan.md:79` 的边界：不改其 `Cargo.toml`、不加根 members、不写生产配置引用） |
+| `side-projects/local-mcp-server` | 「复用现有」`:71` | 见 §2 裁决 AW3-02 | **不在本波改动**（沿用 `2026-09-26-mcp-adaptation-v4-part-2-plan.md:79` 的边界——该文已压缩至 `../history/2026-09.md` 2026-09-26 part-2 主计划条目，原文见 Git 历史：不改其 `Cargo.toml`、不加根 members、不写生产配置引用） |
 
 ---
 
@@ -55,7 +55,7 @@
 
 ### AW3-03 工具面成员与名字
 
-- 7 个工具**全部** `direct: true`。理由：迁移前这 7 个工具就在首个 LLM 请求的直连工具表内（wave 2 基线打印 `spec/issues/2026-09-26-mcp-adaptation-v4-part-3-acceptance.md` §2.3 的 18 项列表含全部 7 个），保持成员集合不变是「零语义变化」的选择。
+- 7 个工具**全部** `direct: true`。理由：迁移前这 7 个工具就在首个 LLM 请求的直连工具表内（wave 2 基线打印 `2026-09-26-mcp-adaptation-v4-part-3-acceptance.md` §2.3 的 18 项列表含全部 7 个；该文已压缩至 `../history/2026-09.md` 2026-09-26 part-3 验收条目，原文见 Git 历史），保持成员集合不变是「零语义变化」的选择。
 - 注册表条目使 overlay 自动派生 `system_mcp: Some(true)` 与 `system_mcp_tools = direct 集合`（`peri-middlewares/src/mcp/builtin/mod.rs:317-334` 的 `builtin_default_entry`）。**不手写** `system_mcp_tools`。
 - 匹配口径：`system_mcp_tools` 按**所属 server 的原始工具名**精确匹配（`peri-middlewares/src/mcp/system_tools.rs:8-10`），故闸门配置里出现的是裸名，模型面仍是 effective name。
 
@@ -182,7 +182,7 @@
 | T6 | `peri-acp/src/host/assemble.rs:366-376` | 追加 `.with_workspace(...)`，**必须早于** `:496` 的 `McpClientPool::run_initialize` |
 | T7 | `peri-agent/src/session/factory.rs` + `peri-middlewares/src/assembly.rs` | 摘除 `ChainSlot::Filesystem` / `ChainSlot::Terminal`（先例：`ChainSlot::Cron` 的摘除）与其装配分支 |
 | T8 | `peri-acp-types/src/meta_harness.rs:104-129`、`:147-152` | 见 AW3-06 |
-| T9 | `peri-acp-types/src/meta_harness.rs:210-241`（`MIDDLEWARE_TOOL_NAMES`） | 7 个裸名条目**必须删**（先例裁决 IF-F5，见 `2026-09-26-mcp-adaptation-v4-part-2-sub-plan-f-instances-web-artifact.md:226-230`）。不删则 `peri-agent/src/session/exec/stage_builder/tools.rs:41-56` 会**永久误剔**任意来源注册的同名工具 |
+| T9 | `peri-acp-types/src/meta_harness.rs:210-241`（`MIDDLEWARE_TOOL_NAMES`） | 7 个裸名条目**必须删**（先例裁决 IF-F5，见 `2026-09-26-mcp-adaptation-v4-part-2-sub-plan-f-instances-web-artifact.md:226-230`；该文已压缩至 `../history/2026-09.md` 2026-09-26 条目，原文见 Git 历史）。不删则 `peri-agent/src/session/exec/stage_builder/tools.rs:41-56` 会**永久误剔**任意来源注册的同名工具 |
 | T10 | `peri-middlewares/src/middleware/filesystem.rs`、`middleware/terminal.rs` | 删 `FilesystemMiddleware` / `TerminalMiddleware` 类型与其 `tool_names()`；`BashTool` 与 6 个工具实现**保留并复用**（AW3-02） |
 
 ### 3.4 **P0 待核实项**（施工第一步必须取回证据，不得凭推断施工）

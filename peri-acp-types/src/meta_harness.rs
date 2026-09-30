@@ -188,7 +188,7 @@ pub const SECTION_HOLDER_MIDDLEWARE: &[(&str, &str)] = &[
 ///
 /// 用途：session/turn 级工具视图剔除"middleware 静态工具名且不在当前链
 /// 工具集合"的条目（设计 §2.5 关闭语义的防御面，决策记录见
-/// `spec/issues/2026-08-14-meta-harness-tool-view-exclusion.md`）。与各
+/// `spec/history/2026-08.md` 2026-08-14 条目）。与各
 /// middleware 实现的工具名由 `assembly_test.rs` 锁定一致。
 ///
 /// **事实核查（2026-08-15 更新）**：2026-08-15 职责拆分（`spec/issues/

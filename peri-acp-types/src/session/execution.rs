@@ -397,7 +397,7 @@ pub struct PromptResult {
     /// 执行停止原因。
     pub stop_reason: PromptStopReason,
     /// 致命执行失败（None = 正常终止 / 用户取消 / 最大轮数；Some = turn 应
-    /// 以协议 error 结束，见 spec/issues/2026-08-18-acp-error-handler.md）。
+    /// 以协议 error 结束，见 spec/history/2026-08.md 2026-08-18 条目）。
     pub failure: Option<ExecutionFailure>,
     /// 没有可验证的 canonical snapshot，宿主必须移除热 session 并要求冷加载。
     pub persistence_inconsistent: bool,

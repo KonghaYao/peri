@@ -1182,7 +1182,7 @@ async fn test_emit_command_feedback_ui_only_keeps_messages() {
 
 // ── LoopResult → ExecOutcome 分类映射（v2 Phase 9）─────────────────────────
 //
-// spec/issues/2026-08-18-acp-error-handler.md Commit 1：fatal / cancel /
+// spec/history/2026-08.md 2026-08-18 条目 Commit 1：fatal / cancel /
 // max-iterations 三类不会混淆，且 fatal 的 public message 非空并脱敏。
 mod loop_result_mapping {
     use peri_acp_types::{

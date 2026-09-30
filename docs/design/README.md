@@ -50,7 +50,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
-| TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/issues/2026-08-10-chat-redesign-slice2-onwards.md` |
+| TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |
 
 ## 维护要求

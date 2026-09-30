@@ -2,7 +2,7 @@
  * 主仓库 / linked worktree / 独立 clone / 子目录四种布局的执行目录与项目归属。
  *
  * 只使用本地 SSE 模型端点，无真实凭据、无外部 API。回归
- * `spec/issues/2026-09-17-p0-workspace-validation-blocks-input.md` 的验收条件第 5 项：
+ * `spec/history/2026-09.md`（2026-09-17 条目） 的验收条件第 5 项：
  * Git 项目聚合、checkout 识别与执行目录在真实 TUI 上仍按设计分离——项目按 common dir
  * 聚合，工作区按 checkout 区分，会话的执行目录是启动目录本身。
  *

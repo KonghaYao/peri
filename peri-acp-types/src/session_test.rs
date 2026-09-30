@@ -1,7 +1,7 @@
 //! session.rs 契约类型测试。
 //!
 //! 覆盖 ExecutionFailure DTO 与 `PromptResult` 的失败语义
-//! （spec/issues/2026-08-18-acp-error-handler.md Commit 1）：
+//! （spec/history/2026-08.md 2026-08-18 条目 Commit 1）：
 //! - `PromptResult::default()` 必须产生安全的 fatal failure，不能作为成功
 //!   `EndTurn` 继续交给 ACP（结果缺失语义）；
 //! - `ExecutionFailure` 的 public message 非空并脱敏（D5 fallback 契约）。

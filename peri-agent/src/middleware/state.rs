@@ -70,7 +70,8 @@ pub trait MiddlewareState: Send + Sync {
     /// `Some(&StageContext.runtime.tools)`。背景：宿主级 `shared_tools`
     /// 生产路径写入点归零后恒为空表（`MIDDLEWARE_TOOL_NAMES` 注释），
     /// `ToolSearchMiddleware` 等消费方必须经此读取本地视图，否则 deferred
-    /// tool 索引永不构建（issue 2026-08-15-workflow-deferred-tool-missing）。
+    /// tool 索引永不构建（issue 2026-08-15-workflow-deferred-tool-missing，已归档至
+    /// `spec/history/2026-08.md`）。
     fn local_tools(&self) -> Option<&crate::agent::stages::SharedToolMap> {
         None
     }

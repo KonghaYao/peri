@@ -28,7 +28,7 @@ use super::AcpServerConfig;
 
 /// host 装配输入：调用方（cli/TUI/print/stdio）持有的轻量输入。
 ///
-/// M-TUI 收口（`spec/issues/2026-08-05-3.0-m-tui-acp-client-path.md`）：
+/// M-TUI 收口（`spec/history/2026-08.md` 2026-08-05 条目，原文见 Git 历史）：
 /// middlewares 具体实现（CronScheduler / McpClientPool / ToolSearchIndex /
 /// AgentCatalogProvider / PluginManager / SettingsHooksLoader /
 /// WorkflowAgentMiddlewareFactory / 插件聚合数据）全部由本装配面内部构造

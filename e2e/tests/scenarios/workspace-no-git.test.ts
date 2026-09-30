@@ -2,7 +2,7 @@
  * 无 Git 环境的普通目录会话：PATH 中不存在 `git` 时，仍能新建会话并发送输入。
  *
  * 只使用本地 SSE 模型端点，无真实凭据、无外部 API。验收
- * `spec/issues/2026-09-17-p0-workspace-validation-blocks-input.md` 第 2 项：
+ * `spec/history/2026-09.md`（2026-09-17 条目） 第 2 项：
  * 「无 Git 的普通目录能新建会话并成功发送一次输入；无重复入队，草稿状态正确」。
  *
  * 依据：`discovery.rs::git` 只在 spawn 返回 `NotFound` 时降级为目录模式，因此本

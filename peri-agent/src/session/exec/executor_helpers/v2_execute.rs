@@ -637,7 +637,7 @@ fn internal_failure_terminal(failure: ExecutionFailure) -> LoopTerminal {
 
 /// Phase 9 纯分类器：一次同时决定 Prompt、Turn 和 fatal failure。
 ///
-/// 分类契约（spec/issues/2026-08-18-acp-error-handler.md Commit 1）：
+/// 分类契约（spec/history/2026-08.md 2026-08-18 条目 Commit 1）：
 /// - `Completed` / 用户 cancel / `Interrupted` / `MaxIterationsExceeded` →
 ///   failure 为 `None`（它们已有标准 `StopReason` 表达，不应升级为请求失败）；
 /// - 其他 `LoopResult::Error` → failure 为安全的窄投影：LLM 错误保留脱敏、

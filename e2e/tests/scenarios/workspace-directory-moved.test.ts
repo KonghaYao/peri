@@ -2,7 +2,7 @@
  * 已登记目录整体搬迁到新位置 → 新位置仍能建立会话并发送输入，旧绑定与历史原样保留。
  *
  * 只使用本地 SSE 模型端点，无真实凭据、无外部 API。回归
- * `spec/issues/2026-09-17-p0-workspace-validation-blocks-input.md` 的「目录移动」
+ * `spec/history/2026-09.md`（2026-09-17 条目） 的「目录移动」
  * 场景：修复前同一文件对象出现在新路径时，`workspaces` 按 `root_identity` 命中旧
  * 登记而路径不同，`session/new` 返回 `NeedsRelink`（-32010），TUI 停在
  * `Input was not accepted. Your draft has been kept.`，新位置不可用且没有恢复入口。
