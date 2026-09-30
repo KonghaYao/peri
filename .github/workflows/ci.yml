@@ -2,11 +2,11 @@ name: CI
 
 on:
     push:
-        branches: [main]
+        branches: [main, pre-release/main]
     pull_request:
-        branches: [main]
+        branches: [main, pre-release/main]
 
-# 同一 PR 只保留最新运行；main 的每次 push 仍独立验证。
+# 同一 PR 只保留最新运行；各分支的每次 push 仍独立验证。
 concurrency:
     group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
     cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -24,16 +24,12 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                os: [ubuntu-latest, macos-latest, windows-latest]
-                rust:
-                    - stable
-                include:
-                    - os: ubuntu-latest
-                      target: x86_64-unknown-linux-gnu
-                    - os: macos-latest
-                      target: aarch64-apple-darwin
-                    - os: windows-latest
-                      target: x86_64-pc-windows-msvc
+                include: >-
+                    ${{ fromJSON(
+                    (github.ref == 'refs/heads/pre-release/main' || github.base_ref == 'pre-release/main')
+                    && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]'
+                    || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]'
+                    ) }}
 
         steps:
             - name: Checkout repository
@@ -51,7 +47,7 @@ jobs:
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@master
               with:
-                  toolchain: ${{ matrix.rust }}
+                  toolchain: stable
                   targets: ${{ matrix.target }}
                   components: clippy
 

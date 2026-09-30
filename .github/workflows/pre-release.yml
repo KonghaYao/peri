@@ -1,0 +1,93 @@
+name: Build Next Major
+
+on:
+    push:
+        branches: [pre-release/main]
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    build:
+        name: Build (${{ matrix.platform }})
+        if: github.ref == 'refs/heads/pre-release/main'
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 60
+        defaults:
+            run:
+                shell: bash
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-24.04
+                      target: x86_64-unknown-linux-gnu
+                      platform: linux-x86_64
+                    - os: ubuntu-24.04-arm
+                      target: aarch64-unknown-linux-gnu
+                      platform: linux-aarch64
+                    - os: macos-15-intel
+                      target: x86_64-apple-darwin
+                      platform: macos-x86_64
+                    - os: macos-14
+                      target: aarch64-apple-darwin
+                      platform: macos-aarch64
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.target }}
+
+            - name: Cache Rust build
+              uses: Swatinem/rust-cache@v2
+              with:
+                  key: next-major-${{ matrix.target }}
+
+            - name: Build peri
+              run: cargo build --locked -p peri-tui --bin peri --release --target ${{ matrix.target }}
+
+            - name: Smoke test binary
+              run: target/${{ matrix.target }}/release/peri --version
+
+            - name: Package binary
+              env:
+                  PLATFORM: ${{ matrix.platform }}
+                  TARGET: ${{ matrix.target }}
+              run: |
+                  mkdir -p dist
+                  tar -czf "dist/peri-${PLATFORM}.tar.gz" -C "target/${TARGET}/release" peri
+                  (
+                      cd dist
+                      shasum -a 256 "peri-${PLATFORM}.tar.gz" > checksums.txt
+                  )
+                  {
+                      echo "Branch: $GITHUB_REF_NAME"
+                      echo "Commit: $GITHUB_SHA"
+                      echo "Run: $GITHUB_RUN_ID (attempt $GITHUB_RUN_ATTEMPT)"
+                      echo "Target: $TARGET"
+                      "target/${TARGET}/release/peri" --version
+                      rustc --version
+                  } > dist/build-info.txt
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: peri-next-major-${{ matrix.platform }}-${{ github.sha }}
+                  path: dist/
+                  if-no-files-found: error
+                  compression-level: 0
+                  retention-days: 14
