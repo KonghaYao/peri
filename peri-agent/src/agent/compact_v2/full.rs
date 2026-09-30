@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
-use peri_model::{ModelMessage, ModelRequest};
+use peri_model::{ModelMessage, ModelRequest, StopReason};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -33,6 +33,13 @@ const SUMMARY_SYSTEM_PROMPT: &str = include_str!("descriptions/summary_system_pr
 
 /// Full Compact user prompt 模板
 const SUMMARY_USER_PROMPT: &str = include_str!("descriptions/summary_user_prompt.md");
+
+// 与普通输出恢复一样有界续写；不抬高 provider 的单次输出上限。
+const MAX_SUMMARY_CONTINUATIONS: usize = 2;
+const SUMMARY_CONTINUATION_PROMPT: &str = "Your summary was cut off by the output token limit. \
+Continue exactly from the end of your previous text, including any unfinished word or tag. \
+Output only the missing remainder; do not restart, repeat earlier sections, or add analysis. \
+Finish the remaining essential facts concisely and close </summary>. Do not call tools.";
 
 // ─── Full Compact ───────────────────────────────────────────────────────────────
 
@@ -88,27 +95,12 @@ pub(super) async fn full_compact_inner(
         // 不回写原 transcript，也不提供可执行工具。
         let mut messages = AgentModelBridge::convert_messages(&visible)?;
         messages.insert(0, ModelMessage::system_text(SUMMARY_SYSTEM_PROMPT));
-        messages.push(ModelMessage::user_text(SUMMARY_USER_PROMPT));
+        messages.push(ModelMessage::user_text(SUMMARY_USER_PROMPT.replace(
+            "{summary_target_tokens}",
+            &(config.summary_max_tokens / 2).max(1).to_string(),
+        )));
         let request = ModelRequest::new(messages).with_max_tokens(config.summary_max_tokens);
-        let response = llm
-            .complete(request, CancellationToken::new())
-            .await
-            .map_err(map_model_error)?;
-        if !matches!(response.stop_reason(), peri_model::StopReason::EndTurn) {
-            return Err(crate::error::AgentError::CompactIncompleteResponse {
-                stop_reason: response.stop_reason().clone(),
-            });
-        }
-        let text = response.assistant_text().unwrap_or_default();
-        postprocess_summary(&text).ok_or_else(|| {
-            // 仅记录形状与 usage，区分无正文和 analysis-only，不输出历史或摘要正文。
-            warn!(
-                response_chars = text.chars().count(),
-                output_tokens = response.usage().map(|usage| usage.output_tokens),
-                "Full Compact response has no usable summary"
-            );
-            crate::error::AgentError::CompactEmptyResponse
-        })?
+        complete_summary(llm, request).await?
     } else {
         // 全 System / 空历史仍保持命令输出 Human-first 的既有契约。
         "No conversation history to compact.".to_owned()
@@ -161,6 +153,76 @@ pub(super) async fn full_compact_inner(
         changed_fields: 0,
         no_op_candidates: 0,
     })
+}
+
+// 续写状态只属于本次摘要计算；完整成功前不向 canonical transcript 写半截摘要。
+async fn complete_summary(
+    llm: &dyn peri_model::Model,
+    mut request: ModelRequest,
+) -> AgentResult<String> {
+    let mut text = String::new();
+    for continuation in 0..=MAX_SUMMARY_CONTINUATIONS {
+        let response = llm
+            .complete(request.clone(), CancellationToken::new())
+            .await
+            .map_err(map_model_error)?;
+        let part = response.assistant_text().unwrap_or_default();
+        let has_tools = matches!(response.message(), ModelMessage::Assistant { content, tool_calls }
+            if !tool_calls.is_empty() || content.iter().any(|block| matches!(block, peri_model::ContentBlock::ToolUse { .. })));
+        if has_tools {
+            return Err(crate::error::AgentError::CompactIncompleteResponse {
+                stop_reason: StopReason::ToolUse,
+            });
+        }
+        text.push_str(&part);
+        match response.stop_reason() {
+            StopReason::EndTurn => {
+                // 空白尾响应不能证明已有半截正文完整，也不能触发外层空摘要重试。
+                // 续写必须闭合 summary；跨响应拆开的标签在拼接之后才校验。
+                if continuation > 0 && (part.trim().is_empty() || !text.contains("</summary>")) {
+                    return Err(crate::error::AgentError::CompactIncompleteResponse {
+                        stop_reason: StopReason::MaxTokens,
+                    });
+                }
+                return postprocess_summary(&text).ok_or_else(|| {
+                    warn!(
+                        response_chars = text.chars().count(),
+                        output_tokens = response.usage().map(|usage| usage.output_tokens),
+                        "Full Compact response has no usable summary"
+                    );
+                    if continuation > 0 {
+                        crate::error::AgentError::CompactIncompleteResponse {
+                            stop_reason: StopReason::MaxTokens,
+                        }
+                    } else {
+                        crate::error::AgentError::CompactEmptyResponse
+                    }
+                });
+            }
+            StopReason::MaxTokens
+                if continuation < MAX_SUMMARY_CONTINUATIONS && !part.trim().is_empty() =>
+            {
+                warn!(
+                    continuation = continuation + 1,
+                    output_tokens = response.usage().map(|usage| usage.output_tokens),
+                    "Full Compact output truncated; continuing the existing summary"
+                );
+                // 只续接可见正文；不重放未签名 reasoning 或任何工具调用。
+                request.messages.push(ModelMessage::assistant_text(part));
+                request
+                    .messages
+                    .push(ModelMessage::user_text(SUMMARY_CONTINUATION_PROMPT));
+                // 给外层取消 select 明确的调度点，不在同步完成的模型替身上连跑请求。
+                tokio::task::yield_now().await;
+            }
+            stop_reason => {
+                return Err(crate::error::AgentError::CompactIncompleteResponse {
+                    stop_reason: stop_reason.clone(),
+                });
+            }
+        }
+    }
+    unreachable!("the final truncated response returns an error")
 }
 
 /// 构造 Full Compact 的 Human 摘要消息。
@@ -531,3 +593,7 @@ mod tests;
 #[cfg(test)]
 #[path = "full_report_test.rs"]
 mod report_tests;
+
+#[cfg(test)]
+#[path = "full_continuation_test.rs"]
+mod continuation_tests;
