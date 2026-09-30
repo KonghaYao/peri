@@ -81,7 +81,7 @@ impl McpClientPool {
         ),
         rmcp::service::ServiceError,
     > {
-        if !self.persistent_cache_allowed(server_name) {
+        if uri.starts_with("peri-output://") || !self.persistent_cache_allowed(server_name) {
             return Ok((
                 peer.read_resource(ReadResourceRequestParams::new(uri))
                     .await?,

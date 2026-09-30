@@ -32,10 +32,17 @@ impl DynamicMcpRegistry {
         handle: &Arc<crate::mcp::client::McpClientHandle>,
         gate: &super::super::admission::DynamicMcpAdmissionGate,
     ) -> Result<BTreeMap<String, Arc<dyn BaseTool>>, DynamicMcpFailure> {
+        let output_pool = self
+            .state
+            .lock()
+            .projections
+            .get(&instance.logical.session_id)
+            .and_then(Weak::upgrade)
+            .map(|projection| projection.pool());
         let mut tools = BTreeMap::<String, Arc<dyn BaseTool>>::new();
         let mut folded = BTreeSet::new();
         for tool in &handle.tools {
-            let bridge = McpToolBridge::new_dynamic(
+            let mut bridge = McpToolBridge::new_dynamic(
                 &instance.logical.server_name,
                 tool,
                 Arc::clone(handle),
@@ -48,6 +55,9 @@ impl DynamicMcpRegistry {
                     "Dynamic MCP server or tool name is invalid",
                 )
             })?;
+            if let Some(pool) = &output_pool {
+                bridge = bridge.with_output_store(pool, Some(&instance.logical.session_id));
+            }
             let name = bridge.name().to_string();
             if !folded.insert(name.to_ascii_lowercase()) || tools.contains_key(&name) {
                 return Err(Self::failure(

@@ -5,8 +5,8 @@ use peri_agent::tools::BaseTool;
 use rmcp::model::{ContentBlock, Tool};
 use thiserror::Error;
 
+use super::client::output_store::format_output;
 use super::client::{McpClientHandle, McpClientPool};
-use peri_mcp_common::shell::persist_truncated_output;
 
 /// MCP 工具调用错误
 #[derive(Debug, Error)]
@@ -47,6 +47,8 @@ pub struct McpToolBridge {
     client: Arc<McpClientHandle>,
     binding_leases: Option<Arc<super::apps::McpAppBindingLeaseRegistry>>,
     admission: Option<super::dynamic::admission::DynamicMcpAdmissionGate>,
+    output_pool: Option<std::sync::Weak<McpClientPool>>,
+    output_session_id: Option<String>,
 }
 
 /// External MCP requests share a 120-second deadline across send and response.
@@ -54,7 +56,6 @@ pub struct McpToolBridge {
 /// comes from ConfigSource; other builtins retain the bounded MCP call contract.
 /// In particular Bash must finish promotion and return its receipt at the 120s boundary.
 pub(crate) const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-const MAX_MCP_LINES: usize = 2000;
 
 /// Sanitize name components to match API tool name pattern: ^[a-zA-Z0-9_-]+$
 pub(crate) fn sanitize_name_component(name: &str) -> String {
@@ -121,6 +122,8 @@ impl McpToolBridge {
             client,
             binding_leases: None,
             admission: None,
+            output_pool: None,
+            output_session_id: None,
         }
     }
 
@@ -157,7 +160,19 @@ impl McpToolBridge {
             client,
             binding_leases: None,
             admission: Some(admission),
+            output_pool: None,
+            output_session_id: None,
         })
+    }
+
+    pub fn with_output_store(
+        mut self,
+        pool: &Arc<McpClientPool>,
+        session_id: Option<&str>,
+    ) -> Self {
+        self.output_pool = Some(Arc::downgrade(pool));
+        self.output_session_id = session_id.map(str::to_string);
+        self
     }
 
     pub fn with_server_generation(mut self, generation: u64) -> Self {
@@ -299,17 +314,16 @@ impl BaseTool for McpToolBridge {
         // 4. 处理 is_error 标志。失败的实例化调用不得签发 App lease。
         if result.is_error.unwrap_or(false) {
             let error_text = format_contents(&result.content);
-            let lines: Vec<&str> = error_text.lines().collect();
-            let reason = if lines.len() > MAX_MCP_LINES {
-                let persist_hint = persist_truncated_output(&error_text);
-                let truncated: String = lines[..MAX_MCP_LINES].join("\n");
-                format!(
-                    "{truncated}\n\n[MCP error output truncated: {} total lines]{persist_hint}",
-                    lines.len()
-                )
-            } else {
-                error_text
-            };
+            let pool = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade);
+            let reason = format_output(
+                pool.as_deref(),
+                self.output_session_id
+                    .as_deref()
+                    .or(ctx.session_id.as_deref()),
+                error_text,
+                true,
+            )
+            .await;
             return Err(Box::new(ToolCallError::CallFailed {
                 server: self.server_name.clone(),
                 tool: self.tool_name.clone(),
@@ -370,17 +384,16 @@ impl BaseTool for McpToolBridge {
 
         // 5. 格式化返回（截断超大输出）
         let formatted = format_contents(&result.content);
-        let lines: Vec<&str> = formatted.lines().collect();
-        let output = if lines.len() > MAX_MCP_LINES {
-            let persist_hint = persist_truncated_output(&formatted);
-            let truncated: String = lines[..MAX_MCP_LINES].join("\n");
-            format!(
-                "{truncated}\n\n[MCP output truncated: {} total lines]{persist_hint}",
-                lines.len()
-            )
-        } else {
-            formatted
-        };
+        let pool = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade);
+        let output = format_output(
+            pool.as_deref(),
+            self.output_session_id
+                .as_deref()
+                .or(ctx.session_id.as_deref()),
+            formatted,
+            false,
+        )
+        .await;
         Ok(output)
     }
 }
@@ -432,14 +445,14 @@ fn format_contents(contents: &[ContentBlock]) -> String {
 /// 保持 deferred。判定只走 `builtin::is_declared_direct`（未实现 / 未知名恒 false），
 /// 不在本文件硬编码任何 `mcp__*` 字面量或实例名。
 pub(crate) fn build_typed_tool_bridges_visible_to(
-    pool: &McpClientPool,
+    pool: &Arc<McpClientPool>,
     session_id: Option<&str>,
 ) -> Vec<McpToolBridge> {
     build_bridges(pool, true, session_id)
 }
 
 /// 部署面视图的 typed 版本（无会话归属过滤）。
-pub(crate) fn build_typed_tool_bridges(pool: &McpClientPool) -> Vec<McpToolBridge> {
+pub(crate) fn build_typed_tool_bridges(pool: &Arc<McpClientPool>) -> Vec<McpToolBridge> {
     build_bridges(pool, true, None)
 }
 
@@ -448,12 +461,12 @@ pub(crate) fn build_typed_tool_bridges(pool: &McpClientPool) -> Vec<McpToolBridg
 /// 与 [`build_typed_tool_bridges_visible_to`] 的唯一差异是不应用声明 direct，因此
 /// public builder 在 builtin 与外部 server 两种输入下的行为都与提取出 typed
 /// builder 之前**逐位一致**。
-pub(crate) fn build_deferred_tool_bridges(pool: &McpClientPool) -> Vec<McpToolBridge> {
+pub(crate) fn build_deferred_tool_bridges(pool: &Arc<McpClientPool>) -> Vec<McpToolBridge> {
     build_bridges(pool, false, None)
 }
 
 fn build_bridges(
-    pool: &McpClientPool,
+    pool: &Arc<McpClientPool>,
     apply_declared_direct: bool,
     session_id: Option<&str>,
 ) -> Vec<McpToolBridge> {
@@ -465,7 +478,8 @@ fn build_bridges(
         for tool in &client.tools {
             let mut bridge = McpToolBridge::new(&client.name, tool, Arc::clone(&client))
                 .with_server_generation(generation)
-                .with_binding_leases(Arc::clone(&pool.app_binding_leases));
+                .with_binding_leases(Arc::clone(&pool.app_binding_leases))
+                .with_output_store(pool, session_id);
             if apply_declared_direct
                 && matches!(&client.source, Some(super::config::ConfigSource::Builtin { instance }) if instance == &client.name)
                 && super::builtin::is_declared_direct(&client.name, tool.name.as_ref())
@@ -485,7 +499,7 @@ fn build_bridges(
 ///
 /// 不过滤会话归属（部署面视图）：会话内装配必须走
 /// [`build_tool_bridges_visible_to`]，否则会拿到其他会话声明的 ACP 工具。
-pub fn build_tool_bridges(pool: &McpClientPool) -> Vec<Box<dyn BaseTool>> {
+pub fn build_tool_bridges(pool: &Arc<McpClientPool>) -> Vec<Box<dyn BaseTool>> {
     build_deferred_tool_bridges(pool)
         .into_iter()
         .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
@@ -494,7 +508,7 @@ pub fn build_tool_bridges(pool: &McpClientPool) -> Vec<Box<dyn BaseTool>> {
 
 /// 会话可见的 bridge 集合（[`build_tool_bridges`] 的 ACP 归属过滤版）。
 pub fn build_tool_bridges_visible_to(
-    pool: &McpClientPool,
+    pool: &Arc<McpClientPool>,
     session_id: Option<&str>,
 ) -> Vec<Box<dyn BaseTool>> {
     build_bridges(pool, false, session_id)
@@ -586,7 +600,7 @@ mod direct_flag_tests {
                     .map(|tool| (instance, tool))
             })
             .expect("注册表必须至少保留一个 deferred 声明的 builtin 工具");
-        let pool = McpClientPool::new_pending();
+        let pool = Arc::new(McpClientPool::new_pending());
         let handle = make_handle(
             instance.name,
             vec![make_tool(tool.original_name)],

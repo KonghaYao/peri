@@ -220,7 +220,7 @@ fn app_allowed_tools_uses_admitted_binding_when_raw_names_collide() {
 
 #[test]
 fn test_build_tool_bridges_filters_app_only_tool_from_model_catalog() {
-    let pool = McpClientPool::new_empty();
+    let pool = Arc::new(McpClientPool::new_empty());
     let tool: Tool = serde_json::from_value(serde_json::json!({
         "name": "app_only",
         "description": "App only",
@@ -252,7 +252,7 @@ fn test_build_tool_bridges_filters_app_only_tool_from_model_catalog() {
 
 #[test]
 fn test_build_tool_bridges_empty_pool() {
-    let pool = McpClientPool::new_empty();
+    let pool = Arc::new(McpClientPool::new_empty());
     let bridges = build_tool_bridges(&pool);
     assert!(bridges.is_empty());
 }
@@ -287,7 +287,7 @@ fn connected_handle(name: &str, tools: Vec<Tool>) -> Arc<McpClientHandle> {
 /// 3. public `build_tool_bridges` 在两种输入下都全 deferred，保持前缀名。
 #[test]
 fn typed_bridges_apply_declared_direct_only_for_builtin_instances() {
-    let pool = McpClientPool::new_empty();
+    let pool = Arc::new(McpClientPool::new_empty());
     pool.clients.write().insert(
         "web".to_string(),
         connected_handle(
@@ -334,7 +334,7 @@ fn typed_bridges_apply_declared_direct_only_for_builtin_instances() {
 /// typed 构造应用声明 direct 原名，public 构造保持 deferred 前缀名。
 #[test]
 fn typed_and_deferred_builders_differ_only_in_direct_flag() {
-    let pool = McpClientPool::new_empty();
+    let pool = Arc::new(McpClientPool::new_empty());
     let handle = connected_handle("web", vec![make_tool("WebSearch", None)]);
     pool.clients
         .write()

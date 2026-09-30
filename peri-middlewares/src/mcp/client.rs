@@ -4,6 +4,7 @@
 mod cache;
 mod lifecycle;
 mod oauth;
+pub(crate) mod output_store;
 pub(crate) mod process;
 // System MCP 启动准入 seam：清单发布与闸门已接线（`initialize` / `middleware`），
 // 仍有三处冻结但尚无生产读取方的成员——`DiscoveryEvidence::is_complete`（只有测试在问）、

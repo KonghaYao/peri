@@ -406,7 +406,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
 /// 只保留 direct：workflow agent 没有 ToolSearch；SubAgent 装配时使用本面
 /// 作为初始工具集，在父 Reason 发布时再绑定当前会话的完整静态 MCP 目录。
 pub(crate) fn open_builtin_bridges(
-    pool: &crate::mcp::McpClientPool,
+    pool: &Arc<crate::mcp::McpClientPool>,
     disabled: &std::collections::HashSet<String>,
 ) -> Vec<Box<dyn BaseTool>> {
     let closed = crate::mcp::builtin::closed_instances(disabled);

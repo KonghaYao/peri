@@ -96,7 +96,7 @@ impl McpClientPool {
             .lock()
             .get(&handle.name)
             .and_then(|entries| {
-                entries.iter().find_map(|(candidate, generation)| {
+                entries.iter().rev().find_map(|(candidate, generation)| {
                     candidate
                         .upgrade()
                         .filter(|candidate| Arc::ptr_eq(candidate, handle))

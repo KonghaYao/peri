@@ -83,6 +83,7 @@ pub struct WorkspaceMcpServer {
     /// `None` 是**未支持**而不是「空目录集」：`skills/*` 返回 `-32601`、
     /// 新 scheme 的 `resources/read` 返回 `-32602`（见模块头）。
     resources: Option<Arc<WorkspaceResourceProvider>>,
+    outputs: Arc<crate::output_store::OutputStore>,
 }
 
 impl WorkspaceMcpServer {
@@ -124,6 +125,7 @@ impl WorkspaceMcpServer {
             git: Arc::new(GitWatchState::new()),
             sinks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             resources: None,
+            outputs: Arc::new(crate::output_store::OutputStore::new()),
         }
     }
 
@@ -316,6 +318,20 @@ impl ServerHandler for WorkspaceMcpServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
+        if request.uri.starts_with("peri-output://") {
+            let outputs = Arc::clone(&self.outputs);
+            let uri = request.uri.clone();
+            let text = tokio::task::spawn_blocking(move || outputs.read(&uri))
+                .await
+                .map_err(|_| McpError::internal_error("workspace output read failed", None))??;
+            return Ok(ReadResourceResponse::Complete(
+                rmcp::model::ReadResourceResult::new(vec![ResourceContents::text(
+                    text,
+                    request.uri,
+                )
+                .with_mime_type("text/plain")]),
+            ));
+        }
         if request.uri == GIT_REF_RESOURCE_URI {
             return Ok(ReadResourceResponse::Complete(
                 rmcp::model::ReadResourceResult::new(vec![ResourceContents::text(
@@ -358,6 +374,28 @@ impl ServerHandler for WorkspaceMcpServer {
             };
         }
         let method = request.method.clone();
+        if method == "workspace/gitBranch" {
+            return tokio::select! {
+                biased;
+                _ = _context.ct.cancelled() => Err(McpError::internal_error("workspace branch read cancelled", None)),
+                result = crate::git_branch::read_branch(&self.cwd) => result,
+            };
+        }
+        if method == peri_acp_types::workspace_output::STORE_OUTPUT_METHOD {
+            let params = request
+                .params
+                .ok_or_else(|| McpError::invalid_params("output/store requires content", None))?;
+            let input = serde_json::from_value(params)
+                .map_err(|_| McpError::invalid_params("output/store requires content", None))?;
+            let outputs = Arc::clone(&self.outputs);
+            return tokio::select! {
+                biased;
+                _ = _context.ct.cancelled() => Err(McpError::internal_error("workspace output store cancelled", None)),
+                result = tokio::task::spawn_blocking(move || outputs.store(input)) => {
+                    result.map_err(|_| McpError::internal_error("workspace output persistence failed", None))?
+                },
+            };
+        }
         if method == "workspace/readText" {
             return tokio::select! {
                 biased;

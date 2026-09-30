@@ -9,12 +9,12 @@ use peri_acp_types::{
 use peri_agent::tools::BaseTool;
 use thiserror::Error;
 
+use super::client::output_store::format_output;
 use super::client::{ClientStatus, McpClientPool};
 use super::skill_discovery::{
     is_skill_scheme, refresh_entry_and_content, uri_eq_ignore_scheme_case, verify_digest,
     verify_digest_bytes,
 };
-use peri_mcp_common::shell::persist_truncated_output;
 
 /// 资源读取工具错误
 #[derive(Debug, Error)]
@@ -38,7 +38,6 @@ pub enum ResourceError {
 
 const TOOL_NAME: &str = "mcp_read_resource";
 const RESOURCE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-const MAX_MCP_LINES: usize = 2000;
 
 /// MCP 资源读取工具——统一资源读取入口
 pub struct McpResourceTool {
@@ -74,6 +73,16 @@ impl McpResourceTool {
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
+    }
+
+    async fn format_recovered_content(&self, content: &str, mime: Option<&str>) -> String {
+        format_output(
+            Some(&self.client_pool),
+            self.session_id.as_deref(),
+            format!("[text/{}]\n{content}", mime.unwrap_or("plain")),
+            false,
+        )
+        .await
     }
 
     /// 读取面热更新恢复（digest 不匹配 / 未列出时，仅 skill:// 且条目覆盖）：
@@ -221,6 +230,34 @@ impl BaseTool for McpResourceTool {
                 status: ClientStatus::Disconnected,
             })?;
 
+        let generation = self.client_pool.handle_generation(&handle);
+        let owner = self.client_pool.acp_owners.read().get(server_name).cloned();
+        let ensure_current = || {
+            let closed = !self.client_pool.is_open()
+                || self.client_pool.builtin_instance_context().is_some_and(|context| {
+                    matches!(handle.source.as_ref(), Some(super::config::ConfigSource::Builtin { instance }) if super::builtin::is_closed(instance, &context.closed))
+                });
+            if closed
+                || self.client_pool.acp_owners.read().get(server_name).cloned() != owner
+                || !self
+                    .client_pool
+                    .get_client_visible_to(server_name, self.session_id.as_deref())
+                    .is_some_and(|current| {
+                        Arc::ptr_eq(&current, &handle)
+                            && matches!(current.status, ClientStatus::Connected)
+                            && self.client_pool.handle_generation(&current) == generation
+                    })
+            {
+                Err(ResourceError::ReadFailed {
+                    server: server_name.to_string(),
+                    reason: "resource server unavailable or changed during request".into(),
+                })
+            } else {
+                Ok(())
+            }
+        };
+        ensure_current()?;
+
         // 4. skill:// 资源完整性绑定定位（规范 MUST：host 持有某 skill 的
         //    entry 期间，读该 skill 的文件须 resolve 到 entry.resources 所列
         //    URI；读未列出文件 = 验证失败，等同 digest 不匹配）。
@@ -247,7 +284,10 @@ impl BaseTool for McpResourceTool {
                 .recover_via_refresh(peer, server_name, entry, uri)
                 .await
             {
-                return Ok(format_recovered_content(&content, mime.as_deref()));
+                ensure_current()?;
+                return Ok(self
+                    .format_recovered_content(&content, mime.as_deref())
+                    .await);
             }
             return Err(Box::new(ResourceError::VerificationFailed {
                 server: server_name.to_string(),
@@ -265,6 +305,7 @@ impl BaseTool for McpResourceTool {
 
         match result {
             Ok(Ok((resource_result, cache_ticket))) => {
+                ensure_current()?;
                 // 6. digest 校验（Listed，MUST）：读到的内容须与条目 resources
                 //    声明的 sha256 digest 一致——contents **逐项**校验（Text
                 //    用 UTF-8 bytes，Blob 用 base64 解码后的 bytes）；任一
@@ -297,7 +338,10 @@ impl BaseTool for McpResourceTool {
                             .recover_via_refresh(peer, server_name, entry, uri)
                             .await
                         {
-                            return Ok(format_recovered_content(&content, mime.as_deref()));
+                            ensure_current()?;
+                            return Ok(self
+                                .format_recovered_content(&content, mime.as_deref())
+                                .await);
                         }
                         return Err(Box::new(ResourceError::VerificationFailed {
                             server: server_name.to_string(),
@@ -338,7 +382,13 @@ impl BaseTool for McpResourceTool {
                     }
                 }
                 let formatted = output.join("\n");
-                Ok(format_lines(formatted))
+                Ok(format_output(
+                    Some(&self.client_pool),
+                    self.session_id.as_deref(),
+                    formatted,
+                    false,
+                )
+                .await)
             }
             Ok(Err(e)) => Err(Box::new(ResourceError::ReadFailed {
                 server: server_name.to_string(),
@@ -435,30 +485,10 @@ fn verify_blob_digest(blob: &str, expected: &str) -> bool {
     }
 }
 
-/// 工具输出格式化：超过 `MAX_MCP_LINES` 行 → 截断 + 持久化提示（正常路径
-/// 与热更新恢复路径共用，保证截断语义一致）。
-fn format_lines(formatted: String) -> String {
-    let lines: Vec<&str> = formatted.lines().collect();
-    if lines.len() > MAX_MCP_LINES {
-        let persist_hint = persist_truncated_output(&formatted);
-        let truncated: String = lines[..MAX_MCP_LINES].join("\n");
-        format!(
-            "{truncated}\n\n[MCP output truncated: {} total lines]{persist_hint}",
-            lines.len()
-        )
-    } else {
-        formatted
-    }
-}
-
-/// 热更新恢复成功的内容格式化：对齐正常路径的 `[text/<mime>]` 前缀
-/// （mime 取自重读的 ResourceContents 原值，缺省 plain）与行数截断/
-/// 持久化（复用 [`format_lines`]）。
-fn format_recovered_content(content: &str, mime: Option<&str>) -> String {
-    let mime = mime.unwrap_or("plain");
-    format_lines(format!("[text/{mime}]\n{content}"))
-}
-
 #[cfg(test)]
 #[path = "resource_tool_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "resource_output_test.rs"]
+mod output_tests;

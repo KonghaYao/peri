@@ -11,6 +11,10 @@ use crate::mcp::{ClientStatus, McpClientPool};
 #[async_trait]
 pub trait WorkspaceFileReader: Send + Sync {
     async fn read_text(&self, path: &Path) -> Result<String, WorkspaceReadError>;
+
+    async fn current_branch(&self) -> Result<Option<String>, WorkspaceReadError> {
+        Err(WorkspaceReadError::Unavailable)
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -32,12 +36,12 @@ pub(crate) struct McpWorkspaceFileReader {
     session_id: Option<String>,
 }
 
-struct PendingFileRead {
+struct PendingWorkspaceRequest {
     peer: Peer<RoleClient>,
     id: Option<RequestId>,
 }
 
-impl Drop for PendingFileRead {
+impl Drop for PendingWorkspaceRequest {
     fn drop(&mut self) {
         if let Some(id) = self.id.take() {
             let peer = self.peer.clone();
@@ -47,7 +51,7 @@ impl Drop for PendingFileRead {
                         Duration::from_secs(1),
                         peer.notify_cancelled(CancelledNotificationParam::new(
                             Some(id),
-                            Some("workspace text read cancelled".into()),
+                            Some("workspace request cancelled".into()),
                         )),
                     )
                     .await;
@@ -69,11 +73,11 @@ impl McpWorkspaceFileReader {
             session_id,
         }
     }
-}
-
-#[async_trait]
-impl WorkspaceFileReader for McpWorkspaceFileReader {
-    async fn read_text(&self, path: &Path) -> Result<String, WorkspaceReadError> {
+    async fn request(
+        &self,
+        method: &str,
+        path: Option<&Path>,
+    ) -> Result<serde_json::Value, WorkspaceReadError> {
         let pool = self
             .pool
             .as_ref()
@@ -88,11 +92,15 @@ impl WorkspaceFileReader for McpWorkspaceFileReader {
             .as_ref()
             .ok_or(WorkspaceReadError::Unavailable)?;
         let generation = pool.handle_generation(&handle);
-        let path = path.to_str().ok_or(WorkspaceReadError::InvalidPath)?;
-        let request = CustomRequest::new(
-            "workspace/readText",
-            Some(serde_json::json!({ "path": path })),
-        );
+        let owner = pool.acp_owners.read().get("workspace").cloned();
+        let params = path
+            .map(|path| {
+                path.to_str()
+                    .map(|path| serde_json::json!({ "path": path }))
+                    .ok_or(WorkspaceReadError::InvalidPath)
+            })
+            .transpose()?;
+        let request = CustomRequest::new(method, params);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let request = tokio::time::timeout_at(
             deadline,
@@ -104,7 +112,7 @@ impl WorkspaceFileReader for McpWorkspaceFileReader {
         .await
         .map_err(|_| WorkspaceReadError::Timeout)?
         .map_err(|_| WorkspaceReadError::ReadFailed)?;
-        let mut pending = PendingFileRead {
+        let mut pending = PendingWorkspaceRequest {
             peer: peer.clone(),
             id: Some(request.id.clone()),
         };
@@ -114,6 +122,7 @@ impl WorkspaceFileReader for McpWorkspaceFileReader {
             .map_err(|_| WorkspaceReadError::ReadFailed)?;
         pending.id.take();
         if workspace_closed(pool)
+            || pool.acp_owners.read().get("workspace").cloned() != owner
             || !pool
                 .get_client_visible_to("workspace", self.session_id.as_deref())
                 .is_some_and(|current| {
@@ -125,12 +134,28 @@ impl WorkspaceFileReader for McpWorkspaceFileReader {
             return Err(WorkspaceReadError::Unavailable);
         }
         match result {
-            ServerResult::CustomResult(result) => result
-                .0
-                .get("text")
-                .and_then(|text| text.as_str())
-                .map(str::to_string)
-                .ok_or(WorkspaceReadError::InvalidResponse),
+            ServerResult::CustomResult(result) => Ok(result.0),
+            _ => Err(WorkspaceReadError::InvalidResponse),
+        }
+    }
+}
+
+#[async_trait]
+impl WorkspaceFileReader for McpWorkspaceFileReader {
+    async fn read_text(&self, path: &Path) -> Result<String, WorkspaceReadError> {
+        self.request("workspace/readText", Some(path))
+            .await?
+            .get("text")
+            .and_then(|text| text.as_str())
+            .map(str::to_string)
+            .ok_or(WorkspaceReadError::InvalidResponse)
+    }
+
+    async fn current_branch(&self) -> Result<Option<String>, WorkspaceReadError> {
+        let result = self.request("workspace/gitBranch", None).await?;
+        match result.get("branch") {
+            Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(branch)) => Ok(Some(branch.clone())),
             _ => Err(WorkspaceReadError::InvalidResponse),
         }
     }

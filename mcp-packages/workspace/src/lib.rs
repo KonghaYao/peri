@@ -3,9 +3,11 @@
 mod file_observation;
 pub mod filesystem;
 mod fuzzy;
+mod git_branch;
 mod git_watch;
 pub mod image;
 mod input;
+mod output_store;
 pub mod resources;
 mod shell_hints;
 pub mod terminal;
