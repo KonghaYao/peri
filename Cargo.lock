@@ -3904,6 +3904,7 @@ dependencies = [
  "peri-acp-types",
  "peri-agent",
  "peri-controller",
+ "peri-mcp-common",
  "peri-mcp-cron",
  "peri-mcp-lsp",
  "peri-mcp-workspace",
@@ -3963,7 +3964,6 @@ dependencies = [
  "peri-resources",
  "serde",
  "serde_json",
- "sqlx",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.20",
@@ -4040,14 +4040,23 @@ dependencies = [
 name = "peri-mcp-common"
 version = "0.2.0"
 dependencies = [
+ "chrono",
  "fs2",
+ "futures",
+ "libc",
+ "peri-acp-types",
  "peri-agent",
+ "peri-process",
  "rmcp",
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -21,7 +21,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 tokio-util.workspace = true
-sqlx = { workspace = true }
 parking_lot.workspace = true
 peri-model = { path = "../peri-model" }
 peri-acp-types = { path = "../peri-acp-types" }
