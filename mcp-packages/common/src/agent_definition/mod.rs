@@ -164,22 +164,6 @@ pub struct ClaudeAgent {
     pub system_prompt: String,
 }
 
-/// 将 agent_id（kebab-case 或 snake_case）格式化为友好显示名称
-///
-/// 例：`"code-reviewer"` → `"Code Reviewer"`，`"security_auditor"` → `"Security Auditor"`
-pub fn format_agent_id(id: &str) -> String {
-    id.split(['-', '_'])
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(first) => first.to_uppercase().chain(chars).collect(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// 解析 Claude Code agent 文件内容
 ///
 /// 返回 frontmatter 和 markdown 正文

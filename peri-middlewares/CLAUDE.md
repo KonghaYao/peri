@@ -27,7 +27,7 @@
 | Plugin manifest、commands、agents、MCP 回退 | `src/plugin/` |
 | Hook 事件与执行器 | `src/hooks/` |
 | Skills 根解析、registry 投影、预载、工具（零 FS） | `src/skills/`（`loader.rs` 根解析 / `mod.rs` 投影与摘要 / `tools.rs` 两工具）、`src/settings.rs`、`src/subagent/skill_preload.rs` |
-| SubAgent、后台任务、取消和事件 | `src/subagent/` |
+| SubAgent、后台任务、取消和事件 | `src/subagent/`；Agent 定义类型与纯解析在 `../mcp-packages/common/src/agent_definition/`，本地扫描在 workspace MCP 资源面 |
 | HITL 权限与审批 | `src/hitl/` |
 | Workflow、工具搜索、LSP 文档同步 | `src/workflow/`、`src/tool_search/`、`src/lsp/middleware.rs`（`LspSyncMiddleware`，无工具） |
 | Builtin MCP handler、工具与公共映射 | `../mcp-packages/{common,web,artifact,cron,lsp,workspace}/`；宿主分派与生命周期在 `src/mcp/builtin/{context,dispatch,runtime}.rs` |

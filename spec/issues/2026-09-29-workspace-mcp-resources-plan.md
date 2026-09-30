@@ -323,7 +323,7 @@ origin 由宿主绑定的实例/连接赋值，不信任 server 文本自称来�
 - 将 builtin 定义 Markdown 及 `built_in_agents.rs` 的嵌入表迁到 workspace 的静态 Agent resource provider，删除上层嵌入副本和 get/list fallback。项目与插件定义也由 provider 读取、产出 `agent://…/agent.md`；宿主不再调用 `read_definition` 或 `scan_agents_detailed` 读文件（现入口 E13、E16）。
 - 复用 `McpAgentRegistry` 与 `load_and_approve_mcp_agent`；先补元数据 session/关闭集过滤，再迁本地来源。不能把 server 自报 `scope=builtin` 视为可信内置来源。需要 host-assigned 来源描述，保留 project/plugin/builtin 的可追溯身份。
 - E13 的实际 loader 优先级是 project→builtin→plugin；不要从 builtin 文件的“最低优先级”注释推断 plugin 一定覆盖 builtin。推荐先保持现有**本地**选择行为，同时跨 origin 同名并存、远端不覆盖本地。是否统一改优先级另列 X3，未裁决不改。
-- parser 的纯 YAML/Markdown 解析若 server 与 host 都需要，提取为契约层纯解析模块（建议 `peri-acp-types/src/agents/parse.rs`）；不把文件 I/O 或 permission 策略搬入 types。`claude_agent_parser` 上层旧实现/重复导出在消费者迁完后删除，不留 shim。远端 v1 类型与 Peri 本地扩展显式区分，不能所有字段直接反序列化后执行。
+- Agent 定义的纯 YAML/Markdown 解析与类型收敛到 `peri-mcp-common::agent_definition`，供本地及远端资源消费共用；不向 `peri-agent` / `peri-acp-types` 添加 YAML 依赖，不搬入文件 I/O 或 permission 策略。`peri-middlewares::claude_agent_parser` 旧实现与重复导出删除，不留 shim。workspace 保留最小 frontmatter 元数据投影，宿主保留远端规范化与授权收敛，不能所有字段直接反序列化后执行。
 - 已有远端规范化会清空 `permission_mode/hooks/memory/background/isolation/allowed_write_dirs/tone/proactiveness/prompt_mode/skills`（E12）。本地定义资源化若全部走此路径，会改变已有行为；X3 必须选择：严格 v1 丢弃本地扩展，或 host 针对受信本地 origin 明示支持选定扩展。两者都不允许 server 提权，远端未知字段仍默认忽略。
 - Agent `skills` URI 请求进入同一 Skill activation，每项独立解析、校验、批准；不再简单清空，也不能因 Agent 已批准就跳过 Skill 校验。无法满足 preload 时报告缺口，不静默启动不完整配置。
 - 只把候选描述投递主模型；Agent 全文在激活后作为子 Agent 候选 system prompt。若用户要求 system Agent 内容直注入主会话，须另行裁决，不能混同 system Skill 规则。非 fork 不自动继承主历史/凭据/批准；能力收敛按 §5.10.3 和宿主上限。
@@ -341,7 +341,7 @@ origin 由宿主绑定的实例/连接赋值，不信任 server 文本自称来�
 | `AgentsMdMiddleware` | 保留纯 contribution adapter；删除全部读盘/搜索/import 行为 | 新建/legacy/read-only恢复/fork/frozen 回归均有证据 |
 | `AgentDefineMiddleware` | 倾向删除空 hook/槽位，overrides 由资源激活结果交给既有 prompt renderer | 同批更新 production_blueprint、assembly、MetaHarness 名单和测试；不得顺带重排其余槽位 |
 | `subagent/built_in_agents.rs` 与 `built-in/*.md` | 上层表和文件删除，包内静态资源替代 | catalog、定义加载、workflow、resume、builtin开关均已接资源/快照 |
-| `claude_agent_parser/` | 纯解析迁契约层或按 X3 保留唯一 host parser；禁止复制一套 | 所有 parse_agent_file 消费者与本地扩展策略核对完毕 |
+| `claude_agent_parser/` | 已迁入 `peri-mcp-common::agent_definition`，上层目录与导出删除；无调用的 `format_agent_id` 删除 | 消费方直接引用共享模块；本地扩展与远端规范化仍由宿主按来源约束 |
 | `mcp/skill_discovery*`、`mcp/agent_registry.rs` | 保留 MCP client adapter/策略；改造发现与激活，不迁宿主 pool 到包内 | 按 §5、§7验收 |
 | `SubAgentMiddleware`、HITL、runtime/context/transport | 保留生命周期与执行授权，仅更换内容来源输入 | 不以“resources 下沉”为由扩大本次范围 |
 
@@ -541,7 +541,8 @@ cargo test --workspace
 | --- | --- | --- | --- |
 | `peri-mcp-workspace` | `src/resources/{mod,skills,agents,instructions,meta,path}.rs` 与对应 `_test.rs`；迁入 builtin Skill/Agent Markdown 静态资产；**承接本地技能读取（J5）：三根扫描、插件根、builtin 资产、清单/digest 生成**；**承接 `.peri/meta` 覆盖文档扫描（J6，语义逐字保留）**。**不新增技能工具模块**（J3） | `Cargo.toml`、`src/{lib,workspace,input}.rs`：公开资源输入（根列表 + `plugin_name` 标签 + `disable_bundled` 关闭位）与 handler 合并；按实际需要使用根已有 serde_yaml/sha2 依赖（`Cargo.toml:53,110`） | 无原七工具删除 |
 | `peri-mcp-common` | 默认不新增通用resource抽象；只有第二个真实复用点才提取 | 原则不改tools-only默认server_info；若资源错误确有共同范式才最小改helpers/failure/result_mapping与测试 | 无 |
-| `peri-acp-types` | 窄资源快照/来源/activation端口类型；纯Agent parser模块（X3选择迁出时）；registry 的 origin 感知查询/歧义候选 | `src/{skills,mcp_skills,ports,builtin_mcp,meta_harness,agents}.rs`；`lib.rs`按新模块导出；frozen契约文件仅在需要存来源/revision时修改 | 不新增两技能工具的声明项（工具留宿主，J3）；不用旧路径re-export维持双实现 |
+| `peri-acp-types` | 窄资源快照/来源/activation端口类型；registry 的 origin 感知查询/歧义候选 | `src/{skills,mcp_skills,ports,builtin_mcp,meta_harness,agents}.rs`；`lib.rs`按新模块导出；frozen契约文件仅在需要存来源/revision时修改 | 不新增两技能工具的声明项（工具留宿主，J3）；不用旧路径re-export维持双实现 |
+| `peri-mcp-common` | 共享 Agent 定义类型与纯 Markdown/YAML 解析 | `common/src/agent_definition/`；`common/src/lib.rs` 导出 | 不扫描、不读盘、不实施授权；middleware 不保留旧模块或兼容导出 |
 | `peri-middlewares` | 必要的 `src/mcp/skill_activation.rs`（统一激活）与context adapter测试；不新建本地扫描副本 | `src/mcp/{skill_discovery,resource_tool,discover_tool,agent_registry,middleware}.rs`、`skill_discovery/{skills_list,legacy_scan,verify}.rs`、`client/{readiness,cache,subscription}.rs`、`builtin/{dispatch,context,mod}.rs`；**`src/skills/tools.rs`（保留并改造正文加载，J3/J5）**、`src/skills/mod.rs`（删除本地扫描与合并）、`subagent/{mod,skill_preload}.rs`（删除本地兜底）、`subagent/tool/{definitions,mcp_activation}.rs`、`agents_md/mod.rs`、`host_ports.rs`（F6 只读投影）、`assembly/workflow.rs`（F4 接 registry）、`assembly.rs`与`assembly/{prompt,mcp,preparation}.rs`、`lib.rs`/manifest；permission/提示词/名字锁定测试按实际触点同步 | `src/skills/{loader,content}.rs`与`skills/builtin/`整体迁出（F7–F10）；**`src/meta_harness/`（J6：scanner 迁出，契约类型留在 `peri-acp-types`）**；`subagent/built_in_agents.rs`及`built-in/*.md`迁出；`agent_define`空middleware/读盘实现；`claude_agent_parser/`在X3提取后删除；**不删 `skills/tools.rs`（J3）但其中不得保留任何 FS 读取路径（J5）**；不删subagent运行时 |
 | `peri-agent` | startup资源候选测试（仅X5/J2方案的窄seam需要） | `src/middleware/capabilities.rs`、`src/agent/stages/middleware_runner.rs`（条件），`src/session/factory.rs`及`session/exec/stage_builder/tools.rs`的槽位/工具所有权；tool_catalog/startup结构仅按窄seam需要改 | AgentDefine槽位若获批删除；不删通用MCP/SkillPreload槽位 |
 | `peri-acp` | 会话资源准备/冻结生命周期集成测试；命令注册异步投影测试 | `src/host/{prepared,assemble,prompt,workflow_agent}.rs`、`src/session/{frozen,construction,frozen_snapshot}.rs`（`construction.rs:64-87` 命令注册改由 MCP 发现驱动）、`src/prompt/mod.rs`；new/load/resume/fork对应事务调用点在W0复核后列入，禁止只改 frozen.rs 忽略调用链 | 删除对middleware本地扫描/读盘入口的调用，不删版本化历史快照 |

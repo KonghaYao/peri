@@ -183,7 +183,7 @@
 | AGENTS.md 注入 | agents_md/mod.rs（AgentsMdMiddleware :22 / read_frozen_content :84） |
 | Goal steering | goal/middleware.rs（GoalMiddleware :24 / after_agent :85）；goal/tool.rs（GoalTool :17） |
 | agent 定义 / 默认 prompt / @mention / 归属 | agent_define/（:35/:78）；default_system_prompt/（:112/:159）；at_mention/（:28）；attribution/（:38） |
-| 工具包装 / 解析 / 辅助 | tools/（ArcToolWrapper :44 / BoxToolWrapper :50）；claude_agent_parser/（parse_agent_file :186 / format_agent_id :170）；meta_harness/（**已删除**——W3b/J6 起段落覆盖经 workspace `peri-meta://` 资源）；SubAgentTool 动态建议（subagent/tool/definitions.rs，`fuzzy_rank` 本地排序）；host_ports.rs（:26/:406/:425） |
+| 工具包装 / 定义消费 / 辅助 | tools/（ArcToolWrapper / BoxToolWrapper）；Agent 定义类型与 `parse_agent_file` 在 `peri-mcp-common::agent_definition`（`mcp-packages/common/src/agent_definition/`），本 crate 不保留 parser 模块或兼容 re-export；meta_harness/（**已删除**——W3b/J6 起段落覆盖经 workspace `peri-meta://` 资源）；SubAgentTool 动态建议（subagent/tool/definitions.rs，`fuzzy_rank` 本地排序）；host_ports.rs |
 
 ### 跨 crate 事实源（不在本 crate 内，改前先看这里）
 

@@ -1,5 +1,7 @@
 //! Explicit remote activation and content/effective-tool-bound approval.
-use crate::{claude_agent_parser::ClaudeAgent, mcp::McpAgentRegistry};
+use peri_mcp_common::agent_definition::ClaudeAgent;
+
+use crate::mcp::McpAgentRegistry;
 
 impl super::SubAgentTool {
     pub(crate) async fn load_and_approve_mcp_agent(

@@ -57,7 +57,83 @@ Basic system prompt.
     let agent = parse_agent_file(content).unwrap();
     assert_eq!(agent.frontmatter.name, "minimal-agent");
     assert!(agent.tools().is_empty());
+    assert_eq!(agent.frontmatter.tools, ToolsValue::Empty);
     assert!(agent.frontmatter.model.is_none());
+}
+
+#[test]
+fn test_parse_crlf_preserves_prompt() {
+    let content = "---\r\nname: reviewer\r\ndescription: Review code\r\ntools: []\r\n---\r\n\r\nReview carefully.\r\nKeep findings concrete.\r\n";
+
+    let agent = parse_agent_file(content).unwrap();
+
+    assert_eq!(agent.frontmatter.name, "reviewer");
+    assert_eq!(agent.frontmatter.tools, ToolsValue::NoTools);
+    assert_eq!(
+        agent.system_prompt,
+        "Review carefully.\nKeep findings concrete."
+    );
+}
+
+#[test]
+fn test_tools_value_wildcards_remain_explicit() {
+    for (declaration, expected) in [
+        ("'*'", vec!["*".to_string()]),
+        ("['*', Read]", vec!["*".to_string(), "Read".to_string()]),
+    ] {
+        let content = format!(
+            "---\nname: reviewer\ndescription: Review code\ntools: {declaration}\n---\nprompt"
+        );
+
+        let agent = parse_agent_file(&content).unwrap();
+
+        assert_eq!(agent.frontmatter.tools, ToolsValue::List(expected));
+    }
+}
+
+#[test]
+fn test_frontmatter_json_projection_preserves_tools_semantics() {
+    for (tools, expected) in [
+        (None, ToolsValue::Empty),
+        (Some(serde_json::json!([])), ToolsValue::NoTools),
+        (Some(serde_json::Value::Null), ToolsValue::NoTools),
+        (
+            Some(serde_json::json!(["*"])),
+            ToolsValue::List(vec!["*".to_string()]),
+        ),
+    ] {
+        let mut projection = serde_json::json!({
+            "name": "reviewer",
+            "description": "Review code"
+        });
+        if let Some(tools) = tools {
+            projection["tools"] = tools;
+        }
+
+        let frontmatter: ClaudeAgentFrontmatter = serde_json::from_value(projection).unwrap();
+
+        assert_eq!(frontmatter.tools, expected);
+    }
+}
+
+#[test]
+fn test_parse_errors_preserve_failure_categories() {
+    assert_eq!(
+        parse_agent_file_inner("plain markdown").unwrap_err(),
+        "文件不以 '---' 开头，缺少 YAML frontmatter"
+    );
+    assert_eq!(
+        parse_agent_file_inner("---\nname: reviewer\n").unwrap_err(),
+        "未找到闭合的 '---' 分隔符"
+    );
+    for content in [
+        "---\nname: reviewer\n---\nprompt",
+        "---\nname: reviewer\ndescription: review\ntools: ['']\n---\nprompt",
+    ] {
+        assert!(parse_agent_file_inner(content)
+            .unwrap_err()
+            .starts_with("YAML frontmatter 解析失败: "));
+    }
 }
 
 #[test]
@@ -99,31 +175,6 @@ prompt"#;
     let agent = parse_agent_file(content).unwrap();
     assert_eq!(agent.frontmatter.max_turns, Some(0));
     // 验证 tool.rs 中的 maxTurns:0 降级逻辑（这里只验证解析正确）
-}
-
-#[test]
-fn test_format_agent_id_kebab() {
-    assert_eq!(format_agent_id("code-reviewer"), "Code Reviewer");
-}
-
-#[test]
-fn test_format_agent_id_snake() {
-    assert_eq!(format_agent_id("security_auditor"), "Security Auditor");
-}
-
-#[test]
-fn test_format_agent_id_single_word() {
-    assert_eq!(format_agent_id("researcher"), "Researcher");
-}
-
-#[test]
-fn test_format_agent_id_mixed_separators() {
-    assert_eq!(format_agent_id("my-cool_agent"), "My Cool Agent");
-}
-
-#[test]
-fn test_format_agent_id_empty() {
-    assert_eq!(format_agent_id(""), "");
 }
 
 #[test]

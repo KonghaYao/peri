@@ -11,10 +11,10 @@
 //!   覆盖 skill；
 //! - builtin 开关（`built_in_subagents_enabled`）语义与迁移前逐位一致：
 //!   新建/后台路径遵守父会话冻结 policy，resume 路径允许恢复既有 builtin 定义。
-use crate::claude_agent_parser::{ClaudeAgent, ToolsValue};
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use peri_acp_types::agents::AgentOverrides;
 use peri_agent::tools::BaseTool;
+use peri_mcp_common::agent_definition::{ClaudeAgent, ToolsValue};
 use std::collections::BTreeSet;
 
 impl super::SubAgentTool {

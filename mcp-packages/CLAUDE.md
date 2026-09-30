@@ -21,6 +21,7 @@ Host wire, pool, bridge, readiness, and shutdown tests belong in `peri-middlewar
 | Task | Package entry points |
 | --- | --- |
 | Shared MCP tool schema, server info, call mapping, failure projection, strict numeric parsing, process env lock | `common/src/{helpers,numeric,failure,result_mapping,process_env}.rs` |
+| Shared Agent definition types and pure Markdown/YAML parsing | `common/src/agent_definition/`; local discovery stays in workspace resources, while source trust, approval and execution policy stay in the host |
 | Web search and fetch tools and handler | `web/src/{server,web_search,web_fetch}.rs` |
 | Artifact conversion/upload tool and handler | `artifact/src/{server,tool,client}.rs` |
 | Cron scheduling and tools/handler | `cron/src/{scheduler,tools,server}.rs` |

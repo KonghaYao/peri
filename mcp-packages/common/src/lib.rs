@@ -1,5 +1,6 @@
 //! Shared behavior used by the independently packaged builtin MCP instances.
 
+pub mod agent_definition;
 pub mod failure;
 mod helpers;
 mod numeric;

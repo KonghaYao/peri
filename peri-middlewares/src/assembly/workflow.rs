@@ -271,7 +271,7 @@ async fn resolve_agent_definition_via_registry(
         .model
         .filter(|model| !model.is_empty() && model != "inherit");
     let allowed_tools = match frontmatter.tools {
-        crate::ToolsValue::Empty => None,
+        peri_mcp_common::agent_definition::ToolsValue::Empty => None,
         tools => Some(tools.to_vec()),
     };
     Ok(WorkflowAgentDefinition {

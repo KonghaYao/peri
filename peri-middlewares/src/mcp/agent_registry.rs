@@ -38,7 +38,7 @@ use rmcp::model::ResourceContents;
 use sha2::{Digest, Sha256};
 
 use super::client::{ClientStatus, McpClientHandle, McpClientPool};
-use crate::claude_agent_parser::{parse_agent_file, ClaudeAgent};
+use peri_mcp_common::agent_definition::{parse_agent_file, ClaudeAgent, ClaudeAgentFrontmatter};
 
 const MAX_AGENT_BYTES: usize = 256 * 1024;
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -579,7 +579,7 @@ fn local_catalog_fields(
     resource_description: &Option<String>,
     frontmatter: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<LocalCatalogFields> {
-    let frontmatter: crate::claude_agent_parser::ClaudeAgentFrontmatter =
+    let frontmatter: ClaudeAgentFrontmatter =
         serde_json::from_value(serde_json::Value::Object(frontmatter?.clone())).ok()?;
     let capability = crate::subagent::infer_agent_capability(&frontmatter);
     let display_name = if frontmatter.name.trim().is_empty() {

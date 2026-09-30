@@ -9,5 +9,8 @@ license = "Apache-2.0"
 peri-agent = { path = "../../peri-agent" }
 fs2 = "0.4"
 rmcp.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 thiserror.workspace = true
+tracing.workspace = true

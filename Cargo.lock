@@ -4043,8 +4043,11 @@ dependencies = [
  "fs2",
  "peri-agent",
  "rmcp",
+ "serde",
  "serde_json",
+ "serde_yaml",
  "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
