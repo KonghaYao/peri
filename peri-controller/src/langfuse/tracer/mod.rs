@@ -44,7 +44,7 @@ mod usage;
 use super::config::LangfuseConfig;
 use super::session_like::LangfuseSessionLike;
 use crate::langfuse::tracer::stages::StageHandle;
-use event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
+pub(crate) use event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
 use langfuse_client::types::{EventBody, ObservationLevel};
 use langfuse_client::IngestionEvent;
 use peri_agent::agent::events_v2::TurnErrorReason;

@@ -207,6 +207,7 @@ VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri`
 - 各 crate 生产代码 fs 调用点经多模式交叉搜索（`std::fs` / `tokio::fs` / `dirs_next` / `temp_dir` / `current_dir`）聚合统计；行号为快照值
 - `peri-agent` → `sqlx` 无任何引用；`peri-acp-types` / `peri-model` / `peri-controller` / `peri-runtime` / `langfuse-client` 无 fs I/O
 - `peri-agent` → `sqlx` 直接依赖清理（2026-09-30 实施后验证，非快照）：`cargo check -p peri-agent` 通过；`cargo tree -p peri-agent -i sqlx` 仅剩 `peri-resources` 路径，`--depth 1` 顶层无 `sqlx`；`peri-agent` 源码与测试复核无 `sqlx` 引用
+- metrics 出口对齐 Langfuse（2026-09-30 实施后验证，非快照）：`cargo test -p peri-agent --lib metrics::`（10 passed：未安装出口丢弃、已安装出口投递 + 500 字符截断 + 身份透传）、`cargo test -p peri-controller --lib langfuse::metric_sink`（4 passed：`event-create` wire 类型、payload/level/身份 metadata、背压丢弃记账）、`cargo check -p peri-acp --lib`（安装点编译通过）、`cargo clippy -p peri-agent -p peri-controller --all-targets` 无告警、`bash scripts/check-layer-imports.sh` 通过；`src/metrics/mod.rs` 已无 `tokio::fs` / `dirs_next` / 文件路径写入
 - `persist_truncated_output*`、`init_tracing`、`metrics::emit` 的下游消费面
 - VS Code URI 设计要点取自官方文档与社区 issue（链接见 4.3）
 
@@ -217,3 +218,5 @@ VS Code 把一切资源（文件、编辑器、扩展资源、存储）用 `Uri`
 - 未评估"shell 输出落盘迁往 mcp-packages"的具体接口形态（属后续设计）
 - 各等级项（P1 shell / 工具 fs 严查 / `skillsDir`、P2 统一地址、P3 配置数据面与 Plugin MCP、P4 切换）未做实施拆解与工作量评估；等级表是方向记录
 - cwd / 统一地址（P2）仅到方向层面；未形成 spec 契约
+- metrics → Langfuse 未做端到端上报验证（本地无 Langfuse 凭据，未观察 Langfuse 服务端落库）
+- metrics 事件未挂到 turn 的 trace 上：事件以自有 trace id 作为 root event 上报（`metadata` 保留 sid/rid），跨 sid→活跃 trace 的归属需要额外注册表，本次未引入

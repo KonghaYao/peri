@@ -129,7 +129,7 @@
 | 续跑调度 | host/continuation.rs | `run_continuation_scheduler`（:111） |
 | Host 任务所有权 | host/task_scope.rs | `HostTaskOwner` / `HostTaskSpawner`；生产 timeout driver + 测试 controlled phase driver |
 | writer lease | host/lease.rs | `WriterLease`（:20，多读者单 writer） |
-| 装配 | host/assemble.rs | `assemble_server_config`；`build_legacy_frozen_data` 仅发现保存目录的配置与插件输入，缺失快照在执行资源装配前构建 |
+| 装配 | host/assemble.rs | `assemble_server_config`；`build_legacy_frozen_data` 仅发现保存目录的配置与插件输入，缺失快照在执行资源装配前构建；Langfuse 会话创建成功时安装指标出口（`peri_agent::metrics::set_sink` + `LangfuseMetricsSink`），未配置时不安装、指标不落盘 |
 | stage 构建 | host/stage_builder.rs | `build_stage_context`：消费单一 `FrozenSessionData`，派生 frozen language/MetaHarness/date 与 Agent 装配输入，禁止从当轮 config 建第二事实源；frozen 中的项目指令正文来自 P4 内容准入期经 builtin `workspace` 实例读取的 `peri-instruction://workspace/{main\|local}` 资源（W5：`AgentsMdMiddleware` 为纯 adapter、不读盘） |
 | workflow 薄壳 | host/workflow_agent.rs | `create_session_workflow_middleware`（:192，装配经 `WorkflowMiddlewareFactory` 端口）；生产工厂由 `host/assemble.rs` 经 `default_workflow_middleware_factory_with_pool(mcp_pool_concrete.clone())`（:514）注入**带 MCP 池**的实例，使 workflow agent 工具面与主链一样可见 selected builtin tools using raw names |
 | stdio 部署 | host/stdio/ | `run_acp_stdio`（mod.rs:39，`StdioInput` → `assemble_stdio_config` → `run_acp_server_with_sessions`，业务处理走统一宿主）；集成测试 `run_server_integration_test.rs`（initialize → session/new → 通知 wire 链路） |

@@ -241,11 +241,10 @@ pub fn build_session_manager(
         cron_scheduler,
         mcp_subscription,
         dynamic_mcp,
-        // 装配注入面：per-session 后台任务管理器（Agent 层实现，per-session
-        // 聚合：registry + bg shell 执行），由本装配点构造后注入（全路径引用）；
+        // 装配注入面：Agent 管理 session registry，工具环境提供本地 shell 执行。
         // ACP 协议面只持有契约 `peri_acp_types::tasks::TaskManager`。
         Some(Arc::new(|| {
-            Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
+            Arc::new(peri_mcp_common::create_local_task_manager())
                 as Arc<dyn peri_acp_types::tasks::TaskManager>
         })),
         agent_catalog,
@@ -727,6 +726,16 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     } else {
         (None, None)
     };
+
+    // 指标出口：仅 Langfuse 可用时安装（Langfuse event）；未配置时保持未安装，
+    // 指标事件丢弃——不落盘。
+    if let Some(session) = &langfuse_session {
+        let metrics_session: Arc<dyn peri_controller::langfuse::LangfuseSessionLike> =
+            session.clone();
+        peri_agent::metrics::set_sink(Some(Arc::new(
+            peri_controller::langfuse::LangfuseMetricsSink::new(metrics_session),
+        )));
+    }
 
     AcpServerConfig {
         workspace_assembly: (!session_scoped).then(|| WorkspaceAssembly {

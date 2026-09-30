@@ -1,55 +1,65 @@
-//! 轻量异常指标追踪系统
+//! 指标事件出口。
 //!
-//! JSONL 文件存储，mpsc channel 解耦，fire-and-forget 写入。
+//! 指标只经宿主装配注入的 [`MetricsSink`] 上报（生产出口是 Langfuse event）；
+//! 未注入出口（未配置或不可用 Langfuse）时事件直接丢弃——不落盘、不做本地缓冲、
+//! 不建双写兼容层。
+//!
+//! [不变量] `emit` 不阻塞调用方，也不产生任何文件系统写入。
 
-use std::sync::LazyLock;
+use std::sync::Arc;
 
 use chrono::Utc;
-use serde::Serialize;
-use tokio::sync::mpsc;
+use parking_lot::RwLock;
 
 /// 字符串截断上限（字符级，CJK 安全）
 const TRUNCATE_LIMIT: usize = 500;
 
-/// 指标事件
-#[derive(Debug, Serialize)]
-struct MetricEvent {
+/// 指标事件（出口契约）。
+#[derive(Debug, Clone)]
+pub struct MetricEvent {
     /// ISO 8601 毫秒时间戳
-    ts: String,
+    pub ts: String,
     /// session_id
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sid: Option<String>,
+    pub sid: Option<String>,
     /// run_id（当前 ReAct 循环标识）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rid: Option<String>,
+    pub rid: Option<String>,
     /// 事件名（点分层级）
-    event: String,
+    pub event: String,
     /// 事件附加数据
-    data: serde_json::Value,
+    pub data: serde_json::Value,
 }
 
-/// 全局 channel sender
-static METRICS_TX: LazyLock<mpsc::UnboundedSender<MetricEvent>> = LazyLock::new(|| {
-    let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(metrics_writer(rx));
-    tx
-});
+/// 指标出口。由宿主装配注入，实现必须立即返回（fire-and-forget）且不得 panic。
+pub trait MetricsSink: Send + Sync {
+    /// 接收一个事件；投递失败由实现自行警告，不回传调用方。
+    fn record(&self, event: MetricEvent);
+}
+
+/// 进程级出口槽。宿主装配注入一次；`None` 表示未配置（事件丢弃）。
+static SINK: RwLock<Option<Arc<dyn MetricsSink>>> = RwLock::new(None);
+
+/// 安装/替换指标出口；`None` 清除出口。
+///
+/// 生产装配点在 ACP host（`peri-acp/src/host/assemble.rs`），且只在 Langfuse
+/// 可用时安装；未配置 Langfuse 的部署保持未安装。
+pub fn set_sink(sink: Option<Arc<dyn MetricsSink>>) {
+    *SINK.write() = sink;
+}
 
 /// 发射一个指标事件。fire-and-forget，不阻塞调用方。
 ///
-/// `data` 中所有字符串值会被截断到 500 字符。
+/// `data` 中所有字符串值会被截断到 500 字符。未安装出口时事件被丢弃。
 pub fn emit(event: &str, data: serde_json::Value, sid: Option<&str>, rid: Option<&str>) {
-    let data = truncate_json_strings(data);
-    let evt = MetricEvent {
-        ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        sid: sid.map(|s| s.to_owned()),
-        rid: rid.map(|s| s.to_owned()),
-        event: event.to_owned(),
-        data,
+    let Some(sink) = SINK.read().clone() else {
+        return;
     };
-    if METRICS_TX.send(evt).is_err() {
-        tracing::warn!(event, "metrics channel send failed (writer dropped)");
-    }
+    sink.record(MetricEvent {
+        ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        sid: sid.map(str::to_owned),
+        rid: rid.map(str::to_owned),
+        event: event.to_owned(),
+        data: truncate_json_strings(data),
+    });
 }
 
 /// 获取当前进程 RSS（MB），通过 sysinfo 获取实时值。
@@ -74,79 +84,6 @@ pub fn current_rss_mb() -> Option<u64> {
 pub fn total_system_memory_mb() -> Option<u64> {
     let sys = sysinfo::System::new_all();
     Some(sys.total_memory() / (1024 * 1024))
-}
-
-/// 单 writer task：消费 channel，追加写入 JSONL 文件
-async fn metrics_writer(mut rx: mpsc::UnboundedReceiver<MetricEvent>) {
-    let base_dir = dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".peri")
-        .join("metrics");
-
-    if let Err(e) = tokio::fs::create_dir_all(&base_dir).await {
-        tracing::warn!(path = %base_dir.display(), error = %e, "无法创建 metrics 目录");
-        return;
-    }
-
-    let mut current_date = today();
-    let path = base_dir.join(format!("{current_date}.jsonl"));
-    let file = match tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .await
-    {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "无法打开 metrics 文件");
-            return;
-        }
-    };
-    use tokio::io::AsyncWriteExt;
-    let mut writer = tokio::io::BufWriter::new(file);
-
-    while let Some(evt) = rx.recv().await {
-        let date = today();
-        if date != current_date {
-            let _ = writer.flush().await;
-            let path = base_dir.join(format!("{date}.jsonl"));
-            match tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .await
-            {
-                Ok(f) => {
-                    writer = tokio::io::BufWriter::new(f);
-                    current_date = date;
-                }
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "无法切换 metrics 文件");
-                    return;
-                }
-            }
-        }
-
-        match serde_json::to_string(&evt) {
-            Ok(line) => {
-                if let Err(e) = writer.write_all(line.as_bytes()).await {
-                    tracing::warn!(error = %e, "metrics write failed");
-                }
-                if let Err(e) = writer.write_all(b"\n").await {
-                    tracing::warn!(error = %e, "metrics newline write failed");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "metrics serialize failed");
-            }
-        }
-    }
-
-    let _ = writer.flush().await;
-}
-
-fn today() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
 /// 递归截断 JSON 中所有字符串值到 TRUNCATE_LIMIT 字符
