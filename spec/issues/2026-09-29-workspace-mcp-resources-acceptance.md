@@ -1,6 +1,6 @@
 # Workspace MCP resources 验收记录（W1–W6）
 
-> 日期：2026-09-30（W6 收口 + L0 门禁修复）。仓库 `/Users/konghayao/code/ai/peri-v4p3`，分支 `feat/mcp-adaptation-v4-part-3`，基线 HEAD `0c5ecb40`（W6 提交）；L0 门禁存量修复与确定性改造见 §2 与 §6.4 第 11 项（提交 hash 待回填）。
+> 日期：2026-09-30（W6 收口 + L0 门禁修复）。仓库 `/Users/konghayao/code/ai/peri-v4p3`，分支 `feat/mcp-adaptation-v4-part-3`，基线 HEAD `0c5ecb40`（W6 提交）；L0 门禁存量修复与确定性改造见 §2 与 §6.4 第 11 项（提交 `91543f18`）。
 > 口径：只记录**实际执行过**的命令与结果（命令 + EXIT + 关键计数）；静态证据给 `file:line`；没有运行证据的事项单列「未完成 / 未验证」，不写成已具备能力（遵循 `docs/standards/testing.md` TEST-EVIDENCE-001 与计划 §8.3）。
 > 计划与裁决：`2026-09-29-workspace-mcp-resources-plan.md`（下称 plan）、`2026-09-29-workspace-mcp-resources-decisions.md`（下称 decisions）；本记录不重复两者全文，只写验收事实。
 
@@ -188,7 +188,7 @@ cargo test -p peri-acp --lib -- host::requests::tests::meta_resources
     | `header-suffix-and-error` | ❌ `:57:5`（模型 turn 等待 120s 超时） | ❌ `:198:9`（错误卡点击展开 5s 超时） | ❌ `:198:9`（1m51s） | **存量**：确定性失败点为 `:198:9`（W6 单跑与 HEAD 基线一致）；L0 的 `:57:5` 为长跑期间真实模型用时波动 |
     | `edit-diff` | ❌ `:60:7`（Write 完成态 120s 超时） | ✅ 通过 | ✅ 通过（1m32s） | **非回归**：失败为真实模型用时波动（flake） |
 
-    两点交付侧事实：① L0 tier 的 12 个文件中有 **7 个经 `launchPeri`（`dev.sh` + `.env`）驱动真实模型**，与本 tier 自述「偏确定性用例」存在张力——模型端用时波动可越过用例的 120s 等待窗（`edit-diff`、`header-suffix` 在 L0 同批超时，单跑通过/推进到更后阶段）。② 6 个失败中 5 个在 W6 前 HEAD 上原样复现或推进到同一确定性失败点，全部与本波 4 个运行时文件无因果；L0 过门所需修复登记为存量任务（`schema` 正则失配、`system_reminder` 计数期望、错误卡点击展开、真实模型用例的确定性改造）。**该批存量修复已于 2026-09-30 完成并验证（下表）。**
+    两点交付侧事实：① L0 tier 的 12 个文件中有 **7 个经 `launchPeri`（`dev.sh` + `.env`）驱动真实模型**，与本 tier 自述「偏确定性用例」存在张力——模型端用时波动可越过用例的 120s 等待窗（`edit-diff`、`header-suffix` 在 L0 同批超时，单跑通过/推进到更后阶段）。② 6 个失败中 5 个在 W6 前 HEAD 上原样复现或推进到同一确定性失败点，全部与本波 4 个运行时文件无因果；L0 过门所需修复登记为存量任务（`schema` 正则失配、`system_reminder` 计数期望、错误卡点击展开、真实模型用例的确定性改造）。**该批存量修复已于 2026-09-30 完成并验证（提交 `91543f18`，下表）。**
 
     **L0 存量修复与确定性改造（2026-09-30，W6 后续；全部修复均先单跑、后经全量 L0 复验）**：
 
