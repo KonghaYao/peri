@@ -260,6 +260,16 @@ pub fn build_v2_subagent_context(
     for tool in tools {
         tools_map.insert(tool.name().to_string(), tool);
     }
+    for tool in chain.collect_tools(cwd) {
+        let tool: Arc<dyn BaseTool> = Arc::from(tool);
+        if let Some(winner) = tools_map.values().find(|existing| {
+            crate::session::tool_catalog::tool_names_conflict(existing.as_ref(), tool.as_ref())
+        }) {
+            crate::session::tool_catalog::warn_tool_collision(winner.as_ref(), tool.as_ref());
+            continue;
+        }
+        tools_map.insert(tool.name().to_string(), tool);
+    }
     let combined_shared_tools: SharedToolMap = Arc::new(RwLock::new(tools_map.clone()));
     let tool_catalog = Arc::new(SessionToolCatalog::with_filter(
         tools_map,

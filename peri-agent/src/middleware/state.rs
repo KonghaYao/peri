@@ -74,6 +74,9 @@ pub trait MiddlewareState: Send + Sync {
     fn local_tools(&self) -> Option<&crate::agent::stages::SharedToolMap> {
         None
     }
+    fn tool_source(&self, _name: &str) -> Option<crate::session::tool_catalog::ToolSource> {
+        None
+    }
 }
 
 /// `AgentState` 的 MiddlewareState 适配；自身完整状态 API 不经 hook 暴露。

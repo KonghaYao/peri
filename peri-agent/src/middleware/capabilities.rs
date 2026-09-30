@@ -52,6 +52,9 @@ pub trait QueueState: Send + Sync {
 /// Reason 目录重绑能力；目录访问与刷新产生的 recall 在同一阶段提交。
 pub trait CatalogState: Send + Sync {
     fn local_tools(&self) -> Option<&SharedToolMap>;
+    fn tool_source(&self, _name: &str) -> Option<crate::session::tool_catalog::ToolSource> {
+        None
+    }
     fn push_recall(&mut self, item: String);
 }
 
@@ -207,6 +210,9 @@ impl<T: MiddlewareState + ?Sized> QueueState for T {
 impl<T: MiddlewareState + ?Sized> CatalogState for T {
     fn local_tools(&self) -> Option<&SharedToolMap> {
         MiddlewareState::local_tools(self)
+    }
+    fn tool_source(&self, name: &str) -> Option<crate::session::tool_catalog::ToolSource> {
+        MiddlewareState::tool_source(self, name)
     }
     fn push_recall(&mut self, item: String) {
         MiddlewareState::push_recall(self, item)

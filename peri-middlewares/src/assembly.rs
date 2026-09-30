@@ -390,9 +390,8 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
 /// 同一份 frozen policy 去掉关闭实例（`closed_instances` / `is_closed` 是
 /// 唯一判定入口，不硬编码实例名或工具名前缀）。
 ///
-/// 只保留 direct：外部 server 的 deferred bridge 在 workflow agent 与
-/// subagent `parent_tools` 两条链上都没有 ToolSearch 可发现，注入它们只会
-/// 变成模型看不见的注册项。
+/// 只保留 direct：workflow agent 没有 ToolSearch；SubAgent 装配时使用本面
+/// 作为初始工具集，在父 Reason 发布时再绑定当前会话的完整静态 MCP 目录。
 pub(crate) fn open_builtin_bridges(
     pool: &crate::mcp::McpClientPool,
     disabled: &std::collections::HashSet<String>,

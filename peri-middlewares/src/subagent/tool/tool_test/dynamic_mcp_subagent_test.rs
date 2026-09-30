@@ -51,7 +51,7 @@ impl BaseTool for NamedTool {
     }
 
     fn is_direct(&self) -> bool {
-        true
+        false
     }
 
     async fn invoke(
@@ -67,18 +67,39 @@ struct CatalogLLM {
     seen: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
+async fn discover_names(tools: &[&dyn BaseTool], messages: &[BaseMessage]) -> Vec<String> {
+    let mut names = tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+    assert!(!names.contains(&"mcp__dynamic__lookup".to_string()));
+    let search = tools
+        .iter()
+        .find(|tool| tool.name() == "SearchExtraTools")
+        .expect("subagents need deferred tool discovery");
+    let result = search
+        .invoke(
+            serde_json::json!({"query": "select:mcp__dynamic__lookup"}),
+            ToolContext::new(messages, "/tmp"),
+        )
+        .await
+        .unwrap();
+    if result.contains("mcp__dynamic__lookup") {
+        names.push("mcp__dynamic__lookup".to_string());
+    }
+    names
+}
+
 #[async_trait]
 impl ReactLLM for CatalogLLM {
     async fn generate_reasoning(
         &self,
-        _messages: &[BaseMessage],
+        messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
         _streaming: Option<StreamingContext>,
     ) -> peri_agent::error::AgentResult<Reasoning> {
-        self.seen
-            .lock()
-            .unwrap()
-            .push(tools.iter().map(|tool| tool.name().to_string()).collect());
+        let names = discover_names(tools, messages).await;
+        self.seen.lock().unwrap().push(names);
         Ok(Reasoning::with_answer("", "done"))
     }
 }
@@ -187,14 +208,12 @@ async fn existing_fork_child_refreshes_across_load_and_unload_reason_boundaries(
     impl ReactLLM for RefreshingLLM {
         async fn generate_reasoning(
             &self,
-            _messages: &[BaseMessage],
+            messages: &[BaseMessage],
             tools: &[&dyn BaseTool],
             _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
-            self.seen
-                .lock()
-                .unwrap()
-                .push(tools.iter().map(|tool| tool.name().to_string()).collect());
+            let names = discover_names(tools, messages).await;
+            self.seen.lock().unwrap().push(names);
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match call {
                 0 => {
@@ -276,8 +295,8 @@ async fn generation_n_dispatch_stays_pinned_after_n_plus_one_is_published() {
                     "use pinned tool",
                     vec![peri_agent::agent::react::ToolCall::new(
                         "call-1",
-                        "mcp__dynamic__lookup",
-                        serde_json::json!({}),
+                        "ExecuteExtraTool",
+                        serde_json::json!({"tool_name": "mcp__dynamic__lookup", "params": {}}),
                     )],
                 ));
             }

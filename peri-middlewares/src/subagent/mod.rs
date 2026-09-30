@@ -512,6 +512,46 @@ impl Middleware for SubAgentMiddleware {
         }
         Ok(())
     }
+
+    async fn before_reason_catalog(
+        &self,
+        state: &mut dyn hook_state::CatalogState,
+    ) -> AgentResult<()> {
+        let Some(local_tools) = state.local_tools() else {
+            return Ok(());
+        };
+        let Some(parent) = self.parent_session.read().clone() else {
+            return Ok(());
+        };
+        let mut tools = local_tools.write();
+        if !tools.get("Agent").is_some_and(|tool| {
+            tool.mcp_server_name().is_none() && tool.namespace() == Some("interaction")
+        }) {
+            return Ok(());
+        }
+        let mut agent = self.build_tool(&parent.store().cwd);
+        agent.parent_tools = Arc::new(
+            self.parent_tools
+                .iter()
+                .filter(|tool| tool.mcp_server_name().is_none())
+                .cloned()
+                .chain(
+                    tools
+                        .values()
+                        .filter(|tool| tool.mcp_server_name().is_some())
+                        .filter(|tool| {
+                            !matches!(
+                                state.tool_source(tool.name()),
+                                Some(peri_agent::session::tool_catalog::ToolSource::DynamicMcp(_))
+                            )
+                        })
+                        .cloned(),
+                )
+                .collect(),
+        );
+        tools.insert("Agent".to_string(), Arc::new(agent));
+        Ok(())
+    }
 }
 
 #[cfg(test)]

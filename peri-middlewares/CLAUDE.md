@@ -15,6 +15,7 @@
 - MCP 配置按全局 `~/.peri/settings.json`、插件、项目 `{cwd}/.mcp.json` 合并；工具与资源仅在 pool 可用时注册。
 - Skills 的**来源**（用户目录、配置的 `skillsDir`、项目目录、插件根、内置静态资产）由 builtin `workspace` 实例的资源面（`skills/list` + `resources/read`）提供；宿主零文件系统读取（J5），只做根解析适配器（`src/skills/loader.rs::resolve_skill_roots`：路径 + scope/标签）与配置读取（`src/settings.rs`）。扫描语义（叶子、深度/目录预算、symlink 口径、同名先到先得）在 provider（`mcp-packages/workspace/src/resources/skills.rs`）。
 - SubAgent 从父工具、冻结上下文、取消策略与事件处理器派生执行上下文；具体 agent 定义和内置 agent 请直接查 `src/subagent/` 与项目 `.claude/agents/`，如需举例只使用 `explorer`。
+- SubAgent 在父 Reason 目录发布时绑定当前 MCP 工具快照，避免装配早于 MCP 就绪而漏工具；子链收集自身工具并经 ToolSearch 发现、执行 deferred 工具。搜索与执行只消费子 Agent 过滤后的目录，`tools: []` 不得获得元工具。
 
 ## 任务路由
 

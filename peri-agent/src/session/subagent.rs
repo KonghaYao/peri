@@ -8,7 +8,7 @@
 //!
 //! 依赖方向：Agent 层不反向依赖 middlewares。子链装配经
 //! [`SubagentChainAssembler`] trait 依赖反转（中间件层提供实现，
-//! 链序 AgentsMd→Skills→[SkillPreload]→Todo 由实现方保持，ARC-MIDDLEWARE-001）；
+//! 链序 AgentsMd→Skills→[SkillPreload]→Todo→[ToolSearch] 由实现方保持，ARC-MIDDLEWARE-001）；
 //! 生命周期 hook 触发经 [`SubagentLifecycleStart`]/[`SubagentLifecycleStop`]
 //! 闭包注入（middlewares 构造闭包，内部触发其 RegisteredHook）。
 //!

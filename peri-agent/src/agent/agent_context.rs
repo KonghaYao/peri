@@ -148,6 +148,15 @@ impl MiddlewareState for AgentContext<'_> {
     fn local_tools(&self) -> Option<&crate::agent::stages::SharedToolMap> {
         Some(&self.ctx.runtime.tools)
     }
+    fn tool_source(&self, name: &str) -> Option<crate::session::tool_catalog::ToolSource> {
+        self.ctx
+            .runtime
+            .tool_catalog
+            .snapshot()
+            .tools
+            .get(name)
+            .map(|entry| entry.source.clone())
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

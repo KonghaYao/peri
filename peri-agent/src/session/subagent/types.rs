@@ -81,7 +81,7 @@ pub struct SubagentChainContext {
 
 /// 子 agent 中间件链装配器：由中间件层提供实现。
 ///
-/// 链序（AgentsMd→Skills→[SkillPreload]→Todo）是行为契约，实现方必须保持
+/// 链序（AgentsMd→Skills→[SkillPreload]→Todo→[ToolSearch]）是行为契约，实现方必须保持
 /// `peri-middlewares/src/subagent/tool/mod.rs` 的 `build_subagent_middlewares`
 /// 顺序（ARC-MIDDLEWARE-001）。
 pub trait SubagentChainAssembler: Send + Sync {

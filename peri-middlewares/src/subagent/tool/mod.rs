@@ -30,8 +30,8 @@ use crate::{
 ///
 /// `CronMiddleware` 不在此表：v4 起 cron 不再是链槽位，能力由 builtin `cron`
 /// 实例提供，`CronMiddleware` 只作为该实例的策略键（`BUILTIN_INSTANCE_POLICY_KEYS`）；
-/// SubAgent 链不含 MCP 提供面，cron 工具（注册表声明 deferred）也不会经
-/// `parent_tools` 继承——那是 direct-only 面。
+/// SubAgent 不创建 MCP 连接；工具继承父 Reason 的会话目录，deferred 工具
+/// 由子链 ToolSearch 提供发现和执行入口。
 ///
 /// 以下中间件通过**参数注入**方式支持 SubAgent：
 ///
@@ -78,6 +78,12 @@ pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<d
             let (tx, _rx) = mpsc::channel(8);
             tx
         })));
+    }
+    if !disabled.contains("ToolSearch") {
+        middlewares.push(Box::new(crate::tool_search::ToolSearchMiddleware::new(
+            Arc::new(crate::tool_search::ToolSearchIndex::new()),
+            Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new())),
+        )));
     }
     middlewares
 }
@@ -141,7 +147,7 @@ pub use define::SubAgentTool;
 /// 子 agent 链装配器实现（L3）：经 [`SubagentChainAssembler`] trait 依赖反转，
 /// 由 middlewares 提供实现——Agent 层 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent) 从父 session copy frozen
 /// 数据后调用本实现构建子链，链序保持 [`build_subagent_middlewares`] 不变
-/// （AgentsMd→Skills→[SkillPreload]→Todo，ARC-MIDDLEWARE-001）。
+/// （AgentsMd→Skills→[SkillPreload]→Todo→[ToolSearch]，ARC-MIDDLEWARE-001）。
 ///
 /// W4b（F5/J5）：装配器持有会话级 MCP skill registry（父链装配面注入），子链的
 /// 技能目录/正文因此只有 MCP 一个来源；未装配时子链无技能面，不回落磁盘。

@@ -149,7 +149,7 @@
 | 功能 | 入口/关键点 |
 | --- | --- |
 | 中间件 / 扫描 | mod.rs（SubAgentMiddleware :143 / scan_agents :326 / infer_agent_capability :395 / scan_agents_detailed :427） |
-| 工具 / 链装配 | tool/define.rs（唯一 SubAgentTool 与 BaseTool API）；configuration / invocation / definitions / mcp_activation / spawn_context 为私有职责实现；mod.rs 的 build_subagent_middlewares / SubagentChainAssemblerImpl 保留链序事实源 |
+| 工具 / 链装配 | tool/define.rs（唯一 SubAgentTool 与 BaseTool API）；configuration / invocation / definitions / mcp_activation / spawn_context 为私有职责实现；tool/mod.rs 的 build_subagent_middlewares / SubagentChainAssemblerImpl 保留链序事实源（含 ToolSearch）；subagent/mod.rs::before_reason_catalog 从父会话当前目录绑定 MCP 继承快照；Agent 的 subagent/v2_bridge.rs 收集子链工具后统一应用工具过滤 |
 | fork / 预加载 / 内置 | fork.rs（filter_tools :22）；skill_preload.rs（extract_skill_names_from_text :26）；built_in_agents.rs；agent_result.rs；descriptions/ |
 
 ### HITL 与审批（src/hitl/ + src/ask_user/ + src/permission/）

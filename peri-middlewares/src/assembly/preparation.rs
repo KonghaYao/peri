@@ -122,12 +122,6 @@ pub(super) fn build_parent_tools(
     // 分支构造——关闭的 middleware 连坐，其工具不进入 parent_tools
     // （设计 §2.5"关闭面 = 全部装配入口"）。
     //
-    // A6 面②/A7 面②：Web / Artifact 能力迁移后由 builtin 实例提供，且子 agent 链**没有**
-    // ToolSearch（唯一实例化点在主链），因此本面必须走类型化构造：注册表声明的
-    // direct（WebSearch / WebFetch）在 parent_tools 上仍为 direct，否则子 agent 会净失去
-    // Web 能力（IF-D13 / R3）。关闭实例由 `open_builtin_bridges` 按同一份 frozen
-    // policy 过滤（IF-D10 面②），裸名 Web 工具不再出现在任何装配面。
-    //
     // v4-part-4 W3-C1：7 个文件/终端裸名（`Read` / `Write` / `Edit` / `Glob` / `Grep` /
     // `folder_operations` / `Bash`）的**裸名来源已从本面摘除**（原 `FilesystemMiddleware`
     // / `TerminalMiddleware` 两段 `build_tools` 连坐块已删）。它们的唯一来源是下一段的
