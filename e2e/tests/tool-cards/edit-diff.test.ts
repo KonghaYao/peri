@@ -14,12 +14,27 @@
  *   120/80/48 列由 render_test 锁定）
  *
  * [Slice 5] 新增场景（§15 golden scene：diff 的 120 列）。
+ *
+ * 驱动方式（L0 确定性改造）：隔离 HOME + 本地假 model server 重放一步
+ * Write tool_use（file_path=TARGET、content 两行）——真实模型在 120s 等待窗内
+ * 的用时波动与 L0 `maxFirstAttemptFailures=0` 冲突，重放后确定性成立
+ * （`helpers/replay-model.ts`）。
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeAll } from "vitest";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import { rm } from "node:fs/promises";
+import { PROJECT_ROOT, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import {
+  launchReplayTui,
+  makeReplayHome,
+  replayDebug,
+  startReplayModelServer,
+  type ReplayServer,
+} from "../../helpers/replay-model.js";
 import type { TmuxTester } from "tui-tester";
 
 /** 每次运行独立目标文件（避免并行/重跑冲突）。 */
@@ -27,11 +42,24 @@ const TARGET = path.join(os.tmpdir(), `peri-e2e-edit-diff-${process.pid}.txt`);
 
 describe("tool-card: edit/write diff summary rendering (G-Diff)", () => {
   let tester: TmuxTester;
+  let replay: ReplayServer;
+  let home: string;
+
+  beforeAll(async () => {
+    // 控制面脚本不构建 binary；本用例必须跑当前源码。
+    await promisify(execFile)("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
+      cwd: PROJECT_ROOT,
+      timeout: 600_000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+  }, 610_000);
 
   afterEach(async () => {
     if (tester?.isRunning()) {
       await tester.stop().catch(() => {});
     }
+    if (replay) await replay.close();
+    if (home) await rm(home, { recursive: true, force: true });
     try {
       fs.unlinkSync(TARGET);
     } catch {
@@ -50,7 +78,18 @@ describe("tool-card: edit/write diff summary rendering (G-Diff)", () => {
         /* 不存在即预期 */
       }
 
-      tester = await launchPeri({ size: { cols: 120, rows: 60 } });
+      // 剧本：一步返回 Write tool_use（content 两行 → `+2`），再以文本步收尾。
+      replay = await startReplayModelServer([
+        {
+          prompt: "E2E 测试",
+          toolUses: [
+            { name: "Write", input: { file_path: TARGET, content: "hello\nworld" } },
+          ],
+        },
+        { text: "完成" },
+      ]);
+      home = await makeReplayHome(replay.port);
+      tester = await launchReplayTui({ home, size: { cols: 120, rows: 60 } });
 
       await sendPrompt(
         tester,
@@ -91,6 +130,9 @@ describe("tool-card: edit/write diff summary rendering (G-Diff)", () => {
       const expanded = await takePeriSnapshot(tester, "edit-diff-expanded");
       expect(expanded.text.length).toBeGreaterThan(50);
       expect(expanded.text).toMatch(/▾\s+Write .*e2e-edit-diff.*· \+2/);
+
+      // 重放契约：剧本必须全部命中（未命中会回固定文本，掩盖真实链路偏航）。
+      expect(replay.misses(), `剧本全部命中：${replayDebug(replay)}`).toBe(0);
     },
   );
 });

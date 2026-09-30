@@ -32,7 +32,7 @@ use render::{
     footer_separator, popup_height, prompt_and_border_width,
     render_multiline_with_cursor_for_themed,
 };
-use submit::{exit_history_mode_if_active, submit_text};
+use submit::exit_history_mode_if_active;
 
 #[cfg(test)]
 use popup::{apply_slash_selection, build_slash_items, detect_slash_token};
@@ -74,11 +74,13 @@ use peri_theme::atoms::THEME_ATOM;
 #[cfg(test)]
 use crate::kit::atoms::{ACP_STATE, FILE_LIST, VIEW_MODELS, ViewModelsSnapshot, WIZARD_ACTIVE};
 #[cfg(test)]
-use crate::kit::slash_completion::SlashActionKind;
+use crate::kit::slash_completion::{ConfirmOutcome, SlashActionKind, confirm_outcome};
 #[cfg(test)]
 use crate::kit::submit_request::{SubmitRequest, parse_submit_request};
 #[cfg(test)]
 use ratatui_kit::ratatui::widgets::Block;
+#[cfg(test)]
+use submit::submit_text;
 
 /// [S2 单一事实源] 输入内容变化 → 焦点回到输入态：同步清除消息区 entry
 /// 导航焦点（消息区仲裁与渲染同读 FOCUSED_ENTRY，无需 effect 收敛）。
@@ -197,29 +199,11 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 let slash_active = *SLASH_HINT_ACTIVE.state().read();
 
                 let result = match key.code {
-                    // ── 提交 ──（仅在不激活 popup 时按 Enter 提交）
+                    // ── 提交 ──（仅在不激活 popup 时按 Enter 提交；补全弹窗
+                    // 无候选时的 Enter 由 SlashCompletion 的 on_submit 回调走
+                    // 同一 commit_input 落点，不被静默吞掉）
                     KeyCode::Enter if !is_shift && !is_alt && !mention_active && !slash_active => {
-                        exit_entry_focus_on_edit();
-                        let mut s = state.write();
-                        if crate::kit::steer_state::is_enabled()
-                            && crate::kit::atoms::ACP_STATE.state().read().is_loading
-                            && is_remote_command(&s.text)
-                        {
-                            submit::show_submit_blocked_notification(
-                                &crate::kit::submit_request::SubmitRequest::AgentText {
-                                    text: s.text.clone(),
-                                    attachments: Vec::new(),
-                                },
-                            );
-                            return EventResult::Consumed;
-                        }
-                        let submitted = s.take_text();
-                        drop(s);
-
-                        submit_text(submitted);
-                        reset_mention_popup();
-                        reset_slash_popup();
-                        *PREDICTION.state().write() = PredictionState::default();
+                        submit::commit_input(state);
                         EventResult::Consumed
                     }
 
@@ -663,6 +647,8 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     };
     let mention_select_state = state;
     let slash_select_state = state;
+    // 无候选 Confirm（popup 吞 Enter 修复）的提交落点状态句柄
+    let slash_submit_state = state;
 
     let slash_popup_height = if slash_active {
         popup_height(slash_items.len())
@@ -861,6 +847,11 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     }))),
                     on_cancel: Arc::new(Mutex::new(Handler::from(|_: ()| {
                         reset_slash_popup();
+                    }))),
+                    on_submit: Arc::new(Mutex::new(Handler::from(move |_: ()| {
+                        // 无候选（列表空/无匹配）按 Enter：弹窗已关，输入按普通
+                        // 提交通道处理——`/plugin` 等由 submit 解析器本地开面板。
+                        submit::commit_input(slash_submit_state);
                     }))),
                 )).into_any()
             } else {

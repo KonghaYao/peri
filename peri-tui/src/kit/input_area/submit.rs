@@ -1,3 +1,6 @@
+use ratatui_kit::prelude::State;
+
+use crate::components::textarea::TextAreaState;
 use crate::i18n;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::{ACP_STATE, INPUT_BUFFER, LOCAL_EVENT_TX, SUBMIT_TX, WIZARD_ACTIVE};
@@ -107,6 +110,35 @@ pub(super) fn dispatch_submit_request<F>(
             }
         }
     }
+}
+
+/// Enter 提交落点（输入区 Enter 分支与 SlashCompletion「无候选 Confirm」
+/// 共用同一实现）：steer 阻断提示 → 取出文本 → [`submit_text`] 统一落点 →
+/// 清理弹窗与预测态。
+///
+/// [Why 单一实现] 空候选弹窗按 Enter 走提交分支后，必须与输入区 Enter 完全
+/// 同路，否则两条提交路径会各自漂移（附件消费、steer 阻断、历史记录任一处
+/// 不一致都会变成静默行为差异）。
+pub(super) fn commit_input(state: State<TextAreaState>) {
+    super::exit_entry_focus_on_edit();
+    let mut s = state.write();
+    if crate::kit::steer_state::is_enabled()
+        && crate::kit::atoms::ACP_STATE.state().read().is_loading
+        && is_remote_command(&s.text)
+    {
+        show_submit_blocked_notification(&crate::kit::submit_request::SubmitRequest::AgentText {
+            text: s.text.clone(),
+            attachments: Vec::new(),
+        });
+        return;
+    }
+    let submitted = s.take_text();
+    drop(s);
+
+    submit_text(submitted);
+    super::reset_mention_popup();
+    super::reset_slash_popup();
+    *crate::kit::atoms::PREDICTION.state().write() = crate::kit::atoms::PredictionState::default();
 }
 
 pub(super) fn show_submit_blocked_notification(request: &SubmitRequest) {

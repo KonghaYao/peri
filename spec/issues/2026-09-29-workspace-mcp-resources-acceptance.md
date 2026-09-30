@@ -1,6 +1,6 @@
 # Workspace MCP resources 验收记录（W1–W6）
 
-> 日期：2026-09-30（W6 收口）。仓库 `/Users/konghayao/code/ai/peri-v4p3`，分支 `feat/mcp-adaptation-v4-part-3`，基线 HEAD `0c5ecb40`（W6 提交）。
+> 日期：2026-09-30（W6 收口 + L0 门禁修复）。仓库 `/Users/konghayao/code/ai/peri-v4p3`，分支 `feat/mcp-adaptation-v4-part-3`，基线 HEAD `0c5ecb40`（W6 提交）；L0 门禁存量修复与确定性改造见 §2 与 §6.4 第 11 项（提交 hash 待回填）。
 > 口径：只记录**实际执行过**的命令与结果（命令 + EXIT + 关键计数）；静态证据给 `file:line`；没有运行证据的事项单列「未完成 / 未验证」，不写成已具备能力（遵循 `docs/standards/testing.md` TEST-EVIDENCE-001 与计划 §8.3）。
 > 计划与裁决：`2026-09-29-workspace-mcp-resources-plan.md`（下称 plan）、`2026-09-29-workspace-mcp-resources-decisions.md`（下称 decisions）；本记录不重复两者全文，只写验收事实。
 
@@ -39,7 +39,8 @@
 | `git diff --check` | 0 | 无输出（无空白错误） |
 | `cd e2e && npm run e2e -- --file tests/scenarios/workspace-mcp-resources.test.ts --serial --retry 0` | 0 | 1 文件 / 1 通过 / 0 失败（20s；print/stdio 场景） |
 | `cd e2e && npm run e2e -- --file tests/scenarios/workspace-mcp-resources-tui.test.ts --serial --retry 0` | 0 | 1 文件 / 1 通过 / 0 失败（17s；TUI 场景） |
-| `cd e2e && npm run e2e:l0` | 1 | 12 文件：✅ 6 通过 / ❌ 6 失败（10m26s，并发 1，重试 0；flake 门禁未过，含本波注册的 print/stdio 场景文件）。6 个首轮失败经 HEAD 基线对照（§6.4 第 11 项）判定 5 个为存量、1 个为真实模型用时波动，**非本波回归** |
+| `cd e2e && npm run e2e:l0` | 1 | （W6 收口时）12 文件：✅ 6 通过 / ❌ 6 失败（10m26s，并发 1，重试 0；flake 门禁未过，含本波注册的 print/stdio 场景文件）。6 个首轮失败经 HEAD 基线对照（§6.4 第 11 项）判定 5 个为存量、1 个为真实模型用时波动，**非本波回归** |
+| `cd e2e && npm run e2e:l0`（存量修复后，2026-09-30） | 0 | 11 文件：✅ 11 通过 / ❌ 0 失败（4m08s，并发 1，重试 0，首轮 11/11 全过）。`header-suffix-and-error` 移出 L0；`viewport-40x8` / `first-tool-stuck-running` / `edit-diff` 改由本地假 model server 重放（`helpers/replay-model.ts`），L0 不再依赖真实模型/凭据/网络（TEST-HERMETIC-001，见 §6.4 第 11 项） |
 
 上述命令由同一条证据链脚本顺序执行（每条命令单独落日志 + 逐条 EXIT），测试计数取自各命令日志的 `test result:` 汇总行；`check-file-size.sh` 的 EXIT=1 由存量超限产生，不等于本波回归（理由见 §6.4 第 1 项）。
 
@@ -187,13 +188,25 @@ cargo test -p peri-acp --lib -- host::requests::tests::meta_resources
     | `header-suffix-and-error` | ❌ `:57:5`（模型 turn 等待 120s 超时） | ❌ `:198:9`（错误卡点击展开 5s 超时） | ❌ `:198:9`（1m51s） | **存量**：确定性失败点为 `:198:9`（W6 单跑与 HEAD 基线一致）；L0 的 `:57:5` 为长跑期间真实模型用时波动 |
     | `edit-diff` | ❌ `:60:7`（Write 完成态 120s 超时） | ✅ 通过 | ✅ 通过（1m32s） | **非回归**：失败为真实模型用时波动（flake） |
 
-    两点交付侧事实：① L0 tier 的 12 个文件中有 **7 个经 `launchPeri`（`dev.sh` + `.env`）驱动真实模型**，与本 tier 自述「偏确定性用例」存在张力——模型端用时波动可越过用例的 120s 等待窗（`edit-diff`、`header-suffix` 在 L0 同批超时，单跑通过/推进到更后阶段）。② 6 个失败中 5 个在 W6 前 HEAD 上原样复现或推进到同一确定性失败点，全部与本波 4 个运行时文件无因果；L0 过门所需修复登记为存量任务（`schema` 正则失配、`system_reminder` 计数期望、错误卡点击展开、真实模型用例的确定性改造）。
+    两点交付侧事实：① L0 tier 的 12 个文件中有 **7 个经 `launchPeri`（`dev.sh` + `.env`）驱动真实模型**，与本 tier 自述「偏确定性用例」存在张力——模型端用时波动可越过用例的 120s 等待窗（`edit-diff`、`header-suffix` 在 L0 同批超时，单跑通过/推进到更后阶段）。② 6 个失败中 5 个在 W6 前 HEAD 上原样复现或推进到同一确定性失败点，全部与本波 4 个运行时文件无因果；L0 过门所需修复登记为存量任务（`schema` 正则失配、`system_reminder` 计数期望、错误卡点击展开、真实模型用例的确定性改造）。**该批存量修复已于 2026-09-30 完成并验证（下表）。**
+
+    **L0 存量修复与确定性改造（2026-09-30，W6 后续；全部修复均先单跑、后经全量 L0 复验）**：
+
+    | # | 修复 | 验证证据 |
+    | --- | --- | --- |
+    | 1 | `legacy-history-upgrade`：版本正则从 `PRAGMA user_version`（`schema.rs` 自 `ecaded2f` 起为格式串，永久失配）改瞄 `CURRENT_SCHEMA_VERSION` 常量 | 单跑 EXIT=0（1 文件 / 1 通过，48s） |
+    | 2 | `workspace-no-git` ×2 处 / `workspace-slow-git` ×1 处：role 计数期望补 `system_reminder`（首轮 MCP 能力概览按 canonical 契约持久化——原「未坐实」推测由失败 run 实测坐实） | 单跑均 EXIT=0（18s / 13s） |
+    | 3 | `plugin-uninstall-no-freeze`：产品修复 + 夹具修正。**产品**：空 slash 补全弹窗 Confirm 吞 Enter（`/plugin` 打不开面板）→ `SlashCompletion` 新增 `on_submit` 回调，无候选 Confirm 走 `submit::commit_input` 统一提交落点（同层单趟分发下「放行给输入区」不可行，见代码注释与 TRAP 说明）；**夹具**：补 `.claude-plugin/plugin.json`、`scope`/`origin` 改用 serde PascalCase 枚举名（原值使 `installed_plugins.json` 解析失败） | `cargo test -p peri-tui --lib` **1706 passed / 0 failed / 7 ignored**（EXIT=0，含新回归测试 `test_empty_slash_popup_enter_submits_and_opens_plugin_panel`）；L0 全量复验 |
+    | 4 | `header-suffix-and-error`：展开详情断言改用 MCP 桥接脱敏文本（单一常量 `EXPANDED_ERROR_RE`，waitFor 谓词与终态断言同源；旧期望 `Error: File not found at /nonexistent` 只存于私有 `ToolFailure.detail`、永不上屏） | 单跑 EXIT=0（1 通过，4m01s）；collapsed / expanded 快照离线核验正则非空洞（false / true） |
+    | 5 | L0 确定性改造（TEST-HERMETIC-001）：新增 `e2e/helpers/replay-model.ts`（本地假 model server，Anthropic SSE 剧本重放；`env -i` + 死端口代理护栏 + `misses()` 偏航契约）；`viewport-40x8` / `first-tool-stuck-running` / `edit-diff` 改隔离 HOME + 重放驱动（**既有断言零改动**，文件末新增 `misses()==0` 守卫）；`header-suffix-and-error` 移出 L0（留 L1/L2）；`tiers.mjs` L0 = 11 文件、描述更新；`e2e/CLAUDE.md` 增 TEST-HERMETIC-001 不变量与路由行 | 3 文件单跑均 EXIT=0（9.8s / 50.7s / 37.4s；基线分别 167.5s / 51.3s / 92–115s）；**L0 全量 11/11 全绿（4m08s，首轮全过，零 flake）**，见 §2 第 14 行 |
+
+    修复期间的过程观察（供参考）：viewport 首轮单跑由新增的 `misses()` 守卫暴露「peri 首请求末尾追加 user 角色 `<system-reminder>`（MCP connection_summary）」的匹配偏航，匹配逻辑由「最后一条 user 文本」改为**全部 user 消息文本拼接**（`replay-model.ts` `userText`，TRAP 注释）；`plugin-uninstall-no-freeze` 与 `legacy-history-upgrade` 不经假 model server（前者无模型请求、后者死端口配置），同样满足不依赖真实凭据/网络，tier 描述按此事实措辞。
 
 ### 6.5 平台限制
 
 - 全部运行证据取自 **macOS（本机）**；Linux/Windows 未运行。
 - TUI 场景依赖 tmux（本机 3.6a）与本机 Node；CI 环境需具备同等前置。
-- 本计划验收链的模型侧为本地假 model server（Anthropic SSE 形状）；未接真实 provider 做端到端（本计划不依赖）。仓库既有 L0 tier 中另有 7 个用例经 `launchPeri` 驱动真实模型（见 §6.4 第 11 项）。
+- 本计划验收链的模型侧为本地假 model server（Anthropic SSE 形状）；未接真实 provider 做端到端（本计划不依赖）。2026-09-30 起 L0 tier 不再依赖真实模型/凭据/网络（见 §6.4 第 11 项）；**L1/L2 仍有真实依赖**——如 `thread-switch.test.ts` 的 LLM judge 需 `OPENAI_API_KEY`（无 key 时 `helpers/judge.ts:37-39` 显式 throw），本轮回归抽查中其 UI 断言全过、失败点仅在 judge 初始化（运行环境未加载 `.env` 凭据，非回归）；L1/L2 全面 hermetic 化不在本轮范围。
 - Windows 路径穿越/保留名等平台语义未验证（provider 侧按 X5 受限 profile 拒绝 `..`、绝对路径、反斜杠、NUL）。
 
 ### 6.6 相邻未决（不在本计划范围，未处理）

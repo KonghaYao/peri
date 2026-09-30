@@ -328,8 +328,10 @@ describe("慢 Git 的工作区发现", () => {
     const counts = await query<{ role: string; n: number }>(
       "SELECT role, COUNT(*) AS n FROM messages GROUP BY role ORDER BY role",
     );
+    // 首轮注入的 MCP 能力概览 reminder（system_reminder）按 canonical 契约持久化，仅首轮一条
     expect(counts).toEqual([
       { role: "assistant", n: 1 },
+      { role: "system_reminder", n: 1 },
       { role: "user", n: 1 },
     ]);
   }, 180_000);

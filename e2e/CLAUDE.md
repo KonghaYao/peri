@@ -43,6 +43,7 @@ run-e2e.mjs → vitest worker → helpers/peri.ts → dev.sh → Peri TUI (tmux)
 | 控制面 / 分层门禁 | `scripts/run-e2e.mjs` + `config/tiers.mjs` |
 | 空 HOME 首次配置、保存失败重试、运行时重配置 | `tests/scenarios/fresh-setup.test.ts`（先构建当前 binary；空 HOME/cwd + 本地 SSE，不经预写配置的 launchPeri） |
 | workspace MCP resources 验收（print/stdio 真实二进制） | `tests/scenarios/workspace-mcp-resources*.test.ts`（夹具 `helpers/workspace-mcp-fixture.ts` + `fixtures/mcp-skill-fixture.mjs`） |
+| 本地假 model server 重放 | `helpers/replay-model.ts`（隔离 HOME + 真实二进制 + tmux + 剧本 SSE）；先例 `helpers/workspace-mcp-fixture.ts` + `tests/scenarios/workspace-mcp-resources-tui.test.ts` |
 | 场景用例 | `tests/**` |
 
 ## 稳定不变量
@@ -52,6 +53,7 @@ run-e2e.mjs → vitest worker → helpers/peri.ts → dev.sh → Peri TUI (tmux)
 - `waitForStableScreen(baseScreen)`：先变化再稳定（连续 3 次全文一致）。
 - Judge 仅在测试里 `expect(result.pass)` 时作阻断；criteria 写可观察正向结果。
 - 完成态优先 **磁盘因果**（如 workflow `state.json`），屏幕通知可能滚走。
+- **L0 tier 用例不得依赖真实模型/凭据/外部网络**（TEST-HERMETIC-001）：用隔离 HOME + 本地假 model server 驱动（`helpers/replay-model.ts`）；确需真实模型链路的用例放 L1 及以后。
 - 不得把 `OPENAI_API_KEY` 写入测试、录制或报告。
 
 ## tmux / launchPeri

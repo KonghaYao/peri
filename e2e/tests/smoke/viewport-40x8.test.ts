@@ -11,25 +11,54 @@
  * 等待策略（Slice 5 修复记录）：40×8 下 3 行视口只显示最新内容（footer
  * 处理耗时行），user bubble "hi" 与回答文本在视口上方（顶部 ▲ 指示）——
  * `waitForText("hi")` 必然超时。改为等待 turn 完成标志（footer 处理耗时）。
+ *
+ * 驱动方式（L0 确定性改造）：隔离 HOME + 本地假 model server 重放
+ * （`helpers/replay-model.ts`；先例 workspace-mcp-resources-tui），
+ * 不依赖真实模型/凭据/外部网络。
  */
-import { describe, it, expect, afterEach } from "vitest";
-import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import { describe, it, expect, afterEach, beforeAll } from "vitest";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { rm } from "node:fs/promises";
+import { PROJECT_ROOT, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import {
+  launchReplayTui,
+  makeReplayHome,
+  replayDebug,
+  startReplayModelServer,
+  type ReplayServer,
+} from "../../helpers/replay-model.js";
 import type { TmuxTester } from "tui-tester";
 
 describe("smoke: 40x8 minimal viewport", () => {
   let tester: TmuxTester;
+  let replay: ReplayServer;
+  let home: string;
+
+  beforeAll(async () => {
+    // 控制面脚本不构建 binary；本用例必须跑当前源码。
+    await promisify(execFile)("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
+      cwd: PROJECT_ROOT,
+      timeout: 600_000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+  }, 610_000);
 
   afterEach(async () => {
     if (tester?.isRunning()) {
       await tester.stop().catch(() => {});
     }
+    if (replay) await replay.close();
+    if (home) await rm(home, { recursive: true, force: true });
   });
 
   it(
     "40×8 下正常提问回答（transcript 保留、无 panic）",
     { timeout: 300_000 },
     async () => {
-      tester = await launchPeri({ size: { cols: 40, rows: 8 } });
+      replay = await startReplayModelServer([{ prompt: "hi", text: "REPLAY-40X8-REPLY" }]);
+      home = await makeReplayHome(replay.port);
+      tester = await launchReplayTui({ home, size: { cols: 40, rows: 8 } });
 
       await sendPrompt(tester, "hi");
 
@@ -53,6 +82,9 @@ describe("smoke: 40x8 minimal viewport", () => {
 
       // composer 的提示符必须仍可见，确认 turn 完成后输入区未被挤出视口。
       expect(capture.text).toContain("❯");
+
+      // 重放契约：剧本必须全部命中（未命中会回固定文本，掩盖真实链路偏航）。
+      expect(replay.misses(), `剧本全部命中：${replayDebug(replay)}`).toBe(0);
     },
   );
 });

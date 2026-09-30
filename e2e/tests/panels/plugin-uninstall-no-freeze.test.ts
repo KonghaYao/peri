@@ -48,6 +48,13 @@ describe("panels: plugin uninstall no-freeze", () => {
       const pluginsDir = path.join(testHome, ".claude", "plugins");
       const cacheDir = path.join(pluginsDir, "cache", "fixture-marketplace", "fixture-plugin", "1.0.0");
       fs.mkdirSync(cacheDir, { recursive: true });
+      // 插件清单：会话准备路径的插件发现是**严格只读**的（清单缺失/非法即
+      // 会话创建失败，不再生成合成清单），夹具必须给出真实安装形态。
+      fs.mkdirSync(path.join(cacheDir, ".claude-plugin"), { recursive: true });
+      fs.writeFileSync(
+        path.join(cacheDir, ".claude-plugin", "plugin.json"),
+        JSON.stringify({ name: "fixture-plugin", version: "1.0.0", description: "Fixture plugin" }),
+      );
       fs.writeFileSync(
         path.join(pluginsDir, "installed_plugins.json"),
         JSON.stringify({
@@ -57,9 +64,12 @@ describe("panels: plugin uninstall no-freeze", () => {
             name: "fixture-plugin",
             marketplace: "fixture-marketplace",
             version: "1.0.0",
-            scope: "user",
+            // scope / origin 取值必须是契约枚举的 serde 名（InstallScope /
+            // PluginOrigin，PascalCase）——写 `"user"` / `"peri"` 会让
+            // installed_plugins.json 解析失败。
+            scope: "User",
             install_path: cacheDir,
-            origin: "peri",
+            origin: "PeriInstalled",
           }],
         }),
       );

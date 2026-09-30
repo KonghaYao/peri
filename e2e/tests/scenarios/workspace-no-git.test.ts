@@ -219,15 +219,19 @@ describe("无 Git 环境的工作区", () => {
     await tester!.sendKey("enter");
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect(replies, "空回车不得产生第二次模型请求").toBe(1);
+    // 首轮注入的 MCP 能力概览 reminder（system_reminder）按 canonical 契约持久化，仅首轮一条
     expect(await messageCounts()).toEqual([
       { role: "assistant", n: 1 },
+      { role: "system_reminder", n: 1 },
       { role: "user", n: 1 },
     ]);
 
     // 同一会话继续可用：第二次输入正常送达，历史里仍只有各自一条。
     await prompt("NO_GIT_SECOND_INPUT", 2);
+    // 首轮注入的 MCP 能力概览 reminder（system_reminder）按 canonical 契约持久化，仅首轮一条
     expect(await messageCounts()).toEqual([
       { role: "assistant", n: 2 },
+      { role: "system_reminder", n: 1 },
       { role: "user", n: 2 },
     ]);
     expect(await query("SELECT thread_id FROM session_bindings")).toHaveLength(1);

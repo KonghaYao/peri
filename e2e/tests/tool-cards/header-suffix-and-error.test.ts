@@ -27,6 +27,24 @@ const STAGE = {
   error: "请使用 Read 工具读取文件 /nonexistent",
 } as const;
 
+/**
+ * 错误卡展开后可见的详情文本（§8.2 错误态展开）。
+ *
+ * 展开后上屏的是 MCP 桥接层的脱敏错误文本——`/nonexistent/...` 路径只出现在
+ * 卡片 header（input_summary），详情行只含桥接消息且被硬截断为单行（尾部 `…`）：
+ *   ×  Read /nonexistent/peri_e2e_test_file_12345.txt — Failed
+ *   │  MCP 服务器 "workspace" 工具 "Read" 调用失败: tool `Read` failed to execute; File not found. Verify f…
+ *
+ * 断言文本来源：`failed to execute`（mcp-packages/common/src/result_mapping.rs:25）
+ * 与 `File not found`（mcp-packages/workspace/src/filesystem/read.rs:218）。
+ * 原始 `Error: File not found at /nonexistent/...`（ToolFailure.detail，私有字段）
+ * 按脱敏策略不上屏，仅保留为旧形态备选分支。
+ *
+ * waitFor 谓词与最终断言必须共用此常量，否则展开/折叠判定会不同源而互相矛盾。
+ */
+const EXPANDED_ERROR_RE =
+  /×[^\n]*Read[^\n]*\/nonexistent[^\n]*\n[^\n]*(?:failed to execute[^\n]*File not found|Error: File not found at)/;
+
 interface Turn {
   section: string;
   completed: boolean;
@@ -185,7 +203,10 @@ describe("tool-card: header suffix + error display", () => {
       );
 
       // 点击工具卡首行切换折叠。
-      // 错误态 header 始终保持 `×`，通过详细错误输出判断展开状态。
+      // 错误态 header 始终保持 `×`（`× Read {path} — Failed`），无法靠符号判断展开状态，
+      // 只能通过详情行判断：展开后新增的是 MCP 桥接层的单行脱敏错误文本
+      // （`MCP 服务器 "workspace" 工具 "Read" 调用失败: tool \`Read\` failed to execute; File not found. Verify f…`）。
+      // 注意 `/nonexistent` 路径只出现在卡片 header（input_summary），详情行尾部被硬截断（`…`）。
       const collapsedScreen = await tester.getScreenText();
       const errorRow = collapsedScreen
         .split("\n")
@@ -193,10 +214,11 @@ describe("tool-card: header suffix + error display", () => {
       expect(errorRow, "错误工具卡应位于当前视口").toBeGreaterThanOrEqual(0);
       await tester.click(4, errorRow);
       // tui-tester.click 当前只发 SGR Down；Peri 在 Up 时提交单击动作。
+      // 展开判定谓词与下方终态断言共用 EXPANDED_ERROR_RE，保证两者同源不漂移。
       await tester.sendText(`\u001b[<0;5;${errorRow + 1}m`);
       try {
         await tester.waitFor(
-          (screen) => /×[^\n]*Read[^\n]*\/nonexistent[^\n]*\n[^\n]*Error: File not found at \/nonexistent/.test(screen),
+          (screen) => EXPANDED_ERROR_RE.test(screen),
           { timeout: 5_000, interval: 200, message: "点击错误工具卡后应显示详细错误" },
         );
       } catch (error) {
@@ -236,9 +258,9 @@ describe("tool-card: header suffix + error display", () => {
         errHeader!.includes("失败") || errHeader!.includes("Failed"),
         `错误态头行含错误词：${errHeader}`,
       ).toBe(true);
-      const expandedError = /×[^\n]*Read[^\n]*\/nonexistent[^\n]*\n[^\n]*Error: File not found at \/nonexistent/;
-      expect(errorCollapsedCapture.text).not.toMatch(expandedError);
-      expect(errorExpandedCapture.text).toMatch(expandedError);
+      // 折叠态必须不含详情行、展开态必须命中（与 waitFor 谓词同一正则）。
+      expect(errorCollapsedCapture.text).not.toMatch(EXPANDED_ERROR_RE);
+      expect(errorExpandedCapture.text).toMatch(EXPANDED_ERROR_RE);
 
     },
   );

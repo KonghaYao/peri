@@ -728,6 +728,26 @@ fn test_slash_on_select_setup_activates_wizard() {
     );
 }
 
+/// 回归（空补全弹窗吞 Enter）：弹窗激活但无候选时 Confirm 必须落到提交分支，
+/// 且该分支落点（`submit_text`）把 `/plugin` 解析成本地开面板——两端任一退化
+/// 都会复现「/plugin 打不开面板、输入被静默吞掉」。
+#[test]
+#[serial]
+fn test_empty_slash_popup_enter_submits_and_opens_plugin_panel() {
+    reset_submit_side_effect_state();
+    assert_eq!(
+        confirm_outcome(0, 0),
+        ConfirmOutcome::Submit,
+        "无候选（列表空/无匹配）时 Enter 必须走提交分支，不得只关弹窗"
+    );
+    submit_text("/plugin".to_string());
+    assert_eq!(
+        *ACTIVE_PANEL.state().read(),
+        Some(PanelKind::Plugin),
+        "提交路径须把 /plugin 落到 plugin 面板"
+    );
+}
+
 /// 未命中 ui 域（core:compact 全名形态，TUI 只拦截 ui 域）→
 /// apply_slash_selection 落输入框（display 即 lexical）。
 #[test]
