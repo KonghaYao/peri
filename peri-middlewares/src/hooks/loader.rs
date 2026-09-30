@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::path::Path;
 
 use crate::{
     hooks::types::{HookEvent, HookMatchRule, HooksConfig, RegisteredHook},
@@ -66,7 +66,7 @@ fn parse_hooks_value_tolerant(
 pub(crate) fn extract_hooks(manifest: &PluginManifest, install_path: &Path) -> Option<HooksConfig> {
     // Priority 1: hooks/hooks.json file
     let hooks_file = install_path.join("hooks").join("hooks.json");
-    let content = match fs::read_to_string(&hooks_file) {
+    let content = match peri_mcp_config::read_text(&hooks_file) {
         Ok(content) => content,
         Err(error) => {
             if error.kind() != std::io::ErrorKind::NotFound {
@@ -110,19 +110,19 @@ pub(crate) fn extract_hooks(manifest: &PluginManifest, install_path: &Path) -> O
 ///
 /// Returns a list of `RegisteredHook` with `plugin_name = "settings.json"`.
 ///
-/// 目录经 [`crate::plugin::claude_home`] 解析（HOME 优先的唯一权威），与
+/// 目录经配置数据面的 [`peri_mcp_config::home_dir`] 解析，与
 /// [`is_user_settings_path`] 的排除判定同源。
 pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
-    let claude_dir = crate::plugin::claude_home();
-    let settings_path = claude_dir.join("settings.json");
-    if !settings_path.exists() {
-        tracing::warn!("No settings.json at {}", settings_path.display());
+    let Some(home) = peri_mcp_config::home_dir() else {
+        tracing::warn!("Cannot resolve user home for global hooks");
         return Vec::new();
-    }
+    };
+    let claude_dir = home.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
 
     tracing::info!("Reading hooks from {}", settings_path.display());
 
-    let content = match fs::read_to_string(&settings_path) {
+    let content = match peri_mcp_config::read_text(&settings_path) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("Failed to read {}: {}", settings_path.display(), e);
@@ -200,13 +200,12 @@ pub fn load_global_settings_hooks() -> Vec<RegisteredHook> {
 /// Returns a list of `RegisteredHook` with `plugin_name = "settings.local.json"`.
 pub fn load_settings_local_hooks(cwd: &str) -> Vec<RegisteredHook> {
     let settings_path = Path::new(cwd).join(".claude").join("settings.local.json");
-    if !settings_path.exists() {
-        tracing::debug!("No settings.local.json at {}", settings_path.display());
-        return Vec::new();
-    }
-
-    let content = match fs::read_to_string(&settings_path) {
+    let content = match peri_mcp_config::read_text(&settings_path) {
         Ok(c) => c,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!("No settings.local.json at {}", settings_path.display());
+            return Vec::new();
+        }
         Err(e) => {
             tracing::warn!("Failed to read {}: {}", settings_path.display(), e);
             return Vec::new();
@@ -271,18 +270,17 @@ pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
     let settings_path = Path::new(cwd).join(".claude").join("settings.json");
     if is_user_settings_path(&settings_path) {
         tracing::debug!(
-            "Skipping project hooks: {} is the user-level settings file",
+            "Skipping project hooks: {} is not a confirmed distinct project settings file",
             settings_path.display()
         );
         return Vec::new();
     }
-    if !settings_path.exists() {
-        tracing::debug!("No settings.json at {}", settings_path.display());
-        return Vec::new();
-    }
-
-    let content = match fs::read_to_string(&settings_path) {
+    let content = match peri_mcp_config::read_text(&settings_path) {
         Ok(c) => c,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!("No settings.json at {}", settings_path.display());
+            return Vec::new();
+        }
         Err(e) => {
             tracing::warn!("Failed to read {}: {}", settings_path.display(), e);
             return Vec::new();
@@ -336,16 +334,17 @@ pub fn load_settings_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
     hooks
 }
 
-/// `path` 是否就是用户级 `~/.claude/settings.json`。无法确定主目录时视为不是。
+/// `path` 是否应按用户级 `~/.claude/settings.json` 排除。无法确定主目录时视为不是。
 ///
-/// 主目录解析须与 `load_global_settings_hooks` 同源（[`crate::plugin::user_home`]，
-/// HOME 优先），否则排除会认错文件。
+/// 主目录解析须与 `load_global_settings_hooks` 同源（配置数据面），
+/// 否则排除会认错文件。
 fn is_user_settings_path(path: &Path) -> bool {
-    is_user_settings_path_under(path, &crate::plugin::user_home())
+    peri_mcp_config::home_dir().is_some_and(|home| is_user_settings_path_under(path, &home))
 }
 
 /// P3 配置来源身份判定（不是工具执行环境文件读取）：字面相同，或经符号链接指向同一文件
 /// （macOS `$HOME` 为链接、`/var` → `/private/var` 等）。
+/// 身份探测失败时告警并保守排除，避免把用户级 hooks 重复注册成项目级。
 ///
 /// 拆出该入口让排除规则能直接以显式主目录验证，不必依赖进程环境。
 fn is_user_settings_path_under(path: &Path, home: &Path) -> bool {
@@ -353,10 +352,18 @@ fn is_user_settings_path_under(path: &Path, home: &Path) -> bool {
     if path == user_path {
         return true;
     }
-    matches!(
-        (std::fs::canonicalize(path), std::fs::canonicalize(&user_path)),
-        (Ok(path), Ok(user_path)) if path == user_path
-    )
+    match peri_mcp_config::same_file(path, &user_path) {
+        Ok(same_file) => same_file,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                user_path = %user_path.display(),
+                error_kind = ?error.kind(),
+                "Cannot establish distinct project hooks source, skipping project hooks"
+            );
+            true
+        }
+    }
 }
 
 #[cfg(test)]

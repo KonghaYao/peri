@@ -3905,6 +3905,7 @@ dependencies = [
  "peri-agent",
  "peri-controller",
  "peri-mcp-common",
+ "peri-mcp-config",
  "peri-mcp-cron",
  "peri-mcp-lsp",
  "peri-mcp-workspace",
@@ -4059,6 +4060,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "peri-mcp-config"
+version = "0.2.0"
+dependencies = [
+ "dirs-next",
+ "peri-acp-types",
+ "rmcp",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "peri-mcp-cron"
 version = "0.2.0"
 dependencies = [
@@ -4174,6 +4188,7 @@ dependencies = [
  "peri-js-runtime",
  "peri-mcp-artifact",
  "peri-mcp-common",
+ "peri-mcp-config",
  "peri-mcp-cron",
  "peri-mcp-lsp",
  "peri-mcp-web",

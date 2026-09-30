@@ -12,8 +12,8 @@
 `SessionContext/config → Agent session factory（唯一触发点与链序蓝本）→ assembly 槽位构造 → MiddlewareChain → prompt/tools → Agent stage`。
 
 - 插件提供 skill roots、agent dirs、hook groups 与 MCP 配置，由对应中间件消费。
-- MCP 配置按全局 `~/.peri/settings.json`、插件、项目 `{cwd}/.mcp.json` 合并；工具与资源仅在 pool 可用时注册。
-- 图片附件及归因/LSP 的文件正文经当前会话可见的 builtin workspace MCP 读取；能力关闭、断连或换代后不回落宿主文件系统。hook loader 的配置正文与 canonical 来源去重属于配置控制面，保留 symlink 同文件判定，不用字面比较代替。
+- MCP 配置按数据面全局路径（默认 `~/.peri/settings.json`，尊重 `--config-file`）、插件、项目 `{cwd}/.mcp.json` 合并；配置正文、保存与来源身份经独立 `peri-mcp-config` MCP 通道，不依赖尚未启动的工具池。工具与资源仅在 pool 可用时注册。
+- 图片附件及归因/LSP 的文件正文经当前会话可见的 builtin workspace MCP 读取；能力关闭、断连或换代后不回落宿主文件系统。hook loader 的正文与 canonical 来源去重经配置数据面，保留 symlink 同文件判定；身份不可得时跳过项目来源，不假定为独立来源。
 - Skills 的**来源**（用户目录、项目目录、插件根、内置静态资产）由 builtin `workspace` 实例的资源面（`skills/list` + `resources/read`）提供；宿主只做根解析适配器（`src/skills/loader.rs::resolve_skill_roots`：路径 + scope/标签，不检查目录存在性），`src/settings.rs` 只读取 `disableBundledSkills`；`skillsDir` 配置链路已删除。扫描语义（叶子、深度/目录预算、symlink 口径、同名先到先得）在 provider（`mcp-packages/workspace/src/resources/skills.rs`）。
 - SubAgent 从父工具、冻结上下文、取消策略与事件处理器派生执行上下文；具体 agent 定义和内置 agent 请直接查 `src/subagent/` 与项目 `.claude/agents/`，如需举例只使用 `explorer`。
 - SubAgent 在父 Reason 目录发布时绑定当前 MCP 工具快照，避免装配早于 MCP 就绪而漏工具；子链收集自身工具并经 ToolSearch 发现、执行 deferred 工具。搜索与执行只消费子 Agent 过滤后的目录，`tools: []` 不得获得元工具。

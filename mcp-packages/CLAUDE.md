@@ -2,13 +2,15 @@
 
 ## Scope
 
-`mcp-packages/` contains the builtin MCP server implementations split by capability: shared behavior, web, artifact, cron, LSP, and workspace. Each package owns its capability's tools and server handler. The LSP package also owns the LSP client and host-shared pool implementation; the host retains configuration injection, readiness admission, process supervision, and shutdown authority.
+`mcp-packages/` contains MCP capability implementations: shared behavior, configuration, web, artifact, cron, LSP, and workspace. Configuration is an independent bootstrap data plane, not a session builtin tool server; the other capability packages own their tools and handlers. The LSP package also owns the LSP client and host-shared pool implementation; the host retains configuration injection, readiness admission, process supervision, and shutdown authority.
 
 The dependency direction is inward: packages may use `peri-agent`, `peri-acp-types`, `peri-resources`, and `peri-mcp-common` as needed. They must not depend on `peri-middlewares` or ACP host implementation. `peri-middlewares` remains the composition and lifecycle host and depends on these packages.
 
 Before changing code, explicitly read the relevant standards. Peri does not inherit a parent `CLAUDE.md` when loading a package directory.
 
 ## Data flow and boundaries
+
+Configuration has a separate bootstrap channel owned by `peri-mcp-config`: synchronous host adapters exchange MCP requests on a dedicated runtime thread before the session tool pool exists. Only the provider performs configuration file I/O and path identity probes; consumers retain typed parsing and domain precedence. See `config/CLAUDE.md` for deployment injection and trust boundaries.
 
 The ACP host creates the builtin instance context, selects the handler, and owns MCP transport and client lifecycle. A capability package constructs its handler and tools; `peri-mcp-common` supplies shared tool-schema conversion, tool-call result mapping, numeric parameter parsing, and process-environment locking. For LSP, the package constructs the host-scoped pool and the handler owns the same injected `Arc`; the host still retains the shutdown handle and invokes bounded shutdown. The host connects the handler to the client and retains readiness, cancellation, bridge, and shutdown ownership.
 
@@ -20,6 +22,7 @@ Host wire, pool, bridge, readiness, and shutdown tests belong in `peri-middlewar
 
 | Task | Package entry points |
 | --- | --- |
+| Configuration bootstrap, file sources, atomic save and shared path authority | `config/CLAUDE.md`, `config/src/{lib,client,server}.rs`; DTOs `peri-acp-types/src/configuration.rs`; isolated MCP channel available before session tool-pool startup |
 | Shared MCP tool schema, server info, call mapping, failure projection, strict numeric parsing, process env lock | `common/src/{helpers,numeric,failure,result_mapping,process_env}.rs` |
 | Local shell execution, process-tree ownership, tee and persisted output | `common/src/{shell,shell_executor,shell_output}.rs`; `create_local_task_manager()` injects the concrete executor into Agent's lifecycle manager |
 | Shared Agent definition types and pure Markdown/YAML parsing | `common/src/agent_definition/`; local discovery stays in workspace resources, while source trust, approval and execution policy stay in the host |

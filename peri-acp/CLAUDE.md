@@ -22,6 +22,7 @@
 
 ## 稳定不变量
 
+- 配置 I/O 与全局路径权威在 `peri-mcp-config`，启动前使用独立 MCP 通道，不能依赖待配置的 session 工具池；`provider/store.rs::ConfigSource` 保留类型校验、分层合并与差异保存，布局探测失败不得误写全局层，详见 `../mcp-packages/config/CLAUDE.md`。
 - `SessionManager` 在每条 session/new、load、resume 或 fork 路径注册 session caps；发送扩展事件前按该 session 的 caps 门控。
 - 新增 `ExecutorEvent` 或 ACP 扩展事件时，覆盖发射、ACP mapper/forwarder、caps 门控（如适用）和客户端消费；不能只增加枚举或单一发送点。
 - 给 Hub/Web 的事件投影必须从 canonical event 映射为版本化 allowlist DTO；不得复用包含消息、路径、输出或错误正文的 TUI 私有 `event_json`。`peri.agentActivity` 是该安全摘要面，legacy `peri.agentEvent` wire 保持独立兼容。

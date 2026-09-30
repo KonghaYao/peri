@@ -1,34 +1,15 @@
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use anyhow::Result;
 
 use super::config::PeriConfig;
-
-/// 进程级全局配置路径重定向（None 表示未设置，使用默认路径）。
-///
-/// 仅由部署装配点（CLI 入口 `--config-file`）在启动早期调用一次，之后
-/// 全部读取经 [`config_path`] 跟随。相对路径按启动时 cwd 解析为绝对路径。
-static CONFIG_PATH_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// 全局配置文件路径。
 ///
 /// 已通过 [`set_global_config_path`] 设置重定向时返回重定向路径，否则返回默认
 /// `~/.peri/settings.json`。
 pub fn config_path() -> PathBuf {
-    CONFIG_PATH_OVERRIDE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .unwrap_or_else(default_config_path)
-}
-
-/// 默认配置文件路径：~/.peri/settings.json
-fn default_config_path() -> PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".peri")
-        .join("settings.json")
+    peri_mcp_config::global_config_path()
 }
 
 /// 进程级重定向全局配置文件路径；`None` 复位为默认路径。
@@ -36,19 +17,7 @@ fn default_config_path() -> PathBuf {
 /// 由部署装配点（CLI 入口）在启动早期调用一次，之后 [`config_path()`] 跟随
 /// 该路径。相对路径按启动时 cwd 解析为绝对路径。
 pub fn set_global_config_path(path: Option<PathBuf>) {
-    let resolved = path.map(|p| {
-        if p.is_relative() {
-            std::env::current_dir()
-                .ok()
-                .map(|c| c.join(&p))
-                .unwrap_or(p)
-        } else {
-            p
-        }
-    });
-    *CONFIG_PATH_OVERRIDE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = resolved;
+    peri_mcp_config::set_global_config_path(path);
 }
 
 /// 工作区配置路径探测：`{cwd}/.peri/settings.json` 存在、且不是全局配置文件
@@ -58,24 +27,12 @@ pub fn set_global_config_path(path: Option<PathBuf>) {
 /// 就是 `~/.peri/settings.json`，`--config-file` 指向 cwd 内文件时同理。该场景不
 /// 存在全局 + 工作区两层；若判为工作区模式，保存会按「只写相对全局基准的差异
 /// 字段」回写同一文件，把未改动字段（providers 凭据等）整份丢弃。
-fn workspace_config_path_at(cwd: &Path, global_path: &Path) -> Option<PathBuf> {
+fn workspace_config_path_at(cwd: &Path, global_path: &Path) -> Result<Option<PathBuf>> {
     let path = cwd.join(".peri").join("settings.json");
-    if !path.exists() || is_same_file(&path, global_path) {
-        return None;
+    if !peri_mcp_config::exists(&path)? || peri_mcp_config::same_file(&path, global_path)? {
+        return Ok(None);
     }
-    Some(path)
-}
-
-/// 同一文件判定：先字面比较，再按规范化真实路径比较（覆盖符号链接与相对路径
-/// 差异）。任一侧无法规范化（通常是不存在）时视为不同文件。
-fn is_same_file(a: &Path, b: &Path) -> bool {
-    if a == b {
-        return true;
-    }
-    matches!(
-        (std::fs::canonicalize(a), std::fs::canonicalize(b)),
-        (Ok(a), Ok(b)) if a == b
-    )
+    Ok(Some(path))
 }
 
 /// 基于进程当前目录的工作区配置路径探测（只读场景：main.rs 启动期 env 注入）。
@@ -83,8 +40,11 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
 /// 保存场景请勿调用本函数——保存必须经 [`ConfigSource`]（加载时已确定布局，
 /// 保证读写路径决策一致，不会漂移）。
 pub fn workspace_config_path() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    workspace_config_path_at(&cwd, &config_path())
+    let cwd = peri_mcp_config::current_dir().ok()?;
+    workspace_config_path_at(&cwd, &config_path()).unwrap_or_else(|error| {
+        tracing::warn!(error = %error, "工作区配置路径探测失败");
+        None
+    })
 }
 
 /// 配置源——加载时一次性确定的「全局 + 工作区」布局与分层基准。
@@ -99,13 +59,14 @@ pub struct ConfigSource {
     global: PeriConfig,
     /// 加载时刻的合并配置（全局 + 工作区覆盖）
     merged: PeriConfig,
+    layout_error: Option<anyhow::Error>,
 }
 
 impl ConfigSource {
     /// 确定性构造：显式 cwd + 全局路径。测试直接调用，无需切换进程 cwd
     /// 或依赖进程级重定向。
     pub fn load_at(cwd: &Path, global_path: PathBuf) -> Result<Self> {
-        let workspace_path = workspace_config_path_at(cwd, &global_path);
+        let workspace_path = workspace_config_path_at(cwd, &global_path)?;
         let global = load_from(&global_path)?;
         let workspace = workspace_path.as_deref().map(load_from).transpose()?;
         let mut merged = global.clone();
@@ -117,14 +78,15 @@ impl ConfigSource {
             workspace_path,
             global,
             merged,
+            layout_error: None,
         })
     }
 
     /// 生产入口：cwd = 进程当前目录；全局路径跟随 [`config_path`]
     /// （含 `--config-file` 重定向）。
     pub fn load() -> Result<Self> {
-        let cwd =
-            std::env::current_dir().map_err(|e| anyhow::anyhow!("无法获取当前工作目录: {e}"))?;
+        let cwd = peri_mcp_config::current_dir()
+            .map_err(|e| anyhow::anyhow!("无法获取当前工作目录: {e}"))?;
         Self::load_at(&cwd, config_path())
     }
 
@@ -133,8 +95,24 @@ impl ConfigSource {
     /// 生产启动路径使用——配置文件损坏时保持与迁移前 `load().ok()` 一致的
     /// fallback 行为（回退环境变量），同时保留路径决策供保存使用。
     pub fn load_lenient() -> Self {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        Self::load_at_lenient(&cwd, config_path())
+        match peri_mcp_config::current_dir() {
+            Ok(cwd) => Self::load_at_lenient(&cwd, config_path()),
+            Err(error) => {
+                tracing::warn!(error = %error, "无法获取当前工作目录，配置不可写");
+                let global_path = config_path();
+                let global = load_from(&global_path).unwrap_or_else(|error| {
+                    tracing::warn!(path = %global_path.display(), error = %error, "全局配置解析失败，按空配置继续");
+                    PeriConfig::default()
+                });
+                Self {
+                    global_path,
+                    workspace_path: None,
+                    merged: global.clone(),
+                    global,
+                    layout_error: Some(error.into()),
+                }
+            }
+        }
     }
 
     /// 单文件来源构造：指定文件整体生效（`--settings` 语义——不探测工作区、
@@ -146,12 +124,19 @@ impl ConfigSource {
             workspace_path: None,
             global: cfg.clone(),
             merged: cfg,
+            layout_error: None,
         })
     }
 
     /// 容错构造的确定性版本（显式 cwd + 全局路径），测试友好。
     pub fn load_at_lenient(cwd: &Path, global_path: PathBuf) -> Self {
-        let workspace_path = workspace_config_path_at(cwd, &global_path);
+        let (workspace_path, layout_error) = match workspace_config_path_at(cwd, &global_path) {
+            Ok(path) => (path, None),
+            Err(error) => {
+                tracing::warn!(error = %error, "工作区配置路径探测失败，配置不可写");
+                (None, Some(error))
+            }
+        };
         let global = load_from(&global_path).unwrap_or_else(|e| {
             tracing::warn!(path = %global_path.display(), error = %e, "全局配置解析失败，按空配置继续");
             PeriConfig::default()
@@ -171,6 +156,7 @@ impl ConfigSource {
             workspace_path,
             global,
             merged,
+            layout_error,
         }
     }
 
@@ -212,6 +198,9 @@ impl ConfigSource {
     }
 
     fn reload_layers(&self) -> Result<(PeriConfig, Option<PeriConfig>)> {
+        if let Some(error) = &self.layout_error {
+            anyhow::bail!("Configuration layout unavailable: {error}");
+        }
         Ok((
             load_from(&self.global_path)?,
             self.workspace_path.as_deref().map(load_from).transpose()?,
@@ -268,10 +257,10 @@ pub fn load() -> Result<PeriConfig> {
 /// 见 [`super::config::AppConfig::validate_meta_harness`]）——warn 不 fail，
 /// 不改变既有 `Result` 语义。
 pub fn load_from(path: &Path) -> Result<PeriConfig> {
-    if !path.exists() {
+    if !peri_mcp_config::exists(path)? {
         return Ok(PeriConfig::default());
     }
-    let content = std::fs::read_to_string(path)?;
+    let content = peri_mcp_config::read_text(path)?;
     let mut cfg: PeriConfig = serde_json::from_str(&content)?;
     cfg.config.validate_meta_harness();
     Ok(cfg)
@@ -283,18 +272,8 @@ pub fn load_from(path: &Path) -> Result<PeriConfig> {
 /// 仅限显式路径场景（测试注入 / ACP 装配快照）；业务保存请经
 /// [`ConfigSource::save`]。
 pub fn save_to(cfg: &PeriConfig, path: &Path) -> Result<()> {
-    // 确保目录存在
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let content = serde_json::to_string_pretty(cfg)?;
-
-    // atomic write
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, content)?;
-    std::fs::rename(&tmp_path, path)?;
-
+    peri_mcp_config::write_text_atomic(path, &content)?;
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 # MCP package 代码索引
 
-Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate 持有；MCP 实例注册、配置、transport、宿主 context、policy 与生命周期仍由 `peri-middlewares` 装配。每个 crate 的依赖方向面向 `peri-mcp-common`、`peri-agent` / `peri-acp-types` / `peri-resources` 等稳定能力接口，不依赖 `peri-middlewares`。
+Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate 持有；配置来源 I/O 由独立 `peri-mcp-config` 数据面持有，session MCP 实例注册、配置投影、transport、宿主 context、policy 与生命周期仍由 `peri-middlewares` 装配。每个 crate 的依赖方向面向 `peri-mcp-common`、`peri-agent` / `peri-acp-types` / `peri-resources` 等稳定能力接口，不依赖 `peri-middlewares`。
 
 宿主侧入口见 [`peri-middlewares` 代码索引](peri-middlewares.md)。本文是插件包的当前路径索引；设计契约见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 与 [`MCP 适配设计`](../design/mcp-adaptation-v4-part-1.md)。
 
@@ -8,6 +8,7 @@ Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate �
 
 | 能力 | crate 与入口 | 主要实现 | 说明 |
 | --- | --- | --- | --- |
+| 配置数据面 | `peri-mcp-config`：`mcp-packages/config/src/{lib,client,server}.rs`；契约 `peri-acp-types/src/configuration.rs` | `ConfigurationClient`、`ConfigurationMcpServer`、`config/execute` | 独立于 session 工具池的启动控制能力；同步消费通过专用 runtime 线程走真实 MCP，读写/atomic 保存/路径权威/来源身份探测由 provider 单一维护。默认 duplex，部署可在首次访问前 `install_client` 注入 TCP 客户端；仅供受信部署通道，不暴露模型工具，不提供本机 fallback。 |
 | MCP 通用映射 | `peri-mcp-common`：`mcp-packages/common/src/lib.rs` | `server_info`、`rmcp_tool_from_base`、`list_tools_of`、`invoke_tool_call`、`parse_optional_u64`；`failure.rs`、`result_mapping.rs`、`process_env.rs` | 多个实例共用的 server metadata、schema 映射、IF-D14 结果映射、安全失败类型和 process environment lock；不依赖宿主 middleware。 |
 | Agent 定义格式 | `peri-mcp-common`：`mcp-packages/common/src/agent_definition/` | `ClaudeAgent`、`ClaudeAgentFrontmatter`、`ToolsValue`、`parse_agent_file` | 本地与远端 MCP Agent 共用的纯数据与 Markdown/YAML 解析，不扫描目录、不读取文件、不签发授权；保留 omitted / explicit zero / allowlist 三态。workspace 提供扫描与原始资源，宿主 registry 消费定义并按来源实施信任、批准和执行策略；不向计算核心添加 YAML 依赖。 |
 | Workspace 宿主读取 | `peri-mcp-workspace`：`mcp-packages/workspace/src/{image,file_observation}.rs` | custom request `image/read` / `workspace/readText`，由 `workspace.rs::on_custom_request` 分派 | 图片附件读取、格式与大小校验及归因/LSP 的完整正文读取归工具环境；不增加模型工具。宿主 image reader 与 `peri-middlewares/src/workspace_io.rs` 只经当前会话可见的 builtin workspace 句柄读取，关闭/不可得不回落宿主磁盘。 |
@@ -31,6 +32,7 @@ Builtin MCP 的工具、server handler 与 LSP 客户端/pool 由独立 crate �
 ## 验证
 
 ```bash
+cargo test -p peri-mcp-config --lib
 cargo test -p peri-mcp-web --lib
 cargo test -p peri-mcp-artifact --lib
 cargo test -p peri-mcp-cron --lib

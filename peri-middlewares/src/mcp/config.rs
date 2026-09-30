@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, path::Path};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -82,16 +79,23 @@ fn builtin_overlay_error(error: super::builtin::BuiltinOverlayError) -> McpConfi
 
 /// 从指定 JSON 文件加载 MCP 配置，文件不存在时返回空配置
 pub(crate) fn load_from_path(path: &Path) -> Result<McpConfigFile, McpConfigError> {
-    if !path.exists() {
+    if !config_exists(path)? {
         return Ok(McpConfigFile::default());
     }
-    let content = std::fs::read_to_string(path).map_err(|e| McpConfigError::ReadError {
+    let content = peri_mcp_config::read_text(path).map_err(|e| McpConfigError::ReadError {
         path: path.display().to_string(),
         source: e,
     })?;
     serde_json::from_str::<McpConfigFile>(&content).map_err(|e| McpConfigError::ParseError {
         path: path.display().to_string(),
         source: e,
+    })
+}
+
+fn config_exists(path: &Path) -> Result<bool, McpConfigError> {
+    peri_mcp_config::exists(path).map_err(|source| McpConfigError::ReadError {
+        path: path.display().to_string(),
+        source,
     })
 }
 
@@ -145,11 +149,11 @@ pub(crate) fn validate_config(config: &McpConfigFile) -> Result<(), McpConfigErr
 pub(crate) fn load_global_config(
     settings_json_path: &Path,
 ) -> Result<McpConfigFile, McpConfigError> {
-    if !settings_json_path.exists() {
+    if !config_exists(settings_json_path)? {
         return Ok(McpConfigFile::default());
     }
     let content =
-        std::fs::read_to_string(settings_json_path).map_err(|e| McpConfigError::ReadError {
+        peri_mcp_config::read_text(settings_json_path).map_err(|e| McpConfigError::ReadError {
             path: settings_json_path.display().to_string(),
             source: e,
         })?;
@@ -332,10 +336,7 @@ pub(crate) fn load_merged_config_full(
     cwd: &Path,
     claude_home: &Path,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
-    let global_path = dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".peri")
-        .join("settings.json");
+    let global_path = peri_mcp_config::global_config_path();
     let policy = super::builtin::builtin_injection_policy_from_env();
     load_merged_config_full_with_paths(cwd, claude_home, &global_path, &policy)
 }
@@ -502,41 +503,21 @@ pub fn load_merged_config(cwd: &Path, claude_home: &Path) -> Result<McpConfigFil
 
 /// 原子写入 JSON 文件（先写临时文件，再 rename 替换）
 fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), McpConfigError> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let tmp_path = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
-
     let content = serde_json::to_string_pretty(value).map_err(|e| McpConfigError::WriteError {
         path: path.display().to_string(),
         source: e.into(),
     })?;
 
-    use std::io::Write;
-    let mut file = std::fs::File::create(&tmp_path).map_err(|e| McpConfigError::WriteError {
+    peri_mcp_config::write_text_atomic(path, &content).map_err(|e| McpConfigError::WriteError {
         path: path.display().to_string(),
         source: e,
-    })?;
-    file.write_all(content.as_bytes())
-        .map_err(|e| McpConfigError::WriteError {
-            path: path.display().to_string(),
-            source: e,
-        })?;
-    drop(file);
-
-    std::fs::rename(&tmp_path, path).map_err(|e| McpConfigError::WriteError {
-        path: path.display().to_string(),
-        source: e,
-    })?;
-
-    Ok(())
+    })
 }
 
 /// 从配置文件中删除指定的 MCP 服务器
 /// 优先尝试项目级 .mcp.json，未找到则尝试全局 settings.json
 pub fn remove_server_from_config(cwd: &Path, server_name: &str) -> Result<(), McpConfigError> {
-    let global_path = dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".peri")
-        .join("settings.json");
+    let global_path = peri_mcp_config::global_config_path();
     remove_server_from_config_with_paths(cwd, &global_path, server_name)
 }
 
@@ -552,9 +533,9 @@ pub(crate) fn remove_server_from_config_with_paths(
 ) -> Result<(), McpConfigError> {
     // 1. 尝试项目级删除
     let project_path = cwd.join(".mcp.json");
-    if project_path.exists() {
+    if config_exists(&project_path)? {
         let content =
-            std::fs::read_to_string(&project_path).map_err(|e| McpConfigError::ReadError {
+            peri_mcp_config::read_text(&project_path).map_err(|e| McpConfigError::ReadError {
                 path: project_path.display().to_string(),
                 source: e,
             })?;
@@ -578,9 +559,9 @@ pub(crate) fn remove_server_from_config_with_paths(
     }
 
     // 2. 尝试全局删除
-    if global_path.exists() {
+    if config_exists(global_path)? {
         let content =
-            std::fs::read_to_string(global_path).map_err(|e| McpConfigError::ReadError {
+            peri_mcp_config::read_text(global_path).map_err(|e| McpConfigError::ReadError {
                 path: global_path.display().to_string(),
                 source: e,
             })?;
@@ -645,10 +626,7 @@ pub fn set_server_disabled(
     server_name: &str,
     disabled: bool,
 ) -> Result<(), McpConfigError> {
-    let global_path = dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".peri")
-        .join("settings.json");
+    let global_path = peri_mcp_config::global_config_path();
     set_server_disabled_with_paths(cwd, &global_path, server_name, disabled)
 }
 
@@ -661,9 +639,9 @@ pub(crate) fn set_server_disabled_with_paths(
 ) -> Result<(), McpConfigError> {
     // 1. 尝试项目级
     let project_path = cwd.join(".mcp.json");
-    if project_path.exists() {
+    if config_exists(&project_path)? {
         let content =
-            std::fs::read_to_string(&project_path).map_err(|e| McpConfigError::ReadError {
+            peri_mcp_config::read_text(&project_path).map_err(|e| McpConfigError::ReadError {
                 path: project_path.display().to_string(),
                 source: e,
             })?;
@@ -697,9 +675,9 @@ pub(crate) fn set_server_disabled_with_paths(
     }
 
     // 2. 尝试全局
-    if global_path.exists() {
+    if config_exists(global_path)? {
         let content =
-            std::fs::read_to_string(global_path).map_err(|e| McpConfigError::ReadError {
+            peri_mcp_config::read_text(global_path).map_err(|e| McpConfigError::ReadError {
                 path: global_path.display().to_string(),
                 source: e,
             })?;
@@ -779,3 +757,11 @@ fn test_config() -> McpServerConfig {
 #[cfg(test)]
 #[path = "config_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config/io_test.rs"]
+mod io_tests;
+
+#[cfg(test)]
+#[path = "config/policy_test.rs"]
+mod policy_tests;

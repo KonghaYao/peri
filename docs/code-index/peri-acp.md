@@ -84,7 +84,7 @@
 | --- | --- | --- |
 | Provider 构建 | provider/mod.rs | `LlmProvider`（:23）；`from_config_for_alias`（:125）；`into_model`（:246） |
 | 配置结构 | provider/config.rs | `PeriConfig`（:13）/`AppConfig`（:177，`merge_overrides` :232）/`ProviderConfig`（:456） |
-| 配置加载/保存 | provider/store.rs | `ConfigSource::{load_at,load_lenient,reload_merged,save}`；重读复用固定路径，保存拒绝损坏配置；工作区探测 `workspace_config_path_at`（:61，经 `is_same_file` :71 排除符号链接）剔除与全局配置文件同一文件的路径——cwd 为 home 时只有全局一层，保存不按差异回写同一文件丢字段；workspace 的全局分层基准被外部修改时要求重启，避免旧内存凭据落入项目文件 |
+| 配置加载/保存 | provider/store.rs；数据面 `mcp-packages/config/` | `ConfigSource::{load_at,load_lenient,reload_merged,save}`；读写/存在性/canonical 身份与共享路径权威统一经独立 `peri-mcp-config` MCP 通道。保留 typed 校验、固定分层路径及差异保存；同文件不拆层，布局不可得时 lenient 来源也拒绝保存，避免覆盖全局凭据；分层基准变化仍要求重启 |
 
 ### src/transport/（传输抽象）
 

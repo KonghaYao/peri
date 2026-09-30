@@ -1,9 +1,31 @@
-//! F12 配置位读取测试（迁移自 `skills/mod_test.rs`：W4b 后本模块是宿主唯一的
-//! 配置读取点，`peri-middlewares/src/skills/` 不再含任何 `std::fs` 调用）。
+//! F12 配置位读取测试，配置正文与全局路径由配置数据面提供。
 
 use tempfile::tempdir;
 
 use super::load_disable_bundled_skills_from_path;
+
+struct GlobalConfigGuard(std::path::PathBuf);
+
+impl Drop for GlobalConfigGuard {
+    fn drop(&mut self) {
+        peri_mcp_config::set_global_config_path(Some(self.0.clone()));
+    }
+}
+
+/// [回归测试] ACP 指定的配置路径必须同时控制内置技能关闭位。
+#[test]
+#[serial_test::serial]
+fn test_disable_bundled_skills_uses_shared_global_config_path() {
+    let _lock = peri_mcp_common::process_env::lock().expect("process env lock");
+    let dir = tempdir().unwrap();
+    let settings_path = dir.path().join("custom-config.json");
+    std::fs::write(&settings_path, r#"{"disableBundledSkills":true}"#).unwrap();
+    let _guard = GlobalConfigGuard(peri_mcp_config::global_config_path());
+    peri_mcp_config::set_global_config_path(Some(settings_path.clone()));
+
+    assert_eq!(super::global_config_path(), settings_path);
+    assert!(super::load_disable_bundled_skills());
+}
 
 // ─── 配置位读取（F12 宿主适配器）───────────────────────────────────────────
 
@@ -45,9 +67,28 @@ fn test_load_disable_bundled_skills_reads_false_explicit() {
 
 #[test]
 fn test_load_disable_bundled_skills_handles_missing_file() {
+    let dir = tempdir().unwrap();
     assert!(!load_disable_bundled_skills_from_path(
-        std::path::Path::new("/nonexistent.json")
+        &dir.path().join("missing.json")
     ));
+}
+
+#[test]
+fn test_load_disable_bundled_skills_handles_read_failure() {
+    let dir = tempdir().unwrap();
+    assert!(!load_disable_bundled_skills_from_path(dir.path()));
+}
+
+#[test]
+fn test_nested_disable_bundled_skills_takes_precedence() {
+    let dir = tempdir().unwrap();
+    let settings_path = dir.path().join("settings.json");
+    std::fs::write(
+        &settings_path,
+        r#"{"config":{"disableBundledSkills":false},"disableBundledSkills":true}"#,
+    )
+    .unwrap();
+    assert!(!load_disable_bundled_skills_from_path(&settings_path));
 }
 
 #[test]

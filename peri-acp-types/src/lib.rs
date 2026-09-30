@@ -43,6 +43,7 @@ pub mod command;
 pub use command::command_registry;
 pub mod compact;
 pub mod compact_reminder;
+pub mod configuration;
 pub mod cron;
 pub mod dynamic_mcp;
 pub mod error;

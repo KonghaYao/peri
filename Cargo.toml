@@ -6,6 +6,7 @@ members = [
     "peri-controller",
     "peri-middlewares",
     "mcp-packages/common",
+    "mcp-packages/config",
     "mcp-packages/web",
     "mcp-packages/artifact",
     "mcp-packages/cron",
@@ -90,6 +91,7 @@ lru = "0.18"
 
 # --- MCP capability packages ---
 peri-mcp-common = { path = "mcp-packages/common" }
+peri-mcp-config = { path = "mcp-packages/config" }
 peri-mcp-web = { path = "mcp-packages/web" }
 peri-mcp-artifact = { path = "mcp-packages/artifact" }
 peri-mcp-cron = { path = "mcp-packages/cron" }

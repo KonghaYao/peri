@@ -371,11 +371,10 @@ fn test_config_source_load_merges_meta_harness_per_key() {
 #[test]
 fn test_config_source_save_unwritable_errors() {
     let tmp = tempfile::tempdir().unwrap();
-    // 以普通文件为全局路径父目录，create_dir_all 必然失败
     let f = tmp.path().join("f");
-    std::fs::write(&f, "not a dir").unwrap();
     let target = f.join("settings.json");
     let source = ConfigSource::load_at(&tmp.path().join("empty-cwd"), target.clone()).unwrap();
+    std::fs::write(&f, "not a dir").unwrap();
 
     let result = source.save(&PeriConfig::default());
     assert!(result.is_err());
@@ -527,5 +526,84 @@ fn config_source_refuses_stale_global_baseline_without_copying_credentials() {
     assert_eq!(
         std::fs::read(source.workspace_path().unwrap()).unwrap(),
         old_workspace
+    );
+}
+
+#[test]
+#[serial]
+fn config_path_uses_shared_data_plane_authority() {
+    let _guard = ConfigPathGuard;
+    let tmp = tempfile::tempdir().unwrap();
+    let shared_path = tmp.path().join("shared.json");
+    peri_mcp_config::set_global_config_path(Some(shared_path.clone()));
+    assert_eq!(super::config_path(), shared_path);
+
+    let acp_path = tmp.path().join("acp.json");
+    super::set_global_config_path(Some(acp_path.clone()));
+    assert_eq!(peri_mcp_config::global_config_path(), acp_path);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn config_io_works_without_workspace_pool_on_current_thread_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("nested/settings.json");
+    let mut config = PeriConfig::default();
+    config.config.active_alias = "sonnet".into();
+    save_to(&config, &path).unwrap();
+    assert_eq!(load_from(&path).unwrap(), config);
+}
+
+#[test]
+fn load_from_directory_propagates_read_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    assert!(load_from(tmp.path()).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn load_from_symlink_loop_propagates_probe_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("settings.json");
+    std::os::unix::fs::symlink(&path, &path).unwrap();
+    assert!(load_from(&path).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_probe_failure_prevents_lenient_source_from_writing_global() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let peri_dir = cwd.join(".peri");
+    std::os::unix::fs::symlink(&peri_dir, &peri_dir).unwrap();
+    let global_path = tmp.path().join("global.json");
+    let original = r#"{"config":{"active_alias":"sonnet"}}"#;
+    std::fs::write(&global_path, original).unwrap();
+
+    assert!(ConfigSource::load_at(&cwd, global_path.clone()).is_err());
+    let source = ConfigSource::load_at_lenient(&cwd, global_path.clone());
+    assert_eq!(source.loaded_merged().config.active_alias, "sonnet");
+    assert!(source.reload_merged().is_err());
+    assert!(source.save(&PeriConfig::default()).is_err());
+    assert_eq!(std::fs::read_to_string(global_path).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn same_file_probe_failure_prevents_lenient_source_from_writing_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("workspace");
+    let original = r#"{"config":{"active_alias":"sonnet"}}"#;
+    write_settings(&cwd, original);
+    let global_path = tmp.path().join("global.json");
+    std::os::unix::fs::symlink(&global_path, &global_path).unwrap();
+
+    assert!(ConfigSource::load_at(&cwd, global_path.clone()).is_err());
+    let source = ConfigSource::load_at_lenient(&cwd, global_path);
+    assert!(source.reload_merged().is_err());
+    assert!(source.save(&PeriConfig::default()).is_err());
+    assert_eq!(
+        std::fs::read_to_string(cwd.join(".peri/settings.json")).unwrap(),
+        original
     );
 }
